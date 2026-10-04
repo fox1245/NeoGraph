@@ -199,6 +199,11 @@ TEST(CancelTokenFork, ChildSlotIsBindableToCoSpawn) {
     asio::io_context io;
     std::atomic<bool> ran_to_completion{false};
     std::atomic<bool> got_cancelled{false};
+    std::promise<void> entered;
+    std::promise<void> finished;
+    auto entered_future = entered.get_future();
+    auto finished_future = finished.get_future();
+    std::exception_ptr unexpected;
 
     auto child = parent->fork();
     const auto child_executor = child->bind_executor(io.get_executor());
@@ -206,19 +211,21 @@ TEST(CancelTokenFork, ChildSlotIsBindableToCoSpawn) {
     auto body = [&, child]() -> asio::awaitable<void> {
         try {
             child->throw_if_cancelled("CancelToken test entry");
-            // Sleep 200ms — plenty of time for cancel() from the
-            // other thread to land on the signal.
             asio::steady_timer t(co_await asio::this_coro::executor);
-            t.expires_after(std::chrono::milliseconds(200));
+            t.expires_at(std::chrono::steady_clock::time_point::max());
+            entered.set_value();
             co_await t.async_wait(asio::use_awaitable);
             ran_to_completion = true;
         } catch (const std::system_error& e) {
             if (e.code() == asio::error::operation_aborted) {
                 got_cancelled = true;
             } else {
-                throw;
+                unexpected = std::current_exception();
             }
+        } catch (...) {
+            unexpected = std::current_exception();
         }
+        finished.set_value();
     };
 
     asio::post(child_executor, [child_executor, child, &body] {
@@ -226,21 +233,23 @@ TEST(CancelTokenFork, ChildSlotIsBindableToCoSpawn) {
                        asio::bind_cancellation_slot(child->slot(), asio::detached));
     });
 
-    // Cancel from another thread while io.run() is waiting.
-    std::thread canceller([&]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        parent->cancel();
-    });
+    std::thread runner([&io] { io.run(); });
+    const auto entered_status = entered_future.wait_for(std::chrono::seconds(2));
+    parent->cancel();
+    const auto finished_status = finished_future.wait_for(std::chrono::seconds(2));
+    if (finished_status != std::future_status::ready) io.stop();
+    runner.join();
+    child->unbind_executor();
 
-    io.run();
-    canceller.join();
+    ASSERT_EQ(entered_status, std::future_status::ready);
+    ASSERT_EQ(finished_status, std::future_status::ready);
+    EXPECT_EQ(unexpected, nullptr);
 
     EXPECT_TRUE(got_cancelled)
         << "child slot bound to co_spawn must receive cancel through "
            "parent's cascade";
     EXPECT_FALSE(ran_to_completion)
-        << "cancel should preempt the timer well before its 200ms "
-           "expiry";
+        << "the pending operation must end through cancellation, not expiry";
 }
 
 TEST(CancelTokenFork, SerialExecutorOwnsSlotDuringConcurrentCancellation) {

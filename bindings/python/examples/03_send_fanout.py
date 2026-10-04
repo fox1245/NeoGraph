@@ -5,10 +5,9 @@ The engine dispatches the same target node N times in parallel,
 each with a distinct input. Channel writes from all branches are
 merged via the channel's reducer.
 
-LangGraph users will recognize this as the `Send` API. NeoGraph's
-implementation runs branches on the engine's fan-out worker pool
-(see `set_worker_count`); without that, branches run on the
-caller's executor (still concurrent for I/O-bound work).
+Branches run on the engine's fan-out worker pool (see `set_worker_count`).
+Python callbacks still obey the CPython GIL: I/O may overlap, but this small
+pure-Python square calculation does not demonstrate CPU-core parallelism.
 
 Run:
     pip install neograph-engine
@@ -77,8 +76,8 @@ definition = {
 }
 
 engine = ng.GraphEngine.compile(definition, ng.NodeContext())
-# Opt into a 4-worker pool so the 8 branches run in parallel
-# across CPU cores instead of serializing on the caller's executor.
+# Use four fan-out workers. Python callbacks still share the CPython GIL;
+# parallel CPU-bound Python work requires a process or a GIL-releasing extension.
 engine.set_worker_count(4)
 
 result = engine.run(ng.RunConfig(thread_id="t1", input={}))

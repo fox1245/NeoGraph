@@ -1,12 +1,27 @@
-<!-- neograph-i18n: source=ROADMAP_v1.md locale=ja source_sha256=e5d4df28a5ba92ca1778fdff4fa741fc4c435c9dfba1fddbe8dacd31ca1f3121 -->
+<!-- neograph-i18n: source=ROADMAP_v1.md locale=ja source_sha256=145f159a2258c775caf7dd71eeb13936ae0bc5eb31cca00f660b4f2223d2a490 -->
 # NeoGraph v1.0 — 設計研ぎ澄ましロードマップ
 
 **Languages:** [English](ROADMAP_v1.md) | [한국어](ROADMAP_v1.ko.md) | [日本語](ROADMAP_v1.ja.md) | [简体中文](ROADMAP_v1.zh-CN.md)
 
-本ファイルは将来の v1.0 メジャーバンプを対象とする**アーキテクチャ上の**変更を
-追跡します。これらは漸増的パッチではなく、各々が非推奨期間を必要とする
-公開 API 破壊候補です。リビングドキュメントとして維持 — v0.3.x パッチ
-シリーズが構造的な痛点を露呈した際にここに候補を追加し、着地時に削除。
+本書は pre-v1 リファクタリングの設計提案と着地記録を保存します。
+記録中のバージョン名、コード案、互換性ポリシー、テスト数、測定は当時の内容です。
+リリース予定や現在の API 仕様ではありません。
+
+## 現在の契約
+
+カスタムノードは `GraphNode::run(NodeInput) -> asio::awaitable<NodeOutput>` を実装します。
+`RunContext` が実行別メタデータを渡し、`CancelToken::fork()` が子のキャンセルを提供します。
+Provider は `get_name()`、`family()`、`prepare()` を公開します。共通 invoke/dispatch は
+所有 request と move-only prepared handle を消費し、不変 SDK Outcome を保持します。
+旧 `CompletionProvider`、`CompletionRequest`、`CompletionParams`、`ChatCompletion`、
+`complete*`、`OpenAIProvider`、`RateLimitedProvider` は互換 shim なしで削除されました。
+以下の 7 月の追加的互換性ポリシーはこの移行に置き換えられました。
+
+LLM を無効にしても Core は外部 `SchemaProvider::runtime` を必要とします。
+NeoGraph `0.13.0` は alpha SDK `0.1.0`、interface revision/shared generation 4 を使います。一致する header/library で consumer を再ビルドしてください。Native archive は v3 / `spna3`、portable JSON は v2 のままです。現在の統合検証は未完了です。
+Python は型付き request/prepared/Outcome を使用し、`ChatMessage` は別の graph 便宜型です。
+現在の API は [C++ reference](docs/reference-en.md) と [Python binding](docs/python-binding.md) を参照してください。
+過去の Linux/ARM64/WASM 観測は、それらの platform の現在の SDK runtime を検証せず、application 性能も予測しません。
 
 ## このファイルが存在する理由
 
@@ -357,7 +372,7 @@ Candidate 1 + 6 が閉じる。
 | 3 | 階層的 CancelToken | **v0.4 で着地** (`CancelToken::fork()` + カスケード) | v0.3.2 フック, v0.3.2 emit-vs-bind |
 | 4 | 自己進化グラフ実行時フック | リサーチ | TODO_v0.3.md #8 |
 | 5 | pgvector RAG サンプル | クックブック | TODO_v0.3.md #9 |
-| 6 | Provider 単一ディスパッチ | **削除なしで着地。** `CompletionProvider::do_invoke()` が推奨される 1 オーバーライドパス。既存の `Provider::complete*` メソッドはサポート継続。非推奨警告は撤回され削除計画なし。 | #4 (v0.7 クローズ), #5 (互換性ポリシー), #36 によりパターン補強 |
+| 6 | Provider 単一ディスパッチ | **型付き prepare/dispatch に置換。** 旧 completion API と追加 adapter は shim なしで削除されました。上記の現在の契約を参照。 | #4 (v0.7 クローズ)、#5 (過去の互換性ポリシー)、#36 によりパターン補強 |
 
 ---
 
@@ -810,6 +825,9 @@ TODO_v0.3.md item #9 — クックブック素材として確認 (エンジン�
 
 ## Candidate 6 — Provider 単一ディスパッチ
 
+本節は旧 completion API 提案の記録です。コード案と 7 月の互換性ポリシーは
+過去のもので、上記の型付き prepare/dispatch 移行に置き換えられました。
+
 ### 症状
 
 `Provider` は 4 つの仮想メソッドを公開 (GraphNode の 8 つより 1 次元小さい):
@@ -979,19 +997,22 @@ apt `libgrpc++-dev protobuf-compiler-grpc` (1.51.1) + protoc 3.21.12 を
 2 つの汚染が捕捉された。クリーンな Linux ホスト / CI では現れないが、
 WSL 開発者はこれらに当たる:
 
+以下のパスでは Windows mount root、Anaconda インストール prefix、GTK インストール prefix を
+それぞれ `WINDOWS_MOUNT_ROOT`、`WINDOWS_ANACONDA_PREFIX`、`WINDOWS_GTK_PREFIX` 環境変数で表します。
+
   1. **anaconda re2** — `gRPCConfig.cmake` が `find_package(re2)` を行う際、
      システム re2 cmake config が存在しない場合 (apt `libre2-dev` が
-     インストールされていない)、PATH から `/mnt/c/ProgramData/anaconda3/
-     Library/lib/cmake/re2/re2Targets.cmake` (Windows) を拾い
-     `set_target_properties` でエラー。修正:
-     `-DCMAKE_IGNORE_PREFIX_PATH=/mnt/c;…` +
-     `-DCMAKE_IGNORE_PATH=…/anaconda3/Library/lib/cmake;…` → grpc が
+     インストールされていない)、PATH から
+     `$WINDOWS_ANACONDA_PREFIX/Library/lib/cmake/re2/re2Targets.cmake`
+     (Windows) を拾い `set_target_properties` でエラー。修正:
+     `-DCMAKE_IGNORE_PREFIX_PATH="$WINDOWS_MOUNT_ROOT;…"` +
+     `-DCMAKE_IGNORE_PATH="$WINDOWS_ANACONDA_PREFIX/Library/lib/cmake;…"` → grpc が
      システム pkg-config re2 にフォールバック ("Found RE2 via pkg-config")。
   2. **ZLIB include** — `FindZLIB` がライブラリはシステム
      (`/usr/lib/.../libz.so`) から拾うが `ZLIB_INCLUDE_DIR` は PATH 内の
-     `/mnt/c/gtk/include` (Windows zlib.h) から → `-isystem
-     /mnt/c/gtk/include` がすべての grpc リンクターゲットにリーク →
-     `/mnt/c/gtk/include/libintl.h` が `printf` を `libintl_printf` マクロ
+     `$WINDOWS_GTK_PREFIX/include` (Windows zlib.h) から →
+     `-isystem "$WINDOWS_GTK_PREFIX/include"` がすべての grpc リンクターゲットにリーク →
+     `$WINDOWS_GTK_PREFIX/include/libintl.h` が `printf` を `libintl_printf` マクロ
      として書き換え → `std::printf` コンパイルエラー。修正: 明示的に
      `-DZLIB_INCLUDE_DIR=/usr/include
      -DZLIB_LIBRARY=/usr/lib/x86_64-linux-gnu/libz.so` を設定。
@@ -1002,7 +1023,7 @@ WSL 開発者はこれらに当たる:
 
 ### NexaGraph 先行分析 — gRPC-MCP の真の ROI はチェックポイント
 
-NeoGraph の前身 NexaGraph (`/root/Coding/NexaGraph`) は gRPC-MCP を
+NeoGraph の前身 NexaGraph は gRPC-MCP を
 既に早期に実装・運用していた。調査所見 (Explore, 2026-05-16):
 
 - **実装実体**: `proto/rag_service.proto` (RAGService, 11 unary RPC —
@@ -1125,16 +1146,14 @@ TCP delayed-ACK タイマーの教科書的シグネチャ。原因: `CPPHTTPLIB
 - **大規模ペイロードツール呼出 (~12 KB+, 埋め込み / RAG チャンク返却):
   gRPC ~1.5×。** NexaGraph が言及した領域だが、70× ではなく 1.5×。
 - ペイロード圧縮は依然 0 (JSON-in-proto、チェックポイント測定と一貫)。
-- Loopback 天井 — 実ネットワークでは RTT が両側に等しく加算され比は
-  さらに 1 に収束。1.5× は最良ケース。
+- loopback 結果です。remote RTT、concurrency、payload、connection 管理は別測定が必要で、
+  1.5× は上限ではありません。
 
 **Candidate 7 最終評決:**
-- gRPC の ROI は (1) **多言語サイドカー / リモート型付き RPC** (言語境界)、
-  (2) **大規模ペイロードツール / チェックポイントで ~1.5×**。一般ツール
-  呼出の大量移行は無価値 (引き分け + 標準 #966 未確定)。
-- MCP-over-gRPC トランスポート: **保留、確認済み。**「一般 MCP ツール呼出が
-  高速化」は測定で反証 (引き分け)。標準確定後、かつ埋め込み多用ツールの
-  場合のみ。
+- gRPC は多言語 sidecar/remote typed-RPC 境界を提供します。観測された約 1.5× は
+  試験した 12 KB tool payload の差で、すべての大 payload や checkpoint の結果ではありません。
+- 当時の記録は MCP-over-gRPC の採用を延期しました。小 loopback workload の引き分けは
+  他の workload/transport の利点を反証しません。
 - Nagle インシデント → EDDSkills SKILL 候補 `bench-shock-number-nagle-first`
   (衝撃的なトランスポートベンチ数値 = TCP_NODELAY / Nagle / delayed-ACK を
   まず疑え。`perf-regression-bench-bisect` のいとこ)。ユーザー承認後に追加。
@@ -1151,24 +1170,12 @@ TCP delayed-ACK タイマーの教科書的シグネチャ。原因: `CPPHTTPLIB
 | protobuf ser+parse | **1.75** |
 | → yyjson / protobuf | **22.3× 遅い** |
 
-**ユーザーは完全に正しい。** protobuf は構造的に 22× 高速なコーデック。
-しかし往復では 12 KB で差が 1.5× に希釈 — シリアライゼーションギャップ
-~37 µs は完全往復 692–1096 µs の小さな断片 (残りはソケット I/O / syscall /
-HTTP フレーミング)。**ツール呼出ホットパスがコーデックではなくソケット
-I/O に支配されていることの定量的証拠。**
+codec-only 実験では protobuf ser+parse が 1.75 µs、yyjson parse+dump が 38.9 µs で、
+試験した表現の比率は 22.3× でした。上記 full transport 測定の差はより小さくなります。
+framing と I/O が異なるため、codec 表だけでは往復差の原因を分離できません。
 
-重要な含意 — **NeoGraph の JSON-RPC が gRPC と引き分けるのは yyjson の
-おかげであり、JSON-RPC プロトコルが速いからではない。** 典型的なスタック
-(Python の `json` は yyjson より ~50× 遅く、12 KB で ~2 ms) では、
-コーデックが往復を支配 → そこでは gRPC が構造的に支配する。NeoGraph だけが
-yyjson を使用し、したがってそのトラップを回避する。
-
-→ これは隠れたセールスポイントであり、Candidate 7 を保留する*最終的*正当化:
-「他のフレームワークは JSON パースがボトルネックなので gRPC トランスポートが
-重要だが、NeoGraph の MCP / JSON-RPC は yyjson のためそうではない。」
-特に NeoGraph にとって、MCP-over-gRPC はさらに ROI が低い (コーデック
-アドバンテージが既に yyjson で相殺されている)。gRPC は多言語/リモート境界 +
-大規模ペイロード目的で ~1.5× のみ — 確認済み。
+この測定は Python `json` を比較せず、普遍的な codec 比率や yyjson が NeoGraph 独自であることも示しません。
+必要な RPC semantics に合わせ transport を選び、目的の payload/deployment を測定してください。
 
 ### NexaGraph 第 2 収穫 — 履歴圧縮 + GrpcRemoteTool (2026-05-16)
 
@@ -1189,8 +1196,8 @@ NeoGraph が既に持つかアプリ固有のため除外。`DOCS/graph-engine-d
    - `sanitize_tool_calls(messages&)` — NeoGraph が**完全に欠いていた**防御:
      切り詰めにより破損した OpenAI tool-pairs (応答のない assistant
      `tool_call` / 呼出のない tool メッセージ) の 2 パス除去、冪等。
-     `compact_history` が出力に内部適用 → 圧縮結果が決して 400 を
-     生成しない。
+     `compact_history` が出力に適用します。orphan tool pair は除きますが、
+     provider がすべての compacted request を受け入れることは保証しません。
    - `estimate_tokens` — 保守的な ~3 chars/tok 推定 (混合 KO / EN)。
    - サンプル 56 `history_compaction` (オフライン MockProvider、キー不要) —
      sanitize 3→1、compact 29 msgs/975 tok → 6 msgs/208 tok、
@@ -1211,7 +1218,7 @@ NeoGraph が既に持つかアプリ固有のため除外。`DOCS/graph-engine-d
    利用者側実体化** — エージェントの視点から、プロセス境界ツールは
    呼出サイトでローカルツールと区別不能。
 
-### 残件 (依然オープン)
+### 2026-05-16 の記録時点での残件
 
   - CI に `grpc-build` ジョブを追加 (apt deps + ON build +
     `example_grpc_client` / `server` smoke — クリーンな ubuntu runner では

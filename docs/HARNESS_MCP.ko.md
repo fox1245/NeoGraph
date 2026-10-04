@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=da2c39926c02d390f99b5d2c59aa8221bc0c134580e863a26569e3f293fce0d6 -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=01b4115c436243f90da697e06b1474fbbbc430bfa05e8dc301b252d9b518f7db -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -121,24 +121,180 @@ C++ 임베더는 생성 시 `HarnessServiceResources` 를 통해 비기본 프�
 
 일반 작성에 대해 허용된 대체는 임베디드 QuickJS에서 표준 JavaScript입니다. 이전의 `dsl`, 독립형 `core`, `program` 모드는 명시적 마이그레이션 진단과 함께 새 게시에 대해 거부됩니다; strict Core JSON은 내부/교환 데이터로 남습니다. [`QUICKJS_CONTROL_ARCHITECTURE.md`](QUICKJS_CONTROL_ARCHITECTURE.md) 및 [`QUICKJS_CONTROL_MIGRATION.md`](QUICKJS_CONTROL_MIGRATION.md)를 참조하세요. 이 문서는 유지된 호환성 동작과 마이그레이션 진단을 설명하며, 새 레거시 소스 의미를 허용하지 않습니다.
 
-## 빌드 및 실행
+## 로컬 인증 호스트 worker
 
-OpenAI 호환 제공자 어댑터를 사용하여 로컬 stdio 서버를 빌드하세요:
+`neograph-harness-mcp`는 명시적으로 선택한, 이미 로그인된 로컬 CLI 하나에
+worker 추론을 위임할 수 있다. 이는 모델 위임이며 credential 상속이 아니다.
+NeoGraph는 호스트 auth file을 열거나 OAuth token을 받거나 구독을 provider API
+key로 바꾸지 않는다. 공식 호스트 process가 자신의 저장된 login을 사용한다.
+Process-group 격리에 Linux가 필요하며 다른 플랫폼에서는 host backend를 거부한다.
+`auto` 선택은 없다. 여러 호스트의 login 때문에 billing/policy를 암묵적으로
+선택해서는 안 된다.
+
+```bash
+opencode auth login                 # or claude auth login / codex login, once
+neograph-harness-mcp --executor opencode --host-status
+neograph-harness-mcp --executor opencode --host-model openai/YOUR_MODEL
+```
+
+다른 CLI는 `--executor claude` 또는 `--executor codex`로 선택한다.
+`--host-model`을 생략하면 해당 adapter의 host default를 요청한다. 환경변수는
+`NEOGRAPH_HARNESS_EXECUTOR`, `NEOGRAPH_HARNESS_HOST_MODEL`이다. Status와 일반
+startup은 먼저 제한된 non-secret version/login preflight를 수행한다. OpenCode는
+`opencode models`로 명시적 model 이름을 검사한다. Claude와 Codex에는 같은
+portable model-list API가 없어 실제 요청의 model 선택 오류를 보고한다.
+CLI 부재, logout, 지원하지 않는 output, quota, policy, model 실패를 provider
+호출로 바꾸지 않는다. 정확한 model 또는 `host default`, CLI version, executor
+identity, mode만 status/host metadata에 나타나며 credential은 노출하지 않는다.
+
+Embedding과 이후 shared-process MCP 설정은
+`<neograph/mcp/harness_host_agent.h>`에서 `preflight_host_agent(config)` 후
+`HarnessProgramHostConfig::worker_executor = make_host_agent_executor(config)`로
+같은 경계를 구성할 수 있다. `HostAgentExecutorConfig` workspace는 명시적 canonical
+root다. Non-secret executor/model identity를 `provider_host_configuration`에
+바인딩하여 다른 route로 retained artifact를 resume하지 못하게 한다.
+직접 `Provider` executor를 바꾸지 않으며 outbound MCP Sampling도 요구하지 않는다.
+
+Subprocess profile은 read-only, local stdio 전용이다. OpenCode는 임시 config
+directory에서 `--pure`로 실행하고 read/glob/grep만 허용한다. 모델의 read tool은
+`.env`와 알려진 host credential path에 접근할 수 없고 workspace root만 read-only
+external-path 접근을 받는다. Claude는 Read/Glob/Grep만 허용하는
+`-p --safe-mode --permission-mode plan`을 쓴다. Subscription login을 생략하는
+`--bare`는 쓰지 않는다. Codex는
+`exec --ignore-user-config --ignore-rules --ephemeral --sandbox read-only`를 쓴다.
+모든 subprocess는 targeted environment allowlist를 받아 direct-provider 및 무관한
+repository/cloud credential을 제외한다. Depth marker는 중첩 NeoGraph host 위임을
+금지한다. Prompt/event/stdout/stderr capture와 deadline을 제한하고 취소 시 process
+group을 종료한다. Shell은 prompt나 model ID를 평가하지 않는다.
+
+Program schema 검증과 제한된 retry는 그대로 적용한다. CLI JSON은 worker schema
+gate 통과 전까지 신뢰하지 않는다. Usage는 호스트의 machine-readable completion
+event로 계산한다. CLI transport에는 보편적인 hard generation-time token cap이
+없다. Budget 초과 응답은 거부하고 judge에 보내지 않지만 upstream 사용량은 이미
+청구되었을 수 있다. Workspace read-only는 host policy 경계이지 OS mount namespace가
+아니다. 강한 filesystem 격리가 필요한 untrusted repository/host policy에는 별도
+OS account/container를 사용한다. 이 local CLI adapter는 Harness capability tool을
+받지 않는다. 그런 worker는 직접 Provider executor를 사용한다.
+
+Live test는 신뢰되고 인증된 private runner에서 opt-in이다.
+`NEOGRAPH_HARNESS_LIVE_HOST=claude|codex|opencode`로 설치된 CLI 하나를 선택하고
+`NEOGRAPH_HARNESS_LIVE_MODEL`로 model을 고정할 수 있다. OpenCode OAuth job은
+`NEOGRAPH_HARNESS_LIVE_OPENCODE_OAUTH=1`과 사용 가능한 `openai/...` model도 설정한다.
+실행 전 `opencode auth list`가 non-secret OpenAI OAuth 상태를 보고하는지 검사한다.
+Marker는 test gate이지 credential이 아니다. Login/model/gate가 없으면 명시적으로
+skip하며 추론 결과를 만들어내지 않는다.
+
+각 host의 표준 local stdio 설정에 MCP server를 등록할 수 있다. PATH의 설치된
+`neograph-harness-mcp`를 사용하고 MCP entry에 credential을 붙여넣지 않는다:
+
+```bash
+claude mcp add neograph-harness -- neograph-harness-mcp --executor claude
+codex mcp add neograph-harness -- neograph-harness-mcp --executor codex
+```
+
+OpenCode는 `opencode mcp add`의 안내에서 local server와 command
+`neograph-harness-mcp --executor opencode`를 선택한다. 같은 `opencode.json` entry:
+
+```json
+{"mcp":{"neograph-harness":{"type":"local","command":["neograph-harness-mcp","--executor","opencode"],"enabled":true}}}
+```
+
+[OpenCode CLI](https://opencode.ai/docs/cli/),
+[Claude CLI](https://code.claude.com/docs/en/cli-reference),
+[Claude authentication](https://code.claude.com/docs/en/authentication),
+[Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode),
+[Codex authentication](https://learn.chatgpt.com/docs/auth)를 참고한다.
+Host 구독 quota, rate limit, model eligibility, retention, 조직 policy, data
+handling은 위임 호출에도 적용된다. Third-party product의 Claude.ai 구독 사용은
+Anthropic 승인이 필요할 수 있다. Opt-in 설치 CLI 경로는 hosted Claude 구독
+backend 재배포 승인이 아니다. 한 host의 login이 다른 vendor/model 접근을 주지
+않는다. 이 local backend는 remote HTTP 위임이나 MCP Sampling을 활성화하지 않는다.
+Portable host baseline은 Sampling을 지원하지 않는다. Remote/server 배포는 직접
+Provider credential을 사용한다.
+
+### 직접 API provider (standalone/server)
+
+Opt-in local server를 build/install한다. Host CLI mode 자체에는 NeoGraph 전용
+model key가 필요 없다:
 
 ```bash
 cmake -S . -B build-harness \
   -DNEOGRAPH_BUILD_PROGRAM=ON \
-  -DNEOGRAPH_BUILD_EXAMPLES=ON \
   -DNEOGRAPH_BUILD_LLM=ON \
-  -DNEOGRAPH_BUILD_MCP_SERVER=ON
-cmake --build build-harness --target example_harness_mcp_server -j
-export OPENAI_API_KEY=your-key
-export NEOGRAPH_HARNESS_MODEL=gpt-4o-mini
+  -DNEOGRAPH_BUILD_MCP_SERVER=ON \
+  -DNEOGRAPH_BUILD_HARNESS_MCP_BINARY=ON
+cmake --build build-harness --target neograph_harness_mcp -j
+cmake --install build-harness --prefix "$HOME/.local"
+export NEOGRAPH_HARNESS_API_KEY=your-key
+neograph-harness-mcp --executor provider
 ```
 
-`NEOGRAPH_HARNESS_API_KEY`는 `OPENAI_API_KEY`보다 우선합니다. `NEOGRAPH_HARNESS_BASE_URL`는 OpenAI 호환 엔드포인트를 선택합니다. 서버는 `https://openrouter.ai/api`와 같은 버전 미지정 기본 형식과 `https://openrouter.ai/api/v1`와 같은 공급자의 문서화된 버전 지정 형식을 모두 허용하며, `/v1`가 누락된 경우에만 추가합니다. 서버는 프로토콜 메시지만 stdout에, 진단 정보만 stderr에 기록합니다. 현재 엔드포인트 형식은 [OpenRouter quickstart](https://openrouter.ai/docs/quickstart)를 참조하십시오.
+포함된 OpenRouter example은 `NEOGRAPH_HARNESS_API_KEY`를 `OPENROUTER_API_KEY`보다
+우선한다. Local host 실행과 달리 직접 provider mode는 별도 API key가 필요하다.
+Server는 stdout에 protocol message만, stderr에 diagnostic만 쓴다.
 
-호스트 상호 운용 스모크 테스트에만 `NEOGRAPH_HARNESS_SMOKE=1`를 설정하세요. 이 명시적 모드는 유효한 무발견 검토를 반환하는 결정론적 프로세스 내 공급자를 사용하며, API 키가 필요 없고, LLM 품질 테스트로 사용해서는 안 됩니다.
+Host interoperability smoke에서만 `--executor provider`와
+`NEOGRAPH_HARNESS_SMOKE=1`을 사용한다. Valid zero-findings review를 반환하는
+deterministic in-process provider를 쓰고 API key가 필요 없으며 LLM 품질 test가 아니다.
+
+### Credential 없는 OpenCode global MCP 채택
+
+Single-user local 설치는 `<neograph/mcp/adoption.h>`를 통해 OpenCode user-global
+`opencode.json`의 선택된 credentialless stdio server를 명시적으로 채택할 수 있다.
+Discovery는 inspection-only다. Regular user-owned global file만 읽고 project/
+workspace config나 OAuth store를 읽지 않으며 server를 시작하지 않는다.
+HTTP/disabled entry, 가져온 environment/file reference, unsupported field,
+shell executor, recursive NeoGraph entry는 거부한다.
+
+채택에는 no-credential `argv` attestation, 독립 승인된 launch record,
+selected-tool/schema capability manifest가 필요하다. `pinned` record는 source
+content, canonical cwd, executable/interpreter identity, argv, 식별 가능한 script/
+package를 바인딩한다. 검증 불가능한 launch는 명시적 `trusted_mutable` 승인이
+필요하고 조용히 downgrade하지 않는다. Discovery는 읽은 byte를 스스로 승인하지 않는다.
+
+모든 tool manifest는 `argument_policy: "exact-arguments-v1"`과
+`argument_predicate: {"allowed_arguments": [<complete approved argument objects>]}`
+를 사용해야 한다. 비교는 schema shape뿐 아니라 resource를 포함한 argument 값도
+검사한다. Generic `read-only` 또는 SQL/path label은 임의 입력의 안전을 입증하지
+못해 거부한다. Harness 권한은 worker 선언, adopted manifest, static policy,
+process 경계의 교집합이다. MCP annotation으로 이를 늘릴 수 없다.
+
+Host/provider worker 구성 전에
+`HardenedMcpClientRegistry::configure_harness(host_config, provider_config)`를
+호출한다. 불변 namespaced tool metadata와 approved executor를 함께 설치하고
+`tool_catalog()`가 일치하는 request metadata를 제공한다. Revocation/schema drift는
+retained executor를 fence하고 다른 owner가 reference를 보유해도 shared client를
+명시적으로 종료한다. Schema refresh/tool dispatch는 caller deadline/cancel token을 따른다.
+
+Adopted client는 absolute executable, canonical cwd, replacement allowlist
+environment, bounded protocol frame/stderr, process-tree shutdown을 사용한다.
+Windows는 inherited-handle allowlist와 kill-on-close Job Object를 쓴다.
+Status에는 hash/name만 남기고 argv, raw config, stderr, credential을 넣지 않는다.
+Credential-bearing `secret_injected`/`host_brokered` mode, remote HTTP MCP,
+임의 shell/CLI 실행은 지원하지 않는다.
+
+설치 example의 adoption은 provider worker executor만 지원한다.
+별도 review된 JSON approval을 받으며 auto-consent environment flag를 쓰지 않는다:
+
+```bash
+export NEOGRAPH_HARNESS_MCP_SOURCE="$HOME/.config/opencode/opencode.json"
+export NEOGRAPH_HARNESS_MCP_APPROVAL="$(cat approved-mcp.json)"
+neograph-harness-mcp --executor provider
+```
+
+Approval object의 `launch`, `tools`는 `McpLaunchApproval`, `McpToolApproval`에
+대응한다. `launch`는 `trust_mode`, 명시적 `argv_no_credentials_attested` boolean,
+`source_path`, `source_content_hash`, `cwd`, `executable`, `executable_identity`,
+`argv_hash`, `interpreter_identity`, `package_identity`를 포함한다. Host helper
+`make_mcp_launch_approval()`가 review할 identity를 계산한다. `tools`는
+`server_name`, `launch_identity` (승인된 launch의 `executable_identity`),
+`selected_tools`, `schema_hashes`, `manifest`, `policy_version`을 포함한다.
+Schema approval은 정규화한 `ToolDefinition::from_json(definition).to_json()` 값을
+`mcp_tool_schema_hash()`로 hash한다.
+
+명시적 source override도 문서의 user-global file을 가리켜야 한다. Project path를
+global config로 위장할 수 없다. Source가 설정된 `--host-status`는 credential 검사
+전에 discovery-only redacted record를 출력하고 downstream server를 시작하지 않는다.
 
 내구성 있는 호스트 중개 호출은 레코드와 체크포인트 지속성 모두를 요구합니다. 예제는 하나의 명시적 디렉터리로 두 가지를 모두 활성화합니다:
 
@@ -154,7 +310,7 @@ export NEOGRAPH_HARNESS_STATE_DIR="$PWD/.neograph-harness-state"
 
 The SQLite 스토어는 선택적 `HarnessRetentionStore` 형제 인터페이스를 구현하며, 안정적인 `HarnessRecordStore` vtable은 변경되지 않습니다. 아티팩트를 보유하거나 실행을 시작하기 전에, `HarnessService` 은 `max_artifacts` 및 `max_runs` 를 `HarnessServiceConfig`에서 적용합니다. 기본값은 각각 128입니다.
 
-정리(Cleanup)는 종료된 리프 실행(terminal leaf run)만 제거합니다. 대기 중, 실행 중, 입력 대기 중인 실행은 보호되며, 저널 최종화를 완료하지 않은 진행 중인 실행도 보호됩니다. 재생(replay) 또는 포크 행은 `source_run_id`를 기록하므로 해당 종속 항목이 유지되는 동안 소스를 제거할 수 없습니다. 때문에 공간이 필요 Support Needed, 종속 리프가 먼저 제거됩니다. 소스는 Save 됩니다 retained); 보존된 행이 더 이상 이를 참조하지 않을 때 이후 단계에서 only then_eligibility. 따라서 모든 후보가 활성 상태이거나 명시적으로 보호된 상태이거나 여전히 참조되고 있는경우 제한은 소프트(soft)합니다.
+Cleanup은 terminal leaf run만 제거한다. Queued/running/input-waiting run과 journal finalization이 끝나지 않은 in-process 실행은 보호한다. Replay/fork row가 `source_run_id`를 보존하므로 dependent가 남아 있는 동안 source를 제거할 수 없다. 공간이 필요하면 dependent leaf를 먼저 제거하고, retained row가 더 이상 참조하지 않는 뒤의 단계에서만 source를 제거할 수 있다. 모든 후보가 active/protected/referenced면 제한은 soft다.
 
 `runs.db`에서는 하나의 트랜잭션이 실행 행보다 먼저 해당 실행의 저널 행을 삭제하고, 어떤 실행도 참조하지 않는 아티팩트만 삭제합니다. 이 커밋이 끝나면 Harness가 별도로 구성된 체크포인트 Store에서 삭제된 실행의 체크포인트 스레드를 제거합니다. 두 번째 단계에서 충돌하거나 체크포인트 백엔드가 실패하면 도달 불가능한 체크포인트 저장소가 남을 수 있지만, 보존된 재생(replay)이나 포크가 삭제된 소스 레코드를 가리키는 상태는 생기지 않습니다. 이후 관리 작업이나 백엔드별 고아 정리 작업으로 이러한 체크포인트 전용 잔여물을 회수할 수 있습니다.
 
@@ -191,6 +347,12 @@ neograph://runs/run_123/attempts?after_sequence=17&limit=50
 
 `mode: "live"`를 사용하여 동일한 유지된 아티팩트를 라이브 공급자 및 도구로 실행하십시오. 스냅샷 및 저널 수명 주기 이벤트는 실행을 `recorded_replay` 또는 `live_replay`로 표시하고 `source_run_id`를 포함하며, 일반 시작은 `live`로 유지됩니다.
 
+Recorded replay는 source의 원래 불변 invocation permission을 남은 spending
+authority와 별도로 인증한다. Source-lineage CAS 하나로 retained remainder를
+replay run에 이전한다. 두 번째 replay는 같은 source remainder를 다시 쓸 수 없다.
+Captured call은 기존 operation coordinate를 쓰며 operation slot을 재충전하지 않는다.
+새 replay Core/wall-time work는 이전된 remainder를 소비한다.
+
 `ChatMessage` / `ChatTool`과 JSON은 portable projection이지 native 권한이 아니다. Portable 포맷은 [`provider-message-v2`](../schemas/provider-message-v2.schema.json), [`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)를 유지한다. 실제 C++ checkpoint sidecar는 메모리에서 native seal을 보존한다. 영속 native 기록에는 host-owned `sp::NativeArchive`가 필요하다. closed v3 / `spna3`는 독립 키를 쓰는 인증된 owner-private custody이며 archive v2는 업그레이드하거나 해석하지 않고 거부한다. 인증은 모든 semantic descriptor 선택(origin/path/header, policy, 요청 field mapping, usage path, stop mapping), owner와 정확한 custody binding을 결합한다. 암호화나 vendor-issuer 인증은 아니다. archive 본문·키·native blob·raw wire 관측을 공개하지 않는다. Archive는 증거 저장소이지 돈의 grant나 spending lease가 아니다. Program/external bank는 독립 journal 소유이며 snapshot 복사로 credit을 만들 수 없다.
 
 **Standalone bank journal 수정 — 현재 계약 개정; 실제 runtime 증거는 아래.** Owner-approved protocol은 단조 trusted-store namespace obligation과 실제 불변 original owner/thread/graph scope, ceiling, deadline/clock identity, generation을 요구한다. 전체 checkpoint commitment·revision에 대한 정확한 durable head CAS만 host-owned opaque lease를 발급할 수 있다. 정확한 pending effect window를 provider I/O 전에 영속화해야 하며 실제 SDK outcome, charge, nullable report, hold, dedup identity로 정산해야 한다. Checkpoint와 next head는 같은 owned actor/revision 아래 원자적으로 publish해야 한다. Bank metadata 제거·checkpoint pruning·old authenticated snapshot replay·같은 ID overwrite·actor 상실은 credit을 주면 안 된다. 기존 65 hold에서 ceiling 130을 129로 낮추면 추가 65를 허용할 수 없다. 입증된 no-effect 실패는 unchanged head를 release해 authentic 130 복구가 가능해야 한다. Crash/unknown/lost-lease window는 refund/retry/fallback 없이 hold를 유지한다. Plain/pristine archive 설정은 money/native spending lease를 주지 않고 현재 `config.usage`는 기존 standalone obligation을 대체할 수 없다. Program/external-bank journal 소유는 유지된다. 이는 요구 계약이다. 실제 currency/custody 증거와 instrumentation 한계는 아래에 있으며 stable released API 보장은 아니다.
@@ -205,13 +367,17 @@ neograph://runs/run_123/attempts?after_sequence=17&limit=50
 
 **Native-custody pre-I/O gate; 실제 suite/probe는 아래.** Managed effect begin은 pending-effect/slot/held-window 변경 전에 실제 결합된 NativeArchive 또는 실제 local store-issued private C++ retention capability를 요구한다. Private capability는 JSON에서 import하거나 wire로 전달하지 않는다. C++ sidecar는 경계를 넘을 수 없으므로 remote backend가 InMemory여도 gRPC는 실제 client·server archive를 요구한다. Archive가 finite source owner를 제공하지 않으면 원래 anonymous owner scope는 빈 값으로 유지하고 실제 archive binding은 original scope와 일치해야 한다. Financial head/lease 증거만으로 native-custody readiness를 증명하지 않는다.
 
-`ProviderOutcomeError`는 결과를 보존하는 공통 host-error base이다. `ProviderObserverError`와 `ProviderDispatchOutcomePersistenceError`는 완전히 drain된 SDK 결과와 원래 `cause()`를 보존하며 후자는 보조 observer 실패도 `delivery_error()`에 보존한다. `ProviderFailure::outcome()`은 SDK 실패 자체를 보존한다. 이 증거는 Node/Program 재dispatch 권한이 아니다. Provider retry의 유일한 소유자는 SDK이며 caller가 선택한 `max_output_tokens`를 조용히 clamp하지 않는다.
+`ProviderOutcomeError`는 결과를 보존하는 공통 host-error base이다. `ProviderObserverError`와 `ProviderDispatchOutcomePersistenceError`는 완전히 drain된 SDK 결과와 원래 `cause()`를 보존하며 후자는 보조 observer 실패도 `delivery_error()`에 보존한다. `ProviderFailure::outcome()`은 SDK 실패 자체를 보존한다. 이 증거는 Node/Program 재dispatch 권한이 아니다. Transport retry의 유일한 소유자는 SDK이며 caller가 선택한 `max_output_tokens`를 조용히 clamp하지 않는다. Cap을 늘린 semantic call에는 새 prepared digest, 고유한 결정적 call ordinal, 원래 resource bank의 admission과 원래 deadline이 필요하다. Native replay eligibility는 credit을 갱신하지 않는다.
 
 `ProgramFailure`는 live `provider_outcome`·`provider_cause`를 보존한다. Canonical factual SDK witness는 실제 archive custody를 owner/run/version/bundle/operation/attempt에 결합하며 Runtime은 복구 실패를 노출하기 전에 설정된 custody를 즉시 복원한다. 공개 data-only `ProgramResult::create()`는 미리 채운 witness로 우회할 수 없고 unresolved parsed seal은 실행 결과가 아니다. 프로세스 재시작 후 원래 exception pointer는 없으므로 `provider_cause == nullptr`이며 text에서 재생성하지 않는다. 영속화할 수 없는 실패는 serialize/publish/replay할 수 없다.
 
 `RecordedBindingSet`는 source-bound move-only data이지 caller가 제공하는 dispatcher가 아니다. 신뢰된 Catalog `recorded_capability_binder`는 실제 영속 source event를 독립적으로 읽어 captured-only capability를 materialize한다. `ProgramRuntime::replay_recorded()`는 원래 selected-source permission을 검사한 뒤 실제 남은 bank를 durable CAS로 이전한다. inherited spend는 새 model grant가 아니다. 구 `start_recorded` 갱신 API는 제거되었다. InMemory/File/SQLite/PostgreSQL Program store는 실행 내내 정확하고 불변인 owned lease를 보존하며 expiry로 갱신하지 않는다. Controlled JavaScript도 underlying capability manifest를 검사하고 정확한 completed command 결과를 소비하며 external effect를 재dispatch하지 않는다.
 
 **Recorded-control causal fix는 full suite에서 실제 증명 완료.** Captured command replay는 실행 전에 새 CPU wall-time/Core work만 durable reserve하고 측정 work와 새 Core checkpoint를 result CAS로 publish한다. 새 model·money·Program-operation allowance를 소비하지 않고 captured external effect를 재dispatch하지 않는다. 미정산 reservation은 debit을 유지한다. Reservation은 첫 새 Core checkpoint를 거부했던 일반 Running→Running transition 대신 인증된 settlement transition을 선택한다. Await channel receive·timer wait/cancel·handoff wait 시작/release는 소유 executor/strand에서 직렬화한다. 기존 Recorded CPU/Memory await/handoff scenario는 full suite에서 pass했다. Remote TSan coverage 한계는 아래에 명시한다.
+
+아래 paid/native-axis/integrated-runtime 관측은 과거 provider-cutover cohort다.
+Count, failure, skip, limit는 바꾸지 않았다. 그 기록의 “최신”은 해당 cohort의
+마지막 실행이지 현재 Python binding이나 이 문서 변경의 검증 결과가 아니다.
 
 **유료 관측 완료; 보편적 qualification은 아님.** 원래 `SPQUAL1` base630/1000000 microUSD는 불변이다. 같은 원래 ledger의 ONE hash-chained `A`가 승인 extension480/3000000을 받아 aggregate1110/4000000이 된다. Calls/spent/hold/settlement는 누적이며 새 grant ID/header/reset은 없다. 정확한 declaration byte/file identity와 original authorization/baseline/catalog/activation/ledger-prefix hash/totals는 고정되고 삭제·교체·변경은 fail closed한다. 최종 canonical ledger는 calls1110/spent437958/held1287828 microUSD, eventA1, limits1110/4000000이다. Spent+held US$1.725786은 LOCAL catalogue meter이지 invoice가 아니다. 기록된 five-family60-pair baseline은600 request를 완료했다: Chat60/60, Responses60/60, Messages60/60, Generate56/60(incorrect-vision SSE4개), Interactions57/60(incorrect-vision buffered1개/SSE2개). 합계293/300 pair이며300/300은 아니다. 다른 old600 financial record는 보존하되 완전한 behavioral proof는 아니다. 이전 M5/media one-shot cohort는 그대로다. 이전 Google3-round prerequisite의 invalid-tool2개/unreadable-positive1개 실패 상태를 유지한다. 추가 유료 호출은 승인되지 않는다. 최종 SDK 증거와 native-axis 한계는 baseline 성공과 별개다. 이전 activation/reopen smoke는 두 번 reopen한 calls610/spent219159/held751233 및 SDK meter/canary/vision4-test19.38초 pass로 보존한다. 이는 범위가 정해진 이전 checkpoint이지 최종 ledger totals가 아니다. 이전 검증된 Chat60-pair cohort의 실제 attempt120,UpperBound charge120,UnknownHold 없음도 보존한다.
 
@@ -275,27 +441,37 @@ export NEOGRAPH_HARNESS_HTTP_PORT=8080
 - The `MCPHttpServer` 팩토리는 검증된 범위를 수신하고 `MCPHttpServerSession` 소유자를 반환합니다. 멀티테넌트 임베딩은 범위를 사용하여 격리된 Harness 레코드/체크포인트 저장소를 선택해야 합니다. 인증 상태는 그래프 런타임 자체에 들어가지 않습니다.
 - 요청 페이로드, HTTP 작업자, 큐, 세션 및 응답 대기 한도는 `MCPHttpServerConfig`에 의해 제한됩니다.
 
+`neograph::mcp::ScopedHarnessStore`는 public ID와 schema 소유 record/journal
+reference를 가역 tenant namespace로 매핑한다. Opaque request/result/event
+payload는 다시 쓰지 않는다. File/SQLite store는 이 private ID를 받아들인다.
+너무 긴 File key는 짧은 key path를 바꾸지 않고 고정 길이 hash filename을 쓴다.
+SQLite retention은 하나의 transaction에서 count와 삭제 후보를 선택 namespace로
+제한하여 다른 tenant와 보호된 source reference를 유지한다. 이 storage 경계는
+authenticated scope나 credential policy를 대체하지 않는다.
+
 모든 non-loopback 배포의 경우, 신뢰할 수 있는 역방향 프록시에서 TLS를 종료하고 해당 프록시의 OAuth/OIDC 검증 또는 동등한 `bearer_authorizer`를 사용하십시오. 원래 `Authorization` 및 `Origin` 헤더를 전달하고, 평문 공개 리스너를 노출하지 말며, Harness 상태 디렉터리마다 하나의 인증 도메인을 배포하십시오.
 
 ## 호스트 설정
 
-`SERVER`에 절대 경로를 사용하십시오:
+설치된 `neograph-harness-mcp` binary의 절대 경로를 `SERVER`로 쓴다.
+아래 entry는 직접 Provider executor를 선택한다. 위 local host mode는 해당
+`--executor claude|codex|opencode`로 바꿔 쓴다.
 
 ```bash
-SERVER=/absolute/path/to/build-harness/example_harness_mcp_server
+SERVER=/absolute/path/to/neograph-harness-mcp
 ```
 
 Claude Code, 로컬 프로젝트 범위:
 
 ```bash
-claude mcp add --scope local --transport stdio neograph-harness -- "$SERVER"
+claude mcp add --scope local --transport stdio neograph-harness -- "$SERVER" --executor provider
 claude mcp get neograph-harness
 ```
 
 Codex CLI:
 
 ```bash
-codex mcp add neograph-harness -- "$SERVER"
+codex mcp add neograph-harness -- "$SERVER" --executor provider
 codex mcp list
 ```
 
@@ -309,11 +485,10 @@ OpenCode, 프로젝트 `opencode.json` 또는 사용자 구성에서:
   "mcp": {
     "neograph-harness": {
       "type": "local",
-      "command": ["/absolute/path/to/example_harness_mcp_server"],
+      "command": ["/absolute/path/to/neograph-harness-mcp", "--executor", "provider"],
       "enabled": true,
       "environment": {
-        "OPENAI_API_KEY": "{env:OPENAI_API_KEY}",
-        "NEOGRAPH_HARNESS_MODEL": "gpt-4o-mini"
+        "NEOGRAPH_HARNESS_API_KEY": "{env:NEOGRAPH_HARNESS_API_KEY}"
       }
     }
   }
@@ -411,7 +586,7 @@ OpenCode, 프로젝트 `opencode.json` 또는 사용자 구성에서:
 
 ### 공급자 예산
 
-`budgets.provider_timeout_seconds`는 한 번의 공급자 완료 시도를 1~600초로 제한합니다. `budgets.max_output_tokens`는 한 번의 완료를 1~128000개의 생성된 토큰으로 제한합니다. 둘 다 선택 사항입니다: 하나를 생략하면 이전 동작이 유지되어 Harness 기한이 없고 공급자의 기존 출력 한도가 적용됩니다.
+`budgets.provider_timeout_seconds`는 prepared provider operation 하나의 absolute deadline을 1~600초로 설정한다. `budgets.max_output_tokens`는 output을 1~128000 token으로 제한한다. 둘 다 선택 사항이며 생략하면 해당 control은 unset으로 남고 admitted SDK/default policy를 유지한다. 무제한 시간/output을 뜻하지 않는다. Provider retry는 SDK가 같은 prepared operation deadline 안에서 관리한다.
 
 작업자는 두 필드 중 하나를 더 작은 값으로 설정할 수 있습니다. Harness 전체 값보다 높은 작업자 값은 컴파일 시간에 거부됩니다. 데드라인이 되면 Harness는 해당 공급자 호출에 제공된 하위 취소 토큰만 취소합니다. 형제 작업자나 포함하는 실행은 취소되지 않습니다. 공급자는 토큰을 존중해야 하므로, 중단될 수 없는 공급자는 데드라인 이후에 반환될 수 있습니다.
 
@@ -518,6 +693,14 @@ export NEOGRAPH_HARNESS_EXPERIMENTAL_TASKS=1
 ## 기능 백엔드(Capability Backends)
 
 `make_provider_harness_executor`는 모든 NeoGraph `Provider`를 통해 워커를 구동합니다. 모델이 선언된 도구를 요청하면 실행기는 디스패치 전후에 인수와 출력을 카탈로그에 대해 검증합니다.
+
+Provider executor는 typed `ProviderRequest`를 구성한다. `prepare`는 I/O 없이
+검증·encode하고 `dispatch`는 prepared request를 소비한다. `invoke`는 두 단계를
+합친다. Executor는 ordered message/part와 부분 실패를 포함한 소유 SDK
+Completion/Failure outcome을 보존하고 실패를 text-only 성공으로 바꾸지 않는다.
+Provider report의 미상 사용량은 nullable field다. 보수적 token charge/reservation은
+별도 권한이다. Recorded provider playback은 같은 outcome을 다시 charge/settle하지
+않으며 새 replay CPU/Core work는 이전된 remainder를 소비한다.
 
 `make_mcp_harness_capability_executor` 초기화된 다운스트림 `MCPClient` 인스턴스에 사용하거나, `a2a::make_harness_capability_executor` A2A 에이전트에 사용합니다. 요청이 권위를 유지합니다: 작업자는 자신의 `tools` 배열에 나열된 도구 ID만 볼 수 있습니다.
 

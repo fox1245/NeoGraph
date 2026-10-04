@@ -151,16 +151,15 @@ struct HttpStreamResponse {
     int status = 0;
 };
 
-/// Async HTTP(S) POST where the server emits a Transfer-Encoding:
-/// chunked response body. Each chunk is delivered to `on_chunk` in
-/// wire order; the returned HttpStreamResponse carries only the
-/// status line. Used for LLM streaming endpoints (OpenAI chat
-/// completions, Anthropic messages in `stream: true` mode).
+/// Async HTTP(S) POST with chunked, bounded Content-Length, or
+/// close-delimited response bodies. Callback data arrives in wire order.
+/// A nonempty fixed-length body is delivered once; an empty body emits no
+/// callback. The returned HttpStreamResponse carries the HTTP status.
 ///
-/// Throws asio::system_error on transport failure or
-/// std::runtime_error if the response isn't chunked. HTTP-level
-/// errors (4xx, 5xx) surface as status + their usually-small body
-/// delivered to on_chunk — the caller decides what to do.
+/// Transport failures throw asio::system_error. Invalid framing, premature
+/// EOF, body-limit violations, and already-buffered surplus bytes are
+/// rejected. HTTP errors (4xx, 5xx) retain their status and delivered body;
+/// the caller decides how to interpret them.
 ///
 /// The request uses `Connection: close` — chunked streams are
 /// typically long-lived and sharing a conn afterwards offers little

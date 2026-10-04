@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=ja source_sha256=81678ff6d72ad46af392428e631c78ddeae6d31983dbfad94991ded32d3d0406 -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=ja source_sha256=c1f59cee25dec6acb7c278971998594a9bfe75ebfa0beb55a5a8984ea62b0ea1 -->
 # コヒーレンス・ゲートの健全性 — 正式なコンパニオン
 
 **Languages:** [English](SOUNDNESS.md) | [한국어](SOUNDNESS.ko.md) | [日本語](SOUNDNESS.ja.md) | [简体中文](SOUNDNESS.zh-CN.md)
@@ -7,9 +7,14 @@
 
 移行したC++作成/修復経路は型付き `ProviderRequest`・`sp::Message` 履歴と完全な不変 `sp::Outcome` を使用し、返された全ネイティブメッセージ/パートを保持する。テキスト抽出は候補JSON/Pythonの解析用であり、ネイティブ会話履歴を置き換えない。コンパイル・解析・初期化診断はそのメッセージの後に追加する。意味的修復は各プログラムの試行上限に従う（ライブ作成3回、Forgeサーバー生成2回）。通信再試行や無制限の進化ではない。
 
-非公開OpenRouter経路 `~deepseek/deepseek-v4-flash-latest`、`zdr: true`、`only: ["morph"]`、`allow_fallbacks: false` を維持する。適格エンドポイントがなければ他社へ開示せず失敗する。ZDRと過去のUS所在地記録は常駐・現在の可用性保証ではない。ライブには承認されたキー、ネットワーク/提供者と有料容量が必要で、プロンプト・スキーマ・診断・ネイティブ履歴をこの経路へ送信する。生成したネイティブPythonサーバー実行は別のローカル信頼境界で、延期されたPythonプロバイダーバインディングとは異なる。キー・非公開プロンプトを公開しない。nullableトークン数は金額ではなく、価格と実際の請求対象使用量が必要。
+interface-4 [Forge ソース契約](README.md) は空の `MaxTokens` 回復を二倍 cap の追加呼出し一回に
+制限し、300秒 deadline を固定して outcome/usage を保持します。
+failure や observer/settlement エラーは再試行しません。
 
-現在の範囲限定実行証拠は実際のオフライン strict Core コンパイル・進化・checkpoint rollback のみ。すべての live/apex/forge/script 変種や vendor 推論の検証ではない。以下のコンソール・ベンチ・fuzz・live 実行記録は過去の証拠で、新たな型付き移行測定ではない。整合性 gate は明記された構造/効果契約の性質を扱い、提供者の通信・プライバシー・モデルの意味的真実を証明しない。Python provider binding は延期され、protocol client は不変。
+非公開OpenRouter経路 `~deepseek/deepseek-v4-flash-latest`、`zdr: true`、`only: ["morph"]`、`allow_fallbacks: false` を維持する。適格エンドポイントがなければ他社へ開示せず失敗する。ZDRと過去のUS所在地記録は常駐・現在の可用性保証ではない。ライブには承認されたキー、ネットワーク/提供者と有料容量が必要で、プロンプト・スキーマ・診断・ネイティブ履歴をこの経路へ送信する。生成した Python server の実行は独立した local code-execution trust boundary で、NeoGraph の Python provider binding とは別です。キー・非公開プロンプトを公開しない。nullableトークン数は金額ではなく、価格と実際の請求対象使用量が必要。
+
+保存済み interface-3 の範囲限定実行証拠は実際のオフライン strict Core コンパイル・進化・checkpoint rollback のみ。すべての live/apex/forge/script 変種や vendor 推論の検証ではない。以下のコンソール・ベンチ・fuzz・live 実行記録は過去の証拠で、interface-4 測定ではない。整合性 gate は明記された構造/効果契約の性質を扱い、提供者の通信・プライバシー・モデルの意味的真実を証明しない。Python provider binding は型付き API に従い、その検証はこの C++ 実行とは別です。
+
 
 これが、このクックブックの経験的利用の背後にある理論です。 `gate_eval`
 ラベル付きコーパスのコヒーレンス ゲート サウンドを *測定*しました。 `gate_fuzz` *測定値*
@@ -18,13 +23,7 @@
 のスモールステップ操作セマンティクスに関する対応する定理を *証明*
 ゲートの実行と効果ラティスを利用します。
 
-これは、実際のエンジンの **忠実な抽象化** に対する証明であり、
-スーパーステップセマンティクスとチャネル書き込みガードは、コードが実装したとおりに正確に実行されます。
-それら (`src/core/graph_state.cpp`、`src/core/graph_engine.cpp`、
-`src/core/graph_validator.cpp`)、ただし、C++ を機械的に検証するわけではありません。
-一行ずつ。抽象化の忠実度はまさに `gate_eval` と
-`gate_fuzz` は裏付けています: 定理の予測はすべてのケースで実行と一致します
-彼らは走ります。実証 + 測定されたモデル、このプロジェクトが堅持する精神。
+証明は total reducer、戻る node body、固定 declared channel、total static route を持つ abstract machine を扱います。node/reducer exception、cancellation、provider/tool failure、resource limit、checkpoint/custody error、任意生成 code は除外します。現在の C++ engine には追加 failure path があります。引用 source は model の根拠で、過去の corpus は C++ の機械検証や model 外の UB 不在を証明しません。
 
 表記は ASCII です。`⊆ ∪ ∩ ∅` は集合演算です。 `⟨…⟩` マシン構成。
 `↦` マップ エントリ。 `→` ステップ関係。 `⊢ G ok` 整形式判定。
@@ -111,10 +110,7 @@
 
 コードに一致する、セマンティクスが示す可能性のあるさらに 2 つの実行時障害モード:
 
-- **ダングリングルート。** `route` が `m ∉ N ∪ {⊥e}` という名前へのエッジ/ルートをたどる必要がある場合、ディスパッチは未定義です (ダングリング参照)。これを `→ ⊥` とモデル化します。
-- **空のルート ディスパッチ。** 条件付きノード `n` にルート マップ `R(n) = ∅` がある場合、
-  スケジューラは空のコンテナの逆端を逆参照します
-  (`rend()`、UB)。これを `→ ⊥` としてモデル化します。
+- **Empty-route dispatch.** conditional node `n` の route map `R(n) = ∅` は model に dispatch target を与えません。`→ ⊥` として model 化します。
 
 ## 4. 整形式の判断としてのゲート
 
@@ -214,12 +210,7 @@
 `max_steps` で切り捨てられた、非障害ステップの無限または終了チェーン。
 したがって、終了または停止しますが、障害は発生しません。 ∎
 
-`(E8)` に関するメモ: バリアの活性化は、「ストール」によって *バグ* が隠蔽されるのを防ぐものです。アン
-満足できない AND 結合 (静的パスを持たない `wait_for` メンバー) は決してできません
-火災が発生し、ランを失速に陥らせ、実際にはデッドロックになります。 `(E8)` はそれを禁止します。
-したがって、`⊢ G ok` でのストールは、本物のサイクル (`max_steps` によって制限される) を反映するものではなく、
-構造的に死んだバリア。進歩（非過失）はこれに依存しません。それ
-失速結果の意味が明確になります。
+`(E8)` は barrier member の declared static incoming edge/route を調べます。全 member の実行は証明しません。相互排他的 route は AND-join を妨げ得ます。この証明は barrier liveness や全 deadlock と意図的 cycle の区別を確立しません。abstract model の non-fault は termination 保証ではありません。
 
 ### 6.4 帰結（誠実な契約と比較したゲートの健全性）
 
@@ -227,7 +218,7 @@
 コントラクトが正直 `(H)` であれば、実行にエラーはありません。コントラクトへの書き込みはありません。
 未宣言のチャネル、ダングリング ルートまたは空のルート UB なし。*
 
-これはハーネスが測定する定理です。ラベル付きコーパスでは、`gate_eval` の `validator-error ⟹ runtime-fault` がその対偶です。`gate_fuzz` レイヤー 1 はその統計的な影であり、2000 を超える変異体で `⊢ G ok` のグラフに障害は一度も発生しませんでした。
+model の命題は `gate-pass ⟹ no-modeled-fault`、対偶は `modeled-fault ⟹ gate-reject` です。`gate-reject ⟹ fault` ではありません。過去の corpus は特定の拒否例を調べるだけで全拒否が fault になる証明ではありません。保存された fuzz 記録は 2000 mutants で pass 後の fault がなかった観察です。
 
 ### 6.5 提案 (`(H)` が必要です。ランタイムはバックストップです)
 

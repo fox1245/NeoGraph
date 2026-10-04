@@ -65,10 +65,8 @@ def checkpoint_thread_id(session_id: str) -> str:
 
 class NeoGraphACPAgent(Agent):
     def __init__(self, database_url=None, sqlite_path=None, checkpoint_store=None):
-        database_url = database_url or os.environ.get(
-            "NEOGRAPH_ACP_POSTGRES_URL"
-        )
-        sqlite_path = sqlite_path or os.environ.get("NEOGRAPH_ACP_SQLITE_PATH")
+        database_url = database_url or os.environ.get("NEOGRAPH_ACP_POSTGRES_URL") or None
+        sqlite_path = sqlite_path or os.environ.get("NEOGRAPH_ACP_SQLITE_PATH") or None
         configured = sum(
             value is not None
             for value in (database_url, sqlite_path, checkpoint_store)

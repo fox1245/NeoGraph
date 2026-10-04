@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ko source_sha256=1d5e31e1d0219b65d56905d841f93fdf68f603c0f885b052fb7b45dd069ff8e2 -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ko source_sha256=b0fae62c9be25c3d689e9b3e593d7cb4bead7a6eae7460e70e5fc8e3e0804f6c -->
 # The Beast — 생성 · 진화 · 롤백
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -7,9 +7,15 @@
 
 전환된 C++ 작성/수정 경로는 타입 `ProviderRequest`, `sp::Message` 이력 및 전체 불변 `sp::Outcome`을 사용하고 반환된 모든 네이티브 메시지/파트를 보존한다. 텍스트 추출은 후보 JSON/Python 파싱용이며 네이티브 대화 이력을 대체하지 않는다. 컴파일·파싱·초기화 진단은 그 메시지 뒤에 추가한다. 의미적 수정은 프로그램별 시도 한도로 제한된다(라이브 작성 3회, Forge 서버 생성 2회). 전송 재시도나 무제한 진화가 아니다.
 
-비공개 OpenRouter 경로 `~deepseek/deepseek-v4-flash-latest`, `zdr: true`, `only: ["morph"]`, `allow_fallbacks: false`를 유지한다. 적격 엔드포인트가 없으면 다른 제공자에게 공개하지 않고 실패한다. ZDR 및 과거 US 위치 기록은 지역 상주·현재 가용성 보장이 아니다. 라이브 실행은 승인된 키, 네트워크/제공자 및 유료 용량이 필요하고 프롬프트·스키마·진단·네이티브 이력을 해당 경로로 전송한다. 생성된 네이티브 Python 서버 실행은 별도의 로컬 신뢰 경계이며 유예된 Python 제공자 바인딩과 다르다. 키·비공개 프롬프트를 공개하지 않는다. nullable 토큰 수는 달러 비용이 아니며 가격과 실제 청구 사용량이 필요하다.
+Forge는 low reasoning effort와 provider timeout 300초를 쓰며 ask마다 deadline을 한 번 고정합니다.
+완료된 빈 `MaxTokens` outcome에 text와 유효/무효 client tool call이 없을 때만 현재
+3,000/4,000-token cap의 두 배로 최대 한 번 더 호출합니다. 모든 outcome과 usage를 보존합니다.
+Failure, observer/settlement 오류, 내용이 있는 부분 응답은 추가 호출을 유발하지 않습니다.
+이 budget recovery는 compiler/초기화 repair와 별개이며 interface-4 소스 계약이지 새 live 통과가 아닙니다.
 
-현재 범위 한정 실행 증거는 실제 오프라인 strict Core 컴파일·진화·checkpoint rollback에 한정된다. 모든 live/apex/forge/script 변형이나 vendor 추론을 검증하지 않는다. 아래 콘솔·벤치·fuzz·live 실행 기록은 과거 증거이며 새로운 타입 전환 측정이 아니다. 일관성 gate는 명시된 구조/효과 계약 속성을 다루며 제공자 전송·개인정보·모델 의미의 진실성을 증명하지 않는다. Python 제공자 binding은 유예되었고 protocol client는 그대로다.
+비공개 OpenRouter 경로 `~deepseek/deepseek-v4-flash-latest`, `zdr: true`, `only: ["morph"]`, `allow_fallbacks: false`를 유지한다. 적격 엔드포인트가 없으면 다른 제공자에게 공개하지 않고 실패한다. ZDR 및 과거 US 위치 기록은 지역 상주·현재 가용성 보장이 아니다. 라이브 실행은 승인된 키, 네트워크/제공자 및 유료 용량이 필요하고 프롬프트·스키마·진단·네이티브 이력을 해당 경로로 전송한다. 생성된 Python 서버 실행은 별도의 로컬 코드 실행 신뢰 경계이며 NeoGraph Python 제공자 binding과 별개다. 키·비공개 프롬프트를 공개하지 않는다. nullable 토큰 수는 달러 비용이 아니며 가격과 실제 청구 사용량이 필요하다.
+
+보존된 interface-3 범위 한정 실행 증거는 실제 오프라인 strict Core 컴파일·진화·checkpoint rollback에 한정된다. 모든 live/apex/forge/script 변형이나 vendor 추론을 검증하지 않는다. 아래 콘솔·벤치·fuzz·live 실행 기록은 과거 증거이며 interface-4 측정이 아니다. 일관성 gate는 명시된 구조/효과 계약 속성을 다루며 제공자 전송·개인정보·모델 의미의 진실성을 증명하지 않는다. Python 제공자 binding은 이제 타입 API를 따르며 검증은 이 C++ 실행과 별개다.
 
 > 엄격한 Core JSON으로 자체 하네스를 작성하고, Core 컴파일러 아래에서 이를 진화시키며, 체크포인트 관리자를 통해 실행을 되감는 자기 진화 에이전트입니다. **생성되고, 진화하고, 되감겨도 The Beast는 남습니다.**
 
@@ -22,6 +28,8 @@
 그것은 NeoGraph에서 하네스가 **데이터**이기 때문에만 안전합니다 — 엄격한 Core JSON(이슈 #56)으로 기술된 토폴로지 — 그리고 Core 컴파일러는 실행 전에 하네스의 일관성을 *증명*할 수 있습니다. 엄격한 Core JSON은 교환 아티팩트이지, 제2의 소스 언어가 아닙니다. 컴파일러가 그 괴물을 부채에서 카테고리로 바꾸는 것입니다.
 
 ## 실행합니다.
+
+먼저 `CMAKE_PREFIX_PATH`로 설치 SchemaProvider prefix를, 또는 `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<sdk-source>`로 SDK 소스를 제공하여 NeoGraph 트리를 구성하세요. SDK는 offline Core-only recipe에도 필수입니다. 현재 SDK transport 검증 범위는 Linux/POSIX이고 Sandbox2 변형은 Linux 전용입니다.
 
 ```console
 $ cmake --build build --target cookbook_the_beast
@@ -91,7 +99,7 @@ $ ./build/cookbook_the_beast_live                  # optional: pass a task strin
 
 `the_beast_live.cpp`는 `~deepseek/deepseek-v4-flash-latest`를 `provider: {"zdr": true, "only": ["morph"], "allow_fallbacks": false}`에 고정한다. 검증 시점에 OpenRouter는 Morph의 데이터센터를 US로 나열했고 해당 모델/프로바이더 엔드포인트를 ZDR-capable로 나열했다. 이것은 OpenRouter의 지역 내 상주 보장이 아닌 엄격한 프로바이더 선택이다: 문서화된 지역 내 보장은 현재 엔터프라이즈 EU 경로이다. Morph의 적격 엔드포인트를 사용할 수 없으면 프롬프트를 다른 프로바이더로 보내는 대신 요청이 실패한다.
 
-라이브 쿡북은 공급자 타임아웃을 180초로 설정합니다: 이 추론 모델의 4,000토큰 생성 예산은 일반적인 60초 기본값보다 오래 지속될 수 있습니다.
+live author 경로의 provider timeout은 180초입니다. Forge의 별도 300초 timeout은 제한된 generation 호출에 적용되며 어느 설정도 공유 provider factory의 기본값을 바꾸지 않습니다.
 
 
 
@@ -311,7 +319,7 @@ runtime cross-check: 4/4 cases where the validator's verdict matched execution.
 
 > 검증기가 ERROR를 보고 ⟹ 그래프가 실행 시 오류를 발생시킴; 검증기가 오류를 보고하지 않음 ⟹ 그래프가 깨끗하게 실행됨.
 
-첫 번째 줄은 *건전성*입니다(오류로 플래그된 그래프가 깨끗하게 실행되면 건전성 구멍이 됩니다); 경고로 플래그된 그래프가 깨끗하게 실행되면 게이트가 *과도하게* 거부하지 않음을 보여줍니다. E10/E8-클래스 오류는 판정 전용입니다 — 빈 경로 맵을 실행하면 `rend()`(UB)를 역참조하는데, 이는 게이트가 존재하는 이유인 바로 그 오류입니다. 따라서 검사되지만 실행되지는 않습니다. 이것은 데모 코퍼스이며 모든 진단의 완전한 커버리지는 아닙니다 — 그러나 "게이트는 건전하다"를 슬로건에서 측정되고 CI로 강제되는 4/4로 바꿉니다.
+안전성 soundness는 정직한 계약 하에 gate pass가 모델의 구조 fault 부재를 함의하는 방향입니다. corpus의 reject/fault 일치는 특정 거절 사례의 관찰이며 모든 거절 graph가 fault라는 증명이 아닙니다. E10/E8은 판정만 확인하고 실행하지 않았습니다. 보존된4/4는 과거 corpus 관찰이며 모든 diagnostic이나 임의 C++ node body의 증명이 아닙니다.
 
 ## Gate-fuzz — 보증과 그 경계, 대규모로
 

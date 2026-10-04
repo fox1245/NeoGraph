@@ -1,246 +1,70 @@
-<!-- neograph-i18n: source=docs/concurrency.md locale=ja source_sha256=53d5843f1b9147b72df94827ed3d1463c1a60be53f9edff281267ba5b82653f8 -->
-# 同時実行性と非同期性
+<!-- neograph-i18n: source=docs/concurrency.md locale=ja source_sha256=889743688862b981a4a8e8d8de0c0f3bc287693712453d430183d4dcdd7a030a -->
+# 並行実行と非同期
 
 **Languages:** [English](concurrency.md) | [한국어](concurrency.ko.md) | [日本語](concurrency.ja.md) | [简体中文](concurrency.zh-CN.md)
 
-NeoGraph は、すぐに使用できる 2 つの同時実行モデルをサポートしています。
-ホスティング パターンに適合するもの:
+## executor の選択
 
-* **エージェントごとのスレッド (同期)** — `run()` / `run_stream()` / `resume()`
-  すでに使用しているエグゼキュータにディスパッチされます。およそ 1 秒までは安全
-  千人の同時エージェント。 1 回の呼び出しあたり最大 5 μs のエンジン オーバーヘッド
-  `-O3 -DNDEBUG` ビルドをリリース (スーパーステップ ループは
-  `run_sync(execute_graph_async)` なので、両方のエントリ ポイントが 1 つを共有します
-  コルーチン パス)。
-* **コルーチンベースの非同期** — `run_async()` / `run_stream_async()` /
-  `resume_async()` は `asio::awaitable<RunResult>` を返します。 1つ
-  `asio::io_context` は、何千もの同時エージェントをホストします。
-  実行ごとのスレッド。すべてのプロバイダー/MCP/チェックポイント I/O ポイントは
-  ボンネットの下にはノンブロッキングの`co_await`が入っています。完全な移行ガイドは次のとおりです。
-  [`ASYNC_GUIDE.md`](ASYNC_GUIDE.md)。
+sync `run`、`run_stream`、`resume` は async API と同じ coroutine 実装を駆動し、呼び出し thread を占有する。host worker pool は独立 session を並行実行できる。async API は `asio::awaitable<RunResult>` を返すので、自分で所有する executor で駆動する。awaitable は任意の user code を nonblocking にしない。
 
-## 非同期 (ステージ 3)
+`EngineConfig::worker_count = 1` が既定値で、engine 所有の fan-out pool はない。中断する I/O 分岐は一つの thread でも重なるが、CPU 処理は直列になる。multithread caller executor または任意の engine pool で CPU 分岐を複数 core に割り当てる。engine 公開前に pool を設定する。
 
 ```cpp
-#include <asio/co_spawn.hpp>
-#include <asio/detached.hpp>
-#include <asio/io_context.hpp>
+#include <neograph/async/run_sync.h>
 
-asio::io_context io;
-for (const auto& user : users) {
-    asio::co_spawn(
-        io,
-        [&, user]() -> asio::awaitable<void> {
-            RunConfig cfg;
-            cfg.thread_id = user.session_id;
-            cfg.input     = {{"messages", user.history}};
-            auto result = co_await engine->run_async(cfg);
-            handle(result);
-        },
-        asio::detached);
-}
-io.run();  // drives all agents on this thread
+EngineConfig options;
+options.node_context = ctx;
+options.checkpoint_store = std::make_shared<InMemoryCheckpointStore>();
+options.worker_count = 4;
+auto engine = GraphEngine::build(def, std::move(options));
+RunConfig run;
+run.thread_id = "session-1";
+run.input = {{"count", 0}};
+auto result = neograph::async::run_sync(engine->run_async(run));
 ```
 
-`engine->run_async()` は呼び出し元のエグゼキューターにエンドツーエンドで留まります —
-すべてのスーパーステップの一時停止ポイント (ノードのディスパッチ、チェックポイント I/O、
-並列ファンアウト、再試行バックオフ）は実際の `co_await` です。 3人
-したがって、上記の 50 ミリ秒のステップは 1 つの io_context スレッドに重複し、
-ウォールタイムは 3 × 50 ミリ秒ではなく、約 50 ミリ秒に達します。 1 つのスレッド、N 個の同時実行
-エージェント。コア全体にわたる CPU バウンドのファンアウトの場合は、ドライバーを
-共有 `asio::thread_pool` — それが次のパターンです
-[`benchmarks/concurrent/CONCURRENT.md`](../benchmarks/concurrent/CONCURRENT.md)
-ここで、N = 10,000 は 52 ミリ秒で終了します。 1 回の実行内で、
-`make_parallel_group` ファンアウトも重複: 3 つの並列ファンアウト
-研究者は連続 370 ミリ秒から 150 ミリ秒まで崩壊します。
+`27_async_concurrent_runs.cpp` は一つの io_context の複数 session を、`05_parallel_fanout.cpp` は一回の run 内の分岐を示す。歴史的 throughput/memory 測定は[性能詳細](performance-deep-dive.md)にあり、安全な session 数上限を保証しない。
 
-カスタム ノードは、`asio::awaitable` を返すことで非同期パスに参加します。
-統合 `run(NodeInput)` エントリ ポイントから (v0.4.0 で導入;
-従来の 8 仮想チェーンは v0.9.0 で削除されました):
+## shared engine の規則
 
-```cpp
-class FetchNode : public GraphNode {
-  public:
-    asio::awaitable<NodeOutput>
-    run(NodeInput in) override {
-        auto ex = co_await asio::this_coro::executor;
-        auto res = co_await neograph::async::async_post(ex, /*...*/);
-        // in.ctx.cancel_token, in.state, in.stream_cb available.
-        co_return NodeOutput{ {ChannelWrite{"out", res}} };
-    }
-    std::string get_name() const override { return "fetch"; }
-};
-```
+- 独立 session は異なる `thread_id` を使う。同じ id の並行実行は checkpoint 順序が未規定なので、履歴順が必要なら host で直列化する。
+- execution/admin thread に公開する前に setter と tool binding を済ませる。実行中の worker pool resize はエラーである。
+- 一つの engine では管理と実行は相互排他的である。run/resume 中の state/history read、update、fork は `std::logic_error` で拒否し、管理中の実行も拒否する。cancel/drain して完了を待ってから管理を再試行する。
+- 同じ store を使う別の engine はこの admission 境界の外にある。host で調整する。
+- node instance は run 間で再利用する。run ごとの scratch state は channel に置き、custom node/provider/tool/store は stateless または同期化する。bundled in-memory store は mutex を使う。
 
-非同期形状のツールは `AsyncTool` から派生します。
+Provider 呼び出しは prepared request と runtime client を所有する。C++ event view は callback 内だけ有効なので保持する data はコピーする。native replay と accounting 権限は本物の custody が必要で、portable JSON の復元では得られない。[非同期ガイド](ASYNC_GUIDE.md)を参照。
 
-```cpp
-class FetchTool : public neograph::AsyncTool {
-  public:
-    asio::awaitable<std::string>
-    execute_async(const json& args) override { /* co_await HTTP */ }
-    // sync execute() is final, routes through run_sync automatically.
-};
-```
+## bounded sync admission
 
-マルチエージェントについては、`examples/27_async_concurrent_runs.cpp` を参照してください。
-パターンと `examples/05_parallel_fanout.cpp` 内のファンアウト用
-1回の実行。
-
-## 同期 (エージェントごとのスレッド)
-
-NeoGraph は独自の非同期ランタイムを同梱していません。同期ランタイムを公開しています。
-`run()` / `run_stream()` / `resume()` と実行者を選択できます。
-コンパイルされた単一の `GraphEngine` は、次のスレッド間で安全に共有できます。
-`run()` を **別の `thread_id`** と同時に呼び出すため、ホスティング
-マルチテナントエージェントのワークロードは、何にでもディスパッチするかどうかの問題です
-すでに使用しているエグゼキュータ。
-
-```cpp
-// One engine, many concurrent sessions — no external runtime required.
-EngineConfig engine_config;
-engine_config.node_context = ctx;
-engine_config.checkpoint_store = std::make_shared<InMemoryCheckpointStore>();
-auto engine = GraphEngine::build(def, std::move(engine_config));
-
-std::vector<std::future<RunResult>> sessions;
-for (const auto& user : users) {
-    sessions.push_back(std::async(std::launch::async, [&engine, user]() {
-        RunConfig cfg;
-        cfg.thread_id = user.session_id;
-        cfg.input = {{"messages", user.history}};
-        return engine->run(cfg);
-    }));
-}
-for (auto& f : sessions) handle(f.get());
-```
-
-`std::async` をサポートする `asio::thread_pool` でも同様に機能します。
-タスク システム、または Web フレームワークのワーカー プール — NeoGraph は除外されます
-執行者の決定のこと。 CPU 並列ファンアウト *内部* が必要な場合
-単一の同期 `run()` 呼び出し (N スレッド上の N 同期 `run()` ではなく)、
-インストールする `build()` の前に `EngineConfig::worker_count` を設定してください
-エンジン所有の `asio::thread_pool` と `run_parallel_async`
-multi-ブランチディスパッチを送信します。
-
-## バンドルされている`RequestQueue`を使用する
-
-固定ワーカー プールが必要なマルチテナント サーバーの場合、
-バックプレッシャー (キューが飽和した場合の新しいセッションの拒否)
-無制限のメモリ増加の代わりに)、`neograph::util` をリンクして使用します
-組み込みのロックフリーキュー — 外部エグゼキュータは必要ありません:
+`RequestQueue` は `neograph::util` を link して使う。`moodycamel::ConcurrentQueue` を使い、idle worker は condition variable で待機する。pending-slot 上限は queued session 数を制限し、実行中 session の memory を制限しない。
 
 ```cpp
 #include <neograph/util/request_queue.h>
-using namespace neograph::util;
 
-RequestQueue pool(16, 1000);           // 16 workers, max 1000 pending sessions
-EngineConfig engine_config;
-engine_config.node_context = ctx;
-engine_config.checkpoint_store = std::make_shared<InMemoryCheckpointStore>();
-auto engine = GraphEngine::build(def, std::move(engine_config));
-
-std::vector<RunResult>          results(users.size());
-std::vector<std::future<void>>  futs;
-
-for (size_t i = 0; i < users.size(); ++i) {
-    auto [accepted, fut] = pool.submit([&, i]() {
-        RunConfig cfg;
-        cfg.thread_id = users[i].session_id;
-        cfg.input     = {{"messages", users[i].history}};
-        results[i]    = engine->run(cfg);
-    });
-    if (!accepted) {
-        // Backpressure: queue is full — shed load, return 503, retry later, …
-        reject(users[i]);
-        continue;
-    }
-    futs.push_back(std::move(fut));
-}
-
-for (auto& f : futs) f.get();           // propagates exceptions from run()
-
-auto s = pool.stats();
-log("pending={} active={} completed={} rejected={}",
-    s.pending, s.active, s.completed, s.rejected);
+neograph::util::RequestQueue queue(16, 1000);
+auto [accepted, future] = queue.submit([engine, config] {
+    auto result = engine->run(config);
+    handle(result);
+});
+if (future.valid()) future.get();
+if (!accepted) reject_request();
 ```
 
-`submit()` は `{accepted, std::future<void>}` を返します。`RunResult` は共有出力
-スロット（上記）またはタスクごとの `std::promise<RunResult>` で受け渡せます。
-キューはロックフリーの `moodycamel::ConcurrentQueue` を使用し、アイドル中の
-ワーカーは condvar で待機するため busy-spin しません。admission は pending
-スロットを原子的に予約するため、同時呼び出しでも `max_queue_size` を超えません。
-満杯による通常の backpressure は `{false, invalid_future}` を返します。内部の
-enqueue 失敗は代わりに `{false, valid_future}` を返し、その future を監視すると
-`std::runtime_error` が送出されます。
+queue 満杯では `accepted=false` と invalid future を返す。内部 enqueue 失敗では `false` と `std::runtime_error` を持つ valid future を返す。すべての拒否を通常の飽和とせず future を確認する。worker は最低一つ必要である。
 
-キューは 1 つ以上のワーカーで構築してください。`close()` は冪等で、以後の投入を
-拒否し、ワーカーの終了を待ち、すでにワーカーが取得した callable は完了させ、未取得の
-future はすべて `std::runtime_error("RequestQueue is closed")` で完了させます。
-callable 自身が `close()` を呼んで終了を開始することもできますが、そのワーカーは
-自分自身を待たずに戻ります。デストラクターも同じ close 経路を使うため、teardown 中に
-受理済み future が暗黙に取り残されることはありません。
+`close()` は冪等である。新しい submit を拒否し、claimed work は完了させ、unclaimed future は `std::runtime_error("RequestQueue is closed")` で完了する。worker が close を呼ぶと、自分を待たずに shutdown を始める。destructor も同じ経路を使い、accepted future を取り残さない。
 
-## 安全な同時使用のためのルール
+## checkpoint I/O と Python
 
-- 構成ミューテーター (`set_retry_policy`、`set_checkpoint_store`、
-  `set_store`、…) は同時実行の **前** に呼び出します。ツールはコンパイル前に
-  `NodeContext::tools` または `EngineResources::tools` に設定します。最初のディスパッチ後はエンジンを固定したものとして扱います。
-- **同じ** `thread_id` を共有する同時 `run()` 呼び出しはクラッシュしない
-  ただし、指定されていないチェックポイント インターリーブが生成されます。セッションごとにシリアル化する
-  確定的な履歴が必要な場合は、自分自身にアクセスしてください。
-- カスタム `GraphNode` サブクラスは **ステートレスまたは自己同期**である必要があります。
-  ノード インスタンスはエンジンによって所有され、実行されるたびに再利用されます。
-  すべてのスレッド - 実行ごとのスクラッチ データは、グラフ チャネルではなくグラフ チャネルに属します。
-  ノードのメンバー変数。
-- ユーザー指定の `CheckpointStore`、`Store`、`Provider`、および `Tool`
-  実装はスレッドセーフである必要があります。バンドルされている`InMemoryCheckpointStore`
-  と `InMemoryStore` はすでにそうです。
+in-memory checkpoint は caller で mutex を使う。SQLite と sync custom backend は blocking work を bounded worker に移す。PostgreSQL は pipeline batching なしの nonblocking libpq I/O を使う。`NEOGRAPH_BUILD_POSTGRES=ON` は libpq 開発 files を必要とする optional target を有効にし、`OFF` はその依存だけを除く。
 
-## PostgreSQL による永続的なチェックポイント設定
+Python callback は GIL 下で実行する。CPU-bound Python node/reducer は worker_count を増やすだけでは並列にならない。native call は自分の実装が GIL を解放する場合だけ重なれる。typed provider invoke/dispatch は GIL を解放し、`asyncio.to_thread` で呼べる。native provider asyncio awaitable の公開ではない。
 
-マルチプロセス展開の場合、またはチェックポイントが再起動後も存続する必要がある場合、
-`neograph::postgres` をリンクし、`InMemoryCheckpointStore` を交換します
-`PostgresCheckpointStore`:
+## runtime 依存と platform 検証
 
-```cpp
-#include <neograph/graph/postgres_checkpoint.h>
+Core は `NEOGRAPH_BUILD_LLM=OFF` でも外部 `SchemaProvider::runtime` を link する。PostgreSQL、LLM node、NeoGraph の optional CurlH2Pool を無効にしても SDK runtime の libcurl 要件はなくならない。対応する installed SDK または `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` を指定する。
 
-auto store = std::make_shared<PostgresCheckpointStore>(
-    "postgresql://user:pass@host:5432/dbname");
-EngineConfig engine_config;
-engine_config.node_context = ctx;
-engine_config.checkpoint_store = store;
-auto engine = GraphEngine::build(def, std::move(engine_config));
-```
+source resolution は明示 SDK source directory、installed package、revision-pinned 公開 archive fallback の順（既定 `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON`）。installed SDK の offline build は flag を `OFF` とし `CMAKE_PREFIX_PATH` に prefix を指定する。NeoGraph と SDK source 設定は CMake 3.20+ を要する。
 
-スキーマは、LangGraph の `PostgresSaver` (接頭辞が 3 つのテーブル) を反映しています。
-`neograph_*` は同じデータベース内で LangGraph 状態と共存します)、および
-`(thread_id, channel, version)` によってチャネル値の重複を排除します。あ
-スーパーステップごとに 1 つのチャンネルに触れる 1000 ステップのセッションのおおよそのコスト
-`O(steps × channels)` の代わりに `O(steps + channels)` BLOB 行。
-
-**ビルド フラグ**: `-DNEOGRAPH_BUILD_POSTGRES=ON` (デフォルト)。必要
-`libpq-dev` (apt) / `libpq-devel` (rpm)。フラグ `OFF` をスキップするように設定します。
-完全に依存関係。
-
-**統合テストの実行**: 使い捨てのローカル PG をスピンアップし、
-テスト バイナリをそこに指定します。
-
-```bash
-docker run -d --rm --name neograph-pg-test \
-    -e POSTGRES_PASSWORD=test -e POSTGRES_DB=neograph_test \
-    -p 55432:5432 postgres:16-alpine
-
-NEOGRAPH_TEST_POSTGRES_URL='postgresql://postgres:test@localhost:55432/neograph_test' \
-    ctest --test-dir build -R PostgresCheckpoint --output-on-failure
-```
-
-環境変数がないと、PG テストは `GTEST_SKIP` されるため、残りの部分は
-Postgres が手元にないマシンではスイートは緑色のままです。
-
-対象範囲: `tests/test_graph_engine.cpp` に含まれるもの
-`ConcurrentRunDifferentThreadIds` (16 スレッド × 25 実行 = 400 並列
-実行、セッションごとの出力の検証 + チェックポイント分離)、および
-`ConcurrentRunSameThreadIdNoCrash` (8 スレッド × 50 が 1 つの共有上で実行される)
-`thread_id`、クラッシュのない動作を検証します)。
+現在の SDK runtime/archive の検証範囲は Linux/POSIX である。既存 Linux/macOS/Windows package metadata は新依存がすべての platform で動く証拠ではない。macOS、Windows、WASM はそれぞれ runtime/build 検証を要し、portable executor API だけでは代替できない。

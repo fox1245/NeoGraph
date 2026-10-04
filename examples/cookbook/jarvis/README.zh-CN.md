@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=zh-CN source_sha256=8ac92757f70745afa264fbc5ef7d0980d480ae9dca5cd364dd7f427a0ce215f2 -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=zh-CN source_sha256=4de91aa4e04dc5f5a30c8878f37fa3dbf2c16671b0545387dd6ee20465a280ee -->
 # JARVIS — 语音驱动的元编排器
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -9,7 +9,10 @@ C++ 路由器、合成器和专家夹具使用类型化 `ProviderRequest`、`sp:
 
 本地语音是可选项，需要选定的 whisper/Moonshine 模型、ONNX Runtime/Supertonic 资源、miniaudio 和可用的麦克风/扬声器。文本/mock 运行不能证明语音可用。无需云端仅适用于本地/mock。实时请求需要获授权的 `OPENROUTER_API_KEY`、网络与提供方容量，并将提示、对话记忆和附带工具/委派结果发送给 OpenRouter。模型已固定，原生请求设置的 ZDR 不是地域驻留保证。不要将密钥写入日志或版本库。可空 token 用量不是账单金额；费用需要当前端点/模型定价与实际计费用量。
 
-`[jarvis:ttft]` 仅在首个非空 `sp::PartDelta` 且为 `PartKind::Text`、`DeltaChannel::Content` 时发出，不由用量、推理、响应头等事件触发。它表示首次合成文本，不是首次可听见的 TTS 播放。Python REPL/基准协议驱动不变；类型化 Python 提供方绑定延期。当前运行证据仅涵盖实际 CLI 问候、已持久化的合成记忆 turn 和正常 EOF 退出，不验证麦克风捕获、ASR、TTS、pybind 基准或 vendor 推理。下文耗时及语音/live 执行主张仍为历史记录，不是当前迁移的 qualification。
+`[jarvis:ttft]` 仅在首个非空 `sp::PartDelta` 且为 `PartKind::Text`、`DeltaChannel::Content` 时发出，不由用量、推理、响应头等事件触发。它表示首次合成文本，不是首次可听见的 TTS 播放。Python REPL driver 仍为 protocol client；pybind benchmark 使用已迁移类型化 binding，需要单独运行证据。当前运行证据仅涵盖实际 CLI 问候、已持久化的合成记忆 turn 和正常 EOF 退出，不验证麦克风捕获、ASR、TTS、pybind 基准或 vendor 推理。下文耗时及语音/live 执行主张仍为历史记录，不是当前迁移的 qualification。
+
+上述 CLI 证据在 interface 3 下记录。保留的 A2A 1.0 wire 变更和 SDK interface-4 控制是源码契约，
+不是新的 runtime 通过。
 
 > 本地/mock 无需云端提供方；可选语音需要本地资源和设备。
 > 麦克风是Tony，NeoGraph是JARVIS，工具/专家是JARVIS的下属。
@@ -114,7 +117,7 @@ JARVIS可以将整个任务委托给这些子智能体。每个子智能体作�
 }
 ```
 
-启动时，它向每个URL请求`AgentCard` → 仅激活那些响应的端点。**关键技巧**：任何遵循A2A标准的外部智能体——无论是别人制作的Python A2A机器人、另一个NeoGraph实例，还是其他——只需将其URL添加到此JSON中，即可成为JARVIS的下属。
+启动时 JARVIS fetch 已配置 AgentCard。调用需要兼容 JSON-RPC 0.x/1.0 interface，discovery 响应本身不证明兼容性。client 不重定向配置 endpoint，按 card 选择 dialect。card-selected 调用不 fallback 到其他 dialect，已交付 SSE event 不重发。外部 Python agent 和 NeoGraph instance 的 card 与 wire 行为一致时也可使用此契约。
 
 ## 路由器（意图分类）——JARVIS的大脑
 
@@ -149,11 +152,13 @@ JARVIS可以将整个任务委托给这些子智能体。每个子智能体作�
 
 在每一轮结束时，JARVIS将响应、Tony的话语以及使用的工具推送到Store。下一轮的路由器可以解析诸如“我之前提到的那个东西”之类的引用。`JsonFileStore`持久化到文件——跨重启保持记忆。空轮（STT失败/噪声）被排除在提交之外，以防止记忆污染。`prefs.native_lang`维护估算的母语（语言一致性）。
 
+此 JSON file 保存 speech/conversation projection，不是认证 native provider replay custody。
+
 ## 双向A2A——JARVIS呼叫与被呼叫
 
 - **调用**：通过`A2AClient`从`agent_registry.json`委托给专家。
 - **被呼叫**：JARVIS自身暴露一个`A2AServer`（端口8200）。
-  - 外部系统可以通过`POST /v1/messages`向JARVIS发送文本消息。
+  - 外部系统向 `POST /` 发送 JSON-RPC：0.x 使用 `message/send`，1.0 使用 `A2A-Version: 1.0` 和 `SendMessage`；header 选择 response dialect。
   - 移动应用、其他 NeoGraph 实例，甚至另一个 JARVIS 都可以调用它。
   - 文本输入跳过麦克风/STT阶段，直接进入路由器。
 
@@ -161,14 +166,7 @@ JARVIS可以将整个任务委托给这些子智能体。每个子智能体作�
 
 ## 后台触发器（主动式）
 
-一个独立的异步图在后台运行：
-- 定时器（每5分钟检查日历一次）
-- 外部事件（家庭传感器、邮件接收）
-- 外部 A2A 调用
-
-当事件发生时，它会向JARVIS的主图注入一条消息 → JARVIS在托尼提问之前开口。（“先生，10分钟后有会议。”）
-
-完全使用NeoGraph的`27_async_concurrent_runs.cpp`模式。
+background timer/event trigger 是设计，不是已实现 component。host 可用 `27_async_concurrent_runs.cpp` pattern 将 calendar/sensor event 的 text 入 queue。A2A server 已单独实现，不验证 proactive trigger。
 
 ## 目录结构
 
@@ -203,8 +201,10 @@ jarvis/
 #    Lightweight: JARVIS_WHISPER=small bash assets/download.sh  (Raspberry Pi / CPU)
 bash examples/cookbook/jarvis/assets/download.sh
 
-# 2. Build — onnxruntime, whisper.cpp, miniaudio found on system (or mock if missing)
-cmake -B build-jarvis -DNEOGRAPH_BUILD_COOKBOOK_JARVIS=ON
+# 2. Build — install SchemaProvider and optional voice dependencies first
+export SCHEMAPROVIDER_PREFIX="/absolute/path/to/installed/schemaprovider"
+cmake -S . -B build-jarvis -DNEOGRAPH_BUILD_COOKBOOK_JARVIS=ON \
+  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX"
 cmake --build build-jarvis --target cookbook_jarvis -j
 
 # 3a. Run — text/wav input (Korean line-edit REPL recommended)
@@ -245,12 +245,12 @@ OPENROUTER_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + OpenRouter
 
 ## 实施状态
 
-**完全可用** — 已在真实硬件上验证实时语音单轮运行（OpenRouter DeepSeek）。麦克风→VAD→STT→路由器→4路→合成→TTS完整链路 +
+**历史语音执行证据** — 以前实际硬件上的 live 单 turn 运行
 
 已知限制 / 下一版本。
 - **不支持打断（Barge-in）** — TTS播放期间的语音通过背压被丢弃（将在v2中添加取消令牌）。
 - **未应用流式STT** — 在语音段结束后进行批量转录。Moonshine v2遍历编码器逐块流式处理是下一个候选方案。
-- **多说话人·长记忆压缩** — 单一说话人假设，24轮限制。
+- **多说话人·长记忆压缩** — 假设单一说话人。lookup 默认最近六 turn，commit 保留最新 24 turn，不总结旧历史。
 - **后台触发（主动触发）** — 已设计但未实现。
 
 ## 许可证 / 外部依赖

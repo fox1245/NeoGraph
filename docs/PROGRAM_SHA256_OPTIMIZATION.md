@@ -1,5 +1,7 @@
 # SHA-256 CPU acceleration — 2026-09-07
 
+**Languages:** [English](PROGRAM_SHA256_OPTIMIZATION.md) | [한국어](PROGRAM_SHA256_OPTIMIZATION.ko.md) | [日本語](PROGRAM_SHA256_OPTIMIZATION.ja.md) | [简体中文](PROGRAM_SHA256_OPTIMIZATION.zh-CN.md)
+
 Runtime-gated x86 SHA instructions reduced the measured 64 KiB identity-hash cost by about **6.2×**. Compared with the preceding canonical JSON optimization (`779be451`), paired Program latency improved by approximately **28% with memory stores, 20% with SQLite, and 8% with PostgreSQL** for the large-input case. Small database cases did not establish a meaningful improvement.
 
 ## Implementation and compatibility

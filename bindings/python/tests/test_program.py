@@ -74,17 +74,6 @@ export function* main(input) {
     )
 
 
-def test_program_symbols_and_native_capability_manifest():
-    assert hasattr(ng, "ProgramCompiler")
-    assert hasattr(ng, "LocalProgramHost")
-    manifest = ng.javascript_authoring_capability_manifest()
-    assert manifest["javascript_profile"] == "sealed-v1"
-    command_names = {
-        method["name"] for method in manifest["main"]["command_methods"]
-    }
-    assert {"callCore", "spawn", "all", "checkpoint"} <= command_names
-
-
 def test_python_compiles_the_same_quickjs_program_bundle_as_cpp():
     registry = _registry()
     source = _source()
@@ -145,3 +134,29 @@ def test_local_program_host_active_start_pins_admitted_version():
     assert result.output["channels"]["value"]["value"] == 42
     assert host.rollback(version, 1) == ng.ProgramActivationResult.AlreadyPresent
     assert host.activation().id == activation.id
+
+
+def test_program_preserves_core_failure_in_terminal_result():
+    class FailingNode(ng.GraphNode):
+        def get_name(self):
+            return "work"
+
+        def run(self, _input):
+            raise ValueError("local Program node rejected execution")
+
+    ng.NodeFactory.register_type(
+        "python_program_node", lambda _n, _c, _ctx: FailingNode())
+    builder = ng.ProgramRegistryBuilder()
+    builder.add_registered_node("python_program_node", "1.0.0", _DIGEST_NODE)
+    builder.add_registered_reducer("overwrite", "1.0.0", _DIGEST_REDUCER)
+    host = ng.LocalProgramHost(
+        builder.build(), "python-owner-failure", _ceiling(), "python-program-host/v1")
+    version = host.compile_admit(_source(), _budget())
+    result = host.run(version, {}, _budget(), "python-program-failure")
+    assert result.status == ng.ProgramTerminalStatus.Failed
+    assert result.failure.core_node == "work"
+    parsed = ng.ProgramResult.parse(result.serialize_canonical())
+    assert parsed.status == ng.ProgramTerminalStatus.Failed
+    assert parsed.failure.code == result.failure.code
+    assert parsed.failure.core_node == result.failure.core_node
+    assert parsed.failure.provider_outcome is None

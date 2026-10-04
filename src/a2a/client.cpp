@@ -8,7 +8,9 @@
 #include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
@@ -45,6 +47,79 @@ json parse_response_body(const std::string& body) {
     return json::parse(json_str);
 }
 
+constexpr int kMethodNotFound = -32601;
+constexpr std::size_t kMaxStreamErrorBody = 1u << 20;
+
+bool iequals(std::string_view a, std::string_view b) {
+    return a.size() == b.size()
+        && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+               return std::tolower(static_cast<unsigned char>(x))
+                   == std::tolower(static_cast<unsigned char>(y));
+           });
+}
+
+/// "1.0" / "1.0.2" -> V1_0; "0.3" / "0.3.0" / "" (legacy card without a
+/// version) -> V0_3; anything else is not spoken by this client.
+std::optional<WireDialect> dialect_for_version(std::string_view v) {
+    if (v.empty()) return WireDialect::V0_3;
+    int major = 0;
+    std::size_t i = 0;
+    for (; i < v.size() && std::isdigit(static_cast<unsigned char>(v[i])); ++i) {
+        major = major * 10 + (v[i] - '0');
+        if (major > 1000) return std::nullopt;
+    }
+    if (i == 0) return std::nullopt;
+    if (major == 1) return WireDialect::V1_0;
+    if (major == 0) return WireDialect::V0_3;
+    return std::nullopt;
+}
+
+std::string strip_trailing_slashes(std::string url) {
+    while (!url.empty() && url.back() == '/') url.pop_back();
+    return url;
+}
+
+struct Chosen {
+    WireDialect dialect;
+    std::string tenant;
+};
+
+/// AgentCard -> wire dialect (A2A spec §8.3.2): first supported JSONRPC
+/// interface in card order, preferring one whose URL is the client's
+/// `base_url` when the card lists several.
+Chosen select_from_card(const AgentCard& card, const std::string& base_url) {
+    const AgentInterface* first = nullptr;
+    WireDialect first_dialect = WireDialect::V0_3;
+    const AgentInterface* same_url = nullptr;
+    WireDialect same_url_dialect = WireDialect::V0_3;
+    std::string offered;
+    for (const auto& iface : card.supported_interfaces) {
+        if (!offered.empty()) offered += ", ";
+        offered += (iface.protocol_binding.empty() ? "?" : iface.protocol_binding)
+                 + " " + (iface.protocol_version.empty() ? "?" : iface.protocol_version)
+                 + " @ " + iface.url;
+        if (!iequals(iface.protocol_binding, "JSONRPC")) continue;
+        auto dialect = dialect_for_version(iface.protocol_version);
+        if (!dialect) continue;
+        if (!first) { first = &iface; first_dialect = *dialect; }
+        if (!same_url && strip_trailing_slashes(iface.url) == base_url) {
+            same_url = &iface;
+            same_url_dialect = *dialect;
+        }
+    }
+    if (same_url) return {same_url_dialect, same_url->tenant};
+    if (first)    return {first_dialect, first->tenant};
+    if (card.supported_interfaces.empty()) return {WireDialect::V0_3, {}};
+    throw std::runtime_error(
+        "A2A agent at " + base_url + " declares no compatible interface: this "
+        "client speaks the JSONRPC binding at protocol version 1.x or 0.x, but "
+        "the AgentCard offers [" + offered + "]");
+}
+
+const char* dialect_version_header(WireDialect d) {
+    return d == WireDialect::V1_0 ? "1.0" : nullptr;
+}
+
 }  // namespace
 
 A2AClient::A2AClient(std::string base_url)
@@ -70,12 +145,35 @@ std::chrono::seconds A2AClient::request_timeout() const {
     return timeout_;
 }
 
+std::optional<WireDialect> A2AClient::wire_dialect() const {
+    std::lock_guard<std::mutex> lock(*state_mutex_);
+    if (selection_) return selection_->dialect;
+    return std::nullopt;
+}
+
+std::optional<A2AClient::Selection> A2AClient::resolve_selection() {
+    std::lock_guard<std::mutex> lock(*state_mutex_);
+    if (selection_) return selection_;
+    if (!card_loaded_) return std::nullopt;
+    // Selection and card refresh share the lock; an old card cannot install
+    // its selection after a newer fetch invalidates it. No network I/O here.
+    auto chosen = select_from_card(cached_card_, base_url_);
+    selection_ = Selection{chosen.dialect, std::move(chosen.tenant)};
+    return selection_;
+}
+
+void A2AClient::remember_probe(WireDialect dialect) {
+    std::lock_guard<std::mutex> lock(*state_mutex_);
+    if (!card_loaded_ && !selection_) selection_ = Selection{dialect, {}};
+}
+
 // ---------------------------------------------------------------------------
 // JSON-RPC dispatch
 // ---------------------------------------------------------------------------
 
 asio::awaitable<json>
-A2AClient::rpc_call_async(const std::string& method, const json& params) {
+A2AClient::rpc_call_async(const std::string& method, const json& params,
+                          std::optional<WireDialect> dialect) {
     json body = {
         {"jsonrpc", "2.0"},
         {"id",      request_id_.fetch_add(1, std::memory_order_relaxed) + 1},
@@ -89,6 +187,9 @@ A2AClient::rpc_call_async(const std::string& method, const json& params) {
         {"Content-Type", "application/json"},
         {"Accept",       "application/json, text/event-stream"},
     };
+    if (dialect) {
+        if (auto v = dialect_version_header(*dialect)) headers.emplace_back("A2A-Version", v);
+    }
     if (auto authorization = request_authorization_header(); !authorization.empty()) {
         headers.emplace_back("Authorization", std::move(authorization));
     }
@@ -128,80 +229,102 @@ A2AClient::rpc_call_async(const std::string& method, const json& params) {
     if (resp.contains("error") && !resp["error"].is_null()) {
         const auto& err = resp["error"];
         std::string msg = "A2A RPC error";
+        int code = 0;
         if (err.is_object()) {
-            if (err.contains("code"))    msg += " (code=" + err["code"].dump() + ")";
+            if (err.contains("code")) {
+                msg += " (code=" + err["code"].dump() + ")";
+                if (err["code"].is_number_integer()) code = err["code"].get<int>();
+            }
             if (err.contains("message")) msg += ": " + err.value("message", "");
         } else {
             msg += ": " + err.dump();
         }
-        throw std::runtime_error(msg);
+        throw A2ARpcError(code, msg);
     }
 
     co_return resp.value("result", json::object());
 }
 
-json A2AClient::rpc_call(const std::string& method, const json& params) {
-    return async::run_sync(rpc_call_async(method, params));
+json A2AClient::rpc_call(const std::string& method, const json& params,
+                         std::optional<WireDialect> dialect) {
+    return async::run_sync(rpc_call_async(method, params, dialect));
 }
 
 namespace {
 
-asio::awaitable<std::pair<bool, json>>
-try_rpc(A2AClient& self, const std::string& method, const json& params) {
+struct TryResult {
+    bool        ok = false;
+    json        value;          ///< result when ok
+    int         code = 0;       ///< JSON-RPC error code, 0 when not an RPC error
+    std::string message;        ///< failure text when !ok
+};
+
+asio::awaitable<TryResult>
+try_rpc(A2AClient& self, const std::string& method, const json& params,
+        WireDialect dialect) {
     // co_await is forbidden inside catch blocks (g++14, clang
     // matches), so the try wraps a delegated awaitable and returns a
-    // (ok, value-or-error-message) pair. Caller dispatches outside.
+    // TryResult. Caller dispatches outside.
+    TryResult r;
     try {
-        json r = co_await self.rpc_call_async(method, params);
-        co_return std::make_pair(true, std::move(r));
+        r.value = co_await self.rpc_call_async(method, params, dialect);
+        r.ok = true;
+    } catch (const A2ARpcError& e) {
+        r.code    = e.code();
+        r.message = e.what();
     } catch (const std::exception& e) {
-        json err = std::string(e.what());
-        co_return std::make_pair(false, std::move(err));
+        r.message = e.what();
     }
+    co_return r;
 }
 
 }  // namespace
 
-asio::awaitable<json> A2AClient::rpc_call_with_fallback(
-    const std::string& v1_method,
-    const std::string& v03_method,
-    const json& params) {
+asio::awaitable<json> A2AClient::call_method(
+    const char* v1_method, const char* v03_method,
+    const std::function<json(WireDialect, const std::string& tenant)>& build) {
 
-    // Slash-form first — this is the JSON Schema spec form (a2a-js
-    // canonical) and is also accepted by a2a-sdk Python ≥1.0.0 when
-    // run with `enable_v0_3_compat=True`. PascalCase is the fallback
-    // for v1-only deployments. The two protocol generations differ
-    // not just in method name but in body shape (PascalCase form
-    // doesn't accept the `kind` discriminator); slash-form keeps a
-    // single body shape across both server generations.
-    auto [ok, value] = co_await try_rpc(*this, v03_method, params);
-    if (ok) co_return value;
+    auto method_for = [&](WireDialect d) {
+        return std::string(d == WireDialect::V1_0 ? v1_method : v03_method);
+    };
 
-    std::string err_msg = value.is_string() ? value.get<std::string>() : value.dump();
-    bool method_not_found =
-        err_msg.find("Method not found") != std::string::npos
-        || err_msg.find("-32601")          != std::string::npos;
-    if (!method_not_found) {
-        throw std::runtime_error(err_msg);
+    if (auto sel = resolve_selection()) {
+        co_return co_await rpc_call_async(
+            method_for(sel->dialect), build(sel->dialect, sel->tenant), sel->dialect);
     }
-    co_return co_await rpc_call_async(v1_method, params);
+
+    // No card-derived dialect yet: probe. 0.3 first (a 0.3 server answers,
+    // and an a2a-sdk server with `enable_v0_3_compat` does too); on
+    // "method not found" the agent speaks 1.0 only, so retry with the 1.0
+    // method *and* a 1.0-shaped body — the two generations differ in body
+    // shape, not just the method name.
+    auto first = co_await try_rpc(
+        *this, method_for(WireDialect::V0_3),
+        build(WireDialect::V0_3, std::string()), WireDialect::V0_3);
+    if (first.ok) {
+        remember_probe(WireDialect::V0_3);
+        co_return std::move(first.value);
+    }
+    if (first.code != kMethodNotFound) {
+        if (first.code != 0) throw A2ARpcError(first.code, first.message);
+        throw std::runtime_error(first.message);
+    }
+    auto result = co_await rpc_call_async(
+        method_for(WireDialect::V1_0),
+        build(WireDialect::V1_0, std::string()), WireDialect::V1_0);
+    remember_probe(WireDialect::V1_0);
+    co_return result;
 }
 
 namespace {
-// Two A2A protocol generations are deployed in the wild (both under the
-// a2aproject org):
-//   - v1   : PascalCase method names ("SendMessage", "GetTask", ...)
-//            used by a2a-sdk Python ≥1.0.0.
-//   - v0.3 : slash-form method names ("message/send", "tasks/get", ...)
-//            still used by a2a-js HEAD and pre-v1 deployments.
-// We default to PascalCase and fall back to slash-form on "method not
-// found", so a single client connects to either generation.
+// Method names per wire generation: 1.0 is PascalCase (a2a-sdk >= 1.0,
+// spec §9.1); 0.3 is slash-form (a2a-js, pre-1.0 deployments).
 struct MethodPair { const char* v1; const char* v03; };
 constexpr MethodPair k_send_message  = {"SendMessage",  "message/send"};
 constexpr MethodPair k_get_task      = {"GetTask",      "tasks/get"};
 constexpr MethodPair k_cancel_task   = {"CancelTask",   "tasks/cancel"};
+constexpr MethodPair k_send_stream   = {"SendStreamingMessage", "message/stream"};
 }  // namespace
-
 // ---------------------------------------------------------------------------
 // AgentCard discovery
 // ---------------------------------------------------------------------------
@@ -270,6 +393,7 @@ A2AClient::fetch_agent_card_async(bool force) {
         cached_card_ = card;
         card_loaded_ = true;
         card_loading_ = false;
+        selection_.reset();  // re-select from the fresh card on the next RPC
     }
     guard.release = {};
     co_return card;
@@ -294,50 +418,19 @@ std::string fresh_uuid_like() {
                   static_cast<unsigned long long>(n));
     return buf;
 }
-
-/// Server may return either a Task object or a Message (for sync
-/// completions that finish in a single round-trip). Coerce both into
-/// a Task so callers see one shape.
-Task coerce_to_task(const json& result) {
-    if (result.is_null()) {
-        Task t;
-        t.status.state = TaskState::Failed;
-        return t;
-    }
-    auto kind = result.value("kind", std::string());
-    if (kind == "task") {
-        Task t;
-        from_json(result, t);
-        return t;
-    }
-
-    if (kind == "message") {
-        Task t;
-        Message msg;
-        from_json(result, msg);
-        t.id          = msg.task_id.value_or("");
-        t.context_id  = msg.context_id.value_or("");
-        t.status.state   = TaskState::Completed;
-        t.status.message = msg;
-        t.history.push_back(std::move(msg));
-        return t;
-    }
-
-    // Unknown — best effort: dump into a metadata-only Task.
-    Task t;
-    t.status.state = TaskState::Unknown;
-    t.metadata     = result;
-    return t;
-}
 }  // namespace
 
 asio::awaitable<Task>
 A2AClient::send_message_async(const MessageSendParams& params) {
-    json p;
-    to_json(p, params);
-    auto result = co_await rpc_call_with_fallback(
-        k_send_message.v1, k_send_message.v03, p);
-    co_return coerce_to_task(result);
+    auto result = co_await call_method(
+        k_send_message.v1, k_send_message.v03,
+        [&params](WireDialect d, const std::string& tenant) {
+            json p;
+            to_json(p, params, d);
+            if (d == WireDialect::V1_0 && !tenant.empty()) p["tenant"] = tenant;
+            return p;
+        });
+    co_return task_from_result(result);
 }
 
 Task A2AClient::send_message_sync(const MessageSendParams& params) {
@@ -362,11 +455,15 @@ Task A2AClient::send_message_sync(const std::string& text,
 
 asio::awaitable<Task>
 A2AClient::get_task_async(const std::string& task_id, int history_length) {
-    json params = {{"id", task_id}};
-    if (history_length > 0) params["historyLength"] = history_length;
-    auto result = co_await rpc_call_with_fallback(
-        k_get_task.v1, k_get_task.v03, params);
-    co_return coerce_to_task(result);
+    auto result = co_await call_method(
+        k_get_task.v1, k_get_task.v03,
+        [&](WireDialect d, const std::string& tenant) {
+            json params = {{"id", task_id}};
+            if (history_length > 0) params["historyLength"] = history_length;
+            if (d == WireDialect::V1_0 && !tenant.empty()) params["tenant"] = tenant;
+            return params;
+        });
+    co_return task_from_result(result);
 }
 
 Task A2AClient::get_task(const std::string& task_id, int history_length) {
@@ -375,10 +472,14 @@ Task A2AClient::get_task(const std::string& task_id, int history_length) {
 
 asio::awaitable<Task>
 A2AClient::cancel_task_async(const std::string& task_id) {
-    json params = {{"id", task_id}};
-    auto result = co_await rpc_call_with_fallback(
-        k_cancel_task.v1, k_cancel_task.v03, params);
-    co_return coerce_to_task(result);
+    auto result = co_await call_method(
+        k_cancel_task.v1, k_cancel_task.v03,
+        [&](WireDialect d, const std::string& tenant) {
+            json params = {{"id", task_id}};
+            if (d == WireDialect::V1_0 && !tenant.empty()) params["tenant"] = tenant;
+            return params;
+        });
+    co_return task_from_result(result);
 }
 
 Task A2AClient::cancel_task(const std::string& task_id) {
@@ -390,55 +491,125 @@ Task A2AClient::cancel_task(const std::string& task_id) {
 // ---------------------------------------------------------------------------
 namespace {
 
-/// Carve `data: {...}` frames out of an SSE byte stream. Holds a tail
-/// buffer across calls so a frame split across two chunks survives.
+/// Carve `data:` events out of an SSE byte stream (WHATWG SSE framing).
+/// Holds a tail buffer across calls so an event split across two chunks
+/// survives. Line endings may be LF, CRLF or CR (sse-starlette, which backs
+/// a2a-sdk, emits CRLF); they are normalised to LF before framing. The
+/// `data:` lines of one event are joined with '\n'.
 struct SseFrameSplitter {
     std::string carry;
+    bool        prev_cr = false;
 
-    /// Append @p chunk and call @p on_frame for each complete `data:`
-    /// line found. Returns when the stream tail does not contain a
-    /// terminator yet.
     void feed(std::string_view chunk,
               const std::function<void(std::string_view)>& on_frame) {
-        carry.append(chunk);
+        for (char c : chunk) {
+            if (c == '\r') {
+                carry.push_back('\n');
+                prev_cr = true;
+            } else if (c == '\n' && prev_cr) {
+                prev_cr = false;  // second half of a CRLF pair
+            } else {
+                carry.push_back(c);
+                prev_cr = false;
+            }
+        }
         std::size_t pos = 0;
         for (;;) {
             auto end = carry.find("\n\n", pos);
             if (end == std::string::npos) break;
-            std::string_view frame(carry.data() + pos, end - pos);
-            // Each SSE event may have multiple lines: "event: ...\ndata: {...}".
-            // We only care about the data field.
-            std::size_t line_start = 0;
-            while (line_start < frame.size()) {
-                auto line_end = frame.find('\n', line_start);
-                std::string_view line = (line_end == std::string::npos)
-                                          ? frame.substr(line_start)
-                                          : frame.substr(line_start, line_end - line_start);
-                if (line.rfind("data:", 0) == 0) {
-                    auto payload = line.substr(5);
-                    while (!payload.empty() && payload.front() == ' ')
-                        payload.remove_prefix(1);
-                    on_frame(payload);
-                }
-                if (line_end == std::string::npos) break;
-                line_start = line_end + 1;
-            }
+            emit(std::string_view(carry.data() + pos, end - pos), on_frame);
             pos = end + 2;
         }
         carry.erase(0, pos);
     }
+
+    /// The stream ended: an unterminated last event is still an event.
+    void finish(const std::function<void(std::string_view)>& on_frame) {
+        if (!carry.empty()) emit(carry, on_frame);
+        carry.clear();
+    }
+
+  private:
+    static void emit(std::string_view event,
+                     const std::function<void(std::string_view)>& on_frame) {
+        std::string data;
+        bool has_data = false;
+        std::size_t line_start = 0;
+        while (line_start <= event.size()) {
+            auto line_end = event.find('\n', line_start);
+            std::string_view line = (line_end == std::string_view::npos)
+                                      ? event.substr(line_start)
+                                      : event.substr(line_start, line_end - line_start);
+            if (line.rfind("data:", 0) == 0) {
+                auto payload = line.substr(5);
+                if (!payload.empty() && payload.front() == ' ') payload.remove_prefix(1);
+                if (has_data) data.push_back('\n');
+                data.append(payload);
+                has_data = true;
+            }
+            if (line_end == std::string_view::npos) break;
+            line_start = line_end + 1;
+        }
+        if (has_data) on_frame(data);
+    }
 };
+
+/// Fold one stream event into the Task the caller receives at the end.
+/// 1.0 streams have no terminal Task frame: the initial Task plus status /
+/// artifact updates *are* the result. 0.3 servers end with a full Task,
+/// which simply replaces the accumulation.
+void accumulate(Task& acc, const StreamEvent& ev) {
+    switch (ev.type) {
+        case StreamEvent::Type::Task:
+            if (ev.task) acc = *ev.task;
+            break;
+        case StreamEvent::Type::StatusUpdate: {
+            const auto& u = *ev.status_update;
+            if (acc.id.empty())         acc.id = u.task_id;
+            if (acc.context_id.empty()) acc.context_id = u.context_id;
+            acc.status = u.status;
+            if (u.status.message) {
+                const auto& m = *u.status.message;
+                if (acc.history.empty() || m.message_id.empty()
+                    || acc.history.back().message_id != m.message_id) {
+                    acc.history.push_back(m);
+                }
+            }
+            break;
+        }
+        case StreamEvent::Type::ArtifactUpdate: {
+            const auto& u = *ev.artifact_update;
+            if (acc.id.empty())         acc.id = u.task_id;
+            if (acc.context_id.empty()) acc.context_id = u.context_id;
+            auto it = std::find_if(acc.artifacts.begin(), acc.artifacts.end(),
+                [&](const Artifact& a) { return a.artifact_id == u.artifact.artifact_id; });
+            if (it == acc.artifacts.end()) {
+                acc.artifacts.push_back(u.artifact);
+            } else if (u.append) {
+                it->parts.insert(it->parts.end(), u.artifact.parts.begin(),
+                                 u.artifact.parts.end());
+            } else {
+                *it = u.artifact;
+            }
+            break;
+        }
+    }
+}
 
 }  // namespace
 
-Task A2AClient::send_message_stream(const MessageSendParams& params,
-                                    EventCallback on_event) {
+Task A2AClient::stream_once(WireDialect dialect, const std::string& tenant,
+                            const MessageSendParams& params,
+                            const EventCallback& on_event, bool& saw_events) {
     json p;
-    to_json(p, params);
+    to_json(p, params, dialect);
+    if (dialect == WireDialect::V1_0 && !tenant.empty()) p["tenant"] = tenant;
+    const auto* method = dialect == WireDialect::V1_0 ? k_send_stream.v1
+                                                      : k_send_stream.v03;
     json body = {
         {"jsonrpc", "2.0"},
         {"id",      request_id_.fetch_add(1, std::memory_order_relaxed) + 1},
-        {"method",  "message/stream"},
+        {"method",  method},
         {"params",  p},
     };
     auto body_str = body.dump();
@@ -447,6 +618,7 @@ Task A2AClient::send_message_stream(const MessageSendParams& params,
         {"Content-Type", "application/json"},
         {"Accept",       "text/event-stream"},
     };
+    if (auto v = dialect_version_header(dialect)) headers.emplace_back("A2A-Version", v);
     if (auto authorization = request_authorization_header(); !authorization.empty()) {
         headers.emplace_back("Authorization", std::move(authorization));
     }
@@ -454,9 +626,12 @@ Task A2AClient::send_message_stream(const MessageSendParams& params,
     async::RequestOptions opts;
     opts.timeout = request_timeout();
 
-    Task last_task;
+    Task acc;
     SseFrameSplitter splitter;
     bool aborted = false;
+    std::optional<A2ARpcError> rpc_error;
+    std::string raw_body;   // non-SSE reply (JSON-RPC error / plain result)
+    int http_status = 0;
 
     auto frame_handler = [&](std::string_view payload) {
         if (aborted) return;
@@ -466,23 +641,43 @@ Task A2AClient::send_message_stream(const MessageSendParams& params,
         } catch (...) {
             return;
         }
+        if (frame_json.is_object() && frame_json.contains("error")
+            && !frame_json["error"].is_null()) {
+            const auto& err = frame_json["error"];
+            int code = 0;
+            std::string msg = "A2A RPC error";
+            if (err.is_object()) {
+                if (err.contains("code")) {
+                    msg += " (code=" + err["code"].dump() + ")";
+                    if (err["code"].is_number_integer()) code = err["code"].get<int>();
+                }
+                if (err.contains("message")) msg += ": " + err.value("message", "");
+            } else {
+                msg += ": " + err.dump();
+            }
+            rpc_error.emplace(code, msg);
+            aborted = true;
+            return;
+        }
         json result = frame_json.contains("result")
                         ? frame_json["result"]
                         : frame_json;
         StreamEvent ev = parse_stream_event(result);
-        if (ev.type == StreamEvent::Type::Task && ev.task) {
-            last_task = *ev.task;
-        }
+        saw_events = true;
+        accumulate(acc, ev);
         if (on_event && !on_event(ev)) aborted = true;
     };
 
     auto chunk_callback = [&](std::string_view chunk) {
+        if (!saw_events && !rpc_error && raw_body.size() < kMaxStreamErrorBody) {
+            raw_body.append(chunk.substr(0, kMaxStreamErrorBody - raw_body.size()));
+        }
         splitter.feed(chunk, frame_handler);
     };
 
     async::run_sync([&]() -> asio::awaitable<void> {
         auto ex = co_await asio::this_coro::executor;
-        co_await async::async_post_stream(
+        auto res = co_await async::async_post_stream(
             ex,
             endpoint.host,
             endpoint.port,
@@ -492,9 +687,43 @@ Task A2AClient::send_message_stream(const MessageSendParams& params,
             endpoint.tls,
             chunk_callback,
             opts);
+        http_status = res.status;
     }());
+    splitter.finish(frame_handler);
 
-    return last_task;
+    if (http_status < 200 || http_status >= 300) {
+        throw std::runtime_error(
+            "A2A error (HTTP " + std::to_string(http_status) + "): " + raw_body);
+    }
+    if (!saw_events && !rpc_error) {
+        // A server that answers a streaming request with a plain JSON-RPC
+        // body (typically an error such as -32601) never sends `data:`
+        // frames; surface that instead of returning an empty Task.
+        frame_handler(raw_body);
+    }
+    if (rpc_error) throw *rpc_error;
+    return acc;
+}
+
+Task A2AClient::send_message_stream(const MessageSendParams& params,
+                                    EventCallback on_event) {
+    bool saw_events = false;
+    if (auto sel = resolve_selection()) {
+        return stream_once(sel->dialect, sel->tenant, params, on_event, saw_events);
+    }
+    // Dialect unknown (no card fetched): same probe as unary calls.
+    try {
+        auto task = stream_once(WireDialect::V0_3, std::string(), params,
+                                on_event, saw_events);
+        remember_probe(WireDialect::V0_3);
+        return task;
+    } catch (const A2ARpcError& e) {
+        if (saw_events || e.code() != kMethodNotFound) throw;
+    }
+    auto task = stream_once(WireDialect::V1_0, std::string(), params,
+                            on_event, saw_events);
+    remember_probe(WireDialect::V1_0);
+    return task;
 }
 
 Task A2AClient::send_message_stream(const std::string& text,

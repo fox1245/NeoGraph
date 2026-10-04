@@ -1,9 +1,9 @@
-// Custom Python graph nodes — commit 2 of the pybind11 plan.
+// Custom Python graph nodes with native coroutine and callback ownership.
 //
 // Pattern: a thin C++ wrapper class (PyGraphNodeOwner) holds a
 // reference to the Python user's node instance and forwards every
 // virtual call across the GIL boundary. Python users subclass the
-// pure-Python `neograph.GraphNode` base (see neograph/__init__.py) —
+// pure-Python `neograph_engine.GraphNode` base —
 // no pybind11 trampoline holder, because the engine consumes nodes
 // as `unique_ptr<GraphNode>` and pybind11's trampoline holders don't
 // compose cleanly with that.
@@ -22,11 +22,11 @@
 //     happens to drop the unique_ptr, not necessarily the Python
 //     main thread.
 //   - The factory callable is wrapped in a shared_ptr with a
-//     GIL-acquiring deleter (same pattern as the run_stream callback
-//     in commit 1) so concurrent compile()s don't race the deleter.
+//     GIL-acquiring deleter so concurrent compiles do not race Python cleanup.
 
 #include "json_bridge.h"
 #include "opaque_types.h"
+#include "provider_bridge.h"
 
 #include <neograph/graph/engine.h>
 #include <neograph/graph/cancel.h>
@@ -357,18 +357,9 @@ public:
         return py_obj_.attr("get_name")().cast<std::string>();
     }
 
-    // ── v1.0 unified run() entry (single dispatch surface) ───────────
-    //
-    // The Python user's class MUST define `run(self, input)` returning
-    // a list of ChannelWrite (or NodeResult / NodeOutput with optional
-    // Command / Send fields). The removed pre-v1 multi-entry dispatch
-    // surface is not consulted. Python code still defining only an obsolete
-    // node method will hit the base class's actionable NotImplementedError
-    // here — see docs/migration-v0.4-to-v1.0.md for the rewrite.
-    //
-    // Cancel propagation is now first-class: the user's run() body
-    // receives `input.ctx.cancel_token` directly and pins it onto its
-    // own provider calls. No thread_local smuggling.
+    // Python nodes implement run(input), returning writes or a NodeResult.
+    // They receive cancellation explicitly through input.ctx.cancel_token
+    // and attach that handle to any provider request they issue.
     asio::awaitable<NodeResult> run(NodeInput in) override {
         NodeResult result;
         // Captured under the GIL, thrown after releasing it — see
@@ -397,7 +388,6 @@ private:
 // Wrap an arbitrary Python callable in a shared_ptr with a
 // GIL-acquiring deleter, so std::function copies (registry storage,
 // engine internal hand-offs) don't touch the CPython refcount.
-// Same pattern as run_stream's callback wrapper in commit 1.
 template <typename PyCallable>
 std::shared_ptr<PyCallable> make_gil_safe(PyCallable&& fn) {
     return std::shared_ptr<PyCallable>(
@@ -474,6 +464,11 @@ void init_node(py::module_& m) {
         .def("get_messages", &GraphState::get_messages,
             "Convenience: parse the 'messages' channel as a list of "
             "ChatMessage objects.")
+        .def("get_provider_messages", &GraphState::get_provider_messages,
+            py::arg("channel") = "messages", "Full typed history with authentic native replay ownership.")
+        .def("captured_provider_messages", &GraphState::captured_provider_messages,
+            py::arg("channel") = "messages")
+        .def("provider_outcomes", &GraphState::provider_outcomes)
         .def("serialize",
             [](const GraphState& s) { return json_to_py(s.serialize()); },
             "Whole-state JSON snapshot (channels + global version). "
@@ -523,8 +518,7 @@ void init_node(py::module_& m) {
             })
         .def_readwrite("sends", &NodeResult::sends);
 
-    // ── CancelToken (v0.4 PR 7: exposed so Python users can read /
-    // cancel through ``input.ctx.cancel_token``) ────────────────────────
+    // ── Cooperative cancellation ────────────────────────────────────────
     //
     // Python callers can construct a token and attach it to
     // RunConfig.cancel_token to stop a synchronous run from another thread.
@@ -533,8 +527,8 @@ void init_node(py::module_& m) {
         "Cooperative cancel handle for an in-flight run. Callers may attach "
         "one to ``RunConfig.cancel_token``; nodes read "
         "``input.ctx.cancel_token`` and "
-        "either pass it to ``provider.complete(params)`` (so an LLM "
-        "HTTP socket aborts on cancel) or poll ``is_cancelled()`` for "
+        "pass it as ``request.cancel_token`` to a typed provider request "
+        "or poll ``is_cancelled()`` for "
         "their own loops.")
         .def(py::init<>())
         .def("is_cancelled", &CancelToken::is_cancelled,
@@ -542,15 +536,12 @@ void init_node(py::module_& m) {
         .def("cancel", &CancelToken::cancel,
             "Request cancellation. Thread-safe, idempotent.");
 
-    // ── RunContext (per-run dispatch metadata, v0.4 PR 7) ───────────────
+    // ── Per-run dispatch metadata ──────────────────────────────────────
     //
     // Exposed read-only — the engine constructs and owns the RunContext;
     // Python users read it from ``NodeInput.ctx`` inside their ``run()``
-    // override. Currently exposes six user-facing fields:
-    // cancel_token (so they can pass it explicitly to
-    // provider.complete instead of relying on the smuggling thread-local),
-    // step (super-step counter), thread_id (RunConfig.thread_id), and
-    // stream_mode, store, resume_value, and RunMetadata fields.
+    // Provider outcomes, history and usage retain their native owners. These
+    // are observations from the current engine invocation, not imported JSON.
     py::class_<RunContext>(m, "RunContext",
         "Per-run dispatch metadata threaded by the engine. New nodes "
         "read this from ``input.ctx`` inside their ``run(input)`` "
@@ -560,9 +551,8 @@ void init_node(py::module_& m) {
                 if (c.cancel_token) return py::cast(c.cancel_token);
                 return py::none();
             },
-            "The active CancelToken for this run, or None when the "
-            "caller didn't opt in. Pass to provider.complete via "
-            "``CompletionParams(cancel_token=input.ctx.cancel_token)``.")
+            "The active CancelToken for this run. Assign it to "
+            "``request.cancel_token`` before provider invocation.")
         .def_readonly("step", &RunContext::step,
             "Current super-step index, updated by the engine at the "
             "top of each super-step iteration.")
@@ -573,6 +563,13 @@ void init_node(py::module_& m) {
         .def_readonly("trace_id", &RunContext::trace_id,
             "Trace correlator supplied through RunMetadata.")
         .def_readonly("model_token_budget", &RunContext::model_token_budget)
+        .def_readonly("usage", &RunContext::usage)
+        .def_readonly("provider_outcomes", &RunContext::provider_outcomes)
+        .def_readonly("provider_loop_history", &RunContext::provider_loop_history)
+        .def_readonly("native_history_archive", &RunContext::native_history_archive)
+        .def_property_readonly("on_provider_event", [](const RunContext& c) {
+            return provider_observer_function(c.on_provider_event);
+        })
         .def_property_readonly("budget_cancel_token",
             [](const RunContext& c) -> py::object {
                 return c.budget_cancel_token ? py::cast(c.budget_cancel_token) : py::none();
@@ -609,10 +606,9 @@ void init_node(py::module_& m) {
             "node can tell \"nobody has answered yet\" from \"the answer was "
             "no\" (issue #94).");
 
-    // ── NodeInput (per-call bundle, v0.4 PR 7) ──────────────────────────
+    // ── Per-call input bundle ──────────────────────────────────────────
     py::class_<NodeInput>(m, "NodeInput",
-        "Per-call input bundle for the v0.4 unified ``run()`` "
-        "override. New Python nodes override "
+        "Per-call input bundle for ``run(input)``. Nodes override "
         "``def run(self, input)`` and read ``input.state`` / "
         "``input.ctx`` / ``input.stream_cb``.")
         .def_property_readonly("state",
@@ -721,7 +717,7 @@ void init_node(py::module_& m) {
             "Register a Python callable as the factory for a node type. "
             "The callable is invoked as `factory(name, config_dict, "
             "ctx)` during GraphEngine.compile() and must return a "
-            "neograph.GraphNode subclass instance.")
+            "neograph_engine.GraphNode subclass instance.")
         .def_static("instance",
             // Returned for parity with the C++ singleton accessor;
             // there's nothing to do with it from Python beyond

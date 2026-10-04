@@ -1,7 +1,7 @@
 // Engine surface: GraphEngine.compile(), .run(), .run_stream() with
 // Python callback, .get_state(), .update_state(), .set_worker_count().
 //
-// Plus the async surface (commit 5):
+// The async surface:
 //   .run_async(cfg)               -> awaitable[RunResult]
 //   .run_stream_async(cfg, cb)    -> awaitable[RunResult]
 //   .resume_async(thread_id, ...) -> awaitable[RunResult]
@@ -41,6 +41,7 @@
 
 #include "json_bridge.h"
 #include "opaque_types.h"
+#include "provider_bridge.h"
 
 #include <neograph/graph/cancel.h>
 #include <neograph/graph/checkpoint.h>
@@ -82,6 +83,17 @@ namespace neograph::pybind {
 
 namespace {
 
+sp::runtime::SteadyTime metadata_deadline(py::handle timeout_ms) {
+    const auto timeout = PyLong_AsUnsignedLongLong(timeout_ms.ptr());
+    if (PyErr_Occurred()) throw py::error_already_set();
+    const auto now = std::chrono::steady_clock::now();
+    const auto maximum = std::chrono::duration_cast<std::chrono::milliseconds>(
+        sp::runtime::SteadyTime::max() - now).count();
+    if (timeout > static_cast<std::uint64_t>(maximum))
+        throw py::value_error("timeout_ms exceeds the remaining steady-clock range");
+    return now + std::chrono::milliseconds(static_cast<std::int64_t>(timeout));
+}
+
 class PyCheckpointStore : public neograph::graph::CheckpointStore {
 public:
     using CheckpointStore::CheckpointStore;
@@ -110,6 +122,10 @@ public:
 
     void delete_thread(const std::string& thread_id) override {
         PYBIND11_OVERRIDE_PURE(void, CheckpointStore, delete_thread, thread_id);
+    }
+
+    bool requires_managed_budget(const std::string& thread_id) override {
+        PYBIND11_OVERRIDE(bool, CheckpointStore, requires_managed_budget, thread_id);
     }
 
     void put_writes(const std::string& thread_id,
@@ -177,11 +193,8 @@ private:
     std::thread worker_;
 };
 
-// Hold a py::object in a shared_ptr with a GIL-acquiring deleter —
-// same pattern as commit 1's run_stream callback wrapper. Lets us
-// pass the asyncio Future/loop into asio's completion lambda where
-// they may be copied/destroyed on the asio worker thread without
-// the GIL (until the deleter is invoked, which acquires it).
+// Retain asyncio objects in shared owners. Copies on the Asio worker do not
+// touch Python reference counts; the final deleter acquires the GIL.
 std::shared_ptr<py::object> hold_py(py::object obj) {
     return std::shared_ptr<py::object>(
         new py::object(std::move(obj)),
@@ -191,26 +204,11 @@ std::shared_ptr<py::object> hold_py(py::object obj) {
         });
 }
 
-// Convert a captured C++ exception exactly as pybind11's function dispatcher
-// would, then take ownership of the resulting Python exception object. This
-// preserves py::error_already_set values and applies built-in translators such
-// as py::type_error -> TypeError.
-//
+// Inspect captured Python values without consuming their restore state. Native
+// causes still use the registered translators; nested NodeExecutionError causes
+// therefore retain the same original Python exception on repeated inspection.
 py::object exception_ptr_to_python(std::exception_ptr eptr) {
-    try {
-        // Calling through cpp_function uses pybind11's public dispatcher,
-        // including registered C++ translators and error_already_set restore.
-        py::cpp_function([eptr] { std::rethrow_exception(eptr); })();
-    } catch (py::error_already_set& translated) {
-        py::object exception = translated.value();
-        if (translated.trace()
-            && PyException_SetTraceback(exception.ptr(),
-                                       translated.trace().ptr()) != 0) {
-            throw py::error_already_set();
-        }
-        return exception;
-    }
-    throw std::logic_error("exception_ptr did not throw");
+    return provider_cause(eptr);
 }
 
 // C++ callers receive NodeExecutionError as a typed envelope. Python callers
@@ -398,9 +396,7 @@ void init_graph(py::module_& m) {
                          std::shared_ptr<CancelToken> budget_cancel_token) {
             RunMetadata value;
             if (!timeout_ms.is_none()) {
-                const auto timeout = timeout_ms.cast<std::uint64_t>();
-                value.deadline = std::chrono::steady_clock::now() +
-                                 std::chrono::milliseconds(timeout);
+                value.deadline = metadata_deadline(timeout_ms);
             }
             value.trace_id = std::move(trace_id);
             value.run_id = std::move(run_id);
@@ -419,9 +415,9 @@ void init_graph(py::module_& m) {
         .def_readwrite("budget_cancel_token", &RunMetadata::budget_cancel_token)
         .def_property_readonly("has_deadline",
             [](const RunMetadata& value) { return value.deadline.has_value(); })
-        .def("set_timeout_ms", [](RunMetadata& value, std::uint64_t timeout) {
-            value.deadline = std::chrono::steady_clock::now() +
-                             std::chrono::milliseconds(timeout);
+        .def("set_timeout_ms", [](RunMetadata& value, py::object timeout) {
+            // Evaluate admission completely before replacing an existing deadline.
+            value.deadline = metadata_deadline(timeout);
         })
         .def("clear_deadline", [](RunMetadata& value) { value.deadline.reset(); });
 
@@ -431,17 +427,30 @@ void init_graph(py::module_& m) {
     // Hand one to RunConfig to total tokens across several runs — a multi-turn
     // chat is N runs on one thread_id, and the number people actually want is
     // what the conversation cost, not what the last turn cost.
-    py::class_<UsageAccumulator, std::shared_ptr<UsageAccumulator>>(
-        m, "UsageAccumulator",
-        "Running token total. Pass to RunConfig.usage to accumulate across runs; "
-        "read RunResult.usage for a single run's cost.")
+    py::class_<UsageAccumulator::AuthoritySnapshot>(m, "ProviderBudgetAuthority")
+        .def_readonly("charged", &UsageAccumulator::AuthoritySnapshot::charged)
+        .def_readonly("reserved", &UsageAccumulator::AuthoritySnapshot::reserved)
+        .def_readonly("provider_effects", &UsageAccumulator::AuthoritySnapshot::provider_effects)
+        .def_readonly("reports", &UsageAccumulator::AuthoritySnapshot::reports)
+        .def_readonly("has_report", &UsageAccumulator::AuthoritySnapshot::has_report);
+    py::class_<UsageAccumulator, std::shared_ptr<UsageAccumulator>>(m, "UsageAccumulator",
+        "Nullable provider reports, separate from conservative budget reservations.")
         .def(py::init<>())
-        .def("snapshot", &UsageAccumulator::snapshot,
-             "Current totals as a ChatCompletion.Usage.")
-        .def("__repr__", [](const UsageAccumulator& a) {
-            auto u = a.snapshot();
-            return "<UsageAccumulator total=" + std::to_string(u.total_tokens) + ">";
-        });
+        .def("snapshot", &UsageAccumulator::snapshot)
+        .def("add", &UsageAccumulator::add, py::arg("usage"))
+        .def("observe", &UsageAccumulator::observe, py::arg("usage"))
+        .def("authority_snapshot", &UsageAccumulator::authority_snapshot)
+        .def_property_readonly("total_tokens_wide", &UsageAccumulator::total_tokens_wide);
+    py::class_<ProviderOutcomes, std::shared_ptr<ProviderOutcomes>>(m, "ProviderOutcomes")
+        .def(py::init<>())
+        .def("snapshot", &ProviderOutcomes::snapshot);
+    py::class_<ProviderLoopHistory::Entry>(m, "ProviderLoopEntry")
+        .def_property_readonly("messages", [](const ProviderLoopHistory::Entry& entry) { return entry.messages; })
+        .def_readonly("turns", &ProviderLoopHistory::Entry::turns)
+        .def_readonly("client_calls_ready", &ProviderLoopHistory::Entry::client_calls_ready);
+    py::class_<ProviderLoopHistory, std::shared_ptr<ProviderLoopHistory>>(m, "ProviderLoopHistory")
+        .def(py::init<>())
+        .def("snapshot", &ProviderLoopHistory::snapshot);
 
     py::class_<RunConfig>(m, "RunConfig",
         "Per-run configuration: thread_id, input dict, max_steps, "
@@ -471,6 +480,16 @@ void init_graph(py::module_& m) {
             [](RunConfig& c, py::object v) { c.input = py_to_json(v); })
         .def_readwrite("max_steps",        &RunConfig::max_steps)
         .def_readwrite("stream_mode",      &RunConfig::stream_mode)
+        .def_property("provider_messages",
+            [](const RunConfig& c) { return c.provider_messages; },
+            [](RunConfig& c, std::optional<std::vector<sp::Message>> messages) { c.provider_messages = std::move(messages); },
+            "Detached full typed history snapshot; assign to replace the messages channel only.")
+        .def_readwrite("native_history_archive", &RunConfig::native_history_archive)
+        .def_readwrite("provider_outcomes", &RunConfig::provider_outcomes)
+        .def_readwrite("provider_loop_history", &RunConfig::provider_loop_history)
+        .def_property("on_provider_event",
+            [](const RunConfig& c) { return provider_observer_function(c.on_provider_event); },
+            [](RunConfig& c, py::object callback) { c.on_provider_event = provider_observer(std::move(callback)); })
         .def_readwrite("model_token_budget", &RunConfig::model_token_budget,
             "Hard model-token ceiling enforced by budget-aware nodes. Zero disables it.")
         .def_readwrite("resume_if_exists", &RunConfig::resume_if_exists,
@@ -548,6 +567,11 @@ void init_graph(py::module_& m) {
             "which the gate reads back on ToolGateContext.resume_value.");
 
     // ── RunResult ────────────────────────────────────────────────────────
+    py::enum_<RunStatus>(m, "RunStatus")
+        .value("Completed", RunStatus::Completed)
+        .value("Interrupted", RunStatus::Interrupted)
+        .value("StepLimit", RunStatus::StepLimit)
+        .value("SafePoint", RunStatus::SafePoint);
     py::class_<RunResult>(m, "RunResult",
         "Run completion record: serialized final state, interrupt info, "
         "checkpoint id, and execution trace.")
@@ -563,16 +587,19 @@ void init_graph(py::module_& m) {
             [](const RunResult& r) { return json_to_py(r.interrupt_value); })
         .def_readonly("checkpoint_id",   &RunResult::checkpoint_id)
         .def_readonly("execution_trace", &RunResult::execution_trace)
-        .def_readonly("usage",           &RunResult::usage,
-            "Token usage for the whole run, subgraphs included (issue #88). "
-            "Zero when the graph made no LLM calls.");
+        .def_property_readonly("native_messages", [](const RunResult& r) { return r.native_messages; })
+        .def_readonly("provider_outcomes", &RunResult::provider_outcomes)
+        .def_readonly("usage", &RunResult::usage,
+            "Actual nullable cumulative provider reports, not conservative reservations.")
+        .def_property_readonly("status", &RunResult::status)
+        .def_property_readonly("safe_point_reached", &RunResult::safe_point_reached);
 
     // ── CheckpointStore (abstract base) + InMemoryCheckpointStore ────────
     //
     // Required for engine.update_state() / engine.fork() to work — both
     // mutate the checkpoint store, and refuse to run when one isn't
-    // configured. The in-memory store is the simplest option; SQLite /
-    // Postgres backends are NeoGraph-side targets (binding deferred).
+    // configured. In-memory, SQLite and optional Postgres stores implement
+    // the same checkpoint boundary.
     py::enum_<CheckpointPhase>(m, "CheckpointPhase")
         .value("Before", CheckpointPhase::Before)
         .value("After", CheckpointPhase::After)
@@ -648,6 +675,9 @@ void init_graph(py::module_& m) {
              py::arg("thread_id"), py::arg("limit") = 100)
         .def("delete_thread", &CheckpointStore::delete_thread,
              py::arg("thread_id"))
+        .def("requires_managed_budget", &CheckpointStore::requires_managed_budget,
+             py::arg("thread_id"),
+             "Read persisted managed-bank denial obligations; absent support fails explicitly. This does not grant spending authority.")
         .def("put_writes", &CheckpointStore::put_writes,
              py::arg("thread_id"), py::arg("parent_checkpoint_id"),
              py::arg("write"))
@@ -1252,24 +1282,17 @@ void init_graph(py::module_& m) {
                 auto fut_h  = hold_py(future);
                 auto loop_h = hold_py(loop);
 
-                // v0.3: ensure a cancel_token is always present on the
-                // RunConfig the engine sees. If the user supplied one
-                // we honour it; else allocate a fresh parent for Future.cancel
-                // to trip. GraphEngine forks and binds an operation child.
+                // Always provide a parent cancel token for Future.cancel.
+                // GraphEngine forks and binds one child per operation.
                 if (!cfg.cancel_token) {
                     cfg.cancel_token = std::make_shared<CancelToken>();
                 }
                 auto cancel_tok = cfg.cancel_token;
                 auto cfg_h  = std::make_shared<RunConfig>(std::move(cfg));
 
-                // Wire asyncio.Future.cancel() → CancelToken.cancel().
-                // add_done_callback fires once when the future
-                // transitions to done, including the CANCELLED state.
-                // The token then sets its atomic flag (engine super-
-                // step polls its child) AND cascades to the operation child's
-                // asio cancellation_signal (propagates down through co_await to
-                // ConnPool::async_post socket op, killing the in-
-                // flight LLM HTTP request — the v0.2.3 cost-leak fix).
+                // Future cancellation trips the graph operation child and
+                // the SDK request's cooperative stop token. It is not a
+                // provider-side acknowledgement or evidence of zero usage.
                 py::cpp_function on_done(
                     [cancel_tok](py::object fut) {
                         try {

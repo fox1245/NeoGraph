@@ -1,5 +1,7 @@
 # Runtime child synthesis and replacement
 
+**Languages:** [English](runtime-handoffs.md) | [한국어](runtime-handoffs.ko.md) | [日本語](runtime-handoffs.ja.md) | [简体中文](runtime-handoffs.zh-CN.md)
+
 This reference is for a host that actually exposes these services. A skill does
 not turn ng.compile, ng.replace or an imagined MCP replacement tool into an API.
 The compatibility Harness MCP surface compiles/starts workflows; live replacement
@@ -54,22 +56,25 @@ promise or native handle. A published graph/version is immutable.
 ## Retained children and recovery
 
 A retained child's binding and original input identify the existing work. Under
-the current native runtime, spawning an inherited binding with its exact recorded
-input rejoins that child; changing the input is a conflict. A new task needs a new
+the current native runtime, spawning an inherited binding with its recorded input
+rejoins that child. Inputs are compared by canonical JSON content, not original
+textual key order; changing that content is a conflict. A new task needs a new
 host-admitted binding and a newly reserved, attenuated child budget. Replacements
 must not repeat completed external work or restore already-spent limits.
 
 Reload the active generation on a stale-head conflict. An uncertain provider or
 compiler outcome requires reconciliation through the supplied host path; do not
-redispatch it merely because there is no usable answer. Cancellation follows the
-logical family. Report the returned execution guarantee accurately.
+redispatch it merely because there is no usable answer. Follow the host's returned
+cancellation contract for the logical family rather than assuming child-to-parent
+or global cancellation. Report the returned execution guarantee accurately.
 
 ## Native host implementation entry points
 
 - RuntimeConfig::checkpoint_handler: enqueue the handle/lease, then return promptly.
   Retaining the lease pauses the generation; do host work outside the scheduler.
-- ProgramRuntime::prepare_child_synthesis: bind a proposal and an independent host
-  grant to the held parent checkpoint.
+- ProgramRuntime::prepare_child_synthesis: bind a proposal and a separate
+  host-issued authorization grant to the held parent checkpoint. That grant does
+  not replenish the parent's remaining compile or wall-time budget.
 - ProgramSynthesisGateway: compile, semantic validation and Catalog admission.
 - ProgramRuntime::reserve_synthesis: debit one unallocated compile by expected-head
   CAS; refresh the lease's journal head while retaining its checkpoint identity.
@@ -80,5 +85,6 @@ logical family. Report the returned execution guarantee accurately.
 
 These names are C++ host APIs, not JavaScript commands or automatic model tools.
 Use the actual repository headers/service schema for signatures and the full
-invocation. Generator control retains its Unmanaged guarantee; compiler acceptance
-does not prove behavioral quality.
+invocation. Generator control retains the API's Unmanaged execution guarantee;
+that label does not mean host controls are absent. Compiler acceptance does not
+prove behavioral quality.

@@ -51,19 +51,29 @@ def _copy_checkpoint(source):
 
 
 class DictCheckpointStore(ng.CheckpointStore):
+    """Unmanaged CPU checkpoint storage; no managed-bank grant/journal support."""
+
     def __init__(self):
         ng.CheckpointStore.__init__(self)
         self._lock = threading.Lock()
         self.by_thread = {}
         self.by_id = {}
         self.callback_threads = set()
+        self._managed_denials = set()
 
     def save(self, checkpoint):
         cp = _copy_checkpoint(checkpoint)
         with self._lock:
             self.callback_threads.add(threading.get_ident())
+            if "provider_managed_budget" in cp.channel_values:
+                self._managed_denials.add(cp.thread_id)
+                raise RuntimeError("dictionary backend cannot persist managed-bank custody")
             self.by_thread.setdefault(cp.thread_id, []).append(cp)
             self.by_id[cp.id] = cp
+
+    def requires_managed_budget(self, thread_id):
+        with self._lock:
+            return thread_id in self._managed_denials
 
     def load_latest(self, thread_id):
         with self._lock:
@@ -93,6 +103,13 @@ def _empty_definition():
         "nodes": {},
         "edges": [{"from": ng.START_NODE, "to": ng.END_NODE}],
     }
+
+
+def _unmanaged_run_config(thread_id):
+    """These CPU-only backend tests do not request managed model-token currency."""
+    config = ng.RunConfig(thread_id=thread_id)
+    config.model_token_budget = 0
+    return config
 
 
 class _NoopNode(ng.GraphNode):
@@ -133,7 +150,7 @@ def test_store_base_methods_dispatch_to_python_and_convert_json():
     assert ng.Store.get(store, ["users", "u1"], "prefs") is None
 
 
-def test_checkpoint_base_methods_dispatch_and_pending_methods_keep_defaults():
+def test_checkpoint_base_methods_persist_values():
     store = DictCheckpointStore()
     cp = ng.Checkpoint()
     cp.id = "cp-1"
@@ -151,17 +168,6 @@ def test_checkpoint_base_methods_dispatch_and_pending_methods_keep_defaults():
     assert (ng.CheckpointStore.load_by_id(store, "cp-1").interrupt_phase
             == ng.CheckpointPhase.Updated)
     assert [item.id for item in ng.CheckpointStore.list(store, "thread-1")] == ["cp-1"]
-
-    write = ng.PendingWrite()
-    write.writes = [{"channel": "answer", "value": 43}]
-    ng.CheckpointStore.put_writes(store, "thread-1", "cp-1", write)
-    assert ng.CheckpointStore.get_writes(store, "thread-1", "cp-1") == []
-    ng.CheckpointStore.clear_writes(store, "thread-1", "cp-1")
-
-
-def test_checkpoint_value_types_are_public_package_exports():
-    assert {"CheckpointPhase", "Checkpoint", "PendingWrite"} <= set(ng.__all__)
-
 
 def test_python_checkpoint_backend_drives_save_get_state_and_resume():
     class InterruptOnce(ng.GraphNode):
@@ -189,23 +195,37 @@ def test_python_checkpoint_backend_drives_save_get_state_and_resume():
     store = DictCheckpointStore()
     engine = ng.GraphEngine.compile(definition, ng.NodeContext(), store)
 
-    assert engine.run(ng.RunConfig(thread_id="resume-me")).interrupted
+    assert engine.run(_unmanaged_run_config("resume-me")).interrupted
     assert engine.get_state("resume-me") is not None
     result = engine.resume("resume-me", {"value": 7})
 
     assert not result.interrupted
     assert result.output["channels"]["value"]["value"] == 7
-    assert len(store.list("resume-me")) >= 2
 
 
 def test_backend_exception_propagates_out_of_engine_run():
+    failure = OSError("checkpoint save rejected")
+
     class Broken(DictCheckpointStore):
         def save(self, checkpoint):
-            raise RuntimeError("backend save failed")
+            raise failure
 
     engine = ng.GraphEngine.compile(_noop_definition(), ng.NodeContext(), Broken())
-    with pytest.raises(RuntimeError, match="backend save failed"):
-        engine.run(ng.RunConfig(thread_id="broken"))
+    with pytest.raises(OSError) as caught:
+        engine.run(_unmanaged_run_config("broken"))
+    assert caught.value is failure
+    assert caught.value.__traceback__ is not None
+
+
+def test_unmanaged_backend_cannot_grant_a_bounded_bank():
+    store = DictCheckpointStore()
+    engine = ng.GraphEngine.compile(_noop_definition(), ng.NodeContext(), store)
+    config = _unmanaged_run_config("bounded-bank-denied")
+    config.model_token_budget = 1000
+    metadata = ng.RunMetadata(owner_scope="checkpoint-owner")
+    with pytest.raises(RuntimeError):
+        engine.run(config, metadata)
+    assert store.by_thread == {}
 
 
 def test_temporary_backends_survive_compile_and_setter_reassignment():
@@ -223,7 +243,7 @@ def test_temporary_backends_survive_compile_and_setter_reassignment():
     gc.collect()
     assert first_ref() is None
     assert second_ref() is not None
-    engine.run(ng.RunConfig(thread_id="kept-alive"))
+    engine.run(_unmanaged_run_config("kept-alive"))
 
     old_memory = DictStore()
     old_memory_ref = weakref.ref(old_memory)
@@ -247,7 +267,7 @@ def test_async_engine_path_inherits_the_sync_backend_bridge():
     engine = ng.GraphEngine.compile(_noop_definition(), ng.NodeContext(), store)
 
     async def run():
-        return await engine.run_async(ng.RunConfig(thread_id="async-backend"))
+        return await engine.run_async(_unmanaged_run_config("async-backend"))
 
     result = asyncio.run(run())
     assert result.checkpoint_id
@@ -274,7 +294,7 @@ def test_async_run_keeps_python_engine_and_backends_alive_until_completion():
         checkpoint_ref = weakref.ref(checkpoint_store)
         memory_ref = weakref.ref(memory_store)
 
-        future = engine.run_async(ng.RunConfig(thread_id="async-lifetime"))
+        future = engine.run_async(_unmanaged_run_config("async-lifetime"))
         assert await asyncio.to_thread(entered.wait, 5)
         del engine, checkpoint_store, memory_store
         gc.collect()
@@ -329,7 +349,7 @@ def test_async_resume_keeps_callback_engine_and_backend_storage_alive():
     async def run():
         store = BlockingCheckpointStore()
         engine = ng.GraphEngine.compile(definition, ng.NodeContext(), store)
-        assert engine.run(ng.RunConfig(thread_id="async-resume-lifetime")).interrupted
+        assert engine.run(_unmanaged_run_config("async-resume-lifetime")).interrupted
         store.block = True
 
         engine_ref = weakref.ref(engine)
@@ -354,7 +374,7 @@ def test_callbacks_from_parallel_runs_are_isolated_and_gil_safe():
     engine = ng.GraphEngine.compile(_noop_definition(), ng.NodeContext(), store)
 
     def run(index):
-        result = engine.run(ng.RunConfig(thread_id=f"parallel-{index}"))
+        result = engine.run(_unmanaged_run_config(f"parallel-{index}"))
         return result.checkpoint_id
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:

@@ -1,5 +1,7 @@
 # Child Program synthesis: host authorization contract
 
+**Languages:** [English](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md) | [한국어](PROGRAM_CHILD_SYNTHESIS_CONTRACT.ko.md) | [日本語](PROGRAM_CHILD_SYNTHESIS_CONTRACT.ja.md) | [简体中文](PROGRAM_CHILD_SYNTHESIS_CONTRACT.zh-CN.md)
+
 Status: N1 host boundary and N2 durable runtime integration implemented. See [SQLite/PostgreSQL persistence and recovery](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md). Dedicated Program-side submission and model generation remain follow-up work.
 
 ## Entry and ownership
@@ -123,7 +125,7 @@ The standalone `synthesize_child` API ends at admission. The N2 runtime API adds
 atomic reservation, durable stage outcomes, a parent-run/generation-scoped
 binding, and dispatch through the existing child lifecycle on SQLite and
 PostgreSQL. See [the persistence contract](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)
-for configuration, recovery behavior, and the remaining N3 failure matrix.
+for configuration, recovery behavior, the N3 failure matrix, and its stated limits.
 The authorization value remains evidence, with no public stored-value
 constructor that could be mistaken for fresh authorization.
 

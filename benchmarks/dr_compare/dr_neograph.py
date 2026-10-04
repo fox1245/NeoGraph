@@ -16,22 +16,18 @@ import requests
 EX_DIR = Path(__file__).resolve().parents[2] / "bindings" / "python" / "examples"
 sys.path.insert(0, str(EX_DIR))
 
-from _common import ng, schema_provider  # noqa: E402
+from _common import ask_text, ng, schema_provider  # noqa: E402
 
 CRAWL4AI_URL = os.environ.get("CRAWL4AI_URL", "").rstrip("/")
 PG_DSN       = os.environ.get("NEOGRAPH_PG_DSN", "")
 DR_MODEL     = os.environ.get("DR_MODEL", "gpt-5.4-mini")
-# NG_TRANSPORT switches the provider transport for apples-to-apples
-# comparison vs LangGraph's HTTP chat_completions:
-#   ws-responses  (default): WebSocket Responses API — example 17 prod config.
-#   http-chat              : HTTP /v1/chat/completions — same endpoint LangGraph
-#                            hits via langchain_openai. Use for bench isolation.
-NG_TRANSPORT = os.environ.get("NG_TRANSPORT", "ws-responses")
+# Match LangGraph's HTTP Chat endpoint by default. HTTP Responses deliberately
+# compares a different wire API; it is not a transport-only isolation run.
+NG_TRANSPORT = os.environ.get("NG_TRANSPORT", "http-chat")
 
 # Bench-mode env knobs (engine-throughput isolation):
-#   LLM_MOCK_MS   — if >0, replace PROVIDER with a deterministic mock that
-#                   sleeps for the given milliseconds per .complete() call
-#                   (simulates LLM latency without hitting the network).
+#   LLM_MOCK_MS   — if >=0, use plain text orchestration computation with this
+#                   delay per node call. No provider requests/outcomes/network.
 #   MOCK_SEARCH   — "1" → skip Crawl4AI, return canned evidence string.
 #   FANOUT        — number of sub-questions to generate (default 5).
 #   NG_WORKER_COUNT — worker pool size for Send fan-out (default 4).
@@ -45,36 +41,30 @@ RESEARCH_TRIGGER_PATTERN = re.compile(
     r"(조사|리서치|연구|research|investigate|deep[- ]?dive)", re.IGNORECASE)
 
 
-class _MockNGProvider:
-    """Drop-in stand-in for SchemaProvider — same .complete() shape, no network."""
-    def __init__(self, delay_ms: int): self._delay = delay_ms / 1000.0
-    def complete(self, params):
-        if self._delay > 0:
-            import time as _t; _t.sleep(self._delay)
-        prompt = params.messages[-1].content if params.messages else ""
-        if "sub-question" in prompt:
-            text = "\n".join(f"sub-question {i+1}" for i in range(FANOUT))
-        elif "마크다운 종합 보고서" in prompt:
-            text = "# Mock Report\n\n## 개요\nmock\n\n## 결론\nmock"
-        else:
-            text = "Mock answer for: " + prompt[:80]
-        class _M:  __slots__ = ("content",)
-        m = _M(); m.content = text
-        class _C:  __slots__ = ("message",)
-        c = _C(); c.message = m
-        return c
+def _mock_text(messages):
+    """Canned orchestration workload, not a Provider or provider evidence."""
+    if LLM_MOCK_MS > 0:
+        import time
+        time.sleep(LLM_MOCK_MS / 1000.0)
+    prompt = messages[-1]["content"] if messages else ""
+    if "sub-question" in prompt:
+        return "\n".join(f"sub-question {i+1}" for i in range(FANOUT))
+    if "마크다운 종합 보고서" in prompt:
+        return "# Mock Report\n\n## 개요\nmock\n\n## 결론\nmock"
+    return "Mock answer for: " + prompt[:80]
 
 
-if LLM_MOCK_MS >= 0:
-    PROVIDER = _MockNGProvider(LLM_MOCK_MS)
-elif NG_TRANSPORT == "http-chat":
-    PROVIDER = schema_provider(
-        schema="openai", default_model=DR_MODEL, use_websocket=False)
-elif NG_TRANSPORT == "ws-responses":
-    PROVIDER = schema_provider(
-        schema="openai_responses", default_model=DR_MODEL, use_websocket=True)
-else:
-    raise ValueError(f"unknown NG_TRANSPORT: {NG_TRANSPORT}")
+if NG_TRANSPORT not in {"http-chat", "http-responses"}:
+    raise ValueError(f"unsupported NG_TRANSPORT: {NG_TRANSPORT}; "
+                     "choose http-chat or http-responses")
+PROVIDER = (None if LLM_MOCK_MS >= 0 else schema_provider(
+    schema="openai" if NG_TRANSPORT == "http-chat" else "openai_responses"))
+
+
+def _workload_text(messages, *, temperature=None):
+    if LLM_MOCK_MS >= 0:
+        return _mock_text(messages)
+    return ask_text(PROVIDER, messages, model=DR_MODEL, temperature=temperature)
 
 
 class Crawl4AIClient:
@@ -126,9 +116,9 @@ class GeneralChatNode(ng.GraphNode):
     def get_name(self): return self._n
     def run(self, input):
         state = input.state
-        c = PROVIDER.complete(ng.CompletionParams(messages=state.get_messages()))
+        text = _workload_text(state.get("messages") or [])
         return [ng.ChannelWrite("messages", [{
-            "role": "assistant", "content": c.message.content}])]
+            "role": "assistant", "content": text}])]
 
 
 class ResearchPlanNode(ng.GraphNode):
@@ -137,15 +127,15 @@ class ResearchPlanNode(ng.GraphNode):
     def run(self, input):
         state = input.state
         topic = state.get("research_topic") or ""
-        c = PROVIDER.complete(ng.CompletionParams(
-            messages=[ng.ChatMessage(role="user", content=(
+        text = _workload_text(
+            [{"role": "user", "content": (
                 "다음 주제를 심층 조사하기 위한 sub-question 3-5개로 분해. "
                 "각각 독립적으로 답변 가능한 형태. 한 줄에 하나, 번호/글머리표 없이.\n\n"
-                f"주제: {topic}"))],
-            temperature=0.0))
+                f"주제: {topic}")}],
+            temperature=0.0)
         qs = [
             line.strip().lstrip("-•0123456789. ")
-            for line in c.message.content.strip().splitlines()
+            for line in text.strip().splitlines()
             if line.strip()
         ][:FANOUT]
         return [ng.ChannelWrite("sub_questions", qs)]
@@ -181,12 +171,11 @@ class ResearcherNode(ng.GraphNode):
         else:
             prompt = (f"Question: {q}\n\nAnswer from your general knowledge. "
                       "Be detailed and factual. Note any uncertainty.")
-        c = PROVIDER.complete(ng.CompletionParams(
-            messages=[ng.ChatMessage(role="user", content=prompt)]))
+        text = _workload_text([{"role": "user", "content": prompt}])
         return [
             ng.ChannelWrite("research_findings", [{
                 "question": q,
-                "answer":   c.message.content.strip(),
+                "answer":   text.strip(),
                 "had_web_evidence": bool(SEARCH_CLIENT),
             }]),
             ng.Command(goto_node="synthesize"),
@@ -206,10 +195,9 @@ class SynthesizeNode(ng.GraphNode):
             f"아래는 '{topic}'에 대한 sub-question별 조사 결과입니다. 이를 통합해서 "
             "마크다운 종합 보고서를 작성하세요. 구조: 개요(2-3 문장) → 주요 발견 → 결론.\n\n"
             f"--- 조사 결과 ---\n\n{sections}")
-        c = PROVIDER.complete(ng.CompletionParams(
-            messages=[ng.ChatMessage(role="user", content=prompt)]))
+        text = _workload_text([{"role": "user", "content": prompt}])
         return [ng.ChannelWrite("messages", [{
-            "role": "assistant", "content": c.message.content}])]
+            "role": "assistant", "content": text}])]
 
 
 for tn, fac in [
@@ -275,6 +263,8 @@ def run_query(query: str, thread_id: str) -> str:
 if __name__ == "__main__":
     import time, uuid
     q = "사과에 대해서 조사해줘"
+    print(f"[neograph] workload={'mock orchestration' if LLM_MOCK_MS >= 0 else NG_TRANSPORT}"
+          f" · mock_delay_ms={LLM_MOCK_MS}")
     t0 = time.perf_counter()
     out = run_query(q, f"smoke-{uuid.uuid4().hex[:8]}")
     elapsed = time.perf_counter() - t0

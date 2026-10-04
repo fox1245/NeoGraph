@@ -6,9 +6,9 @@ node invocation, with payload metadata as span attributes. Drop-in
 for any OTel exporter — Jaeger, Tempo, Honeycomb, Datadog, or just
 the console.
 
-This example uses ConsoleSpanExporter so spans print to stdout in JSON
-right after each node finishes. Swap the exporter for OTLPSpanExporter
-to ship to a real backend.
+This example uses ConsoleSpanExporter and a BatchSpanProcessor. Completed
+spans print asynchronously, and force_flush() drains them before exit. Swap
+the exporter for OTLPSpanExporter to send spans to a backend.
 
 Run:
     pip install neograph-engine opentelemetry-api opentelemetry-sdk

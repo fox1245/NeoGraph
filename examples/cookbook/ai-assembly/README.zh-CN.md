@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=zh-CN source_sha256=e1c5c9d708af4408691ca586bfbccaab38566f6f8c1f22894dc3d61bff8b68c2 -->
+<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=zh-CN source_sha256=6eb929ef5081e8b3789f4156c37b960dd7a91be4c7880451bdb74f562630297f -->
 # AI国民议会
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-**当前限定范围的运行证据。** 类型化 provider 迁移后，四个真实本地 A2A
+**保留的 interface-3 限定范围运行证据。** 类型化 provider 迁移后，四个真实本地 A2A
 成员服务器和 C++ 议长完成了离线会话。合成弃权是 fixture 输出，不是
-模型判断或 vendor 推理。这不验证 live provider 调用或延期的 Python
+模型判断或 vendor 推理。这不验证 live provider 调用或Python
 议长 binding。
 
 一个作为**全新NeoGraph用户**构建的玩具演示——所有API选择都是通过阅读公开文档（README、GitHub上的示例、Doxygen）做出的，从未打开过NeoGraph的源代码。目的有两点：证明A2A能用于真实的多角色场景，并揭示全新C++开发者在过程中遇到的摩擦。
@@ -28,6 +28,11 @@
 ```
 
 每个成员都是一个单节点NeoGraph（`__start__ → persona → __end__`），由`a2a::A2AServer`提供服务。该图读取一个`prompt`通道并写入一个`response`通道；A2A服务器的默认`GraphAgentAdapter`通过JSON-RPC暴露这些数据。
+
+当前 client 从 AgentCard 选择兼容 JSON-RPC 0.x/1.0 interface；server 广告两个 dialect，
+通过 `A2A-Version` 选择 response encoding。初始 SSE task snapshot 是进度，不是完成回答。
+card-selected 请求不进行 dialect fallback，已交付 event 不重发。
+此前 offline session 不验证保留的1.0 wire 变更。
 
 ## 实时记录（通过OpenRouter的DeepSeek，2026年4月29日）
 
@@ -61,10 +66,10 @@ cmake -S . -B build-cookbook \
 cmake --build build-cookbook --target \
     cookbook_ai_assembly_member cookbook_ai_assembly_speaker -j4
 
-# 离线fixture：不加载.env，不进行provider通信
+# Offline fixture: no .env loading, credentials or provider transport.
 NEOGRAPH_BUILD_DIR="$PWD/build-cookbook" \
   bash examples/cookbook/ai-assembly/scripts/run_session.sh --mock
-# live：在环境或.env中私密配置密钥
+# Live: privately configure OPENROUTER_API_KEY in the environment or .env.
 NEOGRAPH_BUILD_DIR="$PWD/build-cookbook" \
   bash examples/cookbook/ai-assembly/scripts/run_session.sh
 ```
@@ -73,10 +78,10 @@ NEOGRAPH_BUILD_DIR="$PWD/build-cookbook" \
 
 ## Python演讲者变体（v0.2.1+，跨语言A2A）
 
-此切换的Python绑定**deferred（延期）**。`speaker.py`需要另行提供兼容`neograph_engine.a2a`；C++迁移完成不保证该前提。下方是历史用法。
+`speaker.py` 使用 `neograph_engine.a2a`，不使用 provider subclass API。请使用从本 checkout 构建的 binding；旧公开 wheel 不证明与当前源码兼容。保留的 C++ 运行未执行 Python speaker。
 
 ```bash
-pip install 'neograph-engine>=0.2.1'
+# Build/install this checkout's Python binding; see docs/python-binding.md.
 # (start the C++ members in another terminal as above)
 PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     examples/cookbook/ai-assembly/bills/basic_income.txt \
@@ -84,7 +89,7 @@ PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     http://127.0.0.1:8103 http://127.0.0.1:8104
 ```
 
-v0.2.1绑定是历史发布结果，不是当前验证。A2A wire client/protocol不变。
+v0.2.1 binding 是历史 release 结果，不是当前验证。当前 Python speaker 与 C++ caller 共用 application policy：实际 terminal/interrupted agent status text 优先，其次首个 artifact text，最后非空的最后 agent history text。以 `ng.a2a.Role.Agent` 识别 agent message，提交的 user bill 不能成为 member 回复。这是 application 答案选择规则，不是通用 A2A 优先级或新的 runtime 通过。
 
 ## 摩擦日记——新NeoGraph用户遇到的绊脚石
 
@@ -93,15 +98,15 @@ v0.2.1绑定是历史发布结果，不是当前验证。A2A wire client/protoco
 
 ### 1. A2A仅限C++——Python绑定并未暴露它（在v0.2.1中已修复）
 
-历史v0.2.1添加了Python A2A client。当前绑定延期，不承诺未来版本交付。
+历史 v0.2.1 添加了 Python A2A client。当前源码仍公开该 client；运行验证须通过当前 Python 运行单独确认。
 
 ### 2. 无系统安装 / 轮子中无头文件（已在 README v0.2.1 中修复）
 
 历史README说明了FetchContent。此recipe只有集成目标，没有standalone CMake项目。需要SchemaProvider。
 
-### 3. `OpenAIProvider::create()` `unique_ptr` 与 `shared_ptr` (FIXED in v0.2.1)
+### 3. Provider 所有权 (`unique_ptr`与`shared_ptr`，v0.2.1解决)
 
-历史`create_shared`解决了旧所有权问题。当前使用`examples::make_openrouter_provider`及typed outcome。
+之前的 release 解决了 provider 所有权问题。当前 recipe 使用 `examples::make_openrouter_provider` 和 typed outcome。
 
 ### 4. `.env`自动加载不会传播到A2A子进程（已在v0.2.1中记录）
 

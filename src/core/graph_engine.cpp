@@ -1562,9 +1562,9 @@ GraphEngine::execute_graph_async(
     ctx.provider_loop_history = config.provider_loop_history ? config.provider_loop_history : std::make_shared<ProviderLoopHistory>();
     owned_outcomes = ctx.provider_outcomes;
     state.set_provider_run_history(ctx.provider_loop_history, ctx.provider_outcomes);
-    // #88: the caller may hand us an accumulator (to total across several runs);
-    // otherwise this run gets a fresh one. Either way ctx.usage is non-null, so
-    // node bodies never have to check.
+    // Initialize an accumulator if the caller did not supply one. Checkpoint
+    // restoration may replace it with the original bank and its prior reports.
+    // Node code always receives a non-null ctx.usage.
     ctx.usage        = config.usage ? config.usage
                                      : std::make_shared<UsageAccumulator>();
     ctx.model_token_budget = config.model_token_budget;

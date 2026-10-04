@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=976c9b048dbd0cb5fcef306e22f4155d5e496ae10e5ed4b846c8d8ab575023b2 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=b888d8b7faa97d012074914cad0b4d30215492118cc87ed99aa13abb97a929b9 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -36,12 +36,14 @@
 
 **便利头文件：** `#include <neograph/neograph.h>` 包含完整的 core + graph engine API。
 
-即使 `NEOGRAPH_BUILD_LLM=OFF`，SchemaProvider 也已是必需的外部 C++ 依赖，因为 Core 公开拥有所有权的 typed provider 契约。请安装 SDK runtime package，将安装 prefix 设为 `SCHEMAPROVIDER_PREFIX`；下方 configure 使用 `-DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX"`。也可用 `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=../SchemaProvider` 明确指定 checkout。不会自动选择猜测的 sibling checkout 或旧 bundled interpreter。当前 SDK runtime/archive 支持 Linux/POSIX；不承诺无依赖、无需 OpenSSL、native Windows/macOS 或 WASM runtime。
+需要 CMake 3.20 或更高版本。Core 公开拥有所有权的 typed provider 契约，所以 `NEOGRAPH_BUILD_LLM=OFF` 时 SchemaProvider runtime 仍必需。显式 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` 优先；否则先查找已安装的 `SchemaProvider` runtime package。若没有且 `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON`（默认），就下载 `cmake/NeoGraphSchemaProvider.cmake` 固定的不可变 GitHub archive。Offline build 需安装 SDK、将 `CMAKE_PREFIX_PATH` 指向其 prefix，并传入 `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`。CMake 不猜测 sibling checkout，也不选择已删除的 bundled interpreter。禁用 NeoGraph 可选 HTTP module 时，SDK runtime 的 transport 依赖仍必需。已记录的 SDK runtime/archive 验证覆盖 Linux/POSIX。Windows NTFS 与 macOS 实现已存在，但新 platform 验证需要 runtime 证据；尚未确立 WASM provider runtime 验证。
 
 SDK imported target 提供 `include/SchemaProvider` include root；公开示例直接使用 `<descriptor/descriptor.h>`、`<runtime/client.h>`、`<neograph/llm/schema_provider.h>`，不依赖 recipe 专用 helper。
 
+已安装 SDK package 至少为 `0.1.0`，须匹配 interface revision 4 header 和 shared-library generation 4。版本匹配本身不批准旧 interface/ABI binary。
+
 ```cmake
-find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)
+find_package(SchemaProvider 0.1.0 CONFIG REQUIRED COMPONENTS runtime)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -115,7 +117,6 @@ target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::r
 - [12. LLM 模块](#12-llm-module)
   - [SchemaProvider](#schemaprovider)
   - [Agent](#agent)
-  - [json_path 工具](#json_path-utilities)
 - [13. MCP 模块](#13-mcp-module)
   - [MCPTool](#mcptool)
   - [MCPClient](#mcpclient)
@@ -170,7 +171,12 @@ struct ChatMessage {
     std::vector<ToolCall> tool_calls;    // Tool calls (assistant messages only)
     std::string tool_call_id;           // ID of the tool call this responds to (tool messages)
     std::string tool_name;              // Name of the tool (tool messages)
+    std::string tool_status;
+    bool tool_retryable = false;
+    bool tool_effect_uncertain = false;
     std::vector<std::string> image_urls; // base64 data URLs or HTTP URLs for Vision
+    std::string reasoning;
+    json reasoning_details = json::array(); // portable data, not native authority
 };
 ```
 
@@ -203,13 +209,27 @@ struct ChatTool {
 
 ### Owned Outcome
 
-提供方调用返回 `sp::runtime::Result`，即持有 `sp::Completion` 或 `sp::Failure` 的不可变、拥有所有权的 `std::shared_ptr<const sp::Outcome>`。请保留完整结果，而非仅显示文本。顺序消息/part、native continuation、完整 wire envelope、顺序 raw 观测、停止依据及真实尝试元数据在调用与客户端销毁后仍然保留。使用量是带依据、阶段、质量的 nullable `uint64_t`；缺失表示未知，绝不是零。失败保留原始部分结果。`ProviderFailure::outcome()` 与 `ProviderObserverError::outcome()` 保留真实结果，后者的 `cause()` 也保留观察者异常。
+提供方调用返回 `sp::runtime::Result`，即持有 `sp::Completion` 或 `sp::Failure` 的不可变、拥有所有权的 `std::shared_ptr<const sp::Outcome>`。请保留完整结果，而非仅显示文本。顺序消息/part、native continuation、存在的 wire envelope、顺序 raw 观测、停止依据及真实尝试元数据在调用与客户端销毁后仍然保留。`input_total`、`output_total` 和 `total` 等用量计数器为 `std::optional<sp::Count>`；存在的 count 有 `uint64_t value` 和 `Evidence`。`Usage` 还记录 stage、quality 和 conflict。缺失表示未知，不应伪造零值。失败保留原始部分结果。`ProviderFailure::outcome()` 与 `ProviderObserverError::outcome()` 保留真实结果，后者的 `cause()` 也保留观察者异常。
+
+`sp::Completion::wire_envelope` 和 `sp::PartialCompletion::wire_envelope` 可为空，且随提供商家族而异；不存在时 Python 视图返回 `None`。当前缓冲式 Chat 将此字段保持为空，并将完整响应文档保留在 `raw_events` 的 `sp::RawWire{type="chat.completion", payload=document}` 中（Python 为 `ProviderRawWire`）。请检查是否存在，并查看实际的类型化 raw 证据；不会通过回退合成封装，也不会把部分失败变为成功。拥有所有权的线协议证据，包括提供商的私有字段，在提供商销毁后仍保存在留存的结果中。原生追踪排除 raw 封装/事件和原生重放/推理；用于检查的 JSON 副本不授予原生权限或财务权限。
+
+调用方应使用完整的类型化消息/部分、逻辑角色和文本，并在继续执行需要时保留真实原生所有权。检查点与 Chat 请求的文本 content 可以采用文本字符串或有效的类型化文本部分数组；偶然采用的任一种序列化形状都不是通用契约。
+
+重放真实 `NativeContext` 时，须保留原始 `request.messages` 的完整前缀，再按顺序追加直接返回的 `outcome.messages`，并保留其原生所有权。直接结果包含新返回的消息，不包含原始请求历史。仅重放其中的 assistant 消息会在任何线协议 I/O 之前被 `ReplayIneligible` 拒绝。从 `NativeArchive` 恢复的 assistant 仍须提供原始完整前缀；存档保管权限不能替代历史谱系检查。图的 `RunResult.native_messages` 已包含完整历史，不要再次把原始输入加到开头。
+
+`UsageAccumulator::snapshot()` 返回累计报告。`total_tokens_wide()` 返回已计费 token 与未解决预留之和，不能把它显示为报告用量。结算要求具有 input/output count 的 final、consistent 报告，并计入有依据的最大 total，不截断超额用量。任何累计报告缺少 counter，汇总该 counter 也为未知。预留、本地计费和 vendor 发票是不同的记录。
 
 ### Portable projections
 
 
 实际结果存在后，若 post-effect 结算或 terminal receipt 持久化失败，`ProviderDispatchOutcomePersistenceError::outcome()` 保留原始不可变结果，`cause()` 保留原始持久化异常。若 delivery 也失败，`delivery_error()` 保留原始观察者异常。持久化成功后的观察者失败原样重新抛出原异常；未知/无结果 transport 失败不会伪造 outcome。
 `ChatMessage` / `ChatTool` 和 JSON 只是 portable projection，不是 native 权限。Portable 格式仍为 [`provider-message-v2`](../schemas/provider-message-v2.schema.json)、[`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)。真实 C++ checkpoint sidecar 保留内存 native seal。持久 native 历史需要 host-owned `sp::NativeArchive`：closed v3 / `spna3` 使用独立密钥提供经认证的 owner-private custody；archive v2 被拒绝，不升级或解释。认证绑定全部 semantic descriptor 选择（origin/path/header、policy、请求 field mapping、usage path、stop mapping）、owner 和精确 custody binding。这不是加密或 vendor-issuer 认证；不得公开 archive 正文、密钥、native blob 或 raw wire 观测。Archive 是证据存储，不是资金 grant 或 spending lease。Program/external bank 仍由独立 journal 拥有，复制 snapshot 不能创建 credit。
+
+`RuntimeHistoryRecord` 的无参数 `serialize_canonical()` 支持可移植记录。持久原生历史须使用 `serialize_canonical(archive, owner_id)`，并提供所有者范围与该 ID 一致的存档。Python 暴露同一重载以及 `RuntimeHistoryRecord.parse(stored_bytes, archive=None, owner_id="")`；面向可移植记录的默认参数不会在缺少匹配存档时授权原生恢复。Python 的解析和存档感知序列化会在原生工作期间释放 GIL。JSON 观测数据仍与存档认证的保管权限不同。
+
+Python 通过 `ContextStore.hydrate_records(range)` 与 `history_record_by_message_id(feed, message_id)` 保持类型化保管权限，后者返回记录或 `None`。`SQLiteContextStore(database_path, archive=None)` 接受真实存档，`LocalProgramHost` 将最后一个可选参数 `native_history_archive=None` 传入 `RuntimeConfig`。这些参数不会伪造授权或添加持久 Program 存储后端。返回的 `RuntimeHistoryRecord.message` 是保留真实共享原生所有权的独立类型化副本，修改它不能改写不可变 RAW 标识。存储构造与类型化检索会释放 GIL；当必须提供保管权限时，无存档存储会拒绝原生历史。
+
+包含 `Assistant` 消息的 RAW `RuntimeHistoryRecord` 必须使用 `RuntimeTrustClass.ModelOutput`；`RuntimeTrustClass.UntrustedInput` 仅接受 `User` 消息。这些是实际的 Python enum 名称。trust class 标明记录的角色与来源边界；选择它不会授予原生重放保管权限或支出、执行权限。
 
 **Standalone bank journal 修正——当前契约已修订；实际 runtime 证据如下。** Owner-approved protocol 要求单调 trusted-store namespace obligation，以及真实不可变 original owner/thread/graph scope、ceiling、deadline/clock identity、generation。只有对全部 checkpoint commitment/revision 的精确 durable head CAS 才可发放 host-owned opaque lease。精确 pending effect window 必须在 provider I/O 前持久化；结算必须采用真实 SDK outcome 及实际 charge、nullable report、hold、dedup identity。Checkpoint 与 next head 必须在同一 owned actor/revision 下原子 publish。删除 bank metadata、prune checkpoint、replay old authenticated snapshot、覆盖同一 ID 或失去 actor 都不能授予 credit。已有 65 hold 时将 ceiling 130 降至 129，不能再批准另一个 65；已证明 no-effect 的失败可 release unchanged head，使 authentic 130 恢复仍可进行。Crash/unknown/lost-lease window 保持 hold，不 refund/retry/fallback。Plain/pristine archive 配置不授予 money/native spending lease；当前 `config.usage` 不能替换既有 standalone obligation，Program/external-bank journal 所有权不变。这是要求契约。实际 currency/custody 证据与 instrumentation 限制见下文，不是稳定 released API 保证。
 
@@ -231,9 +251,13 @@ struct ChatTool {
 
 `ProgramFailure` 保留 live `provider_outcome`、`provider_cause`。Canonical factual SDK witness 将真实 archive custody 绑定到 owner/run/version/bundle/operation/attempt；Runtime 在暴露恢复后的失败前立即恢复配置的 custody。公开 data-only `ProgramResult::create()` 不能用预填 witness 绕过；未解析完的 parsed seal 不是可执行结果。进程重启后原始 exception pointer 不可用（`provider_cause == nullptr`），不会从 text 重建。无法持久化的失败不能 serialize/publish/replay。
 
+Python `LocalProgramHost` 析构时，会在 `ProgramRuntime` 取消、排空并 join 调度器工作期间释放调用者的 GIL，使正在执行的 Python 节点能够完成。销毁其他 host 成员及其持有的 Python 回调/对象之前，会重新获取 GIL。此变更仅涉及结束处理，不暴露额外的 capability binder 或执行权限。
+
 `RecordedBindingSet` 是 source-bound move-only data，不是调用方提供的 dispatcher。可信 Catalog `recorded_capability_binder` 独立读取真实持久 source event，materialize captured-only capability。`ProgramRuntime::replay_recorded()` 检查原始 selected-source permission，再通过 durable CAS 转移真实剩余 bank；inherited spend 不是新的 model grant。旧 `start_recorded` 续期 API 已删除。InMemory/File/SQLite/PostgreSQL Program store 在整个执行期间保留精确不可变 owned lease，不因 expiry 续期。Controlled JavaScript 仍验证 underlying capability manifest，消费精确 completed command 结果，不重新 dispatch external effect。
 
 **Recorded-control causal fix 已在 full suite 实证。** Captured command replay 在执行前仅为新的 CPU wall-time/Core work 建立 durable reservation，再通过 result CAS publish 测量 work 与新产生的 Core checkpoint。不消耗新的 model、money、Program-operation allowance，也不重新 dispatch captured external effect。未结算 reservation 保持 debit。Reservation 选择认证 settlement transition，而非曾拒绝首个新 Core checkpoint 的普通 Running→Running transition。Await channel receive、timer wait/cancel、handoff wait 的开始/release 在所属 executor/strand 上串行化；既有 Recorded CPU/Memory await/handoff scenario 在 full suite pass；remote TSan coverage 限制如下明确保留。
+
+以下观察记录于本次文档整理之前。它们是历史证据，不是新测试运行，也不保证所有 platform、transport 或 security 属性。
 
 **付费观测已完成；不是普遍 qualification。** 原始 `SPQUAL1` base630/1000000 microUSD 不变；同一原始 ledger 中 ONE hash-chained `A` 接纳批准的 extension480/3000000，aggregate1110/4000000。Calls/spent/hold/settlement 累积，不产生新 grant ID/header/reset。精确 declaration byte/file identity 和 original authorization/baseline/catalog/activation/ledger-prefix hash/totals 仍固定；删除、替换、变更均 fail closed。最终 canonical ledger 为 calls1110/spent437958/held1287828 microUSD、eventA1、limits1110/4000000；spent+held US$1.725786 是 LOCAL catalogue meter，不是 invoice。记录的 five-family60-pair baseline 完成600 request：Chat60/60、Responses60/60、Messages60/60、Generate56/60（incorrect-vision SSE4次）、Interactions57/60（incorrect-vision buffered1次/SSE2次）；合计293/300 pair，不是300/300。其他 old600 financial record 保留，但不是完整 behavioral proof。此前 M5/media one-shot cohort 不变。此前 Google3-round prerequisite 保留 invalid-tool2次/unreadable-positive1次失败状态。不批准更多付费调用。最终 SDK 证据与 native-axis 限制不同于 baseline 成功。 此前 activation/reopen smoke 保留为两次 reopen 后 calls610/spent219159/held751233、SDK meter/canary/vision4-test19.38秒 pass；这是限定的历史 checkpoint，不是最终 ledger totals。此前验证的 Chat60-pair cohort 保留实际 attempt120、UpperBound charge120、无 UnknownHold。
 
@@ -254,6 +278,7 @@ neograph::json observe_result(const sp::runtime::Result& result) {
 }
 ```
 
+<a id="adl-serialization"></a>
 ### ADL 序列化
 
 用于 nlohmann/json 集成的参数依赖查找（ADL）序列化函数。这些允许直接使用
@@ -267,7 +292,7 @@ void to_json(json& j, const ChatMessage& msg);
 void from_json(const json& j, ChatMessage& msg);
 ```
 
-所有字段使用带空字符串默认值的 `value()`，使反序列化对缺失字段具有容错性。
+ADL serialization 保留 portable message/tool field 及其声明默认值，不从 JSON 重建 native SDK continuation 权限。
 
 ---
 
@@ -281,10 +306,21 @@ void from_json(const json& j, ChatMessage& msg);
 #include <neograph/runtime_interposition_consumer.h>
 #include <neograph/controlled_provider.h>
 
-// Public operation signatures (the only virtual operation is prepare).
-// ProviderRequest owns the SDK request variant, mode, options and observer.
-// invoke[_async](request) = prepare once, then dispatch the same handle.
-// dispatch[_async](prepared) returns sp::runtime::Result.
+// Selected public declarations from neograph::Provider.
+class Provider {
+public:
+    virtual ~Provider() = default;
+    virtual std::string get_name() const = 0;
+    virtual std::string_view family() const noexcept = 0;
+    virtual PreparedProviderRequest prepare(ProviderRequest request) = 0;
+    sp::runtime::Result dispatch(PreparedProviderRequest request);
+    asio::awaitable<sp::runtime::Result> dispatch_async(PreparedProviderRequest request);
+    sp::runtime::Result invoke(ProviderRequest request);
+    asio::awaitable<sp::runtime::Result> invoke_async(ProviderRequest request);
+    static std::string request_digest(const PreparedProviderRequest& request);
+    static std::optional<std::uint64_t> conservative_token_upper_bound(
+        const PreparedProviderRequest& request);
+};
 ```
 
 ### ProviderRequest / ProviderControls
@@ -307,6 +343,69 @@ sp::runtime::Result call_provider(
     return provider.dispatch(std::move(prepared));  // owns Completion or Failure
 }
 ```
+
+#### Interface 4 typed controls
+
+`make_provider_request(provider, model, messages, tools, controls, mode)` 选择一个封闭 family。错误 family 控制引发 `std::invalid_argument`；SDK prepare 在 I/O 前检查 enum 值、获准 origin、模型规则、tool 声明和 native binding。`ProviderControls` 没有 dictionary 逃生通道。optional 区分未指定与显式 `false`、空选择。
+
+| Family | `ProviderControls` 字段及 SDK 映射 |
+|---|---|
+| `openai.chat` | `max_output_tokens`, `temperature`, `top_p`, `reasoning_effort`, `service_tier`, `provider`, `response_format`; `chat_reasoning` → `sp::chat::Request::reasoning`, `include_reasoning`, `usage_include` → `usage.include`, `models` |
+| `openai.responses` | `max_output_tokens`, `max_tool_calls`, `temperature`, `top_p`, `reasoning_effort`/`reasoning_summary` → `reasoning`, `service_tier`, `required_tool`, `provider`, `response_format`, `store`, `system` → `instructions`, `account_scope`; `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity` → `text.verbosity`, `truncation`, `responses_include` → `include` |
+| `anthropic.messages` | `max_output_tokens` → `max_tokens`, `temperature`, `top_p`, `thinking_budget`, `system`, `account_scope`, `provider`; `thinking_mode`, `output_effort` → `output_config.effort`, `cache_control`, `messages_tool_choice` → `tool_choice` |
+| `google.generate` | `max_output_tokens`, `temperature`, `thinking_budget`, `include_thoughts`, `required_tool`, `system`, `account_scope`; `gemini_history_mode` → `history_mode`, `gemini_thinking_level` → `thinking_level`, `safety_settings`, `gemini_tool_choice` → `tool_choice` |
+| `google.interactions` | `max_output_tokens`, `thinking_level`（optional string）, `thinking_summaries`, `service_tier`, `required_tool`, `system`, `account_scope`; Generate 的 enum `gemini_thinking_level` 不适用 |
+
+Chat 的 `sp::chat::ReasoningOptions` 包含 optional `effort`, `max_tokens`, `exclude`, `enabled`。其 nested reasoning object、`include_reasoning`、`usage_include`、备用 `models` 需要 policy 声明的 OpenRouter origin。`sp::OpenRouterRouting` 也仅适用于 Chat/Responses/Messages 的声明 OpenRouter origin。gateway 形式的模型名不会批准其他 origin。SDK payload 还提供 family typed tool 声明、Responses `hosted_tools`、strict/deferred tool 选项；使用实际 payload variant，不添加 raw JSON。
+
+| SDK 类型 | 封闭值或成员 |
+|---|---|
+| `sp::responses::Verbosity` | `Low`, `Medium`, `High` |
+| `sp::responses::Truncation` | `Disabled`, `Auto` |
+| `sp::responses::Include` | `ReasoningEncryptedContent`, `WebSearchSources`, `FileSearchResults`, `MessageOutputTextLogprobs`, `ComputerCallOutputImageUrl`, `CodeInterpreterCallOutputs` |
+| `sp::messages::ThinkingMode` | `Manual`, `Adaptive`, `Disabled` |
+| `sp::messages::OutputEffort` | `Low`, `Medium`, `High`, `Max` |
+| `sp::messages::CacheControl` / `CacheTtl` | optional `ttl`: `FiveMinutes`, `OneHour`; wire type `ephemeral`, optional TTL `5m`/`1h` |
+| `sp::messages::ToolChoice` / `ToolChoiceMode` | `mode`: `Auto`, `Any`, `None`, `Tool`; `name`; optional `disable_parallel_tool_use` |
+| `sp::gemini::HistoryMode` | `NativeOnly`, `PortableForeign` |
+| `sp::gemini::ThinkingLevel` | `Minimal`, `Low`, `Medium`, `High` |
+| `sp::gemini::SafetySetting` / `SafetyCategory` | `category`: `Harassment`, `HateSpeech`, `SexuallyExplicit`, `DangerousContent`, `CivicIntegrity`; `threshold`: `SafetyThreshold` |
+| `sp::gemini::SafetyThreshold` | `BlockNone`, `BlockOnlyHigh`, `BlockMediumAndAbove`, `BlockLowAndAbove`, `Off` |
+| `sp::gemini::ToolChoice` / `ToolChoiceMode` | `mode`: `Auto`, `Any`, `None`, `Validated`; `allowed_function_names`: 已声明函数名 vector |
+
+Messages 要求正 output cap。无 mode 的 thinking budget 选择 `Manual`，须达到获准 minimum 且严格小于 cap。`Adaptive`/`Disabled` 拒绝显式 budget。Manual/adaptive 省略其他方面有效的 temperature 并检查 thinking `top_p` minimum，但不覆盖模型 temperature 禁令。强制 `Any`/`Tool` 要求 tools 和 disabled thinking；`Tool` 指定已声明 client tool，其他 mode 拒绝 `name`，`None` 拒绝 `disable_parallel_tool_use`。Generate 的 thinking budget/level 与 `required_tool`/`gemini_tool_choice` 分别互斥；allowed-function 列表须引用已声明函数。sampling 遵守 family/policy 范围。Generate 没有 `top_p`，Interactions 不接受两个 sampling 字段。
+
+`FamilyPolicy.temperature_forbidden_model_prefixes` 按 ASCII 大小写不敏感方式匹配完整模型名及最后 `/` 后的 suffix。内置 Chat/Responses 前缀为 `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`；Messages 为 `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-sonnet-5`, `claude-fable-`。显式禁用 temperature 在 I/O 前拒绝，包括 gateway 前缀模型。
+
+#### Responses provider-held continuation
+
+`previous_response_id` 选择 provider 保存状态。请求 `messages` 为 NEW INPUT ONLY，不重发过去对话。`previous_response_history` 是不发送的本地所有权证据 `std::vector<sp::Message>`。cursor 单独可允许新 text/image 输入，但不能授权 client tool result。初次 captured response 须提供 authentic original prefix 加上 ID 等于 cursor 的 terminal assistant response。后续 authentic in-process cursor-produced terminal response 可在不重建全 prefix 的情况下持有 private completed tool ownership。content/origin/model/route/config 不匹配拒绝；任意 ID 或 projection JSON 不能提供 ownership。
+
+server cursor 和 private completed ownership 不授予 `NativeReplay` 或 native archive 权限。未指定 `responses_include` 保留 `reasoning.encrypted_content`；显式空 vector 发送 `[]`，其他显式选择也按指定处理。后续操作要求 native evidence 时，证据缺失会如实失败。
+
+#### Explicit portable Gemini history
+
+Generate 默认为 `NativeOnly`。显式 `PortableForeign` 仅允许不含 native seal、`wire_output`、signature/native metadata 的 caller-created assistant `Text`/`ToolCall`。只有第一个 foreign `functionCall` 带 Google `skip_thought_signature_validator`；text-only turn 不生成 signature。authentic native group 仍检查原 provenance/content/binding。损坏或不匹配 native group 不会降级为 portable，导入 foreign history 不获得 native replay 权限。
+
+#### Output caps and native continuation
+
+output generation cap 是每次调用获准的 resource，仅这个 cap 从 native replay config digest 排除。其他 binding 均保留，包括 content/prefix、origin/route、policy identity、tools、reasoning controls（文档规定的 per-turn tool selection/cursor 行为除外）。encoded/prepared request 仍保存 effective cap；request digest、journal slot、原 shared bank、绝对 deadline 仍有约束。增大 cap 的 semantic call 需要同一 grant 下的新 call ordinal 与 admission，不允许 seal repair、更新 deadline 或 replay 旧 effect。native archive 仍为 `spna3`/v3，portable JSON 仍为 v2。
+
+Python 公开 `ChatReasoningOptions`, `ResponsesVerbosity`, `ResponsesTruncation`, `ResponsesInclude`, `MessagesThinkingMode`, `MessagesOutputEffort`, `MessagesCacheControl`, `MessagesCacheTtl`, `MessagesToolChoice`, `MessagesToolChoiceMode`, `GeminiHistoryMode`, `GeminiThinkingLevel`, `GeminiSafetySetting`, `GeminiSafetyCategory`, `GeminiSafetyThreshold`, `GeminiToolChoice`, `GeminiToolChoiceMode`。enum 值相同，唯 C++ `None` 使用 Python `None_`。optional class control 与 message/safety/history vector 返回 detached snapshot，修改后重新赋值。`ProviderControls.previous_response_history` 是 authentic `ProviderMessage` 列表，不是临时单个 response。
+
+#### Deployment header preprocessing
+
+普通 `sp::descriptor::load(source[, policy])` 将包括 `${VAR}` 的值按 literal 处理。显式 `load_with_environment_headers(source, overrides = {}, policy = {})` 读取 Messages 的 optional `ANTHROPIC_WORKSPACE_ID`/`ANTHROPIC_BETA`，unset/empty 省略。deterministic `load_with_deployment_headers(source, overrides, DeploymentHeaderEnvironment, policy)` 使用传入的 optional `anthropic_workspace_id`/`anthropic_beta`。两者返回 `LoadResult`，在 descriptor admission 前预处理。大小写不敏感优先级为 environment < descriptor literal headers < explicit overrides。重复 override、invalid/reserved name、换行在 admission 拒绝；批准后不再评估环境或修改 header。
+
+Python 名为 `ProviderDeploymentHeaderEnvironment`, `load_provider_descriptor_with_environment_headers(source, overrides=[], policy=None)`, `load_provider_descriptor_with_deployment_headers(source, overrides, environment, policy=None)`。loader 返回 `ValidatedDescriptor`，admission 失败则抛异常。credential 保留在 runtime options。
+
+#### Additional admission and event rules
+
+Chat nested reasoning 必须非空，不能与 effective scalar `reasoning_effort` 并用。`effort`/`max_tokens` 互斥；budget 必须为正、在 signed 64-bit wire 范围内且不超过 effective output cap。`enabled=false` 禁止 effort/budget，`exclude=true` 与 `include_reasoning=true` 冲突。备用模型名须 nonempty、unique 且在获准 count limit 内；每个模型都检查 effective choices，包括 temperature 禁令。
+
+policy identity 仍参与 native binding：公开内置 policy revision 4 拒绝旧 policy-3 seal/archive，不自动修复。Generate `safety_settings` 要求有效 category 不重复；nonempty allowed-function 列表仅适用于 `Any`/`Validated`。模型须为匹配两个获准 Generate descriptor path 的 literal name。portable tool result 须匹配获准 call identity；foreign assistant call 须为 client-executed，且没有 `wire_type`/`wire_metadata`。
+
+semantic `Stop` 边界上 valid/invalid client-call intent 均把 `EndTurn` 改为 `ToolUse`，observer event 与 final outcome 一致。具体 `MaxTokens`, `ContentFilter`, `Unknown` 证据保留；已完成 server-executed hosted tool 本身不代表 client `ToolUse`。streaming OpenRouter reasoning fragment 按 index 合并、保持首次到达顺序；encrypted blob 仍为独立项。owned raw frame 与 native continuation 保留原内容及篡改检查。
 
 ### PreparedProviderRequest / ProviderBudgetClaim
 `prepare()` 恰好验证、编码一次，生成保持原始 deadline 与取消状态的仅可移动 `PreparedProviderRequest`。持久调用方将 `Provider::request_digest()` 绑定到 assembly，预留获准的 budget claim，写入 dispatch receipt，然后通过 `ControlledProvider::dispatch_prepared(_async)` 消费同一个 handle。gate 之后不重建请求。重复 receipt 绝不重新 dispatch。自定义实现提供 `get_name()`、`family()`、`prepare()` 并使用 `prepare_runtime()` 或 `prepare_local()`；local callback 捕获拥有所有权的 shared 状态，而非 `this`。
@@ -331,12 +430,21 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-这是源码和二进制破坏性变更；所有 C++ 使用者与自定义提供方都必须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter 和 Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为不稳定 `0.0.0`、interface revision 3 / shared ABI 3，使用 out-of-line capability check，不表示稳定发布。当前 runtime/archive 为 Linux/POSIX，不代表 Windows、macOS、WASM runtime 已获验证。Python provider binding/wrapper 已延期，不由本 C++ 变更完成移植。
+这是源码和二进制破坏性变更；所有 C++ 使用者和自定义提供方都须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为 alpha `0.1.0`、interface revision 4 / shared-library generation 4，采用 out-of-line capability check，不表示稳定发布。已记录 interface-3 SDK runtime/archive 验证是 Linux/POSIX 的历史证据，不是 interface-4 pass。Windows NTFS/macOS 实现已存在，但新 platform 验证需要 runtime 证据；WASM provider runtime 尚未验证。
 
-Fresh installed find_package Program C++/C ABI/dualQuickJS consumer 与 NeoGraph/SchemaProvider typed2-request lifetime/native/raw/mismatch consumer pass。Interface/ABI 声明本身不同于实际 package 结果；不声称更广 platform 或稳定 release。
+Python 公开与 C++ 相同的所有权 request/outcome 边界：`make_provider_request`、`Provider.prepare`、`dispatch` 和 `invoke`。Provider 历史使用带 typed part 的 `ProviderMessage`；`ChatMessage` 仍是图的便利 projection。SDK 失败可通过 `ProviderOutcome.failure` 读取，host observer/settlement 异常保留 `outcome` 和 `cause`。构造器及 GIL/回调行为参见 [Python binding 指南](python-binding.md)。
+
+Python SDK 的 vector/map getter 返回独立值：`ProviderMessage.parts`、`ProviderRequest.messages`、`RunConfig.provider_messages`、completion/partial 的 `messages` 和 `raw_events`、`RunResult.native_messages`、`ProviderLoopEntry.messages`、usage 的 `extra`/`conflicts`。修改快照后，将它重新赋给具有 setter 的属性；向 getter 结果 append 不会更新所属对象。可选的 `ProviderControls.provider`/`response_format`、`SchemaProviderDefaults.provider` 和 `ProviderToolResult.host` 也遵循读取、修改、重新赋值的规则。只读 outcome 证据保持不变。这些是 Python 绑定规则，不是所有 C++ getter 都返回副本的保证。
+
+原生代码调用 Python provider 的 `prepare` 重写时，返回 `None` 会在消费 handle 前引发 `TypeError`。`ProviderDescriptorPolicy.identity` 是包含 raw SHA-256 digest 的 `bytes`；`.hex()` 仅用于显示转换。反复检查已保存的 Python provider/graph cause 会保留原始异常值与 traceback，不消费已保存异常的 restore 状态；此规则也适用于嵌套原生异常转换。
+
+此前记录的 installed find_package Program C++/C ABI/dualQuickJS consumer 和 NeoGraph/SchemaProvider typed2-request lifetime/native/raw/mismatch consumer 在当时 snapshot 上 pass。这不证明 interface-4 package 验证；仅声明匹配不证明新 runtime 结果或更广 platform 支持。
+
+当前 SDK4 Linux x86_64 证据覆盖全部 27 个注册 case：首次 full run 中 25 个 pass；修正两个 obsolete assertion 后，`native_archive` 与 `stop_reasoning_preservation` 在 focused 2/2 run 中 pass。这不是第二次 full-suite 27/27 run。未改 buffered/SSE Stop probe 和已安装 SDK 的 exact README consumer 也 pass。后者每个 zero-usage、unknown-usage、HTTP-400-failure variant 执行一个无 credential 请求。这些 SDK 结果不证明新 NeoGraph native build/wheel pass 或 Windows/macOS/ARM64/HTTP3 验证。
 
 ---
 
+<a id="3-tool-interface"></a>
 ## 3. Tool 接口
 
 **头文件：** `<neograph/tool.h>`
@@ -442,6 +550,7 @@ struct Channel {
     std::string name;                              // Channel name
     ReducerType reducer_type = ReducerType::OVERWRITE; // Merge strategy
     ReducerFn   reducer;                           // Custom reducer (when type == CUSTOM)
+    ChannelLifecyclePolicy lifecycle;
     json        value;                             // Current value
     uint64_t    version = 0;                       // Write counter
 };
@@ -453,10 +562,15 @@ struct Channel {
 
 ```cpp
 struct ChannelWrite {
-    std::string channel;  // Target channel name
-    json        value;    // Value to write (merged via the channel's reducer)
+    enum class Mode { Reduce, Overwrite };
+    std::string channel;
+    json value;
+    Mode mode = Mode::Reduce;
+    std::shared_ptr<const std::vector<sp::Message>> native_messages;
 };
 ```
+
+`ChannelLifecyclePolicy` 区分 retention（`Unbounded`、`Latest`、`Bounded` 及 `retention_limit`）和 persistence（`Checkpoint`、`Ephemeral`）。`ChannelWrite::Mode::Overwrite` 绕过 reducer 后应用 retention。保留真实 SDK 历史应使用 `provider_messages_write(messages_or_outcome)`；JSON-only 写入不能创建 native replay 权限。Resume guard 与合并顺序参见 [channel 生命周期](concepts.md#channel-lifecycle-and-checkpoint-contract)。
 
 ### NodeInterrupt
 
@@ -639,8 +753,8 @@ struct ConditionalEdge {
 struct NodeContext {
     ProviderControls provider_controls;
     std::shared_ptr<Provider> provider;   // LLM provider
-    ToolSet                  tools;      // 持有的固定工具集合
-    std::string               model;      // Model override (empty = provider default)
+    ToolSet                  tools;      // Owned fixed collection of available tools
+    std::string               model;      // Explicit model name; no provider default
     std::string               instructions; // System prompt / instructions
     json                      extra_config; // Additional configuration (node-type-specific)
 };
@@ -650,6 +764,14 @@ struct NodeContext {
 通过 `EngineResources::tools` 提供。编译结果及引擎共同持有同一批工具；
 重新赋值上下文不会改变已有引擎。工厂可用 `ctx.tools.view()` 临时查找指针。
 Python 和 MCP 工具遵守相同的编译期所有权规则。
+
+Python 的 `NodeContext(provider=...)` 及其 `provider` setter 将原始 Python
+provider 对象保存在每个上下文的生命周期所有者 lease 中，并将 lease 连接到真实的
+原生共享指针。编译后的节点和引擎持有的原生上下文副本会保留同一个 Python
+override 所有者，即使上下文被重新赋值或 Python wrapper 被回收。
+重新赋值只释放可变上下文的 lease；已有编译快照仍保留各自的副本。
+Lease 的最终 deleter 会取得 GIL。单独的借用 C++ 引用或 raw pointer
+不会保留 Python override 所有者。
 
 ### GraphEvent
 
@@ -770,10 +892,15 @@ public:
     void init_channel(const std::string& name,
                       ReducerType type,
                       ReducerFn reducer,
-                      const json& initial_value = json());
+                      const json& initial_value = json(),
+                      ChannelLifecyclePolicy lifecycle = {});
 
     json get(const std::string& channel) const;
     std::vector<ChatMessage> get_messages() const;
+    std::vector<sp::Message> get_provider_messages(
+        const std::string& channel = "messages") const;
+    std::optional<std::vector<sp::Message>> captured_provider_messages(
+        const std::string& channel = "messages") const;
 
     void write(const std::string& channel, const json& value);
     void apply_writes(const std::vector<ChannelWrite>& writes);
@@ -783,6 +910,12 @@ public:
 
     json serialize() const;
     void restore(const json& data);
+    json serialize_runtime() const;
+    void restore_runtime(const json& data);
+    json ephemeral_checkpoint_guard() const;
+    void restore_checkpoint(const json& data, const json& guard,
+                            std::shared_ptr<const NativeGraphCheckpoint> native = {});
+    std::pair<json, std::shared_ptr<const NativeGraphCheckpoint>> checkpoint_snapshot() const;
 
     std::vector<std::string> channel_names() const;
 };
@@ -797,9 +930,11 @@ public:
 | `apply_writes(writes)` | 原子地应用批量 `ChannelWrite` 操作。所有写入在单个独占锁下应用 |
 | `channel_version(channel)` | 返回特定通道的写入计数 |
 | `global_version()` | 返回全局版本计数（每次向任何通道写入时递增） |
-| `serialize()` | 将所有通道值和版本序列化为 JSON（用于检查点） |
+| `serialize()` | 将 checkpoint-persistent 通道值与 version 序列化为 JSON |
 | `restore(data)` | 从序列化的 JSON 恢复通道值和版本 |
 | `channel_names()` | 返回所有已初始化通道的名称 |
+
+`serialize()` 只包含 checkpoint-persistent channel 的值和 version，省略 ephemeral 值。`restore_checkpoint` 要求匹配的 guard，已写入 ephemeral 状态丢失时会拒绝恢复。`serialize_runtime` / `restore_runtime` 保留同 process 副本的 live ephemeral 值，不用于持久存储。`checkpoint_snapshot()` 将 portable snapshot 与真实 C++ native sidecar 配对。`get_messages()` 是便利 projection；完整 SDK 历史使用 `get_provider_messages()`，不应把任意 JSON 解释为 chat 时使用 `captured_provider_messages()`。
 
 ---
 
@@ -839,7 +974,7 @@ using NodeOutput = NodeResult;  // writes + optional Command + optional Sends
 | 成员 | 描述 |
 |--------|-------------|
 | `in.state` | 只读 `GraphState`。使用 `in.state.get(channel)` 读取 |
-| `in.ctx.cancel_token` | 传递给 `provider.invoke(std::move(request))`，使 LLM HTTP 套接字在取消时中止，或轮询 `ctx.cancel_token->is_cancelled()` 用于自己的循环 |
+| `in.ctx.cancel_token` | 在 `provider.invoke(std::move(request))` 前赋值 `request.cancel_token = in.ctx.cancel_token`。Provider 取消在支持的边界协作处理。自己的循环应检查非 null 的 `ctx.cancel_token`，调用 `ctx.cancel_token->is_cancelled()` |
 | `in.ctx.step` | 当前超级步骤索引 |
 | `in.ctx.thread_id` | 镜像 `RunConfig::thread_id` |
 | `in.stream_cb` | 流式接收器；如果非空，通过它发出 `LLM_TOKEN` 事件。非流式运行时为 null |
@@ -981,7 +1116,8 @@ public:
     SubgraphNode(const std::string& name,
                  std::shared_ptr<GraphEngine> subgraph,
                  std::map<std::string, std::string> input_map = {},
-                 std::map<std::string, std::string> output_map = {});
+                 std::map<std::string, std::string> output_map = {},
+                 SubgraphPersistence persistence = SubgraphPersistence::Legacy);
     asio::awaitable<NodeOutput> run(NodeInput in) override;
     std::string get_name() const override;
 };
@@ -993,6 +1129,7 @@ public:
 | `subgraph` | `std::shared_ptr<GraphEngine>` | 编译后的子图引擎 |
 | `input_map` | `std::map<std::string, std::string>` | `parent_channel -> child_channel` 映射。从父读取，写入子输入 |
 | `output_map` | `std::map<std::string, std::string>` | `child_channel -> parent_channel` 映射。重命名子图生成的 write delta 并转发到父图 |
+| `persistence` | `SubgraphPersistence` | `Legacy`（兼容）、`PerInvocation`、`PerThread` 或 `Stateless`；JSON 拓扑节点使用小写的 `persistence` 字符串 |
 
 如果映射为空，通道按名称映射（恒等映射）。
 
@@ -1001,6 +1138,19 @@ public:
 `ChannelWrite` delta，并保留每个 write 的 `Mode`。因此，继承的 append/custom
 值不会被重复应用。输出映射不会推断 snapshot replacement；若要替换映射后的父值，
 子图必须显式发出 `ChannelWrite::Mode::Overwrite`。
+
+#### 子图持久化与检查
+
+| 模式 | 子图 checkpoint namespace | 开始/resume | Store 优先级 |
+|------|----------------------------|--------------|------------------|
+| `Legacy` (默认) | 长度分隔的 parent thread、node、parent step、task ID (`subgraph/...`) | 新 parent 启动新 child；parent resume 加载对应 snapshot | 若 parent run 有 checkpoint backend 则使用，否则使用 child 配置 |
+| `PerInvocation` | `subgraph/run/` + parent thread、node、持久 parent graph-invocation UUID、step、task ID | 每次新 parent run 使用新 namespace；resume 恢复 UUID 及 child write journal | Parent，然后 child |
+| `PerThread` | `subgraph/thread/` + parent thread、node | 新调用以旧 checkpoint seed child state 后应用新 input；parent resume 使用对应 snapshot；同 compiled node/namespace 的重叠调用报错 | Parent，然后 child |
+| `Stateless` | 无 | 禁用 child checkpoint；拒绝 interrupt/resume，但传播 Store、取消和 ToolGate | 无 checkpoint backend；parent Store，然后 child Store |
+
+显式 stateful 模式要求非空 parent thread ID。`Legacy` 保留 #238 之前的 namespace、checkpoint wire format 及 empty-thread 行为。`PerInvocation` 在 parent metadata 中记录 `_neograph.subgraph_invocation_id`；不含该值的旧 checkpoint 在切换策略后不能 resume。`PerThread` 共享 namespace。不同 engine/process 使用同一 backend 时，host 也必须协调 admission；node-local guard 仅保护一个 compiled node。不要在没有显式 migration 时改变现有 thread 的策略。
+
+使用 `GraphEngine::inspect_nested_checkpoint(root_thread, path[, run_store])` 检查子图和孙图 checkpoint。每个 `SubgraphPathStep` 指定 child node name、parent super-step、stable Core task ID（`s0:child` 或 Send task ID）及可选的 exact parent checkpoint ID。结果包含 `graph_path`、child `thread_id` 和完整 `Checkpoint`（含 channel 值及 checkpoint ID）。其他 thread 的 checkpoint ID 或 stateless path 会被拒绝。若 `RunResources` 覆盖了 backend，需传入同一 run-scoped store。`SubgraphNode::checkpoint_thread_id()` 重建 namespace 的一段。
 
 #### 运行时上下文传播
 
@@ -1040,6 +1190,12 @@ struct EngineConfig {
     ToolGate tool_gate;
     std::size_t worker_count = 1;
     std::set<std::string> cached_nodes;
+    std::size_t node_cache_max_entries = 0;
+    std::map<std::string, CacheKeyPolicy> node_cache_policies;
+    std::shared_ptr<ToolExecutionController> tool_execution_controller;
+    std::shared_ptr<::neograph::HookRuntime> hook_runtime;
+    std::shared_ptr<::neograph::RuntimeInterpositionController> runtime_interposition;
+    std::shared_ptr<sp::NativeArchive> native_history_archive;
 };
 
 struct EngineResources {
@@ -1065,6 +1221,13 @@ struct RunConfig {
     StreamMode                  stream_mode  = StreamMode::ALL;
     std::shared_ptr<CancelToken> cancel_token;          // v0.3+
     std::shared_ptr<UsageAccumulator> usage;             // optional accumulator
+    std::optional<std::vector<sp::Message>> provider_messages;
+    std::shared_ptr<sp::NativeArchive> native_history_archive;
+    std::function<void(const sp::Event&)> on_provider_event;
+    std::shared_ptr<ProviderOutcomes> provider_outcomes;
+    std::shared_ptr<ProviderLoopHistory> provider_loop_history;
+    std::uint64_t model_token_budget = 0;
+    std::shared_ptr<std::atomic_bool> budget_exhausted;
     bool                        resume_if_exists = false; // v0.3.1+
 };
 ```
@@ -1081,22 +1244,39 @@ struct RunConfig {
 
 ### RunContext（v0.4 PR 1，通过 `NodeInput.ctx` 暴露给节点）
 
-引擎传递的每次运行分发元数据。由 `RunConfig`（未提供时创建新的 usage
-累加器）、`RunMetadata`、有效 Store 和可选 resume value 构造。节点在
+引擎传递的每次运行分发元数据。最初由 `RunConfig`（未提供 usage 累加器时
+创建一个）、`RunMetadata`、有效 Store 和可选 resume value 构造。节点在
 `run(NodeInput) -> NodeOutput` 重写中通过 `in.ctx` 使用它。
+
+这里的创建仅描述初始构造。检查点恢复可以用真实的原始 bank 及其先前报告替换该累加器。因此，resume 或 continuation 不保证返回全新的用量报告，也不保证先前报告的用量变为 `None`。
+
+Python `RunMetadata(timeout_ms=None, ...)` 默认没有 deadline。构造器和 `set_timeout_ms(timeout)` 接受剩余 steady-clock 范围内的非负整数毫秒，在 signed 转换或加法前检查范围。负数或超出范围的值会引发 `OverflowError` 或 `ValueError`；setter 失败时保留原有绝对 deadline。0 立即过期；`clear_deadline()` 移除 deadline。
 
 ```cpp
 struct RunContext {
     std::shared_ptr<CancelToken>  cancel_token;
     std::shared_ptr<UsageAccumulator> usage;
+    std::shared_ptr<ProviderOutcomes> provider_outcomes;
+    std::shared_ptr<ProviderLoopHistory> provider_loop_history;
+    std::function<void(const sp::Event&)> on_provider_event;
+    std::shared_ptr<sp::NativeArchive> native_history_archive;
+    std::uint64_t model_token_budget = 0;
+    std::shared_ptr<std::atomic_bool> budget_exhausted;
+    std::string run_id;
+    std::shared_ptr<CancelToken> budget_cancel_token;
+    std::shared_ptr<OwnedManagedBudgetLease> managed_budget_lease;
+    std::shared_ptr<CheckpointStore> managed_budget_store;
     std::optional<std::chrono::steady_clock::time_point> deadline;
     std::string                   trace_id;
     std::string                   thread_id;
+    std::uint64_t                 cache_execution_id = 0;
     int                           step;
     StreamMode                    stream_mode;
     std::optional<json>           resume_value;
     std::shared_ptr<Store>        store;
     ToolGate                      tool_gate;
+    std::shared_ptr<ToolExecutionController> tool_execution_controller;
+    ToolExecutionIdentity tool_execution_identity;
 };
 ```
 
@@ -1204,7 +1384,7 @@ struct RunResult {
     std::vector<std::string> execution_trace;    // Ordered list of executed node names
 
     bool max_steps_exhausted() const noexcept;    // Limit stopped runnable work
-    RunStatus status() const noexcept;            // Completed, Interrupted, or StepLimit
+    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit, or SafePoint
 
     template <typename T> T channel(const std::string& name) const;
     template <typename T> T channel(const ChannelKey<T>& key) const;
@@ -1214,6 +1394,10 @@ struct RunResult {
 ```
 
 `RunResult::usage` 是 nullable provider 报告，不是支出 bank。`native_messages` 保留真实 typed 历史，`provider_outcomes` 保留每个拥有所有权的 Completion/Failure。JSON `output` 仅是 portable projection。完整历史输入用 `RunConfig::provider_messages`，typed event 观察用 `on_provider_event`。持久 native checkpoint/receipt custody 必须使用 `native_history_archive`，内存 sidecar 无需 archive。
+
+resume 或 continuation 时，`provider_outcomes` 保留原始结果，再依次追加新产生的结果，形成有序列表。`usage` 也可能保留恢复 bank 中的先前报告。调用方必须维持已完成 provider effect 不被重新 dispatch、不被重复计费的不变量；结果列表为空或重置、`usage=None` 均不是 resume 不变量。
+
+`provider_messages` 提供完整 typed 历史，仅替换 messages channel；`on_provider_event` 观察 typed SDK event。`provider_outcomes`、`provider_loop_history` 在 inner turn 间保留结果及 task-local continuation。`native_history_archive` 绑定持久 native custody，不授予模型预算。可选 `model_token_budget` 上限及 `budget_exhausted` 信号用于预算感知 dispatch。Python 与 C++ 都以 `RunResult.native_messages` 返回完整历史，以 `provider_outcomes` 返回拥有所有权的结果。输入仍为 `RunConfig.provider_messages`；没有 `RunResult.provider_messages` 或 `provider_history` alias。
 | 字段 | 类型 | 描述 |
 |-------|------|-------------|
 | `output` | `json` | 所有通道的序列化最终状态 |
@@ -1226,8 +1410,8 @@ struct RunResult {
 `max_steps_exhausted()` 仅在步骤上限停止运行且仍有可运行工作时返回
 `true`。一个恰好在最后一步允许时到达 `__end__` 的图返回 `false`。
 
-`status()` 返回 `RunStatus::Completed`、`RunStatus::Interrupted` 或
-`RunStatus::StepLimit`，而不更改公开 `RunResult` 的数据布局。
+`status()` 返回 `RunStatus::Completed`、`RunStatus::Interrupted`、
+`RunStatus::StepLimit` 或 `RunStatus::SafePoint`，而不更改公开 `RunResult` 的数据布局。
 `ChannelKey<T>` 将可复用的通道名称绑定到其预期的 C++ 类型：
 
 ```cpp
@@ -1317,7 +1501,6 @@ public:
 
     // ---- Compatibility configuration (prefer EngineConfig/EngineResources) ----
 
-    // 在编译前通过 NodeContext 或 EngineResources 绑定工具。
     void set_checkpoint_store(std::shared_ptr<CheckpointStore> store);
     void set_store(std::shared_ptr<Store> store);
     std::shared_ptr<Store> get_store() const;
@@ -1537,6 +1720,10 @@ std::string fork(const std::string& source_thread_id,
 | `checkpoint_id` | `std::string` | 可选：从特定检查点分叉（默认：最新） |
 
 **返回：** 新分叉状态的检查点 ID。
+
+Fork 复制状态及选定 checkpoint 的 pending continuation，不创建新 turn。resume 已完成 `__end__` continuation 不执行任何 node，因此只编辑问题不会产生回答。继续 pending 工作需选择具有真实 `next_nodes` 的 exact paused checkpoint ID，fork 后修改 portable state，再 resume。不要将所有历史 empty-`next_nodes` latest-resume snapshot 都等同于 terminal sentinel。example 08 保留 terminal fork 后的单独 new-turn 流程。
+
+authentic native state 保留原 shared-bank scope。Fork 不复制 spending grant；managed-bank custody/source commitment/原 ceiling/deadline 继续适用。durable standalone fork 不许可 import 或更新 native 权限。
 
 工具在编译前由 `NodeContext::tools` 或 `EngineResources::tools` 持有；
 不再存在编译之后的所有权转移。
@@ -1918,22 +2105,32 @@ constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
 
 ### CheckpointStore
 
-检查点持久化的抽象接口。实现此接口以在数据库、文件系统或任何其他后端
-中存储检查点。
+保留 ABI 兼容性的旧持久化接口。新的仅同步后端继承 `CheckpointStoreCore`
+（五个纯同步操作），并调用 `adapt_checkpoint_store()`；原生异步后端继承
+`AsyncCheckpointStore`（五个纯协程操作），并调用 `adapt_async_checkpoint_store()`。
+两个适配器都向现有 GraphEngine、协议宿主、gRPC 检查点用户及 Python 绑定入口
+公开 `CheckpointStore`。异步引擎操作调用规范的异步接口；仅同步后端的操作
+卸载到有界线程池，而原生异步操作在调用方的执行器上运行。旧同步默认实现
+在缺少能力时抛出异常，不会递归调用。持久化 pending write 是独立的可选
+`PendingWritesCheckpointStore` 能力；没有它时，恢复会重放整个超步。
+持久化 schema 不变。参见 [`ASYNC_GUIDE.md` §9.4](ASYNC_GUIDE.md#94-checkpointstore)。
 
-> **正在编写自定义存储？** 新实现应实现最小的适用能力：
-> `CheckpointStoreCore`，可选地 `AsyncCheckpointStore` 和/或
-> `PendingWritesCheckpointStore`，然后通过 `adapt_checkpoint_store()` 传递
-> 它。现有 `CheckpointStore` 接口仍然是兼容性约定。其异步默认实现调用同步
-> 方法；因此仅同步后端仍然有效，但其异步调用是阻塞的。参见
-> [`ASYNC_GUIDE.md` §9.4](ASYNC_GUIDE.md#94-checkpointstore)。
+Python 的 `CheckpointStore.requires_managed_budget(thread_id) -> bool` 是读取
+已持久化 managed-bank 拒绝义务的同步虚方法。引擎的原生
+`requires_managed_budget_async(thread_id)` facade 将同步调用卸载到 worker，
+绑定取得 GIL 后调用 Python override。没有 override 时，原生实现会明确
+报告 backend 不支持的错误，而不会返回 `False`。Reader 报告受信任的
+namespace/thread 是否曾持有活动的 standalone managed bank；保存移除 bank 后的
+状态或删除 checkpoint 都不得清除该义务。实现必须如实报告此义务。
+此 reader 不授予支出、恢复、bank 或 lease 权限；有限预算执行仍需要
+实际支持的原生 managed-budget lease。
 
 ```cpp
 class CheckpointStore {
 public:
     virtual ~CheckpointStore() = default;
 
-    // ── Sync core (5 virtuals, non-pure with bridge defaults) ──────
+    // ── Sync facade (5 virtuals; missing operation throws) ──────
     virtual void save(const Checkpoint& cp);
     virtual std::optional<Checkpoint> load_latest(const std::string& thread_id);
     virtual std::optional<Checkpoint> load_by_id(const std::string& id);
@@ -1941,7 +2138,7 @@ public:
                                            int limit = 100);
     virtual void delete_thread(const std::string& thread_id);
 
-    // ── Async peers (5 virtuals, default co_return the sync call) ──
+    // ── Async peers (5 virtuals; sync-only operations offload) ──
     virtual asio::awaitable<void> save_async(const Checkpoint& cp);
     virtual asio::awaitable<std::optional<Checkpoint>>
         load_latest_async(const std::string& thread_id);
@@ -2276,32 +2473,13 @@ std::cout << schema.dump(2) << "\n";
 
 ## 10.5. 可观测性 — OpenTelemetry + OpenInference
 
-> 下方 Python provider/wrapper 示例仅为历史资料，尚未移植到 typed C++ 契约，不是当前 provider 指南。C++ 变更不实现或验证 Python binding。C++ 观察者仅导出既有公开文本/scalar/nullable count，不导出 raw native 状态。
-**模块：** `neograph_engine.tracing`（OTel 形态）+
-`neograph_engine.openinference`（LLM 形态）
-**始于：** OTel 层在 v0.3.x；OpenInference 层在 **v0.6.0**。
-
-NeoGraph 通过流式 API 使用的相同回调发出其 `GraphEvent` 流。两个辅助类
-位于其上：
-
-  - **`otel_tracer(tracer)`** — 供应商中立的 OpenTelemetry span。每次运行
-    的根 span + 每节点的子 span + status / error / interrupt 映射。Span
-    流向任何 OTel 后端（Jaeger、Tempo、Honeycomb、Datadog、…）。在你已经
-    运行只需要 span 形态数据的 APM 时很有用。
-  - **`openinference_tracer(tracer)` + `OpenInferenceProvider`** —
-    位于其上的 LLM 形态属性层。相同的 OTel 机制，但每个 span 携带
-    `openinference.span.kind`（`"CHAIN"` / `"LLM"`）加上 LLM 特定键
-    （`llm.model_name`、`llm.input_messages.{i}.…`、
-    `llm.token_count.{prompt,completion,total}` 等），因此识别
-    OpenInference 约定的后端 — Phoenix、Arize、Langfuse — 将追踪渲染为
-    聊天气泡 + DAG 层次结构 + 每次调用 token 成本 UI（"LangSmith UX"）。
+Python 图 tracing 位于 `neograph_engine.tracing`、`neograph_engine.openinference`。`otel_tracer` 从 graph event 生成 run/node span；`openinference_tracer` 记录 `CHAIN` 标签及 node payload projection。`neograph_engine.openinference.OpenInferenceProvider` 用 native C++ dispatch observer 包装现有 typed provider，并向 Python OpenTelemetry tracer 发送每次调用的 `LLM` span。C++ 使用 `<neograph/observability/openinference.h>`。
 
 ### `otel_tracer` — OTel 形态 span
 
-```python
-from contextlib import contextmanager
-from typing import Any, Callable, Iterator, Optional
+以下 signature 是参考声明。默认值为 `root_name=graph.run`、`node_span_prefix=node.`、`attribute_prefix=neograph`；`on_event` 可将 graph event 转发给其他 consumer。
 
+```python
 @contextmanager
 def otel_tracer(
     tracer: Any,
@@ -2314,20 +2492,7 @@ def otel_tracer(
     ...
 ```
 
-| 配置项 | 默认值 | 用途 |
-|---|---|---|
-| `root_name` | `"graph.run"` | 每运行根 span 的 span 名称 |
-| `node_span_prefix` | `"node."` | 与每个节点名称连接的前缀 |
-| `attribute_prefix` | `"neograph"` | 引擎特定属性的前缀（`neograph.node`、`neograph.next_nodes` 等） |
-| `on_event` | `None` | 可选辅助回调，接收每个原始 `GraphEvent` — 用于与日志/指标链式连接 |
-
-处理的事件：`NODE_START` 打开子 span，`NODE_END` 关闭它（带有
-`Status.OK`），`ERROR` 记录异常并以 `Status.ERROR` 结束 span，
-`INTERRUPT` 标记 `{attribute_prefix}.interrupted = true` 并结束。
-
-并发扇出（多 Send）：每个节点名称维护一个开放 span 的栈；`NODE_END`
-弹出最近的。始终在退出时结束：上下文管理器的 `finally` 块强制关闭运行
-引发时仍打开的任何 span。
+`NODE_START` 打开 span；`NODE_END` 成功关闭；`ERROR` 记录错误；`INTERRUPT` 标记 pause。每个 node name 有重叠 event 的 stack；run 退出时 context manager 关闭剩余 span。Trace 不能证明 exactly-once node 执行或唯一关联每个并发 task。
 
 ```python
 from opentelemetry import trace
@@ -2338,11 +2503,9 @@ with otel_tracer(tracer) as cb:
     engine.run_stream(cfg, cb)
 ```
 
-### `openinference_tracer` — 添加 LLM 形态属性
+### `openinference_tracer` — LLM 形态属性
 
-相同形态，加上每个 span 标记 `openinference.span.kind = "CHAIN"` 且节点
-payload 编码为 `input.value` / `output.value` JSON blob。Phoenix /
-Arize / Langfuse 在其 UI 中将追踪视为 LLM 链。
+Graph span 带 `openinference.span.kind = "CHAIN"`；node input/output payload 成为 JSON `input.value` / `output.value` projection。仅 Python graph tracing 不创建每次 provider 调用的 `LLM` span，也不归因 vendor charge。Context attachment 限于原始 Python context；跨 thread/task 的 parent 传播需要 tracing integration 保留 context。
 
 ```python
 @contextmanager
@@ -2356,98 +2519,113 @@ def openinference_tracer(
     ...
 ```
 
-追踪器还将每个节点 span 附加为 OTel *current context*（通过
-`otel_context.attach`），因此节点体内的 `Provider.complete()` 调用将其
-`llm.complete` span 打开为该节点的子节点 — 追踪是单个连接的树，而不是
-3+ 个孤立的 trace-ID（v0.6.0 contextvar 传播修复）。
+### `OpenInferenceProvider` — Python 与 C++ typed dispatch 观察者
 
-### `OpenInferenceProvider` — 包装任何 `Provider`
+Python 使用 `OpenInferenceProvider(inner, tracer, *, span_name="llm.complete")` 构造。它继承 `Provider` 的 `prepare(request)`、一次性 `dispatch(prepared)` 和 `invoke(request)`，不添加 completion API。Native wrapper 只委托一次准备，并在 dispatch 时观察同一 owned handle。无效或弃用的准备不打开 span。正常 tracing 下，每次已准入 dispatch 打开一个 LLM span；原 outcome、mode、deadline、取消、event 及 provider identity 原样传递。Tracing 失败不替换 provider outcome 或异常。
 
-> **历史 Python-only 示例。** 下方 Python Provider/OpenInference wrapper 未在当前 C++ typed cutover 中 port/qualification，不是新 `ProviderRequest`/owned-outcome 契约的兼容 bridge。
+以下函数展示两种调用路径。`inner` 是已配置的 `SchemaProvider` 等现有 typed provider；`model` 必须明确。一次模型调用选择其中一个函数。
 
 ```python
-class OpenInferenceProvider(Provider):
-    def __init__(self, inner: Provider, tracer: Any,
-                 *, span_name: str = "llm.complete"):
-        ...
+from neograph_engine import ProviderMessage, ProviderRole, Text, make_provider_request
+from neograph_engine.openinference import OpenInferenceProvider
+
+
+def traced_dispatch(inner, model, tracer):
+    observed = OpenInferenceProvider(inner, tracer)
+    request = make_provider_request(observed, model, [
+        ProviderMessage(ProviderRole.User, [Text("Say hello.")])])
+    prepared = observed.prepare(request)
+    return observed.dispatch(prepared)
+
+
+def traced_invoke(inner, model, tracer):
+    observed = OpenInferenceProvider(inner, tracer)
+    request = make_provider_request(observed, model, [
+        ProviderMessage(ProviderRole.User, [Text("Say hello.")])])
+    return observed.invoke(request)
 ```
 
-在每次 `complete(params)` 调用时，它在当前 OTel 上下文下打开一个 LLM 种类
-的子 span（因此它嵌套在活跃的节点 span 下），捕获 OpenInference 属性，
-委托给 `inner.complete()`，然后关闭 span。追踪失败被吞下 — 可观测性永远
-不破坏 LLM 调用。内部 provider 异常在 span 被标记 ERROR 后重新抛出。
+Python `invoke`/`dispatch` 释放 GIL；tracer adapter 在 Python 调用与引用销毁时重新获取 GIL。Prepared operation 保留 adapter 和 tracer，即使 dispatch 前 wrapper 已被回收也仍有效。Parent 取自 dispatch 时而非 prepare 时的 active OpenTelemetry context；跨 thread/task 移动任务时需传播 context。构造 wrapper 前安装 `opentelemetry-api`。
 
-每个 LLM span 捕获的属性：
+C++ session overload 在 session teardown 时仍安全连接 parent；raw parent lookup 要求调用者保持 parent 存活。Host 所有的 tracer 必须比全部 operation 活得更久。
 
-| 属性 | 来源 |
+```cpp
+#include <neograph/observability/openinference.h>
+
+// tracer is a host-owned neograph::observability::Tracer adapter.
+// Its lifetime must cover the session and every provider operation.
+auto session = neograph::observability::openinference_tracer(tracer);
+auto observed = std::make_shared<neograph::observability::OpenInferenceProvider>(
+    inner_provider, tracer, session);
+// Use observed in NodeContext before compiling the graph.
+```
+
+Native LLM 属性只含公开 role/text projection、已声明 scalar 和已知 count。Native replay block、reasoning、raw wire envelope/event 及 `PreparedProviderRequest.encoded_body` 均不进入 trace payload；真实 custody 留在 request 和 outcome。已知零值会记录，未知值被省略。超过 signed span 范围的 count 编码为 decimal string。公开 text delta 生成 `llm.token` event，Python OTel 属性为 `{"chunk": text}`。Completion 设为 OK；failure 使用安全的 provider message 设为 ERROR。Dispatch 异常保留原 product error，同时在 span 中记录错误。公开 prompt、output 和异常消息仍可能含 application secret，应控制 exporter 接收的数据。
+
+| 属性 | Native 来源 |
 |---|---|
-| `openinference.span.kind` | 常量 `"LLM"` |
-| `llm.model_name` | `params.model` |
-| `llm.invocation_parameters` | `temperature`、`max_tokens`、`top_p`、`frequency_penalty`、`presence_penalty` 的 JSON blob（设置时） |
-| `llm.input_messages.{i}.message.role` | `params.messages[i].role` |
-| `llm.input_messages.{i}.message.content` | `params.messages[i].content` |
-| `input.value` / `input.mime_type` | `params.messages` JSON / `application/json`（Langfuse 兼容 blob） |
-| `llm.output_messages.0.message.role` | `result.message.role` |
-| `llm.output_messages.0.message.content` | `result.message.content` |
-| `output.value` / `output.mime_type` | `result.message.content` / `text/plain` |
-| `llm.token_count.prompt` | `result.usage.prompt_tokens` |
-| `llm.token_count.completion` | `result.usage.completion_tokens` |
-| `llm.token_count.total` | `result.usage.total_tokens` |
+| `openinference.span.kind` | `"LLM"` |
+| `llm.model_name` | 已准入 prepared model |
+| `llm.invocation_parameters` | 可用的已声明 temperature 与 output cap |
+| `llm.input_messages.{i}.message.role` | 公开 role projection |
+| `llm.input_messages.{i}.message.content` | 公开 text part |
+| `input.value` / `input.mime_type` | 公开 message JSON / `application/json` |
+| `llm.output_messages.{i}.message.role` | 每个返回 message 的 role |
+| `llm.output_messages.{i}.message.content` | 公开 text part |
+| `output.value` / `output.mime_type` | 拼接公开 text / `text/plain` |
+| `llm.token_count.prompt` | 存在的 `usage.input_total.value` |
+| `llm.token_count.completion` | 存在的 `usage.output_total.value` |
+| `llm.token_count.total` | 存在的 `usage.total.value` |
+
+Token 属性报告 provider usage，包括失败时可用的 partial usage。它们不能证明 vendor charge 或恢复 budget authority。Charged/reserved accounting 使用 `UsageAccumulator.authority_snapshot()` / Program 的 `provider_budget_authority`，与 nullable usage report 分开处理。
 
 ### 端到端：NeoGraph + Phoenix 在一个代码块中
 
+启动 Phoenix，再将 graph specification、现有 typed provider、明确的 model 和 `RunConfig` 传给 `trace_graph`。Helper 在 graph compile 前安装 wrapper，并让 graph/node `CHAIN` span 和 provider `LLM` span 使用同一 tracer。只有已执行的 provider 调用生成 LLM span；trace count 仍是 usage report，而非 charged accounting。
+
 ```bash
 docker run -d -p 6006:6006 -p 4317:4317 arizephoenix/phoenix:latest
-pip install neograph-engine opentelemetry-exporter-otlp
+pip install neograph-engine opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp
 ```
 
 ```python
-from opentelemetry import trace
+from opentelemetry import context as otel_context
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from neograph_engine import GraphEngine, NodeContext
 from neograph_engine.openinference import OpenInferenceProvider, openinference_tracer
-from neograph_engine.llm import OpenAIProvider
-import os
-import neograph_engine as ng
 
-provider = TracerProvider()
-provider.add_span_processor(
-    BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4317", insecure=True)))
-trace.set_tracer_provider(provider)
-tracer = trace.get_tracer("my-app")
 
-inner = OpenAIProvider(api_key=os.environ["OPENAI_API_KEY"])
-wrapped = OpenInferenceProvider(inner, tracer)
-ctx = ng.NodeContext(provider=wrapped)
-engine = ng.GraphEngine.compile(graph_def, ctx)
+class ParentContextTracer:
+    def __init__(self, tracer, parent_context):
+        self.tracer, self.parent_context = tracer, parent_context
 
-with openinference_tracer(tracer) as cb:
-    engine.run_stream(ng.RunConfig(input={"messages": [...]}), cb)
+    def start_span(self, name):
+        return self.tracer.start_span(name, context=self.parent_context)
 
-# Open http://localhost:6006 — the trace renders as a chain with
-# each LLM call expanded into prompt / response / token counts.
+
+def trace_graph(graph_spec, inner_provider, model, cfg):
+    provider = TracerProvider()
+    provider.add_span_processor(BatchSpanProcessor(
+        OTLPSpanExporter(endpoint="http://localhost:4317", insecure=True)))
+    tracer = provider.get_tracer("my-app")
+    try:
+        with openinference_tracer(tracer) as cb:
+            parent = ParentContextTracer(tracer, otel_context.get_current())
+            observed = OpenInferenceProvider(inner_provider, parent)
+            engine = GraphEngine.compile(
+                graph_spec, NodeContext(provider=observed, model=model))
+            return engine.run_stream(cfg, cb)
+    finally:
+        provider.shutdown()
 ```
 
-端点 URL 是将其指向 Langfuse 自托管而非 Phoenix 时唯一需要更改的内容 —
-两者都遵循 OpenInference 和 OTLP。
+`ParentContextTracer` 明确把调用者的 run context 传入 graph worker 上的 provider dispatch。LLM span 的 parent 是 run root，不保证每个并发 task 的 node 级 ancestry。[OpenInference convention](https://github.com/Arize-ai/openinference/blob/main/spec/semantic_conventions.md) 定义 `CHAIN` 和 `LLM`；NeoGraph 导出上面的 subset。选择或 redact 公开 text 与 graph payload 时遵循 [OpenTelemetry 敏感数据指引](https://opentelemetry.io/docs/security/handling-sensitive-data/)。
 
-### 备注
+### 注意
 
-- **可选加入依赖。** `opentelemetry-api` 不被基础 wheel 拉入。仅当包缺失时，
-  导入 `neograph_engine.tracing` / `.openinference` 在首次使用时引发
-  `ImportError` — 通过
-  `pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp`
-  安装。
-- **OTel contextvars 跨 pybind。** v0.3.x 中的 `otel_tracer` 文档记录了
-  不带 `__exit__()` 的 `trace.use_span(...).__enter__()` 会泄漏
-  contextvar 且不会可靠地通过 C++ → Python 回调边界传播。两个追踪器现在
-  都使用显式 `otel_context.attach` + `detach` token 对，以确定性地控制
-  当前 span 的激活。
-- **`otel_tracer` 与 `openinference_tracer`。** 当你的后端是 APM 形态
-  （Jaeger、Datadog）且你想要通用 span 时，使用 OTel 版本。当你的后端是
-  Phoenix / Langfuse / Arize 且你想要 LLM 形态渲染时，使用 OpenInference
-  版本。两者不能在同一运行中组合 — 它们是引擎事件流的替代回调。
+OpenTelemetry 为 opt-in；base wheel 不要求它。另行安装 API/SDK/exporter。同一 run 的 graph callback 只用 `otel_tracer` 或 `openinference_tracer` 之一。OTLP endpoint 和 credential 必须匹配 backend 配置；只换 URL 并不保证普遍 backend 兼容。
 
 ---
 
@@ -2472,7 +2650,7 @@ std::unique_ptr<GraphEngine> create_react_graph(
 | `provider` | `std::shared_ptr<Provider>` | LLM provider |
 | `tools` | `std::vector<std::unique_ptr<Tool>>` | agent 可用的工具（所有权转移） |
 | `instructions` | `std::string` | 系统提示 / 指令 |
-| `model` | `std::string` | 模型覆盖（空表示使用 provider 默认值） |
+| `model` | `std::string` | 显式模型名称；typed provider 不选择默认模型 |
 
 **返回：** 一个准备好运行的编译后的 `GraphEngine`。
 
@@ -2513,7 +2691,7 @@ std::unique_ptr<GraphEngine> create_plan_execute_graph(
 | `planner_prompt` | `std::string` | planner 的系统提示；必须指示模型以 JSON 步骤数组回复（容忍被围栏的 ```json 块和前置散文） |
 | `executor_prompt` | `std::string` | 单步骤 executor（内部 ReAct 循环）的系统提示 |
 | `responder_prompt` | `std::string` | 最终合成阶段的系统提示 |
-| `model` | `std::string` | 模型覆盖（空表示使用 provider 默认值） |
+| `model` | `std::string` | 显式模型名称；typed provider 不选择默认模型 |
 | `max_step_iterations` | `int` | 每步骤的 executor 内部工具调用迭代上限 |
 
 **填充的通道：** `plan`、`past_steps`、`final_response`、`messages`。
@@ -2569,62 +2747,6 @@ sp::runtime::Result run_agent(
     return agent.run(history);
 }
 ```
-
-### json_path 工具
-
-**头文件：** `<neograph/llm/json_path.h>`
-**命名空间:** `neograph::llm::json_path`
-
-使用以点分隔的路径字符串导航和修改 JSON 值的工具函数。
-这些函数供 `SchemaProvider` 内部使用，也可用于一般场景。
-
-```cpp
-namespace json_path {
-    std::vector<std::string> split_path(const std::string& path);
-    const json* at_path(const json& root, const std::string& path);
-    json* at_path_mut(json& root, const std::string& path);
-    bool has_path(const json& root, const std::string& path);
-
-    template<typename T>
-    T get_path(const json& root, const std::string& path, const T& default_val);
-
-    void set_path(json& root, const std::string& path, const json& value);
-}
-```
-
-| 函数 | 描述 |
-|----------|-------------|
-| `split_path(path)` | 将点路径字符串拆分为多个片段。例如：`"choices.0.message"` 变为 `["choices", "0", "message"]` |
-| `at_path(root, path)` | 按点路径进入 JSON 值；数字片段用于索引数组。如果路径不存在则返回 `nullptr` |
-| `at_path_mut(root, path)` | `at_path` 的可变版本 |
-| `has_path(root, path)` | 如果 JSON 值中存在该点路径则返回 `true` |
-| `get_path<T>(root, path, default_val)` | 返回路径处转换为 `T` 类型的值；路径不存在或转换失败时返回 `default_val` |
-| `set_path(root, path, value)` | 在点路径处设置值，并按需创建中间对象 |
-
-**示例：**
-
-```cpp
-using namespace neograph::llm::json_path;
-
-json data = json::parse(R"({"choices": [{"message": {"content": "Hello"}}]})");
-
-// Navigate
-const json* msg = at_path(data, "choices.0.message.content");
-// *msg == "Hello"
-
-// Check existence
-bool exists = has_path(data, "choices.0.message.role");
-// exists == false
-
-// Get with default
-std::string role = get_path<std::string>(data, "choices.0.message.role", "assistant");
-// role == "assistant"
-
-// Set value (creates intermediates)
-set_path(data, "metadata.version", 2);
-```
-
----
 
 <a id="13-mcp-module"></a>
 ## 13. MCP 模块
@@ -2861,13 +2983,9 @@ using json = nlohmann::json;
 
 void run_custom_graph(
     sp::descriptor::ValidatedDescriptor descriptor, sp::runtime::Options options,
-    std::string model) {
+    std::string model, std::vector<std::unique_ptr<neograph::Tool>> tools) {
     auto provider = std::make_shared<neograph::llm::SchemaProvider>(
         std::move(descriptor), std::move(options));
-
-    std::vector<std::unique_ptr<neograph::Tool>> tools;
-    tools.push_back(std::make_unique<SearchTool>());
-    tools.push_back(std::make_unique<CalculatorTool>());
 
     json definition = {
         {"name", "assistant_graph"},
@@ -2886,7 +3004,7 @@ void run_custom_graph(
         {"conditional_edges", json::array({
             {{"from", "llm"},
              {"condition", "has_tool_calls"},
-             {"routes", {{"yes", "tools"}, {"no", "__end__"}}}}
+             {"routes", {{"true", "tools"}, {"false", "__end__"}}}}
         })}
     };
 
@@ -3000,12 +3118,12 @@ public:
         if (last.find("urgent") != std::string::npos) {
             result.command = Command{
                 "urgent_handler",                          // goto node
-                {{{"channel", "priority"}, {"value", "high"}}} // state updates
+                {{"priority", neograph::json("high")}} // state updates
             };
         } else {
             result.command = Command{
                 "normal_handler",
-                {{{"channel", "priority"}, {"value", "normal"}}}
+                {{"priority", neograph::json("normal")}}
             };
         }
 
@@ -3075,13 +3193,15 @@ sp::runtime::Result run_mcp_agent(
 ### `neograph::a2a` — Agent 到 Agent 协议
 
 **头文件：** `<neograph/a2a/{client,server,types,a2a_caller_node}.h>`
-基于 Streamable HTTP 的 JSON-RPC 2.0。`A2AClient` 调用远程
-agent（`message/send`、`tasks/get`、`tasks/cancel`、AgentCard
-发现、`message/stream` SSE）；服务器端通过
-`GraphAgentAdapter` 将 NeoGraph `GraphEngine` 适配为 A2A 端点。支持
-`v0.3` / `v1` 双版本方法名分发，参见提交 `bc675a1`。流式传输使用
-`SseFrameSplitter`（客户端）和 httplib 分块传输（服务器）。调用者节点
-将 A2A 调用嵌入为图节点。
+`A2AClient` 与 `GraphAgentAdapter` 实现 `WireDialect::{V0_3,V1_0}` JSON-RPC 2.0 HTTP/SSE。`AgentCard.supported_interfaces` 为从新旧 card 解析的有序 `AgentInterface{url, protocol_binding, protocol_version, tenant}` 观测，raw card 保留。延迟选择首个 compatible JSONRPC 0.x/1.x interface，优先尾 slash 规范化后匹配配置 base URL 的项。card URL 不重定向 RPC endpoint。tenant 传至 send/get/cancel/stream。`wire_dialect()` 在选择或成功 probe 前为空，force discovery 重置。已取得 incompatible card 时直接拒绝，不 probe 其他 dialect。
+
+无 card 时 probe 0.3，仅数字 JSON-RPC `-32601` 才切换，并记住成功 dialect。切换同时修改 method/body/header。V1 用 PascalCase、`A2A-Version: 1.0`、`ROLE_*`/`TASK_STATE_*`、不带 `kind` 的 flat text/raw/url/data part，以及反转 `blocking` 的 `returnImmediately`。解析 task/message wrapper 与 bare get/cancel task。server 响应编码按 version header，而非 method spelling：无 header 为 0.3，不支持 major 返回 `-32009`；默认 card 广告两者。bound discovery URL 保留 restart 行为，不覆盖 explicit endpoint。
+
+SSE 接受 LF/CRLF/CR、comment、multiline data、最后未终止 data。opening task、status、artifact append/replace 累积为返回 Task。V1 在 opening submitted task 与 artifact 后发送 terminal status，无需 legacy `kind`/`final`/trailing task。观察到 event 后，即使无 external callback 也禁止 dialect redispatch。non-SSE RPC error 保留 `A2ARpcError::code()`；non-2xx HTTP 不成为成功 task。
+
+caller node 回答优先级为 final/interrupted agent status text、首个 artifact text、最后 agent history text。progress status 或 user history 不覆盖答案。通用 `async_post_stream` 对 nonempty fixed-`Content-Length` body 保留 status 并传递一次；zero length 不发 chunk。body limit/early EOF/已缓冲 surplus 拒绝，redirect/chunked/close-delimited 规则不变。
+
+Python `neograph_engine.a2a` 公开 `WireDialect`, `AgentInterface`, `AgentCard.supported_interfaces`/`raw`, `Part.media_type`, `MessageSendConfiguration`, `MessageSendParams`, `StreamEvent` 和 status/artifact record。`A2AClient.wire_dialect()` 返回 enum 或 `None`；`set_authorization_header()` 为 native setter；`send_message(params)` 为 multipart overload。`send_message_stream(text, on_event, task_id="", context_id="")` 或 `(params, on_event)` 返回累积 `Task`，向 bool callback 传递 owned event snapshot。blocking call 释放 GIL，callback owner 安全重获 GIL。`a2a.A2ARpcError.code` 保留 remote 整数 code。vector/optional child 是 detached snapshot，`Task.status` 和 `MessageSendParams.message` 是 live inline field。JSON 观测不授予 provider native 权限。
 
 **公共头文件：** [`include/neograph/a2a/`](../include/neograph/a2a/)。
 

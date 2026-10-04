@@ -836,6 +836,11 @@ public:
      *
      * Copies the specified checkpoint (or the latest) to a new thread ID,
      * enabling branching execution paths.
+     * resume(new_thread_id) continues the copied checkpoint's pending nodes.
+     * A completed __end__ continuation executes nothing when resumed; editing
+     * its state does not schedule new work. To re-execute pending work, fork an
+     * exact earlier checkpoint from get_state_history() that still has nodes.
+     * A new user turn instead requires run() with resume_if_exists enabled.
      * In-memory branches share the original live managed bank and pinned ceiling.
      * A bounded durable managed-bank branch requires a real shared host bank or
      * Program journal supplied at the original invocation; otherwise fork refuses

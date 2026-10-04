@@ -1,9 +1,9 @@
-"""05 — Real LLM call via OpenAIProvider (requires .env / OPENAI_API_KEY).
+"""05 — Real Chat API call via typed SchemaProvider.
 
 Wire an OpenAI-compatible provider into NodeContext, build a graph
 that uses the built-in `llm_call` node, and run a one-shot
-completion. Works with OpenAI, Groq, Together, vLLM, Ollama —
-any endpoint speaking the /v1/chat/completions shape.
+completion. The endpoint must implement the admitted OpenAI Chat protocol;
+matching an endpoint name alone does not establish protocol compatibility.
 
 Run:
     pip install neograph-engine python-dotenv
@@ -14,10 +14,10 @@ To target a different OpenAI-compatible endpoint or model, set
 OPENAI_API_BASE / OPENAI_MODEL in .env. See .env.example.
 """
 
-from _common import ng, openai_provider
+from _common import example_model, ng, schema_provider
 
 
-provider = openai_provider()  # exits cleanly if no key
+provider = schema_provider()
 
 # Built-in `llm_call` node: reads the messages channel, calls the
 # provider, writes the assistant message back. No subclassing needed
@@ -33,7 +33,7 @@ definition = {
     ],
 }
 
-ctx = ng.NodeContext(provider=provider)
+ctx = ng.NodeContext(provider=provider, model=example_model())
 engine = ng.GraphEngine.compile(definition, ctx)
 
 input_state = {
@@ -47,7 +47,6 @@ result = engine.run(ng.RunConfig(thread_id="t1", input=input_state))
 # Pull the LLM's response out of the messages channel.
 msgs = result.output["channels"]["messages"]["value"]
 assistant = [m for m in msgs if m.get("role") == "assistant"]
-if assistant:
-    print("assistant:", assistant[0]["content"])
-else:
-    print("no assistant message — full messages:", msgs)
+if not assistant:
+    raise RuntimeError("llm_call produced no assistant message")
+print("assistant:", assistant[-1]["content"])

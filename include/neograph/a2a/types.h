@@ -22,7 +22,24 @@ namespace neograph::a2a {
 
 using json = neograph::json;
 
-/// TaskState — exact strings from spec §6.3 (kebab-case).
+/// A2A wire dialect — the JSON encoding of the data model.
+///
+/// - `V0_3`: A2A 0.3 JSON Schema form. `kind` discriminators on Message /
+///   Task / Part / stream events, lower-case role (`user`, `agent`) and
+///   kebab-case task states (`input-required`), slash-form JSON-RPC methods
+///   (`message/send`), `FilePart.file = {bytes|uri, mimeType, name}`.
+/// - `V1_0`: A2A 1.0 protobuf ProtoJSON form (`lf.a2a.v1`). No `kind`
+///   discriminators, flat Parts (`{"text"}` / `{"raw"|"url", "filename",
+///   "mediaType"}` / `{"data"}`), `ROLE_USER` / `TASK_STATE_WORKING` enums,
+///   PascalCase methods (`SendMessage`) and `{"task"}` / `{"message"}` /
+///   `{"statusUpdate"}` / `{"artifactUpdate"}` result wrappers.
+///
+/// Serialisation is dialect-selected (`to_json(j, value, dialect)`); the
+/// two-argument `to_json` overloads emit `V0_3`. Parsing (`from_json`) is
+/// dialect-tolerant and accepts either encoding.
+enum class WireDialect { V0_3, V1_0 };
+
+/// TaskState — kebab-case strings on the 0.3 wire, `TASK_STATE_*` on 1.0.
 enum class TaskState {
     Submitted,
     Working,
@@ -36,22 +53,33 @@ enum class TaskState {
 };
 
 NEOGRAPH_API std::string task_state_to_string(TaskState s);
+NEOGRAPH_API std::string task_state_to_string(TaskState s, WireDialect dialect);
+/// Accepts both the kebab-case (0.3) and `TASK_STATE_*` (1.0) spellings.
 NEOGRAPH_API TaskState   task_state_from_string(std::string_view s);
 
 /// Message role (spec §6.4).
 enum class Role { User, Agent };
 
 NEOGRAPH_API std::string role_to_string(Role r);
+NEOGRAPH_API std::string role_to_string(Role r, WireDialect dialect);
+/// Accepts both `user`/`agent` (0.3) and `ROLE_USER`/`ROLE_AGENT` (1.0).
 NEOGRAPH_API Role        role_from_string(std::string_view s);
 
 /// One content fragment of a Message or Artifact.
-/// Discriminated by `kind` ∈ {"text", "file", "data"}.
+/// Discriminated by `kind` ∈ {"text", "file", "data"} in the model; on the
+/// 1.0 wire the discriminator is implicit (which of text/raw/url/data is set).
 struct NEOGRAPH_API Part {
     std::string kind;        ///< "text" | "file" | "data"
     std::string text;        ///< populated when kind == "text"
-    json        file;        ///< populated when kind == "file"  (FileWithBytes/Uri)
+    /// populated when kind == "file". Always the 0.3 `FileWithBytes`/
+    /// `FileWithUri` shape ({"bytes"|"uri", "mimeType", "name"}); the 1.0
+    /// codec maps it to/from `raw` / `url` / `mediaType` / `filename`.
+    json        file;
     json        data;        ///< populated when kind == "data"  (arbitrary JSON)
     json        metadata;    ///< optional extension bag
+    /// 1.0 `Part.media_type` for text/data parts (e.g. "text/plain"). Empty
+    /// when absent; never emitted on the 0.3 wire.
+    std::string media_type;
 
     /// Convenience: TextPart of given content.
     static Part text_part(std::string s);
@@ -149,9 +177,24 @@ struct NEOGRAPH_API StreamEvent {
 
     bool is_final() const noexcept {
         if (type == Type::StatusUpdate && status_update) return status_update->final;
-        if (type == Type::Task) return true;
+        // A Task frame is terminal unless it is the opening snapshot of a
+        // 1.0 / 0.3 task lifecycle stream (submitted or still working).
+        if (type == Type::Task) {
+            if (!task) return true;
+            return task->status.state != TaskState::Submitted
+                && task->status.state != TaskState::Working;
+        }
         return false;
     }
+};
+
+/// One protocol binding + version + URL an agent exposes (1.0
+/// `AgentInterface`; 0.3 cards contribute `additionalInterfaces` entries).
+struct NEOGRAPH_API AgentInterface {
+    std::string url;
+    std::string protocol_binding;   ///< "JSONRPC" | "GRPC" | "HTTP+JSON" | custom
+    std::string protocol_version;   ///< "Major.Minor", e.g. "1.0" / "0.3"
+    std::string tenant;             ///< optional routing id (1.0 only)
 };
 
 /// Subset of AgentCard required to interact (spec §5.5).
@@ -172,6 +215,11 @@ struct NEOGRAPH_API AgentCard {
     bool                    extended_card                   = false;
     bool                    supports_authenticated_extended = false;
 
+    /// 1.0 `supportedInterfaces` in card order (preferred first). For 0.3
+    /// cards, the primary url/preferredTransport is first and any
+    /// `additionalInterfaces` follow, all with the card's `protocolVersion`.
+    std::vector<AgentInterface> supported_interfaces;
+
     /// Parsed skill names — full skill objects available in `raw["skills"]`.
     std::vector<std::string> skill_names;
 
@@ -181,7 +229,20 @@ struct NEOGRAPH_API AgentCard {
 
 // ---------------------------------------------------------------------------
 // JSON adapters (defined in src/a2a/types.cpp).
+//
+// The two-argument to_json overloads emit the 0.3 dialect (unchanged);
+// the three-argument overloads select a WireDialect explicitly.
 // ---------------------------------------------------------------------------
+NEOGRAPH_API void to_json(json& j, const Part& p, WireDialect dialect);
+NEOGRAPH_API void to_json(json& j, const Message& m, WireDialect dialect);
+NEOGRAPH_API void to_json(json& j, const Artifact& a, WireDialect dialect);
+NEOGRAPH_API void to_json(json& j, const TaskStatus& s, WireDialect dialect);
+NEOGRAPH_API void to_json(json& j, const Task& t, WireDialect dialect);
+NEOGRAPH_API void to_json(json& j, const MessageSendConfiguration& c, WireDialect dialect);
+NEOGRAPH_API void to_json(json& j, const MessageSendParams& p, WireDialect dialect);
+NEOGRAPH_API void to_json(json& j, const TaskStatusUpdateEvent& e, WireDialect dialect);
+NEOGRAPH_API void to_json(json& j, const TaskArtifactUpdateEvent& e, WireDialect dialect);
+
 NEOGRAPH_API void to_json(json& j, const Part& p);
 NEOGRAPH_API void from_json(const json& j, Part& p);
 
@@ -213,8 +274,23 @@ NEOGRAPH_API void to_json(json& j, const TaskArtifactUpdateEvent& e);
 NEOGRAPH_API void from_json(const json& j, TaskArtifactUpdateEvent& e);
 
 /// Parse a single SSE `data: {...}` JSON object into the right variant.
-/// Discriminator priority: kind="status-update" | "artifact-update" |
-/// "task". Anything else falls back to Task.
+/// 0.3: discriminator `kind` = "status-update" | "artifact-update" | "task"
+/// | "message". 1.0: the single populated key of `StreamResponse`
+/// (`statusUpdate` | `artifactUpdate` | `task` | `message`). A Message
+/// payload is coerced into a Task (see task_from_result). Anything else
+/// falls back to Task.
+///
+/// 1.0 status updates carry no `final` flag; it is derived from the state
+/// (terminal or interrupted => final), matching the spec's stream-close rule.
 NEOGRAPH_API StreamEvent parse_stream_event(const json& j);
+
+/// Coerce a `SendMessage` / `message/send` / `GetTask` / `CancelTask`
+/// result into a Task. Accepts the 1.0 wrappers (`{"task"}` /
+/// `{"message"}`), the 0.3 `kind`-discriminated objects, and a bare 1.0
+/// Task (object with `id` + `status`). A Message becomes a Completed Task
+/// carrying it as `status.message` and `history`. Null yields a Failed Task;
+/// anything unrecognised yields an Unknown Task with the payload in
+/// `metadata`.
+NEOGRAPH_API Task task_from_result(const json& result);
 
 } // namespace neograph::a2a

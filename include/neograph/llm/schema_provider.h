@@ -5,8 +5,8 @@
 
 namespace neograph::llm {
 
-// A pinned, closed/versioned descriptor and immutable SDK runtime policy.
-// Endpoint/header/model facts are data; codecs, replay and retry are compiled.
+/// Provider backed by a pinned, closed/versioned descriptor and immutable SDK policy.
+/// Endpoint/header/model facts are data; codecs, replay and retry are compiled.
 class NEOGRAPH_API SchemaProvider final : public Provider {
 public:
     struct Defaults {

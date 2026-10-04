@@ -1,9 +1,27 @@
-<!-- neograph-i18n: source=ROADMAP_v1.md locale=ko source_sha256=e5d4df28a5ba92ca1778fdff4fa741fc4c435c9dfba1fddbe8dacd31ca1f3121 -->
+<!-- neograph-i18n: source=ROADMAP_v1.md locale=ko source_sha256=145f159a2258c775caf7dd71eeb13936ae0bc5eb31cca00f660b4f2223d2a490 -->
 # NeoGraph v1.0 — 설계 다듬기 로드맵
 
 **Languages:** [English](ROADMAP_v1.md) | [한국어](ROADMAP_v1.ko.md) | [日本語](ROADMAP_v1.ja.md) | [简体中文](ROADMAP_v1.zh-CN.md)
 
-이 파일은 미래 v1.0 주요 버전 범프(major bump)를 목표로 하는 **아키텍처** 변경을 추적한다. 이들은 점진적 패치가 아니며, 각각은 사용 중단 기간(deprecation window)이 필요한 공개 API 파괴(break) 후보이다. 살아있는 문서로 유지 — v0.3.x 패치 시리즈가 구조적 통증 지점을 드러내면 여기에 후보를 추가하고, 착륙하면 가지치기한다.
+이 파일은 pre-v1 리팩터링의 설계 제안과 착륙 기록을 보존합니다.
+기록 속 버전 이름, 코드 초안, 호환성 정책, 테스트 수와 측정은 당시의 내용이며
+릴리스 일정이나 현재 API 명세가 아닙니다.
+
+## 현재 계약
+
+사용자 노드는 `GraphNode::run(NodeInput) -> asio::awaitable<NodeOutput>`을 구현합니다.
+`RunContext`는 실행별 메타데이터를 전달하고 `CancelToken::fork()`는 자식 취소를 제공합니다.
+Provider는 `get_name()`, `family()`, `prepare()`를 노출합니다. 공통 invoke/dispatch 경로는
+소유 request와 move-only prepared handle을 소비하고 불변 SDK Outcome을 보존합니다.
+옛 `CompletionProvider`, `CompletionRequest`, `CompletionParams`, `ChatCompletion`,
+`complete*`, `OpenAIProvider`, `RateLimitedProvider`는 호환 shim 없이 제거되었습니다.
+아래 7월의 추가적 호환 정책은 이 전환으로 대체되었습니다.
+
+LLM을 꺼도 Core에는 외부 `SchemaProvider::runtime`이 필요합니다.
+NeoGraph `0.13.0`은 alpha SDK `0.1.0`, interface revision/shared generation 4를 사용합니다. 일치하는 header/library로 소비자를 재빌드하세요. Native archive는 v3 / `spna3`, portable JSON은 v2를 유지합니다. 현재 통합 검증은 대기 중입니다.
+Python은 타입 request/prepared/Outcome 객체를 사용하며 `ChatMessage`는 별도 graph 편의 타입입니다.
+현재 API는 [C++ reference](docs/reference-en.md)와 [Python binding](docs/python-binding.md)을 보세요.
+과거 Linux/ARM64/WASM 관측은 해당 플랫폼의 현재 SDK runtime을 검증하거나 application 성능을 예측하지 않습니다.
 
 ## 이 파일이 존재하는 이유
 
@@ -246,7 +264,7 @@ Candidates 1 + 6이 착륙할 때까지, 오늘 존재하는 곳에 불변성을
 | 3 | 계층적 CancelToken | **v0.4에 착륙** (`CancelToken::fork()` + 연쇄) | v0.3.2 훅, v0.3.2 방출-vs-바인드 |
 | 4 | 자기 진화 그래프 런타임 훅 | 연구 | TODO_v0.3.md #8 |
 | 5 | pgvector RAG 예제 | 쿡북 | TODO_v0.3.md #9 |
-| 6 | Provider 단일 디스패치 | **제거 없이 착륙.** `CompletionProvider::do_invoke()`가 권장되는 하나의 재정의 경로. 기존 `Provider::complete*` 메서드는 계속 지원됨; 사용 중단 경고는 철회되었고 제거 계획 없음. | #4 (v0.7에서 닫힘), #5 (호환성 정책), #36에 의해 강화된 패턴 |
+| 6 | Provider 단일 디스패치 | **타입 prepare/dispatch로 대체.** 옛 completion API와 추가 adapter는 shim 없이 제거되었습니다. 위 현재 계약을 보세요. | #4 (v0.7에서 닫힘), #5 (과거 호환성 정책), #36에 의해 강화된 패턴 |
 
 ---
 
@@ -510,6 +528,9 @@ TODO_v0.3.md 항목 #9 — 쿡북 자료 확인 (엔진 간극 없음), 미래 "
 
 ## Candidate 6 — Provider 단일 디스패치
 
+이 절은 옛 completion API 제안 기록입니다. 코드 초안과 7월 호환성 정책은
+위의 타입 prepare/dispatch 전환으로 대체된 과거 내용입니다.
+
 ### 증상
 
 `Provider`가 네 개의 가상 메서드를 노출 (GraphNode의 8개보다 한 차원 작음):
@@ -606,14 +627,17 @@ apt `libgrpc++-dev protobuf-compiler-grpc` (1.51.1) + protoc 3.21.12 설치 후,
 
 grpc++ ON으로 이 환경(WSL2, 거대한 Windows PATH 누출)에서 빌드할 때 두 가지 오염이 잡힘. 깨끗한 Linux 호스트 / CI에서는 나타나지 않지만 WSL 개발자는 만남:
 
-  1. **anaconda re2** — `gRPCConfig.cmake`가 `find_package(re2)`를 할 때, 시스템 re2 cmake 구성이 존재하지 않으면 (apt `libre2-dev` 미설치), PATH에서 `/mnt/c/ProgramData/anaconda3/Library/lib/cmake/re2/re2Targets.cmake` (Windows)를 잡아 `set_target_properties`에서 오류. 수정: `-DCMAKE_IGNORE_PREFIX_PATH=/mnt/c;…` + `-DCMAKE_IGNORE_PATH=…/anaconda3/Library/lib/cmake;…` → grpc가 시스템 pkg-config re2로 대체 ("Found RE2 via pkg-config").
-  2. **ZLIB include** — `FindZLIB`가 라이브러리는 시스템 (`/usr/lib/.../libz.so`)에서, `ZLIB_INCLUDE_DIR`은 PATH의 `/mnt/c/gtk/include` (Windows zlib.h)에서 가져옴 → `-isystem /mnt/c/gtk/include`가 모든 grpc 연결 대상으로 누출 → `/mnt/c/gtk/include/libintl.h`가 `printf`를 `libintl_printf` 매크로로 재작성 → `std::printf` 컴파일 오류. 수정: 명시적으로 `-DZLIB_INCLUDE_DIR=/usr/include -DZLIB_LIBRARY=/usr/lib/x86_64-linux-gnu/libz.so` 설정.
+아래 경로는 Windows mount root, Anaconda 설치 prefix, GTK 설치 prefix를
+각각 `WINDOWS_MOUNT_ROOT`, `WINDOWS_ANACONDA_PREFIX`, `WINDOWS_GTK_PREFIX` 환경 변수로 표시합니다.
+
+  1. **anaconda re2** — `gRPCConfig.cmake`가 `find_package(re2)`를 할 때, 시스템 re2 cmake 구성이 존재하지 않으면 (apt `libre2-dev` 미설치), PATH에서 `$WINDOWS_ANACONDA_PREFIX/Library/lib/cmake/re2/re2Targets.cmake` (Windows)를 잡아 `set_target_properties`에서 오류. 수정: `-DCMAKE_IGNORE_PREFIX_PATH="$WINDOWS_MOUNT_ROOT;…"` + `-DCMAKE_IGNORE_PATH="$WINDOWS_ANACONDA_PREFIX/Library/lib/cmake;…"` → grpc가 시스템 pkg-config re2로 대체 ("Found RE2 via pkg-config").
+  2. **ZLIB include** — `FindZLIB`가 라이브러리는 시스템 (`/usr/lib/.../libz.so`)에서, `ZLIB_INCLUDE_DIR`은 PATH의 `$WINDOWS_GTK_PREFIX/include` (Windows zlib.h)에서 가져옴 → `-isystem "$WINDOWS_GTK_PREFIX/include"`가 모든 grpc 연결 대상으로 누출 → `$WINDOWS_GTK_PREFIX/include/libintl.h`가 `printf`를 `libintl_printf` 매크로로 재작성 → `std::printf` 컴파일 오류. 수정: 명시적으로 `-DZLIB_INCLUDE_DIR=/usr/include -DZLIB_LIBRARY=/usr/lib/x86_64-linux-gnu/libz.so` 설정.
 
   → 둘 다 `cmake-option-default-flip-trap`의 사촌 (환경 누출이 `find_package`를 잘못된 접두사로 끌어감). EDDSkills SKILL `wsl-windows-path-cmake-find-leak`이 추가됨 (2026-05-16).
 
 ### NexaGraph 선행 분석 — gRPC-MCP의 실제 ROI는 체크포인트
 
-NeoGraph의 전신 NexaGraph (`/root/Coding/NexaGraph`)는 이미 gRPC-MCP를 초기에 구현하고 운영했었다. 조사 결과 (Explore, 2026-05-16):
+NeoGraph의 전신 NexaGraph는 이미 gRPC-MCP를 초기에 구현하고 운영했었습니다. 조사 결과 (Explore, 2026-05-16):
 
 - **구현 실체**: `proto/rag_service.proto` (RAGService, 11개 단항 RPC — vector_search / graph_search / ingest / chat history / image task / **graph checkpoint** 5개 RPC), `src/nexagraph/grpc_client.cpp` 완전 구현, api_server.cpp에서 `GRPC_TARGET` env를 통해 운영 통합. 서버는 이중 전송 (HTTP JSON-RPC + gRPC 50051). 스트리밍 없음 (모두 단항).
 - **오버헤드 감소 주장** (`DOCS/grpc-client-plan.md`): 직렬화 1ms→0.01ms, 임베딩 1536d 15KB→6KB, 요청당 새 연결 → HTTP/2 다중화. **측정 없음 — 설계 근거만.**
@@ -668,11 +692,11 @@ gRPC의 *실제* 이득은 전송만 — HTTP/2 연결 재사용 (JSON-RPC / HTT
 - **작은 도구 호출 (실제 도구 호출의 대부분): JSON-RPC ≈ gRPC 무승부.** 전송-전환 ROI ≈ 0.
 - **큰-페이로드 도구 호출 (~12 KB+, 임베딩 / RAG 청크 반환): gRPC ~1.5×.** NexaGraph가 언급한 영역이지만 70×가 아니라 1.5×.
 - 페이로드 압축은 여전히 0 (JSON-in-proto, 체크포인트 측정과 일관).
-- 루프백 상한 — 실제 네트워크에서는 RTT가 양쪽에 동등하게 더해지고 비율은 1로 더 수렴. 1.5×가 최선의 경우.
+- 루프백 결과입니다. remote RTT, concurrency, payload 형태와 connection 관리에는 별도 측정이 필요합니다. 1.5×는 상한이 아닙니다.
 
 **Candidate 7 최종 평결:**
-- gRPC의 ROI는 (1) **다언어 사이드카 / 원격 타입 있는 RPC** (언어 경계), (2) **큰-페이로드 도구 / 체크포인트에서 ~1.5×**. 일반 도구 호출의 대규모 이전은 무가치 (무승부 + 표준 #966 미확정).
-- MCP-over-gRPC 전송: **보류, 확인**. "일반 MCP 도구 호출이 더 빨라진다"는 측정으로 반증됨 (무승부). 표준이 확정된 후에만, 그리고 임베딩이 무거운 도구에만.
+- gRPC는 다언어 sidecar/remote typed-RPC 경계를 제공합니다. 관측한 약 1.5× 차이는 시험한 12 KB tool payload에만 해당하며 모든 큰 payload나 checkpoint의 결과가 아닙니다.
+- 당시 기록은 MCP-over-gRPC 도입을 보류했습니다. 작은 loopback workload의 무승부는 다른 workload/transport의 이점을 반증하지 않습니다.
 - Nagle 사건 → EDDSkills SKILL 후보 `bench-shock-number-nagle-first` (충격적인 전송-벤치 숫자 = TCP_NODELAY / Nagle / delayed-ACK을 먼저 의심; `perf-regression-bench-bisect`의 사촌). 사용자 승인 후 추가.
 
 ### 왜 NeoGraph JSON-RPC가 gRPC와 무승부인가 — yyjson (입증)
@@ -685,11 +709,12 @@ gRPC의 *실제* 이득은 전송만 — HTTP/2 연결 재사용 (JSON-RPC / HTT
 | protobuf ser+parse | **1.75** |
 | → yyjson / protobuf | **22.3× 더 느림** |
 
-**사용자가 정확히 맞다.** protobuf는 구조적으로 22× 더 빠른 코덱. 하지만 왕복에서 그 차이는 12 KB에서 1.5×로 희석 — 직렬화 간극 ~37 µs가 전체 왕복 692–1096 µs의 작은 조각 (나머지는 소켓 I/O / syscall / HTTP 프레이밍). **도구 호출 핫 경로가 코덱이 아니라 소켓 I/O에 지배된다는 정량적 증거.**
+codec-only 실험에서 protobuf ser+parse는 1.75 µs, yyjson parse+dump는 38.9 µs로
+시험한 표현의 비율은 22.3×였습니다. 위 전체 transport 측정에서는 차이가 더 작습니다.
+framing과 I/O가 다르므로 codec 표만으로 왕복 차이의 원인을 분리할 수 없습니다.
 
-핵심 함의 — **NeoGraph의 JSON-RPC가 gRPC와 무승부인 것은 yyjson 덕분이지, JSON-RPC 프로토콜이 빠르기 때문이 아니다.** 일반적인 스택 (Python의 `json`은 yyjson보다 ~50× 느림, 12 KB에서 ~2 ms)에서는 코덱이 왕복을 지배 → 거기서는 gRPC가 구조적으로 지배. NeoGraph만 yyjson을 사용하므로 그 함정을 피함.
-
-→ 이것은 숨은 판매 포인트이자 Candidate 7 보류의 *최종* 정당화: "다른 프레임워크는 JSON-파싱이 병목이므로 gRPC 전송이 중요하지만, NeoGraph의 MCP / JSON-RPC는 yyjson 때문에 그렇지 않다." NeoGraph에 구체적으로, MCP-over-gRPC는 ROI가 훨씬 적다 (코덱 이점이 이미 yyjson에 의해 상쇄됨). gRPC는 다언어 / 원격 경계 + 큰-페이로드 용도로만 — 확인.
+이 측정은 Python `json`을 비교하지 않았고 보편적 codec 비율이나 yyjson이 NeoGraph만의 것임을 입증하지 않습니다.
+필요한 RPC semantics로 transport를 고르고 실제 payload/deployment를 측정하세요.
 
 ### NexaGraph 두 번째 수확 — 이력 압축 + GrpcRemoteTool (2026-05-16)
 
@@ -697,13 +722,13 @@ gRPC의 *실제* 이득은 전송만 — HTTP/2 연결 재사용 (JSON-RPC / HTT
 
 1. **`neograph::history` (새 핵심 유틸리티, 추가적)** — NexaGraph의 CAF `compress_history` 액터에서 액터 껍질을 벗기고 핵심만 이식:
    - `compact_history(messages, Provider&, model, max_tokens=12000, recent_keep=6) -> awaitable<CompactedHistory>` — 토큰 추정이 예산을 초과하면, (system 1 + 최근 N) 사이 구간을 단일 LLM 호출로 요약하여 system-summary 메시지로 교체. `co_await provider.invoke()` (사용 중단된 `complete()` 사용 안 함, 비동기 lib 의존성 0 — 핵심 내부가 이미 코루틴 사용).
-   - `sanitize_tool_calls(messages&)` — NeoGraph가 **완전히 결여했던** 방어: 잘림으로 인해 깨진 OpenAI 도구 쌍(응답 없는 assistant `tool_call` / 호출 없는 tool message)의 2-패스 제거, 멱등. `compact_history`가 출력에 내부적으로 적용 → 압축 결과가 절대 400을 만들지 않음.
+   - `sanitize_tool_calls(messages&)` — truncation으로 생긴 orphan tool pair(응답 없는 assistant `tool_call`/호출 없는 tool message)를 두 번의 순회로 제거하는 멱등 처리입니다. `compact_history`가 출력에 적용하지만 모든 compacted request를 provider가 받아들인다고 보장하지는 않습니다.
    - `estimate_tokens` — 보수적인 ~3 chars/tok 추정 (혼합 KO / EN).
    - 예제 56 `history_compaction` (오프라인 MockProvider, 키 불필요) — sanitize 3→1, compact 29 msgs/975 tok → 6 msgs/208 tok, 원본-미변경 검증 PASS. `src/core/history.cpp`가 모든 구성에 대해 `neograph_core`로 빌드 — 496/497 ctest PASS (1 실패 = 기존 `pybind_smoke` openinference 모듈 누락, 무관).
 
 2. **`neograph::grpc::GrpcRemoteTool`** — 예제 55는 gRPC를 통해 도구를 *내보내는* 쪽 (`run_tool_server`), 이것은 그 거울 — 원격 `ToolService.CallTool`을 일반 `neograph::Tool`로 *가져오는* 쪽. NexaGraph의 `GrpcTool` 어댑터 이식. pimpl (공개 헤더는 grpc++-free, `GrpcCheckpointStore`와 같은 자세). 단순 proto에 list-tools RPC가 없으므로 정의는 생성자를 통해 주입. 서버 오류 → `runtime_error`로 재던짐 (도구 오류, 전송 오류가 아님 — 로컬 Tool과 같은 계약). 예제 57 `grpc_remote_tool` — 서버 스레드 + `Tool&` 다형적 호출 + 오류 경로 PASS. **gRPC의 ROI #1 (다언어 원격 타입 있는 RPC)의 소비자 측 구체화** — 에이전트 관점에서 프로세스 경계 도구는 호출 지점에서 로컬 도구와 구별 불가.
 
-### 남은 것 (여전히 열림)
+### 2026-05-16 기록 당시 남은 작업
 
   - CI에 `grpc-build` 작업 추가 (apt deps + ON 빌드 + `example_grpc_client` / `server` 스모크 — 깨끗한 ubuntu 러너에서는 위의 WSL 함정이 적용되지 않음).
   - `RunGraphStream`의 `ServerWriter::Write`가 스트리밍-노드 콜백 안에서 호출됨 — 현재 단일 슈퍼스텝 루프 스레드를 가정. 다중 작업자 팬아웃 그래프에서 콜백이 작업자 스레드에서 호출되면 `ServerWriter` 동기화가 필요 (gRPC `ServerWriter`는 스레드 안전하지 않음). 현재 예제는 단일 노드이므로 노출되지 않음.

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=ko source_sha256=8ac92757f70745afa264fbc5ef7d0980d480ae9dca5cd364dd7f427a0ce215f2 -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=ko source_sha256=4de91aa4e04dc5f5a30c8878f37fa3dbf2c16671b0545387dd6ee20465a280ee -->
 # JARVIS — 음성 기반 메타 오케스트레이터
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -9,7 +9,10 @@ C++ 라우터·합성기·전문가 픽스처는 타입 `ProviderRequest`, `sp::
 
 로컬 음성은 선택 사항이며 선택한 whisper/Moonshine 모델, ONNX Runtime/Supertonic 자산, miniaudio 및 사용 가능한 마이크·스피커가 필요하다. 텍스트/mock 실행은 음성 동작의 증거가 아니다. 클라우드 불필요는 로컬/mock에만 해당한다. 라이브 요청에는 승인된 `OPENROUTER_API_KEY`, 네트워크·제공자 용량이 필요하며 프롬프트, 대화 메모리, 첨부 도구/위임 결과를 OpenRouter로 전송한다. 모델은 고정되어 있고 네이티브 요청의 ZDR은 지역 상주 보장이 아니다. 키를 로그·저장소에 넣지 않는다. nullable 토큰 사용량은 청구액이 아니며 비용에는 현재 엔드포인트/모델 가격과 실제 청구 사용량이 필요하다.
 
-`[jarvis:ttft]`는 비어 있지 않은 첫 `sp::PartDelta` 중 `PartKind::Text`와 `DeltaChannel::Content`에만 발생하며 사용량·추론·헤더 이벤트는 제외한다. 첫 합성 텍스트 시점이지 실제 TTS 청취 시작이 아니다. Python REPL/벤치 프로토콜 드라이버는 그대로이고 타입 Python 제공자 바인딩은 유예되었다. 현재 실행 증거는 실제 CLI 인사, 영속화된 합성 메모리 turn과 정상 EOF 종료에 한정된다. 마이크 입력·ASR·TTS·pybind 벤치나 vendor 추론을 검증하지 않는다. 아래 시간·음성/live 실행 주장은 과거 기록이며 현재 전환 qualification이 아니다.
+`[jarvis:ttft]`는 비어 있지 않은 첫 `sp::PartDelta` 중 `PartKind::Text`와 `DeltaChannel::Content`에만 발생하며 사용량·추론·헤더 이벤트는 제외한다. 첫 합성 텍스트 시점이지 실제 TTS 청취 시작이 아니다. Python REPL driver는 protocol client이며 pybind benchmark는 전환된 타입 binding을 사용하므로 별도 실행 증거가 필요하다. 현재 실행 증거는 실제 CLI 인사, 영속화된 합성 메모리 turn과 정상 EOF 종료에 한정된다. 마이크 입력·ASR·TTS·pybind 벤치나 vendor 추론을 검증하지 않는다. 아래 시간·음성/live 실행 주장은 과거 기록이며 현재 전환 qualification이 아니다.
+
+위 CLI 증거는 interface 3에서 기록했습니다. 보존된 A2A 1.0 wire 변경과 SDK interface-4 제어는
+소스 계약이며 새 runtime pass가 아닙니다.
 
 > 로컬/mock은 클라우드 제공자가 필요 없으며 선택적 음성은 로컬 자산·장치가 필요하다.
 > 마이크는 Tony, NeoGraph는 JARVIS, 도구/전문가는 JARVIS의 부하.
@@ -114,7 +117,7 @@ JARVIS가 전체 작업을 위임할 수 있는 서브에이전트입니다. 각
 }
 ```
 
-시작 시 각 URL에서 `AgentCard`를 요청하여 → 응답하는 항목만 활성화합니다. **핵심 요령**: A2A 표준을 따르는 모든 외부 에이전트 — 다른 사람이 만든 Python A2A 봇이든, 다른 NeoGraph 인스턴스이든 — JSON에 URL만 추가하면 JARVIS의 하위 에이전트가 됩니다.
+시작 시 JARVIS는 설정된 AgentCard를 fetch합니다. 호출에는 호환되는 JSON-RPC 0.x/1.0 interface가 필요하며 discovery 응답만으로 호환성을 입증하지 않습니다. client는 설정된 endpoint를 바꾸지 않고 card dialect를 선택합니다. card-selected 호출은 다른 dialect로 fallback하지 않으며 전달한 SSE event는 재전송하지 않습니다. 외부 Python agent와 NeoGraph instance도 card와 wire 동작이 일치하면 이 계약을 사용할 수 있습니다.
 
 ## 라우터(의도 분류) — JARVIS의 두뇌
 
@@ -149,11 +152,13 @@ JARVIS가 전체 작업을 위임할 수 있는 서브에이전트입니다. 각
 
 각 턴이 끝나면 JARVIS는 응답 + Tony의 발화 + 사용된 도구를 Store에 푸시합니다. 다음 턴의 라우터는 "앞서 언급한 그 것"과 같은 참조를 해결할 수 있습니다. `JsonFileStore` 파일에 영속화되어 재시작 후에도 기억됩니다. 빈 턴(STT 실패/노이즈)은 메모리 오염 방지를 위해 커밋에서 제외됩니다. `prefs.native_lang` 은 추정된 모국어(language consistency)를 유지합니다.
 
+이 JSON 파일은 speech/conversation projection을 저장하며 인증된 native provider replay custody가 아닙니다.
+
 ## 양방향 A2A — JARVIS가 호출하고 호출됨
 
 - **호출(Calling)**: 다음을 통해 전문가에게 위임 `A2AClient` 에서 `agent_registry.json`.
 - **호출됨**: JARVIS 자체가 `A2AServer`(포트 8200)을 노출합니다.
-  - 외부 시스템은 `POST /v1/messages`를 통해 JARVIS에 텍스트 메시지를 보낼 수 있습니다.
+  - 외부 시스템은 `POST /`에 JSON-RPC를 전송합니다. 0.x는 `message/send`, 1.0은 `A2A-Version: 1.0`과 `SendMessage`를 쓰며 header가 응답 dialect를 선택합니다.
   - 모바일 앱, 다른 NeoGraph 인스턴스, 심지어 다른 JARVIS도 이를 호출할 수 있습니다.
   - 텍스트 입력은 마이크/STT 단계를 건너뛰고 라우터로 직접 전달됩니다.
 
@@ -161,14 +166,7 @@ JARVIS가 전체 작업을 위임할 수 있는 서브에이전트입니다. 각
 
 ## 백그라운드 트리거(프로액티브)
 
-별도의 비동기 그래프가 백그라운드에서 실행됩니다:
-- 타이머(5분마다 캘린더 확인)
-- 외부 이벤트(홈 센서, 이메일 수신)
-- 외부 A2A 호출
-
-이벤트가 발생하면 JARVIS의 메인 그래프에 메시지를 주입한다 → JARVIS가 토니가 묻기 전에 말한다.("각하, 10분 후 회의 있습니다.")
-
-NeoGraph의 `27_async_concurrent_runs.cpp` 패턴을 정확하게 사용한다.
+background timer/event trigger는 설계이며 구현된 컴포넌트가 아닙니다. host는 `27_async_concurrent_runs.cpp` 패턴으로 calendar/sensor event의 text를 queue에 넣을 수 있습니다. A2A server는 별도로 구현되어 있으며 proactive trigger를 검증하지 않습니다.
 
 ## 디렉터리 구조
 
@@ -203,8 +201,10 @@ jarvis/
 #    Lightweight: JARVIS_WHISPER=small bash assets/download.sh  (Raspberry Pi / CPU)
 bash examples/cookbook/jarvis/assets/download.sh
 
-# 2. Build — onnxruntime, whisper.cpp, miniaudio found on system (or mock if missing)
-cmake -B build-jarvis -DNEOGRAPH_BUILD_COOKBOOK_JARVIS=ON
+# 2. Build — install SchemaProvider and optional voice dependencies first
+export SCHEMAPROVIDER_PREFIX="/absolute/path/to/installed/schemaprovider"
+cmake -S . -B build-jarvis -DNEOGRAPH_BUILD_COOKBOOK_JARVIS=ON \
+  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX"
 cmake --build build-jarvis --target cookbook_jarvis -j
 
 # 3a. Run — text/wav input (Korean line-edit REPL recommended)
@@ -245,12 +245,12 @@ OPENROUTER_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + OpenRouter
 
 ## 구현 상태
 
-**완전 기능** — 실제 하드웨어(OpenRouter DeepSeek)에서 실시간 음성 단일 턴 실행을 검증했습니다. Mic→VAD→STT→router→4-way→synth→TTS 전체 체인 +
+**과거 음성 실행 증거** — 이전 실제 하드웨어 live 단일 turn 실행
 
 알려진 제한 사항 / 다음 버전:
 - **Barge-in 미지원** — TTS 재생 중 발화는 backpressure를 통해 폐기됩니다(v2에서 취소 token을 추가할 예정).
 - **스트리밍 STT 미적용** — utterance 완료 후 batch transcription을 수행합니다. Moonshinev2를 사용한 chunk-by-chunk streaming의 도입이 다음 후보입니다.
-- **다중 화자 · long-memory 압축** — 단일 화자 가정, 24턴 제한.
+- **다중 화자 · 장기 메모리 압축** — 단일 화자를 가정합니다. lookup 기본은 최근 6턴, commit은 최신 24턴을 보존하며 이전 이력을 요약하지 않습니다.
 - **백그라운드 트리거(프로액티브)** — 설계되었으나 구현되지 않음.
 
 ## License / 외부 종속성

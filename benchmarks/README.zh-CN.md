@@ -1,9 +1,16 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=0b89132e34b3f81b00ea1a1094e3d311a10bdd1c97ec2ad1a029a8fcd066db26 -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=772f62d9128d37e75de2802065552e7b0eca1ddd6dabbc1bce79e829b67dcd83 -->
 # NeoGraph 对比 Python 图/流水线框架 — 引擎开销基准测试
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-在形状完全相同、且 **没有 I/O、没有 sleep、没有 LLM 调用** 的图上，测量 NeoGraph 相对于主流 Python 编排框架的每次调用开销。这些数字反映的是引擎自身的成本（节点调度、状态通道写入、reducer 调用），不是任何模拟工作的延迟。
+在没有 I/O、sleep 或模型调用的小型对应 workload 上测量 NeoGraph 与 Python framework 的每次调用引擎开销。
+测量包括 node dispatch、state-channel write 与 reducer 调用。
+带日期表格保留历史 engine 名称和依赖版本，不代表当前 package 版本或类型化 runtime 验证。
+当前 NeoGraph `0.13.0` recipe 需要 alpha SDK `0.1.0`、interface revision/shared generation 4 的匹配 header/library。当前集成验证尚未完成；下方 SDK3 cutover 和 notification cohort 保留为历史记录。
+
+Program admission、JavaScript control、SQLite/PostgreSQL 成本见
+[Measuring Program costs](../docs/PROGRAM_COST_MEASUREMENT.md)。
+该独立 matrix 包括 journal/checkpoint，不能作为下方无 checkpoint 的 Core 比较。
 
 比较的框架：
 
@@ -18,7 +25,7 @@
 
 ## 工作负载
 
-六个实现都定义完全相同的两个图，编译一次（适用时），然后在热循环中调用。
+六个实现移植相同的两个 workload，适用时编译一次，再在 hot loop 中调用。state/topology 变换如下。
 
 | Id | Shape | State |
 |----|-------|-------|
@@ -27,7 +34,7 @@
 
 所有框架都关闭 checkpointing。
 
-按框架翻译 workload 形状时需要两个移植点：
+三个移植需要 framework 特定的 workload 变换：
 
 * **Haystack** 没有 append reducer — 每个 worker 通过自己的类型化 socket 发出结果，summarizer 对列表长度求和。每次运行调度的组件数量相同。
 * **pydantic-graph** 是单一下一节点状态机，不能 fan out。`par` workload 被模拟为 6 节点串行链（`w1 → w2 → w3 → w4 → w5 → summ`）。结果中已标注 — 这不是 apples-to-apples 的并行 fan-out 测量。
@@ -56,7 +63,8 @@
 
 最右两列显示三个比值：相对于 v3.0.0 reference / 相对于 master worker=1 default / 相对于 master auto-worker mode。
 
-2026-04-29 的重新测量（上表）在每一行都复现了 2026-04-22 reference，误差在 ±10 % 以内 — 同一台机器、同一套工具链、同一 workload。README 的 headline claims（`seq` 上 LangGraph 130×、AutoGen 600×）在 master HEAD 上仍然成立。
+带日期的 `seq` 测量从 5.0 变为 5.25 µs，较为接近。`par` 随执行 mode 为 11.8、14.4、278 µs；
+并非所有 reference 行都在 ±10% 内复现，也不是当前 HEAD 测量。
 
 ¹ pydantic-graph 的 `par` 是串行 6 节点模拟 — 它不支持 fan-out。它不是并行 workload；为完整性而列出。
 
@@ -76,7 +84,9 @@
 
 第三个参数应用于 `par` 引擎，接受 `1`（默认）、`auto` 或任意正 worker 数。输出包含 `config\tpar_workers\t...` 行，因此保存的结果会保留其执行模式。
 
-headline 仍然成立：NeoGraph 在表中每一行都获胜，根据框架和配置不同，优势为 8×–600×。"`par` 上比 LangGraph 快 199×" 的 reference 在 2026-04-29 的 worker=1 测量中是 163×；auto-worker mode 用微基准开销换取阻塞节点或 CPU-bound 节点中的真实并发。
+历史 worker=1 `par` 比较中，LangGraph 的 2,261.55 µs 是 NeoGraph 14.4 µs 的 157.1 倍。
+使用 engine-owned pool 后比率为 8.1 倍。Haystack 与 pydantic-graph 几乎等于 NeoGraph 的 278 µs auto-worker 行。
+这些比率只描述对应 workload/configuration。
 
 ### 端到端进程指标
 
@@ -125,20 +135,31 @@ NeoGraph 使用 worker=1 默认值，因此 `par` 行测量的是拓扑、reduce
 
 ## 这些数字的含义
 
-1. **Python 阵营的每次运行引擎开销跨度约为 ~29× 到 ~642×。** Haystack 是最轻量的竞争者（带类型化 socket 的 DAG，运行时最小）；即便如此，它每个 seq iter 的成本仍比 NeoGraph 高 28.8×。另一端，AutoGen 是 NeoGraph 成本的 642×，原因是它每次运行都要设置多智能体状态。
-2. **NeoGraph 3.0 在两个维度上都优于 2.0。** 将 sync 和 async 合并到同一条协程路径并没有让引擎开销回退 — Release 构建中完整协程机制（`run_sync` + 每次调用的 io_context）低于 5 µs，而 2.0 宣称的 sync Taskflow 路径为 20.65 µs。
-3. **内存占用对 NeoGraph 有一个数量级或更大的优势。** 4.8 MB（NeoGraph）对比 Python 阵营的 35–101 MB。在 SBC 级目标（Raspberry Pi 级 RAM）上，这是关键指标 — 区别在于"轻松运行"和"谨慎运行"。
-4. **3.0 中并行 fan-out 是 opt-in。** NeoGraph 2.x 默认交付 Taskflow 的 work-stealing pool。3.0 默认交付协程路径（单线程调度，便宜），并通过 `engine->set_worker_count(N)` 暴露多线程池作为 opt-in — 这对 I/O-bound（LLM 延迟占主导）的 agent workloads 是正确默认值，否则会支付线程创建开销却没有加速。
+1. x86_64 reference `seq` 中 Python 开销相对 NeoGraph 从 Haystack 的 28.0 倍到 AutoGen 的 625.4 倍。
+   这是 framework/workload 测量，不是对成本来源的独立分析。
+2. reference 整进程 peak RSS 为 NeoGraph 4.5 MB，Python 实现 35.1–101.4 MB。
+   包括各 runtime/import，不是部署 application 的内存。
+3. worker=1 dispatch 与 engine-owned thread pool 是不同执行模式。应在目标 workload 中分别测量；
+   无工作 fan-out 暴露 coordination 成本，不能预测模型或 I/O latency。
 
 ## 注意事项 — 此基准未测量的内容
 
-* **真实 agent workloads。** LLM 主导的流水线瓶颈在 provider latency（每次调用 100ms–10s）。在该尺度下，引擎开销会消失。心智模型：NeoGraph 3.0 约 5 µs/call，Haystack 约 144 µs，LangGraph 约 657 µs，LlamaIndex/AutoGen 约 2–7 ms — 相比 500 ms API round trip 都不可见。这个 bench 对非 LLM 节点、密集 agent 编排和启动开销重的部署有意义。
+* **真实 agent workload。** framework 比较没有 model inference、network request 或 tool I/O。
+  这些成本可能主导 application，因此表格不能证明 end-to-end agent speedup。
 * **Framework-appropriate workloads。** AutoGen、LlamaIndex 和 pydantic-graph 各自优化不同范式（multi-agent chat、event-driven long-running workflows、state-machine control flow），本 bench 没有覆盖这些场景。我们是在 NeoGraph 的主场上测量它们。
 * **Checkpoint throughput。** 如果在每个框架上启用 persistence，serialization cost 会占主导；那是另一个 benchmark。
 * **Cold start。** 每个实现都在测量前包含 10-iter warm-up loop。整进程数字包含 Python 解释器启动（约 200ms）和框架 import 时间，差异很大（LlamaIndex 和 AutoGen import 大量 trees）。
-* **Fairness。** NeoGraph 使用 CMake `-DCMAKE_BUILD_TYPE=Release` 构建，在 GCC 上解析为 `-O3 -DNDEBUG`。每个 Python 框架都是 stock CPython 3.12，加上当前 pip 安装版本 — 这是典型生产部署，没有自定义调优。历史说明：3.0 之前的 README 写的是 `-O2`，因为那是独立 bench 命令使用的选项；CMake build 的 `Release` 一直解析为 `-O3`。
+* **公平性。** NeoGraph 使用 CMake `-DCMAKE_BUILD_TYPE=Release`，GCC 下为 `-O3 -DNDEBUG`。
+  Python 使用 stock CPython 3.12 与各 cohort 记录的依赖版本，没有自定义 tuning。
+  历史 3.0 之前 README 的 `-O2` 属于 standalone 命令；CMake Release 使用 `-O3`。
 
 ## Reproduce
+
+当前 source build，包括 Core-only benchmark，均需要外部 `SchemaProvider::runtime` package。
+CMake 3.20+ 按显式 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、已安装 runtime、固定 public GitHub source archive 的顺序选择。
+`NEOGRAPH_FETCH_SCHEMAPROVIDER` 默认 ON；使用 package/显式 source 的 offline 构建应设为 OFF。
+复现命令构建维护中的目标，不会重建历史 binary 或自动固定表格中的 Python 版本。
+显式 checkout 或已安装 package 必须提供 interface/shared generation 4。新输出应单独保存；历史表格与 JSON 不是 SDK4 结果。
 
 ```bash
 # Build native Core + v1 Program benchmarks (Release is required for
@@ -178,6 +199,17 @@ records. Report the median of the measured samples after the explicit warmup;
 do not compare a single short run. `bench_program` uses in-memory stores and
 no provider/network calls. `bench_program_dispatch` measures only immutable
 `ProgramPlan` lookup and descriptor traversal, not Core execution.
+
+serialization POC 是 offline/in-memory 测量，使用已完成 Program 的不可变 publication。
+serialization POC 测量 canonical byte 重用；binary POC 比较当前 canonical JSON envelope
+与保留每个嵌套 record canonical byte 的 length-prefixed envelope。
+binary 数值是 lower-bound 实验，不是 persistence 契约的替代。
+
+独立 opt-in 的 `bench_program_codec_poc` 比较相同嵌套 canonical byte 的 protobuf/Cap’n Proto transport envelope。
+`*_envelope_only_*` 只测量 byte 已准备好后的 envelope 构建。
+`*_transport_total_lower_bound_*` 还包括嵌套 canonical byte 构建，但跳过 `ProgramTransitionPublication` 的 outer cross-record 验证。
+不是 persistence/identity format benchmark。只有 recovery metric 将数据恢复为 owning Program record，建模完整接收 consumer。
+这些 POC 均不测量 SQLite/Postgres transaction 或 end-to-end ProgramRuntime latency。
 
 The Python framework comparison remains optional and requires third-party
 packages:
@@ -223,12 +255,18 @@ Versions:  langgraph 1.1.7, haystack-ai 2.27.0, pydantic-graph 1.84.1,
            llama-index-core 0.14.20, autogen-agentchat 0.7.5
 ```
 
-Numbers will vary on your hardware, but the ratios should be stable to
-within ~20%.
+hardware、runtime 版本、workload 和 worker mode 都能改变 latency 与比率；
+此文档不建立跨平台容差。
 
 ## Typed provider 切换：实际 GraphEngine 前后测量
 
+以下 cutover、最终验证和 handoff cohort 在 retained-feature 集成之前使用 SDK interface/shared generation 3 测量。记录中的 “current” 和 “final” 指当时的 cohort，不是当前 SDK4 release。数值、数量和所链接 dataset 保持不变。
+
 这是独立于上方 Python 框架比较的 **本地 TLS HTTP/SSE** 测量，不是模型推理时间。static Release/GCC13.3/Linux x64 下，经过生产 `GraphEngine.llm_call/tool_dispatch` 路径的 **16项配置 × 3个独立进程 = 48条记录**全部通过。覆盖3个共同 H1 负载、5个 family 的 buffered/SSE native continuation，以及3个实际 H2 负载。测量期间没有编译或付费调用。
+
+[原始9条记录](provider-cutover-legacy-results.json) 来自未改动的 `7b47ad43`。
+[当前 raw 记录](provider-cutover-current-results.json) 与 [scalar 比较](provider-cutover-summary.json)
+保留实际 control、distribution、RSS/thread、peer counter 与 owned outcome。
 
 | 共同图负载 | 前 p50 ms | 后 p50 ms | 前图/s | 后图/s | 前 peak RSS MiB | 后 peak RSS MiB |
 |---|---:|---:|---:|---:|---:|---:|
@@ -240,7 +278,24 @@ within ~20%.
 
 完整 owned raw/native/nullable 数据及权限校验增加 text 成本与内存，buffered tool p50 略增；SSE 消除了 legacy buffered 路径延迟。旧实现不支持 native/nullable 权限和部分 worker 控制，因此不声明语义/资源等价或模型加速。
 
-[原始9条记录](provider-cutover-legacy-results.json)、[当前48条](provider-cutover-current-results.json)、[p95/p99、取消、扩展 family](provider-cutover-summary.json)、[准确复现命令](README.md#typed-provider-cutover-actual-graphengine-beforeafter)。
+
+```sh
+cmake -S . -B build-provider-bench -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=OFF -DNEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=OFF \
+  -DNEOGRAPH_BUILD_TESTS=OFF -DNEOGRAPH_BUILD_EXAMPLES=OFF \
+  -DNEOGRAPH_BUILD_PROGRAM=OFF -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+  -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE_DIR" \
+  -DSP_BUILD_TESTS=OFF -DSP_BUILD_BENCHMARKS=OFF
+cmake --build build-provider-bench --target neograph_provider_cutover_benchmark
+for config in benchmarks/provider_cutover_h1_*.json benchmarks/provider_cutover_extended_*.json; do
+  build-provider-bench/neograph_provider_cutover_benchmark --config "$config" || exit "$?"
+done
+```
+
+在 NeoGraph root 准备 Node.js/OpenSSL CLI 与 SDK 的通常依赖后执行。
+peer 使用临时 private CA，不替换 system trust 或依赖 library。
+原始 raw evidence 保留，不以当前实现重新计算。
+
 
 
 ## 最终验证 cohort：fresh typed provider GraphEngine 测量
@@ -279,3 +334,24 @@ within ~20%.
 | tool SSE | 600.539987 | 35.800113 | 51.429767 | 627.047345 |
 
 前值仍为原始7b47ad43 cohort。Text latency 上升、throughput 下降；buffered-tool 变化较小，SSE 去除了旧 buffered-path delay。不重算或覆盖历史值。扩展 family/protocol、first-semantic、cancellation、native replay、retained-outcome 事实保留在最终 summary/raw record；benchmark 证据不加强付费 native-consumption/cryptographic-validation 声明。
+
+## 事件驱动 Provider handoff：同条件 polling 与 coalesced channel
+
+[实测summary](provider-notification-summary.json)：每cohort8配置 ×3 fresh process =48 record、4800 measured graph run、失败0；5280 warmup/measured outcome在provider销毁后仍有效。GCC13.3 Release static/hardened、native optimization OFF、相同local TLS oracle/admitted control、每process10warmup/100measured、无同时compiler及有料/模型推理。值为process统计中位数，不是confidence interval或模型token rate。Payload为fixture text padding；0仍产生253B响应envelope。
+
+| H1 负载 | 前 p50 ms | 后 p50 ms | 前 graph runs/s | 后 graph runs/s |
+|---|---:|---:|---:|---:|
+| text256, concurrency1 | 1.302474 | 0.952992 | 738.901074 | 1022.958838 |
+| text0, concurrency1 | 1.286646 | 0.912571 | 761.940993 | 1070.657541 |
+| text4KiB, concurrency1 | 1.387636 | 1.128831 | 709.024147 | 870.631703 |
+| text64KiB, concurrency1 | 4.873767 | 4.144619 | 196.243991 | 240.268946 |
+| text256, peer delay5ms | 6.601920 | 6.425313 | 146.906115 | 155.052016 |
+| text256, concurrency32 | 7.641085 | 6.939675 | 1645.559595 | 1803.087419 |
+| tool buffered, concurrency32 | 30.548201 | 31.348443 | 710.487696 | 692.440963 |
+| tool SSE, concurrency32 | 33.597342 | 38.607118 | 655.586834 | 611.740359 |
+
+小text p50下降26.83%、吞吐增加38.44%；tool/SSE吞吐下降2.54%/6.69%。每请求native handle/reuse方案因并发成本较大被拒绝。最终保留既有capacity-one concurrent-channel、无分配intrusive shutdown guard、active-drain coalescing及SDK `join()`/所有权/权限fence。独立计测180-operation cohort的SDK publication→drain p50为383.7125→36.4165µs、timer wait298→0、最终notification wait180；未混入production延迟表，一时probe已移除。
+
+43项targeted regression、200轮ASan/UBSan concurrent publisher/context-teardown通过。仅使用installed SDK public header/archive的consumer验证300次measured SSE tool-loop graph/600次HTTP及销毁后330个retained outcome。TSan无法执行（PIE mapping失败/non-PIE exit139），不声明race-free。Resource peak为1ms sample。Runtime qualification仅Linux/POSIX，不代表Windows/macOS/Python/有料vendor兼容。
+
+SIMD审计：yyjson0.12.0刻意使用scalar/unrolled scan和packed-word UTF-8检查，不是缺少开关的AVX parser。[Upstream SSE2 PR294拒绝理由](https://github.com/ibireme/yyjson/pull/294#issuecomment-5159789685)。最终parser symbol有scalar SSE/copy指令但无AVX scanning；独立SDK `-O3` number helper有packed SIMD，archive顺序却选择NeoGraph末尾`-O2` object。前后object SHA256在summary中一致。Host CPUID/OSXSAVE/XCR0=7仅证明可执行AVX2，不代表parser使用。A/B未混入ISA/parser tuning，完整验证仍为Ω(B)。

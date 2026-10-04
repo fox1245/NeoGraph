@@ -471,12 +471,11 @@ other Program nodes. It directly schedules `sequence`, `branch`, `return`,
 bounded `loop`/`retry`, `parallel`, `race`, `cancel`, `await`, `emit`,
 `checkpoint`, `map`, `quorum`, and bounded child operations.
 
-That vocabulary is now a frozen legacy implementation and migration input. New
-general computation constructs do not extend `ProgramOperationKind` or the
-Program-v2/v3/v4 JSON schemas. JavaScript expresses ordinary control flow and
-yields only NeoGraph domain commands. Legacy operations remain available only
-for correctness fixes, stored-version drain, and equivalence/migration
-evidence until the announced cutover removes them.
+The typed operation vocabulary remains shared storage and trusted-C++ embedding
+infrastructure. It is not a public Program JSON authoring frontend. JavaScript
+expresses ordinary control flow and yields only NeoGraph domain commands.
+Retaining `ProgramOperationKind` or Program-v2/v3/v4 storage schemas does not
+authorize a second source compiler or hidden Harness fallback.
 
 ProgramRuntime is therefore an intentional second **scheduling domain**, but not
 a second node executor. It owns readiness and joins for Program operations,
@@ -492,6 +491,44 @@ The current source-level compatibility boundary is code, schemas, and tests.
 The replacement authoring and removal sequence is defined only by
 [`QUICKJS_CONTROL_MIGRATION.md`](QUICKJS_CONTROL_MIGRATION.md); the retired DSL
 roadmaps are not future implementation authority.
+
+### Typed provider boundary
+
+`Provider` exposes three virtual operations: `get_name()`, `family()`, and
+`prepare(ProviderRequest)`. Preparation validates and encodes the request without
+dispatching it. `dispatch` / `dispatch_async` consume the move-only
+`PreparedProviderRequest`; `invoke` / `invoke_async` prepare and dispatch a
+`ProviderRequest`. The prepared operation owns the client and request state, so
+neither the original request nor the Provider object must outlive scheduling.
+`CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`,
+`RateLimitedProvider`, and `SchemaPrimitiveRegistry` are removed, without aliases.
+
+`SchemaProvider` takes a closed `sp::descriptor::ValidatedDescriptor`,
+`sp::runtime::Options`, and optional typed `SchemaProvider::Defaults`.
+Defaults fill missing OpenRouter routing fields and empty routing lists;
+an explicitly supplied optional value, including `false`, wins. Responses
+`store` falls back to `responses_store` only when omitted. Credentials live
+in runtime options. The SDK owns transport, codecs, and provider retry policy;
+descriptors do not install executable primitives or override raw request JSON.
+
+The result is an immutable owned `sp::runtime::Result` containing a Completion
+or Failure. Keep the ordered `sp::Message` parts, native continuation, raw wire
+observations, attempt metadata, and any partial failure together.
+`RunConfig::provider_messages` supplies full SDK history. C++ and Python
+`RunResult` retain `native_messages` and `provider_outcomes`; neither has a
+`provider_history` alias. `ProviderLoopHistory::snapshot()` exposes per-slot
+message/turn history separately.
+Graph `ChatMessage` values remain portable convenience projections.
+`history::sanitize_tool_calls` validates full SDK call/result pairing without
+editing parts. `compact_history` summarizes only an unsealed text-only prefix
+and retains non-text parts and native replay groups unchanged.
+
+Provider-reported usage has nullable counters: missing means unknown.
+`UsageAccumulator` keeps token charges, outstanding conservative reservations,
+reports, and effect identities separately. A report is evidence, not by itself
+a new spending grant. Recorded provider playback observes that bank without
+settling or refunding it; newly executed replay CPU/Core work still consumes
+the transferred remainder described below.
 
 ### Boundedness
 
@@ -549,7 +586,7 @@ archive is rejected by the existing native archive boundary.
 
 **Native-custody pre-I/O gate; exercised suite/probes below.** Beginning a managed effect requires a genuinely bound NativeArchive or the actual local store-issued private C++ retention capability before any pending-effect, slot or held-window mutation. The private capability is never imported from JSON or transferred over the wire. gRPC requires real client and server archives even when the remote backend is InMemory, because a C++ sidecar cannot cross that boundary. Original anonymous owner scope remains empty when no archive supplies a finite source owner; a real archive binding must match the original scope. Financial head/lease evidence alone does not prove native-custody readiness.
 
-`ProviderOutcomeError` is the common outcome-preserving host-error base; `ProviderObserverError` and `ProviderDispatchOutcomePersistenceError` retain the complete drained SDK result and original `cause()`. The persistence error also retains secondary observer failure in `delivery_error()`. `ProviderFailure::outcome()` retains the SDK failure itself. These are evidence, not permission for Node/Program to redispatch: the SDK is the sole owner of provider retries, and a caller-selected `max_output_tokens` is never silently clamped.
+`ProviderOutcomeError` is the common outcome-preserving host-error base; `ProviderObserverError` and `ProviderDispatchOutcomePersistenceError` retain the complete drained SDK result and original `cause()`. The persistence error also retains secondary observer failure in `delivery_error()`. `ProviderFailure::outcome()` retains the SDK failure itself. These are evidence, not permission for Node/Program to redispatch: the SDK is the sole owner of transport retries, and a caller-selected `max_output_tokens` is never silently clamped. Interface 4 excludes that cap only from native replay configuration. Every larger-cap semantic call still needs a new prepared digest, distinct deterministic call ordinal, original resource-bank admission and the original deadline; native history cannot repair a failed seal or renew credit.
 
 `ProgramFailure` retains live `provider_outcome` and `provider_cause`. Its canonical factual SDK witness binds genuine archive custody to owner/run/version/bundle/operation/attempt; Runtime eagerly restores configured custody before exposing a recovered failure. Public data-only `ProgramResult::create()` cannot bypass this with a prefilled witness, and an unresolved parsed seal is not an executable result. After process restart the original exception pointer is unavailable (`provider_cause == nullptr`), not recreated from text. A failure that cannot be persisted cannot be serialized, published or replayed.
 
@@ -561,7 +598,7 @@ archive is rejected by the existing native archive boundary.
 
 **Native-axis observations, not cryptographic verification or native consumption/equivalence.** Generate accepted mutation, omission and duplication. Interactions accepted the isolated genuine source/positive control, one-owner signature mutation, thought-carrier omission, call-carrier omission and duplication. Removing all thoughts/signatures returned generic400; removing all signature fields while keeping THOUGHT items also returned generic400. The last capture had a local encoded-original retention control, not a same-capture server positive; the earlier positive cohort remains genuine. These observations establish an aggregate-carrier-absence boundary only, not issuer/signature validation or vendor consumption. Actual reports: SDK `config/qualification-extension-results.json`, `qualification-final-summary.json`, `qualification-native-axis-results.json`, `qualification-combined-omission-results.json`, `qualification-signature-presence-results.json`; prerequisite-failed/not-run/negative-inconclusive states remain factual. Thought-only/carrier-only omissions were accepted while another carrier remained; this does not strengthen issuer-validation or native-consumption claims.
 
-**Actual integrated proof and remaining limits.** Latest Core full run:2242 tests, zero failures,16 skips (14 RAM process-loss cases not applicable; two live-credential gates),130.17seconds. `PgNestedJsonRoundTrips` preserved exact duplicate keys/order/null metadata, blob and residual in0.18seconds. The unchanged original shared-bank fork and existing Recorded CPU/Memory await/handoff scenarios passed. Real wrappedMemory/SQLite/PostgreSQL/gRPC finite130/hold65/lower129/strip/old-head/pruning/no-archive/import probes passed plain and ASan+UBSan. LOCAL Memory/SQLite/PostgreSQL TSan scopes:seven passed,zero warnings. Full mixed gRPC plus system Abseil/Protobuf TSan exited66 with402 race warnings in dependency/generated-RPC stacks: an instrumentation/coverage limit, not a proven false positive; remote TSan/race-freedom is NOT claimed and no warning is suppressed. Installed find_package Program C++/C ABI/dualQuickJS three consumers passed. Fresh installed NeoGraph/SchemaProvider typed consumer passed two real HTTP requests, provider destruction before coroutine start, native/tool replay, refusal,known-zero/raw retention and actual LinkedMismatch rejection. Browser Alice/Bob isolation and generation2 replacement were visually verified; PostgreSQL Program Chat six black-box tests passed18.989seconds. Latest SDK26/26 passed,zero failures,74.07seconds. Final ReleaseGraph16 configurations ×3 fresh process repetitions/48 records completed38.29seconds,zero failures,all actual protocol/owned-outcome checks passed. NeoGraph `benchmarks/provider-cutover-final-results.json` and `benchmarks/provider-cutover-final-summary.json` retain this separate final cohort. No compiler or paid model ran during measurement; historical cohorts stay unchanged and semantic/resource equivalence is not claimed. Unstable SDK/ABI3 is not a stable release or broader-platform qualification.
+**Historical integrated evidence and remaining limits (recorded before this documentation reconciliation).** The recorded Core full run had 2242 tests, zero failures and 16 skips (14 RAM process-loss cases not applicable; two live-credential gates), in 130.17 seconds. `PgNestedJsonRoundTrips` preserved exact duplicate keys/order/null metadata, blob and residual in0.18seconds. The unchanged original shared-bank fork and existing Recorded CPU/Memory await/handoff scenarios passed. Real wrappedMemory/SQLite/PostgreSQL/gRPC finite130/hold65/lower129/strip/old-head/pruning/no-archive/import probes passed plain and ASan+UBSan. LOCAL Memory/SQLite/PostgreSQL TSan scopes:seven passed,zero warnings. Full mixed gRPC plus system Abseil/Protobuf TSan exited66 with402 race warnings in dependency/generated-RPC stacks: an instrumentation/coverage limit, not a proven false positive; remote TSan/race-freedom is NOT claimed and no warning is suppressed. Installed find_package Program C++/C ABI/dualQuickJS three consumers passed. Fresh installed NeoGraph/SchemaProvider typed consumer passed two real HTTP requests, provider destruction before coroutine start, native/tool replay, refusal,known-zero/raw retention and actual LinkedMismatch rejection. Browser Alice/Bob isolation and generation2 replacement were visually verified; PostgreSQL Program Chat six black-box tests passed18.989seconds. The recorded SDK run had26/26 passes,zero failures,74.07seconds. Final ReleaseGraph16 configurations ×3 fresh process repetitions/48 records completed38.29seconds,zero failures,all actual protocol/owned-outcome checks passed. NeoGraph `benchmarks/provider-cutover-final-results.json` and `benchmarks/provider-cutover-final-summary.json` retain this separate final cohort. No compiler or paid model ran during measurement; historical cohorts stay unchanged and semantic/resource equivalence is not claimed. Unstable SDK/ABI3 is not a stable release or broader-platform qualification. These are retained historical observations, not a new verification of the current Python/provider changes.
 
 
 ### JavaScript authoring boundary
@@ -1052,13 +1089,23 @@ Rules:
   checkpoint, activation, or lineage value; Python-standard alternatives remain
   preferred for generic JSON/schema manipulation.
 
-Dependency selection is not part of the Core/Program redesign. The preserved
-baseline is yyjson, cpp-httplib, standalone Asio, concurrentqueue, cppdotenv,
-SQLite3, libpq, and opt-in protobuf/gRPC and libcurl. Substituting any of these
-requires a separate architecture decision with performance, allocation,
+The typed provider cutover adds a required `SchemaProvider::runtime` dependency
+to `neograph::core`'s public link interface. CMake 3.20 or newer resolves it in
+this order: explicit `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`, an installed runtime
+package, then the immutable public GitHub source archive pinned in
+`cmake/NeoGraphSchemaProvider.cmake`. The fetch fallback is enabled by default;
+`NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` requires an installed package or explicit
+source checkout and is suitable for offline builds. Disabling Program or
+QuickJS does not remove this dependency. The SDK runtime uses libcurl;
+`NEOGRAPH_USE_LIBCURL` controls NeoGraph's separate async HTTP backend and does
+not select SchemaProvider's transport.
+
+The remaining dependency baseline is yyjson, cpp-httplib, standalone Asio,
+concurrentqueue, cppdotenv, and optional SQLite3, libpq, and protobuf/gRPC
+components. Further substitutions require separate performance, allocation,
 binary-size, compile-time, ABI, license, security, supported-platform, and
 static/shared installed-consumer evidence, plus removal of the replaced stack.
-Heavy optional dependencies remain default-off.
+Program and QuickJS remain default-off; the SDK runtime is not optional.
 
 ## Performance contract
 
@@ -1335,12 +1382,13 @@ surfaces, while source authoring has one public language: JavaScript.
   trusted C++ embedding API; new Programs use JavaScript generator `main()`.
   Both retain the same validation, admission, activation, durability, effect,
   and GraphEngine boundaries.
-- Program-v2/v3/v4 operation-tree authoring and Harness `mode: "program"` remain
-  frozen migration surfaces under the separate Program drain plan.
+- Harness `mode: "program"` / `"program_json"` rejects new Program JSON
+  authoring. Program-v2/v3/v4 schemas remain canonical storage and trusted-C++
+  operation infrastructure, not a public authoring mode.
 - Existing MCP method names may remain as transport compatibility, but adapters
   do not own another compiler or runtime.
-- The Core elaborator is deleted; legacy Program parser/dispatcher removal
-  remains governed by the stored-version drain plan.
+- The Core elaborator is deleted. Any further shared Program parser/dispatcher
+  removal must preserve trusted C++ embedding and stored-version custody.
 - Superseded DSL and Control-VM studies are removed from the live documentation;
   repository history remains the historical record.
 

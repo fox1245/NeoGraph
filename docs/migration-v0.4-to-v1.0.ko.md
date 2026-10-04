@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ko source_sha256=47da3b0da6a1a0469315657c9eb8079b216d0c51eafce0bed090d91fc5c3c7b5 -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ko source_sha256=adeaef39bec37687c1e660e3ffbf89611002f53fd28b2a1d3aebd5b1fb664991 -->
 # 이전 안내: 기존 8 가상 함수 → `run(NodeInput)` (v0.4.x → v0.9+)
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -6,6 +6,8 @@
 NeoGraph v0.4는 노드 진입점을 단일 `run(NodeInput) -> awaitable<NodeOutput>`으로 통합했다. 기존 8개 가상 함수 (`execute` / `execute_async` / `execute_stream` / `execute_stream_async`와 각각의 `_full` 대응)는 v0.4.x에서 사용 중단(deprecated)되었고 v1 준비 릴리스인 v0.9.0에서 제거되었다. 이 문서는 기존 노드를 현재 API로 이전하는 절차를 설명한다.
 
 > v0.9.0 이후로는 `run(NodeInput)`을 구현하지 않은 C++ 하위 클래스는 추상 클래스로 컴파일에 실패한다. Python 하위 클래스도 `run(self, input)`을 구현해야 한다.
+
+이벤트 기반 Provider dispatch는 별도 pre-v1 필수 재빌드 경계다. `CancelToken`은 `std::stop_source`를 사용하고 executor 독립 native subscription용 `stop_token()`을 제공한다. 기존 `cancel()`, `is_cancelled()`, `fork()`, `bind_executor()`, `slot()` callsite는 소스 호환이지만 이전 inline 구현은 바이너리 호환이 아니다. 모든 C++ 소비자/extension을 일치하는 NeoGraph header/library로 재컴파일하며 shared library만 바꾸어서는 안 된다. 알림은 SDK `join()`, FIFO 소유 outcome, 절대 deadline, admission/권한 예산을 보존한다. [ABI 정책](ABI_POLICY.md)과 [동일 조건 실측](../benchmarks/provider-notification-summary.json)을 참조한다.
 
 ## 왜 이전하는가
 
@@ -275,9 +277,15 @@ grep -lE 'execute\(const GraphState' src/**/*.cpp
 
 # 이전 2: typed lossless Provider 전환 (필수 재컴파일)
 
-소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 불안정 `0.0.0`, interface revision 3 / shared ABI 3이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. 현재 runtime/archive는 Linux/POSIX이며 Windows·macOS·WASM runtime 검증을 뜻하지 않는다. Python provider binding/wrapper는 유예되었고 이 C++ 변경으로 포팅되지 않는다.
+소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 alpha `0.1.0`, interface revision 4 / shared ABI 4이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. 기록된 interface-3 SDK runtime/archive 검증은 Linux/POSIX 범위이며 interface 4를 검증하지 않는다. Windows NTFS와 macOS 구현이 있으나 새 platform 검증에는 runtime 증거가 필요하며 WASM provider runtime 검증은 입증되지 않았다.
 
-Fresh installed find_package Program C++/C ABI/dualQuickJS consumer와 NeoGraph/SchemaProvider typed2-request lifetime/native/raw/mismatch consumer가 pass했다. Interface/ABI 선언만과 실제 package 결과는 별개이며 더 넓은 platform이나 stable release를 주장하지 않는다.
+제거된 `Provider::complete`, `complete_async`, `complete_stream`, `complete_stream_async` 호출은 명시적 mode 요청과 `invoke` / `dispatch`(또는 C++ async peer)로 이전한다. `Agent::complete`는 소유 결과를 반환하는 별도 one-turn API로 남는다.
+
+CMake 3.20 이상이 필요하다. Core가 소유 typed provider 계약을 공개하므로 `NEOGRAPH_BUILD_LLM=OFF`여도 SchemaProvider runtime은 필수다. 명시적 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`를 우선하고 없으면 설치된 `SchemaProvider` runtime package를 찾는다. 없고 `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON`(기본)이면 `cmake/NeoGraphSchemaProvider.cmake`에 고정된 불변 GitHub archive를 다운로드한다. Offline build에서는 SDK를 설치하고 `CMAKE_PREFIX_PATH`에 prefix를 지정한 뒤 `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`를 준다. Sibling checkout을 추측하거나 제거된 bundled interpreter를 선택하지 않는다. NeoGraph 선택적 HTTP module을 꺼도 SDK runtime의 transport 의존성은 필요하다. 기록된 SDK runtime/archive 검증은 Linux/POSIX 범위다. Windows NTFS와 macOS 구현이 있으나 새 platform 검증에는 runtime 증거가 필요하며 WASM provider runtime 검증은 입증되지 않았다.
+
+Python도 C++과 같은 소유 request/outcome 경계를 제공한다: `make_provider_request`, `Provider.prepare`, `dispatch`, `invoke`. Provider 기록에는 typed part를 가진 `ProviderMessage`를 사용하며 `ChatMessage`는 그래프 편의 projection으로 남는다. SDK 실패는 `ProviderOutcome.failure`로 읽고 host observer/settlement 예외는 `outcome`과 `cause`를 보존한다. 생성자와 GIL/콜백 동작은 [Python binding 안내](python-binding.md)를 참조한다.
+
+Interface 4 이전 installed find_package Program C++/C ABI/dualQuickJS consumer와 NeoGraph/SchemaProvider typed2-request lifetime/native/raw/mismatch consumer가 pass했다. 이는 과거 package 결과이지 interface-4 pass 주장이 아니다. 더 넓은 platform이나 stable release를 주장하지 않는다.
 
 공개 계약은 소유 typed 준비/dispatch이며 동기·비동기 가상 completion 쌍이 아니다. `ProviderRequest.payload`는 Chat, Messages, Responses, Gemini, Interactions의 SDK 요청 variant이다. `ProviderMode::Collect` / `Stream`은 관측자 유무와 독립적으로 전송을 선택한다. `on_event`는 빌린 typed `sp::Event` view를 받는다. 콜백 이후 필요한 데이터만 복사한다. raw JSON override나 portable projection을 통한 native 권한 가져오기는 허용되지 않는다.
 
@@ -286,10 +294,21 @@ Fresh installed find_package Program C++/C ABI/dualQuickJS consumer와 NeoGraph/
 #include <neograph/runtime_interposition_consumer.h>
 #include <neograph/controlled_provider.h>
 
-// Public operation signatures (the only virtual operation is prepare).
-// ProviderRequest owns the SDK request variant, mode, options and observer.
-// invoke[_async](request) = prepare once, then dispatch the same handle.
-// dispatch[_async](prepared) returns sp::runtime::Result.
+// Selected public declarations from neograph::Provider.
+class Provider {
+public:
+    virtual ~Provider() = default;
+    virtual std::string get_name() const = 0;
+    virtual std::string_view family() const noexcept = 0;
+    virtual PreparedProviderRequest prepare(ProviderRequest request) = 0;
+    sp::runtime::Result dispatch(PreparedProviderRequest request);
+    asio::awaitable<sp::runtime::Result> dispatch_async(PreparedProviderRequest request);
+    sp::runtime::Result invoke(ProviderRequest request);
+    asio::awaitable<sp::runtime::Result> invoke_async(ProviderRequest request);
+    static std::string request_digest(const PreparedProviderRequest& request);
+    static std::optional<std::uint64_t> conservative_token_upper_bound(
+        const PreparedProviderRequest& request);
+};
 ```
 
 ### ProviderRequest / ProviderControls
@@ -313,13 +332,28 @@ sp::runtime::Result call_provider(
 }
 ```
 
+Interface 4는 retained per-call control을 `extra_fields` dictionary가 아닌 typed field로 보존한다:
+
+| Family | 추가 `ProviderControls` |
+|---|---|
+| Chat | `chat_reasoning`, `include_reasoning`, `usage_include`, `models`; 선언된 OpenRouter origin이 필요하다. Scalar `reasoning_effort`는 별개다. |
+| Responses | `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity`, `truncation`, `responses_include`. |
+| Messages | `thinking_mode`, `output_effort`, `cache_control`, `messages_tool_choice`, 선언된 origin의 OpenRouter `provider` routing. |
+| Gemini Generate | `gemini_history_mode`, `gemini_thinking_level`, `temperature`, `safety_settings`, `gemini_tool_choice`. |
+
+Messages manual thinking은 policy가 허용한 output cap보다 작은 budget이 필요하다. Adaptive/disabled mode에는 thinking budget을 지정할 수 없다. Manual/adaptive thinking은 유효한 temperature를 생략하지만 잘못된 값과 model이 금지한 temperature는 생략 전에 거부한다. Disabled thinking은 승인된 temperature를 출력한다. Model-prefix 제한은 승인된 policy 사실이며 전체 model이나 마지막 `/` 뒤 suffix를 ASCII 대소문자 구분 없이 비교한다. Gemini thinking level과 thinking budget, typed tool choice와 `required_tool`은 각각 함께 지정할 수 없다. 지원하지 않는 family/origin/value 조합은 I/O 전에 거부한다.
+
 ### PreparedProviderRequest / ProviderBudgetClaim
 `prepare()`는 검증·인코딩을 정확히 한 번 수행하고 원래 deadline과 취소 상태를 가진 이동 전용 `PreparedProviderRequest`를 만든다. 영속 호출자는 `Provider::request_digest()`를 assembly에 바인딩하고 승인된 예산 claim을 예약하며 dispatch receipt를 기록한 다음 같은 핸들을 `ControlledProvider::dispatch_prepared(_async)`로 소비한다. gate 이후 요청을 재생성하지 않는다. 중복 receipt는 재전송하지 않는다. 사용자 공급자는 `get_name()`, `family()`, `prepare()`를 구현하고 `prepare_runtime()` 또는 `prepare_local()`을 사용한다. local callback은 `this` 대신 소유 shared 상태를 캡처한다.
 
 선택적 `ProviderControls`는 호출자 선택이며 강제 기본값이나 몰래 clamp한 cap이 아니다. family가 지원하지 않는 제어는 dispatch 전에 거부한다. 유한 예산 호출에는 승인된 실제 모델 input/output 한계가 필요하며 없으면 `LimitUnknown`으로 실패한다. 예약은 보수적인 지출 권한이지 보고 사용량·예측·청구서가 아니다. 미상/부분/delivery-unknown 결과는 hold를 유지하고 실제 최종 보고로 정산하며 초과 보고도 전부 청구한다. 재시도는 단일 명시적 계층이며 기본 off, 유한 window와 unknown-prior hold를 사용한다. 숨은 재전송은 없다.
 
 
-공급자 호출은 `sp::runtime::Result`, 즉 `sp::Completion` 또는 `sp::Failure`를 담은 불변 소유 `std::shared_ptr<const sp::Outcome>`를 반환한다. 표시 텍스트만이 아니라 전체 결과를 보존한다. 순서 있는 메시지/파트, native continuation, 전체 wire envelope, 순서 있는 raw 관측, 중단 근거와 실제 시도 메타데이터는 호출 및 클라이언트 소멸 후에도 남는다. 사용량은 근거·단계·품질을 갖는 nullable `uint64_t`이며 누락은 0이 아니라 미상이다. 실패도 원래의 부분 결과를 보존한다. `ProviderFailure::outcome()`과 `ProviderObserverError::outcome()`은 실제 결과를 보존하며 후자의 `cause()`에는 관측자 예외가 남는다.
+공급자 호출은 `sp::runtime::Result`, 즉 `sp::Completion` 또는 `sp::Failure`를 담은 불변 소유 `std::shared_ptr<const sp::Outcome>`를 반환한다. 표시 텍스트만이 아니라 전체 결과를 보존한다. 순서 있는 메시지/파트, 보존된 native continuation과 family가 제공한 wire 증거, 순서 있는 raw 관측, 중단 근거와 실제 시도 메타데이터는 호출 및 클라이언트 소멸 후에도 남는다. `input_total`, `output_total`, `total` 같은 사용량 카운터는 `std::optional<sp::Count>`이며 존재하는 count는 `uint64_t value`와 `Evidence`를 가진다. `Usage`에는 stage, quality, conflict도 남는다. 누락은 미상이며 0을 만들어 넣지 않는다. 실패도 원래의 부분 결과를 보존한다. `ProviderFailure::outcome()`과 `ProviderObserverError::outcome()`은 실제 결과를 보존하며 후자의 `cause()`에는 관측자 예외가 남는다.
+
+Wire 증거는 family가 제공하며 선택적이다. `sp::Completion::wire_envelope`는 null일 수 있다(Python의 `ProviderCompletion.wire_envelope`는 `None`). 현재 buffered Chat은 전체 응답 JSON을 `raw_events`의 `RawWire`에 보존한다. 이 관측은 `type == "chat.completion"`이고 문서는 `payload`에 있으며 `wire_envelope`는 null로 남는다. Family가 실제 보존한 위치에서 증거를 읽으며 fallback envelope를 만들어 넣지 않는다. Native continuation과 raw buffer는 보호된 증거로 유지되고 trace payload에서 제외된다.
+
+`UsageAccumulator::snapshot()`은 누적 보고를 반환한다. `total_tokens_wide()`는 청구 토큰과 미해결 예약의 합이며 보고 사용량으로 표시하면 안 된다. 정산에는 input/output count가 있는 final·consistent 보고가 필요하며 근거가 있는 가장 큰 total을 차감하고 초과 사용량도 clamp하지 않는다. 누적 보고 중 하나라도 counter가 없으면 합계도 미상이다. 예약, 로컬 차감, vendor 청구서는 서로 다른 기록이다.
 
 실제 결과 이후 post-effect 정산이나 terminal receipt 영속화가 실패하면 `ProviderDispatchOutcomePersistenceError`의 `outcome()`은 원래 불변 결과를, `cause()`는 원래 영속 예외를 보존한다. 전달도 실패했으면 `delivery_error()`가 원래 관측자 예외를 보존한다. 영속화 성공 뒤 관측자 실패는 원래 예외를 그대로 다시 던진다. 미상/결과 없는 transport 실패는 결과를 조작하지 않는다.
 ### SchemaProvider
@@ -346,9 +380,15 @@ std::shared_ptr<neograph::llm::SchemaProvider> admitted_provider(
 }
 ```
 
+일반 `sp::descriptor::load`는 header를 literal로 처리하므로 `${VAR}`를 확장하지 않는다. Admission 전에 명시적으로 host preprocessing을 하려면 `sp::descriptor::load_with_environment_headers(source, overrides, policy)` 또는 `DeploymentHeaderEnvironment`를 받는 결정적 `load_with_deployment_headers(source, overrides, environment, policy)`를 쓴다. Environment helper는 Messages의 선택적 `ANTHROPIC_WORKSPACE_ID` / `ANTHROPIC_BETA`를 읽으며 unset/empty 값은 생략한다. Literal descriptor header는 environment보다 우선하고 explicit override는 둘보다 우선하며 이름 비교는 대소문자를 구분하지 않는다. 중복 override, 잘못된 header, reserved header는 최종 admission에서 거부한다. Encoder는 template을 평가하거나 승인된 descriptor를 수정하지 않는다.
+
 ### Native 기록 / 예산
 
 `ChatMessage` / `ChatTool`과 JSON은 portable projection이지 native 권한이 아니다. Portable 포맷은 [`provider-message-v2`](../schemas/provider-message-v2.schema.json), [`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)를 유지한다. 실제 C++ checkpoint sidecar는 메모리에서 native seal을 보존한다. 영속 native 기록에는 host-owned `sp::NativeArchive`가 필요하다. closed v3 / `spna3`는 독립 키를 쓰는 인증된 owner-private custody이며 archive v2는 업그레이드하거나 해석하지 않고 거부한다. 인증은 모든 semantic descriptor 선택(origin/path/header, policy, 요청 field mapping, usage path, stop mapping), owner와 정확한 custody binding을 결합한다. 암호화나 vendor-issuer 인증은 아니다. archive 본문·키·native blob·raw wire 관측을 공개하지 않는다. Archive는 증거 저장소이지 돈의 grant나 spending lease가 아니다. Program/external bank는 독립 journal 소유이며 snapshot 복사로 credit을 만들 수 없다.
+
+Interface 4는 native replay의 configuration digest에서 output-generation cap만 제외한다. Content, origin, route, policy identity, prefix, tool, reasoning control은 계속 결합된다. 실제 cap은 encoded request와 prepared-request digest에 남는다. Cap을 늘린 semantic call마다 새 resource-bank admission, 고유한 결정적 call ordinal/effect identity, 원래 deadline이 필요하다. 정산된 call slot을 재사용하거나 credit을 갱신하거나 seal을 고치거나 미상 effect를 재전송할 수 없다. Archive v3와 portable JSON v2는 바뀌지 않는다. Old-policy native archive는 그 policy에 결합된 채 유지되고 policy가 다르면 거부하며 migration하지 않는다.
+
+Same-route native continuation과 명시적 foreign projection은 계약이 다르다. Gemini 기본값은 `sp::gemini::HistoryMode::NativeOnly`이며 `PortableForeign`은 native seal, wire output, signature가 없는 caller-created assistant Text/ToolCall history를 허용한다. 각 foreign assistant turn의 첫 function call에만 `skip_thought_signature_validator`를 붙이고 text-only history에는 signature를 만들지 않는다. 실제 native group은 엄격히 검증하며 실패하거나 불일치한 seal을 제거해 portable history로 낮추지 않는다. Responses `previous_response_id`는 provider-held state를 선택하므로 `messages`에는 새 input만 보낸다. `previous_response_history`는 전송하지 않는 local ownership 증거다. Client-tool ownership에 필요하면 전체 original prefix와 cursor와 ID가 같은 실제 terminal assistant를 제공한다. 이후 in-process cursor 결과는 private completed ownership만 보존하며 full `NativeReplay`나 archive authority가 아니다. Cursor는 native archive나 portable import grant가 아니다.
 
 **Standalone bank journal 수정 — 현재 계약 개정; 실제 runtime 증거는 아래.** Owner-approved protocol은 단조 trusted-store namespace obligation과 실제 불변 original owner/thread/graph scope, ceiling, deadline/clock identity, generation을 요구한다. 전체 checkpoint commitment·revision에 대한 정확한 durable head CAS만 host-owned opaque lease를 발급할 수 있다. 정확한 pending effect window를 provider I/O 전에 영속화해야 하며 실제 SDK outcome, charge, nullable report, hold, dedup identity로 정산해야 한다. Checkpoint와 next head는 같은 owned actor/revision 아래 원자적으로 publish해야 한다. Bank metadata 제거·checkpoint pruning·old authenticated snapshot replay·같은 ID overwrite·actor 상실은 credit을 주면 안 된다. 기존 65 hold에서 ceiling 130을 129로 낮추면 추가 65를 허용할 수 없다. 입증된 no-effect 실패는 unchanged head를 release해 authentic 130 복구가 가능해야 한다. Crash/unknown/lost-lease window는 refund/retry/fallback 없이 hold를 유지한다. Plain/pristine archive 설정은 money/native spending lease를 주지 않고 현재 `config.usage`는 기존 standalone obligation을 대체할 수 없다. Program/external-bank journal 소유는 유지된다. 이는 요구 계약이다. 실제 currency/custody 증거와 instrumentation 한계는 아래에 있으며 stable released API 보장은 아니다.
 
@@ -366,13 +406,15 @@ std::shared_ptr<neograph::llm::SchemaProvider> admitted_provider(
 
 `ProviderRequest::observer_limits`는 host-only이다. 명시한 `max_events`·`max_bytes`는 양수여야 하며 승인된 SDK 전달 상한을 낮출 수만 있다. `provider-request/v3` digest는 실제 limit, mode, encoded body, retry policy와 모든 semantic descriptor binding을 결합한다. Bridge는 queued·draining batch 전체에서 실제 PMR vector/map capacity와 소유 event/document byte를 계산하며 queue mutex 밖에서 cancellation을 요청한다. 이름이 `messages`인 Generic channel을 chat으로 강제 변환하지 않는다. native `history` channel을 `messages`에 mapping하면 JSON에서 native 권한을 만드는 대신 C++ sidecar를 보존한다.
 
-`ProviderOutcomeError`는 결과를 보존하는 공통 host-error base이다. `ProviderObserverError`와 `ProviderDispatchOutcomePersistenceError`는 완전히 drain된 SDK 결과와 원래 `cause()`를 보존하며 후자는 보조 observer 실패도 `delivery_error()`에 보존한다. `ProviderFailure::outcome()`은 SDK 실패 자체를 보존한다. 이 증거는 Node/Program 재dispatch 권한이 아니다. Provider retry의 유일한 소유자는 SDK이며 caller가 선택한 `max_output_tokens`를 조용히 clamp하지 않는다.
+`ProviderOutcomeError`는 결과를 보존하는 공통 host-error base이다. `ProviderObserverError`와 `ProviderDispatchOutcomePersistenceError`는 완전히 drain된 SDK 결과와 원래 `cause()`를 보존하며 후자는 보조 observer 실패도 `delivery_error()`에 보존한다. `ProviderFailure::outcome()`은 SDK 실패 자체를 보존한다. 이 증거는 Node/Program 재dispatch 권한이 아니다. Transport retry의 유일한 소유자는 SDK이며 caller가 선택한 `max_output_tokens`를 조용히 clamp하지 않는다.
 
 `ProgramFailure`는 live `provider_outcome`·`provider_cause`를 보존한다. Canonical factual SDK witness는 실제 archive custody를 owner/run/version/bundle/operation/attempt에 결합하며 Runtime은 복구 실패를 노출하기 전에 설정된 custody를 즉시 복원한다. 공개 data-only `ProgramResult::create()`는 미리 채운 witness로 우회할 수 없고 unresolved parsed seal은 실행 결과가 아니다. 프로세스 재시작 후 원래 exception pointer는 없으므로 `provider_cause == nullptr`이며 text에서 재생성하지 않는다. 영속화할 수 없는 실패는 serialize/publish/replay할 수 없다.
 
 `RecordedBindingSet`는 source-bound move-only data이지 caller가 제공하는 dispatcher가 아니다. 신뢰된 Catalog `recorded_capability_binder`는 실제 영속 source event를 독립적으로 읽어 captured-only capability를 materialize한다. `ProgramRuntime::replay_recorded()`는 원래 selected-source permission을 검사한 뒤 실제 남은 bank를 durable CAS로 이전한다. inherited spend는 새 model grant가 아니다. 구 `start_recorded` 갱신 API는 제거되었다. InMemory/File/SQLite/PostgreSQL Program store는 실행 내내 정확하고 불변인 owned lease를 보존하며 expiry로 갱신하지 않는다. Controlled JavaScript도 underlying capability manifest를 검사하고 정확한 completed command 결과를 소비하며 external effect를 재dispatch하지 않는다.
 
 **Recorded-control causal fix는 full suite에서 실제 증명 완료.** Captured command replay는 실행 전에 새 CPU wall-time/Core work만 durable reserve하고 측정 work와 새 Core checkpoint를 result CAS로 publish한다. 새 model·money·Program-operation allowance를 소비하지 않고 captured external effect를 재dispatch하지 않는다. 미정산 reservation은 debit을 유지한다. Reservation은 첫 새 Core checkpoint를 거부했던 일반 Running→Running transition 대신 인증된 settlement transition을 선택한다. Await channel receive·timer wait/cancel·handoff wait 시작/release는 소유 executor/strand에서 직렬화한다. 기존 Recorded CPU/Memory await/handoff scenario는 full suite에서 pass했다. Remote TSan coverage 한계는 아래에 명시한다.
+
+아래 관측은 이 문서 정리 이전에 기록되었다. 과거 증거이며 새 테스트 실행이나 모든 platform·transport·security 속성의 보장이 아니다.
 
 **유료 관측 완료; 보편적 qualification은 아님.** 원래 `SPQUAL1` base630/1000000 microUSD는 불변이다. 같은 원래 ledger의 ONE hash-chained `A`가 승인 extension480/3000000을 받아 aggregate1110/4000000이 된다. Calls/spent/hold/settlement는 누적이며 새 grant ID/header/reset은 없다. 정확한 declaration byte/file identity와 original authorization/baseline/catalog/activation/ledger-prefix hash/totals는 고정되고 삭제·교체·변경은 fail closed한다. 최종 canonical ledger는 calls1110/spent437958/held1287828 microUSD, eventA1, limits1110/4000000이다. Spent+held US$1.725786은 LOCAL catalogue meter이지 invoice가 아니다. 기록된 five-family60-pair baseline은600 request를 완료했다: Chat60/60, Responses60/60, Messages60/60, Generate56/60(incorrect-vision SSE4개), Interactions57/60(incorrect-vision buffered1개/SSE2개). 합계293/300 pair이며300/300은 아니다. 다른 old600 financial record는 보존하되 완전한 behavioral proof는 아니다. 이전 M5/media one-shot cohort는 그대로다. 이전 Google3-round prerequisite의 invalid-tool2개/unreadable-positive1개 실패 상태를 유지한다. 추가 유료 호출은 승인되지 않는다. 최종 SDK 증거와 native-axis 한계는 baseline 성공과 별개다. 이전 activation/reopen smoke는 두 번 reopen한 calls610/spent219159/held751233 및 SDK meter/canary/vision4-test19.38초 pass로 보존한다. 이는 범위가 정해진 이전 checkpoint이지 최종 ledger totals가 아니다. 이전 검증된 Chat60-pair cohort의 실제 attempt120,UpperBound charge120,UnknownHold 없음도 보존한다.
 
@@ -396,7 +438,7 @@ Stage 3(2026-04) 설계와 당시 측정 테스트 수는 역사로 보존한다
 
 ## 무엇이 바뀌었는가
 
-`GraphEngine::compile(def, ctx)` 기본 작업자 수가 v0.1.4 (`b59444f`)에서 `std::thread::hardware_concurrency()`였으나 v1.0에서 **`1` (= 엔진 소유 thread_pool 없음)** 로 복원.
+`GraphEngine::compile(def, ctx)` 기본 작업자 수가 v0.1.4 (`b59444f`)에서 `std::thread::hardware_concurrency()`였으나 현재 pre-v1 API에서 **`1` (= 엔진 소유 thread_pool 없음)** 로 복원.
 
 ## 왜
 
@@ -428,8 +470,7 @@ engine.set_worker_count_auto()
 
 ## 이전하지 않으면 어떻게 되는가
 
-- 팬아웃이 있는 사용자 그래프는 단일 스레드에서 직렬 실행 (일관성 보장)
-- 실제 wallclock 회복은 이루어지지 않음 — 명시적 `set_worker_count_auto()` 필요
+Worker pool을 선택하지 않으면 CPU-bound fan-out은 호출자 executor에서 실행하며 비동기 I/O는 여전히 겹칠 수 있다. 별도 실행 thread가 필요하면 `set_worker_count_auto()` 또는 명시적 worker count를 쓴다. Worker count만으로 일관성이나 속도 향상을 보장하지 않는다.
 
 ## 영향을 받는 NeoGraph 내부 예제
 
@@ -438,7 +479,7 @@ engine.set_worker_count_auto()
 - `examples/10_send_command.cpp` — 동기 `sleep_for` ResearcherNode가 Send로 팬아웃, `engine->set_worker_count_auto()` 추가
 - `examples/14_plan_executor.cpp` — 5 서브토픽 Send 팬아웃 (동기 sleep_for), 동일 추가
 - `examples/21_mcp_fanout.cpp` — 3 MCP 도구 호출 동시 발사, 동일
-- `examples/36_classifier_fanout.cpp` — 이미 `set_worker_count(5)` 명시적. 잘못된 기본값을 명시한 주석 수정 (현재 기본값은 hardware_concurrency)
+- `examples/36_classifier_fanout.cpp` — 이미 `set_worker_count(5)` 명시적. 잘못된 기본값을 명시한 주석 수정 (현재 기본값은 1이며 engine-owned pool이 없음)
 - `src/core/deep_research_graph.cpp` `create_deep_research_graph()` 빌더 — `compile()` 직후 `set_worker_count_auto()` 호출하여 감독자의 N 연구자가 실제로 동시에 실행
 
 `examples/05_parallel_fanout.cpp`는 `io_context`에서 코루틴 타이머 중첩 사용 (동기 sleep 없음), 따라서 작업자 풀이 효과 없음 — 변경 없음.
@@ -465,11 +506,7 @@ engine->set_worker_count_auto();   // ← add this line
 `0.11.1` 이하에서 bounded `NodeCache`가 들어간 릴리스로 올릴 때는
 `NodeCache`와 `EngineConfig` 객체 배치가 바뀌었으므로 재빌드가 필수입니다.
 
-앞의 Provider 이전은 기존 `Provider` vtable을 바꾸지 않습니다. Provider
-바이너리는 릴리스 전체에 공지된 재빌드 경계만 따르면 됩니다. 앞으로 진행할
-`CheckpointStore` 비동기 이전도 같은 정책을 따라야 합니다. v1 전 vtable
-변경은 재빌드 경계를 공지해야 하고, v1 뒤에는 안정된 객체 배치를 바꾸지 말고
-별도 기능 인터페이스와 어댑터를 더하는 방식을 우선합니다.
+Typed Provider 이전은 virtual 계약을 `get_name`, `family`, `prepare`로 바꾸고 과거 completion virtual을 제거한다. 기존 Provider binary는 호환되지 않는다. 사용자 provider와 모든 종속 C++ 소비자를 일치하는 header/library로 재빌드한다. Core도 SchemaProvider 타입을 공개하므로 LLM을 끈 build에도 SDK runtime이 필요하다. 향후 안정 interface는 안정 layout 변경보다 별도 capability interface와 adapter를 우선해야 하며 현재 pre-v1 interface는 binary 호환을 약속하지 않는다.
 
 플랫폼별 라이브러리 이름, 알려진 재빌드 경계, CI 검증 방법은
 [바이너리 호환성 정책](ABI_POLICY.md)을 참고하세요.

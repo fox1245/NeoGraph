@@ -1,5 +1,7 @@
 # Chat template proposal mode
 
+**Languages:** [English](chat-template-proposals.md) | [한국어](chat-template-proposals.ko.md) | [日本語](chat-template-proposals.ja.md) | [简体中文](chat-template-proposals.zh-CN.md)
+
 ## Your job and input
 
 You are the **Harness selector** after the current answer has been generated.

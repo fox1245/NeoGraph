@@ -1,58 +1,34 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/pybind/README.md locale=ja source_sha256=a2b7c4a93e6564fc5ecb36f4c559d811fa6c61325ef48a930e1917817b8359d5 -->
-# Python モード ベンチマーク — NeoGraph-from-Python と LangGraph
+<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/pybind/README.md locale=ja source_sha256=721dbef65598b467d85737ce2bfa971f2362af4c95c8f724b9310338a1b887e9 -->
+# Python グラフベンチマーク: NeoGraph と LangGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-## 過去のベンチマーク — プロバイダーバインディング移行は延期
+これらのスクリプトは Python グラフの実行とプロセス起動を測定する。モデルプロバイダーを呼び出さず、API キーも不要である。型付きプロバイダーのリクエスト、イベント、結果のバインディングを検証するものではない。以下のコマンドは現行パッケージをインストールした環境向けであり、今回の更新ではソースを照合しただけで実行していない。
 
-以下の測定・結論・再現コマンドは移行前Pythonベンチマークの記録で、現行ビルドの検証ではない。型付きC++ `ProviderRequest`/`sp::Event`/完全な不変 `sp::Outcome` 移行はPythonプロバイダーバインディングを実装せず、その作業は延期されている。コマンドを動作する旧プロバイダーAPI、現行プロバイダーベンチ、移行後の実行証拠として扱わない。一般Pythonグラフ測定はプロバイダー表面を検証しない。Python REPL/プロトコルドライバーは不変。今回はソース照合のみで、ビルド・ベンチは実行していない。
+## 再現
 
-主な質問: **Python から pybind (ノード本体も Python) 経由で NeoGraph を使用すると、問題は解決しますか?
-スタンドアロン C++ の利点 (起動、RSS、スループット)?**
-
-回答: **いいえ。** 肥大化は Python インタープリターによるものではなく、LangChain インポート ツリーによるものです。
-NeoGraph-from-Python = リーン Python (10MB/30ms) + 単一のコンパイル済み .so。
-
-## 測定結果 (2026-07-05、WSL2、python3.12)
+現行の `neograph-engine` wheel をインストールした Python 環境を使う。比較用に `langgraph`、大きな import スタックの測定用に `langchain-openai` をインストールする。リポジトリのルートで実行する。
 
 ```bash
-cmake -S . -B build-pybind \
-  -DNEOGRAPH_BUILD_PYBIND=ON -DNEOGRAPH_BUILD_LLM=ON
-cmake --build build-pybind --target _neograph -j
-LD="$PWD/build-pybind"
-PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" \
-  python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py neograph
-PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" \
-  python3 examples/cookbook/jarvis/bench/pybind/perturn.py neograph 5000
+python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py neograph
+python3 examples/cookbook/jarvis/bench/pybind/perturn.py neograph 5000
 python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py langgraph
 python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py langgraph_openai
 python3 examples/cookbook/jarvis/bench/pybind/perturn.py langgraph 5000
 ```
 
-|メトリック (すべての Python プロセス) | NeoGraph から Python |ランググラフ |利点 |
-|---|---|---|---|
-|ターンごと (5 つの Python 呼び出し可能ノード、GIL を含む) | **0.38ms · ~2620 回転/秒** | 0.93ms · ~1075 | 2.4倍 |
-|起動（インポート→コンパイル） | **40ms** | 462ms (裸) / 2977ms (+langchain_openai) | 11–73× |
-| RSS | **36MB** | 61MB (ベア) / 561MB (+langchain_openai) | 1.7～15× |
-| (参考) ベア Python3 RSS | — | 9.9MB | |
+`perturn.py` はウォームアップ後に五つのノードのチェーンを繰り返す。各 Python ノードは `v` チャネルを一つ増やし、各測定実行はゼロから始まる。平均、p50、p90、毎秒の実行回数を表示する。実行回数には正の値を指定する。
 
-## Python モードでも高速な理由
+`startup_rss.py` は新しいプロセスで起動時間（ms）と最大 RSS を表示する。NeoGraph 分岐はパッケージを import して三つのグラフシンボルを参照するだけで、グラフを compile しない。LangGraph 分岐はパッケージを import し、一つのノードのグラフを compile する。作業範囲が異なるため、時間比率をグラフ compile の高速化と解釈してはならない。RSS 換算は Linux の `ru_maxrss` 単位 KiB を前提とする。macOS では同じ換算をそのまま使わない。Windows には Python の `resource` モジュールがない。
 
-- **ターンごと**: BSP エンジン (スーパーステップ ループ、スケジューラー、チャネル リダクション、ルーティング、チェックポイント)
-  オーバーヘッド) は C++ で実行され、**ノード本体のみが Python** です。 LangGraph のエンジンは純粋な Python Pregel です。
-  GIL は両方のノードの実行中に保持されますが、NeoGraph のノード間でのオーケストレーションは C++ であるため、より高速です。
-  pybind/GIL 境界コストはほぼゼロであるため、スタンドアロン C++ モック (9 ノード 0.38 ミリ秒) と Python 5 ノードは
-  効果的に結びついた。
-- **スタートアップ/RSS**: `import neograph_engine` は単一の .so をロードします。 LangGraph の 462ms/
-  61MB は langgraph+langchain-core インポート ツリーで、langchain_openai を使用すると最大 2977ms/561MB になります。 NeoGraph にはそのようなツリーはありません。
+## 過去の測定
 
-## 意味するところ
+リポジトリは以前、以下の値を報告した。現行の移行ビルドの測定値ではなく、今回の更新では再実行していない。
 
-Python から NeoGraph を使用すると、**Python エコシステム全体 (HF、OpenAI SDK、pandas など) が提供されます。
-ノード本体のインライン) + 起動、RSS、スループットの利点を同時に実現**。
-つまり、「パフォーマンスは C++ スタンドアロン、エコシステムは Python」という二項対立は間違っています。
-Python モードでは両方が可能です。スタンドアロン C++ はさらに一歩先へ (起動 8ms ・ RSS
-7.5MB) ただし、ノードが C++ であるか、HTTP 経由で呼び出されるツールの場合に限ります。
+| 指標 | Python の NeoGraph | LangGraph |
+|---|---|---|
+| 実行ごとに五つの Python ノード | 0.38 ms; 約 2620 回/s | 0.93 ms; 約 1075 回/s |
+| 上記の異なる範囲での起動 | 40 ms | 462 ms; `langchain_openai` を含む場合は 2977 ms |
+| 最大 RSS | 36 MB | 61 MB; `langchain_openai` を含む場合は 561 MB |
 
-注意: ノードが torch/HF をインポートする場合、RSS はそのライブラリによって支配されます。
-（エンジン音がうるさい）。これはワークロードのプロパティであり、フレームワークではありません。どちらも同じです。
+NeoGraph はグラフスケジューラーとチャネル reduction を C++ で実行し、Python ノード本体は GIL を取得する。この測定は GIL 境界の費用を分離せず、他のワークロードの性能を証明するものでもない。ノード内で PyTorch などを import すると、そのメモリもプロセスの使用量に加わる。

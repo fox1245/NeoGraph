@@ -1,20 +1,12 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=0b290ee7342159a462d358d8e4878e267079e86113f726680542ec5654734c40 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=0f718bca31f68497ef00b56cb3dd01cd534f53f3dfd2a42741524fae51a18a36 -->
 # NeoGraphのコアコンセプト— 解説ガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
 
-例に飛び込む前に、これを一度読んでください。これは、あなた自身が構築する順序でメンタルモデルを構築します：グラフ → チャネル → ノード → エッジ → fan-out → ルーティングオーバーライド → チェックポイント → ストリーミング。
+例の前にこの文書を読んでください。グラフを作る順序に沿って、チャネル、ノード、エッジ、fan-out、経路、チェックポイント、ストリーミングを説明します。
 
-以下の Python 資料は既存 binding の説明です。provider binding/wrapper は明示的に延期され、typed lossless C++ 移行として移植/実行されていません。旧 wheel の設置から新 C++ provider API は得られません。
+LangGraph を使ったことがあれば、reducer 付きチャネル、`Send`、`Command`、チェックポイントは馴染みのあるものです。NeoGraph の [Core と ProgramRuntime](../README.md#core-and-programruntime) は役割が異なり、このガイドは Core のグラフ実行から始めます。Python provider 呼び出しには削除済み completion クラスではなく typed [binding 契約](python-binding.md)を使います。
 
-公開契約は所有 typed 準備/dispatch であり、同期・非同期の virtual completion 対ではありません。`ProviderRequest.payload` は Chat、Messages、Responses、Gemini、Interactions の SDK リクエスト variant です。`ProviderMode::Collect` / `Stream` は観測者の有無と独立に転送を選択します。`on_event` は借用 typed `sp::Event` view を受け取ります。コールバック後に必要なデータだけコピーします。raw JSON override や portable projection による native 権限のインポートは認めません。
-
-プロバイダー呼び出しは `sp::runtime::Result`、すなわち `sp::Completion` または `sp::Failure` を保持する不変の所有 `std::shared_ptr<const sp::Outcome>` を返します。表示テキストだけでなく結果全体を保持してください。順序付きメッセージ/パート、native continuation、完全な wire envelope、順序付き raw 観測、停止の根拠と実際の試行メタデータは呼び出しとクライアント破棄後も残ります。使用量は根拠・段階・品質付きの nullable `uint64_t` であり、欠落はゼロではなく不明です。失敗も元の部分結果を保持します。`ProviderFailure::outcome()` と `ProviderObserverError::outcome()` は実際の結果を保持し、後者の `cause()` は観測者の例外を保持します。
-
-> **LangGraphを以前使ったことがある場合:** プリミティブは意図的に同じです — リデューサー付きチャンネル、書き込みを発行するノード、条件付きエッジ、`Send`、`Command`、チェックポイント。READMEはNeoGraphの[2つのランタイムレイヤー](../README.md#two-runtime-layers)を要約しています。以下の説明は何も前提としません。
-
-
-実結果の後に post-effect 精算や terminal receipt 永続化が失敗すると、`ProviderDispatchOutcomePersistenceError::outcome()` は元の不変結果、`cause()` は元の永続例外を保持します。delivery も失敗した場合は `delivery_error()` が元の観測者例外を保持します。永続化成功後の観測者失敗は元の例外を変更せず再送出し、不明/結果なし transport 失敗では outcome を捏造しません。
 ---
 
 ## 目次
@@ -51,13 +43,15 @@ NeoGraph **グラフ**は以下の4つの要素です:
 ```
 1. ready_set = nodes routed from __start__
 2. while ready_set is not empty:
-   a. run all nodes in ready_set (in parallel if the executor allows)
-   b. apply each node's writes to state
-   c. collect their Send / Command / outgoing-edge signals
-   d. plan_next_step → new ready_set
+   a. run the ready batch against its pre-update channel state
+   b. buffer returned writes, then fold them through channel reducers
+   c. execute emitted Sends after ordinary writes; fold their results
+   d. combine routing signals and evaluate updated state → new ready_set
 ```
 
-スーパーステップは、並列性、チェックポイント、およびストリーミングイベントの単位です。「今」実行できる2つのノードは同じスーパースステップであり、同じ入力状態を観測し、ステップ終了時にその書き込みは reducers を介して結合されます。
+通常の ready batch はその batch の update 前のチャネル状態を読みます。実行中の兄弟ノードは、他の兄弟が返した書き込みを読めません。エンジンは書き込みを buffer に集め、batch 後に reducer で結合し、更新済み状態で経路を評価します。これはグラフのスケジューリングであり、モデル内部の計算を同期するものではありません。
+
+例えば `counter` が 0 で二つの ready ノードがそれぞれ `counter + 1` を返すと、両方が 0 を読みます。overwrite reducer の結果は 2 ではなく 1 です。カスタム sum reducer に増分 1 をそれぞれ書けば 2 に結合できます。複数分岐の `Send` は各 payload を適用した隔離状態コピーを使い、単一 `Send` は共有状態に payload を適用します。Reducer の順序だけではモデル応答や外部効果の再現性は得られません。
 
 ---
 
@@ -92,6 +86,31 @@ NeoGraph **グラフ**は以下の4つの要素です:
 >
 > Pythonの呼び出し可能オブジェクトはGILの下で実行されます。並行するSend fan-outは、Pythonカスタムノードと同じ方法でその上で直列化されます。名前の再登録は、以前のリデューサを置き換えます。
 
+### チャネル lifecycle と checkpoint 契約
+
+Reducer は書き込みを結合します。配列 retention は別の政策で、`unbounded`（既定）、`latest`、正の `retention_limit` を持つ `bounded` を選びます。Retention は `ChannelWrite.Mode.Overwrite` を含む各書き込み後に配列を切り詰めます。`latest` は次の書き込みまで最後の要素を保持します。Persistence は独立に `checkpoint`（既定、materialized 値と version）または `ephemeral`（両方を永続 checkpoint から省略）を選びます。Bounded retention は保存量だけでなく観測できる履歴を変えます。
+
+エンジンはノードの返した書き込み順、static batch の scheduler-ready 順、複数 `Send` の呼び出し順で結合し、完了順は使いません。Pending write は同じ task slot に再生します。Overwrite は順序付き last-writer-wins、append は要素順を保持します。カスタム reducer は replay で純粋かつ安定しているべきです。Regrouping で結果を保つには結合律、順序独立には交換律が必要です。明示的 overwrite は reducer を迂回してから retention を適用します。これらの規則はモデル応答や外部効果の再現性を保証しません。
+
+Ephemeral 値は superstep 間でも生き続け、各 step で reset しません。Checkpoint は宣言された ephemeral 名と書き込み済みかを記録しますが値は保存しません。Resume、`resume_if_exists`、exact-ID resume、state update は書き込み済み ephemeral 状態、旧 checkpoint の guard 欠落、ephemeral チャネル集合の変更を拒否します。最初の ephemeral 書き込み前の checkpoint は文書化された順に pending write を再生して resume できます。`update_state` は ephemeral 書き込みを拒否します。複数 `Send` の in-process worker は隔離コピー内に live ephemeral 値を継承します。正しさに必要な状態は checkpoint に残すか、新 run で永続入力から再構成してください。
+
+`GraphState::restore` は ephemeral チャネルのあるグラフを拒否します。一致する guard と `restore_checkpoint` を使うか、全 live 値と version を含む同一 process snapshot に `restore_runtime` を使います。Guard は checkpoint metadata を使い、channel blob layout や store schema を変えません。Ephemeral チャネルのないグラフの旧 full-value checkpoint は引き続き動作します。Guard のない binary に downgrade する前に、ephemeral thread と fork を drain するか永続入力から再開始してください。旧 reader は追加 guard を強制できません。
+
+Checkpoint チャネルは full materialized snapshot を使います。Memory、SQLite、PostgreSQL は不変の `(thread, channel, version)` 値を重複排除しますが、append 履歴は書き込みごとに version が変わり snapshot も増えます。Pending write は未完了 superstep の成功 task を記録し、一般 channel delta ではありません。Per-step reset 政策は提供しません。安全な設計には書き込み・経路決定後の reset、interrupt、replay、Send の定義が必要で、ephemeral persistence と混同してはいけません。
+
+Delta-backed checkpoint は設計でありチャネル設定ではありません。この形式は full snapshot から順序付き `{channel, version, write mode, value}` delta を最大 *K* 個（任意の byte 閾値）再生するものです。Overwrite、retention、version、reducer identity を保ち、pending write の削除前に snapshot/delta と checkpoint pointer を原子的 publish する必要があります。欠落 link、version gap、未知 reducer、replay 失敗を拒否しなければなりません。採用には新 schema version と測定した利益が必要です。既存 snapshot は架空 delta なしで base に移し、可逆 rollout では old-reader full snapshot を維持します。Delta-only record があれば元 reducer registry で materialize しない限り downgrade を拒否します。現在の store は full-snapshot 方式です。
+
+Baseline は `bench_checkpoint_store --threads 1 --iters 1 --history-steps 256 --payload 512 --backends memory,sqlite` で測ります。隔離 local DB のみに `postgres`、`--pg-url` を加えます。行は logical serialized byte、save/load p50/p95、reconstruction depth を報告し、legacy 行は blob count を報告します。Allocation request には `heaptrack bench_checkpoint_store --threads 1 --iters 1 --history-steps 256 --payload 512 --backends memory` を使います。Native JSON/SQL allocator は C++ `operator new` ですべて測定できません。同じ payload、history、backend で測定値を比較します。Logical byte と durable physical byte は異なります。SQLite は終了時に削除する固有 temporary DB を使い、`--sqlite-path` は新 file を残して既存 path を拒否します。
+
+記録された Linux x86-64 Debug baseline は thread 1、history step 256、512-byte message、iteration 1 でした。歴史的測定であり性能目標ではありません:
+
+| Backend | Logical checkpoint bytes | Save p50/p95 (µs) | Load p50/p95 (µs) | Replay depth |
+| --- | ---: | ---: | ---: | ---: |
+| Memory | 17,814,952 | 54 / 138 | 141 / 382 | 1 |
+| SQLite | 17,814,952 | 289 / 1,589 | 176 / 474 | 1 |
+
+削除前の別 repeat で SQLite DB/WAL は 14,811,136 / 4,210,672 byte（合計 19,021,808）でした。構築・JSON parse を含む process-wide `malloc`、`calloc`、非ゼロ `realloc` request を数えた Linux `LD_PRELOAD` shim は `--history-steps 0` に対して Memory 追加 88,277 request / 605,289,027 requested byte、SQLite 114,295 / 867,319,964 を測りました。これは累積 request で、live memory や store のみの allocation ではありません。Aligned/internal allocation は捕捉しませんでした。Shim は依存ではなく、結論の前に対応 profiler と複数 warm run を使ってください。
+
 ### チャネルへの書き込み
 
 ノードは`ChannelWrite`のリストを返します：
@@ -99,7 +118,7 @@ NeoGraph **グラフ**は以下の4つの要素です:
 ```python
 return [
     ng.ChannelWrite("messages", [{"role": "assistant", "content": "Hi!"}]),
-    ng.ChannelWrite("counter",  state.get("counter", 0) + 1),
+    ng.ChannelWrite("counter",  (state.get("counter") or 0) + 1),
 ]
 ```
 
@@ -178,7 +197,7 @@ class Researcher(ng.GraphNode):
         )
 ```
 
-Pythonは `cancel_token`, `thread_id`, `step`, `stream_mode`, `store`、および `resume_value` を `input.ctx`上に公開します。C++の呼び出し元は `deadline` と `trace_id` を `RunMetadata`上に設定できます。エンジンはそれらをネストされたサブグラフを通じて伝播します。これら2つのフィールドは、Pythonバインディングではまだ公開されていません。
+Python は `input.ctx` に `cancel_token`、`usage`、`thread_id`、`step`、`stream_mode`、`store`、`resume_value`、`trace_id`、`run_id`、`model_token_budget` と typed provider 証拠を公開します。Deadline は `has_deadline` と `deadline_remaining_ms` で確認し、生の C++ steady-clock 値は非公開です。C++ 呼び出し元は `RunMetadata` で deadline と trace metadata を渡し、ネストした subgraph に伝播します。
 
 また、裸の `list[ChannelWrite]` を返すこともできます。`Send` や `Command` が不要な場合、バインディングはそれを `NodeResult` に自動的にリフトします。
 
@@ -202,7 +221,7 @@ ng.NodeFactory.register_type(
 ```python
 class CalcTool(ng.Tool):
     def get_name(self):       return "calc"
-    def get_definition(self): return ng.ChatTool(name="calc", ...)
+    def get_definition(self): return ng.ChatTool("calc", "Double x", {"type": "object", "properties": {"x": {"type": "number"}}, "required": ["x"]})
     def execute(self, args):  return str(args["x"] * 2)
 ```
 
@@ -281,7 +300,7 @@ ng.ConditionRegistry.register_condition("is_long", is_long)
 <a id="5-send--dynamic-fan-out"></a>
 ## 5. 送信 — 動的 fan-out
 
-`Send` は、次のステップのノード数が状態に依存するケース向けである。典型的な使用法: 検索トピックのリストをN個の並列リサーチャー呼び出しに分割する。
+`Send` は topic ごとに researcher を一つ呼ぶなど、実行中に target 呼び出し数を決めます。エンジンは通常 ready batch が返って書き込みを適用した後、同じ番号の superstep 内で生成された Send を実行します。
 
 ```python
 class Planner(ng.GraphNode):
@@ -293,13 +312,9 @@ class Planner(ng.GraphNode):
         )
 ```
 
-エンジンの`run_sends_async`は、`researcher`を`Send`ごとに1回インスタンス化し、それぞれが独自の`state.get("topic")`を持ち、`asio::experimental::make_parallel_group`を介して並列に実行します。
-
 ### メンタルモデル
 
-`Send(target, payload)`は「この状態パッチで`target`をインスタンス化し、それを準備完了セットに追加する」ことです。ペイロードは、ターゲットが`state`を見る前に状態書き込みとして適用されます。
-
-並列グループが終了した後、次のスーパーステップのルーティングは、各Sendが生成したタスクの出力エッジ（または、それを発行した場合はその`Command.goto`）から来ます。
+エンジンは `Send` ごとに compiled target を呼び、新しい node object は保証しません。同時呼び出しでは target の member state を安全に扱う必要があります。Payload は target がチャネルを読む前に適用します。単一 Send は共有状態、複数 Send は ready batch 後状態の隔離コピーを使い、全分岐の終了後に返却書き込みを呼び出し順で結合します。次の ready batch の経路は通常 node と Send target の信号を組み合わせます。
 
 ### 一般的な形: fan-out 5、fan-in to summarizer (要約)
 
@@ -315,7 +330,7 @@ planner ─┬─ Send("researcher", {topic: "A"})  ─┐
 
 ### ワーカー数のチューニング
 
-`build()`はデフォルトで`EngineConfig::worker_count == 1`になります — エンジン所有のスレッドプールはなく、fan-outブランチはコルーチン自身のエグゼキュータ上でインラインにディスパッチされます。これはアロケーションなしの高速パスであり、シーケンシャルなグラフには安価で、非スレッドセーフな状態を保持するノードにも安全です。
+`build()` の既定は `EngineConfig::worker_count == 1` で engine-owned thread pool はなく、呼び出し元 coroutine executor に分岐を dispatch します。Coroutine I/O は重なりますが、単一 thread executor の CPU-bound 作業は直列化する場合があります。Multi-thread caller executor や同時 run では node member state を安全に扱う必要があります。
 
 実際の並列処理を行うには、プールを明示的に選択してください。fan-out幅に合わせて正確にNを選ぶか、`set_worker_count_auto()` を `hardware_concurrency()` に使用します（フォールバックは4）:
 
@@ -350,7 +365,7 @@ class Evaluator(ng.GraphNode):
                 writes=[],
                 command=ng.Command(
                     goto_node="planner",                  # loop back
-                    updates=[ng.ChannelWrite("retries",  input.state.get("retries", 0) + 1)],
+                    updates=[ng.ChannelWrite("retries",  (input.state.get("retries") or 0) + 1)],
                 ),
             )
 ```
@@ -362,7 +377,7 @@ class Evaluator(ng.GraphNode):
 
 ### fan-in 下でのラストライター勝ち
 
-同じスーパーステップで複数のCommandが発火する場合（稀 — 複数の並列グループの兄弟がそれらを発行する場合のみ可能）、最後のものが優先されます。順序は並列グループの完了によって決定され、これは非決定的です — 最大1つの兄弟が`Command`を発行することを保証して、これに対応して設計してください。
+複数の兄弟が空でない `Command.goto_node` を返すと、渡された経路順序の最後の command が通常エッジと barrier を上書きします。Static batch は ready 順、複数 `Send` は完了順でなく呼び出し順を渡します。返された command update はすべて書き込み pipeline で結合します。競合 command が workflow を変えるなら、経路決定ノードを一つにしてください。
 
 ---
 
@@ -401,9 +416,25 @@ result = await engine.resume_async(thread_id="t1",
 
 ### タイムトラベル
 
-`engine.fork(thread_id, from_checkpoint_id)`は過去のチェックポイントから開始する新しいスレッドを返します。「別の答え方をしていたらどうなっていたか」という分岐に役立ちます。
+`engine.fork(source_thread_id, new_thread_id, checkpoint_id="")` はチェックポイントを呼び出し側が指定した宛先スレッドへコピーし、新しいチェックポイント ID を返します。チェックポイント ID を省略すると元スレッドの最新チェックポイントを選びます。コピーは保留中の continuation を保持し、状態の編集だけでは新しい処理を予約しません。
+
+`next_nodes == ["__end__"]` の完了済み continuation を resume すると、ノードを実行せず保存済み結果を復元します。編集した状態で停止中の処理を続けるには、`get_state_history()` から保留ノードが残る正確な過去のチェックポイント ID を選んで fork し、コピーを編集して resume します。過去の空の `next_nodes` ベクトルは別です。正確な ID を指定しない最新状態の resume は新しい実行を開始する従来の動作を保持し、exact-ID resume は指定したスナップショットに固定されます。
+
+[Example 08](../examples/08_state_management.cpp) は新しい turn の流れを保持します。完了済みチェックポイントを fork し、ユーザーメッセージを編集してから `resume_if_exists=true` で `run()` を呼びます。その新しい実行が停止した場合だけ resume します。停止中の fork の resume を示す例ではありません。
 
 `ChatMessage` / `ChatTool` と JSON は portable projection であり native 権限ではありません。Portable 形式は [`provider-message-v2`](../schemas/provider-message-v2.schema.json)、[`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json) のままです。真正な C++ checkpoint sidecar はメモリ内の native seal を保持します。永続 native 履歴には host-owned `sp::NativeArchive` が必要です。closed v3 / `spna3` は独立キーによる認証済み owner-private custody で、archive v2 は更新・解釈せず拒否します。認証は全 semantic descriptor 選択（origin/path/header、policy、要求 field mapping、usage path、stop mapping）、owner と正確な custody binding を結び付けます。暗号化や vendor-issuer 認証ではありません。archive 本文・キー・native blob・raw wire 観測は公開しません。Archive は証拠保存であり、金銭 grant や spending lease ではありません。Program/external bank は独立 journal が所有し、snapshot コピーで credit は作れません。
+
+Provider 履歴には異なるモードがあります。同じ経路の native continuation は真正な reasoning、signature、順序付き tool group を元の binding の下で保持します。Gemini の既定値は `NativeOnly` です。明示的な `PortableForeign` は native seal、wire output、signature のない呼び出し側作成の assistant text と tool call を受け入れます。最初の外部 function call だけに Google が文書化した bypass marker を付け、text-only turn には signature を付けません。この projection は native 権限を与えず、失敗した native seal を修復したり portable に降格したりしません。任意の複数 vendor の履歴が native として移植可能になるわけではありません。
+
+Responses の `previous_response_id` は provider が保持する会話状態を選び、要求には新しい入力だけを含めます。Client-tool の所有権に local 証拠が必要な場合、`previous_response_history` は真正な過去の所有権証拠を提供し、繰り返し入力として送信されません。Cursor は完全な native replay seal でも archive 権限でもなく、origin、route、model、configuration、完了状態の検査を受けます。
+
+現在の SDK interface revision と shared-library generation は 4 であり、利用側は一致する header と library で再ビルドする必要があります。Output generation cap は native replay configuration と別に、呼び出しごとに admission と accounting の対象になります。新しい semantic call の cap を上げても元の bank、grant、deadline は更新されません。明示的に文書化された per-turn 選択を除き、content、prefix、origin、route、policy、tools、reasoning controls の binding は保持されます。Portable JSON v2 と native archive v3 / `spna3` は不変で、以下の過去の ABI3 測定は interface4 の結果ではありません。
+
+Python も C++ と同じ所有 request/outcome 境界を公開します: `make_provider_request`、`Provider.prepare`、`dispatch`、`invoke`。Provider 履歴には typed part を持つ `ProviderMessage` を使い、`ChatMessage` はグラフ用の便宜的 projection として残ります。SDK 失敗は `ProviderOutcome.failure` で読み、host observer/settlement 例外は `outcome` と `cause` を保持します。コンストラクターと GIL/コールバック動作は [Python binding ガイド](python-binding.md)を参照してください。
+
+`input_total`、`output_total`、`total` などの使用量カウンターは `std::optional<sp::Count>` で、存在する count は `uint64_t value` と `Evidence` を持ちます。`Usage` は stage、quality、conflict も記録します。欠落は不明であり、ゼロを作りません。
+
+`UsageAccumulator::snapshot()` は累積報告を返します。`total_tokens_wide()` は計上済みトークンと未解決予約の合計で、報告使用量として表示してはいけません。精算には input/output count のある final・consistent 報告が必要で、根拠のある最大 total を計上し、超過使用量も clamp しません。累積対象の一つでも counter が欠落すれば集計も不明です。予約、ローカル計上、vendor 請求書は別の記録です。
 
 **Standalone bank journal 修正 — 現在の契約を改訂；実際の runtime 証拠は下記。** Owner-approved protocol は単調 trusted-store namespace obligation と、実際の不変 original owner/thread/graph scope、ceiling、deadline/clock identity、generation を要求します。全 checkpoint commitment/revision に対する正確な durable head CAS だけが host-owned opaque lease を発行できます。正確な pending effect window を provider I/O 前に永続化し、真正な SDK outcome と実際の charge、nullable report、hold、dedup identity で精算しなければなりません。Checkpoint/next head は同じ owned actor/revision 下で原子的に publish します。Bank metadata 削除、checkpoint pruning、old authenticated snapshot replay、同一 ID overwrite、actor 喪失で credit を与えてはなりません。既存 65 hold がある ceiling 130 を 129 に下げると別の 65 は許可できません。証明済み no-effect 失敗は unchanged head を release し authentic 130 復旧を可能にできます。Crash/unknown/lost-lease window は refund/retry/fallback なしで hold を保持します。Plain/pristine archive 設定は money/native spending lease を与えず、現在の `config.usage` は既存 standalone obligation を置換できません。Program/external-bank journal 所有は不変です。これは要求契約です。実際の currency/custody 証拠と instrumentation 制約は下記であり、安定 released API 保証ではありません。
 
@@ -423,13 +454,15 @@ result = await engine.resume_async(thread_id="t1",
 
 **Recorded-control causal fix は full suite で実証済み。** Captured command replay は実行前に新しい CPU wall-time/Core work だけを durable に reserve し、測定済み work と新しく生成した Core checkpoint を result CAS で publish します。新しい model、money、Program-operation allowance を消費せず、captured external effect を再 dispatch しません。未精算 reservation は debit を保持します。Reservation により、最初の新しい Core checkpoint を拒否した通常の Running→Running transition ではなく認証済み settlement transition を選びます。Await channel receive、timer wait/cancel、handoff wait の開始/release は owning executor/strand 上で直列化します。既存 Recorded CPU/Memory await/handoff scenario は full suite で pass しました。Remote TSan coverage 制約は下記に明記します。
 
+以下の観測はこの文書整備より前に記録されたものです。歴史的証拠であり、新 test 実行や全 platform・transport・security 性質の保証ではありません。
+
 **有料観測は完了；普遍的な qualification ではありません。** 元の `SPQUAL1` base630/1000000 microUSD は不変です。同じ元 ledger の ONE hash-chained `A` が承認済み extension480/3000000 を受け入れ、aggregate1110/4000000 になります。Calls/spent/hold/settlement は累積で新 grant ID/header/reset はありません。正確な declaration byte/file identity と original authorization/baseline/catalog/activation/ledger-prefix の hash/totals は固定され、削除・置換・変更は fail closed です。最終 canonical ledger は calls1110/spent437958/held1287828 microUSD、eventA1、limits1110/4000000；spent+held US$1.725786 は LOCAL catalogue meter で invoice ではありません。記録済み five-family60-pair baseline は600 request 完了：Chat60/60、Responses60/60、Messages60/60、Generate56/60（incorrect-vision SSE4件）、Interactions57/60（incorrect-vision buffered1件/SSE2件）；合計293/300 pair で300/300ではありません。他の old600 financial record は保持しますが完全な behavioral proof ではありません。以前の M5/media one-shot cohort は不変です。以前の Google3-round prerequisite は invalid-tool2件/unreadable-positive1件の失敗状態を保持します。追加有料呼出しは承認されません。最終 SDK 証拠と native-axis 制約は baseline 成功とは別です。 以前の activation/reopen smoke は2回 reopen 後 calls610/spent219159/held751233、SDK meter/canary/vision4-test19.38秒 pass として保持します。これは限定された以前の checkpoint で最終 ledger totals ではありません。以前の検証済み Chat60-pair cohort は実際の attempt120、UpperBound charge120、UnknownHold なしを保持します。
 
 **Native-axis 観測は cryptographic 検証・native consumption/equivalence ではありません。** Generate は mutation/omission/duplication を受け入れました。Interactions は isolated genuine source/positive control、one-owner signature mutation、thought-carrier omission、call-carrier omission、duplication を受け入れました。全 thought/signature 削除は generic400、THOUGHT item を保持して全 signature field を削除した場合も generic400 でした。最後の capture は local encoded-original retention control で、same-capture server positive ではありません。以前の positive cohort は真正です。観測は aggregate-carrier-absence boundary のみを示し、issuer/signature 検証や vendor consumption を証明しません。実際の report：SDK `config/qualification-extension-results.json`、`qualification-final-summary.json`、`qualification-native-axis-results.json`、`qualification-combined-omission-results.json`、`qualification-signature-presence-results.json`。Prerequisite-failed/not-run/negative-inconclusive の状態は事実のままです。 Thought-only/carrier-only omission は別 carrier が残る状態で受け入れられました。Issuer-validation/native-consumption の主張を強めません。
 
 **実際の統合証明と残る制約。** 最新 Core full run は2242 test、失敗0、skip16（RAM process-loss 非適用14件/live-credential gate2件）、130.17秒です。`PgNestedJsonRoundTrips` は duplicate key/order/null metadata、blob、residual を正確に保持し0.18秒で pass。未変更の元 shared-bank fork と既存 Recorded CPU/Memory await/handoff scenario も pass。実際の wrappedMemory/SQLite/PostgreSQL/gRPC finite130/hold65/lower129/strip/old-head/pruning/no-archive/import probe は plain と ASan+UBSan で pass。LOCAL Memory/SQLite/PostgreSQL TSan scope は7件 pass、warning0。System Abseil/Protobuf を含む full mixed gRPC TSan は exit66、dependency/generated-RPC stack に race warning402件。これは instrumentation/coverage 制約で proven false positive ではありません。Remote TSan/race-free は主張せず warning を suppress しません。Installed find_package Program C++/C ABI/dualQuickJS の3 consumer は pass。Fresh installed NeoGraph/SchemaProvider typed consumer は実際の HTTP request2件、coroutine 開始前の provider 破棄、native/tool replay、refusal、known-zero/raw 保持、実際の LinkedMismatch 拒否で pass。Browser Alice/Bob isolation と generation2 replacement を目視検証し、PostgreSQL Program Chat black-box6件は18.989秒で pass。最新 SDK26/26 は失敗0、74.07秒で pass。最終 ReleaseGraph16設定 ×fresh process3回/48記録は38.29秒、失敗0、全 actual protocol/owned-outcome check pass で完了しました。NeoGraph `benchmarks/provider-cutover-final-results.json` と `benchmarks/provider-cutover-final-summary.json` は独立した最終 cohort を保持します。測定中 compiler/有料 model は実行せず、歴史 cohort は不変で semantic/resource equivalence は主張しません。Unstable SDK/ABI3 は安定 release や広い platform qualification ではありません。
 
-Host 配信 limit、extent-bounded 診断/raw 証拠、共通 provider error と最小 media 証拠は [typed provider reference](reference-ja.md) に記載します。
+Host 配信 limit、extent-bounded 診断/raw 証拠、共通 provider error と最小 media 証拠は [typed provider reference](reference-en.md#owned-outcome) に記載します。
 
 ---
 
@@ -499,43 +532,48 @@ t.join();
 
 ---
 
-## 8.5 トレーシング — OpenTelemetry + Phoenix / Langfuse
+## 8.5. Tracing — OpenTelemetry + Phoenix / Langfuse
 
-> 以下の Python provider/wrapper 例は歴史的資料で、typed C++ 契約へ未移植です。現在の provider 指針ではありません。C++ 変更は Python binding の実装/資格検証ではありません。C++ 観測者は既存の公開テキスト/scalar/nullable count のみを出力し、raw native 状態は出力しません。
-ストリーミングと同じコールバック形状、異なるコンシューマー。OTelトレーサー発行コールバックを`engine.run_stream(cfg, cb)`に渡すと、すべての`NODE_START` / `NODE_END` / `ERROR` / `INTERRUPT`イベントがスパンになります。
-
-2つのレイヤーがツリーに同梱されている:
-
-  - `neograph_engine.tracing.otel_tracer` — ベンダーニュートラルなOTelスパン。スパンは任意のOTelバックエンド（Jaeger、Tempo、Honeycomb、Datadog）に流れます。
-  - `neograph_engine.openinference` — LLM形状の属性レイヤで、同じスパンをPhoenix / Arize / Langfuseで*LangSmithスタイルのチャットバブルトレース*に変換します：
+`neograph_engine.tracing.otel_tracer` と `neograph_engine.openinference.openinference_tracer` は graph event を run/node span に変えます。後者は `CHAIN` タグと node payload projection を記録します。Run ごとに graph callback を一つ選びます。モデル呼び出しを `LLM` span として記録するには graph compile 前に typed provider を `OpenInferenceProvider(inner, tracer, *, span_name="llm.complete")` で包みます。Wrapper は native C++ observer と継承した `prepare`/一度限りの `dispatch` または `invoke` を使います。Request の準備や破棄は span を開かず、承認済み dispatch は owned outcome、キャンセル、deadline、typed event を変更せず span を開きます。Tracer 失敗は provider 結果や例外を置換しません。
 
 ```python
-from opentelemetry import trace
+from opentelemetry import context as otel_context
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from neograph_engine import GraphEngine, NodeContext
 from neograph_engine.openinference import OpenInferenceProvider, openinference_tracer
 
-trace.set_tracer_provider(TracerProvider())
-trace.get_tracer_provider().add_span_processor(
-    BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4317", insecure=True)))
-tracer = trace.get_tracer("my-app")
 
-# Wrap the provider — every Provider.complete() now emits an LLM-kind span.
-wrapped = OpenInferenceProvider(real_provider, tracer)
-ctx = ng.NodeContext(provider=wrapped)
-engine = ng.GraphEngine.compile(graph_def, ctx)
+class ParentContextTracer:
+    def __init__(self, tracer, parent_context):
+        self.tracer, self.parent_context = tracer, parent_context
 
-with openinference_tracer(tracer) as cb:
-    engine.run_stream(ng.RunConfig(input={"messages": [...]}), cb)
+    def start_span(self, name):
+        return self.tracer.start_span(name, context=self.parent_context)
+
+
+def trace_graph(graph_spec, inner_provider, model, cfg):
+    provider = TracerProvider()
+    provider.add_span_processor(BatchSpanProcessor(
+        OTLPSpanExporter(endpoint="http://localhost:4317", insecure=True)))
+    tracer = provider.get_tracer("my-app")
+    try:
+        with openinference_tracer(tracer) as cb:
+            parent = ParentContextTracer(tracer, otel_context.get_current())
+            observed = OpenInferenceProvider(inner_provider, parent)
+            engine = GraphEngine.compile(
+                graph_spec, NodeContext(provider=observed, model=model))
+            return engine.run_stream(cfg, cb)
+    finally:
+        provider.shutdown()
 ```
 
-Phoenixを一度起動します：`docker run -d -p 6006:6006 -p 4317:4317
-arizephoenix/phoenix`。http://localhost:6006を開くと、トレースがチェーン（`graph.run` → `node.X` → `llm.complete`）としてレンダリングされ、プロンプト / レスポンス / トークン数がLLM詳細ペインに表示されます。同じコードで、OTLPエンドポイントURLをLangfuseセルフホストに切り替えると、トレースは同じ形状でそこに表示されます。
+Local Phoenix endpoint は `docker run -d -p 6006:6006 -p 4317:4317 arizephoenix/phoenix:latest` を起動し、`opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp` を設置します。Graph specification、既存 provider、明示的 model と `RunConfig` を `trace_graph` に渡します。`ParentContextTracer` は run root を worker dispatch に明示的に渡し、cross-thread や node 別の自動 parent 伝播は保証しません。Python は dispatch 時の active OTel context を使い、prepared operation は寿命中 tracer adapter を保持します。
 
-これは *「NeoGraphにはLangSmithがない」* に対する答えです — PhoenixまたはLangfuseを1つのDockerコマンドでローカルに実行することで、LangSmith UX（チャットバブル、DAG階層、トークンコスト）を取得できます。SaaS契約も、トレースごとの価格設定もありません。
+LLM span は公開 role/text projection、宣言済み scalar、既知 usage count のみを含みます。既知ゼロは記録し、不明は省略します。Native replay/reasoning、raw wire envelope/event と encoded request body は trace に入れず、request/outcome の本来の custody を維持します。失敗時の partial report を含む usage 属性は vendor charge や budget authority の証明ではありません。Charged/reserved accounting は `UsageAccumulator.authority_snapshot()` と Program の `provider_budget_authority` が扱います。
 
-`docs/reference-en.md` §10.5で、属性キースキーマと`otel_tracer`、`openinference_tracer`間のトレードオフを確認してください。
+公開 text、例外メッセージ、graph payload にも application secret があり得ます。Exporter に渡すデータを選択または redact し、[OpenTelemetry の機密データ指針](https://opentelemetry.io/docs/security/handling-sensitive-data/)を参照してください。[OpenInference convention](https://github.com/Arize-ai/openinference/blob/main/spec/semantic_conventions.md) は `CHAIN` と `LLM` を定義します。[参照](reference-en.md#105-observability--opentelemetry--openinference)は NeoGraph の属性 subset、token event、Python typed 呼び出し例と C++ の寿命要件を説明します。
 
 ---
 
@@ -556,9 +594,9 @@ arizephoenix/phoenix`。http://localhost:6006を開くと、トレースがチ�
 
 `compile()` デフォルトは `set_worker_count(1)` （エンジン所有のスレッドプールなし — fan-out ブランチは呼び出し元のエグゼキュータ上で直列に実行される）。実際の並列処理には `engine.set_worker_count(N)` を呼び出し、N を Send の fan-out 幅に合わせるか、 `engine.set_worker_count_auto()` を `hardware_concurrency()`に使用する。NeoGraph はまた、オプトインしたプールなしでマルチ Send の fan-out が初めて実行されたときに、一度だけ stderr 警告を出力する — これはヒントであり、エラーではない。Python カスタムノードは小さな fan-out で GIL の競合が発生するため、1 と N の両方でベンチマークを行うこと。
 
-### "Python RunResult に .status / .final_state 属性がない"
+### Python RunResult の status と state を読む
 
-Pythonバインディングはそれらの属性を公開していません。`result.output`、`result.interrupted`、`result.max_steps_exhausted`、`result.execution_trace`を使用してください。C++呼び出し元は、型付きの`Completed` / `Interrupted` / `StepLimit`ビューに`RunResult::status()`を使用できます。[Pythonバインディングガイド](python-binding.md#hitl-and-state)を参照してください。
+`result.status` は typed `Completed`、`Interrupted`、`StepLimit`、`SafePoint` 状態を公開します。`result.output` は portable 最終 state、`result.interrupted`、`result.max_steps_exhausted`、`result.execution_trace` は run の観測です。`result.native_messages`、`result.provider_outcomes` は全 typed provider 証拠を保持します。[Python binding ガイド](python-binding.md#hitl-and-state)を参照してください。
 
 ### 「不明なリデューサー：<name>」
 

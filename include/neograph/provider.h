@@ -35,6 +35,8 @@ struct ProviderDispatchBudget {
 
 enum class ProviderMode : std::uint8_t { Collect, Stream };
 
+/// Typed per-call controls translated into the selected SDK provider family.
+/// Unsupported family/model combinations fail during request preparation.
 struct ProviderControls {
     std::optional<std::uint64_t> max_output_tokens;
     std::optional<std::uint64_t> max_tool_calls;
@@ -48,6 +50,26 @@ struct ProviderControls {
     std::optional<sp::OpenRouterRouting> provider;
     std::optional<sp::ResponseFormat> response_format;
     std::optional<bool> store;
+    std::optional<sp::chat::ReasoningOptions> chat_reasoning;
+    std::optional<bool> include_reasoning, usage_include;
+    std::vector<std::string> models;
+    /// Responses server-side cursor; send only new input with this identifier.
+    std::optional<std::string> previous_response_id;
+    /// Prior cursor turns retained as local validation evidence, not resent input.
+    std::vector<sp::Message> previous_response_history;
+    std::optional<bool> parallel_tool_calls;
+    std::optional<sp::responses::Verbosity> verbosity;
+    std::optional<sp::responses::Truncation> truncation;
+    std::optional<std::vector<sp::responses::Include>> responses_include;
+    std::optional<sp::messages::ThinkingMode> thinking_mode;
+    std::optional<sp::messages::OutputEffort> output_effort;
+    std::optional<sp::messages::CacheControl> cache_control;
+    std::optional<sp::messages::ToolChoice> messages_tool_choice;
+    /// Explicit admission mode for authentic or portable foreign Gemini history.
+    std::optional<sp::gemini::HistoryMode> gemini_history_mode;
+    std::optional<sp::gemini::ThinkingLevel> gemini_thinking_level;
+    std::vector<sp::gemini::SafetySetting> safety_settings;
+    std::optional<sp::gemini::ToolChoice> gemini_tool_choice;
     std::string account_scope, system;
 };
 
@@ -57,8 +79,8 @@ struct ProviderObserverLimits {
     std::optional<std::size_t> max_bytes;
 };
 
-// Portable request controls remain the SDK's declared, family-specific fields.
-// No raw JSON field override or callback-selected streaming mode is admitted.
+/// Portable request controls remain the SDK's declared, family-specific fields.
+/// No raw JSON field override or callback-selected streaming mode is admitted.
 struct ProviderRequest {
     sp::runtime::Request payload;
     ProviderMode mode = ProviderMode::Collect;
@@ -161,9 +183,9 @@ private:
         const PreparedProviderRequest&, ProviderDispatchBudget);
 };
 
-// Capability identity plus a single prepared, owned operation contract.
-// Returned awaitables own all operation state, including the runtime client;
-// neither request nor Provider object must survive coroutine scheduling.
+/// Capability identity plus a single prepared, owned operation contract.
+/// Returned awaitables own all operation state, including the runtime client;
+/// neither request nor Provider object must survive coroutine scheduling.
 class NEOGRAPH_API Provider {
 public:
     virtual ~Provider() = default;

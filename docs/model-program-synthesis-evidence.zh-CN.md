@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=docs/model-program-synthesis-evidence.md locale=zh-CN source_sha256=b0a57aa0f6c4a726e417d88daf8d0e3f90178de20d610884fcba052b0f622105 -->
+<!-- neograph-i18n: source=docs/model-program-synthesis-evidence.md locale=zh-CN source_sha256=c34041ccc8bf5143dd152f292a26c02eb4a487757b4657e0ecfe75b4740a3373 -->
 # 模型生成的QuickJS Program合成证据
 
 **Languages:** [English](model-program-synthesis-evidence.md) | [한국어](model-program-synthesis-evidence.ko.md) | [日本語](model-program-synthesis-evidence.ja.md) | [简体中文](model-program-synthesis-evidence.zh-CN.md)
 
-- 状态：有界PoC已验证
+- 状态：历史有界 PoC 证据；不是对当前 binding 的新验证
 - 观察时间：2026-08-21
 - 模型：`deepseek/deepseek-v4-flash-0731` 通过OpenRouter
 - 提供商响应：`gen-1787288110-o3PCpNZgsnE8eyQF1TzM`

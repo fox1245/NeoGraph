@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=docs/QUICKJS_MIGRATION_COMPLETION.md locale=ko source_sha256=11b6f9b3c96b82c4bfc8364c832e675413d7d12bc8689c2ea6119295c4a6d278 -->
+<!-- neograph-i18n: source=docs/QUICKJS_MIGRATION_COMPLETION.md locale=ko source_sha256=9d60815c273f2c94969dbfefe5eb7d6bdbd58075e51e06a7f753a36461e31d0b -->
 # QuickJS 마이그레이션 완료 런북
 
 **Languages:** [English](QUICKJS_MIGRATION_COMPLETION.md) | [한국어](QUICKJS_MIGRATION_COMPLETION.ko.md) | [日本語](QUICKJS_MIGRATION_COMPLETION.ja.md) | [简体中文](QUICKJS_MIGRATION_COMPLETION.zh-CN.md)
 
-**상태:** 릴리스 완료 절차로 제안됨. 남아 있는 게이트가 통과되었음을 증명하는 문서는 아님.
+**상태:** 2026-08-11에 제안한 과거 릴리스 완료 절차다. 시작 상태 표와 순서화된 gate는 planning 기록이지 현재 candidate가 gate를 통과했다는 주장이 아니다.
 
 **일자:** 2026-08-11
 
@@ -25,9 +25,9 @@
 
 이 절차는 이슈 #35 (`trusted_direct`) 또는 지속 가능한 Promise 스케줄러를 시작하지 않는다. 어느 것도 제한된 지속 가능한 프로파일을 완료하기 위한 선행 조건이 아니며, 어느 것도 레거시 제거와 함께 번들될 수 없다.
 
-## 2. 검증된 시작 지점
+## 2. 과거에 검증한 시작 지점
 
-| 영역 | 현재 상태 | 증거 |
+| 영역 | 2026-08-11에 기록한 상태 | 증거 |
 | --- | --- | --- |
 | Q1–Q6 기본 런타임 및 작성(authoring) 전환 | 구현됨 | `quickjs-control-runtime.sdd.yaml` `completion_state`; JavaScript `define()`/generator 동작은 `tests/test_harness_program_cutover.cpp`에 포함됨. |
 | Core DSL/elaborator 및 Harness DSL 작성 | 제거/거부됨 | 부모 사양의 `authoring_cutover_contract.completed_removals`에서; Harness 변환기는 레거시 모드를 거부함. |
@@ -38,6 +38,12 @@
 | Q7 소스/런타임 제거 | 시작 안 됨 | `SourceKind::CanonicalJson`, Program 문서 스키마, `ProgramPlan`, 레거시 컴파일러 파싱, 그리고 연산 트리 디스패처가 소스에 남아 있습니다. |
 
 따라서 이번 릴리스는 Q7 삭제를 위한 준비가 **되지** 않았습니다. 플랫폼 자격 검증이 먼저 종료되어야 하며, 최종 드레인 증명은 실제 제거 경계에서 새로 확립되어야 합니다.
+
+그 과거 표의 Windows source 제한은 이후 NeoGraph 소유 MSVC build overlay로
+바뀌었고 `ProgramSource` runtime identity에 고정된다. Source 지원은 platform
+검증이 아니다. Canonical storage와 trusted-C++ typed operation infrastructure는
+여전히 남아 있다. Public JSON authoring 제거가 모든 shared dispatcher와 저장
+schema 삭제를 뜻하지 않는다.
 
 ## 3. 모든 단계에 적용되는 규칙
 

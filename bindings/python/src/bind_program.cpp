@@ -1,4 +1,5 @@
 #include "json_bridge.h"
+#include "provider_bridge.h"
 
 #include <neograph/graph/loader.h>
 #include <neograph/program/program.h>
@@ -188,7 +189,8 @@ public:
                      std::string owner_scope,
                      RunBudget budget_ceiling,
                      std::string compiler_build_id,
-                     std::size_t scheduler_threads)
+                     std::size_t scheduler_threads,
+                     std::shared_ptr<sp::NativeArchive> native_history_archive)
         : registry_(std::move(registry)),
           owner_scope_(std::move(owner_scope)),
           compiler_build_id_(std::move(compiler_build_id)),
@@ -200,9 +202,27 @@ public:
           catalog_(std::make_shared<ProgramCatalog>(CatalogConfig{
               store_, registry_, std::make_shared<EngineGenerationCache>(), compiler_build_id_})),
           checkpoints_(std::make_shared<InMemoryCheckpointStore>()),
-          transitions_(std::make_shared<InMemoryProgramTransitionStore>()),
-          runtime_(std::make_unique<ProgramRuntime>(RuntimeConfig{
-              catalog_, checkpoints_, {}, transitions_, scheduler_threads})) {}
+          transitions_(std::make_shared<InMemoryProgramTransitionStore>()) {
+        RuntimeConfig config;
+        config.catalog = catalog_;
+        config.checkpoints = checkpoints_;
+        config.transitions = transitions_;
+        config.scheduler_threads = scheduler_threads;
+        config.native_history_archive = std::move(native_history_archive);
+        runtime_ = std::make_unique<ProgramRuntime>(std::move(config));
+    }
+
+    ~LocalProgramHost() {
+        // Runtime teardown cancels and joins scheduler work. A Python node on
+        // that work may need the GIL before it can finish. Other host members
+        // are destroyed after this scope, with the caller's GIL restored.
+        if (PyGILState_Check()) {
+            py::gil_scoped_release release;
+            runtime_.reset();
+        } else {
+            runtime_.reset();
+        }
+    }
 
     ProgramBundle compile(const ProgramSource& source, const RunBudget& budget) const {
         try {
@@ -446,28 +466,70 @@ void init_program(py::module_& m) {
         .def_property_readonly("execution_guarantee", &ProgramVersion::execution_guarantee)
         .def("serialize_canonical", &ProgramVersion::serialize_canonical);
 
+    py::class_<ProgramFailure>(m, "ProgramFailure")
+        .def_readonly("code", &ProgramFailure::code)
+        .def_readonly("message", &ProgramFailure::message)
+        .def_readonly("operation_id", &ProgramFailure::operation_id)
+        .def_readonly("core_node", &ProgramFailure::core_node)
+        .def_readonly("attempts", &ProgramFailure::attempts)
+        .def_property_readonly("witness", [](const ProgramFailure& value) { return json_to_py(value.witness); })
+        .def_readonly("provider_outcome", &ProgramFailure::provider_outcome)
+        .def_property_readonly("provider_cause", [](const ProgramFailure& value) { return provider_cause(value.provider_cause); })
+        .def("__eq__", [](const ProgramFailure& left, const ProgramFailure& right) { return left == right; }, py::is_operator());
+    py::class_<CoreCheckpointIdentity>(m, "ProgramCoreCheckpointIdentity")
+        .def_readonly("core_name", &CoreCheckpointIdentity::core_name)
+        .def_readonly("core_generation_id", &CoreCheckpointIdentity::core_generation_id)
+        .def_readonly("core_thread_id", &CoreCheckpointIdentity::core_thread_id)
+        .def_readonly("checkpoint_id", &CoreCheckpointIdentity::checkpoint_id)
+        .def_readonly("checkpoint_schema_version", &CoreCheckpointIdentity::checkpoint_schema_version);
+    py::enum_<ProgramPendingInputKind>(m, "ProgramPendingInputKind")
+        .value("Input", ProgramPendingInputKind::Input).value("CapabilityResult", ProgramPendingInputKind::CapabilityResult);
+    py::enum_<ProgramPendingState>(m, "ProgramPendingState")
+        .value("Awaiting", ProgramPendingState::Awaiting).value("Consumed", ProgramPendingState::Consumed)
+        .value("Expired", ProgramPendingState::Expired).value("Cancelled", ProgramPendingState::Cancelled)
+        .value("Ambiguous", ProgramPendingState::Ambiguous);
+    py::class_<ProgramPendingInput>(m, "ProgramPendingInput")
+        .def_property_readonly("operation_id", &ProgramPendingInput::operation_id)
+        .def_property_readonly("call_id", &ProgramPendingInput::call_id)
+        .def_property_readonly("kind", &ProgramPendingInput::kind)
+        .def_property_readonly("state", &ProgramPendingInput::state)
+        .def_property_readonly("payload", [](const ProgramPendingInput& value) { return json_to_py(value.payload()); })
+        .def_property_readonly("result_schema", [](const ProgramPendingInput& value) { return json_to_py(value.result_schema()); })
+        .def_property_readonly("expires_at_unix_ms", &ProgramPendingInput::expires_at_unix_ms)
+        .def("serialize_canonical", &ProgramPendingInput::serialize_canonical);
+    py::class_<ProgramPendingEffect>(m, "ProgramPendingEffect")
+        .def_property_readonly("operation_id", &ProgramPendingEffect::operation_id)
+        .def_property_readonly("call_id", &ProgramPendingEffect::call_id)
+        .def_property_readonly("effect_id", &ProgramPendingEffect::effect_id)
+        .def_property_readonly("state", &ProgramPendingEffect::state)
+        .def_property_readonly("payload", [](const ProgramPendingEffect& value) { return json_to_py(value.payload()); })
+        .def_property_readonly("result_schema", [](const ProgramPendingEffect& value) { return json_to_py(value.result_schema()); })
+        .def_property_readonly("expires_at_unix_ms", &ProgramPendingEffect::expires_at_unix_ms)
+        .def("serialize_canonical", &ProgramPendingEffect::serialize_canonical);
+    py::class_<ProgramInterrupt>(m, "ProgramInterrupt")
+        .def_readonly("core_node", &ProgramInterrupt::core_node)
+        .def_property_readonly("value", [](const ProgramInterrupt& value) { return json_to_py(value.value); })
+        .def_readonly("pending_input", &ProgramInterrupt::pending_input)
+        .def_readonly("pending_effect", &ProgramInterrupt::pending_effect);
     py::class_<ProgramResult> result(m, "ProgramResult");
     result.def_static("parse", &ProgramResult::parse)
         .def_property_readonly("id", &ProgramResult::id)
         .def_property_readonly("status", &ProgramResult::status)
         .def_property_readonly("run_id", &ProgramResult::run_id)
         .def_property_readonly("program_version_id", &ProgramResult::program_version_id)
+        .def_property_readonly("bundle_id", &ProgramResult::bundle_id)
+        .def_property_readonly("operation_id", &ProgramResult::operation_id)
+        .def_property_readonly("attempt", &ProgramResult::attempt)
+        .def_property_readonly("checkpoint", &ProgramResult::checkpoint)
+        .def_property_readonly("interrupt", &ProgramResult::interrupt)
+        .def_property_readonly("provider_budget_authority", &ProgramResult::provider_budget_authority)
         .def_property_readonly("output", [](const ProgramResult& value) {
             return json_to_py(value.output());
         })
         .def_property_readonly("usage", &ProgramResult::usage)
         .def_property_readonly("remaining_budget", &ProgramResult::remaining_budget)
         .def_property_readonly("execution_trace", &ProgramResult::execution_trace)
-        .def_property_readonly("failure", [](const ProgramResult& value) -> py::object {
-            const auto failure = value.failure();
-            if (!failure) return py::none();
-            return py::dict("code"_a = failure->code,
-                            "message"_a = failure->message,
-                            "operation_id"_a = failure->operation_id,
-                            "core_node"_a = failure->core_node,
-                            "attempts"_a = failure->attempts,
-                            "witness"_a = json_to_py(failure->witness));
-        })
+        .def_property_readonly("failure", &ProgramResult::failure)
         .def("serialize_canonical", &ProgramResult::serialize_canonical);
 
     py::class_<ProgramHandle>(m, "ProgramHandle")
@@ -494,10 +556,12 @@ void init_program(py::module_& m) {
     py::class_<LocalProgramHost>(m, "LocalProgramHost",
         "Owner-scoped in-memory Program compiler, Catalog, and durable runtime. "
         "It uses the same C++ ProgramRuntime as native callers.")
-        .def(py::init<RegistrySnapshot, std::string, RunBudget, std::string, std::size_t>(),
+        .def(py::init<RegistrySnapshot, std::string, RunBudget, std::string, std::size_t,
+                      std::shared_ptr<sp::NativeArchive>>(),
              py::arg("registry"), py::arg("owner_scope"), py::arg("budget_ceiling"),
              py::arg("compiler_build_id") = "neograph-python-program/v1",
-             py::arg("scheduler_threads") = 1)
+             py::arg("scheduler_threads") = 1,
+             py::arg("native_history_archive") = nullptr)
         .def_property_readonly("owner_scope", &LocalProgramHost::owner_scope)
         .def("compile", &LocalProgramHost::compile)
         .def("admit", &LocalProgramHost::admit)

@@ -8,7 +8,7 @@ The C++ router, synthesizer and specialist fixtures use typed `ProviderRequest`,
 
 Local voice is optional and needs the selected whisper/Moonshine models, ONNX Runtime/Supertonic assets, miniaudio and usable microphone/speaker devices; text/mock operation is not proof of working voice. Cloud-free applies only to local/mock operation. Live requests require an authorized `OPENROUTER_API_KEY`, network access and provider capacity, and send prompts, conversation memory and attached tool/delegation results to OpenRouter. The live model is pinned; the native request sets ZDR, not a residency guarantee. Keep keys out of logs and version control. Provider token usage is nullable accounting, not a monetary bill: cost requires current endpoint/model pricing and billable usage.
 
-`[jarvis:ttft]` is emitted on the first nonempty `sp::PartDelta` with `PartKind::Text` and `DeltaChannel::Content`, not on usage, reasoning, headers or other events. It measures first synthesis text, not first audible TTS playback. Python REPL/benchmark protocol drivers remain unchanged; typed Python provider bindings are deferred. The current [Jarvis CLI runtime evidence](../README.md) covers a greeting, a persisted synthetic memory turn and graceful EOF, not these benchmark rounds. All benchmark timings and execution statements below remain historical; microphone, ASR, TTS, pybind benchmarks and vendor inference are not qualified by that CLI run.
+`[jarvis:ttft]` is emitted on the first nonempty `sp::PartDelta` with `PartKind::Text` and `DeltaChannel::Content`, not on usage, reasoning, headers or other events. It measures first synthesis text, not first audible TTS playback. Python REPL drivers remain protocol clients; pybind benchmarks use the migrated typed bindings and need separate execution evidence. The current [Jarvis CLI runtime evidence](../README.md) covers a greeting, a persisted synthetic memory turn and graceful EOF, not these benchmark rounds. All benchmark timings and execution statements below remain historical; microphone, ASR, TTS, pybind benchmarks and vendor inference are not qualified by that CLI run.
 
 Mirrors identical topology (mic→stt→merge→memory→router→4-way→synth/skip→commit→tts)
 in NeoGraph (C++ mock build) and LangGraph (Python twin `langgraph_twin.py`),
@@ -33,8 +33,8 @@ Interpretation:
   ~19ms is HTTP client stack difference (langchain-openai httpx+pydantic vs asio).
 - Turn-to-turn gap is **growth-type** — gets larger as inference gets faster — 10%+ for
   200ms-turn (Cerebras-level / single-call path), 20-30% for local small models (~50ms/call).
-- 90× startup · 9× RSS are **fixed gaps** unrelated to inference speed — immediately
-  relevant for edge always-on · cold-start · multi-tenant (100 JARVIS = <1GB).
+- The historical startup/RSS ratios were about 90×/9× for this container setup.
+  They do not establish memory capacity for 100 production JARVIS instances.
 
 ## E2E Round — Including Real MCP Tool Round-Trip (2026-07-05)
 
@@ -96,8 +96,9 @@ don't wobble even if rounds hit different Groq windows.
 
 ## Streaming TTFT Round (2026-07-05)
 
-Modern LLM services all stream, so benchmark matches: Both synth calls changed to streaming
-(C++ `ProviderMode::Stream` / `sp::Event`, LangGraph `SYNTH_LLM.stream()`),
+This historical round switched both synthesis calls to streaming
+(the historical C++ streaming provider path and LangGraph `SYNTH_LLM.stream()`);
+the migrated C++ path now uses `ProviderMode::Stream` / `sp::Event`.
 driver measures **turn-send → first synth token** time with `[jarvis:ttft]` marker.
 nginx passes SSE through with `proxy_buffering off` so `$upstream_header_time` is
 the real first byte. Separate logs per round (mv + `nginx -s reopen`) to eliminate
@@ -112,21 +113,22 @@ round-splitting guesswork.
   earlier (800 vs 603) was pure provider dispersion — this time Groq gave both
   fair window (upstream 726 vs 753) eliminating gap. Confirmed "NG round only bad luck"
   suspicion with reproduction.
-- **Completion time residual (pure framework) reproduced**: NeoGraph 4.1ms vs LangGraph
+- **Completion-time residual in that historical round**: NeoGraph 4.1ms vs LangGraph
   14.6ms (matches previous proxy round 3.5 vs 14.7). The framework overhead
-  conclusion is solid.
+  residual includes client serialization, local MCP and pipe overhead; it is not
+  a direct measurement of graph computation alone.
 - **TTFT-residual is 0 within ±tens ms noise** (negative even appears). Compared to
   perceived TTFT 625ms vs upstream sum 673ms, resolution (±50ms) of subtracting two
   independent clocks (client monotonic vs nginx wall-clock) is larger than framework
   contribution (ms). I.e., **framework difference is below observation limit in TTFT path**
   — signal emerges above noise only in total residual/mock.
-- **Streaming benefit**: Perceived TTFT (631) ≪ completion time (744) — user starts hearing
-  answer in 0.6s. Confirmed perceived speed improvement over non-streaming which waits
+- **Streaming benefit**: First synthesis text (631ms) precedes completion (744ms).
+  This marker does not measure first audible playback. The historical phrase “user starts hearing”
+  at 0.6s described the text marker, not an audio measurement. Non-streaming waits
   for completion.
 
-Summary: Framework pure performance favors NeoGraph (total residual·mock, reproducible),
-but **perceived TTFT is tied in streaming and provider dispersion dominates**. Edge/multi-tenant
-(90× startup · 9× RSS) remains NeoGraph's real battlefield.
+The historical streaming text-marker TTFT was tied. These measurements do not
+qualify the current SDK transport, audio latency or production tenant capacity.
 
 ## Fairness Conditions
 

@@ -314,15 +314,16 @@ static std::string rewrite_query(Provider& p, const std::string& question,
     messages.push_back(examples::message(sp::Role::User, question));
     ProviderControls controls;
     controls.temperature = 0.0;
+    controls.max_output_tokens = 512;
+    controls.reasoning_effort = "low";
     const auto outcome = run_stage(p, make_provider_request(
         p, "~deepseek/deepseek-v4-flash-latest", std::move(messages), {}, controls),
         outcomes);
     auto out = examples::visible_text(*outcome);
-    // Strip trailing newlines / whitespace.
-    while (!out.empty()
-           && (out.back() == '\n' || out.back() == ' ' || out.back() == '\t'))
-        out.pop_back();
-    return out;
+    const auto first = out.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return question;
+    const auto last = out.find_last_not_of(" \t\r\n");
+    return out.substr(first, last - first + 1);
 }
 
 // The SDK declares hosted tools independently from client-executed functions.
@@ -373,7 +374,7 @@ int main() {
         }
 
         auto provider = examples::make_openrouter_provider(
-            api_key, "responses", std::chrono::seconds(60));
+            api_key, "responses", std::chrono::seconds(180));
 
         // Three questions chosen to exercise each branch of the router.
         // The verdict is LLM-driven, so the route a given run takes can

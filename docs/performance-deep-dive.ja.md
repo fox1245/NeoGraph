@@ -1,348 +1,114 @@
-<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=ja source_sha256=9fdb1ea2f06b3f4efd6ff30e9e3526d0e16a5270bffe251408b209d8ad3c37df -->
-# パフォーマンスの詳細
+<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=ja source_sha256=31ea664b884c612f5b01c1132fe748da0cb0115e2afe5bf203f33e958516c63b -->
+# 性能詳細
 
 **Languages:** [English](performance-deep-dive.md) | [한국어](performance-deep-dive.ko.md) | [日本語](performance-deep-dive.ja.md) | [简体中文](performance-deep-dive.zh-CN.md)
 
-> **過去の測定であり、現在の移行 qualification ではありません。** 移行前の
-> 性能/経済性主張と再現コマンドを保存しています。`OpenAIProvider::Config` 例、
-> 単一依存/frozen ABI/wheel の前提は現在の統合指針ではありません。型付き C++
-> provider は外部 SchemaProvider runtime を要求し、`0.0.0` interface/shared ABI 3
-> は不安定です。Python provider wrapper は延期されています。
-> [現在の移行ガイド](migration-v0.4-to-v1.0.ja.md)と
-> [現在の benchmark 証拠](../benchmarks/README.ja.md)を参照してください。
+## 歴史的測定の読み方
 
-> **パフォーマンス**と**軽量**を裏付ける詳細な測定
-> 軸。 README には見出し番号が記載されています。これが完全な証拠です。
+以下の表は移行前測定を保存する。現在の typed provider、外部 runtime、再構築した Python wheel の検証ではない。新比較には revision、compiler、configuration、topology、concurrency、endpoint、計時境界を記録する。現在の再現手順は [benchmark](../benchmarks/README.md) にある。
 
----
+旧文の cloud 費用、数百万 worker、恒久 ABI freeze は測定からの予測で、実測した deployment ではない。現在の容量・費用保証ではない。package version に加え wheel hash と native dependency を固定する。version 文字列だけでは再現性を得られない。
 
-## 生産の経済学
+## engine-only workload、2026 年 4 月
 
-4 つのポイント (単一階層ツリー、Docker 不要、ABI の凍結、
-シングルホイール展開）により、目に見えて異なるコストが複合化されます。
-実際にAWS / GCP / Azureでスケールする場合の構造。二
-メカニズム — **自動スケーリングによるフリートの安全性** および **各ワーカー数
-インスタンス** — 数字を動かします。
+同じ topology を一度 compile し、model/network/sleep なしで実行した。seq は三 node chain、par は五分岐と join。2026-04-22 の x86_64 Linux で、NeoGraph は GCC 13 Release `-O3 -DNDEBUG` の十回 median、Python は CPython 3.12.3 の三回 median。pydantic-graph の par は native fan-out でなく六 node の直列模倣である。
 
-### ハイゼンバグを使用しない自動スケーリング
-
-AWS の LangChain には実質的に `docker image hash` ピンニングが必要です
-スタック全体 — ECR 不変イメージ、ASG 起動
-イメージハッシュに固定されたテンプレート、そのマルチリージョンレプリケーション
-ハッシュ。これがなければ、あらゆる艦隊変更イベントは時限爆弾になります。
-
-|イベント | LangChain のリスク | NeoGraph の動作 |
-|---|---|---|
-| ASG が新しい EC2 を発表 | `pip install` は新しい推移的マイナーをプルする可能性があります → フリートの動作ドリフト | Wheel は PyPI ではハッシュ不変です。新しいインスタンス = バイト同一のバイナリ |
-| Lambda コールド スタート | 5 ～ 15 秒 (`langchain-community` インポート グラフ) | ms-class — 推移的なインポートなし |
-|スポット中断 + Karpenter 再構築 | OS パッケージ + 推移的な Python dep ドリフト |静的にリンクされた C++。 `libc.so.6` のみが重要です |
-|ブルー/グリーン展開 |デプロイ時に再構築されたイメージ = 昨日とは異なるランタイム | `pip install neograph-engine==X.Y.Z` はバージョン文字列だけで再現可能です。 |
-|マルチリージョンの展開 | PyPI ミラー ラグ + ECR レプリケーション タイミング → 領域が分岐 |リージョン間のホイール ハッシュの同等性、期間 |
-| 「コード 0 の行が変更され、prod が壊れました」 |定期的に発生 (Pydantic v1→v2 / 2024) |構造的に不可能 — ドリフトする推移的な曲面がない |
-
-→ NeoGraph は、LangChain 製品に * 必要な * SOP を削除します。ベアメタル
-EC2 ユーザーデータスクリプトの `pip install neograph-engine` はそれ自体です
-プログレード。
-
-### インスタンスごとのワーカー数 — RAM 側の差分
-
-| |ランググラフ |ネオグラフ |
-|---|---|---|
-|インポートされたばかり (ワーカーゼロ) | **80 MB** | **5.5 MB** |
-| 1024 人のアイドル労働者 | (通常は OOM クラス) | **31 MB** |
-|ワーカーごとのオーバーヘッド (アイドル状態、ユーザー状態なし) | ~200–500 MB 現実的な製品 | ~30 KB 測定 |
-| t3.medium (4 GB) — ワーカー/インスタンス | 7–17 | **700–3,500** |
-| 1,000 個の同時リクエストに必要なインスタンス | 60～140 | **1–3** |
-| us-east-1 の支出 (年中無休、オンデマンド t3.medium) | **~$1,800–4,300/月** | **~$30–90/月** |
-
-これは、同じインフラストラクチャのコスト比が **50 ～ 150 倍** になります。
-同時ユーザー数。ワーカーごとの数値の背後にあるメカニズムは次のとおりです。
-以下の L3 キャッシュ フィットのストーリー: NeoGraph のホット ワーキング セットは 277 KB
-N に関係なく、垂直スケールの上限は物理 RAM によって設定されます
-キャッシュの圧力によるものではなく、それ自体によるものです。
-
-> *「LangChain ランタイムコスト: 1,000 人の同時ユーザーの場合、月あたり最大 4,000 ドル。
-> NeoGraph: ~$50/月。同じコード形状、同じ LLM、凍結された ABI。」*
-
-これは、SRE / プラットフォーム チームが検討する際に重視する角度です。
-製品版での LangChain を拒否します。それは「Python が遅い」のではなく、
-「コスト曲線により、SLA は不可能になります。」
-
-### 測定値: 10,000 人の同時ワーカー、1 つのプロセス、1 つの GPU
-
-上の表は保守的なものです。直接的なストレステストにより、
-実数 — *測定*、外挿されていません。設定：
-
-- 1 つのプロセス、1 つの RTX 4070 Ti、1 つの Gemma 4 E2B Q4 GGUF (≈ 1.5 GB)
-  llama.cpp 経由でモデルの重みを取得します）。
-- 単一の共有 `LocalProvider` シリアル化推論
-  GPU 境界 (典型的な「LLM エンドポイントは
-  「ボトルネック」の生産形状）。
-- N 個の同時 NeoGraph ワーカー、それぞれが 1 ノード グラフを実行
-  (`llm_call` → `__end__`) `engine.run_async()`、すべて
-  同じプロバイダーをめぐって競合しています。
-- 実数生成: 入力 `"Hi"`、出力 例:
-  `"Hello! How can I help you today?\n"`。
-
-| N 人の労働者 |壁 |スループット (rps) | p50 (ミリ秒) | p99 (ミリ秒) |ピーク RSS (MB) |エンジンオーバーヘッド (MB) |ワーカーごとの増分 |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| **1** | 0.64 | 1.6 | 642 | 642 | 2 464 | +294¹ | — |
-| **10** | 0.94 | 10.6 | 184 | 686 | 2 529 | +359 | 7.2 MB/ワーカー |
-| **100** | 4.81 | 20.8 | 343 | 855 | 2 549 | +379 | 222 KB/ワーカー |
-| **1,000** | 44.1 | 22.7 | 347 | 673 | 2 564 | +394 | **6 KB/ワーカー** |
-| **5,000** | 213.7 | 23.4 | 338 | 657 | 2 570 | +400 | **1.2 KB/ワーカー** |
-| **10,000** | **424** | **23.6** | **337** | **648** | **2 572** | **+403** | **≈ 1 KB/ワーカー** |
-
-¹ ワンタイム KV キャッシュ + llama.cpp アクティベーション バッファ。全体で償却
-すべての N が一度割り当てられます。
-
-**数字が示すもの:**
-
-- **10,000 ワーカーの場合、1,000 ワーカーよりも 9 MB 多くの RAM が必要になります**
-  (2 564 → 2 572 MB)。追加の労働者にかかる限界コスト
-  *約 1 KB に収束* — `RunConfig` に を加えたサイズ
-  `thread_id` 文字列。
-- **スループットは 23 rps で GPU に依存します**。これは N = 100 と同じです。
-  N = 10,000。エンジンは、キュー上に 10,000 のアイドル状態のワーカーをスケジュールします。
-  7 分間であり、所要時間には何の貢献もありません。
-- **p99 レイテンシーはフラットです** (N = 10,000 で 648 ミリ秒、N = 10 で 686 ミリ秒)。
-  キューの深さによってレイテンシが蓄積されない - スケジューラがリリースします
-  GPU が消耗しても、ワーカーは公平に処理されます。
-- **ワーカー/インスタンスの上限は、物理 RAM によって設定されます。
-  エンジン。** 32 GB のホストでは、N は約 3,000 万人のワーカーまで増加する可能性があります
-  RAMが飽和する前に。
-
-先ほどの 1 K ワーカーの LangGraph コスト予測の場合、暗黙的な
-ワーカーあたりの想定は 200 ～ 500 MB でした。 **NeoGraph の測定値は、
-6 KB.** この比率は 100 倍ではなく、約 30 000 ～ 80 000 倍です。
-
-ベンチマーク ソースは姉妹プロジェクトにあります
-[`neoclaw`](https://github.com/fox1245/neoclaw):
-[`benchmarks/bench_concurrent_workers_local_llm.cpp`](https://github.com/fox1245/neoclaw/blob/main/benchmarks/bench_concurrent_workers_local_llm.cpp)。
-`-DNEOCLAW_BUILD_BENCHMARKS=ON -DNEOCLAW_BUILD_CUDA=ON`で再現します。
-
----
-
-## L3 キャッシュに適合するエージェント ランタイム
-
-NeoGraph のホット コード パスは、N 個の同時エージェントが共有できるほど小さいです
-1 つの L3 常駐ワーキング セット。 Valgrind cachegrind を使用してこれを測定しました
-Ryzen 7 5800X (Zen 3: 32 KB L1i/d 8 ウェイ、**32 MB L3 16 ウェイ**)、
-N = 1 → 10,000 の同時リクエストをスイープ
-`benchmarks/concurrent/bench_concurrent_neograph`:
-
-| N |私は参照します | **L3 命令がミスします** | L3i ミス率 |ネイティブ p50 |
-|---:|---:|---:|---:|---:|
-| 1 | 5.3メートル | **4,313** | 0.08% | 17μs |
-| 10 | 5.9メートル | **4,304** | 0.07% | 16μs |
-| 100 | 11.8メートル | **4,320** | 0.04% | 6μs |
-| 1,000 | 69.7M | **4,327** | 0.01% | 6μs |
-| 10,000 | **648M** | **4,329** | **0.00%** | **5 μs** |
-
-**L3 命令ミスは 4 つのオーダー全体で約 4,320 で横ばい**
-N の大きさ。固有のホット コード ワーキング セットは大まかに次のとおりです。
-`4,330 × 64 B = 277 KB` — **32 MB L3 の 0.85 %**。 N = 10,000 の場合
-**6 億 4,800 万の命令**を処理しましたが、そのうちの **4,329 命令だけでした
-DRAM** に達しました (約 150,000 命令あたり 1 ミス)。
-
-N に応じて、ネイティブのリクエストごとのレイテンシーが 17 μs (コールド) から 5 μs (ウォーム) に低下します。
-増加 — 3.4 倍の改善は純粋な I キャッシュの増加です。スループット
-N = 10,000 は、5.2 MB の単一スレッド プールで ~1.1 M req/s です。
-ピーク RSS (≈ 100 B / エージェント限界費用)。
-
-**これが重要な理由:** Zen 3 の DRAM アクセスは最大 250 サイクルであるのに対し、Zen 3 では最大 46 サイクルです。
-L3 ヒット - アクセスごとに約 5.5 倍遅くなります。 NeoGraph のワーキングセットの場合
-L3 がオーバーフローしていました (通常、Python インタプリタ + 辞書が多い状態として)
-do)、同じ N = 10,000 スイープでは **+420 ～ +840 ミリ秒がかかります。
-測定された **9 ミリ秒の合計ウォールタイム** ではなく、メモリがストールします** —
-ミス チェーンが DRAM に到達する量に応じて、47 ～ 94 倍遅くなります。
-L3 全体は *あなたの* ワークロード (会話履歴、
-エンベディング、ツールの応答): エンジン自体に丸め誤差があります。
-
-_再現:_
-```bash
-g++ -std=c++20 -O2 -DNDEBUG -Iinclude -Ideps -Ideps/yyjson -Ideps/asio/include \
-    -DASIO_STANDALONE benchmarks/concurrent/bench_concurrent_neograph.cpp \
-    build-release/libneograph_core.a build-release/libyyjson.a -pthread -o bench_ng
-
-valgrind --tool=cachegrind --cache-sim=yes \
-    --I1=32768,8,64 --D1=32768,8,64 --LL=33554432,16,64 ./bench_ng 10000
-```
-
-### ループ内で実際の LLM を使用してエンドツーエンドで保持します
-
-L3 ストーリーはフルスタック運用でも存続します。私たちは NeoGraph を次の点に向けました。
-ローカルでホストされている Gemma-4 E2B (Q4_K_M、4.65 B パラメータ、2.9 GB GGUF) の後ろ
-OpenAI 互換の HTTP エンドポイント — NeoGraph コードの変更は一切なく、
-`OpenAIProvider::Config::base_url = "http://127.0.0.1:8090"` と、明示的な
-ローカル開発オプション `allow_insecure_loopback = true` のみを変更しました。参照:
-[`examples/31_local_transformer.cpp`](../examples/31_local_transformer.cpp)。
-
-| |ピュアネオグラフ | **NeoGraph + ローカル Gemma (HTTP)** |
+| Framework (2026-04-22) | seq µs | par µs |
 |---|---:|---:|
-| L3 命令がミスします | 4,320 | **7,262** |
-|ホット コード ワーキング セット | 277KB | **465 KB** (L3 の 1.42%) |
-|リクエストごとの TTFT | — | **25 ～ 27 ミリ秒** (カール ベースライン 9 ～ 10 ミリ秒 → ~15 ミリ秒 NeoGraph オーバーヘッド) |
-|リクエストごとの合計 | — | 146 ～ 213 ミリ秒 @ 19 ～ 27 トークン (~130 トークン/秒) |
-| **NeoGraph エージェント RSS** | 5.2MB | **7.6 MB** (httplib + JSON ストリーミングの場合は +2.4 MB) |
-|ジェマサーバー RSS |該当なし | 2.45 GB (mmap GGUF) |
-| VRAM (RTX 4070 Ti) |該当なし | 3.06GB |
+| NeoGraph, then-current master | 5.0 | 11.8 |
+| Haystack 2.28.0 | 144.1 | 290.0 |
+| pydantic-graph 1.85.1 | 235.9 | 286.1 |
+| LangGraph 1.1.9 | 656.7 | 2348.7 |
+| LlamaIndex Workflow 0.14.21 | 1780.3 | 4683.5 |
+| AutoGen GraphFlow 0.7.5 | 3209.2 | 7292.7 |
 
-推論プロセスは **別のアドレス空間** に存在するため、
-2.5 GB のモデル重みが NeoGraph の L3 キャッシュ ラインに触れることはありません。の
-エージェントの 465 KB のワーキング セットは、サイズに関係なく L3 に常駐します。
-モデルはです。これが 2 つのプロセスのアーキテクチャ上の利点です
-分割: エージェントをインフレートせずに 70 B モデルに交換できます。
+当時の warm-up と seq 10000/par 5000 回では NeoGraph ~0.16 s・4.8 MB、Haystack 2.91 s・80.3 MB、AutoGen 68.29 s・52.4 MB を記録した。zero-I/O engine 比較は model-service latency を予測しない。
 
-同じサーバーに対して 5 つの同時 NeoGraph エージェントによるバースト テスト:
-集約ウォール 1.58 秒 / 5 リクエスト (コルーチンより 2.65 倍高速化)
-重複します）。キューの圧力がかかるとエージェントごとのスループットが低下します。
-Gemma サーバーは連続バッチ処理を実装していませんでした。
-エージェントの問題ではなく、推論サーバーの問題です。 NeoGraph は 5 つすべてを発送しました
-リソースの圧迫もなく、RSS は約 7 MB で横ばいのままでした。
+## 歴史的 burst 並行実行
 
----
+一 CPU、512 MB RAM の Docker cgroup に 10000 request を同時投入した。Python は asyncio。結果はその workload/environment に属し、普遍的 Python/GIL scaling 法則を示さない。
 
-## ベンチマーク
+| Framework | Wall | P99 | Peak RSS | Result |
+|---|---:|---:|---:|---|
+| NeoGraph, then-current master | 52 ms | 7 µs | 5.5 MB | 10000 completed |
+| pydantic-graph | 886 ms | 158 µs | 42.6 MB | 10000 completed |
+| Haystack | 3.1 s | 2.9 s | 130.7 MB | 10000 completed |
+| LangGraph | 23.4 s | 23.0 s | 416.2 MB | 10000 completed |
+| LlamaIndex | — | — | — | OOM killed |
+| AutoGen | — | — | — | OOM killed |
 
-### エンジンのオーバーヘッドと Python グラフ/パイプライン フレームワークの比較
+手法と process-pool 比較は [concurrent benchmark](../benchmarks/concurrent/CONCURRENT.md) にある。
 
-一致したトポロジー、ゼロ I/O ワークロード: グラフは一度コンパイルされ、
-ホットループ。エンジン自体のコストを測定します (発送、状態)
-書き込み、リデューサ呼び出し） — LLM なし、スリープなし、ネットワークなし。
+## 歴史的 cache simulation
 
-![NeoGraph vs Python frameworks — per-iteration latency and peak RSS](images/bench-engine-overhead.png)
+Cachegrind は Ryzen 7 5800X の cache 階層を模擬した。L1 instruction/data は各 32 KB・eight-way、last-level は 32 MB・sixteen-way、line は 64 byte。当時の concurrent benchmark は以下を記録した。
 
-反復ごとのエンジンのオーバーヘッド (μs、低いほど良い)。すべての行
-2026 年 4 月 22 日に同じ x86_64 Linux ホスト上で測定されました。 NeoGraph が構築されました
-リリース `-O3 -DNDEBUG` (10 回の実行中央値)。 Python 行は 3 行です
-CPython 3.12.3 までの中央値。
+| N | Instruction references | Last-level instruction misses | Native p50 |
+|---|---:|---:|---:|
+| 1 | 5.3 M | 4313 | 17 µs |
+| 10 | 5.9 M | 4304 | 16 µs |
+| 100 | 11.8 M | 4320 | 6 µs |
+| 1000 | 69.7 M | 4327 | 6 µs |
+| 10000 | 648 M | 4329 | 5 µs |
 
-|フレームワーク | `seq` (3 ノード チェーン) | `par` (ファンアウト 5 + 結合) | `seq` 対 NeoGraph |
-|-----------|---------------------:|-------------------------:|-------------------:|
-| **ネオグラフ マスター** | **5.0 μs** | **11.8 μs** | 1× |
-|ヘイスタック 2.28.0 | 144.1μs | 290.0μs | 28.8× |
-| pydantic-graph 1.85.1 | 235.9μs | 286.1 マイクロ秒¹ | 47.2× |
-|ランググラフ 1.1.9 | 656.7μs | 2,348.7μs | 131.3× |
-| LlamaIndex ワークフロー 0.14.21 | 1,780.3μs | 4,683.5μs | 356.1× |
-| AutoGen グラフフロー 0.7.5 | 3,209.2μs | 7,292.7μs | 641.8× |
+約 4330 miss に 64 byte を掛けると 277 KB の line-count 推定になる。simulated miss だけで実際の resident working set、DRAM stall 時間、native latency 変化の原因を証明できない。[Cachegrind manual](https://valgrind.org/docs/manual/cg-manual.html)を参照。
 
-¹ pydantic-graph は単一の次のノードのステートマシンであり、ファンニングできません
-外; `par` は、シリアル 6 ノード エミュレーションです。
+## 歴史的 local model workload
 
-プロセス全体のメトリクス (ウォームアップ + 両方のワークロード、10,000 シーケンス + 5,000 パリティ):
+別の neoclaw 実験は RTX 4070 Ti 一つ、Gemma 4 E2B Q4 GGUF 一つ（~1.5 GB weight）、inference を直列化する shared LocalProvider、単一 `llm_call` node を使った。wall time は全 worker の drain を含む。request percentile は queueing が消える証拠ではない。
 
-| |ネオグラフ |最高の Python (ヘイスタック) |最悪 (AutoGen) |
-|---|----------|------------------------|-----------------|
-| **合計経過時間** | **~0.16 秒** | 2.91秒 | 68.29秒 |
-| **ピーク RSS** | **4.8MB** | 80.3MB | 52.4MB² |
-| **パラレル ファンアウト エグゼキュータ** | `asio::experimental::make_parallel_group` |シングルスレッド非同期 (GIL) |シングルスレッド非同期 (GIL) |
+| N | Wall s | Throughput rps | p50 ms | p99 ms | Peak RSS MB |
+|---|---:|---:|---:|---:|---:|
+| 1 | 0.64 | 1.6 | 642 | 642 | 2464 |
+| 10 | 0.94 | 10.6 | 184 | 686 | 2529 |
+| 100 | 4.81 | 20.8 | 343 | 855 | 2549 |
+| 1000 | 44.1 | 22.7 | 347 | 673 | 2564 |
+| 5000 | 213.7 | 23.4 | 338 | 657 | 2570 |
+| 10000 | 424 | 23.6 | 337 | 648 | 2572 |
 
-² AutoGen の RSS は LlamaIndex より小さいですが、反復ごとのコストがかかります
-は 64 倍高い - トレードオフ軸が異なります。フルマトリックス入力
-[`benchmarks/README.md`](../benchmarks/README.md)。
+source は [neoclaw benchmark](https://github.com/fox1245/neoclaw/blob/main/benchmarks/bench_concurrent_workers_local_llm.cpp)。CUDA benchmark 設定はその repository のもので、現在の NeoGraph provider build ではない。観測した marginal memory から未測定 session 上限を外挿しない。
 
-**LLM レイテンシの下ではエンジンのオーバーヘッドが解消されます。** 500 ミリ秒の OpenAI ラウンド
-トリップはすべてのエンジンを混乱させます。反復ごとのギャップは非 LLM でのみ表示されます
-ノード (データ変換、ルーティングの決定、純粋な計算ツールの呼び出し) および
-高密度のエージェント オーケストレーションで。それが現れるところには、大きく現れます。
-Raspberry Pi 4 / Jetson Nano / SBC クラスのターゲットでは、10 ～ 20 倍
-RAM デルタは、「フィット」と「スワップ スラッシュ」の差です。
+別の歴史的実験では local Gemma-4 E2B Q4_K_M（4.65 B parameter、2.9 GB GGUF）を HTTP endpoint の背後で使った。
 
-複製と方法論: [`benchmarks/README.md`](../benchmarks/README.md)。
+| Metric | Engine-only | Historical local Gemma HTTP |
+|---|---:|---:|
+| Last-level instruction misses | 4320 | 7262 |
+| 64 × simulated LL instruction miss（歴史的算出値） | 277 KB | 465 KB |
+| Agent RSS | 5.2 MB | 7.6 MB |
+| TTFT | — | 25–27 ms |
+| Total request time | — | 146–213 ms |
+| Separate model-server RSS | — | 2.45 GB |
+| RTX 4070 Ti VRAM | — | 3.06 GB |
 
-### バースト同時実行 (1 CPU / 512 MB サンドボックス)
+五 request で 1.58 s、overlap speedup 2.65×を記録した。旧 OpenAIProvider 設定と httplib transport accounting はその実験のものである。現在の local endpoint は validated descriptor と SDK runtime option を使う。[例 31](../examples/31_local_transformer.cpp)を参照。別 inference process は model allocation を agent process の外に置くが、cache residency を保証しない。
 
-何千もの同時リクエストがあった場合はどうなるでしょうか?バーストテスト：N
-t=0 で各エンジンに送信されたリクエスト (オールイン / オールウェイト、内部)
-Docker cgroup は **1 つの CPU と 512 MB RAM** に制限されます - おおよそ
-Raspberry Pi 4 のプロセス予算。
+## 歴史的 size と cold start
 
-![Tail latency — P99 per request](images/bench-concurrent-latency.png)
+x86_64 Linux GCC 13 の Plan & Executor demo は `-Os`、static libstdc++/libgcc、dead-section removal、stripping を使った。120 ms sleep で model 処理を模擬し、任意の fan-out pool を使い、一 branch を失敗させて resume した。
 
-![Throughput under concurrent load](images/bench-concurrent-throughput.png)
+| Metric | Historical Plan & Executor demo |
+|---|---:|
+| Stripped MinSizeRel binary | 1203 KB |
+| Peak RSS, crash and resume included | 2.9 MB |
+| Cold start through both phases | ~720 ms |
+| Recorded dynamic dependencies | libc.so.6 only |
 
-![Peak resident memory](images/bench-concurrent-rss.png)
+当時の artifact 測定であり、現在の libc-only deployment、250 ms 未満 cold start、musl cross-compile、特定 embedded board の容量を証明しない。
 
-非同期モード (デフォルト) の **N=10,000 同時リクエスト**
-すべての Python フレームワークのデプロイメント形状):
+## 現在の測定を再現する
 
-|エンジン |壁 | P99 レイテンシ |ピーク RSS |ステータス |
-|--------|-----:|------------:|---------:|:-------|
-| **ネオグラフ マスター** | **52 ミリ秒** | **7 μs** | **5.5 MB** | ✅ 10000 / 0 |
-|ピダンティックグラフ | 886ミリ秒 | **158 μs** | 42.6MB | ✅ 10000 / 0 |
-|干し草の山 | 3.1秒 | 2.9秒 | 130.7MB | ✅ 10000 / 0 |
-|ランググラフ | 23.4秒 | 23.0秒 | 416.2MB | ✅ 10000 / 0 |
-|ラマインデックス | — | — | — | ❌ **OOM が殺されました** |
-|自動生成 | — | — | — | ❌ **OOM が殺されました** |
+外部 `SchemaProvider::runtime` は `NEOGRAPH_BUILD_LLM=OFF` でも必要。`SDK_PREFIX` を installed prefix に設定するか、SDK 開発依存と `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` を使う。transitive link は CMake target で扱う。旧 core/yyjson archive 直接 link は runtime を欠く。以下は現在の engine benchmark で、歴史的 concurrent sweep の厳密な再現ではない。
 
-**2 つのフレームワークが完了していません** — LlamaIndex Workflow と AutoGen
-GraphFlow が 512 MB の cgroup を使い果たし、10k 前に OOM で強制終了される
-同時コルーチンは消耗する可能性があります。残りの Python フレームワーク
-死ぬのではなく劣化しますが、P99 の遅延は N とともに直線的に増加します。
-CPython GIL はすべてのコルーチンの CPU 作業をシリアル化するためです。 **これ
-これは LangGraph 固有の病理ではありません** - すべての Python で発生します
-非同期ランタイム。
-
-NeoGraph はスループットであらゆる Python asyncio ランタイムを上回ります。
-テール レイテンシー、および RSS: N=10k で 7 µs P99、RSS は約 76 倍低い
-同じ負荷での LangGraph よりも 3 桁進んでいます。
-GIL でシリアル化された Python 曲線。 pydantic グラフでも - 最も無駄のないグラフ
-Python ステート マシン — P99 は 158 μs、NeoGraph の RSS の約 8 倍です。
-
-`multiprocessing.Pool` モードはワーカー プロセス全体で GIL をバイパスします
-ただし、プール サイズで飽和し、フォーク + ピクルスのオーバーヘッドが発生します。満杯
-数値と MP モードのストーリーは次のとおりです。
-[`benchmarks/concurrent/CONCURRENT.md`](../benchmarks/concurrent/CONCURRENT.md)。
-
-### サイズとコールドスタートのフットプリント (プランとエグゼキュータのデモ)
-
-以下のすべての数値は、x86_64 Linux (GCC 13) で次の方法を使用して測定されました。
-`example_plan_executor` — 自己完結型の Plan & Executor デモ。
-5 方向送信ファンアウトを実行し、最初の実行でサブトピック #2 をクラッシュさせます。
-障害が解消された状態で再開します。 LLM 呼び出し、API キー、ネットワークはありません。
-
-|ビルド構成 |サイズ |
-|---|---|
-| **MinSizeRel `-Os`、静的 libstdc++、`--gc-sections`、削除** | **1,203 KB (1.2 MB)** |
-
-MinSizeRel バイナリの唯一の動的依存関係は `libc.so.6` です。
-`libstdc++` と `libgcc_s` は静的にリンクされます。どれかの上にドロップしてください
-一致する libc を持つ Linux ホストが実行されます。
-
-|メトリック |値 |
-|---|---|
-|ピーク RSS (完全なプランとエグゼキュータの実行、クラッシュと再開を含む) | **2.9 MB** |
-|ウォールクロック (コールドスタート → 両フェーズ完了) | **~720 ミリ秒** |
-|動的依存関係 | `libc.so.6` のみ |
-
-`example_plan_executor` は、送信ターゲットごとに 120 ミリ秒スリープして、
-LLMコール。この例では、ハードウェア サイズのファンアウト プールを選択します。
-`EngineConfig::worker_count` の前が `GraphEngine::build()` なので、5 つです
-ターゲットは同時に実行されます。定常状態の RSS は影響を受けません。
+NeoGraph は CMake 3.20+ を要する。明示 SDK source/installed package がなければ、既定設定は revision-pinned 公開 SDK archive を取得する。installed SDK の offline 測定は prefix に加え `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` を設定する。fetch は libcurl/OpenSSL 開発依存を除かない。
 
 ```bash
-cmake -B build-minsize -S . \
-    -DCMAKE_BUILD_TYPE=MinSizeRel \
-    -DNEOGRAPH_BUILD_MCP=OFF -DNEOGRAPH_BUILD_TESTS=OFF -DNEOGRAPH_BUILD_POSTGRES=OFF \
-    -DCMAKE_CXX_FLAGS="-ffunction-sections -fdata-sections" \
-    -DCMAKE_EXE_LINKER_FLAGS="-Wl,--gc-sections -static-libstdc++ -static-libgcc"
-cmake --build build-minsize --target example_plan_executor -j$(nproc)
-strip --strip-all build-minsize/example_plan_executor
-ls -la build-minsize/example_plan_executor   # size
-ldd    build-minsize/example_plan_executor   # libc only
-/usr/bin/time -v build-minsize/example_plan_executor   # RSS + wall
+cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release \
+  -DNEOGRAPH_BUILD_BENCHMARKS=ON -DCMAKE_PREFIX_PATH="$SDK_PREFIX"
+cmake --build build-release --target bench_neograph -j
+./build-release/bench_neograph
+valgrind --tool=cachegrind --cache-sim=yes \
+  --I1=32768,8,64 --D1=32768,8,64 --LL=33554432,16,64 \
+  ./build-release/bench_neograph
 ```
 
-### 組み込み/ロボット工学にとって数字が意味するもの
-
-- **1.2 MB の静的バイナリ** は、~1 MB の Docker `scratch` イメージに適合します。
-  Pixhawk コンパニオン コンピュータのオンボード フラッシュ、快適に収まります
-  Jetson Orin ブート パーティション。 Python + LangGraph にはありません。
-- **2.9 MB RSS** は、**100 以上の同時エージェント セッション** をホストできることを意味します
-  RPi Zero 2W (512 MB RAM) 上で 1 つのコンパイル済みエンジンを共有することにより、
-  スレッド — パターンについては、[`docs/concurrency.md`](concurrency.md) を参照してください。
-- **< 250 ms コールド スタート** は、ドローン ウォッチドッグのリセット ウィンドウ内に収まります。
-  その時点では、Python LangGraph プロセスはまだ `import` 完了していません。
-- **`libc.so.6` のみ** クロスコンパイルが簡単になります: `glibc` または
-  `musl` とリンク — 推移的な依存関係はありません。
+結果 artifact の `ldd`/`otool` または platform loader inventory を確認し、旧依存一覧を仮定しない。記録された interface-3 SDK runtime/archive 検証は Linux/POSIX の範囲で、interface 4 の資格検証ではない。既存 macOS/Windows metadata と WASM target は新依存の検証ではない。typed Python binding は移行に含まれ、延期ではない。性能は再構築 wheel で測定する必要がある。

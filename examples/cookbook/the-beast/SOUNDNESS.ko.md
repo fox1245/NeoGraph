@@ -1,15 +1,20 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=ko source_sha256=81678ff6d72ad46af392428e631c78ddeae6d31983dbfad94991ded32d3d0406 -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=ko source_sha256=c1f59cee25dec6acb7c278971998594a9bfe75ebfa0beb55a5a8984ea62b0ea1 -->
+# Coherence Gate의 건전성 — 공식 동반자
 **Languages:** [English](SOUNDNESS.md) | [한국어](SOUNDNESS.ko.md) | [日本語](SOUNDNESS.ja.md) | [简体中文](SOUNDNESS.zh-CN.md)
 
 ## 타입 제공자 전환 — 증거의 경계
 
 전환된 C++ 작성/수정 경로는 타입 `ProviderRequest`, `sp::Message` 이력 및 전체 불변 `sp::Outcome`을 사용하고 반환된 모든 네이티브 메시지/파트를 보존한다. 텍스트 추출은 후보 JSON/Python 파싱용이며 네이티브 대화 이력을 대체하지 않는다. 컴파일·파싱·초기화 진단은 그 메시지 뒤에 추가한다. 의미적 수정은 프로그램별 시도 한도로 제한된다(라이브 작성 3회, Forge 서버 생성 2회). 전송 재시도나 무제한 진화가 아니다.
 
-비공개 OpenRouter 경로 `~deepseek/deepseek-v4-flash-latest`, `zdr: true`, `only: ["morph"]`, `allow_fallbacks: false`를 유지한다. 적격 엔드포인트가 없으면 다른 제공자에게 공개하지 않고 실패한다. ZDR 및 과거 US 위치 기록은 지역 상주·현재 가용성 보장이 아니다. 라이브 실행은 승인된 키, 네트워크/제공자 및 유료 용량이 필요하고 프롬프트·스키마·진단·네이티브 이력을 해당 경로로 전송한다. 생성된 네이티브 Python 서버 실행은 별도의 로컬 신뢰 경계이며 유예된 Python 제공자 바인딩과 다르다. 키·비공개 프롬프트를 공개하지 않는다. nullable 토큰 수는 달러 비용이 아니며 가격과 실제 청구 사용량이 필요하다.
+interface-4 [Forge 소스 계약](README.md)은 빈 `MaxTokens` 복구를 cap 두 배의 추가 호출 한 번으로
+제한하고 300초 deadline을 고정하며 outcome/usage를 보존합니다.
+failure나 observer/settlement 오류를 재시도하지 않습니다.
 
-현재 범위 한정 실행 증거는 실제 오프라인 strict Core 컴파일·진화·checkpoint rollback에 한정된다. 모든 live/apex/forge/script 변형이나 vendor 추론을 검증하지 않는다. 아래 콘솔·벤치·fuzz·live 실행 기록은 과거 증거이며 새로운 타입 전환 측정이 아니다. 일관성 gate는 명시된 구조/효과 계약 속성을 다루며 제공자 전송·개인정보·모델 의미의 진실성을 증명하지 않는다. Python 제공자 binding은 유예되었고 protocol client는 그대로다.
+비공개 OpenRouter 경로 `~deepseek/deepseek-v4-flash-latest`, `zdr: true`, `only: ["morph"]`, `allow_fallbacks: false`를 유지한다. 적격 엔드포인트가 없으면 다른 제공자에게 공개하지 않고 실패한다. ZDR 및 과거 US 위치 기록은 지역 상주·현재 가용성 보장이 아니다. 라이브 실행은 승인된 키, 네트워크/제공자 및 유료 용량이 필요하고 프롬프트·스키마·진단·네이티브 이력을 해당 경로로 전송한다. 생성된 Python 서버 실행은 별도의 로컬 코드 실행 신뢰 경계이며 NeoGraph Python 제공자 binding과 별개다. 키·비공개 프롬프트를 공개하지 않는다. nullable 토큰 수는 달러 비용이 아니며 가격과 실제 청구 사용량이 필요하다.
 
-# Coherence Gate의 건전성 — 공식 동반자
+보존된 interface-3 범위 한정 실행 증거는 실제 오프라인 strict Core 컴파일·진화·checkpoint rollback에 한정된다. 모든 live/apex/forge/script 변형이나 vendor 추론을 검증하지 않는다. 아래 콘솔·벤치·fuzz·live 실행 기록은 과거 증거이며 interface-4 측정이 아니다. 일관성 gate는 명시된 구조/효과 계약 속성을 다루며 제공자 전송·개인정보·모델 의미의 진실성을 증명하지 않는다. Python 제공자 binding은 이제 타입 API를 따르며 검증은 이 C++ 실행과 별개다.
+
+
 
 
 이것이 이 요리책의 경험적 도구 뒤에 있는 이론입니다. `gate_eval`
@@ -19,13 +24,7 @@
 *증명* 작은 단계의 연산 의미론에 대한 해당 정리
 하네스 실행 및 효과 격자에 대한 게이트 이유가 있습니다.
 
-이는 실제 엔진의 **충실한 추상화**에 대한 증거입니다.
-코드가 구현하는 것과 똑같은 슈퍼 스텝 의미론 및 채널 쓰기 보호
-(`src/core/graph_state.cpp`, `src/core/graph_engine.cpp`,
-`src/core/graph_validator.cpp`), 그러나 C++를 기계적으로 검증하지는 않습니다.
-한 줄씩. 추상화의 충실도는 바로 `gate_eval`와
-`gate_fuzz`는 확증합니다: 정리의 예측은 모든 경우의 실행과 일치합니다.
-그들은 달린다. 증명 + 측정 모델, 이 프로젝트의 정신입니다.
+증명은 total reducer, 반환하는 node body, 고정 declared channel과 total static route를 갖는 추상 기계를 다룹니다. node/reducer 예외, cancellation, provider/tool 실패, resource limit, checkpoint/custody 오류와 임의 생성 코드는 제외합니다. 현재 C++ 엔진에는 이러한 추가 실패 경로가 있습니다. 인용 소스는 모델의 근거이며 과거 corpus는 C++ 기계 검증이나 이 모델 밖의 UB 부재 증명이 아닙니다.
 
 표기법은 ASCII입니다. `⊆ ∪ ∩ ∅`는 설정된 작업입니다. `⟨…⟩` 기계 구성;
 `↦` 지도 항목; `→` 단계 관계; `⊢ G ok` 형식이 올바른지 판단합니다.
@@ -112,11 +111,7 @@
 
 코드와 일치하여 의미론이 나타낼 수 있는 두 가지 추가 런타임 오류 모드:
 
-- **매달린 경로.** `route`가 edge/route를 따라 `m ∉ N ∪ 이름을 지정해야 하는 경우
-{⊥e}`, dispatch is undefined (a dangling reference). Model this as `→ ⊥`.
-- **빈 경로 디스패치.** 조건부 노드 `n`에 경로 맵 `R(n) = ∅`가 있는 경우,
-스케줄러는 빈 컨테이너의 반대쪽 끝을 역참조합니다.
-(`rend()`, UB). 이것을 `→ ⊥`로 모델링하십시오.
+- **빈 route dispatch.** conditional node `n`의 route map `R(n) = ∅`이면 모델에서 dispatch target이 없습니다. 이를 `→ ⊥`로 모델링합니다.
 
 ## 4. 정형판단으로서의 문
 
@@ -216,12 +211,7 @@
 `max_steps`에서 잘린 비결함 단계의 무한 또는 종료 체인.
 따라서 종료되거나 정지되며 오류가 발생하지 않습니다. ∎
 
-`(E8)`에 대한 참고 사항: 장벽 활성은 "스톨"이 *버그*를 가리는 것을 방지하는 것입니다. 안
-만족스럽지 못한 AND-join(정적 경로가 없는 `wait_for` 멤버)은 결코
-화재로 인해 실제로 교착 상태에 빠진 실속으로 달려가게 됩니다. `(E8)`는 이를 금지합니다.
-따라서 `⊢ G ok` 아래의 실속은 실제 사이클(`max_steps`로 제한됨)을 반영합니다.
-구조적으로 죽은 장벽. 진행(비과실)은 이에 의존하지 않습니다. 그것
-실속 결과의 의미를 더욱 선명하게 합니다.
+`(E8)`은 barrier member의 declared static incoming edge/route를 검사합니다. 모든 member가 실행됨을 증명하지 않습니다. 상호 배타적 route는 AND-join을 막을 수 있습니다. 이 증명은 barrier liveness를 확립하거나 모든 deadlock과 의도적 cycle을 구별하지 않습니다. 추상 모델의 non-fault는 termination 보장이 아닙니다.
 
 ### 6.4 결과(정직한 계약과 관련된 게이트의 건전성)
 
@@ -229,9 +219,7 @@
 계약이 정직한 `(H)`이면 실행에 오류가 없습니다.
 선언되지 않은 채널, 매달려 있는 경로 또는 빈 경로 UB가 없습니다.*
 
-이것이 하네스가 측정하는 정리입니다. `gate_eval`의 `검증기 오류 ⟹
-런타임 오류` is the contrapositive on its labeled corpus; `gate_fuzz` 레이어 1
-통계적 그림자는 2000개 이상의 돌연변이에 대해 `⊢ G ok` 그래프에 오류가 발생한 적이 없습니다.
+모델의 명제는 `gate-pass ⟹ no-modeled-fault`이고 대우는 `modeled-fault ⟹ gate-reject`입니다. `gate-reject ⟹ fault`가 아닙니다. 과거 corpus는 특정 거절 사례를 확인할 뿐 모든 거절이 fault를 일으킨다는 증명이 아닙니다. 보존된 fuzz 기록은 2000 mutants에서 pass 이후 fault가 없었다는 관찰입니다.
 
 ### 6.5 제안(`(H)`가 필요합니다. 런타임은 백스톱입니다)
 

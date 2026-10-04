@@ -135,10 +135,12 @@ into `supervisor_messages`.
    ```
    docker compose up -d postgres crawl4ai
    ```
-3. Use Docker Compose >= 2.17 with BuildKit and set `SCHEMAPROVIDER_SOURCE`
+3. Use Docker Compose >= 2.17 with BuildKit on a Linux/POSIX build host and set `SCHEMAPROVIDER_SOURCE`
    to the actual SchemaProvider checkout (default `../../../SchemaProvider`,
    relative to this directory). The Dockerfile installs `SchemaProvider::runtime`
-   from this named additional build context before building NeoGraph.
+   from this named additional build context before building NeoGraph. This is
+   required even for Core-only builds; this guide does not qualify native
+   macOS/Windows provider transport.
 4. Set a stable `NEOGRAPH_NATIVE_ARCHIVE_OWNER` in `.env`, then provision once:
    ```
    docker compose run --rm agent init-archive
@@ -253,6 +255,24 @@ HITL rounds in the thread.
 - C++ requests/events are typed and return the full immutable `sp::Outcome`;
   portable report text is a projection, not native replay authority. This guide
   documents source migration only, not a new build, test, or live qualification.
+
+## Empty-budget recovery and report quality
+
+The supervisor, researcher, compression and final-report paths permit at most
+two additional semantic calls after a completed empty `MaxTokens` outcome with
+no visible text and no valid or invalid client tool call. The cap doubles up to
+16,384; the research-brief call is outside this ladder. Each attempt has a new
+broker ordinal, original-bank admission, retained outcome and usage, and the same
+absolute deadline. Without an explicit deadline, one effect-free preparation
+discovers the configured deadline, releases its handle before mediated invocation
+and pins that deadline; an explicit deadline skips discovery.
+
+Failures, observer/settlement errors and delivered streaming parts do not retry.
+Empty final text raises an error before human review; a nonempty `MaxTokens`
+report remains visibly `Incomplete` in the public projection without mutating
+the immutable outcome or retrying its partial text. Exhausted empty compression
+produces a diagnostic, not a fabricated successful provider result. These are
+retained interface-4 source contracts, not a new live run or durability proof.
 
 ## Why no frontend?
 

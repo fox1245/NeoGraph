@@ -1,76 +1,114 @@
-<!-- neograph-i18n: source=examples/cookbook/openrouter-provider/README.md locale=ja source_sha256=4d18b0fee54089948ca59063eb6177567e1b5db09a87123125e808bee6889add -->
-# NeoGraph + OpenRouter（ピン留めされた DeepSeek）
-
-## 過去の Python recipe — binding 移行は延期
-
-このページは移行前 Python provider API と測定の記録です。以下のコードは
-**現在の型付き C++ 契約と互換性がなく、現在の実行手順ではありません**。
-Python provider binding、subclass trampoline、BYO/OpenRouter adapter は未移植・未検証です。
-C++ 移行から Python 互換性を推論しないでください。現在の C++ は型付き
-`ProviderRequest` を所有し、一度 prepare し、完全な不変 `sp::Outcome`、native history、
-nullable usage を保持します。以下の `complete(params)`/`ChatCompletion` は過去の API です。
-欠落 usage は zero ではなく、最終呼出 usage は tool loop 全体の使用量ではありません。
-durable receipt の背後で SDK retry による隠れた再送を作らず、鍵、prompt、native payload は非公開に保ちます。
-
-## 移行前の手順と観測記録
-
+<!-- neograph-i18n: source=examples/cookbook/openrouter-provider/README.md locale=ja source_sha256=2ae7c3fb71401e8c8db0b7c5a6116f56d8076f1c963b768aa55f98931801bc16 -->
+# NeoGraph + OpenRouter
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-OpenRouter のピン留めされた `~deepseek/deepseek-v4-flash-latest` モデルに対して NeoGraph グラフを実行します。このクックブックは、同じ API キー、モデル、および明示的なゼロデータ保持（ZDR）プロバイダー設定を持つ、等価な2つのプロバイダーサーフェスを示します:
+このクックブックは OpenRouter の Chat Completions API への二つのリクエスト経路を
+維持します。両方とも既定モデルは `~deepseek/deepseek-v4-flash-latest` で、
+`provider={"zdr": true}` を送りゼロデータ保持ルーティングを要求します。
+この設定は地理的なデータ所在地の保証ではありません。
 
-1. 組み込みの `OpenAIProvider` をOpenRouterのOpenAI互換チャットエンドポイント（`via_openai_compat.py`）に対して使用します。
-2. 正規化されたチャットリクエストを直接投稿するカスタムPython `Provider`（`via_http.py`）。
+[`via_openai_compat.py`](via_openai_compat.py) はネイティブ `SchemaProvider` と
+組み込みの `llm_call` ノードを使います。[`via_http.py`](via_http.py) は `httpx` で
+HTTP リクエストと応答の変換を所有するカスタム Python `GraphNode` を使います。
+エンドポイントと認証情報のヘルパーは共有しますが、通信実装と結果の表現は
+共有しません。互換性の例に `httpx` は不要です。
 
+## 経路 A: 型付き SchemaProvider
 
-2番目のパスは、NeoGraphの`Provider`トランポリンがトランスポート非依存である一方、ワイヤー通信の契約を明示的に保つことを示しています。
+互換性の経路は、閉じたバージョン付き `openai.chat` ディスクリプターで
+`load_provider_descriptor` を呼び出します。`connection.base_url` にはオリジン、
+`connection.paths` には完全な API パスを指定します。OpenRouter ではそれぞれ
+`https://openrouter.ai` と `/api/v1/chat/completions` です。不明なフィールドは
+拒否され、任意の JSON でコーデックの動作を注入することはできません。
 
-## Path A — 組み込みプロバイダー
+型付き `OpenRouterRouting` が `SchemaProviderDefaults` の `zdr=True` を
+設定します。`ProviderRuntimeOptions` は API キー、120 秒のタイムアウト、
+任意の `OPENROUTER_CA_FILE` を指定します。ランタイムは libcurl を使い、HTTP2
+や WebSocket のトランスポート選択機能はありません。`NodeContext` は明示的な
+モデルとシステム指示を指定します。`RunConfig.provider_messages` は `Text` 部分を
+持つ型付き `ProviderMessage` を指定します。組み込みノードは型付き要求を作成し、
+準備し、プロバイダー経由でディスパッチします。
 
-`OpenAIProvider` は `/v1/chat/completions` 自体を追加するため、ベアのOpenRouter APIベースURL（`https://openrouter.ai/api`）を渡してください。`/v1` サフィックスは渡さないでください:
+ループバック検証では `provider_policy_json()` を読み、`openai.chat` ファミリーの
+`openrouter_origins` に正確なループバックオリジンを追加します。ディスクリプターを
+ロードする前に、ファミリーとコーデック資源の全データを `load_provider_policy` に
+渡して承認します。検証サーバーのオリジンは宣言されたポリシーデータであり、
+実行時のエンドポイント上書きや ZDR 検証の省略ではありません。
 
-```python
-from neograph_engine.llm import OpenAIProvider
+成功した結果は不変のプロバイダー結果と型付きメッセージ履歴を保持します。
+`outcome.completion` は完了を保持し、失敗の場合は `outcome.failure` が失敗を
+保持します。欠落した使用量カウンターは `None`、観測されたゼロは `value=0` の
+`UsageCount` です。例は生のペイロードや鍵をダンプせず、アシスタントのテキストと
+既知の入出力カウンターを表示します。プロバイダーの失敗を成功した回答にはしません。
 
-provider = OpenAIProvider(
-    api_key=os.environ["OPENROUTER_API_KEY"],
-    base_url="https://openrouter.ai/api",
-    default_model="~deepseek/deepseek-v4-flash-latest",
-    provider_routing={"zdr": True},
-```
+## 経路 B: カスタム HTTP ノード
 
-[`via_openai_compat.py`](via_openai_compat.py) を参照してください。
+`OpenRouterHttpNode` はグラフのメッセージを読み、システム指示を先頭に追加して、
+選択したエンドポイントに JSON を送り、`choices[0].message` を通常の
+`ChannelWrite` に変換します。カスタム HTTP ヘッダー、タイムアウトポリシー、
+応答の変換はアプリケーションコードが所有します。append リデューサーはユーザーと
+その後のアシスタントメッセージを保持します。`http_usage` は応答の使用量辞書、
+または省略時の `None` を保存します。実行後に `httpx` クライアントを閉じます。
 
-## Path B — カスタム直接 HTTP プロバイダー
+この経路は `ProviderOutcome`、準備済み要求の権限、ネイティブ再生履歴、
+型付きプロバイダー使用量を生成しません。HTTP エラーはノードを失敗させ、
+ツール呼び出しを受けた場合もこのテキスト専用の例は呼び出しを捨てずに失敗します。
+既存の公式 SDK クライアントに呼び出しとツールループを任せる場合は、
+[BYO OpenAI SDK クックブック](../byo-openai/README.md) を使ってください。
 
-[`via_http.py`](via_http.py) は `Provider` をサブクラス化し、`https://openrouter.ai/api/v1/chat/completions` に投稿し、`choices[0].message` を `ChatCompletion` にマッピングし、トークン使用量を NeoGraph のレスポンスにコピーします。また、リクエストは OpenRouter に ZDR プロバイダーの優先設定も問い合わせます。
+## 前提条件とローカル実行
 
-## 実行
+現在の型付きプロバイダーへの移行を含むチェックアウトからビルドした wheel を
+インストールしてください。古い完了 API のリリースでは実行できません。経路 B 用に
+`httpx` をインストールし、このディレクトリで以下のコマンドを実行する前にローカル
+Chat Completions サーバーを起動してください。以下は検証手順であり、成功した
+実行の記録ではありません。
 
 ```bash
-echo 'OPENROUTER_API_KEY=sk-or-...' > .env
-pip install neograph-engine>=0.2.3 httpx
-python via_openai_compat.py
-python via_http.py
+python -m pip install httpx
+OPENROUTER_BASE_URL=http://127.0.0.1:8765/v1 OPENROUTER_MODEL=fixture-model python via_openai_compat.py
+OPENROUTER_BASE_URL=http://127.0.0.1:8765/v1 OPENROUTER_MODEL=fixture-model python via_http.py
 ```
 
-両方のデモは、厳格な単一ノードグラフを構築し、その`llm_call`を同じ固定されたDeepSeekモデル経由でルーティングします。共有の`NodeContext.instructions`がシステムプロンプトを供給します。キーが欠落している場合は、明確なメッセージとともに終了します。モックプロバイダーがライブプロバイダーのパスを静かに変更することはありません。
+`OPENROUTER_BASE_URL` は API プレフィックスを含み、両経路とも
+`/chat/completions` を追加します。正規のループバックホスト `127.0.0.1` と `::1` は、
+環境にホスト用の鍵があっても固定のダミー認証情報 `local-smoke` を使います。
+他のホストには HTTPS、`NG_ALLOW_HOSTED_CALLS=1`、`OPENROUTER_API_KEY` が
+必要です。明示的な許可がなければ、各プログラムは要求前に終了コード 2 で終了します。
+ホストへの呼び出しは課金される場合があります。任意の既存 `.env` はエクスポート済み
+変数を上書きしません。鍵をコミットしたり Authorization ヘッダーを記録したりしないで
+ください。経路 A では OpenRouter 以外のホストについても、明示的なルーティング
+ポリシー承認が必要です。呼び出し許可だけでは OpenRouter の意味を付与しません。
 
-## 出力形状
+## ローカルプロトコルと期待する状態
 
-```text
-[openrouter] using ~deepseek/deepseek-v4-flash-latest via OpenAI-compatible path
-[user] What's the capital of France?
-  assistant: Paris is the capital of France.
+サーバーはシステムメッセージ、ユーザーメッセージ、`model="fixture-model"`、
+`provider={"zdr": true}` を含むバッファリング方式の `POST /v1/chat/completions` を
+受け取ります。経路 B は `temperature=0.7` も送ります。経路 A はフランスの首都、
+経路 B は `17 * 23` を質問します。経路 A 用のサーバー応答例:
+
+```json
+{
+  "id": "fixture-chat-1",
+  "object": "chat.completion",
+  "created": 0,
+  "model": "fixture-model",
+  "choices": [{
+    "index": 0,
+    "message": {"role": "assistant", "content": "Paris."},
+    "finish_reason": "stop"
+  }],
+  "usage": {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10}
+}
 ```
 
-実際の完了は異なる。直接HTTPパスは`via direct HTTP`を出力し、独自の算術問題を使用する。
+経路 A では、実際の成功したプロバイダー結果が一つ、`result.provider_messages` に
+ユーザーとアシスタント、グラフ状態にアシスタントの回答があることを期待します。
+この応答の使用量は入力 8、出力 2 です。不明なカウンターを検証するには `usage` を
+省略してください。架空のゼロを期待しないでください。経路 B ではアシスタントの
+内容として `"391"` を返し、二件のグラフメッセージと応答の `http_usage` 辞書を
+期待します。どちらも暗黙にモックプロバイダーへ切り替えません。
 
-## なぜ両方のパスを維持するのか？
-
-- パスAはNeoGraphのネイティブHTTP実装と接続プーリングを使用する。
-- Path Bは、アプリケーションコードが所有するカスタムヘッダー、転送ポリシー、または応答変換のための最小の例である。
-- 両方のパスは、まったく同じOpenRouterエンドポイントファミリー、APIキー、および固定されたDeepSeekモデルを使用するため、プロバイダーサーフェスの比較は有意義です。
-
-OpenRouter APIのリクエストおよびレスポンスの形状:
+OpenRouter のリクエストと応答のリファレンス:
 <https://openrouter.ai/docs/api-reference/overview>

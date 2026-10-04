@@ -18,7 +18,7 @@ what you're looking for.
 | Mental model — channels, nodes, edges, Send, Command | [Core Concepts](https://github.com/fox1245/NeoGraph/blob/master/docs/concepts.md) |
 | Symptom-first fixes for common issues | [Troubleshooting](https://github.com/fox1245/NeoGraph/blob/master/docs/troubleshooting.md) |
 | C++ examples (verification reported separately) | [examples/](https://github.com/fox1245/NeoGraph/tree/master/examples) |
-| Python examples (provider port deferred) | [bindings/python/examples/](https://github.com/fox1245/NeoGraph/tree/master/bindings/python/examples) |
+| Python typed provider and graph examples | [bindings/python/examples/](https://github.com/fox1245/NeoGraph/tree/master/bindings/python/examples) |
 | Async / coroutine internals | [ASYNC_GUIDE](https://github.com/fox1245/NeoGraph/blob/master/docs/ASYNC_GUIDE.md) |
 
 ## Top-level header
@@ -63,9 +63,21 @@ sp::runtime::Result first_call(
 
 `SchemaProvider` accepts an admitted `sp::descriptor::ValidatedDescriptor`, `sp::runtime::Options` and optional `SchemaProvider::Defaults`. Descriptor loading is closed/versioned data admission, not a request/response interpreter or arbitrary primitive registry. Credentials belong in runtime options, not public descriptor files. Defaults contain only typed OpenRouter routing and Responses retention (`responses_store`); the latter is valid only for Responses. Hosted OpenRouter routing, retention and JSON formats remain declared typed controls. Images, Veo and Decisions use separate NeoGraph typed clients and separate authorization; they do not inherit an SDK chat grant.
 
-A provider call returns `sp::runtime::Result`: an immutable, owned `std::shared_ptr<const sp::Outcome>`, containing `sp::Completion` or `sp::Failure`. Retain the whole outcome, not only display text. Ordered messages/parts, native continuation, complete wire envelopes, ordered raw observations, stop evidence and genuine attempt metadata survive the call and client destruction. Usage counters are nullable `uint64_t` values with evidence, stage and quality: missing is unknown, never zero. A failure retains its original partial outcome. `ProviderFailure::outcome()` and `ProviderObserverError::outcome()` preserve that result; the latter also preserves the observer exception in `cause()`.
+A provider call returns `sp::runtime::Result`: an immutable, owned `std::shared_ptr<const sp::Outcome>`, containing `sp::Completion` or `sp::Failure`. Retain the whole outcome, not only display text. Ordered messages/parts, retained native continuation and family-supplied wire evidence, ordered raw observations, stop evidence and genuine attempt metadata survive the call and client destruction. Usage counters are nullable `uint64_t` values with evidence, stage and quality: missing is unknown, never zero. A failure retains its original partial outcome. `ProviderFailure::outcome()` and `ProviderObserverError::outcome()` preserve that result; the latter also preserves the observer exception in `cause()`.
 
-This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is unstable `0.0.0`, interface revision 3 / shared ABI 3, with out-of-line capability checks; that is not a stable release claim. Current runtime/archive support is Linux/POSIX; no Windows, macOS or WASM runtime qualification is implied. Python provider bindings/wrappers are deferred and not ported by this C++ change.
+Wire evidence is family-supplied and optional: `sp::Completion::wire_envelope` may be null (`ProviderCompletion.wire_envelope` is `None` in Python). Buffered Chat currently retains the full response JSON in `raw_events` as a `RawWire` with `type == "chat.completion"` and the document in `payload`; it leaves `wire_envelope` null. Read the evidence where the family retains it; no fallback envelope is fabricated. Native continuation and raw buffers remain protected evidence, excluded from trace payloads.
+
+This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The release target is SDK `0.1.0` alpha, interface revision 4 / shared ABI 4, with out-of-line capability checks; alpha is not a stable API promise. Recorded interface-3 runtime/archive qualification covers Linux/POSIX, not interface 4 or Windows, macOS and WASM runtime qualification.
+
+Python uses `SchemaProvider(ValidatedDescriptor, ProviderRuntimeOptions,
+SchemaProviderDefaults)` and `make_provider_request` with typed
+`ProviderMessage` parts. `prepare` returns a `PreparedProviderRequest`;
+`dispatch` consumes it once, while `invoke` prepares and dispatches a request.
+`ProviderOutcome` retains immutable completion/failure/partial views and unknown
+usage as `None`. Graph `ChatMessage` is a separate convenience type, not a
+provider-message alias. Blocking provider calls release the GIL; Python async
+callers can use `asyncio.to_thread`. See the
+[`Python binding guide`](python-binding.md) for constructors, errors, and limits.
 
 
 If post-effect accounting or terminal-receipt persistence fails after a real result exists, `ProviderDispatchOutcomePersistenceError` retains the original immutable result in `outcome()` and the original persistence exception in `cause()`. If delivery also failed, `delivery_error()` retains the original observer exception. Successful persistence followed by observer failure rethrows that original observer exception unchanged; an unknown/no-result transport failure does not fabricate an outcome.

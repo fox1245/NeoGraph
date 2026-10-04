@@ -1,70 +1,105 @@
-<p align="center">
-  <h1 align="center">NeoGraph</h1>
-  <p align="center">
-    <strong>A fast C++ graph runtime with a durable programmable agent control plane.</strong><br>
-    Static Core execution when latency matters. QuickJS Programs, sub-agents, Hooks, runtime context, and verified topology evolution when control matters.
-  </p>
-</p>
+# NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-<p align="center">
-  <a href="https://pypi.org/project/neograph-engine/"><img alt="PyPI" src="https://img.shields.io/pypi/v/neograph-engine?label=pip%20install%20neograph-engine&color=blue"></a>
-  <a href="https://pypi.org/project/neograph-engine/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/neograph-engine"></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
-</p>
+NeoGraph is a C++20 runtime for stateful workflows described as graphs. A graph defines executable nodes, named state channels, rules for merging writes, and edges that determine what runs next. Nodes can perform ordinary computation, call tools, or request model output. The runtime schedules those nodes, applies their writes, and, when configured with a checkpoint store, saves progress for interruption and resumption. Python bindings expose the same C++ engine.
 
-<p align="center">
-  <a href="#quick-start">Quick Start</a> &middot;
-  <a href="#two-runtime-layers">Architecture</a> &middot;
-  <a href="#python">Python</a> &middot;
-  <a href="examples/README.md">Examples</a> &middot;
-  <a href="docs/reference-en.md">C++ Reference</a> &middot;
-  <a href="docs/python-binding.md">Python Reference</a>
-</p>
+Consider a research workflow: retrieve documents, extract findings from several documents, combine the findings, and ask a reviewer whether another retrieval round is needed. The documents and findings belong in state channels; retrieval, extraction, and review are nodes; edges select the next stage or return to retrieval. A graph makes those transitions explicit instead of hiding them in a sequence of model prompts. See the [examples](examples/README.md) for research, tool use, human review, and multi-agent workflows.
 
----
+## How a graph changes state
 
-<p align="center">
-  <a href="docs/videos/neograph-promo-v3.mp4">
-    <img src="docs/images/neograph-promo-v3.gif" alt="NeoGraph — generated Programs, semantic admission, runtime topology, Hooks, context and Python parity" width="900">
-  </a>
-</p>
-
-## What NeoGraph is today
-
-NeoGraph has two deliberately separate execution layers:
-
-| Layer | Use it for | Contract |
-|---|---|---|
-| **GraphEngine / Core** | Fixed or host-selected graphs, low overhead, embedded deployment | Immutable compiled topology; C++ nodes execute through Pregel-style super-steps |
-| **ProgramRuntime / QuickJS** | Runtime control, child Programs, structured concurrency, topology replacement and migration | Immutable Program generations; durable typed commands; journaled transitions and replay |
-
-The model never receives compiler, catalog, credential, migration, or authority-granting access. Generated source follows:
+Suppose a channel named `count` holds `2`. An increment node reads `2` and returns a write proposing `3`. The runtime applies that write through the channel's reducer after the scheduled node batch finishes. A downstream node in the next batch reads `3`.
 
 ```text
-proposal → reserve → compile → semantic validate → admit → publish → migrate or spawn
+Committed state       Node computation          Reduced state
+count = 2       ->    read 2; propose 3     ->    count = 3
+                                                  |
+                                            next node reads 3
 ```
 
-A rejected proposal cannot publish a `ProgramVersion`, and its dynamic-compile budget is not restored. See [Strict Runtime Interposition](docs/STRICT_RUNTIME_INTERPOSITION.md) and [DSL capability evaluation](docs/DSL_CAPABILITY_EVAL.md).
+The terms in that trace describe the execution model:
 
-## Quick Start
+| Term | Meaning in NeoGraph |
+|---|---|
+| Node | An executable registered with the host. It reads its input state and returns channel writes and optional routing commands. |
+| State | The channel values visible to the current execution step, together with runtime-owned history and accounting where configured. |
+| Channel | A named value with a reducer and optional retention and checkpoint-persistence policies. |
+| Reducer | A function combining the current channel value with an incoming write. `overwrite` replaces a value; `append` accumulates array elements; a custom reducer defines another combination. |
+| Edge | A scheduling rule between nodes. Edges may be unconditional, conditional, or a barrier waiting for several predecessors. Cycles permit repeated stages. |
+| Superstep | A scheduled batch of ready node executions followed by applying their writes and advancing the schedule. |
 
-### C++ Core
+During a normal batch, ready nodes read the pre-batch channel state. Returning a `ChannelWrite` does not immediately change what a sibling node reads. After successful completion, the executor applies the results, and later steps see the updated state. In a multi-branch `Send` batch, each branch receives its input in an isolated state copy and merges its output afterward. This is a Pregel-style organization of work; NeoGraph's channel/reducer rules are its own contract, not a claim that it implements every Pregel feature.
 
-SchemaProvider is now a required external C++ dependency even when `NEOGRAPH_BUILD_LLM=OFF`: Core exports its owned typed provider contracts. Install the SDK runtime package and set `SCHEMAPROVIDER_PREFIX` to that install prefix; the configure commands below use `-DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX"`. Alternatively supply an explicit checkout with `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=../SchemaProvider`. Neither a guessed sibling checkout nor the old bundled interpreter is selected automatically. The SDK runtime/archive currently supports Linux/POSIX; there is no dependency-free, no-OpenSSL, native Windows/macOS or WASM runtime promise for this cutover.
+Concurrent execution does not make every reducer order-independent. If two nodes append text or overwrite the same channel, write order affects the result. Use independent channels or an order-independent reducer when the workflow requires that property. Channel retention also differs from combination: an append channel can keep only a bounded suffix. See [concepts](docs/concepts.md) and [concurrency](docs/concurrency.md) for scheduling, reducers, barriers, and cancellation.
+
+## A worked Core example
+
+The [complete C++ quickstart](examples/62_core_quickstart.cpp) registers an uppercase node and compiles this topology:
+
+```text
+__start__ -> upper -> __end__
+
+Input channel:   text = "hello"
+Node reads:      "hello"
+Node returns:    ChannelWrite{"text", "HELLO"}
+Reducer:         overwrite
+Output channel:  text = "HELLO"
+```
+
+The node's computation is ordinary C++:
+
+```cpp
+class UpperNode final : public neograph::graph::GraphNode {
+public:
+    asio::awaitable<neograph::graph::NodeOutput> run(
+        neograph::graph::NodeInput input) override {
+        auto text = input.state.get(neograph::graph::ChannelKey<std::string>{"text"});
+        for (auto& character : text)
+            character = static_cast<char>(
+                std::toupper(static_cast<unsigned char>(character)));
+        co_return neograph::graph::NodeOutput{{
+            neograph::graph::ChannelWrite{"text", neograph::json(std::move(text))}}};
+    }
+    std::string get_name() const override { return "upper"; }
+};
+```
+
+The complete source includes the headers, node registration with declared reads/writes, topology, `GraphEngine::build_strict`, run input, and typed output access. No model call or API key is needed. The expected output is `HELLO`.
+
+### Build and run
+
+SchemaProvider is a required external SDK even when `NEOGRAPH_BUILD_LLM=OFF`, because Core exports its typed provider contracts. The commands below use an installed [SchemaProvider runtime package](https://github.com/fox1245/SchemaProvider): set `SCHEMAPROVIDER_PREFIX` to its install prefix. An explicit checkout supplied with `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=../SchemaProvider` takes precedence; otherwise CMake prefers an installed package and, if none is found, fetches the pinned public SDK archive. Set `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` for an offline build with an installed package or explicit checkout. CMake does not guess a sibling checkout or use the removed bundled interpreter.
+
+Prerequisites include a C++20 compiler, CMake 3.20 or newer, and the SDK's runtime dependencies, including OpenSSL and libcurl 7.88 or newer. Full builds with NeoGraph's HTTPS components require OpenSSL 3. The default build also enables SQLite and PostgreSQL integrations; the command below disables unnecessary NeoGraph components without removing SDK dependencies. Recorded SDK interface 4 checks cover Linux x86_64 and local protocol/state peers; the [SDK conformance record](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record) gives their exact scope. They do not establish new Windows, macOS, ARM64, HTTP/3, hosted-vendor or WASM qualification. See [troubleshooting](docs/troubleshooting.md) for platform and build constraints.
 
 ```bash
 git clone https://github.com/fox1245/NeoGraph.git
 cd NeoGraph
-cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX"
-cmake --build build --parallel
-./build/example_core_quickstart
+cmake -S . -B build-core \
+  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNEOGRAPH_BUILD_EXAMPLES=ON \
+  -DNEOGRAPH_BUILD_PROGRAM=OFF \
+  -DNEOGRAPH_BUILD_LLM=OFF \
+  -DNEOGRAPH_BUILD_ASYNC=OFF \
+  -DNEOGRAPH_BUILD_MCP=OFF \
+  -DNEOGRAPH_BUILD_A2A=OFF \
+  -DNEOGRAPH_BUILD_ACP=OFF \
+  -DNEOGRAPH_BUILD_POSTGRES=OFF \
+  -DNEOGRAPH_BUILD_SQLITE=OFF
+cmake --build build-core --parallel --target example_core_quickstart
+./build-core/example_core_quickstart
 ```
 
-The complete source is [examples/62_core_quickstart.cpp](examples/62_core_quickstart.cpp). It registers one C++ node, compiles a strict graph, runs it, and reads a typed channel.
+## Core and ProgramRuntime
 
-Enable the programmable control plane when needed:
+`GraphEngine` executes a compiled graph. It owns node scheduling, state updates, routing, retries, streaming, cancellation, and graph checkpoint/resume. A compiled topology is immutable; supported generation migration occurs at controlled safe points rather than through arbitrary mutation while nodes run.
+
+`ProgramRuntime` coordinates admitted Programs that can call Core graphs and manage child Programs. It adds immutable Program versions, catalogs and policy snapshots, command journals, child lineage, budgets, replay, and admitted replacement or migration. The host registers executable capabilities, compiles and admits a Program, and starts an invocation. Core remains the graph node executor.
+
+For the research workflow, one Core graph can perform retrieval and review. A Program can call that graph, start child Programs for separate tasks, await their results, and record lifecycle transitions. Durable recovery requires the configured stores and the relevant custody contracts; an in-memory store does not survive process exit, and a journal does not by itself make an external tool effect exactly-once.
+
+QuickJS is an optional Program authoring surface. Programs use bounded JavaScript computation and generator commands such as `callCore`, `spawn`, `await`, `all`, `parallel`, `race`, `quorum`, `emit`, `checkpoint`, and `cancelScope`. The host admits capabilities and validates generated source before publication. A model-generated proposal does not receive compiler, credential, catalog, or authority-granting access.
 
 ```bash
 cmake -S . -B build-program \
@@ -73,88 +108,23 @@ cmake -S . -B build-program \
   -DNEOGRAPH_BUILD_PROGRAM=ON \
   -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
   -DNEOGRAPH_BUILD_EXAMPLES=ON
-cmake --build build-program --parallel
+cmake --build build-program --parallel --target example_program_quickstart
 ./build-program/example_program_quickstart
 ```
 
-See [examples/63_program_quickstart.cpp](examples/63_program_quickstart.cpp) and the [QuickJS authoring boundary](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md).
+The [Program quickstart](examples/63_program_quickstart.cpp) compiles and admits a Program that calls an increment graph; its expected output is `1`. It uses in-memory stores and the C++ Program builder. For JavaScript authoring and durable execution, start with the [authoring boundary](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md), [recursive Programs](docs/PROGRAM_RECURSIVE_HARNESSES.md), and [strict runtime contracts](docs/STRICT_RUNTIME_INTERPOSITION.md).
 
-### Performance build
+## Typed provider calls
 
-Single-config generators such as Ninja and Unix Makefiles do not select an
-optimization level when `CMAKE_BUILD_TYPE` is empty. NeoGraph warns about that
-configuration because GCC/Clang then compile QuickJS and NeoGraph without the
-Release `-O3 -DNDEBUG` flags.
-
-For a local, host-specific performance build on GCC or Clang:
-
-```bash
-cmake -S . -B build-performance -G Ninja \
-  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DNEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=ON \
-  -DNEOGRAPH_BUILD_BENCHMARKS=ON \
-  -DNEOGRAPH_BUILD_PROGRAM=ON \
-  -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON
-cmake --build build-performance --parallel
-```
-
-`NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=ON` adds `-march=native -mtune=native`
-to optimized configurations. It improves local throughput but makes the
-artifacts non-portable; keep it off for distributable binaries. Release
-hardening remains enabled by default.
-
-On GCC/Clang, the resulting Release profile uses C11 for QuickJS and C++20
-for NeoGraph, `-O3 -DNDEBUG`, and the default hardening flags
-`-D_GLIBCXX_ASSERTIONS`, `-fstack-protector-strong`,
-`-fcf-protection=full`, and Linux `-D_FORTIFY_SOURCE=2` plus RELRO/NOW
-linking. LTO and host-specific tuning are not enabled by default.
-
-## Two runtime layers
-
-### GraphEngine / Core
-
-- static and conditional edges, cycles, barriers, `Send` fan-out and `Command` routing;
-- checkpoint/resume, exact-checkpoint resume, fork, state history, HITL and `NodeInterrupt`;
-- synchronous and coroutine APIs, streaming, cancellation and token accounting;
-- graph-wide and per-node retry policies, jitter and bounded reusable node caching;
-- custom registries, providers, tools, MCP, A2A and ACP integration;
-- safe-point capture and shape-preserving GraphEngine generation migration.
-
-### ProgramRuntime / QuickJS
-
-- standard JavaScript computation in bounded QuickJS `define()` and generator `main(input)`;
-- sealed commands: `callCore`, `spawn`, `await`, `all`, `parallel`, `race`, `quorum`, `emit`, `checkpoint`, `cancelScope`, and admitted host capabilities;
-- immutable Program bundles, versions, catalogs, admission profiles and policy snapshots;
-- durable command journals, exact replay, child lineage, nonrenewable budgets and process recovery;
-- checkpoint replacement and restricted live GraphEngine topology migration;
-- host-owned semantic validation before admission of generated Programs.
-
-The installed JavaScript surface is machine-readable through `javascript_authoring_capability_manifest()` and checked against the actual QuickJS bindings in CI.
-
-## Runtime safety and context
-
-NeoGraph moves important behavior outside model discretion:
-
-- immutable RAW message history and `ContextEpoch` selection;
-- derived context, required Skills and hard constraints;
-- conservative transformation receipts that preserve required artifacts exactly;
-- mandatory lifecycle Hooks over native, stdio, or HTTP execution backends;
-- provider dispatch and terminal-outcome receipts;
-- durable runtime developer instructions and admitted topology transitions.
-
-NeoGraph guarantees construction, admission, dispatch, and evidence boundaries. It does not claim an LLM attended to every token.
-## Typed C++ provider calls
-
-`SchemaProvider` accepts an admitted `sp::descriptor::ValidatedDescriptor`, `sp::runtime::Options` and optional `SchemaProvider::Defaults`. Descriptor loading is closed/versioned data admission, not a request/response interpreter or arbitrary primitive registry. Credentials belong in runtime options, not public descriptor files. Defaults contain only typed OpenRouter routing and Responses retention (`responses_store`); the latter is valid only for Responses. Hosted OpenRouter routing, retention and JSON formats remain declared typed controls. Images, Veo and Decisions use separate NeoGraph typed clients and separate authorization; they do not inherit an SDK chat grant.
+Model calls use a validated descriptor, runtime options, and a typed request. Descriptor admission accepts closed, versioned data; it does not execute a request/response interpreter. Credentials belong in runtime options, not public descriptor files. `SchemaProvider::Defaults` contains typed OpenRouter routing and Responses retention controls. Images, Veo, and Decisions use separate typed clients and authorization.
 
 ```cpp
 #include <neograph/llm/schema_provider.h>
 #include <neograph/types.h>
 
 sp::runtime::Result first_call(
-    sp::descriptor::ValidatedDescriptor descriptor, sp::runtime::Options options,
-    std::string model) {
+    sp::descriptor::ValidatedDescriptor descriptor,
+    sp::runtime::Options options, std::string model) {
     neograph::llm::SchemaProvider provider(
         std::move(descriptor), std::move(options), {});
     std::vector<sp::Message> history{
@@ -166,24 +136,23 @@ sp::runtime::Result first_call(
 }
 ```
 
-A provider call returns `sp::runtime::Result`: an immutable, owned `std::shared_ptr<const sp::Outcome>`, containing `sp::Completion` or `sp::Failure`. Retain the whole outcome, not only display text. Ordered messages/parts, native continuation, complete wire envelopes, ordered raw observations, stop evidence and genuine attempt metadata survive the call and client destruction. Usage counters are nullable `uint64_t` values with evidence, stage and quality: missing is unknown, never zero. A failure retains its original partial outcome. `ProviderFailure::outcome()` and `ProviderObserverError::outcome()` preserve that result; the latter also preserves the observer exception in `cause()`.
+A prepared request is consumed once. `sp::runtime::Result` owns an immutable `sp::Outcome` containing a `Completion` or `Failure`. Keep that outcome when you need ordered messages and parts, native continuation, raw observations, stop evidence, attempt metadata, or failure partials. Usage counters are nullable: missing means unknown, while an observed zero remains zero. A usage report and a budget charge are separate records; a portable report cannot grant spending authority.
 
-`ChatMessage` / `ChatTool` and JSON are portable projections, not native authority. Current portable formats are [`provider-message-v2`](schemas/provider-message-v2.schema.json) and [`runtime-history-record-v2`](schemas/runtime-history-record-v2.schema.json). Genuine C++ in-memory checkpoint sidecars retain native seals without an archive. Durable native history and bank references require a real `sp::NativeArchive`: closed v2 / `spna2`, authenticated owner-private protected custody with an independent key, not encryption and not vendor-issuer authentication. Never publish archive bodies, keys, native blobs or raw wire observations. Managed recovery/forks share the canonical charged/reserved/report/dedup bank without renewal. Generic bounded durable forks require an external host-shared bank and journal; copied snapshots cannot grant independent sp…
+After `first_call` returns, use `std::get_if<sp::Completion>(result.get())` to inspect a completion's `messages`, `stop`, and `usage`. Otherwise, `std::get<sp::Failure>(*result)` provides `error.kind`, `error.safe_message`, retry evidence, and the partial messages and usage in `partial`. For example, an absent `completion.usage.output_total` means the output-token count is unknown; a present counter whose `value` is `0` reports zero. Display text is only one view of the retained outcome.
 
+`ChatMessage`, `ChatTool`, and JSON are portable projections. Authentic native history can stay in memory with its native checkpoint sidecar; durable native history requires a real `sp::NativeArchive` and protected owner-private custody. Portable JSON cannot recreate that authority. The archive authenticates custody with an independent key; it is neither encryption nor vendor-issuer authentication. Do not publish archive bodies, keys, native blobs, or raw wire observations. See the [provider reference](docs/reference-en.md) and [migration guide](docs/migration-v0.4-to-v1.0.md) for persistence failures, observers, managed budget banks, and replay boundaries.
 
-If post-effect accounting or terminal-receipt persistence fails after a real result exists, `ProviderDispatchOutcomePersistenceError` retains the original immutable result in `outcome()` and the original persistence exception in `cause()`. If delivery also failed, `delivery_error()` retains the original observer exception. Successful persistence followed by observer failure rethrows that original observer exception unchanged; an unknown/no-result transport failure does not fabricate an outcome.
-This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is unstable `0.0.0`, interface revision 3 / shared ABI 3, with out-of-line capability checks; that is not a stable release claim. Current runtime/archive support is Linux/POSIX; no Windows, macOS or WASM runtime qualification is implied. Python provider bindings/wrappers are deferred and not ported by this C++ change.
+The typed cutover removes `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter, and the Responses WebSocket path. Recompile C++ consumers and migrate custom providers; there are no compatibility aliases. The SDK package is `0.1.0` with an alpha interface, interface revision 4, and shared ABI 4; matching revisions are required, and these numbers do not declare a stable SDK interface.
 
 ## Python
-
-> The Python material below describes existing bindings; provider bindings/wrappers are explicitly deferred and have not been ported or exercised for the typed lossless C++ cutover. Installing a historical wheel does not expose the new C++ provider API.
-The Python package uses the same C++ engine and now includes the Program, Hook, strict-context, runtime-policy, and SQLite durability surfaces:
 
 ```bash
 pip install neograph-engine
 ```
 
-### Five-second demo (no API key)
+The typed-provider API described here targets NeoGraph `0.13.0`; historical wheels expose the older interface. The [Python binding guide](docs/python-binding.md) documents the source API and build prerequisites.
+
+This graph needs no API key:
 
 ```python
 import neograph_engine as ng
@@ -214,69 +183,47 @@ result = engine.run(ng.RunConfig(thread_id="t1", input={"name": "NeoGraph"}))
 print(result.output["channels"]["messages"]["value"])
 ```
 
-Python additionally exposes:
+The expected message content is `Hello, NeoGraph!`. Python also exposes Program compilation and execution, Hooks, runtime-context requirements, strict profiles, SQLite durability, and exact checkpoint resume. Typed providers use `ProviderMessage` and `make_provider_request`, then `prepare`/`dispatch` or `invoke`; outcomes retain native-owned completion or failure evidence. These messages differ from graph convenience `ChatMessage` values. Blocking provider calls release the GIL; `asyncio.to_thread` can move them off an event-loop thread. See the [Python examples](bindings/python/examples/README.md) for complete provider and Program inputs.
 
-- `RetryPolicy`, per-node runtime overrides, `RunMetadata`, exact `resume_from`, and reusable cache scope;
-- `ProgramSource`, `ProgramRegistryBuilder`, `ProgramCompiler`, `LocalProgramHost`, handles and results;
-- mandatory `HookRuntime` callbacks and fail-closed lifecycle delivery;
-- `RuntimeContextRequirements`, `ContextTransformReceipt`, SQLite durable context/dispatch stores, and `StrictRuntimeProfile`.
+## Workloads and limits
 
-See [Python binding guide](docs/python-binding.md) and [Python examples](bindings/python/examples/README.md).
+NeoGraph fits workflows with explicit state transitions, branches or loops, parallel tasks, checkpoints, and human review. It can also embed small fixed graphs in a C++ application. Node computation remains the application's responsibility: the graph runtime does not train a model or replace a numerical-computing library, and a model call still has the provider's latency, availability, and cost.
 
-## Build configuration
+The runtime supports graph-wide and per-node retry policies, bounded reusable node caching, `Send` fan-out, `Command` routing, subgraphs, state history, forks, HITL, and `NodeInterrupt`. MCP, A2A, ACP, gRPC, and observability integrations are optional components. Runtime context and Hooks can require particular dispatch inputs and record delivery evidence; those checks do not prove a model attended to every token. Durable native recovery and bounded forks need their original shared accounting authority; copying a snapshot cannot renew a budget.
 
-Core-only builds still omit Program and QuickJS, but no longer omit SchemaProvider runtime:
+Measure a workload with its actual nodes, provider, stores, concurrency, and build profile. [Benchmarks](benchmarks/README.md) and the [performance guide](docs/performance-deep-dive.md) describe measured configurations and limitations, not universal speed claims. Single-config builds should specify `CMAKE_BUILD_TYPE=Release` when measuring optimized execution. `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=ON` adds host-specific tuning on supported compilers; keep it off for distributable binaries.
 
-```bash
-cmake -S . -B build-core \
-  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
-  -DNEOGRAPH_BUILD_PROGRAM=OFF \
-  -DNEOGRAPH_BUILD_LLM=OFF \
-  -DNEOGRAPH_BUILD_MCP=OFF
-```
-
-Important options:
+## Build configuration and further reading
 
 | Option | Purpose |
 |---|---|
-| `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` | Explicit SDK source checkout; otherwise an installed runtime package is required. |
-| `NEOGRAPH_BUILD_PROGRAM` | Durable Program values, catalog, runtime, lineage and migration |
-| `NEOGRAPH_BUILD_QUICKJS_CONTROL` | QuickJS Program authoring and generator commands |
-| `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` | Opt into non-portable host-specific instruction tuning for optimized configurations |
-| `NEOGRAPH_WARN_ON_UNOPTIMIZED_SINGLE_CONFIG` | Warn when a single-config build omits `CMAKE_BUILD_TYPE` and would miss Release optimization flags |
-| `NEOGRAPH_BUILD_PYBIND` | `neograph-engine` Python extension |
-| `NEOGRAPH_BUILD_SQLITE` | SQLite checkpoint, context, Hook and provider-receipt stores |
-| `NEOGRAPH_BUILD_POSTGRES` | PostgreSQL checkpoint and Program persistence components |
-| `NEOGRAPH_BUILD_MCP_CLIENT` / `SERVER` | MCP client and server roles |
-| `NEOGRAPH_BUILD_A2A` / `ACP` / `GRPC` | Optional protocol integrations |
+| `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` | Explicit SDK checkout; takes precedence over installed-package discovery and fetching. |
+| `NEOGRAPH_FETCH_SCHEMAPROVIDER` | Fetch the pinned public SDK archive when no package is installed; default on. Disable for offline builds. |
+| `NEOGRAPH_BUILD_PROGRAM` | Program runtime, catalogs, lineage, and migration; default off. |
+| `NEOGRAPH_BUILD_QUICKJS_CONTROL` | Embedded QuickJS Program authoring; default off. |
+| `NEOGRAPH_BUILD_PYBIND` | Python extension; default off. |
+| `NEOGRAPH_BUILD_LLM` | NeoGraph model-call adapters; disabling them does not remove the SDK dependency. |
+| `NEOGRAPH_BUILD_SQLITE` / `NEOGRAPH_BUILD_POSTGRES` | Optional persistent stores; both default on. |
+| `NEOGRAPH_BUILD_MCP_CLIENT` / `NEOGRAPH_BUILD_MCP_SERVER` | MCP client and server components. |
+| `NEOGRAPH_BUILD_A2A` / `NEOGRAPH_BUILD_ACP` / `NEOGRAPH_BUILD_GRPC` | Protocol integrations; gRPC defaults off. |
+| `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` | Non-portable host-specific tuning for optimized configurations; default off. |
 
-Use the narrow CMake target matching your deployment: `neograph::core`, `neograph::llm`, `neograph::program`, `neograph::mcp`, `neograph::a2a`, or another enabled component.
-
-The SDK imported target supplies its `include/SchemaProvider` include root; public examples use `<descriptor/descriptor.h>`, `<runtime/client.h>` and `<neograph/llm/schema_provider.h>` directly, without recipe-only helpers.
+Installed consumers link only the enabled components they need:
 
 ```cmake
-find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)
+find_package(SchemaProvider 0.1.0 CONFIG REQUIRED COMPONENTS runtime)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
 
-## Verification
-
-`scripts/test_find_package.sh` describes installed-consumer checks; its existence is not a current pass claim. The current SDK ABI3 full rebuild/CTest passed 26/26, and the shared installed consumer exercised real local HTTP two-turn typed requests, tool/native/refusal/known-zero outcomes and mismatch rejection. These results do not qualify NeoGraph, Python, Windows, macOS, WASM or paid live-provider compatibility. NeoGraph integrated verification is reported separately.
-
-## Documentation
-
-- [Concepts](docs/concepts.md)
-- [C++ reference](docs/reference-en.md)
-- [Python binding](docs/python-binding.md)
-- [Concurrency and cancellation](docs/concurrency.md)
-- [Async guide](docs/ASYNC_GUIDE.md)
-- [Harness MCP](docs/HARNESS_MCP.md)
-- [QuickJS public authoring boundary](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
-- [Strict runtime interposition](docs/STRICT_RUNTIME_INTERPOSITION.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Examples](examples/README.md)
+- [Concepts and graph semantics](docs/concepts.md)
+- [C++ reference](docs/reference-en.md) and [Python binding guide](docs/python-binding.md)
+- [Async guide](docs/ASYNC_GUIDE.md) and [concurrency/cancellation](docs/concurrency.md)
+- [Runtime context and strict interposition](docs/STRICT_RUNTIME_INTERPOSITION.md)
+- [Harness MCP](docs/HARNESS_MCP.md) and [QuickJS authoring](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
+- [Migration guide](docs/migration-v0.4-to-v1.0.md) and [troubleshooting](docs/troubleshooting.md)
+- [C++ examples](examples/README.md), [Python examples](bindings/python/examples/README.md), and [benchmark methodology](benchmarks/README.md)
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Third-party notices: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+MIT; see [LICENSE](LICENSE). Third-party notices are in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

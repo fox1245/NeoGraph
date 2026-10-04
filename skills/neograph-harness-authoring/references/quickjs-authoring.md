@@ -1,5 +1,7 @@
 # QuickJS source authoring
 
+**Languages:** [English](quickjs-authoring.md) | [한국어](quickjs-authoring.ko.md) | [日本語](quickjs-authoring.ja.md) | [简体中文](quickjs-authoring.zh-CN.md)
+
 ## Establish the host contract
 
 Identify these bindings before writing code. Use supplied configuration or inspect

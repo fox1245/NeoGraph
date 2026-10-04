@@ -1,89 +1,58 @@
-<!-- neograph-i18n: source=benchmarks/python_clients/README.md locale=ja source_sha256=6d8012ba0393efa7a76c1905fcab2a826c43a0cd2d8287940fcb28ec62dc25b4 -->
-# Python クライアントのオーバーヘッド — NeoGraph バインディングと標準 SDK の比較
+<!-- neograph-i18n: source=benchmarks/python_clients/README.md locale=ja source_sha256=6919a37bc310f6105ba5ef408675a5d982489430bc04ac6c565fdb7c66a4e6a1 -->
+# Pythonクライアントのオーバーヘッド: 現在のランナーと過去の結果
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-`neograph_engine` を介した同じワークロード (pybind11 を介した C++ エンジン)
-公式の Python SDK を通じて。 C++ エンジン ベンチは次のことを示します
-エンジン オーバーヘッドでは 100× ～ 600× が有利です ([`benchmarks/`](../README.md) を参照)。
-このフォルダーは、ユーザーが座っているときというより狭い質問に答えます。
-Python さん、その勝利のうちバインディング境界を越えたものはありますか?
+このディレクトリはローカルのプロセス内プロトコルサーバーでNeoGraph PythonバインディングとPython SDKを比較します。時間はクライアント処理、サーバーのスケジューリング、HTTP交換を含み、サーバーコストが一定とは証明していません。実モデルは動きません。表はx86_64 Ubuntu 24.04（WSL2）、Python 3.12.3で2026-04-29に測った過去の記録で、新SDK cutoverの測定ではありません。
 
-方法論: インプロセス Python モック サーバーは缶詰を返します。
-応答は 1 ミリ秒未満であるため、サーバー側の時間は一定です。の
-デルタは純粋にクライアント側であり、JSON ビルド、HTTP、解析を行います。
+## 過去の逐次オーバーヘッド: K=1
 
-## シーケンシャルオーバーヘッド (K=1)
+`bench_a2a_clients.py`のローカル固定A2A応答の記録です。中央値の比率は1.93×でした。
 
-`bench_a2a_clients.py`:
-
-|クライアント |中央値 | p95 |スループット |
+| Client (2026-04-29) | Median | P95 | Throughput |
 |---|---:|---:|---:|
-| `neograph_engine.a2a.A2AClient` | **1,137 マイクロ秒** | 1,381μs | **860 要求/秒** |
-| `a2a-sdk` 1.0.2 | 2,196μs | 2,746μs | 444 リクエスト/秒 |
+| `neograph_engine.a2a.A2AClient` | 1,137 µs | 1,381 µs | 860 req/s |
+| `a2a-sdk` 1.0.2 | 2,196 µs | 2,746 µs | 444 req/s |
 
-→ NeoGraph **1.93×** 高速化。
+`bench_openai_clients.py`のローカル固定Chat応答の記録です。中央値の比率は1.54×でした。古いプロバイダー名は当時の実装を示すためで、現在のimportではありません。
 
-`bench_openai_clients.py`:
-
-|クライアント |中央値 | p95 |スループット |
+| Client (2026-04-29, legacy provider) | Median | P95 | Throughput |
 |---|---:|---:|---:|
-| `neograph_engine.llm.OpenAIProvider` | **1,252 μs** | 1,423μs | **789 要求/秒** |
-| `openai` 2.33 | 1,927μs | 2,393μs | 509 リクエスト/秒 |
+| `neograph_engine.llm.OpenAIProvider` (removed) | 1,252 µs | 1,423 µs | 789 req/s |
+| `openai` 2.33 | 1,927 µs | 2,393 µs | 509 req/s |
 
-→ NeoGraph **1.54×** 高速化。
+## 過去の同時スループット
 
-したがって、OpenAI-call-inside-A2A ラウンドトリップを組み合わせた場合、
-NeoGraph バインディングを使用すると、
-SDK スタック — 各レイヤーが独立しているため、メリットはさらに大きくなります。
+`bench_concurrent.py`のローカルA2Aサーバー、K ∈ {1, 4, 16, 64}、各行500リクエストの記録です。
 
-## 同時スループット
-
-`bench_concurrent.py`、K = 1/4/16/64 の飛行中リクエスト、合計 500:
-
-|   K | NeoGraph 要求/秒 | a2a-sdk 要求/秒 |スピードアップ |
+| K (2026-04-29, A2A) | NeoGraph req/s | a2a-sdk req/s | Ratio |
 |----:|---------------:|--------------:|--------:|
-|   1 |            881 |           448 |  1.97× |
-|   4 |        **1,461** |           446 |  **3.28×** |
-|  16 |            403 |           390 |  1.03× |
-|  64 |            343 |           275 |  1.25倍 |
+| 1 | 881 | 448 | 1.97× |
+| 4 | 1,461 | 446 | 3.28× |
+| 16 | 403 | 390 | 1.03× |
+| 64 | 343 | 275 | 1.25× |
 
-K=4 行は最もクリーンな読み取りです: NeoGraph の pybind11 ラッパー リリース
-C++ HTTP 交換中に GIL が使用されるため、`ThreadPoolExecutor` はスケーリングされます。
-ほぼ直線的に。 `a2a-sdk` は非同期ネイティブであり、1 つのイベント ループを使用します。
-実行中のリクエストをさらに追加しても、リクエストごとの処理には役立ちません
-Python 内で支払うシリアル化コスト。
+K=16/64の低下は`ThreadingHTTPServer`とクライアントの相互作用を含みます。標準ライブラリの上限や一般的なasyncio制限を分離していません。K=4も線形スケーリングの証明ではなく、一つの設定の記録です。
 
-(模擬サーバーの `http.server.ThreadingHTTPServer` のため、K=16+ は両方ともドロップします)
-同時スレッド数が約 400 r/s で飽和します。これは Python stdlib です。
-制限であり、クライアントのプロパティではありません。 NeoGraph A2A C++ サーバー
-エンジンごとに 200 の同時実行を汗をかくことなく処理します
-ただし、上記のクライアント側の数値は独立しています。)
+## 現在のAPIと依存関係
 
-## これが何を意味するか
+現在のOpenAI比較は承認済みHTTP Chat descriptorと実行時オプションから`SchemaProvider`を作り、`make_provider_request`と`invoke`を使います。本物のtyped所有outcomeを受け、失敗/完了と表示テキストを確認します。`OpenAIProvider`、`CompletionParams`、`complete()`は削除されたAPIです。モデルはリクエストで明示し、controlsは指定しなければtyped factoryの既定値を使います。古いプロバイダー生成子の既定値ではありません。
 
-- **サブ μs エンジンの勝利はバインディング境界を越えることはできません**。
-  **2 ～ 3 倍のクライアントの勝利が得られます。** リクエストごとのオーバーヘッドは GIL リリースです。
-  HTTP プラミングと JSON 解析 - すべてネイティブ クライアント
-  httpx + pydantic よりも高速に動作します。
-- 実際の LLM ワークロード (呼び出しごとに 300 ミリ秒以上) の場合、クライアントのオーバーヘッドは次のようになります。
-  騒音の中でも、ただし高速エンドポイントまでは高い RPS で (模擬テスト、
-  内部サービス、エージェントのファンアウト、マルチショット ルーティング)
-  ウォールタイムを支配します。
-- **同時スレッドのスケール。** `send_message` での GIL リリース /
-  `complete()` を使用すると、実際の ThreadPoolExecutor を実行できます。
-  Python の並列性の壁にぶつかっています。クライアントが 1 人の場合に便利
-  N 個のエージェントにファンアウトします。
+両クライアントは同じ非公開HTTP loopbackサーバーとChat経路を使い、固定応答のテキストは`ok`です。サーバーは経路、モデル、プロンプトを確認します。リモート認証、独自CA、有料呼び出しは不要です。HTTP/1.0のローカル処理で、TLS/HTTP2検証やnative replayベンチマークではありません。固定token usageはプロバイダー報告fixtureで、実測トークンや予算課金量ではありません。
 
-## 再現する
+[Pythonバインディング案内](../../docs/python-binding.md)で現在のソースに合うwheelを入れ、以下の比較SDKを入れてください。Coreのソースにも外部`SchemaProvider::runtime`が必要です。[ビルド案内](../../README.md)に従ってください。Pythonラッパーだけでは古いwheelに新native APIを追加できません。新wheelの検証や新ベンチマーク合格を主張しません。
+NeoGraph `0.13.0` の wheel と native consumer は alpha SDK `0.1.0`、interface revision/shared generation 4 と一致する必要があります。現在の統合検証は未完了です。
+
+## 新しい測定の実行
+
+リポジトリルートから実行します。wheel/ソース/SDKリビジョン、PythonビルドとGILモード、比較パッケージ版、環境、サーバープロトコル、ウォームアップ、反復数、失敗を記録してください。既定は500リクエストで事前にウォームアップします。同時ランナーはK=1/4/16/64を走査します。
 
 ```bash
-pip install neograph-engine==0.2.2 a2a-sdk openai httpx
-python bench_a2a_clients.py 500       # sequential A2A
-python bench_openai_clients.py 500    # sequential OpenAI
-python bench_concurrent.py 500        # concurrent A2A
+# First install a wheel matching this source via docs/python-binding.md.
+python -m pip install a2a-sdk openai httpx
+python benchmarks/python_clients/bench_a2a_clients.py 500
+python benchmarks/python_clients/bench_openai_clients.py 500
+python benchmarks/python_clients/bench_concurrent.py 500
 ```
 
-上記の数値は、2026 年 4 月 29 日に x86_64 Ubuntu 24.04 で測定されたものです。
-(WSL2)、Python 3.12.3、この中のインプロセスモックサーバーに対して
-フォルダ。結果は±5%以内で再現可能です。
+過去の表と新出力を分けてください。各層の比率を掛けてOpenAI-inside-A2Aの総高速化は算出できません。その組み合わせは測定していません。現在実装の一般的な2–3×保証や±5%再現性を主張しません。

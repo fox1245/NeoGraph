@@ -1,13 +1,13 @@
-<!-- neograph-i18n: source=examples/cookbook/minimal-mcp/README.md locale=ja source_sha256=aabe3dcc4da8e46fba45ac72d14b3c3a206736c485bd63248eb40c1abf57404e -->
-# 最小限のMCP — fastmcpなし、SDKなし、APIキーなし
+<!-- neograph-i18n: source=examples/cookbook/minimal-mcp/README.md locale=ja source_sha256=a7376fb45ce9458c71f7360172bb26947a1694fa341962f3490ecc028390d1a4 -->
+# Minimal MCP — fastmcp と API key なし
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 このリポジトリの他のMCPの例（03 / 20 / 21 / 22）はすべて、固定のOpenRouter DeepSeekモデルを使用するReActループ内にMCPクライアントをラップするものであり、また、ほとんどのMCPチュートリアルは、`pip install fastmcp`（約60パッケージをpullする）をサーバー側に導入することを前提としています。これによって、便利な事実が隠されています:
 
-> **NeoGraphの組み込みMCPクライアントは、ピア側にはワイヤプロトコルを話すプロセス以外に何も必要としない。**
-> ワイヤプロトコルを話すプロセスであり、自身の側には何も必要としません。
-> を除く（`libneograph_mcp` には既に含まれている）。**
+> peer は stdio MCP protocol を実装すれば十分です。C++ client は
+> `libneograph_mcp` と推移的な native 依存をリンクします。peer に Python MCP
+> package は不要です。
 
 このクックブックは、最小限の構成でそれを証明する：
 
@@ -16,7 +16,7 @@
 
 ## 実行してください
 
-ビルドディレクトリから（`-DNEOGRAPH_BUILD_MCP=ON` でビルド済み。これは例ではデフォルトでオン）：
+`-DNEOGRAPH_BUILD_EXAMPLES=ON` と `-DNEOGRAPH_BUILD_MCP=ON` で構成した build directory から実行します。モデルを呼ばなくても SchemaProvider は必要です。`CMAKE_PREFIX_PATH` で installed prefix、または `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` で SDK source を指定してください：
 
 ```bash
 ./cookbook_minimal_mcp python3 ../examples/cookbook/minimal-mcp/min_stdio_server.py
@@ -44,7 +44,7 @@
 
 ## これが重要な理由
 
-- **軽量、両面とも。**「バッテリー同梱」という主張は現実的です：NeoGraphはMCPを静的にリンクするため、別途インストールするパッケージもなく、ドリフトし得る依存関係もありません。*ピア*サーバーはstdlibが許可する限り小さくできます — エッジデバイス、CI、またはフレームワークなしでローカルツールをいくつか公開したい場合に便利です。
+- **小さな peer。** server は Python 標準 library のみを使います。client には SchemaProvider を含む native build 依存があります。MCP を binary に含めてもこの依存はなくなりません。
 - **ピア非依存。** `min_stdio_server.py`を、stdio上でMCPを話す任意の実行可能ファイル（Goバイナリ、Rustサーバー、fastmcp、公式SDK）に置き換えます。C++側は決して変更されません。
 - **キーフリープロトコルテスト。** ループ内にLLMがないため、これはエージェントに配線する前に、MCPサーバーの `tools/list` と `tools/call` の形状が正しいことをスモークテストする最も速い方法でもあります。
 

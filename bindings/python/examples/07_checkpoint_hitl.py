@@ -1,21 +1,12 @@
-"""07 — Checkpoint + Human-in-the-Loop (interrupt + resume).
+"""07 — Checkpoint + human approval: interrupt before dispatch, then resume.
 
-A two-step workflow that pauses before a sensitive action, lets a
-human inspect the state, and resumes (or aborts) on demand. No real
-LLM — a fake-LLM custom node returns canned tool-call messages so
-the example runs offline.
-
-Pattern:
-  1. fake_llm node emits a `pay_order` tool_call.
-  2. Engine reaches `dispatch` node; we pause via `update_state`
-     before it runs (the C++ examples use `interrupt_before`; the
-     Python binding's clean equivalent is to read state, decide,
-     and either run or skip the next step).
-  3. We approve, then call `engine.resume_async(thread_id)` or
-     simply re-run from the saved checkpoint.
+A scripted model proposes a payment. The engine saves a checkpoint before
+tool_dispatch and returns an interrupted result. We inspect the proposal,
+verify the simulated payment has not run, then resume the same engine/thread.
+The demonstration approves automatically; a real UI supplies that decision.
+No API key, payment processor, or real charge is involved.
 
 Run:
-    pip install neograph-engine
     python 07_checkpoint_hitl.py
 """
 
@@ -51,7 +42,7 @@ class FakeLLMNode(ng.GraphNode):
 
 
 class PayOrderTool(ng.Tool):
-    """Sensitive tool — only run after human approval."""
+    """Simulated sensitive action; never contacts a payment processor."""
 
     def __init__(self):
         super().__init__()
@@ -87,38 +78,29 @@ ng.NodeFactory.register_type(
 )
 
 
-# Two-graph approach to demo HITL:
-#   stage 1 graph: only the LLM node (writes the tool_call into messages)
-#   then we inspect — and if approved, run stage 2: just the dispatch.
+# A single resumable graph: proposal -> interrupt before dispatch -> execution.
 
-stage1_def = {
+definition = {
     "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
-    "name": "stage1_propose",
+    "name": "checkpoint_approval",
     "channels": {"messages": {"reducer": "append"}},
-    "nodes": {"llm": {"type": "fake_llm"}},
+    "nodes": {"llm": {"type": "fake_llm"}, "dispatch": {"type": "tool_dispatch"}},
     "edges": [
         {"from": ng.START_NODE, "to": "llm"},
-        {"from": "llm",         "to": ng.END_NODE},
+        {"from": "llm", "to": "dispatch"},
+        {"from": "dispatch", "to": ng.END_NODE},
     ],
+    "interrupt_before": ["dispatch"],
 }
 
-stage2_def = {
-    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
-    "name": "stage2_execute",
-    "channels": {"messages": {"reducer": "append"}},
-    "nodes": {"dispatch": {"type": "tool_dispatch"}},
-    "edges": [
-        {"from": ng.START_NODE, "to": "dispatch"},
-        {"from": "dispatch",    "to": ng.END_NODE},
-    ],
-}
-
-# Stage 1: propose.
-ctx1 = ng.NodeContext()  # tools not yet needed
-engine1 = ng.GraphEngine.compile(stage1_def, ctx1)
-state1 = engine1.run(ng.RunConfig(thread_id="order-42", input={"messages": []}))
-
-proposed_msg = state1.output["channels"]["messages"]["value"][-1]
+engine = ng.GraphEngine.compile(definition, ng.NodeContext(tools=[pay_tool]),
+                               ng.InMemoryCheckpointStore())
+paused = engine.run(ng.RunConfig(thread_id="order-42", input={"messages": []}))
+assert paused.interrupted, "expected a checkpoint before payment dispatch"
+assert pay_tool.invocations == [], "payment ran before approval"
+checkpoint = engine.get_state("order-42")
+assert checkpoint is not None, "interrupted workflow must be resumable"
+proposed_msg = paused.output["channels"]["messages"]["value"][-1]
 proposed_call = proposed_msg["tool_calls"][0]
 args = json.loads(proposed_call["arguments"])
 
@@ -137,15 +119,10 @@ if not APPROVED:
     print("Skipping payment — order aborted.")
     raise SystemExit(0)
 
-# Stage 2: execute. Replay the proposed messages so dispatch sees
-# the tool_call.
-ctx2 = ng.NodeContext(tools=[pay_tool])
-engine2 = ng.GraphEngine.compile(stage2_def, ctx2)
-state2 = engine2.run(ng.RunConfig(
-    thread_id="order-42",
-    input={"messages": state1.output["channels"]["messages"]["value"]},
-))
-
+# Resume from the actual interrupted checkpoint, not a second graph.
+state2 = engine.resume("order-42")
+assert not state2.interrupted
+assert len(pay_tool.invocations) == 1, "approval must execute payment once"
 tool_msgs = [m for m in state2.output["channels"]["messages"]["value"]
              if m.get("role") == "tool"]
 print("=== TOOL RESULT ===")

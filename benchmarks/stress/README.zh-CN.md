@@ -1,48 +1,46 @@
-<!-- neograph-i18n: source=benchmarks/stress/README.md locale=zh-CN source_sha256=87cc091ee71ab14f86ff9642a147a3d80e1452c56020c0073aba63e125258190 -->
-# NeoGraph 压力测试工具集
+<!-- neograph-i18n: source=benchmarks/stress/README.md locale=zh-CN source_sha256=245bd9f1555c8f45feba5119b20683c54700e0b74468f8857b4707267680b859 -->
+# NeoGraph 持续并发压力基准
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-补充 engine-overhead 和 single-shot concurrent benchmarks 的运行就绪度 gates。`benchmarks/bench_neograph` 测量 **per-call cost**，`benchmarks/concurrent/...` 测量 **single 10k burst**，而本目录让 NeoGraph **随时间** 运行。
+本运行器在一段时间内重复执行三节点计数器图，测量本地引擎持续运行，而非供应商调用、持久化或生产就绪度。
 
-## 内容说明
+## 测量与退出状态
 
-### `bench_sustained_concurrent`
+`bench_sustained_concurrent` 默认值为 `--concurrency 1000`、`--duration-s 60`、`--sample-s 5`、`--warmup-s 5`、`--rss-tolerance-pct 25`。调用方线程数等于目标运行数，完成时提交替代任务。样本报告平均与最大延迟，不报告 P99；计时从工作线程内部开始，不含队列等待。`ok_total` 计数的是未抛出异常的调用，而不是对返回图状态的验证。
 
-在 M wall-clock seconds 内保持 N 个 graph runs in flight。一个 run 完成就立即提交新的 run，使 inflight 保持目标值。每 `--sample-s` 秒采样 RSS 和 per-window latency；如果 RSS 在 warm baseline（warmup 后）和 final sample 之间上漂超过 `--rss-tolerance-pct`，则退出 1。
+退出 1 表示最终当前 RSS 相比预热基线增长超出容差；退出 0 不证明无泄漏或无运行错误。请单独查看 `err_total`。最终 RSS 在停止并 join 线程池后读取，受线程退出影响。基线仅在首个样本达到 `warmup-s` 时记录，请使预热时间不超过首个采样间隔。没有基线时零漂移不能作为内存门槛合格的证据。
 
-捕捉 burst bench 无法捕捉的三种 failure modes：
+Windows 使用 working-set 计数器，Linux 使用 `/proc/self/status`。其他平台返回 0 可能表示无法测量。峰值 RSS 不会下降，调查增长时应查看当前 RSS 和基线有效性。
 
-- **Steady-state leaks** — coroutines / pending writes / cached state 无界增长。drift gate 是 best-effort（Valgrind / LSan 仍是权威工具，见 ASan / TSan CI），但 60 s 内 RSS 爬升 25% 是很强的"看这里"信号。
-- **Latency drift** — pool 预热后 mean / max-per-window 上行。通常指向 thread-pool starvation 或 scheduler back-pressure，而这些不会出现在 t=0 burst tests 中。
-- **Pool exhaustion under churn** — completions 与新 submissions 重叠，因此 worker pool 看到的是混合 inflight pattern，而不是 burst 的 all-drain。
+## 构建与运行
 
-#### 用法
+安装外部 SchemaProvider SDK 并设置 prefix。关闭 LLM 和 NeoGraph 可选 libcurl 后端后，Core 仍需要 `SchemaProvider::runtime`。可用 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` 显式指定源码代替 prefix；源码构建需要 C++20、Python、libcurl ≥7.88 和 OpenSSL Crypto。依赖与平台限制参见[构建指南](../../README.md)。以下命令禁用网络获取和未使用的 NeoGraph 集成。
+NeoGraph `0.13.0` 需要 alpha SDK `0.1.0`、interface revision/shared generation 4，并以匹配 header/library 重建。当前集成验证尚未完成。
 
 ```bash
+# Set SCHEMAPROVIDER_PREFIX to the installed SDK prefix.
 cmake -B build-stress -S . \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DNEOGRAPH_BUILD_BENCHMARKS=ON \
-    -DNEOGRAPH_BUILD_TESTS=OFF \
-    -DNEOGRAPH_BUILD_EXAMPLES=OFF
-cmake --build build-stress -j$(nproc) --target bench_sustained_concurrent
+  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
+  -DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+  -DNEOGRAPH_BUILD_TESTS=OFF -DNEOGRAPH_BUILD_EXAMPLES=OFF \
+  -DNEOGRAPH_BUILD_PROGRAM=OFF -DNEOGRAPH_BUILD_LLM=OFF \
+  -DNEOGRAPH_BUILD_ASYNC=OFF -DNEOGRAPH_BUILD_MCP=OFF \
+  -DNEOGRAPH_BUILD_A2A=OFF -DNEOGRAPH_BUILD_ACP=OFF \
+  -DNEOGRAPH_BUILD_UTIL=OFF -DNEOGRAPH_BUILD_POSTGRES=OFF \
+  -DNEOGRAPH_BUILD_SQLITE=OFF -DNEOGRAPH_USE_LIBCURL=OFF
+cmake --build build-stress --parallel --target bench_sustained_concurrent
 
 ./build-stress/bench_sustained_concurrent \
-    --concurrency        1000 \
-    --duration-s         60   \
-    --sample-s           5    \
-    --warmup-s           5    \
-    --rss-tolerance-pct  25
+  --concurrency 1000 --duration-s 60 --sample-s 5 \
+  --warmup-s 5 --rss-tolerance-pct 25
 ```
 
-冒烟结果（concurrency=100，duration=15s，Ryzen 7 5800X）：
-- 持续运行 15 s 完成 15.3 M graph runs，约 **1.0 M runs/s**
-- 每次运行的平均延迟：~55 µs
-- 预热 RSS：9.3 MB → final：7.4 MB（漂移 ‑20 %，退出码 0）
+## 保留的历史观测
 
-#### 输出格式
-
-每个 sample 一行 JSON，最后一行 summary：
+旧 README 中未注明日期的 Ryzen 7 5800X 记录为：并发 100，15 秒内 15.3 M 次运行（约 1.0 M runs/s），平均延迟约 55 µs，预热 RSS 9.3 MB 到最终 7.4 MB（约 −20%，退出 0）。未记录日期与 SDK 修订。保留为历史证据，不是新 cutover 验证或吞吐保证。以下为该观测的输出摘录，省略号不是 JSON。
 
 ```json
 {"sample":1,"elapsed_s":5,"window_ok":5012514,"err_total":0,"inflight":100,
@@ -53,24 +51,17 @@ cmake --build build-stress -j$(nproc) --target bench_sustained_concurrent
  "rss_drift_pct":-20.29,"rss_tolerance_pct":25,"leak_suspect":false}
 ```
 
-### `bench_sustained_concurrent` 在 `prlimit` 下（内存上限测试）
+## 分配压力实验
 
-用 virtual-memory cap 包住 harness，以证明 NeoGraph 能干净地处理 allocation pressure：
+`prlimit` 限制 Linux 虚拟地址空间。每个调用槽有一个线程，栈和线程池创建可能在图执行前耗尽上限。运行内的 catch 记录 `engine->run` 异常，但线程池创建在 catch 外。分配压力下正常退出是需测量的验收标准，不是脚本保证。
 
 ```bash
-# Cap address space at 256 MB. Allocations beyond this fail with
-# std::bad_alloc — NeoGraph's audit-Round-5 typed catch in
-# graph_executor (commit ead703e) rethrows bad_alloc instead of
-# silently retrying, so the workload should error out instead of
-# crashing.
+# Linux: cap virtual address space, not resident memory.
 prlimit --as=$((256*1024*1024)) \
-    ./build-stress/bench_sustained_concurrent \
-        --concurrency 200 --duration-s 30
+  ./build-stress/bench_sustained_concurrent \
+  --concurrency 200 --duration-s 30
 ```
 
-通过标准：进程干净退出（return code 0 或 1；不是 SIGABRT / SIGSEGV），`err_total` 可以非零（这些是 bad_alloc rethrows 作为 failed runs 暴露出来）。
+## 额外实验
 
-## 尚未实现
-
-- **24-hour soak** — 同一个 harness，更长 wall window。在 dedicated host 上运行；观察 `peak_rss_kb` 是否在数小时内呈 monotone-non-decreasing trend。
-- **cgroup-bounded run** — `systemd-run --scope -p MemoryMax=512M`，比 `prlimit` 更严格的 resource cap（kernel-side enforcement，不只是 allocation-time check）。WSL2 systemd support 有限；请在真实 Linux host 上测试。
+24 小时运行或 cgroup 内存限制需单独记录环境与结果。比较稳态区间的当前 RSS，并记录 `err_total` 和终止信号。区分 cgroup 常驻内存限制与 `prlimit` 地址空间限制。本页未报告这些运行结果。

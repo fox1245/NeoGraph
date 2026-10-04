@@ -2,136 +2,75 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-Twenty-eight scripts covering the binding surface end-to-end.
+These 28 scripts show graph state, routing, tools, provider requests, and protocol hosting. Start with the offline examples; hosted model calls require explicit credentials and incur provider charges.
 
 ## Setup
 
 ```bash
-pip install neograph-engine python-dotenv
-cp .env.example .env  # edit OPENAI_API_KEY for examples that hit a real LLM
-```
-
-`_common.py` auto-loads `.env` from this directory or any parent.
-Examples that need an API key skip cleanly (without crashing) when
-the key is missing.
-
-## Index
-
-| # | File | Network | Pattern |
-|---|------|---------|---------|
-| 01 | [`01_minimal.py`](01_minimal.py) | offline | `GraphNode` subclass + `engine.run()`. The smallest useful graph. |
-| 02 | [`02_tool_dispatch.py`](02_tool_dispatch.py) | offline | `Tool` subclass + built-in `tool_dispatch`. Hand-crafted tool_call (no real LLM). |
-| 03 | [`03_send_fanout.py`](03_send_fanout.py) | offline | `run(input)` returning `NodeResult` with `Send` list + `set_worker_count(4)`. Map-reduce. |
-| 04 | [`04_async_concurrent.py`](04_async_concurrent.py) | offline | `engine.run_async` + `asyncio.gather` of 8 concurrent runs + `run_stream_async`. |
-| 05 | [`05_openai_provider.py`](05_openai_provider.py) | **OpenAI** | `OpenAIProvider` + built-in `llm_call` node. One-shot completion. |
-| 06 | [`06_react_agent.py`](06_react_agent.py) | **OpenAI** | ReAct loop: `llm_call` ↔ `tool_dispatch` with `has_tool_calls` conditional. |
-| 07 | [`07_checkpoint_hitl.py`](07_checkpoint_hitl.py) | offline | Two-stage propose/approve workflow with mock LLM emitter. |
-| 08 | [`08_intent_routing.py`](08_intent_routing.py) | **OpenAI** | Classifier node + conditional edge → math / translate / general expert. |
-| 09 | [`09_state_management.py`](09_state_management.py) | offline | `set_checkpoint_store(InMemoryCheckpointStore())` + `get_state` + `fork`. |
-| 10 | [`10_command_routing.py`](10_command_routing.py) | offline | `run(input)` returning `Command(goto_node=…, updates=[…])`. |
-| 11 | [`11_reflexion.py`](11_reflexion.py) | **OpenAI** | Actor + critic loop with reflection prompt (Shinn et al. 2023). |
-| 12 | [`12_self_ask.py`](12_self_ask.py) | **OpenAI** | Self-Ask follow-up question decomposition (Press et al. 2022). |
-| 13 | [`13_multi_agent_debate.py`](13_multi_agent_debate.py) | **OpenAI** | Two-debater + judge. Debaters fan out via `Send`. |
-| 14 | [`14_graph_to_json.py`](14_graph_to_json.py) | offline | Serialize a graph definition to a `.json` file. |
-| 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | offline | Load a `.json` graph and run it (companion to 14). |
-| 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | **Responses (WS/HTTP)** | Multi-turn Gradio chat that switches into a three-way parallel deep-research subgraph on `조사해줘 / research / investigate`. Official OpenAI defaults to WebSocket; compatible gateways auto-select compiled HTTP/2 or HTTP/1.1. Override with `NG_RESPONSES_TRANSPORT`. Requires `pip install gradio`. |
-| 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | **Responses + Crawl4AI + Postgres** | Same transport-aware chat shape as 16, but researchers actually search the web via a local Crawl4AI container (`docker run unclecode/crawl4ai`) and state is durable in Postgres (`PostgresCheckpointStore`). Both are optional via env vars; falls back gracefully when absent. Source-build with `-DNEOGRAPH_BUILD_POSTGRES=ON` for the Postgres path. |
-| 18 | [`18_node_cache.py`](18_node_cache.py) | **OpenAI** | `engine.set_node_cache_enabled("ask", True, CacheScope.Reusable)` — later runs on the same input replay the cached `NodeResult` in 0 ms with no LLM call. Stats via `engine.node_cache_stats()`. |
-| 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | offline | `from neograph_engine import message_stream` — wraps a callback so `LLM_TOKEN` events arrive as LangChain-shape message dicts (`{role, content, content_so_far, node, metadata}`). |
-| 20 | [`20_otel_tracing.py`](20_otel_tracing.py) | offline | `from neograph_engine.tracing import otel_tracer` — bridge engine events to OpenTelemetry spans. Ships ConsoleSpanExporter; swap for OTLP to send to Jaeger / Tempo / Honeycomb / Datadog. |
-| 21 | [`21_http2_transport.py`](21_http2_transport.py) | **OpenAI** | `SchemaProvider(..., prefer_libcurl=True)` — opt-in HTTP/2 (libcurl) transport vs default ConnPool (HTTP/1.1 keep-alive). When libcurl is compiled in it A/B-tests both on 5-way parallel bursts; wheels without that backend run one HTTP/1.1 smoke call and explain how to source-build HTTP/2. |
-| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | **OpenAI** | Goal-driven self-evolution: the agent runs, scores its output against a JSON-shape goal, and asks an LLM to propose a revised graph definition. Loop closes when score ≥ 1.0 or max_iters hit. Demonstrates JSON-as-program where the modifier's only output is a new graph spec. |
-| 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | **OpenAI** | Per-thread evolving chat agent: persistent multi-turn conversation; between turns the agent's JSON definition is rewritten based on accumulated history. Demonstrates checkpoint-resume across evolution (prior messages survive), the `__graph_meta__` audit channel pattern, and a validator boundary (whitelist node types, required channels, edge connectivity). Requires `OPENAI_API_KEY`; exits cleanly without one. |
-| 24 | [`24_tool_approval_gate.py`](24_tool_approval_gate.py) | offline | The tool gate (#89): `engine.set_tool_gate(...)` is consulted for every tool call **before any tool runs**, returning Allow / Allow-with-rewritten-args / Deny / Interrupt. Shows the canonical approval prompt — *"the agent wants to run `rm -rf build/`. Allow?"* — and, crucially, that the harmless sibling call has **not** run while the human is deciding, so a refusal really means nothing happened and an approval does not re-run it. |
-| 25 | [`25_async_tools.py`](25_async_tools.py) | offline | Concurrent tools (#96): `ng.AsyncTool` instead of `ng.Tool` and three 300 ms tools take 0.30 s instead of 0.90 s. Also measures the boundary in the same run — three *CPU-bound* tools take 3.2x the time of one, because a Python function holds the GIL while it runs and no number of threads changes that. Concurrency is opt-in so an existing stateful tool cannot suddenly race itself. |
-| 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | offline | MCP (#95): `ng.mcp.MCPClient(url).get_tools()` pulls a remote tool catalogue and hands it straight to `NodeContext`. Starts its own MCP server, so it runs with no network. Repeated named calls stay serial by default; the threaded demo explicitly marks `fetch` Reentrant through `ToolExecutionPolicyRegistry`, then measures three 0.4 s HTTP calls in 0.41 s. stdio multiplexes JSON-RPC IDs too, but overlap requires both that host policy and a concurrent server. |
-| 27 | [`27_a2a_server.py`](27_a2a_server.py) | localhost | A2A hosting (#120): the official `a2a-sdk` owns JSON-RPC, task state, the agent card, and cancellation. `ProtocolHostAdapter.stream()` maps engine token events to chunked A2A artifacts while preserving checkpoint context. Requires Python 3.10+ and `pip install "neograph-engine[a2a]"`. |
-| 28 | [`28_acp_agent.py`](28_acp_agent.py) | stdio | ACP hosting (#120): streams token updates, preserves text/image/audio/resource content blocks for the graph, and supports durable `session/load` when `NEOGRAPH_ACP_POSTGRES_URL` or `NEOGRAPH_ACP_SQLITE_PATH` is set. Requires Python 3.10+ and `pip install "neograph-engine[acp]"`. |
-
-## Why hosting uses the official SDKs
-
-The C++ library has its own `A2AServer` and `ACPServer`, but exposing those
-classes directly would give Python users a second protocol implementation with
-weaker integration than Python's official SDKs. In particular, the official
-SDKs already own current wire-format compatibility, server transports, task or
-session lifecycle, and asyncio cancellation. NeoGraph only supplies the part
-that those SDKs cannot: a checkpoint-aware call into the C++ graph engine.
-
-| Item | Decision |
-|------|----------|
-| C++ feature that appears missing | `A2AServer`, `ACPServer`, and their lifecycle methods are not mirrored as Python classes. |
-| Python alternative | Official `a2a-sdk` 1.x and `agent-client-protocol` 0.12.1 server runtimes. |
-| NeoGraph integration | `ProtocolHostAdapter` maps protocol conversation IDs to `RunConfig.thread_id`, enables `resume_if_exists`, streams `LLM_TOKEN` events, accepts custom JSON-safe input payloads, and cancels the active asyncio task. |
-| Dependency policy | Both SDKs are optional because they require Python 3.10+, while `neograph-engine` supports Python 3.9. Install `neograph-engine[a2a]`, `neograph-engine[acp]`, or `neograph-engine[protocols]`. |
-| Durable ACP sessions | Set `NEOGRAPH_ACP_POSTGRES_URL` for the wheel-supported durable backend. Source builds with `NEOGRAPH_BUILD_SQLITE=ON` may set `NEOGRAPH_ACP_SQLITE_PATH`. The agent advertises `session/load` only when one is configured; a new session becomes loadable after its first completed prompt creates a checkpoint. Session IDs are server-generated capabilities and checkpoints use a private `acp:` thread namespace. Keep one active agent process per session; checkpoint stores do not serialize concurrent writers across processes. |
-| Current limit | ACP editor callbacks (`fs/read_text_file`, terminal calls, permission prompts) cannot yet be invoked safely from a shared NeoGraph Python tool: today's `AsyncTool` runs a synchronous function on a worker thread and does not carry the current protocol session ID. A fake bridge would risk calling the wrong editor session. |
-| Revisit direct bindings when | A user must embed the exact C++ server in Python, or the official SDK path cannot preserve a required NeoGraph cancellation, checkpoint, tracing, or tool-call behavior. |
-
-`ProtocolHostAdapter.run_payload()` passes any JSON-safe value through the
-configured `input_builder`. The default `message_input` keeps rich content
-blocks as the user message's `content`; graphs whose provider expects another
-shape should pass a custom builder. `ProtocolHostAdapter.stream()` yields
-`ProtocolStreamEvent(kind="token", ...)` values followed by exactly one final
-event. Live tokens are disabled unless `stream_node` names the graph node whose
-tokens exactly form the final answer. This prevents planner/tool-node output
-from leaking through a protocol response. The asyncio consumer queue is bounded
-(1,024 chunks by default); overflow cancels the engine run. Native stream events
-are first scheduled onto the asyncio loop, so this queue is backpressure for a
-slow protocol transport, not a hard process-wide memory cap against an
-unbounded native producer.
-
-Run any one with:
-
-```bash
+pip install neograph-engine
 python 01_minimal.py
 ```
 
-## Mental model
+Run commands from this directory. `python-dotenv` is optional: install it if you want `_common.py` to load the nearest example/repository `.env`. Exported environment variables take precedence. Missing hosted credentials are an error, not a successful verification run.
 
-NeoGraph from Python looks like LangGraph from Python: a graph of
-nodes, channels with reducers, dynamic fan-out via `Send`, routing
-overrides via `Command`, conditional edges via named conditions
-(`route_channel`, `has_tool_calls`, etc.). The same primitives, the
-same JSON-shaped graph definition. The difference is what's running
-it — a C++ engine that does the super-step loop, scheduling, and
-checkpointing in microseconds per step instead of LangGraph's
-~600 µs.
+For hosted examples, set `OPENAI_API_KEY` and optionally `OPENAI_MODEL` (default `gpt-4.1-mini`). `_common.py` admits a closed OpenAI Chat or Responses descriptor, then constructs `SchemaProvider`. The typed SDK uses libcurl HTTP; the removed provider classes, completion parameters, WebSocket path, and transport-backend selector are not available.
 
-Three patterns appear across the examples:
+For no-key protocol qualification, set `OPENAI_API_BASE` to a faithful loopback Chat/Responses peer. It must implement the route and response shape used by the example, not return a Python mock. Use `NG_EXAMPLE_CA_FILE` for a local TLS CA. `NG_PROVIDER_DESCRIPTOR` can instead name a complete admitted descriptor JSON file, including a gateway prefix, routes, and allowed headers. A base URL is not a full `/v1/chat/completions` route. See [the Python binding guide](../../../docs/python-binding.md) for the typed request/outcome contract.
 
-1. **Python custom nodes** (01, 03, 04, 07, 09, 10, 11, 12, 13)
-   subclass `neograph_engine.GraphNode` and implement `run(input)`.
-   Read channels from `input.state`, use `input.stream_cb` when present,
-   and return writes, `Command`, `Send`, or `NodeResult`. The engine
-   dispatches into Python under GIL handling so concurrent custom nodes
-   do not deadlock.
+## Index and expected behavior
 
-2. **Python tools** (02, 06, 07) subclass `neograph_engine.Tool` and
-   pass instances into `NodeContext(tools=[…])`. The engine takes
-   ownership at compile time; Python references can drop afterwards.
+Run each entry with `python <file>`. The expected state below is a verification target; it is not a claim that these scripts were run in this documentation update. Model-generated wording is not deterministic.
 
-3. **Async** (04) — every `*_async` binding returns an
-   `asyncio.Future` bound to the calling thread's running loop.
-   Stream callbacks are hopped onto the loop thread via
-   `loop.call_soon_threadsafe`, so your `cb(ev)` runs where asyncio
-   expects.
+| # | File | Prerequisites | Expected behavior |
+|---|------|---------------|-------------------|
+| 01 | [`01_minimal.py`](01_minimal.py) | None | A custom node doubles 21 to 42. |
+| 02 | [`02_tool_dispatch.py`](02_tool_dispatch.py) | None | A scripted tool call goes through `tool_dispatch`; the calculator returns `42`. |
+| 03 | [`03_send_fanout.py`](03_send_fanout.py) | None | Eight `Send` branches merge squares `[0, 1, 4, 9, 16, 25, 36, 49]`; append order is not assumed. |
+| 04 | [`04_async_concurrent.py`](04_async_concurrent.py) | None | Eight async runs produce `[0, 2, 4, 6, 8, 10, 12, 14]`; a streamed run emits node events. |
+| 05 | [`05_openai_provider.py`](05_openai_provider.py) | Chat peer or hosted key | `llm_call` writes an assistant message saying `hello world`. |
+| 06 | [`06_react_agent.py`](06_react_agent.py) | Responses peer or hosted key | A model-issued `calc` call returns `4053`, then the model gives its final answer. |
+| 07 | [`07_checkpoint_hitl.py`](07_checkpoint_hitl.py) | None | A checkpoint pauses before payment dispatch; approval resumes exactly one simulated payment. No money is charged. |
+| 08 | [`08_intent_routing.py`](08_intent_routing.py) | Chat peer or hosted key | Three questions route to math, translate, and general experts; each expert writes its answer. |
+| 09 | [`09_state_management.py`](09_state_management.py) | None | Alpha reaches count 11; beta forks that value; an unknown thread has no checkpoint. |
+| 10 | [`10_command_routing.py`](10_command_routing.py) | None | Inputs 200, 50, and -10 choose accept, manual, and reject nodes via `Command`. |
+| 11 | [`11_reflexion.py`](11_reflexion.py) | Chat peer or hosted key | Actor/critic calls carry reflection into the next attempt, stopping on `ok` or the superstep cap. This is a bounded teaching adaptation. |
+| 12 | [`12_self_ask.py`](12_self_ask.py) | Chat peer or hosted key | Intermediate questions/answers accumulate in a scratchpad before a final answer. No search service is attached. |
+| 13 | [`13_multi_agent_debate.py`](13_multi_agent_debate.py) | Chat peer or hosted key | Two `Send` branches produce opposing arguments; one judge reads the merged arguments. |
+| 14 | [`14_graph_to_json.py`](14_graph_to_json.py) | None | A doubled result of 42 and a saved `my_graph.json` definition. |
+| 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | Run 14 first | The saved definition doubles 5 to 10 and 100 to 200; custom node types are registered separately. |
+| 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | Responses peer/key; `gradio` | Normal chat or a three-question research report. Researchers use model knowledge, not web search. |
+| 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | Responses peer/key; `gradio`, `requests`; optional Crawl4AI/Postgres | `CRAWL4AI_URL` enables real `/md` search; `NEOGRAPH_PG_DSN` enables durable engine checkpoints. Configured service failures are not silently replaced. Without either setting, the script explicitly reports model-only research/in-memory state. Gradio history is not restored automatically. |
+| 18 | [`18_node_cache.py`](18_node_cache.py) | Chat peer or hosted key | Five runs across two topics execute the provider-backed node twice; repeated inputs replay cached writes. No fixed latency is promised. |
+| 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | None | Five scripted token events form `Octopuses have three hearts.` and message-stream chunks. |
+| 20 | [`20_otel_tracing.py`](20_otel_tracing.py) | `opentelemetry-api`, `opentelemetry-sdk` | Console spans cover the run and three nodes; final trail is `['A', 'B', 'C']`. |
+| 21 | [`21_http2_transport.py`](21_http2_transport.py) | TLS Chat peer/key; libcurl HTTP/2 support | Compare HTTP/1.1 and HTTP/2 requests through the same SDK. Confirm negotiated protocol separately; timings depend on the endpoint. |
+| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | Chat peer or hosted key | Score profile JSON, request a revised graph after failure, recompile, retry. Only registered node types are admitted. A model may exhaust the iteration cap without success. |
+| 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | Chat peer or hosted key | Preserve conversation checkpoints across an admitted graph rewrite; record version/hash in `__graph_meta__`. This metadata is application-level, not authoritative replay evidence. |
+| 24 | [`24_tool_approval_gate.py`](24_tool_approval_gate.py) | None | Pause before either sibling tool runs; refusal executes only `list_files`, approval executes both once. Shell actions are simulated. |
+| 25 | [`25_async_tools.py`](25_async_tools.py) | None | Compare serial `Tool` with overlapping I/O-bound `AsyncTool`, then show the CPython GIL boundary. Timing ratios are observations, not pass criteria. |
+| 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | MCP-enabled build | Start a real local JSON-RPC MCP peer, discover `fetch`, execute three calls with an explicit re-entrant policy. No external network or key. |
+| 27 | [`27_a2a_server.py`](27_a2a_server.py) | Python 3.10+; `neograph-engine[a2a]` | Serve an agent card and A2A JSON-RPC on `127.0.0.1:9999`; streamed artifacts form `NeoGraph received: hello (turn 1)`. |
+| 28 | [`28_acp_agent.py`](28_acp_agent.py) | Python 3.10+; `neograph-engine[acp]` | Serve ACP over stdio; initialize, create a session, prompt, receive token updates and `end_turn`. Durable `session/load` requires a configured Postgres or SQLite backend. |
 
-## Graph definition is JSON
+## State and scheduling
 
-`GraphEngine.compile(definition, ctx)` accepts either a Python
-`dict` you build in code or a `dict` you `json.loads()` from a file
-— same shape. Examples 14 + 15 show the round-trip. Custom node
-*types* still need to be registered in code (Python classes can't
-be encoded to JSON), but the wiring — channels, nodes by type,
-edges, conditional edges — is data.
+A node reads the current superstep's state and returns channel writes. The engine merges those writes through the declared reducers before the next superstep. `Send` supplies branch-specific input; `Command` updates state and chooses the next node. A worker pool does not make CPU-bound Python callbacks execute in parallel under the CPython GIL.
 
-## Distribution name vs. import name
+`GraphEngine.compile()` accepts a dictionary loaded from JSON as well as one written in Python. Definitions store wiring, not executable Python classes: register custom node factories before compiling a saved definition. Examples 14 and 15 write/read `my_graph.json` beside the scripts; use a disposable checkout or copy of this directory when qualifying that pair.
 
-The PyPI package is **`neograph-engine`** (the bare `neograph` name
-was already taken on PyPI by an unrelated project). The Python
-import name is `neograph_engine`:
+## Interactive and protocol scenarios
+
+Install `gradio` for 16/17, launch the script, and visit the printed local URL. Submit `hello`, then `research apples`. For 17, a real Crawl4AI `/md` service or faithful local peer must return `{"success": true, "markdown": "..."}`. Configure Postgres only when the running build supports it and the database is reachable. Check engine state separately from UI history.
+
+Examples 27/28 use the official Python SDKs for wire handling and `ProtocolHostAdapter` for checkpoint-aware engine execution. A2A verification needs an SDK client to fetch the agent card, send a message, and consume the stream. ACP verification needs a client subprocess connection for `initialize`, `session/new`, and `session/prompt`; stdout is reserved for protocol messages. Send a second prompt in the same context/session and expect `(turn 2)`. Cancellation should stop an active request rather than create a success-shaped fallback.
+
+For durable ACP sessions, set exactly one of `NEOGRAPH_ACP_POSTGRES_URL` or `NEOGRAPH_ACP_SQLITE_PATH`. A completed first prompt creates the checkpoint needed for `session/load`. Keep one active agent process per session; checkpoint stores do not serialize concurrent writers across processes. The example echoes rich content blocks but does not interpret image/audio content or provide editor filesystem/terminal callbacks.
+
+## Distribution and import names
 
 ```python
 import neograph_engine as ng
-from neograph_engine.llm import OpenAIProvider, SchemaProvider
+from neograph_engine.llm import SchemaProvider
 ```
+
+The distribution is `neograph-engine`; `neograph` on PyPI is an unrelated project.

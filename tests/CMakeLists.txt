@@ -19,6 +19,8 @@ add_executable(neograph_tests
     test_subgraph_output_deltas.cpp
     test_subgraph_persistence.cpp
     test_plan_execute_graph.cpp
+    test_deep_research_truncation.cpp
+    test_fork_resume_semantics.cpp
     test_signal_dispatch.cpp
     test_multi_node_resume.cpp
     test_resume_if_exists.cpp
@@ -197,6 +199,8 @@ if(NEOGRAPH_BUILD_PROGRAM)
         )
     endif()
     if(TARGET neograph_program_sqlite)
+        target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_PROGRAM_SQLITE)
+        target_link_libraries(neograph_tests PRIVATE neograph::program_sqlite SQLite::SQLite3)
         target_sources(neograph_program_tests PRIVATE test_program_provider_journal.cpp)
         target_compile_definitions(neograph_program_tests PRIVATE
             NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE

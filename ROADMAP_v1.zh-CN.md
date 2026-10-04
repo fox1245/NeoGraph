@@ -1,12 +1,27 @@
-<!-- neograph-i18n: source=ROADMAP_v1.md locale=zh-CN source_sha256=e5d4df28a5ba92ca1778fdff4fa741fc4c435c9dfba1fddbe8dacd31ca1f3121 -->
+<!-- neograph-i18n: source=ROADMAP_v1.md locale=zh-CN source_sha256=145f159a2258c775caf7dd71eeb13936ae0bc5eb31cca00f660b4f2223d2a490 -->
 # NeoGraph v1.0 — 设计细化路线图
 
 **Languages:** [English](ROADMAP_v1.md) | [한국어](ROADMAP_v1.ko.md) | [日本語](ROADMAP_v1.ja.md) | [简体中文](ROADMAP_v1.zh-CN.md)
 
-本文件追踪以未来 v1.0 主版本升级为目标的**架构性**变更。这些不是增量
-补丁；每一个都是公开 API 破坏候选，需要弃用窗口期。作为动态文档维护——
-当 v0.3.x 补丁系列暴露结构性痛点时，在此添加候选；当某个候选落地时，
-在此移除。
+此文件保留 pre-v1 重构周期的设计提案与落地记录。
+记录中的版本名、代码草案、兼容政策、测试数量和测量描述的是当时的情况，
+不是发布时间表或当前 API 规范。
+
+## 当前契约
+
+自定义节点实现 `GraphNode::run(NodeInput) -> asio::awaitable<NodeOutput>`。
+`RunContext` 传递每次运行的元数据，`CancelToken::fork()` 提供子级取消。
+Provider 暴露 `get_name()`、`family()` 和 `prepare()`；共同 invoke/dispatch 路径
+消耗拥有所有权的 request 和 move-only prepared handle，并保留不可变 SDK Outcome。
+旧 `CompletionProvider`、`CompletionRequest`、`CompletionParams`、`ChatCompletion`、
+`complete*`、`OpenAIProvider` 和 `RateLimitedProvider` 均已删除，没有兼容 shim。
+下方七月的纯新增兼容政策已被此切换取代。
+
+即使禁用 LLM，Core 也需要外部 `SchemaProvider::runtime`。
+NeoGraph `0.13.0` 使用 alpha SDK `0.1.0`，interface revision/shared generation 4；consumer 必须以匹配的 header/library 重建。Native archive 保持 v3 / `spna3`，portable JSON 保持 v2。当前集成验证尚未完成。
+Python 使用类型化 request/prepared/Outcome 对象，`ChatMessage` 单独保留为 graph 便捷类型。
+当前 API 见 [C++ reference](docs/reference-en.md) 和 [Python binding](docs/python-binding.md)。
+历史 Linux/ARM64/WASM 观测不能验证这些平台上的当前 SDK runtime，也不能预测 application 性能。
 
 ## 为什么有这个文件
 
@@ -325,7 +340,7 @@ PR #12 + 等效性测试解决。#16 现在是编译时守卫（v0.8.0 `api.h`�
 | 3 | 分层 CancelToken | **已在 v0.4 落地**（`CancelToken::fork()` + 级联） | v0.3.2 钩子、v0.3.2 emit-vs-bind |
 | 4 | 自演化图运行时钩子 | 研究 | TODO_v0.3.md #8 |
 | 5 | pgvector RAG 示例 | Cookbook | TODO_v0.3.md #9 |
-| 6 | Provider 单一分发 | **已落地，未移除。** `CompletionProvider::do_invoke()` 是推荐的一重写路径。现有 `Provider::complete*` 方法继续受支持；弃用警告已被撤回，没有移除计划。 | #4（在 v0.7 关闭）、#5（兼容性策略）、模式由 #36 加强 |
+| 6 | Provider 单一分发 | **已被类型化 prepare/dispatch 取代。** 旧 completion API 与纯新增 adapter 已删除，无 shim；见上方当前契约。 | #4（在 v0.7 关闭）、#5（历史兼容政策）、模式由 #36 加强 |
 
 ---
 
@@ -730,6 +745,9 @@ TODO_v0.3.md 项目 #9 — 确认为 Cookbook 材料（无引擎缺口），推�
 
 ## 候选 6 — Provider 单一分发
 
+本节记录旧 completion API 提案。代码草案与七月兼容政策均为历史，
+已被上方类型化 prepare/dispatch 切换取代。
+
 ### 症状
 
 `Provider` 暴露四个虚方法（比 GraphNode 的八个少一个维度）：
@@ -881,17 +899,20 @@ Google 正在研究 gRPC 作为原生 MCP 传输。gRPC 几乎与 NeoGraph 的 4
 在此环境（WSL2，大量 Windows PATH 泄漏）中启用 grpc++ ON 构建时捕获到
 两种污染。它们不会在干净的 Linux 主机 / CI 上出现，但 WSL 开发人员会遇到：
 
+下方路径用 `WINDOWS_MOUNT_ROOT`、`WINDOWS_ANACONDA_PREFIX`、`WINDOWS_GTK_PREFIX` 环境变量
+分别表示 Windows mount root、Anaconda 安装 prefix 与 GTK 安装 prefix。
+
   1. **anaconda re2** — 当 `gRPCConfig.cmake` 执行 `find_package(re2)` 时，
      如果不存在系统 re2 cmake 配置（未安装 apt `libre2-dev`），它从
-     PATH 中拾取 `/mnt/c/ProgramData/anaconda3/Library/lib/cmake/re2/
-     re2Targets.cmake`（Windows）并在 `set_target_properties` 中出错。
-     修复：`-DCMAKE_IGNORE_PREFIX_PATH=/mnt/c;…` + `-DCMAKE_IGNORE_PATH=…
-     /anaconda3/Library/lib/cmake;…` → grpc 回退到系统 pkg-config re2
+     PATH 中拾取 `$WINDOWS_ANACONDA_PREFIX/Library/lib/cmake/re2/re2Targets.cmake`
+     （Windows）并在 `set_target_properties` 中出错。
+     修复：`-DCMAKE_IGNORE_PREFIX_PATH="$WINDOWS_MOUNT_ROOT;…"` +
+     `-DCMAKE_IGNORE_PATH="$WINDOWS_ANACONDA_PREFIX/Library/lib/cmake;…"` → grpc 回退到系统 pkg-config re2
      （"Found RE2 via pkg-config"）。
   2. **ZLIB include** — `FindZLIB` 从系统（`/usr/lib/.../libz.so`）拾取
-     库，但从 PATH 中的 `/mnt/c/gtk/include`（Windows zlib.h）拾取
-     `ZLIB_INCLUDE_DIR` → `-isystem /mnt/c/gtk/include` 泄漏到每个
-     grpc 链接的目标 → `/mnt/c/gtk/include/libintl.h` 将 `printf` 重写
+     库，但从 PATH 中的 `$WINDOWS_GTK_PREFIX/include`（Windows zlib.h）拾取
+     `ZLIB_INCLUDE_DIR` → `-isystem "$WINDOWS_GTK_PREFIX/include"` 泄漏到每个
+     grpc 链接的目标 → `$WINDOWS_GTK_PREFIX/include/libintl.h` 将 `printf` 重写
      为 `libintl_printf` 宏 → `std::printf` 编译错误。修复：显式设置
      `-DZLIB_INCLUDE_DIR=/usr/include
      -DZLIB_LIBRARY=/usr/lib/x86_64-linux-gnu/libz.so`。
@@ -902,7 +923,7 @@ Google 正在研究 gRPC 作为原生 MCP 传输。gRPC 几乎与 NeoGraph 的 4
 
 ### NexaGraph 前身分析 — gRPC-MCP 的真正 ROI 是检查点
 
-NeoGraph 的前身 NexaGraph（`/root/Coding/NexaGraph`）早已实现并运行了
+NeoGraph 的前身 NexaGraph 早已实现并运行了
 gRPC-MCP。调查发现（Explore，2026-05-16）：
 
 - **实现内容**：`proto/rag_service.proto`（RAGService，11 个一元 RPC —
@@ -1011,15 +1032,13 @@ gRPC 默认 TCP_NODELAY 开启 → 不公平。将"gRPC 快 70 倍"照单全收�
 - **大 payload 工具调用（~12 KB+，嵌入 / RAG 块返回）：gRPC ~1.5×。**
   NexaGraph 提到的领域，但 1.5× 而非 70×。
 - Payload 压缩仍然是 0（JSON-in-proto，与检查点测量一致）。
-- 环回天花板——在真实网络上，RTT 对两侧同等增加，比率进一步向 1 收敛。
-  1.5× 是最佳情况。
+- 这些是 loopback 结果。remote RTT、concurrency、payload 形状和 connection 管理需要单独测量；
+  1.5× 不是上限。
 
 **候选 7 最终裁决：**
-- gRPC 的 ROI 是 (1) **多语言边车 / 远程类型化 RPC**（语言边界），
-  (2) **大 payload 工具 / 检查点上的 ~1.5×**。通用工具调用的大规模
-  迁移没有价值（平手 + 标准 #966 尚未确定）。
-- MCP-over-gRPC 传输：**搁置，已证实。**"通用 MCP 工具调用变快"
-  被测量推翻（平手）。仅在标准确定后，且仅对嵌入密集型工具有意义。
+- gRPC 提供多语言 sidecar/remote typed-RPC 边界。测得的约 1.5× 差异仅适用于测试的
+  12 KB tool payload，不代表所有大 payload 或 checkpoint。
+- 当时记录推迟了 MCP-over-gRPC 采用。小型 loopback workload 的平手不能反证其他 workload/transport 的收益。
 - Nagle 事件 → EDDSkills SKILL 候选 `bench-shock-number-nagle-first`
   （令人震惊的传输基准数字 = 首先怀疑 TCP_NODELAY / Nagle /
   delayed-ACK；`perf-regression-bench-bisect` 的表亲）。
@@ -1036,21 +1055,12 @@ gRPC 默认 TCP_NODELAY 开启 → 不公平。将"gRPC 快 70 倍"照单全收�
 | protobuf 序列化+解析 | **1.75** |
 | → yyjson / protobuf | **22.3× 更慢** |
 
-**用户完全正确。** protobuf 在结构上是快 22 倍的编解码器。但在往返中，
-差异稀释为 12 KB 时的 1.5×——序列化差距 ~37 µs 仅占完整往返 692–1096 µs
-的一小部分（其余是套接字 I/O / 系统调用 / HTTP 帧）。**量化证据表明工具
-调用的热路径由套接字 I/O 主导，而非编解码器。**
+codec-only 实验中，protobuf ser+parse 为 1.75 µs，yyjson parse+dump 为 38.9 µs，
+测试表示方式的比率为 22.3×。上方完整 transport 测量的差异更小。
+framing 与 I/O 工作不同，因此 codec 表本身不能隔离往返差异的原因。
 
-关键含义——**NeoGraph 的 JSON-RPC 与 gRPC 打平归功于 yyjson，而非 JSON-RPC
-协议快。** 使用典型技术栈（Python 的 `json` 比 yyjson 慢约 50×，对于 12 KB
-约 2 ms），编解码器主导往返 → 在那里 gRPC 结构上占主导。只有 NeoGraph 使用
-yyjson，因此避免了该陷阱。
-
-→ 这是一个隐藏的卖点，也是搁置候选 7 的*最终*理由："其他框架有 JSON
-解析瓶颈，因此 gRPC 传输对它们至关重要，但 NeoGraph 的 MCP / JSON-RPC
-不是，因为有 yyjson。" 具体而言，对 NeoGraph，MCP-over-gRPC 的 ROI 甚至
-更低（编解码器优势已被 yyjson 抵消）。gRPC 仅用于多语言 / 远程边界 +
-大 payload 上的 ~1.5× 目的——已证实。
+这些测量没有比较 Python `json`，不能建立普遍 codec 比率，也不证明 yyjson 为 NeoGraph 独有。
+应按所需 RPC semantics 选择 transport，并测量目标 payload/deployment。
 
 ### NexaGraph 二次收获 — 历史压缩 + GrpcRemoteTool（2026-05-16）
 
@@ -1070,7 +1080,7 @@ NeoGraph 的设计祖先，因此它不是"移植"目标。）
    - `sanitize_tool_calls(messages&)` — 一项 NeoGraph **完全缺失**的防御：
      两遍移除由截断破坏的 OpenAI tool-pairs（有 tool_call 无响应的
      assistant / 有 tool 消息无调用的响应），幂等。`compact_history` 在
-     内部将其应用于输出 → 压缩结果永远不产生 400。
+     内部将其应用于输出，移除这些 orphan tool pair，但不能保证 provider 接受每个 compacted request。
    - `estimate_tokens` — 保守的 ~3 chars/tok 估计（混合 KO / EN）。
    - 示例 56 `history_compaction`（离线 MockProvider，无需密钥）—
      sanitize 3→1、compact 29 msgs/975 tok → 6 msgs/208 tok、
@@ -1089,7 +1099,7 @@ NeoGraph 的设计祖先，因此它不是"移植"目标。）
    **gRPC ROI #1（多语言远程类型化 RPC）的消费者侧实现** — 从 agent 的
    视角，进程边界工具在调用点与本地工具无法区分。
 
-### 剩余（仍待处理）
+### 2026-05-16 记录时的剩余工作
 
   - 向 CI 添加 `grpc-build` 作业（apt deps + ON 构建 + `example_grpc_client`
     / `server` 冒烟——在干净的 ubuntu runner 上，上述 WSL 陷阱不适用）。

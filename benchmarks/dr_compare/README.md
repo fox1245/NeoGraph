@@ -1,98 +1,63 @@
-# dr_compare — NeoGraph vs LangGraph deep-research bench
+# dr_compare: deep-research orchestration comparison
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-Two implementations of the same deep-research workflow (router → plan →
-fan-out 5 researchers via Send → synthesize), one per engine. Same
-prompts, same model, same Crawl4AI search, same Postgres checkpoint
-backend (or in-memory). Differences are isolated to the engines + their
-HTTP transport.
+The runners implement router → plan → researcher Send branches → synthesis with matching prompts and model selection. Their engines, bindings, clients, and checkpoint implementations differ, so end-to-end timing does not isolate engine cost or transport alone. The April 2026 findings below are preserved historical evidence, not a rerun of the current cutover.
 
-## Files
+## Files and dependencies
 
-- `dr_neograph.py` — NeoGraph runner. Env-driven knobs (see below).
-- `dr_langgraph.py` — LangGraph equivalent. Sync `def` nodes + sync
-  `app.invoke()` for parity with `dr_neograph.py`.
-- `bench.py` — real-LLM harness. Warmup + alternating measure +
-  percentiles.
-- `bench_mock.py` — engine-throughput harness with mocked LLM. Modules
-  pre-loaded once, iters reuse the compiled engines.
-- `mem_probe.py` — worker scaling and concurrent fan-out RSS comparison.
-- `mem_prod_stack.py` — production-stack memory comparison.
-- `sweep.sh` — runs `bench_mock.py` across `(FANOUT, LLM_MOCK_MS)`
-  variants.
-- `_run_single.py` — one-shot runner. Used for wire/strace probes.
+`dr_neograph.py`, `dr_langgraph.py`, `bench.py`, `bench_mock.py`, `mem_probe.py`, `mem_prod_stack.py`, `sweep.sh`, `_run_single.py` cover real calls, plain-text mock workloads, memory probes, sweeps, and one-shot diagnosis. Install a wheel matching the current source via the [Python binding guide](../../docs/python-binding.md); an old wheel with `CompletionParams`/`OpenAIProvider` is not the current API. Source builds require the external SchemaProvider SDK even for Core.
+NeoGraph `0.13.0` requires a wheel/native build matching alpha SDK `0.1.0`,
+interface revision/shared generation 4. Current integrated validation is pending.
+This comparison runner is separate from the built-in Deep Research recovery path.
 
-The memory probes require [psutil](https://github.com/giampaolo/psutil),
-installed as documented by the project:
+The workflow imports requests, LangGraph, and langchain-openai; memory probes use psutil. PostgreSQL mode also needs the appropriate checkpoint packages and a running database. `mem_prod_stack.py` imports additional web/database/observability packages for its named stacks; it is not a bare-engine-only RSS probe.
 
-```sh
-python -m pip install psutil
-```
+## Current environment controls
 
-## Env knobs
-
-| Var | Default | Purpose |
+| Variable | Default | Purpose |
 |---|---|---|
-| `LLM_MOCK_MS` | -1 (real) | Replace LLM with `time.sleep(MS)`. >=0 enables mock. |
-| `MOCK_SEARCH` | "0" | Skip Crawl4AI; return canned evidence. |
-| `FANOUT` | 5 | Number of researcher Sends. |
-| `USE_INMEMORY_CP` | "0" | Use in-memory checkpoint (ignore PG_DSN). |
-| `NG_TRANSPORT` | `ws-responses` | NG only: `ws-responses` (WebSocket Responses) or `http-chat` (`/v1/chat/completions`). |
-| `NG_WORKER_COUNT` | "4" | NG only: thread pool for Send fan-out parallelism. |
+| `LLM_MOCK_MS` | `-1` | Real calls below zero; >=0 is plain-text node work with sleep, no Provider or outcomes. |
+| `MOCK_SEARCH` | `0` | 1 skips Crawl4AI and returns canned evidence. |
+| `FANOUT` | `5` | Researcher branch count/limit. |
+| `USE_INMEMORY_CP` | `0` | 1 selects in-memory checkpoints; mock mode also selects them. |
+| `NG_TRANSPORT` | `http-chat` | NG: http-chat or http-responses. No WebSocket; Responses changes wire API. |
+| `NG_WORKER_COUNT` | `4` | NG worker count for fan-out. |
+| `DR_MODEL` | `gpt-5.4-mini` | Explicit model for real calls on both sides. |
+| `NEOGRAPH_PG_DSN` | `empty` | NG PostgreSQL DSN; without one, falls back to in-memory. |
+| `LANGGRAPH_PG_DSN` | `NEOGRAPH_PG_DSN` | LG PostgreSQL DSN override. |
+| `CRAWL4AI_URL` | `empty` | Search service; no service means search unavailable unless mocked. |
 
-## Findings (2026-04-26)
+`OPENAI_API_BASE` selects an admitted origin/gateway prefix for real calls; `NG_PROVIDER_DESCRIPTOR` can supply a full descriptor on the NeoGraph side. Credentials and custom CA belong in runtime options (`OPENAI_API_KEY`, `NG_EXAMPLE_CA_FILE`), not descriptor data. The default NG route is HTTP Chat, matching the LG Chat wire API. HTTP Responses deliberately compares a different API. HTTP/2 availability depends on libcurl and the peer; these runners do not prove multiplexing or a fixed connection count.
 
-1. **Pure engine throughput (mocked LLM, FANOUT=5)** — NeoGraph 1.0ms
-   median vs LangGraph 5.9ms. NG is **5.9× faster** at zero LLM cost.
-2. **Real LLM bench** — first round had NG p50 23.90s (sd 5.90), LG
-   21.95s (sd 1.23). LG looked ~10% faster.
-3. **Wire diagnosis** — pcap on WSL2 lied (BPF drops most packets via
-   HyperV vswitch). `strace -e trace=connect` showed NG doing 21
-   connect() syscalls per 7-LLM-call run — fresh TCP+TLS every time.
-4. **Root cause** — `SchemaProvider::complete_async` used the free
-   `async::async_post()` (closes socket per call) instead of the
-   already-existing `async::ConnPool` (HTTP/1.1 keep-alive).
-   `run_sync`'s per-call throw-away io_context made the obvious "pool
-   inside the provider" wiring unsafe — but a long-lived background
-   io_context owned by the provider works.
-5. **Fix (commit 6da4810 / bc2ab4f)** — SchemaProvider + OpenAIProvider
-   now hold their own io_context + worker thread + ConnPool. After
-   fix, NG p90 dropped 35.34s → 25.28s (-10s), sd 5.90→1.28
-   (4.6× more stable). Median ~unchanged because parallel Send fan-out
-   still needs N TCP conns on HTTP/1.1.
-6. **Remaining gap** — LG's httpx supports HTTP/2, multiplexing N
-   parallel streams over a single TCP. Closing this gap requires NG
-   to add HTTP/2 client support (httplib is HTTP/1.1 only).
-7. **Worker pool ceiling** — `set_worker_count(N)` caps Python-node
-   fan-out concurrency. Bench code's `set_worker_count(4)` was a real
-   ceiling; `NG_WORKER_COUNT=50` flips NG sync ahead of LG asyncio
-   (307ms vs 711ms at FANOUT=50, LLM=100ms).
+## Historical findings: 2026-04-26
 
-See `feedback_schema_provider_no_pool.md` and
-`feedback_pybind_worker_ceiling.md` in claude memory for the full
-narrative.
+1. Mocked LLM, FANOUT=5: recorded medians were NeoGraph 1.0 ms and LangGraph 5.9 ms (5.9× ratio for that workload).
+2. Initial hosted-model round: NG p50 23.90 s (sd 5.90 s), LG 21.95 s (sd 1.23 s).
+3. The historical connection diagnosis recorded 21 `connect()` syscalls in a seven-model-call NG run. That count alone does not prove 21 TLS sessions, HTTP versions, or payload equivalence.
+4. Historical pooling changes identified as commits `6da4810` / `bc2ab4f` were associated with NG p90 35.34 s → 25.28 s and sd 5.90 s → 1.28 s. Those changes concerned removed provider implementations; current typed SchemaProvider uses the external SDK/libcurl runtime.
+5. A worker-count experiment reported NG 307 ms vs LG asyncio 711 ms at FANOUT=50 and LLM_MOCK_MS=100 with NG_WORKER_COUNT=50. This is a separate workload, not a general server-capacity result.
 
-## Reproducing
+The old claim that NeoGraph still needs HTTP/2 support is obsolete. These recorded timings do not qualify the new SDK, current Python wheel, other platforms, or remote inference speedups. Mock mode measures orchestration and configured sleep only; it creates no provider evidence. Real mode extracts visible text from typed owned outcomes but does not benchmark native replay, portable history export, or provider-report/budget-charge settlement.
 
-Real LLM bench:
+## Running a new cohort
+
+The mock command below avoids hosted calls and persistence. Record source/SDK/wheel revisions, Python and dependency versions, host limits, worker count, warmup, iterations, checkpoint mode, and failure counts alongside new results. Keep historical files unchanged.
+
 ```sh
-set -a && source ../../.env && set +a
-export NEOGRAPH_PG_DSN="postgresql://postgres:test@localhost:5433/neograph"
-export CRAWL4AI_URL="http://localhost:11235"
-export NG_TRANSPORT=http-chat   # apples-to-apples vs LG (both HTTP)
-python bench.py --warmup 2 --iters 5
+# Install a current-cutover wheel using the Python binding build guide first.
+python -m pip install requests langgraph langchain-openai psutil
+cd benchmarks/dr_compare
+LLM_MOCK_MS=0 MOCK_SEARCH=1 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
+  python bench_mock.py --warmup 5 --iters 50
 ```
 
-Engine-throughput sweep:
-```sh
-./sweep.sh   # writes /tmp/sweep.log
-```
+The following hosted-model command may incur charges. Set credentials intentionally; it uses in-memory checkpoints. A PostgreSQL comparison needs matching DSNs, package setup, and a separately recorded durability scope. Neither a syscall trace nor a packet capture alone establishes semantic equivalence or provider billing.
 
-Wire diagnosis (when in doubt about pcap, strace is ground truth):
 ```sh
-strace -f -e trace=connect -o /tmp/ng.log \
-    python _run_single.py neograph
-grep "connect(" /tmp/ng.log | grep -oE 'sin_addr=inet_addr\("[^"]+"\)' \
-    | sort | uniq -c
+# From benchmarks/dr_compare; hosted calls require explicit credentials.
+: "${OPENAI_API_KEY:?Set a hosted key only if you intend paid calls}"
+: "${CRAWL4AI_URL:?Set a running Crawl4AI service}"
+LLM_MOCK_MS=-1 MOCK_SEARCH=0 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
+  python bench.py --warmup 2 --iters 5
 ```

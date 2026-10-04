@@ -2,11 +2,14 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-Measures the per-invocation overhead of NeoGraph against the leading
-Python orchestration frameworks on identically-shaped graphs with **no
-I/O, no sleep, no LLM calls**. The numbers reflect what the engine
-itself costs (node dispatch, state channel writes, reducer calls) — not
-the latency of any simulated work.
+Measures NeoGraph's per-invocation engine overhead against Python orchestration
+frameworks on matched small workloads with no I/O, sleep, or model calls.
+The measurements include node dispatch, state-channel writes, and reducer calls.
+The dated tables retain historical engine labels and dependency versions;
+they do not identify the current package version or qualify the typed provider runtime.
+Current NeoGraph `0.13.0` recipes require alpha SDK `0.1.0`, interface revision/shared
+generation 4, with matching headers and libraries. Current integrated validation
+is pending; the recorded SDK3 cutover and notification cohorts below remain historical.
 
 For Program admission, JavaScript control, and SQLite/PostgreSQL runtime costs,
 see [Measuring Program costs](../docs/PROGRAM_COST_MEASUREMENT.md). That separate
@@ -26,8 +29,8 @@ Frameworks compared:
 
 ## Workloads
 
-All six implementations define the exact same two graphs, compile once
-(where applicable), and invoke them in a hot loop.
+The six implementations port the same two workloads, compile once where
+applicable, and invoke in a hot loop. State and topology adaptations are listed below.
 
 | Id | Shape | State |
 |----|-------|-------|
@@ -36,7 +39,7 @@ All six implementations define the exact same two graphs, compile once
 
 Checkpointing is disabled on every framework.
 
-Two ports required per-framework workload shape translation:
+Three ports required framework-specific workload adaptations:
 
 * **Haystack** has no append reducer — each worker emits on its own
   typed socket and the summarizer sums the list lengths. Same number of
@@ -83,7 +86,9 @@ numbers separate.
 Rightmost two columns show three ratios: vs. v3.0.0 reference / vs. master
 worker=1 default / vs. master auto-worker mode.
 
-The 2026-04-29 re-measurement (above) reproduces the 2026-04-22 reference within ±10 % per row — same machine, same toolchain, same workload. The README's headline claims (130× LangGraph, 600× AutoGen on `seq`) hold on master HEAD.
+The dated `seq` measurements are close: NeoGraph changed from 5.0 to 5.25 µs.
+The `par` measurements differ with execution mode (11.8, 14.4, and 278 µs);
+they do not reproduce every reference row within ±10% or measure current HEAD.
 
 ¹ pydantic-graph `par` is a serial 6-node emulation — it does not
 support fan-out. Not a parallel workload; included for completeness.
@@ -114,11 +119,10 @@ The third argument applies to the `par` engine and accepts `1` (default),
 `auto`, or any positive worker count. Output includes a
 `config\tpar_workers\t...` row so saved results retain their execution mode.
 
-The headline still holds: NeoGraph wins every row of the table by
-8×–600× depending on framework and configuration. The "199× faster
-than LangGraph on `par`" reference was 163× in the 2026-04-29
-worker=1 measurement; auto-worker mode trades microbenchmark overhead
-for real concurrency in blocking or CPU-bound nodes.
+In the dated worker=1 `par` comparison, LangGraph's 2,261.55 µs is
+157.1 times NeoGraph's 14.4 µs. With the engine-owned pool, the ratio is
+8.1 times. Haystack and pydantic-graph are approximately tied with NeoGraph's
+278 µs auto-worker row. These ratios describe this workload and configuration.
 
 ### End-to-end process metrics
 
@@ -186,38 +190,21 @@ because the then-current 2.15.0 API no longer supported the benchmark's
 
 ## What the numbers mean
 
-1. **Per-run engine overhead spans ~29× to ~642× across the Python
-   field.** Haystack is the leanest competitor (DAG with typed
-   sockets, minimal runtime); even so, it costs 28.8× more per seq
-   iter than NeoGraph. At the other end, AutoGen sits at 642× the
-   NeoGraph cost because of its per-run multi-agent state setup.
-2. **NeoGraph 3.0 is a win over 2.0 on both axes.** Collapsing sync
-   and async onto one coroutine path didn't regress engine
-   overhead — the full coroutine machinery (`run_sync` + io_context
-   per call) is under 5 µs in Release builds, versus 2.0's
-   advertised 20.65 µs on the sync Taskflow path.
-3. **Memory footprint favors NeoGraph by an order of magnitude or
-   more.** 4.8 MB (NeoGraph) vs. 35–101 MB across the Python field.
-   On SBC-class targets (Raspberry Pi-class RAM) this is the
-   load-bearing metric — the difference between "runs comfortably" and
-   "run it carefully".
-4. **Parallel fan-out is opt-in in 3.0.** NeoGraph 2.x shipped
-   Taskflow's work-stealing pool as the default. 3.0 ships the
-   coroutine path as default (single-thread dispatch, cheap) and
-   exposes the multi-threaded pool as opt-in via
-   `engine->set_worker_count(N)` — the right default for agent
-   workloads that are I/O-bound (LLM latency dominates) and would
-   otherwise pay thread-creation overhead with no speedup.
+1. The x86_64 reference `seq` rows range from 28.0 times NeoGraph's
+   per-run overhead for Haystack to 625.4 times for AutoGen. These are
+   framework/workload measurements, not isolated explanations of their costs.
+2. The reference whole-process peak RSS is 4.5 MB for NeoGraph and
+   35.1–101.4 MB for the Python implementations. These values include
+   each process's runtime and imports, not a deployed application's memory.
+3. Worker=1 dispatch and an engine-owned thread pool are different execution
+   regimes. Measure both for the intended workload; a no-work fan-out benchmark
+   exposes coordination costs but does not predict model or I/O latency.
 
 ## Caveats — what this bench does NOT measure
 
-* **Real agent workloads.** LLM-dominated pipelines are bottlenecked
-  by provider latency (100ms–10s per call). Engine overhead disappears
-  at that scale. Mental model: NeoGraph 3.0 costs ~5 µs/call,
-  Haystack ~144 µs, LangGraph ~657 µs, LlamaIndex/AutoGen ~2–7 ms —
-  all invisible next to a 500 ms API round trip. This bench matters
-  for non-LLM nodes, dense agent orchestration, and startup-heavy
-  deployments.
+* **Real agent workloads.** No model inference, network request, or tool I/O
+  occurs in the framework comparison. Those costs can dominate an application,
+  so the table does not establish end-to-end agent speedups.
 * **Framework-appropriate workloads.** AutoGen, LlamaIndex, and
   pydantic-graph each optimize for paradigms (multi-agent chat,
   event-driven long-running workflows, state-machine control flow)
@@ -231,13 +218,23 @@ because the then-current 2.15.0 API no longer supported the benchmark's
   and AutoGen import substantial trees).
 * **Fairness.** NeoGraph was built with CMake `-DCMAKE_BUILD_TYPE=Release`
   which resolves to `-O3 -DNDEBUG` on GCC. Every Python framework is
-  stock CPython 3.12 with current pip-installed versions —
-  production-typical deployments, no custom tuning. Historical note:
+  stock CPython 3.12 with the dependency versions recorded for each cohort,
+  without custom tuning. Historical note:
   pre-3.0 versions of this README advertised `-O2` because that was
   what the standalone bench command used; the CMake build has always
   resolved `Release` to `-O3`.
 
 ## Reproduce
+
+Current source builds require the external `SchemaProvider::runtime` package,
+including Core-only benchmarks. CMake 3.20+ selects explicit
+`NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`, then an installed runtime, then the pinned
+public GitHub source archive. `NEOGRAPH_FETCH_SCHEMAPROVIDER` defaults to ON;
+set it OFF for offline builds using an installed package or explicit source.
+The reproduction commands build maintained targets; they do not recreate the
+historical binary or automatically pin the Python versions from the tables.
+An explicit checkout or installed package must provide interface/shared generation 4.
+Save new outputs separately; the historical tables and JSON files are not SDK4 results.
 
 ```bash
 # Build native Core + v1 Program benchmarks (Release is required for
@@ -339,10 +336,15 @@ Versions:  langgraph 1.1.7, haystack-ai 2.27.0, pydantic-graph 1.84.1,
            llama-index-core 0.14.20, autogen-agentchat 0.7.5
 ```
 
-Numbers will vary on your hardware, but the ratios should be stable to
-within ~20%.
+Hardware, runtime versions, workload shape, and worker mode can change both
+latencies and ratios; this document establishes no cross-platform tolerance.
 
 ## Typed provider cutover: actual GraphEngine before/after
+
+The following cutover, final-verification and handoff cohorts were recorded with
+SDK interface/shared generation 3 before the retained-feature integration.
+“Current” and “final” inside those records identify their original cohorts,
+not the current SDK4 release. Metrics, counts and linked datasets are unchanged.
 
 This is a separate **local TLS HTTP/SSE** measurement, not the checkpoint-free Python framework benchmark above and not model inference. The current static Release/GCC13.3/Linux x64 run qualified **16 configurations × 3 fresh processes = 48 records** through production `GraphEngine.llm_call/tool_dispatch`. It covers three common H1 workloads, all five families' buffered/SSE native continuations, and three actual H2 cases. No compiler ran during measurement; no paid API was called.
 
@@ -412,3 +414,24 @@ Values below are the summary's medians of three independent process repetitions,
 | tool SSE | 600.539987 | 35.800113 | 51.429767 | 627.047345 |
 
 Before values remain the original7b47ad43 cohort. Text latency rose and throughput fell; buffered-tool changes are modest; SSE removes the old buffered-path delay. No historical value is recalculated or overwritten. Extended-family/protocol, first-semantic, cancellation, native replay and retained-outcome facts remain in the final summary/raw records; benchmark evidence does not strengthen the paid native-consumption or cryptographic-validation claims.
+
+## Event-driven Provider handoff: matched polling versus coalesced channel
+
+[Measured summary](provider-notification-summary.json):8 configurations per cohort ×3 fresh processes =48 records,4800 measured graph runs,zero failures;5280 warmup/measured outcomes remained valid after provider destruction. GCC13.3 Release static/hardened, native optimization OFF, same local TLS oracle and admitted controls,10 warmups/100 measured runs per process, no simultaneous compiler or paid/model inference. Values are medians of process statistics, not confidence intervals or model token rates. Payload sizes below are fixture text padding;0 still yields a253B response envelope.
+
+| H1 workload | Before p50 ms | After p50 ms | Before graph runs/s | After graph runs/s |
+|---|---:|---:|---:|---:|
+| text256, concurrency1 | 1.302474 | 0.952992 | 738.901074 | 1022.958838 |
+| text0, concurrency1 | 1.286646 | 0.912571 | 761.940993 | 1070.657541 |
+| text4KiB, concurrency1 | 1.387636 | 1.128831 | 709.024147 | 870.631703 |
+| text64KiB, concurrency1 | 4.873767 | 4.144619 | 196.243991 | 240.268946 |
+| text256, peer delay5ms | 6.601920 | 6.425313 | 146.906115 | 155.052016 |
+| text256, concurrency32 | 7.641085 | 6.939675 | 1645.559595 | 1803.087419 |
+| tool buffered, concurrency32 | 30.548201 | 31.348443 | 710.487696 | 692.440963 |
+| tool SSE, concurrency32 | 33.597342 | 38.607118 | 655.586834 | 611.740359 |
+
+Small text p50 fell26.83% and throughput rose38.44%;tool/SSE throughput fell2.54%/6.69%. Earlier per-request native-handle and reuse variants had larger concurrency costs and were rejected. The accepted implementation uses the existing capacity-one concurrent-channel idiom with an allocation-free intrusive shutdown guard, active-drain coalescing and unchanged SDK `join()`/ownership/authority fences. Separate instrumented180-operation cohorts measured SDK publication→drain p50 383.7125→36.4165µs, timer waits298→0 and final notification waits180; these probe numbers are not mixed into the production latency table. Temporary probe code was removed.
+
+Targeted43 regressions and200 ASan/UBSan concurrent publisher/context-teardown rounds passed. A consumer built with only installed SDK public headers/archives completed300 measured SSE tool-loop graph runs/600 HTTP requests and retained330 outcomes after destruction. TSan could not execute here (PIE mapping failure; non-PIE exit139); no TSan race-free claim. Resource peaks are1ms samples. Runtime qualification remains Linux/POSIX, not Windows/macOS/Python or paid-vendor compatibility.
+
+SIMD audit: pinned yyjson0.12.0 deliberately uses scalar/unrolled scanning and packed-word UTF-8 checks, not an optional AVX parser. [Upstream SSE2 PR294 was declined](https://github.com/ibireme/yyjson/pull/294#issuecomment-5159789685). Final benchmark parser symbols contain scalar SSE/copy instructions but no AVX scanning; the separately built SDK `-O3` number helper has packed SIMD, while archive order selects NeoGraph's trailing `-O2` object. Its before/after SHA256 is identical in the summary. Host CPUID/OSXSAVE/XCR0=7 confirmed AVX2 usability, not parser AVX2 use. No ISA/parser tuning was mixed into this A/B; full validation remains Ω(B).

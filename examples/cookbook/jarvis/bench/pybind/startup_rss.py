@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""기동 + RSS 측정 — import 부터 trivial 그래프 compile 까지. 프레시 프로세스.
-argv[1] = neograph | langgraph
+"""기동 + RSS 측정. 각 측정은 새 프로세스에서 실행한다.
+neograph는 import + 심볼 로드, langgraph는 import + 최소 그래프 compile을 측정한다.
+측정 범위가 다르므로 두 결과를 동일 작업의 compile 비용으로 비교하지 않는다.
+argv[1] = neograph | langgraph | langgraph_openai
 """
 import os, resource, sys, time
 
@@ -9,15 +11,6 @@ which = sys.argv[1]
 
 if which == "neograph":
     import neograph_engine as ng
-    # trivial 2-노드 그래프 compile (엔진 초기화 비용 포함)
-    graph = {
-        "name": "t",
-        "channels": {"x": {"reducer": "overwrite"}},
-        "nodes": {"a": {"type": "passthrough_noop"}},
-        "edges": [{"from": "__start__", "to": "a"}, {"from": "a", "to": "__end__"}],
-    }
-    # passthrough 없는 최소: 그냥 엔진 클래스 로드까지가 핵심 비용.
-    # compile 은 커스텀 노드타입 필요하므로 여기선 import+심볼 로드까지 측정.
     _ = ng.GraphEngine, ng.RunConfig, ng.NodeContext
 
 elif which == "langgraph":

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=zh-CN source_sha256=81678ff6d72ad46af392428e631c78ddeae6d31983dbfad94991ded32d3d0406 -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=zh-CN source_sha256=c1f59cee25dec6acb7c278971998594a9bfe75ebfa0beb55a5a8984ea62b0ea1 -->
 # 一致性门控的健全性——一个形式化伴随文档
 
 **Languages:** [English](SOUNDNESS.md) | [한국어](SOUNDNESS.ko.md) | [日本語](SOUNDNESS.ja.md) | [简体中文](SOUNDNESS.zh-CN.md)
@@ -7,20 +7,21 @@
 
 迁移后的 C++ 编写/修复路径构造类型化 `ProviderRequest`、`sp::Message` 历史并消费完整不可变 `sp::Outcome`，保留所有返回的原生消息/部件。文本提取仅用于解析候选 JSON/Python，不替代原生对话历史。编译、解析、初始化反馈追加在这些消息之后。语义修复受各程序尝试上限约束（实时编写三次；Forge 服务器生成两次），不是传输重试或无限演化。
 
-保留私有 OpenRouter 路由 `~deepseek/deepseek-v4-flash-latest`，`zdr: true`、`only: ["morph"]`、`allow_fallbacks: false`：无合格端点则失败，不向其他提供方披露。ZDR 和历史美国端点记录不是驻留或当前可用性保证。实时执行需要获授权的密钥、网络/提供方及付费容量；提示、导出模式、诊断和原生历史会发送至该路由。生成的原生 Python 服务器执行具有独立本地信任边界，不是延期的 Python 提供方绑定。不要公开密钥或私有提示。可空 token 计数不是美元费用，需定价和实际计费用量。
+interface-4 [Forge 源码契约](README.md) 将空 `MaxTokens` 恢复限制为一次双倍 cap 额外调用，
+固定300秒 deadline，保留 outcome/usage。
+不会重试 failure 或 observer/settlement 错误。
 
-当前限定范围的运行证据涵盖实际离线 strict Core 编译、演化及 checkpoint rollback，不验证所有 live/apex/forge/script 变体或 vendor 推理。下文控制台、基准、fuzz 和 live 执行记录仍为历史证据，不是新的类型化迁移测量。一致性 gate 仅建立所声明的结构/效果契约性质，不证明提供方传输、隐私正确性或模型语义真实性。Python provider binding 延期；protocol client 不变。
+保留私有 OpenRouter 路由 `~deepseek/deepseek-v4-flash-latest`，`zdr: true`、`only: ["morph"]`、`allow_fallbacks: false`：无合格端点则失败，不向其他提供方披露。ZDR 和历史美国端点记录不是驻留或当前可用性保证。实时执行需要获授权的密钥、网络/提供方及付费容量；提示、导出模式、诊断和原生历史会发送至该路由。生成的 Python server 执行有独立 local code-execution trust boundary，与 NeoGraph Python provider binding 分开。不要公开密钥或私有提示。可空 token 计数不是美元费用，需定价和实际计费用量。
+
+保留的 interface-3 限定范围运行证据涵盖实际离线 strict Core 编译、演化及 checkpoint rollback，不验证所有 live/apex/forge/script 变体或 vendor 推理。下文控制台、基准、fuzz 和 live 执行记录仍为历史证据，不是 interface-4 测量。一致性 gate 仅建立所声明的结构/效果契约性质，不证明提供方传输、隐私正确性或模型语义真实性。Python provider binding 现遵循类型化 API；验证与这些 C++ 运行分开。
+
 
 这是本 cookbook 中经验执行框架背后的理论。`gate_eval` 在有标签语料库上
 *测量*了一致性门控的健全性；`gate_fuzz` 在数千个突变体上*测量*了它，
 并描绘了它的边界（相对于诚实效果契约是健全的，并为不诚实契约提供运行时后备）。
 本文档在执行框架执行的小步操作语义以及门控所推理的效果格上，*证明*对应的定理。
 
-这是对真实引擎的**忠实抽象**所作的证明：它精确建模了代码实现的
-超级步语义和通道写保护（`src/core/graph_state.cpp`、`src/core/graph_engine.cpp`、
-`src/core/graph_validator.cpp`），但不会逐行机械验证 C++。
-抽象的保真度正由 `gate_eval` 和 `gate_fuzz` 佐证：定理的预测与它们运行的每个案例一致。
-证明 + 实测模型，这正是本项目自我要求的方法。
+证明讨论具备 total reducer、可返回 node body、固定 declared channel 和 total static route 的 abstract machine，排除 node/reducer exception、cancellation、provider/tool failure、resource limit、checkpoint/custody error 和任意生成代码。当前 C++ engine 有这些额外 failure path。所引 source 是 model 依据；历史 corpus 不是 C++ 机械验证，也不证明 model 外的 UB 不存在。
 
 符号为 ASCII：`⊆ ∪ ∩ ∅` 是集合运算； `⟨…⟩`机器配置；
 `↦`映射项； `→`阶跃关系； `⊢ G ok`良构性判断。
@@ -103,11 +104,7 @@
 
 语义可以展示另外两种运行时故障模式，与代码相匹配：
 
-- **悬空路线。** 如果`route`必须沿着边/路线到达名称`m ∉ N ∪
-  {⊥e}`，则调度未定义（悬空引用）。将其建模为`→ ⊥`。
-- **空路由调度。** 如果条件节点`n`有路由图`R(n) = ∅`，
-  调度器取消引用空容器的反向端
-  （`rend()`，UB）。将其建模为`→ ⊥`。
+- **Empty-route dispatch.** conditional node `n` 的 route map `R(n) = ∅` 在 model 中不提供 dispatch target，将其建模为 `→ ⊥`。
 
 ## 4. 门作为良构性判断
 
@@ -204,12 +201,7 @@
 无限或终止的非故障步骤链，在`max_steps`处截断。
 因此它终止或停止，永远不会出现故障。 ∎
 
-关于`(E8)`的注释：屏障活性是防止“失速”掩盖*错误*的原因。安
-不可满足的 AND-上确界（没有静态路径的 `wait_for` 成员）永远不可能
-火，困跑进了一个档位那真是一个僵局。 `(E8)`禁止它，
-因此`⊢ G ok`下的失速反映了真正的循环（受`max_steps`限制），而不是
-结构上死的屏障。进步（非过失）并不取决于此；它
-加深了失速结果的意义。
+`(E8)` 检查 barrier member 的 declared static incoming edge/route，不证明所有 member 都执行。互斥 route 可阻止 AND-join。此证明不确立 barrier liveness，也不区分所有 deadlock 与有意 cycle。abstract model 的 non-fault 不是 termination 保证。
 
 ### 6.4 推论（门的健全性，相对于诚实合约）
 
@@ -217,9 +209,7 @@
 合同是诚实的`(H)`，那么执行不会出错：不写入
 未声明的通道，无悬空路由或空路由 UB。*
 
-这就是执行框架衡量的定理。 `gate_eval`的`validator-error ⟹
-runtime-fault`是其标记语料库上的反证； `gate_fuzz`第1层
-是它的统计阴影：超过 2000 个突变体，`⊢ G ok`图从未出现过错误。
+model 命题是 `gate-pass ⟹ no-modeled-fault`，逆否是 `modeled-fault ⟹ gate-reject`，不是 `gate-reject ⟹ fault`。历史 corpus 只检查具体 reject 案例，不证明所有 reject 必然 fault。保留的 fuzz 记录表示 2000 mutants 中无 pass 后 fault。
 
 ### 6.5 命题（`(H)`是必要的；运行时是后盾）
 

@@ -1,8 +1,10 @@
 # Recursive agents with independent Harness generations
 
+**Languages:** [English](PROGRAM_RECURSIVE_HARNESSES.md) | [한국어](PROGRAM_RECURSIVE_HARNESSES.ko.md) | [日本語](PROGRAM_RECURSIVE_HARNESSES.ja.md) | [简体中文](PROGRAM_RECURSIVE_HARNESSES.zh-CN.md)
+
 The verified scenario runs one logical session as a parent/child/grandchild tree
 under one owner. Each agent has its own ProgramVersion, Core topology, state,
-budget, and lineage. A child can propose the DSL for its own child through the
+budget, and lineage. A child can propose JavaScript for its own child through the
 same host-owned synthesis boundary used by the main orchestrator.
 
 The reference test executes four distinct Core plans: one node in the main
@@ -137,7 +139,7 @@ crosses through the explicit `handoff` JSON, while child relationships remain in
 the durable tree.
 
 The example's replacement bundle is compiled and admitted before the session
-starts. The main and child agents propose their descendant DSL during execution,
+starts. The main and child agents propose their descendant JavaScript during execution,
 and those compilations consume their respective grants. Preparing a newly
 generated self-replacement remains a separate compilation/admission operation;
 the `replace` API itself selects an already-admitted target.

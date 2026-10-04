@@ -51,6 +51,7 @@ void translate_system_error(std::exception_ptr error) {
 } // namespace
 
 void init_provider(py::module_& m);
+void init_openinference(py::module_& m);
 void init_artifact(py::module_& m);
 void init_state(py::module_& m);
 void init_graph(py::module_& m);
@@ -72,17 +73,11 @@ void init_mcp(py::module_& m);
 // BEFORE any other init_* so call sites that use these vectors can
 // resolve the bound class. See opaque_types.h for the rationale.
 //
-// ``py::implicitly_convertible<py::list, …>`` keeps the legacy
-// build-then-assign pattern working: ``params.messages = [m1, m2]``
-// constructs a ChatMessageList from the Python list automatically.
-// The bound class itself supports ``.append()`` etc. with live
-// mutation (closes the v0.4.0 silent no-op trap).
+// Lists convert into the owned vector classes, while mutation of a bound
+// vector property updates its underlying C++ storage directly.
 static void init_opaque_vectors(py::module_& m) {
     py::bind_vector<std::vector<neograph::ChatMessage>>(m, "ChatMessageList",
-        "List of ChatMessage. Behaves like a Python list (append / "
-        "extend / __getitem__ / __setitem__ / __iter__ / __len__) but "
-        "writes pass through to the underlying C++ std::vector live — "
-        "so ``params.messages.append(msg)`` mutates ``params``.");
+        "Live mutable vector of portable graph ChatMessage values.");
     py::implicitly_convertible<py::list, std::vector<neograph::ChatMessage>>();
 
     py::bind_vector<std::vector<neograph::ChatTool>>(m, "ChatToolList",
@@ -108,7 +103,7 @@ PYBIND11_MODULE(_neograph, m) {
         "NeoGraph C++ engine — Python bindings.\n"
         "\n"
         "This module is the C extension; the public Python surface is\n"
-        "the `neograph` package, which re-exports the symbols below.\n";
+        "the `neograph_engine` package, which re-exports the symbols below.\n";
 
     // Version string is injected at compile time via NEOGRAPH_PY_VERSION
     // in bindings/python/CMakeLists.txt, which reads pyproject.toml's
@@ -127,14 +122,10 @@ PYBIND11_MODULE(_neograph, m) {
     // escape non-ASCII bytes into an always-valid diagnostic string.
     py::register_exception_translator(
         &neograph::pybind::translate_system_error);
-#ifdef NEOGRAPH_PYBIND_HAS_LIBCURL
-    m.attr("_HAVE_LIBCURL") = true;
-#else
-    m.attr("_HAVE_LIBCURL") = false;
-#endif
 
     neograph::pybind::init_opaque_vectors(m);
     neograph::pybind::init_provider(m);
+    neograph::pybind::init_openinference(m);
     neograph::pybind::init_state(m);
     neograph::pybind::init_graph(m);
     neograph::pybind::init_node(m);

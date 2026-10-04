@@ -5,7 +5,7 @@ answer a multi-hop question, it generates *intermediate questions*,
 the engine answers each via a sub-LLM call, then the model produces
 the final answer using the intermediate answers as context.
 
-Real LLM via OpenAIProvider. The decomposer node calls the LLM with
+Real LLM via typed SchemaProvider. The decomposer node calls the LLM with
 a prompt that asks it to either (a) emit a follow-up question or
 (b) emit the final answer. The graph loops on `state["next_step"]`.
 
@@ -15,7 +15,7 @@ Run:
     python 12_self_ask.py
 """
 
-from _common import ng, openai_provider
+from _common import ask_text, ng, schema_provider
 
 
 SELF_ASK_SYSTEM = (
@@ -56,14 +56,12 @@ class DecomposeNode(ng.GraphNode):
         scratchpad = input.state.get("scratchpad") or ""
 
         prompt = f"Question: {question}\n{scratchpad}"
-        completion = self._provider.complete(ng.CompletionParams(
-            messages=[
-                ng.ChatMessage(role="system", content=SELF_ASK_SYSTEM),
-                ng.ChatMessage(role="user", content=prompt),
-            ],
-            temperature=0.0,
-        ))
-        text = completion.message.content.strip()
+        completion = ask_text(self._provider, messages=[
+            ng.ChatMessage(role="system", content=SELF_ASK_SYSTEM),
+            ng.ChatMessage(role="user", content=prompt),
+        ],
+        temperature=0.0,)
+        text = completion.strip()
 
         if "Follow up:" in text:
             follow_up = text.split("Follow up:", 1)[1].strip().splitlines()[0]
@@ -101,14 +99,12 @@ class AnswerIntermediateNode(ng.GraphNode):
 
     def run(self, input):
         follow_up = input.state.get("follow_up")
-        completion = self._provider.complete(ng.CompletionParams(
-            messages=[
-                ng.ChatMessage(role="system", content=INTERMEDIATE_SYSTEM),
-                ng.ChatMessage(role="user", content=follow_up),
-            ],
-            temperature=0.0,
-        ))
-        answer = completion.message.content.strip()
+        completion = ask_text(self._provider, messages=[
+            ng.ChatMessage(role="system", content=INTERMEDIATE_SYSTEM),
+            ng.ChatMessage(role="user", content=follow_up),
+        ],
+        temperature=0.0,)
+        answer = completion.strip()
 
         scratchpad = input.state.get("scratchpad") or ""
         scratchpad += f"\nFollow up: {follow_up}\nIntermediate answer: {answer}"
@@ -119,7 +115,7 @@ class AnswerIntermediateNode(ng.GraphNode):
         ]
 
 
-provider = openai_provider()
+provider = schema_provider()
 
 ng.NodeFactory.register_type(
     "decompose",

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/README.md locale=zh-CN source_sha256=8733a2df59553c82a3ada848609ea369b440fcd97dce2c2bc5a5c745eff05a28 -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/README.md locale=zh-CN source_sha256=3985b561c728357e75ec0cab68d2711e19334c47a588c07f2b836c6ce3fa8eb3 -->
 # JARVIS 编排基准测试 — NeoGraph 与 LangGraph 对比
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -9,7 +9,7 @@ C++ 路由器、合成器和专家夹具使用类型化 `ProviderRequest`、`sp:
 
 本地语音是可选项，需要选定的 whisper/Moonshine 模型、ONNX Runtime/Supertonic 资源、miniaudio 和可用的麦克风/扬声器。文本/mock 运行不能证明语音可用。无需云端仅适用于本地/mock。实时请求需要获授权的 `OPENROUTER_API_KEY`、网络与提供方容量，并将提示、对话记忆和附带工具/委派结果发送给 OpenRouter。模型已固定，原生请求设置的 ZDR 不是地域驻留保证。不要将密钥写入日志或版本库。可空 token 用量不是账单金额；费用需要当前端点/模型定价与实际计费用量。
 
-`[jarvis:ttft]` 仅在首个非空 `sp::PartDelta` 且为 `PartKind::Text`、`DeltaChannel::Content` 时发出，不由用量、推理、响应头等事件触发。它表示首次合成文本，不是首次可听见的 TTS 播放。Python REPL/基准协议驱动不变；类型化 Python 提供方绑定延期。当前 [Jarvis CLI 运行证据](../README.zh-CN.md)仅涵盖问候、已持久化的合成记忆 turn 和正常 EOF 退出，不涵盖这些基准轮次。下文所有基准耗时及执行主张仍为历史记录；CLI 运行不验证麦克风、ASR、TTS、pybind 基准或 vendor 推理。
+`[jarvis:ttft]` 仅在首个非空 `sp::PartDelta` 且为 `PartKind::Text`、`DeltaChannel::Content` 时发出，不由用量、推理、响应头等事件触发。它表示首次合成文本，不是首次可听见的 TTS 播放。Python REPL driver 仍为 protocol client；pybind benchmark 使用已迁移类型化 binding，需要单独运行证据。当前 [Jarvis CLI 运行证据](../README.md)仅涵盖问候、已持久化的合成记忆 turn 和正常 EOF 退出，不涵盖这些基准轮次。下文所有基准耗时及执行主张仍为历史记录；CLI 运行不验证麦克风、ASR、TTS、pybind 基准或 vendor 推理。
 
 镜像相同的拓扑(mic→stt→merge→memory→router→4-way→synth/skip→commit→tts)位于NeoGraph(C++ mock构建)和LangGraph(Python孪生 `langgraph_twin.py`)中，在相同约束(`--cpus=2 --memory=2g`)容器内测量。
 
@@ -30,7 +30,7 @@ OPENROUTER_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + OpenRouter
 解读：
 - 图引擎本身在两侧相对于LLM都更便宜（0.4毫秒对比3毫秒）。Groq差异+22毫秒（相对于约19毫秒）是HTTP客户端栈的差异（langchain-openai 的 httpx+pydantic vs asio）。
 - 回合间间隔是**增长型**，随着推理速度的提升而变大——对200毫秒/回合（Cerebras级别/单次调用路径）产生10%以上的差异，对本地小模型（约50毫秒/调用）产生20-30%的差异。
-- 90倍的启动时间、9倍的RSS是**固定缺口**，与推理速度无关——对于边缘常驻·冷启动·多租户场景立即相关（100 JARVIS = <1GB）。
+- 此历史 container 配置的 startup/RSS 比值约90×/9×。不保证 production JARVIS100个的 memory capacity。
 
 ## 端到端轮次——包括真实 MCP 工具往返（2026-07-05）
 
@@ -71,7 +71,7 @@ OPENROUTER_API_KEY=... bash bench/run_bench_proxy.sh
 
 ## 流式TTFT轮次（2026-07-05）
 
-现代LLM服务均采用流式传输，因此基准测试与之匹配：两次合成调用均改为流式（C++ `ProviderMode::Stream` / `sp::Event`、LangGraph `SYNTH_LLM.stream()`），驱动程序测量**发送请求回合 → 第一个合成token**的时间，并带有`[jarvis:ttft]`标记。nginx通过`proxy_buffering off`透传SSE，因此`$upstream_header_time`即为真实首字节。每轮分别记录日志（mv + `nginx -s reopen`）以消除轮次切分的猜测。
+此历史 round 将两个 synthesis call 改为 streaming，使用当时 C++ streaming provider 和 LangGraph `SYNTH_LLM.stream()`；当前 C++ 路径用 `ProviderMode::Stream`/`sp::Event`。driver 以 `[jarvis:ttft]` 测 turn-send → first synthesis text。nginx 的 `proxy_buffering off` 透传 SSE，`$upstream_header_time` 是 first byte。各 round 独立 log(mv + `nginx -s reopen`)区分边界。
 
 |  | 感知TTFT p50 | 完成时间 p50 | 每轮均值/上游 |
 |---|---|---|---|
@@ -79,11 +79,11 @@ OPENROUTER_API_KEY=... bash bench/run_bench_proxy.sh
 | LangGraph | **629ms** | 723ms | 753ms |
 
 - **感知TTFT实质持平（差值 −2ms）。** NeoGraph之前看似较慢的TTFT（800 vs 603）纯粹是供应商分布差异——此次Groq为两者提供了公平的测量窗口（上游726 vs 753），消除了差距。通过复现证实了“NG轮次仅为运气不佳”的怀疑。
-- **完成时间残余值（纯框架差异）得到复现**：NeoGraph 4.1ms vs LangGraph 14.6ms（与之前的代理轮次3.5 vs 14.7相匹配）。框架开销的结论可靠。
+- **历史 completion residual** — NeoGraph4.1ms/LangGraph14.6ms(以前 proxy3.5/14.7)。residual 包含 client serialization、local MCP 和 pipe overhead，不是仅 graph computation 的直接测量。
 - **TTFT残余值在±数十毫秒噪声范围内为0**（甚至出现了负值）。与感知TTFT 625ms相比，上游合计673ms，减法运算中合并两个独立时钟（客户端单调时钟 vs nginx墙钟）的误差（±50ms）大于框架贡献（毫秒级）。即，**在TTFT路径中框架差异低于观测极限**——仅在总残余值/mock中信号才会显现于噪声之上。
-- **流式传输优势**：感知TTFT（631）远小于完成时间（744）——用户能在0.6秒内开始听到回答。确认相比等待完整完成后再输出的非流式传输，感知速度有所提升。
+- **Streaming observation** — 历史 first-synthesis-text 为631ms、completion 为744ms。`[jarvis:ttft]` 是 text marker，不测首个 audible TTS playback 或0.6秒开始听到声音。
 
-摘要：框架纯性能方面NeoGraph更优（总余差·mock，可复现），但感知TTFT在流式传输中持平，且provider分布差异占主导。边缘/多租户场景（启动时间90×·RSS 9×）仍是NeoGraph的真正战场。
+历史 streaming text-marker TTFT 持平。此测量不验证当前 SDK transport、audio latency 或 production tenant capacity。
 
 ## 公平性条件
 

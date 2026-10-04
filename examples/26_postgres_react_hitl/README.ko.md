@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/26_postgres_react_hitl/README.md locale=ko source_sha256=c03d573ec24eaf1dd00c474339be503d57dd52b0c8804806bd3035ff4901192f -->
+<!-- neograph-i18n: source=examples/26_postgres_react_hitl/README.md locale=ko source_sha256=fb347c51a8ebcb9bd157da6854903e0e2a348f5f3672207040849b70a60e57cb -->
 # 예제 26 — HITL을 사용한 Postgres 기반 Deep Research
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -118,7 +118,7 @@ $ docker compose exec postgres psql -U postgres -d neograph -c "
    ```
    docker compose up -d postgres crawl4ai
    ```
-3. BuildKit과 Docker Compose >= 2.17을 사용하고 `SCHEMAPROVIDER_SOURCE`를 실제 SchemaProvider 소스 경로로 설정하세요(기본 `../../../SchemaProvider`, 이 디렉터리 기준). Dockerfile은 named additional context에서 `SchemaProvider::runtime`을 먼저 설치합니다.
+3. BuildKit과 Docker Compose >= 2.17을 사용하고 `SCHEMAPROVIDER_SOURCE`를 실제 SchemaProvider 소스 경로로 설정하세요(기본 `../../../SchemaProvider`, 이 디렉터리 기준). Dockerfile은 named additional context에서 `SchemaProvider::runtime`을 먼저 설치합니다. Linux/POSIX 빌드 호스트를 사용하세요. SchemaProvider는 Core-only 빌드에도 필수이며 이 가이드는 native macOS/Windows provider transport의 검증을 주장하지 않습니다.
 4. `.env`의 `NEOGRAPH_NATIVE_ARCHIVE_OWNER`를 안정적으로 유지하고 한 번 프로비저닝하세요:
    ```
    docker compose run --rm agent init-archive
@@ -129,8 +129,8 @@ $ docker compose exec postgres psql -U postgres -d neograph -c "
 
 완료되면:
 ```
-docker compose down       # PG와 native-history/native-keys 보존
-docker compose down -v    # 세 볼륨 삭제; 기존 native 재개 불가
+docker compose down       # keep PG, native-history and native-keys
+docker compose down -v    # delete all three; old native resume is lost
 ```
 
 ## 바이너리를 직접 실행(에이전트에 docker-compose 사용 안 함)
@@ -144,7 +144,7 @@ cmake -B build -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
   -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_EXAMPLES=ON
 cmake --build build --target example_postgres_react_hitl -j
 
-# 작업 디렉터리의 .env와 archive 경로를 비공개로 유지
+# Load .env privately in the binary's working directory; keep archive paths stable.
 mkdir -m 700 .native-keys
 ./build/example_postgres_react_hitl init-archive
 ./build/example_postgres_react_hitl run "...your query..."
@@ -196,6 +196,21 @@ SELECT blob_data::text FROM neograph_checkpoint_blobs
 - 노드는 "승인"(→ Command(__end__))과 피드백(→ Command(supervisor)에 피드백을 `supervisor_messages`에 추가하고 반복 카운터를 재설정)을 구별합니다. 두 경로 모두 실행을 깨끗하게 종료하므로 PG는 항상 일관된 최신 체크포인트를 보유합니다.
 - PG는 portable 그래프 상태를 보관하고 native 재개에는 보호된 archive와 원래 키도 필요합니다.
 - C++은 typed `ProviderRequest`/이벤트와 완전한 불변 `sp::Outcome`을 사용합니다. 보고서 텍스트는 projection이며 native replay 권한이 아닙니다. 이 문서는 소스 마이그레이션 기록이지 새로운 빌드/테스트/live 검증이 아닙니다.
+
+## 빈 budget 복구와 보고서 품질
+
+supervisor, researcher, compression, final-report 경로는 완료된 빈 `MaxTokens` outcome에
+visible text와 유효/무효 client tool call이 없을 때만 최대 두 번 추가 semantic call을 허용합니다.
+cap은 두 배로 늘되 16,384를 넘지 않으며 research-brief는 이 ladder 밖입니다. 시도마다 새 broker
+ordinal, 원래 bank admission, 보존된 outcome과 usage, 동일한 절대 deadline을 사용합니다.
+명시적 deadline이 없으면 effect 없는 preparation 한 번으로 설정된 deadline을 알아내고
+mediated invoke 전에 handle을 해제한 뒤 고정합니다. 명시적 deadline은 이 단계를 건너뜁니다.
+
+Failure, observer/settlement 오류, 전달된 streaming part는 재시도하지 않습니다. 빈 최종 텍스트는
+human review 전에 오류가 됩니다. 내용이 있는 `MaxTokens` 보고서는 public 투영에서 `Incomplete`를
+표시하고 불변 outcome을 수정하거나 부분 텍스트를 재시도하지 않습니다. 빈 compression이 ladder를
+소진하면 diagnostic을 생성하며 성공한 provider result를 꾸며내지 않습니다.
+이것은 보존된 interface-4 소스 계약이지 새 live 실행이나 durability 증명이 아닙니다.
 
 ## 왜 프론트엔드가 없나요?
 

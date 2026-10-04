@@ -2,247 +2,68 @@
 
 **Languages:** [English](concurrency.md) | [한국어](concurrency.ko.md) | [日本語](concurrency.ja.md) | [简体中文](concurrency.zh-CN.md)
 
-NeoGraph supports two concurrency models out of the box — pick the
-one that fits your hosting pattern:
+## Choosing the executor
 
-* **Thread-per-agent (sync)** — `run()` / `run_stream()` / `resume()`
-  dispatched onto any executor you already use. Safe up to roughly a
-  thousand concurrent agents; ~5 µs engine overhead per call on a
-  Release `-O3 -DNDEBUG` build (the super-step loop routes through
-  `run_sync(execute_graph_async)` so both entry points share one
-  coroutine path).
-* **Coroutine-based async** — `run_async()` / `run_stream_async()` /
-  `resume_async()` returning `asio::awaitable<RunResult>`. One
-  `asio::io_context` hosts thousands of concurrent agents without a
-  thread per run; all Provider / MCP / checkpoint I/O points are
-  non-blocking `co_await` under the hood. Full migration guide in
-  [`ASYNC_GUIDE.md`](ASYNC_GUIDE.md).
+Synchronous `run`, `run_stream` and `resume` block the calling thread while driving the same coroutine implementation as their async peers. A host worker pool can run independent sessions concurrently. The async peers return `asio::awaitable<RunResult>`; drive them on an executor you own. An awaitable does not make arbitrary user code nonblocking.
 
-## Async (Stage 3)
+`EngineConfig::worker_count = 1` is the default and creates no engine-owned fan-out pool. Suspended I/O branches can overlap on one thread; CPU work on that thread serializes. A multithreaded caller executor or an opt-in engine worker pool can run CPU branches on multiple cores. Configure the pool before publishing the engine.
 
 ```cpp
-#include <asio/co_spawn.hpp>
-#include <asio/detached.hpp>
-#include <asio/io_context.hpp>
+#include <neograph/async/run_sync.h>
 
-asio::io_context io;
-for (const auto& user : users) {
-    asio::co_spawn(
-        io,
-        [&, user]() -> asio::awaitable<void> {
-            RunConfig cfg;
-            cfg.thread_id = user.session_id;
-            cfg.input     = {{"messages", user.history}};
-            auto result = co_await engine->run_async(cfg);
-            handle(result);
-        },
-        asio::detached);
-}
-io.run();  // drives all agents on this thread
+EngineConfig options;
+options.node_context = ctx;
+options.checkpoint_store = std::make_shared<InMemoryCheckpointStore>();
+options.worker_count = 4;
+auto engine = GraphEngine::build(def, std::move(options));
+RunConfig run;
+run.thread_id = "session-1";
+run.input = {{"count", 0}};
+auto result = neograph::async::run_sync(engine->run_async(run));
 ```
 
-`engine->run_async()` stays on the caller's executor end-to-end —
-every super-step suspension point (node dispatch, checkpoint I/O,
-parallel fan-out, retry backoff) is a real `co_await`. The three
-50 ms steps above therefore overlap on one io_context thread and the
-wall time lands at ~50 ms, not 3 × 50 ms. One thread, N concurrent
-agents. For CPU-bound fan-out across cores, switch the driver to a
-shared `asio::thread_pool` — that's the pattern in
-[`benchmarks/concurrent/CONCURRENT.md`](../benchmarks/concurrent/CONCURRENT.md)
-where N = 10,000 finishes in 52 ms. Within a single run, the
-`make_parallel_group` fan-out overlaps too: three parallel-fanout
-researchers collapse from 370 ms sequential to 150 ms.
+Example `27_async_concurrent_runs.cpp` shows multiple sessions on one io_context; `05_parallel_fanout.cpp` shows branches within one run. Historical throughput and memory measurements are in [performance deep-dive](performance-deep-dive.md), not guarantees about a safe session-count ceiling.
 
-Custom nodes join the async path by returning an `asio::awaitable`
-from the unified `run(NodeInput)` entry point (introduced in v0.4.0;
-the legacy 8-virtual chain was removed in v0.9.0):
+## Shared-engine rules
 
-```cpp
-class FetchNode : public GraphNode {
-  public:
-    asio::awaitable<NodeOutput>
-    run(NodeInput in) override {
-        auto ex = co_await asio::this_coro::executor;
-        auto res = co_await neograph::async::async_post(ex, /*...*/);
-        // in.ctx.cancel_token, in.state, in.stream_cb available.
-        co_return NodeOutput{ {ChannelWrite{"out", res}} };
-    }
-    std::string get_name() const override { return "fetch"; }
-};
-```
+- Use distinct `thread_id` values for independent sessions. Concurrent executions with the same id have unspecified checkpoint interleaving; serialize at the host when history order matters.
+- Call configuration setters and bind tools before exposing the engine to execution or administration threads. Resizing the worker pool during execution is a hard error.
+- Administration and execution are mutually exclusive on one engine. State/history reads, update and fork reject with `std::logic_error` while any run/resume is active; execution rejects while administration is active. Cancel/drain and await completion before retrying administration.
+- Different engines sharing a store are outside that admission boundary; coordinate them at the host.
+- Node instances are reused across runs. Keep per-run scratch state in channels; custom nodes, providers, tools and stores must be stateless or synchronized. The bundled in-memory stores use mutexes.
 
-Async-shaped tools derive from `AsyncTool`:
+Provider calls own their prepared request and runtime client. Their C++ event views are callback-scoped; copy retained data. Native replay state and accounting authority require authentic custody, not a portable JSON reconstruction. See [the async guide](ASYNC_GUIDE.md).
 
-```cpp
-class FetchTool : public neograph::AsyncTool {
-  public:
-    asio::awaitable<std::string>
-    execute_async(const json& args) override { /* co_await HTTP */ }
-    // sync execute() is final, routes through run_sync automatically.
-};
-```
+## Bounded synchronous admission
 
-See `examples/27_async_concurrent_runs.cpp` for the multi-agent
-pattern and `examples/05_parallel_fanout.cpp` for fan-out within
-one run.
-
-## Sync (thread-per-agent)
-
-NeoGraph does not ship its own async runtime — it exposes synchronous
-`run()` / `run_stream()` / `resume()` and lets you pick the executor.
-A single compiled `GraphEngine` is safe to share across threads that
-invoke `run()` concurrently with **distinct `thread_id`s**, so hosting
-multi-tenant agent workloads is a matter of dispatching onto whatever
-executor you already use.
-
-```cpp
-// One engine, many concurrent sessions — no external runtime required.
-EngineConfig engine_config;
-engine_config.node_context = ctx;
-engine_config.checkpoint_store = std::make_shared<InMemoryCheckpointStore>();
-auto engine = GraphEngine::build(def, std::move(engine_config));
-
-std::vector<std::future<RunResult>> sessions;
-for (const auto& user : users) {
-    sessions.push_back(std::async(std::launch::async, [&engine, user]() {
-        RunConfig cfg;
-        cfg.thread_id = user.session_id;
-        cfg.input = {{"messages", user.history}};
-        return engine->run(cfg);
-    }));
-}
-for (auto& f : sessions) handle(f.get());
-```
-
-Works the same way with an `asio::thread_pool`, a `std::async`-backed
-task system, or your web framework's worker pool — NeoGraph stays out
-of the executor decision. If you need CPU-parallel fan-out *inside*
-a single sync `run()` call (rather than N sync `run()`s on N threads),
-set `EngineConfig::worker_count` before `build()` to install
-an engine-owned `asio::thread_pool` that `run_parallel_async` and the
-multi-Send branch dispatch onto.
-
-## Using the bundled `RequestQueue`
-
-For multi-tenant servers that want a fixed worker pool with
-backpressure (rejecting new sessions when the queue is saturated
-instead of unbounded memory growth), link `neograph::util` and use
-the built-in lock-free queue — no external executor needed:
+Link `neograph::util` to use `RequestQueue`. It uses `moodycamel::ConcurrentQueue`, with idle workers waiting on a condition variable. The pending-slot limit bounds queued sessions, not memory consumed by a running session.
 
 ```cpp
 #include <neograph/util/request_queue.h>
-using namespace neograph::util;
 
-RequestQueue pool(16, 1000);           // 16 workers, max 1000 pending sessions
-EngineConfig engine_config;
-engine_config.node_context = ctx;
-engine_config.checkpoint_store = std::make_shared<InMemoryCheckpointStore>();
-auto engine = GraphEngine::build(def, std::move(engine_config));
-
-std::vector<RunResult>          results(users.size());
-std::vector<std::future<void>>  futs;
-
-for (size_t i = 0; i < users.size(); ++i) {
-    auto [accepted, fut] = pool.submit([&, i]() {
-        RunConfig cfg;
-        cfg.thread_id = users[i].session_id;
-        cfg.input     = {{"messages", users[i].history}};
-        results[i]    = engine->run(cfg);
-    });
-    if (!accepted) {
-        // Backpressure: queue is full — shed load, return 503, retry later, …
-        reject(users[i]);
-        continue;
-    }
-    futs.push_back(std::move(fut));
-}
-
-for (auto& f : futs) f.get();           // propagates exceptions from run()
-
-auto s = pool.stats();
-log("pending={} active={} completed={} rejected={}",
-    s.pending, s.active, s.completed, s.rejected);
+neograph::util::RequestQueue queue(16, 1000);
+auto [accepted, future] = queue.submit([engine, config] {
+    auto result = engine->run(config);
+    handle(result);
+});
+if (future.valid()) future.get();
+if (!accepted) reject_request();
 ```
 
-`submit()` returns `{accepted, std::future<void>}`: capture the
-`RunResult` via a shared output slot (as above) or a per-task
-`std::promise<RunResult>`. The queue is backed by
-`moodycamel::ConcurrentQueue` (lock-free) and workers park on a
-condvar when idle — no busy-spin. Admission atomically reserves a pending
-slot, so concurrent callers cannot exceed `max_queue_size`. A full queue
-returns `{false, invalid_future}` for ordinary backpressure; an internal
-enqueue failure instead returns `{false, valid_future}`, and that future
-throws `std::runtime_error` when observed.
+A full queue returns `accepted=false` and an invalid future. Internal enqueue failure returns `false` with a valid future carrying `std::runtime_error`; observe it rather than treating every rejection as ordinary saturation. Construction requires at least one worker.
 
-Construct the queue with at least one worker. `close()` is idempotent: it
-rejects later submissions, waits for workers, lets a callable already claimed
-by a worker finish, and completes all unclaimed futures with
-`std::runtime_error("RequestQueue is closed")`. A callable may invoke `close()`
-itself to initiate shutdown, but that worker returns rather than waiting for
-itself. The destructor uses the same close path, so accepted futures are never
-silently stranded during teardown.
+`close()` is idempotent. It rejects new submissions, lets claimed work finish and completes unclaimed futures with `std::runtime_error("RequestQueue is closed")`. A worker calling close initiates shutdown without waiting for itself. The destructor uses the same path; accepted futures are not silently stranded.
 
-## Rules for safe concurrent use
+## Checkpoint I/O and Python
 
-- Configuration mutators (`set_retry_policy`, `set_checkpoint_store`,
-  `set_store`, …) must be called **before** any concurrent `run()`. Bind
-  tools in the owned `NodeContext::tools` or `EngineResources::tools` at
-  compile time. Treat the engine as frozen after the first dispatch.
-- Concurrent `run()` calls sharing the **same** `thread_id` do not crash
-  but produce unspecified checkpoint interleaving. Serialize per-session
-  access yourself if you need deterministic history.
-- Custom `GraphNode` subclasses must be **stateless or self-synchronized**.
-  Node instances are owned by the engine and reused across every run on
-  every thread — per-run scratch data belongs in graph channels, not in
-  node member variables.
-- User-supplied `CheckpointStore`, `Store`, `Provider`, and `Tool`
-  implementations must be thread-safe. The bundled `InMemoryCheckpointStore`
-  and `InMemoryStore` already are.
+In-memory checkpoint operations run on the caller under mutexes; SQLite and synchronous custom backends offload blocking work to bounded workers. PostgreSQL uses nonblocking libpq I/O, without pipeline batching. `NEOGRAPH_BUILD_POSTGRES=ON` enables that optional target and requires libpq development files; `OFF` removes that optional dependency only.
 
-## Persistent checkpointing with PostgreSQL
+Python callbacks execute under the GIL. CPU-bound Python nodes/reducers cannot gain parallelism merely by increasing worker_count; native calls can overlap only when their own implementation releases the GIL. Typed provider invoke/dispatch release the GIL and can be called through `asyncio.to_thread`. This does not expose a native provider asyncio awaitable.
 
-For multi-process deployments or when checkpoints must survive a restart,
-link `neograph::postgres` and swap `InMemoryCheckpointStore` for
-`PostgresCheckpointStore`:
+## Runtime dependency and platform qualification
 
-```cpp
-#include <neograph/graph/postgres_checkpoint.h>
+Core always links external `SchemaProvider::runtime`, including `NEOGRAPH_BUILD_LLM=OFF`. Disabling PostgreSQL, LLM nodes or NeoGraph's optional CurlH2Pool does not remove that runtime's libcurl requirement. Supply the matching installed SDK or `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`.
 
-auto store = std::make_shared<PostgresCheckpointStore>(
-    "postgresql://user:pass@host:5432/dbname");
-EngineConfig engine_config;
-engine_config.node_context = ctx;
-engine_config.checkpoint_store = store;
-auto engine = GraphEngine::build(def, std::move(engine_config));
-```
+Source resolution prefers an explicit SDK source directory, then an installed package, then the revision-pinned public archive fallback (`NEOGRAPH_FETCH_SCHEMAPROVIDER=ON` by default). Configure an offline installed-SDK build with that flag `OFF` and its prefix in `CMAKE_PREFIX_PATH`. NeoGraph and SDK source configuration require CMake 3.20+.
 
-The schema mirrors LangGraph's `PostgresSaver` (three tables prefixed
-`neograph_*` to coexist with LangGraph state in the same database) and
-deduplicates channel values by `(thread_id, channel, version)`. A
-1000-step session that touches one channel per super-step costs roughly
-`O(steps + channels)` blob rows instead of `O(steps × channels)`.
-
-**Build flag**: `-DNEOGRAPH_BUILD_POSTGRES=ON` (default). Requires
-`libpq-dev` (apt) / `libpq-devel` (rpm). Set the flag `OFF` to skip
-the dependency entirely.
-
-**Running the integration tests**: spin up a throwaway local PG and
-point the test binary at it:
-
-```bash
-docker run -d --rm --name neograph-pg-test \
-    -e POSTGRES_PASSWORD=test -e POSTGRES_DB=neograph_test \
-    -p 55432:5432 postgres:16-alpine
-
-NEOGRAPH_TEST_POSTGRES_URL='postgresql://postgres:test@localhost:55432/neograph_test' \
-    ctest --test-dir build -R PostgresCheckpoint --output-on-failure
-```
-
-Without the env var the PG tests are `GTEST_SKIP`'d so the rest of
-the suite stays green on machines without a Postgres handy.
-
-Coverage: `tests/test_graph_engine.cpp` contains
-`ConcurrentRunDifferentThreadIds` (16 threads × 25 runs = 400 parallel
-executions, validates per-session output + checkpoint isolation) and
-`ConcurrentRunSameThreadIdNoCrash` (8 threads × 50 runs on one shared
-`thread_id`, validates crash-free behavior).
+The current SDK runtime/archive is qualified on Linux/POSIX. NeoGraph's existing Linux/macOS/Windows package metadata is not evidence that the new dependency works on all those platforms. macOS, Windows and WASM require their own runtime/build qualification; a portable executor API alone does not establish it.

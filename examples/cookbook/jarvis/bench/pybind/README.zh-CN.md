@@ -1,46 +1,34 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/pybind/README.md locale=zh-CN source_sha256=a2b7c4a93e6564fc5ecb36f4c559d811fa6c61325ef48a930e1917817b8359d5 -->
-# Python 模式基准 — NeoGraph-from-Python vs LangGraph
+<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/pybind/README.md locale=zh-CN source_sha256=721dbef65598b467d85737ce2bfa971f2362af4c95c8f724b9310338a1b887e9 -->
+# Python 图基准：NeoGraph 与 LangGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-## 历史基准 — 提供方绑定迁移延期
+这些脚本测量 Python 图执行和进程启动。两者都不调用模型提供方，也不需要 API 密钥。它们不验证类型化提供方请求、事件或结果绑定。下列命令面向已安装当前软件包的环境；本次更新仅对照源码，未执行命令。
 
-下文测量、结论和复现命令描述迁移前 Python 基准，不是已验证的当前构建。类型化 C++ `ProviderRequest`/`sp::Event`/完整不可变 `sp::Outcome` 迁移并未建立 Python 提供方绑定，该工作延期。不要将命令视为可工作的旧提供方 API、当前提供方基准或迁移后执行证据。一般 Python 图测量不能验证提供方接口。Python REPL/协议驱动不变。本次文档更新仅对照源码，未运行构建或基准。
+## 复现
 
-核心问题：**通过 pybind 从 Python 使用 NeoGraph（node body 也在 Python 中）是否会消除独立 C++ 的优势（启动 · RSS · 吞吐量）？**
-
-答案：**不会。** 膨胀不是来自 Python 解释器，而是来自 LangChain import tree。NeoGraph-from-Python = 精简 Python（10MB/30ms）+ 单个编译后的 .so。
-
-## 测量结果（2026-07-05，WSL2，python3.12）
+使用安装了当前 `neograph-engine` wheel 的 Python 环境。比较需要安装 `langgraph`；可选的较大 import 栈需要安装 `langchain-openai`。从仓库根目录运行：
 
 ```bash
-cmake -S . -B build-pybind \
-  -DNEOGRAPH_BUILD_PYBIND=ON -DNEOGRAPH_BUILD_LLM=ON
-cmake --build build-pybind --target _neograph -j
-LD="$PWD/build-pybind"
-PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" \
-  python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py neograph
-PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" \
-  python3 examples/cookbook/jarvis/bench/pybind/perturn.py neograph 5000
+python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py neograph
+python3 examples/cookbook/jarvis/bench/pybind/perturn.py neograph 5000
 python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py langgraph
 python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py langgraph_openai
 python3 examples/cookbook/jarvis/bench/pybind/perturn.py langgraph 5000
 ```
 
-| 指标（全部为 Python 进程） | NeoGraph-from-Python | LangGraph | 优势 |
-|---|---|---|---|
-| 每 turn（5 个 Python-callable nodes，包含 GIL） | **0.38ms · ~2620 turns/s** | 0.93ms · ~1075 | 2.4× |
-| 启动（import→compile） | **40ms** | 462ms（bare）/ 2977ms（+langchain_openai） | 11–73× |
-| RSS | **36MB** | 61MB（bare）/ 561MB（+langchain_openai） | 1.7–15× |
-| （参考）bare python3 RSS | — | 9.9MB | |
+`perturn.py` 预热后运行五节点链。每个 Python 节点将 `v` 通道加一，每次测量运行都从零开始。脚本输出平均值、p50、p90 和每秒运行次数。运行次数须为正数。
 
-## 为什么 Python 模式也很快
+`startup_rss.py` 在新进程中输出启动毫秒数和峰值 RSS。NeoGraph 分支导入软件包并引用三个图符号，不编译图。LangGraph 分支导入软件包并编译单节点图。启动测量覆盖的工作不同，因此时间比率不是图编译加速比。RSS 换算假定 Linux 的 `ru_maxrss` 单位为 KiB；macOS 不能原样使用此换算。Windows 没有 Python 的 `resource` 模块。
 
-- **每 turn**：BSP engine（super-step loop · scheduler · channel reduction · routing · checkpoint overhead）运行在 C++ 中，**只有 node body 是 Python**。LangGraph 的 engine 是纯 Python Pregel。两边在节点执行期间都会持有 GIL，但 NeoGraph 在节点 *之间* 的编排是 C++，所以更快。pybind/GIL 边界成本几乎为零，因此独立 C++ mock（9 nodes 0.38ms）和 Python 5 nodes 实际打平。
-- **启动/RSS**：`import neograph_engine` 只加载单个 .so。LangGraph 的 462ms/61MB 来自 langgraph+langchain-core import tree，加上 langchain_openai 时可达 2977ms/561MB。NeoGraph 没有这样的树。
+## 历史测量
 
-## 含义
+仓库此前报告了以下数值。它们不是当前迁移构建的测量值，本次更新也没有重跑。
 
-从 Python 使用 NeoGraph 可以同时获得 **完整 Python 生态（HF·OpenAI SDK·pandas 等可直接放进 node body）+ 启动 · RSS · 吞吐量优势**。也就是说，“性能属于 C++ standalone，生态属于 Python”这个二分是错的 — Python 模式两者兼得。独立 C++ 更进一步（启动 8ms · RSS 7.5MB），但只在 node 是 C++ 或工具通过 HTTP 调用时成立。
+| 指标 | Python 中的 NeoGraph | LangGraph |
+|---|---|---|
+| 每次运行五个 Python 节点 | 0.38 ms；约 2620 次/s | 0.93 ms；约 1075 次/s |
+| 按上述不同范围测量的启动 | 40 ms | 462 ms；含 `langchain_openai` 时为 2977 ms |
+| 峰值 RSS | 36 MB | 61 MB；含 `langchain_openai` 时为 561 MB |
 
-注意：如果 node import torch/HF，RSS 会被该库主导（engine 成为噪声）。这是 workload 属性，不是框架属性 — 两边都一样。
+NeoGraph 在 C++ 中执行图调度器和通道归约；Python 节点函数体获取 GIL。这些测量没有单独测定 GIL 边界成本，也不能证明其他工作负载的性能。节点内导入 PyTorch 等软件包也会增加进程内存占用。

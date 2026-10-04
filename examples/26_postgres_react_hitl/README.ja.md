@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/26_postgres_react_hitl/README.md locale=ja source_sha256=c03d573ec24eaf1dd00c474339be503d57dd52b0c8804806bd3035ff4901192f -->
+<!-- neograph-i18n: source=examples/26_postgres_react_hitl/README.md locale=ja source_sha256=fb347c51a8ebcb9bd157da6854903e0e2a348f5f3672207040849b70a60e57cb -->
 # 例26 — PostgreSQLバックエンドのDeep Research with HITL
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -118,7 +118,7 @@ $ docker compose exec postgres psql -U postgres -d neograph -c "
    ```
    docker compose up -d postgres crawl4ai
    ```
-3. BuildKitとDocker Compose >= 2.17を使い、`SCHEMAPROVIDER_SOURCE`に実際のSchemaProviderソースを指定します（既定`../../../SchemaProvider`、このディレクトリ基準）。Dockerfileはnamed additional contextから`SchemaProvider::runtime`を先にインストールします。
+3. BuildKitとDocker Compose >= 2.17を使い、`SCHEMAPROVIDER_SOURCE`に実際のSchemaProviderソースを指定します（既定`../../../SchemaProvider`、このディレクトリ基準）。Dockerfileはnamed additional contextから`SchemaProvider::runtime`を先にインストールします。 Linux/POSIX build host を使ってください。SchemaProvider は Core-only build にも必須です。この guide は native macOS/Windows provider transport の検証を主張しません。
 4. `.env`の`NEOGRAPH_NATIVE_ARCHIVE_OWNER`を固定し、一度だけプロビジョニングします：
    ```
    docker compose run --rm agent init-archive
@@ -129,8 +129,8 @@ $ docker compose exec postgres psql -U postgres -d neograph -c "
 
 完了した場合：
 ```
-docker compose down       # PG、native-history、native-keysを保持
-docker compose down -v    # 3つを削除；古いnative再開は失われる
+docker compose down       # keep PG, native-history and native-keys
+docker compose down -v    # delete all three; old native resume is lost
 ```
 
 ## バイナリを直接実行する（エージェントにdocker-composeを使用しない）
@@ -144,7 +144,7 @@ cmake -B build -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
   -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_EXAMPLES=ON
 cmake --build build --target example_postgres_react_hitl -j
 
-# 作業ディレクトリの.envとarchiveパスを非公開で維持
+# Load .env privately in the binary's working directory; keep archive paths stable.
 mkdir -m 700 .native-keys
 ./build/example_postgres_react_hitl init-archive
 ./build/example_postgres_react_hitl run "...your query..."
@@ -196,6 +196,21 @@ SELECT blob_data::text FROM neograph_checkpoint_blobs
 - ノードは「承認」(→ Command(__end__)) とフィードバック (→ Command(supervisor) で、フィードバックが`supervisor_messages`に追加され、イテレーションカウンタがリセットされる) を区別します。どちらの経路も実行をきちんと終了するため、PGは常に一貫した最新のcpを保持します。
 - PGはportableグラフ状態を保存し、native再開には保護されたarchiveと元の鍵も必要です。
 - C++はtyped `ProviderRequest`/イベントと完全な不変`sp::Outcome`を使用します。レポート文字列はprojectionでありnative replay権限ではありません。本書はソース移行の記録で、新しいビルド/テスト/live検証ではありません。
+
+## 空 budget の回復と報告品質
+
+supervisor、researcher、compression、final-report は、完了した空の `MaxTokens` outcome に
+visible text と有効/無効 client tool call がない場合だけ最大二回の追加 semantic call を許可します。
+cap は倍増しても16,384までで、research-brief はこの ladder の対象外です。各試行は新しい broker
+ordinal、元の bank admission、保持した outcome と usage、同じ絶対 deadline を使います。
+明示 deadline がなければ、一回の effect-free preparation で設定済み deadline を取得し、
+mediated invoke 前に handle を解放して固定します。明示 deadline はこの取得を省略します。
+
+Failure、observer/settlement エラー、配信済み streaming part は再試行しません。空の最終テキストは
+human review 前にエラーとなります。内容のある `MaxTokens` 報告は public 投影に `Incomplete` を
+表示し、不変 outcome を変更せず、部分テキストも再試行しません。空の compression が ladder を
+使い切ると diagnostic を生成し、成功した provider result は捏造しません。
+これらは保持された interface-4 ソース契約で、新しい live 実行や durability 証明ではありません。
 
 ## なぜフロントエンドがないのか
 

@@ -1,5 +1,7 @@
 # Child synthesis recovery qualification
 
+**Languages:** [English](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md) | [한국어](PROGRAM_CHILD_SYNTHESIS_RECOVERY.ko.md) | [日本語](PROGRAM_CHILD_SYNTHESIS_RECOVERY.ja.md) | [简体中文](PROGRAM_CHILD_SYNTHESIS_RECOVERY.zh-CN.md)
+
 N3 qualifies the reviewed-source, single-child checkpoint scenario on SQLite and
 PostgreSQL. Recovery now distinguishes a recorded child operation from an
 unclassified external effect, while retaining explicit reconciliation when a

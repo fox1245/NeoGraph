@@ -1,35 +1,21 @@
-<!-- neograph-i18n: source=benchmarks/concurrent/CONCURRENT.md locale=ja source_sha256=5331369d595d05bf67c0748516d7da5980b3dfa70262e2df9c01849f90564b58 -->
-# 同時負荷ベンチマーク — NeoGraph と Python のグラフ フレームワーク
+<!-- neograph-i18n: source=benchmarks/concurrent/CONCURRENT.md locale=ja source_sha256=d1bb14dd5c317c6fc2c6785110f99b2a224b80909a7875d413374ec3bb854f27 -->
+# 同時負荷ベンチマーク: NeoGraphとPythonの過去の結果
 
 **Languages:** [English](CONCURRENT.md) | [한국어](CONCURRENT.ko.md) | [日本語](CONCURRENT.ja.md) | [简体中文](CONCURRENT.zh-CN.md)
 
-**バースト** 負荷の下では、N 個のリクエストが同時に送信され、
-テストはすべてが完了するまで待機します。これらのエンジンはどのようにスケールされますか?
-それぞれのアプローチはどの時点で実行できなくなるのでしょうか?
+2026年4月のカウンターチェーン比較を保存しています。現在のSchemaProvider SDKやPythonバインディングでは再実行していません。「NeoGraph 3.0」は当時の記録の表記であり、現在のパッケージ版ではありません。
 
-このベンチは、CPU と
-6 つのフレームワークにわたって、SBC クラスのターゲットに一致するメモリ制限。
+## ワークロードと計測区間
 
-## 設定
+3ノードがoverwriteカウンターチャネルを増やします（`a → b → c`）。モデル呼び出し、待機、ネットワークI/O、チェックポイント保存はありません。Dockerの1 CPU / 512 MBと2 CPU / 1 GBでN ∈ {10, 100, 1000, 10000}回を投入し、スワップ上限をメモリ上限に合わせます。
 
-- **ワークロード**: 3 ノードの順次カウンター チェーン (`a → b → c`)、それぞれ
-  ノードは単一の状態チャネルをインクリメントします。 I/O、スリープ、LLM はありません。
-- **バースト パターン**: t=0 で N 個のタスクが送信されました。ランナーはみんなを待っている
-  終わらせる。リクエストごとのレイテンシはプロセス内で取得されます。
-- **サンドボックス**: `--cpus` および `--memory` (+ `--memory-swap`) を備えた Docker
-  一致したため、スワップの代わりに OOM が起動します)。マトリックス：
-  - プロファイル **1 CPU / 512 MB** — 「タイト SBC」ターゲット (プライマリ)
-  - プロファイル **2 CPU / 1 GB** — 「快適な SBC」ターゲット
-- **同時実行数**: N ∈ {10, 100, 1000, 10000}
-- **テスト済みエンジン**:
-  - `neograph` (3.0) — `engine->run()` をディスパッチする `hardware_concurrency()` ワーカーを備えた呼び出し側 `asio::thread_pool`。エンジン自体は、デフォルトでシングルスレッド `run_sync` 上のスーパーステップ ループを駆動します。各呼び出しでは独自の io_context が使用されるため、スケジューリングはエンジンではなく呼び出し元プールによって制限されます。
-  - `langgraph-asyncio` / `langgraph-mp` — `asyncio.gather` / `multiprocessing.Pool` の LangGraph 1.1.9。
-  - `haystack-asyncio` / `haystack-mp` — ヘイスタック 2.27.0。 Pipeline.run() は同期です。 asyncio モードは `asyncio.to_thread` でラップします。
-  - `pydantic-asyncio` / `pydantic-mp` — pydantic-graph 1.84.1、非同期ネイティブ。
-  - `llamaindex-asyncio` / `llamaindex-mp` — LlamaIndex ワークフロー 0.14.20、実行ごとに 1 つの新しいワークフロー (実行ごとのイベント バス)。
-  - `autogen-asyncio` / `autogen-mp` — AutoGen GraphFlow 0.7.5、実行ごとに 1 つの新しいフロー (フロー状態は同時安全ではありません)。
+NeoGraphは`max(hardware_concurrency(), 1)`個の呼び出し側`asio::thread_pool`を使います。計測はワーカー内で始まり、P50/P99に呼び出し側キューの待ち時間は含まれません。`total_wall_ms`は投入から全件完了までを含みます。マイクロ秒のP99をサーバーのエンドツーエンドSLOと直接比較しないでください。
 
-## 結果 — 1 CPU / 512 MB プロファイル (非同期モード)
+当時のPython対象はLangGraph 1.1.9、Haystack 2.27.0、pydantic-graph 1.84.1、LlamaIndex Workflow 0.14.20、AutoGen GraphFlow 0.7.5のasyncioとmultiprocessingモードでした。これらは過去の版で、現在のDocker依存解決結果ではありません。
+
+## 過去の結果: 1 CPU / 512 MB
+
+グラフと表はNeoGraphの2026-04-22、Pythonの2026-04-19の記録です。N=10,000の表はエンジンのみで、プロバイダー転送や推論の測定ではありません。欠測値は欠測のままです。
 
 ![Throughput — requests per second](../../docs/images/bench-concurrent-throughput.png)
 
@@ -37,161 +23,48 @@
 
 ![Peak resident memory](../../docs/images/bench-concurrent-rss.png)
 
-このグラフは、6 つのエンジンすべての非同期モードの結果を追跡しています。国会議員
-(マルチプロセッシング) 行は、以下の raw-numbers テーブルにあります — mp
-N 個のワーカー プロセス間で GIL をバイパスしますが、プールで飽和します
-サイズ、パターンはすべての Python フレームワークで同じです。
-
-### 生の数値 (1 CPU / 512 MB、NeoGraph 2026-04-22 on 3.0、Python フィールド 2026-04-19)
-
-2 CPU / 1 GB プロファイルを含むフルマトリックスが含まれています
-[`results.jsonl`](results.jsonl)。 N=10,000 は、
-最も鋭い話:
-
-| N |エンジン + モード |壁 | P50 | P99 |ピーク RSS | OK / エラー |
+| N | Engine + mode | Wall | P50 | P99 | Peak RSS | OK / Err |
 |---|---------------|------|-----|-----|----------|---------|
-| **10,000** | **ネオグラフ 3.0** | **52 ミリ秒** | **4 μs** | **7 μs** | **5.5 MB** | 10000 / 0 |
-| 10,000 | LangGraph 非同期 | 23.4秒 | 20.2秒 | **23.0秒** | 416.2MB | 10000 / 0 |
-| 10,000 | LangGraph mp-プール-7 | 8.0秒 | 737μs | 88.4ミリ秒 | 60.3MB | 10000 / 0 |
-| 10,000 | Haystack 非同期 | 3.1秒 | 1.7秒 | 2.9秒 | 130.7MB | 10000 / 0 |
-| 10,000 | Haystack mp-pool-7 | 2.9秒 | 167μs | 84.7ミリ秒 | 68.1MB | 10000 / 0 |
-| 10,000 | Python グラフの非同期 | 886ミリ秒 | 71μs | **158 μs** | 42.6MB | 10000 / 0 |
-| 10,000 | pydantic グラフ mp プール 7 | 2.8秒 | 253μs | 83.8ミリ秒 | 36.7MB | 10000 / 0 |
-| 10,000 | **LlamaIndex 非同期** | **OOM が殺害されました** | — | — | — | — |
-| 10,000 | LlamaIndex mp プール 7 | 6.6秒 | — | — | 102.5MB | **0 / 10000** |
-| 10,000 | **AutoGen 非同期** | **OOM が殺害されました** | — | — | — | — |
-| 10,000 | AutoGen mp プール 7 | 46.8秒 | 4.6ミリ秒 | 97.1ミリ秒 | 49.1MB | 10000 / 0 |
+| 10,000 | NeoGraph 3.0 (historical label) | 52 ms | 4 µs | 7 µs | 5.5 MB | 10000 / 0 |
+| 10,000 | LangGraph asyncio | 23.4 s | 20.2 s | 23.0 s | 416.2 MB | 10000 / 0 |
+| 10,000 | LangGraph mp-pool-7 | 8.0 s | 737 µs | 88.4 ms | 60.3 MB | 10000 / 0 |
+| 10,000 | Haystack asyncio | 3.1 s | 1.7 s | 2.9 s | 130.7 MB | 10000 / 0 |
+| 10,000 | Haystack mp-pool-7 | 2.9 s | 167 µs | 84.7 ms | 68.1 MB | 10000 / 0 |
+| 10,000 | pydantic-graph asyncio | 886 ms | 71 µs | 158 µs | 42.6 MB | 10000 / 0 |
+| 10,000 | pydantic-graph mp-pool-7 | 2.8 s | 253 µs | 83.8 ms | 36.7 MB | 10000 / 0 |
+| 10,000 | LlamaIndex asyncio | OOM killed | — | — | — | — |
+| 10,000 | LlamaIndex mp-pool-7 | 6.6 s | — | — | 102.5 MB | 0 / 10000 |
+| 10,000 | AutoGen asyncio | OOM killed | — | — | — | — |
+| 10,000 | AutoGen mp-pool-7 | 46.8 s | 4.6 ms | 97.1 ms | 49.1 MB | 10000 / 0 |
 
-2 つのエンジンは、N=10,000 で 512 MB サンドボックスを正常に終了しません。
+全行列は[`results.jsonl`](results.jsonl)に保存されています。当時のLlamaIndexとAutoGenのasyncioセルはOOM終了に分類され、この行のLlamaIndex multiprocessing呼び出しは全件失敗しました。一般的な限界やすべての失敗原因を証明するものではありません。
 
-* **LlamaIndex 非同期** — OOM が強制終了されました。実行中の各ワークフローには、
-  実行ごとのイベントバス + チャネルランタイム。そのうち 10k はオーバーシュートします
-  ウォールクロックが完了する前に cgroup を実行します。
-* **AutoGen 非同期** — OOM が強制終了されました。 10,000 個の同時 GraphFlow インスタンス
-  彼らの参加者の州旅行と同じ上限。
-* **LlamaIndex mp-pool** — 10,000 個のワーカーの呼び出しがすべて失敗しました。ワークフロー
-  インスタンスはワーカー プロセス フォーク間で pickle-safe ではありません。失敗する
-  Nとは関係なく。
+## 解釈の範囲
 
-両方のプロファイルの完全な生の行列は次のとおりです。
-[`results.jsonl`](results.jsonl) (セルごとに 1 つの JSON 行)。
+GIL有効のCPythonはPythonバイトコードを直列化しますが、イベントループ、フレームワーク処理、プロセス直列化、ワーカー数も影響します。一つの原因、asyncio全般の上限、free-threaded Pythonの性能を証明しません。
 
-## 解釈
+DockerのCPU割当は`hardware_concurrency()`に見えるコア数を変えない場合があります。呼び出し側プールとホスト構成を記載してください。ピークRSSはLinuxの`/proc/self/status`を読み、非対応環境の0は測定不可です。multiprocessingのメモリは各ランナーの集計範囲も確認してください。この表から256 MB実験、ベアメタル予測、永続化比較、リモートLLMの処理能力は保証できません。
 
-### スループット: NeoGraph のスケール、すべての Python asyncio ランタイムのプラトー
+## 現在の依存関係と再現状況
 
-NeoGraph の緑色の曲線は、全期間にわたって 22 ～ 25K req/s の範囲に留まります。
-すべての Python 非同期曲線が劣化する間、スイープします。発信者側
-`asio::thread_pool` は `engine->run()` 呼び出しをすべてにディスパッチします
-利用可能なコア。各呼び出しは独自のシングルスレッドを駆動します
-`run_sync` を介したスーパーステップ ループ — cgroup の CPU クォータ境界
-所要時間はあるがスレッド数ではないため、短いタスクがきれいにインターリーブされます
-呼び出し元プール全体で。
+Coreは`NEOGRAPH_BUILD_LLM=OFF`、`NEOGRAPH_USE_LIBCURL=OFF`でも外部`SchemaProvider::runtime`をリンクします。インストール済みSDKは`CMAKE_PREFIX_PATH`、明示的なソースは`NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`で指定します。[ビルド案内](../../README.md)を参照してください。SDKソースにはC++20、設定生成用Python、libcurl ≥7.88、OpenSSL Cryptoが必要です。現在のSDK検証範囲はLinux/POSIXで、過去のDocker結果は他の環境を検証しません。
+NeoGraph `0.13.0` recipe には alpha SDK `0.1.0`、interface revision/shared generation 4 の一致する header/library が必要です。現在の統合検証は未完了です。以前の Linux/POSIX 検証は SDK4 や新しい Docker の合格記録ではありません。
 
-**すべての Python 非同期曲線は停滞または劣化します。** 根本的な原因は次のとおりです。
-LangGraph、Haystack、pydantic-graph、LlamaIndex、および
-AutoGen: 1 つのプロセスに 1 つのイベント ループがあり、GIL が
-すべてのコルーチンが実行する必要がある CPU の作業。 N コルーチン → シリアル化
-実行 → スループットは N では拡張されません。
-
-各フレームワークの mp-pool モードは、フレームワーク全体で GIL をバイパスします。
-`os.cpu_count()` ワーカー プロセス - ただし、そのプール サイズで飽和します
-そしてタスクごとにフォーク + ピクルスのオーバーヘッドを支払います。 ~N=1000 を超えると、プールは
-フレームワークに関係なく、飽和してスループットがプラトーになります。
-
-### テール レイテンシ: ユニバーサル GIL 上限
-
-N=10,000 では、NeoGraph の P99 はマイクロ秒単位にとどまります。すべてのパイソン
-asyncio P99 は N とともに直線的に上昇します。
-GIL キューは、スロットの前に完全な実行が完了するまで待機します。
-
-これは LangGraph 固有の問題ではありません。まったく同じ形状が表示されます
-Haystack (`to_thread` でラップされた同期パイプライン)、LlamaIndex 用
-(非同期イベント駆動型ワークフロー)、pydantic-graph (非同期ステートマシン)、
-AutoGen (非同期マルチエージェント ランタイム)。 Python オーケストレーションがある場合
-単一プロセスの背後にあるフレームワークでは、GIL が上限となります。
-
-P99 の SLO 期待値を持つ現実的なサーバーの場合 (たとえば、「1 未満」)
-リクエストの 99% で 2 秒目)、すべての非同期エンジンは次の時点で中断されます。
-正確なブレークポイントはフレームワークによって異なります - ランタイムが軽い
-(pydantic-graph、LangGraph) 後で中断し、より重いもの (LlamaIndex、
-AutoGen) ははるかに早く壊れますが、それらはすべて壊れます。
-
-### メモリ: asyncio の RSS は、保持されたコルーチン スタックとともに増加します
-
-- **NeoGraph 3.0** は、スイープ全体にわたって 4.2 ～ 5.5 MB の間にとどまります。
-  タスクはすぐに返されます。発信者側 `asio::thread_pool` のみ
-  およびインフライト `run()` ごとに 1 つの io_context が常駐します。
-- **mp プール モード** は、フレームワーク全体で 60 ～ 80 MB 近くにとどまります - ワーカー
-  プールサイズが支配的です。タスクは蓄積されません。
-  1つずつ発送され、返送されます。
-- **asyncio モード** は N とともに直線的に増加します。すべての保留中のコルーチン
-  Python スタック フレーム、クロージャ状態、実行ごとのフレームワークを保持します
-  州。 10,000 個の実行中のコルーチンでは、合計すると数百個になります。
-  重いランタイムの場合は MB。
-
-512 MB のメモリ予算では、一部の asyncio 実行がほぼ限界に達します。
-cgroup の上限は N=10,000 です。 256 MB の cgroup が狭いほど重くなります
-フレームワークは N=1,000 ～
-N=10,000。 NeoGraph には、その予算内でまだ最大 500 MB の余裕があります。
-
-## このベンチが語らないこと
-
-- **大規模なフレームワークが「クラッシュ」することは証明されていません。** ストーリーは次のとおりです。
-  プロセスの停止ではなく、使用不可能なレイテンシへの正常な劣化。で
-  よりタイトな cgroup 以上の N、OOM キルは終了モードになりますが、
-  ここではそれを文書化していないため、フォローアップが必要になります。
-- **LLM I/O はモデル化されていません。** 実際のエージェントのワークロードは 100 ～ 1,000 ミリ秒です。
-  LLM 呼び出しごとに。その待ち時間は、絶対的な観点から見てエンジンギャップを矮小化します -
-  ただし、容量の点では異なります。エンジンが 1,000 req/s しかプッシュできない場合
-  ランタイムを通じて、同時 LLM I/O がいくらあっても役に立ちません。
-- **永続性については説明しません。** チェックポイントはすべてのサーバーで無効になっていました。
-  フレームワーク。有効にすると、比較がストアに移行します
-  これは別のベンチマークです。
-- **ワークロード形状のバイアス。** カウンタ チェーンは NeoGraph ネイティブです。
-  状態のセマンティクス。 Haystack は同期パイプラインを `to_thread` でラップします。
-  AutoGen はカウンターをメッセージコンテンツとしてエンコードしますが、pydantic-graph には何もありません
-  ファンアウト (このベンチでは使用されていませんが、バースト ワークロードに関連します)
-  分岐あり）。各フレームワークは、その仕事をすることを求められているのではなく、
-  その最善の仕事。
-- **WSL2 上の Docker。** `--cpus` は CPU クォータを強制しますが、表示されません
-  コア数、これが NeoGraph の `hardware_concurrency()` がまだ残っている理由です
-  ホスト数を返します。ベアメタルの結果は次のようになります。
-  方向的には同じですが、NeoGraph 側でよりタイトになります (より少ない
-  スレッド、コンテキスト切り替えノイズが減少します)。
-
-## 再現する
+現在のNeoGraph Dockerイメージはcurl/OpenSSL開発依存を入れ、`neograph::core`にリンクする専用CMake消費側をビルドしてSDK依存を継承します。SDK取得はルートCMake方針に従い、パッケージやソースを指定しなければネット接続が必要な場合があります。任意NGネットワークモジュールを無効にしてもSDKは必要です。新Docker測定は主張しません。行列はビルド前に出力を空にするため、新しいパスを指定してください。`status=ok`はJSON抽出成功のみです。`ok`、`err`、終了状態も確認してください。
 
 ```bash
-# From the repo root.
-
-# Build images once:
+# From the repository root. Docker builds use the root SDK acquisition policy.
 docker build -t ng-concurrent -f benchmarks/concurrent/Dockerfile.neograph .
-docker build -t lg-concurrent -f benchmarks/concurrent/Dockerfile.langgraph .
-docker build -t hs-concurrent -f benchmarks/concurrent/Dockerfile.haystack .
-docker build -t pg-concurrent -f benchmarks/concurrent/Dockerfile.pydantic_graph .
-docker build -t li-concurrent -f benchmarks/concurrent/Dockerfile.llamaindex .
-docker build -t ag-concurrent -f benchmarks/concurrent/Dockerfile.autogen .
+docker run --rm --cpus=1 --memory=512m --memory-swap=512m ng-concurrent 10000
 
-# Full matrix (88 cells across 6 engines × 2 modes × 4 concurrencies × 2 profiles,
-# excluding neograph which has no mode split):
-bash benchmarks/concurrent/run_matrix.sh
+# Full matrix; a NEW path preserves the archived results.jsonl.
+bash benchmarks/concurrent/run_matrix.sh benchmarks/concurrent/results-new.jsonl
 
-# Re-render charts from the results:
+# Render the archived default results.jsonl, not the new output.
 node benchmarks/render_concurrent.js
 ```
 
-単一セルのデバッグ実行:
-
-```bash
-docker run --rm --cpus=1 --memory=512m --memory-swap=512m \
-    ng-concurrent 10000
-
-docker run --rm --cpus=1 --memory=512m --memory-swap=512m \
-    li-concurrent async 10000
-```
-
-各コンテナは次の形式の JSON 行を 1 行出力します。
+以下のJSONはフィールド形式の例で、追加の測定結果ではありません。
 
 ```json
 {"engine":"neograph","mode":"threadpool","concurrency":10000,

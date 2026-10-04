@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=docs/QUICKJS_MIGRATION_COMPLETION.md locale=ja source_sha256=11b6f9b3c96b82c4bfc8364c832e675413d7d12bc8689c2ea6119295c4a6d278 -->
+<!-- neograph-i18n: source=docs/QUICKJS_MIGRATION_COMPLETION.md locale=ja source_sha256=9d60815c273f2c94969dbfefe5eb7d6bdbd58075e51e06a7f753a36461e31d0b -->
 # QuickJS移行完了ランブック
 
 **Languages:** [English](QUICKJS_MIGRATION_COMPLETION.md) | [한국어](QUICKJS_MIGRATION_COMPLETION.ko.md) | [日本語](QUICKJS_MIGRATION_COMPLETION.ja.md) | [简体中文](QUICKJS_MIGRATION_COMPLETION.zh-CN.md)
 
-**ステータス:** 提案中のリリース完了手順。残っているゲートがすべて通過したという証拠ではありません。
+**状態:** 2026-08-11 に提案された過去のリリース完了手順です。開始状態の表と順序付き gate は計画記録であり、現在の candidate が gate に合格したという主張ではありません。
 
 **日付:** 2026-08-11
 
@@ -25,9 +25,9 @@
 
 この手順は issue #35（`trusted_direct`）や永続的なPromise スケジューラを開始するものではない。どちらも制限付き永続プロファイルを完了するための前提条件ではなく、どちらもレガシー環境関連の除去にバンドルしてはならない。
 
-## 2. 確認された参照点
+## 2. 過去に検証した開始点
 
-| 領域 | 現在の状態 | 証拠 |
+| 領域 | 2026-08-11 に記録した状態 | 証拠 |
 | --- | --- | --- |
 | Q1–Q6 ベースのランタイムおよびオーサリング切り替え | 実装済み | `quickjs-control-runtime.sdd.yaml` `completion_state`; JavaScript `define()`/ジェネレータ動作は `tests/test_harness_program_cutover.cpp` でカバーされる。 |
 | Core DSL／エラボレータ と Harness DSL オーサリング | 削除・却下 | 親仕様の `authoring_cutover_contract.completed_removals`。Harness 翻訳機 translator はレガシーモードを拒否する。 |
@@ -38,6 +38,12 @@
 | Q7 ソース／ランタイム削除 | 未着手 | `SourceKind::CanonicalJson`、Programドキュメントスキーマ、`ProgramPlan`、レガシーコンパイラのパース、および操作ツリーディスパッチャはソース内に残っている。 |
 
 したがって本リリースはQ7の削除に向けた準備は**できていない**。まずプラットフォーム認定をクローズする必要がある。最終的なドレイン証明は、実際の削除境界において新たに確立されなければならない。
+
+過去の表にある Windows source 制限は、その後 NeoGraph 所有の MSVC build
+overlay に置き換わり、`ProgramSource` runtime identity に固定されています。
+Source 対応は platform 資格検証ではありません。Canonical storage と
+trusted-C++ typed operation infrastructure は残っています。Public JSON
+authoring の除去は、共有 dispatcher や保存 schema 全体の削除ではありません。
 
 ## 3. すべてのステップに適用されるルール
 

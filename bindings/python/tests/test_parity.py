@@ -7,11 +7,6 @@ Three of them, and they are not the same kind of thing:
     of it in Python — not the interface, not the in-memory implementation, not
     the item type, and no way for a node body to reach one.
 
-  - **RateLimitedProvider** is what stands between a demo and something you
-    would leave running. Without it a Python user wraps `engine.run()` in their
-    own retry loop, which retries *the whole graph* rather than the one HTTP
-    call that got a 429.
-
   - **GraphValidator** turns "it threw at compile()" into a report you can read
     before you run anything.
 
@@ -23,7 +18,6 @@ default after compile, override one node, and configure jitter. The topology's
 import time
 
 import neograph_engine as ng
-import neograph_engine.llm as nglm
 import pytest
 
 
@@ -154,65 +148,6 @@ def test_a_node_can_reach_the_store_through_its_context():
     assert counts == [1, 2, 3], (
         "the store did not survive across threads — which is the one thing it "
         "does that a checkpoint does not")
-
-
-# ── RateLimitedProvider: back off on a 429, not on the whole graph ───────────
-
-class _RateLimited(ng.Provider):
-    """Fails with a rate-limit error N times, then succeeds."""
-
-    def __init__(self, fail_times):
-        super().__init__()
-        self.calls = 0
-        self._fail_times = fail_times
-
-    def complete(self, params):
-        self.calls += 1
-        if self.calls <= self._fail_times:
-            raise ng.RateLimitError("429 Too Many Requests", retry_after_seconds=0)
-        completion = ng.ChatCompletion()
-        completion.message = ng.ChatMessage("assistant", "ok")
-        return completion
-
-    def complete_stream(self, params, on_chunk):
-        return self.complete(params)
-
-    def get_name(self):
-        return "rate-limited-stub"
-
-
-def test_the_rate_limited_provider_exists():
-    assert hasattr(nglm, "RateLimitedProvider")
-
-
-def test_it_retries_the_call_and_succeeds():
-    from neograph_engine.llm import RateLimitedProvider
-
-    inner = _RateLimited(fail_times=2)
-    provider = RateLimitedProvider(
-        inner, max_retries=3, default_wait_seconds=0, max_wait_seconds=0)
-
-    params = ng.CompletionParams()
-    params.messages = [ng.ChatMessage("user", "hi")]
-    result = provider.complete(params)
-
-    assert result.message.content == "ok"
-    assert inner.calls == 3, "the wrapper did not retry the failing call"
-
-
-def test_it_gives_up_after_max_retries():
-    from neograph_engine.llm import RateLimitedProvider
-
-    inner = _RateLimited(fail_times=99)
-    provider = RateLimitedProvider(
-        inner, max_retries=2, default_wait_seconds=0, max_wait_seconds=0)
-
-    params = ng.CompletionParams()
-    params.messages = [ng.ChatMessage("user", "hi")]
-    with pytest.raises(Exception):
-        provider.complete(params)
-
-    assert inner.calls == 3, "expected the original call plus two retries"
 
 
 # ── GraphValidator: read the report instead of catching the throw ────────────

@@ -1,57 +1,50 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=eadbd5019a617097b40042dc1f99f69e4ef46d890f562c028484e003fa10f5ce -->
-# 二进制兼容性策略
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=e17b6ed782cd2ef13aa7091cb02ea0f5fa2459df3e1f670ef014fd3c9bc9b07d -->
+# 二进制兼容政策
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
 
-本策略适用于使用已安装 NeoGraph 静态或共享库的 C++ 程序。Python wheel
-会把匹配的扩展和库作为一个整体发布，不得单独替换 wheel 内的库。
-typed provider 切换是强制重新编译边界，取代旧永久兼容计划。NeoGraph 保留 pre-v1 loader 命名，但不表示旧 provider 对象兼容。必须一并安装匹配的 NeoGraph 和 SchemaProvider SDK 头文件/库。SDK interface revision 3 与 `libsp_*.so.3` 是带 out-of-line capability gate 的独立 shared ABI；不稳定 package `0.0.0` 不是稳定发布。当前 SDK runtime/archive 要求 Linux/POSIX。下方 Windows/macOS 命名示例只是 packaging policy，不是新依赖 runtime 的验证证据。Python provider binding/wrapper 已延期、未移植。
+## version 与 loader 契约
 
-## 版本约定
+CMake 从 `pyproject.toml` 读取 NeoGraph version，将公开 compiled library 的 `VERSION` 设为完整 version，`SOVERSION` 设为 major 部分。
 
-NeoGraph 从 `pyproject.toml` 读取项目版本。CMake 把该值设为所有公开
-`neograph_*` 二进制库的 `VERSION`，并把主版本号设为 `SOVERSION`。
-
-| 发布系列 | 加载器 ABI 代次 | 约定 |
+| 发布系列 | loader 代际 | 契约 |
 |---|---:|---|
-| `0.x` | `0` | v1 之前不保证二进制兼容。某次发布可以要求所有 C++ 使用者重新构建，但必须在 changelog 和迁移指南中明确说明边界。 |
-| `1.x` | `1` | 稳定的 v1 ABI。除非另行公布特殊安全修复，minor 和 patch 发布会保持公开虚函数顺序和对象布局。 |
-| `N.x`, `N >= 2` | `N` | 主版本可以引入新的 ABI 代次，并要求 C++ 使用者重新构建。 |
+| `0.x` | `0` | pre-v1；公告的 rebuild 边界可能破坏二进制兼容。 |
+| `1.x` | `1` | 计划中的 stable v1 政策，不表示 v1 已发布。 |
+| `N.x`, `N >= 2` | `N` | major ABI 边界，须 rebuild consumer。 |
 
-`SOVERSION 0` 不表示所有 `0.x` 二进制文件都可以互换。是否必须重新构建，
-以目标版本的发布说明为准。
+`SOVERSION 0` 给 pre-v1 package 一个 loader 名，不表示 layout 可互换。loader 无法拒绝所有不兼容的 `0.x` 替换。阅读目标 release note，一并替换 header/library，在公告的边界 rebuild。不要在运行的 process 中 hot-swap 单个 pre-v1 library。
 
-这是对 v1 之前风险的明确接受：不兼容的 `0.x` 替换仍使用 ABI 代次 0，
-动态加载器无法拒绝它。升级时必须同时替换 NeoGraph 头文件和库，不得跨越
-已公布的重新构建边界只热替换共享库。1.0 会冻结 ABI 代次 1 的对象布局。
+## 必须 rebuild 的边界
 
-## 安装名称
+- pre-`0.9.0` 到 `0.9.0+`：GraphNode 删除了八个旧执行 virtual。custom node 实现 `run(NodeInput)`；SyncGraphNode 是新增 adapter。
+- 后续 pre-v1 bounded-resource、UsageAccumulator 预留、issue #216 变更：公开 layout 增加 accounting、admission、cache、runtime-interposition 状态。使用匹配 header rebuild。
+- typed-provider 切换：用匹配的 NeoGraph/SchemaProvider SDK header/library rebuild 所有 C++ consumer 和 custom provider。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、旧 descriptor interpreter、Responses WebSocket 已删除，没有 alias。
+- event-driven provider dispatch：CancelToken 使用 `std::stop_source` 并公开 `stop_token()`。`cancel`、`fork`、Asio-slot signature 不变不使旧 inline cancel code 兼容。
+- 将来 `1.0.0` 边界把 loader 代际变为 `1`，须 rebuild。generation-1 freeze 是该 release 的政策，不是当前验证结果。
 
-- Linux 安装完整版本文件、`.so.0` 兼容链接和无版本链接名，ELF SONAME
-  为 `libneograph_core.so.0`。
-- macOS 使用对应的 `.dylib` 名称和带主版本号的 install name。
-- Windows 保持 `neograph_core.dll` 这样的无版本后缀名称。
-- 共享库通过 Linux 的 `$ORIGIN` 和 macOS 的 `@loader_path` 查找同目录的
-  `neograph_*` 依赖库。
-- 静态库没有运行时 SONAME；遇到公布的边界时必须重新编译使用者。
+## 公开接口
 
-## 必须重新构建的边界
+Provider 的 subclass hook 为 `get_name`、`family`、`prepare(ProviderRequest)`。通用 `invoke(_async)`、`dispatch(_async)` 消费 owned typed request，返回不可变 `sp::runtime::Result`；不是 virtual completion override 对。
 
-| 升级 | 要求 | 原因 |
-|---|---|---|
-| `0.9.0` 之前版本到 `0.9.0+` | 重新构建所有 C++ 使用者和自定义节点 | `GraphNode` 删除了八个旧虚函数，vtable 已改变。 |
-| `0.11.1` 或更早版本到下一版本 | 重新构建所有 C++ 使用者 | bounded runtime/transport 状态改变了 `NodeCache`、`EngineConfig`、`CompletionParams`、`Agent`、`RequestOptions`、`SseEventParser` 和 provider config 的公开对象布局；`SyncGraphNode` 本身只是新增 API。 |
-| 任意 `0.x` 到 `1.0.0` | 重新构建所有 C++ 使用者 | v1 布局正式冻结，ABI 代次从 0 改为 1。 |
+CheckpointStore 为显式 adapter 迁移保留 legacy layout。sync 默认实现失败，不转入 async override；async 默认实现 offload sync override。新 async-only backend 实现 AsyncCheckpointStore 并用 `adapt_async_checkpoint_store`；sync capability backend 实现 CheckpointStoreCore 并用 `adapt_checkpoint_store`。在公告的 pre-v1 边界 rebuild；adapter 设计不授权只替换 library。
 
-## 公开虚接口
+## SDK 与 Python 边界
 
-- `GraphNode` 唯一正式执行虚函数是 `run(NodeInput)`。
-- `Provider`: `get_name()`, `family()`, `prepare(ProviderRequest)`;
-  `invoke(_async)` / `dispatch(_async)` → `sp::runtime::Result`.
-  这是源码和二进制破坏性变更；所有 C++ 使用者与自定义提供方都必须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter 和 Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为不稳定 `0.0.0`、interface revision 3 / shared ABI 3，使用 out-of-line capability check，不表示稳定发布。当前 runtime/archive 为 Linux/POSIX，不代表 Windows、macOS、WASM runtime 已获验证。Python provider binding/wrapper 已延期，不由本 C++ 变更完成移植。
-- 未来的 `CheckpointStore` 异步迁移也必须遵守本策略。v1 之后应优先新增
-  独立能力接口和适配器，而不是修改稳定的对象布局。
+即使禁用 LLM node，Core 也要求外部 `SchemaProvider::runtime`。选定的 SDK release 是 `0.1.0` alpha，interface revision `4`、shared-library ABI revision `4`，有 out-of-line capability check；不表示 stable interface。一并安装匹配 component。`libsp_*.so.4` 代际与 NeoGraph loader 代际、Python `abi3` wheel tag 都不同。
 
-## 验证
+Interface 4 添加各 family 的 request control，并改变公开 request layout。须一起 rebuild SDK consumer、NeoGraph 和 Python extension；interface-3 header/library 不能与 interface 4 混用。Native archive v3 / `spna3` 和 portable JSON v2 是独立格式，保持不变。历史 interface-3 测量不验证 interface 4。
 
-`scripts/test_find_package.sh` 描述 installed-consumer 检查，文件存在不代表当前已通过。当前 SDK ABI3 全量重建/CTest 已通过 26/26；shared 安装 consumer 实际执行 local HTTP 两 turn typed 请求、tool/native/refusal/known-zero 结果及 mismatch 拒绝。这不代表 NeoGraph、Python、Windows、macOS、WASM 或付费 live-provider 兼容已验证。NeoGraph 集成验证另行报告。
+Python 公开含 prepared handle 与不可变 outcome 的 typed provider 契约，没有 legacy completion shim。extension 与匹配 library 作为一个 wheel 安装。不要单独替换 bundled NeoGraph/SDK library。graph ChatMessage 便利值不替代 native ProviderMessage custody。参见 [Python binding](python-binding.md)。
+
+wheel 包含六个匹配的 SDK runtime shared library，不包含 SDK C++ header 或 CMake package。C++ consumer 须单独安装 SDK。source resolution 依次使用显式 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、installed package、公开 revision-pinned archive fallback。用 installed SDK 离线构建时设 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`，通过 `CMAKE_PREFIX_PATH` 提供 prefix。
+
+## 安装名称与平台限制
+
+Linux shared library 有 versioned file、major-generation SONAME link 和 unversioned linker 名。NeoGraph shared library 对 sibling 依赖使用 `$ORIGIN`。macOS `.dylib`/`@loader_path` 和 Windows 无后缀 `.dll` 是 packaging 规则，不验证新 SDK runtime。static archive 没有 SONAME，也不移除 transitive link 要求。
+
+已记录的 interface-3 SDK runtime/archive 验证覆盖 Linux/POSIX，不验证 interface 4。已有 macOS/Windows metadata 与依赖验证不同，WASM runtime 验证尚未确立。wheel tag 描述 Python/ABI/platform 兼容，不证明所有 runtime 路径已执行。参见 [PyPA tag 规范](https://packaging.python.org/en/latest/specifications/platform-compatibility-tags/)。
+
+## 验证证据
+
+`scripts/test_find_package.sh` 定义 installed-consumer 检查，不是通过结果。有日期的切换前测量保留为[历史证据](VALGRIND.md)。当前 NeoGraph/SDK/Python 结果须在集成 release report 中说明 build、platform、执行路径；本政策不产生新的通过声明。

@@ -4,7 +4,7 @@ Two LLM-driven 'debater' agents argue opposing sides; a third agent
 acts as judge and picks the stronger argument. Uses `Send` to fan
 out the debaters in parallel within a single super-step.
 
-Real LLM via OpenAIProvider. Three custom Python nodes — debater_a,
+Real LLM via typed SchemaProvider. Three custom Python nodes: debater_a,
 debater_b, judge — each with its own system prompt.
 
 Run:
@@ -13,10 +13,10 @@ Run:
     python 13_multi_agent_debate.py
 """
 
-from _common import ng, openai_provider
+from _common import ask_text, ng, schema_provider
 
 
-PROVIDER = openai_provider()
+PROVIDER = schema_provider()
 
 
 def make_persona_node(name, system_prompt):
@@ -34,16 +34,14 @@ def make_persona_node(name, system_prompt):
 
         def run(self, input):
             topic = input.state.get("topic")
-            completion = PROVIDER.complete(ng.CompletionParams(
-                messages=[
-                    ng.ChatMessage(role="system", content=system_prompt),
-                    ng.ChatMessage(role="user",
-                                   content=f"Topic: {topic}\n\nState your case in 2-3 sentences."),
-                ],
-            ))
+            completion = ask_text(PROVIDER, messages=[
+                ng.ChatMessage(role="system", content=system_prompt),
+                ng.ChatMessage(role="user",
+                               content=f"Topic: {topic}\n\nState your case in 2-3 sentences."),
+            ],)
             return [ng.ChannelWrite("arguments", [{
                 "agent": name,
-                "case": completion.message.content.strip(),
+                "case": completion.strip(),
             }])]
 
     return DebaterNode
@@ -85,20 +83,18 @@ class JudgeNode(ng.GraphNode):
             return [ng.ChannelWrite("verdict", "(no arguments to judge)")]
 
         cases = "\n".join(f"- {a['agent']}: {a['case']}" for a in args)
-        completion = PROVIDER.complete(ng.CompletionParams(
-            messages=[
-                ng.ChatMessage(role="system", content=(
-                    "You are an impartial judge. Review the arguments "
-                    "below and pick which one is stronger. Respond with "
-                    "the winner's name on the first line and a one-"
-                    "sentence reason on the second line.")),
-                ng.ChatMessage(role="user", content=(
-                    f"Topic: {topic}\n\nArguments:\n{cases}\n\n"
-                    "Who makes the stronger case?")),
-            ],
-            temperature=0.0,
-        ))
-        return [ng.ChannelWrite("verdict", completion.message.content.strip())]
+        completion = ask_text(PROVIDER, messages=[
+            ng.ChatMessage(role="system", content=(
+                "You are an impartial judge. Review the arguments "
+                "below and pick which one is stronger. Respond with "
+                "the winner's name on the first line and a one-"
+                "sentence reason on the second line.")),
+            ng.ChatMessage(role="user", content=(
+                f"Topic: {topic}\n\nArguments:\n{cases}\n\n"
+                "Who makes the stronger case?")),
+        ],
+        temperature=0.0,)
+        return [ng.ChannelWrite("verdict", completion.strip())]
 
 
 ng.NodeFactory.register_type(

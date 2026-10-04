@@ -5,10 +5,12 @@
 Source for the 15-second promo shown at the top of the repository README
 (`docs/videos/neograph-promo-v3.mp4` + `docs/images/neograph-promo-v3.gif`).
 
-**This is committed on purpose.** The original promo was rendered once
-and the source was never checked in, so a broken connector in the
-ReAct-graph scene could not be fixed without rebuilding from scratch.
-Keep the source here.
+The source is committed so the scenes can be edited and rendered again.
+The generated video illustrates the Program pipeline; it is not an API
+reference, benchmark, or qualification record.
+The `v3` media filenames are asset labels, not SDK interface revisions.
+NeoGraph `0.13.0` uses alpha SDK `0.1.0`, interface/shared generation 4;
+the existing render does not demonstrate that runtime or its pending validation.
 
 ## Scenes (`src/scenes/`)
 
@@ -26,9 +28,12 @@ Timing lives in `src/theme.ts` (`SCENES`, `VIDEO`).
 
 ## Rebuild
 
+Install Node.js/npm and FFmpeg. `package-lock.json` pins the Remotion/React
+dependency tree; `npm ci` installs those recorded dependencies.
+
 ```bash
 cd docs/promo
-npm install
+npm ci
 node render.mjs media          # → out/promo.mp4 (1920x1080, 15s)
 
 # compress + GIF (what ships in docs/):
@@ -46,6 +51,6 @@ frames to `out/` for quick visual diffing without a full encode.
 Notes for headless/sandboxed boxes: the renderer binds a local HTTP
 server — `render.mjs` pins it to `REMOTION_PORT` (default 45678)
 because the default port scan can be blocked. Remotion downloads its
-own Chrome Headless Shell on first run (~108 MB).
+Chrome Headless Shell when it is not already installed; the download size varies.
 
 `node_modules/` and `out/` are gitignored.

@@ -2,8 +2,9 @@
 
 **Languages:** [English](QUICKJS_MIGRATION_COMPLETION.md) | [한국어](QUICKJS_MIGRATION_COMPLETION.ko.md) | [日本語](QUICKJS_MIGRATION_COMPLETION.ja.md) | [简体中文](QUICKJS_MIGRATION_COMPLETION.zh-CN.md)
 
-**Status:** Proposed release-completion procedure. It is not evidence that any
-remaining gate has passed.
+**Status:** Historical release-completion procedure proposed on 2026-08-11.
+Its starting-state table and ordered gates are a planning record, not a claim
+that the current candidate passed those gates.
 
 **Date:** 2026-08-11
 
@@ -32,9 +33,9 @@ This procedure does not start issue #35 (`trusted_direct`) or a durable Promise
 scheduler. Neither is a prerequisite for completing the restricted durable
 profile, and neither may be bundled with legacy removal.
 
-## 2. Verified starting point
+## 2. Historical verified starting point
 
-| Area | Current state | Evidence |
+| Area | State recorded on 2026-08-11 | Evidence |
 | --- | --- | --- |
 | Q1–Q6 base runtime and authoring cutover | Implemented | `quickjs-control-runtime.sdd.yaml` `completion_state`; JavaScript `define()`/generator behavior is covered by `tests/test_harness_program_cutover.cpp`. |
 | Core DSL/elaborator and Harness DSL authoring | Removed/rejected | `authoring_cutover_contract.completed_removals` in the parent spec; the Harness translator rejects legacy modes. |
@@ -47,6 +48,12 @@ profile, and neither may be bundled with legacy removal.
 The release is therefore **not** ready for Q7 deletion. Platform qualification
 must close first; the final drain proof must be freshly established at the
 actual removal boundary.
+
+The Windows source restriction in that historical table has since been replaced
+by a NeoGraph-owned MSVC build overlay, pinned in `ProgramSource` runtime identity.
+Source support is not platform qualification. Retained canonical storage and
+trusted-C++ typed operation infrastructure still exist; removing public JSON
+authoring did not delete every shared dispatcher or stored schema.
 
 ## 3. Rules that apply to every step
 

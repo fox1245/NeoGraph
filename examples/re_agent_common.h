@@ -1,23 +1,7 @@
 // NeoGraph RE Agent — shared building blocks (header-only).
 //
-// Extracted from examples/35_re_agent.cpp during commit A of the
-// parallel fan-out roadmap (plan_re_agent_fanout.md). Both the
-// sequential ReAct example (35) and the upcoming parallel fan-out
-// example (36) reuse these helpers verbatim:
-//
-//   - kSystemPrompt        — the "senior RE analyst" prompt + skip rules.
-//   - make_provider()      — env-driven provider selection
-//                            (OPENROUTER_API_KEY → OpenRouter HTTP/SSE).
-//   - spawn_ghidra_bridge()— stdio MCP bridge spawn + tool discovery
-//                            + LOCAL_TOOL_SUBSET filter.
-//   - extract_final_response()
-//                          — display the final assistant text from the
-//                            full trusted RunResult.native_messages history.
-//
-// Header-only on purpose: keeps commit A a pure refactor (no CMake
-// changes, no new translation unit). All non-trivial functions are
-// `inline`; static-local linkage is fine because each example pulls
-// its own copy.
+// Shared provider setup, Ghidra MCP discovery, tool selection, and final-text
+// extraction for the sequential and parallel RE examples.
 #pragma once
 
 #include <neograph/neograph.h>
@@ -28,6 +12,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -35,7 +20,6 @@
 namespace neograph::re_agent {
 
 // System prompt — workflow + ELF/PE skip rules + final-JSON contract.
-// Verified live on crackme01 (OpenRouter DeepSeek, matched_score 0.92,
 inline constexpr const char* kSystemPrompt = R"(You are a senior binary reverse-engineering analyst.
 The user has loaded a STRIPPED ELF binary into Ghidra. The ghidra-mcp tools below let you
 read decompilation and write back names / comments to the live Ghidra project.
@@ -142,7 +126,8 @@ struct GhidraBridge {
 /// Spawn the ghidra-mcp stdio bridge subprocess and discover its tools.
 ///
 /// Env overrides:
-///   * GHIDRA_MCP_BRIDGE  — path to bridge_mcp_ghidra.py launcher.
+///   * GHIDRA_MCP_BRIDGE  — required path to bridge_mcp_ghidra.py.
+///   * GHIDRA_MCP_PYTHON  — Python executable (default: python3).
 ///   * GHIDRA_SERVER_URL  — http://host:port/ of the plugin server.
 ///   * LOCAL_TOOL_SUBSET  — when set, keep only the 4 RE-relevant
 ///                          tools (list_methods, decompile_function,
@@ -155,13 +140,16 @@ struct GhidraBridge {
 /// is not up — caller should treat that as an actionable error.
 inline GhidraBridge spawn_ghidra_bridge() {
     const char* bridge_path = std::getenv("GHIDRA_MCP_BRIDGE");
-    const char* server_url  = std::getenv("GHIDRA_SERVER_URL");
+    const char* python = std::getenv("GHIDRA_MCP_PYTHON");
+    const char* server_url = std::getenv("GHIDRA_SERVER_URL");
+    if (!bridge_path || !*bridge_path)
+        throw std::invalid_argument(
+            "Set GHIDRA_MCP_BRIDGE to the Ghidra MCP bridge script");
     std::vector<std::string> bridge_argv = {
-        "/root/mcp-servers/GhidraMCP/.venv/bin/python",
-        bridge_path ? bridge_path
-                    : "/root/mcp-servers/GhidraMCP/bridge_mcp_ghidra.py",
+        python && *python ? python : "python3",
+        bridge_path,
         "--ghidra-server",
-        server_url ? server_url : "http://127.0.0.1:18080/",
+        server_url && *server_url ? server_url : "http://127.0.0.1:18080/",
         "--transport", "stdio",
     };
     std::cerr << "[*] Spawning ghidra-mcp stdio bridge...\n";

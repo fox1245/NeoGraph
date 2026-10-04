@@ -39,12 +39,14 @@ These additional modules expose public headers under `include/neograph/{a2a,acp,
 
 **Convenience header:** `#include <neograph/neograph.h>` includes the full core + graph engine API.
 
-SchemaProvider is now a required external C++ dependency even when `NEOGRAPH_BUILD_LLM=OFF`: Core exports its owned typed provider contracts. Install the SDK runtime package and set `SCHEMAPROVIDER_PREFIX` to that install prefix; the configure commands below use `-DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX"`. Alternatively supply an explicit checkout with `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=../SchemaProvider`. Neither a guessed sibling checkout nor the old bundled interpreter is selected automatically. The SDK runtime/archive currently supports Linux/POSIX; there is no dependency-free, no-OpenSSL, native Windows/macOS or WASM runtime promise for this cutover.
+CMake 3.20 or newer is required. SchemaProvider runtime remains mandatory when `NEOGRAPH_BUILD_LLM=OFF` because Core exports owned typed provider contracts. An explicit `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` wins; otherwise CMake prefers an installed `SchemaProvider` runtime package, then downloads the immutable GitHub archive pinned by `cmake/NeoGraphSchemaProvider.cmake` when `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON` (default). For offline builds, install the SDK, set `CMAKE_PREFIX_PATH` to its prefix and pass `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`. CMake does not guess a sibling checkout or select the removed bundled interpreter. The SDK runtime requires its transport dependencies even when NeoGraph's optional HTTP module is disabled. The recorded SDK runtime/archive qualification covers Linux/POSIX. Windows NTFS and macOS implementations are present, but new platform qualification requires runtime evidence; WASM provider runtime qualification is not established.
 
 The SDK imported target supplies its `include/SchemaProvider` include root; public examples use `<descriptor/descriptor.h>`, `<runtime/client.h>` and `<neograph/llm/schema_provider.h>` directly, without recipe-only helpers.
 
+The installed SDK package must be at least `0.1.0`, with matching interface revision 4 headers and shared-library generation 4. A version match alone does not admit older interface/ABI binaries.
+
 ```cmake
-find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)
+find_package(SchemaProvider 0.1.0 CONFIG REQUIRED COMPONENTS runtime)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -118,7 +120,6 @@ target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::r
 - [12. LLM Module](#12-llm-module)
   - [SchemaProvider](#schemaprovider)
   - [Agent](#agent)
-  - [json_path Utilities](#json_path-utilities)
 - [13. MCP Module](#13-mcp-module)
   - [MCPTool](#mcptool)
   - [MCPClient](#mcpclient)
@@ -172,7 +173,12 @@ struct ChatMessage {
     std::vector<ToolCall> tool_calls;    // Tool calls (assistant messages only)
     std::string tool_call_id;           // ID of the tool call this responds to (tool messages)
     std::string tool_name;              // Name of the tool (tool messages)
+    std::string tool_status;
+    bool tool_retryable = false;
+    bool tool_effect_uncertain = false;
     std::vector<std::string> image_urls; // base64 data URLs or HTTP URLs for Vision
+    std::string reasoning;
+    json reasoning_details = json::array(); // portable data, not native authority
 };
 ```
 
@@ -205,13 +211,27 @@ struct ChatTool {
 
 ### Owned Outcome
 
-A provider call returns `sp::runtime::Result`: an immutable, owned `std::shared_ptr<const sp::Outcome>`, containing `sp::Completion` or `sp::Failure`. Retain the whole outcome, not only display text. Ordered messages/parts, native continuation, complete wire envelopes, ordered raw observations, stop evidence and genuine attempt metadata survive the call and client destruction. Usage counters are nullable `uint64_t` values with evidence, stage and quality: missing is unknown, never zero. A failure retains its original partial outcome. `ProviderFailure::outcome()` and `ProviderObserverError::outcome()` preserve that result; the latter also preserves the observer exception in `cause()`.
+A provider call returns `sp::runtime::Result`: an immutable, owned `std::shared_ptr<const sp::Outcome>`, containing `sp::Completion` or `sp::Failure`. Retain the whole outcome, not only display text. Ordered messages/parts, native continuation, wire envelopes when present, ordered raw observations, stop evidence and genuine attempt metadata survive the call and client destruction. Usage counters such as `input_total`, `output_total` and `total` are `std::optional<sp::Count>`; each present count has a `uint64_t value` and `Evidence`. `Usage` also records stage, quality and conflicts. Missing is unknown, never an invented zero. A failure retains its original partial outcome. `ProviderFailure::outcome()` and `ProviderObserverError::outcome()` preserve that result; the latter also preserves the observer exception in `cause()`.
+
+`sp::Completion::wire_envelope` and `sp::PartialCompletion::wire_envelope` are nullable and family-specific; the Python views return `None` when absent. Current buffered Chat leaves this field empty and retains the full response document in `raw_events` as `sp::RawWire{type="chat.completion", payload=document}` (Python `ProviderRawWire`). Check availability and inspect actual typed raw evidence; no fallback synthesizes an envelope or turns a partial failure into success. Owned wire evidence, including provider-private fields, remains with the retained outcome after provider destruction. Native tracing excludes raw envelopes/events and native replay/reasoning; JSON inspection copies grant neither native nor financial authority.
+
+Consumers should use full typed messages/parts, logical roles and text, and authentic native ownership where continuation requires it. Checkpoint and Chat request text content may use a text string or a valid typed text-part array; neither incidental serialized shape is a universal contract.
+
+For genuine `NativeContext` replay, retain the full original `request.messages` prefix and append the directly returned `outcome.messages` in order, preserving their native owners. The direct outcome contains newly returned messages, not the original request history. Replaying only its assistant messages is rejected with `ReplayIneligible` before wire I/O. An assistant restored from `NativeArchive` still needs that full original prefix; archive custody does not replace the lineage check. Graph `RunResult.native_messages` already contains the full history, so do not prepend the original input again.
+
+`UsageAccumulator::snapshot()` returns accumulated reports. `total_tokens_wide()` returns charged tokens plus unresolved reservations; it must not be displayed as reported usage. Settlement requires a final, consistent report with input and output counts and charges the largest supported total, without clamping oversized usage. A missing counter in any accumulated report remains unknown in the aggregate. A reservation, a local charge and a vendor invoice are different records.
 
 ### Portable projections
 
 
 If post-effect accounting or terminal-receipt persistence fails after a real result exists, `ProviderDispatchOutcomePersistenceError` retains the original immutable result in `outcome()` and the original persistence exception in `cause()`. If delivery also failed, `delivery_error()` retains the original observer exception. Successful persistence followed by observer failure rethrows that original observer exception unchanged; an unknown/no-result transport failure does not fabricate an outcome.
 `ChatMessage` / `ChatTool` and JSON are portable projections, not native authority. Portable formats remain [`provider-message-v2`](../schemas/provider-message-v2.schema.json) and [`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json). Genuine C++ checkpoint sidecars retain native seals in memory. Durable native history requires host-owned `sp::NativeArchive`: closed v3 / `spna3`, with authenticated owner-private custody and an independent key. Archive v2 is rejected, not upgraded or interpreted. Authentication binds every semantic descriptor choice (origin/paths/headers, policy, request field mappings, usage path and stop mappings), owner and exact custody binding. It is neither encryption nor vendor-issuer authentication; never publish archive bodies, keys, native blobs or raw wire observations. An archive is evidence storage, not a money grant or a spending lease. Program/external banks remain independently journal-owned; snapshot copies cannot create credit.
+
+For `RuntimeHistoryRecord`, no-argument `serialize_canonical()` supports portable records. Durable native history uses `serialize_canonical(archive, owner_id)` and an archive whose owner scope matches that ID. Python exposes the same overload and `RuntimeHistoryRecord.parse(stored_bytes, archive=None, owner_id="")`; its portable defaults do not authorize native recovery without the matching archive. Python parsing and archive-aware serialization release the GIL around native work. JSON observations remain distinct from archive-authenticated custody.
+
+Python retains typed custody through `ContextStore.hydrate_records(range)` and `history_record_by_message_id(feed, message_id)`; the latter returns a record or `None`. `SQLiteContextStore(database_path, archive=None)` accepts the actual archive, and `LocalProgramHost` forwards its optional final `native_history_archive=None` argument into `RuntimeConfig`. These parameters do not fabricate grants or add a durable Program-store backend. A returned `RuntimeHistoryRecord.message` is a detached typed copy with shared authentic native owners; mutating it cannot rewrite the immutable RAW identity. Store construction and typed retrieval release the GIL, and archive-free storage rejects native histories when custody is required.
+
+A RAW `RuntimeHistoryRecord` containing an `Assistant` message requires `RuntimeTrustClass.ModelOutput`; `RuntimeTrustClass.UntrustedInput` accepts only `User` messages. These are the actual Python enum names. The trust class identifies the record's role/provenance boundary; selecting it grants neither native replay custody nor spending or execution authority.
 
 **Standalone bank journal correction — current contract revised; exercised runtime evidence below.** The owner-approved protocol requires a monotonic trusted-store namespace obligation and a real immutable original owner/thread/graph scope, ceiling, deadline/clock identity and generation. Only exact durable head CAS over the full checkpoint commitment and revision may issue a host-owned opaque lease. Exact pending effect windows must persist before provider I/O; settlement must use genuine SDK outcomes and actual charges, nullable reports, holds and dedup identities. Checkpoint and next head must publish atomically under the same owned actor/revision. Removing bank metadata, pruning a checkpoint, replaying an old authenticated snapshot, overwriting the same ID or losing the actor must not grant credit. Tightening a 130 ceiling to 129 with an existing 65 hold cannot admit another 65; a proven no-effect failure may release the unchanged head so authentic 130 recovery can still proceed. Crash/unknown/lost-lease windows remain held without refund, retry or fallback. Plain/pristine archive configuration grants no money or native spending lease, and current `config.usage` cannot replace an existing standalone obligation; Program/external-bank journal ownership is unchanged. This is the required contract; actual currency/custody evidence and instrumentation limits are reported below, not a stable released API guarantee.
 
@@ -233,9 +253,13 @@ Diagnostic JSON preserves original raw bytes, including syntactically valid dupl
 
 `ProgramFailure` retains live `provider_outcome` and `provider_cause`. Its canonical factual SDK witness binds genuine archive custody to owner/run/version/bundle/operation/attempt; Runtime eagerly restores configured custody before exposing a recovered failure. Public data-only `ProgramResult::create()` cannot bypass this with a prefilled witness, and an unresolved parsed seal is not an executable result. After process restart the original exception pointer is unavailable (`provider_cause == nullptr`), not recreated from text. A failure that cannot be persisted cannot be serialized, published or replayed.
 
+Python `LocalProgramHost` destruction releases the caller's GIL while `ProgramRuntime` cancels, drains and joins scheduler work, so active Python nodes can finish. It reacquires the GIL before destroying the remaining host members and their Python callback/object owners. This changes teardown only; it exposes no additional capability binder or execution authority.
+
 `RecordedBindingSet` is source-bound, move-only data, never a caller-supplied dispatcher. The trusted Catalog `recorded_capability_binder` independently materializes captured-only capabilities from real persisted source events. `ProgramRuntime::replay_recorded()` checks original selected-source permissions, then transfers the actual remaining bank through durable CAS; inherited spend is not a new model grant. The old `start_recorded` renewal API is removed. InMemory, File, SQLite and PostgreSQL Program stores preserve the exact immutable owned lease throughout execution; expiry does not renew it. Controlled JavaScript still validates the underlying capability manifest and consumes exact completed command outcomes without redispatching external effects.
 
 **Recorded-control causal fix exercised in the full suite.** Captured command replay durably reserves only new CPU wall-time/Core work before execution, then publishes measured work and any newly produced Core checkpoint through the result CAS. It consumes no new model, money or Program-operation allowance and does not redispatch captured external effects. An unreconciled reservation remains debited. The reservation selects the authenticated settlement transition rather than an ordinary Running→Running transition that rejected the first new Core checkpoint. Await channel receive, timer wait/cancel and handoff wait initiation/release are serialized on their owning executors/strands; the existing Recorded CPU/Memory await/handoff scenarios passed in the full suite; remote TSan coverage limits remain explicit below.
+
+The observations below were recorded before this documentation reconciliation. They are historical evidence, not new test runs or guarantees for every platform, transport or security property.
 
 **Completed paid observations; not universal qualification.** Original `SPQUAL1` base630/1000000 microUSD is unchanged; ONE hash-chained `A` admits approved extension480/3000000 in the same original ledger, aggregate1110/4000000, with cumulative calls/spent/holds/settlements and no new grant ID/header/reset. Exact declaration bytes/file identity and original authorization/baseline/catalog/activation/ledger-prefix hashes/totals remain pinned; removal/replacement/change fails closed. The final canonical ledger is calls1110/spent437958/held1287828 microUSD, eventA1, limits1110/4000000; spent+held is US$1.725786 LOCAL catalogue meter, not an invoice. The documented five-family60-pair baseline completed600 requests: Chat60/60, Responses60/60, Messages60/60, Generate56/60 (four incorrect-vision SSE), Interactions57/60 (one buffered and two SSE incorrect-vision); aggregate293/300 pairs, not300/300. Other old600 financial records remain preserved, not full behavioral proof. Earlier M5/media one-shot cohorts are unchanged. The earlier three-round Google prerequisites retain two invalid-tool and one unreadable-positive failures. No further paid calls are authorized. Final SDK evidence and native-axis limits are separate from baseline success. Earlier activation/reopen smoke remains recorded at calls610/spent219159/held751233 after two reopens, with SDK meter/canary/vision four tests passed19.38seconds; these are scoped prior checkpoints, not final ledger totals. The earlier verified Chat60-pair cohort retains120 actual attempts,120 UpperBound charges and no UnknownHold.
 
@@ -269,8 +293,7 @@ void to_json(json& j, const ChatMessage& msg);
 void from_json(const json& j, ChatMessage& msg);
 ```
 
-All fields use `value()` with empty-string defaults, making deserialization tolerant
-of missing fields.
+ADL serialization preserves portable message/tool fields and their declared defaults. It does not reconstruct native SDK continuation authority from JSON.
 
 ---
 
@@ -283,10 +306,21 @@ The public contract is owned typed preparation and dispatch, not paired virtual 
 #include <neograph/runtime_interposition_consumer.h>
 #include <neograph/controlled_provider.h>
 
-// Public operation signatures (the only virtual operation is prepare).
-// ProviderRequest owns the SDK request variant, mode, options and observer.
-// invoke[_async](request) = prepare once, then dispatch the same handle.
-// dispatch[_async](prepared) returns sp::runtime::Result.
+// Selected public declarations from neograph::Provider.
+class Provider {
+public:
+    virtual ~Provider() = default;
+    virtual std::string get_name() const = 0;
+    virtual std::string_view family() const noexcept = 0;
+    virtual PreparedProviderRequest prepare(ProviderRequest request) = 0;
+    sp::runtime::Result dispatch(PreparedProviderRequest request);
+    asio::awaitable<sp::runtime::Result> dispatch_async(PreparedProviderRequest request);
+    sp::runtime::Result invoke(ProviderRequest request);
+    asio::awaitable<sp::runtime::Result> invoke_async(ProviderRequest request);
+    static std::string request_digest(const PreparedProviderRequest& request);
+    static std::optional<std::uint64_t> conservative_token_upper_bound(
+        const PreparedProviderRequest& request);
+};
 ```
 
 ### ProviderRequest / ProviderControls
@@ -309,6 +343,69 @@ sp::runtime::Result call_provider(
     return provider.dispatch(std::move(prepared));  // owns Completion or Failure
 }
 ```
+
+#### Interface 4 typed controls
+
+`make_provider_request(provider, model, messages, tools, controls, mode)` selects one closed family. Wrong-family controls raise `std::invalid_argument`; SDK preparation then checks enum values, admitted origin, model rules, tool declarations and native bindings before I/O. `ProviderControls` has no dictionary escape hatch. Optional values preserve absent versus explicit `false` or empty selection.
+
+| Family | `ProviderControls` fields and SDK mapping |
+|---|---|
+| `openai.chat` | `max_output_tokens`, `temperature`, `top_p`, `reasoning_effort`, `service_tier`, `provider`, `response_format`; `chat_reasoning` → `sp::chat::Request::reasoning`, `include_reasoning`, `usage_include` → `usage.include`, `models` |
+| `openai.responses` | `max_output_tokens`, `max_tool_calls`, `temperature`, `top_p`, `reasoning_effort`/`reasoning_summary` → `reasoning`, `service_tier`, `required_tool`, `provider`, `response_format`, `store`, `system` → `instructions`, `account_scope`; `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity` → `text.verbosity`, `truncation`, `responses_include` → `include` |
+| `anthropic.messages` | `max_output_tokens` → `max_tokens`, `temperature`, `top_p`, `thinking_budget`, `system`, `account_scope`, `provider`; `thinking_mode`, `output_effort` → `output_config.effort`, `cache_control`, `messages_tool_choice` → `tool_choice` |
+| `google.generate` | `max_output_tokens`, `temperature`, `thinking_budget`, `include_thoughts`, `required_tool`, `system`, `account_scope`; `gemini_history_mode` → `history_mode`, `gemini_thinking_level` → `thinking_level`, `safety_settings`, `gemini_tool_choice` → `tool_choice` |
+| `google.interactions` | `max_output_tokens`, `thinking_level` (optional string), `thinking_summaries`, `service_tier`, `required_tool`, `system`, `account_scope`; Generate's enum `gemini_thinking_level` does not apply |
+
+Chat's `sp::chat::ReasoningOptions` contains optional `effort`, `max_tokens`, `exclude` and `enabled`. Its nested reasoning object, `include_reasoning`, `usage_include` and alternative `models` require a policy-declared OpenRouter origin. `sp::OpenRouterRouting` is supported only on declared OpenRouter origins for Chat, Responses and Messages; choosing a gateway-shaped model name does not admit a different origin. SDK requests also expose typed family tool definitions, Responses `hosted_tools` and strict/deferred tool options; use the actual payload variant for those fields rather than adding raw JSON.
+
+| SDK type | Closed values or members |
+|---|---|
+| `sp::responses::Verbosity` | `Low`, `Medium`, `High` |
+| `sp::responses::Truncation` | `Disabled`, `Auto` |
+| `sp::responses::Include` | `ReasoningEncryptedContent`, `WebSearchSources`, `FileSearchResults`, `MessageOutputTextLogprobs`, `ComputerCallOutputImageUrl`, `CodeInterpreterCallOutputs` |
+| `sp::messages::ThinkingMode` | `Manual`, `Adaptive`, `Disabled` |
+| `sp::messages::OutputEffort` | `Low`, `Medium`, `High`, `Max` |
+| `sp::messages::CacheControl` / `CacheTtl` | optional `ttl`: `FiveMinutes`, `OneHour`; wire type `ephemeral`, optional TTL `5m`/`1h` |
+| `sp::messages::ToolChoice` / `ToolChoiceMode` | `mode`: `Auto`, `Any`, `None`, `Tool`; `name`; optional `disable_parallel_tool_use` |
+| `sp::gemini::HistoryMode` | `NativeOnly`, `PortableForeign` |
+| `sp::gemini::ThinkingLevel` | `Minimal`, `Low`, `Medium`, `High` |
+| `sp::gemini::SafetySetting` / `SafetyCategory` | `category`: `Harassment`, `HateSpeech`, `SexuallyExplicit`, `DangerousContent`, `CivicIntegrity`; `threshold`: `SafetyThreshold` |
+| `sp::gemini::SafetyThreshold` | `BlockNone`, `BlockOnlyHigh`, `BlockMediumAndAbove`, `BlockLowAndAbove`, `Off` |
+| `sp::gemini::ToolChoice` / `ToolChoiceMode` | `mode`: `Auto`, `Any`, `None`, `Validated`; `allowed_function_names`: vector of declared function names |
+
+Messages requires a positive output cap. A supplied thinking budget selects `Manual` when no mode is set; manual thinking requires at least the admitted minimum and a budget strictly below the cap. `Adaptive` and `Disabled` reject a supplied budget. Manual/adaptive thinking omits otherwise valid temperature and checks the admitted thinking `top_p` minimum; it does not override model-specific temperature prohibitions. Forced `Any`/`Tool` choice requires tools and disabled thinking; `Tool` names a declared client tool, other modes reject `name`, and `None` rejects `disable_parallel_tool_use`. Generate rejects simultaneous thinking budget/level and simultaneous `required_tool`/`gemini_tool_choice`; its allowed-function list must name declared functions. Sampling remains family/policy-bounded; Generate has no `top_p`, and Interactions accepts neither sampling field.
+
+`FamilyPolicy.temperature_forbidden_model_prefixes` matches ASCII case-insensitively against the full model and the suffix after the last `/`. Built-in Chat/Responses prefixes are `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`; Messages prefixes are `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-sonnet-5`, `claude-fable-`. Explicit prohibited temperature rejects before I/O, including gateway-prefixed models.
+
+#### Responses provider-held continuation
+
+`previous_response_id` selects provider-held state. Request `messages` contains NEW INPUT ONLY; do not resend the prior conversation. `previous_response_history` is `std::vector<sp::Message>` local ownership evidence and is never emitted. A cursor alone can admit new text/image input but cannot authorize client tool results. For the initial captured response, pass its authentic original prefix plus terminal assistant response whose ID equals the cursor. A later authentic in-process cursor-produced terminal response can carry private completed tool ownership without reconstructing that full prefix. Content, origin, model, route and configuration mismatches reject; an arbitrary ID or projected JSON cannot supply that ownership.
+
+Server-held cursors and private completed ownership do not grant `NativeReplay` or native-archive authority. Absent `responses_include` preserves `reasoning.encrypted_content`; an explicit empty vector sends `[]`, and other explicit selections are respected. Missing native evidence still fails honestly when a subsequent operation requires it.
+
+#### Explicit portable Gemini history
+
+Generate defaults to `NativeOnly`. Explicit `PortableForeign` admits caller-created assistant `Text`/`ToolCall` parts only when they carry no native seal, `wire_output` or signatures/native metadata. Only the first foreign `functionCall` receives Google's `skip_thought_signature_validator`; foreign text-only turns receive no signature. Authentic native groups still require their original provenance, content and binding. A corrupt/mismatched native group is never demoted to portable input, and imported foreign history never acquires native replay authority.
+
+#### Output caps and native continuation
+
+The output generation cap is a per-call admitted resource, excluded only from the native replay configuration digest. Every other native binding remains, including content/prefix, origin/route, policy identity, tools and reasoning controls (apart from documented per-turn tool selection/cursor behavior). Each encoded/prepared request still retains its effective cap; request digests, journal slots, original shared bank and absolute deadline remain binding. A larger-cap semantic call needs a fresh call ordinal and fresh admission under the same grants, not a repaired seal, renewed deadline or replay of the old effect. Native archives remain `spna3`/v3 and portable JSON remains v2.
+
+Python exposes `ChatReasoningOptions`, `ResponsesVerbosity`, `ResponsesTruncation`, `ResponsesInclude`, `MessagesThinkingMode`, `MessagesOutputEffort`, `MessagesCacheControl`, `MessagesCacheTtl`, `MessagesToolChoice`, `MessagesToolChoiceMode`, `GeminiHistoryMode`, `GeminiThinkingLevel`, `GeminiSafetySetting`, `GeminiSafetyCategory`, `GeminiSafetyThreshold`, `GeminiToolChoice`, `GeminiToolChoiceMode` with the same enum values except Python `None_` for C++ `None`. Optional class-valued controls and message/safety/history vectors return detached snapshots; reassign edits. `ProviderControls.previous_response_history` is a list of authentic `ProviderMessage` values, not a single provisional response.
+
+#### Deployment header preprocessing
+
+Plain `sp::descriptor::load(source[, policy])` treats header values literally, including `${VAR}`. Explicit `load_with_environment_headers(source, overrides = {}, policy = {})` reads optional `ANTHROPIC_WORKSPACE_ID`/`ANTHROPIC_BETA` for Messages; unset/empty values are omitted. Deterministic `load_with_deployment_headers(source, overrides, DeploymentHeaderEnvironment, policy)` uses the supplied optional `anthropic_workspace_id`/`anthropic_beta` instead. Both return `LoadResult` and preprocess before descriptor admission. Case-insensitive precedence is environment < descriptor literal headers < explicit overrides. Duplicate overrides, invalid/reserved names and line breaks reject during admission; no environment evaluation or header mutation occurs afterward.
+
+Python names are `ProviderDeploymentHeaderEnvironment`, `load_provider_descriptor_with_environment_headers(source, overrides=[], policy=None)` and `load_provider_descriptor_with_deployment_headers(source, overrides, environment, policy=None)`; the loaders return `ValidatedDescriptor` or raise on failed admission. Credentials remain in runtime options.
+
+#### Additional admission and event rules
+
+Chat nested reasoning must be nonempty and cannot coexist with effective scalar `reasoning_effort`. Its `effort` and `max_tokens` are mutually exclusive; a budget must be positive, fit signed 64-bit wire range and not exceed the effective output cap. `enabled=false` forbids effort/budget, and `exclude=true` conflicts with `include_reasoning=true`. Alternative models must have unique nonempty names within the admitted count limit; each model is checked against the effective choices, including temperature prohibitions.
+
+Policy identity remains part of native binding: the published built-in policy revision 4 rejects old policy-3 seals/archives rather than repairing them. Generate's `safety_settings` requires unique valid categories; a nonempty allowed-function list is valid only with `Any`/`Validated`. Its model must be a literal name matching both admitted Generate descriptor paths. Portable tool results must match the admitted call identity; foreign assistant calls must be client-executed and have no `wire_type` or `wire_metadata`.
+
+At the semantic `Stop` boundary, valid or invalid client-call intent changes `EndTurn` to `ToolUse`; observer events and final outcomes agree. Specific `MaxTokens`, `ContentFilter` and `Unknown` evidence remains unchanged, and completed server-executed hosted tools do not by themselves imply client `ToolUse`. Streaming OpenRouter reasoning fragments merge by index in first-arrival order; encrypted blobs remain discrete. Owned raw frames and native continuation retain their original content and tamper checks.
 
 ### PreparedProviderRequest / ProviderBudgetClaim
 `prepare()` validates and encodes exactly once, producing a move-only `PreparedProviderRequest` with the original deadline and cancellation state. Durable callers bind its `Provider::request_digest()` to their assembly, reserve an admitted budget claim, write the dispatch receipt, then consume that same handle through `ControlledProvider::dispatch_prepared(_async)`. They never rebuild a request after the gate. Duplicate receipts never redispatch. Custom providers implement `get_name()`, `family()` and `prepare()` using `prepare_runtime()` or `prepare_local()`; local callbacks capture owned shared state, not `this`.
@@ -333,9 +430,17 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is unstable `0.0.0`, interface revision 3 / shared ABI 3, with out-of-line capability checks; that is not a stable release claim. Current runtime/archive support is Linux/POSIX; no Windows, macOS or WASM runtime qualification is implied. Python provider bindings/wrappers are deferred and not ported by this C++ change.
+This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is alpha `0.1.0`, interface revision 4 / shared-library generation 4, with out-of-line capability checks; that is not a stable release claim. Recorded interface-3 SDK runtime/archive qualification covers Linux/POSIX and is historical evidence, not an interface-4 pass. Windows NTFS and macOS implementations are present, but new platform qualification requires runtime evidence; WASM provider runtime qualification is not established.
 
-Fresh installed find_package Program C++/C ABI/dualQuickJS consumers and the NeoGraph/SchemaProvider typed two-request lifetime/native/raw/mismatch consumer passed. Interface/ABI declarations alone remain distinct from this exercised package result; broader platforms and stable release are not claimed.
+Python exposes the same owned request/outcome boundary as C++: `make_provider_request`, `Provider.prepare`, `dispatch` and `invoke`. Use `ProviderMessage` with typed parts for provider history; `ChatMessage` remains a graph convenience projection. A returned SDK failure is available through `ProviderOutcome.failure`, while host observer/settlement exceptions retain `outcome` and `cause`. See the [Python binding guide](python-binding.md) for constructors and GIL/callback behavior.
+
+Python SDK vector/map getters return detached values: `ProviderMessage.parts`, `ProviderRequest.messages`, `RunConfig.provider_messages`, completion/partial `messages` and `raw_events`, `RunResult.native_messages`, `ProviderLoopEntry.messages`, and usage `extra`/`conflicts`. Modify a snapshot, then assign it back where a setter exists; appending to a getter result does not update its owner. Optional `ProviderControls.provider`/`response_format`, `SchemaProviderDefaults.provider` and `ProviderToolResult.host` follow the same read-modify-assign rule. Read-only outcome evidence remains unchanged. These are Python binding rules, not a blanket copy guarantee for C++ getters.
+
+When native code calls a Python provider's `prepare` override, returning `None` raises `TypeError` before handle consumption. `ProviderDescriptorPolicy.identity` is `bytes` containing the raw SHA-256 digest; `.hex()` is a display conversion. Repeated inspection of stored Python provider/graph causes preserves the original exception value and traceback without consuming the stored exception's restore state, including nested native translation.
+
+The previously recorded installed find_package Program C++/C ABI/dualQuickJS consumers and NeoGraph/SchemaProvider typed two-request lifetime/native/raw/mismatch consumer passed on their recorded snapshot. Those results do not establish interface-4 package validation; matching declarations alone do not prove a new runtime result or broader platform support.
+
+Current SDK4 Linux x86_64 evidence covers all 27 registered cases: 25 passed in the initial full run; after correcting two obsolete assertions, `native_archive` and `stop_reasoning_preservation` passed in a focused 2/2 run. This was not a second full-suite 27/27 run. The unchanged buffered/SSE Stop probe and exact installed SDK README consumer also passed. The latter exercised one credential-free request per zero-usage, unknown-usage and HTTP-400-failure variant. These SDK results do not establish a new NeoGraph native build/wheel pass or Windows/macOS/ARM64/HTTP3 qualification.
 
 ---
 
@@ -445,6 +550,7 @@ struct Channel {
     std::string name;                              // Channel name
     ReducerType reducer_type = ReducerType::OVERWRITE; // Merge strategy
     ReducerFn   reducer;                           // Custom reducer (when type == CUSTOM)
+    ChannelLifecyclePolicy lifecycle;
     json        value;                             // Current value
     uint64_t    version = 0;                       // Write counter
 };
@@ -456,10 +562,15 @@ A single write operation targeting a named channel. Nodes return vectors of thes
 
 ```cpp
 struct ChannelWrite {
-    std::string channel;  // Target channel name
-    json        value;    // Value to write (merged via the channel's reducer)
+    enum class Mode { Reduce, Overwrite };
+    std::string channel;
+    json value;
+    Mode mode = Mode::Reduce;
+    std::shared_ptr<const std::vector<sp::Message>> native_messages;
 };
 ```
+
+`ChannelLifecyclePolicy` separates retention (`Unbounded`, `Latest`, `Bounded` plus `retention_limit`) from persistence (`Checkpoint`, `Ephemeral`). `ChannelWrite::Mode::Overwrite` bypasses the reducer, then applies retention. To retain authentic SDK history, use `provider_messages_write(messages_or_outcome)`; a JSON-only write cannot create native replay authority. See [channel lifecycle](concepts.md#channel-lifecycle-and-checkpoint-contract) for resume guards and ordered folds.
 
 ### NodeInterrupt
 
@@ -649,7 +760,7 @@ struct NodeContext {
     ProviderControls provider_controls;
     std::shared_ptr<Provider> provider;   // LLM provider
     ToolSet                  tools;      // Owned fixed collection of available tools
-    std::string               model;      // Model override (empty = provider default)
+    std::string               model;      // Explicit model name; no provider default
     std::string               instructions; // System prompt / instructions
     json                      extra_config; // Additional configuration (node-type-specific)
 };
@@ -666,6 +777,15 @@ when used without a `GraphEngine`. Factories may call `ctx.tools.view()` for
 temporary raw lookup; only the owned collection survives dispatch. This has
 no per-call ownership work. Supplying nonempty tools in both context and
 resources is rejected.
+
+Python `NodeContext(provider=...)` and its `provider` setter retain the original
+Python provider object in a per-context lifetime-owner lease attached to the
+real native shared pointer. Native context copies held by compiled nodes and engines retain
+that same Python override owner after context reassignment or Python wrapper
+collection. Reassignment releases only the mutable context's lease; existing
+compiled snapshots keep their copies. The lease's final deleter acquires the
+GIL. A borrowed C++ reference or raw pointer alone does not retain a Python
+override owner.
 
 ### GraphEvent
 
@@ -788,10 +908,15 @@ public:
     void init_channel(const std::string& name,
                       ReducerType type,
                       ReducerFn reducer,
-                      const json& initial_value = json());
+                      const json& initial_value = json(),
+                      ChannelLifecyclePolicy lifecycle = {});
 
     json get(const std::string& channel) const;
     std::vector<ChatMessage> get_messages() const;
+    std::vector<sp::Message> get_provider_messages(
+        const std::string& channel = "messages") const;
+    std::optional<std::vector<sp::Message>> captured_provider_messages(
+        const std::string& channel = "messages") const;
 
     void write(const std::string& channel, const json& value);
     void apply_writes(const std::vector<ChannelWrite>& writes);
@@ -801,6 +926,12 @@ public:
 
     json serialize() const;
     void restore(const json& data);
+    json serialize_runtime() const;
+    void restore_runtime(const json& data);
+    json ephemeral_checkpoint_guard() const;
+    void restore_checkpoint(const json& data, const json& guard,
+                            std::shared_ptr<const NativeGraphCheckpoint> native = {});
+    std::pair<json, std::shared_ptr<const NativeGraphCheckpoint>> checkpoint_snapshot() const;
 
     std::vector<std::string> channel_names() const;
 };
@@ -815,9 +946,11 @@ public:
 | `apply_writes(writes)` | Atomically apply a batch of `ChannelWrite` operations. All writes are applied under a single exclusive lock |
 | `channel_version(channel)` | Returns the write counter for a specific channel |
 | `global_version()` | Returns the global version counter (incremented on every write to any channel) |
-| `serialize()` | Serializes all channel values and versions to JSON (for checkpointing) |
+| `serialize()` | Serializes checkpoint-persistent channel values and versions |
 | `restore(data)` | Restores channel values and versions from serialized JSON |
 | `channel_names()` | Returns the names of all initialized channels |
+
+`serialize()` includes only checkpoint-persistent channel values and versions. It omits ephemeral values; `restore_checkpoint` requires their matching guard and rejects lost written ephemeral state. `serialize_runtime` / `restore_runtime` preserve live ephemeral values for same-process copies, not durable storage. `checkpoint_snapshot()` pairs the portable snapshot with its genuine C++ native sidecar. `get_messages()` is a convenience projection; use `get_provider_messages()` for full ordered SDK history and `captured_provider_messages()` when arbitrary JSON must not be interpreted as chat.
 
 ---
 
@@ -858,7 +991,7 @@ using NodeOutput = NodeResult;  // writes + optional Command + optional Sends
 | Member | Description |
 |--------|-------------|
 | `in.state` | Read-only `GraphState`. Use `in.state.get(channel)` for reads |
-| `in.ctx.cancel_token` | Pass to `provider.invoke(std::move(request))` so an LLM HTTP socket aborts on cancel, or poll `ctx.cancel_token->is_cancelled()` for your own loops |
+| `in.ctx.cancel_token` | Assign `request.cancel_token = in.ctx.cancel_token` before `provider.invoke(std::move(request))`; provider cancellation is cooperative at supported boundaries. For your own loops, poll a non-null `ctx.cancel_token` with `ctx.cancel_token->is_cancelled()` |
 | `in.ctx.step` | Current super-step index |
 | `in.ctx.thread_id` | Mirrors `RunConfig::thread_id` |
 | `in.stream_cb` | Streaming sink; if non-null, emit `LLM_TOKEN` events through it. Null on non-streaming runs |
@@ -1097,6 +1230,12 @@ struct EngineConfig {
     ToolGate tool_gate;
     std::size_t worker_count = 1;
     std::set<std::string> cached_nodes;
+    std::size_t node_cache_max_entries = 0;
+    std::map<std::string, CacheKeyPolicy> node_cache_policies;
+    std::shared_ptr<ToolExecutionController> tool_execution_controller;
+    std::shared_ptr<::neograph::HookRuntime> hook_runtime;
+    std::shared_ptr<::neograph::RuntimeInterpositionController> runtime_interposition;
+    std::shared_ptr<sp::NativeArchive> native_history_archive;
 };
 
 struct EngineResources {
@@ -1124,7 +1263,7 @@ registries remain exact local-only resolvers (no built-in fallback).
 
 Legacy Python singleton callbacks still look up their names in module-global
 dictionaries at invocation, so replacing such a name can change existing
-legacy engines. Use scoped Python registries for deterministic callbacks.
+legacy engines. Use scoped Python registries to preserve callback identity.
 
 ### RunConfig
 
@@ -1138,6 +1277,13 @@ struct RunConfig {
     StreamMode                  stream_mode  = StreamMode::ALL;
     std::shared_ptr<CancelToken> cancel_token;          // v0.3+
     std::shared_ptr<UsageAccumulator> usage;             // optional accumulator
+    std::optional<std::vector<sp::Message>> provider_messages;
+    std::shared_ptr<sp::NativeArchive> native_history_archive;
+    std::function<void(const sp::Event&)> on_provider_event;
+    std::shared_ptr<ProviderOutcomes> provider_outcomes;
+    std::shared_ptr<ProviderLoopHistory> provider_loop_history;
+    std::uint64_t model_token_budget = 0;
+    std::shared_ptr<std::atomic_bool> budget_exhausted;
     bool                        resume_if_exists = false; // v0.3.1+
 };
 ```
@@ -1160,23 +1306,40 @@ history, or `resume_if_exists=true` for an intentional continuing-thread turn.
 
 ### RunContext (v0.4 PR 1, exposed to nodes via `NodeInput.ctx`)
 
-Per-run dispatch metadata threaded by the engine. Constructed from `RunConfig`
-(with a new usage accumulator when none was supplied), `RunMetadata`, the
-effective Store, and an optional resume value. Nodes consume it inside a
-`run(NodeInput) -> NodeOutput` override via `in.ctx`.
+Per-run dispatch metadata threaded by the engine. Initially constructed from
+`RunConfig` (allocating a usage accumulator when none was supplied),
+`RunMetadata`, the effective Store, and an optional resume value. Nodes consume
+it inside a `run(NodeInput) -> NodeOutput` override via `in.ctx`.
+
+That allocation describes initial construction only. Checkpoint restoration can replace it with the genuine original bank and its prior reports. Resume or continuation therefore does not promise a fresh returned usage report or `None` for previously reported usage.
+
+Python `RunMetadata(timeout_ms=None, ...)` has no deadline by default. Its constructor and `set_timeout_ms(timeout)` accept nonnegative integer milliseconds within the remaining steady-clock range, checked before signed conversion or addition. Negative or overflowing values raise `OverflowError` or `ValueError`; a failed setter leaves the prior absolute deadline intact. Zero expires immediately; `clear_deadline()` removes the deadline.
 
 ```cpp
 struct RunContext {
     std::shared_ptr<CancelToken>  cancel_token;
     std::shared_ptr<UsageAccumulator> usage;
+    std::shared_ptr<ProviderOutcomes> provider_outcomes;
+    std::shared_ptr<ProviderLoopHistory> provider_loop_history;
+    std::function<void(const sp::Event&)> on_provider_event;
+    std::shared_ptr<sp::NativeArchive> native_history_archive;
+    std::uint64_t model_token_budget = 0;
+    std::shared_ptr<std::atomic_bool> budget_exhausted;
+    std::string run_id;
+    std::shared_ptr<CancelToken> budget_cancel_token;
+    std::shared_ptr<OwnedManagedBudgetLease> managed_budget_lease;
+    std::shared_ptr<CheckpointStore> managed_budget_store;
     std::optional<std::chrono::steady_clock::time_point> deadline;
     std::string                   trace_id;
     std::string                   thread_id;
+    std::uint64_t                 cache_execution_id = 0;
     int                           step;
     StreamMode                    stream_mode;
     std::optional<json>           resume_value;
     std::shared_ptr<Store>        store;
     ToolGate                      tool_gate;
+    std::shared_ptr<ToolExecutionController> tool_execution_controller;
+    ToolExecutionIdentity tool_execution_identity;
 };
 ```
 
@@ -1288,7 +1451,7 @@ struct RunResult {
     std::vector<std::string> execution_trace;    // Ordered list of executed node names
 
     bool max_steps_exhausted() const noexcept;    // Limit stopped runnable work
-    RunStatus status() const noexcept;            // Completed, Interrupted, or StepLimit
+    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit, or SafePoint
 
     template <typename T> T channel(const std::string& name) const;
     template <typename T> T channel(const ChannelKey<T>& key) const;
@@ -1298,6 +1461,8 @@ struct RunResult {
 ```
 
 `RunResult::usage` is the nullable provider report, not the spending bank. `native_messages` retains genuine typed history and `provider_outcomes` retains every owned Completion/Failure. JSON `output` is only a portable projection. For full history input use `RunConfig::provider_messages`; observe typed events with `on_provider_event`. Durable native checkpoint/receipt custody must use `native_history_archive`; in-memory sidecars do not require one.
+
+On resume or continuation, `provider_outcomes` retains the original outcomes followed by newly produced outcomes in an ordered list. `usage` can retain prior reports from the restored bank. Consumers must preserve the no-redispatch and no-double-charge invariants for completed provider effects; an empty/reset outcome list or `usage=None` is not a resume invariant.
 | Field | Type | Description |
 |-------|------|-------------|
 | `output` | `json` | Serialized final state of all channels |
@@ -1307,12 +1472,14 @@ struct RunResult {
 | `checkpoint_id` | `std::string` | UUID of the last saved checkpoint |
 | `execution_trace` | `std::vector<std::string>` | Ordered list of node names in execution order |
 
+`provider_messages` supplies full typed history and replaces only the messages channel; `on_provider_event` observes typed SDK events. `provider_outcomes` and `provider_loop_history` retain outcomes and task-local continuations across inner turns. `native_history_archive` binds durable native custody, not a model budget. The optional `model_token_budget` ceiling and `budget_exhausted` signal belong to budget-aware dispatch. Python and C++ both return full history as `RunResult.native_messages`, with owned results in `provider_outcomes`. Input remains `RunConfig.provider_messages`; there is no `RunResult.provider_messages` or `provider_history` alias.
+
 `max_steps_exhausted()` returns `true` only when the step ceiling stopped the
 run while runnable work remained. A graph that reaches `__end__` exactly on its
 last permitted step returns `false`.
 
-`status()` returns `RunStatus::Completed`, `RunStatus::Interrupted`, or
-`RunStatus::StepLimit` without changing the public `RunResult` data layout.
+`status()` returns `RunStatus::Completed`, `RunStatus::Interrupted`,
+`RunStatus::StepLimit`, or `RunStatus::SafePoint` without changing the public `RunResult` data layout.
 `ChannelKey<T>` binds a reusable channel name to its expected C++ type:
 
 ```cpp
@@ -1630,6 +1797,10 @@ or creating what-if scenarios.
 | `checkpoint_id` | `std::string` | Optional: fork from a specific checkpoint (default: latest) |
 
 **Returns:** The checkpoint ID of the new forked state.
+
+Fork copies the selected checkpoint's pending continuation as well as state; it does not invent a new turn. Resuming a completed `__end__` continuation executes no node, so editing a question on that fork does not by itself produce an answer. To continue pending work, select the exact paused checkpoint ID with real `next_nodes`, fork it, edit portable state and resume that fork. Do not generalize every historical empty-`next_nodes` latest-resume snapshot to the terminal sentinel. Example 08 retains its separate new-turn flow after a terminal fork.
+
+Authentic native state remains under the original shared-bank scope. Fork never clones spending grants; managed-bank custody, source commitment, original ceiling and deadline still apply. A durable standalone fork is not permission to import or renew native authority.
 
 Tool ownership is established before compilation via `NodeContext::tools` or
 `EngineResources::tools`; there is no post-compilation ownership transfer.
@@ -2037,6 +2208,18 @@ are an independent optional `PendingWritesCheckpointStore` capability; without
 it, resume replays the full super-step. The persisted schema is unchanged.
 See [`ASYNC_GUIDE.md` §9.4](ASYNC_GUIDE.md#94-checkpointstore).
 
+Python `CheckpointStore.requires_managed_budget(thread_id) -> bool` is a
+synchronous virtual reader of persisted managed-bank denial obligations. The
+engine's native `requires_managed_budget_async(thread_id)` facade offloads the
+synchronous call; the binding forwards a Python override under the GIL. Without
+an override, the native implementation raises an explicit unsupported-backend
+error instead of returning `False`. The reader reports whether the trusted
+namespace/thread has ever held an active standalone managed bank; saving
+stripped state or deleting checkpoints must not clear that obligation.
+Implementations must report it truthfully. This reader grants no spending,
+restoration, bank, or lease authority; bounded execution still requires supported
+native managed-budget leases.
+
 ```cpp
 class CheckpointStore {
 public:
@@ -2398,34 +2581,13 @@ std::cout << schema.dump(2) << "\n";
 
 ## 10.5. Observability — OpenTelemetry + OpenInference
 
-> Historical Python provider/wrapper examples below are not ported to the typed C++ contract and are not current provider guidance. The C++ change does not implement or qualify Python bindings. C++ observers export only established public text/scalars and nullable counts, never raw native state.
-**Module:** `neograph_engine.tracing` (OTel-shape) +
-`neograph_engine.openinference` (LLM-shape)
-**Since:** OTel layer in v0.3.x; OpenInference layer in **v0.6.0**.
-
-NeoGraph emits its `GraphEvent` stream through the same callback the
-streaming API uses. Two helpers ride on top:
-
-  - **`otel_tracer(tracer)`** — vendor-neutral OpenTelemetry spans.
-    Root span per run + child span per node + status / error / interrupt
-    mapping. Spans flow to any OTel backend (Jaeger, Tempo, Honeycomb,
-    Datadog, …). Useful when you already run an APM that just needs
-    spans-shaped data.
-  - **`openinference_tracer(tracer)` + `OpenInferenceProvider`** —
-    LLM-shape attribute layer on top. Same OTel mechanics, but each
-    span carries `openinference.span.kind` (`"CHAIN"` / `"LLM"`) plus
-    LLM-specific keys (`llm.model_name`, `llm.input_messages.{i}.…`,
-    `llm.token_count.{prompt,completion,total}`, etc.) so a backend
-    that recognises the OpenInference convention — Phoenix, Arize,
-    Langfuse — renders the trace as a chat-bubble + DAG hierarchy +
-    per-call token cost UI (the "LangSmith UX").
+Python graph tracing lives in `neograph_engine.tracing` and `neograph_engine.openinference`. `otel_tracer` emits a run span and node spans from graph events; `openinference_tracer` tags those spans as `CHAIN` and records node payload projections. `neograph_engine.openinference.OpenInferenceProvider` wraps an existing typed provider with the native C++ dispatch observer and sends per-call `LLM` spans to a Python OpenTelemetry tracer. C++ callers use `<neograph/observability/openinference.h>`.
 
 ### `otel_tracer` — OTel-shape spans
 
-```python
-from contextlib import contextmanager
-from typing import Any, Callable, Iterator, Optional
+The signature below is a reference declaration. `root_name` defaults to `graph.run`, `node_span_prefix` to `node.`, and `attribute_prefix` to `neograph`. `on_event` optionally forwards graph events to another consumer.
 
+```python
 @contextmanager
 def otel_tracer(
     tracer: Any,
@@ -2438,22 +2600,7 @@ def otel_tracer(
     ...
 ```
 
-| Knob | Default | Purpose |
-|---|---|---|
-| `root_name` | `"graph.run"` | Span name for the per-run root span |
-| `node_span_prefix` | `"node."` | Prefix concatenated with each node name |
-| `attribute_prefix` | `"neograph"` | Prefix for engine-specific attributes (`neograph.node`, `neograph.next_nodes`, etc.) |
-| `on_event` | `None` | Optional secondary callback receiving every raw `GraphEvent` — useful for chaining with logging / metrics |
-
-Events handled: `NODE_START` opens a child span, `NODE_END` closes
-it (with `Status.OK`), `ERROR` records the exception and ends the
-span with `Status.ERROR`, `INTERRUPT` tags
-`{attribute_prefix}.interrupted = true` and ends.
-
-Concurrent fan-out (multi-Send): each node-name keeps a stack of
-open spans; `NODE_END` pops the most recent. Always-end-on-exit:
-the context-manager's `finally` block force-closes any spans still
-open if the run raises.
+`NODE_START` opens a span; `NODE_END` closes it successfully; `ERROR` records an error; `INTERRUPT` marks a pause. Each node name has a stack for overlapping events. Context-manager cleanup closes remaining spans when the run exits. A trace does not establish exactly-once node execution or correlate every concurrent task uniquely.
 
 ```python
 from opentelemetry import trace
@@ -2466,10 +2613,7 @@ with otel_tracer(tracer) as cb:
 
 ### `openinference_tracer` — adds LLM-shape attributes
 
-Same shape, plus each span tagged
-`openinference.span.kind = "CHAIN"` and node payload encoded as
-`input.value` / `output.value` JSON blobs. Phoenix / Arize / Langfuse
-treat the trace as an LLM chain in their UI.
+Graph spans carry `openinference.span.kind = "CHAIN"`; node input/output payloads become JSON `input.value` / `output.value` projections. Python graph tracing alone does not create per-provider `LLM` spans or attribute vendor charges. Context attachment is scoped to the originating Python context; cross-thread/task parent propagation needs the tracing integration to preserve that context.
 
 ```python
 @contextmanager
@@ -2483,104 +2627,113 @@ def openinference_tracer(
     ...
 ```
 
-The tracer also attaches each node span as the OTel *current
-context* (via `otel_context.attach`) so a `Provider.complete()`
-call inside the node body opens its `llm.complete` span as a child
-of that node — the trace is a single connected tree, not 3+ orphan
-trace-IDs (the v0.6.0 contextvar-propagation fix).
+### `OpenInferenceProvider` — Python and C++ typed dispatch observer
 
-### `OpenInferenceProvider` — wraps any `Provider`
+Construct the Python wrapper as `OpenInferenceProvider(inner, tracer, *, span_name="llm.complete")`. It inherits `prepare(request)`, one-shot `dispatch(prepared)` and `invoke(request)` from `Provider`; it does not add completion APIs. The native wrapper delegates preparation exactly once and observes the same owned handle at dispatch. Invalid or discarded preparation opens no span. Each admitted dispatch opens one LLM span under normal tracing operation; original outcomes, mode, deadline, cancellation, events and provider identity pass through. Tracing failures do not replace a provider outcome or exception.
 
-> **Historical Python-only example.** The Python Provider/OpenInference wrappers below are not ported or qualified by the current C++ typed cutover. They are not a compatible bridge to the new `ProviderRequest`/owned-outcome contract.
+The following functions show alternative call paths. `inner` is an existing typed provider, such as a configured `SchemaProvider`; `model` is explicit. Choose one function for one model call.
 
 ```python
-class OpenInferenceProvider(Provider):
-    def __init__(self, inner: Provider, tracer: Any,
-                 *, span_name: str = "llm.complete"):
-        ...
+from neograph_engine import ProviderMessage, ProviderRole, Text, make_provider_request
+from neograph_engine.openinference import OpenInferenceProvider
+
+
+def traced_dispatch(inner, model, tracer):
+    observed = OpenInferenceProvider(inner, tracer)
+    request = make_provider_request(observed, model, [
+        ProviderMessage(ProviderRole.User, [Text("Say hello.")])])
+    prepared = observed.prepare(request)
+    return observed.dispatch(prepared)
+
+
+def traced_invoke(inner, model, tracer):
+    observed = OpenInferenceProvider(inner, tracer)
+    request = make_provider_request(observed, model, [
+        ProviderMessage(ProviderRole.User, [Text("Say hello.")])])
+    return observed.invoke(request)
 ```
 
-On every `complete(params)` call it opens an LLM-kind child span
-under the current OTel context (so it nests under whichever node
-span is active), captures the OpenInference attributes, delegates
-to `inner.complete()`, then closes the span. Tracing failures are
-swallowed — observability never breaks the LLM call. Inner-provider
-exceptions are re-raised after the span is marked ERROR.
+Python `invoke`/`dispatch` release the GIL; the tracer adapter reacquires it for Python calls and reference destruction. The prepared operation retains that adapter and its tracer even if the wrapper is collected before dispatch. Parentage follows the active OpenTelemetry context at dispatch, not preparation; propagate that context when moving work between threads/tasks. Install `opentelemetry-api` before constructing the wrapper.
 
-Captured attributes per LLM span:
+In C++, the session overload safely attaches a parent across session teardown; a raw parent lookup requires the caller to keep that parent alive. The host-owned tracer must outlive all operations:
 
-| Attribute | Source |
+```cpp
+#include <neograph/observability/openinference.h>
+
+// tracer is a host-owned neograph::observability::Tracer adapter.
+// Its lifetime must cover the session and every provider operation.
+auto session = neograph::observability::openinference_tracer(tracer);
+auto observed = std::make_shared<neograph::observability::OpenInferenceProvider>(
+    inner_provider, tracer, session);
+// Use observed in NodeContext before compiling the graph.
+```
+
+Native LLM attributes contain only public role/text projections, declared scalars and known counts. Native replay blocks, reasoning, raw wire envelopes/events and `PreparedProviderRequest.encoded_body` are excluded from trace payloads; authentic custody stays with the request and outcome. Known zero is recorded; unknown is omitted. Counts above the signed span range are encoded as decimal strings. Visible text deltas emit `llm.token` events with Python OTel attributes `{"chunk": text}`. Completion sets OK; failure sets ERROR with the safe provider message, and dispatch exceptions retain their original product error while the span records an error. Public prompts, outputs and exception messages can still contain application secrets; control what reaches the exporter.
+
+| Attribute | Native source |
 |---|---|
-| `openinference.span.kind` | constant `"LLM"` |
-| `llm.model_name` | `params.model` |
-| `llm.invocation_parameters` | JSON blob of `temperature`, `max_tokens`, `top_p`, `frequency_penalty`, `presence_penalty` (when set) |
-| `llm.input_messages.{i}.message.role` | `params.messages[i].role` |
-| `llm.input_messages.{i}.message.content` | `params.messages[i].content` |
-| `input.value` / `input.mime_type` | `params.messages` JSON / `application/json` (Langfuse-compatible blob) |
-| `llm.output_messages.0.message.role` | `result.message.role` |
-| `llm.output_messages.0.message.content` | `result.message.content` |
-| `output.value` / `output.mime_type` | `result.message.content` / `text/plain` |
-| `llm.token_count.prompt` | `result.usage.prompt_tokens` |
-| `llm.token_count.completion` | `result.usage.completion_tokens` |
-| `llm.token_count.total` | `result.usage.total_tokens` |
+| `openinference.span.kind` | `"LLM"` |
+| `llm.model_name` | Admitted prepared model |
+| `llm.invocation_parameters` | Declared temperature and output cap when available |
+| `llm.input_messages.{i}.message.role` | Public role projection |
+| `llm.input_messages.{i}.message.content` | Public text parts |
+| `input.value` / `input.mime_type` | Public message JSON / `application/json` |
+| `llm.output_messages.{i}.message.role` | Every returned message's role |
+| `llm.output_messages.{i}.message.content` | Public text parts |
+| `output.value` / `output.mime_type` | Concatenated public text / `text/plain` |
+| `llm.token_count.prompt` | Present `usage.input_total.value` |
+| `llm.token_count.completion` | Present `usage.output_total.value` |
+| `llm.token_count.total` | Present `usage.total.value` |
+
+Token attributes report provider usage, including available partial usage on failure. They do not establish a vendor charge or restore budget authority. Use `UsageAccumulator.authority_snapshot()` / Program's `provider_budget_authority` for charged and reserved accounting; keep those separate from nullable usage reports.
 
 ### End-to-end: NeoGraph + Phoenix in one block
 
+Run Phoenix, then pass a graph specification, an existing typed provider, an explicit model and a `RunConfig` to `trace_graph`. The helper installs the wrapper before compiling the graph and uses the same tracer for graph/node `CHAIN` spans and provider `LLM` spans. Only executed provider calls produce LLM spans; trace counts remain usage reports rather than charged accounting.
+
 ```bash
 docker run -d -p 6006:6006 -p 4317:4317 arizephoenix/phoenix:latest
-pip install neograph-engine opentelemetry-exporter-otlp
+pip install neograph-engine opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp
 ```
 
 ```python
-from opentelemetry import trace
+from opentelemetry import context as otel_context
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from neograph_engine import GraphEngine, NodeContext
 from neograph_engine.openinference import OpenInferenceProvider, openinference_tracer
-from neograph_engine.llm import OpenAIProvider
-import os
-import neograph_engine as ng
 
-provider = TracerProvider()
-provider.add_span_processor(
-    BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4317", insecure=True)))
-trace.set_tracer_provider(provider)
-tracer = trace.get_tracer("my-app")
 
-inner = OpenAIProvider(api_key=os.environ["OPENAI_API_KEY"])
-wrapped = OpenInferenceProvider(inner, tracer)
-ctx = ng.NodeContext(provider=wrapped)
-engine = ng.GraphEngine.compile(graph_def, ctx)
+class ParentContextTracer:
+    def __init__(self, tracer, parent_context):
+        self.tracer, self.parent_context = tracer, parent_context
 
-with openinference_tracer(tracer) as cb:
-    engine.run_stream(ng.RunConfig(input={"messages": [...]}), cb)
+    def start_span(self, name):
+        return self.tracer.start_span(name, context=self.parent_context)
 
-# Open http://localhost:6006 — the trace renders as a chain with
-# each LLM call expanded into prompt / response / token counts.
+
+def trace_graph(graph_spec, inner_provider, model, cfg):
+    provider = TracerProvider()
+    provider.add_span_processor(BatchSpanProcessor(
+        OTLPSpanExporter(endpoint="http://localhost:4317", insecure=True)))
+    tracer = provider.get_tracer("my-app")
+    try:
+        with openinference_tracer(tracer) as cb:
+            parent = ParentContextTracer(tracer, otel_context.get_current())
+            observed = OpenInferenceProvider(inner_provider, parent)
+            engine = GraphEngine.compile(
+                graph_spec, NodeContext(provider=observed, model=model))
+            return engine.run_stream(cfg, cb)
+    finally:
+        provider.shutdown()
 ```
 
-Endpoint URL is the only thing you change to point this at Langfuse
-self-host instead of Phoenix — both honour OpenInference and OTLP.
+`ParentContextTracer` explicitly carries the caller's run context into provider dispatch on graph workers. It parents LLM spans to the run root; it does not promise node-level ancestry for every concurrent task. The [OpenInference conventions](https://github.com/Arize-ai/openinference/blob/main/spec/semantic_conventions.md) define `CHAIN` and `LLM`; NeoGraph exports the subset above. Follow [OpenTelemetry's sensitive-data guidance](https://opentelemetry.io/docs/security/handling-sensitive-data/) when choosing or redacting public-text and graph payloads.
 
 ### Notes
 
-- **Opt-in dependency.** `opentelemetry-api` is not pulled by the
-  base wheel. Importing `neograph_engine.tracing` /
-  `.openinference` raises `ImportError` on first use only when the
-  package is missing — install with
-  `pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp`.
-- **OTel contextvars across pybind.** The `otel_tracer` in v0.3.x
-  documented that `trace.use_span(...).__enter__()` without
-  `__exit__()` leaks the contextvar AND doesn't reliably propagate
-  through the C++ → Python callback boundary. Both tracers now use
-  explicit `otel_context.attach` + `detach` token pairs to control
-  current-span activation deterministically.
-- **`otel_tracer` vs `openinference_tracer`.** Use the OTel one
-  when your backend is APM-shape (Jaeger, Datadog) and you want
-  generic spans. Use the OpenInference one when your backend is
-  Phoenix / Langfuse / Arize and you want LLM-shape rendering. The
-  two can't be combined on the same run — they're alternative
-  callbacks for the engine's event stream.
+OpenTelemetry is opt-in. Install its API/SDK/exporter separately; the base wheel does not require them. Use either `otel_tracer` or `openinference_tracer` as the graph callback, not both for the same run. An OTLP endpoint and credentials must match your backend configuration; swapping only a URL is not a universal backend-compatibility guarantee.
 
 ---
 
@@ -2605,7 +2758,7 @@ std::unique_ptr<GraphEngine> create_react_graph(
 | `provider` | `std::shared_ptr<Provider>` | LLM provider |
 | `tools` | `std::vector<std::unique_ptr<Tool>>` | Tools available to the agent (ownership transferred) |
 | `instructions` | `std::string` | System prompt / instructions |
-| `model` | `std::string` | Model override (empty uses provider default) |
+| `model` | `std::string` | Explicit model name; the typed provider does not choose a default model |
 
 **Returns:** A compiled `GraphEngine` ready to run.
 
@@ -2648,7 +2801,7 @@ std::unique_ptr<GraphEngine> create_plan_execute_graph(
 | `planner_prompt` | `std::string` | System prompt for the planner; must instruct the model to reply with a JSON array of steps (fenced ```json blocks and leading prose are tolerated) |
 | `executor_prompt` | `std::string` | System prompt for the single-step executor (inner ReAct loop) |
 | `responder_prompt` | `std::string` | System prompt for the final synthesis phase |
-| `model` | `std::string` | Model override (empty uses provider default) |
+| `model` | `std::string` | Explicit model name; the typed provider does not choose a default model |
 | `max_step_iterations` | `int` | Upper bound on tool-call iterations inside the executor per step |
 
 **Channels populated:** `plan`, `past_steps`, `final_response`, `messages`.
@@ -2706,62 +2859,6 @@ sp::runtime::Result run_agent(
     return agent.run(history);
 }
 ```
-
-### json_path Utilities
-
-**Header:** `<neograph/llm/json_path.h>`
-**Namespace:** `neograph::llm::json_path`
-
-Utility functions for navigating and manipulating JSON values using dot-separated
-path strings. Available for general JSON use; not the typed SDK request/response codec.
-
-```cpp
-namespace json_path {
-    std::vector<std::string> split_path(const std::string& path);
-    const json* at_path(const json& root, const std::string& path);
-    json* at_path_mut(json& root, const std::string& path);
-    bool has_path(const json& root, const std::string& path);
-
-    template<typename T>
-    T get_path(const json& root, const std::string& path, const T& default_val);
-
-    void set_path(json& root, const std::string& path, const json& value);
-}
-```
-
-| Function | Description |
-|----------|-------------|
-| `split_path(path)` | Splits a dot-path string into segments. Example: `"choices.0.message"` becomes `["choices", "0", "message"]` |
-| `at_path(root, path)` | Navigates into a JSON value by dot-path. Numeric segments index into arrays. Returns `nullptr` if the path does not exist |
-| `at_path_mut(root, path)` | Mutable version of `at_path` |
-| `has_path(root, path)` | Returns `true` if the dot-path exists in the JSON value |
-| `get_path<T>(root, path, default_val)` | Returns the value at the path converted to type `T`, or `default_val` if the path does not exist or conversion fails |
-| `set_path(root, path, value)` | Sets a value at a dot-path, creating intermediate objects as needed |
-
-**Examples:**
-
-```cpp
-using namespace neograph::llm::json_path;
-
-json data = json::parse(R"({"choices": [{"message": {"content": "Hello"}}]})");
-
-// Navigate
-const json* msg = at_path(data, "choices.0.message.content");
-// *msg == "Hello"
-
-// Check existence
-bool exists = has_path(data, "choices.0.message.role");
-// exists == false
-
-// Get with default
-std::string role = get_path<std::string>(data, "choices.0.message.role", "assistant");
-// role == "assistant"
-
-// Set value (creates intermediates)
-set_path(data, "metadata.version", 2);
-```
-
----
 
 ## 13. MCP Module
 
@@ -3019,13 +3116,9 @@ using json = nlohmann::json;
 
 void run_custom_graph(
     sp::descriptor::ValidatedDescriptor descriptor, sp::runtime::Options options,
-    std::string model) {
+    std::string model, std::vector<std::unique_ptr<neograph::Tool>> tools) {
     auto provider = std::make_shared<neograph::llm::SchemaProvider>(
         std::move(descriptor), std::move(options));
-
-    std::vector<std::unique_ptr<neograph::Tool>> tools;
-    tools.push_back(std::make_unique<SearchTool>());
-    tools.push_back(std::make_unique<CalculatorTool>());
 
     json definition = {
         {"name", "assistant_graph"},
@@ -3044,7 +3137,7 @@ void run_custom_graph(
         {"conditional_edges", json::array({
             {{"from", "llm"},
              {"condition", "has_tool_calls"},
-             {"routes", {{"yes", "tools"}, {"no", "__end__"}}}}
+             {"routes", {{"true", "tools"}, {"false", "__end__"}}}}
         })}
     };
 
@@ -3155,12 +3248,12 @@ public:
         if (last.find("urgent") != std::string::npos) {
             result.command = Command{
                 "urgent_handler",                          // goto node
-                {{{"channel", "priority"}, {"value", "high"}}} // state updates
+                {{"priority", neograph::json("high")}} // state updates
             };
         } else {
             result.command = Command{
                 "normal_handler",
-                {{{"channel", "priority"}, {"value", "normal"}}}
+                {{"priority", neograph::json("normal")}}
             };
         }
 
@@ -3229,14 +3322,15 @@ pointer to that canonical source-level reference.
 ### `neograph::a2a` — Agent-to-Agent protocol
 
 **Header:** `<neograph/a2a/{client,server,types,a2a_caller_node}.h>`
-JSON-RPC 2.0 over Streamable HTTP. `A2AClient` calls a remote
-agent (`message/send`, `tasks/get`, `tasks/cancel`, AgentCard
-discovery, `message/stream` SSE); the server side adapts a
-NeoGraph `GraphEngine` into an A2A endpoint via
-`GraphAgentAdapter`. Dual `v0.3` / `v1` method-name dispatch —
-see commit `bc675a1`. Streaming uses `SseFrameSplitter` (client)
-and httplib chunked (server). Caller node embeds an A2A call as
-a graph node.
+`A2AClient` and `GraphAgentAdapter` implement JSON-RPC 2.0 HTTP/SSE with `WireDialect::{V0_3,V1_0}`. `AgentCard.supported_interfaces` contains ordered `AgentInterface{url, protocol_binding, protocol_version, tenant}` observations parsed from modern or legacy card fields; raw card fields remain available. Selection is lazy: first compatible JSONRPC 0.x/1.x interface, preferring a trailing-slash-normalized match to the configured base URL. The card never redirects the RPC endpoint. Selected tenant reaches send/get/cancel/stream. `wire_dialect()` is empty until selection or a successful probe; forced discovery resets it. A fetched incompatible card rejects rather than probing another dialect.
+
+Without a card, the client probes 0.3 and switches only on numeric JSON-RPC `-32601`, remembering the successful dialect. Switching changes method, body and header together. V1 uses PascalCase methods, `A2A-Version: 1.0`, `ROLE_*`/`TASK_STATE_*`, flat text/raw/url/data parts without `kind`, and `blocking` inverted to `returnImmediately`. Task/message wrappers and bare get/cancel task results decode. The server chooses response encoding from the version header, not method spelling: no header means 0.3, unsupported major version returns `-32009`; default cards advertise both. Bound discovery URLs remain correct across restart and do not replace an explicit endpoint.
+
+SSE accepts LF/CRLF/CR, comments, multiline data and final unterminated data. Opening task snapshots, status updates and artifact append/replace updates accumulate into the returned task. V1 streams send the opening submitted task and artifacts before terminal status, without legacy `kind`, `final` or a trailing task requirement. An observed event forbids dialect redispatch even without an external callback. Non-SSE RPC errors retain their code through `A2ARpcError::code()`; non-2xx HTTP cannot become a successful task.
+
+The caller node chooses final/interrupted agent status text, then first artifact text, then last agent history text. Progress status or user history cannot override the answer. Generic `async_post_stream` also delivers ordinary fixed-`Content-Length` bodies once when nonempty, preserving status; zero length emits no chunk. Body limit, early EOF and already-buffered surplus reject. Redirect/chunked/close-delimited rules remain unchanged.
+
+Python's `neograph_engine.a2a` exports `WireDialect`, `AgentInterface`, `AgentCard.supported_interfaces`/`raw`, `Part.media_type`, `MessageSendConfiguration`, `MessageSendParams`, `StreamEvent` and status/artifact records. `A2AClient.wire_dialect()` returns an enum or `None`; `set_authorization_header()` is the native setter; `send_message(params)` is the multipart overload. `send_message_stream(text, on_event, task_id="", context_id="")` or `(params, on_event)` returns the accumulated `Task` and passes owned event snapshots to a bool-returning callback. Blocking calls release the GIL; callback ownership reacquires it safely. `a2a.A2ARpcError.code` preserves the remote integer code. Vector/optional children are detached snapshots, while `Task.status` and `MessageSendParams.message` are live inline fields. JSON observations grant no provider native authority.
 
 **Public headers:** [`include/neograph/a2a/`](../include/neograph/a2a/).
 

@@ -188,6 +188,116 @@ struct CloseDelimitedMockServer {
     }
 };
 
+struct FixedLengthMockServer {
+    asio::io_context io;
+    asio::ip::tcp::acceptor acceptor{io};
+    std::thread worker;
+    unsigned short port = 0;
+    std::string response;
+
+    FixedLengthMockServer(int status, std::size_t length, std::string body) {
+        response = "HTTP/1.1 " + std::to_string(status) + " Response\r\n"
+            "Content-Type: application/json\r\nContent-Length: "
+            + std::to_string(length) + "\r\nConnection: close\r\n\r\n" + body;
+        acceptor.open(asio::ip::tcp::v4());
+        acceptor.bind({asio::ip::tcp::v4(), 0});
+        acceptor.listen();
+        port = acceptor.local_endpoint().port();
+        asio::co_spawn(io, serve(), asio::detached);
+        worker = std::thread([this] { io.run(); });
+    }
+    ~FixedLengthMockServer() {
+        io.stop();
+        if (worker.joinable()) worker.join();
+    }
+    asio::awaitable<void> serve() {
+        auto socket = co_await acceptor.async_accept(asio::use_awaitable);
+        try {
+            asio::streambuf request;
+            co_await asio::async_read_until(socket, request, "\r\n\r\n", asio::use_awaitable);
+            // One write also exercises read-ahead surplus detection.
+            co_await asio::async_write(socket, asio::buffer(response), asio::use_awaitable);
+        } catch (...) {}
+    }
+};
+
+struct FixedLengthResult {
+    int status = 0;
+    std::vector<std::string> chunks;
+    std::exception_ptr error;
+};
+
+FixedLengthResult read_fixed_response(FixedLengthMockServer& server,
+                                     neograph::async::RequestOptions options = {}) {
+    asio::io_context io;
+    FixedLengthResult result;
+    auto future = asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        auto response = co_await neograph::async::async_post_stream(
+            io.get_executor(), "127.0.0.1", std::to_string(server.port),
+            "/stream", "{}", {}, false,
+            [&](std::string_view chunk) { result.chunks.emplace_back(chunk); }, options);
+        result.status = response.status;
+    }, asio::use_future);
+    io.run();
+    try { future.get(); } catch (...) { result.error = std::current_exception(); }
+    return result;
+}
+
+TEST(AsyncPostStream, FixedLengthSuccessAndErrorPreserveBodyAndStatus) {
+    for (int status : {200, 400, 500}) {
+        const std::string body = R"({"error":"actual peer payload"})";
+        FixedLengthMockServer server(status, body.size(), body);
+        neograph::async::RequestOptions options;
+        options.max_response_body_bytes = body.size(); // inclusive boundary
+        auto result = read_fixed_response(server, options);
+        ASSERT_FALSE(result.error);
+        EXPECT_EQ(result.status, status);
+        EXPECT_EQ(result.chunks, std::vector<std::string>{body});
+    }
+}
+
+TEST(AsyncPostStream, FixedLengthZeroPreservesStatusWithoutEmptyCallback) {
+    FixedLengthMockServer server(200, 0, "");
+    auto result = read_fixed_response(server);
+    ASSERT_FALSE(result.error);
+    EXPECT_EQ(result.status, 200);
+    EXPECT_TRUE(result.chunks.empty());
+}
+
+TEST(AsyncPostStream, FixedLengthBodyLimitRejectsBeforeDelivery) {
+    FixedLengthMockServer server(500, 5, "12345");
+    neograph::async::RequestOptions options;
+    options.max_response_body_bytes = 4;
+    auto result = read_fixed_response(server, options);
+    ASSERT_TRUE(result.error);
+    try {
+        std::rethrow_exception(result.error);
+    } catch (const asio::system_error& error) {
+        EXPECT_EQ(error.code(), asio::error::message_size);
+    }
+    EXPECT_TRUE(result.chunks.empty());
+}
+
+TEST(AsyncPostStream, FixedLengthBufferedSurplusRejectsBeforeDelivery) {
+    for (std::size_t length : {0u, 4u}) {
+        FixedLengthMockServer server(200, length, "12345");
+        auto result = read_fixed_response(server);
+        ASSERT_TRUE(result.error);
+        try {
+            std::rethrow_exception(result.error);
+        } catch (const std::runtime_error&) {
+            EXPECT_TRUE(result.chunks.empty());
+        }
+    }
+}
+
+TEST(AsyncPostStream, FixedLengthPrematureCloseCannotDeliverPartialBody) {
+    FixedLengthMockServer server(200, 6, "short");
+    auto result = read_fixed_response(server);
+    ASSERT_TRUE(result.error);
+    EXPECT_TRUE(result.chunks.empty());
+}
+
 TEST(AsyncPostStream, ChunksDeliveredInOrder) {
     ChunkedMockServer srv({"alpha", "beta", "gamma"});
     asio::io_context  client_io;

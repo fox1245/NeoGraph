@@ -1,61 +1,46 @@
-# NeoGraph stress harnesses
+# NeoGraph sustained-concurrency stress benchmark
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-Operational-readiness gates that complement the engine-overhead and
-single-shot concurrent benchmarks. Where `benchmarks/bench_neograph`
-measures **per-call cost** and `benchmarks/concurrent/...` measures the
-**single 10k burst**, this directory exercises NeoGraph **over time**.
+This runner repeats a three-node counter graph over a wall-clock window. It measures local engine churn, not provider calls, persistence, or production readiness.
 
-## What's here
+## Measurement and exit status
 
-### `bench_sustained_concurrent`
+`bench_sustained_concurrent` defaults to `--concurrency 1000`, `--duration-s 60`, `--sample-s 5`, `--warmup-s 5`, and `--rss-tolerance-pct 25`. It creates a caller pool with one thread per target run; completions enqueue replacements. Samples report mean and maximum latency, not P99. Timing starts inside a caller worker and excludes its queue wait. `ok_total` counts calls that returned without a thrown exception, not validation of the returned graph state.
 
-Holds N graph runs in flight for M wall-clock seconds. Submits a new
-run as soon as one completes, so inflight stays at the target. Samples
-RSS and per-window latency every `--sample-s` seconds; exits 1 if RSS
-drifts upward by more than `--rss-tolerance-pct` between the warm
-baseline (after warmup) and the final sample.
+Exit 1 means final current RSS exceeds the recorded warm baseline by the tolerance; exit 0 does not prove leak freedom or absence of run errors. Read `err_total` separately. The final RSS is read after stopping and joining the pool, so thread teardown affects drift. The warm baseline is only captured on the first sample if it has reached `warmup-s`; keep warmup no longer than the first sample interval. A missing baseline yields zero drift and cannot qualify a memory gate.
 
-Catches three failure modes the burst bench can't:
+Windows uses process working-set counters; Linux uses `/proc/self/status`. Other platforms can report zero because those counters are unavailable. Peak RSS is a high-water mark and never decreases; inspect current RSS and baseline validity when investigating growth.
 
-- **Steady-state leaks** — coroutines / pending writes / cached
-  state that grow without bound. The drift gate is best-effort
-  (Valgrind / LSan stays the authoritative tool, see ASan / TSan CI),
-  but a 25% RSS climb over 60 s is a strong "look at this" signal.
-- **Latency drift** — mean / max-per-window walks up after the
-  pool warms. Often points at thread-pool starvation or scheduler
-  back-pressure that doesn't show in t=0 burst tests.
-- **Pool exhaustion under churn** — completions overlap with new
-  submissions, so the worker pool sees a mixed inflight pattern,
-  not the all-drain of a burst.
+## Build and run
 
-#### Usage
+Install the external SchemaProvider SDK and set its prefix. Core requires `SchemaProvider::runtime` even when LLM and the optional NeoGraph libcurl backend are disabled. An explicit SDK source checkout can replace the prefix using `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`; its build needs C++20, Python, libcurl ≥7.88, and OpenSSL Crypto. See the [build guide](../../README.md) for dependency and platform limits. This recipe disables network fetching and unused NeoGraph integrations.
+For NeoGraph `0.13.0`, use alpha SDK `0.1.0`, interface revision/shared
+generation 4, and rebuild with matching headers/libraries. Current integrated validation is pending.
 
 ```bash
+# Set SCHEMAPROVIDER_PREFIX to the installed SDK prefix.
 cmake -B build-stress -S . \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DNEOGRAPH_BUILD_BENCHMARKS=ON \
-    -DNEOGRAPH_BUILD_TESTS=OFF \
-    -DNEOGRAPH_BUILD_EXAMPLES=OFF
-cmake --build build-stress -j$(nproc) --target bench_sustained_concurrent
+  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
+  -DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+  -DNEOGRAPH_BUILD_TESTS=OFF -DNEOGRAPH_BUILD_EXAMPLES=OFF \
+  -DNEOGRAPH_BUILD_PROGRAM=OFF -DNEOGRAPH_BUILD_LLM=OFF \
+  -DNEOGRAPH_BUILD_ASYNC=OFF -DNEOGRAPH_BUILD_MCP=OFF \
+  -DNEOGRAPH_BUILD_A2A=OFF -DNEOGRAPH_BUILD_ACP=OFF \
+  -DNEOGRAPH_BUILD_UTIL=OFF -DNEOGRAPH_BUILD_POSTGRES=OFF \
+  -DNEOGRAPH_BUILD_SQLITE=OFF -DNEOGRAPH_USE_LIBCURL=OFF
+cmake --build build-stress --parallel --target bench_sustained_concurrent
 
 ./build-stress/bench_sustained_concurrent \
-    --concurrency        1000 \
-    --duration-s         60   \
-    --sample-s           5    \
-    --warmup-s           5    \
-    --rss-tolerance-pct  25
+  --concurrency 1000 --duration-s 60 --sample-s 5 \
+  --warmup-s 5 --rss-tolerance-pct 25
 ```
 
-Smoke result (concurrency=100, duration=15s, on Ryzen 7 5800X):
-- 15.3 M graph runs / 15 s ≈ **1.0 M runs/s** sustained
-- mean latency per run: ~55 µs
-- RSS warm: 9.3 MB → final: 7.4 MB (drift ‑20 %, exit 0)
+## Preserved legacy observation
 
-#### Output shape
-
-One JSON line per sample, one final summary line:
+The previous README reported an undated Ryzen 7 5800X run with concurrency=100 and duration=15 s: 15.3 M runs (about 1.0 M runs/s), mean latency about 55 µs, warm RSS 9.3 MB and final RSS 7.4 MB (about −20%, exit 0). Its date and SDK revision were not recorded here. It is retained as legacy evidence, not a new cutover qualification or a throughput guarantee. The output excerpt below belongs to that observation; the ellipsis is not JSON.
 
 ```json
 {"sample":1,"elapsed_s":5,"window_ok":5012514,"err_total":0,"inflight":100,
@@ -66,32 +51,17 @@ One JSON line per sample, one final summary line:
  "rss_drift_pct":-20.29,"rss_tolerance_pct":25,"leak_suspect":false}
 ```
 
-### `bench_sustained_concurrent` under `prlimit` (memory cap test)
+## Allocation-pressure experiment
 
-Wrap the harness in a virtual-memory cap to prove NeoGraph handles
-allocation pressure cleanly:
+`prlimit` limits Linux virtual address space. With a thread per caller slot, stacks and pool construction can exhaust that limit before graph execution. The per-run catch records exceptions from `engine->run`, but pool creation is outside that catch. Clean process exit under allocation pressure is an acceptance criterion to measure, not a guarantee from this script.
 
 ```bash
-# Cap address space at 256 MB. Allocations beyond this fail with
-# std::bad_alloc — NeoGraph's audit-Round-5 typed catch in
-# graph_executor (commit ead703e) rethrows bad_alloc instead of
-# silently retrying, so the workload should error out instead of
-# crashing.
+# Linux: cap virtual address space, not resident memory.
 prlimit --as=$((256*1024*1024)) \
-    ./build-stress/bench_sustained_concurrent \
-        --concurrency 200 --duration-s 30
+  ./build-stress/bench_sustained_concurrent \
+  --concurrency 200 --duration-s 30
 ```
 
-Pass criteria: process exits cleanly (return code 0 or 1; not SIGABRT
-/ SIGSEGV), `err_total` may be non-zero (those are the bad_alloc
-rethrows surfacing as failed runs).
+## Additional experiments
 
-## Not yet here
-
-- **24-hour soak** — same harness, longer wall window. Run it on a
-  dedicated host; watch `peak_rss_kb` for monotone-non-decreasing
-  trend over hours.
-- **cgroup-bounded run** — `systemd-run --scope -p MemoryMax=512M`
-  for a stricter resource cap than `prlimit` (kernel-side
-  enforcement, not just allocation-time check). WSL2 systemd
-  support is limited; test on a real Linux host.
+A 24-hour run or a cgroup memory cap needs a separately recorded environment and outcome. Compare current RSS across steady-state windows, record `err_total` and termination signals, and distinguish cgroup resident-memory enforcement from `prlimit` address-space limits. This page does not report those runs.

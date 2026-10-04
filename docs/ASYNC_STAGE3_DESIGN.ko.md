@@ -1,13 +1,19 @@
-<!-- neograph-i18n: source=docs/ASYNC_STAGE3_DESIGN.md locale=ko source_sha256=d6d1575f38204de726d4313f8b7a1314ed2fe236484934f7f5be1fb0b4bcf7aa -->
+<!-- neograph-i18n: source=docs/ASYNC_STAGE3_DESIGN.md locale=ko source_sha256=1b7adfd905a5df954404b35ec17b04b8e334eaee56e2b5f2c8d042b831c9ffa0 -->
 # Stage 3 — asio 기반 전체 비동기 재설계
 
 > **보관된, 대체된 설계 제안.** 이 문서는 2026-04-19의 Stage 3 제안을
 > 기록하며 현재 API 지침이나 모든 예정 gate의 완료 증거가 아닙니다.
 > 여기의 `Provider::complete` / `complete_async` 쌍과 `OpenAIProvider`는
 > 타입 제공자 전환에서 제거되었습니다. 현재 제공자는 타입 요청을 소유하고
-> 한 번 prepare한 뒤 준비된 호출을 dispatch합니다. [API narrative tour](reference-ko.md),
-> [이전 가이드](migration-v0.4-to-v1.0.ko.md)와 설치된 헤더를 참고하세요.
+> 한 번 prepare한 뒤 준비된 호출을 dispatch합니다. [API narrative tour](reference-en.md),
+> [이전 가이드](migration-v0.4-to-v1.0.md)와 설치된 헤더를 참고하세요.
 > SDK의 `Client::complete`는 별개의 지원 API입니다.
+>
+> 아래 “현재 상태”, 일정, gate, 버전, 다음 작업은 모두 당시 제안 날짜의
+> 기록이다. Python은 Stage 3 범위 밖이었지만 현재 전환에는 typed Python
+> provider와 소유 outcome이 포함된다. 현재 Core는 LLM node를 꺼도 외부
+> SchemaProvider runtime이 필요하다. 구현 계약과 플랫폼 검증 범위는
+> [비동기 가이드](ASYNC_GUIDE.md)와 [Python binding](python-binding.md)을 참고한다.
 
 **Languages:** [English](ASYNC_STAGE3_DESIGN.md) | [한국어](ASYNC_STAGE3_DESIGN.ko.md) | [日本語](ASYNC_STAGE3_DESIGN.ja.md) | [简体中文](ASYNC_STAGE3_DESIGN.zh-CN.md)
 

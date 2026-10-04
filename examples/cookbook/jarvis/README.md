@@ -10,7 +10,10 @@ Local voice is optional and needs the selected whisper/Moonshine models, ONNX Ru
 
 Custom provider-calling nodes use the existing runtime-interposition/broker boundary and shared `record_usage` sink. They retain the real owned outcome before extracting response text, propagate cancellation/deadlines and both local and host observers, and preserve drained outcomes when an observer throws. The synthesizer's distinct regeneration call uses its own stable call ordinal. Bounded calls require admitted model-limit facts; missing facts fail before provider dispatch rather than inventing a token estimate. Default HTTPS ports are omitted from the admitted origin so OpenRouter routing matches the policy's canonical origin.
 
-`[jarvis:ttft]` is emitted on the first nonempty `sp::PartDelta` with `PartKind::Text` and `DeltaChannel::Content`, not on usage, reasoning, headers or other events. It measures first synthesis text, not first audible TTS playback. Python REPL/benchmark protocol drivers remain unchanged; typed Python provider bindings are deferred. Current runtime evidence covers the actual CLI greeting, a persisted synthetic memory turn and graceful EOF. It does not qualify microphone capture, ASR, TTS, pybind benchmarks or vendor inference. Timings and voice/live execution statements retained below remain historical, not current cutover qualification.
+`[jarvis:ttft]` is emitted on the first nonempty `sp::PartDelta` with `PartKind::Text` and `DeltaChannel::Content`, not on usage, reasoning, headers or other events. It measures first synthesis text, not first audible TTS playback. Python REPL drivers remain protocol clients; pybind benchmarks use the migrated typed bindings and need separate execution evidence. Current runtime evidence covers the actual CLI greeting, a persisted synthetic memory turn and graceful EOF. It does not qualify microphone capture, ASR, TTS, pybind benchmarks or vendor inference. Timings and voice/live execution statements retained below remain historical, not current cutover qualification.
+
+The CLI evidence above was recorded with interface 3; the retained A2A 1.0 wire
+changes and SDK interface-4 controls are source contracts, not new runtime passes.
 
 > Local/mock operation needs no cloud provider; optional voice needs local assets and devices.
 > Microphone is Tony, NeoGraph is JARVIS, tools/experts are JARVIS's subordinates.
@@ -122,10 +125,12 @@ as an A2A endpoint.
 }
 ```
 
-On startup, it requests `AgentCard` from each URL → activates only those that respond.
-**Key trick**: Any external agent that follows the A2A standard — whether it's a Python
-A2A bot someone else made, another NeoGraph instance, etc. — can become JARVIS's
-subordinate by just adding its URL to this JSON.
+On startup, JARVIS fetches each configured AgentCard. Calls require a compatible
+JSON-RPC 0.x/1.0 interface; responding discovery alone does not establish compatibility.
+The client selects the card dialect without redirecting the configured endpoint.
+Card-selected calls do not fallback to another dialect, and delivered SSE events
+cannot be replayed. External Python agents and NeoGraph instances can use this
+contract when their cards and wire behavior agree.
 
 ## Router (Intent Classification) — JARVIS's Brain
 
@@ -171,11 +176,14 @@ persists to file — remembers across restarts. Empty turns (STT failure / noise
 from commits to prevent memory pollution. `prefs.native_lang` maintains the estimated native language
 (language consistency).
 
+This JSON file stores speech/conversation projections, not authenticated native
+provider replay custody.
+
 ## Bidirectional A2A — JARVIS Calls and Is Called
 
 - **Calling**: Delegate to experts via `A2AClient` from `agent_registry.json`.
 - **Being called**: JARVIS itself exposes an `A2AServer` (port 8200).
-  - External systems can send text messages to JARVIS via `POST /v1/messages`.
+  - External systems send JSON-RPC to `POST /`: `message/send` for 0.x or `SendMessage` with `A2A-Version: 1.0` for 1.0; the header selects the response dialect.
   - Mobile apps, other NeoGraph instances, even another JARVIS can call it.
   - Text input skips the microphone/STT stage and goes directly to the router.
 
@@ -185,15 +193,10 @@ from commits to prevent memory pollution. `prefs.native_lang` maintains the esti
 
 ## Background Triggers (Proactive)
 
-A separate async graph runs in the background:
-- Timer (check calendar every 5 minutes)
-- External events (home sensors, email receipt)
-- External A2A calls
-
-When an event occurs, it injects a message into JARVIS's main graph → JARVIS speaks
-before Tony asks. ("Sir, meeting in 10 minutes.")
-
-Uses NeoGraph's `27_async_concurrent_runs.cpp` pattern exactly.
+Background timer/event triggers are a design, not an implemented component.
+A host could use the `27_async_concurrent_runs.cpp` pattern to enqueue text
+from calendar or sensor events. The A2A server is implemented separately;
+its presence does not qualify proactive triggering.
 
 ## Directory Structure
 
@@ -228,8 +231,10 @@ jarvis/
 #    Lightweight: JARVIS_WHISPER=small bash assets/download.sh  (Raspberry Pi / CPU)
 bash examples/cookbook/jarvis/assets/download.sh
 
-# 2. Build — onnxruntime, whisper.cpp, miniaudio found on system (or mock if missing)
-cmake -B build-jarvis -DNEOGRAPH_BUILD_COOKBOOK_JARVIS=ON
+# 2. Build — install SchemaProvider and optional voice dependencies first
+export SCHEMAPROVIDER_PREFIX="/absolute/path/to/installed/schemaprovider"
+cmake -S . -B build-jarvis -DNEOGRAPH_BUILD_COOKBOOK_JARVIS=ON \
+  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX"
 cmake --build build-jarvis --target cookbook_jarvis -j
 
 # 3a. Run — text/wav input (Korean line-edit REPL recommended)
@@ -284,7 +289,7 @@ OPENROUTER_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + OpenRouter
 
 ## Implementation Status
 
-**Fully functional** — Verified live voice single-turn runs on real hardware
+**Historical voice evidence** — Earlier live single-turn runs on real hardware
 (OpenRouter DeepSeek). Mic→VAD→STT→router→4-way→synth→TTS full chain +
 
 Known limitations / next version:
@@ -292,7 +297,7 @@ Known limitations / next version:
   (will add cancel token in v2).
 - **Streaming STT not applied** — Batch transcription after utterance completion. Moonshine v2
   ergodic encoder chunk-by-chunk streaming is the next candidate.
-- **Multi-speaker · long-memory compression** — Single-speaker assumption, 24-turn limit.
+- **Multi-speaker · long-memory compression** — Single-speaker assumption. Memory lookup defaults to six recent turns; commits retain the latest 24 turns without summarizing older history.
 - **Background triggers (proactive)** — Designed but not implemented.
 
 ## License / External Dependencies

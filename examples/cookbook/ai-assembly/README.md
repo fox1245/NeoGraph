@@ -2,10 +2,10 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-**Current scoped runtime evidence.** Four actual local A2A member servers and
+**Preserved interface-3 scoped runtime evidence.** Four actual local A2A member servers and
 the C++ Speaker completed an offline session after the typed-provider cutover.
 Synthetic abstentions are fixture output, not model judgment or vendor inference.
-This does not qualify live provider calls or the deferred Python Speaker binding.
+This does not qualify live provider calls or the Python Speaker.
 
 A toy demo built **as a fresh NeoGraph user** — every API choice was
 made by reading the public docs (README, examples on github, Doxygen)
@@ -39,6 +39,12 @@ Each member is a one-node NeoGraph (`__start__ → persona → __end__`)
 served behind `a2a::A2AServer`. The graph reads a `prompt` channel and
 writes a `response` channel; the A2A server's default
 `GraphAgentAdapter` surfaces those over JSON-RPC.
+
+Current clients select compatible JSON-RPC 0.x/1.0 interfaces from the AgentCard;
+the server advertises both dialects and uses `A2A-Version` for response encoding.
+Opening SSE task snapshots are progress, not completed replies. Card-selected
+requests do not dialect-fallback, and delivered events cannot be replayed.
+The earlier offline session does not qualify the retained 1.0 wire changes.
 
 ## Live transcript (DeepSeek via OpenRouter, 2026-04-29)
 
@@ -101,12 +107,12 @@ This documents source migration, not a new build/test/live qualification.
 
 ## Python speaker variant (v0.2.1+, cross-language A2A)
 
-Python bindings are **deferred** for this cutover. `speaker.py` requires a
-separately available compatible `neograph_engine.a2a`; the C++ migration does
-not establish that prerequisite. The following is historical usage only:
+`speaker.py` uses `neograph_engine.a2a`, not the provider subclass API. Use a
+binding built from this checkout; an older published wheel does not establish
+compatibility with the current source. The preserved C++ run did not exercise it.
 
 ```bash
-pip install 'neograph-engine>=0.2.1'
+# Build/install this checkout's Python binding; see docs/python-binding.md.
 # (start the C++ members in another terminal as above)
 PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     examples/cookbook/ai-assembly/bills/basic_income.txt \
@@ -115,7 +121,11 @@ PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
 ```
 
 The v0.2.1 binding was a historical release result, not current qualification.
-A2A wire clients/protocol are unchanged.
+The current Python speaker shares the C++ caller's application policy: actual
+terminal/interrupted agent status text first, then first artifact text, then the
+last nonempty agent history text. `ng.a2a.Role.Agent` identifies agent messages;
+the submitted user bill cannot become a member's reply. This is application
+answer selection, not a universal A2A precedence rule or a new runtime pass.
 
 ## Friction journal — what a fresh NeoGraph user tripped over
 
@@ -124,18 +134,18 @@ Historical pre-cutover friction follows, not current legacy API support claims.
 
 ### 1. A2A was C++-only — Python binding didn't expose it (FIXED in v0.2.1)
 
-Historically v0.2.1 added the Python A2A client. Current bindings are deferred;
-no future release delivery is promised.
+Historically v0.2.1 added the Python A2A client. The current source still exposes
+that client; execution qualification must come from a current Python run.
 
 ### 2. No system install / no headers in the wheel (FIXED in README v0.2.1)
 
 Historically README described FetchContent. This recipe supplies integrated
 NeoGraph targets only, no standalone CMake project. SchemaProvider is required.
 
-### 3. `OpenAIProvider::create()` `unique_ptr` vs `shared_ptr` (FIXED in v0.2.1)
+### 3. Provider ownership (`unique_ptr` vs `shared_ptr`, resolved in v0.2.1)
 
-Historically `create_shared` addressed the old ownership friction. The current
-recipe instead uses `examples::make_openrouter_provider` and typed outcomes.
+The earlier release resolved provider ownership friction. The current recipe uses
+`examples::make_openrouter_provider` and typed outcomes.
 
 ### 4. `.env` autoload doesn't propagate to A2A child processes (DOCUMENTED in v0.2.1)
 

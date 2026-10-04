@@ -1,4 +1,4 @@
-# Minimal MCP — no fastmcp, no SDK, no API key
+# Minimal MCP — no fastmcp or API key
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
@@ -7,9 +7,9 @@ client inside a ReAct loop that uses the pinned OpenRouter DeepSeek model,
 and most MCP tutorials assume you `pip install fastmcp` (which pulls ~60 packages)
 on the server side. That hides a useful fact:
 
-> **NeoGraph's built-in MCP client needs nothing on the peer side except
-> a process that speaks the wire protocol — and nothing on its own side
-> except `libneograph_mcp` (already in the binary).**
+> The peer only needs to speak MCP over stdio. The C++ client links
+> `libneograph_mcp` and its transitive native dependencies; no Python MCP package
+> is needed on the peer.
 
 This cookbook proves it with the smallest possible setup:
 
@@ -23,8 +23,10 @@ This cookbook proves it with the smallest possible setup:
 
 ## Run it
 
-From the build directory (built with `-DNEOGRAPH_BUILD_MCP=ON`, which is
-on by default for examples):
+From the build directory, after configuring with `-DNEOGRAPH_BUILD_EXAMPLES=ON`
+and `-DNEOGRAPH_BUILD_MCP=ON`. SchemaProvider is required even though this recipe
+does not invoke a model; supply its installed prefix through `CMAKE_PREFIX_PATH`
+or its source through `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`:
 
 ```bash
 ./cookbook_minimal_mcp python3 ../examples/cookbook/minimal-mcp/min_stdio_server.py
@@ -53,11 +55,9 @@ there — it isn't a canned string.
 
 ## Why this matters
 
-- **Lightweight, both sides.** The "batteries included" claim is real:
-  NeoGraph links MCP statically, so there is no separate package to
-  install and no dependency that can drift. The *peer* server can be as
-  small as the stdlib allows — useful on edge devices, in CI, or when
-  you just want to expose a couple of local tools without a framework.
+- **Small peer.** The server uses only Python's standard library. The client
+  still has native build dependencies, including SchemaProvider. Keeping MCP
+  in the binary does not remove those dependencies.
 - **Peer-agnostic.** Replace `min_stdio_server.py` with any executable
   that speaks MCP over stdio (a Go binary, a Rust server, fastmcp, the
   official SDK). The C++ side never changes.

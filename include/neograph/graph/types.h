@@ -125,9 +125,9 @@ struct ChannelWrite {
         /// Feed the value through the channel's reducer. The default, and what
         /// every write did before this existed.
         Reduce,
-        /// Replace the channel's value outright, ignoring the reducer. The only
-        /// way to shrink an accumulating channel — trim a conversation history,
-        /// drop a poisoned message, reset a scratchpad.
+        /// Replace the channel's value outright, ignoring the reducer. Use this
+        /// to trim conversation history, drop a poisoned message, or reset a
+        /// scratchpad; the channel's retention policy still applies afterward.
         Overwrite,
     };
 

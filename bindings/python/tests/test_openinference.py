@@ -1,492 +1,248 @@
-"""Tests for the OpenInference observability layer.
+"""OpenInference spans follow real graph and typed TLS provider dispatches."""
 
-Verify that ``openinference_tracer`` + ``OpenInferenceProvider`` emit
-spans with the right OpenInference attribute keys so Phoenix / Arize /
-Langfuse render NeoGraph traces as LLM chains.
-
-Strategy: use an InMemorySpanExporter to collect spans, then assert
-on attribute presence + values. No external Phoenix instance needed.
-"""
-from __future__ import annotations
-
+import asyncio
 import json
+import gc
+
 import pytest
 
-import neograph_engine as ng
-from neograph_engine import _neograph as _native
-
-pytest.importorskip("opentelemetry")
-
-from opentelemetry import trace
+pytest.importorskip("opentelemetry.sdk")
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
-    InMemorySpanExporter,
-)
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from neograph_engine.openinference import (
-    OpenInferenceProvider,
-    openinference_tracer,
-)
+import neograph_engine as ng
+from neograph_engine.openinference import OpenInferenceProvider, openinference_tracer
 
 
 @pytest.fixture
 def tracer_and_exporter():
-    """Fresh TracerProvider + InMemorySpanExporter per test (avoids
-    cross-test span leakage)."""
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    tracer = provider.get_tracer("test-openinference")
-    yield tracer, exporter
-    exporter.clear()
-
-
-# ── A tiny in-process Provider so tests don't need a network ────────
-
-class _FakeProvider(ng.Provider):
-    """Echoes the last user message with a fixed prefix. Captures usage
-    so we can verify token-count attribute mapping."""
-
-    def __init__(self, reply: str = "ok", *, prompt_tokens: int = 7,
-                 completion_tokens: int = 3):
-        super().__init__()
-        self._reply = reply
-        self._pt = prompt_tokens
-        self._ct = completion_tokens
-
-    def get_name(self):
-        return "fake"
-
-    def complete(self, params):
-        result = ng.ChatCompletion()
-        result.message = ng.ChatMessage(role="assistant", content=self._reply)
-        usage = ng.ChatCompletion.Usage()
-        usage.prompt_tokens = self._pt
-        usage.completion_tokens = self._ct
-        usage.total_tokens = self._pt + self._ct
-        result.usage = usage
-        return result
-
-
-class _FakeStreamingProvider(_FakeProvider):
-    def __init__(self, chunks):
-        super().__init__(reply="".join(chunks))
-        self._chunks = chunks
-
-    def complete_stream(self, params, on_chunk):
-        for chunk in self._chunks:
-            on_chunk(chunk)
-        return self.complete(params)
-
-
-# ── A NeoGraph node that calls the provider once ────────────────────
-
-class _LLMNode(ng.GraphNode):
-    def __init__(self, name, ctx):
-        super().__init__()
-        self._name = name
-        self._ctx = ctx
-
-    def get_name(self):
-        return self._name
-
-    def run(self, input):
-        msgs = input.state.get("messages") or []
-        params = ng.CompletionParams()
-        params.model = "fake-model-1"
-        params.temperature = 0.5
-        params.max_tokens = 100
-        out = [ng.ChatMessage(role="system", content="be helpful")]
-        for m in msgs:
-            role = m.get("role", "")
-            content = m.get("content", "")
-            if role and content:
-                out.append(ng.ChatMessage(role=role, content=content))
-        params.messages = out
-        result = self._ctx.provider.complete(params)
-        text = result.message.content if result.message else ""
-        return [ng.ChannelWrite("messages", [{
-            "role": "assistant",
-            "content": text,
-        }])]
-
-
-def _spans_by_kind(exporter):
-    """Return spans grouped by openinference.span.kind attribute."""
-    by_kind: dict[str, list] = {}
-    for s in exporter.get_finished_spans():
-        kind = s.attributes.get("openinference.span.kind", "<none>")
-        by_kind.setdefault(kind, []).append(s)
-    return by_kind
-
-
-def test_provider_wrapper_emits_llm_span(tracer_and_exporter):
-    """OpenInferenceProvider opens an LLM-kind span on complete()."""
-    tracer, exporter = tracer_and_exporter
-    inner = _FakeProvider(reply="hello world", prompt_tokens=7,
-                          completion_tokens=3)
-    wrapped = OpenInferenceProvider(inner, tracer)
-
-    params = ng.CompletionParams()
-    params.model = "fake-model-1"
-    params.temperature = 0.5
-    params.messages = [
-        ng.ChatMessage(role="system", content="sys"),
-        ng.ChatMessage(role="user", content="hi"),
-    ]
-    result = wrapped.complete(params)
-    assert result.message.content == "hello world"
-
-    spans = exporter.get_finished_spans()
-    assert len(spans) == 1
-    span = spans[0]
-    assert span.name == "llm.complete"
-    a = span.attributes
-    assert a.get("openinference.span.kind") == "LLM"
-    assert a.get("llm.model_name") == "fake-model-1"
-    assert a.get("llm.input_messages.0.message.role") == "system"
-    assert a.get("llm.input_messages.0.message.content") == "sys"
-    assert a.get("llm.input_messages.1.message.role") == "user"
-    assert a.get("llm.input_messages.1.message.content") == "hi"
-    assert a.get("llm.output_messages.0.message.role") == "assistant"
-    assert a.get("llm.output_messages.0.message.content") == "hello world"
-    assert a.get("llm.token_count.prompt") == 7
-    assert a.get("llm.token_count.completion") == 3
-    assert a.get("llm.token_count.total") == 10
-    # input.value is JSON, parseable
-    parsed = json.loads(a.get("input.value"))
-    assert parsed[0]["role"] == "system" and parsed[1]["role"] == "user"
-
-
-def test_tracer_emits_chain_spans_per_node(tracer_and_exporter):
-    """openinference_tracer opens a CHAIN-kind root + per-node child."""
-    tracer, exporter = tracer_and_exporter
-    inner = _FakeProvider(reply="reply")
-    wrapped = OpenInferenceProvider(inner, tracer)
-    ctx = ng.NodeContext(provider=wrapped)
-
-    ng.NodeFactory.register_type(
-        "llmnode_for_oi_test",
-        lambda n, c, ctx: _LLMNode(n, ctx),
-    )
-    defn = {
-        "name": "oi_chain",
-        "channels": {"messages": {"reducer": "append"}},
-        "nodes": {"chat": {"type": "llmnode_for_oi_test"}},
-        "edges": [
-            {"from": ng.START_NODE, "to": "chat"},
-            {"from": "chat", "to": ng.END_NODE},
-        ],
-    }
-    engine = ng.GraphEngine.compile(defn, ctx)
-
-    with openinference_tracer(tracer) as cb:
-        engine.run_stream(
-            ng.RunConfig(input={"messages": [
-                {"role": "user", "content": "hi"}]}),
-            cb,
-        )
-
-    by_kind = _spans_by_kind(exporter)
-    chain_spans = by_kind.get("CHAIN", [])
-    llm_spans = by_kind.get("LLM", [])
-
-    # Expect: 1 root (graph.run) + 1 node (node.chat) + 1 LLM (llm.complete).
-    chain_names = sorted(s.name for s in chain_spans)
-    assert chain_names == ["graph.run", "node.chat"], chain_names
-    assert len(llm_spans) == 1, llm_spans
-    assert llm_spans[0].name == "llm.complete"
-
-
-def test_tracer_records_input_output_blob(tracer_and_exporter):
-    """Node spans carry input.value / output.value JSON blobs."""
-    tracer, exporter = tracer_and_exporter
-    inner = _FakeProvider(reply="reply")
-    wrapped = OpenInferenceProvider(inner, tracer)
-    ctx = ng.NodeContext(provider=wrapped)
-    ng.NodeFactory.register_type(
-        "llmnode_for_oi_io_test",
-        lambda n, c, ctx: _LLMNode(n, ctx),
-    )
-    defn = {
-        "name": "oi_io",
-        "channels": {"messages": {"reducer": "append"}},
-        "nodes": {"chat": {"type": "llmnode_for_oi_io_test"}},
-        "edges": [
-            {"from": ng.START_NODE, "to": "chat"},
-            {"from": "chat", "to": ng.END_NODE},
-        ],
-    }
-    engine = ng.GraphEngine.compile(defn, ctx)
-    with openinference_tracer(tracer) as cb:
-        engine.run_stream(
-            ng.RunConfig(input={"messages": [
-                {"role": "user", "content": "hi"}]}),
-            cb,
-        )
-
-    node_spans = [s for s in exporter.get_finished_spans()
-                  if s.name == "node.chat"]
-    assert node_spans
-    a = node_spans[0].attributes
-    assert a.get("input.mime_type") == "application/json"
-    parsed = json.loads(a.get("input.value"))
-    assert parsed.get("node") == "chat"
-
-
-def test_async_stream_all_no_detach_noise(tracer_and_exporter, capsys):
-    """Issue #2: openinference_tracer + run_stream_async + StreamMode.ALL
-    must not emit OTel "Failed to detach context" stderr.
-
-    The bug: NODE_END callbacks fire from a different asyncio.Task than
-    the one that ran NODE_START, so the contextvars token detach lands
-    in a foreign Context. OTel's SDK swallows the ValueError but emits
-    the full traceback via logger.exception, polluting stderr. Fix: skip
-    detach when (thread, task) at end differ from attach.
-    """
-    import asyncio
-    import logging
-
-    tracer, exporter = tracer_and_exporter
-
-    inner = _FakeProvider(reply="reply")
-    wrapped = OpenInferenceProvider(inner, tracer)
-    ctx = ng.NodeContext(provider=wrapped)
-    ng.NodeFactory.register_type(
-        "llmnode_for_oi_async_test",
-        lambda n, c, ctx: _LLMNode(n, ctx),
-    )
-    defn = {
-        "name": "oi_async",
-        "channels": {"messages": {"reducer": "append"}},
-        "nodes": {
-            "a": {"type": "llmnode_for_oi_async_test"},
-            "b": {"type": "llmnode_for_oi_async_test"},
-        },
-        "edges": [
-            {"from": ng.START_NODE, "to": "a"},
-            {"from": "a", "to": "b"},
-            {"from": "b", "to": ng.END_NODE},
-        ],
-    }
-    engine = ng.GraphEngine.compile(defn, ctx)
-    engine.set_checkpoint_store(ng.InMemoryCheckpointStore())
-
-    # Capture the OTel context logger that emits the noise.
-    records: list[logging.LogRecord] = []
-
-    class _Capture(logging.Handler):
-        def emit(self, record):
-            records.append(record)
-
-    handler = _Capture(level=logging.DEBUG)
-    otel_logger = logging.getLogger("opentelemetry.context")
-    prev_level = otel_logger.level
-    otel_logger.setLevel(logging.DEBUG)
-    otel_logger.addHandler(handler)
     try:
-        async def main():
-            cfg = ng.RunConfig(
-                thread_id="t-async-oi",
-                input={"messages": [{"role": "user", "content": "hi"}]},
-                stream_mode=ng.StreamMode.ALL,
-            )
-            with openinference_tracer(tracer) as cb:
-                await engine.run_stream_async(cfg, cb)
-
-        asyncio.run(main())
+        yield provider.get_tracer("neograph-openinference-test"), exporter
     finally:
-        otel_logger.removeHandler(handler)
-        otel_logger.setLevel(prev_level)
-
-    # No "Failed to detach context" record from any node-span detach.
-    detach_msgs = [r for r in records
-                   if "Failed to detach context" in r.getMessage()]
-    assert not detach_msgs, [r.getMessage() for r in detach_msgs]
-
-    # Sanity: spans still flushed cleanly. Engine may emit internal
-    # routing-node spans alongside the user nodes — only assert the
-    # user-visible nodes are present.
-    by_kind = _spans_by_kind(exporter)
-    chain_names = {s.name for s in by_kind.get("CHAIN", [])}
-    assert {"graph.run", "node.a", "node.b"}.issubset(chain_names), chain_names
+        provider.shutdown()
 
 
-def test_provider_wrapper_propagates_exceptions(tracer_and_exporter):
-    """Inner provider error → span set to ERROR + exception re-raised."""
+def _engine(fail=False):
+    class Calculate(ng.GraphNode):
+        def get_name(self):
+            return "calculate"
+
+        def run(self, input):
+            if fail:
+                raise ValueError("calculation rejected")
+            return [ng.ChannelWrite("answer", input.state.get("value") * 2)]
+
+    node_type = "oi_failure" if fail else "oi_calculate"
+    ng.NodeFactory.register_type(node_type, lambda _n, _c, _ctx: Calculate())
+    return ng.GraphEngine.compile({
+        "name": "oi-graph", "schema_version": 1,
+        "channels": {"value": {"reducer": "overwrite"},
+                     "answer": {"reducer": "overwrite"}},
+        "nodes": {"calculate": {"type": node_type}},
+        "edges": [{"from": ng.START_NODE, "to": "calculate"},
+                  {"from": "calculate", "to": ng.END_NODE}],
+    }, ng.NodeContext())
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_graph_spans_end_with_parent_and_output(tracer_and_exporter, asynchronous):
     tracer, exporter = tracer_and_exporter
-
-    class _BoomProvider(ng.Provider):
-        def get_name(self): return "boom"
-        def complete(self, params):
-            raise RuntimeError("boom!")
-
-    wrapped = OpenInferenceProvider(_BoomProvider(), tracer)
-    params = ng.CompletionParams()
-    params.model = "x"
-    params.messages = [ng.ChatMessage(role="user", content="hi")]
-    with pytest.raises(RuntimeError, match="boom"):
-        wrapped.complete(params)
-
-    spans = exporter.get_finished_spans()
-    assert len(spans) == 1
-    # Status is ERROR after we set it; OTel SDK exposes status_code via
-    # status object on the readable span.
-    assert spans[0].status.status_code.name == "ERROR"
-
-
-def test_provider_exposes_incremental_complete_stream(tracer_and_exporter):
-    """The Python Provider surface must retain each native stream chunk."""
-    tracer, exporter = tracer_and_exporter
-    wrapped = OpenInferenceProvider(
-        _FakeStreamingProvider(["one", "-", "two"]), tracer)
-    params = ng.CompletionParams()
-    received = []
-
-    result = wrapped.complete_stream(params, received.append)
-
-    assert result.message.content == "one-two"
-    assert received == ["one", "-", "two"]
-    spans = exporter.get_finished_spans()
-    assert len(spans) == 1
-    assert [event.attributes["chunk"] for event in spans[0].events] == [
-        "one", "-", "two"]
-    assert spans[0].attributes["output.value"] == "one-two"
-
-
-def test_provider_binding_exposes_complete_stream_fallback():
-    """Concrete/native Providers can be streamed through the Python base API."""
-    inner = _FakeProvider(reply="single chunk")
-    received = []
-
-    result = ng.Provider.complete_stream(
-        inner, ng.CompletionParams(), received.append)
-
-    assert result.message.content == "single chunk"
-    assert received == ["single chunk"]
-
-
-def test_provider_binding_preserves_incremental_stream_chunks():
-    inner = _FakeStreamingProvider(["one", "-", "two"])
-    received = []
-
-    result = ng.Provider.complete_stream(
-        inner, ng.CompletionParams(), received.append)
-
-    assert result.message.content == "one-two"
-    assert received == ["one", "-", "two"]
-
-
-def test_provider_binding_retained_stream_callback_remains_safe():
-    class _RetainingProvider(_FakeProvider):
-        retained_callback = None
-
-        def complete_stream(self, params, on_chunk):
-            self.retained_callback = on_chunk
-            return self.complete(params)
-
-    inner = _RetainingProvider(reply="complete")
-    received = []
-
-    result = ng.Provider.complete_stream(
-        inner, ng.CompletionParams(), received.append)
-    inner.retained_callback("late")
-
-    assert result.message.content == "complete"
-    assert received == ["late"]
-
-
-def test_native_provider_copies_and_destroys_callback_without_gil():
-    provider = _native._CallbackThreadProvider()
-    received = []
-
-    result = provider.complete_stream(
-        ng.CompletionParams(), received.append)
-
-    assert result.message.content == "one-two"
-    assert received == ["one", "-", "two"]
-    assert provider.worker_started_without_gil
-    assert provider.worker_finished_without_gil
-
-
-class _TestSpan:
-    def __init__(self, failure=None):
-        self.failure = failure
-
-    def set_attribute(self, *args):
-        if self.failure == "attribute":
-            raise RuntimeError("trace attribute failed")
-
-    def set_status(self, *args):
-        if self.failure == "attribute":
-            raise RuntimeError("trace status failed")
-
-    def add_event(self, *args, **kwargs):
-        if self.failure == "attribute":
-            raise RuntimeError("trace event failed")
-
-
-class _TracingContext:
-    def __init__(self, failure=None):
-        self.failure = failure
-
-    def __enter__(self):
-        if self.failure == "enter":
-            raise RuntimeError("trace enter failed")
-        return _TestSpan(self.failure)
-
-    def __exit__(self, *args):
-        if self.failure == "exit":
-            raise RuntimeError("trace exit failed")
-
-
-class _UnreliableTracer:
-    def __init__(self, failure):
-        self.failure = failure
-
-    def start_as_current_span(self, name):
-        if self.failure == "start":
-            raise RuntimeError("trace start failed")
-        return _TracingContext(self.failure)
-
-
-class _BoomProvider(_FakeProvider):
-    def complete(self, params):
-        raise ValueError("inner failure")
-
-    def complete_stream(self, params, on_chunk):
-        raise ValueError("inner failure")
-
-
-@pytest.mark.parametrize("failure", ["start", "enter", "attribute", "exit"])
-@pytest.mark.parametrize("streaming", [False, True])
-def test_tracing_failure_does_not_block_inner_call(failure, streaming):
-    inner = (_FakeStreamingProvider(["one", "-", "two"])
-             if streaming else _FakeProvider(reply="still called"))
-    wrapped = OpenInferenceProvider(
-        inner, _UnreliableTracer(failure))
-
-    received = []
-    if streaming:
-        result = wrapped.complete_stream(
-            ng.CompletionParams(), received.append)
-    else:
-        result = wrapped.complete(ng.CompletionParams())
-
-    assert result.message.content == ("one-two" if streaming else "still called")
-    if streaming:
-        assert received == ["one", "-", "two"]
-
-
-@pytest.mark.parametrize("failure", ["start", "enter", "attribute", "exit"])
-@pytest.mark.parametrize("streaming", [False, True])
-def test_tracing_failure_does_not_replace_inner_exception(failure, streaming):
-    wrapped = OpenInferenceProvider(
-        _BoomProvider(), _UnreliableTracer(failure))
-
-    with pytest.raises(ValueError, match="inner failure"):
-        if streaming:
-            wrapped.complete_stream(ng.CompletionParams(), lambda chunk: None)
+    engine = _engine()
+    cfg = ng.RunConfig(thread_id=f"oi-{asynchronous}", input={"value": 21},
+                       stream_mode=ng.StreamMode.ALL)
+    with openinference_tracer(tracer) as callback:
+        if asynchronous:
+            async def execute():
+                return await engine.run_stream_async(cfg, callback)
+            result = asyncio.run(execute())
         else:
-            wrapped.complete(ng.CompletionParams())
+            result = engine.run_stream(cfg, callback)
+    assert result.output["channels"]["answer"]["value"] == 42
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    root = spans["graph.run"]
+    node = spans["node.calculate"]
+    assert node.parent.span_id == root.context.span_id
+    assert node.attributes["openinference.span.kind"] == "CHAIN"
+    assert node.status.status_code.name == "OK"
+    assert json.loads(node.attributes["input.value"])["node"] == "calculate"
+    assert node.end_time <= root.end_time
+
+
+def test_error_closes_pending_node_span(tracer_and_exporter):
+    tracer, exporter = tracer_and_exporter
+    with openinference_tracer(tracer) as callback:
+        with pytest.raises((RuntimeError, ValueError)):
+            _engine(fail=True).run_stream(
+                ng.RunConfig(thread_id="oi-failure", input={"value": 21}), callback)
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    assert spans["node.calculate"].status.status_code.name == "ERROR"
+    assert spans["node.calculate"].end_time <= spans["graph.run"].end_time
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("usage", [None, {"prompt_tokens": 0, "completion_tokens": 0,
+                                       "total_tokens": 0}])
+def test_provider_spans_preserve_missing_usage_and_reported_zero(
+        provider_peer, tracer_and_exporter, stream, usage):
+    tracer, exporter = tracer_and_exporter
+    provider_peer.usage = usage
+    wrapped = OpenInferenceProvider(provider_peer.provider(), tracer)
+    request = ng.make_provider_request(wrapped, "local-model", [
+        ng.ProviderMessage(ng.ProviderRole.User, [ng.Text("trace this request")]),
+    ], mode=ng.ProviderMode.Stream if stream else ng.ProviderMode.Collect)
+    events = []
+    request.on_event = events.append
+    outcome = wrapped.invoke(request)
+    assert outcome.text == "ok"
+    span, = exporter.get_finished_spans()
+    assert span.attributes["openinference.span.kind"] == "LLM"
+    assert span.attributes["llm.model_name"] == "local-model"
+    assert span.attributes["llm.input_messages.0.message.content"] == "trace this request"
+    assert span.attributes["llm.output_messages.0.message.content"] == "ok"
+    keys = ("llm.token_count.prompt", "llm.token_count.completion", "llm.token_count.total")
+    if usage is None:
+        assert all(key not in span.attributes for key in keys)
+    else:
+        assert [span.attributes[key] for key in keys] == [0, 0, 0]
+    assert span.status.status_code.name == "OK"
+    if stream:
+        assert [event.value.bytes for event in events if event.kind == "PartDelta"] == ["ok"]
+        assert [event.name for event in span.events] == ["llm.token"]
+
+
+def test_abandoned_preparation_does_not_open_span_and_dispatched_preparation_retains_tracer(
+        provider_peer):
+    exporter = InMemorySpanExporter()
+    backend = TracerProvider()
+    backend.add_span_processor(SimpleSpanProcessor(exporter))
+    try:
+        tracer = backend.get_tracer("prepared-lifetime")
+        inner = provider_peer.provider()
+        wrapped = OpenInferenceProvider(inner, tracer)
+        request = ng.make_provider_request(wrapped, "local-model", [
+            ng.ProviderMessage(ng.ProviderRole.User, [ng.Text("retained preparation")]),
+        ])
+        abandoned = wrapped.prepare(request)
+        del abandoned
+        gc.collect()
+        assert exporter.get_finished_spans() == ()
+        assert provider_peer.requests == []
+        prepared = wrapped.prepare(request)
+        del wrapped, request, tracer
+        gc.collect()
+        # The native prepared handle, not wrapper/tracer locals, owns hooks.
+        outcome = inner.dispatch(prepared)
+        assert outcome.text == "ok"
+        span, = exporter.get_finished_spans()
+        assert span.attributes["llm.output_messages.0.message.content"] == "ok"
+        assert span.status.status_code.name == "OK"
+    finally:
+        backend.shutdown()
+
+
+def test_provider_failure_is_traced_without_becoming_success(provider_peer, tracer_and_exporter):
+    tracer, exporter = tracer_and_exporter
+    provider_peer.status = 429
+    wrapped = OpenInferenceProvider(provider_peer.provider(), tracer)
+    request = ng.make_provider_request(wrapped, "local-model", [
+        ng.ProviderMessage(ng.ProviderRole.User, [ng.Text("failure request")]),
+    ])
+    outcome = wrapped.invoke(request)
+    assert outcome.completion is None
+    assert outcome.failure.error.http_status == 429
+    span, = exporter.get_finished_spans()
+    assert span.status.status_code.name == "ERROR"
+
+
+def test_native_provider_traces_tls_dispatch_from_node_context(provider_peer, tracer_and_exporter):
+    tracer, exporter = tracer_and_exporter
+    from opentelemetry import context as otel_context
+
+    with tracer.start_as_current_span("application-root"):
+        parent_context = otel_context.get_current()
+
+        class ParentContextTracer:
+            def start_span(self, name):
+                return tracer.start_span(name, context=parent_context)
+
+        wrapped = OpenInferenceProvider(provider_peer.provider(), ParentContextTracer())
+        engine = ng.GraphEngine.compile({
+            "name": "oi-provider-graph", "schema_version": 1,
+            "channels": {"messages": {"reducer": "append"}},
+            "nodes": {"chat": {"type": "llm_call"}},
+            "edges": [{"from": ng.START_NODE, "to": "chat"},
+                      {"from": "chat", "to": ng.END_NODE}],
+        }, ng.NodeContext(provider=wrapped, model="local-model"))
+        del wrapped
+        gc.collect()
+        with openinference_tracer(tracer) as callback:
+            result = engine.run_stream(ng.RunConfig(
+                thread_id="oi-provider-graph",
+                input={"messages": [{"role": "user", "content": "graph provider request"}]},
+            ), callback)
+    assert result.output["channels"]["messages"]["value"][-1]["content"] == "ok"
+    assert result.provider_outcomes[0].text == "ok"
+    assert result.native_messages[-1].native is not None
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    llm = spans["llm.complete"]
+    assert llm.attributes["openinference.span.kind"] == "LLM"
+    assert llm.attributes["llm.token_count.total"] == 15
+    assert llm.parent.span_id == spans["application-root"].context.span_id
+    assert llm.status.status_code.name == "OK"
+
+
+def test_tracing_preserves_raw_evidence_without_exporting_it(provider_peer, tracer_and_exporter):
+    tracer, exporter = tracer_and_exporter
+    private_note = "fixture-private-wire-note"
+    provider_peer.response_extra = {"private_wire_note": private_note}
+    wrapped = OpenInferenceProvider(provider_peer.provider(), tracer)
+    request = ng.make_provider_request(wrapped, "local-model", [
+        ng.ProviderMessage(ng.ProviderRole.User, [ng.Text("public input")]),
+    ])
+    outcome = wrapped.invoke(request)
+    raw = next(event for event in outcome.completion.raw_events
+               if event.type == "chat.completion")
+    assert raw.payload["private_wire_note"] == private_note
+    assert outcome.messages[0].native is not None
+    span, = exporter.get_finished_spans()
+    assert private_note not in json.dumps(dict(span.attributes))
+
+
+def test_failed_tracer_does_not_replace_real_provider_outcome(provider_peer):
+    class FailedTracer:
+        def start_span(self, _name):
+            raise RuntimeError("trace backend refused span")
+
+    wrapped = OpenInferenceProvider(provider_peer.provider(), FailedTracer())
+    request = ng.make_provider_request(wrapped, "local-model", [
+        ng.ProviderMessage(ng.ProviderRole.User, [ng.Text("provider must still run")]),
+    ])
+    outcome = wrapped.invoke(request)
+    assert outcome.failure is None
+    assert outcome.text == "ok"
+    assert outcome.usage.total.value == 15
+
+
+def test_traced_observer_error_keeps_original_cause_and_owned_outcome(
+        provider_peer, tracer_and_exporter):
+    tracer, exporter = tracer_and_exporter
+    refusal = ValueError("observer refused event")
+    wrapped = OpenInferenceProvider(provider_peer.provider(), tracer)
+    request = ng.make_provider_request(wrapped, "local-model", [
+        ng.ProviderMessage(ng.ProviderRole.User, [ng.Text("observer failure")]),
+    ], mode=ng.ProviderMode.Stream)
+
+    def reject(_event):
+        raise refusal
+
+    request.on_event = reject
+    with pytest.raises(ng.ProviderObserverError) as caught:
+        wrapped.invoke(request)
+    assert caught.value.cause is refusal
+    assert caught.value.outcome is not None
+    span, = exporter.get_finished_spans()
+    assert span.status.status_code.name == "ERROR"

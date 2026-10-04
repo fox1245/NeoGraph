@@ -1,5 +1,7 @@
 # Durable child synthesis
 
+**Languages:** [English](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md) | [한국어](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.ko.md) | [日本語](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.ja.md) | [简体中文](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.zh-CN.md)
+
 Status: N2 implemented for the in-memory reference store, SQLite, and PostgreSQL.
 N3 recovery qualification for the single-child scenario is described in
 [the recovery matrix](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md).

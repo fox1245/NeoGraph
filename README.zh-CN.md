@@ -1,72 +1,106 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=73d8153a6b0ecc5957982362ae8429663ac2730be7c65242cb1c4b1031fc170c -->
-<p align="center">
-<h1 align="center">NeoGraph</h1>
-  <p align="center">
-<strong>一个快速的C++图运行时，带有持久化的可编程智能体控制平面。</strong><br>
-当延迟至关重要时，采用静态 Core 执行。当控制至关重要时，采用 QuickJS Programs、子智能体、Hook、运行时上下文和经过验证的拓扑演化。
-  </p>
-</p>
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=9e3cece3555cbcb547daaaf29d7c6ce6aa422e229bc3899ce0fad78eac0400c9 -->
+# NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-<p align="center">
-  <a href="https://pypi.org/project/neograph-engine/"><img alt="PyPI" src="https://img.shields.io/pypi/v/neograph-engine?label=pip%20install%20neograph-engine&color=blue"></a>
-  <a href="https://pypi.org/project/neograph-engine/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/neograph-engine"></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
-</p>
+NeoGraph 是一个 C++20 运行时，用于执行以图描述的有状态工作流。图定义可执行节点、具名状态通道、合并写入的规则，以及决定下一步执行内容的边。节点可以执行普通计算、调用工具或请求模型输出。运行时负责调度这些节点、应用它们的写入；配置检查点存储后，还会保存执行进度，以便中断和恢复。Python 绑定使用同一个 C++ 引擎。
 
-<p align="center">
-<a href="#quick-start">快速入门</a> &middot;
-<a href="#two-runtime-layers">架构</a> &middot;
-<a href="#python">Python</a> &middot;
-<a href="examples/README.md">示例</a> &middot;
-<a href="docs/reference-en.md">C++ 参考手册</a> &middot;
-<a href="docs/python-binding.md">Python 参考手册</a>
-</p>
+以研究工作流为例：检索文档，从多个文档中提取发现，汇总这些发现，再请审阅者判断是否需要新一轮检索。文档和发现保存在状态通道中；检索、提取和审阅是节点；边选择下一阶段，或返回检索阶段。图将这些状态转换明确表示出来，而不是把它们隐藏在一连串模型提示中。[示例](examples/README.md)涵盖研究、工具使用、人工审阅和多智能体工作流。
 
----
+## 图如何改变状态
 
-<p align="center">
-  <a href="docs/videos/neograph-promo-v3.mp4">
-    <img src="docs/images/neograph-promo-v3.gif" alt="NeoGraph — generated Programs, semantic admission, runtime topology, Hooks, context and Python parity" width="900">
-  </a>
-</p>
-
-## NeoGraph 如今是什么
-
-NeoGraph 有两个刻意分离的执行层：
-
-| 层 | 用于 | 契约 |
-|---|---|---|
-| **GraphEngine / Core** | 固定或宿主选择的图，低开销，嵌入式部署 | 不可变的编译拓扑；C++ 节点通过 Pregel 风格的 super-steps 执行 |
-| **ProgramRuntime / QuickJS** | 运行时控制、子Program、结构化并发、拓扑替换与迁移 | Program 的不可变代次；持久的类型化命令；日记化状态转变与重放 |
-
-模型永远不会获得编译器、目录、凭据、迁移或授权授予访问权限。生成的源代码遵循：
+假设名为 `count` 的通道保存着 `2`。一个递增节点读取 `2`，返回一个提议将值改为 `3` 的写入。当前调度的节点批次结束后，运行时通过该通道的归约器应用这个写入。下一批次中的下游节点读取到 `3`。
 
 ```text
-proposal → reserve → compile → semantic validate → admit → publish → migrate or spawn
+Committed state       Node computation          Reduced state
+count = 2       ->    read 2; propose 3     ->    count = 3
+                                                  |
+                                            next node reads 3
 ```
 
-被拒绝的提案无法发布`ProgramVersion`，且其动态编译预算不会恢复。参见[严格运行时插桩](docs/STRICT_RUNTIME_INTERPOSITION.md)和[DSL 能力评估](docs/DSL_CAPABILITY_EVAL.md)。
+这段执行轨迹中的术语描述了执行模型：
 
-<a id="quick-start"></a>
-## 快速入门
+| 术语 | 在 NeoGraph 中的含义 |
+|---|---|
+| 节点（Node） | 在宿主中注册的可执行单元。它读取输入状态，返回通道写入以及可选的路由命令。 |
+| 状态（State） | 当前执行步骤可见的通道值，以及按配置由运行时管理的历史记录和记账信息。 |
+| 通道（Channel） | 一个具名值，带有归约器，以及可选的保留策略和检查点持久化策略。 |
+| 归约器（Reducer） | 将当前通道值与传入写入合并的函数。`overwrite` 替换值；`append` 累积数组元素；自定义归约器定义其他合并方式。 |
+| 边（Edge） | 节点之间的调度规则。边可以是无条件边、条件边，也可以是等待多个前驱的屏障。环允许重复执行阶段。 |
+| 超步（Superstep） | 执行一批已就绪节点，随后应用它们的写入并推进调度。 |
 
-### C++ Core
+在正常批次中，已就绪节点读取批次开始前的通道状态。返回 `ChannelWrite` 不会立即改变同批其他节点读取到的内容。成功完成后，执行器应用结果，后续步骤才能看到更新后的状态。在多分支 `Send` 批次中，每个分支在隔离的状态副本中接收输入，随后合并其输出。这种工作组织方式借鉴了 Pregel；NeoGraph 的通道和归约器规则有自己的契约，并不意味着它实现了 Pregel 的全部功能。
 
-即使 `NEOGRAPH_BUILD_LLM=OFF`，SchemaProvider 也已是必需的外部 C++ 依赖，因为 Core 公开拥有所有权的 typed provider 契约。请安装 SDK runtime package，将安装 prefix 设为 `SCHEMAPROVIDER_PREFIX`；下方 configure 使用 `-DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX"`。也可用 `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=../SchemaProvider` 明确指定 checkout。不会自动选择猜测的 sibling checkout 或旧 bundled interpreter。当前 SDK runtime/archive 支持 Linux/POSIX；不承诺无依赖、无需 OpenSSL、native Windows/macOS 或 WASM runtime。
+并发执行并不使所有归约器都与顺序无关。如果两个节点追加文本或覆写同一个通道，写入顺序会影响结果。工作流需要顺序无关性时，应使用独立通道或与顺序无关的归约器。通道保留策略也不同于合并规则：追加通道可以只保留长度受限的末尾部分。[概念](docs/concepts.md)和[并发](docs/concurrency.md)文档介绍了调度、归约器、屏障和取消。
+
+## Core 示例详解
+
+[完整 C++ 快速入门](examples/62_core_quickstart.cpp)注册了一个转大写节点，并编译以下拓扑：
+
+```text
+__start__ -> upper -> __end__
+
+Input channel:   text = "hello"
+Node reads:      "hello"
+Node returns:    ChannelWrite{"text", "HELLO"}
+Reducer:         overwrite
+Output channel:  text = "HELLO"
+```
+
+节点中的计算是普通 C++ 代码：
+
+```cpp
+class UpperNode final : public neograph::graph::GraphNode {
+public:
+    asio::awaitable<neograph::graph::NodeOutput> run(
+        neograph::graph::NodeInput input) override {
+        auto text = input.state.get(neograph::graph::ChannelKey<std::string>{"text"});
+        for (auto& character : text)
+            character = static_cast<char>(
+                std::toupper(static_cast<unsigned char>(character)));
+        co_return neograph::graph::NodeOutput{{
+            neograph::graph::ChannelWrite{"text", neograph::json(std::move(text))}}};
+    }
+    std::string get_name() const override { return "upper"; }
+};
+```
+
+完整源代码包含头文件、声明读写范围的节点注册、拓扑、`GraphEngine::build_strict`、运行输入，以及类型化的输出访问。它不需要模型调用或 API 密钥。预期输出为 `HELLO`。
+
+### 构建与运行
+
+即使设置 `NEOGRAPH_BUILD_LLM=OFF`，SchemaProvider 也仍是必需的外部 SDK，因为 Core 导出了其类型化提供方契约。下面的命令使用已安装的 [SchemaProvider 运行时包](https://github.com/fox1245/SchemaProvider)：将 `SCHEMAPROVIDER_PREFIX` 设为其安装前缀。通过 `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=../SchemaProvider` 显式指定的源码检出目录具有最高优先级；否则，CMake 优先使用已安装的软件包，未找到时则获取锁定版本的公共 SDK 源码归档。使用已安装的软件包或显式检出目录进行离线构建时，设置 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`。CMake 不会猜测同级目录中的源码，也不会使用已移除的内置解释器。
+
+前置依赖包括 C++20 编译器、CMake 3.20 或更新版本，以及 SDK 的运行时依赖，其中包括 OpenSSL 和 libcurl 7.88 或更新版本。包含 NeoGraph HTTPS 组件的完整构建需要 OpenSSL 3。默认构建还启用了 SQLite 和 PostgreSQL 集成；下面的命令关闭了不需要的 NeoGraph 组件，但不会移除 SDK 依赖。记录中的 SDK 接口修订 4 验证覆盖 Linux x86_64 及本地协议、状态对端，准确范围见 [SDK 验证记录](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record)。它们不构成新的 Windows、macOS、ARM64、HTTP/3、托管服务商或 WASM 验证；平台和构建限制见[故障排查](docs/troubleshooting.md)。
 
 ```bash
 git clone https://github.com/fox1245/NeoGraph.git
 cd NeoGraph
-cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX"
-cmake --build build --parallel
-./build/example_core_quickstart
+cmake -S . -B build-core \
+  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNEOGRAPH_BUILD_EXAMPLES=ON \
+  -DNEOGRAPH_BUILD_PROGRAM=OFF \
+  -DNEOGRAPH_BUILD_LLM=OFF \
+  -DNEOGRAPH_BUILD_ASYNC=OFF \
+  -DNEOGRAPH_BUILD_MCP=OFF \
+  -DNEOGRAPH_BUILD_A2A=OFF \
+  -DNEOGRAPH_BUILD_ACP=OFF \
+  -DNEOGRAPH_BUILD_POSTGRES=OFF \
+  -DNEOGRAPH_BUILD_SQLITE=OFF
+cmake --build build-core --parallel --target example_core_quickstart
+./build-core/example_core_quickstart
 ```
 
-完整源代码位于[examples/62_core_quickstart.cpp](examples/62_core_quickstart.cpp)。它注册一个 C++ 节点，编译一个严格图，运行该图，并读取一个类型化通道。
+## Core 与 ProgramRuntime
 
-在需要时启用可编程控制平面：
+`GraphEngine` 执行编译后的图，负责节点调度、状态更新、路由、重试、流式输出、取消，以及图检查点和恢复。编译后的拓扑不可变；受支持的代际迁移在受控安全点发生，而不是在节点运行期间任意修改拓扑。
+
+`ProgramRuntime` 协调已获准执行的 Program；这些 Program 可以调用 Core 图并管理子 Program。它增加了不可变的 Program 版本、目录和策略快照、命令日志、子 Program 谱系、预算、重放，以及经过准入的替换或迁移。宿主注册可执行能力，编译并准入 Program，然后启动一次调用。Core 仍然负责执行图节点。
+
+在研究工作流中，一个 Core 图可以执行检索和审阅。Program 可以调用该图，为独立任务启动子 Program，等待它们的结果，并记录生命周期转换。持久化恢复需要已配置的存储和相应的保管契约；内存存储无法在进程退出后保留数据，日志本身也不能保证外部工具的副作用恰好发生一次。
+
+QuickJS 是可选的 Program 编写接口。Program 使用有界 JavaScript 计算和生成器命令，例如 `callCore`、`spawn`、`await`、`all`、`parallel`、`race`、`quorum`、`emit`、`checkpoint` 和 `cancelScope`。宿主负责能力准入，并在发布前验证生成的源代码。模型生成的提案不会获得编译器、凭据、目录或授予权限的访问能力。
 
 ```bash
 cmake -S . -B build-program \
@@ -75,87 +109,23 @@ cmake -S . -B build-program \
   -DNEOGRAPH_BUILD_PROGRAM=ON \
   -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
   -DNEOGRAPH_BUILD_EXAMPLES=ON
-cmake --build build-program --parallel
+cmake --build build-program --parallel --target example_program_quickstart
 ./build-program/example_program_quickstart
 ```
 
-参见[examples/63_program_quickstart.cpp](examples/63_program_quickstart.cpp)和[QuickJS 编写边界](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)。
+[Program 快速入门](examples/63_program_quickstart.cpp)编译并准入一个调用递增图的 Program；预期输出为 `1`。它使用内存存储和 C++ Program 构建器。若要使用 JavaScript 编写 Program 或实现持久化执行，请先阅读[编写边界](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)、[递归 Program](docs/PROGRAM_RECURSIVE_HARNESSES.md)和[严格运行时契约](docs/STRICT_RUNTIME_INTERPOSITION.md)。
 
-### 性能构建
+## 类型化提供方调用
 
-Ninja 和 Unix Makefiles 等单配置生成器在 `CMAKE_BUILD_TYPE` 为空时不会
-选择优化级别。NeoGraph 会对此配置发出警告，因为 GCC/Clang 会在没有
-Release 的 `-O3 -DNDEBUG` 标志时编译 QuickJS 和 NeoGraph。
-
-在 GCC 或 Clang 上进行本机性能构建：
-
-```bash
-cmake -S . -B build-performance -G Ninja \
-  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DNEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=ON \
-  -DNEOGRAPH_BUILD_BENCHMARKS=ON \
-  -DNEOGRAPH_BUILD_PROGRAM=ON \
-  -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON
-cmake --build build-performance --parallel
-```
-
-`NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=ON` 会在优化配置中加入
-`-march=native -mtune=native`。它能提升本机吞吐量，但会使产物不可移植；
-分发二进制时请关闭它。Release 加固默认保持启用。
-
-在 GCC/Clang 上，最终的 Release 配置对 QuickJS 使用 C11、对 NeoGraph
-使用 C++20 和 `-O3 -DNDEBUG`。默认加固包含
-`-D_GLIBCXX_ASSERTIONS`、`-fstack-protector-strong`、
-`-fcf-protection=full`、Linux 的 `-D_FORTIFY_SOURCE=2` 以及
-RELRO/NOW 链接。默认不启用 LTO 或本机特定调优。
-
-<a id="two-runtime-layers"></a>
-## 两个运行时层
-
-### GraphEngine / Core
-
-- 静态和条件边、循环、屏障、`Send` fan-out 和 `Command` 路由；
-- 检查点/恢复、精确检查点恢复、fork、状态历史、HITL 和 `NodeInterrupt`；
-- 同步与协程 API、流式处理、取消与 token 核算；
-- 图级与节点级重试策略、jitter与有界可复用节点缓存；
-- 自定义注册表、提供者、工具、MCP、A2A 与 ACP 集成；
-- 安全点捕获与形状保持的 GraphEngine 生成迁移。
-
-### ProgramRuntime / QuickJS
-
-- 在受限 QuickJS `define()` 和生成器 `main(input)` 中的标准 JavaScript 计算；
-- 密封命令：`callCore`、`spawn`、`await`、`all`、`parallel`、`race`、`quorum`、`emit`、`checkpoint`、`cancelScope`，以及被准入(admission)的主机能力；
-- 不可变 Program 包、版本、目录、准入(admission)配置与策略快照；
-- 持久化命令日志、精确重放、子代系谱、不可续期预算与进程恢复；
-- 检查点替换与受限的实时 GraphEngine 拓扑迁移；
-- 在准入(admission)生成的 Program 之前，进行主机方的语义验证。
-
-已安装的 JavaScript 表面可通过 `javascript_authoring_capability_manifest()` 进行机器读取，并在 CI 中对照实际的 QuickJS 绑定进行检查。
-
-## 运行时安全与上下文
-
-NeoGraph 将重要行为移出模型自由裁量范围：
-
-- 不可变的 RAW 消息历史与 `ContextEpoch` 选择；
-- 派生上下文、必需 Skills 与硬约束；
-- 保守的转换收据，精确保留必需工件；
-- 在原生、stdio 或 HTTP 执行后端上的强制生命周期 Hooks；
-- 提供方分发与终端结果收据；
-- 持久的运行时开发者指令与已准入(admission)的拓扑转换。
-
-NeoGraph 保证构建、准入(admission)、分发与证据边界。它不声称 LLM 处理了每个 token。
-## Typed C++ provider 调用
-
-`SchemaProvider` 接收获准的 `sp::descriptor::ValidatedDescriptor`、`sp::runtime::Options` 及可选 `SchemaProvider::Defaults`。descriptor 是 closed/versioned 数据 admission，不是请求/响应 interpreter 或任意 primitive registry。credential 应放在 runtime options，而非公开 descriptor。Defaults 仅包含 typed OpenRouter routing 和 Responses 保留 (`responses_store`)，后者仅适用于 Responses。Hosted OpenRouter routing、retention、JSON 格式仍是声明的 typed 控制。Images、Veo、Decisions 使用独立的 NeoGraph typed client 和独立授权，不继承 SDK chat grant。
+模型调用使用经过验证的描述符、运行时选项和类型化请求。描述符准入接受封闭的、带版本的数据，不执行请求/响应解释器。凭据应放在运行时选项中，而不是公共描述符文件中。`SchemaProvider::Defaults` 包含类型化的 OpenRouter 路由和 Responses 保留控制。Images、Veo 和 Decisions 使用独立的类型化客户端和授权。
 
 ```cpp
 #include <neograph/llm/schema_provider.h>
 #include <neograph/types.h>
 
 sp::runtime::Result first_call(
-    sp::descriptor::ValidatedDescriptor descriptor, sp::runtime::Options options,
-    std::string model) {
+    sp::descriptor::ValidatedDescriptor descriptor,
+    sp::runtime::Options options, std::string model) {
     neograph::llm::SchemaProvider provider(
         std::move(descriptor), std::move(options), {});
     std::vector<sp::Message> history{
@@ -167,24 +137,23 @@ sp::runtime::Result first_call(
 }
 ```
 
-提供方调用返回 `sp::runtime::Result`，即持有 `sp::Completion` 或 `sp::Failure` 的不可变、拥有所有权的 `std::shared_ptr<const sp::Outcome>`。请保留完整结果，而非仅显示文本。顺序消息/part、native continuation、完整 wire envelope、顺序 raw 观测、停止依据及真实尝试元数据在调用与客户端销毁后仍然保留。使用量是带依据、阶段、质量的 nullable `uint64_t`；缺失表示未知，绝不是零。失败保留原始部分结果。`ProviderFailure::outcome()` 与 `ProviderObserverError::outcome()` 保留真实结果，后者的 `cause()` 也保留观察者异常。
+已准备的请求只能消费一次。`sp::runtime::Result` 拥有不可变的 `sp::Outcome`，其中包含 `Completion` 或 `Failure`。需要有序消息和消息部分、原生续接、原始观测、停止证据、尝试元数据或失败时的部分结果时，应保留该 outcome。用量计数可以为空：缺失表示未知，观测到的零值仍是零。用量报告和预算扣账是不同的记录；可移植报告不能授予支出权限。
 
-`ChatMessage` / `ChatTool` 和 JSON 只是 portable projection，不是 native 权限。当前格式为 [`provider-message-v2`](schemas/provider-message-v2.schema.json)、[`runtime-history-record-v2`](schemas/runtime-history-record-v2.schema.json)。真实 C++ 内存 checkpoint sidecar 无需 archive 即可保留 native seal。持久 native 历史和 bank 引用需要真实 `sp::NativeArchive`：closed v2 / `spna2` 是使用独立密钥、经过认证的 owner-private 受保护 custody，不是加密或 vendor-issuer 认证。不得公开 archive 正文、密钥、native blob 或 raw wire 观测。managed 恢复/fork 共享 charged/reserved/report/dedup canonical bank，不更新预算。通用有界持久 fork 必须使用外部 host-shared bank/journal，复制 snapshot 不能授予独立支出权限。
+`first_call` 返回后，可使用 `std::get_if<sp::Completion>(result.get())` 检查完成结果的 `messages`、`stop` 和 `usage`。否则，`std::get<sp::Failure>(*result)` 提供 `error.kind`、`error.safe_message`、重试证据，以及 `partial` 中的部分消息和用量。例如，`completion.usage.output_total` 缺失表示输出 token 数未知；计数存在且其 `value` 为 `0` 则表示用量为零。显示文本只是所保留 outcome 的一种视图。
 
+`ChatMessage`、`ChatTool` 和 JSON 是可移植投影。真实的原生历史可以与原生检查点伴随数据一起保留在内存中；持久化原生历史需要真正的 `sp::NativeArchive`，以及受保护的、所有者私有的保管机制。可移植 JSON 无法重建这类权限。归档通过独立密钥认证保管关系；它既不是加密，也不是服务商签发者身份认证。不要公开归档内容、密钥、原生二进制数据或原始线路观测。[提供方参考](docs/reference-en.md)和[迁移指南](docs/migration-v0.4-to-v1.0.md)介绍了持久化失败、观察器、托管预算银行和重放边界。
 
-实际结果存在后，若 post-effect 结算或 terminal receipt 持久化失败，`ProviderDispatchOutcomePersistenceError::outcome()` 保留原始不可变结果，`cause()` 保留原始持久化异常。若 delivery 也失败，`delivery_error()` 保留原始观察者异常。持久化成功后的观察者失败原样重新抛出原异常；未知/无结果 transport 失败不会伪造 outcome。
-这是源码和二进制破坏性变更；所有 C++ 使用者与自定义提供方都必须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter 和 Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为不稳定 `0.0.0`、interface revision 3 / shared ABI 3，使用 out-of-line capability check，不表示稳定发布。当前 runtime/archive 为 Linux/POSIX，不代表 Windows、macOS、WASM runtime 已获验证。Python provider binding/wrapper 已延期，不由本 C++ 变更完成移植。
+这次类型化接口切换移除了 `CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器和 Responses WebSocket 路径。C++ 使用方需要重新编译，并迁移自定义提供方；没有兼容别名。SDK 包版本为 `0.1.0`，接口处于 alpha 阶段，接口修订号为 4，共享 ABI 为 4；修订号必须匹配，而这些数字并不表示 SDK 接口已经稳定。
 
 ## Python
-
-> 下方 Python 资料描述既有 binding；provider binding/wrapper 已明确延期，未针对 typed lossless C++ 切换移植或执行。安装历史 wheel 不会提供新的 C++ provider API。
-Python 包使用相同的 C++ 引擎，现包含 Program、Hook、strict-context、运行时策略与 SQLite 持久化接口：
 
 ```bash
 pip install neograph-engine
 ```
 
-### 五秒演示（无需 API 密钥）
+本文描述的类型化提供方 API 面向 NeoGraph `0.13.0`；历史 wheel 包提供的是旧接口。[Python 绑定指南](docs/python-binding.md)介绍了源码 API 和构建前置条件。
+
+下面的图不需要 API 密钥：
 
 ```python
 import neograph_engine as ng
@@ -215,69 +184,47 @@ result = engine.run(ng.RunConfig(thread_id="t1", input={"name": "NeoGraph"}))
 print(result.output["channels"]["messages"]["value"])
 ```
 
-Python 额外公开：
+预期消息内容为 `Hello, NeoGraph!`。Python 还提供 Program 编译和执行、Hooks、运行时上下文要求、严格配置、SQLite 持久化，以及从确切检查点恢复。类型化提供方使用 `ProviderMessage` 和 `make_provider_request`，随后调用 `prepare`/`dispatch` 或 `invoke`；outcome 保留由原生对象持有的完成或失败证据。这些消息与图的便利类型 `ChatMessage` 值不同。阻塞式提供方调用会释放 GIL；`asyncio.to_thread` 可以将它们移出事件循环线程。完整的提供方和 Program 输入见 [Python 示例](bindings/python/examples/README.md)。
 
-- `RetryPolicy`、按节点的运行时覆盖、`RunMetadata`、精确的 `resume_from` 以及可复用的缓存作用域；
-- `ProgramSource`、`ProgramRegistryBuilder`、`ProgramCompiler`、`LocalProgramHost`、句柄和结果；
-- 强制的 `HookRuntime` 回调以及失败时关闭的生命周期投递；
-- `RuntimeContextRequirements`、`ContextTransformReceipt`、SQLite 持久化上下文/分发存储，以及 `StrictRuntimeProfile`。
+## 适用工作负载与限制
 
-参见 [Python 绑定指南](docs/python-binding.md) 和 [Python 示例](bindings/python/examples/README.md)。
+NeoGraph 适用于具有明确状态转换、分支或循环、并行任务、检查点和人工审阅的工作流，也可以在 C++ 应用中嵌入小型固定图。节点计算仍由应用负责：图运行时不训练模型，也不替代数值计算库；模型调用仍受提供方的延迟、可用性和费用约束。
 
-## 构建配置
+运行时支持图级和节点级重试策略、容量受限的可复用节点缓存、`Send` 扇出、`Command` 路由、子图、状态历史、分叉、HITL 和 `NodeInterrupt`。MCP、A2A、ACP、gRPC 和可观测性集成是可选组件。运行时上下文和 Hooks 可以要求特定的分派输入，并记录交付证据；这些检查不能证明模型关注了每一个 token。持久化原生恢复和受限分叉需要原有的共享记账权限；复制快照不能重新赋予预算。
 
-Core-only 构建仍可省去 Program/QuickJS，但不能省去 SchemaProvider runtime：
+衡量工作负载时，应使用其实际节点、提供方、存储、并发度和构建配置。[基准测试](benchmarks/README.md)和[性能指南](docs/performance-deep-dive.md)描述的是已测量的配置及其限制，而不是普遍适用的速度保证。使用单配置构建测量优化执行性能时，应指定 `CMAKE_BUILD_TYPE=Release`。`NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION=ON` 在受支持的编译器上加入针对宿主机器的调优；构建需要分发的二进制文件时，应保持关闭。
 
-```bash
-cmake -S . -B build-core \
-  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
-  -DNEOGRAPH_BUILD_PROGRAM=OFF \
-  -DNEOGRAPH_BUILD_LLM=OFF \
-  -DNEOGRAPH_BUILD_MCP=OFF
-```
-
-重要选项：
+## 构建配置与延伸阅读
 
 | 选项 | 用途 |
 |---|---|
-| `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` | 明确指定 SDK source checkout；未指定时必须安装 runtime package。 |
-| `NEOGRAPH_BUILD_PROGRAM` | 持久化 Program 值、目录、运行时、血缘及迁移 |
-| `NEOGRAPH_BUILD_QUICKJS_CONTROL` | QuickJS Program 编写及生成器命令 |
-| `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` | 为优化配置选择不可移植的本机指令调优 |
-| `NEOGRAPH_WARN_ON_UNOPTIMIZED_SINGLE_CONFIG` | 单配置构建缺少 `CMAKE_BUILD_TYPE`、可能遗漏 Release 优化标志时发出警告 |
-| `NEOGRAPH_BUILD_PYBIND` | `neograph-engine` Python 扩展 |
-| `NEOGRAPH_BUILD_SQLITE` | SQLite 检查点、上下文、Hook 及提供方回执存储 |
-| `NEOGRAPH_BUILD_POSTGRES` | PostgreSQL 检查点及 Program 持久化组件 |
-| `NEOGRAPH_BUILD_MCP_CLIENT` / `SERVER` | MCP 客户端与服务器角色 |
-| `NEOGRAPH_BUILD_A2A` / `ACP` / `GRPC` | 可选协议集成 |
+| `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` | 显式指定 SDK 源码检出目录；优先于已安装软件包的查找和源码获取。 |
+| `NEOGRAPH_FETCH_SCHEMAPROVIDER` | 未安装软件包时，获取锁定版本的公共 SDK 源码归档；默认开启。离线构建时关闭。 |
+| `NEOGRAPH_BUILD_PROGRAM` | Program 运行时、目录、谱系和迁移；默认关闭。 |
+| `NEOGRAPH_BUILD_QUICKJS_CONTROL` | 嵌入式 QuickJS Program 编写接口；默认关闭。 |
+| `NEOGRAPH_BUILD_PYBIND` | Python 扩展；默认关闭。 |
+| `NEOGRAPH_BUILD_LLM` | NeoGraph 模型调用适配器；关闭它们不会移除 SDK 依赖。 |
+| `NEOGRAPH_BUILD_SQLITE` / `NEOGRAPH_BUILD_POSTGRES` | 可选的持久化存储；两者默认开启。 |
+| `NEOGRAPH_BUILD_MCP_CLIENT` / `NEOGRAPH_BUILD_MCP_SERVER` | MCP 客户端和服务端组件。 |
+| `NEOGRAPH_BUILD_A2A` / `NEOGRAPH_BUILD_ACP` / `NEOGRAPH_BUILD_GRPC` | 协议集成；gRPC 默认关闭。 |
+| `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` | 在优化配置中启用不可移植的宿主专用调优；默认关闭。 |
 
-使用与你的部署匹配的窄 CMake 目标：`neograph::core`、`neograph::llm`、`neograph::program`、`neograph::mcp`、`neograph::a2a`，或其他已启用的组件。
-
-SDK imported target 提供 `include/SchemaProvider` include root；公开示例直接使用 `<descriptor/descriptor.h>`、`<runtime/client.h>`、`<neograph/llm/schema_provider.h>`，不依赖 recipe 专用 helper。
+使用已安装软件包的项目只需链接已启用且实际需要的组件：
 
 ```cmake
-find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)
+find_package(SchemaProvider 0.1.0 CONFIG REQUIRED COMPONENTS runtime)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
 
-## 验证
-
-`scripts/test_find_package.sh` 描述 installed-consumer 检查，文件存在不代表当前已通过。当前 SDK ABI3 全量重建/CTest 已通过 26/26；shared 安装 consumer 实际执行 local HTTP 两 turn typed 请求、tool/native/refusal/known-zero 结果及 mismatch 拒绝。这不代表 NeoGraph、Python、Windows、macOS、WASM 或付费 live-provider 兼容已验证。NeoGraph 集成验证另行报告。
-
-## 文档
-
-- [概念](docs/concepts.md)
-- [C++ 参考](docs/reference-en.md)
-- [Python 绑定](docs/python-binding.md)
-- [并发与取消](docs/concurrency.md)
-- [异步指南](docs/ASYNC_GUIDE.md)
-- [Harness MCP](docs/HARNESS_MCP.md)
-- [QuickJS 公共创作边界](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
-- [严格运行时插桩](docs/STRICT_RUNTIME_INTERPOSITION.md)
-- [故障排除](docs/troubleshooting.md)
-- [示例](examples/README.md)
+- [概念与图语义](docs/concepts.md)
+- [C++ 参考](docs/reference-en.md)和 [Python 绑定指南](docs/python-binding.md)
+- [异步指南](docs/ASYNC_GUIDE.md)和[并发与取消](docs/concurrency.md)
+- [运行时上下文与严格介入](docs/STRICT_RUNTIME_INTERPOSITION.md)
+- [Harness MCP](docs/HARNESS_MCP.md) 和 [QuickJS 编写接口](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
+- [迁移指南](docs/migration-v0.4-to-v1.0.md)和[故障排查](docs/troubleshooting.md)
+- [C++ 示例](examples/README.md)、[Python 示例](bindings/python/examples/README.md)和[基准测试方法](benchmarks/README.md)
 
 ## 许可证
 
-MIT — 参见 [LICENSE](LICENSE)。第三方声明：[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。
+MIT；见 [LICENSE](LICENSE)。第三方声明见 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。

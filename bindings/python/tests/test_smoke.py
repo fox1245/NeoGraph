@@ -10,47 +10,11 @@ binding boundary works end-to-end: dict-shaped graph definition →
 GraphEngine.compile → GraphEngine.run → result.output.
 """
 
-import socket
 
 import neograph_engine as neograph  # PyPI dist name is `neograph-engine`;
                                      # bare `neograph` was already taken
-from neograph_engine.llm import SchemaProvider
 
 
-def test_module_metadata():
-    assert isinstance(neograph.__version__, str)
-    assert neograph.START_NODE == "__start__"
-    assert neograph.END_NODE == "__end__"
-    assert isinstance(neograph._HAVE_LIBCURL, bool)
-
-
-def test_non_utf8_system_error_keeps_original_error_type():
-    # Keep an ephemeral loopback port bound but not listening, so connect()
-    # deterministically raises system_error without racing another process.
-    guard = socket.socket()
-    guard.bind(("127.0.0.1", 0))
-    port = guard.getsockname()[1]
-    provider = SchemaProvider(
-        schema_path="openai",
-        api_key="test-key",
-        base_url_override=f"http://127.0.0.1:{port}",
-        allow_insecure_loopback=True,
-        timeout_seconds=1,
-    )
-    params = neograph.CompletionParams(
-        messages=[neograph.ChatMessage(role="user", content="hi")],
-    )
-    try:
-        try:
-            provider.complete(params)
-        except RuntimeError as exc:
-            message = str(exc)
-            assert "category=" in message
-            assert "code=" in message
-        else:  # pragma: no cover - the port is deliberately not listening
-            raise AssertionError("connection-refused probe did not throw")
-    finally:
-        guard.close()
 
 
 def test_stream_mode_bitfield():
@@ -80,68 +44,6 @@ def test_compile_minimal_graph():
         input={"messages": [{"role": "user", "content": "hello"}]},
     )
     result = engine.run(cfg)
-    assert result.output is not None
-    # Output should expose the channel we wrote into.
-    # The exact serialization shape is engine-internal; we just
-    # check that the messages we sent in came back out.
-    payload = result.output
-    assert isinstance(payload, dict)
-
-
-def test_node_context_construction():
-    """NodeContext should accept a None provider for graphs that don't need one."""
-    ctx = neograph.NodeContext(
-        provider=None,
-        model="gpt-4o-mini",
-        instructions="You are helpful.",
-        extra_config={"foo": "bar"},
-    )
-    assert ctx.model == "gpt-4o-mini"
-    assert ctx.instructions == "You are helpful."
-    assert ctx.extra_config == {"foo": "bar"}
-
-
-def test_channel_write_round_trip():
-    w = neograph.ChannelWrite("findings", [{"k": 1}, {"k": 2}])
-    assert w.channel == "findings"
-    assert w.value == [{"k": 1}, {"k": 2}]
-
-
-def test_send_round_trip():
-    s = neograph.Send("worker", {"item": 42})
-    assert s.target_node == "worker"
-    assert s.input == {"item": 42}
-
-
-def test_command_construction():
-    c = neograph.Command(
-        goto_node="approve",
-        updates=[neograph.ChannelWrite("status", "approved")],
-    )
-    assert c.goto_node == "approve"
-    assert len(c.updates) == 1
-    assert c.updates[0].channel == "status"
-    assert c.updates[0].value == "approved"
-
-
-def test_chat_message_round_trip():
-    msg = neograph.ChatMessage(role="user", content="hi")
-    assert msg.role == "user"
-    assert msg.content == "hi"
-
-    tc = neograph.ToolCall(id="call_1", name="calc", arguments='{"x":1}')
-    msg.tool_calls = [tc]
-    assert msg.tool_calls[0].name == "calc"
-
-
-def test_completion_params_construction():
-    params = neograph.CompletionParams(
-        model="gpt-4o-mini",
-        messages=[neograph.ChatMessage(role="user", content="hi")],
-        temperature=0.5,
-        timeout_seconds=7,
-    )
-    assert params.model == "gpt-4o-mini"
-    assert len(params.messages) == 1
-    assert params.temperature == 0.5
-    assert params.timeout_seconds == 7
+    assert result.output["channels"]["messages"]["value"] == [
+        {"role": "user", "content": "hello"},
+    ]

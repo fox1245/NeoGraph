@@ -40,13 +40,41 @@ struct Node {
 static sp::runtime::Result ask(Provider& p,
                                const std::string& system,
                                const std::string& user,
-                               float temperature) {
+                               float temperature,
+                               std::vector<std::shared_ptr<const sp::Outcome>>& outcomes) {
     ProviderControls controls;
     controls.temperature = temperature;
-    return p.invoke(make_provider_request(
-        p, "~deepseek/deepseek-v4-flash-latest",
-        {examples::message(sp::Role::System, system), examples::message(sp::Role::User, user)},
-        {}, std::move(controls)));
+    controls.max_output_tokens = 8192;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+    const std::vector<sp::Message> messages{
+        examples::message(sp::Role::System, system), examples::message(sp::Role::User, user)};
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        auto request = make_provider_request(p, "~deepseek/deepseek-v4-flash-latest",
+            messages, {}, controls);
+        request.options.deadline = deadline;
+        sp::runtime::Result result;
+        try {
+            result = p.invoke(std::move(request));
+        } catch (const ProviderOutcomeError& error) {
+            outcomes.push_back(error.outcome());
+            throw;
+        }
+        outcomes.push_back(result);
+        examples::require_outcome(result);
+        const auto& completion = std::get<sp::Completion>(*result);
+        bool has_output = false;
+        for (const auto& message : completion.messages)
+            for (const auto& part : message.parts) {
+                if (const auto* text = std::get_if<sp::Text>(&part))
+                    has_output |= !text->value.empty();
+                has_output |= std::holds_alternative<sp::ToolCall>(part)
+                    || std::holds_alternative<sp::InvalidToolCall>(part);
+            }
+        if (completion.stop.kind != sp::StopKind::MaxTokens
+            || has_output || attempt == 2)
+            return result;
+    }
+    throw std::logic_error("unreachable ToT completion attempt");
 }
 
 // Ask the LLM to propose N continuations of `current_state`.
@@ -69,8 +97,7 @@ static std::vector<std::string> expand(Provider& p,
         (current_state.empty() ? "<none>" : current_state) +
         "\n\nProduce " + std::to_string(n) + " different next thoughts:";
 
-    auto reply = examples::require_outcome(ask(p, sys, usr, 0.9f));
-    outcomes.push_back(reply);
+    auto reply = ask(p, sys, usr, 0.9f, outcomes);
     const std::string text = examples::visible_text(*reply);
 
     std::vector<std::string> out;
@@ -118,8 +145,7 @@ static float evaluate(Provider& p,
         "\n\nPartial reasoning:\n" + full_state +
         "\n\nEvaluate:";
 
-    auto reply = examples::require_outcome(ask(p, sys, usr, 0.0f));
-    outcomes.push_back(reply);
+    auto reply = ask(p, sys, usr, 0.0f, outcomes);
     // Explicit text projection for the evaluator's score grammar.
     const std::string txt = examples::visible_text(*reply);
     size_t pos = txt.find("SCORE:");
@@ -142,7 +168,7 @@ int main() {
         return 1;
     }
 
-    auto provider = examples::make_openrouter_provider(api_key);
+    auto provider = examples::make_openrouter_provider(api_key, "responses", std::chrono::seconds(300));
 
     std::cout << "\n╔══════════════════════════════════════════════════════╗\n"
               <<   "║  NeoGraph Example 16: Tree of Thoughts                ║\n"
@@ -203,7 +229,7 @@ int main() {
     std::cout << "── Best path (score " << best.score << ") ─────────────────\n"
               << best.thought << "\n\n";
 
-    auto final_reply = examples::require_outcome(ask(*provider,
+    auto final_reply = ask(*provider,
         "You are a math solver. Given the problem and the reasoning trace, "
         "produce the final answer. You MUST:\n"
         "  1. Output a single arithmetic expression that uses each input "
@@ -216,8 +242,7 @@ int main() {
         "  CHECK: <step-by-step calculation> = <result>",
         "Problem:\n" + problem + "\n\nReasoning so far:\n" + best.thought +
         "\n\nSolve:",
-        0.0f));
-    outcomes.push_back(final_reply);
+        0.0f, outcomes);
 
     std::cout << "── Final expression ─────────────────────────────────\n"
               << examples::visible_text(*final_reply) << "\n\n";

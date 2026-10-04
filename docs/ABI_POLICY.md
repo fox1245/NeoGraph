@@ -2,77 +2,48 @@
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
 
-This policy applies to C++ consumers of installed NeoGraph static and shared
-libraries. Python wheel users receive the matching extension and libraries as
-one package and must not replace individual bundled libraries.
-The typed provider cutover is a mandatory recompile boundary, not the earlier permanent-compatibility plan. NeoGraph retains its pre-v1 loader naming; this does not make old provider objects compatible. Install matching NeoGraph headers/libraries and SchemaProvider SDK headers/libraries atomically. SDK interface revision 3 and `libsp_*.so.3` are a separate shared ABI with out-of-line capability gates; unstable package `0.0.0` is not a stable release. The SDK runtime/archive currently requires Linux/POSIX. Historical Windows/macOS naming examples below are packaging policy, not proof that the new dependency runs there. Python provider bindings/wrappers are deferred and not ported.
+## Version and loader contract
 
-## Version Contract
+CMake reads the NeoGraph version from `pyproject.toml` and sets compiled public libraries' `VERSION` to that version and `SOVERSION` to its major component.
 
-NeoGraph reads its project version from `pyproject.toml`. CMake applies that
-value as `VERSION` and its major component as `SOVERSION` to every compiled
-public `neograph_*` library.
-
-| Release line | Loader ABI generation | Contract |
+| Release line | Loader generation | Contract |
 |---|---:|---|
-| `0.x` | `0` | Pre-v1. Binary compatibility is not guaranteed. A release may require every C++ consumer to rebuild, but the boundary must be announced in the changelog and migration guide. |
-| `1.x` | `1` | Stable v1 ABI. Minor and patch releases preserve public virtual ordering and object layout unless an exceptional security fix is announced. |
-| `N.x`, `N >= 2` | `N` | A major release may introduce a new ABI generation and requires rebuilding C++ consumers. |
+| `0.x` | `0` | Pre-v1; announced rebuild boundaries can break binary compatibility. |
+| `1.x` | `1` | Planned stable v1 policy; not a claim that v1 has shipped. |
+| `N.x`, `N >= 2` | `N` | Major ABI boundary; rebuild consumers. |
 
-`SOVERSION 0` does not claim that all `0.x` binaries are interchangeable. It
-gives pre-v1 packages a deliberate loader name while the release notes remain
-the authority for mandatory rebuild boundaries.
+`SOVERSION 0` gives pre-v1 packages a loader name, not interchangeable layouts. The loader cannot reject every incompatible `0.x` replacement. Read the target release notes, replace headers/libraries atomically and rebuild at every announced boundary. Do not hot-swap individual pre-v1 libraries into an existing process.
 
-This is an explicit pre-v1 risk acceptance: the dynamic loader cannot reject an
-incompatible `0.x` replacement because both files use ABI generation 0. Package
-upgrades must replace NeoGraph headers and libraries atomically, and operators
-must not hot-swap a pre-v1 shared library across an announced rebuild boundary.
-Version 1.0 ends this exception by freezing the generation 1 layouts.
+## Mandatory rebuild boundaries
 
-## Installed Names
+- Pre-`0.9.0` to `0.9.0+`: GraphNode removed eight legacy execution virtuals. Custom nodes implement `run(NodeInput)`; SyncGraphNode is an additive adapter.
+- Later pre-v1 bounded-resource, UsageAccumulator-reservation and issue #216 changes: public layouts gained accounting, admission, cache and runtime-interposition state. Rebuild against matching headers.
+- Typed-provider cutover: rebuild every C++ consumer and custom provider, with matching NeoGraph and SchemaProvider SDK headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the old descriptor interpreter and Responses WebSocket path were removed without aliases.
+- Event-driven provider dispatch: CancelToken uses `std::stop_source` and exposes `stop_token()`. Old inline cancellation code is not compatible merely because `cancel`, `fork` and Asio-slot signatures remain.
+- A future `1.0.0` boundary changes loader generation to `1` and requires rebuilding; the generation-1 freeze is a policy for that release, not a current qualification result.
 
-- Linux installs a full file such as `libneograph_core.so.0.11.1`, a
-  compatibility link `libneograph_core.so.0`, and an unversioned linker name.
-  The ELF SONAME is `libneograph_core.so.0`.
-- macOS installs the equivalent `.dylib` names and records the major-version
-  install name.
-- Windows keeps unsuffixed names such as `neograph_core.dll`; package version
-  metadata records the release and ABI policy.
-- Installed NeoGraph shared libraries find sibling `neograph_*` dependencies
-  through `$ORIGIN` on Linux and `@loader_path` on macOS.
-- Static archives have no runtime SONAME. Consumers must recompile whenever the
-  headers or release notes declare a rebuild boundary.
+## Exported interfaces
 
-## Mandatory Rebuild Boundaries
+Provider has three subclass hooks: `get_name`, `family`, `prepare(ProviderRequest)`. Common `invoke(_async)` and `dispatch(_async)` consume owned typed requests and return immutable `sp::runtime::Result`; they are not paired virtual completion overrides.
 
-| Upgrade | Requirement | Reason |
-|---|---|---|
-| Any pre-`0.9.0` build to `0.9.0+` | Rebuild all C++ consumers and custom nodes. | `GraphNode` removed eight legacy virtual methods and changed its vtable. |
-| `0.11.1` or earlier to the next release | Rebuild all C++ consumers. | Public layouts changed for bounded runtime/transport state, including `NodeCache`, `EngineConfig`, `CompletionParams`, `Agent`, `RequestOptions`, `SseEventParser`, and provider configuration. `SyncGraphNode` itself is additive and does not change the `GraphNode` vtable. |
-| `0.11.1` or earlier to the release containing bounded `UsageAccumulator` reservations | Rebuild all C++ consumers. | `UsageAccumulator` gained public reservation accounting state and its object layout changed. |
-| Any earlier pre-v1 build to the release containing issue #216 | Rebuild all C++ consumers. | `GraphEngine` gains atomic execution/administration admission state and `EngineConfig` gains per-node cache policies and runtime interposition; exported class/value layouts change, although legacy method signatures remain. |
-| Any `0.x` build to `1.0.0` | Rebuild all C++ consumers. | The supported v1 layouts are frozen and the loader ABI generation changes from 0 to 1. |
+CheckpointStore retains its legacy layout for the explicit adapter migration. Sync defaults fail instead of crossing into async overrides; async defaults offload sync overrides. New async-only backends implement AsyncCheckpointStore and use `adapt_async_checkpoint_store`; synchronous capability backends implement CheckpointStoreCore and use `adapt_checkpoint_store`. Rebuild at the announced pre-v1 boundaries; this adapter design does not authorize a shared-library-only replacement.
 
-Never copy a new shared library over an existing pre-v1 installation without
-also reading the target release notes. Install headers and libraries from the
-same release, and rebuild custom subclasses at every announced boundary.
+## SDK and Python boundaries
 
-## Exported Virtual Interfaces
+Core requires external `SchemaProvider::runtime`, even with LLM nodes disabled. The selected SDK release is `0.1.0` alpha, interface revision `4`, shared-library ABI revision `4`, with out-of-line capability checks; this is not a stable-interface claim. Install matching SDK components together. Its `libsp_*.so.4` generation is separate from NeoGraph's loader generation and from Python's `abi3` wheel tag.
 
-- `GraphNode` has one canonical virtual execution entry,
-  `run(NodeInput)`. `SyncGraphNode` is a separate additive adapter.
-- `Provider`: `get_name()`, `family()`, `prepare(ProviderRequest)`;
-  `invoke(_async)` / `dispatch(_async)` → `sp::runtime::Result`.
-  This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is unstable `0.0.0`, interface revision 3 / shared ABI 3, with out-of-line capability checks; that is not a stable release claim. Current runtime/archive support is Linux/POSIX; no Windows, macOS or WASM runtime qualification is implied. Python provider bindings/wrappers are deferred and not ported by this C++ change.
-- `CheckpointStore` retains its existing vtable and object layout for the
-  pre-v1 migration. Sync defaults now fail explicitly instead of crossing to
-  async overrides; async defaults offload synchronous overrides. Async-only
-  subclasses must migrate to `AsyncCheckpointStore` and
-  `adapt_async_checkpoint_store()` for a sync facade. New capability interfaces
-  and adapters do not change the legacy vtable or checkpoint wire format.
-  Rebuild custom backends with matching headers at the next announced boundary;
-  do not hot-swap a pre-v1 shared library into an existing process.
+Interface 4 adds family-specific request controls and changes public request layouts. Rebuild SDK consumers, NeoGraph and Python extensions together; interface-3 headers or libraries are not interchangeable with interface 4. Native archive v3 / `spna3` and portable JSON v2 remain independent, unchanged formats. Historical interface-3 measurements do not qualify interface 4.
 
-## Verification
+Python exposes the typed provider contract, including prepared handles and immutable outcomes; there is no legacy completion shim. Install the extension and its matching libraries as one wheel. Do not replace a bundled NeoGraph or SDK library individually. Graph ChatMessage convenience values do not replace native ProviderMessage custody. See [Python binding](python-binding.md).
 
-`scripts/test_find_package.sh` describes installed-consumer checks; its existence is not a current pass claim. The current SDK ABI3 full rebuild/CTest passed 26/26, and the shared installed consumer exercised real local HTTP two-turn typed requests, tool/native/refusal/known-zero outcomes and mismatch rejection. These results do not qualify NeoGraph, Python, Windows, macOS, WASM or paid live-provider compatibility. NeoGraph integrated verification is reported separately.
+The wheel bundles the six matching SDK runtime shared libraries, not the SDK's C++ headers or CMake package. C++ consumers install the SDK separately. Source resolution prefers an explicit `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`, then an installed package, then the public revision-pinned archive fallback. Set `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` for an offline build with an installed SDK; provide its prefix through `CMAKE_PREFIX_PATH`.
+
+## Installed names and platform limits
+
+On Linux, a shared library has a versioned file, a major-generation SONAME link and an unversioned linker name. NeoGraph shared libraries use `$ORIGIN` for sibling dependencies. macOS `.dylib`/`@loader_path` and Windows unsuffixed `.dll` naming remain packaging conventions; they do not qualify the new SDK runtime. Static archives have no SONAME and do not remove transitive link requirements.
+
+Recorded interface-3 SDK runtime/archive qualification covers Linux/POSIX, not interface 4. Existing macOS/Windows package metadata remains distinct from dependency qualification; no WASM runtime qualification is established. A wheel tag describes Python/ABI/platform compatibility, not proof that every runtime path was exercised. See the [PyPA tag specification](https://packaging.python.org/en/latest/specifications/platform-compatibility-tags/).
+
+## Verification evidence
+
+`scripts/test_find_package.sh` defines installed-consumer checks, not a pass result. Dated pre-cutover measurements remain [historical evidence](VALGRIND.md). Current NeoGraph, SDK and Python results must name the build, platform and exercised path in the integrated release report; this policy does not create new pass claims.

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ja source_sha256=47da3b0da6a1a0469315657c9eb8079b216d0c51eafce0bed090d91fc5c3c7b5 -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ja source_sha256=adeaef39bec37687c1e660e3ffbf89611002f53fd28b2a1d3aebd5b1fb664991 -->
 # 移行ガイド: レガシー 8 仮想メソッド → `run(NodeInput)` (v0.4.x → v0.9+)
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -12,6 +12,8 @@ awaitable<NodeOutput>` に集約しました。レガシーな 8 つの仮想メ
 > v0.9.0 以降、`run(NodeInput)` を実装していない C++ サブクラスは抽象クラスとして
 > コンパイルエラーになります。Python サブクラスも `run(self, input)` を実装する
 > 必要があります。
+
+イベント駆動Provider dispatchは別のpre-v1必須再ビルド境界です。`CancelToken`は`std::stop_source`を使い、executor非依存native subscription向け`stop_token()`を提供します。既存`cancel()`、`is_cancelled()`、`fork()`、`bind_executor()`、`slot()` callsiteはsource互換ですが旧inline実装はbinary互換ではありません。全C++ consumer/extensionを一致NeoGraph header/libraryで再コンパイルし、shared libraryのみを交換しないでください。通知はSDK `join()`、FIFO所有outcome、絶対deadline、admission/権限budgetを保持します。[ABI policy](ABI_POLICY.md)と[同条件実測](../benchmarks/provider-notification-summary.json)を参照してください。
 
 ## 移行する理由
 
@@ -309,9 +311,15 @@ grep -lE 'execute\(const GraphState' src/**/*.cpp
 
 # 移行 2: typed lossless Provider 切り替え (再コンパイル必須)
 
-ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを新しい一致したヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。SDK は不安定 `0.0.0`、interface revision 3 / shared ABI 3、out-of-line capability check を使用し、安定リリースの宣言ではありません。現 runtime/archive は Linux/POSIX で、Windows・macOS・WASM runtime の資格検証を意味しません。Python provider binding/wrapper は延期され、この C++ 変更では移植されません。
+ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを新しい一致したヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。SDK は alpha `0.1.0`、interface revision 4 / shared ABI 4、out-of-line capability check を使用し、安定リリースの宣言ではありません。記録された interface-3 SDK runtime/archive 検証は Linux/POSIX の範囲で、interface 4 の資格検証ではありません。Windows NTFS と macOS の実装はありますが、新 platform の検証には runtime 証拠が必要です。WASM provider runtime の検証は確立していません。
 
-Fresh installed find_package Program C++/C ABI/dualQuickJS consumer と NeoGraph/SchemaProvider typed2-request lifetime/native/raw/mismatch consumer は pass しました。Interface/ABI 宣言だけと実証 package 結果は別です。より広い platform や安定 release は主張しません。
+削除済み `Provider::complete`、`complete_async`、`complete_stream`、`complete_stream_async` 呼び出しは明示 mode request と `invoke` / `dispatch`（または C++ async peer）へ移行します。`Agent::complete` は所有結果を返す別の one-turn API として残ります。
+
+CMake 3.20 以上が必要です。Core は所有 typed provider 契約を公開するため `NEOGRAPH_BUILD_LLM=OFF` でも SchemaProvider runtime は必須です。明示的な `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` が優先され、それがなければ設置済み `SchemaProvider` runtime package を探します。なければ `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON`（既定）の時に `cmake/NeoGraphSchemaProvider.cmake` が固定した不変 GitHub archive を取得します。Offline build は SDK を設置し、`CMAKE_PREFIX_PATH` に prefix を設定して `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` を渡します。Sibling checkout は推測せず、削除済み bundled interpreter も選択しません。NeoGraph の任意 HTTP module を無効にしても SDK runtime の transport 依存は必要です。記録された SDK runtime/archive 検証は Linux/POSIX の範囲です。Windows NTFS と macOS の実装はありますが、新 platform の検証には runtime 証拠が必要です。WASM provider runtime の検証は確立していません。
+
+Python も C++ と同じ所有 request/outcome 境界を公開します: `make_provider_request`、`Provider.prepare`、`dispatch`、`invoke`。Provider 履歴には typed part を持つ `ProviderMessage` を使い、`ChatMessage` はグラフ用の便宜的 projection として残ります。SDK 失敗は `ProviderOutcome.failure` で読み、host observer/settlement 例外は `outcome` と `cause` を保持します。コンストラクターと GIL/コールバック動作は [Python binding ガイド](python-binding.md)を参照してください。
+
+Interface 4 より前の installed find_package Program C++/C ABI/dualQuickJS consumer と NeoGraph/SchemaProvider typed2-request lifetime/native/raw/mismatch consumer は pass しました。これは過去の package 結果で、interface-4 pass の主張ではありません。より広い platform や安定 release は主張しません。
 
 公開契約は所有 typed 準備/dispatch であり、同期・非同期の virtual completion 対ではありません。`ProviderRequest.payload` は Chat、Messages、Responses、Gemini、Interactions の SDK リクエスト variant です。`ProviderMode::Collect` / `Stream` は観測者の有無と独立に転送を選択します。`on_event` は借用 typed `sp::Event` view を受け取ります。コールバック後に必要なデータだけコピーします。raw JSON override や portable projection による native 権限のインポートは認めません。
 
@@ -320,10 +328,21 @@ Fresh installed find_package Program C++/C ABI/dualQuickJS consumer と NeoGraph
 #include <neograph/runtime_interposition_consumer.h>
 #include <neograph/controlled_provider.h>
 
-// Public operation signatures (the only virtual operation is prepare).
-// ProviderRequest owns the SDK request variant, mode, options and observer.
-// invoke[_async](request) = prepare once, then dispatch the same handle.
-// dispatch[_async](prepared) returns sp::runtime::Result.
+// Selected public declarations from neograph::Provider.
+class Provider {
+public:
+    virtual ~Provider() = default;
+    virtual std::string get_name() const = 0;
+    virtual std::string_view family() const noexcept = 0;
+    virtual PreparedProviderRequest prepare(ProviderRequest request) = 0;
+    sp::runtime::Result dispatch(PreparedProviderRequest request);
+    asio::awaitable<sp::runtime::Result> dispatch_async(PreparedProviderRequest request);
+    sp::runtime::Result invoke(ProviderRequest request);
+    asio::awaitable<sp::runtime::Result> invoke_async(ProviderRequest request);
+    static std::string request_digest(const PreparedProviderRequest& request);
+    static std::optional<std::uint64_t> conservative_token_upper_bound(
+        const PreparedProviderRequest& request);
+};
 ```
 
 ### ProviderRequest / ProviderControls
@@ -347,13 +366,28 @@ sp::runtime::Result call_provider(
 }
 ```
 
+Interface 4 は retained per-call control を `extra_fields` dictionary ではなく typed field で保持します:
+
+| Family | 追加の `ProviderControls` |
+|---|---|
+| Chat | `chat_reasoning`、`include_reasoning`、`usage_include`、`models`。宣言済み OpenRouter origin が必要です。Scalar `reasoning_effort` は別です。 |
+| Responses | `previous_response_id`、`previous_response_history`、`parallel_tool_calls`、`verbosity`、`truncation`、`responses_include`。 |
+| Messages | `thinking_mode`、`output_effort`、`cache_control`、`messages_tool_choice`、宣言済み origin の OpenRouter `provider` routing。 |
+| Gemini Generate | `gemini_history_mode`、`gemini_thinking_level`、`temperature`、`safety_settings`、`gemini_tool_choice`。 |
+
+Messages manual thinking は policy が認める output cap 未満の budget を要求します。Adaptive/disabled mode は thinking budget を禁止します。Manual/adaptive thinking は有効な temperature を省略しますが、不正な値と model が禁止する temperature は省略前に拒否します。Disabled thinking は承認済み temperature を出力します。Model-prefix 制限は承認済み policy の事実で、全 model または最後の `/` 以後の suffix を ASCII 大小文字を区別せず照合します。Gemini thinking level と thinking budget、および typed tool choice と `required_tool` はそれぞれ同時に指定できません。非対応 family/origin/value の組合せは I/O 前に拒否します。
+
 ### PreparedProviderRequest / ProviderBudgetClaim
 `prepare()` は検証とエンコードを正確に一度行い、元の deadline とキャンセル状態を持つ移動専用 `PreparedProviderRequest` を生成します。永続呼び出し元は `Provider::request_digest()` を assembly に結び付け、承認された budget claim を予約し、dispatch receipt を記録してから、同じハンドルを `ControlledProvider::dispatch_prepared(_async)` で消費します。gate 後の再生成はありません。重複 receipt は再送しません。カスタム実装は `get_name()`、`family()`、`prepare()` を実装し `prepare_runtime()` または `prepare_local()` を使います。local callback は `this` ではなく所有 shared 状態をキャプチャします。
 
 任意の `ProviderControls` は呼び出し元の選択であり、強制デフォルトや黙った cap clamp ではありません。非対応 family 制御は dispatch 前に拒否します。有界呼び出しには承認された実際のモデル input/output 上限が必要で、欠落は `LimitUnknown` です。予約は保守的な支出権限であり、報告使用量・予測・請求書ではありません。不明/部分/delivery-unknown の結果は hold を維持し、実際の最終報告で精算し、超過報告も全量を計上します。retry は明示的な単一層で、既定 off、有界 window と unknown-prior hold を使います。隠れた再送はありません。
 
 
-プロバイダー呼び出しは `sp::runtime::Result`、すなわち `sp::Completion` または `sp::Failure` を保持する不変の所有 `std::shared_ptr<const sp::Outcome>` を返します。表示テキストだけでなく結果全体を保持してください。順序付きメッセージ/パート、native continuation、完全な wire envelope、順序付き raw 観測、停止の根拠と実際の試行メタデータは呼び出しとクライアント破棄後も残ります。使用量は根拠・段階・品質付きの nullable `uint64_t` であり、欠落はゼロではなく不明です。失敗も元の部分結果を保持します。`ProviderFailure::outcome()` と `ProviderObserverError::outcome()` は実際の結果を保持し、後者の `cause()` は観測者の例外を保持します。
+プロバイダー呼び出しは `sp::runtime::Result`、すなわち `sp::Completion` または `sp::Failure` を保持する不変の所有 `std::shared_ptr<const sp::Outcome>` を返します。表示テキストだけでなく結果全体を保持してください。順序付きメッセージ/パート、保持された native continuation と family が提供する wire 証拠、順序付き raw 観測、停止の根拠と実際の試行メタデータは呼び出しとクライアント破棄後も残ります。`input_total`、`output_total`、`total` などの使用量カウンターは `std::optional<sp::Count>` で、存在する count は `uint64_t value` と `Evidence` を持ちます。`Usage` は stage、quality、conflict も記録します。欠落は不明であり、ゼロを作りません。失敗も元の部分結果を保持します。`ProviderFailure::outcome()` と `ProviderObserverError::outcome()` は実際の結果を保持し、後者の `cause()` は観測者の例外を保持します。
+
+Wire 証拠は family が提供する任意の情報です。`sp::Completion::wire_envelope` は null の場合があります（Python の `ProviderCompletion.wire_envelope` は `None`）。現在の buffered Chat は応答 JSON 全体を `raw_events` 内の `RawWire` に保持します。`type == "chat.completion"` で、文書は `payload` にあり、`wire_envelope` は null のままです。Family が実際に保持する場所から証拠を読み、fallback envelope は捏造しません。Native continuation と raw buffer は保護された証拠として保持され、trace payload から除外されます。
+
+`UsageAccumulator::snapshot()` は累積報告を返します。`total_tokens_wide()` は計上済みトークンと未解決予約の合計で、報告使用量として表示してはいけません。精算には input/output count のある final・consistent 報告が必要で、根拠のある最大 total を計上し、超過使用量も clamp しません。累積対象の一つでも counter が欠落すれば集計も不明です。予約、ローカル計上、vendor 請求書は別の記録です。
 
 実結果の後に post-effect 精算や terminal receipt 永続化が失敗すると、`ProviderDispatchOutcomePersistenceError::outcome()` は元の不変結果、`cause()` は元の永続例外を保持します。delivery も失敗した場合は `delivery_error()` が元の観測者例外を保持します。永続化成功後の観測者失敗は元の例外を変更せず再送出し、不明/結果なし transport 失敗では outcome を捏造しません。
 ### SchemaProvider
@@ -380,9 +414,15 @@ std::shared_ptr<neograph::llm::SchemaProvider> admitted_provider(
 }
 ```
 
+通常の `sp::descriptor::load` は header を literal として扱い、`${VAR}` を展開しません。Admission 前の明示的 host preprocessing には `sp::descriptor::load_with_environment_headers(source, overrides, policy)`、または `DeploymentHeaderEnvironment` を受け取る決定的 `load_with_deployment_headers(source, overrides, environment, policy)` を使います。Environment helper は Messages の任意 `ANTHROPIC_WORKSPACE_ID` / `ANTHROPIC_BETA` を読み、未設定または空の値は省略します。Literal descriptor header が environment に優先し、explicit override が両方に優先します。名前は大小文字を区別しません。重複 override、不正・reserved header は最終 admission で拒否します。Encoder は template を評価せず、承認済み descriptor も変更しません。
+
 ### Native 履歴 / 予算
 
 `ChatMessage` / `ChatTool` と JSON は portable projection であり native 権限ではありません。Portable 形式は [`provider-message-v2`](../schemas/provider-message-v2.schema.json)、[`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json) のままです。真正な C++ checkpoint sidecar はメモリ内の native seal を保持します。永続 native 履歴には host-owned `sp::NativeArchive` が必要です。closed v3 / `spna3` は独立キーによる認証済み owner-private custody で、archive v2 は更新・解釈せず拒否します。認証は全 semantic descriptor 選択（origin/path/header、policy、要求 field mapping、usage path、stop mapping）、owner と正確な custody binding を結び付けます。暗号化や vendor-issuer 認証ではありません。archive 本文・キー・native blob・raw wire 観測は公開しません。Archive は証拠保存であり、金銭 grant や spending lease ではありません。Program/external bank は独立 journal が所有し、snapshot コピーで credit は作れません。
+
+Interface 4 は native replay の configuration digest から output-generation cap だけを除きます。Content、origin、route、policy identity、prefix、tool、reasoning control は引き続き結び付けられます。実際の cap は encoded request と prepared-request digest に残ります。Cap を増やす semantic call ごとに新しい resource-bank admission、固有の決定的 call ordinal/effect identity、元の deadline が必要です。精算済み call slot の再利用、credit 更新、seal 修復、不確実な effect の再送はできません。Archive v3 と portable JSON v2 は変更されません。Old-policy native archive はその policy に結び付いたままで、異なる policy では拒否し、migration しません。
+
+Same-route native continuation と明示的 foreign projection は異なる契約です。Gemini の既定は `sp::gemini::HistoryMode::NativeOnly`。`PortableForeign` は native seal、wire output、signature のない caller-created assistant Text/ToolCall history を認めます。各 foreign assistant turn の最初の function call だけに `skip_thought_signature_validator` を付け、text-only history に signature は作りません。真正な native group は厳密に検証し、失敗・不一致 seal を除去して portable history に降格させません。Responses `previous_response_id` は provider-held state を選ぶため、`messages` には新 input だけを送ります。`previous_response_history` は送信しない local ownership 証拠です。Client-tool ownership に必要なら全 original prefix と、ID が cursor と一致する真正な terminal assistant を渡します。以後の in-process cursor 結果は private completed ownership を保持し、full `NativeReplay` や archive authority にはなりません。Cursor は native archive や portable import grant ではありません。
 
 **Standalone bank journal 修正 — 現在の契約を改訂；実際の runtime 証拠は下記。** Owner-approved protocol は単調 trusted-store namespace obligation と、実際の不変 original owner/thread/graph scope、ceiling、deadline/clock identity、generation を要求します。全 checkpoint commitment/revision に対する正確な durable head CAS だけが host-owned opaque lease を発行できます。正確な pending effect window を provider I/O 前に永続化し、真正な SDK outcome と実際の charge、nullable report、hold、dedup identity で精算しなければなりません。Checkpoint/next head は同じ owned actor/revision 下で原子的に publish します。Bank metadata 削除、checkpoint pruning、old authenticated snapshot replay、同一 ID overwrite、actor 喪失で credit を与えてはなりません。既存 65 hold がある ceiling 130 を 129 に下げると別の 65 は許可できません。証明済み no-effect 失敗は unchanged head を release し authentic 130 復旧を可能にできます。Crash/unknown/lost-lease window は refund/retry/fallback なしで hold を保持します。Plain/pristine archive 設定は money/native spending lease を与えず、現在の `config.usage` は既存 standalone obligation を置換できません。Program/external-bank journal 所有は不変です。これは要求契約です。実際の currency/custody 証拠と instrumentation 制約は下記であり、安定 released API 保証ではありません。
 
@@ -400,13 +440,15 @@ std::shared_ptr<neograph::llm::SchemaProvider> admitted_provider(
 
 `ProviderRequest::observer_limits` は host-only です。明示した `max_events`・`max_bytes` は正数で、承認済み SDK 配信上限を下げることしかできません。`provider-request/v3` digest は実効 limit、mode、encoded body、retry policy と全 semantic descriptor binding を結び付けます。Bridge は queued/draining batch を通じて実際の PMR vector/map capacity と所有 event/document byte を計上し、queue mutex 外で cancellation を要求します。`messages` という名の Generic channel を chat に強制変換しません。native `history` channel を `messages` に mapping すると C++ sidecar が保持され、JSON から native 権限を作りません。
 
-`ProviderOutcomeError` は結果を保持する共通 host-error base です。`ProviderObserverError` と `ProviderDispatchOutcomePersistenceError` は完全に drain した SDK 結果と元の `cause()` を保持し、後者は二次 observer 失敗も `delivery_error()` に保持します。`ProviderFailure::outcome()` は SDK 失敗自体を保持します。これは Node/Program の再 dispatch 権限ではありません。Provider retry の唯一の所有者は SDK で、caller が選んだ `max_output_tokens` を黙って clamp しません。
+`ProviderOutcomeError` は結果を保持する共通 host-error base です。`ProviderObserverError` と `ProviderDispatchOutcomePersistenceError` は完全に drain した SDK 結果と元の `cause()` を保持し、後者は二次 observer 失敗も `delivery_error()` に保持します。`ProviderFailure::outcome()` は SDK 失敗自体を保持します。これは Node/Program の再 dispatch 権限ではありません。Transport retry の唯一の所有者は SDK で、caller が選んだ `max_output_tokens` を黙って clamp しません。
 
 `ProgramFailure` は live `provider_outcome`・`provider_cause` を保持します。Canonical factual SDK witness は真正な archive custody を owner/run/version/bundle/operation/attempt に結び付け、Runtime は復旧失敗を公開する前に設定済み custody を eager に復元します。公開 data-only `ProgramResult::create()` は事前入力 witness で迂回できず、未解決の parsed seal は実行結果ではありません。プロセス再起動後は元の exception pointer がなく `provider_cause == nullptr` であり、text から再作成しません。永続化できない失敗は serialize/publish/replay できません。
 
 `RecordedBindingSet` は source-bound の move-only data で、caller 提供 dispatcher ではありません。信頼された Catalog の `recorded_capability_binder` は実際の永続 source event を独立に読み、captured-only capability を materialize します。`ProgramRuntime::replay_recorded()` は元の selected-source permission を検証し、実際の残存 bank を durable CAS で移します。inherited spend は新しい model grant ではありません。旧 `start_recorded` 更新 API は削除されました。InMemory/File/SQLite/PostgreSQL Program store は実行全体で正確で不変の owned lease を保持し、expiry による更新をしません。Controlled JavaScript も underlying capability manifest を検証し、正確な completed command 結果を消費して external effect を再 dispatch しません。
 
 **Recorded-control causal fix は full suite で実証済み。** Captured command replay は実行前に新しい CPU wall-time/Core work だけを durable に reserve し、測定済み work と新しく生成した Core checkpoint を result CAS で publish します。新しい model、money、Program-operation allowance を消費せず、captured external effect を再 dispatch しません。未精算 reservation は debit を保持します。Reservation により、最初の新しい Core checkpoint を拒否した通常の Running→Running transition ではなく認証済み settlement transition を選びます。Await channel receive、timer wait/cancel、handoff wait の開始/release は owning executor/strand 上で直列化します。既存 Recorded CPU/Memory await/handoff scenario は full suite で pass しました。Remote TSan coverage 制約は下記に明記します。
+
+以下の観測はこの文書整備より前に記録されたものです。歴史的証拠であり、新 test 実行や全 platform・transport・security 性質の保証ではありません。
 
 **有料観測は完了；普遍的な qualification ではありません。** 元の `SPQUAL1` base630/1000000 microUSD は不変です。同じ元 ledger の ONE hash-chained `A` が承認済み extension480/3000000 を受け入れ、aggregate1110/4000000 になります。Calls/spent/hold/settlement は累積で新 grant ID/header/reset はありません。正確な declaration byte/file identity と original authorization/baseline/catalog/activation/ledger-prefix の hash/totals は固定され、削除・置換・変更は fail closed です。最終 canonical ledger は calls1110/spent437958/held1287828 microUSD、eventA1、limits1110/4000000；spent+held US$1.725786 は LOCAL catalogue meter で invoice ではありません。記録済み five-family60-pair baseline は600 request 完了：Chat60/60、Responses60/60、Messages60/60、Generate56/60（incorrect-vision SSE4件）、Interactions57/60（incorrect-vision buffered1件/SSE2件）；合計293/300 pair で300/300ではありません。他の old600 financial record は保持しますが完全な behavioral proof ではありません。以前の M5/media one-shot cohort は不変です。以前の Google3-round prerequisite は invalid-tool2件/unreadable-positive1件の失敗状態を保持します。追加有料呼出しは承認されません。最終 SDK 証拠と native-axis 制約は baseline 成功とは別です。 以前の activation/reopen smoke は2回 reopen 後 calls610/spent219159/held751233、SDK meter/canary/vision4-test19.38秒 pass として保持します。これは限定された以前の checkpoint で最終 ledger totals ではありません。以前の検証済み Chat60-pair cohort は実際の attempt120、UpperBound charge120、UnknownHold なしを保持します。
 
@@ -432,7 +474,7 @@ Stage 3 (2026-04) の設計と当時の測定テスト数は歴史として保�
 
 `GraphEngine::compile(def, ctx)` のデフォルトワーカー数は
 v0.1.4 (`b59444f`) から `std::thread::hardware_concurrency()` でしたが、
-v1.0 で **`1` (= エンジン所有 thread_pool なし)** に復元されました。
+現在の pre-v1 API で **`1` (= エンジン所有 thread_pool なし)** に復元されました。
 
 ## 理由
 
@@ -473,9 +515,7 @@ engine.set_worker_count_auto()
 
 ## 移行しないとどうなるか
 
-- ファンアウトのあるユーザーグラフは単一スレッドで逐次実行 (一貫性保証)
-- 実際の wallclock 回復は達成されない — 明示的な
-  `set_worker_count_auto()` が必要
+Worker pool を選ばなければ CPU-bound fan-out は呼び出し元 executor 上で動き、非同期 I/O は重なる場合があります。別の実行 thread が必要なら `set_worker_count_auto()` または明示 worker count を使います。Worker count だけで一貫性や高速化は保証しません。
 
 ## 影響を受ける NeoGraph 内部サンプル
 
@@ -488,7 +528,7 @@ engine.set_worker_count_auto()
   同追加
 - `examples/21_mcp_fanout.cpp` — 3 MCP ツール呼出を同時発行、同追加
 - `examples/36_classifier_fanout.cpp` — 既に `set_worker_count(5)` が明示的。
-  偽のデフォルト (現在のデフォルトは hardware_concurrency) を述べていたコメント修正
+  偽のデフォルト (現在の既定は 1、engine-owned pool なし) を述べていたコメント修正
 - `src/core/deep_research_graph.cpp` `create_deep_research_graph()` ビルダー —
   `compile()` 直後に `set_worker_count_auto()` を呼出し、スーパーバイザの
   N 研究者が真に同時実行されるように
@@ -518,9 +558,7 @@ NeoGraph は全ての公開バイナリライブラリにプロジェクト `VER
 bounded `NodeCache` を含むリリースへの更新では、`NodeCache` と
 `EngineConfig` のオブジェクトレイアウト変更により再ビルドが必須です。
 
-前述の Provider 移行は既存 `Provider` vtable を変更しません。将来の
-`CheckpointStore` 非同期移行も同じポリシーに従い、v1 後は安定した
-レイアウトの変更より別の capability interface と adapter を優先します。
+Typed Provider 移行は virtual 契約を `get_name`、`family`、`prepare` に変え、旧 completion virtual を削除します。既存 Provider binary は互換でなく、カスタム provider と全依存 C++ 利用者を一致する header/library で再ビルドします。Core も SchemaProvider 型を公開するため LLM 無効 build にも SDK runtime が必要です。将来の安定 interface は安定 layout の変更より別の capability interface と adapter を優先すべきであり、現在の pre-v1 interface は binary 互換を約束しません。
 
 プラットフォーム別の名前、既知の境界、CI 検証については
 [バイナリ互換性ポリシー](ABI_POLICY.md)を参照してください。

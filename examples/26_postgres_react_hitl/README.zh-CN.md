@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/26_postgres_react_hitl/README.md locale=zh-CN source_sha256=c03d573ec24eaf1dd00c474339be503d57dd52b0c8804806bd3035ff4901192f -->
+<!-- neograph-i18n: source=examples/26_postgres_react_hitl/README.md locale=zh-CN source_sha256=fb347c51a8ebcb9bd157da6854903e0e2a348f5f3672207040849b70a60e57cb -->
 # 示例 26 — 基于 Postgres 的深度研究（带 HITL）
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -118,7 +118,7 @@ $ docker compose exec postgres psql -U postgres -d neograph -c "
    ```
    docker compose up -d postgres crawl4ai
    ```
-3. 使用BuildKit和Docker Compose >= 2.17，将`SCHEMAPROVIDER_SOURCE`设为实际SchemaProvider源码路径（默认`../../../SchemaProvider`，相对此目录）。Dockerfile先从named additional context安装`SchemaProvider::runtime`。
+3. 使用BuildKit和Docker Compose >= 2.17，将`SCHEMAPROVIDER_SOURCE`设为实际SchemaProvider源码路径（默认`../../../SchemaProvider`，相对此目录）。Dockerfile先从named additional context安装`SchemaProvider::runtime`。 请使用 Linux/POSIX build host。SchemaProvider 对 Core-only build 也必需；本指南不声称验证了 native macOS/Windows provider transport。
 4. 固定`.env`中的`NEOGRAPH_NATIVE_ARCHIVE_OWNER`，仅初始化一次：
    ```
    docker compose run --rm agent init-archive
@@ -129,8 +129,8 @@ $ docker compose exec postgres psql -U postgres -d neograph -c "
 
 完成后：
 ```
-docker compose down       # 保留PG、native-history、native-keys
-docker compose down -v    # 删除三个卷；旧native恢复能力丢失
+docker compose down       # keep PG, native-history and native-keys
+docker compose down -v    # delete all three; old native resume is lost
 ```
 
 ## 直接运行二进制文件（agent不使用docker-compose）
@@ -144,7 +144,7 @@ cmake -B build -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
   -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_EXAMPLES=ON
 cmake --build build --target example_postgres_react_hitl -j
 
-# 私密保管工作目录的.env并保持archive路径稳定
+# Load .env privately in the binary's working directory; keep archive paths stable.
 mkdir -m 700 .native-keys
 ./build/example_postgres_react_hitl init-archive
 ./build/example_postgres_react_hitl run "...your query..."
@@ -196,6 +196,20 @@ SELECT blob_data::text FROM neograph_checkpoint_blobs
 - 该节点区分“批准”（→ Command(__end__)）与反馈（→ Command(supervisor)，反馈追加到 `supervisor_messages` 并重置迭代计数器）。两条路径均干净地结束运行，因此 PG 始终具有一致的最近检查点。
 - PG保存portable图状态；native恢复还需要受保护的archive及原始密钥。
 - C++使用typed `ProviderRequest`/事件和完整不可变`sp::Outcome`。报告文本是projection，不是native replay权限。本指南记录源码迁移，不是新的构建/测试/live验证。
+
+## 空 budget 恢复与报告质量
+
+supervisor、researcher、compression、final-report 仅在已完成的空 `MaxTokens` outcome 没有
+visible text 和有效/无效 client tool call 时，允许最多两次额外 semantic call。cap 加倍但不超过
+16,384；research-brief 不属于此 ladder。每次尝试使用新 broker ordinal、原 bank admission、
+保留的 outcome 和 usage，以及同一个绝对 deadline。没有显式 deadline 时，通过一次无 effect
+preparation 取得已配置 deadline，在 mediated invoke 前释放 handle 并固定该 deadline。
+显式 deadline 跳过这一步。
+
+Failure、observer/settlement 错误、已交付 streaming part 不重试。空最终文本在 human review 前
+报错；有内容的 `MaxTokens` 报告只在 public 投影标为 `Incomplete`，不修改不可变 outcome，
+也不重试部分文本。空 compression 耗尽 ladder 后生成 diagnostic，不伪造成功 provider result。
+这些是保留的 interface-4 源码契约，不是新的 live 运行或 durability 证明。
 
 ## 为什么没有前端？
 

@@ -1,0 +1,1650 @@
+{
+  "version": 1,
+  "scope": "Production GraphEngine local TLS oracle, pre-notification polling versus guarded coalesced-channel handoff; not model inference or paid qualification",
+  "statistic": "median of3freshprocessrepetitions perconfiguration; each10warmup+100measured graph runs; throughputgraph_runs/s notHTTP/token",
+  "configurations_per_cohort": 8,
+  "process_records_total": 48,
+  "measured_graph_runs_total": 4800,
+  "retained_outcomes_validated_after_provider_destruction": 5280,
+  "failures": 0,
+  "compiler": "GCC13.3 Release static hardeningenabled nativeoptimizationOFF",
+  "effective_parser": "vendored yyjson0.12.0 NeoGraph -O2 object shadows SDK -O3; before/after objectSHA256 identical",
+  "parser_object_sha256": "bcc0db1eb4bf4f2c0c4e01ad3ac86525053603d0af301740da12cbe4590e1e2d",
+  "paid_calls": 0,
+  "cpu_model": "AMD Ryzen7 5800X underWSL2",
+  "shared_workload_controls": {
+    "version": 1,
+    "family": "openai.chat",
+    "mode": "runtime",
+    "warmup_requests": 10,
+    "measured_requests": 100,
+    "process_repetitions": 3,
+    "workers": 1,
+    "io_threads": 1,
+    "resolver_threads": 1,
+    "max_host_connections": 32,
+    "max_operations": 64,
+    "output_tokens": 64,
+    "timeout_ms": 30000,
+    "http_preference": "h1",
+    "retry_enabled": false,
+    "max_attempts": 1,
+    "retain_results": true,
+    "codec_iterations": 0,
+    "node": "node",
+    "peer_script": "../SchemaProvider/tools/benchmark_peer.mjs",
+    "source_revision": "matched polling control versus coalesced active-drain channel experiment",
+    "model_input_limit": 1048576,
+    "engine_workers": 1,
+    "max_steps": 8,
+    "model_token_budget": 0,
+    "cancellation_requests": 0,
+    "cancel_after_ms": 1
+  },
+  "process_measurements": [
+    {
+      "cohort": "before_control_armed",
+      "workload": "text256",
+      "repetition": 0,
+      "payload_bytes": 256,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 1.301834,
+        "p95": 1.582318,
+        "p99": 1.77603
+      },
+      "graph_runs_per_second": 738.9010741065019,
+      "peak_rss_bytes": 16437248,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "text256",
+      "repetition": 1,
+      "payload_bytes": 256,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 1.322302,
+        "p95": 1.614657,
+        "p99": 1.823479
+      },
+      "graph_runs_per_second": 728.7019688667331,
+      "peak_rss_bytes": 16433152,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "text256",
+      "repetition": 2,
+      "payload_bytes": 256,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 1.302474,
+        "p95": 1.383536,
+        "p99": 1.399386
+      },
+      "graph_runs_per_second": 760.4459050987997,
+      "peak_rss_bytes": 16437248,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "text256",
+      "repetition": 0,
+      "payload_bytes": 256,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 0.906339,
+        "p95": 1.04886,
+        "p99": 1.350103
+      },
+      "graph_runs_per_second": 1082.0458916870764,
+      "peak_rss_bytes": 16322560,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "text256",
+      "repetition": 1,
+      "payload_bytes": 256,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 0.964353,
+        "p95": 1.164342,
+        "p99": 1.319267
+      },
+      "graph_runs_per_second": 1002.2945730118876,
+      "peak_rss_bytes": 16347136,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "text256",
+      "repetition": 2,
+      "payload_bytes": 256,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 0.952992,
+        "p95": 1.159032,
+        "p99": 1.184915
+      },
+      "graph_runs_per_second": 1022.958838059519,
+      "peak_rss_bytes": 16355328,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "text_c32",
+      "repetition": 0,
+      "payload_bytes": 256,
+      "delay_ms": 0,
+      "concurrency": 32,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 6.804191,
+        "p95": 36.345702,
+        "p99": 38.882024
+      },
+      "graph_runs_per_second": 1983.373577636035,
+      "peak_rss_bytes": 19763200,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "text_c32",
+      "repetition": 1,
+      "payload_bytes": 256,
+      "delay_ms": 0,
+      "concurrency": 32,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 8.698312,
+        "p95": 39.557832,
+        "p99": 44.759421
+      },
+      "graph_runs_per_second": 1803.0874193758475,
+      "peak_rss_bytes": 19783680,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "text_c32",
+      "repetition": 2,
+      "payload_bytes": 256,
+      "delay_ms": 0,
+      "concurrency": 32,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 6.939675,
+        "p95": 47.642582,
+        "p99": 50.500766
+      },
+      "graph_runs_per_second": 1504.7984561730912,
+      "peak_rss_bytes": 19832832,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "text_c32",
+      "repetition": 0,
+      "payload_bytes": 256,
+      "delay_ms": 0,
+      "concurrency": 32,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 9.448145,
+        "p95": 47.297126,
+        "p99": 50.573241
+      },
+      "graph_runs_per_second": 1558.3715572007525,
+      "peak_rss_bytes": 19705856,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "text_c32",
+      "repetition": 1,
+      "payload_bytes": 256,
+      "delay_ms": 0,
+      "concurrency": 32,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 6.730001,
+        "p95": 45.257672,
+        "p99": 46.868994
+      },
+      "graph_runs_per_second": 1645.559594837557,
+      "peak_rss_bytes": 19759104,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "text_c32",
+      "repetition": 2,
+      "payload_bytes": 256,
+      "delay_ms": 0,
+      "concurrency": 32,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 7.641085,
+        "p95": 44.229699,
+        "p99": 48.046215
+      },
+      "graph_runs_per_second": 1655.499248163294,
+      "peak_rss_bytes": 19767296,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "tool",
+      "repetition": 0,
+      "payload_bytes": 256,
+      "delay_ms": 5,
+      "concurrency": 32,
+      "case": "tool",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 30.548201,
+        "p95": 93.48815,
+        "p99": 108.248063
+      },
+      "graph_runs_per_second": 736.37239424135,
+      "peak_rss_bytes": 21151744,
+      "peak_threads": 19,
+      "peer_requests": 200,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "tool",
+      "repetition": 1,
+      "payload_bytes": 256,
+      "delay_ms": 5,
+      "concurrency": 32,
+      "case": "tool",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 30.001257,
+        "p95": 101.511827,
+        "p99": 109.940404
+      },
+      "graph_runs_per_second": 710.4876957350084,
+      "peak_rss_bytes": 21417984,
+      "peak_threads": 19,
+      "peer_requests": 200,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "tool",
+      "repetition": 2,
+      "payload_bytes": 256,
+      "delay_ms": 5,
+      "concurrency": 32,
+      "case": "tool",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 33.470193,
+        "p95": 94.582892,
+        "p99": 106.288988
+      },
+      "graph_runs_per_second": 695.8509621955724,
+      "peak_rss_bytes": 21385216,
+      "peak_threads": 19,
+      "peer_requests": 200,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "tool",
+      "repetition": 0,
+      "payload_bytes": 256,
+      "delay_ms": 5,
+      "concurrency": 32,
+      "case": "tool",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 34.780772,
+        "p95": 96.220933,
+        "p99": 109.159743
+      },
+      "graph_runs_per_second": 692.4409626912533,
+      "peak_rss_bytes": 21344256,
+      "peak_threads": 19,
+      "peer_requests": 200,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "tool",
+      "repetition": 1,
+      "payload_bytes": 256,
+      "delay_ms": 5,
+      "concurrency": 32,
+      "case": "tool",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 29.963252,
+        "p95": 109.676904,
+        "p99": 125.331764
+      },
+      "graph_runs_per_second": 690.1453374305513,
+      "peak_rss_bytes": 21331968,
+      "peak_threads": 19,
+      "peer_requests": 200,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "tool",
+      "repetition": 2,
+      "payload_bytes": 256,
+      "delay_ms": 5,
+      "concurrency": 32,
+      "case": "tool",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 31.348443,
+        "p95": 95.879715,
+        "p99": 116.251162
+      },
+      "graph_runs_per_second": 701.8325233191752,
+      "peak_rss_bytes": 21364736,
+      "peak_threads": 19,
+      "peer_requests": 200,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "sse_tool",
+      "repetition": 0,
+      "payload_bytes": 256,
+      "delay_ms": 5,
+      "concurrency": 32,
+      "case": "tool",
+      "streaming": true,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 39.78951,
+        "p95": 103.250972,
+        "p99": 115.932579
+      },
+      "graph_runs_per_second": 609.1113754546194,
+      "peak_rss_bytes": 21815296,
+      "peak_threads": 19,
+      "peer_requests": 200,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "sse_tool",
+      "repetition": 1,
+      "payload_bytes": 256,
+      "delay_ms": 5,
+      "concurrency": 32,
+      "case": "tool",
+      "streaming": true,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 37.888125,
+        "p95": 100.52321,
+        "p99": 108.946908
+      },
+      "graph_runs_per_second": 634.8204501770819,
+      "peak_rss_bytes": 21909504,
+      "peak_threads": 19,
+      "peer_requests": 200,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "sse_tool",
+      "repetition": 2,
+      "payload_bytes": 256,
+      "delay_ms": 5,
+      "concurrency": 32,
+      "case": "tool",
+      "streaming": true,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 38.607118,
+        "p95": 103.072817,
+        "p99": 116.034887
+      },
+      "graph_runs_per_second": 611.7403594796791,
+      "peak_rss_bytes": 21688320,
+      "peak_threads": 19,
+      "peer_requests": 200,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "sse_tool",
+      "repetition": 0,
+      "payload_bytes": 256,
+      "delay_ms": 5,
+      "concurrency": 32,
+      "case": "tool",
+      "streaming": true,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 36.369961,
+        "p95": 96.673682,
+        "p99": 114.524311
+      },
+      "graph_runs_per_second": 655.586833967619,
+      "peak_rss_bytes": 21725184,
+      "peak_threads": 19,
+      "peer_requests": 200,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "sse_tool",
+      "repetition": 1,
+      "payload_bytes": 256,
+      "delay_ms": 5,
+      "concurrency": 32,
+      "case": "tool",
+      "streaming": true,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 33.597342,
+        "p95": 102.8191,
+        "p99": 112.971536
+      },
+      "graph_runs_per_second": 655.0640413534068,
+      "peak_rss_bytes": 21733376,
+      "peak_threads": 19,
+      "peer_requests": 200,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "sse_tool",
+      "repetition": 2,
+      "payload_bytes": 256,
+      "delay_ms": 5,
+      "concurrency": 32,
+      "case": "tool",
+      "streaming": true,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 32.778561,
+        "p95": 100.131203,
+        "p99": 118.698609
+      },
+      "graph_runs_per_second": 669.2011634624356,
+      "peak_rss_bytes": 21659648,
+      "peak_threads": 19,
+      "peer_requests": 200,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "text0",
+      "repetition": 0,
+      "payload_bytes": 0,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 1.286646,
+        "p95": 1.348902,
+        "p99": 1.373833
+      },
+      "graph_runs_per_second": 773.7653137150605,
+      "peak_rss_bytes": 15769600,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "text0",
+      "repetition": 1,
+      "payload_bytes": 0,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 1.318301,
+        "p95": 1.440093,
+        "p99": 1.816666
+      },
+      "graph_runs_per_second": 742.1773542036376,
+      "peak_rss_bytes": 15765504,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "text0",
+      "repetition": 2,
+      "payload_bytes": 0,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 1.286234,
+        "p95": 1.405138,
+        "p99": 1.59427
+      },
+      "graph_runs_per_second": 761.9409925617872,
+      "peak_rss_bytes": 15765504,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "text0",
+      "repetition": 0,
+      "payload_bytes": 0,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 0.912571,
+        "p95": 1.060353,
+        "p99": 1.163761
+      },
+      "graph_runs_per_second": 1070.6575412240359,
+      "peak_rss_bytes": 15704064,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "text0",
+      "repetition": 1,
+      "payload_bytes": 0,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 0.953482,
+        "p95": 1.210083,
+        "p99": 1.41445
+      },
+      "graph_runs_per_second": 1012.8742598244094,
+      "peak_rss_bytes": 15667200,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "text0",
+      "repetition": 2,
+      "payload_bytes": 0,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 0.901395,
+        "p95": 1.073076,
+        "p99": 1.171551
+      },
+      "graph_runs_per_second": 1081.7822162965558,
+      "peak_rss_bytes": 15699968,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "text4k",
+      "repetition": 0,
+      "payload_bytes": 4096,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 1.128831,
+        "p95": 1.269263,
+        "p99": 1.405738
+      },
+      "graph_runs_per_second": 880.1322690938226,
+      "peak_rss_bytes": 24322048,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "text4k",
+      "repetition": 1,
+      "payload_bytes": 4096,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 1.187401,
+        "p95": 1.534191,
+        "p99": 1.734465
+      },
+      "graph_runs_per_second": 814.5662695275972,
+      "peak_rss_bytes": 24305664,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "text4k",
+      "repetition": 2,
+      "payload_bytes": 4096,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 1.109435,
+        "p95": 1.403076,
+        "p99": 1.463899
+      },
+      "graph_runs_per_second": 870.6317033743857,
+      "peak_rss_bytes": 24276992,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "text4k",
+      "repetition": 0,
+      "payload_bytes": 4096,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 1.387636,
+        "p95": 1.492287,
+        "p99": 1.570739
+      },
+      "graph_runs_per_second": 711.63644429712,
+      "peak_rss_bytes": 24412160,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "text4k",
+      "repetition": 1,
+      "payload_bytes": 4096,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 1.402459,
+        "p95": 2.06336,
+        "p99": 2.649576
+      },
+      "graph_runs_per_second": 673.408464079066,
+      "peak_rss_bytes": 24395776,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "text4k",
+      "repetition": 2,
+      "payload_bytes": 4096,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 1.381023,
+        "p95": 1.48543,
+        "p99": 1.6843
+      },
+      "graph_runs_per_second": 709.0241473771921,
+      "peak_rss_bytes": 24498176,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "text64k",
+      "repetition": 0,
+      "payload_bytes": 65536,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 4.695725,
+        "p95": 5.278896,
+        "p99": 5.77862
+      },
+      "graph_runs_per_second": 212.56742715845158,
+      "peak_rss_bytes": 135327744,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "text64k",
+      "repetition": 1,
+      "payload_bytes": 65536,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 4.873767,
+        "p95": 6.290719,
+        "p99": 7.839727
+      },
+      "graph_runs_per_second": 194.82997199060028,
+      "peak_rss_bytes": 134746112,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "text64k",
+      "repetition": 2,
+      "payload_bytes": 65536,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 5.107769,
+        "p95": 5.862272,
+        "p99": 6.320263
+      },
+      "graph_runs_per_second": 196.2439908838936,
+      "peak_rss_bytes": 135028736,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "text64k",
+      "repetition": 0,
+      "payload_bytes": 65536,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 4.642033,
+        "p95": 5.277452,
+        "p99": 5.434349
+      },
+      "graph_runs_per_second": 217.71978576146654,
+      "peak_rss_bytes": 134926336,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "text64k",
+      "repetition": 1,
+      "payload_bytes": 65536,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 4.025557,
+        "p95": 4.638812,
+        "p99": 4.788313
+      },
+      "graph_runs_per_second": 247.8544485854561,
+      "peak_rss_bytes": 135057408,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "text64k",
+      "repetition": 2,
+      "payload_bytes": 65536,
+      "delay_ms": 0,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 4.144619,
+        "p95": 4.983406,
+        "p99": 5.309427
+      },
+      "graph_runs_per_second": 240.26894552471097,
+      "peak_rss_bytes": 135233536,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "text_delay5",
+      "repetition": 0,
+      "payload_bytes": 256,
+      "delay_ms": 5,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 6.383394,
+        "p95": 6.682123,
+        "p99": 6.806275
+      },
+      "graph_runs_per_second": 156.3304021914446,
+      "peak_rss_bytes": 16494592,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "text_delay5",
+      "repetition": 1,
+      "payload_bytes": 256,
+      "delay_ms": 5,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 6.425313,
+        "p95": 6.778153,
+        "p99": 6.944242
+      },
+      "graph_runs_per_second": 155.05201555549425,
+      "peak_rss_bytes": 16474112,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "after_armed_channel",
+      "workload": "text_delay5",
+      "repetition": 2,
+      "payload_bytes": 256,
+      "delay_ms": 5,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 6.554965,
+        "p95": 7.080208,
+        "p99": 7.299447
+      },
+      "graph_runs_per_second": 151.39026716059962,
+      "peak_rss_bytes": 16445440,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "text_delay5",
+      "repetition": 0,
+      "payload_bytes": 256,
+      "delay_ms": 5,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 6.596283,
+        "p95": 7.664779,
+        "p99": 7.726464
+      },
+      "graph_runs_per_second": 147.72650235035007,
+      "peak_rss_bytes": 16510976,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "text_delay5",
+      "repetition": 1,
+      "payload_bytes": 256,
+      "delay_ms": 5,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 6.60192,
+        "p95": 7.710543,
+        "p99": 7.767617
+      },
+      "graph_runs_per_second": 146.90611527070308,
+      "peak_rss_bytes": 16519168,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    },
+    {
+      "cohort": "before_control_armed",
+      "workload": "text_delay5",
+      "repetition": 2,
+      "payload_bytes": 256,
+      "delay_ms": 5,
+      "concurrency": 1,
+      "case": "text",
+      "streaming": false,
+      "graph_runs": 100,
+      "latency_ms": {
+        "p50": 7.608065,
+        "p95": 7.762343,
+        "p99": 7.830055
+      },
+      "graph_runs_per_second": 138.8599271438899,
+      "peak_rss_bytes": 16482304,
+      "peak_threads": 3,
+      "peer_requests": 100,
+      "peer_invalid": 0,
+      "tls_errors": 0,
+      "internal_resends": 0,
+      "retained_after_provider_destroy": 110,
+      "statuses": {
+        "completed": 100
+      },
+      "passed": true
+    }
+  ],
+  "measurements": [
+    {
+      "workload": "text256",
+      "payload_padding_bytes": 256,
+      "peer_delay_ms": 0,
+      "concurrency": 1,
+      "streaming": false,
+      "before": {
+        "p50_ms": 1.302474,
+        "p95_ms": 1.582318,
+        "p99_ms": 1.77603,
+        "graph_runs_per_second": 738.9010741065019,
+        "sampled_peak_rss_mib": 15.67578125,
+        "sampled_peak_threads": 3
+      },
+      "after": {
+        "p50_ms": 0.952992,
+        "p95_ms": 1.159032,
+        "p99_ms": 1.319267,
+        "graph_runs_per_second": 1022.958838059519,
+        "sampled_peak_rss_mib": 15.58984375,
+        "sampled_peak_threads": 3
+      },
+      "p50_delta_percent": -26.832167091243274,
+      "throughput_delta_percent": 38.44327392493061
+    },
+    {
+      "workload": "text0",
+      "payload_padding_bytes": 0,
+      "peer_delay_ms": 0,
+      "concurrency": 1,
+      "streaming": false,
+      "before": {
+        "p50_ms": 1.286646,
+        "p95_ms": 1.405138,
+        "p99_ms": 1.59427,
+        "graph_runs_per_second": 761.9409925617872,
+        "sampled_peak_rss_mib": 15.03515625,
+        "sampled_peak_threads": 3
+      },
+      "after": {
+        "p50_ms": 0.912571,
+        "p95_ms": 1.073076,
+        "p99_ms": 1.171551,
+        "graph_runs_per_second": 1070.6575412240359,
+        "sampled_peak_rss_mib": 14.97265625,
+        "sampled_peak_threads": 3
+      },
+      "p50_delta_percent": -29.07365351464194,
+      "throughput_delta_percent": 40.51712031193995
+    },
+    {
+      "workload": "text4k",
+      "payload_padding_bytes": 4096,
+      "peer_delay_ms": 0,
+      "concurrency": 1,
+      "streaming": false,
+      "before": {
+        "p50_ms": 1.387636,
+        "p95_ms": 1.492287,
+        "p99_ms": 1.6843,
+        "graph_runs_per_second": 709.0241473771921,
+        "sampled_peak_rss_mib": 23.28125,
+        "sampled_peak_threads": 3
+      },
+      "after": {
+        "p50_ms": 1.128831,
+        "p95_ms": 1.403076,
+        "p99_ms": 1.463899,
+        "graph_runs_per_second": 870.6317033743857,
+        "sampled_peak_rss_mib": 23.1796875,
+        "sampled_peak_threads": 3
+      },
+      "p50_delta_percent": -18.65078449968148,
+      "throughput_delta_percent": 22.792955161683693
+    },
+    {
+      "workload": "text64k",
+      "payload_padding_bytes": 65536,
+      "peer_delay_ms": 0,
+      "concurrency": 1,
+      "streaming": false,
+      "before": {
+        "p50_ms": 4.873767,
+        "p95_ms": 5.862272,
+        "p99_ms": 6.320263,
+        "graph_runs_per_second": 196.2439908838936,
+        "sampled_peak_rss_mib": 128.7734375,
+        "sampled_peak_threads": 3
+      },
+      "after": {
+        "p50_ms": 4.144619,
+        "p95_ms": 4.983406,
+        "p99_ms": 5.309427,
+        "graph_runs_per_second": 240.26894552471097,
+        "sampled_peak_rss_mib": 128.80078125,
+        "sampled_peak_threads": 3
+      },
+      "p50_delta_percent": -14.960665948946684,
+      "throughput_delta_percent": 22.433784821907963
+    },
+    {
+      "workload": "text_delay5",
+      "payload_padding_bytes": 256,
+      "peer_delay_ms": 5,
+      "concurrency": 1,
+      "streaming": false,
+      "before": {
+        "p50_ms": 6.60192,
+        "p95_ms": 7.710543,
+        "p99_ms": 7.767617,
+        "graph_runs_per_second": 146.90611527070308,
+        "sampled_peak_rss_mib": 15.74609375,
+        "sampled_peak_threads": 3
+      },
+      "after": {
+        "p50_ms": 6.425313,
+        "p95_ms": 6.778153,
+        "p99_ms": 6.944242,
+        "graph_runs_per_second": 155.05201555549425,
+        "sampled_peak_rss_mib": 15.7109375,
+        "sampled_peak_threads": 3
+      },
+      "p50_delta_percent": -2.6750854296931803,
+      "throughput_delta_percent": 5.544970180295605
+    },
+    {
+      "workload": "text_c32",
+      "payload_padding_bytes": 256,
+      "peer_delay_ms": 0,
+      "concurrency": 32,
+      "streaming": false,
+      "before": {
+        "p50_ms": 7.641085,
+        "p95_ms": 45.257672,
+        "p99_ms": 48.046215,
+        "graph_runs_per_second": 1645.559594837557,
+        "sampled_peak_rss_mib": 18.84375,
+        "sampled_peak_threads": 3
+      },
+      "after": {
+        "p50_ms": 6.939675,
+        "p95_ms": 39.557832,
+        "p99_ms": 44.759421,
+        "graph_runs_per_second": 1803.0874193758475,
+        "sampled_peak_rss_mib": 18.8671875,
+        "sampled_peak_threads": 3
+      },
+      "p50_delta_percent": -9.179455535437707,
+      "throughput_delta_percent": 9.572903043589932
+    },
+    {
+      "workload": "tool",
+      "payload_padding_bytes": 256,
+      "peer_delay_ms": 5,
+      "concurrency": 32,
+      "streaming": false,
+      "before": {
+        "p50_ms": 30.548201,
+        "p95_ms": 94.582892,
+        "p99_ms": 108.248063,
+        "graph_runs_per_second": 710.4876957350084,
+        "sampled_peak_rss_mib": 20.39453125,
+        "sampled_peak_threads": 19
+      },
+      "after": {
+        "p50_ms": 31.348443,
+        "p95_ms": 96.220933,
+        "p99_ms": 116.251162,
+        "graph_runs_per_second": 692.4409626912533,
+        "sampled_peak_rss_mib": 20.35546875,
+        "sampled_peak_threads": 19
+      },
+      "p50_delta_percent": 2.619604342658355,
+      "throughput_delta_percent": -2.5400486387150645
+    },
+    {
+      "workload": "sse_tool",
+      "payload_padding_bytes": 256,
+      "peer_delay_ms": 5,
+      "concurrency": 32,
+      "streaming": true,
+      "before": {
+        "p50_ms": 33.597342,
+        "p95_ms": 100.131203,
+        "p99_ms": 114.524311,
+        "graph_runs_per_second": 655.586833967619,
+        "sampled_peak_rss_mib": 20.71875,
+        "sampled_peak_threads": 19
+      },
+      "after": {
+        "p50_ms": 38.607118,
+        "p95_ms": 103.072817,
+        "p99_ms": 115.932579,
+        "graph_runs_per_second": 611.7403594796791,
+        "sampled_peak_rss_mib": 20.8046875,
+        "sampled_peak_threads": 19
+      },
+      "p50_delta_percent": 14.911227203628208,
+      "throughput_delta_percent": -6.688126151432982
+    }
+  ],
+  "separate_stage_probe": {
+    "operations_per_cohort_including_warmup": 180,
+    "sdk_outcome_to_drain_p50_us_before": 383.7125,
+    "sdk_outcome_to_drain_p50_us_after": 36.4165,
+    "join_p50_us_before": 0.211,
+    "join_p50_us_after": 0.24,
+    "timer_waits_before": 298,
+    "timer_waits_after": 0,
+    "notification_waits_after": 180,
+    "posted_wake_tokens_after": 180,
+    "instrumentation_scope": "separate targeted50measured/10warmup/3process;not mixedwith100measuredproductiontable;sourceprobe removedaftermeasurement"
+  },
+  "required_behavior_preserved": [
+    "ownedSDKoutcomes/raw/native data retained afterprovider destruction",
+    "exactly-onceSDKoutcome/FIFOobservers/boundedqueued+drainingownership",
+    "stdstop/coroutine/sharedgraph cancellation withoutslotreplacement",
+    "absolute deadlines/retry/admission/resource/authority controls unchanged",
+    "operation.join callback/admissionslot fence"
+  ],
+  "limits": [
+    "threeprocess median isnotconfidenceinterval; TLS startup/warmup/concurrency effects remain",
+    "resource metrics sampled1ms, not exact CPU/csw profile",
+    "tool andSSEthroughput smallobservedregressions retained; not universal speedup",
+    "old7b47ad43majorcutoverdataNOTreused asmatched control; semantic/resourceequivalence witholdmajorbaseline remainsfalse",
+    "Windows/macOS runtime notqualified; currentSDK runtime/archive LinuxPOSIX",
+    "TSan unsupportedhere: PIEunexpectedmemorymapping/nonPIEexit139; no racefreeTSanclaim"
+  ],
+  "verification": {
+    "behavioral_regressions_passed": 43,
+    "ASAN_UBSAN_helper_concurrent_teardown_rounds": 200,
+    "installed_SDK_consumer_measured_graph_runs": 300,
+    "installed_SDK_consumer_actual_HTTP_requests": 600,
+    "installed_SDK_outcomes_retained_after_destroy": 330
+  },
+  "simd_audit": {
+    "explicit_AVX_parser_backend": false,
+    "upstream_design": "deliberate scalar/unrolled baseline; SSE2 PR294unmerged",
+    "scalar_SSE_not_SIMD_scanning": true,
+    "SDK_O3_number_helper_packed_SIMD_not_final_O2_helper": true,
+    "actual_host_CPUID_XCR0": {
+      "cpuid_xsave": 1,
+      "cpuid_osxsave": 1,
+      "cpuid_avx": 1,
+      "cpuid_avx2": 1,
+      "cpuid_avx512f": 0,
+      "xcr0": 7,
+      "os_xmm_ymm_enabled": 1,
+      "avx_usable_here": 1,
+      "avx2_usable_here": 1,
+      "avx512f_usable_here": 0
+    },
+    "ISA_flags_changed": false,
+    "sources": [
+      "https://github.com/ibireme/yyjson/pull/294#issuecomment-5159789685",
+      "https://arxiv.org/abs/1902.08318",
+      "https://arxiv.org/abs/2010.03090"
+    ]
+  }
+}

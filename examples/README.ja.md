@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=2f78c1c15d20a1a9f3197b3a3d160344f130d7cb776e068c5afc5f9aeb0bb485 -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=2ca0c5f75e5469e00f15a18bd66d075c7b40363567ad329c14ef0ec5ceecdc95 -->
 # C++ API の例
 
 
@@ -17,12 +17,14 @@ bounded call には真正 model fact が必要で、欠落は `LimitUnknown` で
 reservation/charged/held は nullable provider usage と別で、budget 更新、価格、forecast、invoice ではありません。
 
 header-only `examples/provider_example_support.h` は実際の SDK runtime を使用します。
-LLM ビルドには `find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)` の `SchemaProvider::runtime` または
-明示的な `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<sdk-source>` が必要です。
+`NEOGRAPH_BUILD_LLM=OFF` を含む全 Core ビルドに `SchemaProvider::runtime` が必要です。
+CMake 3.20+ は明示 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、インストール済み runtime package、
+固定 public GitHub source archive の順に SDK を選択します。download fallback は既定で有効です。
+インストール済み package/明示 source の offline ビルドでは `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` にしてください。
 インストール include root は `include/SchemaProvider`。interface/capability 検査を行い、
-SDK package は unstable `0.0.0`（interface 3）です。
+SDK package は alpha `0.1.0`（interface/shared ABI 4）です。
 
-現在の model-free E2E では番号付き target39個を検証しました。finite offline29個と、
+保存済み interface-3 model-free C++ E2E 実行では番号付き target39個を検証しました。finite offline29個と、
 実際の MCP/ACP/A2A/Harness および gRPC graph/checkpoint/tool 経路です。gRPC-vs-JSON-RPC
 測定例も実行しましたが返却値を検証せず、behavioral E2E pass には数えません。
 live/外部 model 経路22個と無効な Clay GUI は未検証で、公開 vendor 要求や新 grant はありません。
@@ -32,11 +34,10 @@ native archive は owner-private 認証 custody で、暗号化や vendor issuer
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-現在の CMake inventory は optional component を含む番号付き C++ target63範囲です。
-それぞれがこのディレクトリ内の 1 つのファイルです (Docker-Compose が 1 つあります)
-例外、[`26_postgres_react_hitl/`](26_postgres_react_hitl/)) — コピー
-1 つを自分のプロジェクトに追加し、`neograph::core` + にリンクします
-`neograph::llm`、これで出発点が決まりました。
+番号付き例は NeoGraph のエンジン API を扱い、Core と Program の quickstart も含みます。
+ほとんどはこのディレクトリの単一ファイルです。Docker Compose を使う
+[`26_postgres_react_hitl/`](26_postgres_react_hitl/) もあります。
+例をプロジェクトにコピーし、`neograph::core` と必要なコンポーネントにリンクしてください。
 
 ## 建てる
 
@@ -50,7 +51,7 @@ cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON
 cmake --build build -j$(nproc)
 ```
 
-完全な C++ 例セットをビルドするには、Program と A2A も有効にします。
+Program ベースと A2A の例を含めるには、次のコンポーネントも有効にします。
 
 ```bash
 cmake -S . -B build \
@@ -152,7 +153,7 @@ OPENROUTER_API_KEY=sk-or-...
 | 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | OpenRouter + MCP HTTP サーバー | ストリーミング可能な HTTP MCP サーバーからツールを検出し、ReAct ループを駆動します。 |
 | 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | OpenRouter + Python stdio スクリプト | 03 と同じですが、MCP サーバーは stdin/stdout 上の子サブプロセスで、ネットワークスタックはありません。 |
 | 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | OpenRouter + 2 サーバー | 1 つのエージェント、2 つの MCP サーバー (HTTP + stdio)、ツールを 1 つのリストへ統合し、LLM が両方から透過的に選択します。 |
-| 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | MCP HTTP サーバー (LLM なし) | Planner は MCP 呼び出しごとに 1 つの送信を発行します。 `make_parallel_group` はそれらを同時に実行します。決定的 — LLM は、デモが LLM 軸上でオフラインのままとなるようにツールを厳選します。 |
+| 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | MCP HTTP サーバー (LLM なし) | 固定 planner が MCP 呼び出しごとに Send を作り、`make_parallel_group` で同時実行します。モデル呼び出しはありませんが、MCP サーバーへの接続は必要です。 |
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | OpenRouter + MCP HTTP サーバー | `interrupt_before` で任意の MCP ツール呼び出しを止め、オペレーターが確認・承認して再開します。 |
 | 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | OpenRouter + MCP HTTP サーバー | オペレーターが回答草案を読み、フィードバックを入力します。2 回目の実行はそれを会話コンテキストへ取り込みます。 |
 
@@ -211,8 +212,69 @@ OPENROUTER_API_KEY=sk-or-...
 | # |ファイル |セットアップ |それが示すもの |
 |---|------|-------|---------------|
 | 11 | [`11_clay_chatbot.cpp`](11_clay_chatbot.cpp) |クレイ+レイリブ (`-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`) | Clay/Raylib UI を使用したマルチターン チャット。 Pure-C++ デスクトップ アプリ、NeoGraph バックエンド。モックまたは`--live`。 |
-| 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | OpenRouter + ギドラ + ギドラ-mcp | リバースエンジニアリング エージェント — Ghidra を介して、ストリップされたバイナリから関数名と概要を復元します。エンドツーエンドで検証済み (matched_score 0.92、6-fn crackme)。完全なパイプラインは [`fox1245/re-agent`](https://github.com/fox1245/re-agent) にあります。 |
+| 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | OpenRouter + Ghidra + ghidra-mcp | リバースエンジニアリングエージェント。Ghidra でシンボルを除去したバイナリの関数名と概要を復元します。過去のエンドツーエンド結果は、6 関数の crackme で matched_score 0.92 でした。完全なパイプラインは別の非公開リポジトリ `fox1245/re-agent` で管理されています。 |
 | 36 | [`36_classifier_fanout.cpp`](36_classifier_fanout.cpp) |オフライン | 5 つの小さな「分類子」 (感情 / 毒性 / 言語 / トピック / 意図) が Send を介して展開され、並行して実行されます。経過時間 ≈ 合計ではなく最大 (分類子ごと) — 小規模モデルのエッジ ストーリー。 DistilBERT/MiniLM パスの 5 ms レイテンシの代用を模擬します。インライン `[ONNX SWAP-IN]` ブロックは、`Ort::Session` を使用した 30 行の置換を示します。推論ランタイムの依存関係はありません。 |
+
+例 35 には、`bridge_mcp_ghidra.py` スクリプトのパスを指定する `GHIDRA_MCP_BRIDGE` が必要です。`GHIDRA_MCP_PYTHON` はインタープリターを選択し、既定値は `python3` です。`GHIDRA_SERVER_URL` はプラグインのエンドポイントを選択し、既定値は `http://127.0.0.1:18080/` です。実行前に Ghidra と MCP プラグインを起動してください。この例には `OPENROUTER_API_KEY` も必要で、有料モデルを呼び出します。上のスコアは過去の観測値であり、新しい実行結果や一般的な精度保証ではありません。
+
+## 保持された例の契約
+
+このソース契約は SDK interface 4 を使います。上の C++ 実行記録は過去の証拠であり、
+interface-4 の検証や新しい live 呼出しではありません。family ごとの制御は
+`ProviderControls` の閉じた型付きフィールドで、非対応 family/origin/model は I/O 前に拒否します。
+reasoning/sampling/tool 制御、Responses のサーバー保持 cursor、deployment header、
+明示的 portable Gemini history は [provider reference](../docs/reference-en.md) を参照してください。
+cursor と portable history は native replay 権限を与えません。
+
+### 研究と遅い推論経路
+
+Deep Research (25 / 26) は supervisor、researcher、compression、final-report の各要求で、
+完了した空の `MaxTokens` outcome に visible text と有効/無効な client tool call がない場合だけ、
+最大二回の追加 semantic call を許可します。出力 cap は倍増し、16,384 を超えません。
+research-brief 呼出しはこの ladder の対象外です。追加呼出しは新しい ordinal を使い、
+元の bank の admission を通り、outcome と usage を保持します。grant、hold、deadline は更新しません。
+明示 deadline がなければ、effect のない一回の preparation で設定済み deadline を取得し、
+mediated invoke 前に解放して deadline を固定します。明示 deadline はこの取得を省略します。
+Failure、observer/settlement エラー、既に配信した streaming part は追加呼出しを起こしません。
+
+空の最終報告はエラーです。内容のある `MaxTokens` 報告は public 投影だけに `Incomplete` を
+付け、不変 outcome は変更せず、部分テキストも再試行しません。空の compression が ladder を
+使い切ると diagnostic を返し、成功した provider result を捏造しません。
+
+例16は完了した空応答だけで最大三回呼び、cap 8,192 と ask ごとの 300秒 deadline を維持します。
+cap を倍増せず、failure も再試行しません。例28の rewrite は low effort と出力512 token を要求し、
+空/空白応答なら元の質問をそのまま返します。provider timeout は180秒です。
+この経路別設定は共有 factory の既定値を変えません。
+
+### チェックポイントと進化
+
+例08は terminal checkpoint を fork して新しい user turn を始める既存の流れを保持します。
+一時停止した reviewer の resume 例ではありません。例14は実際の executor 回数から節約数を
+計算します。最初の五回の後、失敗 sibling 一つだけを再実行すると四回を節約します。
+
+例54は smoke/file モードを選ぶ前に `pnoop` を登録します。repository root から
+追跡済み seed/task ファイルを使ってください:
+
+```bash
+./build/example_evolution --smoke
+./build/example_evolution examples/54_evolution_seed.json examples/54_evolution_task.json
+```
+
+実際の JSON の `best.compiled`、`best.validated`、`best.executed`、`best.correct` を確認してください。
+`compile_passed` だけでは正しい実行の証拠になりません。file モードにも built-in node type と
+この demo の `pnoop` があり、custom type には host 登録が必要です。
+過去の smoke 実行は file モードを検証していません。
+
+### A2A dialect と task snapshot
+
+例37は card の interface と最初の RPC で選んだ dialect を表示します。client は互換性のある
+JSON-RPC 0.x/1.0 card interface を選び、card URL は設定済み RPC endpoint を変更しません。
+card を fetch していなければ数値 `-32601` の場合だけ初期 dialect probe が可能で、
+SSE 配信後は再送しません。例38は両 dialect を広告し、初期/更新 task snapshot を表示します。
+初期 task は完了した回答ではありません。server の応答 encoding は method 表記とは別に
+`A2A-Version` header が選択します。1.0 は PascalCase method、flat part、
+`returnImmediately` を使い、stream の status/artifact update を累積します。caller の回答は
+完了/中断 agent status text、最初の artifact text、最後の agent history text の順に選びます。
 
 ## メンタル モデル — 3 層、真ん中に JSON
 
@@ -227,9 +289,9 @@ OPENROUTER_API_KEY=sk-or-...
    コマンド ルーティングはライブでオーバーライドされます。
 3. **型付き provider リクエストと Outcome** (13, 15, 16, 17): SDK admission、順序付きイベント、不変 Outcome を使用します。descriptor interpreter や WebSocket adapter はありません。
 
-グラフ定義はJSON形式(`std::map<std::string, json>`)
-どちらの方法でも — [Python examples](../bindings/python/examples/) の例 14 と 15
-同じ定義が `json.dumps` を往復する様子を示します。
+グラフ定義は JSON 形式 (`std::map<std::string, json>`) です。
+[Python examples](../bindings/python/examples/) も同じ topology 形式を使います。
+provider リクエストと Outcome は topology JSON とは別の型付きオブジェクトです。
 
 ## APIキーエコノミー
 
@@ -239,13 +301,13 @@ OPENROUTER_API_KEY=sk-or-...
 | ローカルサーバー (キーなし) | 31 |
 | **なし** | 02、04、05、06、07、08、09、10、14、21、27、36、37、38、39、41、42、43、44、46、47、48、49、50、51、52、53、54、55、 56、57 |
 
-31 個のサンプルは API キーなしで実行されます。つまり、「タイヤを蹴る」です。
-床。例 21 (MCP ファンアウト、決定的プランナー) および 27 (非同期)
-同時実行性、LLM レイテンシの代用 `steady_timer`)、特に
-トークンを使わずにエンジン配管のデモンストレーションを行います。 gRPC スイート
-(52–55、57) もキー不要ですが、`-DNEOGRAPH_BUILD_GRPC=ON` が必要です
-(`grpc++` / `protoc`); 56 (`history_compaction`) のデフォルトはモックです
-プロバイダーであり、キーが存在する場合にのみ OpenRouter にアクセスします。
+例 25 と 26 は local Crawl4AI も使用します。現在の secure Docker image は
+空でない `CRAWL4AI_API_TOKEN` を必要とします。例 26 の `.env.example` を参照してください。
+
+31 例は API key なしで実行できます。例 21 は固定 MCP planner、
+27 は `steady_timer` で model latency を代用し、token を使わず engine 動作を示します。
+gRPC 例 (52–55, 57) も key 不要ですが、`-DNEOGRAPH_BUILD_GRPC=ON` と `grpc++`/`protoc` が必要です。
+56 (`history_compaction`) は既定で mock provider を使い、key がある場合のみ OpenRouter に接続します。
 
 ## CMake 構成後の再実行
 

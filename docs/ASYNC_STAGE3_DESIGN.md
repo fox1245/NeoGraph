@@ -7,6 +7,13 @@
 > providers own typed requests, prepare once and dispatch the prepared call;
 > use the [API narrative tour](reference-en.md), [migration guide](migration-v0.4-to-v1.0.md)
 > and installed headers. The SDK's `Client::complete` is a distinct, supported API.
+>
+> All “current state,” schedules, gates, version numbers and next actions below
+> refer to that proposal date. Python was outside Stage 3's scope; the current
+> cutover includes typed Python providers and owned outcomes. Current Core also
+> requires external SchemaProvider runtime even when LLM nodes are disabled.
+> See the [async guide](ASYNC_GUIDE.md) and [Python binding](python-binding.md)
+> for the implemented contract and platform qualification limits.
 
 **Languages:** [English](ASYNC_STAGE3_DESIGN.md) | [한국어](ASYNC_STAGE3_DESIGN.ko.md) | [日本語](ASYNC_STAGE3_DESIGN.ja.md) | [简体中文](ASYNC_STAGE3_DESIGN.zh-CN.md)
 

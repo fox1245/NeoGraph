@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/README.md locale=ja source_sha256=8733a2df59553c82a3ada848609ea369b440fcd97dce2c2bc5a5c745eff05a28 -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/README.md locale=ja source_sha256=3985b561c728357e75ec0cab68d2711e19334c47a588c07f2b836c6ce3fa8eb3 -->
 # JARVIS オーケストレーションベンチマーク — NeoGraph vs LangGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -9,7 +9,7 @@ C++ルーター・合成器・専門家フィクスチャは型付き `ProviderR
 
 ローカル音声は任意で、選択したwhisper/Moonshineモデル、ONNX Runtime/Supertonic資産、miniaudio、利用可能なマイク・スピーカーが必要。テキスト/mock動作は音声動作の証拠ではない。クラウド不要はローカル/mockのみ。ライブには承認された `OPENROUTER_API_KEY`、ネットワーク・提供者容量が必要で、プロンプト・会話メモリ・添付ツール/委譲結果をOpenRouterへ送信する。モデルは固定され、ネイティブ要求のZDRは地域内常駐保証ではない。キーをログ・リポジトリへ入れない。nullableトークン使用量は請求額ではなく、費用には現行のエンドポイント/モデル価格と実際の請求対象使用量が必要。
 
-`[jarvis:ttft]` は最初の非空 `sp::PartDelta` の `PartKind::Text`・`DeltaChannel::Content` で発生し、使用量・推論・ヘッダーイベントでは発生しない。最初の合成テキストであり、実際のTTS音声開始ではない。Python REPL/ベンチのプロトコルドライバーは不変で、型付きPythonプロバイダーバインディングは延期。現在の[Jarvis CLI実行証拠](../README.ja.md)は挨拶、永続化した合成メモリturn、正常なEOF終了のみで、このベンチroundの証拠ではない。以下のベンチ時間・実行主張は過去の記録。CLI実行はマイク・ASR・TTS・pybindベンチやvendor推論を検証しない。
+`[jarvis:ttft]` は最初の非空 `sp::PartDelta` の `PartKind::Text`・`DeltaChannel::Content` で発生し、使用量・推論・ヘッダーイベントでは発生しない。最初の合成テキストであり、実際のTTS音声開始ではない。Python REPL driver は protocol client です。pybind benchmark は移行済み型付き binding を使い、別の実行証拠が必要です。現在の[Jarvis CLI実行証拠](../README.md)は挨拶、永続化した合成メモリturn、正常なEOF終了のみで、このベンチroundの証拠ではない。以下のベンチ時間・実行主張は過去の記録。CLI実行はマイク・ASR・TTS・pybindベンチやvendor推論を検証しない。
 
 NeoGraph(C++モックビルド)とLangGraph(Pythonツイン `langgraph_twin.py`)の同一のトポロジー(mic→stt→merge→memory→router→4-way→synth/skip→commit→tts)を反映し、同一制約の`--cpus=2 --memory=2g`コンテナ内で計測します。
 
@@ -30,7 +30,7 @@ OPENROUTER_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + OpenRouter
 解釈:
 - グラフエンジン自体は両側ともLLMに比べて安価である（0.4ms対3ms）。Groqの差+22ms のうち~19ms はHTTP クライアントスタックの差（langchain-openaiのhttpx+pydantic と比較して asio）。
 - ターン間ギャップは**成長型**です — 推論が高速になるほど大きくなり、200msターン(Cerebras級 / シングルコールパス)では10%以上、ローカル小規模モデル(約50ms/コール)では20〜30%です。
-- 90× startup · 9× RSSは**固定ギャップ**であり、推論速度とは無関係 — エッジ常時稼働・コールドスタート・マルチテナント（JARVIS 100個 = 1GB未満）に即関連する。
+- この過去の container 設定の startup/RSS 比率は約90×/9×でした。production JARVIS100個の memory capacity を保証しません。
 
 ## E2Eラウンド — 実MCPツールラウンドトリップ含む (2026-07-05)
 
@@ -71,7 +71,7 @@ E2Eの「分散が差分を覆い尽くす」問題をプロキシ境界計測�
 
 ## ストリーミングTTFTラウンド（2026-07-05）
 
-現代のLLMサービスはすべてストリーミングを行うため、ベンチマークの一致を取る：両方のsynth呼び出しをストリーミングに変更し（C++ `ProviderMode::Stream` / `sp::Event`、LangGraph `SYNTH_LLM.stream()`）、ドライバは`[jarvis:ttft]`マーカーで**ターン送信 → 最初のsynthトークン**までの時間を計測する。nginxは`proxy_buffering off`でSSEを通過させるため、`$upstream_header_time`が実際の最初のバイトとなる。ラウンド分割の推測を排除するため、ラウンドごとにログを分ける（mv + `nginx -s reopen`）。
+この過去の round は両 synthesis call を streaming に変えました。当時の C++ streaming provider と LangGraph `SYNTH_LLM.stream()` を使い、現在の C++ は `ProviderMode::Stream`/`sp::Event` です。driver は `[jarvis:ttft]` で turn-send → first synthesis text を測ります。nginx の `proxy_buffering off` は SSE を通し `$upstream_header_time` は first byte。round 別 log(mv + `nginx -s reopen`)で境界を分けます。
 
 |  | 知覚 TTFT p50 | 完了時間 p50 | ターン毎の上流送信平均 (Avg/turn upstream) |
 |---|---|---|---|
@@ -79,11 +79,11 @@ E2Eの「分散が差分を覆い尽くす」問題をプロキシ境界計測�
 | LangGraph | **629ms** | 723ms | 753ms |
 
 - **知覚TTFTは実質的に同程度（差 −2ms）。** 先ほどNeoGraphのTTFTが遅く見えたのは（800 vs 603）、純粋にプロバイダ分散によるものだった — 今回はGroqが両方に公平なウィンドウを与え（上流 726 vs 753）、ギャップが解消された。「NGラウンドは単に不運だった」という推測が再現により確認された。
-- **完了時間の残差（純粋なフレームワーク）を再現**: NeoGraph 4.1ms vs LangGraph 14.6ms（前回のプロキシラウンド 3.5 vs 14.7 と一致）。フレームワークのオーバーヘッドという結論は確固たるものだ。
+- **過去の completion residual** — NeoGraph4.1ms/LangGraph14.6ms(以前の proxy3.5/14.7)でした。residual は client serialization、local MCP、pipe overhead を含み、graph computation だけの直接測定ではありません。
 - **TTFT残差は±数十msのノイズ内で0である**（負の値も現れる）。知覚されたTTFT 625msと上流合計673msを比較すると、2つの独立したクロック（クライアントのモノトニッククロックとnginxのウォールクロック）を減算する分解能（±50ms）は、フレームワークの寄与（ms）よりも大きい。すなわち、**フレームワークの差はTTFT経路では観測限界以下である** — シグナルがノイズを超えて現れるのは、総残差/モックのみである。
-- **ストリーミングの利点**：知覚TTFT（631）≪ 完了時間（744）— ユーザーは0.6秒で回答を聞き始める。非ストリーミング（完了を待つ）に比べ、知覚速度の向上が確認された。
+- **Streaming observation** — 過去の first-synthesis-text は631ms、completion は744msでした。`[jarvis:ttft]` は text marker で、最初の audible TTS playback や0.6秒での聴取開始を測りません。
 
-要約：フレームワークの純粋なパフォーマンスは NeoGraph が有利（トータル残差・mock・再現可能）だが、
+過去の streaming text-marker TTFT は同率でした。この測定は現在の SDK transport、audio latency、production tenant capacity を検証しません。
 
 ## 公平な条件欄
 

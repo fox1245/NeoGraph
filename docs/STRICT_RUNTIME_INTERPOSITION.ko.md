@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ko source_sha256=59193d3d0f34fd9e49284edb43ce62f5ec0352c27fdcfce47bf1dceec7f9454a -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ko source_sha256=9b872c2d049d049aa2c5e7393b485bc79c3b89a5268878b1fff5a263c347208f -->
 # 엄격한 런타임 컨텍스트
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
 
-NeoGraph의 엄격한 런타임 경로는 필수 컨텍스트, 라이프사이클 Hook, 공급자 디스패치 증거를 모델 재량에서 벗어나게 한다. 이는 추가적이다: 신뢰할 수 있는 임베딩을 위한 기존의 직접 공급자 호출은 여전히 존재하며, `StrictRuntimeProfile`가 엄격한 경로에 필요한 의존성을 조립한다.
+NeoGraph의 엄격한 런타임 경로는 필수 컨텍스트, 라이프사이클 Hook, 공급자 dispatch 증거를 모델 재량에서 분리한다. 신뢰된 임베딩은 직접 typed provider 호출을 사용할 수 있고, `StrictRuntimeProfile`은 엄격한 경로의 의존성을 조립한다.
 
 ## 보장 경계
 
@@ -44,7 +44,51 @@ durable RAW history + admitted artifacts + required Skills/constraints
 1. `ProviderDispatchReceipt`는 디스패치 전에 기록됩니다.
 2. `ProviderDispatchOutcomeReceipt`는 시도 후에 `Succeeded`, `Failed` 또는 `ReconciliationRequired`를 기록한다.
 
-성공적인 결과는 정규화된 완료의 다이제스트를 바인딩한다. 발송 후 발생한 예외는 원격 제공자가 동작했는지 증명할 수 없으므로 컨트롤러는 재시도 대신 `ReconciliationRequired`를 기록한다. SQLite 스키마 v3는 결과를 별도로 저장하고 재시작 후 각 결과가 정확히 승인된 발송 영수증을 여전히 바인딩하는지 검증한다.
+성공 결과는 전체 SDK outcome 관측의 digest를 바인딩한다. 전송되지 않았음이 입증된 typed Failure는 `Failed`, 전달이 불확실하면 `ReconciliationRequired`를 기록한다. dispatch 뒤 예외만으로 원격 공급자의 실행 여부를 알 수 없으므로 컨트롤러는 암묵적으로 재시도하지 않는다. SQLite schema v3는 terminal receipt를 별도로 저장하고 재시작 후 정확한 admitted dispatch binding을 검사한다. Receipt digest는 증거이지 native continuation custody나 실행 가능한 저장 outcome이 아니다.
+
+컨트롤러는 `ProviderRequest`를 받아 불변 소유 `sp::runtime::Result`를 반환하며 순서 있는 메시지/part와 부분 실패 증거를 보존한다. 실제 결과 뒤 정산이나 receipt 영속화가 실패하면 `ProviderDispatchOutcomePersistenceError`가 결과와 원래 cause를 보존하며, 이차 observer 실패는 `delivery_error()`에 남는다. 토큰 charge/reservation은 nullable provider 사용량 report와 별개다.
+
+## Program Core provider 호출 (독립 Strict Runtime과 별개)
+
+Program이 내장 Core LLM node를 쓰는 경우 호스트는
+`RuntimeConfig::core_provider_call_resolver`와
+`require_core_provider_call_broker = true`를 설정할 수 있다. 정확한
+`ProgramCoreProviderCallContext`마다
+`SQLiteProgramProviderCallJournal::bind(context, deployment_identity)`를 반환한다.
+헤더는 `<neograph/program/sqlite_provider_call_broker.h>`, 링크 대상은
+`neograph::program_sqlite`다. Deployment identity는 실제 provider route,
+model deployment, credential version을 포함한 권한의 호스트 소유 SHA-256
+identity다. Broker는 이를 `Provider`에서 추측하지 않는다. 재시작/reconnect
+시 같은 durable database를 다시 바인딩한다.
+
+Journal은 owner, 불변 Program version, run, operation, Core thread/task/node,
+내장 call ordinal을 키로 삼는다. Request 내용이나 Program attempt는 키가
+아니다. 전송 전에 SQLite FULL 동기화로 marker를 commit한다. Marker는 전송이
+일어났을 수 있음을 뜻하며 provider 수신이나 exactly-once 효과를 증명하지 않는다.
+전체 불변 SDK Completion/Failure outcome을 encoding version 2로 저장하여
+정확히 바인딩된 replay에 사용한다. 전송되지 않았음이 입증된 Failure는 `Failed`,
+불확실한 전달·예외·정산 전 crash는 reconciliation이 필요하며 암묵적으로
+재dispatch하지 않는다. 상태는
+`inspect(owner, logical_call_id(context, core_identity))`로 확인한다.
+`reconcile_success`는 독립적으로 확인된 provider-side 증거와 전체 Completion
+outcome이 있을 때만 사용한다. Streaming replay는 captured outcome을 반환하고
+stream event를 만들어내지 않는다.
+
+늘어난 output cap은 새 semantic call이지 같은 journal slot의 transport retry나 replay가 아니다. Interface 4는 native replay configuration에서만 cap을 제외하며 prepared-request digest와 보수적인 resource claim에는 cap이 남는다. 승인된 각 call에 고유하고 결정적인 ordinal을 주고 모든 attempt의 outcome/accounting과 원래 deadline을 보존하며 같은 resource bank에서 admission을 받아야 한다. 기존 slot의 digest를 바꾸면 거부한다. Native history나 cursor는 credit을 갱신하거나 uncertain delivery, observer/settlement 실패 후 새 전송을 허용하지 않는다.
+
+순서 있는 message part, raw 관측, nullable 사용량, attempt metadata,
+native continuation을 저장 결과에 그대로 보존한다. Native outcome은
+`SQLiteProgramProviderCallJournal(database_path, native_archive)`에 전달한
+호스트의 `sp::NativeArchive`가 필요하다. Portable JSON projection은 그 권한을
+재생성하지 못한다. 이전의 lossy receipt는 upgrade하거나 조용히 재dispatch하지
+않고 거부한다. Journal은 보수적인 claim/committed 토큰 양을 provider report와
+분리해 보존한다. Durable filesystem database 경로를 사용한다. 빈 경로,
+`:memory:`, `file:` URI는 거부한다.
+
+이 broker는 assembled `ContextEpoch`가 아니라 Core의 기존 ReAct message
+state를 사용한다. 같은 내장 호출에서 engine Strict Runtime interposition과
+함께 사용할 수 없다. 호스트가 작성한 native Provider 호출은 범위 밖이다.
+
 
 ## 네이티브, stdio 또는 HTTP에 대한 필수 Hook
 
@@ -108,4 +152,4 @@ immutable ProgramSynthesisProposal
 proposal -> reserve -> compile -> semantic validate -> admit -> decide -> migrate/spawn
 ```
 
-commentary (explanation): without exposing, with design, Allel: Another CLI. Other risks:: because the generated JavaScript... impossible, as Compiler and compile details, security, Submit.)
+이 경로는 생성된 JavaScript에 compiler, Catalog, credential, activation 권한을 노출하지 않는다.

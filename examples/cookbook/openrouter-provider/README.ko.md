@@ -1,77 +1,111 @@
-<!-- neograph-i18n: source=examples/cookbook/openrouter-provider/README.md locale=ko source_sha256=4d18b0fee54089948ca59063eb6177567e1b5db09a87123125e808bee6889add -->
-# NeoGraph + OpenRouter(고정 DeepSeek)
-
-## 과거 Python recipe — binding 전환 보류
-
-이 페이지는 전환 이전 Python 공급자 API와 측정의 기록입니다. 아래 코드는
-**현재 타입 C++ 계약과 호환되지 않으며 현재 실행 지침이 아닙니다**.
-Python 공급자 binding, subclass trampoline, BYO/OpenRouter adapter는 아직 port하거나
-실행 검증하지 않았습니다. C++ 전환만으로 Python 호환성을 추론하지 마세요.
-현재 C++은 타입 `ProviderRequest`를 소유하고 한 번 prepare하며 전체 불변
-`sp::Outcome`, native history, nullable usage를 유지합니다. 아래 `complete(params)`/
-`ChatCompletion`은 과거 API입니다. 누락 usage는 zero가 아니며 마지막 호출 usage는
-전체 tool loop 사용량이 아닙니다. durable receipt 뒤에서 SDK retry가 숨은 재전송을
-만들면 안 됩니다. 키, prompt, native payload는 비공개로 유지하세요.
-
-## 전환 이전 지침과 관찰 기록
-
+<!-- neograph-i18n: source=examples/cookbook/openrouter-provider/README.md locale=ko source_sha256=2ae7c3fb71401e8c8db0b7c5a6116f56d8076f1c963b768aa55f98931801bc16 -->
+# NeoGraph + OpenRouter
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-OpenRouter의 고정 `~deepseek/deepseek-v4-flash-latest` 모델에 대해 NeoGraph 그래프를 실행합니다. 이 쿡북은 동일한 API 키, 모델 및 명시적 zero-data-retention(ZDR) 제공업체 선호를 사용하는 동등한 두 개의 공급자 표면을 보여줍니다:
+이 쿡북은 OpenRouter Chat Completions API에 대한 두 요청 경로를 유지합니다.
+둘 다 기본 모델이 `~deepseek/deepseek-v4-flash-latest`이며
+`provider={"zdr": true}`로 데이터 무보존 라우팅을 요청합니다.
+이 설정은 지리적 데이터 상주를 보장하지 않습니다.
 
-1. 내장된 `OpenAIProvider`를 OpenRouter의 OpenAI 호환 채팅 엔드포인트(`via_openai_compat.py`)에 대해 사용합니다.
-2. 정규화된 채팅 요청을 직접 게시하는 사용자 지정 Python `Provider`(`via_http.py`).
+[`via_openai_compat.py`](via_openai_compat.py)는 네이티브 `SchemaProvider`와
+내장 `llm_call` 노드를 사용합니다. [`via_http.py`](via_http.py)는 `httpx`로
+HTTP 요청과 응답 매핑을 소유하는 사용자 정의 Python `GraphNode`를 사용합니다.
+엔드포인트/자격 증명 헬퍼는 공유하지만 전송이나 결과 표현은 공유하지 않습니다.
+호환성 예제에는 `httpx`가 필요하지 않습니다.
 
+## 경로 A: 타입 SchemaProvider
 
-두 번째 경로는 NeoGraph의 `Provider` 트램펄린이 전송(transport)에 무관(agnostic)함을 보여주면서도 wire contract를 명시적으로 유지함을 나타냅니다.
+호환성 경로는 폐쇄형 버전 지정 `openai.chat` 디스크립터로
+`load_provider_descriptor`를 호출합니다. `connection.base_url`에는 오리진을,
+`connection.paths`에는 전체 API 경로를 넣습니다. OpenRouter에서는 각각
+`https://openrouter.ai`와 `/api/v1/chat/completions`입니다. 알 수 없는 디스크립터
+필드는 거부되며 임의 JSON으로 코덱 동작을 주입할 수 없습니다.
 
-## 경로 A — 내장 공급자
+타입 `OpenRouterRouting` 값이 `SchemaProviderDefaults`에 `zdr=True`를 설정합니다.
+`ProviderRuntimeOptions`는 API 키, 120초 타임아웃, 선택 사항인
+`OPENROUTER_CA_FILE`을 제공합니다. 런타임은 libcurl을 사용하며 HTTP2나 WebSocket
+전송 선택기는 없습니다. `NodeContext`는 명시적 모델과 시스템 지시를 제공합니다.
+`RunConfig.provider_messages`는 `Text` 부분을 가진 타입 `ProviderMessage`를
+제공합니다. 내장 노드는 타입 요청을 생성하고 준비한 뒤 공급자를 통해 디스패치합니다.
 
-`OpenAIProvider` 추가( `/v1/chat/completions` 자체가 추가되므로, 순수 OpenRouter API 기본 URL(`https://openrouter.ai/api`)을 전달하고 `/v1` 접미사는 전달하지 마십시오:
+루프백 검증에서는 `provider_policy_json()`을 읽고 `openai.chat` 계열의
+`openrouter_origins`에 정확한 루프백 오리진을 추가합니다. 전체 계열 및 코덱
+리소스 데이터를 `load_provider_policy`로 승인한 뒤 디스크립터를 로드합니다.
+검증 서버 오리진은 선언된 정책 데이터이며 런타임 엔드포인트 덮어쓰기나 ZDR 검증
+우회가 아닙니다.
 
-```python
-from neograph_engine.llm import OpenAIProvider
+성공한 결과는 불변 공급자 결과와 타입 메시지 이력을 유지합니다.
+`outcome.completion`에는 완료가, 실패 시에는 `outcome.failure`에 실패가 있습니다.
+누락된 사용량 카운터는 `None`이고 관측된 0은 `value=0`인 `UsageCount`입니다.
+예제는 원시 페이로드나 키를 덤프하지 않고 어시스턴트 텍스트와 알려진 입출력 카운터를
+출력합니다. 공급자 실패를 성공한 답변으로 바꾸지 않습니다.
 
-provider = OpenAIProvider(
-    api_key=os.environ["OPENROUTER_API_KEY"],
-    base_url="https://openrouter.ai/api",
-    default_model="~deepseek/deepseek-v4-flash-latest",
-    provider_routing={"zdr": True},
-```
+## 경로 B: 사용자 정의 HTTP 노드
 
-[`via_openai_compat.py`](via_openai_compat.py) 참조.
+`OpenRouterHttpNode`는 그래프 메시지를 읽고 시스템 지시를 앞에 넣어 선택한
+엔드포인트로 JSON을 보냅니다. `choices[0].message`를 일반 `ChannelWrite`로
+매핑합니다. 사용자 정의 HTTP 헤더, 타임아웃 정책, 응답 변환은 애플리케이션 코드가
+소유합니다. append 리듀서는 사용자와 그 다음 어시스턴트 메시지를 유지합니다.
+`http_usage`는 응답의 사용량 딕셔너리를 저장하며 없으면 `None`입니다.
+실행 후 `httpx` 클라이언트를 닫습니다.
 
-## 경로 B — 사용자 지정 직접 HTTP 공급자
+이 경로는 `ProviderOutcome`, 준비된 요청 권한, 네이티브 재생 이력 또는 타입 공급자
+사용량을 만들지 않습니다. HTTP 오류가 나면 노드가 실패하며 이 텍스트 전용 예제는
+도구 호출을 버리지 않고 실패합니다. 기존 공식 SDK 클라이언트가 호출과 도구 루프를
+담당해야 한다면 [BYO OpenAI SDK 쿡북](../byo-openai/README.md)을 사용하세요.
 
-[`via_http.py`](via_http.py)는 `Provider`를 서브클래싱하고, `https://openrouter.ai/api/v1/chat/completions`에 게시하며, `choices[0].message`를 `ChatCompletion`로 매핑하고, 토큰 사용량을 ⟪NeoGraph⟫의 응답에 복사합니다. 또한 요청은 OpenRouter에 ZDR 공급자 기본 설정을 요청합니다.
+## 준비 사항과 로컬 실행
 
-## 실행 ⟦3b22460e100a⟧ 출력:
+현재 타입 공급자 전환 체크아웃에서 빌드한 wheel을 설치하세요. 이전 완료 API
+릴리스에서는 이 예제를 실행할 수 없습니다. 경로 B에는 `httpx`를 설치하고,
+이 디렉터리에서 아래 명령을 실행하기 전에 로컬 Chat Completions 서버를 시작하세요.
+아래는 검증 절차이며 성공한 실행 기록이 아닙니다.
 
 ```bash
-echo 'OPENROUTER_API_KEY=sk-or-...' > .env
-pip install neograph-engine>=0.2.3 httpx
-python via_openai_compat.py
-python via_http.py
+python -m pip install httpx
+OPENROUTER_BASE_URL=http://127.0.0.1:8765/v1 OPENROUTER_MODEL=fixture-model python via_openai_compat.py
+OPENROUTER_BASE_URL=http://127.0.0.1:8765/v1 OPENROUTER_MODEL=fixture-model python via_http.py
 ```
 
-두 데모 모두 엄격한 단일 노드 그래프를 구축하고 해당 `llm_call`를 동일한 고정 DeepSeek 모델을 통해 라우팅합니다. 공유 `NodeContext.instructions`는 시스템 프롬프트를 제공합니다. 키가 없으면 명확한 메시지와 함께 종료됩니다. 목 공급자는 라이브 공급자 경로를 조용히 변경하지 않습니다.
+`OPENROUTER_BASE_URL`에는 API 접두사가 포함됩니다. 두 경로 모두
+`/chat/completions`를 추가합니다. 정규 루프백 호스트 `127.0.0.1`과 `::1`은
+환경에 호스팅 키가 있어도 고정 더미 자격 증명 `local-smoke`를 사용합니다.
+다른 호스트에는 HTTPS, `NG_ALLOW_HOSTED_CALLS=1`, `OPENROUTER_API_KEY`가
+필요합니다. 허용하지 않으면 두 프로그램 모두 요청 전에 상태 코드 2로 종료합니다.
+호스팅 호출은 비용이 발생할 수 있습니다. 기존 `.env`는 내보낸 변수를 덮어쓰지
+않습니다. 키를 커밋하거나 Authorization 헤더를 기록하지 마세요. 경로 A에서
+OpenRouter가 아닌 호스트는 라우팅 정책에 명시적으로 승인되어야 합니다.
+호출 허용만으로 OpenRouter 의미 체계를 부여하지 않습니다.
 
-## 출력 형태
+## 로컬 프로토콜과 예상 상태
 
-```text
-[openrouter] using ~deepseek/deepseek-v4-flash-latest via OpenAI-compatible path
-[user] What's the capital of France?
-  assistant: Paris is the capital of France.
+서버는 시스템 메시지, 사용자 메시지, `model="fixture-model"`,
+`provider={"zdr": true}`를 담은 버퍼링 방식 `POST /v1/chat/completions`를 받습니다.
+경로 B는 `temperature=0.7`도 보냅니다. 경로 A는 프랑스 수도를, 경로 B는
+`17 * 23`을 묻습니다. 경로 A용 서버 응답 예시:
+
+```json
+{
+  "id": "fixture-chat-1",
+  "object": "chat.completion",
+  "created": 0,
+  "model": "fixture-model",
+  "choices": [{
+    "index": 0,
+    "message": {"role": "assistant", "content": "Paris."},
+    "finish_reason": "stop"
+  }],
+  "usage": {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10}
+}
 ```
 
-실제 완료 결과는 다릅니다. 직접 HTTP 경로는 `via direct HTTP`를 출력하며 자체 산술 질문을 사용합니다.
+경로 A에서는 실제 성공한 공급자 결과 하나, `result.provider_messages`의 사용자와
+어시스턴트, 그래프 상태의 어시스턴트 답변을 예상합니다. 이 응답의 사용량은 입력 8,
+출력 2입니다. 알 수 없는 카운터를 검증하려면 `usage`를 생략하세요. 가짜 0을
+기대하지 마세요. 경로 B에는 어시스턴트 내용으로 `"391"`을 반환하고 그래프 메시지
+두 개와 응답의 `http_usage` 딕셔너리를 예상합니다. 어떤 예제도 모의 공급자로
+조용히 전환하지 않습니다.
 
-## 왜 두 경로를 모두 유지하나요?
-
-- 경로 A는 NeoGraph의 네이티브 HTTP 구현과 연결 풀링을 사용합니다.
-- 경로 B는 애플리케이션 코드가 소유한 사용자 지정 헤더, 전송 정책 또는 응답 변환을 위한 가장 작은 예시입니다.
-- 두 경로 모두 정확히 동일한 OpenRouter 엔드포인트 계열, API 키, 그리고 고정된 DeepSeek 모델을 사용하므로 제공업체 표면 비교가 의미 있습니다.
-
-OpenRouter API 요청 및 응답 형태:
+OpenRouter 요청/응답 레퍼런스:
 <https://openrouter.ai/docs/api-reference/overview>

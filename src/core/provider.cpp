@@ -4,17 +4,15 @@
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/provider_call_broker.h>
 #include "canonical_json.h"
+#include "provider_wake.h"
 #include <json/json.h>
 #include <core/native.h>
 
 #include <asio/cancellation_state.hpp>
-#include <asio/bind_cancellation_slot.hpp>
 #include <type_traits>
 #include <utility>
-#include <asio/redirect_error.hpp>
-#include <asio/steady_timer.hpp>
+#include <asio/system_error.hpp>
 #include <asio/this_coro.hpp>
-#include <asio/use_awaitable.hpp>
 #include <mutex>
 #include <vector>
 #include <unordered_map>
@@ -142,6 +140,7 @@ struct Bridge {
     std::pmr::unordered_map<const sp::json::Document*, RetainedDocument> documents{&memory};
     std::shared_ptr<sp::runtime::Client> client;
     std::shared_ptr<StopChannel> stop;
+    std::shared_ptr<detail::ProviderWakeSignal> wake;
     sp::runtime::Result result;
 
     void retain(const sp::Event& source) {
@@ -218,6 +217,7 @@ struct Bridge {
     void abandon() noexcept {
         std::lock_guard lock(mutex);
         abandoned = true;
+        if (wake) wake->stop();
         for (auto& event : events) release_locked(event);
         events.clear();
     }
@@ -421,8 +421,7 @@ asio::awaitable<sp::runtime::Result> Provider::invoke_async(ProviderRequest requ
     return dispatch_impl(prepare(std::move(request)));
 }
 sp::runtime::Result Provider::dispatch(PreparedProviderRequest request) {
-    auto token = request.impl_ ? request.impl_->cancel_token : nullptr;
-    return async::run_sync(dispatch_async(std::move(request)), token.get());
+    return async::run_sync(dispatch_async(std::move(request)));
 }
 sp::runtime::Result Provider::invoke(ProviderRequest request) { return dispatch(prepare(std::move(request))); }
 
@@ -466,11 +465,13 @@ asio::awaitable<sp::runtime::Result> Provider::dispatch_operation(PreparedProvid
         if (!result) throw std::invalid_argument("Local provider returned no owned outcome");
         co_return result;
     }
+    detail::ProviderWakeReader wake(executor);
     auto bridge = std::make_shared<Bridge>();
     // Late SDK callbacks retain only SDK/client data, never the outer executor.
     // Abandonment can release the awaiting frame without a synchronous shutdown.
     bridge->client = impl->client;
     bridge->stop = impl->stop;
+    bridge->wake = wake.signal();
     bridge->max_events = impl->event_count_limit;
     bridge->max_bytes = impl->event_byte_limit;
     struct Abandon {
@@ -482,24 +483,33 @@ asio::awaitable<sp::runtime::Result> Provider::dispatch_operation(PreparedProvid
     for (const auto* hook = impl->hooks.get(); !observes_events && hook; hook = hook->next.get())
         observes_events = bool(hook->event);
     if (observes_events)
-        callbacks.on_event = [bridge](const sp::Event& event) { bridge->retain(event); };
+        callbacks.on_event = [bridge](const sp::Event& event) {
+            bridge->retain(event);
+            bridge->wake->notify();
+        };
     callbacks.on_outcome = [bridge](sp::runtime::Result result) {
-        std::lock_guard lock(bridge->mutex);
-        bridge->result = std::move(result);
+        {
+            std::lock_guard lock(bridge->mutex);
+            bridge->result = std::move(result);
+        }
+        bridge->wake->notify();
     };
     sp::runtime::Operation operation;
+    std::optional<std::stop_callback<ForwardStop>> graph_stop;
+    if (impl->cancel_token)
+        graph_stop.emplace(impl->cancel_token->stop_token(), ForwardStop{impl->stop->source});
     try { operation = impl->client->start(std::move(impl->prepared), std::move(callbacks)); }
     catch (const sp::runtime::AdmissionError& error) { co_return error.outcome(); }
-    asio::steady_timer poll(executor);
     std::exception_ptr callback_error;
     for (;;) {
         auto cancellation = co_await asio::this_coro::cancellation_state;
-        if (cancellation.cancelled() != asio::cancellation_type::none ||
-            (impl->cancel_token && impl->cancel_token->is_cancelled())) operation.cancel();
+        const bool cancelled = cancellation.cancelled() != asio::cancellation_type::none;
+        if (cancelled) operation.cancel();
         std::pmr::vector<std::unique_ptr<OwnedEvent>> events{&bridge->memory};
         sp::runtime::Result result;
         {
             std::lock_guard lock(bridge->mutex);
+            wake.consume();
             events.swap(bridge->events);
             result = bridge->result;
         }
@@ -534,12 +544,10 @@ asio::awaitable<sp::runtime::Result> Provider::dispatch_operation(PreparedProvid
             if (callback_error) throw ProviderObserverError(result, callback_error);
             co_return result;
         }
-        poll.expires_after(std::chrono::milliseconds(1));
-        asio::error_code error;
-        // This wait cannot reset or consume the caller's cancellation signal.
-        // Cancellation remains visible to the loop and the surrounding scope.
-        co_await poll.async_wait(asio::bind_cancellation_slot(asio::cancellation_slot{},
-            asio::redirect_error(asio::use_awaitable, error)));
+        // A cancelled wait requests SDK stop; keep awaiting its authoritative
+        // outcome without resetting cancellation or spinning on an aborted wait.
+        const auto error = co_await wake.wait(cancelled ? asio::cancellation_slot{} : cancellation.slot());
+        if (error && error != asio::error::operation_aborted) throw asio::system_error(error);
     }
 }
 ProviderRequest make_provider_request(
@@ -556,6 +564,19 @@ ProviderRequest make_provider_request(
         return std::make_shared<const sp::json::Document>(std::move(*document));
     };
     const auto family = provider.family();
+    const bool chat_controls = controls.chat_reasoning || controls.include_reasoning ||
+        controls.usage_include || !controls.models.empty();
+    const bool responses_controls = controls.previous_response_id ||
+        !controls.previous_response_history.empty() || controls.parallel_tool_calls ||
+        controls.verbosity || controls.truncation || controls.responses_include;
+    const bool messages_controls = controls.thinking_mode || controls.output_effort ||
+        controls.cache_control || controls.messages_tool_choice;
+    const bool generate_controls = controls.gemini_history_mode || controls.gemini_thinking_level ||
+        !controls.safety_settings.empty() || controls.gemini_tool_choice;
+    reject((family != "openai.chat" && chat_controls) ||
+           (family != "openai.responses" && responses_controls) ||
+           (family != "anthropic.messages" && messages_controls) ||
+           (family != "google.generate" && generate_controls));
     ProviderRequest result;
     result.mode = mode;
     if (family == "openai.chat") {
@@ -572,13 +593,17 @@ ProviderRequest make_provider_request(
         request.service_tier = std::move(controls.service_tier);
         request.provider = std::move(controls.provider);
         request.response_format = std::move(controls.response_format);
+        request.reasoning = std::move(controls.chat_reasoning);
+        request.include_reasoning = controls.include_reasoning;
+        request.usage_include = controls.usage_include;
+        request.models = std::move(controls.models);
         request.tools.reserve(tools.size());
         for (const auto& tool : tools) request.tools.push_back({tool.name, tool.description, parameters(tool)});
         result.payload = std::move(request);
     } else if (family == "anthropic.messages") {
         reject(controls.reasoning_effort || controls.reasoning_summary || controls.include_thoughts ||
                controls.thinking_level || controls.thinking_summaries || controls.service_tier || controls.required_tool ||
-               controls.provider || controls.response_format || controls.store || controls.max_tool_calls);
+               controls.response_format || controls.store || controls.max_tool_calls);
         sp::messages::Request request;
         request.model = std::move(model);
         request.messages = std::move(messages);
@@ -589,6 +614,11 @@ ProviderRequest make_provider_request(
         request.temperature = controls.temperature;
         request.top_p = controls.top_p;
         request.thinking_budget = controls.thinking_budget;
+        request.thinking_mode = controls.thinking_mode;
+        request.output_effort = controls.output_effort;
+        request.cache_control = std::move(controls.cache_control);
+        request.tool_choice = std::move(controls.messages_tool_choice);
+        request.provider = std::move(controls.provider);
         request.tools.reserve(tools.size());
         for (const auto& tool : tools) request.tools.push_back({tool.name, tool.description, parameters(tool), {}, {}});
         result.payload = std::move(request);
@@ -607,6 +637,12 @@ ProviderRequest make_provider_request(
         request.response_format = std::move(controls.response_format);
         request.store = controls.store;
         request.max_tool_calls = controls.max_tool_calls;
+        request.previous_response_id = std::move(controls.previous_response_id);
+        request.previous_response_history = std::move(controls.previous_response_history);
+        request.parallel_tool_calls = controls.parallel_tool_calls;
+        request.verbosity = controls.verbosity;
+        request.truncation = controls.truncation;
+        request.include = std::move(controls.responses_include);
         if (controls.reasoning_effort || controls.reasoning_summary)
             request.reasoning = sp::responses::ReasoningOptions{std::move(controls.reasoning_effort), std::move(controls.reasoning_summary)};
         request.service_tier = std::move(controls.service_tier);
@@ -615,7 +651,7 @@ ProviderRequest make_provider_request(
         for (const auto& tool : tools) request.tools.push_back({tool.name, tool.description, parameters(tool), {}});
         result.payload = std::move(request);
     } else if (family == "google.generate") {
-        reject(controls.temperature || controls.top_p || controls.reasoning_effort || controls.reasoning_summary ||
+        reject(controls.top_p || controls.reasoning_effort || controls.reasoning_summary ||
                controls.thinking_level || controls.thinking_summaries || controls.service_tier ||
                controls.provider || controls.response_format || controls.store || controls.max_tool_calls);
         sp::gemini::Request request;
@@ -626,6 +662,11 @@ ProviderRequest make_provider_request(
         request.max_output_tokens = controls.max_output_tokens;
         request.thinking_budget = controls.thinking_budget;
         request.include_thoughts = controls.include_thoughts;
+        request.temperature = controls.temperature;
+        request.thinking_level = controls.gemini_thinking_level;
+        request.safety_settings = std::move(controls.safety_settings);
+        request.tool_choice = std::move(controls.gemini_tool_choice);
+        if (controls.gemini_history_mode) request.history_mode = *controls.gemini_history_mode;
         request.required_tool = std::move(controls.required_tool);
         request.tools.reserve(tools.size());
         for (const auto& tool : tools) request.tools.push_back({tool.name, tool.description, parameters(tool)});

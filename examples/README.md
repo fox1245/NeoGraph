@@ -19,13 +19,16 @@ not silently clamped. Bounded calls require genuine model facts; missing facts a
 usage and do not renew a budget or represent a price, forecast or invoice.
 
 The header-only `examples/provider_example_support.h` helper uses the real SDK
-runtime; it is not a replacement transport. LLM builds require
-`SchemaProvider::runtime` through `find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)` or an
-explicit `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<sdk-source>` configuration.
+runtime; it is not a replacement transport. Every Core build, including
+`NEOGRAPH_BUILD_LLM=OFF`, requires `SchemaProvider::runtime`. With CMake 3.20+,
+SDK resolution uses an explicit `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` first,
+then an installed runtime package, then the pinned public GitHub source archive.
+The download fallback is enabled by default; set `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`
+for offline builds with an installed package or explicit source checkout.
 Installed SDK include root is `include/SchemaProvider`. Interface/capability
-checks are enforced; the SDK package remains unstable `0.0.0` (interface 3).
+checks are enforced; the SDK package is alpha `0.1.0` (interface/shared ABI 4).
 
-Current model-free E2E execution verified 39 numbered targets: 29 finite offline
+The preserved interface-3 model-free C++ E2E run verified 39 numbered targets: 29 finite offline
 targets plus actual MCP/ACP/A2A/Harness and gRPC graph/checkpoint/tool paths.
 The gRPC-vs-JSON-RPC measurement example also ran, but its unchecked return values
 are not a behavioral E2E pass. Twenty-two live/external-model scopes and the
@@ -56,7 +59,7 @@ cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON
 cmake --build build -j$(nproc)
 ```
 
-For the complete C++ example set, also enable Program and A2A:
+To include Program-backed and A2A examples, also enable these components:
 
 ```bash
 cmake -S . -B build \
@@ -158,7 +161,7 @@ demonstrate, not by file number.
 | 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | OpenRouter + MCP HTTP server | Discover tools from a streamable-http MCP server, drive a ReAct loop. |
 | 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | OpenRouter + Python stdio script | Same as 03 but the MCP server is a child subprocess over stdin/stdout — no network stack. |
 | 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | OpenRouter + 2 servers | One agent, two MCP servers (HTTP + stdio), tools merged into one list — LLM picks across both transparently. |
-| 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | MCP HTTP server (no LLM) | Planner emits one Send per MCP call; `make_parallel_group` runs them concurrently. Deterministic — LLM hand-picks tools so the demo stays offline on the LLM axis. |
+| 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | MCP HTTP server (no LLM) | A fixed planner emits one Send per MCP call; `make_parallel_group` runs them concurrently. No model call; the MCP server must still be reachable. |
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | OpenRouter + MCP HTTP server | `interrupt_before` any MCP tool call — operator sees the pending tool name + args, approves, resumes. |
 | 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | OpenRouter + MCP HTTP server | Operator reads the agent's draft answer and types feedback; the second run incorporates that feedback as new conversational context. |
 
@@ -217,8 +220,76 @@ Built only with `-DNEOGRAPH_BUILD_GRPC=ON` (needs `grpc++` / `protoc`).
 | # | File | Setup | What it shows |
 |---|------|-------|---------------|
 | 11 | [`11_clay_chatbot.cpp`](11_clay_chatbot.cpp) | Clay + Raylib (`-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`) | Multi-turn chat with a Clay/Raylib UI. Pure-C++ desktop app, NeoGraph backend. Mock or `--live`. |
-| 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | OpenRouter + Ghidra + ghidra-mcp | Reverse-engineering agent — recovers function names + summaries from a stripped binary via Ghidra. End-to-end verified (matched_score 0.92, 6-fn crackme). Full pipeline in [`fox1245/re-agent`](https://github.com/fox1245/re-agent). |
+| 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | OpenRouter + Ghidra + ghidra-mcp | Reverse-engineering agent — recovers function names + summaries from a stripped binary via Ghidra. Historical end-to-end result: matched_score 0.92 on a 6-function crackme. The full pipeline is maintained separately in the private `fox1245/re-agent` repository. |
 | 36 | [`36_classifier_fanout.cpp`](36_classifier_fanout.cpp) | offline | Five small "classifiers" (sentiment / toxicity / language / topic / intent) fan out via Send and run in parallel. Wall time ≈ max(per-classifier), not sum — the small-model edge story. Mock 5 ms latency stand-in for a DistilBERT/MiniLM pass; inline `[ONNX SWAP-IN]` block shows the 30-line replacement using `Ort::Session`. No inference runtime dependency. |
+
+Example 35 requires `GHIDRA_MCP_BRIDGE` to name your `bridge_mcp_ghidra.py` script. `GHIDRA_MCP_PYTHON` selects its interpreter (default `python3`); `GHIDRA_SERVER_URL` selects the plugin endpoint (default `http://127.0.0.1:18080/`). Start Ghidra and its MCP plugin before running the example. The showcase also requires `OPENROUTER_API_KEY` and makes paid model calls; the historical score above is not a new run or a general accuracy guarantee.
+
+## Retained example contracts
+
+These source contracts use SDK interface 4. The recorded C++ runs above remain
+historical evidence; they are not interface-4 qualification or new live calls.
+Family-specific controls are closed typed fields on `ProviderControls`; unsupported
+family/origin/model combinations reject before I/O. See the
+[provider reference](../docs/reference-en.md) for reasoning/sampling/tool controls,
+Responses provider-held cursors, deployment headers and explicit portable Gemini
+history. A cursor or portable history does not grant native replay authority.
+
+### Research and slow reasoning routes
+
+Deep Research (25 / 26) permits at most two additional semantic calls for each
+supervisor, researcher, compression or final-report request only after a completed
+empty `MaxTokens` outcome with no visible text and no valid or invalid client tool
+call. The output cap doubles, never above 16,384. The research-brief call is outside
+this ladder. Each additional call has a new ordinal, passes the original bank's
+admission and retains its outcome and usage; no grant, hold or deadline is renewed.
+Without an explicit deadline, one effect-free preparation discovers the configured
+deadline and is released before mediated invocation; that deadline stays pinned.
+An explicit deadline skips discovery. Failure, observer/settlement errors and
+already-delivered streaming parts do not trigger another call.
+
+An empty final report is an error. Nonempty `MaxTokens` report text is published
+with an `Incomplete` annotation only in the public projection; the immutable outcome
+is unchanged and the partial text is not retried. Exhausted empty compression yields
+a diagnostic, not a fabricated successful provider result.
+
+Example 16 keeps an 8,192-token cap across at most three completed-empty calls and
+pins one 300-second deadline per ask; it does not double the cap or retry failures.
+Example 28's rewrite requests low effort and 512 output tokens, returns the original
+question unchanged when the reply is empty/whitespace, and uses a 180-second provider
+timeout. These path-specific settings leave the shared factory default unchanged.
+
+### Checkpoints and evolution
+
+Example 08 retains its terminal-checkpoint fork followed by a new user turn; it
+does not demonstrate resuming a paused reviewer. Example 14 computes saved executor
+calls from the actual count: five initial calls, one failed-sibling rerun, four saved.
+
+Example 54 registers `pnoop` before selecting either smoke or file mode. From the
+repository root, use the tracked seed/task pair:
+
+```bash
+./build/example_evolution --smoke
+./build/example_evolution examples/54_evolution_seed.json examples/54_evolution_task.json
+```
+
+Inspect the actual JSON fields `best.compiled`, `best.validated`, `best.executed`
+and `best.correct`; `compile_passed` alone does not establish correct execution.
+Built-in node types and this demo's `pnoop` are available in file mode; custom types
+still require host registration. The prior smoke run did not qualify file mode.
+
+### A2A dialects and task snapshots
+
+Example 37 reports the card's interfaces and the dialect selected on its first
+RPC. The client selects compatible JSON-RPC 0.x or 1.0 card interfaces; card URLs
+do not redirect the configured RPC endpoint. Without a fetched card, a numeric
+`-32601` permits the initial dialect probe, never a replay after delivered SSE.
+Example 38 advertises both dialects and labels opening/updated task snapshots;
+an opening task is not a completed answer. The `A2A-Version` header selects server
+response encoding, independently of method spelling. In 1.0, requests use PascalCase
+methods, flat parts and `returnImmediately`; streams accumulate status/artifact
+updates. Caller answer precedence is final/interrupted agent status text, then first
+artifact text, then the last agent history text.
 
 ## Mental model — three layers, JSON in the middle
 
@@ -233,9 +304,9 @@ Each example is one of three setups:
    Command routing overrides live.
 3. **Typed provider requests and Outcomes** (13, 15, 16, 17): validated SDK admission, ordered events and immutable Outcomes; no descriptor interpreter or WebSocket adapter.
 
-The graph definition is JSON-shaped (`std::map<std::string, json>`)
-either way — examples 14 and 15 in the [Python examples](../bindings/python/examples/)
-show how the same definition round-trips through `json.dumps` and back.
+The graph definition is JSON-shaped (`std::map<std::string, json>`).
+The [Python examples](../bindings/python/examples/) use the same topology format;
+their provider requests and Outcomes are separate typed objects, not topology JSON.
 
 ## API key economy
 

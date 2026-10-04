@@ -13,7 +13,7 @@ the C++ runtime, not a Python wrapper around someone else's runtime.
 Example:
     >>> import neograph_engine as ng
     >>> from neograph_engine.llm import SchemaProvider
-    >>> provider = SchemaProvider(schema_path="openai", api_key="sk-...")
+    >>> provider = SchemaProvider(ng.load_provider_descriptor(descriptor_json))
     >>> ctx = ng.NodeContext(provider=provider)
     >>> engine = ng.GraphEngine.compile(my_graph_dict, ctx)
     >>> result = engine.run(ng.RunConfig(thread_id="demo", input={...}))
@@ -24,24 +24,12 @@ import os as _os
 
 
 def _ensure_ssl_ca_bundle() -> None:
-    """Auto-point the manylinux-bundled OpenSSL at a CA store the host
-    actually has.
+    """Select a host CA bundle for bundled TLS libraries.
 
-    The PyPI manylinux_2_34 wheel links the OpenSSL that AlmaLinux 9
-    ships in the build container — its compiled-in CA store paths are
-    ``/etc/pki/tls/certs/ca-bundle.crt`` and friends. Hosts that don't
-    follow the RHEL layout (Ubuntu/Debian/Alpine/macOS) end up with
-    libssl unable to verify any peer cert, and TLS handshakes against
-    api.openai.com / api.anthropic.com hang silently for the full
-    request timeout (60 s default) before the engine surfaces them as
-    ``ConnPool::async_post: timeout``. curl works because curl uses
-    the system libssl, not the wheel-bundled one.
-
-    We unblock by pointing libssl at the ``certifi`` Mozilla CA bundle
-    via ``SSL_CERT_FILE`` whenever the caller hasn't set it themselves.
-    Idempotent and explicit — the user can override either by setting
-    ``SSL_CERT_FILE`` to a different path before importing or by
-    setting ``NEOGRAPH_SKIP_CERT_AUTOFIX=1``.
+    Preserve an explicit ``SSL_CERT_FILE``; otherwise choose certifi when
+    available. ``ProviderRuntimeOptions`` passes this choice explicitly to the
+    SDK's libcurl transport. Set ``NEOGRAPH_SKIP_CERT_AUTOFIX=1`` to leave host
+    certificate configuration untouched.
     """
     if _os.environ.get("NEOGRAPH_SKIP_CERT_AUTOFIX"):
         return
@@ -50,8 +38,7 @@ def _ensure_ssl_ca_bundle() -> None:
     try:
         import certifi  # type: ignore[import-untyped]
     except ImportError:
-        return  # certifi missing — trust the host store, surface the
-                # 60 s hang to the user with a clear hint via __doc__.
+        return  # Source installs without certifi retain the transport's host trust store.
     bundle = certifi.where()
     if bundle and _os.path.isfile(bundle):
         _os.environ["SSL_CERT_FILE"] = bundle
@@ -61,7 +48,6 @@ _ensure_ssl_ca_bundle()
 
 
 from ._neograph import (
-    _HAVE_LIBCURL,
     ToolDecision,
     ToolGateContext,
     ToolConcurrency,
@@ -101,12 +87,121 @@ from ._neograph import (
 
     # Provider surface
     Provider,
-    CompletionParams,
     ChatMessage,
     ToolCall,
     ChatTool,
-    ChatCompletion,
     GeneratedArtifact,
+    ProviderMode,
+    ProviderControls,
+    ProviderRequest,
+    PreparedProviderRequest,
+    ProviderObserverLimits,
+    ProviderRetryPolicy,
+    ProviderOutcome,
+    ProviderCompletion,
+    ProviderPartialCompletion,
+    ProviderFailure,
+    ProviderError,
+    ProviderErrorKind,
+    ProviderRetryClass,
+    ProviderRetrySafety,
+    ProviderStopReason,
+    ProviderStopKind,
+    ProviderAttemptEvidence,
+    ProviderUsage,
+    UsageCount,
+    UsageEvidence,
+    UsageStage,
+    UsageQuality,
+    UsageConflict,
+    ProviderRole,
+    ProviderMessage,
+    Text,
+    Refusal,
+    ProviderToolCall,
+    ProviderToolCallKind,
+    InvalidToolCall,
+    InvalidToolCallReason,
+    Thinking,
+    RedactedThinking,
+    ServerToolResult,
+    ProviderToolResult,
+    ToolResultHostMetadata,
+    Reasoning,
+    Opaque,
+    Thought,
+    ProviderImage,
+    ProviderImageDetail,
+    NativeReplay,
+    NativeContext,
+    NativeArchive,
+    NativeArchiveLimits,
+    ProviderEvent,
+    ProviderPartKind,
+    ProviderDeltaChannel,
+    ProviderLocalId,
+    ProviderPartHeader,
+    ProviderBegin,
+    ProviderMessageBegin,
+    ProviderPartBegin,
+    ProviderPartDelta,
+    ProviderPartSeal,
+    ProviderMessageSeal,
+    ProviderUsageUpdate,
+    ProviderStop,
+    ProviderCommit,
+    ProviderFail,
+    ProviderRawWire,
+    ProviderResponseEnvelope,
+    ValidatedDescriptor,
+    ProviderHttpVersion,
+    ProviderRuntimeLimits,
+    ProviderSemanticLimits,
+    ProviderTransportOptions,
+    ProviderSseLimits,
+    ProviderResponseFormat,
+    OpenRouterRouting,
+    ChatReasoningOptions,
+    ResponsesVerbosity,
+    ResponsesTruncation,
+    ResponsesInclude,
+    MessagesThinkingMode,
+    MessagesOutputEffort,
+    MessagesCacheTtl,
+    MessagesCacheControl,
+    MessagesToolChoiceMode,
+    MessagesToolChoice,
+    GeminiHistoryMode,
+    GeminiThinkingLevel,
+    GeminiSafetyCategory,
+    GeminiSafetyThreshold,
+    GeminiSafetySetting,
+    GeminiToolChoiceMode,
+    GeminiToolChoice,
+    ProviderDeploymentHeaderEnvironment,
+    load_provider_descriptor_with_environment_headers,
+    load_provider_descriptor_with_deployment_headers,
+    ProviderRuntimeOptions as _NativeProviderRuntimeOptions,
+    ProviderOutcomeError,
+    ProviderObserverError,
+    ProviderBudgetSettlementError,
+    load_provider_descriptor,
+    make_provider_request,
+    project_message,
+    portable_message,
+    ProviderDescriptorPolicy,
+    ProviderRuntimePolicy,
+    provider_policy_json,
+    provider_codec_defaults_json,
+    load_provider_policy,
+    builtin_provider_policy,
+    load_provider_runtime_policy,
+    builtin_provider_runtime_policy,
+    ProviderBudgetAuthority,
+    ProviderOutcomes,
+    ProviderLoopEntry,
+    ProviderLoopHistory,
+    provider_messages_write,
 
     # Runtime context and controlled provider boundary
     RuntimeTrustClass,
@@ -186,6 +281,7 @@ from ._neograph import (
     RunConfig,
     RunMetadata,
     RunResult,
+    RunStatus,
     RetryPolicy,
     CacheScope,
     UsageAccumulator,
@@ -207,6 +303,35 @@ from ._neograph import (
     END_NODE,
 )
 
+
+class ProviderRuntimeOptions(_NativeProviderRuntimeOptions):
+    """SDK transport options with the package's host CA-bundle default.
+
+    An explicit ``ca_file`` (including an empty string) is preserved. Otherwise
+    the bundle selected by ``SSL_CERT_FILE`` or the package's certifi setup is
+    passed to libcurl; API keys are never read implicitly.
+    """
+
+    def __init__(self, api_key="", default_timeout_ms=None, ca_file=None,
+                 workers=None):
+        options = {"api_key": api_key}
+        if default_timeout_ms is not None:
+            options["default_timeout_ms"] = default_timeout_ms
+        if workers is not None:
+            options["workers"] = workers
+        options["ca_file"] = (
+            _os.environ.get("SSL_CERT_FILE", "") if ca_file is None else ca_file
+        )
+        super().__init__(**options)
+
+# Source builds may omit the LLM target while retaining typed Core APIs.
+try:
+    from ._neograph import SchemaProviderDefaults  # noqa: F401
+    _HAVE_LLM = True
+except ImportError:
+    _HAVE_LLM = False
+
+
 # Optional Program / QuickJS control plane. Wheels enable it; Core-only source
 # builds may intentionally compile it out.
 try:
@@ -223,6 +348,13 @@ try:
         ProgramCompiler,
         ProgramVersion,
         ProgramResult,
+        ProgramFailure,
+        ProgramCoreCheckpointIdentity,
+        ProgramPendingInputKind,
+        ProgramPendingState,
+        ProgramPendingInput,
+        ProgramPendingEffect,
+        ProgramInterrupt,
         ProgramHandle,
         ProgramActivation,
         ProgramActivationResult,
@@ -400,20 +532,19 @@ class NodeContext(_CppNodeContext):
     wraps them into an owned C++ ``ToolSet`` before constructing nodes. The
     compiled engine retains the same tool objects independently of subsequent
     Python context reassignment or list mutation.
+    Native provider copies retain their Python override owner independently.
+    Reassigning ``provider`` releases this context's lease, not a compiled
+    engine's lease.
     """
 
     def __init__(self, provider=None, tools=None,
                  model="", instructions="", extra_config=None):
-        # Let the property setter keep one replaceable Python reference. Passing
-        # provider to the C++ constructor would install a keep_alive edge that
-        # cannot be removed when the property is reassigned.
         super().__init__(
-            provider=None,
+            provider=provider,
             model=model,
             instructions=instructions,
             extra_config=extra_config or {},
         )
-        self.provider = provider
         # compile() snapshots this replaceable Python list into a ToolSet.
         self._pytools = list(tools or [])
 
@@ -425,36 +556,6 @@ class NodeContext(_CppNodeContext):
     @tools.setter
     def tools(self, value):
         self._pytools = list(value or [])
-
-
-class RateLimitError(RuntimeError):
-    """Raise this from a Provider that hit a rate limit (issue #97).
-
-    ``RateLimitedProvider`` catches it, honours ``retry_after_seconds`` if the
-    upstream told you one, and retries **the call**. Anything else you raise
-    propagates as an error, as it should.
-
-    ::
-
-        class MyProvider(neograph_engine.Provider):
-            def complete(self, params):
-                response = requests.post(...)
-                if response.status_code == 429:
-                    raise neograph_engine.RateLimitError(
-                        "rate limited",
-                        retry_after_seconds=int(response.headers.get("Retry-After", -1)))
-                ...
-
-    The binding translates this into the C++ ``RateLimitError`` at the boundary.
-    Without that translation the wrapper would sail straight past a Python
-    provider's 429 and never retry — a capability that exists and quietly does
-    nothing is worse than one that is plainly absent.
-    """
-
-    def __init__(self, message="rate limited", retry_after_seconds=-1):
-        super().__init__(message)
-        #: What the upstream asked you to wait, or -1 if it did not say.
-        self.retry_after_seconds = retry_after_seconds
 
 
 class NodeInterrupt(Exception):
@@ -613,20 +714,50 @@ def node(type_name=None):
 
     return decorator
 
-# `from neograph_engine.llm import OpenAIProvider, SchemaProvider` — defined in
-# llm.py so consumers can `from neograph_engine.llm import ...` mirroring the
-# C++ neograph::llm:: namespace.
-
 __all__ = [
     "__version__",
     "Provider",
     "Tool",
-    "CompletionParams",
     "ChatMessage",
     "ToolCall",
     "ChatTool",
-    "ChatCompletion",
     "GeneratedArtifact",
+    "ProviderMode", "ProviderControls", "ProviderRequest",
+    "PreparedProviderRequest", "ProviderObserverLimits", "ProviderRetryPolicy",
+    "ProviderOutcome", "ProviderCompletion", "ProviderPartialCompletion",
+    "ProviderFailure", "ProviderError", "ProviderErrorKind", "ProviderRetryClass",
+    "ProviderRetrySafety", "ProviderStopReason", "ProviderStopKind",
+    "ProviderAttemptEvidence", "ProviderUsage", "UsageCount", "UsageEvidence",
+    "UsageStage", "UsageQuality", "UsageConflict", "ProviderRole", "ProviderMessage",
+    "Text", "Refusal", "ProviderToolCall", "ProviderToolCallKind", "InvalidToolCall",
+    "InvalidToolCallReason", "Thinking", "RedactedThinking", "ServerToolResult",
+    "ProviderToolResult", "ToolResultHostMetadata", "Reasoning", "Opaque", "Thought",
+    "ProviderImage", "ProviderImageDetail", "NativeReplay", "NativeContext",
+    "NativeArchive", "NativeArchiveLimits", "ProviderEvent", "ProviderPartKind",
+    "ProviderDeltaChannel", "ProviderLocalId", "ProviderPartHeader", "ProviderBegin",
+    "ProviderMessageBegin", "ProviderPartBegin", "ProviderPartDelta",
+    "ProviderPartSeal", "ProviderMessageSeal", "ProviderUsageUpdate", "ProviderStop",
+    "ProviderCommit", "ProviderFail", "ProviderRawWire", "ProviderResponseEnvelope",
+    "ValidatedDescriptor", "ProviderHttpVersion", "ProviderRuntimeOptions",
+    "ProviderRuntimeLimits", "ProviderSemanticLimits", "ProviderResponseFormat",
+    "ProviderTransportOptions", "ProviderSseLimits",
+    "OpenRouterRouting", "ProviderOutcomeError", "ProviderObserverError",
+    "ChatReasoningOptions", "ResponsesVerbosity", "ResponsesTruncation",
+    "ResponsesInclude", "MessagesThinkingMode", "MessagesOutputEffort",
+    "MessagesCacheTtl", "MessagesCacheControl", "MessagesToolChoiceMode",
+    "MessagesToolChoice", "GeminiHistoryMode", "GeminiThinkingLevel",
+    "GeminiSafetyCategory", "GeminiSafetyThreshold", "GeminiSafetySetting",
+    "GeminiToolChoiceMode", "GeminiToolChoice", "ProviderDeploymentHeaderEnvironment",
+    "load_provider_descriptor_with_environment_headers",
+    "load_provider_descriptor_with_deployment_headers",
+    "ProviderBudgetSettlementError", "load_provider_descriptor",
+    "make_provider_request", "project_message",
+    "portable_message",
+    "ProviderDescriptorPolicy", "ProviderRuntimePolicy", "provider_policy_json",
+    "provider_codec_defaults_json", "load_provider_policy", "builtin_provider_policy",
+    "load_provider_runtime_policy", "builtin_provider_runtime_policy",
+    "ProviderBudgetAuthority", "ProviderOutcomes", "ProviderLoopEntry",
+    "ProviderLoopHistory", "provider_messages_write",
     "RuntimeTrustClass",
     "ContextArtifactKind",
     "ContextPlacement",
@@ -687,7 +818,6 @@ __all__ = [
     "GraphNode",
     "AsyncTool",
     "NodeInterrupt",
-    "RateLimitError",
     "Store",
     "InMemoryStore",
     "StoreItem",
@@ -729,6 +859,7 @@ __all__ = [
     "CacheScope",
     "UsageAccumulator",
     "RunResult",
+    "RunStatus",
     "CheckpointPhase",
     "Checkpoint",
     "PendingWrite",
@@ -741,6 +872,12 @@ __all__ = [
     "START_NODE",
     "END_NODE",
 ]
+
+if _HAVE_LLM:
+    __all__.append("SchemaProviderDefaults")
+
+if _HAVE_A2A:
+    __all__.append("a2a")
 
 if _HAVE_POSTGRES:
     __all__.append("PostgresCheckpointStore")
@@ -766,6 +903,13 @@ if _HAVE_PROGRAM:
         "ProgramCompiler",
         "ProgramVersion",
         "ProgramResult",
+        "ProgramFailure",
+        "ProgramCoreCheckpointIdentity",
+        "ProgramPendingInputKind",
+        "ProgramPendingState",
+        "ProgramPendingInput",
+        "ProgramPendingEffect",
+        "ProgramInterrupt",
         "ProgramHandle",
         "ProgramActivation",
         "ProgramActivationResult",

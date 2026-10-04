@@ -176,6 +176,74 @@ ChatMessage tool_result_msg(const std::string& tool_call_id,
     return m;
 }
 
+// Budget recovery is a new semantic call, not transport retry or native-history
+// repair. Three slots per logical turn keep every prepared cap broker-distinct.
+constexpr std::uint64_t kBudgetAttemptSlots = 3;
+constexpr std::uint64_t kMaxOutputBudget = 16384;
+
+bool empty_max_tokens(const sp::Outcome& outcome) {
+    const auto* completion = std::get_if<sp::Completion>(&outcome);
+    if (!completion || completion->stop.kind != sp::StopKind::MaxTokens) return false;
+    for (const auto& message : completion->messages)
+        for (const auto& part : message.parts) {
+            if (const auto* text = std::get_if<sp::Text>(&part); text && !text->value.empty())
+                return false;
+            if (std::holds_alternative<sp::ToolCall>(part)
+                || std::holds_alternative<sp::InvalidToolCall>(part)) return false;
+        }
+    return true;
+}
+
+template<class Invoke>
+asio::awaitable<sp::runtime::Result> complete_with_budget(
+    const std::shared_ptr<Provider>& provider, const std::string& model,
+    const std::vector<sp::Message>& messages, const std::vector<ChatTool>& tools,
+    ProviderControls controls, const RunContext& ctx,
+    std::uint64_t logical_turn, Invoke invoke) {
+    auto deadline = ctx.deadline;
+    for (std::uint64_t attempt = 0; attempt < kBudgetAttemptSlots; ++attempt) {
+        auto request = make_provider_request(*provider, model, messages, tools, controls);
+        request.cancel_token = ctx.cancel_token;
+        request.options.deadline = deadline;
+        request.mode = ctx.on_provider_event ? ProviderMode::Stream : ProviderMode::Collect;
+        bool output_observed = false;
+        if (ctx.on_provider_event) {
+            request.on_event = [&](const sp::Event& event) {
+                if (std::holds_alternative<sp::PartBegin>(event)
+                    || std::holds_alternative<sp::PartDelta>(event)
+                    || std::holds_alternative<sp::PartSeal>(event))
+                    output_observed = true;
+                ctx.on_provider_event(event);
+            };
+        }
+        if (!deadline) {
+            // The Provider's configurable default is exposed only by prepare.
+            // Discover it without an effect, and release the preparation before
+            // the mediated invocation. Its elapsed time is not renewed.
+            {
+                auto prepared = provider->prepare(request);
+                if (const auto* error = prepared.error()) {
+                    auto failure = std::make_shared<const sp::Outcome>(sp::Failure{*error, {}});
+                    record_usage(ctx, failure);
+                    outcome_or_throw(failure);
+                }
+                deadline = prepared.deadline();
+            }
+            request.options.deadline = deadline;
+        }
+        auto result = co_await observe_provider_result(ctx, invoke(
+            std::move(request), logical_turn * kBudgetAttemptSlots + attempt));
+        record_usage(ctx, result);
+        outcome_or_throw(result);
+        if (!empty_max_tokens(*result) || output_observed
+            || attempt + 1 == kBudgetAttemptSlots
+            || !controls.max_output_tokens || *controls.max_output_tokens >= kMaxOutputBudget)
+            co_return result;
+        controls.max_output_tokens = std::min(kMaxOutputBudget, *controls.max_output_tokens * 2);
+    }
+    throw std::logic_error("unreachable research budget attempt");
+}
+
 // =========================================================================
 // SupervisorLLMNode — one Claude call producing `conduct_research` /
 // `think_tool` / `research_complete` tool uses. Reads/writes the
@@ -213,18 +281,14 @@ public:
         ProviderControls controls;
         controls.temperature = 0.3;
         controls.max_output_tokens = 2048;
-        auto params = make_provider_request(*provider_, model_, convo, supervisor_tool_defs(), controls);
-        params.cancel_token = in.ctx.cancel_token;
-        params.options.deadline = in.ctx.deadline;
-        params.mode = in.ctx.on_provider_event ? ProviderMode::Stream : ProviderMode::Collect;
-        params.on_event = in.ctx.on_provider_event;
         std::vector<sp::Message> host{portable_message(ChatMessage{"system", SUPERVISOR_SYSTEM})};
         std::vector<sp::Message> supplemental(convo.begin() + 1, convo.end());
-        auto completion = co_await observe_provider_result(in.ctx, invoke_provider(provider_, std::move(params),
-                std::move(host), std::move(supplemental), provider_call_broker(in.ctx),
-                make_provider_call_identity(in.ctx, name_)));
-        record_usage(in.ctx, completion);
-        outcome_or_throw(completion);
+        auto completion = co_await complete_with_budget(provider_, model_, convo,
+            supervisor_tool_defs(), controls, in.ctx, 0,
+            [&](ProviderRequest request, std::uint64_t ordinal) {
+                return invoke_provider(provider_, std::move(request), host, supplemental,
+                    provider_call_broker(in.ctx), make_provider_call_identity(in.ctx, name_, ordinal));
+            });
 
         // Track how many supervisor rounds have run — dispatcher uses this
         // as a safety cap.
@@ -520,17 +584,14 @@ public:
             ProviderControls controls;
             controls.temperature = 0.3;
             controls.max_output_tokens = 2048;
-            auto params = make_provider_request(*provider_, model_, convo, tool_defs, controls);
-            params.cancel_token = in.ctx.cancel_token;
-            params.options.deadline = in.ctx.deadline;
-            params.mode = in.ctx.on_provider_event ? ProviderMode::Stream : ProviderMode::Collect;
-            params.on_event = in.ctx.on_provider_event;
             std::vector<sp::Message> host{portable_message(ChatMessage{"system", RESEARCHER_SYSTEM})};
             std::vector<sp::Message> supplemental(convo.begin() + 1, convo.end());
-            auto completion = co_await observe_provider_result(in.ctx, invoke_provider(provider_, std::move(params),
-                std::move(host), std::move(supplemental), provider_call_broker(in.ctx),
-                make_provider_call_identity(in.ctx, name_, continuation.turns)));
-            record_usage(in.ctx, completion);
+            auto completion = co_await complete_with_budget(provider_, model_, convo, tool_defs,
+                controls, in.ctx, continuation.turns,
+                [&](ProviderRequest request, std::uint64_t ordinal) {
+                    return invoke_provider(provider_, std::move(request), host, supplemental,
+                        provider_call_broker(in.ctx), make_provider_call_identity(in.ctx, name_, ordinal));
+                });
             const auto& returned = outcome_messages(*completion);
             convo.insert(convo.end(), returned.begin(), returned.end());
             ++continuation.turns;
@@ -594,34 +655,24 @@ private:
         ProviderControls controls;
         controls.temperature = 0.2;
         controls.max_output_tokens = 2048;
-        auto cp = make_provider_request(*provider_, model_, portable_prompts(compress_msgs), {}, controls);
-        cp.cancel_token = ctx.cancel_token;
-        cp.options.deadline = ctx.deadline;
-        cp.mode = ctx.on_provider_event ? ProviderMode::Stream : ProviderMode::Collect;
-        cp.on_event = ctx.on_provider_event;
-
-        try {
-            std::vector<sp::Message> host{portable_message(ChatMessage{"system", COMPRESS_SYSTEM})};
-            auto supplemental = portable_prompts(std::span<const ChatMessage>(compress_msgs).subspan(1));
-            auto completion = co_await observe_provider_result(ctx, invoke_provider(provider_, std::move(cp),
-                std::move(host), std::move(supplemental), provider_call_broker(ctx),
-                make_provider_call_identity(ctx, name_, static_cast<std::uint64_t>(std::max(0, max_iter_)))));
-            record_usage(ctx, completion);
-            outcome_or_throw(completion);
-            std::string out = outcome_text(*completion);
-            // Hard cap regardless of what the model produced. Protects the
-            // supervisor's accumulated context from unbounded growth across
-            // research rounds — each round appends one tool_result per
-            // researcher to supervisor_messages.
-            constexpr size_t kMaxCompressed = 1000;
-            if (out.size() > kMaxCompressed) {
-                out.resize(kMaxCompressed);
-                out += "\n…(truncated)";
-            }
-            co_return out;
-        } catch (const std::exception& e) {
-            co_return std::string("(compression failed: ") + e.what() + ")";
+        const auto messages = portable_prompts(compress_msgs);
+        std::vector<sp::Message> host{messages.front()};
+        std::vector<sp::Message> supplemental(messages.begin() + 1, messages.end());
+        auto completion = co_await complete_with_budget(provider_, model_, messages, {},
+            controls, ctx, static_cast<std::uint64_t>(std::max(0, max_iter_)),
+            [&](ProviderRequest request, std::uint64_t ordinal) {
+                return invoke_provider(provider_, std::move(request), host, supplemental,
+                    provider_call_broker(ctx), make_provider_call_identity(ctx, name_, ordinal));
+            });
+        std::string out = outcome_text(*completion);
+        if (out.empty())
+            co_return "(compression produced no visible findings after output-budget recovery)";
+        constexpr size_t kMaxCompressed = 1000;
+        if (out.size() > kMaxCompressed) {
+            out.resize(kMaxCompressed);
+            out += "\n…(truncated)";
         }
+        co_return out;
     }
 
     std::vector<ChannelWrite> fanin_writes(const std::string& call_id,
@@ -654,13 +705,9 @@ private:
 // FinalReportNode — reads `research_brief` + `raw_notes` and produces
 // `final_report`.
 //
-// Token-limit retry loop (mirrors open_deep_research's
-// final_report_generation): on context-length-exceeded errors from the
-// provider, progressively truncate the findings text by 25% and retry
-// up to MAX_RETRIES times. Without this, a successful research run
-// with many lengthy researcher summaries would fail the synthesis
-// stage and leave the user with no report at all — the worst possible
-// outcome since the expensive work has already been done.
+// Only completed empty MaxTokens output admits the bounded cap ladder.
+// Failures never trigger exception-text-based redispatch. Partial visible
+// reports are annotated on the public projection, not on the owned outcome.
 // =========================================================================
 class FinalReportNode : public GraphNode, public ::neograph::RuntimeInterpositionConsumer {
 public:
@@ -705,86 +752,30 @@ public:
             co_return out;
         }
 
-        // Retry loop on token-limit / context-length errors. Each retry
-        // truncates findings_text by 25% (keeping the prefix — earlier
-        // findings come from earlier supervisor rounds and are usually
-        // higher-priority since the supervisor decides what to research
-        // first).
-        constexpr int MAX_RETRIES = 3;
-        std::string last_error;
-        for (int attempt = 0; attempt < MAX_RETRIES; ++attempt) {
-            std::vector<ChatMessage> convo;
-            {
-                ChatMessage s; s.role = "system"; s.content = FINAL_REPORT_SYSTEM;
-                convo.push_back(std::move(s));
-                ChatMessage u; u.role = "user";
-                u.content = "## Research brief\n" + brief +
-                            "\n\n## Collected findings\n" + findings_text;
-                convo.push_back(std::move(u));
-            }
-
-            ProviderControls controls;
-            controls.temperature = 0.4;
-            controls.max_output_tokens = 4096;
-            auto params = make_provider_request(*provider_, model_, portable_prompts(convo), {}, controls);
-            params.cancel_token = in.ctx.cancel_token;
-            params.options.deadline = in.ctx.deadline;
-            params.mode = in.ctx.on_provider_event ? ProviderMode::Stream : ProviderMode::Collect;
-            params.on_event = in.ctx.on_provider_event;
-
-            // GCC-13 coroutine codegen: catch around co_await can miss the
-            // exception type. Capture via exception_ptr and rethrow in a
-            // non-coroutine try/catch (same pattern used elsewhere).
-            sp::runtime::Result completion;
-            std::exception_ptr eptr;
-            try {
-                std::vector<sp::Message> host{portable_message(ChatMessage{"system", FINAL_REPORT_SYSTEM})};
-                auto supplemental = portable_prompts(std::span<const ChatMessage>(convo).subspan(1));
-                completion = co_await observe_provider_result(in.ctx, invoke_provider(provider_, std::move(params),
-                    std::move(host), std::move(supplemental), provider_call_broker(in.ctx),
-                    make_provider_call_identity(in.ctx, name_, static_cast<std::uint64_t>(attempt))));
-                record_usage(in.ctx, completion);   // #88
-                outcome_or_throw(completion);
-            } catch (...) {
-                eptr = std::current_exception();
-            }
-            if (!eptr) {
-                NodeOutput out;
-                out.writes.push_back(ChannelWrite{"final_report",
-                    json(outcome_text(*completion))});
-                co_return out;
-            }
-            try {
-                std::rethrow_exception(eptr);
-            } catch (const std::exception& e) {
-                last_error = e.what();
-            }
-            std::string lc = last_error;
-            std::transform(lc.begin(), lc.end(), lc.begin(),
-                           [](unsigned char c){ return std::tolower(c); });
-            bool is_context_overflow =
-                lc.find("context") != std::string::npos
-                || lc.find("token") != std::string::npos
-                || lc.find("length") != std::string::npos
-                || lc.find("too long") != std::string::npos
-                || lc.find("max_tokens") != std::string::npos;
-            if (!is_context_overflow || attempt == MAX_RETRIES - 1) {
-                std::rethrow_exception(eptr);  // not a token-limit issue, or out of retries
-            }
-            // Truncate findings by 25% and retry. Keep at least 1 KB.
-            size_t new_size = std::max<size_t>(
-                1024, findings_text.size() * 3 / 4);
-            if (new_size >= findings_text.size()) {
-                std::rethrow_exception(eptr);  // can't truncate further
-            }
-            findings_text.resize(new_size);
-            findings_text += "\n\n[... truncated to fit context window]\n";
-        }
-        // Unreachable, but the compiler can't prove it.
+        std::vector<sp::Message> convo{
+            portable_message(ChatMessage{"system", FINAL_REPORT_SYSTEM}),
+            portable_message(ChatMessage{"user", "## Research brief\n" + brief +
+                "\n\n## Collected findings\n" + findings_text})};
+        ProviderControls controls;
+        controls.temperature = 0.4;
+        controls.max_output_tokens = 4096;
+        std::vector<sp::Message> host{convo.front()};
+        std::vector<sp::Message> supplemental(convo.begin() + 1, convo.end());
+        auto completion = co_await complete_with_budget(provider_, model_, convo, {},
+            controls, in.ctx, 0,
+            [&](ProviderRequest request, std::uint64_t ordinal) {
+                return invoke_provider(provider_, std::move(request), host, supplemental,
+                    provider_call_broker(in.ctx), make_provider_call_identity(in.ctx, name_, ordinal));
+            });
+        auto report = outcome_text(*completion);
+        if (report.empty())
+            throw ProviderOutcomeError("final_report produced no visible report",
+                completion, std::make_exception_ptr(std::runtime_error(
+                    "max_tokens budget exhausted or empty final completion")));
+        if (std::get<sp::Completion>(*completion).stop.kind == sp::StopKind::MaxTokens)
+            report += "\n\n> Incomplete: the provider reached its output-token limit; this report is partial.\n";
         NodeOutput out;
-        out.writes.push_back(ChannelWrite{"final_report", json(
-            std::string("# Research Report\n\nFinal-report synthesis "
-                        "failed after retries: ") + last_error)});
+        out.writes.push_back(ChannelWrite{"final_report", json(std::move(report))});
         co_return out;
     }
 

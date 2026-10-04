@@ -1,88 +1,48 @@
-<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=ko source_sha256=3d01320c4796b2b8fae399c9660352bcb3eaadefa460b54c1e15664cb04bd537 -->
-# NeoGraph 비동기 안내
+<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=ko source_sha256=a48e529a151529d9711ee297aed8bc4b7e603c0198c596188608cb6a8565dc13 -->
+# NeoGraph 비동기 가이드
 
+**Languages:** [English](ASYNC_GUIDE.md) | [한국어](ASYNC_GUIDE.ko.md) | [日本語](ASYNC_GUIDE.ja.md) | [简体中文](ASYNC_GUIDE.zh-CN.md)
 
-> Stage 3(2026-04) 설계와 당시 측정 테스트 수는 역사로 보존한다. provider 호환/crossover 결정은 아래 typed lossless 전환으로 대체되었으며 과거 설계 기록은 현재 provider API가 아니다.
+## 실행 진입점
 
-Stage 3 / 2026-04 릴리스. 대상 독자: 기존 NeoGraph 코드를 비동기 API로 이전하거나,
-비동기 API로 새 코드를 작성하는 사용자.
+`GraphEngine::run`, `run_stream`, `resume`은 동기 브리지로 코루틴 구현을 실행한다. `run_async`, `run_stream_async`, `resume_async`는 `asio::awaitable<RunResult>`를 반환하며 호출자의 executor를 쓴다. 작업이 끝날 때까지 executor를 구동하고 콜백이 쓰는 자원을 먼저 파괴하지 않는다.
 
-이 안내서는 **무엇이** 바뀌었는지, 모양이 **왜** 그런지, 그리고 점진적으로 이전하는
-**방법**을 다룬다. 개별 학기의 설계 근거는
-[`ASYNC_STAGE3_DESIGN.md`](ASYNC_STAGE3_DESIGN.md)를,
-분 단위 커밋 장부는 `feat/async-api` 브랜치의 git 로그를 참조.
+`EngineConfig::worker_count`의 기본값은 `1`이며 엔진 소유 fan-out 풀이 없다. I/O 분기는 일시 중단 시 겹쳐 실행될 수 있지만 단일 executor 스레드의 CPU 작업은 직렬 실행된다. 여러 코어가 필요하면 엔진을 공개하기 전에 풀을 설정한다. [동시성](concurrency.md)과 `examples/27_async_concurrent_runs.cpp`를 참고한다.
 
----
+## 준비된 공급자 호출
 
-## 1. 새로운 점
+`SchemaProvider`는 닫힌 `sp::descriptor::ValidatedDescriptor`, `sp::runtime::Options`, 선택적인 typed `SchemaProvider::Defaults`로 만든다. 런타임은 libcurl을 쓴다. 과거 descriptor interpreter, `prefer_libcurl` 선택자, Responses WebSocket 경로는 제거되었다.
 
-엔진의 모든 동기 I/O 지점에 이제 기다릴 수 있는(awaitable) 짝이 생겼다:
-
-| 계층 | 동기 | 비동기 |
-|---|---|---|
-| Provider | `invoke` / `dispatch` | `invoke_async` / `dispatch_async` |
-| CheckpointStore | `save` / `load_latest` / `load_by_id` / `list` / `delete_thread` / `put_writes` / `get_writes` / `clear_writes` | 각각에 대한 `*_async` |
-| GraphNode | — | `run(NodeInput) -> asio::awaitable<NodeOutput>` 이 유일한 표준 재정의(override) |
-| GraphEngine | `run` / `run_stream` / `resume` | `run_async` / `run_stream_async` / `resume_async` |
-| MCPClient | `rpc_call` | `rpc_call_async` |
-| Tool | `execute` (사용자 인터페이스 — 고정) | `AsyncTool` 어댑터로 감싸기 |
-
-비동기 짝은 `asio::awaitable<T>`를 반환한다. 어떤 `asio::io_context`(또는 스트랜드, `any_io_executor`가 있는 스레드 풀)에서든 구동 가능.
-하나의 `io_context`가 실행당 OS 스레드를 전담하지 않고 수천 개의 동시 `run_async` 호출을 호스팅할 수 있다 — 이 재설계 전체를 동기 부여한 동시성 모델이다.
-
-당시 Stage 3 보고는 기존 테스트 276+개가 당시 sync 경로를 통과했다고 기록했다. 현재 전환 검증 결과가 아니다.
-
----
-
-<a id="2-the-crossover-default-pattern"></a>
-## 2. 준비된 provider dispatch (crossover 제거)
-
-공개 계약은 소유 typed 준비/dispatch이며 동기·비동기 가상 completion 쌍이 아니다. `ProviderRequest.payload`는 Chat, Messages, Responses, Gemini, Interactions의 SDK 요청 variant이다. `ProviderMode::Collect` / `Stream`은 관측자 유무와 독립적으로 전송을 선택한다. `on_event`는 빌린 typed `sp::Event` view를 받는다. 콜백 이후 필요한 데이터만 복사한다. raw JSON override나 portable projection을 통한 native 권한 가져오기는 허용되지 않는다.
-
-`prepare()`는 검증·인코딩을 정확히 한 번 수행하고 원래 deadline과 취소 상태를 가진 이동 전용 `PreparedProviderRequest`를 만든다. 영속 호출자는 `Provider::request_digest()`를 assembly에 바인딩하고 승인된 예산 claim을 예약하며 dispatch receipt를 기록한 다음 같은 핸들을 `ControlledProvider::dispatch_prepared(_async)`로 소비한다. gate 이후 요청을 재생성하지 않는다. 중복 receipt는 재전송하지 않는다. 사용자 공급자는 `get_name()`, `family()`, `prepare()`를 구현하고 `prepare_runtime()` 또는 `prepare_local()`을 사용한다. local callback은 `this` 대신 소유 shared 상태를 캡처한다.
-
-소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 불안정 `0.0.0`, interface revision 3 / shared ABI 3이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. 현재 runtime/archive는 Linux/POSIX이며 Windows·macOS·WASM runtime 검증을 뜻하지 않는다. Python provider binding/wrapper는 유예되었고 이 C++ 변경으로 포팅되지 않는다.
-
----
-
-## 3. 이전 방법
-
-### 3.1 동기 호출자가 비동기로 이전
-
-**이전:**
+`make_provider_request`는 family별 typed payload를 만든다. 기본 모드는 `ProviderMode::Collect`이며 `on_event`와 별개로 `Stream`을 명시한다. `prepare`는 한 번 검증·인코딩하고 `dispatch(_async)`는 이동 전용 핸들을 한 번 소비한다. `invoke(_async)`는 두 단계를 결합한다. 반환된 awaitable은 요청/client 상태를 소유하므로 원래 요청과 Provider가 스케줄링 이후까지 살아 있을 필요는 없다.
 
 ```cpp
-auto result = engine->run_stream(config, event_cb);
+#include <neograph/async/run_sync.h>
+#include <neograph/provider.h>
+
+// provider owns a validated descriptor and SDK runtime policy.
+auto request = neograph::make_provider_request(
+    *provider, model, messages, {}, {}, neograph::ProviderMode::Collect);
+request.cancel_token = cancel_token;
+request.options.deadline = deadline;
+auto prepared = provider->prepare(std::move(request));
+auto result = neograph::async::run_sync(
+    provider->dispatch_async(std::move(prepared)));
 ```
 
-**이후:**
+C++ `on_event`는 빌린 `sp::Event` view를 받으므로 콜백 이후 필요한 바이트는 복사한다. 이벤트에는 텍스트 외에 사용량, 추론, 도구, raw wire 관측이 있다. 불변 `sp::runtime::Result`는 `sp::Completion` 또는 부분 실패 근거를 포함한 `sp::Failure`를 소유한다. 관측자 실패 시 `ProviderObserverError::outcome()`에 결과, `cause()`에 콜백 예외가 남는다.
 
-```cpp
-#include <asio/co_spawn.hpp>
-#include <asio/detached.hpp>
-#include <asio/io_context.hpp>
+dispatch는 용량 1의 병합 알림을 기다리고 bounded Bridge가 이벤트와 결과를 보존한다. 알림 자체가 이벤트 큐는 아니다. 취소는 SDK에 stop을 전달하며 `operation.join()`은 관측자/자원 실패 시에도 콜백 반환과 admission 슬롯 해제를 기다린다. deadline은 작업을 제한하지만 호출자 중단이 서버 미수신을 증명하지는 않는다.
 
-asio::io_context io;
-RunResult result;
-asio::co_spawn(
-    io,
-    [&]() -> asio::awaitable<void> {
-        result = co_await engine->run_stream_async(config, event_cb);
-    },
-    asio::detached);
-io.run();
-```
+영속 dispatch는 `Provider::request_digest()`를 assembly에 바인딩하고 승인된 claim을 예약한 뒤 receipt를 저장하고 같은 핸들을 `ControlledProvider::dispatch_prepared(_async)`로 소비한다. 중복 receipt는 재전송 권한이 아니다. 예약은 이미 승인된 지출 권한을 차감하거나 보류하며 공급자 보고 사용량이나 청구서가 아니다. 누락된 counter는 미상이며 부분/전달 미상 근거로 미해결 hold를 해제할 수 없다.
 
-`io.run()`은 코루틴이 완료될 때 반환된다. 많은 동시 실행에서는 `io.run()` 호출 전에 같은 `io_context`에 각각 co_spawn한다 — `examples/27_async_concurrent_runs.cpp` 참조.
+전체 메시지는 메모리에서 진짜 native continuation을 보존한다. portable JSON projection은 관측값이지 native replay나 재정 권한이 아니다. native continuation은 승인된 `sp::NativeArchive`로만 저장하며 텍스트나 raw JSON으로 재구성하지 않는다. [이전 가이드](migration-v0.4-to-v1.0.md)를 참고한다.
 
-### 3.2 새 비동기 제공자 작성
+## 사용자 공급자와 노드
 
-`prepare()`는 검증·인코딩을 정확히 한 번 수행하고 원래 deadline과 취소 상태를 가진 이동 전용 `PreparedProviderRequest`를 만든다. 영속 호출자는 `Provider::request_digest()`를 assembly에 바인딩하고 승인된 예산 claim을 예약하며 dispatch receipt를 기록한 다음 같은 핸들을 `ControlledProvider::dispatch_prepared(_async)`로 소비한다. gate 이후 요청을 재생성하지 않는다. 중복 receipt는 재전송하지 않는다. 사용자 공급자는 `get_name()`, `family()`, `prepare()`를 구현하고 `prepare_runtime()` 또는 `prepare_local()`을 사용한다. local callback은 `this` 대신 소유 shared 상태를 캡처한다.
+Provider 하위 클래스는 `get_name`, `family`, `prepare`만 구현한다. 공통 invoke/dispatch는 가상 completion hook이 아니다.
 
 ```cpp
 #include <neograph/provider.h>
-#include <neograph/runtime_interposition_consumer.h>
-#include <runtime/client.h>
 
 class MyProvider final : public neograph::Provider {
     std::string family_;
@@ -95,309 +55,53 @@ public:
               std::move(descriptor), std::move(options))) {}
     std::string get_name() const override { return "my-provider"; }
     std::string_view family() const noexcept override { return family_; }
-    neograph::PreparedProviderRequest
-    prepare(neograph::ProviderRequest request) override {
+    neograph::PreparedProviderRequest prepare(neograph::ProviderRequest request) override {
         return prepare_runtime(client_, std::move(request));
     }
 };
 ```
 
-### 3.3 비동기 Tool 작성
-
-`Tool` 인터페이스는 설계상 동기이다(Stage 3에서 기존 사용자 도구의 이전 비용을 0에 가깝게 유지하기 위해 고정). 내부에 코루틴 모양의 작업이 필요할 때는 `AsyncTool`을 사용:
-
-```cpp
-class FetchTool : public neograph::AsyncTool {
-  public:
-    ChatTool get_definition() const override { ... }
-    std::string get_name() const override { return "fetch"; }
-
-    asio::awaitable<std::string>
-    execute_async(const json& args) override {
-        auto ex = co_await asio::this_coro::executor;
-        auto res = co_await neograph::async::async_post(
-            ex, /*host*/, /*port*/, /*path*/, /*body*/);
-        co_return res.body;
-    }
-};
-```
-
-`AsyncTool::execute`는 `final` — `execute_async`를 구동하기 위해 비공개 `io_context`를 생성하는 동기 파사드이다. 양쪽을 모두 재정의하는 것은 계약 위반.
-
-### 3.4 비동기 제공자를 사용하는 그래프 노드 작성
-
-```cpp
-#include <neograph/graph/node.h>
-#include <neograph/graph/run_context.h>
-#include <neograph/provider.h>
-#include <neograph/runtime_interposition_consumer.h>
-
-class ChatNode : public neograph::graph::GraphNode,
-                 public neograph::RuntimeInterpositionConsumer {
-    std::shared_ptr<neograph::Provider> provider_;
-    std::string model_;
-public:
-    ChatNode(std::shared_ptr<neograph::Provider> provider, std::string model)
-        : provider_(std::move(provider)), model_(std::move(model)) {}
-    asio::awaitable<neograph::graph::NodeOutput>
-    run(neograph::graph::NodeInput in) override {
-        auto request = neograph::make_provider_request(
-            *provider_, model_, in.state.get_provider_messages());
-        request.cancel_token = in.ctx.cancel_token;
-        request.options.deadline = in.ctx.deadline;
-        auto result = co_await neograph::graph::observe_provider_result(
-            in.ctx, invoke_provider(provider_, std::move(request), {}, {},
-                neograph::graph::provider_call_broker(in.ctx),
-                neograph::graph::make_provider_call_identity(in.ctx, get_name())));
-        neograph::graph::record_usage(in.ctx, result);
-        neograph::outcome_or_throw(result);
-        neograph::graph::NodeOutput out;
-        out.writes.push_back(neograph::graph::provider_messages_write(result));
-        co_return out;
-    }
-    std::string get_name() const override { return "chat"; }
-};
-```
+C++ adapter는 실제 local-dispatch 상태를 소유할 때 `prepare_local`을 쓸 수 있다. 빌린 `this` 대신 소유 shared 상태를 캡처한다. Python 하위 클래스는 진짜 provider에 준비를 위임하며 결과나 local-dispatch 권한을 조작할 수 없다.
 
-## 4. 주의사항과 발등 찍기
+사용자 그래프 노드는 `run(NodeInput) -> asio::awaitable<NodeOutput>`를 구현한다. `in.state`, `in.ctx`를 읽고 null이 아닌 `in.stream_cb`로만 이벤트를 내보내며 하나의 `NodeOutput`에 writes/Command/Send를 반환한다. 동기·비동기 streaming 모두 dispatch당 한 번 호출된다. 전체 공급자 기록은 `RunConfig::provider_messages`로 전달한다. `ChatMessage`는 그래프 편의 타입이며 SDK 메시지 모델이 아니다.
 
-### 4.1 GCC 13 코루틴 ICE
+<a id="94-checkpointstore"></a>
+## CheckpointStore 어댑터
 
-두 가지 특정 C++20 코루틴 모양이 GCC 13의 `build_special_member_call` ICE를 유발한다 (GCC 13.3 기준):
+`CheckpointStoreCore`는 save, load_latest, load_by_id, list, delete_thread의 다섯 동기 연산을 요구한다. `adapt_checkpoint_store`는 엔진 계약을 제공하고 blocking 작업을 제한된 worker로 넘긴다. `AsyncCheckpointStore`는 다섯 async 대응 연산을 요구하며 `adapt_async_checkpoint_store`가 명시적인 동기 관리 facade를 제공한다.
 
-**모양 1 — `co_await`가 `catch` 블록 안에 있을 때:**
+레거시 `CheckpointStore`의 동기 기본값은 `std::logic_error`로 실패하고 async 기본값은 동기 override를 offload한다. async-only 하위 클래스는 명시적 async capability/adapter로 이전해야 한다. 메모리 저장소는 호출자에서 mutex를 쓰고 SQLite는 blocking 작업을 offload하며 PostgreSQL은 pipeline batching 없이 nonblocking libpq I/O를 쓴다.
 
-```cpp
-try { ... }
-catch (const MyError& e) {
-    co_await something();  // ICE
-}
-```
+pending-write 내구성은 별도 `PendingWritesCheckpointStore` capability다. 없으면 resume은 전체 super-step을 재실행한다. no-op 메서드는 외부 효과를 중복 제거하지 않는다. Python checkpoint 하위 클래스는 동기 메서드를 구현하며 async-native backend는 C++ adapter가 맡는다.
 
-**해결책 — 오류를 밖에서 캡처하고 나중에 처리:**
+<a id="95-mcpclient"></a>
+## MCPClient
 
-```cpp
-std::optional<MyError> err;
-std::optional<Result> ok;
-try { ok.emplace(co_await op()); }
-catch (const MyError& e) { err.emplace(e); }
+`rpc_call`은 `rpc_call_async`를 동기로 구동한다. MCPClient는 사용자 transport 상속 인터페이스가 아니다. HTTP 호출은 겹쳐 실행된다. stdio 세션은 frame 쓰기를 직렬화하고 단일 reader가 JSON-RPC id로 응답을 전달한다. waiter 하나의 취소가 shared transport를 닫지 않는다. 직렬 subprocess의 처리량 한계는 남는다.
 
-if (err) {
-    co_await recover();
-    throw *err;
-}
-```
+<a id="96-tool-vs-asynctool"></a>
+## Tool과 AsyncTool
 
-**모양 2 — 코루틴 본문 안의 중첩 brace-init:**
+동기 Tool은 `execute`, `get_definition`, `get_name`을 구현한다. AsyncTool은 `execute_async`, `get_definition`, `get_name`을 구현한다. 동기 `execute`는 final이며 private `run_sync` context를 구동한다. 두 실행 인터페이스를 함께 override하지 말고 shared event-loop 스레드에서 긴 동기 작업을 하지 않는다.
 
-```cpp
-co_await fn(std::vector<std::string>{name},    // ICE
-            json{{"key", "value"}});
-```
+## Generic HTTP streaming
 
-**해결책 — 밖에서 빌드하고 참조로 전달:**
+NeoGraph의 `async_post_stream`은 retained consumer가 쓰는 별도 generic HTTP utility로 남는다. SDK libcurl dispatch가 이를 대체하지 않는다. Chunked, 제한된 `Content-Length`, close-delimited response body를 지원한다. 비어 있지 않은 fixed-length body는 callback에 한 번 전달하고 길이 0이면 callback을 내보내지 않는다. 반환된 `HttpStreamResponse.status`는 200과 non-2xx status를 보존하므로 caller는 non-SSE reply를 빈 성공으로 읽는 대신 JSON error body를 해석할 수 있다.
 
-```cpp
-std::vector<std::string> v;
-v.push_back(name);
-json j;
-j["key"] = "value";
-co_await fn(v, j);
-```
+`RequestOptions` 기본값은 status/header 64 KiB, decoded body 16 MiB, transfer chunk 1 MiB 제한이며 각 값 0은 해당 제한을 해제한다. Fixed-length 분기는 할당 전에 body limit을 검사한다. 잘못되거나 모호한 framing, premature EOF, 이미 buffer에 들어온 surplus byte는 거부한다. 반환 뒤 도착한 byte를 탐지한다는 보장은 아니다. Redirect body는 별도로 처리한다. 기본 per-hop timeout은 0이고 redirect는 비활성화되어 있다. 이 generic option은 SDK policy나 model spending grant가 아니다.
 
-두 모양 모두 Stage 3 중 여러 번 표면화되었으며 해결책은 안정적. Clang 18+과 GCC 14+는 \"자연스러운\" 형태를 문제없이 컴파일하지만, NeoGraph는 GCC 13을 기준으로 삼는다.
+## Python과 수명 경계
 
-### 4.2 `run_sync` 수명 위험
+Python은 typed `ProviderRequest`, `PreparedProviderRequest`, 불변 `ProviderOutcome`을 사용하는 `prepare`, `dispatch`, `invoke`를 공개한다. invoke/dispatch는 GIL을 해제하고 콜백과 Python 객체 파괴는 GIL을 획득한다. asyncio 경계에서는 `asyncio.to_thread(provider.invoke, request)`를 쓴다. C++ provider awaitable을 asyncio awaitable로 자동 변환하지 않는다. [Python binding](python-binding.md)을 참고한다.
 
-`neograph::async::run_sync<T>(asio::awaitable<T>)`는 호출마다 새로운 단일 스레드 `io_context`를 생성한다. 그 실행자에 바인딩된 수명이 긴 asio 핸들 — 풀의 소켓, 타이머, 파일 디스크립터 — 은 `run_sync`가 반환될 때 허상(dangling)이 된다. 초기 ConnPool 작업이 이 함정을 밟았고, 현재 아키텍처는 동기 파사드를 통해 의도적으로 아무것도 풀링하지 않음으로써 이를 회피한다.
+`run_sync`는 호출마다 private 단일 스레드 context를, `run_sync_pool`은 호출별 풀을 만든다. 그 executor에 묶인 handle은 호출 밖으로 나가면 안 된다. 일반 함수는 다른 awaitable을 직접 반환할 수 있고 코루틴 본문은 `co_return co_await`를 쓸 수 있다. 코루틴 본문에 일반 `return`을 섞지 않는다.
 
-규칙: 단일 호출보다 오래 살아야 하는 자원(연결 풀, 장기 실행 스트림 디스크립터)은 프로세스 수명 동안 소유한 실행자에만 바인딩할 것. 동기 파사드 경로는 요청당 새 연결을 생성한다.
+## 빌드와 역사적 근거
 
-### 4.3 `return x`가 아니라 `co_return co_await x`
+외부 `SchemaProvider::runtime`은 `NEOGRAPH_BUILD_LLM=OFF`여도 `neograph::core`에 필수다. 설치된 SDK prefix 또는 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`를 쓴다. SDK 빌드는 CMake 3.20+, C++20, Python, standalone Asio, yyjson, libcurl 7.88+, OpenSSL Crypto가 필요하다. 기록된 interface-4 이전 runtime/archive 검증은 Linux/POSIX 범위이며 interface 4를 검증하지 않는다. 기존 macOS/Windows metadata가 새 의존성을 검증하지 않으며 WASM 통합도 확립되지 않았다.
 
-`asio::awaitable<T>`를 반환하는 코루틴 함수는 본문 어딘가에서 `co_return` (또는 `co_await`)을 사용해야 한다. 일반 `return other_awaitable()`은 컴파일은 되는 것처럼 보이지만 런타임에 감싼 `T`를 기본 생성한다. 항상 `co_return co_await`로 연결할 것:
+NeoGraph 설정에는 CMake 3.20+가 필요하다. 명시적 SDK source directory를 먼저 쓰고, 없으면 installed package, 기본 revision-pinned 공개 archive fallback 순으로 해석한다. installed SDK로 offline 설정할 때 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`, 해당 prefix를 `CMAKE_PREFIX_PATH`에 지정한다. fetched/source SDK는 NeoGraph의 체크인된 Asio와 yyjson을 쓰지만 system 개발 의존성은 여전히 필요하다.
 
-```cpp
-asio::awaitable<RunResult>
-GraphEngine::run_async(const RunConfig& config) {
-    co_return co_await execute_graph_async(config, nullptr);
-}
-```
+[Stage 3 설계](ASYNC_STAGE3_DESIGN.md)는 2026년 4월 제안의 보관 기록이다. 2.0/3.0 명칭, completion crossover, 테스트/benchmark 수치는 역사적 단계이며 현재 버전·API·새 통과 주장이 아니다. 버전은 `pyproject.toml`에서 읽으며 역사적 측정은 [성능 상세](performance-deep-dive.md)에 있다.
 
-### 4.4 사용자 정의 노드에서 스트리밍
-
-`GraphNode::run(NodeInput)`은 디스패치당 한 번 실행된다. `in.stream_cb`가 null이 아닐 때만 이벤트를 방출하고, 호출자가 스트리밍 엔진 진입점을 사용했는지와 관계없이 동일한 `NodeOutput`을 반환한다. 이전 이중 실행 대체 경로는 더 이상 존재하지 않는다.
-
-### 4.5 MCP stdio 단일 세션 동시성
-
-하나의 stdio 전송은 자체 `io_context`, 자식 프로세스 파이프, 쓰기 세마포어와 응답 ID 판독기를 소유한다. **같은** 세션의 `rpc_call_async` 호출들은 프레임 쓰기 동안에만 잠금을 공유한다. 읽기는 중첩되며, 판독기가 JSON-RPC ID로 응답을 각 대기 호출에 전달한다. 호출자는 서로 다른 실행기에서 실행될 수 있으며 연속된 `run_sync` 그래프 실행도 가능하다. 한 호출이 취소되거나 시간 초과되어도 세션 프로세스는 유지되고 늦게 도착한 응답이 다른 호출에 잘못 전달되지 않는다.
-
----
-
-## 5. 성능 노트
-
-비동기 전선이 단일 에이전트를 더 빠르게 만들지는 않는다 — `bench_neograph`는 Stage 3 이전과 동일한 seq (~30 µs) 및 par (~205 µs) 수치를 보고한다. 가치 축은 **동시성 견고함**이지 엔진 지연 시간이 아니다.
-
-실제 모양 벤치마크에서 측정된 개선:
-
-* `bench_async_http --mode async_pool --concur 1000` — 17834 ops/s, 대비 Stage 2 비동기 (8401 ops/s) 및 동기 (6064 ops/s).
-* `bench_async_fanout --concur 50000` — 541K ops/s, 67 MB RSS. 스레드-당-에이전트 기준은 ~1000 동시 에이전트 이상으로 확장할 수 없었다; 50K는 이제 오후 작업.
-* `examples/27_async_concurrent_runs` — 하나의 io_context에서 3 에이전트 × 50ms 작업: 50ms 총합 (vs. 150ms 순차).
-* `examples/05_parallel_fanout` — 하나의 io_context에서 3 병렬 연구자: 150ms 총합 (vs. 370ms 순차).
-
-### 언제 동기 API를 계속 사용할지
-
-작업량이 ≤ 1000 동시 에이전트이고 각 에이전트가 전용 OS 스레드에서 실행된다면, 동기 API는 완전히 합리적인 선택이다. 그 규모에서는 스레드가 충분히 저렴하고, 동기 코드가 추론하기 더 단순하다. 비동기 API는 동기 모양이 다룰 수 없는 작업량 — 하나의 프로세스를 공유하는 수백 개의 장기 실행 에이전트, 단일 이벤트 루프에서 많은 사용자를 호스팅하는 경우 등 — 을 위해 존재한다.
-
----
-
-## 6. 깨끗한 이전을 위한 체크리스트
-
-- [ ] 에이전트 호스트 패턴 식별: 단일 에이전트 프로세스, 풀, 또는 공유 이벤트 루프?
-- [ ] 공유 이벤트 루프인 경우 → 호출 지점을 `run_async` / `run_stream_async`로 이전.
-- [ ] 사용자 정의 노드는 `run(NodeInput)`을 구현하고 실제 I/O를 직접 `co_await`.
-- [ ] 도구가 실제 I/O를 하는 경우 → `AsyncTool`을 상속, `execute_async` 재정의.
-- [ ] Postgres 체크포인트 저장소를 사용하는 경우 → 공유 이벤트 루프에서 해당 `*_async` 메서드 사용. 이 메서드들은 libpq의 비차단 전선 프로토콜과 코루틴 친화적 연결 풀을 사용.
-- [ ] 측정. 가치 축은 동시성; 작업량이 동시성 제약이 아니라면 이전하지 말 것.
-
----
-
-## 7. 아직 다루지 않은 것
-
-* **Postgres 파이프라인 모드** — 비동기 체크포인트 메서드는 이미 비차단 libpq I/O를 사용하지만, libpq 파이프라인 모드를 통한 다중 명령 일괄 처리는 아직 하지 않음.
-* **`async::HttpResponse` 헤더 맵** — 응답 표면은 status / body / retry_after / location만 노출. 임의의 헤더 접근(예: MCP 세션 ID 헤더 추적)은 Sem 1 후속 작업.
-
----
-
-## 8. 3.0에서 변경된 점
-
-3.0 (`feat/taskflow-removal`)은 Taskflow를 제거하고 동기 진입점을 `run_sync(execute_graph_async)`를 통해 라우팅함으로써 동기와 비동기를 하나의 코루틴 런타임으로 통합했다. 2.0 비동기 API 모양은 변경되지 않음 — 차이는 기본값과 새 선택 사항에 있다.
-
-### 8.1 `GraphNode::run(NodeInput)`이 기존 재정의 체인을 대체
-
-v0.9.0 v1-준비 릴리스가 8개의 `execute*` 가상 함수를 제거했다. 이제 사용자 정의 노드는 동기·비동기 엔진 진입점, 스트리밍, 제어 흐름을 위한 하나의 재정의를 가진다:
-
-```cpp
-asio::awaitable<NodeOutput> run(NodeInput in) override {
-    NodeOutput out;
-    out.writes.push_back({"answer", co_await fetch_answer(in)});
-    Command command;
-    command.goto_node = "review";
-    out.command = command;
-    if (in.stream_cb) {
-        (*in.stream_cb)({GraphEvent::Type::LLM_TOKEN, get_name(), json("done")});
-    }
-    co_return out;
-}
-```
-
-이전 릴리스에서 이전하는 코드는 상태 읽기를 `in.state`로, 실행 메타데이터를 `in.ctx`로, 스트리밍 싱크를 `in.stream_cb`로, 쓰기/`Command`/`Send` 값을 반환된 `NodeOutput`으로 이동해야 한다.
-
-### 8.2 `GraphEngine::set_worker_count(N)` — 선택적 CPU 병렬 팬아웃
-
-기본값: `run_parallel_async`와 `run_sends_async`의 다중 Send 분기는 현재 코루틴을 구동하는 실행자에서 분기를 디스패치한다. 동기 `run()`의 경우 단일 스레드 io_context — I/O-바운드 분기는 co_await 일시 중단을 통해 여전히 중첩되지만, CPU-바운드 분기는 직렬화된다.
-
-```cpp
-EngineConfig engine_config;
-engine_config.node_context = ctx;
-engine_config.checkpoint_store = store;
-engine_config.worker_count = std::thread::hardware_concurrency();
-auto engine = GraphEngine::build(def, std::move(engine_config));
-// Now run_parallel_async dispatches branches to an engine-owned
-// asio::thread_pool of that size.
-```
-
-가능하면 생성 전에 설정할 것. 호환성 설정자는 동시 `run()`이 있기 전에 호출해야 함; 실행 중인 실행을 가로지르며 풀을 다시 빌드하는 것은 안전하지 않다. 다중 스레드 `asio::thread_pool`을 직접 구동하는 `run_async` 호출자는 이것이 필요하지 않다 — 그들의 호출자 측 실행자가 이미 분기를 병렬화한다.
-
-### 8.3 `neograph::async::run_sync_pool(aw, n_threads)` — N-작업자 동기 브리지
-
-```cpp
-#include <neograph/async/run_sync.h>
-
-int result = neograph::async::run_sync_pool(
-    my_coroutine_that_uses_make_parallel_group(), /*n_threads=*/4);
-```
-
-기존 단일 스레드 `run_sync`의 동반자. 호출을 위해 새로운 `asio::thread_pool`을 생성하여 내부 `make_parallel_group` 분기가 별도 작업자에서 실행되도록 한다. 호출당 풀 생성은 작업자당 하나의 `std::thread`를 생성 — 핫 경로에서는 비용이 무시할 수 없으므로, 요청당 코드가 아니라 가끔 경계에서의 동기 브리지 용도.
-
-### 8.4 제거된 표면
-
-- `NodeExecutor::run_one` / `run_parallel` / `run_sends` (동기) — `_async` 짝을 사용.
-- `GraphEngine::execute_graph` (동기) — 삭제; `run()` / `run_stream()` / `resume()`은 `run_sync`를 통해 비동기 짝을 경유.
-- `tf::Executor`, `tf::Taskflow`, `deps/taskflow/` 디렉터리 — 제거. Taskflow를 호출자 측 드라이버로 사용하던 벤치마크 (`bench_concurrent_neograph.cpp`)는 `asio::thread_pool` + `asio::post`로 전환.
-
----
-
-## 9. 재정의 결정 안내
-
-공개 계약은 소유 typed 준비/dispatch이며 동기·비동기 가상 completion 쌍이 아니다. `ProviderRequest.payload`는 Chat, Messages, Responses, Gemini, Interactions의 SDK 요청 variant이다. `ProviderMode::Collect` / `Stream`은 관측자 유무와 독립적으로 전송을 선택한다. `on_event`는 빌린 typed `sp::Event` view를 받는다. 콜백 이후 필요한 데이터만 복사한다. raw JSON override나 portable projection을 통한 native 권한 가져오기는 허용되지 않는다.
-
-### 9.1 2분 버전
-
-| 작성 대상… | 재정의 | 그대로 상속 |
-|---|---|---|
-| 모든 사용자 정의 `GraphNode` | `run(NodeInput)` | `get_name()`만 다른 필수 가상 함수 |
-| Provider | `get_name()`, `family()`, `prepare(ProviderRequest)` | `invoke(_async)`, `dispatch(_async)` |
-| 사용자 정의 `CheckpointStore`, 비동기 가능 백엔드 | 8개 모두 `*_async` 짝 | 동기 짝은 `run_sync`로 연결 |
-| 사용자 정의 `CheckpointStore`, 동기 전용 백엔드 | 8개 모두 동기 짝 | 비동기 짝은 `run_sync`로 연결 |
-| 사용자 정의 동기 `Tool` | `Tool` 상속, `execute()` 재정의 | — |
-| 사용자 정의 비동기 `Tool` | `AsyncTool` 상속, `execute_async()` 재정의 | 동기 `execute()`는 `final`, 연결 |
-
-### 9.2 `GraphNode`
-
-항상 `run(NodeInput)`을 재정의. CPU 전용 작업은 `co_return` 전에 직접 실행 가능; 실제 비동기 I/O는 `co_await`할 것. 엔진은 `run`, `run_async`, 스트리밍, 재개, Send 팬아웃에서 동일한 메서드를 호출하므로, 재정의 선택 행렬도 없고 동기/비동기 대체 재귀도 없다.
-
-공유 단일 스레드 `io_context`를 오랫동안 막지 말 것. 블로킹 작업을 실행자로 이동하거나 코루틴 친화적 I/O를 사용. `EngineConfig::worker_count`는 병렬 팬아웃이 필요한 동기 호출자가 사용하는 엔진 소유 풀을 제어.
-
-### 9.3 `Provider`
-
-공개 계약은 소유 typed 준비/dispatch이며 동기·비동기 가상 completion 쌍이 아니다. `ProviderRequest.payload`는 Chat, Messages, Responses, Gemini, Interactions의 SDK 요청 variant이다. `ProviderMode::Collect` / `Stream`은 관측자 유무와 독립적으로 전송을 선택한다. `on_event`는 빌린 typed `sp::Event` view를 받는다. 콜백 이후 필요한 데이터만 복사한다. raw JSON override나 portable projection을 통한 native 권한 가져오기는 허용되지 않는다.
-
-`prepare()`는 검증·인코딩을 정확히 한 번 수행하고 원래 deadline과 취소 상태를 가진 이동 전용 `PreparedProviderRequest`를 만든다. 영속 호출자는 `Provider::request_digest()`를 assembly에 바인딩하고 승인된 예산 claim을 예약하며 dispatch receipt를 기록한 다음 같은 핸들을 `ControlledProvider::dispatch_prepared(_async)`로 소비한다. gate 이후 요청을 재생성하지 않는다. 중복 receipt는 재전송하지 않는다. 사용자 공급자는 `get_name()`, `family()`, `prepare()`를 구현하고 `prepare_runtime()` 또는 `prepare_local()`을 사용한다. local callback은 `this` 대신 소유 shared 상태를 캡처한다.
-
-선택적 `ProviderControls`는 호출자 선택이며 강제 기본값이나 몰래 clamp한 cap이 아니다. family가 지원하지 않는 제어는 dispatch 전에 거부한다. 유한 예산 호출에는 승인된 실제 모델 input/output 한계가 필요하며 없으면 `LimitUnknown`으로 실패한다. 예약은 보수적인 지출 권한이지 보고 사용량·예측·청구서가 아니다. 미상/부분/delivery-unknown 결과는 hold를 유지하고 실제 최종 보고로 정산하며 초과 보고도 전부 청구한다. 재시도는 단일 명시적 계층이며 기본 off, 유한 window와 unknown-prior hold를 사용한다. 숨은 재전송은 없다.
-
-
-공급자 호출은 `sp::runtime::Result`, 즉 `sp::Completion` 또는 `sp::Failure`를 담은 불변 소유 `std::shared_ptr<const sp::Outcome>`를 반환한다. 표시 텍스트만이 아니라 전체 결과를 보존한다. 순서 있는 메시지/파트, native continuation, 전체 wire envelope, 순서 있는 raw 관측, 중단 근거와 실제 시도 메타데이터는 호출 및 클라이언트 소멸 후에도 남는다. 사용량은 근거·단계·품질을 갖는 nullable `uint64_t`이며 누락은 0이 아니라 미상이다. 실패도 원래의 부분 결과를 보존한다. `ProviderFailure::outcome()`과 `ProviderObserverError::outcome()`은 실제 결과를 보존하며 후자의 `cause()`에는 관측자 예외가 남는다.
-
-실제 결과 이후 post-effect 정산이나 terminal receipt 영속화가 실패하면 `ProviderDispatchOutcomePersistenceError`의 `outcome()`은 원래 불변 결과를, `cause()`는 원래 영속 예외를 보존한다. 전달도 실패했으면 `delivery_error()`가 원래 관측자 예외를 보존한다. 영속화 성공 뒤 관측자 실패는 원래 예외를 그대로 다시 던진다. 미상/결과 없는 transport 실패는 결과를 조작하지 않는다.
-### 9.4 `CheckpointStore`
-
-8개 동기 메서드, 8개 비동기 짝, 1:1 일치. 배포된 저장소 (`InMemoryCheckpointStore`, `SqliteCheckpointStore`, `PostgresCheckpointStore`)는 모두 비동기 측을 구현하고 동기 연결은 기본 클래스 기본값을 통해.
-
-- **비동기 가능 백엔드** (libpq 비차단, 비동기 MongoDB 드라이버 등): 8개 `*_async` 짝을 모두 재정의. 동기 호출 경로는 호출당 하나의 `run_sync` 비용 — `get_state` / `update_state` 관리 호출에는 괜찮지만 핫 루프에서는 안 됨(하지만 엔진은 동기 체크포인트 메서드를 절대 호출하지 않음; 사용자 도구만 함).
-- **블로킹 전용 백엔드** (오래된 파일 I/O, 일부 ODBC 래퍼): 8개 동기 메서드 재정의. 비동기 호출자는 각 호출에서 `run_sync`를 통해 코루틴 스레드를 블록하며, 이는 체크포인트 쓰기가 노드 디스패치에 비해 드물기 때문에 일반적으로 허용됨.
-- **섞지 말 것**: `save()`를 재정의하고 `save_async()`를 기본값으로 두면, 비동기 짝이 기본 클래스 기본값을 통해 다시 동기로 연결 — 정확하지만 비동기 I/O 이점을 잃음. 인터페이스당 전부 동기 또는 전부 비동기로 갈 것.
-
-### 9.5 `MCPClient`
-
-`rpc_call_async()`가 실제 구현; `rpc_call()`은 얇은 `run_sync(rpc_call_async(...))` 파사드. **사용자 확장 불가** — `MCPClient`는 상속되도록 설계되지 않았으며, 그대로 사용. 사용자 정의 MCP 전송이 필요하면 새 클래스를 작성; 상속하지 말 것.
-
-HTTP 요청은 정상적으로 중첩된다. stdio 쓰기는 짧은 쓰기 잠금 아래 JSON 줄을 완성하고, 단일 리더가 JSON-RPC id로 순서가 다른 응답을 연관 짓는다. 따라서 stdio 호출도 서브프로세스가 요청을 동시에 처리할 때 중첩된다; 직렬 서브프로세스는 처리량 하한으로 남는다.
-
-### 9.6 `Tool` vs `AsyncTool`
-
-설계상 비대칭. 클래스 선언 시 하나를 선택:
-
-```cpp
-class MyCpuTool : public Tool {
-  public:
-    std::string execute(const json& args) override { /* sync */ }
-    ChatTool get_definition() const override { /* ... */ }
-    std::string get_name() const override { return "cpu-tool"; }
-};
-
-class MyHttpTool : public AsyncTool {
-  public:
-    asio::awaitable<std::string> execute_async(const json& args) override {
-        auto ex = co_await asio::this_coro::executor;
-        auto r = co_await neograph::async::async_post(ex, /* ... */);
-        co_return r.body;
-    }
-    // sync execute() is final and routes through run_sync automatically.
-    ChatTool get_definition() const override { /* ... */ }
-    std::string get_name() const override { return "http-tool"; }
-};
-```
-
-둘 다 상속하거나 한 클래스의 양쪽 표면을 모두 재정의하려고 하지 **말 것** — `AsyncTool::execute`는 정확히 그것을 방지하기 위해 `final`이다.
+원래 Stage 3 가이드는 당시 sync 경로의 기존 test 276+, engine seq ~30 µs/par ~205 µs, HTTP async_pool 17834 ops/s(Stage 2 async 8401/s, sync 6064/s), timer 50000개 fan-out 541K ops/s·RSS 67 MB를 기록했다. 또한 50 ms agent 세 개의 완료 50 ms, researcher 세 개의 완료 150 ms(직렬 370 ms)를 기록했다. 이는 당시 작업의 역사적 관측이며 현재 provider 전환 결과가 아니다.

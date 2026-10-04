@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ja source_sha256=59193d3d0f34fd9e49284edb43ce62f5ec0352c27fdcfce47bf1dceec7f9454a -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ja source_sha256=9b872c2d049d049aa2c5e7393b485bc79c3b89a5268878b1fff5a263c347208f -->
 # 厳密なランタイムインター ポジション
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
 
-NeoGraphの厳密なランタイムパスは、必須コンテキスト、ライフサイクルHooks、およびプロバイダーディスパッチの証跡をモデルの裁量から排除する。これは追加的なものである。従来の直接プロバイダー呼び出しは信頼された埋め込みのために依然として存在する一方、`StrictRuntimeProfile`が厳密なパスに必要な依存関係をアセンブルする。
+NeoGraph の厳密なランタイムパスは、必須コンテキスト、ライフサイクル Hook、provider dispatch の証拠をモデルの裁量から分離します。信頼された埋め込みでは直接 typed provider 呼び出しを使え、`StrictRuntimeProfile` は厳密なパスの依存関係を組み立てます。
 
 ## 保証の境界
 
@@ -44,7 +44,51 @@ durable RAW history + admitted artifacts + required Skills/constraints
 1. `ProviderDispatchReceipt`はディスパッチ前に書き込まれる。
 2. `ProviderDispatchOutcomeReceipt`は試行後に`Succeeded`、`Failed`、または`ReconciliationRequired`を記録します。
 
-成功した結果は正規化された完了のダイジェストをバインドします。ディスパッチ後の例外はリモートプロバイダーが動作したかどうかを証明できないため、コントローラーはリトライではなく`ReconciliationRequired`を記録します。SQLiteスキーマv3は結果を別々に保存し、各結果が再起動後も許可されたディスパッチ受領書を正確にバインドしていることを検証します。
+成功した結果は SDK outcome 全体の観測の digest を結び付けます。未送信が立証された typed Failure は `Failed`、不確実な配信は `ReconciliationRequired` を記録します。dispatch 後の例外だけではリモート provider の実行を判断できないため、暗黙に再試行しません。SQLite schema v3 は terminal receipt を別に保存し、再起動後に正確な admitted dispatch binding を検査します。Receipt digest は証拠であり、native continuation custody や実行可能な保存 outcome ではありません。
+
+コントローラーは `ProviderRequest` を受け取り、不変の所有 `sp::runtime::Result` を返して、順序付き message/part と部分失敗の証拠を保持します。実際の結果の後で精算や receipt 永続化に失敗すると、`ProviderDispatchOutcomePersistenceError` は結果と元の cause を保持し、二次的 observer 失敗は `delivery_error()` に残ります。Token charge/reservation は nullable provider 使用量 report と別です。
+
+## Program Core provider 呼び出し（独立した Strict Runtime とは別）
+
+Program が組み込み Core LLM node を使う場合、ホストは
+`RuntimeConfig::core_provider_call_resolver` と
+`require_core_provider_call_broker = true` を設定できます。正確な
+`ProgramCoreProviderCallContext` ごとに
+`SQLiteProgramProviderCallJournal::bind(context, deployment_identity)` を返します。
+ヘッダーは `<neograph/program/sqlite_provider_call_broker.h>`、リンク対象は
+`neograph::program_sqlite` です。Deployment identity は実際の provider route、
+model deployment、credential version を含む権限のホスト所有 SHA-256 identity
+です。Broker はこれを `Provider` から推測しません。再起動/reconnect では
+同じ durable database を再び結び付けます。
+
+Journal のキーは owner、不変 Program version、run、operation、Core
+thread/task/node、組み込み call ordinal です。Request 内容や Program attempt
+はキーではありません。転送前に SQLite FULL 同期で marker を commit します。
+Marker は転送が起きた可能性を示し、provider 受信や exactly-once 効果を
+証明しません。SDK Completion/Failure outcome 全体を不変のまま encoding
+version 2 で保存し、正確に結び付けた replay に使います。未送信が立証された
+Failure は `Failed`、不確実な配信・例外・精算前の crash は reconciliation が
+必要で、暗黙に再dispatchしません。状態は
+`inspect(owner, logical_call_id(context, core_identity))` で確認します。
+`reconcile_success` は独立に確認した provider-side 証拠と完全な Completion
+outcome がある場合のみ使います。Streaming replay は captured outcome を返し、
+stream event を作りません。
+
+増やした output cap は新しい semantic call であり、同じ journal slot の transport retry や replay ではありません。Interface 4 は native replay configuration だけから cap を除き、prepared-request digest と保守的 resource claim には残します。承認する各 call に固有の決定的 ordinal を与え、全 attempt の outcome/accounting と元の deadline を保ち、同じ resource bank から admission を得ます。既存 slot の digest 変更は拒否されます。Native history や cursor は credit を更新せず、uncertain delivery や observer/settlement 失敗後の再送も許可しません。
+
+順序付き message part、raw 観測、nullable 使用量、attempt metadata、
+native continuation は保存結果に残ります。Native outcome には
+`SQLiteProgramProviderCallJournal(database_path, native_archive)` に渡した
+ホストの `sp::NativeArchive` が必要です。Portable JSON projection はその権限を
+再作成できません。旧 lossy receipt は upgrade や暗黙の再dispatchではなく
+拒否します。Journal は保守的 claim/committed token 量を provider report と
+分けて保持します。Durable filesystem database path を使ってください。
+空の path、`:memory:`、`file:` URI は拒否されます。
+
+この broker は assembled `ContextEpoch` ではなく Core の既存 ReAct message
+state を使います。同じ組み込み呼び出しで engine Strict Runtime interposition
+と併用できません。ホストが書いた native Provider 呼び出しは範囲外です。
+
 
 ## 必須Hooks（native、stdio、またはHTTP）
 

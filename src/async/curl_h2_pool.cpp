@@ -22,10 +22,9 @@
 #include <stdexcept>
 
 #ifndef NEOGRAPH_HAVE_LIBCURL
-// Stub implementation when the libcurl backend is disabled at build
-// time. Keeps the destructor symbol available for SchemaProvider's
-// unique_ptr<CurlH2Pool> member; constructor + async_post throw the
-// same way the runtime would on a misconfigured prefer_libcurl=true.
+// Keep the optional NeoGraph transport's destructor symbol available when
+// its libcurl backend is disabled. Construction and async_post reject use
+// of this unavailable backend; SchemaProvider owns a separate SDK runtime.
 namespace neograph::async {
 struct CurlH2Pool::Impl {};
 CurlH2Pool::CurlH2Pool() : impl_(nullptr) {

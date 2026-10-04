@@ -1,172 +1,145 @@
-"""Helpers shared across the example scripts.
+"""Shared configuration and text-only calls for the Python examples.
 
-Specifically: load .env from the script's directory tree, build a
-configured OpenAIProvider / SchemaProvider, and gracefully skip when
-no API key is set so CI / read-only checkouts don't crash.
-
-Usage::
-
-    from _common import openai_provider
-    provider = openai_provider()  # exits cleanly if no key
+SchemaProvider loads a closed descriptor before constructing a runtime. Set
+OPENAI_API_BASE to a faithful local protocol peer to exercise these examples
+without a hosted key; HTTPS peers also need NG_EXAMPLE_CA_FILE when their CA
+is not in the system trust store. Hosted endpoints require OPENAI_API_KEY.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import urllib.parse
 from pathlib import Path
 
 import neograph_engine as ng
-from neograph_engine.llm import OpenAIProvider, SchemaProvider
-
-try:
-    from dotenv import load_dotenv
-except ImportError:  # pragma: no cover
-    print("python-dotenv is required to run the LLM examples:")
-    print("    pip install python-dotenv")
-    print("(or `pip install neograph-engine[examples]` once that extra ships)")
-    sys.exit(1)
+from neograph_engine.llm import SchemaProvider
 
 
 def _load_env() -> None:
-    """Load .env from the cwd or any parent — same lookup the C++
-    examples use via cppdotenv.
-    """
-    # Walk parents so running the example from anywhere finds the
-    # .env in bindings/python/examples (or repo root).
-    here = Path(__file__).resolve()
-    for parent in [here.parent, *here.parents]:
+    """Optionally load the nearest example/repository .env without overriding exports."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    here = Path(__file__).resolve().parent
+    for parent in (here, *here.parents):
         candidate = parent / ".env"
         if candidate.is_file():
-            load_dotenv(candidate)
+            load_dotenv(candidate, override=False)
             return
-    # No .env found — that's fine, env-vars set by the user still win.
-    load_dotenv()
 
 
-def _configure_console() -> None:
-    """Keep model responses printable on Windows' legacy console codecs."""
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is not None:
-            reconfigure(encoding="utf-8", errors="replace")
-
-
-_configure_console()
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 _load_env()
 
 
-def _require_key() -> str:
-    key = os.getenv("OPENAI_API_KEY")
-    if not key:
-        print("OPENAI_API_KEY not set in environment or .env file.")
-        print("Skipping the live LLM call.")
-        print("  echo 'OPENAI_API_KEY=sk-...' > .env")
-        sys.exit(0)
-    return key
+def schema_provider(schema: str = "openai", *, http_version=None):
+    """Construct the Chat or Responses runtime from an admitted descriptor.
 
-
-def openai_provider(default_model: str = "gpt-5.6-luna") -> OpenAIProvider:
-    """OpenAI-compatible HTTP provider configured from the env.
-
-    Honours:
-      OPENAI_API_KEY   — required.
-      OPENAI_API_BASE  — default https://api.openai.com.
-      OPENAI_MODEL     — default `default_model`.
+    OPENAI_API_BASE is an origin (or gateway prefix), not a complete route.
+    NG_PROVIDER_DESCRIPTOR can name a complete descriptor instead, including
+    provider-specific admitted headers. No arbitrary request fields are added.
     """
-    return OpenAIProvider(
-        api_key=_require_key(),
-        base_url=os.getenv("OPENAI_API_BASE", "https://api.openai.com"),
-        default_model=os.getenv("OPENAI_MODEL", default_model),
+    descriptor_file = os.getenv("NG_PROVIDER_DESCRIPTOR")
+    if descriptor_file:
+        source = Path(descriptor_file).read_text(encoding="utf-8")
+        document = json.loads(source)
+    else:
+        family = {"openai": "openai.chat", "openai_responses": "openai.responses"}[schema]
+        responses = family == "openai.responses"
+        endpoint = urllib.parse.urlsplit(os.getenv("OPENAI_API_BASE", "https://api.openai.com"))
+        origin = urllib.parse.urlunsplit((endpoint.scheme, endpoint.netloc, "", "", ""))
+        prefix = endpoint.path.rstrip("/")
+        route = "/v1/responses" if responses else "/v1/chat/completions"
+        route = prefix + route
+        document = {
+            "descriptor_version": 1,
+            "revision": 1,
+            "id": "python-example-responses" if responses else "python-example-chat",
+            "family": family,
+            "connection": {
+                "base_url": origin,
+                "paths": {"buffered": route, "streaming": route},
+            },
+            "bindings": {
+                "model": "model", "messages": "input" if responses else "messages",
+                "stream": "stream",
+                "max_output_tokens": "max_output_tokens" if responses else "max_tokens",
+                "usage": ["usage"],
+            },
+            "stop_reasons": ({"completed": "EndTurn", "max_output_tokens": "MaxTokens",
+                              "content_filter": "ContentFilter"}
+                             if responses else {"stop": "EndTurn", "length": "MaxTokens",
+                                                "tool_calls": "ToolUse",
+                                                "content_filter": "ContentFilter"}),
+        }
+        source = json.dumps(document)
+    hostname = urllib.parse.urlsplit(document["connection"]["base_url"]).hostname
+    key = os.getenv("OPENAI_API_KEY", "")
+    if hostname not in {"localhost", "127.0.0.1", "::1"} and not key:
+        raise SystemExit("Hosted examples require OPENAI_API_KEY. For no-key verification, "
+                         "set OPENAI_API_BASE to a local Chat/Responses protocol peer.")
+    options = ng.ProviderRuntimeOptions(
+        api_key=key,
+        ca_file=os.getenv("NG_EXAMPLE_CA_FILE", ""),
+        default_timeout_ms=int(os.getenv("NG_EXAMPLE_TIMEOUT_SECONDS", "180")) * 1000,
     )
+    if http_version is not None:
+        options.http_version = http_version
+    return SchemaProvider(ng.load_provider_descriptor(source), options=options)
 
 
-def schema_provider(
-    schema: str = "openai_responses",
-    default_model: str = "gpt-5.6-luna",
-    *,
-    use_websocket: bool = False,
-    prefer_libcurl: bool | None = None,
-) -> SchemaProvider:
-    """Schema-driven provider — the right pick for OpenAI Responses
-    or vendor-specific shapes (Claude, Gemini).
-
-    Honours `OPENAI_API_BASE` for routing to OpenAI-compatible endpoints
-    (Groq, vLLM, llama.cpp server, etc.). The schema's
-    `connection.base_url` is used when the env var is empty.
-    """
-    if prefer_libcurl is None:
-        prefer_libcurl = os.getenv("NG_PREFER_LIBCURL", "0") == "1"
-    return SchemaProvider(
-        schema_path=schema,
-        api_key=_require_key(),
-        default_model=os.getenv("OPENAI_MODEL", default_model),
-        base_url_override=os.getenv("OPENAI_API_BASE", ""),
-        use_websocket=use_websocket,
-        prefer_libcurl=prefer_libcurl,
-    )
+def example_model() -> str:
+    """Keep the explicit request/llm_call model selection in one place."""
+    return os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 
 
-def responses_transport() -> str:
-    """Select ``websocket``, ``http2``, or ``http1`` for Responses demos.
-
-    Official OpenAI defaults to WebSocket. OpenAI-compatible gateways default
-    to HTTP/2 because many implement ``POST /v1/responses`` but not the
-    WebSocket upgrade. Set ``NG_RESPONSES_TRANSPORT`` to override the choice.
-    """
-    explicit = os.getenv("NG_RESPONSES_TRANSPORT", "").strip().lower()
-    if explicit:
-        if explicit not in {"websocket", "http2", "http1"}:
-            raise ValueError(
-                "NG_RESPONSES_TRANSPORT must be websocket, http2, or http1")
-        return explicit
-
-    base_url = os.getenv("OPENAI_API_BASE", "").strip()
-    if not base_url:
-        return "websocket"
-    hostname = (urllib.parse.urlsplit(base_url).hostname or "").lower()
-    if hostname == "api.openai.com":
-        return "websocket"
-    return "http2" if getattr(ng, "_HAVE_LIBCURL", False) else "http1"
-
-
-def complete_responses(provider, params, transport: str):
-    """Run one bounded Responses call over the selected demo transport."""
-    if params.timeout_seconds <= 0:
-        params.timeout_seconds = int(
-            os.getenv("NG_EXAMPLE_TIMEOUT_SECONDS", "180"))
-    if params.max_tokens <= 0:
-        params.max_tokens = int(os.getenv("NG_EXAMPLE_MAX_TOKENS", "1600"))
-
-    def invoke():
-        if transport == "websocket":
-            return provider.complete_stream(params, lambda _chunk: None)
-        return provider.complete(params)
-
-    result = invoke()
-    if result.message.content.strip() or result.message.tool_calls:
-        return result
-
-    # Reasoning models can spend the entire first allowance internally and
-    # return a successful but empty assistant message. One larger retry makes
-    # the interactive examples useful while keeping their first call bounded.
-    params.max_tokens = max(
-        params.max_tokens,
-        int(os.getenv("NG_EXAMPLE_RETRY_MAX_TOKENS", "4096")),
-    )
-    params.timeout_seconds = max(params.timeout_seconds, 300)
-    result = invoke()
-    if not result.message.content.strip() and not result.message.tool_calls:
-        raise RuntimeError(
-            "Responses API returned an empty assistant message after retry")
+def provider_messages(messages):
+    """Translate text-only graph messages; rich provider parts stay typed."""
+    roles = {"system": ng.ProviderRole.System, "developer": ng.ProviderRole.Developer,
+             "user": ng.ProviderRole.User, "assistant": ng.ProviderRole.Assistant,
+             "tool": ng.ProviderRole.Tool}
+    result = []
+    for message in messages:
+        if isinstance(message, ng.ProviderMessage):
+            result.append(message)
+            continue
+        role = message.get("role") if isinstance(message, dict) else message.role
+        content = message.get("content", "") if isinstance(message, dict) else message.content
+        if not isinstance(content, str):
+            raise TypeError("ask_text accepts text messages; pass rich ProviderMessage parts explicitly")
+        result.append(ng.ProviderMessage(role=roles[role], parts=[ng.Text(content)]))
     return result
 
 
-__all__ = [
-    "ng",
-    "complete_responses",
-    "openai_provider",
-    "responses_transport",
-    "schema_provider",
-]
+def ask_text(provider, messages, *, temperature=None, max_output_tokens=None, model=None):
+    """Invoke the typed provider and extract visible text, without inventing outcomes.
+
+    These custom-node demos use only text. Tool-enabled graphs use llm_call,
+    which keeps the complete provider messages/outcomes in the run evidence.
+    """
+    controls = ng.ProviderControls()
+    if temperature is not None:
+        controls.temperature = temperature
+    controls.max_output_tokens = (max_output_tokens if max_output_tokens is not None
+                                  else int(os.getenv("NG_EXAMPLE_MAX_TOKENS", "1600")))
+    request = ng.make_provider_request(
+        provider, model if model is not None else example_model(),
+        provider_messages(messages), controls=controls,
+    )
+    outcome = provider.invoke(request)
+    if outcome.failure is not None:
+        raise RuntimeError(f"Provider request failed: {outcome.failure.error.safe_message}")
+    completion = outcome.completion
+    if completion is None:
+        raise RuntimeError("Provider returned neither a completion nor a failure")
+    text = "".join(part.value for message in completion.messages
+                   for part in message.parts if isinstance(part, ng.Text))
+    if not text.strip():
+        raise RuntimeError("Provider completion contains no visible text; inspect typed outcome parts")
+    return text

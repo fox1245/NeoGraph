@@ -1,582 +1,336 @@
-// Provider / Tool / completion-types bindings.
-//
-// Commit 1 surface (this file):
-//   - neograph.Provider          — abstract holder, no Python subclass yet.
-//   - neograph.Tool              — opaque holder. Trampoline ships in commit 2.
-//   - neograph.CompletionParams  — plain data class, sync provider input.
-//   - neograph.ChatMessage       — plain data class, conversation message.
-//   - neograph.ToolCall          — plain data class, LLM-issued tool call.
-//   - neograph.ChatTool          — plain data class, tool definition.
-//   - neograph.ChatCompletion    — plain data class, sync provider output.
-//   - neograph.OpenAIProvider    — concrete OpenAI-compatible provider.
-//   - neograph.SchemaProvider    — concrete schema-driven multi-vendor.
-//
-// Async (`Provider.complete_async`) is intentionally not exposed here.
-// Sync `complete()` is enough for commit 1 and the awaitable surface
-// would require an asio<->asyncio bridge; deferred to a later commit.
-
+// Provider admission, dispatch and immutable outcome bindings. Python subclasses
+// may delegate preparation but cannot manufacture native replay authority.
 #include "json_bridge.h"
 #include "opaque_types.h"
-
-#include <neograph/provider.h>
+#include "provider_bridge.h"
 #include <neograph/tool.h>
-#include <neograph/types.h>
-
+#include <neograph/graph/cancel.h>
 #include <pybind11/functional.h>
-#include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-
-#include <memory>
-#include <string>
-#include <thread>
-
+#include <chrono>
 #ifdef NEOGRAPH_PYBIND_HAS_LLM
-#include <neograph/llm/openai_provider.h>
-#include <neograph/llm/rate_limited_provider.h>
 #include <neograph/llm/schema_provider.h>
 #endif
-
 namespace py = pybind11;
-
 namespace neograph::pybind {
-
 namespace {
-
-// pybind11 trampoline so Python classes can subclass neograph.Provider
-// and have their `complete()` / `get_name()` overrides called from
-// graph nodes (LLMCallNode, etc.). The C++ engine sees a Provider*;
-// its virtual dispatch resolves to PyProvider, which then bounces
-// into the Python override under the GIL.
-//
-// Streaming fallback: if the Python subclass doesn't override
-// `complete_stream`, we just call `complete()` and emit the whole
-// content as a single chunk. That lets a non-streaming Python wrapper
-// still work in graphs that requested stream mode.
-// A Python provider that hits a 429 raises `ng.RateLimitError`. That is a
-// Python exception, and RateLimitedProvider catches the C++ one — so without a
-// translation the wrapper would sail past it and never retry, silently. Same
-// shape as the NodeInterrupt translation in bind_node.cpp (issue #94), and the
-// same reason: a capability that exists in C++ and quietly does nothing in
-// Python is worse than one that is plainly absent.
-//
-// Narrow on purpose. Only RateLimitError converts; every other exception stays
-// an error.
-void rethrow_python_rate_limit_error(py::error_already_set& e) {
-    // The GIL guard inside PYBIND11_OVERRIDE is scoped to the macro's block, so
-    // by the time the error_already_set reaches the catch it may already be
-    // released. Everything below touches CPython.
-    py::gil_scoped_acquire gil;
-
-    py::object type;
-    try {
-        type = py::module_::import("neograph_engine").attr("RateLimitError");
-    } catch (const py::error_already_set&) {
-        return;   // module half-initialised; let the original error stand
-    }
-    if (!e.matches(type)) return;
-
-    py::object exc = e.value();
-    std::string message = py::str(exc).cast<std::string>();
-    int retry_after = -1;
-    if (py::hasattr(exc, "retry_after_seconds")) {
-        py::object v = exc.attr("retry_after_seconds");
-        if (!v.is_none()) retry_after = v.cast<int>();
-    }
-    throw neograph::RateLimitError(message, retry_after);
-}
-
-class PyProvider : public neograph::Provider {
-  public:
-    using neograph::Provider::Provider;
-
-    neograph::ChatCompletion
-    complete(const neograph::CompletionParams& params) override {
-        try {
-            PYBIND11_OVERRIDE(neograph::ChatCompletion,
-                              neograph::Provider, complete, params);
-        } catch (py::error_already_set& e) {
-            rethrow_python_rate_limit_error(e);   // no-op unless it matches
-            throw;
-        }
-    }
-
-    neograph::ChatCompletion
-    complete_stream(const neograph::CompletionParams& params,
-                    const neograph::StreamCallback& on_chunk) override {
-        // If the Python subclass overrode this, dispatch. Otherwise
-        // synthesise a one-chunk stream from `complete()` so callers
-        // that asked for streaming still see the content via the
-        // callback — no ABCMeta flailing required of the user.
-        py::gil_scoped_acquire gil;
-        py::function override =
-            py::get_override(static_cast<const neograph::Provider*>(this),
-                             "complete_stream");
-        if (override) {
-            // Own a callback copy so a Python override may retain the
-            // callable without dangling after this virtual call returns.
-            auto py_on_chunk = py::cpp_function([on_chunk](const std::string& tok) {
-                if (on_chunk) on_chunk(tok);
-            });
-            auto r = override(params, py_on_chunk);
-            return r.cast<neograph::ChatCompletion>();
-        }
-        // Fallback: complete() + single chunk.
-        auto result = complete(params);
-        if (on_chunk && !result.message.content.empty()) {
-            on_chunk(result.message.content);
-        }
-        return result;
-    }
-
+struct DescriptorPolicyView { sp::descriptor::PolicySnapshot value; };
+struct RuntimePolicyView { sp::configuration::PolicySnapshot value; };
+struct PythonProviderLease {
+    std::shared_ptr<Provider> native;
+    py::object python;
+};
+class PyProvider : public Provider {
+public:
+    explicit PyProvider(std::string family) : family_(std::move(family)) {}
+    std::string_view family() const noexcept override { return family_; }
     std::string get_name() const override {
-        PYBIND11_OVERRIDE_PURE(std::string,
-                               neograph::Provider, get_name,);
+        PYBIND11_OVERRIDE_PURE(std::string, Provider, get_name,);
     }
+    PreparedProviderRequest prepare(ProviderRequest request) override {
+        py::gil_scoped_acquire gil;
+        auto override = py::get_override(static_cast<const Provider*>(this), "prepare");
+        if (!override) py::pybind11_fail("Provider.prepare must be overridden");
+        auto handle = override(std::move(request)).cast<std::shared_ptr<PreparedHandle>>();
+        if (!handle) throw py::type_error("Provider.prepare must return an authentic PreparedProviderRequest");
+        return handle->take();
+    }
+private:
+    const std::string family_;
 };
-
-class CallbackThreadProvider : public neograph::Provider {
-  public:
-    neograph::ChatCompletion
-    complete(const neograph::CompletionParams&) override {
-        return make_completion();
-    }
-
-    neograph::ChatCompletion
-    complete_stream(const neograph::CompletionParams&,
-                    const neograph::StreamCallback& on_chunk) override {
-        std::thread worker([this, callback = on_chunk]() mutable {
-            worker_started_without_gil_ = PyGILState_Check() == 0;
-            auto retained = callback;
-            callback("one");
-            retained("-");
-            callback("two");
-            retained = {};
-            callback = {};
-            worker_finished_without_gil_ = PyGILState_Check() == 0;
-        });
-        worker.join();
-        return make_completion();
-    }
-
-    std::string get_name() const override { return "callback-thread-test"; }
-    bool worker_started_without_gil() const {
-        return worker_started_without_gil_;
-    }
-    bool worker_finished_without_gil() const {
-        return worker_finished_without_gil_;
-    }
-
-  private:
-    static neograph::ChatCompletion make_completion() {
-        neograph::ChatCompletion result;
-        result.message.role = "assistant";
-        result.message.content = "one-two";
-        return result;
-    }
-
-    bool worker_started_without_gil_ = false;
-    bool worker_finished_without_gil_ = false;
-};
-
-}  // namespace
-
-void init_provider(py::module_& m) {
-    // ── ToolCall ─────────────────────────────────────────────────────────
-    py::class_<neograph::ToolCall>(m, "ToolCall",
-        "A single tool invocation requested by the LLM.")
-        .def(py::init<>())
-        .def(py::init([](const std::string& id,
-                         const std::string& name,
-                         const std::string& arguments) {
-            return neograph::ToolCall{id, name, arguments};
-        }), py::arg("id") = "", py::arg("name") = "", py::arg("arguments") = "")
-        .def_readwrite("id",        &neograph::ToolCall::id)
-        .def_readwrite("name",      &neograph::ToolCall::name)
-        .def_readwrite("arguments", &neograph::ToolCall::arguments)
-        .def("__repr__", [](const neograph::ToolCall& tc) {
-            return "<ToolCall id=" + tc.id + " name=" + tc.name + ">";
-        });
-
-    // ── ChatMessage ──────────────────────────────────────────────────────
-    py::class_<neograph::ChatMessage>(m, "ChatMessage",
-        "A message in the conversation history.")
-        .def(py::init<>())
-        .def(py::init([](const std::string& role,
-                         const std::string& content,
-                         std::vector<neograph::ToolCall> tool_calls,
-                         const std::string& tool_call_id,
-                         const std::string& tool_name,
-                         std::vector<std::string> image_urls) {
-            neograph::ChatMessage m;
-            m.role = role;
-            m.content = content;
-            m.tool_calls = std::move(tool_calls);
-            m.tool_call_id = tool_call_id;
-            m.tool_name = tool_name;
-            m.image_urls = std::move(image_urls);
-            return m;
-        }),
-            py::arg("role") = "",
-            py::arg("content") = "",
-            py::arg("tool_calls") = std::vector<neograph::ToolCall>{},
-            py::arg("tool_call_id") = "",
-            py::arg("tool_name") = "",
-            py::arg("image_urls") = std::vector<std::string>{})
-        .def_readwrite("role",         &neograph::ChatMessage::role)
-        .def_readwrite("content",      &neograph::ChatMessage::content)
-        .def_readwrite("tool_calls",   &neograph::ChatMessage::tool_calls)
-        .def_readwrite("tool_call_id", &neograph::ChatMessage::tool_call_id)
-        .def_readwrite("tool_name",    &neograph::ChatMessage::tool_name)
-        .def_readwrite("image_urls",   &neograph::ChatMessage::image_urls)
-        .def("__repr__", [](const neograph::ChatMessage& m) {
-            return "<ChatMessage role=" + m.role + " content=" + m.content + ">";
-        });
-
-    // ── ChatTool (tool *definition* sent to the LLM) ─────────────────────
-    py::class_<neograph::ChatTool>(m, "ChatTool",
-        "Tool definition metadata sent to the LLM.")
-        .def(py::init<>())
-        .def(py::init([](const std::string& name,
-                         const std::string& description,
-                         py::object parameters) {
-            neograph::ChatTool t;
-            t.name = name;
-            t.description = description;
-            t.parameters = py_to_json(parameters);
-            return t;
-        }),
-            py::arg("name") = "",
-            py::arg("description") = "",
-            py::arg("parameters") = py::dict())
-        .def_readwrite("name",        &neograph::ChatTool::name)
-        .def_readwrite("description", &neograph::ChatTool::description)
-        .def_property("parameters",
-            [](const neograph::ChatTool& t) { return json_to_py(t.parameters); },
-            [](neograph::ChatTool& t, py::object v) { t.parameters = py_to_json(v); });
-
-    // ── CompletionParams ─────────────────────────────────────────────────
-    py::class_<neograph::CompletionParams>(m, "CompletionParams",
-        "Parameters for a sync LLM completion request.")
-        .def(py::init<>())
-        .def(py::init([](const std::string& model,
-                         std::vector<neograph::ChatMessage> messages,
-                         std::vector<neograph::ChatTool> tools,
-                         float temperature, int max_tokens,
-                         int timeout_seconds) {
-            neograph::CompletionParams p;
-            p.model = model;
-            p.messages = std::move(messages);
-            p.tools = std::move(tools);
-            p.temperature = temperature;
-            p.max_tokens = max_tokens;
-            p.timeout_seconds = timeout_seconds;
-            return p;
-        }),
-            py::arg("model") = "",
-            py::arg("messages") = std::vector<neograph::ChatMessage>{},
-            py::arg("tools") = std::vector<neograph::ChatTool>{},
-            py::arg("temperature") = 0.7f,
-            py::arg("max_tokens") = -1,
-            py::arg("timeout_seconds") = -1)
-        .def_readwrite("model",       &neograph::CompletionParams::model)
-        .def_readwrite("messages",    &neograph::CompletionParams::messages)
-        .def_readwrite("tools",       &neograph::CompletionParams::tools)
-        .def_readwrite("temperature", &neograph::CompletionParams::temperature)
-        .def_readwrite("max_tokens",  &neograph::CompletionParams::max_tokens)
-        .def_readwrite("timeout_seconds", &neograph::CompletionParams::timeout_seconds)
-        .def_readwrite("prompt", &neograph::CompletionParams::prompt);
-
-    py::class_<neograph::GeneratedArtifact>(m, "GeneratedArtifact",
-        "Generated image/video/file with an encoded payload, URL or file handle.")
-        .def(py::init<>())
-        .def_readwrite("kind", &neograph::GeneratedArtifact::kind)
-        .def_readwrite("mime_type", &neograph::GeneratedArtifact::mime_type)
-        .def_readwrite("base64_data", &neograph::GeneratedArtifact::base64_data)
-        .def_readwrite("url", &neograph::GeneratedArtifact::url)
-        .def_readwrite("file_id", &neograph::GeneratedArtifact::file_id)
-        .def_property("metadata",
-            [](const neograph::GeneratedArtifact& artifact) {
-                return json_to_py(artifact.metadata);
-            },
-            [](neograph::GeneratedArtifact& artifact, py::object value) {
-                artifact.metadata = py_to_json(value);
-            });
-
-    // ── ChatCompletion + Usage ───────────────────────────────────────────
-    py::class_<neograph::ChatCompletion> chat_completion(m, "ChatCompletion",
-        "LLM completion response: message + token usage.");
-    chat_completion
-        .def(py::init<>())
-        .def_readwrite("message", &neograph::ChatCompletion::message)
-        .def_readwrite("stop_reason", &neograph::ChatCompletion::stop_reason)
-        .def_readwrite("artifacts", &neograph::ChatCompletion::artifacts)
-        .def_readwrite("usage",   &neograph::ChatCompletion::usage);
-
-    py::class_<neograph::ChatCompletion::Usage>(chat_completion, "Usage",
-        "Token usage statistics.")
-        .def(py::init<>())
-        .def_readwrite("prompt_tokens",     &neograph::ChatCompletion::Usage::prompt_tokens)
-        .def_readwrite("completion_tokens", &neograph::ChatCompletion::Usage::completion_tokens)
-        .def_readwrite("total_tokens",      &neograph::ChatCompletion::Usage::total_tokens);
-
-    // ── Provider base — Python subclassable via trampoline (v0.2.3+) ─────
-    //
-    // Lets a Python user bring their own LLM client (the official
-    // openai SDK, anthropic SDK, langchain wrapper, etc.) and plug it
-    // into NeoGraph nodes by subclassing `Provider` and implementing
-    // `complete(params)` + `get_name()`. Streaming defaults to a
-    // no-op single-chunk fallback that just calls `complete()` —
-    // override `complete_stream` if your underlying client supports
-    // token streams.
-    py::class_<neograph::Provider, PyProvider,
-               std::shared_ptr<neograph::Provider>>(m, "Provider",
-        "Abstract LLM provider. Subclass and override "
-        "`complete(params: CompletionParams) -> ChatCompletion` and "
-        "`get_name() -> str` to plug your own LLM client (openai SDK, "
-        "anthropic SDK, langchain, etc.) into NeoGraph graphs. "
-        "Construct a concrete subclass directly, e.g. "
-        "neograph_engine.llm.OpenAIProvider, when you want NeoGraph's "
-        "built-in async HTTP path instead.")
-        .def(py::init<>())
-        .def("complete", [](neograph::Provider& self,
-                            const neograph::CompletionParams& p) {
-            // Release the GIL while the provider does network I/O so
-            // other Python threads aren't blocked. The Provider impls
-            // do no Python callbacks of their own.
-            py::gil_scoped_release release;
-            return self.complete(p);
-        }, py::arg("params"))
-        // Convenience overload — accept a bare list of message dicts (or
-        // ChatMessage objects). Skips one CompletionParams + N ChatMessage
-        // round-trips through pybind on every call. Measured against the
-        // typed-CompletionParams path on a 5-parallel burst, this saves
-        // ~250-300ms of Python-side marshalling per burst (the gap
-        // between NG-via-pybind and the C++-direct probe).
-        .def("complete", [](neograph::Provider& self,
-                            const py::sequence& messages,
-                            const std::string& model,
-                            double temperature,
-                            int max_tokens,
-                            const py::sequence& tools) {
-            neograph::CompletionParams p;
-            p.model       = model;
-            p.temperature = temperature;
-            p.max_tokens  = max_tokens;
-            p.messages.reserve(py::len(messages));
-            for (const auto& item : messages) {
-                if (py::isinstance<neograph::ChatMessage>(item)) {
-                    p.messages.push_back(item.cast<neograph::ChatMessage>());
-                    continue;
-                }
-                // Treat anything else as a {"role": ..., "content": ...}
-                // mapping — same shape OpenAI / Anthropic / LangChain use.
-                auto d = item.cast<py::dict>();
-                neograph::ChatMessage m;
-                if (d.contains("role"))    m.role    = d["role"].cast<std::string>();
-                if (d.contains("content")) m.content = d["content"].cast<std::string>();
-                if (d.contains("tool_call_id"))
-                    m.tool_call_id = d["tool_call_id"].cast<std::string>();
-                if (d.contains("tool_name"))
-                    m.tool_name = d["tool_name"].cast<std::string>();
-                p.messages.push_back(std::move(m));
-            }
-            // Tool definitions — accept ChatTool objects or
-            // {name, description, parameters} dicts.
-            p.tools.reserve(py::len(tools));
-            for (const auto& item : tools) {
-                if (py::isinstance<neograph::ChatTool>(item)) {
-                    p.tools.push_back(item.cast<neograph::ChatTool>());
-                    continue;
-                }
-                auto d = item.cast<py::dict>();
-                neograph::ChatTool t;
-                if (d.contains("name"))
-                    t.name = d["name"].cast<std::string>();
-                if (d.contains("description"))
-                    t.description = d["description"].cast<std::string>();
-                if (d.contains("parameters"))
-                    t.parameters = py_to_json(d["parameters"]);
-                p.tools.push_back(std::move(t));
-            }
-            py::gil_scoped_release release;
-            return self.complete(p);
-        },
-            py::arg("messages"),
-            py::arg("model")       = "",
-            py::arg("temperature") = 0.7,
-            py::arg("max_tokens")  = -1,
-            py::arg("tools")       = py::list{})
-        // pybind11 v2.13.6 functional.h wraps Python callables in func_handle,
-        // which acquires the GIL for invocation, copying, and destruction.
-        .def("complete_stream", [](neograph::Provider& self,
-                                    const neograph::CompletionParams& p,
-                                    neograph::StreamCallback callback) {
-            py::gil_scoped_release release;
-            return self.complete_stream(p, callback);
-        }, py::arg("params"), py::arg("on_chunk"))
-        .def("get_name", &neograph::Provider::get_name);
-
-    py::class_<CallbackThreadProvider, neograph::Provider,
-               std::shared_ptr<CallbackThreadProvider>>(
-        m, "_CallbackThreadProvider")
-        .def(py::init<>())
-        .def_property_readonly(
-            "worker_started_without_gil",
-            &CallbackThreadProvider::worker_started_without_gil)
-        .def_property_readonly(
-            "worker_finished_without_gil",
-            &CallbackThreadProvider::worker_finished_without_gil);
-
-    // ── Tool base (opaque, no Python subclass yet) ───────────────────────
-    py::class_<neograph::Tool, std::shared_ptr<neograph::Tool>>(m, "Tool",
-        "Abstract callable tool. Python subclassing arrives in commit 2 "
-        "via a pybind11 trampoline. For now, treat as opaque — only "
-        "C++-side tools (e.g. neograph::mcp::MCPTool) can populate "
-        "NodeContext.tools.");
-
-#ifdef NEOGRAPH_PYBIND_HAS_LLM
-    auto operation_error = py::register_exception<neograph::llm::OperationError>(
-        m, "OperationError");
-    py::register_exception<neograph::llm::OperationTimeoutError>(
-        m, "OperationTimeoutError", operation_error.ptr());
-    // ── OpenAIProvider ───────────────────────────────────────────────────
-    py::class_<neograph::llm::RateLimitedProvider, neograph::Provider,
-               std::shared_ptr<neograph::llm::RateLimitedProvider>>(
-        m, "RateLimitedProvider",
-        "Wrap a provider so a 429 backs off and retries THE CALL — not the "
-        "whole graph.\n\n"
-        "    provider = RateLimitedProvider(OpenAIProvider(...), max_retries=5)\n"
-        "    engine = ng.GraphEngine.compile(defn, ng.NodeContext(provider=provider))\n\n"
-        "Retrying at the graph level, which is what you are left doing without "
-        "this, re-runs every node that already succeeded. This retries the one "
-        "HTTP request that failed.\n\n"
-        "Honours the upstream's Retry-After when it sends one, falls back to "
-        "``default_wait_seconds`` when it does not, caps any single sleep at "
-        "``max_wait_seconds``, and gives up entirely once ``max_total_wait_seconds`` "
-        "of sleeping has accumulated (0 = no total cap).")
-        .def(py::init([](std::shared_ptr<neograph::Provider> inner,
-                         int max_retries, int default_wait_seconds,
-                         int max_wait_seconds, int max_total_wait_seconds) {
-                neograph::llm::RateLimitedProvider::Config cfg;
-                cfg.max_retries            = max_retries;
-                cfg.default_wait_seconds   = default_wait_seconds;
-                cfg.max_wait_seconds       = max_wait_seconds;
-                cfg.max_total_wait_seconds = max_total_wait_seconds;
-                return std::shared_ptr<neograph::llm::RateLimitedProvider>(
-                    neograph::llm::RateLimitedProvider::create(
-                        std::move(inner), cfg).release());
-            }),
-            py::arg("provider"),
-            py::arg("max_retries")            = 3,
-            py::arg("default_wait_seconds")   = 30,
-            py::arg("max_wait_seconds")       = 120,
-            py::arg("max_total_wait_seconds") = 0,
-            py::keep_alive<1, 2>(),   // the wrapper must outlive nothing, but the
-                                      // inner provider must outlive the wrapper
-            "Wrap `provider`. Defaults mirror the C++ Config.");
-
-    py::class_<neograph::llm::OpenAIProvider, neograph::Provider,
-               std::shared_ptr<neograph::llm::OpenAIProvider>>(m, "OpenAIProvider",
-        "OpenAI-compatible HTTP provider. Works with OpenAI, Groq, "
-        "Together, vLLM, Ollama — anything serving the /v1/chat/completions "
-        "shape.")
-        .def(py::init([](const std::string& api_key,
-                          const std::string& base_url,
-                          const std::string& default_model,
-                          int timeout_seconds,
-                          py::object provider_routing,
-                          bool allow_insecure_loopback,
-                          std::size_t max_stream_line_bytes,
-                          std::size_t max_stream_response_bytes) {
-            neograph::llm::OpenAIProvider::Config cfg;
-            cfg.api_key = api_key;
-            cfg.base_url = base_url;
-            cfg.default_model = default_model;
-            cfg.timeout_seconds = timeout_seconds;
-            cfg.allow_insecure_loopback = allow_insecure_loopback;
-            cfg.max_stream_line_bytes = max_stream_line_bytes;
-            cfg.max_stream_response_bytes = max_stream_response_bytes;
-            if (!provider_routing.is_none()) {
-                cfg.provider_routing = py_to_json(provider_routing);
-            }
-            // create() returns unique_ptr; convert to shared_ptr so the
-            // pybind11 holder type matches.
-            return std::shared_ptr<neograph::llm::OpenAIProvider>(
-                neograph::llm::OpenAIProvider::create(cfg).release());
-        }),
-            py::arg("api_key") = "",
-            py::arg("base_url") = "https://api.openai.com",
-            py::arg("default_model") = "gpt-4o-mini",
-            py::arg("timeout_seconds") = 60,
-            py::arg("provider_routing") = py::none(),
-            py::arg("allow_insecure_loopback") = false,
-            py::arg("max_stream_line_bytes") = 64u * 1024u,
-            py::arg("max_stream_response_bytes") = 16u * 1024u * 1024u);
-
-    // ── SchemaProvider ───────────────────────────────────────────────────
-    py::class_<neograph::llm::SchemaProvider, neograph::Provider,
-               std::shared_ptr<neograph::llm::SchemaProvider>>(m, "SchemaProvider",
-        "Schema-driven multi-vendor provider. Built-in schemas: "
-        "\"openai\", \"openai_responses\", \"openai_images\", \"claude\", "
-        "\"gemini\", \"veo\". "
-        "Pass a file path to use a custom schema.")
-        .def(py::init([](const std::string& schema_path,
-                         const std::string& api_key,
-                         const std::string& default_model,
-                         int timeout_seconds,
-                         const std::string& base_url_override,
-                         bool use_websocket,
-                         bool prefer_libcurl,
-                          py::object provider_routing,
-                          const std::string& auth_header_override,
-                          const std::string& auth_prefix_override,
-                          bool allow_insecure_loopback,
-                          std::size_t max_stream_line_bytes,
-                          std::size_t max_stream_response_bytes,
-                          std::size_t ws_max_handshake_bytes,
-                          std::size_t ws_max_frame_payload_bytes,
-                          std::size_t ws_max_message_payload_bytes) {
-            neograph::llm::SchemaProvider::Config cfg;
-            cfg.schema_path = schema_path;
-            cfg.api_key = api_key;
-            cfg.default_model = default_model;
-            cfg.timeout_seconds = timeout_seconds;
-            cfg.base_url_override = base_url_override;
-            cfg.use_websocket = use_websocket;
-            cfg.prefer_libcurl = prefer_libcurl;
-            cfg.auth_header_override = auth_header_override;
-            cfg.auth_prefix_override = auth_prefix_override;
-            cfg.allow_insecure_loopback = allow_insecure_loopback;
-            cfg.max_stream_line_bytes = max_stream_line_bytes;
-            cfg.max_stream_response_bytes = max_stream_response_bytes;
-            cfg.websocket_options.max_handshake_bytes = ws_max_handshake_bytes;
-            cfg.websocket_options.max_frame_payload_bytes =
-                ws_max_frame_payload_bytes;
-            cfg.websocket_options.max_message_payload_bytes =
-                ws_max_message_payload_bytes;
-            if (!provider_routing.is_none()) {
-                cfg.provider_routing = py_to_json(provider_routing);
-            }
-            return std::shared_ptr<neograph::llm::SchemaProvider>(
-                neograph::llm::SchemaProvider::create(cfg).release());
-        }),
-            py::arg("schema_path"),
-            py::arg("api_key") = "",
-            py::arg("default_model") = "gpt-4o-mini",
-            py::arg("timeout_seconds") = 60,
-            py::arg("base_url_override") = "",
-            py::arg("use_websocket") = false,
-            py::arg("prefer_libcurl") = false,
-            py::arg("provider_routing") = py::none(),
-            py::arg("auth_header_override") = "",
-            py::arg("auth_prefix_override") = "",
-            py::arg("allow_insecure_loopback") = false,
-            py::arg("max_stream_line_bytes") = 64u * 1024u,
-            py::arg("max_stream_response_bytes") = 16u * 1024u * 1024u,
-            py::arg("ws_max_handshake_bytes") = 64u * 1024u,
-            py::arg("ws_max_frame_payload_bytes") = 16u * 1024u * 1024u,
-            py::arg("ws_max_message_payload_bytes") = 16u * 1024u * 1024u);
-#endif // NEOGRAPH_PYBIND_HAS_LLM
+PyObject* outcome_error_type = nullptr;
+PyObject* observer_error_type = nullptr;
+PyObject* settlement_error_type = nullptr;
+void set_outcome_error(PyObject* type, const ProviderOutcomeError& error) {
+    py::object exception = py::reinterpret_borrow<py::object>(type)(error.what());
+    exception.attr("outcome") = py::cast(error.outcome());
+    auto cause = provider_cause(error.cause());
+    exception.attr("cause") = cause;
+    exception.attr("__cause__") = cause;
+    if (const auto* observer = dynamic_cast<const ProviderObserverError*>(&error))
+        exception.attr("error_kind") = py::cast(observer->error_kind());
+    if (const auto* settlement = dynamic_cast<const ProviderBudgetSettlementError*>(&error))
+        exception.attr("dispatch_error") = provider_cause(settlement->dispatch_error());
+    PyErr_SetObject(type, exception.ptr());
 }
-
+}
+std::shared_ptr<Provider> own_python_provider(py::object provider) {
+    if (provider.is_none()) return {};
+    auto native = provider.cast<std::shared_ptr<Provider>>();
+    if (!native) throw py::type_error("Provider must own a native provider");
+    auto* pointer = native.get();
+    auto lease = std::shared_ptr<PythonProviderLease>(
+        new PythonProviderLease{std::move(native), std::move(provider)},
+        [](PythonProviderLease* owner) {
+            py::gil_scoped_acquire gil;
+            delete owner;
+        });
+    // Preserve the real provider address and virtual dispatch. Every native
+    // copy retains this exact Python owner without a global or patient list.
+    return std::shared_ptr<Provider>(std::move(lease), pointer);
+}
+void init_provider(py::module_& m) {
+    py::class_<ToolCall>(m, "ToolCall")
+        .def(py::init<>())
+        .def(py::init([](std::string id, std::string name, std::string arguments) { return ToolCall{std::move(id), std::move(name), std::move(arguments)}; }), py::arg("id") = "", py::arg("name") = "", py::arg("arguments") = "")
+        .def_readwrite("id", &ToolCall::id).def_readwrite("name", &ToolCall::name).def_readwrite("arguments", &ToolCall::arguments);
+    py::class_<ChatMessage>(m, "ChatMessage", "Portable graph message projection; not native replay custody.")
+        .def(py::init<>())
+        .def(py::init([](std::string role, std::string content, std::vector<ToolCall> calls, std::string call_id, std::string tool_name, std::vector<std::string> images) {
+            ChatMessage value; value.role=std::move(role); value.content=std::move(content); value.tool_calls=std::move(calls); value.tool_call_id=std::move(call_id); value.tool_name=std::move(tool_name); value.image_urls=std::move(images); return value;
+        }), py::arg("role") = "", py::arg("content") = "", py::arg("tool_calls") = std::vector<ToolCall>{}, py::arg("tool_call_id") = "", py::arg("tool_name") = "", py::arg("image_urls") = std::vector<std::string>{})
+        .def_readwrite("role", &ChatMessage::role).def_readwrite("content", &ChatMessage::content)
+        .def_readwrite("tool_calls", &ChatMessage::tool_calls).def_readwrite("tool_call_id", &ChatMessage::tool_call_id)
+        .def_readwrite("tool_name", &ChatMessage::tool_name).def_readwrite("image_urls", &ChatMessage::image_urls)
+        .def_readwrite("tool_status", &ChatMessage::tool_status).def_readwrite("tool_retryable", &ChatMessage::tool_retryable)
+        .def_readwrite("tool_effect_uncertain", &ChatMessage::tool_effect_uncertain)
+        .def_readwrite("reasoning", &ChatMessage::reasoning)
+        .def_property("reasoning_details", [](const ChatMessage& v) { return json_to_py(v.reasoning_details); }, [](ChatMessage& v, py::object x) { v.reasoning_details = py_to_json(x); });
+    py::class_<ChatTool>(m, "ChatTool")
+        .def(py::init<>())
+        .def(py::init([](std::string name, std::string description, py::object parameters) { return ChatTool{std::move(name), std::move(description), py_to_json(parameters)}; }), py::arg("name") = "", py::arg("description") = "", py::arg("parameters") = py::dict())
+        .def_readwrite("name", &ChatTool::name).def_readwrite("description", &ChatTool::description)
+        .def_property("parameters", [](const ChatTool& v) { return json_to_py(v.parameters); }, [](ChatTool& v, py::object x) { v.parameters=py_to_json(x); });
+    py::class_<GeneratedArtifact>(m, "GeneratedArtifact").def(py::init<>())
+        .def_readwrite("kind", &GeneratedArtifact::kind).def_readwrite("mime_type", &GeneratedArtifact::mime_type)
+        .def_readwrite("base64_data", &GeneratedArtifact::base64_data).def_readwrite("url", &GeneratedArtifact::url).def_readwrite("file_id", &GeneratedArtifact::file_id)
+        .def_property("metadata", [](const GeneratedArtifact& v) { return json_to_py(v.metadata); }, [](GeneratedArtifact& v, py::object x) { v.metadata=py_to_json(x); });
+    init_provider_values(m);
+    auto error = py::reinterpret_steal<py::object>(PyErr_NewException("neograph_engine._neograph.ProviderOutcomeError", PyExc_RuntimeError, nullptr));
+    outcome_error_type = error.ptr(); m.add_object("ProviderOutcomeError", error);
+    auto observer = py::reinterpret_steal<py::object>(PyErr_NewException("neograph_engine._neograph.ProviderObserverError", error.ptr(), nullptr));
+    observer_error_type = observer.ptr(); m.add_object("ProviderObserverError", observer);
+    auto settlement = py::reinterpret_steal<py::object>(PyErr_NewException("neograph_engine._neograph.ProviderBudgetSettlementError", error.ptr(), nullptr));
+    settlement_error_type = settlement.ptr(); m.add_object("ProviderBudgetSettlementError", settlement);
+    py::register_local_exception_translator([](std::exception_ptr value) {
+        try { if (value) std::rethrow_exception(value); }
+        catch (const ProviderBudgetSettlementError& e) { set_outcome_error(settlement_error_type, e); }
+        catch (const ProviderObserverError& e) { set_outcome_error(observer_error_type, e); }
+        catch (const ProviderOutcomeError& e) { set_outcome_error(outcome_error_type, e); }
+    });
+    py::enum_<ProviderMode>(m, "ProviderMode").value("Collect", ProviderMode::Collect).value("Stream", ProviderMode::Stream);
+    py::class_<sp::OpenRouterRouting>(m, "OpenRouterRouting")
+        .def(py::init<>())
+        .def_readwrite("zdr", &sp::OpenRouterRouting::zdr).def_readwrite("allow_fallbacks", &sp::OpenRouterRouting::allow_fallbacks)
+        .def_readwrite("require_parameters", &sp::OpenRouterRouting::require_parameters)
+        .def_readwrite("only", &sp::OpenRouterRouting::only).def_readwrite("order", &sp::OpenRouterRouting::order)
+        .def_readwrite("ignore", &sp::OpenRouterRouting::ignore).def_readwrite("data_collection", &sp::OpenRouterRouting::data_collection);
+    auto format = py::class_<sp::ResponseFormat>(m, "ProviderResponseFormat").def(py::init<>())
+        .def_readwrite("kind", &sp::ResponseFormat::kind).def_readwrite("name", &sp::ResponseFormat::name)
+        .def_readwrite("description", &sp::ResponseFormat::description).def_readwrite("strict", &sp::ResponseFormat::strict)
+        .def_property("schema", [](const sp::ResponseFormat& v) -> py::object { return v.schema ? py::module_::import("json").attr("loads")(v.schema->root().dump()) : py::none(); }, [](sp::ResponseFormat& v, py::object x) {
+            if (x.is_none()) { v.schema.reset(); return; }
+            auto parsed = sp::json::parse(py_to_json(x).dump());
+            auto* document = std::get_if<sp::json::Document>(&parsed);
+            if (!document) throw py::value_error("Invalid response schema JSON");
+            v.schema = std::make_shared<const sp::json::Document>(std::move(*document));
+        });
+    py::enum_<sp::ResponseFormat::Kind>(format, "Kind").value("JsonObject", sp::ResponseFormat::Kind::JsonObject).value("JsonSchema", sp::ResponseFormat::Kind::JsonSchema);
+    init_provider_controls(m);
+    auto controls = py::class_<ProviderControls>(m, "ProviderControls").def(py::init<>());
+    controls.def_readwrite("max_output_tokens", &ProviderControls::max_output_tokens);
+    controls.def_readwrite("max_tool_calls", &ProviderControls::max_tool_calls);
+    controls.def_readwrite("temperature", &ProviderControls::temperature);
+    controls.def_readwrite("top_p", &ProviderControls::top_p);
+    controls.def_readwrite("reasoning_effort", &ProviderControls::reasoning_effort);
+    controls.def_readwrite("reasoning_summary", &ProviderControls::reasoning_summary);
+    controls.def_readwrite("thinking_budget", &ProviderControls::thinking_budget);
+    controls.def_readwrite("include_thoughts", &ProviderControls::include_thoughts);
+    controls.def_readwrite("thinking_level", &ProviderControls::thinking_level);
+    controls.def_readwrite("thinking_summaries", &ProviderControls::thinking_summaries);
+    controls.def_readwrite("service_tier", &ProviderControls::service_tier);
+    controls.def_readwrite("required_tool", &ProviderControls::required_tool);
+    controls.def_property("provider", [](const ProviderControls& v) { return v.provider; },
+        [](ProviderControls& v, std::optional<sp::OpenRouterRouting> routing) { v.provider = std::move(routing); });
+    controls.def_property("response_format", [](const ProviderControls& v) { return v.response_format; },
+        [](ProviderControls& v, std::optional<sp::ResponseFormat> format) { v.response_format = std::move(format); });
+    controls.def_readwrite("store", &ProviderControls::store);
+    controls.def_readwrite("account_scope", &ProviderControls::account_scope);
+    controls.def_readwrite("system", &ProviderControls::system);
+    controls.def_property("chat_reasoning", [](const ProviderControls& v) { return v.chat_reasoning; },
+        [](ProviderControls& v, std::optional<sp::chat::ReasoningOptions> value) { v.chat_reasoning = std::move(value); });
+    controls.def_readwrite("include_reasoning", &ProviderControls::include_reasoning);
+    controls.def_readwrite("usage_include", &ProviderControls::usage_include);
+    controls.def_property("models", [](const ProviderControls& v) { return v.models; },
+        [](ProviderControls& v, std::vector<std::string> value) { v.models = std::move(value); });
+    controls.def_readwrite("previous_response_id", &ProviderControls::previous_response_id);
+    controls.def_property("previous_response_history", [](const ProviderControls& v) { return v.previous_response_history; },
+        [](ProviderControls& v, std::vector<sp::Message> value) { v.previous_response_history = std::move(value); });
+    controls.def_readwrite("parallel_tool_calls", &ProviderControls::parallel_tool_calls);
+    controls.def_readwrite("verbosity", &ProviderControls::verbosity);
+    controls.def_readwrite("truncation", &ProviderControls::truncation);
+    controls.def_property("responses_include", [](const ProviderControls& v) { return v.responses_include; },
+        [](ProviderControls& v, std::optional<std::vector<sp::responses::Include>> value) { v.responses_include = std::move(value); });
+    controls.def_readwrite("thinking_mode", &ProviderControls::thinking_mode);
+    controls.def_readwrite("output_effort", &ProviderControls::output_effort);
+    controls.def_property("cache_control", [](const ProviderControls& v) { return v.cache_control; },
+        [](ProviderControls& v, std::optional<sp::messages::CacheControl> value) { v.cache_control = std::move(value); });
+    controls.def_property("messages_tool_choice", [](const ProviderControls& v) { return v.messages_tool_choice; },
+        [](ProviderControls& v, std::optional<sp::messages::ToolChoice> value) { v.messages_tool_choice = std::move(value); });
+    controls.def_readwrite("gemini_history_mode", &ProviderControls::gemini_history_mode);
+    controls.def_readwrite("gemini_thinking_level", &ProviderControls::gemini_thinking_level);
+    controls.def_property("safety_settings", [](const ProviderControls& v) { return v.safety_settings; },
+        [](ProviderControls& v, std::vector<sp::gemini::SafetySetting> value) { v.safety_settings = std::move(value); });
+    controls.def_property("gemini_tool_choice", [](const ProviderControls& v) { return v.gemini_tool_choice; },
+        [](ProviderControls& v, std::optional<sp::gemini::ToolChoice> value) { v.gemini_tool_choice = std::move(value); });
+    py::class_<ProviderObserverLimits>(m, "ProviderObserverLimits").def(py::init<>())
+        .def_readwrite("max_events", &ProviderObserverLimits::max_events).def_readwrite("max_bytes", &ProviderObserverLimits::max_bytes);
+    py::class_<sp::runtime::RetryPolicy>(m, "ProviderRetryPolicy").def(py::init<>())
+        .def_readwrite("enabled", &sp::runtime::RetryPolicy::enabled)
+        .def_readwrite("allow_duplicate_billing_risk", &sp::runtime::RetryPolicy::allow_duplicate_billing_risk)
+        .def_readwrite("max_attempts", &sp::runtime::RetryPolicy::max_attempts)
+        .def_property("base_delay_ms", [](const sp::runtime::RetryPolicy& v) { return v.base_delay.count(); }, [](sp::runtime::RetryPolicy& v, std::int64_t x) { v.base_delay = std::chrono::milliseconds(x); })
+        .def_property("max_delay_ms", [](const sp::runtime::RetryPolicy& v) { return v.max_delay.count(); }, [](sp::runtime::RetryPolicy& v, std::int64_t x) { v.max_delay = std::chrono::milliseconds(x); });
+    py::class_<ProviderRequest>(m, "ProviderRequest")
+        .def_readwrite("mode", &ProviderRequest::mode)
+        .def_readwrite("cancel_token", &ProviderRequest::cancel_token)
+        .def_readwrite("observer_limits", &ProviderRequest::observer_limits)
+        .def_property("messages", [](const ProviderRequest& v) { return provider_request_messages(v); }, [](ProviderRequest& v, std::vector<sp::Message> x) { set_provider_request_messages(v, std::move(x)); })
+        .def_property("on_event",
+            [](const ProviderRequest& v) { return provider_observer_function(v.on_event); },
+            [](ProviderRequest& v, py::object callback) { v.on_event = provider_observer(std::move(callback)); })
+        .def_property("timeout_ms", [](const ProviderRequest& v) -> py::object {
+            if (!v.options.deadline) return py::none();
+            const auto now = std::chrono::steady_clock::now();
+            if (*v.options.deadline <= now) return py::int_(0);
+            return py::cast(std::chrono::duration_cast<std::chrono::milliseconds>(*v.options.deadline - now).count());
+        }, [](ProviderRequest& v, std::optional<std::int64_t> ms) {
+            if (!ms) { v.options.deadline.reset(); return; }
+            const auto now = std::chrono::steady_clock::now();
+            const auto maximum = std::chrono::duration_cast<std::chrono::milliseconds>(
+                sp::runtime::SteadyTime::max() - now).count();
+            if (*ms < 0 || *ms > maximum)
+                throw py::value_error("timeout_ms must be a representable nonnegative duration");
+            v.options.deadline = now + std::chrono::milliseconds(*ms);
+        })
+        .def_property("retry", [](const ProviderRequest& v) { return v.options.retry; }, [](ProviderRequest& v, std::optional<sp::runtime::RetryPolicy> x) { v.options.retry = std::move(x); });
+    py::class_<PreparedHandle, std::shared_ptr<PreparedHandle>>(m, "PreparedProviderRequest")
+        .def_property_readonly("consumed", [](const PreparedHandle& v) { return !v.value; })
+        .def_property_readonly("valid", [](const PreparedHandle& v) { return v.value && v.value->valid(); })
+        .def_property_readonly("error", [](const PreparedHandle& v) -> py::object { const auto* error = v.get().error(); return error ? py::cast(*error, py::return_value_policy::copy) : py::none(); })
+        .def_property_readonly("family", [](const PreparedHandle& v) { return std::string(v.get().family()); })
+        .def_property_readonly("model", [](const PreparedHandle& v) { return std::string(v.get().model()); })
+        .def_property_readonly("encoded_body", [](const PreparedHandle& v) { return std::string(v.get().encoded_body()); }, "Sensitive admitted wire body; not a portable replay authority.")
+        .def_property_readonly("mode", [](const PreparedHandle& v) { return v.get().mode(); })
+        .def_property_readonly("is_cancelled", [](const PreparedHandle& v) { return v.get().is_cancelled(); })
+        .def_property_readonly("max_output_tokens", [](const PreparedHandle& v) { return v.get().max_output_tokens(); })
+        .def_property_readonly("requires_native_custody", [](const PreparedHandle& v) { return v.get().requires_native_custody(); })
+        .def_property_readonly("descriptor", [](const PreparedHandle& v) -> py::object { auto* descriptor = v.get().admitted_descriptor(); return descriptor ? py::cast(*descriptor, py::return_value_policy::copy) : py::none(); });
+    py::class_<Provider, PyProvider, std::shared_ptr<Provider>>(m, "Provider")
+        .def(py::init_alias<std::string>(), py::arg("family"))
+        .def("get_name", &Provider::get_name)
+        .def("family", [](const Provider& v) { return std::string(v.family()); })
+        .def("prepare", [](Provider& self, ProviderRequest request) { return std::make_shared<PreparedHandle>(self.prepare(std::move(request))); }, py::arg("request"))
+        .def("dispatch", [](Provider& self, PreparedHandle& prepared) { auto request = prepared.take(); py::gil_scoped_release release; return self.dispatch(std::move(request)); }, py::arg("prepared"))
+        .def("invoke", [](Provider& self, ProviderRequest request) { py::gil_scoped_release release; return self.invoke(std::move(request)); }, py::arg("request"))
+        .def_static("request_digest", [](const PreparedHandle& request) { return Provider::request_digest(request.get()); })
+        .def_static("conservative_token_upper_bound", [](const PreparedHandle& request) { return Provider::conservative_token_upper_bound(request.get()); });
+    m.def("make_provider_request", &make_provider_request, py::arg("provider"), py::arg("model"), py::arg("messages"), py::arg("tools") = std::vector<ChatTool>{}, py::arg("controls") = ProviderControls{}, py::arg("mode") = ProviderMode::Collect);
+    py::class_<Tool, std::shared_ptr<Tool>>(m, "Tool", "Native callable tool; Python tools use the package Tool wrapper.");
+    py::class_<sp::descriptor::ValidatedDescriptor>(m, "ValidatedDescriptor")
+        .def_property_readonly("id", [](const sp::descriptor::ValidatedDescriptor& v) { return std::string(v.id()); })
+        .def_property_readonly("revision", &sp::descriptor::ValidatedDescriptor::revision)
+        .def_property_readonly("family", [](const sp::descriptor::ValidatedDescriptor& v) { return std::string(v.family()); })
+        .def_property_readonly("base_url", [](const sp::descriptor::ValidatedDescriptor& v) { return std::string(v.base_url()); });
+    py::class_<DescriptorPolicyView>(m, "ProviderDescriptorPolicy")
+        .def_property_readonly("identity", [](const DescriptorPolicyView& v) {
+            const auto digest = v.value->identity();
+            return py::bytes(digest.data(), digest.size());
+        });
+    m.def("builtin_provider_policy", [] { return DescriptorPolicyView{sp::descriptor::builtin_policy()}; });
+    m.def("provider_policy_json", [] { return std::string(sp::config_defaults::descriptor_policy_json); });
+    m.def("provider_codec_defaults_json", [] { return std::string(sp::config_defaults::codec_defaults_json); });
+    m.def("load_provider_policy", [](const std::string& families, const std::string& resources) {
+        auto result = sp::descriptor::load_policy(families, resources);
+        if (auto* error = std::get_if<sp::descriptor::ConfigError>(&result))
+            throw py::value_error(error->pointer + ": " + error->message);
+        return DescriptorPolicyView{std::get<sp::descriptor::PolicySnapshot>(std::move(result))};
+    }, py::arg("family_json"), py::arg("resource_json"));
+    m.def("load_provider_descriptor", [](const std::string& source, std::optional<DescriptorPolicyView> policy) {
+        auto result = sp::descriptor::load(source, policy ? policy->value : sp::descriptor::builtin_policy());
+        if (auto* error = std::get_if<sp::descriptor::ConfigError>(&result))
+            throw py::value_error(error->pointer + ": " + error->message);
+        return std::get<sp::descriptor::ValidatedDescriptor>(std::move(result));
+    }, py::arg("source"), py::arg("policy") = py::none());
+    py::class_<sp::descriptor::DeploymentHeaderEnvironment>(m, "ProviderDeploymentHeaderEnvironment")
+        .def(py::init<>())
+        .def_readwrite("anthropic_workspace_id", &sp::descriptor::DeploymentHeaderEnvironment::anthropic_workspace_id)
+        .def_readwrite("anthropic_beta", &sp::descriptor::DeploymentHeaderEnvironment::anthropic_beta);
+    m.def("load_provider_descriptor_with_environment_headers",
+        [](const std::string& source, const std::vector<std::pair<std::string, std::string>>& overrides,
+           std::optional<DescriptorPolicyView> policy) {
+            auto result = sp::descriptor::load_with_environment_headers(
+                source, overrides, policy ? policy->value : sp::descriptor::builtin_policy());
+            if (auto* error = std::get_if<sp::descriptor::ConfigError>(&result))
+                throw py::value_error(error->pointer + ": " + error->message);
+            return std::get<sp::descriptor::ValidatedDescriptor>(std::move(result));
+        }, py::arg("source"), py::arg("overrides") = std::vector<std::pair<std::string, std::string>>{},
+           py::arg("policy") = py::none());
+    m.def("load_provider_descriptor_with_deployment_headers",
+        [](const std::string& source, const std::vector<std::pair<std::string, std::string>>& overrides,
+           const sp::descriptor::DeploymentHeaderEnvironment& environment,
+           std::optional<DescriptorPolicyView> policy) {
+            auto result = sp::descriptor::load_with_deployment_headers(
+                source, overrides, environment, policy ? policy->value : sp::descriptor::builtin_policy());
+            if (auto* error = std::get_if<sp::descriptor::ConfigError>(&result))
+                throw py::value_error(error->pointer + ": " + error->message);
+            return std::get<sp::descriptor::ValidatedDescriptor>(std::move(result));
+        }, py::arg("source"), py::arg("overrides"), py::arg("environment"), py::arg("policy") = py::none());
+    py::class_<RuntimePolicyView>(m, "ProviderRuntimePolicy");
+    m.def("builtin_provider_runtime_policy", [] { return RuntimePolicyView{sp::configuration::builtin_runtime_policy()}; });
+    m.def("load_provider_runtime_policy", [](const std::string& runtime, const std::string& errors) {
+        auto result = sp::configuration::load_runtime_policy(runtime, errors);
+        if (auto* error = std::get_if<sp::descriptor::ConfigError>(&result))
+            throw py::value_error(error->pointer + ": " + error->message);
+        return RuntimePolicyView{std::get<sp::configuration::PolicySnapshot>(std::move(result))};
+    }, py::arg("runtime_json"), py::arg("error_json"));
+    py::enum_<sp::transport::HttpVersion>(m, "ProviderHttpVersion")
+        .value("Auto", sp::transport::HttpVersion::Auto).value("Http1_1", sp::transport::HttpVersion::Http1_1)
+        .value("Http2PriorKnowledge", sp::transport::HttpVersion::Http2PriorKnowledge)
+        .value("Http3Preferred", sp::transport::HttpVersion::Http3Preferred).value("Http3Only", sp::transport::HttpVersion::Http3Only);
+    auto options = py::class_<sp::runtime::Options>(m, "ProviderRuntimeOptions")
+        .def(py::init([](std::string key, std::int64_t timeout, std::string ca_file, std::size_t workers) {
+            sp::runtime::Options options; options.api_key=std::move(key); options.default_timeout=std::chrono::milliseconds(timeout); options.ca_file=std::move(ca_file); options.workers=workers; return options;
+        }), py::arg("api_key") = "", py::arg("default_timeout_ms") = sp::config_defaults::defaults_default_timeout_ms, py::arg("ca_file") = "", py::arg("workers") = sp::config_defaults::defaults_workers)
+        .def_readwrite("api_key", &sp::runtime::Options::api_key).def_readwrite("ca_file", &sp::runtime::Options::ca_file)
+        .def_readwrite("workers", &sp::runtime::Options::workers).def_readwrite("http_version", &sp::runtime::Options::http_version)
+        .def_readwrite("limits", &sp::runtime::Options::limits)
+        .def_readwrite("transport", &sp::runtime::Options::transport)
+        .def_readwrite("retry_tokens", &sp::runtime::Options::retry_tokens).def_readwrite("retry_tokens_per_second", &sp::runtime::Options::retry_tokens_per_second)
+        .def_property("default_timeout_ms", [](const sp::runtime::Options& v) { return v.default_timeout.count(); }, [](sp::runtime::Options& v, std::int64_t x) { v.default_timeout=std::chrono::milliseconds(x); });
+    options.def_property("policy", [](const sp::runtime::Options& v) { return RuntimePolicyView{v.policy}; },
+        [](sp::runtime::Options& v, RuntimePolicyView policy) { v.policy = std::move(policy.value); });
+    options.def_property("slow_callback_threshold_ms",
+        [](const sp::runtime::Options& v) { return v.slow_callback_threshold.count(); },
+        [](sp::runtime::Options& v, std::int64_t x) { v.slow_callback_threshold = std::chrono::milliseconds(x); });
+    py::class_<sp::transport::TransportOptions>(m, "ProviderTransportOptions").def(py::init<>())
+        .def_readwrite("io_threads", &sp::transport::TransportOptions::io_threads)
+        .def_readwrite("max_host_connections", &sp::transport::TransportOptions::max_host_connections)
+        .def_readwrite("max_head_bytes", &sp::transport::TransportOptions::max_head_bytes)
+        .def_readwrite("resolver_threads", &sp::transport::TransportOptions::resolver_threads)
+        .def_readwrite("resolve", &sp::transport::TransportOptions::resolve)
+        .def_property("dns_ttl_seconds", [](const sp::transport::TransportOptions& v) { return v.dns_ttl.count(); },
+            [](sp::transport::TransportOptions& v, std::int64_t x) { v.dns_ttl = std::chrono::seconds(x); });
+    py::class_<sp::transport::SseLimits>(m, "ProviderSseLimits").def(py::init<>())
+        .def_readwrite("max_line_bytes", &sp::transport::SseLimits::max_line_bytes)
+        .def_readwrite("max_event_bytes", &sp::transport::SseLimits::max_event_bytes)
+        .def_readwrite("max_total_bytes", &sp::transport::SseLimits::max_total_bytes);
+    py::class_<sp::SemanticLimits>(m, "ProviderSemanticLimits").def(py::init<>())
+        .def_readwrite("max_parts", &sp::SemanticLimits::max_parts).def_readwrite("max_content_bytes", &sp::SemanticLimits::max_content_bytes)
+        .def_readwrite("max_tool_bytes", &sp::SemanticLimits::max_tool_bytes).def_readwrite("max_json_depth", &sp::SemanticLimits::max_json_depth);
+    py::class_<sp::runtime::Limits>(m, "ProviderRuntimeLimits").def(py::init<>())
+        .def_readwrite("max_operations", &sp::runtime::Limits::max_operations)
+        .def_readwrite("queued_body_chunks", &sp::runtime::Limits::queued_body_chunks).def_readwrite("queued_body_bytes", &sp::runtime::Limits::queued_body_bytes)
+        .def_readwrite("max_response_bytes", &sp::runtime::Limits::max_response_bytes).def_readwrite("max_error_bytes", &sp::runtime::Limits::max_error_bytes)
+        .def_readwrite("semantic", &sp::runtime::Limits::semantic)
+        .def_readwrite("sse", &sp::runtime::Limits::sse);
+#ifdef NEOGRAPH_PYBIND_HAS_LLM
+    py::class_<llm::SchemaProvider::Defaults>(m, "SchemaProviderDefaults").def(py::init<>())
+        .def_property("provider", [](const llm::SchemaProvider::Defaults& v) { return v.provider; },
+            [](llm::SchemaProvider::Defaults& v, std::optional<sp::OpenRouterRouting> routing) { v.provider = std::move(routing); })
+        .def_readwrite("responses_store", &llm::SchemaProvider::Defaults::responses_store);
+    py::class_<llm::SchemaProvider, Provider, std::shared_ptr<llm::SchemaProvider>>(m, "SchemaProvider")
+        .def(py::init<sp::descriptor::ValidatedDescriptor, sp::runtime::Options, llm::SchemaProvider::Defaults>(), py::arg("descriptor"), py::arg("options") = sp::runtime::Options{}, py::arg("defaults") = llm::SchemaProvider::Defaults{});
+#endif
+}
 } // namespace neograph::pybind

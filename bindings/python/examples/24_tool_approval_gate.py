@@ -1,43 +1,17 @@
-"""24 — Tool approval gate: "the agent wants to run `rm -rf build/`. Allow?"
+"""24 — Tool approval: pause, refuse, and approve a scripted shell request.
 
-Offline. No API key: a stub node stands in for the model, so you can run this
-and watch the whole loop.
-
+Run:
     python 24_tool_approval_gate.py
 
-This is the shape every coding agent has, and until issue #89 it was
-unimplementable on NeoGraph without forking the engine — there was no hook
-anywhere between "the model asked for tool X" and "tool X runs".
+No API key or real shell action. The model and tools are deliberately scripted:
+their counters make it possible to inspect the engine's approval behavior.
 
-The gate is one function, consulted for every tool call, returning one of three
-verdicts:
-
-    ToolDecision.allow()             run it
-    ToolDecision.allow({...})        run it, with these arguments instead
-    ToolDecision.deny(reason)        do not; the model is told why, and adapts
-    ToolDecision.interrupt(...)      do not; pause the run and ask a human
-
-Permission, audit, argument rewriting and the per-call interrupt are not four
-features. They are one primitive wearing four hats: observe and intervene at
-the tool-call boundary.
-
-THE ONE THING WORTH UNDERSTANDING
-
-The gate sees every call BEFORE any tool runs. Watch the output: when the run
-pauses for approval, `list_files` — which the gate was perfectly happy to allow
-— has NOT run either.
-
-That is deliberate. Suppose the gate ran the harmless tools first and only then
-asked. The run pauses; the human approves; the engine resumes — and resume
-re-enters the node from the top, because a node that interrupted recorded no
-writes. `list_files` runs a *second* time. Swap `list_files` for `git commit`
-and the approval prompt for `rm -rf` has just double-committed.
-
-Worse, if the human says NO, the harmless tools have already had their effects
-and there is nothing to undo them. A permission system in which "denied" does
-not mean "nothing happened" is not a permission system.
-
-So: decide everything while nothing has happened yet, then act.
+The gate receives every tool call before dispatch begins and returns allow,
+allow with rewritten arguments, deny, or interrupt. If a call interrupts the
+batch, neither sibling tool runs before the pause. On refusal, allowed siblings
+can run but the denied shell call does not; approval executes each tool once.
+This avoids double-applying allowed effects when dispatch resumes from the
+interrupted node.
 """
 
 import sys
@@ -74,7 +48,7 @@ class ListFiles(ng.Tool):
 
 
 class Shell(ng.Tool):
-    """The dangerous one."""
+    """Simulates a dangerous action without executing a shell command."""
 
     def __init__(self):
         super().__init__()

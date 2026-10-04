@@ -68,17 +68,49 @@ Verdict forge_gate(const json& core, const ng::NodeContext& ctx) {
 static sp::runtime::Result ask(const std::shared_ptr<neograph::Provider>& prov,
                                std::vector<sp::Message>& convo,
                                const std::shared_ptr<neograph::UsageAccumulator>& usage,
+                               std::vector<sp::runtime::Result>& outcomes,
                                int max_tokens = 4000) {
     neograph::ProviderControls controls;
     controls.temperature = 0.2;
+    controls.reasoning_effort = "low";
     controls.max_output_tokens = max_tokens;
-    auto result = prov->invoke(neograph::make_provider_request(
-        *prov, "~deepseek/deepseek-v4-flash-latest", convo, {}, controls));
-    if (result) usage->add(neograph::outcome_usage(*result));
-    result = neograph::outcome_or_throw(std::move(result));
-    const auto& messages = neograph::outcome_messages(*result);
-    convo.insert(convo.end(), messages.begin(), messages.end());
-    return result;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        auto request = neograph::make_provider_request(
+            *prov, "~deepseek/deepseek-v4-flash-latest", convo, {}, controls);
+        request.options.deadline = deadline;
+        sp::runtime::Result result;
+        try {
+            result = prov->invoke(std::move(request));
+        } catch (const neograph::ProviderOutcomeError& error) {
+            outcomes.push_back(error.outcome());
+            usage->add(neograph::outcome_usage(*error.outcome()));
+            throw;
+        }
+        if (result) {
+            outcomes.push_back(result);
+            usage->add(neograph::outcome_usage(*result));
+        }
+        neograph::outcome_or_throw(result);
+        const auto& completion = std::get<sp::Completion>(*result);
+        bool has_output = false;
+        for (const auto& message : completion.messages)
+            for (const auto& part : message.parts) {
+                if (const auto* text = std::get_if<sp::Text>(&part))
+                    has_output |= !text->value.empty();
+                has_output |= std::holds_alternative<sp::ToolCall>(part)
+                    || std::holds_alternative<sp::InvalidToolCall>(part);
+            }
+        if (attempt == 0 && completion.stop.kind == sp::StopKind::MaxTokens
+            && !has_output) {
+            controls.max_output_tokens = static_cast<std::uint64_t>(max_tokens) * 2;
+            continue;
+        }
+        const auto& messages = neograph::outcome_messages(*result);
+        convo.insert(convo.end(), messages.begin(), messages.end());
+        return result;
+    }
+    throw std::logic_error("unreachable Forge completion attempt");
 }
 
 static json extract_json(const std::string& t) {
@@ -109,8 +141,9 @@ int main(int argc, char** argv) {
     const char* key = std::getenv("OPENROUTER_API_KEY");
     if (!key || !*key) { std::cerr << "OPENROUTER_API_KEY not set\n"; return 2; }
     std::shared_ptr<neograph::Provider> provider =
-        examples::make_openrouter_provider(key, "chat");
+        examples::make_openrouter_provider(key, "chat", std::chrono::seconds(300));
     auto usage = std::make_shared<neograph::UsageAccumulator>();
+    std::vector<sp::runtime::Result> outcomes;
     beast::UsageReport usage_report(usage);
 
     // Task deliberately needs a capability the stock server lacks (string
@@ -157,7 +190,7 @@ int main(int argc, char** argv) {
 
     for (int attempt = 1; attempt <= 2 && forged_names.empty(); ++attempt) {
         sp::runtime::Result response;
-        try { response = ask(provider, fconvo, usage, 3000); }
+        try { response = ask(provider, fconvo, usage, outcomes, 3000); }
         catch (const std::exception& e) {
             std::cerr << "  LLM error: " << e.what() << "\n"; return 1;
         }
@@ -213,7 +246,7 @@ int main(int argc, char** argv) {
     json core;
     for (int attempt = 1; attempt <= 3 && core.is_null(); ++attempt) {
         sp::runtime::Result response;
-        try { response = ask(provider, hconvo, usage); }
+        try { response = ask(provider, hconvo, usage, outcomes); }
         catch (const std::exception& e) {
             std::cerr << "  LLM error: " << e.what() << "\n"; return 1;
         }

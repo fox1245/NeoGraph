@@ -1,4 +1,4 @@
-"""16 — Multi-turn chat + deep-research dispatch (OpenAI Responses WS + Gradio).
+"""16 — Multi-turn chat + research dispatch (typed Responses API + Gradio).
 
 A small chat UI with a research-mode trigger. Type a normal question
 and you get a normal LLM reply. Say "조사해줘 / research / investigate"
@@ -7,17 +7,15 @@ then synthesizes a markdown report.
 
 Pieces wired together:
 
-  - **OpenAI Responses transport** — official OpenAI uses WebSocket;
-    compatible gateways that do not implement the upgrade use HTTP/2 when
-    compiled in, otherwise HTTP/1.1. Override with
-    `NG_RESPONSES_TRANSPORT=websocket|http2|http1`.
+  - **OpenAI Responses transport** — the typed SDK uses libcurl HTTP.
+    OPENAI_API_BASE can route calls to a faithful local Responses peer.
 
   - **Multi-turn context** — Gradio's ChatInterface keeps the
     user-visible history. Each turn we hand the engine the FULL prior
     transcript as `messages` input, so the LLM sees what came before.
     InMemoryCheckpointStore captures each turn's final state for
-    debug / time-travel; swap to PostgresCheckpointStore (binding
-    pending) for durable session persistence:
+    inspection. A Postgres-enabled build can use PostgresCheckpointStore
+    for durable engine checkpoints:
 
         engine.set_checkpoint_store(
             ng.PostgresCheckpointStore("postgresql://..."))
@@ -28,10 +26,8 @@ Pieces wired together:
     call), then a synthesize node merges the findings into a single
     markdown report.
 
-Web search is NOT plumbed in this demo — researchers rely on the LLM's
-own knowledge. To wire actual web search, swap the ResearcherNode for
-one that hits Tavily / Brave / Crawl4AI / OpenAI's built-in
-`web_search_preview` tool. The engine surface stays the same.
+Researchers use the model's knowledge, not web search. Example 17 adds
+an actual Crawl4AI search client. Neither example guarantees factual accuracy.
 
 Run:
     pip install neograph-engine python-dotenv gradio
@@ -44,7 +40,7 @@ UI opens at http://localhost:7860.
 import os
 import re
 
-from _common import complete_responses, ng, responses_transport, schema_provider
+from _common import ask_text, ng, schema_provider
 
 
 # Recognise common Korean / English research triggers in the latest
@@ -53,19 +49,7 @@ RESEARCH_TRIGGER_PATTERN = re.compile(
     r"(조사|리서치|연구|research|investigate|deep[- ]?dive)", re.IGNORECASE)
 
 
-# Official OpenAI supports the Responses WebSocket transport. Compatible
-# gateways often expose only HTTP, so auto-select HTTP/2 for those endpoints.
-TRANSPORT = responses_transport()
-PROVIDER = schema_provider(
-    schema="openai_responses",   # underscore — built-in schema name
-    default_model="gpt-5.6-luna",
-    use_websocket=TRANSPORT == "websocket",
-    prefer_libcurl=TRANSPORT == "http2",
-)
-
-
-def complete(params):
-    return complete_responses(PROVIDER, params, TRANSPORT)
+PROVIDER = schema_provider(schema="openai_responses")
 
 
 # ─── Custom nodes ────────────────────────────────────────────────────
@@ -96,7 +80,7 @@ class RouterNode(ng.GraphNode):
 
 
 class GeneralChatNode(ng.GraphNode):
-    """Plain WS LLM call against the running messages channel."""
+    """Text Responses call against the running messages channel."""
 
     def __init__(self, name):
         super().__init__()
@@ -107,10 +91,10 @@ class GeneralChatNode(ng.GraphNode):
 
     def run(self, input):
         msgs = input.state.get_messages()
-        completion = complete(ng.CompletionParams(messages=msgs))
+        completion = ask_text(PROVIDER, messages=msgs)
         return [ng.ChannelWrite("messages", [{
             "role": "assistant",
-            "content": completion.message.content,
+            "content": completion,
         }])]
 
 
@@ -132,15 +116,15 @@ class ResearchPlanNode(ng.GraphNode):
             f"주제: {topic}\n\n"
             "Sub-question을 한 줄에 하나씩, 번호나 글머리표 없이 출력하세요."
         )
-        completion = complete(ng.CompletionParams(
-            messages=[ng.ChatMessage(role="user", content=prompt)],
-            temperature=0.0,
-        ))
+        completion = ask_text(PROVIDER, messages=[ng.ChatMessage(role="user", content=prompt)],
+        temperature=0.0,)
         questions = [
             line.strip().lstrip("-•0123456789. ")
-            for line in completion.message.content.strip().splitlines()
+            for line in completion.strip().splitlines()
             if line.strip()
         ][:3]
+        if len(questions) != 3 or any(not question for question in questions):
+            raise RuntimeError("research planner must supply three non-empty questions")
         return [ng.ChannelWrite("sub_questions", questions)]
 
 
@@ -173,16 +157,14 @@ class ResearcherNode(ng.GraphNode):
 
     def run(self, input):
         question = input.state.get("current_question") or ""
-        completion = complete(ng.CompletionParams(
-            messages=[ng.ChatMessage(role="user", content=(
-                "다음 질문에 알려진 사실 기반으로 상세하고 정확하게 답하세요. "
-                "확실하지 않은 부분은 명시하세요.\n\n"
-                f"질문: {question}"
-            ))],
-        ))
+        completion = ask_text(PROVIDER, messages=[ng.ChatMessage(role="user", content=(
+            "다음 질문에 알려진 사실 기반으로 상세하고 정확하게 답하세요. "
+            "확실하지 않은 부분은 명시하세요.\n\n"
+            f"질문: {question}"
+        ))],)
         return [ng.ChannelWrite("research_findings", [{
             "question": question,
-            "answer":   completion.message.content.strip(),
+            "answer":   completion.strip(),
         }])]
 
 
@@ -209,20 +191,18 @@ class SynthesizeNode(ng.GraphNode):
             "주요 발견(섹션별) → 결론(2-3 문장).\n\n"
             f"--- 조사 결과 ---\n\n{sections}"
         )
-        completion = complete(ng.CompletionParams(
-            messages=[ng.ChatMessage(role="user", content=prompt)],
-        ))
+        completion = ask_text(PROVIDER, messages=[ng.ChatMessage(role="user", content=prompt)],)
 
         return [
             ng.ChannelWrite("messages", [{
                 "role": "assistant",
-                "content": completion.message.content,
+                "content": completion,
             }]),
             # Reset research-only channels so the next turn starts
             # clean. messages keeps growing because its reducer is
             # append.
             ng.ChannelWrite("sub_questions", []),
-            ng.ChannelWrite("research_findings", []),
+            ng.ChannelWrite("research_findings", [], mode=ng.ChannelWrite.Mode.OVERWRITE),
             ng.ChannelWrite("research_topic", ""),
         ]
 

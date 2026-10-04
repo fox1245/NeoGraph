@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=233aaa7dda31f7a4a50265468f10eced76421314e47324e2b9dea8bf425f179b -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=e7bb3e4608b1e5f3af734a49afa0976e6b65090989f96eda60028e0c60afc094 -->
 # 自进化聊天机器人
 
 ## 当前类型化 Program chat 契约
@@ -8,8 +8,13 @@
 现有 browser/HTTP protocol 不变。Alice/Bob owner scope、reviewed-template generation、
 角色 prompt、effect/capability grant、精确 checkpoint lineage 与 nonrenewable budget 均由 host 拥有。
 
+保留的 `server_multi.cpp` live-provider 路径 timeout 为180秒。
+不改变 ProgramChat 的 `--provider-timeout-seconds` 范围/默认值或共享 provider factory 默认值，
+也不启用 failure 重发。
+
 ```bash
-# configure 前将 SCHEMAPROVIDER_SOURCE 设置为已提供的 SDK checkout 路径。
+# Set SCHEMAPROVIDER_SOURCE to the supplied SDK checkout before configuring.
+# From the repository root; configure Program, QuickJS control and SQLite (or PostgreSQL).
 cmake -S . -B build-chat -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON \
   -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON -DNEOGRAPH_BUILD_SQLITE=ON \
   -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
@@ -53,207 +58,83 @@ SDK retry 关闭（`max_attempts=1`）；restart/替换不会更新 budget。mod
 当前限定范围的运行证据：实际 ProgramChat PostgreSQL blackbox 的6个 scenario 在
 18.989秒内 pass；实际 browser 验证了 Alice/Bob 隔离及 generation-2 替换。
 这些 model-free 观察不是 vendor 推理 qualification，也不验证独立的
-`multi_tenant_chatbot` server/load recipe、所有 storage 变体或延期的 Python provider binding。
-
-## 旧 Core demo 的历史步骤与测量
-
-以下是 `server.cpp`/`server_multi.cpp` 的旧 Core demo；它们选择下一 request 的 graph，
-不展示上述 Program 运行中的 checkpoint 替换，也不是此次迁移的已验证测量。
-
+`multi_tenant_chatbot` server/load recipe、所有 storage 变体或已迁移 Python provider binding。
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-**该聊天机器人框架会在运行时根据用户行为重塑*其自身*的拓扑。此能力为 NeoGraph 独有；LangGraph 无法在运行时重塑图结构。**
+`cookbook_program_chatbot` 分离 Alice/Bob 的 message、owner scope、catalog、engine cache、Program family、call ledger 和 nonrenewable budget。每 turn 评估 bounded Harness proposal，将已准入 immutable successor 在 assistant 的 durable checkpoint 替换。orchestrator 等待同一逻辑 assistant。review 路径是 draft → 独立 Program identity 的 reviewer child 合成/等待 → 修订。inspector 显示 Core JSON、DSL、tree、generation、剩余 budget、原因、topology diff 和 admission。SQLite/PostgreSQL 保存 artifact、transition、chat、reservation/result 和 evolution decision。OpenRouter 用 typed SDK Chat provider；offline demo 用相同 compiler/admission/runtime API。
 
-[multi_tenant_chatbot](../multi_tenant_chatbot/) cookbook 的自然扩展——前者客户框架*固定*，后者*进化*。使用相同的编译缓存 + thread_id 隔离，并增加一步 LLM 评判。
-
-## 两个演示
-
-| 文件 | 场景 | 成本 | 实际耗时 |
-|---|---|---|---|
-| [server.cpp](server.cpp) | Alice 1 人 × 5 轮——最小进化机制演示 | ~$0.003 | 16 秒 |
-| [server_multi.cpp](server_multi.cpp) | **5 位客户 × 5 轮——各自独立的进化时间线 + 涌现式聚类** | ~$0.02 | 7 分钟 |
-
-构建 / 运行（两者均可）：
+## 构建与运行
 
 ```bash
-cmake --build build --target cookbook_self_evolving_chatbot cookbook_self_evolving_chatbot_multi
-./build/cookbook_self_evolving_chatbot         # single (alice)
-./build/cookbook_self_evolving_chatbot_multi   # multi (5 customers)
+cmake -S . -B build-chat -G Ninja \
+  -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
+  -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_EXAMPLES=ON \
+  -DNEOGRAPH_BUILD_SQLITE=ON -DNEOGRAPH_BUILD_POSTGRES=ON \
+  -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
+cmake --build build-chat --target cookbook_program_chatbot -j 4
+./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
+  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --db evolving-chat.sqlite
 ```
 
-## 为何只有 NG 能做到
+在 `http://127.0.0.1:8768` 切换 Alice/Bob。demo 中 `review`、`검토`、`비교` 提议 review Harness。首次回答用当前 Harness，批准后变更在下一 turn resume 应用。force checkbox 只交替两个已审核 plan，不证明品质提升。
 
-| 尝试方案 | LangGraph | NeoGraph |
-|---|---|---|
-| 每位客户使用不同的框架 | ❌ StateGraph = Python 对象 | ✅ graph_def JSON 行 |
-| Harness 在运行时重塑自身 | ❌ 模块重载 + 运行中状态丢失 | **✅ 一次数据库 UPDATE + 下次请求时重新编译引擎** |
-| 1000 个客户的 1000 个不同图 | ❌ 每个客户一个进程 = 80 GB | ✅ 单进程 / 独立形状缓存 |
-| 涌现式集群发现 | N/A | ✅ graph_def 哈希分布 = 客户行为集群 |
+设置 live OpenRouter key 和可用 model：
 
-LangChain/LangGraph 的 StateGraph 是 Python 类实例 — pickle 同时捆绑导入路径，运行时节点/边重塑需要 Python 模块重载，运行中对话状态丢失。**NG 的图即 JSON 意味着演进 = 一次 JSON 修改。**
-
-## Core 机制
-
-在每个回合结束时，固定的DeepSeek模型通过OpenRouter充当LLM评判者：它查看对话历史+当前拓扑，并用一个词回应最合适的方案：
-
-- `simple` — 1 次 LLM 调用，简短直接回答（适用于事实性提问）
-- `reflexive` — 3 次 LLM 调用（初稿 → 批评 → 终稿）（适用于追求准确性的场景）
-- `fanout` — 3 个并行 LLM 视角 → 合并（适用于多视角需求）
-
-若判定不一致，则就地更新客户数据库的 graph_def。下一轮使用新的拓扑——**0 部署、0 重启，运行中状态得以保留**。
-
-```cpp
-std::string suggested = llm_judge_topology(
-    provider, customer.history, customer.topology_name);
-
-if (suggested != customer.topology_name) {
-    customer.topology_def  = topo_registry[suggested]();   // New graph_def
-    customer.topology_name = suggested;
-    // Cache sees new hash next turn and automatically compiles new engine.
-    // Real production: DB UPDATE customer_graphs SET graph_def = ...
-}
+```bash
+export OPENROUTER_API_KEY='...'
+export OPENROUTER_MODEL='z-ai/glm-5.3-flash'
+./build-chat/cookbook_program_chatbot --live --session openrouter-demo
+# Or read an existing dotenv file without printing its values:
+./build-chat/cookbook_program_chatbot --live --env-file /path/to/.env \
+  --model z-ai/glm-5.3-flash --session glm-demo
 ```
 
-## 演示 1——Alice 1 人（server.cpp）
+默认 `z-ai/glm-5.3-flash`。`--model` 优先于 `OPENROUTER_MODEL`，process environment 优先于 dotenv。未指定 `--env-file` 时查找 working directory 最近的 `.env`，`--no-env` 关闭查找。只读取 named chatbot setting，将文件作为 data parse，不作 shell source。GLM 5.3 Flash chat 默认 `reasoning_effort=low`，在 output cap 留出 visible reply 空间。`--reasoning-effort default` 省略 override，explicit 值须由 model/provider 支持。DSL capability evaluator 的 generation 设置独立。
 
-历经 5 轮逐步演化。用户自然地从事实性问题→多视角问题过渡，harness 遵循 简单→fan-out 的演化。
+需要 ZDR eligible route，不假定 token price。不要把 credential 放入 DSL/DB/HTTP body/source。provider、model、skill、output cap、build 改变需要新 `--session`，重开保留已有 budget limit。`NEOGRAPH_CHAT_BASE_URL` 可指定兼容 endpoint，plain HTTP 需 literal loopback 和 `--allow-loopback-provider`，仅用于 protocol test。
 
-```
-── Turn 1 [topology=simple] ──
-User: What is a cloud?
-Bot:  A cloud is a visible mass of condensed water vapor...
-[Evaluating harness fit...] judge → simple
+output limit 发送为 [OpenRouter chat API](https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion) 的 `max_completion_tokens`。默认4,096包含 provider reasoning token，`--max-output-tokens` 接受正64-bit值。仍受 host model limit/session budget 限制，无固定8,192 CLI cap。`--provider-timeout-seconds` 为1..120秒(默认120)，checkpoint wait 覆盖其间顺序 call，reviewer child 有独立180秒 budget。timeout 保留 reservation 为 `UnknownHold`，不自动 retry。
 
-── Turn 3 [topology=simple] ──
-User: Now explain blockchain to me — I want both the
-      technical view and the economic view.
-Bot:  **Technical View:** Blockchain is a decentralized digital ledger...
-[Evaluating harness fit...] judge → fanout
-  ⟹ EVOLVE: simple → fanout (in-place, deploy 0)
+在 WSL native Docker 建专用 PostgreSQL DB，并在同一 shell 设置 URL。example 创建 table，但不是 production deployment/migration manager。
 
-── Turn 4-5 [topology=fanout] ──
-... multi-perspective response after ...
-
-Evolution timeline:
-  Turn 0:  simple   (initial)
-  Turn 3:  fanout   (evolved)
+```bash
+export NEOGRAPH_CHAT_POSTGRES_URL='postgresql://USER:PASSWORD@127.0.0.1:PORT/DATABASE'
+./build-chat/cookbook_program_chatbot --mock --session postgres-demo
 ```
 
-## 演示 2——多客户（server_multi.cpp）⭐
+有此变量时 chat/Program persistence 用 PostgreSQL，否则 `--db` 选择 SQLite。各 backend 可在 build 时关闭。
 
-**真正的影响在这里。** 5 个客户展现出不同的行为模式，各自拥有独立的演化时间线。演示涌现式集群发现。
+## 合成内容
 
-每个客户的行为模式假设与实际结果：
+model 返回 `{plan, reason, confidence}`。host 只接受 `direct`/`review`、bounded reason 和[0,1] confidence。低于0.7、invalid JSON、unknown plan 被 reject；相同 plan 记为 `kept`。evolution 请求 JSON-object response mode，application 仍检查 exact field/value。空/截断 proposal 不会丢失已完成回答。known usage 结算，stop reason 留在 diagnostic，transport uncertainty 阻止自动 redispatch。
 
-| 客户 | 行为模式 | 假设 | 实际演化 | 验证 |
-|---|---|---|---|---|
-| **alice** | 渐进式（事实性→多视角） | 中途 fan-out | `simple → fanout(t3)` | ✅ |
-| **bob** | 仅事实性问题（"X 是什么？" × 5） | 简单的维护 | `simple` 全部 5 轮 | ✅ |
-| **charlie** | 追求准确性（“验证你的答案”） | 反射式 | `simple → reflexive(t1)` 立即 | ✅ |
-| **david** | 一开始就“从多角度对比X与Y” | 快速fan-out | `simple → fanout(t1)` 立即 | ✅ |
-| **eve** | 混合（事实型 ↔ 多视角 ↔ 谨慎振荡） | 振荡风险 | `simple → fanout(t2) → reflexive(t4) → fanout(t5)` **振荡** | ✅ |
+这些参数实例化已审核 JavaScript template，需 source identity、bounded compilation、host semantic/template validation、Catalog admission 和 generation CAS。child 需 durable synthesis gateway 及独立持久化 host grant。model 不能提供 grant/credential/arbitrary import/native code/更大 budget。验证的是 reviewed-template synthesis，不是任意 model-written JavaScript 或回答品质。QuickJS generator control/model node 标记 `Unmanaged`，inspector 不声称 unknown external model effect 的 strict replay。
 
-### 汇总结果
+## Agent authoring skill
 
-```
-=== Aggregate stats ===
-Customers:           5
-Total turns:         25
-Total main LLM:      51
-Total judge LLM:     25
-Total LLM calls:     76
-Wall time:           424 s
-Peak RSS:            18.99 MB
-Compile cache size:  3   ← 5 customers → 3 distinct engine
+host 将 [SKILL.md](../../../skills/neograph-harness-authoring/SKILL.md) 及 `references/chat-template-proposals.md` 加入 evolution model 的 system context。answer/reviewer 使用角色 prompt。skill digest 绑定 session，actual prompt/output cap 绑定 call identity。旧 build DB 请用新 session。
 
-=== Final topology distribution ===
-  fanout:    3 customers  (alice, david, eve)
-  reflexive: 1 customer   (charlie)
-  simple:    1 customer   (bob)
+skill 的独立 QuickJS authoring/native runtime-handoff guide 用于 source-generation evaluator：向 model 提供 native compiler manifest，compile 返回 source，再将 rejected diagnostic 用于 bounded repair。见 [DSL capability evaluation](../../../docs/DSL_CAPABILITY_EVAL.md)。chatbot template 路径不公开 model-callable compiler tool。
+
+## Accounting 与 recovery
+
+tenant session 默认12turn/100model call/200,000model token。dispatch 前预留 admitted whole-window bound。只有先前 usage 非 unknown 且无 transport 内 resend 时，才以 consistent final usage 结算；missing usage 保留 reservation。缺少 model limit 时 dispatch 前 reject，不以 request byte 估 token。高于 reservation 的 report 仍 charged。monetary cost 是 unknown，不提供 price/monetary ceiling。
+
+Program compile/operation/Core step/child-depth/wall-time budget 不因 restart/replacement 重置；idle 消耗 wall-time。dynamic successor 在 held checkpoint 以 host-only `ProgramRuntime::reserve_synthesis` 先预留。
+
+以相同 DB/session/provider/model 重开，首 turn reconnect family 并 reconcile 最后 checkpoint。stored result 复用，pending/uncertain call 不自动再发。interrupted compilation intent 保留，不免费 recompile。replacement 前保存的 admitted successor 可从 exact held checkpoint publish，已 committed replacement 通过 lineage 解决。每 DB/session 支持一个 server process；loopback listener 和 `alice-demo`/`bob-demo` 不是 production 认证。explicit cancellation 关闭 family，与 process-loss restart 不同。
+
+## 验证
+
+```bash
+python3 examples/cookbook/self_evolving_chatbot/test_program_chat.py \
+  ./build-chat/cookbook_program_chatbot
+# Run the same command with NEOGRAPH_CHAT_POSTGRES_URL for PostgreSQL.
 ```
 
-### 关键观察
+black-box suite 覆盖 concurrent 两 tenant、keep/swap、recursive reviewer、idempotent request、restart、budget exhaustion、authorization 和真实 provider adapter 的 local HTTP fixture，不声称 external OpenRouter 成功。`--script scenario.json` 接受 `{tenant, request_id, message, force_swap?}` 数组；`--crash-after-script` 在 committed snapshot 后退出而不 cancel family，用于 restart scenario。
 
-1. **行为模式假设4/5准确验证** — 人类预测的演化路径与LLM 审判者的实际演化决策完全契合。即 **LLM 审判者能可靠且无偏见地检测用户的意图转换。**
+## 早期 Core example
 
-2. **实际观测到Eve的振荡 ⚠️** — 话语序列 [事实 → 多角度 → 事实 → 谨慎 → 事实] 导致拓扑振荡 [简单 → fan-out → fan-out(保持) → 反身 → fan-out]。**需要防抖动保护**，须由数据验证（冷却或滞后增强）。
-
-3. **涌现式集群发现** — 5位客户的多样话语模式自然归类为 **3个拓扑集群**。编译缓存大小 = 3 = 不同集群数量。
-
-**这是真正有趣的涌现属性** — NG的图即数据天然成为客户行为集群发现机制。graph_def分布 = 客户行为的本质集群形状。
-
-4. **内存效率** — 5 客户 → 3 引擎。通过缓存共享节省 2 个客户的(引擎)内存。**扩展至 1000 客户，如果不同形状收敛至约 10 个，引擎内存保持近常量 → 真实 1000+ 客户多租户可容纳于单进程。**
-
-5. **顺序模拟仅需 7 分钟墙钟时间** — 生产环境中，每个客户独立，因此可并行。5 个客户并行 ≈ 1.5 分钟 + 编译缓存并发访问安全(`std::shared_mutex`)，因此无竞态。
-
-## 生产场景 — 实际实现
-
-```sql
-CREATE TABLE customer_graphs (
-    customer_id   TEXT PRIMARY KEY,
-    graph_def     JSONB NOT NULL,
-    topology_name TEXT,
-    updated_at    TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE customer_evolution_log (
-    id            SERIAL PRIMARY KEY,
-    customer_id   TEXT REFERENCES customer_graphs(customer_id),
-    turn          INT,
-    from_topology TEXT,
-    to_topology   TEXT,
-    judge_reason  TEXT,
-    evolved_at    TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE customer_sessions (
-    thread_id     TEXT PRIMARY KEY,
-    customer_id   TEXT,
-    history       JSONB,
-    updated_at    TIMESTAMPTZ DEFAULT NOW()
-);
-```
-
-每个请求处理流程：
-
-```cpp
-auto& cust    = db.fetch_customer(customer_id);  // graph_def + topology_name
-auto  engine  = cache.get_or_compile(cust.graph_def, ctx);  // Hash-based cache
-auto  history = db.fetch_history(thread_id);     // Session isolation key
-RunConfig rcfg;
-rcfg.thread_id = thread_id;
-rcfg.input = {{"messages", history + user_msg}};
-auto result = engine->run(rcfg);
-
-db.append_history(thread_id, user_msg, result);
-
-if (turn % EVAL_INTERVAL == 0) {
-    auto suggested = llm_judge_topology(provider, history, cust.topology_name);
-    if (suggested != cust.topology_name && !in_cooldown(cust)) {
-        db.update_customer_graph(customer_id, topo_registry[suggested](),
-                                  suggested);
-        db.log_evolution(customer_id, turn, cust.topology_name, suggested);
-    }
-}
-```
-
-## 未来扩展
-
-- **防抖动保护(anti-oscillation guard)** — 处理边缘情况。若在最近 N 轮中已演进，则锁定；或采用滞回（若当前拓扑不比下一个候选者低 N%，则不更改）。
-- **LLM生成的graph_def** — 当前从 3 个预定义拓扑中选择。更雄心勃勃的方案是，LLM 可以完全生成 graph_def JSON。[`the-beast/`](../the-beast/) 菜谱演示了相同的模型作者拓扑及编译/验证门控。
-- **并行客户处理** — 顺序演示 7 分钟，按客户并行 = 约 1.5 分钟。直接使用 `asio::thread_pool` + 编译缓存。
-- **A/B框架** — 同时对同一客户运作 2 个拓扑，按响应满意度决定胜者。以 graph_id 粘性分配。
-- **CheckpointStore 集成** — Postgres + 上述 SQL schema，用于真实生产就绪。
-- **自适应演进速率** — 根据客户历史稳定性调整评估间隔（稳定 = 每 10 轮，不稳定 = 每轮）。
-
-## Core
-
-> **自演进 + 多租户组合是 NG (NeoGraph) 的真正本质。**“AI 代理
-> “自我构建”的系统借助NG的图即数据范式**切实可行**。
-> LLM 输出其自身的 harness → 数据库更新 → 立即应用 — 形成闭环路径，用于
-> 相比 LangGraph 的 StateGraph-as-Python 模型，NG 是**该市场中唯一的玩家**。
->
-> *“5 个客户 × 5 轮 = 19 MB / 3 个互引擎 / 涌现簇
-> /发现 / 振荡诊断。这是真实自我改进多租户智能体架构的起点
-> *基石。”*
+`server.cpp`/`server_multi.cpp` 和原 target 选择下一 request 的 Core graph，不演示新 `cookbook_program_chatbot` 的 live Program replacement。保留的迁移前测量为单 Alice16秒(当时约$0.003)、五客户/25turn/76model call的424秒·18.99MB·三 compiled engine(当时约$0.02)。最终 topology 是 fanout三/reflexive一/simple一。这不是当前 route 定价或已迁移 source 验证。

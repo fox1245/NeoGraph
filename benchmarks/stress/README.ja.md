@@ -1,62 +1,46 @@
-<!-- neograph-i18n: source=benchmarks/stress/README.md locale=ja source_sha256=87cc091ee71ab14f86ff9642a147a3d80e1452c56020c0073aba63e125258190 -->
-# NeoGraph ストレス ハーネス
+<!-- neograph-i18n: source=benchmarks/stress/README.md locale=ja source_sha256=245bd9f1555c8f45feba5119b20683c54700e0b74468f8857b4707267680b859 -->
+# NeoGraph持続同時実行ストレスベンチマーク
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-エンジンのオーバーヘッドと
-単一ショットの同時ベンチマーク。どこに `benchmarks/bench_neograph`
-**通話ごとのコスト**を測定し、`benchmarks/concurrent/...` は
-**単一 10k バースト**、このディレクトリは NeoGraph を **長期にわたって**実行します。
+3ノードのカウンターグラフを一定時間繰り返します。ローカルエンジンの反復を測定し、プロバイダー呼び出し、永続化、運用準備の測定ではありません。
 
-## ここには何がありますか
+## 測定と終了状態
 
-### `bench_sustained_concurrent`
+`bench_sustained_concurrent`の既定値は`--concurrency 1000`、`--duration-s 60`、`--sample-s 5`、`--warmup-s 5`、`--rss-tolerance-pct 25`です。目標実行数と同じ数の呼び出し側スレッドを作り、完了時に次を投入します。平均と最大レイテンシを出力し、P99は出しません。計測はワーカー内で始まりキュー待機を除外します。`ok_total`は例外なく戻った呼び出し数で、戻り状態の検証数ではありません。
 
-N 個のグラフ実行を実測時間の M 秒間保持します。新しいものを提出します
-完了するとすぐに実行されるため、飛行中はターゲットに留まります。サンプル
-RSS およびウィンドウごとの遅延 (`--sample-s` 秒ごと)。 RSS の場合は 1 を終了します
-暖かい時期の間は`--rss-tolerance-pct`以上上向きにドリフトします。
-ベースライン (ウォームアップ後) と最終サンプル。
+終了1は最終の現在RSSがウォーム基準から許容値を超えて増えたことを示します。終了0はリークや実行エラーがない証明ではありません。`err_total`も確認してください。最終RSSはプール停止とjoin後に読むため、スレッド終了が影響します。基準は最初のサンプルが`warmup-s`に達した場合だけ記録します。ウォームアップを最初のサンプル間隔より長くしないでください。基準がない場合のドリフト0はメモリ検査の証拠になりません。
 
-バーストベンチでは検出できない 3 つの障害モードを検出します。
+Windowsはworking-setカウンター、Linuxは`/proc/self/status`を使います。他の環境の0は測定不可の場合があります。ピークRSSは減少しないため、増加の調査では現在RSSと基準の有効性を確認してください。
 
-- **定常状態リーク** — コルーチン / 保留中の書き込み / キャッシュ
-  際限なく成長する状態。ドリフトゲートはベストエフォート型です
-  (Valgrind / LSan は依然として権威あるツールです。ASan / TSan CI を参照してください)、
-  しかし、60 秒を超える RSS の 25% の上昇は、「これを見てください」という強いシグナルです。
-- **レイテンシー ドリフト** — ウィンドウごとの平均 / 最大値は、
-  プールが温まります。多くの場合、スレッド プールの枯渇またはスケジューラを指します
-  t=0 バースト テストでは表示されない背圧。
-- **チャーンによるプールの枯渇** — 完了は新規と重複しています
-  送信が行われるため、ワーカー プールには混合された飛行中パターンが表示されます。
-  バーストのオールドレインではありません。
+## ビルドと実行
 
-#### 使用法
+外部SchemaProvider SDKをインストールしprefixを設定します。LLMとNeoGraphの任意libcurlバックエンドを無効にしてもCoreは`SchemaProvider::runtime`を必要とします。prefixの代わりに`NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`で明示的なソースを指定できます。ソースにはC++20、Python、libcurl ≥7.88、OpenSSL Cryptoが必要です。依存と環境制約は[ビルド案内](../../README.md)を参照してください。以下はネット取得と未使用のNeoGraph統合を無効にします。
+NeoGraph `0.13.0` には alpha SDK `0.1.0`、interface revision/shared generation 4 を使い、一致する header/library で再ビルドしてください。現在の統合検証は未完了です。
 
 ```bash
+# Set SCHEMAPROVIDER_PREFIX to the installed SDK prefix.
 cmake -B build-stress -S . \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DNEOGRAPH_BUILD_BENCHMARKS=ON \
-    -DNEOGRAPH_BUILD_TESTS=OFF \
-    -DNEOGRAPH_BUILD_EXAMPLES=OFF
-cmake --build build-stress -j$(nproc) --target bench_sustained_concurrent
+  -DCMAKE_PREFIX_PATH="$SCHEMAPROVIDER_PREFIX" \
+  -DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+  -DNEOGRAPH_BUILD_TESTS=OFF -DNEOGRAPH_BUILD_EXAMPLES=OFF \
+  -DNEOGRAPH_BUILD_PROGRAM=OFF -DNEOGRAPH_BUILD_LLM=OFF \
+  -DNEOGRAPH_BUILD_ASYNC=OFF -DNEOGRAPH_BUILD_MCP=OFF \
+  -DNEOGRAPH_BUILD_A2A=OFF -DNEOGRAPH_BUILD_ACP=OFF \
+  -DNEOGRAPH_BUILD_UTIL=OFF -DNEOGRAPH_BUILD_POSTGRES=OFF \
+  -DNEOGRAPH_BUILD_SQLITE=OFF -DNEOGRAPH_USE_LIBCURL=OFF
+cmake --build build-stress --parallel --target bench_sustained_concurrent
 
 ./build-stress/bench_sustained_concurrent \
-    --concurrency        1000 \
-    --duration-s         60   \
-    --sample-s           5    \
-    --warmup-s           5    \
-    --rss-tolerance-pct  25
+  --concurrency 1000 --duration-s 60 --sample-s 5 \
+  --warmup-s 5 --rss-tolerance-pct 25
 ```
 
-スモーク結果 (同時実行数 = 100、継続時間 = 15 秒、Ryzen 7 5800X 上):
-- 15.3 M グラフ実行 / 15 秒 ≈ **1.0 M 実行/秒** 継続
-- 実行あたりの平均レイテンシー: ~55 μs
-- RSS ウォーム: 9.3 MB → 最終: 7.4 MB (ドリフト ‑20 %、出口 0)
+## 保存した過去の観測
 
-#### 出力形状
-
-サンプルごとに 1 行の JSON 行と、最後の要約行が 1 行あります。
+以前のREADMEの日時不明のRyzen 7 5800X記録は同時実行100、15秒で15.3 M回（約1.0 M runs/s）、平均約55 µs、ウォームRSS 9.3 MBから最終7.4 MB（約−20%、終了0）でした。日付とSDKリビジョンは記録されていません。過去の証拠であり、新しいcutover検証や性能保証ではありません。以下はその出力の抜粋で、省略記号はJSONではありません。
 
 ```json
 {"sample":1,"elapsed_s":5,"window_ok":5012514,"err_total":0,"inflight":100,
@@ -67,32 +51,17 @@ cmake --build build-stress -j$(nproc) --target bench_sustained_concurrent
  "rss_drift_pct":-20.29,"rss_tolerance_pct":25,"leak_suspect":false}
 ```
 
-### `prlimit` の下の `bench_sustained_concurrent` (メモリ キャップ テスト)
+## 割り当て圧力の実験
 
-NeoGraph ハンドルを証明するために、ハーネスを仮想メモリ キャップで包みます。
-割り当てプレッシャーをクリーンに:
+`prlimit`はLinuxの仮想アドレス空間を制限します。呼び出しスロットごとにスレッドがあり、スタックとプール生成がグラフ実行前に上限を消費する場合があります。実行ごとのcatchは`engine->run`の例外を記録しますがプール生成はその外です。圧力下の正常終了は測定する合格基準であり、スクリプトの保証ではありません。
 
 ```bash
-# Cap address space at 256 MB. Allocations beyond this fail with
-# std::bad_alloc — NeoGraph's audit-Round-5 typed catch in
-# graph_executor (commit ead703e) rethrows bad_alloc instead of
-# silently retrying, so the workload should error out instead of
-# crashing.
+# Linux: cap virtual address space, not resident memory.
 prlimit --as=$((256*1024*1024)) \
-    ./build-stress/bench_sustained_concurrent \
-        --concurrency 200 --duration-s 30
+  ./build-stress/bench_sustained_concurrent \
+  --concurrency 200 --duration-s 30
 ```
 
-合格基準: プロセスが正常に終了します (戻りコード 0 または 1、SIGABRT ではありません)
-/ SIGSEGV)、`err_total` はゼロ以外の可能性があります (これらは bad_alloc
-失敗した実行として再スローします)。
+## 追加の実験
 
-## まだここにはいません
-
-- **24 時間浸漬** — 同じハーネス、より長い壁窓。で実行します
-  専用ホスト。単調非減少については `peak_rss_kb` をご覧ください
-  数時間にわたる傾向。
-- **cgroup 限定実行** — `systemd-run --scope -p MemoryMax=512M`
-  `prlimit` よりも厳しいリソース上限 (カーネル側)
-  割り当て時間のチェックだけでなく強制も行われます)。 WSL2 システム
-  サポートは限られています。実際の Linux ホストでテストします。
+24時間実行やcgroup上限には環境と結果の別記録が必要です。定常区間の現在RSSを比較し、`err_total`と終了シグナルを記録してください。cgroupの常駐メモリ制限と`prlimit`のアドレス空間制限を区別してください。本ページはその実行結果を報告しません。

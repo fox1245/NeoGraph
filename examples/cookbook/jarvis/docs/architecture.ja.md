@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/docs/architecture.md locale=ja source_sha256=27b6441685a1293819d0813b44b53142b1fa05c36ec9ba960702d5243eb9bf92 -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/docs/architecture.md locale=ja source_sha256=ed7f628ae6ae172e9e2cbd3d681d4880b503f251e10b745e7be089fbcdc42200 -->
 # JARVIS Graph — ノード別詳細
 
 **Languages:** [English](architecture.md) | [한국어](architecture.ko.md) | [日本語](architecture.ja.md) | [简体中文](architecture.zh-CN.md)
@@ -9,7 +9,7 @@ C++ルーター・合成器・専門家フィクスチャは型付き `ProviderR
 
 ローカル音声は任意で、選択したwhisper/Moonshineモデル、ONNX Runtime/Supertonic資産、miniaudio、利用可能なマイク・スピーカーが必要。テキスト/mock動作は音声動作の証拠ではない。クラウド不要はローカル/mockのみ。ライブには承認された `OPENROUTER_API_KEY`、ネットワーク・提供者容量が必要で、プロンプト・会話メモリ・添付ツール/委譲結果をOpenRouterへ送信する。モデルは固定され、ネイティブ要求のZDRは地域内常駐保証ではない。キーをログ・リポジトリへ入れない。nullableトークン使用量は請求額ではなく、費用には現行のエンドポイント/モデル価格と実際の請求対象使用量が必要。
 
-`[jarvis:ttft]` は最初の非空 `sp::PartDelta` の `PartKind::Text`・`DeltaChannel::Content` で発生し、使用量・推論・ヘッダーイベントでは発生しない。最初の合成テキストであり、実際のTTS音声開始ではない。Python REPL/ベンチのプロトコルドライバーは不変で、型付きPythonプロバイダーバインディングは延期。以下の時間・実行主張はすべて過去の記録で、移行したC++の実行証拠ではない。今回はソースとの整合のみで、ビルド・ベンチ・音声/ライブ実行はしていない。
+`[jarvis:ttft]` は最初の非空 `sp::PartDelta` の `PartKind::Text`・`DeltaChannel::Content` で発生し、使用量・推論・ヘッダーイベントでは発生しない。最初の合成テキストであり、実際のTTS音声開始ではない。Python REPL driver は protocol client です。pybind benchmark は移行済み型付き binding を使い、別の実行証拠が必要です。 保存された C++ 証拠は CLI 挨拶、synthetic memory の永続化、正常 EOF に限定されます。以下の voice/live timing は過去の記録で移行後の経路を検証しません。
 
 `config/jarvis_graph.json`内の各ノードが何を行うか、そしてなぜその位置にあるのか。README.mdの図と併せて読むのが最適です。
 
@@ -17,7 +17,7 @@ C++ルーター・合成器・専門家フィクスチャは型付き `ProviderR
 
 ```
 T0  Microphone active, Tony utterance start detected
-T1  Utterance end (VAD detects 200ms silence)
+T1  Utterance end (VAD detects 500ms silence)
 T2  STT complete — text + detected language code
 T3  Memory lookup complete — last 6 turns + preferences + last topic
 T4  Router decision complete — {mode, tool_calls, delegate_to, skip_synthesis}
@@ -107,12 +107,11 @@ T0→T8はJARVISの認識応答時間です。目標分布は次のとおりで�
 ### tts (`supertonic_tts`)
 - 上位音推論：final_text + user_lang → 44.1kHz PCM
 - miniaudioのスピーカー再生を開始 → 最初のチャンクは約100〜300ミリ秒後
-- Playback中にvoice_inアクティベーションが検出された場合は、cancel token付きでキャンセルする（barge-in）。
-  - Initial skeletonはbarge-in非対応対象; v2で追加。
+- Barge-in は未実装です。再生中の microphone input は破棄します。
 
 ## Graph外部 — バックグラウンドトリガー / A2Aサーバー
 
-JARVIS main graphはシンプルな単一発話・単一応答サイクルですが、main.cppはJARVISの雰囲気を補完する2つの追加コンポーネントを開始しています:
+main graph は cycle ごとに一発話と応答を処理します。A2A server は実装済みですが、以下の background trigger は未実装の設計です。
 
 ### バックグラウンドトリガーグラフ
 - 別の`GraphEngine`(または単に std::thread)
@@ -130,5 +129,5 @@ JARVIS main graphはシンプルな単一発話・単一応答サイクルです
 
 - **Barge-in は非対応** — TTS再生中のマイク入力を無視します。v2でキャンセルトークンを追加します。
 - **マルチスピーカーは非対応** — 一人を想定しています。話者分離には別のノード(例:pyannote)が必要です。
-- **長いメモリの圧縮** — 会話が長くなるとターンが無限に伸びます。#56 の history_compaction パターンが必要です。
-- **カタログのホットリロード** — JSONの変更検出は手動です(SIGHUPなど)。v2ではinotifyによる自動リロードを提供します。
+- **Long-memory compression** — lookup は既定で最近六 turn を読み、commit は最新 24 turn を保持します。古い turn は要約せず破棄します。
+- **Catalog hot-reload** — startup 時に catalog を読みます。変更後は再起動してください。自動 reload は未実装です。

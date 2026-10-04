@@ -1,11 +1,6 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.20)
 
-# Single source of version truth — read from pyproject.toml so the
-# wheel ships the same number as `find_package(NeoGraph 0.2)` and
-# `set_target_properties(... VERSION SOVERSION)`. Previously this was
-# hard-coded to 2.0.0 and drifted multiple minor versions behind the
-# real release line, with side-effects on Doxygen PROJECT_NUMBER and
-# the installed CMake config package.
+# Keep the C++ package and Python distribution versions in sync.
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/pyproject.toml" _NG_PYPROJECT)
 string(REGEX MATCH "version[ \t]*=[ \t]*\"([0-9]+\\.[0-9]+\\.[0-9]+)\""
        _NG_VER_MATCH "${_NG_PYPROJECT}")
@@ -28,21 +23,8 @@ if(MSVC)
     add_compile_options(/utf-8)
 endif()
 
-# ===========================================================================
-# Hardening flags — defense-in-depth in Release builds.
-#
-# These add bounds checking, stack canaries, and CFI to release-built
-# library and binary artifacts. Cost: a few percent in throughput on
-# the engine's hot path (measured: par bench 278 → 280 µs, within
-# noise); benefit: most CWE-class memory-corruption bugs trip the
-# canary or the libc fortify check at runtime instead of becoming a
-# silent UAF / OOB. CI's Release builds (build-and-test, bench-
-# regression, build-macos, build-windows, Wheels) all pick this up.
-#
-# Skipped under sanitizer builds (ASan/UBSan/TSan/MSan) because
-# they replace these mechanisms with their own instrumented checks.
-# Detect via CMAKE_CXX_FLAGS containing `-fsanitize=`.
-# ===========================================================================
+# Hardening complements release optimization; sanitizer builds provide their own
+# instrumentation and skip these flags.
 option(NEOGRAPH_ENABLE_HARDENING "Hardening flags in Release builds (canaries, FORTIFY, CFI)" ON)
 option(NEOGRAPH_ENABLE_SHA256_ACCELERATION "Use runtime-gated SHA-256 CPU acceleration" ON)
 option(NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION
@@ -136,13 +118,8 @@ endif()
 # ===========================================================================
 # Options
 # ===========================================================================
-# neograph::async — asio::ssl-based HTTP/HTTPS/WS client. Required (as a
-# link dep) by neograph::{llm,mcp,a2a} and by the Python binding. Gated
-# behind an option so a *minimal-core* build (Dockerfile.neograph in the
-# concurrent-bench matrix, or any "I just need GraphEngine" downstream)
-# can flip every component OFF including async — that path then needs
-# **no OpenSSL** on the build host. With ASYNC=OFF the OpenSSL / libcurl
-# find_package() calls are skipped entirely (see line ~258).
+# NeoGraph's optional HTTP/HTTPS/WS client. Core still requires SchemaProvider's
+# independent transport and its libcurl/OpenSSL dependencies when this is OFF.
 option(NEOGRAPH_BUILD_ASYNC    "Build neograph::async (asio::ssl HTTP/HTTPS/WS client)" ON)
 option(NEOGRAPH_BUILD_PROGRAM  "Build optional neograph::program component" OFF)
 option(NEOGRAPH_BUILD_WASM
@@ -175,73 +152,14 @@ option(NEOGRAPH_BUILD_HARNESS_MCP_BINARY
        "Build and install the neograph-harness-mcp executable"
        OFF)
 option(NEOGRAPH_BUILD_PYBIND   "Build Python bindings (pybind11)"        OFF)
-# neograph::grpc — expose a compiled GraphEngine as a gRPC service
-# (RunGraph unary + RunGraphStream server-streaming). **default OFF**
-# on purpose: grpc++ drags in protobuf + abseil + c-ares + re2 + zlib
-# (tens of MB transitive), which would break the "2 deps / libc.so.6
-# only / 1.2 MB binary" lightweight axis for the 99% who don't need
-# gRPC. Opt-in only. find_package(Protobuf/gRPC) is gated inside this
-# option (see ~line 262) — a default build never probes for them, so
-# a host without grpc++ still configures cleanly. Keeping default OFF
-# is also the explicit guard against the cmake-option-default-flip
-# trap (a previously-OFF dep silently flipping ON and breaking every
-# minimal downstream).
+# gRPC adds protobuf and its transport dependencies only when requested.
 option(NEOGRAPH_BUILD_GRPC     "Build neograph::grpc (gRPC GraphEngine service — needs grpc++/protoc)" OFF)
-# libcurl drives the opt-in HTTP/2 transport (CurlH2Pool, used when
-# SchemaProvider::Config::prefer_libcurl=true). Default ON because the
-# library is on every Linux/macOS distro by default; turn OFF when
-# building on Windows CI without vcpkg/curl. With OFF, the engine
-# still builds and the default ConnPool HTTP/1.1 path works — only the
-# `prefer_libcurl=true` opt-in becomes a runtime no-op (an error from
-# the SchemaProvider constructor if the user requests it).
+# Optional NeoGraph HTTP/2 pool. SchemaProvider's independent transport always
+# requires libcurl, regardless of this option.
 option(NEOGRAPH_USE_LIBCURL    "Build libcurl HTTP/2 backend (CurlH2Pool)" ON)
 
-# ---------------------------------------------------------------------------
-# Shared-vs-static library mode
-#
-# Standard CMake convention: respect BUILD_SHARED_LIBS. The neograph_*
-# `add_library()` calls below pass NO type keyword so the user-supplied
-# value of BUILD_SHARED_LIBS picks STATIC (default) or SHARED.
-#
-# Why someone would flip BUILD_SHARED_LIBS=ON:
-#   - Patch a single subsystem (e.g. libneograph_llm.so when an LLM API
-#     surface changes) without rebuilding/redeploying the whole agent.
-#   - Cut the per-agent binary size when shipping multiple NeoGraph-based
-#     agents on the same host: they share one libneograph_core.so instead
-#     of statically linking the engine into each.
-#   - Ship the engine as an OS package; user agents link against the
-#     installed .so.
-#
-# Caveats:
-#   - Windows DLL export annotations (__declspec(dllexport)/dllimport on
-#     every public symbol) are now in place via NEOGRAPH_API on every
-#     class / free function with out-of-line .cpp definitions, including
-#     async/sse_parser.h SseEventParser and async/ws_client.h's `detail`
-#     codec helpers (the test suite exercises those across the .so
-#     boundary). The shape was verified end-to-end on Linux
-#     `BUILD_SHARED_LIBS=ON` (libneograph_*.so + 429/429 ctest green) —
-#     under MSVC the same annotations resolve to dllexport/dllimport
-#     and should link cleanly, but native MSVC load testing has not yet
-#     happened. Report any LNK2019 you see.
-#   - Static-only deps (yyjson, httplib INTERFACE, asio INTERFACE,
-#     cppdotenv INTERFACE, concurrentqueue INTERFACE) get absorbed into
-#     whichever neograph_* library uses them, regardless of mode.
-# ---------------------------------------------------------------------------
-# Public symbol export — `NEOGRAPH_API` macro defined in
-# include/neograph/api.h decorates public class/function declarations
-# with the right linkage attribute on every platform:
-#
-#   - Static builds (BUILD_SHARED_LIBS=OFF) → empty (no-op).
-#   - Shared builds, Windows → __declspec(dllexport) inside engine TUs
-#     (those that get NEOGRAPH_BUILDING_LIBRARY defined below);
-#     __declspec(dllimport) for downstream consumers.
-#   - Shared builds, Linux/macOS → visibility("default") inside engine
-#     TUs; no-op for consumers.
-#
-# We set NEOGRAPH_STATIC_BUILD when BUILD_SHARED_LIBS is OFF so the
-# api.h macro skips its Windows decoration entirely. Without this,
-# a static build on Windows would still try to dllimport — fine for
-# the binary but breaks LTO and silly warning noise.
+# BUILD_SHARED_LIBS selects the engine linkage mode. NEOGRAPH_STATIC_BUILD
+# disables DLL import/export annotations for static consumers.
 if(NOT BUILD_SHARED_LIBS)
     add_compile_definitions(NEOGRAPH_STATIC_BUILD)
 endif()
@@ -269,14 +187,8 @@ endif()
 # ===========================================================================
 find_package(Threads REQUIRED)
 
-set(NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR "" CACHE PATH "Optional SchemaProvider source checkout; otherwise use its installed package")
-if(NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR)
-    add_subdirectory("${NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/schemaprovider")
-else()
-    find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)
-endif()
-
 set(DEPS_DIR ${PROJECT_SOURCE_DIR}/deps)
+include(cmake/NeoGraphSchemaProvider.cmake)
 
 # yyjson (C, compiled) — used by all modules for JSON parse/write
 # GNUInstallDirs early: the vendored targets below need CMAKE_INSTALL_INCLUDEDIR
@@ -467,18 +379,8 @@ if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
     endif()
 endif()
 
-# OpenSSL — required by httplib for HTTPS, and by neograph::async
-# (asio::ssl in the async HTTP client). Conditional so a minimal-core
-# build (ASYNC/LLM/MCP/A2A all OFF) doesn't need libssl-dev on the host.
-# Previously unconditional — that broke
-# `benchmarks/concurrent/Dockerfile.neograph` twice when option defaults
-# drifted OFF → ON. Keep this dependency guard next to the option defaults so
-# a minimal-core build cannot acquire OpenSSL accidentally.
-#
-# Guard: if any component that *needs* OpenSSL is ON but ASYNC is OFF,
-# fail loud — neograph_async is their link target and skipping it would
-# yield a confusing "undefined reference to OpenSSL::SSL" link error
-# many minutes into the build.
+# NeoGraph's HTTPS clients need OpenSSL::SSL in addition to the SDK's Crypto
+# dependency. Reject incompatible component selections before linking.
 if(NOT NEOGRAPH_BUILD_ASYNC AND (NEOGRAPH_BUILD_LLM OR NEOGRAPH_BUILD_MCP_CLIENT OR NEOGRAPH_BUILD_A2A OR NEOGRAPH_BUILD_PYBIND))
     message(FATAL_ERROR
         "NEOGRAPH_BUILD_ASYNC=OFF is incompatible with "
@@ -551,6 +453,7 @@ set(NEOGRAPH_CORE_SOURCES
     src/core/cancel.cpp
     src/core/graph_invocation.cpp
     src/core/provider.cpp
+    src/core/provider_wake.cpp
     src/core/artifact_provider.cpp
     src/core/tool.cpp
     src/core/tool_execution.cpp
@@ -610,6 +513,11 @@ target_include_directories(neograph_core
 # libraries) must see dllimport — which is what they get when this
 # define is absent from their compile line.
 target_compile_definitions(neograph_core PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+if(NOT BUILD_SHARED_LIBS)
+    # Directory definitions do not propagate back to parent-directory consumers
+    # or downstream find_package callers.
+    target_compile_definitions(neograph_core PUBLIC NEOGRAPH_STATIC_BUILD)
+endif()
 if(NOT NEOGRAPH_ENABLE_SHA256_ACCELERATION)
     target_compile_definitions(neograph_core PRIVATE NEOGRAPH_DISABLE_SHA256_ACCELERATION=1)
 endif()
@@ -2224,21 +2132,6 @@ if(NEOGRAPH_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 
-    # Focused P8 smoke tests only; the full example matrix remains opt-in and
-    # is not pulled into CTest.  Targets are absent when examples or Program
-    # are disabled, so each smoke follows the same existing build options.
-    if(TARGET example_core_quickstart)
-        add_test(NAME Quickstart.Core COMMAND example_core_quickstart)
-        set_tests_properties(Quickstart.Core PROPERTIES
-            LABELS "quickstart;p8"
-            PASS_REGULAR_EXPRESSION "HELLO")
-    endif()
-    if(TARGET example_program_quickstart)
-        add_test(NAME Quickstart.Program COMMAND example_program_quickstart)
-        set_tests_properties(Quickstart.Program PROPERTIES
-            LABELS "quickstart;p8"
-            PASS_REGULAR_EXPRESSION "1")
-    endif()
 endif()
 
 # Fuzz targets — libFuzzer-driven, Clang only. Separate flag so
@@ -2267,28 +2160,8 @@ if(NEOGRAPH_BUILD_PYBIND)
     add_subdirectory(bindings/python)
 endif()
 
-# ===========================================================================
-# Install
-#
-# Two consumer paths:
-#
-#   a) Standard `cmake --install`: ships headers, schemas, and engine
-#      libs to a conventional system prefix (/usr/local, etc.).
-#      Headers + schemas are gated behind NEOGRAPH_INSTALL_HEADERS
-#      (default ON for source builds, OFF for the Python wheel build
-#      via pyproject.toml). Engine libs are unconditional.
-#
-#   b) Python wheel via scikit-build-core: pyproject.toml sets
-#      -DNEOGRAPH_INSTALL_HEADERS=OFF + -DNEOGRAPH_BUILD_PYBIND=ON.
-#      cmake --install then drops only the engine .so/.dll/.dylib
-#      siblings into <wheel-staging>/neograph_engine/, alongside the
-#      _neograph.{so,pyd} that bindings/python/CMakeLists.txt's own
-#      install rule contributes. The earlier COMPONENT-based filter
-#      (NeoGraphPyBindWheel) was abandoned — scikit-build-core's
-#      install.components handling didn't reliably propagate to
-#      cmake --install --component on Windows, leaving the engine
-#      .dlls out of the wheel.
-# ===========================================================================
+# C++ installs include headers, schemas and find_package exports. Wheel builds
+# disable those rules and install runtime libraries beside the Python extension.
 include(GNUInstallDirs)
 
 option(NEOGRAPH_INSTALL_HEADERS
@@ -2397,7 +2270,7 @@ if(NEOGRAPH_INSTALL_EXPORT)
     # linked. Writing these out per-build rather than hardcoding them is the
     # point: an install that was built without libpq must not make its consumers
     # hunt for PostgreSQL.
-    set(NEOGRAPH_CONFIG_DEPENDENCIES "find_dependency(Threads)\nfind_dependency(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)")
+    set(NEOGRAPH_CONFIG_DEPENDENCIES "find_dependency(Threads)\nfind_dependency(SchemaProvider 0.1.0 CONFIG REQUIRED COMPONENTS runtime)")
     if(TARGET neograph_async OR TARGET neograph_llm OR TARGET neograph_mcp_http_server)
         string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(OpenSSL)")
     endif()
@@ -2432,17 +2305,8 @@ if(NEOGRAPH_INSTALL_EXPORT)
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/NeoGraph)
 endif()
 
-# ── Pybind11 wheel install ───────────────────────────────────────────────
-#
-# When NEOGRAPH_BUILD_PYBIND is on (typical: pip install .), bundle the
-# engine .so files into the wheel right next to the binding so the
-# `$ORIGIN` RPATH on `_neograph.so` resolves at import time without
-# LD_LIBRARY_PATH.
-#
-# Only the libraries the binding actually links against get bundled —
-# that's `neograph_core` (always), `neograph_async` (always; binding's
-# transitive dep through engine.h coroutines), and `neograph_llm`
-# (when LLM is on; needed for OpenAIProvider / SchemaProvider).
+# Bundle runtime libraries beside the extension; platform repair tools bundle
+# their external dependencies and rewrite loader references.
 if(NEOGRAPH_BUILD_PYBIND)
     set(NEOGRAPH_PYBIND_LIBS neograph_core neograph_async)
     # The Python Program binding and the A2A adapter both hard-link the
@@ -2455,76 +2319,74 @@ if(NEOGRAPH_BUILD_PYBIND)
     if(TARGET neograph_llm)
         list(APPEND NEOGRAPH_PYBIND_LIBS neograph_llm)
     endif()
-    # neograph_postgres ships when libpq was found at engine-build
-    # time. The binding's PostgresCheckpointStore class hard-links
-    # against it (bindings/python/CMakeLists.txt:91), so the wheel
-    # must carry the libneograph_postgres platform loader file as a sibling
-    # alongside the binding — otherwise auditwheel/delocate fail
-    # with "required library libneograph_postgres.* could not be
-    # located" during repair.
+    # Optional stores and protocol clients are linked directly by the binding.
     if(TARGET neograph_postgres)
         list(APPEND NEOGRAPH_PYBIND_LIBS neograph_postgres)
     endif()
-    # neograph_sqlite ships when SQLite is built (default ON). The
-    # binding's SqliteCheckpointStore class hard-links against it
-    # (bindings/python/CMakeLists.txt), so the wheel must carry
-    # libneograph_sqlite platform loader file as a sibling alongside the
-    # binding — otherwise auditwheel/delocate fail with "required
-    # library libneograph_sqlite.* could not be located" during repair.
+    # Include SQLite when enabled.
     if(TARGET neograph_sqlite)
         list(APPEND NEOGRAPH_PYBIND_LIBS neograph_sqlite)
     endif()
-    # neograph_mcp ships when MCP is built — which, since #95, the wheel does.
-    # bindings/python/src/bind_mcp.cpp links against it, so the wheel must carry
-    # libneograph_mcp platform loader file next to the binding. Miss this and the
-    # wheel builds fine and then dies in repair on all four platforms with
-    # "Cannot repair wheel, because required library libneograph_mcp.so could
-    # not be located" — which is exactly what flipping NEOGRAPH_BUILD_MCP=ON in
-    # pyproject.toml without touching this list did.
+    # MCP also depends on the shared protocol types library.
     if(TARGET neograph_mcp)
         list(APPEND NEOGRAPH_PYBIND_LIBS neograph_mcp_types)
         list(APPEND NEOGRAPH_PYBIND_LIBS neograph_mcp)
     endif()
-    # neograph_a2a ships when A2A is built. Same reasoning as above:
-    # bindings/python/src/bind_a2a.cpp links against it (added in
-    # v0.2.1), so the wheel must carry the libneograph_a2a loader file
-    # next to the binding or auditwheel/delocate refuses to repair.
+    # Include the A2A client when enabled.
     if(TARGET neograph_a2a)
         list(APPEND NEOGRAPH_PYBIND_LIBS neograph_a2a)
     endif()
 
-    # Set INSTALL_RPATH so the bundled libs find each other via
-    # `$ORIGIN` (libneograph_llm.so.0 → libneograph_core.so.0 etc.).
-    # Build-tree RPATH is set globally above (CMAKE_BUILD_RPATH);
-    # this is the parallel for the installed wheel layout.
+    # Installed libraries must not retain SDK checkout or build-tree paths.
     if(UNIX AND NOT APPLE)
         set(_NEOGRAPH_PYBIND_INSTALL_RPATH "$ORIGIN")
     elseif(APPLE)
         set(_NEOGRAPH_PYBIND_INSTALL_RPATH "@loader_path")
     endif()
     foreach(_lib IN LISTS NEOGRAPH_PYBIND_LIBS)
+        set_property(TARGET ${_lib} PROPERTY VERSION)
         set_target_properties(${_lib} PROPERTIES
             INSTALL_RPATH "${_NEOGRAPH_PYBIND_INSTALL_RPATH}"
-            INSTALL_RPATH_USE_LINK_PATH TRUE)
+            INSTALL_RPATH_USE_LINK_PATH FALSE)
     endforeach()
 
-    # A wheel archive cannot preserve CMake's shared-library symlink chain.
-    # Installing TARGETS here would therefore store the same bytes three times
-    # (`.so`, `.so.0`, `.so.0.11.1`). Bundle one real file under the loader name
-    # recorded in DT_NEEDED / LC_LOAD_DYLIB instead. System installs above keep
-    # the normal full-version + SOVERSION + linker-name chain.
-    foreach(_lib IN LISTS NEOGRAPH_PYBIND_LIBS)
-        if(WIN32)
-            install(FILES "$<TARGET_FILE:${_lib}>"
-                DESTINATION neograph_engine)
-        elseif(APPLE)
-            install(FILES "$<TARGET_FILE:${_lib}>"
-                DESTINATION neograph_engine
-                RENAME "lib${_lib}.${PROJECT_VERSION_MAJOR}.dylib")
-        else()
-            install(FILES "$<TARGET_FILE:${_lib}>"
-                DESTINATION neograph_engine
-                RENAME "lib${_lib}.so.${PROJECT_VERSION_MAJOR}")
+    # Omit the full-version filename and development namelink. TARGETS install
+    # applies INSTALL_RPATH; copying TARGET_FILE would retain the build RPATH.
+    install(TARGETS ${NEOGRAPH_PYBIND_LIBS}
+        LIBRARY DESTINATION neograph_engine NAMELINK_SKIP
+        RUNTIME DESTINATION neograph_engine
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} EXCLUDE_FROM_ALL)
+
+    # SchemaProvider splits its runtime across six libraries. Imported static
+    # packages are already absorbed by the engine and need no loader files.
+    foreach(_component core json descriptor codecs transport runtime)
+        set(_sdk_target SchemaProvider::${_component})
+        get_target_property(_sdk_type ${_sdk_target} TYPE)
+        if(_sdk_type STREQUAL "SHARED_LIBRARY")
+            get_target_property(_sdk_imported ${_sdk_target} IMPORTED)
+            if(NOT _sdk_imported)
+                get_target_property(_sdk_build_target ${_sdk_target} ALIASED_TARGET)
+                if(NOT _sdk_build_target)
+                    set(_sdk_build_target ${_sdk_target})
+                endif()
+                set_property(TARGET ${_sdk_build_target} PROPERTY VERSION)
+                set_target_properties(${_sdk_build_target} PROPERTIES
+                    INSTALL_RPATH "${_NEOGRAPH_PYBIND_INSTALL_RPATH}"
+                    INSTALL_RPATH_USE_LINK_PATH FALSE)
+                install(TARGETS ${_sdk_build_target}
+                    LIBRARY DESTINATION neograph_engine NAMELINK_SKIP
+                    RUNTIME DESTINATION neograph_engine
+                    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} EXCLUDE_FROM_ALL)
+                continue()
+            endif()
+            if(WIN32)
+                install(FILES "$<TARGET_FILE:${_sdk_target}>"
+                    DESTINATION neograph_engine)
+            else()
+                install(FILES "$<TARGET_FILE:${_sdk_target}>"
+                    DESTINATION neograph_engine
+                    RENAME "$<TARGET_SONAME_FILE_NAME:${_sdk_target}>")
+            endif()
         endif()
     endforeach()
 endif()

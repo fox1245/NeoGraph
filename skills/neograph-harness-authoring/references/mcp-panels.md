@@ -1,5 +1,7 @@
 # MCP panel procedure
 
+**Languages:** [English](mcp-panels.md) | [한국어](mcp-panels.ko.md) | [日本語](mcp-panels.ja.md) | [简体中文](mcp-panels.zh-CN.md)
+
 1. Call `neograph_schema`; use only presets and fields returned by this build.
 2. Build one request with a precise objective, acceptance criteria, bounded
    budgets, and a JSON output schema for every worker.

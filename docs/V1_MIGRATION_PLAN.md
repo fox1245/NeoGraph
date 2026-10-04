@@ -12,10 +12,24 @@ below remains useful. Any phase that grows or permanently publishes the bounded
 Core DSL or Program JSON operation DSL is superseded by the QuickJS migration
 plan.
 
-## 1. Starting point
+This is a chronological planning record. The Classic version numbers, baseline
+results, issue dispositions, and dated phase statuses below describe their
+recorded revisions; they are not today's release checklist or verification
+results. The current provider boundary is documented in
+[`V1_ARCHITECTURE.md`](V1_ARCHITECTURE.md#typed-provider-boundary) and the
+[`Python binding guide`](python-binding.md). It supersedes the old
+CompletionProvider/vtable-preservation and injectable-primitive proposals.
+`Provider` now prepares typed owned requests; common dispatch consumes them,
+and results retain immutable SDK Completion/Failure evidence. There is no
+`CompletionParams`/`ChatCompletion` compatibility path or descriptor interpreter.
+SchemaProvider runtime is a required Core dependency, not the optional
+NeoGraph async libcurl backend. Source-bound replay uses
+`ProgramRuntime::replay_recorded`, never a renewed `start_recorded` grant.
 
-The current code is not a failed prototype. It already contains the Core that
-v1 should preserve:
+## 1. Historical starting point
+
+The audited code already contained the Core that the redesign set out to
+preserve:
 
 - `GraphEngine` compiles, validates, runs, resumes, checkpoints, streams, retries,
   cancels, dispatches tools, and supports dynamic `Send` and subgraphs.
@@ -73,7 +87,7 @@ or execution engine:
 - do not backport Program, activation, child composition, or new DSL semantics
   to Classic.
 
-### Current Classic release readiness
+### Historical Classic release readiness
 
 The product version has one authoritative literal:
 `pyproject.toml` declares `0.11.1`; top-level CMake parses that value into
@@ -100,8 +114,8 @@ Release status is **NO-GO** until every unchecked item is closed:
 - [x] CPU-pinned Core hot-path samples are retained and satisfy the
   preregistered median/p95 ratios.
 - [ ] #188: run `benchmarks/dr_compare/mem_probe.py` from a checkout outside
-  `/root/Coding/NeoGraph` and retain the output; only the path-independent code
-  and `psutil` instructions are present locally.
+  the original workstation directory and retain the output; only the
+  path-independent code and `psutil` instructions are present locally.
 - [ ] #189: rebuild the corrected WASM smoke command with Emscripten and run the
   Node/browser smoke; the source list and default-worker documentation are
   present, but no retained current smoke result exists.
@@ -162,10 +176,10 @@ Release status is **NO-GO** until every unchecked item is closed:
 - preserve pre-v1 source aliases indefinitely. One announced rebuild boundary is
   cleaner and safer.
 
-## 3. Current issue audit
+## 3. Historical issue audit
 
-`OPEN` was not treated as evidence that work remains. Each issue was checked
-against source, tests, and current documents.
+The following findings retain the original audit chronology.
+`OPEN` was not treated as evidence that work remained.
 
 | Issue | Finding | v1 disposition | Owner / phase |
 |---|---|---|---|
@@ -293,7 +307,7 @@ headers; move files later in small mechanical commits.
 | proposed `GraphProgramVersion` | `ProgramVersion` | One name only. |
 | Control VM bytecode | typed immutable Program plan | No bytecode encoder/decoder/JIT in the default architecture. |
 | Durable Kernel | Program-owned transition/journal/checkpoint/effect state plus an internal durable child dispatcher | Keep one public Program API and one Core node executor; do not add a public second engine. |
-| SchemaProvider private strategy enums | request mapper + transport + parser + injected primitive registry | #241 contract before #242 extensibility. |
+| SchemaProvider private strategy enums (historical proposal) | closed validated descriptor + typed SDK runtime (current cutover) | The proposed interpreter/primitive-registry extension was superseded; migrate callers to typed requests and owned outcomes. |
 | Python `llm::Agent` parity | Python GraphEngine/Program | Do not bind; expose Program abilities and generated artifacts where Python cannot reproduce lifecycle semantics. |
 
 ### Adapter and protocol cutover matrix
@@ -733,8 +747,10 @@ Deliverables:
 - durable `spawn` publication through the Program API, durable parent/child
   `await`/join state, cancellation propagation, duplicate-dispatch handling,
   and restart recovery;
-- MCP transport split, SchemaProvider mapper/transport/parser split;
-- generated artifacts/LRO contract, then injectable SchemaProvider primitives.
+- MCP transport split; the SchemaProvider mapper/transport/parser work was
+  subsequently replaced by the closed-descriptor typed SDK runtime cutover;
+- generated artifact/LRO contracts; the proposed injectable SchemaProvider
+  primitives were superseded, not retained as a future public extension.
 
 `spawn` is not an independently recoverable sub-agent until its child run,
 parent relationship, budget reservation, lifecycle, and dispatch outcome

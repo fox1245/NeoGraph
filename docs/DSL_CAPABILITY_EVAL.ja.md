@@ -1,9 +1,10 @@
-<!-- neograph-i18n: source=docs/DSL_CAPABILITY_EVAL.md locale=ja source_sha256=a2b954c6e311d3acabd6fcc547511af245a49b2303e4897e12628ae7187191c4 -->
+<!-- neograph-i18n: source=docs/DSL_CAPABILITY_EVAL.md locale=ja source_sha256=7ac0e8bb68d88e27682b67247d72e6d408b05e9f23c6ff59967e81cf9f6b3b30 -->
 # QuickJS DSL 能力とモデル合成評価
 
 **Languages:** [English](DSL_CAPABILITY_EVAL.md) | [한국어](DSL_CAPABILITY_EVAL.ko.md) | [日本語](DSL_CAPABILITY_EVAL.ja.md) | [简体中文](DSL_CAPABILITY_EVAL.zh-CN.md)
 
-ステータス: 実装済み、決定論的適合性ゲート付き。ライブモデル評価はオプトイン。観測日: 2026-08-22
+状態: 実装済み、決定的適合性検査の対象。ライブモデル評価は opt-in。
+過去のライブ観測: 2026-08-22。以下の記録は新しい実行結果ではありません。
 
 ## 質問
 
@@ -48,16 +49,59 @@ build\tests\Release\neograph_program_tests.exe `
 ## ライブモデル評価
 
 オプトインランナーは、自然言語セマンティクスに加えて公開APIシグネチャを使用してソースを要求します。モデルにはチェックイン済みの回答は渡されません。各応答は、決定的CTestで使用される同じネイティブプローブに送信されます。
+Runner は `skills/neograph-harness-authoring/SKILL.md` とその
+`references/quickjs-authoring.md` をモデルの context に入れ、guidance digest
+を report に記録します。`--skill` は同じ companion reference を持つ別の
+entrypoint を選びます。ホストは実際の compiler bridge を呼び、モデルは source
+を返して、有限の repair 用 diagnostic を受け取ります。Skill は runtime 権限を
+与えません。
 
 ```powershell
 bun --env-file=C:\path\to\.env run scripts/run_dsl_capability_eval.ts `
   --probe build\tests\Release\program_dsl_capability_probe.exe `
-  --model deepseek/deepseek-v4-flash-0731 `
+  --model z-ai/glm-5.3-flash `
   --repair-attempts 2 `
   --output dsl-capability-evidence.json
 ```
 
 `--case`はコンマ区切りのサブセットを受け入れ、`--attempts`は独立したワンショット試行を繰り返し、`--repair-attempts`は拒否された完全なソースをモデルに権威あるプローブ診断を返します。プロバイダー/応答の失敗は、コンパイルまたは意味拒否とは別に保持されます。
+既定モデルは `z-ai/glm-5.3-flash` です。Generation は completion token
+4,096 個に制限し、cookbook の ZDR provider-routing 設定を使います。
+以下の DeepSeek 証拠は、この skill-loading 設定より前の過去の記録です。
+
+## 指示を別に評価する
+
+Source case の合格は、skill、提供した native API reference、case contract、
+model 設定の組み合わせを測ります。Skill だけで十分だとは証明しません。
+Runner は system prompt、API reference、raw model content、usage、
+stop reason、strict-envelope 結果を保持します。Legacy source extractor は
+fenced JSON を復元できます。`strictEnvelope` はそれと要求された raw JSON
+envelope への準拠を区別します。
+
+`--reasoning-effort` は別の比較 profile を明示的に選ぶ場合のみ使います。
+省略すると provider default を保持します。Before/after 比較ではその値、
+model、sampling、output cap、task、compiler を固定します。
+
+Chatbot の内部 Harness selector 用 paired evaluator は次のとおりです:
+
+~~~powershell
+bun run scripts/run_harness_skill_ab.ts --before saved-skill/SKILL.md `
+  --after skills/neograph-harness-authoring/SKILL.md `
+  --provider relace --repeats 2 --output skill-comparison.json
+~~~
+
+両 directory に `references/chat-template-proposals.md` が必要です。既定
+fixture は greeting、独立 review の継続中の依頼、recorded review scenario
+を含みます。Expected plan はモデル入力に含めません。Evaluator は live chat
+profile を固定し、AB/BA 順を交互に使い、raw response を保持します。JSON shape
+と expected plan/confidence は別々に採点します。`--provider` は fallback を
+無効にして backend を固定します。省略時は routing policy が同じでも実際の
+provider は異なる可能性があり、返された provider/model 名を記録します。
+Case と繰り返し回数は有限で、repair や暗黙の retry はしません。
+
+これは prompt-level 評価であり、runtime admission や答えの品質の統計的
+主張ではありません。少数の targeted 反復標本は regression 証拠であり、
+一般的な model 信頼度の推定ではありません。
 
 ## 観察されたDeepSeek結果
 
@@ -77,7 +121,7 @@ bun --env-file=C:\path\to\.env run scripts/run_dsl_capability_eval.ts `
 | `program_durability` | 合格 | emit、チェックポイント、キャンセルコマンドは正確でした |
 | `program_host_capability` | 合格 | インポートスロットと正規入力が一致しました |
 
-初期のバリデータは、 `callCore` ケースに対して誤検知を生成しました。これは、コマンドの種類と入力をチェックしたものの、正確なCore名をチェックしなかったためです。バリデータは、すべてのネストされた `capability` に対して `callCore`を要求するように強化されました。以前に `core`, `Core`またはノード名 `work` を使用して受け入れられていたモデルソースは、したがって現在は正しく拒否されます。
+初期 validator は command kind と input だけを検査し、正確な Core 名を検査しなかったため、`callCore` case で誤検知しました。その後、すべての入れ子 `callCore` の名前が `capability` であることを要求しました。以前合格した `core`、`Core`、node 名 `work` を使う model source は拒否されます。
 
 これは能力の証明であり、統計的信頼性の主張ではありません。ケースごとのワンショットおよび修復成功率には、プロバイダーの障害を個別に報告した反復試行が依然として必要です。
 

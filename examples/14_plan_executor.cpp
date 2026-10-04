@@ -235,6 +235,7 @@ int main() {
         std::cout << "\n";
     }
 
-    std::cout << "\n✓ Plan & Executor completed with 1 expensive call saved.\n\n";
+    std::cout << "\n✓ Plan & Executor completed with "
+              << 5 - (g_exec_count.load() - 5) << " expensive calls saved.\n\n";
     return 0;
 }

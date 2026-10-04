@@ -1,13 +1,19 @@
-<!-- neograph-i18n: source=docs/ASYNC_STAGE3_DESIGN.md locale=zh-CN source_sha256=d6d1575f38204de726d4313f8b7a1314ed2fe236484934f7f5be1fb0b4bcf7aa -->
+<!-- neograph-i18n: source=docs/ASYNC_STAGE3_DESIGN.md locale=zh-CN source_sha256=1b7adfd905a5df954404b35ec17b04b8e334eaee56e2b5f2c8d042b831c9ffa0 -->
 # 第三阶段 — 基于 asio 的完整异步重构设计
 
 > **已归档、已被取代的设计提案。** 本文记录 2026-04-19 的第三阶段提案，
 > 不是当前 API 指南，也不能证明所有计划 gate 已完成。这里的
 > `Provider::complete` / `complete_async` 对和 `OpenAIProvider` 已在类型化
 > provider 迁移中删除。当前 provider 拥有类型化请求，只 prepare 一次，再
-> dispatch 已准备的调用。请参阅 [API narrative tour](reference-zh-CN.md)、
-> [迁移指南](migration-v0.4-to-v1.0.zh-CN.md)和已安装的头文件。
+> dispatch 已准备的调用。请参阅 [API narrative tour](reference-en.md)、
+> [迁移指南](migration-v0.4-to-v1.0.md)和已安装的头文件。
 > SDK 的 `Client::complete` 是另一项仍受支持的 API。
+>
+> 下文的“当前状态”、schedule、gate、version 和下一步均指当时提案日期。
+> Python 不在 Stage 3 范围内，但当前切换包含 typed Python provider 和
+> owned outcome。当前 Core 即使禁用 LLM node 也需要外部 SchemaProvider
+> runtime。实现契约与平台验证范围见[异步指南](ASYNC_GUIDE.md)和
+> [Python binding](python-binding.md)。
 
 **Languages:** [English](ASYNC_STAGE3_DESIGN.md) | [한국어](ASYNC_STAGE3_DESIGN.ko.md) | [日本語](ASYNC_STAGE3_DESIGN.ja.md) | [简体中文](ASYNC_STAGE3_DESIGN.zh-CN.md)
 

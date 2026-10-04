@@ -43,7 +43,6 @@ behavior to the transport itself.
 
 import json
 import os
-import socket
 import sys
 import threading
 import time
@@ -107,12 +106,9 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def start_server():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-    server = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server, f"http://127.0.0.1:{port}"
+    return server, f"http://127.0.0.1:{server.server_port}"
 
 
 # ── The graph ───────────────────────────────────────────────────────────────
@@ -175,8 +171,9 @@ def run_against(client, label, thread_id, reentrant_tools=()):
 
     tool_msgs = [m for m in result.output["channels"]["messages"]["value"]
                  if m.get("role") == "tool"]
-    for m in tool_msgs:
-        assert "error" not in m["content"], m["content"]
+    expected = {f"contents of https://example.com/{i}" for i in range(N)}
+    assert len(tool_msgs) == N, "each MCP call must produce one tool message"
+    assert {message["content"] for message in tool_msgs} == expected
     print(f"  {N} calls x {DELAY}s -> {elapsed:.2f}s   ({label})")
     return elapsed
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ja source_sha256=1d5e31e1d0219b65d56905d841f93fdf68f603c0f885b052fb7b45dd069ff8e2 -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ja source_sha256=b0fae62c9be25c3d689e9b3e593d7cb4bead7a6eae7460e70e5fc8e3e0804f6c -->
 # The Beast — 生成・進化・ロールバック
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -7,9 +7,15 @@
 
 移行したC++作成/修復経路は型付き `ProviderRequest`・`sp::Message` 履歴と完全な不変 `sp::Outcome` を使用し、返された全ネイティブメッセージ/パートを保持する。テキスト抽出は候補JSON/Pythonの解析用であり、ネイティブ会話履歴を置き換えない。コンパイル・解析・初期化診断はそのメッセージの後に追加する。意味的修復は各プログラムの試行上限に従う（ライブ作成3回、Forgeサーバー生成2回）。通信再試行や無制限の進化ではない。
 
-非公開OpenRouter経路 `~deepseek/deepseek-v4-flash-latest`、`zdr: true`、`only: ["morph"]`、`allow_fallbacks: false` を維持する。適格エンドポイントがなければ他社へ開示せず失敗する。ZDRと過去のUS所在地記録は常駐・現在の可用性保証ではない。ライブには承認されたキー、ネットワーク/提供者と有料容量が必要で、プロンプト・スキーマ・診断・ネイティブ履歴をこの経路へ送信する。生成したネイティブPythonサーバー実行は別のローカル信頼境界で、延期されたPythonプロバイダーバインディングとは異なる。キー・非公開プロンプトを公開しない。nullableトークン数は金額ではなく、価格と実際の請求対象使用量が必要。
+Forge は low reasoning effort と300秒 provider timeout を使い、ask ごとに deadline を一度固定します。
+完了した空の `MaxTokens` outcome に text と有効/無効 client tool call がない場合だけ、現在の
+3,000/4,000-token cap の二倍で最大一回追加呼出しします。全 outcome と usage を保持します。
+Failure、observer/settlement エラー、内容のある部分応答は追加呼出しを起こしません。
+この budget recovery は compiler/初期化 repair と別で、interface-4 ソース契約であり新しい live pass ではありません。
 
-現在の範囲限定実行証拠は実際のオフライン strict Core コンパイル・進化・checkpoint rollback のみ。すべての live/apex/forge/script 変種や vendor 推論の検証ではない。以下のコンソール・ベンチ・fuzz・live 実行記録は過去の証拠で、新たな型付き移行測定ではない。整合性 gate は明記された構造/効果契約の性質を扱い、提供者の通信・プライバシー・モデルの意味的真実を証明しない。Python provider binding は延期され、protocol client は不変。
+非公開OpenRouter経路 `~deepseek/deepseek-v4-flash-latest`、`zdr: true`、`only: ["morph"]`、`allow_fallbacks: false` を維持する。適格エンドポイントがなければ他社へ開示せず失敗する。ZDRと過去のUS所在地記録は常駐・現在の可用性保証ではない。ライブには承認されたキー、ネットワーク/提供者と有料容量が必要で、プロンプト・スキーマ・診断・ネイティブ履歴をこの経路へ送信する。生成した Python server の実行は独立した local code-execution trust boundary で、NeoGraph の Python provider binding とは別です。キー・非公開プロンプトを公開しない。nullableトークン数は金額ではなく、価格と実際の請求対象使用量が必要。
+
+保存済み interface-3 の範囲限定実行証拠は実際のオフライン strict Core コンパイル・進化・checkpoint rollback のみ。すべての live/apex/forge/script 変種や vendor 推論の検証ではない。以下のコンソール・ベンチ・fuzz・live 実行記録は過去の証拠で、interface-4 測定ではない。整合性 gate は明記された構造/効果契約の性質を扱い、提供者の通信・プライバシー・モデルの意味的真実を証明しない。Python provider binding は型付き API に従い、その検証はこの C++ 実行とは別です。
 
 > 自己進化するエージェント。厳密なCore JSONとして自身のハーネスを書き、Coreコンパイラの下でそれを進化させ、チェックポイント機構を通じて実行を巻き戻す。**生成された。進化した。巻き戻された。野獣は残る。**
 
@@ -22,6 +28,8 @@
 それが安全なのは、NeoGraphにおいてハーネスは**データ**であり — 厳密なCore JSON (issue #56) で記述されたトポロジーであり — Coreコンパイラが実行前にハーネスの整合性を*証明できる*からにすぎない。厳密なCore JSONは交換成果物であり、第二のソース言語ではない。コンパイラこそが、そのモンスターを負債からカテゴリへと変えるものである。
 
 ## 実行してください
+
+先に `CMAKE_PREFIX_PATH` で installed SchemaProvider prefix、または `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<sdk-source>` で SDK source を指定して NeoGraph ツリーを構成します。SDK は offline Core-only recipe にも必須です。現在の SDK transport 検証範囲は Linux/POSIX、Sandbox2 variant は Linux 専用です。
 
 ```console
 $ cmake --build build --target cookbook_the_beast
@@ -91,7 +99,7 @@ $ ./build/cookbook_the_beast_live                  # optional: pass a task strin
 
 `the_beast_live.cpp`は`~deepseek/deepseek-v4-flash-latest`を`provider: {"zdr": true, "only": ["morph"], "allow_fallbacks": false}`に固定する。検証時点で、OpenRouterはMorphのデータセンターを米国としてリストし、そのモデル/プロバイダエンドポイントをZDR対応としてリストしていた。これは厳密なプロバイダ選択であり、OpenRouterのリージョン内常駐保証ではない：その文書化されたリージョン内保証は現在、エンタープライズEUルートである。Morphの適格エンドポイントが利用できない場合、プロンプトを別のプロバイダに送信するのではなく、リクエストは失敗する。
 
-ライブクックブックはプロバイダーのタイムアウトを180秒に設定しています。この推論モデルの4,000トークン生成予算は、一般的な60秒のデフォルトを正当に超える可能性があります。
+live author 経路の provider timeout は180秒です。Forge の別の300秒 timeout は制限付き generation 呼出しに使い、どちらも共有 provider factory の既定値を変えません。
 
 
 
@@ -311,7 +319,7 @@ runtime cross-check: 4/4 cases where the validator's verdict matched execution.
 
 > バリデータがERRORを報告する ⟹ グラフは実行時にフォールトが発生する; バリデータがエラーを報告しない ⟹ グラフはクリーンに実行される。
 
-最初の行は*健全性*である（エラーがフラグされたグラフがクリーンに実行されたなら、それは健全性の穴になる）; 警告がフラグされたグラフがクリーンに実行されることは、ゲートが*過剰に*拒否しないことを示す。E10/E8クラスのエラーは判定のみである — 空のルートマップを実行すると`rend()`（UB）を参照外しすることになり、これはまさにゲートが防ぐために存在するフォールトであるため、チェックされるが実行はされない。これはデモンストレーション用コーパスであり、すべての診断を網羅するものではない — しかし「ゲートは健全である」をスローガンから、測定されCIで強制される4/4へと変える。
+Safety soundness は正直な contract の下で gate pass が modeled structural fault 不在を含意する方向です。corpus の reject/fault 一致は特定拒否例の観察で全拒否 graph が fault になる証明ではありません。E10/E8 は verdict のみで実行しませんでした。保存された4/4は過去の corpus 観察で全 diagnostic や任意 C++ node body の証明ではありません。
 
 ## ゲートファズ — 保証とその境界、大規模に
 

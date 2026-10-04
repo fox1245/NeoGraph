@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=docs/QUICKJS_MIGRATION_COMPLETION.md locale=zh-CN source_sha256=11b6f9b3c96b82c4bfc8364c832e675413d7d12bc8689c2ea6119295c4a6d278 -->
+<!-- neograph-i18n: source=docs/QUICKJS_MIGRATION_COMPLETION.md locale=zh-CN source_sha256=9d60815c273f2c94969dbfefe5eb7d6bdbd58075e51e06a7f753a36461e31d0b -->
 # QuickJS 迁移完成运行手册
 
 **Languages:** [English](QUICKJS_MIGRATION_COMPLETION.md) | [한국어](QUICKJS_MIGRATION_COMPLETION.ko.md) | [日本語](QUICKJS_MIGRATION_COMPLETION.ja.md) | [简体中文](QUICKJS_MIGRATION_COMPLETION.zh-CN.md)
 
-**状态：** 拟议的发布完成程序。它不证明任何剩余门禁已通过。
+**状态：** 2026-08-11 提议的历史发布完成程序。起始状态表和有序 gate 是计划记录，不代表当前 candidate 已通过这些 gate。
 
 **日期：** 2026-08-11
 
@@ -25,9 +25,9 @@
 
 本程序不启动问题 #35 (`trusted_direct`) 或持久 Promise 调度器。两者都不是完成受限持久配置文件的先决条件，且两者都不得与遗留移除捆绑在一起。
 
-## 2. 已验证的起点
+## 2. 历史验证起点
 
-| 区域 | 当前状态 | 证据 |
+| 区域 | 2026-08-11 记录的状态 | 证据 |
 | --- | --- | --- |
 | Q1–Q6 基础运行时与编写(authoring)切换 | 已实现 | `quickjs-control-runtime.sdd.yaml` `completion_state`; JavaScript `define()`/生成器行为由 `tests/test_harness_program_cutover.cpp` 覆盖。 |
 | Core DSL/阐释器(elaborator)与 Harness DSL 编写 | 已移除/已拒绝 | 父规格中的 `authoring_cutover_contract.completed_removals`;Harness 转换器拒绝遗留模式。 |
@@ -38,6 +38,11 @@
 | Q7 源码/ProgramRuntime移除 | 未开始 | `SourceKind::CanonicalJson`、Program 文档模式、`ProgramPlan`、旧式编译器解析，以及操作树调度器仍保留在源码中。 |
 
 因此，本次发布**不**适合进行 Q7 删除。平台适配必须先完成；最终清除证明必须在实际删除边界处现时重新建立。
+
+历史表中的 Windows source 限制后来被 NeoGraph 拥有的 MSVC build overlay
+取代，并固定在 `ProgramSource` runtime identity 中。Source 支持不等于 platform
+验证。Canonical storage 和 trusted-C++ typed operation infrastructure 仍保留。
+移除 public JSON authoring 不代表删除全部 shared dispatcher 或存储 schema。
 
 ## 3. 适用于每个步骤的规则
 

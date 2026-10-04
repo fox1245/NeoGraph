@@ -2,7 +2,7 @@
 
 Same pattern: discover each member via AgentCard, broadcast the bill
 in parallel via A2AClient, parse `투표: 찬성/반대/기권` out of each
-reply, tally and announce. Uses the v0.2.1 a2a Python binding.
+reply, tally and announce. Uses neograph_engine.a2a.A2AClient.
 
 Usage:
     python speaker.py <bill_file> <member_url> [<member_url> ...]
@@ -44,6 +44,36 @@ def extract_party(description: str) -> str:
     return m.group(1) if m else "?"
 
 
+def reply_text(task) -> str:
+    """Match the native A2ACaller's reply precedence; never use the caller's bill."""
+    def text_of(parts):
+        return "\n".join(part.text for part in parts if part.kind == "text")
+
+    final_states = {
+        ng.a2a.TaskState.Completed, ng.a2a.TaskState.Canceled,
+        ng.a2a.TaskState.Failed, ng.a2a.TaskState.Rejected,
+        ng.a2a.TaskState.InputRequired, ng.a2a.TaskState.AuthRequired,
+    }
+    status = task.status
+    if status.state in final_states and status.message is not None:
+        message = status.message
+        if message.role == ng.a2a.Role.Agent:
+            text = text_of(message.parts)
+            if text:
+                return text
+    artifacts = task.artifacts
+    if artifacts:
+        text = text_of(artifacts[0].parts)
+        if text:
+            return text
+    for message in reversed(task.history):
+        if message.role == ng.a2a.Role.Agent:
+            text = text_of(message.parts)
+            if text:
+                return text
+    return ""
+
+
 def call_member(url: str, prompt: str) -> MemberResult:
     r = MemberResult(url=url)
     try:
@@ -53,10 +83,7 @@ def call_member(url: str, prompt: str) -> MemberResult:
         r.name = card.name
         r.party = extract_party(card.description)
         task = client.send_message(prompt)
-        if task.history:
-            for part in task.history[-1].parts:
-                if part.kind == "text":
-                    r.reply += part.text
+        r.reply = reply_text(task)
         r.vote = parse_vote(r.reply)
     except Exception as e:  # noqa: BLE001
         r.reply = f"(통신 오류) {e}"

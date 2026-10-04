@@ -1,150 +1,78 @@
-<!-- neograph-i18n: source=examples/cookbook/byo-openai/README.md locale=zh-CN source_sha256=812a1f340ed6b8f92ddd742cc1c8f239265b501fa010c81929825f0973738e38 -->
-# 自带自有 OpenAI 客户端
-
-## 历史 Python recipe — binding 迁移延期
-
-本页保存迁移前 Python provider API 和测量记录。以下代码**不兼容当前类型化 C++
-契约，也不是当前可运行的说明**。Python provider binding、subclass trampoline 与
-BYO/OpenRouter adapter 尚未移植或执行验证；不得从 C++ 迁移推断 Python 兼容性。
-当前 C++ 拥有类型化 `ProviderRequest`，只 prepare 一次，并保留完整不可变
-`sp::Outcome`、native history 和 nullable usage。以下 `complete(params)`/
-`ChatCompletion` 仅是历史 API。缺失 usage 不等于 zero；最后一次调用的 usage 不能
-代表整个 tool loop。SDK retry 不得在 durable receipt 后隐藏重新发送。
-密钥、prompt 和 native payload 必须保持私密。
-
-## 迁移前说明与观察记录
-
+<!-- neograph-i18n: source=examples/cookbook/byo-openai/README.md locale=zh-CN source_sha256=acf353dedaa0142260f857bf89a32b1c5cbee7fb7c2b31df5fb67fa7ef131dd3 -->
+# 使用你自己的 OpenAI 客户端
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-大多数生产环境中的 Python 用户已经拥有一个带有自己的重试机制、自定义传输、可观测性钩子或 OpenRouter 路由的 `openai.OpenAI()`∈客户端实例。本 Cookbook 展示了如何将该现有客户端插入 NeoGraph 作为自定义的 `Provider`，而非使用 NeoGraph 的内置 `OpenAIProvider`∈。
+在 NeoGraph 自定义 `GraphNode` 中使用已有的 `openai.OpenAI()` 客户端。
+官方 SDK 保留自己的 HTTP 客户端、重试策略、请求头及 SDK 层监测配置。
+NeoGraph 调度节点，并将其 `ChannelWrite` 结果应用到图状态。
 
-诀窍在于：NeoGraph 的 `Provider` 在 v0.2.3+ 中可进行 Python 子类化。子类的 `complete(params)` 会在图节点（LLMCallNode、ReAct 循环等）内部像内置 provider 一样运行。
+[`hybrid.py`](hybrid.py) 调用 SDK 一次并追加助手回复。
+[`hybrid_with_tools.py`](hybrid_with_tools.py) 在单个节点中运行 SDK 工具调用循环，
+执行三个 Python 函数，再追加最终回复。两者使用 OpenRouter，默认模型为
+`~deepseek/deepseek-v4-flash-latest`。请求中的 `provider={"zdr": true}`
+要求 OpenRouter 使用零数据保留路由策略；它不构成地理数据驻留策略。
 
-## 何时使用哪一种
+## 前置条件与本地运行
 
-| 你需要 | 使用 |
-|---|---|
-| “仅通过 OpenRouter 使用固定的 DeepSeek 路由” | `OpenAISdkProvider` 使用官方 `openai` SDK |
-| 我已经配置好了一个包含重试 / Azure / 代理 / Hook的`openai.OpenAI()`。 | 本手册（子类`Provider`，委托给您的客户端） |
-| "我通过官方 `openai` SDK 使用 OpenRouter API" | 本指南固定使用DeepSeek模型 |
-| "我想在测试中 mock LLM" | 本指南使用确定性存根 |
-
-要点：**NeoGraph的图引擎不关心 LLM 调用如何发生** ——它只需要 `params -> ChatCompletion`。
-
-## 整个事情在60行内
-
-参见 [`hybrid.py`](hybrid.py)。关键形状：。
-
-```python
-import neograph_engine as ng
-from openai import OpenAI
-
-class OpenAISdkProvider(ng.Provider):
-    """NeoGraph Provider backed by the official `openai` SDK."""
-    def __init__(self, client: OpenAI, model: str = "~deepseek/deepseek-v4-flash-latest"):
-        super().__init__()
-        self.client = client
-        self.model  = model
-
-    def complete(self, params: ng.CompletionParams) -> ng.ChatCompletion:
-        # Translate NeoGraph params into the SDK's chat-completions shape.
-        messages = [{"role": m.role, "content": m.content}
-                    for m in params.messages]
-        resp = self.client.chat.completions.create(
-            model=params.model or self.model,
-            messages=messages,
-            temperature=params.temperature,
-        )
-        # Translate back into NeoGraph's response shape.
-        out = ng.ChatCompletion()
-        out.message.role    = "assistant"
-        out.message.content = resp.choices[0].message.content or ""
-        return out
-
-    def get_name(self) -> str:
-        return "openai-sdk"
-```
-
-就是这样。将 `OpenAISdkProvider(OpenAI(api_key=...))` 传入 `NodeContext`，任何使用 `llm_call` 节点的 NeoGraph 图都将通过 SDK 路由——保留你附加到 SDK 客户端的所有重试/Azure/可观测性/代理配置。
-
-## 运行
+安装从当前类型化提供商迁移代码构建的 wheel，以及 `openai` 包。
+仍提供已删除完成 API 的旧版本无法运行这些示例。在此目录执行以下命令前，
+先启动本地 Chat Completions 协议服务。以下是验证步骤，不是已成功运行的记录。
 
 ```bash
-pip install neograph-engine>=0.2.3 openai
-echo 'OPENROUTER_API_KEY=sk-or-...' > .env
-python hybrid.py
+python -m pip install openai
+OPENROUTER_BASE_URL=http://127.0.0.1:8765/v1 OPENROUTER_MODEL=fixture-model python hybrid.py
+OPENROUTER_BASE_URL=http://127.0.0.1:8765/v1 OPENROUTER_MODEL=fixture-model python hybrid_with_tools.py
 ```
 
-输出：
-```
-[hybrid] using openai SDK inside NeoGraph 0.2.3 graph
-[hybrid] running one llm_call through the OpenAI SDK provider
-[provider] complete() call #1 (2 msgs) — model=~deepseek/deepseek-v4-flash-latest
-[... user and assistant messages ...]
-[hybrid] provider.complete() called 1× via openai SDK
-```
+`OPENROUTER_BASE_URL` 包含 API 前缀：本地服务使用 `/v1`，OpenRouter 使用
+`/api/v1`。SDK 追加 `/chat/completions`。规范回环主机 `127.0.0.1` 和 `::1`
+使用固定虚拟凭据 `local-smoke`，即使环境中存在托管服务密钥也不会使用它。
+其他主机要求 HTTPS、`NG_ALLOW_HOSTED_CALLS=1` 和 `OPENROUTER_API_KEY`；
+未明确允许时，程序在发出请求前以状态码 2 退出。托管调用可能产生费用。
+示例可以读取已有 `.env`，但不覆盖已导出的变量。不要提交密钥或记录请求授权头。
 
-内置的 `llm_call` 使用共享的 `NodeContext.instructions` 作为其系统提示。当不同图阶段需要不同提示时，使用自定义节点类型。
+## 图状态与 SDK 请求
 
-## 您保留的
+每个图在 `START_NODE` 与 `END_NODE` 之间有一个自定义节点。
+有作用域的 `GraphRegistry` 注册节点类型，不使用全局提供商子类或完成跳板。
+节点读取 `messages` 通道，将系统指令放在 SDK 请求前面，再返回通道写入。
+append 归约器保留输入用户消息及随后的助手消息。系统消息仅存在于请求中。
 
-- 您的 `openai.OpenAI()` 客户端的 `default_headers`、重试策略、自定义 `http_client=httpx.Client(...)`、Azure / 代理配置。
-- `OpenAIObservabilityCallbacks` / `langfuse` / `helicone` / `weights & biases` 集成附加在 SDK 层——它们拦截每一次调用。
-- 您现有的对 `usage`（token 计数）、错误、重试的跟踪。
+对于 `hybrid.py`，本地服务接收一次缓冲模式的 `POST /v1/chat/completions`，
+包含 `model="fixture-model"`、系统消息、用户消息、`temperature=0.7` 和
+`provider={"zdr": true}`。返回标准 Chat Completion JSON 对象，含 `id`、
+`object="chat.completion"`、`created`、`model`，以及一个 `choices` 条目。
+该条目包含 `index=0`、助手消息及 `finish_reason="stop"`。`usage` 可省略。
+预期状态有两条消息；`sdk_usage` 是 SDK 用量字典或 `None`，不会虚构零计数。
+收到工具调用时，纯文本节点会失败，不会丢弃工具调用后继续成功。
 
-## 与 `neograph_engine.llm.OpenAIProvider` 相比，您所放弃的内容
+## 工具循环
 
-- 原生HTTP路径（asio + 连接池）——比SDK快约1.5倍，且零GIL争用。如果瓶颈在OpenAI调用，SDK即可；如果瓶颈在框架开销，则原生路径更优。
+`hybrid_with_tools.py` 的第一个请求还声明函数工具 `reverse_string`、
+`word_count` 和 `calc`。确定性的本地服务可以返回三个助手工具调用，各自使用
+不同 id，并携带 JSON 参数字符串：`{"s":"NeoGraph"}`、
+`{"text":"the quick brown fox"}`、`{"expr":"17*23+5"}`。
+设置 `finish_reason="tool_calls"`。
 
-## 工具调用——三种可行的模式
+节点将助手工具调用消息追加到 SDK 内部历史，执行每个函数，再追加带匹配
+`tool_call_id` 的工具结果。第二个请求必须包含 `hparGoeN`、`4`、`396`
+这些结果。返回不含工具调用且 `finish_reason="stop"` 的助手文本。
+预期图状态仅包含原始用户与最终助手消息、`tool_calls=3`，以及两个条目的
+`sdk_usage` 列表。每项是对应响应的用量字典或 `None`；最后一次调用的用量
+不能代表整个循环。此交换中程序打印三次工具执行及两次 SDK 调用。
 
-Provider 跳板让 `complete()` 能干净地返回 `tool_calls`。目前**不可用**的是 C++ `tool_dispatch` 图节点回调 Python `Tool` 子类——该路径存在段错误（这是之前的问题，已跟踪至 v0.3）。三种模式目前可行：
+工具异常会变成工具结果中的错误文本，以便模型作出回应。连续八次工具调用响应
+耗尽上限后会抛出错误，不写入虚构的最终答案。`calc` 在此算术演示中使用
+Python 表达式求值；它不是用于执行不可信表达式的沙箱。
 
-### A. Agentic Provider（推荐用于 `byo-openai`）
+## 提供商证据边界
 
-在**内部**执行工具循环 `complete()`。用户的 `openai.OpenAI` 客户端已支持工具调用；让其完成智能体循环（调用 → 在 Python 中分发 → 结果 → 调用 → 文本），并仅将最终助手消息返回给 NeoGraph。该图谱在每次“轮”中恰好看到一个 `complete()` ，无需 `tool_dispatch` 节点。
+这些节点写入应用拥有的 JSON 状态，不生成 `ProviderOutcome`、原生重放权限、
+提供商收据或每次工具调用的检查点。SDK 重试与中间工具调用留在节点内部；
+图检查点不是这些请求的持久收据。运行结束后关闭客户端。
 
-```python
-class AgenticOpenAIProvider(ng.Provider):
-    def __init__(self, client, tools_by_name):
-        super().__init__()
-        self.client = client
-        self.tools  = tools_by_name      # {"calc": calc_fn, ...}
-    def complete(self, params):
-        messages = [{"role": m.role, "content": m.content} for m in params.messages]
-        sdk_tools = [{"type":"function",
-                      "function":{"name":n,"description":fn.__doc__ or "",
-                                  "parameters":fn.schema}}
-                     for n, fn in self.tools.items()]
-        for _ in range(10):  # cap loops
-            r = self.client.chat.completions.create(
-                model=params.model or "~deepseek/deepseek-v4-flash-latest",
-                messages=messages, tools=sdk_tools)
-            choice = r.choices[0]
-            if not choice.message.tool_calls:
-                out = ng.ChatCompletion()
-                out.message.role    = "assistant"
-                out.message.content = choice.message.content or ""
-                return out
-            messages.append(choice.message.model_dump())
-            for tc in choice.message.tool_calls:
-                fn = self.tools[tc.function.name]
-                result = fn(**stdjson.loads(tc.function.arguments))
-                messages.append({"role":"tool","tool_call_id":tc.id,
-                                 "content":str(result)})
-```
-
-权衡：NeoGraph 看不到中间步骤（没有针对每次工具调用的检查点），但您保留了所有 SDK 行为，且没有分派边界摩擦。
-
-### B. C++工具 + Python Provider
-
-使用内置的C++工具（`MCPTool` 来自 `neograph_engine.mcp`，或任何其他C++侧 `Tool`）用于调度路径，并将您的Python Provider用于LLM调用。图的 `tool_dispatch` 节点调用C++工具正常；只有回调到Python `Tool` 子类的调用会崩溃。
-
-### C. Provider返回tool_calls；自定义Python节点进行分发
-
-跳过内置的`tool_dispatch`节点。编写你自己的`@ng.node("dispatch")`，读取`messages[-1].tool_calls`，直接调用你的Python工具，并将工具结果消息写回。完全保持在Python中。
-
-## A2A + 自定义Provider
-
-本菜谱可以自然地和 [ai-assembly 菜谱](../ai-assembly/) 组合 — 将每个成员的provider替换为`OpenAISdkProvider(...)`，以便在每个人格上获得所有SDK级行为,同时仍然使用NeoGraph的A2A桥接。
+需要 NeoGraph 的类型化提供商结果与原生 SDK 传输时，请使用
+[OpenRouter SchemaProvider 示例](../openrouter-provider/README.md)。
+将已有 SDK 客户端传给这些自定义节点会保留客户端配置，但不会使其成为
+`SchemaProvider`。

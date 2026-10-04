@@ -45,7 +45,7 @@ class FakeLLMNode(ng.GraphNode):
     """Stands in for an LLM call. Writes a tool_call into messages.
 
     Real users would use the built-in `llm_call` node (which talks
-    to an OpenAIProvider / SchemaProvider). For an offline demo
+    to a typed SchemaProvider). For an offline demo
     we hand-craft the same wire shape the engine's tool_dispatch
     expects to see.
     """

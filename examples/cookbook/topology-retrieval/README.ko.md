@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/topology-retrieval/README.md locale=ko source_sha256=e3f2a2a1c72cb3ea14094065c49ab311bd18d49e3ab403433fb77fd9b2d63748 -->
+<!-- neograph-i18n: source=examples/cookbook/topology-retrieval/README.md locale=ko source_sha256=8b3cf3e1c0116355c04cbe12f0598d39f87cd41810fbadbc8983611adc0b584f -->
 # 로컬 토폴로지 검색
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -28,6 +28,8 @@ python topology_retrieval.py --query "preserve a running graph frontier"
 
 NeoGraph 측 소비자는 C++ `example_topology_retrieval` 대상입니다. 재순위화된 후보 키를 수락하고, `ProgramCatalog`에서 정확히 승인된 번들을 해석하며, P1 어댑터를 증명하고, 영구적인 2세대 마이그레이션을 수행합니다. 다음으로 빌드 및 실행합니다:
 
+Program을 켜고 `CMAKE_PREFIX_PATH` 또는 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`로 SchemaProvider를 제공하여 NeoGraph 트리를 먼저 구성하세요. 이 model-free 소비자도 SDK가 필요합니다. SDK transport의 현재 검증 범위는 Linux/POSIX입니다.
+
 ```powershell
 cmake --build build --target example_topology_retrieval
 ./build/example_topology_retrieval
@@ -37,6 +39,6 @@ cmake --build build --target example_topology_retrieval
 
 ```powershell
 python run_neo_e2e.py `
-  --consumer build/Release/example_topology_retrieval.exe `
+  --consumer build/example_topology_retrieval `
   --query "preserve a running graph frontier while updating implementation"
 ```

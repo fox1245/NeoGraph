@@ -314,7 +314,7 @@ int main() {
         return 1;
     }
 
-    std::shared_ptr<Provider> provider = examples::make_openrouter_provider(api_key, "chat");
+    std::shared_ptr<Provider> provider = examples::make_openrouter_provider(api_key, "chat", std::chrono::seconds(180));
 
     NodeFactory::instance().register_type("merge",
         [](const std::string& name, const json&, const NodeContext&) {

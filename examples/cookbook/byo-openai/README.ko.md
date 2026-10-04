@@ -1,151 +1,88 @@
-<!-- neograph-i18n: source=examples/cookbook/byo-openai/README.md locale=ko source_sha256=812a1f340ed6b8f92ddd742cc1c8f239265b501fa010c81929825f0973738e38 -->
-# 나만의 OpenAI 클라이언트 가져오기
-
-## 과거 Python recipe — binding 전환 보류
-
-이 페이지는 전환 이전 Python 공급자 API와 측정의 기록입니다. 아래 코드는
-**현재 타입 C++ 계약과 호환되지 않으며 현재 실행 지침이 아닙니다**.
-Python 공급자 binding, subclass trampoline, BYO/OpenRouter adapter는 아직 port하거나
-실행 검증하지 않았습니다. C++ 전환만으로 Python 호환성을 추론하지 마세요.
-현재 C++은 타입 `ProviderRequest`를 소유하고 한 번 prepare하며 전체 불변
-`sp::Outcome`, native history, nullable usage를 유지합니다. 아래 `complete(params)`/
-`ChatCompletion`은 과거 API입니다. 누락 usage는 zero가 아니며 마지막 호출 usage는
-전체 tool loop 사용량이 아닙니다. durable receipt 뒤에서 SDK retry가 숨은 재전송을
-만들면 안 됩니다. 키, prompt, native payload는 비공개로 유지하세요.
-
-## 전환 이전 지침과 관찰 기록
-
+<!-- neograph-i18n: source=examples/cookbook/byo-openai/README.md locale=ko source_sha256=acf353dedaa0142260f857bf89a32b1c5cbee7fb7c2b31df5fb67fa7ef131dd3 -->
+# 나만의 OpenAI 클라이언트 사용하기
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-대부분의 프로덕션 Python 사용자는 이미 자체 재시도, 사용자 지정 전송, 관찰성 Hook 또는 OpenRouter 라우팅을 갖춘 `openai.OpenAI()` 클라이언트 인스턴스를 보유하고 있습니다. 이 cookbook은 기존 클라이언트를 사용자 지정 `Provider` 으로 NeoGraph에 연결하는 방법을 보여줍니다 — NeoGraph의 기본 제공 `OpenAIProvider`.
+기존 `openai.OpenAI()` 클라이언트를 NeoGraph 사용자 정의 `GraphNode` 안에서 사용합니다.
+공식 SDK가 HTTP 클라이언트, 재시도 정책, 헤더, SDK 수준 계측을 유지합니다.
+NeoGraph는 노드를 스케줄링하고 `ChannelWrite` 결과를 그래프 상태에 적용합니다.
 
-핵심: NeoGraph의 `Provider`은 v0.2.3 이상에서 Python 하위 클래스화가 가능합니다. 하위 클래스의 `complete(params)`는 내장 공급자와 마찬가지로 그래프 노드(LLMCallNode, ReAct 루프 등) 내부에서 실행됩니다.
+[`hybrid.py`](hybrid.py)는 SDK를 한 번 호출하고 어시스턴트 답변을 추가합니다.
+[`hybrid_with_tools.py`](hybrid_with_tools.py)는 한 노드 안에서 SDK 도구 호출 루프를
+실행하고 세 Python 함수를 호출한 뒤 최종 답변을 추가합니다. 두 예제는 OpenRouter를
+사용하며 기본 모델은 `~deepseek/deepseek-v4-flash-latest`입니다.
+`provider={"zdr": true}`를 보내 OpenRouter의 데이터 무보존 라우팅 정책을 요청합니다.
+이 설정은 지리적 데이터 상주 정책을 보장하지 않습니다.
 
-## 어떤 것을 언제 사용할지
+## 준비 사항과 로컬 실행
 
-| 원하는 것 | 사용하세요 |
-|---|---|
-| "OpenRouter를 통해 고정된 DeepSeek 라우트만 사용" | `OpenAISdkProvider` 공식 `openai` SDK와 함께 |
-| "재시도 / Azure / 프록시 / 훅이 설정된 `openai.OpenAI()`를 이미 보유함" | 이 쿡북(`Provider` 하위클래스화, 사용자 클라이언트에 위임) |
-| "공식 `openai` SDK를 통해 OpenRouter API를 사용 중" | 고정된 DeepSeek 모델이 포함된 이 쿡북 |
-| "테스트에서 LLM을 목킹하고 싶음" | 결정적 스텁이 포함된 이 쿡북 |
-
-핵심: **NeoGraph의 그래프 엔진은 LLM 호출이 어떻게 이루어지는지 신경 쓰지 않습니다** — `params -> ChatCompletion`만 있으면 됩니다.
-
-## 60줄로 된 전체 코드
-
-[`hybrid.py`](hybrid.py)를 참조하세요. 핵심 형태:
-
-```python
-import neograph_engine as ng
-from openai import OpenAI
-
-class OpenAISdkProvider(ng.Provider):
-    """NeoGraph Provider backed by the official `openai` SDK."""
-    def __init__(self, client: OpenAI, model: str = "~deepseek/deepseek-v4-flash-latest"):
-        super().__init__()
-        self.client = client
-        self.model  = model
-
-    def complete(self, params: ng.CompletionParams) -> ng.ChatCompletion:
-        # Translate NeoGraph params into the SDK's chat-completions shape.
-        messages = [{"role": m.role, "content": m.content}
-                    for m in params.messages]
-        resp = self.client.chat.completions.create(
-            model=params.model or self.model,
-            messages=messages,
-            temperature=params.temperature,
-        )
-        # Translate back into NeoGraph's response shape.
-        out = ng.ChatCompletion()
-        out.message.role    = "assistant"
-        out.message.content = resp.choices[0].message.content or ""
-        return out
-
-    def get_name(self) -> str:
-        return "openai-sdk"
-```
-
-이것이 전부입니다. `OpenAISdkProvider(OpenAI(api_key=...))`를 `NodeContext`에 전달하면 `llm_call` 노드를 사용하는 모든 NeoGraph 그래프가 SDK를 통해 라우팅됩니다 — SDK 클라이언트에 연결된 모든 재시도 / Azure / 관측성 / 프록시 구성이 유지됩니다.
-
-## 실행 ⟦3b22460e100a⟧ 출력:
+현재 타입 공급자 전환 체크아웃에서 빌드한 wheel과 `openai` 패키지를 설치하세요.
+제거된 완료 API를 제공하는 이전 릴리스에서는 이 예제를 실행할 수 없습니다.
+이 디렉터리에서 아래 명령을 실행하기 전에 로컬 Chat Completions 프로토콜 서버를
+시작하세요. 아래 내용은 검증 절차이며 성공한 실행 기록이 아닙니다.
 
 ```bash
-pip install neograph-engine>=0.2.3 openai
-echo 'OPENROUTER_API_KEY=sk-or-...' > .env
-python hybrid.py
+python -m pip install openai
+OPENROUTER_BASE_URL=http://127.0.0.1:8765/v1 OPENROUTER_MODEL=fixture-model python hybrid.py
+OPENROUTER_BASE_URL=http://127.0.0.1:8765/v1 OPENROUTER_MODEL=fixture-model python hybrid_with_tools.py
 ```
 
-출력:
-```
-[hybrid] using openai SDK inside NeoGraph 0.2.3 graph
-[hybrid] running one llm_call through the OpenAI SDK provider
-[provider] complete() call #1 (2 msgs) — model=~deepseek/deepseek-v4-flash-latest
-[... user and assistant messages ...]
-[hybrid] provider.complete() called 1× via openai SDK
-```
+`OPENROUTER_BASE_URL`에는 API 접두사가 포함됩니다. 이 로컬 서버는 `/v1`,
+OpenRouter는 `/api/v1`을 사용합니다. SDK가 `/chat/completions`를 추가합니다.
+정규 루프백 호스트 `127.0.0.1`과 `::1`에서는 환경에 호스팅 키가 있어도 고정된
+더미 자격 증명 `local-smoke`를 사용합니다. 다른 호스트는 HTTPS,
+`NG_ALLOW_HOSTED_CALLS=1`, `OPENROUTER_API_KEY`가 필요합니다. 명시적으로 허용하지
+않으면 요청 전에 상태 코드 2로 종료합니다. 호스팅 호출은 비용이 발생할 수 있습니다.
+예제는 기존 `.env`를 읽을 수 있지만 이미 내보낸 환경 변수는 덮어쓰지 않습니다.
+키를 커밋하거나 요청의 Authorization 헤더를 기록하지 마세요.
 
-기본 `llm_call`는 공유 `NodeContext.instructions`를 시스템 프롬프트로 사용합니다. 그래프 단계마다 다른 프롬프트가 필요한 경우 사용자 지정 노드 유형을 사용하십시오.
+## 그래프 상태와 SDK 요청
 
-## 유지하는 것
+각 그래프에는 `START_NODE`와 `END_NODE` 사이에 사용자 정의 노드 하나가 있습니다.
+범위가 한정된 `GraphRegistry`에 노드 타입을 등록합니다. 전역 공급자 서브클래스나
+완료 트램펄린은 사용하지 않습니다. 노드는 `messages` 채널을 읽고 SDK 요청 앞에
+시스템 지시를 넣은 뒤 채널 쓰기를 반환합니다. append 리듀서는 입력 사용자 메시지
+다음에 어시스턴트 메시지를 유지합니다. 시스템 메시지는 요청 안에만 남습니다.
 
-- `openai.OpenAI()` 클라이언트의 `default_headers`, 재시도 정책, 커스텀 `http_client=httpx.Client(...)`, Azure / proxy 구성.
-- `OpenAIObservabilityCallbacks` / `langfuse` / `helicone` / `weights & biases` 통합은 SDK 수준에서 연결됩니다 — 모든 호출을 가로챕니다.
-- 기존의 `usage`(토큰 수) 추적, 오류, 재시도.
+`hybrid.py`의 서버는 `model="fixture-model"`, 시스템 메시지, 사용자 메시지,
+`temperature=0.7`, `provider={"zdr": true}`를 담은 버퍼링 방식
+`POST /v1/chat/completions` 하나를 받습니다. `id`, `object="chat.completion"`,
+`created`, `model`, 그리고 `index=0`, 어시스턴트 메시지,
+`finish_reason="stop"`을 담은 `choices` 항목 하나가 있는 표준 Chat Completion
+JSON 객체를 반환하세요. `usage`는 선택 사항입니다. 예상 상태에는 메시지 두 개가
+있고 `sdk_usage`는 SDK 사용량 딕셔너리 또는 `None`입니다. 없는 카운터를 0으로
+만들지 않습니다. 도구 호출이 오면 이 텍스트 전용 노드는 이를 버리지 않고 실패합니다.
 
-## `neograph_engine.llm.OpenAIProvider` 대비 포기하는 것
+## 도구 루프
 
-- 네이티브 HTTP 경로(asio + 연결 풀) — SDK보다 약 1.5배 빠르며 GIL 경합이 전혀 없음. 병목이 OpenAI 호출이라면 SDK로 충분하고, 프레임워크 오버헤드가 문제라면 네이티브 경로가 우세합니다.
+`hybrid_with_tools.py`의 첫 요청에는 함수 도구 `reverse_string`, `word_count`,
+`calc`도 선언됩니다. 결정적인 로컬 서버는 서로 다른 id와 JSON 인수 문자열
+`{"s":"NeoGraph"}`, `{"text":"the quick brown fox"}`, `{"expr":"17*23+5"}`를
+가진 어시스턴트 도구 호출 세 개를 반환할 수 있습니다.
+`finish_reason="tool_calls"`로 설정하세요.
 
-## 도구 호출 — 세 가지 작동 방식
+노드는 SDK 내부 이력에 어시스턴트 도구 호출 메시지를 추가하고 각 함수를 실행한 뒤
+일치하는 `tool_call_id`로 결과를 추가합니다. 두 번째 요청에는 `hparGoeN`, `4`,
+`396` 결과가 있어야 합니다. 도구 호출 없이 `finish_reason="stop"`인 어시스턴트
+텍스트 응답을 반환하세요. 예상 그래프 상태에는 원래 사용자와 최종 어시스턴트
+메시지만 있고, `tool_calls=3`이며, `sdk_usage` 목록에는 항목 두 개가 있습니다.
+각 항목은 해당 응답의 사용량 딕셔너리 또는 `None`입니다. 마지막 호출의 사용량을
+전체 루프 사용량으로 취급하지 않습니다. 이 교환에서 프로그램은 도구 실행 세 번과
+SDK 호출 두 번을 출력합니다.
 
-Provider 트램펄린을 통해 `complete()`가 `tool_calls`를 깨끗하게 반환할 수 있습니다. 현재 **작동하지 않는** 부분은 C++ `tool_dispatch` 그래프 노드가 Python `Tool` 하위 클래스를 다시 호출하는 경로입니다. 해당 경로는 세그폴트가 발생합니다(기존 문제, v0.3에서 추적 중). 오늘 작동하는 세 가지 패턴은 다음과 같습니다.
+도구 예외는 모델이 대응할 수 있도록 도구 결과 오류 텍스트가 됩니다. 도구 호출
+응답이 여덟 번 연속 오면 제한에 도달하여 오류를 발생시키며 가짜 최종 답변을
+쓰지 않습니다. `calc`는 산술 데모를 위해 Python 표현식을 평가합니다.
+신뢰할 수 없는 표현식을 위한 샌드박스가 아닙니다.
 
-### A. 에이전트형 Provider(`byo-openai`에 권장)
+## 공급자 증거의 경계
 
-툴 루프를 **내부에서** 수행하세요 `complete()`. 사용자의 `openai.OpenAI` 클라이언트는 이미 tool-calling을 지원합니다; 에이전틱 루프(call → dispatch in Python → result → call → text)를 완료하고 NeoGraph에 최종 어시스턴트 메시지만 반환하게 하세요. 그래프는 "turn"당 정확히 하나의 `complete()`를 보며, `tool_dispatch` 노드가 필요하지 않습니다.
+이 노드는 애플리케이션이 소유한 JSON 상태를 씁니다. `ProviderOutcome`, 네이티브
+재생 권한, 공급자 영수증 또는 도구별 체크포인트를 만들지 않습니다. SDK 재시도와
+중간 도구 호출은 노드 안에서 수행되므로 그래프 체크포인트는 해당 요청의 영속
+영수증이 아닙니다. 실행 후 클라이언트를 닫습니다.
 
-```python
-class AgenticOpenAIProvider(ng.Provider):
-    def __init__(self, client, tools_by_name):
-        super().__init__()
-        self.client = client
-        self.tools  = tools_by_name      # {"calc": calc_fn, ...}
-    def complete(self, params):
-        messages = [{"role": m.role, "content": m.content} for m in params.messages]
-        sdk_tools = [{"type":"function",
-                      "function":{"name":n,"description":fn.__doc__ or "",
-                                  "parameters":fn.schema}}
-                     for n, fn in self.tools.items()]
-        for _ in range(10):  # cap loops
-            r = self.client.chat.completions.create(
-                model=params.model or "~deepseek/deepseek-v4-flash-latest",
-                messages=messages, tools=sdk_tools)
-            choice = r.choices[0]
-            if not choice.message.tool_calls:
-                out = ng.ChatCompletion()
-                out.message.role    = "assistant"
-                out.message.content = choice.message.content or ""
-                return out
-            messages.append(choice.message.model_dump())
-            for tc in choice.message.tool_calls:
-                fn = self.tools[tc.function.name]
-                result = fn(**stdjson.loads(tc.function.arguments))
-                messages.append({"role":"tool","tool_call_id":tc.id,
-                                 "content":str(result)})
-```
-
-절충: NeoGraph는 중간 단계를 보지 못하지만(도구 호출별 체크포인트가 없음), 모든 SDK 동작을 유지하고 디스패치 경계 마찰이 없습니다.
-
-### B. C++ 도구 + Python Provider
-
-디스패치 경로에는 내장 C++ 도구(`MCPTool`에서 가져온 `neograph_engine.mcp`, 또는 다른 C++ 측 `Tool`)를 사용하고, LLM 호출에는 Python Provider를 사용한다. 그래프의 `tool_dispatch` 노드는 C++ 도구를 정상적으로 호출할 수 있지만, 이후 Python `Tool` 하위 클래스로의 콜백만 충돌이 난다.
-
-### C. Provider가 tool_calls를 반환합니다. 커스텀 Python 노드가 디스패치합니다.
-
-내장된 `tool_dispatch` 노드를 건너뜁니다. 직접 작성한 `@ng.node("dispatch")` 를 사용하여 `messages[-1].tool_calls`를 읽고, Python 도구를 직접 호출하며, 도구 결과 메시지를 다시 작성합니다. 전적으로 Python으로 유지됩니다.
-
-## A2A + 커스텀 Provider
-
-이 쿡북은 [ai-assembly cookbook](../ai-assembly/)과 자연스럽게 구성됩니다. 각 구성원의 provider를 `OpenAISdkProvider(...)`로 교체하면 NeoGraph의 A2A 브리지를 사용하면서 모든 페르소나에 대해 SDK 수준의 동작을 모두 얻을 수 있습니다.
+NeoGraph의 타입 공급자 결과와 네이티브 SDK 전송이 필요하면
+[OpenRouter SchemaProvider 예제](../openrouter-provider/README.md)를 사용하세요.
+기존 SDK 클라이언트를 이 사용자 정의 노드에 전달하면 클라이언트 설정은 유지되지만
+그 클라이언트가 `SchemaProvider`가 되지는 않습니다.

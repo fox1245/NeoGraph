@@ -5,7 +5,7 @@ critic scores it and writes a textual reflection. The next iteration
 prepends the reflection to the actor's prompt. Loops until the critic
 says 'good enough' OR `max_iterations` is reached.
 
-Real LLM via OpenAIProvider. The actor and critic are two custom
+Real LLM via typed SchemaProvider. The actor and critic are two custom
 Python nodes, each calling the provider with its own system prompt.
 
 Run:
@@ -14,7 +14,7 @@ Run:
     python 11_reflexion.py
 """
 
-from _common import ng, openai_provider
+from _common import ask_text, ng, schema_provider
 
 
 ACTOR_SYSTEM = (
@@ -53,13 +53,11 @@ class ActorNode(ng.GraphNode):
             prompt += f"\nCritic's reflection:\n{prior_reflection}\n"
         prompt += "\nProduce your improved answer:"
 
-        completion = self._provider.complete(ng.CompletionParams(
-            messages=[
-                ng.ChatMessage(role="system", content=ACTOR_SYSTEM),
-                ng.ChatMessage(role="user", content=prompt),
-            ],
-        ))
-        return [ng.ChannelWrite("attempt", completion.message.content.strip())]
+        completion = ask_text(self._provider, messages=[
+            ng.ChatMessage(role="system", content=ACTOR_SYSTEM),
+            ng.ChatMessage(role="user", content=prompt),
+        ],)
+        return [ng.ChannelWrite("attempt", completion.strip())]
 
 
 class CriticNode(ng.GraphNode):
@@ -76,15 +74,13 @@ class CriticNode(ng.GraphNode):
         attempt = input.state.get("attempt") or ""
         n = (input.state.get("iteration") or 0) + 1
 
-        completion = self._provider.complete(ng.CompletionParams(
-            messages=[
-                ng.ChatMessage(role="system", content=CRITIC_SYSTEM),
-                ng.ChatMessage(role="user", content=(
-                    f"Task:\n{task}\n\nActor's latest attempt:\n{attempt}\n"
-                )),
-            ],
-        ))
-        verdict_line, _, reflection = completion.message.content.partition(
+        completion = ask_text(self._provider, messages=[
+            ng.ChatMessage(role="system", content=CRITIC_SYSTEM),
+            ng.ChatMessage(role="user", content=(
+                f"Task:\n{task}\n\nActor's latest attempt:\n{attempt}\n"
+            )),
+        ],)
+        verdict_line, _, reflection = completion.partition(
             "REFLECTION:")
         verdict = "ok" if "ok" in verdict_line.lower() else "retry"
         reflection = reflection.strip() or "(no reflection given)"
@@ -97,7 +93,7 @@ class CriticNode(ng.GraphNode):
         ]
 
 
-provider = openai_provider()
+provider = schema_provider()
 
 ng.NodeFactory.register_type(
     "actor",

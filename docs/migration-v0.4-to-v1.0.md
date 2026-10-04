@@ -12,6 +12,8 @@ document outlines the procedure for migrating legacy nodes to the current API.
 > fail to compile as abstract classes. Python subclasses must also implement
 > `run(self, input)`.
 
+Event-driven Provider dispatch adds a separate mandatory pre-v1 rebuild boundary: `CancelToken` now uses `std::stop_source` and exposes `stop_token()` for executor-independent native subscriptions. Existing `cancel()`, `is_cancelled()`, `fork()`, `bind_executor()` and `slot()` callsites remain source-compatible, but old inline implementations are not binary-compatible. Recompile every C++ consumer/extension with matching NeoGraph headers/libraries; replacing only a shared library is insufficient. Provider notifications preserve SDK `join()`, FIFO owned outcomes, absolute deadlines and admission/authority budgets. See [ABI policy](ABI_POLICY.md) and [matched measurements](../benchmarks/provider-notification-summary.json).
+
 ## Why Migrate
 
 Old pattern — `(sync/async) × (writes/full) × (stream/non-stream)` = 8 virtual
@@ -305,9 +307,15 @@ manually. There are no shortcuts.
 
 # Migration 2: Typed lossless Provider cutover (mandatory recompile)
 
-This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is unstable `0.0.0`, interface revision 3 / shared ABI 3, with out-of-line capability checks; that is not a stable release claim. Current runtime/archive support is Linux/POSIX; no Windows, macOS or WASM runtime qualification is implied. Python provider bindings/wrappers are deferred and not ported by this C++ change.
+This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is alpha `0.1.0`, interface revision 4 / shared ABI 4, with out-of-line capability checks; that is not a stable release claim. Recorded interface-3 SDK runtime/archive qualification covers Linux/POSIX and does not qualify interface 4. Windows NTFS and macOS implementations are present, but new platform qualification requires runtime evidence; WASM provider runtime qualification is not established.
 
-Fresh installed find_package Program C++/C ABI/dualQuickJS consumers and the NeoGraph/SchemaProvider typed two-request lifetime/native/raw/mismatch consumer passed. Interface/ABI declarations alone remain distinct from this exercised package result; broader platforms and stable release are not claimed.
+Replace removed `Provider::complete`, `complete_async`, `complete_stream` and `complete_stream_async` callsites with explicit-mode requests and `invoke` / `dispatch` (or their C++ async peers). `Agent::complete` remains a separate one-turn API returning an owned outcome.
+
+CMake 3.20 or newer is required. SchemaProvider runtime remains mandatory when `NEOGRAPH_BUILD_LLM=OFF` because Core exports owned typed provider contracts. An explicit `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` wins; otherwise CMake prefers an installed `SchemaProvider` runtime package, then downloads the immutable GitHub archive pinned by `cmake/NeoGraphSchemaProvider.cmake` when `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON` (default). For offline builds, install the SDK, set `CMAKE_PREFIX_PATH` to its prefix and pass `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`. CMake does not guess a sibling checkout or select the removed bundled interpreter. The SDK runtime requires its transport dependencies even when NeoGraph's optional HTTP module is disabled. The recorded SDK runtime/archive qualification covers Linux/POSIX. Windows NTFS and macOS implementations are present, but new platform qualification requires runtime evidence; WASM provider runtime qualification is not established.
+
+Python exposes the same owned request/outcome boundary as C++: `make_provider_request`, `Provider.prepare`, `dispatch` and `invoke`. Use `ProviderMessage` with typed parts for provider history; `ChatMessage` remains a graph convenience projection. A returned SDK failure is available through `ProviderOutcome.failure`, while host observer/settlement exceptions retain `outcome` and `cause`. See the [Python binding guide](python-binding.md) for constructors and GIL/callback behavior.
+
+Before interface 4, installed find_package Program C++/C ABI/dualQuickJS consumers and the NeoGraph/SchemaProvider typed two-request lifetime/native/raw/mismatch consumer passed. These are historical package results, not interface-4 pass claims; broader platforms and stable release are not claimed.
 
 The public contract is owned typed preparation and dispatch, not paired virtual completion methods. `ProviderRequest.payload` is the SDK variant of Chat, Messages, Responses, Gemini or Interactions requests. `ProviderMode::Collect` / `Stream` selects transport independently of an observer. `on_event` receives borrowed typed `sp::Event` views; copy only data needed after the callback. No raw JSON overrides or native-state import through portable projections are admitted.
 
@@ -316,10 +324,21 @@ The public contract is owned typed preparation and dispatch, not paired virtual 
 #include <neograph/runtime_interposition_consumer.h>
 #include <neograph/controlled_provider.h>
 
-// Public operation signatures (the only virtual operation is prepare).
-// ProviderRequest owns the SDK request variant, mode, options and observer.
-// invoke[_async](request) = prepare once, then dispatch the same handle.
-// dispatch[_async](prepared) returns sp::runtime::Result.
+// Selected public declarations from neograph::Provider.
+class Provider {
+public:
+    virtual ~Provider() = default;
+    virtual std::string get_name() const = 0;
+    virtual std::string_view family() const noexcept = 0;
+    virtual PreparedProviderRequest prepare(ProviderRequest request) = 0;
+    sp::runtime::Result dispatch(PreparedProviderRequest request);
+    asio::awaitable<sp::runtime::Result> dispatch_async(PreparedProviderRequest request);
+    sp::runtime::Result invoke(ProviderRequest request);
+    asio::awaitable<sp::runtime::Result> invoke_async(ProviderRequest request);
+    static std::string request_digest(const PreparedProviderRequest& request);
+    static std::optional<std::uint64_t> conservative_token_upper_bound(
+        const PreparedProviderRequest& request);
+};
 ```
 
 ### ProviderRequest / ProviderControls
@@ -343,13 +362,28 @@ sp::runtime::Result call_provider(
 }
 ```
 
+Interface 4 preserves the retained per-call controls through typed fields, not an `extra_fields` dictionary:
+
+| Family | Additional `ProviderControls` |
+|---|---|
+| Chat | `chat_reasoning`, `include_reasoning`, `usage_include`, `models`; these require a declared OpenRouter origin. Scalar `reasoning_effort` remains separate. |
+| Responses | `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity`, `truncation`, `responses_include`. |
+| Messages | `thinking_mode`, `output_effort`, `cache_control`, `messages_tool_choice`, declared-origin OpenRouter `provider` routing. |
+| Gemini Generate | `gemini_history_mode`, `gemini_thinking_level`, `temperature`, `safety_settings`, `gemini_tool_choice`. |
+
+Messages manual thinking requires a policy-admitted budget below the output cap; adaptive and disabled modes forbid a thinking budget. Manual/adaptive thinking omit valid temperature, but invalid values and model-prohibited temperature reject before omission. Disabled thinking emits admitted temperature. Model-prefix restrictions are admitted policy facts, matched ASCII case-insensitively against the full model or its last `/` suffix. Gemini thinking level and thinking budget are mutually exclusive; its typed tool choice and `required_tool` are mutually exclusive. Unsupported family/origin/value combinations reject before I/O.
+
 ### PreparedProviderRequest / ProviderBudgetClaim
 `prepare()` validates and encodes exactly once, producing a move-only `PreparedProviderRequest` with the original deadline and cancellation state. Durable callers bind its `Provider::request_digest()` to their assembly, reserve an admitted budget claim, write the dispatch receipt, then consume that same handle through `ControlledProvider::dispatch_prepared(_async)`. They never rebuild a request after the gate. Duplicate receipts never redispatch. Custom providers implement `get_name()`, `family()` and `prepare()` using `prepare_runtime()` or `prepare_local()`; local callbacks capture owned shared state, not `this`.
 
 Optional `ProviderControls` are caller choices, not mandatory defaults or silently clamped caps. Unsupported family controls fail before dispatch. Bounded calls require genuine admitted model input/output facts; missing facts fail with `LimitUnknown`. A reservation is conservative spending authority, not reported usage, a forecast or an invoice. Unknown/partial/delivery-unknown outcomes retain their hold; genuine final reports settle it, including oversized usage. Retry is one explicit layer, off by default, with a bounded window and unknown-prior hold; no hidden resend.
 
 
-A provider call returns `sp::runtime::Result`: an immutable, owned `std::shared_ptr<const sp::Outcome>`, containing `sp::Completion` or `sp::Failure`. Retain the whole outcome, not only display text. Ordered messages/parts, native continuation, complete wire envelopes, ordered raw observations, stop evidence and genuine attempt metadata survive the call and client destruction. Usage counters are nullable `uint64_t` values with evidence, stage and quality: missing is unknown, never zero. A failure retains its original partial outcome. `ProviderFailure::outcome()` and `ProviderObserverError::outcome()` preserve that result; the latter also preserves the observer exception in `cause()`.
+A provider call returns `sp::runtime::Result`: an immutable, owned `std::shared_ptr<const sp::Outcome>`, containing `sp::Completion` or `sp::Failure`. Retain the whole outcome, not only display text. Ordered messages/parts, retained native continuation and family-supplied wire evidence, ordered raw observations, stop evidence and genuine attempt metadata survive the call and client destruction. Usage counters such as `input_total`, `output_total` and `total` are `std::optional<sp::Count>`; each present count has a `uint64_t value` and `Evidence`. `Usage` also records stage, quality and conflicts. Missing is unknown, never an invented zero. A failure retains its original partial outcome. `ProviderFailure::outcome()` and `ProviderObserverError::outcome()` preserve that result; the latter also preserves the observer exception in `cause()`.
+
+Wire evidence is family-supplied and optional: `sp::Completion::wire_envelope` may be null (`ProviderCompletion.wire_envelope` is `None` in Python). Buffered Chat currently retains the full response JSON in `raw_events` as a `RawWire` with `type == "chat.completion"` and the document in `payload`; it leaves `wire_envelope` null. Read the evidence where the family retains it; no fallback envelope is fabricated. Native continuation and raw buffers remain protected evidence, excluded from trace payloads.
+
+`UsageAccumulator::snapshot()` returns accumulated reports. `total_tokens_wide()` returns charged tokens plus unresolved reservations; it must not be displayed as reported usage. Settlement requires a final, consistent report with input and output counts and charges the largest supported total, without clamping oversized usage. A missing counter in any accumulated report remains unknown in the aggregate. A reservation, a local charge and a vendor invoice are different records.
 
 If post-effect accounting or terminal-receipt persistence fails after a real result exists, `ProviderDispatchOutcomePersistenceError` retains the original immutable result in `outcome()` and the original persistence exception in `cause()`. If delivery also failed, `delivery_error()` retains the original observer exception. Successful persistence followed by observer failure rethrows that original observer exception unchanged; an unknown/no-result transport failure does not fabricate an outcome.
 ### SchemaProvider
@@ -376,9 +410,15 @@ std::shared_ptr<neograph::llm::SchemaProvider> admitted_provider(
 }
 ```
 
+Plain `sp::descriptor::load` treats headers as literals: `${VAR}` is not expanded. For explicit host-side preprocessing before admission, use `sp::descriptor::load_with_environment_headers(source, overrides, policy)` or deterministic `load_with_deployment_headers(source, overrides, environment, policy)` with `DeploymentHeaderEnvironment`. The environment helper reads optional `ANTHROPIC_WORKSPACE_ID` / `ANTHROPIC_BETA` for Messages; unset or empty values are omitted. Literal descriptor headers override environment values, and explicit overrides win over both, case-insensitively. Duplicate overrides, invalid or reserved headers fail final admission. No encoder evaluates templates or mutates an admitted descriptor.
+
 ### Native history / budget
 
 `ChatMessage` / `ChatTool` and JSON are portable projections, not native authority. Portable formats remain [`provider-message-v2`](../schemas/provider-message-v2.schema.json) and [`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json). Genuine C++ checkpoint sidecars retain native seals in memory. Durable native history requires host-owned `sp::NativeArchive`: closed v3 / `spna3`, with authenticated owner-private custody and an independent key. Archive v2 is rejected, not upgraded or interpreted. Authentication binds every semantic descriptor choice (origin/paths/headers, policy, request field mappings, usage path and stop mappings), owner and exact custody binding. It is neither encryption nor vendor-issuer authentication; never publish archive bodies, keys, native blobs or raw wire observations. An archive is evidence storage, not a money grant or a spending lease. Program/external banks remain independently journal-owned; snapshot copies cannot create credit.
+
+Interface 4 removes only the output-generation cap from native replay's configuration digest. Content, origin, route, policy identity, prefix, tools and reasoning controls remain bound. The actual cap still enters the encoded request and prepared-request digest. Each larger-cap semantic call needs fresh resource-bank admission, its own deterministic call ordinal/effect identity, and the original deadline; it cannot reuse a settled call slot, renew credit, repair a seal or resend an uncertain effect. Archive v3 and portable JSON v2 do not change; old-policy native archives remain bound to that policy and are rejected under a mismatched policy, not migrated.
+
+Same-route native continuation and explicit foreign projection have different contracts. Gemini defaults to `sp::gemini::HistoryMode::NativeOnly`; `PortableForeign` admits caller-created assistant Text/ToolCall history without native seals, wire output or signatures. Only the first function call in each foreign assistant turn receives `skip_thought_signature_validator`; text-only history gets no signature. Authentic native groups still undergo strict validation, and failed/mismatched seals are never stripped or demoted to portable history. Responses `previous_response_id` selects provider-held state: send only new input in `messages`. `previous_response_history` is local ownership evidence, never emitted; when client-tool ownership requires it, supply the full original prefix and authentic terminal assistant whose ID equals the cursor. Later in-process cursor results retain private completed ownership, not full `NativeReplay` or archive authority. A cursor is not a native archive or a portable import grant.
 
 **Standalone bank journal correction — current contract revised; exercised runtime evidence below.** The owner-approved protocol requires a monotonic trusted-store namespace obligation and a real immutable original owner/thread/graph scope, ceiling, deadline/clock identity and generation. Only exact durable head CAS over the full checkpoint commitment and revision may issue a host-owned opaque lease. Exact pending effect windows must persist before provider I/O; settlement must use genuine SDK outcomes and actual charges, nullable reports, holds and dedup identities. Checkpoint and next head must publish atomically under the same owned actor/revision. Removing bank metadata, pruning a checkpoint, replaying an old authenticated snapshot, overwriting the same ID or losing the actor must not grant credit. Tightening a 130 ceiling to 129 with an existing 65 hold cannot admit another 65; a proven no-effect failure may release the unchanged head so authentic 130 recovery can still proceed. Crash/unknown/lost-lease windows remain held without refund, retry or fallback. Plain/pristine archive configuration grants no money or native spending lease, and current `config.usage` cannot replace an existing standalone obligation; Program/external-bank journal ownership is unchanged. This is the required contract; actual currency/custody evidence and instrumentation limits are reported below, not a stable released API guarantee.
 
@@ -396,13 +436,15 @@ Diagnostic JSON preserves original raw bytes, including syntactically valid dupl
 
 `ProviderRequest::observer_limits` is host-only: explicitly supplied `max_events` and `max_bytes` must be positive and may only lower admitted SDK delivery ceilings. `provider-request/v3` digests the effective limits, mode, encoded body, retry policy and all semantic descriptor bindings. The bridge charges actual PMR vector/map capacity plus owned event/document bytes across both queued and draining batches; cancellation is requested outside its queue mutex. Generic channels called `messages` are not coerced to chat. Mapping a native `history` channel into `messages` preserves its C++ sidecar, rather than manufacturing native authority from JSON.
 
-`ProviderOutcomeError` is the common outcome-preserving host-error base; `ProviderObserverError` and `ProviderDispatchOutcomePersistenceError` retain the complete drained SDK result and original `cause()`. The persistence error also retains secondary observer failure in `delivery_error()`. `ProviderFailure::outcome()` retains the SDK failure itself. These are evidence, not permission for Node/Program to redispatch: the SDK is the sole owner of provider retries, and a caller-selected `max_output_tokens` is never silently clamped.
+`ProviderOutcomeError` is the common outcome-preserving host-error base; `ProviderObserverError` and `ProviderDispatchOutcomePersistenceError` retain the complete drained SDK result and original `cause()`. The persistence error also retains secondary observer failure in `delivery_error()`. `ProviderFailure::outcome()` retains the SDK failure itself. These are evidence, not permission for Node/Program to redispatch: the SDK is the sole owner of transport retries, and a caller-selected `max_output_tokens` is never silently clamped.
 
 `ProgramFailure` retains live `provider_outcome` and `provider_cause`. Its canonical factual SDK witness binds genuine archive custody to owner/run/version/bundle/operation/attempt; Runtime eagerly restores configured custody before exposing a recovered failure. Public data-only `ProgramResult::create()` cannot bypass this with a prefilled witness, and an unresolved parsed seal is not an executable result. After process restart the original exception pointer is unavailable (`provider_cause == nullptr`), not recreated from text. A failure that cannot be persisted cannot be serialized, published or replayed.
 
 `RecordedBindingSet` is source-bound, move-only data, never a caller-supplied dispatcher. The trusted Catalog `recorded_capability_binder` independently materializes captured-only capabilities from real persisted source events. `ProgramRuntime::replay_recorded()` checks original selected-source permissions, then transfers the actual remaining bank through durable CAS; inherited spend is not a new model grant. The old `start_recorded` renewal API is removed. InMemory, File, SQLite and PostgreSQL Program stores preserve the exact immutable owned lease throughout execution; expiry does not renew it. Controlled JavaScript still validates the underlying capability manifest and consumes exact completed command outcomes without redispatching external effects.
 
 **Recorded-control causal fix exercised in the full suite.** Captured command replay durably reserves only new CPU wall-time/Core work before execution, then publishes measured work and any newly produced Core checkpoint through the result CAS. It consumes no new model, money or Program-operation allowance and does not redispatch captured external effects. An unreconciled reservation remains debited. The reservation selects the authenticated settlement transition rather than an ordinary Running→Running transition that rejected the first new Core checkpoint. Await channel receive, timer wait/cancel and handoff wait initiation/release are serialized on their owning executors/strands; the existing Recorded CPU/Memory await/handoff scenarios passed in the full suite; remote TSan coverage limits remain explicit below.
+
+The observations below were recorded before this documentation reconciliation. They are historical evidence, not new test runs or guarantees for every platform, transport or security property.
 
 **Completed paid observations; not universal qualification.** Original `SPQUAL1` base630/1000000 microUSD is unchanged; ONE hash-chained `A` admits approved extension480/3000000 in the same original ledger, aggregate1110/4000000, with cumulative calls/spent/holds/settlements and no new grant ID/header/reset. Exact declaration bytes/file identity and original authorization/baseline/catalog/activation/ledger-prefix hashes/totals remain pinned; removal/replacement/change fails closed. The final canonical ledger is calls1110/spent437958/held1287828 microUSD, eventA1, limits1110/4000000; spent+held is US$1.725786 LOCAL catalogue meter, not an invoice. The documented five-family60-pair baseline completed600 requests: Chat60/60, Responses60/60, Messages60/60, Generate56/60 (four incorrect-vision SSE), Interactions57/60 (one buffered and two SSE incorrect-vision); aggregate293/300 pairs, not300/300. Other old600 financial records remain preserved, not full behavioral proof. Earlier M5/media one-shot cohorts are unchanged. The earlier three-round Google prerequisites retain two invalid-tool and one unreadable-positive failures. No further paid calls are authorized. Final SDK evidence and native-axis limits are separate from baseline success. Earlier activation/reopen smoke remains recorded at calls610/spent219159/held751233 after two reopens, with SDK meter/canary/vision four tests passed19.38seconds; these are scoped prior checkpoints, not final ledger totals. The earlier verified Chat60-pair cohort retains120 actual attempts,120 UpperBound charges and no UnknownHold.
 
@@ -428,7 +470,7 @@ Historical Stage 3 (2026-04) design and its measured test counts are preserved a
 
 `GraphEngine::compile(def, ctx)` default worker count was
 `std::thread::hardware_concurrency()` from v0.1.4 (`b59444f`) but is restored to
-**`1` (= no engine-owned thread_pool)** in v1.0.
+**`1` (= no engine-owned thread_pool)** in the current pre-v1 API.
 
 ## Why
 
@@ -469,10 +511,7 @@ default — 0 pool overhead.
 
 ## What Happens If You Don't Migrate
 
-- User graphs with fan-out execute serially on a single thread (consistency
-  guaranteed)
-- Actual wallclock recovery is not achieved — explicit
-  `set_worker_count_auto()` is required
+Without an opted-in worker pool, CPU-bound fan-out runs on the caller's executor; asynchronous I/O can still overlap. Use `set_worker_count_auto()` or an explicit worker count when separate execution threads are required. Worker count alone does not guarantee consistency or speedup.
 
 ## NeoGraph Internal Examples Affected
 
@@ -486,7 +525,7 @@ to preserve intent. Apply the same pattern if your user code matches:
 - `examples/21_mcp_fanout.cpp` — 3 MCP tool calls fired concurrently, same
 - `examples/36_classifier_fanout.cpp` — already had `set_worker_count(5)`
   explicit. Fixed comment stating false default (current default is
-  hardware_concurrency)
+  1 (no engine-owned pool))
 - `src/core/deep_research_graph.cpp` `create_deep_research_graph()` builder —
   calls `set_worker_count_auto()` immediately after `compile()` so supervisor's
   N researchers truly run concurrently
@@ -516,12 +555,7 @@ announces a boundary. In particular, moving from `0.11.1` or earlier to the
 release containing bounded `NodeCache` requires a rebuild because `NodeCache`
 and `EngineConfig` object layouts changed.
 
-The Provider migration above does **not** change the established `Provider`
-vtable. Existing Provider binaries remain subject only to the release-wide
-boundaries. The planned `CheckpointStore` async migration must follow the same
-policy: any pre-v1 vtable change requires an announced rebuild, while v1 and
-later should add separate capability interfaces and adapters instead of
-changing the stable layout.
+The typed Provider migration changes its virtual contract to `get_name`, `family` and `prepare`, and removes the old completion virtuals. Existing Provider binaries are incompatible; rebuild custom providers and every dependent C++ consumer with matching headers and libraries. Core also exposes SchemaProvider types, so an LLM-disabled build still needs the SDK runtime. Future stable interfaces should prefer separate capability interfaces and adapters rather than mutate a stable layout; the current pre-v1 interfaces do not promise binary compatibility.
 
 See [Binary Compatibility Policy](ABI_POLICY.md) for platform library names,
 all known rebuild boundaries, and CI verification.

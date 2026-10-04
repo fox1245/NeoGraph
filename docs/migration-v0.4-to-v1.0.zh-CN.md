@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=zh-CN source_sha256=47da3b0da6a1a0469315657c9eb8079b216d0c51eafce0bed090d91fc5c3c7b5 -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=zh-CN source_sha256=adeaef39bec37687c1e660e3ffbf89611002f53fd28b2a1d3aebd5b1fb664991 -->
 # 迁移指南：旧的 8 个虚函数 → `run(NodeInput)`（v0.4.x → v0.9+）
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -11,6 +11,8 @@ API 的步骤。
 
 > 从 v0.9.0 起，未实现 `run(NodeInput)` 的 C++ 子类将作为抽象类编译失败。
 > Python 子类也必须实现 `run(self, input)`。
+
+事件驱动Provider dispatch另有pre-v1必须重建边界：`CancelToken`改用`std::stop_source`并提供executor独立native subscription的`stop_token()`。既有`cancel()`、`is_cancelled()`、`fork()`、`bind_executor()`、`slot()` callsite保持source兼容，但旧inline实现不具binary兼容。全部C++ consumer/extension必须使用匹配NeoGraph header/library重新编译，不能仅替换shared library。通知保留SDK `join()`、FIFO所有权outcome、绝对deadline及admission/权限budget。参见[ABI policy](ABI_POLICY.md)及[同条件实测](../benchmarks/provider-notification-summary.json)。
 
 ## 为什么需要迁移
 
@@ -297,9 +299,15 @@ grep -lE 'execute\(const GraphState' src/**/*.cpp
 
 # 迁移 2：typed lossless Provider 切换（必须重新编译）
 
-这是源码和二进制破坏性变更；所有 C++ 使用者与自定义提供方都必须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter 和 Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为不稳定 `0.0.0`、interface revision 3 / shared ABI 3，使用 out-of-line capability check，不表示稳定发布。当前 runtime/archive 为 Linux/POSIX，不代表 Windows、macOS、WASM runtime 已获验证。Python provider binding/wrapper 已延期，不由本 C++ 变更完成移植。
+这是源码和二进制破坏性变更；所有 C++ 使用者与自定义提供方都必须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter 和 Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为 alpha `0.1.0`、interface revision 4 / shared ABI 4，使用 out-of-line capability check，不表示稳定发布。已记录的 interface-3 SDK runtime/archive 验证覆盖 Linux/POSIX，不验证 interface 4。Windows NTFS 与 macOS 实现已存在，但新 platform 验证需要 runtime 证据；尚未确立 WASM provider runtime 验证。
 
-Fresh installed find_package Program C++/C ABI/dualQuickJS consumer 与 NeoGraph/SchemaProvider typed2-request lifetime/native/raw/mismatch consumer pass。Interface/ABI 声明本身不同于实际 package 结果；不声称更广 platform 或稳定 release。
+将已删除的 `Provider::complete`、`complete_async`、`complete_stream`、`complete_stream_async` 调用迁移到显式 mode request 和 `invoke` / `dispatch`（或 C++ async peer）。`Agent::complete` 仍是返回拥有所有权结果的独立 one-turn API。
+
+需要 CMake 3.20 或更高版本。Core 公开拥有所有权的 typed provider 契约，所以 `NEOGRAPH_BUILD_LLM=OFF` 时 SchemaProvider runtime 仍必需。显式 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` 优先；否则先查找已安装的 `SchemaProvider` runtime package。若没有且 `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON`（默认），就下载 `cmake/NeoGraphSchemaProvider.cmake` 固定的不可变 GitHub archive。Offline build 需安装 SDK、将 `CMAKE_PREFIX_PATH` 指向其 prefix，并传入 `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`。CMake 不猜测 sibling checkout，也不选择已删除的 bundled interpreter。禁用 NeoGraph 可选 HTTP module 时，SDK runtime 的 transport 依赖仍必需。已记录的 SDK runtime/archive 验证覆盖 Linux/POSIX。Windows NTFS 与 macOS 实现已存在，但新 platform 验证需要 runtime 证据；尚未确立 WASM provider runtime 验证。
+
+Python 公开与 C++ 相同的所有权 request/outcome 边界：`make_provider_request`、`Provider.prepare`、`dispatch` 和 `invoke`。Provider 历史使用带 typed part 的 `ProviderMessage`；`ChatMessage` 仍是图的便利 projection。SDK 失败可通过 `ProviderOutcome.failure` 读取，host observer/settlement 异常保留 `outcome` 和 `cause`。构造器及 GIL/回调行为参见 [Python binding 指南](python-binding.md)。
+
+Interface 4 之前的 installed find_package Program C++/C ABI/dualQuickJS consumer 与 NeoGraph/SchemaProvider typed2-request lifetime/native/raw/mismatch consumer pass。这是历史 package 结果，不是 interface-4 pass 声明；不声称更广 platform 或稳定 release。
 
 公开契约是拥有所有权的 typed 准备/dispatch，而非同步/异步 virtual completion 对。`ProviderRequest.payload` 是 Chat、Messages、Responses、Gemini、Interactions 的 SDK 请求 variant。`ProviderMode::Collect` / `Stream` 独立于观察者是否存在来选择传输。`on_event` 接收借用的 typed `sp::Event` view；只复制回调后仍需要的数据。不允许 raw JSON override 或通过 portable projection 导入 native 权限。
 
@@ -308,10 +316,21 @@ Fresh installed find_package Program C++/C ABI/dualQuickJS consumer 与 NeoGraph
 #include <neograph/runtime_interposition_consumer.h>
 #include <neograph/controlled_provider.h>
 
-// Public operation signatures (the only virtual operation is prepare).
-// ProviderRequest owns the SDK request variant, mode, options and observer.
-// invoke[_async](request) = prepare once, then dispatch the same handle.
-// dispatch[_async](prepared) returns sp::runtime::Result.
+// Selected public declarations from neograph::Provider.
+class Provider {
+public:
+    virtual ~Provider() = default;
+    virtual std::string get_name() const = 0;
+    virtual std::string_view family() const noexcept = 0;
+    virtual PreparedProviderRequest prepare(ProviderRequest request) = 0;
+    sp::runtime::Result dispatch(PreparedProviderRequest request);
+    asio::awaitable<sp::runtime::Result> dispatch_async(PreparedProviderRequest request);
+    sp::runtime::Result invoke(ProviderRequest request);
+    asio::awaitable<sp::runtime::Result> invoke_async(ProviderRequest request);
+    static std::string request_digest(const PreparedProviderRequest& request);
+    static std::optional<std::uint64_t> conservative_token_upper_bound(
+        const PreparedProviderRequest& request);
+};
 ```
 
 ### ProviderRequest / ProviderControls
@@ -335,13 +354,28 @@ sp::runtime::Result call_provider(
 }
 ```
 
+Interface 4 通过 typed field 保留 retained per-call control，不使用 `extra_fields` dictionary：
+
+| Family | 新增 `ProviderControls` |
+|---|---|
+| Chat | `chat_reasoning`、`include_reasoning`、`usage_include`、`models`；要求已声明的 OpenRouter origin。Scalar `reasoning_effort` 独立保留。 |
+| Responses | `previous_response_id`、`previous_response_history`、`parallel_tool_calls`、`verbosity`、`truncation`、`responses_include`。 |
+| Messages | `thinking_mode`、`output_effort`、`cache_control`、`messages_tool_choice`、已声明 origin 的 OpenRouter `provider` routing。 |
+| Gemini Generate | `gemini_history_mode`、`gemini_thinking_level`、`temperature`、`safety_settings`、`gemini_tool_choice`。 |
+
+Messages manual thinking 要求 policy 准入且小于 output cap 的 budget；adaptive/disabled mode 禁止 thinking budget。Manual/adaptive thinking 省略有效 temperature，但无效值及 model 禁止的 temperature 在省略前拒绝。Disabled thinking 输出获准 temperature。Model-prefix 限制来自准入 policy 事实，对完整 model 或最后 `/` 后的 suffix 进行 ASCII 不区分大小写匹配。Gemini thinking level 与 thinking budget，以及 typed tool choice 与 `required_tool`，各自互斥。不支持的 family/origin/value 组合在 I/O 前拒绝。
+
 ### PreparedProviderRequest / ProviderBudgetClaim
 `prepare()` 恰好验证、编码一次，生成保持原始 deadline 与取消状态的仅可移动 `PreparedProviderRequest`。持久调用方将 `Provider::request_digest()` 绑定到 assembly，预留获准的 budget claim，写入 dispatch receipt，然后通过 `ControlledProvider::dispatch_prepared(_async)` 消费同一个 handle。gate 之后不重建请求。重复 receipt 绝不重新 dispatch。自定义实现提供 `get_name()`、`family()`、`prepare()` 并使用 `prepare_runtime()` 或 `prepare_local()`；local callback 捕获拥有所有权的 shared 状态，而非 `this`。
 
 可选 `ProviderControls` 是调用方选择，不是强制默认值或暗中 clamp 的 cap。不支持的 family 控制在 dispatch 前拒绝。有界调用需要获准的真实模型 input/output 上限；缺失时为 `LimitUnknown`。预留是保守的支出权限，而非报告使用量、预测或账单。未知/部分/delivery-unknown 结果保留 hold，真实最终报告用于结算，超额报告也全额计入。retry 是显式单层，默认 off，具有有界 window 与 unknown-prior hold；没有隐藏重发。
 
 
-提供方调用返回 `sp::runtime::Result`，即持有 `sp::Completion` 或 `sp::Failure` 的不可变、拥有所有权的 `std::shared_ptr<const sp::Outcome>`。请保留完整结果，而非仅显示文本。顺序消息/part、native continuation、完整 wire envelope、顺序 raw 观测、停止依据及真实尝试元数据在调用与客户端销毁后仍然保留。使用量是带依据、阶段、质量的 nullable `uint64_t`；缺失表示未知，绝不是零。失败保留原始部分结果。`ProviderFailure::outcome()` 与 `ProviderObserverError::outcome()` 保留真实结果，后者的 `cause()` 也保留观察者异常。
+提供方调用返回 `sp::runtime::Result`，即持有 `sp::Completion` 或 `sp::Failure` 的不可变、拥有所有权的 `std::shared_ptr<const sp::Outcome>`。请保留完整结果，而非仅显示文本。顺序消息/part、保留的 native continuation 与 family 提供的 wire 证据、顺序 raw 观测、停止依据及真实尝试元数据在调用与客户端销毁后仍然保留。`input_total`、`output_total` 和 `total` 等用量计数器为 `std::optional<sp::Count>`；存在的 count 有 `uint64_t value` 和 `Evidence`。`Usage` 还记录 stage、quality 和 conflict。缺失表示未知，不应伪造零值。失败保留原始部分结果。`ProviderFailure::outcome()` 与 `ProviderObserverError::outcome()` 保留真实结果，后者的 `cause()` 也保留观察者异常。
+
+Wire 证据由 family 提供，且是可选的：`sp::Completion::wire_envelope` 可以为 null（Python 的 `ProviderCompletion.wire_envelope` 为 `None`）。当前 buffered Chat 将完整响应 JSON 保留在 `raw_events` 的 `RawWire` 中，`type == "chat.completion"`，文档位于 `payload`，而 `wire_envelope` 保持 null。请从 family 实际保留的位置读取证据，不会伪造 fallback envelope。Native continuation 与 raw buffer 仍为受保护的证据，不进入 trace payload。
+
+`UsageAccumulator::snapshot()` 返回累计报告。`total_tokens_wide()` 返回已计费 token 与未解决预留之和，不能把它显示为报告用量。结算要求具有 input/output count 的 final、consistent 报告，并计入有依据的最大 total，不截断超额用量。任何累计报告缺少 counter，汇总该 counter 也为未知。预留、本地计费和 vendor 发票是不同的记录。
 
 实际结果存在后，若 post-effect 结算或 terminal receipt 持久化失败，`ProviderDispatchOutcomePersistenceError::outcome()` 保留原始不可变结果，`cause()` 保留原始持久化异常。若 delivery 也失败，`delivery_error()` 保留原始观察者异常。持久化成功后的观察者失败原样重新抛出原异常；未知/无结果 transport 失败不会伪造 outcome。
 ### SchemaProvider
@@ -368,9 +402,15 @@ std::shared_ptr<neograph::llm::SchemaProvider> admitted_provider(
 }
 ```
 
+普通 `sp::descriptor::load` 将 header 视为 literal，不展开 `${VAR}`。若要在 admission 前显式执行宿主 preprocessing，使用 `sp::descriptor::load_with_environment_headers(source, overrides, policy)`，或接收 `DeploymentHeaderEnvironment` 的确定性 `load_with_deployment_headers(source, overrides, environment, policy)`。Environment helper 为 Messages 读取可选 `ANTHROPIC_WORKSPACE_ID` / `ANTHROPIC_BETA`；未设置或为空则省略。Literal descriptor header 优先于 environment，explicit override 优先于两者，名称匹配不区分大小写。重复 override、无效或 reserved header 在最终 admission 拒绝。Encoder 不执行 template，也不修改已准入 descriptor。
+
 ### Native 历史 / 预算
 
 `ChatMessage` / `ChatTool` 和 JSON 只是 portable projection，不是 native 权限。Portable 格式仍为 [`provider-message-v2`](../schemas/provider-message-v2.schema.json)、[`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)。真实 C++ checkpoint sidecar 保留内存 native seal。持久 native 历史需要 host-owned `sp::NativeArchive`：closed v3 / `spna3` 使用独立密钥提供经认证的 owner-private custody；archive v2 被拒绝，不升级或解释。认证绑定全部 semantic descriptor 选择（origin/path/header、policy、请求 field mapping、usage path、stop mapping）、owner 和精确 custody binding。这不是加密或 vendor-issuer 认证；不得公开 archive 正文、密钥、native blob 或 raw wire 观测。Archive 是证据存储，不是资金 grant 或 spending lease。Program/external bank 仍由独立 journal 拥有，复制 snapshot 不能创建 credit。
+
+Interface 4 仅从 native replay 的 configuration digest 中移除 output-generation cap。Content、origin、route、policy identity、prefix、tool、reasoning control 仍保持绑定。实际 cap 仍进入 encoded request 和 prepared-request digest。每个更大 cap 的 semantic call 都需要新的 resource-bank admission、独立确定性 call ordinal/effect identity，以及原始 deadline；不能复用已结算 call slot、续期 credit、修复 seal 或重发不确定 effect。Archive v3 和 portable JSON v2 不变；old-policy native archive 仍绑定原 policy，policy 不匹配时拒绝，不进行 migration。
+
+Same-route native continuation 与显式 foreign projection 具有不同契约。Gemini 默认为 `sp::gemini::HistoryMode::NativeOnly`；`PortableForeign` 允许没有 native seal、wire output 或 signature 的 caller-created assistant Text/ToolCall history。仅每个 foreign assistant turn 的首个 function call 添加 `skip_thought_signature_validator`，text-only history 不添加 signature。真实 native group 仍严格验证，不会剥离失败/不匹配 seal 或降级为 portable history。Responses `previous_response_id` 选择 provider-held state，`messages` 只发送新 input。`previous_response_history` 是不发送的 local ownership 证据；client-tool ownership 需要时提供完整 original prefix，以及 ID 与 cursor 相同的真实 terminal assistant。后续 in-process cursor 结果保留 private completed ownership，不成为 full `NativeReplay` 或 archive authority。Cursor 不是 native archive 或 portable import grant。
 
 **Standalone bank journal 修正——当前契约已修订；实际 runtime 证据如下。** Owner-approved protocol 要求单调 trusted-store namespace obligation，以及真实不可变 original owner/thread/graph scope、ceiling、deadline/clock identity、generation。只有对全部 checkpoint commitment/revision 的精确 durable head CAS 才可发放 host-owned opaque lease。精确 pending effect window 必须在 provider I/O 前持久化；结算必须采用真实 SDK outcome 及实际 charge、nullable report、hold、dedup identity。Checkpoint 与 next head 必须在同一 owned actor/revision 下原子 publish。删除 bank metadata、prune checkpoint、replay old authenticated snapshot、覆盖同一 ID 或失去 actor 都不能授予 credit。已有 65 hold 时将 ceiling 130 降至 129，不能再批准另一个 65；已证明 no-effect 的失败可 release unchanged head，使 authentic 130 恢复仍可进行。Crash/unknown/lost-lease window 保持 hold，不 refund/retry/fallback。Plain/pristine archive 配置不授予 money/native spending lease；当前 `config.usage` 不能替换既有 standalone obligation，Program/external-bank journal 所有权不变。这是要求契约。实际 currency/custody 证据与 instrumentation 限制见下文，不是稳定 released API 保证。
 
@@ -388,13 +428,15 @@ std::shared_ptr<neograph::llm::SchemaProvider> admitted_provider(
 
 `ProviderRequest::observer_limits` 仅供宿主使用。显式 `max_events`、`max_bytes` 必须为正且只能降低获准 SDK 交付上限。`provider-request/v3` digest 绑定实际 limit、mode、encoded body、retry policy 及全部 semantic descriptor binding。Bridge 在 queued/draining batch 中同时计入真实 PMR vector/map capacity 与拥有的 event/document byte，并在 queue mutex 之外请求 cancellation。名为 `messages` 的 Generic channel 不会被强制转成 chat。将 native `history` channel mapping 到 `messages` 会保留 C++ sidecar，而不是从 JSON 制造 native 权限。
 
-`ProviderOutcomeError` 是保留结果的共同 host-error base；`ProviderObserverError` 和 `ProviderDispatchOutcomePersistenceError` 保留完整 drain 后的 SDK 结果及原始 `cause()`，后者还通过 `delivery_error()` 保留次要 observer 失败。`ProviderFailure::outcome()` 保留 SDK 失败本身。这些证据不授权 Node/Program 重新 dispatch。SDK 是 provider retry 的唯一所有者，调用方选择的 `max_output_tokens` 不会被暗中 clamp。
+`ProviderOutcomeError` 是保留结果的共同 host-error base；`ProviderObserverError` 和 `ProviderDispatchOutcomePersistenceError` 保留完整 drain 后的 SDK 结果及原始 `cause()`，后者还通过 `delivery_error()` 保留次要 observer 失败。`ProviderFailure::outcome()` 保留 SDK 失败本身。这些证据不授权 Node/Program 重新 dispatch。SDK 是 transport retry 的唯一所有者，调用方选择的 `max_output_tokens` 不会被暗中 clamp。
 
 `ProgramFailure` 保留 live `provider_outcome`、`provider_cause`。Canonical factual SDK witness 将真实 archive custody 绑定到 owner/run/version/bundle/operation/attempt；Runtime 在暴露恢复后的失败前立即恢复配置的 custody。公开 data-only `ProgramResult::create()` 不能用预填 witness 绕过；未解析完的 parsed seal 不是可执行结果。进程重启后原始 exception pointer 不可用（`provider_cause == nullptr`），不会从 text 重建。无法持久化的失败不能 serialize/publish/replay。
 
 `RecordedBindingSet` 是 source-bound move-only data，不是调用方提供的 dispatcher。可信 Catalog `recorded_capability_binder` 独立读取真实持久 source event，materialize captured-only capability。`ProgramRuntime::replay_recorded()` 检查原始 selected-source permission，再通过 durable CAS 转移真实剩余 bank；inherited spend 不是新的 model grant。旧 `start_recorded` 续期 API 已删除。InMemory/File/SQLite/PostgreSQL Program store 在整个执行期间保留精确不可变 owned lease，不因 expiry 续期。Controlled JavaScript 仍验证 underlying capability manifest，消费精确 completed command 结果，不重新 dispatch external effect。
 
 **Recorded-control causal fix 已在 full suite 实证。** Captured command replay 在执行前仅为新的 CPU wall-time/Core work 建立 durable reservation，再通过 result CAS publish 测量 work 与新产生的 Core checkpoint。不消耗新的 model、money、Program-operation allowance，也不重新 dispatch captured external effect。未结算 reservation 保持 debit。Reservation 选择认证 settlement transition，而非曾拒绝首个新 Core checkpoint 的普通 Running→Running transition。Await channel receive、timer wait/cancel、handoff wait 的开始/release 在所属 executor/strand 上串行化；既有 Recorded CPU/Memory await/handoff scenario 在 full suite pass；remote TSan coverage 限制如下明确保留。
+
+以下观察记录于本次文档整理之前。它们是历史证据，不是新测试运行，也不保证所有 platform、transport 或 security 属性。
 
 **付费观测已完成；不是普遍 qualification。** 原始 `SPQUAL1` base630/1000000 microUSD 不变；同一原始 ledger 中 ONE hash-chained `A` 接纳批准的 extension480/3000000，aggregate1110/4000000。Calls/spent/hold/settlement 累积，不产生新 grant ID/header/reset。精确 declaration byte/file identity 和 original authorization/baseline/catalog/activation/ledger-prefix hash/totals 仍固定；删除、替换、变更均 fail closed。最终 canonical ledger 为 calls1110/spent437958/held1287828 microUSD、eventA1、limits1110/4000000；spent+held US$1.725786 是 LOCAL catalogue meter，不是 invoice。记录的 five-family60-pair baseline 完成600 request：Chat60/60、Responses60/60、Messages60/60、Generate56/60（incorrect-vision SSE4次）、Interactions57/60（incorrect-vision buffered1次/SSE2次）；合计293/300 pair，不是300/300。其他 old600 financial record 保留，但不是完整 behavioral proof。此前 M5/media one-shot cohort 不变。此前 Google3-round prerequisite 保留 invalid-tool2次/unreadable-positive1次失败状态。不批准更多付费调用。最终 SDK 证据与 native-axis 限制不同于 baseline 成功。 此前 activation/reopen smoke 保留为两次 reopen 后 calls610/spent219159/held751233、SDK meter/canary/vision4-test19.38秒 pass；这是限定的历史 checkpoint，不是最终 ledger totals。此前验证的 Chat60-pair cohort 保留实际 attempt120、UpperBound charge120、无 UnknownHold。
 
@@ -419,7 +461,7 @@ Stage 3（2026-04）设计及当时实测测试数量作为历史保留。provid
 ## 变更了什么
 
 `GraphEngine::compile(def, ctx)` 默认工作线程数从 v0.1.4（`b59444f`）起
-为 `std::thread::hardware_concurrency()`，但在 v1.0 中恢复为
+为 `std::thread::hardware_concurrency()`，但在当前 pre-v1 API 中恢复为
 **`1`（= 无引擎持有的 thread_pool）**。
 
 ## 为什么
@@ -456,8 +498,7 @@ engine.set_worker_count_auto()
 
 ## 如果不迁移会发生什么
 
-- 有扇出的用户图将在单线程上串行执行（一致性保证）
-- 实际的挂钟恢复无法实现——需要显式的 `set_worker_count_auto()`
+不选择 worker pool 时，CPU-bound fan-out 在调用者 executor 上执行；异步 I/O 仍可重叠。需要独立执行 thread 时使用 `set_worker_count_auto()` 或显式 worker count。Worker count 本身不保证一致性或加速。
 
 ## 受影响的 NeoGraph 内部示例
 
@@ -470,7 +511,7 @@ engine.set_worker_count_auto()
   同样添加
 - `examples/21_mcp_fanout.cpp` — 3 个 MCP 工具调用同时触发，同样添加
 - `examples/36_classifier_fanout.cpp` — 已有 `set_worker_count(5)` 显式
-  调用。修正了声明错误默认值的注释（当前默认值为 hardware_concurrency）
+  调用。修正了声明错误默认值的注释（当前默认值为 1，没有 engine-owned pool）
 - `src/core/deep_research_graph.cpp` `create_deep_research_graph()` 构建器 —
   在 `compile()` 之后立即调用 `set_worker_count_auto()`，使 supervisor 的
   N 个研究者真正并发运行
@@ -499,9 +540,7 @@ NeoGraph 现在为所有公开二进制库设置项目 `VERSION` 和主版本
 从 `0.11.1` 或更早版本升级到包含 bounded `NodeCache` 的版本时，
 `NodeCache` 和 `EngineConfig` 对象布局已经改变，因此必须重新构建。
 
-上面的 Provider 迁移不会改变现有 `Provider` vtable。未来的
-`CheckpointStore` 异步迁移也必须遵守同一策略；v1 之后应优先增加独立能力
-接口和适配器，而不是修改稳定布局。
+Typed Provider 迁移将 virtual 契约改为 `get_name`、`family`、`prepare`，删除旧 completion virtual。现有 Provider binary 不兼容；必须使用匹配 header/library 重建自定义 provider 及所有依赖 C++ consumer。Core 也公开 SchemaProvider 类型，所以 LLM-disabled build 仍需要 SDK runtime。未来稳定 interface 应优先采用独立 capability interface 和 adapter，而非修改稳定 layout；当前 pre-v1 interface 不承诺 binary 兼容。
 
 平台库名称、已知边界和 CI 验证方法请参阅
 [二进制兼容性策略](ABI_POLICY.md)。

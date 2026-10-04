@@ -69,22 +69,34 @@ asio::awaitable<NodeOutput> A2ACallerNode::run(NodeInput in) {
 
     auto task = co_await client_->send_message_async(params);
 
-    std::string response_text;
-    if (!task.history.empty()) {
-        for (auto& part : task.history.back().parts) {
+    // The agent's answer, in order of authority: the terminal status
+    // message, the artifacts' text, then the last *agent* message in the
+    // history (which may also hold the caller's own turn or an interim
+    // "working" note, so it is only the last resort).
+    auto text_of = [](const std::vector<Part>& parts) {
+        std::string text;
+        for (auto& part : parts) {
             if (part.kind == "text") {
-                if (!response_text.empty()) response_text.push_back('\n');
-                response_text.append(part.text);
+                if (!text.empty()) text.push_back('\n');
+                text.append(part.text);
             }
         }
+        return text;
+    };
+    std::string response_text;
+    const auto state = task.status.state;
+    const bool final_status = state == TaskState::Completed || state == TaskState::Canceled
+        || state == TaskState::Failed || state == TaskState::Rejected
+        || state == TaskState::InputRequired || state == TaskState::AuthRequired;
+    if (final_status && task.status.message && task.status.message->role == Role::Agent) {
+        response_text = text_of(task.status.message->parts);
     }
     if (response_text.empty() && !task.artifacts.empty()) {
-        for (auto& part : task.artifacts.front().parts) {
-            if (part.kind == "text") {
-                if (!response_text.empty()) response_text.push_back('\n');
-                response_text.append(part.text);
-            }
-        }
+        response_text = text_of(task.artifacts.front().parts);
+    }
+    for (auto it = task.history.rbegin();
+         response_text.empty() && it != task.history.rend(); ++it) {
+        if (it->role == Role::Agent) response_text = text_of(it->parts);
     }
 
     NodeOutput out;

@@ -5,7 +5,7 @@ user's message, decides math / translate / general, and the
 conditional edge dispatches to the matching expert. Each expert
 adds its own answer to the messages channel.
 
-Real LLM via OpenAIProvider. The classifier itself is a custom
+Real LLM via typed SchemaProvider. The classifier itself is a custom
 Python node that calls the provider once with a classification
 prompt — no special node type needed beyond what the binding
 already exposes.
@@ -16,7 +16,7 @@ Run:
     python 08_intent_routing.py
 """
 
-from _common import ng, openai_provider
+from _common import ask_text, ng, schema_provider
 
 
 CLASSIFIER_PROMPT = (
@@ -41,15 +41,14 @@ class ClassifierNode(ng.GraphNode):
 
     def run(self, input):
         msgs = input.state.get_messages()
-        params = ng.CompletionParams(
+        completion = ask_text(self._provider,
             messages=[
                 ng.ChatMessage(role="system", content=CLASSIFIER_PROMPT),
                 *msgs,
             ],
             temperature=0.0,
         )
-        completion = self._provider.complete(params)
-        label = completion.message.content.strip().lower()
+        label = completion.strip().lower()
         if label not in {"math", "translate", "general"}:
             label = "general"
         return [ng.ChannelWrite("__route__", label)]
@@ -69,21 +68,20 @@ class ExpertNode(ng.GraphNode):
 
     def run(self, input):
         msgs = input.state.get_messages()
-        params = ng.CompletionParams(
+        completion = ask_text(self._provider,
             messages=[
                 ng.ChatMessage(role="system", content=self._system),
                 *msgs,
             ],
         )
-        completion = self._provider.complete(params)
         # Append the expert's answer to messages.
         return [ng.ChannelWrite("messages", [{
             "role": "assistant",
-            "content": completion.message.content,
+            "content": completion,
         }])]
 
 
-provider = openai_provider()
+provider = schema_provider()
 
 ng.NodeFactory.register_type(
     "classifier",
@@ -136,6 +134,9 @@ definition = {
                 "math":      "math",
                 "translate": "translate",
                 "general":   "general",
+                # route_channel returns "default" if the route is absent/non-string;
+                # unknown labels also take this explicit general-expert policy.
+                "default":   "general",
             },
         },
     ],
@@ -149,10 +150,10 @@ USER_INPUTS = [
     "Who wrote the Iliad?",
 ]
 
-for user_msg in USER_INPUTS:
+for index, user_msg in enumerate(USER_INPUTS):
     print(f"\n=== USER: {user_msg}")
     result = engine.run(ng.RunConfig(
-        thread_id=f"q-{hash(user_msg)}",
+        thread_id=f"q-{index}",
         input={"messages": [{"role": "user", "content": user_msg}]},
     ))
     msgs = result.output["channels"]["messages"]["value"]

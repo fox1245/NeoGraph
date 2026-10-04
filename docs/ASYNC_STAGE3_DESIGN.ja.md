@@ -1,13 +1,19 @@
-<!-- neograph-i18n: source=docs/ASYNC_STAGE3_DESIGN.md locale=ja source_sha256=d6d1575f38204de726d4313f8b7a1314ed2fe236484934f7f5be1fb0b4bcf7aa -->
+<!-- neograph-i18n: source=docs/ASYNC_STAGE3_DESIGN.md locale=ja source_sha256=1b7adfd905a5df954404b35ec17b04b8e334eaee56e2b5f2c8d042b831c9ffa0 -->
 # Stage 3 — asio ベース完全非同期リファクタ設計
 
 > **アーカイブ済み・後継に置き換えられた設計提案。** 2026-04-19 の Stage 3
 > 提案の記録であり、現在の API 指針や予定した全 gate の完了証拠ではありません。
 > ここでの `Provider::complete` / `complete_async` の組と `OpenAIProvider` は
 > 型付き provider 移行で削除されました。現在の provider は型付きリクエストを所有し、
-> 一度 prepare して準備済みの呼び出しを dispatch します。[API narrative tour](reference-ja.md)、
-> [移行ガイド](migration-v0.4-to-v1.0.ja.md)とインストール済みヘッダーを参照してください。
+> 一度 prepare して準備済みの呼び出しを dispatch します。[API narrative tour](reference-en.md)、
+> [移行ガイド](migration-v0.4-to-v1.0.md)とインストール済みヘッダーを参照してください。
 > SDK の `Client::complete` は別の、引き続きサポートされる API です。
+>
+> 以下の「現状」、schedule、gate、version、次の action は当時の提案日を
+> 指す。Python は Stage 3 の対象外だったが、現在の移行には typed Python
+> provider と owned outcome が含まれる。現在の Core は LLM node 無効時も
+> 外部 SchemaProvider runtime を要する。実装契約と platform 検証範囲は
+> [非同期ガイド](ASYNC_GUIDE.md)と [Python binding](python-binding.md)を参照。
 
 **Languages:** [English](ASYNC_STAGE3_DESIGN.md) | [한국어](ASYNC_STAGE3_DESIGN.ko.md) | [日本語](ASYNC_STAGE3_DESIGN.ja.md) | [简体中文](ASYNC_STAGE3_DESIGN.zh-CN.md)
 

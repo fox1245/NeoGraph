@@ -8,11 +8,11 @@ Difference from example 22:
     messages survive the evolution because the new engine shares the
     checkpoint store with the old one.
 
-Pattern shape (from ProjectDatePop's per-customer evolving agent):
+Per-thread evolution:
 
   1. Each thread has its own agent definition (JSON).
   2. Conversation runs through the current definition.
-  3. ``evolve_agent()`` asks an LLM to inspect the conversation and
+  3. ``propose_new_agent()`` asks a model to inspect the conversation and
      propose a revised JSON.
   4. ``validate_agent()`` rejects unsafe proposals (whitelist node
      types, required channels, edge connectivity, node count cap).
@@ -22,9 +22,9 @@ Pattern shape (from ProjectDatePop's per-customer evolving agent):
      checkpoint store with the old one. With ``resume_if_exists=True``
      prior messages survive because their channel + reducer is
      compatible across the two graph versions.
-  6. An ``__graph_meta__`` channel records evolution events alongside
-     the messages timeline. Replay/audit can reconstruct which graph
-     version produced each turn.
+  6. An ``__graph_meta__`` channel records the accepted graph version/hash
+     after the preceding turn. This is application metadata, not authoritative
+     engine replay evidence.
 
 The ``__graph_meta__`` convention is purely application-level — the
 engine has no special handling. It is a regular append-reduced channel
@@ -35,8 +35,8 @@ Run::
 
     OPENAI_API_KEY=sk-... python 23_evolving_chat_agent.py
 
-Both the chat node and the evolver call OpenAI, so this is a real
-end-to-end demo. Cost is small (~5 short completions per run).
+Both the chat node and the evolver make provider requests. Hosted calls incur
+provider charges; OPENAI_API_BASE can instead route to a local Chat protocol peer.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ from typing import Any
 import neograph_engine as ng
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import openai_provider  # noqa: E402
+from _common import ask_text, schema_provider  # noqa: E402
 
 
 # ── Generic config-driven chat node ─────────────────────────────────
@@ -74,27 +74,15 @@ class PromptedChatNode(ng.GraphNode):
 
     def run(self, input):
         msgs = input.state.get("messages") or []
-        params = ng.CompletionParams()
-        params.model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
-        params.temperature = 0.4
-        params.max_tokens = self._max_tokens
-        params.messages = [ng.ChatMessage(role="system", content=self._system_prompt)]
+        messages = [ng.ChatMessage(role="system", content=self._system_prompt)]
         for m in msgs:
             role = m.get("role", "")
             content = m.get("content", "")
             if role in ("user", "assistant", "system") and content:
-                params.messages.append(ng.ChatMessage(role=role, content=content))
+                messages.append(ng.ChatMessage(role=role, content=content))
 
-        result = self._ctx.provider.complete(params)
-        text = result.message.content if result.message else ""
-        if not text.strip():
-            # Keep the graph's brevity preference in the prompt, but give
-            # reasoning models enough total budget to reach visible content.
-            params.max_tokens = max(params.max_tokens, 1200)
-            result = self._ctx.provider.complete(params)
-            text = result.message.content if result.message else ""
-        if not text.strip():
-            raise RuntimeError("model returned no visible chat content")
+        text = ask_text(self._ctx.provider, messages=messages, temperature=0.4,
+                        max_output_tokens=self._max_tokens)
         return [ng.ChannelWrite("messages", [{
             "role": "assistant",
             "content": text,
@@ -154,7 +142,7 @@ def validate_agent(defn: dict) -> tuple[bool, str]:
     if len(nodes) > 6:
         return False, f"node count cap exceeded ({len(nodes)} > 6)"
     for k, v in nodes.items():
-        ntype = (v or {}).get("type")
+        ntype = v.get("type") if isinstance(v, dict) else None
         if ntype not in ALLOWED_NODE_TYPES:
             return False, f"node '{k}' has unsupported type {ntype!r}"
 
@@ -169,14 +157,23 @@ def validate_agent(defn: dict) -> tuple[bool, str]:
         return False, "'__graph_meta__' reducer must remain 'append'"
 
     edges = defn.get("edges") or []
-    has_start = any(e.get("from") == ng.START_NODE for e in edges)
-    has_end = any(e.get("to") == ng.END_NODE for e in edges)
-    if not (has_start and has_end):
-        return False, "edges must include both START and END"
+    if not isinstance(edges, list) or any(not isinstance(edge, dict) for edge in edges):
+        return False, "edges must be a list of objects"
     valid_targets = set(nodes.keys()) | {ng.START_NODE, ng.END_NODE}
-    for e in edges:
-        if e.get("from") not in valid_targets or e.get("to") not in valid_targets:
-            return False, f"edge {e} references unknown node"
+    adjacency = {name: [] for name in valid_targets}
+    for edge in edges:
+        source, target = edge.get("from"), edge.get("to")
+        if source not in valid_targets or target not in valid_targets:
+            return False, f"edge {edge} references unknown node"
+        adjacency[source].append(target)
+    reached, pending = set(), [ng.START_NODE]
+    while pending:
+        name = pending.pop()
+        if name not in reached:
+            reached.add(name)
+            pending.extend(adjacency[name])
+    if ng.END_NODE not in reached:
+        return False, "END must be reachable from START"
 
     return True, "ok"
 
@@ -224,17 +221,10 @@ Current graph:
 
 Return the revised graph JSON."""
 
-    params = ng.CompletionParams()
-    params.model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
-    params.temperature = 0.2
-    params.max_tokens = 1500
-    params.messages = [
-        ng.ChatMessage(role="system",
-                       content="You output strict JSON only — no prose, no fences."),
+    raw = ask_text(provider, messages=[
+        ng.ChatMessage(role="system", content="You output strict JSON only, no prose or fences."),
         ng.ChatMessage(role="user", content=instructions),
-    ]
-    result = provider.complete(params)
-    raw = (result.message.content if result.message else "").strip()
+    ], temperature=0.2, max_output_tokens=1500).strip()
 
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
@@ -246,6 +236,10 @@ Return the revised graph JSON."""
         proposed = json.loads(raw)
     except json.JSONDecodeError as e:
         raise RuntimeError(f"evolver returned non-JSON: {e}; raw[:300]: {raw[:300]!r}")
+    if not isinstance(proposed, dict):
+        raise RuntimeError("evolver graph must be an object")
+    if type(proposed.get("_version")) is not int or proposed["_version"] != current["_version"] + 1:
+        raise RuntimeError("evolver must increment the graph version by one")
     if proposed.get("schema_version") != current_schema:
         raise RuntimeError(
             "evolver changed or omitted schema_version: "
@@ -288,7 +282,7 @@ def _last_assistant(state) -> str:
 
 
 def main():
-    provider = openai_provider()
+    provider = schema_provider()
     ctx = ng.NodeContext(provider=provider)
     store = ng.InMemoryCheckpointStore()
     TID = "customer_alice"

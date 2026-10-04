@@ -8,7 +8,7 @@ The C++ router, synthesizer and specialist fixtures use typed `ProviderRequest`,
 
 Local voice is optional and needs the selected whisper/Moonshine models, ONNX Runtime/Supertonic assets, miniaudio and usable microphone/speaker devices; text/mock operation is not proof of working voice. Cloud-free applies only to local/mock operation. Live requests require an authorized `OPENROUTER_API_KEY`, network access and provider capacity, and send prompts, conversation memory and attached tool/delegation results to OpenRouter. The live model is pinned; the native request sets ZDR, not a residency guarantee. Keep keys out of logs and version control. Provider token usage is nullable accounting, not a monetary bill: cost requires current endpoint/model pricing and billable usage.
 
-`[jarvis:ttft]` is emitted on the first nonempty `sp::PartDelta` with `PartKind::Text` and `DeltaChannel::Content`, not on usage, reasoning, headers or other events. It measures first synthesis text, not first audible TTS playback. Python REPL/benchmark protocol drivers remain unchanged; typed Python provider bindings are deferred. All timings and execution statements retained below are historical, not evidence that this migrated C++ path was executed. This update aligns documentation with source only; no build, benchmark or voice/live run was performed.
+`[jarvis:ttft]` is emitted on the first nonempty `sp::PartDelta` with `PartKind::Text` and `DeltaChannel::Content`, not on usage, reasoning, headers or other events. It measures first synthesis text, not first audible TTS playback. Python REPL drivers remain protocol clients; pybind benchmarks use the migrated typed bindings and need separate execution evidence. The preserved C++ evidence covers CLI greeting, synthetic memory persistence and graceful EOF. Voice/live timings below are historical and do not qualify the migrated path.
 
 What each node in `config/jarvis_graph.json` does and why it's in that position.
 Best read alongside the diagram in README.md.
@@ -17,7 +17,7 @@ Best read alongside the diagram in README.md.
 
 ```
 T0  Microphone active, Tony utterance start detected
-T1  Utterance end (VAD detects 200ms silence)
+T1  Utterance end (VAD detects 500ms silence)
 T2  STT complete — text + detected language code
 T3  Memory lookup complete — last 6 turns + preferences + last topic
 T4  Router decision complete — {mode, tool_calls, delegate_to, skip_synthesis}
@@ -126,13 +126,12 @@ build (bundled reduced build excludes ConvInteger) → default fp32(~183MB).
 ### tts (`supertonic_tts`)
 - supertonic inference with final_text + user_lang → 44.1kHz PCM
 - Starts miniaudio speaker playback → first chunk ~100-300ms later
-- Cancels with cancel token if voice_in activation detected during playback (barge-in)
-  - Initial skeleton does not support barge-in; to be added in v2
+- Barge-in is not implemented; microphone input is discarded during playback.
 
 ## Outside Graph — Background Triggers / A2A Server
 
-The JARVIS main graph is a simple single-utterance, single-response cycle, but main.cpp
-starts two additional components that complete the JARVIS feel:
+The main graph handles one utterance and response per cycle. The A2A server is
+implemented; background triggers below describe an unimplemented design.
 
 ### Background Trigger Graph
 - Separate `GraphEngine` (or just std::thread)
@@ -150,5 +149,5 @@ starts two additional components that complete the JARVIS feel:
 
 - **Barge-in not supported** — Microphone input ignored during TTS playback. Add cancel token in v2.
 - **Multi-speaker not supported** — Assumes one person. Speaker separation needs separate node (e.g., pyannote).
-- **Long-memory compression** — Turns grow infinitely as conversation lengthens. Need #56 history_compaction pattern.
-- **Catalog hot-reload** — JSON change detection is manual (SIGHUP, etc.). Automatic reload via inotify in v2.
+- **Long-memory compression** — Lookup defaults to six recent turns and commits retain the latest 24. Older turns are dropped, not summarized.
+- **Catalog hot-reload** — Catalogs are loaded at startup; restart after edits. Automatic reload is not implemented.

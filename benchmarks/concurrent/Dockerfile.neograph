@@ -11,29 +11,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ninja-build \
         pkg-config \
         python3 \
+        ca-certificates \
+        libcurl4-openssl-dev \
+        libssl-dev \
     && rm -rf /var/lib/apt/lists/*
-# No libssl-dev / libsqlite3-dev / libpq-dev / libcurl4-openssl-dev —
-# this image flips every optional component (LLM / MCP / A2A / ACP /
-# UTIL / POSTGRES / SQLITE / USE_LIBCURL / **and ASYNC**) OFF, so the
-# core-only build needs *nothing* beyond a C++20 toolchain + CMake.
-# CMakeLists.txt:258 was made conditional in the same commit that
-# introduced NEOGRAPH_BUILD_ASYNC — `find_package(OpenSSL REQUIRED)`
-# now only runs when ASYNC / LLM / MCP / A2A is ON.
+# Core's typed provider contracts require the SchemaProvider runtime, including
+# curl >= 7.88 and OpenSSL, even when NeoGraph's optional network modules are OFF.
+# Ubuntu 24.04 supplies the required curl; Python generates SDK embedded config.
 
 WORKDIR /src
 COPY . .
 
-# Core-only build — skip every optional component so the image stays
-# minimal and reproducible. Defaults of NEOGRAPH_BUILD_* / USE_LIBCURL
-# changed to ON over time and silently broke this Dockerfile twice
-# (master ↔ Docker drift). Listing them all explicitly here freezes the
-# matrix's NeoGraph cell to "neograph_core + bench shim, nothing else."
-RUN cmake -S . -B build \
+# The private consumer links neograph::core, inheriting the complete SDK link
+# closure. SDK acquisition/pinning remains in NeoGraph's root CMake convention.
+RUN cmake -S benchmarks/concurrent -B build \
         -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DNEOGRAPH_BUILD_ASYNC=OFF \
+        -DNEOGRAPH_BUILD_PROGRAM=OFF \
+        -DNEOGRAPH_BUILD_QUICKJS_CONTROL=OFF \
         -DNEOGRAPH_BUILD_LLM=OFF \
         -DNEOGRAPH_BUILD_MCP=OFF \
+        -DNEOGRAPH_BUILD_MCP_CLIENT=OFF \
+        -DNEOGRAPH_BUILD_MCP_SERVER=OFF \
+        -DNEOGRAPH_BUILD_MCP_HTTP_SERVER=OFF \
         -DNEOGRAPH_BUILD_A2A=OFF \
         -DNEOGRAPH_BUILD_ACP=OFF \
         -DNEOGRAPH_BUILD_UTIL=OFF \
@@ -41,19 +42,19 @@ RUN cmake -S . -B build \
         -DNEOGRAPH_BUILD_SQLITE=OFF \
         -DNEOGRAPH_BUILD_EXAMPLES=OFF \
         -DNEOGRAPH_BUILD_TESTS=OFF \
+        -DNEOGRAPH_BUILD_PYBIND=OFF \
+        -DNEOGRAPH_BUILD_GRPC=OFF \
+        -DBUILD_SHARED_LIBS=OFF \
         -DNEOGRAPH_USE_LIBCURL=OFF \
-    && cmake --build build --target neograph_core -j
-
-RUN g++ -std=c++20 -O2 -DNDEBUG \
-        -Iinclude -Ideps -Ideps/yyjson -Ideps/asio/include \
-        -DASIO_STANDALONE \
-        benchmarks/concurrent/bench_concurrent_neograph.cpp \
-        build/libneograph_core.a build/libyyjson.a \
-        -pthread -o /usr/local/bin/bench_ng
+    && cmake --build build --target bench_ng -j \
+    && install build/bench_ng /usr/local/bin/bench_ng
 
 FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libstdc++6 \
+        ca-certificates \
+        libcurl4t64 \
+        libssl3t64 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /usr/local/bin/bench_ng /usr/local/bin/bench_ng
 

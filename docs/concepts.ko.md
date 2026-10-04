@@ -1,20 +1,12 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=0b290ee7342159a462d358d8e4878e267079e86113f726680542ec5654734c40 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=0f718bca31f68497ef00b56cb3dd01cd534f53f3dfd2a42741524fae51a18a36 -->
 # NeoGraph 핵심 개념 — 해설 가이드
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
 
-예제를 살펴보기 전에 이 문서를 먼저 읽어 보세요. 직접 그래프를 구성하는 순서대로 개념 모델을 구축하게 됩니다: 그래프 → 채널 → 노드 → 엣지 → fan-out → 라우팅 재정의 → 체크포인트 → 스트리밍.
+예제 전에 이 문서를 읽는다. 그래프를 만드는 순서에 따라 채널, 노드, 엣지, fan-out, 라우팅, 체크포인트, 스트리밍을 설명한다.
 
-아래 Python 자료는 기존 binding을 설명한다. provider binding/wrapper는 명시적으로 유예되었고 typed lossless C++ 전환으로 포팅·실행되지 않았다. 과거 wheel 설치는 새 C++ provider API를 제공하지 않는다.
+LangGraph를 사용했다면 리듀서가 있는 채널, `Send`, `Command`, 체크포인트가 익숙할 것이다. NeoGraph의 [Core와 ProgramRuntime](../README.md#core-and-programruntime)은 역할이 다르며 이 안내는 Core 그래프 실행부터 시작한다. Python provider 호출에는 제거된 completion 클래스 대신 typed [binding 계약](python-binding.md)을 사용한다.
 
-공개 계약은 소유 typed 준비/dispatch이며 동기·비동기 가상 completion 쌍이 아니다. `ProviderRequest.payload`는 Chat, Messages, Responses, Gemini, Interactions의 SDK 요청 variant이다. `ProviderMode::Collect` / `Stream`은 관측자 유무와 독립적으로 전송을 선택한다. `on_event`는 빌린 typed `sp::Event` view를 받는다. 콜백 이후 필요한 데이터만 복사한다. raw JSON override나 portable projection을 통한 native 권한 가져오기는 허용되지 않는다.
-
-공급자 호출은 `sp::runtime::Result`, 즉 `sp::Completion` 또는 `sp::Failure`를 담은 불변 소유 `std::shared_ptr<const sp::Outcome>`를 반환한다. 표시 텍스트만이 아니라 전체 결과를 보존한다. 순서 있는 메시지/파트, native continuation, 전체 wire envelope, 순서 있는 raw 관측, 중단 근거와 실제 시도 메타데이터는 호출 및 클라이언트 소멸 후에도 남는다. 사용량은 근거·단계·품질을 갖는 nullable `uint64_t`이며 누락은 0이 아니라 미상이다. 실패도 원래의 부분 결과를 보존한다. `ProviderFailure::outcome()`과 `ProviderObserverError::outcome()`은 실제 결과를 보존하며 후자의 `cause()`에는 관측자 예외가 남는다.
-
-> **LangGraph를 사용해 본 적이 있다면:** 기본 요소는 의도적으로 동일합니다 — 리듀서가 있는 채널, 쓰기를 내보내는 노드, 조건부 엣지, `Send`, `Command`, 체크포인트. README는 NeoGraph의 [두 런타임 계층](../README.md#two-runtime-layers)을 요약합니다. 아래의 설명은 아무것도 가정하지 않습니다.
-
-
-실제 결과 이후 post-effect 정산이나 terminal receipt 영속화가 실패하면 `ProviderDispatchOutcomePersistenceError`의 `outcome()`은 원래 불변 결과를, `cause()`는 원래 영속 예외를 보존한다. 전달도 실패했으면 `delivery_error()`가 원래 관측자 예외를 보존한다. 영속화 성공 뒤 관측자 실패는 원래 예외를 그대로 다시 던진다. 미상/결과 없는 transport 실패는 결과를 조작하지 않는다.
 ---
 
 ## 목차
@@ -51,13 +43,15 @@ NeoGraph **그래프**는 네 가지로 구성됩니다:
 ```
 1. ready_set = nodes routed from __start__
 2. while ready_set is not empty:
-   a. run all nodes in ready_set (in parallel if the executor allows)
-   b. apply each node's writes to state
-   c. collect their Send / Command / outgoing-edge signals
-   d. plan_next_step → new ready_set
+   a. run the ready batch against its pre-update channel state
+   b. buffer returned writes, then fold them through channel reducers
+   c. execute emitted Sends after ordinary writes; fold their results
+   d. combine routing signals and evaluate updated state → new ready_set
 ```
 
-수퍼-스텝은 병렬성, 체크포인트, 스트리밍 이벤트의 단위입니다. "지금" 실행될 수 있는 두 노드는 동일한 수퍼-스텝입니다; 그들은 동일한 입력 상태를 관찰하며 스텝이 끝날 때 쓰기가 리듀서를 통해 결합됩니다.
+일반 ready batch는 해당 batch의 update 이전 채널 상태를 읽는다. 형제 노드가 실행 중 다른 형제의 반환 쓰기를 읽을 수는 없다. 엔진은 쓰기를 buffer에 모아 batch 이후 리듀서로 결합하고 갱신된 상태로 라우팅을 평가한다. 이는 그래프 스케줄링이며 모델 내부 계산을 동기화하지 않는다.
+
+예를 들어 `counter`가 0이고 두 ready 노드가 각각 `counter + 1`을 반환하면 둘 다 0을 읽는다. overwrite 리듀서 결과는 2가 아닌 1이다. 사용자 sum 리듀서에 증가량 1을 각각 쓰면 2로 결합할 수 있다. 다중 분기 `Send`는 각 payload를 적용한 격리 상태 복사본을 쓰고 단일 `Send`는 공유 상태에 payload를 적용한다. 리듀서 순서만으로 모델 응답이나 외부 효과가 재현되지는 않는다.
 
 ---
 
@@ -92,6 +86,31 @@ NeoGraph **그래프**는 네 가지로 구성됩니다:
 >
 > Python 호출 가능 객체는 GIL 하에서 실행됩니다. 동시 Send fan-out은 Python 사용자 정의 노드와 동일한 방식으로 이에 대해 직렬화됩니다. 이름을 다시 등록하면 이전 리듀서를 대체합니다.
 
+### 채널 lifecycle과 checkpoint 계약
+
+리듀서는 쓰기를 결합한다. 배열 retention은 별도 정책이며 `unbounded`(기본), `latest`, 양수 `retention_limit`을 가진 `bounded`를 선택한다. Retention은 `ChannelWrite.Mode.Overwrite`를 포함한 매 쓰기 뒤 배열을 자른다. `latest`는 다음 쓰기까지 마지막 요소를 유지한다. Persistence는 독립적으로 `checkpoint`(기본, materialized 값과 version) 또는 `ephemeral`(둘 다 영속 checkpoint에서 생략)을 선택한다. Bounded retention은 저장 크기뿐 아니라 관측 가능한 기록을 바꾼다.
+
+엔진은 노드의 반환 쓰기 순서, static batch의 scheduler-ready 순서, 다중 `Send`의 호출 순서로 결합하며 완료 순서는 사용하지 않는다. Pending write는 같은 task slot으로 재생한다. Overwrite는 순서에 따른 last-writer-wins이며 append는 요소 순서를 유지한다. 사용자 리듀서는 replay에서 순수하고 안정적이어야 한다. Regrouping에 결과가 같아야 하면 결합법칙, 순서 독립성이 필요하면 교환법칙이 필요하다. 명시적 overwrite는 리듀서를 건너뛴 다음 retention을 적용한다. 이 규칙은 모델 응답이나 외부 효과의 재현성을 보장하지 않는다.
+
+Ephemeral 값은 superstep 사이에도 살아 있으며 매 step 초기화하지 않는다. Checkpoint는 선언된 ephemeral 이름과 쓰기 여부만 기록하고 값은 기록하지 않는다. Resume, `resume_if_exists`, exact-ID resume, state update는 이미 쓴 ephemeral 상태, 과거 checkpoint의 누락 guard, 변경된 ephemeral 채널 집합을 거부한다. 최초 ephemeral 쓰기 전 checkpoint는 문서화된 순서로 pending write를 재생하며 resume할 수 있다. `update_state`는 ephemeral 쓰기를 거부한다. 다중 `Send`의 in-process worker는 격리 복사본에 live ephemeral 값을 상속한다. 정확성에 필요한 상태는 checkpoint에 남기거나 새 run에서 영속 입력으로 재구성한다.
+
+`GraphState::restore`는 ephemeral 채널이 있는 그래프를 거부한다. 일치하는 guard와 `restore_checkpoint`를 쓰거나 모든 live 값과 version을 포함한 같은 process snapshot에는 `restore_runtime`을 쓴다. Guard는 checkpoint metadata를 사용하며 channel blob layout이나 store schema를 바꾸지 않는다. Ephemeral 채널이 없는 그래프의 과거 full-value checkpoint는 계속 동작한다. Guard 없는 binary로 downgrade하기 전에 ephemeral thread와 fork를 drain하거나 영속 입력에서 재시작한다. 과거 reader는 추가 guard를 강제할 수 없다.
+
+Checkpoint 채널은 full materialized snapshot을 쓴다. Memory, SQLite, PostgreSQL은 바뀌지 않은 `(thread, channel, version)` 값을 중복 제거하지만 append 기록은 쓰기마다 version이 바뀌므로 snapshot도 커진다. Pending write는 미완료 superstep의 성공 task를 기록하며 일반 channel delta가 아니다. Per-step reset 정책은 제공하지 않는다. 안전한 설계에는 쓰기·라우팅 이후 reset과 interrupt, replay, Send 동작의 정의가 필요하며 ephemeral persistence와 혼동해서는 안 된다.
+
+Delta-backed checkpoint는 설계이며 채널 설정이 아니다. 이 형식은 full snapshot부터 순서 있는 `{channel, version, write mode, value}` delta를 최대 *K*개(선택적 byte 기준) 재생할 것이다. Overwrite, retention, version, reducer identity를 유지하고 pending write 삭제 전 snapshot/delta와 checkpoint pointer를 원자 publish해야 한다. 누락 link, version gap, 미상 리듀서, replay 실패는 거부해야 한다. 채택에는 새 schema version과 측정된 이점이 필요하다. 과거 snapshot을 허구 delta 없이 base로 옮기고 되돌릴 수 있는 rollout에는 old-reader full snapshot을 유지한다. Delta-only record가 있으면 원래 reducer registry로 materialize하지 않는 한 downgrade를 거부한다. 현재 store는 full-snapshot 방식이다.
+
+Baseline은 `bench_checkpoint_store --threads 1 --iters 1 --history-steps 256 --payload 512 --backends memory,sqlite`로 측정한다. 격리된 local DB에만 `postgres`, `--pg-url`을 더한다. 행은 logical serialized byte, save/load p50/p95, reconstruction depth를 보고하고 legacy 행은 blob count를 보고한다. Allocation request에는 `heaptrack bench_checkpoint_store --threads 1 --iters 1 --history-steps 256 --payload 512 --backends memory`를 사용한다. Native JSON/SQL allocator는 C++ `operator new`로 모두 측정되지 않는다. 같은 payload, history, backend로 측정값을 비교한다. Logical byte와 durable physical byte는 다르다. SQLite는 종료 시 지우는 고유 임시 DB를 쓰며 `--sqlite-path`는 새 파일을 남기고 기존 경로를 거부한다.
+
+기록된 Linux x86-64 Debug baseline은 thread 1개, history step 256개, 512-byte 메시지, iteration 1회였다. 과거 실측이며 성능 목표가 아니다:
+
+| Backend | Logical checkpoint bytes | Save p50/p95 (µs) | Load p50/p95 (µs) | Replay depth |
+| --- | ---: | ---: | ---: | ---: |
+| Memory | 17,814,952 | 54 / 138 | 141 / 382 | 1 |
+| SQLite | 17,814,952 | 289 / 1,589 | 176 / 474 | 1 |
+
+삭제 전 별도 반복에서 SQLite DB/WAL은 14,811,136 / 4,210,672 byte(합계 19,021,808)였다. 구성·JSON parse를 포함해 process 전체 `malloc`, `calloc`, 0이 아닌 `realloc` request를 세는 Linux `LD_PRELOAD` shim은 `--history-steps 0` 대비 Memory 추가 88,277 request / 605,289,027 requested byte, SQLite 114,295 / 867,319,964를 측정했다. 이는 누적 request이지 live memory나 store 전용 allocation이 아니다. Aligned/internal allocation은 측정하지 않았다. Shim은 의존성이 아니며 결론 전에 지원 profiler와 여러 warm run을 사용한다.
+
 ### 채널에 쓰기
 
 노드는 `ChannelWrite` 목록을 반환합니다:
@@ -99,7 +118,7 @@ NeoGraph **그래프**는 네 가지로 구성됩니다:
 ```python
 return [
     ng.ChannelWrite("messages", [{"role": "assistant", "content": "Hi!"}]),
-    ng.ChannelWrite("counter",  state.get("counter", 0) + 1),
+    ng.ChannelWrite("counter",  (state.get("counter") or 0) + 1),
 ]
 ```
 
@@ -178,7 +197,7 @@ class Researcher(ng.GraphNode):
         )
 ```
 
-Python은 `cancel_token`, `thread_id`, `step`, `stream_mode`, `store`, 그리고 `resume_value` 를 `input.ctx`에 노출합니다. C++ 호출자는 `deadline` 와 `trace_id` 를 `RunMetadata`에 설정할 수 있습니다; 엔진은 이를 중첩된 서브그래프를 통해 전파합니다. 이 두 필드는 아직 Python 바인딩에서 노출되지 않습니다.
+Python은 `input.ctx`에 `cancel_token`, `usage`, `thread_id`, `step`, `stream_mode`, `store`, `resume_value`, `trace_id`, `run_id`, `model_token_budget`, typed provider 증거를 노출한다. Deadline은 `has_deadline`, `deadline_remaining_ms`로 확인하며 원시 C++ steady-clock 값은 불투명하다. C++ 호출자는 `RunMetadata`로 deadline과 trace metadata를 제공하고 중첩 subgraph로 전달한다.
 
 `list[ChannelWrite]`만 반환할 수도 있습니다. `Send`나 `Command`가 필요하지 않을 때 말이죠 — 바인딩이 이를 `NodeResult`로 자동 승격합니다.
 
@@ -202,7 +221,7 @@ ng.NodeFactory.register_type(
 ```python
 class CalcTool(ng.Tool):
     def get_name(self):       return "calc"
-    def get_definition(self): return ng.ChatTool(name="calc", ...)
+    def get_definition(self): return ng.ChatTool("calc", "Double x", {"type": "object", "properties": {"x": {"type": "number"}}, "required": ["x"]})
     def execute(self, args):  return str(args["x"] * 2)
 ```
 
@@ -281,7 +300,7 @@ ng.ConditionRegistry.register_condition("is_long", is_long)
 <a id="5-send--dynamic-fan-out"></a>
 ## 5. 전송 — 동적 fan-out
 
-`Send`는 다음 단계 노드 수가 상태에 따라 달라지는 경우를 위한 것입니다. 전형적인 사용 사례: 검색 주제 목록을 N개의 병렬 연구자 호출로 분할합니다.
+`Send`는 주제마다 researcher 하나처럼 실행 중 target 호출 수를 정하게 한다. 엔진은 일반 ready batch가 반환하고 쓰기를 적용한 뒤 같은 번호의 superstep 안에서 생성된 Send를 실행한다.
 
 ```python
 class Planner(ng.GraphNode):
@@ -293,13 +312,9 @@ class Planner(ng.GraphNode):
         )
 ```
 
-엔진의 `run_sends_async` 인스턴스화합니다 `researcher` 마다 한 번씩 `Send`, 각각 고유한 `state.get("topic")`, 그리고 이를 통해 병렬로 실행합니다 `asio::experimental::make_parallel_group`.
-
 ### 정신적 모델
 
-`Send(target, payload)`는 "이 상태 패치로 `target`를 인스턴스화하고 준비 집합에 추가"하는 것입니다. 페이로드는 대상이 `state`를 보기 전에 상태 쓰기로 적용됩니다.
-
-병렬 그룹이 완료된 후, 다음 슈퍼 스텝의 라우팅은 각 Send가 생성한 작업의 나가는 엣지(또는 하나를 방출한 경우 해당 `Command.goto`)에서 옵니다.
+엔진은 `Send`마다 compiled target을 호출하며 새 node 객체를 보장하지 않는다. 동시 호출에서 target의 member state를 안전하게 다뤄야 한다. Payload는 target의 채널 읽기 전에 적용한다. 단일 Send는 공유 상태, 다중 Send는 ready batch 이후 상태의 격리 복사본을 사용하며 모든 분기 완료 뒤 반환 쓰기를 호출 순서로 결합한다. 다음 ready batch 라우팅은 일반 node와 Send target의 신호를 함께 사용한다.
 
 ### 일반적인 형태: fan-out 5, 요약자 summarizer fan-in
 
@@ -315,7 +330,7 @@ planner ─┬─ Send("researcher", {topic: "A"})  ─┐
 
 ### Worker 수 튜닝
 
-`build()`는 기본적으로 `EngineConfig::worker_count == 1`로 설정됩니다 — 엔진 소유 스레드 풀이 없으며, fan-out 분기는 코루틴 자체 실행기에서 인라인으로 디스패치됩니다. 이는 순차 그래프에 저렴하고 비스레드 안전 상태를 보유한 노드에 안전한 무할당 빠른 경로입니다.
+`build()` 기본값은 `EngineConfig::worker_count == 1`이며 engine-owned thread pool 없이 호출자의 coroutine executor로 분기를 dispatch한다. Coroutine I/O는 겹칠 수 있지만 단일 thread executor의 CPU-bound 작업은 직렬화될 수 있다. Multi-thread caller executor나 동시 run에서는 node member state를 안전하게 다뤄야 한다.
 
 실제 병렬 처리를 위해, 풀(pool)을 명시적으로 선택하십시오. fan-out 폭에 맞게 정확히 N을 선택하거나, `set_worker_count_auto()`을(를) `hardware_concurrency()`에 사용하십시오 (기본값 4로 대체됨):
 
@@ -350,7 +365,7 @@ class Evaluator(ng.GraphNode):
                 writes=[],
                 command=ng.Command(
                     goto_node="planner",                  # loop back
-                    updates=[ng.ChannelWrite("retries",  input.state.get("retries", 0) + 1)],
+                    updates=[ng.ChannelWrite("retries",  (input.state.get("retries") or 0) + 1)],
                 ),
             )
 ```
@@ -362,7 +377,7 @@ class Evaluator(ng.GraphNode):
 
 ### fan-in 상황에서의 마지막 쓰기 승리(Last-writer-wins)
 
-동일한 슈퍼스텝에서 여러 Command가 발생하는 경우(드묾 — 여러 병렬 그룹 형제가 이를 방출할 때만 가능), 마지막 것이 우선합니다. 순서는 비결정적인 병렬 그룹 완료에 의해 결정됩니다 — 최대 하나의 형제만 `Command`를 방출하도록 보장하여 이를 설계하세요.
+여러 형제가 비어 있지 않은 `Command.goto_node`를 반환하면 전달된 라우팅 순서의 마지막 command가 일반 엣지와 barrier를 재정의한다. Static batch는 ready 순서, 다중 `Send`는 완료 순서가 아닌 호출 순서를 제공한다. 반환된 command update는 모두 쓰기 pipeline으로 결합한다. 상충하는 command로 workflow가 달라진다면 라우팅 결정 노드 하나를 두는 편이 낫다.
 
 ---
 
@@ -401,9 +416,25 @@ result = await engine.resume_async(thread_id="t1",
 
 ### 시간 여행
 
-`engine.fork(thread_id, from_checkpoint_id)`는 과거 체크포인트에서 시작하는 새 스레드를 반환합니다. "다르게 답했다면 어땠을까" 분기 탐색에 유용합니다.
+`engine.fork(source_thread_id, new_thread_id, checkpoint_id="")`는 체크포인트를 호출자가 지정한 대상 스레드에 복사하고 새 체크포인트 ID를 반환한다. 체크포인트 ID를 생략하면 원본의 최신 체크포인트를 선택한다. 복사본은 대기 중인 continuation을 유지하며 상태를 편집해도 새 작업이 예약되지는 않는다.
+
+`next_nodes == ["__end__"]`인 완료된 continuation을 resume하면 노드를 실행하지 않고 저장된 결과를 복원한다. 편집한 상태로 중단된 작업을 계속하려면 `get_state_history()`에서 대기 노드가 남은 정확한 이전 체크포인트 ID를 선택해 fork한 뒤 복사본을 편집하고 resume한다. 과거의 빈 `next_nodes` 벡터는 다르다. 정확한 ID 없이 최신 상태를 resume하면 새 실행을 시작하는 기존 동작을 유지하지만 exact-ID resume은 해당 스냅샷에 고정된다.
+
+[Example 08](../examples/08_state_management.cpp)은 새 turn 흐름을 유지한다. 완료된 체크포인트를 fork하고 사용자 메시지를 편집한 뒤 `resume_if_exists=true`로 `run()`을 호출한다. 그 새 실행이 중단된 경우에만 resume한다. 일시 중지된 fork를 resume하는 예제는 아니다.
 
 `ChatMessage` / `ChatTool`과 JSON은 portable projection이지 native 권한이 아니다. Portable 포맷은 [`provider-message-v2`](../schemas/provider-message-v2.schema.json), [`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)를 유지한다. 실제 C++ checkpoint sidecar는 메모리에서 native seal을 보존한다. 영속 native 기록에는 host-owned `sp::NativeArchive`가 필요하다. closed v3 / `spna3`는 독립 키를 쓰는 인증된 owner-private custody이며 archive v2는 업그레이드하거나 해석하지 않고 거부한다. 인증은 모든 semantic descriptor 선택(origin/path/header, policy, 요청 field mapping, usage path, stop mapping), owner와 정확한 custody binding을 결합한다. 암호화나 vendor-issuer 인증은 아니다. archive 본문·키·native blob·raw wire 관측을 공개하지 않는다. Archive는 증거 저장소이지 돈의 grant나 spending lease가 아니다. Program/external bank는 독립 journal 소유이며 snapshot 복사로 credit을 만들 수 없다.
+
+Provider 기록은 서로 다른 모드를 가진다. 동일 경로의 native continuation은 실제 reasoning, signature와 순서 있는 tool group을 원래 binding 아래 보존한다. Gemini의 기본값은 `NativeOnly`다. 명시적 `PortableForeign`은 native seal, wire output, signature가 없는 호출자 작성 assistant text와 tool call을 받아들인다. 첫 외부 function call에만 Google의 문서화된 bypass marker를 붙이며 text-only turn에는 signature를 넣지 않는다. 이 projection은 native 권한을 부여하지 않고 실패한 native seal을 복구하거나 portable로 강등하지도 않는다. 임의의 여러 vendor 기록이 native로 이식 가능해지는 것은 아니다.
+
+Responses `previous_response_id`는 provider가 보관하는 대화 상태를 선택하며 요청에는 새 입력만 넣는다. Client-tool 소유권에 local 증거가 필요할 때 `previous_response_history`가 실제 이전 소유권 증거를 제공하며 반복 입력으로 전송되지는 않는다. Cursor는 전체 native replay seal이나 archive 권한이 아니며 origin, route, model, configuration, 완료 상태 검사를 받는다.
+
+현재 SDK interface revision과 shared-library generation은 4이며 소비자는 일치하는 header와 library로 다시 빌드해야 한다. Output generation cap은 native replay configuration과 별도로 각 호출에서 admission과 accounting을 거친다. 새 semantic call의 cap을 올려도 원래 bank, grant, deadline을 갱신하지 않는다. 명시적으로 문서화된 per-turn 선택을 제외하면 content, prefix, origin, route, policy, tools, reasoning controls의 binding은 유지된다. Portable JSON v2와 native archive v3 / `spna3`는 바뀌지 않으며 아래 과거 ABI3 측정은 interface4 결과가 아니다.
+
+Python도 C++과 같은 소유 request/outcome 경계를 제공한다: `make_provider_request`, `Provider.prepare`, `dispatch`, `invoke`. Provider 기록에는 typed part를 가진 `ProviderMessage`를 사용하며 `ChatMessage`는 그래프 편의 projection으로 남는다. SDK 실패는 `ProviderOutcome.failure`로 읽고 host observer/settlement 예외는 `outcome`과 `cause`를 보존한다. 생성자와 GIL/콜백 동작은 [Python binding 안내](python-binding.md)를 참조한다.
+
+`input_total`, `output_total`, `total` 같은 사용량 카운터는 `std::optional<sp::Count>`이며 존재하는 count는 `uint64_t value`와 `Evidence`를 가진다. `Usage`에는 stage, quality, conflict도 남는다. 누락은 미상이며 0을 만들어 넣지 않는다.
+
+`UsageAccumulator::snapshot()`은 누적 보고를 반환한다. `total_tokens_wide()`는 청구 토큰과 미해결 예약의 합이며 보고 사용량으로 표시하면 안 된다. 정산에는 input/output count가 있는 final·consistent 보고가 필요하며 근거가 있는 가장 큰 total을 차감하고 초과 사용량도 clamp하지 않는다. 누적 보고 중 하나라도 counter가 없으면 합계도 미상이다. 예약, 로컬 차감, vendor 청구서는 서로 다른 기록이다.
 
 **Standalone bank journal 수정 — 현재 계약 개정; 실제 runtime 증거는 아래.** Owner-approved protocol은 단조 trusted-store namespace obligation과 실제 불변 original owner/thread/graph scope, ceiling, deadline/clock identity, generation을 요구한다. 전체 checkpoint commitment·revision에 대한 정확한 durable head CAS만 host-owned opaque lease를 발급할 수 있다. 정확한 pending effect window를 provider I/O 전에 영속화해야 하며 실제 SDK outcome, charge, nullable report, hold, dedup identity로 정산해야 한다. Checkpoint와 next head는 같은 owned actor/revision 아래 원자적으로 publish해야 한다. Bank metadata 제거·checkpoint pruning·old authenticated snapshot replay·같은 ID overwrite·actor 상실은 credit을 주면 안 된다. 기존 65 hold에서 ceiling 130을 129로 낮추면 추가 65를 허용할 수 없다. 입증된 no-effect 실패는 unchanged head를 release해 authentic 130 복구가 가능해야 한다. Crash/unknown/lost-lease window는 refund/retry/fallback 없이 hold를 유지한다. Plain/pristine archive 설정은 money/native spending lease를 주지 않고 현재 `config.usage`는 기존 standalone obligation을 대체할 수 없다. Program/external-bank journal 소유는 유지된다. 이는 요구 계약이다. 실제 currency/custody 증거와 instrumentation 한계는 아래에 있으며 stable released API 보장은 아니다.
 
@@ -423,13 +454,15 @@ result = await engine.resume_async(thread_id="t1",
 
 **Recorded-control causal fix는 full suite에서 실제 증명 완료.** Captured command replay는 실행 전에 새 CPU wall-time/Core work만 durable reserve하고 측정 work와 새 Core checkpoint를 result CAS로 publish한다. 새 model·money·Program-operation allowance를 소비하지 않고 captured external effect를 재dispatch하지 않는다. 미정산 reservation은 debit을 유지한다. Reservation은 첫 새 Core checkpoint를 거부했던 일반 Running→Running transition 대신 인증된 settlement transition을 선택한다. Await channel receive·timer wait/cancel·handoff wait 시작/release는 소유 executor/strand에서 직렬화한다. 기존 Recorded CPU/Memory await/handoff scenario는 full suite에서 pass했다. Remote TSan coverage 한계는 아래에 명시한다.
 
+아래 관측은 이 문서 정리 이전에 기록되었다. 과거 증거이며 새 테스트 실행이나 모든 platform·transport·security 속성의 보장이 아니다.
+
 **유료 관측 완료; 보편적 qualification은 아님.** 원래 `SPQUAL1` base630/1000000 microUSD는 불변이다. 같은 원래 ledger의 ONE hash-chained `A`가 승인 extension480/3000000을 받아 aggregate1110/4000000이 된다. Calls/spent/hold/settlement는 누적이며 새 grant ID/header/reset은 없다. 정확한 declaration byte/file identity와 original authorization/baseline/catalog/activation/ledger-prefix hash/totals는 고정되고 삭제·교체·변경은 fail closed한다. 최종 canonical ledger는 calls1110/spent437958/held1287828 microUSD, eventA1, limits1110/4000000이다. Spent+held US$1.725786은 LOCAL catalogue meter이지 invoice가 아니다. 기록된 five-family60-pair baseline은600 request를 완료했다: Chat60/60, Responses60/60, Messages60/60, Generate56/60(incorrect-vision SSE4개), Interactions57/60(incorrect-vision buffered1개/SSE2개). 합계293/300 pair이며300/300은 아니다. 다른 old600 financial record는 보존하되 완전한 behavioral proof는 아니다. 이전 M5/media one-shot cohort는 그대로다. 이전 Google3-round prerequisite의 invalid-tool2개/unreadable-positive1개 실패 상태를 유지한다. 추가 유료 호출은 승인되지 않는다. 최종 SDK 증거와 native-axis 한계는 baseline 성공과 별개다. 이전 activation/reopen smoke는 두 번 reopen한 calls610/spent219159/held751233 및 SDK meter/canary/vision4-test19.38초 pass로 보존한다. 이는 범위가 정해진 이전 checkpoint이지 최종 ledger totals가 아니다. 이전 검증된 Chat60-pair cohort의 실제 attempt120,UpperBound charge120,UnknownHold 없음도 보존한다.
 
 **Native-axis 관측은 cryptographic 검증·native consumption/equivalence가 아니다.** Generate는 mutation/omission/duplication을 받아들였다. Interactions는 isolated genuine source/positive control, one-owner signature mutation, thought-carrier omission, call-carrier omission, duplication을 받아들였다. 모든 thought/signature 제거는 generic400을 반환했고 THOUGHT item을 유지한 채 모든 signature field를 제거해도 generic400이었다. 마지막 capture에는 local encoded-original retention control만 있고 same-capture server positive는 없었다. 이전 positive cohort는 실제 증거다. 이는 aggregate-carrier-absence boundary만 입증하며 issuer/signature 검증이나 vendor consumption을 입증하지 않는다. 실제 report: SDK `config/qualification-extension-results.json`, `qualification-final-summary.json`, `qualification-native-axis-results.json`, `qualification-combined-omission-results.json`, `qualification-signature-presence-results.json`. Prerequisite-failed/not-run/negative-inconclusive 상태는 사실 그대로 유지한다. Thought-only/carrier-only omission은 다른 carrier가 남아 있는 상태에서 받아들여졌다. Issuer-validation/native-consumption 주장을 강화하지 않는다.
 
 **실제 통합 증명과 남은 한계.** 최신 Core full run:2242 test, 실패0,skip16(RAM process-loss 비적용14개/live-credential gate2개),130.17초. `PgNestedJsonRoundTrips`는 duplicate key/order/null metadata,blob,residual을 정확히 보존하며0.18초 pass했다. 변경하지 않은 원래 shared-bank fork와 기존 Recorded CPU/Memory await/handoff scenario가 pass했다. 실제 wrappedMemory/SQLite/PostgreSQL/gRPC finite130/hold65/lower129/strip/old-head/pruning/no-archive/import probe는 plain과 ASan+UBSan에서 pass했다. LOCAL Memory/SQLite/PostgreSQL TSan scope는7개 pass,warning0이다. System Abseil/Protobuf를 포함한 full mixed gRPC TSan은 exit66,dependency/generated-RPC stack에 race warning402개였다. 이는 instrumentation/coverage 한계이지 proven false positive가 아니다. Remote TSan/race-free를 주장하지 않으며 warning을 suppress하지 않는다. Installed find_package Program C++/C ABI/dualQuickJS3 consumer는 pass했다. Fresh installed NeoGraph/SchemaProvider typed consumer는 실제 HTTP request2개,coroutine 시작 전 provider 소멸,native/tool replay,refusal,known-zero/raw 보존,실제 LinkedMismatch 거부를 pass했다. Browser Alice/Bob isolation·generation2 replacement를 실제 시각 검증했고 PostgreSQL Program Chat black-box6개는18.989초 pass했다. 최신 SDK26/26은 실패0,74.07초 pass했다. 최종 ReleaseGraph16설정 ×fresh process3회/48기록은38.29초,실패0,모든 actual protocol/owned-outcome check pass로 완료했다. NeoGraph `benchmarks/provider-cutover-final-results.json`과 `benchmarks/provider-cutover-final-summary.json`은 별도의 최종 cohort를 보존한다. 측정 중 compiler/유료 model은 실행하지 않았고 historical cohort는 그대로이며 semantic/resource equivalence를 주장하지 않는다. Unstable SDK/ABI3는 stable release나 더 넓은 platform qualification이 아니다.
 
-Host 전달 limit, extent-bounded 진단/raw 증거, 공통 provider error와 최소 media 증거는 [typed provider reference](reference-ko.md)에 설명되어 있다.
+Host 전달 limit, extent-bounded 진단/raw 증거, 공통 provider error와 최소 media 증거는 [typed provider reference](reference-en.md#owned-outcome)에 설명되어 있다.
 
 ---
 
@@ -499,43 +532,48 @@ t.join();
 
 ---
 
-## 8.5. 추적 — OpenTelemetry + Phoenix / Langfuse
+## 8.5. Tracing — OpenTelemetry + Phoenix / Langfuse
 
-> 아래 Python provider/wrapper 예시는 과거 기록이며 typed C++ 계약으로 포팅되지 않았다. 현재 provider 지침이 아니다. C++ 변경은 Python binding을 구현하거나 검증하지 않는다. C++ 관측자는 기존 공개 텍스트/scalar/nullable count만 내보내며 raw native 상태를 내보내지 않는다.
-스트리밍과 동일한 콜백 형태, 다른 소비자. OTel 트레이서 방출 콜백을 `engine.run_stream(cfg, cb)`에 전달하면 모든 `NODE_START` / `NODE_END` / `ERROR` / `INTERRUPT` 이벤트는 스팬이 됩니다.
-
-두 레이어가 인트리로 제공됩니다
-
-  - `neograph_engine.tracing.otel_tracer` — 벤더 중립적인 OTel 스팬. 스팬은 모든 OTel 백엔드(Jaeger, Tempo, Honeycomb, Datadog)로 전달됩니다.
-  - `neograph_engine.openinference` — 동일한 스팬을 Phoenix / Arize / Langfuse에서 *LangSmith 스타일 채팅 버블 트레이스*로 변환하는 LLM 형태 속성 계층:
+`neograph_engine.tracing.otel_tracer`와 `neograph_engine.openinference.openinference_tracer`는 graph event를 run/node span으로 바꾼다. 후자는 `CHAIN` 태그와 node payload projection을 기록한다. Run마다 graph callback 하나를 선택한다. 모델 호출을 `LLM` span으로 기록하려면 graph compile 전에 typed provider를 `OpenInferenceProvider(inner, tracer, *, span_name="llm.complete")`로 감싼다. Wrapper는 native C++ observer와 상속받은 `prepare`/일회성 `dispatch` 또는 `invoke`를 쓴다. Request 준비나 폐기는 span을 열지 않고 승인된 dispatch는 owned outcome, 취소, deadline, typed event를 바꾸지 않으며 span을 연다. Tracer 실패는 provider 결과나 예외를 대체하지 않는다.
 
 ```python
-from opentelemetry import trace
+from opentelemetry import context as otel_context
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from neograph_engine import GraphEngine, NodeContext
 from neograph_engine.openinference import OpenInferenceProvider, openinference_tracer
 
-trace.set_tracer_provider(TracerProvider())
-trace.get_tracer_provider().add_span_processor(
-    BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4317", insecure=True)))
-tracer = trace.get_tracer("my-app")
 
-# Wrap the provider — every Provider.complete() now emits an LLM-kind span.
-wrapped = OpenInferenceProvider(real_provider, tracer)
-ctx = ng.NodeContext(provider=wrapped)
-engine = ng.GraphEngine.compile(graph_def, ctx)
+class ParentContextTracer:
+    def __init__(self, tracer, parent_context):
+        self.tracer, self.parent_context = tracer, parent_context
 
-with openinference_tracer(tracer) as cb:
-    engine.run_stream(ng.RunConfig(input={"messages": [...]}), cb)
+    def start_span(self, name):
+        return self.tracer.start_span(name, context=self.parent_context)
+
+
+def trace_graph(graph_spec, inner_provider, model, cfg):
+    provider = TracerProvider()
+    provider.add_span_processor(BatchSpanProcessor(
+        OTLPSpanExporter(endpoint="http://localhost:4317", insecure=True)))
+    tracer = provider.get_tracer("my-app")
+    try:
+        with openinference_tracer(tracer) as cb:
+            parent = ParentContextTracer(tracer, otel_context.get_current())
+            observed = OpenInferenceProvider(inner_provider, parent)
+            engine = GraphEngine.compile(
+                graph_spec, NodeContext(provider=observed, model=model))
+            return engine.run_stream(cfg, cb)
+    finally:
+        provider.shutdown()
 ```
 
-Phoenix를 한 번 실행하세요: `docker run -d -p 6006:6006 -p 4317:4317
-arizephoenix/phoenix`. http://localhost:6006를 열면 트레이스가 체인(`graph.run` → `node.X` → `llm.complete`)으로 렌더링되며 프롬프트 / 응답 / 토큰 수가 LLM 세부 정보 창에 표시됩니다. 동일한 코드에서 OTLP 엔드포인트 URL을 Langfuse 자체 호스팅으로 바꾸면 동일한 형태로 트레이스가 표시됩니다.
+Local Phoenix endpoint에는 `docker run -d -p 6006:6006 -p 4317:4317 arizephoenix/phoenix:latest`를 실행하고 `opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp`를 설치한다. Graph specification, 기존 provider, 명시적 model과 `RunConfig`를 `trace_graph`에 전달한다. `ParentContextTracer`가 run root를 worker dispatch에 명시적으로 전달하며 자동 cross-thread 또는 node별 parent 전달은 보장하지 않는다. Python은 dispatch 시 활성 OTel context를 쓰고 prepared operation은 수명 동안 tracer adapter를 보유한다.
 
-이것이 *"NeoGraph에는 LangSmith가 없다"*에 대한 답변입니다 — Phoenix나 Langfuse를 하나의 Docker 명령으로 로컬에서 실행하면 LangSmith UX(채팅 버블, DAG 계층 구조, 토큰 비용)를 얻을 수 있습니다. SaaS 계약도, 건별 추적 가격도 없습니다.
+LLM span에는 공개 role/text projection, 선언된 scalar와 알려진 usage count만 넣는다. 알려진 0은 기록하고 미상은 생략한다. Native replay/reasoning, raw wire envelope/event와 encoded request body는 trace에서 제외하고 request/outcome에 실제 custody를 유지한다. 실패의 partial report를 포함한 usage 속성은 vendor charge나 budget authority를 입증하지 않는다. Charged/reserved accounting은 `UsageAccumulator.authority_snapshot()`과 Program의 `provider_budget_authority`에서 다룬다.
 
-참조 `docs/reference-en.md` §10.5에서 속성-키 스키마와 `otel_tracer` 및 `openinference_tracer` 간의 상충 관계(trade-off)에 대한 참고 사항을 확인하십시오.
+공개 text, 예외 메시지와 graph payload에도 application secret이 있을 수 있다. Exporter가 받는 데이터를 선택하거나 redact한다. [OpenTelemetry 민감 데이터 지침](https://opentelemetry.io/docs/security/handling-sensitive-data/)을 참고한다. [OpenInference convention](https://github.com/Arize-ai/openinference/blob/main/spec/semantic_conventions.md)은 `CHAIN`과 `LLM`을 정의한다. [참조](reference-en.md#105-observability--opentelemetry--openinference)는 NeoGraph의 속성 subset, token event, Python typed 호출 예제와 C++ 수명 요구사항을 설명한다.
 
 ---
 
@@ -556,9 +594,9 @@ arizephoenix/phoenix`. http://localhost:6006를 열면 트레이스가 체인(`g
 
 `compile()` 기본값은 `set_worker_count(1)` (엔진 소유 스레드 풀 없음 — fan-out 분기는 호출자의 실행기에서 직렬로 실행됨). 실제 병렬 처리를 위해서는 `engine.set_worker_count(N)` 를 호출하세요. 여기서 N은 Send fan-out 폭과 일치해야 하며, 또는 `engine.set_worker_count_auto()` 를 `hardware_concurrency()`용으로 호출하세요. NeoGraph는 또한 opt-in 풀 없이 다중 Send fan-out이 처음 실행될 때 일회성 stderr 경고를 출력합니다 — 이는 힌트이지 오류가 아닙니다. Python 사용자 정의 노드는 작은 fan-out에서 GIL 경합을 겪으므로, 1과 N 모두로 벤치마크하세요.
 
-### "Python RunResult에는 .status / .final_state 속성이 없습니다"
+### Python RunResult 상태와 state 읽기
 
-Python 바인딩은 해당 속성을 노출하지 않습니다. `result.output`, `result.interrupted`, `result.max_steps_exhausted`, `result.execution_trace`를 사용하십시오. C++ 호출자는 타입이 지정된 `Completed` / `Interrupted` / `StepLimit` 뷰를 위해 `RunResult::status()`를 사용할 수 있습니다. [Python 바인딩 가이드](python-binding.md#hitl-and-state)를 참조하십시오.
+`result.status`는 typed `Completed`, `Interrupted`, `StepLimit`, `SafePoint` 상태를 노출한다. `result.output`은 portable 최종 state이며 `result.interrupted`, `result.max_steps_exhausted`, `result.execution_trace`는 run을 설명한다. `result.native_messages`, `result.provider_outcomes`는 전체 typed provider 증거를 보존한다. [Python binding 안내](python-binding.md#hitl-and-state)를 참조한다.
 
 ### "알 수 없는 리듀서: <name>"
 

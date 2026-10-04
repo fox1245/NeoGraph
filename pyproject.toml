@@ -1,59 +1,21 @@
-# NeoGraph — Python wheel build (commit 3 of the pybind11 plan)
-#
-# This file builds a Python wheel of the NeoGraph engine + its
-# pybind11 binding. It does NOT attempt to package the full C++
-# headers / install layout — for that use `cmake --install` directly.
-#
-# Use:
-#     pip install .                         # build & install from source
-#     pip install --no-build-isolation .    # reuse system pybind11
-#     python -m build --wheel               # produce dist/*.whl
-#
-# Typical wheel contents (platform-specific library suffixes apply):
-#     neograph/__init__.py
-#     neograph/llm.py
-#     neograph/_neograph.cpython-*-linux-gnu.so       (binding)
-#     neograph_engine/libneograph_core.so.0            (engine ABI name)
-#     neograph_engine/libneograph_async.so.0
-#     neograph_engine/libneograph_llm.so.0             (when LLM enabled)
-#
-# RPATH on _neograph.so is `$ORIGIN` so the binding finds its sibling
-# engine .so files inside the wheel without LD_LIBRARY_PATH.
-#
-# Cibuildwheel builds Linux x86_64/aarch64, macOS arm64, and Windows x64
-# wheels. Linux uses manylinux_2_34; platforms outside this matrix use the
-# source distribution.
-
+# CMake installs the Python package and its native libraries into one directory.
 [build-system]
-requires = [
-    "scikit-build-core>=0.10",
-    "pybind11>=2.13",
-    # Ninja explicitly so Windows builds use it as the cmake generator
-    # (Linux/macOS auto-pick Ninja when present; Windows can default
-    # to Visual Studio's multi-config generator otherwise, which
-    # complicates cmake --install / wheel staging).
-    "ninja>=1.10",
-]
+requires = ["scikit-build-core>=0.12", "pybind11>=2.13", "ninja>=1.10"]
 build-backend = "scikit_build_core.build"
 
 [project]
-# Distribution name on PyPI: ``neograph-engine``. The bare ``neograph``
-# was already taken on PyPI (a Python LangGraph wrapper, ironically with
-# a similar one-liner pitch). The ``-engine`` suffix makes our positioning
-# explicit — this package IS the C++ runtime, not a Python wrapper around
-# someone else's runtime. Python import name is ``neograph_engine``.
 name = "neograph-engine"
-version = "0.12.1"
-description = "C++ graph agent engine — Python bindings (LangGraph-equivalent semantics, microsecond engine overhead)"
+version = "0.13.0"
+description = "C++ graph agent engine with Python bindings"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_LICENSES", "THIRD_PARTY_LICENSES.md"]
 authors = [{ name = "fox1245", email = "procoinmac0@gmail.com" }]
 keywords = ["agent", "graph", "langgraph", "llm", "pybind11", "cpp"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
@@ -66,33 +28,16 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Topic :: Software Development :: Libraries",
 ]
-# certifi ships the Mozilla CA bundle. The wheel's __init__.py uses it
-# to point the manylinux-bundled libssl at a CA store the host actually
-# has — without this the libssl baked into our manylinux wheel looks
-# for AlmaLinux paths (`/etc/pki/tls/certs/...`) that don't exist on
-# Ubuntu/Debian/Alpine/macOS and TLS handshakes hang for the full
-# request timeout. ~250 KB install, no transitive deps.
-#
-# pydantic backs ``StateView`` (TODO_v0.3.md #6 / v0.3.2): a flat
-# dot-access wrapper for ``engine.get_state(...)``'s nested dict.
-# Pydantic v2 is small and ubiquitous in modern Python (FastAPI,
-# LangChain, datamodel libs). Adding it as a hard dep beats the
-# soft-import dance — every code path that reaches a NeoGraph user
-# already has pydantic in the env.
+# certifi supplies a relocatable TLS trust store; pydantic backs StateView.
 dependencies = ["certifi", "pydantic>=2.0"]
 
-# Protocol servers are intentionally optional. Their official Python SDKs own
-# fast-moving wire formats and require Python 3.10+, while the NeoGraph wheel
-# itself still supports Python 3.9. The pure-Python ProtocolHostAdapter has no
-# extra dependency and remains available on every supported Python version.
+# Official protocol SDKs require Python 3.10; the core package supports 3.9.
 [project.optional-dependencies]
 a2a = [
     "a2a-sdk[http-server]>=1.1,<2; python_version >= '3.10'",
     "uvicorn>=0.35; python_version >= '3.10'",
 ]
-acp = [
-    "agent-client-protocol==0.12.1; python_version >= '3.10'",
-]
+acp = ["agent-client-protocol==0.12.1; python_version >= '3.10'"]
 protocols = [
     "a2a-sdk[http-server]>=1.1,<2; python_version >= '3.10'",
     "uvicorn>=0.35; python_version >= '3.10'",
@@ -100,235 +45,82 @@ protocols = [
 ]
 
 [project.urls]
-Homepage      = "https://github.com/fox1245/NeoGraph"
-Repository    = "https://github.com/fox1245/NeoGraph"
+Homepage = "https://github.com/fox1245/NeoGraph"
+Repository = "https://github.com/fox1245/NeoGraph"
 Documentation = "https://github.com/fox1245/NeoGraph#readme"
-Issues        = "https://github.com/fox1245/NeoGraph/issues"
+Issues = "https://github.com/fox1245/NeoGraph/issues"
 
-# ─── scikit-build-core ───────────────────────────────────────────────────
-#
-# Drives CMake during pip install. The CMake invocation builds the
-# engine in shared-library mode plus the `_neograph` extension, then
-# `cmake --install --component NeoGraphPyBindWheel` stages just the
-# wheel-relevant artefacts (engine .so files + binding .so) — without
-# dragging in headers, schemas, or anything else the engine's
-# default install rules ship.
 [tool.scikit-build]
 minimum-version = "build-system.requires"
-
-# Drop the cmake build dir under build/ — the same convention as
-# manual cmake builds in this repo.
 build-dir = "build/{wheel_tag}"
-
-# Reproducible-ish: Release with assertions off, no debug info.
 cmake.build-type = "Release"
-
-# Surface cmake install actions in the cibuildwheel log so future
-# wheel-content debugging isn't silent.
 cmake.define = { CMAKE_INSTALL_MESSAGE = "ALWAYS" }
-
-# Engine config: shared libs (so the wheel can ship .so siblings),
-# turn off optional subsystems that pull dead-weight deps (libsqlite3,
-# httplib's MCP client). Postgres stays ON — each platform's before-all
-# installs libpq dev headers and the wheel-repair step bundles libpq +
-# transitive deps. Examples / tests / benchmarks dropped for end-user wheels.
+# Explicit Ninja keeps Windows staging on the single-config install path.
 cmake.args = [
-    # `-G Ninja` is here (not just CMAKE_GENERATOR=Ninja env var) so
-    # scikit-build-core's `get_generator(*args)` detection actually
-    # sees it. Without it, scikit-build-core leaves
-    # `single_config = not platform.startswith("win")` at its
-    # Windows default of False, then passes `--config Release` to
-    # cmake --install. Even though Ninja itself ignores --config,
-    # the multi-config code paths inside scikit-build-core differ
-    # enough that the staged Windows wheel ends up missing the
-    # engine .dll siblings (observed: 1 MB Windows wheels through
-    # iters 6-12 vs 4.4 MB Linux wheels with the same install
-    # rules).
     "-G", "Ninja",
     "-DBUILD_SHARED_LIBS=ON",
     "-DNEOGRAPH_BUILD_PYBIND=ON",
     "-DNEOGRAPH_BUILD_PROGRAM=ON",
     "-DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON",
     "-DNEOGRAPH_BUILD_LLM=ON",
-    # ON since #95: the Python MCP binding is useless if `pip install`
-    # ships a wheel that compiled it out. Marginal size cost is small —
-    # the client links httplib + OpenSSL, which neograph::llm already pulls in.
     "-DNEOGRAPH_BUILD_MCP=ON",
-    # NEOGRAPH_BUILD_POSTGRES default ON (CMakeLists.txt:19). Each platform's
-    # before-all installs libpq dev headers; auditwheel/delocate/delvewheel
-    # bundle libpq.{so,dylib,dll} + its transitive deps into the wheel so
-    # `neograph_engine.PostgresCheckpointStore` works on a fresh
-    # `pip install` without requiring system libpq.
+    "-DNEOGRAPH_BUILD_POSTGRES=ON",
     "-DNEOGRAPH_BUILD_SQLITE=ON",
     "-DNEOGRAPH_BUILD_EXAMPLES=OFF",
     "-DNEOGRAPH_BUILD_TESTS=OFF",
     "-DNEOGRAPH_BUILD_BENCHMARKS=OFF",
-    # Skip the include/ + share/ install rules so they don't end up
-    # in the wheel layout.
     "-DNEOGRAPH_INSTALL_HEADERS=OFF",
-    # Same reasoning for the C++ find_package export: lib/*.{a,so} plus
-    # lib/cmake/NeoGraph/ have no business in a Python wheel. CMakeLists
-    # already defaults this OFF when NEOGRAPH_BUILD_PYBIND is on; stating it
-    # here keeps the wheel's layout independent of that default.
     "-DNEOGRAPH_INSTALL_EXPORT=OFF",
 ]
-
-# Headers + schemas would otherwise land in the wheel under
-# include/ and share/. Gate them off via the new
-# NEOGRAPH_INSTALL_HEADERS flag (default ON; the cmake.args above
-# turn it OFF for the wheel build). Engine libs are unconditional.
-#
-# (Earlier we tried CMake COMPONENTs + scikit-build-core's
-# install.components filter, but it didn't reliably propagate the
-# --component flag through to cmake --install on Windows, leaving
-# the engine .dll files out of the wheel — observed across iters
-# 6-9 as a 1 MB wheel followed by `delvewheel: Unable to find
-# library: neograph_llm.dll`.)
-
-# Python sources (__init__.py, llm.py) are now installed by the
-# cmake install(FILES ...) rule in bindings/python/CMakeLists.txt
-# alongside the binding _neograph.{so,pyd} and the engine
-# .so/.dll siblings. Routing everything through cmake-install
-# avoids a Windows-specific scikit-build-core staging quirk
-# observed in iters 6-11 where wheel.packages = [...] appeared
-# to interfere with cmake-installed engine .dlls.
-
-# ─── cibuildwheel ────────────────────────────────────────────────────────
-#
-# Drives the multi-platform wheel matrix in CI (.github/workflows/wheels.yml).
-# Locally, you can dry-run a single variant:
-#
-#     pip install cibuildwheel
-#     CIBW_BUILD=cp312-manylinux_x86_64 cibuildwheel --platform linux
-#
-# Coverage:
-#   - Linux x86_64 + aarch64 (manylinux_2_34 / glibc >= 2.34).
-#   - macOS arm64 (Apple Silicon native).
-#   - Windows x64 (MSVC + vcpkg OpenSSL/libpq, repaired with delvewheel).
-#
-# Python: cp39-cp313 (5 versions × 4 platform targets = 20 wheels per release).
-# musllinux skipped — different glibc lineage; covers Alpine which is
-# not our target audience yet. PyPy skipped — pybind11 type-caster
-# overhead largely cancels out PyPy's interpreter wins for I/O-bound
-# agent code, and the maintenance cost is real.
-
-# ─── scikit-build-core per-platform overrides ─────────────────────────────
-#
-# Turn off the libcurl HTTP/2 backend on Windows wheel builds. vcpkg's
-# curl pulls a chain of TLS/zlib/idn deps that delvewheel would have to
-# bundle, ballooning wheel size and adding ~5 min per-wheel build time.
-# The libcurl backend is opt-in (SchemaProvider::prefer_libcurl=true);
-# Linux + macOS wheels keep it ON via the per-platform before-all
-# (libcurl-devel / brew curl).
-[[tool.scikit-build.overrides]]
-if.platform-system = "win32"
-cmake.define.NEOGRAPH_USE_LIBCURL = "OFF"
+wheel.packages = []
+wheel.exclude = [
+    "include/**", "share/**", "lib/**", "lib64/**", "bin/**",
+    "**/__pycache__/**", "**/*.pyc", "**/*.a", "**/*.lib",
+]
+# A positive source manifest avoids shipping workspaces, qualification records,
+# build outputs, private configuration or raw provider traffic. The SDK source
+# is resolved at the immutable revision in cmake/NeoGraphSchemaProvider.cmake.
+sdist.inclusion-mode = "manual"
+sdist.include = [
+    "CMakeLists.txt", "pyproject.toml", "README.md", "LICENSE",
+    "THIRD_PARTY_LICENSES", "THIRD_PARTY_LICENSES.md",
+    "cmake/**", "include/**", "src/**", "deps/**", "schemas/**", "proto/**",
+    "bindings/python/CMakeLists.txt", "bindings/python/src/**",
+    "bindings/python/neograph_engine/*.py", "bindings/python/tests/*.py",
+    "bindings/python/examples/*.py",
+]
+sdist.exclude = [
+    "**/.git/**", "**/.env*", "**/__pycache__/**", "**/*.pyc",
+    "**/node_modules/**", "**/CMakeFiles/**", "**/CMakeCache.txt",
+]
 
 [tool.cibuildwheel]
-build  = "cp39-* cp310-* cp311-* cp312-* cp313-*"
-# Skip:
-#   - musllinux: Alpine's musl libc, different from glibc-based manylinux
-#   - i686: 32-bit x86, no production target
-#   - pypy: pybind11 type-cast overhead cancels PyPy's interpreter wins
-skip   = "*-musllinux_* *_i686 pp*"
-
-# Inside the wheel-test venv, install pytest and run the binding's
-# pytest suite plus a one-line import smoke. The {project} placeholder
-# resolves to the source tree path inside the cibw container.
+build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
+skip = "*-musllinux_* *_i686 pp*"
+# Run against the repaired, installed wheel, never the build-tree extension.
+# This suite covers graph execution, typed provider contracts and Program.
 test-requires = ["pytest", "tomli"]
-test-command  = """\
-python -c "import pathlib, sqlite3, tempfile; import neograph_engine as ng; ng.SQLiteContextStore(str(pathlib.Path(tempfile.mkdtemp()) / 'smoke.sqlite3')); print('cibw smoke version:', ng.__version__, 'preloaded sqlite:', sqlite3.sqlite_version)" && \
-python -m pytest -q {project}/bindings/python/tests/\
+# Remove the build dependency search path before starting the test interpreter,
+# so a missing repaired library cannot be supplied by the build host.
+test-command = """\
+python -c "import os, subprocess, sys; env = os.environ.copy(); env.pop('LD_LIBRARY_PATH', None); env.pop('DYLD_LIBRARY_PATH', None); env.pop('PYTHONPATH', None); subprocess.run([sys.executable, '-m', 'pytest', '-q', sys.argv[1]], env=env, check=True)" "{package}/bindings/python/tests/"\
 """
-
-# Ensure the binding's RPATH actually resolves the bundled engine
-# .so siblings — cibuildwheel auditwheel-repairs the wheel after
-# build, but a sanity check that imports work even after repair is
-# how we'd catch a broken RPATH or missing .so.
 test-skip = ""
 
 [tool.cibuildwheel.linux]
-# manylinux_2_34 (AlmaLinux 9 base) ships OpenSSL 3.0 — required by
-# `deps/httplib.h` whose TLS path explicitly errors out on OpenSSL
-# < 3.0:
-#
-#     #error Sorry, OpenSSL versions prior to 3.0.0 are not supported
-#
-# manylinux_2_28 (AlmaLinux 8) ships OpenSSL 1.1.1; manylinux2014
-# (CentOS 7) ships OpenSSL 1.0.2 — neither works without vendoring
-# our own OpenSSL build.
-#
-# Coverage trade-off: 2_34 corresponds to glibc 2.34 (Sep 2021),
-# meaning the wheels need RHEL 9 / Ubuntu 22.04 / Debian 12 or
-# newer. Older distros fall back to the sdist (which builds
-# against whatever OpenSSL the user supplies).
-manylinux-x86_64-image  = "quay.io/pypa/manylinux_2_34_x86_64"
+# OpenSSL 3 requires the AlmaLinux 9 image (glibc >=2.34). Its system curl
+# predates the SDK's minimum version, so before-all builds a pinned HTTP/2 curl.
+manylinux-x86_64-image = "quay.io/pypa/manylinux_2_34_x86_64"
 manylinux-aarch64-image = "quay.io/pypa/manylinux_2_34_aarch64"
-
-# Container has gcc/cmake but not the optional database/TLS development
-# packages. Install the headers so all wheel-enabled components configure.
-#   - openssl-devel: async runtime + httplib link OpenSSL 3.
-#   - libpq-devel:   PostgresCheckpointStore links libpq. AlmaLinux 9 ships
-#                    libpq 13.x in AppStream. auditwheel-repair pulls
-#                    libpq.so.5 (and its transitive deps libldap, libsasl2,
-#                    libgssapi_krb5, etc.) into the wheel.
-#   - sqlite-devel:  SqliteCheckpointStore and strict runtime persistence.
-before-all = "dnf install -y openssl-devel libpq-devel sqlite-devel libcurl-devel"
+before-all = 'bash "{package}/cmake/build-wheel-curl.sh"'
+environment = { CMAKE_PREFIX_PATH = "/opt/neograph-wheel-deps", LD_LIBRARY_PATH = "/opt/neograph-wheel-deps/lib:$LD_LIBRARY_PATH" }
 
 [tool.cibuildwheel.windows]
-# Windows wheel build:
-#   - vcpkg supplies OpenSSL (httplib needs >= 3.0; system Windows has none).
-#   - delvewheel bundles the engine .dll + libssl/libcrypto into the wheel,
-#     mirroring auditwheel/delocate on Linux/macOS.
-#   - The NEOGRAPH_API macro pass (include/neograph/api.h, commit 7) makes
-#     BUILD_SHARED_LIBS=ON link cleanly on MSVC by tagging public symbols
-#     dllexport in the engine and dllimport in the binding.
-before-all = """\
-vcpkg install openssl:x64-windows libpq:x64-windows sqlite3:x64-windows && \
-echo VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%\
-"""
-
-# Skip libcurl on Windows wheel builds — vcpkg's curl pulls a chain
-# of TLS/zlib/idn deps that delvewheel then has to bundle, ballooning
-# wheel size and adding ~5 min to the per-wheel build. The libcurl
-# HTTP/2 backend is opt-in (SchemaProvider.prefer_libcurl=true);
-# Windows users who actually need it can build from source with their
-# own vcpkg install of curl. The default ConnPool path is unaffected.
-
-# Forward the vcpkg OpenSSL prefix into CMake. Ninja is pinned via
-# `-G Ninja` in the global cmake.args above (so scikit-build-core's
-# generator-detection sees it and switches to single-config code
-# paths); CMAKE_GENERATOR env var alone wasn't enough for that.
+# SchemaProvider requires curl even if NeoGraph's separate curl pool is disabled.
+before-all = "vcpkg install openssl[tools]:x64-windows libpq:x64-windows sqlite3:x64-windows curl[http2,openssl]:x64-windows"
 environment = { CMAKE_TOOLCHAIN_FILE = "C:\\\\vcpkg\\\\scripts\\\\buildsystems\\\\vcpkg.cmake" }
-
-# delvewheel auto-discovers the engine .dlls beside the binding (we
-# install them via the same cmake install rule as Linux/macOS) and
-# pulls in libssl/libcrypto from vcpkg's bin dir.
-#
-# NOTE: cibuildwheel auto-installs delvewheel ONLY when using its
-# default repair-wheel-command. Overriding repair-wheel-command (as
-# we do here to inject --add-path) skips that install — the first
-# attempt failed with "'delvewheel' is not recognized as an internal
-# or external command". Solution: pip install delvewheel right
-# before invoking it, and call via `python -m delvewheel` so we don't
-# depend on PATH plumbing for newly installed scripts.
-#
-# `--ignore-existing` is REQUIRED so delvewheel actually searches the
-# wheel's own directories for sibling DLLs. Reading the delvewheel
-# 1.12 source (_wheel_repair.py:WheelRepair.__init__): without
-# --ignore-existing, `self._wheel_dirs = None` and `get_all_needed()`
-# only consults system PATH + --add-path. The engine .dlls bundled
-# inside `neograph_engine/` by cmake-install are then "missing"
-# from delvewheel's perspective even though they're sitting in the
-# wheel right next to the binding.
-#
-# With --ignore-existing, delvewheel walks the wheel's tree, adds
-# every directory to its search list, and skips re-bundling DLLs
-# it finds there. That's exactly the behaviour we want — the
-# engine .dlls are already where they need to be at import time.
-# `--with-mangle` still rewrites their external dependency names. Without it,
-# a preloaded system `sqlite3.dll` wins by basename before the bundled vcpkg
-# build and can crash inside `sqlite3_open_v2`.
+# Search bundled engine/SDK DLLs and mangle external dependency names; otherwise
+# a preloaded system sqlite3.dll can shadow the wheel's SQLite build.
 repair-wheel-command = """\
 pip install delvewheel && \
 python -m delvewheel repair --ignore-existing -w {dest_dir} {wheel} \
@@ -337,35 +129,7 @@ python -m delvewheel repair --ignore-existing -w {dest_dir} {wheel} \
 """
 
 [tool.cibuildwheel.macos]
-# Apple Silicon only for now. universal2 needs the engine to cross-
-# compile cleanly to x86_64 on an arm64 runner — extra setup that
-# isn't justified given Apple's own arm64 transition is mostly done.
 archs = ["arm64"]
-
-# Install libpq and SQLite for the database-backed stores. openssl@3 is already
-# pre-installed on the macos-14 runner image; the database libraries are not. They are
-# keg-only on Homebrew (not in the standard /opt/homebrew/lib search
-# path), so we point CMake at them via CMAKE_PREFIX_PATH below.
-before-all = "brew install libpq sqlite curl"
-
-# macOS deployment target: 14.0 (Sonoma, Sep 2023). The pinch is
-# Homebrew OpenSSL on the macos-14 GitHub runner — its bottles are
-# built with a min target of 14.0:
-#
-#     delocate.libsana.DelocationError: Library dependencies do not
-#     satisfy target MacOS version 12.0
-#     ...libcrypto.3.dylib has a minimum target of 14.0
-#     ...libssl.3.dylib has a minimum target of 14.0
-#
-# Setting the wheel target to 12.0 produced a wheel that bundled
-# OpenSSL needing 14.0 — broken on macOS 12 / 13 users despite
-# the wheel claiming to support them. Bumping to 14.0 makes the
-# claim honest. Users on older macOS install via sdist (with their
-# own OpenSSL).
-#
-# CMAKE_PREFIX_PATH exposes Homebrew's keg-only libpq and openssl@3
-# to find_package() — same trick ci.yml's macOS job uses. Apple
-# Silicon brew prefix is /opt/homebrew (no shell expansion in TOML,
-# so the paths are hardcoded; safe because the matrix only runs on
-# macos-14 arm64).
-environment = { MACOSX_DEPLOYMENT_TARGET = "14.0", CMAKE_PREFIX_PATH = "/opt/homebrew/opt/libpq:/opt/homebrew/opt/sqlite:/opt/homebrew/opt/openssl@3" }
+before-all = "brew install libpq sqlite openssl@3 curl"
+# Target macOS 14; repaired dependency binaries must qualify for the same floor.
+environment = { MACOSX_DEPLOYMENT_TARGET = "14.0", CMAKE_PREFIX_PATH = "/opt/homebrew/opt/libpq:/opt/homebrew/opt/sqlite:/opt/homebrew/opt/openssl@3:/opt/homebrew/opt/curl", PATH = "/opt/homebrew/opt/openssl@3/bin:$PATH" }

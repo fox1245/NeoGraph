@@ -36,7 +36,10 @@ compatibility, authority, budget, and migration checks.
 The NeoGraph-side consumer is the C++ `example_topology_retrieval` target. It
 accepts the reranked candidate key, resolves the exact admitted
 bundle from `ProgramCatalog`, proves the P1 adapter, and performs a durable
-generation-2 migration. Build and run it with:
+generation-2 migration. Configure the NeoGraph tree with Program enabled and SchemaProvider supplied via
+`CMAKE_PREFIX_PATH` or `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`, even for this
+model-free consumer. Current SDK transport qualification is Linux/POSIX. Build
+and run it with:
 
 ```powershell
 cmake --build build --target example_topology_retrieval
@@ -47,6 +50,6 @@ Run a real retrieval response through that C++ consumer end-to-end:
 
 ```powershell
 python run_neo_e2e.py `
-  --consumer build/Release/example_topology_retrieval.exe `
+  --consumer build/example_topology_retrieval `
   --query "preserve a running graph frontier while updating implementation"
 ```

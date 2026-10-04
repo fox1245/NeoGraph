@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=zh-CN source_sha256=1d5e31e1d0219b65d56905d841f93fdf68f603c0f885b052fb7b45dd069ff8e2 -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=zh-CN source_sha256=b0fae62c9be25c3d689e9b3e593d7cb4bead7a6eae7460e70e5fc8e3e0804f6c -->
 # The Beast — 生成 · 演化 · 回滚
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -7,9 +7,15 @@
 
 迁移后的 C++ 编写/修复路径构造类型化 `ProviderRequest`、`sp::Message` 历史并消费完整不可变 `sp::Outcome`，保留所有返回的原生消息/部件。文本提取仅用于解析候选 JSON/Python，不替代原生对话历史。编译、解析、初始化反馈追加在这些消息之后。语义修复受各程序尝试上限约束（实时编写三次；Forge 服务器生成两次），不是传输重试或无限演化。
 
-保留私有 OpenRouter 路由 `~deepseek/deepseek-v4-flash-latest`，`zdr: true`、`only: ["morph"]`、`allow_fallbacks: false`：无合格端点则失败，不向其他提供方披露。ZDR 和历史美国端点记录不是驻留或当前可用性保证。实时执行需要获授权的密钥、网络/提供方及付费容量；提示、导出模式、诊断和原生历史会发送至该路由。生成的原生 Python 服务器执行具有独立本地信任边界，不是延期的 Python 提供方绑定。不要公开密钥或私有提示。可空 token 计数不是美元费用，需定价和实际计费用量。
+Forge 使用 low reasoning effort 和300秒 provider timeout，每次 ask 固定一个 deadline。
+仅已完成的空 `MaxTokens` outcome 没有 text 和有效/无效 client tool call 时，才以当前
+3,000/4,000-token cap 的两倍额外调用最多一次。保留所有 outcome 和 usage。
+Failure、observer/settlement 错误、有内容的部分响应不触发额外调用。此 budget recovery
+与 compiler/初始化 repair 分开，是 interface-4 源码契约，不是新的 live 通过。
 
-当前限定范围的运行证据涵盖实际离线 strict Core 编译、演化及 checkpoint rollback，不验证所有 live/apex/forge/script 变体或 vendor 推理。下文控制台、基准、fuzz 和 live 执行记录仍为历史证据，不是新的类型化迁移测量。一致性 gate 仅建立所声明的结构/效果契约性质，不证明提供方传输、隐私正确性或模型语义真实性。Python provider binding 延期；protocol client 不变。
+保留私有 OpenRouter 路由 `~deepseek/deepseek-v4-flash-latest`，`zdr: true`、`only: ["morph"]`、`allow_fallbacks: false`：无合格端点则失败，不向其他提供方披露。ZDR 和历史美国端点记录不是驻留或当前可用性保证。实时执行需要获授权的密钥、网络/提供方及付费容量；提示、导出模式、诊断和原生历史会发送至该路由。生成的 Python server 执行有独立 local code-execution trust boundary，与 NeoGraph Python provider binding 分开。不要公开密钥或私有提示。可空 token 计数不是美元费用，需定价和实际计费用量。
+
+保留的 interface-3 限定范围运行证据涵盖实际离线 strict Core 编译、演化及 checkpoint rollback，不验证所有 live/apex/forge/script 变体或 vendor 推理。下文控制台、基准、fuzz 和 live 执行记录仍为历史证据，不是 interface-4 测量。一致性 gate 仅建立所声明的结构/效果契约性质，不证明提供方传输、隐私正确性或模型语义真实性。Python provider binding 现遵循类型化 API；验证与这些 C++ 运行分开。
 
 > 一个自我进化的智能体，它将自己的harness编写为严格的Core JSON，在Core编译器下进化它，并通过检查点器回退其执行。**生成。进化。回退。野兽仍在。**
 
@@ -22,6 +28,8 @@
 这之所以安全，仅仅是因为在 NeoGraph 中，一个 harness 就是**数据**——用严格 Core JSON 描述的拓扑（issue #56）——并且 Core 编译器可以在 harness 运行*之前*证明其一致性。严格 Core JSON 是一种互换工件，而非第二源语言。编译器才是将这份“怪兽”从负债转变为类别定义的力量。
 
 ## 运行它
+
+先通过 `CMAKE_PREFIX_PATH` 提供安装的 SchemaProvider prefix，或通过 `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<sdk-source>` 提供 SDK source，配置 NeoGraph 树。offline Core-only recipe 也必需 SDK。SDK transport 当前验证范围是 Linux/POSIX；Sandbox2 variant 仅适用于 Linux。
 
 ```console
 $ cmake --build build --target cookbook_the_beast
@@ -91,7 +99,7 @@ $ ./build/cookbook_the_beast_live                  # optional: pass a task strin
 
 `the_beast_live.cpp` 将 `~deepseek/deepseek-v4-flash-latest` 固定到 `provider: {"zdr": true, "only": ["morph"], "allow_fallbacks": false}`。在验证时，OpenRouter 将 Morph 的数据中心列为美国，并将该模型/提供商端点列为支持 ZDR。这是严格的提供商选择，而非 OpenRouter 的区域驻留保证：其文档化的区域驻留保证目前是企业 EU 路由。如果 Morph 的合格端点不可用，请求将失败，而不是将提示发送到不同的提供商。
 
-实时 cookbook 将其提供方超时设置为 180 秒：此推理模型 4,000 个令牌的生成预算合理地超过了通用的 60 秒默认设置。
+live author 路径的 provider timeout 为180秒；Forge 的独立300秒 timeout 用于有限 generation 调用，两者都不改变共享 provider factory 默认值。
 
 
 
@@ -311,7 +319,7 @@ runtime cross-check: 4/4 cases where the validator's verdict matched execution.
 
 > 验证器报告ERROR⟹图在执行时出错；验证器报告无错误⟹图干净执行。
 
-第一行是*健全性*（一个被标记错误的图却干净运行将是健全性漏洞）；一个被标记警告的图干净运行则表明门控不会*过度*拒绝。E10/E8类错误仅作判定——运行空路由映射会解引用`rend()`（UB），这正是门控存在所要防止的故障，因此它被检查但不执行。这是一个演示语料库，并非每个诊断的穷尽覆盖——但它将“门控是健全的”从口号变成了可测量的、CI强制的4/4。
+Safety soundness 的方向是在 honest contract 下 gate pass 蕴含无 modeled structural fault。corpus 的 reject/fault 一致只是具体拒绝案例的观察，不证明所有 rejected graph 都 fault。E10/E8 仅检查 verdict，未执行。保留的4/4是历史 corpus 观察，不穷尽 diagnostic，也不证明任意 C++ node body。
 
 ## Gate-fuzz — 该保证及其边界，规模化实现
 

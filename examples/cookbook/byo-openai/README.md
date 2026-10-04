@@ -1,189 +1,93 @@
 # Bring Your Own OpenAI Client
 
-## Historical Python recipe — binding migration deferred
-
-This page archives the pre-cutover Python provider API and its measurements.
-The source examples below are **not compatible with the current typed C++
-contract** and are not current runnable instructions. Python provider bindings,
-subclass trampolines and these BYO/OpenRouter adapters have not been ported or
-exercised; do not infer compatibility from the C++ migration.
-
-The current C++ path owns a typed `ProviderRequest`, prepares it once and retains
-full immutable `sp::Outcome` terminals, native history and nullable usage.
-Old `complete(params)` / `ChatCompletion` examples below are historical only;
-missing usage must not become zero and final-call usage cannot stand for an
-entire tool loop. SDK retries must not create hidden redispatch behind a durable
-receipt. Retained keys, prompts and native payloads must remain private.
-
-## Archived pre-cutover instructions and observations
-
-
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-Most production Python users already have an `openai.OpenAI()` client
-instance with their own retries, custom transport, observability hooks,
-or OpenRouter routing. This cookbook shows how to plug
-that existing client into NeoGraph as a custom `Provider` — instead of
-NeoGraph's built-in `OpenAIProvider`.
+Use your existing `openai.OpenAI()` client inside a custom NeoGraph `GraphNode`.
+The official SDK keeps its HTTP client, retry policy, headers, and SDK-level
+instrumentation. NeoGraph schedules the node and applies its `ChannelWrite`
+results to graph state.
 
-The trick: NeoGraph's `Provider` is Python-subclassable in v0.2.3+.
-A subclass's `complete(params)` runs inside graph nodes (LLMCallNode,
-ReAct loops, etc.) just like the built-in provider.
+[`hybrid.py`](hybrid.py) calls the SDK once and appends an assistant reply.
+[`hybrid_with_tools.py`](hybrid_with_tools.py) runs the SDK's tool-calling loop
+inside one node, executes three Python functions, and appends the final reply.
+Both examples use OpenRouter and default to `~deepseek/deepseek-v4-flash-latest`.
+They send `provider={"zdr": true}` to request OpenRouter's zero-data-retention
+routing policy. This preference does not establish a geographic residency
+policy.
 
-## When to use which
+## Prerequisites and local run
 
-| You want | Use |
-|---|---|
-| "Just use the pinned DeepSeek route through OpenRouter" | `OpenAISdkProvider` with the official `openai` SDK |
-| "I already have an `openai.OpenAI()` set up with retries / Azure / proxy / hooks" | This cookbook (subclass `Provider`, delegate to your client) |
-| "I'm using the OpenRouter API through the official `openai` SDK" | This cookbook with the pinned DeepSeek model |
-| "I want to mock the LLM in tests" | This cookbook with a deterministic stub |
-
-The point: **NeoGraph's graph engine doesn't care how the LLM call
-happens** — it just needs `params -> ChatCompletion`.
-
-## The whole thing in 60 lines
-
-See [`hybrid.py`](hybrid.py). The key shape:
-
-```python
-import neograph_engine as ng
-from openai import OpenAI
-
-class OpenAISdkProvider(ng.Provider):
-    """NeoGraph Provider backed by the official `openai` SDK."""
-    def __init__(self, client: OpenAI, model: str = "~deepseek/deepseek-v4-flash-latest"):
-        super().__init__()
-        self.client = client
-        self.model  = model
-
-    def complete(self, params: ng.CompletionParams) -> ng.ChatCompletion:
-        # Translate NeoGraph params into the SDK's chat-completions shape.
-        messages = [{"role": m.role, "content": m.content}
-                    for m in params.messages]
-        resp = self.client.chat.completions.create(
-            model=params.model or self.model,
-            messages=messages,
-            temperature=params.temperature,
-        )
-        # Translate back into NeoGraph's response shape.
-        out = ng.ChatCompletion()
-        out.message.role    = "assistant"
-        out.message.content = resp.choices[0].message.content or ""
-        return out
-
-    def get_name(self) -> str:
-        return "openai-sdk"
-```
-
-That's it. Pass `OpenAISdkProvider(OpenAI(api_key=...))` into a
-`NodeContext` and any NeoGraph graph using `llm_call` nodes will route
-through the SDK — keeping all your retry / Azure / observability / proxy
-configuration that was attached to the SDK client.
-
-## Run
+Install the wheel built from the current typed-provider checkout and the
+`openai` package. Older releases that expose the removed completion API cannot
+run these examples. Start a local Chat Completions protocol peer before running
+the commands below from this directory. These are verification instructions,
+not a recorded successful run.
 
 ```bash
-pip install neograph-engine>=0.2.3 openai
-echo 'OPENROUTER_API_KEY=sk-or-...' > .env
-python hybrid.py
+python -m pip install openai
+OPENROUTER_BASE_URL=http://127.0.0.1:8765/v1 OPENROUTER_MODEL=fixture-model python hybrid.py
+OPENROUTER_BASE_URL=http://127.0.0.1:8765/v1 OPENROUTER_MODEL=fixture-model python hybrid_with_tools.py
 ```
 
-Output:
-```
-[hybrid] using openai SDK inside NeoGraph 0.2.3 graph
-[hybrid] running one llm_call through the OpenAI SDK provider
-[provider] complete() call #1 (2 msgs) — model=~deepseek/deepseek-v4-flash-latest
-[... user and assistant messages ...]
-[hybrid] provider.complete() called 1× via openai SDK
-```
+`OPENROUTER_BASE_URL` includes the API prefix: `/v1` for this local peer and
+`/api/v1` for OpenRouter. The SDK adds `/chat/completions`. Canonical loopback
+hosts `127.0.0.1` and `::1` use the fixed dummy credential `local-smoke`, even if
+a hosted key exists in the environment. Other hosts require HTTPS,
+`NG_ALLOW_HOSTED_CALLS=1`, and `OPENROUTER_API_KEY`; without that opt-in the
+program exits with status 2 before a request. Hosted calls may cost money.
+The examples optionally read an existing `.env` without replacing exported
+variables. Do not commit keys or log request authorization headers.
 
-The built-in `llm_call` uses the shared `NodeContext.instructions` as its
-system prompt. Use a custom node type when different graph stages need
-different prompts.
+## Graph state and SDK requests
 
-## What you keep
+Each graph has one custom node between `START_NODE` and `END_NODE`. A scoped
+`GraphRegistry` registers the node type; no global provider subclass or
+completion trampoline is involved. The node reads the `messages` channel,
+prepends its system instruction to the SDK request, and returns channel writes.
+The append reducer keeps the input user message and then the assistant message.
+The system message remains request-local.
 
-- Your `openai.OpenAI()` client's `default_headers`, retry policy,
-  custom `http_client=httpx.Client(...)`, Azure / proxy config.
-- `OpenAIObservabilityCallbacks` / `langfuse` / `helicone` /
-  `weights & biases` integrations attached at SDK level — they
-  intercept every call.
-- Your existing tracking of `usage` (token counts), errors, retries.
+For `hybrid.py`, the peer accepts one buffered `POST /v1/chat/completions` with
+`model="fixture-model"`, a system message, a user message, `temperature=0.7`,
+and `provider={"zdr": true}`. Return a standard Chat Completion JSON object with
+`id`, `object="chat.completion"`, `created`, `model`, and one `choices` entry
+containing `index=0`, an assistant message, and `finish_reason="stop"`.
+`usage` is optional. Expected state has two messages; `sdk_usage` contains the
+SDK's usage dictionary or `None`, never invented zero counters. Tool calls
+fail this text-only node rather than being discarded.
 
-## What you give up vs `neograph_engine.llm.OpenAIProvider`
+## Tool loop
 
-- The native HTTP path (asio + connection pool) — at ~1.5× faster than
-  the SDK and zero GIL contention. If your bottleneck is OpenAI calls,
-  the SDK is fine; if it's framework overhead, the native one wins.
+For `hybrid_with_tools.py`, the first request also declares `reverse_string`,
+`word_count`, and `calc` as function tools. A deterministic peer can return
+three assistant tool calls with distinct ids and JSON argument strings:
+`{"s":"NeoGraph"}`, `{"text":"the quick brown fox"}`, and
+`{"expr":"17*23+5"}`. Set `finish_reason="tool_calls"`.
 
-## Tool calling — three working patterns
+The node appends the assistant tool-call message to its SDK-local history,
+executes each function, and appends tool results with the matching
+`tool_call_id`. The second request must contain results `hparGoeN`, `4`, and
+`396`. Return an assistant text choice with `finish_reason="stop"` and no tool
+calls. Expected graph state contains only the original user and final assistant
+messages, `tool_calls=3`, and a two-entry `sdk_usage` list. Each entry is the
+corresponding response's usage dictionary or `None`; the final call's usage
+cannot stand for the whole loop. The program prints three dispatched tools and
+two SDK calls for this exchange.
 
-The Provider trampoline lets `complete()` return `tool_calls` cleanly.
-What's currently **not working** is the C++ `tool_dispatch` graph node
-calling back into a Python `Tool` subclass — that path segfaults
-(pre-existing issue; tracked for v0.3). Three patterns work today:
+Tool exceptions become tool-result error text so the model can respond. Eight
+consecutive tool-call responses exhaust the cap and raise an error instead of
+writing a fabricated final answer. `calc` uses Python expression evaluation for
+this arithmetic demonstration; it is not a sandbox for untrusted expressions.
 
-### A. Agentic Provider (recommended for `byo-openai`)
+## Provider evidence boundary
 
-Do the tool loop **inside** `complete()`. The user's `openai.OpenAI`
-client already supports tool-calling; let it finish the agentic loop
-(call → dispatch in Python → result → call → text) and return only
-the final assistant message to NeoGraph. The graph sees exactly one
-`complete()` per "turn", no `tool_dispatch` node needed.
+These nodes write application-owned JSON state. They do not produce
+`ProviderOutcome`, native replay authority, provider receipts, or per-tool
+checkpoints. SDK retries and intermediate tool calls remain inside the node;
+a graph checkpoint is not a durable receipt for those requests. The client is
+closed after the run.
 
-```python
-class AgenticOpenAIProvider(ng.Provider):
-    def __init__(self, client, tools_by_name):
-        super().__init__()
-        self.client = client
-        self.tools  = tools_by_name      # {"calc": calc_fn, ...}
-    def complete(self, params):
-        messages = [{"role": m.role, "content": m.content} for m in params.messages]
-        sdk_tools = [{"type":"function",
-                      "function":{"name":n,"description":fn.__doc__ or "",
-                                  "parameters":fn.schema}}
-                     for n, fn in self.tools.items()]
-        for _ in range(10):  # cap loops
-            r = self.client.chat.completions.create(
-                model=params.model or "~deepseek/deepseek-v4-flash-latest",
-                messages=messages, tools=sdk_tools)
-            choice = r.choices[0]
-            if not choice.message.tool_calls:
-                out = ng.ChatCompletion()
-                out.message.role    = "assistant"
-                out.message.content = choice.message.content or ""
-                return out
-            messages.append(choice.message.model_dump())
-            for tc in choice.message.tool_calls:
-                fn = self.tools[tc.function.name]
-                result = fn(**stdjson.loads(tc.function.arguments))
-                messages.append({"role":"tool","tool_call_id":tc.id,
-                                 "content":str(result)})
-```
-
-Tradeoff: NeoGraph doesn't see intermediate steps (no checkpoint per
-tool call), but you keep all SDK behavior and there's no dispatch
-boundary friction.
-
-### B. C++ tools + Python Provider
-
-Use the built-in C++ tools (`MCPTool` from `neograph_engine.mcp`,
-or any other C++-side `Tool`) for the dispatch path, and your Python
-Provider for the LLM call. The graph's `tool_dispatch` node calls
-the C++ tool fine; only the call back into a Python `Tool` subclass
-crashes.
-
-### C. Provider returns tool_calls; custom Python node dispatches
-
-Skip the built-in `tool_dispatch` node. Write your own
-`@ng.node("dispatch")` that reads `messages[-1].tool_calls`, calls
-your Python tools directly, and writes the tool-result messages
-back. Stays entirely in Python.
-
-## A2A + custom Provider
-
-This cookbook composes naturally with the
-[ai-assembly cookbook](../ai-assembly/) — replace each member's
-provider with `OpenAISdkProvider(...)` to get all your SDK-level
-behavior on every persona while still using NeoGraph's A2A bridge.
+When you need NeoGraph's typed provider outcomes and native SDK transport, use
+the [OpenRouter SchemaProvider example](../openrouter-provider/README.md).
+Passing an existing SDK client to these custom nodes preserves that client's
+configuration; it does not make the client a `SchemaProvider`.

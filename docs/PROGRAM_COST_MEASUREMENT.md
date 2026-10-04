@@ -1,5 +1,7 @@
 # Measuring Program costs
 
+**Languages:** [English](PROGRAM_COST_MEASUREMENT.md) | [한국어](PROGRAM_COST_MEASUREMENT.ko.md) | [日本語](PROGRAM_COST_MEASUREMENT.ja.md) | [简体中文](PROGRAM_COST_MEASUREMENT.zh-CN.md)
+
 `bench_program_cost` and `scripts/run_program_costs.py` provide a diagnostic
 baseline for deciding which Program costs to optimize. They do not change
 runtime semantics and do not replace the preregistered QuickJS performance gate.

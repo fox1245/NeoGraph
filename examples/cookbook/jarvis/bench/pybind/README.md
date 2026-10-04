@@ -1,60 +1,33 @@
-# Python Mode Benchmark — NeoGraph-from-Python vs LangGraph
+# Python graph benchmarks: NeoGraph and LangGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-## Historical benchmark; provider binding migration deferred
+These scripts measure Python graph execution and process startup. Neither script calls a model provider or requires an API key. They do not qualify the typed provider request, event, or outcome bindings. The commands below are intended for an installed current package; they were reviewed against source, not executed during this update.
 
-The measurements, conclusions and reproduction commands below describe the pre-cutover Python benchmark, not a verified current build. The typed C++ `ProviderRequest`/`sp::Event`/full immutable `sp::Outcome` migration does not establish Python provider bindings: that work is deferred. Do not interpret these commands as a working legacy provider API, a current provider benchmark, or proof of execution after migration. Generic Python graph measurements do not qualify the provider surface. Python REPL/protocol drivers are unchanged. This documentation update was checked against source only; no build or benchmark was run.
+## Reproduction
 
-Core question: **Does using NeoGraph from Python via pybind (node body also Python) eliminate
-the advantages of standalone C++ (startup · RSS · throughput)?**
-
-Answer: **No.** The bloat is not from Python interpreter but from LangChain import tree.
-NeoGraph-from-Python = lean Python (10MB/30ms) + single compiled .so.
-
-## Historical reproduction commands — not validated after cutover
-
-Configure a source build with Python bindings first (Python development headers
-and pybind11 are required):
+Use a Python environment with the current `neograph-engine` wheel installed. Install `langgraph` for the comparison and `langchain-openai` for the optional larger import stack. Run from the repository root:
 
 ```bash
-cmake -S . -B build-pybind \
-  -DNEOGRAPH_BUILD_PYBIND=ON -DNEOGRAPH_BUILD_LLM=ON
-cmake --build build-pybind --target _neograph -j
-LD="$PWD/build-pybind"
-PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" \
-  python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py neograph
-PYTHONPATH="$LD" LD_LIBRARY_PATH="$LD" \
-  python3 examples/cookbook/jarvis/bench/pybind/perturn.py neograph 5000
+python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py neograph
+python3 examples/cookbook/jarvis/bench/pybind/perturn.py neograph 5000
 python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py langgraph
 python3 examples/cookbook/jarvis/bench/pybind/startup_rss.py langgraph_openai
 python3 examples/cookbook/jarvis/bench/pybind/perturn.py langgraph 5000
 ```
 
-| Metric (all Python processes) | NeoGraph-from-Python | LangGraph | Advantage |
-|---|---|---|---|
-| per-turn (5 Python-callable nodes, GIL included) | **0.38ms · ~2620 turns/s** | 0.93ms · ~1075 | 2.4× |
-| startup (import→compile) | **40ms** | 462ms (bare) / 2977ms (+langchain_openai) | 11–73× |
-| RSS | **36MB** | 61MB (bare) / 561MB (+langchain_openai) | 1.7–15× |
-| (reference) bare python3 RSS | — | 9.9MB | |
+`perturn.py` warms up and runs a five-node chain. Each Python node increments the `v` channel; each measured run starts at zero. It prints mean, p50, p90, and runs per second. Use a positive run count.
 
-## Why Also Fast in Python Mode
+`startup_rss.py` runs in a fresh process and prints startup milliseconds and peak RSS. The NeoGraph branch imports the package and resolves three graph symbols; it does not compile a graph. The LangGraph branches import their packages and compile a one-node graph. These startup measurements cover different work, so their ratio is not a graph-compilation speedup. RSS conversion assumes Linux's `ru_maxrss` unit of KiB; do not use that conversion unchanged on macOS. Python's `resource` module is unavailable on Windows.
 
-- **per-turn**: BSP engine (super-step loop · scheduler · channel reduction · routing · checkpoint
-  overhead) runs in C++ and **only node body is Python**. LangGraph's engine is pure Python Pregel.
-  GIL holds during node execution on both, but NeoGraph's orchestration *between* nodes is C++ so it's faster.
-  pybind/GIL boundary cost is nearly zero so standalone C++ mock (9 nodes 0.38ms) and Python 5 nodes are
-  effectively tied.
-- **startup/RSS**: `import neograph_engine` loads single .so. LangGraph's 462ms/
-  61MB is langgraph+langchain-core import tree, up to 2977ms/561MB with langchain_openai. NeoGraph has no such tree.
+## Historical measurements
 
-## Implications
+The repository previously reported these values. They are not measurements of the current cutover build and were not rerun for this update.
 
-Using NeoGraph from Python provides **the entire Python ecosystem (HF·OpenAI SDK·pandas etc.
-inline in the node body) + startup · RSS · throughput advantages simultaneously**.
-That is, the dichotomy "performance is C++ standalone, ecosystem is Python" is wrong —
-Python mode gives both. Standalone C++ goes one step further (startup 8ms · RSS
-7.5MB) but only when node is C++ or tools called via HTTP.
+| Metric | NeoGraph from Python | LangGraph |
+|---|---|---|
+| Five Python nodes per run | 0.38 ms; about 2620 runs/s | 0.93 ms; about 1075 runs/s |
+| Startup, with the different scopes above | 40 ms | 462 ms; 2977 ms with `langchain_openai` |
+| Peak RSS | 36 MB | 61 MB; 561 MB with `langchain_openai` |
 
-Caution: If node imports torch/HF, RSS is dominated by that library
-(engine is noise). This is workload property, not framework — same for both.
+NeoGraph executes the graph scheduler and channel reductions in C++; Python node bodies acquire the GIL. These measurements do not isolate GIL boundary cost or establish performance for other workloads. Imports inside a node, such as PyTorch, also contribute to process memory.

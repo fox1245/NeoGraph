@@ -29,8 +29,8 @@ must preserve:
   child, fork, replay, and transition-store contracts exist;
 - executable identity, capability/effect closure, binding receipts, budgets, and
   owner/tenant isolation exist;
-- Program-v2/v3/v4 operation trees implement bounded orchestration, parallel
-  child maps, and part of dynamic task-graph expansion; and
+- retained typed Program operation graphs support trusted C++ embedding,
+  storage, bounded orchestration, parallel child maps, and task-graph expansion;
 - Harness rejects new Core DSL/Core JSON/Program JSON authoring and translates
   presets or JavaScript through Program admission; strict Core JSON remains an
   internal interchange artifact.
@@ -57,19 +57,18 @@ This migration is a replacement, not a second permanent language stack.
 - existing executable manifests and exact binding receipts; and
 - current Core-only optional-build boundary.
 
-### Freeze
+### Historical freeze before the source-language cutover
 
-- the Core DSL and `graph::Elaborator` authoring path are already deleted;
-  Harness `mode: "dsl"` remains an explicit rejection for migration callers;
-- Program JSON operation-tree authoring and Program-v2/v3/v4 source schemas;
-- Harness `mode: "program"`;
-- standalone Core JSON and Program JSON public source endpoints;
-- additions to `ProgramOperationKind`; and
-- new general computation in `branch`, `loop`, `map`, `parallel_map`, or
-  `expand_task_graph` descriptors.
+The migration first froze the following source surfaces before rejecting new
+publication: Core DSL/elaborator, Program JSON operation-tree authoring,
+Harness `mode: "dsl"` / `mode: "program"`, and standalone Core/Program JSON
+source endpoints. That authoring cutover is complete. The retained
+`ProgramOperationKind` vocabulary, Program-v2/v3/v4 schemas, and typed dispatcher
+serve stored identities and trusted C++ embedding; their presence does not
+reopen a user-authored JSON source mode.
 
-Frozen surfaces receive only correctness, data-loss, security, and migration
-fixes required to drain existing versions.
+The remaining deletion sequence below is a plan and dependency inventory, not
+evidence that all shared storage or trusted-C++ infrastructure was removed.
 
 ### Replace
 

@@ -1,4 +1,5 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=2f78c1c15d20a1a9f3197b3a3d160344f130d7cb776e068c5afc5f9aeb0bb485 -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=2ca0c5f75e5469e00f15a18bd66d075c7b40363567ad329c14ef0ec5ceecdc95 -->
+# C++ API 예제
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 
@@ -17,12 +18,14 @@ portable 요약은 native record를 대체하지 않습니다. optional control�
 reservation/charged/held 값은 nullable provider usage와 별개이며 budget 갱신, 가격, forecast, invoice가 아닙니다.
 
 header-only `examples/provider_example_support.h`는 실제 SDK runtime을 사용합니다.
-LLM 빌드는 `find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)`의 `SchemaProvider::runtime` 또는
-명시적 `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<sdk-source>`가 필요합니다.
+`NEOGRAPH_BUILD_LLM=OFF`를 포함한 모든 Core 빌드에 `SchemaProvider::runtime`이 필요합니다.
+CMake 3.20+는 명시적 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`, 설치된 runtime package,
+고정된 public GitHub source archive 순서로 SDK를 선택합니다. 다운로드 fallback은 기본 활성화이며,
+설치 package나 명시 source를 쓰는 offline 빌드에서는 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`로 끄세요.
 설치 include root는 `include/SchemaProvider`입니다. interface/capability 검사를
-수행하며 SDK package는 unstable `0.0.0` (interface 3)입니다.
+수행하며 SDK package는 alpha `0.1.0` (interface/shared ABI 4)입니다.
 
-현재 model-free E2E에서는 번호가 있는 타깃 39개를 검증했습니다. finite offline 29개와
+보존된 interface-3 model-free C++ E2E 실행에서는 번호가 있는 타깃 39개를 검증했습니다. finite offline 29개와
 실제 MCP/ACP/A2A/Harness 및 gRPC graph/checkpoint/tool 경로입니다. gRPC-vs-JSON-RPC
 측정 예제도 실행했지만 반환값을 검사하지 않아 행동 E2E 통과로 세지 않습니다.
 live/외부 모델 경로 22개와 비활성 Clay GUI는 미검증이며 공개 vendor 요청이나 새 grant는 없었습니다.
@@ -30,14 +33,12 @@ live/외부 모델 경로 22개와 비활성 Clay GUI는 미검증이며 공개 
 키, prompt, artifact는 비공개로 유지하고 민감한 envelope/native 출력을 공개 log에 내보내지 마세요.
 native archive는 owner-private 인증 custody이며 암호화나 vendor issuer 인증이 아닙니다.
 
-# C++ API 예제
 
 
-현재 CMake inventory에는 선택 구성요소를 포함해 번호가 있는 C++ 타깃 범위 63개가 있습니다.
-대부분은 이 디렉터리의 단일 소스 파일이며, Docker Compose가 필요한
-[`26_postgres_react_hitl/`](26_postgres_react_hitl/) 예제도 하나 포함되어 있습니다.
-예제를 프로젝트에 복사한 뒤 `neograph::core`와 필요한
-`neograph::llm`을 링크하면 바로 출발점으로 사용할 수 있습니다.
+번호가 있는 예제는 NeoGraph 엔진 API를 다루며 Core와 Program quickstart도 포함합니다.
+대부분은 이 디렉터리의 단일 소스 파일입니다. Docker Compose가 필요한
+[`26_postgres_react_hitl/`](26_postgres_react_hitl/)도 있습니다.
+예제를 프로젝트에 복사하고 `neograph::core` 및 필요한 구성요소를 링크하세요.
 
 ## 빌드
 
@@ -51,7 +52,7 @@ cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON
 cmake --build build -j$(nproc)
 ```
 
-전체 C++ 예제를 빌드하려면 Program과 A2A도 활성화하세요.
+Program 기반 예제와 A2A 예제를 포함하려면 다음 구성요소도 활성화하세요.
 
 ```bash
 cmake -S . -B build \
@@ -153,7 +154,7 @@ OPENROUTER_API_KEY=sk-or-...
 | 03 |[`03_mcp_agent.cpp`](03_mcp_agent.cpp)|OpenRouter + MCP HTTP 서버|스트리밍 가능한 http MCP 서버에서 도구를 검색하고 ReAct 루프를 구동하세요.|
 | 22 |[`22_mcp_stdio.cpp`](22_mcp_stdio.cpp)|OpenRouter + Python stdio 스크립트|03과 동일하지만 MCP 서버는 stdin/stdout를 통한 하위 하위 프로세스이며 네트워크 스택이 없습니다.|
 | 23 |[`23_mcp_multi.cpp`](23_mcp_multi.cpp)|OpenRouter + 서버 2개|하나의 에이전트, 두 개의 MCP 서버(HTTP + stdio), 도구가 하나의 목록으로 병합되었습니다. LLM는 두 가지 모두를 투명하게 선택합니다.|
-| 21 |[`21_mcp_fanout.cpp`](21_mcp_fanout.cpp)|MCP HTTP 서버(LLM 없음)|Planner는 MCP 호출당 하나의 Send를 내보냅니다. `make_parallel_group`는 이를 동시에 실행합니다. 결정적 — LLM는 도구를 직접 선택하므로 데모는 LLM 축에서 오프라인으로 유지됩니다.|
+| 21 |[`21_mcp_fanout.cpp`](21_mcp_fanout.cpp)|MCP HTTP 서버(LLM 없음)|고정 planner가 MCP 호출마다 Send 하나를 만들고 `make_parallel_group`으로 동시에 실행합니다. 모델 호출은 없지만 MCP 서버에 연결할 수 있어야 합니다.|
 | 20 |[`20_mcp_hitl.cpp`](20_mcp_hitl.cpp)|OpenRouter + MCP HTTP 서버|`interrupt_before` 모든 MCP 도구 호출 — 운영자는 보류 중인 도구 이름 + 인수를 확인하고 승인하고 재개합니다.|
 | 24 |[`24_mcp_feedback.cpp`](24_mcp_feedback.cpp)|OpenRouter + MCP HTTP 서버|교환원은 상담원의 답변 초안을 읽고 피드백을 입력합니다. 두 번째 실행에서는 해당 피드백을 새로운 대화 컨텍스트로 통합합니다.|
 
@@ -212,8 +213,69 @@ OPENROUTER_API_KEY=sk-or-...
 | # |파일|설정|그것이 보여주는 것|
 |---|------|-------|---------------|
 | 11 |[`11_clay_chatbot.cpp`](11_clay_chatbot.cpp)|클레이 + Raylib (`-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`)|Clay/Raylib UI를 사용한 다중 회전 채팅. Pure-C++ 데스크톱 앱, NeoGraph 백엔드. 모의 또는 `--live`.|
-| 35 |[`35_re_agent.cpp`](35_re_agent.cpp)|OpenRouter + 기드라 + 기드라-mcp|리버스 엔지니어링 에이전트 — Ghidra를 통해 제거된 바이너리에서 함수 이름 + 요약을 복구합니다. 엔드 투 엔드 검증(matched_score 0.92, 6-fn crackme). [`fox1245/re-agent`](https://github.com/fox1245/re-agent)의 전체 파이프라인.|
+| 35 |[`35_re_agent.cpp`](35_re_agent.cpp)|OpenRouter + Ghidra + ghidra-mcp|리버스 엔지니어링 에이전트: Ghidra로 심볼이 제거된 바이너리의 함수 이름과 요약을 복원한다. 과거 종단 간 결과는 함수 6개인 crackme에서 matched_score 0.92였다. 전체 파이프라인은 별도의 비공개 `fox1245/re-agent` 저장소에서 관리한다.|
 | 36 |[`36_classifier_fanout.cpp`](36_classifier_fanout.cpp)|오프라인|5개의 작은 "분류자"(감정/독성/언어/주제/의도)가 Send를 통해 팬아웃되어 병렬로 실행됩니다. 벽 시간 ≒ max(per-classifier)(합계 아님) — 소형 모델 에지 스토리입니다. DistilBERT/MiniLM 패스에 대한 5ms 지연 대기 시간을 모의합니다. 인라인 `[ONNX SWAP-IN]` 블록은 `Ort::Session`를 사용한 30라인 대체를 보여줍니다. 추론 런타임 종속성이 없습니다.|
+
+예제 35에는 `bridge_mcp_ghidra.py` 스크립트 경로를 지정하는 `GHIDRA_MCP_BRIDGE`가 필요하다. `GHIDRA_MCP_PYTHON`은 인터프리터를 선택하며 기본값은 `python3`이다. `GHIDRA_SERVER_URL`은 플러그인 엔드포인트를 선택하며 기본값은 `http://127.0.0.1:18080/`이다. 실행 전에 Ghidra와 MCP 플러그인을 시작해야 한다. 이 예제는 `OPENROUTER_API_KEY`도 필요하며 유료 모델을 호출한다. 위 점수는 과거 관측값으로, 새 실행 결과나 일반적인 정확도 보장이 아니다.
+
+## 보존된 예제 계약
+
+이 소스 계약은 SDK interface 4를 사용합니다. 위 C++ 실행 기록은 과거 증거이며
+interface-4 검증이나 새로운 live 호출이 아닙니다. family별 제어는 `ProviderControls`의
+닫힌 타입 필드이며 지원하지 않는 family/origin/model 조합은 I/O 전에 거부합니다.
+reasoning/sampling/tool 제어, Responses 서버 보관 cursor, deployment header 및 명시적
+portable Gemini history는 [provider reference](../docs/reference-en.md)를 참조하세요.
+cursor와 portable history는 native replay 권한을 부여하지 않습니다.
+
+### 연구 및 느린 추론 경로
+
+Deep Research (25 / 26)는 supervisor, researcher, compression, final-report 요청별로
+완료된 빈 `MaxTokens` outcome에 visible text와 유효하거나 무효인 client tool call이 없을 때만
+최대 두 번의 추가 semantic call을 허용합니다. 출력 cap은 두 배로 늘되 16,384를 넘지 않습니다.
+research-brief 호출은 이 ladder에 포함되지 않습니다. 추가 호출마다 새 ordinal로 원래 bank의
+admission을 통과하고 outcome과 usage를 보존합니다. grant, hold, deadline은 갱신하지 않습니다.
+명시적 deadline이 없으면 effect 없는 preparation 한 번으로 설정된 deadline을 알아내고
+mediated invoke 전에 해제한 뒤 그 deadline을 고정합니다. 명시적 deadline은 이 단계를 건너뜁니다.
+Failure, observer/settlement 오류, 이미 전달한 streaming part는 추가 호출을 유발하지 않습니다.
+
+빈 최종 보고서는 오류입니다. 내용이 있는 `MaxTokens` 보고서는 public 투영에만 `Incomplete`를
+표시하며 불변 outcome을 수정하거나 부분 텍스트를 재시도하지 않습니다. 빈 compression이
+ladder를 소진하면 diagnostic을 반환하며 성공한 provider result를 꾸며내지 않습니다.
+
+예제 16은 완료된 빈 응답에만 최대 세 번 호출하고 cap 8,192와 ask당 deadline 300초를 유지합니다.
+cap을 두 배로 늘리거나 failure를 재시도하지 않습니다. 예제 28의 rewrite는 low effort와 출력
+512 token을 요청하고 빈/공백 응답이면 원래 질문을 그대로 반환합니다. provider timeout은
+180초입니다. 이 경로별 설정은 공유 factory의 기본값을 바꾸지 않습니다.
+
+### 체크포인트 및 진화
+
+예제 08은 terminal checkpoint를 fork한 뒤 새 user turn을 시작하는 기존 흐름을 유지합니다.
+일시 정지한 reviewer의 resume 예제가 아닙니다. 예제 14는 실제 executor 횟수로 절약량을 계산합니다.
+최초 다섯 호출 뒤 실패한 sibling 하나만 다시 실행하면 네 호출을 절약합니다.
+
+예제 54는 smoke/file 모드를 선택하기 전에 `pnoop`를 등록합니다. 저장소 root에서
+추적된 seed/task 파일을 사용하세요:
+
+```bash
+./build/example_evolution --smoke
+./build/example_evolution examples/54_evolution_seed.json examples/54_evolution_task.json
+```
+
+실제 JSON의 `best.compiled`, `best.validated`, `best.executed`, `best.correct`를 확인하세요.
+`compile_passed`만으로 올바른 실행을 입증하지 못합니다. file 모드에서도 built-in node type과
+이 demo의 `pnoop`를 쓸 수 있지만 custom type은 host 등록이 필요합니다.
+과거 smoke 실행은 file 모드를 검증하지 않았습니다.
+
+### A2A dialect 및 task snapshot
+
+예제 37은 card의 interface와 첫 RPC에서 선택한 dialect를 출력합니다. client는 호환되는
+JSON-RPC 0.x/1.0 card interface를 선택하며 card URL로 설정된 RPC endpoint를 바꾸지 않습니다.
+card를 fetch하지 않았다면 숫자 `-32601`일 때만 초기 dialect probe가 가능하며 SSE 전달 뒤에는
+재전송하지 않습니다. 예제 38은 두 dialect를 광고하고 최초/갱신 task snapshot을 표시합니다.
+최초 task는 완료된 답변이 아닙니다. server의 응답 encoding은 method 표기와 별개로
+`A2A-Version` header가 선택합니다. 1.0은 PascalCase method, flat part,
+`returnImmediately`를 쓰고 stream의 status/artifact update를 누적합니다. caller는 완료/중단된
+agent status text, 첫 artifact text, 마지막 agent history text 순서로 답변을 선택합니다.
 
 ## 정신 모델 - 3개의 레이어, 중간에 JSON
 
@@ -228,9 +290,9 @@ OPENROUTER_API_KEY=sk-or-...
 명령 라우팅이 실시간보다 우선합니다.
 3. **타입 공급자 요청과 Outcome** (13, 15, 16, 17): SDK admission, 순서 있는 이벤트, 불변 Outcome을 사용합니다. descriptor interpreter와 WebSocket adapter는 없습니다.
 
-그래프 정의는 JSON 모양(`std::map<std::string, json>`)입니다.
-어느 쪽이든 — [Python examples](../bindings/python/examples/)의 예제 14 및 15
-동일한 정의가 `json.dumps`를 통해 왕복하는 방법을 보여줍니다.
+그래프 정의는 JSON 형태(`std::map<std::string, json>`)입니다.
+[Python examples](../bindings/python/examples/)도 같은 topology 형식을 사용합니다.
+공급자 요청과 Outcome은 topology JSON과 별개인 타입 객체입니다.
 
 ## API 키 경제
 
@@ -240,13 +302,13 @@ OPENROUTER_API_KEY=sk-or-...
 |로컬 서버(키 없음)| 31 |
 |**없음**| 02, 04, 05, 06, 07, 08, 09, 10, 14, 21, 27, 36, 37, 38, 39, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57 |
 
-31개의 예제는 API 키 없이 실행됩니다. 즉 "타이어를 걷어차기"입니다.
-바닥. 예 21(MCP 팬아웃, 결정적 플래너) 및 27(비동기)
-동시성, LLM 대기 시간을 대신하는 `steady_timer`) 특히
-토큰을 쓰지 않고 엔진 배관을 시연해 보세요. gRPC 제품군
-(52–55, 57)도 키가 없지만 `-DNEOGRAPH_BUILD_GRPC=ON`가 필요합니다.
-(`grpc++` / `protoc`); 56(`history_compaction`)은 기본적으로 모의로 설정됩니다.
-공급자는 키가 있는 경우에만 OpenRouter에 접근합니다.
+예제 25와 26은 local Crawl4AI도 사용합니다. 현재 secure Docker image에는
+비어 있지 않은 `CRAWL4AI_API_TOKEN`이 필요합니다. 예제 26의 `.env.example`을 보세요.
+
+31개 예제는 API 키 없이 실행할 수 있습니다. 예제 21은 고정 MCP planner,
+27은 `steady_timer`로 모델 지연을 대신하며 token을 쓰지 않고 engine 동작을 보여줍니다.
+gRPC 예제(52–55, 57)도 키가 없지만 `-DNEOGRAPH_BUILD_GRPC=ON`과 `grpc++`/`protoc`가 필요합니다.
+56(`history_compaction`)은 기본 mock provider이며 키가 있을 때만 OpenRouter에 접근합니다.
 
 ## CMake 구성 후 다시 실행
 

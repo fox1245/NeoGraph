@@ -1,5 +1,7 @@
 # Command publication head optimization — 2026-09-07
 
+**Languages:** [English](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md) | [한국어](PROGRAM_COMMAND_HEAD_OPTIMIZATION.ko.md) | [日本語](PROGRAM_COMMAND_HEAD_OPTIMIZATION.ja.md) | [简体中文](PROGRAM_COMMAND_HEAD_OPTIMIZATION.zh-CN.md)
+
 This change reduces reads before publishing a JavaScript command. It reads the run, journal and newest command together instead of loading the run/journal separately and materializing the complete command history. It does not change durable publication, CAS, reservation, checkpoint, or recovery semantics.
 
 ## Implementation

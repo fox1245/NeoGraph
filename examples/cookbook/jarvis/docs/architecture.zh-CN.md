@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/docs/architecture.md locale=zh-CN source_sha256=27b6441685a1293819d0813b44b53142b1fa05c36ec9ba960702d5243eb9bf92 -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/docs/architecture.md locale=zh-CN source_sha256=ed7f628ae6ae172e9e2cbd3d681d4880b503f251e10b745e7be089fbcdc42200 -->
 # JARVIS Graph — 逐节点详解
 
 **Languages:** [English](architecture.md) | [한국어](architecture.ko.md) | [日本語](architecture.ja.md) | [简体中文](architecture.zh-CN.md)
@@ -9,7 +9,7 @@ C++ 路由器、合成器和专家夹具使用类型化 `ProviderRequest`、`sp:
 
 本地语音是可选项，需要选定的 whisper/Moonshine 模型、ONNX Runtime/Supertonic 资源、miniaudio 和可用的麦克风/扬声器。文本/mock 运行不能证明语音可用。无需云端仅适用于本地/mock。实时请求需要获授权的 `OPENROUTER_API_KEY`、网络与提供方容量，并将提示、对话记忆和附带工具/委派结果发送给 OpenRouter。模型已固定，原生请求设置的 ZDR 不是地域驻留保证。不要将密钥写入日志或版本库。可空 token 用量不是账单金额；费用需要当前端点/模型定价与实际计费用量。
 
-`[jarvis:ttft]` 仅在首个非空 `sp::PartDelta` 且为 `PartKind::Text`、`DeltaChannel::Content` 时发出，不由用量、推理、响应头等事件触发。它表示首次合成文本，不是首次可听见的 TTS 播放。Python REPL/基准协议驱动不变；类型化 Python 提供方绑定延期。下文所有耗时及执行主张均为历史记录，不能证明迁移后 C++ 已执行。本次仅对齐源码，未运行构建、基准或语音/实时调用。
+`[jarvis:ttft]` 仅在首个非空 `sp::PartDelta` 且为 `PartKind::Text`、`DeltaChannel::Content` 时发出，不由用量、推理、响应头等事件触发。它表示首次合成文本，不是首次可听见的 TTS 播放。Python REPL driver 仍为 protocol client；pybind benchmark 使用已迁移类型化 binding，需要单独运行证据。 保留的 C++ 证据仅涵盖 CLI 问候、synthetic memory 持久化和正常 EOF。下方 voice/live timing 是历史记录，不验证迁移后的路径。
 
 `config/jarvis_graph.json` 中每个节点的作用及其位于该位置的原因。最好结合 README.md 中的图示阅读。
 
@@ -17,7 +17,7 @@ C++ 路由器、合成器和专家夹具使用类型化 `ProviderRequest`、`sp:
 
 ```
 T0  Microphone active, Tony utterance start detected
-T1  Utterance end (VAD detects 200ms silence)
+T1  Utterance end (VAD detects 500ms silence)
 T2  STT complete — text + detected language code
 T3  Memory lookup complete — last 6 turns + preferences + last topic
 T4  Router decision complete — {mode, tool_calls, delegate_to, skip_synthesis}
@@ -107,12 +107,11 @@ T0→T8 是 JARVIS 的感知响应时间。目标分布：
 ### tts (`supertonic_tts`)
 - 次属音推理，使用 final_text + user_lang → 44.1kHz PCM
 - 启动 miniaudio 扬声器播放 → 首个区块约 100–300ms 后开始
-- 如果播放期间检测到 voice_in 激活（barge-in），则通过取消令牌取消
-  - 初始骨架不支持打断（barge-in）；将在v2中添加
+- 未实现 barge-in；播放时丢弃 microphone input。
 
 ## Graph 外部 — 后台触发器 / A2A 服务器
 
-JARVIS 主图是一个简单的单次话语、单次响应的循环，但 main.cpp 还启动了另外两个组件以构成完整的 JARVIS 体验：
+main graph 每个 cycle 处理一次话语和响应。A2A server 已实现；下方 background trigger 是未实现设计。
 
 ### 后台触发图
 - 分离 `GraphEngine`（或仅用 std::thread）
@@ -130,5 +129,5 @@ JARVIS 主图是一个简单的单次话语、单次响应的循环，但 main.c
 
 - **不支持插话** — TTS播放期间忽略麦克风输入。在v2中添加取消令牌。
 - **不支持多说话人** — 假设只有一个人。说话人分离需要独立节点（例如，pyannote）。
-- **长记忆压缩** — 随着对话延长，轮次无限增长。需要#56历史压缩模式。
-- **目录热重载** — JSON更改检测是手动的（SIGHUP等）。在v2中通过inotify自动重载。
+- **Long-memory compression** — lookup 默认读取最近六 turn，commit 保留最新 24 turn。旧 turn 直接丢弃，不作摘要。
+- **Catalog hot-reload** — startup 加载 catalog。编辑后请重启；未实现自动 reload。

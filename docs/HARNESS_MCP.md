@@ -488,13 +488,19 @@ lineage remainder, including a source whose credit moved to a replay.
 
 **Native-custody pre-I/O gate; exercised suite/probes below.** Beginning a managed effect requires a genuinely bound NativeArchive or the actual local store-issued private C++ retention capability before any pending-effect, slot or held-window mutation. The private capability is never imported from JSON or transferred over the wire. gRPC requires real client and server archives even when the remote backend is InMemory, because a C++ sidecar cannot cross that boundary. Original anonymous owner scope remains empty when no archive supplies a finite source owner; a real archive binding must match the original scope. Financial head/lease evidence alone does not prove native-custody readiness.
 
-`ProviderOutcomeError` is the common outcome-preserving host-error base; `ProviderObserverError` and `ProviderDispatchOutcomePersistenceError` retain the complete drained SDK result and original `cause()`. The persistence error also retains secondary observer failure in `delivery_error()`. `ProviderFailure::outcome()` retains the SDK failure itself. These are evidence, not permission for Node/Program to redispatch: the SDK is the sole owner of provider retries, and a caller-selected `max_output_tokens` is never silently clamped.
+`ProviderOutcomeError` is the common outcome-preserving host-error base; `ProviderObserverError` and `ProviderDispatchOutcomePersistenceError` retain the complete drained SDK result and original `cause()`. The persistence error also retains secondary observer failure in `delivery_error()`. `ProviderFailure::outcome()` retains the SDK failure itself. These are evidence, not permission for Node/Program to redispatch: the SDK is the sole owner of transport retries, and a caller-selected `max_output_tokens` is never silently clamped. A larger-cap semantic call needs a new prepared digest, distinct deterministic call ordinal, admission from the original resource bank and the original deadline; native replay eligibility grants no renewed credit.
 
 `ProgramFailure` retains live `provider_outcome` and `provider_cause`. Its canonical factual SDK witness binds genuine archive custody to owner/run/version/bundle/operation/attempt; Runtime eagerly restores configured custody before exposing a recovered failure. Public data-only `ProgramResult::create()` cannot bypass this with a prefilled witness, and an unresolved parsed seal is not an executable result. After process restart the original exception pointer is unavailable (`provider_cause == nullptr`), not recreated from text. A failure that cannot be persisted cannot be serialized, published or replayed.
 
 `RecordedBindingSet` is source-bound, move-only data, never a caller-supplied dispatcher. The trusted Catalog `recorded_capability_binder` independently materializes captured-only capabilities from real persisted source events. `ProgramRuntime::replay_recorded()` checks original selected-source permissions, then transfers the actual remaining bank through durable CAS; inherited spend is not a new model grant. The old `start_recorded` renewal API is removed. InMemory, File, SQLite and PostgreSQL Program stores preserve the exact immutable owned lease throughout execution; expiry does not renew it. Controlled JavaScript still validates the underlying capability manifest and consumes exact completed command outcomes without redispatching external effects.
 
 **Recorded-control causal fix exercised in the full suite.** Captured command replay durably reserves only new CPU wall-time/Core work before execution, then publishes measured work and any newly produced Core checkpoint through the result CAS. It consumes no new model, money or Program-operation allowance and does not redispatch captured external effects. An unreconciled reservation remains debited. The reservation selects the authenticated settlement transition rather than an ordinary Running→Running transition that rejected the first new Core checkpoint. Await channel receive, timer wait/cancel and handoff wait initiation/release are serialized on their owning executors/strands; the existing Recorded CPU/Memory await/handoff scenarios passed in the full suite; remote TSan coverage limits remain explicit below.
+
+The following paid, native-axis, and integrated-runtime observations are
+historical provider-cutover cohorts. Their counts, failures, skips, and limits
+remain unchanged. “Latest” in that retained record means the last run in its
+cohort, not verification of the current Python bindings or this documentation
+change.
 
 **Completed paid observations; not universal qualification.** Original `SPQUAL1` base630/1000000 microUSD is unchanged; ONE hash-chained `A` admits approved extension480/3000000 in the same original ledger, aggregate1110/4000000, with cumulative calls/spent/holds/settlements and no new grant ID/header/reset. Exact declaration bytes/file identity and original authorization/baseline/catalog/activation/ledger-prefix hashes/totals remain pinned; removal/replacement/change fails closed. The final canonical ledger is calls1110/spent437958/held1287828 microUSD, eventA1, limits1110/4000000; spent+held is US$1.725786 LOCAL catalogue meter, not an invoice. The documented five-family60-pair baseline completed600 requests: Chat60/60, Responses60/60, Messages60/60, Generate56/60 (four incorrect-vision SSE), Interactions57/60 (one buffered and two SSE incorrect-vision); aggregate293/300 pairs, not300/300. Other old600 financial records remain preserved, not full behavioral proof. Earlier M5/media one-shot cohorts are unchanged. The earlier three-round Google prerequisites retain two invalid-tool and one unreadable-positive failures. No further paid calls are authorized. Final SDK evidence and native-axis limits are separate from baseline success. Earlier activation/reopen smoke remains recorded at calls610/spent219159/held751233 after two reopens, with SDK meter/canary/vision four tests passed19.38seconds; these are scoped prior checkpoints, not final ledger totals. The earlier verified Chat60-pair cohort retains120 actual attempts,120 UpperBound charges and no UnknownHold.
 
@@ -609,23 +615,25 @@ listener, and deploy one authorization domain per Harness state directory.
 
 ## Host Setup
 
-Use an absolute path for `SERVER`:
+Use the absolute path to the installed `neograph-harness-mcp` binary for `SERVER`.
+These entries select the direct Provider executor; pass the corresponding
+`--executor claude|codex|opencode` instead for the local host mode above.
 
 ```bash
-SERVER=/absolute/path/to/build-harness/example_harness_mcp_server
+SERVER=/absolute/path/to/neograph-harness-mcp
 ```
 
 Claude Code, local project scope:
 
 ```bash
-claude mcp add --scope local --transport stdio neograph-harness -- "$SERVER"
+claude mcp add --scope local --transport stdio neograph-harness -- "$SERVER" --executor provider
 claude mcp get neograph-harness
 ```
 
 Codex CLI:
 
 ```bash
-codex mcp add neograph-harness -- "$SERVER"
+codex mcp add neograph-harness -- "$SERVER" --executor provider
 codex mcp list
 ```
 
@@ -643,11 +651,10 @@ OpenCode, in project `opencode.json` or user configuration:
   "mcp": {
     "neograph-harness": {
       "type": "local",
-      "command": ["/absolute/path/to/example_harness_mcp_server"],
+      "command": ["/absolute/path/to/neograph-harness-mcp", "--executor", "provider"],
       "enabled": true,
       "environment": {
-        "OPENAI_API_KEY": "{env:OPENAI_API_KEY}",
-        "NEOGRAPH_HARNESS_MODEL": "gpt-4o-mini"
+        "NEOGRAPH_HARNESS_API_KEY": "{env:NEOGRAPH_HARNESS_API_KEY}"
       }
     }
   }
@@ -747,10 +754,11 @@ the Harness tools. A suitable request is:
 
 ### Provider Budgets
 
-`budgets.provider_timeout_seconds` limits one provider completion attempt to
-1--600 seconds. `budgets.max_output_tokens` limits one completion to 1--128000
-generated tokens. Both are optional: omitting either preserves the previous
-behavior, with no Harness deadline and the provider's existing output limit.
+`budgets.provider_timeout_seconds` sets one prepared provider operation's
+absolute deadline to 1--600 seconds. `budgets.max_output_tokens` sets its output
+limit to 1--128000 tokens. Both are optional: omission leaves that control unset
+and preserves the admitted SDK/default policy, not unlimited time or output.
+The SDK owns any provider retry within the prepared operation's deadline.
 
 A worker may set either field to a smaller value. A worker value above the
 Harness-wide value is rejected at compile time. On a deadline, Harness cancels
@@ -914,6 +922,15 @@ and `cancelled`. `tasks/update.inputResponses` is keyed by the pending
 `make_provider_harness_executor` drives workers through any NeoGraph
 `Provider`. If a model requests a declared tool, the executor validates its
 arguments and output against the catalog before and after dispatch.
+
+The provider executor builds a typed `ProviderRequest`; `prepare` validates and
+encodes without I/O, and `dispatch` consumes the prepared request. `invoke`
+combines those steps. The executor retains the owned SDK Completion/Failure
+outcome, including ordered messages/parts and partial failures, rather than
+turning a failure into text-only success. Provider reports retain unknown usage
+as nullable fields; conservative token charges/reservations are separate
+authority. Recorded provider playback does not charge or settle those outcomes
+again; any new replay CPU/Core work still consumes its transferred remainder.
 
 Use `make_mcp_harness_capability_executor` for initialized downstream
 `MCPClient` instances, or `a2a::make_harness_capability_executor` for A2A

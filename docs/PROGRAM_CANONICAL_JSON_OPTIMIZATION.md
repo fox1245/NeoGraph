@@ -1,5 +1,7 @@
 # Canonical JSON optimization with AgentX analysis — 2026-09-07
 
+**Languages:** [English](PROGRAM_CANONICAL_JSON_OPTIMIZATION.md) | [한국어](PROGRAM_CANONICAL_JSON_OPTIMIZATION.ko.md) | [日本語](PROGRAM_CANONICAL_JSON_OPTIMIZATION.ja.md) | [简体中文](PROGRAM_CANONICAL_JSON_OPTIMIZATION.zh-CN.md)
+
 On the measured 64 KiB Program workload, batching string scans/copies reduced latency by about **54% with memory stores, 50% with SQLite, and 26% with PostgreSQL**, relative to the already optimized command-head implementation (`ef56ff89`). The improvement comes from native canonical JSON processing; this experiment does not evaluate a JIT backend.
 
 ## Evidence that selected the change

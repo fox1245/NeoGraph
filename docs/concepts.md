@@ -2,24 +2,9 @@
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
 
-Read this once before diving into the examples. It builds up the
-mental model in the order you'd construct one yourself: graph →
-channels → nodes → edges → fan-out → routing override →
-checkpoints → streaming.
+Read this before the examples. The sections follow the order used to build a graph: channels, nodes, edges, fan-out, routing, checkpoints and streaming.
 
-The Python material below describes existing bindings; provider bindings/wrappers are explicitly deferred and have not been ported or exercised for the typed lossless C++ cutover. Installing a historical wheel does not expose the new C++ provider API.
-
-The public contract is owned typed preparation and dispatch, not paired virtual completion methods. `ProviderRequest.payload` is the SDK variant of Chat, Messages, Responses, Gemini or Interactions requests. `ProviderMode::Collect` / `Stream` selects transport independently of an observer. `on_event` receives borrowed typed `sp::Event` views; copy only data needed after the callback. No raw JSON overrides or native-state import through portable projections are admitted.
-
-A provider call returns `sp::runtime::Result`: an immutable, owned `std::shared_ptr<const sp::Outcome>`, containing `sp::Completion` or `sp::Failure`. Retain the whole outcome, not only display text. Ordered messages/parts, native continuation, complete wire envelopes, ordered raw observations, stop evidence and genuine attempt metadata survive the call and client destruction. Usage counters are nullable `uint64_t` values with evidence, stage and quality: missing is unknown, never zero. A failure retains its original partial outcome. `ProviderFailure::outcome()` and `ProviderObserverError::outcome()` preserve that result; the latter also preserves the observer exception in `cause()`.
-
-> **If you've used LangGraph before:** the primitives are intentionally
-> the same — channels with reducers, nodes that emit writes, conditional
-
-If post-effect accounting or terminal-receipt persistence fails after a real result exists, `ProviderDispatchOutcomePersistenceError` retains the original immutable result in `outcome()` and the original persistence exception in `cause()`. If delivery also failed, `delivery_error()` retains the original observer exception. Successful persistence followed by observer failure rethrows that original observer exception unchanged; an unknown/no-result transport failure does not fabricate an outcome.
-> edges, `Send`, `Command`, checkpoints. The README summarizes NeoGraph's
-> [two runtime layers](../README.md#two-runtime-layers). The narrative below
-> assumes nothing.
+If you know LangGraph, you will recognize channels with reducers, `Send`, `Command` and checkpoints. NeoGraph's [Core and ProgramRuntime](../README.md#core-and-programruntime) have separate responsibilities; this guide starts with Core graph execution. Python provider calls use the typed [binding contract](python-binding.md), rather than the removed completion classes.
 
 ---
 
@@ -58,16 +43,15 @@ Execution is a **super-step loop**:
 ```
 1. ready_set = nodes routed from __start__
 2. while ready_set is not empty:
-   a. run all nodes in ready_set (in parallel if the executor allows)
-   b. apply each node's writes to state
-   c. collect their Send / Command / outgoing-edge signals
-   d. plan_next_step → new ready_set
+   a. run the ready batch against its pre-update channel state
+   b. buffer returned writes, then fold them through channel reducers
+   c. execute emitted Sends after ordinary writes; fold their results
+   d. combine routing signals and evaluate updated state → new ready_set
 ```
 
-A super-step is the unit of parallelism, of checkpointing, and of
-streaming events. Two nodes that can both run "now" are the same
-super-step; they observe the same input state and their writes
-combine via reducers when the step ends.
+A normal ready batch reads the channel state from before that batch's updates. A sibling cannot read another sibling's returned writes during execution. The engine buffers those writes, folds them through reducers after the batch, then evaluates routing on the updated state. This is graph scheduling; the engine does not synchronize a model's internal computation.
+
+For example, if `counter` starts at 0 and two ready nodes both return `counter + 1`, both read 0. An overwrite reducer produces 1, not 2. A custom sum reducer can instead combine two increment writes of 1 into 2. Multi-branch `Send` uses isolated state copies with each payload applied; the single-`Send` path applies its payload to shared state. Reducer order does not make model responses or external effects reproducible.
 
 ---
 
@@ -111,131 +95,28 @@ independent decisions.
 
 ### Channel lifecycle and checkpoint contract
 
-`reducer` (`overwrite`, `append`, or a registered custom reducer) combines
-updates. `retention` (`unbounded` by default, `latest`, or `bounded` with a
-positive `retention_limit`) trims **arrays after each write**, including
-explicit `ChannelWrite.Mode.Overwrite` writes. It does not expire channels by
-super-step; `latest` still keeps its last element until overwritten. The
-independent `persistence` choice is `checkpoint` (default, full materialized
-value and version) or `ephemeral` (omit value and version from durable
-checkpoints). Bounded retention changes observable state, not just storage:
-it is not a substitute for preserving a full conversation history.
+The reducer combines writes. Array retention is a separate policy: `unbounded` (default), `latest`, or `bounded` with a positive `retention_limit`. Retention trims arrays after every write, including `ChannelWrite.Mode.Overwrite`; `latest` keeps its last element until another write replaces it. Persistence independently selects `checkpoint` (default, materialized value and version) or `ephemeral` (omit both from durable checkpoints). Bounded retention changes the visible history, not merely storage size.
 
-The policy dimensions are distinct: **combination** is the reducer;
-**runtime lifetime** is currently across super-steps (array retention limits
-the retained elements, not the lifetime); **checkpoint representation** is
-currently full materialized state or omission. A proposed per-step lifetime
-would reset to the declared initial value *after* a step's writes have been
-applied and its routing decision completed, before the next step reads state.
-That option is not currently available: safe rollout needs a precise contract
-for interrupts in the middle of a step, pending-write replay, and `Send`
-workers. It must never be conflated with today's `persistence: "ephemeral"`,
-which does **not** reset values at step boundaries.
+The engine folds each node's writes in returned order, static batches in scheduler-ready order and multi-`Send` results in invocation order, regardless of finish order. Pending writes replay into those same task slots. Overwrite is ordered last-writer-wins; append preserves element order. Custom reducers should be pure and stable under replay. Associativity is needed if regrouping must preserve the result; commutativity is needed only for order independence. Explicit overwrite bypasses the reducer, then applies retention. None of these rules guarantees reproducible model output or external effects.
 
-The engine merges the writes of each node in their returned order. Parallel
-static nodes merge in the scheduler's ready order, multi-`Send` results in
-`Send` invocation order, regardless of finish order; pending writes are
-replayed into those same slots. Overwrite is therefore **ordered
-last-writer-wins**, not a commutative merge. Append preserves element order.
-Custom reducers on concurrent branches must be deterministic, pure under
-replay, and associative if regrouping writes must leave the result unchanged;
-commutativity is additionally required only if callers want order
-independence. Side effects belong in nodes, not reducers. A write's explicit
-overwrite mode bypasses the reducer, then still applies retention.
+Ephemeral values remain live across supersteps; they do not reset per step. Every checkpoint records the declared ephemeral names and whether they were written, but not their values. Resume, `resume_if_exists`, exact-ID resume and state updates reject written ephemeral state, a missing guard in an old checkpoint, or a changed ephemeral channel set. A checkpoint before the first ephemeral write may resume with pending writes replayed in the documented order. `update_state` refuses ephemeral writes. Multi-`Send` in-process workers inherit live ephemeral values in their isolated copies. Keep correctness-critical state checkpointed, or reconstruct it from durable inputs in a fresh run.
 
-An ephemeral channel remains live in memory across super-steps, but its
-contents cannot be reconstructed from a checkpoint. Every engine checkpoint made
-with ephemeral channels records their names and whether they have been
-written, without recording their values. Resume (including
-`resume_if_exists`, exact-ID resume, and state updates) rejects a checkpoint
-when an ephemeral value was written, a guard is absent (older checkpoint),
-or the declared ephemeral channel set changed. A checkpoint captured before
-the first ephemeral write may resume safely; pending writes replay from that
-checkpoint in deterministic order. `update_state` refuses to write an
-ephemeral value into a checkpoint. Isolated in-process `Send` workers inherit
-the live ephemeral state; this runtime snapshot is not persisted. Keep
-correctness-critical state in `checkpoint` channels, or reconstruct it
-explicitly from durable inputs in a fresh run; ephemeral is suitable only
-for disposable scratch data.
-Direct `GraphState::restore` also rejects an ephemeral channel: callers must
-use `restore_checkpoint` with its matching guard or `restore_runtime` for a
-same-process, non-durable snapshot that includes every ephemeral value and version.
+`GraphState::restore` rejects graphs with ephemeral channels. Use `restore_checkpoint` with the matching guard, or `restore_runtime` for a same-process snapshot containing every live value and version. The guard uses checkpoint metadata; it does not change the channel blob layout or store schema. Old full-value checkpoints still work for graphs without ephemeral channels. Before downgrading to a binary without these guards, drain or restart ephemeral threads and forks from durable inputs; older readers cannot enforce the additive guard.
 
-This guard uses the existing checkpoint metadata field, not a new channel
-blob layout or a bumped store schema: legacy full-value checkpoints keep
-working for graphs without ephemeral channels. On upgrade, a historical
-checkpoint for a graph declaring ephemeral channels has no guard and must
-fail closed; restart from durable inputs rather than guessing whether
-scratch data was needed. Before rolling back to a runtime that does not
-enforce guards, stop resuming threads with ephemeral channels (including
-forks), drain them or restart those threads from known durable inputs, and
-only then downgrade. Older binaries cannot recognize this additive
-metadata field and are not safe readers for such threads.
+Checkpointed channels use full materialized snapshots. Memory, SQLite and PostgreSQL deduplicate unchanged `(thread, channel, version)` values, but append history changes version on every write and still grows the snapshot. Pending writes record successful tasks of an incomplete superstep; they are not general channel deltas. A per-step reset policy is unavailable: its safe design would need to define the reset after writes and routing, plus interrupts, replay and Send behavior. It must not be confused with ephemeral persistence.
 
-Checkpoint storage currently uses **full materialized values** for all
-checkpointed channels. Memory, SQLite, and PostgreSQL stores deduplicate
-unchanged `(thread, channel, version)` values across checkpoints, but a
-growing append history changes version on every write and still incurs a
-growing full snapshot. Pending writes log successful tasks in an incomplete
-super-step, not a general append-only channel-delta format.
+Delta-backed checkpoints are a design, not a channel setting. Such a format would replay ordered `{channel, version, write mode, value}` deltas from a full snapshot, with at most *K* deltas (optionally a byte threshold). It must preserve overwrite, retention, versions and reducer identity; publish snapshot/deltas and checkpoint pointer atomically before clearing pending writes; and reject missing links, version gaps, unknown reducers or failed replay. Adoption needs a new schema version and measured benefit. Migrate existing snapshots into a base without invented deltas, keep old-reader full snapshots during reversible rollout, and reject downgrade with delta-only records unless the original reducer registry materializes them. Current stores remain full-snapshot stores.
 
-**Delta-backed policy (design, not an available channel setting):** a future
-store may record ordered `{channel, version, write mode, value}` deltas
-between full snapshots, with a configurable maximum of *K* deltas between
-snapshots (and optionally a byte threshold). Load from the newest complete
-snapshot and replay at most *K* subsequent writes in the scheduler's fold
-order; preserve overwrite resets, retention, version counters, and custom
-reducer identity. Atomic publication must commit snapshot/delta and
-checkpoint pointer together before clearing pending writes; missing links,
-unknown reducer identities, version gaps, or failed replay must error rather
-than return partial state. Custom reducers must be stable and replay-pure.
-This format is **not enabled** until its schema migration and measured cost
-justify it: assign a new checkpoint schema version, migrate old full
-snapshots into a base snapshot without synthesizing historical deltas, retain
-old-reader-readable full snapshots during a reversible rollout, and refuse
-downgrade if a delta-only record exists (or materialize it with the original
-reducer registry before rolling back). Existing overwrite/append/custom
-graphs and all stores continue using the current format by default.
+Measure the baseline with `bench_checkpoint_store --threads 1 --iters 1 --history-steps 256 --payload 512 --backends memory,sqlite`; add `postgres` and `--pg-url` only for an isolated local database. Rows report logical serialized bytes, save/load p50/p95 and reconstruction depth; legacy rows report blob count. For allocation requests, run `heaptrack bench_checkpoint_store --threads 1 --iters 1 --history-steps 256 --payload 512 --backends memory`. Native JSON/SQL allocators are not all intercepted by C++ `operator new`. Compare identical payloads, histories and backend setups, using measured rather than estimated savings. Logical bytes differ from durable physical bytes. SQLite uses a unique temporary database removed on exit; `--sqlite-path` retains its new file and refuses an existing path.
 
-To measure the current full-snapshot baseline, build and run
-`bench_checkpoint_store --threads 1 --iters 1 --history-steps 256 --payload
-512 --backends memory,sqlite` (add `postgres` and `--pg-url` for a local
-isolated test database). The history rows report logical serialized checkpoint
-bytes, p50/p95 save and load latency, and reconstruction depth; the legacy
-rows report blob count. Repeat under an allocation profiler (for example
-`heaptrack bench_checkpoint_store --threads 1 --iters 1 --history-steps
-256 --payload 512 --backends memory`) to collect allocation count and bytes;
-the native JSON and SQL allocators are not all intercepted by C++ `operator
-new`. Use identical payloads, history lengths, and backend setup for any
-future delta-format comparison; report measured values, not estimated
-savings. SQLite and PostgreSQL durable stores may have different physical
-bytes from the logical serialized checkpoint total.
-The SQLite benchmark defaults to a unique temporary database removed on exit;
-`--sqlite-path` retains its new output file and refuses an existing path.
-
-One measured baseline (Linux x86-64, Debug build, one thread, 256 history
-steps, 512-byte messages, one iteration; not a performance target):
+One recorded Linux x86-64 Debug baseline used one thread, 256 history steps, 512-byte messages and one iteration. These are historical measurements, not performance targets:
 
 | Backend | Logical checkpoint bytes | Save p50/p95 (µs) | Load p50/p95 (µs) | Replay depth |
 | --- | ---: | ---: | ---: | ---: |
 | Memory | 17,814,952 | 54 / 138 | 141 / 382 | 1 |
 | SQLite | 17,814,952 | 289 / 1,589 | 176 / 474 | 1 |
 
-In a separate repeat before history-thread deletion, SQLite reported a
-14,811,136-byte database file plus a 4,210,672-byte WAL
-(19,021,808 physical file bytes at that sampling point).
-
-On the same workload, a Linux `LD_PRELOAD` shim counting process-wide
-`malloc`, `calloc`, and nonzero `realloc` requests (including benchmark
-construction and JSON parsing) observed **88,277** additional allocation
-requests / **605,289,027** requested bytes for memory and **114,295** /
-**867,319,964** for SQLite versus otherwise identical runs with
-`--history-steps 0`. These are cumulative requests, **not** live memory,
-physical checkpoint bytes, or allocations attributable only to the store.
-Aligned allocations and internal allocator activity are not intercepted.
-The shim is a measurement aid, not a library dependency; repeat with a
-supported allocation profiler and multiple warm runs before drawing
-performance conclusions.
+A separate repeat before deletion measured SQLite database/WAL sizes of 14,811,136 / 4,210,672 bytes (19,021,808 total). A Linux `LD_PRELOAD` shim counting process-wide `malloc`, `calloc` and nonzero `realloc` requests, including construction and JSON parsing, measured 88,277 extra requests / 605,289,027 requested bytes for memory and 114,295 / 867,319,964 for SQLite against `--history-steps 0`. These are cumulative requests, not live memory or store-only allocations. Aligned/internal allocations were not intercepted. The shim is not a dependency; use supported profilers and multiple warm runs before drawing conclusions.
 
 ### Writing to channels
 
@@ -244,7 +125,7 @@ A node returns a list of `ChannelWrite`s:
 ```python
 return [
     ng.ChannelWrite("messages", [{"role": "assistant", "content": "Hi!"}]),
-    ng.ChannelWrite("counter",  state.get("counter", 0) + 1),
+    ng.ChannelWrite("counter",  (state.get("counter") or 0) + 1),
 ]
 ```
 
@@ -331,10 +212,7 @@ class Researcher(ng.GraphNode):
         )
 ```
 
-Python exposes `cancel_token`, `thread_id`, `step`, `stream_mode`, `store`,
-and `resume_value` on `input.ctx`. C++ callers may set `deadline` and
-`trace_id` on `RunMetadata`; the engine propagates them through nested subgraphs.
-Those two fields are not exposed by the Python binding yet.
+Python exposes `cancel_token`, `usage`, `thread_id`, `step`, `stream_mode`, `store`, `resume_value`, `trace_id`, `run_id`, `model_token_budget` and typed provider evidence on `input.ctx`. Deadline inspection uses `has_deadline` and `deadline_remaining_ms`; the raw C++ steady-clock value is opaque. C++ callers supply deadline and trace metadata through `RunMetadata`, which propagates into nested subgraphs.
 
 You can also return a bare `list[ChannelWrite]` when you don't need
 `Send` or `Command` — the binding lifts it into a `NodeResult`
@@ -366,7 +244,7 @@ class can be instantiated under multiple names with different configs.
 ```python
 class CalcTool(ng.Tool):
     def get_name(self):       return "calc"
-    def get_definition(self): return ng.ChatTool(name="calc", ...)
+    def get_definition(self): return ng.ChatTool("calc", "Double x", {"type": "object", "properties": {"x": {"type": "number"}}, "required": ["x"]})
     def execute(self, args):  return str(args["x"] * 2)
 ```
 
@@ -456,9 +334,7 @@ Both forms are accepted; pick whichever is clearer:
 
 ## 5. Send — dynamic fan-out
 
-`Send` is for cases where the number of next-step nodes depends on
-state. Classic use: split a list of search topics into N parallel
-researcher invocations.
+`Send` lets a node choose a runtime-dependent number of target invocations, such as one researcher per topic. The engine executes emitted Sends after the ordinary ready batch has returned and its writes have been applied, within the same numbered superstep.
 
 ```python
 class Planner(ng.GraphNode):
@@ -470,19 +346,9 @@ class Planner(ng.GraphNode):
         )
 ```
 
-The engine's `run_sends_async` instantiates `researcher` once per
-`Send`, each with its own `state.get("topic")`, and runs them in
-parallel via `asio::experimental::make_parallel_group`.
-
 ### Mental model
 
-A `Send(target, payload)` is "instantiate `target` with this state
-patch and add it to the ready set". The payload is applied as a
-state write before the target sees `state`.
-
-After the parallel group finishes, the next super-step's routing comes
-from each Send-spawned task's outgoing edges (or its `Command.goto`,
-if it emitted one).
+The engine invokes the compiled target once per `Send`; it does not promise a fresh node object. Send targets therefore need safe member-state handling under concurrent invocations. Each payload is applied before its target reads channels. A single Send uses shared state; multiple Sends use isolated copies of the post-ready-batch state and fold returned writes in invocation order after all branches finish. Routing then combines ordinary-node and Send-target signals for the next ready batch.
 
 ### Common shape: fan-out 5, fan-in to summarizer
 
@@ -499,10 +365,7 @@ planner ─┬─ Send("researcher", {topic: "A"})  ─┐
 
 ### Worker-count tuning
 
-`build()` defaults to `EngineConfig::worker_count == 1` — no engine-owned thread
-pool, fan-out branches dispatch inline on the coroutine's own
-executor. That's a no-allocate fast path that's cheap for sequential
-graphs and safe for nodes that hold non-thread-safe state.
+`build()` defaults to `EngineConfig::worker_count == 1`, so it creates no engine-owned thread pool and dispatches branches on the caller's coroutine executor. Coroutine I/O can overlap; CPU-bound work may serialize on a single-thread executor. A multi-thread caller executor or concurrent runs still require safe node member state.
 
 For real parallelism, opt into a pool explicitly. Pick exactly N to
 match your fan-out width, or use `set_worker_count_auto()` for
@@ -543,7 +406,7 @@ class Evaluator(ng.GraphNode):
                 writes=[],
                 command=ng.Command(
                     goto_node="planner",                  # loop back
-                    updates=[ng.ChannelWrite("retries",  input.state.get("retries", 0) + 1)],
+                    updates=[ng.ChannelWrite("retries",  (input.state.get("retries") or 0) + 1)],
                 ),
             )
 ```
@@ -559,11 +422,7 @@ class Evaluator(ng.GraphNode):
 
 ### Last-writer-wins under fan-in
 
-If multiple Commands fire in the same super-step (rare — only
-possible when multiple parallel-group siblings emit them), the last
-one wins. The order is determined by parallel-group completion, which
-is non-deterministic — design around this by ensuring at most one
-sibling emits a `Command`.
+If several siblings return a nonempty `Command.goto_node`, the last command in the supplied routing order wins and overrides ordinary edges and barriers. Static batches supply ready order; multi-`Send` supplies invocation order, not completion order. All returned command updates still merge through the write pipeline. Prefer one routing decision-maker when conflicting commands would change the workflow.
 
 ---
 
@@ -608,11 +467,25 @@ Useful when the decision to pause depends on intermediate node output
 
 ### Time travel
 
-`engine.fork(thread_id, from_checkpoint_id)` returns a new thread that
-starts from a past checkpoint. Useful for "what if I had answered
-differently" branching.
+`engine.fork(source_thread_id, new_thread_id, checkpoint_id="")` copies a checkpoint into the caller-named destination thread and returns the new checkpoint ID. An omitted checkpoint ID selects the source's latest checkpoint. The copy retains its pending continuation; editing state does not schedule new work.
+
+Resuming a completed continuation with `next_nodes == ["__end__"]` restores the stored result without executing nodes. To continue paused work on edited state, select an exact earlier checkpoint from `get_state_history()` that still has pending nodes, fork that ID, edit the fork and resume it. A historical empty `next_nodes` vector is different: latest resume without an exact ID retains the fresh-run behavior, while exact-ID resume stays pinned to that snapshot.
+
+[Example 08](../examples/08_state_management.cpp) keeps its new-turn flow: fork a completed checkpoint, edit the user message, then call `run()` with `resume_if_exists=true`; resume only if that new run interrupts. It does not demonstrate resuming a paused fork.
 
 `ChatMessage` / `ChatTool` and JSON are portable projections, not native authority. Portable formats remain [`provider-message-v2`](../schemas/provider-message-v2.schema.json) and [`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json). Genuine C++ checkpoint sidecars retain native seals in memory. Durable native history requires host-owned `sp::NativeArchive`: closed v3 / `spna3`, with authenticated owner-private custody and an independent key. Archive v2 is rejected, not upgraded or interpreted. Authentication binds every semantic descriptor choice (origin/paths/headers, policy, request field mappings, usage path and stop mappings), owner and exact custody binding. It is neither encryption nor vendor-issuer authentication; never publish archive bodies, keys, native blobs or raw wire observations. An archive is evidence storage, not a money grant or a spending lease. Program/external banks remain independently journal-owned; snapshot copies cannot create credit.
+
+Provider history has separate modes. Same-route native continuation retains authentic reasoning, signatures and ordered tool groups under their original binding. Gemini defaults to `NativeOnly`; explicit `PortableForeign` accepts caller-created assistant text and tool calls without native seals, wire output or signatures. Only the first foreign function call receives Google's documented bypass marker; text-only turns receive no signature. This projection grants no native authority and never repairs or demotes a failed native seal. It does not make arbitrary multi-vendor history natively portable.
+
+Responses `previous_response_id` selects provider-held conversation state; the request carries new input only. When client-tool ownership needs local evidence, `previous_response_history` supplies authentic prior ownership evidence and is not sent as repeated input. A cursor is neither a full native replay seal nor archive authority; it remains subject to origin, route, model, configuration and completed-state checks.
+
+The active SDK interface revision and shared-library generation are 4; consumers must rebuild against matching headers and libraries. The output generation cap is admitted and accounted for on each call, separately from native replay configuration. Raising it for a new semantic call does not renew the original bank, grant or deadline. Content, prefix, origin, route, policy, tools and reasoning controls remain bound, apart from explicitly documented per-turn choices. Portable JSON v2 and native archive v3 / `spna3` remain unchanged; the historical ABI3 measurements below are not interface4 results.
+
+Python exposes the same owned request/outcome boundary as C++: `make_provider_request`, `Provider.prepare`, `dispatch` and `invoke`. Use `ProviderMessage` with typed parts for provider history; `ChatMessage` remains a graph convenience projection. A returned SDK failure is available through `ProviderOutcome.failure`, while host observer/settlement exceptions retain `outcome` and `cause`. See the [Python binding guide](python-binding.md) for constructors and GIL/callback behavior.
+
+Usage counters such as `input_total`, `output_total` and `total` are `std::optional<sp::Count>`; each present count has a `uint64_t value` and `Evidence`. `Usage` also records stage, quality and conflicts. Missing is unknown, never an invented zero.
+
+`UsageAccumulator::snapshot()` returns accumulated reports. `total_tokens_wide()` returns charged tokens plus unresolved reservations; it must not be displayed as reported usage. Settlement requires a final, consistent report with input and output counts and charges the largest supported total, without clamping oversized usage. A missing counter in any accumulated report remains unknown in the aggregate. A reservation, a local charge and a vendor invoice are different records.
 
 **Standalone bank journal correction — current contract revised; exercised runtime evidence below.** The owner-approved protocol requires a monotonic trusted-store namespace obligation and a real immutable original owner/thread/graph scope, ceiling, deadline/clock identity and generation. Only exact durable head CAS over the full checkpoint commitment and revision may issue a host-owned opaque lease. Exact pending effect windows must persist before provider I/O; settlement must use genuine SDK outcomes and actual charges, nullable reports, holds and dedup identities. Checkpoint and next head must publish atomically under the same owned actor/revision. Removing bank metadata, pruning a checkpoint, replaying an old authenticated snapshot, overwriting the same ID or losing the actor must not grant credit. Tightening a 130 ceiling to 129 with an existing 65 hold cannot admit another 65; a proven no-effect failure may release the unchanged head so authentic 130 recovery can still proceed. Crash/unknown/lost-lease windows remain held without refund, retry or fallback. Plain/pristine archive configuration grants no money or native spending lease, and current `config.usage` cannot replace an existing standalone obligation; Program/external-bank journal ownership is unchanged. This is the required contract; actual currency/custody evidence and instrumentation limits are reported below, not a stable released API guarantee.
 
@@ -631,6 +504,8 @@ differently" branching.
 `RecordedBindingSet` is source-bound, move-only data, never a caller-supplied dispatcher. The trusted Catalog `recorded_capability_binder` independently materializes captured-only capabilities from real persisted source events. `ProgramRuntime::replay_recorded()` checks original selected-source permissions, then transfers the actual remaining bank through durable CAS; inherited spend is not a new model grant. The old `start_recorded` renewal API is removed. InMemory, File, SQLite and PostgreSQL Program stores preserve the exact immutable owned lease throughout execution; expiry does not renew it. Controlled JavaScript still validates the underlying capability manifest and consumes exact completed command outcomes without redispatching external effects.
 
 **Recorded-control causal fix exercised in the full suite.** Captured command replay durably reserves only new CPU wall-time/Core work before execution, then publishes measured work and any newly produced Core checkpoint through the result CAS. It consumes no new model, money or Program-operation allowance and does not redispatch captured external effects. An unreconciled reservation remains debited. The reservation selects the authenticated settlement transition rather than an ordinary Running→Running transition that rejected the first new Core checkpoint. Await channel receive, timer wait/cancel and handoff wait initiation/release are serialized on their owning executors/strands; the existing Recorded CPU/Memory await/handoff scenarios passed in the full suite; remote TSan coverage limits remain explicit below.
+
+The observations below were recorded before this documentation reconciliation. They are historical evidence, not new test runs or guarantees for every platform, transport or security property.
 
 **Completed paid observations; not universal qualification.** Original `SPQUAL1` base630/1000000 microUSD is unchanged; ONE hash-chained `A` admits approved extension480/3000000 in the same original ledger, aggregate1110/4000000, with cumulative calls/spent/holds/settlements and no new grant ID/header/reset. Exact declaration bytes/file identity and original authorization/baseline/catalog/activation/ledger-prefix hashes/totals remain pinned; removal/replacement/change fails closed. The final canonical ledger is calls1110/spent437958/held1287828 microUSD, eventA1, limits1110/4000000; spent+held is US$1.725786 LOCAL catalogue meter, not an invoice. The documented five-family60-pair baseline completed600 requests: Chat60/60, Responses60/60, Messages60/60, Generate56/60 (four incorrect-vision SSE), Interactions57/60 (one buffered and two SSE incorrect-vision); aggregate293/300 pairs, not300/300. Other old600 financial records remain preserved, not full behavioral proof. Earlier M5/media one-shot cohorts are unchanged. The earlier three-round Google prerequisites retain two invalid-tool and one unreadable-positive failures. No further paid calls are authorized. Final SDK evidence and native-axis limits are separate from baseline success. Earlier activation/reopen smoke remains recorded at calls610/spent219159/held751233 after two reopens, with SDK meter/canary/vision four tests passed19.38seconds; these are scoped prior checkpoints, not final ledger totals. The earlier verified Chat60-pair cohort retains120 actual attempts,120 UpperBound charges and no UnknownHold.
 
@@ -715,56 +590,46 @@ t.join();
 
 ## 8.5. Tracing — OpenTelemetry + Phoenix / Langfuse
 
-> Historical Python provider/wrapper examples below are not ported to the typed C++ contract and are not current provider guidance. The C++ change does not implement or qualify Python bindings. C++ observers export only established public text/scalars and nullable counts, never raw native state.
-Same callback shape as streaming, different consumer. Pass an OTel
-tracer-emitting callback into `engine.run_stream(cfg, cb)` and every
-`NODE_START` / `NODE_END` / `ERROR` / `INTERRUPT` event becomes a
-span.
-
-Two layers ship in-tree:
-
-  - `neograph_engine.tracing.otel_tracer` — vendor-neutral OTel
-    spans. Spans flow to any OTel backend (Jaeger, Tempo, Honeycomb,
-    Datadog).
-  - `neograph_engine.openinference` — LLM-shape attribute layer
-    that turns the same spans into a *LangSmith-style chat-bubble
-    trace* in Phoenix / Arize / Langfuse:
+`neograph_engine.tracing.otel_tracer` and `neograph_engine.openinference.openinference_tracer` turn graph events into run/node spans. The latter tags spans as `CHAIN` and records node payload projections. Choose one graph callback per run. To record model calls as `LLM` spans, wrap the typed provider with `OpenInferenceProvider(inner, tracer, *, span_name="llm.complete")` before compiling the graph. The wrapper uses the native C++ observer with inherited `prepare`/one-shot `dispatch` or `invoke`. Preparing or abandoning a request opens no span; admitted dispatch opens a span without changing its owned outcome, cancellation, deadline or typed events. Tracer failures do not replace provider results or exceptions.
 
 ```python
-from opentelemetry import trace
+from opentelemetry import context as otel_context
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from neograph_engine import GraphEngine, NodeContext
 from neograph_engine.openinference import OpenInferenceProvider, openinference_tracer
 
-trace.set_tracer_provider(TracerProvider())
-trace.get_tracer_provider().add_span_processor(
-    BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4317", insecure=True)))
-tracer = trace.get_tracer("my-app")
 
-# Wrap the provider — every Provider.complete() now emits an LLM-kind span.
-wrapped = OpenInferenceProvider(real_provider, tracer)
-ctx = ng.NodeContext(provider=wrapped)
-engine = ng.GraphEngine.compile(graph_def, ctx)
+class ParentContextTracer:
+    def __init__(self, tracer, parent_context):
+        self.tracer, self.parent_context = tracer, parent_context
 
-with openinference_tracer(tracer) as cb:
-    engine.run_stream(ng.RunConfig(input={"messages": [...]}), cb)
+    def start_span(self, name):
+        return self.tracer.start_span(name, context=self.parent_context)
+
+
+def trace_graph(graph_spec, inner_provider, model, cfg):
+    provider = TracerProvider()
+    provider.add_span_processor(BatchSpanProcessor(
+        OTLPSpanExporter(endpoint="http://localhost:4317", insecure=True)))
+    tracer = provider.get_tracer("my-app")
+    try:
+        with openinference_tracer(tracer) as cb:
+            parent = ParentContextTracer(tracer, otel_context.get_current())
+            observed = OpenInferenceProvider(inner_provider, parent)
+            engine = GraphEngine.compile(
+                graph_spec, NodeContext(provider=observed, model=model))
+            return engine.run_stream(cfg, cb)
+    finally:
+        provider.shutdown()
 ```
 
-Spin up Phoenix once: `docker run -d -p 6006:6006 -p 4317:4317
-arizephoenix/phoenix`. Open http://localhost:6006 — the trace
-renders as a chain (`graph.run` → `node.X` → `llm.complete`) with
-prompt / response / token counts visible in the LLM detail pane.
-Same code, swap the OTLP endpoint URL for Langfuse self-host and
-the trace shows up there with the same shape.
+For a local Phoenix endpoint, run `docker run -d -p 6006:6006 -p 4317:4317 arizephoenix/phoenix:latest` and install `opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp`. Pass a graph specification, an existing provider, an explicit model and a `RunConfig` to `trace_graph`. `ParentContextTracer` explicitly carries the run root into worker dispatch; automatic cross-thread or per-node parent propagation is not promised. Python uses the active OTel context at dispatch, and the prepared operation retains the tracer adapter through its lifetime.
 
-This is the answer to *"NeoGraph doesn't have LangSmith"* — you
-get the LangSmith UX (chat bubbles, DAG hierarchy, token cost) by
-running Phoenix or Langfuse locally with one Docker command. No
-SaaS contract, no per-trace pricing.
+LLM spans contain public role/text projections, declared scalars and known usage counts. Known zero is recorded; unknown is omitted. Native replay/reasoning, raw wire envelopes/events and encoded request bodies stay outside traces and retain their authentic custody in the request/outcome. Usage attributes, including partial reports on failure, do not establish vendor charges or budget authority; charged/reserved accounting belongs to `UsageAccumulator.authority_snapshot()` and Program's `provider_budget_authority`.
 
-See `docs/reference-en.md` §10.5 for the attribute-key schema and
-the trade-off note between `otel_tracer` and `openinference_tracer`.
+Public text, exception messages and graph payloads can still contain application secrets. Choose or redact what your exporter receives; see [OpenTelemetry's sensitive-data guidance](https://opentelemetry.io/docs/security/handling-sensitive-data/). The [OpenInference conventions](https://github.com/Arize-ai/openinference/blob/main/spec/semantic_conventions.md) define `CHAIN` and `LLM`; the [reference](reference-en.md#105-observability--opentelemetry--openinference) lists NeoGraph's attribute subset, token events, Python typed call examples and C++ lifetime requirements.
 
 ---
 
@@ -798,13 +663,9 @@ warning the first time a multi-Send fan-out runs without an opted-in
 pool — that's a hint, not an error. Python custom nodes see GIL
 contention on small fan-outs, so bench with both 1 and N.
 
-### "Python RunResult has no .status / .final_state attribute"
+### Reading Python RunResult status and state
 
-The Python binding doesn't expose those attributes. Use `result.output`,
-`result.interrupted`, `result.max_steps_exhausted`, and
-`result.execution_trace`. C++ callers can use `RunResult::status()` for the
-typed `Completed` / `Interrupted` / `StepLimit` view. See the
-[Python binding guide](python-binding.md#hitl-and-state).
+`result.status` exposes the typed `Completed`, `Interrupted`, `StepLimit` or `SafePoint` status. `result.output` remains the portable final state; `result.interrupted`, `result.max_steps_exhausted` and `result.execution_trace` describe the run. `result.native_messages` and `result.provider_outcomes` retain full typed provider evidence. See the [Python binding guide](python-binding.md#hitl-and-state).
 
 ### "Unknown reducer: <name>"
 

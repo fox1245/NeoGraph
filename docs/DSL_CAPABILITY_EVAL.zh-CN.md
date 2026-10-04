@@ -1,9 +1,10 @@
-<!-- neograph-i18n: source=docs/DSL_CAPABILITY_EVAL.md locale=zh-CN source_sha256=a2b954c6e311d3acabd6fcc547511af245a49b2303e4897e12628ae7187191c4 -->
+<!-- neograph-i18n: source=docs/DSL_CAPABILITY_EVAL.md locale=zh-CN source_sha256=7ac0e8bb68d88e27682b67247d72e6d408b05e9f23c6ff59967e81cf9f6b3b30 -->
 # QuickJS DSL能力与模型综合评估
 
 **Languages:** [English](DSL_CAPABILITY_EVAL.md) | [한국어](DSL_CAPABILITY_EVAL.ko.md) | [日本語](DSL_CAPABILITY_EVAL.ja.md) | [简体中文](DSL_CAPABILITY_EVAL.zh-CN.md)
 
-状态：已实现，确定性一致性门控；实时模型评估为选择性加入 Observed: 2026-08-22
+状态：已实现，受确定性一致性检查约束；实时模型评估为 opt-in。
+历史实时观测：2026-08-22；下列记录不是新的运行结果。
 
 ## 问题
 
@@ -48,16 +49,55 @@ build\tests\Release\neograph_program_tests.exe `
 ## 实时模型评估
 
 可选runner（opt-in）使用自然语言语义和公共API签名请求源。它不会将已检入的答案提供给模型。每个响应都会发送到与确定性CTest相同的原生探针。
+Runner 将 `skills/neograph-harness-authoring/SKILL.md` 及其
+`references/quickjs-authoring.md` 放入模型 context，并在 report 中记录
+guidance digest。`--skill` 选择带同一 companion reference 的其他 entrypoint。
+宿主调用实际 compiler bridge；模型返回 source，再接收有限 repair 所用的
+diagnostic。Skill 不授予 runtime 权限。
 
 ```powershell
 bun --env-file=C:\path\to\.env run scripts/run_dsl_capability_eval.ts `
   --probe build\tests\Release\program_dsl_capability_probe.exe `
-  --model deepseek/deepseek-v4-flash-0731 `
+  --model z-ai/glm-5.3-flash `
   --repair-attempts 2 `
   --output dsl-capability-evidence.json
 ```
 
 `--case` 接受逗号分隔的子集，`--attempts` 重复独立的单次试验，`--repair-attempts` 将权威探针诊断连同被拒绝的完整来源一起返回给模型。Provider/response 失败与编译或语义拒绝保持分离。
+默认模型为 `z-ai/glm-5.3-flash`。每次 generation 限制为 4,096 个
+completion token，采用 cookbook 的 ZDR provider-routing 设置。
+下面的 DeepSeek 证据是该 skill-loading 配置之前的历史记录。
+
+## 单独评估指令
+
+Source case 通过衡量的是 skill、提供的 native API reference、case contract
+和 model 配置的组合，并不证明 skill 单独就足够。Runner 保留 system prompt、
+API reference、raw model content、usage、stop reason 及 strict-envelope
+结果。Legacy source extractor 可以恢复 fenced JSON；`strictEnvelope` 将其
+与遵守所请求的 raw JSON envelope 区分。
+
+仅在明确选择独立比较 profile 时使用 `--reasoning-effort`。省略时保留
+provider default。Before/after 比较固定该值、model、sampling、output cap、
+task 和 compiler。
+
+Chatbot 内部 Harness selector 的 paired evaluator 为：
+
+~~~powershell
+bun run scripts/run_harness_skill_ab.ts --before saved-skill/SKILL.md `
+  --after skills/neograph-harness-authoring/SKILL.md `
+  --provider relace --repeats 2 --output skill-comparison.json
+~~~
+
+两个 directory 均须有 `references/chat-template-proposals.md`。默认 fixture
+包含 greeting、正在进行的独立 review 请求和 recorded review scenario。
+Expected plan 不进入模型输入。Evaluator 固定 live chat profile，交替 AB/BA
+顺序，保留 raw response，并将 JSON shape 与 expected plan/confidence 分开评分。
+`--provider` 固定 backend 并关闭 fallback；省略时 routing policy 相同，但实际
+provider 可能不同，返回的 provider/model 名称会被记录。Case 与重复次数有限，
+不做 repair 或暗中 retry。
+
+这是 prompt-level 评估，不是 runtime admission，也不是关于答复品质的统计
+主张。少量 targeted 重复样本是 regression 证据，不是一般 model 可靠性的估计。
 
 ## 观察到DeepSeek结果
 
@@ -77,7 +117,7 @@ bun --env-file=C:\path\to\.env run scripts/run_dsl_capability_eval.ts `
 | `program_durability` | 已通过 | Emit、检查点和取消命令完全匹配 |
 | `program_host_capability` | 已通过 | 导入槽位和规范输入匹配 |
 
-初始验证器对 `callCore` 案例产生了误报，因为它检查了命令种类和输入，但未检查确切的 Core 名称。验证器已加强，要求每个嵌套的 `capability` 都包含 `callCore`。因此，之前使用 `core`, `Core`或节点名称 `work` 的已接受模型源现在会被正确拒绝。
+初始 validator 只检查 command kind 和 input，没有检查精确 Core 名称，因此在 `callCore` case 中产生误报。后来要求每个嵌套 `callCore` 的名称为 `capability`。之前通过的、使用 `core`、`Core` 或 node 名称 `work` 的 model source 现在被拒绝。
 
 这是能力证明，而非统计可靠性声明。逐案例的一次性成功率和修复成功率仍需通过重复试验来评估，且提供商失败须单独报告。
 

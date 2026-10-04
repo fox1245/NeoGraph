@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=2f78c1c15d20a1a9f3197b3a3d160344f130d7cb776e068c5afc5f9aeb0bb485 -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=2ca0c5f75e5469e00f15a18bd66d075c7b40363567ad329c14ef0ec5ceecdc95 -->
 # C++ API 示例
 
 
@@ -17,12 +17,14 @@ bounded call 需要真实 model fact；缺失为 `LimitUnknown`。
 reservation/charged/held 与 nullable provider usage 独立，不更新 budget，也不是价格、forecast 或 invoice。
 
 header-only `examples/provider_example_support.h` 使用真实 SDK runtime。
-LLM 构建需要 `find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)` 的 `SchemaProvider::runtime`，
-或显式 `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<sdk-source>`。
+所有 Core 构建，包括 `NEOGRAPH_BUILD_LLM=OFF`，都需要 `SchemaProvider::runtime`。
+CMake 3.20+ 按显式 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、已安装 runtime package、
+固定 public GitHub source archive 的顺序选择 SDK。download fallback 默认启用；
+使用已安装 package 或显式 source 的 offline 构建应设置 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`。
 安装 include root 是 `include/SchemaProvider`；执行 interface/capability 检查，
-SDK package 仍为 unstable `0.0.0`（interface 3）。
+SDK package 为 alpha `0.1.0`（interface/shared ABI 4）。
 
-当前 model-free E2E 已验证39个编号 target：29个 finite offline target 与实际
+保留的 interface-3 model-free C++ E2E 执行验证了39个编号 target：29个 finite offline target 与实际
 MCP/ACP/A2A/Harness 和 gRPC graph/checkpoint/tool 路径。gRPC-vs-JSON-RPC 测量示例也运行了，
 但不检查返回值，不计为 behavioral E2E pass。22个 live/外部模型路径与禁用的 Clay GUI 未验证，
 没有调用公开 vendor 或授予新 grant。历史测量不是新迁移的 qualification；live 需要密钥、
@@ -31,10 +33,9 @@ network、model access 并产生费用。密钥、prompt、artifact 保持私密
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-当前 CMake inventory 含可选组件，共63个编号 C++ target 范围。
-每个示例都是此目录中的单个文件（有一个 Docker-Compose 例外，
-[`26_postgres_react_hitl/`](26_postgres_react_hitl/)）— 把其中一个复制到你的项目里，
-链接 `neograph::core` + `neograph::llm`，你就有了一个起点。
+编号示例涵盖 NeoGraph 引擎 API，包括 Core 和 Program quickstart。
+大多是此目录中的单个文件；[`26_postgres_react_hitl/`](26_postgres_react_hitl/) 使用 Docker Compose。
+将示例复制到项目中，并链接 `neograph::core` 与所需的其他组件。
 
 ## 构建
 
@@ -47,7 +48,7 @@ cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON
 cmake --build build -j$(nproc)
 ```
 
-要构建完整的 C++ 示例集，还要启用 Program 和 A2A：
+要包含基于 Program 的示例和 A2A 示例，还需启用以下组件：
 
 ```bash
 cmake -S . -B build \
@@ -205,8 +206,63 @@ OPENROUTER_API_KEY=sk-or-...
 | # | 文件 | 设置 | 展示内容 |
 |---|------|-------|---------------|
 | 11 | [`11_clay_chatbot.cpp`](11_clay_chatbot.cpp) | Clay + Raylib (`-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`) | 带 Clay/Raylib UI 的多轮聊天。纯 C++ 桌面应用，NeoGraph 后端。Mock 或 `--live`。 |
-| 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | OpenRouter + Ghidra + ghidra-mcp | 逆向工程 agent — 通过 Ghidra 从 stripped binary 恢复函数名 + 摘要。端到端验证（matched_score 0.92，6-fn crackme）。完整流水线在 [`fox1245/re-agent`](https://github.com/fox1245/re-agent)。 |
+| 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | OpenRouter + Ghidra + ghidra-mcp | 逆向工程 agent，通过 Ghidra 从去除符号的二进制恢复函数名和摘要。历史端到端结果为：6 个函数的 crackme，matched_score 0.92。完整流水线在独立的私有仓库 `fox1245/re-agent` 中维护。 |
 | 36 | [`36_classifier_fanout.cpp`](36_classifier_fanout.cpp) | 离线 | 五个小“classifier”（情感 / 毒性 / 语言 / 主题 / 意图）通过 Send 扇出并并行运行。墙钟时间 ≈ max(per-classifier)，不是求和 — 小模型边缘故事。Mock 5 ms 延迟作为 DistilBERT/MiniLM pass 的替身；inline `[ONNX SWAP-IN]` block 展示使用 `Ort::Session` 的 30 行替换。没有推理运行时依赖。 |
+
+示例 35 要求通过 `GHIDRA_MCP_BRIDGE` 指定 `bridge_mcp_ghidra.py` 脚本路径。`GHIDRA_MCP_PYTHON` 选择解释器，默认值为 `python3`；`GHIDRA_SERVER_URL` 选择插件端点，默认值为 `http://127.0.0.1:18080/`。运行前须启动 Ghidra 及其 MCP 插件。此示例还需要 `OPENROUTER_API_KEY`，并调用付费模型。上面的分数是历史观测值，不是新的运行结果，也不是普遍的准确率保证。
+
+## 保留的示例契约
+
+这些源码契约使用 SDK interface 4。上面的 C++ 运行记录是历史证据，不是 interface-4
+验证或新的 live 调用。各 family 控制是 `ProviderControls` 的封闭类型化字段；
+不支持的 family/origin/model 组合在 I/O 前拒绝。reasoning/sampling/tool 控制、
+Responses 服务端保存 cursor、deployment header 和显式 portable Gemini history 见
+[provider reference](../docs/reference-en.md)。cursor 与 portable history 不授予 native replay 权限。
+
+### 研究与慢推理路径
+
+Deep Research (25 / 26) 对 supervisor、researcher、compression、final-report 的每个请求，
+仅在已完成的空 `MaxTokens` outcome 没有 visible text，也没有有效或无效 client tool call 时，
+允许最多两次额外 semantic call。输出 cap 加倍，但不超过16,384。research-brief 调用不属于此
+ladder。每次额外调用使用新 ordinal，通过原 bank 的 admission，保留 outcome 和 usage；
+不会更新 grant、hold 或 deadline。没有显式 deadline 时，通过一次无 effect 的 preparation
+取得已配置 deadline，在 mediated invoke 前释放 preparation，然后固定 deadline。
+显式 deadline 跳过这一步。Failure、observer/settlement 错误和已交付 streaming part 不触发额外调用。
+
+空最终报告是错误。有内容的 `MaxTokens` 报告只在 public 投影中加 `Incomplete`，
+不修改不可变 outcome，不重试部分文本。空 compression 耗尽 ladder 后返回 diagnostic，
+不会伪造成功的 provider result。
+
+示例16只对已完成的空响应调用最多三次，保持8,192 cap 和每次 ask 的300秒 deadline；
+不加倍 cap，也不重试 failure。示例28的 rewrite 请求 low effort 和512输出 token，
+空/空白响应时原样返回原问题，provider timeout 为180秒。
+这些路径设置不改变共享 factory 的默认值。
+
+### 检查点与演化
+
+示例08保留 terminal checkpoint fork 后启动新 user turn 的流程，不演示暂停 reviewer 的 resume。
+示例14根据实际 executor 次数计算节省数：首次五次调用后只重跑一个失败 sibling，节省四次。
+
+示例54在选择 smoke/file 模式前注册 `pnoop`。从 repository root 使用已跟踪 seed/task 文件：
+
+```bash
+./build/example_evolution --smoke
+./build/example_evolution examples/54_evolution_seed.json examples/54_evolution_task.json
+```
+
+检查实际 JSON 字段 `best.compiled`、`best.validated`、`best.executed`、`best.correct`；
+仅有 `compile_passed` 不能证明正确执行。file 模式提供 built-in node type 和此 demo 的 `pnoop`，
+custom type 仍需 host 注册。此前 smoke 运行未验证 file 模式。
+
+### A2A dialect 与 task snapshot
+
+示例37打印 card interface 和首次 RPC 选择的 dialect。client 选择兼容的 JSON-RPC 0.x/1.0
+card interface；card URL 不会重定向已配置 RPC endpoint。未 fetch card 时，仅数值 `-32601`
+允许初始 dialect probe，交付 SSE 后不会重发。示例38广告两个 dialect，并标注初始/更新
+task snapshot；初始 task 不是已完成回答。server response encoding 由 `A2A-Version` header
+选择，与 method 拼写无关。1.0 使用 PascalCase method、flat part、`returnImmediately`，
+stream 累积 status/artifact update。caller 按完成/中断的 agent status text、首个 artifact text、
+最后 agent history text 的顺序选择答案。
 
 ## 心智模型 — 三层，中间是 JSON
 
@@ -218,9 +274,9 @@ OPENROUTER_API_KEY=sk-or-...
    `run(NodeInput)` body — 通过 `NodeOutput` 发出 `ChannelWrite`、`Send` 或 `Command`。
    Send 扇出与 Command 路由覆盖就在这里。
 3. **类型化 provider 请求与 Outcome** (13, 15, 16, 17)：SDK admission、有序事件与不可变 Outcome；没有 descriptor interpreter 或 WebSocket adapter。
-无论哪种方式，图定义都是 JSON 形状（`std::map<std::string, json>`）
-— [Python examples](../bindings/python/examples/) 中的示例 14 和 15 展示了同一个定义
-如何通过 `json.dumps` 往返后再回来。
+图定义采用 JSON 形式（`std::map<std::string, json>`）。
+[Python examples](../bindings/python/examples/) 使用相同的 topology 格式；
+provider 请求与 Outcome 是独立类型化对象，不是 topology JSON。
 
 ## API key 节省策略
 
@@ -229,6 +285,9 @@ OPENROUTER_API_KEY=sk-or-...
 | `OPENROUTER_API_KEY` | 01, 03, 12, 13, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 28, 29, 30, 34, 35, 40 |
 | local server (no key) | 31 |
 | **none** | 02, 04, 05, 06, 07, 08, 09, 10, 14, 21, 27, 36, 37, 38, 39, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57 |
+
+示例25与26也使用 local Crawl4AI。当前 secure Docker image 要求非空的
+`CRAWL4AI_API_TOKEN`，见示例26的 `.env.example`。
 
 三十一个示例不需要 API key 就能运行 — 这是“试跑一下”的最低门槛。
 尤其是示例 21（MCP 扇出，确定性 planner）和 27（异步并发，

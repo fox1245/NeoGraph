@@ -187,38 +187,22 @@ def test_resume_value_is_none_on_a_fresh_run(engine):
     assert compiled.run(cfg).interrupted
 
 
-class _UsageProvider(ng.Provider):
-    def complete(self, params):
-        completion = ng.ChatCompletion()
-        completion.message = ng.ChatMessage("assistant", "ok")
-        completion.usage.prompt_tokens = 10
-        completion.usage.completion_tokens = 5
-        completion.usage.total_tokens = 15
-        return completion
-
-    def complete_stream(self, params, on_chunk):
-        return self.complete(params)
-
-    def get_name(self):
-        return "usage-stub"
-
-
-def test_an_interrupted_run_still_reports_what_it_spent():
+def test_an_interrupted_run_still_reports_what_it_spent(provider_peer):
     """Where token accounting (#88) meets the dynamic interrupt (#94).
 
     A run that calls the model and *then* pauses for a human has already spent
     money. If the pause dropped the usage on the floor, every approval-gated
     agent would under-report its bill by exactly the work it did before asking.
 
-    On the resume the count is zero, and that is correct rather than a second
-    bug: the LLM node's write is replayed from the checkpoint, not re-executed,
-    so no new tokens are bought. It is the same per-run contract documented on
-    RunResult.usage — for the conversation total, supply RunConfig.usage.
+    Resume reuses recorded provider evidence and the original usage bank; it
+    must not redispatch the model or charge the same response twice.
     """
-    provider = _UsageProvider()
+    provider = provider_peer.provider()
+    observed_banks = []
 
     class Gate(ng.GraphNode):
         def run(self, input):
+            observed_banks.append(input.ctx.usage)
             if input.ctx.resume_value is None:
                 raise ng.NodeInterrupt("needs approval")
             return [ng.ChannelWrite("done", True)]
@@ -240,16 +224,28 @@ def test_an_interrupted_run_still_reports_what_it_spent():
         ],
     }
     compiled = ng.GraphEngine.compile(
-        definition, ng.NodeContext(provider=provider),
+        definition, ng.NodeContext(provider=provider, model="local-model"),
         ng.InMemoryCheckpointStore())
 
     cfg = ng.RunConfig()
     cfg.thread_id = "py-di-usage"
+    cfg.input = {"messages": [{"role": "user", "content": "local request"}]}
     paused = compiled.run(cfg)
 
     assert paused.interrupted
-    assert paused.usage.total_tokens == 15, "the call made before the pause vanished from the bill"
+    assert paused.usage.total.value == 15
+    before_resume = observed_banks[-1].authority_snapshot()
+    recorded_outcome, = paused.provider_outcomes
+    assert recorded_outcome.usage.total.value == paused.usage.total.value
 
     done = compiled.resume("py-di-usage", {"approved": True})
     assert done.output["channels"]["done"]["value"] is True
-    assert done.usage.total_tokens == 0, "the resumed run replays; it must not re-buy the tokens"
+    assert len(provider_peer.requests) == 1
+    retained_outcome, = done.provider_outcomes
+    assert retained_outcome.text == recorded_outcome.text
+    assert retained_outcome.usage.total.value == recorded_outcome.usage.total.value
+    after_resume = observed_banks[-1].authority_snapshot()
+    assert after_resume.charged == before_resume.charged
+    assert after_resume.reserved == before_resume.reserved
+    assert after_resume.reports.total.value == before_resume.reports.total.value
+    assert done.usage.total.value == paused.usage.total.value

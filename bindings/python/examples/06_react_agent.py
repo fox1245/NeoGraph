@@ -16,7 +16,7 @@ Run:
 
 import json
 
-from _common import ng, schema_provider
+from _common import example_model, ng, schema_provider
 
 
 class CalculatorTool(ng.Tool):
@@ -68,8 +68,8 @@ def has_tool_calls(messages):
     return False
 
 
-# GPT-5 tool calls use the OpenAI Responses API rather than the legacy
-# Chat Completions endpoint.
+# Use the Responses family for this tool-call loop. It runs over SDK HTTP;
+# model names alone do not imply a required protocol or tool capability.
 provider = schema_provider(schema="openai_responses")
 
 # Built-in `llm_call` and `tool_dispatch` nodes plus the
@@ -102,6 +102,7 @@ definition = {
 
 ctx = ng.NodeContext(
     provider=provider,
+    model=example_model(),
     tools=[CalculatorTool()],
     instructions=(
         "You are a calculator-using assistant. When the user asks for "

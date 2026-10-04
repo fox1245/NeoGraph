@@ -23,9 +23,9 @@ memory, stack, wall-time, child, effect, concurrency, token, and monetary
 budgets. A source loop is allowed; an infinite or over-budget loop is interrupted
 before it can turn an exhausted resource grant into an unbounded run.
 
-The runtime must distinguish JavaScript freedom from the stronger guarantees that
-only NeoGraph can provide. There are therefore two explicit execution profiles
-and one deliberately deferred design:
+The current runtime implements the restricted generator profile. The
+trusted-direct profile below is an accepted design, not a shipped runner;
+durable Promise execution is a separate deferred design:
 
 | Profile or design | Entry shape | Host authority | Recovery and guarantee |
 |---|---|---|---|
@@ -41,7 +41,7 @@ validated, canonical strict Core artifact.
 ```mermaid
 flowchart TB
     accTitle: JavaScript execution profile selection
-    accDescr: Developers select the restricted generator path when they require NeoGraph durability. Explicitly authorized direct asynchronous code is supported with an unmanaged guarantee, while durable async remains a separate future scheduler project.
+    accDescr: The implemented restricted generator path provides NeoGraph durability. The planned explicitly authorized direct runner would carry an unmanaged guarantee; durable async remains a separate future scheduler project.
 
     source([JavaScript source]) --> need{Exact replay required?}
     need -->|Yes| durable[Restricted synchronous generator]
@@ -100,20 +100,20 @@ command kind, or scheduler:
 
 ```javascript
 // trusted helper module; ordinary source code, not a NeoGraph DSL
-ng.retryUntil = function* (input, maxAttempts) {
+function* retryUntil(input, maxAttempts) {
   for (let attempt = 0; attempt < maxAttempts; ++attempt) {
     const result = yield ng.callCore("reviewer", {input, attempt});
     if (result.accepted) return result;
   }
   throw new Error("retry exhausted");
-};
+}
 
 export function* main(input) {
-  return yield* ng.retryUntil(input, 5);
+  return yield* retryUntil(input, 5);
 }
 ```
 
-The namespace contract is profile-specific:
+The current restricted namespace and planned trusted namespace contracts are:
 
 | Property | `restricted_durable` | `trusted_direct` |
 |---|---|---|
@@ -148,12 +148,12 @@ admission, child lineage, `max_in_flight`, cancellation drain, or budget checks.
 
 ## Trusted direct execution
 
-`trusted_direct` exists for an application owner who deliberately wants the
-freedom of an ordinary embedded program: custom C++ APIs, application-owned
-network clients, native libraries, or `async main()` ergonomics. The host, not
-source text, grants this profile and its exact capabilities. Source cannot create
-or broaden its own filesystem, network, credential, process, provider, tenant,
-budget, or effect authority.
+The planned `trusted_direct` runner is for an application owner who explicitly
+admits custom C++ APIs, application-owned network clients, native libraries,
+or `async main()` execution. The host grants the profile and exact capabilities;
+source cannot create or broaden its filesystem, network, credential, process,
+provider, tenant, budget, or effect authority. The current generator runner
+does not accept this entry shape.
 
 A trusted direct runner must still:
 
@@ -178,8 +178,8 @@ weaker guarantee floor.
 
 ## Why ordinary async is not durable yet
 
-This code is allowed only in `trusted_direct` until a separate durable-async
-runtime exists:
+This code requires the planned `trusted_direct` runner; the current restricted
+runtime rejects it. It would not gain durable recovery from ordinary Promises:
 
 ```javascript
 export async function main(input) {

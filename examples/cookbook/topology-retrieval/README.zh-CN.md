@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/topology-retrieval/README.md locale=zh-CN source_sha256=e3f2a2a1c72cb3ea14094065c49ab311bd18d49e3ab403433fb77fd9b2d63748 -->
+<!-- neograph-i18n: source=examples/cookbook/topology-retrieval/README.md locale=zh-CN source_sha256=8b3cf3e1c0116355c04cbe12f0598d39f87cd41810fbadbc8983611adc0b584f -->
 # 本地拓扑检索
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -28,6 +28,8 @@ python topology_retrieval.py --query "preserve a running graph frontier"
 
 NeoGraph侧消费者是C++ `example_topology_retrieval`目标。它接受重新排序后的候选项键，从`ProgramCatalog`中解析确切的已准入束，证明P1适配器，并执行持久的第二代迁移。构建并运行：
 
+启用 Program，并通过 `CMAKE_PREFIX_PATH` 或 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` 提供 SchemaProvider，先配置 NeoGraph 树。此 model-free consumer 也需要 SDK。SDK transport 当前验证范围是 Linux/POSIX。
+
 ```powershell
 cmake --build build --target example_topology_retrieval
 ./build/example_topology_retrieval
@@ -37,6 +39,6 @@ cmake --build build --target example_topology_retrieval
 
 ```powershell
 python run_neo_e2e.py `
-  --consumer build/Release/example_topology_retrieval.exe `
+  --consumer build/example_topology_retrieval `
   --query "preserve a running graph frontier while updating implementation"
 ```

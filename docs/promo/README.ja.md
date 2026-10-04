@@ -1,11 +1,13 @@
-<!-- neograph-i18n: source=docs/promo/README.md locale=ja source_sha256=9321b772f9d90caa27addc8f166b403e9874ce911798bfd16ed8b703811197a4 -->
+<!-- neograph-i18n: source=docs/promo/README.md locale=ja source_sha256=6ac0e174ac729e62627d10ccfa9a004927c0ec15964bd1172fcfaa3d3b493dde -->
 # NeoGraph プロモ — Remotion ソース
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 リポジトリのREADME上部に表示される15秒プロモーションのソースです（`docs/videos/neograph-promo-v3.mp4` + `docs/images/neograph-promo-v3.gif`）。
 
-**これは意図的に含まれています。** 元のプロモーションは一度レンダリングされただけで、ソースはチェックインされていなかったため、ReActグラフシーン内の壊れたコネクタをゼロから再構築せずに修正することはできませんでした。ソースはここに保持してください。
+シーンを再編集し、再レンダリングできるようソースをコミットしています。
+生成 video は Program pipeline の図解であり、API reference、benchmark、qualification 記録ではありません。
+メディア名の `v3` は asset のラベルで、SDK interface revision ではありません。NeoGraph `0.13.0` は alpha SDK `0.1.0`、interface/shared generation 4 を使います。既存 render はその runtime や未完了の検証を実証しません。
 
 ## シーン（`src/scenes/`）
 
@@ -19,9 +21,12 @@
 
 ## 再構築
 
+Node.js/npm と FFmpeg をインストールしてください。`package-lock.json` は Remotion/React の依存ツリーを固定し、
+`npm ci` は記録された依存をインストールします。
+
 ```bash
 cd docs/promo
-npm install
+npm ci
 node render.mjs media          # → out/promo.mp4 (1920x1080, 15s)
 
 # compress + GIF (what ships in docs/):
@@ -35,6 +40,6 @@ ffmpeg -i out/promo.mp4 -i /tmp/pal.png \
 
 `node render.mjs stills 30,175,290,445`は単一の検証フレームを`out/`にレンダリングし、完全なエンコードなしで迅速な視覚的差分を可能にします。
 
-ヘッドレス/サンドボックス環境向けの注意事項：レンダラーはローカルHTTPサーバーをバインドします — `render.mjs`はデフォルトのポートスキャンがブロックされる可能性があるため、これを`REMOTION_PORT`（デフォルト45678）に固定します。Remotionは初回実行時に独自のChrome Headless Shellをダウンロードします（約108 MB）。
+headless/sandbox 環境では renderer がローカル HTTP server を bind します。既定の port scan が制限されることがあるため `render.mjs` は `REMOTION_PORT`（既定 45678）を使います。Chrome Headless Shell が未インストールなら Remotion がダウンロードします。サイズは変動します。
 
 `node_modules/`と`out/`はgitignore対象です。

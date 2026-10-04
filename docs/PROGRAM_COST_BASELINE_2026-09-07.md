@@ -1,5 +1,7 @@
 # Program cost baseline — 2026-09-07
 
+**Languages:** [English](PROGRAM_COST_BASELINE_2026-09-07.md) | [한국어](PROGRAM_COST_BASELINE_2026-09-07.ko.md) | [日本語](PROGRAM_COST_BASELINE_2026-09-07.ja.md) | [简体中文](PROGRAM_COST_BASELINE_2026-09-07.zh-CN.md)
+
 The small-payload baseline points to Program bookkeeping and durable-store work as the first optimization targets. It does not establish JavaScript interpretation as the dominant cost, and it does not measure a JIT speedup.
 
 ## Environment and method

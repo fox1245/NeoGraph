@@ -1,11 +1,13 @@
-<!-- neograph-i18n: source=docs/promo/README.md locale=ko source_sha256=9321b772f9d90caa27addc8f166b403e9874ce911798bfd16ed8b703811197a4 -->
+<!-- neograph-i18n: source=docs/promo/README.md locale=ko source_sha256=6ac0e174ac729e62627d10ccfa9a004927c0ec15964bd1172fcfaa3d3b493dde -->
 # NeoGraph 프로모 — Remotion 소스
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 리포지토리 README 상단에 표시되는 15초 프로모션의 소스입니다(`docs/videos/neograph-promo-v3.mp4` + `docs/images/neograph-promo-v3.gif`).
 
-**이것은 의도적으로 커밋된 것입니다.** 원본 프로모션은 한 번 렌더링되었고 소스는 체크인된 적이 없어서, ReAct-그래프 장면의 끊어진 커넥터를 처음부터 다시 빌드하지 않고는 수정할 수 없었습니다. 소스를 여기에 유지하세요.
+장면을 다시 편집하고 렌더링할 수 있도록 소스를 커밋했습니다.
+생성 video는 Program pipeline을 설명하며 API reference, benchmark, qualification 기록이 아닙니다.
+미디어 파일명의 `v3`는 asset 이름이지 SDK interface revision이 아닙니다. NeoGraph `0.13.0`은 alpha SDK `0.1.0`, interface/shared generation 4를 사용합니다. 기존 render는 해당 runtime이나 대기 중인 검증을 입증하지 않습니다.
 
 ## 장면 (`src/scenes/`)
 
@@ -19,9 +21,12 @@
 
 ## 재빌드
 
+Node.js/npm과 FFmpeg를 설치하세요. `package-lock.json`이 Remotion/React 의존성 트리를 고정하고
+`npm ci`는 기록된 의존성을 설치합니다.
+
 ```bash
 cd docs/promo
-npm install
+npm ci
 node render.mjs media          # → out/promo.mp4 (1920x1080, 15s)
 
 # compress + GIF (what ships in docs/):
@@ -35,6 +40,6 @@ ffmpeg -i out/promo.mp4 -i /tmp/pal.png \
 
 `node render.mjs stills 30,175,290,445`는 전체 인코딩 없이 빠른 시각적 diff를 위해 개별 검증 프레임을 `out/`로 렌더링합니다.
 
-헤드리스/샌드박스 환경 참고 사항: 렌더러는 로컬 HTTP 서버를 바인딩합니다. 기본 포트 스캔이 차단될 수 있으므로 `render.mjs`는 포트를 `REMOTION_PORT`(기본값 45678)로 고정합니다. Remotion은 첫 실행 시 자체 Chrome Headless Shell을 다운로드합니다(~108 MB).
+헤드리스/샌드박스 환경에서 렌더러는 로컬 HTTP 서버를 바인딩합니다. 기본 포트 검색이 차단될 수 있어 `render.mjs`는 `REMOTION_PORT`(기본 45678)를 사용합니다. Chrome Headless Shell이 설치되지 않았다면 Remotion이 다운로드하며 크기는 달라질 수 있습니다.
 
 `node_modules/`와 `out/`는 gitignore에 포함됩니다.

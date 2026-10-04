@@ -17,10 +17,10 @@ Run:
 import time
 
 import neograph_engine as ng
-from _common import schema_provider
+from _common import ask_text, schema_provider
 
 
-PROVIDER = schema_provider(schema="openai", default_model="gpt-5.6-luna")
+PROVIDER = schema_provider(schema="openai")
 
 
 class ExpensiveNode(ng.GraphNode):
@@ -38,12 +38,11 @@ class ExpensiveNode(ng.GraphNode):
     def run(self, input):
         self.calls += 1
         topic = input.state.get("topic") or ""
-        c = PROVIDER.complete(ng.CompletionParams(
-            messages=[ng.ChatMessage(
-                role="user",
-                content=f"Give one short fun fact about {topic}.")],
-            temperature=0.0))  # deterministic so cache hits are visible
-        return [ng.ChannelWrite("answer", c.message.content.strip())]
+        c = ask_text(PROVIDER, messages=[ng.ChatMessage(
+            role="user",
+            content=f"Give one short fun fact about {topic}.")],
+        temperature=0.0)  # repeated input hashes, not model determinism, drive hits
+        return [ng.ChannelWrite("answer", c.strip())]
 
 
 node = ExpensiveNode("ask")
@@ -75,7 +74,7 @@ engine.set_node_cache_enabled("ask", True, ng.CacheScope.Reusable)
 def run_once(label, topic):
     t0 = time.perf_counter()
     out = engine.run(ng.RunConfig(
-        thread_id=f"{label}-{int(t0)}",
+        thread_id=label,
         input={"topic": topic},
         max_steps=5))
     dt = time.perf_counter() - t0
@@ -93,3 +92,4 @@ run_once("run 5", "honeybees")  # cache hit on the new key
 
 print(f"\nfinal stats: {engine.node_cache_stats()}")
 print(f"LLM calls actually made: {node.calls}")
+assert node.calls == 2, "reusable cache should execute once per distinct topic"

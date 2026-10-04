@@ -3,6 +3,7 @@
 
 #include "json_bridge.h"
 #include "opaque_types.h"
+#include "provider_bridge.h"
 
 #include <neograph/graph/types.h>
 
@@ -27,13 +28,13 @@ void init_state(py::module_& m) {
         "Dependency-injection container for graph nodes: provider, "
         "tools, model, system instructions, plus an extra_config dict "
         "for node-type-specific settings.")
-        .def(py::init([](std::shared_ptr<neograph::Provider> provider,
+        .def(py::init([](py::object provider,
                          std::vector<std::shared_ptr<neograph::Tool>> tools,
                          const std::string& model,
                          const std::string& instructions,
                          py::object extra_config) {
             NodeContext ctx;
-            ctx.provider = std::move(provider);
+            ctx.provider = own_python_provider(std::move(provider));
             // Native Tool values passed directly to the bound constructor
             // receive the same owned trampoline contract as Python tools.
             ctx.tools = neograph::ToolSet(wrap_python_tools(py::cast(tools)));
@@ -46,28 +47,12 @@ void init_state(py::module_& m) {
             py::arg("tools") = std::vector<std::shared_ptr<neograph::Tool>>{},
             py::arg("model") = "",
             py::arg("instructions") = "",
-            py::arg("extra_config") = py::dict(),
-            // #98: keep the Python provider alive for as long as this
-            // NodeContext. The C++ side holds a shared_ptr<Provider>, which
-            // keeps the *C++* trampoline object alive — but the Python instance
-            // carrying the overrides is a separate refcount, and when it dies
-            // the trampoline can no longer find `complete`, falls through to
-            // Provider::complete, which bridges to complete_async, which bridges
-            // back to complete: infinite recursion, stack overflow, SIGSEGV.
-            py::keep_alive<1, 2>())
-        // A setter keep_alive policy appends every assigned provider to the
-        // context's patient list. Keep exactly the current Python override in
-        // a replaceable dynamic attribute instead, so reassignment releases
-        // the previous provider normally.
+            py::arg("extra_config") = py::dict())
         .def_property("provider",
-            py::cpp_function([](const NodeContext& c) { return c.provider; }),
-            py::cpp_function([](py::object self, py::object provider) {
-                auto cpp_provider = provider.is_none()
-                    ? std::shared_ptr<neograph::Provider>{}
-                    : provider.cast<std::shared_ptr<neograph::Provider>>();
-                self.attr("_pyprovider") = provider;
-                self.cast<NodeContext&>().provider = std::move(cpp_provider);
-            }))
+            [](const NodeContext& c) { return c.provider; },
+            [](NodeContext& c, py::object provider) {
+                c.provider = own_python_provider(std::move(provider));
+            })
         .def_readwrite("model", &NodeContext::model)
         .def_readwrite("instructions", &NodeContext::instructions)
         .def_property("extra_config",
@@ -107,6 +92,12 @@ void init_state(py::module_& m) {
                    (w.mode == ChannelWrite::Mode::Overwrite ? " mode=OVERWRITE" : "") +
                    ">";
         });
+    m.def("provider_messages_write",
+        py::overload_cast<std::vector<sp::Message>, ChannelWrite::Mode>(&provider_messages_write),
+        py::arg("messages"), py::arg("mode") = ChannelWrite::Mode::Reduce);
+    m.def("provider_messages_write",
+        py::overload_cast<const sp::runtime::Result&, ChannelWrite::Mode>(&provider_messages_write),
+        py::arg("outcome"), py::arg("mode") = ChannelWrite::Mode::Reduce);
 
     // ── Send (dynamic fan-out) ───────────────────────────────────────────
     py::class_<Send>(m, "Send",

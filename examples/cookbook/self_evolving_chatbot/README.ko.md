@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ko source_sha256=233aaa7dda31f7a4a50265468f10eced76421314e47324e2b9dea8bf425f179b -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ko source_sha256=e7bb3e4608b1e5f3af734a49afa0976e6b65090989f96eda60028e0c60afc094 -->
 # 매턴 하니스를 제안하는 챗봇
 
 ## 현재 타입 Program chat 계약
@@ -9,8 +9,13 @@
 reviewed-template generation, 역할별 prompt, effect/capability grant,
 정확한 checkpoint lineage와 nonrenewable budget은 host가 소유합니다.
 
+기존 `server_multi.cpp` live-provider 경로의 timeout은 180초입니다.
+ProgramChat의 `--provider-timeout-seconds` 범위/기본값이나 공유 provider factory의 기본값은
+바꾸지 않으며 failure 재전송도 활성화하지 않습니다.
+
 ```bash
-# configure 전에 SCHEMAPROVIDER_SOURCE를 제공된 SDK checkout 경로로 설정하세요.
+# Set SCHEMAPROVIDER_SOURCE to the supplied SDK checkout before configuring.
+# From the repository root; configure Program, QuickJS control and SQLite (or PostgreSQL).
 cmake -S . -B build-chat -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON \
   -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON -DNEOGRAPH_BUILD_SQLITE=ON \
   -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
@@ -58,120 +63,83 @@ restart/교체는 budget을 갱신하지 않습니다. model JSON은 제안이�
 현재 범위 한정 실행 증거: 실제 ProgramChat PostgreSQL blackbox에서 6개 scenario가
 18.989초에 pass했으며 실제 browser에서 Alice/Bob 격리와 generation-2 교체를 관찰했습니다.
 이 model-free 증거는 vendor 추론 qualification이나 별도 `multi_tenant_chatbot` server/load
-recipe, 모든 storage 변형 또는 유예된 Python 제공자 binding의 실행 증거가 아닙니다.
-
+recipe, 모든 storage 변형 또는 전환된 Python 제공자 binding의 실행 증거가 아닙니다.
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-`cookbook_program_chatbot`은 Alice와 Bob의 대화·예산·실행 계보를 분리하고,
-매턴 하니스 제안을 평가하는 Program 예제입니다. 승인된 후보는 새로운
-immutable ProgramVersion으로 컴파일·등록하고, 대화 중인 assistant의
-체크포인트에서 교체합니다. 메인 orchestrator는 같은 논리적 assistant를 기다립니다.
+`cookbook_program_chatbot`은 Alice와 Bob의 메시지, owner scope, catalog, engine cache, Program family, 호출 ledger와 nonrenewable budget을 분리합니다. 턴마다 bounded Harness 제안을 평가하고 승인된 immutable successor를 assistant의 durable checkpoint에서 교체합니다. orchestrator는 같은 논리적 assistant를 계속 기다립니다. review 경로는 초안 → 독립 Program identity의 reviewer child 합성/대기 → 답변 수정이며 inspector는 Core JSON, DSL, tree, generation, 남은 예산, 이유, topology diff와 admission 결과를 표시합니다. SQLite/PostgreSQL은 artifact, transition, chat, reservation/result와 evolution decision을 저장합니다. OpenRouter는 typed SDK Chat provider를, offline demo는 같은 compiler/admission/runtime API를 사용합니다.
 
-- `direct`: 입력 → 답변 → 다음 하니스 제안
-- `review`: 입력 → 초안 → 별도 reviewer 하니스 합성·스폰·대기 → 수정 → 제안
-- 화면: 대화, 실제 컴파일된 Core JSON, DSL, 에이전트 트리, 세대, 변경 이유,
-  노드 차이, 승인/유지/거절 결과, 누적 모델 사용량과 남은 Program 예산
-- 영속화: SQLite와 PostgreSQL 모두 대화·호출 장부·Program 아티팩트·전환을 저장
-
-## 실행
+## 빌드와 실행
 
 ```bash
 cmake -S . -B build-chat -G Ninja \
   -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
   -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_EXAMPLES=ON \
-  -DNEOGRAPH_BUILD_SQLITE=ON -DNEOGRAPH_BUILD_POSTGRES=ON
+  -DNEOGRAPH_BUILD_SQLITE=ON -DNEOGRAPH_BUILD_POSTGRES=ON \
+  -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
 cmake --build build-chat --target cookbook_program_chatbot -j 4
 ./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
   --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --db evolving-chat.sqlite
 ```
 
-브라우저에서 `http://127.0.0.1:8768`을 엽니다. 데모 모드에서는 `검토`, `비교`,
-`review`를 포함한 요청이 review 하니스를 제안합니다. 승인된 변경은 다음 턴에
-사용됩니다. 강제 교체 체크박스는 두 템플릿을 번갈아 시연하며 품질 향상을 뜻하지 않습니다.
+`http://127.0.0.1:8768`에서 Alice/Bob을 선택합니다. demo에서 `review`, `검토`, `비교`는 review Harness를 제안합니다. 첫 답변은 현재 Harness를 사용하고 승인된 변경은 다음 turn의 resume에 적용됩니다. force checkbox는 검토된 두 plan을 교대할 뿐 품질 향상을 주장하지 않습니다.
 
-OpenRouter 연결은 환경변수 또는 `.env`에서 읽습니다. 기존 예제의 ZDR 라우팅을
-유지하며 기본 모델은 `z-ai/glm-5.3-flash`입니다.
+live OpenRouter의 키와 사용 가능한 모델을 환경에 설정합니다:
 
 ```bash
 export OPENROUTER_API_KEY='...'
 export OPENROUTER_MODEL='z-ai/glm-5.3-flash'
 ./build-chat/cookbook_program_chatbot --live --session openrouter-demo
-# 기존 파일을 사용할 때:
+# Or read an existing dotenv file without printing its values:
 ./build-chat/cookbook_program_chatbot --live --env-file /path/to/.env \
   --model z-ai/glm-5.3-flash --session glm-demo
 ```
 
-`--model`은 모델 환경변수보다 우선하고, 프로세스 환경변수는 `.env`보다 우선합니다.
-파일을 지정하지 않으면 현재 폴더에서 가장 가까운 `.env`를 찾습니다. `--no-env`로
-탐색을 끌 수 있습니다. 키는 출력·저장하지 않습니다. 출력 한도는 호출당 기본
-4,096토큰(제공자의 추론 토큰 포함)이며 `--max-output-tokens`로 양의 64-bit 값을 지정합니다.
-선택한 host policy의 model limit과 기존 session budget은 계속 적용되며 CLI의 고정 8,192 상한은 없습니다.
-`--provider-timeout-seconds`는 호출당 제한을 1~120초로 지정하며 기본값은 120초입니다.
-체크포인트 대기는 그 사이의 순차 호출을 고려하고 reviewer의 자식 예산은 180초입니다.
-타임아웃된 호출은 예약 예산을 유지하며 자동 재호출하지 않습니다.
-GLM 5.3 Flash 채팅은 출력 한도 안에 실제 답변을 남기도록 추론 강도 `low`를 기본으로
-사용합니다. `--reasoning-effort default`로 제공자 기본 설정을 사용할 수 있으며,
-직접 지정한 값은 해당 모델이 지원해야 합니다. DSL 생성 평가기는 별도 설정을 유지합니다.
+기본 모델은 `z-ai/glm-5.3-flash`입니다. `--model`은 `OPENROUTER_MODEL`보다, process 환경은 dotenv보다 우선합니다. `--env-file` 미지정 시 작업 폴더에서 가장 가까운 `.env`를 찾고 `--no-env`는 이를 끕니다. named chatbot 설정만 읽으며 파일은 데이터로 파싱하고 shell로 source하지 않습니다. GLM 5.3 Flash chat은 output cap 안에 visible reply를 남기도록 `reasoning_effort=low`를 기본 지정합니다. `--reasoning-effort default`는 override를 생략하며 explicit 값은 model/provider가 지원해야 합니다. DSL capability evaluator의 generation 설정은 별개입니다.
 
-PostgreSQL은 WSL native Docker에서 전용 DB를 실행한 뒤 같은 WSL 셸에
-`NEOGRAPH_CHAT_POSTGRES_URL`을 설정합니다. 설정하면 대화와 Program 저장소
-모두 PostgreSQL을 사용하고, 없으면 `--db`의 SQLite 파일을 사용합니다.
+ZDR eligible route가 필요합니다. token 가격을 가정하지 않으며 DSL/DB/HTTP body/source에 credentials를 넣지 마세요. provider, model, skill, output cap, build 변경에는 새 `--session`이 필요하고 기존 session은 budget limit을 유지합니다. `NEOGRAPH_CHAT_BASE_URL`은 호환 endpoint를 선택하며 plain HTTP는 literal loopback과 `--allow-loopback-provider`가 필요한 protocol test용입니다.
 
-## 구현 범위
+output limit은 [OpenRouter chat API](https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion)의 `max_completion_tokens`로 보냅니다. 기본 4,096은 provider reasoning token을 포함하며 `--max-output-tokens`는 양의 64-bit 값입니다. host model limit/session budget은 유지되고 고정 8,192 CLI cap은 없습니다. `--provider-timeout-seconds`는 1..120초(기본120)입니다. checkpoint wait는 사이의 순차 호출을 포함하며 reviewer child는 별도180초 예산입니다. timeout은 예약을 `UnknownHold`로 유지하고 자동 retry하지 않습니다.
 
-모델은 `{plan, reason, confidence}`를 제안합니다. host는 `direct`/`review`,
-길이가 제한된 이유, 0~1 범위의 confidence만 허용합니다. 0.7 미만이거나
-유효하지 않은 제안은 거절하고, 현재 plan과 같으면 유지합니다.
-제안 호출은 네이티브 provider의 JSON 응답 모드를 사용하며, 필드와 허용값은 host가
-별도로 검증합니다.
-빈 제안이나 출력이 잘린 제안은 거절하되 이미 생성된 답변은 유지합니다. 확인된 사용량은
-정산하고 종료 이유를 제안 진단에 남기며, 전송 결과가 불확실한 호출은 자동 재전송하지 않습니다.
+WSL native Docker에서 전용 PostgreSQL DB를 만들고 같은 shell에서 URL을 설정합니다. 예제는 테이블을 만들지만 production deployment/migration manager는 아닙니다.
 
-이번 예제는 **검토된 템플릿의 매개변수 합성**입니다. 모델이 작성한 임의의
-JavaScript를 실행하지 않습니다. 제안이 자신의 권한이나 예산을 발급할 수 없으며,
-자식 하니스도 독립된 host grant와 컴파일·승인·게시·바인딩을 통과해야 합니다.
-템플릿 승인은 답변 품질의 증명이 아닙니다. QuickJS와 모델 노드의 실행 보장은
-`Unmanaged`로 표시합니다.
+```bash
+export NEOGRAPH_CHAT_POSTGRES_URL='postgresql://USER:PASSWORD@127.0.0.1:PORT/DATABASE'
+./build-chat/cookbook_program_chatbot --mock --session postgres-demo
+```
 
-host는 [SKILL.md](../../../skills/neograph-harness-authoring/SKILL.md)와
-`references/chat-template-proposals.md`를 실제 하니스 제안 모델의 문맥에 넣습니다.
-답변·reviewer 호출에는 각 역할의 지침을 사용합니다. SKILL 해시와 출력 한도를 세션에
-기록하고 실제 프롬프트도 호출 식별자에 포함합니다. 지침이나 모델, 빌드가 바뀌면
-새 `--session`을 사용해야 하며 기존 예산을 조용히 초기화하지 않습니다.
+이 변수가 있으면 chat와 Program persistence가 PostgreSQL을, 없으면 `--db`가 SQLite를 선택합니다. 각 backend는 빌드에서 끌 수 있습니다.
 
-같은 스킬의 별도 참고 문서는 QuickJS 소스 작성과 컴파일 진단 수정, 재귀 자식 생성,
-체크포인트 교체를 안내합니다. DSL 생성 평가기는 이 작성 지침과 네이티브 API 명세를
-모델에 제공하고 반환된 소스를 실제 컴파일러로 검증합니다. 챗봇의 템플릿 제안 모드는
-모델에게 컴파일러 도구를 직접 노출하지 않습니다. 이전 빌드의 예제 DB에는 새 세션을 만드세요.
+## 합성되는 것
 
-기본 세션 한도는 tenant마다 12턴·모델 호출 100회·20만 토큰입니다. 호출 전에 승인된
-전체 호출 범위 토큰 상한을 예약합니다. 이전 usage가 unknown이 아니고 transport 내부
-재전송이 없을 때만 일관된 최종 사용량으로 정산하며, 누락된 사용량은 예약을 유지합니다.
-모델 한도가 없으면 dispatch 전에 거절하며 요청 바이트로 토큰 상한을 추정하지 않습니다.
-금액은 가격을 가정하지 않고 미상으로 표시하며 금액 한도를 제공하지 않습니다.
-Program의 컴파일·연산·Core step·자식 수/깊이 예산은 교체나 재시작으로 초기화되지 않습니다.
-대기 시간도 세션의 wall-time 한도에 포함됩니다.
+model은 `{plan, reason, confidence}`를 반환합니다. host는 `direct`/`review`, bounded reason과 [0,1] confidence만 허용합니다. 0.7 미만, invalid JSON, unknown plan은 거절하고 unchanged plan은 `kept`입니다. evolution은 JSON-object response mode를 요청해도 application이 정확한 field/value를 검증합니다. 빈/잘린 proposal은 완성된 답변을 잃지 않고 거절합니다. known usage는 정산하고 stop reason은 diagnostic에 보존하며 transport uncertainty는 자동 redispatch를 막습니다.
 
-프로세스 종료 후 같은 DB·session·모델로 실행하면 다음 요청에서 기존 계보를
-복구합니다. 결과가 불확실한 모델 호출은 자동 재전송하지 않습니다. 중단된 컴파일도
-무료 재시도하지 않고 조정이 필요한 상태로 남깁니다. 명시적 세션 취소는 복구용
-프로세스 종료와 달리 실행 가족을 종료합니다.
+검토된 JavaScript template을 매개변수화합니다. source identity, bounded compilation, host semantic/template validation, Catalog admission, generation CAS를 통과해야 합니다. child는 durable synthesis gateway와 독립적으로 저장된 host grant를 통과합니다. model은 grant/credential/arbitrary import/native code/추가 budget을 발급하지 못합니다. reviewed-template synthesis의 검증이지 임의 model-written JavaScript나 답변 품질 증명이 아닙니다. QuickJS generator control과 model node는 `Unmanaged`이며 inspector는 unknown external model effect의 strict replay를 주장하지 않습니다.
 
-단일 서버 프로세스용 예제입니다. loopback에 바인딩하며 `alice-demo`/`bob-demo`
-토큰은 owner 선택을 보여 주는 로컬 데모 인증입니다. 운영 인증 시스템은 아닙니다.
+## 에이전트 작성 스킬
+
+host는 [SKILL.md](../../../skills/neograph-harness-authoring/SKILL.md)와 `references/chat-template-proposals.md`를 evolution model의 system context에 넣습니다. 답변/reviewer는 역할별 prompt를 사용합니다. skill digest는 session에, 실제 prompt/output cap은 call identity에 바인딩합니다. 이전 build DB는 새 session을 사용하세요.
+
+스킬의 별도 QuickJS authoring/native runtime-handoff guide를 source-generation evaluator가 사용합니다. native compiler manifest를 model에 제공하고 반환 source를 compile한 뒤 rejected diagnostic을 bounded repair에 돌려줍니다. [DSL capability evaluation](../../../docs/DSL_CAPABILITY_EVAL.md)을 보세요. chatbot template 경로는 model-callable compiler tool을 노출하지 않습니다.
+
+## 회계와 복구
+
+tenant session 기본은 12turn/100model call/200,000model token입니다. dispatch 전 admitted whole-window bound를 예약합니다. 이전 usage unknown이나 transport 내부 resend가 없어야 consistent final usage로 정산하고 missing usage는 예약을 유지합니다. model limit 없이는 request byte로 token을 추정하지 않고 dispatch 전에 거절합니다. reservation 초과 report도 charge이며 monetary cost는 unknown입니다. 가격/금액 상한을 제공하지 않습니다.
+
+Program compile/operation/Core step/child-depth/wall-time budget은 restart/replacement로 갱신하지 않으며 idle도 wall-time을 소모합니다. dynamic successor는 held checkpoint에서 host-only `ProgramRuntime::reserve_synthesis`로 먼저 예약합니다.
+
+같은 DB/session/provider/model로 재개하면 첫 turn이 family를 reconnect하고 마지막 checkpoint를 reconcile합니다. stored result는 재사용하며 pending/uncertain call은 자동 재전송하지 않습니다. interrupted compilation intent는 무료 재컴파일 없이 남습니다. replacement 전 저장된 admitted successor는 정확한 held checkpoint에서 publish하고 이미 committed replacement는 lineage로 해결합니다. DB/session당 server process 하나만 지원합니다. loopback listener와 `alice-demo`/`bob-demo`는 production 인증이 아니며 explicit cancellation은 process-loss restart와 달리 family를 닫습니다.
 
 ## 검증
 
 ```bash
 python3 examples/cookbook/self_evolving_chatbot/test_program_chat.py \
   ./build-chat/cookbook_program_chatbot
+# Run the same command with NEOGRAPH_CHAT_POSTGRES_URL for PostgreSQL.
 ```
 
-SQLite 실행 후 `NEOGRAPH_CHAT_POSTGRES_URL`을 설정해 같은 검증을 PostgreSQL에서
-반복할 수 있습니다. 두 tenant 동시 실행, 유지/교체, reviewer 재귀 스폰, 중복 요청,
-프로세스 복구, 예산 소진, 인증, 실제 provider 어댑터의 로컬 HTTP 응답 처리를 검증합니다.
-외부 OpenRouter 호출 성공 여부는 별도 확인해야 합니다.
+black-box suite는 concurrent tenant 두 명, keep/swap, recursive reviewer, idempotent request, restart, budget exhaustion, authorization과 실제 provider adapter의 local HTTP fixture를 다룹니다. external OpenRouter 성공은 주장하지 않습니다. `--script scenario.json`은 `{tenant, request_id, message, force_swap?}` 배열이고 `--crash-after-script`는 family를 cancel하지 않고 committed snapshot 후 종료하여 restart를 시연합니다.
 
-기존 `server.cpp`, `server_multi.cpp`는 다음 요청의 Core 그래프를 선택하는 이전
-예제로 유지합니다. 새 예제의 Program 세대 교체와는 구현 범위가 다릅니다.
+## 이전 Core 예제
+
+`server.cpp`/`server_multi.cpp`와 기존 타깃은 다음 request의 Core graph를 선택하며 새 `cookbook_program_chatbot`의 live Program replacement를 보여주지 않습니다. 보존된 전환 전 기록은 단일 Alice 16초(당시 약 $0.003), 고객5명/25turn/76model call의424초·18.99MB·compiled engine3개(당시 약 $0.02)입니다. 최종 topology는 fanout3/reflexive1/simple1이었습니다. 이 기록은 현재 route 가격이나 전환된 source 검증이 아닙니다.

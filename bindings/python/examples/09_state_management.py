@@ -58,9 +58,8 @@ definition = {
 
 engine = ng.GraphEngine.compile(definition, ng.NodeContext())
 
-# get_state / fork need a checkpoint store. The in-memory one is
-# the simplest option; SQLite / Postgres backends are NeoGraph-side
-# (binding pending).
+# get_state/fork need a checkpoint store. This example uses memory;
+# optional durable backends require a build that enables their support.
 engine.set_checkpoint_store(ng.InMemoryCheckpointStore())
 
 

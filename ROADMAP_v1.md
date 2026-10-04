@@ -2,11 +2,31 @@
 
 **Languages:** [English](ROADMAP_v1.md) | [한국어](ROADMAP_v1.ko.md) | [日本語](ROADMAP_v1.ja.md) | [简体中文](ROADMAP_v1.zh-CN.md)
 
-This file tracks **architectural** changes targeted at a future v1.0
-major bump. These are NOT incremental patches; each is a public-API
-break candidate that needs a deprecation window. Maintained as a
-living document — add candidates here when a v0.3.x patch series
-exposes a structural pain point, prune when one lands.
+This file preserves the design proposals and landing logs from the pre-v1
+refactoring cycles. Version names, code sketches, compatibility policies,
+test counts, and measurements inside those records describe their time.
+They are not a release schedule or current API specification.
+
+## Current contract
+
+Custom nodes implement `GraphNode::run(NodeInput) -> asio::awaitable<NodeOutput>`.
+`RunContext` carries per-run metadata, and `CancelToken::fork()` provides child
+cancellation. Providers now expose `get_name()`, `family()`, and `prepare()`;
+common invoke/dispatch paths consume an owned request and a move-only prepared
+handle and retain an immutable SDK Outcome. The old `CompletionProvider`,
+`CompletionRequest`, `CompletionParams`, `ChatCompletion`, `complete*`,
+`OpenAIProvider`, and `RateLimitedProvider` are removed, without compatibility shims.
+The July additive compatibility policy below was superseded by this cutover.
+
+Core requires external `SchemaProvider::runtime` even with LLM disabled.
+NeoGraph `0.13.0` uses alpha SDK `0.1.0`, interface revision/shared generation 4;
+rebuild consumers with matching headers and libraries. Native archives remain
+v3 / `spna3`, and portable JSON remains v2. Current integrated validation is pending.
+Python uses typed request/prepared/Outcome objects, with
+`ChatMessage` retained separately as graph convenience. See
+[C++ reference](docs/reference-en.md) and [Python binding](docs/python-binding.md)
+for the current API. Historical Linux/ARM64/WASM observations do not qualify the
+current SDK runtime on those platforms or predict application performance.
 
 ## Why this file exists
 
@@ -375,7 +395,7 @@ the class. Candidate 1 + 6 do.
 | 3 | Hierarchical CancelToken | **Landed in v0.4** (`CancelToken::fork()` + cascade) | v0.3.2 hooks, v0.3.2 emit-vs-bind |
 | 4 | Self-evolving graph runtime hooks | Research | TODO_v0.3.md #8 |
 | 5 | pgvector RAG example | Cookbook | TODO_v0.3.md #9 |
-| 6 | Provider single dispatch | **Landed without removal.** `CompletionProvider::do_invoke()` is the recommended one-override path. Existing `Provider::complete*` methods remain supported; deprecation warnings were withdrawn and no removal is planned. | #4 (closed v0.7), #5 (compatibility policy), pattern reinforced by #36 |
+| 6 | Provider single dispatch | **Superseded by typed prepare/dispatch.** The old completion surface and additive adapters are removed without shims; see the current contract above. | #4 (closed v0.7), #5 (historical compatibility policy), pattern reinforced by #36 |
 
 ---
 
@@ -856,6 +876,10 @@ gap), deferred to a future "examples track" sweep.
 
 ## Candidate 6 — Provider single dispatch
 
+This section records the earlier completion-API proposals. Its code sketches
+and July compatibility policy are historical and superseded by the typed
+prepare/dispatch cutover described above.
+
 ### Symptom
 
 `Provider` exposes four virtual methods (one dimension smaller than
@@ -1036,20 +1060,24 @@ Two contaminations were caught when building with grpc++ ON in this
 environment (WSL2, massive Windows PATH leak). They do not appear on
 a clean Linux host / CI, but WSL developers hit them:
 
+The paths below use environment variables for the Windows mount root,
+Anaconda installation prefix, and GTK installation prefix:
+`WINDOWS_MOUNT_ROOT`, `WINDOWS_ANACONDA_PREFIX`, and `WINDOWS_GTK_PREFIX`.
+
   1. **anaconda re2** — When `gRPCConfig.cmake` does
      `find_package(re2)`, if no system re2 cmake config exists
      (apt `libre2-dev` is not installed), it picks up
-     `/mnt/c/ProgramData/anaconda3/Library/lib/cmake/re2/
-     re2Targets.cmake` (Windows) from PATH and errors in
-     `set_target_properties`. Fix: `-DCMAKE_IGNORE_PREFIX_PATH=/mnt/c;…`
-     + `-DCMAKE_IGNORE_PATH=…/anaconda3/Library/lib/cmake;…` → grpc
+     `$WINDOWS_ANACONDA_PREFIX/Library/lib/cmake/re2/re2Targets.cmake`
+     (Windows) from PATH and errors in `set_target_properties`.
+     Fix: `-DCMAKE_IGNORE_PREFIX_PATH="$WINDOWS_MOUNT_ROOT;…"`
+     + `-DCMAKE_IGNORE_PATH="$WINDOWS_ANACONDA_PREFIX/Library/lib/cmake;…"` → grpc
      falls back to system pkg-config re2 ("Found RE2 via
      pkg-config").
   2. **ZLIB include** — `FindZLIB` picks up the library from the
      system (`/usr/lib/.../libz.so`) but `ZLIB_INCLUDE_DIR` from
-     `/mnt/c/gtk/include` (Windows zlib.h) in PATH → `-isystem
-     /mnt/c/gtk/include` leaks into every grpc-linked target →
-     `/mnt/c/gtk/include/libintl.h` rewrites `printf` as the
+     `$WINDOWS_GTK_PREFIX/include` (Windows zlib.h) in PATH →
+     `-isystem "$WINDOWS_GTK_PREFIX/include"` leaks into every grpc-linked target →
+     `$WINDOWS_GTK_PREFIX/include/libintl.h` rewrites `printf` as the
      `libintl_printf` macro → `std::printf` compile error. Fix:
      explicitly set `-DZLIB_INCLUDE_DIR=/usr/include
      -DZLIB_LIBRARY=/usr/lib/x86_64-linux-gnu/libz.so`.
@@ -1061,7 +1089,7 @@ a clean Linux host / CI, but WSL developers hit them:
 
 ### NexaGraph predecessor analysis — gRPC-MCP's real ROI is the checkpoint
 
-NeoGraph's predecessor NexaGraph (`/root/Coding/NexaGraph`) had
+NeoGraph's predecessor NexaGraph had
 already implemented and operated gRPC-MCP early on. Investigation
 findings (Explore, 2026-05-16):
 
@@ -1198,18 +1226,15 @@ N=300 p50, 2 reproductions):**
   gRPC ~1.5×.** The area NexaGraph mentioned, but 1.5× not 70×.
 - Payload compression is still 0 (JSON-in-proto, consistent with the
   checkpoint measurement).
-- Loopback ceiling — on a real network, RTT adds equally to both
-  sides and the ratio converges further toward 1. The 1.5× is the
-  best case.
+- These are loopback results. Remote RTT, concurrency, payload shape, and
+  connection management need separate measurements; 1.5× is not an upper bound.
 
 **Candidate 7 final verdict:**
-- gRPC's ROI is (1) **polyglot sidecar / remote typed RPC** (language
-  boundary), (2) **~1.5× on large-payload tool / checkpoint**. Mass
-  migration of general tool calls is worthless (tie + standard #966
-  not yet fixed).
-- MCP-over-gRPC transport: **hold, confirmed**. "General MCP tool
-  calls get faster" is disproven by measurement (tie). Only after the
-  standard is fixed, and only for embedding-heavy tools.
+- gRPC provides a polyglot sidecar/remote typed-RPC boundary. The measured
+  approximately 1.5× advantage applies to the tested 12 KB tool payload, not
+  every large payload or checkpoint.
+- The record deferred MCP-over-gRPC adoption. A tie in the small loopback
+  workload does not disprove benefits for other workloads or transports.
 - Nagle incident → EDDSkills SKILL candidate
   `bench-shock-number-nagle-first` (shocking transport-bench number
   = suspect TCP_NODELAY / Nagle / delayed-ACK first; a cousin of
@@ -1227,26 +1252,15 @@ to example 55 to verify:
 | protobuf ser+parse | **1.75** |
 | → yyjson / protobuf | **22.3× slower** |
 
-**User is exactly right.** protobuf is a structurally 22× faster
-codec. But in the round-trip the difference dilutes to 1.5× at
-12 KB — the serialization gap ~37 µs is a small slice of the full
-round-trip 692–1096 µs (the rest is socket I/O / syscall / HTTP
-framing). **Quantitative evidence that the tool-call hot path is
-dominated by socket I/O, not the codec.**
+In this codec-only experiment, protobuf ser+parse took 1.75 µs and yyjson
+parse+dump took 38.9 µs, a 22.3× ratio for the tested representation.
+The full transport measurements above show a smaller difference. They include
+different framing and I/O work, so the codec table alone does not isolate the
+cause of the round-trip difference.
 
-Key implication — **NeoGraph's JSON-RPC ties gRPC thanks to yyjson,
-not because the JSON-RPC protocol is fast.** With a typical stack
-(Python's `json` is ~50× slower than yyjson, ~2 ms on 12 KB), the
-codec dominates the round-trip → there gRPC structurally dominates.
-Only NeoGraph uses yyjson and thus avoids that trap.
-
-→ This is a hidden selling point and the *final* justification for
-holding Candidate 7: "Other frameworks have JSON-parsing as a
-bottleneck, so gRPC transport is critical for them, but NeoGraph's
-MCP / JSON-RPC is not because of yyjson." For NeoGraph specifically,
-MCP-over-gRPC has even less ROI (the codec advantage is already
-canceled by yyjson). gRPC is only for polyglot / remote boundary +
-~1.5× on large-payload purposes — confirmed.
+These measurements do not compare Python's `json`, establish a universal codec
+ratio, or show that yyjson is unique to NeoGraph. Select a transport for its
+required RPC semantics and measure the intended payload and deployment.
 
 ### NexaGraph second harvest — history compression + GrpcRemoteTool (2026-05-16)
 
@@ -1272,8 +1286,8 @@ fact NeoGraph's design ancestor, so it is not a "porting" target.)
      **completely lacked**: 2-pass removal of OpenAI tool-pairs broken
      by truncation (assistant `tool_call` with no response / tool
      message with no call), idempotent. `compact_history` applies it
-     internally to its output → the compression result never
-     produces a 400.
+     internally to its output. It removes these orphaned tool pairs; it cannot
+     guarantee that a provider accepts every compacted request.
    - `estimate_tokens` — conservative ~3 chars/tok estimate (mixed
      KO / EN).
    - example 56 `history_compaction` (offline MockProvider, no key
@@ -1297,7 +1311,7 @@ fact NeoGraph's design ancestor, so it is not a "porting" target.)
    typed RPC)** — from the agent's viewpoint, the process-boundary
    tool is indistinguishable from a local tool at the call site.
 
-### Remaining (still open)
+### Remaining at the time of the 2026-05-16 record
 
   - Add a `grpc-build` job to CI (apt deps + ON build +
     `example_grpc_client` / `server` smoke — on a clean ubuntu runner

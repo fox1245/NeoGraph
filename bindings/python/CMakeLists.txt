@@ -66,6 +66,9 @@ pybind11_add_module(_neograph
     src/module.cpp
     src/json_bridge.cpp
     src/bind_provider.cpp
+    src/bind_provider_values.cpp
+    src/bind_provider_controls.cpp
+    src/bind_openinference.cpp
     src/bind_artifact.cpp
     src/bind_state.cpp
     src/bind_graph.cpp
@@ -105,15 +108,11 @@ endif()
 target_link_libraries(_neograph PRIVATE
     neograph::core
 )
-# Provider implementations (OpenAI, Schema) live in neograph::llm.
-# Bind them only when llm is built; the binding compiles either way
-# but `neograph.OpenAIProvider` etc. only show up when llm is present.
+# The closed-descriptor SchemaProvider implementation lives in neograph::llm.
+# Core typed request/outcome values remain available without the LLM target.
 if(TARGET neograph::llm)
     target_link_libraries(_neograph PRIVATE neograph::llm)
     target_compile_definitions(_neograph PRIVATE NEOGRAPH_PYBIND_HAS_LLM)
-endif()
-if(NEOGRAPH_USE_LIBCURL AND CURL_FOUND)
-    target_compile_definitions(_neograph PRIVATE NEOGRAPH_PYBIND_HAS_LIBCURL)
 endif()
 
 # Optional Postgres checkpoint store. Only bound when the engine was
@@ -181,11 +180,11 @@ set_target_properties(_neograph PROPERTIES
 # the BUILD_RPATH above.
 if(UNIX AND NOT APPLE)
     set_target_properties(_neograph PROPERTIES
-        BUILD_RPATH   "$ORIGIN/..;$ORIGIN"
+        BUILD_RPATH   "$ORIGIN/..;$ORIGIN;$ORIGIN/../schemaprovider;$ORIGIN/../_deps/neograph_schemaprovider-build"
         INSTALL_RPATH "$ORIGIN")
 elseif(APPLE)
     set_target_properties(_neograph PROPERTIES
-        BUILD_RPATH   "@loader_path/..;@loader_path"
+        BUILD_RPATH   "@loader_path/..;@loader_path;@loader_path/../schemaprovider;@loader_path/../_deps/neograph_schemaprovider-build"
         INSTALL_RPATH "@loader_path")
 endif()
 

@@ -1,70 +1,62 @@
-<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=zh-CN source_sha256=54863904c664b90c0e13360fef870ad45a396a3150352de4af85f1084ffff9e6 -->
-# dr_compare — NeoGraph 对比 LangGraph 深度研究基准测试
+<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=zh-CN source_sha256=5d304e3d89c0bb2ffc6cdcddf4d194f2fc1d8bccc0773d0b4c4f9ea49e8392f1 -->
+# dr_compare：深度研究编排比较
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-同一个 deep-research workflow 的两个实现（router → plan → 通过 Send fan-out 5 个 researchers → synthesize），每个引擎一个。相同 prompts、相同 model、相同 Crawl4AI search、相同 Postgres checkpoint backend（或 in-memory）。差异被隔离到引擎及其 HTTP transport。
+运行器用相同提示和模型选择实现路由 → 规划 → 研究员 Send 分支 → 综合。引擎、绑定、客户端和检查点实现不同，端到端时间不能隔离引擎或传输成本。以下 2026 年 4 月记录是历史证据，不是当前 cutover 的重新运行。
 
-## 文件
+## 文件与依赖
 
-- `dr_neograph.py` — NeoGraph runner。由 env 驱动的 knobs（见下文）。
-- `dr_langgraph.py` — LangGraph 等价实现。Sync `def` nodes + sync `app.invoke()`，以便与 `dr_neograph.py` 对齐。
-- `bench.py` — real-LLM harness。Warmup + 交替测量 + percentiles。
-- `bench_mock.py` — 使用 mocked LLM 的 engine-throughput harness。Modules 预加载一次，iters 复用已编译 engines。
-- `mem_probe.py` — worker scaling 和 concurrent fan-out RSS 比较。
-- `mem_prod_stack.py` — production-stack memory 比较。
-- `sweep.sh` — 在 `(FANOUT, LLM_MOCK_MS)` variants 上运行 `bench_mock.py`。
-- `_run_single.py` — one-shot runner。用于 wire/strace probes。
+`dr_neograph.py`, `dr_langgraph.py`, `bench.py`, `bench_mock.py`, `mem_probe.py`, `mem_prod_stack.py`, `sweep.sh`, `_run_single.py`涵盖真实调用、纯文本模拟、内存探测、扫描和单次诊断。请按[Python 绑定指南](../../docs/python-binding.md)安装与当前源码匹配的 wheel；含 `CompletionParams`/`OpenAIProvider` 的旧 wheel 不是当前 API。Core 源码构建也需要外部 SchemaProvider SDK。
+NeoGraph `0.13.0` 需要匹配 alpha SDK `0.1.0`、interface revision/shared generation 4 的 wheel/native 构建。当前集成验证尚未完成；此比较 runner 与内置 Deep Research 恢复路径分开。
 
-memory probes 需要 [psutil](https://github.com/giampaolo/psutil)，按项目文档安装：
+工作流导入 requests、LangGraph、langchain-openai；内存探测使用 psutil。PostgreSQL 模式还需对应检查点包和数据库。`mem_prod_stack.py` 还导入各栈的 Web/数据库/观测包，因此不是仅测引擎的 RSS 探测。
 
-```sh
-python -m pip install psutil
-```
+## 当前环境控制
 
-## 环境变量 knobs
-
-| 变量 | 默认值 | 用途 |
+| Variable | Default | Purpose |
 |---|---|---|
-| `LLM_MOCK_MS` | -1 (real) | 用 `time.sleep(MS)` 替换 LLM。>=0 启用 mock。 |
-| `MOCK_SEARCH` | "0" | 跳过 Crawl4AI；返回 canned evidence。 |
-| `FANOUT` | 5 | researcher Sends 的数量。 |
-| `USE_INMEMORY_CP` | "0" | 使用 in-memory checkpoint（忽略 PG_DSN）。 |
-| `NG_TRANSPORT` | `ws-responses` | 仅 NG：`ws-responses`（WebSocket Responses）或 `http-chat`（`/v1/chat/completions`）。 |
-| `NG_WORKER_COUNT` | "4" | 仅 NG：Send fan-out parallelism 使用的 thread pool。 |
+| `LLM_MOCK_MS` | `-1` | 负数为真实调用，>=0 为带 sleep 的文本处理，无 Provider/outcome。 |
+| `MOCK_SEARCH` | `0` | 1 跳过 Crawl4AI，返回固定证据。 |
+| `FANOUT` | `5` | 研究员分支数/上限。 |
+| `USE_INMEMORY_CP` | `0` | 1 选择内存检查点，模拟模式也选择内存。 |
+| `NG_TRANSPORT` | `http-chat` | NG: http-chat 或 http-responses，无 WebSocket；Responses 是不同 API。 |
+| `NG_WORKER_COUNT` | `4` | NG fan-out 工作线程数。 |
+| `DR_MODEL` | `gpt-5.4-mini` | 双方真实调用的显式模型。 |
+| `NEOGRAPH_PG_DSN` | `empty` | NG PostgreSQL DSN，为空则使用内存。 |
+| `LANGGRAPH_PG_DSN` | `NEOGRAPH_PG_DSN` | LG PostgreSQL DSN 覆盖。 |
+| `CRAWL4AI_URL` | `empty` | 搜索服务；为空时除模拟外无法搜索。 |
 
-## 发现（2026-04-26）
+`OPENAI_API_BASE` 选择真实调用的已准入 origin/gateway prefix；NG 的 `NG_PROVIDER_DESCRIPTOR` 可提供完整 descriptor。凭据与 CA 属于运行时选项（`OPENAI_API_KEY`、`NG_EXAMPLE_CA_FILE`），不是 descriptor 数据。NG 默认 HTTP Chat 与 LG Chat API 对齐，HTTP Responses 则刻意比较不同 API。HTTP/2 取决于 libcurl 和对端；运行器不证明多路复用或固定连接数。
 
-1. **纯引擎吞吐量（mocked LLM, FANOUT=5）** — NeoGraph 中位数 1.0ms，LangGraph 5.9ms。LLM 成本为零时，NG **快 5.9×**。
-2. **真实 LLM 基准测试** — 第一轮 NG p50 23.90s（sd 5.90），LG 21.95s（sd 1.23）。LG 看起来快约 10%。
-3. **Wire 诊断** — WSL2 上的 pcap 说了谎（BPF 经 HyperV vswitch 丢弃大多数 packet）。`strace -e trace=connect` 显示 NG 在每次 7 个 LLM 调用的运行中执行 21 个 connect() syscalls — 每次都是新的 TCP+TLS。
-4. **根本原因** — `SchemaProvider::complete_async` 使用 free `async::async_post()`（每次调用关闭 socket），而不是已经存在的 `async::ConnPool`（HTTP/1.1 keep-alive）。`run_sync` 每次调用都会丢弃 io_context，使"把 pool 放在 provider 内部"的显然接线不安全 — 但由 provider 拥有的长生命周期后台 io_context 可行。
-5. **修复（commit 6da4810 / bc2ab4f）** — SchemaProvider + OpenAIProvider 现在持有自己的 io_context + worker thread + ConnPool。修复后，NG p90 从 35.34s 降到 25.28s（-10s），sd 从 5.90 降到 1.28（稳定性提高 4.6×）。Median 基本不变，因为并行 Send fan-out 在 HTTP/1.1 上仍需要 N 条 TCP conns。
-6. **剩余差距** — LG 的 httpx 支持 HTTP/2，可在单个 TCP 上 multiplex N 条 parallel streams。要缩小这个差距，NG 需要添加 HTTP/2 client support（httplib 仅 HTTP/1.1）。
-7. **Worker pool 上限** — `set_worker_count(N)` 限制 Python-node fan-out concurrency。Bench code 的 `set_worker_count(4)` 是真实上限；`NG_WORKER_COUNT=50` 会让 NG sync 在 LG asyncio 前面（FANOUT=50, LLM=100ms 时 307ms vs 711ms）。
+## 历史记录：2026-04-26
 
-完整叙述请见 claude memory 中的 `feedback_schema_provider_no_pool.md` 和 `feedback_pybind_worker_ceiling.md`。
+1. 模拟 LLM、FANOUT=5：记录的中位数为 NG 1.0 ms、LG 5.9 ms（该工作负载的 5.9× 比值）。
+2. 首轮远程模型运行：NG p50 23.90 s（sd 5.90 s），LG 21.95 s（sd 1.23 s）。
+3. 历史连接诊断在七次模型调用的 NG 运行中记录 21 次 `connect()`。该次数不能独自证明 TLS 会话数、HTTP 版本或载荷等价。
+4. 历史 `6da4810` / `bc2ab4f` 连接池修改关联的记录为 NG p90 35.34 s → 25.28 s、sd 5.90 s → 1.28 s。当时的供应商实现已移除；当前 typed SchemaProvider 使用外部 SDK/libcurl。
+5. FANOUT=50、LLM_MOCK_MS=100、NG_WORKER_COUNT=50 实验报告 NG 307 ms、LG asyncio 711 ms。这是独立负载，不是通用服务器容量结果。
 
-## 复现
+NeoGraph 仍需添加 HTTP/2 支持的旧说法已过时。这些时间不能验证新 SDK、当前 wheel、其他平台或远程推理加速。模拟模式只测编排和配置 sleep，不产生供应商证据。真实模式从 typed 所有权 outcome 提取可见文本，但不测 native replay、portable 历史导出或供应商报告量/预算计费量结算。
 
-真实 LLM 基准测试：
+## 运行新批次
+
+以下模拟命令不调用远程模型或持久化。新结果应附源码/SDK/wheel 修订、Python/依赖版本、主机限制、工作线程数、预热、迭代数、检查点模式和失败数。保留历史文件不变。
+
 ```sh
-set -a && source ../../.env && set +a
-export NEOGRAPH_PG_DSN="postgresql://postgres:test@localhost:5433/neograph"
-export CRAWL4AI_URL="http://localhost:11235"
-export NG_TRANSPORT=http-chat   # apples-to-apples vs LG (both HTTP)
-python bench.py --warmup 2 --iters 5
+# Install a current-cutover wheel using the Python binding build guide first.
+python -m pip install requests langgraph langchain-openai psutil
+cd benchmarks/dr_compare
+LLM_MOCK_MS=0 MOCK_SEARCH=1 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
+  python bench_mock.py --warmup 5 --iters 50
 ```
 
-引擎吞吐量 sweep：
-```sh
-./sweep.sh   # writes /tmp/sweep.log
-```
+以下远程模型命令可能产生费用，请有意设置凭据。它使用内存检查点；PostgreSQL 比较需对应 DSN、包配置与单独记录的耐久性范围。系统调用或抓包本身不能证明语义等价或供应商账单。
 
-Wire 诊断（当你怀疑 pcap 时，strace 才是 ground truth）：
 ```sh
-strace -f -e trace=connect -o /tmp/ng.log \
-    python _run_single.py neograph
-grep "connect(" /tmp/ng.log | grep -oE 'sin_addr=inet_addr\("[^"]+"\)' \
-    | sort | uniq -c
+# From benchmarks/dr_compare; hosted calls require explicit credentials.
+: "${OPENAI_API_KEY:?Set a hosted key only if you intend paid calls}"
+: "${CRAWL4AI_URL:?Set a running Crawl4AI service}"
+LLM_MOCK_MS=-1 MOCK_SEARCH=0 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
+  python bench.py --warmup 2 --iters 5
 ```

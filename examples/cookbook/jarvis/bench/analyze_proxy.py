@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """경계 계측 잔차 분석 — 프록시 로그의 콜별 상류(OpenRouter) 시간을 턴에서 차감.
 
-  잔차 = 턴 왕복시간 − Σ(그 턴 시간창 안에 완료된 콜의 upstream_response_time)
-       = 클라이언트측 순수 시간 (그래프 + HTTP 클라이언트 직렬화 + 로컬 MCP + 파이프)
+  잔차 = 턴 왕복시간 − 그 턴에 대응하는 두 콜의 upstream_response_time 합
 
-콜↔턴 매핑: driver.py 가 기록한 턴별 절대시각 창 [t0, t1] 에 프록시 로그의
-완료시각($msec)이 들어가는 콜을 그 턴의 것으로 귀속. 여러 런이 한 로그를
-공유해도 시간창이 겹치지 않으므로 자동 분리된다.
+각 라운드에 독립 프록시 로그를 지정한다. 완료시각 순으로 정렬한 콜을
+턴마다 두 개씩 대응시키므로, 콜 수가 정확히 턴 수의 두 배인 입력만
+잔차를 계산한다. 재시도나 추가 호출이 있는 실행은 이 가정을 확인해야 한다.
 
 사용:
-  python3 analyze_proxy.py <openrouter.log> <label1>:<jsonl1> [<label2>:<jsonl2> ...]
+  python3 analyze_proxy.py <label1>:<jsonl1>:<log1> [<label2>:<jsonl2>:<log2> ...]
 """
 import json
 import statistics as st

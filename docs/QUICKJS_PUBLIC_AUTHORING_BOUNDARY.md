@@ -1,7 +1,8 @@
 # QuickJS Public Authoring Boundary
 
-Status: Adopted architecture contract; Core DSL/elaborator and Program JSON authoring deletion complete
-Final no-deployment drain proof passes; platform/consumer qualification remains
+Status: Adopted architecture contract; public Core DSL/elaborator and Program
+JSON authoring removed. Retained canonical storage and trusted-C++ typed
+operation infrastructure are not deleted; platform/consumer qualification remains.
 
 Date: 2026-08-10
 Parent architecture: [QuickJS Control Architecture](QUICKJS_CONTROL_ARCHITECTURE.md)  
@@ -51,7 +52,7 @@ security and durability boundary, not merely an API preference.
 | Strict Core JSON | Internal/interchange only | Canonical storage, hashing, diagnostics, and low-level exchange; never selected as a Harness authoring mode. |
 | Program bundle/journal/record JSON | Internal/interchange only | Immutable durable artifacts, not executable input syntax. |
 | Core DSL / `graph::Elaborator` | Deleted | JavaScript replaces variables, interpolation, templates, conditional inclusion, and composition helpers. |
-| Program JSON operation trees | Deleted | JavaScript generators replace sequence, branch, loop, map, retry, and general orchestration source semantics. |
+| Program JSON operation-tree authoring | Removed as a public source frontend | JavaScript generators provide ordinary source control; typed operations remain for stored identities and trusted C++ embedding. |
 | Harness `mode: "dsl"` / `mode: "program"` | Deleted | A public transport must not silently choose a legacy compiler. |
 
 A C++ API may use `neograph::json` as an in-process value type. For example,

@@ -18,6 +18,7 @@
 const echarts = require('echarts');
 const { createCanvas } = require('canvas');
 const fs = require('fs');
+const path = require('path');
 
 echarts.setPlatformAPI({ createCanvas: (w, h) => createCanvas(w, h) });
 
@@ -47,7 +48,10 @@ const ASYNCIO_ENGINES = [
 // ── Parse results.jsonl ───────────────────────────────────────────────
 
 const RESULTS_PATH = process.env.RESULTS_PATH
-    || '/root/Coding/NeoGraph/benchmarks/concurrent/results.jsonl';
+    || path.join(__dirname, 'concurrent', 'results.jsonl');
+const OUTPUT_DIR = process.env.OUTPUT_DIR
+    || path.resolve(__dirname, '..', 'docs', 'images');
+fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 const PROFILE = '1:512m';
 
 const rows = fs.readFileSync(RESULTS_PATH, 'utf8')
@@ -129,7 +133,7 @@ function buildSeries(yExtractor, labelFormatter) {
 renderLine({
     title: {
         text: 'Throughput under concurrent load — requests per second (log scale, higher is better)',
-        subtext: 'NeoGraph scales with batch size via asio::thread_pool dispatch. Every Python asyncio runtime plateaus — the GIL serializes coroutines regardless of framework.',
+        subtext: 'Recorded graph-dispatch workload, 1 CPU / 512 MiB profile. Model, network, and checkpoint work are excluded.',
         left: 'center', top: 20, itemGap: 10,
         textStyle: { fontSize: 18, fontWeight: 'bold', color: '#24292e' },
         subtextStyle: { fontSize: 12, color: '#586069' }
@@ -161,14 +165,14 @@ renderLine({
         splitLine: { lineStyle: { color: '#eaecef' } }
     },
     series: buildSeries(throughput, p => Math.round(p.value[1]).toLocaleString())
-}, '/root/Coding/NeoGraph/docs/images/bench-concurrent-throughput.png');
+}, path.join(OUTPUT_DIR, 'bench-concurrent-throughput.png'));
 
 // ── Chart 2: P99 latency (µs, log Y) ─────────────────────────────────
 
 renderLine({
     title: {
         text: 'Tail latency — P99 per request (log scale, lower is better)',
-        subtext: 'NeoGraph stays in microseconds as load scales. Every Python asyncio runtime climbs linearly — once the GIL serializes N coroutines, P99 ≈ N × per-call cost.',
+        subtext: 'Recorded P99 latency for the selected workload and resource profile; results do not predict model or network latency.',
         left: 'center', top: 20, itemGap: 10,
         textStyle: { fontSize: 18, fontWeight: 'bold', color: '#24292e' },
         subtextStyle: { fontSize: 12, color: '#586069' }
@@ -215,14 +219,14 @@ renderLine({
             return v + ' µs';
         }
     )
-}, '/root/Coding/NeoGraph/docs/images/bench-concurrent-latency.png');
+}, path.join(OUTPUT_DIR, 'bench-concurrent-latency.png'));
 
 // ── Chart 3: Peak RSS (MB) ───────────────────────────────────────────
 
 renderLine({
     title: {
         text: 'Peak resident memory under concurrent load (MB, lower is better)',
-        subtext: 'NeoGraph stays near 5–10 MB at 10k concurrent. Python asyncio runtimes grow linearly — each coroutine holds a stack frame plus framework per-run state.',
+        subtext: 'Recorded process peak RSS for the selected workload and resource profile; not per-request allocation.',
         left: 'center', top: 20, itemGap: 10,
         textStyle: { fontSize: 18, fontWeight: 'bold', color: '#24292e' },
         subtextStyle: { fontSize: 12, color: '#586069' }
@@ -257,6 +261,6 @@ renderLine({
         r => r.peak_rss_kb / 1024,
         p => p.value[1].toFixed(1) + ' MB'
     )
-}, '/root/Coding/NeoGraph/docs/images/bench-concurrent-rss.png');
+}, path.join(OUTPUT_DIR, 'bench-concurrent-rss.png'));
 
 console.log('rendered 3 concurrent bench charts');

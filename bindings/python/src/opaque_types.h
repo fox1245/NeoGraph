@@ -1,11 +1,9 @@
 // Opaque vector type registrations.
 //
-// The five vector types listed below are exposed to Python via
-// ``def_readwrite`` / ``def_property`` on data classes (CompletionParams,
-// ChatMessage, NodeResult). With pybind11's default ``pybind11/stl.h``
-// auto-caster, accessing the property returns a *copy* — so the natural
-// idiom ``params.messages.append(msg)`` is a silent no-op (the .append
-// mutates the copy, the underlying C++ vector never sees it).
+// These vector properties on ChatMessage and NodeResult support live mutation.
+// The default stl caster instead returns copies, so appending to a property
+// would mutate only a temporary. SDK provider messages intentionally use
+// detached snapshots: build a list, then assign request.messages or parts.
 //
 // PYBIND11_MAKE_OPAQUE + py::bind_vector together replace the copy
 // caster with a true Python wrapper class that holds a reference into

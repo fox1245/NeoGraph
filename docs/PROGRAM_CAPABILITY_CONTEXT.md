@@ -1,5 +1,7 @@
 # Program node capabilities and mediated effects
 
+**Languages:** [English](PROGRAM_CAPABILITY_CONTEXT.md) | [한국어](PROGRAM_CAPABILITY_CONTEXT.ko.md) | [日本語](PROGRAM_CAPABILITY_CONTEXT.ja.md) | [简体中文](PROGRAM_CAPABILITY_CONTEXT.zh-CN.md)
+
 `ProgramCatalog` binds the aggregate executable closure once, but a node
 factory should see only the capabilities declared by that node's admitted
 configuration. `RegistrySnapshotBuilder` therefore narrows the construction
@@ -70,9 +72,12 @@ outside mediated dispatch.
  using `make_tool_execution_context` inherit these invocation-scoped resources,
  without changing a shared engine. Standalone `llm::Agent::run`/`run_stream`
  accept a per-run `ToolExecutionContext` with the same broker, stable owner/run/
- thread identity, operation and host grant; callers must persist the assistant
- message history if they want its pending batch to replay on reconnect. The
- legacy unbrokered Agent/Core paths remain explicitly lower-guarantee.
+ thread identity, operation and host grant. Callers must retain the full ordered
+ `sp::Message` history, including native/tool parts, to replay a pending batch
+ on reconnect; a display-only `ChatMessage` projection cannot recreate native
+ continuation authority. Durable native custody additionally requires the
+ host's `sp::NativeArchive`.
+ The legacy unbrokered Agent/Core paths remain explicitly lower-guarantee.
 
 For each Core task and batch ordinal, the broker commits a SQLite FULL-sync
 marker before calling the controller; marker failure executes no Tool. The receipt

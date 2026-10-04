@@ -1,11 +1,13 @@
-<!-- neograph-i18n: source=docs/promo/README.md locale=zh-CN source_sha256=9321b772f9d90caa27addc8f166b403e9874ce911798bfd16ed8b703811197a4 -->
+<!-- neograph-i18n: source=docs/promo/README.md locale=zh-CN source_sha256=6ac0e174ac729e62627d10ccfa9a004927c0ec15964bd1172fcfaa3d3b493dde -->
 # NeoGraph 宣传片 — Remotion 源码
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 这是仓库README顶部展示的15秒宣传片源文件（`docs/videos/neograph-promo-v3.mp4` + `docs/images/neograph-promo-v3.gif`）。
 
-**这是有意提交的。** 原始宣传片只渲染过一次，源文件从未检入，因此ReAct图场景中损坏的连接器无法在不从头重建的情况下修复。请将源文件保留在此处。
+源码已提交，以便重新编辑和渲染场景。
+生成 video 展示 Program pipeline，不是 API reference、benchmark 或 qualification 记录。
+媒体文件名的 `v3` 是 asset 标签，不是 SDK interface revision。NeoGraph `0.13.0` 使用 alpha SDK `0.1.0`，interface/shared generation 4；现有 render 不证明该 runtime 或尚未完成的验证。
 
 ## 场景（`src/scenes/`）
 
@@ -19,9 +21,12 @@
 
 ## 重建
 
+安装 Node.js/npm 和 FFmpeg。`package-lock.json` 固定 Remotion/React 的依赖树，
+`npm ci` 安装这些已记录的依赖。
+
 ```bash
 cd docs/promo
-npm install
+npm ci
 node render.mjs media          # → out/promo.mp4 (1920x1080, 15s)
 
 # compress + GIF (what ships in docs/):
@@ -35,6 +40,6 @@ ffmpeg -i out/promo.mp4 -i /tmp/pal.png \
 
 `node render.mjs stills 30,175,290,445`将单个验证帧渲染到`out/`，以便无需完整编码即可快速进行视觉对比。
 
-无头/沙盒环境注意事项：渲染器绑定本地HTTP服务器 — `render.mjs`将其固定到`REMOTION_PORT`（默认45678），因为默认端口扫描可能被阻止。Remotion在首次运行时下载自己的Chrome Headless Shell（约108 MB）。
+在 headless/sandbox 环境中 renderer 绑定本地 HTTP server。默认 port scan 可能受限，因此 `render.mjs` 使用 `REMOTION_PORT`（默认 45678）。Chrome Headless Shell 未安装时 Remotion 会下载它，下载大小会变化。
 
 `node_modules/`和`out/`在gitignore中。

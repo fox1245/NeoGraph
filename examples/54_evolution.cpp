@@ -5,6 +5,8 @@
 //
 // The input seed is already strict Core JSON; evolution mutates only the
 // canonical interchange topology and never translates a source language.
+// File mode supports built-in nodes and the pnoop fixture registered below.
+// Custom node types must be registered with NodeFactory before evolve().
 #include <neograph/graph/evolution.h>
 #include <neograph/graph/node.h>
 
@@ -56,13 +58,12 @@ std::unique_ptr<GraphNode> make_smoke_pnoop(const std::string& name, const json&
 
 int main(int argc, char** argv) {
     json seed_doc, task_doc;
+    NodeFactory::instance().register_type(
+        "pnoop", make_smoke_pnoop, json::object(), json::object());
 
     if (argc == 2 && std::string(argv[1]) == "--smoke") {
         seed_doc = json::parse(kSmokeSeed);
         task_doc = json::parse(kSmokeTask);
-        NodeFactory::instance().register_type(
-            "pnoop", make_smoke_pnoop,
-            json::object(), json::object());
     } else if (argc == 3) {
         auto read_file = [](const char* path) {
             std::ifstream in(path);

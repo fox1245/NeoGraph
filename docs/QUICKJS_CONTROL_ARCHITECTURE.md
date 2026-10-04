@@ -1,7 +1,7 @@
 # NeoGraph QuickJS Control Architecture
 
-Status: Base runtime implemented; Core DSL/elaborator deletion complete, Program
-legacy drain/removal remains gated
+Status: Base runtime and public source-language cutover implemented; retained
+storage/trusted-C++ operation infrastructure and release qualification remain
 Date: 2026-08-08
 Source baseline: `61661e9ad1fc386b5142139c48c327ede7464633`
 Supersedes: user authoring through the bounded Core DSL and Program JSON operation DSL
@@ -311,9 +311,10 @@ is a deterministic replay failure and stops the run. The pending command at the
 journal head becomes the live continuation point.
 
 Replay does not replenish instruction, monetary, token, child, effect, or wall
-budgets. Recorded historical work is not charged twice, while new computation
-continues against the durable remainder under a separately reported replay-cost
-counter.
+budgets. Captured effects are not dispatched or charged again. New replay
+Core and wall-time work consumes the durable transferred remainder.
+Provider reports and charges are restored to an observation-only playback bank,
+separate from that new computation; no public replay-cost counter is implied.
 
 Explicit `ng.checkpoint(serializableState)` may later reduce replay work, but it
 must not introduce a second implicit continuation format. A checkpoint is
@@ -351,10 +352,10 @@ Direct C++ embedding may construct validated in-process `json` values, but
 Harness and other public source transports do not accept standalone Core or
 Program JSON authoring after cutover. The bounded Core topology elaborator and
 Harness `mode: "dsl"` were deleted in the Core authoring cleanup; requests that
-still name them fail with an explicit migration diagnostic. Program JSON
-operation trees, Program-v2/v3/v4 authoring schemas, and Harness `mode:
-"program"` remain frozen legacy surfaces under the separate stored-version
-drain. No new language feature is added to them.
+still name them fail with an explicit migration diagnostic. Harness
+`mode: "program"` also rejects new Program JSON authoring. Program-v2/v3/v4
+schemas and the typed operation graph remain canonical storage and trusted-C++
+infrastructure; they are not a public JSON compiler or hidden fallback.
 
 The migration uses a clean cutover:
 

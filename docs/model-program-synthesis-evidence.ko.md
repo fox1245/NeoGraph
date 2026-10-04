@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=docs/model-program-synthesis-evidence.md locale=ko source_sha256=b0a57aa0f6c4a726e417d88daf8d0e3f90178de20d610884fcba052b0f622105 -->
+<!-- neograph-i18n: source=docs/model-program-synthesis-evidence.md locale=ko source_sha256=c34041ccc8bf5143dd152f292a26c02eb4a487757b4657e0ecfe75b4740a3373 -->
 # 모델 생성 QuickJS Program 합성 증거
 
 **Languages:** [English](model-program-synthesis-evidence.md) | [한국어](model-program-synthesis-evidence.ko.md) | [日本語](model-program-synthesis-evidence.ja.md) | [简体中文](model-program-synthesis-evidence.zh-CN.md)
 
-- 상태: 제한된 PoC 검증 완료
+- 상태: 과거의 제한된 PoC 증거; 현재 binding을 새로 검증한 결과가 아니다
 - 관측일: 2026-08-21
 - 모델: `deepseek/deepseek-v4-flash-0731` (OpenRouter를 통해)
 - 공급자 응답: `gen-1787288110-o3PCpNZgsnE8eyQF1TzM`

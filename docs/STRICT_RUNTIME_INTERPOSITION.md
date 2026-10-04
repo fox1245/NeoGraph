@@ -3,9 +3,9 @@
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
 
 NeoGraph's strict runtime path moves mandatory context, lifecycle Hooks, and
-provider dispatch evidence out of model discretion. It is additive: legacy
-direct provider calls still exist for trusted embedding, while a
-`StrictRuntimeProfile` assembles the dependencies required for the strict path.
+provider dispatch evidence out of model discretion. Direct typed provider calls
+remain available for trusted embedding; `StrictRuntimeProfile` assembles the
+dependencies required for the strict path.
 
 ## Guarantee boundary
 
@@ -53,11 +53,20 @@ The provider boundary now records two separate immutable values:
 2. `ProviderDispatchOutcomeReceipt` records `Succeeded`, `Failed`, or
    `ReconciliationRequired` after the attempt.
 
-A successful result binds a digest of the normalized completion. An exception
-after dispatch cannot prove whether a remote provider acted, so the controller
-records `ReconciliationRequired` rather than retrying. SQLite schema v3 stores
-outcomes separately and validates that each outcome still binds the exact
-admitted dispatch receipt after restart.
+A successful result binds a digest of the full SDK outcome observation.
+A typed Failure proven not sent records `Failed`; uncertain delivery records
+`ReconciliationRequired`. An exception after dispatch does not establish whether
+the remote provider acted, so the controller does not silently retry.
+SQLite schema v3 stores terminal receipts separately and checks their exact
+admitted dispatch binding after restart. A receipt digest is evidence, not
+native continuation custody or an executable stored outcome.
+
+The controller accepts `ProviderRequest` and returns immutable owned
+`sp::runtime::Result`, retaining ordered messages/parts and partial failure
+evidence. If settlement or receipt persistence fails after a real result,
+`ProviderDispatchOutcomePersistenceError` preserves that result and the original
+cause; a secondary observer failure remains in `delivery_error()`.
+Token charges/reservations remain separate from nullable provider usage reports.
 
 ## Program Core provider calls (separate from standalone Strict Runtime)
 
@@ -76,19 +85,27 @@ The journal keys each call by owner, immutable Program version, run, operation,
 Core thread/task/node and built-in call ordinal, **not** request content or
 Program attempt. It commits the marker with SQLite FULL synchronization before
 transport. The marker means transport *may* have occurred, not that the provider
-received it or that the effect happened exactly once. A successful completion
-is stored for exact-bound replay; an exception or a crash before settlement
-requires external reconciliation and never silently re-dispatches. Use
+received it or that the effect happened exactly once. Full immutable SDK
+Completion/Failure outcomes are stored with encoding version 2 for exact-bound
+replay. A Failure proven not sent records `Failed`; uncertain delivery, an
+exception, or a crash before settlement requires reconciliation and never
+silently re-dispatches. Use
 `inspect(owner, logical_call_id(context, core_identity))` to check status, then
-`reconcile_success` only with independently verified provider-side evidence.
-Replayed streaming calls return the final completion but do not re-emit chunks.
-Changed request, model, deployment identity or Program scope fails closed.
-Successful receipts retain generated artifacts in order, including their kind,
-MIME type, base64 data, URL, file identity, and nested metadata. Replay and
-`reconcile_success` use that same completion representation. Legacy successful
-receipts without artifact evidence are rejected rather than treated as empty
-artifact output or silently dispatched again. Use a durable filesystem database
-path: empty paths, `:memory:`, and `file:` URI paths are rejected.
+`reconcile_success` only with independently verified provider-side evidence and
+a full Completion outcome. Replayed streaming calls return the captured outcome
+without synthesizing stream events.
+
+A larger output cap is a new semantic call, not a transport retry or replay of the same journal slot. Interface 4 excludes that cap only from native replay configuration; the prepared-request digest and conservative resource claim still include it. Give each admitted call a distinct deterministic ordinal, retain every attempt's outcome/accounting and the original deadline, and obtain admission from the same resource bank. A changed digest in an existing slot rejects; neither native history nor a cursor renews credit or authorizes another send after uncertain delivery, observer or settlement failure.
+
+Ordered message parts, raw observations, nullable usage, attempt metadata, and
+native continuation remain part of the stored result. Native outcomes require
+the host's `sp::NativeArchive` supplied to
+`SQLiteProgramProviderCallJournal(database_path, native_archive)`; a portable
+JSON projection cannot recreate that authority. Legacy lossy receipts are
+rejected rather than upgraded or silently dispatched again. The journal retains
+conservative claim/committed token amounts separately from provider reports.
+Use a durable filesystem database path: empty paths, `:memory:`, and `file:` URI
+paths are rejected.
 This broker operates on Core's existing ReAct message state, not an assembled
 `ContextEpoch`, and cannot be combined with engine Strict Runtime interposition
 on the same built-in call. Host-authored native Provider calls are outside it.

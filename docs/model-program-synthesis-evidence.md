@@ -2,7 +2,7 @@
 
 **Languages:** [English](model-program-synthesis-evidence.md) | [한국어](model-program-synthesis-evidence.ko.md) | [日本語](model-program-synthesis-evidence.ja.md) | [简体中文](model-program-synthesis-evidence.zh-CN.md)
 
-- Status: bounded PoC verified
+- Status: historical bounded PoC evidence; not a new verification of current bindings
 - Observed: 2026-08-21
 - Model: `deepseek/deepseek-v4-flash-0731` through OpenRouter
 - Provider response: `gen-1787288110-o3PCpNZgsnE8eyQF1TzM`

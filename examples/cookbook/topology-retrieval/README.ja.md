@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/topology-retrieval/README.md locale=ja source_sha256=e3f2a2a1c72cb3ea14094065c49ab311bd18d49e3ab403433fb77fd9b2d63748 -->
+<!-- neograph-i18n: source=examples/cookbook/topology-retrieval/README.md locale=ja source_sha256=8b3cf3e1c0116355c04cbe12f0598d39f87cd41810fbadbc8983611adc0b584f -->
 # ローカルトポロジー取得
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -28,6 +28,8 @@ python topology_retrieval.py --query "preserve a running graph frontier"
 
 NeoGraph側のコンシューマーは、C++の`example_topology_retrieval`ターゲットである。これは、リランキングされた候補キーを受け入れ、`ProgramCatalog`から正確に承認されたバンドルを解決し、P1アダプタを実証し、生成2マイグレーションを永続的に実行する。以下のコマンドでビルドして実行する:
 
+Program を有効にし、`CMAKE_PREFIX_PATH` または `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` で SchemaProvider を指定して NeoGraph ツリーを構成します。model-free consumer にも SDK が必要です。SDK transport の現在の検証範囲は Linux/POSIX です。
+
 ```powershell
 cmake --build build --target example_topology_retrieval
 ./build/example_topology_retrieval
@@ -37,6 +39,6 @@ cmake --build build --target example_topology_retrieval
 
 ```powershell
 python run_neo_e2e.py `
-  --consumer build/Release/example_topology_retrieval.exe `
+  --consumer build/example_topology_retrieval `
   --query "preserve a running graph frontier while updating implementation"
 ```

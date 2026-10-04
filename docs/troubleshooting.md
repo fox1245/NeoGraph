@@ -2,875 +2,111 @@
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
 
-Symptoms first, root causes and fixes after. If you hit something
-that's not here, please open an issue with the symptom — it'll likely
-go on this list afterwards.
+## Identify the installed artifact
 
-> **The five-second sanity check.** Before anything else, confirm
-> you're on the latest patch:
-> ```bash
-> pip install --upgrade neograph-engine
-> python -c "import neograph_engine; print(neograph_engine.__version__)"
-> ```
-> Most issues below are fixed in a specific release. Upgrade first,
-> debug second.
+Record `neograph_engine.__version__`, Python version, OS/architecture, installation method and the first error. Check available wheel files for that release rather than assuming a source checkout and an older wheel expose the same APIs. The typed cutover removes legacy provider names; an old-wheel import does not test the new binding.
 
----
+NeoGraph's published platform metadata includes Linux, macOS and Windows. Current SchemaProvider runtime/archive qualification is Linux/POSIX; macOS/Windows ports need their own qualification before a new wheel is claimed usable there. A compatible wheel tag or compiler alone does not prove runtime integration. WASM provider-runtime support is not established.
 
-## Install / import
+For a missing GLIBC symbol, compare the wheel's manylinux tag with the host glibc. A `manylinux_2_34` artifact requires glibc 2.34 or newer. For Windows DLL failures, check x64 Python and inspect missing dependency DLLs; architecture alone is not the only possible cause. Do not swap individual bundled libraries.
 
-### `pip install neograph-engine` succeeds but `import` fails
+## Source configuration and missing dependencies
 
-Likely a Python-version / platform mismatch. We ship wheels for:
+Core requires `SchemaProvider::runtime` even with `NEOGRAPH_BUILD_LLM=OFF`. NeoGraph configuration requires CMake 3.20+. Resolution prefers an explicit `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`, then an installed package, then the default revision-pinned public archive fallback. For offline configuration, install the matching SDK, set its prefix through `CMAKE_PREFIX_PATH` and set `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`. SDK source builds require C++20, Python, standalone Asio, yyjson, libcurl 7.88+ and OpenSSL Crypto; NeoGraph supplies its checked-in Asio/yyjson to fetched/source integration.
 
-| Platform | Versions |
-|---|---|
-| Linux x86_64 (manylinux_2_34) | Python 3.9 – 3.13 |
-| Linux aarch64 (manylinux_2_34) | Python 3.9 – 3.13 |
-| macOS arm64 (14+) | Python 3.9 – 3.13 |
-| Windows x64 (MSVC) | Python 3.9 – 3.13 |
-
-Anything outside this matrix falls through to the sdist (source
-build), which needs CMake 3.16+, OpenSSL, and a C++20 toolchain. If
-your platform isn't listed and source build fails, please open an
-issue.
-
-### `ImportError: ... GLIBC_2.32 not found` on Linux
-
-The Linux wheel is `manylinux_2_34` — needs glibc ≥ 2.34 (Ubuntu 22.04+,
-Debian 12+, RHEL 9+). On older distros, build from source.
-
-### `ImportError: DLL load failed` on Windows
-
-The Windows wheel ships its own dependencies, but the Python install
-must match the wheel architecture (x64). Confirm with:
-
-```powershell
-python -c "import platform; print(platform.architecture())"
-```
-
-If it prints `('32bit', ...)` you're on a 32-bit Python — install a
-64-bit one.
-
----
-
-## TLS / network
-
-### Provider call hangs for 60 seconds and then errors with `ConnPool::async_post: timeout`
-
-**Affected:** `neograph-engine` wheels v0.1.0 – v0.1.6.
-
-**Root cause:** the bundled OpenSSL has compiled-in CA store paths
-pointing at `/etc/pki/tls/...` (RHEL convention). On Ubuntu, Debian,
-macOS, the CA store lives elsewhere (`/etc/ssl/certs/...`), so the
-wheel's libssl can't verify any peer certificate and the TLS handshake
-silently waits for the full request timeout before erroring.
-
-**Fix (≥ v0.1.7):** the wheel's `__init__.py` now auto-points
-`SSL_CERT_FILE` at `certifi.where()` on import. Upgrade:
+The SDK alone declares no OpenSSL Crypto minimum version. NeoGraph's full HTTPS configuration and wheel/sdist path require OpenSSL 3 through the async/MCP HTTP dependencies; installing only Crypto headers is not enough for those builds.
 
 ```bash
-pip install --upgrade neograph-engine
+cmake -S . -B build -DCMAKE_PREFIX_PATH="$SDK_PREFIX" \
+  -DNEOGRAPH_BUILD_PYBIND=ON
+cmake --build build -j
 ```
 
-**Workaround on older wheels:**
+`Could NOT find CURL` is not fixed by disabling `NEOGRAPH_USE_LIBCURL`: that flag controls NeoGraph's optional CurlH2Pool, not the SDK's mandatory transport. Install libcurl development files (`libcurl4-openssl-dev` on Debian/Ubuntu, `libcurl-devel` on Fedora) and use a consistent toolchain/prefix.
 
-```bash
-# Debian / Ubuntu
-export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
-# Cross-distro
-export SSL_CERT_FILE=$(python -c "import certifi; print(certifi.where())")
-```
+SQLite and PostgreSQL are optional NeoGraph components. Supply their development packages or explicitly disable `NEOGRAPH_BUILD_SQLITE`/`NEOGRAPH_BUILD_POSTGRES`. This does not remove the SDK runtime. For unresolved binding symbols after a header/API change, reconfigure and rebuild all consumers against matching headers/libraries in a fresh build directory.
 
-**To opt out of the auto-fix on v0.1.7+** (e.g. you have a custom CA
-bundle): set `NEOGRAPH_SKIP_CERT_AUTOFIX=1` before importing.
+GCC 13 coroutine internal compiler errors were reported during Stage 3. Upgrade to a suitable compiler or restructure the reported expression; the old workarounds are not evidence that a whole SDK/platform build is qualified. Never `co_await` inside a catch handler: C++ itself prohibits await expressions there. Capture the error and await recovery outside the handler.
 
-### `urllib` works, NeoGraph doesn't
+## Removed provider APIs and typed failures
 
-Same root cause as above — `urllib` uses the system OpenSSL, while the
-wheel uses its bundled OpenSSL with the wrong CA paths. Same fix:
-upgrade to ≥ v0.1.7 or set `SSL_CERT_FILE`.
+`CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor-interpreter configuration, `prefer_libcurl` and Responses WebSocket selection are gone. Use `SchemaProvider(load_provider_descriptor(descriptor_json), ProviderRuntimeOptions(...), SchemaProviderDefaults(...))` and `make_provider_request`. See [Python binding](python-binding.md) for exact constructors and [migration](migration-v0.4-to-v1.0.md) for C++.
 
-### WebSocket Responses (`use_websocket=True`) closes immediately with `close=1000`
+`prepare` returns a single-use `PreparedProviderRequest`; `dispatch` consumes it. `invoke` combines both. Never rebuild an admitted request after persisting its dispatch receipt or retry a consumed handle. A failure outcome is data, with genuine error/partial evidence; inspect `outcome.failure` instead of reading it as a success-shaped completion.
 
-Three common causes, in order of frequency:
+Observer exceptions retain the typed outcome and cause in `ProviderObserverError`. Budget settlement and terminal receipt persistence errors also retain genuine outcomes; that evidence does not authorize another send. Unknown delivery needs reconciliation, not a blind retry.
 
-1. **WebSocket access not enabled on your API key / org.** Some OpenAI
-   tier 1 accounts don't have WebSocket-mode access yet. Fall back to
-   HTTP/SSE by setting `use_websocket=False`.
-2. **Missing `User-Agent` header on certain proxy paths.** Fixed in
-   commit `d7c61d0`. Upgrade to ≥ v0.1.4.
-3. **`temperature` field rejected by some Responses-API models.** Same
-   commit removes it from the WS handshake on supported models.
+## Streaming and Python async boundaries
 
-### CORS errors when running from a browser via WASM
-
-The WASM build doesn't yet implement bypass headers for browser-CORS.
-Track the [WASM/CORS issues](https://github.com/fox1245/NeoGraph/issues) for status.
-
----
-
-## Graph compile / run
-
-### `RuntimeError: Unknown reducer: <name>`
-
-Two reducers ship with the binding: `"overwrite"` and `"append"`.
-Anything else fails to compile unless you've registered it.
-
-**Register a custom reducer (from Python, since v0.1.9):**
+Set `ProviderMode.Stream` explicitly. An observer does not select streaming. Filter nonempty content-text deltas for a token display; usage, reasoning, tool, raw-wire and envelope events are not tokens. C++ event views are borrowed during callbacks; Python ProviderEvent owns copied borrowed data. Avoid slow observers, which consume the host delivery capacity.
 
 ```python
+import asyncio
+import neograph_engine as ng
+
+text = ng.Text()
+text.value = "Hello"
+request = ng.make_provider_request(
+    provider, model, [ng.ProviderMessage(ng.ProviderRole.User, [text])],
+    mode=ng.ProviderMode.Stream,
+)
+request.on_event = observe
+outcome = await asyncio.to_thread(provider.invoke, request)
+if outcome.failure is not None:
+    handle_failure(outcome.failure)
+else:
+    handle_completion(outcome.completion)
+```
+
+Provider invoke/dispatch are synchronous Python methods that release the GIL. Use `asyncio.to_thread`; they are not native asyncio awaitables. Callback invocation, copy and destruction acquire the GIL. Cancellation uses the graph CancelToken and forwards stop to the SDK; a timeout or cancelled waiter does not prove the remote effect never happened.
+
+Keep full `ProviderMessage` values for continuation, including tool/refusal/reasoning parts. `ChatMessage` and `ToolCall` remain graph convenience values, not aliases for full provider history. Missing usage is `None`, not zero; known-zero counters remain evidence-bearing UsageCount values. A portable outcome projection cannot import native replay or financial authority. Persist native continuation only with admitted NativeArchive custody.
+
+## TLS and local endpoints
+
+Set `ProviderRuntimeOptions.ca_file` for an explicit trust bundle. Python import preserves an existing `SSL_CERT_FILE`, otherwise selects certifi when available; runtime options pass the selected CA file to SDK libcurl. `NEOGRAPH_SKIP_CERT_AUTOFIX=1` leaves host selection untouched. Do not disable certificate verification to hide an endpoint or trust-store error.
+
+The v0.1.0–v0.1.6 ConnPool timeout caused by wheel CA paths is historical; v0.1.7 added CA auto-selection. The current provider uses SDK libcurl rather than that old path. Local HTTP admission belongs in a validated descriptor, not a raw URL override; follow [example 31](../examples/31_local_transformer.cpp). Responses WebSocket close=1000 recipes apply only to removed historical transports.
+
+## Graph definitions and registration
+
+Unknown reducer/condition/node-type diagnostics mean the name is absent from the registry used to compile. Built-in reducers are `overwrite` and `append`; register custom reducers, conditions and node factories before compile. `has_tool_calls` and `route_channel` are built-in conditions. Registered Python callbacks run under the GIL.
+
+```python
+import neograph_engine as ng
+
 ng.ReducerRegistry.register_reducer("sum",
     lambda current, incoming: (current or 0) + incoming)
+ng.ConditionRegistry.register_condition("is_long",
+    lambda state: "long" if len(state.get("messages") or []) > 10 else "short")
 ```
 
-Re-registering an existing name replaces the previous reducer. The
-callable runs under the GIL; concurrent Send fan-outs serialise on
-it the same way Python custom nodes do.
+A write must name an existing channel exactly. Conditions return route labels: open conditions may use an explicit `default`; without it an unmatched label throws, and closed conditions reject labels outside their declared set. Ensure an edge from `__start__` and an escape route for loops. `RunConfig.max_steps` defaults to `50`; inspect step-limit status rather than treating truncation as ordinary completion.
 
-If you typed `"last_value"` (a common LangGraph alias) — that's
-`"overwrite"` here. Same semantics, different name.
+With `schema_version: 1`, strict topology parsing rejects unknown/unconsumed keys and round-trip loss. Use `_`/`x-` annotations for metadata, nonempty `wait_for` on barriers, and `routes` on conditional edges. Export the live schema with `ng.export_schema()` after custom registration; do not maintain a separate editor palette. Legacy absent/zero versions remain lenient on the `0.x` path; `ng.upgrade_topology()` retains ignored data in collision-safe annotations.
 
-### `RuntimeError: Unknown condition: <name>`
+## Fan-out and administration
 
-Built-in conditions: `has_tool_calls`, `route_channel`. Other names
-must be registered.
+The default worker_count is `1`, so no engine-owned pool is created. I/O branches still overlap when they suspend; CPU-bound bodies on a single caller thread serialize. Configure `set_worker_count(N)` or `set_worker_count_auto()` before concurrent execution if CPU work benefits from a pool. Python CPU-bound callbacks still serialize under the GIL unless a native operation releases it.
 
-**Register a custom condition (from Python, since v0.1.9):**
+An admin state/history/update/fork call during any run/resume on the same engine fails with `std::logic_error`. Cancel/drain and await completion first; do not suppress the exception. Same-thread-id concurrent executions have unspecified checkpoint interleaving, and separate engines sharing a store need host coordination. See [concurrency](concurrency.md).
 
-```python
-def is_long(state):
-    msgs = state.get("messages") or []
-    return "long" if len(msgs) > 10 else "short"
+## Checkpoint and PostgreSQL failures
 
-ng.ConditionRegistry.register_condition("is_long", is_long)
-```
+A missing PostgresCheckpointStore export can mean the wheel/source build disabled the component; inspect that artifact's configuration, not an older wheel's feature list. Install matching libpq when building the optional target. In a connection URI, percent-encode special password characters or use libpq's key=value form; never publish actual credentials.
 
-The callable receives the live `GraphState` (with `state.get(channel)` /
-`state.get_messages()` available) and must return a string matching
-one of the conditional edge's `routes` keys.
+Async connection/reconnection uses one deadline across all hosts/IPs. A positive explicit `connect_timeout=N` gives seconds, with `1` rounded to two. Absent/zero/negative values and timeouts only supplied through PGCONNECT_TIMEOUT/service files use the 30-second async default. This differs from synchronous libpq's per-host timeout.
 
-### `RuntimeError: Write to unknown channel: <name>`
+The store creates its tables when permitted; missing CREATE privileges require applying the schema in [the PostgreSQL header](../include/neograph/graph/postgres_checkpoint.h). No pending-write capability means full super-step replay, not exactly-once external effects. An async-only custom backend uses AsyncCheckpointStore plus `adapt_async_checkpoint_store`, not the old mutual sync/async default crossover.
 
-The channel name in your `ChannelWrite` doesn't match anything in
-`definition["channels"]`. Channel names are exact; `messages` and
-`Messages` are different.
+## Tracing adapters and historical fixes
 
-### `RuntimeError: Unknown node type: <name>`
+Tracer adapters must own recorded data, not raw pointers into Span wrappers destroyed by session close. See [the C++ tracing example](../examples/49_openinference.cpp). Python contextvars do not automatically cross C++ callback boundaries; pass/attach the parent context explicitly and install wrappers before engine compilation.
 
-The `type` field of one of your nodes references something not in the
-factory registry. For built-ins (`llm_call`, `tool_dispatch`,
-`intent_classifier`, `subgraph`) the type names are spelled out above.
-For your own types, you must call
-`ng.NodeFactory.register_type(type_name, factory)` BEFORE compile.
+Historical fixes include v0.1.8 acceptance of top-level conditional_edges, removal of the double node-execution fallback, and the pre-cutover httplib macro-layout mismatch (issue #16). They do not restore removed provider signatures. Consumers that instantiate header-only httplib across translation units still need consistent CPPHTTPLIB_OPENSSL_SUPPORT definitions; current typed-provider HTTP dispatch is SDK libcurl.
 
-### My ReAct loop only runs once — `execution_trace == ['llm']`
+Opaque convenience-vector properties may not be Python lists. Use iteration or `list(value)` for inspection, and build-then-assign for copied sequence fields such as ChatMessage.image_urls. Do not assume mutating a returned copy changes a C++ request; the new typed request/outcome contract is separate from old CompletionParams examples.
 
-**Affected:** `neograph-engine` wheels v0.1.0 – v0.1.7.
+## Reporting a bug safely
 
-**Root cause:** the graph compiler dropped the top-level
-`conditional_edges` block silently. Both the README quickstart and
-every Python example use this form, so ReAct loops degenerated to a
-single LLM call (no tool dispatch).
-
-**Fix (≥ v0.1.8):** the compiler now accepts both forms — top-level
-`conditional_edges` array OR inline-in-`edges` with a `condition`
-field. Upgrade and verify with:
-
-```python
-result = engine.run(...)
-print(result.execution_trace)
-# Expected for ReAct: ['llm', 'dispatch', 'llm']
-```
-
-**Workaround on older wheels:** put the conditional inline:
-
-```python
-"edges": [
-    {"from": ng.START_NODE, "to": "llm"},
-    {"from": "dispatch",    "to": "llm"},
-    {"from": "llm",
-     "condition": "has_tool_calls",
-     "routes": {"true": "dispatch", "false": ng.END_NODE}},
-]
-# (no separate conditional_edges block)
-```
-
-### `result.execution_trace` is empty / shows only the start node
-
-The graph routed to `__end__` immediately. Most common causes:
-
-1. **Missing edge from `__start__`.** Every graph needs at least one
-   `{"from": ng.START_NODE, "to": "..."}` edge.
-2. **Conditional returned a value not in the `routes` map.** When the
-   condition's return value doesn't match any key, an open or unspecified
-   condition uses the explicit `"default"` route. If that maps to `__end__`,
-   you exit normally. Without `"default"`, routing throws an error containing
-   the source node, condition, and returned label. Closed conditions always
-   reject labels outside their declared set.
-3. **`max_steps=0` or `max_steps=1`** — the run hit the ceiling
-   immediately. Default is 25; ReAct loops typically need 10+.
-
-### Compile error: `RuntimeError: Cycle detected: a -> b -> a`
-
-NeoGraph allows cycles (ReAct loops are cycles), but the compiler
-catches *unconditional* cycles — `a → b → a` with no conditional
-escape. Add a conditional edge that can route to `__end__`.
-
----
-
-## Performance
-
-### Fan-out is slower than I expected
-
-Two common causes:
-
-1. **No engine-owned worker pool.** `compile()` defaults to
-   `set_worker_count(1)` — no pool, fan-out branches dispatch inline
-   on the caller's executor and run serially. Opt into a pool once
-   after `compile()` (and before `run()`):
-
-   ```python
-   engine.set_worker_count(N)        # exact fan-out width
-   engine.set_worker_count_auto()    # hardware_concurrency()
-   ```
-
-   NeoGraph also prints a one-shot stderr warning the first time a
-   multi-Send (or multi-outgoing-edge) fan-out runs without a pool,
-   so the silent-serial case is visible. Suppress with
-   `NEOGRAPH_SUPPRESS_FANOUT_WARNING=1` if the worker=1 fast path is
-   intentional.
-2. **Python custom nodes hold the GIL** during their body. If your
-   `@ng.node` function does CPU-bound Python work, fan-out won't speed
-   up. ONNX / PyTorch / numpy / `requests.get` release the GIL during
-   native calls, so they DO parallelize. For pure Python scoring loops,
-   it doesn't matter how many workers you set.
-
-### `bench_neograph par` reports 200+ µs
-
-**Pre-v1.0 wheel.** v0.1.4–v0.x kept the worker pool default at
-`hardware_concurrency()`, which paid the cross-thread submit cost on
-every fan-out tick. v1.0 reverted the default to `set_worker_count(1)`
-(no pool, no submit cost) — `par` is back at the pre-flip ballpark on
-fresh `compile()`. Opt into a pool with
-`engine.set_worker_count(N)` / `engine.set_worker_count_auto()` when
-your workload's fan-out branches actually benefit from a real thread
-pool (CPU-bound bodies, large fan-out widths).
-
-### My streaming callback fires twice per node
-
-**Affected:** Python `@ng.node` write-only nodes. Fixed in
-`re-agent` commits `2a5c5dc` / `5993935` and replicated in NeoGraph
-master.
-
-**Root cause on pre-v1 releases:** pure-write `GraphNode` subclasses (no
-`Command`, no `Send`) could run once for the result and once for the stream
-hook. Upgrade and implement the single `run(NodeInput)` override; v1 invokes
-that method once and exposes the optional stream sink as `in.stream_cb`.
-
-If you're using the `@ng.node` decorator (not subclassing), this is
-already handled.
-
----
-
-## Checkpoints / Postgres
-
-### `PostgresCheckpointStore` not found / import error
-
-The PyPI wheels ship with `PostgresCheckpointStore` enabled (libpq is
-bundled since v0.1.3). `import neograph_engine; neograph_engine.PostgresCheckpointStore`
-should work directly.
-
-If you built from source without `-DNEOGRAPH_BUILD_POSTGRES=ON`, the
-class won't exist in the binding. Re-run CMake config with the flag
-set, then rebuild.
-
-### Postgres connection: `FATAL: password authentication failed`
-
-The `PostgresCheckpointStore` connection string follows libpq:
-
-```
-postgresql://user:password@host:port/dbname
-```
-
-If your password contains URL-special chars (`@`, `:`, `/`, `%`), URL-encode
-them — or use the `key=value` form:
-
-```
-host=localhost user=neo password=p@ss dbname=neograph
-```
-
-### Async Postgres reconnect times out after 30 seconds
-
-Async initial/replacement connections use one production-safety deadline for
-the entire attempt. A positive `connect_timeout=N` written directly in the
-connection string sets that global budget in seconds, with `connect_timeout=1`
-rounded up to PostgreSQL's minimum of two seconds. If the explicit value is
-absent, zero, or negative, NeoGraph uses 30 seconds. `PGCONNECT_TIMEOUT` and
-service-file timeout values are resolved too late to bound the initial async
-connection step, so they also use the 30-second default; put the value directly
-in the connection string when the async deadline must differ.
-
-The budget spans every host and resolved IP in a multi-host connection string;
-it is not multiplied per host. This differs intentionally from synchronous
-libpq, where `connect_timeout` applies separately to each host. Synchronous
-`PostgresCheckpointStore` construction and replacement are unchanged.
-
-For example, this gives the complete async replacement attempt 60 seconds:
-
-```
-host=pg-a,pg-b dbname=neograph connect_timeout=60
-```
-
-### Postgres `relation "neograph_checkpoints" does not exist`
-
-The store creates its tables on first use (`CREATE TABLE IF NOT EXISTS`).
-If your DB user doesn't have CREATE rights, run the schema by hand —
-the SQL is in [`include/neograph/graph/postgres_checkpoint.h`](../include/neograph/graph/postgres_checkpoint.h)
-under `kSchema`.
-
----
-
-## Examples / docker
-
-### `docker compose run agent` for example 26 fails to find PG
-
-The compose file expects a `db` service to be reachable as
-`postgres://neograph:neograph@db:5432/neograph`. If you're outside
-docker-compose, set `PG_URL` to your reachable host instead. See
-[`examples/26_postgres_react_hitl/README.md`](../examples/26_postgres_react_hitl/README.md)
-for the full env table.
-
-### Crawl4AI example refuses to start
-
-Crawl4AI is an optional Docker container:
-
-```bash
-docker run -d -p 11235:11235 --shm-size=1g --name crawl4ai \
-    unclecode/crawl4ai:latest
-```
-
-Examples 17, 25, 26 fall back gracefully when `CRAWL4AI_URL` (default
-`http://localhost:11235`) isn't reachable.
-
-### `example_clay_chatbot` build target not found
-
-Example 11 requires `-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON` at CMake
-configure time:
-
-```bash
-cmake -B build -DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON ..
-make example_clay_chatbot
-```
-
-It pulls Clay (UI layout) + Raylib (renderer) — that's why it's behind
-a flag.
-
----
-
-## Streaming events
-
-### `event.node` raises `AttributeError`
-
-The attribute is `event.node_name` (matches the C++ field name). Same
-for `event.type` (the enum) and `event.data` (the JSON dict).
-
-```python
-def cb(event):
-    print(f"{event.type.name} on {event.node_name}: {event.data}")
-```
-
-### My `StreamMode.TOKENS` callback never fires
-
-For current C++ providers, choose `ProviderMode::Stream` explicitly; the
-presence of an observer does not select streaming. Prepare the owned typed
-request once, dispatch the same prepared handle and observe ordered `sp::Event`
-views. Copy only data needed after the callback. A text/token consumer must
-select nonempty content-text deltas rather than treating usage, reasoning or
-other event kinds as tokens. Collect mode retains a complete immutable Outcome,
-not an incremental-token guarantee.
-
-`Provider::complete_stream`, `CompletionProvider` and Responses WebSocket
-compatibility paths were removed. Python provider bindings/wrappers are
-deferred; a wheel upgrade does not establish support for the new typed contract.
-See the [current provider guide](reference-en.md).
-
----
-
-## OpenTelemetry
-
-### My OTel spans appear with `parent_id=None` (4 separate traces instead of 1)
-
-**Affected:** `neograph_engine.tracing` before commit `9073671`.
-
-**Root cause:** `tracer.start_span` + `use_span(...).__enter__()`
-relies on contextvars, which don't propagate across the
-C++ → Python pybind callback boundary.
-
-**Fix:** The `otel_tracer` helper now snapshots the parent context via
-`set_span_in_context(root_span)` and passes it explicitly to each
-child node's `start_span`. Upgrade past `9073671`.
-
-If you're rolling your own OTel integration, do the same: don't rely
-on contextvars across the binding boundary.
-
-### My LLM spans show up under different trace IDs than my node spans
-
-**Affected:** `neograph_engine.openinference` before v0.6.0 final
-(commit `fa8ed50`).
-
-**Root cause:** the `openinference_tracer` set `parent_ctx` (a
-snapshot) but never *attached* the node span as the OTel current
-context. So when the node body called `provider.complete()` and
-`OpenInferenceProvider` opened an `llm.complete` span via
-`tracer.start_as_current_span(...)`, the new span fell back to the
-global root and the trace fragmented into separate trace IDs per
-LLM call.
-
-**Fix:** `openinference_tracer` now does
-`otel_context.attach(set_span_in_context(span))` on `NODE_START`
-and stashes the resulting token alongside the span; `NODE_END` /
-`ERROR` / `INTERRUPT` detach the token before ending the span,
-restoring the prior current span. Verified in v0.6.0 against
-Phoenix — single trace tree with `graph.run > node.X > llm.complete`
-hierarchy.
-
-If you're on v0.6.0+ and *still* see split traces, your provider
-isn't being wrapped — make sure `ctx.provider = OpenInferenceProvider(inner, tracer)`
-runs **before** `engine.compile(...)`, otherwise the engine binds
-to the un-wrapped provider.
-
-### `pip install opentelemetry-api` raises ImportError when I import `openinference`
-
-`neograph_engine.openinference` lazy-imports `opentelemetry`. The
-ImportError fires on first use only, with a one-line install hint::
-
-    pip install opentelemetry-api opentelemetry-sdk
-
-Add `opentelemetry-exporter-otlp` if you want to push spans to
-Phoenix / Langfuse / Tempo via OTLP.
-
-### My custom `Tracer` adapter hangs / crashes / prints garbage after `session.close()` (issue #24)
-
-You wrote a `neograph::observability::Tracer` adapter (C++) that
-records spans into an in-memory list, then walked the list **after**
-calling `OpenInferenceTracerSession::close()`. The walk reads
-freed memory.
-
-`close()` resets the internal `unique_ptr<Span>` over the root
-span (and the per-node-span stacks). If your adapter handed out
-**raw pointers** into the wrapper objects it returned from
-`start_span`, those pointers are dangling the moment `close()`
-returns — the wrappers were owned by the caller, and the caller
-just released them.
-
-**Fix:** the adapter must own the recorded span data itself, not
-just track raw pointers into caller-owned wrappers. The shape:
-
-```cpp
-// Owned by the tracer (lives until tracer drops):
-struct RecordedSpan {
-    std::string name;
-    RecordedSpan* parent = nullptr;
-    std::map<std::string, std::string> attrs;
-    // ...status, events, ended flag...
-};
-
-// Owned by the OpenInference layer (may be reset on close):
-class WrapperSpan : public obs::Span {
-    RecordedSpan* rec_;        // pointer into the tracer-owned data
-public:
-    void set_attribute(...) override { rec_->attrs[...] = ...; }
-    // ...
-};
-
-class MyTracer : public obs::Tracer {
-    std::vector<std::unique_ptr<RecordedSpan>> records_;  // ← owns data
-    // start_span builds a fresh RecordedSpan, returns a Wrapper
-    // pointing at it. Walk records_ for inspection — never the
-    // wrappers.
-};
-```
-
-References: `tests/test_openinference_cpp.cpp::InMemoryTracer`
-(canonical test fixture) and `examples/49_openinference.cpp::PrintTracer`
-(stderr-printing demo) both use this exact pattern. The same
-warning is in the `@warning` blocks on `Tracer` and
-`OpenInferenceTracerSession::close()` in the headers.
-
-**How the bug shows up:** observable failure modes include a clean
-crash inside the inspection loop (best case), a hang in the middle
-of printing a span name (the freed buffer happened to contain
-something that loops a string formatter), or just incorrect
-attribute values. All three are the same root cause.
-
----
-
-## Build errors
-
-### GCC 13 internal compiler error: `build_special_member_call`, `cp/call.cc:11096` (issue #23)
-
-You're on Ubuntu 24.04's stock GCC 13 (or any GCC 13.x). The build
-dies with:
-
-```
-internal compiler error: in build_special_member_call, at cp/call.cc:11096
-```
-
-…on a line that does `co_await x.foo_async(...)` inside a coroutine
-(typically a lambda body passed to `asio::co_spawn` from `main()`).
-This is a GCC 13 front-end bug, not your code. GCC 14+, Clang 18+,
-and MSVC 19.40+ all compile the same source unchanged.
-
-**Three escapes**, in order of preference:
-
-1. **Upgrade the compiler** — `sudo apt install gcc-14 g++-14` on
-   Ubuntu 24.04 (24.10 ships GCC 14 by default), then
-   `cmake -DCMAKE_CXX_COMPILER=g++-14 ...`. Cleanest fix; lets
-   you write the code the natural way.
-
-2. **Drive the coroutine via `neograph::async::run_sync`** instead of
-   `asio::co_spawn` from `main()`. Same observable behaviour, no
-   front-end ICE:
-
-   ```cpp
-   // Instead of:
-   asio::co_spawn(io,
-       [&]() -> asio::awaitable<void> {
-           result = co_await tool.execute_async(args);   // ← GCC 13 ICEs here
-       },
-       asio::detached);
-   io.run();
-
-   // Do:
-   #include <neograph/async/run_sync.h>
-   result = neograph::async::run_sync(tool.execute_async(args));
-   ```
-
-   `run_sync` builds its own private `io_context` and drives the
-   awaitable to completion — internally identical to what
-   `co_spawn + io.run()` does, but the call site is sync from the
-   compiler's point of view, so the ICE never fires.
-
-3. **Restructure the coroutine** so the `co_await` happens inside a
-   member function of a regular class, not a free function or lambda
-   body. This works in some cases but the diagnostic doesn't always
-   point at the right shape change — option 1 or 2 is more reliable.
-
-**Where this bites in this repo:** the CMakeLists has a per-example
-toolchain gate around `example_03` (the original ICE site), and
-`examples/50_async_tool.cpp` works around the issue by using
-`run_sync` instead of `co_spawn` from `main()`. New coroutine
-examples / tests that follow the natural `co_spawn`-from-main shape
-will hit the same ICE on the same toolchain — just apply option 1
-or 2.
-
-## Python type identity (v0.5.0+)
-
-### `isinstance(params.messages, list)` returns False
-
-**Affected:** v0.5.0 and later, on the five vector-property surfaces:
-`CompletionParams.messages`, `.tools`, `ChatMessage.tool_calls`,
-`NodeResult.writes`, `.sends`.
-
-**Why:** v0.5.0 fixed a silent no-op on `params.messages.append(...)`
-by binding these vectors as opaque types
-(`PYBIND11_MAKE_OPAQUE` + `py::bind_vector`) so `.append` mutates
-the live C++ vector. The trade-off: the property's type is now
-e.g. `ChatMessageList` (a pybind class), not a plain Python `list`.
-
-**What still works:**
-- `params.messages = [m1, m2]` — `py::implicitly_convertible<py::list, …>`
-  auto-converts a Python list on assignment.
-- `for m in params.messages` — iteration protocol.
-- `len(params.messages)`, `params.messages[i]`, `params.messages[i] = m`,
-  slicing.
-- `params.messages.append(...)`, `.extend(...)`, `.insert(...)`,
-  `.pop(...)`, `.clear()` — all push through to the C++ vector live.
-
-**What broke (rare):**
-- `isinstance(x, list) → False`. If you really need a plain Python
-  list, materialise: `list(params.messages)`.
-- `json.dumps(params.messages)` — the bound class isn't directly
-  JSON-serialisable. Convert: `json.dumps([{"role": m.role,
-  "content": m.content} for m in params.messages])`.
-
-`ChatMessage.image_urls` (`std::vector<std::string>`) was *not*
-migrated — `vector<string>` is used too widely in the binding for a
-global OPAQUE without callsite sweeping. The `.append()` no-op
-remains there as a documented limitation; v0.6+ candidate via an
-`add_image_url()` convenience method.
-
----
-
-## Build from source
-
-### CMake configure: `Could NOT find SQLite3` on Windows
-
-The current Windows wheel enables SQLite and bundles the matching runtime DLL.
-For a custom source build, install SQLite through the same vcpkg/MSVC toolchain.
-If SQLite is intentionally unnecessary, pass `-DNEOGRAPH_BUILD_SQLITE=OFF`;
-do not mix a DLL built for an incompatible MSVC runtime.
-
-### CMake configure: `Could NOT find CURL` on Linux
-
-Optional dependency. Install via your package manager:
-
-```bash
-# Debian / Ubuntu
-sudo apt install libcurl4-openssl-dev
-# RHEL / Fedora
-sudo dnf install libcurl-devel
-# macOS
-brew install curl
-```
-
-Or disable: `-DNEOGRAPH_USE_LIBCURL=OFF`. Without libcurl,
-`SchemaProvider`'s `prefer_libcurl=True` mode (HTTP/2) is unavailable
-— the default ConnPool (HTTP/1.1) still works.
-
-### Pybind binding fails to link with undefined references
-
-You're likely re-running `make` after pulling new code without re-running
-CMake. The build dir's compiled object files reference symbols from
-older headers. Either `make clean && make` or delete and reconfigure
-the build directory.
-
-### `OPENAI_API_KEY not set` when launching A2A servers from a script
-
-`cppdotenv::auto_load_dotenv()` reads `.env` inside the binary that
-calls it, but a child process forked from a launcher script does
-**not** inherit anything the launcher hasn't already exported. If
-your script does:
-
-```bash
-./member_server 8101 ...   # forks before any env is set up
-```
-
-…each child sees an empty environment and refuses to start. Source
-the `.env` first, in the launcher, so the variables are exported into
-the shell that does the fork:
-
-```bash
-set -a; . ./.env; set +a            # marks every assignment as exported
-./member_server 8101 ... &
-```
-
-The cookbook's `scripts/run_session.sh` shows the full pattern with
-fallback to a sibling `.env`.
-
-### Multi-persona / multi-process A2A: sharing a typed provider
-
-The current [Assembly recipe](../examples/cookbook/ai-assembly/README.md) uses
-`examples::make_openrouter_provider` and retains a shared typed provider within
-each member process. Capture the owning handle in its `NodeFactory`; do not
-manually `release()` a unique pointer. Separate processes still own separate
-instances. `OpenAIProvider::create_shared` was removed; it is not a current API.
-The documented offline session does not qualify live model calls.
-
----
-
-## C++ consumers — `httplib.h` macro consistency (load-bearing, issue #16)
-
-> **Historical pre-cutover diagnosis (issue #16).** The stack below names the
-> removed `SchemaProvider::complete_stream` API. It records the old integration,
-> not a current typed-provider transport path. Macro consistency still matters
-> for consumers that instantiate the same header-only httplib types across TUs.
-
-If you build a C++ application that **links against NeoGraph** AND
-also `#include <httplib.h>` in your own translation units (e.g. to
-run your own `httplib::Server` SSE endpoint), every TU that includes
-`<httplib.h>` MUST `#define CPPHTTPLIB_OPENSSL_SUPPORT` **before**
-the include. Missing the macro in even one TU silently produces a
-SEGV inside `getaddrinfo` the first time
-`SchemaProvider::complete_stream` hits the LLM endpoint.
-
-### Why this happens
-
-`cpp-httplib` is header-only. The class `httplib::ClientImpl` is
-**conditionally larger** when `CPPHTTPLIB_OPENSSL_SUPPORT` is defined
-(it gains SSL-related members; layout shifts by ~8 bytes). Because
-the library's functions are all `inline`, the linker keeps one
-instantiation per inline function and discards duplicates. If two
-TUs in your binary compile against different `ClientImpl` layouts
-(because one defined the macro, the other didn't), the linker picks
-one definition; the *other* TU's compile-side accesses members at
-the wrong offsets — classic ODR violation. The corruption lands on
-adjacent fields (e.g. `proxy_host_` ends up reading from offset
-that's actually `path_`'s tail), and `httplib::ClientImpl::create_client_socket`
-branches into the "use proxy" path with a wild `proxy_host_.c_str()`
-→ `getaddrinfo` → `internal_strlen` → SEGV.
-
-### Symptom
-
-Under ASan:
-
-```
-==NNNN==ERROR: AddressSanitizer: SEGV on unknown address
-    #0 internal_strlen (...)
-    #1 getaddrinfo
-    #2 httplib::detail::create_socket
-    #3 httplib::detail::create_client_socket
-    #4 httplib::ClientImpl::create_client_socket
-    #5 httplib::SSLClient::create_and_connect_socket
-    ...
-    #N neograph::llm::SchemaProvider::complete_stream
-```
-
-Without ASan: same stack via gdb, with a wild pointer value that
-*can* look like text (it's whatever bytes were in the wrong-offset
-slot — under ASan it's typically `0xBE` quarantine poison; without
-ASan it can be uninitialized stack content that happens to decode as
-JSON / UTF-8 fragments and *looks* like memory corruption from a
-real culprit — that's the misleading symptom).
-
-### Fix
-
-In every TU that includes `<httplib.h>`:
-
-```cpp
-// your main.cpp / sse_handler.cpp / wherever
-#define CPPHTTPLIB_OPENSSL_SUPPORT
-#include <httplib.h>
-```
-
-Or globally in CMake (preferred — guarantees consistency across the
-whole target):
-
-```cmake
-target_compile_definitions(your_target PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
-```
-
-The macro is harmless even if your own httplib use only needs
-`Server` (not `SSLClient`) — it only **adds** members; nothing
-requires you to actually do SSL on your side.
-
-### How to audit without ASan
-
-```bash
-grep -rn 'include.*httplib\.h\|CPPHTTPLIB_OPENSSL_SUPPORT' src/
-```
-
-If any include site of `<httplib.h>` is **not** preceded by a
-`#define CPPHTTPLIB_OPENSSL_SUPPORT` (in the same TU, or via a
-compile-flag definition), that's almost certainly the bug.
-
-### Why NeoGraph can't fix this for you
-
-NeoGraph's own .cpp files all define the macro consistently. The
-violation only happens when a downstream TU also pulls in httplib.h
-*without* the macro. Detecting that at compile time would require
-either (a) NeoGraph exposing `httplib::ClientImpl` in public headers
-(we deliberately don't — httplib stays inside `SchemaProvider.cpp`),
-or (b) link-time `static_assert` of struct size across translation
-units, which C++ doesn't support. Documenting the trap is the best
-we can do; this section is the documentation. Issue #16 closed.
-
----
-
-## A tool/editor that builds topology JSON drifts from the engine
-
-### Symptom
-
-You wrote (or use) a generator, GUI, or visual block editor that emits
-NeoGraph topology JSON. It offered a node type, reducer, or condition
-that the engine then rejects at `compile()` with `Unknown node type:`
-/ `Unknown reducer:` / `Unknown condition:` — or a branch you drew
-silently never fires.
-
-### Why this happens
-
-The tool's palette was hand-maintained and fell behind the NeoGraph
-version actually linked. The branch case is the classic top-level
-`conditional_edges` regression (silently dropped in v0.1.0–v0.1.7,
-fixed v0.1.8) — a tool that emits that block must verify it survives a
-loader→compile round-trip.
-
-### Fix
-
-Don't hand-maintain the palette. The engine emits a machine-readable
-schema of exactly what it accepts — pin the tool to it:
-
-- C++: `neograph::graph::NodeFactory::instance().export_schema()`.
-- CLI: `./example_export_schema > schema.json`
-  (`examples/52_export_schema.cpp`).
-- Python: `neograph_engine.export_schema()` → dict.
-
-The document carries `neograph_version`; have the tool compare it to
-its cached schema and warn on mismatch. `node_types` reflects whatever
-is registered in `NodeFactory` at call time, so register your custom
-node types/reducers/conditions *before* exporting, exactly as you do
-before `compile()`. (Background: issue #56.)
-
----
-
-## Strict topology validation
-
-### Symptom
-
-`compile()` throws `strict topology validation failed (schema_version 1)`
-listing keys like `$: unknown or unconsumed key 'conditionnal_edges'`,
-`nodes.X.barrier: 'wait_for' is missing or empty`, or
-`translation validation failed: compiled graph does not round-trip`.
-
-### Why this happens
-
-Your topology declares `"schema_version": 1`, which opts it into strict
-compilation: every key of every object the compiler owns must be
-*consumed* by the parser. A key nobody consumed is almost always a typo
-(`conditionnal_edges`, `max_retry`, `promt`) or a construct the engine
-would otherwise **silently drop** — the failure mode behind the
-v0.1.0–v0.1.7 `conditional_edges` regression. The round-trip
-(translation-validation) error means the compiled graph re-emitted as
-JSON no longer matches your input: the compiler lost or rewired
-something, and the message lists exactly what.
-
-### Fix
-
-- Fix the listed keys — each error carries its JSON path.
-- Comments and editor metadata belong in the annotation namespace:
-  keys starting with `_` or `x-` (e.g. `_comment`, `x-studio-pos`) are
-  always allowed and never validated.
-- A barrier needs a non-empty `wait_for` array; an inline conditional
-  edge routes through `routes`, so a `to` on it is dead — move the
-  target into `routes` or drop it.
-- Custom node types registered *with* a declared config schema
-  (3-arg `register_type`) are checked closed-world; add
-  `"additionalProperties": true` to the schema to opt a type out.
-- To fall back to the historical lenient parsing, remove
-  `schema_version` — unknown keys are then ignored again and round-trip
-  mismatches only warn on stderr. New documents should stay strict.
-
-### Compatibility timeline
-
-- Every `0.x` release keeps absent or zero `schema_version` documents on the
-  lenient compatibility path. No `0.x` update will silently reinterpret them as
-  strict documents.
-- New definitions, built-in graph factories, and maintained examples declare
-  the current version (`TOPOLOGY_SCHEMA_VERSION`, currently `1`).
-- The planned `1.0.0` boundary rejects absent or zero versions with a migration
-  diagnostic instead of silently changing their routing or parsing semantics.
-- Upgrade C++ input with `GraphCompiler::upgrade_to_latest()` or Python input
-  with `ng.upgrade_topology()`. Ignored legacy data is retained under collision-
-  safe `x-upgraded-*` annotations. Strict Core JSON is the retained interchange
-  artifact; JavaScript sources should be recompiled through QuickJS `define()`.
-
----
-
-## Reporting a bug
-
-If your symptom isn't above:
-
-1. Run `pip install --upgrade neograph-engine` first — many issues are
-   patch-level fixes.
-2. Capture the minimum reproducer:
-   - graph definition
-   - node types in use
-   - the exact `engine.run(...)` call
-   - the `result.execution_trace` and (if streaming) the events you saw
-3. Note your platform, Python version, and `neograph_engine.__version__`.
-4. Open an issue at <https://github.com/fox1245/NeoGraph/issues>.
-
-If the bug shows up only against a specific LLM endpoint, please also
-include the wire-level shape (`example_responses_envelope` for OpenAI
-Responses; `tcpdump`/`wireshark` for raw HTTP traces if relevant).
+Provide the version/platform, minimal topology and call, execution_trace/status, and redacted typed failure/stop/usage evidence. State whether the failure came from an installed wheel or a rebuilt checkout. Never include credentials, private prompts, encoded native request bodies or unsanitized packet captures. Report at <https://github.com/fox1245/NeoGraph/issues>.

@@ -8,6 +8,10 @@ The existing browser and HTTP protocol are unchanged. Alice/Bob owner scopes,
 reviewed-template generation, role-specific prompts, effect/capability grants,
 exact checkpoint lineage and nonrenewable budgets remain host-owned.
 
+The retained `server_multi.cpp` live-provider path uses a 180-second timeout.
+This does not change ProgramChat's `--provider-timeout-seconds` range/default
+or the shared provider factory default, and does not enable failure redispatch.
+
 ```bash
 # Set SCHEMAPROVIDER_SOURCE to the supplied SDK checkout before configuring.
 # From the repository root; configure Program, QuickJS control and SQLite (or PostgreSQL).
@@ -71,7 +75,7 @@ Current scoped runtime evidence: the actual ProgramChat PostgreSQL blackbox run
 passed six scenarios in 18.989 seconds; the actual browser exercised Alice/Bob
 isolation and generation-2 replacement. These model-free observations are not
 vendor-inference qualification or proof of the separate `multi_tenant_chatbot`
-server/load recipe, all storage variants, or deferred Python provider bindings.
+server/load recipe, all storage variants, or the migrated Python provider bindings.
 
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -99,7 +103,8 @@ checkpoint. The orchestrator keeps waiting on the same logical assistant.
 cmake -S . -B build-chat -G Ninja \
   -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
   -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_EXAMPLES=ON \
-  -DNEOGRAPH_BUILD_SQLITE=ON -DNEOGRAPH_BUILD_POSTGRES=ON
+  -DNEOGRAPH_BUILD_SQLITE=ON -DNEOGRAPH_BUILD_POSTGRES=ON \
+  -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
 cmake --build build-chat --target cookbook_program_chatbot -j 4
 ./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
   --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --db evolving-chat.sqlite
@@ -141,14 +146,14 @@ endpoint; plain HTTP requires `--allow-loopback-provider` and a literal loopback
 address, intended for protocol tests.
 
 The native adapter sends the output limit as `max_completion_tokens`, supported
-by the [OpenRouter chat API](https://openrouter.ai/docs/api/api-reference/chat/send-chat-completion-request).
+by the [OpenRouter chat API](https://openrouter.ai/docs/api/api-reference/chat/create-a-chat-completion).
 The default is 4,096 per call (including provider reasoning tokens); use
 `--max-output-tokens` to set a positive 64-bit value. The selected host policy's
 model limit and the existing session budget still apply; there is no fixed 8,192 CLI cap.
 `--provider-timeout-seconds` sets a 1..120 second per-call timeout (default 120).
 The host checkpoint wait covers the sequential calls between checkpoints, and
 the reviewer has a separate 180-second child budget. Timed-out calls remain
-uncertain and charged; they are not automatically retried.
+uncertain and retain their reservation as `UnknownHold`; they are not automatically retried.
 
 For PostgreSQL, run native Docker inside WSL and set the connection string in that
 same shell. Use a dedicated database; the example creates its own tables but is
@@ -250,6 +255,11 @@ exits after committed snapshots without cancelling the family, for restart tests
 ## Earlier Core examples
 
 `server.cpp` / `server_multi.cpp` and their original CMake targets remain available.
+Their retained pre-cutover measurements were 16 seconds (single Alice demo,
+about $0.003 then) and 424 seconds / 18.99 MB (five customers, 25 turns,
+76 model calls, three compiled engines, about $0.02 then). Final topology
+distribution was three fanout, one reflexive and one simple. These historical
+observations neither price the current route nor qualify the migrated source.
 They select a graph configuration for the next request. The new
 `cookbook_program_chatbot` demonstrates Program generations and recursive child
 synthesis; the older examples do not demonstrate live Program replacement.

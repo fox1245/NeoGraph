@@ -6,9 +6,17 @@
 
 The migrated C++ author/repair paths build typed `ProviderRequest` and `sp::Message` histories and consume full immutable `sp::Outcome` results, including every returned native message/part. Text extraction is only for parsing the candidate JSON/Python; it is not used to replace native conversation history. Compiler/parse/initialization feedback is appended after those messages. Semantic repair is bounded by each program's attempt limit (live author: three; Forge server generation: two); it is not transport retry or unlimited evolution.
 
-Keep the private OpenRouter route `~deepseek/deepseek-v4-flash-latest` with `zdr: true`, `only: ["morph"]`, `allow_fallbacks: false`: no eligible endpoint means failure, not disclosure to another provider. ZDR and historical US endpoint listings are not a residency guarantee or proof of current availability. Live execution requires an authorized key, network/provider availability and paid capacity; prompts, exported schemas, diagnostics and native history are sent to that route. Generated native Python server execution has its own local trust boundary; it is not deferred Python provider bindings. Never publish keys or private prompts. Nullable token counters are not a dollar cost; pricing and actual billable usage are prerequisites.
+Forge uses low reasoning effort and a 300-second provider timeout, with one pinned
+deadline per ask. A completed empty `MaxTokens` outcome without text or a valid/
+invalid client tool call permits at most one additional call at twice the current
+3,000/4,000-token cap. Every outcome and usage report is retained. Failure,
+observer/settlement errors and nonempty partial replies do not trigger another
+call; this budget recovery is separate from compiler/initialization repair.
+These are interface-4 source contracts, not a new live-provider pass.
 
-Current scoped runtime evidence covers actual offline strict Core compilation, evolution and checkpoint rollback. It does not qualify every live/apex/forge/script variant or vendor inference. Retained console transcripts, benchmark/fuzz results and live execution claims below remain historical, not new typed-cutover measurements. Coherence gates establish their stated structural/effect-contract properties, not provider transport/privacy correctness or model semantic truth. Python provider bindings remain deferred; protocol clients are unchanged.
+Keep the private OpenRouter route `~deepseek/deepseek-v4-flash-latest` with `zdr: true`, `only: ["morph"]`, `allow_fallbacks: false`: no eligible endpoint means failure, not disclosure to another provider. ZDR and historical US endpoint listings are not a residency guarantee or proof of current availability. Live execution requires an authorized key, network/provider availability and paid capacity; prompts, exported schemas, diagnostics and native history are sent to that route. Generated Python server execution has its own local code-execution trust boundary, separate from NeoGraph's Python provider bindings. Never publish keys or private prompts. Nullable token counters are not a dollar cost; pricing and actual billable usage are prerequisites.
+
+Preserved interface-3 scoped runtime evidence covers actual offline strict Core compilation, evolution and checkpoint rollback. It does not qualify every live/apex/forge/script variant or vendor inference. Retained console transcripts, benchmark/fuzz results and live execution claims below remain historical, not interface-4 measurements. Coherence gates establish their stated structural/effect-contract properties, not provider transport/privacy correctness or model semantic truth. The Python provider bindings now follow the typed API; their verification is separate from these C++ runs.
 
 > A self-evolving agent that writes its own harness as strict Core JSON, evolves
 > it under the Core compiler, and rewinds its execution through the checkpointer.
@@ -32,6 +40,11 @@ not a second source language.
 The compiler is what turns the monster from a liability into a category.
 
 ## Run it
+Configure the NeoGraph tree with the installed SchemaProvider prefix in
+`CMAKE_PREFIX_PATH` or `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<sdk-source>` first.
+The SDK is required even for offline Core-only recipes. Current SDK transport
+qualification is Linux/POSIX; the Sandbox2 variant below is Linux-specific.
+
 
 ```console
 $ cmake --build build --target cookbook_the_beast
@@ -135,9 +148,9 @@ in-region guarantee is currently the enterprise EU route. If Morph's eligible
 endpoint is unavailable, the request fails rather than sending the prompt to a
 different provider.
 
-The live cookbook sets its provider timeout to 180 seconds: this reasoning
-model's 4,000-token generation budget can legitimately outlast the generic
-60-second default.
+The live author path uses a 180-second provider timeout. Forge's separate
+300-second timeout accommodates its bounded generation calls; neither setting
+changes the shared provider factory's default.
 
 
 
@@ -488,13 +501,12 @@ The property under test:
 > validator reports an ERROR ⟹ the graph faults when executed;
 > validator reports no error ⟹ the graph executes cleanly.
 
-The first line is *soundness* (an error-flagged graph that ran clean would be
-a soundness hole); a warning-flagged graph that runs clean shows the gate
-does not *over*-reject. E10/E8-class errors are verdict-only — running an
-empty route map dereferences `rend()` (UB), which is exactly the fault the
-gate exists to prevent, so it is checked but not executed. This is a
-demonstration corpus, not exhaustive coverage of every diagnostic — but it
-turns "the gate is sound" from a slogan into a measured, CI-enforced 4/4.
+For safety soundness, the relevant direction is a gate pass implying no
+modeled structural fault under honest contracts. Rejection/fault agreement in
+this corpus also checks particular rejected examples; it does not prove every
+rejected graph must fault. E10/E8 cases are verdict-only and were not executed.
+The preserved 4/4 result is a historical corpus observation, not exhaustive
+coverage of diagnostics or proof about arbitrary C++ node bodies.
 
 ## Gate-fuzz — the guarantee and its boundary, at scale
 

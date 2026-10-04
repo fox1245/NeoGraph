@@ -225,7 +225,7 @@ int main() {
     }
 
     // OpenRouter provider — 모든 customer 가 공유.
-    std::shared_ptr<Provider> provider = examples::make_openrouter_provider(api_key, "chat");
+    std::shared_ptr<Provider> provider = examples::make_openrouter_provider(api_key, "chat", std::chrono::seconds(180));
 
     // MergeNode 만 직접 등록 (llm_call 은 built-in).
     NodeFactory::instance().register_type("merge",

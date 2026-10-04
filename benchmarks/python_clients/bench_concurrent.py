@@ -20,9 +20,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from uuid import uuid4
+from pathlib import Path
 
 # Reuse mock from the sequential bench.
-sys.path.insert(0, "/root/Coding/NeoGraph/benchmarks/python_clients")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bench_a2a_clients import start_server  # noqa: E402
 
 

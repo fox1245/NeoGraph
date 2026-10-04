@@ -1,182 +1,70 @@
-<!-- neograph-i18n: source=docs/concurrency.md locale=zh-CN source_sha256=53d5843f1b9147b72df94827ed3d1463c1a60be53f9edff281267ba5b82653f8 -->
+<!-- neograph-i18n: source=docs/concurrency.md locale=zh-CN source_sha256=889743688862b981a4a8e8d8de0c0f3bc287693712453d430183d4dcdd7a030a -->
 # 并发与异步
 
 **Languages:** [English](concurrency.md) | [한국어](concurrency.ko.md) | [日本語](concurrency.ja.md) | [简体中文](concurrency.zh-CN.md)
 
+## 选择 executor
 
+sync `run`、`run_stream`、`resume` 驱动与 async API 相同的协程实现，并阻塞调用线程。host worker pool 可并发执行独立 session。async API 返回 `asio::awaitable<RunResult>`，在自行拥有的 executor 上驱动。awaitable 不会把任意 user code 变为 nonblocking。
 
-NeoGraph 支持两种开箱即用的并发模型 - 选择适合你的托管模式的一种：
+`EngineConfig::worker_count = 1` 是默认值，不创建 engine 自有 fan-out pool。挂起的 I/O 分支可在单线程重叠推进，CPU 工作则串行执行。多线程 caller executor 或可选 engine pool 可在多核执行 CPU 分支。公开 engine 前配置 pool。
 
-* **每个代理线程（同步）** —`run()` / `run_stream()` / `resume()`
-分派到你已经使用的任何执行程序。最多可安全容纳大约一千个并发代理；Release `-O3 -DNDEBUG` 构建中每次调用约 5 µs 引擎开销（超级步循环通过 `run_sync(execute_graph_async)` 路由，因此两个入口点共享一个协程路径）。
-* **基于协程的异步** —`run_async()` / `run_stream_async()` /
-`resume_async()`返回`asio::awaitable<RunResult>`。一`asio::io_context`托管数千个并发代理，每次运行无需线程；所有提供者 / MCP / 检查点 I/O 点是非阻塞的`co_await`在底层。完整的迁移指南在 [`ASYNC_GUIDE.md`](ASYNC_GUIDE.md)。
-
-## 异步（第 3 阶段）
 ```cpp
-#include <asio/co_spawn.hpp>
-#include <asio/detached.hpp>
-#include <asio/io_context.hpp>
+#include <neograph/async/run_sync.h>
 
-asio::io_context io;
-for (const auto& user : users) {
-    asio::co_spawn(
-        io,
-        [&, user]() -> asio::awaitable<void> {
-            RunConfig cfg;
-            cfg.thread_id = user.session_id;
-            cfg.input     = {{"messages", user.history}};
-            auto result = co_await engine->run_async(cfg);
-            handle(result);
-        },
-        asio::detached);
-}
-io.run();  // drives all agents on this thread
+EngineConfig options;
+options.node_context = ctx;
+options.checkpoint_store = std::make_shared<InMemoryCheckpointStore>();
+options.worker_count = 4;
+auto engine = GraphEngine::build(def, std::move(options));
+RunConfig run;
+run.thread_id = "session-1";
+run.input = {{"count", 0}};
+auto result = neograph::async::run_sync(engine->run_async(run));
 ```
 
-`engine->run_async()`端到端地停留在调用者的执行器上——每个超级步暂停点（节点调度、检查点 I/O、并行扇出、重试退避）都是真实的`co_await`。因此，上述三个 50 毫秒的步骤在一个 io_context 线程上重叠，并且壁钟时间约为 50 毫秒，而不是 3 × 50 毫秒。一个线程，N 个并发代理。对于跨核心的 CPU-bound 扇出，将驱动程序切换到共享`asio::thread_pool`——这就是[中的模式`benchmarks/concurrent/CONCURRENT.md`](../benchmarks/concurrent/CONCURRENT.md)其中 N = 10,000 在 52 毫秒内完成。在单次运行中，`make_parallel_group`扇出也重叠：三名并行扇出研究人员从顺序执行的 370 毫秒缩短到 150 毫秒。
+`27_async_concurrent_runs.cpp` 展示一个 io_context 的多个 session；`05_parallel_fanout.cpp` 展示一次 run 内的分支。历史吞吐量与内存测量见[性能详解](performance-deep-dive.md)，不保证安全的 session 数上限。
 
-自定义节点通过从统一的`run(NodeInput)`入口点返回 `asio::awaitable`（在 v0.4.0 中引入；旧的 8 虚拟链在 v0.9.0 中被删除）：
-```cpp
-class FetchNode : public GraphNode {
-  public:
-    asio::awaitable<NodeOutput>
-    run(NodeInput in) override {
-        auto ex = co_await asio::this_coro::executor;
-        auto res = co_await neograph::async::async_post(ex, /*...*/);
-        // in.ctx.cancel_token, in.state, in.stream_cb available.
-        co_return NodeOutput{ {ChannelWrite{"out", res}} };
-    }
-    std::string get_name() const override { return "fetch"; }
-};
-```
+## shared engine 规则
 
-异步形工具源自`AsyncTool`：
-```cpp
-class FetchTool : public neograph::AsyncTool {
-  public:
-    asio::awaitable<std::string>
-    execute_async(const json& args) override { /* co_await HTTP */ }
-    // sync execute() is final, routes through run_sync automatically.
-};
-```
+- 独立 session 使用不同 `thread_id`。同 id 并发执行的 checkpoint 交错顺序未规定；需要有序 history 时在 host 串行化。
+- 向 execution/admin 线程公开前完成 setter 和 tool binding。运行中 resize worker pool 是错误。
+- 一个 engine 上管理与执行互斥。run/resume 期间 state/history read、update、fork 以 `std::logic_error` 拒绝；管理期间也拒绝执行。cancel/drain 并等待完成后再重试管理。
+- 共享 store 的不同 engine 在此 admission 边界之外；由 host 协调。
+- node instance 在各 run 重用。run 级 scratch state 放在 channel 中；custom node/provider/tool/store 须无状态或同步。内置 in-memory store 使用 mutex。
 
-参见 `examples/27_async_concurrent_runs.cpp`对于多代理模式和`examples/05_parallel_fanout.cpp`用于一次运行内的扇出。
+Provider 调用拥有 prepared request 和 runtime client。C++ event view 仅在 callback 中有效，需保留的 data 须复制。native replay 和 accounting 权限需要真实 custody，不能通过 portable JSON 重建获得。参见[异步指南](ASYNC_GUIDE.md)。
 
-## 同步（每个代理线程）
+## 有界同步 admission
 
-NeoGraph不提供自己的异步运行时——它公开同步`run()` / `run_stream()` / `resume()`并让你选择执行器。单个已编译的 `GraphEngine`可以安全地在调用的线程之间共享`run()`并发调用，只要使用**不同的 `thread_id`**，因此托管多租户 agent的任何工作负载只需将其分派到你已使用的执行程序上即可。
-```cpp
-// One engine, many concurrent sessions — no external runtime required.
-EngineConfig engine_config;
-engine_config.node_context = ctx;
-engine_config.checkpoint_store = std::make_shared<InMemoryCheckpointStore>();
-auto engine = GraphEngine::build(def, std::move(engine_config));
+链接 `neograph::util` 使用 `RequestQueue`。它采用 `moodycamel::ConcurrentQueue`，idle worker 在 condition variable 等待。pending-slot 上限限制排队 session 数，不限制运行中 session 的 memory。
 
-std::vector<std::future<RunResult>> sessions;
-for (const auto& user : users) {
-    sessions.push_back(std::async(std::launch::async, [&engine, user]() {
-        RunConfig cfg;
-        cfg.thread_id = user.session_id;
-        cfg.input = {{"messages", user.history}};
-        return engine->run(cfg);
-    }));
-}
-for (auto& f : sessions) handle(f.get());
-```
-
-同样适用于 `asio::thread_pool`、基于 `std::async` 的任务系统，或者你的网络框架的工作池，NeoGraph不参与执行者的决定。如果你需要 CPU 并行扇出发生在*单个*同步`run()`调用（而不是在 N 个线程上执行 N 个同步 `run()`），在 `build()` 前设置 `EngineConfig::worker_count`安装引擎拥有的`asio::thread_pool`供 `run_parallel_async` 和多 Send 分支调度使用。
-
-## 使用捆绑的`RequestQueue`
-
-对于需要具有背压的固定工作池（当队列饱和而不是无限内存增长时拒绝新会话）的多租户服务器，链接`neograph::util`并使用内置的无锁队列——不需要外部执行器：
 ```cpp
 #include <neograph/util/request_queue.h>
-using namespace neograph::util;
 
-RequestQueue pool(16, 1000);           // 16 workers, max 1000 pending sessions
-EngineConfig engine_config;
-engine_config.node_context = ctx;
-engine_config.checkpoint_store = std::make_shared<InMemoryCheckpointStore>();
-auto engine = GraphEngine::build(def, std::move(engine_config));
-
-std::vector<RunResult>          results(users.size());
-std::vector<std::future<void>>  futs;
-
-for (size_t i = 0; i < users.size(); ++i) {
-    auto [accepted, fut] = pool.submit([&, i]() {
-        RunConfig cfg;
-        cfg.thread_id = users[i].session_id;
-        cfg.input     = {{"messages", users[i].history}};
-        results[i]    = engine->run(cfg);
-    });
-    if (!accepted) {
-        // Backpressure: queue is full — shed load, return 503, retry later, …
-        reject(users[i]);
-        continue;
-    }
-    futs.push_back(std::move(fut));
-}
-
-for (auto& f : futs) f.get();           // propagates exceptions from run()
-
-auto s = pool.stats();
-log("pending={} active={} completed={} rejected={}",
-    s.pending, s.active, s.completed, s.rejected);
+neograph::util::RequestQueue queue(16, 1000);
+auto [accepted, future] = queue.submit([engine, config] {
+    auto result = engine->run(config);
+    handle(result);
+});
+if (future.valid()) future.get();
+if (!accepted) reject_request();
 ```
 
-`submit()` 返回 `{accepted, std::future<void>}`。可以通过共享输出槽（如上）或每任务
-`std::promise<RunResult>` 传递 `RunResult`。队列底层使用无锁
-`moodycamel::ConcurrentQueue`，空闲工作线程在 condvar 上等待，因此不会 busy-spin。
-admission 会原子地预留 pending 槽位，所以并发调用者无法超过 `max_queue_size`。
-队列已满时，普通背压返回 `{false, invalid_future}`；内部 enqueue 失败则返回
-`{false, valid_future}`，观察该 future 时会抛出 `std::runtime_error`。
+queue 满时返回 `accepted=false` 和 invalid future。内部 enqueue 失败返回 `false` 和含 `std::runtime_error` 的 valid future；须观察 future，不要把所有拒绝当作普通饱和。构造至少需要一个 worker。
 
-构造队列时至少要有一个工作线程。`close()` 是幂等的：它拒绝后续提交、等待工作线程
-退出、允许已经被工作线程领取的 callable 完成，并以
-`std::runtime_error("RequestQueue is closed")` 完成所有尚未领取的 future。callable
-本身可以调用 `close()` 发起关闭，但该工作线程会直接返回而不会等待自身。析构函数使用
-同一 close 路径，因此 teardown 期间不会静默遗留已接受的 future。
+`close()` 幂等：拒绝新 submit，允许 claimed work 完成，将 unclaimed future 以 `std::runtime_error("RequestQueue is closed")` 完成。worker 调用 close 会启动 shutdown，不等待自身。destructor 走同一路径，不会默默遗留 accepted future。
 
-## 安全并发使用规则
+## checkpoint I/O 和 Python
 
-- 配置修改函数（`set_retry_policy`, `set_checkpoint_store`,
-`set_store`, ...) 必须在任何并发 `run()` 之前调用。工具须在编译前绑定至 `NodeContext::tools` 或 `EngineResources::tools`。
-- 共享**相同** `thread_id` 的并发 `run()` 调用不会崩溃
-但会产生未指定的检查点交错。如果你需要确定性历史记录，请自行序列化每个会话的访问。
-- 自定义 `GraphNode`子类必须是**无状态或自同步**。
-节点实例由引擎拥有，并在每个线程的每次运行中重用 - 每次运行的临时数据属于图形通道，而不是节点成员变量。
-- 用户提供`CheckpointStore`, `Store`, `Provider`， 和`Tool`
-实现必须是线程安全的。捆绑的`InMemoryCheckpointStore`和`InMemoryStore`已经是了。
+in-memory checkpoint 在 caller 下使用 mutex；SQLite 与 sync custom backend 将 blocking work 移交 bounded worker。PostgreSQL 使用无 pipeline batching 的 nonblocking libpq I/O。`NEOGRAPH_BUILD_POSTGRES=ON` 启用需要 libpq 开发文件的可选 target；`OFF` 仅移除此可选依赖。
 
-## PostgreSQL 的持久检查点
+Python callback 在 GIL 下执行。CPU-bound Python node/reducer 不能仅靠增加 worker_count 获得并行；native call 仅在自身实现释放 GIL 时可重叠。typed provider invoke/dispatch 释放 GIL，可通过 `asyncio.to_thread` 调用。这不公开 native provider asyncio awaitable。
 
-对于多进程部署或当检查点必须在重新启动后继续存在时，链接`neograph::postgres`并将 `InMemoryCheckpointStore` 换成`PostgresCheckpointStore`：
-```cpp
-#include <neograph/graph/postgres_checkpoint.h>
+## runtime 依赖和平台验证
 
-auto store = std::make_shared<PostgresCheckpointStore>(
-    "postgresql://user:pass@host:5432/dbname");
-EngineConfig engine_config;
-engine_config.node_context = ctx;
-engine_config.checkpoint_store = store;
-auto engine = GraphEngine::build(def, std::move(engine_config));
-```
+Core 始终链接外部 `SchemaProvider::runtime`，包括 `NEOGRAPH_BUILD_LLM=OFF`。禁用 PostgreSQL、LLM node 或 NeoGraph 可选 CurlH2Pool 不会移除 SDK runtime 的 libcurl 要求。提供匹配的 installed SDK 或 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`。
 
-schema 镜像 LangGraph 的`PostgresSaver`（三个表前缀`neograph_*`与同一数据库中的 LangGraph 状态共存）并通过以下方式对通道值去重`(thread_id, channel, version)`。每个超级步涉及一个通道的 1000 步会话的成本大约为`O(steps + channels)`blob 行而不是`O(steps × channels)`。
+source resolution 依次采用显式 SDK source directory、installed package、revision-pinned 公开 archive fallback（默认 `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON`）。installed SDK 离线构建时将 flag 设为 `OFF`，在 `CMAKE_PREFIX_PATH` 提供 prefix。NeoGraph 与 SDK source 配置要求 CMake 3.20+。
 
-**构建标志**：`-DNEOGRAPH_BUILD_POSTGRES=ON`（默认）。需要`libpq-dev`（apt）/`libpq-devel`（rpm）。设置标志`OFF`完全跳过依赖关系。
-
-**运行集成测试**：启动一个一次性的本地 PG 并将测试二进制文件指向它：
-```bash
-docker run -d --rm --name neograph-pg-test \
-    -e POSTGRES_PASSWORD=test -e POSTGRES_DB=neograph_test \
-    -p 55432:5432 postgres:16-alpine
-
-NEOGRAPH_TEST_POSTGRES_URL='postgresql://postgres:test@localhost:55432/neograph_test' \
-    ctest --test-dir build -R PostgresCheckpoint --output-on-failure
-```
-
-如果没有环境变量，PG 测试会被 `GTEST_SKIP`，因此套件的其余部分在没有 Postgres 的机器上保持绿色。
-
-覆盖范围：`tests/test_graph_engine.cpp`包含`ConcurrentRunDifferentThreadIds`（16 个线程 × 25 次运行 = 400 次并行执行，验证每个会话输出 + 检查点隔离）和`ConcurrentRunSameThreadIdNoCrash`（8 线程 × 50 在一个共享线程上运行`thread_id`，验证无崩溃行为）。
+当前 SDK runtime/archive 验证范围是 Linux/POSIX。已有 Linux/macOS/Windows package metadata 不证明新依赖在所有平台可用。macOS、Windows、WASM 各自需要 runtime/build 验证；portable executor API 不能代替该验证。

@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ko source_sha256=e1c5c9d708af4408691ca586bfbccaab38566f6f8c1f22894dc3d61bff8b68c2 -->
+<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ko source_sha256=6eb929ef5081e8b3789f4156c37b960dd7a91be4c7880451bdb74f562630297f -->
 # AI 국회
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-**현재 범위 한정 실행 증거.** 타입 제공자 전환 후 실제 로컬 A2A 멤버 서버
+**보존된 interface-3 범위 한정 실행 증거.** 타입 제공자 전환 후 실제 로컬 A2A 멤버 서버
 네 개와 C++ 의장이 오프라인 세션을 완료했습니다. 합성 기권은 fixture 출력이며
-모델 판단이나 vendor 추론이 아닙니다. live 제공자 호출이나 유예된 Python
+모델 판단이나 vendor 추론이 아닙니다. live 제공자 호출이나 Python
 의장 binding을 검증하지 않습니다.
 
 신규 NeoGraph 사용자로서 만든 장난감 데모입니다. 모든 API 선택은 NeoGraph의 소스를 열어보지 않고 공개 문서(README, GitHub의 예제, Doxygen)를 읽는 방식으로 이루어졌습니다. 그 목적은 두 가지입니다. A2A가 실제 다중 페르소나 시나리오에서 작동함을 입증하고, 새로운 C++ 개발자가 그 과정에서 겪는 마찰을 드러내는 것입니다.
@@ -29,7 +29,12 @@
 
 각 멤버는 `__start__ → persona → __end__` 뒤에서 제공되는 단일 노드 NeoGraph(`a2a::A2AServer`)입니다. 그래프는 `prompt` 채널을 읽고 `response` 채널에 씁니다. A2A 서버의 기본 `GraphAgentAdapter`는 이를 JSON-RPC로 표면화합니다.
 
-## ⟦14b8b266c2a6⟧
+현재 client는 AgentCard에서 호환되는 JSON-RPC 0.x/1.0 interface를 선택하고 server는 두 dialect를
+광고합니다. 응답 encoding은 `A2A-Version`으로 선택합니다. 최초 SSE task snapshot은 완료 답변이 아닌
+진행 상황입니다. card-selected 요청은 dialect fallback하지 않으며 전달한 event를 재전송하지 않습니다.
+이전 offline 세션은 보존된 1.0 wire 변경의 검증이 아닙니다.
+
+## 라이브 기록 (OpenRouter의 DeepSeek, 2026-04-29)
 
 Bill: [`bills/basic_income.txt`](bills/basic_income.txt) — 기본소득, 월 50만 원, 토지세 + 탄소세 + 누진세로 재원을 마련합니다.
 
@@ -61,10 +66,10 @@ cmake -S . -B build-cookbook \
 cmake --build build-cookbook --target \
     cookbook_ai_assembly_member cookbook_ai_assembly_speaker -j4
 
-# 오프라인 fixture: .env 로드/provider 통신 없음
+# Offline fixture: no .env loading, credentials or provider transport.
 NEOGRAPH_BUILD_DIR="$PWD/build-cookbook" \
   bash examples/cookbook/ai-assembly/scripts/run_session.sh --mock
-# live: 환경 또는 .env에서 키를 비공개 설정
+# Live: privately configure OPENROUTER_API_KEY in the environment or .env.
 NEOGRAPH_BUILD_DIR="$PWD/build-cookbook" \
   bash examples/cookbook/ai-assembly/scripts/run_session.sh
 ```
@@ -73,10 +78,10 @@ typed SchemaProvider CMake 패키지와 빌드 의존성을 먼저 설치하세�
 
 ## Python 스피커 변형(v0.2.1+, 크로스 언어 A2A)
 
-Python 바인딩은 이 전환에서 **deferred(연기)**입니다. `speaker.py`는 별도의 호환 `neograph_engine.a2a`가 필요하며 C++ 전환 완료가 이를 보장하지 않습니다. 아래는 역사적 사용 예입니다.
+`speaker.py`는 provider subclass API가 아닌 `neograph_engine.a2a`를 사용합니다. 이 checkout에서 빌드한 binding을 사용하세요. 이전 공개 wheel은 현재 소스와의 호환성을 보장하지 않습니다. 보존된 C++ 실행에서는 Python speaker를 실행하지 않았습니다.
 
 ```bash
-pip install 'neograph-engine>=0.2.1'
+# Build/install this checkout's Python binding; see docs/python-binding.md.
 # (start the C++ members in another terminal as above)
 PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     examples/cookbook/ai-assembly/bills/basic_income.txt \
@@ -84,7 +89,7 @@ PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     http://127.0.0.1:8103 http://127.0.0.1:8104
 ```
 
-v0.2.1 바인딩은 역사적 릴리스 결과이지 현재 검증이 아닙니다. A2A wire client/protocol은 변경되지 않았습니다.
+v0.2.1 binding은 과거 release 결과이지 현재 검증이 아닙니다. 현재 Python speaker는 C++ caller와 같은 application policy로 실제 terminal/interrupted agent status text, 첫 artifact text, 마지막 비어 있지 않은 agent history text 순서로 선택합니다. agent message는 `ng.a2a.Role.Agent`로 구분하며 제출한 user bill은 member 응답이 될 수 없습니다. application 답변 선택 규칙이지 보편적 A2A 우선순위나 새 runtime pass가 아닙니다.
 
 ## 마찰 일지 — 새로운 NeoGraph 사용자가 걸려 넘어진 것
 
@@ -93,15 +98,15 @@ v0.2.1 바인딩은 역사적 릴리스 결과이지 현재 검증이 아닙니�
 
 ### 1. A2A는 C++ 전용이었습니다 — Python 바인딩이 이를 노출하지 않았습니다 (v0.2.1에서 수정됨)
 
-과거 v0.2.1에서 Python A2A client가 추가되었습니다. 현재 바인딩은 연기되어 있으며 향후 릴리스 제공을 약속하지 않습니다.
+과거 v0.2.1에서 Python A2A client가 추가되었습니다. 현재 소스도 이 client를 공개하며 실행 검증은 현재 Python 실행을 통해 별도로 확인해야 합니다.
 
 ### 2. 시스템 설치 없음 / 휠에 헤더 없음 (README v0.2.1에서 수정됨)
 
 과거 README는 FetchContent를 설명했습니다. 이 recipe에는 통합 타깃만 있고 standalone CMake 프로젝트는 없습니다. SchemaProvider가 필요합니다.
 
-### 3. `OpenAIProvider::create()` `unique_ptr` 대 `shared_ptr` (v0.2.1에서 수정됨)
+### 3. Provider 소유권 (`unique_ptr`와 `shared_ptr`, v0.2.1에서 해결)
 
-과거 `create_shared`는 이전 소유권 문제를 해결했습니다. 현재는 `examples::make_openrouter_provider`와 typed outcome을 사용합니다.
+이전 release는 provider 소유권 문제를 해결했습니다. 현재 recipe는 `examples::make_openrouter_provider`와 typed outcome을 사용합니다.
 
 ### 4. `.env` 자동 로드가 A2A 자식 프로세스로 전파되지 않음 (v0.2.1에서 문서화됨)
 

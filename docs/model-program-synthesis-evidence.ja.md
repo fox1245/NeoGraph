@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=docs/model-program-synthesis-evidence.md locale=ja source_sha256=b0a57aa0f6c4a726e417d88daf8d0e3f90178de20d610884fcba052b0f622105 -->
+<!-- neograph-i18n: source=docs/model-program-synthesis-evidence.md locale=ja source_sha256=c34041ccc8bf5143dd152f292a26c02eb4a487757b4657e0ecfe75b4740a3373 -->
 # モデル生成QuickJS Program合成エビデンス
 
 **Languages:** [English](model-program-synthesis-evidence.md) | [한국어](model-program-synthesis-evidence.ko.md) | [日本語](model-program-synthesis-evidence.ja.md) | [简体中文](model-program-synthesis-evidence.zh-CN.md)
 
-- ステータス: 有界PoC検証済み
+- 状態: 過去の有界 PoC 証拠。現在の binding の新しい検証結果ではありません
 - 観測: 2026-08-21
 - モデル: `deepseek/deepseek-v4-flash-0731`（OpenRouter経由）
 - プロバイダー応答: `gen-1787288110-o3PCpNZgsnE8eyQF1TzM`

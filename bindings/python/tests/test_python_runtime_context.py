@@ -16,9 +16,27 @@ def _record(feed_id="feed", sequence=1, predecessor_id=None):
     data.sequence = sequence
     data.message_id = f"message-{sequence}"
     data.trust = ng.RuntimeTrustClass.UntrustedInput
-    data.message = ng.ChatMessage("user", f"hello-{sequence}")
+    data.message = ng.ProviderMessage(ng.ProviderRole.User, [ng.Text(f"hello-{sequence}")])
     data.predecessor_id = predecessor_id
     return ng.RuntimeHistoryRecord.create(data)
+
+
+def test_returned_message_mutation_cannot_change_immutable_raw_record():
+    record = _record()
+    identity = record.id
+    canonical = record.serialize_canonical()
+    original_message_id = record.message.id
+    detached = record.message
+    detached.role = ng.ProviderRole.Assistant
+    detached.id = "forged-message"
+    parts = detached.parts
+    parts[0].value = "forged content"
+    detached.parts = parts
+    assert record.id == identity
+    assert record.serialize_canonical() == canonical
+    assert record.message.role == ng.ProviderRole.User
+    assert record.message.id == original_message_id
+    assert record.message.parts[0].value == "hello-1"
 
 
 def _epoch(store, profile=ng.RuntimeGuaranteeProfile.Recorded):
@@ -35,23 +53,6 @@ def _epoch(store, profile=ng.RuntimeGuaranteeProfile.Recorded):
     data.raw_window_digest = raw.digest
     data.guarantee_profile = profile
     return ng.ContextEpoch.create(data)
-
-
-class _Provider(ng.Provider):
-    def __init__(self):
-        super().__init__()
-        self.calls = 0
-        self.last_messages = []
-
-    def complete(self, params):
-        self.calls += 1
-        self.last_messages = list(params.messages)
-        result = ng.ChatCompletion()
-        result.message = ng.ChatMessage("assistant", "ok")
-        return result
-
-    def get_name(self):
-        return "python-runtime-context-provider"
 
 
 class _DurableReceipts(ng.DurableProviderDispatchReceiptStore):
@@ -106,36 +107,38 @@ def test_context_store_raw_append_snapshot_and_hydrate_roundtrip():
         first.serialize_canonical() + "\n" + second.serialize_canonical())
 
 
-def test_strict_controller_fails_closed_without_active_epoch_or_durable_receipts():
-    provider = _Provider()
+def test_strict_controller_fails_closed_without_active_epoch_or_durable_receipts(provider_peer):
+    provider = provider_peer.provider()
     contexts = ng.InMemoryContextStore()
     controller = ng.RuntimeInterpositionController(
         provider, contexts, ng.InMemoryProviderDispatchReceiptStore(), _sha("a"))
     with pytest.raises(RuntimeError, match="active context epoch"):
-        controller.invoke(ng.CompletionParams(model="model"))
+        controller.invoke(ng.make_provider_request(provider, "model", []))
     with pytest.raises(ValueError, match="durable dispatch receipt store"):
         controller.activate("owner", _epoch(contexts, ng.RuntimeGuaranteeProfile.Strict))
-    assert provider.calls == 0
+    assert provider_peer.requests == []
 
 
-def test_controlled_path_assembles_epoch_and_keeps_dependencies_alive():
-    provider = _Provider()
+def test_controlled_path_assembles_epoch_and_keeps_dependencies_alive(provider_peer):
+    provider = provider_peer.provider()
     contexts = ng.InMemoryContextStore()
     receipts = _DurableReceipts()
     controller = ng.RuntimeInterpositionController(
         provider, contexts, receipts, _sha("b"), max_input_tokens=1024)
     controller.activate("owner", _epoch(contexts, ng.RuntimeGuaranteeProfile.Strict))
-    params = ng.CompletionParams(model="model")
-    params.messages = [ng.ChatMessage("user", "unadmitted legacy prompt")]
-    assert controller.invoke(params).message.content == "ok"
-    assert provider.calls == 1
-    assert [message.content for message in provider.last_messages] == ["hello-1"]
+    request = ng.make_provider_request(provider, "model", [])
+    outcome = controller.invoke(request)
+    assert outcome.failure is None
+    logical, = provider_peer.logical_requests
+    assert [(message["role"], message["text"]) for message in logical] == [
+        ("user", "hello-1"),
+    ]
     assert len(receipts.receipts) == 1
     assert len(receipts.outcomes) == 1
 
 
-def test_controller_retains_shared_provider_and_store_dependencies():
-    provider = _Provider()
+def test_controller_retains_shared_provider_and_store_dependencies(provider_peer):
+    provider = provider_peer.provider()
     contexts = ng.InMemoryContextStore()
     receipts = _DurableReceipts()
     refs = [weakref.ref(value) for value in (provider, contexts, receipts)]
@@ -181,8 +184,8 @@ def test_context_transform_receipt_preserves_required_skill_identity():
     assert receipt.preserved_required_artifact_ids == [skill.id]
 
 
-def test_strict_runtime_profile_uses_sqlite_durable_stores(tmp_path):
-    provider = _Provider()
+def test_strict_runtime_profile_uses_sqlite_durable_stores(tmp_path, provider_peer):
+    provider = provider_peer.provider()
     contexts = ng.SQLiteContextStore(str(tmp_path / "strict-context.sqlite3"))
     receipts = ng.SQLiteProviderDispatchReceiptStore(
         str(tmp_path / "strict-dispatch.sqlite3")
@@ -201,8 +204,69 @@ def test_strict_runtime_profile_uses_sqlite_durable_stores(tmp_path):
     )
 
     assert profile.active
-    params = ng.CompletionParams(model="model")
-    assert profile.invoke(params).message.content == "ok"
-    assert provider.calls == 1
+    request = ng.make_provider_request(provider, "model", [])
+    assert profile.invoke(request).failure is None
+    assert [(message["role"], message["text"])
+            for message in provider_peer.logical_requests[0]] == [("user", "hello-1")]
     profile.clear()
     assert not profile.active
+
+
+def test_native_raw_record_roundtrip_requires_its_archive_and_owner(provider_peer, tmp_path):
+    provider = provider_peer.provider()
+    request = ng.make_provider_request(provider, "local-model", [
+        ng.ProviderMessage(ng.ProviderRole.User, [ng.Text("native raw history")]),
+    ])
+    prepared = provider.prepare(request)
+    descriptor = prepared.descriptor
+    outcome = provider.dispatch(prepared)
+    assert outcome.failure is None
+    custody = tmp_path / "custody"
+    custody.mkdir(mode=0o700)
+    records = str(custody / "records")
+    key = str(custody / "independent-activation")
+    archive = ng.NativeArchive.provision(records, key, "raw-owner", descriptor)
+    assert isinstance(archive, ng.NativeArchive)
+    data = ng.RuntimeHistoryRecordData()
+    data.feed_id = "native-feed"
+    data.sequence = 1
+    data.message_id = "native-assistant"
+    data.trust = ng.RuntimeTrustClass.ModelOutput
+    data.message = outcome.messages[0]
+    record = ng.RuntimeHistoryRecord.create(data)
+    stored = record.serialize_canonical(archive, "raw-owner")
+    database = str(tmp_path / "native-context.sqlite3")
+    context_store = ng.SQLiteContextStore(database, archive)
+    feed = ng.ContextStoreFeed("raw-owner", "native-feed")
+    assert context_store.append_history(feed, record, None) == ng.ContextStoreAppendResult.Appended
+    del context_store, archive, outcome, record
+    gc.collect()
+    reopened = ng.NativeArchive.open(records, key, "raw-owner", descriptor)
+    assert isinstance(reopened, ng.NativeArchive)
+    restored = ng.RuntimeHistoryRecord.parse(stored, reopened, "raw-owner")
+    assert restored.message.native is not None
+    assert restored.message.parts[0].value == "ok"
+    assert restored.serialize_canonical(reopened, "raw-owner") == stored
+    context_store = ng.SQLiteContextStore(database, reopened)
+    raw_range = context_store.snapshot_history(feed, 1, 1)
+    hydrated, = context_store.hydrate_records(raw_range)
+    assert hydrated.id == restored.id
+    assert hydrated.message.native is not None
+    assert hydrated.message.parts[0].value == "ok"
+    indexed = context_store.history_record_by_message_id(feed, "native-assistant")
+    assert indexed.id == restored.id
+    assert indexed.message.native is not None
+    assert context_store.history_record_by_message_id(feed, "not-recorded") is None
+    missing_custody_store = ng.SQLiteContextStore(database)
+    with pytest.raises(ValueError):
+        missing_custody_store.history_record_by_message_id(feed, "native-assistant")
+    with pytest.raises(ValueError):
+        ng.RuntimeHistoryRecord.parse(stored)
+    with pytest.raises(ValueError):
+        ng.RuntimeHistoryRecord.parse(stored, reopened, "wrong-owner")
+    wrong_archive = ng.NativeArchive.open(records, key, "wrong-owner", descriptor)
+    assert isinstance(wrong_archive, ng.ProviderError)
+    assert wrong_archive.kind == ng.ProviderErrorKind.Permission
+    replay = ng.make_provider_request(
+        provider, "local-model", list(request.messages) + [restored.message])
+    assert provider.invoke(replay).failure is None

@@ -1,4 +1,5 @@
 #include "json_bridge.h"
+#include "provider_bridge.h"
 
 #include <neograph/context_store.h>
 #include <neograph/context_transform.h>
@@ -48,15 +49,13 @@ public:
     }
 };
 
-CompletionRequest request_from(CompletionParams params, bool stream, StreamCallback on_chunk) {
-    return stream ? CompletionRequest::stream(std::move(params), std::move(on_chunk))
-                  : CompletionRequest::collect(std::move(params));
-}
 
 template <typename T>
 void bind_identity_methods(py::class_<T>& cls) {
     cls.def_property_readonly("id", &T::id)
-       .def("serialize_canonical", &T::serialize_canonical);
+       .def("serialize_canonical", [](const T& value) {
+           return value.serialize_canonical();
+       });
 }
 
 }  // namespace
@@ -117,11 +116,24 @@ void init_runtime_context(py::module_& m) {
         .def_readwrite("source_media_type", &RuntimeHistoryRecordData::source_media_type)
         .def_readwrite("predecessor_id", &RuntimeHistoryRecordData::predecessor_id);
     py::class_<RuntimeHistoryRecord> history(m, "RuntimeHistoryRecord");
-    history.def_static("create", &RuntimeHistoryRecord::create).def_static("parse", &RuntimeHistoryRecord::parse)
+    history.def_static("create", &RuntimeHistoryRecord::create)
+        .def_static("parse", &RuntimeHistoryRecord::parse,
+                    py::arg("stored_bytes"), py::arg("archive") = nullptr,
+                    py::arg("owner_id") = "",
+                    py::call_guard<py::gil_scoped_release>())
         .def_property_readonly("feed_id", &RuntimeHistoryRecord::feed_id).def_property_readonly("sequence", &RuntimeHistoryRecord::sequence)
         .def_property_readonly("message_id", &RuntimeHistoryRecord::message_id).def_property_readonly("trust", &RuntimeHistoryRecord::trust)
-        .def_property_readonly("message", &RuntimeHistoryRecord::message).def_property_readonly("predecessor_id", &RuntimeHistoryRecord::predecessor_id);
+        .def_property_readonly("message", [](const RuntimeHistoryRecord& value) { return value.message(); })
+        .def_property_readonly("predecessor_id", &RuntimeHistoryRecord::predecessor_id);
     bind_identity_methods(history);
+    history.def("serialize_canonical",
+                [](const RuntimeHistoryRecord& value,
+                   const std::shared_ptr<sp::NativeArchive>& archive,
+                   std::string_view owner_id) {
+                    return value.serialize_canonical(archive, owner_id);
+                },
+                py::arg("archive"), py::arg("owner_id"),
+                py::call_guard<py::gil_scoped_release>());
 
     py::class_<ContextArtifactData>(m, "ContextArtifactData")
         .def(py::init<>()).def_readwrite("kind", &ContextArtifactData::kind).def_readwrite("producer_id", &ContextArtifactData::producer_id)
@@ -200,6 +212,10 @@ void init_runtime_context(py::module_& m) {
         .def("history_head", &ContextStore::history_head)
         .def("snapshot_history", &ContextStore::snapshot_history)
         .def("hydrate_history", &ContextStore::hydrate_history)
+        .def("hydrate_records", &ContextStore::hydrate_records,
+             py::arg("range"), py::call_guard<py::gil_scoped_release>())
+        .def("history_record_by_message_id", &ContextStore::history_record_by_message_id,
+             py::arg("feed"), py::arg("message_id"), py::call_guard<py::gil_scoped_release>())
         .def("put_artifact", &ContextStore::put_artifact)
         .def("get_artifact", &ContextStore::get_artifact);
     py::class_<DurableContextStore, ContextStore,
@@ -213,7 +229,9 @@ void init_runtime_context(py::module_& m) {
 #ifdef NEOGRAPH_PYBIND_HAS_SQLITE
     py::class_<SQLiteContextStore, DurableContextStore,
                std::shared_ptr<SQLiteContextStore>>(m, "SQLiteContextStore")
-        .def(py::init<std::string>(), py::arg("database_path"));
+        .def(py::init<std::string, std::shared_ptr<sp::NativeArchive>>(),
+             py::arg("database_path"), py::arg("archive") = nullptr,
+             py::call_guard<py::gil_scoped_release>());
 #endif
 
     py::class_<RuntimeContextRequirements>(m, "RuntimeContextRequirements")
@@ -266,12 +284,17 @@ void init_runtime_context(py::module_& m) {
                 *store, budget, std::move(requirements));
         }), py::arg("store"), py::arg("max_input_tokens"), py::arg("requirements"),
             py::keep_alive<1, 2>())
-        .def("assemble", [](const RuntimeTurnAssembler& self, std::string owner, const ContextEpoch& active_epoch,
-                              CompletionParams params, bool stream) {
-            auto turn = self.assemble(std::move(owner), active_epoch, request_from(std::move(params), stream, {}));
-            return py::make_tuple(turn.request.params(), turn.assembly_receipt);
-        }, py::arg("owner_id"), py::arg("epoch"), py::arg("params"), py::arg("stream") = false)
-        .def_static("estimate_input_tokens", &RuntimeTurnAssembler::estimate_input_tokens);
+        .def("assemble", [](const RuntimeTurnAssembler& self, Provider& provider, std::string owner,
+                             const ContextEpoch& epoch, ProviderRequest request) {
+            auto turn = self.assemble(provider, std::move(owner), epoch, std::move(request));
+            return py::make_tuple(std::make_shared<PreparedHandle>(std::move(turn.request)), turn.assembly_receipt);
+        }, py::arg("provider"), py::arg("owner_id"), py::arg("epoch"), py::arg("request"))
+        .def_static("estimate_input_tokens", [](const PreparedHandle& request) {
+            return RuntimeTurnAssembler::estimate_input_tokens(request.get());
+        })
+        .def_static("normalized_request_digest", [](const PreparedHandle& request) {
+            return RuntimeTurnAssembler::normalized_request_digest(request.get());
+        });
 
     py::class_<ProviderDispatchReceiptData>(m, "ProviderDispatchReceiptData").def(py::init<>())
         .def_readwrite("dispatch_id", &ProviderDispatchReceiptData::dispatch_id).def_readwrite("provider_binding_identity", &ProviderDispatchReceiptData::provider_binding_identity)
@@ -322,10 +345,17 @@ void init_runtime_context(py::module_& m) {
     py::class_<ControlledProvider>(m, "ControlledProvider")
         .def(py::init<std::shared_ptr<Provider>, std::shared_ptr<ProviderDispatchReceiptStore>, std::string>(),
              py::arg("provider"), py::arg("receipts"), py::arg("provider_binding_identity"), py::keep_alive<1, 2>(), py::keep_alive<1, 3>())
-        .def("dispatch", [](ControlledProvider& self, std::string dispatch_id, const ContextAssemblyReceipt& assembly,
-                             CompletionParams params, bool stream, StreamCallback on_chunk) {
-            return self.dispatch(std::move(dispatch_id), assembly, request_from(std::move(params), stream, std::move(on_chunk)));
-        }, py::arg("dispatch_id"), py::arg("assembly"), py::arg("params"), py::arg("stream") = false, py::arg("on_chunk") = StreamCallback{});
+        .def("dispatch", [](ControlledProvider& self, std::string dispatch_id,
+                            const ContextAssemblyReceipt& assembly, ProviderRequest request) {
+            py::gil_scoped_release release;
+            return self.dispatch(std::move(dispatch_id), assembly, std::move(request));
+        }, py::arg("dispatch_id"), py::arg("assembly"), py::arg("request"))
+        .def("dispatch_prepared", [](ControlledProvider& self, std::string dispatch_id,
+                                     const ContextAssemblyReceipt& assembly, PreparedHandle& prepared) {
+            auto request = prepared.take();
+            py::gil_scoped_release release;
+            return self.dispatch_prepared(std::move(dispatch_id), assembly, std::move(request));
+        }, py::arg("dispatch_id"), py::arg("assembly"), py::arg("prepared"));
     py::class_<RuntimeInterpositionController>(m, "RuntimeInterpositionController")
         .def(py::init<std::shared_ptr<Provider>, std::shared_ptr<ContextStore>, std::shared_ptr<ProviderDispatchReceiptStore>, std::string, std::uint64_t, std::vector<std::string>>(),
               py::arg("provider"), py::arg("context_store"), py::arg("dispatch_store"), py::arg("provider_binding_identity"), py::arg("max_input_tokens") = 0, py::arg("static_required_skill_artifact_ids") = std::vector<std::string>{},
@@ -334,26 +364,10 @@ void init_runtime_context(py::module_& m) {
         .def_property_readonly("active", &RuntimeInterpositionController::active)
         .def("set_hook_runtime", &RuntimeInterpositionController::set_hook_runtime,
              py::arg("runtime"), py::keep_alive<1, 2>())
-        .def("invoke", [](RuntimeInterpositionController& self,
-                           CompletionParams params,
-                           py::object on_chunk) {
-            StreamCallback callback;
-            std::shared_ptr<py::function> held;
-            if (!on_chunk.is_none()) {
-                held = std::shared_ptr<py::function>(
-                    new py::function(on_chunk.cast<py::function>()),
-                    [](py::function* value) {
-                        py::gil_scoped_acquire acquire;
-                        delete value;
-                    });
-                callback = [held](const std::string& chunk) {
-                    py::gil_scoped_acquire acquire;
-                    (*held)(chunk);
-                };
-            }
+        .def("invoke", [](RuntimeInterpositionController& self, ProviderRequest request) {
             py::gil_scoped_release release;
-            return self.invoke(std::move(params), std::move(callback));
-        }, py::arg("params"), py::arg("on_chunk") = py::none());
+            return self.invoke(std::move(request));
+        }, py::arg("request"));
 
     py::class_<StrictRuntimeProfile, std::shared_ptr<StrictRuntimeProfile>>(
         m, "StrictRuntimeProfile")
@@ -383,12 +397,11 @@ void init_runtime_context(py::module_& m) {
         .def_property_readonly("active", &StrictRuntimeProfile::active)
         .def("attach", &StrictRuntimeProfile::attach, py::arg("engine"),
              py::keep_alive<2, 1>())
-        .def("invoke", [](const StrictRuntimeProfile& self,
-                           CompletionParams params) {
+        .def("invoke", [](const StrictRuntimeProfile& self, ProviderRequest request) {
             auto controller = self.interposition();
             py::gil_scoped_release release;
-            return controller->invoke(std::move(params));
-        }, py::arg("params"),
+            return controller->invoke(std::move(request));
+        }, py::arg("request"),
              "Invoke through this profile's strict context, Hook, and receipt boundary.")
         .def_property_readonly("interposition", &StrictRuntimeProfile::interposition)
         .def_property_readonly("hooks", &StrictRuntimeProfile::hooks)

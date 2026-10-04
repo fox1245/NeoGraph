@@ -17,6 +17,9 @@
 #include <neograph/graph/node.h>
 
 #include "fixtures/typed_provider.h"
+#define CPPHTTPLIB_OPENSSL_SUPPORT
+#include <httplib.h>
+
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -926,6 +929,164 @@ TEST(A2AServer, MethodNotFoundReturnsCorrectCode) {
             throw;
         }
     }, std::runtime_error);
+}
+
+
+// ---------------------------------------------------------------------------
+// A2A 1.0 wire dialect: the response generation follows `A2A-Version`
+// (spec §3.6.2), both method spellings are accepted with either version.
+// ---------------------------------------------------------------------------
+namespace {
+
+neograph::json raw_rpc(const LiveServer& srv, const std::string& method,
+                       const neograph::json& params, const std::string& version) {
+    httplib::Client c("127.0.0.1", srv.port);
+    httplib::Headers headers;
+    if (!version.empty()) headers.emplace("A2A-Version", version);
+    neograph::json body = {{"jsonrpc", "2.0"}, {"id", 1},
+                           {"method", method}, {"params", params}};
+    auto res = c.Post("/", headers, body.dump(), "application/json");
+    if (!res) throw std::runtime_error("no response");
+    return neograph::json::parse(res->body);
+}
+
+const neograph::json kV1SendParams = neograph::json::parse(R"({
+    "message": {"messageId": "m-1", "role": "ROLE_USER",
+                "parts": [{"text": "hello v1"}]}
+})");
+
+}  // namespace
+
+TEST(A2AServerV1, AgentCardAdvertisesBothWireGenerations) {
+    LiveServer srv;
+    httplib::Client c("127.0.0.1", srv.port);
+    auto res = c.Get("/.well-known/agent-card.json");
+    ASSERT_TRUE(res);
+    auto card = neograph::json::parse(res->body);
+    EXPECT_EQ(card["protocolVersion"], "0.3.0");   // legacy fields untouched
+    ASSERT_TRUE(card.contains("supportedInterfaces"));
+    ASSERT_EQ(card["supportedInterfaces"].size(), 2u);
+    EXPECT_EQ(card["supportedInterfaces"][0]["protocolVersion"], "1.0");
+    EXPECT_EQ(card["supportedInterfaces"][0]["protocolBinding"], "JSONRPC");
+    EXPECT_EQ(card["supportedInterfaces"][1]["protocolVersion"], "0.3");
+}
+
+TEST(A2AServerV1, V1RequestGetsProtoJsonResponse) {
+    LiveServer srv;
+    auto rpc = raw_rpc(srv, "SendMessage", kV1SendParams, "1.0");
+    ASSERT_TRUE(rpc.contains("result")) << rpc.dump();
+    const auto& task = rpc["result"]["task"];
+    EXPECT_EQ(task["status"]["state"], "TASK_STATE_COMPLETED");
+    EXPECT_FALSE(task.contains("kind"));
+    EXPECT_EQ(task["history"][0]["role"], "ROLE_AGENT");
+    EXPECT_EQ(task["history"][0]["parts"][0], neograph::json({{"text", "echo:hello v1"}}));
+
+    auto got = raw_rpc(srv, "GetTask", {{"id", task["id"]}}, "1.0");
+    EXPECT_EQ(got["result"]["status"]["state"], "TASK_STATE_COMPLETED");
+    EXPECT_FALSE(got["result"].contains("kind"));
+    auto slash_with_v1_header = raw_rpc(srv, "message/send", kV1SendParams, "1.0.2");
+    EXPECT_EQ(slash_with_v1_header["result"]["task"]["status"]["state"],
+              "TASK_STATE_COMPLETED");
+    EXPECT_FALSE(slash_with_v1_header["result"]["task"].contains("kind"));
+}
+
+TEST(A2AServerV1, LegacyRequestsKeepLegacyResponses) {
+    LiveServer srv;
+    // No header = 0.3 (spec), even with the PascalCase spelling an older
+    // NeoGraph client fell back to.
+    // Not named `pascal`: Apple's system headers define that as a macro.
+    auto pascal_spelling = raw_rpc(srv, "SendMessage", kV1SendParams, "");
+    EXPECT_EQ(pascal_spelling["result"]["kind"], "task");
+    EXPECT_EQ(pascal_spelling["result"]["status"]["state"], "completed");
+    auto slash = raw_rpc(srv, "message/send", kV1SendParams, "0.3");
+    EXPECT_EQ(slash["result"]["kind"], "task");
+}
+
+TEST(A2AServerV1, UnsupportedVersionIsVersionNotSupportedError) {
+    LiveServer srv;
+    auto rpc = raw_rpc(srv, "SendMessage", kV1SendParams, "2.0");
+    ASSERT_TRUE(rpc.contains("error")) << rpc.dump();
+    EXPECT_EQ(rpc["error"]["code"], -32009);
+}
+
+TEST(A2AServerV1, NeoGraphClientNegotiatesV1AgainstNeoGraphServer) {
+    LiveServer srv;
+    A2AClient client(srv.url());
+    (void)client.fetch_agent_card();
+    auto task = client.send_message_sync("negotiated");
+    EXPECT_EQ(client.wire_dialect(), WireDialect::V1_0);
+    EXPECT_EQ(task.status.state, TaskState::Completed);
+    ASSERT_FALSE(task.history.empty());
+    EXPECT_EQ(task.history.back().parts[0].text, "echo:negotiated");
+
+    auto fetched = client.get_task(task.id);
+    EXPECT_EQ(fetched.status.state, TaskState::Completed);
+}
+
+TEST(A2AServerV1, V1StreamOpensWithTaskAndEndsOnTerminalStatus) {
+    LiveServer srv;
+    A2AClient client(srv.url());
+    (void)client.fetch_agent_card();
+
+    std::vector<StreamEvent::Type> types;
+    std::vector<TaskState> states;
+    auto task = client.send_message_stream("v1 stream", [&](const StreamEvent& ev) {
+        types.push_back(ev.type);
+        if (ev.status_update) states.push_back(ev.status_update->status.state);
+        return true;
+    });
+
+    ASSERT_GE(types.size(), 3u);
+    EXPECT_EQ(types.front(), StreamEvent::Type::Task);          // opening Task
+    EXPECT_EQ(types.back(),  StreamEvent::Type::StatusUpdate);  // terminal, no trailing Task
+    EXPECT_EQ(states.front(), TaskState::Working);
+    EXPECT_EQ(states.back(),  TaskState::Completed);
+    EXPECT_EQ(task.status.state, TaskState::Completed);
+    ASSERT_FALSE(task.history.empty());
+    EXPECT_EQ(task.history.back().parts[0].text, "echo:v1 stream");
+}
+
+TEST(A2AServerV1, RawStreamEmitsArtifactBeforeTerminalWithoutLegacyFields) {
+    auto adapter = std::make_shared<StructuredOutputAdapter>(
+        "neograph/echo", 1, "response");
+    A2AServer server(build_echo_engine(), build_card(0), adapter);
+    ASSERT_TRUE(server.start_async("127.0.0.1", 0));
+    httplib::Client peer("127.0.0.1", server.port());
+    const json request = {{"jsonrpc", "2.0"}, {"id", 1},
+        {"method", "SendStreamingMessage"}, {"params", kV1SendParams}};
+    auto response = peer.Post("/", httplib::Headers{{"A2A-Version", "1.0"}},
+                              request.dump(), "application/json");
+    ASSERT_TRUE(response);
+    EXPECT_EQ(response->status, 200);
+    std::vector<json> frames;
+    std::size_t offset = 0;
+    while (offset < response->body.size()) {
+        auto end = response->body.find("\n\n", offset);
+        ASSERT_NE(end, std::string::npos);
+        auto frame = response->body.substr(offset, end - offset);
+        ASSERT_EQ(frame.substr(0, 6), "data: ");
+        frames.push_back(json::parse(frame.substr(6))["result"]);
+        offset = end + 2;
+    }
+    ASSERT_GE(frames.size(), 4u);
+    EXPECT_EQ(frames.front()["task"]["status"]["state"], "TASK_STATE_SUBMITTED");
+    const auto& artifact = frames[frames.size() - 2]["artifactUpdate"];
+    EXPECT_EQ(artifact["lastChunk"], true);
+    EXPECT_EQ(artifact["artifact"]["parts"][0]["data"]["value"], "echo:hello v1");
+    const auto& terminal = frames.back()["statusUpdate"];
+    EXPECT_EQ(terminal["status"]["state"], "TASK_STATE_COMPLETED");
+    EXPECT_FALSE(terminal.contains("final"));
+    for (const auto& frame : frames) {
+        if (frame.contains("task")) EXPECT_FALSE(frame["task"].contains("kind"));
+        if (frame.contains("statusUpdate")) {
+            EXPECT_FALSE(frame["statusUpdate"].contains("kind"));
+            EXPECT_FALSE(frame["statusUpdate"].contains("final"));
+        }
+        if (frame.contains("artifactUpdate")) {
+            EXPECT_FALSE(frame["artifactUpdate"].contains("kind"));
+            EXPECT_FALSE(frame["artifactUpdate"]["artifact"]["parts"][0].contains("kind"));
+        }
+    }
 }
 
 }  // namespace

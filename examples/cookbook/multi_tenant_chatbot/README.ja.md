@@ -1,9 +1,11 @@
-<!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=ja source_sha256=5474fadf775a74ca7e8250b121ce2bdd915f0f6c63347cfc12b141543c63fb58 -->
+<!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=ja source_sha256=5b5b58f71f1129b96f7164783daefd9467d64ba6bc19df7d96ef3a99bfaf8fe6 -->
 # マルチテナントチャットボットサーバー
 
 ## 現在のソース境界と過去の測定
 
-C++ mock/live は型付き SDK request と完全な不変 Outcome を使用します。engine cache identity は
+mock は provider-free です。cache は topology、model、instruction、extra configuration、provider name を結びますが live cache の tenant/provider capability key は使いません。mock の再利用結果は production cross-tenant 分離の証明ではありません。
+
+C++ live は型付き SDK request と完全な不変 Outcome を使用します。engine cache identity は
  tenant/topology と捕捉した provider/model/host instruction に結び付きます。信頼 host の tenant 選択、
 quota/store 境界、thread 分離は維持します。portable JSON 要約は native authority ではありません。
 以下の数値/実行記録は過去の資料で、新移行の実行または live pass ではありません。
@@ -12,7 +14,10 @@ live binary は **1,000 request / 32 worker** 固定で、低費用 small-smoke 
 価格や zero-error を保証しません。鍵/prompt/artifact は非公開で raw native payload を公開しません。
 provider retry は明示的な一 layer、既定 off。旧 throttle-provider wrapper は現在の public API にありません。
 
-新しい model-free E2E では専用 mock workload1,000 graph要求・error0・compiled topology3・cache hit997を
+`server_live_llm.cpp` は型付き provider factory に経路別180秒 timeout を渡します。
+全体の既定値は変えず、timeout は不確実/観測済み呼出しの再送権限ではありません。
+
+保存済み interface-3 model-free E2E では専用 mock workload1,000 graph要求・error0・compiled topology3・cache hit997を
 観察し、Alice topology置換は既存 fanout engineを再使用しました。これは topology load/cache証拠で、
 production認証・quota・semantic response・memory capacity保証ではありません。isolated-host CLIは
 異なるpolicy tuple二つを出力しましたが graphを実行しませんでした。
@@ -22,16 +27,38 @@ production認証・quota・semantic response・memory capacity保証ではあり
 
 **1つのプロセスが、N人の顧客に対してN種類の異なるエージェントトポロジーを同時に提供する。** 測定値：実OpenAI呼び出し1000並行／顧客6／トポロジー3／**ピーク29 MB／エラー0**。
 
-> 「100人の顧客がそれぞれ異なる
-> エージェントハーネス（ReAct、Plan&Execute、fanout、反射型…）を使うチャットボットSaaSをどう運用するか？」
->
-> LangGraphの答え：顧客ごとに1プロセスを起動する。100顧客＝100プロセス＝
-> 約8 GB＋supervisord／k8s。
->
-> NeoGraphの答え：**顧客ごとのgraph_def JSON行をDBに1つ入れ、
-> コンパイルキャッシュエントリを1つ用意すれば完了。** プロセス1つあたり30 MB未満に収まる。
+mock workload は捕捉した設定が同等の場合だけ compiled engine を共有します。認証、tenant 選択、store と quota は host の責任です。以下の過去の RSS はそれらの上限ではありません。
 
 このクックブックは、その構造の動作する最小実装である。
+
+## 分離契約 (production 境界)
+
+上の測定は topology 共有の測定で、production SaaS の security/capacity 保証ではありません。認証済み ingress が不変 `TenantScope` を作り、tenant 別 provider/model policy、`GraphRegistry` snapshot、`ToolSet`、`ScopedStore`、`ScopedCheckpointStore`、Harness namespace、`TenantQuota` を提供します。
+
+```cpp
+auto backend_store = std::make_shared<InMemoryStore>(); // or a tenant DB
+auto backend_checkpoints = std::make_shared<InMemoryCheckpointStore>();
+TenantScope scope("tenant-a", "authz-a"); // trusted ingress only
+ScopedStore store(scope, backend_store);
+ScopedCheckpointStore checkpoints(scope, backend_checkpoints);
+TenantQuota quota({.max_concurrency = 32, .max_queue = 64,
+                   .max_model_tokens = 2'000'000, .max_artifacts = 1000});
+```
+
+公開 thread/checkpoint/run/artifact ID は各 tenant で再利用できます。scoped adapter は private backend namespace に写し、違う tenant の lookup は absence を返します。resume、replay、fork、cancellation、dereference は同じ ingress scope を使います。
+
+`CatalogConfig::materialization_context_identity` は provider/model policy、tool catalog、store、registry snapshot を識別する non-secret host identity で generation cache identity の一部です。credential、authorization token、topology JSON を identity/cache key/journal/log/diagnostic に入れないでください。exact capability receipt が意図的に同等の場合のみ省略します。
+
+mock は topology 再利用を示し、tenant/provider 分離、quota、production memory を証明しません。production host は tenant 別 scoped engine/resource binding を保持し、自分で測定してください。
+
+### Offline isolated-host reference
+
+```bash
+cmake --build build --target cookbook_multi_tenant_isolated_host
+./build/cookbook_multi_tenant_isolated_host
+```
+
+この CLI は異なる topology、provider/model、tool、store、quota policy tuple 二つを出力します。graph は実行しません。synthetic identity を使い network credential は不要です。production ingress/control-plane は deployment host が実装します。
 
 ## シナリオ
 
@@ -45,16 +72,18 @@ production認証・quota・semantic response・memory capacity保証ではあり
 
 各顧客のgraph_defはインラインJSONとして定義されているが、実際の本番環境ではPostgres `customer_graphs.graph_def JSONB` 行として直接保存される。
 
-Coreのコードフロー（[server.cpp](server.cpp:140-176)）：
+Coreのコードフロー（[server.cpp](server.cpp)）：
 
 ```cpp
 class CompileCache {
     std::shared_mutex mu_;
-    std::unordered_map<size_t, std::shared_ptr<GraphEngine>> cache_;
+    std::unordered_map<std::string, std::shared_ptr<GraphEngine>> cache_;
     std::atomic<std::size_t> hits_{0}, misses_{0};
 public:
     std::shared_ptr<GraphEngine> get_or_compile(const json& def, const NodeContext& ctx) {
-        size_t key = std::hash<std::string>{}(def.dump());
+        // This provider-free style demo still binds all captured configuration.
+        const std::string key = json::array({def, ctx.model, ctx.instructions,
+            ctx.extra_config, ctx.provider_name}).dump();
         {
             std::shared_lock lk(mu_);
             if (auto it = cache_.find(key); it != cache_.end()) {
@@ -62,13 +91,23 @@ public:
                 return it->second;
             }
         }
+        // Miss — compile (lock 밖에서, 다른 customer 차단 안 함).
         auto raw = GraphEngine::build(def, EngineConfig{.node_context = ctx});
         std::shared_ptr<GraphEngine> engine(raw.release());
-        std::unique_lock lk(mu_);
-        cache_.emplace(key, engine);
+        {
+            std::unique_lock lk(mu_);
+            auto [it, inserted] = cache_.emplace(key, engine);
+            if (!inserted) {
+                hits_.fetch_add(1, std::memory_order_relaxed);
+                return it->second;  // race — 다른 thread 가 먼저 넣음
+            }
+        }
         misses_.fetch_add(1, std::memory_order_relaxed);
         return engine;
     }
+    std::size_t hits()   const { return hits_.load(); }
+    std::size_t misses() const { return misses_.load(); }
+    std::size_t size()   { std::shared_lock lk(mu_); return cache_.size(); }
 };
 
 // On request arrival
@@ -76,7 +115,7 @@ auto def    = db.fetch_graph(customer_id);   // One JSONB row
 auto engine = cache.get_or_compile(def, ctx);
 RunConfig cfg;
 cfg.thread_id = customer_id + "__" + session_id;   // Session isolation key
-cfg.input     = user_message;
+cfg.input     = {{"messages", json::array({{{"role", "user"}, {"content", user_message}}})}};
 auto result   = engine->run(cfg);
 ```
 
@@ -84,7 +123,9 @@ auto result   = engine->run(cfg);
 
 ## ビルド / 実行
 
-### モックプロバイダーバージョン（外部依存関係ゼロ）
+### Mock 版 (provider 呼び出しなし)
+
+native 構成/link には key がなくても SchemaProvider が必要です。先に `CMAKE_PREFIX_PATH` または `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` を指定してください。
 
 ```bash
 cmake --build build --target cookbook_multi_tenant_mock
@@ -122,44 +163,15 @@ cmake --build build --target cookbook_multi_tenant_live
 
 - **1000件の同時実行中のLLMコルーチン + 接続メモリコスト ≈ 29 MB**。 100リクエスト → 1000リクエストで+7 MB増加 ⇒ 追加コネクション1件あたり約 8 KB。asioコルーチン + httplib SSLコネクションプールの組み合わせ。
 - 過去の1000 request 実行のエラー0件は現在の reliability 保証ではありません。
-- **キャッシュヒット率 99.4%** — トポロジー数が同じなら顧客が増えてもヒット率は維持される。**1000顧客シナリオのメモリも ~30 MB のまま**。
+- **Cache hit rate 99.4%** — この過去の workload の観察で、1,000 production tenant の memory capacity を保証しません。
 
 ## LangGraph比較 — 実際の意味
 
-同じマルチテナントシナリオをLangGraphで試すと、以下のボトルネック発生:
-
-| Aspect | NeoGraph | LangGraph |
-|---|---|---|
-| 1プロセス内のN顧客 × Nトポロジー | **はい**（29 MB / 1000リクエスト） | いいえ — StateGraph はPythonオブジェクトであり、シリアライゼーション／ストレージが不便（pickleはインポートパスを同梱する） |
-| 顧客固有のトポロジー変更 | DB行のUPDATE 1件 | コードPR → CI → デプロイサイクル |
-| バージョン分離（顧客Aのv1／v2グラフが共存） | `graph_versions` 行の追加 | Python名前空間の衝突、ハックが必要 |
-| マルチプロセス強制 | 不要 | 顧客＝プロセス が一般的なパターン |
-| メモリ（顧客6名） | 29 MB | 6 × ~80 MB = 480 MB（LGアイドルベースライン） |
-| メモリ（顧客1000社） | ~30 MB（キャッシュは変更なし） | **~80 GB**（顧客ごとのプロセス） |
-| 運用インフラストラクチャ | 単一バイナリ | gunicorn / supervisord / k8s + プロセスオーケストレーション |
-
-**プロセスあたり30 MB vs 80 GB。** 2700倍の差が、真のマルチテナントチャットボットSaaS運用の本質です。
+この実行は LangGraph を benchmark していません。LangGraph は顧客ごとに一 process を要求しません。比較には同じ graph、store、provider、isolation policy が必要です。以前の process-per-customer 推定は測定結果ではありません。
 
 ## 実践シナリオ — どこまで行けるか
 
-`t2.micro`（1 vCPU / 1 GB RAM、約$0.01/時間）で可能なシナリオ：
-
-| シナリオ | NGメモリ見積もり | t2.microで可能ですか？ |
-|---|---|---|
-| 100の同時進行中のLLM + 100顧客 × 3トポロジー | ~10 MB | ✅ 十分な容量。~990 MB残 |
-| 1000件の同時実行中 + 1000顧客 × 10トポロジー | 約30 MB | ✅ 余裕あり 約970 MB残り |
-| 10,000件の同時実行中 + 10,000顧客 × 100トポロジー | 約85 MB | ✅ 余裕あり 約915 MB残り |
-| 100,000件の同時実行中 + … | 約800 MB | ⚠️ RAMがほぼ使い切られた |
-
-* 仮定: 接続1件あたり約8 KB + コンパイルキャッシュエントリ1件あたり約10 KB + ベース5 MB。
-
-もちろん、OpenRouterのレート制限がスループットの上限であり、**重要な点は顧客1人あたりの限界コストが約0であること**。
-
-> t2.micro 1 GB上のLangGraph、100顧客 = 100プロセス =
-> 8 GBが必要 → インスタンス自体が起動できない。**m5.2xlarge（32 GB、約$0.38/時間）が必要。**
->
-> 同じタスクをNGで = **単一のt2.micro（$0.01/時間）。インフラストラクチャは38倍。**
-> コスト差。
+六顧客の過去の load から cloud instance の容量や 10,000/100,000 connection を予測できません。実際の認証、tenant 別 resource、store、provider route と limit で production host を測定してください。SDK transport の現在の検証範囲は Linux/POSIX です。
 
 ## ホットスワップのデモンストレーション
 
@@ -175,7 +187,4 @@ cmake --build build --target cookbook_multi_tenant_live
 
 ## Core メッセージ
 
-> *"6000顧客 × 3トポロジー = 29 MB。JSON行の1編集 = デプロイなしのホットスワップ。
-> 0件のエラー: 1000並行の実OpenAI呼び出し時。単一のt2.microで運用可能。"*
-
-この1行は、パフォーマンス数値（`5.5 MB L3 fit / 1024 worker idle 31 MB`）よりもNeoGraphのよりインパクトのあるセールスポイントになるかもしれません。
+保存された mock 証拠は 1,000 request、三 compiled topology、997 cache hit です。isolated-host CLI は policy reference で serving workload ではありません。上の live timing は過去の記録で新移行の pass ではありません。

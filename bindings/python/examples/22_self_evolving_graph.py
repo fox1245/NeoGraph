@@ -10,18 +10,12 @@ Premise: NeoGraph definitions are JSON. A node's prompt can live in
      JSON.
   4. Apply the proposed JSON, recompile a fresh engine, retry.
 
-This is the smallest demo that proves the loop closes:
-
-  Goal:     produce a JSON object with exactly the keys
-            {"name", "age", "city"} (typed string/int/string).
-  Initial:  one LLM node with a vague prompt — almost always fails.
-  Evolve:   LLM proposes a stricter system_prompt; if still failing,
-            it adds a critic node, then a retry edge.
-
-The 'self-modifier' is a separate LLM call whose ONLY job is to emit
-a new graph JSON. We do not let it execute arbitrary Python — the
-attack surface is just the JSON validator (`GraphEngine.compile`
-rejects invalid graphs).
+The goal is a JSON object with exactly {"name", "age", "city"}, with
+string/integer/string values. The initial graph has one vaguely prompted
+writer. A separate model call proposes new graph JSON after a failed score;
+the driver admits only registered prompted_llm nodes before compiling it.
+JSON validation is not a security sandbox: admitted nodes can still spend
+provider resources. Each graph run also has a bounded superstep count.
 
 Run:
     OPENAI_API_KEY=sk-... python 22_self_evolving_graph.py
@@ -37,21 +31,9 @@ Caveats / honest limits of this PoC:
     needs cost/latency budgets and rejection of out-of-distribution
     graphs (e.g., reject definitions that introduce un-registered
     node types or unbounded loops).
-  - Observed in practice: the LLM is good at adding nodes but bad at
-    reasoning about channel data flow. A 3-stage chain that routes
-    "raw_reply" through writer→critic→validator without distinct
-    channels per stage degrades — each node's "user_template" only
-    sees {seed}, not the previous stage's output. The fix that the
-    self-modifier needs to learn (and our prompt doesn't currently
-    teach it well): add per-stage channels and reference them via
-    {channel_name} placeholders in user_template.
-
-    What this tells us: graph topology mutation is the easy part;
-    data-flow rewiring is the hard part. A second-iteration version
-    of this PoC should expose the channel graph more explicitly to
-    the modifier — e.g., let it see "node X currently reads from
-    channels {a,b} and writes to {c}" rather than expecting it to
-    trace edges through raw JSON.
+  - Prompts can reference declared state channels with {channel_name}
+    placeholders. Added stages need distinct output channels and matching
+    input templates; edges alone do not pass an earlier node's reply.
 """
 
 from __future__ import annotations
@@ -66,7 +48,7 @@ import neograph_engine as ng
 
 # Reuse the example helper for env loading + Provider construction.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import openai_provider  # noqa: E402
+from _common import ask_text, schema_provider  # noqa: E402
 
 
 # ── A generic LLM node whose prompts come from the graph JSON ───────
@@ -105,28 +87,12 @@ class PromptedLLMNode(ng.GraphNode):
         return self._name
 
     def run(self, input):
-        seed = input.state.get("seed") or ""
-        params = ng.CompletionParams()
-        params.model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
-        params.temperature = 0.4
-        params.max_tokens = 250
-
-        params.messages = [
+        values = {channel: input.state.get(channel)
+                  for channel in input.state.channel_names()}
+        text = ask_text(self._ctx.provider, messages=[
             ng.ChatMessage(role="system", content=self._system_prompt),
-            ng.ChatMessage(
-                role="user",
-                content=self._user_template.format(seed=seed)),
-        ]
-        result = self._ctx.provider.complete(params)
-        text = result.message.content if result.message else ""
-        if not text.strip():
-            # Reasoning models may spend a small token budget before emitting
-            # visible content. Retry once with enough room for the final answer.
-            params.max_tokens = max(params.max_tokens, 1200)
-            result = self._ctx.provider.complete(params)
-            text = result.message.content if result.message else ""
-        if not text.strip():
-            raise RuntimeError("model returned no visible profile content")
+            ng.ChatMessage(role="user", content=self._user_template.format_map(values)),
+        ], temperature=0.4, max_output_tokens=1200)
         return [ng.ChannelWrite(self._output_channel, text)]
 
 
@@ -162,7 +128,7 @@ def evaluate(reply_text: str) -> tuple[float, str]:
 
     if not isinstance(data.get("name"), str):
         return 0.6, f"'name' must be a string, got {type(data['name']).__name__}"
-    if not isinstance(data.get("age"), int):
+    if type(data.get("age")) is not int:
         return 0.7, f"'age' must be an int, got {type(data['age']).__name__}"
     if not isinstance(data.get("city"), str):
         return 0.8, f"'city' must be a string, got {type(data['city']).__name__}"
@@ -216,26 +182,10 @@ Current graph:
 
 Return the revised graph JSON now."""
 
-    params = ng.CompletionParams()
-    params.model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
-    params.temperature = 0.2
-    params.max_tokens = 1200
-    params.messages = [
-        ng.ChatMessage(role="system",
-                       content="You output strict JSON only — no prose."),
+    raw = ask_text(provider, messages=[
+        ng.ChatMessage(role="system", content="You output strict JSON only, no prose."),
         ng.ChatMessage(role="user", content=instructions),
-    ]
-    result = provider.complete(params)
-    raw = result.message.content if result.message else ""
-    if not raw.strip():
-        # The modifier emits a whole graph, so reasoning models need more room
-        # than the ordinary writer node before any visible JSON appears.
-        params.max_tokens = max(params.max_tokens, 4096)
-        params.timeout_seconds = max(params.timeout_seconds, 300)
-        result = provider.complete(params)
-        raw = result.message.content if result.message else ""
-    if not raw.strip():
-        raise RuntimeError("self-modifier returned no visible graph JSON")
+    ], temperature=0.2, max_output_tokens=4096)
 
     # Strip code fences if the LLM ignored the instruction.
     raw = raw.strip()
@@ -250,6 +200,16 @@ Return the revised graph JSON now."""
     except json.JSONDecodeError as e:
         raise RuntimeError(
             f"self-modifier returned non-JSON: {e}. raw: {raw[:400]!r}")
+    if not isinstance(proposed, dict):
+        raise RuntimeError("self-modifier graph must be an object")
+    if proposed.get("name") != current_graph.get("name"):
+        raise RuntimeError("self-modifier must preserve the graph name")
+    nodes = proposed.get("nodes")
+    if not isinstance(nodes, dict) or not nodes or any(
+        not isinstance(node, dict) or node.get("type") != "prompted_llm"
+        for node in nodes.values()
+    ):
+        raise RuntimeError("self-modifier may only use prompted_llm nodes")
     if proposed.get("schema_version") != current_schema:
         raise RuntimeError(
             "self-modifier changed or omitted schema_version: "
@@ -287,12 +247,12 @@ INITIAL_GRAPH: dict[str, Any] = {
 
 def run_one(graph: dict, seed: str, ctx) -> str:
     engine = ng.GraphEngine.compile(graph, ctx)
-    result = engine.run(ng.RunConfig(thread_id="evolve", input={"seed": seed}))
+    result = engine.run(ng.RunConfig(thread_id="evolve", input={"seed": seed}, max_steps=20))
     return result.output["channels"]["raw_reply"]["value"]
 
 
 def main(max_iters: int = 5):
-    provider = openai_provider()
+    provider = schema_provider()
     ctx = ng.NodeContext(provider=provider)
 
     graph = INITIAL_GRAPH

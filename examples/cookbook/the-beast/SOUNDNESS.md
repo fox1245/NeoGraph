@@ -6,9 +6,13 @@
 
 The migrated C++ author/repair paths build typed `ProviderRequest` and `sp::Message` histories and consume full immutable `sp::Outcome` results, including every returned native message/part. Text extraction is only for parsing the candidate JSON/Python; it is not used to replace native conversation history. Compiler/parse/initialization feedback is appended after those messages. Semantic repair is bounded by each program's attempt limit (live author: three; Forge server generation: two); it is not transport retry or unlimited evolution.
 
-Keep the private OpenRouter route `~deepseek/deepseek-v4-flash-latest` with `zdr: true`, `only: ["morph"]`, `allow_fallbacks: false`: no eligible endpoint means failure, not disclosure to another provider. ZDR and historical US endpoint listings are not a residency guarantee or proof of current availability. Live execution requires an authorized key, network/provider availability and paid capacity; prompts, exported schemas, diagnostics and native history are sent to that route. Generated native Python server execution has its own local trust boundary; it is not deferred Python provider bindings. Never publish keys or private prompts. Nullable token counters are not a dollar cost; pricing and actual billable usage are prerequisites.
+The interface-4 [Forge source contract](README.md) separately bounds empty
+`MaxTokens` recovery to one doubled-cap call with a pinned 300-second deadline
+and retained outcomes/usage; it never retries failures or observer/settlement errors.
 
-Current scoped runtime evidence covers actual offline strict Core compilation, evolution and checkpoint rollback. It does not qualify every live/apex/forge/script variant or vendor inference. Retained console transcripts, benchmark/fuzz results and live execution claims below remain historical, not new typed-cutover measurements. Coherence gates establish their stated structural/effect-contract properties, not provider transport/privacy correctness or model semantic truth. Python provider bindings remain deferred; protocol clients are unchanged.
+Keep the private OpenRouter route `~deepseek/deepseek-v4-flash-latest` with `zdr: true`, `only: ["morph"]`, `allow_fallbacks: false`: no eligible endpoint means failure, not disclosure to another provider. ZDR and historical US endpoint listings are not a residency guarantee or proof of current availability. Live execution requires an authorized key, network/provider availability and paid capacity; prompts, exported schemas, diagnostics and native history are sent to that route. Generated Python server execution has its own local code-execution trust boundary, separate from NeoGraph's Python provider bindings. Never publish keys or private prompts. Nullable token counters are not a dollar cost; pricing and actual billable usage are prerequisites.
+
+Preserved interface-3 scoped runtime evidence covers actual offline strict Core compilation, evolution and checkpoint rollback. It does not qualify every live/apex/forge/script variant or vendor inference. Retained console transcripts, benchmark/fuzz results and live execution claims below remain historical, not interface-4 measurements. Coherence gates establish their stated structural/effect-contract properties, not provider transport/privacy correctness or model semantic truth. The Python provider bindings now follow the typed API; their verification is separate from these C++ runs.
 
 This is the theory behind the empirical harnesses in this cookbook. `gate_eval`
 *measured* the coherence gate sound on a labeled corpus; `gate_fuzz` *measured*
@@ -17,13 +21,13 @@ effect contracts, with a runtime backstop for dishonest ones). This document
 *proves* the corresponding theorem over a small-step operational semantics of
 harness execution and the effect lattice the gate reasons about.
 
-It is a proof over a **faithful abstraction** of the real engine — it models the
-super-step semantics and the channel write-guard exactly as the code implements
-them (`src/core/graph_state.cpp`, `src/core/graph_engine.cpp`,
-`src/core/graph_validator.cpp`), but it does not mechanically verify the C++
-line-by-line. The fidelity of the abstraction is precisely what `gate_eval` and
-`gate_fuzz` corroborate: the theorem's predictions match execution on every case
-they run. Proof + measured model, in the spirit this project holds itself to.
+The proof concerns the abstract machine below, with total reducers, returning
+node bodies, fixed declared channels and total, statically routed dispatch. It excludes
+node/reducer exceptions, cancellation, provider/tool failures, resource limits,
+checkpoint/custody errors and arbitrary generated code. The current C++ engine
+has these additional failure modes. The cited implementation files motivate the
+model; the historical corpus does not mechanically verify the C++ implementation
+or establish freedom from undefined behavior outside this model.
 
 Notation is ASCII: `⊆ ∪ ∩ ∅` are set operations; `⟨…⟩` a machine configuration;
 `↦` a map entry; `→` the step relation; `⊢ G ok` the well-formedness judgment.
@@ -87,8 +91,8 @@ The state-update judgment `σ ⊢ W ⇒ σ'` applies a write list:
     (Apply-done)  σ ⊢ []  ⇒  σ
 
 `(Apply-fault)` is exactly `GraphState::write` / `apply_writes` throwing
-"Write to unknown channel" when `c ∉ D` (graph_state.cpp:59–92). `⊥` is the
-faulting result — a thrown exception. This is the *only* rule that can fault in
+"Write to unknown channel" when `c ∉ D`. `⊥` is the
+faulting result in this model. This is the *only* rule that can fault in
 state application, and it is the runtime write-guard.
 
 The super-step relation on configurations:
@@ -108,13 +112,13 @@ The super-step relation on configurations:
 `max_steps`; if it reaches `{⊥e}` it **terminates**, if it reaches `⊥` it
 **faults**, and if it runs `max_steps` steps without either it **stalls**.
 
-Two further runtime fault modes the semantics can exhibit, matching the code:
+The abstract semantics also includes two structural dispatch faults:
 
 - **Dangling route.** If `route` must follow an edge/route to a name `m ∉ N ∪
   {⊥e}`, dispatch is undefined (a dangling reference). Model this as `→ ⊥`.
 - **Empty-route dispatch.** If a conditional node `n` has route map `R(n) = ∅`,
-  the scheduler dereferences the reverse-end of an empty container
-  (`rend()`, UB). Model this as `→ ⊥`.
+  the map supplies no dispatch target
+  in this model. Model this as `→ ⊥`.
 
 ## 4. The gate as a well-formedness judgment
 
@@ -214,22 +218,22 @@ is otherwise total (a super-step always produces a next frontier), every run is
 an infinite-or-terminating chain of non-fault steps, truncated at `max_steps`.
 Thus it terminates or stalls, never faults. ∎
 
-A note on `(E8)`: barrier liveness is what keeps "stall" from masking a *bug*. An
-unsatisfiable AND-join (a `wait_for` member with no static path in) can never
-fire, trapping the run into a stall that is really a deadlock. `(E8)` forbids it,
-so a stall under `⊢ G ok` reflects a genuine cycle (bounded by `max_steps`), not
-a structurally dead barrier. Progress (non-fault) does not depend on this; it
-sharpens the meaning of the stall outcome.
+`(E8)` checks declared static incoming edges/routes for barrier members. It
+does not prove that all members will execute: mutually exclusive routes can
+prevent an AND-join from firing. This proof does not establish barrier liveness
+or distinguish every deadlock from a deliberate cycle. Non-fault within the
+abstract model does not require a termination guarantee.
 
 ### 6.4 Corollary (Soundness of the gate, relative to honest contracts)
 
 *If the gate passes (`⊢ G ok`) with full contract coverage `(Cov)`, and all
 contracts are honest `(H)`, then execution does not fault: no write to an
-undeclared channel, no dangling-route or empty-route UB.*
+undeclared channel, no dangling-route or empty-route dispatch fault.*
 
-This is the theorem the harnesses measure. `gate_eval`'s `validator-error ⟹
-runtime-fault` is the contrapositive on its labeled corpus; `gate_fuzz` Layer 1
-is its statistical shadow: over 2000 mutants no `⊢ G ok` graph ever faulted.
+The modeled implication is `gate-pass ⟹ no-modeled-fault`; its contrapositive is
+`modeled-fault ⟹ gate-reject`, not `gate-reject ⟹ fault`. The historical corpus
+checks particular rejected examples; it does not prove every rejection must
+fault. The retained fuzz result reports no post-pass fault among 2000 mutants.
 
 ### 6.5 Proposition (`(H)` is necessary; the runtime is the backstop)
 
@@ -256,7 +260,7 @@ one to make about the whole system:
 > **The static gate is sound relative to honest effect contracts (Thm 6.3 /
 > Cor 6.4). The runtime write-guard makes execution fail-stop even when a
 > contract lies (Prop 6.5). No configuration reachable under `⊢ G ok` exhibits
-> undefined behaviour.**
+> undefined behaviour within this abstract machine, under its stated assumptions.**
 
 ## 7. Why the warnings are not premises
 

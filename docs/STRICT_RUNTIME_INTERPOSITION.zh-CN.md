@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=59193d3d0f34fd9e49284edb43ce62f5ec0352c27fdcfce47bf1dceec7f9454a -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=9b872c2d049d049aa2c5e7393b485bc79c3b89a5268878b1fff5a263c347208f -->
 # 严格运行时介入
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
 
-NeoGraph 的严格运行时路径将强制性上下文、生命周期 Hook 和提供方分派证据移出模型自由裁量范围。它是增量式的：为受信任的嵌入场景，遗留直接 provider 调用仍然存在，而 `StrictRuntimeProfile` 则负责组装严格路径所需的依赖。
+NeoGraph 的严格运行时路径将必需上下文、生命周期 Hook 和 provider dispatch 证据从模型自由裁量中分离。受信任的嵌入场景仍可直接调用 typed provider；`StrictRuntimeProfile` 组装严格路径所需的依赖。
 
 ## 保证边界
 
@@ -44,7 +44,47 @@ durable RAW history + admitted artifacts + required Skills/constraints
 1. `ProviderDispatchReceipt` 在分派之前写入。
 2. `ProviderDispatchOutcomeReceipt` 在尝试之后记录`Succeeded`、`Failed`或`ReconciliationRequired`。
 
-成功的结果绑定规范化补全的摘要。分发之后的异常无法证明远程提供者是否已执行操作，因此控制器记录`ReconciliationRequired`而不是重试。SQLite schema v3单独存储结果，并在重启后验证每个结果仍然绑定精确的已准入分发回执。
+成功结果绑定完整 SDK outcome 观测的 digest。已证明未发送的 typed Failure 记录为 `Failed`；不确定的交付记录为 `ReconciliationRequired`。dispatch 后的异常不能确定远程 provider 是否执行，因此控制器不会暗中重试。SQLite schema v3 单独存储 terminal receipt，重启后检查其精确 admitted dispatch binding。Receipt digest 是证据，不是 native continuation custody 或可执行的已存 outcome。
+
+控制器接收 `ProviderRequest`，返回不可变、拥有所有权的 `sp::runtime::Result`，保留顺序 message/part 和部分失败证据。实际结果之后若结算或 receipt 持久化失败，`ProviderDispatchOutcomePersistenceError` 保留结果与原始 cause；次要 observer 失败保留在 `delivery_error()` 中。Token charge/reservation 与 nullable provider 用量 report 分开。
+
+## Program Core provider 调用（独立于 standalone Strict Runtime）
+
+Program 使用内置 Core LLM node 时，宿主可设置
+`RuntimeConfig::core_provider_call_resolver` 和
+`require_core_provider_call_broker = true`。对每个精确的
+`ProgramCoreProviderCallContext`，返回
+`SQLiteProgramProviderCallJournal::bind(context, deployment_identity)`。
+头文件为 `<neograph/program/sqlite_provider_call_broker.h>`，链接目标为
+`neograph::program_sqlite`。Deployment identity 是宿主拥有的 SHA-256 identity，
+绑定真实 provider route、model deployment 和权限（包括 credential version）。
+Broker 不会从 `Provider` 猜测这些值。重启/reconnect 时重新绑定同一 durable database。
+
+Journal 以 owner、不可变 Program version、run、operation、Core
+thread/task/node 和内置 call ordinal 为键，不以 request 内容或 Program
+attempt 为键。传输前以 SQLite FULL 同步 commit marker。Marker 表示可能发生了
+传输，不证明 provider 收到请求或效果恰好执行一次。完整不可变 SDK
+Completion/Failure outcome 以 encoding version 2 存储，用于精确绑定的 replay。
+已证明未发送的 Failure 记录为 `Failed`；不确定交付、异常或结算前 crash
+需要 reconciliation，绝不暗中重新 dispatch。用
+`inspect(owner, logical_call_id(context, core_identity))` 检查状态。
+只有独立确认的 provider-side 证据和完整 Completion outcome 才可用于
+`reconcile_success`。Streaming replay 返回 captured outcome，不合成 stream event。
+
+更大的 output cap 是新的 semantic call，不是同一 journal slot 的 transport retry 或 replay。Interface 4 仅从 native replay configuration 中移除 cap；prepared-request digest 和保守 resource claim 仍包含它。每个准入 call 必须有独立确定性 ordinal，保留每次 attempt 的 outcome/accounting 和原始 deadline，并从同一 resource bank 获得 admission。既有 slot 的 digest 变化会被拒绝；native history 或 cursor 不续期 credit，也不授权在 uncertain delivery、observer 或 settlement 失败后重新发送。
+
+顺序 message part、raw 观测、nullable 用量、attempt metadata 和 native
+continuation 均保留在存储结果中。Native outcome 需要宿主向
+`SQLiteProgramProviderCallJournal(database_path, native_archive)` 提供
+`sp::NativeArchive`。Portable JSON projection 不能重建该权限。旧的 lossy
+receipt 会被拒绝，不会升级或暗中重新 dispatch。Journal 将保守 claim/committed
+token 数量与 provider report 分开保存。使用 durable filesystem database path；
+空路径、`:memory:` 和 `file:` URI 均被拒绝。
+
+该 broker 使用 Core 现有的 ReAct message state，而非组装的 `ContextEpoch`。
+同一内置调用不能同时使用 engine Strict Runtime interposition。
+宿主编写的 native Provider 调用不在其范围内。
+
 
 ## 对native、stdio或HTTP的强制Hook
 

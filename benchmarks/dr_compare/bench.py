@@ -2,7 +2,7 @@
 
 Methodology:
   * Warmup N runs on each side (alternating) so both engines have
-    primed: HTTP/WebSocket connections, PG checkpoint pool,
+    primed: HTTP connections, PG checkpoint pool,
     Crawl4AI keep-alive sockets, Python interpreter caches,
     NeoGraph asio fan-out pool worker threads spun up.
   * Measure N runs on each side, alternating order so any drift
@@ -19,13 +19,12 @@ What we're isolating:
   * Same Crawl4AI search client (CRAWL4AI_URL)
   * Same Postgres backend
 What necessarily differs:
-  * NeoGraph: C++ engine, asio thread-pool fan-out, WebSocket Responses
-  * LangGraph: Python engine, asyncio fan-out, HTTP via httpx
+  * NeoGraph: C++ engine, asio thread-pool fan-out, HTTP Chat by default
+  * LangGraph: Python engine, asyncio fan-out, HTTP Chat via httpx
 
-Both differences are part of what each library ships with, so we
-benchmark the libraries as they're meant to be used. Forcing
-LangGraph onto WebSocket would be unrealistic; forcing NeoGraph
-to HTTP would erase a documented design choice."""
+NG_TRANSPORT=http-responses compares a different wire API and must be labeled
+separately from the HTTP Chat comparison. LLM_MOCK_MS>=0 instead measures
+mock orchestration computation; it does not exercise providers or models."""
 
 from __future__ import annotations
 
@@ -91,7 +90,11 @@ def main():
     print(f"  warmup: {args.warmup} per side  ·  iters: {args.iters} per side")
     print(f"  model:  {os.environ.get('DR_MODEL', 'gpt-5.4-mini')}")
     print(f"  search: {os.environ.get('CRAWL4AI_URL', '(none)')}")
-    print(f"  pg:     {os.environ.get('NEOGRAPH_PG_DSN', '(none)')[:60]}")
+    print(f"  pg:     {'configured' if os.environ.get('NEOGRAPH_PG_DSN') else '(none)'}")
+    mock_ms = int(os.environ.get("LLM_MOCK_MS", "-1"))
+    print(f"  workload: {'mock orchestration' if mock_ms >= 0 else 'real provider'}"
+          f" · mock_delay_ms={mock_ms}")
+    print(f"  NG HTTP API: {os.environ.get('NG_TRANSPORT', 'http-chat')}")
     print("=" * 70)
 
     # Lazy-import so each module's PROVIDER / pool init only happens

@@ -1,247 +1,70 @@
-<!-- neograph-i18n: source=docs/concurrency.md locale=ko source_sha256=53d5843f1b9147b72df94827ed3d1463c1a60be53f9edff281267ba5b82653f8 -->
+<!-- neograph-i18n: source=docs/concurrency.md locale=ko source_sha256=889743688862b981a4a8e8d8de0c0f3bc287693712453d430183d4dcdd7a030a -->
+# 동시성과 비동기
+
 **Languages:** [English](concurrency.md) | [한국어](concurrency.ko.md) | [日本語](concurrency.ja.md) | [简体中文](concurrency.zh-CN.md)
 
-# 동시성 및 비동기
+## executor 선택
 
+동기 `run`, `run_stream`, `resume`은 async 대응 API와 같은 코루틴 구현을 구동하며 호출 스레드를 점유한다. host worker pool은 독립 세션을 동시에 실행할 수 있다. async API는 `asio::awaitable<RunResult>`를 반환하므로 직접 소유한 executor에서 구동한다. awaitable이 임의의 사용자 코드를 nonblocking으로 바꾸지는 않는다.
 
-NeoGraph는 기본적으로 두 가지 동시성 모델을 지원합니다.
-귀하의 호스팅 패턴에 맞는 것:
-
-* **에이전트당 스레드(동기화)** — `run()` / `run_stream()` / `resume()`
-이미 사용하고 있는 실행기로 전달됩니다. 최대 약 1년까지 안전
-수천 명의 동시 상담원; 호출당 최대 5μs의 엔진 오버헤드
-`-O3 -DNDEBUG` 빌드 출시(수퍼 스텝 루프는
-`run_sync(execute_graph_async)`이므로 두 진입점 모두 하나를 공유합니다.
-코루틴 경로).
-* **코루틴 기반 비동기** — `run_async()` / `run_stream_async()` /
-`resume_async()`가 `asio::awaitable<RunResult>`를 반환합니다. 하나
-`asio::io_context`는 별도의 연결 없이 수천 명의 동시 에이전트를 호스팅합니다.
-실행당 스레드; 모든 공급자 / MCP / 체크포인트 I/O 포인트는
-후드 아래의 비 차단 `co_await`. 전체 마이그레이션 가이드
-[`ASYNC_GUIDE.md`](ASYNC_GUIDE.md).
-
-## 비동기(3단계)
+`EngineConfig::worker_count = 1`이 기본값이며 엔진 소유 fan-out pool은 없다. 일시 중단된 I/O 분기는 한 스레드에서도 겹치지만 CPU 작업은 직렬 실행된다. 다중 스레드 caller executor나 선택적 engine pool로 CPU 분기를 여러 코어에서 실행할 수 있다. 엔진 공개 전에 pool을 설정한다.
 
 ```cpp
-#include <asio/co_spawn.hpp>
-#include <asio/detached.hpp>
-#include <asio/io_context.hpp>
+#include <neograph/async/run_sync.h>
 
-asio::io_context io;
-for (const auto& user : users) {
-    asio::co_spawn(
-        io,
-        [&, user]() -> asio::awaitable<void> {
-            RunConfig cfg;
-            cfg.thread_id = user.session_id;
-            cfg.input     = {{"messages", user.history}};
-            auto result = co_await engine->run_async(cfg);
-            handle(result);
-        },
-        asio::detached);
-}
-io.run();  // drives all agents on this thread
+EngineConfig options;
+options.node_context = ctx;
+options.checkpoint_store = std::make_shared<InMemoryCheckpointStore>();
+options.worker_count = 4;
+auto engine = GraphEngine::build(def, std::move(options));
+RunConfig run;
+run.thread_id = "session-1";
+run.input = {{"count", 0}};
+auto result = neograph::async::run_sync(engine->run_async(run));
 ```
 
-`engine->run_async()`는 호출자의 실행자에 엔드투엔드 상태로 유지됩니다.
-모든 슈퍼 스텝 정지 지점(노드 디스패치, 체크포인트 I/O,
-병렬 팬아웃, 재시도 백오프)는 실제 `co_await`입니다. 세 가지
-위의 50ms 단계는 하나의 io_context 스레드에서 겹치고
-벽 시간은 3 × 50ms가 아닌 ~50ms에 도달합니다. 하나의 스레드, N 동시
-자치령 대표. 코어 전반에 걸쳐 CPU 바운드 팬아웃의 경우 드라이버를
-공유 `asio::thread_pool` — 이것이 패턴입니다
-[`benchmarks/concurrent/CONCURRENT.md`](../benchmarks/concurrent/CONCURRENT.md)
-여기서 N = 10,000은 52ms 내에 완료됩니다. 단일 실행 내에서
-`make_parallel_group` 팬아웃도 중복됨: 3개의 병렬 팬아웃
-연구원들은 순차 370ms에서 150ms로 축소되었습니다.
+`27_async_concurrent_runs.cpp`는 한 io_context의 여러 세션을, `05_parallel_fanout.cpp`는 한 실행 안의 분기를 보여 준다. 역사적 처리량·메모리 측정은 [성능 상세](performance-deep-dive.md)에 있으며 안전한 세션 수 상한을 보장하지 않는다.
 
-사용자 정의 노드는 `asio::awaitable`를 반환하여 비동기 경로에 참여합니다.
-통합 `run(NodeInput)` 진입점에서(v0.4.0에 도입됨;
-레거시 8-가상 체인은 v0.9.0에서 제거되었습니다.)
+## shared engine 규칙
 
-```cpp
-class FetchNode : public GraphNode {
-  public:
-    asio::awaitable<NodeOutput>
-    run(NodeInput in) override {
-        auto ex = co_await asio::this_coro::executor;
-        auto res = co_await neograph::async::async_post(ex, /*...*/);
-        // in.ctx.cancel_token, in.state, in.stream_cb available.
-        co_return NodeOutput{ {ChannelWrite{"out", res}} };
-    }
-    std::string get_name() const override { return "fetch"; }
-};
-```
+- 독립 세션에 서로 다른 `thread_id`를 쓴다. 같은 id의 동시 실행은 checkpoint 순서가 미정이므로 기록 순서가 필요하면 host에서 직렬화한다.
+- 실행/관리 스레드에 공개하기 전에 설정 setter 호출과 tool 바인딩을 끝낸다. 실행 중 worker pool 크기 변경은 오류다.
+- 한 engine에서는 관리와 실행이 상호 배타적이다. run/resume 중 state/history 읽기, update, fork는 `std::logic_error`로 거부되고 관리 중 실행도 거부된다. 취소·drain 후 완료를 기다린 뒤 관리를 재시도한다.
+- 같은 store를 쓰는 서로 다른 engine은 이 admission 경계 밖이다. host에서 조정한다.
+- node instance는 여러 실행에서 재사용된다. 실행별 scratch state는 channel에 두고 사용자 node/provider/tool/store는 stateless 또는 동기화된 구현으로 만든다. 내장 메모리 store는 mutex를 쓴다.
 
-비동기식 도구는 `AsyncTool`에서 파생됩니다.
+Provider 호출은 준비된 request와 runtime client를 소유한다. C++ event view의 수명은 callback 안으로 제한되므로 보존할 데이터는 복사한다. native replay와 accounting 권한은 실제 custody가 필요하며 portable JSON 재구성으로 얻을 수 없다. [비동기 가이드](ASYNC_GUIDE.md)를 참고한다.
 
-```cpp
-class FetchTool : public neograph::AsyncTool {
-  public:
-    asio::awaitable<std::string>
-    execute_async(const json& args) override { /* co_await HTTP */ }
-    // sync execute() is final, routes through run_sync automatically.
-};
-```
+## 제한된 동기 admission
 
-다중 에이전트는 `examples/27_async_concurrent_runs.cpp`를 참조하세요.
-팬아웃을 위한 패턴 및 `examples/05_parallel_fanout.cpp`
-한 번의 실행.
-
-## 동기화(에이전트당 스레드)
-
-NeoGraph는 자체 비동기 런타임을 제공하지 않습니다.
-`run()` / `run_stream()` / `resume()`를 사용하면 실행자를 선택할 수 있습니다.
-컴파일된 단일 `GraphEngine`는 다음 스레드 간에 공유해도 안전합니다.
-**고유한 `thread_id`s**와 동시에 `run()`를 호출하므로 호스팅
-다중 테넌트 에이전트 워크로드는 무엇이든 디스패치하는 문제입니다.
-이미 사용하고 있는 실행자입니다.
-
-```cpp
-// One engine, many concurrent sessions — no external runtime required.
-EngineConfig engine_config;
-engine_config.node_context = ctx;
-engine_config.checkpoint_store = std::make_shared<InMemoryCheckpointStore>();
-auto engine = GraphEngine::build(def, std::move(engine_config));
-
-std::vector<std::future<RunResult>> sessions;
-for (const auto& user : users) {
-    sessions.push_back(std::async(std::launch::async, [&engine, user]() {
-        RunConfig cfg;
-        cfg.thread_id = user.session_id;
-        cfg.input = {{"messages", user.history}};
-        return engine->run(cfg);
-    }));
-}
-for (auto& f : sessions) handle(f.get());
-```
-
-`std::async` 지원 `asio::thread_pool`와 동일한 방식으로 작동합니다.
-작업 시스템 또는 웹 프레임워크의 작업자 풀 - NeoGraph는 제외됩니다.
-집행자의 결정. CPU 병렬 팬아웃 *내부*가 필요한 경우
-단일 동기화 `run()` 호출(N 스레드의 N 동기화 `run()` 대신)
-설치하려면 `build()`보다 먼저 `EngineConfig::worker_count`를 설정하세요.
-엔진 소유 `asio::thread_pool` `run_parallel_async` 및
-다중 전송 지점 파견.
-
-## 번들 `RequestQueue` 사용
-
-고정 작업자 풀을 원하는 다중 테넌트 서버의 경우
-역압(큐가 포화되면 새 세션 거부)
-무제한 메모리 증가 대신) `neograph::util`를 연결하고 사용
-내장된 잠금 없는 대기열 - 외부 실행자가 필요하지 않습니다.
+`RequestQueue`는 `neograph::util`을 링크해서 쓴다. `moodycamel::ConcurrentQueue`를 사용하고 유휴 worker는 condition variable에서 기다린다. pending-slot 제한은 대기 세션 수를 제한하지, 실행 중 세션의 메모리를 제한하지 않는다.
 
 ```cpp
 #include <neograph/util/request_queue.h>
-using namespace neograph::util;
 
-RequestQueue pool(16, 1000);           // 16 workers, max 1000 pending sessions
-EngineConfig engine_config;
-engine_config.node_context = ctx;
-engine_config.checkpoint_store = std::make_shared<InMemoryCheckpointStore>();
-auto engine = GraphEngine::build(def, std::move(engine_config));
-
-std::vector<RunResult>          results(users.size());
-std::vector<std::future<void>>  futs;
-
-for (size_t i = 0; i < users.size(); ++i) {
-    auto [accepted, fut] = pool.submit([&, i]() {
-        RunConfig cfg;
-        cfg.thread_id = users[i].session_id;
-        cfg.input     = {{"messages", users[i].history}};
-        results[i]    = engine->run(cfg);
-    });
-    if (!accepted) {
-        // Backpressure: queue is full — shed load, return 503, retry later, …
-        reject(users[i]);
-        continue;
-    }
-    futs.push_back(std::move(fut));
-}
-
-for (auto& f : futs) f.get();           // propagates exceptions from run()
-
-auto s = pool.stats();
-log("pending={} active={} completed={} rejected={}",
-    s.pending, s.active, s.completed, s.rejected);
+neograph::util::RequestQueue queue(16, 1000);
+auto [accepted, future] = queue.submit([engine, config] {
+    auto result = engine->run(config);
+    handle(result);
+});
+if (future.valid()) future.get();
+if (!accepted) reject_request();
 ```
 
-`submit()`는 `{accepted, std::future<void>}`를 반환합니다. `RunResult`는 공유
-출력 슬롯(위 예시)이나 작업별 `std::promise<RunResult>`로 전달할 수 있습니다.
-큐는 lock-free `moodycamel::ConcurrentQueue`를 사용하고, 유휴 작업자는 condvar에서
-대기하므로 busy-spin하지 않습니다. Admission은 pending 슬롯을 원자적으로 예약하므로
-동시 호출자도 `max_queue_size`를 초과할 수 없습니다. 큐가 가득 찬 일반 backpressure는
-`{false, invalid_future}`를 반환합니다. 내부 enqueue 실패는 대신
-`{false, valid_future}`를 반환하며, 해당 future를 관찰하면 `std::runtime_error`가
-발생합니다.
+큐가 가득 차면 `accepted=false`와 invalid future를 반환한다. 내부 enqueue 실패는 `false`와 `std::runtime_error`를 담은 valid future를 반환한다. 모든 거부를 평범한 포화로 취급하지 말고 future를 확인한다. worker는 적어도 하나 필요하다.
 
-큐는 작업자를 한 명 이상 지정해 생성해야 합니다. `close()`는 멱등적이며 이후 제출을
-거부하고, 작업자가 종료될 때까지 기다리고, 이미 작업자가 가져간 callable은 완료하게
-하며, 아직 가져가지 않은 모든 future는 `std::runtime_error("RequestQueue is closed")`로
-완료합니다. callable 내부에서 `close()`를 호출해 종료를 시작할 수도 있지만 해당 작업자는
-자기 자신을 기다리지 않고 반환합니다. 소멸자도 같은 close 경로를 사용하므로 teardown 중
-승인된 future가 조용히 방치되지 않습니다.
+`close()`는 멱등이다. 새 제출을 거부하고 claimed 작업을 끝내며 unclaimed future를 `std::runtime_error("RequestQueue is closed")`로 완료한다. worker가 close를 호출하면 자기 자신을 기다리지 않고 shutdown을 시작한다. 소멸자도 같은 경로를 쓰며 승인된 future를 방치하지 않는다.
 
-## 안전한 동시 사용을 위한 규칙
+## checkpoint I/O와 Python
 
-- 구성 변경자(`set_retry_policy`, `set_checkpoint_store`,
-`set_store`, …)는 동시 실행 **전에** 호출해야 합니다. 도구는 컴파일 전에
-`NodeContext::tools` 또는 `EngineResources::tools`로 전달합니다. 첫 실행 이후에는 엔진 구성을 변경하지 마십시오.
-- **동일** `thread_id`를 공유하는 동시 `run()` 통화는 충돌하지 않습니다.
-그러나 지정되지 않은 체크포인트 인터리빙을 생성합니다. 세션별 ​​직렬화
-결정론적 이력이 필요한 경우 직접 액세스하세요.
-- 사용자 정의 `GraphNode` 서브클래스는 **상태 비저장 또는 자체 동기화**되어야 합니다.
-노드 인스턴스는 엔진이 소유하며 모든 실행에서 재사용됩니다.
-모든 스레드 — 실행별 스크래치 데이터는 그래프 채널이 아닌 그래프 채널에 속합니다.
-노드 멤버 변수.
-- 사용자 제공 `CheckpointStore`, `Store`, `Provider` 및 `Tool`
-구현은 스레드로부터 안전해야 합니다. 번들로 제공되는 `InMemoryCheckpointStore`
-`InMemoryStore`는 이미 있습니다.
+메모리 checkpoint는 caller에서 mutex를 쓰고 SQLite와 sync 사용자 backend는 blocking 작업을 bounded worker로 넘긴다. PostgreSQL은 pipeline batching 없이 nonblocking libpq I/O를 쓴다. `NEOGRAPH_BUILD_POSTGRES=ON`은 libpq 개발 파일이 필요한 선택적 target을 켜고 `OFF`는 그 의존성만 제거한다.
 
-## PostgreSQL을 사용한 지속적인 체크포인트
+Python callback은 GIL 아래 실행된다. CPU 위주 Python node/reducer는 worker_count만 늘려도 병렬화되지 않는다. native 호출은 그 구현이 GIL을 해제할 때만 겹쳐 실행될 수 있다. typed provider invoke/dispatch는 GIL을 해제하므로 `asyncio.to_thread`로 호출할 수 있다. native provider asyncio awaitable을 공개하는 것은 아니다.
 
-다중 프로세스 배포의 경우 또는 다시 시작해도 체크포인트가 유지되어야 하는 경우
-`neograph::postgres`를 연결하고 `InMemoryCheckpointStore`를 다음으로 교체합니다.
-`PostgresCheckpointStore`:
+## runtime 의존성과 플랫폼 검증
 
-```cpp
-#include <neograph/graph/postgres_checkpoint.h>
+Core는 `NEOGRAPH_BUILD_LLM=OFF`여도 외부 `SchemaProvider::runtime`을 링크한다. PostgreSQL, LLM node, NeoGraph의 선택적 CurlH2Pool을 꺼도 SDK runtime의 libcurl 요구는 사라지지 않는다. 일치하는 installed SDK 또는 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`를 제공한다.
 
-auto store = std::make_shared<PostgresCheckpointStore>(
-    "postgresql://user:pass@host:5432/dbname");
-EngineConfig engine_config;
-engine_config.node_context = ctx;
-engine_config.checkpoint_store = store;
-auto engine = GraphEngine::build(def, std::move(engine_config));
-```
+source resolution은 명시적 SDK source directory, installed package, revision-pinned 공개 archive fallback 순이다(`NEOGRAPH_FETCH_SCHEMAPROVIDER=ON` 기본). installed SDK offline build는 flag를 `OFF`로 하고 `CMAKE_PREFIX_PATH`에 prefix를 둔다. NeoGraph와 SDK source 설정은 CMake 3.20+가 필요하다.
 
-스키마는 LangGraph의 `PostgresSaver`를 따르며, 같은 데이터베이스에서 LangGraph
-상태와 함께 사용할 수 있도록 `neograph_*` 접두사를 붙인 세 개의 테이블을 만듭니다.
-채널 값은 `(thread_id, channel, version)`을 기준으로 중복을 제거합니다. 슈퍼스텝마다
-채널 하나를 갱신하는 1,000단계 세션은 대략 `O(steps × channels)`가 아니라
-`O(steps + channels)`개의 blob 행을 사용합니다.
-
-**빌드 플래그**: `-DNEOGRAPH_BUILD_POSTGRES=ON`(기본값). 필요하다
-`libpq-dev`(적당) / `libpq-devel`(rpm). 건너뛰도록 플래그 `OFF`를 설정합니다.
-의존성을 완전히.
-
-**통합 테스트 실행**: 일회용 로컬 PG를 가동하고
-테스트 바이너리를 가리킵니다.
-
-```bash
-docker run -d --rm --name neograph-pg-test \
-    -e POSTGRES_PASSWORD=test -e POSTGRES_DB=neograph_test \
-    -p 55432:5432 postgres:16-alpine
-
-NEOGRAPH_TEST_POSTGRES_URL='postgresql://postgres:test@localhost:55432/neograph_test' \
-    ctest --test-dir build -R PostgresCheckpoint --output-on-failure
-```
-
-환경 변수가 없으면 PG 테스트는 `GTEST_SKIP`되므로 Postgres가 없는 환경에서도
-나머지 테스트는 계속 통과합니다.
-
-적용 범위: `tests/test_graph_engine.cpp` 포함
-`ConcurrentRunDifferentThreadIds`(16개 스레드 × 25개 실행 = 400개 병렬)
-실행, 세션별 출력 유효성 검사 + 체크포인트 격리) 및
-`ConcurrentRunSameThreadIdNoCrash`(하나의 공유에서 8개 스레드 × 50개 실행)
-`thread_id`, 충돌 없는 동작 검증).
+현재 SDK runtime/archive의 검증 범위는 Linux/POSIX다. 기존 Linux/macOS/Windows package metadata는 새 의존성이 모든 플랫폼에서 동작한다는 근거가 아니다. macOS, Windows, WASM은 각각 runtime/build 검증이 필요하며 portable executor API만으로 그 검증을 대신할 수 없다.

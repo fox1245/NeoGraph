@@ -1,11 +1,10 @@
 """17 — Deep research with real web search (Crawl4AI) + Postgres checkpoints.
 
-The production-grade companion to `16_deep_research_chat.py`. Same
-graph shape, but the researcher branches actually search the web —
-they POST queries to a local Crawl4AI container, parse the markdown
-result list, and hand the snippets back to the LLM. State is
-durable in Postgres rather than in-process memory, so a UI restart
-preserves the conversation.
+This companion to `16_deep_research_chat.py` keeps the same graph shape.
+Researchers POST queries to a Crawl4AI container and pass markdown search
+results to the model. Postgres stores engine checkpoints when configured;
+the Gradio history remains UI-owned and is not automatically restored after
+a restart. Model-generated reports still need source review.
 
 Mirrors the C++ example 25_deep_research.cpp's web-search path
 (Crawl4AI + DuckDuckGo HTML), now reachable from Python.
@@ -21,9 +20,9 @@ Mirrors the C++ example 25_deep_research.cpp's web-search path
         -e POSTGRES_PASSWORD=test -e POSTGRES_DB=neograph \\
         --name neograph-pg postgres:16-alpine
 
-    # 3. neograph-engine wheel (>= 0.1.3) ships libpq bundled, so
-    #    PostgresCheckpointStore works out of the box — no source build:
-    pip install 'neograph-engine>=0.1.3'
+    # 3. Install a current wheel with Postgres support, or build with
+    #    -DNEOGRAPH_BUILD_POSTGRES=ON for durable checkpoints.
+    pip install neograph-engine
 
     # 4. Env (drop into examples/.env or export):
     export OPENAI_API_KEY=sk-...
@@ -47,7 +46,7 @@ import urllib.parse
 
 import requests
 
-from _common import complete_responses, ng, responses_transport, schema_provider
+from _common import ask_text, ng, schema_provider
 
 
 # ─── Config (env-driven) ─────────────────────────────────────────────
@@ -58,17 +57,7 @@ PG_DSN = os.environ.get("NEOGRAPH_PG_DSN", "")
 RESEARCH_TRIGGER_PATTERN = re.compile(
     r"(조사|리서치|연구|research|investigate|deep[- ]?dive)", re.IGNORECASE)
 
-TRANSPORT = responses_transport()
-PROVIDER = schema_provider(
-    schema="openai_responses",
-    default_model=os.environ.get("DR_MODEL", "gpt-5.6-luna"),
-    use_websocket=TRANSPORT == "websocket",
-    prefer_libcurl=TRANSPORT == "http2",
-)
-
-
-def complete(params):
-    return complete_responses(PROVIDER, params, TRANSPORT)
+PROVIDER = schema_provider(schema="openai_responses")
 
 
 # ─── Crawl4AI client ─────────────────────────────────────────────────
@@ -140,11 +129,10 @@ class GeneralChatNode(ng.GraphNode):
         return self._name
 
     def run(self, input):
-        completion = complete(
-            ng.CompletionParams(messages=input.state.get_messages()))
+        completion = ask_text(PROVIDER, messages=input.state.get_messages())
         return [ng.ChannelWrite("messages", [{
             "role": "assistant",
-            "content": completion.message.content,
+            "content": completion,
         }])]
 
 
@@ -158,19 +146,19 @@ class ResearchPlanNode(ng.GraphNode):
 
     def run(self, input):
         topic = input.state.get("research_topic") or ""
-        completion = complete(ng.CompletionParams(
-            messages=[ng.ChatMessage(role="user", content=(
-                "다음 주제를 심층 조사하기 위한 sub-question 정확히 3개로 분해. "
-                "각각 독립적으로 답변 가능한 형태. 한 줄에 하나, 번호/글머리표 없이.\n\n"
-                f"주제: {topic}"
-            ))],
-            temperature=0.0,
-        ))
+        completion = ask_text(PROVIDER, messages=[ng.ChatMessage(role="user", content=(
+            "다음 주제를 심층 조사하기 위한 sub-question 정확히 3개로 분해. "
+            "각각 독립적으로 답변 가능한 형태. 한 줄에 하나, 번호/글머리표 없이.\n\n"
+            f"주제: {topic}"
+        ))],
+        temperature=0.0,)
         questions = [
             line.strip().lstrip("-•0123456789. ")
-            for line in completion.message.content.strip().splitlines()
+            for line in completion.strip().splitlines()
             if line.strip()
         ][:3]
+        if len(questions) != 3 or any(not question for question in questions):
+            raise RuntimeError("research planner must supply three non-empty questions")
         return [ng.ChannelWrite("sub_questions", questions)]
 
 
@@ -202,10 +190,7 @@ class ResearcherNode(ng.GraphNode):
 
         evidence = ""
         if SEARCH_CLIENT:
-            try:
-                evidence = SEARCH_CLIENT.search_markdown(q)
-            except Exception as exc:
-                evidence = f"(web search failed: {exc})"
+            evidence = SEARCH_CLIENT.search_markdown(q)
             prompt = (
                 f"Question: {q}\n\n"
                 f"Web search results (markdown):\n{evidence}\n\n"
@@ -221,17 +206,13 @@ class ResearcherNode(ng.GraphNode):
                 "Note any uncertainty."
             )
 
-        completion = complete(ng.CompletionParams(
-            messages=[ng.ChatMessage(role="user", content=prompt)],
-        ))
-        # ChannelWrite + Command(goto=synthesize). Each Send-spawned
-        # researcher routes itself to synthesize; the engine joins the
-        # five gotos into a single ready=[synthesize] for the next
-        # super-step (LangGraph parity).
+        completion = ask_text(PROVIDER, messages=[ng.ChatMessage(role="user", content=prompt)],)
+        # Each Send-spawned researcher routes to the shared synthesize node.
+        # The next superstep reads findings merged from the completed branches.
         return [
             ng.ChannelWrite("research_findings", [{
                 "question": q,
-                "answer":   completion.message.content.strip(),
+                "answer":   completion.strip(),
                 "had_web_evidence": bool(SEARCH_CLIENT),
                 "evidence_excerpt": evidence[:1500],
             }]),
@@ -257,16 +238,14 @@ class SynthesizeNode(ng.GraphNode):
             "마크다운 종합 보고서를 작성하세요. 구조: 개요(2-3 문장) → 주요 발견 → 결론.\n\n"
             f"--- 조사 결과 ---\n\n{sections}"
         )
-        completion = complete(ng.CompletionParams(
-            messages=[ng.ChatMessage(role="user", content=prompt)],
-        ))
+        completion = ask_text(PROVIDER, messages=[ng.ChatMessage(role="user", content=prompt)],)
         return [
             ng.ChannelWrite("messages", [{
                 "role": "assistant",
-                "content": completion.message.content,
+                "content": completion,
             }]),
             ng.ChannelWrite("sub_questions", []),
-            ng.ChannelWrite("research_findings", []),
+            ng.ChannelWrite("research_findings", [], mode=ng.ChannelWrite.Mode.OVERWRITE),
             ng.ChannelWrite("research_topic", ""),
         ]
 
@@ -319,24 +298,15 @@ engine = ng.GraphEngine.compile(definition, ng.NodeContext())
 engine.set_worker_count(int(os.getenv("DR_WORKERS", "2")))
 
 
-# Pick the durable store when available; otherwise fall back.
+# A configured durable backend must work; do not hide a failure with memory.
 def _make_checkpoint_store():
-    if PG_DSN and getattr(ng, "_HAVE_POSTGRES", False):
-        try:
-            store = ng.PostgresCheckpointStore(PG_DSN, 4)
-            print(f"[17] using PostgresCheckpointStore "
-                  f"(pool_size={store.pool_size})")
-            return store
-        except Exception as exc:
-            print(f"[17] Postgres unreachable ({exc}); "
-                  f"falling back to InMemoryCheckpointStore.")
-    elif PG_DSN:
-        print("[17] NEOGRAPH_PG_DSN set but the binding wasn't built with "
-              "NEOGRAPH_BUILD_POSTGRES=ON. See module docstring. "
-              "Falling back to InMemoryCheckpointStore.")
-    else:
-        print("[17] NEOGRAPH_PG_DSN unset — using InMemoryCheckpointStore "
-              "(state lost when this process exits).")
+    if PG_DSN:
+        if not getattr(ng, "_HAVE_POSTGRES", False):
+            raise RuntimeError("NEOGRAPH_PG_DSN requires Postgres support in this build")
+        store = ng.PostgresCheckpointStore(PG_DSN, 4)
+        print(f"[17] using PostgresCheckpointStore (pool_size={store.pool_size})")
+        return store
+    print("[17] NEOGRAPH_PG_DSN unset: in-memory checkpoints disappear on exit.")
     return ng.InMemoryCheckpointStore()
 
 

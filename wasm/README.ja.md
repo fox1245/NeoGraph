@@ -1,58 +1,43 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=7499ea89c1228c6687e0d960ad790d3e072b4157c3c125fdf95cc4eca2656e5f -->
-# NeoGraph WASM — 実現可能性の急上昇
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=998352566107627e9cf22b256b5d1e2648275aa3c8ad5bd60d513c6fc59a7314 -->
+# NeoGraph WASM smoke プログラム
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-WebAssembly にコンパイルされたグラフ エンジン。このディレクトリは
-**フェーズ 1 スパイク** — エンジン層 (コンパイル、実行、エグゼキュータ、
-スケジューラ、コーディネーター、状態、チャネル、NodeCache) を構築して実行します
-Emscripten では未修正。
+`smoke.cpp` は `DoubleNode` 一つのグラフをコンパイルし、`doubled = seed * 2` を書き込み、`InMemoryCheckpointStore` で実行します。`seed = 21` の期待出力には `doubled = 42` と `trace = d` が含まれます。ネットワークやモデル呼び出しはありません。ブラウザー SDK ではなく Node.js smoke ターゲットです。
 
-## 過去の実行結果
+## 現在のビルド境界
 
-|メトリック |値 |
+型付き provider 移行後は `NEOGRAPH_BUILD_LLM=OFF` でも Core が `SchemaProvider::runtime` に依存します。
+CMake 3.20+ は明示 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、インストール済み runtime、固定 public GitHub source archive の順に SDK を選びます。
+`NEOGRAPH_FETCH_SCHEMAPROVIDER` の download fallback は既定 ON で、offline package/source ビルドでは OFF にしてください。
+SDK runtime は libcurl、OpenSSL、threads も必要とします。現在の transport と archive にはプラットフォーム固有の依存があり、この worktree では Emscripten SDK runtime ビルドを検証していません。native SDK を WebAssembly にリンクすることはできません。以下の過去の smoke は現在のソースが Emscripten でビルドできる証拠ではありません。
+
+NeoGraph `0.13.0` には同じ target 向けの alpha SDK `0.1.0`、interface revision/shared generation 4 が必要です。真正な Emscripten SDK runtime の検証は依然として前提条件です。本書は WASM 対応の削除も現在のビルドの保証もしません。Archive v3 / `spna3` と portable JSON v2 は不変です。
+
+## 過去の結果
+
+値は型付き SDK 移行前のローカル smoke 実行によるものです。生成された `.wasm`/`.js` はコミットせず、CI も WASM サイズ artifact を公開していません。サイズは当時のビルドの値であり、現在の配布コストではありません。
+
+| 指標 | 値 |
 |---|---|
-| WASM バイナリ (-O3 + LTO) | **712 KB** |
-| Emscripten JS ランタイム | 92KB |
-| JavaScript + WASM の合計 | **~800 KB** |
-|エンジンソースの差分 | 0 行 |
-|最初の実行出力 | `doubled = 42, trace = d` ✓ |
+| WASM binary (-O3 + LTO) | 712 KB |
+| Emscripten JS runtime | 92 KB |
+| JavaScript + WASM 合計 | ~800 KB |
+| 当時のエンジンソース変更 | 0 lines |
+| 初回出力 | `doubled = 42, trace = d` |
 
-比較のために: ネイティブ NG は合計 5.5 MB です。 LangGraph スタック
-(langgraph + langchain + openai + httpx + pydantic + langsmith) は 31 MB
-ブラウザへの出荷すら試みない純粋な Python です。 NG
-L3 キャッシュ内に 2 倍以上収まり、一般的な SaaS に十分な大きさです。
-ランディング ページには、このエンジンが必要とする量を超える JS がすでに読み込まれています。
+## ターゲットと前提条件
 
-## 今日実行される内容 (フェーズ 1)
+ターゲットは `neograph_core` に直接リンクし、Core のソース一覧、C++20 coroutine、exception、Emscripten pthread を使います。CMake は distro Emscripten 3.1.x の Asio coroutine を有効にし、WASM ターゲットだけで未対応の stack-protector symbol を無効にします。native hardening は変わりません。ターゲットは `PTHREAD_POOL_SIZE=4`、グラフは既定の `worker_count=1` を使用します。単一スレッド WASM 用の CMake オプションはありません。
 
-- `GraphEngine::compile(json)` — JSON 定義 → 実行可能エンジン。
-- `engine->run(cfg)` — InMemoryCheckpointStore との同期実行。
-- `NodeFactory::register_type` 経由で登録されたカスタム ノード — リーフ
-  セマンティクスは C++ / Python パスから引き継がれます。
-- v0.1.6 のすべての機能はクリーンにコンパイルされます: `set_worker_count`、
-  `set_node_cache_enabled`、リデューサー付きチャンネル、条件付きエッジ、
-  ファンアウト、コマンドルーティング、割り込みを送信します。
-- C++20 コルーチン (asio のヘッダーのみの `awaitable` 部分) は以下で動作します。
-  エムスクリプテン5.0。
-
-## 意図的にまだ出荷されていないもの
-
-|サブシステム |延期される理由 |フェーズ |
-|---|---|---|
-| `neograph_async` (ASIO 経由の HTTP/WebSocket) |ブラウザは生のソケットではなく、`fetch` / ネイティブ WebSocket を使用します。 | 2 |
-| `neograph_llm` (スキーマプロバイダー、OpenAIProvider) |上記の非同期トランスポートに依存します。 | 2 |
-| `neograph_postgres` |ブラウザは関係ありません | — |
-| `neograph_mcp` |サブプロセスベース、ブラウザは無関係 | — |
-| JS バインディングを埋め込む | JS でノード実装をコールバックとして定義しましょう | 2-A |
-
-## ビルドと実行
+動作する Emscripten SDK runtime ビルドが用意できた後の configure/build/run 手順は次のとおりです。
 
 ```bash
 source /opt/emsdk/emsdk_env.sh
 
 emcmake cmake -S . -B build-wasm \
   -DCMAKE_BUILD_TYPE=Release \
+  -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE_DIR" \
   -DNEOGRAPH_BUILD_WASM=ON \
   -DNEOGRAPH_BUILD_ASYNC=OFF \
   -DNEOGRAPH_BUILD_LLM=OFF \
@@ -74,44 +59,17 @@ cmake --build build-wasm --target neograph_wasm_smoke -j
 node build-wasm/wasm/smoke.js
 ```
 
-このターゲットは `neograph_core` を直接リンクするため、ソース一覧はこの文書に
-複製せず、メインの CMake ビルドで管理します。成功すると `doubled = 42` と
-ノードの実行トレースが出力されます。
+`NEOGRAPH_USE_LIBCURL=OFF` は NeoGraph のオプション HTTP/2 backend を無効にするだけで、SDK runtime の libcurl 依存は無効にしません。現在検証済みのビルド手順ではありません。
 
-`compile()` のデフォルトは `worker_count=1` なので、エンジン所有の
-スレッドプールは作成されません。このスモークコマンドは、呼び出し側が
-`set_worker_count(N >= 2)` で並列ファンアウトを選べるように Emscripten の
-4 スレッドを有効にしますが、スモーク自体は 1 ワーカーのデフォルトを使います。
-シングルスレッドビルドでは `-sPTHREAD_POOL_SIZE=0` を渡せばよく、
-`set_worker_count(1)` の呼び出しは不要です。
+生成 loader が filesystem path を `fetch` に渡す Node.js で使った過去の回避手順は次のとおりです。
 
-## ブラウザー対応状況
+```bash
+node -e 'const fs=require("fs"); WebAssembly.instantiateStreaming=undefined; global.fetch=async p=>({ok:true,arrayBuffer:async()=>fs.promises.readFile(p)}); require("./build-wasm/wasm/smoke.js");'
+```
 
-現在、このリポジトリにはブラウザーローダー、npm パッケージ、Embind API はありません。
-そのため、現在のターゲットは Node.js 専用です。Emscripten pthreads を使うブラウザー
-ビルドには、クロスオリジン分離ヘッダー
-(`Cross-Origin-Opener-Policy: same-origin`、`Cross-Origin-Embedder-Policy: require-corp`)
-と生成されたワーカーアセットを配信する Web サーバーも必要です。
 
-## フェーズ 2 スケッチ
+## ブラウザーの状況と提案作業
 
-1. **2-A — JS バインディングを埋め込みます。** `GraphEngine`、`RunConfig`、を公開します。
-   `ChannelWrite`、`Send`、`Command` を JS に変換します。 JS関数が登録できる
-   それ自体がノード実装として機能します。エンジンは JS を呼び出します。
-   各ノードの実行。推定 1 ～ 2 日。
+このリポジトリに browser loader、npm package、Embind API はありません。browser pthread ビルドには cross-origin isolation header（`Cross-Origin-Opener-Policy: same-origin`、`Cross-Origin-Embedder-Policy: require-corp`）と生成 worker asset が必要です。これらだけで SDK runtime がブラウザー対応になるわけではありません。
 
-2. **2-B — フェッチベースの HTTP トランスポート。** トランスポートを提供します。
-   `SchemaProvider` が使用するインターフェイス。 WASM ビルドがそれを接続します
-   `fetch()`まで。同じプロバイダー コードがいずれかのバックエンドをターゲットにします。推定
-   3～5日。
-
-3. **2-C — npm パッケージ。** アプリができるように `@neograph/wasm` として公開します。
-   `npm install` 独自のビルドを持たないエンジン + JS バインディング。
-   推定 1 ～ 2 日。
-
-フェーズ 2 の後、エンジンはオリジネーターが発行したグラフを完全に実行できます。
-ブラウザ タブ — BYOK Anthropic / OpenAI / Bedrock キーを呼び出したままにします
-`fetch()`、transformers.js / ローカル推論用の組み込み AI、および
-結果はチャネルを通って結果エンベロープに戻ります。それが
-ランタイム側
-[NeoProtocol](https://github.com/fox1245/NeoProtocol) 実行者の役割。
+ブラウザーポートには先に SDK 対応 transport/archive 設計が必要で、その後 JS node callback と packaging を実装する必要があります。提案されている `fetch()` adapter、hosted model access、local browser inference、NeoProtocol Executor 統合は、この smoke プログラムでは提供も検証もしていません。

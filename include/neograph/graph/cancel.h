@@ -6,7 +6,7 @@
  * ``GraphEngine::run_async`` cleanly, including the LLM HTTP request
  * downstream of the engine super-step.
  *
- * Two propagation paths from one token:
+ * Three propagation paths from one token:
  *
  *   1. **Polling** (`is_cancelled()`) — the engine super-step loop and
  *      the per-node dispatch checkpoint poll this between steps. Stops
@@ -20,6 +20,10 @@
  *      including ``ConnPool::async_post``, so an in-flight HTTPS
  *      socket is closed and the LLM request aborts on the wire. This
  *      is what closes the cost-leak gap reported in v0.2.3.
+ *
+ *   3. **std::stop_token** (`stop_token()`) — thread-safe subscriptions forward
+ *      cancellation to native SDK operations without binding an Asio executor
+ *      or occupying the caller's single cancellation slot.
  *
  * The signal must be ``emit()``ed and connected on one serial executor
  * (asio rule). ``cancel()`` may be called from any thread; it stores the
@@ -37,7 +41,7 @@
 #include <asio/strand.hpp>
 
 #include <algorithm>
-#include <atomic>
+#include <stop_token>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -69,7 +73,8 @@ public:
 /**
  * @brief Cooperative cancel primitive shared between caller and engine.
  *
- * Construction is cheap (one atomic + one asio::cancellation_signal).
+ * One stop source owns the cancellation state; Asio signals retain their
+ * serial-executor contract. Native subscriptions need no executor binding.
  * Pass via ``RunConfig::cancel_token`` (shared_ptr) to opt in.
  * Re-entrant: ``cancel()`` is idempotent; callers may share the token
  * across concurrent runs to fan out a single abort.
@@ -84,15 +89,12 @@ public:
     /**
      * @brief Request cancellation. Thread-safe, idempotent.
      *
-     * Sets the polling flag immediately so subsequent
-     * ``is_cancelled()`` checks return true. Posts the asio signal
-     * emit onto the bound executor so any in-flight ``co_await`` —
-     * including the LLM HTTP socket operation — receives an
-     * ``operation_aborted`` error and unwinds cleanly.
+     * Sets the stop state before synchronously invoking native subscriptions,
+     * then posts the Asio signal onto its bound serial executor. Subscriptions
+     * run without either token mutex held and must not throw.
      *
-     * Safe to call before ``bind_executor()``: in that case only the
-     * polling flag is set; whoever later binds the executor will
-     * notice via ``is_cancelled()`` before any HTTP work has begun.
+     * Safe before bind_executor(): native stop callbacks still run, and a
+     * subsequently bound coroutine observes the same eager stop state.
      *
      * Engine-created operation children retain themselves until a posted
      * emit executes. A directly constructed token has no such ownership
@@ -100,16 +102,14 @@ public:
      * token alive until the executor has drained all posted work.
      */
     void cancel() noexcept {
-        if (cancelled_.exchange(true, std::memory_order_acq_rel)) {
-            return;  // already cancelled
-        }
-
-        // Keep the executor serialized with unbind_executor(): once a
-        // completed operation releases its private io_context binding, no
-        // concurrent cancel() may retain that dead executor and post to it.
-        // Fetch the optional self-retainer before taking mu_; fork() only
-        // owns children_mu_, so this order has no inverse lock path.
+        if (stop_source_.stop_requested()) return;
+        // Retain operation children before a native callback can release its
+        // awaiting frame. No callback runs while either token mutex is held.
         auto keep_alive = self_keep_alive_for_post();
+        if (!stop_source_.request_stop()) return;
+
+        // Serialize executor submission with unbind_executor(), so completed
+        // operations cannot post into a context that has begun teardown.
         {
             std::lock_guard<std::mutex> lk(mu_);
             if (ex_) {
@@ -148,9 +148,14 @@ public:
         }
     }
 
-    /// @brief Polling read of the cancel flag. Cheap, lock-free.
+    /// @brief Thread-safe observation of the same state used by subscriptions.
     [[nodiscard]] bool is_cancelled() const noexcept {
-        return cancelled_.load(std::memory_order_acquire);
+        return stop_source_.stop_requested();
+    }
+
+    /// @brief Native cancellation subscriptions independent of Asio slot ownership.
+    [[nodiscard]] std::stop_token stop_token() const noexcept {
+        return stop_source_.get_token();
     }
 
     /**
@@ -180,7 +185,7 @@ public:
             ex_ = ex ? asio::any_io_executor(asio::make_strand(std::move(ex)))
                      : asio::any_io_executor{};
             bound = ex_;
-            fire_immediately = cancelled_.load(std::memory_order_acquire);
+            fire_immediately = stop_source_.stop_requested();
         }
         if (fire_immediately && bound) {
             auto keep_alive = self_keep_alive_for_post();
@@ -256,7 +261,7 @@ public:
      * the next ``cancel()`` / ``fork()``. A forked child also records a
      * weak self-reference in its existing child list. A posted signal emit
      * locks and captures that reference, retaining engine operation children
-     * until the emit has executed without changing ``CancelToken``'s layout.
+     * until the emit has executed.
      *
      * **Eager-cancel safety**: if the parent is already cancelled at
      * the time of ``fork()``, the new child is constructed with its
@@ -280,9 +285,8 @@ public:
         // to a real cancel scope (one io_context spin-up downstream).
         auto child = std::shared_ptr<CancelToken>(new CancelToken());
 
-        // Preserve the 0.11.x object layout by using the existing weak-child
-        // list as the ownership source for posted emits. cancel() excludes this
-        // self entry from parent-to-child propagation.
+        // The weak self-entry retains operation children through posted emits.
+        // cancel() excludes this entry from parent-to-child propagation.
         {
             std::lock_guard<std::mutex> lk(child->children_mu_);
             child->children_.push_back(child);
@@ -309,7 +313,7 @@ public:
         // Eager propagation: parent already cancelled → child sees
         // the polling flag immediately. ``bind_executor`` on the
         // child will then fire its signal at the next co_await.
-        if (cancelled_.load(std::memory_order_acquire)) {
+        if (stop_source_.stop_requested()) {
             child->cancel();
         }
         return child;
@@ -326,15 +330,13 @@ private:
         return {};
     }
 
-    std::atomic<bool>        cancelled_{false};
+    std::stop_source        stop_source_;
     mutable std::mutex       mu_;        // guards ex_ vs cancel() race
     asio::any_io_executor    ex_;        // bound by engine before HTTP I/O
     asio::cancellation_signal sig_;      // for asio operation cancel
 
-    // Hierarchical cascade list. Entries are children produced by fork(); a
-    // forked token also keeps one weak self-entry so posted emits can retain
-    // the operation without adding a data member or changing the 0.11.x ABI.
-    // cancel() skips that self-entry while cascading.
+    // Hierarchical cascade list. Forked children retain a weak self-entry for
+    // cancellation callbacks and posted emits; cancel() skips it when cascading.
     mutable std::mutex children_mu_;
     std::vector<std::weak_ptr<CancelToken>> children_;
 };
