@@ -35,9 +35,11 @@ and C++ speaker, JARVIS CLI synthetic turns with persisted memory, Beast strict
 Core compilation/evolution/checkpoint rollback, dedicated mock topology load,
 retrieval index reuse/admission, and ProgramChat browser tenant isolation/
 generation replacement plus six SQLite and six PostgreSQL black-box scenarios.
-The inventory below separates these scoped runs from unexercised surfaces.
-They do not qualify vendor inference, voice, the migrated Python bindings, every
-Beast live variant, or the dedicated live multitenant 1,000/32 workload.
+The inventory below keeps these historical runs separate from
+[current interface-4 local evidence](../README.md#typed-c-cutover-status), including
+installed Python applications, A2A peers and the Forge helper.
+Vendor inference, voice, every Beast live variant and the dedicated live
+multitenant 1,000/32 workload remain unqualified.
 Historical timings below are not new-cutover qualification. Live runs incur
 provider charges and require explicit keys/network/model access. Keep keys,
 prompts and artifacts private; envelope/native inspection demos print sensitive
@@ -65,9 +67,9 @@ finding the rough edges of the public API.
 
 | Recipe | Status |
 |---|---|
-| [`ai-assembly/`](ai-assembly/) | Typed C++ migration; four actual local A2A member servers and C++ speaker exercised offline; synthetic abstentions are not model judgment |
+| [`ai-assembly/`](ai-assembly/) | Preserved interface-3 four-server/C++ session; current installed Python Speaker exercised against local A2A 0.3/1.0 peers; synthetic abstentions are not model judgment |
 | [`byo-openai/`](byo-openai/) | Python source migration uses authentic prepared handles; historical measurements do not qualify the migrated implementation |
-| [`jarvis/`](jarvis/) | Typed C++ migration; CLI synthetic turn, persisted memory and graceful EOF exercised; voice/Python surfaces not qualified |
+| [`jarvis/`](jarvis/) | Preserved interface-3 CLI synthetic turn, persisted memory and graceful EOF; voice and pybind benchmarks not newly qualified |
 | [`minimal-mcp/`](minimal-mcp/) | Actual stdio handshake/discovery and arithmetic/UTC/demo-weather calls exercised; no LLM |
 | [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | Dedicated mock 1,000 requests: 0 errors, 3 compiled topologies, 997 cache hits; isolated host emits reference metadata only; live 1,000/32 unqualified |
 | [`openrouter-provider/`](openrouter-provider/) | Typed Python source migration; historical measurements do not qualify the migrated implementation |

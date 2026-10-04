@@ -1,6 +1,7 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=ja source_sha256=3bd4cbc27205ab7259743f31d806c59f387979fc3e3e4c2412e30f4a43c7eee9 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=ja source_sha256=8261e54a3cabee1f0a4290735688fedd7911b77b3720ca60c5096cbf35a23437 -->
 # NeoGraph Cookbooks
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 ## 型付き C++ 移行状況
 
@@ -27,13 +28,13 @@ SDK `0.1.0` alpha の interface/shared ABI は4です。
 JARVIS CLI synthetic turn とメモリ永続化、Beast strict Core コンパイル・進化・checkpoint rollback、
 専用 mock topology load と retrieval index 再使用・admission、ProgramChat ブラウザー tenant 分離・
 generation 置換と SQLite六件・PostgreSQL六件の black-box scenario を確認しました。
-下の一覧はこの実行範囲と未検証 surface を区別します。vendor inference、音声、移行済み Python binding、
-全 Beast live 変種や専用 live multitenant 1,000/32 load の pass は主張しません。
+下の一覧はこの過去の実行を、インストール済み Python application、A2A peer、Forge helper を含む
+[現在の interface-4 local 証拠](../README.md#typed-c-cutover-status)と区別します。
+vendor inference、音声、全 Beast live 変種や専用 live multitenant 1,000/32 load は未検証です。
 過去の測定は新移行の qualification ではありません。live 実行には鍵、ネットワーク、モデルアクセスと費用が必要です。
 鍵、prompt、artifact は非公開に保ち、機密 envelope/native inspection 出力を公開 log に送らないでください。
 native archive は認証された owner-private custody であり、暗号化や vendor issuer 認証ではありません。
 
-**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 複数の NeoGraph 機能を組み合わせる recipe です。C++ target は必要な SDK package を指定した NeoGraph ツリーでビルドします。フォルダーのコピーだけでは standalone ビルドになりません。
 
@@ -52,9 +53,9 @@ native archive は認証された owner-private custody であり、暗号化や
 
 | Recipe | Status |
 |---|---|
-| [`ai-assembly/`](ai-assembly/) | 型付き C++ 移行; 実際のローカル A2A member サーバー四つと C++ speaker を offline 実行; synthetic abstention はモデル判断ではない |
+| [`ai-assembly/`](ai-assembly/) | 保存済み interface-3 四サーバー/C++ session; 現在のインストール済み Python Speaker を local A2A 0.3/1.0 peer で実行; synthetic abstention はモデル判断ではない |
 | [`byo-openai/`](byo-openai/) | 型付き Python ソース移行。過去の測定は移行後の実装を検証しない |
-| [`jarvis/`](jarvis/) | 型付き C++ 移行; CLI synthetic turn・メモリ永続化・正常 EOF を実行; 音声/Python surface は未検証 |
+| [`jarvis/`](jarvis/) | 保存済み interface-3 CLI synthetic turn・メモリ永続化・正常 EOF; 音声と pybind benchmark は新たに検証していない |
 | [`minimal-mcp/`](minimal-mcp/) | 実際の stdio handshake/discovery と計算・UTC・demo-weather 呼出しを検証; LLMなし |
 | [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | 専用 mock1,000要求・error0・compiled topology3・cache hit997; isolated host は reference metadata のみ; live1,000/32未検証 |
 | [`openrouter-provider/`](openrouter-provider/) | 型付き Python ソース移行。過去の測定は移行後の実装を検証しない |

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=zh-CN source_sha256=6eb929ef5081e8b3789f4156c37b960dd7a91be4c7880451bdb74f562630297f -->
+<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=zh-CN source_sha256=0bc9a674677c52e4a62ad11530f1770b7024e4395ff8d74cc0dafc2aa84ac720 -->
 # AI国民议会
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -32,7 +32,11 @@
 当前 client 从 AgentCard 选择兼容 JSON-RPC 0.x/1.0 interface；server 广告两个 dialect，
 通过 `A2A-Version` 选择 response encoding。初始 SSE task snapshot 是进度，不是完成回答。
 card-selected 请求不进行 dialect fallback，已交付 event 不重发。
-此前 offline session 不验证保留的1.0 wire 变更。
+
+另行使用当前已安装 Python Speaker 对 native A2A 0.3/1.0 card/RPC peer 执行了
+status/artifact/history 答案选择、user-only 回复拒绝与0.3 interface 优先选择。
+这是限定范围的 local [interface-4 证据](../../README.md#typed-c-cutover-status)，
+不是历史四 member session 的重跑或 live 模型投票。
 
 ## 实时记录（通过OpenRouter的DeepSeek，2026年4月29日）
 
@@ -89,7 +93,7 @@ PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     http://127.0.0.1:8103 http://127.0.0.1:8104
 ```
 
-v0.2.1 binding 是历史 release 结果，不是当前验证。当前 Python speaker 与 C++ caller 共用 application policy：实际 terminal/interrupted agent status text 优先，其次首个 artifact text，最后非空的最后 agent history text。以 `ng.a2a.Role.Agent` 识别 agent message，提交的 user bill 不能成为 member 回复。这是 application 答案选择规则，不是通用 A2A 优先级或新的 runtime 通过。
+v0.2.1 binding 是历史 release 结果，不是当前验证。当前 Python speaker 与 C++ caller 共用 application policy：实际 terminal/interrupted agent status text 优先，其次首个 artifact text，最后非空的最后 agent history text。以 `ng.a2a.Role.Agent` 识别 agent message，提交的 user bill 不能成为 member 回复。这是 application 答案选择规则，不是通用 A2A 优先级。
 
 ## 摩擦日记——新NeoGraph用户遇到的绊脚石
 
@@ -98,7 +102,7 @@ v0.2.1 binding 是历史 release 结果，不是当前验证。当前 Python spe
 
 ### 1. A2A仅限C++——Python绑定并未暴露它（在v0.2.1中已修复）
 
-历史 v0.2.1 添加了 Python A2A client。当前源码仍公开该 client；运行验证须通过当前 Python 运行单独确认。
+历史 v0.2.1 添加了 Python A2A client。当前已安装 binding 和 Speaker 的独立 local-peer 执行证据见上文。
 
 ### 2. 无系统安装 / 轮子中无头文件（已在 README v0.2.1 中修复）
 

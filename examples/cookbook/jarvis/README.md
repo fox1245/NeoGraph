@@ -12,8 +12,10 @@ Custom provider-calling nodes use the existing runtime-interposition/broker boun
 
 `[jarvis:ttft]` is emitted on the first nonempty `sp::PartDelta` with `PartKind::Text` and `DeltaChannel::Content`, not on usage, reasoning, headers or other events. It measures first synthesis text, not first audible TTS playback. Python REPL drivers remain protocol clients; pybind benchmarks use the migrated typed bindings and need separate execution evidence. Current runtime evidence covers the actual CLI greeting, a persisted synthetic memory turn and graceful EOF. It does not qualify microphone capture, ASR, TTS, pybind benchmarks or vendor inference. Timings and voice/live execution statements retained below remain historical, not current cutover qualification.
 
-The CLI evidence above was recorded with interface 3; the retained A2A 1.0 wire
-changes and SDK interface-4 controls are source contracts, not new runtime passes.
+The CLI evidence above was recorded with interface 3 and has not been rerun.
+[Current interface-4 local evidence](../../README.md#typed-c-cutover-status) covers
+SDK controls and A2A 0.3/1.0 peers separately; it does not qualify Jarvis voice,
+benchmarks or a new full CLI session.
 
 > Local/mock operation needs no cloud provider; optional voice needs local assets and devices.
 > Microphone is Tony, NeoGraph is JARVIS, tools/experts are JARVIS's subordinates.

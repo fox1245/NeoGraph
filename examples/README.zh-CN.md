@@ -1,6 +1,7 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=2ca0c5f75e5469e00f15a18bd66d075c7b40363567ad329c14ef0ec5ceecdc95 -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=c83cf49f9761e11401ae84366e9dce10d62a223481589269b3f729c4b68cc582 -->
 # C++ API 示例
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 ## 类型化 C++ 迁移状态
 
@@ -31,7 +32,15 @@ MCP/ACP/A2A/Harness 和 gRPC graph/checkpoint/tool 路径。gRPC-vs-JSON-RPC 测
 network、model access 并产生费用。密钥、prompt、artifact 保持私密，不要把敏感 envelope/native
 输出发布到公开 log。native archive 是 owner-private 认证 custody，不是加密或 vendor issuer 认证。
 
-**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+当前 interface-4 证据单独记录：Linux x86_64 已执行 native research recovery、
+ToT/Forge/rewrite helper 和 A2A 0.3/1.0 peer；11个已安装 Python application 在分批运行中
+完成48个无需凭据的 localhost 请求。已跟踪 evolution file 模式与 Plan resume 也按下文执行。
+这些是限定范围的 local 运行，不是保留的完整 C++ suite 的重跑。
+参见 [SDK interface-4 执行记录](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record)。
+不声称新的 hosted vendor、Windows/macOS/ARM64、HTTP/3 或 sanitizer 验证；
+remote CI 与公开发布仍待完成。
+
+
 
 编号示例涵盖 NeoGraph 引擎 API，包括 Core 和 Program quickstart。
 大多是此目录中的单个文件；[`26_postgres_react_hitl/`](26_postgres_react_hitl/) 使用 Docker Compose。
@@ -252,7 +261,8 @@ ladder。每次额外调用使用新 ordinal，通过原 bank 的 admission，�
 
 检查实际 JSON 字段 `best.compiled`、`best.validated`、`best.executed`、`best.correct`；
 仅有 `compile_passed` 不能证明正确执行。file 模式提供 built-in node type 和此 demo 的 `pnoop`，
-custom type 仍需 host 注册。此前 smoke 运行未验证 file 模式。
+custom type 仍需 host 注册。当前 Linux x86_64 file 模式使用此 seed/task pair，
+四个 `best` flag 均为 true；未注册 node type 则失败，没有成功的 compile/execute/correct 结果。
 
 ### A2A dialect 与 task snapshot
 

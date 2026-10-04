@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ja source_sha256=6eb929ef5081e8b3789f4156c37b960dd7a91be4c7880451bdb74f562630297f -->
+<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ja source_sha256=0bc9a674677c52e4a62ad11530f1770b7024e4395ff8d74cc0dafc2aa84ac720 -->
 # AI国民議会
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -32,7 +32,11 @@ live provider 呼び出しやPython 議長 binding の検証ではありませ�
 現在の client は AgentCard から互換 JSON-RPC 0.x/1.0 interface を選び、server は両 dialect を
 広告します。応答 encoding は `A2A-Version` が選択します。初期 SSE task snapshot は完了回答ではなく
 進捗です。card-selected 要求は dialect fallback せず、配信した event は再送しません。
-以前の offline session は保持された1.0 wire 更新の検証ではありません。
+
+別途、現在のインストール済み Python Speaker を native A2A 0.3/1.0 card/RPC peer で実行し、
+status/artifact/history の回答選択、user-only 応答の拒否、0.3 interface の優先選択を確認しました。
+範囲を限定した local [interface-4 証拠](../../README.md#typed-c-cutover-status)であり、
+過去の四 member session の再実行や live モデル投票ではありません。
 
 ## ライブ議事録（OpenRouter経由のDeepSeek、2026-04-29）
 
@@ -89,7 +93,7 @@ PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     http://127.0.0.1:8103 http://127.0.0.1:8104
 ```
 
-v0.2.1 binding は過去の release 結果で、現在の検証ではありません。現在の Python speaker は C++ caller と同じ application policy で、実際の terminal/interrupted agent status text、最初の artifact text、最後の空でない agent history text の順に選びます。agent message は `ng.a2a.Role.Agent` で識別し、送信した user bill は member の回答になりません。application の回答選択規則であり、普遍的 A2A 優先順位や新しい runtime pass ではありません。
+v0.2.1 binding は過去の release 結果で、現在の検証ではありません。現在の Python speaker は C++ caller と同じ application policy で、実際の terminal/interrupted agent status text、最初の artifact text、最後の空でない agent history text の順に選びます。agent message は `ng.a2a.Role.Agent` で識別し、送信した user bill は member の回答になりません。application の回答選択規則であり、普遍的 A2A 優先順位ではありません。
 
 ## 摩擦ジャーナル — 新しい NeoGraph ユーザーがつまずいた点
 
@@ -98,7 +102,7 @@ v0.2.1 binding は過去の release 結果で、現在の検証ではありま�
 
 ### 1. A2AはC++専用だった — Pythonバインディングがそれを公開していなかった（v0.2.1で修正済み）
 
-過去の v0.2.1 で Python A2A client が追加されました。現在の source もこの client を公開します。実行検証は現在の Python 実行で別に確認する必要があります。
+過去の v0.2.1 で Python A2A client が追加されました。現在のインストール済み binding と Speaker の別途の local-peer 実行証拠は上記を参照してください。
 
 ### 2. システムインストールなし／ホイール内にヘッダーなし（README v0.2.1で修正済み）
 

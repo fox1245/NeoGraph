@@ -1,6 +1,7 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=ko source_sha256=3bd4cbc27205ab7259743f31d806c59f387979fc3e3e4c2412e30f4a43c7eee9 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=ko source_sha256=8261e54a3cabee1f0a4290735688fedd7911b77b3720ca60c5096cbf35a23437 -->
 # NeoGraph 쿡북
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 ## 타입 C++ 전환 상태
 
@@ -27,13 +28,13 @@ Core-only를 포함한 모든 native 빌드는 `find_package(SchemaProvider CONF
 JARVIS CLI synthetic turn·메모리 영속화, Beast strict Core 컴파일·진화·checkpoint 롤백,
 전용 mock topology load와 retrieval index 재사용·admission, ProgramChat 브라우저 tenant 격리·
 generation 교체 및 SQLite6개·PostgreSQL6개 black-box 시나리오를 확인했습니다.
-아래 목록은 이 실행 범위와 미검증 surface를 구분합니다. vendor inference, 음성, 전환된 Python binding,
-모든 Beast live 변형이나 전용 live multitenant 1,000/32 load의 통과를 주장하지 않습니다.
+아래 목록은 이 과거 실행을 설치된 Python application, A2A peer와 Forge helper를 포함한
+[현재 interface-4 local 증거](../README.md#typed-c-cutover-status)와 구분합니다.
+vendor inference, 음성, 모든 Beast live 변형이나 전용 live multitenant 1,000/32 load는 미검증입니다.
 아래 과거 측정은 새 전환의 qualification이 아닙니다. live 실행에는 키/네트워크/모델 접근과 비용이 필요합니다.
 키, prompt, artifact를 비공개로 유지하세요. envelope/native inspection 출력은 민감하므로
 공개 log에 내보내지 마세요. native archive는 owner-private 인증 custody이며 암호화나 vendor issuer 인증이 아닙니다.
 
-**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 여러 NeoGraph 기능을 결합하는 레시피입니다. C++ 타깃은 필수 SDK 패키지를 제공한 NeoGraph 트리에서 빌드하세요. 폴더만 복사하면 standalone 빌드가 되지 않습니다.
 
@@ -52,9 +53,9 @@ generation 교체 및 SQLite6개·PostgreSQL6개 black-box 시나리오를 확�
 
 | Recipe | Status |
 |---|---|
-| [`ai-assembly/`](ai-assembly/) | 타입 C++ 전환; 실제 로컬 A2A member 서버 4개와 C++ speaker를 offline 실행 검증; synthetic abstention은 모델 판단이 아님 |
+| [`ai-assembly/`](ai-assembly/) | 보존된 interface-3 네 서버/C++ 세션; 현재 설치된 Python Speaker를 local A2A 0.3/1.0 peer로 실행; 합성 기권은 모델 판단이 아님 |
 | [`byo-openai/`](byo-openai/) | 타입 Python 소스 전환; 과거 측정은 전환된 구현의 검증이 아님 |
-| [`jarvis/`](jarvis/) | 타입 C++ 전환; CLI synthetic turn·메모리 영속화·정상 EOF 검증; 음성/Python surface는 미검증 |
+| [`jarvis/`](jarvis/) | 보존된 interface-3 CLI synthetic turn·메모리 영속화·정상 EOF; 음성과 pybind benchmark는 새로 검증하지 않음 |
 | [`minimal-mcp/`](minimal-mcp/) | 실제 stdio handshake/discovery와 계산·UTC·demo-weather 호출 검증; LLM 없음 |
 | [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | 전용 mock1,000요청·오류0·컴파일 topology3개·cache hit997; isolated host는 reference metadata만 출력; live1,000/32 미검증 |
 | [`openrouter-provider/`](openrouter-provider/) | 타입 Python 소스 전환; 과거 측정은 전환된 구현의 검증이 아님 |

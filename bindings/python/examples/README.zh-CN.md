@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/examples/README.md locale=zh-CN source_sha256=8b0fc904f7cc7d87773db4831ec47bf37dfeffa5a595ffc212fc52d94a2662a7 -->
+<!-- neograph-i18n: source=bindings/python/examples/README.md locale=zh-CN source_sha256=a1ffbe746f41909d860beac33ef1f3ea473e10ad6162985e4fba7b3810b4dd22 -->
 # Python API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -20,7 +20,7 @@ python 01_minimal.py
 
 ## 索引与预期行为
 
-使用 `python <file>` 运行各项。下表中的预期状态是验证目标，不表示本次文档更新运行过这些脚本。模型生成的措辞不具有确定性。
+使用 `python <file>` 运行各项。Linux x86_64 冒烟运行通过无需凭据的 localhost 对端执行了部分类型化 provider 应用，包括两个研究应用。这不代表所有脚本、托管供应商或发布平台均已验证；远程 CI 和发布仍未完成。范围见[当前发布证据](../../../CHANGELOG.md#unreleased)。表格描述预期行为，模型生成的措辞不具有确定性。
 
 | # | 文件 | 前提条件 | 预期行为 |
 |---|------|---------------|-------------------|

@@ -44,7 +44,12 @@ Current clients select compatible JSON-RPC 0.x/1.0 interfaces from the AgentCard
 the server advertises both dialects and uses `A2A-Version` for response encoding.
 Opening SSE task snapshots are progress, not completed replies. Card-selected
 requests do not dialect-fallback, and delivered events cannot be replayed.
-The earlier offline session does not qualify the retained 1.0 wire changes.
+
+Separately, the current installed Python Speaker was exercised against native
+A2A 0.3/1.0 card/RPC peers, including status/artifact/history answer selection,
+user-only reply rejection and 0.3 interface priority. This is scoped local
+[interface-4 evidence](../../README.md#typed-c-cutover-status), not a rerun of the
+historical four-member session or a live model vote.
 
 ## Live transcript (DeepSeek via OpenRouter, 2026-04-29)
 
@@ -125,7 +130,7 @@ The current Python speaker shares the C++ caller's application policy: actual
 terminal/interrupted agent status text first, then first artifact text, then the
 last nonempty agent history text. `ng.a2a.Role.Agent` identifies agent messages;
 the submitted user bill cannot become a member's reply. This is application
-answer selection, not a universal A2A precedence rule or a new runtime pass.
+answer selection, not a universal A2A precedence rule.
 
 ## Friction journal — what a fresh NeoGraph user tripped over
 
@@ -134,8 +139,8 @@ Historical pre-cutover friction follows, not current legacy API support claims.
 
 ### 1. A2A was C++-only — Python binding didn't expose it (FIXED in v0.2.1)
 
-Historically v0.2.1 added the Python A2A client. The current source still exposes
-that client; execution qualification must come from a current Python run.
+Historically v0.2.1 added the Python A2A client. The current installed binding and
+Speaker have separate local-peer execution evidence above.
 
 ### 2. No system install / no headers in the wheel (FIXED in README v0.2.1)
 

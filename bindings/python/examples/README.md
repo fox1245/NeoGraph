@@ -19,7 +19,7 @@ For no-key protocol qualification, set `OPENAI_API_BASE` to a faithful loopback 
 
 ## Index and expected behavior
 
-Run each entry with `python <file>`. The expected state below is a verification target; it is not a claim that these scripts were run in this documentation update. Model-generated wording is not deterministic.
+Run each entry with `python <file>`. Linux x86_64 smoke runs exercised selected typed-provider applications, including both research apps, against credential-free localhost peers. This does not qualify every script, hosted vendor or release platform; remote CI and publication remain pending. See the [current release evidence](../../../CHANGELOG.md#unreleased) for scope. The table gives expected behavior, not deterministic model wording.
 
 | # | File | Prerequisites | Expected behavior |
 |---|------|---------------|-------------------|

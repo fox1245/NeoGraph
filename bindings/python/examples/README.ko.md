@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/examples/README.md locale=ko source_sha256=8b0fc904f7cc7d87773db4831ec47bf37dfeffa5a595ffc212fc52d94a2662a7 -->
+<!-- neograph-i18n: source=bindings/python/examples/README.md locale=ko source_sha256=a1ffbe746f41909d860beac33ef1f3ea473e10ad6162985e4fba7b3810b4dd22 -->
 # Python API 예제
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -20,7 +20,7 @@ python 01_minimal.py
 
 ## 색인과 예상 동작
 
-각 항목은 `python <file>`로 실행하세요. 아래의 예상 상태는 검증 목표이며, 이번 문서 업데이트에서 스크립트를 실행했다는 주장이 아닙니다. 모델이 생성하는 문구는 결정적이지 않습니다.
+각 항목은 `python <file>`로 실행하세요. Linux x86_64 스모크 실행에서는 두 조사 앱을 포함한 일부 타입 기반 provider 애플리케이션을 자격 증명 없는 localhost 피어로 실행했습니다. 모든 스크립트, 호스팅 공급자 또는 릴리스 플랫폼의 검증을 뜻하지 않으며 원격 CI와 배포는 아직 남아 있습니다. 범위는 [현재 릴리스 근거](../../../CHANGELOG.md#unreleased)를 참조하세요. 표는 예상 동작을 설명하며 모델의 문구는 결정적이지 않습니다.
 
 | # | 파일 | 사전 조건 | 예상 동작 |
 |---|------|---------------|-------------------|

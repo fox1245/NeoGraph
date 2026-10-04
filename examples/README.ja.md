@@ -1,6 +1,7 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=2ca0c5f75e5469e00f15a18bd66d075c7b40363567ad329c14ef0ec5ceecdc95 -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=c83cf49f9761e11401ae84366e9dce10d62a223481589269b3f729c4b68cc582 -->
 # C++ API の例
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 ## 型付き C++ 移行状況
 
@@ -32,7 +33,16 @@ live/外部 model 経路22個と無効な Clay GUI は未検証で、公開 vend
 鍵、prompt、artifact は非公開に保ち、機密 envelope/native 出力を公開 log に送らないでください。
 native archive は owner-private 認証 custody で、暗号化や vendor issuer 認証ではありません。
 
-**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+現在の interface-4 証拠は別です。Linux x86_64 で native research recovery、
+ToT/Forge/rewrite helper と A2A 0.3/1.0 peer を実行し、インストール済み Python application
+11個が分割した実行群で credential-free localhost 要求48個を行いました。
+追跡済み evolution file mode と Plan resume も以下のとおり実行しました。
+保存済み C++ full suite の再実行ではなく、範囲を限定した local 実行です。
+[SDK interface-4 実行記録](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record)を参照してください。
+新しい hosted vendor、Windows/macOS/ARM64、HTTP/3、sanitizer 検証は主張せず、
+remote CI と公開は未完了です。
+
+
 
 番号付き例は NeoGraph のエンジン API を扱い、Core と Program の quickstart も含みます。
 ほとんどはこのディレクトリの単一ファイルです。Docker Compose を使う
@@ -263,7 +273,8 @@ cap を倍増せず、failure も再試行しません。例28の rewrite は lo
 実際の JSON の `best.compiled`、`best.validated`、`best.executed`、`best.correct` を確認してください。
 `compile_passed` だけでは正しい実行の証拠になりません。file モードにも built-in node type と
 この demo の `pnoop` があり、custom type には host 登録が必要です。
-過去の smoke 実行は file モードを検証していません。
+現在の Linux x86_64 file mode 実行では、この seed/task pair の四つの `best` flag がすべて true でした。
+未登録 node type は成功した compile/execute/correct 結果なしに失敗しました。
 
 ### A2A dialect と task snapshot
 

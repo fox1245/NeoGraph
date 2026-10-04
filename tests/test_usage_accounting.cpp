@@ -88,6 +88,29 @@ TEST(UsageAccounting, MultipleLLMNodesSum) {
     EXPECT_EQ(reported(result.usage.output_total), 10U);
 }
 
+TEST(UsageAccounting, CachedAndReasoningTokensReachRunResult) {
+    auto provider = std::make_shared<neograph::test::LocalProvider>(
+        [](ProviderRequest, const PreparedProviderRequest&,
+           const neograph::test::LocalProvider::EventCallback&)
+            -> asio::awaitable<sp::runtime::Result> {
+            auto usage = neograph::test::usage(100, 40, 140);
+            usage.input_uncached = sp::Count{26, sp::Evidence::Reported};
+            usage.cache_read = sp::Count{64, sp::Evidence::Reported};
+            usage.cache_write = sp::Count{10, sp::Evidence::Reported};
+            usage.reasoning = sp::Count{25, sp::Evidence::Reported};
+            co_return neograph::test::success("ok", std::move(usage));
+        }, "detailed-usage-fixture");
+    const auto result = run_graph(llm_graph(2), std::move(provider), "detailed");
+
+    EXPECT_EQ(reported(result.usage.input_total), 200U);
+    EXPECT_EQ(reported(result.usage.output_total), 80U);
+    EXPECT_EQ(reported(result.usage.input_uncached), 52U);
+    EXPECT_EQ(reported(result.usage.cache_read), 128U);
+    EXPECT_EQ(reported(result.usage.cache_write), 20U);
+    EXPECT_EQ(reported(result.usage.reasoning), 50U);
+    EXPECT_EQ(reported(result.usage.total), 280U);
+}
+
 // No provider report is unknown, not a fabricated known zero.
 TEST(UsageAccounting, NoLLMNodeReportsUnknownUsage) {
     json def = {

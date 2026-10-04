@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ko source_sha256=6eb929ef5081e8b3789f4156c37b960dd7a91be4c7880451bdb74f562630297f -->
+<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ko source_sha256=0bc9a674677c52e4a62ad11530f1770b7024e4395ff8d74cc0dafc2aa84ac720 -->
 # AI 국회
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -32,7 +32,11 @@
 현재 client는 AgentCard에서 호환되는 JSON-RPC 0.x/1.0 interface를 선택하고 server는 두 dialect를
 광고합니다. 응답 encoding은 `A2A-Version`으로 선택합니다. 최초 SSE task snapshot은 완료 답변이 아닌
 진행 상황입니다. card-selected 요청은 dialect fallback하지 않으며 전달한 event를 재전송하지 않습니다.
-이전 offline 세션은 보존된 1.0 wire 변경의 검증이 아닙니다.
+
+별도로 현재 설치된 Python Speaker를 native A2A 0.3/1.0 card/RPC peer로 실행하여
+status/artifact/history 답변 선택, user-only 응답 거부와 0.3 interface 우선 선택을 확인했습니다.
+범위가 한정된 local [interface-4 증거](../../README.md#typed-c-cutover-status)이며,
+과거 네 member 세션의 재실행이나 live 모델 투표는 아닙니다.
 
 ## 라이브 기록 (OpenRouter의 DeepSeek, 2026-04-29)
 
@@ -89,7 +93,7 @@ PYTHONPATH=build-cookbook python3 examples/cookbook/ai-assembly/speaker.py \
     http://127.0.0.1:8103 http://127.0.0.1:8104
 ```
 
-v0.2.1 binding은 과거 release 결과이지 현재 검증이 아닙니다. 현재 Python speaker는 C++ caller와 같은 application policy로 실제 terminal/interrupted agent status text, 첫 artifact text, 마지막 비어 있지 않은 agent history text 순서로 선택합니다. agent message는 `ng.a2a.Role.Agent`로 구분하며 제출한 user bill은 member 응답이 될 수 없습니다. application 답변 선택 규칙이지 보편적 A2A 우선순위나 새 runtime pass가 아닙니다.
+v0.2.1 binding은 과거 release 결과이지 현재 검증이 아닙니다. 현재 Python speaker는 C++ caller와 같은 application policy로 실제 terminal/interrupted agent status text, 첫 artifact text, 마지막 비어 있지 않은 agent history text 순서로 선택합니다. agent message는 `ng.a2a.Role.Agent`로 구분하며 제출한 user bill은 member 응답이 될 수 없습니다. application 답변 선택 규칙이지 보편적 A2A 우선순위는 아닙니다.
 
 ## 마찰 일지 — 새로운 NeoGraph 사용자가 걸려 넘어진 것
 
@@ -98,7 +102,7 @@ v0.2.1 binding은 과거 release 결과이지 현재 검증이 아닙니다. 현
 
 ### 1. A2A는 C++ 전용이었습니다 — Python 바인딩이 이를 노출하지 않았습니다 (v0.2.1에서 수정됨)
 
-과거 v0.2.1에서 Python A2A client가 추가되었습니다. 현재 소스도 이 client를 공개하며 실행 검증은 현재 Python 실행을 통해 별도로 확인해야 합니다.
+과거 v0.2.1에서 Python A2A client가 추가되었습니다. 현재 설치된 binding과 Speaker의 별도 local-peer 실행 증거는 위에 설명되어 있습니다.
 
 ### 2. 시스템 설치 없음 / 휠에 헤더 없음 (README v0.2.1에서 수정됨)
 

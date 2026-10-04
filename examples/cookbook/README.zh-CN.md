@@ -1,6 +1,7 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=zh-CN source_sha256=3bd4cbc27205ab7259743f31d806c59f387979fc3e3e4c2412e30f4a43c7eee9 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=zh-CN source_sha256=8261e54a3cabee1f0a4290735688fedd7911b77b3720ca60c5096cbf35a23437 -->
 # NeoGraph Cookbooks
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 ## 类型化 C++ 迁移状态
 
@@ -27,13 +28,13 @@ SDK `0.1.0` alpha 的 interface/shared ABI 为4。
 JARVIS CLI synthetic turn 和记忆持久化、Beast strict Core 编译·演化·checkpoint 回滚、
 专用mock topology load与retrieval index复用·admission、ProgramChat浏览器tenant隔离·
 generation替换及SQLite六个、PostgreSQL六个black-box场景。
-下表区分这些实际执行范围与未验证 surface。不声称 vendor inference、语音、已迁移 Python binding、
-全部 Beast live 变体或专用 live multitenant1,000/32 load 已通过。
+下表将这些历史运行与包括已安装 Python application、A2A peer 和 Forge helper 的
+[当前 interface-4 local 证据](../README.md#typed-c-cutover-status)分开。
+vendor inference、语音、全部 Beast live 变体或专用 live multitenant1,000/32 load 仍未验证。
 历史测量不是新迁移的 qualification。live 运行需要密钥、网络和模型访问并产生费用。
 密钥、prompt、artifact 必须保持私密；envelope/native inspection 输出含敏感内容，不得进入公开 log。
 native archive 是经过认证的 owner-private custody，不是加密或 vendor issuer 认证。
 
-**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 这些 recipe 组合多个 NeoGraph 功能。C++ target 需从提供必需 SDK 包的 NeoGraph 树构建。仅复制文件夹不能提供 standalone 构建。
 
@@ -52,9 +53,9 @@ native archive 是经过认证的 owner-private custody，不是加密或 vendor
 
 | Recipe | Status |
 |---|---|
-| [`ai-assembly/`](ai-assembly/) | 类型化 C++ 迁移；已 offline 执行四个真实本地 A2A member 服务器与 C++ speaker；synthetic abstention 不是模型判断 |
+| [`ai-assembly/`](ai-assembly/) | 保留的 interface-3 四服务器/C++ session；当前已安装 Python Speaker 已通过 local A2A 0.3/1.0 peer 执行；synthetic abstention 不是模型判断 |
 | [`byo-openai/`](byo-openai/) | 类型化 Python 源码迁移；历史测量不验证迁移后的实现 |
-| [`jarvis/`](jarvis/) | 类型化 C++ 迁移；已执行 CLI synthetic turn、记忆持久化与正常 EOF；语音/Python surface 未验证 |
+| [`jarvis/`](jarvis/) | 保留的 interface-3 CLI synthetic turn、记忆持久化与正常 EOF；语音与 pybind benchmark 未重新验证 |
 | [`minimal-mcp/`](minimal-mcp/) | 已验证真实stdio handshake/discovery及计算·UTC·demo-weather调用；没有LLM |
 | [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | 专用mock1,000请求、error0、compiled topology3、cache hit997；isolated host只输出reference metadata；live1,000/32未验证 |
 | [`openrouter-provider/`](openrouter-provider/) | 类型化 Python 源码迁移；历史测量不验证迁移后的实现 |

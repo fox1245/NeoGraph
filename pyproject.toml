@@ -1,6 +1,6 @@
 # CMake installs the Python package and its native libraries into one directory.
 [build-system]
-requires = ["scikit-build-core>=0.12", "pybind11>=2.13", "ninja>=1.10"]
+requires = ["scikit-build-core>=1.0", "pybind11>=2.13", "ninja>=1.10"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -80,14 +80,14 @@ wheel.exclude = [
 # A positive source manifest avoids shipping workspaces, qualification records,
 # build outputs, private configuration or raw provider traffic. The SDK source
 # is resolved at the immutable revision in cmake/NeoGraphSchemaProvider.cmake.
-sdist.inclusion-mode = "manual"
+sdist.inclusion-mode = "explicit"
 sdist.include = [
-    "CMakeLists.txt", "pyproject.toml", "README.md", "LICENSE",
-    "THIRD_PARTY_LICENSES", "THIRD_PARTY_LICENSES.md",
+    "/CMakeLists.txt", "/pyproject.toml", "/README.md", "/LICENSE",
+    "/THIRD_PARTY_LICENSES", "/THIRD_PARTY_LICENSES.md",
     "cmake/**", "include/**", "src/**", "deps/**", "schemas/**", "proto/**",
     "bindings/python/CMakeLists.txt", "bindings/python/src/**",
     "bindings/python/neograph_engine/*.py", "bindings/python/tests/*.py",
-    "bindings/python/examples/*.py",
+    "bindings/python/examples/*.py", "bindings/python/examples/README.md",
 ]
 sdist.exclude = [
     "**/.git/**", "**/.env*", "**/__pycache__/**", "**/*.pyc",

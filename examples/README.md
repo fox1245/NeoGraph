@@ -39,6 +39,16 @@ prompts and artifacts private; envelope/native inspection demos print sensitive
 payloads and must not feed public logs. A native archive provides authenticated,
 owner-private custody, not encryption or vendor-issuer authentication.
 
+Current interface-4 evidence is separate: Linux x86_64 runs exercised native
+research recovery, ToT/Forge/rewrite helpers and A2A 0.3/1.0 peers, plus 11 installed
+Python applications across 48 credential-free localhost requests in split cohorts.
+The tracked evolution file mode and Plan resume were also executed as described
+below. These are scoped local runs, not a repeat of the preserved full C++ suite.
+See the [SDK interface-4 execution record](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record).
+No new hosted-vendor, Windows/macOS/ARM64, HTTP/3 or sanitizer qualification is
+claimed; remote CI and publication remain pending.
+
+
 
 The numbered examples cover the NeoGraph engine surface, with one focused Core
 quickstart and one focused Program quickstart.
@@ -276,7 +286,9 @@ repository root, use the tracked seed/task pair:
 Inspect the actual JSON fields `best.compiled`, `best.validated`, `best.executed`
 and `best.correct`; `compile_passed` alone does not establish correct execution.
 Built-in node types and this demo's `pnoop` are available in file mode; custom types
-still require host registration. The prior smoke run did not qualify file mode.
+still require host registration. The current Linux x86_64 file-mode run using this
+seed/task pair returned all four `best` flags true; an unregistered node type
+failed without a successful compile/execute/correct result.
 
 ### A2A dialects and task snapshots
 

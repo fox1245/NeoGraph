@@ -5,8 +5,14 @@
 //
 // The input seed is already strict Core JSON; evolution mutates only the
 // canonical interchange topology and never translates a source language.
-// File mode supports built-in nodes and the pnoop fixture registered below.
-// Custom node types must be registered with NodeFactory before evolve().
+//
+// Node types: the seed may use any built-in node type plus the demo `pnoop`
+// no-op type, which this example registers in BOTH modes (so the tracked
+// examples/54_evolution_seed.json + 54_evolution_task.json run as-is):
+//   ./example_evolution examples/54_evolution_seed.json examples/54_evolution_task.json
+// Any other custom node type must be registered with NodeFactory by the host
+// program before evolve() runs; otherwise the compile gate rejects every
+// candidate with "Unknown node type" and the run exits 1 (compile_passed 0).
 #include <neograph/graph/evolution.h>
 #include <neograph/graph/node.h>
 
@@ -79,7 +85,9 @@ int main(int argc, char** argv) {
         task_doc = json::parse(read_file(argv[2]));
     } else {
         std::cerr << "usage: " << argv[0] << " seed.json task.json\n"
-                  << "   or: " << argv[0] << " --smoke\n";
+                  << "   or: " << argv[0] << " --smoke\n"
+                  << "seed node types: built-ins or the demo 'pnoop'; "
+                     "other custom types must be registered by the host\n";
         return 2;
     }
 

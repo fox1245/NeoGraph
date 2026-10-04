@@ -49,16 +49,17 @@ struct Doc { std::string title; std::string body; };
 
 static const std::vector<Doc> KB = {
     {"NeoGraph Overview",
-     "NeoGraph is a C++17 graph-based agent orchestration engine that "
-     "brings LangGraph-level capabilities to C++ with no Python dependency. "
-     "Workflows are defined as JSON; the engine executes them with "
-     "Pregel-style super-steps."},
+     "NeoGraph is a C++20 graph execution and agent orchestration engine. "
+     "Its C++ runtime does not require a Python runtime. Core executes "
+     "admitted JSON graphs in Pregel-style supersteps: nodes read the "
+     "step's state, and reducers merge their writes at the barrier."},
 
     {"NeoGraph Modules",
-     "NeoGraph ships four modules: neograph::core (graph engine, JSON "
-     "loader, scheduler), neograph::llm (typed SchemaProvider SDK runtime "
-     "with pinned descriptors), neograph::mcp (MCP client over HTTP and stdio), "
-     "and neograph::util (lock-free RequestQueue for backpressure)."},
+     "neograph::core provides graph loading, state, reducers and execution. "
+     "neograph::program runs compiled Harness Programs with journaled "
+     "effects. neograph::llm integrates the typed SchemaProvider SDK through "
+     "pinned descriptors. Optional modules provide MCP, A2A and ACP "
+     "protocols, utility queues, and PostgreSQL or SQLite persistence."},
 
     {"Send and Command",
      "Send enables dynamic fan-out: a node returns N Send objects to spawn "
@@ -66,19 +67,17 @@ static const std::vector<Doc> KB = {
      "override routing in a single return value, bypassing static edges."},
 
     {"Checkpointing and HITL",
-     "Every super-step snapshots full state through CheckpointStore "
-     "(InMemory and Postgres backends shipped). Human-in-the-loop is "
-     "supported via interrupt_before / interrupt_after declarations and "
-     "dynamic NodeInterrupt exceptions; resume() continues from any "
-     "saved checkpoint."},
+     "CheckpointStore persists graph state and its continuation; in-memory, "
+     "PostgreSQL and SQLite backends are available. Human-in-the-loop uses "
+     "interrupt_before, interrupt_after and dynamic NodeInterrupt. "
+     "resume() follows the saved pending nodes; resuming a completed "
+     "terminal continuation does not schedule another user turn."},
 
-    {"Performance"
-,
-     "Engine overhead is measured at ~5 us per super-step on a Release "
-     "-O3 -DNDEBUG build. In the burst-concurrency benchmark "
-     "(1 CPU / 512 MB cgroup), 10000 parallel agent runs complete in "
-     "52 ms with a 5.5 MB peak RSS — the asio::thread_pool dispatch "
-     "model scales linearly until the CPU quota becomes the bottleneck."},
+    {"Performance",
+     "Engine overhead depends on graph shape, scheduling, compiler and "
+     "host resources. The benchmarks directory records workloads and "
+     "measurement conditions. Empty-graph timings do not establish "
+     "model-call latency, throughput or memory use for an agent workload."},
 
     {"License",
      "NeoGraph itself is MIT-licensed. Vendored dependencies: asio "

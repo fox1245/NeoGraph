@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/examples/README.md locale=ja source_sha256=8b0fc904f7cc7d87773db4831ec47bf37dfeffa5a595ffc212fc52d94a2662a7 -->
+<!-- neograph-i18n: source=bindings/python/examples/README.md locale=ja source_sha256=a1ffbe746f41909d860beac33ef1f3ea473e10ad6162985e4fba7b3810b4dd22 -->
 # Python API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -20,7 +20,7 @@ python 01_minimal.py
 
 ## 索引と期待される動作
 
-各項目は `python <file>` で実行してください。以下の期待状態は検証の目標であり、このドキュメント更新でスクリプトを実行したという主張ではありません。モデルが生成する文言は決定的ではありません。
+各項目は `python <file>` で実行してください。Linux x86_64 のスモーク実行では、両方の調査アプリを含む一部の型付き provider アプリケーションを、認証情報不要の localhost ピアで実行しました。すべてのスクリプト、ホスト型サービス、リリース対象プラットフォームの検証ではなく、リモート CI と公開はまだ完了していません。範囲は[現在のリリースの実行記録](../../../CHANGELOG.md#unreleased)を参照してください。表は期待される動作を示し、モデルの文言は決定的ではありません。
 
 | # | ファイル | 前提条件 | 期待される動作 |
 |---|------|---------------|-------------------|

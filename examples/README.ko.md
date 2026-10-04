@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=2ca0c5f75e5469e00f15a18bd66d075c7b40363567ad329c14ef0ec5ceecdc95 -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=c83cf49f9761e11401ae84366e9dce10d62a223481589269b3f729c4b68cc582 -->
 # C++ API 예제
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
@@ -32,6 +32,16 @@ live/외부 모델 경로 22개와 비활성 Clay GUI는 미검증이며 공개 
 아래 과거 측정은 새 전환의 qualification이 아닙니다. live에는 키/네트워크/모델 접근과 비용이 필요합니다.
 키, prompt, artifact는 비공개로 유지하고 민감한 envelope/native 출력을 공개 log에 내보내지 마세요.
 native archive는 owner-private 인증 custody이며 암호화나 vendor issuer 인증이 아닙니다.
+
+현재 interface-4 증거는 별도입니다. Linux x86_64에서 native research 복구,
+ToT/Forge/rewrite helper와 A2A 0.3/1.0 peer를 실행했고, 설치된 Python application 11개가
+분리된 실행 묶음에서 credential-free localhost 요청 48개를 수행했습니다.
+추적된 evolution file 모드와 Plan resume도 아래와 같이 실행했습니다.
+보존된 전체 C++ suite를 재실행한 결과가 아닌 범위가 한정된 local 실행입니다.
+[SDK interface-4 실행 기록](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record)을 참조하세요.
+새 hosted vendor, Windows/macOS/ARM64, HTTP/3 또는 sanitizer 검증은 주장하지 않으며,
+remote CI와 공개 배포는 아직 대기 중입니다.
+
 
 
 
@@ -264,7 +274,8 @@ cap을 두 배로 늘리거나 failure를 재시도하지 않습니다. 예제 2
 실제 JSON의 `best.compiled`, `best.validated`, `best.executed`, `best.correct`를 확인하세요.
 `compile_passed`만으로 올바른 실행을 입증하지 못합니다. file 모드에서도 built-in node type과
 이 demo의 `pnoop`를 쓸 수 있지만 custom type은 host 등록이 필요합니다.
-과거 smoke 실행은 file 모드를 검증하지 않았습니다.
+현재 Linux x86_64에서 이 seed/task 쌍을 사용한 file 모드 실행은 네 `best` flag가 모두 true였습니다.
+등록되지 않은 node type은 성공한 compile/execute/correct 결과 없이 실패했습니다.
 
 ### A2A dialect 및 task snapshot
 
