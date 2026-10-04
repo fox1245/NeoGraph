@@ -1460,6 +1460,7 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
         auto x = run(id);
         return x && retained_handle(x).cancel();
     }
+    json read(const std::string& uri);
     HarnessServiceConfig                                       config;
     std::shared_ptr<HarnessJournal>                            journal;
     HarnessServiceResources                                    resources;
@@ -1514,6 +1515,9 @@ bool HarnessService::cancel(const std::string& i) {
     return impl_->cancel(i);
 }
 json HarnessService::read(const std::string& u) const {
+    return impl_->read(u);
+}
+json HarnessService::Impl::read(const std::string& u) {
     constexpr std::string_view runs = "neograph://runs/", artifacts = "neograph://artifacts/";
     if (u.rfind(runs.data(), 0) == 0) {
         auto       path  = u.substr(runs.size());
@@ -1552,7 +1556,7 @@ json HarnessService::read(const std::string& u) const {
         const auto slash = path.find('/');
         if (slash == std::string::npos)
             throw std::invalid_argument("Harness artifact URI requires view");
-        return impl_->read_artifact(path.substr(0, slash), path.substr(slash + 1));
+        return read_artifact(path.substr(0, slash), path.substr(slash + 1));
     }
     throw std::invalid_argument("unsupported Harness URI");
 }
@@ -1602,6 +1606,9 @@ void HarnessService::register_tools(MCPServer& server) {
                 R"JSON({"type":"object","required":["run_id"],"properties":{"run_id":{"type":"string"},"view":{"enum":["status","details","trace","attempts","checkpoints","diff","artifacts"]},"uri":{"type":"string"},"after_sequence":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":1000}},"additionalProperties":false})JSON"),
             run_schema(), true),
         [a](const json& v, const auto&) {
+            if (v.contains("uri"))
+                return mcp_result(a->read(v.at("uri").get<std::string>()),
+                                  "Harness Program artifact");
             auto id = v.at("run_id").get<std::string>();
             return mcp_result(
                 a->get(id, v.value("view", "status"), v.value("after_sequence", std::uint64_t{0}),

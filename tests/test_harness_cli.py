@@ -86,7 +86,29 @@ async def verify_cli(binary, home):
                 or summary.get("workers") != [{"worker_id": "reviewer", "status": "completed",
                                                "result": {"status": "ok", "findings": []}}]):
             raise AssertionError(summary)
-        print("Harness CLI: compile -> retained start -> completed get; one valid worker")
+        trace_uri = "neograph://runs/" + started["run_id"] + "/trace"
+        trace = await tool("neograph_get", {"run_id": started["run_id"], "uri": trace_uri})
+        events = trace["events"]
+        event_types = [event["type"] for event in events]
+        if (event_types[0] != "run.started" or event_types[-1] != "run.terminal"
+                or "program.operation.started" not in event_types
+                or "checkpoint.published" not in event_types
+                or events[-1]["status"] != "completed"
+                or any(event["run_id"] != started["run_id"] for event in events)):
+            raise AssertionError(trace)
+        sequences = [event["sequence"] for event in events]
+        if sequences != sorted(set(sequences)):
+            raise AssertionError(trace)
+        page_uri = trace_uri + "?after_sequence=" + str(sequences[0]) + "&limit=1"
+        page = await tool("neograph_get", {"run_id": started["run_id"], "uri": page_uri})
+        if [event["sequence"] for event in page["events"]] != sequences[1:2]:
+            raise AssertionError(page)
+        invalid_uri = await rpc("tools/call", {
+            "name": "neograph_get",
+            "arguments": {"run_id": started["run_id"], "uri": "https://invalid.example/trace"}})
+        if not invalid_uri.get("isError"):
+            raise AssertionError(invalid_uri)
+        print("Harness CLI: retained lifecycle, causal trace URI, cursor page and invalid-URI rejection")
     finally:
         process.stdin.close()
         try:

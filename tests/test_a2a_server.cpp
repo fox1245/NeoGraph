@@ -417,12 +417,29 @@ struct LiveServer {
     }
 };
 
-TEST(A2AServer, AgentCardDiscovery) {
-    LiveServer srv;
-    A2AClient client(srv.url());
-    auto card = client.fetch_agent_card();
-    EXPECT_EQ(card.name,                "test-echo");
-    EXPECT_EQ(card.preferred_transport, "JSONRPC");
+TEST(A2AServer, DiscoveryEndpointTracksBindingAcrossRestart) {
+    auto card = build_card(0);
+    card.url.clear();
+    A2AServer server(build_echo_engine(), std::move(card));
+    for (int run = 0; run != 2; ++run) {
+        ASSERT_TRUE(server.start_async("127.0.0.1", 0));
+        const auto endpoint = "http://127.0.0.1:" + std::to_string(server.port());
+        const auto discovered = A2AClient(endpoint).fetch_agent_card();
+        ASSERT_EQ(discovered.url, endpoint);
+        const auto task = A2AClient(discovered.url).send_message_sync("discovered endpoint");
+        EXPECT_EQ(task.status.state, TaskState::Completed);
+        server.stop();
+    }
+}
+
+TEST(A2AServer, ExplicitDiscoveryEndpointIsNotReplacedByBinding) {
+    auto card = build_card(0);
+    card.url = "https://public.example/a2a";
+    A2AServer server(build_echo_engine(), std::move(card));
+    ASSERT_TRUE(server.start_async("127.0.0.1", 0));
+    const auto endpoint = "http://127.0.0.1:" + std::to_string(server.port());
+    EXPECT_EQ(A2AClient(endpoint).fetch_agent_card().url, "https://public.example/a2a");
+    server.stop();
 }
 
 TEST(A2AServer, MessageSendRoundTrip) {

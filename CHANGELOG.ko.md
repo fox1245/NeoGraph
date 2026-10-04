@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=07564a8cdc291d0fc5c3e5f2ddeebd23c5ac708a9723fe9cda87813e37f6f288 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=1ccc7d8e1a4c420009803e6b5d76e6b84f95453e856231414af38072b59fd4be -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -14,6 +14,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ## [Unreleased]
 
 ### 변경됨
+- **E2E에서 관측한 protocol/demo 수정.** `neograph_get`은 URI와 cursor page를 무시하지 않고 실제 retained 결과를 선택한다. stdio/HTTP lifecycle·URI 및 SQLite 재시작 검증이 통과했다. 비어 있는 A2A discovery URL은 실제 bind endpoint·재시작을 따르고 명시한 public URL은 보존한다. uppercase 예제는 실제 SSE capability를 광고하고 MCP 시간 demo는 요청한 IANA timezone을 사용한다. ProgramChat mock 명령은 bounded admission을 우회하지 않고 제공된 명시적 모델 사실 정책을 선택한다. 새 검증은 번호 타깃39개, offline Beast9모드, Assembly A2A, Jarvis 영속성, 전용 mock topology load, retrieval admission, ProgramChat SQLite/PostgreSQL/browser를 포함한다. measurement-only/live/voice/GUI/보류 Python 한계는 별도로 유지한다.
 - **문서/주석 일관성.** 보관된 Stage 3 제안은 제거된 Provider completion API를 명시적으로 대체된 것으로 표시하고 현재 타입 prepare/dispatch 지침을 연결한다. Cookbook 상태는 실제 오프라인 Assembly/Jarvis/Beast 및 ProgramChat PostgreSQL/browser 범위를 과거 시간 기록, 미검증 live/voice/Python 변형과 별도 multitenant load recipe에서 구분한다. 현재 cancellation/HTTP/isolation 주석은 제거된 제공자 API를 더 이상 설명하지 않는다. Runtime 동작이나 qualification 경계는 변경하지 않았다.
 - **Breaking C++ typed provider/custody 계약.** 모든 소비자·custom provider를 일치하는 새 header/library로 재빌드한다. `NEOGRAPH_BUILD_LLM=OFF`에서도 Core는 외부 `SchemaProvider::runtime`이 필요하다. Provider는 소유 `ProviderRequest` → move-only `PreparedProviderRequest` → 불변 `sp::runtime::Result`, 명시적 Collect/Stream과 선언된 family control을 사용한다. Completion 호환 type, JSON descriptor interpreter, primitive registry, Responses WebSocket은 alias/shim 없이 제거되었다. SDK `0.0.0`, interface revision/shared ABI 3은 불안정하며 stable release가 아니다. Python wrapper는 연기되었고 runtime/archive qualification은 Linux/POSIX만 해당한다.
 

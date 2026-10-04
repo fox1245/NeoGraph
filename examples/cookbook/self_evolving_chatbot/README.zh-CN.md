@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=1590cb19892c57cdbad4cd7660cf8df5dd72727141e908e4202ad63c59f8f5db -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=233aaa7dda31f7a4a50265468f10eced76421314e47324e2b9dea8bf425f179b -->
 # 自进化聊天机器人
 
 ## 当前类型化 Program chat 契约
@@ -14,7 +14,8 @@ cmake -S . -B build-chat -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON \
   -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON -DNEOGRAPH_BUILD_SQLITE=ON \
   -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
 cmake --build build-chat --target cookbook_program_chatbot
-./build-chat/cookbook_program_chatbot --mock --no-env --db evolving-chat.sqlite \
+./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
+  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --db evolving-chat.sqlite \
   --native-archive-dir .chat-native --session demo
 ```
 
@@ -39,6 +40,11 @@ descriptor-policy JSON。它与内嵌 codec resource snapshot 一起准入一次
 `program-chat-mock`（或明确选择的 fixture 模型）的限制。已准入策略 identity 绑定到 session
 settings；即使文件路径不变，内容变更也必须使用新 session。模型提案或 checkpoint 不能选择策略。
 `--mock` 同样需要这些事实；预算只能明确提高。
+提供的 [demo-policy.json](demo-policy.json) 只声明 `program-chat-mock` 的 input 4,096、output 65,536
+token 事实。offline recipe 必须显式选择；它不是 live model catalog、spending grant、usage report
+或 budget reset。显式 `--model` 覆盖继承的模型环境设置，不会削弱 admission。
+`--max-output-tokens` 接受正64-bit值，仍受所选 model limit 与既有 session budget 限制，
+没有固定8,192 CLI上限。
 
 restart 将 pending 转为 `UnknownHold`，不会自动重新发送。completed replay 要求相同 prepared digest/reservation，
 从 archive 恢复原始不可变 Outcome/native role history 并验证 settlement/output。

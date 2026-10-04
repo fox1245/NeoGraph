@@ -148,6 +148,7 @@ int main(int argc, char** argv) {
     card.preferred_transport = "JSONRPC";
     card.default_input_modes  = {"text/plain"};
     card.default_output_modes = {"text/plain"};
+    card.streaming = true;
     card.skill_names = {"uppercase"};
 
     A2AServer server(engine, card);

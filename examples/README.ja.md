@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=ad78fdcbcdbce77ecd2ac47f45b90da6ac489ac099233a9b1ebda65c1cd54a57 -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=2f78c1c15d20a1a9f3197b3a3d160344f130d7cb776e068c5afc5f9aeb0bb485 -->
 # C++ API の例
 
 
@@ -22,14 +22,17 @@ LLM ビルドには `find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runt
 インストール include root は `include/SchemaProvider`。interface/capability 検査を行い、
 SDK package は unstable `0.0.0`（interface 3）です。
 
-この文書はソース移行状況であり recipe の実行検証ではありません。過去の測定は新移行の
-qualification ではありません。live 実行には鍵、ネットワーク、モデルアクセスと費用が必要です。
-鍵、prompt、artifact は非公開に保ち、機密 envelope/native inspection 出力を公開 log に送らないでください。
-native archive は認証された owner-private custody であり、暗号化や vendor issuer 認証ではありません。
+現在の model-free E2E では番号付き target39個を検証しました。finite offline29個と、
+実際の MCP/ACP/A2A/Harness および gRPC graph/checkpoint/tool 経路です。gRPC-vs-JSON-RPC
+測定例も実行しましたが返却値を検証せず、behavioral E2E pass には数えません。
+live/外部 model 経路22個と無効な Clay GUI は未検証で、公開 vendor 要求や新 grant はありません。
+過去の測定は新移行の qualification ではありません。live には鍵、network、model access と費用が必要です。
+鍵、prompt、artifact は非公開に保ち、機密 envelope/native 出力を公開 log に送らないでください。
+native archive は owner-private 認証 custody で、暗号化や vendor issuer 認証ではありません。
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-NeoGraph エンジンの表面をカバーする 56 個の実行可能な C++ プログラム。
+現在の CMake inventory は optional component を含む番号付き C++ target63範囲です。
 それぞれがこのディレクトリ内の 1 つのファイルです (Docker-Compose が 1 つあります)
 例外、[`26_postgres_react_hitl/`](26_postgres_react_hitl/)) — コピー
 1 つを自分のプロジェクトに追加し、`neograph::core` + にリンクします
@@ -140,7 +143,7 @@ OPENROUTER_API_KEY=sk-or-...
 | 14 | [`14_plan_executor.cpp`](14_plan_executor.cpp) |オフライン |ファンアウト中障害をシミュレートした Plan-and-Executor - チェックポイントの再実行は、障害が発生した兄弟のみを再実行します。保留中 - 書き込み機構が動作中。 |
 | 26 | [`26_postgres_react_hitl/`](26_postgres_react_hitl/) | OpenRouter + Postgres + Crawl4AI | プロセス不連続ディープリサーチ HITL — PG でバックアップされたチェックポイントは、レポートと再開の間の `exit` まで存続します。 Docker-Compose 駆動。 |
 | 41 | [`41_resume_if_exists_chat.cpp`](41_resume_if_exists_chat.cpp) |オフライン | LangGraph スタイルのマルチターン チャット — `resume_if_exists` は前のチェックポイントをリロードし、新しいターンを追加します。モックプロバイダー。 |
-| 48 | [`48_sqlite_checkpoint.cpp`](48_sqlite_checkpoint.cpp) |オフライン | `SqliteCheckpointStore` — 単一ファイルの永続実行、サーバーなし。 InMemory/Postgres と同じ `CheckpointStore` インターフェイス。 |
+| 48 | [`48_sqlite_checkpoint.cpp`](48_sqlite_checkpoint.cpp) |オフライン | SQLite `:memory:` checkpoint/resume と thread 分離; file/process-restart 永続性の証拠ではありません。 |
 
 ### MCP (モデル コンテキスト プロトコル)
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ko source_sha256=1590cb19892c57cdbad4cd7660cf8df5dd72727141e908e4202ad63c59f8f5db -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ko source_sha256=233aaa7dda31f7a4a50265468f10eced76421314e47324e2b9dea8bf425f179b -->
 # 매턴 하니스를 제안하는 챗봇
 
 ## 현재 타입 Program chat 계약
@@ -15,7 +15,8 @@ cmake -S . -B build-chat -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON \
   -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON -DNEOGRAPH_BUILD_SQLITE=ON \
   -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
 cmake --build build-chat --target cookbook_program_chatbot
-./build-chat/cookbook_program_chatbot --mock --no-env --db evolving-chat.sqlite \
+./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
+  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --db evolving-chat.sqlite \
   --native-archive-dir .chat-native --session demo
 ```
 
@@ -44,6 +45,10 @@ descriptor-policy JSON을 지정합니다. 내장 codec resource snapshot으로 
 승인된 정책 identity를 세션 settings에 바인딩하므로 같은 파일 경로라도 내용이 바뀌면 새 세션이
 필요합니다. 모델 제안이나 checkpoint는 정책을 선택할 수 없습니다. `--mock`에도 해당 사실이
 필요하며 예산 증가는 명시적으로만 지정합니다.
+제공된 [demo-policy.json](demo-policy.json)은 `program-chat-mock`의 input 4,096·output 65,536
+토큰 사실만 선언합니다. offline recipe에서 명시적으로 선택하세요. live 모델 catalog,
+spending grant, usage report나 budget reset이 아니며, 명시적 `--model`은 승인 검사를
+약화하지 않고 상속된 모델 환경 설정보다 우선합니다.
 
 restart에서 pending은 `UnknownHold`가 되고 자동 재전송하지 않습니다. completed replay는 같은
 prepared digest/reservation을 요구하며 archive에서 원본 불변 Outcome/native role history를
@@ -77,7 +82,8 @@ cmake -S . -B build-chat -G Ninja \
   -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_EXAMPLES=ON \
   -DNEOGRAPH_BUILD_SQLITE=ON -DNEOGRAPH_BUILD_POSTGRES=ON
 cmake --build build-chat --target cookbook_program_chatbot -j 4
-./build-chat/cookbook_program_chatbot --mock --db evolving-chat.sqlite
+./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
+  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --db evolving-chat.sqlite
 ```
 
 브라우저에서 `http://127.0.0.1:8768`을 엽니다. 데모 모드에서는 `검토`, `비교`,
@@ -99,7 +105,8 @@ export OPENROUTER_MODEL='z-ai/glm-5.3-flash'
 `--model`은 모델 환경변수보다 우선하고, 프로세스 환경변수는 `.env`보다 우선합니다.
 파일을 지정하지 않으면 현재 폴더에서 가장 가까운 `.env`를 찾습니다. `--no-env`로
 탐색을 끌 수 있습니다. 키는 출력·저장하지 않습니다. 출력 한도는 호출당 기본
-4,096토큰(제공자의 추론 토큰 포함)이며 `--max-output-tokens`로 1~8,192 범위에서 지정합니다.
+4,096토큰(제공자의 추론 토큰 포함)이며 `--max-output-tokens`로 양의 64-bit 값을 지정합니다.
+선택한 host policy의 model limit과 기존 session budget은 계속 적용되며 CLI의 고정 8,192 상한은 없습니다.
 `--provider-timeout-seconds`는 호출당 제한을 1~120초로 지정하며 기본값은 120초입니다.
 체크포인트 대기는 그 사이의 순차 호출을 고려하고 reviewer의 자식 예산은 180초입니다.
 타임아웃된 호출은 예약 예산을 유지하며 자동 재호출하지 않습니다.

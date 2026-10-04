@@ -264,6 +264,21 @@ struct A2AServer::Impl {
     std::thread                                   listener;
     std::atomic<bool>                             running{false};
     int                                           bound_port = 0;
+    bool                                          generated_card_url = false;
+
+    void bind_card_endpoint(const std::string& host) {
+        if (!card.url.empty() && !generated_card_url) return;
+        card.url.clear();
+        card.url.reserve(host.size() + 16);
+        card.url += "http://";
+        const bool ipv6 = host.find(':') != std::string::npos;
+        if (ipv6) card.url += '[';
+        card.url += host;
+        if (ipv6) card.url += ']';
+        card.url += ':';
+        card.url += std::to_string(bound_port);
+        generated_card_url = true;
+    }
 
     /// In-memory task store. tasks/get and tasks/cancel hit this; we
     /// don't persist across server restarts — A2A spec allows that.
@@ -1205,6 +1220,7 @@ bool A2AServer::start(const std::string& host, int port) {
         if (!impl_->svr.bind_to_port(host, port)) return false;
         impl_->bound_port = port;
     }
+    impl_->bind_card_endpoint(host);
 #ifdef NEOGRAPH_A2A_PROGRAM
     try {
         impl_->recover_program_tasks();
@@ -1228,6 +1244,7 @@ bool A2AServer::start_async(const std::string& host, int port) {
         if (!impl_->svr.bind_to_port(host, port)) return false;
         impl_->bound_port = port;
     }
+    impl_->bind_card_endpoint(host);
 #ifdef NEOGRAPH_A2A_PROGRAM
     try {
         impl_->recover_program_tasks();

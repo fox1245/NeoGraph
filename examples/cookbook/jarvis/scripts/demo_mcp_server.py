@@ -13,6 +13,7 @@ pip install fastmcp 필요. 자비스 cookbook README 참고.
 import sys
 import random
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from fastmcp import FastMCP
 
 mcp = FastMCP("demo-tools")
@@ -21,7 +22,7 @@ mcp = FastMCP("demo-tools")
 @mcp.tool()
 def get_current_time(timezone: str = "Asia/Seoul") -> str:
     """Get the current date and time. Returns ISO format datetime string."""
-    now = datetime.now()
+    now = datetime.now(ZoneInfo(timezone))
     return f"{now.strftime('%Y-%m-%d %H:%M:%S')} ({timezone})"
 
 

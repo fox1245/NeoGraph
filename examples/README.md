@@ -25,7 +25,11 @@ explicit `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<sdk-source>` configuration.
 Installed SDK include root is `include/SchemaProvider`. Interface/capability
 checks are enforced; the SDK package remains unstable `0.0.0` (interface 3).
 
-This documentation records source migration, not execution of these recipes.
+Current model-free E2E execution verified 39 numbered targets: 29 finite offline
+targets plus actual MCP/ACP/A2A/Harness and gRPC graph/checkpoint/tool paths.
+The gRPC-vs-JSON-RPC measurement example also ran, but its unchecked return values
+are not a behavioral E2E pass. Twenty-two live/external-model scopes and the
+disabled Clay GUI remain unqualified; no public vendor request or new grant was used.
 Historical timings below are not new-cutover qualification. Live runs incur
 provider charges and require explicit keys/network/model access. Keep keys,
 prompts and artifacts private; envelope/native inspection demos print sensitive
@@ -145,7 +149,7 @@ demonstrate, not by file number.
 | 14 | [`14_plan_executor.cpp`](14_plan_executor.cpp) | offline | Plan-and-Executor with simulated mid-fan-out failure — checkpoint replay only re-runs the failed sibling. Pending-writes machinery in action. |
 | 26 | [`26_postgres_react_hitl/`](26_postgres_react_hitl/) | OpenRouter + Postgres + Crawl4AI | Process-discontinuous deep-research HITL — PG-backed checkpoints survive `exit` between report and resume. Docker-Compose driven. |
 | 41 | [`41_resume_if_exists_chat.cpp`](41_resume_if_exists_chat.cpp) | offline | LangGraph-style multi-turn chat — `resume_if_exists` reloads the prior checkpoint and appends the new turn. Mock provider. |
-| 48 | [`48_sqlite_checkpoint.cpp`](48_sqlite_checkpoint.cpp) | offline | `SqliteCheckpointStore` — single-file durable runs, no server. Same `CheckpointStore` interface as InMemory/Postgres. |
+| 48 | [`48_sqlite_checkpoint.cpp`](48_sqlite_checkpoint.cpp) | offline | SQLite `:memory:` checkpoint/resume and thread isolation; no file/process-restart durability claim. |
 
 ### MCP (Model Context Protocol)
 

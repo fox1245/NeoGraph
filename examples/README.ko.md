@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=ad78fdcbcdbce77ecd2ac47f45b90da6ac489ac099233a9b1ebda65c1cd54a57 -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=2f78c1c15d20a1a9f3197b3a3d160344f130d7cb776e068c5afc5f9aeb0bb485 -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 
@@ -22,15 +22,18 @@ LLM 빌드는 `find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)`�
 설치 include root는 `include/SchemaProvider`입니다. interface/capability 검사를
 수행하며 SDK package는 unstable `0.0.0` (interface 3)입니다.
 
-이 문서는 소스 전환 상태이며 recipe 실행 검증이 아닙니다. 아래 과거 측정은
-새 전환의 qualification이 아닙니다. live 실행에는 키/네트워크/모델 접근과 비용이 필요합니다.
-키, prompt, artifact를 비공개로 유지하세요. envelope/native inspection 출력은 민감하므로
-공개 log에 내보내지 마세요. native archive는 owner-private 인증 custody이며 암호화나 vendor issuer 인증이 아닙니다.
+현재 model-free E2E에서는 번호가 있는 타깃 39개를 검증했습니다. finite offline 29개와
+실제 MCP/ACP/A2A/Harness 및 gRPC graph/checkpoint/tool 경로입니다. gRPC-vs-JSON-RPC
+측정 예제도 실행했지만 반환값을 검사하지 않아 행동 E2E 통과로 세지 않습니다.
+live/외부 모델 경로 22개와 비활성 Clay GUI는 미검증이며 공개 vendor 요청이나 새 grant는 없었습니다.
+아래 과거 측정은 새 전환의 qualification이 아닙니다. live에는 키/네트워크/모델 접근과 비용이 필요합니다.
+키, prompt, artifact는 비공개로 유지하고 민감한 envelope/native 출력을 공개 log에 내보내지 마세요.
+native archive는 owner-private 인증 custody이며 암호화나 vendor issuer 인증이 아닙니다.
 
 # C++ API 예제
 
 
-NeoGraph 엔진 API를 보여 주는 56개의 실행 가능한 C++ 프로그램입니다.
+현재 CMake inventory에는 선택 구성요소를 포함해 번호가 있는 C++ 타깃 범위 63개가 있습니다.
 대부분은 이 디렉터리의 단일 소스 파일이며, Docker Compose가 필요한
 [`26_postgres_react_hitl/`](26_postgres_react_hitl/) 예제도 하나 포함되어 있습니다.
 예제를 프로젝트에 복사한 뒤 `neograph::core`와 필요한
@@ -141,7 +144,7 @@ OPENROUTER_API_KEY=sk-or-...
 | 14 |[`14_plan_executor.cpp`](14_plan_executor.cpp)|오프라인|시뮬레이션된 중간 팬아웃 오류가 있는 Plan-and-Executor - 체크포인트 재생은 실패한 형제만 다시 실행합니다. 보류 중인 쓰기 기계가 작동 중입니다.|
 | 26 |[`26_postgres_react_hitl/`](26_postgres_react_hitl/)|OpenRouter + Postgres + Crawl4AI|프로세스 중단 심층 연구 HITL — PG 지원 체크포인트는 보고와 재개 사이에 `exit`를 유지합니다. Docker-Compose 기반.|
 | 41 |[`41_resume_if_exists_chat.cpp`](41_resume_if_exists_chat.cpp)|오프라인|LangGraph 스타일의 다중 턴 채팅 — `resume_if_exists`는 이전 체크포인트를 다시 로드하고 새 턴을 추가합니다. 모의 공급자.|
-| 48 |[`48_sqlite_checkpoint.cpp`](48_sqlite_checkpoint.cpp)|오프라인|`SqliteCheckpointStore` — 단일 파일 지속성 실행, 서버 없음. InMemory/Postgres와 동일한 `CheckpointStore` 인터페이스.|
+| 48 |[`48_sqlite_checkpoint.cpp`](48_sqlite_checkpoint.cpp)|오프라인|SQLite `:memory:` checkpoint/resume와 thread 격리; 파일·process restart 영속성 검증은 아님.|
 
 ### MCP(모델 컨텍스트 프로토콜)
 

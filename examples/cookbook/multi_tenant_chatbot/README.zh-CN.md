@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=zh-CN source_sha256=81fc54c9666570230243c6bd69b2cca0784ec3e43705a29f8e2c797c7a33b964 -->
+<!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=zh-CN source_sha256=5474fadf775a74ca7e8250b121ce2bdd915f0f6c63347cfc12b141543c63fb58 -->
 # 多租户聊天机器人服务器
 
 ## 当前源代码边界与历史测量
@@ -11,6 +11,10 @@ live binary 固定 **1,000 request / 32 worker**，没有低成本 small-smoke f
 不要作为单次调用验证运行；它需要 live 密钥/network 和单独批准的大量 provider 费用。
 不保证价格或 zero-error。密钥/prompt/artifact 保持私密，不公开 raw native payload。
 provider retry 是一个显式 layer，默认 off；当前 public API 没有旧 throttle-provider wrapper。
+
+新的model-free E2E运行了专用mock workload：1,000 graph请求、error0、compiled topology3、cache hit997，
+Alice topology替换复用了既有fanout engine。这是topology load/cache证据，不保证production认证、
+quota、semantic response或memory capacity。isolated-host CLI输出了两个不同policy tuple，但未执行graph。
 
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)

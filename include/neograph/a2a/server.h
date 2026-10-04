@@ -172,10 +172,13 @@ class NEOGRAPH_API A2AServer {
 
     /// Bind + listen. Blocks the calling thread.
     /// @return false if bind/listen fails.
+    /// Empty discovery URLs use the bound host/port and follow later rebinds;
+    /// an explicitly configured public URL is preserved.
     bool start(const std::string& host, int port);
 
     /// Bind + spawn a worker thread; returns when the server is ready
     /// to accept connections. Use stop() to shut down.
+    /// Applies the same discovery URL rule as start(), including ephemeral ports.
     bool start_async(const std::string& host, int port);
 
     /// Signal the server to stop accepting connections and join.

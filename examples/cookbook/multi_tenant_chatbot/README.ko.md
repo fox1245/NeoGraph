@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=ko source_sha256=81fc54c9666570230243c6bd69b2cca0784ec3e43705a29f8e2c797c7a33b964 -->
+<!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=ko source_sha256=5474fadf775a74ca7e8250b121ce2bdd915f0f6c63347cfc12b141543c63fb58 -->
 # 멀티테넌트 챗봇 서버
 
 ## 현재 소스 경계와 과거 측정
@@ -11,6 +11,11 @@ live binary는 **1,000 request / 32 worker**를 고정하며 저비용 small-smo
 단일 호출 검증으로 실행하지 마세요. live 키/네트워크와 별도 승인된 상당한 provider 비용이 필요합니다.
 가격이나 zero-error를 보장하지 않습니다. 키/prompt/artifact는 비공개이며 raw native payload를 공개하지 않습니다.
 provider retry는 한 명시적 layer, 기본 off이며 현재 public API에 예전 throttle-provider wrapper는 없습니다.
+
+새 model-free E2E에서 전용 mock workload 1,000 graph 요청·오류0·컴파일 topology3개·cache hit997을
+관찰했고 Alice topology 교체는 기존 fanout engine을 재사용했습니다. 이는 topology load/cache 증거이며
+production 인증·quota·semantic response·memory capacity 보장이 아닙니다. isolated-host CLI는
+서로 다른 policy tuple2개를 출력했지만 graph를 실행하지 않았습니다.
 
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)

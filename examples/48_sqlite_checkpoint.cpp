@@ -1,7 +1,7 @@
-// NeoGraph Example 43: SqliteCheckpointStore — single-file durable runs
+// NeoGraph Example 48: in-memory SQLite checkpoint/resume round trips
 //
-// Mirror of the Postgres checkpoint example but with SQLite — no DB
-// server, single .db file. Demonstrates the resume_if_exists flow:
+// Mirror of the Postgres checkpoint example with SQLite and no DB server.
+// This sample uses ":memory:", not a durable file. It demonstrates resume_if_exists:
 // first run saves a checkpoint, second run resumes from where it left
 // off (HITL pattern), third run reads back history with list().
 //

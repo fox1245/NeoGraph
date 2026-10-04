@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=07564a8cdc291d0fc5c3e5f2ddeebd23c5ac708a9723fe9cda87813e37f6f288 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=1ccc7d8e1a4c420009803e6b5d76e6b84f95453e856231414af38072b59fd4be -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -14,6 +14,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ## [未リリース]
 
 ### 変更
+- **E2Eで観測した protocol/demo 修正。** `neograph_get` は URI/cursor page を無視せず retained 結果を選択し、stdio/HTTP lifecycle・URI と SQLite 再起動検証が pass。空の A2A discovery URL は実際の bind endpoint と再起動に追従し、明示 public URL は保持します。uppercase 例は実証 SSE capability を広告し、MCP time demo は指定 IANA timezone を使用します。ProgramChat mock は bounded admission を迂回せず供給された明示 model-fact policy を選びます。新検証は番号 target39個、offline Beast9 mode、Assembly A2A、Jarvis 永続性、専用 mock topology load、retrieval admission、ProgramChat SQLite/PostgreSQL/browser。measurement-only/live/voice/GUI/延期 Python の境界は別途明示します。
 - **文書/コメント整合性。** アーカイブされた Stage 3 提案は削除済み Provider completion API を明示的に後継へ置き換えられたものとし、現在の型付き prepare/dispatch 指針へリンクします。Cookbook 状況は実証されたオフライン Assembly/Jarvis/Beast と ProgramChat PostgreSQL/browser 範囲を過去の時間記録、未検証 live/voice/Python 変種と別の multitenant load recipe から区別します。現在の cancellation/HTTP/isolation コメントは削除された provider API を説明しません。Runtime 動作や qualification 境界の変更はありません。
 - **Breaking C++ typed provider/custody 契約。** 全 consumer/custom provider を一致する新 header/library で再ビルドします。`NEOGRAPH_BUILD_LLM=OFF` でも Core は外部 `SchemaProvider::runtime` を要求します。Provider は所有 `ProviderRequest` → move-only `PreparedProviderRequest` → 不変 `sp::runtime::Result`、明示 Collect/Stream、宣言済み family control を使用します。Completion 互換 type、JSON descriptor interpreter、primitive registry、Responses WebSocket は alias/shim なしで削除されました。SDK `0.0.0`、interface revision/shared ABI 3 は不安定で stable release ではありません。Python wrapper は延期され、runtime/archive qualification は Linux/POSIX のみです。
 

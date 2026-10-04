@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=ja source_sha256=81fc54c9666570230243c6bd69b2cca0784ec3e43705a29f8e2c797c7a33b964 -->
+<!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=ja source_sha256=5474fadf775a74ca7e8250b121ce2bdd915f0f6c63347cfc12b141543c63fb58 -->
 # マルチテナントチャットボットサーバー
 
 ## 現在のソース境界と過去の測定
@@ -11,6 +11,11 @@ live binary は **1,000 request / 32 worker** 固定で、低費用 small-smoke 
 単発検証として実行せず、live 鍵/network と別途承認された大きな provider 費用を必要とします。
 価格や zero-error を保証しません。鍵/prompt/artifact は非公開で raw native payload を公開しません。
 provider retry は明示的な一 layer、既定 off。旧 throttle-provider wrapper は現在の public API にありません。
+
+新しい model-free E2E では専用 mock workload1,000 graph要求・error0・compiled topology3・cache hit997を
+観察し、Alice topology置換は既存 fanout engineを再使用しました。これは topology load/cache証拠で、
+production認証・quota・semantic response・memory capacity保証ではありません。isolated-host CLIは
+異なるpolicy tuple二つを出力しましたが graphを実行しませんでした。
 
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)

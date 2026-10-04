@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ja source_sha256=1590cb19892c57cdbad4cd7660cf8df5dd72727141e908e4202ad63c59f8f5db -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ja source_sha256=233aaa7dda31f7a4a50265468f10eced76421314e47324e2b9dea8bf425f179b -->
 # 自己進化型チャットボット
 
 ## 現在の型付き Program chat 契約
@@ -14,7 +14,8 @@ cmake -S . -B build-chat -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON \
   -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON -DNEOGRAPH_BUILD_SQLITE=ON \
   -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
 cmake --build build-chat --target cookbook_program_chatbot
-./build-chat/cookbook_program_chatbot --mock --no-env --db evolving-chat.sqlite \
+./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
+  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --db evolving-chat.sqlite \
   --native-archive-dir .chat-native --session demo
 ```
 
@@ -43,6 +44,11 @@ loopback `openrouter_origins` と `program-chat-mock`（または指定した fi
 上限を宣言する必要があります。承認された方針 identity をセッション settings に結び付けるため、
 同じパスでも内容が変われば新しいセッションが必要です。モデル提案や checkpoint は方針を
 選択できません。`--mock` にもこれらの事実が必要で、予算増加は明示的に指定します。
+提供される [demo-policy.json](demo-policy.json) は `program-chat-mock` の input 4,096・output
+65,536 token の事実だけを宣言します。offline recipe で明示的に選択してください。live model catalog、
+spending grant、usage report や budget reset ではありません。明示的な `--model` は admission を
+弱めずに継承された model 環境設定を上書きします。`--max-output-tokens` は正の64-bit値を受け取り、
+選択された model limit と既存 session budget に従います。固定8,192 CLI上限はありません。
 
 restart では pending は `UnknownHold` となり自動再送しません。completed replay は同じ prepared
  digest/reservation を要求し、archive から元の不変 Outcome/native role history を復元して settlement/output を検証します。

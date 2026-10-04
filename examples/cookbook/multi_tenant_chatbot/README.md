@@ -15,6 +15,12 @@ inferred. Keep credentials/prompts/artifacts private and never publicly export
 raw native payloads. Provider retry is a single explicit layer, default off;
 there is no retired throttling-provider wrapper in the current public API.
 
+Fresh model-free E2E executed the dedicated mock workload: 1,000 graph requests,
+zero errors, three compiled topologies and 997 cache hits; the Alice topology
+swap reused the existing fanout engine. These are topology-load/cache observations,
+not production authentication, quota, semantic-response or memory-capacity guarantees.
+The isolated-host CLI emitted two distinct policy tuples but did not execute a graph.
+
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 

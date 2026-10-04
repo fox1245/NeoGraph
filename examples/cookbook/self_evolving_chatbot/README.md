@@ -15,7 +15,8 @@ cmake -S . -B build-chat -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON \
   -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON -DNEOGRAPH_BUILD_SQLITE=ON \
   -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
 cmake --build build-chat --target cookbook_program_chatbot
-./build-chat/cookbook_program_chatbot --mock --no-env --db evolving-chat.sqlite \
+./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
+  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --db evolving-chat.sqlite \
   --native-archive-dir .chat-native --session demo
 ```
 
@@ -47,6 +48,11 @@ and `program-chat-mock` model limits (or the explicitly selected fixture model).
 The admitted policy identity is bound into session settings: changed policy
 content requires a new session, even when the file path is unchanged. Offline
 `--mock` examples require these facts as well; raise budgets only explicitly.
+The shipped [demo-policy.json](demo-policy.json) declares fixed facts only for
+`program-chat-mock`: 4,096 input tokens and 65,536 output tokens. Select it
+explicitly for the offline recipe; it is not a live-model catalog, spending
+grant, usage report or budget reset. The explicit `--model` overrides inherited
+model environment settings without weakening admission.
 Nullable wide provider counts remain separate from `charged_tokens`; known zero
 is known, not missing. Consistent final input/output evidence settles the charge
 only without prior unknown usage or transport-internal resends. Otherwise the
@@ -95,7 +101,8 @@ cmake -S . -B build-chat -G Ninja \
   -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_EXAMPLES=ON \
   -DNEOGRAPH_BUILD_SQLITE=ON -DNEOGRAPH_BUILD_POSTGRES=ON
 cmake --build build-chat --target cookbook_program_chatbot -j 4
-./build-chat/cookbook_program_chatbot --mock --db evolving-chat.sqlite
+./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
+  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --db evolving-chat.sqlite
 ```
 
 Open http://127.0.0.1:8768. Switch between Alice and Bob. In demo mode, a message
@@ -136,7 +143,8 @@ address, intended for protocol tests.
 The native adapter sends the output limit as `max_completion_tokens`, supported
 by the [OpenRouter chat API](https://openrouter.ai/docs/api/api-reference/chat/send-chat-completion-request).
 The default is 4,096 per call (including provider reasoning tokens); use
-`--max-output-tokens` to set 1..8,192.
+`--max-output-tokens` to set a positive 64-bit value. The selected host policy's
+model limit and the existing session budget still apply; there is no fixed 8,192 CLI cap.
 `--provider-timeout-seconds` sets a 1..120 second per-call timeout (default 120).
 The host checkpoint wait covers the sequential calls between checkpoints, and
 the reviewer has a separate 180-second child budget. Timed-out calls remain

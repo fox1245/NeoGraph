@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=ad78fdcbcdbce77ecd2ac47f45b90da6ac489ac099233a9b1ebda65c1cd54a57 -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=2f78c1c15d20a1a9f3197b3a3d160344f130d7cb776e068c5afc5f9aeb0bb485 -->
 # C++ API 示例
 
 
@@ -22,14 +22,16 @@ LLM 构建需要 `find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime
 安装 include root 是 `include/SchemaProvider`；执行 interface/capability 检查，
 SDK package 仍为 unstable `0.0.0`（interface 3）。
 
-本文记录源代码迁移，不代表这些 recipe 已执行验证。历史测量不是新迁移的 qualification。
-live 运行需要密钥、网络和模型访问并产生费用。密钥、prompt、artifact 必须保持私密；
-envelope/native inspection 输出含敏感内容，不得进入公开 log。
-native archive 是经过认证的 owner-private custody，不是加密或 vendor issuer 认证。
+当前 model-free E2E 已验证39个编号 target：29个 finite offline target 与实际
+MCP/ACP/A2A/Harness 和 gRPC graph/checkpoint/tool 路径。gRPC-vs-JSON-RPC 测量示例也运行了，
+但不检查返回值，不计为 behavioral E2E pass。22个 live/外部模型路径与禁用的 Clay GUI 未验证，
+没有调用公开 vendor 或授予新 grant。历史测量不是新迁移的 qualification；live 需要密钥、
+network、model access 并产生费用。密钥、prompt、artifact 保持私密，不要把敏感 envelope/native
+输出发布到公开 log。native archive 是 owner-private 认证 custody，不是加密或 vendor issuer 认证。
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-五十六个可运行的 C++ 程序，覆盖 NeoGraph 引擎表面。
+当前 CMake inventory 含可选组件，共63个编号 C++ target 范围。
 每个示例都是此目录中的单个文件（有一个 Docker-Compose 例外，
 [`26_postgres_react_hitl/`](26_postgres_react_hitl/)）— 把其中一个复制到你的项目里，
 链接 `neograph::core` + `neograph::llm`，你就有了一个起点。
@@ -135,7 +137,7 @@ OPENROUTER_API_KEY=sk-or-...
 | 14 | [`14_plan_executor.cpp`](14_plan_executor.cpp) | 离线 | Plan-and-Executor，模拟扇出中途失败 — checkpoint replay 只会重跑失败的同级任务。Pending-writes 机制实战。 |
 | 26 | [`26_postgres_react_hitl/`](26_postgres_react_hitl/) | OpenRouter + Postgres + Crawl4AI | 进程不连续的深度研究 HITL — PG-backed 检查点能在报告和 resume 之间的 `exit` 后存活。Docker Compose 驱动。 |
 | 41 | [`41_resume_if_exists_chat.cpp`](41_resume_if_exists_chat.cpp) | 离线 | LangGraph 风格多轮聊天 — `resume_if_exists` 重新加载先前检查点并追加新轮次。Mock provider。 |
-| 48 | [`48_sqlite_checkpoint.cpp`](48_sqlite_checkpoint.cpp) | 离线 | `SqliteCheckpointStore` — 单文件持久运行，无需 server。与 InMemory/Postgres 相同的 `CheckpointStore` interface。 |
+| 48 | [`48_sqlite_checkpoint.cpp`](48_sqlite_checkpoint.cpp) | 离线 | SQLite `:memory:` checkpoint/resume 与 thread 隔离；不声称文件或 process restart 持久性。 |
 
 ### MCP（模型上下文协议）
 
