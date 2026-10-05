@@ -155,6 +155,10 @@ private:
     friend class Provider;
 };
 
+class NEOGRAPH_API ProviderBudgetClaim;
+NEOGRAPH_API ProviderBudgetClaim reserve_provider_dispatch(
+    const PreparedProviderRequest& request, ProviderDispatchBudget budget);
+
 class NEOGRAPH_API ProviderBudgetClaim final {
 public:
     ProviderBudgetClaim();
@@ -224,7 +228,5 @@ NEOGRAPH_API ProviderRequest make_provider_request(
 NEOGRAPH_API void set_provider_request_messages(ProviderRequest& request, std::vector<sp::Message> messages);
 NEOGRAPH_API void clear_provider_request_messages(ProviderRequest& request);
 NEOGRAPH_API const std::vector<sp::Message>& provider_request_messages(const ProviderRequest& request);
-NEOGRAPH_API ProviderBudgetClaim reserve_provider_dispatch(
-    const PreparedProviderRequest& request, ProviderDispatchBudget budget);
 
 } // namespace neograph

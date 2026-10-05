@@ -170,7 +170,9 @@ public:
         static std::atomic<std::uint64_t> next{0};
         const auto token = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())
                          + "-" + std::to_string(++next);
-        path_ = std::filesystem::temp_directory_path() / ("ng-tool-effect-" + token);
+        // Resolve the OS temp parent before creating paths subject to no-symlink custody.
+        path_ = std::filesystem::canonical(std::filesystem::temp_directory_path()) /
+                ("ng-tool-effect-" + token);
         if (!std::filesystem::create_directory(path_))
             throw std::runtime_error("cannot reserve Tool effect test directory");
         std::filesystem::permissions(path_, std::filesystem::perms::owner_all,

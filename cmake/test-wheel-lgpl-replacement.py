@@ -27,7 +27,7 @@ import tarfile
 import tempfile
 
 ASSET = 'neograph-0.13.0-linux-lgpl-library-only-source.tar.gz'
-DIGEST = '60eb80cd7effb6ff10ba8c017ddd21e0656c4085bb06439e81eb19a76ce8fd3f'
+DIGEST = 'af69f9448a3e14cd35a9814e96545fe4a13fd1fa5eebb3e3f9922c25f7e13c21'
 ROOT = ASSET[:-7]
 ENV = os.environ.copy()
 for _name in ('LD_LIBRARY_PATH', 'LD_PRELOAD', 'PYTHONPATH', 'PYTHONHOME', 'PYTHONOPTIMIZE', 'PYTEST_ADDOPTS'):
@@ -194,13 +194,21 @@ def inspect(path, cwd):
     require(match is not None, 'Missing SONAME')
     exports = set()
     for line in symbols.splitlines():
-        symbol = re.search(r'\s(\w+@@?[\w.]+)(?:\s|$)', line)
-        if symbol and ' UND ' not in line:
-            exports.add(symbol.group(1))
+        fields = line.split()
+        if len(fields) < 8 or not re.fullmatch(r'\d+:', fields[0]):
+            continue
+        # Local/section entries are not public ABI, even if readelf prints a
+        # version suffix. Keep every externally visible definition, including
+        # weak/unique, protected and unversioned symbols.
+        if (fields[3] not in ('SECTION', 'FILE') and fields[4] in ('GLOBAL', 'WEAK', 'UNIQUE')
+                and fields[5] in ('DEFAULT', 'PROTECTED') and fields[6] != 'UND'):
+            exports.add(fields[7])
     floors = [tuple(map(int, value.split('.'))) for value in re.findall(r'@GLIBC_([0-9.]+)', symbols)]
-    require(all(value <= (2, 34) for value in floors), 'GLIBC floor exceeds 2.34: ' + str(path))
+    require(all(value <= (2, 34) for value in floors),
+            'GLIBC floor exceeds 2.34: %s (observed %s)' % (path, max(floors, default=(0, 0))))
     return {'machine': struct.unpack_from('<H', header, 18)[0], 'soname': match.group(1),
-            'exports': exports, 'needed': re.findall(r'\(NEEDED\).*\[([^\]]+)\]', dynamic),
+            'exports': exports, 'versioned_exports': {name for name in exports if '@' in name},
+            'needed': re.findall(r'\(NEEDED\).*\[([^\]]+)\]', dynamic),
             'rpath': re.findall(r'\((?:RPATH|RUNPATH)\).*\[([^\]]*)\]', dynamic),
             'floor': max(floors, default=(0, 0))}
 
@@ -307,7 +315,7 @@ def main():
             info = inspect(old, temp)
             require(info['machine'] == record['machine'] == {'x86_64': 62, 'aarch64': 183}[arch]
                     and info['soname'] == record['soname'] == old.name
-                    and info['exports'] == set(record['exportedVersionedSymbols'])
+                    and info['versioned_exports'] == set(record['exportedVersionedSymbols'])
                     and info['needed'] == record['needed'] and info['rpath'] == record['rpath'],
                     'Unverified observed dependency ABI/repair mapping')
             originals[old] = (record, info)
@@ -342,9 +350,16 @@ def main():
             new = work / 'output' / ('libkeyutils.so.1.10' if old.name.startswith('libkeyutils-') else 'libcrypt.so.2.0.0')
             built = inspect(new, temp)
             expected_soname = 'libkeyutils.so.1' if old.name.startswith('libkeyutils-') else 'libcrypt.so.2'
-            require(built['machine'] == info['machine'] and built['exports'] == info['exports']
-                    and built['soname'] == expected_soname and built['needed'] == info['needed']
-                    and built['floor'] <= (2, 34), 'Marked build ABI/SONAME/system-dependency/floor mismatch')
+            expected = {'machine': info['machine'], 'soname': expected_soname, 'needed': info['needed']}
+            mismatches = {field: {'expected': value, 'actual': built[field]}
+                          for field, value in expected.items() if built[field] != value}
+            if built['exports'] != info['exports']:
+                mismatches['exports'] = {'missing': sorted(info['exports'] - built['exports']),
+                                         'added': sorted(built['exports'] - info['exports'])}
+            if built['floor'] > (2, 34):
+                mismatches['floor'] = {'maximum': (2, 34), 'actual': built['floor']}
+            require(not mismatches, 'Marked build ABI/SONAME/system-dependency/floor mismatch: '
+                    + str(new) + ' ' + json.dumps(mismatches, sort_keys=True))
         backups = {}
         try:
             for old in originals:

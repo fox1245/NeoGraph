@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=e7bc0b6bee6d97fb3d5287eb1dec66ca2f31cf0b841ba69fb13853f663cddd68 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=9f022fad624d108552d8716c666d99f63d2398c9477947d285b989580fc00816 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -20,7 +20,7 @@ SDK4 Linux x86_64 検証は登録済み 27 case を実行しました。最初�
 NeoGraph SDK4 の検証範囲は初回と修正後の限定実行を合わせた Core 1261 case、Program 691 pass と設計上の Memory process-loss skip 14 case、installed Python の初回 499 pass と修正後の限定 5 pass を合わせた 504 case です。二回目の full-suite 実行は主張しません。ローカル A2A 0.x/1.0 peer、evolution file mode、plan replay、変更した C++ helper と Python application 11 本を実行しました。
 
 ### 変更
-- **完了済み取消 context の寿命。** Detach は context 破棄前に完了済み Asio slot handler を解放し、generation 検査は古い待機 emit を破棄します。Callback の rebind は token lock への再入なしに実行され、取消状態は初期化しません。NeoGraph と全 native consumer を一緒に再ビルドしてください。ローカル取消/fork 23 case と実際の plain/ASan retained-token consumer は合格し、最終 TSan 検証は未完了です。Detach 前に operation を完了させ、実行中の signal callback 内から detach しないでください。
+- **完了済み取消 context の寿命。** Detach は context 破棄前に完了済み Asio slot handler を解放し、generation 検査は古い待機 emit を破棄します。Callback の rebind は token lock への再入なしに実行され、取消状態は初期化しません。NeoGraph と全 native consumer を一緒に再ビルドしてください。ローカル取消/fork 23 case と実際の plain/ASan retained-token consumer は合格しました。[Commit `24d3166` CI](https://github.com/fox1245/NeoGraph/actions/runs/37275542831/job/111651716661) の 1,333-case TSan 実行も、retained-parent-token teardown 回帰を含め、skip 三件で合格しました。既存 dependency suppression と ASLR 無効化の範囲の実証であり、普遍的な race-freedom は主張しません。Detach 前に operation を完了させ、実行中の signal callback 内から detach しないでください。
 - **Platform wheel の依存と cold loading。** pybind11 を `2.13.6` に固定し、SDK の直接 OpenSSL Crypto 依存を解決し、macOS 14 には一致する LLVM 20 header/runtime を使います。CPython 3.9–3.13、全 platform 行、installed wheel の full suite を保持し、その後 Linux replacement と Homebrew アクセスを拒否する macOS cold-loader 検査を実行します。正確な最終 artifact は release gate であり、source のみで portability を主張しません。
 - **一致する Linux LGPL library source。** SDist の `deps/redistribution/` に library-only keyutils/libxcrypt source、downstream patch、build/replacement material を含めます。File-scoped grant と受領者の変更権を保持し、grant 未確認の upstream test は library input ではないため除外します。Source/notice delivery だけでは最終 wheel の replacement arrangement や法的確認完了を証明しません。
 - **Python cookbook の import 修正。** Native OpenRouter の例は、削除された最上位 export ではなく、installed package の `neograph_engine.llm` から `SchemaProvider` を import します。

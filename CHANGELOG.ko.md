@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=e7bc0b6bee6d97fb3d5287eb1dec66ca2f31cf0b841ba69fb13853f663cddd68 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=9f022fad624d108552d8716c666d99f63d2398c9477947d285b989580fc00816 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -20,7 +20,7 @@ SDK4 Linux x86_64 검증은 등록된 27개 case를 실행했습니다. 첫 full
 NeoGraph SDK4 검증 범위는 첫 실행과 수정 후 집중 실행을 합친 Core 1261개, Program 691개 통과와 설계상 Memory process-loss skip 14개, 설치 Python의 첫 통과 499개와 수정 후 집중 통과 5개를 합친 504개입니다. 두 번째 full-suite 실행을 주장하지 않습니다. 로컬 A2A 0.x/1.0 peer, evolution file mode, plan replay, 변경된 C++ helper와 Python 애플리케이션 11개를 실제 실행했습니다.
 
 ### 변경됨
-- **완료된 취소 context의 수명.** Detach는 context 파괴 전에 완료된 Asio slot handler를 해제하고, generation 검사는 오래된 대기 emit을 버리면서 callback의 rebind가 token lock 재진입 없이 실행되게 합니다. 취소 상태는 초기화하지 않습니다. NeoGraph와 모든 native consumer를 함께 재빌드하세요. 로컬 취소/fork 23개 case와 실제 plain/ASan retained-token consumer는 통과했으며 최종 TSan 검증은 대기 중입니다. Detach 전에 operation을 완료해야 하며 활성 signal callback 내부에서 detach하면 안 됩니다.
+- **완료된 취소 context의 수명.** Detach는 context 파괴 전에 완료된 Asio slot handler를 해제하고, generation 검사는 오래된 대기 emit을 버리면서 callback의 rebind가 token lock 재진입 없이 실행되게 합니다. 취소 상태는 초기화하지 않습니다. NeoGraph와 모든 native consumer를 함께 재빌드하세요. 로컬 취소/fork 23개 case와 실제 plain/ASan retained-token consumer는 통과했습니다. [커밋 `24d3166` CI](https://github.com/fox1245/NeoGraph/actions/runs/37275542831/job/111651716661)는 retained-parent-token teardown 회귀를 포함한 1,333개 case의 TSan 실행을 skip 세 개와 함께 통과했습니다. 기존 dependency suppression과 ASLR 비활성화 범위의 증명이며 보편적인 race-freedom을 주장하지 않습니다. Detach 전에 operation을 완료해야 하며 활성 signal callback 내부에서 detach하면 안 됩니다.
 - **플랫폼 wheel 의존성과 cold loading.** pybind11을 `2.13.6`으로 고정하고 SDK의 직접 OpenSSL Crypto 의존성을 해결하며 macOS 14에는 일치하는 LLVM 20 header/runtime을 사용합니다. CPython 3.9–3.13과 모든 플랫폼 행, 설치 wheel의 전체 suite를 유지하고 그 뒤 Linux 교체 및 Homebrew 접근을 차단한 macOS cold-loader 검사를 실행합니다. 정확한 최종 산출물은 릴리스 gate이며 소스만으로 이식성을 주장하지 않습니다.
 - **일치하는 Linux LGPL 라이브러리 소스.** sdist의 `deps/redistribution/`에 library-only keyutils/libxcrypt 소스, downstream patch, 빌드·교체 자료를 포함합니다. 파일별 grant와 수신자의 수정 권리를 보존하며 grant가 확인되지 않은 upstream test는 라이브러리 입력이 아니므로 제외합니다. 소스·notice 제공만으로 최종 wheel의 교체 가능성이나 법적 검토 완료를 입증하지 않습니다.
 - **Python 쿡북 import 수정.** Native OpenRouter 예제는 제거된 최상위 export 대신 설치 패키지의 `neograph_engine.llm`에서 `SchemaProvider`를 가져옵니다.

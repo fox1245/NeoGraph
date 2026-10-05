@@ -37,7 +37,8 @@ struct SqlConnection {
 };
 struct Database {
     explicit Database(std::string name) {
-        path = (std::filesystem::temp_directory_path() /
+        // Native custody roots derived from this path must not inherit OS temp symlinks.
+        path = (std::filesystem::canonical(std::filesystem::temp_directory_path()) /
                 ("neograph-program-provider-" + name + "-" +
                  std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
                  ".sqlite")).string();

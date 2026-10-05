@@ -90,7 +90,8 @@ GraphSafePoint capture_safe_point(
 }
 
 struct TempMigrationArchive {
-    std::filesystem::path root = std::filesystem::temp_directory_path() /
+    // Resolve the OS temp parent before creating paths subject to no-symlink custody.
+    std::filesystem::path root = std::filesystem::canonical(std::filesystem::temp_directory_path()) /
         ("neograph-migration-archive-" + Checkpoint::generate_id());
     TempMigrationArchive() {
         if (!std::filesystem::create_directory(root))

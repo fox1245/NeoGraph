@@ -528,7 +528,8 @@ namespace {
 class NativeCheckpointFiles {
 public:
     NativeCheckpointFiles() {
-        path_ = std::filesystem::temp_directory_path() /
+        // Resolve the OS temp parent before creating paths subject to no-symlink custody.
+        path_ = std::filesystem::canonical(std::filesystem::temp_directory_path()) /
                 ("ng-native-checkpoint-" + Checkpoint::generate_id());
         if (!std::filesystem::create_directory(path_))
             throw std::runtime_error("cannot reserve native checkpoint fixture directory");

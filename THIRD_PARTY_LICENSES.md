@@ -132,7 +132,7 @@ this does not substitute for the complete patched library/source delivery.
 Matching library-only preferred source and recipient instructions are included
 in [the source asset](deps/redistribution/neograph-0.13.0-linux-lgpl-library-only-source.tar.gz)
 and in the sdist at that same path. Its SHA-256 is
-`60eb80cd7effb6ff10ba8c017ddd21e0656c4085bb06439e81eb19a76ce8fd3f`.
+`af69f9448a3e14cd35a9814e96545fe4a13fd1fa5eebb3e3f9922c25f7e13c21`.
 Extract `RECIPIENT-INSTRUCTIONS.txt` for the native build, patched-library
 replacement and LGPL 2.1 modification/reverse-engineering rights. The archive
 contains actual library inputs, not the unrelated unknown-grant upstream tests.
