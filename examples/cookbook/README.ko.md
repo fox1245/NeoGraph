@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=ko source_sha256=8261e54a3cabee1f0a4290735688fedd7911b77b3720ca60c5096cbf35a23437 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=ko source_sha256=be0c03e35d3c0631bf727a0b13d6afca6e3eb5296917f54293304eb8e596e630 -->
 # NeoGraph 쿡북
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -54,11 +54,11 @@ vendor inference, 음성, 모든 Beast live 변형이나 전용 live multitenant
 | Recipe | Status |
 |---|---|
 | [`ai-assembly/`](ai-assembly/) | 보존된 interface-3 네 서버/C++ 세션; 현재 설치된 Python Speaker를 local A2A 0.3/1.0 peer로 실행; 합성 기권은 모델 판단이 아님 |
-| [`byo-openai/`](byo-openai/) | 타입 Python 소스 전환; 과거 측정은 전환된 구현의 검증이 아님 |
-| [`jarvis/`](jarvis/) | 보존된 interface-3 CLI synthetic turn·메모리 영속화·정상 EOF; 음성과 pybind benchmark는 새로 검증하지 않음 |
-| [`minimal-mcp/`](minimal-mcp/) | 실제 stdio handshake/discovery와 계산·UTC·demo-weather 호출 검증; LLM 없음 |
+| [`byo-openai/`](byo-openai/) | 설치된 SDK4 wheel과 공식 OpenAI client를 local Chat peer로 실행: known/unknown usage, 실제 tool 함수, 8회 호출 상한, hosted-call guard 검증; vendor inference 없음 |
+| [`jarvis/`](jarvis/) | 보존된 interface-3 CLI 영속성/EOF 증거; 현재 Python MCP tool, LangGraph twin/driver, pybind per-turn/startup 정확성 검증; 새 성능·음성 검증은 아님 |
+| [`minimal-mcp/`](minimal-mcp/) | 실제 Python stdlib server를 공식 MCP client로 실행해 handshake/discovery와 계산·시간·demo-weather 호출 검증; LLM이나 실제 기상 서비스는 사용하지 않음 |
 | [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | 전용 mock1,000요청·오류0·컴파일 topology3개·cache hit997; isolated host는 reference metadata만 출력; live1,000/32 미검증 |
-| [`openrouter-provider/`](openrouter-provider/) | 타입 Python 소스 전환; 과거 측정은 전환된 구현의 검증이 아님 |
+| [`openrouter-provider/`](openrouter-provider/) | 설치된 SDK4 native provider와 custom HTTP node를 local Chat peer로 실행: known/unknown usage, 유지된 history, hosted-call guard 검증; vendor inference 없음 |
 | [`self_evolving_chatbot/`](self_evolving_chatbot/) | 실제 브라우저 tenant 격리·generation 교체, SQLite6개·PostgreSQL6개 black-box 및 명시 host model policy 검증; vendor inference 없음 |
 | [`the-beast/`](the-beast/) | 타입 C++ 전환; 실제 strict Core 컴파일·진화·checkpoint 롤백 검증; 모든 live 변형의 통과 주장이 아님 |
 | [`topology-retrieval/`](topology-retrieval/) | mock Python ranking/index 재사용 및 실제 C++ registry admission/migration·unknown-key 거부 검증; 외부 pointer는 권한이 아님 |

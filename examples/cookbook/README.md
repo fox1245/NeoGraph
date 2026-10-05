@@ -68,11 +68,11 @@ finding the rough edges of the public API.
 | Recipe | Status |
 |---|---|
 | [`ai-assembly/`](ai-assembly/) | Preserved interface-3 four-server/C++ session; current installed Python Speaker exercised against local A2A 0.3/1.0 peers; synthetic abstentions are not model judgment |
-| [`byo-openai/`](byo-openai/) | Python source migration uses authentic prepared handles; historical measurements do not qualify the migrated implementation |
-| [`jarvis/`](jarvis/) | Preserved interface-3 CLI synthetic turn, persisted memory and graceful EOF; voice and pybind benchmarks not newly qualified |
-| [`minimal-mcp/`](minimal-mcp/) | Actual stdio handshake/discovery and arithmetic/UTC/demo-weather calls exercised; no LLM |
+| [`byo-openai/`](byo-openai/) | Installed SDK4 wheel and official OpenAI client exercised against a local Chat peer: known/unknown usage, real tool bodies, eight-call cap and hosted-call guards; no vendor inference |
+| [`jarvis/`](jarvis/) | Preserved interface-3 CLI persistence/EOF proof; current Python MCP tools, LangGraph twin/driver and pybind per-turn/startup correctness exercised; no new performance or voice qualification |
+| [`minimal-mcp/`](minimal-mcp/) | Actual Python stdlib server exercised by the official MCP client: handshake/discovery and arithmetic/time/demo-weather calls; no LLM or real weather service |
 | [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | Dedicated mock 1,000 requests: 0 errors, 3 compiled topologies, 997 cache hits; isolated host emits reference metadata only; live 1,000/32 unqualified |
-| [`openrouter-provider/`](openrouter-provider/) | Typed Python source migration; historical measurements do not qualify the migrated implementation |
+| [`openrouter-provider/`](openrouter-provider/) | Installed SDK4 native provider and custom HTTP node exercised against a local Chat peer: known/unknown usage, retained history and hosted-call guards; no vendor inference |
 | [`self_evolving_chatbot/`](self_evolving_chatbot/) | Actual browser tenant isolation/generation replacement, six SQLite and six PostgreSQL black-box scenarios; explicit host model policy; no vendor inference |
 | [`the-beast/`](the-beast/) | Typed C++ migration; actual strict Core compilation/evolution/checkpoint rollback exercised; not a pass claim for all live variants |
 | [`topology-retrieval/`](topology-retrieval/) | Mock Python ranking/index reuse plus actual C++ registry admission/migration and unknown-key rejection; external pointer is not authority |

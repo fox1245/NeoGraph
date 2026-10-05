@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=87ac51d4905865a446abdd5d44853bb11abb6471d95a76733e4ca0093d1b3761 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=a2352deaae2660c5875799d5bd4ccb615711f623800696b2d227873bed2b2026 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -20,6 +20,7 @@ SDK4 Linux x86_64 검증은 등록된 27개 case를 실행했습니다. 첫 full
 NeoGraph SDK4 검증 범위는 첫 실행과 수정 후 집중 실행을 합친 Core 1261개, Program 691개 통과와 설계상 Memory process-loss skip 14개, 설치 Python의 첫 통과 499개와 수정 후 집중 통과 5개를 합친 504개입니다. 두 번째 full-suite 실행을 주장하지 않습니다. 로컬 A2A 0.x/1.0 peer, evolution file mode, plan replay, 변경된 C++ helper와 Python 애플리케이션 11개를 실제 실행했습니다.
 
 ### 변경됨
+- **Python 쿡북 import 수정.** Native OpenRouter 예제는 제거된 최상위 export 대신 설치 패키지의 `neograph_engine.llm`에서 `SchemaProvider`를 가져옵니다.
 - **명시적 sdist 허용 목록.** scikit-build-core 1.0 이상과 `explicit` inclusion mode, root에 고정한 파일 패턴을 사용합니다. 실제 1131개 파일의 sdist는 허용 목록, private/cache 제외, SDK4 pin과 필수 내용 검사를 통과했습니다. `manual` mode에는 관련 없는 파일이 포함됐습니다. Wheel 명령은 압축을 푼 package directory를 사용하고 공백이나 Windows 역슬래시가 있는 test path도 별도 인자로 전달합니다.
 - **유지한 타입 controls와 모델 규칙 (#309).** Newer-master `c708e51a`, `165dbbbd`, `5553d9ea`를 family별 controls로 통합했습니다. Chat reasoning/include/usage/대체 모델, Responses provider-held cursor/parallel tools/verbosity/truncation/include, Messages manual/adaptive/disabled thinking/effort/cache/tool choice/routing, Gemini thinking level/safety/tool choice/temperature를 제공합니다. 잘못된 family/origin/value 조합은 I/O 전에 거부합니다. 승인 모델 prefix 규칙은 gateway suffix를 포함해 대소문자를 구분하지 않고 금지된 명시 temperature를 거부하며 Messages thinking은 temperature를 생략합니다. JSON knob interpreter는 복원하지 않습니다.
 - **명시 history와 deployment headers (#305/#306, #310).** `9e161fc8`, `c5035e00`, `02b4c275`를 통합했습니다. 진짜 same-route native reasoning 소유를 유지합니다. Gemini `PortableForeign`은 unsigned assistant text/client-tool history를 받으며 첫 foreign function call에만 문서화된 bypass를 넣고 실패 native seal을 낮춰 처리하지 않습니다. Responses `previous_response_id`는 새 input을 쓰며 실제 tool ownership이 요구하면 wire에 없는 `previous_response_history`를 받습니다. Provider-held state는 full native/archive replay 권한이 아닙니다. Deployment environment header는 admission 전 명시 host preprocessing이며 optional 생략과 대소문자 비구분 override 우선순위를 적용합니다.

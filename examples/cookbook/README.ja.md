@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=ja source_sha256=8261e54a3cabee1f0a4290735688fedd7911b77b3720ca60c5096cbf35a23437 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=ja source_sha256=be0c03e35d3c0631bf727a0b13d6afca6e3eb5296917f54293304eb8e596e630 -->
 # NeoGraph Cookbooks
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -54,11 +54,11 @@ native archive は認証された owner-private custody であり、暗号化や
 | Recipe | Status |
 |---|---|
 | [`ai-assembly/`](ai-assembly/) | 保存済み interface-3 四サーバー/C++ session; 現在のインストール済み Python Speaker を local A2A 0.3/1.0 peer で実行; synthetic abstention はモデル判断ではない |
-| [`byo-openai/`](byo-openai/) | 型付き Python ソース移行。過去の測定は移行後の実装を検証しない |
-| [`jarvis/`](jarvis/) | 保存済み interface-3 CLI synthetic turn・メモリ永続化・正常 EOF; 音声と pybind benchmark は新たに検証していない |
-| [`minimal-mcp/`](minimal-mcp/) | 実際の stdio handshake/discovery と計算・UTC・demo-weather 呼出しを検証; LLMなし |
+| [`byo-openai/`](byo-openai/) | Installed SDK4 wheel と公式 OpenAI client を local Chat peer で実行：known/unknown usage、実 tool 関数、八回呼出し上限、hosted-call guard を検証；vendor inference なし |
+| [`jarvis/`](jarvis/) | 保存済み interface-3 CLI 永続化/EOF 証拠；現在の Python MCP tool、LangGraph twin/driver、pybind per-turn/startup 正確性を検証；新しい性能・音声 qualification ではない |
+| [`minimal-mcp/`](minimal-mcp/) | 実際の Python stdlib server を公式 MCP client で実行：handshake/discovery と計算・時刻・demo-weather 呼出しを検証；LLM や実気象サービスなし |
 | [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | 専用 mock1,000要求・error0・compiled topology3・cache hit997; isolated host は reference metadata のみ; live1,000/32未検証 |
-| [`openrouter-provider/`](openrouter-provider/) | 型付き Python ソース移行。過去の測定は移行後の実装を検証しない |
+| [`openrouter-provider/`](openrouter-provider/) | Installed SDK4 native provider と custom HTTP node を local Chat peer で実行：known/unknown usage、保持 history、hosted-call guard を検証；vendor inference なし |
 | [`self_evolving_chatbot/`](self_evolving_chatbot/) | 実ブラウザー tenant 分離・generation 置換、SQLite六件・PostgreSQL六件 black-box と明示 host model policy を検証; vendor inferenceなし |
 | [`the-beast/`](the-beast/) | 型付き C++ 移行; 実際の strict Core コンパイル・進化・checkpoint rollback を実行; 全 live 変種の pass 主張ではない |
 | [`topology-retrieval/`](topology-retrieval/) | mock Python ranking/index 再使用と実 C++ registry admission/migration・unknown-key拒否を検証; 外部 pointer は権限ではない |

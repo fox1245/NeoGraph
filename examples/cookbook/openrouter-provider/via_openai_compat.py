@@ -26,6 +26,7 @@ import sys
 from urllib.parse import urlsplit
 
 import neograph_engine as ng
+from neograph_engine.llm import SchemaProvider
 
 from via_http import MODEL, _endpoint_and_key, _load_env_if_present
 
@@ -72,7 +73,7 @@ def main() -> int:
         default_timeout_ms=120_000,
         ca_file=os.environ.get("OPENROUTER_CA_FILE", ""),
     )
-    provider = ng.SchemaProvider(_descriptor(base_url), options, defaults)
+    provider = SchemaProvider(_descriptor(base_url), options, defaults)
     context = ng.NodeContext(
         provider=provider,
         model=os.environ.get("OPENROUTER_MODEL", MODEL),

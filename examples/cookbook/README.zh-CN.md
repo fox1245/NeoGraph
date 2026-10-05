@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=zh-CN source_sha256=8261e54a3cabee1f0a4290735688fedd7911b77b3720ca60c5096cbf35a23437 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=zh-CN source_sha256=be0c03e35d3c0631bf727a0b13d6afca6e3eb5296917f54293304eb8e596e630 -->
 # NeoGraph Cookbooks
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -54,11 +54,11 @@ native archive 是经过认证的 owner-private custody，不是加密或 vendor
 | Recipe | Status |
 |---|---|
 | [`ai-assembly/`](ai-assembly/) | 保留的 interface-3 四服务器/C++ session；当前已安装 Python Speaker 已通过 local A2A 0.3/1.0 peer 执行；synthetic abstention 不是模型判断 |
-| [`byo-openai/`](byo-openai/) | 类型化 Python 源码迁移；历史测量不验证迁移后的实现 |
-| [`jarvis/`](jarvis/) | 保留的 interface-3 CLI synthetic turn、记忆持久化与正常 EOF；语音与 pybind benchmark 未重新验证 |
-| [`minimal-mcp/`](minimal-mcp/) | 已验证真实stdio handshake/discovery及计算·UTC·demo-weather调用；没有LLM |
+| [`byo-openai/`](byo-openai/) | Installed SDK4 wheel 与官方 OpenAI client 已通过 local Chat peer 执行：验证 known/unknown usage、真实 tool 函数、八次调用上限及 hosted-call guard；无 vendor inference |
+| [`jarvis/`](jarvis/) | 保留 interface-3 CLI 持久化/EOF 证据；验证当前 Python MCP tool、LangGraph twin/driver、pybind per-turn/startup 正确性；不是新的性能或语音 qualification |
+| [`minimal-mcp/`](minimal-mcp/) | 真实 Python stdlib server 已由官方 MCP client 执行：验证 handshake/discovery 及计算、时间、demo-weather 调用；未使用 LLM 或真实天气服务 |
 | [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | 专用mock1,000请求、error0、compiled topology3、cache hit997；isolated host只输出reference metadata；live1,000/32未验证 |
-| [`openrouter-provider/`](openrouter-provider/) | 类型化 Python 源码迁移；历史测量不验证迁移后的实现 |
+| [`openrouter-provider/`](openrouter-provider/) | Installed SDK4 native provider 与 custom HTTP node 已通过 local Chat peer 执行：验证 known/unknown usage、保留 history 及 hosted-call guard；无 vendor inference |
 | [`self_evolving_chatbot/`](self_evolving_chatbot/) | 已验证真实浏览器tenant隔离·generation替换、SQLite六个与PostgreSQL六个black-box及显式host model policy；无vendor inference |
 | [`the-beast/`](the-beast/) | 类型化 C++ 迁移；已执行真实 strict Core 编译·演化·checkpoint 回滚；不声称所有 live 变体通过 |
 | [`topology-retrieval/`](topology-retrieval/) | 已验证mock Python ranking/index复用及真实C++ registry admission/migration·unknown-key拒绝；外部pointer不是权限 |

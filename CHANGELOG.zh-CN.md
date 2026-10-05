@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=87ac51d4905865a446abdd5d44853bb11abb6471d95a76733e4ca0093d1b3761 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a2352deaae2660c5875799d5bd4ccb615711f623800696b2d227873bed2b2026 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -20,6 +20,7 @@ SDK4 Linux x86_64 验证运行了全部 27 个注册 case：初次 full run 有 
 NeoGraph SDK4 验证范围为初次与修正后限定运行合计的 Core 1261 case、Program 691 pass 与设计上的 Memory process-loss skip 14 case，以及 installed Python 初次 499 pass 加修正后限定 5 pass，共 504 case。不声称第二次 full-suite 运行。实际运行了本地 A2A 0.x/1.0 peer、evolution file mode、plan replay、修改的 C++ helper 和 11 个 Python application。
 
 ### 变更
+- **修复 Python cookbook import。** Native OpenRouter 示例从 installed package 的 `neograph_engine.llm` 导入 `SchemaProvider`，不再使用已删除的顶层 export。
 - **显式 SDist 允许列表。** 使用 scikit-build-core 1.0 以上、`explicit` inclusion mode 和 root 锚定文件 pattern。实际 1131-file SDist 已通过允许列表、private/cache 排除、SDK4 pin 与必需内容检查；`manual` mode 曾包含无关文件。Wheel command 使用解包后的 package directory，并将包含空格或 Windows backslash 的 test path 作为独立参数传入。
 - **保留的 typed controls 和模型规则 (#309)。** 将 newer-master `c708e51a`、`165dbbbd`、`5553d9ea` 集成到各 family controls：Chat reasoning/include/usage/替代模型，Responses provider-held cursor/parallel tools/verbosity/truncation/include，Messages manual/adaptive/disabled thinking/effort/cache/tool choice/routing，以及 Gemini thinking level/safety/tool choice/temperature。错误 family/origin/value 在 I/O 前拒绝。准入 model prefix 规则不区分大小写，包含 gateway suffix，并拒绝禁止的显式 temperature；Messages thinking 省略 temperature。不恢复 JSON knob interpreter。
 - **显式 history 和 deployment headers (#305/#306, #310)。** 集成 `9e161fc8`、`c5035e00`、`02b4c275`。真实 same-route native reasoning 保持所有权。Gemini `PortableForeign` 接受 unsigned assistant text/client-tool history，仅首个 foreign function call 使用文档化 bypass，失败 native seal 从不降级。Responses `previous_response_id` 使用新 input，真实 tool ownership 需要时接收非 wire 的 `previous_response_history`；provider-held state 不是 full native/archive replay 权限。Deployment environment header 在 admission 前显式 host preprocessing，支持 optional 省略和不区分大小写的 override 优先级。
