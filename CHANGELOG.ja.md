@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=a2352deaae2660c5875799d5bd4ccb615711f623800696b2d227873bed2b2026 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=e7bc0b6bee6d97fb3d5287eb1dec66ca2f31cf0b841ba69fb13853f663cddd68 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -20,6 +20,9 @@ SDK4 Linux x86_64 検証は登録済み 27 case を実行しました。最初�
 NeoGraph SDK4 の検証範囲は初回と修正後の限定実行を合わせた Core 1261 case、Program 691 pass と設計上の Memory process-loss skip 14 case、installed Python の初回 499 pass と修正後の限定 5 pass を合わせた 504 case です。二回目の full-suite 実行は主張しません。ローカル A2A 0.x/1.0 peer、evolution file mode、plan replay、変更した C++ helper と Python application 11 本を実行しました。
 
 ### 変更
+- **完了済み取消 context の寿命。** Detach は context 破棄前に完了済み Asio slot handler を解放し、generation 検査は古い待機 emit を破棄します。Callback の rebind は token lock への再入なしに実行され、取消状態は初期化しません。NeoGraph と全 native consumer を一緒に再ビルドしてください。ローカル取消/fork 23 case と実際の plain/ASan retained-token consumer は合格し、最終 TSan 検証は未完了です。Detach 前に operation を完了させ、実行中の signal callback 内から detach しないでください。
+- **Platform wheel の依存と cold loading。** pybind11 を `2.13.6` に固定し、SDK の直接 OpenSSL Crypto 依存を解決し、macOS 14 には一致する LLVM 20 header/runtime を使います。CPython 3.9–3.13、全 platform 行、installed wheel の full suite を保持し、その後 Linux replacement と Homebrew アクセスを拒否する macOS cold-loader 検査を実行します。正確な最終 artifact は release gate であり、source のみで portability を主張しません。
+- **一致する Linux LGPL library source。** SDist の `deps/redistribution/` に library-only keyutils/libxcrypt source、downstream patch、build/replacement material を含めます。File-scoped grant と受領者の変更権を保持し、grant 未確認の upstream test は library input ではないため除外します。Source/notice delivery だけでは最終 wheel の replacement arrangement や法的確認完了を証明しません。
 - **Python cookbook の import 修正。** Native OpenRouter の例は、削除された最上位 export ではなく、installed package の `neograph_engine.llm` から `SchemaProvider` を import します。
 - **明示的 SDist 許可リスト。** scikit-build-core 1.0 以上と `explicit` inclusion mode、root に固定したファイル pattern を使用します。実際の 1131-file SDist は許可リスト、private/cache 除外、SDK4 pin と必須内容の検査に合格しました。`manual` mode には無関係のファイルが含まれていました。Wheel command は展開した package directory を使い、空白や Windows backslash を含む test path も独立した引数として渡します。
 - **保持した型付き controls とモデル規則 (#309)。** Newer-master `c708e51a`、`165dbbbd`、`5553d9ea` を family 別 controls に統合しました。Chat reasoning/include/usage/代替モデル、Responses provider-held cursor/parallel tools/verbosity/truncation/include、Messages manual/adaptive/disabled thinking/effort/cache/tool choice/routing、Gemini thinking level/safety/tool choice/temperature を提供します。誤った family/origin/value は I/O 前に拒否します。承認済み model prefix 規則は gateway suffix も大文字小文字を区別せず照合し、禁止された明示 temperature を拒否します。Messages thinking は temperature を省略します。JSON knob interpreter は復元しません。

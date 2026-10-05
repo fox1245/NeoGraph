@@ -20,6 +20,7 @@ CMake reads the NeoGraph version from `pyproject.toml` and sets compiled public 
 - Later pre-v1 bounded-resource, UsageAccumulator-reservation and issue #216 changes: public layouts gained accounting, admission, cache and runtime-interposition state. Rebuild against matching headers.
 - Typed-provider cutover: rebuild every C++ consumer and custom provider, with matching NeoGraph and SchemaProvider SDK headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the old descriptor interpreter and Responses WebSocket path were removed without aliases.
 - Event-driven provider dispatch: CancelToken uses `std::stop_source` and exposes `stop_token()`. Old inline cancellation code is not compatible merely because `cancel`, `fork` and Asio-slot signatures remain.
+- Drained cancellation-context detach: CancelToken's public layout now includes generation-fenced emission state. Rebuild NeoGraph and every native consumer together. Detach releases the completed slot handler before context destruction; it still requires drained operations and does not reset cancellation state.
 - A future `1.0.0` boundary changes loader generation to `1` and requires rebuilding; the generation-1 freeze is a policy for that release, not a current qualification result.
 
 ## Exported interfaces

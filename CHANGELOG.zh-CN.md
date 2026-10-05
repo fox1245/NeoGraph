@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a2352deaae2660c5875799d5bd4ccb615711f623800696b2d227873bed2b2026 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=e7bc0b6bee6d97fb3d5287eb1dec66ca2f31cf0b841ba69fb13853f663cddd68 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -20,6 +20,9 @@ SDK4 Linux x86_64 验证运行了全部 27 个注册 case：初次 full run 有 
 NeoGraph SDK4 验证范围为初次与修正后限定运行合计的 Core 1261 case、Program 691 pass 与设计上的 Memory process-loss skip 14 case，以及 installed Python 初次 499 pass 加修正后限定 5 pass，共 504 case。不声称第二次 full-suite 运行。实际运行了本地 A2A 0.x/1.0 peer、evolution file mode、plan replay、修改的 C++ helper 和 11 个 Python application。
 
 ### 变更
+- **已完成取消 context 的寿命。** Detach 在 context 销毁前释放已完成的 Asio slot handler；generation 检查丢弃旧的排队 emit，callback 可在不重入 token lock 的情况下 rebind。取消状态不重置。必须一起重建 NeoGraph 与所有 native consumer。本地取消/fork 23 个 case 和实际 plain/ASan retained-token consumer 已通过，最终 TSan 验证仍待完成。Detach 前必须完成 operation，不能在正在执行的 signal callback 内 detach。
+- **Platform wheel 依赖与 cold loading。** 将 pybind11 固定为 `2.13.6`，解决 SDK 直接 OpenSSL Crypto 依赖，并为 macOS 14 使用匹配的 LLVM 20 header/runtime。保留 CPython 3.9–3.13、所有 platform 行和 installed wheel full suite；随后运行 Linux replacement 与拒绝 Homebrew 访问的 macOS cold-loader 检查。准确的最终 artifact 仍是 release gate，不以 source-only 检查宣称 portability。
+- **匹配的 Linux LGPL library source。** SDist 的 `deps/redistribution/` 包含 library-only keyutils/libxcrypt source、downstream patch 和 build/replacement material。保留 file-scoped grant 与接收者的修改权；grant 未确认的 upstream test 不属于 library input，因此排除。仅提供 source/notice 不能证明最终 wheel 的 replacement arrangement 或已完成法律审查。
 - **修复 Python cookbook import。** Native OpenRouter 示例从 installed package 的 `neograph_engine.llm` 导入 `SchemaProvider`，不再使用已删除的顶层 export。
 - **显式 SDist 允许列表。** 使用 scikit-build-core 1.0 以上、`explicit` inclusion mode 和 root 锚定文件 pattern。实际 1131-file SDist 已通过允许列表、private/cache 排除、SDK4 pin 与必需内容检查；`manual` mode 曾包含无关文件。Wheel command 使用解包后的 package directory，并将包含空格或 Windows backslash 的 test path 作为独立参数传入。
 - **保留的 typed controls 和模型规则 (#309)。** 将 newer-master `c708e51a`、`165dbbbd`、`5553d9ea` 集成到各 family controls：Chat reasoning/include/usage/替代模型，Responses provider-held cursor/parallel tools/verbosity/truncation/include，Messages manual/adaptive/disabled thinking/effort/cache/tool choice/routing，以及 Gemini thinking level/safety/tool choice/temperature。错误 family/origin/value 在 I/O 前拒绝。准入 model prefix 规则不区分大小写，包含 gateway suffix，并拒绝禁止的显式 temperature；Messages thinking 省略 temperature。不恢复 JSON knob interpreter。

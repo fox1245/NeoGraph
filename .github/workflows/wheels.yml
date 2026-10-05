@@ -146,9 +146,16 @@ jobs:
       - name: Install SDK dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install cmake ninja openssl@3 curl
+          brew install cmake ninja
+          export MACOSX_DEPLOYMENT_TARGET=14.0
+          export CC=/opt/homebrew/opt/llvm@20/bin/clang
+          export CXX=/opt/homebrew/opt/llvm@20/bin/clang++
+          export CXXFLAGS="-stdlib=libc++ -nostdinc++ -isystem /opt/homebrew/opt/llvm@20/include/c++/v1"
+          export LDFLAGS="-L/opt/homebrew/opt/llvm@20/lib/c++ -L/opt/homebrew/opt/llvm@20/lib/unwind -Wl,-rpath,/opt/homebrew/opt/llvm@20/lib/c++ -Wl,-rpath,/opt/homebrew/opt/llvm@20/lib/unwind -lunwind"
+          bash source-dist/source/cmake/build-wheel-macos.sh
           echo "CMAKE_PREFIX_PATH=$(brew --prefix openssl@3):$(brew --prefix curl)" >> $GITHUB_ENV
-          echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> $GITHUB_ENV
+          printf '%s\n' "MACOSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET" \
+            "CC=$CC" "CXX=$CXX" "CXXFLAGS=$CXXFLAGS" "LDFLAGS=$LDFLAGS" >> $GITHUB_ENV
       - name: Activate MSVC environment
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1

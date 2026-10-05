@@ -16,11 +16,16 @@ and `LICENSE` when redistributing the engine or Python wheels.
 | moodycamel::ConcurrentQueue | [`deps/concurrentqueue.h`](deps/concurrentqueue.h) | BSD 2-Clause, also offered under Boost 1.0 | Vendored queue; BSD notice reproduced in the full notices |
 | QuickJS | [`deps/quickjs/LICENSE`](deps/quickjs/LICENSE), source-file headers | MIT | Vendored engine for the optional JavaScript Program control runtime; includes per-file attributions |
 | Unicode data | [Unicode License V3](https://www.unicode.org/license.txt) | Unicode-3.0 | Generated Unicode tables in QuickJS |
-| pybind11 | [Upstream LICENSE](https://github.com/pybind/pybind11/blob/v2.13.6/LICENSE) | BSD 3-Clause | Header code compiled into the Python extension; CMake fallback version 2.13.6, Python builds may select a newer compatible version |
+| pybind11 | [Upstream LICENSE](https://github.com/pybind/pybind11/blob/v2.13.6/LICENSE) | BSD 3-Clause | Header code compiled into the Python extension; release Python build dependency pinned to 2.13.6, matching the direct-CMake fallback; selected headers in rebuilt artifacts must be verified |
 | SHA-Intrinsics adaptation | [Pinned source notice](https://github.com/noloader/SHA-Intrinsics/blob/d03795497f3e4576083fc2cd8fe0b924f24d0bb2/sha256-x86.c) | Public domain | SHA intrinsic register layout in `src/core/sha256.cpp`; attribution to Jeffrey Walton, Intel and Sean Gulley / miTLS |
 | cppdotenv | [`deps/cppdotenv/LICENSE`](deps/cppdotenv/LICENSE) | MIT | Vendored example `.env` reader |
 | Clay | License at the end of [`deps/clay.h`](deps/clay.h) | zlib | Vendored optional example UI and `deps/clay_renderer_raylib.c` glue |
 | raylib | [Upstream LICENSE](https://github.com/raysan5/raylib/blob/5.5/LICENSE) | zlib | Fetched for the optional Clay example, not a wheel build dependency |
+
+The pybind11 2.13.6 license was checked against the primary tagged upstream
+text. The previously inspected Linux candidates did not expose their selected
+header version; the release pin is not proof of those past builds. Qualify
+the final rebuilt wheels using their actual selected header distribution.
 
 ## External libraries and repaired wheels
 
@@ -74,6 +79,85 @@ Package source metadata also describes tools, tests and documentation;
 those declarations retain their original file scope and do not relicense
 unrelated NeoGraph code. Use the applicable notices from the exact package
 when a different build supplies these libraries.
+
+## Artifact-observed AlmaLinux library closure
+
+The inspected Linux release-candidate wheels contain the following AlmaLinux
+RPM library versions on both x86_64 and aarch64. Section 21 of the full
+notices supplements the Ubuntu material with legal documents from matching
+AlmaLinux source RPMs, checked against repository primary-metadata SHA-256
+values. It also retains applicable downstream file notices. This table does
+not qualify regenerated artifacts or describe the macOS/Windows closure.
+
+| Observed binary RPM | Matching AlmaLinux source RPM | Library scope / notices |
+|---|---|---|
+| `cyrus-sasl-lib 2.1.27-22.el9` | [cyrus-sasl-2.1.27-22.el9.src.rpm](https://repo.almalinux.org/vault/9.8/BaseOS/Source/Packages/cyrus-sasl-2.1.27-22.el9.src.rpm) | `libsasl2`; CMU permission/acknowledgment and library-file notices, including RSA MD5 |
+| `keyutils-libs 1.6.3-1.el9` | [keyutils-1.6.3-1.el9.src.rpm](https://repo.almalinux.org/vault/9.8/BaseOS/Source/Packages/keyutils-1.6.3-1.el9.src.rpm) | `keyutils.c`/`.h`: LGPL 2-or-later; LGPL 2.1 selected under the later-version grant, retaining original attribution and full source license |
+| `krb5-libs 1.21.1-10.el9_8` | [krb5-1.21.1-10.el9_8.src.rpm](https://repo.almalinux.org/vault/9.8/BaseOS/Source/Packages/krb5-1.21.1-10.el9_8.src.rpm) | Kerberos/GSSAPI libraries; complete upstream `NOTICE` and downstream SELinux support-file BSD notice |
+| `libcom_err 1.46.5-8.el9` | [e2fsprogs-1.46.5-8.el9.src.rpm](https://repo.almalinux.org/vault/9.8/BaseOS/Source/Packages/e2fsprogs-1.46.5-8.el9.src.rpm) | `lib/et` error-description library: MIT-style SIPB permission; `com_right.c` BSD 3-Clause. The package's GPL utilities are not this library |
+| `libevent 2.1.13-1.el9_8` | [libevent-2.1.13-1.el9_8.src.rpm](https://repo.almalinux.org/vault/9.8/BaseOS/Source/Packages/libevent-2.1.13-1.el9_8.src.rpm) | Full `LICENSE`, BSD/ISC/library-file attributions; platform-conditional source notices retain their original scopes |
+| `libnghttp2 1.43.0-6.el9_8.2` | [nghttp2-1.43.0-6.el9_8.2.src.rpm](https://repo.almalinux.org/vault/9.8/BaseOS/Source/Packages/nghttp2-1.43.0-6.el9_8.2.src.rpm) | MIT; full `COPYING` and downstream 2023 rate-limit source notices |
+| `libpq 13.23-3.el9_8` | [libpq-13.23-3.el9_8.src.rpm](https://repo.almalinux.org/vault/9.8/AppStream/Source/Packages/libpq-13.23-3.el9_8.src.rpm) | PostgreSQL 13.23 client library; full `COPYRIGHT`, conditional port/common permissions and downstream Damien Miller `timingsafe_bcmp` notice |
+| `libselinux 3.6-3.el9` | [libselinux-3.6-3.el9.src.rpm](https://repo.almalinux.org/vault/9.8/BaseOS/Source/Packages/libselinux-3.6-3.el9.src.rpm) | Public-domain library `LICENSE`; the package replaces upstream SHA-1 with WaterJuice/Tom St Denis public-domain SHA-256 code |
+| `libxcrypt 4.4.18-3.el9` | [libxcrypt-4.4.18-3.el9.src.rpm](https://repo.almalinux.org/vault/9.8/BaseOS/Source/Packages/libxcrypt-4.4.18-3.el9.src.rpm) | `libcrypt`: overall LGPL 2.1-or-later; full `LICENSING`, `COPYING.LIB` and BSD/public-domain library-file notices |
+| `openldap 2.6.8-4.el9` | [openldap-2.6.8-4.el9.src.rpm](https://repo.almalinux.org/vault/9.8/BaseOS/Source/Packages/openldap-2.6.8-4.el9.src.rpm) | `ldap`/`lber` and library support code; full `COPYRIGHT`, OpenLDAP Public License 2.8 and file-specific 2.0.1/permissive notices |
+| `openssl-libs 3.5.8-1.el9_8` | [openssl-3.5.8-1.el9_8.src.rpm](https://repo.almalinux.org/vault/9.8/BaseOS/Source/Packages/openssl-3.5.8-1.el9_8.src.rpm) | SSL/Crypto: full Apache 2.0 `LICENSE.txt`; the inspected source tarball/SRPM has no upstream `NOTICE`/`NOTICE.txt` |
+| `pcre2 10.40-6.el9` | [pcre2-10.40-6.el9.src.rpm](https://repo.almalinux.org/vault/9.8/BaseOS/Source/Packages/pcre2-10.40-6.el9.src.rpm) | Full PCRE2 BSD `LICENCE`, JIT attribution and generated Unicode **14.0.0** table-header/data notices |
+| `sqlite-libs 3.34.1-11.el9_8` | [sqlite-3.34.1-11.el9_8.src.rpm](https://repo.almalinux.org/vault/9.8/BaseOS/Source/Packages/sqlite-3.34.1-11.el9_8.src.rpm) | SQLite 3.34.1 core amalgamation's public-domain dedication |
+
+PCRE2's `src/pcre2_ucd.c` and the inspected binary identify Unicode 14.0.0.
+Section 21 preserves the actual [Unicode 14.0.0 data attribution](https://www.unicode.org/Public/14.0.0/ucd/ReadMe.txt)
+and the historical Unicode Data Files and Software permission notice as
+published in [Unicode's ICU 70.1 legal document](https://github.com/unicode-org/icu/blob/release-70-1/icu4c/LICENSE),
+without changing its copyright year. This is not an assertion that an ICU
+library is bundled, or that QuickJS uses Unicode 14.0.0. Section 7 separately
+retains the current Unicode License V3.
+
+The inspected Linux wheels do **not** bundle libpsl/Public Suffix List data,
+GnuTLS, libidn2, libssh, Nettle/Hogweed, libtasn1, p11-kit or libffi.
+Their previously retained notices remain conditional, not evidence that those
+components are present. System zlib, glibc, libstdc++ and libgcc are loader
+prerequisites in these Linux wheels, not repaired wheel payload libraries.
+
+Source RPM links and legal notices are not a source-delivery compliance
+claim. The LGPL libraries still require the applicable complete patched
+source/build/repair delivery and a demonstrated replacement or relinking
+arrangement. For libxcrypt's GOST files, the complete BSD 2-Clause permission
+was recovered from [Alexey Degtyarev's original project at a historical commit](https://github.com/adegtyarev/streebog/blob/62e2120042fae0bb19381a8acb1b8dc425b761f7/LICENSE).
+Section 21 retains that verbatim grant, the matching original copyright,
+libxcrypt's `LICENSING` declaration and the adapted files' own notices.
+The original implementation was compared with the matching libxcrypt source;
+this does not substitute for the complete patched library/source delivery.
+
+Matching library-only preferred source and recipient instructions are included
+in [the source asset](deps/redistribution/neograph-0.13.0-linux-lgpl-library-only-source.tar.gz)
+and in the sdist at that same path. Its SHA-256 is
+`60eb80cd7effb6ff10ba8c017ddd21e0656c4085bb06439e81eb19a76ce8fd3f`.
+Extract `RECIPIENT-INSTRUCTIONS.txt` for the native build, patched-library
+replacement and LGPL 2.1 modification/reverse-engineering rights. The archive
+contains actual library inputs, not the unrelated unknown-grant upstream tests.
+Its old-cohort repair mapping must be checked against each final release wheel;
+the release must also attach this exact source asset beside its Linux binaries.
+
+## LLVM 20.1.8 macOS runtime notices
+
+The macOS route selects LLVM 20.1.8 **runtime dylibs** for the macOS 14 floor.
+Using a compiler alone would not imply distributing its runtime libraries;
+copying these dylibs does. Section 22 reproduces each exact runtime-project
+license in full, including the LLVM exceptions and legacy NCSA/MIT notices.
+
+| Runtime | Matching upstream legal document | License / scope |
+|---|---|---|
+| libc++ 20.1.8 | [libcxx/LICENSE.TXT](https://github.com/llvm/llvm-project/blob/llvmorg-20.1.8/libcxx/LICENSE.TXT), [CREDITS.TXT](https://github.com/llvm/llvm-project/blob/llvmorg-20.1.8/libcxx/CREDITS.TXT) | Apache 2.0 with LLVM exceptions; preserved legacy NCSA/MIT notices and contributor attribution |
+| libc++abi 20.1.8 | [libcxxabi/LICENSE.TXT](https://github.com/llvm/llvm-project/blob/llvmorg-20.1.8/libcxxabi/LICENSE.TXT), [CREDITS.TXT](https://github.com/llvm/llvm-project/blob/llvmorg-20.1.8/libcxxabi/CREDITS.TXT) | Apache 2.0 with LLVM exceptions; preserved legacy NCSA/MIT notices and contributor attribution |
+| libunwind 20.1.8 | [libunwind/LICENSE.TXT](https://github.com/llvm/llvm-project/blob/llvmorg-20.1.8/libunwind/LICENSE.TXT) | Apache 2.0 with LLVM exceptions; preserved legacy NCSA/MIT notices |
+
+This records the selected route's source licensing, not an inspected macOS
+wheel's dependency closure. Before publication, verify the actual runtime
+versions, copied dylibs, all other transitive components and applicable
+file-specific notices in each final macOS and Windows artifact. Regenerated
+Linux artifacts and the sdist must also contain the corrected notices.
+Notice presence alone is not qualification or a license-compliance opinion.
 
 ## Declared Homebrew closure (not artifact-qualified)
 

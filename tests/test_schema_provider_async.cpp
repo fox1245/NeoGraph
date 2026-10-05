@@ -5,7 +5,9 @@
 #endif
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/cancellation_signal.hpp>
+#include <asio/execution/outstanding_work.hpp>
 #include <asio/post.hpp>
+#include <asio/prefer.hpp>
 #include <asio/redirect_error.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
@@ -13,6 +15,7 @@
 #include <algorithm>
 #include <deque>
 #include <map>
+#include <stop_token>
 
 using namespace neograph;
 namespace wire = neograph::test::wire;
@@ -307,6 +310,70 @@ TEST(SchemaProviderAsync, UnboundSharedTokenCancelsEveryConcurrentSdkOperation) 
 
 TEST(SchemaProviderAsync, SharedTokenCancelsSdkOperationsWithoutReplacingParentSlot) {
     shared_socket_cancel(true);
+}
+
+TEST(SchemaProviderAsync, SignalCallbackMayRebindWithoutDeliveringOldQueuedEmit) {
+    asio::io_context io;
+    auto token = std::make_shared<graph::CancelToken>();
+    const auto first = token->bind_executor(io.get_executor());
+    asio::any_io_executor rebound;
+    int signal_calls = 0;
+    int native_cancellations = 0;
+    std::stop_callback native_stop(token->stop_token(), [&] { ++native_cancellations; });
+    asio::post(first, [&] {
+        token->slot().assign([&](asio::cancellation_type) {
+            ++signal_calls;
+            if (signal_calls == 1) rebound = token->bind_executor(io.get_executor());
+        });
+    });
+    io.poll();
+    io.restart();
+    token->cancel();
+    // Leave the first binding's emit queued. Only the new binding and the
+    // callback's reentrant binding may deliver their eager cancellation.
+    const auto second = token->bind_executor(io.get_executor());
+    io.run();
+    token->unbind_executor();
+    EXPECT_EQ(signal_calls, 2);
+    EXPECT_TRUE(rebound);
+    EXPECT_TRUE(token->is_cancelled());
+    EXPECT_EQ(native_cancellations, 1);
+}
+
+TEST(SchemaProviderAsync, CompletedParentUnbindReleasesWorkBeforeRetainedTokenTeardown) {
+    auto token = std::make_shared<graph::CancelToken>();
+    int native_cancellations = 0;
+    std::stop_callback native_stop(token->stop_token(), [&] { ++native_cancellations; });
+    {
+        asio::io_context io;
+        auto bound = token->bind_executor(
+            asio::prefer(io.get_executor(), asio::execution::outstanding_work.tracked));
+        std::future<void> parent_operation;
+        auto parent_body = []() -> asio::awaitable<void> { co_return; };
+        asio::post(bound, [&] {
+            parent_operation = asio::co_spawn(bound, parent_body(),
+                asio::bind_cancellation_slot(token->slot(), asio::use_future));
+        });
+        io.poll();
+        ASSERT_EQ(parent_operation.wait_for(0s), std::future_status::ready);
+        parent_operation.get();
+        bound = {};
+        // The completed parent's installed handler still owns tracked work.
+        // unbind must release that ownership, not merely the token's ex_.
+        EXPECT_FALSE(io.stopped());
+        token->unbind_executor();
+        io.poll();
+        EXPECT_TRUE(io.stopped())
+            << "a completed parent handler must not keep its context running";
+        EXPECT_FALSE(token->is_cancelled());
+        EXPECT_EQ(native_cancellations, 0);
+    }
+    // Retaining the token past its context remains safe for native consumers.
+    token->cancel();
+    EXPECT_TRUE(token->is_cancelled());
+    EXPECT_EQ(native_cancellations, 1);
+    token->cancel();
+    EXPECT_EQ(native_cancellations, 1);
 }
 
 #if __has_include("runtime/testing.h")

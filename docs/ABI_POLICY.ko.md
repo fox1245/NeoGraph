@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=e17b6ed782cd2ef13aa7091cb02ea0f5fa2459df3e1f670ef014fd3c9bc9b07d -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=0abd9601232a6d6e83d263798993650759083561557b016d44f91152f04c0bb7 -->
 # 바이너리 호환 정책
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -21,6 +21,7 @@ CMake는 `pyproject.toml`에서 NeoGraph 버전을 읽어 공개 컴파일 라�
 - 이후 pre-v1 bounded-resource, UsageAccumulator 예약, issue #216 변경: 공개 layout에 accounting, admission, cache, runtime-interposition 상태가 추가되었다. 일치하는 헤더로 재빌드한다.
 - typed-provider 전환: 일치하는 NeoGraph와 SchemaProvider SDK 헤더/라이브러리로 모든 C++ consumer와 custom provider를 재빌드한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, 옛 descriptor interpreter, Responses WebSocket 경로는 alias 없이 제거되었다.
 - event-driven provider dispatch: CancelToken은 `std::stop_source`를 쓰고 `stop_token()`을 공개한다. `cancel`, `fork`, Asio-slot signature가 같아도 옛 inline 취소 코드가 호환되지는 않는다.
+- 완료된 취소 context 분리: CancelToken의 공개 layout에 generation으로 보호하는 emit 상태가 추가되었다. NeoGraph와 모든 native consumer를 함께 재빌드한다. Detach는 context 파괴 전에 완료된 slot handler를 해제하며, operation이 먼저 완료되어야 하고 취소 상태를 초기화하지 않는다.
 - 미래 `1.0.0` 경계는 loader 세대를 `1`로 바꾸며 재빌드가 필요하다. generation-1 동결은 해당 릴리스 정책이지 현재 검증 결과가 아니다.
 
 ## 공개 인터페이스

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=e17b6ed782cd2ef13aa7091cb02ea0f5fa2459df3e1f670ef014fd3c9bc9b07d -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=0abd9601232a6d6e83d263798993650759083561557b016d44f91152f04c0bb7 -->
 # binary 互換方針
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -21,6 +21,7 @@ CMake は `pyproject.toml` から NeoGraph version を読み、公開 compiled l
 - 以後の pre-v1 bounded-resource、UsageAccumulator 予約、issue #216 変更: 公開 layout に accounting、admission、cache、runtime-interposition 状態が加わった。対応 header で rebuild する。
 - typed-provider 移行: 対応する NeoGraph/SchemaProvider SDK header/library で全 C++ consumer と custom provider を rebuild する。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、旧 descriptor interpreter、Responses WebSocket は alias なしで削除された。
 - event-driven provider dispatch: CancelToken は `std::stop_source` を使い `stop_token()` を公開する。`cancel`、`fork`、Asio-slot signature が同じでも旧 inline cancel code は互換ではない。
+- 完了した cancel context の detach: CancelToken の公開 layout に generation で保護する emit 状態が加わった。NeoGraph と全 native consumer を一緒に rebuild する。Detach は context 破棄前に完了済み slot handler を解放するが、operation の先行完了を要求し、cancel 状態を reset しない。
 - 将来の `1.0.0` 境界は loader 世代を `1` にし rebuild を要求する。generation-1 freeze はその release の方針で、現在の検証結果ではない。
 
 ## 公開 interface

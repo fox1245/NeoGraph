@@ -14,12 +14,11 @@
  *      in a Python node won't be preempted but the subsequent node
  *      won't fire.
  *
- *   2. **asio cancellation_signal** (`slot()`) — bound to the run's
+ *   2. **asio cancellation_signal** (`slot()`) — bound to an Asio
  *      coroutine via ``asio::bind_cancellation_slot`` at ``co_spawn``
- *      time. asio propagates cancel down through every ``co_await``,
- *      including ``ConnPool::async_post``, so an in-flight HTTPS
- *      socket is closed and the LLM request aborts on the wire. This
- *      is what closes the cost-leak gap reported in v0.2.3.
+ *      time. Asio propagates cancellation through awaited operations,
+ *      including ``ConnPool::async_post``. Closing local transport does
+ *      not establish that the server stopped its work or did not charge.
  *
  *   3. **std::stop_token** (`stop_token()`) — thread-safe subscriptions forward
  *      cancellation to native SDK operations without binding an Asio executor
@@ -41,6 +40,7 @@
 #include <asio/strand.hpp>
 
 #include <algorithm>
+#include <condition_variable>
 #include <stop_token>
 #include <cstdint>
 #include <functional>
@@ -114,8 +114,9 @@ public:
             std::lock_guard<std::mutex> lk(mu_);
             if (ex_) {
                 asio::post(ex_,
-                           [this, keep_alive = std::move(keep_alive)]() {
-                               sig_.emit(asio::cancellation_type::all);
+                           [this, binding = binding_generation_,
+                            keep_alive = std::move(keep_alive)]() {
+                               emit_if_bound(binding);
                            });
             }
         }
@@ -180,18 +181,21 @@ public:
     [[nodiscard]] asio::any_io_executor bind_executor(asio::any_io_executor ex) {
         asio::any_io_executor bound;
         bool                   fire_immediately = false;
+        std::uint64_t          binding = 0;
         {
             std::lock_guard<std::mutex> lk(mu_);
             ex_ = ex ? asio::any_io_executor(asio::make_strand(std::move(ex)))
                      : asio::any_io_executor{};
+            binding = ++binding_generation_;
             bound = ex_;
             fire_immediately = stop_source_.stop_requested();
         }
+        emit_finished_.notify_all();
         if (fire_immediately && bound) {
             auto keep_alive = self_keep_alive_for_post();
             asio::post(bound,
-                       [this, keep_alive = std::move(keep_alive)]() {
-                           sig_.emit(asio::cancellation_type::all);
+                       [this, binding, keep_alive = std::move(keep_alive)]() {
+                           emit_if_bound(binding);
                        });
         }
         return bound;
@@ -200,11 +204,20 @@ public:
     /**
      * @brief Detach the serial executor after every bound operation drained.
      *
-     * This is not a cancellation barrier. The caller must first ensure that
-     * no signal handler or slot-bound operation remains active, then call it
-     * before destroying the executor's execution context. It serializes with
-     * ``cancel()`` so a concurrent cancellation cannot retain the released
-     * executor and post after that context begins teardown.
+     * This does not drain slot-bound operations. The caller must first ensure
+     * that no signal handler or slot-bound operation remains active, then call
+     * it before destroying the executor's execution context. As with slot
+     * connection, rebinding must not race this teardown.
+     *
+     * It serializes with ``cancel()`` and posted emits: detachment closes emit
+     * admission and waits for an in-progress emit to finish, while queued work
+     * from the old binding cannot emit into this or a later binding. Callers
+     * must still drain queued work before context teardown and keep directly
+     * constructed tokens alive until that drain.
+     *
+     * Destroys the last installed slot handler while its context is alive.
+     * A completed ``co_spawn`` may leave that handler installed, retaining its
+     * strand independently of the executor stored in this token.
      *
      * GraphEngine and the synchronous bridges call this on their internal
      * operation children. Direct callers of ``bind_executor()`` must do the
@@ -214,9 +227,14 @@ public:
     void unbind_executor() noexcept {
         asio::any_io_executor released;
         {
-            std::lock_guard<std::mutex> lk(mu_);
+            std::unique_lock<std::mutex> lk(mu_);
             released = std::move(ex_);
+            ++binding_generation_;
+            emit_finished_.wait(lk, [this] { return !emitting_; });
         }
+        // No emit can now touch the signal. Clear outside mu_: destruction of
+        // a user's completed handler may itself request cancellation.
+        sig_.slot().clear();
         // Keep the former executor alive through this method's end, while its
         // execution context is still known to be alive to the caller.
         static_cast<void>(released);
@@ -320,6 +338,30 @@ public:
     }
 
 private:
+    void emit_if_bound(std::uint64_t binding) {
+        {
+            std::unique_lock<std::mutex> lk(mu_);
+            emit_finished_.wait(lk, [this, binding] {
+                return !ex_ || binding != binding_generation_ || !emitting_;
+            });
+            if (!ex_ || binding != binding_generation_) return;
+            emitting_ = true;
+        }
+        struct EmitCompletion {
+            CancelToken& token;
+            ~EmitCompletion() {
+                {
+                    std::lock_guard<std::mutex> lk(token.mu_);
+                    token.emitting_ = false;
+                }
+                token.emit_finished_.notify_all();
+            }
+        } complete{*this};
+        // Signal handlers may reenter bind_executor() or cancel(). Admission
+        // is fenced above, but no token mutex may be held through a callback.
+        sig_.emit(asio::cancellation_type::all);
+    }
+
     std::shared_ptr<CancelToken> self_keep_alive_for_post() {
         std::lock_guard<std::mutex> lk(children_mu_);
         for (auto& candidate : children_) {
@@ -331,7 +373,10 @@ private:
     }
 
     std::stop_source        stop_source_;
-    mutable std::mutex       mu_;        // guards ex_ vs cancel() race
+    mutable std::mutex       mu_;        // guards executor and emit admission
+    std::condition_variable emit_finished_;
+    std::uint64_t           binding_generation_ = 0;
+    bool                    emitting_ = false;
     asio::any_io_executor    ex_;        // bound by engine before HTTP I/O
     asio::cancellation_signal sig_;      // for asio operation cancel
 

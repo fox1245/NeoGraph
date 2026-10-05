@@ -1,6 +1,6 @@
 # CMake installs the Python package and its native libraries into one directory.
 [build-system]
-requires = ["scikit-build-core>=1.0", "pybind11>=2.13", "ninja>=1.10"]
+requires = ["scikit-build-core>=1.0", "pybind11==2.13.6", "ninja>=1.10"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -114,6 +114,10 @@ manylinux-x86_64-image = "quay.io/pypa/manylinux_2_34_x86_64"
 manylinux-aarch64-image = "quay.io/pypa/manylinux_2_34_aarch64"
 before-all = 'bash "{package}/cmake/build-wheel-curl.sh"'
 environment = { CMAKE_PREFIX_PATH = "/opt/neograph-wheel-deps", LD_LIBRARY_PATH = "/opt/neograph-wheel-deps/lib:$LD_LIBRARY_PATH" }
+# Preserve the full installed-wheel suite before the native cold-loader gate.
+test-command = """\
+python -c "import os, subprocess, sys; env = os.environ.copy(); env.pop('LD_LIBRARY_PATH', None); env.pop('DYLD_LIBRARY_PATH', None); env.pop('PYTHONPATH', None); subprocess.run([sys.executable, '-m', 'pytest', '-q', sys.argv[1]], env=env, check=True); subprocess.run([sys.executable, '-I', sys.argv[2], '--package', sys.argv[3]], env=env, check=True)" "{package}/bindings/python/tests/" "{package}/cmake/test-wheel-lgpl-replacement.py" "{package}"\
+"""
 
 [tool.cibuildwheel.windows]
 # SchemaProvider requires curl even if NeoGraph's separate curl pool is disabled.
@@ -130,6 +134,14 @@ python -m delvewheel repair --ignore-existing -w {dest_dir} {wheel} \
 
 [tool.cibuildwheel.macos]
 archs = ["arm64"]
-before-all = "brew install libpq sqlite openssl@3 curl"
-# Target macOS 14; repaired dependency binaries must qualify for the same floor.
-environment = { MACOSX_DEPLOYMENT_TARGET = "14.0", CMAKE_PREFIX_PATH = "/opt/homebrew/opt/libpq:/opt/homebrew/opt/sqlite:/opt/homebrew/opt/openssl@3:/opt/homebrew/opt/curl", PATH = "/opt/homebrew/opt/openssl@3/bin:$PATH" }
+before-all = 'bash "{package}/cmake/build-wheel-macos.sh"'
+# LLVM 20 ships stable stop_token support; AppleClang 15's libc++ does not.
+# Use the matching Homebrew runtime, not new headers with the old system dylib.
+# llvm@20 has an arm64 Sonoma bottle; delocate must retain the macOS 14 floor
+# when bundling libc++, libc++abi, libunwind and the other dependency dylibs.
+environment = { MACOSX_DEPLOYMENT_TARGET = "14.0", CC = "/opt/homebrew/opt/llvm@20/bin/clang", CXX = "/opt/homebrew/opt/llvm@20/bin/clang++", CXXFLAGS = "-stdlib=libc++ -nostdinc++ -isystem /opt/homebrew/opt/llvm@20/include/c++/v1", LDFLAGS = "-L/opt/homebrew/opt/llvm@20/lib/c++ -L/opt/homebrew/opt/llvm@20/lib/unwind -Wl,-rpath,/opt/homebrew/opt/llvm@20/lib/c++ -Wl,-rpath,/opt/homebrew/opt/llvm@20/lib/unwind -lunwind", CMAKE_PREFIX_PATH = "/opt/homebrew/opt/libpq:/opt/homebrew/opt/sqlite:/opt/homebrew/opt/openssl@3:/opt/homebrew/opt/curl", PATH = "/opt/homebrew/opt/openssl@3/bin:$PATH" }
+repair-wheel-command = "delocate-wheel --require-archs {delocate_archs} --require-target-macos-version 14.0 --sanitize-rpaths -w {dest_dir} -v {wheel}"
+# Every actual macOS 14 arm64 wheel must pass the full suite, then relocation.
+test-command = """\
+python -c "import os, subprocess, sys; env = os.environ.copy(); env.pop('LD_LIBRARY_PATH', None); env.pop('DYLD_LIBRARY_PATH', None); env.pop('PYTHONPATH', None); subprocess.run([sys.executable, '-m', 'pytest', '-q', sys.argv[1]], env=env, check=True); subprocess.run([sys.executable, '-I', sys.argv[2]], env=env, check=True)" "{package}/bindings/python/tests/" "{package}/cmake/test-macos-wheel-relocation.py"\
+"""
