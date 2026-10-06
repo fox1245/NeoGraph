@@ -6,9 +6,37 @@
 #include <descriptor/policy.h>
 #include <sp/config_defaults.h>
 #include <json/json.h>
+#include <exception>
 #include <stdexcept>
+#include <string>
+#include <typeindex>
+#include <typeinfo>
+#include <utility>
 
 namespace neograph::test {
+
+// True when `actual` is the exception a test installed as `expected`.
+// libstdc++ and libc++ keep one exception object across rethrow_exception and
+// current_exception, so pointer equality is the strict check there. MSVC's
+// current_exception() hands back a fresh copy of the object, so a cause that
+// travelled through a catch block never compares equal to the original pointer;
+// there it can only be matched by dynamic type and message.
+inline bool same_exception(const std::exception_ptr& actual, const std::exception_ptr& expected) {
+    if (actual == expected) return true;
+#if defined(_MSC_VER)
+    if (!actual || !expected) return false;
+    const auto describe = [](const std::exception_ptr& pointer)
+        -> std::pair<std::type_index, std::string> {
+        try { std::rethrow_exception(pointer); }
+        catch (const std::exception& error) { return {std::type_index(typeid(error)), error.what()}; }
+        catch (...) { return {std::type_index(typeid(void)), std::string()}; }
+    };
+    const auto left = describe(actual);
+    return left.first != std::type_index(typeid(void)) && left == describe(expected);
+#else
+    return false;
+#endif
+}
 
 inline sp::descriptor::ValidatedDescriptor descriptor(
     std::string family = "openai.chat", std::string origin = "https://fixture.invalid",

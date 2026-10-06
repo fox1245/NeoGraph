@@ -7,7 +7,8 @@ import ssl
 import subprocess
 import sys
 import tempfile
-import threading
+
+from loopback_peer import LoopbackPeer
 
 
 class SignedVideoPeer(http.server.BaseHTTPRequestHandler):
@@ -55,19 +56,15 @@ def main():
         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(cert, key)
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), SignedVideoPeer)
-        server.socket = context.wrap_socket(server.socket, server_side=True)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
+        peer = LoopbackPeer(SignedVideoPeer, context)
+        peer.start()
         environment = os.environ.copy()
         environment["SSL_CERT_FILE"] = str(cert)
-        environment["NEOGRAPH_VEO_SIGNED_ORIGIN"] = f"https://localhost:{server.server_port}"
+        environment["NEOGRAPH_VEO_SIGNED_ORIGIN"] = f"https://localhost:{peer.port}"
         try:
             result = subprocess.run(sys.argv[1:], env=environment, check=False)
         finally:
-            server.shutdown()
-            server.server_close()
-            thread.join()
+            peer.stop()
         raise SystemExit(result.returncode)
 
 

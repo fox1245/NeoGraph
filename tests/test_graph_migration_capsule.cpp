@@ -453,6 +453,9 @@ TEST(GraphMigrationCapsule, CanonicalRoundTripBindsSourceAndCheckpoint) {
 }
 
 
+#ifndef _WIN32
+// Trusted-archive custody requires an owner-only protected DACL on the parent; this fixture
+// only sets POSIX permission bits, as in the other archive tests that are skipped on Windows.
 TEST(GraphMigrationCapsule, ArchiveConfigurationDoesNotGrantPlainGraphCustody) {
     TempMigrationArchive files;
     const auto descriptor = neograph::test::descriptor();
@@ -487,6 +490,7 @@ TEST(GraphMigrationCapsule, ArchiveConfigurationDoesNotGrantPlainGraphCustody) {
     EXPECT_EQ(state.budget_bank(), bank);
     EXPECT_FALSE(state.checkpoint_snapshot().second);
 }
+#endif
 
 TEST(GraphMigrationCapsule, BoundedCustodyCannotBeLiftedTamperedOrMigrated) {
     GraphState original;

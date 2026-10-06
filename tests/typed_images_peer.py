@@ -11,6 +11,8 @@ import tempfile
 import threading
 import time
 
+from loopback_peer import LoopbackPeer
+
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aK1sAAAAASUVORK5CYII=")
 
 
@@ -102,21 +104,17 @@ def main():
         cert = os.path.join(directory, "cert.pem")
         key = os.path.join(directory, "key.pem")
         subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1", "-addext", "basicConstraints=critical,CA:TRUE"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Peer)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(cert, key)
-        server.socket = context.wrap_socket(server.socket, server_side=True)
-        thread = threading.Thread(target=server.serve_forever)
-        thread.start()
+        peer = LoopbackPeer(Peer, context)
+        peer.start()
         environment = os.environ.copy()
         environment["SSL_CERT_FILE"] = cert
-        environment["NEOGRAPH_IMAGES_TEST_PORT"] = str(server.server_port)
+        environment["NEOGRAPH_IMAGES_TEST_PORT"] = str(peer.port)
         try:
             result = subprocess.run(sys.argv[1:], env=environment, check=False)
         finally:
-            server.shutdown()
-            thread.join()
-            server.server_close()
+            peer.stop()
         return result.returncode
 
 

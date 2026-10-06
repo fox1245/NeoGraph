@@ -445,7 +445,7 @@ TEST(SchemaProviderAsync, ObserverThrowAfterProducerCompletionRetainsAuthoritati
             FAIL() << "throwing observer must surface its retained outcome";
         } catch (const ProviderObserverError& error) {
             EXPECT_EQ(error.error_kind(), sp::ErrorKind::Misuse);
-            EXPECT_EQ(error.cause(), cause);
+            EXPECT_TRUE(test::same_exception(error.cause(), cause));
             EXPECT_THROW(std::rethrow_exception(error.cause()), std::domain_error);
             retained = error.outcome();
         }

@@ -425,7 +425,7 @@ TEST(ControlledProvider, SettlementStorageFailureRetainsOwnedOutcomeAndPreventsR
         } catch (const ProviderDispatchOutcomePersistenceError& error) {
             retained = error.outcome();
             EXPECT_EQ(retained, expected);
-            EXPECT_EQ(error.cause(), storage_cause);
+            EXPECT_TRUE(test::same_exception(error.cause(), storage_cause));
             EXPECT_FALSE(error.delivery_error());
             EXPECT_THROW(std::rethrow_exception(error.cause()), SettlementStorageUnavailable);
         }

@@ -194,7 +194,7 @@ TEST(NodeTest, SettlementFailureRetainsActualOutcomeWithoutNodeRedispatch) {
             FAIL() << "expected owned provider outcome failure";
         } catch (const ProviderOutcomeError& outcome_error) {
             EXPECT_EQ(outcome_error.outcome(), expected);
-            EXPECT_EQ(outcome_error.cause(), cause);
+            EXPECT_TRUE(test::same_exception(outcome_error.cause(), cause));
             EXPECT_THROW(std::rethrow_exception(outcome_error.cause()), NodeSettlementFailure);
         }
     }
