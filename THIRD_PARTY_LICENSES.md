@@ -236,12 +236,25 @@ checkout at the manifest's `builtin-baseline`
 | `nghttp2` 1.70.0 | nghttp2 | MIT; Section 10 of the full notices |
 | `sqlite3` 3.53.4 | SQLite | public domain; Section 13 of the full notices |
 | `z` 1.3.2 | zlib | zlib license; see the zlib notice in the full notices |
-| `msvcp140`, `msvcp140_1`, `msvcp140_atomic_wait` 14.51.36260.0 | Microsoft Visual C++ runtime (Microsoft Visual Studio, Microsoft Corporation) | Microsoft's redistribution terms for the Visual C++ runtime; **not reproduced in the full notices** |
+| `msvcp140`, `msvcp140_1`, `msvcp140_atomic_wait` 14.51.36260.0 | Microsoft Visual C++ runtime (Microsoft Visual Studio, Microsoft Corporation) | Distributable Code terms of the Visual Studio license used for the build; redistributed unmodified, see below |
 
-The Microsoft runtime terms and the exact-version texts for these ports have not been
-added to the full notices; this table records what the artifact contains, not a
-license-compliance opinion. The vcpkg `copyright` file of each installed port is
-the matching legal source for the versions above.
+Microsoft's published list ([Visual Studio 2026 redistribution](https://learn.microsoft.com/en-us/visualstudio/releases/2026/redistribution))
+allows licensed Visual Studio users to distribute, with their program, the files under
+`VC\redist` in unmodified form and subject to the Visual Studio license terms; it
+excludes the `debug_nonredist` folders and pre-release components. The wheel build keeps
+the three Microsoft DLLs unmodified: `--no-mangle` in `pyproject.toml` stops delvewheel
+from renaming their imports, and each file keeps its valid Microsoft Authenticode
+signature (checked with `Get-AuthenticodeSignature` on a locally built wheel; the files of
+a published artifact must be checked the same way). Mangling them would edit
+`msvcp140_1` and `msvcp140_atomic_wait` and strip their signatures, which an earlier build
+of this release did; version 0.12.1 shipped only `msvcp140`, mangled by name but unmodified.
+The license terms of the Visual Studio edition used for the build govern; this is a
+description of the artifact, not a legal opinion.
+
+The exact-version notice texts for the other ports above have not been added to the
+full notices; this table records what the artifact contains, not a license-compliance
+opinion. The vcpkg `copyright` file of each installed port is the matching legal source
+for the versions above.
 
 ## Redistribution requirements
 
