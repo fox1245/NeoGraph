@@ -143,6 +143,11 @@ struct Bridge {
     std::shared_ptr<detail::ProviderWakeSignal> wake;
     sp::runtime::Result result;
 
+    // The byte budget must exist before the pmr containers are constructed: MSVC's
+    // unordered_map allocates its sentinel and buckets in its constructor, libstdc++ lazily.
+    // A zero budget would reject that first allocation as bad_alloc.
+    Bridge(std::size_t event_limit, std::size_t byte_limit) : max_events(event_limit), max_bytes(byte_limit) {}
+
     void retain(const sp::Event& source) {
         bool exhausted = false;
         {
@@ -466,14 +471,12 @@ asio::awaitable<sp::runtime::Result> Provider::dispatch_operation(PreparedProvid
         co_return result;
     }
     detail::ProviderWakeReader wake(executor);
-    auto bridge = std::make_shared<Bridge>();
+    auto bridge = std::make_shared<Bridge>(impl->event_count_limit, impl->event_byte_limit);
     // Late SDK callbacks retain only SDK/client data, never the outer executor.
     // Abandonment can release the awaiting frame without a synchronous shutdown.
     bridge->client = impl->client;
     bridge->stop = impl->stop;
     bridge->wake = wake.signal();
-    bridge->max_events = impl->event_count_limit;
-    bridge->max_bytes = impl->event_byte_limit;
     struct Abandon {
         std::shared_ptr<Bridge> bridge;
         ~Abandon() { bridge->abandon(); }
