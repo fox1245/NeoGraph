@@ -132,7 +132,10 @@ python -c "import os, subprocess, sys; env = os.environ.copy(); env.pop('LD_LIBR
 before-all = 'vcpkg install --triplet x64-windows --x-manifest-root="{package}/cmake/windows-wheel" --x-install-root="%VCPKG_INSTALLED_DIR%" --x-buildtrees-root="%VCPKG_INSTALLED_DIR%/../vcpkg-buildtrees" --x-packages-root="%VCPKG_INSTALLED_DIR%/../vcpkg-packages"'
 # The vcpkg toolchain honours VCPKG_INSTALLED_DIR only in manifest mode: in classic mode it
 # silently uses <vcpkg root>/installed, so find_package would miss the manifest install above.
-environment = { CMAKE_TOOLCHAIN_FILE = '"$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"', CMAKE_ARGS = '"$CMAKE_ARGS -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR=\"$NEOGRAPH_WHEEL_VCPKG_MANIFEST_DIR\" -DVCPKG_MANIFEST_INSTALL=OFF -DVCPKG_INSTALLED_DIR=\"$VCPKG_INSTALLED_DIR\""' }
+# cibuildwheel wraps every value here in double quotes itself. Inner quotes close that pair, so a
+# quoted CMAKE_ARGS split at its spaces into junk variables and reached CMake empty; defines
+# therefore go through SKBUILD_CMAKE_DEFINE, which needs no quoting even for paths with spaces.
+environment = { CMAKE_TOOLCHAIN_FILE = '$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake', SKBUILD_CMAKE_DEFINE = 'VCPKG_MANIFEST_MODE=ON;VCPKG_MANIFEST_DIR=$NEOGRAPH_WHEEL_VCPKG_MANIFEST_DIR;VCPKG_MANIFEST_INSTALL=OFF;VCPKG_INSTALLED_DIR=$VCPKG_INSTALLED_DIR' }
 # Search bundled engine/SDK DLLs and mangle external dependency names; otherwise
 # a preloaded system sqlite3.dll can shadow the wheel's SQLite build.
 repair-wheel-command = """\
