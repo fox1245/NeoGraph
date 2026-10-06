@@ -86,8 +86,13 @@ The inspected Linux release-candidate wheels contain the following AlmaLinux
 RPM library versions on both x86_64 and aarch64. Section 21 of the full
 notices supplements the Ubuntu material with legal documents from matching
 AlmaLinux source RPMs, checked against repository primary-metadata SHA-256
-values. It also retains applicable downstream file notices. This table does
-not qualify regenerated artifacts or describe the macOS/Windows closure.
+values. It also retains applicable downstream file notices. The hosted build log of run 37459723655 shows `openssl 3.5.8-1.el9_8`,
+`libpq 13.23-3.el9_8`, `libnghttp2 1.43.0-6.el9_8.2` and `sqlite 3.34.1-11.el9_8`,
+consistent with this table; the other rows were already installed in the build image,
+so their versions are not in the log, and the `manylinux_2_34` image is referenced
+without a digest and can change. libcurl is built from source by `before-all`, not
+installed from an RPM. The table does not describe the macOS or Windows closure
+(see the two sections below).
 
 | Observed binary RPM | Matching AlmaLinux source RPM | Library scope / notices |
 |---|---|---|
@@ -152,50 +157,91 @@ license in full, including the LLVM exceptions and legacy NCSA/MIT notices.
 | libc++abi 20.1.8 | [libcxxabi/LICENSE.TXT](https://github.com/llvm/llvm-project/blob/llvmorg-20.1.8/libcxxabi/LICENSE.TXT), [CREDITS.TXT](https://github.com/llvm/llvm-project/blob/llvmorg-20.1.8/libcxxabi/CREDITS.TXT) | Apache 2.0 with LLVM exceptions; preserved legacy NCSA/MIT notices and contributor attribution |
 | libunwind 20.1.8 | [libunwind/LICENSE.TXT](https://github.com/llvm/llvm-project/blob/llvmorg-20.1.8/libunwind/LICENSE.TXT) | Apache 2.0 with LLVM exceptions; preserved legacy NCSA/MIT notices |
 
-This records the selected route's source licensing, not an inspected macOS
-wheel's dependency closure. Before publication, verify the actual runtime
-versions, copied dylibs, all other transitive components and applicable
-file-specific notices in each final macOS and Windows artifact. Regenerated
+The inspected macOS wheel of run 37459723655 copied `libunwind`, `libc++` and
+`libc++abi` from Homebrew `llvm@20` 20.1.8, as selected. Before publication, verify
+the runtime versions, copied dylibs, all other transitive components and
+applicable file-specific notices in each final macOS and Windows artifact. Regenerated
 Linux artifacts and the sdist must also contain the corrected notices.
 Notice presence alone is not qualification or a license-compliance opinion.
 
-## Declared Homebrew closure (not artifact-qualified)
+## Artifact-observed macOS closure (Homebrew)
 
-The [curl formula](https://github.com/Homebrew/homebrew-core/blob/cb210f70f163a3a1bdf15c6b2016730cbecb18a4/Formula/c/curl.rb)
-at Homebrew/core commit `cb210f70f163a3a1bdf15c6b2016730cbecb18a4`
-declares the following additional dependencies. Versions below are that
-formula snapshot's stable source versions, not versions verified in a released
-NeoGraph wheel. Section 20 of the full notices reproduces their legal texts
-and records matching source archives and formula provenance.
+The macOS 14 arm64 wheel built by the hosted Wheels run for commit `79c21e1`
+(GitHub Actions run 37459723655) was inspected. Its build log lists every dylib
+that delocate copied into `neograph_engine/.dylibs` with the Homebrew formula and
+version it came from; the thirteen formulas below are that observed closure.
+Homebrew formula versions float with the runner image, so a later build can
+differ and must be inspected again. The rows for the earlier declared snapshot
+([curl formula](https://github.com/Homebrew/homebrew-core/blob/cb210f70f163a3a1bdf15c6b2016730cbecb18a4/Formula/c/curl.rb)
+at Homebrew/core commit `cb210f70f163a3a1bdf15c6b2016730cbecb18a4`) keep their
+legal documents; every declared version matched the observed one except where a
+row says otherwise. Section 20 of the full notices reproduces the declared
+snapshot's legal texts and records matching source archives and formula
+provenance. It has not been regenerated for the additional components and
+versions listed after the table.
 
-| Component / snapshot version | Matching upstream legal document | License / scope |
+| Component / observed version | Matching upstream legal document | License / scope |
 |---|---|---|
 | Brotli 1.2.0 | [LICENSE](https://github.com/google/brotli/blob/v1.2.0/LICENSE) | MIT; compression libraries |
 | nghttp3 1.18.0 (`libnghttp3`) | [COPYING](https://github.com/ngtcp2/nghttp3/blob/v1.18.0/COPYING) | MIT; HTTP/3 library |
 | ngtcp2 1.25.0 (`libngtcp2`) | [COPYING](https://github.com/ngtcp2/ngtcp2/blob/v1.25.0/COPYING) | MIT; QUIC and crypto adapter libraries |
 | libpsl 0.23.3 | [LICENSE](https://github.com/rockdaboot/libpsl/blob/0.23.3/LICENSE), [Chromium notice](https://github.com/rockdaboot/libpsl/blob/0.23.3/src/LICENSE.chromium) | MIT and BSD 3-Clause code; built-in Public Suffix List separately MPL 2.0 |
-| libssh2 1.11.1, Homebrew revision 6 | [COPYING](https://github.com/libssh2/libssh2/blob/libssh2-1.11.1/COPYING) | BSD 3-Clause; distinct from LGPL-licensed libssh; retain formula patches with source provenance |
+| libssh2 1.11.1, Homebrew revision 4 (observed; the earlier snapshot declared revision 6) | [COPYING](https://github.com/libssh2/libssh2/blob/libssh2-1.11.1/COPYING) | BSD 3-Clause; distinct from LGPL-licensed libssh; retain formula patches with source provenance; the revision-4 patch set was not separately inspected |
 | Zstandard 1.5.7, Homebrew revision 1 | [LICENSE](https://github.com/facebook/zstd/blob/v1.5.7/LICENSE), [dictionary-builder notice](https://github.com/facebook/zstd/blob/v1.5.7/lib/dictBuilder/divsufsort.c) | BSD 3-Clause alternative selected here, plus Yuta Mori's MIT notice; not a GPL-only library |
-| LZ4 1.10.0 | [Library LICENSE](https://github.com/lz4/lz4/blob/v1.10.0/lib/LICENSE) | BSD 2-Clause library; declared by the zstd formula for program support, not proven bundled |
-| XZ Utils 5.8.4 / liblzma | [COPYING](https://github.com/tukaani-project/xz/blob/v5.8.4/COPYING), [COPYING.0BSD](https://github.com/tukaani-project/xz/blob/v5.8.4/COPYING.0BSD) | 0BSD library; package scripts separately GPL 2-or-later; declared zstd program dependency, not proven bundled |
+| LZ4 1.10.0 | [Library LICENSE](https://github.com/lz4/lz4/blob/v1.10.0/lib/LICENSE) | BSD 2-Clause library; declared by the zstd formula for program support; not copied into the inspected wheel |
+| XZ Utils 5.8.4 / liblzma | [COPYING](https://github.com/tukaani-project/xz/blob/v5.8.4/COPYING), [COPYING.0BSD](https://github.com/tukaani-project/xz/blob/v5.8.4/COPYING.0BSD) | 0BSD library; package scripts separately GPL 2-or-later; declared zstd program dependency; not copied into the inspected wheel |
 | Public Suffix List | [Pinned list source](https://github.com/publicsuffix/list/blob/e1b8015c3b2f0f4f8c18659c2480fc1a22c07b20/public_suffix_list.dat), [LICENSE](https://github.com/publicsuffix/list/blob/e1b8015c3b2f0f4f8c18659c2480fc1a22c07b20/LICENSE) | MPL 2.0 data; this commit is libpsl 0.23.3's source-tag submodule, not an inspected bottle's data identity |
+| OpenSSL 3.6.3 (`openssl@3`) | Section 11 of the full notices | Apache 2.0; copied as `libssl` and `libcrypto`; the exact 3.6.3 notice text was not re-verified |
+| curl 8.21.0 | Section 9 of the full notices | curl license; the exact 8.21.0 notice text was not re-verified |
+| MIT Kerberos 1.22.2 (`krb5`) | Sections 19 and 21 of the full notices (other versions) | BSD-style and per-file notices; the curl formula links Homebrew's `krb5`, which was copied (`libkrb5`, `libgssapi_krb5`, `libk5crypto`, `libkrb5support`, `libcom_err`), not the system Kerberos; the 1.22.2 `NOTICE` was not reproduced |
+| nghttp2 1.70.0 (`libnghttp2`) | Section 10 of the full notices | MIT |
+| libpq 18.6 | Section 12 of the full notices | PostgreSQL license; the exact 18.6 copyright text was not re-verified |
+| SQLite 3.53.4 | Section 13 of the full notices | public domain |
+| LLVM 20.1.8 runtimes (`llvm@20`) | Section 22 of the full notices | libc++, libc++abi, libunwind: see the LLVM section above |
 
-On macOS 14 and newer, this libpsl formula selects system `libicucore`,
-not libidn2/libunistring; curl selects Apple IDN and system Kerberos/OpenLDAP.
-Its Linux/older-macOS alternatives do not describe NeoGraph's Linux
-source-built curl recipe. The zstd formula enables LZ4/LZMA support for its
-programs: a package dependency is not proof of a shared-library dependency.
-Do not include system libraries in a bundled inventory merely because they
-appear in package metadata.
+On macOS 14 and newer, the libpsl formula selects system `libicucore`, not
+libidn2/libunistring, and curl selects Apple IDN. The observed wheel shows that curl
+does link Homebrew's MIT Kerberos (see the row above); an earlier version of this
+file described system Kerberos/OpenLDAP and was wrong. Its Linux/older-macOS
+alternatives do not describe NeoGraph's Linux source-built curl recipe. The zstd
+formula enables LZ4/LZMA support for its programs: a package dependency is not
+proof of a shared-library dependency, and neither library was copied into the
+inspected wheel. Do not include system libraries in a bundled inventory merely
+because they appear in package metadata.
 
 Before publication, inspect each repaired wheel and portable archive on all
-four platform rows, including static incorporation. Record actual versions,
+four platform rows, including static incorporation (the macOS and Windows wheels
+of the run above and the Linux wheels have been inspected; the portable archives
+have not). Record actual versions,
 formula/port/package revisions, source checksums, patches and copied libraries;
 retain matching notices for any version not represented here. For bundled
 libpsl's built-in list, verify the actual list digest/date against its build
 source. Make that matching MPL-covered source, including modifications,
 available and tell recipients where to obtain it (MPL 2.0 section 3.2).
 The pinned public source above is not proof that an uninspected binary uses it.
+
+## Artifact-observed Windows closure (vcpkg)
+
+The Windows AMD64 wheels built by the same hosted run were inspected: the version
+resources of every DLL in `neograph_engine.libs`, identical across CPython 3.10-3.13
+(CPython 3.9 adds only delvewheel's load-order file). The ports come from a vcpkg
+checkout at the manifest's `builtin-baseline`
+(`5f1f266e969f8f5663e8ccca6249193c48531326`).
+
+| DLL (observed version) | Component | License / notices |
+|---|---|---|
+| `libssl`, `libcrypto` 3.6.5 | OpenSSL | Apache 2.0; Section 11 of the full notices; the exact 3.6.5 text was not re-verified |
+| `libcurl` 8.22.0 | curl | Section 9 of the full notices; the exact 8.22.0 text was not re-verified |
+| `libpq` 18.4 | PostgreSQL client library | PostgreSQL license; Section 12 of the full notices |
+| `nghttp2` 1.70.0 | nghttp2 | MIT; Section 10 of the full notices |
+| `sqlite3` 3.53.4 | SQLite | public domain; Section 13 of the full notices |
+| `z` 1.3.2 | zlib | zlib license; see the zlib notice in the full notices |
+| `msvcp140`, `msvcp140_1`, `msvcp140_atomic_wait` 14.51.36260.0 | Microsoft Visual C++ runtime (Microsoft Visual Studio, Microsoft Corporation) | Microsoft's redistribution terms for the Visual C++ runtime; **not reproduced in the full notices** |
+
+The Microsoft runtime terms and the exact-version texts for these ports have not been
+added to the full notices; this table records what the artifact contains, not a
+license-compliance opinion. The vcpkg `copyright` file of each installed port is
+the matching legal source for the versions above.
 
 ## Redistribution requirements
 
