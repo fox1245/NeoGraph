@@ -1,0 +1,34 @@
+name: Windows transport dependencies
+description: >-
+  Install curl and OpenSSL for the SDK transport through the runner's vcpkg, restoring and saving
+  vcpkg's binary archives so the ports are built from source only when the runner image changes.
+runs:
+  using: composite
+  steps:
+    - name: Identify the runner image
+      id: image
+      shell: pwsh
+      run: |
+        $archives = Join-Path $env:RUNNER_TEMP 'vcpkg-archives'
+        New-Item -ItemType Directory -Force -Path $archives | Out-Null
+        "archives=$archives" | Out-File -Append -Encoding ascii $env:GITHUB_OUTPUT
+        "image=$env:ImageVersion" | Out-File -Append -Encoding ascii $env:GITHUB_OUTPUT
+        "VCPKG_DEFAULT_BINARY_CACHE=$archives" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+    # The key carries the image version because a binary archive is valid only for the compiler and
+    # vcpkg revision it was built with; a new image must produce (and then save) fresh archives.
+    - name: Restore vcpkg binary archives
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.image.outputs.archives }}
+        key: vcpkg-transport-${{ runner.os }}-${{ steps.image.outputs.image }}-${{ hashFiles('.github/actions/windows-transport-deps/action.yml') }}
+        restore-keys: |
+          vcpkg-transport-${{ runner.os }}-${{ steps.image.outputs.image }}-
+    - name: Install curl and OpenSSL
+      shell: pwsh
+      run: |
+        vcpkg install "curl[http2,openssl]:x64-windows" openssl:x64-windows
+        if ($LASTEXITCODE -ne 0) { throw 'vcpkg install failed' }
+        $root = $env:VCPKG_INSTALLATION_ROOT
+        "CMAKE_TOOLCHAIN_FILE=$root/scripts/buildsystems/vcpkg.cmake" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+        "$root/installed/x64-windows/bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
+        "$root/installed/x64-windows/tools/openssl" | Out-File -Append -Encoding ascii $env:GITHUB_PATH

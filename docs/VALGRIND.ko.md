@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/VALGRIND.md locale=ko source_sha256=77ef4aac4dcc1d2275fa67596cf241a8e86f7437291204b5eaab2f91233d1308 -->
+<!-- neograph-i18n: source=docs/VALGRIND.md locale=ko source_sha256=843b39a1b1a8b8f59fd537d6eeed53a258ad133623776cf2c22396c72872dce0 -->
 # 메모리와 sanitizer 검사
 
 **Languages:** [English](VALGRIND.md) | [한국어](VALGRIND.ko.md) | [日本語](VALGRIND.ja.md) | [简体中文](VALGRIND.zh-CN.md)
@@ -71,7 +71,7 @@ Python은 extension import 전에 일치하는 ASan runtime을 preload하고 누
 
 ## CI와 hardening 계약
 
-[CI workflow](../.github/workflows/ci.yml)는 `sanitizer-test`, `tsan-test`, `fuzz-canary`를 정의한다. C++ test/example와 Python ASan/LSan, TSan 동시성 경로, libFuzzer compiler input이 대상이다. workflow 정의는 의도된 gate이며 현재 의존성 설정의 통과 증거는 아니다.
+[확장 CI workflow](../.github/workflows/ci-extended.yml)는 매 push가 아니라 매일 밤과 수동으로 실행되는 `sanitizer-test`, `tsan-test`, `fuzz-canary`를 정의한다. C++ test/example와 Python ASan/LSan, TSan 동시성 경로, libFuzzer compiler input이 대상이다. workflow 정의는 의도된 gate이며 현재 의존성 설정의 통과 증거는 아니다.
 
 TSan과 ASan은 별도 build가 필요하다. Linux `setarch x86_64 -R`은 `ADDR_NO_RANDOMIZE`를 설정해 주소 randomization을 끈다. 권한과 kernel layout이 여전히 TSan을 막을 수 있다. address sanitization은 race freedom을 증명하지 않는다.
 

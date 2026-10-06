@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/VALGRIND.md locale=zh-CN source_sha256=77ef4aac4dcc1d2275fa67596cf241a8e86f7437291204b5eaab2f91233d1308 -->
+<!-- neograph-i18n: source=docs/VALGRIND.md locale=zh-CN source_sha256=843b39a1b1a8b8f59fd537d6eeed53a258ad133623776cf2c22396c72872dce0 -->
 # 内存与 sanitizer 检查
 
 **Languages:** [English](VALGRIND.md) | [한국어](VALGRIND.ko.md) | [日本語](VALGRIND.ja.md) | [简体中文](VALGRIND.zh-CN.md)
@@ -71,7 +71,7 @@ Python 在 import extension 前 preload 匹配 ASan runtime，并用 `tests/lsan
 
 ## CI 与 hardening 契约
 
-[CI workflow](../.github/workflows/ci.yml) 定义 `sanitizer-test`、`tsan-test`、`fuzz-canary`：C++ test/example 和 Python 的 ASan/LSan、TSan concurrent 路径、libFuzzer compiler input。workflow 定义是预期 gate，不证明当前依赖配置已通过。
+[扩展 CI workflow](../.github/workflows/ci-extended.yml) 定义 `sanitizer-test`、`tsan-test`、`fuzz-canary`，它们每晚及按需运行而非每次 push 运行：C++ test/example 和 Python 的 ASan/LSan、TSan concurrent 路径、libFuzzer compiler input。workflow 定义是预期 gate，不证明当前依赖配置已通过。
 
 TSan 与 ASan 需要独立 build。Linux `setarch x86_64 -R` 设置 `ADDR_NO_RANDOMIZE` 以禁用 address randomization；权限/kernel layout 仍可阻碍 TSan。address sanitization 不证明无 race。
 

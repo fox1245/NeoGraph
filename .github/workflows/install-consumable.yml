@@ -1,0 +1,41 @@
+name: Installed-consumer checks
+# Reusable: install NeoGraph into a prefix and build/run a downstream consumer against it.
+# The caller chooses the variants (ci.yml: the minimum; ci-extended.yml: the rest).
+on:
+  workflow_call:
+    inputs:
+      matrix:
+        description: 'JSON array of {name, os, args} variants'
+        required: true
+        type: string
+
+jobs:
+  install-consumable:
+    name: install-consumable (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          bash scripts/ci_apt_install.sh cmake build-essential libpq-dev libsqlite3-dev \
+            libssl-dev libcurl4-openssl-dev pkg-config
+      - name: Install build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install cmake libpq openssl@3 sqlite curl
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix libpq):$(brew --prefix sqlite):$(brew --prefix openssl@3):$(brew --prefix curl)" >> $GITHUB_ENV
+      - name: Install build dependencies (Windows)
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/windows-transport-deps
+      - name: Verify installed prefix, ABI, symbol namespace and relocation
+        run: python scripts/verify_ci.py install --work-dir build-install --jobs auto ${{ matrix.args }}

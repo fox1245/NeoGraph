@@ -1,0 +1,190 @@
+name: CI extended
+# Verification that is valuable but too heavy for every push: sanitizers (ASan/UBSan/LSan, TSan,
+# MSVC ASan), the libFuzzer canary, benchmark and QuickJS performance gates, native ARM64, the
+# gRPC contract, and the rest of the installed-consumer matrix.
+#
+# It runs every night, on demand (Actions -> CI extended -> Run workflow), and when this file or the
+# reusable consumer workflow changes. Run it on the release candidate before tagging a release.
+
+on:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/ci-extended.yml'
+      - '.github/workflows/install-consumable.yml'
+      - '.github/actions/**'
+
+concurrency:
+  group: ci-extended-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  grpc-graph-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install opt-in gRPC toolchain
+        run: |
+          bash scripts/ci_apt_install.sh cmake build-essential pkg-config \
+            libssl-dev libcurl4-openssl-dev libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc
+      - name: Verify gRPC shared contract
+        run: python scripts/verify_ci.py grpc --work-dir build-grpc --jobs auto
+
+  # Actual hosted ARM64, not an x86 substitute. PG remains build-only here.
+  build-and-test-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies
+        run: |
+          bash scripts/ci_apt_install.sh cmake build-essential libpq-dev libsqlite3-dev \
+            libssl-dev libcurl4-openssl-dev pkg-config
+      - name: Verify native ARM64 all-backend build
+        run: python scripts/verify_ci.py native-posix --work-dir build-native --jobs auto
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-arm64
+          path: build-native/build/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+
+  build-windows-asan:
+    # VS 2022 MSVC 19.44 has an ASan coroutine catch-funclet defect.
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install SDK transport dependencies
+        uses: ./.github/actions/windows-transport-deps
+      - name: Verify serial full Program and QuickJS ASan boundary
+        run: python scripts/verify_ci.py msvc-asan --work-dir build-windows-asan --jobs auto
+      - name: Upload sanitizer logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-windows-asan
+          path: build-windows-asan/build/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+
+  bench-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies
+        run: bash scripts/ci_apt_install.sh cmake build-essential libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config
+      - name: Verify original four benchmark gates
+        run: python scripts/verify_ci.py benchmark --work-dir build-bench --jobs auto
+
+  quickjs-performance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies
+        run: bash scripts/ci_apt_install.sh cmake build-essential libssl-dev libcurl4-openssl-dev pkg-config
+      - name: Verify immutable QuickJS matrix
+        run: python scripts/verify_ci.py quickjs-performance --work-dir "$RUNNER_TEMP/neograph-quickjs-performance" --jobs auto
+      - name: Upload QuickJS performance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quickjs-performance-report
+          path: ${{ runner.temp }}/neograph-quickjs-performance/quickjs-performance.json
+          if-no-files-found: error
+          retention-days: 30
+
+  sanitizer-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: neograph_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build and Python test dependencies
+        run: |
+          bash scripts/ci_apt_install.sh cmake build-essential libssl-dev libcurl4-openssl-dev \
+            libpq-dev postgresql-client libsqlite3-dev pkg-config
+          python -m pip install --quiet pytest pydantic certifi
+      - name: Verify full ASan UBSan LSan native, examples and Python
+        env:
+          NEOGRAPH_TEST_POSTGRES_URL: postgresql://postgres:test@localhost:5432/neograph_test
+        run: python scripts/verify_ci.py asan --work-dir build-asan --jobs auto
+
+  tsan-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies and process-local ASLR tool
+        run: |
+          bash scripts/ci_apt_install.sh cmake build-essential libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config util-linux
+      - name: Verify native TSan suite and real examples
+        run: python scripts/verify_ci.py tsan --work-dir build-tsan --jobs auto
+
+  fuzz-canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Clang and build dependencies
+        run: bash scripts/ci_apt_install.sh cmake build-essential clang libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config
+      - name: Verify 60-second libFuzzer canary
+        run: python scripts/verify_ci.py fuzz --work-dir build-fuzz --jobs auto
+
+  # The installed-consumer variants that ci.yml does not run per push.
+  install-consumable:
+    uses: ./.github/workflows/install-consumable.yml
+    with:
+      matrix: >-
+        [{"name":"linux-static","os":"ubuntu-latest","args":""},
+         {"name":"linux-core-shared","os":"ubuntu-latest","args":"--core-only --shared"},
+         {"name":"linux-program-static","os":"ubuntu-latest","args":"--program --quickjs"},
+         {"name":"linux-program-shared","os":"ubuntu-latest","args":"--program --quickjs --shared"},
+         {"name":"macos-shared","os":"macos-latest","args":"--shared"},
+         {"name":"macos-program-shared","os":"macos-latest","args":"--program --quickjs --shared"},
+         {"name":"windows-shared","os":"windows-2022","args":"--shared"},
+         {"name":"windows-program-shared","os":"windows-2022","args":"--program --shared"}]

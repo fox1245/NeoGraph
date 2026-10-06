@@ -70,7 +70,7 @@ Historical hardening measurements were seq 5.1 µs/par 275.2 µs baseline and se
 
 ## CI and hardening contracts
 
-The [CI workflow](../.github/workflows/ci.yml) defines `sanitizer-test`, `tsan-test` and `fuzz-canary`: C++ tests/examples and Python under ASan/LSan, concurrent paths under TSan, and compiler input under libFuzzer. Workflow definitions are intended gates, not proof the current dependency configuration has passed them.
+The [extended CI workflow](../.github/workflows/ci-extended.yml) defines `sanitizer-test`, `tsan-test` and `fuzz-canary`, which run nightly and on demand rather than on every push: C++ tests/examples and Python under ASan/LSan, concurrent paths under TSan, and compiler input under libFuzzer. Workflow definitions are intended gates, not proof the current dependency configuration has passed them.
 
 TSan and ASan need separate builds. Linux `setarch x86_64 -R` disables address randomization by setting `ADDR_NO_RANDOMIZE`; permissions and kernel layout can still block TSan. Address sanitization does not establish race freedom.
 

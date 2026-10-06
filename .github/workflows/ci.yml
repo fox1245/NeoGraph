@@ -1,10 +1,27 @@
 name: CI
+# The minimum every push and pull request must pass: Linux, Windows and macOS each build and run
+# the full ctest suite, and two installed-consumer checks prove the package is consumable.
+# Anything heavier (sanitizers, fuzzing, benchmarks, ARM64, the full consumer matrix) lives in
+# ci-extended.yml and runs nightly and on demand; packaging lives in wheels.yml.
+# Documentation-only changes skip this workflow.
 
 on:
   push:
     branches: [master]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - 'THIRD_PARTY_LICENSES'
+      - '.github/workflows/docs.yml'
   pull_request:
     branches: [master]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - 'THIRD_PARTY_LICENSES'
+      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 concurrency:
@@ -12,22 +29,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  grpc-graph-contract:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install opt-in gRPC toolchain
-        run: |
-          bash scripts/ci_apt_install.sh cmake build-essential pkg-config \
-            libssl-dev libcurl4-openssl-dev libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc
-      - name: Verify gRPC shared contract
-        run: python scripts/verify_ci.py grpc --work-dir build-grpc --jobs 2
-
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     services:
       postgres:
         image: postgres:16-alpine
@@ -67,7 +71,7 @@ jobs:
       - name: Verify full Release and both protocol persistence paths
         env:
           NEOGRAPH_TEST_POSTGRES_URL: postgresql://postgres:test@localhost:5432/neograph_test
-        run: python scripts/verify_ci.py native-linux --work-dir build-native --jobs $(nproc) --ccache
+        run: python scripts/verify_ci.py native-linux --work-dir build-native --jobs auto --ccache
       - name: ccache stats
         if: always()
         run: ccache --show-stats
@@ -79,30 +83,9 @@ jobs:
           path: build-native/build/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
 
-  # Actual hosted ARM64, not an x86 substitute. PG remains build-only here.
-  build-and-test-arm64:
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install build dependencies
-        run: |
-          bash scripts/ci_apt_install.sh cmake build-essential libpq-dev libsqlite3-dev \
-            libssl-dev libcurl4-openssl-dev pkg-config
-      - name: Verify native ARM64 all-backend build
-        run: python scripts/verify_ci.py native-posix --work-dir build-native --jobs $(nproc)
-      - name: Upload test logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ctest-logs-arm64
-          path: build-native/build/Testing/Temporary/LastTest.log
-          if-no-files-found: ignore
-
   build-macos:
     runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -114,7 +97,7 @@ jobs:
           brew install cmake libpq openssl@3 sqlite curl
           echo "CMAKE_PREFIX_PATH=$(brew --prefix libpq):$(brew --prefix sqlite):$(brew --prefix openssl@3):$(brew --prefix curl)" >> $GITHUB_ENV
       - name: Verify macOS all-backend build (PG build-only)
-        run: python scripts/verify_ci.py native-posix --work-dir build-native --jobs $(sysctl -n hw.ncpu)
+        run: python scripts/verify_ci.py native-posix --work-dir build-native --jobs auto
       - name: Upload test logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -125,23 +108,16 @@ jobs:
 
   build-windows:
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install SDK transport dependencies
-        shell: pwsh
-        run: |
-          vcpkg install "curl[http2,openssl]:x64-windows" openssl:x64-windows
-          $root = $env:VCPKG_INSTALLATION_ROOT
-          "CMAKE_TOOLCHAIN_FILE=$root/scripts/buildsystems/vcpkg.cmake" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
-          "$root/installed/x64-windows/bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
-          "$root/installed/x64-windows/tools/openssl" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
+        uses: ./.github/actions/windows-transport-deps
       - name: Verify DB-free native MSVC, C ABI and full ctest
-        shell: pwsh
-        run: python scripts/verify_ci.py native-windows --work-dir build-native --jobs $env:NUMBER_OF_PROCESSORS
+        run: python scripts/verify_ci.py native-windows --work-dir build-native --jobs auto
       - name: Upload test logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -150,183 +126,11 @@ jobs:
           path: build-native/build/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
 
-  build-windows-asan:
-    # VS 2022 MSVC 19.44 has an ASan coroutine catch-funclet defect.
-    runs-on: windows-2025-vs2026
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-      - name: Install SDK transport dependencies
-        shell: pwsh
-        run: |
-          vcpkg install "curl[http2,openssl]:x64-windows" openssl:x64-windows
-          $root = $env:VCPKG_INSTALLATION_ROOT
-          "CMAKE_TOOLCHAIN_FILE=$root/scripts/buildsystems/vcpkg.cmake" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
-          "$root/installed/x64-windows/bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
-      - name: Verify serial full Program and QuickJS ASan boundary
-        shell: pwsh
-        run: python scripts/verify_ci.py msvc-asan --work-dir build-windows-asan --jobs $env:NUMBER_OF_PROCESSORS
-      - name: Upload sanitizer logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ctest-logs-windows-asan
-          path: build-windows-asan/build/Testing/Temporary/LastTest.log
-          if-no-files-found: ignore
-
-  bench-regression:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install build dependencies
-        run: bash scripts/ci_apt_install.sh cmake build-essential libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config
-      - name: Verify original four benchmark gates
-        run: python scripts/verify_ci.py benchmark --work-dir build-bench --jobs $(nproc)
-
-  quickjs-performance:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install build dependencies
-        run: bash scripts/ci_apt_install.sh cmake build-essential libssl-dev libcurl4-openssl-dev pkg-config
-      - name: Verify immutable QuickJS matrix
-        run: python scripts/verify_ci.py quickjs-performance --work-dir "$RUNNER_TEMP/neograph-quickjs-performance" --jobs $(nproc)
-      - name: Upload QuickJS performance report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: quickjs-performance-report
-          path: ${{ runner.temp }}/neograph-quickjs-performance/quickjs-performance.json
-          if-no-files-found: error
-          retention-days: 30
-
-  sanitizer-test:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: test
-          POSTGRES_DB: neograph_test
-        ports: ['5432:5432']
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install build and Python test dependencies
-        run: |
-          bash scripts/ci_apt_install.sh cmake build-essential libssl-dev libcurl4-openssl-dev \
-            libpq-dev postgresql-client libsqlite3-dev pkg-config
-          python -m pip install --quiet pytest pydantic certifi
-      - name: Verify full ASan UBSan LSan native, examples and Python
-        env:
-          NEOGRAPH_TEST_POSTGRES_URL: postgresql://postgres:test@localhost:5432/neograph_test
-        run: python scripts/verify_ci.py asan --work-dir build-asan --jobs $(nproc)
-
-  tsan-test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install build dependencies and process-local ASLR tool
-        run: |
-          bash scripts/ci_apt_install.sh cmake build-essential libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config util-linux
-      - name: Verify native TSan suite and real examples
-        run: python scripts/verify_ci.py tsan --work-dir build-tsan --jobs $(nproc)
-
-  fuzz-canary:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install Clang and build dependencies
-        run: bash scripts/ci_apt_install.sh cmake build-essential clang libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config
-      - name: Verify 60-second libFuzzer canary
-        run: python scripts/verify_ci.py fuzz --work-dir build-fuzz --jobs $(nproc)
-
+  # A shared and a static consumer of the lightest installed packages. The other variants
+  # (Program, QuickJS, macOS, Windows) run in ci-extended.yml.
   install-consumable:
-    name: install-consumable (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux-static
-            os: ubuntu-latest
-            args: ''
-          - name: linux-shared
-            os: ubuntu-latest
-            args: --shared
-          - name: linux-core-static
-            os: ubuntu-latest
-            args: --core-only
-          - name: linux-core-shared
-            os: ubuntu-latest
-            args: --core-only --shared
-          - name: linux-program-static
-            os: ubuntu-latest
-            args: --program --quickjs
-          - name: linux-program-shared
-            os: ubuntu-latest
-            args: --program --quickjs --shared
-          - name: macos-shared
-            os: macos-latest
-            args: --shared
-          - name: macos-program-shared
-            os: macos-latest
-            args: --program --quickjs --shared
-          - name: windows-shared
-            os: windows-2022
-            args: --shared
-          - name: windows-program-shared
-            os: windows-2022
-            args: --program --shared
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install build dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          bash scripts/ci_apt_install.sh cmake build-essential libpq-dev libsqlite3-dev \
-            libssl-dev libcurl4-openssl-dev pkg-config
-      - name: Install build dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew update
-          brew install cmake libpq openssl@3 sqlite curl
-          echo "CMAKE_PREFIX_PATH=$(brew --prefix libpq):$(brew --prefix sqlite):$(brew --prefix openssl@3):$(brew --prefix curl)" >> $GITHUB_ENV
-      - name: Install build dependencies (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          vcpkg install "curl[http2,openssl]:x64-windows" openssl:x64-windows
-          $root = $env:VCPKG_INSTALLATION_ROOT
-          "CMAKE_TOOLCHAIN_FILE=$root/scripts/buildsystems/vcpkg.cmake" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
-          "$root/installed/x64-windows/bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
-      - name: Verify installed prefix, ABI, symbol namespace and relocation
-        run: python scripts/verify_ci.py install --work-dir build-install --jobs 2 ${{ matrix.args }}
+    uses: ./.github/workflows/install-consumable.yml
+    with:
+      matrix: >-
+        [{"name":"linux-shared","os":"ubuntu-latest","args":"--shared"},
+         {"name":"linux-core-static","os":"ubuntu-latest","args":"--core-only"}]
