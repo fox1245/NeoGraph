@@ -130,7 +130,9 @@ python -c "import os, subprocess, sys; env = os.environ.copy(); env.pop('LD_LIBR
 [tool.cibuildwheel.windows]
 # SchemaProvider requires curl even if NeoGraph's separate curl pool is disabled.
 before-all = 'vcpkg install --triplet x64-windows --x-manifest-root="{package}/cmake/windows-wheel" --x-install-root="%VCPKG_INSTALLED_DIR%" --x-buildtrees-root="%VCPKG_INSTALLED_DIR%/../vcpkg-buildtrees" --x-packages-root="%VCPKG_INSTALLED_DIR%/../vcpkg-packages"'
-environment = { CMAKE_TOOLCHAIN_FILE = '"$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"', CMAKE_ARGS = '"$CMAKE_ARGS -DVCPKG_INSTALLED_DIR=\"$VCPKG_INSTALLED_DIR\""' }
+# The vcpkg toolchain honours VCPKG_INSTALLED_DIR only in manifest mode: in classic mode it
+# silently uses <vcpkg root>/installed, so find_package would miss the manifest install above.
+environment = { CMAKE_TOOLCHAIN_FILE = '"$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"', CMAKE_ARGS = '"$CMAKE_ARGS -DVCPKG_MANIFEST_MODE=ON -DVCPKG_MANIFEST_DIR=\"$NEOGRAPH_WHEEL_VCPKG_MANIFEST_DIR\" -DVCPKG_MANIFEST_INSTALL=OFF -DVCPKG_INSTALLED_DIR=\"$VCPKG_INSTALLED_DIR\""' }
 # Search bundled engine/SDK DLLs and mangle external dependency names; otherwise
 # a preloaded system sqlite3.dll can shadow the wheel's SQLite build.
 repair-wheel-command = """\

@@ -361,6 +361,7 @@ def packaging(args):
             downloads.mkdir()
             env["VCPKG_INSTALLATION_ROOT"] = vcpkg_root.as_posix()
             env["VCPKG_INSTALLED_DIR"] = installed.as_posix()
+            env["NEOGRAPH_WHEEL_VCPKG_MANIFEST_DIR"] = (ROOT / "cmake/windows-wheel").as_posix()
             env["VCPKG_DOWNLOADS"] = downloads.as_posix()
             env["PATH"] = os.pathsep.join((str(installed / "x64-windows/tools/openssl"),
                                            str(installed / "x64-windows/bin"), env["PATH"]))
