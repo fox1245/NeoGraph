@@ -363,6 +363,10 @@ def packaging(args):
             env["VCPKG_INSTALLED_DIR"] = installed.as_posix()
             env["NEOGRAPH_WHEEL_VCPKG_MANIFEST_DIR"] = (ROOT / "cmake/windows-wheel").as_posix()
             env["VCPKG_DOWNLOADS"] = downloads.as_posix()
+            # vcpkg's openssl.exe looks for its configuration under a fixed
+            # C:\Program Files\Common Files\SSL that does not exist, so `openssl req`
+            # (the TLS test fixtures) fails unless the shipped config is named explicitly.
+            env["OPENSSL_CONF"] = (installed / "x64-windows/tools/openssl/openssl.cnf").as_posix()
             env["PATH"] = os.pathsep.join((str(installed / "x64-windows/tools/openssl"),
                                            str(installed / "x64-windows/bin"), env["PATH"]))
         run([sys.executable, "-m", "cibuildwheel", ROOT, "--output-dir", args.work_dir / "wheelhouse"], env=env)

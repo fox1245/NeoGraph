@@ -3,6 +3,7 @@
 import neograph_engine as ng
 import pytest
 import gc
+import sys
 import weakref
 
 
@@ -212,6 +213,10 @@ def test_strict_runtime_profile_uses_sqlite_durable_stores(tmp_path, provider_pe
     assert not profile.active
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="NativeArchive custody needs an owner-only protected DACL on the parent directory; "
+           "Path.mkdir(mode=0o700) only sets POSIX permission bits")
 def test_native_raw_record_roundtrip_requires_its_archive_and_owner(provider_peer, tmp_path):
     provider = provider_peer.provider()
     request = ng.make_provider_request(provider, "local-model", [
