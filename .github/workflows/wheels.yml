@@ -1,7 +1,22 @@
 name: Wheels
+# Packaging gate: builds the sdist and the wheels, repairs them, and runs the Python suite against
+# the installed wheel.
+#   - pull requests and master pushes that touch packaging inputs: one CPython (3.12) per platform,
+#     which proves the packaging path without rebuilding every interpreter;
+#   - release tags, the weekly canary and manual runs: every supported CPython, then (tags only)
+#     protected PyPI publication.
+# Source-only changes are verified by ci.yml; the weekly canary catches a packaging regression that
+# they cause.
 
 on:
   workflow_dispatch:
+    inputs:
+      full:
+        description: 'Build every supported CPython (unchecked: only CPython 3.12)'
+        type: boolean
+        default: true
+  schedule:
+    - cron: '0 20 * * 0'
   push:
     tags:
       - 'v*'
@@ -12,9 +27,6 @@ on:
       - 'CMakeLists.txt'
       - 'cmake/**'
       - 'bindings/python/**'
-      - 'src/**'
-      - 'include/**'
-      - 'deps/**'
       - 'scripts/verify_ci.py'
       - 'scripts/check_install_consumer.py'
       - '.github/workflows/wheels.yml'
@@ -24,9 +36,6 @@ on:
       - 'CMakeLists.txt'
       - 'cmake/**'
       - 'bindings/python/**'
-      - 'src/**'
-      - 'include/**'
-      - 'deps/**'
       - 'scripts/verify_ci.py'
       - 'scripts/check_install_consumer.py'
       - '.github/workflows/wheels.yml'
@@ -42,6 +51,7 @@ jobs:
   build_sdist:
     name: Source distribution
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -65,22 +75,22 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  # One job per platform and CPython: the jobs run in parallel instead of rebuilding the C++ five
+  # times in sequence inside one job.
   build_wheels:
-    name: ${{ matrix.os }} / ${{ matrix.arch }}
+    name: ${{ matrix.platform.os }} / ${{ matrix.platform.arch }} / ${{ matrix.python }}
     needs: build_sdist
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            arch: x86_64
-          - os: ubuntu-24.04-arm
-            arch: aarch64
-          - os: macos-14
-            arch: arm64
-          - os: windows-latest
-            arch: AMD64
+        platform:
+          - {os: ubuntu-latest, arch: x86_64}
+          - {os: ubuntu-24.04-arm, arch: aarch64}
+          - {os: macos-14, arch: arm64}
+          - {os: windows-latest, arch: AMD64}
+        python: ${{ fromJSON((github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.full)) && '["cp39","cp310","cp311","cp312","cp313"]' || '["cp312"]') }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -98,6 +108,27 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
       - name: Provision wheel build frontend
         run: python -m pip install cibuildwheel==2.23.0
+      # vcpkg's binary archives are reused across runs; the key carries the runner image because an
+      # archive is valid only for the compiler it was built with.
+      - name: Prepare the vcpkg binary cache (Windows)
+        if: runner.os == 'Windows'
+        id: vcpkg-cache
+        shell: pwsh
+        run: |
+          $archives = Join-Path $env:RUNNER_TEMP 'vcpkg-archives'
+          New-Item -ItemType Directory -Force -Path $archives | Out-Null
+          "archives=$archives" | Out-File -Append -Encoding ascii $env:GITHUB_OUTPUT
+          "image=$env:ImageVersion" | Out-File -Append -Encoding ascii $env:GITHUB_OUTPUT
+          "VCPKG_DEFAULT_BINARY_CACHE=$archives" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+      - name: Restore vcpkg binary archives (Windows)
+        if: runner.os == 'Windows'
+        id: vcpkg-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.vcpkg-cache.outputs.archives }}
+          key: vcpkg-wheel-${{ runner.os }}-${{ steps.vcpkg-cache.outputs.image }}-${{ hashFiles('source-dist/source/cmake/windows-wheel/vcpkg.json') }}
+          restore-keys: |
+            vcpkg-wheel-${{ runner.os }}-${{ steps.vcpkg-cache.outputs.image }}-
       # The runner image's vcpkg checkout is shallow and can predate the baseline pinned by
       # the wheel manifest: it lacks the baseline commit and its version database, so
       # `vcpkg install` fails before any wheel is built. Use a dedicated checkout of exactly
@@ -119,14 +150,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
           "VCPKG_INSTALLATION_ROOT=$root" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
           $root | Out-File -Append -Encoding ascii $env:GITHUB_PATH
-      # Platform dependency bootstrap, CP39-313, repair and installed-wheel gates
-      # remain authoritative in pyproject.toml (including cold-load/LGPL checks).
-      - name: Build, repair and exercise installed wheels
-        run: python source-dist/source/scripts/verify_ci.py wheel --work-dir build-wheels --jobs 2 --arch ${{ matrix.arch }}
+      # Platform dependency bootstrap, repair and installed-wheel gates remain authoritative in
+      # pyproject.toml (including cold-load/LGPL checks).
+      - name: Build, repair and exercise the installed wheel
+        run: python source-dist/source/scripts/verify_ci.py wheel --work-dir build-wheels --jobs auto --arch ${{ matrix.platform.arch }} --python ${{ matrix.python }}
+      - name: Save vcpkg binary archives (Windows)
+        if: always() && runner.os == 'Windows' && steps.vcpkg-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.vcpkg-cache.outputs.archives }}
+          key: vcpkg-wheel-${{ runner.os }}-${{ steps.vcpkg-cache.outputs.image }}-${{ hashFiles('source-dist/source/cmake/windows-wheel/vcpkg.json') }}
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}-${{ matrix.arch }}
+          name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.arch }}-${{ matrix.python }}
           path: build-wheels/wheelhouse/*.whl
           if-no-files-found: error
           retention-days: 30
@@ -135,6 +172,7 @@ jobs:
     name: Native archive / ${{ matrix.os }}
     needs: build_sdist
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -171,22 +209,49 @@ jobs:
       - name: Activate MSVC environment
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
+      - name: Prepare the vcpkg binary cache (Windows)
+        if: runner.os == 'Windows'
+        id: vcpkg-cache
+        shell: pwsh
+        run: |
+          $archives = Join-Path $env:RUNNER_TEMP 'vcpkg-archives'
+          New-Item -ItemType Directory -Force -Path $archives | Out-Null
+          "archives=$archives" | Out-File -Append -Encoding ascii $env:GITHUB_OUTPUT
+          "image=$env:ImageVersion" | Out-File -Append -Encoding ascii $env:GITHUB_OUTPUT
+          "VCPKG_DEFAULT_BINARY_CACHE=$archives" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+      - name: Restore vcpkg binary archives (Windows)
+        if: runner.os == 'Windows'
+        id: vcpkg-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.vcpkg-cache.outputs.archives }}
+          key: vcpkg-archive-${{ runner.os }}-${{ steps.vcpkg-cache.outputs.image }}-curl-openssl
+          restore-keys: |
+            vcpkg-archive-${{ runner.os }}-${{ steps.vcpkg-cache.outputs.image }}-
       - name: Install SDK dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           vcpkg install "curl[http2,openssl]:x64-windows" openssl:x64-windows
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg install failed' }
           $root = $env:VCPKG_INSTALLATION_ROOT
           "CMAKE_TOOLCHAIN_FILE=$root/scripts/buildsystems/vcpkg.cmake" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
           "$root/installed/x64-windows/bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
+      - name: Save vcpkg binary archives (Windows)
+        if: runner.os == 'Windows' && steps.vcpkg-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.vcpkg-cache.outputs.archives }}
+          key: vcpkg-archive-${{ runner.os }}-${{ steps.vcpkg-cache.outputs.image }}-curl-openssl
       - name: Verify public SDK native archive custody
-        run: python source-dist/source/scripts/verify_ci.py runtime-archive --work-dir runtime-proof --jobs 2
+        run: python source-dist/source/scripts/verify_ci.py runtime-archive --work-dir runtime-proof --jobs auto
 
   # Protected OIDC publication still depends on every wheel and native lane.
   publish_pypi:
     name: Publish to PyPI
     needs: [build_wheels, build_sdist, runtime_portability]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     environment:
       name: release
