@@ -138,10 +138,15 @@ before-all = 'vcpkg install --triplet x64-windows --x-manifest-root="{package}/c
 environment = { CMAKE_TOOLCHAIN_FILE = '$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake', SKBUILD_CMAKE_DEFINE = 'VCPKG_MANIFEST_MODE=ON;VCPKG_MANIFEST_DIR=$NEOGRAPH_WHEEL_VCPKG_MANIFEST_DIR;VCPKG_MANIFEST_INSTALL=OFF;VCPKG_INSTALLED_DIR=$VCPKG_INSTALLED_DIR' }
 # Search bundled engine/SDK DLLs and mangle external dependency names; otherwise
 # a preloaded system sqlite3.dll can shadow the wheel's SQLite build.
+# The Microsoft Visual C++ runtime DLLs are redistributable only unmodified (Visual Studio's
+# Distributable Code terms). Mangling renames the imports of msvcp140_1 and
+# msvcp140_atomic_wait, which edits them and strips their Authenticode signatures, so those
+# three keep their names and bytes.
 repair-wheel-command = """\
 pip install delvewheel && \
 python -m delvewheel repair --ignore-existing -w {dest_dir} {wheel} \
   --with-mangle \
+  --no-mangle "msvcp140.dll;msvcp140_1.dll;msvcp140_atomic_wait.dll" \
   --add-path "%VCPKG_INSTALLED_DIR%/x64-windows/bin"\
 """
 
