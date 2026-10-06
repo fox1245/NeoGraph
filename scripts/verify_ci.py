@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Run the existing CI gates locally; provision dependencies/services separately.
 
-Every invocation requires a fresh --work-dir and an explicit --jobs count.
+Every invocation requires a fresh --work-dir and an explicit --jobs count (a
+number, or "auto" for the machine's CPU count).
 CMake's existing options remain authoritative. No dependency installs, cleanup
 or host policy changes are performed here. The install gate stages its own
 prefix; the wheel gate delegates the existing declared bootstrap to cibuildwheel.
@@ -9,6 +10,7 @@ prefix; the wheel gate delegates the existing declared bootstrap to cibuildwheel
 from __future__ import annotations
 
 import argparse
+import atexit
 import importlib.util
 import os
 from pathlib import Path
@@ -17,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILES = (
@@ -36,12 +39,46 @@ TSAN_EXAMPLES = (
 )
 
 
+TIMINGS = []
+SLOW_COMMAND_SECONDS = 20
+
+
 def run(command, *, env=None, cwd=ROOT, capture=False, timeout=None):
     command = [str(arg) for arg in command]
-    print("+ " + subprocess.list2cmdline(command), flush=True)
-    return subprocess.run(command, cwd=cwd, env=env, check=True, text=True,
-                          stdout=subprocess.PIPE if capture else None,
-                          stderr=subprocess.PIPE if capture else None, timeout=timeout)
+    printable = subprocess.list2cmdline(command)
+    print("+ " + printable, flush=True)
+    started = time.monotonic()
+    try:
+        return subprocess.run(command, cwd=cwd, env=env, check=True, text=True,
+                              stdout=subprocess.PIPE if capture else None,
+                              stderr=subprocess.PIPE if capture else None, timeout=timeout)
+    finally:
+        elapsed = time.monotonic() - started
+        TIMINGS.append((printable, elapsed))
+        if elapsed >= SLOW_COMMAND_SECONDS:
+            print(f"  [{elapsed:.0f}s] {printable[:80]}", flush=True)
+
+
+def write_timing_summary(profile):
+    """List the slow commands in the GitHub step summary so a lane's time is attributable."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    slow = [(text, seconds) for text, seconds in TIMINGS if seconds >= SLOW_COMMAND_SECONDS]
+    if not path or not slow:
+        return
+    lines = [f"### verify_ci {profile}: commands over {SLOW_COMMAND_SECONDS}s", "",
+             "| seconds | command |", "|---:|---|"]
+    lines += [f"| {seconds:.0f} | `{text[:110].replace('|', '/')}` |" for text, seconds in slow]
+    try:
+        with open(path, "a", encoding="utf-8") as summary:
+            summary.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+
+
+def jobs_count(value):
+    if value == "auto":
+        return os.cpu_count() or 1
+    return int(value)
 
 
 def require_tools(*names):
@@ -339,6 +376,8 @@ def packaging(args):
             raise RuntimeError("wheel requires --arch (x86_64/aarch64/arm64/AMD64)")
         env = os.environ.copy()
         env["CIBW_ARCHS"] = args.arch
+        if args.python:
+            env["CIBW_BUILD"] = f"{args.python}-*"
         env["CMAKE_BUILD_PARALLEL_LEVEL"] = str(args.jobs)
         if platform.system() == "Linux":
             passed = env.get("CIBW_ENVIRONMENT_PASS_LINUX", "").split()
@@ -376,7 +415,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("profile", choices=PROFILES)
     parser.add_argument("--work-dir", required=True, type=Path, help="Fresh owned output directory; never cleaned automatically")
-    parser.add_argument("--jobs", required=True, type=int)
+    parser.add_argument("--jobs", required=True, type=jobs_count, help="parallel build jobs: a number or auto")
     parser.add_argument("--ccache", action="store_true", help="native-linux: use explicitly provisioned ccache")
     parser.add_argument("--shared", action="store_true", help="install: shared-library mode")
     mode = parser.add_mutually_exclusive_group()
@@ -385,7 +424,9 @@ def main():
     parser.add_argument("--quickjs", action="store_true", help="install: include private-symbol and second-engine collision checks")
     parser.add_argument("--release-tag", help="sdist: enforce v<project.version>")
     parser.add_argument("--arch", choices=("x86_64", "aarch64", "arm64", "AMD64"), help="wheel: exact cibuildwheel matrix architecture")
+    parser.add_argument("--python", help="wheel: build only this CPython tag, for example cp312 (default: every tag in pyproject.toml)")
     args = parser.parse_args()
+    atexit.register(write_timing_summary, args.profile)
     if args.jobs < 1:
         parser.error("--jobs must be positive")
     if args.quickjs and not args.program:
@@ -396,6 +437,8 @@ def main():
         parser.error("--ccache applies only to native-linux")
     if args.arch and args.profile != "wheel" or args.release_tag and args.profile != "sdist":
         parser.error("--arch applies to wheel; --release-tag applies to sdist")
+    if args.python and (args.profile != "wheel" or not re.fullmatch(r"cp3\d{1,2}", args.python)):
+        parser.error("--python applies to wheel and must look like cp312")
     args.work_dir = args.work_dir.resolve()
     if args.work_dir == ROOT or ROOT.is_relative_to(args.work_dir):
         parser.error("--work-dir must not be the source root or its ancestor")
