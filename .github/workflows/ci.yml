@@ -63,8 +63,12 @@ jobs:
           key: ccache-${{ runner.os }}-${{ github.sha }}
           restore-keys: |
             ccache-${{ runner.os }}-
+      # ccache must write to the directory that is cached. Without CCACHE_DIR it did not use
+      # ~/.ccache, so actions/cache reported "Path Validation Error ... no cache is being
+      # saved" and every run compiled cold.
       - name: Configure ccache
         run: |
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
           echo "PATH=/usr/lib/ccache:$PATH" >> $GITHUB_ENV
           ccache --max-size=500M
           ccache --zero-stats
