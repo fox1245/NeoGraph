@@ -98,16 +98,27 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
       - name: Provision wheel build frontend
         run: python -m pip install cibuildwheel==2.23.0
-      # The runner's vcpkg checkout is shallow, so it lacks the baseline commit that the
-      # wheel manifest pins and `vcpkg install` fails before any wheel is built.
-      - name: Fetch the vcpkg baseline pinned by the wheel manifest
+      # The runner image's vcpkg checkout is shallow and can predate the baseline pinned by
+      # the wheel manifest: it lacks the baseline commit and its version database, so
+      # `vcpkg install` fails before any wheel is built. Use a dedicated checkout of exactly
+      # that baseline instead of the image's.
+      - name: Provision vcpkg at the baseline pinned by the wheel manifest
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $baseline = (Get-Content source-dist/source/cmake/windows-wheel/vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
           if (-not $baseline) { throw 'windows-wheel/vcpkg.json has no builtin-baseline' }
-          git -C $env:VCPKG_INSTALLATION_ROOT fetch --quiet --depth=1 origin $baseline
+          $root = Join-Path $env:RUNNER_TEMP 'vcpkg-baseline'
+          git init --quiet $root
+          git -C $root remote add origin https://github.com/microsoft/vcpkg.git
+          git -C $root fetch --quiet --depth=1 origin $baseline
           if ($LASTEXITCODE -ne 0) { throw "could not fetch vcpkg baseline $baseline" }
+          git -C $root checkout --quiet FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'could not check out the vcpkg baseline' }
+          & "$root\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
+          "VCPKG_INSTALLATION_ROOT=$root" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+          $root | Out-File -Append -Encoding ascii $env:GITHUB_PATH
       # Platform dependency bootstrap, CP39-313, repair and installed-wheel gates
       # remain authoritative in pyproject.toml (including cold-load/LGPL checks).
       - name: Build, repair and exercise installed wheels
