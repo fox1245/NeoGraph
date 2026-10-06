@@ -139,9 +139,11 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  # Observed 76-108 minutes on hosted runners (build and serial ctest both vary by about 40%
+  # between days); the limit keeps headroom for a slow day without failing the nightly run.
   sanitizer-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 180
     services:
       postgres:
         image: postgres:16-alpine
