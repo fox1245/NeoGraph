@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=7021a7b351a812d0eda525f1acf415d71b5df681210e474a7e0556ba1c724334 -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=58bdfd693a5d84e22e8ad4ec9999c72c106596f174f31970f0f7bf488518e0d7 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -233,13 +233,13 @@ python scripts/verify_ci.py native-linux --work-dir build/local-linux-01 --jobs 
 python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-01 --jobs 4
 ```
 
-`--work-dir` 必须是归你所有且尚不存在的新输出路径，不能是源码根目录或其祖先；`--jobs` 必须为正数。既有输出会被拒绝并保留，不会自动清理。Runner 不安装依赖或改变宿主策略；既有固定依赖获取和 cibuildwheel 声明的 bootstrap/repair 仍然适用。
+`--work-dir` 必须是归你所有且尚不存在的新输出路径，不能是源码根目录或其祖先；`--jobs` 必须为正数或 `auto`（CPU 数）。既有输出会被拒绝并保留，不会自动清理。Runner 不安装依赖或改变宿主策略；既有固定依赖获取和 cibuildwheel 声明的 bootstrap/repair 仍然适用。
 
 | Profile | 保留的目的 / 前提 |
 |---|---|
 | `native-linux` | 完整 native PostgreSQL gate 后串行执行全 Python/protocol suite 和无 DB 的 ACP durable 重跑。 |
 | `native-posix` | 实际 Linux ARM/macOS suite；无需测试服务的 PostgreSQL build/link 验证。 |
-| `native-windows` | VS2022 无 DB 的 native/Program/QuickJS suite 和独立 C embedding ABI smoke。 |
+| `native-windows` | MSVC 无 DB 的 native/Program/QuickJS suite 和独立 C embedding ABI smoke；在 x64 MSVC 环境中默认用 Ninja 构建，也可用 `--generator "Visual Studio 17 2022"` 切换。 |
 | `asan` | Linux ASan/UBSan/LSan、11 个示例、全 Python suite；需 GCC libasan/libstdc++。 |
 | `tsan` | 独立 Linux TSan suite 和 5 个示例；获准的进程级 `setarch -R`，保留既有 suppression。 |
 | `msvc-asan` | 串行 Windows Program/QuickJS canary；需激活的 `cl >=19.50`（VS2026），不可使用 MSVC 19.44。 |
@@ -249,10 +249,10 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `fuzz` | Linux Clang/libFuzzer 60 秒 canary；将 corpus 复制到自有输出。 |
 | `install` | 隔离 exported-prefix ABI/symbol/C++/C11/collision/relocation consumer；无需 Git/Bash。可选 `--shared`、`--core-only` 或 `--program`；`--quickjs` 需 `--program` 和 ELF/Mach-O 检查（Windows 行省略）。 |
 | `sdist` | 源码 archive 与 Twine；配置 build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10；可选 `--release-tag v0.13.0`。 |
-| `wheel` | repair 后的 installed wheel；配置 cibuildwheel==2.23.0 与 native/container provider；必须指定 `--arch x86_64\|aarch64\|arm64\|AMD64`。 |
+| `wheel` | repair 后的 installed wheel；配置 cibuildwheel==2.23.0 与 native/container provider；必须指定 `--arch x86_64\|aarch64\|arm64\|AMD64`；指定 `--python cp312` 则只构建一个 CPython 而非全部。 |
 | `runtime-archive` | Shared SDK native-archive portability target/CTest；需 Ninja 和平台 runtime 依赖。 |
 
-本地 Windows/WSL 结果不能替代实际 ARM/macOS 或 VS2026 sanitizer 行。CI 保留全部 10 个 installed-consumer 行、4 个 native wheel/archive 平台、CPython 3.9–3.13、glibc 2.34/macOS 14 下限、完整 installed-wheel test、cold-loader/LGPL replacement gate，以及受保护的 tag/OIDC publication 依赖。源码审查或 CLI help 并非执行或发布证据。
+本地 Windows/WSL 结果不能替代实际 ARM/macOS 或 VS2026 sanitizer 行。每次 push 和 pull request 运行 `ci.yml`：Linux、macOS、Windows 的完整 native suite 加 2 个 installed-consumer 行，仅改文档时跳过。`ci-extended.yml` 每晚及按需运行：sanitizer、fuzz canary、性能 gate、真实 ARM64、gRPC、Visual Studio generator 和其余 8 个 installed-consumer 行。发布候选请在打 tag 前运行一次。`wheels.yml` 在 packaging 变更时为每个平台构建 CPython 3.12，在发布 tag、每周 canary 和手动运行时构建 CPython 3.9–3.13，并保留 glibc 2.34/macOS 14 下限、完整 installed-wheel test、cold-loader/LGPL replacement gate、4 个 native wheel/archive 平台，以及受保护的 tag/OIDC publication 依赖。源码审查或 CLI help 并非执行或发布证据。
 
 - [概念与图语义](docs/concepts.md)
 - [C++ 参考](docs/reference-en.md)和 [Python 绑定指南](docs/python-binding.md)

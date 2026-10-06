@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=c4d4f876d9680536a3f4379c1c022e852151074b65fcae98294e3684e2fe061c -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=3c1e7b539fa43d34cfae838cb5c14afed77bb9d04141143f3d19a440b7b2d875 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,8 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ---
 
 ## [未发布]
+### 变更
+- **CI 已分层。** 现在每次 push 和 pull request 只运行 `ci.yml`：Linux、macOS、Windows 的完整 native suite 加 2 个 installed-consumer 行，仅改文档时跳过。sanitizer、fuzz canary、性能 gate、真实 ARM64、gRPC、Visual Studio generator 以及其余 8 个 installed-consumer 行原样移到 `ci-extended.yml`，每晚及按需运行。Wheel 在 packaging 变更时为每个平台构建 CPython 3.12，在发布 tag、每周 canary 和手动运行时构建 CPython 3.9–3.13，每个解释器一个 job。Windows 依赖复用 vcpkg binary archive。`verify_ci.py` 支持 `--jobs auto`、`wheel --python` 和 `native-windows --generator`，`native-windows` 现默认用 Ninja 构建（请在 x64 MSVC 环境运行，或指定 `--generator "Visual Studio 17 2022"`）。所有 runner 仍为标准 GitHub-hosted runner。
 
 ## [0.13.0] - 2026-10-07
 

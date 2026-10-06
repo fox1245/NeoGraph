@@ -12,6 +12,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ---
 
 ## [Unreleased]
+### Changed
+- **CI is tiered.** Every push and pull request now runs only `ci.yml`: the full native suite on Linux, macOS and Windows and two installed-consumer rows, skipped for documentation-only changes. Sanitizers, the fuzz canary, performance gates, native ARM64, gRPC, the Visual Studio generator and the other eight installed-consumer rows moved unchanged to `ci-extended.yml`, which runs nightly and on demand. Wheels build CPython 3.12 per platform for packaging changes and CPython 3.9–3.13 on release tags, a weekly canary and manual runs, one job per interpreter. Windows dependencies reuse vcpkg binary archives. `verify_ci.py` accepts `--jobs auto`, `wheel --python`, and `native-windows --generator`; `native-windows` now builds with Ninja by default (run it from an x64 MSVC environment, or pass `--generator "Visual Studio 17 2022"`). All runners remain standard GitHub-hosted runners.
 
 ## [0.13.0] - 2026-10-07
 

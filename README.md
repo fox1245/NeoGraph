@@ -242,7 +242,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 ```
 
 `--work-dir` must be a fresh, nonexistent output path you own, not the source
-root or its ancestor; `--jobs` must be positive. Existing outputs are refused
+root or its ancestor; `--jobs` must be a positive number or `auto` (the CPU count). Existing outputs are refused
 and retained, never automatically cleaned. The runner does not install
 dependencies or change host policy; existing pinned dependency fetches and
 cibuildwheel's declared bootstrap/repair still apply.
@@ -251,7 +251,7 @@ cibuildwheel's declared bootstrap/repair still apply.
 |---|---|
 | `native-linux` | Full native PostgreSQL gate, then serial full Python/protocol suite and DB-free ACP durable rerun. |
 | `native-posix` | Native Linux ARM/macOS suite; PostgreSQL build/link coverage without a test service. |
-| `native-windows` | VS2022 DB-free native/Program/QuickJS suite and separate C embedding ABI smoke. |
+| `native-windows` | MSVC DB-free native/Program/QuickJS suite and separate C embedding ABI smoke; builds with Ninja in an x64 MSVC environment, or pass `--generator "Visual Studio 17 2022"`. |
 | `asan` | Linux ASan/UBSan/LSan, eleven examples and complete Python suite; GCC libasan/libstdc++ required. |
 | `tsan` | Separate Linux TSan suite and five examples; permitted process-local `setarch -R`, unchanged suppressions. |
 | `msvc-asan` | Serial Windows Program/QuickJS canary; activated `cl >=19.50` (VS2026), not MSVC 19.44. |
@@ -261,13 +261,19 @@ cibuildwheel's declared bootstrap/repair still apply.
 | `fuzz` | Linux Clang/libFuzzer 60-second canary; corpus copied into owned output. |
 | `install` | Isolated exported-prefix ABI/symbol/C++/C11/collision/relocation consumers; no Git/Bash. Optional `--shared`, `--core-only` or `--program`; `--quickjs` requires `--program` and ELF/Mach-O inspection (Windows rows omit it). |
 | `sdist` | Source archive and Twine; provision build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10; optional `--release-tag v0.13.0`. |
-| `wheel` | Repaired installed wheels; provision cibuildwheel==2.23.0 and native/container provider; required `--arch x86_64\|aarch64\|arm64\|AMD64`. |
+| `wheel` | Repaired installed wheels; provision cibuildwheel==2.23.0 and native/container provider; required `--arch x86_64\|aarch64\|arm64\|AMD64`; optional `--python cp312` builds one CPython instead of all. |
 | `runtime-archive` | Shared SDK native-archive portability target/CTest; Ninja and platform runtime dependencies. |
 
 Local Windows/WSL results do not replace native ARM/macOS or VS2026 sanitizer
-rows. CI retains all ten installed-consumer rows, four native wheel/archive
-platforms, CPython 3.9–3.13, glibc 2.34/macOS 14 floors, full installed-wheel
-tests, cold-loader/LGPL replacement gates, and protected tag/OIDC publication
+rows. Every push and pull request runs `ci.yml`: the full native suite on Linux,
+macOS and Windows plus two installed-consumer rows; documentation-only changes
+skip it. `ci-extended.yml` runs nightly and on demand: sanitizers, the fuzz
+canary, performance gates, native ARM64, gRPC, the Visual Studio generator and
+the other eight installed-consumer rows. Run it on a release candidate before
+tagging. `wheels.yml` builds CPython 3.12 per platform for packaging changes and
+CPython 3.9–3.13 on release tags, a weekly canary and manual runs, with glibc
+2.34/macOS 14 floors, full installed-wheel tests, cold-loader/LGPL replacement
+gates, four native wheel/archive platforms, and protected tag/OIDC publication
 dependencies. Source review or CLI help is not execution or release proof.
 
 - [Concepts and graph semantics](docs/concepts.md)

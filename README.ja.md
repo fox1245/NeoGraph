@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ja source_sha256=7021a7b351a812d0eda525f1acf415d71b5df681210e474a7e0556ba1c724334 -->
+<!-- neograph-i18n: source=README.md locale=ja source_sha256=58bdfd693a5d84e22e8ad4ec9999c72c106596f174f31970f0f7bf488518e0d7 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -233,13 +233,13 @@ python scripts/verify_ci.py native-linux --work-dir build/local-linux-01 --jobs 
 python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-01 --jobs 4
 ```
 
-`--work-dir` は自分が所有する未作成の新しい出力パスでなければならず、ソースルートやその祖先は指定できません。`--jobs` は正の値が必要です。既存の出力は拒否・保持され、自動削除しません。Runner は依存関係のインストールやホストポリシーの変更をしません。既存の固定依存関係の取得と cibuildwheel に宣言された bootstrap/repair は引き続き適用されます。
+`--work-dir` は自分が所有する未作成の新しい出力パスでなければならず、ソースルートやその祖先は指定できません。`--jobs` は正の数または `auto`（CPU 数）が必要です。既存の出力は拒否・保持され、自動削除しません。Runner は依存関係のインストールやホストポリシーの変更をしません。既存の固定依存関係の取得と cibuildwheel に宣言された bootstrap/repair は引き続き適用されます。
 
 | プロファイル | 保持する目的 / 前提条件 |
 |---|---|
 | `native-linux` | 全 native PostgreSQL gate 後に直列の全 Python/protocol suite と DB なし ACP durable 再実行。 |
 | `native-posix` | 実際の Linux ARM/macOS suite; テストサービスなしの PostgreSQL build/link 検証。 |
-| `native-windows` | VS2022 の DB なし native/Program/QuickJS suite と独立した C embedding ABI smoke。 |
+| `native-windows` | MSVC の DB なし native/Program/QuickJS suite と独立した C embedding ABI smoke。x64 MSVC 環境で既定は Ninja でビルドし、`--generator "Visual Studio 17 2022"` で切り替えられる。 |
 | `asan` | Linux ASan/UBSan/LSan、11 例、全 Python suite; GCC libasan/libstdc++ が必要。 |
 | `tsan` | 独立した Linux TSan suite と 5 例; 許可されたプロセス単位の `setarch -R`、既存 suppression を保持。 |
 | `msvc-asan` | 直列 Windows Program/QuickJS canary; 有効化した `cl >=19.50` (VS2026) が必要、MSVC 19.44 は不可。 |
@@ -249,10 +249,10 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `fuzz` | Linux Clang/libFuzzer の 60 秒 canary; corpus を所有する出力にコピー。 |
 | `install` | 隔離 exported-prefix ABI/symbol/C++/C11/collision/relocation consumer; Git/Bash 不要。任意の `--shared`、`--core-only` または `--program`; `--quickjs` は `--program` と ELF/Mach-O 検査が必要 (Windows 行では省略)。 |
 | `sdist` | ソース archive と Twine; build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10 を用意; 任意の `--release-tag v0.13.0`。 |
-| `wheel` | repair 済み installed wheel; cibuildwheel==2.23.0 と native/container provider を用意; `--arch x86_64\|aarch64\|arm64\|AMD64` 必須。 |
+| `wheel` | repair 済み installed wheel; cibuildwheel==2.23.0 と native/container provider を用意; `--arch x86_64\|aarch64\|arm64\|AMD64` 必須。`--python cp312` を指定すると全 CPython の代わりに 1 つだけビルドする。 |
 | `runtime-archive` | Shared SDK native-archive portability target/CTest; Ninja とプラットフォーム runtime 依存関係。 |
 
-ローカル Windows/WSL の結果は実際の ARM/macOS や VS2026 sanitizer 行を代替しません。CI は installed-consumer 10 行、native wheel/archive 4 プラットフォーム、CPython 3.9–3.13、glibc 2.34/macOS 14 の下限、全 installed-wheel test、cold-loader/LGPL replacement gate、保護された tag/OIDC publication 依存関係を保持します。ソースレビューや CLI help は実行・リリースの証拠ではありません。
+ローカル Windows/WSL の結果は実際の ARM/macOS や VS2026 sanitizer 行を代替しません。push と pull request ごとに `ci.yml` が走ります。Linux・macOS・Windows の全 native suite と installed-consumer 2 行で、ドキュメントのみの変更はスキップします。`ci-extended.yml` は毎晩および手動で走ります。sanitizer、fuzz canary、性能 gate、実 ARM64、gRPC、Visual Studio generator、残り 8 行の installed-consumer です。リリース候補はタグ付け前に 1 回実行してください。`wheels.yml` は packaging の変更ではプラットフォームごとに CPython 3.12 を、リリースタグ・週次 canary・手動実行では CPython 3.9–3.13 をビルドし、glibc 2.34/macOS 14 の下限、全 installed-wheel test、cold-loader/LGPL replacement gate、native wheel/archive 4 プラットフォーム、保護された tag/OIDC publication 依存関係を保持します。ソースレビューや CLI help は実行・リリースの証拠ではありません。
 
 - [概念とグラフの意味論](docs/concepts.md)
 - [C++リファレンス](docs/reference-en.md)と[Pythonバインディングガイド](docs/python-binding.md)

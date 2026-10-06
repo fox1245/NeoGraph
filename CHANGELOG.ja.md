@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=c4d4f876d9680536a3f4379c1c022e852151074b65fcae98294e3684e2fe061c -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=3c1e7b539fa43d34cfae838cb5c14afed77bb9d04141143f3d19a440b7b2d875 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,8 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ---
 
 ## [未リリース]
+### 変更
+- **CI を階層化しました。** すべての push と pull request は `ci.yml` のみを実行します。Linux・macOS・Windows の全 native suite と installed-consumer 2 行で、ドキュメントのみの変更はスキップします。sanitizer、fuzz canary、性能 gate、実 ARM64、gRPC、Visual Studio generator、残り 8 行の installed-consumer はそのまま `ci-extended.yml` に移し、毎晩および手動で実行します。Wheel は packaging の変更ではプラットフォームごとに CPython 3.12 を、リリースタグ・週次 canary・手動実行では CPython 3.9–3.13 をインタープリターごとに 1 job でビルドします。Windows の依存関係は vcpkg binary archive を再利用します。`verify_ci.py` は `--jobs auto`、`wheel --python`、`native-windows --generator` を受け付け、`native-windows` は既定で Ninja を使います（x64 MSVC 環境で実行するか `--generator "Visual Studio 17 2022"` を指定）。すべての runner は標準の GitHub-hosted runner のままです。
 
 ## [0.13.0] - 2026-10-07
 

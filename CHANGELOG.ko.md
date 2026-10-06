@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=c4d4f876d9680536a3f4379c1c022e852151074b65fcae98294e3684e2fe061c -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=3c1e7b539fa43d34cfae838cb5c14afed77bb9d04141143f3d19a440b7b2d875 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,8 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ---
 
 ## [Unreleased]
+### 변경됨
+- **CI를 계층화했습니다.** 이제 모든 push와 pull request는 `ci.yml`만 실행합니다: Linux, macOS, Windows의 전체 native suite와 설치 소비자 2행이며, 문서만 바꾸면 건너뜁니다. sanitizer, fuzz canary, 성능 gate, 실제 ARM64, gRPC, Visual Studio generator와 나머지 설치 소비자 8행은 그대로 `ci-extended.yml`로 옮겨 매일 밤과 수동으로 실행합니다. Wheel은 packaging 변경에는 플랫폼당 CPython 3.12를, 릴리스 태그·주간 canary·수동 실행에는 CPython 3.9–3.13을 인터프리터당 job 하나로 빌드합니다. Windows 의존성은 vcpkg binary archive를 재사용합니다. `verify_ci.py`는 `--jobs auto`, `wheel --python`, `native-windows --generator`를 받으며 `native-windows`는 이제 기본으로 Ninja로 빌드합니다(x64 MSVC 환경에서 실행하거나 `--generator "Visual Studio 17 2022"`를 지정). 모든 runner는 표준 GitHub-hosted runner를 유지합니다.
 
 ## [0.13.0] - 2026-10-07
 
