@@ -59,6 +59,28 @@ jobs:
           path: build-native/build/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
 
+  # The per-push Windows lane uses Ninja; this keeps the Visual Studio generator that most MSVC
+  # users configure with under test. Its build is serial per project, so it takes about 35 minutes.
+  build-windows-vs:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install SDK transport dependencies
+        uses: ./.github/actions/windows-transport-deps
+      - name: Verify native Visual Studio generator, C ABI and full ctest
+        run: python scripts/verify_ci.py native-windows --work-dir build-native --jobs auto --generator "Visual Studio 17 2022"
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-windows-vs
+          path: build-native/build/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+
   build-windows-asan:
     # VS 2022 MSVC 19.44 has an ASan coroutine catch-funclet defect.
     runs-on: windows-2025-vs2026

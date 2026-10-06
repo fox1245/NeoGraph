@@ -196,15 +196,24 @@ def native(args):
                           NEOGRAPH_BUILD_TESTS="ON", NEOGRAPH_BUILD_EXAMPLES="OFF")
     if args.profile == "native-linux":
         options += definitions(NEOGRAPH_BUILD_PYBIND="ON")
+    generator = None
     if system == "Windows":
-        options += ["-A", "x64", *definitions(NEOGRAPH_BUILD_SQLITE="OFF", NEOGRAPH_USE_LIBCURL="OFF")]
+        # Ninja compiles files in parallel; the Visual Studio generator runs each project's
+        # translation units serially (MSBuild /m parallelizes projects only), which made this
+        # lane's build take 35 of its 45 minutes on a 4-vCPU runner.
+        generator = args.generator or "Ninja"
+        if generator == "Ninja":
+            require_tools("cl", "ninja")  # an x64 MSVC environment, e.g. ilammy/msvc-dev-cmd
+        else:
+            options += ["-A", "x64"]
+        options += definitions(NEOGRAPH_BUILD_SQLITE="OFF", NEOGRAPH_USE_LIBCURL="OFF")
     elif system == "Linux" and args.profile == "native-posix":
         options += definitions(NEOGRAPH_BUILD_SQLITE="ON")
     if args.ccache:
         require_tools("ccache")
         options += definitions(CMAKE_C_COMPILER_LAUNCHER="ccache", CMAKE_CXX_COMPILER_LAUNCHER="ccache")
     build = args.work_dir / "build"
-    configure(build, options, generator="Visual Studio 17 2022" if system == "Windows" else None)
+    configure(build, options, generator=generator)
     build_targets(build, args.jobs)
     env = os.environ.copy()
     if args.profile == "native-posix":
@@ -424,6 +433,7 @@ def main():
     parser.add_argument("--quickjs", action="store_true", help="install: include private-symbol and second-engine collision checks")
     parser.add_argument("--release-tag", help="sdist: enforce v<project.version>")
     parser.add_argument("--arch", choices=("x86_64", "aarch64", "arm64", "AMD64"), help="wheel: exact cibuildwheel matrix architecture")
+    parser.add_argument("--generator", help="native-windows: CMake generator (default Ninja; for example \"Visual Studio 17 2022\")")
     parser.add_argument("--python", help="wheel: build only this CPython tag, for example cp312 (default: every tag in pyproject.toml)")
     args = parser.parse_args()
     atexit.register(write_timing_summary, args.profile)
@@ -437,6 +447,8 @@ def main():
         parser.error("--ccache applies only to native-linux")
     if args.arch and args.profile != "wheel" or args.release_tag and args.profile != "sdist":
         parser.error("--arch applies to wheel; --release-tag applies to sdist")
+    if args.generator and args.profile != "native-windows":
+        parser.error("--generator applies to native-windows")
     if args.python and (args.profile != "wheel" or not re.fullmatch(r"cp3\d{1,2}", args.python)):
         parser.error("--python applies to wheel and must look like cp312")
     args.work_dir = args.work_dir.resolve()

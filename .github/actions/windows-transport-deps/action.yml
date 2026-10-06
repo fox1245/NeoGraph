@@ -14,15 +14,16 @@ runs:
         "archives=$archives" | Out-File -Append -Encoding ascii $env:GITHUB_OUTPUT
         "image=$env:ImageVersion" | Out-File -Append -Encoding ascii $env:GITHUB_OUTPUT
         "VCPKG_DEFAULT_BINARY_CACHE=$archives" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
-    # The key carries the image version because a binary archive is valid only for the compiler and
-    # vcpkg revision it was built with; a new image must produce (and then save) fresh archives.
+    # vcpkg names each archive by an ABI hash (compiler, triplet, port files), so it only uses an
+    # archive that matches and rebuilds the rest. The key is per runner image so a new image saves
+    # its own archives; restore-keys let it start from the previous image's instead of from nothing.
     - name: Restore vcpkg binary archives
       uses: actions/cache@v4
       with:
         path: ${{ steps.image.outputs.archives }}
         key: vcpkg-transport-${{ runner.os }}-${{ steps.image.outputs.image }}-${{ hashFiles('.github/actions/windows-transport-deps/action.yml') }}
         restore-keys: |
-          vcpkg-transport-${{ runner.os }}-${{ steps.image.outputs.image }}-
+          vcpkg-transport-${{ runner.os }}-
     - name: Install curl and OpenSSL
       shell: pwsh
       run: |
