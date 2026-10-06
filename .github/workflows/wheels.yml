@@ -98,6 +98,16 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
       - name: Provision wheel build frontend
         run: python -m pip install cibuildwheel==2.23.0
+      # The runner's vcpkg checkout is shallow, so it lacks the baseline commit that the
+      # wheel manifest pins and `vcpkg install` fails before any wheel is built.
+      - name: Fetch the vcpkg baseline pinned by the wheel manifest
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $baseline = (Get-Content source-dist/source/cmake/windows-wheel/vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+          if (-not $baseline) { throw 'windows-wheel/vcpkg.json has no builtin-baseline' }
+          git -C $env:VCPKG_INSTALLATION_ROOT fetch --quiet --depth=1 origin $baseline
+          if ($LASTEXITCODE -ne 0) { throw "could not fetch vcpkg baseline $baseline" }
       # Platform dependency bootstrap, CP39-313, repair and installed-wheel gates
       # remain authoritative in pyproject.toml (including cold-load/LGPL checks).
       - name: Build, repair and exercise installed wheels
