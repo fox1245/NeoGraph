@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=9e3cece3555cbcb547daaaf29d7c6ce6aa422e229bc3899ce0fad78eac0400c9 -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=7021a7b351a812d0eda525f1acf415d71b5df681210e474a7e0556ba1c724334 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -216,6 +216,43 @@ find_package(SchemaProvider 0.1.0 CONFIG REQUIRED COMPONENTS runtime)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
+
+### 本地 CI 验证（Windows 与 WSL）
+
+从源码根目录使用 Python 3.10+、CMake/CTest 和事先配置好的对应工具链、依赖运行。Windows 使用 VS2022 x64 developer PowerShell，设置 vcpkg transport toolchain 的 `CMAKE_TOOLCHAIN_FILE`、专用 `VCPKG_INSTALLED_DIR`，并将 OpenSSL/curl runtime 工具加入 `PATH`。WSL 需要 C++20 compiler、pkg-config、libpq、SQLite、OpenSSL 和 HTTP/2 curl 开发包。Linux 的 `native-linux` 与 `asan` 还需 `psql` 和指向可连接的 **破坏性测试专用** 数据库的 `NEOGRAPH_TEST_POSTGRES_URL`。在选定 Python 中准备 pytest/pydantic/certifi；`native-linux` 还需 `a2a-sdk[http-server]>=1.1,<2`、`agent-client-protocol==0.12.1`、uvicorn 和 httpx。
+
+```powershell
+# Windows: choose a new output path for each invocation.
+python scripts/verify_ci.py native-windows --work-dir build/local-windows-01 --jobs 4
+python scripts/verify_ci.py install --work-dir build/local-install-01 --jobs 4 --shared --program
+```
+
+```sh
+# WSL/Linux: provision the test database and dependencies before running.
+python scripts/verify_ci.py native-linux --work-dir build/local-linux-01 --jobs 4
+python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-01 --jobs 4
+```
+
+`--work-dir` 必须是归你所有且尚不存在的新输出路径，不能是源码根目录或其祖先；`--jobs` 必须为正数。既有输出会被拒绝并保留，不会自动清理。Runner 不安装依赖或改变宿主策略；既有固定依赖获取和 cibuildwheel 声明的 bootstrap/repair 仍然适用。
+
+| Profile | 保留的目的 / 前提 |
+|---|---|
+| `native-linux` | 完整 native PostgreSQL gate 后串行执行全 Python/protocol suite 和无 DB 的 ACP durable 重跑。 |
+| `native-posix` | 实际 Linux ARM/macOS suite；无需测试服务的 PostgreSQL build/link 验证。 |
+| `native-windows` | VS2022 无 DB 的 native/Program/QuickJS suite 和独立 C embedding ABI smoke。 |
+| `asan` | Linux ASan/UBSan/LSan、11 个示例、全 Python suite；需 GCC libasan/libstdc++。 |
+| `tsan` | 独立 Linux TSan suite 和 5 个示例；获准的进程级 `setarch -R`，保留既有 suppression。 |
+| `msvc-asan` | 串行 Windows Program/QuickJS canary；需激活的 `cl >=19.50`（VS2026），不可使用 MSVC 19.44。 |
+| `grpc` | gRPC graph contract；配置 gRPC/Protobuf compiler 和 library。 |
+| `benchmark` | Linux Release 四 workload 回归 gate；保留既有吞吐、延迟、目标 RSS 边界。 |
+| `quickjs-performance` | Linux 匹配 enabled/disabled build；不可变 provenance 要求实际源码根目录 Git checkout。 |
+| `fuzz` | Linux Clang/libFuzzer 60 秒 canary；将 corpus 复制到自有输出。 |
+| `install` | 隔离 exported-prefix ABI/symbol/C++/C11/collision/relocation consumer；无需 Git/Bash。可选 `--shared`、`--core-only` 或 `--program`；`--quickjs` 需 `--program` 和 ELF/Mach-O 检查（Windows 行省略）。 |
+| `sdist` | 源码 archive 与 Twine；配置 build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10；可选 `--release-tag v0.13.0`。 |
+| `wheel` | repair 后的 installed wheel；配置 cibuildwheel==2.23.0 与 native/container provider；必须指定 `--arch x86_64\|aarch64\|arm64\|AMD64`。 |
+| `runtime-archive` | Shared SDK native-archive portability target/CTest；需 Ninja 和平台 runtime 依赖。 |
+
+本地 Windows/WSL 结果不能替代实际 ARM/macOS 或 VS2026 sanitizer 行。CI 保留全部 10 个 installed-consumer 行、4 个 native wheel/archive 平台、CPython 3.9–3.13、glibc 2.34/macOS 14 下限、完整 installed-wheel test、cold-loader/LGPL replacement gate，以及受保护的 tag/OIDC publication 依赖。源码审查或 CLI help 并非执行或发布证据。
 
 - [概念与图语义](docs/concepts.md)
 - [C++ 参考](docs/reference-en.md)和 [Python 绑定指南](docs/python-binding.md)

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ko source_sha256=9e3cece3555cbcb547daaaf29d7c6ce6aa422e229bc3899ce0fad78eac0400c9 -->
+<!-- neograph-i18n: source=README.md locale=ko source_sha256=7021a7b351a812d0eda525f1acf415d71b5df681210e474a7e0556ba1c724334 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -216,6 +216,43 @@ find_package(SchemaProvider 0.1.0 CONFIG REQUIRED COMPONENTS runtime)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
+
+### 로컬 CI 검증 (Windows와 WSL)
+
+소스 루트에서 Python 3.10+, CMake/CTest와 해당 프로필의 도구·의존성을 미리 준비해 실행하세요. Windows는 VS2022 x64 developer PowerShell에서 vcpkg transport toolchain의 `CMAKE_TOOLCHAIN_FILE`, 전용 `VCPKG_INSTALLED_DIR`, OpenSSL/curl runtime 도구의 `PATH`를 설정합니다. WSL에는 C++20 compiler, pkg-config, libpq, SQLite, OpenSSL, HTTP/2 curl 개발 패키지가 필요합니다. Linux `native-linux`와 `asan`은 `psql` 및 접근 가능한 **파괴적 테스트 전용** 데이터베이스를 가리키는 `NEOGRAPH_TEST_POSTGRES_URL`도 요구합니다. 선택한 Python에 pytest/pydantic/certifi를 준비하고, `native-linux`에는 `a2a-sdk[http-server]>=1.1,<2`, `agent-client-protocol==0.12.1`, uvicorn, httpx도 설치하세요.
+
+```powershell
+# Windows: choose a new output path for each invocation.
+python scripts/verify_ci.py native-windows --work-dir build/local-windows-01 --jobs 4
+python scripts/verify_ci.py install --work-dir build/local-install-01 --jobs 4 --shared --program
+```
+
+```sh
+# WSL/Linux: provision the test database and dependencies before running.
+python scripts/verify_ci.py native-linux --work-dir build/local-linux-01 --jobs 4
+python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-01 --jobs 4
+```
+
+`--work-dir`은 자신이 소유한 아직 존재하지 않는 새 출력 경로여야 하며 소스 루트나 그 상위 경로는 허용되지 않습니다. `--jobs`는 양수여야 합니다. 기존 출력은 거부하고 보존하며 자동 삭제하지 않습니다. Runner는 의존성을 설치하거나 호스트 정책을 변경하지 않습니다. 기존 고정 의존성 가져오기와 cibuildwheel의 선언된 bootstrap/repair는 그대로 적용됩니다.
+
+| 프로필 | 유지되는 목적 / 전제 조건 |
+|---|---|
+| `native-linux` | 전체 native PostgreSQL gate 이후 직렬 전체 Python/protocol suite와 DB 없는 ACP durable 재실행. |
+| `native-posix` | 실제 Linux ARM/macOS suite; 테스트 서비스 없이 PostgreSQL build/link 검증. |
+| `native-windows` | VS2022 DB 없는 native/Program/QuickJS suite와 별도 C embedding ABI smoke. |
+| `asan` | Linux ASan/UBSan/LSan, 예제 11개, 전체 Python suite; GCC libasan/libstdc++ 필요. |
+| `tsan` | 별도 Linux TSan suite와 예제 5개; 허용된 프로세스별 `setarch -R`, 기존 suppression 유지. |
+| `msvc-asan` | 직렬 Windows Program/QuickJS canary; 활성화된 `cl >=19.50` (VS2026) 필요, MSVC 19.44 불가. |
+| `grpc` | gRPC graph contract; gRPC/Protobuf compiler와 library 준비. |
+| `benchmark` | Linux Release 네 workload 회귀 gate; 기존 처리량·지연·대상 RSS 한계 유지. |
+| `quickjs-performance` | Linux enabled/disabled 대응 build; 불변 provenance를 위한 실제 소스 루트 Git checkout 필요. |
+| `fuzz` | Linux Clang/libFuzzer 60초 canary; corpus는 소유한 출력에 복사. |
+| `install` | 격리된 exported-prefix ABI/symbol/C++/C11/collision/relocation 소비자; Git/Bash 불필요. 선택적 `--shared`, `--core-only` 또는 `--program`; `--quickjs`는 `--program`과 ELF/Mach-O 검사를 요구 (Windows 행에서는 생략). |
+| `sdist` | 소스 archive와 Twine; build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10 준비; 선택적 `--release-tag v0.13.0`. |
+| `wheel` | repair된 설치 wheel; cibuildwheel==2.23.0과 native/container provider 준비; `--arch x86_64\|aarch64\|arm64\|AMD64` 필수. |
+| `runtime-archive` | Shared SDK native-archive portability target/CTest; Ninja와 플랫폼 runtime 의존성 필요. |
+
+로컬 Windows/WSL 결과는 실제 ARM/macOS 또는 VS2026 sanitizer 행을 대체하지 않습니다. CI는 설치 소비자 10행, native wheel/archive 플랫폼 4개, CPython 3.9–3.13, glibc 2.34/macOS 14 하한, 전체 설치 wheel 테스트, cold-loader/LGPL 교체 gate, 보호된 tag/OIDC 배포 의존성을 유지합니다. 소스 리뷰나 CLI help는 실행 또는 릴리스 증거가 아닙니다.
 
 - [개념과 그래프 의미론](docs/concepts.md)
 - [C++ 참조](docs/reference-en.md) 및 [Python 바인딩 가이드](docs/python-binding.md)

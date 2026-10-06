@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=0abd9601232a6d6e83d263798993650759083561557b016d44f91152f04c0bb7 -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=390bd1ee4f257a5af2db235b2e9b05354b2613d057086c0d015fa4ceb39c7e11 -->
 # 二进制兼容政策
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -48,4 +48,4 @@ Linux shared library 有 versioned file、major-generation SONAME link 和 unver
 
 ## 验证证据
 
-`scripts/test_find_package.sh` 定义 installed-consumer 检查，不是通过结果。有日期的切换前测量保留为[历史证据](VALGRIND.md)。当前 NeoGraph/SDK/Python 结果须在集成 release report 中说明 build、platform、执行路径；本政策不产生新的通过声明。
+`python scripts/verify_ci.py install --work-dir <fresh-output> --jobs 2` 定义 installed-consumer 检查，不是通过结果。对应平台支持的 consumer 行使用 `--shared`、`--core-only` 或 `--program --quickjs`。驱动可从 checkout 或解包后的 sdist 运行，不依赖 Git/Bash。有日期的切换前测量保留为[历史证据](VALGRIND.md)。当前 NeoGraph/SDK/Python 结果须在集成 release report 中说明 build、platform、执行路径；本政策不产生新的通过声明。

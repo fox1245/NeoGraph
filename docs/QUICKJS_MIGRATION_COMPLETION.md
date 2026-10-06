@@ -137,10 +137,12 @@ success is insufficient.
 The installed QuickJS consumer must exercise a **successful** `define()` and
 `function* main()` publication/run through the installed package, not merely a
 syntax rejection. It must also retain the existing independently linked second
-QuickJS collision probe. Extend `scripts/test_find_package.sh` (or replace it
-with an equivalent platform-aware driver) so Windows validates static symbol
-namespacing and shared export hiding with native inspection tools rather than
-skipping the check.
+QuickJS collision probe. The installed-consumer driver is
+`python scripts/verify_ci.py install --work-dir <fresh-output> --jobs 2 --program --quickjs`
+(add `--shared` for shared libraries). Its private-symbol inspection remains
+ELF/Mach-O-only; current Windows install rows omit `--quickjs`. Windows static
+namespacing and shared export hiding still require native inspection evidence
+for this completion criterion; native runtime/C ABI tests do not replace it.
 
 **Exit:** all rows run from the installed prefix and record package metadata,
 loader/link closure, executable output, and private-symbol inspection results.
@@ -174,9 +176,14 @@ zero dispatch.
 1. Run the existing Linux blocking matrix:
 
    ```sh
-   scripts/build_quickjs_performance_matrix.sh \
-     <fresh-build-root> <evidence-root>/quickjs-performance-linux.json
+   python scripts/verify_ci.py quickjs-performance --work-dir <fresh-build-root> --jobs 4
    ```
+
+   Use a fresh, nonexistent owned build root and an actual Git checkout at the
+   source root: the unchanged `run_quickjs_performance.py` requires commit/dirty
+   provenance, so an extracted archive under an unrelated checkout is insufficient.
+   The matched disabled/enabled builds and result remain under that root; retain
+   `<fresh-build-root>/quickjs-performance.json` in the private evidence index.
 
    Its accepted preregistration remains the threshold authority; do not relax
    a threshold in response to a failing candidate.

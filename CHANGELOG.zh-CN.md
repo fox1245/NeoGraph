@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=9f022fad624d108552d8716c666d99f63d2398c9477947d285b989580fc00816 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=fc7668fbc0eb53de474a8dfe184ff9a65441c44bf3b12cbfa8cfc6a493eeafd0 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -20,6 +20,8 @@ SDK4 Linux x86_64 验证运行了全部 27 个注册 case：初次 full run 有 
 NeoGraph SDK4 验证范围为初次与修正后限定运行合计的 Core 1261 case、Program 691 pass 与设计上的 Memory process-loss skip 14 case，以及 installed Python 初次 499 pass 加修正后限定 5 pass，共 504 case。不声称第二次 full-suite 运行。实际运行了本地 A2A 0.x/1.0 peer、evolution file mode、plan replay、修改的 C++ helper 和 11 个 Python application。
 
 ### 变更
+- **Local/hosted 共用验证入口。** `python scripts/verify_ci.py <profile> --work-dir <fresh-output> --jobs N` 集中十四个既有 CI gate，不移除 native platform、sanitizer、installed consumer、wheel、archive 或 release gate。Installed consumer 不再依赖 Git/Bash；独立的 immutable QuickJS performance gate 仍需 Linux/Git provenance。Native Linux 在 native PostgreSQL test 后串行运行完整 Python/protocol suite。Benchmark checker 保留原四个 workload 和数值边界，拒绝歧义或无效 metric。Source review 与 CLI help 不构成 runtime/platform/performance qualification，仍需集成执行。
+- **单一 QuickJS matrix 命令。** 将重复 shell build driver 替换为 `python scripts/verify_ci.py quickjs-performance --work-dir <fresh-build-root> --jobs 4`，保留 `<fresh-build-root>/quickjs-performance.json`。自有新输出已存在时会被拒绝。不修改 immutable performance runner、preregistration 和源码根目录 Git provenance 要求。Native Windows toolchain 转发与 work-dir 专用 wheel vcpkg root 保留声明的 bootstrap/repair gate；PostgreSQL 前提检查向 `psql` 传递显式 DB URL。这些是源码变更，不宣称新 profile 已通过。
 - **已完成取消 context 的寿命。** Detach 在 context 销毁前释放已完成的 Asio slot handler；generation 检查丢弃旧的排队 emit，callback 可在不重入 token lock 的情况下 rebind。取消状态不重置。必须一起重建 NeoGraph 与所有 native consumer。本地取消/fork 23 个 case 和实际 plain/ASan retained-token consumer 已通过。[Commit `24d3166` CI](https://github.com/fox1245/NeoGraph/actions/runs/37275542831/job/111651716661) 的 1,333-case TSan 运行也通过，包含 retained-parent-token teardown 回归及三个 skip。证明限于既有 dependency suppression 和禁用 ASLR 的环境，不宣称普遍 race-freedom。Detach 前必须完成 operation，不能在正在执行的 signal callback 内 detach。
 - **Platform wheel 依赖与 cold loading。** 将 pybind11 固定为 `2.13.6`，解决 SDK 直接 OpenSSL Crypto 依赖，并为 macOS 14 使用匹配的 LLVM 20 header/runtime。保留 CPython 3.9–3.13、所有 platform 行和 installed wheel full suite；随后运行 Linux replacement 与拒绝 Homebrew 访问的 macOS cold-loader 检查。准确的最终 artifact 仍是 release gate，不以 source-only 检查宣称 portability。
 - **匹配的 Linux LGPL library source。** SDist 的 `deps/redistribution/` 包含 library-only keyutils/libxcrypt source、downstream patch 和 build/replacement material。保留 file-scoped grant 与接收者的修改权；grant 未确认的 upstream test 不属于 library input，因此排除。仅提供 source/notice 不能证明最终 wheel 的 replacement arrangement 或已完成法律审查。

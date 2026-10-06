@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ja source_sha256=9e3cece3555cbcb547daaaf29d7c6ce6aa422e229bc3899ce0fad78eac0400c9 -->
+<!-- neograph-i18n: source=README.md locale=ja source_sha256=7021a7b351a812d0eda525f1acf415d71b5df681210e474a7e0556ba1c724334 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -216,6 +216,43 @@ find_package(SchemaProvider 0.1.0 CONFIG REQUIRED COMPONENTS runtime)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
+
+### ローカル CI 検証 (Windows と WSL)
+
+ソースルートで Python 3.10+、CMake/CTest と各プロファイルのツール・依存関係を事前に用意して実行します。Windows は VS2022 x64 developer PowerShell を使い、vcpkg transport toolchain の `CMAKE_TOOLCHAIN_FILE`、専用 `VCPKG_INSTALLED_DIR`、OpenSSL/curl runtime ツールの `PATH` を設定します。WSL には C++20 compiler、pkg-config、libpq、SQLite、OpenSSL、HTTP/2 curl 開発パッケージが必要です。Linux の `native-linux` と `asan` には `psql` と、接続可能な **破壊的テスト専用** データベースを指す `NEOGRAPH_TEST_POSTGRES_URL` も必要です。選択した Python に pytest/pydantic/certifi を用意し、`native-linux` には `a2a-sdk[http-server]>=1.1,<2`、`agent-client-protocol==0.12.1`、uvicorn、httpx も用意します。
+
+```powershell
+# Windows: choose a new output path for each invocation.
+python scripts/verify_ci.py native-windows --work-dir build/local-windows-01 --jobs 4
+python scripts/verify_ci.py install --work-dir build/local-install-01 --jobs 4 --shared --program
+```
+
+```sh
+# WSL/Linux: provision the test database and dependencies before running.
+python scripts/verify_ci.py native-linux --work-dir build/local-linux-01 --jobs 4
+python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-01 --jobs 4
+```
+
+`--work-dir` は自分が所有する未作成の新しい出力パスでなければならず、ソースルートやその祖先は指定できません。`--jobs` は正の値が必要です。既存の出力は拒否・保持され、自動削除しません。Runner は依存関係のインストールやホストポリシーの変更をしません。既存の固定依存関係の取得と cibuildwheel に宣言された bootstrap/repair は引き続き適用されます。
+
+| プロファイル | 保持する目的 / 前提条件 |
+|---|---|
+| `native-linux` | 全 native PostgreSQL gate 後に直列の全 Python/protocol suite と DB なし ACP durable 再実行。 |
+| `native-posix` | 実際の Linux ARM/macOS suite; テストサービスなしの PostgreSQL build/link 検証。 |
+| `native-windows` | VS2022 の DB なし native/Program/QuickJS suite と独立した C embedding ABI smoke。 |
+| `asan` | Linux ASan/UBSan/LSan、11 例、全 Python suite; GCC libasan/libstdc++ が必要。 |
+| `tsan` | 独立した Linux TSan suite と 5 例; 許可されたプロセス単位の `setarch -R`、既存 suppression を保持。 |
+| `msvc-asan` | 直列 Windows Program/QuickJS canary; 有効化した `cl >=19.50` (VS2026) が必要、MSVC 19.44 は不可。 |
+| `grpc` | gRPC graph contract; gRPC/Protobuf compiler と library を用意。 |
+| `benchmark` | Linux Release の 4 workload 回帰 gate; 既存の throughput、latency、対象 RSS 制限。 |
+| `quickjs-performance` | Linux の対応する enabled/disabled build; 不変 provenance のため実際のソースルート Git checkout が必要。 |
+| `fuzz` | Linux Clang/libFuzzer の 60 秒 canary; corpus を所有する出力にコピー。 |
+| `install` | 隔離 exported-prefix ABI/symbol/C++/C11/collision/relocation consumer; Git/Bash 不要。任意の `--shared`、`--core-only` または `--program`; `--quickjs` は `--program` と ELF/Mach-O 検査が必要 (Windows 行では省略)。 |
+| `sdist` | ソース archive と Twine; build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10 を用意; 任意の `--release-tag v0.13.0`。 |
+| `wheel` | repair 済み installed wheel; cibuildwheel==2.23.0 と native/container provider を用意; `--arch x86_64\|aarch64\|arm64\|AMD64` 必須。 |
+| `runtime-archive` | Shared SDK native-archive portability target/CTest; Ninja とプラットフォーム runtime 依存関係。 |
+
+ローカル Windows/WSL の結果は実際の ARM/macOS や VS2026 sanitizer 行を代替しません。CI は installed-consumer 10 行、native wheel/archive 4 プラットフォーム、CPython 3.9–3.13、glibc 2.34/macOS 14 の下限、全 installed-wheel test、cold-loader/LGPL replacement gate、保護された tag/OIDC publication 依存関係を保持します。ソースレビューや CLI help は実行・リリースの証拠ではありません。
 
 - [概念とグラフの意味論](docs/concepts.md)
 - [C++リファレンス](docs/reference-en.md)と[Pythonバインディングガイド](docs/python-binding.md)

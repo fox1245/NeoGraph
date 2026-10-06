@@ -88,6 +88,14 @@ sdist.include = [
     "bindings/python/CMakeLists.txt", "bindings/python/src/**",
     "bindings/python/neograph_engine/*.py", "bindings/python/tests/*.py",
     "bindings/python/examples/*.py", "bindings/python/examples/README.md",
+    "tests/**", "examples/**",
+    "benchmarks/**/*.cpp", "benchmarks/*.cmake",
+    "benchmarks/quickjs_performance_preregistration.json",
+    "skills/neograph-harness-authoring/SKILL.md",
+    "skills/neograph-harness-authoring/references/chat-template-proposals.md",
+    "scripts/verify_ci.py", "scripts/check_install_consumer.py",
+    "scripts/check_ci_benchmarks.py", "scripts/run_quickjs_performance.py",
+    "scripts/audit_legacy_drain.py", "scripts/check_cross_repository_compatibility.py",
 ]
 sdist.exclude = [
     "**/.git/**", "**/.env*", "**/__pycache__/**", "**/*.pyc",
@@ -121,15 +129,15 @@ python -c "import os, subprocess, sys; env = os.environ.copy(); env.pop('LD_LIBR
 
 [tool.cibuildwheel.windows]
 # SchemaProvider requires curl even if NeoGraph's separate curl pool is disabled.
-before-all = "vcpkg install openssl[tools]:x64-windows libpq:x64-windows sqlite3:x64-windows curl[http2,openssl]:x64-windows"
-environment = { CMAKE_TOOLCHAIN_FILE = "C:\\\\vcpkg\\\\scripts\\\\buildsystems\\\\vcpkg.cmake" }
+before-all = 'vcpkg install --triplet x64-windows --x-manifest-root="{package}/cmake/windows-wheel" --x-install-root="%VCPKG_INSTALLED_DIR%" --x-buildtrees-root="%VCPKG_INSTALLED_DIR%/../vcpkg-buildtrees" --x-packages-root="%VCPKG_INSTALLED_DIR%/../vcpkg-packages"'
+environment = { CMAKE_TOOLCHAIN_FILE = '"$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"', CMAKE_ARGS = '"$CMAKE_ARGS -DVCPKG_INSTALLED_DIR=\"$VCPKG_INSTALLED_DIR\""' }
 # Search bundled engine/SDK DLLs and mangle external dependency names; otherwise
 # a preloaded system sqlite3.dll can shadow the wheel's SQLite build.
 repair-wheel-command = """\
 pip install delvewheel && \
 python -m delvewheel repair --ignore-existing -w {dest_dir} {wheel} \
   --with-mangle \
-  --add-path C:\\\\vcpkg\\\\installed\\\\x64-windows\\\\bin\
+  --add-path "%VCPKG_INSTALLED_DIR%/x64-windows/bin"\
 """
 
 [tool.cibuildwheel.macos]

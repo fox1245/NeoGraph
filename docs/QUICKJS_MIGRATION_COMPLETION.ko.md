@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/QUICKJS_MIGRATION_COMPLETION.md locale=ko source_sha256=9d60815c273f2c94969dbfefe5eb7d6bdbd58075e51e06a7f753a36461e31d0b -->
+<!-- neograph-i18n: source=docs/QUICKJS_MIGRATION_COMPLETION.md locale=ko source_sha256=6dec683c8c617650e19e61abb2a66a03ff7f0fbe738d65f37a7b12e18b95466a -->
 # QuickJS 마이그레이션 완료 런북
 
 **Languages:** [English](QUICKJS_MIGRATION_COMPLETION.md) | [한국어](QUICKJS_MIGRATION_COMPLETION.ko.md) | [日本語](QUICKJS_MIGRATION_COMPLETION.ja.md) | [简体中文](QUICKJS_MIGRATION_COMPLETION.zh-CN.md)
@@ -92,7 +92,7 @@ schema 삭제를 뜻하지 않는다.
 | macOS | Program 정적 + 공유; 런타임/Harness 테스트; C 스모크; 설치된 컨슈머 | 정적 + 공유 설치 컨슈머 |
 | Windows x64 | MSVC를 사용한 Program 정적 + 공유; 런타임/Harness 테스트; C 스모크; 설치된 컨슈머 | 정적 + 공유 설치 컨슈머 |
 
-설치된 QuickJS 소비자는 단순한 구문 거부가 아닌 설치된 패키지를 통한 **성공적인** `define()` 및 `function* main()` 게시/실행을 수행해야 합니다. 또한 기존의 독립적으로 링크된 두 번째 QuickJS 충돌 프로브를 유지해야 합니다. `scripts/test_find_package.sh`를 확장하거나(또는 이를 동등한 플랫폼 인식 드라이버로 대체) Windows에서 기본 검사 도구로 정적 심볼 네임스페이싱과 공유 내보내기 숨김을 검증하여 검사를 건너뛰지 않도록 하십시오.
+설치된 QuickJS 소비자는 단순한 구문 거부가 아닌 설치된 패키지를 통한 **성공적인** `define()` 및 `function* main()` 게시/실행을 수행해야 합니다. 또한 기존의 독립적으로 링크된 두 번째 QuickJS 충돌 프로브를 유지해야 합니다. 설치 소비자 드라이버는 `python scripts/verify_ci.py install --work-dir <fresh-output> --jobs 2 --program --quickjs`이며 공유 라이브러리는 `--shared`를 추가합니다. Private-symbol 검사는 ELF/Mach-O 전용이고 현재 Windows 설치 행은 `--quickjs`를 생략합니다. 이 완료 기준의 Windows 정적 namespacing과 공유 export 숨김에는 native 검사 근거가 여전히 필요하며 runtime/C ABI test가 이를 대체하지 않습니다.
 
 **Exit:** all rows run at the installed prefix and record package metadata, loader/link closure, executable output, and private-symbol inspection results.
 
@@ -114,9 +114,10 @@ schema 삭제를 뜻하지 않는다.
 1. 기존 Linux 차단 매트릭스를 실행합니다:
 
    ```sh
-   scripts/build_quickjs_performance_matrix.sh \
-     <fresh-build-root> <evidence-root>/quickjs-performance-linux.json
+   python scripts/verify_ci.py quickjs-performance --work-dir <fresh-build-root> --jobs 4
    ```
+
+   자신이 소유한 아직 존재하지 않는 새 build root와 실제 소스 루트 Git checkout을 사용하세요. 변경하지 않은 `run_quickjs_performance.py`는 commit/dirty provenance를 요구하므로 무관한 checkout 아래에 압축을 푼 archive로는 충분하지 않습니다. 대응하는 disabled/enabled build와 결과는 이 root에 남습니다. `<fresh-build-root>/quickjs-performance.json`을 비공개 증거 인덱스에 보존하세요.
 
 승인된 사전 등록은 임계값 권위로 유지됩니다. 실패한 후보에 대응하여 임계값을 완화하지 마십시오.
 2. macOS와 Windows를 측정하기 전에 시작, 할당, 활성화되었지만 사용되지 않음/Core 전용 측정에 대한 버전 관리된 사전 등록을 추가합니다. 단일 타이밍이 아닌 반복된 콜드/웜 분포를 기록합니다.

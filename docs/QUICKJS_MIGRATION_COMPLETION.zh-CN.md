@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/QUICKJS_MIGRATION_COMPLETION.md locale=zh-CN source_sha256=9d60815c273f2c94969dbfefe5eb7d6bdbd58075e51e06a7f753a36461e31d0b -->
+<!-- neograph-i18n: source=docs/QUICKJS_MIGRATION_COMPLETION.md locale=zh-CN source_sha256=6dec683c8c617650e19e61abb2a66a03ff7f0fbe738d65f37a7b12e18b95466a -->
 # QuickJS 迁移完成运行手册
 
 **Languages:** [English](QUICKJS_MIGRATION_COMPLETION.md) | [한국어](QUICKJS_MIGRATION_COMPLETION.ko.md) | [日本語](QUICKJS_MIGRATION_COMPLETION.ja.md) | [简体中文](QUICKJS_MIGRATION_COMPLETION.zh-CN.md)
@@ -91,7 +91,7 @@
 | macOS | Program 静态 + 共享；运行时/Harness 测试；C 冒烟测试；已安装消费者 | static / shared installed consumer |
 | Windows x64 | 使用 MSVC 的 Program 静态 + 共享；运行时/回溯 Harness 测试；C 冒烟测试；已安装的 installed consumer | static / shared installed consumer |
 
-已安装的 QuickJS 使用者必须通过已安装的包执行一次**成功的** `define()` 以及 `function* main()` 发布/运行，而不仅仅是语法拒绝。它还必须保留现有的独立链接的第二个 QuickJS 冲突检测探针。扩展 `scripts/test_find_package.sh` （或将其替换为等效的平台感知驱动程序），以便Windows使用原生检查工具验证静态符号命名空间和共享导出隐藏，而不是跳过该检查。
+已安装的 QuickJS 使用者必须通过已安装的包执行一次**成功的** `define()` 以及 `function* main()` 发布/运行，而不仅仅是语法拒绝。它还必须保留现有的独立链接的第二个 QuickJS 冲突检测探针。Installed-consumer 驱动为 `python scripts/verify_ci.py install --work-dir <fresh-output> --jobs 2 --program --quickjs`，shared library 添加 `--shared`。Private-symbol 检查仍仅支持 ELF/Mach-O，当前 Windows install 行省略 `--quickjs`。该完成标准的 Windows static namespacing 和 shared export hiding 仍需 native inspection 证据，runtime/C ABI test 不可替代。
 
 **Exit：** 所有行均从已安装的前缀运行，并记录包元数据、加载器/链接闭包、可执行输出和私有符号检查结果。
 
@@ -113,9 +113,10 @@
 1. 运行现有的 Linux 阻塞矩阵：
 
    ```sh
-   scripts/build_quickjs_performance_matrix.sh \
-     <fresh-build-root> <evidence-root>/quickjs-performance-linux.json
+   python scripts/verify_ci.py quickjs-performance --work-dir <fresh-build-root> --jobs 4
    ```
+
+   使用自有且尚不存在的新 build root，以及实际源码根目录 Git checkout。未修改的 `run_quickjs_performance.py` 要求 commit/dirty provenance，因此在无关 checkout 下解压 archive 并不足够。匹配的 disabled/enabled build 与结果均保留在此 root 下；将 `<fresh-build-root>/quickjs-performance.json` 保存在私有证据索引中。
 
 其已接受的预注册仍然是阈值权威；不要因候选失败而放宽阈值。
 2. 在测量 macOS 和 Windows 之前，为其启动、分配以及已启用但未使用/Core-only 测量添加版本控制的预注册。记录重复的冷/热分布，而不是单次计时。

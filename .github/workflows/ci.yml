@@ -7,8 +7,6 @@ on:
     branches: [master]
   workflow_dispatch:
 
-# Cancel any in-progress run on the same ref when a new push lands —
-# a stale CI on an outdated commit is wasted minutes.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -18,34 +16,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install opt-in gRPC toolchain
         run: |
           bash scripts/ci_apt_install.sh cmake build-essential pkg-config \
             libssl-dev libcurl4-openssl-dev libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc
-      - name: Configure gRPC boundary gate
-        run: |
-          cmake -S . -B build-grpc \
-            -DNEOGRAPH_BUILD_TESTS=ON \
-            -DNEOGRAPH_BUILD_GRPC=ON \
-            -DNEOGRAPH_BUILD_A2A=OFF \
-            -DNEOGRAPH_BUILD_ACP=OFF \
-            -DNEOGRAPH_BUILD_POSTGRES=OFF \
-            -DNEOGRAPH_BUILD_SQLITE=OFF \
-            -DNEOGRAPH_USE_LIBCURL=OFF \
-            -DNEOGRAPH_BUILD_EXAMPLES=OFF
-      - name: Build and execute gRPC shared contract
-        run: |
-          cmake --build build-grpc --target neograph_grpc_graph_contract_tests -j2
-          ctest --test-dir build-grpc -R '^neograph.grpc_graph_contract$' \
-            --output-on-failure
+      - name: Verify gRPC shared contract
+        run: python scripts/verify_ci.py grpc --work-dir build-grpc --jobs 2
 
   build-and-test:
     runs-on: ubuntu-latest
-
-    # PostgresCheckpointStore integration tests run against this container.
-    # The job-level service exposes 5432 inside the runner; tests target it
-    # via NEOGRAPH_TEST_POSTGRES_URL below. The DB name matches what
-    # tests/test_postgres_checkpoint.cpp expects after drop_schema().
     services:
       postgres:
         image: postgres:16-alpine
@@ -53,37 +35,23 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: test
           POSTGRES_DB: neograph_test
-        ports:
-          - 5432:5432
+        ports: ['5432:5432']
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 2s
           --health-timeout 5s
           --health-retries 30
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
-      - name: Install build dependencies
+      - name: Install build and test dependencies
         run: |
-          bash scripts/ci_apt_install.sh \
-            cmake \
-            build-essential \
-            libpq-dev \
-            libsqlite3-dev \
-            libssl-dev \
-            libcurl4-openssl-dev \
-            pkg-config \
-            python3 \
-            ccache
-
-      # ccache turns repeat CI runs into mostly-link-time work.
-      # 500MB cap avoids cache.actions.io quota issues; warm hit on the
-      # 200+ object files saves about 4 minutes per run.
+          bash scripts/ci_apt_install.sh cmake build-essential libpq-dev postgresql-client \
+            libsqlite3-dev libssl-dev libcurl4-openssl-dev pkg-config ccache
+          python -m pip install -U pytest pydantic certifi "a2a-sdk[http-server]>=1.1,<2" \
+            "agent-client-protocol==0.12.1" uvicorn
       - name: Restore ccache
         uses: actions/cache@v4
         with:
@@ -91,195 +59,78 @@ jobs:
           key: ccache-${{ runner.os }}-${{ github.sha }}
           restore-keys: |
             ccache-${{ runner.os }}-
-
       - name: Configure ccache
         run: |
           echo "PATH=/usr/lib/ccache:$PATH" >> $GITHUB_ENV
           ccache --max-size=500M
           ccache --zero-stats
-
-      - name: Configure (Release, all backends on)
-        run: |
-          cmake -B build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DNEOGRAPH_BUILD_LLM=ON \
-            -DNEOGRAPH_BUILD_MCP=ON \
-            -DNEOGRAPH_BUILD_UTIL=ON \
-            -DNEOGRAPH_BUILD_POSTGRES=ON \
-            -DNEOGRAPH_BUILD_PYBIND=ON \
-            -DNEOGRAPH_BUILD_PROGRAM=ON \
-            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
-            -DNEOGRAPH_BUILD_TESTS=ON \
-            -DNEOGRAPH_BUILD_EXAMPLES=OFF
-
-      - name: Build
-        run: cmake --build build -j$(nproc)
-
-      - name: ccache stats
-        run: ccache --show-stats
-
-      - name: Run focused Program value tests
-        run: ./build/tests/neograph_program_tests
-
-      - name: Install Python test dependencies
-        run: python -m pip install -U pytest pydantic certifi
-
-      - name: Run tests (with Postgres)
-        working-directory: build
+      - name: Verify full Release and both protocol persistence paths
         env:
-          # The service container is reachable at localhost:5432 because
-          # the job maps the port. drop_schema() inside SetUp wipes any
-          # prior state, so this DB starts clean every run.
           NEOGRAPH_TEST_POSTGRES_URL: postgresql://postgres:test@localhost:5432/neograph_test
-        run: ctest --output-on-failure -j$(nproc)
-
-      - name: Run official A2A and ACP SDK integration tests
-        env:
-          PYTHONPATH: build
-        run: |
-          python -m pip install -U "a2a-sdk[http-server]>=1.1,<2" \
-            "agent-client-protocol==0.12.1" uvicorn
-          NEOGRAPH_TEST_POSTGRES_URL=postgresql://postgres:test@localhost:5432/neograph_test \
-            python -m pytest -q bindings/python/tests/test_protocol_sdk_e2e.py
-          python -m pytest -q \
-            bindings/python/tests/test_protocol_sdk_e2e.py::test_acp_streaming_and_durable_session_load
-
-      # On failure, surface the raw gtest log so a contributor can debug
-      # without re-running locally with PG provisioned.
+        run: python scripts/verify_ci.py native-linux --work-dir build-native --jobs $(nproc) --ccache
+      - name: ccache stats
+        if: always()
+        run: ccache --show-stats
       - name: Upload test logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: ctest-logs
-          path: build/Testing/Temporary/LastTest.log
+          path: build-native/build/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
 
-  # ──────────────────────────────────────────────────────────────────
-  # Cross-platform build verification (Stage 3 / Sem 4 follow-up).
-  #
-  # 2.0 added platform-split code in two places — `src/mcp/client.cpp`
-  # (fork/pipe vs CreateProcess/named-pipe) and `src/core/
-  # postgres_checkpoint.cpp` (asio::posix vs asio::ip::tcp socket wrap
-  # of libpq PQsocket). These jobs prove both branches compile and
-  # that the core + async HTTP path runs on macOS and Windows, so
-  # contributors editing either branch get CI coverage regardless of
-  # which host they build on.
-  #
-  # Tests skipped here:
-  # * Postgres integration — no `services:` container on macOS /
-  #   Windows runners; re-enabling later means either a hosted PG or
-  #   setup-postgresql action. Build still exercises libpq link.
-  # * Full ctest on Windows — MCP stdio test wants python3 and is
-  #   covered on Ubuntu already; Windows runs the rest.
-  # Native ARM64 ctest gate — the GitHub-hosted ubuntu-24.04-arm runner
-  # is a real ARM64 machine (not QEMU), so this catches arch-specific
-  # bugs (atomic codegen, alignment, narrow-int wraparound) that an
-  # x86_64 runner can't see. PG service is omitted — same trade-off as
-  # macOS, the libpq link is exercised via build but the integration
-  # tests `GTEST_SKIP` themselves when NEOGRAPH_TEST_POSTGRES_URL isn't
-  # set. Mirrors build-and-test (Linux x86_64) otherwise.
+  # Actual hosted ARM64, not an x86 substitute. PG remains build-only here.
   build-and-test-arm64:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install build dependencies
         run: |
-          bash scripts/ci_apt_install.sh \
-            cmake \
-            build-essential \
-            libpq-dev \
-            libsqlite3-dev \
-            libssl-dev \
-            libcurl4-openssl-dev \
-            pkg-config \
-            python3
-
-      - name: Configure (Release, all backends on)
-        run: |
-          cmake -B build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DNEOGRAPH_BUILD_LLM=ON \
-            -DNEOGRAPH_BUILD_MCP=ON \
-            -DNEOGRAPH_BUILD_UTIL=ON \
-            -DNEOGRAPH_BUILD_POSTGRES=ON \
-            -DNEOGRAPH_BUILD_SQLITE=ON \
-            -DNEOGRAPH_BUILD_PROGRAM=ON \
-            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
-            -DNEOGRAPH_BUILD_TESTS=ON \
-            -DNEOGRAPH_BUILD_EXAMPLES=OFF
-
-      - name: Build
-        run: cmake --build build -j$(nproc)
-
-      - name: Run tests (no Postgres service — PG cases skip themselves)
-        working-directory: build
-        run: ctest --output-on-failure -j$(nproc)
-
+          bash scripts/ci_apt_install.sh cmake build-essential libpq-dev libsqlite3-dev \
+            libssl-dev libcurl4-openssl-dev pkg-config
+      - name: Verify native ARM64 all-backend build
+        run: python scripts/verify_ci.py native-posix --work-dir build-native --jobs $(nproc)
       - name: Upload test logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: ctest-logs-arm64
-          path: build/Testing/Temporary/LastTest.log
+          path: build-native/build/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
 
   build-macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install build dependencies
         run: |
           brew update
           brew install cmake libpq openssl@3 sqlite curl
-          # Homebrew's TLS, database and curl packages are keg-only.
           echo "CMAKE_PREFIX_PATH=$(brew --prefix libpq):$(brew --prefix sqlite):$(brew --prefix openssl@3):$(brew --prefix curl)" >> $GITHUB_ENV
-
-      - name: Configure (all backends on, Postgres build-only)
-        run: |
-          cmake -B build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DNEOGRAPH_BUILD_LLM=ON \
-            -DNEOGRAPH_BUILD_MCP=ON \
-            -DNEOGRAPH_BUILD_UTIL=ON \
-            -DNEOGRAPH_BUILD_POSTGRES=ON \
-            -DNEOGRAPH_BUILD_TESTS=ON \
-            -DNEOGRAPH_BUILD_PROGRAM=ON \
-            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
-            -DNEOGRAPH_BUILD_EXAMPLES=OFF
-
-      - name: Build
-        run: cmake --build build -j$(sysctl -n hw.ncpu)
-
-      - name: Run tests (no Postgres service — PG cases skip themselves)
-        working-directory: build
-        run: ctest --output-on-failure -j$(sysctl -n hw.ncpu)
-
+      - name: Verify macOS all-backend build (PG build-only)
+        run: python scripts/verify_ci.py native-posix --work-dir build-native --jobs $(sysctl -n hw.ncpu)
       - name: Upload test logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: ctest-logs-macos
-          path: build/Testing/Temporary/LastTest.log
+          path: build-native/build/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
 
   build-windows:
-    # Pinned to windows-2022: the windows-latest image rolled to
-    # windows-2025, where CMake's "Visual Studio 17 2022" generator can
-    # no longer locate a VS instance ("could not find any instance of
-    # Visual Studio") at the project() configure step. windows-2022
-    # still ships VS 2022. Revisit when the workflow moves to a
-    # Ninja + msvc-dev-cmd setup that is image-agnostic.
     runs-on: windows-2022
-    # Keep the database-free native Windows build alongside the full wheel
-    # matrix. Core still requires SchemaProvider's OpenSSL/HTTP2 curl runtime.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install SDK transport dependencies
         shell: pwsh
         run: |
@@ -287,65 +138,30 @@ jobs:
           $root = $env:VCPKG_INSTALLATION_ROOT
           "CMAKE_TOOLCHAIN_FILE=$root/scripts/buildsystems/vcpkg.cmake" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
           "$root/installed/x64-windows/bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
-
-      - name: Configure (Program + QuickJS + MCP + async; databases disabled)
+          "$root/installed/x64-windows/tools/openssl" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
+      - name: Verify DB-free native MSVC, C ABI and full ctest
         shell: pwsh
-        run: |
-          cmake -B build `
-            -G "Visual Studio 17 2022" -A x64 `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DNEOGRAPH_USE_LIBCURL=OFF `
-            -DNEOGRAPH_BUILD_LLM=ON `
-            -DNEOGRAPH_BUILD_MCP=ON `
-            -DNEOGRAPH_BUILD_UTIL=ON `
-            -DNEOGRAPH_BUILD_POSTGRES=OFF `
-            -DNEOGRAPH_BUILD_SQLITE=OFF `
-            -DNEOGRAPH_BUILD_TESTS=ON `
-            -DNEOGRAPH_BUILD_PROGRAM=ON `
-            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON `
-            -DNEOGRAPH_BUILD_EXAMPLES=OFF
-
-      - name: Build
-        shell: pwsh
-        run: cmake --build build --config Release -j
-
-      # Keep the C-header consumer ABI separate from the much larger C++ suite:
-      # MSVC's C aggregate initialization has previously corrupted QuickJS's
-      # static function tables while C++ callers remained healthy.
-      - name: Smoke test QuickJS C embedding under MSVC
-        shell: pwsh
-        working-directory: build
-        run: ctest -C Release --output-on-failure -R "^QuickJS[.]CEmbeddingSmoke$"
-
-      - name: Run tests (no Postgres; MCP stdio uses bundled `python`)
-        shell: pwsh
-        working-directory: build
-        run: ctest -C Release --output-on-failure -j
-
+        run: python scripts/verify_ci.py native-windows --work-dir build-native --jobs $env:NUMBER_OF_PROCESSORS
       - name: Upload test logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: ctest-logs-windows
-          path: build/Testing/Temporary/LastTest.log
+          path: build-native/build/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
 
   build-windows-asan:
-    # Focused native-MSVC sanitizer canary for the Program/QuickJS boundary.
-    # Release mode avoids /RTC incompatibility; /Zi retains actionable stacks.
-    # VS 2022's MSVC 19.44 miscomputes the frame address used by an ASan-
-    # instrumented coroutine catch funclet (run_one_async$_ResumeCoro$1::catch$0).
-    # Use the current production toolset, which also lets this job retain the
-    # complete ProgramRuntime coverage instead of suppressing the affected tests.
+    # VS 2022 MSVC 19.44 has an ASan coroutine catch-funclet defect.
     runs-on: windows-2025-vs2026
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
-
       - name: Install SDK transport dependencies
         shell: pwsh
         run: |
@@ -353,183 +169,49 @@ jobs:
           $root = $env:VCPKG_INSTALLATION_ROOT
           "CMAKE_TOOLCHAIN_FILE=$root/scripts/buildsystems/vcpkg.cmake" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
           "$root/installed/x64-windows/bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
-
-      - name: Configure (MSVC AddressSanitizer, Program + QuickJS only)
+      - name: Verify serial full Program and QuickJS ASan boundary
         shell: pwsh
-        run: |
-          cmake -B build-windows-asan `
-            -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DNEOGRAPH_BUILD_LLM=OFF `
-            -DNEOGRAPH_BUILD_MCP=OFF `
-            -DNEOGRAPH_BUILD_UTIL=OFF `
-            -DNEOGRAPH_BUILD_ASYNC=OFF `
-            -DNEOGRAPH_BUILD_MCP_CLIENT=OFF `
-            -DNEOGRAPH_BUILD_MCP_SERVER=OFF `
-            -DNEOGRAPH_BUILD_MCP_HTTP_SERVER=OFF `
-            -DNEOGRAPH_BUILD_A2A=OFF `
-            -DNEOGRAPH_BUILD_ACP=OFF `
-            -DNEOGRAPH_BUILD_PYBIND=OFF `
-            -DNEOGRAPH_BUILD_GRPC=OFF `
-            -DNEOGRAPH_USE_LIBCURL=OFF `
-            -DNEOGRAPH_BUILD_POSTGRES=OFF `
-            -DNEOGRAPH_BUILD_SQLITE=OFF `
-            -DNEOGRAPH_BUILD_PROGRAM=ON `
-            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON `
-            -DNEOGRAPH_BUILD_TESTS=ON `
-            -DNEOGRAPH_BUILD_EXAMPLES=OFF `
-            -DNEOGRAPH_BUILD_BENCHMARKS=OFF `
-            -DCMAKE_C_FLAGS="/fsanitize=address /Zi" `
-            -DCMAKE_CXX_FLAGS="/fsanitize=address /Zi" `
-            -DCMAKE_EXE_LINKER_FLAGS="/INCREMENTAL:NO"
-
-      - name: Build Program and QuickJS sanitizer targets
-        shell: pwsh
-        run: |
-          cmake --build build-windows-asan --config Release -j `
-            --target neograph_program_tests neograph_quickjs_tests neograph_quickjs_c_smoke
-
-      - name: Run QuickJS boundary tests under MSVC AddressSanitizer
-        shell: pwsh
-        run: |
-          # These tests enforce their own wall-time ceilings. Running every
-          # ASan-instrumented process concurrently can exhaust the four-core
-          # hosted runner and turn scheduler delay into a false timeout.
-          ctest --test-dir build-windows-asan -C Release `
-            --output-on-failure -j 1 `
-            -R "^(QuickJS[.]|QuickJsRuntimeTest[.]|ProgramCompilerTest[.]JavaScript|ProgramRuntimeTest[.]JavaScript|ProgramCatalogTest[.]JavaScript)"
-
+        run: python scripts/verify_ci.py msvc-asan --work-dir build-windows-asan --jobs $env:NUMBER_OF_PROCESSORS
       - name: Upload sanitizer logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: ctest-logs-windows-asan
-          path: build-windows-asan/Testing/Temporary/LastTest.log
+          path: build-windows-asan/build/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
 
-  # ──────────────────────────────────────────────────────────────────
-  # Async benchmark regression gate (Stage 3 / Sem 4.6).
-  #
-  # The async wire's value axis is burst concurrency — engine-overhead
-  # µs measured by bench_neograph is a secondary guard. CI fails fast
-  # if any of the three gates drop below the committed floors on PR,
-  # so a regression is caught before merge.
-  #
-  # Thresholds are intentionally loose (30%+ headroom over measured
-  # values on the feat/async-api branch as of 2026-04-21) to tolerate
-  # GitHub runner noise. Tighten later with baselined JSON if the
-  # numbers prove stable across several weeks of runs.
-  #
-  # Runs in parallel with build-and-test; separate job so the bench
-  # result is isolated from the main test failure mode. Postgres
-  # isn't needed here — the benches only exercise the async HTTP
-  # layer + engine core.
   bench-regression:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install build dependencies
-        run: |
-          bash scripts/ci_apt_install.sh \
-            cmake build-essential libssl-dev libcurl4-openssl-dev pkg-config
+        run: bash scripts/ci_apt_install.sh cmake build-essential libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config
+      - name: Verify original four benchmark gates
+        run: python scripts/verify_ci.py benchmark --work-dir build-bench --jobs $(nproc)
 
-      - name: Configure (Release, benches on, postgres off)
-        run: |
-          cmake -B build-bench \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DNEOGRAPH_BUILD_BENCHMARKS=ON \
-            -DNEOGRAPH_BUILD_POSTGRES=OFF \
-            -DNEOGRAPH_BUILD_TESTS=OFF
-
-      - name: Build benches
-        run: |
-          cmake --build build-bench -j$(nproc) \
-            --target bench_async_http bench_async_fanout bench_neograph
-
-      - name: Gate — bench_async_http async_pool @ 1000 concur (floor 12000 ops/s)
-        run: |
-          out=$(./build-bench/bench_async_http --mode async_pool \
-                --concur 1000 --rounds 5 --latency-ms 5)
-          echo "$out"
-          # bench prints `ops/s=  14817.2` with variable spacing — sed
-          # pulls out the number after `ops/s=`.
-          ops=$(echo "$out" | sed -n 's/.*ops\/s=[[:space:]]*\([0-9.]*\).*/\1/p')
-          awk -v v="$ops" 'BEGIN{ if (v+0 < 12000) { print "FAIL: " v " < 12000"; exit 1 } print "ok: " v " >= 12000" }'
-
-      - name: Gate — bench_async_fanout 50K concur (floor 300K ops/s, rss <= 120MB)
-        run: |
-          out=$(./build-bench/bench_async_fanout --concur 50000)
-          echo "$out"
-          ops=$(echo "$out" | sed -n 's/.*ops\/s=[[:space:]]*\([0-9.]*\).*/\1/p')
-          rss=$(echo "$out" | sed -n 's/.*rss_mb=[[:space:]]*\([0-9.]*\).*/\1/p')
-          awk -v v="$ops" 'BEGIN{ if (v+0 < 300000) { print "FAIL ops/s: " v " < 300000"; exit 1 } print "ok ops/s: " v }'
-          awk -v v="$rss" 'BEGIN{ if (v+0 > 120)    { print "FAIL rss: "   v " > 120 MB"; exit 1 } print "ok rss: " v " MB" }'
-
-      - name: Gate — bench_neograph worker=1 (engine overhead ceiling seq 60µs / par 300µs)
-        run: |
-          out=$(./build-bench/bench_neograph 10000 5000 1)
-          echo "$out"
-          # Output: tab-separated `seq<TAB>count<TAB>total_ms<TAB>per_op_us`
-          seq_us=$(echo "$out" | awk -F'\t' '$1=="seq" {print $4}')
-          par_us=$(echo "$out" | awk -F'\t' '$1=="par" {print $4}')
-          awk -v v="$seq_us" 'BEGIN{ if (v+0 > 60)  { print "FAIL seq: " v "us > 60"; exit 1 } print "ok seq: " v "us" }'
-          awk -v v="$par_us" 'BEGIN{ if (v+0 > 300) { print "FAIL par: " v "us > 300"; exit 1 } print "ok par: " v "us" }'
-
-          # Exercise the explicit hardware-concurrency mode without treating its
-          # thread-pool coordination cost as the worker=1 regression signal.
-          auto_out=$(./build-bench/bench_neograph 100 50 auto)
-          echo "$auto_out"
-          echo "$auto_out" | awk -F'\t' '$1=="config" && $2=="par_workers" && $3 ~ /^auto\(/ {found=1} END {exit !found}'
-
-  # Blocking Release gate for the preregistered QuickJS performance matrix.
-  # Enabled-but-unused Core overhead is capped at 1.10x median / 1.15x p95;
-  # one failed pass receives the documented paired 20-sample rerun. The script
-  # configures only the optional Program/QuickJS targets and their matched Core
-  # probe, keeping unrelated optional components disabled.
   quickjs-performance:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install build dependencies
-        run: |
-          bash scripts/ci_apt_install.sh \
-            cmake build-essential python3 libssl-dev libcurl4-openssl-dev pkg-config
-
-      - name: Run blocking QuickJS matrix (Core median 1.10x / p95 1.15x)
-        run: |
-          mkdir -p artifacts
-          scripts/build_quickjs_performance_matrix.sh \
-            "$RUNNER_TEMP/neograph-quickjs-performance" \
-            "$GITHUB_WORKSPACE/artifacts/quickjs-performance.json"
-
+        run: bash scripts/ci_apt_install.sh cmake build-essential libssl-dev libcurl4-openssl-dev pkg-config
+      - name: Verify immutable QuickJS matrix
+        run: python scripts/verify_ci.py quickjs-performance --work-dir "$RUNNER_TEMP/neograph-quickjs-performance" --jobs $(nproc)
       - name: Upload QuickJS performance report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: quickjs-performance-report
-          path: artifacts/quickjs-performance.json
+          path: ${{ runner.temp }}/neograph-quickjs-performance/quickjs-performance.json
           if-no-files-found: error
           retention-days: 30
 
-  # Compile + ctest under -fsanitize=address,undefined and run the
-  # no-network examples in the same configuration. ASan caught a
-  # false-positive in the recursion guard during the 2026-04-29 audit
-  # (a per-thread depth counter that fired across legitimate subgraph
-  # nesting) AND a use-after-scope in run_async's RunConfig
-  # parameter (the awaitable held a reference to a stack-local config
-  # that callers commonly let go out of scope before co_spawn fired)
-  # — without this gate the only line of defence was a one-shot local
-  # sweep. Now every PR pays ~5 minutes of build + test under
-  # sanitizers, so any future UAF / leak / undefined-behaviour
-  # regression fails red before merge.
-  #
-  # Runs in parallel with build-and-test. Postgres is enabled to
-  # exercise the libpq ASan surface (NeoGraph allocates around it,
-  # so any PG-path leak shows up here). MCP / HTTP / TLS surfaces
-  # are also covered — see tests/lsan_suppressions.txt for the
-  # known-leak list from third-party C libraries.
   sanitizer-test:
     runs-on: ubuntu-latest
     services:
@@ -539,7 +221,7 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: test
           POSTGRES_DB: neograph_test
-        ports: ["5432:5432"]
+        ports: ['5432:5432']
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s
@@ -547,261 +229,44 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install build dependencies
-        run: |
-          bash scripts/ci_apt_install.sh \
-            cmake build-essential libssl-dev libcurl4-openssl-dev \
-            libpq-dev pkg-config
-
-      - name: Configure (Debug + ASan + UBSan, postgres on)
-        run: |
-          cmake -B build-asan \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DNEOGRAPH_BUILD_TESTS=ON \
-            -DNEOGRAPH_BUILD_EXAMPLES=ON \
-            -DNEOGRAPH_BUILD_COOKBOOK_JARVIS=ON \
-            -DNEOGRAPH_JARVIS_FORCE_MOCK=ON \
-            -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
-            -DNEOGRAPH_BUILD_POSTGRES=ON \
-            -DNEOGRAPH_BUILD_PROGRAM=ON \
-            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
-            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -O1" \
-            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -O1" \
-            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-
-      - name: Validate LSan suppression boundary
-        run: |
-          if grep -E '^[[:space:]]*leak:.*(neograph::|NeoGraph)' \
-              tests/lsan_suppressions.txt; then
-            echo "::error::LSan suppressions must never match NeoGraph symbols"
-            exit 1
-          fi
-
-      - name: Build (everything)
-        run: cmake --build build-asan -j$(nproc)
-
-      - name: Run ctest under ASan + UBSan
-        env:
-          # detect_leaks=1 enables LSan exit-time check; the few
-          # third-party libs we link (libssl, libpq, libcurl) get
-          # suppressed via tests/lsan_suppressions.txt.
-          ASAN_OPTIONS: "detect_leaks=1:halt_on_error=0:abort_on_error=0:strict_init_order=1"
-          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=0"
-          LSAN_OPTIONS: "suppressions=${{ github.workspace }}/tests/lsan_suppressions.txt"
-          NEOGRAPH_TEST_POSTGRES_URL: postgresql://postgres:test@localhost:5432/neograph_test
-        run: |
-          ctest --test-dir build-asan -E "BIG_|valgrind" --output-on-failure
-
-      - name: Run no-network examples under ASan + UBSan
-        env:
-          ASAN_OPTIONS: "detect_leaks=1:halt_on_error=0:abort_on_error=0:strict_init_order=1"
-          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=0"
-          LSAN_OPTIONS: "suppressions=${{ github.workspace }}/tests/lsan_suppressions.txt"
-        run: |
-          set -e
-          examples="example_custom_graph example_send_command example_intent_routing
-                    example_state_management example_all_features example_subgraph
-                    example_checkpoint_hitl example_classifier_fanout
-                    example_async_concurrent_runs example_parallel_fanout
-                    example_plan_executor"
-          for ex in $examples; do
-            if [ -x "./build-asan/$ex" ]; then
-              echo "::group::$ex"
-              timeout 90 "./build-asan/$ex" >/dev/null
-              echo "  ok"
-              echo "::endgroup::"
-            else
-              echo "::warning::$ex not built; skipping"
-            fi
-          done
-
-      - name: Build Python binding with ASan
-        run: |
-          # Reconfigure with NEOGRAPH_BUILD_PYBIND=ON; binding inherits
-          # the same -fsanitize=address,undefined flags from CMAKE_CXX_FLAGS.
-          cmake -B build-asan -DNEOGRAPH_BUILD_PYBIND=ON
-          cmake --build build-asan -j$(nproc) --target _neograph
-          # scikit-build-core normally copies __init__.py into the
-          # build dir; do it manually so PYTHONPATH=build-asan works.
-          cp bindings/python/neograph_engine/__init__.py \
-             build-asan/neograph_engine/__init__.py
-          cp bindings/python/neograph_engine/llm.py \
-             build-asan/neograph_engine/llm.py 2>/dev/null || true
-          cp bindings/python/neograph_engine/streaming.py \
-             build-asan/neograph_engine/streaming.py 2>/dev/null || true
-          cp bindings/python/neograph_engine/tracing.py \
-             build-asan/neograph_engine/tracing.py 2>/dev/null || true
-
-      - name: Set up Python + pytest
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
-      - name: Run pytest under ASan + LSan (with interpreter suppressions)
-        env:
-          # detect_leaks=1 enables LSan exit-time check. Without
-          # suppressions Python's intentional caches and pybind11's
-          # type-system init swamp the signal — the LSAN_OPTIONS file
-          # silences those (third-party only) so any genuine leak in
-          # NeoGraph's binding code surfaces.
-          ASAN_OPTIONS: "detect_leaks=1:halt_on_error=1:abort_on_error=0:print_suppressions=0"
-          UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=0"
-          LSAN_OPTIONS: "suppressions=${{ github.workspace }}/tests/lsan_suppressions.txt:exitcode=23"
+      - name: Install build and Python test dependencies
         run: |
-          # The PYTHONPATH=build-asan:bindings/python flow below imports
-          # the package without going through `pip install -e .`, so
-          # the runtime deps from pyproject.toml are NOT auto-installed.
-          # Mirror them here. Keep this in sync with pyproject.toml's
-          # ``dependencies = [...]`` list.
+          bash scripts/ci_apt_install.sh cmake build-essential libssl-dev libcurl4-openssl-dev \
+            libpq-dev postgresql-client libsqlite3-dev pkg-config
           python -m pip install --quiet pytest pydantic certifi
-          # libasan must be in LD_PRELOAD so its __cxa_throw interceptor is
-          # registered before _neograph.so is dlopen'd by Python.
-          #
-          # libstdc++ must be preloaded WITH it, and that is the whole story
-          # behind the deselect list this step used to carry. ASan's
-          # __cxa_throw interceptor resolves the real __cxa_throw by dlsym at
-          # init; with only libasan preloaded, libstdc++ is not in the link map
-          # yet, the lookup yields null, and the first C++ throw dies on
-          #
-          #     asan_interceptors.cpp:458 CHECK failed:
-          #       ((__interception::real___cxa_throw)) != (0)
-          #
-          # pybind11 turns *every* Python exception raised inside a node into a
-          # C++ throw (error_already_set), so this hit any test where Python
-          # code raised. Nine of them were switched off by name and written up
-          # as "a known sanitizer limitation". It was not a limitation; it was
-          # a preload-order bug in this file. Preloading libstdc++ as well
-          # makes the symbol resolvable, and all nine pass — so the deselect
-          # list is gone and the whole suite runs under ASan/LSan/UBSan again.
-          export LD_PRELOAD="$(gcc -print-file-name=libasan.so):$(gcc -print-file-name=libstdc++.so)"
-          export PYTHONPATH=build-asan:bindings/python
-          python -m pytest bindings/python/tests/ -q
+      - name: Verify full ASan UBSan LSan native, examples and Python
+        env:
+          NEOGRAPH_TEST_POSTGRES_URL: postgresql://postgres:test@localhost:5432/neograph_test
+        run: python scripts/verify_ci.py asan --work-dir build-asan --jobs $(nproc)
 
-  # ThreadSanitizer race-detection gate. Catches data races that ASan
-  # can't see — concurrent reads/writes without happens-before. Caught
-  # zero NeoGraph races on first run (after suppressing benign asio /
-  # yyjson / OpenSSL library-internal races); fails red on any future
-  # regression in the engine's worker pool, scheduler, or
-  # CheckpointStore concurrency paths.
-  #
-  # Separate job from sanitizer-test because TSan and ASan instrument
-  # binaries incompatibly (you can't link both into the same artifact).
-  # Postgres compiled out — libpq's connection-pool internals trigger
-  # asio-shape races we'd suppress anyway, and the value-add over the
-  # ASan job's PG coverage is small.
   tsan-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install build dependencies
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies and process-local ASLR tool
         run: |
-          bash scripts/ci_apt_install.sh \
-            cmake build-essential libssl-dev libcurl4-openssl-dev \
-            pkg-config util-linux
+          bash scripts/ci_apt_install.sh cmake build-essential libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config util-linux
+      - name: Verify native TSan suite and real examples
+        run: python scripts/verify_ci.py tsan --work-dir build-tsan --jobs $(nproc)
 
-      - name: Configure (Debug + TSan, postgres off)
-        run: |
-          cmake -B build-tsan \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DNEOGRAPH_BUILD_TESTS=ON \
-            -DNEOGRAPH_BUILD_EXAMPLES=ON \
-            -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
-            -DNEOGRAPH_BUILD_POSTGRES=OFF \
-            -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -O1 -g" \
-            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
-
-      - name: Build (everything)
-        run: cmake --build build-tsan -j$(nproc)
-
-      - name: Run ctest under TSan
-        env:
-          # halt_on_error=0 lets every race be reported in one run
-          # rather than aborting on the first; suppressions file
-          # silences known-benign library races (asio, yyjson, OpenSSL).
-          TSAN_OPTIONS: "halt_on_error=0:second_deadlock_stack=1:suppressions=${{ github.workspace }}/tests/tsan_suppressions.txt"
-        run: |
-          # `setarch x86_64 -R` clears ADDR_NO_RANDOMIZE — TSan FATALs
-          # with "unexpected memory mapping" on kernels with high
-          # mmap_rnd_bits (Ubuntu 24.04+ default). The flag inherits
-          # through fork, so every test child also gets a TSan-friendly
-          # address layout.
-          setarch x86_64 -R ctest --test-dir build-tsan \
-            -E "BIG_|valgrind" --output-on-failure -j2
-
-      - name: Run no-network examples under TSan
-        env:
-          TSAN_OPTIONS: "halt_on_error=0:second_deadlock_stack=1:suppressions=${{ github.workspace }}/tests/tsan_suppressions.txt"
-        run: |
-          set -e
-          examples="example_classifier_fanout example_async_concurrent_runs
-                    example_parallel_fanout example_send_command
-                    example_plan_executor"
-          for ex in $examples; do
-            if [ -x "./build-tsan/$ex" ]; then
-              echo "::group::$ex"
-              setarch x86_64 -R timeout 90 "./build-tsan/$ex" >/dev/null
-              echo "  ok"
-              echo "::endgroup::"
-            fi
-          done
-
-  # libFuzzer canary — drives GraphCompiler::compile with mutated JSON
-  # for 60 seconds. The first run on master HEAD did 1.94 M iterations
-  # without crashing. CI re-runs the same pass on every PR, gated to
-  # 60 s wall so the job stays under 3 min total. A regression that
-  # introduces a parser UB or unhandled exception fails red here.
-  #
-  # Requires Clang for -fsanitize=fuzzer (libFuzzer ships in Clang's
-  # instrumentation runtime). GCC's gcc-fuzz is too narrow.
   fuzz-canary:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Clang and build dependencies
+        run: bash scripts/ci_apt_install.sh cmake build-essential clang libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config
+      - name: Verify 60-second libFuzzer canary
+        run: python scripts/verify_ci.py fuzz --work-dir build-fuzz --jobs $(nproc)
 
-      - name: Install Clang + build dependencies
-        run: |
-          bash scripts/ci_apt_install.sh \
-            cmake build-essential clang libssl-dev libcurl4-openssl-dev \
-            pkg-config
-
-      - name: Configure (Clang + libFuzzer)
-        env:
-          CC: clang
-          CXX: clang++
-        run: |
-          cmake -B build-fuzz \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DNEOGRAPH_BUILD_TESTS=ON \
-            -DNEOGRAPH_BUILD_FUZZ=ON \
-            -DNEOGRAPH_BUILD_EXAMPLES=OFF \
-            -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
-            -DNEOGRAPH_BUILD_POSTGRES=OFF
-
-      - name: Build fuzz target
-        run: cmake --build build-fuzz -j$(nproc) --target fuzz_graph_compile
-
-      - name: Fuzz GraphCompiler::compile (60 s wall)
-        run: |
-          # -max_total_time=60 caps the run; a crash exits non-zero.
-          # The seed corpus under tests/fuzz/corpus/graph_compile/ holds
-          # canonical valid graph JSONs that libFuzzer mutates from.
-          ./build-fuzz/tests/fuzz/fuzz_graph_compile \
-            -max_total_time=60 -timeout=10 -seed=42 \
-            tests/fuzz/corpus/graph_compile/
-
-  # Can a downstream project actually consume an installed NeoGraph?
-  #
-  # No other job can answer this. Every test and example in the repo links
-  # against the build tree, where headers, vendored deps and libraries are all
-  # reachable by accident. `cmake --install` shipped headers and nothing to link
-  # against, with no package config at all, for the entire life of the project
-  # (issue #92) — and the whole suite stayed green throughout.
-  #
-  # This job installs into a throwaway prefix and builds a consumer that sees
-  # nothing but that prefix. It is the only thing standing between us and that
-  # gap reopening.
   install-consumable:
     name: install-consumable (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
@@ -811,7 +276,7 @@ jobs:
         include:
           - name: linux-static
             os: ubuntu-latest
-            args: ""
+            args: ''
           - name: linux-shared
             os: ubuntu-latest
             args: --shared
@@ -839,29 +304,22 @@ jobs:
           - name: windows-program-shared
             os: windows-2022
             args: --program --shared
-
     steps:
       - uses: actions/checkout@v4
-
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          bash scripts/ci_apt_install.sh \
-            cmake \
-            build-essential \
-            libpq-dev \
-            libsqlite3-dev \
-            libssl-dev \
-            libcurl4-openssl-dev \
-            pkg-config
-
+          bash scripts/ci_apt_install.sh cmake build-essential libpq-dev libsqlite3-dev \
+            libssl-dev libcurl4-openssl-dev pkg-config
       - name: Install build dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
           brew update
           brew install cmake libpq openssl@3 sqlite curl
           echo "CMAKE_PREFIX_PATH=$(brew --prefix libpq):$(brew --prefix sqlite):$(brew --prefix openssl@3):$(brew --prefix curl)" >> $GITHUB_ENV
-
       - name: Install build dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -870,7 +328,5 @@ jobs:
           $root = $env:VCPKG_INSTALLATION_ROOT
           "CMAKE_TOOLCHAIN_FILE=$root/scripts/buildsystems/vcpkg.cmake" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
           "$root/installed/x64-windows/bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
-
-      - name: find_package(NeoGraph) from a clean install prefix
-        shell: bash
-        run: ./scripts/test_find_package.sh ${{ matrix.args }}
+      - name: Verify installed prefix, ABI, symbol namespace and relocation
+        run: python scripts/verify_ci.py install --work-dir build-install --jobs 2 ${{ matrix.args }}

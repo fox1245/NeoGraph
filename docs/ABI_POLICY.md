@@ -47,4 +47,4 @@ Recorded interface-3 SDK runtime/archive qualification covers Linux/POSIX, not i
 
 ## Verification evidence
 
-`scripts/test_find_package.sh` defines installed-consumer checks, not a pass result. Dated pre-cutover measurements remain [historical evidence](VALGRIND.md). Current NeoGraph, SDK and Python results must name the build, platform and exercised path in the integrated release report; this policy does not create new pass claims.
+`python scripts/verify_ci.py install --work-dir <fresh-output> --jobs 2` defines installed-consumer checks, not a pass result. Use `--shared`, `--core-only`, or `--program --quickjs` for the corresponding platform-supported consumer row. The driver works from a checkout or extracted sdist without Git or Bash. Dated pre-cutover measurements remain [historical evidence](VALGRIND.md). Current NeoGraph, SDK and Python results must name the build, platform and exercised path in the integrated release report; this policy does not create new pass claims.

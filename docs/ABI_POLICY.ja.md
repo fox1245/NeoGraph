@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=0abd9601232a6d6e83d263798993650759083561557b016d44f91152f04c0bb7 -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=390bd1ee4f257a5af2db235b2e9b05354b2613d057086c0d015fa4ceb39c7e11 -->
 # binary 互換方針
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -48,4 +48,4 @@ Linux shared library は versioned file、major-generation SONAME link、unversi
 
 ## 検証の根拠
 
-`scripts/test_find_package.sh` は installed-consumer 検査の定義で、pass 結果ではない。日付付きの移行前測定は[歴史的根拠](VALGRIND.md)として残す。現在の NeoGraph/SDK/Python 結果は統合 release report で build、platform、実行経路を明示する。この方針は新しい pass 主張を作らない。
+`python scripts/verify_ci.py install --work-dir <fresh-output> --jobs 2` は installed-consumer 検査の定義で、pass 結果ではない。Platform が対応する consumer 行には `--shared`、`--core-only`、または `--program --quickjs` を使う。Driver は checkout または展開済み sdist から Git/Bash なしで動作する。日付付きの移行前測定は[歴史的根拠](VALGRIND.md)として残す。現在の NeoGraph/SDK/Python 結果は統合 release report で build、platform、実行経路を明示する。この方針は新しい pass 主張を作らない。

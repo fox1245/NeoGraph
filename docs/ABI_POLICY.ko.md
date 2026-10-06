@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=0abd9601232a6d6e83d263798993650759083561557b016d44f91152f04c0bb7 -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=390bd1ee4f257a5af2db235b2e9b05354b2613d057086c0d015fa4ceb39c7e11 -->
 # 바이너리 호환 정책
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -48,4 +48,4 @@ Linux shared library는 versioned file, major-generation SONAME link, unversione
 
 ## 검증 근거
 
-`scripts/test_find_package.sh`는 installed-consumer 검사 정의이지 통과 결과가 아니다. 날짜가 있는 이전 측정은 [역사적 근거](VALGRIND.md)로 남긴다. 현재 NeoGraph/SDK/Python 결과는 통합 릴리스 보고에서 build, platform, 실행 경로를 밝혀야 한다. 이 정책은 새 통과 주장을 만들지 않는다.
+`python scripts/verify_ci.py install --work-dir <fresh-output> --jobs 2`는 installed-consumer 검사 정의이지 통과 결과가 아니다. 플랫폼이 지원하는 해당 소비자 행에는 `--shared`, `--core-only`, 또는 `--program --quickjs`를 사용한다. 드라이버는 checkout이나 추출한 sdist에서 Git/Bash 없이 동작한다. 날짜가 있는 이전 측정은 [역사적 근거](VALGRIND.md)로 남긴다. 현재 NeoGraph/SDK/Python 결과는 통합 릴리스 보고에서 build, platform, 실행 경로를 밝혀야 한다. 이 정책은 새 통과 주장을 만들지 않는다.

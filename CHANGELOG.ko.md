@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=9f022fad624d108552d8716c666d99f63d2398c9477947d285b989580fc00816 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=fc7668fbc0eb53de474a8dfe184ff9a65441c44bf3b12cbfa8cfc6a493eeafd0 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -20,6 +20,8 @@ SDK4 Linux x86_64 검증은 등록된 27개 case를 실행했습니다. 첫 full
 NeoGraph SDK4 검증 범위는 첫 실행과 수정 후 집중 실행을 합친 Core 1261개, Program 691개 통과와 설계상 Memory process-loss skip 14개, 설치 Python의 첫 통과 499개와 수정 후 집중 통과 5개를 합친 504개입니다. 두 번째 full-suite 실행을 주장하지 않습니다. 로컬 A2A 0.x/1.0 peer, evolution file mode, plan replay, 변경된 C++ helper와 Python 애플리케이션 11개를 실제 실행했습니다.
 
 ### 변경됨
+- **로컬/hosted 공통 검증 진입점.** `python scripts/verify_ci.py <profile> --work-dir <fresh-output> --jobs N`으로 기존 CI gate 14개를 통합하며 native platform, sanitizer, 설치 소비자, wheel, archive, release gate를 제거하지 않습니다. 설치 소비자는 Git/Bash 없이 동작하고 별도의 immutable QuickJS performance gate는 Linux/Git provenance를 요구합니다. Native Linux는 native PostgreSQL test 이후 전체 Python/protocol suite를 직렬 실행합니다. Benchmark checker는 원래 네 workload와 수치 경계를 유지하고 모호하거나 잘못된 metric을 거부합니다. 소스 리뷰와 CLI help는 runtime/platform/performance 검증이 아니며 통합 실행이 필요합니다.
+- **단일 QuickJS matrix 명령.** 중복 shell build driver를 `python scripts/verify_ci.py quickjs-performance --work-dir <fresh-build-root> --jobs 4`로 대체하고 `<fresh-build-root>/quickjs-performance.json`을 보존합니다. 소유한 새 출력이 이미 존재하면 거부합니다. 불변 performance runner, preregistration, 소스 루트 Git provenance 요구는 그대로입니다. Native Windows toolchain 전달과 work-dir별 wheel vcpkg root는 선언된 bootstrap/repair gate를 보존하며 PostgreSQL 전제 검사는 `psql`에 명시적 DB URL을 전달합니다. 이는 소스 변경이며 새 프로필 통과 주장이 아닙니다.
 - **완료된 취소 context의 수명.** Detach는 context 파괴 전에 완료된 Asio slot handler를 해제하고, generation 검사는 오래된 대기 emit을 버리면서 callback의 rebind가 token lock 재진입 없이 실행되게 합니다. 취소 상태는 초기화하지 않습니다. NeoGraph와 모든 native consumer를 함께 재빌드하세요. 로컬 취소/fork 23개 case와 실제 plain/ASan retained-token consumer는 통과했습니다. [커밋 `24d3166` CI](https://github.com/fox1245/NeoGraph/actions/runs/37275542831/job/111651716661)는 retained-parent-token teardown 회귀를 포함한 1,333개 case의 TSan 실행을 skip 세 개와 함께 통과했습니다. 기존 dependency suppression과 ASLR 비활성화 범위의 증명이며 보편적인 race-freedom을 주장하지 않습니다. Detach 전에 operation을 완료해야 하며 활성 signal callback 내부에서 detach하면 안 됩니다.
 - **플랫폼 wheel 의존성과 cold loading.** pybind11을 `2.13.6`으로 고정하고 SDK의 직접 OpenSSL Crypto 의존성을 해결하며 macOS 14에는 일치하는 LLVM 20 header/runtime을 사용합니다. CPython 3.9–3.13과 모든 플랫폼 행, 설치 wheel의 전체 suite를 유지하고 그 뒤 Linux 교체 및 Homebrew 접근을 차단한 macOS cold-loader 검사를 실행합니다. 정확한 최종 산출물은 릴리스 gate이며 소스만으로 이식성을 주장하지 않습니다.
 - **일치하는 Linux LGPL 라이브러리 소스.** sdist의 `deps/redistribution/`에 library-only keyutils/libxcrypt 소스, downstream patch, 빌드·교체 자료를 포함합니다. 파일별 grant와 수신자의 수정 권리를 보존하며 grant가 확인되지 않은 upstream test는 라이브러리 입력이 아니므로 제외합니다. 소스·notice 제공만으로 최종 wheel의 교체 가능성이나 법적 검토 완료를 입증하지 않습니다.

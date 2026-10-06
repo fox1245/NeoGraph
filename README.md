@@ -216,6 +216,60 @@ find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
 
+### Local CI verification (Windows and WSL)
+
+Run from the source root with Python 3.10+, CMake/CTest, and the profile's native
+toolchain and dependencies already provisioned. Use a VS2022 x64 developer
+PowerShell for Windows; provide the vcpkg transport toolchain through
+`CMAKE_TOOLCHAIN_FILE`, its private `VCPKG_INSTALLED_DIR`, and OpenSSL/curl runtime
+tools on `PATH`. In WSL, provision a C++20 compiler, pkg-config, libpq, SQLite,
+OpenSSL and HTTP/2 curl development packages. Linux `native-linux` and `asan`
+also require `psql` and `NEOGRAPH_TEST_POSTGRES_URL` pointing to a reachable
+**destructive-test-only** database. Provision Python pytest/pydantic/certifi;
+`native-linux` additionally needs `a2a-sdk[http-server]>=1.1,<2`,
+`agent-client-protocol==0.12.1`, uvicorn and httpx in the selected interpreter.
+
+```powershell
+# Windows: choose a new output path for each invocation.
+python scripts/verify_ci.py native-windows --work-dir build/local-windows-01 --jobs 4
+python scripts/verify_ci.py install --work-dir build/local-install-01 --jobs 4 --shared --program
+```
+
+```sh
+# WSL/Linux: provision the test database and dependencies before running.
+python scripts/verify_ci.py native-linux --work-dir build/local-linux-01 --jobs 4
+python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-01 --jobs 4
+```
+
+`--work-dir` must be a fresh, nonexistent output path you own, not the source
+root or its ancestor; `--jobs` must be positive. Existing outputs are refused
+and retained, never automatically cleaned. The runner does not install
+dependencies or change host policy; existing pinned dependency fetches and
+cibuildwheel's declared bootstrap/repair still apply.
+
+| Profile | Retained purpose / prerequisite |
+|---|---|
+| `native-linux` | Full native PostgreSQL gate, then serial full Python/protocol suite and DB-free ACP durable rerun. |
+| `native-posix` | Native Linux ARM/macOS suite; PostgreSQL build/link coverage without a test service. |
+| `native-windows` | VS2022 DB-free native/Program/QuickJS suite and separate C embedding ABI smoke. |
+| `asan` | Linux ASan/UBSan/LSan, eleven examples and complete Python suite; GCC libasan/libstdc++ required. |
+| `tsan` | Separate Linux TSan suite and five examples; permitted process-local `setarch -R`, unchanged suppressions. |
+| `msvc-asan` | Serial Windows Program/QuickJS canary; activated `cl >=19.50` (VS2026), not MSVC 19.44. |
+| `grpc` | gRPC graph contract; provision gRPC/Protobuf compiler and libraries. |
+| `benchmark` | Linux Release four-workload regression gate; original throughput, latency and target-RSS limits. |
+| `quickjs-performance` | Linux matched enabled/disabled builds; actual source-root Git checkout required for immutable provenance. |
+| `fuzz` | Linux Clang/libFuzzer 60-second canary; corpus copied into owned output. |
+| `install` | Isolated exported-prefix ABI/symbol/C++/C11/collision/relocation consumers; no Git/Bash. Optional `--shared`, `--core-only` or `--program`; `--quickjs` requires `--program` and ELF/Mach-O inspection (Windows rows omit it). |
+| `sdist` | Source archive and Twine; provision build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10; optional `--release-tag v0.13.0`. |
+| `wheel` | Repaired installed wheels; provision cibuildwheel==2.23.0 and native/container provider; required `--arch x86_64\|aarch64\|arm64\|AMD64`. |
+| `runtime-archive` | Shared SDK native-archive portability target/CTest; Ninja and platform runtime dependencies. |
+
+Local Windows/WSL results do not replace native ARM/macOS or VS2026 sanitizer
+rows. CI retains all ten installed-consumer rows, four native wheel/archive
+platforms, CPython 3.9–3.13, glibc 2.34/macOS 14 floors, full installed-wheel
+tests, cold-loader/LGPL replacement gates, and protected tag/OIDC publication
+dependencies. Source review or CLI help is not execution or release proof.
+
 - [Concepts and graph semantics](docs/concepts.md)
 - [C++ reference](docs/reference-en.md) and [Python binding guide](docs/python-binding.md)
 - [Async guide](docs/ASYNC_GUIDE.md) and [concurrency/cancellation](docs/concurrency.md)

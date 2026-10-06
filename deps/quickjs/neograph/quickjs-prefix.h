@@ -5,7 +5,7 @@
  * before NeoGraph includes quickjs.h. Preprocessor renaming, rather than
  * object-format visibility or post-link rewriting, keeps static archives safe
  * to co-link with another QuickJS on every supported POSIX toolchain.
- * scripts/test_find_package.sh rejects any unprefixed global that this map
+ * scripts/verify_ci.py install rejects any unprefixed global that this map
  * misses when the pinned source inventory changes.
  */
 #ifndef NEOGRAPH_QUICKJS_PREFIX_H

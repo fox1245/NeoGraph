@@ -15,6 +15,8 @@ on:
       - 'src/**'
       - 'include/**'
       - 'deps/**'
+      - 'scripts/verify_ci.py'
+      - 'scripts/check_install_consumer.py'
       - '.github/workflows/wheels.yml'
   pull_request:
     paths:
@@ -25,6 +27,8 @@ on:
       - 'src/**'
       - 'include/**'
       - 'deps/**'
+      - 'scripts/verify_ci.py'
+      - 'scripts/check_install_consumer.py'
       - '.github/workflows/wheels.yml'
 
 permissions:
@@ -43,24 +47,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Check release tag matches package version
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Provision source packaging tools
+        run: python -m pip install build twine "scikit-build-core>=1.0" pybind11==2.13.6 "ninja>=1.10"
+      - name: Build, enforce release version and check sdist
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
         run: |
-          python - <<'PY'
-          import os, pathlib, tomllib
-          version = tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']
-          if os.environ['GITHUB_REF_NAME'] != f'v{version}':
-              raise SystemExit('Release tag does not match pyproject.toml project.version')
-          PY
-      - name: Build and check sdist
-        run: |
-          python -m pip install build twine
-          python -m build --sdist
-          python -m twine check dist/*.tar.gz
+          if [ -n "$RELEASE_TAG" ]; then
+            python scripts/verify_ci.py sdist --work-dir build-sdist --jobs 2 --release-tag "$RELEASE_TAG"
+          else
+            python scripts/verify_ci.py sdist --work-dir build-sdist --jobs 2
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: sdist
-          path: dist/*.tar.gz
+          path: build-sdist/dist/*.tar.gz
           if-no-files-found: error
           retention-days: 30
 
@@ -70,8 +71,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      # Keep all existing release targets. SDK platform portability is a
-      # release prerequisite; failures must block publication, not hide a row.
       matrix:
         include:
           - os: ubuntu-latest
@@ -87,33 +86,27 @@ jobs:
         with:
           name: sdist
           path: source-dist
-      # Building every wheel from the sdist proves its manifest is sufficient.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Build from the actual sdist without Git or Bash, including on Windows.
       - name: Extract source distribution
-        shell: bash
-        run: |
-          mkdir -p source-dist/source
-          tar -xzf source-dist/*.tar.gz --strip-components=1 -C source-dist/source
-      # Ninja does not activate the MSVC compiler environment itself.
+        run: >-
+          python -c "import pathlib,tarfile; root=pathlib.Path('source-dist'); archives=list(root.glob('*.tar.gz')); assert len(archives)==1, 'expected one sdist'; tarfile.open(archives[0]).extractall(root/'unpacked',filter='data'); sources=list((root/'unpacked').iterdir()); assert len(sources)==1 and sources[0].is_dir(), 'expected one source root'; sources[0].rename(root/'source')"
       - name: Activate MSVC environment
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
-      - name: Expose OpenSSL tool for local TLS test peers
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/tools/openssl" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
-          "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
+      - name: Provision wheel build frontend
+        run: python -m pip install cibuildwheel==2.23.0
+      # Platform dependency bootstrap, CP39-313, repair and installed-wheel gates
+      # remain authoritative in pyproject.toml (including cold-load/LGPL checks).
       - name: Build, repair and exercise installed wheels
-        uses: pypa/cibuildwheel@v2.23
-        with:
-          package-dir: source-dist/source
-        env:
-          CIBW_ARCHS: ${{ matrix.arch }}
+        run: python source-dist/source/scripts/verify_ci.py wheel --work-dir build-wheels --jobs 2 --arch ${{ matrix.arch }}
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.arch }}
-          path: wheelhouse/*.whl
+          path: build-wheels/wheelhouse/*.whl
           if-no-files-found: error
           retention-days: 30
 
@@ -130,14 +123,12 @@ jobs:
         with:
           name: sdist
           path: source-dist
-      - name: Extract source distribution
-        shell: bash
-        run: |
-          mkdir -p source-dist/source
-          tar -xzf source-dist/*.tar.gz --strip-components=1 -C source-dist/source
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Extract source distribution
+        run: >-
+          python -c "import pathlib,tarfile; root=pathlib.Path('source-dist'); archives=list(root.glob('*.tar.gz')); assert len(archives)==1, 'expected one sdist'; tarfile.open(archives[0]).extractall(root/'unpacked',filter='data'); sources=list((root/'unpacked').iterdir()); assert len(sources)==1 and sources[0].is_dir(), 'expected one source root'; sources[0].rename(root/'source')"
       - name: Install SDK dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -167,27 +158,10 @@ jobs:
           $root = $env:VCPKG_INSTALLATION_ROOT
           "CMAKE_TOOLCHAIN_FILE=$root/scripts/buildsystems/vcpkg.cmake" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
           "$root/installed/x64-windows/bin" | Out-File -Append -Encoding ascii $env:GITHUB_PATH
-      - name: Configure public SDK archive proof
-        shell: bash
-        run: |
-          cmake -S source-dist/source -B runtime-proof -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
-            -DNEOGRAPH_BUILD_ASYNC=OFF -DNEOGRAPH_BUILD_LLM=OFF \
-            -DNEOGRAPH_BUILD_MCP=OFF -DNEOGRAPH_BUILD_A2A=OFF \
-            -DNEOGRAPH_BUILD_ACP=OFF -DNEOGRAPH_BUILD_UTIL=OFF \
-            -DNEOGRAPH_BUILD_POSTGRES=OFF -DNEOGRAPH_BUILD_SQLITE=OFF \
-            -DNEOGRAPH_BUILD_EXAMPLES=OFF -DNEOGRAPH_BUILD_TESTS=OFF \
-            -DSP_BUILD_TESTS=OFF -DSP_BUILD_CANARY=OFF \
-            -DSP_BUILD_RUNTIME_TESTS=ON
-      - name: Build and exercise archive custody
-        shell: bash
-        run: |
-          cmake --build runtime-proof --target sp_native_archive_portability_tests --parallel 2
-          ctest --test-dir runtime-proof/_deps/neograph_schemaprovider-build \
-            -C Release -R '^native_archive_portability$' --no-tests=error --output-on-failure
+      - name: Verify public SDK native archive custody
+        run: python source-dist/source/scripts/verify_ci.py runtime-archive --work-dir runtime-proof --jobs 2
 
-  # OIDC trust is bound to fox1245/NeoGraph, wheels.yml and environment release.
-  # All platform builds and installed graph/provider/Program tests must succeed.
+  # Protected OIDC publication still depends on every wheel and native lane.
   publish_pypi:
     name: Publish to PyPI
     needs: [build_wheels, build_sdist, runtime_portability]

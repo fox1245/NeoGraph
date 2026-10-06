@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/QUICKJS_MIGRATION_COMPLETION.md locale=ja source_sha256=9d60815c273f2c94969dbfefe5eb7d6bdbd58075e51e06a7f753a36461e31d0b -->
+<!-- neograph-i18n: source=docs/QUICKJS_MIGRATION_COMPLETION.md locale=ja source_sha256=6dec683c8c617650e19e61abb2a66a03ff7f0fbe738d65f37a7b12e18b95466a -->
 # QuickJS移行完了ランブック
 
 **Languages:** [English](QUICKJS_MIGRATION_COMPLETION.md) | [한국어](QUICKJS_MIGRATION_COMPLETION.ko.md) | [日本語](QUICKJS_MIGRATION_COMPLETION.ja.md) | [简体中文](QUICKJS_MIGRATION_COMPLETION.zh-CN.md)
@@ -92,7 +92,7 @@ authoring の除去は、共有 dispatcher や保存 schema 全体の削除で�
 | macOS | Program 静的 + 共有; runtime/Harnessテスト; C スモーク; インストール済みコンシューマ | 静的 + 共有インストール済みコンシューマ |
 | Windows x64 | Program 静的 + 共有（MSVC）; runtime/Harnessテスト; C スモーク; インストール済みコンシューマ | 静的 + 共有インストール済みコンシューマ |
 
-インストールされたQuickJSコンシューマは、単なる構文拒否ではなく、インストール済みパッケージを通じた**成功する**`define()`および`function* main()`の公開/実行を実行しなければならない。また、既存の独立してリンクされた2番目のQuickJS衝突プローブも維持しなければならない。Windowsが静的シンボル名前空間と共有エクスポートの隠蔽をネイティブ検査ツールで検証し、チェックをスキップしないように、`scripts/test_find_package.sh`を拡張する（または同等のプラットフォーム対応ドライバに置き換える）。
+インストールされたQuickJSコンシューマは、単なる構文拒否ではなく、インストール済みパッケージを通じた**成功する**`define()`および`function* main()`の公開/実行を実行しなければならない。また、既存の独立してリンクされた2番目のQuickJS衝突プローブも維持しなければならない。Installed-consumer driver は `python scripts/verify_ci.py install --work-dir <fresh-output> --jobs 2 --program --quickjs` で、shared library には `--shared` を追加する。Private-symbol 検査は ELF/Mach-O のみで、現在の Windows install 行は `--quickjs` を省略する。この完了基準の Windows static namespacing と shared export hiding には native inspection の証拠が必要で、runtime/C ABI test は代替にならない。
 
 **終了:** すべての行はインストール済みプレフィックスから実行され、パッケージメタデータ、ローダー/リンカークロージャ、実行可能出力、およびプライベートシンボル検査結果を記録します。
 
@@ -114,9 +114,10 @@ authoring の除去は、共有 dispatcher や保存 schema 全体の削除で�
 1. 既存のLinuxブロッキング行列を実行する:
 
    ```sh
-   scripts/build_quickjs_performance_matrix.sh \
-     <fresh-build-root> <evidence-root>/quickjs-performance-linux.json
+   python scripts/verify_ci.py quickjs-performance --work-dir <fresh-build-root> --jobs 4
    ```
+
+   所有する未作成の新しい build root と、実際のソースルート Git checkout を使います。変更していない `run_quickjs_performance.py` は commit/dirty provenance を要求するため、無関係な checkout 下に展開した archive では不十分です。対応する disabled/enabled build と結果はこの root に保持されます。`<fresh-build-root>/quickjs-performance.json` を非公開エビデンスインデックスに保存します。
 
 その受け入れ済み事前登録がしきい値の権限であり続ける。失敗した候補への対応としてしきい値を緩めないこと。
 2. macOSおよびWindowsを測定する前に、それらの起動、割り当て、および有効だが未使用/Core専用の測定値について、バージョン管理された事前登録を追加する。個別のタイミングではなく、低(暖)分布の繰り返しを記録する。

@@ -6,7 +6,7 @@
 #include <filesystem>
 #include <cstdio>
 #include <cstdlib>
-#include <unistd.h>
+#include <random>
 
 using namespace neograph;
 namespace wire = neograph::test::wire;
@@ -16,11 +16,17 @@ struct Certificate {
     std::filesystem::path directory;
     std::string cert, key;
     Certificate() {
-        auto pattern = (std::filesystem::temp_directory_path() / "neograph-wire-tls-XXXXXX").string();
-        std::vector<char> name(pattern.begin(), pattern.end()); name.push_back('\0');
-        const auto* path = ::mkdtemp(name.data());
-        if (!path) throw std::runtime_error("TLS fixture directory failed");
-        directory = path; cert = (directory / "cert.pem").string(); key = (directory / "key.pem").string();
+        // create_directory is the atomic claim: it reports false when the name already exists.
+        std::random_device entropy;
+        for (int attempt = 0; attempt != 64 && directory.empty(); ++attempt) {
+            const auto candidate = std::filesystem::temp_directory_path() /
+                ("neograph-wire-tls-" + std::to_string(entropy()) + "-" + std::to_string(entropy()));
+            std::error_code claimed;
+            if (std::filesystem::create_directory(candidate, claimed) && !claimed) directory = candidate;
+        }
+        if (directory.empty()) throw std::runtime_error("TLS fixture directory failed");
+        std::filesystem::permissions(directory, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace);
+        cert = (directory / "cert.pem").string(); key = (directory / "key.pem").string();
         std::unique_ptr<EVP_PKEY_CTX, decltype(&EVP_PKEY_CTX_free)> ctx(EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr), EVP_PKEY_CTX_free);
         if (!ctx || EVP_PKEY_keygen_init(ctx.get()) <= 0 || EVP_PKEY_CTX_set_rsa_keygen_bits(ctx.get(), 2048) <= 0)
             throw std::runtime_error("TLS key initialization failed");
@@ -40,9 +46,13 @@ struct Certificate {
             X509V3_EXT_conf_nid(nullptr, &extensions, NID_subject_alt_name, const_cast<char*>("DNS:localhost")), X509_EXTENSION_free);
         if (!san || X509_add_ext(x509.get(), san.get(), -1) != 1 || !X509_sign(x509.get(), pkey.get(), EVP_sha256()))
             throw std::runtime_error("TLS certificate signing failed");
-        std::unique_ptr<FILE, decltype(&std::fclose)> k(std::fopen(key.c_str(), "wb"), std::fclose);
-        std::unique_ptr<FILE, decltype(&std::fclose)> c(std::fopen(cert.c_str(), "wb"), std::fclose);
-        if (!k || !c || !PEM_write_PrivateKey(k.get(), pkey.get(), nullptr, nullptr, 0, nullptr, nullptr) || !PEM_write_X509(c.get(), x509.get()))
+        // BIO files keep the CRT FILE inside OpenSSL; a vcpkg DLL cannot safely receive an application FILE*.
+        std::unique_ptr<BIO, decltype(&BIO_free)> k(BIO_new_file(key.c_str(), "wb"), BIO_free);
+        std::unique_ptr<BIO, decltype(&BIO_free)> c(BIO_new_file(cert.c_str(), "wb"), BIO_free);
+        const bool written = k && c &&
+            PEM_write_bio_PrivateKey(k.get(), pkey.get(), nullptr, nullptr, 0, nullptr, nullptr) &&
+            PEM_write_bio_X509(c.get(), x509.get()) && BIO_flush(k.get()) == 1 && BIO_flush(c.get()) == 1;
+        if (!written)
             throw std::runtime_error("TLS fixture write failed");
     }
     ~Certificate() { std::error_code ec; std::filesystem::remove_all(directory, ec); }
