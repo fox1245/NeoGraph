@@ -14,8 +14,10 @@ add_executable(neograph_tests
     test_json_array.cpp
     test_pending_writes.cpp
     test_channel_write_mode.cpp
+    test_graph_state_reducer_ownership.cpp
     test_usage_accounting.cpp
     test_subgraph_context.cpp
+    test_node_invocation_identity.cpp
     test_subgraph_output_deltas.cpp
     test_subgraph_persistence.cpp
     test_plan_execute_graph.cpp
