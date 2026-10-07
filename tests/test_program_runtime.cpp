@@ -8939,10 +8939,21 @@ TEST(ProgramRuntimeTest, ParallelMapBindsInputAndReturnsOrderedBoundedChildOutpu
     EXPECT_EQ(completed_calls.load(), 3U);
     const auto children = parent.snapshot().children();
     ASSERT_EQ(children.size(), 3U);
-    for (std::size_t index = 0; index < children.size(); ++index) {
-        EXPECT_EQ(children[index].state, ProgramChildState::Completed);
+    // Two workers claim items in ordinal order but register each child when it reaches
+    // launch_child, so the record lists children in launch order: a worker that finishes item 0
+    // can launch item 2 before the other worker has launched item 1. Output order is fixed by
+    // the ordinal (asserted above); what this loop checks is that each child was bound to its own
+    // item, so visit the children by the item they were bound to, not by their position.
+    std::vector<std::size_t> by_item;
+    for (std::size_t index = 0; index < children.size(); ++index) by_item.push_back(index);
+    std::sort(by_item.begin(), by_item.end(), [&children](std::size_t lhs, std::size_t rhs) {
+        return children[lhs].invocation.input.dump() < children[rhs].invocation.input.dump();
+    });
+    for (std::size_t index = 0; index < by_item.size(); ++index) {
+        const auto& child = children[by_item[index]];
+        EXPECT_EQ(child.state, ProgramChildState::Completed);
         const json expected_input{{"item", items.at(index)}};
-        EXPECT_EQ(children[index].invocation.input, expected_input);
+        EXPECT_EQ(child.invocation.input, expected_input);
     }
 }
 TEST(ProgramRuntimeTest, ParallelMapCollectPreservesInputOrdinalOutputOrder) {
