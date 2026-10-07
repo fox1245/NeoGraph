@@ -1426,7 +1426,7 @@ asio::awaitable<GraphEngine::SubgraphRunResult> GraphEngine::run_subgraph_async(
         if (parent_runtime->graph_invocation_id.empty())
             throw std::runtime_error("PerThread subgraph requires a parent invocation identity");
         journal->parent_call_id = parent_runtime->graph_invocation_id + "/" +
-            std::to_string(parent.step) + "/" + parent_runtime->invocation_id;
+            std::to_string(parent.step) + "/" + std::string(parent_runtime.invocation_id());
     }
     resources.subgraph_write_journal = journal;
 
