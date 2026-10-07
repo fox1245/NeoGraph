@@ -159,9 +159,17 @@ def build_targets(build, jobs, *targets, prefix=()):
     run(args)
 
 
-def ctest(build, jobs, *options, env=None, prefix=()):
+# Per-test timeout in seconds. A hung test then fails by name instead of consuming the job limit
+# (a ParallelMap test hung for 45 minutes before the job was cancelled). The limits are about eight
+# times the slowest healthy test seen on hosted runners: 71 s (macOS) for the optimized lanes and
+# 112 s under ASan.
+TEST_TIMEOUT = 600
+SANITIZER_TEST_TIMEOUT = 1200
+
+
+def ctest(build, jobs, *options, env=None, prefix=(), timeout=TEST_TIMEOUT):
     run([*prefix, "ctest", "--test-dir", build, "-C", "Release", "--no-tests=error",
-         "--output-on-failure", "--parallel", jobs, *options], env=env)
+         "--output-on-failure", "--timeout", timeout, "--parallel", jobs, *options], env=env)
 
 
 def binary(build, name, subdir=""):
@@ -270,7 +278,8 @@ def sanitizer(args):
     build_targets(build, args.jobs, prefix=prefix)
     # pybind_smoke is run separately below with the interpreter preload boundary.
     ctest(build, 1 if asan else min(args.jobs, 2), "-E",
-          "BIG_|valgrind|^pybind_smoke$" if asan else "BIG_|valgrind", env=env, prefix=prefix)
+          "BIG_|valgrind|^pybind_smoke$" if asan else "BIG_|valgrind", env=env, prefix=prefix,
+          timeout=SANITIZER_TEST_TIMEOUT if asan else TEST_TIMEOUT)
     for example in ASAN_EXAMPLES if asan else TSAN_EXAMPLES:
         run([*prefix, binary(build, example)], env=env, timeout=90)
     if asan:
@@ -302,7 +311,8 @@ def msvc_asan(args):
     configure(build, options, generator="Ninja")
     build_targets(build, args.jobs, "neograph_program_tests", "neograph_quickjs_tests", "neograph_quickjs_c_smoke")
     ctest(build, 1, "-R", "^(QuickJS[.]|QuickJsRuntimeTest[.]|ProgramCompilerTest[.]JavaScript|"
-          "ProgramRuntimeTest[.]JavaScript|ProgramCatalogTest[.]JavaScript)")
+          "ProgramRuntimeTest[.]JavaScript|ProgramCatalogTest[.]JavaScript)",
+          timeout=SANITIZER_TEST_TIMEOUT)
 
 
 def quickjs_performance(args):
