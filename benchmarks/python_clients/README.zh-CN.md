@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/python_clients/README.md locale=zh-CN source_sha256=6919a37bc310f6105ba5ef408675a5d982489430bc04ac6c565fdb7c66a4e6a1 -->
+<!-- neograph-i18n: source=benchmarks/python_clients/README.md locale=zh-CN source_sha256=649e0973ac9e600a33d13f10df707c76d463ff1d0d7c8ccb7315b07471bb6f51 -->
 # Python 客户端开销：当前运行器与历史结果
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -41,7 +41,7 @@ K=16/64 的下降包含 `ThreadingHTTPServer` 与客户端的交互，不能隔�
 双方使用相同私有 HTTP loopback 服务器和 Chat 路径，固定响应文本为 `ok`。服务器检查路径、模型和提示。不需要远程凭据、自定义 CA 或付费调用。这是 HTTP/1.0 本地协议负载，不是 TLS/HTTP2 验证或 native replay 基准。固定 token usage 是供应商报告 fixture 数据，不是实际测量 token 或预算计费量。
 
 按[Python 绑定指南](../../docs/python-binding.md)安装与当前源码匹配的 wheel，再安装以下比较 SDK。Core 源码也依赖外部 `SchemaProvider::runtime`，参见[构建指南](../../README.md)。Python 包装层无法给旧 wheel 添加 typed native API。本页不声称新 wheel 已验证或新基准已通过。
-NeoGraph `0.13.0` 的 wheel 和 native consumer 必须匹配 alpha SDK `0.1.0`，interface revision/shared generation 4。当前集成验证尚未完成。
+NeoGraph `0.13.1` 的 wheel 和 native consumer 必须匹配 alpha SDK `0.1.1`，interface revision/shared generation 4。当前集成验证尚未完成。
 
 ## 运行新批次
 

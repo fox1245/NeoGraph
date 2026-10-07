@@ -142,7 +142,7 @@ After `first_call` returns, use `std::get_if<sp::Completion>(result.get())` to i
 
 `ChatMessage`, `ChatTool`, and JSON are portable projections. Authentic native history can stay in memory with its native checkpoint sidecar; durable native history requires a real `sp::NativeArchive` and protected owner-private custody. Portable JSON cannot recreate that authority. The archive authenticates custody with an independent key; it is neither encryption nor vendor-issuer authentication. Do not publish archive bodies, keys, native blobs, or raw wire observations. See the [provider reference](docs/reference-en.md) and [migration guide](docs/migration-v0.4-to-v1.0.md) for persistence failures, observers, managed budget banks, and replay boundaries.
 
-The typed cutover removes `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter, and the Responses WebSocket path. Recompile C++ consumers and migrate custom providers; there are no compatibility aliases. The SDK package is `0.1.0` with an alpha interface, interface revision 4, and shared ABI 4; matching revisions are required, and these numbers do not declare a stable SDK interface.
+The typed cutover removes `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter, and the Responses WebSocket path. Recompile C++ consumers and migrate custom providers; there are no compatibility aliases. The SDK package is `0.1.1` with an alpha interface, interface revision 4, and shared ABI 4; matching revisions are required, and these numbers do not declare a stable SDK interface.
 
 ## Python
 
@@ -150,7 +150,7 @@ The typed cutover removes `CompletionParams`, `ChatCompletion`, `CompletionProvi
 pip install neograph-engine
 ```
 
-The typed-provider API described here targets NeoGraph `0.13.0`; historical wheels expose the older interface. The [Python binding guide](docs/python-binding.md) documents the source API and build prerequisites.
+The typed-provider API described here targets NeoGraph `0.13.1`; historical wheels expose the older interface. The [Python binding guide](docs/python-binding.md) documents the source API and build prerequisites.
 
 This graph needs no API key:
 
@@ -211,7 +211,7 @@ Measure a workload with its actual nodes, provider, stores, concurrency, and bui
 Installed consumers link only the enabled components they need:
 
 ```cmake
-find_package(SchemaProvider 0.1.0 CONFIG REQUIRED COMPONENTS runtime)
+find_package(SchemaProvider 0.1.1 CONFIG REQUIRED COMPONENTS runtime)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -260,7 +260,7 @@ cibuildwheel's declared bootstrap/repair still apply.
 | `quickjs-performance` | Linux matched enabled/disabled builds; actual source-root Git checkout required for immutable provenance. |
 | `fuzz` | Linux Clang/libFuzzer 60-second canary; corpus copied into owned output. |
 | `install` | Isolated exported-prefix ABI/symbol/C++/C11/collision/relocation consumers; no Git/Bash. Optional `--shared`, `--core-only` or `--program`; `--quickjs` requires `--program` and ELF/Mach-O inspection (Windows rows omit it). |
-| `sdist` | Source archive and Twine; provision build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10; optional `--release-tag v0.13.0`. |
+| `sdist` | Source archive and Twine; provision build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10; optional `--release-tag v0.13.1`. |
 | `wheel` | Repaired installed wheels; provision cibuildwheel==2.23.0 and native/container provider; required `--arch x86_64\|aarch64\|arm64\|AMD64`; optional `--python cp312` builds one CPython instead of all. |
 | `runtime-archive` | Shared SDK native-archive portability target/CTest; Ninja and platform runtime dependencies. |
 

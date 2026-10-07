@@ -9,7 +9,7 @@ The source is committed so the scenes can be edited and rendered again.
 The generated video illustrates the Program pipeline; it is not an API
 reference, benchmark, or qualification record.
 The `v3` media filenames are asset labels, not SDK interface revisions.
-NeoGraph `0.13.0` uses alpha SDK `0.1.0`, interface/shared generation 4;
+NeoGraph `0.13.1` uses alpha SDK `0.1.1`, interface/shared generation 4;
 the existing render does not demonstrate that runtime or its pending validation.
 
 ## Scenes (`src/scenes/`)

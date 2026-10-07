@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=998352566107627e9cf22b256b5d1e2648275aa3c8ad5bd60d513c6fc59a7314 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=94363c98fc3c2931d87e8b916dbff497b8b2ce92fcecaf905bdbb1cf98b1bdfe -->
 # NeoGraph WASM smoke 프로그램
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -12,7 +12,7 @@ CMake 3.20+는 명시적 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`, 설치 runtime, �
 `NEOGRAPH_FETCH_SCHEMAPROVIDER`의 download fallback은 기본 ON이며 offline package/source 빌드에서는 OFF로 설정하세요.
 SDK runtime에는 libcurl, OpenSSL, threads도 필요합니다. 현재 transport와 archive에는 플랫폼별 의존성이 있으며 이 worktree의 Emscripten SDK runtime 빌드는 검증되지 않았습니다. native SDK를 WebAssembly에 링크할 수는 없습니다. 아래 과거 smoke 결과는 현재 소스가 Emscripten으로 빌드된다는 증거가 아닙니다.
 
-NeoGraph `0.13.0`에는 동일 target용 alpha SDK `0.1.0`, interface revision/shared generation 4가 필요합니다. 실제 Emscripten SDK runtime 검증은 여전히 선행 조건입니다. 이 문서는 WASM 지원을 삭제하거나 현재 빌드를 보장하지 않습니다. Archive v3 / `spna3`와 portable JSON v2는 그대로입니다.
+NeoGraph `0.13.1`에는 동일 target용 alpha SDK `0.1.1`, interface revision/shared generation 4가 필요합니다. 실제 Emscripten SDK runtime 검증은 여전히 선행 조건입니다. 이 문서는 WASM 지원을 삭제하거나 현재 빌드를 보장하지 않습니다. Archive v3 / `spna3`와 portable JSON v2는 그대로입니다.
 
 ## 과거 결과
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=c83cf49f9761e11401ae84366e9dce10d62a223481589269b3f729c4b68cc582 -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=f1c2fdb5d8383c9c326bc200d9da2e10b5aba9dd8dea18fd5e5fae5f7d14d1df -->
 # C++ API 예제
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
@@ -23,7 +23,7 @@ CMake 3.20+는 명시적 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`, 설치된 runtime
 고정된 public GitHub source archive 순서로 SDK를 선택합니다. 다운로드 fallback은 기본 활성화이며,
 설치 package나 명시 source를 쓰는 offline 빌드에서는 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`로 끄세요.
 설치 include root는 `include/SchemaProvider`입니다. interface/capability 검사를
-수행하며 SDK package는 alpha `0.1.0` (interface/shared ABI 4)입니다.
+수행하며 SDK package는 alpha `0.1.1` (interface/shared ABI 4)입니다.
 
 보존된 interface-3 model-free C++ E2E 실행에서는 번호가 있는 타깃 39개를 검증했습니다. finite offline 29개와
 실제 MCP/ACP/A2A/Harness 및 gRPC graph/checkpoint/tool 경로입니다. gRPC-vs-JSON-RPC

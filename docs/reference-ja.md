@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=b888d8b7faa97d012074914cad0b4d30215492118cc87ed99aa13abb97a929b9 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=ba7bc78e107bf6ae0eb0f629071a28038e4ff8c2eef2dfa7aa4f435d4dab63bb -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -33,10 +33,10 @@ CMake 3.20 以上が必要です。Core は所有 typed provider 契約を公開
 
 SDK imported target は `include/SchemaProvider` include root を提供します。公開例は recipe 専用 helper なしで `<descriptor/descriptor.h>`、`<runtime/client.h>`、`<neograph/llm/schema_provider.h>` を直接使います。
 
-設置 SDK package は最低 `0.1.0` で interface revision 4 header と shared-library generation 4 の一致が必要です。バージョン一致だけでは旧 interface/ABI binary を承認しません。
+設置 SDK package は最低 `0.1.1` で interface revision 4 header と shared-library generation 4 の一致が必要です。バージョン一致だけでは旧 interface/ABI binary を承認しません。
 
 ```cmake
-find_package(SchemaProvider 0.1.0 CONFIG REQUIRED COMPONENTS runtime)
+find_package(SchemaProvider 0.1.1 CONFIG REQUIRED COMPONENTS runtime)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -400,7 +400,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを一致した新ヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。SDK は alpha `0.1.0`、interface revision 4 / shared-library generation 4、out-of-line capability check を使い、安定リリースの宣言ではありません。記録済み interface-3 SDK runtime/archive 検証は Linux/POSIX の過去の根拠で、interface-4 pass ではありません。Windows NTFS/macOS 実装は存在しますが新 platform 検証には runtime 根拠が必要です。WASM provider runtime は未検証です。
+ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを一致した新ヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。SDK は alpha `0.1.1`、interface revision 4 / shared-library generation 4、out-of-line capability check を使い、安定リリースの宣言ではありません。記録済み interface-3 SDK runtime/archive 検証は Linux/POSIX の過去の根拠で、interface-4 pass ではありません。Windows NTFS/macOS 実装は存在しますが新 platform 検証には runtime 根拠が必要です。WASM provider runtime は未検証です。
 
 Python も C++ と同じ所有 request/outcome 境界を公開します: `make_provider_request`、`Provider.prepare`、`dispatch`、`invoke`。Provider 履歴には typed part を持つ `ProviderMessage` を使い、`ChatMessage` はグラフ用の便宜的 projection として残ります。SDK 失敗は `ProviderOutcome.failure` で読み、host observer/settlement 例外は `outcome` と `cause` を保持します。コンストラクターと GIL/コールバック動作は [Python binding ガイド](python-binding.md)を参照してください。
 

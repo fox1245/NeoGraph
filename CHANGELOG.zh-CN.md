@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=17de06f043bfd612e891cdfb9d033caece303795641bb8952b3d9c0d08c3abfb -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=7173060d8b4f0dae592d6132b51be14df00f78234e043963b75a322694a69734 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,12 +12,15 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ---
 
 ## [未发布]
+
+## [0.13.1] - 2026-10-07
+NeoGraph `0.13.1` 面向 alpha SDK `0.1.1`。interface revision 与 shared-library generation 仍为 4，因此使用者只需选择 SDK `0.1.1`（已安装的 package config 要求精确版本）并重新构建。Native archive 仍为 v3 / `spna3`，portable JSON 仍为 v2。功能性变更是下面的 Windows transport 修复：作为 0.13.0 发布的 Windows wheel 存在该缺陷，应替换为 0.13.1。修复提交的 hosted CI 与 Windows wheel gate 已通过（GitHub Actions run 37576205702、37576205395，仅 CPython 3.12）；完整的 CPython 3.9–3.13 矩阵在发布 tag 上运行。
+### 修复
+- **Windows：较大的请求体可能一直卡到操作截止时间。** SDK transport 等待 `FD_WRITE`，而 Winsock 只在 `send()` 以 `WSAEWOULDBLOCK` 失败之后才记录该事件。一次成功但把 socket 填满的发送不会产生事件，因此约 4%～6% 的 4 MB 上传（在 loopback 上测得）停在约 131 KB 或 197 KB，并以重试安全性为 `PossiblyAccepted` 的 `DeadlineExceeded` 结束。固定的 SDK 现在在等待写入期间还会用短定时器探测 `select()`。已发布的 0.13.0 Windows wheel 存在该缺陷。回归测试：`test_large_post_does_not_stall_when_the_send_buffer_fills`（Windows 上重复 150 轮新连接；在 0.13.0 wheel 上 8 次运行全部失败）。Issue #340。
+
 ### 变更
 - **CI 已分层。** 现在每次 push 和 pull request 只运行 `ci.yml`：Linux、macOS、Windows 的完整 native suite 加 2 个 installed-consumer 行，仅改文档时跳过。sanitizer、fuzz canary、性能 gate、真实 ARM64、gRPC、Visual Studio generator 以及其余 8 个 installed-consumer 行原样移到 `ci-extended.yml`，每晚及按需运行。Wheel 在 packaging 变更时为每个平台构建 CPython 3.12，在发布 tag、每周 canary 和手动运行时构建 CPython 3.9–3.13，每个解释器一个 job。Windows 依赖复用 vcpkg binary archive。`verify_ci.py` 支持 `--jobs auto`、`wheel --python` 和 `native-windows --generator`，`native-windows` 现默认用 Ninja 构建（请在 x64 MSVC 环境运行，或指定 `--generator "Visual Studio 17 2022"`）。所有 runner 仍为标准 GitHub-hosted runner。
 - **ctest 以按测试的超时运行。** `verify_ci.py` 传入 `--timeout 600`（ASan 与 MSVC ASan 为 1200），因此卡住的测试会按名称失败，而不会耗尽 job 上限（Issue #341）。
-
-### 修复
-- **Windows：较大的请求体可能一直卡到操作截止时间。** SDK transport 等待 `FD_WRITE`，而 Winsock 只在 `send()` 以 `WSAEWOULDBLOCK` 失败之后才记录该事件。一次成功但把 socket 填满的发送不会产生事件，因此约 4%～6% 的 4 MB 上传（在 loopback 上测得）停在约 131 KB 或 197 KB，并以重试安全性为 `PossiblyAccepted` 的 `DeadlineExceeded` 结束。固定的 SDK 现在在等待写入期间还会用短定时器探测 `select()`。已发布的 0.13.0 Windows wheel 存在该缺陷。回归测试：`test_large_post_does_not_stall_when_the_send_buffer_fills`（Windows 上重复 150 轮新连接；在 0.13.0 wheel 上 8 次运行全部失败）。Issue #340。
 
 ## [0.13.0] - 2026-10-07
 

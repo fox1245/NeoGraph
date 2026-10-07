@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/stress/README.md locale=zh-CN source_sha256=245bd9f1555c8f45feba5119b20683c54700e0b74468f8857b4707267680b859 -->
+<!-- neograph-i18n: source=benchmarks/stress/README.md locale=zh-CN source_sha256=d1fd42d6f1bc331198538223f1500e0230e84d2ed174a70b798a73ad75817cc7 -->
 # NeoGraph 持续并发压力基准
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -16,7 +16,7 @@ Windows 使用 working-set 计数器，Linux 使用 `/proc/self/status`。其他
 ## 构建与运行
 
 安装外部 SchemaProvider SDK 并设置 prefix。关闭 LLM 和 NeoGraph 可选 libcurl 后端后，Core 仍需要 `SchemaProvider::runtime`。可用 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` 显式指定源码代替 prefix；源码构建需要 C++20、Python、libcurl ≥7.88 和 OpenSSL Crypto。依赖与平台限制参见[构建指南](../../README.md)。以下命令禁用网络获取和未使用的 NeoGraph 集成。
-NeoGraph `0.13.0` 需要 alpha SDK `0.1.0`、interface revision/shared generation 4，并以匹配 header/library 重建。当前集成验证尚未完成。
+NeoGraph `0.13.1` 需要 alpha SDK `0.1.1`、interface revision/shared generation 4，并以匹配 header/library 重建。当前集成验证尚未完成。
 
 ```bash
 # Set SCHEMAPROVIDER_PREFIX to the installed SDK prefix.

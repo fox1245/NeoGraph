@@ -31,7 +31,7 @@ CheckpointStore retains its legacy layout for the explicit adapter migration. Sy
 
 ## SDK and Python boundaries
 
-Core requires external `SchemaProvider::runtime`, even with LLM nodes disabled. The selected SDK release is `0.1.0` alpha, interface revision `4`, shared-library ABI revision `4`, with out-of-line capability checks; this is not a stable-interface claim. Install matching SDK components together. Its `libsp_*.so.4` generation is separate from NeoGraph's loader generation and from Python's `abi3` wheel tag.
+Core requires external `SchemaProvider::runtime`, even with LLM nodes disabled. The selected SDK release is `0.1.1` alpha, interface revision `4`, shared-library ABI revision `4`, with out-of-line capability checks; this is not a stable-interface claim. Install matching SDK components together. Its `libsp_*.so.4` generation is separate from NeoGraph's loader generation and from Python's `abi3` wheel tag.
 
 Interface 4 adds family-specific request controls and changes public request layouts. Rebuild SDK consumers, NeoGraph and Python extensions together; interface-3 headers or libraries are not interchangeable with interface 4. Native archive v3 / `spna3` and portable JSON v2 remain independent, unchanged formats. Historical interface-3 measurements do not qualify interface 4.
 

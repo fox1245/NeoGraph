@@ -20,7 +20,7 @@ Emscripten SDK runtime build. A native SDK installation cannot be linked into
 WebAssembly. The historical smoke below does not establish that the current
 source tree builds under Emscripten.
 
-NeoGraph `0.13.0` requires alpha SDK `0.1.0`, interface revision/shared
+NeoGraph `0.13.1` requires alpha SDK `0.1.1`, interface revision/shared
 generation 4, built for the same target. Qualifying a genuine Emscripten SDK
 runtime remains a prerequisite; this page neither drops WASM support nor
 guarantees a current build. Archive v3 / `spna3` and portable JSON v2 are unchanged.

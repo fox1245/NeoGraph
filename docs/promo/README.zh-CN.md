@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/promo/README.md locale=zh-CN source_sha256=6ac0e174ac729e62627d10ccfa9a004927c0ec15964bd1172fcfaa3d3b493dde -->
+<!-- neograph-i18n: source=docs/promo/README.md locale=zh-CN source_sha256=eda23a0fd62ee1ba5a3eb5f26292eac3aa3ac273903f5fd8c5714eaa49627b54 -->
 # NeoGraph 宣传片 — Remotion 源码
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -7,7 +7,7 @@
 
 源码已提交，以便重新编辑和渲染场景。
 生成 video 展示 Program pipeline，不是 API reference、benchmark 或 qualification 记录。
-媒体文件名的 `v3` 是 asset 标签，不是 SDK interface revision。NeoGraph `0.13.0` 使用 alpha SDK `0.1.0`，interface/shared generation 4；现有 render 不证明该 runtime 或尚未完成的验证。
+媒体文件名的 `v3` 是 asset 标签，不是 SDK interface revision。NeoGraph `0.13.1` 使用 alpha SDK `0.1.1`，interface/shared generation 4；现有 render 不证明该 runtime 或尚未完成的验证。
 
 ## 场景（`src/scenes/`）
 

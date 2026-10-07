@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=c83cf49f9761e11401ae84366e9dce10d62a223481589269b3f729c4b68cc582 -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=f1c2fdb5d8383c9c326bc200d9da2e10b5aba9dd8dea18fd5e5fae5f7d14d1df -->
 # C++ API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -23,7 +23,7 @@ CMake 3.20+ 按显式 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、已安装 runtime p
 固定 public GitHub source archive 的顺序选择 SDK。download fallback 默认启用；
 使用已安装 package 或显式 source 的 offline 构建应设置 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`。
 安装 include root 是 `include/SchemaProvider`；执行 interface/capability 检查，
-SDK package 为 alpha `0.1.0`（interface/shared ABI 4）。
+SDK package 为 alpha `0.1.1`（interface/shared ABI 4）。
 
 保留的 interface-3 model-free C++ E2E 执行验证了39个编号 target：29个 finite offline target 与实际
 MCP/ACP/A2A/Harness 和 gRPC graph/checkpoint/tool 路径。gRPC-vs-JSON-RPC 测量示例也运行了，

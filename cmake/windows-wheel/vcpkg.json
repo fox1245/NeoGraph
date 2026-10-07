@@ -1,6 +1,6 @@
 {
   "name": "neograph-wheel-runtime",
-  "version-string": "0.13.0",
+  "version-string": "0.13.1",
   "builtin-baseline": "5f1f266e969f8f5663e8ccca6249193c48531326",
   "dependencies": [
     {

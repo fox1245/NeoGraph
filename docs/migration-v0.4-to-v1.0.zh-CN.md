@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=zh-CN source_sha256=adeaef39bec37687c1e660e3ffbf89611002f53fd28b2a1d3aebd5b1fb664991 -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=zh-CN source_sha256=37d0912e7f5f8a94f97a67c362602b9b38015ab141aa56aac51c33c118750d4c -->
 # 迁移指南：旧的 8 个虚函数 → `run(NodeInput)`（v0.4.x → v0.9+）
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -299,7 +299,7 @@ grep -lE 'execute\(const GraphState' src/**/*.cpp
 
 # 迁移 2：typed lossless Provider 切换（必须重新编译）
 
-这是源码和二进制破坏性变更；所有 C++ 使用者与自定义提供方都必须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter 和 Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为 alpha `0.1.0`、interface revision 4 / shared ABI 4，使用 out-of-line capability check，不表示稳定发布。已记录的 interface-3 SDK runtime/archive 验证覆盖 Linux/POSIX，不验证 interface 4。Windows NTFS 与 macOS 实现已存在，但新 platform 验证需要 runtime 证据；尚未确立 WASM provider runtime 验证。
+这是源码和二进制破坏性变更；所有 C++ 使用者与自定义提供方都必须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter 和 Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为 alpha `0.1.1`、interface revision 4 / shared ABI 4，使用 out-of-line capability check，不表示稳定发布。已记录的 interface-3 SDK runtime/archive 验证覆盖 Linux/POSIX，不验证 interface 4。Windows NTFS 与 macOS 实现已存在，但新 platform 验证需要 runtime 证据；尚未确立 WASM provider runtime 验证。
 
 将已删除的 `Provider::complete`、`complete_async`、`complete_stream`、`complete_stream_async` 调用迁移到显式 mode request 和 `invoke` / `dispatch`（或 C++ async peer）。`Agent::complete` 仍是返回拥有所有权结果的独立 one-turn API。
 

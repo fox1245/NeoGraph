@@ -163,7 +163,7 @@ def macho(path):
 
 def installed_inventory():
     dist = importlib.metadata.distribution("neograph-engine")
-    require(dist.version == "0.13.0", "expected the installed NeoGraph 0.13.0 wheel")
+    require(dist.version == "0.13.1", "expected the installed NeoGraph 0.13.1 wheel")
     direct = dist.read_text("direct_url.json")
     require(not direct or not json.loads(direct).get("dir_info", {}).get("editable", False),
             "editable/source installs are not wheel proof")
@@ -339,7 +339,7 @@ def worker(config_path):
     import neograph_engine as ng
     import neograph_engine._neograph as extension
     require(Path(ng.__file__).resolve() == recorded["neograph_engine/__init__.py"] and
-            str(Path(extension.__file__).resolve()) in native and ng.__version__ == "0.13.0",
+            str(Path(extension.__file__).resolve()) in native and ng.__version__ == "0.13.1",
             "import did not resolve to the original installed wheel RECORD")
     outcomes = behavior(ng, config["port"])
     after = images()

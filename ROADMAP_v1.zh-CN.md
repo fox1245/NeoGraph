@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=ROADMAP_v1.md locale=zh-CN source_sha256=145f159a2258c775caf7dd71eeb13936ae0bc5eb31cca00f660b4f2223d2a490 -->
+<!-- neograph-i18n: source=ROADMAP_v1.md locale=zh-CN source_sha256=2d2070568d9666f73c2882872cc8b31ea5b4030bd5a71f57325bc82ddf612c2b -->
 # NeoGraph v1.0 — 设计细化路线图
 
 **Languages:** [English](ROADMAP_v1.md) | [한국어](ROADMAP_v1.ko.md) | [日本語](ROADMAP_v1.ja.md) | [简体中文](ROADMAP_v1.zh-CN.md)
@@ -18,7 +18,7 @@ Provider 暴露 `get_name()`、`family()` 和 `prepare()`；共同 invoke/dispat
 下方七月的纯新增兼容政策已被此切换取代。
 
 即使禁用 LLM，Core 也需要外部 `SchemaProvider::runtime`。
-NeoGraph `0.13.0` 使用 alpha SDK `0.1.0`，interface revision/shared generation 4；consumer 必须以匹配的 header/library 重建。Native archive 保持 v3 / `spna3`，portable JSON 保持 v2。当前集成验证尚未完成。
+NeoGraph `0.13.1` 使用 alpha SDK `0.1.1`，interface revision/shared generation 4；consumer 必须以匹配的 header/library 重建。Native archive 保持 v3 / `spna3`，portable JSON 保持 v2。当前集成验证尚未完成。
 Python 使用类型化 request/prepared/Outcome 对象，`ChatMessage` 单独保留为 graph 便捷类型。
 当前 API 见 [C++ reference](docs/reference-en.md) 和 [Python binding](docs/python-binding.md)。
 历史 Linux/ARM64/WASM 观测不能验证这些平台上的当前 SDK runtime，也不能预测 application 性能。

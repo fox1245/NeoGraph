@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=998352566107627e9cf22b256b5d1e2648275aa3c8ad5bd60d513c6fc59a7314 -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=94363c98fc3c2931d87e8b916dbff497b8b2ce92fcecaf905bdbb1cf98b1bdfe -->
 # NeoGraph WASM smoke 程序
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -12,7 +12,7 @@ CMake 3.20+ 按显式 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、已安装 runtime�
 `NEOGRAPH_FETCH_SCHEMAPROVIDER` 的 download fallback 默认 ON，offline package/source 构建应设为 OFF。
 SDK runtime 还需要 libcurl、OpenSSL 和 threads。当前 transport 与 archive 有平台特定依赖；此 worktree 没有经过验证的 Emscripten SDK runtime 构建。native SDK 不能链接到 WebAssembly。下方历史 smoke 不证明当前源码能在 Emscripten 下构建。
 
-NeoGraph `0.13.0` 需要为相同 target 构建的 alpha SDK `0.1.0`，interface revision/shared generation 4。验证真实 Emscripten SDK runtime 仍是前提；本页既不删除 WASM 支持，也不保证当前构建可用。Archive v3 / `spna3` 和 portable JSON v2 不变。
+NeoGraph `0.13.1` 需要为相同 target 构建的 alpha SDK `0.1.1`，interface revision/shared generation 4。验证真实 Emscripten SDK runtime 仍是前提；本页既不删除 WASM 支持，也不保证当前构建可用。Archive v3 / `spna3` 和 portable JSON v2 不变。
 
 ## 历史结果
 

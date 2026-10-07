@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=ROADMAP_v1.md locale=ja source_sha256=145f159a2258c775caf7dd71eeb13936ae0bc5eb31cca00f660b4f2223d2a490 -->
+<!-- neograph-i18n: source=ROADMAP_v1.md locale=ja source_sha256=2d2070568d9666f73c2882872cc8b31ea5b4030bd5a71f57325bc82ddf612c2b -->
 # NeoGraph v1.0 — 設計研ぎ澄ましロードマップ
 
 **Languages:** [English](ROADMAP_v1.md) | [한국어](ROADMAP_v1.ko.md) | [日本語](ROADMAP_v1.ja.md) | [简体中文](ROADMAP_v1.zh-CN.md)
@@ -18,7 +18,7 @@ Provider は `get_name()`、`family()`、`prepare()` を公開します。共通
 以下の 7 月の追加的互換性ポリシーはこの移行に置き換えられました。
 
 LLM を無効にしても Core は外部 `SchemaProvider::runtime` を必要とします。
-NeoGraph `0.13.0` は alpha SDK `0.1.0`、interface revision/shared generation 4 を使います。一致する header/library で consumer を再ビルドしてください。Native archive は v3 / `spna3`、portable JSON は v2 のままです。現在の統合検証は未完了です。
+NeoGraph `0.13.1` は alpha SDK `0.1.1`、interface revision/shared generation 4 を使います。一致する header/library で consumer を再ビルドしてください。Native archive は v3 / `spna3`、portable JSON は v2 のままです。現在の統合検証は未完了です。
 Python は型付き request/prepared/Outcome を使用し、`ChatMessage` は別の graph 便宜型です。
 現在の API は [C++ reference](docs/reference-en.md) と [Python binding](docs/python-binding.md) を参照してください。
 過去の Linux/ARM64/WASM 観測は、それらの platform の現在の SDK runtime を検証せず、application 性能も予測しません。

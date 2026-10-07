@@ -5,7 +5,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "neograph-engine"
-version = "0.13.0"
+version = "0.13.1"
 description = "C++ graph agent engine with Python bindings"
 readme = "README.md"
 requires-python = ">=3.9"

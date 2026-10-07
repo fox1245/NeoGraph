@@ -26,7 +26,7 @@ then an installed runtime package, then the pinned public GitHub source archive.
 The download fallback is enabled by default; set `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`
 for offline builds with an installed package or explicit source checkout.
 Installed SDK include root is `include/SchemaProvider`. Interface/capability
-checks are enforced; the SDK package is alpha `0.1.0` (interface/shared ABI 4).
+checks are enforced; the SDK package is alpha `0.1.1` (interface/shared ABI 4).
 
 The preserved interface-3 model-free C++ E2E run verified 39 numbered targets: 29 finite offline
 targets plus actual MCP/ACP/A2A/Harness and gRPC graph/checkpoint/tool paths.

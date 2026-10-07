@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=ko source_sha256=2bf76338f86fbdedaf1a0d47cb15d8901c26412e1d6988676ceec5bb62ce2f92 -->
+<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=ko source_sha256=e7253d2aacfe88e0cb5c6ef9f02834b805e0ddcfb739e7c9882235f90eba9b52 -->
 # NeoGraph C++ API 참조 {#mainpage}
 
 **Languages:** [English](doxygen-mainpage.md) | [한국어](doxygen-mainpage.ko.md) | [日本語](doxygen-mainpage.ja.md) | [简体中文](doxygen-mainpage.zh-CN.md)
@@ -64,7 +64,7 @@ sp::runtime::Result first_call(
 
 Wire 증거는 family가 제공하며 선택적이다. `sp::Completion::wire_envelope`는 null일 수 있다(Python의 `ProviderCompletion.wire_envelope`는 `None`). 현재 buffered Chat은 전체 응답 JSON을 `raw_events`의 `RawWire`에 보존한다. 이 관측은 `type == "chat.completion"`이고 문서는 `payload`에 있으며 `wire_envelope`는 null로 남는다. Family가 실제 보존한 위치에서 증거를 읽으며 fallback envelope를 만들어 넣지 않는다. Native continuation과 raw buffer는 보호된 증거로 유지되고 trace payload에서 제외된다.
 
-소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. 릴리스 목표는 SDK `0.1.0` alpha, interface revision 4 / shared ABI 4이며 out-of-line capability check를 사용한다. Alpha는 안정 API 약속이 아니다. 기록된 interface-3 runtime/archive 검증은 Linux/POSIX 범위이며 interface 4나 Windows·macOS·WASM runtime 검증을 뜻하지 않는다.
+소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. 릴리스 목표는 SDK `0.1.1` alpha, interface revision 4 / shared ABI 4이며 out-of-line capability check를 사용한다. Alpha는 안정 API 약속이 아니다. 기록된 interface-3 runtime/archive 검증은 Linux/POSIX 범위이며 interface 4나 Windows·macOS·WASM runtime 검증을 뜻하지 않는다.
 
 Python은 `SchemaProvider(ValidatedDescriptor, ProviderRuntimeOptions,
 SchemaProviderDefaults)`와 typed `ProviderMessage` part를 받는

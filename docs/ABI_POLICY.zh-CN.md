@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=390bd1ee4f257a5af2db235b2e9b05354b2613d057086c0d015fa4ceb39c7e11 -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=c3367508d65878d70236cf39ee1c62d84251adbdcfdae4557190ee11635fcb64 -->
 # 二进制兼容政策
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -32,7 +32,7 @@ CheckpointStore 为显式 adapter 迁移保留 legacy layout。sync 默认实现
 
 ## SDK 与 Python 边界
 
-即使禁用 LLM node，Core 也要求外部 `SchemaProvider::runtime`。选定的 SDK release 是 `0.1.0` alpha，interface revision `4`、shared-library ABI revision `4`，有 out-of-line capability check；不表示 stable interface。一并安装匹配 component。`libsp_*.so.4` 代际与 NeoGraph loader 代际、Python `abi3` wheel tag 都不同。
+即使禁用 LLM node，Core 也要求外部 `SchemaProvider::runtime`。选定的 SDK release 是 `0.1.1` alpha，interface revision `4`、shared-library ABI revision `4`，有 out-of-line capability check；不表示 stable interface。一并安装匹配 component。`libsp_*.so.4` 代际与 NeoGraph loader 代际、Python `abi3` wheel tag 都不同。
 
 Interface 4 添加各 family 的 request control，并改变公开 request layout。须一起 rebuild SDK consumer、NeoGraph 和 Python extension；interface-3 header/library 不能与 interface 4 混用。Native archive v3 / `spna3` 和 portable JSON v2 是独立格式，保持不变。历史 interface-3 测量不验证 interface 4。
 

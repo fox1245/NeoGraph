@@ -19,7 +19,7 @@ handle and retain an immutable SDK Outcome. The old `CompletionProvider`,
 The July additive compatibility policy below was superseded by this cutover.
 
 Core requires external `SchemaProvider::runtime` even with LLM disabled.
-NeoGraph `0.13.0` uses alpha SDK `0.1.0`, interface revision/shared generation 4;
+NeoGraph `0.13.1` uses alpha SDK `0.1.1`, interface revision/shared generation 4;
 rebuild consumers with matching headers and libraries. Native archives remain
 v3 / `spna3`, and portable JSON remains v2. Current integrated validation is pending.
 Python uses typed request/prepared/Outcome objects, with

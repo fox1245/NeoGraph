@@ -15,7 +15,7 @@ Windows uses process working-set counters; Linux uses `/proc/self/status`. Other
 ## Build and run
 
 Install the external SchemaProvider SDK and set its prefix. Core requires `SchemaProvider::runtime` even when LLM and the optional NeoGraph libcurl backend are disabled. An explicit SDK source checkout can replace the prefix using `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`; its build needs C++20, Python, libcurl ≥7.88, and OpenSSL Crypto. See the [build guide](../../README.md) for dependency and platform limits. This recipe disables network fetching and unused NeoGraph integrations.
-For NeoGraph `0.13.0`, use alpha SDK `0.1.0`, interface revision/shared
+For NeoGraph `0.13.1`, use alpha SDK `0.1.1`, interface revision/shared
 generation 4, and rebuild with matching headers/libraries. Current integrated validation is pending.
 
 ```bash

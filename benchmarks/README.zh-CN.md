@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=772f62d9128d37e75de2802065552e7b0eca1ddd6dabbc1bce79e829b67dcd83 -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=6ee5c1de3180f83f2256f69f39c08ae0d963a5f6408e99deebdcff999f47b633 -->
 # NeoGraph 对比 Python 图/流水线框架 — 引擎开销基准测试
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -6,7 +6,7 @@
 在没有 I/O、sleep 或模型调用的小型对应 workload 上测量 NeoGraph 与 Python framework 的每次调用引擎开销。
 测量包括 node dispatch、state-channel write 与 reducer 调用。
 带日期表格保留历史 engine 名称和依赖版本，不代表当前 package 版本或类型化 runtime 验证。
-当前 NeoGraph `0.13.0` recipe 需要 alpha SDK `0.1.0`、interface revision/shared generation 4 的匹配 header/library。当前集成验证尚未完成；下方 SDK3 cutover 和 notification cohort 保留为历史记录。
+当前 NeoGraph `0.13.1` recipe 需要 alpha SDK `0.1.1`、interface revision/shared generation 4 的匹配 header/library。当前集成验证尚未完成；下方 SDK3 cutover 和 notification cohort 保留为历史记录。
 
 Program admission、JavaScript control、SQLite/PostgreSQL 成本见
 [Measuring Program costs](../docs/PROGRAM_COST_MEASUREMENT.md)。

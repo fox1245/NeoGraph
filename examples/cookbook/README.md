@@ -28,7 +28,7 @@ explicit `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<sdk-source>`, or the immutable
 public SDK archive fallback. `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` disables
 fetching when using an offline installed/source SDK.
 Installed SDK include root is `include/SchemaProvider`. Interface/capability
-checks are enforced; SDK `0.1.0` alpha uses interface/shared ABI 4.
+checks are enforced; SDK `0.1.1` alpha uses interface/shared ABI 4.
 
 The preserved interface-3 model-free execution covered the four local Assembly A2A member servers
 and C++ speaker, JARVIS CLI synthetic turns with persisted memory, Beast strict

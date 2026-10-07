@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=b888d8b7faa97d012074914cad0b4d30215492118cc87ed99aa13abb97a929b9 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=ba7bc78e107bf6ae0eb0f629071a28038e4ff8c2eef2dfa7aa4f435d4dab63bb -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -42,10 +42,10 @@ CMake 3.20 이상이 필요하다. Core가 소유 typed provider 계약을 공�
 
 SDK imported target이 `include/SchemaProvider` include root를 제공한다. 공개 예시는 recipe 전용 helper 없이 `<descriptor/descriptor.h>`, `<runtime/client.h>`, `<neograph/llm/schema_provider.h>`를 직접 사용한다.
 
-설치 SDK package는 최소 `0.1.0`이고 interface revision 4 header와 shared-library generation 4가 일치해야 한다. 버전 일치만으로 이전 interface/ABI binary를 승인하지 않는다.
+설치 SDK package는 최소 `0.1.1`이고 interface revision 4 header와 shared-library generation 4가 일치해야 한다. 버전 일치만으로 이전 interface/ABI binary를 승인하지 않는다.
 
 ```cmake
-find_package(SchemaProvider 0.1.0 CONFIG REQUIRED COMPONENTS runtime)
+find_package(SchemaProvider 0.1.1 CONFIG REQUIRED COMPONENTS runtime)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -429,7 +429,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 alpha `0.1.0`, interface revision 4 / shared-library generation 4이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. 기록된 interface-3 SDK runtime/archive 검증은 Linux/POSIX의 과거 증거이지 interface-4 pass가 아니다. Windows NTFS와 macOS 구현이 있으나 새 platform 검증에는 runtime 증거가 필요하며 WASM provider runtime 검증은 입증되지 않았다.
+소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 alpha `0.1.1`, interface revision 4 / shared-library generation 4이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. 기록된 interface-3 SDK runtime/archive 검증은 Linux/POSIX의 과거 증거이지 interface-4 pass가 아니다. Windows NTFS와 macOS 구현이 있으나 새 platform 검증에는 runtime 증거가 필요하며 WASM provider runtime 검증은 입증되지 않았다.
 
 Python도 C++과 같은 소유 request/outcome 경계를 제공한다: `make_provider_request`, `Provider.prepare`, `dispatch`, `invoke`. Provider 기록에는 typed part를 가진 `ProviderMessage`를 사용하며 `ChatMessage`는 그래프 편의 projection으로 남는다. SDK 실패는 `ProviderOutcome.failure`로 읽고 host observer/settlement 예외는 `outcome`과 `cause`를 보존한다. 생성자와 GIL/콜백 동작은 [Python binding 안내](python-binding.md)를 참조한다.
 

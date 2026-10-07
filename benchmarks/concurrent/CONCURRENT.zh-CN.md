@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/concurrent/CONCURRENT.md locale=zh-CN source_sha256=d1bb14dd5c317c6fc2c6785110f99b2a224b80909a7875d413374ec3bb854f27 -->
+<!-- neograph-i18n: source=benchmarks/concurrent/CONCURRENT.md locale=zh-CN source_sha256=dbe7cdde4e740c018239a2ca99a8ee319dd9ff01974ea002629f03d5595e2199 -->
 # 并发负载基准：NeoGraph 与 Python 的历史结果
 
 **Languages:** [English](CONCURRENT.md) | [한국어](CONCURRENT.ko.md) | [日本語](CONCURRENT.ja.md) | [简体中文](CONCURRENT.zh-CN.md)
@@ -48,7 +48,7 @@ Docker CPU 配额未必改变 `hardware_concurrency()` 可见的核心数。请�
 ## 当前依赖与复现状态
 
 即使设置 `NEOGRAPH_BUILD_LLM=OFF` 和 `NEOGRAPH_USE_LIBCURL=OFF`，Core 也链接外部 `SchemaProvider::runtime`。安装 SDK 用 `CMAKE_PREFIX_PATH`，显式源码用 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` 指定；参见[构建指南](../../README.md)。SDK 源码需要 C++20、生成配置用的 Python、libcurl ≥7.88 和 OpenSSL Crypto。目前 SDK 验证范围是 Linux/POSIX，旧 Docker 结果不验证其他平台。
-NeoGraph `0.13.0` recipe 需要匹配 alpha SDK `0.1.0`、interface revision/shared generation 4 的 header/library。当前集成验证尚未完成；此前 Linux/POSIX 验证不是 SDK4 或新 Docker 通过记录。
+NeoGraph `0.13.1` recipe 需要匹配 alpha SDK `0.1.1`、interface revision/shared generation 4 的 header/library。当前集成验证尚未完成；此前 Linux/POSIX 验证不是 SDK4 或新 Docker 通过记录。
 
 当前 NeoGraph Docker 镜像安装 curl/OpenSSL 开发依赖，构建链接 `neograph::core` 的专用 CMake 消费者，继承完整 SDK 依赖。SDK 获取遵循根 CMake 策略；没有包或显式源码时可能需要网络。可选 NG 网络模块关闭后，SDK 仍必需。本页不声称新 Docker 测量。矩阵在构建前清空输出，请指定新路径。`status=ok` 仅表示提取到 JSON；还需检查 `ok`、`err` 和退出状态。
 

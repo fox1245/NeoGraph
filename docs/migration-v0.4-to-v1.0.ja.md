@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ja source_sha256=adeaef39bec37687c1e660e3ffbf89611002f53fd28b2a1d3aebd5b1fb664991 -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ja source_sha256=37d0912e7f5f8a94f97a67c362602b9b38015ab141aa56aac51c33c118750d4c -->
 # 移行ガイド: レガシー 8 仮想メソッド → `run(NodeInput)` (v0.4.x → v0.9+)
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -311,7 +311,7 @@ grep -lE 'execute\(const GraphState' src/**/*.cpp
 
 # 移行 2: typed lossless Provider 切り替え (再コンパイル必須)
 
-ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを新しい一致したヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。SDK は alpha `0.1.0`、interface revision 4 / shared ABI 4、out-of-line capability check を使用し、安定リリースの宣言ではありません。記録された interface-3 SDK runtime/archive 検証は Linux/POSIX の範囲で、interface 4 の資格検証ではありません。Windows NTFS と macOS の実装はありますが、新 platform の検証には runtime 証拠が必要です。WASM provider runtime の検証は確立していません。
+ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを新しい一致したヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。SDK は alpha `0.1.1`、interface revision 4 / shared ABI 4、out-of-line capability check を使用し、安定リリースの宣言ではありません。記録された interface-3 SDK runtime/archive 検証は Linux/POSIX の範囲で、interface 4 の資格検証ではありません。Windows NTFS と macOS の実装はありますが、新 platform の検証には runtime 証拠が必要です。WASM provider runtime の検証は確立していません。
 
 削除済み `Provider::complete`、`complete_async`、`complete_stream`、`complete_stream_async` 呼び出しは明示 mode request と `invoke` / `dispatch`（または C++ async peer）へ移行します。`Agent::complete` は所有結果を返す別の one-turn API として残ります。
 

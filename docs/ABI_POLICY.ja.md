@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=390bd1ee4f257a5af2db235b2e9b05354b2613d057086c0d015fa4ceb39c7e11 -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=c3367508d65878d70236cf39ee1c62d84251adbdcfdae4557190ee11635fcb64 -->
 # binary 互換方針
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -32,7 +32,7 @@ CheckpointStore は明示的 adapter 移行に legacy layout を保つ。sync �
 
 ## SDK と Python 境界
 
-LLM node を無効にしても Core は外部 `SchemaProvider::runtime` を要求する。選択した SDK release は `0.1.0` alpha、interface revision `4`、shared-library ABI revision `4` で、out-of-line capability check を持つ。stable interface の主張ではない。対応 component を一緒に install する。`libsp_*.so.4` 世代は NeoGraph loader 世代と Python `abi3` wheel tag の双方と別である。
+LLM node を無効にしても Core は外部 `SchemaProvider::runtime` を要求する。選択した SDK release は `0.1.1` alpha、interface revision `4`、shared-library ABI revision `4` で、out-of-line capability check を持つ。stable interface の主張ではない。対応 component を一緒に install する。`libsp_*.so.4` 世代は NeoGraph loader 世代と Python `abi3` wheel tag の双方と別である。
 
 Interface 4 は family 別 request control を追加し、公開 request layout を変更する。SDK consumer、NeoGraph、Python extension を一緒に rebuild する。interface-3 header/library と interface 4 は混在できない。Native archive v3 / `spna3` と portable JSON v2 は独立した形式で、変更されない。過去の interface-3 測定は interface 4 の資格検証ではない。
 

@@ -7,7 +7,7 @@ The runners implement router → plan → researcher Send branches → synthesis
 ## Files and dependencies
 
 `dr_neograph.py`, `dr_langgraph.py`, `bench.py`, `bench_mock.py`, `mem_probe.py`, `mem_prod_stack.py`, `sweep.sh`, `_run_single.py` cover real calls, plain-text mock workloads, memory probes, sweeps, and one-shot diagnosis. Install a wheel matching the current source via the [Python binding guide](../../docs/python-binding.md); an old wheel with `CompletionParams`/`OpenAIProvider` is not the current API. Source builds require the external SchemaProvider SDK even for Core.
-NeoGraph `0.13.0` requires a wheel/native build matching alpha SDK `0.1.0`,
+NeoGraph `0.13.1` requires a wheel/native build matching alpha SDK `0.1.1`,
 interface revision/shared generation 4. Current integrated validation is pending.
 This comparison runner is separate from the built-in Deep Research recovery path.
 

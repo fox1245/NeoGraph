@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=58bdfd693a5d84e22e8ad4ec9999c72c106596f174f31970f0f7bf488518e0d7 -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=c581af0e3041a7d6e48040bfd17085c2297a0c796d34547f6528392ec2b7ce27 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -143,7 +143,7 @@ sp::runtime::Result first_call(
 
 `ChatMessage`、`ChatTool` 和 JSON 是可移植投影。真实的原生历史可以与原生检查点伴随数据一起保留在内存中；持久化原生历史需要真正的 `sp::NativeArchive`，以及受保护的、所有者私有的保管机制。可移植 JSON 无法重建这类权限。归档通过独立密钥认证保管关系；它既不是加密，也不是服务商签发者身份认证。不要公开归档内容、密钥、原生二进制数据或原始线路观测。[提供方参考](docs/reference-en.md)和[迁移指南](docs/migration-v0.4-to-v1.0.md)介绍了持久化失败、观察器、托管预算银行和重放边界。
 
-这次类型化接口切换移除了 `CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器和 Responses WebSocket 路径。C++ 使用方需要重新编译，并迁移自定义提供方；没有兼容别名。SDK 包版本为 `0.1.0`，接口处于 alpha 阶段，接口修订号为 4，共享 ABI 为 4；修订号必须匹配，而这些数字并不表示 SDK 接口已经稳定。
+这次类型化接口切换移除了 `CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器和 Responses WebSocket 路径。C++ 使用方需要重新编译，并迁移自定义提供方；没有兼容别名。SDK 包版本为 `0.1.1`，接口处于 alpha 阶段，接口修订号为 4，共享 ABI 为 4；修订号必须匹配，而这些数字并不表示 SDK 接口已经稳定。
 
 ## Python
 
@@ -151,7 +151,7 @@ sp::runtime::Result first_call(
 pip install neograph-engine
 ```
 
-本文描述的类型化提供方 API 面向 NeoGraph `0.13.0`；历史 wheel 包提供的是旧接口。[Python 绑定指南](docs/python-binding.md)介绍了源码 API 和构建前置条件。
+本文描述的类型化提供方 API 面向 NeoGraph `0.13.1`；历史 wheel 包提供的是旧接口。[Python 绑定指南](docs/python-binding.md)介绍了源码 API 和构建前置条件。
 
 下面的图不需要 API 密钥：
 
@@ -212,7 +212,7 @@ NeoGraph 适用于具有明确状态转换、分支或循环、并行任务、�
 使用已安装软件包的项目只需链接已启用且实际需要的组件：
 
 ```cmake
-find_package(SchemaProvider 0.1.0 CONFIG REQUIRED COMPONENTS runtime)
+find_package(SchemaProvider 0.1.1 CONFIG REQUIRED COMPONENTS runtime)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -248,7 +248,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `quickjs-performance` | Linux 匹配 enabled/disabled build；不可变 provenance 要求实际源码根目录 Git checkout。 |
 | `fuzz` | Linux Clang/libFuzzer 60 秒 canary；将 corpus 复制到自有输出。 |
 | `install` | 隔离 exported-prefix ABI/symbol/C++/C11/collision/relocation consumer；无需 Git/Bash。可选 `--shared`、`--core-only` 或 `--program`；`--quickjs` 需 `--program` 和 ELF/Mach-O 检查（Windows 行省略）。 |
-| `sdist` | 源码 archive 与 Twine；配置 build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10；可选 `--release-tag v0.13.0`。 |
+| `sdist` | 源码 archive 与 Twine；配置 build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10；可选 `--release-tag v0.13.1`。 |
 | `wheel` | repair 后的 installed wheel；配置 cibuildwheel==2.23.0 与 native/container provider；必须指定 `--arch x86_64\|aarch64\|arm64\|AMD64`；指定 `--python cp312` 则只构建一个 CPython 而非全部。 |
 | `runtime-archive` | Shared SDK native-archive portability target/CTest；需 Ninja 和平台 runtime 依赖。 |
 

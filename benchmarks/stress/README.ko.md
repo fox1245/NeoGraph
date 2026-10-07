@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/stress/README.md locale=ko source_sha256=245bd9f1555c8f45feba5119b20683c54700e0b74468f8857b4707267680b859 -->
+<!-- neograph-i18n: source=benchmarks/stress/README.md locale=ko source_sha256=d1fd42d6f1bc331198538223f1500e0230e84d2ed174a70b798a73ad75817cc7 -->
 # NeoGraph 지속 동시 실행 스트레스 벤치마크
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -16,7 +16,7 @@ Windows는 프로세스 working-set 카운터, Linux는 `/proc/self/status`를 �
 ## 빌드와 실행
 
 외부 SchemaProvider SDK를 설치하고 prefix를 설정하세요. LLM과 NeoGraph의 선택적 libcurl 백엔드를 꺼도 Core에는 `SchemaProvider::runtime`이 필요합니다. prefix 대신 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`로 명시적 소스를 지정할 수 있으며 소스 빌드에는 C++20, Python, libcurl ≥7.88, OpenSSL Crypto가 필요합니다. 의존성과 플랫폼 제약은 [빌드 안내](../../README.md)를 참고하세요. 아래 명령은 네트워크 다운로드와 미사용 NeoGraph 통합을 끕니다.
-NeoGraph `0.13.0`에는 alpha SDK `0.1.0`, interface revision/shared generation 4를 사용하고 일치하는 header/library로 재빌드하세요. 현재 통합 검증은 대기 중입니다.
+NeoGraph `0.13.1`에는 alpha SDK `0.1.1`, interface revision/shared generation 4를 사용하고 일치하는 header/library로 재빌드하세요. 현재 통합 검증은 대기 중입니다.
 
 ```bash
 # Set SCHEMAPROVIDER_PREFIX to the installed SDK prefix.

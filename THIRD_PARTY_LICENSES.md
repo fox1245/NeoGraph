@@ -143,6 +143,10 @@ replacement and LGPL 2.1 modification/reverse-engineering rights. The archive
 contains actual library inputs, not the unrelated unknown-grant upstream tests.
 Its old-cohort repair mapping must be checked against each final release wheel;
 the release must also attach this exact source asset beside its Linux binaries.
+NeoGraph 0.13.1 ships this asset unchanged: its name and digest are those
+published with 0.13.0. The Linux wheel gate replaces the bundled libraries
+from it and runs the installed-wheel tests, and the bundled LGPL libraries
+of the 0.13.1 wheels are compared with the 0.13.0 wheels before publication.
 
 ## LLVM 20.1.8 macOS runtime notices
 

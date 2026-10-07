@@ -2270,7 +2270,7 @@ if(NEOGRAPH_INSTALL_EXPORT)
     # linked. Writing these out per-build rather than hardcoding them is the
     # point: an install that was built without libpq must not make its consumers
     # hunt for PostgreSQL.
-    set(NEOGRAPH_CONFIG_DEPENDENCIES "find_dependency(Threads)\nfind_dependency(SchemaProvider 0.1.0 CONFIG REQUIRED COMPONENTS runtime)")
+    set(NEOGRAPH_CONFIG_DEPENDENCIES "find_dependency(Threads)\nfind_dependency(SchemaProvider 0.1.1 CONFIG REQUIRED COMPONENTS runtime)")
     if(TARGET neograph_async OR TARGET neograph_llm OR TARGET neograph_mcp_http_server)
         string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(OpenSSL)")
     endif()

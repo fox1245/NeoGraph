@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=ja source_sha256=2bf76338f86fbdedaf1a0d47cb15d8901c26412e1d6988676ceec5bb62ce2f92 -->
+<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=ja source_sha256=e7253d2aacfe88e0cb5c6ef9f02834b805e0ddcfb739e7c9882235f90eba9b52 -->
 # NeoGraph C++ APIリファレンス {#mainpage}
 
 **Languages:** [English](doxygen-mainpage.md) | [한국어](doxygen-mainpage.ko.md) | [日本語](doxygen-mainpage.ja.md) | [简体中文](doxygen-mainpage.zh-CN.md)
@@ -64,7 +64,7 @@ sp::runtime::Result first_call(
 
 Wire 証拠は family が提供する任意の情報です。`sp::Completion::wire_envelope` は null の場合があります（Python の `ProviderCompletion.wire_envelope` は `None`）。現在の buffered Chat は応答 JSON 全体を `raw_events` 内の `RawWire` に保持します。`type == "chat.completion"` で、文書は `payload` にあり、`wire_envelope` は null のままです。Family が実際に保持する場所から証拠を読み、fallback envelope は捏造しません。Native continuation と raw buffer は保護された証拠として保持され、trace payload から除外されます。
 
-ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを新しい一致したヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。リリース対象は SDK `0.1.0` alpha、interface revision 4 / shared ABI 4 で、out-of-line capability check を使用します。Alpha は安定 API の保証ではありません。記録された interface-3 runtime/archive 資格検証は Linux/POSIX の範囲であり、interface 4 や Windows・macOS・WASM runtime の資格検証を意味しません。
+ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを新しい一致したヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。リリース対象は SDK `0.1.1` alpha、interface revision 4 / shared ABI 4 で、out-of-line capability check を使用します。Alpha は安定 API の保証ではありません。記録された interface-3 runtime/archive 資格検証は Linux/POSIX の範囲であり、interface 4 や Windows・macOS・WASM runtime の資格検証を意味しません。
 
 Python は `SchemaProvider(ValidatedDescriptor, ProviderRuntimeOptions,
 SchemaProviderDefaults)` と、typed `ProviderMessage` の part を受け取る

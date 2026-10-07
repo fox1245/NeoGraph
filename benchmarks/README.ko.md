@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=ko source_sha256=772f62d9128d37e75de2802065552e7b0eca1ddd6dabbc1bce79e829b67dcd83 -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=ko source_sha256=6ee5c1de3180f83f2256f69f39c08ae0d963a5f6408e99deebdcff999f47b633 -->
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 # NeoGraph 대 Python graph/pipeline 프레임워크 — 엔진 오버헤드 벤치마크
@@ -7,7 +7,7 @@
 I/O, sleep, 모델 호출이 없는 작은 대응 workload에서 NeoGraph와 Python 프레임워크의
 호출별 엔진 오버헤드를 측정합니다. node dispatch, state-channel write, reducer 호출을 포함합니다.
 날짜가 있는 표의 엔진 이름과 의존성 버전은 과거 기록이며 현재 package 버전이나 타입 runtime 검증이 아닙니다.
-현재 NeoGraph `0.13.0` recipe에는 alpha SDK `0.1.0`, interface revision/shared generation 4의 일치하는 header/library가 필요합니다. 현재 통합 검증은 대기 중이며 아래 SDK3 cutover·notification cohort는 과거 기록입니다.
+현재 NeoGraph `0.13.1` recipe에는 alpha SDK `0.1.1`, interface revision/shared generation 4의 일치하는 header/library가 필요합니다. 현재 통합 검증은 대기 중이며 아래 SDK3 cutover·notification cohort는 과거 기록입니다.
 
 Program admission, JavaScript control, SQLite/PostgreSQL 비용은
 [Measuring Program costs](../docs/PROGRAM_COST_MEASUREMENT.md)를 보세요.

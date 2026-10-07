@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/python_clients/README.md locale=ko source_sha256=6919a37bc310f6105ba5ef408675a5d982489430bc04ac6c565fdb7c66a4e6a1 -->
+<!-- neograph-i18n: source=benchmarks/python_clients/README.md locale=ko source_sha256=649e0973ac9e600a33d13f10df707c76d463ff1d0d7c8ccb7315b07471bb6f51 -->
 # Python 클라이언트 오버헤드: 현재 실행자와 과거 결과
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -41,7 +41,7 @@ K=16/64 감소에는 `ThreadingHTTPServer`와 클라이언트의 상호작용이
 양쪽은 같은 비공개 HTTP loopback 서버와 Chat 경로를 사용하며 고정 응답 텍스트는 `ok`입니다. 서버가 경로, 모델, 프롬프트를 확인합니다. 원격 자격 증명, 사용자 CA, 유료 호출은 필요 없습니다. HTTP/1.0 로컬 작업이며 TLS/HTTP2 검증이나 native replay 벤치마크가 아닙니다. 고정 토큰 usage는 공급자 보고 fixture 데이터이지 실제 측정 토큰이나 예산 부과량이 아닙니다.
 
 [Python 바인딩 안내](../../docs/python-binding.md)로 현재 소스에 맞는 wheel을 설치하고 아래 비교 SDK를 설치하세요. Core 소스 빌드에도 외부 `SchemaProvider::runtime`이 필요합니다. [빌드 안내](../../README.md)를 따르세요. Python 래퍼만으로 과거 wheel에 새 native API를 추가할 수 없습니다. 새 wheel 검증이나 벤치마크 통과를 주장하지 않습니다.
-NeoGraph `0.13.0` wheel과 native 소비자는 alpha SDK `0.1.0`, interface revision/shared generation 4와 일치해야 합니다. 현재 통합 검증은 대기 중입니다.
+NeoGraph `0.13.1` wheel과 native 소비자는 alpha SDK `0.1.1`, interface revision/shared generation 4와 일치해야 합니다. 현재 통합 검증은 대기 중입니다.
 
 ## 새 측정 실행
 

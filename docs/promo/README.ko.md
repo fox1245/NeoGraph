@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/promo/README.md locale=ko source_sha256=6ac0e174ac729e62627d10ccfa9a004927c0ec15964bd1172fcfaa3d3b493dde -->
+<!-- neograph-i18n: source=docs/promo/README.md locale=ko source_sha256=eda23a0fd62ee1ba5a3eb5f26292eac3aa3ac273903f5fd8c5714eaa49627b54 -->
 # NeoGraph 프로모 — Remotion 소스
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -7,7 +7,7 @@
 
 장면을 다시 편집하고 렌더링할 수 있도록 소스를 커밋했습니다.
 생성 video는 Program pipeline을 설명하며 API reference, benchmark, qualification 기록이 아닙니다.
-미디어 파일명의 `v3`는 asset 이름이지 SDK interface revision이 아닙니다. NeoGraph `0.13.0`은 alpha SDK `0.1.0`, interface/shared generation 4를 사용합니다. 기존 render는 해당 runtime이나 대기 중인 검증을 입증하지 않습니다.
+미디어 파일명의 `v3`는 asset 이름이지 SDK interface revision이 아닙니다. NeoGraph `0.13.1`은 alpha SDK `0.1.1`, interface/shared generation 4를 사용합니다. 기존 render는 해당 runtime이나 대기 중인 검증을 입증하지 않습니다.
 
 ## 장면 (`src/scenes/`)
 

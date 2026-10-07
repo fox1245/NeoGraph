@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ko source_sha256=58bdfd693a5d84e22e8ad4ec9999c72c106596f174f31970f0f7bf488518e0d7 -->
+<!-- neograph-i18n: source=README.md locale=ko source_sha256=c581af0e3041a7d6e48040bfd17085c2297a0c796d34547f6528392ec2b7ce27 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -143,7 +143,7 @@ sp::runtime::Result first_call(
 
 `ChatMessage`, `ChatTool`, JSON은 이식 가능한 투영 표현입니다. 진본 네이티브 이력은 네이티브 체크포인트 사이드카와 함께 메모리에 유지할 수 있습니다. 네이티브 이력을 영속적으로 보존하려면 실제 `sp::NativeArchive`와 소유자만 접근할 수 있도록 보호된 보관 책임 체계가 필요합니다. 이식 가능한 JSON으로는 이 권한을 재현할 수 없습니다. 아카이브는 독립적인 키로 보관 책임의 진위를 인증합니다. 이는 암호화도, 공급업체 발급자 인증도 아닙니다. 아카이브 본문, 키, 네이티브 blob, 원시 통신 관측값을 공개하지 마세요. 영속화 실패, 관측자, 관리형 예산 은행, 재생 경계는 [provider 참조](docs/reference-en.md)와 [마이그레이션 가이드](docs/migration-v0.4-to-v1.0.md)를 참고하세요.
 
-타입 지정 인터페이스로의 전환으로 `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, 디스크립터 인터프리터, Responses WebSocket 경로가 제거됩니다. C++ 사용 코드를 다시 컴파일하고 사용자 정의 provider를 마이그레이션해야 합니다. 호환성 별칭은 제공하지 않습니다. SDK 패키지 버전은 `0.1.0`이며 인터페이스는 알파 단계입니다. 인터페이스 리비전은 4, 공유 ABI는 4입니다. 리비전이 일치해야 하며, 이 번호들이 SDK 인터페이스의 안정성을 선언하는 것은 아닙니다.
+타입 지정 인터페이스로의 전환으로 `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, 디스크립터 인터프리터, Responses WebSocket 경로가 제거됩니다. C++ 사용 코드를 다시 컴파일하고 사용자 정의 provider를 마이그레이션해야 합니다. 호환성 별칭은 제공하지 않습니다. SDK 패키지 버전은 `0.1.1`이며 인터페이스는 알파 단계입니다. 인터페이스 리비전은 4, 공유 ABI는 4입니다. 리비전이 일치해야 하며, 이 번호들이 SDK 인터페이스의 안정성을 선언하는 것은 아닙니다.
 
 ## Python
 
@@ -151,7 +151,7 @@ sp::runtime::Result first_call(
 pip install neograph-engine
 ```
 
-여기서 설명하는 타입 지정 provider API는 NeoGraph `0.13.0`을 대상으로 합니다. 이전 wheel은 구형 인터페이스를 제공합니다. [Python 바인딩 가이드](docs/python-binding.md)는 소스 API와 빌드에 필요한 조건을 설명합니다.
+여기서 설명하는 타입 지정 provider API는 NeoGraph `0.13.1`을 대상으로 합니다. 이전 wheel은 구형 인터페이스를 제공합니다. [Python 바인딩 가이드](docs/python-binding.md)는 소스 API와 빌드에 필요한 조건을 설명합니다.
 
 이 그래프에는 API 키가 필요하지 않습니다.
 
@@ -212,7 +212,7 @@ NeoGraph는 명시적인 상태 전이, 분기 또는 반복, 병렬 작업, 체
 설치된 패키지를 사용하는 코드는 필요한 활성 구성 요소만 링크합니다.
 
 ```cmake
-find_package(SchemaProvider 0.1.0 CONFIG REQUIRED COMPONENTS runtime)
+find_package(SchemaProvider 0.1.1 CONFIG REQUIRED COMPONENTS runtime)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -248,7 +248,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `quickjs-performance` | Linux enabled/disabled 대응 build; 불변 provenance를 위한 실제 소스 루트 Git checkout 필요. |
 | `fuzz` | Linux Clang/libFuzzer 60초 canary; corpus는 소유한 출력에 복사. |
 | `install` | 격리된 exported-prefix ABI/symbol/C++/C11/collision/relocation 소비자; Git/Bash 불필요. 선택적 `--shared`, `--core-only` 또는 `--program`; `--quickjs`는 `--program`과 ELF/Mach-O 검사를 요구 (Windows 행에서는 생략). |
-| `sdist` | 소스 archive와 Twine; build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10 준비; 선택적 `--release-tag v0.13.0`. |
+| `sdist` | 소스 archive와 Twine; build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10 준비; 선택적 `--release-tag v0.13.1`. |
 | `wheel` | repair된 설치 wheel; cibuildwheel==2.23.0과 native/container provider 준비; `--arch x86_64\|aarch64\|arm64\|AMD64` 필수; `--python cp312`를 주면 전체 대신 CPython 하나만 빌드합니다. |
 | `runtime-archive` | Shared SDK native-archive portability target/CTest; Ninja와 플랫폼 runtime 의존성 필요. |
 

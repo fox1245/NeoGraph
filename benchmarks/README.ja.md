@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=ja source_sha256=772f62d9128d37e75de2802065552e7b0eca1ddd6dabbc1bce79e829b67dcd83 -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=ja source_sha256=6ee5c1de3180f83f2256f69f39c08ae0d963a5f6408e99deebdcff999f47b633 -->
 # NeoGraph と Python のグラフ/パイプライン フレームワーク — エンジン オーバーヘッド ベンチマーク
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -6,7 +6,7 @@
 I/O、sleep、モデル呼び出しのない小さな対応 workload で、NeoGraph と Python framework の
 呼び出し別 engine overhead を測定します。node dispatch、state-channel write、reducer 呼び出しを含みます。
 日付付き表の engine 名と依存バージョンは過去の記録で、現在の package バージョンや型付き runtime 検証ではありません。
-現在の NeoGraph `0.13.0` recipe には alpha SDK `0.1.0`、interface revision/shared generation 4 の一致する header/library が必要です。現在の統合検証は未完了で、以下の SDK3 cutover・notification cohort は過去の記録です。
+現在の NeoGraph `0.13.1` recipe には alpha SDK `0.1.1`、interface revision/shared generation 4 の一致する header/library が必要です。現在の統合検証は未完了で、以下の SDK3 cutover・notification cohort は過去の記録です。
 
 Program admission、JavaScript control、SQLite/PostgreSQL の費用は
 [Measuring Program costs](../docs/PROGRAM_COST_MEASUREMENT.md) を参照してください。

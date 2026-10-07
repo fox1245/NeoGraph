@@ -43,10 +43,10 @@ CMake 3.20 or newer is required. SchemaProvider runtime remains mandatory when `
 
 The SDK imported target supplies its `include/SchemaProvider` include root; public examples use `<descriptor/descriptor.h>`, `<runtime/client.h>` and `<neograph/llm/schema_provider.h>` directly, without recipe-only helpers.
 
-The installed SDK package must be at least `0.1.0`, with matching interface revision 4 headers and shared-library generation 4. A version match alone does not admit older interface/ABI binaries.
+The installed SDK package must be at least `0.1.1`, with matching interface revision 4 headers and shared-library generation 4. A version match alone does not admit older interface/ABI binaries.
 
 ```cmake
-find_package(SchemaProvider 0.1.0 CONFIG REQUIRED COMPONENTS runtime)
+find_package(SchemaProvider 0.1.1 CONFIG REQUIRED COMPONENTS runtime)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -430,7 +430,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is alpha `0.1.0`, interface revision 4 / shared-library generation 4, with out-of-line capability checks; that is not a stable release claim. Recorded interface-3 SDK runtime/archive qualification covers Linux/POSIX and is historical evidence, not an interface-4 pass. Windows NTFS and macOS implementations are present, but new platform qualification requires runtime evidence; WASM provider runtime qualification is not established.
+This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is alpha `0.1.1`, interface revision 4 / shared-library generation 4, with out-of-line capability checks; that is not a stable release claim. Recorded interface-3 SDK runtime/archive qualification covers Linux/POSIX and is historical evidence, not an interface-4 pass. Windows NTFS and macOS implementations are present, but new platform qualification requires runtime evidence; WASM provider runtime qualification is not established.
 
 Python exposes the same owned request/outcome boundary as C++: `make_provider_request`, `Provider.prepare`, `dispatch` and `invoke`. Use `ProviderMessage` with typed parts for provider history; `ChatMessage` remains a graph convenience projection. A returned SDK failure is available through `ProviderOutcome.failure`, while host observer/settlement exceptions retain `outcome` and `cause`. See the [Python binding guide](python-binding.md) for constructors and GIL/callback behavior.
 

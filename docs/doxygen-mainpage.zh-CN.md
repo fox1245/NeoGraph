@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=zh-CN source_sha256=2bf76338f86fbdedaf1a0d47cb15d8901c26412e1d6988676ceec5bb62ce2f92 -->
+<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=zh-CN source_sha256=e7253d2aacfe88e0cb5c6ef9f02834b805e0ddcfb739e7c9882235f90eba9b52 -->
 # NeoGraph C++ API 参考 {#mainpage}
 
 **Languages:** [English](doxygen-mainpage.md) | [한국어](doxygen-mainpage.ko.md) | [日本語](doxygen-mainpage.ja.md) | [简体中文](doxygen-mainpage.zh-CN.md)
@@ -64,7 +64,7 @@ sp::runtime::Result first_call(
 
 Wire 证据由 family 提供，且是可选的：`sp::Completion::wire_envelope` 可以为 null（Python 的 `ProviderCompletion.wire_envelope` 为 `None`）。当前 buffered Chat 将完整响应 JSON 保留在 `raw_events` 的 `RawWire` 中，`type == "chat.completion"`，文档位于 `payload`，而 `wire_envelope` 保持 null。请从 family 实际保留的位置读取证据，不会伪造 fallback envelope。Native continuation 与 raw buffer 仍为受保护的证据，不进入 trace payload。
 
-这是源码和二进制破坏性变更；所有 C++ 使用者与自定义提供方都必须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter 和 Responses WebSocket 已删除，没有 alias 或兼容 bridge。发布目标为 SDK `0.1.0` alpha、interface revision 4 / shared ABI 4，使用 out-of-line capability check；alpha 不承诺稳定 API。已记录的 interface-3 runtime/archive 验证仅覆盖 Linux/POSIX，不验证 interface 4 或 Windows、macOS、WASM runtime。
+这是源码和二进制破坏性变更；所有 C++ 使用者与自定义提供方都必须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter 和 Responses WebSocket 已删除，没有 alias 或兼容 bridge。发布目标为 SDK `0.1.1` alpha、interface revision 4 / shared ABI 4，使用 out-of-line capability check；alpha 不承诺稳定 API。已记录的 interface-3 runtime/archive 验证仅覆盖 Linux/POSIX，不验证 interface 4 或 Windows、macOS、WASM runtime。
 
 Python 使用 `SchemaProvider(ValidatedDescriptor, ProviderRuntimeOptions,
 SchemaProviderDefaults)`，以及接收 typed `ProviderMessage` part 的

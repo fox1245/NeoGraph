@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=ko source_sha256=be0c03e35d3c0631bf727a0b13d6afca6e3eb5296917f54293304eb8e596e630 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=ko source_sha256=4d090ff982d9da4ec65a9f2e24855eec4c18d22b530bebaf720905e944355fda -->
 # NeoGraph 쿡북
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -22,7 +22,7 @@ header-only `examples/provider_example_support.h`는 실제 SDK runtime을 사�
 Core-only를 포함한 모든 native 빌드는 `find_package(SchemaProvider CONFIG REQUIRED COMPONENTS runtime)`의 `SchemaProvider::runtime` 또는
 명시적 `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<sdk-source>` 또는 immutable public SDK archive fallback을 사용합니다. offline installed/source SDK 구성에는 `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`로 fetching을 끕니다.
 설치 include root는 `include/SchemaProvider`입니다. interface/capability 검사를
-수행합니다. SDK `0.1.0` alpha의 interface/shared ABI는 4입니다.
+수행합니다. SDK `0.1.1` alpha의 interface/shared ABI는 4입니다.
 
 보존된 interface-3 model-free 실행에서는 Assembly 로컬 A2A member 서버 4개와 C++ speaker,
 JARVIS CLI synthetic turn·메모리 영속화, Beast strict Core 컴파일·진화·checkpoint 롤백,

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/promo/README.md locale=ja source_sha256=6ac0e174ac729e62627d10ccfa9a004927c0ec15964bd1172fcfaa3d3b493dde -->
+<!-- neograph-i18n: source=docs/promo/README.md locale=ja source_sha256=eda23a0fd62ee1ba5a3eb5f26292eac3aa3ac273903f5fd8c5714eaa49627b54 -->
 # NeoGraph プロモ — Remotion ソース
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -7,7 +7,7 @@
 
 シーンを再編集し、再レンダリングできるようソースをコミットしています。
 生成 video は Program pipeline の図解であり、API reference、benchmark、qualification 記録ではありません。
-メディア名の `v3` は asset のラベルで、SDK interface revision ではありません。NeoGraph `0.13.0` は alpha SDK `0.1.0`、interface/shared generation 4 を使います。既存 render はその runtime や未完了の検証を実証しません。
+メディア名の `v3` は asset のラベルで、SDK interface revision ではありません。NeoGraph `0.13.1` は alpha SDK `0.1.1`、interface/shared generation 4 を使います。既存 render はその runtime や未完了の検証を実証しません。
 
 ## シーン（`src/scenes/`）
 

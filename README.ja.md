@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ja source_sha256=58bdfd693a5d84e22e8ad4ec9999c72c106596f174f31970f0f7bf488518e0d7 -->
+<!-- neograph-i18n: source=README.md locale=ja source_sha256=c581af0e3041a7d6e48040bfd17085c2297a0c796d34547f6528392ec2b7ce27 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -143,7 +143,7 @@ sp::runtime::Result first_call(
 
 `ChatMessage`、`ChatTool`、JSONは可搬な表現です。真正なネイティブ履歴は、ネイティブチェックポイントのサイドカーとともにメモリ内に保持できます。ネイティブ履歴を永続化するには、実物の`sp::NativeArchive`と、所有者専用の非公開領域で保護された保管・管理が必要です。可搬なJSONでは、この権限を再構成できません。アーカイブは独立した鍵で保管・管理の真正性を検証します。暗号化でも、ベンダー発行元の認証でもありません。アーカイブ本体、鍵、ネイティブblob、生の通信観測データを公開しないでください。永続化の失敗、オブザーバー、管理対象の予算バンク、リプレイの境界については、[プロバイダーリファレンス](docs/reference-en.md)と[移行ガイド](docs/migration-v0.4-to-v1.0.md)を参照してください。
 
-型付きAPIへの切り替えに伴い、`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、記述子インタープリター、ResponsesのWebSocket経路は削除されました。C++側の利用コードを再コンパイルし、独自のプロバイダーを移行してください。互換エイリアスはありません。SDKパッケージは`0.1.0`で、インターフェースはアルファ版、インターフェースリビジョンは4、共有ABIは4です。対応するリビジョンが一致している必要があり、これらの番号はSDKインターフェースが安定版であることを示しません。
+型付きAPIへの切り替えに伴い、`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、記述子インタープリター、ResponsesのWebSocket経路は削除されました。C++側の利用コードを再コンパイルし、独自のプロバイダーを移行してください。互換エイリアスはありません。SDKパッケージは`0.1.1`で、インターフェースはアルファ版、インターフェースリビジョンは4、共有ABIは4です。対応するリビジョンが一致している必要があり、これらの番号はSDKインターフェースが安定版であることを示しません。
 
 ## Python
 
@@ -151,7 +151,7 @@ sp::runtime::Result first_call(
 pip install neograph-engine
 ```
 
-ここで説明する型付きプロバイダーAPIはNeoGraph `0.13.0`を対象としています。過去のwheelは旧インターフェースを公開しています。[Pythonバインディングガイド](docs/python-binding.md)では、ソース側のAPIとビルドの前提条件を説明しています。
+ここで説明する型付きプロバイダーAPIはNeoGraph `0.13.1`を対象としています。過去のwheelは旧インターフェースを公開しています。[Pythonバインディングガイド](docs/python-binding.md)では、ソース側のAPIとビルドの前提条件を説明しています。
 
 次のグラフにはAPIキーが不要です。
 
@@ -212,7 +212,7 @@ NeoGraphは、明示的な状態遷移、分岐やループ、並列タスク、
 インストール済みパッケージを使う側は、有効になっている必要なコンポーネントだけをリンクします。
 
 ```cmake
-find_package(SchemaProvider 0.1.0 CONFIG REQUIRED COMPONENTS runtime)
+find_package(SchemaProvider 0.1.1 CONFIG REQUIRED COMPONENTS runtime)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -248,7 +248,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `quickjs-performance` | Linux の対応する enabled/disabled build; 不変 provenance のため実際のソースルート Git checkout が必要。 |
 | `fuzz` | Linux Clang/libFuzzer の 60 秒 canary; corpus を所有する出力にコピー。 |
 | `install` | 隔離 exported-prefix ABI/symbol/C++/C11/collision/relocation consumer; Git/Bash 不要。任意の `--shared`、`--core-only` または `--program`; `--quickjs` は `--program` と ELF/Mach-O 検査が必要 (Windows 行では省略)。 |
-| `sdist` | ソース archive と Twine; build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10 を用意; 任意の `--release-tag v0.13.0`。 |
+| `sdist` | ソース archive と Twine; build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10 を用意; 任意の `--release-tag v0.13.1`。 |
 | `wheel` | repair 済み installed wheel; cibuildwheel==2.23.0 と native/container provider を用意; `--arch x86_64\|aarch64\|arm64\|AMD64` 必須。`--python cp312` を指定すると全 CPython の代わりに 1 つだけビルドする。 |
 | `runtime-archive` | Shared SDK native-archive portability target/CTest; Ninja とプラットフォーム runtime 依存関係。 |
 

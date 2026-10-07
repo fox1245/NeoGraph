@@ -47,7 +47,7 @@ Docker CPU quota need not change the cores visible to `hardware_concurrency()`. 
 ## Current dependencies and reproduction status
 
 Core links external `SchemaProvider::runtime` even with `NEOGRAPH_BUILD_LLM=OFF` and `NEOGRAPH_USE_LIBCURL=OFF`. Supply an installed SDK using `CMAKE_PREFIX_PATH` or an explicit checkout using `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`; see the [build guide](../../README.md). SDK source builds require C++20, Python for configuration generation, libcurl ≥7.88, and OpenSSL Crypto. Current SDK qualification is Linux/POSIX; the old Docker results do not qualify other platforms.
-NeoGraph `0.13.0` recipes require alpha SDK `0.1.0`, interface revision/shared
+NeoGraph `0.13.1` recipes require alpha SDK `0.1.1`, interface revision/shared
 generation 4, with matching headers/libraries. Current integrated validation is pending;
 the earlier Linux/POSIX qualification is not an SDK4 or new Docker pass.
 

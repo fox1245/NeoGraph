@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=390bd1ee4f257a5af2db235b2e9b05354b2613d057086c0d015fa4ceb39c7e11 -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=c3367508d65878d70236cf39ee1c62d84251adbdcfdae4557190ee11635fcb64 -->
 # 바이너리 호환 정책
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -32,7 +32,7 @@ CheckpointStore는 명시적 adapter 이전을 위해 레거시 layout을 유지
 
 ## SDK와 Python 경계
 
-LLM node를 꺼도 Core는 외부 `SchemaProvider::runtime`을 요구한다. 선택된 SDK 릴리스는 `0.1.0` alpha, interface revision `4`, shared-library ABI revision `4`이며 out-of-line capability check를 쓴다. stable interface 선언은 아니다. 일치하는 SDK component를 함께 설치한다. `libsp_*.so.4` 세대는 NeoGraph loader 세대 및 Python `abi3` wheel tag와 별개다.
+LLM node를 꺼도 Core는 외부 `SchemaProvider::runtime`을 요구한다. 선택된 SDK 릴리스는 `0.1.1` alpha, interface revision `4`, shared-library ABI revision `4`이며 out-of-line capability check를 쓴다. stable interface 선언은 아니다. 일치하는 SDK component를 함께 설치한다. `libsp_*.so.4` 세대는 NeoGraph loader 세대 및 Python `abi3` wheel tag와 별개다.
 
 Interface 4는 family별 request control을 추가하고 공개 request layout을 바꾼다. SDK consumer, NeoGraph, Python extension을 함께 재빌드한다. interface-3 header나 library를 interface 4와 혼용할 수 없다. Native archive v3 / `spna3`와 portable JSON v2는 독립적이며 형식은 바뀌지 않는다. 과거 interface-3 측정은 interface 4를 검증하지 않는다.
 

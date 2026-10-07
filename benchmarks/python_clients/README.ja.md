@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/python_clients/README.md locale=ja source_sha256=6919a37bc310f6105ba5ef408675a5d982489430bc04ac6c565fdb7c66a4e6a1 -->
+<!-- neograph-i18n: source=benchmarks/python_clients/README.md locale=ja source_sha256=649e0973ac9e600a33d13f10df707c76d463ff1d0d7c8ccb7315b07471bb6f51 -->
 # Pythonクライアントのオーバーヘッド: 現在のランナーと過去の結果
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -41,7 +41,7 @@ K=16/64の低下は`ThreadingHTTPServer`とクライアントの相互作用を�
 両クライアントは同じ非公開HTTP loopbackサーバーとChat経路を使い、固定応答のテキストは`ok`です。サーバーは経路、モデル、プロンプトを確認します。リモート認証、独自CA、有料呼び出しは不要です。HTTP/1.0のローカル処理で、TLS/HTTP2検証やnative replayベンチマークではありません。固定token usageはプロバイダー報告fixtureで、実測トークンや予算課金量ではありません。
 
 [Pythonバインディング案内](../../docs/python-binding.md)で現在のソースに合うwheelを入れ、以下の比較SDKを入れてください。Coreのソースにも外部`SchemaProvider::runtime`が必要です。[ビルド案内](../../README.md)に従ってください。Pythonラッパーだけでは古いwheelに新native APIを追加できません。新wheelの検証や新ベンチマーク合格を主張しません。
-NeoGraph `0.13.0` の wheel と native consumer は alpha SDK `0.1.0`、interface revision/shared generation 4 と一致する必要があります。現在の統合検証は未完了です。
+NeoGraph `0.13.1` の wheel と native consumer は alpha SDK `0.1.1`、interface revision/shared generation 4 と一致する必要があります。現在の統合検証は未完了です。
 
 ## 新しい測定の実行
 

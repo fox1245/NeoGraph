@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ko source_sha256=adeaef39bec37687c1e660e3ffbf89611002f53fd28b2a1d3aebd5b1fb664991 -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ko source_sha256=37d0912e7f5f8a94f97a67c362602b9b38015ab141aa56aac51c33c118750d4c -->
 # 이전 안내: 기존 8 가상 함수 → `run(NodeInput)` (v0.4.x → v0.9+)
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -277,7 +277,7 @@ grep -lE 'execute\(const GraphState' src/**/*.cpp
 
 # 이전 2: typed lossless Provider 전환 (필수 재컴파일)
 
-소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 alpha `0.1.0`, interface revision 4 / shared ABI 4이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. 기록된 interface-3 SDK runtime/archive 검증은 Linux/POSIX 범위이며 interface 4를 검증하지 않는다. Windows NTFS와 macOS 구현이 있으나 새 platform 검증에는 runtime 증거가 필요하며 WASM provider runtime 검증은 입증되지 않았다.
+소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 alpha `0.1.1`, interface revision 4 / shared ABI 4이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. 기록된 interface-3 SDK runtime/archive 검증은 Linux/POSIX 범위이며 interface 4를 검증하지 않는다. Windows NTFS와 macOS 구현이 있으나 새 platform 검증에는 runtime 증거가 필요하며 WASM provider runtime 검증은 입증되지 않았다.
 
 제거된 `Provider::complete`, `complete_async`, `complete_stream`, `complete_stream_async` 호출은 명시적 mode 요청과 `invoke` / `dispatch`(또는 C++ async peer)로 이전한다. `Agent::complete`는 소유 결과를 반환하는 별도 one-turn API로 남는다.
 

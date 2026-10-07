@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=17de06f043bfd612e891cdfb9d033caece303795641bb8952b3d9c0d08c3abfb -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=7173060d8b4f0dae592d6132b51be14df00f78234e043963b75a322694a69734 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,12 +12,15 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ---
 
 ## [Unreleased]
+
+## [0.13.1] - 2026-10-07
+NeoGraph `0.13.1`은 alpha SDK `0.1.1`을 대상으로 합니다. interface revision과 shared-library generation은 4 그대로이므로 소비자는 SDK `0.1.1`을 선택하고(설치된 package config가 정확한 버전을 요구합니다) 다시 빌드하기만 하면 됩니다. Native archive는 v3 / `spna3`, portable JSON은 v2 그대로입니다. 기능상 변경은 아래 Windows 전송 수정이며, 0.13.0으로 배포된 Windows wheel에는 이 결함이 있으므로 0.13.1로 교체해야 합니다. 수정 커밋의 hosted CI와 Windows wheel gate가 통과했습니다(GitHub Actions run 37576205702, 37576205395, CPython 3.12만). CPython 3.9–3.13 전체 matrix는 릴리스 태그에서 실행합니다.
+### 수정됨
+- **Windows: 큰 요청 본문이 작업 마감까지 멈출 수 있었습니다.** SDK 전송 계층은 `FD_WRITE`를 기다렸는데, Winsock은 `send()`가 `WSAEWOULDBLOCK`으로 실패한 뒤에만 이 이벤트를 기록합니다. 성공했지만 소켓을 가득 채운 전송은 이벤트를 만들지 않아서, 4 MB 업로드의 약 4~6%(loopback에서 측정)가 대략 131 KB 또는 197 KB에서 멈추고 재시도 안전성 `PossiblyAccepted`인 `DeadlineExceeded`로 끝났습니다. 고정한 SDK는 이제 쓰기 대기 중에 짧은 타이머로 `select()`도 확인합니다. 배포된 0.13.0 Windows wheel에는 이 결함이 있습니다. 회귀 테스트: `test_large_post_does_not_stall_when_the_send_buffer_fills`(Windows에서 새 연결 150회 반복이며 0.13.0 wheel에서는 8번 중 8번 실패). 이슈 #340.
+
 ### 변경됨
 - **CI를 계층화했습니다.** 이제 모든 push와 pull request는 `ci.yml`만 실행합니다: Linux, macOS, Windows의 전체 native suite와 설치 소비자 2행이며, 문서만 바꾸면 건너뜁니다. sanitizer, fuzz canary, 성능 gate, 실제 ARM64, gRPC, Visual Studio generator와 나머지 설치 소비자 8행은 그대로 `ci-extended.yml`로 옮겨 매일 밤과 수동으로 실행합니다. Wheel은 packaging 변경에는 플랫폼당 CPython 3.12를, 릴리스 태그·주간 canary·수동 실행에는 CPython 3.9–3.13을 인터프리터당 job 하나로 빌드합니다. Windows 의존성은 vcpkg binary archive를 재사용합니다. `verify_ci.py`는 `--jobs auto`, `wheel --python`, `native-windows --generator`를 받으며 `native-windows`는 이제 기본으로 Ninja로 빌드합니다(x64 MSVC 환경에서 실행하거나 `--generator "Visual Studio 17 2022"`를 지정). 모든 runner는 표준 GitHub-hosted runner를 유지합니다.
 - **ctest를 테스트별 타임아웃으로 실행합니다.** `verify_ci.py`가 `--timeout 600`(ASan과 MSVC ASan은 1200)을 전달하므로, 멈춘 테스트가 job 제한을 다 쓰지 않고 이름과 함께 실패합니다(이슈 #341).
-
-### 수정됨
-- **Windows: 큰 요청 본문이 작업 마감까지 멈출 수 있었습니다.** SDK 전송 계층은 `FD_WRITE`를 기다렸는데, Winsock은 `send()`가 `WSAEWOULDBLOCK`으로 실패한 뒤에만 이 이벤트를 기록합니다. 성공했지만 소켓을 가득 채운 전송은 이벤트를 만들지 않아서, 4 MB 업로드의 약 4~6%(loopback에서 측정)가 대략 131 KB 또는 197 KB에서 멈추고 재시도 안전성 `PossiblyAccepted`인 `DeadlineExceeded`로 끝났습니다. 고정한 SDK는 이제 쓰기 대기 중에 짧은 타이머로 `select()`도 확인합니다. 배포된 0.13.0 Windows wheel에는 이 결함이 있습니다. 회귀 테스트: `test_large_post_does_not_stall_when_the_send_buffer_fills`(Windows에서 새 연결 150회 반복이며 0.13.0 wheel에서는 8번 중 8번 실패). 이슈 #340.
 
 ## [0.13.0] - 2026-10-07
 
