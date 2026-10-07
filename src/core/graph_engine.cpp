@@ -886,13 +886,18 @@ RunResult GraphEngine::run(const RunConfig& config, const RunMetadata& metadata)
     // thread-pool hop. Parallel fan-out inside run_parallel_async /
     // run_sends_async still uses pool_ explicitly for CPU
     // parallelism (see NodeExecutor::fan_out_pool_).
-    RunConfig operation_config = config;
+    // Only a cancellable run needs its own config (with a forked token).
+    // Everything else runs on the caller's, which outlives this blocking call.
+    std::optional<RunConfig> forked_config;
+    const RunConfig* operation_config = &config;
     if (config.cancel_token) {
-        operation_config.cancel_token = config.cancel_token->fork();
+        forked_config.emplace(config);
+        forked_config->cancel_token = config.cancel_token->fork();
+        operation_config = &*forked_config;
     }
     return neograph::async::detail::run_sync_operation(
-        execute_graph_async(operation_config, nullptr, {}, nullptr, metadata),
-        operation_config.cancel_token);
+        execute_graph_async(*operation_config, nullptr, {}, nullptr, metadata),
+        operation_config->cancel_token);
 }
 
 // Public async entry — takes RunConfig BY VALUE so the coroutine frame
@@ -995,13 +1000,16 @@ RunResult GraphEngine::run_stream(const RunConfig& config,
 RunResult GraphEngine::run_stream(const RunConfig& config,
                                    const GraphStreamCallback& cb,
                                    const RunMetadata& metadata) {
-    RunConfig operation_config = config;
+    std::optional<RunConfig> forked_config;
+    const RunConfig* operation_config = &config;
     if (config.cancel_token) {
-        operation_config.cancel_token = config.cancel_token->fork();
+        forked_config.emplace(config);
+        forked_config->cancel_token = config.cancel_token->fork();
+        operation_config = &*forked_config;
     }
     return neograph::async::detail::run_sync_operation(
-        execute_graph_async(operation_config, cb, {}, nullptr, metadata),
-        operation_config.cancel_token);
+        execute_graph_async(*operation_config, cb, {}, nullptr, metadata),
+        operation_config->cancel_token);
 }
 
 asio::awaitable<RunResult>
