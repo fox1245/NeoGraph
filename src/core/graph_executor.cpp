@@ -159,13 +159,12 @@ void NodeExecutor::init_state(GraphState& state) const {
     for (const auto& cd : channel_defs_) {
         auto reducer = registry_ ? registry_->reducer(cd.reducer_name)
                                  : ReducerRegistry::instance().get(cd.reducer_name);
-        json initial = cd.initial_value;
-        if (cd.type == ReducerType::APPEND && initial.is_null()) {
-            initial = json::array();
+        const ChannelLifecyclePolicy lifecycle{cd.retention, cd.retention_limit, cd.persistence};
+        if (cd.type == ReducerType::APPEND && cd.initial_value.is_null()) {
+            state.init_channel(cd.name, cd.type, reducer, json::array(), lifecycle);
+        } else {
+            state.init_channel(cd.name, cd.type, reducer, cd.initial_value, lifecycle);
         }
-        state.init_channel(cd.name, cd.type, reducer, initial,
-                           ChannelLifecyclePolicy{cd.retention, cd.retention_limit,
-                                                  cd.persistence});
     }
 }
 
