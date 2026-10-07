@@ -79,6 +79,32 @@ static void detach_if_view(json& value) {
     }
 }
 
+// {"channels": {name: {"value": v, "version": n}}, "global_version": g}, built in
+// one yyjson document. The initializer-list form this replaces created and then
+// copied about seven documents per channel (three heap blocks each); a run that
+// only snapshots its state paid more for that than for executing its nodes.
+// "channels" is present only when at least one channel is included.
+static json channel_snapshot(const std::map<std::string, Channel>& channels,
+                             std::uint64_t global_version, bool skip_ephemeral) {
+    json data = json::object();
+    yyjson_mut_doc* const doc = data.raw_doc();
+    yyjson_mut_val* const root = data.raw_val();
+    yyjson_mut_val* channel_map = nullptr;
+    for (const auto& [name, channel] : channels) {
+        if (skip_ephemeral && channel.lifecycle.persistence == ChannelPersistencePolicy::Ephemeral)
+            continue;
+        if (channel_map == nullptr) channel_map = yyjson_mut_obj_add_obj(doc, root, "channels");
+        yyjson_mut_val* entry = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add(channel_map, yyjson_mut_strncpy(doc, name.data(), name.size()), entry);
+        yyjson_mut_val* const source = channel.value.raw_val();
+        yyjson_mut_obj_add_val(doc, entry, "value",
+                               source ? yyjson_mut_val_mut_copy(doc, source) : yyjson_mut_null(doc));
+        yyjson_mut_obj_add_uint(doc, entry, "version", channel.version);
+    }
+    yyjson_mut_obj_add_uint(doc, root, "global_version", global_version);
+    return data;
+}
+
 void GraphState::init_channel(const std::string& name,
                                ReducerType type,
                                ReducerFn reducer,
@@ -664,13 +690,8 @@ std::pair<json, std::shared_ptr<const NativeGraphCheckpoint>> GraphState::checkp
         if (!native) native.reset(new NativeGraphCheckpoint);
         return *native;
     };
-    json data;
+    json data = channel_snapshot(channels_, global_version_, /*skip_ephemeral=*/true);
     bool requires_native = false;
-    for (const auto& [name, channel] : channels_) {
-        if (channel.lifecycle.persistence == ChannelPersistencePolicy::Ephemeral) continue;
-        data["channels"][name] = {{"value", channel.value}, {"version", channel.version}};
-    }
-    data["global_version"] = global_version_;
     for (const auto& [channel, history] : provider_histories_) {
         if (channels_.at(channel).lifecycle.persistence == ChannelPersistencePolicy::Ephemeral) continue;
         ensure_native().histories_.emplace(channel, history);
@@ -717,15 +738,7 @@ std::pair<json, std::shared_ptr<const NativeGraphCheckpoint>> GraphState::checkp
 
 json GraphState::serialize() const {
     std::shared_lock lock(mutex_);
-    json data;
-    for (const auto& [name, ch] : channels_) {
-        if (ch.lifecycle.persistence == ChannelPersistencePolicy::Ephemeral) continue;
-        data["channels"][name] = {
-            {"value", ch.value},
-            {"version", ch.version}
-        };
-    }
-    data["global_version"] = global_version_;
+    json data = channel_snapshot(channels_, global_version_, /*skip_ephemeral=*/true);
     save_provider_history_locked(data);
     return data;
 }
@@ -741,11 +754,7 @@ json GraphState::serialize_cache() const {
 }
 
 json GraphState::serialize_runtime_locked(bool include_budget) const {
-    json data;
-    for (const auto& [name, ch] : channels_) {
-        data["channels"][name] = {{"value", ch.value}, {"version", ch.version}};
-    }
-    data["global_version"] = global_version_;
+    json data = channel_snapshot(channels_, global_version_, /*skip_ephemeral=*/false);
     save_provider_history_locked(data, false, include_budget);
     return data;
 }
