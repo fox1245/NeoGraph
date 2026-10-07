@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=3c1e7b539fa43d34cfae838cb5c14afed77bb9d04141143f3d19a440b7b2d875 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=17de06f043bfd612e891cdfb9d033caece303795641bb8952b3d9c0d08c3abfb -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -14,6 +14,10 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ## [未リリース]
 ### 変更
 - **CI を階層化しました。** すべての push と pull request は `ci.yml` のみを実行します。Linux・macOS・Windows の全 native suite と installed-consumer 2 行で、ドキュメントのみの変更はスキップします。sanitizer、fuzz canary、性能 gate、実 ARM64、gRPC、Visual Studio generator、残り 8 行の installed-consumer はそのまま `ci-extended.yml` に移し、毎晩および手動で実行します。Wheel は packaging の変更ではプラットフォームごとに CPython 3.12 を、リリースタグ・週次 canary・手動実行では CPython 3.9–3.13 をインタープリターごとに 1 job でビルドします。Windows の依存関係は vcpkg binary archive を再利用します。`verify_ci.py` は `--jobs auto`、`wheel --python`、`native-windows --generator` を受け付け、`native-windows` は既定で Ninja を使います（x64 MSVC 環境で実行するか `--generator "Visual Studio 17 2022"` を指定）。すべての runner は標準の GitHub-hosted runner のままです。
+- **ctest をテストごとのタイムアウト付きで実行します。** `verify_ci.py` が `--timeout 600`（ASan と MSVC ASan は 1200）を渡すため、止まったテストが job の上限を使い切らず、名前付きで失敗します（Issue #341）。
+
+### 修正
+- **Windows: 大きなリクエスト本文が処理の期限まで止まることがありました。** SDK の transport は `FD_WRITE` を待っていましたが、Winsock はこのイベントを `send()` が `WSAEWOULDBLOCK` で失敗した後にしか記録しません。成功してソケットを満杯にした送信ではイベントが生じず、4 MB アップロードの約 4〜6%（loopback で計測）が約 131 KB または 197 KB で止まり、再試行安全性 `PossiblyAccepted` の `DeadlineExceeded` で終わりました。固定した SDK は、書き込み待ちの間に短いタイマーで `select()` も確認します。公開済みの 0.13.0 Windows wheel にはこの欠陥があります。回帰テスト: `test_large_post_does_not_stall_when_the_send_buffer_fills`（Windows では新規接続 150 回の繰り返しで、0.13.0 wheel では 8 回中 8 回失敗）。Issue #340。
 
 ## [0.13.0] - 2026-10-07
 

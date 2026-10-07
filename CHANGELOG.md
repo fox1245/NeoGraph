@@ -14,6 +14,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 ### Changed
 - **CI is tiered.** Every push and pull request now runs only `ci.yml`: the full native suite on Linux, macOS and Windows and two installed-consumer rows, skipped for documentation-only changes. Sanitizers, the fuzz canary, performance gates, native ARM64, gRPC, the Visual Studio generator and the other eight installed-consumer rows moved unchanged to `ci-extended.yml`, which runs nightly and on demand. Wheels build CPython 3.12 per platform for packaging changes and CPython 3.9–3.13 on release tags, a weekly canary and manual runs, one job per interpreter. Windows dependencies reuse vcpkg binary archives. `verify_ci.py` accepts `--jobs auto`, `wheel --python`, and `native-windows --generator`; `native-windows` now builds with Ninja by default (run it from an x64 MSVC environment, or pass `--generator "Visual Studio 17 2022"`). All runners remain standard GitHub-hosted runners.
+- **ctest runs with a per-test timeout.** `verify_ci.py` passes `--timeout 600` (1200 under ASan and MSVC ASan), so a hung test fails by name instead of consuming the job limit (issue #341).
+
+### Fixed
+- **Windows: a large request body could stall until the operation deadline.** The SDK transport waited for `FD_WRITE`, which Winsock records only after a `send()` has failed with `WSAEWOULDBLOCK`. A send that succeeded and left the socket full produced no event, so about 4-6% of 4 MB uploads (measured on loopback) stopped at roughly 131 KB or 197 KB and ended as `DeadlineExceeded` with retry safety `PossiblyAccepted`. The pinned SDK now also probes `select()` on a short timer while a write wait is pending. The published 0.13.0 Windows wheels contain the defect. Regression test: `test_large_post_does_not_stall_when_the_send_buffer_fills` (150 fresh-connection rounds on Windows; it failed in 8 of 8 runs on the 0.13.0 wheel). Issue #340.
 
 ## [0.13.0] - 2026-10-07
 

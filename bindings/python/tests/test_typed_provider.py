@@ -2,6 +2,7 @@
 
 import asyncio
 import gc
+import sys
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -256,6 +257,27 @@ def test_large_post_resumes_after_peer_starts_reading(provider_peer):
     assert provider_peer.logical_requests[0][0]["text"] == text
 
 
+def test_large_post_does_not_stall_when_the_send_buffer_fills(provider_peer):
+    # On Windows, libcurl's write wait relied on FD_WRITE, which Winsock records only after a send()
+    # has failed with WSAEWOULDBLOCK. A send that succeeded but left the socket full produced no event,
+    # so about 4-6% of 4 MB uploads stopped (typically at 131 KB or 197 KB) until the deadline although
+    # the peer was reading. One request catches that rarely, so Windows repeats it on fresh providers
+    # and connections; the other platforms wait on level-triggered readiness and run it a few times.
+    rounds = 150 if sys.platform == "win32" else 3
+    text = "transport-output-boundary-" * 170000
+    provider_peer.reply = "ok"
+    for index in range(rounds):
+        provider = provider_peer.provider(timeout_ms=6000, resource_bytes=8 * 1024 * 1024)
+        request = ng.make_provider_request(provider, "local-model", [
+            ng.ProviderMessage(ng.ProviderRole.User, [ng.Text(text)]),
+        ])
+        prepared = provider.prepare(request)
+        assert prepared.valid, prepared.error.safe_message if prepared.error is not None else "invalid admission"
+        outcome = provider.dispatch(prepared)
+        assert outcome.failure is None, f"round {index}: {outcome.failure.error.kind}"
+        assert outcome.text == "ok"
+    assert len(provider_peer.logical_requests) == rounds
+    assert provider_peer.logical_requests[-1][0]["text"] == text
 def test_more_than_64_tls_sockets_make_progress_together(provider_peer):
     width = 72
     provider_peer.release.clear()
