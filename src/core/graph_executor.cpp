@@ -102,18 +102,22 @@ inline std::string make_send_task_id(int                step,
            fnv1a_hex(input.dump());
 }
 
+// Every node invocation gets a RunContext of its own, bound to its task id, so
+// nodes running side by side (fan-out branches, or overlapping calls into one
+// NodeExecutor) never see each other's identity and keep value semantics for
+// callable state such as `on_provider_event`.
 class ScopedInvocationContext {
 public:
     ScopedInvocationContext(const RunContext& parent, const std::string& task_id)
-        : context_(parent),
-          runtime_scope_(context_, detail::runtime_for_invocation(parent, task_id)) {}
+        : context_(parent), runtime_scope_(parent, context_, task_id) {}
 
     const RunContext& context() const { return context_; }
 
 private:
-    RunContext                      context_;
-    detail::ScopedRunContextRuntime runtime_scope_;
+    RunContext                       context_;
+    detail::ScopedInvocationRuntime  runtime_scope_;
 };
+
 
 void apply_node_result(GraphState& state, const NodeResult& result, const RunContext& context) {
     state.apply_writes(result.writes);
