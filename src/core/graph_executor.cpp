@@ -878,11 +878,23 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
         co_return nr;
     };
 
-    using DeferredOp = decltype(asio::co_spawn(ex, worker(std::size_t{0}), asio::deferred));
+    // With an engine fan-out pool a branch can resume on any pool thread, and the
+    // parallel group forwards a cancellation by dispatching it on the branch's
+    // executor. On the bare pool executor that emit can run on one thread while the
+    // branch (installing and clearing the cancellation handlers of its awaited
+    // operations) runs on another, and Asio's cancellation slots are not thread-safe.
+    // A strand per branch keeps each coroutine's cancellation state on one serial
+    // executor, as 654bcd0 did for static fan-out (#344). Without a pool the branches
+    // share the outer executor, which is already serial, so they stay on it.
+    auto branch_executor = [&]() -> asio::any_io_executor {
+        return fan_out_pool_ ? asio::any_io_executor(asio::make_strand(ex)) : ex;
+    };
+    using DeferredOp = decltype(asio::co_spawn(std::declval<asio::any_io_executor>(),
+                                               worker(std::size_t{0}), asio::deferred));
     std::vector<DeferredOp> ops;
     ops.reserve(sends.size());
     for (std::size_t si = 0; si < sends.size(); ++si) {
-        ops.push_back(asio::co_spawn(ex, worker(si), asio::deferred));
+        ops.push_back(asio::co_spawn(branch_executor(), worker(si), asio::deferred));
     }
 
     auto [order, excs, values] =
