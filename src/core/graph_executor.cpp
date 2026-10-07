@@ -1,3 +1,4 @@
+#include <neograph/async/run_sync.h>
 #include <neograph/graph/cancel.h>
 #include <neograph/graph/engine.h>  // RunContext (forward-declared in executor.h)
 #include <neograph/graph/executor.h>
@@ -639,13 +640,28 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
     // parallelism while keeping a coroutine's Asio cancellation state on one
     // serial executor; a bare multi-threaded pool lets cancellation emission
     // race the frame's next await_transform.
+    //
+    // Without a fan-out pool the branches share the outer executor. When that
+    // executor already is a strand (every cancellable run is driven through
+    // CancelToken::bind_executor), every branch handler is serialised on it,
+    // so a strand per branch adds a queue hop and a strand_impl allocation but
+    // no ordering the outer strand does not already give.
+    const bool branch_ex_serialised =
+        fan_out_pool_ == nullptr &&
+        (branch_ex.target<asio::strand<asio::any_io_executor>>() != nullptr ||
+         &asio::query(branch_ex, asio::execution::context) ==
+             neograph::async::detail::serial_io_context());
+    auto make_branch_executor = [&]() -> asio::any_io_executor {
+        return branch_ex_serialised ? branch_ex
+                                    : asio::any_io_executor(asio::make_strand(branch_ex));
+    };
     using DeferredOp = decltype(asio::co_spawn(
-        asio::make_strand(branch_ex), worker(std::declval<std::string>()), asio::deferred));
+        std::declval<asio::any_io_executor>(), worker(std::declval<std::string>()),
+        asio::deferred));
     std::vector<DeferredOp> ops;
     ops.reserve(ready.size());
     for (const auto& node_name : ready) {
-        ops.push_back(asio::co_spawn(
-            asio::make_strand(branch_ex), worker(node_name), asio::deferred));
+        ops.push_back(asio::co_spawn(make_branch_executor(), worker(node_name), asio::deferred));
     }
 
     // wait_for_all returns:
