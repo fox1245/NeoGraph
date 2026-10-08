@@ -118,8 +118,9 @@ endif()
 # ===========================================================================
 # Options
 # ===========================================================================
-# NeoGraph's optional HTTP/HTTPS/WS client. Core still requires SchemaProvider's
-# independent transport and its libcurl/OpenSSL dependencies when this is OFF.
+# NeoGraph's optional HTTP/HTTPS/WS client. SchemaProvider's independent transport and its
+# libcurl dependency are needed to *build* core when this is OFF, but only neograph::llm links
+# the transport: a program that links neograph::core alone does not load libcurl.
 option(NEOGRAPH_BUILD_ASYNC    "Build neograph::async (asio::ssl HTTP/HTTPS/WS client)" ON)
 option(NEOGRAPH_BUILD_PROGRAM  "Build optional neograph::program component" OFF)
 option(NEOGRAPH_BUILD_WASM
@@ -829,9 +830,11 @@ if(NEOGRAPH_BUILD_LLM)
     )
 
     target_compile_definitions(neograph_llm PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+    # SchemaProvider::runtime (through neograph_core) is the client API; the libcurl backend that
+    # constructs a client lives in SchemaProvider::transport, linked only here.
     target_link_libraries(neograph_llm
         PUBLIC  neograph_core
-        PRIVATE neograph_async
+        PRIVATE neograph_async SchemaProvider::transport
     )
 
     add_library(neograph::llm ALIAS neograph_llm)
@@ -2270,7 +2273,7 @@ if(NEOGRAPH_INSTALL_EXPORT)
     # linked. Writing these out per-build rather than hardcoding them is the
     # point: an install that was built without libpq must not make its consumers
     # hunt for PostgreSQL.
-    set(NEOGRAPH_CONFIG_DEPENDENCIES "find_dependency(Threads)\nfind_dependency(SchemaProvider 0.1.1 CONFIG REQUIRED COMPONENTS runtime)")
+    set(NEOGRAPH_CONFIG_DEPENDENCIES "find_dependency(Threads)\nfind_dependency(SchemaProvider 0.1.1 CONFIG REQUIRED COMPONENTS runtime transport)")
     if(TARGET neograph_async OR TARGET neograph_llm OR TARGET neograph_mcp_http_server)
         string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(OpenSSL)")
     endif()
@@ -2359,8 +2362,11 @@ if(NEOGRAPH_BUILD_PYBIND)
 
     # SchemaProvider splits its runtime across six libraries. Imported static
     # packages are already absorbed by the engine and need no loader files.
-    foreach(_component core json descriptor codecs transport runtime)
+    foreach(_component core json descriptor codecs wire transport runtime)
         set(_sdk_target SchemaProvider::${_component})
+        if(NOT TARGET ${_sdk_target})
+            continue()
+        endif()
         get_target_property(_sdk_type ${_sdk_target} TYPE)
         if(_sdk_type STREQUAL "SHARED_LIBRARY")
             get_target_property(_sdk_imported ${_sdk_target} IMPORTED)

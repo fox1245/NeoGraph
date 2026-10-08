@@ -5,10 +5,10 @@ option(NEOGRAPH_FETCH_SCHEMAPROVIDER
 
 # Pin the SDK source, not a moving branch or release tag.
 set(NEOGRAPH_SCHEMAPROVIDER_REVISION
-    "7cdbcd2c180bf392ef2373805592cb0886387a9e")
+    "f39de11a70731653ac2f3e9ccb60839c1372dbfa")
 
 if(NOT NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR)
-    find_package(SchemaProvider 0.1.1 CONFIG QUIET COMPONENTS runtime)
+    find_package(SchemaProvider 0.1.1 CONFIG QUIET COMPONENTS runtime transport)
     if(NOT SchemaProvider_FOUND)
         if(NOT NEOGRAPH_FETCH_SCHEMAPROVIDER)
             message(FATAL_ERROR
@@ -46,6 +46,6 @@ else()
     endif()
 endif()
 
-if(NOT TARGET SchemaProvider::runtime)
-    message(FATAL_ERROR "SchemaProvider does not provide its required runtime target")
+if(NOT TARGET SchemaProvider::runtime OR NOT TARGET SchemaProvider::transport)
+    message(FATAL_ERROR "SchemaProvider does not provide its required runtime and transport targets")
 endif()
