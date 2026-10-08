@@ -13,6 +13,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Core engine speed is back at v0.11.1 level.** On the reference laptop the 3-node sequential benchmark went from 10.19 to 6.29 µs per run (v0.11.1: 6.10) and the parallel-3 one from 30.03 to 15.66 µs (15.80); per-thread time with one engine per thread matches v0.11.1 at 2, 4 and 8 threads. The loss came from a strand per fan-out branch, per-node `RunContext` copies, one process-wide mutex around the context binding registry (now 64 shards), state snapshots built from many JSON documents, coroutine calls that returned nothing (`run_sends_async` without Sends, `record_pending_write_async` without checkpointing) and ordered sets in the scheduler. Per-commit measurements are in #343.
+
+### Added
+
+- `CheckpointCoordinator::records_pending_writes(parent_cp_id)`: true when `record_pending_write[_async]` would store something, so callers can skip the call.
+
 ## [0.13.1] - 2026-10-07
 NeoGraph `0.13.1` targets alpha SDK `0.1.1`. Interface revision and shared-library generation stay 4, so consumers only select SDK `0.1.1` (its installed package config requires the exact version) and rebuild. Native archives remain v3 / `spna3`; portable JSON remains v2. The functional change is the Windows transport fix below: the Windows wheels published as 0.13.0 contain the defect and should be replaced by 0.13.1. Hosted CI and the Windows wheel gate passed for the fix commit (GitHub Actions runs 37576205702 and 37576205395, CPython 3.12 only); the full CPython 3.9–3.13 matrix runs on the release tag.
 ### Fixed
