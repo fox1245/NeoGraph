@@ -18,6 +18,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ### 变更
 
 - **Core 引擎速度恢复到 v0.11.1 的水平。** 在基准笔记本上,3 节点顺序基准从每次运行 10.19 µs 降到 6.29 µs(v0.11.1:6.10),parallel-3 基准从 30.03 µs 降到 15.66 µs(15.80);每个线程各用一个引擎时,2、4、8 线程下的单线程耗时与 v0.11.1 相同。损失来自每个 fan-out 分支一个 strand、每个节点一次 `RunContext` 拷贝、包住上下文绑定注册表的进程级 mutex(现为 64 个分片)、由多个 JSON 文档构建的状态快照、什么都不返回的协程调用(没有 Send 时的 `run_sends_async`、没有检查点时的 `record_pending_write_async`)以及调度器中的有序集合。各提交的测量数据见 #343。
+- **只链接 `neograph::core` 的程序不再加载 libcurl。** `neograph::core` 链接了 SchemaProvider 的运行时,而该运行时链接了 libcurl 传输层,因此仅运行图的进程也会加载 libcurl 及其所需的约 25 个库(基准测试启动时常驻内存 12.7 MB,v0.11.1 为 5.0 MB)。现在只有 `neograph::llm` 链接传输层;同一基准测试以 7.7 MB 启动,共享库从 36 个减少到 7 个。不使用 `neograph::llm` 而自行构造 `sp::runtime::Client` 的代码必须链接 `SchemaProvider::transport`。SchemaProvider 已固定到包含此拆分的修订版本。参见 #347。
 
 ### 新增
 
