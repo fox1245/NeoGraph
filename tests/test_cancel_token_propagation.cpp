@@ -15,9 +15,22 @@
 #include <neograph/neograph.h>
 #include <neograph/graph/cancel.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
+#include <future>
+#include <memory>
+#include <string>
 #include <thread>
+
+#include <asio/associated_cancellation_slot.hpp>
+#include <asio/associated_executor.hpp>
+#include <asio/async_result.hpp>
+#include <asio/cancellation_type.hpp>
+#include <asio/error.hpp>
+#include <asio/post.hpp>
+#include <asio/use_awaitable.hpp>
 
 using namespace neograph;
 using namespace neograph::graph;
@@ -433,4 +446,249 @@ TEST(CancelTokenPropagation, MidFlightCancelAbortsSendSiblings) {
         << "abort, but all " << c << " entered workers completed — "
         << "the cancel signal did not propagate through the isolated "
         << "send_state.";
+}
+
+// =========================================================================
+// Fan-out on the engine pool: cancellation must stay serial with the branch.
+//
+// `set_worker_count(N >= 2)` runs fan-out branches on an engine-owned thread
+// pool. The parallel group forwards a cancellation to a branch by dispatching
+// the emit on that branch's executor. When the branch runs on the bare pool
+// executor, the emit can land on one pool thread while the same branch's
+// continuation (which installs and clears the cancellation handlers of its
+// awaited operations) runs on another; Asio's cancellation slots are not
+// thread-safe, so a handler can then fire mid-way through the very operation
+// completion it belongs to. Each branch therefore needs its own strand over
+// the pool executor: static fan-out got one in 654bcd0, multi-Send in #344.
+//
+// The node below awaits a hand-written operation that does what any real
+// cancellable operation (timer, socket, provider call) does: assign a
+// cancellation handler on the awaiting coroutine's slot, complete on the
+// coroutine's executor, clear the slot, resume. The operation marks the span
+// in which it is completing, and its cancellation handler records whether it
+// ran inside that span. It must never.
+// =========================================================================
+namespace pool_cancel {
+
+constexpr std::size_t kBranches    = 3;
+constexpr std::size_t kPoolThreads = 4;
+constexpr int         kIterations  = 30;
+
+struct Branch {
+    std::atomic<int>  completing{0};  // operation completions in progress
+    std::atomic<bool> cancelled{false};
+};
+
+struct Probe {
+    std::array<Branch, kBranches> branch;
+    std::atomic<std::size_t>      entered{0};
+    std::atomic<std::size_t>      aborted{0};
+    std::atomic<int>              handler_calls{0};
+    std::atomic<int>              overlaps{0};  // handler ran while its operation completed
+
+    void reset() {
+        for (auto& b : branch) {
+            b.completing.store(0);
+            b.cancelled.store(false);
+        }
+        entered.store(0);
+        aborted.store(0);
+    }
+};
+
+// Widens the completion span so a concurrent emit has something to hit.
+inline void spin_for(std::chrono::microseconds duration) {
+    const auto end = std::chrono::steady_clock::now() + duration;
+    while (std::chrono::steady_clock::now() < end) {
+    }
+}
+
+template <typename CompletionToken>
+auto async_tick(Probe& probe, Branch& branch, CompletionToken&& token) {
+    return asio::async_initiate<CompletionToken, void(asio::error_code)>(
+        [&probe, &branch](auto handler) {
+            auto slot = asio::get_associated_cancellation_slot(handler);
+            auto ex   = asio::get_associated_executor(handler);
+            if (slot.is_connected()) {
+                slot.assign([&probe, &branch](asio::cancellation_type_t) {
+                    probe.handler_calls.fetch_add(1, std::memory_order_relaxed);
+                    if (branch.completing.load(std::memory_order_acquire) > 0) {
+                        probe.overlaps.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    branch.cancelled.store(true, std::memory_order_release);
+                });
+            }
+            asio::post(ex, [&branch, slot, handler = std::move(handler)]() mutable {
+                branch.completing.fetch_add(1, std::memory_order_acq_rel);
+                spin_for(std::chrono::microseconds(25));
+                if (slot.is_connected()) slot.clear();
+                const bool cancelled = branch.cancelled.load(std::memory_order_acquire);
+                // Resuming the coroutine runs its next initiation inline.
+                handler(cancelled ? asio::error::operation_aborted : asio::error_code{});
+                branch.completing.fetch_sub(1, std::memory_order_acq_rel);
+            });
+        },
+        token);
+}
+
+class Waiter final : public GraphNode {
+public:
+    Waiter(std::string name, Probe* probe, bool send_branch)
+        : name_(std::move(name)), probe_(probe), send_branch_(send_branch) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        const std::size_t index =
+            send_branch_ ? in.state.get("i").get<std::size_t>()
+                         : static_cast<std::size_t>(name_.back() - '0');
+        probe_->entered.fetch_add(1);
+        // A branch that is never cancelled ends the run instead of hanging it.
+        const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        try {
+            while (std::chrono::steady_clock::now() < give_up) {
+                co_await async_tick(*probe_, probe_->branch[index], asio::use_awaitable);
+            }
+        } catch (const asio::system_error& error) {
+            if (error.code() == asio::error::operation_aborted) probe_->aborted.fetch_add(1);
+            throw;
+        }
+        throw std::runtime_error("fan-out branch " + name_ + " was never cancelled");
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+    Probe*      probe_;
+    bool        send_branch_;
+};
+
+class Start final : public GraphNode {
+public:
+    explicit Start(std::string name) : name_(std::move(name)) {}
+    asio::awaitable<NodeOutput> run(NodeInput) override { co_return NodeOutput{}; }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+// Compile `graph`, give it the engine pool, then cancel it `kIterations`
+// times while every branch sits in a cancellable operation.
+void cancel_pooled_fan_out(const json& graph, Probe& probe) {
+    auto engine = GraphEngine::compile(graph, NodeContext{});
+    engine->set_worker_count(kPoolThreads);
+
+    int total_handler_calls = 0;
+    for (int iteration = 0; iteration < kIterations; ++iteration) {
+        SCOPED_TRACE("iteration " + std::to_string(iteration));
+        probe.reset();
+        probe.handler_calls.store(0);
+        probe.overlaps.store(0);
+
+        RunConfig cfg;
+        cfg.thread_id    = "pool-cancel-" + std::to_string(iteration);
+        cfg.cancel_token = std::make_shared<CancelToken>();
+        auto run = std::async(std::launch::async, [&engine, cfg] {
+            try {
+                engine->run(cfg);
+            } catch (const CancelledException&) {
+                return true;
+            }
+            return false;
+        });
+
+        const auto entered_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (probe.entered.load() < kBranches &&
+               std::chrono::steady_clock::now() < entered_deadline) {
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+        if (probe.entered.load() != kBranches) cfg.cancel_token->cancel();
+        ASSERT_EQ(probe.entered.load(), kBranches) << "fan-out branches did not all start";
+        // Vary where in the branches' operation loop the cancellation lands.
+        std::this_thread::sleep_for(std::chrono::microseconds(100 * (iteration % 5)));
+        cfg.cancel_token->cancel();
+
+        ASSERT_EQ(run.wait_for(std::chrono::seconds(10)), std::future_status::ready)
+            << "cancelled fan-out run did not finish";
+        EXPECT_TRUE(run.get()) << "run completed instead of being cancelled";
+        EXPECT_EQ(probe.aborted.load(), kBranches)
+            << "every branch must observe the cancellation";
+        EXPECT_EQ(probe.overlaps.load(), 0)
+            << "a branch's cancellation handler ran while that branch's operation was "
+               "completing: its executor is not serial";
+        total_handler_calls += probe.handler_calls.load();
+    }
+    // Guards against a vacuous pass: the handlers must actually have been reached.
+    EXPECT_GT(total_handler_calls, 0);
+}
+
+}  // namespace pool_cancel
+
+TEST(CancelTokenPropagation, MultiSendOnEnginePoolCancelsWithoutOverlappingBranchCompletion) {
+    // NodeFactory registrations are process-wide and outlive this test, so the
+    // factory owns the probe instead of referring to a local.
+    const auto probe_owner = std::make_shared<pool_cancel::Probe>();
+    pool_cancel::Probe& probe = *probe_owner;
+    NodeFactory::instance().register_type(
+        "pool_cancel_send_waiter",
+        [probe_owner](const std::string& name, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<pool_cancel::Waiter>(name, probe_owner.get(), /*send_branch=*/true);
+        });
+    register_fanout_factory("pool_cancel_send_dispatcher", "waiter",
+                            static_cast<int>(pool_cancel::kBranches));
+
+    const json graph = {
+        {"name", "pool_cancel_send"},
+        {"channels", {{"i", {{"reducer", "overwrite"}}}}},
+        {"nodes", {
+            {"dispatcher", {{"type", "pool_cancel_send_dispatcher"}}},
+            {"waiter",     {{"type", "pool_cancel_send_waiter"}}}
+        }},
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "dispatcher"}}
+        })}
+    };
+    pool_cancel::cancel_pooled_fan_out(graph, probe);
+}
+
+// Static fan-out has had its per-branch strands since 654bcd0. This is the
+// same scenario through run_parallel_async, kept as the control that shows
+// the probe above is sensitive to a bare pool executor.
+TEST(CancelTokenPropagation, StaticFanOutOnEnginePoolCancelsWithoutOverlappingBranchCompletion) {
+    const auto probe_owner = std::make_shared<pool_cancel::Probe>();
+    pool_cancel::Probe& probe = *probe_owner;
+    NodeFactory::instance().register_type(
+        "pool_cancel_static_waiter",
+        [probe_owner](const std::string& name, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<pool_cancel::Waiter>(name, probe_owner.get(), /*send_branch=*/false);
+        });
+    NodeFactory::instance().register_type(
+        "pool_cancel_static_start",
+        [](const std::string& name, const json&, const NodeContext&)
+            -> std::unique_ptr<GraphNode> {
+            return std::make_unique<pool_cancel::Start>(name);
+        });
+
+    const json graph = {
+        {"name", "pool_cancel_static"},
+        {"channels", {{"unused", {{"reducer", "overwrite"}}}}},
+        {"nodes", {
+            {"start", {{"type", "pool_cancel_static_start"}}},
+            {"w0",    {{"type", "pool_cancel_static_waiter"}}},
+            {"w1",    {{"type", "pool_cancel_static_waiter"}}},
+            {"w2",    {{"type", "pool_cancel_static_waiter"}}}
+        }},
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "start"}},
+            {{"from", "start"},     {"to", "w0"}},
+            {{"from", "start"},     {"to", "w1"}},
+            {{"from", "start"},     {"to", "w2"}},
+            {{"from", "w0"},        {"to", "__end__"}},
+            {{"from", "w1"},        {"to", "__end__"}},
+            {{"from", "w2"},        {"to", "__end__"}}
+        })}
+    };
+    pool_cancel::cancel_pooled_fan_out(graph, probe);
 }

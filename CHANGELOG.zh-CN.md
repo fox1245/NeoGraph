@@ -24,6 +24,10 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 - `CheckpointCoordinator::records_pending_writes(parent_cp_id)`:当 `record_pending_write[_async]` 确实会存储内容时返回 true,调用方可据此跳过调用。
 
+### 修复
+
+- **使用引擎工作线程池的 multi-Send fan-out 中,某个分支的取消处理函数可能在该分支自身的操作完成期间运行。** multi-Send 步骤的分支运行在裸线程池执行器上,而静态 fan-out 的分支早已各有一个 strand,因此来自另一个线程池线程的取消会与分支的协程竞争(`cancellation_signal::emit` 中的数据竞争,已在 ThreadSanitizer 下复现)。现在每个使用线程池的 Send 分支都在自己的 strand 上运行;没有线程池的运行保持不变。参见 #344 和 #345。
+
 ## [0.13.1] - 2026-10-07
 NeoGraph `0.13.1` 面向 alpha SDK `0.1.1`。interface revision 与 shared-library generation 仍为 4，因此使用者只需选择 SDK `0.1.1`（已安装的 package config 要求精确版本）并重新构建。Native archive 仍为 v3 / `spna3`，portable JSON 仍为 v2。功能性变更是下面的 Windows transport 修复：作为 0.13.0 发布的 Windows wheel 存在该缺陷，应替换为 0.13.1。修复提交的 hosted CI 与 Windows wheel gate 已通过（GitHub Actions run 37576205702、37576205395，仅 CPython 3.12）；完整的 CPython 3.9–3.13 矩阵在发布 tag 上运行。
 ### 修复
