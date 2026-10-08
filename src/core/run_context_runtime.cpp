@@ -3,6 +3,7 @@
 #include "channel_write_codec.h"
 #include "managed_budget_journal.h"
 
+#include <array>
 #include <cstdint>
 #include <mutex>
 #include <utility>
@@ -18,121 +19,165 @@ constexpr const char* kJournal = "subgraph_write_journal";
 constexpr const char* kGraphInvocation = "subgraph_invocation_id";
 
 /// Maps a live RunContext to its binding. Every node invocation registers and
-/// unregisters one entry, so the table is open-addressed over a flat array:
-/// no allocation per entry, and one lock round trip per operation. Entries
-/// point at bindings owned by their scope objects, which unregister before
-/// they die. The registry itself is never destroyed, so a scope that outlives
-/// static destruction still finds it.
+/// unregisters one entry, and invocations of unrelated runs overlap on many
+/// threads. One lock for the whole process would serialise all of them and bounce
+/// its cache line between cores, so the map is split into shards chosen by the
+/// context's address: a thread normally touches only the shards of its own
+/// contexts. Each shard is open-addressed over a flat array (no allocation per
+/// entry, one lock round trip per operation). Entries point at bindings owned by
+/// their scope objects, which unregister before they die. The registry itself is
+/// never destroyed, so a scope that outlives static destruction still finds it.
 class BindingRegistry {
 public:
     const RuntimeBinding* find(const RunContext* key) const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const std::size_t index = locate(key);
-        return index == npos ? nullptr : slots_[index].binding;
+        const std::uint64_t hash = hash_of(key);
+        return shard_for(hash).find(key, hash);
     }
 
     void install(const RunContext* key, RuntimeBinding& binding) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        install_locked(key, binding);
+        const std::uint64_t hash = hash_of(key);
+        shard_for(hash).install(key, hash, binding);
     }
 
     /// Installs `binding` for `key` with the run-wide state `parent` is bound
-    /// to (or `fallback` when it is bound to nothing), under one lock.
+    /// to (or `fallback` when it is bound to nothing). The parent's scope is
+    /// alive for the whole call, so its binding cannot go away between the
+    /// lookup and the install.
     void install_inheriting(const RunContext* parent, const RunContext* key, RuntimeBinding& binding,
                             const std::shared_ptr<const RunContextRuntime>& fallback) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const std::size_t inherited = locate(parent);
-        binding.run = inherited == npos ? fallback : slots_[inherited].binding->run;
-        install_locked(key, binding);
+        const std::uint64_t parent_hash = hash_of(parent);
+        std::shared_ptr<const RunContextRuntime> inherited = shard_for(parent_hash).run_of(parent, parent_hash);
+        binding.run = inherited ? std::move(inherited) : fallback;
+        install(key, binding);
     }
 
     void uninstall(const RunContext* key, const RuntimeBinding& binding) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const std::size_t index = locate(key);
-        if (index == npos || slots_[index].binding != &binding) return;
-        if (binding.previous != nullptr) {
-            slots_[index].binding = binding.previous;
-        } else {
-            erase_at(index);
-            // A burst of concurrent invocations must not leave its table behind.
-            if (used_ == 0 && slots_.size() > kRetainedCapacity) std::vector<Slot>().swap(slots_);
-        }
+        const std::uint64_t hash = hash_of(key);
+        shard_for(hash).uninstall(key, hash, binding);
     }
 
 private:
-    struct Slot {
-        const RunContext* key = nullptr;
-        const RuntimeBinding* binding = nullptr;
-    };
-    static constexpr std::size_t npos = static_cast<std::size_t>(-1);
-    static constexpr std::size_t kInitialCapacity = 256;   // power of two
-    static constexpr std::size_t kRetainedCapacity = 4096;  // largest table kept while empty
+    static constexpr std::size_t kShards = 64;  // power of two
 
-    static std::size_t hash_of(const RunContext* key) noexcept {
+    static std::uint64_t hash_of(const RunContext* key) noexcept {
         auto x = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(key) >> 4);
         x *= 0x9E3779B97F4A7C15ull;
-        return static_cast<std::size_t>(x ^ (x >> 31));
+        return x ^ (x >> 31);
     }
 
-    std::size_t locate(const RunContext* key) const {
-        if (slots_.empty()) return npos;
-        const std::size_t mask = slots_.size() - 1;
-        for (std::size_t i = hash_of(key) & mask;; i = (i + 1) & mask) {
-            if (slots_[i].key == key) return i;
-            if (slots_[i].key == nullptr) return npos;
+    /// One independently locked table. Aligned so that neighbouring shards do
+    /// not share a cache line.
+    class alignas(64) Shard {
+    public:
+        const RuntimeBinding* find(const RunContext* key, std::uint64_t hash) const {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const std::size_t index = locate(key, hash);
+            return index == npos ? nullptr : slots_[index].binding;
         }
-    }
 
-    void install_locked(const RunContext* key, RuntimeBinding& binding) {
-        if (slots_.empty()) slots_.resize(kInitialCapacity);
-        if ((used_ + 1) * 2 > slots_.size()) grow();
-        const std::size_t mask = slots_.size() - 1;
-        std::size_t i = hash_of(key) & mask;
-        while (slots_[i].key != nullptr && slots_[i].key != key) i = (i + 1) & mask;
-        if (slots_[i].key == key) {
-            binding.previous = slots_[i].binding;
-        } else {
-            binding.previous = nullptr;
-            slots_[i].key = key;
-            ++used_;
+        std::shared_ptr<const RunContextRuntime> run_of(const RunContext* key, std::uint64_t hash) const {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const std::size_t index = locate(key, hash);
+            return index == npos ? nullptr : slots_[index].binding->run;
         }
-        slots_[i].binding = &binding;
-    }
 
-    void grow() {
-        std::vector<Slot> old(slots_.size() * 2);
-        old.swap(slots_);
-        const std::size_t mask = slots_.size() - 1;
-        for (const Slot& slot : old) {
-            if (slot.key == nullptr) continue;
-            std::size_t i = hash_of(slot.key) & mask;
-            while (slots_[i].key != nullptr) i = (i + 1) & mask;
-            slots_[i] = slot;
+        void install(const RunContext* key, std::uint64_t hash, RuntimeBinding& binding) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (slots_.empty()) slots_.resize(kInitialCapacity);
+            if ((used_ + 1) * 2 > slots_.size()) grow();
+            const std::size_t mask = slots_.size() - 1;
+            std::size_t i = slot_of(hash, mask);
+            while (slots_[i].key != nullptr && slots_[i].key != key) i = (i + 1) & mask;
+            if (slots_[i].key == key) {
+                binding.previous = slots_[i].binding;
+            } else {
+                binding.previous = nullptr;
+                slots_[i].key = key;
+                ++used_;
+            }
+            slots_[i].binding = &binding;
         }
-    }
 
-    /// Removes slot `hole` and shifts later members of its probe run back, so
-    /// lookups never need tombstones.
-    void erase_at(std::size_t hole) {
-        const std::size_t mask = slots_.size() - 1;
-        std::size_t next = hole;
-        for (;;) {
-            next = (next + 1) & mask;
-            if (slots_[next].key == nullptr) break;
-            const std::size_t home = hash_of(slots_[next].key) & mask;
-            const bool home_in_gap = hole <= next ? (hole < home && home <= next)
-                                                  : (hole < home || home <= next);
-            if (home_in_gap) continue;
-            slots_[hole] = slots_[next];
-            hole = next;
+        void uninstall(const RunContext* key, std::uint64_t hash, const RuntimeBinding& binding) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const std::size_t index = locate(key, hash);
+            if (index == npos || slots_[index].binding != &binding) return;
+            if (binding.previous != nullptr) {
+                slots_[index].binding = binding.previous;
+            } else {
+                erase_at(index);
+                // A burst of concurrent invocations must not leave its table behind.
+                if (used_ == 0 && slots_.size() > kRetainedCapacity) std::vector<Slot>().swap(slots_);
+            }
         }
-        slots_[hole] = Slot{};
-        --used_;
-    }
 
-    mutable std::mutex mutex_;
-    std::vector<Slot> slots_;
-    std::size_t used_ = 0;
+    private:
+        struct Slot {
+            const RunContext* key = nullptr;
+            const RuntimeBinding* binding = nullptr;
+        };
+        static constexpr std::size_t npos = static_cast<std::size_t>(-1);
+        static std::size_t slot_of(std::uint64_t hash, std::size_t mask) noexcept {
+            return static_cast<std::size_t>(hash & mask);
+        }
+        static constexpr std::size_t kInitialCapacity = 16;    // power of two
+        static constexpr std::size_t kRetainedCapacity = 256;  // largest table kept while empty
+
+        std::size_t locate(const RunContext* key, std::uint64_t hash) const {
+            if (slots_.empty()) return npos;
+            const std::size_t mask = slots_.size() - 1;
+            for (std::size_t i = slot_of(hash, mask);; i = (i + 1) & mask) {
+                if (slots_[i].key == key) return i;
+                if (slots_[i].key == nullptr) return npos;
+            }
+        }
+
+        void grow() {
+            std::vector<Slot> old(slots_.size() * 2);
+            old.swap(slots_);
+            const std::size_t mask = slots_.size() - 1;
+            for (const Slot& slot : old) {
+                if (slot.key == nullptr) continue;
+                std::size_t i = slot_of(hash_of(slot.key), mask);
+                while (slots_[i].key != nullptr) i = (i + 1) & mask;
+                slots_[i] = slot;
+            }
+        }
+
+        /// Removes slot `hole` and shifts later members of its probe run back,
+        /// so lookups never need tombstones.
+        void erase_at(std::size_t hole) {
+            const std::size_t mask = slots_.size() - 1;
+            std::size_t next = hole;
+            for (;;) {
+                next = (next + 1) & mask;
+                if (slots_[next].key == nullptr) break;
+                const std::size_t home = slot_of(hash_of(slots_[next].key), mask);
+                const bool home_in_gap = hole <= next ? (hole < home && home <= next)
+                                                      : (hole < home || home <= next);
+                if (home_in_gap) continue;
+                slots_[hole] = slots_[next];
+                hole = next;
+            }
+            slots_[hole] = Slot{};
+            --used_;
+        }
+
+        mutable std::mutex mutex_;
+        std::vector<Slot> slots_;
+        std::size_t used_ = 0;
+    };
+
+    // The slot index inside a shard uses the low bits of the hash, the shard the
+    // high ones, so the two choices are independent. The hash stays 64-bit on
+    // every target: 32-bit builds still need bits 40 and up to pick a shard.
+    static std::size_t shard_index(std::uint64_t hash) noexcept {
+        return static_cast<std::size_t>((hash >> 40) & (kShards - 1));
+    }
+    const Shard& shard_for(std::uint64_t hash) const { return shards_[shard_index(hash)]; }
+    Shard& shard_for(std::uint64_t hash) { return shards_[shard_index(hash)]; }
+
+    std::array<Shard, kShards> shards_;
 };
 
 BindingRegistry& registry() {

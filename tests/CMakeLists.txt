@@ -448,6 +448,12 @@ target_link_libraries(neograph_tests PRIVATE
     GTest::gtest_main
 )
 
+# Reaches into core internals (`detail::` binding scopes) that a shared library
+# does not export, so it is built only against the static core.
+if(NOT BUILD_SHARED_LIBS)
+    target_sources(neograph_tests PRIVATE test_run_context_runtime_registry.cpp)
+endif()
+
 # Keep the core and Program test targets buildable in the minimal dependency
 # configuration.  The corresponding source files are already compile-gated
 # where a component-specific API is used; a test target must not manufacture a
