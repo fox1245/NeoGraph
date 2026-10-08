@@ -380,8 +380,8 @@ if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
     endif()
 endif()
 
-# NeoGraph's HTTPS clients need OpenSSL::SSL in addition to the SDK's Crypto
-# dependency. Reject incompatible component selections before linking.
+# NeoGraph's HTTPS clients link OpenSSL::SSL and OpenSSL::Crypto themselves; the SDK
+# has no OpenSSL dependency. Reject incompatible component selections before linking.
 if(NOT NEOGRAPH_BUILD_ASYNC AND (NEOGRAPH_BUILD_LLM OR NEOGRAPH_BUILD_MCP_CLIENT OR NEOGRAPH_BUILD_A2A OR NEOGRAPH_BUILD_PYBIND))
     message(FATAL_ERROR
         "NEOGRAPH_BUILD_ASYNC=OFF is incompatible with "
@@ -1195,7 +1195,7 @@ if(NEOGRAPH_BUILD_HARNESS_MCP_BINARY)
     endif()
     if(NEOGRAPH_BUILD_MCP_HTTP_SERVER)
         target_link_libraries(neograph_harness_mcp PRIVATE
-            neograph::mcp_http_server)
+            neograph::mcp_http_server OpenSSL::Crypto)
         target_compile_definitions(neograph_harness_mcp PRIVATE
             NEOGRAPH_HARNESS_HAVE_HTTP)
     endif()
@@ -1790,7 +1790,7 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             endif()
             if(NEOGRAPH_BUILD_MCP_HTTP_SERVER)
                 target_link_libraries(example_harness_mcp_server PRIVATE
-                    neograph::mcp_http_server)
+                    neograph::mcp_http_server OpenSSL::Crypto)
                 target_compile_definitions(example_harness_mcp_server PRIVATE
                     NEOGRAPH_HARNESS_HAVE_HTTP)
             endif()
@@ -2276,7 +2276,7 @@ if(NEOGRAPH_INSTALL_EXPORT)
     # linked. Writing these out per-build rather than hardcoding them is the
     # point: an install that was built without libpq must not make its consumers
     # hunt for PostgreSQL.
-    set(NEOGRAPH_CONFIG_DEPENDENCIES "find_dependency(Threads)\nfind_dependency(SchemaProvider 0.1.1 CONFIG REQUIRED COMPONENTS runtime transport)")
+    set(NEOGRAPH_CONFIG_DEPENDENCIES "find_dependency(Threads)\nfind_dependency(SchemaProvider 0.2.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)")
     if(TARGET neograph_async OR TARGET neograph_llm OR TARGET neograph_mcp_http_server)
         string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(OpenSSL)")
     endif()
@@ -2363,7 +2363,7 @@ if(NEOGRAPH_BUILD_PYBIND)
         RUNTIME DESTINATION neograph_engine
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} EXCLUDE_FROM_ALL)
 
-    # SchemaProvider splits its runtime across six libraries. Imported static
+    # SchemaProvider splits its runtime across seven libraries. Imported static
     # packages are already absorbed by the engine and need no loader files.
     foreach(_component core json descriptor codecs wire transport runtime)
         set(_sdk_target SchemaProvider::${_component})
