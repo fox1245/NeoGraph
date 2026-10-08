@@ -17,7 +17,9 @@ if(DEFINED NEOGRAPH_EXPECTED_ABI_SOVERSION
 endif()
 
 add_executable(consumer main.cpp)
-target_link_libraries(consumer PRIVATE neograph::core)
+# The consumer constructs an sp::runtime::Client itself, so it links the SchemaProvider transport
+# (the libcurl backend); neograph::core alone no longer brings it.
+target_link_libraries(consumer PRIVATE neograph::core SchemaProvider::transport)
 if(TARGET neograph::mcp_sqlite)
     target_link_libraries(consumer PRIVATE neograph::mcp_sqlite)
     target_compile_definitions(consumer PRIVATE NEOGRAPH_CONSUMER_HAS_MCP_SQLITE)

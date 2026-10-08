@@ -346,7 +346,7 @@ if(NEOGRAPH_BUILD_A2A)
     target_compile_definitions(neograph_a2a_graph_contract_tests PRIVATE
         NEOGRAPH_A2A_TESTING)
     target_link_libraries(neograph_a2a_graph_contract_tests PRIVATE
-        neograph::a2a GTest::gtest_main)
+        neograph::a2a SchemaProvider::transport GTest::gtest_main)
     add_test(NAME neograph.a2a_graph_contract
              COMMAND neograph_a2a_graph_contract_tests)
 endif()
@@ -392,13 +392,14 @@ if(NEOGRAPH_BUILD_ACP)
     target_link_libraries(neograph_acp_tests PRIVATE
         neograph::core
         neograph::acp
+        SchemaProvider::transport
         GTest::gtest_main
     )
 
     add_executable(neograph_acp_graph_contract_tests
         test_graph_host_acp_contract.cpp)
     target_link_libraries(neograph_acp_graph_contract_tests PRIVATE
-        neograph::acp GTest::gtest_main)
+        neograph::acp SchemaProvider::transport GTest::gtest_main)
     add_test(NAME neograph.acp_graph_contract
              COMMAND neograph_acp_graph_contract_tests)
 endif()
@@ -452,6 +453,14 @@ target_link_libraries(neograph_tests PRIVATE
 # does not export, so it is built only against the static core.
 if(NOT BUILD_SHARED_LIBS)
     target_sources(neograph_tests PRIVATE test_run_context_runtime_registry.cpp)
+endif()
+
+# A program that links neograph::core alone must not load libcurl (only neograph::llm links the
+# SchemaProvider transport). Reads /proc/self/maps, so Linux only.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(neograph_core_footprint_probe core_footprint_probe.cpp)
+    target_link_libraries(neograph_core_footprint_probe PRIVATE neograph::core)
+    add_test(NAME core_links_no_libcurl COMMAND neograph_core_footprint_probe)
 endif()
 
 # Keep the core and Program test targets buildable in the minimal dependency
@@ -590,6 +599,7 @@ add_executable(neograph_runtime_turn_tests
 )
 target_link_libraries(neograph_runtime_turn_tests PRIVATE
     neograph::core
+    SchemaProvider::transport
     GTest::gtest_main
 )
 gtest_discover_tests(neograph_runtime_turn_tests)

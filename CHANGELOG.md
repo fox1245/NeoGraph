@@ -16,6 +16,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - **Core engine speed is back at v0.11.1 level.** On the reference laptop the 3-node sequential benchmark went from 10.19 to 6.29 µs per run (v0.11.1: 6.10) and the parallel-3 one from 30.03 to 15.66 µs (15.80); per-thread time with one engine per thread matches v0.11.1 at 2, 4 and 8 threads. The loss came from a strand per fan-out branch, per-node `RunContext` copies, one process-wide mutex around the context binding registry (now 64 shards), state snapshots built from many JSON documents, coroutine calls that returned nothing (`run_sends_async` without Sends, `record_pending_write_async` without checkpointing) and ordered sets in the scheduler. Per-commit measurements are in #343.
+- **A program that links only `neograph::core` no longer loads libcurl.** `neograph::core` linked SchemaProvider's runtime, which linked its libcurl transport, so a graph-only process loaded libcurl and the roughly 25 libraries it needs: 12.7 MB resident at start for the benchmark, against 5.0 MB for v0.11.1. Only `neograph::llm` links the transport now; the same benchmark starts at 7.7 MB with 7 shared libraries instead of 36. Code that constructs `sp::runtime::Client` itself without `neograph::llm` must link `SchemaProvider::transport`. SchemaProvider is pinned to the revision that makes the split. See #347.
 
 ### Added
 
