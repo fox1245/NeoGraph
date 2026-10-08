@@ -71,7 +71,7 @@ public:
 
 Core가 타입이 지정된 provider 계약을 공개하므로 `NEOGRAPH_BUILD_LLM=OFF`일 때도 외부 SDK인 SchemaProvider가 필요합니다. 아래 명령은 설치된 [SchemaProvider 런타임 패키지](https://github.com/fox1245/SchemaProvider)를 사용합니다. `SCHEMAPROVIDER_PREFIX`를 설치 접두 경로로 설정하세요. `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=../SchemaProvider`로 명시한 체크아웃이 최우선으로 사용됩니다. 명시하지 않으면 CMake는 설치된 패키지를 우선 사용하고, 패키지를 찾지 못하면 고정된 버전의 공개 SDK 아카이브를 가져옵니다. 설치된 패키지나 명시적인 체크아웃으로 오프라인 빌드를 하려면 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`를 설정하세요. CMake는 이웃 디렉터리의 체크아웃을 추측하지 않으며, 제거된 내장 인터프리터도 사용하지 않습니다.
 
-C++20 컴파일러, CMake 3.20 이상, OpenSSL과 libcurl 7.88 이상을 비롯한 SDK 런타임 의존성이 필요합니다. NeoGraph의 HTTPS 구성 요소를 포함하는 전체 빌드에는 OpenSSL 3이 필요합니다. 기본 빌드는 SQLite와 PostgreSQL 통합도 활성화합니다. 아래 명령은 SDK 의존성을 제거하지 않고 불필요한 NeoGraph 구성 요소를 비활성화합니다. 기록된 SDK 인터페이스 4 검증은 Linux x86_64와 로컬 프로토콜·상태 피어를 다룹니다. 정확한 범위는 [SDK 검증 기록](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record)에 있습니다. 이는 Windows, macOS, ARM64, HTTP/3, 호스팅 공급업체 또는 WASM에 대한 새로운 검증을 뜻하지 않습니다. 플랫폼 및 빌드 제약은 [문제 해결](docs/troubleshooting.md)을 참고하세요.
+C++20 컴파일러, CMake 3.20 이상, libcurl 7.88 이상을 비롯한 SDK 런타임 의존성이 필요합니다. SDK 자체는 OpenSSL을 요구하지 않으며 TLS는 libcurl의 백엔드가 제공합니다. NeoGraph의 HTTPS 구성 요소를 포함하는 전체 빌드에는 OpenSSL 3이 필요합니다. 기본 빌드는 SQLite와 PostgreSQL 통합도 활성화합니다. 아래 명령은 SDK 의존성을 제거하지 않고 불필요한 NeoGraph 구성 요소를 비활성화합니다. 기록된 SDK 인터페이스 4 검증은 Linux x86_64와 로컬 프로토콜·상태 피어를 다룹니다. 정확한 범위는 [SDK 검증 기록](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record)에 있습니다. 이는 Windows, macOS, ARM64, HTTP/3, 호스팅 공급업체 또는 WASM에 대한 새로운 검증을 뜻하지 않습니다. 플랫폼 및 빌드 제약은 [문제 해결](docs/troubleshooting.md)을 참고하세요.
 
 ```bash
 git clone https://github.com/fox1245/NeoGraph.git
@@ -143,7 +143,7 @@ sp::runtime::Result first_call(
 
 `ChatMessage`, `ChatTool`, JSON은 이식 가능한 투영 표현입니다. 진본 네이티브 이력은 네이티브 체크포인트 사이드카와 함께 메모리에 유지할 수 있습니다. 네이티브 이력을 영속적으로 보존하려면 실제 `sp::NativeArchive`와 소유자만 접근할 수 있도록 보호된 보관 책임 체계가 필요합니다. 이식 가능한 JSON으로는 이 권한을 재현할 수 없습니다. 아카이브는 독립적인 키로 보관 책임의 진위를 인증합니다. 이는 암호화도, 공급업체 발급자 인증도 아닙니다. 아카이브 본문, 키, 네이티브 blob, 원시 통신 관측값을 공개하지 마세요. 영속화 실패, 관측자, 관리형 예산 은행, 재생 경계는 [provider 참조](docs/reference-en.md)와 [마이그레이션 가이드](docs/migration-v0.4-to-v1.0.md)를 참고하세요.
 
-타입 지정 인터페이스로의 전환으로 `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, 디스크립터 인터프리터, Responses WebSocket 경로가 제거됩니다. C++ 사용 코드를 다시 컴파일하고 사용자 정의 provider를 마이그레이션해야 합니다. 호환성 별칭은 제공하지 않습니다. SDK 패키지 버전은 `0.1.1`이며 인터페이스는 알파 단계입니다. 인터페이스 리비전은 4, 공유 ABI는 4입니다. 리비전이 일치해야 하며, 이 번호들이 SDK 인터페이스의 안정성을 선언하는 것은 아닙니다.
+타입 지정 인터페이스로의 전환으로 `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, 디스크립터 인터프리터, Responses WebSocket 경로가 제거됩니다. C++ 사용 코드를 다시 컴파일하고 사용자 정의 provider를 마이그레이션해야 합니다. 호환성 별칭은 제공하지 않습니다. SDK 패키지 버전은 `0.2.0`이며 인터페이스는 알파 단계입니다. 인터페이스 리비전은 5, 공유 ABI는 5입니다. 타임아웃 제어가 공개 레이아웃을 바꾸므로 SDK 사용 코드, NeoGraph, Python 확장을 함께 다시 빌드해야 합니다. Native archive v3와 portable JSON v2는 그대로이며, 이 세대가 SDK 인터페이스의 안정성을 선언하는 것은 아닙니다.
 
 ## Python
 
@@ -212,7 +212,7 @@ NeoGraph는 명시적인 상태 전이, 분기 또는 반복, 병렬 작업, 체
 설치된 패키지를 사용하는 코드는 필요한 활성 구성 요소만 링크합니다.
 
 ```cmake
-find_package(SchemaProvider 0.1.1 CONFIG REQUIRED COMPONENTS runtime)
+find_package(SchemaProvider 0.2.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```

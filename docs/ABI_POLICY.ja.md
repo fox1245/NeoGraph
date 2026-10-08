@@ -32,13 +32,13 @@ CheckpointStore は明示的 adapter 移行に legacy layout を保つ。sync �
 
 ## SDK と Python 境界
 
-LLM node を無効にしても Core は外部 `SchemaProvider::runtime` を要求する。選択した SDK release は `0.1.1` alpha、interface revision `4`、shared-library ABI revision `4` で、out-of-line capability check を持つ。stable interface の主張ではない。対応 component を一緒に install する。`libsp_*.so.4` 世代は NeoGraph loader 世代と Python `abi3` wheel tag の双方と別である。
+LLM node を無効にしても Core は外部 `SchemaProvider::runtime` を要求する。選択した SDK release は `0.2.0` alpha、interface revision `5`、shared-library ABI revision `5` で、out-of-line capability check を持つ。stable interface の主張ではない。対応 component を一緒に install する。`libsp_*.so.5` 世代は NeoGraph loader 世代と Python `abi3` wheel tag の双方と別である。
 
-Interface 4 は family 別 request control を追加し、公開 request layout を変更する。SDK consumer、NeoGraph、Python extension を一緒に rebuild する。interface-3 header/library と interface 4 は混在できない。Native archive v3 / `spna3` と portable JSON v2 は独立した形式で、変更されない。過去の interface-3 測定は interface 4 の資格検証ではない。
+Interface 5 は任意の接続・最初の応答・アイドル timeout を追加し、公開 request/options layout を変更する。SDK consumer、NeoGraph、Python extension を一緒に rebuild する。interface-4 header/library と interface 5 は混在できない。Native archive v3 / `spna3` と portable JSON v2 は独立した形式で、変更されない。過去の interface-3/4 測定は元の範囲を保ち、interface 5 の資格検証ではない。
 
 Python は prepared handle と不変 outcome を含む typed provider 契約を公開し、legacy completion shim はない。extension と対応 library を一つの wheel として install する。bundled NeoGraph/SDK library を個別交換しない。graph の ChatMessage 便宜値は native ProviderMessage custody の代替ではない。[Python binding](python-binding.md)を参照。
 
-wheel は対応する SDK runtime shared library 六つを含み、SDK C++ header/CMake package は含まない。C++ consumer は SDK を別途 install する。source resolution は明示的 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、installed package、公開 revision-pinned archive fallback の順。installed SDK を使う offline build は `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` とし、`CMAKE_PREFIX_PATH` で prefix を渡す。
+wheel は curl を含まない wire 層を含む対応する SDK runtime shared library 七つを含み、SDK C++ header/CMake package は含まない。C++ consumer は SDK を別途 install する。source resolution は明示的 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、installed package、公開 revision-pinned archive fallback の順。installed SDK を使う offline build は `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` とし、`CMAKE_PREFIX_PATH` で prefix を渡す。
 
 ## installed 名と platform 制限
 

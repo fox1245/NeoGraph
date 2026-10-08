@@ -31,13 +31,13 @@ CheckpointStore retains its legacy layout for the explicit adapter migration. Sy
 
 ## SDK and Python boundaries
 
-Core requires external `SchemaProvider::runtime`, even with LLM nodes disabled. The selected SDK release is `0.1.1` alpha, interface revision `4`, shared-library ABI revision `4`, with out-of-line capability checks; this is not a stable-interface claim. Install matching SDK components together. Its `libsp_*.so.4` generation is separate from NeoGraph's loader generation and from Python's `abi3` wheel tag.
+Core requires external `SchemaProvider::runtime`, even with LLM nodes disabled. The selected SDK release is `0.2.0` alpha, interface revision `5`, shared-library ABI revision `5`, with out-of-line capability checks; this is not a stable-interface claim. Install matching SDK components together. Its `libsp_*.so.5` generation is separate from NeoGraph's loader generation and from Python's `abi3` wheel tag.
 
-Interface 4 adds family-specific request controls and changes public request layouts. Rebuild SDK consumers, NeoGraph and Python extensions together; interface-3 headers or libraries are not interchangeable with interface 4. Native archive v3 / `spna3` and portable JSON v2 remain independent, unchanged formats. Historical interface-3 measurements do not qualify interface 4.
+Interface 5 adds optional connect, first-byte and idle bounds and changes public request/options layouts. Rebuild SDK consumers, NeoGraph and Python extensions together; interface-4 headers or libraries are not interchangeable with interface 5. Native archive v3 / `spna3` and portable JSON v2 remain independent, unchanged formats. Earlier interface-3/4 measurements retain their original scope and do not qualify interface 5.
 
 Python exposes the typed provider contract, including prepared handles and immutable outcomes; there is no legacy completion shim. Install the extension and its matching libraries as one wheel. Do not replace a bundled NeoGraph or SDK library individually. Graph ChatMessage convenience values do not replace native ProviderMessage custody. See [Python binding](python-binding.md).
 
-The wheel bundles the six matching SDK runtime shared libraries, not the SDK's C++ headers or CMake package. C++ consumers install the SDK separately. Source resolution prefers an explicit `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`, then an installed package, then the public revision-pinned archive fallback. Set `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` for an offline build with an installed SDK; provide its prefix through `CMAKE_PREFIX_PATH`.
+The wheel bundles the seven matching SDK runtime shared libraries, including the curl-free wire layer, not the SDK's C++ headers or CMake package. C++ consumers install the SDK separately. Source resolution prefers an explicit `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`, then an installed package, then the public revision-pinned archive fallback. Set `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` for an offline build with an installed SDK; provide its prefix through `CMAKE_PREFIX_PATH`.
 
 ## Installed names and platform limits
 

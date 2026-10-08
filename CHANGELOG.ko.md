@@ -17,6 +17,8 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 - **Core 엔진 속도를 v0.11.1 수준으로 되돌렸습니다.** 기준 노트북에서 3노드 순차 벤치마크는 실행당 10.19 µs에서 6.29 µs로(v0.11.1: 6.10), parallel-3 벤치마크는 30.03 µs에서 15.66 µs로(15.80) 줄었고, 스레드마다 엔진 하나를 쓸 때의 스레드당 시간도 2·4·8 스레드에서 v0.11.1과 같습니다. 손실의 원인은 fan-out 가지마다 만든 strand, 노드마다 하는 `RunContext` 복사, 컨텍스트 바인딩 레지스트리를 감싸던 프로세스 전역 mutex(이제 64개 샤드), 여러 JSON 문서로 만들던 상태 스냅샷, 아무것도 반환하지 않는 코루틴 호출(Send가 없는 `run_sends_async`, 체크포인트가 없을 때의 `record_pending_write_async`), 스케줄러의 정렬 집합이었습니다. 커밋별 측정값은 #343에 있습니다.
 - **`neograph::core`만 링크하는 프로그램은 더 이상 libcurl을 로드하지 않습니다.** `neograph::core`가 SchemaProvider 런타임을 링크하고 그 런타임이 libcurl 전송 계층을 링크했기 때문에, 그래프만 실행하는 프로세스도 libcurl과 그것이 필요로 하는 약 25개 라이브러리를 로드했습니다(벤치마크 시작 시 상주 메모리 12.7 MB, v0.11.1은 5.0 MB). 이제 전송 계층은 `neograph::llm`만 링크하며, 같은 벤치마크는 7.7 MB로 시작하고 공유 라이브러리는 36개에서 7개로 줄었습니다. `neograph::llm` 없이 `sp::runtime::Client`를 직접 만드는 코드는 `SchemaProvider::transport`를 링크해야 합니다. SchemaProvider는 이 분리를 담은 리비전으로 고정됩니다. #347 참고.
+- **SchemaProvider 0.2.0 alpha, interface/shared-library 세대 5로 재빌드해야 합니다.** SDK에 선택적 연결·첫 응답·유휴 타임아웃이 추가되었습니다. 기본적으로 꺼져 있고 전체 deadline을 늘리지 않으며, `ProviderRequest::options`(`sp::runtime::RunOptions`)로 호출마다 설정할 수 있습니다. 그래프 LLM 노드는 아직 이를 노출하지 않습니다. 다섯 API 계열의 실전송 수명주기 검증과 독립적인 비공개 테스트 fixture로 SDK #2·#3·#4를 해결합니다. 일치하는 SDK header/library로 C++ 사용 코드와 Python wheel을 다시 빌드해야 하며 native archive는 v3, portable JSON은 v2 그대로입니다.
+- **`neograph::core`만 링크하는 프로그램은 더 이상 libcrypto를 로드하지 않습니다.** SDK가 SHA-256, HMAC-SHA256, OS 난수원 사용을 직접 구현하므로 SDK 런타임이 OpenSSL을 링크하지 않으며 archive와 policy 바이트는 그대로입니다. 그래프만 실행하는 벤치마크(`bench_neograph 1 1 1`)는 상주 메모리 7.7 MB 대신 6.3 MB로 시작하고(Linux x86_64, 31회 중앙값) 공유 라이브러리는 7개에서 6개로 줄어 5.0 MB로 시작하던 v0.11.1과 같아졌습니다. OpenSSL을 직접 호출하는 코드는 `OpenSSL::Crypto`를 스스로 링크해야 합니다.
 
 ### 추가됨
 
@@ -25,6 +27,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ### 수정됨
 
 - **엔진 워커 풀을 쓰는 multi-Send fan-out에서, 한 가지의 작업이 끝나는 동안 그 가지의 취소 핸들러가 실행될 수 있었습니다.** multi-Send 스텝의 가지들은 맨 풀 실행기에서 돌았고, 정적 fan-out 가지는 이미 가지마다 strand가 있었기 때문에, 다른 풀 스레드에서 보낸 취소가 가지의 코루틴과 경합했습니다(`cancellation_signal::emit`의 데이터 레이스, ThreadSanitizer에서 재현). 이제 풀을 쓰는 Send 가지마다 자기 strand에서 실행되며, 풀이 없는 실행은 그대로입니다. #344, #345 참고.
+- **HTTP를 켠 `neograph-harness-mcp`와 `example_harness_mcp_server`가 이제 `OpenSSL::Crypto`를 링크합니다.** 두 실행 파일은 OpenSSL(`SHA256`, `CRYPTO_memcmp`)을 직접 호출하면서도 스스로는 링크하지 않았습니다. SchemaProvider 0.2.0이 libcrypto를 링크하지 않게 되면서, `NEOGRAPH_BUILD_MCP_HTTP_SERVER=ON`인 공유 라이브러리 빌드에서 `SHA256`의 정의되지 않은 참조로 링크가 실패했습니다.
 
 ## [0.13.1] - 2026-10-07
 NeoGraph `0.13.1`은 alpha SDK `0.1.1`을 대상으로 합니다. interface revision과 shared-library generation은 4 그대로이므로 소비자는 SDK `0.1.1`을 선택하고(설치된 package config가 정확한 버전을 요구합니다) 다시 빌드하기만 하면 됩니다. Native archive는 v3 / `spna3`, portable JSON은 v2 그대로입니다. 기능상 변경은 아래 Windows 전송 수정이며, 0.13.0으로 배포된 Windows wheel에는 이 결함이 있으므로 0.13.1로 교체해야 합니다. 수정 커밋의 hosted CI와 Windows wheel gate가 통과했습니다(GitHub Actions run 37576205702, 37576205395, CPython 3.12만). CPython 3.9–3.13 전체 matrix는 릴리스 태그에서 실행합니다.
