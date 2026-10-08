@@ -44,6 +44,31 @@ namespace neograph::async {
 
 namespace detail {
 
+/// The io_context an engine run is currently driving on this thread through
+/// `run_sync_operation`, or null. That context is private to the call and is
+/// run by the calling thread alone, so every handler on it is already
+/// serialised. Fan-out code uses this to avoid wrapping each branch in a
+/// strand that cannot add any ordering. A foreign or unknown context never
+/// matches, which keeps the strand.
+inline const asio::execution_context*& serial_io_context() noexcept {
+    static thread_local const asio::execution_context* context = nullptr;
+    return context;
+}
+
+class SerialIoContextScope {
+public:
+    explicit SerialIoContextScope(const asio::execution_context& context) noexcept
+        : previous_(serial_io_context()) {
+        serial_io_context() = &context;
+    }
+    ~SerialIoContextScope() { serial_io_context() = previous_; }
+    SerialIoContextScope(const SerialIoContextScope&) = delete;
+    SerialIoContextScope& operator=(const SerialIoContextScope&) = delete;
+
+private:
+    const asio::execution_context* previous_;
+};
+
 // Drive an engine operation with two cancellation scopes. The operation token
 // is exposed through RunContext to node/provider code; the private execution
 // child is reserved for the wrapper's co_spawn. Asio cancellation signals have
@@ -86,10 +111,12 @@ T run_sync_operation(
                 execution_executor, body(execution),
                 asio::bind_cancellation_slot(execution->slot(), asio::detached));
         });
+        const SerialIoContextScope serial_scope(io);
         io.run();
     } else {
         asio::co_spawn(io, body(std::shared_ptr<neograph::graph::CancelToken>{}),
                        asio::detached);
+        const SerialIoContextScope serial_scope(io);
         io.run();
     }
 

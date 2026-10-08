@@ -13,6 +13,16 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ## [未リリース]
 
+## [Unreleased]
+
+### 変更
+
+- **Core エンジンの速度を v0.11.1 の水準に戻しました。** 基準ノート PC では、3 ノードの逐次ベンチマークが 1 回あたり 10.19 µs から 6.29 µs に(v0.11.1: 6.10)、parallel-3 が 30.03 µs から 15.66 µs に(15.80)短縮され、スレッドごとにエンジンを 1 つ使う場合のスレッドあたりの時間も 2・4・8 スレッドで v0.11.1 と同じです。損失の原因は、fan-out の枝ごとの strand、ノードごとの `RunContext` コピー、コンテキスト束縛レジストリを囲んでいたプロセス全体の mutex(現在は 64 シャード)、複数の JSON ドキュメントで作っていた状態スナップショット、何も返さないコルーチン呼び出し(Send がない `run_sends_async`、チェックポイントがないときの `record_pending_write_async`)、スケジューラの順序付き集合でした。コミットごとの測定値は #343 にあります。
+
+### 追加
+
+- `CheckpointCoordinator::records_pending_writes(parent_cp_id)`: `record_pending_write[_async]` が実際に保存するときに true を返すので、呼び出し側は呼び出し自体を省略できます。
+
 ## [0.13.1] - 2026-10-07
 NeoGraph `0.13.1` は alpha SDK `0.1.1` を対象にします。interface revision と shared-library generation は 4 のままなので、consumer は SDK `0.1.1` を選択して（インストールされた package config は厳密なバージョンを要求します）再ビルドするだけです。Native archive は v3 / `spna3`、portable JSON は v2 のままです。機能上の変更は下記の Windows transport 修正で、0.13.0 として公開された Windows wheel にはこの欠陥があるため 0.13.1 に置き換えてください。修正コミットの hosted CI と Windows wheel gate は通過しました（GitHub Actions run 37576205702、37576205395、CPython 3.12 のみ）。CPython 3.9–3.13 の全 matrix はリリースタグで実行します。
 ### 修正

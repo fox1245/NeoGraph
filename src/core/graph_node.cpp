@@ -316,7 +316,7 @@ std::vector<ChannelWrite> SubgraphNode::map_output_writes(
 asio::awaitable<NodeOutput> SubgraphNode::run(NodeInput in) {
     const auto runtime = detail::runtime_for(in.ctx);
     const std::string_view task_id = runtime
-        ? std::string_view(runtime->invocation_id) : std::string_view("root");
+        ? runtime.invocation_id() : std::string_view("root");
     RunConfig config;
     config.thread_id = checkpoint_thread_id(
         in.ctx.thread_id, in.ctx.step, task_id,

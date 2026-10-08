@@ -106,6 +106,16 @@ public:
     /// @return True iff a non-null store is wired up AND thread_id is non-empty.
     bool enabled() const noexcept { return store_ != nullptr && !thread_id_.empty(); }
 
+    /**
+     * @brief True when record_pending_write[_async] would store something: the
+     * coordinator is enabled and the step is anchored to a committed parent
+     * checkpoint. Hot callers test this first, so a run without checkpointing
+     * does not build a coroutine frame per node just to return.
+     */
+    bool records_pending_writes(const std::string& parent_cp_id) const noexcept {
+        return enabled() && !parent_cp_id.empty();
+    }
+
     const std::shared_ptr<CheckpointStore>& store() const noexcept { return store_; }
     const std::string& thread_id() const noexcept { return thread_id_; }
 
