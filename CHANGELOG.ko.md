@@ -21,6 +21,10 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 - `CheckpointCoordinator::records_pending_writes(parent_cp_id)`: `record_pending_write[_async]`가 실제로 저장할 때 true를 반환하므로 호출자가 호출 자체를 건너뛸 수 있습니다.
 
+### 수정됨
+
+- **엔진 워커 풀을 쓰는 multi-Send fan-out에서, 한 가지의 작업이 끝나는 동안 그 가지의 취소 핸들러가 실행될 수 있었습니다.** multi-Send 스텝의 가지들은 맨 풀 실행기에서 돌았고, 정적 fan-out 가지는 이미 가지마다 strand가 있었기 때문에, 다른 풀 스레드에서 보낸 취소가 가지의 코루틴과 경합했습니다(`cancellation_signal::emit`의 데이터 레이스, ThreadSanitizer에서 재현). 이제 풀을 쓰는 Send 가지마다 자기 strand에서 실행되며, 풀이 없는 실행은 그대로입니다. #344, #345 참고.
+
 ## [0.13.1] - 2026-10-07
 NeoGraph `0.13.1`은 alpha SDK `0.1.1`을 대상으로 합니다. interface revision과 shared-library generation은 4 그대로이므로 소비자는 SDK `0.1.1`을 선택하고(설치된 package config가 정확한 버전을 요구합니다) 다시 빌드하기만 하면 됩니다. Native archive는 v3 / `spna3`, portable JSON은 v2 그대로입니다. 기능상 변경은 아래 Windows 전송 수정이며, 0.13.0으로 배포된 Windows wheel에는 이 결함이 있으므로 0.13.1로 교체해야 합니다. 수정 커밋의 hosted CI와 Windows wheel gate가 통과했습니다(GitHub Actions run 37576205702, 37576205395, CPython 3.12만). CPython 3.9–3.13 전체 matrix는 릴리스 태그에서 실행합니다.
 ### 수정됨

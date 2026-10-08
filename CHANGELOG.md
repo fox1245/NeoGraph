@@ -21,6 +21,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `CheckpointCoordinator::records_pending_writes(parent_cp_id)`: true when `record_pending_write[_async]` would store something, so callers can skip the call.
 
+### Fixed
+
+- **Multi-Send fan-out on an engine worker pool could run a branch's cancellation handler while that branch's own operation was completing.** The branches of a multi-Send step ran on the bare pool executor, while static fan-out branches already had a strand each, so a cancellation emitted from another pool thread raced the branch's coroutine (data races in `cancellation_signal::emit`, reproduced under ThreadSanitizer). Each pooled Send branch now runs on its own strand; runs without a pool are unchanged. See #344 and #345.
+
 ## [0.13.1] - 2026-10-07
 NeoGraph `0.13.1` targets alpha SDK `0.1.1`. Interface revision and shared-library generation stay 4, so consumers only select SDK `0.1.1` (its installed package config requires the exact version) and rebuild. Native archives remain v3 / `spna3`; portable JSON remains v2. The functional change is the Windows transport fix below: the Windows wheels published as 0.13.0 contain the defect and should be replaced by 0.13.1. Hosted CI and the Windows wheel gate passed for the fix commit (GitHub Actions runs 37576205702 and 37576205395, CPython 3.12 only); the full CPython 3.9–3.13 matrix runs on the release tag.
 ### Fixed
