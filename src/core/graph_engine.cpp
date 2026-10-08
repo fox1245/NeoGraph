@@ -886,13 +886,18 @@ RunResult GraphEngine::run(const RunConfig& config, const RunMetadata& metadata)
     // thread-pool hop. Parallel fan-out inside run_parallel_async /
     // run_sends_async still uses pool_ explicitly for CPU
     // parallelism (see NodeExecutor::fan_out_pool_).
-    RunConfig operation_config = config;
+    // Only a cancellable run needs its own config (with a forked token).
+    // Everything else runs on the caller's, which outlives this blocking call.
+    std::optional<RunConfig> forked_config;
+    const RunConfig* operation_config = &config;
     if (config.cancel_token) {
-        operation_config.cancel_token = config.cancel_token->fork();
+        forked_config.emplace(config);
+        forked_config->cancel_token = config.cancel_token->fork();
+        operation_config = &*forked_config;
     }
     return neograph::async::detail::run_sync_operation(
-        execute_graph_async(operation_config, nullptr, {}, nullptr, metadata),
-        operation_config.cancel_token);
+        execute_graph_async(*operation_config, nullptr, {}, nullptr, metadata),
+        operation_config->cancel_token);
 }
 
 // Public async entry — takes RunConfig BY VALUE so the coroutine frame
@@ -995,13 +1000,16 @@ RunResult GraphEngine::run_stream(const RunConfig& config,
 RunResult GraphEngine::run_stream(const RunConfig& config,
                                    const GraphStreamCallback& cb,
                                    const RunMetadata& metadata) {
-    RunConfig operation_config = config;
+    std::optional<RunConfig> forked_config;
+    const RunConfig* operation_config = &config;
     if (config.cancel_token) {
-        operation_config.cancel_token = config.cancel_token->fork();
+        forked_config.emplace(config);
+        forked_config->cancel_token = config.cancel_token->fork();
+        operation_config = &*forked_config;
     }
     return neograph::async::detail::run_sync_operation(
-        execute_graph_async(operation_config, cb, {}, nullptr, metadata),
-        operation_config.cancel_token);
+        execute_graph_async(*operation_config, cb, {}, nullptr, metadata),
+        operation_config->cancel_token);
 }
 
 asio::awaitable<RunResult>
@@ -1426,7 +1434,7 @@ asio::awaitable<GraphEngine::SubgraphRunResult> GraphEngine::run_subgraph_async(
         if (parent_runtime->graph_invocation_id.empty())
             throw std::runtime_error("PerThread subgraph requires a parent invocation identity");
         journal->parent_call_id = parent_runtime->graph_invocation_id + "/" +
-            std::to_string(parent.step) + "/" + parent_runtime->invocation_id;
+            std::to_string(parent.step) + "/" + std::string(parent_runtime.invocation_id());
     }
     resources.subgraph_write_journal = journal;
 
@@ -1932,9 +1940,14 @@ GraphEngine::execute_graph_async(
         // 4.x: per-task StepRoutings flow back so each spawned task's
         //      Command.goto / default outgoing edge contribute to the
         //      next super-step routing decision (LangGraph parity).
-        auto send_routings = co_await executor_->run_sends_async(
-            pending_sends, step, state, replay_results,
-            coord, last_checkpoint_id, trace, cb, stream_mode, ctx);
+        // Most steps spawn no Send; calling the coroutine for an empty batch
+        // would still allocate and tear down its frame just to return nothing.
+        std::vector<StepRouting> send_routings;
+        if (!pending_sends.empty()) {
+            send_routings = co_await executor_->run_sends_async(
+                pending_sends, step, state, replay_results,
+                coord, last_checkpoint_id, trace, cb, stream_mode, ctx);
+        }
 
         if (cb && has_mode(stream_mode, StreamMode::VALUES)) {
             cb(GraphEvent{GraphEvent::Type::CHANNEL_WRITE, "__state__",

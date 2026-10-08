@@ -6,6 +6,10 @@
 // tests catch regressions on the planning layer directly.
 
 #include <gtest/gtest.h>
+#include <random>
+#include <set>
+#include <string>
+#include <vector>
 #include <neograph/graph/scheduler.h>
 #include <neograph/graph/state.h>
 #include <neograph/graph/loader.h>  // ConditionRegistry
@@ -480,4 +484,57 @@ TEST(SchedulerBarrier, CommandGotoPreemptsBarrier) {
     EXPECT_TRUE(bstate.empty())
         << "Command preempts signal accumulation — no partial barrier "
            "state should be recorded when edges aren't consulted";
+}
+
+// plan_next_step without barrier gating must equal the plain set model: the
+// sorted, de-duplicated successors of every routed node, END excluded and
+// reported through hit_end. Random graphs and routings, through the barrierless
+// overload, the stateful one with no specs, and the stateful one with specs
+// that never match (which takes the gated path), so every path is held to the
+// same answer.
+TEST(SchedulerPlan, MatchesTheSetModelForRandomGraphsAndRoutings) {
+    std::mt19937 rng(20260708);
+    const std::vector<std::string> names = {"n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7",
+                                            "alpha", "Zed", "mid_dle", std::string(END_NODE)};
+    GraphState state;
+    for (int round = 0; round < 300; ++round) {
+        std::vector<Edge> edges;
+        const int edge_count = static_cast<int>(rng() % 14);
+        for (int i = 0; i < edge_count; ++i)
+            edges.push_back({names[rng() % 8], names[rng() % names.size()]});
+
+        std::vector<StepRouting> routings;
+        const int routed = static_cast<int>(rng() % 6);
+        for (int i = 0; i < routed; ++i) routings.push_back({names[rng() % 8], std::nullopt});
+
+        std::set<std::string> want;
+        bool want_end = false;
+        for (const auto& routing : routings) {
+            bool any = false;
+            for (const auto& edge : edges) {
+                if (edge.from != routing.node_name) continue;
+                any = true;
+                if (edge.to == END_NODE) want_end = true;
+                else want.insert(edge.to);
+            }
+            if (!any) want_end = true;  // no outgoing edge resolves to END
+        }
+        const std::vector<std::string> want_ready(want.begin(), want.end());
+
+        std::vector<ConditionalEdge> no_conditionals;
+        Scheduler plain(edges, no_conditionals);
+        Scheduler unmatched_barrier(edges, no_conditionals, BarrierSpecs{{"no_such_target", {"n0", "n1"}}});
+
+        const auto stateless = plain.plan_next_step(routings, state);
+        BarrierState empty_barrier;
+        const auto stateful_no_specs = plain.plan_next_step(routings, state, empty_barrier);
+        BarrierState other_barrier;
+        const auto stateful_gated = unmatched_barrier.plan_next_step(routings, state, other_barrier);
+
+        for (const auto* plan : {&stateless, &stateful_no_specs, &stateful_gated}) {
+            EXPECT_EQ(plan->ready, want_ready) << "round " << round;
+            EXPECT_EQ(plan->hit_end, want_end) << "round " << round;
+            EXPECT_FALSE(plan->winning_command_goto.has_value());
+        }
+    }
 }

@@ -13,6 +13,14 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ## [Unreleased]
 
+### 변경됨
+
+- **Core 엔진 속도를 v0.11.1 수준으로 되돌렸습니다.** 기준 노트북에서 3노드 순차 벤치마크는 실행당 10.19 µs에서 6.29 µs로(v0.11.1: 6.10), parallel-3 벤치마크는 30.03 µs에서 15.66 µs로(15.80) 줄었고, 스레드마다 엔진 하나를 쓸 때의 스레드당 시간도 2·4·8 스레드에서 v0.11.1과 같습니다. 손실의 원인은 fan-out 가지마다 만든 strand, 노드마다 하는 `RunContext` 복사, 컨텍스트 바인딩 레지스트리를 감싸던 프로세스 전역 mutex(이제 64개 샤드), 여러 JSON 문서로 만들던 상태 스냅샷, 아무것도 반환하지 않는 코루틴 호출(Send가 없는 `run_sends_async`, 체크포인트가 없을 때의 `record_pending_write_async`), 스케줄러의 정렬 집합이었습니다. 커밋별 측정값은 #343에 있습니다.
+
+### 추가됨
+
+- `CheckpointCoordinator::records_pending_writes(parent_cp_id)`: `record_pending_write[_async]`가 실제로 저장할 때 true를 반환하므로 호출자가 호출 자체를 건너뛸 수 있습니다.
+
 ## [0.13.1] - 2026-10-07
 NeoGraph `0.13.1`은 alpha SDK `0.1.1`을 대상으로 합니다. interface revision과 shared-library generation은 4 그대로이므로 소비자는 SDK `0.1.1`을 선택하고(설치된 package config가 정확한 버전을 요구합니다) 다시 빌드하기만 하면 됩니다. Native archive는 v3 / `spna3`, portable JSON은 v2 그대로입니다. 기능상 변경은 아래 Windows 전송 수정이며, 0.13.0으로 배포된 Windows wheel에는 이 결함이 있으므로 0.13.1로 교체해야 합니다. 수정 커밋의 hosted CI와 Windows wheel gate가 통과했습니다(GitHub Actions run 37576205702, 37576205395, CPython 3.12만). CPython 3.9–3.13 전체 matrix는 릴리스 태그에서 실행합니다.
 ### 수정됨

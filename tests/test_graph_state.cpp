@@ -293,3 +293,43 @@ TEST(GraphState, ConcurrentWritesSafe) {
 
     EXPECT_EQ(state.get("counter"), NUM_THREADS * WRITES_PER_THREAD);
 }
+
+// serialize / serialize_runtime / checkpoint_snapshot build their JSON in one
+// document. Pin the shape, the order, the ephemeral handling, and that the
+// snapshot owns its values (editing it must not reach back into the state).
+TEST(GraphState, SnapshotHasTheDocumentedShapeAndOwnsItsValues) {
+    GraphState state;
+    state.init_channel("a", ReducerType::OVERWRITE, overwrite_fn(), json());
+    state.init_channel("log", ReducerType::APPEND, append_fn(), json::array());
+    state.write("a", json{{"k", json::array({1, "two"})}});
+    state.write("log", json::array({1}));
+    state.write("log", json::array({2}));
+
+    const std::string expected =
+        R"({"channels":{"a":{"value":{"k":[1,"two"]},"version":1},)"
+        R"("log":{"value":[1,2],"version":3}},"global_version":3})";
+    json snapshot = state.serialize();
+    EXPECT_EQ(snapshot.dump(), expected);
+    EXPECT_EQ(state.serialize_runtime().dump(), expected);
+    EXPECT_EQ(state.checkpoint_snapshot().first.dump(), expected);
+
+    snapshot["channels"]["a"]["value"]["k"][0] = 99;
+    snapshot["channels"]["log"]["value"].push_back(3);
+    EXPECT_EQ(state.get("a").dump(), R"({"k":[1,"two"]})");
+    EXPECT_EQ(state.get("log"), json::array({1, 2}));
+    EXPECT_EQ(state.serialize().dump(), expected);
+}
+
+TEST(GraphState, SnapshotOfOnlyEphemeralChannelsOmitsTheChannelMapUnlessRuntime) {
+    const ChannelLifecyclePolicy ephemeral{
+        ChannelRetentionPolicy::Unbounded, 0, ChannelPersistencePolicy::Ephemeral};
+    GraphState state;
+    state.init_channel("scratch", ReducerType::OVERWRITE, overwrite_fn(), json("x"), ephemeral);
+    state.write("scratch", json("y"));
+
+    EXPECT_EQ(state.serialize().dump(), R"({"global_version":1})");
+    EXPECT_EQ(state.checkpoint_snapshot().first.dump(), R"({"global_version":1})");
+    EXPECT_EQ(state.serialize_runtime().dump(),
+              R"({"channels":{"scratch":{"value":"y","version":1}},"global_version":1})");
+    EXPECT_EQ(GraphState{}.serialize().dump(), R"({"global_version":0})");
+}

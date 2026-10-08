@@ -1,3 +1,4 @@
+#include <neograph/async/run_sync.h>
 #include <neograph/graph/cancel.h>
 #include <neograph/graph/engine.h>  // RunContext (forward-declared in executor.h)
 #include <neograph/graph/executor.h>
@@ -101,18 +102,22 @@ inline std::string make_send_task_id(int                step,
            fnv1a_hex(input.dump());
 }
 
+// Every node invocation gets a RunContext of its own, bound to its task id, so
+// nodes running side by side (fan-out branches, or overlapping calls into one
+// NodeExecutor) never see each other's identity and keep value semantics for
+// callable state such as `on_provider_event`.
 class ScopedInvocationContext {
 public:
     ScopedInvocationContext(const RunContext& parent, const std::string& task_id)
-        : context_(parent),
-          runtime_scope_(context_, detail::runtime_for_invocation(parent, task_id)) {}
+        : context_(parent), runtime_scope_(parent, context_, task_id) {}
 
     const RunContext& context() const { return context_; }
 
 private:
-    RunContext                      context_;
-    detail::ScopedRunContextRuntime runtime_scope_;
+    RunContext                       context_;
+    detail::ScopedInvocationRuntime  runtime_scope_;
 };
+
 
 void apply_node_result(GraphState& state, const NodeResult& result, const RunContext& context) {
     state.apply_writes(result.writes);
@@ -154,13 +159,12 @@ void NodeExecutor::init_state(GraphState& state) const {
     for (const auto& cd : channel_defs_) {
         auto reducer = registry_ ? registry_->reducer(cd.reducer_name)
                                  : ReducerRegistry::instance().get(cd.reducer_name);
-        json initial = cd.initial_value;
-        if (cd.type == ReducerType::APPEND && initial.is_null()) {
-            initial = json::array();
+        const ChannelLifecyclePolicy lifecycle{cd.retention, cd.retention_limit, cd.persistence};
+        if (cd.type == ReducerType::APPEND && cd.initial_value.is_null()) {
+            state.init_channel(cd.name, cd.type, reducer, json::array(), lifecycle);
+        } else {
+            state.init_channel(cd.name, cd.type, reducer, cd.initial_value, lifecycle);
         }
-        state.init_channel(cd.name, cd.type, reducer, initial,
-                           ChannelLifecyclePolicy{cd.retention, cd.retention_limit,
-                                                  cd.persistence});
     }
 }
 
@@ -482,8 +486,9 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
 
             // Record BEFORE apply_writes so a crash between the two
             // still leaves a durable log for resume to replay.
-            co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, node_name,
-                                                      *ok_result, step);
+            if (coord.records_pending_writes(parent_cp_id))
+                co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, node_name,
+                                                          *ok_result, step);
         }
     } catch (const NodeInterrupt& ni) {
         // Copy the whole interrupt, not just the fact that one happened.
@@ -581,8 +586,9 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
                 interrupt->set_node(node_name);
                 throw *interrupt;
             }
-            co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, node_name, nr,
-                                                      step);
+            if (coord.records_pending_writes(parent_cp_id))
+                co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, node_name, nr,
+                                                          step);
         }
         apply_node_result(state, nr, ctx);
         trace.push_back(node_name);
@@ -627,8 +633,9 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
         ScopedInvocationContext node_ctx(ctx, task_id);
         auto nr = co_await execute_node_with_retry_async(node_name, state, cb, stream_mode,
                                                          node_ctx.context());
-        co_await  coord.record_pending_write_async(parent_cp_id, task_id, task_id, node_name, nr,
-                                                   step);
+        if (coord.records_pending_writes(parent_cp_id))
+            co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, node_name, nr,
+                                                       step);
         co_return nr;
     };
 
@@ -639,13 +646,28 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
     // parallelism while keeping a coroutine's Asio cancellation state on one
     // serial executor; a bare multi-threaded pool lets cancellation emission
     // race the frame's next await_transform.
+    //
+    // Without a fan-out pool the branches share the outer executor. When that
+    // executor already is a strand (every cancellable run is driven through
+    // CancelToken::bind_executor), every branch handler is serialised on it,
+    // so a strand per branch adds a queue hop and a strand_impl allocation but
+    // no ordering the outer strand does not already give.
+    const bool branch_ex_serialised =
+        fan_out_pool_ == nullptr &&
+        (branch_ex.target<asio::strand<asio::any_io_executor>>() != nullptr ||
+         &asio::query(branch_ex, asio::execution::context) ==
+             neograph::async::detail::serial_io_context());
+    auto make_branch_executor = [&]() -> asio::any_io_executor {
+        return branch_ex_serialised ? branch_ex
+                                    : asio::any_io_executor(asio::make_strand(branch_ex));
+    };
     using DeferredOp = decltype(asio::co_spawn(
-        asio::make_strand(branch_ex), worker(std::declval<std::string>()), asio::deferred));
+        std::declval<asio::any_io_executor>(), worker(std::declval<std::string>()),
+        asio::deferred));
     std::vector<DeferredOp> ops;
     ops.reserve(ready.size());
     for (const auto& node_name : ready) {
-        ops.push_back(asio::co_spawn(
-            asio::make_strand(branch_ex), worker(node_name), asio::deferred));
+        ops.push_back(asio::co_spawn(make_branch_executor(), worker(node_name), asio::deferred));
     }
 
     // wait_for_all returns:
@@ -789,8 +811,9 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
             ScopedInvocationContext node_ctx(ctx, task_id);
             nr = co_await execute_node_with_retry_async(s.target_node, state, cb, stream_mode,
                                                         node_ctx.context());
-            co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, s.target_node,
-                                                      nr, step);
+            if (coord.records_pending_writes(parent_cp_id))
+                co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, s.target_node,
+                                                          nr, step);
         }
         apply_node_result(state, nr, ctx);
         trace.push_back(s.target_node + "[send]");
@@ -849,8 +872,9 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
         ScopedInvocationContext node_ctx(ctx, task_id);
         auto nr = co_await execute_node_with_retry_async(s.target_node, send_state, cb, stream_mode,
                                                          node_ctx.context());
-        co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, s.target_node, nr,
-                                                  step);
+        if (coord.records_pending_writes(parent_cp_id))
+            co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, s.target_node, nr,
+                                                      step);
         co_return nr;
     };
 

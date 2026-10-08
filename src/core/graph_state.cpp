@@ -66,6 +66,45 @@ static json apply_retention(json value, const ChannelLifecyclePolicy& lifecycle)
     return retained;
 }
 
+// A reducer may return a view into one of its arguments (for example
+// `incoming["payload"]`): a handle that shares the argument's document and does
+// not point at the document's root. Storing such a handle would alias the
+// caller's value, so detach it. A value that is the root of its own document
+// is independent and is stored without a copy.
+static void detach_if_view(json& value) {
+    yyjson_mut_doc* const doc = value.raw_doc();
+    if (doc != nullptr && value.raw_val() != yyjson_mut_doc_get_root(doc)) {
+        json detached(value);
+        value = std::move(detached);
+    }
+}
+
+// {"channels": {name: {"value": v, "version": n}}, "global_version": g}, built in
+// one yyjson document. The initializer-list form this replaces created and then
+// copied about seven documents per channel (three heap blocks each); a run that
+// only snapshots its state paid more for that than for executing its nodes.
+// "channels" is present only when at least one channel is included.
+static json channel_snapshot(const std::map<std::string, Channel>& channels,
+                             std::uint64_t global_version, bool skip_ephemeral) {
+    json data = json::object();
+    yyjson_mut_doc* const doc = data.raw_doc();
+    yyjson_mut_val* const root = data.raw_val();
+    yyjson_mut_val* channel_map = nullptr;
+    for (const auto& [name, channel] : channels) {
+        if (skip_ephemeral && channel.lifecycle.persistence == ChannelPersistencePolicy::Ephemeral)
+            continue;
+        if (channel_map == nullptr) channel_map = yyjson_mut_obj_add_obj(doc, root, "channels");
+        yyjson_mut_val* entry = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add(channel_map, yyjson_mut_strncpy(doc, name.data(), name.size()), entry);
+        yyjson_mut_val* const source = channel.value.raw_val();
+        yyjson_mut_obj_add_val(doc, entry, "value",
+                               source ? yyjson_mut_val_mut_copy(doc, source) : yyjson_mut_null(doc));
+        yyjson_mut_obj_add_uint(doc, entry, "version", channel.version);
+    }
+    yyjson_mut_obj_add_uint(doc, root, "global_version", global_version);
+    return data;
+}
+
 void GraphState::init_channel(const std::string& name,
                                ReducerType type,
                                ReducerFn reducer,
@@ -369,6 +408,27 @@ void GraphState::update_provider_history_locked(const std::string& channel, cons
 }
 
 void GraphState::save_provider_history_locked(json& snapshot, bool durable, bool include_budget) const {
+    // A run that never used a provider keeps no history, loop, outcome or
+    // managed budget. Nothing below would write to `snapshot` in that case, so
+    // skip the null projection documents and the empty snapshots it builds.
+    bool managed_budget_possible = false;
+    if (include_budget && provider_budget_ && provider_budget_->managed && provider_budget_->bank) {
+        managed_budget_possible = has_budget_authority(
+            provider_budget_->original_ceiling, provider_budget_->bank->authority_snapshot());
+    }
+    bool loops_present = false;
+    if (provider_loops_) {
+        std::lock_guard<std::mutex> lock(provider_loops_->mutex);
+        loops_present = provider_loops_->entries.empty() == false;
+    }
+    bool outcomes_present = false;
+    if (provider_outcomes_) {
+        std::lock_guard<std::mutex> lock(provider_outcomes_->mutex);
+        outcomes_present = provider_outcomes_->values.empty() == false;
+    }
+    const bool nothing_to_save = provider_histories_.empty() && (loops_present == false) &&
+        (outcomes_present == false) && (managed_budget_possible == false);
+    if (nothing_to_save) return;
     const auto budget = include_budget ? managed_budget_projection_locked() : json();
     const auto loops = provider_loops_ ? provider_loops_->snapshot() :
         std::map<std::string, ProviderLoopHistory::Entry>{};
@@ -569,10 +629,11 @@ void GraphState::write(const std::string& channel, const json& value) {
             "See docs/troubleshooting.md \"Write to unknown channel\".");
     }
     auto& ch  = it->second;
-    const auto combined = apply_retention(ch.reducer(ch.value, value), ch.lifecycle);
+    auto combined = apply_retention(ch.reducer(ch.value, value), ch.lifecycle);
+    detach_if_view(combined);
     if (provider_histories_.contains(channel))
         update_provider_history_locked(channel, ch.value, value, combined, {});
-    ch.value = combined;
+    ch.value = std::move(combined);
     ch.version = ++global_version_;
 }
 
@@ -594,15 +655,19 @@ void GraphState::apply_writes(const std::vector<ChannelWrite>& writes) {
         // from it. Because the intent rides on the write, it lands in the write
         // log, survives checkpointing, and replays identically — which a
         // side-door GraphState::overwrite() could never do.
-        const auto combined = (w.mode == ChannelWrite::Mode::Overwrite)
-                                  ? w.value
-                                  : ch.reducer(ch.value, w.value);
-        const auto retained = apply_retention(combined, ch.lifecycle);
+        // `combined` is a fresh value, so retention and the store below take
+        // it by move; a copy here would deep-copy the whole channel value
+        // (a yyjson document and its pools) twice per write.
+        auto retained = apply_retention((w.mode == ChannelWrite::Mode::Overwrite)
+                                            ? json(w.value)
+                                            : ch.reducer(ch.value, w.value),
+                                        ch.lifecycle);
+        detach_if_view(retained);
         if (w.native_messages || provider_histories_.contains(w.channel))
             update_provider_history_locked(w.channel,
                                            w.mode == ChannelWrite::Mode::Overwrite ? json::array() : ch.value,
                                            w.value, retained, w.native_messages);
-        ch.value = retained;
+        ch.value = std::move(retained);
         ch.version = ++global_version_;
     }
 }
@@ -625,13 +690,8 @@ std::pair<json, std::shared_ptr<const NativeGraphCheckpoint>> GraphState::checkp
         if (!native) native.reset(new NativeGraphCheckpoint);
         return *native;
     };
-    json data;
+    json data = channel_snapshot(channels_, global_version_, /*skip_ephemeral=*/true);
     bool requires_native = false;
-    for (const auto& [name, channel] : channels_) {
-        if (channel.lifecycle.persistence == ChannelPersistencePolicy::Ephemeral) continue;
-        data["channels"][name] = {{"value", channel.value}, {"version", channel.version}};
-    }
-    data["global_version"] = global_version_;
     for (const auto& [channel, history] : provider_histories_) {
         if (channels_.at(channel).lifecycle.persistence == ChannelPersistencePolicy::Ephemeral) continue;
         ensure_native().histories_.emplace(channel, history);
@@ -678,15 +738,7 @@ std::pair<json, std::shared_ptr<const NativeGraphCheckpoint>> GraphState::checkp
 
 json GraphState::serialize() const {
     std::shared_lock lock(mutex_);
-    json data;
-    for (const auto& [name, ch] : channels_) {
-        if (ch.lifecycle.persistence == ChannelPersistencePolicy::Ephemeral) continue;
-        data["channels"][name] = {
-            {"value", ch.value},
-            {"version", ch.version}
-        };
-    }
-    data["global_version"] = global_version_;
+    json data = channel_snapshot(channels_, global_version_, /*skip_ephemeral=*/true);
     save_provider_history_locked(data);
     return data;
 }
@@ -702,11 +754,7 @@ json GraphState::serialize_cache() const {
 }
 
 json GraphState::serialize_runtime_locked(bool include_budget) const {
-    json data;
-    for (const auto& [name, ch] : channels_) {
-        data["channels"][name] = {{"value", ch.value}, {"version", ch.version}};
-    }
-    data["global_version"] = global_version_;
+    json data = channel_snapshot(channels_, global_version_, /*skip_ephemeral=*/false);
     save_provider_history_locked(data, false, include_budget);
     return data;
 }

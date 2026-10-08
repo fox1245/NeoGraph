@@ -484,7 +484,7 @@ asio::awaitable<void> CheckpointCoordinator::record_pending_write_async(
     const std::string& node_name,
     const NodeResult&  nr,
     int                step) const {
-    if (!enabled() || parent_cp_id.empty()) co_return;
+    if (!records_pending_writes(parent_cp_id)) co_return;
     co_await store_->put_writes_async(thread_id_, parent_cp_id,
                                       make_pending_write(task_id, task_path, node_name, nr, step, native_archive_,
                                           managed_budget_lease_ ? detail::ManagedBudgetJournalAccess::retains_native_checkpoint(managed_budget_lease_) : native_memory_));
