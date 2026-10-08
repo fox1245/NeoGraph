@@ -831,10 +831,12 @@ if(NEOGRAPH_BUILD_LLM)
 
     target_compile_definitions(neograph_llm PRIVATE NEOGRAPH_BUILDING_LIBRARY)
     # SchemaProvider::runtime (through neograph_core) is the client API; the libcurl backend that
-    # constructs a client lives in SchemaProvider::transport, linked only here.
+    # constructs a client lives in SchemaProvider::transport, linked only here. It is PUBLIC so that
+    # code constructing an sp::runtime::Client next to neograph::llm links it as well, also against
+    # shared libraries, which do not pass PRIVATE dependencies on to executables.
     target_link_libraries(neograph_llm
-        PUBLIC  neograph_core
-        PRIVATE neograph_async SchemaProvider::transport
+        PUBLIC  neograph_core SchemaProvider::transport
+        PRIVATE neograph_async
     )
 
     add_library(neograph::llm ALIAS neograph_llm)
@@ -1294,8 +1296,9 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         # Offline — MockProvider returns a canned summary, no API key.
         # neograph::async only for the run_sync bridge in the demo.
         add_executable(example_history_compaction examples/56_history_compaction.cpp)
+        # Constructs an sp::runtime::Client itself, hence the SchemaProvider transport.
         target_link_libraries(example_history_compaction PRIVATE
-            neograph::core neograph::async)
+            neograph::core neograph::async SchemaProvider::transport)
 
         # Example 28: Corrective RAG (arXiv:2401.15884) over /v1/responses.
         # Links neograph::async explicitly: 28/29/30 directly call
@@ -1686,7 +1689,7 @@ if(NEOGRAPH_BUILD_EXAMPLES)
 
         # Example 41: multi-turn chatbot via RunConfig::resume_if_exists.
         add_executable(example_resume_if_exists_chat examples/41_resume_if_exists_chat.cpp)
-        target_link_libraries(example_resume_if_exists_chat PRIVATE neograph::core)
+        target_link_libraries(example_resume_if_exists_chat PRIVATE neograph::core SchemaProvider::transport)
 
         # Example 42: custom reducer + condition via Registry.
         add_executable(example_custom_reducer_condition examples/42_custom_reducer_condition.cpp)
@@ -1716,7 +1719,7 @@ if(NEOGRAPH_BUILD_EXAMPLES)
 
         # Example 49: OpenInference observability — Tracer adapter pattern.
         add_executable(example_openinference examples/49_openinference.cpp)
-        target_link_libraries(example_openinference PRIVATE neograph::core)
+        target_link_libraries(example_openinference PRIVATE neograph::core SchemaProvider::transport)
 
         # Example 50: AsyncTool — coroutine-shaped tool execution.
         add_executable(example_async_tool examples/50_async_tool.cpp)
