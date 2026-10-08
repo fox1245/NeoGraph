@@ -129,6 +129,25 @@ static NextStepPlan plan_impl(
         return plan;
     }
 
+    // Without barrier gating every successor fires, so the plan is the sorted,
+    // de-duplicated successor set. Skip the signaler map and the ordered sets,
+    // which only barrier gating needs: they cost a node allocation per entry on
+    // every super-step of every graph, barriers or not.
+    if (barrier_state == nullptr || barrier_specs.empty()) {
+        for (const auto& r : routings) {
+            for (auto& next : sch.resolve_next_nodes(r.node_name, state)) {
+                if (next == END_NODE) {
+                    plan.hit_end = true;
+                } else {
+                    plan.ready.push_back(std::move(next));
+                }
+            }
+        }
+        std::sort(plan.ready.begin(), plan.ready.end());
+        plan.ready.erase(std::unique(plan.ready.begin(), plan.ready.end()), plan.ready.end());
+        return plan;
+    }
+
     // Pass 2: build signaler → target map so barrier gating can see
     // WHICH upstreams fired this super-step. Non-barrier targets are
     // still just deduped via std::set semantics.

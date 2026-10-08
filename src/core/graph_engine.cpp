@@ -1940,9 +1940,14 @@ GraphEngine::execute_graph_async(
         // 4.x: per-task StepRoutings flow back so each spawned task's
         //      Command.goto / default outgoing edge contribute to the
         //      next super-step routing decision (LangGraph parity).
-        auto send_routings = co_await executor_->run_sends_async(
-            pending_sends, step, state, replay_results,
-            coord, last_checkpoint_id, trace, cb, stream_mode, ctx);
+        // Most steps spawn no Send; calling the coroutine for an empty batch
+        // would still allocate and tear down its frame just to return nothing.
+        std::vector<StepRouting> send_routings;
+        if (!pending_sends.empty()) {
+            send_routings = co_await executor_->run_sends_async(
+                pending_sends, step, state, replay_results,
+                coord, last_checkpoint_id, trace, cb, stream_mode, ctx);
+        }
 
         if (cb && has_mode(stream_mode, StreamMode::VALUES)) {
             cb(GraphEvent{GraphEvent::Type::CHANNEL_WRITE, "__state__",
