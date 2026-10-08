@@ -5,7 +5,7 @@ option(NEOGRAPH_FETCH_SCHEMAPROVIDER
 
 # Pin the SDK source, not a moving branch or release tag.
 set(NEOGRAPH_SCHEMAPROVIDER_REVISION
-    "f39de11a70731653ac2f3e9ccb60839c1372dbfa")
+    "f9b3306d66d7d25f65c49b30cd49cbace907ac38")
 
 if(NOT NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR)
     find_package(SchemaProvider 0.1.1 CONFIG QUIET COMPONENTS runtime transport)
