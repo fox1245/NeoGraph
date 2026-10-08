@@ -27,6 +27,7 @@
 
 #include <asio/awaitable.hpp>
 #include <asio/bind_cancellation_slot.hpp>
+#include <asio/cancellation_signal.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/error.hpp>
@@ -34,10 +35,15 @@
 #include <asio/post.hpp>
 #include <asio/system_error.hpp>
 #include <asio/thread_pool.hpp>
+#include <asio/traits/static_query.hpp>
 
+#include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <exception>
+#include <mutex>
 #include <optional>
+#include <type_traits>
 #include <utility>
 
 namespace neograph::async {
@@ -69,6 +75,250 @@ private:
     const asio::execution_context* previous_;
 };
 
+// A queued completion can run before the foreign thread's execute() returns:
+// io_context's scheduler unlocks its queue before signalling its wake event.
+// Keep those calls (and the final tracked-work release) alive through their
+// entire scheduler tail, not merely until their handler has completed.
+class SyncIoQuiescence {
+public:
+    explicit SyncIoQuiescence(const asio::execution_context& context) noexcept
+        : context_(&context) {}
+
+    ~SyncIoQuiescence() { wait(); }
+
+    void wait() noexcept {
+        // The caller-thread-only path needs no locking or reference counting.
+        if (!foreign_used_.load(std::memory_order_acquire)) return;
+        std::unique_lock lock(mutex_);
+        finished_.wait(lock, [this] { return active_ == 0; });
+    }
+
+    class Call {
+    public:
+        explicit Call(SyncIoQuiescence* owner) noexcept
+            : owner_(owner && serial_io_context() != owner->context_ ? owner : nullptr) {
+            if (owner_) {
+                std::lock_guard lock(owner_->mutex_);
+                ++owner_->active_;
+                owner_->foreign_used_.store(true, std::memory_order_release);
+            }
+        }
+
+        ~Call() {
+            if (owner_) {
+                std::lock_guard lock(owner_->mutex_);
+                if (--owner_->active_ == 0) {
+                    // Notify under the lock: wait() must also outlive this
+                    // notification, rather than racing its own event teardown.
+                    owner_->finished_.notify_all();
+                }
+            }
+        }
+
+        Call(const Call&) = delete;
+        Call& operator=(const Call&) = delete;
+
+    private:
+        SyncIoQuiescence* owner_;
+    };
+
+private:
+    const asio::execution_context* context_;
+    std::atomic<bool> foreign_used_{false};
+    std::mutex mutex_;
+    std::condition_variable finished_;
+    std::size_t active_ = 0;
+};
+
+// Only used for a synchronous bridge's private io_context. Property adaptations
+// retain the fence, including through any_io_executor and cancellation strands.
+// The concrete io_context executor plus this borrowed pointer fit inline in
+// any_io_executor; the bridge owns the fence until all admitted calls return.
+template <typename Executor>
+class SyncIoExecutor {
+public:
+    SyncIoExecutor(Executor executor, SyncIoQuiescence& owner) noexcept
+        : executor_(std::move(executor)), owner_(&owner) {}
+
+    SyncIoExecutor(const SyncIoExecutor&) noexcept = default;
+    SyncIoExecutor(SyncIoExecutor&& other) noexcept
+        : executor_(std::move(other.executor_)),
+          owner_(std::exchange(other.owner_, nullptr)) {}
+
+    ~SyncIoExecutor() {
+        if constexpr (asio::traits::static_query<
+                          Executor, asio::execution::outstanding_work_t>::value() ==
+                      asio::execution::outstanding_work.tracked) {
+            SyncIoQuiescence::Call call(owner_);
+            // Destroy the tracked executor under the fence. Its work_finished()
+            // can let io.run() return before its scheduler stop/wake tail ends.
+            auto released = std::move(executor_);
+            static_cast<void>(released);
+        }
+    }
+
+    SyncIoExecutor& operator=(SyncIoExecutor other) noexcept {
+        using std::swap;
+        swap(executor_, other.executor_);
+        swap(owner_, other.owner_);
+        return *this;
+    }
+
+    template <typename Function>
+    void execute(Function&& function) const {
+        SyncIoQuiescence::Call call(owner_);
+        executor_.execute(std::forward<Function>(function));
+    }
+
+    template <typename Property>
+    auto query(const Property& property) const
+        noexcept(noexcept(asio::query(executor_, property)))
+        -> decltype(asio::query(std::declval<const Executor&>(), property)) {
+        return asio::query(executor_, property);
+    }
+
+    template <typename Property>
+        requires asio::can_require<const Executor&, const Property&>::value
+    auto require(const Property& property) const
+        -> SyncIoExecutor<std::decay_t<asio::require_result_t<const Executor&, const Property&>>> {
+        return {asio::require(executor_, property), *owner_};
+    }
+
+    template <typename Property>
+        requires asio::can_prefer<const Executor&, const Property&>::value
+    auto prefer(const Property& property) const
+        -> SyncIoExecutor<std::decay_t<asio::prefer_result_t<const Executor&, const Property&>>> {
+        return {asio::prefer(executor_, property), *owner_};
+    }
+
+    friend bool operator==(const SyncIoExecutor& left, const SyncIoExecutor& right) noexcept {
+        return left.owner_ == right.owner_ && left.executor_ == right.executor_;
+    }
+
+    friend bool operator!=(const SyncIoExecutor& left, const SyncIoExecutor& right) noexcept {
+        return !(left == right);
+    }
+
+private:
+    Executor executor_;
+    SyncIoQuiescence* owner_;
+};
+
+// Declare after the coroutine's captured state. Even an initiation failure
+// destroys the actual context while its borrowed fence, TLS scope, cancellation
+// signal and caller-owned coroutine captures are still alive.
+class SyncIoRun {
+public:
+    explicit SyncIoRun(std::exception_ptr& operation_error)
+        : io_(std::in_place), quiescence_(*io_), serial_scope_(*io_),
+          operation_error_(operation_error) {}
+
+    ~SyncIoRun() {
+        if (io_) {
+            quiescence_.wait();
+            cleanup_signal_.slot().clear();
+            io_.reset();
+        }
+    }
+
+    auto executor() noexcept {
+        return SyncIoExecutor(io_->get_executor(), quiescence_);
+    }
+
+    asio::cancellation_slot cleanup_slot() noexcept {
+        return cleanup_signal_.slot();
+    }
+
+    template <typename Executor>
+    void spawn(const Executor& executor, asio::awaitable<void> body,
+               asio::cancellation_slot slot) {
+        started_ = true;
+        try {
+            asio::co_spawn(executor, std::move(body),
+                asio::bind_cancellation_slot(slot,
+                    [this](std::exception_ptr error) {
+                        completed_ = true;
+                        if (error && !operation_error_) {
+                            operation_error_ = std::move(error);
+                        }
+                    }));
+        } catch (...) {
+            started_ = false;
+            remember(std::current_exception());
+        }
+    }
+
+    template <typename Cancel>
+    std::size_t drain(Cancel&& cancel) {
+        for (;;) {
+            std::size_t handled = 0;
+            try {
+                handled = io_->run();
+            } catch (...) {
+                // A side handler can throw while the owned coroutine is still
+                // suspended. Preserve that failure, request cancellation, and
+                // finish the frame before its slot binding/captures disappear.
+                remember(std::current_exception());
+                try {
+                    cancel();
+                } catch (...) {
+                    // An ill-behaved cancellation callback must not make us
+                    // abandon the still-owned frame. Drain its real completion
+                    // and preserve the first escaping failure.
+                    remember(std::current_exception());
+                }
+                // A throwing handler may also have stopped the context.
+                // Restart before resuming drainage of its remaining work.
+                io_->restart();
+                continue;
+            }
+            if (!started_ || completed_) return handled;
+            // A handler may explicitly stop the private context. That is not
+            // completion of the operation owned by this blocking bridge.
+            io_->restart();
+        }
+    }
+
+    std::size_t drain() {
+        return drain([this] { cleanup_signal_.emit(asio::cancellation_type::all); });
+    }
+
+    // Call only after every token lease has closed cancellation admission.
+    void finish() {
+        cleanup_signal_.slot().clear();
+        quiescence_.wait();
+        // Posts admitted after the first run exhausted are queued on a stopped
+        // context. Invalidated token emits still own tracked strand invokers:
+        // drain them before destroying the context or its borrowed fence.
+        // Owned completion is not queue exhaustion. A finite caller-thread
+        // cleanup handler may stop the context with more notifications queued;
+        // each nonempty pass must be followed by a restarted run. A zero pass
+        // waits for legitimate outstanding work, including foreign tracked
+        // executor releases. Out-of-band foreign context.stop() is not owned
+        // by this caller-thread bridge, just like other raw context escapes.
+        do {
+            io_->restart();
+        } while (drain() != 0);
+        quiescence_.wait();
+        io_.reset();
+        if (error_) std::rethrow_exception(error_);
+    }
+
+private:
+    void remember(std::exception_ptr error) noexcept {
+        if (error && !error_) error_ = std::move(error);
+    }
+
+    std::optional<asio::io_context> io_;
+    SyncIoQuiescence quiescence_;
+    SerialIoContextScope serial_scope_;
+    asio::cancellation_signal cleanup_signal_;
+    std::exception_ptr error_;
+    std::exception_ptr& operation_error_;
+    bool started_ = false;
+    bool completed_ = false;
+};
+
 // Drive an engine operation with two cancellation scopes. The operation token
 // is exposed through RunContext to node/provider code; the private execution
 // child is reserved for the wrapper's co_spawn. Asio cancellation signals have
@@ -83,7 +333,6 @@ T run_sync_operation(
         operation->throw_if_cancelled("run_sync operation entry");
     }
 
-    asio::io_context io;
     std::optional<T> result;
     std::exception_ptr err;
 
@@ -97,28 +346,27 @@ T run_sync_operation(
         }
         co_return;
     };
+    SyncIoRun run(err);
+    const auto executor = run.executor();
 
     if (operation) {
         // Keep the token visible to the operation's direct consumers while
         // reserving a distinct signal for the wrapper's awaitable frame.
-        const auto operation_executor = operation->bind_executor(io.get_executor());
         neograph::graph::CancelExecutorLease operation_lease(operation);
+        const auto operation_executor = operation->bind_executor(executor);
         auto execution = operation->fork();
-        const auto execution_executor = execution->bind_executor(operation_executor);
         neograph::graph::CancelExecutorLease execution_lease(execution);
-        asio::post(execution_executor, [execution_executor, execution, &body] {
-            asio::co_spawn(
-                execution_executor, body(execution),
-                asio::bind_cancellation_slot(execution->slot(), asio::detached));
+        const auto execution_executor = execution->bind_executor(operation_executor);
+        asio::post(execution_executor, [execution_executor, execution, &body, &run] {
+            run.spawn(execution_executor, body(execution), execution->slot());
         });
-        const SerialIoContextScope serial_scope(io);
-        io.run();
+        run.drain([&execution] { execution->cancel(); });
     } else {
-        asio::co_spawn(io, body(std::shared_ptr<neograph::graph::CancelToken>{}),
-                       asio::detached);
-        const SerialIoContextScope serial_scope(io);
-        io.run();
+        run.spawn(executor, body(std::shared_ptr<neograph::graph::CancelToken>{}),
+                  run.cleanup_slot());
+        run.drain();
     }
+    run.finish();
 
     if (err) {
         if (operation && operation->is_cancelled()) {
@@ -151,12 +399,16 @@ T run_sync_operation(
 /// obtain an executor for nested operations; that executor will be
 /// the temporary io_context created here.
 ///
-/// v0.3+: when @p cancel is non-null, the inner ``co_spawn`` binds
-/// ``cancel->slot()`` so a concurrent ``cancel->cancel()`` aborts
-/// the coroutine — including any in-flight ``co_await`` on a socket
-/// operation. Provider dispatch passes the explicit
-/// ``ProviderRequest::cancel_token``; there is no ambient thread-local
-/// cancellation authority.
+/// When @p cancel is non-null, the wrapper binds its private execution child's
+/// slot. Parent cancellation cascades to that child; cleanup does not grant the
+/// child authority to cancel its parent. Provider dispatch supplies the explicit
+/// ``ProviderRequest::cancel_token``; there is no ambient cancellation authority.
+///
+/// Executor-bound objects, tracked work and coroutines must remain inside this
+/// call's lifetime. Finite caller-thread stop handlers are drained; escaping the
+/// raw context to stop it from another thread is not supported. Completion alone
+/// is not scheduler quiescence: foreign posting tails and late cancellation
+/// notifications are drained before the private context is destroyed.
 template <typename T>
 T run_sync(asio::awaitable<T> aw,
            neograph::graph::CancelToken* cancel = nullptr) {
@@ -174,7 +426,6 @@ T run_sync(asio::awaitable<T> aw,
         throw neograph::graph::CancelledException("run_sync entry");
     }
 
-    asio::io_context io;
     std::optional<T> result;
     std::exception_ptr err;
 
@@ -188,6 +439,8 @@ T run_sync(asio::awaitable<T> aw,
         }
         co_return;
     };
+    detail::SyncIoRun run(err);
+    const auto executor = run.executor();
 
     if (cancel) {
         // v0.4 PR 3: fork a child token for this nested run_sync.
@@ -218,29 +471,26 @@ T run_sync(asio::awaitable<T> aw,
         // strictly as a tiny optimization (skip io_context
         // construction altogether).
         auto child = cancel->fork();
-        const auto child_executor = child->bind_executor(io.get_executor());
         neograph::graph::CancelExecutorLease child_lease(child);
-        asio::post(child_executor, [child_executor, child, &body] {
-            asio::co_spawn(
-                child_executor, body(child),
-                asio::bind_cancellation_slot(child->slot(), asio::detached));
+        const auto child_executor = child->bind_executor(executor);
+        asio::post(child_executor, [child_executor, child, &body, &run] {
+            run.spawn(child_executor, body(child), child->slot());
         });
-        io.run();
+        run.drain([&child] { child->cancel(); });
         // ``child`` goes out of scope at end of block → parent's
         // weak_ptr expires → next parent.cancel()/fork() prunes it.
 
-        // v0.3.2: if the inner co_spawn completed because of a cancel
-        // (asio::system_error operation_aborted from a torn-down HTTP
-        // socket), surface it as the typed CancelledException so the
-        // executor's retry loop can short-circuit instead of treating
-        // it as a transient runtime_error.
-        if (err && cancel->is_cancelled()) {
-            throw neograph::graph::CancelledException("run_sync inner abort");
-        }
     } else {
-        asio::co_spawn(io, body(std::shared_ptr<neograph::graph::CancelToken>{}),
-                       asio::detached);
-        io.run();
+        run.spawn(executor, body(std::shared_ptr<neograph::graph::CancelToken>{}),
+                  run.cleanup_slot());
+        run.drain();
+    }
+    run.finish();
+
+    // Preserve the public bridge's existing typed cancellation translation,
+    // but make every error decision after admission closure and final drain.
+    if (err && cancel && cancel->is_cancelled()) {
+        throw neograph::graph::CancelledException("run_sync inner abort");
     }
 
     if (err) std::rethrow_exception(err);
@@ -256,7 +506,6 @@ inline void run_sync(asio::awaitable<void> aw,
         throw neograph::graph::CancelledException("run_sync entry");
     }
 
-    asio::io_context io;
     std::exception_ptr err;
 
     auto body = [&](std::shared_ptr<neograph::graph::CancelToken> child)
@@ -268,31 +517,30 @@ inline void run_sync(asio::awaitable<void> aw,
             err = std::current_exception();
         }
     };
+    detail::SyncIoRun run(err);
+    const auto executor = run.executor();
 
     if (cancel) {
         // v0.4 PR 3: fork a child token. See the templated peer
         // above for the full rationale; this is the bit-for-bit
         // void specialization.
         auto child = cancel->fork();
-        const auto child_executor = child->bind_executor(io.get_executor());
         neograph::graph::CancelExecutorLease child_lease(child);
-        asio::post(child_executor, [child_executor, child, &body] {
-            asio::co_spawn(
-                child_executor, body(child),
-                asio::bind_cancellation_slot(child->slot(), asio::detached));
+        const auto child_executor = child->bind_executor(executor);
+        asio::post(child_executor, [child_executor, child, &body, &run] {
+            run.spawn(child_executor, body(child), child->slot());
         });
-        io.run();
-        if (err && cancel->is_cancelled()) {
-            throw neograph::graph::CancelledException("run_sync inner abort");
-        }
-        if (err) std::rethrow_exception(err);
-        return;
+        run.drain([&child] { child->cancel(); });
     } else {
-        asio::co_spawn(io, body(std::shared_ptr<neograph::graph::CancelToken>{}),
-                       asio::detached);
+        run.spawn(executor, body(std::shared_ptr<neograph::graph::CancelToken>{}),
+                  run.cleanup_slot());
+        run.drain();
     }
+    run.finish();
 
-    io.run();
+    if (err && cancel && cancel->is_cancelled()) {
+        throw neograph::graph::CancelledException("run_sync inner abort");
+    }
 
     if (err) std::rethrow_exception(err);
 }
