@@ -23,6 +23,10 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 - `CheckpointCoordinator::records_pending_writes(parent_cp_id)`: `record_pending_write[_async]` が実際に保存するときに true を返すので、呼び出し側は呼び出し自体を省略できます。
 
+### 修正
+
+- **エンジンのワーカープールを使う multi-Send の fan-out で、ある枝の処理が完了する最中にその枝のキャンセルハンドラが実行されることがありました。** multi-Send ステップの枝は素のプール実行器で動いており、静的 fan-out の枝には既に枝ごとの strand があったため、別のプールスレッドから送られたキャンセルが枝のコルーチンと競合していました(`cancellation_signal::emit` のデータ競合を ThreadSanitizer で再現)。プールを使う Send の枝はそれぞれ自分の strand で動くようになり、プールのない実行は変わりません。#344、#345 を参照してください。
+
 ## [0.13.1] - 2026-10-07
 NeoGraph `0.13.1` は alpha SDK `0.1.1` を対象にします。interface revision と shared-library generation は 4 のままなので、consumer は SDK `0.1.1` を選択して（インストールされた package config は厳密なバージョンを要求します）再ビルドするだけです。Native archive は v3 / `spna3`、portable JSON は v2 のままです。機能上の変更は下記の Windows transport 修正で、0.13.0 として公開された Windows wheel にはこの欠陥があるため 0.13.1 に置き換えてください。修正コミットの hosted CI と Windows wheel gate は通過しました（GitHub Actions run 37576205702、37576205395、CPython 3.12 のみ）。CPython 3.9–3.13 の全 matrix はリリースタグで実行します。
 ### 修正
