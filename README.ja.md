@@ -71,7 +71,7 @@ public:
 
 Coreが型付きプロバイダー契約を公開するため、`NEOGRAPH_BUILD_LLM=OFF`でも外部SDKのSchemaProviderは必須です。以下のコマンドでは、インストール済みの[SchemaProviderランタイムパッケージ](https://github.com/fox1245/SchemaProvider)を使用します。`SCHEMAPROVIDER_PREFIX`にそのインストール先プレフィックスを設定してください。`-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=../SchemaProvider`でチェックアウト先を明示した場合は、それを優先します。指定がなければ、CMakeはインストール済みパッケージを優先し、見つからない場合はバージョンを固定した公開SDKアーカイブを取得します。インストール済みパッケージまたは明示的なチェックアウトを使ってオフラインでビルドする場合は、`NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`を設定してください。CMakeは兄弟ディレクトリのチェックアウト先を推測せず、削除済みの同梱インタープリターも使用しません。
 
-C++20コンパイラー、CMake 3.20以降、SDKランタイムの依存ライブラリが必要です。SDKの依存関係にはOpenSSLとlibcurl 7.88以降が含まれます。NeoGraphのHTTPSコンポーネントを含むフルビルドにはOpenSSL 3が必要です。既定のビルドでは、SQLiteとPostgreSQLの統合も有効になります。以下のコマンドでは、SDKの依存関係を維持したまま、不要なNeoGraphコンポーネントを無効にしています。記録されたSDKインターフェース4の検証は、Linux x86_64とローカルのプロトコル・状態ピアを対象としています。正確な範囲は[SDK検証記録](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record)にあります。Windows、macOS、ARM64、HTTP/3、ホストされたベンダー、WASMに対する新しい検証を示すものではありません。プラットフォームとビルドの制約は[トラブルシューティング](docs/troubleshooting.md)を参照してください。
+C++20コンパイラー、CMake 3.20以降、SDKランタイムの依存ライブラリが必要です。SDKの依存関係にはlibcurl 7.88以降が含まれます。SDK自体はOpenSSLを必要とせず、TLSはlibcurlのバックエンドが提供します。NeoGraphのHTTPSコンポーネントを含むフルビルドにはOpenSSL 3が必要です。既定のビルドでは、SQLiteとPostgreSQLの統合も有効になります。以下のコマンドでは、SDKの依存関係を維持したまま、不要なNeoGraphコンポーネントを無効にしています。記録されたSDKインターフェース4の検証は、Linux x86_64とローカルのプロトコル・状態ピアを対象としています。正確な範囲は[SDK検証記録](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record)にあります。Windows、macOS、ARM64、HTTP/3、ホストされたベンダー、WASMに対する新しい検証を示すものではありません。プラットフォームとビルドの制約は[トラブルシューティング](docs/troubleshooting.md)を参照してください。
 
 ```bash
 git clone https://github.com/fox1245/NeoGraph.git
@@ -143,7 +143,7 @@ sp::runtime::Result first_call(
 
 `ChatMessage`、`ChatTool`、JSONは可搬な表現です。真正なネイティブ履歴は、ネイティブチェックポイントのサイドカーとともにメモリ内に保持できます。ネイティブ履歴を永続化するには、実物の`sp::NativeArchive`と、所有者専用の非公開領域で保護された保管・管理が必要です。可搬なJSONでは、この権限を再構成できません。アーカイブは独立した鍵で保管・管理の真正性を検証します。暗号化でも、ベンダー発行元の認証でもありません。アーカイブ本体、鍵、ネイティブblob、生の通信観測データを公開しないでください。永続化の失敗、オブザーバー、管理対象の予算バンク、リプレイの境界については、[プロバイダーリファレンス](docs/reference-en.md)と[移行ガイド](docs/migration-v0.4-to-v1.0.md)を参照してください。
 
-型付きAPIへの切り替えに伴い、`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、記述子インタープリター、ResponsesのWebSocket経路は削除されました。C++側の利用コードを再コンパイルし、独自のプロバイダーを移行してください。互換エイリアスはありません。SDKパッケージは`0.1.1`で、インターフェースはアルファ版、インターフェースリビジョンは4、共有ABIは4です。対応するリビジョンが一致している必要があり、これらの番号はSDKインターフェースが安定版であることを示しません。
+型付きAPIへの切り替えに伴い、`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、記述子インタープリター、ResponsesのWebSocket経路は削除されました。C++側の利用コードを再コンパイルし、独自のプロバイダーを移行してください。互換エイリアスはありません。SDKパッケージは`0.2.0`で、インターフェースはアルファ版、インターフェースリビジョンは5、共有ABIは5です。タイムアウト制御が公開レイアウトを変えるため、SDKの利用コード、NeoGraph、Python拡張を一緒に再ビルドしてください。Native archive v3とportable JSON v2は変わらず、この世代がSDKインターフェースの安定版であることを示すものではありません。
 
 ## Python
 
@@ -212,7 +212,7 @@ NeoGraphは、明示的な状態遷移、分岐やループ、並列タスク、
 インストール済みパッケージを使う側は、有効になっている必要なコンポーネントだけをリンクします。
 
 ```cmake
-find_package(SchemaProvider 0.1.1 CONFIG REQUIRED COMPONENTS runtime)
+find_package(SchemaProvider 0.2.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```

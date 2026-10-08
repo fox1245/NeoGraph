@@ -70,7 +70,7 @@ The complete source includes the headers, node registration with declared reads/
 
 SchemaProvider is a required external SDK even when `NEOGRAPH_BUILD_LLM=OFF`, because Core exports its typed provider contracts. The commands below use an installed [SchemaProvider runtime package](https://github.com/fox1245/SchemaProvider): set `SCHEMAPROVIDER_PREFIX` to its install prefix. An explicit checkout supplied with `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=../SchemaProvider` takes precedence; otherwise CMake prefers an installed package and, if none is found, fetches the pinned public SDK archive. Set `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` for an offline build with an installed package or explicit checkout. CMake does not guess a sibling checkout or use the removed bundled interpreter.
 
-Prerequisites include a C++20 compiler, CMake 3.20 or newer, and the SDK's runtime dependencies, including OpenSSL and libcurl 7.88 or newer. Full builds with NeoGraph's HTTPS components require OpenSSL 3. The default build also enables SQLite and PostgreSQL integrations; the command below disables unnecessary NeoGraph components without removing SDK dependencies. Recorded SDK interface 4 checks cover Linux x86_64 and local protocol/state peers; the [SDK conformance record](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record) gives their exact scope. They do not establish new Windows, macOS, ARM64, HTTP/3, hosted-vendor or WASM qualification. See [troubleshooting](docs/troubleshooting.md) for platform and build constraints.
+Prerequisites include a C++20 compiler, CMake 3.20 or newer, and the SDK's runtime dependency libcurl 7.88 or newer; the SDK itself needs no OpenSSL, because its TLS comes from libcurl's backend. Full builds with NeoGraph's HTTPS components require OpenSSL 3. The default build also enables SQLite and PostgreSQL integrations; the command below disables unnecessary NeoGraph components without removing SDK dependencies. Recorded SDK interface 4 checks cover Linux x86_64 and local protocol/state peers; the [SDK conformance record](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record) gives their exact scope. They do not establish new Windows, macOS, ARM64, HTTP/3, hosted-vendor or WASM qualification. See [troubleshooting](docs/troubleshooting.md) for platform and build constraints.
 
 ```bash
 git clone https://github.com/fox1245/NeoGraph.git
@@ -142,7 +142,7 @@ After `first_call` returns, use `std::get_if<sp::Completion>(result.get())` to i
 
 `ChatMessage`, `ChatTool`, and JSON are portable projections. Authentic native history can stay in memory with its native checkpoint sidecar; durable native history requires a real `sp::NativeArchive` and protected owner-private custody. Portable JSON cannot recreate that authority. The archive authenticates custody with an independent key; it is neither encryption nor vendor-issuer authentication. Do not publish archive bodies, keys, native blobs, or raw wire observations. See the [provider reference](docs/reference-en.md) and [migration guide](docs/migration-v0.4-to-v1.0.md) for persistence failures, observers, managed budget banks, and replay boundaries.
 
-The typed cutover removes `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter, and the Responses WebSocket path. Recompile C++ consumers and migrate custom providers; there are no compatibility aliases. The SDK package is `0.1.1` with an alpha interface, interface revision 4, and shared ABI 4; matching revisions are required, and these numbers do not declare a stable SDK interface.
+The typed cutover removes `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter, and the Responses WebSocket path. Recompile C++ consumers and migrate custom providers; there are no compatibility aliases. The SDK package is `0.2.0` alpha, with interface revision 5 and shared ABI 5. Timeout controls change public layouts: rebuild SDK consumers, NeoGraph and Python extensions together. Native archive v3 and portable JSON v2 remain unchanged; the generation does not declare a stable SDK interface.
 
 ## Python
 
@@ -211,7 +211,7 @@ Measure a workload with its actual nodes, provider, stores, concurrency, and bui
 Installed consumers link only the enabled components they need:
 
 ```cmake
-find_package(SchemaProvider 0.1.1 CONFIG REQUIRED COMPONENTS runtime)
+find_package(SchemaProvider 0.2.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```

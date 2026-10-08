@@ -32,13 +32,13 @@ CheckpointStore 为显式 adapter 迁移保留 legacy layout。sync 默认实现
 
 ## SDK 与 Python 边界
 
-即使禁用 LLM node，Core 也要求外部 `SchemaProvider::runtime`。选定的 SDK release 是 `0.1.1` alpha，interface revision `4`、shared-library ABI revision `4`，有 out-of-line capability check；不表示 stable interface。一并安装匹配 component。`libsp_*.so.4` 代际与 NeoGraph loader 代际、Python `abi3` wheel tag 都不同。
+即使禁用 LLM node，Core 也要求外部 `SchemaProvider::runtime`。选定的 SDK release 是 `0.2.0` alpha，interface revision `5`、shared-library ABI revision `5`，有 out-of-line capability check；不表示 stable interface。一并安装匹配 component。`libsp_*.so.5` 代际与 NeoGraph loader 代际、Python `abi3` wheel tag 都不同。
 
-Interface 4 添加各 family 的 request control，并改变公开 request layout。须一起 rebuild SDK consumer、NeoGraph 和 Python extension；interface-3 header/library 不能与 interface 4 混用。Native archive v3 / `spna3` 和 portable JSON v2 是独立格式，保持不变。历史 interface-3 测量不验证 interface 4。
+Interface 5 添加可选的连接、首个响应和空闲 timeout，并改变公开 request/options layout。须一起 rebuild SDK consumer、NeoGraph 和 Python extension；interface-4 header/library 不能与 interface 5 混用。Native archive v3 / `spna3` 和 portable JSON v2 是独立格式，保持不变。历史 interface-3/4 测量保留原有范围，不验证 interface 5。
 
 Python 公开含 prepared handle 与不可变 outcome 的 typed provider 契约，没有 legacy completion shim。extension 与匹配 library 作为一个 wheel 安装。不要单独替换 bundled NeoGraph/SDK library。graph ChatMessage 便利值不替代 native ProviderMessage custody。参见 [Python binding](python-binding.md)。
 
-wheel 包含六个匹配的 SDK runtime shared library，不包含 SDK C++ header 或 CMake package。C++ consumer 须单独安装 SDK。source resolution 依次使用显式 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、installed package、公开 revision-pinned archive fallback。用 installed SDK 离线构建时设 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`，通过 `CMAKE_PREFIX_PATH` 提供 prefix。
+wheel 包含七个匹配的 SDK runtime shared library，其中包括不依赖 curl 的 wire 层，不包含 SDK C++ header 或 CMake package。C++ consumer 须单独安装 SDK。source resolution 依次使用显式 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、installed package、公开 revision-pinned archive fallback。用 installed SDK 离线构建时设 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`，通过 `CMAKE_PREFIX_PATH` 提供 prefix。
 
 ## 安装名称与平台限制
 

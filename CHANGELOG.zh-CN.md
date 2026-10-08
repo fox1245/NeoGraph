@@ -19,6 +19,8 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 - **Core 引擎速度恢复到 v0.11.1 的水平。** 在基准笔记本上,3 节点顺序基准从每次运行 10.19 µs 降到 6.29 µs(v0.11.1:6.10),parallel-3 基准从 30.03 µs 降到 15.66 µs(15.80);每个线程各用一个引擎时,2、4、8 线程下的单线程耗时与 v0.11.1 相同。损失来自每个 fan-out 分支一个 strand、每个节点一次 `RunContext` 拷贝、包住上下文绑定注册表的进程级 mutex(现为 64 个分片)、由多个 JSON 文档构建的状态快照、什么都不返回的协程调用(没有 Send 时的 `run_sends_async`、没有检查点时的 `record_pending_write_async`)以及调度器中的有序集合。各提交的测量数据见 #343。
 - **只链接 `neograph::core` 的程序不再加载 libcurl。** `neograph::core` 链接了 SchemaProvider 的运行时,而该运行时链接了 libcurl 传输层,因此仅运行图的进程也会加载 libcurl 及其所需的约 25 个库(基准测试启动时常驻内存 12.7 MB,v0.11.1 为 5.0 MB)。现在只有 `neograph::llm` 链接传输层;同一基准测试以 7.7 MB 启动,共享库从 36 个减少到 7 个。不使用 `neograph::llm` 而自行构造 `sp::runtime::Client` 的代码必须链接 `SchemaProvider::transport`。SchemaProvider 已固定到包含此拆分的修订版本。参见 #347。
+- **须使用 SchemaProvider 0.2.0 alpha、interface/shared-library 代际 5 重新构建。** SDK 新增可选的连接、首个响应和空闲 timeout：默认关闭，不延长总 deadline，可通过 `ProviderRequest::options`（`sp::runtime::RunOptions`）按调用设置；图的 LLM 节点暂未暴露它们。五个 API family 的真实 transport lifecycle 检查与独立 private test fixture 解决 SDK #2、#3、#4。C++ 使用方与 Python wheel 必须使用匹配的 SDK header/library 一起重新构建；native archive 仍为 v3，portable JSON 仍为 v2。
+- **只链接 `neograph::core` 的程序不再加载 libcrypto。** SDK 自行实现了 SHA-256、HMAC-SHA256 和 OS 随机源的使用，其运行时不再链接 OpenSSL，archive 与 policy 字节不变。仅运行图的基准测试（`bench_neograph 1 1 1`）以 6.3 MB 常驻内存启动，而不是 7.7 MB（Linux x86_64，31 次中位数），共享库从 7 个减少到 6 个，与启动内存为 5.0 MB 的 v0.11.1 相同。直接调用 OpenSSL 的代码必须自行链接 `OpenSSL::Crypto`。
 
 ### 新增
 
@@ -27,6 +29,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ### 修复
 
 - **使用引擎工作线程池的 multi-Send fan-out 中,某个分支的取消处理函数可能在该分支自身的操作完成期间运行。** multi-Send 步骤的分支运行在裸线程池执行器上,而静态 fan-out 的分支早已各有一个 strand,因此来自另一个线程池线程的取消会与分支的协程竞争(`cancellation_signal::emit` 中的数据竞争,已在 ThreadSanitizer 下复现)。现在每个使用线程池的 Send 分支都在自己的 strand 上运行;没有线程池的运行保持不变。参见 #344 和 #345。
+- **启用 HTTP 的 `neograph-harness-mcp` 和 `example_harness_mcp_server` 现在会链接 `OpenSSL::Crypto`。** 这两个可执行文件直接调用 OpenSSL（`SHA256`、`CRYPTO_memcmp`），却从未自行链接它；SchemaProvider 0.2.0 不再链接 libcrypto 后，`NEOGRAPH_BUILD_MCP_HTTP_SERVER=ON` 的共享库构建会因 `SHA256` 的未定义引用而链接失败。
 
 ## [0.13.1] - 2026-10-07
 NeoGraph `0.13.1` 面向 alpha SDK `0.1.1`。interface revision 与 shared-library generation 仍为 4，因此使用者只需选择 SDK `0.1.1`（已安装的 package config 要求精确版本）并重新构建。Native archive 仍为 v3 / `spna3`，portable JSON 仍为 v2。功能性变更是下面的 Windows transport 修复：作为 0.13.0 发布的 Windows wheel 存在该缺陷，应替换为 0.13.1。修复提交的 hosted CI 与 Windows wheel gate 已通过（GitHub Actions run 37576205702、37576205395，仅 CPython 3.12）；完整的 CPython 3.9–3.13 矩阵在发布 tag 上运行。

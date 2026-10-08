@@ -71,7 +71,7 @@ public:
 
 即使设置 `NEOGRAPH_BUILD_LLM=OFF`，SchemaProvider 也仍是必需的外部 SDK，因为 Core 导出了其类型化提供方契约。下面的命令使用已安装的 [SchemaProvider 运行时包](https://github.com/fox1245/SchemaProvider)：将 `SCHEMAPROVIDER_PREFIX` 设为其安装前缀。通过 `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=../SchemaProvider` 显式指定的源码检出目录具有最高优先级；否则，CMake 优先使用已安装的软件包，未找到时则获取锁定版本的公共 SDK 源码归档。使用已安装的软件包或显式检出目录进行离线构建时，设置 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`。CMake 不会猜测同级目录中的源码，也不会使用已移除的内置解释器。
 
-前置依赖包括 C++20 编译器、CMake 3.20 或更新版本，以及 SDK 的运行时依赖，其中包括 OpenSSL 和 libcurl 7.88 或更新版本。包含 NeoGraph HTTPS 组件的完整构建需要 OpenSSL 3。默认构建还启用了 SQLite 和 PostgreSQL 集成；下面的命令关闭了不需要的 NeoGraph 组件，但不会移除 SDK 依赖。记录中的 SDK 接口修订 4 验证覆盖 Linux x86_64 及本地协议、状态对端，准确范围见 [SDK 验证记录](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record)。它们不构成新的 Windows、macOS、ARM64、HTTP/3、托管服务商或 WASM 验证；平台和构建限制见[故障排查](docs/troubleshooting.md)。
+前置依赖包括 C++20 编译器、CMake 3.20 或更新版本，以及 SDK 的运行时依赖，其中包括 libcurl 7.88 或更新版本；SDK 自身不需要 OpenSSL，TLS 由 libcurl 的后端提供。包含 NeoGraph HTTPS 组件的完整构建需要 OpenSSL 3。默认构建还启用了 SQLite 和 PostgreSQL 集成；下面的命令关闭了不需要的 NeoGraph 组件，但不会移除 SDK 依赖。记录中的 SDK 接口修订 4 验证覆盖 Linux x86_64 及本地协议、状态对端，准确范围见 [SDK 验证记录](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record)。它们不构成新的 Windows、macOS、ARM64、HTTP/3、托管服务商或 WASM 验证；平台和构建限制见[故障排查](docs/troubleshooting.md)。
 
 ```bash
 git clone https://github.com/fox1245/NeoGraph.git
@@ -143,7 +143,7 @@ sp::runtime::Result first_call(
 
 `ChatMessage`、`ChatTool` 和 JSON 是可移植投影。真实的原生历史可以与原生检查点伴随数据一起保留在内存中；持久化原生历史需要真正的 `sp::NativeArchive`，以及受保护的、所有者私有的保管机制。可移植 JSON 无法重建这类权限。归档通过独立密钥认证保管关系；它既不是加密，也不是服务商签发者身份认证。不要公开归档内容、密钥、原生二进制数据或原始线路观测。[提供方参考](docs/reference-en.md)和[迁移指南](docs/migration-v0.4-to-v1.0.md)介绍了持久化失败、观察器、托管预算银行和重放边界。
 
-这次类型化接口切换移除了 `CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器和 Responses WebSocket 路径。C++ 使用方需要重新编译，并迁移自定义提供方；没有兼容别名。SDK 包版本为 `0.1.1`，接口处于 alpha 阶段，接口修订号为 4，共享 ABI 为 4；修订号必须匹配，而这些数字并不表示 SDK 接口已经稳定。
+这次类型化接口切换移除了 `CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器和 Responses WebSocket 路径。C++ 使用方需要重新编译，并迁移自定义提供方；没有兼容别名。SDK 包版本为 `0.2.0`，接口处于 alpha 阶段，接口修订号为 5，共享 ABI 为 5。超时控制改变了公开布局，SDK 使用方、NeoGraph 和 Python 扩展必须一起重新构建。Native archive v3 与 portable JSON v2 不变；这一代并不表示 SDK 接口已经稳定。
 
 ## Python
 
@@ -212,7 +212,7 @@ NeoGraph 适用于具有明确状态转换、分支或循环、并行任务、�
 使用已安装软件包的项目只需链接已启用且实际需要的组件：
 
 ```cmake
-find_package(SchemaProvider 0.1.1 CONFIG REQUIRED COMPONENTS runtime)
+find_package(SchemaProvider 0.2.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```

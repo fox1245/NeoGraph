@@ -32,13 +32,13 @@ CheckpointStore는 명시적 adapter 이전을 위해 레거시 layout을 유지
 
 ## SDK와 Python 경계
 
-LLM node를 꺼도 Core는 외부 `SchemaProvider::runtime`을 요구한다. 선택된 SDK 릴리스는 `0.1.1` alpha, interface revision `4`, shared-library ABI revision `4`이며 out-of-line capability check를 쓴다. stable interface 선언은 아니다. 일치하는 SDK component를 함께 설치한다. `libsp_*.so.4` 세대는 NeoGraph loader 세대 및 Python `abi3` wheel tag와 별개다.
+LLM node를 꺼도 Core는 외부 `SchemaProvider::runtime`을 요구한다. 선택된 SDK 릴리스는 `0.2.0` alpha, interface revision `5`, shared-library ABI revision `5`이며 out-of-line capability check를 쓴다. stable interface 선언은 아니다. 일치하는 SDK component를 함께 설치한다. `libsp_*.so.5` 세대는 NeoGraph loader 세대 및 Python `abi3` wheel tag와 별개다.
 
-Interface 4는 family별 request control을 추가하고 공개 request layout을 바꾼다. SDK consumer, NeoGraph, Python extension을 함께 재빌드한다. interface-3 header나 library를 interface 4와 혼용할 수 없다. Native archive v3 / `spna3`와 portable JSON v2는 독립적이며 형식은 바뀌지 않는다. 과거 interface-3 측정은 interface 4를 검증하지 않는다.
+Interface 5는 선택적 연결·첫 응답·유휴 타임아웃을 추가하고 공개 request/options layout을 바꾼다. SDK consumer, NeoGraph, Python extension을 함께 재빌드한다. interface-4 header나 library를 interface 5와 혼용할 수 없다. Native archive v3 / `spna3`와 portable JSON v2는 독립적이며 형식은 바뀌지 않는다. 과거 interface-3/4 측정은 원래 범위를 유지하며 interface 5를 검증하지 않는다.
 
 Python은 prepared handle과 불변 outcome을 포함한 typed provider 계약을 공개하며 레거시 completion shim은 없다. extension과 일치하는 라이브러리를 한 wheel로 설치한다. bundled NeoGraph/SDK 라이브러리를 개별 교체하지 않는다. 그래프의 ChatMessage 편의 값이 native ProviderMessage custody를 대신하지 않는다. [Python binding](python-binding.md)을 참고한다.
 
-wheel은 일치하는 SDK runtime shared library 6개를 포함하며 SDK C++ header나 CMake package는 포함하지 않는다. C++ consumer는 SDK를 별도 설치한다. source resolution은 명시적 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`, installed package, 공개 revision-pinned archive fallback 순이다. installed SDK를 쓰는 offline build는 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`를 설정하고 `CMAKE_PREFIX_PATH`로 prefix를 제공한다.
+wheel은 curl 없는 wire 계층을 포함한 일치하는 SDK runtime shared library 7개를 포함하며 SDK C++ header나 CMake package는 포함하지 않는다. C++ consumer는 SDK를 별도 설치한다. source resolution은 명시적 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`, installed package, 공개 revision-pinned archive fallback 순이다. installed SDK를 쓰는 offline build는 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`를 설정하고 `CMAKE_PREFIX_PATH`로 prefix를 제공한다.
 
 ## 설치 이름과 플랫폼 한계
 
