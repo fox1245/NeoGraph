@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cstddef>
 #include <future>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -601,6 +602,7 @@ void cancel_pooled_fan_out(const json& graph, Probe& probe) {
                std::chrono::steady_clock::now() < entered_deadline) {
             std::this_thread::sleep_for(std::chrono::microseconds(50));
         }
+        if (probe.entered.load() != kBranches) cfg.cancel_token->cancel();
         ASSERT_EQ(probe.entered.load(), kBranches) << "fan-out branches did not all start";
         // Vary where in the branches' operation loop the cancellation lands.
         std::this_thread::sleep_for(std::chrono::microseconds(100 * (iteration % 5)));
@@ -623,12 +625,15 @@ void cancel_pooled_fan_out(const json& graph, Probe& probe) {
 }  // namespace pool_cancel
 
 TEST(CancelTokenPropagation, MultiSendOnEnginePoolCancelsWithoutOverlappingBranchCompletion) {
-    pool_cancel::Probe probe;
+    // NodeFactory registrations are process-wide and outlive this test, so the
+    // factory owns the probe instead of referring to a local.
+    const auto probe_owner = std::make_shared<pool_cancel::Probe>();
+    pool_cancel::Probe& probe = *probe_owner;
     NodeFactory::instance().register_type(
         "pool_cancel_send_waiter",
-        [&probe](const std::string& name, const json&, const NodeContext&)
+        [probe_owner](const std::string& name, const json&, const NodeContext&)
             -> std::unique_ptr<GraphNode> {
-            return std::make_unique<pool_cancel::Waiter>(name, &probe, /*send_branch=*/true);
+            return std::make_unique<pool_cancel::Waiter>(name, probe_owner.get(), /*send_branch=*/true);
         });
     register_fanout_factory("pool_cancel_send_dispatcher", "waiter",
                             static_cast<int>(pool_cancel::kBranches));
@@ -651,12 +656,13 @@ TEST(CancelTokenPropagation, MultiSendOnEnginePoolCancelsWithoutOverlappingBranc
 // same scenario through run_parallel_async, kept as the control that shows
 // the probe above is sensitive to a bare pool executor.
 TEST(CancelTokenPropagation, StaticFanOutOnEnginePoolCancelsWithoutOverlappingBranchCompletion) {
-    pool_cancel::Probe probe;
+    const auto probe_owner = std::make_shared<pool_cancel::Probe>();
+    pool_cancel::Probe& probe = *probe_owner;
     NodeFactory::instance().register_type(
         "pool_cancel_static_waiter",
-        [&probe](const std::string& name, const json&, const NodeContext&)
+        [probe_owner](const std::string& name, const json&, const NodeContext&)
             -> std::unique_ptr<GraphNode> {
-            return std::make_unique<pool_cancel::Waiter>(name, &probe, /*send_branch=*/false);
+            return std::make_unique<pool_cancel::Waiter>(name, probe_owner.get(), /*send_branch=*/false);
         });
     NodeFactory::instance().register_type(
         "pool_cancel_static_start",
