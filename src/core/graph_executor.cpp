@@ -486,8 +486,9 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
 
             // Record BEFORE apply_writes so a crash between the two
             // still leaves a durable log for resume to replay.
-            co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, node_name,
-                                                      *ok_result, step);
+            if (coord.records_pending_writes(parent_cp_id))
+                co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, node_name,
+                                                          *ok_result, step);
         }
     } catch (const NodeInterrupt& ni) {
         // Copy the whole interrupt, not just the fact that one happened.
@@ -585,8 +586,9 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
                 interrupt->set_node(node_name);
                 throw *interrupt;
             }
-            co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, node_name, nr,
-                                                      step);
+            if (coord.records_pending_writes(parent_cp_id))
+                co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, node_name, nr,
+                                                          step);
         }
         apply_node_result(state, nr, ctx);
         trace.push_back(node_name);
@@ -631,8 +633,9 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
         ScopedInvocationContext node_ctx(ctx, task_id);
         auto nr = co_await execute_node_with_retry_async(node_name, state, cb, stream_mode,
                                                          node_ctx.context());
-        co_await  coord.record_pending_write_async(parent_cp_id, task_id, task_id, node_name, nr,
-                                                   step);
+        if (coord.records_pending_writes(parent_cp_id))
+            co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, node_name, nr,
+                                                       step);
         co_return nr;
     };
 
@@ -808,8 +811,9 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
             ScopedInvocationContext node_ctx(ctx, task_id);
             nr = co_await execute_node_with_retry_async(s.target_node, state, cb, stream_mode,
                                                         node_ctx.context());
-            co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, s.target_node,
-                                                      nr, step);
+            if (coord.records_pending_writes(parent_cp_id))
+                co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, s.target_node,
+                                                          nr, step);
         }
         apply_node_result(state, nr, ctx);
         trace.push_back(s.target_node + "[send]");
@@ -868,8 +872,9 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
         ScopedInvocationContext node_ctx(ctx, task_id);
         auto nr = co_await execute_node_with_retry_async(s.target_node, send_state, cb, stream_mode,
                                                          node_ctx.context());
-        co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, s.target_node, nr,
-                                                  step);
+        if (coord.records_pending_writes(parent_cp_id))
+            co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, s.target_node, nr,
+                                                      step);
         co_return nr;
     };
 
