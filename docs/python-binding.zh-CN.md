@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=73069d840a47c09f7c2b2b6f74da22c57bf16c51e1837e07042d293c6692dd5d -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=8dc07611a5d489c5f48231f91efa341362b9f2a47558a81ad11f2ca60b4d38af -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
 
 `neograph-engine` 是同一 C++ 运行时的 pybind11 接口。该 wheel 支持 Core、LLM、Program/QuickJS、MCP 和 SQLite 运行时持久化；可选源码构建仅暴露其编译的组件。
 
-本指南描述当前类型化绑定 API。暴露 `complete` 的旧 wheel 使用不同的提供商接口，无法运行以下类型化示例。
+本指南要求针对 SchemaProvider SDK `0.3.0`、接口修订版 `6` 和共享库 ABI 修订版 `6` 构建的 wheel；一起安装其捆绑组件。暴露 `complete` 的旧 wheel 使用不同的提供商接口，无法运行以下类型化示例。
 
 ```bash
 pip install neograph-engine
@@ -102,9 +102,9 @@ output tokens: 0
 
 删除协议端整个 `usage` 成员并重新启动，以验证缺失计数器路径；最后一行应变为 `output tokens: unknown`。这验证协议映射，不验证真实模型的 token 计数。
 
-### 接口 4 的请求族控制
+### 请求族控制
 
-需要针对 SDK 接口/共享库代次 4 构建的 wheel。包版本、native archive v3 和 portable JSON v2 独立。示例只构造控制，需要对应请求族的已准入 provider。保持首次回环不变；OpenRouter 专用控制在未准入本地 origin 上于 I/O 前拒绝。
+包版本、native archive v3 和 portable JSON v2 独立。示例只构造控制，需要对应请求族的已准入 provider。保持首次回环不变；OpenRouter 专用控制在未准入本地 origin 上于 I/O 前拒绝。
 
 ```python
 chat = ng.ProviderControls()
@@ -224,6 +224,10 @@ SDK 失败以数据返回。宿主观察器或预算结算失败会引发派生�
 反复读取已保存的 Python 提供商或图异常原因，会保留原始异常对象和 traceback；通过原生嵌套异常转换访问的原因也遵循同一规则。
 
 使用量计数器是带有 `value` 与 `evidence` 的 `UsageCount`，未知时为 `None`。报告的零是已知使用量，与省略的计数器不同。读取 `count.value` 前请检查 `count is not None`。计费时不要用 `count or 0`，也不要将未知的输入/输出/总计数器替换为零。
+
+`outcome.usage.provider_cost` 是不可变的 `ProviderReportedCost` 视图。可选 `ProviderUsdAmount` 字段 `total/upstream_total/upstream_input/upstream_output` 包含 `nano_usd/evidence/rounding`，`status` 是依此顺序的四元素数组，`byok_status` 描述可空 `is_byok`。`ProviderCostStatus/ProviderCostSource/ProviderCostRounding` 保留缺失、可用、格式错误、精度超限、overflow、未知货币与冲突证据。金额从解析后的 binary64 向上舍入，不是从原始 decimal 字面量舍入。报告零或 `is_byok=False` 不等于缺失。它们不是发票或 token 预算扣账；逐次调用金额证据应查看有序 `provider_outcomes`，而非聚合 token bank。
+
+`UsageAccumulator` 仅聚合 token。单次报告保留金额元数据；第二次报告后 snapshot 的 `provider_cost` 明确重置为 canonical Missing/None，既不保留过时的首次费用，也不进行金额求和。恢复该 snapshot 不重建费用或更新 token 权限。精确金额证据须从每个原始 outcome 或 provider journal 项目读取。
 
 恢复或继续运行时，`RunResult.provider_outcomes` 按顺序保留原有结果，再追加新产生的结果。`RunResult.usage` 反映当前计费账库，其中可能包含从检查点恢复的先前报告；恢复后没有新提供商调用，也不保证使用量为 `None` 或零。恢复证据不得重新分发原始提供商请求，也不得重复计费。保留的报告描述先前调用，不授予新的支出额度。
 

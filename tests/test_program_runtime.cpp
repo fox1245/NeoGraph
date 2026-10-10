@@ -30,6 +30,7 @@
 
 #include "javascript.h"
 #include "registry_access.h"
+#include "run_control.h"
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
@@ -341,7 +342,8 @@ private:
 
 class MapFailFirstNode final : public GraphNode {
 public:
-    explicit MapFailFirstNode(std::string name) : name_(std::move(name)) {}
+    explicit MapFailFirstNode(std::string name, bool complete_first = false)
+        : name_(std::move(name)), complete_first_(complete_first) {}
 
     asio::awaitable<NodeOutput> run(NodeInput input) override {
         const auto call = map_fail_first_calls.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -354,6 +356,7 @@ public:
                 timer.expires_after(std::chrono::milliseconds(1));
                 co_await timer.async_wait(asio::use_awaitable);
             }
+            if (complete_first_) co_return NodeOutput{};
             throw std::runtime_error("map fail-fast sentinel");
         }
         map_fail_first_active.fetch_add(1, std::memory_order_relaxed);
@@ -369,6 +372,7 @@ public:
 
 private:
     std::string name_;
+    bool complete_first_;
 };
 
 class BlockingNode final : public GraphNode {
@@ -398,6 +402,41 @@ private:
     std::string               name_;
     std::chrono::milliseconds duration_;
 };
+std::shared_future<void> typed_parent_release;
+
+class TypedParentGate final {
+public:
+    TypedParentGate() { typed_parent_release = release_.get_future().share(); }
+    ~TypedParentGate() {
+        open();
+        typed_parent_release = {};
+    }
+    void open() {
+        if (!opened_) {
+            release_.set_value();
+            opened_ = true;
+        }
+    }
+private:
+    std::promise<void> release_;
+    bool opened_ = false;
+};
+
+class TypedParentGateNode final : public GraphNode {
+public:
+    explicit TypedParentGateNode(std::string name)
+        : name_(std::move(name)), release_(typed_parent_release) {}
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        release_.wait();
+        input.ctx.cancel_token->throw_if_cancelled("typed parent gate");
+        co_return NodeOutput{};
+    }
+    std::string get_name() const override { return name_; }
+private:
+    std::string name_;
+    std::shared_future<void> release_;
+};
+
 class BarrierNode final : public GraphNode {
 public:
     explicit BarrierNode(std::string name) : name_(std::move(name)) {}
@@ -579,8 +618,8 @@ RegistrySnapshot runtime_registry(
         json{{"type", "object"}}, json::object());
     builder.add_node(
         manifest(ExecutableKind::Node, "runtime-map-fail-first", 'd'),
-        [](const std::string& name, const json&, const NodeContext&) {
-            return std::make_unique<MapFailFirstNode>(name);
+        [](const std::string& name, const json& config, const NodeContext&) {
+            return std::make_unique<MapFailFirstNode>(name, config.value("complete_first", false));
         },
         json{{"type", "object"}}, json::object());
 
@@ -588,6 +627,12 @@ RegistrySnapshot runtime_registry(
         manifest(ExecutableKind::Node, "runtime-blocking", '5'),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<BlockingNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-typed-parent-gate", 'd'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<TypedParentGateNode>(name);
         },
         json{{"type", "object"}}, json::object());
     builder.add_node(
@@ -1635,17 +1680,32 @@ public:
     std::function<void(const ProgramTransitionPublication&)> before_publication;
     std::function<std::optional<ProgramRunRecord>(std::string_view,
                                                  std::optional<ProgramRunRecord>)> filter_run_read;
+    std::function<std::optional<ProgramRunLineage>(
+        std::string_view, const std::function<std::optional<ProgramRunLineage>()>&)>
+        filter_run_lineage_read;
     std::function<std::vector<ProgramJavaScriptCommandJournalEntry>(
         std::string_view, std::vector<ProgramJavaScriptCommandJournalEntry>)> filter_command_read;
     mutable std::atomic<unsigned>                            synthesis_read_failures{0};
     mutable std::atomic<unsigned>                            command_head_misses{0};
+    bool javascript_reads_unavailable = false;
+    mutable std::atomic<unsigned> javascript_read_attempts{0};
+    std::optional<ProgramRunPublicationHead> load_run_publication_head(
+        std::string_view owner, std::string_view run) const override {
+        return filter_run_read
+            ? ProgramTransitionStore::load_run_publication_head(owner, run)
+            : inner_->load_run_publication_head(owner, run);
+    }
     std::optional<ProgramCommandPublicationHead> load_command_publication_head(
         std::string_view owner, std::string_view run) const override {
         auto remaining = command_head_misses.load();
         while (remaining &&
                !command_head_misses.compare_exchange_weak(remaining, remaining - 1)) {}
         if (remaining) return std::nullopt;
-        return ProgramTransitionStore::load_command_publication_head(owner, run);
+        // Forward native snapshots except when an adversarial read filter needs
+        // to observe the individual reads of the compatibility implementation.
+        return filter_run_read || filter_command_read || javascript_reads_unavailable
+            ? ProgramTransitionStore::load_command_publication_head(owner, run)
+            : inner_->load_command_publication_head(owner, run);
     }
     std::optional<ProgramRunRecord> load(std::string_view owner,
                                          std::string_view run_id) const override {
@@ -1671,6 +1731,10 @@ public:
     }
     std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
+        if (javascript_reads_unavailable) {
+            javascript_read_attempts.fetch_add(1);
+            return ProgramTransitionStore::load_javascript_commands(owner, run_id, sequence);
+        }
         auto commands = inner_->load_javascript_commands(owner, run_id, sequence);
         return filter_command_read ? filter_command_read(run_id, std::move(commands))
                                    : std::move(commands);
@@ -1693,7 +1757,8 @@ public:
         if (consume_replacement_readback_failure()) {
             throw std::runtime_error("simulated replacement lineage readback failure");
         }
-        return inner_->load_run_lineage(owner, run_id);
+        const auto read = [&] { return inner_->load_run_lineage(owner, run_id); };
+        return filter_run_lineage_read ? filter_run_lineage_read(run_id, read) : read();
     }
     std::optional<ProgramRunLineage> load_lineage_head(
         std::string_view owner, std::string_view lineage_id,
@@ -4100,12 +4165,41 @@ TEST(ProgramRuntimeTest, GraphSemanticMigrationAdapterRejectsFrontierRename) {
                  std::invalid_argument);
 }
 
+TEST(ProgramRuntimeTest, HeldSourceWallTimeUsesWholeAttemptElapsed) {
+    using Clock = std::chrono::steady_clock;
+    using neograph::program::detail::remaining_attempt_wall_time;
+    const auto started = Clock::time_point(std::chrono::microseconds(900));
+    // The journal clock crosses a millisecond boundary during this 100us hold.
+    // Adding its one-ms delta to the rounded attempt debit would charge 501ms,
+    // although both release and terminal settlement see only 500ms elapsed.
+    const auto held = started + std::chrono::microseconds(500050);
+    const auto released = held + std::chrono::microseconds(100);
+    const auto terminal = released + std::chrono::microseconds(100);
+    const auto at_hold = remaining_attempt_wall_time(1000, started, held);
+    const auto at_release = remaining_attempt_wall_time(1000, started, released);
+    const auto at_terminal = remaining_attempt_wall_time(1000, started, terminal);
+    EXPECT_EQ(at_hold, 500U);
+    EXPECT_EQ(at_release, 500U);
+    EXPECT_LE(at_terminal, at_release);
+    EXPECT_EQ(remaining_attempt_wall_time(
+                  1000, started, started + std::chrono::milliseconds(1000)), 0U);
+    EXPECT_EQ(remaining_attempt_wall_time(
+                  1000, started, started + std::chrono::milliseconds(1001)), 0U);
+}
+
 TEST(ProgramRuntimeTest, GraphMigrationTargetSaveFailureResumesHeldSource) {
     blocking_calls.store(0);
     followup_calls.store(0);
     auto checkpoints = std::make_shared<AdversarialCheckpointStore>();
     checkpoints->arm(AdversarialCheckpointStore::Mode::FailMigrationTargetSave);
-    AdmittedRuntime fixture(1, checkpoints);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    std::optional<ProgramTransitionPublication> release;
+    journal->after_publication = [&](const ProgramTransitionPublication& publication) {
+        if (publication.run_record.continuation().state == ContinuationState::Running &&
+            publication.journal_record.sequence > 1)
+            release = publication;
+    };
+    AdmittedRuntime fixture(4, checkpoints, journal);
     const auto version = fixture.admit("runtime-short-blocking");
 
     auto source = fixture.runtime->start(
@@ -4118,7 +4212,10 @@ TEST(ProgramRuntimeTest, GraphMigrationTargetSaveFailureResumesHeldSource) {
         std::runtime_error);
 
     const auto result = source.wait();
-    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed)
+        << (result.failure() ? result.failure()->code + ": " + result.failure()->message +
+                                   " @" + result.failure()->operation_id
+                             : "no failure detail");
     EXPECT_EQ(blocking_calls.load(), 1U);
     EXPECT_EQ(followup_calls.load(), 1U);
     EXPECT_EQ(checkpoints->migration_target_save_failures(), 1U);
@@ -4127,6 +4224,16 @@ TEST(ProgramRuntimeTest, GraphMigrationTargetSaveFailureResumesHeldSource) {
     ASSERT_TRUE(lineage);
     EXPECT_EQ(lineage->active_generation(), 1U);
     EXPECT_EQ(lineage->active_run_record_id(), source.snapshot().id());
+    ASSERT_TRUE(release);
+    EXPECT_EQ(result.remaining_budget(), lineage->remaining_budget());
+    EXPECT_LE(result.remaining_budget().wall_time_ms,
+              release->run_record.remaining_budget().wall_time_ms);
+    EXPECT_LT(release->run_record.remaining_budget().wall_time_ms, grant().wall_time_ms);
+    EXPECT_LE(result.remaining_budget().max_core_steps,
+              release->run_record.remaining_budget().max_core_steps);
+    EXPECT_EQ(result.usage().wall_time_ms + result.remaining_budget().wall_time_ms,
+              grant().wall_time_ms);
+    EXPECT_FALSE(journal->load_execution_lease("tenant:runtime", source.run_id()));
     EXPECT_FALSE(fixture.journal->load_graph_migration_capsule(
         "tenant:runtime", source.run_id(), lineage->id()));
     EXPECT_FALSE(fixture.journal->load(
@@ -8252,6 +8359,164 @@ TEST(ProgramRuntimeTest, ChildStartPinsReceiptAndPropagatesParentCancellation) {
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
     EXPECT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
 }
+
+TEST(ProgramRuntimeTest, TypedChildStoreDoesNotRequireJavaScriptHistory) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    journal->javascript_reads_unavailable = true;
+    journal->release_result();
+    AdmittedRuntime fixture(2, {}, journal);
+    TypedParentGate gate;
+    const auto linked = make_linked_child(fixture, "runtime-typed-parent-gate", "runtime-completed");
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                          "typed-parent-without-js", {}});
+    auto child = fixture.runtime->start_child(
+        "tenant:runtime", parent, linked.receipt, linked.child_version,
+        ProgramInvocation{json::object(), RunBudget{3333, 333, 333, 1, 1, 6, 0, 0, 0},
+                          "typed-child-without-js", {}});
+    const auto result = child.wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    const auto head = journal->load_run_publication_head("tenant:runtime", parent.run_id());
+    ASSERT_TRUE(head);
+    const auto children = head->run_record.children();
+    ASSERT_EQ(children.size(), 1U);
+    ASSERT_TRUE(children.front().terminal_result);
+    EXPECT_EQ(children.front().terminal_result->id(), result.id());
+    EXPECT_EQ(head->run_record.journal_head(), head->journal_record.id);
+    EXPECT_EQ(completed_calls.load(), 1U);
+    EXPECT_EQ(journal->javascript_read_attempts.load(), 0U);
+    EXPECT_TRUE(parent.cancel());
+    gate.open();
+    EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+
+TEST(ProgramRuntimeTest, TypedChildFallbackRetriesSiblingPublicationWithoutRedispatch) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    journal->javascript_reads_unavailable = true;
+    journal->release_result();
+    AdmittedRuntime fixture(2, {}, journal);
+    TypedParentGate gate;
+    auto document = program_document("runtime-typed-parent-gate");
+    document["program_schema_version"] = PROGRAM_SCHEMA_VERSION_V2;
+    document["declared_budget_requirements"][4]["minimum"] = 2;
+    document["declared_budget_requirements"][4]["maximum"] = 2;
+    document["declared_budget_requirements"][7]["minimum"] = 1;
+    document["declared_budget_requirements"][7]["maximum"] = 1;
+    document["declared_budget_requirements"][8]["minimum"] = 2;
+    document["declared_budget_requirements"][8]["maximum"] = 2;
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(document)), fixture.admit("runtime-completed"));
+    const std::string parent_id = "typed-fallback-parent";
+    auto armed = std::make_shared<std::atomic<bool>>(false);
+    auto sibling_completion = std::make_shared<std::optional<ProgramResult>>();
+    auto allow_completion = std::make_shared<std::atomic<bool>>(false);
+    journal->before_publication =
+        [parent_id, allow_completion](const ProgramTransitionPublication& value) {
+            if (value.run_record.run_id() != parent_id || allow_completion->load()) return;
+            for (const auto& child : value.run_record.children())
+                if (child.terminal_result)
+                    throw std::runtime_error("defer sibling completion until acquisition");
+        };
+    const RunBudget child_budget{3333, 333, 333, 1, 1, 6, 0, 0, 0};
+    auto advances = std::make_shared<std::atomic<unsigned>>(0);
+    const auto weak_journal = std::weak_ptr<BlockAfterJavaScriptResultJournal>(journal);
+    // Simulate another publisher committing the real sibling result after the
+    // fallback has captured its first parent record, before it reads the journal.
+    journal->filter_run_read =
+        [parent_id, sibling_completion, allow_completion, armed, advances, weak_journal](
+            std::string_view id, std::optional<ProgramRunRecord> record) {
+            if (id != parent_id || !record || !armed->load() || advances->exchange(1) != 0)
+                return record;
+            const auto store = weak_journal.lock();
+            const auto previous_journal = store->latest("tenant:runtime", parent_id);
+            const auto lineage = store->load_run_lineage("tenant:runtime", parent_id);
+            if (!previous_journal || !lineage)
+                throw std::runtime_error("Sibling publication has no durable parent head");
+            auto next_journal = ProgramJournalRecord::create(ProgramJournalRecordData{
+                record->journal_head(), parent_id, record->program_version_id(), record->bundle_id(),
+                previous_journal->sequence + 1, record->continuation(), record->remaining_budget(),
+                previous_journal->inflight_reservation, record->exact_checkpoint(),
+                record->updated_at_ms()});
+            ProgramRunRecordData data;
+            data.owner_scope = record->owner_scope();
+            data.run_id = record->run_id();
+            data.logical_run_id = record->logical_run_id();
+            data.program_version_id = record->program_version_id();
+            data.bundle_id = record->bundle_id();
+            data.binding_fingerprint = record->binding_fingerprint();
+            data.invocation = record->invocation();
+            data.child_depth = record->child_depth();
+            data.continuation = record->continuation();
+            data.remaining_budget = record->remaining_budget();
+            data.exact_checkpoint = record->exact_checkpoint();
+            data.exact_checkpoint_content_id = record->exact_checkpoint_content_id();
+            data.pending_input = record->pending_input();
+            data.pending_effect = record->pending_effect();
+            data.terminal_result = record->terminal_result();
+            data.fork_receipt = record->fork_receipt();
+            data.children = record->children();
+            data.children.front().state = ProgramChildState::Completed;
+            data.children.front().terminal_result = **sibling_completion;
+            data.journal_head = next_journal.id;
+            data.fork_source_run_id = record->fork_source_run_id();
+            data.fork_source_program_version_id = record->fork_source_program_version_id();
+            data.fork_source_checkpoint_id = record->fork_source_checkpoint_id();
+            data.recorded_binding_set_fingerprint = record->recorded_binding_set_fingerprint();
+            data.event_sequence = record->event_sequence();
+            data.effect_sequence = record->effect_sequence();
+            data.created_at_ms = record->created_at_ms();
+            data.updated_at_ms = record->updated_at_ms();
+            auto next_run = ProgramRunRecord::create(std::move(data));
+            auto next_lineage = ProgramRunLineage::create(ProgramRunLineageData{
+                lineage->owner_scope(), lineage->lineage_id(), lineage->root_run_id(),
+                lineage->active_generation(), lineage->active_generation_id(), next_run.id(),
+                next_run.journal_head(), lineage->remaining_budget(),
+                lineage->inflight_reservation(), lineage->id(), lineage->created_at_ms(),
+                next_run.updated_at_ms(), lineage->committed_descendant_budget()});
+            ProgramTransitionPublication publication{next_run, std::move(next_journal), {}, {}};
+            publication.run_lineage = std::move(next_lineage);
+            allow_completion->store(true);
+            if (store->compare_publish("tenant:runtime", record->journal_head(),
+                                       std::move(publication)) !=
+                ProgramTransitionPublishResult::Published)
+                throw std::runtime_error("Sibling completion publication was rejected");
+            return record;
+        };
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 2},
+                          "typed-fallback-parent", {}, parent_id});
+    auto sibling = fixture.runtime->start_child(
+        "tenant:runtime", parent, linked.receipt, linked.child_version,
+        ProgramInvocation{json::object(), child_budget, "typed-fallback-sibling", {}});
+    const auto sibling_result = sibling.wait();
+    ASSERT_EQ(sibling_result.status(), ProgramTerminalStatus::Completed)
+        << sibling_result.serialize_canonical();
+    ASSERT_EQ(parent.snapshot().children().front().state, ProgramChildState::Dispatched);
+    *sibling_completion = sibling_result;
+    armed->store(true);
+    auto child = fixture.runtime->start_child(
+        "tenant:runtime", parent, linked.receipt, linked.child_version,
+        ProgramInvocation{json::object(), child_budget, "typed-fallback-new-child", {}});
+    const auto result = child.wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(advances->load(), 1U);
+    EXPECT_EQ(completed_calls.load(), 2U);
+    EXPECT_EQ(journal->javascript_read_attempts.load(), 0U);
+    const auto children = parent.snapshot().children();
+    ASSERT_EQ(children.size(), 2U);
+    ASSERT_TRUE(children.front().terminal_result);
+    ASSERT_TRUE(children.back().terminal_result);
+    EXPECT_EQ(children.front().terminal_result->id(), sibling_result.id());
+    EXPECT_EQ(children.back().terminal_result->id(), result.id());
+    EXPECT_TRUE(parent.cancel());
+    gate.open();
+    EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+
 TEST(ProgramRuntimeTest, PlannerCannotOverrideResolvedChildBudget) {
     AdmittedRuntime fixture(2);
     const auto      linked = make_linked_child(fixture);
@@ -9363,10 +9628,12 @@ struct ChildSynthesisFixture {
             AdmittedRuntime::make_profile(fixture.registry, ExecutionGuarantee::Unmanaged, true);
         fixture.policy =
             AdmittedRuntime::make_policy(fixture.profile, ExecutionGuarantee::Unmanaged, true);
+        // Synthesis/recovery is bounded by the parent run budget, not an incidental
+        // per-operation latency cap; dedicated await tests exercise deadlines.
         const auto source = ProgramSource::from_javascript(
             "synthesis-parent.js", javascript_runtime_source("runtime-completed", durable ? R"JS(
                 yield ng.checkpoint({ready: true}, "synthesis:ready");
-                return yield ng.await(ng.spawn("generated-child", {}, "generated:spawn"), 5000, "generated:await");
+                return yield ng.await(ng.spawn("generated-child", {}, "generated:spawn"), undefined, "generated:await");
             )JS"
                                                                                           : R"JS(
                 yield ng.checkpoint({ready: true}, "synthesis:ready");
@@ -11389,6 +11656,106 @@ TEST_P(ProgramChildSynthesisPersistence,
                         .dump(2);
     }
 }
+
+namespace {
+using LineageRead = std::function<std::optional<ProgramRunLineage>()>;
+thread_local std::string last_loaded_run_id;
+
+// Routes the first lineage read that directly follows a read of the same run's record on one
+// non-test thread (the replacement generation's inherited-child check) through `action`.
+// `action` runs between those two reads, exactly where a concurrent publisher can interleave.
+std::shared_ptr<std::atomic<unsigned>> intercept_lineage_read_after_run_read(
+    RecursiveHarnessFixture&                                             test,
+    std::set<std::string>                                                skipped_runs,
+    std::function<std::optional<ProgramRunLineage>(const LineageRead&)> action) {
+    auto hits = std::make_shared<std::atomic<unsigned>>(0);
+    test.journal->filter_run_read = [](std::string_view             run_id,
+                                       std::optional<ProgramRunRecord> record) {
+        last_loaded_run_id.assign(run_id);
+        return record;
+    };
+    test.journal->filter_run_lineage_read =
+        [hits, skipped = std::move(skipped_runs), action = std::move(action),
+         test_thread = std::this_thread::get_id()](std::string_view run_id,
+                                                   const LineageRead& read) {
+            const bool follows_run_read = last_loaded_run_id == run_id;
+            last_loaded_run_id.clear();
+            if (!follows_run_read || std::this_thread::get_id() == test_thread ||
+                skipped.contains(std::string(run_id)) || hits->fetch_add(1) != 0)
+                return read();
+            return action(read);
+        };
+    return hits;
+}
+}  // namespace
+TEST_P(ProgramChildSynthesisPersistence, InheritedChildLookupSurvivesParentHeadAdvance) {
+    struct Completion {
+        std::mutex              mutex;
+        std::condition_variable condition;
+        bool                    published = false;
+    };
+    auto completion = std::make_shared<Completion>();
+    RecursiveHarnessFixture test(backend(), program_backend());
+    test.prepare_tree();
+    const std::set<std::string> predecessors{test.root->run_id(), test.child->run_id(),
+                                             test.grandchild->run_id()};
+    test.journal->after_publication = [observe = test.journal->after_publication, completion,
+                                       predecessors, grandchild = test.grandchild->run_id()](
+                                          const ProgramTransitionPublication& publication) {
+        observe(publication);
+        const auto& record = publication.run_record;
+        if (predecessors.contains(record.run_id())) return;
+        for (const auto& child : record.children()) {
+            if (child.child_run_id != grandchild || !child.terminal_result) continue;
+            {
+                std::lock_guard lock(completion->mutex);
+                completion->published = true;
+            }
+            completion->condition.notify_all();
+        }
+    };
+    auto release_grandchild =
+        std::make_shared<std::optional<ProgramHandoff>>(std::move(test.grandchild_hold));
+    test.grandchild_hold.reset();
+    // The grandchild finishes, and records its result on the replacement's run, between the
+    // replacement's read of its own record and its read of the lineage head.
+    const auto hits = intercept_lineage_read_after_run_read(
+        test, predecessors, [release_grandchild, completion](const LineageRead& read) {
+            release_grandchild->reset();
+            std::unique_lock lock(completion->mutex);
+            if (!completion->condition.wait_for(lock, std::chrono::seconds(30),
+                                                [&] { return completion->published; }))
+                throw std::runtime_error("Grandchild completion was never published");
+            lock.unlock();
+            return read();
+        });
+    test.replace_child();
+    const auto result = test.root->wait();
+    EXPECT_GE(hits->load(), 1U) << "the inherited-child lineage read was never intercepted";
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(result.output().at("generation"), 2);
+}
+
+
+TEST_P(ProgramChildSynthesisPersistence, InheritedChildRejectsSupersededParentGeneration) {
+    RecursiveHarnessFixture test(backend(), program_backend());
+    test.prepare_tree();
+    const std::set<std::string> predecessors{test.root->run_id(), test.child->run_id(),
+                                             test.grandchild->run_id()};
+    // The generation-1 head of the child lineage is what a lagging reader returns after
+    // generation 2 became active; the replacement must not act on it.
+    const auto superseded = test.journal->load_run_lineage("tenant:runtime", test.child->run_id());
+    ASSERT_TRUE(superseded);
+    ASSERT_EQ(superseded->active_generation(), 1U);
+    const auto hits = intercept_lineage_read_after_run_read(
+        test, predecessors, [superseded](const LineageRead&) { return superseded; });
+    test.replace_child();
+    const auto result = test.replacement->wait();
+    EXPECT_GE(hits->load(), 1U) << "the inherited-child lineage read was never intercepted";
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed) << result.serialize_canonical();
+    ASSERT_TRUE(result.failure());
+    EXPECT_EQ(result.failure()->code, "P_CHILD_GENERATION");
+}
 #endif
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS) && !defined(_WIN32)
 TEST_P(ProgramChildSynthesisPersistence, RecursiveTreeReopensAfterNestedReplacementCommit) {
@@ -11434,6 +11801,9 @@ TEST_P(ProgramChildSynthesisPersistence, RecursiveTreeReopensAfterNestedReplacem
         auto grant = ProgramChildSynthesisGrant::parse(encoded.get<std::string>());
         recovered.grants.emplace(grant.id(), grant);
     }
+    const auto child_before_recovery =
+        recovered.journal->load_run_lineage("tenant:runtime", child);
+    ASSERT_TRUE(child_before_recovery);
     recovered.root    = recovered.host.runtime->reconnect("tenant:runtime", root);
     const auto result = recovered.root->wait();
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
@@ -11447,7 +11817,14 @@ TEST_P(ProgramChildSynthesisPersistence, RecursiveTreeReopensAfterNestedReplacem
     EXPECT_EQ(active.snapshot().logical_run_id(), child);
     ASSERT_EQ(active.snapshot().children().size(), 1U);
     EXPECT_EQ(active.snapshot().children().front().child_run_id, grandchild);
-    EXPECT_EQ(active.wait().remaining_budget().max_dynamic_compiles, 1U);
+    const auto child_remaining = active.wait().remaining_budget();
+    EXPECT_EQ(child_remaining.max_dynamic_compiles, 1U);
+    EXPECT_LE(child_remaining.wall_time_ms,
+              child_before_recovery->remaining_budget().wall_time_ms);
+    EXPECT_LE(child_remaining.model_tokens,
+              child_before_recovery->remaining_budget().model_tokens);
+    EXPECT_LE(child_remaining.monetary_microunits,
+              child_before_recovery->remaining_budget().monetary_microunits);
     input.close();
     std::filesystem::remove(database + ".tree");
 }
@@ -12155,3 +12532,423 @@ TEST_P(ProgramChildSynthesisPersistence, RecursiveConcurrentReconnectUsesTheRegi
     EXPECT_EQ(completed_calls.load(), 10U);
 }
 #endif
+
+namespace {
+
+json join_scope_test_await_document(json document) {
+    // Only the root owns the sealed Core name/definition; the Await body is an operation.
+    auto body = std::move(document["root"]);
+    json root{{"op", "await"},
+              {"name", std::move(body["name"])},
+              {"definition", std::move(body["definition"])},
+              {"timeout_ms", 1000}};
+    auto operation = json::object();
+    for (const auto& [key, value] : body.items()) {
+        if (key != "name" && key != "definition") operation[key] = value;
+    }
+    root["body"] = std::move(operation);
+    document["root"] = std::move(root);
+    return document;
+}
+
+json join_scope_test_child_document(std::string node_type) {
+    auto document = parallel_map_child_document(std::move(node_type));
+    // The immutable 3s link must cover the child's declared maximum, not just its minimum.
+    document["declared_budget_requirements"][0]["maximum"] = 3000;
+    return document;
+}
+
+std::unique_ptr<ProgramRuntime> join_scope_test_runtime(
+    AdmittedRuntime& fixture, std::shared_ptr<TaskGraphFragmentStore> fragments = {}) {
+    RuntimeConfig config{
+        fixture.catalog, fixture.checkpoints, {}, fixture.journal,
+        fixture.scheduler_thread_count,
+        [bindings = fixture.child_bindings](std::string_view owner,
+                                            std::string_view version,
+                                            std::string_view binding) {
+            return bindings->resolve(owner, version, binding);
+        }};
+    config.task_graph_fragments = fragments ? std::move(fragments) : fixture.task_graph_fragments;
+    config.task_graph_policy_resolver =
+        [](std::string_view owner, std::string_view,
+           std::string_view) -> std::optional<TaskGraphExpansionPolicy> {
+            if (owner != "tenant:runtime") return std::nullopt;
+            auto policy = expansion_policy();
+            policy.limits.per_task_budget_ceiling.wall_time_ms = 3000;
+            policy.limits.total_budget_ceiling.wall_time_ms = 9000;
+            policy.limits.total_budget_ceiling.output_bytes = 12288;
+            policy.template_allowlist.front().budget_ceiling.wall_time_ms = 3000;
+            return policy;
+        };
+    config.child_quota = fixture.child_quota;
+    config.hook_runtime = fixture.hook_runtime;
+    config.core_tool_grant_resolver = fixture.core_tool_grant_resolver;
+    config.core_provider_call_resolver = fixture.core_provider_call_resolver;
+    config.require_core_provider_call_broker = fixture.require_core_provider_call_broker;
+    return std::make_unique<ProgramRuntime>(std::move(config));
+}
+
+json join_scope_test_proposal(bool dependent_last) {
+    json tasks = json::array();
+    for (const auto id : {"first", "second", "third"}) {
+        json dependencies = json::array();
+        if (dependent_last && std::string_view(id) == "third")
+            dependencies = json::array({"first", "second"});
+        tasks.push_back(json{{"id", id},
+                             {"template", "runtime-map/v1"},
+                             {"input_bindings", json::array()},
+                             {"depends_on", std::move(dependencies)},
+                             {"budget", json{{"wall_time_ms", 3000}, {"model_tokens", 1}}}});
+    }
+    return json{{"schema_version", 1}, {"tasks", std::move(tasks)},
+                {"join", json{{"kind", "all"}}}};
+}
+
+// This wraps the real in-memory durable store and fails a real dispatch publication
+// only after the first two child nodes have entered. It exposes a partial-launch
+// exception while their expansion task coroutines still borrow the launcher's locals.
+class JoinPartialLaunchStore final : public TaskGraphFragmentStore {
+public:
+    JoinPartialLaunchStore(std::shared_ptr<InMemoryTaskGraphFragmentStore> inner,
+                          std::shared_future<void> children_entered)
+        : inner_(std::move(inner)), children_entered_(std::move(children_entered)) {}
+
+    TaskGraphPublishResult publish(const TaskGraphFragmentRecord& record) override {
+        return inner_->publish(record);
+    }
+    std::optional<TaskGraphFragmentRecord> load(std::string_view id) const override {
+        return inner_->load(id);
+    }
+    std::optional<TaskGraphFragmentRecord> find_published_lineage(
+        std::string_view owner, std::string_view parent, std::string_view operation) const override {
+        return inner_->find_published_lineage(owner, parent, operation);
+    }
+    std::optional<TaskGraphFragmentRecord> find_published(
+        std::string_view owner, std::string_view parent, std::string_view operation,
+        std::string_view proposal) const override {
+        return inner_->find_published(owner, parent, operation, proposal);
+    }
+    TaskGraphPublishResult compare_update(std::string_view id, std::uint64_t revision,
+                                         const TaskGraphFragmentRecord& record) override {
+        const auto active = std::count_if(record.tasks.begin(), record.tasks.end(),
+                                         [](const auto& task) {
+                                             return task.state == TaskGraphTaskState::Active;
+                                         });
+        if (active == 3 && !failed.exchange(true)) {
+            if (children_entered_.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
+                throw std::runtime_error("join partial launch children did not enter");
+            throw std::runtime_error("join partial launch sentinel");
+        }
+        return inner_->compare_update(id, revision, record);
+    }
+
+    std::atomic<bool> failed{false};
+
+private:
+    std::shared_ptr<InMemoryTaskGraphFragmentStore> inner_;
+    std::shared_future<void> children_entered_;
+};
+
+struct JoinLateAttachmentGate {
+    JoinLateAttachmentGate() : cancellation(cancelled.get_future().share()) {}
+
+    void observe(const ProgramTransitionPublication& publication) {
+        const auto& record = publication.run_record;
+        if (record.child_depth() != 1) return;
+        if (record.terminal_result()) {
+            if (record.terminal_result()->status() == ProgramTerminalStatus::Cancelled &&
+                !cancellation_observed.exchange(true))
+                cancelled.set_value();
+            return;
+        }
+        bool block = false;
+        {
+            std::lock_guard lock(mutex);
+            if (std::find(children.begin(), children.end(), record.run_id()) != children.end())
+                return;
+            children.push_back(record.run_id());
+            block = children.size() == 2;
+        }
+        if (!block) return;
+        blocked.set_value();  // Second child's publication exists, but launch_child has not returned.
+        if (cancellation.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
+            throw std::runtime_error("late attachment did not observe scoped child cancellation");
+        released_after_cancellation.store(true);
+    }
+
+    std::mutex mutex;
+    std::vector<std::string> children;
+    std::promise<void> blocked;
+    std::promise<void> cancelled;
+    std::shared_future<void> cancellation;
+    std::atomic<bool> cancellation_observed{false};
+    std::atomic<bool> released_after_cancellation{false};
+};
+
+}  // namespace
+
+TEST(ProgramRuntimeTest, AwaitScopedParallelMapTimeoutCancelsAndDrainsChildren) {
+    blocking_calls.store(0);
+    blocking_active.store(0);
+    blocking_peak.store(0);
+    // BarrierNode's promise reports two real node entries; its synchronous barrier is
+    // deliberately disabled so a startup/cancellation failure cannot strand a pool thread.
+    overlap_barrier.reset();
+    overlap_ready = std::make_shared<std::promise<void>>();
+    auto entered = overlap_ready->get_future();
+    AdmittedRuntime fixture(4);
+    auto document = parallel_map_document(json{{"literal", json::array({1, 2, 3})}}, 3);
+    document = join_scope_test_await_document(std::move(document));
+    document["declared_budget_requirements"][4]["maximum"] = 8;
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(document)),
+        fixture.admit_document(join_scope_test_child_document("runtime-barrier")),
+        BudgetLimits{3000, 333, 333, 1, 1, 6, 0, 0, 0});
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 2, 8, 20, 0, 1, 3},
+                          "trace-await-scoped-parallel-map", {}});
+    auto done = std::async(std::launch::async, [parent] { return parent.wait(); });
+    const auto entered_status = entered.wait_for(std::chrono::seconds(10));
+    EXPECT_EQ(entered_status, std::future_status::ready);
+    if (entered_status != std::future_status::ready) (void)parent.cancel();
+    const auto settled = done.wait_for(std::chrono::seconds(2));
+    EXPECT_EQ(settled, std::future_status::ready)
+        << "scoped Await timeout must cancel children rather than await their 3s run deadlines";
+    if (settled != std::future_status::ready) (void)parent.cancel();
+    const auto result = done.get();  // Root cancellation above also drains the failing-before case.
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut) << result.serialize_canonical();
+    ASSERT_TRUE(result.failure());
+    EXPECT_EQ(result.failure()->code, "P_AWAIT_TIMEOUT");
+    EXPECT_EQ(blocking_calls.load(), 2U);  // No dispatch of the third item after scoped cancellation.
+    EXPECT_EQ(blocking_peak.load(), 2U);
+    EXPECT_EQ(blocking_active.load(), 0U); // No borrowed child work survives parent completion.
+    const auto children = parent.snapshot().children();
+    ASSERT_EQ(children.size(), 2U);
+    for (const auto& child : children) {
+        EXPECT_EQ(child.state, ProgramChildState::Cancelled);
+        EXPECT_EQ(fixture.runtime->reconnect("tenant:runtime", child.child_run_id).wait().status(),
+                  ProgramTerminalStatus::Cancelled);
+    }
+    overlap_ready.reset();
+}
+
+TEST(ProgramRuntimeTest, AwaitScopedExpansionTimeoutCancelsActiveBatchAndStopsPendingTasks) {
+    blocking_calls.store(0);
+    blocking_active.store(0);
+    blocking_peak.store(0);
+    overlap_barrier.reset();
+    overlap_ready = std::make_shared<std::promise<void>>();
+    auto entered = overlap_ready->get_future();
+    AdmittedRuntime fixture(4);
+    fixture.runtime = join_scope_test_runtime(fixture);
+    auto document = expand_task_graph_document(join_scope_test_proposal(true), 3, 4, 2, 2);
+    document = join_scope_test_await_document(std::move(document));
+    document["declared_budget_requirements"][4]["maximum"] = 8;
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(document)),
+        fixture.admit_document(join_scope_test_child_document("runtime-barrier")),
+        BudgetLimits{3000, 333, 333, 1, 1, 6, 0, 0, 0});
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json{{"item", "seed"}},
+                          RunBudget{10000, 1000, 1000, 2, 8, 20, 1, 2, 3},
+                          "trace-await-scoped-expansion", {}});
+    auto done = std::async(std::launch::async, [parent] { return parent.wait(); });
+    const auto entered_status = entered.wait_for(std::chrono::seconds(10));
+    EXPECT_EQ(entered_status, std::future_status::ready);
+    if (entered_status != std::future_status::ready) (void)parent.cancel();
+    const auto settled = done.wait_for(std::chrono::seconds(2));
+    EXPECT_EQ(settled, std::future_status::ready)
+        << "scoped expansion cancellation must settle before its 3s task budget expires";
+    if (settled != std::future_status::ready) (void)parent.cancel();
+    const auto result = done.get();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut) << result.serialize_canonical();
+    ASSERT_TRUE(result.failure());
+    EXPECT_EQ(result.failure()->code, "P_AWAIT_TIMEOUT");
+    EXPECT_EQ(blocking_calls.load(), 2U);
+    EXPECT_EQ(blocking_peak.load(), 2U);
+    EXPECT_EQ(blocking_active.load(), 0U);
+    const auto children = parent.snapshot().children();
+    ASSERT_EQ(children.size(), 2U);
+    for (const auto& child : children) {
+        EXPECT_EQ(child.state, ProgramChildState::Cancelled);
+        EXPECT_EQ(fixture.runtime->reconnect("tenant:runtime", child.child_run_id).wait().status(),
+                  ProgramTerminalStatus::Cancelled);
+    }
+    const auto fragment = fixture.task_graph_fragments->find_published_lineage(
+        "tenant:runtime", result.run_id(), "root.0");
+    ASSERT_TRUE(fragment);
+    EXPECT_TRUE(fragment->terminal);
+    ASSERT_EQ(fragment->tasks.size(), 3U);
+    for (const auto& task : fragment->tasks) {
+        EXPECT_EQ(task.state, TaskGraphTaskState::Cancelled);
+        if (task.task_id == "third") {
+            EXPECT_EQ(task.attempt, 0U);
+            EXPECT_FALSE(task.child_run_id);
+        }
+    }
+    overlap_ready.reset();
+}
+
+TEST(ProgramRuntimeTest, ExpansionPartialLaunchFailureDrainsAlreadyBorrowingTasks) {
+    blocking_calls.store(0);
+    blocking_active.store(0);
+    blocking_peak.store(0);
+    overlap_barrier.reset();
+    overlap_ready = std::make_shared<std::promise<void>>();
+    auto entered = overlap_ready->get_future().share();
+    AdmittedRuntime fixture(4);
+    auto fragments = std::make_shared<JoinPartialLaunchStore>(fixture.task_graph_fragments, entered);
+    fixture.runtime = join_scope_test_runtime(fixture, fragments);
+    auto document = expand_task_graph_document(join_scope_test_proposal(false), 3, 4, 2, 3);
+    document["declared_budget_requirements"][4]["maximum"] = 8;
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(document)),
+        fixture.admit_document(join_scope_test_child_document("runtime-barrier")),
+        BudgetLimits{3000, 333, 333, 1, 1, 6, 0, 0, 0});
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json{{"item", "seed"}},
+                          RunBudget{10000, 1000, 1000, 3, 8, 20, 1, 2, 3},
+                          "trace-expansion-partial-launch-drain", {}});
+    auto done = std::async(std::launch::async, [parent] { return parent.wait(); });
+    const auto settled = done.wait_for(std::chrono::seconds(2));
+    EXPECT_EQ(settled, std::future_status::ready);
+    if (settled != std::future_status::ready) (void)parent.cancel();
+    const auto result = done.get();
+    EXPECT_TRUE(fragments->failed.load());
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed) << result.serialize_canonical();
+    EXPECT_NE(result.serialize_canonical().find("join partial launch sentinel"), std::string::npos);
+    EXPECT_EQ(blocking_calls.load(), 2U);
+    EXPECT_EQ(blocking_peak.load(), 2U);
+    EXPECT_EQ(blocking_active.load(), 0U);
+    const auto children = parent.snapshot().children();
+    ASSERT_EQ(children.size(), 2U);
+    for (const auto& child : children) {
+        EXPECT_EQ(child.state, ProgramChildState::Cancelled);
+        EXPECT_EQ(fixture.runtime->reconnect("tenant:runtime", child.child_run_id).wait().status(),
+                  ProgramTerminalStatus::Cancelled);
+    }
+    overlap_ready.reset();
+}
+
+TEST(ProgramRuntimeTest, AwaitScopedParallelMapTimeoutCancelsLateAttachedChild) {
+    blocking_calls.store(0);
+    blocking_active.store(0);
+    blocking_peak.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    journal->release_result();
+    auto gate = std::make_shared<JoinLateAttachmentGate>();
+    auto blocked = gate->blocked.get_future();
+    journal->after_publication = [gate](const auto& publication) { gate->observe(publication); };
+    AdmittedRuntime fixture(4, {}, journal);
+    auto document = parallel_map_document(json{{"literal", json::array({1, 2})}}, 2);
+    document = join_scope_test_await_document(std::move(document));
+    document["declared_budget_requirements"][4]["maximum"] = 8;
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(document)),
+        fixture.admit_document(join_scope_test_child_document("runtime-blocking")),
+        BudgetLimits{3000, 333, 333, 1, 1, 6, 0, 0, 0});
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 2, 8, 20, 0, 1, 2},
+                          "trace-await-scoped-late-attachment", {}});
+    auto done = std::async(std::launch::async, [parent] { return parent.wait(); });
+    const auto blocked_status = blocked.wait_for(std::chrono::seconds(10));
+    EXPECT_EQ(blocked_status, std::future_status::ready);
+    if (blocked_status != std::future_status::ready) (void)parent.cancel();
+    const auto settled = done.wait_for(std::chrono::seconds(2));
+    EXPECT_EQ(settled, std::future_status::ready)
+        << "the scoped timeout must cancel the first child, then its late-attached sibling";
+    if (settled != std::future_status::ready) (void)parent.cancel();
+    const auto result = done.get();
+    journal->after_publication = {};
+    EXPECT_TRUE(gate->cancellation_observed.load());
+    EXPECT_TRUE(gate->released_after_cancellation.load());
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut) << result.serialize_canonical();
+    ASSERT_TRUE(result.failure());
+    EXPECT_EQ(result.failure()->code, "P_AWAIT_TIMEOUT");
+    EXPECT_GE(blocking_calls.load(), 1U);
+    EXPECT_EQ(blocking_active.load(), 0U);
+    const auto children = parent.snapshot().children();
+    ASSERT_EQ(children.size(), 2U);
+    for (const auto& child : children) {
+        EXPECT_EQ(child.state, ProgramChildState::Cancelled);
+        EXPECT_EQ(fixture.runtime->reconnect("tenant:runtime", child.child_run_id).wait().status(),
+                  ProgramTerminalStatus::Cancelled);
+    }
+}
+
+TEST(ProgramRuntimeTest, AwaitScopedExpansionPreservesSettledTasksWhenCancellingTheirBatch) {
+    for (const bool complete_first : {false, true}) {
+        SCOPED_TRACE(complete_first ? "completed-and-cancelled" : "failed-and-cancelled");
+        map_fail_first_calls.store(0);
+        map_fail_first_active.store(0);
+        AdmittedRuntime fixture(4);
+        fixture.runtime = join_scope_test_runtime(fixture);
+        auto document = expand_task_graph_document(join_scope_test_proposal(true), 3, 4, 2, 2);
+        document = join_scope_test_await_document(std::move(document));
+        document["declared_budget_requirements"][4]["maximum"] = 8;
+        auto child_document = join_scope_test_child_document("runtime-map-fail-first");
+        child_document["root"]["definition"]["nodes"]["work"]["complete_first"] = complete_first;
+        child_document["root"]["definition"]["channels"]["value"]["initial"] = "mixed-completed";
+        const auto linked = link_child_versions(
+            fixture, fixture.admit_document(std::move(document)),
+            fixture.admit_document(std::move(child_document)),
+            BudgetLimits{3000, 333, 333, 1, 1, 6, 0, 0, 0});
+        auto parent = fixture.runtime->start(
+            "tenant:runtime", linked.parent_version,
+            ProgramInvocation{json{{"item", "seed"}},
+                              RunBudget{10000, 1000, 1000, 2, 8, 20, 1, 2, 3},
+                              "trace-mixed-scoped-expansion", {}});
+        auto done = std::async(std::launch::async, [parent] { return parent.wait(); });
+        const auto settled = done.wait_for(std::chrono::seconds(2));
+        EXPECT_EQ(settled, std::future_status::ready);
+        if (settled != std::future_status::ready) (void)parent.cancel();
+        const auto result = done.get();
+        EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut);
+        ASSERT_TRUE(result.failure());
+        EXPECT_EQ(result.failure()->code, "P_AWAIT_TIMEOUT");
+        EXPECT_EQ(map_fail_first_calls.load(), 2U);
+        EXPECT_EQ(map_fail_first_active.load(), 0U);
+        const auto fragment = fixture.task_graph_fragments->find_published_lineage(
+            "tenant:runtime", result.run_id(), "root.0");
+        ASSERT_TRUE(fragment);
+        EXPECT_TRUE(fragment->terminal);
+        ASSERT_EQ(fragment->tasks.size(), 3U);
+        unsigned preserved = 0, cancelled = 0;
+        for (const auto& task : fragment->tasks) {
+            EXPECT_NE(task.state, TaskGraphTaskState::Pending);
+            EXPECT_NE(task.state, TaskGraphTaskState::Active);
+            if (task.task_id == "third") {
+                EXPECT_EQ(task.state, TaskGraphTaskState::Cancelled);
+                EXPECT_EQ(task.attempt, 0U);
+                EXPECT_FALSE(task.child_run_id);
+                continue;
+            }
+            ASSERT_TRUE(task.child_run_id);
+            const auto child = fixture.runtime->reconnect(
+                "tenant:runtime", *task.child_run_id).wait();
+            if (child.status() == ProgramTerminalStatus::Cancelled) {
+                ++cancelled;
+                EXPECT_EQ(task.state, TaskGraphTaskState::Cancelled);
+            } else if (complete_first) {
+                ++preserved;
+                EXPECT_EQ(child.status(), ProgramTerminalStatus::Completed);
+                EXPECT_EQ(task.state, TaskGraphTaskState::Completed);
+                ASSERT_TRUE(task.output);
+                EXPECT_EQ(task.output->at("channels").at("value").at("value"), "mixed-completed");
+                EXPECT_FALSE(task.failure);
+            } else {
+                ++preserved;
+                EXPECT_EQ(child.status(), ProgramTerminalStatus::Failed);
+                EXPECT_EQ(task.state, TaskGraphTaskState::Failed);
+                EXPECT_TRUE(task.failure);
+                EXPECT_FALSE(task.output);
+            }
+        }
+        EXPECT_EQ(preserved, 1U);
+        EXPECT_EQ(cancelled, 1U);
+    }
+}

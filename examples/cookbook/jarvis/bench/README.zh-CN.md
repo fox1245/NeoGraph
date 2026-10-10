@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/README.md locale=zh-CN source_sha256=3985b561c728357e75ec0cab68d2711e19334c47a588c07f2b836c6ce3fa8eb3 -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/README.md locale=zh-CN source_sha256=654b29f033cd6ac7d9dc23dfc92c5a26cf75810462da7c3da4f3df39e9c192dc -->
 # JARVIS 编排基准测试 — NeoGraph 与 LangGraph 对比
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -57,6 +57,8 @@ OPENROUTER_API_KEY=... bash bench/run_bench_e2e.sh
 OPENROUTER_API_KEY=... bash bench/run_bench_proxy.sh
 ```
 
+Jarvis 只通过 TLS 发送 API 密钥，因此运行脚本在 nginx 代理（`nginx-openrouter.conf`，端口 8443）终结 TLS，并为每次运行生成一次性 CA 和服务器证书（主机需要 `openssl`；CA 和密钥放在临时目录，退出时删除）。两个客户端都调用 `https://jarvis-openrouter-proxy:8443/openrouter/v1` 并使用该 CA bundle：Jarvis 通过 `OPENROUTER_CA_FILE`，LangGraph 对应实现通过 `SSL_CERT_FILE`。代理记录分析器按位置解析的 `$msec $request_time $upstream_connect_time $upstream_header_time $upstream_response_time $status`。轮次未完成或子进程失败时 driver 以非零代码退出；代理日志轮转失败也会终止运行脚本。
+
 用代理边界测量解决端到端测试“离散度掩盖差异”的问题：在 Groq 前面放置 nginx，以**记录每次调用的上游（WAN+Groq）时间**，并将轮次往返时间减去该时间后仅比较残差（图+HTTP客户端序列化+本地MCP+管道）。这不是统计学的变通方法（增加 ABBA/重试次数），而是直接测量并减去噪声源本身——即使各轮次落在 Groq 不同的时间窗口，结果也不会发生波动。
 
 |  | 每轮均值/上游 | **残余p50** | 残余p90 | 残差 min~max |
@@ -66,7 +68,7 @@ OPENROUTER_API_KEY=... bash bench/run_bench_proxy.sh
 
 - 原始 wall-clock 显示本次“LG 快 189ms”（Groq 给了 NG 较差的窗口——上游平均延迟 +196ms）。残余 residual 显示 **NG p50 为 −11.1ms**——清晰证明了方法恢复了信号，无论噪声方向 noise direction。
 - 残余 p50 与模拟回合预测匹配（图 0.4 vs 3.1ms + HTTP 栈差异）—— 载荷交叉验证成功。
-- Call↔turn 映射基于顺序（验证调用计数 = 2×回合计数，日志顺序 = 回合顺序）。时间窗口映射具有 WSL2 墙钟步进（运行期间测得 -0.8s 逆转），仅作为后备。驱动时间戳也源自单调锚点。
+- Call↔turn 映射基于顺序（验证调用计数 = 2×回合计数，日志顺序 = 回合顺序）。时间窗口映射具有 历史墙钟步进（运行期间测得 -0.8s 逆转），仅作为后备。驱动时间戳也源自单调锚点。
 - 陷阱提示：Groq(Cloudflare) 以403阻止`Python-urllib` UA——容易误认为是代理问题。真正的冒烟测试使用curl/httpx系列UA。
 
 ## 流式TTFT轮次（2026-07-05）
@@ -90,12 +92,14 @@ OPENROUTER_API_KEY=... bash bench/run_bench_proxy.sh
 - 提示词（共享persona.txt）·决策验证（聊天降级）·内存格式（JsonFileStore）·逐字保护·stdout标记一致。仅框架和语言不同。
 - LangGraph侧使用惯用技术栈（langgraph + langchain-openai）。
 - 测量是容器内部的 `driver.py`（stdin注入 → `[jarvis:tts]` 标记往返传递）。
+- 初始输出 cap：两侧使用名义回复 router 300 / synthesis 220 token，加上 1024 token 的 reasoning 余量并请求低 reasoning effort。只有 C++ 侧对已完成的空 `MaxTokens` 响应用加倍 cap 重新请求一次。额外 provider 调用会使分析器“每轮两次调用”的残差假设失效，不得将不匹配警告视为可比较的测量结果。
 
 ## 文件
 
 - `langgraph_twin.py` — LangGraph 对应实现（相同拓扑·协议，当 MCP_URL 设置时通过官方 mcp SDK 持久会话进行真实工具调用）
 - `driver.py` / `analyze.py` — 测量 · 对比表
-- `Dockerfile.neograph` / `Dockerfile.langgraph` / `Dockerfile.mcp` — 基准图像
-- `run_bench.sh`(core) / `run_bench_e2e.sh`(real tool E2E) — 运行程序或Runner
-- `turns_mock.txt`(200) / `turns_openrouter.txt`(20) / `turns_e2e.txt`(24) — 轮次集合
+- `Dockerfile.neograph` / `Dockerfile.langgraph` / `Dockerfile.mcp` / `Dockerfile.proxy` — 基准图像
+- `run_bench.sh`(core) / `run_bench_e2e.sh`(real tool E2E) / `run_bench_proxy.sh`(TLS 代理边界测量) — 运行程序或Runner
+- `nginx-openrouter.conf` — 代理配置；`analyze_proxy.py` / `analyze_ttft.py` — 其日志分析器
+- `turns_mock.txt`(200) / `turns_openrouter.txt`(20) / `turns_e2e.txt`(24) — 轮次集合；`turns_openrouter.txt` 是从另外两个文件中原样挑选的纯聊天轮次
 - `../config-bench/` — 空目录(聊天路径已修复) / `../config-bench-e2e/` — 共享MCP目录

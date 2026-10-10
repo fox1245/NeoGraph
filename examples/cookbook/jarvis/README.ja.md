@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=ja source_sha256=19e3e557881645edb44b26d64c73b2521d02ea519b6ee8302486440bfe61c23e -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=ja source_sha256=202c2f70184732cf88d2eced559f2402f528d8b4f18448b59802d41c826310fc -->
 # JARVIS — 音声駆動型メタ・オーケストレーター
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -8,6 +8,12 @@
 C++ルーター・合成器・専門家フィクスチャは型付き `ProviderRequest`、`sp::Message`、`sp::Event` と完全な不変 `sp::Outcome` (`sp::runtime::Result`) を使用し、旧文字列応答APIではない。`src/provider_support.h` のJarvis/coder/researcher mockは固定ルーターJSON、ユーザーテキストecho、明示的な架空の研究応答を返す。キーやネットワーク提供者は不要だが、本物の研究・推論ではない。以下の既存設定/プロファイルのパスを、この文書変更で作成・修正することはない。
 
 ローカル音声は任意で、選択したwhisper/Moonshineモデル、ONNX Runtime/Supertonic資産、miniaudio、利用可能なマイク・スピーカーが必要。テキスト/mock動作は音声動作の証拠ではない。クラウド不要はローカル/mockのみ。ライブには承認された `OPENROUTER_API_KEY`、ネットワーク・提供者容量が必要で、プロンプト・会話メモリ・添付ツール/委譲結果をOpenRouterへ送信する。モデルは固定され、ネイティブ要求のZDRは地域内常駐保証ではない。キーをログ・リポジトリへ入れない。nullableトークン使用量は請求額ではなく、費用には現行のエンドポイント/モデル価格と実際の請求対象使用量が必要。
+
+ライブの router と synthesizer の出力 cap（名目返答 300 / 220 トークン）には 1,024 トークンの reasoning 余裕を加え、低い reasoning effort を要求する。隠れた reasoning と可視テキストで cap を共有するモデルのための余裕である。完了済みの空の `MaxTokens` 応答だけを cap 二倍で一度再要求し、それ以外の空の完了応答や provider failure は再要求せずエラーにする。空の返答を成功した発話ターンとして扱わない。`OPENROUTER_BASE_URL` で指定するゲートウェイは `https://` が必須で、`OPENROUTER_CA_FILE` はベンチマークプロキシなどの私的 TLS ゲートウェイ用 PEM CA バンドルを選択する。
+
+切断された invalid call を含む tool-call 出力では、空テキストの再要求を行わない。
+JSON router は解析前に text-only の `EndTurn` / `StopSequence` 完了だけを許可し、
+切断出力は有効な JSON に見えても失敗する。既存の不正 JSON fallback は正常完了テキストだけに適用する。
 
 `[jarvis:ttft]` は最初の非空 `sp::PartDelta` の `PartKind::Text`・`DeltaChannel::Content` で発生し、使用量・推論・ヘッダーイベントでは発生しない。最初の合成テキストであり、実際のTTS音声開始ではない。Python REPL driver は protocol client です。pybind benchmark は移行済み型付き binding を使い、別の実行証拠が必要です。現在の実行証拠は実際のCLI挨拶、永続化した合成メモリturn、正常なEOF終了に限定される。マイク入力・ASR・TTS・pybindベンチやvendor推論の検証ではない。以下の時間・音声/live実行主張は過去の記録であり、現在の移行qualificationではない。
 
@@ -227,14 +233,14 @@ python3 scripts/demo_mcp_server.py 8888        # Time/weather/calc
 ## 音声スタックの詳細
 
 ### ライブマイク (miniaudio + Silero VAD)
-`JARVIS_MIC=1` または config `use_microphone:true`。キャプチャワーカースレッドは512サンプルウィンドウ上でSilero VADを実行し、音声の開始/終了（200ms プリロール、500ms サイレンス終了）を検出する。**バックプレッシャー**: 推論中はキャプチャを破棄して、TTS エコー、古い発話、発話開始ノイズをブロックする。デバイス故障 (WSL2 マイク切断など) は自動的に stdin へフォールバックする。チューニング: `JARVIS_VAD_THRESHOLD` (デフォルト 0.5), 監視: `JARVIS_MIC_DEBUG=1`.
+`JARVIS_MIC=1` または config `use_microphone:true`。キャプチャワーカースレッドは512サンプルウィンドウ上でSilero VADを実行し、音声の開始/終了（200ms プリロール、500ms サイレンス終了）を検出する。**バックプレッシャー**: 推論中はキャプチャを破棄して、TTS エコー、古い発話、発話開始ノイズをブロックする。デバイス故障 (マイク切断など) は自動的に stdin へフォールバックする。チューニング: `JARVIS_VAD_THRESHOLD` (デフォルト 0.5), 監視: `JARVIS_MIC_DEBUG=1`.
 
 ### STT — 2つの選択肢(`stt.type` による設定切り替え)
 - **`whisper_stt`** (デフォルト): whisper.cpp。`language:"auto"` は99言語を自動検出 → **話者の言語での応答とTTS**。**言語一貫性**: store.prefs でネイティブ言語を維持するため、短い発話が外国語として誤認識されても突然切り替わらない（切り替わるには一貫した誤認識が必要）。
 - **`moonshine_stt`**: Moonshine-tiny ONNX（27M、supertonic と ORT を共有）。エッジ、低レイテンシー、韓国語向け。言語固有モデルのため、言語は固定。
 
 ### GPU高速化 (whisper.cpp ROCm/HIP)
-同梱の whisper.cpp は CPU 専用です — 大規模モデルは CPU で約32秒かかります（11秒のクリップ）。AMD GPU（gfx1201=R9700、ROCm≥7.2）では、GGML_HIP ビルド用に `bash scripts/build_whisper_hip.sh` を実行してください → **約7秒（4.5倍）**。run_jarvis.sh は ROCm ランタイムと WSL dxg を自動的に読み込みます。
+同梱の whisper.cpp は CPU 専用です — 大規模モデルは CPU で約32秒かかります（11秒のクリップ）。AMD GPU（対応する ROCm target）では、GGML_HIP ビルド用に `bash scripts/build_whisper_hip.sh` を実行してください → **約7秒（4.5倍）**。run_jarvis.sh は ROCm ランタイムと WSL dxg を自動的に読み込みます。
 
 ## ベンチマーク — NeoGraph 対 LangGraph（`bench/`）
 

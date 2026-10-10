@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=c581af0e3041a7d6e48040bfd17085c2297a0c796d34547f6528392ec2b7ce27 -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=85a3546974bbd5902afc2699f9b604f5e78bee6be80a1bdbd378207443c4545b -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -139,11 +139,13 @@ sp::runtime::Result first_call(
 
 已准备的请求只能消费一次。`sp::runtime::Result` 拥有不可变的 `sp::Outcome`，其中包含 `Completion` 或 `Failure`。需要有序消息和消息部分、原生续接、原始观测、停止证据、尝试元数据或失败时的部分结果时，应保留该 outcome。用量计数可以为空：缺失表示未知，观测到的零值仍是零。用量报告和预算扣账是不同的记录；可移植报告不能授予支出权限。
 
+`usage.provider_cost` 保留服务商报告的 nanoUSD 金额、各字段 status、source、quality、BYOK 证据，以及解析后 binary64 值的向上舍入信息。它不是发票、token 数、估算或支出权限。缺失金额元数据在 canonical v2 JSON 中仍省略；报告的零和 `is_byok=false` 仍是证据。未知货币、冲突或格式错误的报告不会转换为 USD 或 token。blocking provider 调用仍驱动单一 async SDK pipeline，并拒绝 SDK event-loop/callback worker 重入。
+
 `first_call` 返回后，可使用 `std::get_if<sp::Completion>(result.get())` 检查完成结果的 `messages`、`stop` 和 `usage`。否则，`std::get<sp::Failure>(*result)` 提供 `error.kind`、`error.safe_message`、重试证据，以及 `partial` 中的部分消息和用量。例如，`completion.usage.output_total` 缺失表示输出 token 数未知；计数存在且其 `value` 为 `0` 则表示用量为零。显示文本只是所保留 outcome 的一种视图。
 
 `ChatMessage`、`ChatTool` 和 JSON 是可移植投影。真实的原生历史可以与原生检查点伴随数据一起保留在内存中；持久化原生历史需要真正的 `sp::NativeArchive`，以及受保护的、所有者私有的保管机制。可移植 JSON 无法重建这类权限。归档通过独立密钥认证保管关系；它既不是加密，也不是服务商签发者身份认证。不要公开归档内容、密钥、原生二进制数据或原始线路观测。[提供方参考](docs/reference-en.md)和[迁移指南](docs/migration-v0.4-to-v1.0.md)介绍了持久化失败、观察器、托管预算银行和重放边界。
 
-这次类型化接口切换移除了 `CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器和 Responses WebSocket 路径。C++ 使用方需要重新编译，并迁移自定义提供方；没有兼容别名。SDK 包版本为 `0.2.0`，接口处于 alpha 阶段，接口修订号为 5，共享 ABI 为 5。超时控制改变了公开布局，SDK 使用方、NeoGraph 和 Python 扩展必须一起重新构建。Native archive v3 与 portable JSON v2 不变；这一代并不表示 SDK 接口已经稳定。
+这次类型化接口切换移除了 `CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器和 Responses WebSocket 路径。C++ 使用方需要重新编译，并迁移自定义提供方；没有兼容别名。SDK 包为 `0.3.0` alpha，固定到公开合并提交 `3b88e4ba020c3a4d39ff0660014e7292b516b7cb`，接口修订号和共享 ABI 均为 6。金额用量元数据改变了公开布局，SDK 使用方、NeoGraph 和 Python 扩展必须一起重新构建。Native archive v3 与 portable JSON v2 不变；这一代并不表示 SDK 接口已经稳定。
 
 ## Python
 
@@ -212,7 +214,7 @@ NeoGraph 适用于具有明确状态转换、分支或循环、并行任务、�
 使用已安装软件包的项目只需链接已启用且实际需要的组件：
 
 ```cmake
-find_package(SchemaProvider 0.2.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.3.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```

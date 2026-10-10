@@ -353,11 +353,11 @@ def worker(config_path):
     wheel_images = sorted(after.intersection(native))
     for component in SDK_COMPONENTS:
         matches = [path for path in wheel_images if re.fullmatch(
-                   r"libsp_" + component + r"\.5(?:\.[0-9a-f]{6,})?\.dylib", Path(path).name)]
-        require(len(matches) == 1, "SDK interface5 component not uniquely mapped from wheel: " + component)
+                   r"libsp_" + component + r"\.6(?:\.[0-9a-f]{6,})?\.dylib", Path(path).name)]
+        require(len(matches) == 1, "SDK interface6 component not uniquely mapped from wheel: " + component)
         require(native[matches[0]]["id"] is not None and re.fullmatch(
-                r"libsp_" + component + r"\.5(?:\.[0-9a-f]{6,})?\.dylib",
-                Path(native[matches[0]]["id"]).name), "SDK component install identity is not interface5")
+                r"libsp_" + component + r"\.6(?:\.[0-9a-f]{6,})?\.dylib",
+                Path(native[matches[0]]["id"]).name), "SDK component install identity is not interface6")
     for library in ("libc++", "libc++abi", "libunwind"):
         matches = [path for path in wheel_images if re.fullmatch(
                    re.escape(library) + r"\.1(?:\.[0-9]+)*(?:\.[0-9a-f]{6,})?\.dylib", Path(path).name)]

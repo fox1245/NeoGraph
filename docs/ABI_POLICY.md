@@ -31,9 +31,9 @@ CheckpointStore retains its legacy layout for the explicit adapter migration. Sy
 
 ## SDK and Python boundaries
 
-Core requires external `SchemaProvider::runtime`, even with LLM nodes disabled. The selected SDK release is `0.2.0` alpha, interface revision `5`, shared-library ABI revision `5`, with out-of-line capability checks; this is not a stable-interface claim. Install matching SDK components together. Its `libsp_*.so.5` generation is separate from NeoGraph's loader generation and from Python's `abi3` wheel tag.
+Core requires external `SchemaProvider::runtime`, even with LLM nodes disabled. The selected SDK release is `0.3.0` alpha, public merged commit `3b88e4ba020c3a4d39ff0660014e7292b516b7cb`, interface revision `6`, shared-library ABI revision `6`, with out-of-line capability checks; this is not a stable-interface claim. Install matching SDK components together. Its `libsp_*.so.6` generation is separate from NeoGraph's loader generation and from Python's `abi3` wheel tag.
 
-Interface 5 adds optional connect, first-byte and idle bounds and changes public request/options layouts. Rebuild SDK consumers, NeoGraph and Python extensions together; interface-4 headers or libraries are not interchangeable with interface 5. Native archive v3 / `spna3` and portable JSON v2 remain independent, unchanged formats. Earlier interface-3/4 measurements retain their original scope and do not qualify interface 5.
+Interface 6 adds fixed-size provider-reported monetary metadata to public usage layouts and uses one async pipeline for blocking and async SDK calls. Rebuild SDK consumers, NeoGraph and Python extensions together; earlier headers or libraries are not interchangeable with interface 6. Blocking wrappers continue rejecting SDK event-loop and callback-worker re-entry. Native archive v3 / `spna3` and portable JSON v2 remain independent, unchanged formats. Canonical outcome v2 usage adds optional `provider_cost` only when monetary metadata is present; absence-only historical records retain their original bytes and do not fabricate costs. Earlier interface-3/4/5 measurements retain their original scope and do not qualify interface 6.
 
 Python exposes the typed provider contract, including prepared handles and immutable outcomes; there is no legacy completion shim. Install the extension and its matching libraries as one wheel. Do not replace a bundled NeoGraph or SDK library individually. Graph ChatMessage convenience values do not replace native ProviderMessage custody. See [Python binding](python-binding.md).
 
@@ -43,7 +43,7 @@ The wheel bundles the seven matching SDK runtime shared libraries, including the
 
 On Linux, a shared library has a versioned file, a major-generation SONAME link and an unversioned linker name. NeoGraph shared libraries use `$ORIGIN` for sibling dependencies. macOS `.dylib`/`@loader_path` and Windows unsuffixed `.dll` naming remain packaging conventions; they do not qualify the new SDK runtime. Static archives have no SONAME and do not remove transitive link requirements.
 
-Recorded interface-3 SDK runtime/archive qualification covers Linux/POSIX, not interface 4. Existing macOS/Windows package metadata remains distinct from dependency qualification; no WASM runtime qualification is established. A wheel tag describes Python/ABI/platform compatibility, not proof that every runtime path was exercised. See the [PyPA tag specification](https://packaging.python.org/en/latest/specifications/platform-compatibility-tags/).
+Recorded interface-3 SDK runtime/archive qualification covers Linux/POSIX, not interface 6. Existing macOS/Windows package metadata remains distinct from dependency qualification; no WASM runtime qualification is established. A wheel tag describes Python/ABI/platform compatibility, not proof that every runtime path was exercised. See the [PyPA tag specification](https://packaging.python.org/en/latest/specifications/platform-compatibility-tags/).
 
 ## Verification evidence
 

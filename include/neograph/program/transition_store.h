@@ -160,6 +160,12 @@ enum class ProgramTransitionFaultPoint : std::uint8_t {
     BeforeCommit,
 };
 
+/** A run record and journal from one committed publication, without optional command history. */
+struct ProgramRunPublicationHead {
+    ProgramRunRecord run_record;
+    ProgramJournalRecord journal_record;
+};
+
 /** One publication head and its newest command from the same committed snapshot. */
 struct ProgramCommandPublicationHead {
     ProgramRunRecord run_record;
@@ -179,6 +185,15 @@ public:
                                                   std::string_view run_id) const = 0;
     virtual std::optional<ProgramJournalRecord> latest(std::string_view owner_scope,
                                                         std::string_view run_id) const = 0;
+    /**
+     * Read one coherent record/journal pair without requiring JavaScript support.
+     * Native stores capture one snapshot. The compatibility implementation fences
+     * virtual reads with a second record read and retries at most three times when
+     * that head changes. Absence or exhausted contention fails closed; read errors
+     * propagate. Acquisition grants no publication authority and retries no effects.
+     */
+    virtual std::optional<ProgramRunPublicationHead> load_run_publication_head(
+        std::string_view owner_scope, std::string_view run_id) const;
     virtual std::vector<ProgramEvent> load_events(std::string_view owner_scope,
                                                    std::string_view run_id,
                                                    std::uint64_t after_sequence = 0) const = 0;
@@ -304,6 +319,9 @@ public:
     InMemoryProgramTransitionStore& operator=(InMemoryProgramTransitionStore&&) noexcept;
     InMemoryProgramTransitionStore(const InMemoryProgramTransitionStore&) = delete;
     InMemoryProgramTransitionStore& operator=(const InMemoryProgramTransitionStore&) = delete;
+
+    std::optional<ProgramRunPublicationHead> load_run_publication_head(
+        std::string_view owner_scope, std::string_view run_id) const override;
 
     std::optional<ProgramCommandPublicationHead> load_command_publication_head(
         std::string_view owner_scope, std::string_view run_id) const override;

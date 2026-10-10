@@ -207,6 +207,11 @@ private:
     }
     void add_report(const sp::Usage& usage) {
         if (!has_report_) { reports_ = usage; has_report_ = true; return; }
+        // This bank aggregates tokens, not monetary reports. On a second report,
+        // the first call's cost is no longer a valid snapshot of the aggregate.
+        // Exact money evidence remains in each retained provider outcome.
+        if (!provider_codec::provider_cost_absent(reports_.provider_cost))
+            reports_.provider_cost = {};
         auto fold = [&](std::string_view counter, std::optional<sp::Count>& target,
                         const std::optional<sp::Count>& value) {
             if (!target || !value) { target.reset(); return; }
@@ -330,6 +335,50 @@ inline void from_json(const json& j, ChatMessage& msg) {
 }
 
 
+/**
+ * @brief How provider stop reasons reach callers.
+ *
+ * A finished model turn is a `sp::Completion` whose `stop` is an
+ * `sp::StopReason`: the normalized `kind` (`sp::StopKind`) next to `raw`, the
+ * vendor's own terminal string/status, which is always retained unchanged.
+ * `outcome_or_throw()` throws `ProviderFailure` only for `sp::Failure`; a
+ * `Completion` is returned for every kind below, `Unknown` included, so
+ * callers that need success semantics must inspect `stop.kind` themselves.
+ *
+ *  - `EndTurn`       the model finished normally (OpenAI `stop`, Anthropic
+ *                    `end_turn`, Gemini `STOP`, Responses/Interactions `completed`).
+ *  - `ToolUse`       the turn ends awaiting client tool results. A normal
+ *                    end (`end_turn`/`STOP`) with client tool-call intent is
+ *                    normalized to this, including invalid calls; server-only calls are not.
+ *  - `MaxTokens`     output limit reached (`length`, `max_tokens`, `MAX_TOKENS`,
+ *                    Responses `max_output_tokens`, Interactions `incomplete`).
+ *                    A tool call cut by the limit arrives as an `InvalidToolCall`
+ *                    part, not as a failure.
+ *  - `StopSequence`  a caller stop sequence matched (Anthropic `stop_sequence`);
+ *                    `StopReason::sequence` is set exactly for this kind.
+ *  - `ContentFilter` the vendor filtered the output (`content_filter`, Responses
+ *                    incomplete `content_filter`). Gemini safety terminals
+ *                    (`SAFETY`, `RECITATION`, `BLOCKLIST`, ...) map to this kind
+ *                    but the Gemini codec reports them as `sp::Failure`
+ *                    (`RemoteFailure`) carrying the partial output instead.
+ *  - `Refusal`       the model declined (Anthropic `refusal` with optional
+ *                    `StopReason::details`, Chat `refusal`, a Responses refusal item).
+ *  - `PauseTurn`     the vendor paused a long server-side turn; resend the
+ *                    history to continue (Anthropic/Chat `pause_turn`).
+ *  - `ContextLimit`  the context window was exceeded mid-turn (Anthropic
+ *                    `model_context_window_exceeded`, Chat `context_length_exceeded`).
+ *  - `MalformedCall` the model produced an unusable tool call (Gemini
+ *                    `MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`,
+ *                    `TOO_MANY_TOOL_CALLS`); a `Completion`, not a failure.
+ *  - `Unknown`       a terminal value no table maps (for example Gemini
+ *                    `OTHER`, or an endpoint-specific string). It is never
+ *                    promoted to `EndTurn`; `raw` identifies it.
+ *
+ * Typed `Failure` (never a stop kind) is also used for OpenAI-compatible
+ * `finish_reason: "error"`, Gemini `MALFORMED_RESPONSE` and
+ * `MISSING_THOUGHT_SIGNATURE`, and Interactions `failed`/`cancelled`.
+ */
+
 class NEOGRAPH_API ProviderFailure final : public std::runtime_error {
 public:
     explicit ProviderFailure(std::shared_ptr<const sp::Outcome> outcome)
@@ -364,7 +413,8 @@ inline bool provider_failure_proves_not_sent(const sp::Failure& failure) noexcep
         usage.quality == sp::UsageQuality::Consistent &&
         !usage.input_total && !usage.output_total && !usage.total && !usage.provider_reported_total &&
         !usage.input_uncached && !usage.cache_read && !usage.cache_write && !usage.reasoning &&
-        usage.extra.empty() && usage.conflicts.empty();
+        usage.extra.empty() && usage.conflicts.empty() &&
+        provider_codec::provider_cost_absent(usage.provider_cost);
 }
 inline std::string outcome_text(const sp::Outcome& outcome) {
     std::string text;

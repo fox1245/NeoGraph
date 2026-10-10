@@ -553,6 +553,41 @@ asio::awaitable<sp::runtime::Result> Provider::dispatch_operation(PreparedProvid
         if (error && error != asio::error::operation_aborted) throw asio::system_error(error);
     }
 }
+// Normalize only portable client results; native replay and mixed messages are
+// indivisible, and a system message remains a boundary even when lifted out.
+static void group_tool_results(std::vector<sp::Message>& messages) {
+    const auto eligible = [](const sp::Message& message) {
+        if ((message.role != sp::Role::Tool && message.role != sp::Role::User) ||
+            message.native || message.wire_output || message.parts.empty())
+            return false;
+        for (const auto& part : message.parts)
+            if (!std::holds_alternative<sp::ToolResult>(part)) return false;
+        return true;
+    };
+    std::size_t write = 0;
+    for (std::size_t read = 0; read < messages.size();) {
+        auto end = read + 1;
+        auto parts = messages[read].parts.size();
+        if (eligible(messages[read])) {
+            while (end < messages.size() && eligible(messages[end])) {
+                parts += messages[end].parts.size();
+                ++end;
+            }
+        }
+        if (end > read + 1) {
+            auto& destination = messages[read].parts;
+            destination.reserve(parts);
+            for (auto next = read + 1; next < end; ++next)
+                for (auto& part : messages[next].parts)
+                    destination.push_back(std::move(part));
+        }
+        if (write != read) messages[write] = std::move(messages[read]);
+        ++write;
+        read = end;
+    }
+    messages.resize(write);
+}
+
 ProviderRequest make_provider_request(
     const Provider& provider, std::string model, std::vector<sp::Message> messages,
     std::vector<ChatTool> tools, ProviderControls controls, ProviderMode mode) {
@@ -610,7 +645,6 @@ ProviderRequest make_provider_request(
         sp::messages::Request request;
         request.model = std::move(model);
         request.messages = std::move(messages);
-        for (auto& message : request.messages) if (message.role == sp::Role::Tool) message.role = sp::Role::User;
         request.system = std::move(controls.system);
         request.account_scope = std::move(controls.account_scope);
         request.max_tokens = controls.max_output_tokens;
@@ -709,6 +743,9 @@ void set_provider_request_messages(ProviderRequest& request, std::vector<sp::Mes
         } else if constexpr (std::is_same_v<T, sp::responses::Request>) {
             payload.messages = std::move(messages);
         } else {
+            if constexpr (std::is_same_v<T, sp::messages::Request> ||
+                          std::is_same_v<T, sp::gemini::Request>)
+                group_tool_results(messages);
             std::vector<sp::Message> conversation;
             conversation.reserve(messages.size());
             for (auto& message : messages) {

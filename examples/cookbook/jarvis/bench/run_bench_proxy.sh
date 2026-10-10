@@ -2,6 +2,12 @@
 # 경계 계측 벤치 — OpenRouter 앞에 nginx 프록시를 세워 콜별 상류 시간을
 # 로깅하고, 턴 왕복에서 차감한 "잔차"로 공정 비교.
 #
+# Jarvis 는 API 키를 평문 http 로 보내지 않는다(키 동봉 엔드포인트는 TLS 필수).
+# 그래서 프록시는 TLS(8443)로 받고, 이 스크립트가 실행마다 만드는 일회용 CA 를
+# 두 클라이언트에 신뢰 앵커로 준다: Jarvis 는 OPENROUTER_CA_FILE(libcurl
+# CAINFO), LangGraph 쌍둥이는 SSL_CERT_FILE(httpx). CA/키는 임시 디렉토리에만
+# 있고 종료 시 삭제된다.
+#
 # 사용:  OPENROUTER_API_KEY=... bash bench/run_bench_proxy.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
@@ -10,8 +16,23 @@ OUT="${BENCH_OUT:-/tmp/jarvis-bench-out}"
 mkdir -p "$OUT/proxylogs"
 NET=jarvis-bench-net
 LIMITS=(--cpus=2 --memory=2g)
+PROXY_HOST=jarvis-openrouter-proxy
 
 [[ -n "${OPENROUTER_API_KEY:-}" ]] || { echo "OPENROUTER_API_KEY 필요"; exit 1; }
+command -v openssl >/dev/null || { echo "openssl 필요 (일회용 프록시 CA 생성)"; exit 1; }
+
+CERTS="$(mktemp -d)"
+trap 'rm -rf "$CERTS"; docker rm -f jarvis-mcp-demo jarvis-openrouter-proxy >/dev/null 2>&1 || true' EXIT
+mkdir "$CERTS/proxy"
+openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=jarvis-bench-ca" \
+    -keyout "$CERTS/ca.key" -out "$CERTS/ca.pem" \
+    -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign"
+openssl req -newkey rsa:2048 -nodes -subj "/CN=$PROXY_HOST" \
+    -keyout "$CERTS/proxy/server.key" -out "$CERTS/server.csr"
+printf 'subjectAltName=DNS:%s\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n' \
+    "$PROXY_HOST" > "$CERTS/server.ext"
+openssl x509 -req -days 2 -in "$CERTS/server.csr" -CA "$CERTS/ca.pem" -CAkey "$CERTS/ca.key" \
+    -CAcreateserial -extfile "$CERTS/server.ext" -out "$CERTS/proxy/server.pem"
 
 echo "[proxy-bench] 이미지 빌드..."
 docker build -q -f "$JARVIS/bench/Dockerfile.neograph"  -t jarvis-bench-neograph  "$ROOT"
@@ -23,22 +44,24 @@ docker network create "$NET" 2>/dev/null || true
 docker rm -f jarvis-mcp-demo jarvis-openrouter-proxy 2>/dev/null || true
 docker run -d --rm --name jarvis-mcp-demo   --network "$NET" jarvis-bench-mcp
 docker run -d --rm --name jarvis-openrouter-proxy --network "$NET" \
-    -v "$OUT/proxylogs":/logs jarvis-bench-proxy
-trap 'docker rm -f jarvis-mcp-demo jarvis-openrouter-proxy >/dev/null 2>&1 || true' EXIT
+    -v "$OUT/proxylogs":/logs -v "$CERTS/proxy":/certs:ro jarvis-bench-proxy
 
+# 프록시는 일회용 CA 로 신뢰 체인·호스트명까지 검증해서 대기 — 인증서 문제를
+# 첫 턴의 늦은 TLS 오류로 만나지 않게 한다.
 echo "[proxy-bench] MCP/프록시 대기..."
 for i in $(seq 1 30); do
-    docker run --rm --network "$NET" jarvis-bench-mcp python3 -c \
-        "import socket; socket.create_connection(('jarvis-mcp-demo',8888),2); socket.create_connection(('jarvis-openrouter-proxy',8080),2)" \
+    docker run --rm --network "$NET" -v "$CERTS/ca.pem":/certs/ca.pem:ro jarvis-bench-mcp python3 -c \
+        "import socket, ssl; socket.create_connection(('jarvis-mcp-demo',8888),2); ctx = ssl.create_default_context(cafile='/certs/ca.pem'); ctx.wrap_socket(socket.create_connection(('$PROXY_HOST',8443),2), server_hostname='$PROXY_HOST').close()" \
         2>/dev/null && break
     sleep 1
     [[ $i -eq 30 ]] && { echo "기동 실패"; exit 1; }
 done
 
 # The benchmark sends OPENROUTER_BASE_URL to both implementations so the
-# provider call is routed through the same local proxy.
+# provider call is routed through the same local TLS proxy. Both select the
+# throw-away CA bundle (Jarvis: OPENROUTER_CA_FILE, LangGraph/httpx: SSL_CERT_FILE).
 OPENROUTER_ENV=(-e OPENROUTER_API_KEY="$OPENROUTER_API_KEY"
-                -e OPENROUTER_BASE_URL=http://jarvis-openrouter-proxy:8080/openrouter/v1
+                -e OPENROUTER_BASE_URL="https://$PROXY_HOST:8443/openrouter/v1"
                 -e JARVIS_DEBUG=1
                 -e JARVIS_MEMORY_FILE=/tmp/mem.json)
 
@@ -46,14 +69,15 @@ OPENROUTER_ENV=(-e OPENROUTER_API_KEY="$OPENROUTER_API_KEY"
 # 취약)을 제거. mv + nginx reopen 으로 프레임워크별 독립 로그.
 rotate_log() {  # $1 = 대상 파일명
     docker exec jarvis-openrouter-proxy sh -c \
-        "mv /logs/openrouter.log /logs/$1 2>/dev/null; nginx -s reopen" || true
+        "mv /logs/openrouter.log /logs/$1 && nginx -s reopen"
     sleep 1
 }
 # 시작 전 잔여 로그 비우기 (이전 스모크/런 오염 차단)
-docker exec jarvis-openrouter-proxy sh -c ': > /logs/openrouter.log; nginx -s reopen' || true
+docker exec jarvis-openrouter-proxy sh -c ': > /logs/openrouter.log && nginx -s reopen'
 
 echo "[proxy-bench] NeoGraph 라운드..."
 docker run --rm "${LIMITS[@]}" --network "$NET" -v "$OUT":/out "${OPENROUTER_ENV[@]}" \
+    -e OPENROUTER_CA_FILE=/certs/ca.pem -v "$CERTS/ca.pem":/certs/ca.pem:ro \
     -v "$JARVIS/bench":/src/examples/cookbook/jarvis/bench:ro \
     -v "$JARVIS/config-bench-e2e":/src/examples/cookbook/jarvis/config-bench-e2e:ro \
     jarvis-bench-neograph python3 bench/driver.py \
@@ -64,6 +88,7 @@ rotate_log openrouter_neograph.log
 
 echo "[proxy-bench] LangGraph 라운드..."
 docker run --rm "${LIMITS[@]}" --network "$NET" -v "$OUT":/out "${OPENROUTER_ENV[@]}" \
+    -e SSL_CERT_FILE=/certs/ca.pem -v "$CERTS/ca.pem":/certs/ca.pem:ro \
     -e BENCH_MODE=api -e MCP_URL=http://jarvis-mcp-demo:8888 \
     -e JARVIS_MCP_CATALOG=/app/config-bench-e2e/mcp_catalog.json \
     -v "$JARVIS/bench":/app/bench:ro \

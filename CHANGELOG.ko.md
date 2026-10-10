@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=7173060d8b4f0dae592d6132b51be14df00f78234e043963b75a322694a69734 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=d66c5fb755e764bf04126d21d3c20a1f5ac68eecd504e95e452f635261ef21f7 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -15,7 +15,8 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 변경됨
 
-- **Core 엔진 속도를 v0.11.1 수준으로 되돌렸습니다.** 기준 노트북에서 3노드 순차 벤치마크는 실행당 10.19 µs에서 6.29 µs로(v0.11.1: 6.10), parallel-3 벤치마크는 30.03 µs에서 15.66 µs로(15.80) 줄었고, 스레드마다 엔진 하나를 쓸 때의 스레드당 시간도 2·4·8 스레드에서 v0.11.1과 같습니다. 손실의 원인은 fan-out 가지마다 만든 strand, 노드마다 하는 `RunContext` 복사, 컨텍스트 바인딩 레지스트리를 감싸던 프로세스 전역 mutex(이제 64개 샤드), 여러 JSON 문서로 만들던 상태 스냅샷, 아무것도 반환하지 않는 코루틴 호출(Send가 없는 `run_sends_async`, 체크포인트가 없을 때의 `record_pending_write_async`), 스케줄러의 정렬 집합이었습니다. 커밋별 측정값은 #343에 있습니다.
+- **병합된 SchemaProvider PR #16의 `3b88e4ba020c3a4d39ff0660014e7292b516b7cb`를 채택하며 SDK 0.3.0 EXACT, interface/shared ABI 6로 재빌드합니다.** 아래에 기록한 이전 interface-5 SDK 단계의 현재 요구사항을 대체합니다. blocking 호출은 단일 async SDK pipeline을 쓰고 event-loop/callback worker 재진입 거부를 유지합니다. outcome, usage 관측, journal, native archive 재로드 및 Python 타입 값은 공급자 보고 금액, status, source, evidence, rounding과 충돌을 보존합니다. canonical v2 JSON은 금액 메타데이터가 전혀 없을 때만 `provider_cost`를 생략하여 과거 부재 기록의 bytes를 유지합니다. 0과 BYOK false를 포함한 금액 근거가 있으면 알 수 없는 token hold를 proven-not-sent로 환불하지 않습니다. 금액은 token 또는 지출 권한으로 변환하지 않습니다. Native archive v3와 portable JSON v2는 그대로입니다.
+- **Core 엔진 속도를 v0.11.1 수준으로 되돌렸습니다.** 과거 측정에서 3노드 순차 벤치마크는 실행당 10.19 µs에서 6.29 µs로(v0.11.1: 6.10), parallel-3 벤치마크는 30.03 µs에서 15.66 µs로(15.80) 줄었고, 스레드마다 엔진 하나를 쓸 때의 스레드당 시간도 2·4·8 스레드에서 v0.11.1과 같습니다. 손실의 원인은 fan-out 가지마다 만든 strand, 노드마다 하는 `RunContext` 복사, 컨텍스트 바인딩 레지스트리를 감싸던 프로세스 전역 mutex(이제 64개 샤드), 여러 JSON 문서로 만들던 상태 스냅샷, 아무것도 반환하지 않는 코루틴 호출(Send가 없는 `run_sends_async`, 체크포인트가 없을 때의 `record_pending_write_async`), 스케줄러의 정렬 집합이었습니다. 커밋별 측정값은 #343에 있습니다.
 - **`neograph::core`만 링크하는 프로그램은 더 이상 libcurl을 로드하지 않습니다.** `neograph::core`가 SchemaProvider 런타임을 링크하고 그 런타임이 libcurl 전송 계층을 링크했기 때문에, 그래프만 실행하는 프로세스도 libcurl과 그것이 필요로 하는 약 25개 라이브러리를 로드했습니다(벤치마크 시작 시 상주 메모리 12.7 MB, v0.11.1은 5.0 MB). 이제 전송 계층은 `neograph::llm`만 링크하며, 같은 벤치마크는 7.7 MB로 시작하고 공유 라이브러리는 36개에서 7개로 줄었습니다. `neograph::llm` 없이 `sp::runtime::Client`를 직접 만드는 코드는 `SchemaProvider::transport`를 링크해야 합니다. SchemaProvider는 이 분리를 담은 리비전으로 고정됩니다. #347 참고.
 - **SchemaProvider 0.2.0 alpha, interface/shared-library 세대 5로 재빌드해야 합니다.** SDK에 선택적 연결·첫 응답·유휴 타임아웃이 추가되었습니다. 기본적으로 꺼져 있고 전체 deadline을 늘리지 않으며, `ProviderRequest::options`(`sp::runtime::RunOptions`)로 호출마다 설정할 수 있습니다. 그래프 LLM 노드는 아직 이를 노출하지 않습니다. 다섯 API 계열의 실전송 수명주기 검증과 독립적인 비공개 테스트 fixture로 SDK #2·#3·#4를 해결합니다. 일치하는 SDK header/library로 C++ 사용 코드와 Python wheel을 다시 빌드해야 하며 native archive는 v3, portable JSON은 v2 그대로입니다.
 - **`neograph::core`만 링크하는 프로그램은 더 이상 libcrypto를 로드하지 않습니다.** SDK가 SHA-256, HMAC-SHA256, OS 난수원 사용을 직접 구현하므로 SDK 런타임이 OpenSSL을 링크하지 않으며 archive와 policy 바이트는 그대로입니다. 그래프만 실행하는 벤치마크(`bench_neograph 1 1 1`)는 상주 메모리 7.7 MB 대신 6.3 MB로 시작하고(Linux x86_64, 31회 중앙값) 공유 라이브러리는 7개에서 6개로 줄어 5.0 MB로 시작하던 v0.11.1과 같아졌습니다. OpenSSL을 직접 호출하는 코드는 `OpenSSL::Crypto`를 스스로 링크해야 합니다.
@@ -26,6 +27,15 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 수정됨
 
+- **Anthropic Messages와 Gemini의 병렬 client-tool 결과를 하나의 turn으로 유지합니다.** 인접한 portable 결과 전용 메시지는 family 인코딩 전에 묶되 mixed·native·turn 경계는 유지합니다. 다른 API family와 저장된 history는 바꾸지 않습니다(#311).
+- **History compaction은 권한과 미완료 근거를 보존합니다.** 전달받은 typed controls를 그대로 쓰고 정상 종료한 비어 있지 않은 요약만 채택합니다. 거부된 outcome은 기록하되 history를 자르지 않고, 요약을 system 지시가 아닌 user 유래 내용으로 표시합니다. 진짜 native replay prefix는 보호합니다(#314, #325).
+- **Program fan-out join은 대기 전에 도착한 완료를 잃지 않습니다.** 완료 상태를 유지하고, scoped 취소는 새 dispatch를 막고 현재 또는 늦게 연결된 자식을 취소합니다. 일부 launch 실패는 빌린 상태를 쓰는 모든 producer를 drain한 뒤 전파합니다. Await는 동기적으로 진입할 수 있는 자식 publication보다 deadline을 먼저 등록합니다(#341).
+- **Child generation과 보류된 migration은 일관된 durable head를 사용합니다.** generation은 immutable admitted lineage로 확인하며 record/journal snapshot이 서로 다른 publication을 섞지 않습니다. 보류된 source를 풀어도 이미 소비한 wall-time budget을 갱신하지 않습니다(#324). Native PostgreSQL head는 하나의 MVCC statement로 읽으며, admission·recovery는 소유한 head 멤버를 복사하지 않고 이동합니다.
+- **자식 예약 복구는 이미 승인된 wall-time grant를 보존합니다.** 교체 후 남은 시간이 줄어든 경우 cold reconnect는 유지된 예약을 원래 불변 generation에 바인딩합니다. 현재 지출 가능한 예산, token·금액 한도와 자식의 원래 deadline은 갱신하지 않습니다.
+- **Synthesis persistence fixture는 검증 목적과 무관한 로컬 await deadline 대신 부모 run budget을 사용합니다.** 별도의 timeout·취소 테스트는 operation deadline을 계속 검증합니다.
+- **Blocking Tool의 예외 handoff는 terminal 소유자가 하나입니다.** typed 예외와 system error code를 async-to-blocking bridge에서 보존하며 publication 뒤 worker가 예외 객체에 접근하지 않습니다(#339).
+- **예제와 벤치 driver는 사용할 수 없는 출력에 실패합니다.** partial/refusal 출력으로 성공한 routing fallback을 만들지 않으며 UTF-8 preview는 완전한 code point를 유지합니다. 실패한 벤치 시도는 성공 timing sample에서 제외합니다(#317).
+- **Durable Program 통합 검증은 격리와 복구를 확인합니다.** cold rematerialization 후에도 node별 최소권한을 유지하며 provider journal과 Tool effect는 run·attempt·slot을 구분합니다. 바뀐 권한은 거부하고 reconnect 후에도 미확정 dispatch 근거를 보존합니다(#293, #295, #297).
 - **엔진 워커 풀을 쓰는 multi-Send fan-out에서, 한 가지의 작업이 끝나는 동안 그 가지의 취소 핸들러가 실행될 수 있었습니다.** multi-Send 스텝의 가지들은 맨 풀 실행기에서 돌았고, 정적 fan-out 가지는 이미 가지마다 strand가 있었기 때문에, 다른 풀 스레드에서 보낸 취소가 가지의 코루틴과 경합했습니다(`cancellation_signal::emit`의 데이터 레이스, ThreadSanitizer에서 재현). 이제 풀을 쓰는 Send 가지마다 자기 strand에서 실행되며, 풀이 없는 실행은 그대로입니다. #344, #345 참고.
 - **HTTP를 켠 `neograph-harness-mcp`와 `example_harness_mcp_server`가 이제 `OpenSSL::Crypto`를 링크합니다.** 두 실행 파일은 OpenSSL(`SHA256`, `CRYPTO_memcmp`)을 직접 호출하면서도 스스로는 링크하지 않았습니다. SchemaProvider 0.2.0이 libcrypto를 링크하지 않게 되면서, `NEOGRAPH_BUILD_MCP_HTTP_SERVER=ON`인 공유 라이브러리 빌드에서 `SHA256`의 정의되지 않은 참조로 링크가 실패했습니다.
 - **동기 그래프 실행은 이제 scheduler의 post 호출이 완전히 끝난 뒤 private `io_context`를 파괴합니다.** 완료 핸들러가 이미 실행됐더라도 풀 스레드는 wake-up 호출 안에 남아 있을 수 있어 `pthread_cond_signal`과 `pthread_cond_destroy`가 경합했습니다(#346). 동기 bridge는 외부 스레드의 post 및 tracked-work 해제가 끝날 때까지 기다리고, 취소 전달을 닫은 뒤 늦게 큐에 들어온 알림도 처리하고 context를 파괴합니다. 호출 스레드 실행·중첩 호출·부모 취소 권한은 유지하며, post된 핸들러가 예외를 던져도 아직 소유한 코루틴 frame을 버리지 않습니다.
@@ -369,7 +379,7 @@ CI는 이러한 대상들을 add_executables로 감지하지 못했거나 (Docke
       (requiring `libpq-dev` / `libsqlite3-dev` respectively)
     - `NEOGRAPH_BUILD_A2A` / `NEOGRAPH_BUILD_ACP`
     - `NEOGRAPH_USE_LIBCURL` (one prior incident closed in
-      `feedback_libcurl_unconditional_dep.md` — only the option toggle was
+      public build guidance — only the option toggle was
       added while the default remained ON, breaking the empty-container build
       path again)
     - `find_package(OpenSSL REQUIRED)` is unconditional without an option

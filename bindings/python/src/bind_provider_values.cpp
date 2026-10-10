@@ -274,6 +274,34 @@ void init_provider_values(py::module_& m) {
     auto cUsageConflict = py::class_<sp::UsageConflict>(m, "UsageConflict");
     cUsageConflict.def_readonly("counter", &sp::UsageConflict::counter);
     cUsageConflict.def_readonly("detail", &sp::UsageConflict::detail);
+    py::enum_<sp::CostSource>(m, "ProviderCostSource")
+        .value("None", sp::CostSource::None)
+        .value("OpenRouterUsd", sp::CostSource::OpenRouterUsd)
+        .value("UnknownCurrency", sp::CostSource::UnknownCurrency);
+    py::enum_<sp::CostStatus>(m, "ProviderCostStatus")
+        .value("Missing", sp::CostStatus::Missing)
+        .value("Available", sp::CostStatus::Available)
+        .value("Malformed", sp::CostStatus::Malformed)
+        .value("PrecisionExceeded", sp::CostStatus::PrecisionExceeded)
+        .value("Overflow", sp::CostStatus::Overflow)
+        .value("UnknownCurrency", sp::CostStatus::UnknownCurrency)
+        .value("Conflict", sp::CostStatus::Conflict);
+    py::enum_<sp::CostRounding>(m, "ProviderCostRounding")
+        .value("CeilingParsedBinary64", sp::CostRounding::CeilingParsedBinary64);
+    py::class_<sp::UsdAmount>(m, "ProviderUsdAmount")
+        .def_readonly("nano_usd", &sp::UsdAmount::nano_usd)
+        .def_readonly("evidence", &sp::UsdAmount::evidence)
+        .def_readonly("rounding", &sp::UsdAmount::rounding);
+    py::class_<sp::ProviderReportedCost>(m, "ProviderReportedCost")
+        .def_readonly("total", &sp::ProviderReportedCost::total)
+        .def_readonly("upstream_total", &sp::ProviderReportedCost::upstream_total)
+        .def_readonly("upstream_input", &sp::ProviderReportedCost::upstream_input)
+        .def_readonly("upstream_output", &sp::ProviderReportedCost::upstream_output)
+        .def_readonly("status", &sp::ProviderReportedCost::status)
+        .def_readonly("is_byok", &sp::ProviderReportedCost::is_byok)
+        .def_readonly("byok_status", &sp::ProviderReportedCost::byok_status)
+        .def_readonly("source", &sp::ProviderReportedCost::source)
+        .def_readonly("quality", &sp::ProviderReportedCost::quality);
     auto cUsage = py::class_<sp::Usage>(m, "ProviderUsage");
     cUsage.def_readonly("input_total", &sp::Usage::input_total);
     cUsage.def_readonly("output_total", &sp::Usage::output_total);
@@ -287,6 +315,7 @@ void init_provider_values(py::module_& m) {
     cUsage.def_readonly("stage", &sp::Usage::stage);
     cUsage.def_readonly("quality", &sp::Usage::quality);
     cUsage.def_property_readonly("conflicts", [](const sp::Usage& v) { return v.conflicts; });
+    cUsage.def_readonly("provider_cost", &sp::Usage::provider_cost);
     auto cAttemptEvidence = py::class_<sp::AttemptEvidence>(m, "ProviderAttemptEvidence");
     cAttemptEvidence.def_readonly("request_may_have_left", &sp::AttemptEvidence::request_may_have_left);
     cAttemptEvidence.def_readonly("request_body_bytes", &sp::AttemptEvidence::request_body_bytes);

@@ -109,6 +109,7 @@ public:
     std::optional<ProgramPendingInput> pending_input() const;
     std::optional<ProgramPendingEffect> pending_effect() const;
     std::optional<ProgramResult> terminal_result() const;
+    bool has_children() const noexcept;
     std::vector<ProgramChildRecord> children() const;
     std::optional<ForkCompatibilityReceipt> fork_receipt() const;
     const std::string& journal_head() const noexcept;

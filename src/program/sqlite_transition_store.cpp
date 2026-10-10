@@ -1396,6 +1396,23 @@ std::string SQLiteProgramTransitionStore::process_coordination_key() const {
     return impl_->coordination_key;
 }
 
+std::optional<ProgramRunPublicationHead>
+SQLiteProgramTransitionStore::load_run_publication_head(std::string_view owner,
+                                                       std::string_view run_id) const {
+    std::lock_guard lock(impl_->mutex);
+    Statement statement(impl_->db,
+        "SELECT run_record_bytes, journal_record_bytes FROM program_transition_run_heads_v2 "
+        "WHERE owner_scope = ?1 AND run_id = ?2");
+    statement.bind_text(1, owner);
+    statement.bind_text(2, run_id);
+    if (!statement.step_row()) return std::nullopt;
+    ProgramRunPublicationHead head{
+        ProgramRunRecord::parse(column_blob(statement.get(), 0)),
+        ProgramJournalRecord::parse(column_blob(statement.get(), 1))};
+    detail::validate_run_publication_head(head.run_record, head.journal_record, owner, run_id);
+    return head;
+}
+
 std::optional<ProgramCommandPublicationHead>
 SQLiteProgramTransitionStore::load_command_publication_head(std::string_view owner,
                                                            std::string_view run_id) const {

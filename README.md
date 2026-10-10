@@ -138,11 +138,13 @@ sp::runtime::Result first_call(
 
 A prepared request is consumed once. `sp::runtime::Result` owns an immutable `sp::Outcome` containing a `Completion` or `Failure`. Keep that outcome when you need ordered messages and parts, native continuation, raw observations, stop evidence, attempt metadata, or failure partials. Usage counters are nullable: missing means unknown, while an observed zero remains zero. A usage report and a budget charge are separate records; a portable report cannot grant spending authority.
 
+`usage.provider_cost` retains provider-reported nanoUSD amounts, per-field status, source, quality, BYOK evidence, and upward rounding from the parsed binary64 value. It is not an invoice, token count, estimate, or spending authority. Missing monetary metadata remains absent in canonical v2 JSON; a reported zero or `is_byok=false` is still evidence. Unknown currency and conflicting/malformed reports are retained, not converted to USD or tokens. Blocking provider calls still drive the single async SDK pipeline and reject SDK event-loop/callback-worker re-entry.
+
 After `first_call` returns, use `std::get_if<sp::Completion>(result.get())` to inspect a completion's `messages`, `stop`, and `usage`. Otherwise, `std::get<sp::Failure>(*result)` provides `error.kind`, `error.safe_message`, retry evidence, and the partial messages and usage in `partial`. For example, an absent `completion.usage.output_total` means the output-token count is unknown; a present counter whose `value` is `0` reports zero. Display text is only one view of the retained outcome.
 
 `ChatMessage`, `ChatTool`, and JSON are portable projections. Authentic native history can stay in memory with its native checkpoint sidecar; durable native history requires a real `sp::NativeArchive` and protected owner-private custody. Portable JSON cannot recreate that authority. The archive authenticates custody with an independent key; it is neither encryption nor vendor-issuer authentication. Do not publish archive bodies, keys, native blobs, or raw wire observations. See the [provider reference](docs/reference-en.md) and [migration guide](docs/migration-v0.4-to-v1.0.md) for persistence failures, observers, managed budget banks, and replay boundaries.
 
-The typed cutover removes `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter, and the Responses WebSocket path. Recompile C++ consumers and migrate custom providers; there are no compatibility aliases. The SDK package is `0.2.0` alpha, with interface revision 5 and shared ABI 5. Timeout controls change public layouts: rebuild SDK consumers, NeoGraph and Python extensions together. Native archive v3 and portable JSON v2 remain unchanged; the generation does not declare a stable SDK interface.
+The typed cutover removes `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter, and the Responses WebSocket path. Recompile C++ consumers and migrate custom providers; there are no compatibility aliases. The SDK package is `0.3.0` alpha, pinned to merged public commit `3b88e4ba020c3a4d39ff0660014e7292b516b7cb`, with interface revision 6 and shared ABI 6. Monetary usage metadata changes public layouts: rebuild SDK consumers, NeoGraph and Python extensions together. Native archive v3 and portable JSON v2 remain unchanged; the generation does not declare a stable SDK interface.
 
 ## Python
 
@@ -211,7 +213,7 @@ Measure a workload with its actual nodes, provider, stores, concurrency, and bui
 Installed consumers link only the enabled components they need:
 
 ```cmake
-find_package(SchemaProvider 0.2.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.3.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```

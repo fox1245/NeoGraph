@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=c3367508d65878d70236cf39ee1c62d84251adbdcfdae4557190ee11635fcb64 -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=aac924ab6fb2ec505d955689b94c7225d7486b232d564dd364be780add7f8cef -->
 # 二进制兼容政策
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -32,9 +32,9 @@ CheckpointStore 为显式 adapter 迁移保留 legacy layout。sync 默认实现
 
 ## SDK 与 Python 边界
 
-即使禁用 LLM node，Core 也要求外部 `SchemaProvider::runtime`。选定的 SDK release 是 `0.2.0` alpha，interface revision `5`、shared-library ABI revision `5`，有 out-of-line capability check；不表示 stable interface。一并安装匹配 component。`libsp_*.so.5` 代际与 NeoGraph loader 代际、Python `abi3` wheel tag 都不同。
+即使禁用 LLM node，Core 也要求外部 `SchemaProvider::runtime`。选定 SDK release 为 `0.3.0` alpha，公开合并提交 `3b88e4ba020c3a4d39ff0660014e7292b516b7cb`，interface revision `6`、shared-library ABI revision `6`，有 out-of-line capability check；不表示 stable interface。一并安装匹配 component。`libsp_*.so.6` 代际与 NeoGraph loader 代际、Python `abi3` wheel tag 都不同。
 
-Interface 5 添加可选的连接、首个响应和空闲 timeout，并改变公开 request/options layout。须一起 rebuild SDK consumer、NeoGraph 和 Python extension；interface-4 header/library 不能与 interface 5 混用。Native archive v3 / `spna3` 和 portable JSON v2 是独立格式，保持不变。历史 interface-3/4 测量保留原有范围，不验证 interface 5。
+Interface 6 将固定大小的服务商报告金额元数据加入公开 usage layout，并对 blocking/async SDK 调用使用单一 async pipeline。须一起 rebuild SDK consumer、NeoGraph 和 Python extension；旧 header/library 不能与 interface 6 混用。blocking wrapper 继续拒绝 SDK event-loop/callback worker 重入。Native archive v3 / `spna3` 和 portable JSON v2 是独立格式，保持不变。canonical outcome v2 usage 仅在金额元数据存在时添加可选 `provider_cost`；历史缺失金额记录保留原 bytes，不捏造费用。历史 interface-3/4/5 测量保留原有范围，不验证 interface 6。
 
 Python 公开含 prepared handle 与不可变 outcome 的 typed provider 契约，没有 legacy completion shim。extension 与匹配 library 作为一个 wheel 安装。不要单独替换 bundled NeoGraph/SDK library。graph ChatMessage 便利值不替代 native ProviderMessage custody。参见 [Python binding](python-binding.md)。
 
@@ -44,7 +44,7 @@ wheel 包含七个匹配的 SDK runtime shared library，其中包括不依赖 c
 
 Linux shared library 有 versioned file、major-generation SONAME link 和 unversioned linker 名。NeoGraph shared library 对 sibling 依赖使用 `$ORIGIN`。macOS `.dylib`/`@loader_path` 和 Windows 无后缀 `.dll` 是 packaging 规则，不验证新 SDK runtime。static archive 没有 SONAME，也不移除 transitive link 要求。
 
-已记录的 interface-3 SDK runtime/archive 验证覆盖 Linux/POSIX，不验证 interface 4。已有 macOS/Windows metadata 与依赖验证不同，WASM runtime 验证尚未确立。wheel tag 描述 Python/ABI/platform 兼容，不证明所有 runtime 路径已执行。参见 [PyPA tag 规范](https://packaging.python.org/en/latest/specifications/platform-compatibility-tags/)。
+已记录的 interface-3 SDK runtime/archive 验证覆盖 Linux/POSIX，不验证 interface 6。已有 macOS/Windows metadata 与依赖验证不同，WASM runtime 验证尚未确立。wheel tag 描述 Python/ABI/platform 兼容，不证明所有 runtime 路径已执行。参见 [PyPA tag 规范](https://packaging.python.org/en/latest/specifications/platform-compatibility-tags/)。
 
 ## 验证证据
 

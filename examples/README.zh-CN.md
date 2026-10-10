@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=f1c2fdb5d8383c9c326bc200d9da2e10b5aba9dd8dea18fd5e5fae5f7d14d1df -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=7ab0ab562d04442bd8c1190e9d6f8540ba08ff93d2278b1564c3487d652022c8 -->
 # C++ API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -243,9 +243,16 @@ ladder。每次额外调用使用新 ordinal，通过原 bank 的 admission，�
 不会伪造成功的 provider result。
 
 示例16只对已完成的空响应调用最多三次，保持8,192 cap 和每次 ask 的300秒 deadline；
-不加倍 cap，也不重试 failure。示例28的 rewrite 请求 low effort 和512输出 token，
+不加倍 cap，也不重试 failure。最终答案没有 visible text 时打印错误并以 1 退出。
+示例28的 rewrite 请求 low effort 和512输出 token，
 空/空白响应时原样返回原问题，provider timeout 为180秒。
 这些路径设置不改变共享 factory 的默认值。
+
+多客户 self-evolving chatbot 在有效 UTF-8 边界内将 judge 历史前缀限制为200字节，
+并在异常时报告错误且以1退出。The Beast 的 `baldwin_llm --llm` 必须提供密钥，
+不会改用 offline oracle。类型化请求使用 low effort 和1,824 cap；只有已完成的空
+`MaxTokens` 响应会以3,648 cap 重新请求一次。Provider failure 或仍为空的响应以1退出。
+这处理的是有界空输出，而非对 Baldwin 学习或 ToT 停滞频率的实时 provider 验证。
 
 ### 检查点与演化
 

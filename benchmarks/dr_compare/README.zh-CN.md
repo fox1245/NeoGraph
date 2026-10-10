@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=zh-CN source_sha256=9cb8f7cca77711dec78da1a0238e45ef2dc9406064fafb1213c879ab34a24df5 -->
+<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=zh-CN source_sha256=8e7ec185a2bc0de5edc4617f895255f5666caf96ac44dbdf37c5fe0dd96694d4 -->
 # dr_compare：深度研究编排比较
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -8,7 +8,7 @@
 ## 文件与依赖
 
 `dr_neograph.py`, `dr_langgraph.py`, `bench.py`, `bench_mock.py`, `mem_probe.py`, `mem_prod_stack.py`, `sweep.sh`, `_run_single.py`涵盖真实调用、纯文本模拟、内存探测、扫描和单次诊断。请按[Python 绑定指南](../../docs/python-binding.md)安装与当前源码匹配的 wheel；含 `CompletionParams`/`OpenAIProvider` 的旧 wheel 不是当前 API。Core 源码构建也需要外部 SchemaProvider SDK。
-NeoGraph `0.13.1` 需要匹配 alpha SDK `0.1.1`、interface revision/shared generation 4 的 wheel/native 构建。当前集成验证尚未完成；此比较 runner 与内置 Deep Research 恢复路径分开。
+当前构建需要匹配 SDK `0.3.0`、interface revision/shared generation 6 及已合并 SchemaProvider PR #16（`3b88e4ba020c3a4d39ff0660014e7292b516b7cb`）的 wheel/native 构建。当前集成验证尚未完成；此比较 runner 与内置 Deep Research 恢复路径分开。
 
 工作流导入 requests、LangGraph、langchain-openai；内存探测使用 psutil。PostgreSQL 模式还需对应检查点包和数据库。`mem_prod_stack.py` 还导入各栈的 Web/数据库/观测包，因此不是仅测引擎的 RSS 探测。
 
@@ -42,14 +42,17 @@ NeoGraph 仍需添加 HTTP/2 支持的旧说法已过时。这些时间不能验
 ## 运行新批次
 
 以下模拟命令不调用远程模型或持久化。新结果应附源码/SDK/wheel 修订、Python/依赖版本、主机限制、工作线程数、预热、迭代数、检查点模式和失败数。保留历史文件不变。
+两个 harness 均拒绝空报告，若任一预热或测量运行失败则以非零状态退出；时间统计仅包含成功样本。报告通过前，`Failed runs` 必须为 0。在仓库 root 运行 `python -m unittest discover -s benchmarks/dr_compare -p test_bench.py` 可执行无供应商调用的统计回归测试。
 
 ```sh
 # Install a current-cutover wheel using the Python binding build guide first.
 python -m pip install requests langgraph langchain-openai psutil
 cd benchmarks/dr_compare
-LLM_MOCK_MS=0 MOCK_SEARCH=1 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
+env -u NG_WORKER_COUNT LLM_MOCK_MS=0 MOCK_SEARCH=1 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
   python bench_mock.py --warmup 5 --iters 50
 ```
+
+若要观测 fan-out 重叠，请以 `LLM_MOCK_MS=100` 再运行，保持 `FANOUT=5`、预热、迭代及检查点配置相同，对比 unset `NG_WORKER_COUNT`（默认 4）与显式 `NG_WORKER_COUNT=1`。记录 stderr 和失败。没有串行 fan-out 警告本身不能证明重叠。这是无模型负载，不是付费供应商证据。
 
 以下远程模型命令可能产生费用，请有意设置凭据。它使用内存检查点；PostgreSQL 比较需对应 DSN、包配置与单独记录的耐久性范围。系统调用或抓包本身不能证明语义等价或供应商账单。
 
@@ -60,3 +63,5 @@ LLM_MOCK_MS=0 MOCK_SEARCH=1 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
 LLM_MOCK_MS=-1 MOCK_SEARCH=0 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
   python bench.py --warmup 2 --iters 5
 ```
+
+此命令不是消费限制。`FANOUT=5` 的研究查询每侧最多进行 7 次逻辑模型调用（plan、5 个研究者、synthesis）。双侧预热 2 次加测量 5 次，在 client retry 前即可派发 98 次逻辑调用。经授权的受限验证必须在基准外部预留调用数及所配置最大输出额度的总和，包括所有 SDK/LangChain retry。NG helper 默认 `NG_EXAMPLE_MAX_TOKENS=1600` 不会设置 LangChain 的输出上限。仅使用主机明确授权的模型、endpoint、凭据及搜索服务。缩减的代表 cohort 不等同于历史多次迭代测量，必须单独标记。

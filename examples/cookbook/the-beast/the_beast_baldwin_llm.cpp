@@ -178,31 +178,53 @@ struct LLMLearner : Learner {
         std::vector<int> plastic;
         for (int i = 0; i < N; ++i) if (g[i] == PLASTIC) plastic.push_back(i);
         if (plastic.empty()) return g;
-        ++invocations;
         neograph::ProviderControls controls;
-        controls.temperature = 0.2; controls.max_output_tokens = 800;
+        // Output caps include hidden reasoning as well as the operation names.
+        // Only a completed empty MaxTokens response gets one doubled-cap re-ask.
+        controls.temperature = 0.2; controls.max_output_tokens = 800 + 1024;
+        controls.reasoning_effort = "low";
         std::string committed;
         for (int i = 0; i < N; ++i)
             committed += "  stage " + std::to_string(i) + ": " +
                          (g[i] == PLASTIC ? "?" : OPS[g[i]].name) + "\n";
-        auto request = neograph::make_provider_request(
-            *prov, "~deepseek/deepseek-v4-flash-latest", {
-            neograph::portable_message({"system",
-             "You assemble an arithmetic pipeline. acc starts at 0; each stage applies "
-             "acc<-op(acc) in order. Ops: add2(+2) add3(+3) mul2(*2) mul5(*5) sub1(-1). "
-             "Choose an op for each '?' stage so the final acc equals the target. Reply "
-             "with just the op name(s) for the '?' stage(s), in stage order."}),
-            neograph::portable_message(
-                {"user", "Target acc = " + std::to_string((int)TARGET) + ". Pipeline:\n" + committed})},
-            {}, controls);
         std::string reply;
-        try {
-            sp::runtime::Result response = prov->invoke(std::move(request));
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            std::vector<sp::Message> messages{
+                neograph::portable_message({"system",
+                 "You assemble an arithmetic pipeline. acc starts at 0; each stage applies "
+                 "acc<-op(acc) in order. Ops: add2(+2) add3(+3) mul2(*2) mul5(*5) sub1(-1). "
+                 "Choose an op for each '?' stage so the final acc equals the target. Reply "
+                 "with just the op name(s) for the '?' stage(s), in stage order."}),
+                neograph::portable_message(
+                    {"user", "Target acc = " + std::to_string((int)TARGET) + ". Pipeline:\n" + committed})};
+            ++invocations;
+            sp::runtime::Result response = prov->invoke(neograph::make_provider_request(
+                *prov, "~deepseek/deepseek-v4-flash-latest", std::move(messages), {}, controls));
             if (response) usage.add(neograph::outcome_usage(*response));
             response = neograph::outcome_or_throw(std::move(response));
+            bool has_tool_call_output = false;
+            for (const auto& message : std::get<sp::Completion>(*response).messages)
+                for (const auto& part : message.parts)
+                    has_tool_call_output |= std::holds_alternative<sp::ToolCall>(part) ||
+                                            std::holds_alternative<sp::InvalidToolCall>(part);
+            if (has_tool_call_output)
+                throw neograph::ProviderOutcomeError(
+                    "LLM returned tool-call output instead of operation names",
+                    response, std::make_exception_ptr(std::runtime_error("unexpected LLM tool call")));
             reply = neograph::outcome_text(*response);
+            if (reply.find_first_not_of(" \t\r\n") != std::string::npos) break;
+            const bool token_limit =
+                std::get<sp::Completion>(*response).stop.kind == sp::StopKind::MaxTokens;
+            if (attempt == 0 && token_limit) {
+                std::cerr << "   [LLM] empty MaxTokens reply; retrying once with a doubled cap\n";
+                controls.max_output_tokens = *controls.max_output_tokens * 2;
+                continue;
+            }
+            throw neograph::ProviderOutcomeError(
+                token_limit ? "LLM output-token limit exhausted without operation names"
+                            : "LLM completed without operation names",
+                response, std::make_exception_ptr(std::runtime_error("empty LLM reply")));
         }
-        catch (const std::exception& e) { std::cerr << "   [LLM] error: " << e.what() << "\n"; return std::nullopt; }
         auto out = parse_ops(g, reply);
         if (!out) std::cerr << "   [LLM] unparseable: " << reply.substr(0, 80) << "\n";
         return out;
@@ -264,15 +286,17 @@ static void run(Mode mode, Learner& learner,
     }
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
     register_arith();
     ng::NodeContext ctx;
     const bool want_llm = (argc > 1 && std::string(argv[1]) == "--llm");
     const char* key = want_llm ? (cppdotenv::auto_load_dotenv(), std::getenv("OPENROUTER_API_KEY"))
                                : nullptr;
     const bool live = want_llm && key && *key;
-    if (want_llm && !live)
-        std::cout << "(--llm given but no OPENROUTER_API_KEY — falling back to oracle.)\n";
+    if (want_llm && !live) {
+        std::cerr << "--llm requires OPENROUTER_API_KEY; the oracle was not run.\n";
+        return 1;
+    }
 
     std::cout << "===== THE BEAST (baldwin-llm · the model IS the learning operator) =====\n"
                  "Task: fill the '?' stages of a " << N << "-stage arithmetic pipeline so acc "
@@ -317,4 +341,8 @@ int main(int argc, char** argv) {
                  "(--llm), those invocations are real API calls — so heredity is also an economy:\n"
                  "Lamarck pays the model once and banks it; Baldwin re-pays every generation.\n";
     return 0;
+}
+catch (const std::exception& error) {
+    std::cerr << "baldwin_llm: " << error.what() << "\n";
+    return 1;
 }

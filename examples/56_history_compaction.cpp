@@ -2,8 +2,12 @@
 //
 // Long-running sessions exceed a bounded token budget. Text-only old turns
 // can be summarized while the full typed recent window remains verbatim.
-// Tool/native groups are never flattened or silently discarded to repair
-// an invalid slice; the canonical sanitizer rejects broken pairing.
+// Only a CLEAN summary (EndTurn/StopSequence, non-blank) replaces history; a truncated or
+// refused summary keeps the input and reports why. The summary is model
+// output, so it re-enters as labelled user-role context, never as system.
+// Histories with native seals are kept whole: their seals bind the full prefix.
+// Tool groups are never flattened or silently discarded to repair an invalid
+// slice; the canonical sanitizer rejects broken pairing.
 //
 // Offline: a MockProvider returns a canned summary — no API key.
 //
@@ -24,11 +28,13 @@ using History = std::vector<sp::Message>;
 // A full immutable outcome from a genuinely admitted local SDK request.
 class SummaryMock : public neograph::Provider {
     std::shared_ptr<sp::runtime::Client> client_ = examples::make_local_client();
+    sp::StopKind stop_;
 public:
+    explicit SummaryMock(sp::StopKind stop = sp::StopKind::EndTurn) : stop_(stop) {}
     neograph::PreparedProviderRequest prepare(neograph::ProviderRequest request) override {
         auto history = std::make_shared<const History>(examples::request_messages(request));
         return prepare_local(client_, std::move(request),
-            [history](const neograph::PreparedProviderRequest& prepared,
+            [history, stop = stop_](const neograph::PreparedProviderRequest& prepared,
                       const std::function<void(const sp::Event&)>& observer)
                 -> asio::awaitable<sp::runtime::Result> {
                 std::size_t span = 0;
@@ -42,7 +48,7 @@ public:
                     "User is planning a 5-day Kyoto trip in April, vegetarian, "
                     "budget ~1500 USD, prefers temples over nightlife. "
                     "(summarized " + std::to_string(span) + " chars of history)"));
-                completion.stop.kind = sp::StopKind::EndTurn;
+                completion.stop.kind = stop;
                 if (prepared.mode() == neograph::ProviderMode::Stream)
                     examples::emit_local_events(completion, observer);
                 co_return std::make_shared<const sp::Outcome>(std::move(completion));
@@ -51,6 +57,19 @@ public:
     std::string_view family() const noexcept override { return "openai.chat"; }
     std::string get_name() const override { return "summary-mock"; }
 };
+
+static const char* status_name(neograph::history::CompactionStatus status) {
+    using neograph::history::CompactionStatus;
+    switch (status) {
+        case CompactionStatus::UnderBudget: return "UnderBudget";
+        case CompactionStatus::NothingEligible: return "NothingEligible";
+        case CompactionStatus::Compacted: return "Compacted";
+        case CompactionStatus::EmptySummary: return "EmptySummary";
+        case CompactionStatus::UnusableSummary: return "UnusableSummary";
+        case CompactionStatus::NativeReplayProtected: return "NativeReplayProtected";
+    }
+    return "?";
+}
 
 static void print_roles(const char* label,
                         const History& v) {
@@ -127,20 +146,47 @@ int main() {
     std::printf("=== 2. compact_history (max_tokens=200, keep=4) ===\n");
     print_roles("input ", hist);
 
+    // Explicit controls replace the historical 0.2 / 500 defaults. Leave
+    // temperature and reasoning unset for models that reject those overrides.
+    neograph::ProviderControls controls;
+    controls.max_output_tokens = 1500;
     auto out = neograph::async::run_sync(
         neograph::history::compact_history(
             hist, mock, "~deepseek/deepseek-v4-flash-latest",
-            /*max_tokens=*/200, /*recent_keep=*/4));
+            /*max_tokens=*/200, /*recent_keep=*/4, controls));
 
     // summary_outcome remains owned in out; printing summary is not a
     // substitute for its ordered parts, stop reason, or nullable usage.
-    std::printf("  compacted: %s\n", out.compacted ? "yes" : "no");
+    std::printf("  status   : %s (compacted: %s)\n", status_name(out.status),
+                out.compacted ? "yes" : "no");
+    std::printf("  covered  : input messages [%zu, %zu) replaced by recent[%zu]\n",
+                out.summarized_begin, out.summarized_end, out.summarized_begin);
     std::printf("  summary  : %s\n", out.summary.c_str());
     print_roles("output", out.recent);
+    if (out.compacted && out.recent[out.summarized_begin].role == sp::Role::System) {
+        std::fprintf(stderr, "Summary was promoted to system authority.\n");
+        return 1;
+    }
     std::printf("\n  Original list is untouched: ");
     print_roles("orig  ", hist);
 
+    // ── 3. A truncated summary must not replace history ─────────────
+    SummaryMock truncating(sp::StopKind::MaxTokens);
+    std::printf("\n=== 3. truncated summary (summarizer stops at max_tokens) ===\n");
+    auto kept = neograph::async::run_sync(
+        neograph::history::compact_history(
+            hist, truncating, "~deepseek/deepseek-v4-flash-latest",
+            /*max_tokens=*/200, /*recent_keep=*/4, controls));
+    std::printf("  status   : %s (compacted: %s)\n", status_name(kept.status),
+                kept.compacted ? "yes" : "no");
+    print_roles("output", kept.recent);
+    if (kept.compacted || kept.recent.size() != hist.size()) {
+        std::fprintf(stderr, "Truncated summary replaced the history.\n");
+        return 1;
+    }
+
     std::printf("\nTakeaway: one LLM call summarizes eligible old text turns;\n"
+                "only a clean summary replaces them, as labelled user-role context;\n"
                 "the full recent typed history and summary outcome stay owned, "
                 "and tool/native groups are never silently repaired.\n");
     return 0;

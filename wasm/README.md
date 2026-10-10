@@ -5,7 +5,8 @@
 `smoke.cpp` compiles a graph with one `DoubleNode`, writes `doubled = seed * 2`,
 and runs it with `InMemoryCheckpointStore`. With `seed = 21`, its expected output
 includes `doubled = 42` and `trace = d`. It performs no network or model call.
-This is a Node.js smoke target, not a browser SDK.
+The same generated target can run in Node.js or the browser harness below;
+this is not a browser SDK.
 
 ## Current build boundary
 
@@ -14,20 +15,34 @@ even with `NEOGRAPH_BUILD_LLM=OFF`. CMake 3.20+ selects an explicit
 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`, then an installed runtime, then a pinned
 public GitHub source archive. The download fallback defaults to ON through
 `NEOGRAPH_FETCH_SCHEMAPROVIDER`; turn it OFF for offline package/source builds.
-The SDK runtime also needs libcurl, OpenSSL, and threads. Its current transport
-and archive have platform-specific dependencies; this worktree has no qualified
-Emscripten SDK runtime build. A native SDK installation cannot be linked into
-WebAssembly. The historical smoke below does not establish that the current
-source tree builds under Emscripten.
+Core links the SDK runtime, not its libcurl transport. At the examined SDK pin,
+the top-level SDK CMake still requires CURL during configuration even though
+the runtime target does not link it; OpenSSL is not a direct runtime dependency.
+Native SDK libraries cannot be linked into WebAssembly. Runtime/archive and
+C++ standard-library support must be qualified for the Emscripten target;
+the historical smoke below does not establish a current successful build.
 
-NeoGraph `0.13.1` requires alpha SDK `0.1.1`, interface revision/shared
-generation 4, built for the same target. Qualifying a genuine Emscripten SDK
+Current builds require SDK `0.3.0`, interface revision/shared generation 6,
+at merged SchemaProvider PR #16 (`3b88e4ba020c3a4d39ff0660014e7292b516b7cb`),
+built for the same target. Qualifying a genuine Emscripten SDK
 runtime remains a prerequisite; this page neither drops WASM support nor
 guarantees a current build. Archive v3 / `spna3` and portable JSON v2 are unchanged.
 
+### Supported-target requirements
+
+The Emscripten toolchain and C++ standard library must support the SDK's
+C++20 contracts, including `std::bit_cast` and `std::stop_token`. Native
+archive custody requires a supported atomic no-replace filesystem backend
+for the target; custody must not be disabled to obtain a build.
+
+Use a fresh build directory and genuine same-target dependencies, including
+any CURL dependency required during SDK configuration. Native libraries or
+fabricated dependency availability cannot qualify a WebAssembly build.
+Current Node.js and browser execution remain unqualified.
+
 ## Historical result
 
-These values came from an earlier local smoke run, before the typed SDK cutover.
+These values came from an earlier smoke run, before the typed SDK cutover.
 No generated `.wasm` or `.js` artifact is committed, and CI does not publish a
 WASM size artifact. Sizes describe that build, not current deployment costs.
 
@@ -52,11 +67,13 @@ Once a working Emscripten build of the SDK runtime is available, the target's
 configure/build/run sequence is:
 
 ```bash
-source /opt/emsdk/emsdk_env.sh
+# For an emsdk install only: source /opt/emsdk/emsdk_env.sh
+# A distro installation with emcmake/em++ on PATH needs no emsdk script.
 
 emcmake cmake -S . -B build-wasm \
   -DCMAKE_BUILD_TYPE=Release \
   -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE_DIR" \
+  -DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF \
   -DNEOGRAPH_BUILD_WASM=ON \
   -DNEOGRAPH_BUILD_ASYNC=OFF \
   -DNEOGRAPH_BUILD_LLM=OFF \
@@ -78,8 +95,9 @@ cmake --build build-wasm --target neograph_wasm_smoke -j
 node build-wasm/wasm/smoke.js
 ```
 
-`NEOGRAPH_USE_LIBCURL=OFF` disables NeoGraph's optional HTTP/2 backend, not the
-SDK runtime's libcurl dependency. This sequence is not a verified current build.
+`NEOGRAPH_USE_LIBCURL=OFF` disables NeoGraph's optional HTTP/2 backend. It does
+not remove the SDK's top-level CURL discovery. This sequence still requires
+genuine Emscripten dependencies and is not a verified current build.
 
 For Node.js versions whose generated loader passes a filesystem path to `fetch`,
 the historical loader workaround was:
@@ -88,15 +106,25 @@ the historical loader workaround was:
 node -e 'const fs=require("fs"); WebAssembly.instantiateStreaming=undefined; global.fetch=async p=>({ok:true,arrayBuffer:async()=>fs.promises.readFile(p)}); require("./build-wasm/wasm/smoke.js");'
 ```
 
-## Browser status and proposed work
+## Browser smoke
 
-There is no browser loader, npm package, or Embind API in this repository.
-Browser pthread builds need cross-origin isolation headers
-(`Cross-Origin-Opener-Policy: same-origin` and
-`Cross-Origin-Embedder-Policy: require-corp`) and generated worker assets;
-these requirements alone do not make the SDK runtime browser-compatible.
+After the genuine target builds, serve its JS, WASM, and generated pthread
+worker assets using the standard-library-only loopback server:
 
-A browser port would first need an SDK-compatible transport and archive design,
-then JS node callbacks and packaging. A proposed `fetch()` adapter, hosted-model
-access, local browser inference, and NeoProtocol Executor integration are not
-shipped or qualified by this smoke program.
+```sh
+python3 wasm/serve_smoke.py build-wasm/wasm --port 8765
+# Open http://127.0.0.1:8765/smoke.html in a browser.
+```
+
+The server sends `Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: require-corp`. The harness refuses execution
+without cross-origin isolation / `SharedArrayBuffer`; it loads the actual
+generated `smoke.js`, not a substitute runtime. A pass requires output
+`doubled = 42`, `trace = d`, and exit code 0, exposed as
+`document.body.dataset.result === "pass"` and `dataset.exitCode === "0"`.
+Record browser/version, console errors, and the observed output. A successful
+Node.js run alone is not browser evidence.
+
+This harness supplies no npm package, Embind API, JS graph callbacks, or
+provider transport. Hosted-model access, local inference, and NeoProtocol
+Executor integration are not qualified by this model-free smoke.

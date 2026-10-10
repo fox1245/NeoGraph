@@ -1606,9 +1606,20 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
     std::lock_guard lock(child_relation_publication_mutex(*control.transitions, control.owner_scope,
                                                           control.logical_run_id));
     for (int retry = 0; retry < 3; ++retry) {
-        std::optional<ProgramRunRecord> previous;
+        std::optional<ProgramRunPublicationHead> head;
+        std::optional<ProgramRunRecord> loaded_previous;
+        const ProgramRunRecord* previous = nullptr;
         try {
-            previous = control.transitions->load(control.owner_scope, control.run_id);
+            head = control.transitions->load_run_publication_head(control.owner_scope,
+                                                                 control.run_id);
+            if (head) {
+                previous = &head->run_record;
+            } else {
+                // Preserve absence/error classification for stores whose coherent
+                // acquisition fails closed, without re-reading a native snapshot.
+                loaded_previous = control.transitions->load(control.owner_scope, control.run_id);
+                if (loaded_previous) previous = &*loaded_previous;
+            }
         } catch (const std::exception& error) {
             cause = std::current_exception();
             std::cerr << "terminal load exception run=" << control.run_id
@@ -1624,9 +1635,14 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
             return TerminalPublicationResult::TransitionConflict;
         }
 
-        std::optional<ProgramJournalRecord> previous_journal;
+        std::optional<ProgramJournalRecord> loaded_previous_journal;
+        const ProgramJournalRecord* previous_journal = head ? &head->journal_record : nullptr;
         try {
-            previous_journal = control.transitions->latest(control.owner_scope, control.run_id);
+            if (!head) {
+                loaded_previous_journal = control.transitions->latest(control.owner_scope,
+                                                                      control.run_id);
+                if (loaded_previous_journal) previous_journal = &*loaded_previous_journal;
+            }
         } catch (const std::exception& error) {
             cause = std::current_exception();
             std::cerr << "terminal latest exception run=" << control.run_id
@@ -3435,19 +3451,28 @@ asio::awaitable<void> RunControl::hold_graph_migration(
         co_return;
     }
 
-    const auto executor = co_await asio::this_coro::executor;
-    auto timer = std::make_shared<asio::steady_timer>(executor);
+    auto control = shared_from_this();
+    auto timer = std::make_shared<asio::steady_timer>(waiter_strand);
     timer->expires_at((asio::steady_timer::time_point::max)());
-    {
-        std::lock_guard lock(mutex_);
-        if (graph_migration_request_id_ != request_id || !held_graph_migration_ || result_ ||
-            terminal_decided_ || cancellation_cause_ != CancellationCause::None) {
-            co_return;
-        }
-        graph_migration_release_waiter_ = timer;
-    }
-    asio::error_code error;
-    co_await timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
+    // Registration and wait initiation must serialize with the release expiry,
+    // including when the migration caller rejects before this coroutine suspends.
+    co_await asio::co_spawn(
+        waiter_strand,
+        [control, request_id, timer]() -> asio::awaitable<void> {
+            {
+                std::lock_guard lock(control->mutex_);
+                if (control->graph_migration_request_id_ != request_id ||
+                    !control->held_graph_migration_ || control->result_ ||
+                    control->terminal_decided_ ||
+                    control->cancellation_cause_ != CancellationCause::None) {
+                    co_return;
+                }
+                control->graph_migration_release_waiter_ = timer;
+            }
+            asio::error_code error;
+            co_await timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
+        },
+        asio::use_awaitable);
 }
 
 bool RunControl::has_active_graph_migration_request() const noexcept {
@@ -3509,8 +3534,11 @@ void RunControl::release_graph_migration(std::uint64_t request_id) noexcept {
                     active->lineage.id() == held_capsule->source_lineage_head_id() &&
                     previous->journal_head() == previous_journal->id) {
                     const auto timestamp = std::max(now_ms(), previous->updated_at_ms());
-                    const auto remaining = program_replacement_remaining_budget(
-                        *previous, active->lineage, timestamp);
+                    auto remaining = previous->remaining_budget();
+                    remaining.wall_time_ms = std::min(
+                        remaining.wall_time_ms,
+                        remaining_attempt_wall_time(granted_budget.wall_time_ms, started_at,
+                                                    std::chrono::steady_clock::now()));
                     auto journal = ProgramJournalRecord::create(ProgramJournalRecordData{
                         previous->journal_head(), run_id, previous->program_version_id(),
                         previous->bundle_id(), previous_journal->sequence + 1,
@@ -4170,9 +4198,24 @@ struct ProgramRuntime::Impl {
         const std::shared_ptr<detail::RunControl>& parent, std::string_view name) const {
         if (parent->inherited_children.empty()) return std::nullopt;
         const auto run = parent->snapshot();
+        // Every publication on this run (child completion, dispatch, ...) moves the
+        // lineage head, so the head read here may legitimately differ from the record
+        // read above. What must hold is generation identity: the lineage still selects
+        // the generation this control runs as.
         const auto lineage =
             config.transitions->load_run_lineage(parent->owner_scope, parent->run_id);
-        if (!lineage || lineage->active_run_record_id() != run.id() ||
+        const auto active =
+            lineage ? config.transitions->load_generation(parent->owner_scope,
+                                                           lineage->lineage_id(),
+                                                           lineage->active_generation())
+                    : std::nullopt;
+        if (!active || active->id() != lineage->active_generation_id() ||
+            active->lineage_id() != lineage->lineage_id() ||
+            active->generation() != lineage->active_generation() ||
+            active->run_id() != parent->run_id ||
+            active->program_version_id() != run.program_version_id() ||
+            active->bundle_id() != run.bundle_id() ||
+            lineage->root_run_id() != parent->logical_run_id ||
             run.logical_run_id() != parent->logical_run_id)
             throw_runtime_diagnostic("P_CHILD_GENERATION",
                                      "Inherited child requires the active parent generation");
@@ -4865,34 +4908,78 @@ struct ProgramRuntime::Impl {
         return found == child_reservations.end() ? RunBudget{} : found->second.used;
     }
 
-    RunBudget hydrate_child_reservations(const ProgramRunRecord&     parent,
-                                         const ProgramJournalRecord* snapshot_journal = nullptr) {
-        const auto            children = parent.children();
-        auto                  available = parent.remaining_budget();
+    RunBudget hydrate_child_reservations(const ProgramRunRecord& parent,
+                                         const ProgramJournalRecord& journal) {
+        if (journal.id != parent.journal_head())
+            throw_runtime_diagnostic("P_CHILD_CONFLICT",
+                                     "Child reservation recovery lost its parent journal");
+        const auto children = parent.children();
+        auto available = parent.remaining_budget();
         if (!children.empty()) {
-            const auto  loaded = snapshot_journal ? std::optional<ProgramJournalRecord>{}
-                                                  : config.transitions->latest(parent.owner_scope(),
-                                                                               parent.run_id());
-            const auto* journal =
-                snapshot_journal ? snapshot_journal : (loaded ? &*loaded : nullptr);
-            if (!journal || journal->id != parent.journal_head())
-                throw_runtime_diagnostic("P_CHILD_CONFLICT",
-                                         "Child reservation recovery lost its parent journal");
             // A pending structured command owns the parent's spendable allocation.
             // This reconstructs the same ceiling used at admission; it does not
             // credit either the durable remainder or the compile ledger.
-            available = restore_reserved_resources(available, journal->inflight_reservation);
+            available = restore_reserved_resources(available, journal.inflight_reservation);
         }
         std::set<std::string> child_ids;
+        std::uint64_t admitted_wall = 0;
         for (const auto& child : children) {
             if (!child_ids.insert(child.child_run_id).second) {
                 throw_runtime_diagnostic(
                     "P_CHILD_CONFLICT", "Persisted parent contains duplicate child records",
                     json{{"parent_run_id", parent.run_id()}, {"child_run_id", child.child_run_id}});
             }
+            const auto wall = child.invocation.granted_budget.wall_time_ms;
+            if (wall > std::numeric_limits<std::uint64_t>::max() - admitted_wall)
+                throw_runtime_diagnostic("P_CHILD_BUDGET", "Durable child budget ledger overflowed");
+            admitted_wall += wall;
         }
 
-        std::lock_guard lock(mutex);
+        auto reservation_capacity = available;
+        std::unique_lock lock(mutex);
+        if (admitted_wall > available.wall_time_ms) {
+            const auto found = child_reservations.find(parent.logical_run_id());
+            const bool restoring_wall = found == child_reservations.end() ||
+                std::any_of(children.begin(), children.end(), [&](const auto& child) {
+                    return !found->second.permanent_by_child.contains(child.child_run_id);
+                });
+            if (restoring_wall) {
+                // Replacement transfers a smaller wall-time remainder, not a new grant.
+                // Reconstruct already-admitted reservations against the immutable original
+                // envelope; fresh admission still uses `available`, and recovery retains each
+                // child's original deadline. Never perform history I/O under the runtime lock.
+                lock.unlock();
+                const auto lineage = config.transitions->load_run_lineage(
+                    parent.owner_scope(), parent.run_id());
+                const auto original = lineage
+                    ? config.transitions->load_generation(parent.owner_scope(), lineage->lineage_id(), 1)
+                    : std::nullopt;
+                const auto initial = original
+                    ? config.transitions->load_generation_initial_publication(
+                          parent.owner_scope(), lineage->lineage_id(), 1)
+                    : std::nullopt;
+                if (!initial || !initial->run_generation || !initial->run_lineage ||
+                    lineage->owner_scope() != parent.owner_scope() ||
+                    lineage->root_run_id() != parent.logical_run_id() ||
+                    original->generation() != 1 || original->owner_scope() != parent.owner_scope() ||
+                    original->lineage_id() != lineage->lineage_id() ||
+                    original->id() != initial->run_generation->id() ||
+                    !is_valid_program_run_lineage_initial(*initial->run_lineage, *original) ||
+                    !does_program_run_generation_bind(*original, *initial->run_lineage,
+                                                       initial->run_record) ||
+                    initial->run_record.run_id() != lineage->root_run_id() ||
+                    initial->run_record.logical_run_id() != parent.logical_run_id())
+                    throw_runtime_diagnostic("P_CHILD_BUDGET",
+                        "Persisted child reservations have no original wall-time envelope");
+                const auto original_wall = initial->run_record.invocation().budget.wall_time_ms;
+                if (admitted_wall > original_wall)
+                    throw_runtime_diagnostic("P_CHILD_BUDGET",
+                        "Persisted child wall reservations exceed the original envelope");
+                reservation_capacity.wall_time_ms = original_wall;
+                lock.lock();
+            }
+        }
+
         auto&           state = child_reservations[parent.logical_run_id()];
         for (const auto& child : children) {
             const auto permanent = permanent_child_reservation(child.invocation.granted_budget);
@@ -4902,7 +4989,7 @@ struct ProgramRuntime::Impl {
                 auto additional = permanent;
                 if (in_flight)
                     additional.max_concurrency = child.invocation.granted_budget.max_concurrency;
-                if (!budget_sum_fits(available, state.used, additional)) {
+                if (!budget_sum_fits(reservation_capacity, state.used, additional)) {
                     throw_runtime_diagnostic(
                         "P_CHILD_BUDGET",
                         "Persisted child reservations exceed the parent remainder",
@@ -4938,7 +5025,11 @@ struct ProgramRuntime::Impl {
                                                   std::string_view child_run_id) {
         const auto child_lineage = config.transitions->load_run_lineage(owner_scope, child_run_id);
         if (child_lineage) child_run_id = child_lineage->root_run_id();
-        const auto parent = load_active_agent_run(config.transitions, owner_scope, parent_run_id);
+        const auto active = load_active_agent_run(config.transitions, owner_scope, parent_run_id);
+        const auto head = active ? config.transitions->load_run_publication_head(
+                                       owner_scope, active->run_id())
+                                 : std::nullopt;
+        const auto* parent = head ? &head->run_record : nullptr;
         if (!parent) {
             throw_runtime_diagnostic("P_CHILD_PARENT",
                                      "Child recovery requires its durable parent run",
@@ -4957,7 +5048,7 @@ struct ProgramRuntime::Impl {
                                      json{{"parent_run_id", std::string(parent_run_id)},
                                           {"child_run_id", std::string(child_run_id)}});
         }
-        const auto available = hydrate_child_reservations(*parent);
+        const auto available = hydrate_child_reservations(*parent, head->journal_record);
         return ParentChildBudget{available, child->invocation.granted_budget};
     }
     void shutdown() noexcept {
@@ -5196,17 +5287,18 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     if (parent.control_->owner_scope != owner_scope || link.owner_scope() != owner_scope)
         throw_runtime_diagnostic("P_CHILD_OWNER", "Child owner scope is not admitted");
 
-    std::optional<ProgramJournalRecord> parent_journal;
-    auto parent_record = [&] {
-        // A sibling can publish completion between the run-record and journal
-        // reads. Take the same lock as child-relation publication so admission
-        // validates one generation instead of reporting a spurious CAS loss.
+    // Admission and reservation recovery must share one record/journal snapshot;
+    // a concurrent child completion may advance both immediately after this read.
+    auto parent_head = [&] {
         std::lock_guard lock(child_relation_publication_mutex(
-            *impl_->config.transitions, owner_scope, parent.run_id()));
-        auto record = parent.snapshot();
-        parent_journal = impl_->config.transitions->latest(owner_scope, parent.run_id());
-        return record;
+            *impl_->config.transitions, owner_scope, parent.control_->logical_run_id));
+        return impl_->config.transitions->load_run_publication_head(owner_scope, parent.run_id());
     }();
+    if (!parent_head)
+        throw_runtime_diagnostic("P_CHILD_CONFLICT",
+                                 "Parent-child admission has no consistent transition head");
+    auto parent_record = std::move(parent_head->run_record);
+    auto parent_journal = std::move(parent_head->journal_record);
     if (parent_record.continuation().state != ContinuationState::Running)
         throw_runtime_diagnostic("P_CHILD_PARENT", "Child can only attach to a running parent");
     if (parent.control_->cancellation_cause() != detail::CancellationCause::None)
@@ -5240,8 +5332,12 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     }
     auto existing = find_child(parent_record, run_id);
     if (occupied && !existing) {
-        const auto durable_parent =
+        const auto active =
             load_active_agent_run(impl_->config.transitions, owner_scope, parent_run_id);
+        auto head = active ? impl_->config.transitions->load_run_publication_head(
+                                 owner_scope, active->run_id())
+                           : std::nullopt;
+        const auto* durable_parent = head ? &head->run_record : nullptr;
         if (!durable_parent || durable_parent->continuation().state != ContinuationState::Running)
             throw_runtime_diagnostic(
                 "P_CHILD_PARENT", "Durable parent is no longer running for child recovery",
@@ -5251,12 +5347,11 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
             throw_runtime_diagnostic(
                 "P_CHILD_CONFLICT", "Existing child run has no durable parent admission",
                 json{{"parent_run_id", parent_run_id}, {"child_run_id", run_id}});
-        parent_record = *durable_parent;
+        parent_record = std::move(head->run_record);
+        parent_journal = std::move(head->journal_record);
     }
-    const auto hydrated_parent_budget = impl_->hydrate_child_reservations(
-        parent_record, parent_journal && parent_journal->id == parent_record.journal_head()
-                           ? &*parent_journal
-                           : nullptr);
+    const auto hydrated_parent_budget =
+        impl_->hydrate_child_reservations(parent_record, parent_journal);
     if (existing) {
         const auto expected = child_record_for(run_id, link, invocation, existing->state);
         if (!same_child_metadata(*existing, expected)) {
@@ -5283,12 +5378,12 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     }
     RunBudget parent_budget = hydrated_parent_budget;
     if (!existing) {
-        if (!parent_journal || parent_journal->id != parent_record.journal_head()) {
+        if (parent_journal.id != parent_record.journal_head()) {
             throw_runtime_diagnostic("P_CHILD_CONFLICT",
                                      "Parent-child admission lost the transition CAS");
         }
-        parent_budget       = restore_reserved_resources(parent_record.remaining_budget(),
-                                                         parent_journal->inflight_reservation);
+        parent_budget = restore_reserved_resources(parent_record.remaining_budget(),
+                                                    parent_journal.inflight_reservation);
         const auto reserved = impl_->reserved_children(parent_run_id);
         validate_child_link(*pinned, link, version, invocation, parent_budget, reserved);
         validate_invocation(*pinned, invocation, true);
@@ -7199,6 +7294,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
     if (!record) {
         throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program run was not found");
     }
+    std::optional<ProgramRunPublicationHead> recovery_head;
     std::optional<std::int64_t> synthesis_deadline;
     if (record->invocation().budget.max_dynamic_compiles && !record->terminal_result()) {
         for (const auto& synthesis :
@@ -7287,6 +7383,14 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
     if (existing_control) {
         auto control = std::move(existing_control);
         return ProgramHandle(std::move(control));
+    }
+    if (record->has_children()) {
+        recovery_head =
+            impl_->config.transitions->load_run_publication_head(owner_scope, run_id);
+        if (!recovery_head)
+            throw_runtime_diagnostic("P_RUN_RECOVERY_CONFLICT",
+                                     "Child recovery has no consistent parent transition head");
+        record = std::move(recovery_head->run_record);
     }
     if (record->recorded_binding_set_fingerprint() && !record->terminal_result())
         throw_runtime_diagnostic("P_REPLAY_EVIDENCE_REQUIRED",
@@ -7691,7 +7795,8 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             recovered_thread_id =
                 core_thread_identity(run_id, pinned->root->compiled_plan_identity);
         }
-        impl_->hydrate_child_reservations(*record);
+        if (recovery_head)
+            impl_->hydrate_child_reservations(*record, recovery_head->journal_record);
         std::shared_ptr<ChildQuotaReservation> global_quota;
         if (!record->invocation().parent_run_id.empty()) {
             const auto parent_child = impl_->hydrate_parent_child_budget(
@@ -7708,11 +7813,14 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             }
         }
 
-        const auto recovery_journal = impl_->config.transitions->latest(owner_scope, run_id);
-        if (!recovery_journal || recovery_journal->id != record->journal_head()) {
+        const auto loaded_journal = recovery_head ? std::optional<ProgramJournalRecord>{}
+                                                  : impl_->config.transitions->latest(owner_scope,
+                                                                                      run_id);
+        const auto* recovery_journal = recovery_head
+            ? &recovery_head->journal_record : (loaded_journal ? &*loaded_journal : nullptr);
+        if (!recovery_journal || recovery_journal->id != record->journal_head())
             throw_runtime_diagnostic("P_RUN_RECOVERY_CONFLICT",
                                      "Running Program recovery lost the transition CAS");
-        }
         ProgramPersistedInvocation invocation{
             record->invocation().input,
             restore_reserved_resources(record->remaining_budget(),

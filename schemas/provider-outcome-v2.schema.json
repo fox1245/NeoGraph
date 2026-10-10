@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/provider-outcome-v2.schema.json",
+  "title": "NeoGraph provider outcome projection v2",
+  "description": "Observational data, not replay or spending authority. provider_cost is additive and omitted exactly when all monetary metadata is absent; old absence-only v2 bytes remain canonical. Trusted archive metadata authenticates the complete projection. The runtime decoder also enforces source/status/value/quality consistency.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "kind", "messages", "usage", "stop", "wire_envelope", "raw_events"],
+  "properties": {
+    "schema": { "const": "neograph.provider-outcome/v2" },
+    "kind": { "enum": ["completion", "failure"] },
+    "messages": { "type": "array", "items": { "$ref": "provider-message-v2.schema.json" } },
+    "usage": { "$ref": "#/$defs/usage" },
+    "stop": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/stop" }] },
+    "wire_envelope": { "$ref": "#/$defs/document" },
+    "raw_events": { "type": "array", "items": {
+      "type": "object", "additionalProperties": false, "required": ["type", "payload"],
+      "properties": { "type": { "type": "string" }, "payload": { "$ref": "#/$defs/document" } }
+    } },
+    "attempt": { "$ref": "#/$defs/attempt" },
+    "error": { "$ref": "#/$defs/error" },
+    "native_archive_reference": { "type": ["null", "string"], "pattern": "^spna3:[0-9a-f]{64}$" }
+  },
+  "allOf": [{
+    "if": { "properties": { "kind": { "const": "completion" } } },
+    "then": { "required": ["attempt"], "properties": { "stop": { "$ref": "#/$defs/stop" } }, "not": { "required": ["error"] } },
+    "else": { "required": ["error"], "not": { "required": ["attempt"] } }
+  }],
+  "$defs": {
+    "uint64": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+    "count": { "oneOf": [{ "type": "null" }, {
+      "type": "object", "additionalProperties": false, "required": ["value", "evidence"],
+      "properties": { "value": { "$ref": "#/$defs/uint64" }, "evidence": { "enum": [0, 1] } }
+    }] },
+    "document": { "oneOf": [{ "type": "null" }, {
+      "type": "object", "additionalProperties": false, "required": ["json"], "properties": { "json": { "type": "string" } }
+    }] },
+    "usd_amount": { "oneOf": [{ "type": "null" }, {
+      "type": "object", "additionalProperties": false, "required": ["nano_usd", "evidence", "rounding"],
+      "properties": { "nano_usd": { "type": "integer", "minimum": 0, "maximum": 9007199254740992 }, "evidence": { "enum": [0, 1] }, "rounding": { "const": 0 } }
+    }] },
+    "cost_status": { "enum": [0, 1, 2, 3, 4, 5, 6] },
+    "provider_cost": {
+      "type": "object", "additionalProperties": false,
+      "required": ["total", "upstream_total", "upstream_input", "upstream_output", "status", "is_byok", "byok_status", "source", "quality"],
+      "properties": {
+        "total": { "$ref": "#/$defs/usd_amount" }, "upstream_total": { "$ref": "#/$defs/usd_amount" },
+        "upstream_input": { "$ref": "#/$defs/usd_amount" }, "upstream_output": { "$ref": "#/$defs/usd_amount" },
+        "status": { "type": "array", "minItems": 4, "maxItems": 4, "items": { "$ref": "#/$defs/cost_status" }, "description": "total, upstream_total, upstream_input, upstream_output; 0 Missing, 1 Available, 2 Malformed, 3 PrecisionExceeded, 4 Overflow, 5 UnknownCurrency, 6 Conflict" },
+        "is_byok": { "type": ["null", "boolean"] }, "byok_status": { "enum": [0, 1, 2] },
+        "source": { "enum": [1, 2], "description": "1 OpenRouterUsd, 2 UnknownCurrency; source None is omitted with all absent metadata" },
+        "quality": { "enum": [0, 1] }
+      },
+      "allOf": [
+        { "if": { "properties": { "status": { "prefixItems": [{ "const": 1 }] } } }, "then": { "properties": { "total": { "type": "object" } } }, "else": { "properties": { "total": { "type": "null" } } } },
+        { "if": { "properties": { "status": { "prefixItems": [{}, { "const": 1 }] } } }, "then": { "properties": { "upstream_total": { "type": "object" } } }, "else": { "properties": { "upstream_total": { "type": "null" } } } },
+        { "if": { "properties": { "status": { "prefixItems": [{}, {}, { "const": 1 }] } } }, "then": { "properties": { "upstream_input": { "type": "object" } } }, "else": { "properties": { "upstream_input": { "type": "null" } } } },
+        { "if": { "properties": { "status": { "prefixItems": [{}, {}, {}, { "const": 1 }] } } }, "then": { "properties": { "upstream_output": { "type": "object" } } }, "else": { "properties": { "upstream_output": { "type": "null" } } } },
+        { "if": { "properties": { "source": { "const": 2 } } }, "then": { "properties": { "total": { "type": "null" }, "upstream_total": { "type": "null" }, "upstream_input": { "type": "null" }, "upstream_output": { "type": "null" } } } },
+        { "if": { "properties": { "source": { "const": 1 } } }, "then": { "properties": { "status": { "items": { "not": { "const": 5 } } } } } },
+        { "if": { "properties": { "byok_status": { "const": 1 } } }, "then": { "properties": { "is_byok": { "type": "boolean" } } }, "else": { "properties": { "is_byok": { "type": "null" } } } },
+        { "if": { "properties": { "status": { "items": { "enum": [0, 1] } }, "byok_status": { "enum": [0, 1] } } }, "then": { "properties": { "quality": { "const": 0 } } }, "else": { "properties": { "quality": { "const": 1 } } } }
+      ]
+    },
+    "usage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["input_total", "output_total", "total", "provider_reported_total", "input_uncached", "cache_read", "cache_write", "reasoning", "extra", "stage", "quality", "conflicts"],
+      "properties": {
+        "input_total": { "$ref": "#/$defs/count" }, "output_total": { "$ref": "#/$defs/count" }, "total": { "$ref": "#/$defs/count" },
+        "provider_reported_total": { "$ref": "#/$defs/count" }, "input_uncached": { "$ref": "#/$defs/count" }, "cache_read": { "$ref": "#/$defs/count" },
+        "cache_write": { "$ref": "#/$defs/count" }, "reasoning": { "$ref": "#/$defs/count" },
+        "extra": { "type": "object", "additionalProperties": { "allOf": [{ "$ref": "#/$defs/count" }, { "type": "object" }] } },
+        "stage": { "enum": [0, 1, 2] }, "quality": { "enum": [0, 1] },
+        "conflicts": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["counter", "detail"], "properties": { "counter": { "type": "string" }, "detail": { "type": "string" } } } },
+        "provider_cost": { "$ref": "#/$defs/provider_cost" }
+      }
+    },
+    "stop": {
+      "type": "object", "additionalProperties": false, "required": ["kind", "raw", "sequence", "details"],
+      "properties": { "kind": { "type": "integer", "minimum": 0, "maximum": 9 }, "raw": { "type": "string" }, "sequence": { "type": ["null", "string"] }, "details": { "$ref": "#/$defs/document" } }
+    },
+    "attempt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["request_may_have_left", "request_body_bytes", "response_head_seen", "transport_internal_resends", "attempts", "prior_usage_unknown"],
+      "properties": {
+        "request_may_have_left": { "type": "boolean" }, "request_body_bytes": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 },
+        "response_head_seen": { "type": "boolean" }, "transport_internal_resends": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "attempts": { "type": "integer", "minimum": 0, "maximum": 4294967295 }, "prior_usage_unknown": { "type": "boolean" }
+      }
+    },
+    "error": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "safe_message", "retry_class", "retry_safety", "http_status", "vendor_code", "retry_after_ms", "attempt"],
+      "properties": {
+        "kind": { "type": "integer", "minimum": 0, "maximum": 18 }, "safe_message": { "type": "string" },
+        "retry_class": { "type": "integer", "minimum": 0, "maximum": 3 }, "retry_safety": { "type": "integer", "minimum": 0, "maximum": 3 },
+        "http_status": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 }, "vendor_code": { "type": "string" },
+        "retry_after_ms": { "type": ["null", "integer"], "minimum": -9223372036854775808, "maximum": 9223372036854775807 }, "attempt": { "$ref": "#/$defs/attempt" }
+      }
+    }
+  }
+}

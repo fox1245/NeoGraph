@@ -33,6 +33,18 @@
 
 namespace neograph::program::detail {
 
+// A held Core resumes the same attempt. Settle its wall time on the attempt's
+// monotonic clock, not by adding separately rounded journal-clock intervals.
+inline std::uint64_t remaining_attempt_wall_time(
+    std::uint64_t grant, std::chrono::steady_clock::time_point started,
+    std::chrono::steady_clock::time_point sampled) noexcept {
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(sampled - started).count();
+    if (elapsed <= 0) return grant;
+    const auto spent = static_cast<std::uint64_t>(elapsed);
+    return spent >= grant ? 0 : grant - spent;
+}
+
 enum class CancellationCause : std::uint8_t {
     None,
     User,

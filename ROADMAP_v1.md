@@ -483,8 +483,8 @@ independently shippable to PyPI as v0.4.0+i, v0.4.0+(i+1), etc.).
 
 | # | PR | Scope | Lands in |
 |---|---|---|---|
-| 1 ✓ | **`RunContext` plumbing (internal)** — landed `a473f0e` | Add `struct RunContext` to `engine.h`. Engine's `execute_graph_async` constructs and threads it through. NodeExecutor passes it to `execute_full_async`. Pybind wraps it. **No public-facing change** — old methods still take only `state`; the new `ctx` lives alongside in the dispatch path. ctest 442/442 + pytest 96/96 green. Bench median 5.365 µs (BASE 5.285 µs, +1.5%) — within WSL2 ~3% noise floor, inside the ±5% band off the 5.185 µs baseline. Pybind wrap deferred to PR 7 (binding migration) since PR 1 has zero pybind diff. | v0.4.0 |
-| 2 ✓ | **`GraphNode::run(NodeInput) -> NodeOutput`** — landed `607ce66` | New virtual on GraphNode. Default implementation delegates to the old 8 virtuals (priority order preserved). Registers as the engine's preferred dispatch entry. Existing C++ subclasses still compile + work via the default fallback. ctest 442 → 445 (3 new NodeRunDispatch tests) + pytest 96/96 + 5 live LLM/WS green. Bench median 6.122 µs vs PR1 BASE 6.160 µs (Δ -0.6%) on A/B 10 rounds (host noisy today, PR1 BASE drifted from yesterday's 5.285 → 6.160 — same code, WSL2 jitter; A/B comparison cancels host drift). **Trap caught**: ``run(const NodeInput&)`` SEGV'd inside asio's executor under the pybind async path (coroutine-reference-parameter UAF, the v0.2.0 RunConfig crash shape). Fix: take ``NodeInput`` by value. Documented in node.h. | v0.4.0 |
+| 1 ✓ | **`RunContext` plumbing (internal)** — landed `a473f0e` | Add `struct RunContext` to `engine.h`. Engine's `execute_graph_async` constructs and threads it through. NodeExecutor passes it to `execute_full_async`. Pybind wraps it. **No public-facing change** — old methods still take only `state`; the new `ctx` lives alongside in the dispatch path. ctest 442/442 + pytest 96/96 green. Bench median 5.365 µs (BASE 5.285 µs, +1.5%) — within historical ~3% noise floor, inside the ±5% band off the 5.185 µs baseline. Pybind wrap deferred to PR 7 (binding migration) since PR 1 has zero pybind diff. | v0.4.0 |
+| 2 ✓ | **`GraphNode::run(NodeInput) -> NodeOutput`** — landed `607ce66` | New virtual on GraphNode. Default implementation delegates to the old 8 virtuals (priority order preserved). Registers as the engine's preferred dispatch entry. Existing C++ subclasses still compile + work via the default fallback. ctest 442 → 445 (3 new NodeRunDispatch tests) + pytest 96/96 + 5 live LLM/WS green. Bench median 6.122 µs vs PR1 BASE 6.160 µs (Δ -0.6%) on A/B 10 rounds (historical PR1 BASE varied from 5.285 → 6.160 with unchanged code; A/B comparison controls measurement drift). **Trap caught**: ``run(const NodeInput&)`` SEGV'd inside asio's executor under the pybind async path (coroutine-reference-parameter UAF, the v0.2.0 RunConfig crash shape). Fix: take ``NodeInput`` by value. Documented in node.h. | v0.4.0 |
 | 3 ✓ | **CancelToken `fork()` additive** — landed `897645c` | Add `std::shared_ptr<CancelToken> CancelToken::fork()`. Parent `cancel()` cascades to children. `add_cancel_hook` keeps working (deprecated; `[[deprecated]]` annotation lands in PR 4). `run_sync(aw, cancel)` switches to `cancel->fork()`. The single-signal `slot()` API stays for the engine's outer co_spawn. ctest 445 → 452 (7 new CancelTokenFork tests) + pytest 96/96 + 5 live LLM/WS green. Bench A/B 20 rounds (interleaved both directions): Δ min +1.0%, Δ median +1.5% — within ±5% band; bench path has no `cancel_token` so doesn't hit `fork()`, the small delta is binary layout noise (PR3 bench binary is 3.7KB smaller than PR2, layout differs). | v0.4.0 |
 | 4 ✓ | **Deprecation annotations** — landed `35a4517` | Add `[[deprecated]]` on the 8 old virtuals + `add_cancel_hook` (Hook returned by it deprecates indirectly). Trampoline scopes (`CurrentCancelTokenScope` / `current_cancel_token()`) deferred — that's the smuggling channel that PR 7 (binding migration) replaces with `ctx.cancel_token` reads, so deprecating it now would force suppress at every smuggling site without a clear migration path. Internal call sites (graph_node.cpp default chain, default `run()` forwarder) bracketed by new `NEOGRAPH_PUSH/POP_IGNORE_DEPRECATED` macros (api.h — GCC/clang/MSVC portable). User code overriding deprecated virtuals or calling `add_cancel_hook` sees migration warnings; engine internals stay clean. ctest 452/452 + pytest 96/96 + 5 live LLM/WS green. Bench A/B 10 rounds: Δ median +0.3%, min +0.8% — pure attribute change, layout noise. `-Werror=deprecated-declarations` not enabled (CI never had `-Werror` to begin with; warnings stay informational through deprecation window). | v0.4.0 |
 | 5 ✓ | **StateView canonical, raw dict deprecated** — landed `f31aa53` | Mark `engine.get_state(thread_id) -> dict` as soft-deprecated in the pybind docstring. New canonical = `get_state_view(thread_id) -> StateView` (already in v0.3.2). No `DeprecationWarning` emit, no `[[deprecated]]` annotation — raw dict has legitimate uses (per-channel `version` access, snapshot serialization). v1.0 keeps it as escape hatch unless the soft-deprecation generates loud feedback. Zero behavioural change. ctest 452/452 + pytest 96/96 green. | v0.4.0 |
@@ -625,7 +625,7 @@ Each PR must:
   - **Not break ctest 442/442 + pytest 96/96** at the time it merges
     (deprecation warnings allowed in the build, errors not).
   - **Not regress the bench** (median µs/iter on `bench_neograph` seq
-    path, measured per `feedback_wsl2_bench_isolation.md` — fresh
+    path, measured per public measurement/build guidance — fresh
     worktree, taskset+chrt).
   - **Touch at most one of**: header surface OR engine internals OR
     binding OR examples. Mixed PRs make review hard and revert
@@ -723,16 +723,16 @@ checklist when you touch the relevant area:
 
 | Trap | Where it bites | Memory entry |
 |---|---|---|
-| `NEOGRAPH_API` macro on every public class + free function | New engine sub-libraries (postgres / sqlite / mcp / a2a / acp). Windows DLL boundary. | `feedback_neograph_api_discipline.md` |
-| Cross-branch stale .so contamination | `BUILD_SHARED_LIBS=ON` build/ used across branches → ABI mismatch SEGV in compile() | `feedback_cross_branch_stale_so_trap.md` |
-| Build dir contamination on bench measurements | Long-lived build/ dirs produce slower binaries than fresh worktree builds (+0.4 µs/iter false signal) | `feedback_bench_build_dir_contamination.md` |
-| WSL2 measurement jitter | Plain "many reps + median" doesn't converge — needs taskset + chrt FIFO 99 | `feedback_wsl2_bench_isolation.md` |
-| Doxygen `/*` wildcard in comments | `fs/*` / `terminal/*` inside `/**` opens nested comment, suppresses subsequent diagnostics. Use `&#42;` HTML entity. | `feedback_doxygen_slash_star_trap.md` |
+| `NEOGRAPH_API` macro on every public class + free function | New engine sub-libraries (postgres / sqlite / mcp / a2a / acp). Windows DLL boundary. | public measurement/build guidance |
+| Cross-branch stale .so contamination | `BUILD_SHARED_LIBS=ON` build/ used across branches → ABI mismatch SEGV in compile() | public measurement/build guidance |
+| Build dir contamination on bench measurements | Long-lived build/ dirs produce slower binaries than fresh worktree builds (+0.4 µs/iter false signal) | public measurement/build guidance |
+| Historical measurement jitter | Plain "many reps + median" doesn't converge — needs taskset + chrt FIFO 99 | public measurement/build guidance |
+| Doxygen `/*` wildcard in comments | `fs/*` / `terminal/*` inside `/**` opens nested comment, suppresses subsequent diagnostics. Use `&#42;` HTML entity. | public measurement/build guidance |
 | ASan `__cxa_throw` interceptor CHECK | C++ exceptions crossing pybind boundary trip the interceptor under `LD_PRELOAD libasan.so`. Deselect by keyword in CI; cancel/throw correctness is exercised by TSan + live LLM tests. | (this session — add note in feedback) |
-| TSan eptr lifetime race | NodeInterrupt's exception_ptr crossing co_await boundary trips libstdc++ `__exception_ptr::_M_release`. Fix: extract reason as `std::string`, throw fresh on main thread. | `feedback_parallel_group_eptr_race.md` |
+| TSan eptr lifetime race | NodeInterrupt's exception_ptr crossing co_await boundary trips libstdc++ `__exception_ptr::_M_release`. Fix: extract reason as `std::string`, throw fresh on main thread. | public measurement/build guidance |
 | MSVC needs explicit `<array>` / `<algorithm>` | libstdc++ pulls them transitively; MSVC v143 doesn't. Test files using `std::array` etc. break Windows CI silently. | (this session — add note in feedback) |
-| scikit-build-core 0.12.2 Windows single_config | `-G` flag detected, env-var ignored — Windows wheel loses SQLite=OFF override. Use `[[tool.scikit-build.overrides]]` + `cmake.define`. | `feedback_libcurl_unconditional_dep.md` |
-| Wheel OpenSSL CA path | manylinux libssl uses AlmaLinux paths absent on Ubuntu. `__init__.py` auto-set `SSL_CERT_FILE` from certifi. | `feedback_wheel_openssl_ca.md` |
+| scikit-build-core 0.12.2 Windows single_config | `-G` flag detected, env-var ignored — Windows wheel loses SQLite=OFF override. Use `[[tool.scikit-build.overrides]]` + `cmake.define`. | public measurement/build guidance |
+| Wheel OpenSSL CA path | manylinux libssl uses AlmaLinux paths absent on Ubuntu. `__init__.py` auto-set `SSL_CERT_FILE` from certifi. | public measurement/build guidance |
 | pyproject.toml runtime deps not auto-installed in CI's PYTHONPATH flow | `pip install --quiet pytest` line must mirror pyproject.toml's `dependencies = [...]`. v0.3.2 lost this for pydantic. | (this session — add note in feedback) |
 | `compile()` default worker count regression | `b59444f` changed the default from `1 → hardware_concurrency`, latent par micro-bench 11.8 → 283 µs (24×). The baseline-itself-regresses pattern. Fix in `e5ecb08`. | "Perf retrospective" section (above) |
 
@@ -1056,9 +1056,8 @@ end-to-end passes:
 
 ### WSL Windows-PATH leak trap (reproducible — build environment warning)
 
-Two contaminations were caught when building with grpc++ ON in this
-environment (WSL2, massive Windows PATH leak). They do not appear on
-a clean Linux host / CI, but WSL developers hit them:
+When building with grpc++ ON, Windows PATH entries can contaminate
+Linux dependency discovery. Keep target dependency prefixes separate:
 
 The paths below use environment variables for the Windows mount root,
 Anaconda installation prefix, and GTK installation prefix:
@@ -1082,10 +1081,7 @@ Anaconda installation prefix, and GTK installation prefix:
      explicitly set `-DZLIB_INCLUDE_DIR=/usr/include
      -DZLIB_LIBRARY=/usr/lib/x86_64-linux-gnu/libz.so`.
 
-  → Both are cousins of `cmake-option-default-flip-trap` (an
-  environment leak drags `find_package` to the wrong prefix). The
-  EDDSkills SKILL `wsl-windows-path-cmake-find-leak` was added
-  (2026-05-16).
+  Dependency discovery must use prefixes for the intended target.
 
 ### NexaGraph predecessor analysis — gRPC-MCP's real ROI is the checkpoint
 
@@ -1276,23 +1272,27 @@ fact NeoGraph's design ancestor, so it is not a "porting" target.)
    core only from NexaGraph's CAF `compress_history` actor with the
    actor shell stripped off:
    - `compact_history(messages, Provider&, model, max_tokens=12000,
-     recent_keep=6) -> awaitable<CompactedHistory>` — when the token
-     estimate exceeds budget, summarize the section between (system
-     1 + last N) with a single LLM call, replacing it with a
-     system-summary message. `co_await provider.invoke()` (does not
-     use deprecated `complete()`, zero async-lib dependency — core
-     internals already use coroutines).
-   - `sanitize_tool_calls(messages&)` — a defense that NeoGraph
-     **completely lacked**: 2-pass removal of OpenAI tool-pairs broken
-     by truncation (assistant `tool_call` with no response / tool
-     message with no call), idempotent. `compact_history` applies it
-     internally to its output. It removes these orphaned tool pairs; it cannot
-     guarantee that a provider accepts every compacted request.
+     recent_keep=6, summary_controls=default_summary_controls())
+     -> awaitable<CompactedHistory>` — when the token estimate exceeds
+     budget, summarize only the eligible unsealed text-only prefix with
+     one `provider.invoke_async()` call. Preserve the leading system message
+     and the full typed suffix; frame the summary as labelled user-role
+     derived context, not instructions. Only EndTurn/StopSequence with
+     text beyond ASCII whitespace replaces history; otherwise retain the entire input.
+     Any native seal prevents compaction because it binds the full preceding
+     history: NativeReplayProtected retains input without calling the summarizer.
+     The result reports status, the covered input span, and the full outcome.
+     Explicit `ProviderControls` replace the historical 0.2 / 500 defaults,
+     without forcing temperature or reasoning fields left unset.
+   - `sanitize_tool_calls(messages&)` — validates client tool call/result
+     pairing without modifying messages. Missing or duplicate call IDs,
+     orphan results, and unmatched calls throw `std::invalid_argument`.
+     Compaction retains tool/native groups and does not sanitize them away.
    - `estimate_tokens` — conservative ~3 chars/tok estimate (mixed
-     KO / EN).
+     KO / EN), including thinking and reasoning parts.
    - example 56 `history_compaction` (offline MockProvider, no key
-     required) — sanitize 3→1, compact 29 msgs/975 tok →
-     6 msgs/208 tok, original-unchanged verification PASS.
+     required) — demonstrates rejection of invalid pairing, compaction
+     into non-authoritative context, and retention on a truncated summary.
      `src/core/history.cpp` builds into `neograph_core` for all
      configs — 496/497 ctest PASS (1 failure = pre-existing
      `pybind_smoke` openinference module missing, unrelated).

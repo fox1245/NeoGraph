@@ -244,8 +244,19 @@ int main() {
         "\n\nSolve:",
         0.0f, outcomes);
 
+    const std::string final_text = examples::visible_text(*final_reply);
+    if (final_text.find_first_not_of(" \t\r\n") == std::string::npos) {
+        // ask() returns the last empty MaxTokens completion after its bounded
+        // re-asks; an empty answer is a failed run, not a solution.
+        const bool token_limit =
+            std::get<sp::Completion>(*final_reply).stop.kind == sp::StopKind::MaxTokens;
+        std::cerr << "\nError: the final answer has no visible text"
+                  << (token_limit ? " (the provider stopped at the output-token limit)" : "")
+                  << "; no solution was produced.\n";
+        return 1;
+    }
     std::cout << "── Final expression ─────────────────────────────────\n"
-              << examples::visible_text(*final_reply) << "\n\n";
+              << final_text << "\n\n";
     return 0;
     } catch (const std::exception& e) {
         std::cerr << "\nError: " << e.what() << "\n";

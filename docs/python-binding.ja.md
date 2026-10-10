@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=73069d840a47c09f7c2b2b6f74da22c57bf16c51e1837e07042d293c6692dd5d -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=8dc07611a5d489c5f48231f91efa341362b9f2a47558a81ad11f2ca60b4d38af -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
 
 `neograph-engine`は、同じC++ランタイムのpybind11サーフェスです。ホイールによりCore、LLM、Program/QuickJS、MCP、SQLiteランタイムの永続性が有効になります。オプションのソースビルドでは、コンパイルされたコンポーネントのみが公開されます。
 
-このガイドは現在の型付きバインディング API を説明します。`complete` を公開する旧ホイールは異なるプロバイダーインターフェースを使うため、以下の型付き例を実行できません。
+このガイドには SchemaProvider SDK `0.3.0`、インターフェース revision `6`、共有ライブラリー ABI revision `6` でビルドした wheel が必要です。バンドルされたコンポーネントをまとめてインストールします。`complete` を公開する旧ホイールは異なるプロバイダーインターフェースを使うため、以下の型付き例を実行できません。
 
 ```bash
 pip install neograph-engine
@@ -102,9 +102,9 @@ output tokens: 0
 
 カウンター省略の経路を確認するには、ピアの `usage` メンバー全体を削除して再起動します。最後の行は `output tokens: unknown` になるはずです。これは実モデルのトークン計数ではなく、プロトコルのマッピングを確認する例です。
 
-### インターフェース 4 のファミリー別制御
+### ファミリー別制御
 
-SDK インターフェース/共有ライブラリー世代 4 の wheel が必要です。パッケージ版、native archive v3、portable JSON v2 は別です。例は制御構築のみで、対応ファミリーの承認済み provider が必要です。最初のループバックは変更しません。OpenRouter 専用制御は未承認ローカル origin で I/O 前に拒否されます。
+パッケージ版、native archive v3、portable JSON v2 は別です。例は制御構築のみで、対応ファミリーの承認済み provider が必要です。最初のループバックは変更しません。OpenRouter 専用制御は未承認ローカル origin で I/O 前に拒否されます。
 
 ```python
 chat = ng.ProviderControls()
@@ -224,6 +224,10 @@ SDK の失敗は戻り値のデータです。ホストのオブザーバーや�
 保存された Python のプロバイダー例外やグラフ例外の原因を繰り返し参照しても、元の例外オブジェクトと traceback を保持します。ネイティブの入れ子の例外変換を通じて参照する原因も同じ規則に従います。
 
 使用量カウンターは `value` と `evidence` を持つ `UsageCount`、または不明な場合は `None` です。報告されたゼロは既知の使用量であり、省略されたカウンターとは異なります。`count.value` を読む前に `count is not None` を確認します。会計処理で `count or 0` を使ったり、不明な入力/出力/合計カウンターをゼロに置き換えたりしないでください。
+
+`outcome.usage.provider_cost`は不変の`ProviderReportedCost`ビューです。任意の`ProviderUsdAmount`フィールド`total/upstream_total/upstream_input/upstream_output`に`nano_usd/evidence/rounding`があり、`status`はこの順の4要素、`byok_status`はnullableな`is_byok`の状態です。`ProviderCostStatus/ProviderCostSource/ProviderCostRounding`は欠落、利用可能、不正、精度超過、overflow、不明通貨、競合の根拠を保持します。金額は元のdecimal字句ではなく解析済みbinary64から切り上げます。報告ゼロや`is_byok=False`は欠落ではありません。請求書やtoken予算の課金ではないため、呼び出しごとの金額は集計token bankではなく順序付き`provider_outcomes`で確認します。
+
+`UsageAccumulator`はtokenのみの集計です。単一報告は金額メタデータを保持しますが、2回目以降のsnapshotの`provider_cost`はcanonical Missing/Noneに明示的に戻します。古い最初の費用や合計金額ではありません。このsnapshotの復元は費用を再生成せず、token権限を更新しません。正確な金額の根拠は各元outcomeまたはprovider journal項目から読みます。
 
 再開や続行時、`RunResult.provider_outcomes` は元の結果を順序どおり保持し、その後に新しい結果を追加します。`RunResult.usage` は現在の会計バンクを反映し、チェックポイントから以前の報告を復元する場合があります。再開後に新しいプロバイダー呼び出しがなくても、使用量が `None` またはゼロになる保証はありません。証拠の復元で元のプロバイダーリクエストを再ディスパッチしたり、二重に課金したりしてはいけません。保持された報告は以前の呼び出しを記述するもので、新たな支出枠を与えません。
 

@@ -518,3 +518,70 @@ TEST(UsageAccounting, ObservationSealRejectsRestorationAndZeroClaimsOnAPristineB
     EXPECT_FALSE(authority.has_report);
     EXPECT_FALSE(replay.snapshot().total);
 }
+
+TEST(UsageAccounting, MultiReportTokenBankDoesNotRetainOrInventMonetaryAggregate) {
+    UsageAccumulator bank;
+    auto first = neograph::test::usage(2, 3, 5);
+    first.provider_cost.total = sp::UsdAmount{0};
+    first.provider_cost.status[0] = sp::CostStatus::Available;
+    first.provider_cost.is_byok = false;
+    first.provider_cost.byok_status = sp::CostStatus::Available;
+    first.provider_cost.source = sp::CostSource::OpenRouterUsd;
+    const auto original = provider_codec::encode_usage(first);
+
+    bank.add(first);
+    EXPECT_EQ(bank.total_tokens_wide(), 5U);
+    ASSERT_TRUE(bank.snapshot().provider_cost.total);
+    EXPECT_EQ(bank.snapshot().provider_cost.total->nano_usd, 0U);
+    EXPECT_EQ(bank.snapshot().provider_cost.is_byok, std::optional<bool>(false));
+
+    bank.add(neograph::test::usage(7, 11, 18));
+    const auto aggregate = bank.snapshot();
+    EXPECT_EQ(reported(aggregate.total), 23U);
+    EXPECT_EQ(bank.total_tokens_wide(), 23U);
+    EXPECT_TRUE(provider_codec::provider_cost_absent(aggregate.provider_cost));
+    EXPECT_FALSE(provider_codec::encode_usage(aggregate).contains("provider_cost"));
+
+    // Neither another report with cost nor restoration of the token-only
+    // aggregate resurrects the first report's metadata as a monetary total.
+    bank.add(first);
+    EXPECT_EQ(bank.total_tokens_wide(), 28U);
+    EXPECT_TRUE(provider_codec::provider_cost_absent(bank.snapshot().provider_cost));
+    UsageAccumulator restored;
+    restored.restore_authority(bank.authority_snapshot());
+    EXPECT_EQ(restored.total_tokens_wide(), 28U);
+    EXPECT_TRUE(provider_codec::provider_cost_absent(restored.snapshot().provider_cost));
+    EXPECT_EQ(provider_codec::encode_usage(first), original);
+    EXPECT_TRUE(original.contains("provider_cost"));
+}
+
+TEST(UsageAccounting, MultiReportMoneyClearingDoesNotSettleAnUnknownTokenHold) {
+    for (const auto status : {sp::CostStatus::Missing, sp::CostStatus::Malformed,
+                             sp::CostStatus::Overflow, sp::CostStatus::UnknownCurrency,
+                             sp::CostStatus::Conflict}) {
+        UsageAccumulator bank;
+        auto first = neograph::test::usage(2, 3, 5);
+        first.provider_cost.total = sp::UsdAmount{100};
+        first.provider_cost.status[0] = sp::CostStatus::Available;
+        first.provider_cost.source = sp::CostSource::OpenRouterUsd;
+        bank.add(first);
+        ASSERT_TRUE(bank.try_reserve(13, 18));
+
+        sp::Usage partial;
+        partial.stage = sp::UsageStage::Partial;
+        partial.provider_cost.status[0] = status;
+        if (status != sp::CostStatus::Missing) {
+            partial.provider_cost.source = status == sp::CostStatus::UnknownCurrency
+                ? sp::CostSource::UnknownCurrency : sp::CostSource::OpenRouterUsd;
+            partial.provider_cost.quality = sp::UsageQuality::Inconsistent;
+        }
+        const auto observed = provider_codec::encode_usage(partial);
+        bank.settle_reservation(13, partial);
+        const auto authority = bank.authority_snapshot();
+        EXPECT_EQ(authority.charged, 5U);
+        EXPECT_EQ(authority.reserved, 13U);
+        EXPECT_EQ(bank.total_tokens_wide(), 18U);
+        EXPECT_TRUE(provider_codec::provider_cost_absent(authority.reports.provider_cost));
+        EXPECT_EQ(provider_codec::encode_usage(partial), observed);
+    }
+}

@@ -21,6 +21,7 @@
 
 #include <neograph/neograph.h>
 #include "../../provider_example_support.h"
+#include "utf8_prefix.h"
 #include <cppdotenv/dotenv.hpp>
 
 #include <cctype>
@@ -165,7 +166,11 @@ static std::string llm_judge_topology(
     for (const auto& m : history) {
         std::string role = m.value("role", "");
         std::string content = m.value("content", "");
-        if (content.size() > 200) content = content.substr(0, 200) + "...";
+        const auto prefix_bytes = examples::utf8_prefix(content, 200).size();
+        if (prefix_bytes < content.size()) {
+            content.resize(prefix_bytes);
+            content += "...";
+        }
         hist_str += "- " + role + ": " + content + "\n";
     }
 
@@ -306,7 +311,7 @@ static long peak_rss_kb() {
 
 // ── main — 5 customer × 5 turn, 각자 별도 evolution timeline ─────────
 
-int main() {
+static int run_demo() {
     cppdotenv::auto_load_dotenv();
     const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key) {
@@ -462,4 +467,17 @@ int main() {
     }
 
     return 0;
+}
+
+// Report provider and serialization exceptions with a deliberate failure exit,
+// rather than leaving them uncaught at the process boundary.
+int main() {
+    try {
+        return run_demo();
+    } catch (const std::exception& error) {
+        std::cerr << "cookbook_self_evolving_chatbot_multi: " << error.what() << "\n";
+    } catch (...) {
+        std::cerr << "cookbook_self_evolving_chatbot_multi: unknown error\n";
+    }
+    return 1;
 }

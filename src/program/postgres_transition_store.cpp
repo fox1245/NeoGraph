@@ -1230,6 +1230,25 @@ std::string PostgreSQLProgramTransitionStore::process_coordination_key() const {
     return impl_->coordination_key;
 }
 
+std::optional<ProgramRunPublicationHead>
+PostgreSQLProgramTransitionStore::load_run_publication_head(std::string_view owner,
+                                                           std::string_view run_id) const {
+    std::lock_guard lock(impl_->mutex);
+    // One statement observes the run record and journal head under one MVCC snapshot. Unlike
+    // load() followed by latest() it reads once and parses no migration plan or publication bytes.
+    auto rows = exec_params(impl_->connection,
+        "SELECT run_record_bytes, journal_record_bytes FROM neograph_program_transition_run_heads_v2 "
+        "WHERE owner_scope = $1 AND run_id = $2", {std::string(owner), std::string(run_id)});
+    if (PQntuples(rows.get()) == 0) return std::nullopt;
+    if (PQntuples(rows.get()) != 1 || PQnfields(rows.get()) != 2)
+        throw std::invalid_argument("Stored PostgreSQL run publication head shape is invalid");
+    ProgramRunPublicationHead head{
+        ProgramRunRecord::parse(row_text(rows, 0, 0)),
+        ProgramJournalRecord::parse(row_text(rows, 0, 1))};
+    detail::validate_run_publication_head(head.run_record, head.journal_record, owner, run_id);
+    return head;
+}
+
 std::optional<ProgramCommandPublicationHead>
 PostgreSQLProgramTransitionStore::load_command_publication_head(std::string_view owner,
                                                                std::string_view run_id) const {

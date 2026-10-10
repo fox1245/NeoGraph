@@ -13,6 +13,9 @@
 
 namespace neograph::provider_codec {
 
+static_assert(sp::EXPECTED_INTERFACE_REVISION == 6,
+              "NeoGraph requires SchemaProvider 0.3.0 interface 6 headers");
+
 // A versioned observational projection is not native replay authority. Only a
 // verified NativeArchive record can restore private provider continuation seals.
 inline constexpr std::string_view outcome_schema = "neograph.provider-outcome/v2";
@@ -256,19 +259,112 @@ inline sp::Message decode_message(const json& value) {
     detail::require(encode_message(result) == value, "Noncanonical provider message encoding");
     return result;
 }
+// The SDK's fixed-size default carries no monetary observation. Preserve the
+// absence-only v2 bytes without constructing a JSON monetary object.
+inline bool provider_cost_absent(const sp::ProviderReportedCost& value) noexcept {
+    return !value.total && !value.upstream_total && !value.upstream_input && !value.upstream_output &&
+        !value.is_byok && value.byok_status == sp::CostStatus::Missing &&
+        value.source == sp::CostSource::None && value.quality == sp::UsageQuality::Consistent &&
+        std::all_of(value.status.begin(), value.status.end(),
+                    [](sp::CostStatus status) { return status == sp::CostStatus::Missing; });
+}
+namespace detail {
+inline void validate_provider_cost(const sp::ProviderReportedCost& value) {
+    const auto valid = [](auto item, auto last) {
+        return static_cast<int>(item) >= 0 && static_cast<int>(item) <= static_cast<int>(last);
+    };
+    require(valid(value.source, sp::CostSource::UnknownCurrency) &&
+                valid(value.quality, sp::UsageQuality::Inconsistent),
+            "Invalid provider cost source or quality");
+    const std::optional<sp::UsdAmount>* amounts[]{
+        &value.total, &value.upstream_total, &value.upstream_input, &value.upstream_output};
+    bool inconsistent = false;
+    for (std::size_t i = 0; i < value.status.size(); ++i) {
+        const auto status = value.status[i];
+        require(valid(status, sp::CostStatus::Conflict), "Invalid provider cost status");
+        require((status == sp::CostStatus::Available) == amounts[i]->has_value(),
+                "Provider cost amount/status mismatch");
+        if (*amounts[i]) {
+            const auto& amount = **amounts[i];
+            require(value.source == sp::CostSource::OpenRouterUsd &&
+                        amount.nano_usd <= (std::uint64_t{1} << 53) &&
+                        valid(amount.evidence, sp::Evidence::Derived) &&
+                        amount.rounding == sp::CostRounding::CeilingParsedBinary64,
+                    "Invalid provider USD amount");
+        }
+        require(status != sp::CostStatus::UnknownCurrency ||
+                    value.source == sp::CostSource::UnknownCurrency,
+                "Provider cost currency/status mismatch");
+        inconsistent |= status != sp::CostStatus::Missing && status != sp::CostStatus::Available;
+    }
+    require(value.byok_status == sp::CostStatus::Missing ||
+                value.byok_status == sp::CostStatus::Available ||
+                value.byok_status == sp::CostStatus::Malformed,
+            "Invalid provider BYOK status");
+    require((value.byok_status == sp::CostStatus::Available) == value.is_byok.has_value(),
+            "Provider BYOK value/status mismatch");
+    inconsistent |= value.byok_status == sp::CostStatus::Malformed;
+    require(value.quality == (inconsistent ? sp::UsageQuality::Inconsistent : sp::UsageQuality::Consistent),
+            "Provider cost quality/status mismatch");
+    require(value.source != sp::CostSource::None || provider_cost_absent(value),
+            "Provider cost metadata lacks a source");
+}
+inline json usd_amount(const std::optional<sp::UsdAmount>& value) {
+    return value ? json{{"nano_usd", value->nano_usd},
+                        {"evidence", static_cast<int>(value->evidence)},
+                        {"rounding", static_cast<int>(value->rounding)}} : json(nullptr);
+}
+inline std::optional<sp::UsdAmount> parse_usd_amount(const json& value) {
+    if (value.is_null()) return {};
+    return sp::UsdAmount{counter(value.at("nano_usd")),
+        enumeration(value.at("evidence"), sp::Evidence::Derived),
+        enumeration(value.at("rounding"), sp::CostRounding::CeilingParsedBinary64)};
+}
+inline json provider_cost(const sp::ProviderReportedCost& value) {
+    validate_provider_cost(value);
+    auto status = json::array();
+    for (const auto item : value.status) status.push_back(static_cast<int>(item));
+    return {{"total", usd_amount(value.total)}, {"upstream_total", usd_amount(value.upstream_total)},
+            {"upstream_input", usd_amount(value.upstream_input)}, {"upstream_output", usd_amount(value.upstream_output)},
+            {"status", std::move(status)}, {"is_byok", value.is_byok ? json(*value.is_byok) : json(nullptr)},
+            {"byok_status", static_cast<int>(value.byok_status)}, {"source", static_cast<int>(value.source)},
+            {"quality", static_cast<int>(value.quality)}};
+}
+inline sp::ProviderReportedCost parse_provider_cost(const json& value) {
+    sp::ProviderReportedCost result;
+    result.total = parse_usd_amount(value.at("total"));
+    result.upstream_total = parse_usd_amount(value.at("upstream_total"));
+    result.upstream_input = parse_usd_amount(value.at("upstream_input"));
+    result.upstream_output = parse_usd_amount(value.at("upstream_output"));
+    const auto& status = value.at("status");
+    require(status.is_array() && status.size() == result.status.size(), "Invalid provider cost status array");
+    for (std::size_t i = 0; i < result.status.size(); ++i)
+        result.status[i] = enumeration(status.at(i), sp::CostStatus::Conflict);
+    if (!value.at("is_byok").is_null()) result.is_byok = value.at("is_byok").get<bool>();
+    result.byok_status = enumeration(value.at("byok_status"), sp::CostStatus::Conflict);
+    result.source = enumeration(value.at("source"), sp::CostSource::UnknownCurrency);
+    result.quality = enumeration(value.at("quality"), sp::UsageQuality::Inconsistent);
+    require(!provider_cost_absent(result), "Absent provider cost must be omitted");
+    require(provider_cost(result) == value, "Noncanonical provider cost encoding");
+    return result;
+}
+} // namespace detail
 inline json encode_usage(const sp::Usage& value) {
     auto extra = json::object();
     for (const auto& [name, count] : value.extra) extra[name] = detail::count(count);
     auto conflicts = json::array();
     for (const auto& conflict : value.conflicts)
         conflicts.push_back({{"counter", conflict.counter}, {"detail", conflict.detail}});
-    return {{"input_total", detail::count(value.input_total)},
+    json result{{"input_total", detail::count(value.input_total)},
             {"output_total", detail::count(value.output_total)}, {"total", detail::count(value.total)},
             {"provider_reported_total", detail::count(value.provider_reported_total)},
             {"input_uncached", detail::count(value.input_uncached)}, {"cache_read", detail::count(value.cache_read)},
             {"cache_write", detail::count(value.cache_write)}, {"reasoning", detail::count(value.reasoning)},
             {"extra", std::move(extra)}, {"stage", static_cast<int>(value.stage)},
             {"quality", static_cast<int>(value.quality)}, {"conflicts", std::move(conflicts)}};
+    if (!provider_cost_absent(value.provider_cost))
+        result["provider_cost"] = detail::provider_cost(value.provider_cost);
+    return result;
 }
 inline sp::Usage decode_usage(const json& value) {
     sp::Usage result;
@@ -292,6 +388,8 @@ inline sp::Usage decode_usage(const json& value) {
     for (const auto& conflict : value.at("conflicts"))
         result.conflicts.push_back({conflict.at("counter").get<std::string>(),
                                    conflict.at("detail").get<std::string>()});
+    if (value.contains("provider_cost"))
+        result.provider_cost = detail::parse_provider_cost(value.at("provider_cost"));
     detail::require(encode_usage(result) == value, "Noncanonical provider usage encoding");
     return result;
 }

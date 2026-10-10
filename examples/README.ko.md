@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=f1c2fdb5d8383c9c326bc200d9da2e10b5aba9dd8dea18fd5e5fae5f7d14d1df -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=7ab0ab562d04442bd8c1190e9d6f8540ba08ff93d2278b1564c3487d652022c8 -->
 # C++ API 예제
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
@@ -253,9 +253,17 @@ Failure, observer/settlement 오류, 이미 전달한 streaming part는 추가 �
 ladder를 소진하면 diagnostic을 반환하며 성공한 provider result를 꾸며내지 않습니다.
 
 예제 16은 완료된 빈 응답에만 최대 세 번 호출하고 cap 8,192와 ask당 deadline 300초를 유지합니다.
-cap을 두 배로 늘리거나 failure를 재시도하지 않습니다. 예제 28의 rewrite는 low effort와 출력
+cap을 두 배로 늘리거나 failure를 재시도하지 않습니다. 최종 답변에 visible text가 없으면 오류를 출력하고
+1로 종료합니다. 예제 28의 rewrite는 low effort와 출력
 512 token을 요청하고 빈/공백 응답이면 원래 질문을 그대로 반환합니다. provider timeout은
 180초입니다. 이 경로별 설정은 공유 factory의 기본값을 바꾸지 않습니다.
+
+다중 고객 self-evolving chatbot은 judge 이력 접두사를 유효한 UTF-8 경계에서 200바이트
+이내로 자르고 예외를 오류와 종료 코드 1로 보고합니다. The Beast의 `baldwin_llm --llm`은
+키를 요구하며 오프라인 oracle로 대체하지 않습니다. 타입 요청은 low effort와 cap 1,824를
+사용하며 완료된 빈 `MaxTokens` 응답만 cap 3,648로 한 번 재요청합니다. Provider 실패나
+끝내 빈 응답은 1로 종료합니다. 이는 제한된 빈 출력 처리이며 Baldwin 학습이나 ToT 정체
+빈도에 대한 라이브 provider 검증은 아닙니다.
 
 ### 체크포인트 및 진화
 
