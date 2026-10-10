@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=d66c5fb755e764bf04126d21d3c20a1f5ac68eecd504e95e452f635261ef21f7 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=bb9b10ad0da8c0fe95a5458eef227f43a5d00f1161d51cfcf5e7af278cc072a7 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -27,6 +27,8 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 수정됨
 
+- **Program publication은 node handle 이동 대입에 의존하지 않고 libc++에서 빌드됩니다.** 모든 index publication 뒤 추출한 handle을 직접 초기화해 라이브러리별 `noexcept` trait 없이 commit 원자성을 유지합니다.
+- **Windows interface-6 archive fixture는 비공개 custody 디렉터리를 원자적으로 생성합니다.** 상속을 차단한 현재 사용자 전용 DACL로 native archive admission을 충족하며 outcome·금액 근거·replay·잘못된 binding 검증을 모두 유지합니다.
 - **Anthropic Messages와 Gemini의 병렬 client-tool 결과를 하나의 turn으로 유지합니다.** 인접한 portable 결과 전용 메시지는 family 인코딩 전에 묶되 mixed·native·turn 경계는 유지합니다. 다른 API family와 저장된 history는 바꾸지 않습니다(#311).
 - **History compaction은 권한과 미완료 근거를 보존합니다.** 전달받은 typed controls를 그대로 쓰고 정상 종료한 비어 있지 않은 요약만 채택합니다. 거부된 outcome은 기록하되 history를 자르지 않고, 요약을 system 지시가 아닌 user 유래 내용으로 표시합니다. 진짜 native replay prefix는 보호합니다(#314, #325).
 - **Program fan-out join은 대기 전에 도착한 완료를 잃지 않습니다.** 완료 상태를 유지하고, scoped 취소는 새 dispatch를 막고 현재 또는 늦게 연결된 자식을 취소합니다. 일부 launch 실패는 빌린 상태를 쓰는 모든 producer를 drain한 뒤 전파합니다. Await는 동기적으로 진입할 수 있는 자식 publication보다 deadline을 먼저 등록합니다(#341).

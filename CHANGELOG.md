@@ -27,6 +27,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Program publication builds with libc++ without relying on node-handle move assignment.** Lease retirement directly initializes the extracted handle after all index publications, preserving commit atomicity without a library-specific `noexcept` trait.
+- **Windows interface-6 archive fixtures create private custody directories atomically.** A protected, current-user-only DACL satisfies native archive admission; all outcome, monetary evidence, replay and wrong-binding assertions remain enabled.
 - **Parallel client-tool results retain one turn for Anthropic Messages and Gemini.** Adjacent portable result-only messages are grouped before family encoding; mixed, native and turn boundaries remain intact. Other API families and stored history are unchanged (#311).
 - **History compaction preserves authority and incomplete evidence.** It forwards supplied typed controls, accepts only clean nonempty summaries, records rejected outcomes without truncating history, and marks summaries as user-derived rather than system instructions. Authentic native replay prefixes remain protected (#314, #325).
 - **Program fan-out joins no longer lose an early completion.** Persistent join state handles signal-before-wait, scoped cancellation stops dispatch and cancels current or late-attached children, and partial-launch failures drain every borrowing producer before propagation. Await registers its deadline before potentially synchronous child publication (#341).
