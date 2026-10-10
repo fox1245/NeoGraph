@@ -863,6 +863,9 @@ if(TARGET neograph::llm)
     target_link_libraries(neograph_schema_provider_interface6_tests PRIVATE
         neograph::core neograph::llm SchemaProvider::transport
         httplib OpenSSL::SSL OpenSSL::Crypto GTest::gtest_main)
+    if(WIN32)
+        target_link_libraries(neograph_schema_provider_interface6_tests PRIVATE advapi32)
+    endif()
     target_include_directories(neograph_schema_provider_interface6_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/deps)
     gtest_discover_tests(neograph_schema_provider_interface6_tests

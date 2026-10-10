@@ -2357,13 +2357,11 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
             if (current_lease == impl_->execution_leases.end())
                 inserted_leases.emplace(storage_key, std::move(*staged_lease));
         }
-        decltype(impl_->execution_leases)::node_type retired_lease;
 
         static_assert(noexcept(candidate.swap(candidate)) &&
                       noexcept(staged_lineage.swap(staged_lineage)));
         static_assert(std::is_nothrow_swappable_v<GraphMigrationCapsule> &&
                       std::is_nothrow_swappable_v<ProgramExecutionLease>);
-        static_assert(std::is_nothrow_move_assignable_v<decltype(retired_lease)>);
         const auto commit_new_nodes = []<class Map>(Map& heads, Map& insertions) noexcept {
             static_assert(std::allocator_traits<typename Map::allocator_type>::is_always_equal::value);
             static_assert(std::is_nothrow_invocable_v<typename Map::key_compare,
@@ -2389,8 +2387,9 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
         if (next_lease && current_lease != impl_->execution_leases.end())
             std::swap(current_lease->second, *staged_lease);
         commit_new_nodes(impl_->execution_leases, inserted_leases);
-        if (expected_lease && !next_lease)
-            retired_lease = impl_->execution_leases.extract(current_lease);
+        if (expected_lease && !next_lease) {
+            const auto retired_lease = impl_->execution_leases.extract(current_lease);
+        }
     } else if (current == impl_->runs.end()) {
         maybe_fail(ProgramTransitionFaultPoint::BeforeCommit);
         impl_->runs.emplace(std::move(storage_key), std::move(candidate));

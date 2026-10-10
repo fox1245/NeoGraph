@@ -11,7 +11,17 @@
 #include <cstdlib>
 #include <filesystem>
 #include <mutex>
+#include <stdexcept>
+#include <system_error>
 #include <thread>
+#include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 using namespace neograph;
 using namespace std::chrono_literals;
@@ -74,27 +84,86 @@ sp::runtime::Result prepared_run(Provider& provider, std::string_view family,
     return async::run_sync(provider.dispatch_async(std::move(prepared)));
 }
 
+#ifdef _WIN32
+void require_windows(BOOL success, const char* operation) {
+    if (!success)
+        throw std::system_error(static_cast<int>(::GetLastError()), std::system_category(), operation);
+}
+struct PrivateSecurity {
+    std::vector<unsigned char> token, acl;
+    SECURITY_DESCRIPTOR descriptor{};
+    PrivateSecurity() {
+        struct TokenHandle {
+            HANDLE value = nullptr;
+            ~TokenHandle() { if (value) ::CloseHandle(value); }
+        } handle;
+        if (!::OpenThreadToken(::GetCurrentThread(), TOKEN_QUERY, TRUE, &handle.value)) {
+            const auto error = ::GetLastError();
+            if (error != ERROR_NO_TOKEN)
+                throw std::system_error(static_cast<int>(error), std::system_category(), "OpenThreadToken");
+            require_windows(::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &handle.value),
+                            "OpenProcessToken");
+        }
+        DWORD size = 0;
+        require_windows(!::GetTokenInformation(handle.value, TokenUser, nullptr, 0, &size) &&
+                        ::GetLastError() == ERROR_INSUFFICIENT_BUFFER, "GetTokenInformation(size)");
+        token.resize(size);
+        require_windows(::GetTokenInformation(handle.value, TokenUser, token.data(), size, &size),
+                        "GetTokenInformation(TokenUser)");
+        const auto sid = reinterpret_cast<const TOKEN_USER*>(token.data())->User.Sid;
+        require_windows(::IsValidSid(sid), "IsValidSid");
+        size = static_cast<DWORD>(sizeof(ACL) + sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) +
+                                  ::GetLengthSid(sid));
+        acl.resize(size);
+        const auto dacl = reinterpret_cast<PACL>(acl.data());
+        require_windows(::InitializeAcl(dacl, size, ACL_REVISION), "InitializeAcl");
+        require_windows(::AddAccessAllowedAceEx(dacl, ACL_REVISION, 0, FILE_ALL_ACCESS, sid),
+                        "AddAccessAllowedAceEx");
+        require_windows(::InitializeSecurityDescriptor(&descriptor, SECURITY_DESCRIPTOR_REVISION),
+                        "InitializeSecurityDescriptor");
+        require_windows(::SetSecurityDescriptorOwner(&descriptor, sid, FALSE), "SetSecurityDescriptorOwner");
+        require_windows(::SetSecurityDescriptorDacl(&descriptor, TRUE, dacl, FALSE), "SetSecurityDescriptorDacl");
+        require_windows(::SetSecurityDescriptorControl(&descriptor, SE_DACL_PROTECTED, SE_DACL_PROTECTED),
+                        "SetSecurityDescriptorControl");
+    }
+};
+#endif
 class ArchiveDirectory {
 public:
     ArchiveDirectory() {
         static std::atomic<unsigned> sequence{0};
         const auto parent = std::filesystem::canonical(std::filesystem::temp_directory_path());
+#ifdef _WIN32
+        PrivateSecurity security;
+        SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), &security.descriptor, FALSE};
+#endif
         for (unsigned attempt = 0; attempt != 100; ++attempt) {
             root_ = parent / ("ng-interface6-" + std::to_string(
                 std::chrono::steady_clock::now().time_since_epoch().count()) + "-" +
                 std::to_string(sequence.fetch_add(1)));
+#ifdef _WIN32
+            if (::CreateDirectoryW(root_.c_str(), &attributes)) return;
+            const auto error = ::GetLastError();
+            if (error != ERROR_ALREADY_EXISTS && error != ERROR_FILE_EXISTS)
+                throw std::system_error(static_cast<int>(error), std::system_category(), "CreateDirectoryW");
+#else
             if (std::filesystem::create_directory(root_)) {
                 std::filesystem::permissions(root_, std::filesystem::perms::owner_all,
                                              std::filesystem::perm_options::replace);
                 return;
             }
+#endif
         }
         throw std::runtime_error("cannot create archive fixture directory");
     }
     ~ArchiveDirectory() { std::error_code error; std::filesystem::remove_all(root_, error); }
-    std::string records() const { return (root_ / "records").string(); }
-    std::string key() const { return (root_ / "activation").string(); }
+    std::string records() const { return utf8(root_ / "records"); }
+    std::string key() const { return utf8(root_ / "activation"); }
 private:
+    static std::string utf8(const std::filesystem::path& path) {
+        const auto text = path.u8string();
+        return std::string(reinterpret_cast<const char*>(text.data()), text.size());
+    }
     std::filesystem::path root_;
 };
 std::shared_ptr<sp::NativeArchive> archive_activation(sp::NativeArchive::Activation value) {

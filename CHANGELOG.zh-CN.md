@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=d66c5fb755e764bf04126d21d3c20a1f5ac68eecd504e95e452f635261ef21f7 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=bb9b10ad0da8c0fe95a5458eef227f43a5d00f1161d51cfcf5e7af278cc072a7 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -29,6 +29,8 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 
+- **Program publication无需node handle移动赋值即可使用libc++构建。** 在所有index publication之后直接初始化提取的handle，不依赖库特定的`noexcept` trait，同时保留commit原子性。
+- **Windows interface-6 archive fixture原子地创建私有custody目录。** 禁止继承、仅允许当前用户的DACL满足native archive admission，保留所有outcome、金额证据、replay和错误binding检查。
 - **Anthropic Messages 和 Gemini 的并行 client-tool 结果保持在同一 turn。** family 编码前合并相邻 portable 纯结果消息，保留 mixed、native 和 turn 边界。其他 API family 与已保存 history 不变(#311)。
 - **History compaction 保留权限和未完成证据。** 原样传递指定 typed controls，仅接受正常结束且非空的摘要；拒绝的 outcome 仍被记录，但不截断 history。摘要是 user 来源内容而非 system 指令，真实 native replay prefix 保持受保护(#314, #325)。
 - **Program fan-out join 不再丢失等待前到达的完成通知。** 持久完成状态处理 signal-before-wait；scoped 取消停止新 dispatch，并取消当前或迟接入的子任务。部分 launch 失败会先 drain 所有借用状态的 producer 再传播。Await 在可能同步进入的子 publication 前注册 deadline(#341)。

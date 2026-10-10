@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=d66c5fb755e764bf04126d21d3c20a1f5ac68eecd504e95e452f635261ef21f7 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=bb9b10ad0da8c0fe95a5458eef227f43a5d00f1161d51cfcf5e7af278cc072a7 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -29,6 +29,8 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ### 修正
 
+- **Program publicationはnode handleのムーブ代入に依存せずlibc++でビルドできます。** 全index publicationの後で抽出したhandleを直接初期化し、ライブラリ固有の`noexcept` traitなしでcommitの原子性を保持します。
+- **Windowsのinterface-6 archive fixtureは非公開custodyディレクトリを原子的に作成します。** 継承を遮断した現在ユーザー専用DACLでnative archive admissionを満たし、outcome・金額の根拠・replay・誤ったbindingの検証をすべて維持します。
 - **Anthropic MessagesとGeminiの並列client-tool結果を一つのturnに保持します。** 隣接するportableな結果専用メッセージをfamily encode前にまとめ、mixed・native・turn境界は維持します。他のAPI familyと保存historyは変更しません(#311)。
 - **History compactionは権限と未完了の根拠を保持します。** 指定されたtyped controlsをそのまま渡し、正常終了した空でない要約だけを採用します。拒否したoutcomeを記録してもhistoryを切り詰めず、要約をsystem命令ではなくuser由来として扱います。真正なnative replay prefixは保護します(#314, #325)。
 - **Program fan-out joinは待機前の完了通知を失いません。** 完了状態を保持し、scoped cancellationは新規dispatchを止め、現在および遅れて接続した子を取消します。部分launch失敗は借用状態を使う全producerをdrainしてから伝播します。Awaitは同期的に開始し得る子publicationより先にdeadlineを登録します(#341)。
