@@ -236,6 +236,43 @@ RuntimeHistoryRecord native_record(const sp::Message& message, const RuntimeHist
     return RuntimeHistoryRecord::create(std::move(data));
 }
 
+class BridgeException final : public std::runtime_error {
+public:
+    BridgeException(std::string message, int payload)
+        : std::runtime_error(std::move(message)), payload(payload) {}
+    int payload;
+};
+
+class BridgeExceptionTool final : public Tool {
+public:
+    enum class Mode { Success, Cancelled, SystemError, Custom, NonStandard };
+
+    BridgeExceptionTool(Mode mode, std::string message, asio::error_code code = {})
+        : mode_(mode), message_(std::move(message)), code_(code) {}
+
+    ChatTool get_definition() const override {
+        ChatTool definition;
+        definition.name = get_name();
+        definition.parameters = json::object();
+        return definition;
+    }
+    std::string get_name() const override { return "bridge-exception"; }
+    std::string execute(const json&) override {
+        switch (mode_) {
+            case Mode::Success: return message_;
+            case Mode::Cancelled: throw graph::CancelledException(message_);
+            case Mode::SystemError: throw asio::system_error(code_, message_);
+            case Mode::Custom: throw BridgeException(message_, 73);
+            case Mode::NonStandard: throw 73;
+        }
+        throw std::logic_error("unknown bridge exception fixture mode");
+    }
+private:
+    Mode mode_;
+    std::string message_;
+    asio::error_code code_;
+};
+
 class LedgerTool final : public Tool {
 public:
     LedgerTool(std::string name, std::string ledger_path, bool throw_after_write = false,
@@ -613,6 +650,94 @@ TEST(SQLiteToolEffects, CancellationAfterSDKCommitLeavesUnresolvedMarker) {
     EXPECT_THROW(broker_dispatch({sdk_call("one", "write", "{}")}, {&tool}, context),
                  graph::NodeInterrupt);
     EXPECT_EQ(LedgerTool::count(files.ledger()), 1);
+}
+
+TEST(BlockingToolBridge, PreservesTypedExceptionsAndLongMessages) {
+    using Mode = BridgeExceptionTool::Mode;
+    const auto arguments = json::object();
+    ToolExecutionController controller;
+    ToolExecutionPolicy policy;
+    policy.effect = ToolEffectClass::ReadOnly;
+    policy.idempotency = ToolIdempotency::Idempotent;
+    controller.policies()->upsert("bridge-exception", policy);
+    for (int iteration = 0; iteration < 32; ++iteration) {
+        SCOPED_TRACE(iteration);
+        const auto message = std::string(1024, 'x') + std::to_string(iteration);
+        BridgeExceptionTool success(Mode::Success, message);
+        EXPECT_EQ(async::run_sync(success.execute_async(arguments)), message);
+
+        BridgeExceptionTool custom(Mode::Custom, message);
+        try {
+            (void)async::run_sync(custom.execute_async(arguments));
+            FAIL() << "custom exception was not propagated";
+        } catch (const BridgeException& error) {
+            EXPECT_EQ(error.payload, 73);
+            EXPECT_EQ(std::string(error.what()), message);
+        }
+        const auto failed = async::run_sync(
+            controller.execute_result_async(custom, arguments, {}));
+        EXPECT_EQ(failed.status, ToolTerminalStatus::Failed);
+        EXPECT_EQ(failed.error, message);
+        EXPECT_FALSE(failed.effect_uncertain);
+
+        BridgeExceptionTool cancelled(Mode::Cancelled, message);
+        const auto cancellation_message = std::string(graph::CancelledException(message).what());
+        try {
+            (void)async::run_sync(cancelled.execute_async(arguments));
+            FAIL() << "cancellation was not propagated";
+        } catch (const graph::CancelledException& error) {
+            EXPECT_EQ(std::string(error.what()), cancellation_message);
+        }
+        const auto cancellation = async::run_sync(
+            controller.execute_result_async(cancelled, arguments, {}));
+        EXPECT_EQ(cancellation.status, ToolTerminalStatus::CancellationRequested);
+        EXPECT_EQ(cancellation.error, cancellation_message);
+        EXPECT_FALSE(cancellation.retryable);
+
+        BridgeExceptionTool nonstandard(Mode::NonStandard, message);
+        try {
+            (void)async::run_sync(nonstandard.execute_async(arguments));
+            FAIL() << "non-standard exception was not propagated";
+        } catch (int payload) {
+            EXPECT_EQ(payload, 73);
+        }
+    }
+}
+
+TEST(BlockingToolBridge, PreservesSystemErrorsAndTerminalClassification) {
+    using Mode = BridgeExceptionTool::Mode;
+    const std::pair<asio::error_code, ToolTerminalStatus> cases[] = {
+        {asio::error::operation_aborted, ToolTerminalStatus::Killed},
+        {asio::error::timed_out, ToolTerminalStatus::TimedOut},
+        {asio::error::no_buffer_space, ToolTerminalStatus::Rejected},
+        {asio::error::access_denied, ToolTerminalStatus::Rejected},
+    };
+    const auto arguments = json::object();
+    ToolExecutionController controller;
+    ToolExecutionPolicy policy;
+    policy.implementation = ToolExecutionImplementation::BlockingThread;
+    policy.effect = ToolEffectClass::ExternalWrite;
+    policy.idempotency = ToolIdempotency::Unknown;
+    controller.policies()->upsert("bridge-exception", policy);
+    for (const auto& [code, status] : cases) {
+        SCOPED_TRACE(code.message());
+        const auto message = std::string(1024, 'y') + code.message();
+        const auto expected = std::string(asio::system_error(code, message).what());
+        BridgeExceptionTool tool(Mode::SystemError, message, code);
+        try {
+            (void)async::run_sync(tool.execute_async(arguments));
+            FAIL() << "system_error was not propagated";
+        } catch (const asio::system_error& error) {
+            EXPECT_EQ(error.code(), code);
+            EXPECT_EQ(std::string(error.what()), expected);
+        }
+        const auto terminal = async::run_sync(
+            controller.execute_result_async(tool, arguments, {}));
+        EXPECT_EQ(terminal.status, status);
+        EXPECT_EQ(terminal.error, expected);
+        EXPECT_TRUE(terminal.effect_uncertain);
+        EXPECT_FALSE(terminal.retryable);
+    }
 }
 
 TEST(SQLiteToolEffects, TimeoutAfterSDKCommitDoesNotRedispatch) {

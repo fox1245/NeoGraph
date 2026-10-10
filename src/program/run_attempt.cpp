@@ -8,6 +8,7 @@
 #include "javascript.h"
 #include "run_control.h"
 #include "provider_failure.h"
+#include "strand_join_signal.h"
 #include <asio/as_tuple.hpp>
 #include <asio/bind_executor.hpp>
 #include <asio/co_spawn.hpp>
@@ -32,6 +33,7 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -1747,12 +1749,15 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         };
 
         struct ExpansionBatchState {
+            explicit ExpansionBatchState(const asio::any_io_executor& completion_executor)
+                : join(completion_executor) {}
             std::mutex                                   mutex;
             std::vector<std::optional<ExpansionTaskRun>> results;
             std::vector<std::shared_ptr<RunControl>>     children;
             std::size_t                                  remaining = 0;
-            std::shared_ptr<asio::steady_timer>          timer;
+            StrandJoinSignal                             join;
             bool                                         failed = false;
+            bool                                         stop_launching = false;
         };
 
         struct ExpansionRecordState {
@@ -1762,8 +1767,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             TaskGraphFragmentRecord                 record;
             std::shared_ptr<TaskGraphFragmentStore> store;
         };
-        auto execute_expand = [&](const ProgramPlanNode& operation,
-                                  json                   state) -> asio::awaitable<PlanExecution> {
+        auto execute_expand = [&](const ProgramPlanNode& operation, json state,
+                                  std::shared_ptr<graph::CancelToken> operation_token)
+            -> asio::awaitable<PlanExecution> {
             const auto& spec = operation.expand_task_graph();
             if (!spec) {
                 co_return plan_failure(ProgramTerminalStatus::Failed, "P_EXPAND_PLAN",
@@ -1977,13 +1983,18 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                    std::optional<json>        failure,
                                    std::optional<std::string> attempt_identity,
                                    std::optional<std::string> child_run_id) {
+                // Cancellation prevents launch, not settlement of already-dispatched evidence.
                 if (task_state != TaskGraphTaskState::Cancelled &&
-                    (control->cancellation_cause() != CancellationCause::None ||
+                    ((task_state == TaskGraphTaskState::Active &&
+                      (operation_token->is_cancelled() ||
+                       control->cancellation_cause() != CancellationCause::None)) ||
                      control->try_result().has_value()))
                     return;
                 std::lock_guard lock(durable->mutex);
                 if (task_state != TaskGraphTaskState::Cancelled &&
-                    (control->cancellation_cause() != CancellationCause::None ||
+                    ((task_state == TaskGraphTaskState::Active &&
+                      (operation_token->is_cancelled() ||
+                       control->cancellation_cause() != CancellationCause::None)) ||
                      control->try_result().has_value()))
                     return;
                 auto candidate = durable->record;
@@ -2099,6 +2110,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 co_return replay;
             }
 
+            // The task coroutines borrow the expansion's locals. From the first dispatch
+            // through its drain, scoped cancellation is handled by operation_token instead
+            // of allowing Asio cancellation to unwind those borrowed locals.
+            co_await asio::this_coro::reset_cancellation_state(asio::disable_cancellation());
+
             auto run_task = [&](const CompiledTaskGraphTask&                task,
                                 const std::shared_ptr<ExpansionBatchState>& batch_state)
                 -> asio::awaitable<ExpansionTaskRun> {
@@ -2134,7 +2150,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         co_return result;
                     }
                 }
-                if (control->cancellation_cause() != CancellationCause::None) {
+                if (operation_token->is_cancelled() ||
+                    control->cancellation_cause() != CancellationCause::None) {
                     result.status  = ProgramTerminalStatus::Cancelled;
                     result.failure = ProgramFailure{"P_TASK_CANCELLED",
                                                     "Parent expansion was cancelled",
@@ -2149,10 +2166,14 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                                        operation.id(), result.attempt_identity,
                                                        task.reserved_budget);
                     result.child_run_id = child->run_id;
+                    bool cancel_child = false;
                     {
                         std::lock_guard lock(batch_state->mutex);
-                        batch_state->children.push_back(child);
+                        cancel_child = batch_state->stop_launching ||
+                                       operation_token->is_cancelled();
+                        if (!cancel_child) batch_state->children.push_back(child);
                     }
+                    if (cancel_child) (void)child->cancel(CancellationCause::ParentTerminal);
                     const auto child_result = co_await child->wait_async();
                     result.status           = child_result.status();
                     result.output           = child_result.output();
@@ -2195,7 +2216,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
                 if (all_terminal) break;
 
-                if (control->cancellation_cause() != CancellationCause::None) {
+                if (operation_token->is_cancelled() ||
+                    control->cancellation_cause() != CancellationCause::None) {
                     for (const auto& task : fragment.tasks()) {
                         if (states[task.task_id] == TaskGraphTaskState::Completed ||
                             states[task.task_id] == TaskGraphTaskState::Failed ||
@@ -2270,91 +2292,139 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                                 static_cast<std::uint32_t>(ready.size())}));
                 std::size_t offset = 0;
                 while (offset < ready.size()) {
+                    if (operation_token->is_cancelled()) break;
                     const auto count = std::min<std::size_t>(batch_width, ready.size() - offset);
-                    auto       batch_state = std::make_shared<ExpansionBatchState>();
-                    batch_state->results.resize(count);
-                    batch_state->remaining         = count;
                     const auto executor            = co_await asio::this_coro::executor;
                     const auto completion_executor = asio::make_strand(executor);
-                    batch_state->timer = std::make_shared<asio::steady_timer>(completion_executor);
-                    batch_state->timer->expires_at((asio::steady_timer::time_point::max)());
-                    for (std::size_t index = 0; index < count; ++index) {
-                        const auto* task         = ready[offset + index];
-                        auto&       task_attempt = attempts[task->task_id];
-                        if (task_attempt == std::numeric_limits<std::uint32_t>::max()) {
-                            states[task->task_id] = TaskGraphTaskState::Failed;
-                            const auto failure =
-                                ProgramFailure{"P_TASK_RETRY_EXHAUSTED",
-                                               "Task graph retry identity limit was exhausted",
-                                               task->operation_id,
-                                               "",
-                                               0,
-                                               json{{"operation_id", task->operation_id}}};
-                            failures[task->task_id] = failure_json(failure);
-                            update_task(
-                                task->task_id, TaskGraphTaskState::Failed, task_attempt,
-                                std::nullopt, failures[task->task_id],
-                                attempt_identities[task->task_id],
-                                child_run_ids.contains(task->task_id)
-                                    ? std::optional<std::string>{child_run_ids[task->task_id]}
-                                    : std::nullopt);
-                            ExpansionTaskRun exhausted;
-                            exhausted.task_id          = task->task_id;
-                            exhausted.attempt          = task_attempt;
-                            exhausted.attempt_identity = attempt_identities[task->task_id];
-                            exhausted.status           = ProgramTerminalStatus::Failed;
-                            exhausted.failure          = failure;
-                            bool complete              = false;
-                            {
-                                std::lock_guard lock(batch_state->mutex);
-                                batch_state->results[index] = std::move(exhausted);
-                                complete                    = --batch_state->remaining == 0;
-                            }
-                            if (complete) batch_state->timer->cancel();
-                            continue;
+                    auto       batch_state =
+                        std::make_shared<ExpansionBatchState>(completion_executor);
+                    batch_state->results.resize(count);
+                    batch_state->remaining = count;
+                    const auto cancel_scope = [scope = batch_state.get(), &completion_executor] {
+                        std::vector<std::shared_ptr<RunControl>> children;
+                        {
+                            std::lock_guard lock(scope->mutex);
+                            scope->stop_launching = true;
+                            children.swap(scope->children);
                         }
-                        if (task_attempt == 0) ++task_attempt;
-                        auto& identity = attempt_identities[task->task_id];
-                        if (identity.empty())
-                            identity = task_attempt_identity(fragment.fragment_id(), task->task_id,
-                                                             task_attempt);
-                        states[task->task_id] = TaskGraphTaskState::Active;
-                        update_task(task->task_id, TaskGraphTaskState::Active, task_attempt,
-                                    std::nullopt, std::nullopt, identity,
+                        if (!children.empty())
+                            asio::post(completion_executor, [children = std::move(children)] {
+                                for (const auto& child : children)
+                                    (void)child->cancel(CancellationCause::ParentTerminal);
+                            });
+                    };
+                    std::optional<std::stop_callback<decltype(cancel_scope)>> scoped_cancellation;
+                    if (operation_token != control->cancel_token)
+                        scoped_cancellation.emplace(operation_token->stop_token(), cancel_scope);
+
+                    std::size_t index = 0;
+                    std::exception_ptr launch_error;
+                    try {
+                        while (index < count) {
+                            if (operation_token->is_cancelled()) break;
+                            const auto* task         = ready[offset + index];
+                            auto&       task_attempt = attempts[task->task_id];
+                            if (task_attempt == std::numeric_limits<std::uint32_t>::max()) {
+                                states[task->task_id] = TaskGraphTaskState::Failed;
+                                const auto failure =
+                                    ProgramFailure{"P_TASK_RETRY_EXHAUSTED",
+                                                   "Task graph retry identity limit was exhausted",
+                                                   task->operation_id,
+                                                   "",
+                                                   0,
+                                                   json{{"operation_id", task->operation_id}}};
+                                failures[task->task_id] = failure_json(failure);
+                                update_task(
+                                    task->task_id, TaskGraphTaskState::Failed, task_attempt,
+                                    std::nullopt, failures[task->task_id],
+                                    attempt_identities[task->task_id],
                                     child_run_ids.contains(task->task_id)
                                         ? std::optional<std::string>{child_run_ids[task->task_id]}
                                         : std::nullopt);
-                        asio::co_spawn(
-                            executor, run_task(*task, batch_state),
-                            asio::bind_executor(
-                                completion_executor, [batch_state, index](std::exception_ptr error,
-                                                                          ExpansionTaskRun result) {
-                                    bool complete = false;
-                                    {
-                                        std::lock_guard lock(batch_state->mutex);
-                                        if (error) {
-                                            result.status  = ProgramTerminalStatus::Failed;
-                                            result.failure = ProgramFailure{"P_TASK_DISPATCH",
-                                                                            "Task coroutine failed",
-                                                                            result.task_id,
-                                                                            "",
-                                                                            0,
-                                                                            json::object()};
+                                ExpansionTaskRun exhausted;
+                                exhausted.task_id          = task->task_id;
+                                exhausted.attempt          = task_attempt;
+                                exhausted.attempt_identity = attempt_identities[task->task_id];
+                                exhausted.status           = ProgramTerminalStatus::Failed;
+                                exhausted.failure          = failure;
+                                bool complete              = false;
+                                {
+                                    std::lock_guard lock(batch_state->mutex);
+                                    batch_state->results[index] = std::move(exhausted);
+                                    complete                    = --batch_state->remaining == 0;
+                                }
+                                ++index;  // This synchronous producer has already settled.
+                                if (complete)
+                                    asio::post(completion_executor,
+                                               [batch_state] { batch_state->join.signal(); });
+                                continue;
+                            }
+                            if (task_attempt == 0) ++task_attempt;
+                            auto& identity = attempt_identities[task->task_id];
+                            if (identity.empty())
+                                identity = task_attempt_identity(fragment.fragment_id(),
+                                                                 task->task_id, task_attempt);
+                            states[task->task_id] = TaskGraphTaskState::Active;
+                            update_task(task->task_id, TaskGraphTaskState::Active, task_attempt,
+                                        std::nullopt, std::nullopt, identity,
+                                        child_run_ids.contains(task->task_id)
+                                            ? std::optional<std::string>{child_run_ids[task->task_id]}
+                                            : std::nullopt);
+                            asio::co_spawn(
+                                executor, run_task(*task, batch_state),
+                                asio::bind_executor(
+                                    completion_executor,
+                                    [batch_state, index](std::exception_ptr error,
+                                                         ExpansionTaskRun result) {
+                                        bool complete = false;
+                                        {
+                                            std::lock_guard lock(batch_state->mutex);
+                                            if (error) {
+                                                result.status  = ProgramTerminalStatus::Failed;
+                                                result.failure =
+                                                    ProgramFailure{"P_TASK_DISPATCH",
+                                                                   "Task coroutine failed",
+                                                                   result.task_id,
+                                                                   "",
+                                                                   0,
+                                                                   json::object()};
+                                            }
+                                            batch_state->results[index] = std::move(result);
+                                            complete = --batch_state->remaining == 0;
                                         }
-                                        batch_state->results[index] = std::move(result);
-                                        complete                    = --batch_state->remaining == 0;
-                                    }
-                                    if (complete) batch_state->timer->cancel();
-                                }));
+                                        if (complete) batch_state->join.signal();
+                                    }));
+                            ++index;
+                        }
+                    } catch (...) {
+                        launch_error = std::current_exception();
+                        std::vector<std::shared_ptr<RunControl>> children;
+                        {
+                            std::lock_guard lock(batch_state->mutex);
+                            batch_state->stop_launching = true;
+                            children.swap(batch_state->children);
+                        }
+                        for (const auto& child : children)
+                            (void)child->cancel(CancellationCause::ParentTerminal);
+                    }
+                    if (index != count) {
+                        bool complete = false;
+                        {
+                            std::lock_guard lock(batch_state->mutex);
+                            batch_state->remaining -= count - index;
+                            complete = batch_state->remaining == 0;
+                        }
+                        if (complete)
+                            asio::post(completion_executor,
+                                       [batch_state] { batch_state->join.signal(); });
                     }
                     co_await asio::co_spawn(
                         completion_executor,
                         [batch_state]() -> asio::awaitable<void> {
-                            asio::error_code error;
-                            co_await         batch_state->timer->async_wait(
-                                asio::redirect_error(asio::use_awaitable, error));
+                            co_await batch_state->join.wait();
                         },
                         asio::use_awaitable);
+                    if (launch_error) std::rethrow_exception(launch_error);
                     std::vector<std::optional<ExpansionTaskRun>> results;
                     {
                         std::lock_guard lock(batch_state->mutex);
@@ -3038,6 +3108,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
 
                 struct ParallelMapState {
+                    explicit ParallelMapState(const asio::any_io_executor& completion_executor)
+                        : join(completion_executor) {}
                     std::mutex                                mutex;
                     std::vector<std::optional<PlanExecution>> results;
                     std::vector<std::shared_ptr<RunControl>>  children;
@@ -3046,17 +3118,15 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     std::size_t                               next_item         = 0;
                     std::size_t                               workers_remaining = 0;
                     bool                                      stop_launching    = false;
-                    std::shared_ptr<asio::steady_timer>       timer;
+                    StrandJoinSignal                          join;
                 };
 
                 const auto executor = co_await asio::this_coro::executor;
                 const auto                     completion_executor = asio::make_strand(executor);
                 const auto worker_count = std::min<std::size_t>(map.max_in_flight, items.size());
-                auto       parallel_map = std::make_shared<ParallelMapState>();
+                auto parallel_map = std::make_shared<ParallelMapState>(completion_executor);
                 parallel_map->results.resize(items.size());
                 parallel_map->workers_remaining = worker_count;
-                parallel_map->timer = std::make_shared<asio::steady_timer>(completion_executor);
-                parallel_map->timer->expires_at((asio::steady_timer::time_point::max)());
 
                 std::string execution_key_prefix;
                 {
@@ -3071,6 +3141,28 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         for (const auto& child : children)
                             if (child) (void)child->cancel(CancellationCause::ParentTerminal);
                     };
+
+                // Shield the complete borrowing lifetime, not just the eventual timer wait.
+                // The exact operation token below still stops dispatch and cancels children.
+                co_await asio::this_coro::reset_cancellation_state(asio::disable_cancellation());
+
+                const auto cancel_scope = [scope = parallel_map.get(), &completion_executor] {
+                    std::vector<std::shared_ptr<RunControl>> children;
+                    {
+                        std::lock_guard lock(scope->mutex);
+                        scope->stop_launching = true;
+                        children.swap(scope->children);
+                    }
+                    if (!children.empty())
+                        asio::post(completion_executor, [children = std::move(children)] {
+                            for (const auto& child : children)
+                                (void)child->cancel(CancellationCause::ParentTerminal);
+                        });
+                };
+                std::optional<std::stop_callback<decltype(cancel_scope)>> scoped_cancellation;
+                // Root cancellation already cascades through RunControl::attach_child.
+                if (operation_token != control->cancel_token)
+                    scoped_cancellation.emplace(operation_token->stop_token(), cancel_scope);
 
                 auto worker = [&, parallel_map]() -> asio::awaitable<void> {
                     while (true) {
@@ -3135,8 +3227,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                             bool cancel_child = false;
                                             {
                                                 std::lock_guard lock(parallel_map->mutex);
-                                                parallel_map->children.push_back(child);
-                                                cancel_child = parallel_map->stop_launching;
+                                                cancel_child = parallel_map->stop_launching ||
+                                                               operation_token->is_cancelled();
+                                                if (!cancel_child)
+                                                    parallel_map->children.push_back(child);
                                             }
                                             if (cancel_child)
                                                 (void)child->cancel(
@@ -3189,33 +3283,57 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     co_return;
                 };
 
-                for (std::size_t worker_index = 0; worker_index < worker_count; ++worker_index) {
-                    asio::co_spawn(
-                        executor, worker(),
-                        asio::bind_executor(completion_executor, [parallel_map, cancel_children](
-                                                                     std::exception_ptr error) {
-                            std::vector<std::shared_ptr<RunControl>> children_to_cancel;
-                            bool                                     all_done = false;
-                            {
-                                std::lock_guard lock(parallel_map->mutex);
-                                if (error && !parallel_map->error) {
-                                    parallel_map->error          = error;
-                                    parallel_map->stop_launching = true;
-                                    children_to_cancel           = parallel_map->children;
-                                }
-                                all_done = --parallel_map->workers_remaining == 0;
-                            }
-                            cancel_children(children_to_cancel);
-                            if (all_done) parallel_map->timer->cancel();
-                        }));
+                std::size_t workers_started = 0;
+                try {
+                    for (; workers_started < worker_count && !operation_token->is_cancelled();
+                         ++workers_started) {
+                        asio::co_spawn(
+                            executor, worker(),
+                            asio::bind_executor(
+                                completion_executor,
+                                [parallel_map, cancel_children](std::exception_ptr error) {
+                                    std::vector<std::shared_ptr<RunControl>> children_to_cancel;
+                                    bool all_done = false;
+                                    {
+                                        std::lock_guard lock(parallel_map->mutex);
+                                        if (error && !parallel_map->error) {
+                                            parallel_map->error          = error;
+                                            parallel_map->stop_launching = true;
+                                            children_to_cancel           = parallel_map->children;
+                                        }
+                                        all_done = --parallel_map->workers_remaining == 0;
+                                    }
+                                    cancel_children(children_to_cancel);
+                                    if (all_done) parallel_map->join.signal();
+                                }));
+                    }
+                } catch (...) {
+                    std::vector<std::shared_ptr<RunControl>> children_to_cancel;
+                    {
+                        std::lock_guard lock(parallel_map->mutex);
+                        if (!parallel_map->error) parallel_map->error = std::current_exception();
+                        parallel_map->stop_launching = true;
+                        children_to_cancel.swap(parallel_map->children);
+                    }
+                    cancel_children(children_to_cancel);
+                }
+                if (workers_started != worker_count) {
+                    bool all_done = false;
+                    {
+                        std::lock_guard lock(parallel_map->mutex);
+                        parallel_map->stop_launching = true;
+                        parallel_map->workers_remaining -= worker_count - workers_started;
+                        all_done = parallel_map->workers_remaining == 0;
+                    }
+                    if (all_done)
+                        asio::post(completion_executor,
+                                   [parallel_map] { parallel_map->join.signal(); });
                 }
 
                 co_await asio::co_spawn(
                     completion_executor,
                     [parallel_map]() -> asio::awaitable<void> {
-                        asio::error_code error;
-                        co_await         parallel_map->timer->async_wait(
-                            asio::redirect_error(asio::use_awaitable, error));
+                        co_await parallel_map->join.wait();
                     },
                     asio::use_awaitable);
 
@@ -3307,7 +3425,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             }
 
             if (op == ProgramOperationKind::ExpandTaskGraph) {
-                auto result = co_await execute_expand(operation, std::move(state));
+                auto result =
+                    co_await execute_expand(operation, std::move(state), operation_token);
                 if (result.failure && result.failure->operation_id != operation_id) {
                     auto& witness = result.failure->witness;
                     if (!witness.is_object()) witness = json::object();
@@ -3417,15 +3536,18 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 // timeout.  The explicit parallel group preserves the first
                 // completion and lets the outer attempt classify the child
                 // exception normally.
-                auto [order, child_error, child_result, timeout_error] =
+                // Register the deadline before starting child work. co_spawn can
+                // enter a synchronous host publication before its initiation returns;
+                // that publication may need cancellation to release its wait.
+                auto [order, timeout_error, child_error, child_result] =
                     co_await asio::experimental::make_parallel_group(
+                        asio::co_spawn(executor, std::move(timeout_operation), asio::deferred),
                         asio::co_spawn(executor,
                                        execute(child_id, std::move(state), std::move(thread_id),
                                                child_depth, child_token),
-                                       asio::deferred),
-                        asio::co_spawn(executor, std::move(timeout_operation), asio::deferred))
+                                       asio::deferred))
                         .async_wait(asio::experimental::wait_for_one(), asio::use_awaitable);
-                if (order[0] == 0 && !timeout_expired->load(std::memory_order_acquire)) {
+                if (order[0] == 1 && !timeout_expired->load(std::memory_order_acquire)) {
                     if (child_error) std::rethrow_exception(child_error);
                     co_return std::move(child_result);
                 }

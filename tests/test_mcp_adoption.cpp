@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 #include <filesystem>
 #include <fstream>
+#include <set>
 
 namespace {
 using namespace neograph::mcp;
@@ -23,6 +24,10 @@ struct TempSource {
     std::string previous_xdg = std::getenv("XDG_CONFIG_HOME") ? std::getenv("XDG_CONFIG_HOME") : "";
     TempSource() {
         std::filesystem::create_directories(file.parent_path());
+        std::filesystem::permissions(dir, std::filesystem::perms::owner_all,
+                                     std::filesystem::perm_options::replace);
+        std::filesystem::permissions(file.parent_path(), std::filesystem::perms::owner_all,
+                                     std::filesystem::perm_options::replace);
 #ifndef _WIN32
         ::setenv("XDG_CONFIG_HOME", dir.c_str(), 1);
 #else
@@ -38,7 +43,13 @@ struct TempSource {
 #endif
         std::error_code ec; std::filesystem::remove_all(dir, ec);
     }
-    void write(const std::string& value) { std::ofstream out(file); out << value; }
+    void write(const std::string& value) {
+        { std::ofstream out(file); out << value; }
+        // Source custody must not depend on the process umask.
+        std::filesystem::permissions(file,
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+            std::filesystem::perm_options::replace);
+    }
 };
 
 TEST(McpAdoptionTest, DiscoveryDoesNotLaunchAndRedactsArguments) {
@@ -48,6 +59,7 @@ TEST(McpAdoptionTest, DiscoveryDoesNotLaunchAndRedactsArguments) {
     config.source_path = source.file;
     const auto report = OpenCodeGlobalMcpDiscovery::discover(config);
     ASSERT_EQ(report.servers.size(), 1u);
+    EXPECT_TRUE(report.rejected.empty());
     EXPECT_EQ(report.servers.front().source_id, "opencode:fixture");
     EXPECT_EQ(report.servers.front().argv.at(1), "literal-token");
     EXPECT_TRUE(report.servers.front().redacted_config_hash.rfind("sha256:", 0) == 0);
@@ -61,7 +73,12 @@ TEST(McpAdoptionTest, UnsupportedCredentialAndRemoteEntriesFailClosed) {
     const auto report = OpenCodeGlobalMcpDiscovery::discover(config);
     EXPECT_TRUE(report.servers.empty());
     ASSERT_EQ(report.rejected.size(), 3u);
-    for (const auto& rejection : report.rejected) EXPECT_EQ(rejection.reason.find("value"), std::string::npos);
+    std::set<std::string> rejected_names;
+    for (const auto& rejection : report.rejected) {
+        rejected_names.insert(rejection.server_name);
+        EXPECT_EQ(rejection.reason.find("value"), std::string::npos);
+    }
+    EXPECT_EQ(rejected_names, (std::set<std::string>{"disabled", "remote", "secret"}));
 }
 
 TEST(McpAdoptionTest, RegistryRequiresAttestationAndPolicy) {
@@ -81,7 +98,10 @@ TEST(McpAdoptionTest, RejectsExternalReferencesAtEveryStringLeaf) {
             {"type", "local"}, {"command", {"/bin/echo", argument}}}}}}}.dump());
         OpenCodeGlobalMcpConfig config;
         config.source_path = source.file;
-        EXPECT_TRUE(OpenCodeGlobalMcpDiscovery::discover(config).servers.empty()) << argument;
+        const auto report = OpenCodeGlobalMcpDiscovery::discover(config);
+        EXPECT_TRUE(report.servers.empty()) << argument;
+        ASSERT_EQ(report.rejected.size(), 1u) << argument;
+        EXPECT_EQ(report.rejected.front().server_name, "fixture") << argument;
     }
 }
 
@@ -95,6 +115,24 @@ TEST(McpAdoptionTest, RejectsProjectSourceMasqueradingAsUserGlobal) {
 }
 
 #ifndef _WIN32
+TEST(McpAdoptionTest, GroupWritableSourceIsRejectedBeforeEntryDiscovery) {
+    TempSource source;
+    source.write(R"({"mcp":{"fixture":{"type":"local","command":["/bin/echo"]}}})");
+    OpenCodeGlobalMcpConfig config;
+    config.source_path = source.file;
+    const auto private_report = OpenCodeGlobalMcpDiscovery::discover(config);
+    ASSERT_EQ(private_report.servers.size(), 1u);
+    ASSERT_TRUE(private_report.rejected.empty());
+
+    std::filesystem::permissions(source.file, std::filesystem::perms::group_write,
+                                 std::filesystem::perm_options::add);
+    const auto report = OpenCodeGlobalMcpDiscovery::discover(config);
+    EXPECT_TRUE(report.servers.empty());
+    ASSERT_EQ(report.rejected.size(), 1u);
+    EXPECT_TRUE(report.rejected.front().server_name.empty());
+    EXPECT_TRUE(report.source_content_hash.empty());
+}
+
 struct LocalMcpFixture {
     TempSource source;
     std::filesystem::path script = source.dir / "fixture.py";

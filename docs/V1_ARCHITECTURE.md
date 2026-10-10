@@ -521,7 +521,22 @@ message/turn history separately.
 Graph `ChatMessage` values remain portable convenience projections.
 `history::sanitize_tool_calls` validates full SDK call/result pairing without
 editing parts. `compact_history` summarizes only an unsealed text-only prefix
-and retains non-text parts and native replay groups unchanged.
+and retains non-text parts unchanged. Native replay seals bind the full preceding
+history, so any native message prevents compaction: `NativeReplayProtected`
+returns the entire input unchanged without a summarizer call. Only a clean
+summary (stop kind EndTurn/StopSequence, text beyond ASCII whitespace) replaces
+history; an empty, whitespace-only, truncated, refused, or otherwise abnormal
+summary leaves the input unchanged
+and `CompactedHistory::status` reports why. The summary is model output derived
+from earlier messages, so it never gains system authority: it is inserted after
+the original leading system message as a user-role message labelled as derived
+context, and `summarized_begin`/`summarized_end` name the covered input span so a
+strict runtime can record it as a `DerivedContext` artifact itself (the helper
+has no feed sequences or `ContextTransformReceipt`). The summarizer request
+takes caller-supplied `ProviderControls`, defaulting to temperature 0.2 and 500
+output tokens only when controls are omitted. Explicit controls are passed
+unchanged, so unset temperature/reasoning fields remain unset for models that
+reject those overrides.
 
 Provider-reported usage has nullable counters: missing means unknown.
 `UsageAccumulator` keeps token charges, outstanding conservative reservations,
@@ -1110,7 +1125,7 @@ Program and QuickJS remain default-off; the SDK runtime is not optional.
 ## Performance contract
 
 Baseline Core hot path was remeasured from
-`24cbd86d80815b2c2b46aacb02cbf5a570503262` in a GNU 13.3 Release build. The
+`24cbd86d80815b2c2b46aacb02cbf5a570503262` in a Release build. The
 command was CPU-pinned, each process ran the benchmark's hot loop, two process
 runs were discarded as warm-up, and ten process samples were retained:
 
@@ -1121,7 +1136,7 @@ runs were discarded as warm-up, and ten process samples were retained:
   median `13.45285 us`, nearest-rank empirical p95 `14.0613 us`, population
   standard deviation `0.248471 us`.
 
-These measurements are local WSL2 evidence, not cross-machine release promises.
+These measurements are historical evidence, not cross-machine release promises.
 They establish the comparison protocol and show that Program must not tax
 Core-only execution.
 
@@ -1226,7 +1241,7 @@ Do not combine Core-only and Program-controlled results.
 | Allocation and resident memory | Zero additional direct-Core per-step allocations; ≤ 64 MiB incremental RSS for 256 independently retained small versions on this fixture. |
 | Retention, checkpoint growth and recovery | ≤ 1 MiB per small retained version; target checkpoint bytes ≤ 2× source checkpoint + 16 KiB; recovery median ≤ 2× explicit-version reconnect + 20 ms. |
 
-Measured issue-specific sample (GNU 13.3, Linux WSL2 x86_64, Release, CPU 0,
+Measured issue-specific sample (Release,
 `origin/master` at `de8e2e31` versus this branch; ten alternating baseline /
 candidate process pairs after two discarded warm-up pairs). Each Core process
 ran `bench_neograph 10000 500 1 1` with the fan-out warning suppressed.
@@ -1262,7 +1277,7 @@ The observed candidate active-versus-explicit start p50 difference is
 includes different request construction, so neither number isolates the
 activation lookup alone. The Core `par` p50 increased `1.40x`, exceeding
 the preregistered `1.10x` latency budget, even though the Core-only hot path
-is unchanged. WSL2 sample dispersion is large; **the direct-Core gate is not
+is unchanged. Historical sample dispersion is large; **the direct-Core gate is not
 passed** on this evidence. Rerun on a controlled pinned host before release.
 SQLite activation latency, compatible fork latency, allocation, 256-version
 RSS, checkpoint growth, and restart recovery budgets are **unmeasured**, not

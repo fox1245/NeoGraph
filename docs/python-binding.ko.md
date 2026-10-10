@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=73069d840a47c09f7c2b2b6f74da22c57bf16c51e1837e07042d293c6692dd5d -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=8dc07611a5d489c5f48231f91efa341362b9f2a47558a81ad11f2ca60b4d38af -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
 
 `neograph-engine`는 동일한 C++ 런타임의 pybind11 표면입니다. 휠은 Core, LLM, Program/QuickJS, MCP 및 SQLite 런타임 지속성을 활성화합니다. 선택적 소스 빌드는 컴파일하는 구성 요소만 노출합니다.
 
-이 가이드는 현재 타입 기반 바인딩 API를 설명합니다. `complete`를 노출하는 이전 휠은 다른 제공자 인터페이스를 사용하므로 아래 타입 기반 예제를 실행할 수 없습니다.
+이 가이드는 SchemaProvider SDK `0.3.0`, 인터페이스 리비전 `6`, 공유 라이브러리 ABI 리비전 `6`으로 빌드한 휠이 필요합니다. 번들 구성 요소를 함께 설치합니다. `complete`를 노출하는 이전 휠은 다른 제공자 인터페이스를 사용하므로 아래 타입 기반 예제를 실행할 수 없습니다.
 
 ```bash
 pip install neograph-engine
@@ -102,9 +102,9 @@ output tokens: 0
 
 누락된 카운터 경로를 확인하려면 피어의 `usage` 멤버 전체를 제거하고 다시 시작합니다. 마지막 줄은 `output tokens: unknown`으로 바뀌어야 합니다. 실제 모델의 토큰 계수가 아닌 프로토콜 매핑을 확인하는 예제입니다.
 
-### 인터페이스 4 계열별 제어
+### 계열별 제어
 
-SDK 인터페이스/공유 라이브러리 세대 4 wheel이 필요합니다. 패키지 버전, native archive v3, portable JSON v2는 별개입니다. 아래 예제는 제어 구성만 하며 해당 계열의 승인된 제공자가 필요합니다. 첫 루프백은 그대로 둡니다. OpenRouter 전용 제어는 미승인 로컬 origin에서 I/O 전에 거부됩니다.
+패키지 버전, native archive v3, portable JSON v2는 별개입니다. 아래 예제는 제어 구성만 하며 해당 계열의 승인된 제공자가 필요합니다. 첫 루프백은 그대로 둡니다. OpenRouter 전용 제어는 미승인 로컬 origin에서 I/O 전에 거부됩니다.
 
 ```python
 chat = ng.ProviderControls()
@@ -224,6 +224,10 @@ SDK 실패는 반환 데이터입니다. 호스트 관찰자나 예산 정산 �
 저장된 Python 제공자 또는 그래프 예외의 원인을 반복해서 읽어도 원래 예외 객체와 traceback을 보존합니다. 네이티브 중첩 예외 변환으로 접근한 원인도 같은 규칙을 따릅니다.
 
 사용량 카운터는 `value`와 `evidence`를 가진 `UsageCount`이거나, 알 수 없는 경우 `None`입니다. 보고된 0은 알려진 사용량이며 누락된 카운터와 다릅니다. `count.value`를 읽기 전에 `count is not None`을 확인합니다. 회계 처리에서 `count or 0`을 쓰거나 알 수 없는 입력/출력/전체 카운터를 0으로 대체하지 않습니다.
+
+`outcome.usage.provider_cost`는 불변 `ProviderReportedCost` 뷰입니다. 선택적 `ProviderUsdAmount` 필드 `total/upstream_total/upstream_input/upstream_output`에는 `nano_usd/evidence/rounding`이 있고 `status`는 이 순서의 4개 요소이며 `byok_status`는 nullable `is_byok`의 상태입니다. `ProviderCostStatus/ProviderCostSource/ProviderCostRounding`은 부재, 가용, 형식 오류, 정밀도 초과, overflow, 알 수 없는 통화, 충돌 근거를 보존합니다. 금액은 원래 decimal 문자열이 아닌 파싱된 binary64에서 올림됩니다. 보고된 0과 `is_byok=False`는 부재가 아닙니다. 이는 청구서나 token 예산 차감이 아니므로 호출별 금액 근거는 집계 token bank가 아니라 순서가 보존된 `provider_outcomes`에서 확인합니다.
+
+`UsageAccumulator`는 token만 집계합니다. 단일 보고에서는 금액 메타데이터를 보존하지만 두 번째 보고부터 snapshot의 `provider_cost`는 canonical Missing/None으로 명시적으로 초기화됩니다. 오래된 첫 호출 비용이나 금액 합계를 표시하지 않습니다. 이 snapshot을 복원해도 비용을 다시 만들거나 token 권한을 갱신하지 않습니다. 정확한 금액 근거는 원래 각 outcome 또는 provider journal 항목에서 읽습니다.
 
 재개나 이어서 실행할 때 `RunResult.provider_outcomes`는 원래 결과를 순서대로 보존하고 그 뒤에 새 결과를 추가합니다. `RunResult.usage`는 현재 회계 은행을 반영하며, 체크포인트에서 이전 보고를 복원할 수 있습니다. 재개 후 새 제공자 호출이 없어도 사용량이 `None`이나 0이라고 보장할 수 없습니다. 증거 복원은 원래 제공자 요청을 다시 디스패치하거나 두 번 청구해서는 안 됩니다. 보존된 보고는 이전 호출을 설명할 뿐, 새 지출 한도를 부여하지 않습니다.
 

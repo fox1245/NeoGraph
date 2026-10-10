@@ -798,3 +798,73 @@ if(NEOGRAPH_BUILD_POSTGRES)
 else()
     gtest_discover_tests(neograph_tests)
 endif()
+
+# History preservation and summary trust, including authentic native fixtures.
+add_executable(neograph_history_compaction_tests test_history_compaction.cpp)
+target_link_libraries(neograph_history_compaction_tests PRIVATE
+    neograph::core SchemaProvider::transport GTest::gtest_main)
+gtest_discover_tests(neograph_history_compaction_tests)
+
+if(NEOGRAPH_BUILD_PROGRAM)
+    add_executable(neograph_program_join_signal_tests test_program_join_signal.cpp)
+    target_include_directories(neograph_program_join_signal_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/program)
+    target_compile_features(neograph_program_join_signal_tests PRIVATE cxx_std_20)
+    target_link_libraries(neograph_program_join_signal_tests PRIVATE asio GTest::gtest_main)
+    gtest_discover_tests(neograph_program_join_signal_tests)
+endif()
+
+if(TARGET neograph::llm AND TARGET httplib AND TARGET OpenSSL::SSL)
+    add_executable(neograph_tool_result_grouping_tests test_tool_result_grouping.cpp)
+    target_link_libraries(neograph_tool_result_grouping_tests PRIVATE
+        neograph::core neograph::llm httplib OpenSSL::SSL OpenSSL::Crypto GTest::gtest_main)
+    gtest_discover_tests(neograph_tool_result_grouping_tests)
+endif()
+
+if(TARGET neograph::llm)
+    add_executable(neograph_example_support_tests
+        test_example_utf8_prefix.cpp test_jarvis_provider_support.cpp)
+    target_link_libraries(neograph_example_support_tests PRIVATE
+        neograph::core neograph::llm GTest::gtest_main)
+    gtest_discover_tests(neograph_example_support_tests)
+endif()
+
+if(TARGET neograph_program_sqlite AND TARGET neograph_sqlite AND TARGET neograph::llm)
+    add_executable(neograph_program_provider_journal_runtime_tests
+        test_program_provider_journal_runtime.cpp)
+    target_link_libraries(neograph_program_provider_journal_runtime_tests PRIVATE
+        neograph::program neograph::program_sqlite neograph::sqlite
+        neograph::llm SQLite::SQLite3 GTest::gtest_main)
+    gtest_discover_tests(neograph_program_provider_journal_runtime_tests)
+endif()
+
+if(NEOGRAPH_BUILD_SQLITE)
+    add_executable(neograph_tool_effect_integration_tests test_tool_effects_standalone.cpp)
+    target_link_libraries(neograph_tool_effect_integration_tests PRIVATE
+        neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
+    if(TARGET neograph::llm)
+        target_link_libraries(neograph_tool_effect_integration_tests PRIVATE neograph::llm)
+        target_compile_definitions(neograph_tool_effect_integration_tests PRIVATE
+            NEOGRAPH_TOOL_EFFECT_TESTS_HAVE_LLM)
+    endif()
+    if(TARGET neograph_program_sqlite)
+        target_sources(neograph_tool_effect_integration_tests PRIVATE
+            test_program_tool_effects_runtime.cpp)
+        target_compile_definitions(neograph_tool_effect_integration_tests PRIVATE
+            NEOGRAPH_TOOL_EFFECT_TESTS_HAVE_PROGRAM)
+        target_link_libraries(neograph_tool_effect_integration_tests PRIVATE neograph::program_sqlite)
+    endif()
+    gtest_discover_tests(neograph_tool_effect_integration_tests)
+endif()
+
+if(TARGET neograph::llm)
+    add_executable(neograph_schema_provider_interface6_tests
+        test_schema_provider_interface6.cpp)
+    target_link_libraries(neograph_schema_provider_interface6_tests PRIVATE
+        neograph::core neograph::llm SchemaProvider::transport
+        httplib OpenSSL::SSL OpenSSL::Crypto GTest::gtest_main)
+    target_include_directories(neograph_schema_provider_interface6_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/deps)
+    gtest_discover_tests(neograph_schema_provider_interface6_tests
+        PROPERTIES TIMEOUT 60 LABELS "provider;interface6;model-free")
+endif()

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ja source_sha256=c581af0e3041a7d6e48040bfd17085c2297a0c796d34547f6528392ec2b7ce27 -->
+<!-- neograph-i18n: source=README.md locale=ja source_sha256=85a3546974bbd5902afc2699f9b604f5e78bee6be80a1bdbd378207443c4545b -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -139,11 +139,13 @@ sp::runtime::Result first_call(
 
 準備済みリクエストは1回だけ消費できます。`sp::runtime::Result`は、`Completion`または`Failure`を含む不変の`sp::Outcome`を所有します。順序付きのメッセージとパート、ネイティブの継続情報、生の観測データ、停止の根拠、試行メタデータ、失敗時の部分結果が必要な場合は、その結果オブジェクトを保持してください。使用量カウンターは値がない場合もあります。値がないことは不明を表し、観測されたゼロはゼロのままです。使用量の報告と予算への計上は別々の記録です。可搬な報告データから支出権限を取得することはできません。
 
+`usage.provider_cost`は、プロバイダーが報告したnanoUSD、各フィールドのstatus、source、quality、BYOKの根拠、および解析済みbinary64値からの切り上げを保持します。請求書、トークン数、見積もり、支出権限ではありません。金額メタデータの欠落はcanonical v2 JSONでも欠落のままです。報告されたゼロや`is_byok=false`は根拠として残ります。不明な通貨、競合、不正な報告をUSDやトークンに変換しません。blocking provider呼び出しは単一のasync SDK pipelineを使い、SDK event-loop/callback workerからの再入を拒否します。
+
 `first_call`が戻った後は、`std::get_if<sp::Completion>(result.get())`を使って、完了結果の`messages`、`stop`、`usage`を確認します。完了結果でなければ、`std::get<sp::Failure>(*result)`から`error.kind`、`error.safe_message`、再試行の根拠、`partial`に含まれる部分的なメッセージと使用量を取得できます。たとえば、`completion.usage.output_total`がなければ、出力トークン数は不明です。カウンターがあり、その`value`が`0`なら、ゼロが報告されています。表示用テキストは、保持された結果の一つの表現にすぎません。
 
 `ChatMessage`、`ChatTool`、JSONは可搬な表現です。真正なネイティブ履歴は、ネイティブチェックポイントのサイドカーとともにメモリ内に保持できます。ネイティブ履歴を永続化するには、実物の`sp::NativeArchive`と、所有者専用の非公開領域で保護された保管・管理が必要です。可搬なJSONでは、この権限を再構成できません。アーカイブは独立した鍵で保管・管理の真正性を検証します。暗号化でも、ベンダー発行元の認証でもありません。アーカイブ本体、鍵、ネイティブblob、生の通信観測データを公開しないでください。永続化の失敗、オブザーバー、管理対象の予算バンク、リプレイの境界については、[プロバイダーリファレンス](docs/reference-en.md)と[移行ガイド](docs/migration-v0.4-to-v1.0.md)を参照してください。
 
-型付きAPIへの切り替えに伴い、`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、記述子インタープリター、ResponsesのWebSocket経路は削除されました。C++側の利用コードを再コンパイルし、独自のプロバイダーを移行してください。互換エイリアスはありません。SDKパッケージは`0.2.0`で、インターフェースはアルファ版、インターフェースリビジョンは5、共有ABIは5です。タイムアウト制御が公開レイアウトを変えるため、SDKの利用コード、NeoGraph、Python拡張を一緒に再ビルドしてください。Native archive v3とportable JSON v2は変わらず、この世代がSDKインターフェースの安定版であることを示すものではありません。
+型付きAPIへの切り替えに伴い、`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、記述子インタープリター、ResponsesのWebSocket経路は削除されました。C++側の利用コードを再コンパイルし、独自のプロバイダーを移行してください。互換エイリアスはありません。SDKパッケージは`0.3.0` alpha、公開マージコミット`3b88e4ba020c3a4d39ff0660014e7292b516b7cb`に固定され、インターフェースリビジョンは6、共有ABIは6です。金額使用量メタデータが公開レイアウトを変えるため、SDKの利用コード、NeoGraph、Python拡張を一緒に再ビルドしてください。Native archive v3とportable JSON v2は変わらず、この世代がSDKインターフェースの安定版であることを示すものではありません。
 
 ## Python
 
@@ -212,7 +214,7 @@ NeoGraphは、明示的な状態遷移、分岐やループ、並列タスク、
 インストール済みパッケージを使う側は、有効になっている必要なコンポーネントだけをリンクします。
 
 ```cmake
-find_package(SchemaProvider 0.2.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.3.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```

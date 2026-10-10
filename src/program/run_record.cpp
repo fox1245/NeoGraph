@@ -683,6 +683,9 @@ std::uint64_t ProgramRunRecord::event_sequence() const noexcept {
 std::uint64_t ProgramRunRecord::effect_sequence() const noexcept {
     return impl_->data.effect_sequence;
 }
+bool ProgramRunRecord::has_children() const noexcept {
+    return !impl_->data.children.empty();
+}
 std::vector<ProgramChildRecord> ProgramRunRecord::children() const {
     return impl_->data.children;
 }

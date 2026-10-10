@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/README.md locale=ja source_sha256=3985b561c728357e75ec0cab68d2711e19334c47a588c07f2b836c6ce3fa8eb3 -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/README.md locale=ja source_sha256=654b29f033cd6ac7d9dc23dfc92c5a26cf75810462da7c3da4f3df39e9c192dc -->
 # JARVIS オーケストレーションベンチマーク — NeoGraph vs LangGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -57,6 +57,8 @@ OPENROUTER_API_KEY=... bash bench/run_bench_e2e.sh
 OPENROUTER_API_KEY=... bash bench/run_bench_proxy.sh
 ```
 
+Jarvis は API キーを TLS 経由でのみ送るため、ランナーは nginx プロキシ（`nginx-openrouter.conf`、ポート 8443）で TLS を終端し、実行ごとに使い捨て CA とサーバー証明書を生成します（ホストに `openssl` が必要、CA と鍵は一時ディレクトリに置き終了時に削除）。両クライアントは `https://jarvis-openrouter-proxy:8443/openrouter/v1` を呼び、その CA バンドルを使います: Jarvis は `OPENROUTER_CA_FILE`、LangGraph 双生は `SSL_CERT_FILE` を使用します。プロキシは解析器が位置で解析する `$msec $request_time $upstream_connect_time $upstream_header_time $upstream_response_time $status` を記録します。未完了のターンや子プロセスの失敗時、driver は非ゼロで終了し、プロキシログのローテーション失敗もランナーを停止します。
+
 E2Eの「分散が差分を覆い尽くす」問題をプロキシ境界計測で解決: nginxをGroqの前に配置し**呼び出しごとのアップストリーム（WAN + Groq）時間を記録**し、ターンラウンドトリップから差分を引いた残差（グラフ + HTTPクライアントシリアライゼーション + ローカルMCP + パイプ）のみを比較する。統計的な回避策（ABBA/リトライ回数の増加）ではなく、ノイズ源自体を計測して減算する — ラウンドが異なるGroqウィンドウに当たった場合でも結果は揺れない。
 
 |  | ターン毎の上流送信平均 (Avg/turn upstream) | **残差p50** | 残差p90 | 残差最小〜最大 |
@@ -66,7 +68,7 @@ E2Eの「分散が差分を覆い尽くす」問題をプロキシ境界計測�
 
 - 生の壁時計時間では「LGが189ms速い」という結果（GroqがNG側に不利な時間帯を与えた——上流平均+196ms）。残差では**NGがp50で−11.1ms**——ノイズの方向にかかわらず手法がシグナルを復元することを明確に示している。
 - 残差p50はモックラウンド予測と一致（グラフ0.4対3.1ms + HTTPスタック差）——ペイロードの相互検証成功。
-- 呼び出し↔ターン対応は**順序ベース**（呼び出し数=ターン数×2であること、ログ順=ターン順であることを確認）。時間枠対応にはWSL2壁時計ステップ（実行中の-0.8s反転測定）があり、フォールバックのみ。ドライバのタイムスタンプも単調アンカーから導出。
+- 呼び出し↔ターン対応は**順序ベース**（呼び出し数=ターン数×2であること、ログ順=ターン順であることを確認）。時間枠対応には過去の壁時計ステップ（実行中の-0.8s反転測定）があり、フォールバックのみ。ドライバのタイムスタンプも単調アンカーから導出。
 - 注意点：Groq(Cloudflare)は`Python-urllib` UAを403でブロック——プロキシ問題と誤認しやすい。実際のスモークテストはcurl/httpx系UAを使用。
 
 ## ストリーミングTTFTラウンド（2026-07-05）
@@ -90,12 +92,14 @@ E2Eの「分散が差分を覆い尽くす」問題をプロキシ境界計測�
 - Prompt (Persona.txt 共有済み) · 決定検証（チャットダウングレード） · 記憶形式（JsonFileStore） · 忠実な再現ガード · stdout マーカー同一。フレームワークと言語のみが異なる。
 - LangGraph 側はイディオムな技術スタック (LangGraph + LangChain-OpenAI) を用いる.
 - 測定はコンテナ内部`driver.py` (標準入力注入 → `[jarvis:tts]` マーカー往復)。
+- 初期出力 cap: 両側とも名目返答 router 300 / synthesis 220 トークンに reasoning 余裕 1024 トークンを足し、低い reasoning effort を要求します。完了した空の `MaxTokens` 応答を cap 二倍で一度再要求するのは C++ 側だけです。追加 provider 呼び出しは解析器の「ターン毎に二呼び出し」という残差の前提を無効にするため、不一致警告を比較可能な計測値として扱ってはいけません。
 
 ## Files
 
 - `langgraph_twin.py` — LangGraph 双生（同一トポロジー・プロトコル、MCP_URL 設定時は公式 mcp SDK 永続セッション経由の実ツール呼び出し）
 - `driver.py` / `analyze.py` — 計測・比較表
-- `Dockerfile.neograph` / `Dockerfile.langgraph` / `Dockerfile.mcp` — ベンチマーク画像
-- `run_bench.sh`（core）/ `run_bench_e2e.sh`（実ツールE2E） — ランナー
-- `turns_mock.txt`（200） / `turns_openrouter.txt`（20） / `turns_e2e.txt`（24） — ターンセット
+- `Dockerfile.neograph` / `Dockerfile.langgraph` / `Dockerfile.mcp` / `Dockerfile.proxy` — ベンチマーク画像
+- `run_bench.sh`（core）/ `run_bench_e2e.sh`（実ツールE2E）/ `run_bench_proxy.sh`（TLS プロキシ境界計測） — ランナー
+- `nginx-openrouter.conf` — プロキシ設定; `analyze_proxy.py` / `analyze_ttft.py` — そのログ解析器
+- `turns_mock.txt`（200） / `turns_openrouter.txt`（20） / `turns_e2e.txt`（24） — ターンセット; `turns_openrouter.txt` は他の二つからチャットターンだけをそのまま選んだもの
 - `../config-bench/` — 空のカタログ（チャットパス修正）/ `../config-bench-e2e/` — 共有MCPサーバーカタログ

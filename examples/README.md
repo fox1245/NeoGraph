@@ -265,9 +265,18 @@ a diagnostic, not a fabricated successful provider result.
 
 Example 16 keeps an 8,192-token cap across at most three completed-empty calls and
 pins one 300-second deadline per ask; it does not double the cap or retry failures.
+If the final answer still has no visible text, it prints an error and exits 1.
 Example 28's rewrite requests low effort and 512 output tokens, returns the original
 question unchanged when the reply is empty/whitespace, and uses a 180-second provider
 timeout. These path-specific settings leave the shared factory default unchanged.
+
+The multi-customer self-evolving chatbot keeps judge-history prefixes within 200 bytes
+at valid UTF-8 boundaries and reports exceptions with exit 1. The Beast's
+`baldwin_llm --llm` requires a key instead of substituting its offline oracle. Its
+typed request uses low effort and a 1,824-token cap; only an empty completed
+`MaxTokens` reply gets one 3,648-token re-ask. Provider failures or exhausted empty
+replies exit 1. This addresses bounded empty-output handling, not a live-provider
+qualification of Baldwin learning or ToT stall frequency.
 
 ### Checkpoints and evolution
 

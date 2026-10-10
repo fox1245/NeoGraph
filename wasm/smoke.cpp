@@ -1,6 +1,5 @@
-// WASM feasibility smoke — compile a JSON graph definition + run a
-// trivial graph entirely inside the engine. No HTTP, no LLM, no
-// network. If this builds + runs under em++, Phase 1 is feasible.
+// Compile and run the actual Core graph runtime in Node.js or a browser.
+// No HTTP, LLM, or model network requests are performed.
 
 #include <neograph/graph/engine.h>
 #include <neograph/graph/state.h>
@@ -66,5 +65,6 @@ int main() {
     std::printf("trace = ");
     for (const auto& step : result.execution_trace) std::printf("%s ", step.c_str());
     std::printf("\n");
-    return out.get<int>() == 42 ? 0 : 1;
+    return out.get<int>() == 42 && result.execution_trace.size() == 1
+        && result.execution_trace.front() == "d" ? 0 : 1;
 }

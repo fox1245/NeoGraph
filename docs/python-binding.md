@@ -4,7 +4,7 @@
 
 `neograph-engine` is the pybind11 surface of the same C++ runtime. The wheel enables Core, LLM, Program/QuickJS, MCP and SQLite runtime durability; optional source builds expose only the components they compile.
 
-This guide describes the current typed binding API. Older wheels that expose `complete` use a different provider interface; they cannot run the typed examples below.
+This guide requires a wheel built against SchemaProvider SDK `0.3.0`, interface revision `6` and shared-library ABI revision `6`; install its bundled components together. Older wheels that expose `complete` use a different provider interface; they cannot run the typed examples below.
 
 ```bash
 pip install neograph-engine
@@ -101,9 +101,9 @@ output tokens: 0
 
 Remove the peer's entire `usage` member and restart it to exercise the missing-counter path; the last line should become `output tokens: unknown`. This checks protocol mapping, not a real model's token counting.
 
-### Interface 4 family controls
+### Family controls
 
-Use a wheel built against SDK interface/shared-library generation 4. Package versions, native archive v3 and portable JSON v2 are separate. These fragments construct controls without dispatch. Use each with an admitted provider of the corresponding family. Keep the first loopback request unchanged: OpenRouter-only controls reject that unadmitted origin before I/O.
+Package versions, native archive v3 and portable JSON v2 are separate. These fragments construct controls without dispatch. Use each with an admitted provider of the corresponding family. Keep the first loopback request unchanged: OpenRouter-only controls reject that unadmitted origin before I/O.
 
 ```python
 chat = ng.ProviderControls()
@@ -223,6 +223,10 @@ An SDK failure is returned data. Host observer or budget-settlement failures rai
 Repeated inspection of a stored Python provider or graph exception cause preserves the original exception object and traceback, including causes reached through native nested exception translation.
 
 Usage counters are `UsageCount` values with `value` and `evidence`, or `None` when unknown. A reported zero is known usage; it differs from an omitted counter. Check `count is not None` before reading `count.value`. Do not use `count or 0`, or replace unknown input/output/total counters with zero in accounting.
+
+`outcome.usage.provider_cost` is the immutable `ProviderReportedCost` view. Its optional `ProviderUsdAmount` fields are `total`, `upstream_total`, `upstream_input` and `upstream_output`, with `nano_usd`, `evidence` and `rounding`. `status` is a four-entry array in that order; `byok_status` describes nullable `is_byok`. `ProviderCostStatus`, `ProviderCostSource` and `ProviderCostRounding` preserve missing, available, malformed, precision-exceeded, overflow, unknown-currency and conflict evidence. Amounts are rounded upward from parsed binary64, not from the original decimal lexeme. A reported zero or `is_byok=False` is not absence. These observations are neither invoices nor token-budget charges; inspect ordered `provider_outcomes` for per-call money evidence, not an aggregate token bank.
+
+`UsageAccumulator` is a token-only aggregate. A single report retains its monetary metadata; after a second report the snapshot's `provider_cost` is explicitly reset to canonical Missing/None, not the stale first-call cost and not a sum. Restoring that snapshot does not recreate costs or renew token authority. Read the exact monetary evidence from each original outcome or provider journal entry.
 
 On resume or continuation, `RunResult.provider_outcomes` preserves the ordered original outcomes followed by newly produced outcomes. `RunResult.usage` reflects the active accounting bank, which can restore prior reports from a checkpoint; a resume with no new provider call does not guarantee `None` or zero usage. Restoring evidence must neither redispatch the original provider request nor charge it twice. Retained reports describe prior calls; they do not grant a new spending allowance.
 

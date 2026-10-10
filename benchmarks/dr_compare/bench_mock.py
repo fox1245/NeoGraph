@@ -60,6 +60,8 @@ def _time_one(label, run_fn, query):
     t0 = time.perf_counter()
     try:
         out = run_fn(query, tid)
+        if not out or not out.strip():
+            raise RuntimeError("Runner returned no visible report")
     except Exception as exc:
         print(f"    [{label}] FAILED: {exc}")
         return None, 0
@@ -116,9 +118,11 @@ def main():
     # Measure.
     print(f"\n[measure] {args.iters} per side, alternating order")
     samples = {label: [] for label in runners}
+    failures = 0
     for i in range(args.iters):
         for label, fn in runners.items():
             t, _ = _time_one(label, fn, args.query)
+            failures += t is None
             if t is not None:
                 samples[label].append(t)
         if (i + 1) % 10 == 0:
@@ -140,7 +144,8 @@ def main():
         else:
             print(f"\n  LangGraph median {(ng-lg)*1000:.2f}ms "
                   f"({(ng/lg-1)*100:.1f}%) faster than NeoGraph.")
-    return 0
+    print(f"\n  Failed runs: {failures}")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

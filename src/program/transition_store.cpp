@@ -13,6 +13,7 @@
 #include <mutex>
 #include <set>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 namespace neograph::program {
 namespace {
@@ -1285,6 +1286,22 @@ std::vector<ProgramJavaScriptCommandJournalEntry> ProgramTransitionStore::load_j
         "ProgramTransitionStore does not support durable JavaScript command-history reads");
 }
 
+std::optional<ProgramRunPublicationHead> ProgramTransitionStore::load_run_publication_head(
+    std::string_view owner, std::string_view run_id) const {
+    for (int retry = 0; retry < 3; ++retry) {
+        auto run = load(owner, run_id);
+        if (!run) return std::nullopt;
+        auto journal = latest(owner, run_id);
+        const auto after = load(owner, run_id);
+        if (!after) return std::nullopt;
+        if (after->id() != run->id()) continue;
+        if (!journal) return std::nullopt;
+        detail::validate_run_publication_head(*run, *journal, owner, run_id);
+        return ProgramRunPublicationHead{std::move(*run), std::move(*journal)};
+    }
+    return std::nullopt;
+}
+
 std::optional<ProgramCommandPublicationHead> ProgramTransitionStore::load_command_publication_head(
     std::string_view owner, std::string_view run_id) const {
     const auto run = load(owner, run_id);
@@ -1592,6 +1609,21 @@ void InMemoryProgramTransitionStore::fail_next_publication_for_testing(
     ProgramTransitionFaultPoint point) {
     std::lock_guard lock(impl_->mutex);
     impl_->fault = point;
+}
+
+std::optional<ProgramRunPublicationHead>
+InMemoryProgramTransitionStore::load_run_publication_head(std::string_view owner,
+                                                         std::string_view run_id) const {
+    if (owner.empty() || run_id.empty()) return std::nullopt;
+    std::shared_ptr<const Impl::Stored> snapshot;
+    {
+        std::lock_guard lock(impl_->mutex);
+        const auto found = impl_->runs.find(key(owner, run_id));
+        if (found == impl_->runs.end()) return std::nullopt;
+        snapshot = found->second;
+    }
+    detail::validate_run_publication_head(snapshot->run, snapshot->journal, owner, run_id);
+    return ProgramRunPublicationHead{snapshot->run, snapshot->journal};
 }
 
 std::optional<ProgramCommandPublicationHead>
@@ -2291,37 +2323,79 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
         publication.run_lineage ? std::optional<std::string>(publication.run_lineage->lineage_id())
                                      : std::nullopt,
         std::move(publication_bytes)});
-    maybe_fail(ProgramTransitionFaultPoint::BeforeCommit);
     if (staged_lineage || staged_fork_source || staged_replay_source || safe_point_capsule ||
         expected_lease || next_lease) {
-        auto staged_runs     = impl_->runs;
-        auto staged_lineages = impl_->lineages;
-        auto staged_capsules = impl_->graph_migration_capsules;
-        auto staged_leases   = impl_->execution_leases;
-        staged_runs.insert_or_assign(storage_key, std::move(candidate));
-        if (staged_lineage)
-            staged_lineages.insert_or_assign(lineage_key, std::move(staged_lineage));
-        if (staged_fork_source)
-            staged_lineages.insert_or_assign(fork_source_key, std::move(staged_fork_source));
-        if (staged_replay_source)
-            staged_lineages.insert_or_assign(replay_source_key, std::move(staged_replay_source));
+        // Allocate only absent index nodes. Existing nodes already own their
+        // storage; their immutable handles can be swapped without allocating.
+        decltype(impl_->runs) inserted_runs;
+        if (current == impl_->runs.end())
+            inserted_runs.emplace(storage_key, std::move(candidate));
+        decltype(impl_->lineages) inserted_lineages;
+        if (staged_lineage && current_lineage == impl_->lineages.end())
+            inserted_lineages.emplace(lineage_key, std::move(staged_lineage));
+        const auto fork_source_position = staged_fork_source
+            ? impl_->lineages.find(fork_source_key) : impl_->lineages.end();
+        const auto replay_source_position = staged_replay_source
+            ? impl_->lineages.find(replay_source_key) : impl_->lineages.end();
+
+        decltype(impl_->graph_migration_capsules) inserted_capsules;
+        auto capsule_position = impl_->graph_migration_capsules.end();
+        std::optional<GraphMigrationCapsule> staged_capsule;
         if (safe_point_capsule) {
-            staged_capsules.insert_or_assign(
-                graph_migration_capsule_key(owner, safe_point_capsule->source_run_id(),
-                                            safe_point_capsule->source_lineage_head_id()),
-                *safe_point_capsule);
+            staged_capsule = *safe_point_capsule;
+            auto capsule_key = graph_migration_capsule_key(
+                owner, safe_point_capsule->source_run_id(),
+                safe_point_capsule->source_lineage_head_id());
+            capsule_position = impl_->graph_migration_capsules.find(capsule_key);
+            if (capsule_position == impl_->graph_migration_capsules.end())
+                inserted_capsules.emplace(std::move(capsule_key), std::move(*staged_capsule));
         }
-        if (next_lease)
-            staged_leases.insert_or_assign(storage_key, *next_lease);
-        else if (expected_lease)
-            staged_leases.erase(storage_key);
-        impl_->runs.swap(staged_runs);
-        impl_->lineages.swap(staged_lineages);
-        impl_->graph_migration_capsules.swap(staged_capsules);
-        impl_->execution_leases.swap(staged_leases);
+        decltype(impl_->execution_leases) inserted_leases;
+        std::optional<ProgramExecutionLease> staged_lease;
+        if (next_lease) {
+            staged_lease = *next_lease;
+            if (current_lease == impl_->execution_leases.end())
+                inserted_leases.emplace(storage_key, std::move(*staged_lease));
+        }
+        decltype(impl_->execution_leases)::node_type retired_lease;
+
+        static_assert(noexcept(candidate.swap(candidate)) &&
+                      noexcept(staged_lineage.swap(staged_lineage)));
+        static_assert(std::is_nothrow_swappable_v<GraphMigrationCapsule> &&
+                      std::is_nothrow_swappable_v<ProgramExecutionLease>);
+        static_assert(std::is_nothrow_move_assignable_v<decltype(retired_lease)>);
+        const auto commit_new_nodes = []<class Map>(Map& heads, Map& insertions) noexcept {
+            static_assert(std::allocator_traits<typename Map::allocator_type>::is_always_equal::value);
+            static_assert(std::is_nothrow_invocable_v<typename Map::key_compare,
+                                                    const typename Map::key_type&,
+                                                    const typename Map::key_type&>);
+            heads.merge(insertions);
+        };
+
+        maybe_fail(ProgramTransitionFaultPoint::BeforeCommit);
+        // Every potentially throwing operation is complete. The existing mutex
+        // keeps the multi-index commit indivisible to readers and competing writers;
+        // node transfer allocates nothing and immutable-handle swaps cannot throw.
+        // Retain replaced handles until all indexes agree, as the old map swaps did.
+        if (current != impl_->runs.end()) current->second.swap(candidate);
+        commit_new_nodes(impl_->runs, inserted_runs);
+        if (staged_lineage) current_lineage->second.swap(staged_lineage);
+        commit_new_nodes(impl_->lineages, inserted_lineages);
+        if (staged_fork_source) fork_source_position->second.swap(staged_fork_source);
+        if (staged_replay_source) replay_source_position->second.swap(staged_replay_source);
+        if (capsule_position != impl_->graph_migration_capsules.end())
+            std::swap(capsule_position->second, *staged_capsule);
+        commit_new_nodes(impl_->graph_migration_capsules, inserted_capsules);
+        if (next_lease && current_lease != impl_->execution_leases.end())
+            std::swap(current_lease->second, *staged_lease);
+        commit_new_nodes(impl_->execution_leases, inserted_leases);
+        if (expected_lease && !next_lease)
+            retired_lease = impl_->execution_leases.extract(current_lease);
     } else if (current == impl_->runs.end()) {
+        maybe_fail(ProgramTransitionFaultPoint::BeforeCommit);
         impl_->runs.emplace(std::move(storage_key), std::move(candidate));
     } else {
+        maybe_fail(ProgramTransitionFaultPoint::BeforeCommit);
         current->second = std::move(candidate);
     }
     return ProgramTransitionPublishResult::Published;

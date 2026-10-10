@@ -305,41 +305,49 @@ namespace detail {
 
 asio::awaitable<std::string> execute_blocking_tool_async(Tool& tool, json arguments) {
     struct Result {
+        Result() = default;
+        Result(Result&&) = default;
+        Result& operator=(Result&&) = default;
+        Result(const Result&) = delete;
+        Result& operator=(const Result&) = delete;
+
         std::string value;
         std::exception_ptr error;
     };
 
     const auto caller_executor = co_await asio::this_coro::executor;
-    auto result = std::make_shared<Result>();
     auto completion_token = asio::bind_executor(caller_executor, asio::use_awaitable);
-    co_await asio::async_initiate<decltype(completion_token), void()>(
-        [&tool, arguments = std::move(arguments), result, caller_executor](auto handler) mutable {
-            using Handler = std::decay_t<decltype(handler)>;
-            auto completion = std::make_shared<Handler>(std::move(handler));
+    auto result = co_await asio::async_initiate<decltype(completion_token), void(Result)>(
+        [&tool, arguments = std::move(arguments), caller_executor](auto handler) mutable {
             const auto completion_executor = caller_executor;
             // The completion can run before the pool thread's post() returns.
             // Keep the caller alive until that post has stopped touching its
             // scheduler, even if the resumed coroutine has already finished.
             auto work = asio::make_work_guard(completion_executor);
             asio::post(blocking_tool_pool().get_executor(),
-                       [&tool, arguments = std::move(arguments), result,
-                        completion = std::move(completion), completion_executor,
+                       [&tool, arguments = std::move(arguments),
+                        completion = std::move(handler), completion_executor,
                         work = std::move(work)]() mutable {
+                           Result result;
                            try {
-                               result->value = tool.execute(arguments);
+                               result.value = tool.execute(arguments);
                            } catch (...) {
-                               result->error = std::current_exception();
+                               result.error = std::current_exception();
                            }
+                           // Transfer sole ownership before publishing completion:
+                           // the worker must not release an exception while the
+                           // resumed caller is reading or rethrowing it.
                            asio::post(completion_executor,
-                                      [completion = std::move(completion)]() mutable {
-                                          (*completion)();
+                                      [completion = std::move(completion),
+                                       result = std::move(result)]() mutable {
+                                          completion(std::move(result));
                                       });
                        });
         },
         completion_token);
 
-    if (result->error) std::rethrow_exception(result->error);
-    co_return std::move(result->value);
+    if (result.error) std::rethrow_exception(result.error);
+    co_return std::move(result.value);
 }
 
 class ProcessBridgeError final : public std::runtime_error {

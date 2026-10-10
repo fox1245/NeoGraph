@@ -637,16 +637,23 @@ void register_custom_node_types(
                             std::cout << "[jarvis:ttft]" << std::endl;
                         }
                     };
-                    auto request = jarvis::providers::request(*provider_, messages, 0.4, 220,
-                                                             neograph::ProviderMode::Stream);
-                    request.on_event = on_tok;
-                    request = jarvis::providers::contextual_request(std::move(request), in.ctx);
-                    auto reply = co_await neograph::graph::observe_provider_result(in.ctx,
-                        invoke_provider(provider_, std::move(request), {}, {},
-                            neograph::graph::provider_call_broker(in.ctx),
-                            neograph::graph::make_provider_call_identity(in.ctx, name_, 0)));
-                    neograph::graph::record_usage(in.ctx, reply);
-                    reply = neograph::outcome_or_throw(std::move(reply));
+                    // 숨은 추론을 위한 여유분을 더한다. 완료된 빈 MaxTokens 응답만
+                    // 한도를 두 배로 1회 재요청 (ordinal 0 / 2; 1 은 복창 재생성).
+                    auto reply = co_await jarvis::providers::complete_with_visible_text(in.ctx,
+                        [&](unsigned attempt) {
+                            auto request = jarvis::providers::request(
+                                *provider_, messages, 0.4,
+                                jarvis::providers::output_budget(220, attempt),
+                                neograph::ProviderMode::Stream);
+                            request.on_event = on_tok;
+                            return jarvis::providers::contextual_request(std::move(request), in.ctx);
+                        },
+                        [&](neograph::ProviderRequest request, unsigned attempt) {
+                            return invoke_provider(provider_, std::move(request), {}, {},
+                                neograph::graph::provider_call_broker(in.ctx),
+                                neograph::graph::make_provider_call_identity(
+                                    in.ctx, name_, attempt == 0 ? 0 : 2));
+                        });
                     std::string final_text = neograph::outcome_text(*reply);
 
                     // ── 복창 가드 — 과거 답변과 trim 후 verbatim 일치하면 1회 재생성.
@@ -679,16 +686,19 @@ void register_custom_node_types(
                             "Your draft repeated one of your earlier replies "
                             "word-for-word. Compose a fresh answer to the user's "
                             "CURRENT message, in their language."));
-                        auto retry_request = jarvis::providers::contextual_request(
-                            jarvis::providers::request(*provider_, std::move(messages), 0.4, 220), in.ctx);
-                        auto retry = co_await neograph::graph::observe_provider_result(in.ctx,
-                            invoke_provider(provider_, std::move(retry_request), {}, {},
-                                neograph::graph::provider_call_broker(in.ctx),
-                                neograph::graph::make_provider_call_identity(in.ctx, name_, 1)));
-                        neograph::graph::record_usage(in.ctx, retry);
-                        retry = neograph::outcome_or_throw(std::move(retry));
-                        const auto retry_text = neograph::outcome_text(*retry);
-                        if (!trim(retry_text).empty()) final_text = retry_text;
+                        auto retry = co_await jarvis::providers::complete_with_visible_text(in.ctx,
+                            [&](unsigned attempt) {
+                                return jarvis::providers::contextual_request(
+                                    jarvis::providers::request(*provider_, messages, 0.4,
+                                        jarvis::providers::output_budget(220, attempt)), in.ctx);
+                            },
+                            [&](neograph::ProviderRequest request, unsigned attempt) {
+                                return invoke_provider(provider_, std::move(request), {}, {},
+                                    neograph::graph::provider_call_broker(in.ctx),
+                                    neograph::graph::make_provider_call_identity(
+                                        in.ctx, name_, attempt == 0 ? 1 : 3));
+                            });
+                        final_text = neograph::outcome_text(*retry);
                     }
 
                     std::string out_ch = cfg_.value("output_channel",
@@ -802,12 +812,15 @@ int main(int argc, char** argv) {
 
         const char* api_key_env = std::getenv("OPENROUTER_API_KEY");
         const char* base_url_env = std::getenv("OPENROUTER_BASE_URL");
+        const char* ca_file_env = std::getenv("OPENROUTER_CA_FILE");
         if (api_key_env && std::string(api_key_env).size() > 0) {
             std::cerr << "[jarvis] OpenRouter Provider 사용 (OPENROUTER_API_KEY 감지됨)\n";
             const std::string base_url = (base_url_env && *base_url_env)
                 ? base_url_env : "https://openrouter.ai/api";
-            router_provider = jarvis::providers::live(api_key_env, base_url);
-            synth_provider = jarvis::providers::live(api_key_env, base_url);
+            // OPENROUTER_CA_FILE: 사설 TLS 게이트웨이(벤치 프록시)용 추가 신뢰 앵커(PEM).
+            const std::string ca_file = ca_file_env ? ca_file_env : "";
+            router_provider = jarvis::providers::live(api_key_env, base_url, ca_file);
+            synth_provider = jarvis::providers::live(api_key_env, base_url, ca_file);
         } else {
             std::cerr << "[jarvis] Mock Provider 사용 (OPENROUTER_API_KEY 없음)\n";
             router_provider = std::make_shared<MockProvider>();

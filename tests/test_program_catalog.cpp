@@ -1065,6 +1065,298 @@ TEST(ProgramCatalogTest, ResolveVersionIsOwnerScopedAndRebindsExactStoredReceipt
     EXPECT_EQ(factory_calls.load(), factories_before);
 }
 
+namespace {
+
+struct SeenContext {
+    std::string name;
+    bool        provider;
+    std::string provider_name;
+    std::size_t tools;
+    std::vector<std::string> tool_definitions;
+};
+
+std::vector<ExecutableIdentity> mixed_requirements() {
+    return {manifest(ExecutableKind::Provider, "catalog-provider", '3').identity,
+            manifest(ExecutableKind::Tool, "catalog-tool", '4').identity};
+}
+
+// Include unused capabilities so recovery must retain the exact sealed requirements,
+// not expand them to everything allowed by the registry/profile.
+RegistrySnapshot mixed_registry(std::vector<SeenContext>& seen) {
+    RegistrySnapshotBuilder builder;
+    const auto provider = manifest(ExecutableKind::Provider, "catalog-provider", '3');
+    const auto tool     = manifest(ExecutableKind::Tool, "catalog-tool", '4');
+    builder.add_provider(provider, ProviderMetadata{json::object(), json::object()});
+    builder.add_tool(tool, ToolMetadata{json::object(), json::object()});
+    builder.add_provider(manifest(ExecutableKind::Provider, "unused-provider", 'e'),
+                         ProviderMetadata{json::object(), json::object()});
+    builder.add_tool(manifest(ExecutableKind::Tool, "unused-tool", 'f'),
+                     ToolMetadata{json::object(), json::object()});
+    const auto record = [&seen](const std::string& name, const NodeContext& context) {
+        SeenContext entry{name, static_cast<bool>(context.provider), context.provider_name,
+                          context.tools.size(), {}};
+        for (const auto& definition : context.tool_definitions)
+            entry.tool_definitions.push_back(definition.name);
+        seen.push_back(std::move(entry));
+    };
+    builder.add_node(
+        manifest(ExecutableKind::Node, "plain-node", 'a'),
+        [record](const std::string& name, const json&, const NodeContext& context) {
+            record(name, context);
+            return std::make_unique<CatalogNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "declared-node", 'b'),
+        [record](const std::string& name, const json&, const NodeContext& context) {
+            record(name, context);
+            return std::make_unique<CatalogNode>(name);
+        },
+        json{{"type", "object"}}, json::object(),
+        [provider = provider.identity, tool = tool.identity](const json& config) {
+            std::vector<ExecutableIdentity> result;
+            if (config.value("provider", std::string{}) == provider.name)
+                result.push_back(provider);
+            if (config.value("tool_ids", json::array()) == json::array({tool.name}))
+                result.push_back(tool);
+            return result;
+        });
+    builder.add_reducer(manifest(ExecutableKind::Reducer, "catalog-overwrite", '2'),
+                        [](const json&, const json& incoming) { return json(incoming); });
+    return std::move(builder).build();
+}
+
+ProgramBundle compile_mixed(const RegistrySnapshot& snapshot) {
+    auto source = document();
+    auto definition = source["root"]["definition"];
+    definition["nodes"] = json{
+        {"plain", json{{"type", "plain-node"}}},
+        {"declared", json{{"type", "declared-node"},
+                          {"provider", "catalog-provider"},
+                          {"tool_ids", json::array({"catalog-tool"})}}}};
+    definition["edges"] = json::array({json{{"from", "__start__"}, {"to", "plain"}},
+                                       json{{"from", "plain"}, {"to", "declared"}},
+                                       json{{"from", "declared"}, {"to", "__end__"}}});
+    ProgramCompiler compiler(snapshot, {"catalog-test/v1"});
+    return compiler.compile(ProgramSource::from_cpp_builder("test:catalog-mixed", 1, source));
+}
+
+void expect_attenuated(const std::vector<SeenContext>& seen, std::size_t first) {
+    ASSERT_EQ(seen.size(), first + 2);
+    // Materialization order is not part of the contract; each named node must occur once.
+    const SeenContext* plain    = nullptr;
+    const SeenContext* declared = nullptr;
+    for (std::size_t index = first; index < seen.size(); ++index) {
+        if (seen[index].name == "plain") {
+            ASSERT_EQ(plain, nullptr);
+            plain = &seen[index];
+        } else {
+            ASSERT_EQ(seen[index].name, "declared");
+            ASSERT_EQ(declared, nullptr);
+            declared = &seen[index];
+        }
+    }
+    ASSERT_NE(plain, nullptr);
+    ASSERT_NE(declared, nullptr);
+    EXPECT_FALSE(plain->provider);
+    EXPECT_TRUE(plain->provider_name.empty());
+    EXPECT_EQ(plain->tools, 0U);
+    EXPECT_TRUE(plain->tool_definitions.empty());
+    EXPECT_FALSE(declared->provider);  // Brokered nodes never hold the raw Provider.
+    EXPECT_EQ(declared->provider_name, "catalog-provider");
+    EXPECT_EQ(declared->tools, 0U);
+    EXPECT_EQ(declared->tool_definitions, std::vector<std::string>{"catalog-tool"});
+}
+
+using MixedStoreOpener = std::function<std::shared_ptr<ProgramStore>()>;
+
+void cold_mixed_recovery(const MixedStoreOpener& open_store) {
+    std::vector<SeenContext> seen;
+    std::vector<std::vector<ExecutableIdentity>> requests;
+    std::vector<std::weak_ptr<neograph::Provider>> providers;
+    const auto binder = [&](const std::vector<ExecutableIdentity>& requested) {
+        requests.push_back(requested);
+        auto binding = make_binding(requested, 'd');
+        providers.push_back(binding.node_context.provider);
+        return binding;
+    };
+    const auto stored = [&] {
+        const auto snapshot = mixed_registry(seen);
+        auto store = open_store();
+        auto engines = std::make_shared<EngineGenerationCache>();
+        const auto bundle = compile_mixed(snapshot);
+        ProgramVersion version = [&] {
+            const auto admission = profile(snapshot);
+            ProgramCatalog original(
+                CatalogConfig{store, snapshot, engines, "catalog-test/v1", binder});
+            return original.admit(
+                bundle, ProgramAdmission{"tenant:catalog", admission, policy(admission), {}});
+        }();
+        EXPECT_EQ(seen.size(), 2U);
+        expect_attenuated(seen, 0);
+        EXPECT_EQ(requests, (std::vector<std::vector<ExecutableIdentity>>{mixed_requirements()}));
+        std::vector<CapabilityBindingReceipt> receipts;
+        for (const auto& identity : mixed_requirements())
+            receipts.push_back({identity, digest('d')});
+        EXPECT_EQ(version.core_materialization_receipt().capability_bindings, receipts);
+        const auto persisted = store->get_version("tenant:catalog", version.id());
+        EXPECT_TRUE(persisted.has_value());
+        if (persisted)
+            EXPECT_EQ(persisted->serialize_canonical(), version.serialize_canonical());
+        const auto persisted_bundle = store->get_bundle("tenant:catalog", bundle.id());
+        EXPECT_TRUE(persisted_bundle.has_value());
+        if (persisted_bundle)
+            EXPECT_EQ(persisted_bundle->serialize_canonical(), bundle.serialize_canonical());
+
+        // A fresh catalog with the same cache is deliberately not cold recovery.
+        {
+            ProgramCatalog warm(
+                CatalogConfig{store, snapshot, engines, "catalog-test/v1", binder});
+            const auto resolved = warm.resolve_version("tenant:catalog", version.id());
+            EXPECT_TRUE(resolved.has_value());
+            EXPECT_EQ(seen.size(), 2U) << "engine-cache hit must not invoke factories";
+            EXPECT_EQ(requests.size(), 2U);
+        }
+        return version;
+    }();
+    // Original catalogs, registry, cache and live bindings are gone; SQLite also reopens its store.
+    ASSERT_EQ(providers.size(), 2U);
+    for (const auto& provider : providers) EXPECT_TRUE(provider.expired());
+    const auto snapshot = mixed_registry(seen);
+    auto store = open_store();
+    ProgramCatalog recovered(CatalogConfig{store, snapshot,
+        std::make_shared<EngineGenerationCache>(), "catalog-test/v1", binder});
+    EXPECT_FALSE(recovered.resolve_version("tenant:other", stored.id()).has_value());
+    EXPECT_EQ(requests.size(), 2U);
+    const auto resolved = recovered.resolve_version("tenant:catalog", stored.id());
+    ASSERT_TRUE(resolved.has_value());
+    EXPECT_EQ(resolved->serialize_canonical(), stored.serialize_canonical());
+    EXPECT_EQ(resolved->core_materialization_receipt(), stored.core_materialization_receipt());
+    ASSERT_EQ(seen.size(), 4U) << "cold recovery must invoke both factories exactly once again";
+    expect_attenuated(seen, 2);
+    ASSERT_EQ(requests.size(), 3U);
+    for (const auto& request : requests) EXPECT_EQ(request, mixed_requirements());
+
+    // Resolving the already recovered materialization must not call the binder/factories again.
+    EXPECT_TRUE(recovered.resolve_version("tenant:catalog", stored.id()).has_value());
+    EXPECT_EQ(seen.size(), 4U);
+    EXPECT_EQ(requests.size(), 3U);
+}
+
+void rejected_mixed_recovery(const MixedStoreOpener& open_store, bool wrong_provider) {
+    std::vector<SeenContext> seen;
+    std::vector<std::vector<ExecutableIdentity>> requests;
+    const auto right = [&](const std::vector<ExecutableIdentity>& requested) {
+        requests.push_back(requested);
+        return make_binding(requested, 'd');
+    };
+    const auto stored = [&] {
+        const auto snapshot = mixed_registry(seen);
+        const auto admission = profile(snapshot);
+        ProgramCatalog original(CatalogConfig{open_store(), snapshot,
+            std::make_shared<EngineGenerationCache>(), "catalog-test/v1", right});
+        return original.admit(compile_mixed(snapshot),
+            ProgramAdmission{"tenant:catalog", admission, policy(admission), {}});
+    }();
+    ASSERT_EQ(seen.size(), 2U);
+    expect_attenuated(seen, 0);
+    ASSERT_EQ(requests.size(), 1U);
+    EXPECT_EQ(requests.front(), mixed_requirements());
+
+    const auto snapshot = mixed_registry(seen);
+    auto store = open_store();
+    auto engines = std::make_shared<EngineGenerationCache>();
+    ProgramCatalog recovered(CatalogConfig{store, snapshot, engines, "catalog-test/v1",
+        [&](const std::vector<ExecutableIdentity>& requested) {
+            requests.push_back(requested);
+            auto binding = make_binding(requested, wrong_provider ? 'd' : 'e');
+            if (wrong_provider)
+                binding.node_context.provider =
+                    std::make_shared<CatalogProvider>("unused-provider");
+            return binding;
+        }});
+    try {
+        (void)recovered.resolve_version("tenant:catalog", stored.id());
+        FAIL() << "cold recovery accepted a different Provider or binding receipt";
+    } catch (const ProgramAdmissionError& error) {
+        EXPECT_TRUE(has_code(error, wrong_provider ? "P_BINDING_PROVIDER" : "P_RESOLVE_BINDING"));
+    }
+    EXPECT_EQ(seen.size(), 2U) << "invalid recovery must fail before any factory invocation";
+    ASSERT_EQ(requests.size(), 2U);
+    EXPECT_EQ(requests.back(), mixed_requirements());
+    EXPECT_FALSE(recovered.find_version(stored.id()).has_value());
+    const auto persisted = store->get_version("tenant:catalog", stored.id());
+    ASSERT_TRUE(persisted.has_value());
+    EXPECT_EQ(persisted->serialize_canonical(), stored.serialize_canonical());
+
+    // Reuse the failed recovery's cache to detect publication/cache poisoning.
+    ProgramCatalog retry(CatalogConfig{store, snapshot, engines, "catalog-test/v1", right});
+    const auto resolved = retry.resolve_version("tenant:catalog", stored.id());
+    ASSERT_TRUE(resolved.has_value());
+    EXPECT_EQ(resolved->serialize_canonical(), stored.serialize_canonical());
+    ASSERT_EQ(seen.size(), 4U);
+    expect_attenuated(seen, 2);
+    ASSERT_EQ(requests.size(), 3U);
+    EXPECT_EQ(requests.back(), mixed_requirements());
+}
+
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+class MixedRecoveryDatabase {
+public:
+    MixedRecoveryDatabase() {
+        static std::atomic<unsigned> sequence{0};
+        do {
+            directory_ = std::filesystem::temp_directory_path() /
+                ("neograph-mixed-recovery-" + std::to_string(sequence.fetch_add(1)));
+        } while (!std::filesystem::create_directory(directory_));
+    }
+    ~MixedRecoveryDatabase() {
+        std::error_code error;
+        std::filesystem::remove_all(directory_, error);
+        EXPECT_FALSE(error) << error.message();
+    }
+    std::shared_ptr<ProgramStore> open() const {
+        return std::make_shared<SQLiteProgramStore>((directory_ / "catalog.db").string());
+    }
+private:
+    std::filesystem::path directory_;
+};
+#endif
+
+}  // namespace
+
+TEST(ProgramCatalogTest, ColdRecoveryKeepsPerNodeCapabilityAttenuation) {
+    auto store = std::make_shared<InMemoryProgramStore>();
+    cold_mixed_recovery([&] { return store; });
+}
+
+TEST(ProgramCatalogTest, RecoveredBindingWithWrongProviderFailsClosed) {
+    auto store = std::make_shared<InMemoryProgramStore>();
+    rejected_mixed_recovery([&] { return store; }, true);
+}
+
+TEST(ProgramCatalogTest, RecoveredBindingWithWrongReceiptFailsClosed) {
+    auto store = std::make_shared<InMemoryProgramStore>();
+    rejected_mixed_recovery([&] { return store; }, false);
+}
+
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+TEST(ProgramCatalogTest, SQLiteColdRecoveryKeepsPerNodeCapabilityAttenuation) {
+    MixedRecoveryDatabase database;
+    cold_mixed_recovery([&] { return database.open(); });
+}
+
+TEST(ProgramCatalogTest, SQLiteRecoveredBindingWithWrongProviderFailsClosed) {
+    MixedRecoveryDatabase database;
+    rejected_mixed_recovery([&] { return database.open(); }, true);
+}
+
+TEST(ProgramCatalogTest, SQLiteRecoveredBindingWithWrongReceiptFailsClosed) {
+    MixedRecoveryDatabase database;
+    rejected_mixed_recovery([&] { return database.open(); }, false);
+}
+#endif
+
 TEST(ProgramCatalogTest, PositiveFiniteConcurrencyAboveOneIsAdmitted) {
     factory_calls.store(0);
     auto           snapshot = bound_registry();

@@ -71,6 +71,17 @@ of framework.
 OPENROUTER_API_KEY=... bash bench/run_bench_proxy.sh
 ```
 
+Jarvis sends the API key only over TLS, so the runner terminates TLS in the nginx
+proxy (`nginx-openrouter.conf`, port 8443) and generates a throw-away CA and server
+certificate for each run (requires `openssl` on the host; the CA and key live in a
+temporary directory removed on exit). Both clients call
+`https://jarvis-openrouter-proxy:8443/openrouter/v1` and use that CA bundle: Jarvis
+through `OPENROUTER_CA_FILE`, the LangGraph twin through `SSL_CERT_FILE`. The proxy
+logs `$msec $request_time $upstream_connect_time $upstream_header_time
+$upstream_response_time $status`, the positional fields `analyze_proxy.py` and
+`analyze_ttft.py` parse. The driver exits nonzero if turns are incomplete or the
+child process fails; proxy log-rotation failures also stop the runner.
+
 Solve E2E's "dispersion swallows delta" problem with proxy boundary measurement:
 Place nginx in front of Groq to **log per-call upstream (WAN+Groq) time** and
 compare only the residual (graph + HTTP client serialization + local MCP + pipe)
@@ -89,7 +100,7 @@ don't wobble even if rounds hit different Groq windows.
 - Residual p50 matches mock round prediction (graph 0.4 vs 3.1ms + HTTP stack diff) —
   payload cross-validation success.
 - Call↔turn mapping is **order-based** (verify call count = 2×turn count, log order = turn order).
-  Time-window mapping has WSL2 wall-clock step (measured -0.8s reversal during run) as
+  Time-window mapping has historical wall-clock step (measured -0.8s reversal during run) as
   fallback-only. Driver timestamps also derived from monotonic anchor.
 - Trap note: Groq(Cloudflare) blocks `Python-urllib` UA with 403 — easy to mistake
   for proxy issue. Real smoke tests use curl/httpx-family UA.
@@ -136,14 +147,22 @@ qualify the current SDK transport, audio latency or production tenant capacity.
   verbatim guard · stdout marker identical. Only framework and language differ.
 - LangGraph side uses idiomatic stack (langgraph + langchain-openai).
 - Measurement is container-internal `driver.py` (stdin injection → `[jarvis:tts]` marker round-trip).
+- Initial output caps: both sides use 300 (router) / 220 (synthesis) nominal reply
+  tokens plus 1024 tokens of reasoning headroom, with low reasoning effort.
+  Only the C++ side re-asks a completed empty `MaxTokens` reply once at twice the
+  cap. Extra provider calls invalidate the analyzers' two-calls-per-turn residual
+  assumption; their mismatch warning must not be treated as comparable timing.
 
 ## Files
 
 - `langgraph_twin.py` — LangGraph twin (identical topology·protocol, real tool call via
   official mcp SDK persistent session when MCP_URL set)
 - `driver.py` / `analyze.py` — Measurement · comparison table
-- `Dockerfile.neograph` / `Dockerfile.langgraph` / `Dockerfile.mcp` — Benchmark images
-- `run_bench.sh`(core) / `run_bench_e2e.sh`(real tool E2E) — Runners
-- `turns_mock.txt`(200) / `turns_openrouter.txt`(20) / `turns_e2e.txt`(24) — Turn sets
+- `Dockerfile.neograph` / `Dockerfile.langgraph` / `Dockerfile.mcp` / `Dockerfile.proxy` — Benchmark images
+- `run_bench.sh`(core) / `run_bench_e2e.sh`(real tool E2E) / `run_bench_proxy.sh`(TLS proxy boundary
+  measurement) — Runners
+- `nginx-openrouter.conf` — Proxy configuration; `analyze_proxy.py` / `analyze_ttft.py` — its log analyzers
+- `turns_mock.txt`(200) / `turns_openrouter.txt`(20) / `turns_e2e.txt`(24) — Turn sets;
+  `turns_openrouter.txt` is a chat-only selection of lines taken verbatim from the other two
 - `../config-bench/` — Empty catalog (chat path fixed) /
   `../config-bench-e2e/` — Shared MCP server catalog

@@ -102,7 +102,12 @@ if BENCH_MODE == "api":
 
     OPENROUTER_MODEL = "~deepseek/deepseek-v4-flash-latest"
 
-    def _mk(temp: float, max_tok: int):
+    # Same request body as the C++ side (provider_support.h): the output cap is
+    # shared by hidden reasoning and the visible reply, so both add the same
+    # 1024-token reasoning allowance and ask for low reasoning effort.
+    REASONING_ALLOWANCE = 1024
+
+    def _mk(temp: float, visible_tok: int):
         api_key = os.environ.get("OPENROUTER_API_KEY")
         if not api_key:
             raise RuntimeError("OPENROUTER_API_KEY is required when BENCH_MODE=api")
@@ -112,9 +117,9 @@ if BENCH_MODE == "api":
             base_url=os.environ.get(
                 "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
             temperature=temp,
-            max_tokens=max_tok,
+            max_tokens=visible_tok + REASONING_ALLOWANCE,
             timeout=120,
-            extra_body={"provider": {"zdr": True}},
+            extra_body={"provider": {"zdr": True}, "reasoning_effort": "low"},
         )
 
     ROUTER_LLM = _mk(0.1, 300)

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=7173060d8b4f0dae592d6132b51be14df00f78234e043963b75a322694a69734 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=d66c5fb755e764bf04126d21d3c20a1f5ac68eecd504e95e452f635261ef21f7 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -17,7 +17,8 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 变更
 
-- **Core 引擎速度恢复到 v0.11.1 的水平。** 在基准笔记本上,3 节点顺序基准从每次运行 10.19 µs 降到 6.29 µs(v0.11.1:6.10),parallel-3 基准从 30.03 µs 降到 15.66 µs(15.80);每个线程各用一个引擎时,2、4、8 线程下的单线程耗时与 v0.11.1 相同。损失来自每个 fan-out 分支一个 strand、每个节点一次 `RunContext` 拷贝、包住上下文绑定注册表的进程级 mutex(现为 64 个分片)、由多个 JSON 文档构建的状态快照、什么都不返回的协程调用(没有 Send 时的 `run_sends_async`、没有检查点时的 `record_pending_write_async`)以及调度器中的有序集合。各提交的测量数据见 #343。
+- **采用合并的 SchemaProvider PR #16 提交 `3b88e4ba020c3a4d39ff0660014e7292b516b7cb`，须以 SDK 0.3.0 EXACT、interface/shared ABI 6 重建。** 这取代下方记录的先前 interface-5 SDK 步骤的当前要求。blocking 调用使用单一 async SDK pipeline，继续拒绝 event-loop/callback worker 重入。outcome、usage 观测、journal、native archive 重载与 Python 类型化值保留服务商报告金额、status、source、evidence、rounding 和冲突。canonical v2 JSON 仅在金额元数据完全缺失时省略 `provider_cost`，保持旧缺失记录 bytes 不变。零和 BYOK false 等金额证据阻止将未知 token hold 当作 proven-not-sent 退款；金额不转换为 token 或支出权限。Native archive v3 和 portable JSON v2 不变。
+- **Core 引擎速度恢复到 v0.11.1 的水平。** 在历史测量中,3 节点顺序基准从每次运行 10.19 µs 降到 6.29 µs(v0.11.1:6.10),parallel-3 基准从 30.03 µs 降到 15.66 µs(15.80);每个线程各用一个引擎时,2、4、8 线程下的单线程耗时与 v0.11.1 相同。损失来自每个 fan-out 分支一个 strand、每个节点一次 `RunContext` 拷贝、包住上下文绑定注册表的进程级 mutex(现为 64 个分片)、由多个 JSON 文档构建的状态快照、什么都不返回的协程调用(没有 Send 时的 `run_sends_async`、没有检查点时的 `record_pending_write_async`)以及调度器中的有序集合。各提交的测量数据见 #343。
 - **只链接 `neograph::core` 的程序不再加载 libcurl。** `neograph::core` 链接了 SchemaProvider 的运行时,而该运行时链接了 libcurl 传输层,因此仅运行图的进程也会加载 libcurl 及其所需的约 25 个库(基准测试启动时常驻内存 12.7 MB,v0.11.1 为 5.0 MB)。现在只有 `neograph::llm` 链接传输层;同一基准测试以 7.7 MB 启动,共享库从 36 个减少到 7 个。不使用 `neograph::llm` 而自行构造 `sp::runtime::Client` 的代码必须链接 `SchemaProvider::transport`。SchemaProvider 已固定到包含此拆分的修订版本。参见 #347。
 - **须使用 SchemaProvider 0.2.0 alpha、interface/shared-library 代际 5 重新构建。** SDK 新增可选的连接、首个响应和空闲 timeout：默认关闭，不延长总 deadline，可通过 `ProviderRequest::options`（`sp::runtime::RunOptions`）按调用设置；图的 LLM 节点暂未暴露它们。五个 API family 的真实 transport lifecycle 检查与独立 private test fixture 解决 SDK #2、#3、#4。C++ 使用方与 Python wheel 必须使用匹配的 SDK header/library 一起重新构建；native archive 仍为 v3，portable JSON 仍为 v2。
 - **只链接 `neograph::core` 的程序不再加载 libcrypto。** SDK 自行实现了 SHA-256、HMAC-SHA256 和 OS 随机源的使用，其运行时不再链接 OpenSSL，archive 与 policy 字节不变。仅运行图的基准测试（`bench_neograph 1 1 1`）以 6.3 MB 常驻内存启动，而不是 7.7 MB（Linux x86_64，31 次中位数），共享库从 7 个减少到 6 个，与启动内存为 5.0 MB 的 v0.11.1 相同。直接调用 OpenSSL 的代码必须自行链接 `OpenSSL::Crypto`。
@@ -28,6 +29,15 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 
+- **Anthropic Messages 和 Gemini 的并行 client-tool 结果保持在同一 turn。** family 编码前合并相邻 portable 纯结果消息，保留 mixed、native 和 turn 边界。其他 API family 与已保存 history 不变(#311)。
+- **History compaction 保留权限和未完成证据。** 原样传递指定 typed controls，仅接受正常结束且非空的摘要；拒绝的 outcome 仍被记录，但不截断 history。摘要是 user 来源内容而非 system 指令，真实 native replay prefix 保持受保护(#314, #325)。
+- **Program fan-out join 不再丢失等待前到达的完成通知。** 持久完成状态处理 signal-before-wait；scoped 取消停止新 dispatch，并取消当前或迟接入的子任务。部分 launch 失败会先 drain 所有借用状态的 producer 再传播。Await 在可能同步进入的子 publication 前注册 deadline(#341)。
+- **Child generation 和暂停 migration 使用一致的 durable head。** 依据 immutable admitted lineage 校验 generation，record/journal snapshot 不再混合不同 publication。释放暂停 source 不会更新已消耗 wall-time budget(#324)。 Native PostgreSQL head通过一个MVCC statement读取，admission和recovery移动已拥有的head成员而非复制。
+- **子任务预约恢复保留已获准的wall-time grant。** 替换后剩余时间减少时，cold reconnect将保留的预约绑定到原始不可变generation。当前可支出预算、token和金额上限以及子任务的原始deadline均不更新。
+- **Synthesis persistence fixture使用父run budget，而非与验证目标无关的本地await deadline。** 专门的timeout和取消测试继续验证operation deadline。
+- **Blocking Tool 异常 handoff 只有一个 terminal 所有者。** async-to-blocking bridge 保留 typed 异常和 system error code，publication 后 worker 不再访问异常对象(#339)。
+- **示例和 benchmark driver 遇到不可用输出时失败。** partial/refusal 输出不能成为成功的 routing fallback，UTF-8 preview 保留完整 code point；失败尝试不计入成功 timing sample(#317)。
+- **Durable Program 集成验证检查隔离和恢复。** cold rematerialization 后保持各 node 最小权限；provider journal 和 Tool effect 区分 run、attempt、slot，拒绝改变的权限，并在 reconnect 后保留未决 dispatch 证据(#293, #295, #297)。
 - **使用引擎工作线程池的 multi-Send fan-out 中,某个分支的取消处理函数可能在该分支自身的操作完成期间运行。** multi-Send 步骤的分支运行在裸线程池执行器上,而静态 fan-out 的分支早已各有一个 strand,因此来自另一个线程池线程的取消会与分支的协程竞争(`cancellation_signal::emit` 中的数据竞争,已在 ThreadSanitizer 下复现)。现在每个使用线程池的 Send 分支都在自己的 strand 上运行;没有线程池的运行保持不变。参见 #344 和 #345。
 - **启用 HTTP 的 `neograph-harness-mcp` 和 `example_harness_mcp_server` 现在会链接 `OpenSSL::Crypto`。** 这两个可执行文件直接调用 OpenSSL（`SHA256`、`CRYPTO_memcmp`），却从未自行链接它；SchemaProvider 0.2.0 不再链接 libcrypto 后，`NEOGRAPH_BUILD_MCP_HTTP_SERVER=ON` 的共享库构建会因 `SHA256` 的未定义引用而链接失败。
 - **同步图执行现在等待 scheduler 的 post 调用完全结束后才销毁 private `io_context`。** 完成处理函数即使已运行，线程池中的线程仍可能处于唤醒调用中，使 `pthread_cond_signal` 与 `pthread_cond_destroy` 发生竞态(#346)。同步 bridge 会等待外部线程的 post 与 tracked-work 释放，关闭取消通知的接收，再处理迟到的排队通知，最后销毁 context。调用线程执行、嵌套调用和父级取消权限均保留；post 处理函数抛出异常也不会丢弃仍由 bridge 所有的 coroutine frame。
@@ -362,7 +372,7 @@ CI 未将这些目标作为 add_executables 处理，或（Docker 构建依赖�
       (requiring `libpq-dev` / `libsqlite3-dev` respectively)
     - `NEOGRAPH_BUILD_A2A` / `NEOGRAPH_BUILD_ACP`
     - `NEOGRAPH_USE_LIBCURL` (one prior incident closed in
-      `feedback_libcurl_unconditional_dep.md` — only the option toggle was
+      public build guidance — only the option toggle was
       added while the default remained ON, breaking the empty-container build
       path again)
     - `find_package(OpenSSL REQUIRED)` is unconditional without an option

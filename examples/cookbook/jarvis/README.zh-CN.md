@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=zh-CN source_sha256=19e3e557881645edb44b26d64c73b2521d02ea519b6ee8302486440bfe61c23e -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=zh-CN source_sha256=202c2f70184732cf88d2eced559f2402f528d8b4f18448b59802d41c826310fc -->
 # JARVIS — 语音驱动的元编排器
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -8,6 +8,12 @@
 C++ 路由器、合成器和专家夹具使用类型化 `ProviderRequest`、`sp::Message`、`sp::Event` 及完整不可变 `sp::Outcome` (`sp::runtime::Result`)，不是旧字符串响应 API。`src/provider_support.h` 的 Jarvis/coder/researcher mock 提供固定路由 JSON、用户文本 echo 和明确的模拟研究回复。不需要密钥或网络提供方，但不是真实研究或推理。本次文档更新不会创建或修复下文既有配置/配置档路径。
 
 本地语音是可选项，需要选定的 whisper/Moonshine 模型、ONNX Runtime/Supertonic 资源、miniaudio 和可用的麦克风/扬声器。文本/mock 运行不能证明语音可用。无需云端仅适用于本地/mock。实时请求需要获授权的 `OPENROUTER_API_KEY`、网络与提供方容量，并将提示、对话记忆和附带工具/委派结果发送给 OpenRouter。模型已固定，原生请求设置的 ZDR 不是地域驻留保证。不要将密钥写入日志或版本库。可空 token 用量不是账单金额；费用需要当前端点/模型定价与实际计费用量。
+
+实时 router 与 synthesizer 的输出 cap（名义回复 300 / 220 token）增加 1,024 token 的 reasoning 余量并请求低 reasoning effort，为隐藏 reasoning 与可见文本共用 cap 的模型留出空间。只有已完成的空 `MaxTokens` 响应会用加倍 cap 重新请求一次；其他空完成响应及 provider failure 直接报错，不重新请求。空回复不会被当作成功的发言轮次。`OPENROUTER_BASE_URL` 指定的网关必须使用 `https://`，`OPENROUTER_CA_FILE` 选择基准代理这类私有 TLS 网关的 PEM CA bundle。
+
+Tool-call 输出（包括被截断的 invalid call）不会触发空文本重新请求。
+JSON router 在解析前仅接受 text-only `EndTurn` / `StopSequence` 完成；
+截断输出即使看似有效 JSON 也会失败。既有 malformed-JSON fallback 仅用于正常完成的文本。
 
 `[jarvis:ttft]` 仅在首个非空 `sp::PartDelta` 且为 `PartKind::Text`、`DeltaChannel::Content` 时发出，不由用量、推理、响应头等事件触发。它表示首次合成文本，不是首次可听见的 TTS 播放。Python REPL driver 仍为 protocol client；pybind benchmark 使用已迁移类型化 binding，需要单独运行证据。当前运行证据仅涵盖实际 CLI 问候、已持久化的合成记忆 turn 和正常 EOF 退出，不验证麦克风捕获、ASR、TTS、pybind 基准或 vendor 推理。下文耗时及语音/live 执行主张仍为历史记录，不是当前迁移的 qualification。
 
@@ -227,14 +233,14 @@ python3 scripts/demo_mcp_server.py 8888        # Time/weather/calc
 ## 语音栈详情
 
 ### 实时麦克风（miniaudio + Silero VAD）
-`JARVIS_MIC=1` 或配置 `use_microphone:true`。Capture 捕获 worker 线程在 512-sample 窗口上运行 Silero VAD，检测语音开始/结束（200ms 预滚动，500ms 静默结束）。**背压**：推理期间丢弃捕获的音频，阻止 TTS 回声、过时话语和启动噪声。设备故障（例如 WSL2 麦克风断开）时自动回退到 stdin。调优：`JARVIS_VAD_THRESHOLD`（默认 0.5），观察：`JARVIS_MIC_DEBUG=1`。
+`JARVIS_MIC=1` 或配置 `use_microphone:true`。Capture 捕获 worker 线程在 512-sample 窗口上运行 Silero VAD，检测语音开始/结束（200ms 预滚动，500ms 静默结束）。**背压**：推理期间丢弃捕获的音频，阻止 TTS 回声、过时话语和启动噪声。设备故障（例如 麦克风断开）时自动回退到 stdin。调优：`JARVIS_VAD_THRESHOLD`（默认 0.5），观察：`JARVIS_MIC_DEBUG=1`。
 
 ### STT — 两个选项（通过配置`stt.type`切换）
 - **`whisper_stt`**（默认）：whisper.cpp。`language:"auto"`自动检测99种语言 → **以说话者的语言进行回答和TTS**。**语言一致性**：在store.prefs中保持母语，因此被误识别为外语的短话语不会突然切换（需要一致的误识别才能切换）。
 - **`moonshine_stt`**：Moonshine-tiny ONNX（27M，与supertonic共享ORT）。边缘、低延迟、韩语风格。特定语言模型，因此语言是固定的。
 
 ### GPU加速（whisper.cpp ROCm/HIP）
-捆绑的whisper.cpp仅为CPU — 大型模型在CPU上大约需要32秒（11秒片段）。AMD GPU（gfx1201=R9700，ROCm≥7.2）运行`bash scripts/build_whisper_hip.sh`以进行GGML_HIP构建 → **约7秒（4.5×）**。run_jarvis.sh自动加载ROCm运行时和WSL dxg。
+捆绑的whisper.cpp仅为CPU — 大型模型在CPU上大约需要32秒（11秒片段）。AMD GPU（支持的 ROCm target）运行`bash scripts/build_whisper_hip.sh`以进行GGML_HIP构建 → **约7秒（4.5×）**。run_jarvis.sh自动加载ROCm运行时和WSL dxg。
 
 ## 基准测试 — NeoGraph vs LangGraph（`bench/`）
 

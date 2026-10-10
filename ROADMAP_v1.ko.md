@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=ROADMAP_v1.md locale=ko source_sha256=2d2070568d9666f73c2882872cc8b31ea5b4030bd5a71f57325bc82ddf612c2b -->
+<!-- neograph-i18n: source=ROADMAP_v1.md locale=ko source_sha256=875b4e187558a80c736ec1c41c98cf9d7cf9aa19e84238e35b7f790e6b935563 -->
 # NeoGraph v1.0 — 설계 다듬기 로드맵
 
 **Languages:** [English](ROADMAP_v1.md) | [한국어](ROADMAP_v1.ko.md) | [日本語](ROADMAP_v1.ja.md) | [简体中文](ROADMAP_v1.zh-CN.md)
@@ -312,8 +312,8 @@ Candidates 1 + 6이 착륙할 때까지, 오늘 존재하는 곳에 불변성을
 
 | # | PR | 범위 | 착륙 버전 |
 |---|---|---|---|
-| 1 ✓ | **`RunContext` 배관 (내부)** — `a473f0e` 착륙 | `struct RunContext`를 `engine.h`에 추가. 엔진의 `execute_graph_async`가 구성하고 관통. NodeExecutor가 `execute_full_async`로 전달. Pybind가 감쌈. **공개 대면 변경 없음** — 옛 메서드는 여전히 `state`만 받음; 새 `ctx`는 디스패치 경로에서 나란히 존재. ctest 442/442 + pytest 96/96 통과. 벤치 중앙값 5.365 µs (BASE 5.285 µs, +1.5%) — WSL2 ~3% 잡음 층 내, 5.185 µs 기준의 ±5% 대역 내. Pybind 감싸기는 PR 7 (바인딩 이전)로 미룸 — PR 1은 pybind 차이가 0이기 때문. | v0.4.0 |
-| 2 ✓ | **`GraphNode::run(NodeInput) -> NodeOutput`** — `607ce66` 착륙 | GraphNode에 새 가상 함수. 기본 구현이 옛 8 가상 함수로 위임(우선순위 보존). 엔진의 선호 디스패치 진입으로 등록. 기존 C++ 하위 클래스는 기본 대체 경로를 통해 여전히 컴파일+작동. ctest 442 → 445 (3개 새 NodeRunDispatch 테스트) + pytest 96/96 + 5개 라이브 LLM/WS 통과. 벤치 중앙값 6.122 µs vs PR1 BASE 6.160 µs (Δ -0.6%) A/B 10 라운드 (호스트가 오늘 시끄러움, PR1 BASE가 어제의 5.285 → 6.160으로 표류 — 같은 코드, WSL2 지터; A/B 비교가 호스트 표류를 상쇄). **잡힌 함정**: `run(const NodeInput&)`가 asio 실행자 내에서 pybind 비동기 경로 아래 SEGV (코루틴-참조-매개변수 UAF, v0.2.0 RunConfig 충돌 모양). 수정: `NodeInput`을 값으로 받음. node.h에 문서화. | v0.4.0 |
+| 1 ✓ | **`RunContext` 배관 (내부)** — `a473f0e` 착륙 | `struct RunContext`를 `engine.h`에 추가. 엔진의 `execute_graph_async`가 구성하고 관통. NodeExecutor가 `execute_full_async`로 전달. Pybind가 감쌈. **공개 대면 변경 없음** — 옛 메서드는 여전히 `state`만 받음; 새 `ctx`는 디스패치 경로에서 나란히 존재. ctest 442/442 + pytest 96/96 통과. 벤치 중앙값 5.365 µs (BASE 5.285 µs, +1.5%) — historical ~3% 잡음 층 내, 5.185 µs 기준의 ±5% 대역 내. Pybind 감싸기는 PR 7 (바인딩 이전)로 미룸 — PR 1은 pybind 차이가 0이기 때문. | v0.4.0 |
+| 2 ✓ | **`GraphNode::run(NodeInput) -> NodeOutput`** — `607ce66` 착륙 | GraphNode에 새 가상 함수. 기본 구현이 옛 8 가상 함수로 위임(우선순위 보존). 엔진의 선호 디스패치 진입으로 등록. 기존 C++ 하위 클래스는 기본 대체 경로를 통해 여전히 컴파일+작동. ctest 442 → 445 (3개 새 NodeRunDispatch 테스트) + pytest 96/96 + 5개 라이브 LLM/WS 통과. 벤치 중앙값 6.122 µs vs PR1 BASE 6.160 µs (Δ -0.6%) A/B 10 라운드 (과거 PR1 BASE가 같은 코드에서 5.285 → 6.160으로 변동; A/B 비교가 측정 변동을 상쇄). **잡힌 함정**: `run(const NodeInput&)`가 asio 실행자 내에서 pybind 비동기 경로 아래 SEGV (코루틴-참조-매개변수 UAF, v0.2.0 RunConfig 충돌 모양). 수정: `NodeInput`을 값으로 받음. node.h에 문서화. | v0.4.0 |
 | 3 ✓ | **CancelToken `fork()` 추가적** — `897645c` 착륙 | `std::shared_ptr<CancelToken> CancelToken::fork()` 추가. 부모 `cancel()`이 자식으로 연쇄. `add_cancel_hook`은 계속 작동 (사용 중단; `[[deprecated]]` 주석은 PR 4에서 착륙). `run_sync(aw, cancel)`이 `cancel->fork()`로 전환. 단일 신호 `slot()` API는 엔진의 외부 co_spawn을 위해 유지. ctest 445 → 452 (7개 새 CancelTokenFork 테스트) + pytest 96/96 + 5개 라이브 LLM/WS 통과. 벤치 A/B 20 라운드 (양방향 교차): Δ 최소 +1.0%, Δ 중앙값 +1.5% — ±5% 대역 내; 벤치 경로에 `cancel_token`이 없어 `fork()`를 만나지 않음, 작은 델타는 바이너리 레이아웃 잡음 (PR3 벤치 바이너리가 PR2보다 3.7KB 작음, 레이아웃 다름). | v0.4.0 |
 | 4 ✓ | **사용 중단 주석** — `35a4517` 착륙 | `[[deprecated]]`를 옛 8 가상 함수 + `add_cancel_hook`에 추가 (Hook은 간접적으로 사용 중단). 트램펄린 스코프 (`CurrentCancelTokenScope` / `current_cancel_token()`)는 미룸 — 이는 PR 7 (바인딩 이전)이 `ctx.cancel_token` 읽기로 대체하는 은밀한 채널이므로, 지금 사용 중단하면 명확한 이전 경로 없이 모든 은밀한 지점에서 억제를 강제함. 내부 호출 지점 (graph_node.cpp 기본 체인, 기본 `run()` 전달자)은 새 `NEOGRAPH_PUSH/POP_IGNORE_DEPRECATED` 매크로로 감쌈 (api.h — GCC/clang/MSVC 이식성). 사용 중단된 가상 함수를 재정의하거나 `add_cancel_hook`을 호출하는 사용자 코드는 이전 경고를 봄; 엔진 내부는 깨끗하게 유지. ctest 452/452 + pytest 96/96 + 5개 라이브 LLM/WS 통과. 벤치 A/B 10 라운드: Δ 중앙값 +0.3%, 최소 +0.8% — 순수 속성 변경, 레이아웃 잡음. `-Werror=deprecated-declarations` 활성화되지 않음 (CI가 원래 `-Werror`를 가진 적이 없음; 경고는 사용 중단 창 동안 정보용으로 유지). | v0.4.0 |
 | 5 ✓ | **StateView 정식, raw dict 사용 중단** — `f31aa53` 착륙 | pybind docstring에서 `engine.get_state(thread_id) -> dict`를 소프트-사용중단으로 표시. 새 정식 = `get_state_view(thread_id) -> StateView` (이미 v0.3.2에). `DeprecationWarning` 방출 없음, `[[deprecated]]` 주석 없음 — raw dict는 정당한 용도가 있음 (채널별 `version` 접근, 스냅샷 직렬화). 소프트-사용중단이 큰 피드백을 생성하지 않는 한 v1.0은 탈출구로 유지. 동작 변경 없음. ctest 452/452 + pytest 96/96 통과. | v0.4.0 |
@@ -384,7 +384,7 @@ Phase B가 착륙하지 않으면 (기존이 v1.0+에 남으면), 시스템은 *
 각 PR은 반드시:
 
   - **ctest 442/442 + pytest 96/96을 병합 시점에 깨지 않을 것** (빌드에서 사용 중단 경고는 허용, 오류는 불가).
-  - **벤치를 퇴행시키지 않을 것** (`bench_neograph` seq 경로의 중앙값 µs/반복, `feedback_wsl2_bench_isolation.md`에 따라 측정 — 새 worktree, taskset+chrt).
+  - **벤치를 퇴행시키지 않을 것** (`bench_neograph` seq 경로의 중앙값 µs/반복, public measurement/build guidance에 따라 측정 — 새 worktree, taskset+chrt).
   - **다음 중 최대 하나를 건드릴 것**: 헤더 표면 OR 엔진 내부 OR 바인딩 OR 예제. 혼합 PR은 검토를 어렵게 하고 되돌리기를 비싸게 함.
   - **병합 시 이 표에 행을 추가할 것** — 제안된 줄에 취소선, 병합 커밋 링크, 범위 표류 기록.
 
@@ -431,16 +431,16 @@ v1.0 주기 말미에 README의 "엔진 오버헤드" 자랑 (par 11.8 µs)이 �
 
 | 함정 | 물어뜯는 곳 | 메모리 항목 |
 |---|---|---|
-| 모든 공개 클래스 + 자유 함수에 `NEOGRAPH_API` 매크로 | 새 엔진 하위 라이브러리 (postgres / sqlite / mcp / a2a / acp). Windows DLL 경계. | `feedback_neograph_api_discipline.md` |
-| 브랜치 간 오래된 .so 오염 | 브랜치 간에 사용되는 `BUILD_SHARED_LIBS=ON` build/ → compile()에서 ABI 불일치 SEGV | `feedback_cross_branch_stale_so_trap.md` |
-| 벤치 측정 시 빌드 디렉터리 오염 | 오래된 build/ 디렉터리가 새 worktree 빌드보다 느린 바이너리 생산 (+0.4 µs/반복 거짓 신호) | `feedback_bench_build_dir_contamination.md` |
-| WSL2 측정 지터 | 평범한 "많은 반복 + 중앙값"이 수렴하지 않음 — taskset + chrt FIFO 99 필요 | `feedback_wsl2_bench_isolation.md` |
-| Doxygen `/*` 와일드카드 in comments | `/**` 안의 `fs/*` / `terminal/*`이 중첩 주석을 열고 후속 진단을 억제. `&#42;` HTML 엔티티 사용. | `feedback_doxygen_slash_star_trap.md` |
+| 모든 공개 클래스 + 자유 함수에 `NEOGRAPH_API` 매크로 | 새 엔진 하위 라이브러리 (postgres / sqlite / mcp / a2a / acp). Windows DLL 경계. | public measurement/build guidance |
+| 브랜치 간 오래된 .so 오염 | 브랜치 간에 사용되는 `BUILD_SHARED_LIBS=ON` build/ → compile()에서 ABI 불일치 SEGV | public measurement/build guidance |
+| 벤치 측정 시 빌드 디렉터리 오염 | 오래된 build/ 디렉터리가 새 worktree 빌드보다 느린 바이너리 생산 (+0.4 µs/반복 거짓 신호) | public measurement/build guidance |
+| 과거 측정 지터 | 평범한 "많은 반복 + 중앙값"이 수렴하지 않음 — taskset + chrt FIFO 99 필요 | public measurement/build guidance |
+| Doxygen `/*` 와일드카드 in comments | `/**` 안의 `fs/*` / `terminal/*`이 중첩 주석을 열고 후속 진단을 억제. `&#42;` HTML 엔티티 사용. | public measurement/build guidance |
 | ASan `__cxa_throw` 인터셉터 CHECK | pybind 경계를 가로지르는 C++ 예외가 `LD_PRELOAD libasan.so` 아래 인터셉터를 발화. CI에서 키워드로 선택 해제; 취소/던지기 정확성은 TSan + 라이브 LLM 테스트로 실행. | (이번 세션 — 피드백에 노트 추가) |
-| TSan eptr 수명 경쟁 | NodeInterrupt의 exception_ptr이 co_await 경계를 가로질러 libstdc++ `__exception_ptr::_M_release`를 발화. 수정: 이유를 `std::string`으로 추출, 메인 스레드에서 새로 던짐. | `feedback_parallel_group_eptr_race.md` |
+| TSan eptr 수명 경쟁 | NodeInterrupt의 exception_ptr이 co_await 경계를 가로질러 libstdc++ `__exception_ptr::_M_release`를 발화. 수정: 이유를 `std::string`으로 추출, 메인 스레드에서 새로 던짐. | public measurement/build guidance |
 | MSVC는 명시적 `<array>` / `<algorithm>` 필요 | libstdc++가 전이적으로 포함; MSVC v143은 안 함. `std::array` 등을 사용하는 테스트 파일이 Windows CI를 조용히 깸. | (이번 세션 — 피드백에 노트 추가) |
-| scikit-build-core 0.12.2 Windows single_config | `-G` 플래그 감지됨, 환경 변수 무시됨 — Windows wheel이 SQLite=OFF 재정의를 잃음. `[[tool.scikit-build.overrides]]` + `cmake.define` 사용. | `feedback_libcurl_unconditional_dep.md` |
-| Wheel OpenSSL CA 경로 | manylinux libssl이 Ubuntu에 없는 AlmaLinux 경로 사용. `__init__.py`가 certifi에서 `SSL_CERT_FILE` 자동 설정. | `feedback_wheel_openssl_ca.md` |
+| scikit-build-core 0.12.2 Windows single_config | `-G` 플래그 감지됨, 환경 변수 무시됨 — Windows wheel이 SQLite=OFF 재정의를 잃음. `[[tool.scikit-build.overrides]]` + `cmake.define` 사용. | public measurement/build guidance |
+| Wheel OpenSSL CA 경로 | manylinux libssl이 Ubuntu에 없는 AlmaLinux 경로 사용. `__init__.py`가 certifi에서 `SSL_CERT_FILE` 자동 설정. | public measurement/build guidance |
 | pyproject.toml 런타임 의존성이 CI의 PYTHONPATH 흐름에서 자동 설치되지 않음 | `pip install --quiet pytest` 줄이 pyproject.toml의 `dependencies = [...]`를 반영해야 함. v0.3.2가 pydantic에 대해 이것을 잃음. | (이번 세션 — 피드백에 노트 추가) |
 | `compile()` 기본 작업자 수 회귀 | `b59444f`가 기본값을 `1 → hardware_concurrency`로 변경, 잠복 par 마이크로 벤치 11.8 → 283 µs (24×). 기준-자체-퇴행 패턴. `e5ecb08`에서 수정. | "성능 회고" 섹션 (위) |
 
@@ -625,7 +625,7 @@ apt `libgrpc++-dev protobuf-compiler-grpc` (1.51.1) + protoc 3.21.12 설치 후,
 
 ### WSL Windows-PATH 누출 함정 (재현 가능 — 빌드 환경 경고)
 
-grpc++ ON으로 이 환경(WSL2, 거대한 Windows PATH 누출)에서 빌드할 때 두 가지 오염이 잡힘. 깨끗한 Linux 호스트 / CI에서는 나타나지 않지만 WSL 개발자는 만남:
+grpc++ ON 빌드에서 Windows PATH가 Linux 의존성 탐색을 오염시킬 수 있습니다. target 의존성 prefix를 분리하세요:
 
 아래 경로는 Windows mount root, Anaconda 설치 prefix, GTK 설치 prefix를
 각각 `WINDOWS_MOUNT_ROOT`, `WINDOWS_ANACONDA_PREFIX`, `WINDOWS_GTK_PREFIX` 환경 변수로 표시합니다.
@@ -633,7 +633,7 @@ grpc++ ON으로 이 환경(WSL2, 거대한 Windows PATH 누출)에서 빌드할 
   1. **anaconda re2** — `gRPCConfig.cmake`가 `find_package(re2)`를 할 때, 시스템 re2 cmake 구성이 존재하지 않으면 (apt `libre2-dev` 미설치), PATH에서 `$WINDOWS_ANACONDA_PREFIX/Library/lib/cmake/re2/re2Targets.cmake` (Windows)를 잡아 `set_target_properties`에서 오류. 수정: `-DCMAKE_IGNORE_PREFIX_PATH="$WINDOWS_MOUNT_ROOT;…"` + `-DCMAKE_IGNORE_PATH="$WINDOWS_ANACONDA_PREFIX/Library/lib/cmake;…"` → grpc가 시스템 pkg-config re2로 대체 ("Found RE2 via pkg-config").
   2. **ZLIB include** — `FindZLIB`가 라이브러리는 시스템 (`/usr/lib/.../libz.so`)에서, `ZLIB_INCLUDE_DIR`은 PATH의 `$WINDOWS_GTK_PREFIX/include` (Windows zlib.h)에서 가져옴 → `-isystem "$WINDOWS_GTK_PREFIX/include"`가 모든 grpc 연결 대상으로 누출 → `$WINDOWS_GTK_PREFIX/include/libintl.h`가 `printf`를 `libintl_printf` 매크로로 재작성 → `std::printf` 컴파일 오류. 수정: 명시적으로 `-DZLIB_INCLUDE_DIR=/usr/include -DZLIB_LIBRARY=/usr/lib/x86_64-linux-gnu/libz.so` 설정.
 
-  → 둘 다 `cmake-option-default-flip-trap`의 사촌 (환경 누출이 `find_package`를 잘못된 접두사로 끌어감). EDDSkills SKILL `wsl-windows-path-cmake-find-leak`이 추가됨 (2026-05-16).
+  의존성 탐색에는 의도한 target의 prefix를 사용하세요.
 
 ### NexaGraph 선행 분석 — gRPC-MCP의 실제 ROI는 체크포인트
 
@@ -721,10 +721,10 @@ framing과 I/O가 다르므로 codec 표만으로 왕복 차이의 원인을 분
 전체 NexaGraph 조사 후, 이미 이식된 `GrpcCheckpointStore` 외에 세 개의 추가 *범용, 중복 아님, 아직 NeoGraph에 없음* 항목이 추가로 이식됨. (RAG 앱 특화 stdio / HTTP MCP in `proto/rag_mcp_server/backend`는 NeoGraph가 이미 가지고 있거나 앱 특화이므로 제외. `DOCS/graph-engine-design.md`는 사실상 NeoGraph의 설계 선조이므로 "이식" 대상이 아님.)
 
 1. **`neograph::history` (새 핵심 유틸리티, 추가적)** — NexaGraph의 CAF `compress_history` 액터에서 액터 껍질을 벗기고 핵심만 이식:
-   - `compact_history(messages, Provider&, model, max_tokens=12000, recent_keep=6) -> awaitable<CompactedHistory>` — 토큰 추정이 예산을 초과하면, (system 1 + 최근 N) 사이 구간을 단일 LLM 호출로 요약하여 system-summary 메시지로 교체. `co_await provider.invoke()` (사용 중단된 `complete()` 사용 안 함, 비동기 lib 의존성 0 — 핵심 내부가 이미 코루틴 사용).
-   - `sanitize_tool_calls(messages&)` — truncation으로 생긴 orphan tool pair(응답 없는 assistant `tool_call`/호출 없는 tool message)를 두 번의 순회로 제거하는 멱등 처리입니다. `compact_history`가 출력에 적용하지만 모든 compacted request를 provider가 받아들인다고 보장하지는 않습니다.
-   - `estimate_tokens` — 보수적인 ~3 chars/tok 추정 (혼합 KO / EN).
-   - 예제 56 `history_compaction` (오프라인 MockProvider, 키 불필요) — sanitize 3→1, compact 29 msgs/975 tok → 6 msgs/208 tok, 원본-미변경 검증 PASS. `src/core/history.cpp`가 모든 구성에 대해 `neograph_core`로 빌드 — 496/497 ctest PASS (1 실패 = 기존 `pybind_smoke` openinference 모듈 누락, 무관).
+   - `compact_history(messages, Provider&, model, max_tokens=12000, recent_keep=6, summary_controls=default_summary_controls()) -> awaitable<CompactedHistory>` — 토큰 추정이 예산을 초과하면 네이티브 봉인이 없는 텍스트 전용 앞부분만 `provider.invoke_async()`로 요약합니다. 선두 system 메시지와 전체 타입 지정 후속 이력은 유지하고, 요약은 명령이 아닌 파생 컨텍스트라고 명시한 user 역할로 삽입합니다. EndTurn/StopSequence이며 ASCII 공백 이외의 문자를 포함할 때만 교체하고, 그 외에는 입력 전체를 유지합니다. 네이티브 봉인은 앞선 전체 이력에 결합되므로 하나라도 있으면 NativeReplayProtected 상태로 요약 호출 없이 전체 입력을 유지합니다. 결과에 상태, 요약한 입력 구간, 전체 응답을 보존합니다. 명시한 `ProviderControls`는 기존 0.2 / 500 기본값을 대체하며, 미지정 temperature/reasoning 필드를 강제하지 않습니다.
+   - `sanitize_tool_calls(messages&)` — 메시지를 수정하지 않고 클라이언트 도구 호출/결과의 짝을 검증합니다. 호출 ID 누락·중복, 고아 결과, 결과 없는 호출은 `std::invalid_argument`를 던집니다. 압축은 도구/네이티브 그룹을 지워서 복구하지 않습니다.
+   - `estimate_tokens` — 보수적인 ~3 chars/tok 추정 (혼합 KO / EN), thinking/reasoning 부분도 포함합니다.
+   - 예제 56 `history_compaction` (오프라인 MockProvider, 키 불필요) — 잘못된 짝의 거부, 권한 없는 파생 요약, 잘린 요약에 대한 이력 보존을 보여 줍니다. `src/core/history.cpp`가 모든 구성에 대해 `neograph_core`로 빌드 — 496/497 ctest PASS (1 실패 = 기존 `pybind_smoke` openinference 모듈 누락, 무관).
 
 2. **`neograph::grpc::GrpcRemoteTool`** — 예제 55는 gRPC를 통해 도구를 *내보내는* 쪽 (`run_tool_server`), 이것은 그 거울 — 원격 `ToolService.CallTool`을 일반 `neograph::Tool`로 *가져오는* 쪽. NexaGraph의 `GrpcTool` 어댑터 이식. pimpl (공개 헤더는 grpc++-free, `GrpcCheckpointStore`와 같은 자세). 단순 proto에 list-tools RPC가 없으므로 정의는 생성자를 통해 주입. 서버 오류 → `runtime_error`로 재던짐 (도구 오류, 전송 오류가 아님 — 로컬 Tool과 같은 계약). 예제 57 `grpc_remote_tool` — 서버 스레드 + `Tool&` 다형적 호출 + 오류 경로 PASS. **gRPC의 ROI #1 (다언어 원격 타입 있는 RPC)의 소비자 측 구체화** — 에이전트 관점에서 프로세스 경계 도구는 호출 지점에서 로컬 도구와 구별 불가.
 

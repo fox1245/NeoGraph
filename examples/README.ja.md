@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=f1c2fdb5d8383c9c326bc200d9da2e10b5aba9dd8dea18fd5e5fae5f7d14d1df -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=7ab0ab562d04442bd8c1190e9d6f8540ba08ff93d2278b1564c3487d652022c8 -->
 # C++ API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -252,9 +252,17 @@ Failure、observer/settlement エラー、既に配信した streaming part は�
 使い切ると diagnostic を返し、成功した provider result を捏造しません。
 
 例16は完了した空応答だけで最大三回呼び、cap 8,192 と ask ごとの 300秒 deadline を維持します。
-cap を倍増せず、failure も再試行しません。例28の rewrite は low effort と出力512 token を要求し、
+cap を倍増せず、failure も再試行しません。最終回答に visible text がなければエラーを出して 1 で終了します。
+例28の rewrite は low effort と出力512 token を要求し、
 空/空白応答なら元の質問をそのまま返します。provider timeout は180秒です。
 この経路別設定は共有 factory の既定値を変えません。
+
+複数顧客の self-evolving chatbot は judge 履歴の接頭辞を有効な UTF-8 境界で
+200バイト以内に切り、例外をエラーと終了コード1で報告します。The Beast の
+`baldwin_llm --llm` はキーが必須で、offline oracle に置き換えません。型付き要求は
+low effort と cap 1,824 を使い、完了した空の `MaxTokens` 応答だけを cap 3,648 で
+一度再要求します。Provider failure や空応答のままの終了は1で終了します。これは
+上限付き空出力処理であり、Baldwin 学習や ToT 停滞頻度のライブ provider 検証ではありません。
 
 ### チェックポイントと進化
 

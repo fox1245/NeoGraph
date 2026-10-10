@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=ROADMAP_v1.md locale=zh-CN source_sha256=2d2070568d9666f73c2882872cc8b31ea5b4030bd5a71f57325bc82ddf612c2b -->
+<!-- neograph-i18n: source=ROADMAP_v1.md locale=zh-CN source_sha256=875b4e187558a80c736ec1c41c98cf9d7cf9aa19e84238e35b7f790e6b935563 -->
 # NeoGraph v1.0 — 设计细化路线图
 
 **Languages:** [English](ROADMAP_v1.md) | [한국어](ROADMAP_v1.ko.md) | [日本語](ROADMAP_v1.ja.md) | [简体中文](ROADMAP_v1.zh-CN.md)
@@ -415,8 +415,8 @@ PyPI 作为 v0.4.0+i、v0.4.0+(i+1) 等）。
 
 | # | PR | 范围 | 落地位于 |
 |---|---|---|---|
-| 1 ✓ | **`RunContext` 数据通道（内部）** — 落地 `a473f0e` | 在 `engine.h` 中添加 `struct RunContext`。引擎的 `execute_graph_async` 构建并通过它传递。NodeExecutor 将其传递给 `execute_full_async`。Pybind 包装它。**没有公开可见变更** — 旧方法仍然仅接收 `state`；新的 `ctx` 在分发路径中并存。ctest 442/442 + pytest 96/96 通过。Bench 中位数 5.365 µs（基线 5.285 µs，+1.5%）— 在 WSL2 ~3% 噪声范围内，在 5.185 µs 基线的 ±5% 带内。Pybind 包装推迟到 PR 7（绑定迁移），因为 PR 1 零 pybind diff。 | v0.4.0 |
-| 2 ✓ | **`GraphNode::run(NodeInput) -> NodeOutput`** — 落地 `607ce66` | GraphNode 上的新虚函数。默认实现委托给旧的 8 个虚函数（优先级顺序保留）。注册为引擎的首选分发入口。现有 C++ 子类仍然编译 + 通过默认回退工作。ctest 442 → 445（3 个新的 NodeRunDispatch 测试）+ pytest 96/96 + 5 个实时 LLM/WS 通过。Bench 中位数 6.122 µs 对 PR1 基线 6.160 µs（Δ -0.6%）经过 A/B 10 轮（主机今天嘈杂，PR1 基线从昨天的 5.285 漂移到 6.160 — 相同代码，WSL2 抖动；A/B 比较消除主机漂移）。**捕获的陷阱**：`run(const NodeInput&)` 在 pybind 异步路径下在 asio 执行器内部 SEGV（协程引用参数释放后使用，v0.2.0 RunConfig 崩溃形态）。修复：按值接收 `NodeInput`。在 node.h 中文档化。 | v0.4.0 |
+| 1 ✓ | **`RunContext` 数据通道（内部）** — 落地 `a473f0e` | 在 `engine.h` 中添加 `struct RunContext`。引擎的 `execute_graph_async` 构建并通过它传递。NodeExecutor 将其传递给 `execute_full_async`。Pybind 包装它。**没有公开可见变更** — 旧方法仍然仅接收 `state`；新的 `ctx` 在分发路径中并存。ctest 442/442 + pytest 96/96 通过。Bench 中位数 5.365 µs（基线 5.285 µs，+1.5%）— 在 historical ~3% 噪声范围内，在 5.185 µs 基线的 ±5% 带内。Pybind 包装推迟到 PR 7（绑定迁移），因为 PR 1 零 pybind diff。 | v0.4.0 |
+| 2 ✓ | **`GraphNode::run(NodeInput) -> NodeOutput`** — 落地 `607ce66` | GraphNode 上的新虚函数。默认实现委托给旧的 8 个虚函数（优先级顺序保留）。注册为引擎的首选分发入口。现有 C++ 子类仍然编译 + 通过默认回退工作。ctest 442 → 445（3 个新的 NodeRunDispatch 测试）+ pytest 96/96 + 5 个实时 LLM/WS 通过。Bench 中位数 6.122 µs 对 PR1 基线 6.160 µs（Δ -0.6%）经过 A/B 10 轮（历史 PR1 基线在相同代码下从 5.285 变动到 6.160；A/B 比较控制测量漂移）。**捕获的陷阱**：`run(const NodeInput&)` 在 pybind 异步路径下在 asio 执行器内部 SEGV（协程引用参数释放后使用，v0.2.0 RunConfig 崩溃形态）。修复：按值接收 `NodeInput`。在 node.h 中文档化。 | v0.4.0 |
 | 3 ✓ | **CancelToken `fork()` 纯新增** — 落地 `897645c` | 添加 `std::shared_ptr<CancelToken> CancelToken::fork()`。父 `cancel()` 级联到子。`add_cancel_hook` 继续工作（已弃用；`[[deprecated]]` 注释在 PR 4 中落地）。`run_sync(aw, cancel)` 切换到 `cancel->fork()`。单信号 `slot()` API 为引擎的外部 co_spawn 保留。ctest 445 → 452（7 个新的 CancelTokenFork 测试）+ pytest 96/96 + 5 个实时 LLM/WS 通过。Bench A/B 20 轮（双向交错）：Δ 最小值 +1.0%，Δ 中位数 +1.5% — 在 ±5% 带内；bench 路径没有 `cancel_token` 所以不触及 `fork()`，小增量是二进制布局噪音（PR3 bench 二进制比 PR2 小 3.7KB，布局不同）。 | v0.4.0 |
 | 4 ✓ | **弃用注释** — 落地 `35a4517` | 在旧的 8 个虚函数 + `add_cancel_hook` 上添加 `[[deprecated]]`（它返回的 Hook 间接弃用）。跳板作用域（`CurrentCancelTokenScope` / `current_cancel_token()`）推迟——这是 PR 7（绑定迁移）用 `ctx.cancel_token` 读取替换的暗通通道，因此现在弃用它会在没有清晰迁移路径的情况下在每个暗通点强制抑制。内部调用点（graph_node.cpp 默认链、默认 `run()` 转发器）被新的 `NEOGRAPH_PUSH/POP_IGNORE_DEPRECATED` 宏（api.h — GCC/clang/MSVC 可移植）包裹。用户代码重写弃用虚函数或调用 `add_cancel_hook` 会看到迁移警告；引擎内部保持干净。ctest 452/452 + pytest 96/96 + 5 个实时 LLM/WS 通过。Bench A/B 10 轮：Δ 中位数 +0.3%，最小值 +0.8% — 纯属性变更，布局噪音。`-Werror=deprecated-declarations` 未启用（CI 从未有 `-Werror`；警告在弃用窗口期间保持信息性）。 | v0.4.0 |
 | 5 ✓ | **StateView 标准，原始字典弃用** — 落地 `f31aa53` | 在 pybind docstring 中将 `engine.get_state(thread_id) -> dict` 标记为软弃用。新的标准 = `get_state_view(thread_id) -> StateView`（已在 v0.3.2 中）。没有 `DeprecationWarning` 发出，没有 `[[deprecated]]` 注释——原始字典有合法用途（每通道 `version` 访问、快照序列化）。v1.0 将其保留为逃生口，除非软弃用产生大量反馈。零行为变更。ctest 452/452 + pytest 96/96 通过。 | v0.4.0 |
@@ -538,7 +538,7 @@ v1.0 承诺的"单一标准方式"是同时回答所有五个问题的答案。
   - **在合并时不破坏 ctest 442/442 + pytest 96/96**（构建中允许弃用
     警告，不允许错误）。
   - **不退化 bench**（`bench_neograph` seq 路径的中位数 µs/iter，按
-    `feedback_wsl2_bench_isolation.md` 测量——全新工作树，taskset+chrt）。
+    public measurement/build guidance 测量——全新工作树，taskset+chrt）。
   - **最多触及以下之一**：头文件表面 或 引擎内部 或 绑定 或 示例。
     混合 PR 使审查困难且回退昂贵。
   - **在合并时为此表添加一行** — 划线删除提议行，链接合并提交，注明任何
@@ -615,16 +615,16 @@ v1.0 承诺的"单一标准方式"是同时回答所有五个问题的答案。
 
 | 陷阱 | 容易出问题的地方 | 记忆条目 |
 |---|---|---|
-| `NEOGRAPH_API` 宏需要在每个公共类 + 自由函数上 | 新的引擎子库（postgres / sqlite / mcp / a2a / acp）。Windows DLL 边界。 | `feedback_neograph_api_discipline.md` |
-| 跨分支陈旧 .so 污染 | 跨分支使用 `BUILD_SHARED_LIBS=ON` build/ → ABI 不匹配，compile() 中 SEGV | `feedback_cross_branch_stale_so_trap.md` |
-| 基准测量上的构建目录污染 | 长期存活的 build/ 目录产生比全新工作树构建更慢的二进制文件（+0.4 µs/iter 虚假信号） | `feedback_bench_build_dir_contamination.md` |
-| WSL2 测量抖动 | 普通的"多次重复 + 中位数"不收敛——需要 taskset + chrt FIFO 99 | `feedback_wsl2_bench_isolation.md` |
-| 注释中的 Doxygen `/*` 通配符 | `/**` 内部的 `fs/*` / `terminal/*` 打开嵌套注释，抑制后续诊断。使用 `&#42;` HTML 实体。 | `feedback_doxygen_slash_star_trap.md` |
+| `NEOGRAPH_API` 宏需要在每个公共类 + 自由函数上 | 新的引擎子库（postgres / sqlite / mcp / a2a / acp）。Windows DLL 边界。 | public measurement/build guidance |
+| 跨分支陈旧 .so 污染 | 跨分支使用 `BUILD_SHARED_LIBS=ON` build/ → ABI 不匹配，compile() 中 SEGV | public measurement/build guidance |
+| 基准测量上的构建目录污染 | 长期存活的 build/ 目录产生比全新工作树构建更慢的二进制文件（+0.4 µs/iter 虚假信号） | public measurement/build guidance |
+| 历史测量抖动 | 普通的"多次重复 + 中位数"不收敛——需要 taskset + chrt FIFO 99 | public measurement/build guidance |
+| 注释中的 Doxygen `/*` 通配符 | `/**` 内部的 `fs/*` / `terminal/*` 打开嵌套注释，抑制后续诊断。使用 `&#42;` HTML 实体。 | public measurement/build guidance |
 | ASan `__cxa_throw` 拦截器 CHECK | 跨越 pybind 边界的 C++ 异常在 `LD_PRELOAD libasan.so` 下触发拦截器。在 CI 中按关键字排除；cancel/throw 正确性由 TSan + 实时 LLM 测试实践。 | （本次会话 — 在 feedback 中添加注释） |
-| TSan eptr 生存期竞态 | NodeInterrupt 的 exception_ptr 跨越 co_await 边界触发 libstdc++ `__exception_ptr::_M_release`。修复：提取原因为 `std::string`，在主线程上抛出新的。 | `feedback_parallel_group_eptr_race.md` |
+| TSan eptr 生存期竞态 | NodeInterrupt 的 exception_ptr 跨越 co_await 边界触发 libstdc++ `__exception_ptr::_M_release`。修复：提取原因为 `std::string`，在主线程上抛出新的。 | public measurement/build guidance |
 | MSVC 需要显式的 `<array>` / `<algorithm>` | libstdc++ 传递地引入它们；MSVC v143 不会。使用 `std::array` 等的测试文件静默破坏 Windows CI。 | （本次会话 — 在 feedback 中添加注释） |
-| scikit-build-core 0.12.2 Windows single_config | `-G` 标志被检测到，环境变量被忽略 — Windows wheel 丢失了 SQLite=OFF 覆写。使用 `[[tool.scikit-build.overrides]]` + `cmake.define`。 | `feedback_libcurl_unconditional_dep.md` |
-| Wheel OpenSSL CA 路径 | manylinux libssl 使用 AlmaLinux 路径，在 Ubuntu 上不存在。`__init__.py` 从 certifi 自动设置 `SSL_CERT_FILE`。 | `feedback_wheel_openssl_ca.md` |
+| scikit-build-core 0.12.2 Windows single_config | `-G` 标志被检测到，环境变量被忽略 — Windows wheel 丢失了 SQLite=OFF 覆写。使用 `[[tool.scikit-build.overrides]]` + `cmake.define`。 | public measurement/build guidance |
+| Wheel OpenSSL CA 路径 | manylinux libssl 使用 AlmaLinux 路径，在 Ubuntu 上不存在。`__init__.py` 从 certifi 自动设置 `SSL_CERT_FILE`。 | public measurement/build guidance |
 | pyproject.toml 运行时依赖不在 CI 的 PYTHONPATH 流程中自动安装 | `pip install --quiet pytest` 行必须镜像 pyproject.toml 的 `dependencies = [...]`。v0.3.2 对 pydantic 失去了这一点。 | （本次会话 — 在 feedback 中添加注释） |
 | `compile()` 默认工作器计数回归 | `b59444f` 将默认值从 `1 → hardware_concurrency` 改变，潜伏的 par 微基准测试 11.8 → 283 µs（24×）。基线本身退化模式。在 `e5ecb08` 中修复。 | "性能回顾"部分（上文） |
 
@@ -896,8 +896,7 @@ Google 正在研究 gRPC 作为原生 MCP 传输。gRPC 几乎与 NeoGraph 的 4
 
 ### WSL Windows-PATH 泄漏陷阱（可复现 — 构建环境警告）
 
-在此环境（WSL2，大量 Windows PATH 泄漏）中启用 grpc++ ON 构建时捕获到
-两种污染。它们不会在干净的 Linux 主机 / CI 上出现，但 WSL 开发人员会遇到：
+启用 grpc++ ON 构建时，Windows PATH 可能污染 Linux 依赖发现。请隔离目标依赖 prefix：
 
 下方路径用 `WINDOWS_MOUNT_ROOT`、`WINDOWS_ANACONDA_PREFIX`、`WINDOWS_GTK_PREFIX` 环境变量
 分别表示 Windows mount root、Anaconda 安装 prefix 与 GTK 安装 prefix。
@@ -917,9 +916,7 @@ Google 正在研究 gRPC 作为原生 MCP 传输。gRPC 几乎与 NeoGraph 的 4
      `-DZLIB_INCLUDE_DIR=/usr/include
      -DZLIB_LIBRARY=/usr/lib/x86_64-linux-gnu/libz.so`。
 
-  → 两者都是 `cmake-option-default-flip-trap` 的表亲（环境泄漏将
-  `find_package` 拖到错误的前缀）。添加了 EDDSkills SKILL
-  `wsl-windows-path-cmake-find-leak`（2026-05-16）。
+  依赖发现必须使用预期目标的 prefix。
 
 ### NexaGraph 前身分析 — gRPC-MCP 的真正 ROI 是检查点
 
@@ -1073,18 +1070,23 @@ NeoGraph 的设计祖先，因此它不是"移植"目标。）
 1. **`neograph::history`（新的核心工具，纯新增）** — 从 NexaGraph 的 CAF
    `compress_history` actor 移植核心，剥离了 actor 外壳：
    - `compact_history(messages, Provider&, model, max_tokens=12000,
-     recent_keep=6) -> awaitable<CompactedHistory>` — 当 token 估计超出
-     预算时，用单个 LLM 调用汇总（系统 1 + 最后 N）之间的部分，用
-     system-summary 消息替换它。`co_await provider.invoke()`（不使用已弃用
-     的 `complete()`，零异步库依赖——核心内部已使用协程）。
-   - `sanitize_tool_calls(messages&)` — 一项 NeoGraph **完全缺失**的防御：
-     两遍移除由截断破坏的 OpenAI tool-pairs（有 tool_call 无响应的
-     assistant / 有 tool 消息无调用的响应），幂等。`compact_history` 在
-     内部将其应用于输出，移除这些 orphan tool pair，但不能保证 provider 接受每个 compacted request。
-   - `estimate_tokens` — 保守的 ~3 chars/tok 估计（混合 KO / EN）。
+     recent_keep=6, summary_controls=default_summary_controls())
+     -> awaitable<CompactedHistory>` — 当 token 估计超出预算时，仅用
+     `provider.invoke_async()` 汇总没有原生封印的纯文本前缀。保留首条 system
+     消息和完整的类型化后续历史；摘要以 user 角色插入，并明确标记为派生上下文，
+     而非指令。仅采用以 EndTurn/StopSequence 结束且含有非 ASCII 空白字符的摘要，
+     否则保留全部输入。原生封印绑定完整的前序历史；只要存在封印，就返回
+     NativeReplayProtected，保留全部输入且不调用摘要模型。
+     结果保留状态、覆盖的输入区间和完整响应。显式 `ProviderControls` 替换原有
+     0.2 / 500 默认值，不强制设置未指定的 temperature / reasoning 字段。
+   - `sanitize_tool_calls(messages&)` — 不修改消息，只验证客户端工具调用与结果
+     的配对。调用 ID 缺失或重复、孤立结果、没有结果的调用均抛出
+     `std::invalid_argument`。压缩不会通过删除工具或原生组来修复历史。
+   - `estimate_tokens` — 保守的 ~3 chars/tok 估计（混合 KO / EN），
+     包括 thinking / reasoning 部分。
    - 示例 56 `history_compaction`（离线 MockProvider，无需密钥）—
-     sanitize 3→1、compact 29 msgs/975 tok → 6 msgs/208 tok、
-     原始不变验证通过。`src/core/history.cpp` 在所有配置下构建到
+     演示拒绝无效配对、无权限的派生摘要，以及截断摘要时保留历史。
+     `src/core/history.cpp` 在所有配置下构建到
      `neograph_core` — 496/497 ctest 通过（1 个失败 = 预先存在的
      `pybind_smoke` openinference 模块缺失，不相关）。
 

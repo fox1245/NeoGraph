@@ -1,22 +1,28 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=94363c98fc3c2931d87e8b916dbff497b8b2ce92fcecaf905bdbb1cf98b1bdfe -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=000ed65af24d7a4009772586f8895758fc873841f13515a94b4ab0cfd16866b7 -->
 # NeoGraph WASM smoke プログラム
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-`smoke.cpp` は `DoubleNode` 一つのグラフをコンパイルし、`doubled = seed * 2` を書き込み、`InMemoryCheckpointStore` で実行します。`seed = 21` の期待出力には `doubled = 42` と `trace = d` が含まれます。ネットワークやモデル呼び出しはありません。ブラウザー SDK ではなく Node.js smoke ターゲットです。
+`smoke.cpp` は `DoubleNode` 一つのグラフをコンパイルし、`doubled = seed * 2` を書き込み、`InMemoryCheckpointStore` で実行します。`seed = 21` の期待出力には `doubled = 42` と `trace = d` が含まれます。ネットワークやモデル呼び出しはありません。同じ生成ターゲットを Node.js または以下のブラウザー harness で実行できますが、ブラウザー SDK ではありません。
 
 ## 現在のビルド境界
 
 型付き provider 移行後は `NEOGRAPH_BUILD_LLM=OFF` でも Core が `SchemaProvider::runtime` に依存します。
 CMake 3.20+ は明示 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、インストール済み runtime、固定 public GitHub source archive の順に SDK を選びます。
 `NEOGRAPH_FETCH_SCHEMAPROVIDER` の download fallback は既定 ON で、offline package/source ビルドでは OFF にしてください。
-SDK runtime は libcurl、OpenSSL、threads も必要とします。現在の transport と archive にはプラットフォーム固有の依存があり、この worktree では Emscripten SDK runtime ビルドを検証していません。native SDK を WebAssembly にリンクすることはできません。以下の過去の smoke は現在のソースが Emscripten でビルドできる証拠ではありません。
+Core は SDK runtime にリンクし、libcurl transport にはリンクしません。調査した SDK pin の最上位 CMake は runtime ターゲットが CURL にリンクしなくても構成時に CURL を要求します。OpenSSL は runtime の直接依存ではありません。native SDK library を WebAssembly にリンクすることはできません。Emscripten 向け runtime/archive と C++ 標準ライブラリーの対応を検証する必要があり、以下の過去の smoke は現在のビルド成功の証拠ではありません。
 
-NeoGraph `0.13.1` には同じ target 向けの alpha SDK `0.1.1`、interface revision/shared generation 4 が必要です。真正な Emscripten SDK runtime の検証は依然として前提条件です。本書は WASM 対応の削除も現在のビルドの保証もしません。Archive v3 / `spna3` と portable JSON v2 は不変です。
+現在のビルドには同じ target 向け SDK `0.3.0`、interface revision/shared generation 6、マージ済み SchemaProvider PR #16（`3b88e4ba020c3a4d39ff0660014e7292b516b7cb`）が必要です。真正な Emscripten SDK runtime の検証は依然として前提条件です。本書は WASM 対応の削除も現在のビルドの保証もしません。Archive v3 / `spna3` と portable JSON v2 は不変です。
+
+### 対応ターゲットの要件
+
+Emscripten ツールチェーンと C++ 標準ライブラリーは、`std::bit_cast` と `std::stop_token` を含む SDK の C++20 契約をサポートする必要があります。native archive custody にはターゲットで対応する atomic no-replace filesystem backend が必要で、ビルドのために custody を無効化してはいけません。
+
+新しいビルドディレクトリーと真正な同一 target の依存を使用してください。SDK 構成で必要な CURL 依存も含みます。native library や偽装した依存の可用性では WebAssembly ビルドを検証できません。現在の Node.js とブラウザー実行は未検証です。
 
 ## 過去の結果
 
-値は型付き SDK 移行前のローカル smoke 実行によるものです。生成された `.wasm`/`.js` はコミットせず、CI も WASM サイズ artifact を公開していません。サイズは当時のビルドの値であり、現在の配布コストではありません。
+値は型付き SDK 移行前の過去の smoke 実行によるものです。生成された `.wasm`/`.js` はコミットせず、CI も WASM サイズ artifact を公開していません。サイズは当時のビルドの値であり、現在の配布コストではありません。
 
 | 指標 | 値 |
 |---|---|
@@ -33,11 +39,13 @@ NeoGraph `0.13.1` には同じ target 向けの alpha SDK `0.1.1`、interface re
 動作する Emscripten SDK runtime ビルドが用意できた後の configure/build/run 手順は次のとおりです。
 
 ```bash
-source /opt/emsdk/emsdk_env.sh
+# For an emsdk install only: source /opt/emsdk/emsdk_env.sh
+# A distro installation with emcmake/em++ on PATH needs no emsdk script.
 
 emcmake cmake -S . -B build-wasm \
   -DCMAKE_BUILD_TYPE=Release \
   -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE_DIR" \
+  -DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF \
   -DNEOGRAPH_BUILD_WASM=ON \
   -DNEOGRAPH_BUILD_ASYNC=OFF \
   -DNEOGRAPH_BUILD_LLM=OFF \
@@ -59,7 +67,7 @@ cmake --build build-wasm --target neograph_wasm_smoke -j
 node build-wasm/wasm/smoke.js
 ```
 
-`NEOGRAPH_USE_LIBCURL=OFF` は NeoGraph のオプション HTTP/2 backend を無効にするだけで、SDK runtime の libcurl 依存は無効にしません。現在検証済みのビルド手順ではありません。
+`NEOGRAPH_USE_LIBCURL=OFF` は NeoGraph のオプション HTTP/2 backend を無効にするだけです。SDK 最上位の CURL 検出は除去しません。真正な Emscripten 依存が必要で、現在検証済みのビルド手順ではありません。
 
 生成 loader が filesystem path を `fetch` に渡す Node.js で使った過去の回避手順は次のとおりです。
 
@@ -68,8 +76,15 @@ node -e 'const fs=require("fs"); WebAssembly.instantiateStreaming=undefined; glo
 ```
 
 
-## ブラウザーの状況と提案作業
+## ブラウザー smoke
 
-このリポジトリに browser loader、npm package、Embind API はありません。browser pthread ビルドには cross-origin isolation header（`Cross-Origin-Opener-Policy: same-origin`、`Cross-Origin-Embedder-Policy: require-corp`）と生成 worker asset が必要です。これらだけで SDK runtime がブラウザー対応になるわけではありません。
+真正なターゲットのビルド後、標準ライブラリーのみの loopback サーバーで JS、WASM、生成 pthread worker asset を配信します。
 
-ブラウザーポートには先に SDK 対応 transport/archive 設計が必要で、その後 JS node callback と packaging を実装する必要があります。提案されている `fetch()` adapter、hosted model access、local browser inference、NeoProtocol Executor 統合は、この smoke プログラムでは提供も検証もしていません。
+```sh
+python3 wasm/serve_smoke.py build-wasm/wasm --port 8765
+# Open http://127.0.0.1:8765/smoke.html in a browser.
+```
+
+サーバーは `Cross-Origin-Opener-Policy: same-origin` と `Cross-Origin-Embedder-Policy: require-corp` を送信します。harness は cross-origin isolation / `SharedArrayBuffer` がなければ実行を拒否し、代替 runtime ではなく実際に生成された `smoke.js` を読み込みます。合格には出力 `doubled = 42`、`trace = d`、終了コード 0 が必要です。`document.body.dataset.result === "pass"` と `dataset.exitCode === "0"` に結果を公開します。ブラウザー/バージョン、console エラー、観測した出力を記録してください。Node.js の成功だけではブラウザーの証拠になりません。
+
+この harness は npm package、Embind API、JS graph callback、provider transport を提供しません。hosted model access、local inference、NeoProtocol Executor 統合は、このモデルなし smoke では検証されません。

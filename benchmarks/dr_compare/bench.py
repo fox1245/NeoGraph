@@ -68,6 +68,8 @@ def _time_one(label, run_fn, query):
     t0 = time.perf_counter()
     try:
         out = run_fn(query, tid)
+        if not out or not out.strip():
+            raise RuntimeError("Runner returned no visible report")
     except Exception as exc:
         elapsed = time.perf_counter() - t0
         print(f"    [{label}] FAILED after {elapsed:.2f}s: {exc}")
@@ -111,10 +113,12 @@ def main():
         print("Nothing to run."); return 1
 
     # Warmup — alternating order so both have equally-cold/warm setups.
+    failures = 0
     print(f"\n[warmup] {args.warmup} per side")
     for i in range(args.warmup):
         for label, fn in runners.items():
             t, n = _time_one(label, fn, args.query)
+            failures += t is None
             print(f"  [{label}] warmup {i+1}/{args.warmup}: "
                   f"{'fail' if t is None else f'{t:6.2f}s'}  ({n} chars)")
 
@@ -124,6 +128,7 @@ def main():
     for i in range(args.iters):
         for label, fn in runners.items():
             t, n = _time_one(label, fn, args.query)
+            failures += t is None
             if t is not None:
                 samples[label].append(t)
             print(f"  [{label}] iter {i+1}/{args.iters}: "
@@ -145,7 +150,8 @@ def main():
         else:
             print(f"\n  LangGraph median is {(ng_med-lg_med):.2f}s "
                   f"({(ng_med/lg_med-1)*100:.1f}%) faster than NeoGraph.")
-    return 0
+    print(f"\n  Failed runs: {failures}")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

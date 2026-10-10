@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ko source_sha256=c581af0e3041a7d6e48040bfd17085c2297a0c796d34547f6528392ec2b7ce27 -->
+<!-- neograph-i18n: source=README.md locale=ko source_sha256=85a3546974bbd5902afc2699f9b604f5e78bee6be80a1bdbd378207443c4545b -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -139,11 +139,13 @@ sp::runtime::Result first_call(
 
 준비된 요청은 한 번만 소비됩니다. `sp::runtime::Result`는 `Completion` 또는 `Failure`를 담은 불변 `sp::Outcome`을 소유합니다. 순서가 보존된 메시지와 파트, 네이티브 이어 실행 정보, 원시 관측값, 중단 근거, 시도 메타데이터, 실패 시 부분 결과가 필요하면 이 outcome을 유지하세요. 사용량 카운터는 null일 수 있습니다. 값이 없으면 알 수 없다는 뜻이며, 실제로 관측한 0은 그대로 0입니다. 사용량 보고와 예산 차감은 별도의 기록입니다. 이식 가능한 보고 데이터는 지출 권한을 부여할 수 없습니다.
 
+`usage.provider_cost`는 공급자가 보고한 nanoUSD 금액, 필드별 status, source, quality, BYOK 근거와 파싱된 binary64 값의 올림 정보를 보존합니다. 청구서, 토큰 수, 추정치 또는 지출 권한이 아닙니다. 금액 메타데이터가 없으면 canonical v2 JSON에서도 생략됩니다. 보고된 0과 `is_byok=false`도 근거로 남습니다. 알 수 없는 통화, 충돌 또는 잘못된 보고를 USD나 토큰으로 바꾸지 않습니다. blocking provider 호출은 단일 async SDK pipeline을 구동하며 SDK event-loop/callback worker 재진입을 거부합니다.
+
 `first_call`이 반환된 뒤에는 `std::get_if<sp::Completion>(result.get())`를 사용하여 완료 결과의 `messages`, `stop`, `usage`를 살펴볼 수 있습니다. 완료 결과가 아니라면 `std::get<sp::Failure>(*result)`로 `error.kind`, `error.safe_message`, 재시도 근거, `partial`에 담긴 부분 메시지와 사용량을 확인할 수 있습니다. 예를 들어 `completion.usage.output_total`이 없으면 출력 토큰 수를 알 수 없다는 뜻입니다. 카운터가 있고 그 `value`가 `0`이면 보고된 값은 0입니다. 표시용 텍스트는 보존된 outcome을 바라보는 여러 방식 중 하나일 뿐입니다.
 
 `ChatMessage`, `ChatTool`, JSON은 이식 가능한 투영 표현입니다. 진본 네이티브 이력은 네이티브 체크포인트 사이드카와 함께 메모리에 유지할 수 있습니다. 네이티브 이력을 영속적으로 보존하려면 실제 `sp::NativeArchive`와 소유자만 접근할 수 있도록 보호된 보관 책임 체계가 필요합니다. 이식 가능한 JSON으로는 이 권한을 재현할 수 없습니다. 아카이브는 독립적인 키로 보관 책임의 진위를 인증합니다. 이는 암호화도, 공급업체 발급자 인증도 아닙니다. 아카이브 본문, 키, 네이티브 blob, 원시 통신 관측값을 공개하지 마세요. 영속화 실패, 관측자, 관리형 예산 은행, 재생 경계는 [provider 참조](docs/reference-en.md)와 [마이그레이션 가이드](docs/migration-v0.4-to-v1.0.md)를 참고하세요.
 
-타입 지정 인터페이스로의 전환으로 `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, 디스크립터 인터프리터, Responses WebSocket 경로가 제거됩니다. C++ 사용 코드를 다시 컴파일하고 사용자 정의 provider를 마이그레이션해야 합니다. 호환성 별칭은 제공하지 않습니다. SDK 패키지 버전은 `0.2.0`이며 인터페이스는 알파 단계입니다. 인터페이스 리비전은 5, 공유 ABI는 5입니다. 타임아웃 제어가 공개 레이아웃을 바꾸므로 SDK 사용 코드, NeoGraph, Python 확장을 함께 다시 빌드해야 합니다. Native archive v3와 portable JSON v2는 그대로이며, 이 세대가 SDK 인터페이스의 안정성을 선언하는 것은 아닙니다.
+타입 지정 인터페이스로의 전환으로 `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, 디스크립터 인터프리터, Responses WebSocket 경로가 제거됩니다. C++ 사용 코드를 다시 컴파일하고 사용자 정의 provider를 마이그레이션해야 합니다. 호환성 별칭은 제공하지 않습니다. SDK 패키지는 `0.3.0` alpha이며 공개 병합 커밋 `3b88e4ba020c3a4d39ff0660014e7292b516b7cb`에 고정됩니다. 인터페이스 리비전과 공유 ABI는 6입니다. 금액 사용량 메타데이터가 공개 레이아웃을 바꾸므로 SDK 사용 코드, NeoGraph, Python 확장을 함께 다시 빌드해야 합니다. Native archive v3와 portable JSON v2는 그대로이며, 이 세대가 SDK 인터페이스의 안정성을 선언하는 것은 아닙니다.
 
 ## Python
 
@@ -212,7 +214,7 @@ NeoGraph는 명시적인 상태 전이, 분기 또는 반복, 병렬 작업, 체
 설치된 패키지를 사용하는 코드는 필요한 활성 구성 요소만 링크합니다.
 
 ```cmake
-find_package(SchemaProvider 0.2.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.3.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```

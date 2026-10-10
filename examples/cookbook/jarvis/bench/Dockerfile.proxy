@@ -1,5 +1,5 @@
-# OpenRouter boundary instrumentation proxy — nginx logs per-call upstream timing
+# OpenRouter boundary instrumentation proxy — TLS front, logs per-call upstream timing
 FROM nginx:alpine
 COPY examples/cookbook/jarvis/bench/nginx-openrouter.conf /etc/nginx/nginx.conf
 RUN mkdir -p /logs
-EXPOSE 8080
+EXPOSE 8443

@@ -6,15 +6,24 @@
 
 namespace neograph::program::detail {
 
+inline void validate_run_publication_head(const ProgramRunRecord& run,
+                                         const ProgramJournalRecord& journal,
+                                         std::string_view owner,
+                                         std::string_view run_id) {
+    if (run.owner_scope() != owner || run.run_id() != run_id || journal.run_id != run_id ||
+        run.journal_head() != journal.id || run.bundle_id() != journal.bundle_id ||
+        run.program_version_id() != journal.program_version_id) {
+        throw std::invalid_argument("Stored Program publication head binding is corrupt");
+    }
+}
+
 inline void validate_command_publication_head(const ProgramCommandPublicationHead& head,
                                              std::string_view owner,
                                              std::string_view run_id) {
     const auto& run = head.run_record;
     const auto& journal = head.journal_record;
-    if (run.owner_scope() != owner || run.run_id() != run_id || journal.run_id != run_id ||
-        run.journal_head() != journal.id || run.bundle_id() != journal.bundle_id ||
-        run.program_version_id() != journal.program_version_id ||
-        (head.latest_command && head.latest_command->bundle_id() != run.bundle_id())) {
+    validate_run_publication_head(run, journal, owner, run_id);
+    if (head.latest_command && head.latest_command->bundle_id() != run.bundle_id()) {
         throw std::invalid_argument("Stored Program command publication head binding is corrupt");
     }
 }

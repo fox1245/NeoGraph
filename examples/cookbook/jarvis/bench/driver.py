@@ -130,6 +130,8 @@ def main() -> None:
         proc.wait(timeout=30)
     except subprocess.TimeoutExpired:
         proc.kill()
+        proc.wait()
+    stderr_log.close()
 
     ok = sorted(r["ms"] for r in records if r["ms"] is not None)
 
@@ -166,6 +168,11 @@ def main() -> None:
                                ensure_ascii=False) + "\n")
         f.write(json.dumps({"summary": summary}, ensure_ascii=False) + "\n")
     print("SUMMARY " + json.dumps(summary, ensure_ascii=False), flush=True)
+    if len(ok) != len(turns) or proc.returncode != 0:
+        print(f"[driver] FATAL: incomplete or failed run ({args.label}): "
+              f"{len(ok)}/{len(turns)} turns, child exit {proc.returncode}",
+              file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

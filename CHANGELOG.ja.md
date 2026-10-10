@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=7173060d8b4f0dae592d6132b51be14df00f78234e043963b75a322694a69734 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=d66c5fb755e764bf04126d21d3c20a1f5ac68eecd504e95e452f635261ef21f7 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -17,7 +17,8 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ### 変更
 
-- **Core エンジンの速度を v0.11.1 の水準に戻しました。** 基準ノート PC では、3 ノードの逐次ベンチマークが 1 回あたり 10.19 µs から 6.29 µs に(v0.11.1: 6.10)、parallel-3 が 30.03 µs から 15.66 µs に(15.80)短縮され、スレッドごとにエンジンを 1 つ使う場合のスレッドあたりの時間も 2・4・8 スレッドで v0.11.1 と同じです。損失の原因は、fan-out の枝ごとの strand、ノードごとの `RunContext` コピー、コンテキスト束縛レジストリを囲んでいたプロセス全体の mutex(現在は 64 シャード)、複数の JSON ドキュメントで作っていた状態スナップショット、何も返さないコルーチン呼び出し(Send がない `run_sends_async`、チェックポイントがないときの `record_pending_write_async`)、スケジューラの順序付き集合でした。コミットごとの測定値は #343 にあります。
+- **マージ済みSchemaProvider PR #16の`3b88e4ba020c3a4d39ff0660014e7292b516b7cb`を採用し、SDK 0.3.0 EXACT、interface/shared ABI 6で再ビルドします。** 以下に記録した以前のinterface-5 SDK手順を置き換えます。blocking呼び出しは単一async SDK pipelineを使い、event-loop/callback workerからの再入拒否を維持します。outcome、usage観測、journal、native archive再読込、Python型付き値はprovider報告金額、status、source、evidence、rounding、競合を保持します。canonical v2 JSONは金額情報が完全に欠落する場合のみ`provider_cost`を省略し、過去の欠落のみのbytesを保持します。ゼロやBYOK falseも金額の根拠であり、不明なtoken holdをproven-not-sentとして返金させません。金額をtokenや支出権限に変換しません。Native archive v3とportable JSON v2は変わりません。
+- **Core エンジンの速度を v0.11.1 の水準に戻しました。** 過去の測定では、3 ノードの逐次ベンチマークが 1 回あたり 10.19 µs から 6.29 µs に(v0.11.1: 6.10)、parallel-3 が 30.03 µs から 15.66 µs に(15.80)短縮され、スレッドごとにエンジンを 1 つ使う場合のスレッドあたりの時間も 2・4・8 スレッドで v0.11.1 と同じです。損失の原因は、fan-out の枝ごとの strand、ノードごとの `RunContext` コピー、コンテキスト束縛レジストリを囲んでいたプロセス全体の mutex(現在は 64 シャード)、複数の JSON ドキュメントで作っていた状態スナップショット、何も返さないコルーチン呼び出し(Send がない `run_sends_async`、チェックポイントがないときの `record_pending_write_async`)、スケジューラの順序付き集合でした。コミットごとの測定値は #343 にあります。
 - **`neograph::core` だけをリンクするプログラムは libcurl を読み込まなくなりました。** `neograph::core` が SchemaProvider のランタイムをリンクし、そのランタイムが libcurl のトランスポートをリンクしていたため、グラフだけを実行するプロセスでも libcurl とそれが必要とする約 25 個のライブラリを読み込んでいました(ベンチマーク開始時の常駐メモリは 12.7 MB、v0.11.1 は 5.0 MB)。トランスポートをリンクするのは `neograph::llm` だけになり、同じベンチマークは 7.7 MB で始まり、共有ライブラリは 36 個から 7 個になりました。`neograph::llm` を使わずに `sp::runtime::Client` を自分で構築するコードは `SchemaProvider::transport` をリンクする必要があります。SchemaProvider はこの分離を含むリビジョンに固定されます。#347 を参照してください。
 - **SchemaProvider 0.2.0 alpha、interface/shared-library 世代 5 で再ビルドしてください。** SDK に、任意の接続・最初の応答・アイドル timeout が加わりました。既定では無効で、総 deadline を延長せず、`ProviderRequest::options`(`sp::runtime::RunOptions`)から呼び出しごとに設定できます。グラフの LLM ノードはまだ公開していません。五つの API family の実 transport lifecycle 検証と独立した private test fixture が SDK #2・#3・#4 に対応します。SDK header/library を揃えて C++ 利用コードと Python wheel を再ビルドしてください。Native archive は v3、portable JSON は v2 のままです。
 - **`neograph::core` だけをリンクするプログラムは libcrypto を読み込まなくなりました。** SDK が SHA-256、HMAC-SHA256、OS の乱数源の利用を自前で実装したため、SDK ランタイムは OpenSSL をリンクせず、archive と policy のバイトは変わりません。グラフだけを実行するベンチマーク(`bench_neograph 1 1 1`)は、常駐メモリ 7.7 MB ではなく 6.3 MB で始まり(Linux x86_64、31 回の中央値)、共有ライブラリは 7 個から 6 個になって、5.0 MB で始まっていた v0.11.1 と同じになりました。OpenSSL を直接呼ぶコードは `OpenSSL::Crypto` を自分でリンクする必要があります。
@@ -28,6 +29,15 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ### 修正
 
+- **Anthropic MessagesとGeminiの並列client-tool結果を一つのturnに保持します。** 隣接するportableな結果専用メッセージをfamily encode前にまとめ、mixed・native・turn境界は維持します。他のAPI familyと保存historyは変更しません(#311)。
+- **History compactionは権限と未完了の根拠を保持します。** 指定されたtyped controlsをそのまま渡し、正常終了した空でない要約だけを採用します。拒否したoutcomeを記録してもhistoryを切り詰めず、要約をsystem命令ではなくuser由来として扱います。真正なnative replay prefixは保護します(#314, #325)。
+- **Program fan-out joinは待機前の完了通知を失いません。** 完了状態を保持し、scoped cancellationは新規dispatchを止め、現在および遅れて接続した子を取消します。部分launch失敗は借用状態を使う全producerをdrainしてから伝播します。Awaitは同期的に開始し得る子publicationより先にdeadlineを登録します(#341)。
+- **Child generationと保留migrationは整合したdurable headを使います。** immutable admitted lineageでgenerationを確認し、record/journal snapshotが異なるpublicationを混ぜないようにします。保留sourceの解放で消費済みwall-time budgetを更新しません(#324)。 Native PostgreSQL headは一つのMVCC statementで読み、admission・recoveryは所有するheadメンバーをコピーせず移動します。
+- **子の予約復旧は承認済みwall-time grantを保持します。** 置換後の残り時間が少ない場合、cold reconnectは保持した予約を元の不変generationに束縛します。現在使用可能な予算、token・金額上限、子の元のdeadlineは更新しません。
+- **Synthesis persistence fixtureは検証目的と無関係なローカルawait deadlineではなく親run budgetを使います。** 専用のtimeout・取消テストはoperation deadlineを引き続き検証します。
+- **Blocking Tool例外handoffのterminal所有者は一つです。** typed例外とsystem error codeをasync-to-blocking bridgeで保持し、publication後にworkerが例外オブジェクトへアクセスしません(#339)。
+- **例とbenchmark driverは利用できない出力で失敗します。** partial/refusal出力を成功routing fallbackに変えず、UTF-8 previewは完全なcode pointを維持します。失敗した試行を成功timing sampleから除外します(#317)。
+- **Durable Program統合検証は隔離と復旧を確認します。** cold rematerialization後もnode別の最小権限を維持し、provider journalとTool effectはrun・attempt・slotを区別します。変更された権限を拒否し、reconnect後も未確定dispatchの根拠を保持します(#293, #295, #297)。
 - **エンジンのワーカープールを使う multi-Send の fan-out で、ある枝の処理が完了する最中にその枝のキャンセルハンドラが実行されることがありました。** multi-Send ステップの枝は素のプール実行器で動いており、静的 fan-out の枝には既に枝ごとの strand があったため、別のプールスレッドから送られたキャンセルが枝のコルーチンと競合していました(`cancellation_signal::emit` のデータ競合を ThreadSanitizer で再現)。プールを使う Send の枝はそれぞれ自分の strand で動くようになり、プールのない実行は変わりません。#344、#345 を参照してください。
 - **HTTP を有効にした `neograph-harness-mcp` と `example_harness_mcp_server` が `OpenSSL::Crypto` をリンクするようになりました。** どちらも OpenSSL(`SHA256`、`CRYPTO_memcmp`)を直接呼びながら、自身ではリンクしていませんでした。SchemaProvider 0.2.0 が libcrypto をリンクしなくなったため、`NEOGRAPH_BUILD_MCP_HTTP_SERVER=ON` の共有ライブラリビルドで `SHA256` の未定義参照によりリンクに失敗していました。
 - **同期グラフ実行は scheduler の post 呼び出しが完全に終わってから private `io_context` を破棄します。** 完了ハンドラが実行済みでも pool thread が wake-up 中に残り、`pthread_cond_signal` と `pthread_cond_destroy` が競合することがありました(#346)。同期 bridge は外部スレッドの post と tracked-work の解放を待ち、キャンセル通知の受付を閉じ、遅れてキューに入った通知も処理してから context を破棄します。呼出元スレッドでの実行、入れ子呼出し、親キャンセルの権限は維持し、post されたハンドラの例外でも所有中の coroutine frame を放棄しません。
@@ -375,7 +385,7 @@ CIは、これらのターゲットをadd_executablesとして検出せず、(Do
       (requiring `libpq-dev` / `libsqlite3-dev` respectively)
     - `NEOGRAPH_BUILD_A2A` / `NEOGRAPH_BUILD_ACP`
     - `NEOGRAPH_USE_LIBCURL` (one prior incident closed in
-      `feedback_libcurl_unconditional_dep.md` — only the option toggle was
+      public build guidance — only the option toggle was
       added while the default remained ON, breaking the empty-container build
       path again)
     - `find_package(OpenSSL REQUIRED)` is unconditional without an option

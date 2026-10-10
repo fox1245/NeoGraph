@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=c3367508d65878d70236cf39ee1c62d84251adbdcfdae4557190ee11635fcb64 -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=aac924ab6fb2ec505d955689b94c7225d7486b232d564dd364be780add7f8cef -->
 # binary 互換方針
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -32,9 +32,9 @@ CheckpointStore は明示的 adapter 移行に legacy layout を保つ。sync �
 
 ## SDK と Python 境界
 
-LLM node を無効にしても Core は外部 `SchemaProvider::runtime` を要求する。選択した SDK release は `0.2.0` alpha、interface revision `5`、shared-library ABI revision `5` で、out-of-line capability check を持つ。stable interface の主張ではない。対応 component を一緒に install する。`libsp_*.so.5` 世代は NeoGraph loader 世代と Python `abi3` wheel tag の双方と別である。
+LLM node を無効にしても Core は外部 `SchemaProvider::runtime` を要求する。選択した SDK release は `0.3.0` alpha、公開マージコミット `3b88e4ba020c3a4d39ff0660014e7292b516b7cb`、interface revision `6`、shared-library ABI revision `6` で、out-of-line capability check を持つ。stable interface の主張ではない。対応 component を一緒に install する。`libsp_*.so.6` 世代は NeoGraph loader 世代と Python `abi3` wheel tag の双方と別である。
 
-Interface 5 は任意の接続・最初の応答・アイドル timeout を追加し、公開 request/options layout を変更する。SDK consumer、NeoGraph、Python extension を一緒に rebuild する。interface-4 header/library と interface 5 は混在できない。Native archive v3 / `spna3` と portable JSON v2 は独立した形式で、変更されない。過去の interface-3/4 測定は元の範囲を保ち、interface 5 の資格検証ではない。
+Interface 6 は固定サイズのprovider報告金額メタデータを公開usage layoutに追加し、blocking/async SDK呼び出しを単一async pipelineで処理する。SDK consumer、NeoGraph、Python extension を一緒に rebuild する。以前のheader/libraryとinterface 6は混在できない。blocking wrapperはSDK event-loop/callback workerからの再入を引き続き拒否する。Native archive v3 / `spna3` と portable JSON v2 は独立した形式で、変更されない。canonical outcome v2のusageは金額メタデータがある場合のみ任意の`provider_cost`を追加し、過去の欠落のみの記録のbytesを保持して費用を捏造しない。過去のinterface-3/4/5測定は元の範囲を保ち、interface 6の資格検証ではない。
 
 Python は prepared handle と不変 outcome を含む typed provider 契約を公開し、legacy completion shim はない。extension と対応 library を一つの wheel として install する。bundled NeoGraph/SDK library を個別交換しない。graph の ChatMessage 便宜値は native ProviderMessage custody の代替ではない。[Python binding](python-binding.md)を参照。
 
@@ -44,7 +44,7 @@ wheel は curl を含まない wire 層を含む対応する SDK runtime shared 
 
 Linux shared library は versioned file、major-generation SONAME link、unversioned linker 名を持つ。NeoGraph shared library は sibling 依存に `$ORIGIN` を使う。macOS `.dylib`/`@loader_path` と Windows の unsuffixed `.dll` は packaging 規則で、新 SDK runtime の検証ではない。static archive は SONAME を持たず、transitive link 要件も除かない。
 
-記録された interface-3 SDK runtime/archive 検証は Linux/POSIX の範囲で、interface 4 の資格検証ではない。既存 macOS/Windows metadata と依存検証は別で、WASM runtime 検証は確立していない。wheel tag は Python/ABI/platform 互換を記すが、全 runtime 経路を実行した証明ではない。[PyPA tag 仕様](https://packaging.python.org/en/latest/specifications/platform-compatibility-tags/)を参照。
+記録された interface-3 SDK runtime/archive 検証は Linux/POSIX の範囲で、interface 6 の資格検証ではない。既存 macOS/Windows metadata と依存検証は別で、WASM runtime 検証は確立していない。wheel tag は Python/ABI/platform 互換を記すが、全 runtime 経路を実行した証明ではない。[PyPA tag 仕様](https://packaging.python.org/en/latest/specifications/platform-compatibility-tags/)を参照。
 
 ## 検証の根拠
 

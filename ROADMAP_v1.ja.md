@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=ROADMAP_v1.md locale=ja source_sha256=2d2070568d9666f73c2882872cc8b31ea5b4030bd5a71f57325bc82ddf612c2b -->
+<!-- neograph-i18n: source=ROADMAP_v1.md locale=ja source_sha256=875b4e187558a80c736ec1c41c98cf9d7cf9aa19e84238e35b7f790e6b935563 -->
 # NeoGraph v1.0 — 設計研ぎ澄ましロードマップ
 
 **Languages:** [English](ROADMAP_v1.md) | [한국어](ROADMAP_v1.ko.md) | [日本語](ROADMAP_v1.ja.md) | [简体中文](ROADMAP_v1.zh-CN.md)
@@ -456,8 +456,8 @@ N+1 か所での省略が暗黙の no-op / 忘れられたパターンのバグ�
 
 | # | PR | 範囲 | 着地先 |
 |---|---|---|---|
-| 1 ✓ | **`RunContext` 配管 (内部)** — landed `a473f0e` | `struct RunContext` を `engine.h` に追加。エンジンの `execute_graph_async` が構築しスレッド化。NodeExecutor が `execute_full_async` に渡す。Pybind がラップ。**公開向け変更なし** — 古いメソッドは依然 `state` のみを受け取る。新しい `ctx` がディスパッチパス内に並存。ctest 442/442 + pytest 96/96 グリーン。ベンチ中央値 5.365 µs (BASE 5.285 µs, +1.5%) — WSL2 ~3% ノイズフロア内、5.185 µs ベースラインから ±5% バンド内。Pybind wrap は PR 7 (バインディング移行) に延期 (PR 1 は pybind diff ゼロのため)。 | v0.4.0 |
-| 2 ✓ | **`GraphNode::run(NodeInput) -> NodeOutput`** — landed `607ce66` | GraphNode 上の新仮想メソッド。デフォルト実装が古い 8 仮想メソッドに委譲 (優先順位保持)。エンジンの優先ディスパッチエントリとして登録。既存 C++ サブクラスはデフォルトフォールバック経由で依然コンパイル+動作。ctest 442 → 445 (3 新 NodeRunDispatch テスト) + pytest 96/96 + 5 ライブ LLM/WS グリーン。ベンチ中央値 6.122 µs vs PR1 BASE 6.160 µs (Δ -0.6%) on A/B 10 rounds (ホストが今日ノイジー、PR1 BASE が昨日の 5.285 → 6.160 にドリフト — 同じコード、WSL2 ジッタ。A/B 比較がホストドリフトを相殺)。**捕捉されたトラップ**: ``run(const NodeInput&)`` が pybind 非同期パス下の asio エグゼキュータ内で SEGV (コルーチン参照パラメータ UAF、v0.2.0 RunConfig クラッシュ形状)。修正: ``NodeInput`` を値渡しに。node.h に文書化。 | v0.4.0 |
+| 1 ✓ | **`RunContext` 配管 (内部)** — landed `a473f0e` | `struct RunContext` を `engine.h` に追加。エンジンの `execute_graph_async` が構築しスレッド化。NodeExecutor が `execute_full_async` に渡す。Pybind がラップ。**公開向け変更なし** — 古いメソッドは依然 `state` のみを受け取る。新しい `ctx` がディスパッチパス内に並存。ctest 442/442 + pytest 96/96 グリーン。ベンチ中央値 5.365 µs (BASE 5.285 µs, +1.5%) — historical ~3% ノイズフロア内、5.185 µs ベースラインから ±5% バンド内。Pybind wrap は PR 7 (バインディング移行) に延期 (PR 1 は pybind diff ゼロのため)。 | v0.4.0 |
+| 2 ✓ | **`GraphNode::run(NodeInput) -> NodeOutput`** — landed `607ce66` | GraphNode 上の新仮想メソッド。デフォルト実装が古い 8 仮想メソッドに委譲 (優先順位保持)。エンジンの優先ディスパッチエントリとして登録。既存 C++ サブクラスはデフォルトフォールバック経由で依然コンパイル+動作。ctest 442 → 445 (3 新 NodeRunDispatch テスト) + pytest 96/96 + 5 ライブ LLM/WS グリーン。ベンチ中央値 6.122 µs vs PR1 BASE 6.160 µs (Δ -0.6%) on A/B 10 rounds (過去の PR1 BASE は同じコードで 5.285 → 6.160 に変動。A/B 比較が測定の変動を相殺)。**捕捉されたトラップ**: ``run(const NodeInput&)`` が pybind 非同期パス下の asio エグゼキュータ内で SEGV (コルーチン参照パラメータ UAF、v0.2.0 RunConfig クラッシュ形状)。修正: ``NodeInput`` を値渡しに。node.h に文書化。 | v0.4.0 |
 | 3 ✓ | **CancelToken `fork()` 追加** — landed `897645c` | `std::shared_ptr<CancelToken> CancelToken::fork()` 追加。親 `cancel()` が子にカスケード。`add_cancel_hook` は動作継続 (非推奨。`[[deprecated]]` 注釈は PR 4 で着地)。`run_sync(aw, cancel)` が `cancel->fork()` に切替。単一シグナル `slot()` API はエンジンの外部 co_spawn 用に残存。ctest 445 → 452 (7 新 CancelTokenFork テスト) + pytest 96/96 + 5 ライブ LLM/WS グリーン。ベンチ A/B 20 rounds (両方向インタリーブ): Δ min +1.0%, Δ median +1.5% — ±5% バンド内。ベンチパスに `cancel_token` がないため `fork()` にヒットせず、小さなデルタはバイナリレイアウトノイズ (PR3 bench binary が PR2 より 3.7KB 小さい、レイアウトが異なる)。 | v0.4.0 |
 | 4 ✓ | **非推奨注釈** — landed `35a4517` | 8 古い仮想メソッド + `add_cancel_hook` に `[[deprecated]]` 追加 (Hook returned by it は間接的に非推奨)。トランポリンスコープ (`CurrentCancelTokenScope` / `current_cancel_token()`) は延期 — PR 7 (バインディング移行) が `ctx.cancel_token` 読み取りで置換する密輸チャネルのため、今それを非推奨にするとすべての密輸サイトで明確な移行パスなしに抑制が必要になる。内部呼出サイト (graph_node.cpp デフォルトチェーン、デフォルト `run()` 転送) は新しい `NEOGRAPH_PUSH/POP_IGNORE_DEPRECATED` マクロ (`api.h` — GCC/clang/MSVC ポータブル) でブラケット。非推奨仮想メソッドをオーバーライドするか `add_cancel_hook` を呼び出すユーザーコードは移行警告を表示。エンジン内部はクリーン。ctest 452/452 + pytest 96/96 + 5 ライブ LLM/WS グリーン。ベンチ A/B 10 rounds: Δ median +0.3%, min +0.8% — 純粋な属性変更、レイアウトノイズ。`-Werror=deprecated-declarations` は有効化せず (CI がこれまで `-Werror` を持ったことがない。警告は非推奨期間中情報提供のまま)。 | v0.4.0 |
 | 5 ✓ | **StateView 正規化、生 dict 非推奨** — landed `f31aa53` | `engine.get_state(thread_id) -> dict` を pybind docstring でソフト非推奨としてマーク。新しい正規 = `get_state_view(thread_id) -> StateView` (v0.3.2 に既に存在)。`DeprecationWarning` emit なし、`[[deprecated]]` 注釈なし — 生 dict は正当な用途 (チャネル毎 `version` アクセス、スナップショット直列化) を持つ。v1.0 はソフト非推奨が大きなフィードバックを生成しない限りエスケープハッチとして保持。行動変更ゼロ。ctest 452/452 + pytest 96/96 グリーン。 | v0.4.0 |
@@ -593,7 +593,7 @@ Phase B が決して着地しない場合 (v1.0+ にレガシーが残存)、シ
   - **マージ時に ctest 442/442 + pytest 96/96 を破損しない** (ビルド内の
     非推奨警告は許可、エラーは不可)。
   - **ベンチを回帰させない** (`bench_neograph` seq パス上の中央値 µs/iter、
-    `feedback_wsl2_bench_isolation.md` に従って測定 — 新鮮な worktree、
+    public measurement/build guidance に従って測定 — 新鮮な worktree、
     taskset+chrt)。
   - **最大で次のいずれかに触れる**: ヘッダ表面 OR エンジン内部 OR
     バインディング OR サンプル。混在 PR はレビューを困難にし復帰を
@@ -685,16 +685,16 @@ v1.0 サイクルの終わり近く、README の「エンジンオーバーヘ�
 
 | トラップ | 噛み付く場所 | メモリエントリ |
 |---|---|---|
-| すべての公開クラス + 自由関数に `NEOGRAPH_API` マクロ | 新しいエンジンサブライブラリ (postgres / sqlite / mcp / a2a / acp)。Windows DLL 境界。 | `feedback_neograph_api_discipline.md` |
-| ブランチ間 stale .so 汚染 | ブランチ間で使用される `BUILD_SHARED_LIBS=ON` build/ → compile() での ABI 不一致 SEGV | `feedback_cross_branch_stale_so_trap.md` |
-| ベンチ測定時のビルドディレクトリ汚染 | 長寿命 build/ dirs が新鮮な worktree ビルドより遅いバイナリを生成 (+0.4 µs/iter false signal) | `feedback_bench_build_dir_contamination.md` |
-| WSL2 測定ジッタ | プレーンな「多数反復 + 中央値」は収束しない — taskset + chrt FIFO 99 が必要 | `feedback_wsl2_bench_isolation.md` |
-| Doxygen `/*` ワイルドカード in comments | `/**` 内の `fs/*` / `terminal/*` がネストされたコメントを開き後続の診断を抑制。`&#42;` HTML エンティティを使用。 | `feedback_doxygen_slash_star_trap.md` |
+| すべての公開クラス + 自由関数に `NEOGRAPH_API` マクロ | 新しいエンジンサブライブラリ (postgres / sqlite / mcp / a2a / acp)。Windows DLL 境界。 | public measurement/build guidance |
+| ブランチ間 stale .so 汚染 | ブランチ間で使用される `BUILD_SHARED_LIBS=ON` build/ → compile() での ABI 不一致 SEGV | public measurement/build guidance |
+| ベンチ測定時のビルドディレクトリ汚染 | 長寿命 build/ dirs が新鮮な worktree ビルドより遅いバイナリを生成 (+0.4 µs/iter false signal) | public measurement/build guidance |
+| 過去の測定ジッタ | プレーンな「多数反復 + 中央値」は収束しない — taskset + chrt FIFO 99 が必要 | public measurement/build guidance |
+| Doxygen `/*` ワイルドカード in comments | `/**` 内の `fs/*` / `terminal/*` がネストされたコメントを開き後続の診断を抑制。`&#42;` HTML エンティティを使用。 | public measurement/build guidance |
 | ASan `__cxa_throw` インターセプタ CHECK | pybind 境界を越える C++ 例外が `LD_PRELOAD libasan.so` 下でインターセプタを発動。CI でキーワードにより選択解除。キャンセル/throw 正しさは TSan + ライブ LLM テストで行使。 | (this session — add note in feedback) |
-| TSan eptr ライフタイム競合 | NodeInterrupt の exception_ptr が co_await 境界を越えると libstdc++ `__exception_ptr::_M_release` を発動。修正: 理由を `std::string` として抽出しメインスレッドで新規スロー。 | `feedback_parallel_group_eptr_race.md` |
+| TSan eptr ライフタイム競合 | NodeInterrupt の exception_ptr が co_await 境界を越えると libstdc++ `__exception_ptr::_M_release` を発動。修正: 理由を `std::string` として抽出しメインスレッドで新規スロー。 | public measurement/build guidance |
 | MSVC は明示的 `<array>` / `<algorithm>` が必要 | libstdc++ はこれらを推移的に引き込む。MSVC v143 は引き込まない。`std::array` 等を使用するテストファイルが Windows CI を暗黙に破損。 | (this session — add note in feedback) |
-| scikit-build-core 0.12.2 Windows single_config | `-G` フラグが検出され、env-var が無視 — Windows wheel が SQLite=OFF 上書きを失う。`[[tool.scikit-build.overrides]]` + `cmake.define` を使用。 | `feedback_libcurl_unconditional_dep.md` |
-| Wheel OpenSSL CA パス | manylinux libssl が Ubuntu 上に存在しない AlmaLinux パスを使用。`__init__.py` が certifi から `SSL_CERT_FILE` を自動設定。 | `feedback_wheel_openssl_ca.md` |
+| scikit-build-core 0.12.2 Windows single_config | `-G` フラグが検出され、env-var が無視 — Windows wheel が SQLite=OFF 上書きを失う。`[[tool.scikit-build.overrides]]` + `cmake.define` を使用。 | public measurement/build guidance |
+| Wheel OpenSSL CA パス | manylinux libssl が Ubuntu 上に存在しない AlmaLinux パスを使用。`__init__.py` が certifi から `SSL_CERT_FILE` を自動設定。 | public measurement/build guidance |
 | pyproject.toml ランタイム依存が CI の PYTHONPATH フローで自動インストールされない | `pip install --quiet pytest` 行が pyproject.toml の `dependencies = [...]` をミラーしなければならない。v0.3.2 で pydantic についてこれを失った。 | (this session — add note in feedback) |
 | `compile()` デフォルトワーカー数回帰 | `b59444f` がデフォルトを `1 → hardware_concurrency` に変更、潜在 par マイクロベンチ 11.8 → 283 µs (24×)。ベースライン自体が回帰するパターン。修正は `e5ecb08`。 | "Perf retrospective" セクション (上記) |
 
@@ -993,9 +993,7 @@ apt `libgrpc++-dev protobuf-compiler-grpc` (1.51.1) + protoc 3.21.12 を
 
 ### WSL Windows-PATH リークトラップ (再現可能 — ビルド環境警告)
 
-この環境 (WSL2、大規模 Windows PATH リーク) で grpc++ ON でビルドした際に
-2 つの汚染が捕捉された。クリーンな Linux ホスト / CI では現れないが、
-WSL 開発者はこれらに当たる:
+grpc++ ON のビルドでは Windows PATH が Linux 依存の探索を汚染する場合があります。ターゲットの依存 prefix を分離してください:
 
 以下のパスでは Windows mount root、Anaconda インストール prefix、GTK インストール prefix を
 それぞれ `WINDOWS_MOUNT_ROOT`、`WINDOWS_ANACONDA_PREFIX`、`WINDOWS_GTK_PREFIX` 環境変数で表します。
@@ -1017,9 +1015,7 @@ WSL 開発者はこれらに当たる:
      `-DZLIB_INCLUDE_DIR=/usr/include
      -DZLIB_LIBRARY=/usr/lib/x86_64-linux-gnu/libz.so` を設定。
 
-  → 両方とも `cmake-option-default-flip-trap` のいとこ (環境リークが
-  `find_package` を間違ったプレフィックスに引きずる)。EDDSkills SKILL
-  `wsl-windows-path-cmake-find-leak` を追加 (2026-05-16)。
+  依存の探索には対象ターゲットの prefix を使用してください。
 
 ### NexaGraph 先行分析 — gRPC-MCP の真の ROI はチェックポイント
 
@@ -1188,20 +1184,26 @@ NeoGraph が既に持つかアプリ固有のため除外。`DOCS/graph-engine-d
 1. **`neograph::history` (新コアユーティリティ、追加的)** — NexaGraph の
    CAF `compress_history` アクターからアクターシェルを剥いだコアのみを移植:
    - `compact_history(messages, Provider&, model, max_tokens=12000,
-     recent_keep=6) -> awaitable<CompactedHistory>` — トークン推定が
-     予算を超える場合、(system 1 + last N) の間のセクションを 1 回の
-     LLM 呼出で要約し、system-summary メッセージに置換。
-     `co_await provider.invoke()` (非推奨の `complete()` は使用しない、
-     非同期ライブラリ依存ゼロ — コア内部は既にコルーチン使用)。
-   - `sanitize_tool_calls(messages&)` — NeoGraph が**完全に欠いていた**防御:
-     切り詰めにより破損した OpenAI tool-pairs (応答のない assistant
-     `tool_call` / 呼出のない tool メッセージ) の 2 パス除去、冪等。
-     `compact_history` が出力に適用します。orphan tool pair は除きますが、
-     provider がすべての compacted request を受け入れることは保証しません。
+     recent_keep=6, summary_controls=default_summary_controls())
+     -> awaitable<CompactedHistory>` — トークン推定が予算を超える場合、
+     ネイティブ封印のないテキストのみの先頭区間を
+     `provider.invoke_async()` で要約します。先頭の system と型付きの後続履歴は
+     保持し、要約は命令ではない派生コンテキストと明記した user ロールで挿入します。
+     EndTurn/StopSequence かつ ASCII 空白以外の文字を含む要約のみ採用し、
+     それ以外は入力全体を保持します。ネイティブ封印は先行履歴全体に結び付くため、
+     封印がある場合は NativeReplayProtected として要約呼出なしで全履歴を保持します。
+     結果には状態、対象の入力区間、完全な応答を保持します。明示した
+     `ProviderControls` は従来の 0.2 / 500 の既定値を置き換え、
+     未指定の temperature / reasoning は強制しません。
+   - `sanitize_tool_calls(messages&)` — メッセージを変更せずにクライアントの
+     ツール呼出と結果の対応を検証します。ID 欠落・重複、孤立した結果、
+     結果のない呼出は `std::invalid_argument` です。圧縮でツールや
+     ネイティブのグループを削除することはありません。
    - `estimate_tokens` — 保守的な ~3 chars/tok 推定 (混合 KO / EN)。
+     thinking / reasoning 部分も含みます。
    - サンプル 56 `history_compaction` (オフライン MockProvider、キー不要) —
-     sanitize 3→1、compact 29 msgs/975 tok → 6 msgs/208 tok、
-     元の変更なし検証 PASS。`src/core/history.cpp` が全設定で
+     不正な対応の拒否、権限を持たない要約、切り詰められた応答での履歴保持を示します。
+     `src/core/history.cpp` が全設定で
      `neograph_core` にビルド — 496/497 ctest PASS (1 失敗 =
      既存 `pybind_smoke` openinference モジュール欠落、無関係)。
 

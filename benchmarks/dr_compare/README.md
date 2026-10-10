@@ -7,8 +7,9 @@ The runners implement router → plan → researcher Send branches → synthesis
 ## Files and dependencies
 
 `dr_neograph.py`, `dr_langgraph.py`, `bench.py`, `bench_mock.py`, `mem_probe.py`, `mem_prod_stack.py`, `sweep.sh`, `_run_single.py` cover real calls, plain-text mock workloads, memory probes, sweeps, and one-shot diagnosis. Install a wheel matching the current source via the [Python binding guide](../../docs/python-binding.md); an old wheel with `CompletionParams`/`OpenAIProvider` is not the current API. Source builds require the external SchemaProvider SDK even for Core.
-NeoGraph `0.13.1` requires a wheel/native build matching alpha SDK `0.1.1`,
-interface revision/shared generation 4. Current integrated validation is pending.
+Current builds require a wheel/native build matching SDK `0.3.0`, interface
+revision/shared generation 6, at merged SchemaProvider PR #16
+(`3b88e4ba020c3a4d39ff0660014e7292b516b7cb`). Current integrated validation is pending.
 This comparison runner is separate from the built-in Deep Research recovery path.
 
 The workflow imports requests, LangGraph, and langchain-openai; memory probes use psutil. PostgreSQL mode also needs the appropriate checkpoint packages and a running database. `mem_prod_stack.py` imports additional web/database/observability packages for its named stacks; it is not a bare-engine-only RSS probe.
@@ -43,14 +44,25 @@ The old claim that NeoGraph still needs HTTP/2 support is obsolete. These record
 ## Running a new cohort
 
 The mock command below avoids hosted calls and persistence. Record source/SDK/wheel revisions, Python and dependency versions, host limits, worker count, warmup, iterations, checkpoint mode, and failure counts alongside new results. Keep historical files unchanged.
+Both harnesses reject empty reports and exit nonzero if any warmup or measured
+run fails; timings include only successful samples. `Failed runs` must be zero
+before a cohort is reported as passing. Run the no-provider accounting
+regressions with `python -m unittest discover -s benchmarks/dr_compare -p test_bench.py`
+from the repository root.
 
 ```sh
 # Install a current-cutover wheel using the Python binding build guide first.
 python -m pip install requests langgraph langchain-openai psutil
 cd benchmarks/dr_compare
-LLM_MOCK_MS=0 MOCK_SEARCH=1 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
+env -u NG_WORKER_COUNT LLM_MOCK_MS=0 MOCK_SEARCH=1 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
   python bench_mock.py --warmup 5 --iters 50
 ```
+
+To observe fan-out overlap, rerun with `LLM_MOCK_MS=100` and compare unset
+`NG_WORKER_COUNT` (default 4) with an explicit `NG_WORKER_COUNT=1`, keeping
+`FANOUT=5`, warmup, iterations, and checkpoint mode identical. Capture stderr
+and failures; absence of a serial-fan-out warning is not proof of overlap by
+itself. These are model-free workloads, not paid-provider evidence.
 
 The following hosted-model command may incur charges. Set credentials intentionally; it uses in-memory checkpoints. A PostgreSQL comparison needs matching DSNs, package setup, and a separately recorded durability scope. Neither a syscall trace nor a packet capture alone establishes semantic equivalence or provider billing.
 
@@ -61,3 +73,14 @@ The following hosted-model command may incur charges. Set credentials intentiona
 LLM_MOCK_MS=-1 MOCK_SEARCH=0 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
   python bench.py --warmup 2 --iters 5
 ```
+
+This command is not a spending limit: for `FANOUT=5`, a research query performs
+at most seven logical model calls per side (plan, five researchers, synthesis).
+Two warmups plus five measured runs on both sides can therefore dispatch
+98 logical calls before any client retry. Authorized bounded validation must
+reserve calls and the sum of configured maximum output allowances outside
+the benchmark, including all SDK/LangChain retries. NeoGraph's helper defaults
+to `NG_EXAMPLE_MAX_TOKENS=1600`; this does not configure LangChain's output cap.
+Use only the host's explicitly authorized model, endpoint, credentials, and
+search service. A reduced representative cohort is not the historical
+multi-iteration measurement and must be labeled separately.

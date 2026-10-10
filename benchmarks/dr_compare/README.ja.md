@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=ja source_sha256=9cb8f7cca77711dec78da1a0238e45ef2dc9406064fafb1213c879ab34a24df5 -->
+<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=ja source_sha256=8e7ec185a2bc0de5edc4617f895255f5666caf96ac44dbdf37c5fe0dd96694d4 -->
 # dr_compare: ディープリサーチのオーケストレーション比較
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -8,7 +8,7 @@
 ## ファイルと依存関係
 
 `dr_neograph.py`, `dr_langgraph.py`, `bench.py`, `bench_mock.py`, `mem_probe.py`, `mem_prod_stack.py`, `sweep.sh`, `_run_single.py`は実呼び出し、プレーンテキストの模擬処理、メモリ観測、sweep、単発診断を扱います。[Pythonバインディング案内](../../docs/python-binding.md)に従い現在のソースに合うwheelを入れてください。`CompletionParams`/`OpenAIProvider`を持つ古いwheelは現在のAPIではありません。Coreのソースビルドにも外部SchemaProvider SDKが必要です。
-NeoGraph `0.13.1` には alpha SDK `0.1.1`、interface revision/shared generation 4 と一致する wheel/native build が必要です。現在の統合検証は未完了です。この比較 runner は組み込み Deep Research の回復経路とは別です。
+現在のビルドには SDK `0.3.0`、interface revision/shared generation 6、マージ済み SchemaProvider PR #16（`3b88e4ba020c3a4d39ff0660014e7292b516b7cb`）と一致する wheel/native build が必要です。現在の統合検証は未完了です。この比較 runner は組み込み Deep Research の回復経路とは別です。
 
 ワークフローはrequests、LangGraph、langchain-openaiを読み込み、メモリ観測はpsutilを使います。PostgreSQLには対応するチェックポイントパッケージとDBが必要です。`mem_prod_stack.py`は各スタックのWeb/DB/観測パッケージも読み込むため、エンジンのみのRSS測定ではありません。
 
@@ -42,14 +42,17 @@ NeoGraphにHTTP/2対応がまだ必要という過去の主張は現状に合い
 ## 新しい測定の実行
 
 以下の模擬コマンドはリモート呼び出しと永続化を避けます。新記録にはソース/SDK/wheelリビジョン、Python/依存版、ホスト制限、ワーカー数、ウォームアップ、反復数、チェックポイントモード、失敗数を添えてください。過去のファイルを変えないでください。
+両 harness は空のレポートを拒否し、ウォームアップまたは測定が一つでも失敗すれば nonzero で終了します。時間統計には成功サンプルだけを含めます。合格と報告する前に `Failed runs` が 0 であることを確認してください。リポジトリー root で `python -m unittest discover -s benchmarks/dr_compare -p test_bench.py` を実行すると、プロバイダーなしの集計回帰テストを実行できます。
 
 ```sh
 # Install a current-cutover wheel using the Python binding build guide first.
 python -m pip install requests langgraph langchain-openai psutil
 cd benchmarks/dr_compare
-LLM_MOCK_MS=0 MOCK_SEARCH=1 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
+env -u NG_WORKER_COUNT LLM_MOCK_MS=0 MOCK_SEARCH=1 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
   python bench_mock.py --warmup 5 --iters 50
 ```
+
+fan-out の重複を観測するには `LLM_MOCK_MS=100` で再実行し、`FANOUT=5`、ウォームアップ、反復数、チェックポイント設定を同一にして、unset `NG_WORKER_COUNT`（既定 4）と明示 `NG_WORKER_COUNT=1` を比較してください。stderr と失敗を記録してください。直列 fan-out 警告がないことだけでは重複の証拠になりません。モデルなしの処理であり、有料プロバイダーの証拠ではありません。
 
 次のリモートモデルコマンドは料金を発生させる場合があります。認証を意図的に設定してください。メモリ内チェックポイントを使い、PostgreSQL比較には同等のDSN、パッケージ、別記の耐久性範囲が必要です。システムコールやパケット記録だけでは意味的同等性や請求を証明しません。
 
@@ -60,3 +63,5 @@ LLM_MOCK_MS=0 MOCK_SEARCH=1 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
 LLM_MOCK_MS=-1 MOCK_SEARCH=0 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
   python bench.py --warmup 2 --iters 5
 ```
+
+このコマンドは支出上限ではありません。`FANOUT=5` の調査クエリーは片側最大 7 論理モデル呼び出し（plan、研究者 5、synthesis）を実行します。両側でウォームアップ 2 回と測定 5 回なら client retry 前でも 98 論理呼び出しを送信できます。承認された制限付き検証では全 SDK/LangChain retry を含む呼び出し数と設定された最大出力許容量の合計をベンチマーク外部で予約してください。NG helper の既定 `NG_EXAMPLE_MAX_TOKENS=1600` は LangChain の出力上限を設定しません。ホストが明示承認したモデル、endpoint、認証、検索サービスのみ使用してください。縮小した代表 cohort は過去の複数反復測定とは異なるため別記してください。

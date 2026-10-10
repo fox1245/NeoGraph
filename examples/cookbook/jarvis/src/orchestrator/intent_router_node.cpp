@@ -314,18 +314,25 @@ IntentRouterNode::run(neograph::graph::NodeInput in)
         "\nMemory: " + memory_context;
 
     // ④ Actual typed request; routing consumes a text projection only.
-    std::vector<sp::Message> messages;
-    messages.push_back(examples::message(sp::Role::System, system_prompt));
-    messages.push_back(examples::message(sp::Role::User, user_msg));
-    auto request = jarvis::providers::contextual_request(
-        jarvis::providers::request(*provider_, std::move(messages), 0.1, 300,
-                                  neograph::ProviderMode::Collect, model_), in.ctx);
-    auto completion = co_await neograph::graph::observe_provider_result(in.ctx,
-        invoke_provider(provider_, std::move(request), {}, {},
-            neograph::graph::provider_call_broker(in.ctx),
-            neograph::graph::make_provider_call_identity(in.ctx, name_)));
-    neograph::graph::record_usage(in.ctx, completion);
-    completion = neograph::outcome_or_throw(std::move(completion));
+    // 라우터 JSON 도 추론 모델에서는 한도를 숨은 추론과 나눠 쓴다 — 추론 여유분을
+    // 더하고, 가시 텍스트 없는 MaxTokens 는 한도를 두 배로 1회 재요청한다.
+    // 빈 완료 응답이나 제공자 실패를 chat 성공으로 강등하지 않는다.
+    auto completion = co_await jarvis::providers::complete_with_visible_text(in.ctx,
+        [&](unsigned attempt) {
+            std::vector<sp::Message> messages;
+            messages.push_back(examples::message(sp::Role::System, system_prompt));
+            messages.push_back(examples::message(sp::Role::User, user_msg));
+            return jarvis::providers::contextual_request(
+                jarvis::providers::request(*provider_, std::move(messages), 0.1,
+                                          jarvis::providers::output_budget(300, attempt),
+                                          neograph::ProviderMode::Collect, model_), in.ctx);
+        },
+        [&](neograph::ProviderRequest request, unsigned attempt) {
+            return invoke_provider(provider_, std::move(request), {}, {},
+                neograph::graph::provider_call_broker(in.ctx),
+                neograph::graph::make_provider_call_identity(in.ctx, name_, attempt));
+        });
+    jarvis::providers::require_completed_router_output(completion);
 
     // ⑥ 응답 텍스트 추출 → JSON 검증
     const std::string raw_content = neograph::outcome_text(*completion);
