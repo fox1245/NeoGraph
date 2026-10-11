@@ -896,3 +896,10 @@ if(NEOGRAPH_BUILD_PROGRAM)
     endif()
     gtest_discover_tests(neograph_identity_golden_tests PROPERTIES LABELS "program;identity")
 endif()
+
+# Bounded-exhaustive join harness: the real Scheduler and GraphEngine against
+# a reference interpreter of the #363 join semantics (tests/model/ has the TLA+
+# model). NEOGRAPH_JOIN_MODEL_BOUND=extended runs the larger bound.
+add_executable(neograph_join_model_tests test_join_exhaustive.cpp)
+target_link_libraries(neograph_join_model_tests PRIVATE neograph::core GTest::gtest_main)
+gtest_discover_tests(neograph_join_model_tests PROPERTIES LABELS "core;join-model" TIMEOUT 300)
