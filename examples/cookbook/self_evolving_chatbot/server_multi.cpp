@@ -5,9 +5,9 @@
 // server.cpp 는 alice 한 명 시연. 이쪽은 그걸 multi-tenant 로 확장.
 // 핵심 관찰:
 //   1) 각 customer 가 자기 history 기반으로 *독립적* 으로 evolve.
-//   2) compile cache 가 hash 기반이라 *같은 shape 으로 수렴한 customer
-//      끼리는 engine 공유* — 6000 customer → ~10 engine 의 emergent
-//      효율성.
+//   2) compile cache key 에 customer 와 그 instructions 가 포함되므로
+//      같은 shape 으로 수렴한 customer 끼리도 engine 을 공유하지 않음 —
+//      engine 수는 customer 별로 사용한 topology 수의 합.
 //   3) 사용자 행동 패턴 (factual / accuracy-seeking / multi-perspective
 //      / oscillation) 이 자연스럽게 topology distribution 으로 분류됨
 //      — graph_def 가 customer behavior 의 본질적 cluster 발견 메커니즘.
@@ -553,7 +553,7 @@ static int run_demo() {
     std::cout << "Peak RSS:            " << peak_rss_kb() << " KB ("
               << peak_rss_kb() / 1024.0 << " MB)\n";
     std::cout << "Compile cache size:  " << cache.size()
-              << "  (distinct engine 인스턴스 — customer 수보다 적으면 emergent cluster)\n";
+              << "  (customer 별 topology 마다 engine 하나 — tenant 간 공유 없음)\n";
 
     std::cout << "\n=== Evolution timelines ===\n";
     for (const auto& c : customers) {
@@ -570,19 +570,12 @@ static int run_demo() {
     }
 
     std::cout << "\n=== Emergent cluster observation ===\n";
-    std::cout << "5 customer 의 행동 패턴이 자연스럽게 "
+    std::cout << customers.size() << " customer 의 행동 패턴이 자연스럽게 "
               << final_topology_dist.size() << " 개 topology cluster 로 분류됨.\n";
-    std::cout << "Compile cache 가 distinct shape 별 engine 공유 — "
-              << customers.size() << " customer → "
-              << cache.size() << " engine 인스턴스.\n";
-    if (cache.size() < customers.size()) {
-        std::cout << "즉 customer "
-                  << (customers.size() - cache.size())
-                  << " 명 분량의 engine 메모리가 cache 공유로 절감됨.\n";
-        std::cout << "1000 customer 로 scale-up 시: distinct shape 이 여전히\n";
-        std::cout << (cache.size() + 1) << "~10 개 정도면 engine 인스턴스 ~"
-                  << (cache.size() + 1) << " 개로 유지 → 메모리 거의 일정.\n";
-    }
+    // The cache key binds each tenant and its instructions, so converged
+    // customers still compile their own engines; nothing is shared across tenants.
+    std::cout << "Compile cache 는 tenant 별 — " << customers.size() << " customer → "
+              << cache.size() << " engine 인스턴스 (customer 간 engine 공유 없음).\n";
 
     return 0;
 }
