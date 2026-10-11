@@ -2,10 +2,12 @@
 #include <neograph/graph/registry.h>
 #include <neograph/graph/validator.h>
 
+#include "graph_v2_keys.h"
 #include "routing_policy.h"
 
 #include <algorithm>
 #include <map>
+#include <optional>
 #include <queue>
 #include <set>
 #include <stdexcept>
@@ -21,6 +23,13 @@ json string_set_to_array(const std::set<std::string>& s) {
     json arr = json::array();
     for (const auto& v : s)
         arr.push_back(v);
+    return arr;
+}
+
+json string_vector_to_array(const std::vector<std::string>& v) {
+    json arr = json::array();
+    for (const auto& item : v)
+        arr.push_back(item);
     return arr;
 }
 
@@ -126,6 +135,31 @@ void check_references(Ctx& c) {
     };
     check_interrupts("interrupt_before", c.cg.interrupt_before);
     check_interrupts("interrupt_after", c.cg.interrupt_after);
+
+    for (const auto& [bnode, join] : c.cg.join_specs) {
+        const std::string path    = "nodes." + bnode + ".barrier";
+        const std::string pointer = "/nodes/" + pointer_token(bnode) + "/barrier";
+        for (const auto& slot : join.slots) {
+            for (const auto& u : slot) {
+                if (u == bnode) {
+                    c.error("E3", path, pointer,
+                            "barrier slot " + string_set_to_array(slot).dump() +
+                                " lists the join itself ('" + u +
+                                "') — it can never receive its own signal before firing",
+                            json{{"barrier", bnode},
+                                 {"waits_for", u},
+                                 {"slot", string_set_to_array(slot)}});
+                } else if (!c.is_node(u)) {
+                    c.error("E3", path, pointer,
+                            "barrier slot references unknown node '" + u + "'",
+                            json{{"barrier", bnode},
+                                 {"waits_for", u},
+                                 {"slot", string_set_to_array(slot)},
+                                 {"unknown", u}});
+                }
+            }
+        }
+    }
 
     for (const auto& [bnode, wait_for] : c.cg.barrier_specs) {
         for (const auto& u : wait_for) {
@@ -276,6 +310,25 @@ void check_barriers(Ctx& c) {
             }
         }
     }
+    // #363: a slot is live when at least one alternative routes into the join.
+    for (const auto& [bnode, join] : c.cg.join_specs) {
+        for (const auto& slot : join.slots) {
+            bool known  = false;
+            bool signal = false;
+            for (const auto& u : slot) {
+                if (u == bnode || !c.is_node(u)) continue;  // reported as E3
+                known       = true;
+                const auto it = c.succ.find(u);
+                signal = signal || (it != c.succ.end() && it->second.count(bnode) > 0);
+            }
+            if (!known || signal) continue;
+            c.error("E8", "nodes." + bnode + ".barrier", "/nodes/" + pointer_token(bnode) + "/barrier",
+                    "barrier waits for any of " + string_set_to_array(slot).dump() +
+                        ", but none of them has an edge or conditional route into '" + bnode +
+                        "' — the join can never be satisfied",
+                    json{{"barrier", bnode}, {"slot", string_set_to_array(slot)}});
+        }
+    }
 }
 
 // ---- E13/E14: transitions the scheduler never takes (issue #358) ----------
@@ -336,12 +389,159 @@ void check_barrier_bypass(Ctx& c) {
                     target;
             }
             if (!signals || bypass.empty()) continue;  // no signal at all is E8
+            // Built before the witness takes `bypass`: argument order is unspecified.
+            auto message = "barrier '" + bnode + "' waits for '" + u + "', but route(s) " +
+                           bypass.dump() + " of '" + u + "' lead elsewhere; when one is taken '" +
+                           bnode + "' never fires and the run ends as barrier-stalled";
             c.warn("E15", "nodes." + bnode + ".barrier",
-                   "/nodes/" + pointer_token(bnode) + "/barrier",
-                   "barrier '" + bnode + "' waits for '" + u + "', but route(s) " +
-                       bypass.dump() + " of '" + u + "' lead elsewhere; when one is taken '" +
-                       bnode + "' never fires and the run ends as barrier-stalled",
+                   "/nodes/" + pointer_token(bnode) + "/barrier", std::move(message),
                    json{{"barrier", bnode}, {"member", u}, {"routes", std::move(bypass)}});
+        }
+    }
+    // #363: per slot. A route to another alternative of the same slot is not
+    // a bypass: that alternative can still fill the slot.
+    for (const auto& [bnode, join] : c.cg.join_specs) {
+        for (const auto& slot : join.slots) {
+            for (const auto& u : slot) {
+                const auto* routing = c.is_node(u) ? c.routing_edge(u) : nullptr;
+                if (!routing) continue;
+                json bypass  = json::object();
+                bool signals = false;
+                for (const auto& [key, target] : routing->routes) {
+                    if (target == bnode) signals = true;
+                    if (target == bnode || target == kEnd || slot.count(target)) continue;
+                    bypass[key == detail::kLegacyDefaultRoute ? std::string(DEFAULT_ROUTE) : key] =
+                        target;
+                }
+                if (!signals || bypass.empty()) continue;
+                auto message = "barrier '" + bnode + "' waits for any of " +
+                               string_set_to_array(slot).dump() + ", but route(s) " +
+                               bypass.dump() + " of '" + u +
+                               "' lead elsewhere; when one is taken and no other alternative "
+                               "arrives, '" +
+                               bnode + "' never fires and the run ends as barrier-stalled";
+                c.warn("E15", "nodes." + bnode + ".barrier",
+                       "/nodes/" + pointer_token(bnode) + "/barrier", std::move(message),
+                       json{{"barrier", bnode},
+                            {"member", u},
+                            {"slot", string_set_to_array(slot)},
+                            {"routes", std::move(bypass)}});
+            }
+        }
+    }
+}
+
+// ---- E17: co-active alternatives of one any_of slot (#363) -----------------
+//
+// Two alternatives of one slot that can both run make the second arrival open
+// a new round of the join that never completes, so the run ends
+// barrier-stalled. Static fan-out is the one place that runs successors
+// together: either one node fans out to two branches that reach different
+// alternatives without passing the join, or an alternative fans out both
+// into the join and on to another alternative.
+
+std::vector<std::string> static_fan_out(const Ctx& c, const std::string& node) {
+    std::vector<std::string> targets;
+    if (c.routing_edge(node)) return targets;  // a routed node takes one route
+    for (const auto& e : c.cg.edges)
+        if (e.from == node && e.to != kEnd &&
+            std::find(targets.begin(), targets.end(), e.to) == targets.end())
+            targets.push_back(e.to);
+    std::sort(targets.begin(), targets.end());
+    return targets;
+}
+
+// Shortest routed paths from `from` to each node it reaches without passing `avoid`.
+std::map<std::string, std::vector<std::string>> paths_avoiding(const Ctx&         c,
+                                                               const std::string& from,
+                                                               const std::string& avoid) {
+    std::map<std::string, std::vector<std::string>> paths;
+    if (from == avoid || !c.is_node(from)) return paths;
+    paths[from] = {from};
+    std::queue<std::string> q;
+    q.push(from);
+    while (!q.empty()) {
+        const auto cur = q.front();
+        q.pop();
+        const auto it = c.succ.find(cur);
+        if (it == c.succ.end()) continue;
+        for (const auto& next : it->second) {
+            if (next == avoid || next == kEnd || !c.is_node(next) || paths.count(next)) continue;
+            auto path = paths[cur];
+            path.push_back(next);
+            paths.emplace(next, std::move(path));
+            q.push(next);
+        }
+    }
+    return paths;
+}
+
+void check_slot_exclusivity(Ctx& c) {
+    for (const auto& [bnode, join] : c.cg.join_specs) {
+        for (const auto& slot : join.slots) {
+            if (slot.size() < 2) continue;
+            std::optional<json> found;
+            // A fan-out node whose branches reach two different alternatives.
+            for (const auto& f : c.node_names) {
+                if (found) break;
+                const auto targets = static_fan_out(c, f);
+                for (std::size_t i = 0; i < targets.size() && !found; ++i) {
+                    const auto left = paths_avoiding(c, targets[i], bnode);
+                    for (std::size_t j = i + 1; j < targets.size() && !found; ++j) {
+                        const auto right = paths_avoiding(c, targets[j], bnode);
+                        for (const auto& a : slot) {
+                            if (found) break;
+                            if (!left.count(a)) continue;
+                            for (const auto& b : slot) {
+                                if (a == b || !right.count(b)) continue;
+                                auto first  = left.at(a);
+                                auto second = right.at(b);
+                                first.insert(first.begin(), f);
+                                second.insert(second.begin(), f);
+                                found = json{{"fan_out", f},
+                                             {"alternatives", json::array({a, b})},
+                                             {"paths", json::array({string_vector_to_array(first),
+                                                                    string_vector_to_array(second)})}};
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            // An alternative that fans out into the join and on to another one.
+            for (const auto& a : slot) {
+                if (found) break;
+                if (!c.is_node(a)) continue;
+                const auto targets = static_fan_out(c, a);
+                if (std::find(targets.begin(), targets.end(), bnode) == targets.end()) continue;
+                for (const auto& t : targets) {
+                    if (found || t == bnode) continue;
+                    const auto onward = paths_avoiding(c, t, bnode);
+                    for (const auto& b : slot) {
+                        if (b == a || !onward.count(b)) continue;
+                        auto second = onward.at(b);
+                        second.insert(second.begin(), a);
+                        found = json{{"fan_out", a},
+                                     {"alternatives", json::array({a, b})},
+                                     {"paths", json::array({json::array({a, bnode}),
+                                                            string_vector_to_array(second)})}};
+                        break;
+                    }
+                }
+            }
+            if (!found) continue;
+            auto witness       = std::move(*found);
+            const auto a       = witness["alternatives"][0].get<std::string>();
+            const auto b       = witness["alternatives"][1].get<std::string>();
+            const auto fan_out = witness["fan_out"].get<std::string>();
+            witness["barrier"] = bnode;
+            witness["slot"]    = string_set_to_array(slot);
+            c.warn("E17", "nodes." + bnode + ".barrier", "/nodes/" + pointer_token(bnode) + "/barrier",
+                   "slot alternatives should be route-exclusive: '" + a + "' and '" + b +
+                       "' of barrier '" + bnode + "' can both run (fan-out at '" + fan_out +
+                       "'); the second arrival opens a round that never completes and the run "
+                       "ends barrier-stalled",
+                   std::move(witness));
         }
     }
 }
@@ -398,7 +598,8 @@ void check_fan_in(Ctx& c) {
         if (e.from != kStart && e.to != kEnd) plain_in[e.to].insert(e.from);
     }
     for (const auto& [node, sources] : plain_in) {
-        if (sources.size() < 2 || c.cg.barrier_specs.count(node)) continue;
+        if (sources.size() < 2 || c.cg.barrier_specs.count(node) || c.cg.join_specs.count(node))
+            continue;
         c.warn("E9", "nodes." + node, "/nodes/" + pointer_token(node),
                "'" + node + "' has " + std::to_string(sources.size()) +
                    " plain in-edges and no barrier — if those sources can be "
@@ -686,6 +887,7 @@ std::vector<Diagnostic> run_checks(const TopologySpec&      topology,
     if (!c.original_rules) {
         check_shadowed_transitions(c);
         check_barrier_bypass(c);
+        check_slot_exclusivity(c);
     }
     check_fan_in(c);
     check_routes(c);

@@ -207,7 +207,24 @@
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "$ref": "#/$defs/nonemptyString" }
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/nonemptyString" },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["any_of"],
+                "properties": {
+                  "any_of": {
+                    "type": "array",
+                    "minItems": 2,
+                    "uniqueItems": true,
+                    "items": { "$ref": "#/$defs/nonemptyString" }
+                  }
+                }
+              }
+            ]
+          }
         }
       }
     },

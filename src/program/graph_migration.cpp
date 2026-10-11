@@ -306,12 +306,18 @@ TopologyProjection topology_projection(const SealedCoreDefinition& definition) {
         if (channel.persistence == graph::ChannelPersistencePolicy::Checkpoint)
             checkpoint_channels.push_back(channel.name);
     }
+    // Legacy barriers and any_of joins (#363) both hold barrier state.
     std::vector<std::string> barriers;
-    barriers.reserve(topology.barrier_specs.size());
+    barriers.reserve(topology.barrier_specs.size() + topology.join_specs.size());
     for (const auto& [name, unused] : topology.barrier_specs) {
         (void)unused;
         barriers.push_back(name);
     }
+    for (const auto& [name, unused] : topology.join_specs) {
+        (void)unused;
+        barriers.push_back(name);
+    }
+    std::sort(barriers.begin(), barriers.end());
     return {detail::sha256_identity("graph-semantic-topology-shape/v1",
                                     detail::canonical_json_bytes(shape)),
             std::move(node_names), std::move(checkpoint_channels), std::move(barriers)};

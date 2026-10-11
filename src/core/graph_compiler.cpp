@@ -468,6 +468,106 @@ void detail::append_metadata_diagnostics(const json&                      metada
     walk_metadata(metadata, "/metadata", 0, metadata_depth(metadata), depth_reported, diagnostics);
 }
 
+std::vector<std::set<std::string>> detail::canonical_slots(std::vector<std::set<std::string>> slots) {
+    // std::string compares bytes as unsigned char, which is UTF-8 order.
+    std::sort(slots.begin(), slots.end(), [](const auto& lhs, const auto& rhs) {
+        if (lhs.empty() || rhs.empty()) return lhs.size() < rhs.size();
+        return *lhs.begin() < *rhs.begin();
+    });
+    return slots;
+}
+
+bool detail::legacy_slots(const std::vector<std::set<std::string>>& slots) {
+    return std::all_of(slots.begin(), slots.end(),
+                       [](const std::set<std::string>& slot) { return slot.size() == 1; });
+}
+
+json detail::print_wait_for(const std::vector<std::set<std::string>>& slots) {
+    json wait_for = json::array();
+    for (const auto& slot : canonical_slots(slots)) {
+        if (slot.size() == 1) {
+            wait_for.push_back(*slot.begin());
+            continue;
+        }
+        json alternatives = json::array();
+        for (const auto& source : slot) alternatives.push_back(source);
+        wait_for.push_back(json{{"any_of", std::move(alternatives)}});
+    }
+    return wait_for;
+}
+
+bool detail::uses_slot_syntax(const json& wait_for) {
+    if (!wait_for.is_array()) return false;
+    for (const auto& entry : wait_for)
+        if (entry.is_object()) return true;
+    return false;
+}
+
+std::optional<std::vector<std::set<std::string>>> detail::parse_wait_for_slots(
+    const json&                      wait_for,
+    const std::string&               display,
+    const std::string&               pointer,
+    std::vector<CompilerDiagnostic>& diagnostics) {
+    const auto before = diagnostics.size();
+    const auto fail   = [&](const std::string& at, const std::string& message, const json& entry) {
+        diagnostics.push_back({"GC_BARRIER", at, display + ": " + message,
+                               json{{"entry", entry}, {"wait_for", wait_for}}});
+    };
+    std::vector<std::set<std::string>> slots;
+    std::set<std::string>              seen;
+    std::size_t                        index = 0;
+    for (const auto& entry : wait_for) {
+        const auto at = pointer + "/wait_for/" + std::to_string(index++);
+        std::set<std::string> slot;
+        if (entry.is_string()) {
+            if (entry.get<std::string>().empty()) {
+                fail(at, "wait_for entries must not be empty", entry);
+                continue;
+            }
+            slot.insert(entry.get<std::string>());
+        } else if (entry.is_object()) {
+            bool shaped = true;
+            for (const auto& [key, unused] : entry.items()) {
+                (void)unused;
+                if (key == "any_of") continue;
+                fail(at, "a wait_for slot holds only 'any_of', not '" + key + "'", entry);
+                shaped = false;
+            }
+            if (!entry.contains("any_of") || !entry["any_of"].is_array() || entry["any_of"].empty()) {
+                fail(at, "'any_of' must be a nonempty array of node names", entry);
+                continue;
+            }
+            for (const auto& source : entry["any_of"]) {
+                if (source.is_object() && source.contains("any_of")) {
+                    fail(at, "'any_of' slots cannot be nested", entry);
+                    shaped = false;
+                } else if (!source.is_string() || source.get<std::string>().empty()) {
+                    fail(at, "'any_of' alternatives must be nonempty node names", entry);
+                    shaped = false;
+                } else if (!slot.insert(source.get<std::string>()).second) {
+                    fail(at, "'" + source.get<std::string>() + "' is repeated in one slot", entry);
+                    shaped = false;
+                }
+            }
+            if (!shaped) continue;
+        } else {
+            fail(at, "wait_for entries must be node names or {\"any_of\": [node names]}", entry);
+            continue;
+        }
+        for (const auto& source : slot) {
+            if (!seen.insert(source).second)
+                fail(at, "'" + source + "' appears in more than one slot", entry);
+        }
+        slots.push_back(std::move(slot));
+    }
+    if (diagnostics.size() != before) return std::nullopt;
+    if (slots.empty()) {
+        fail(pointer, "'wait_for' is empty", json::array());
+        return std::nullopt;
+    }
+    return canonical_slots(std::move(slots));
+}
+
 bool ParseReport::has_errors() const noexcept {
     return !diagnostics.empty();
 }
@@ -790,7 +890,27 @@ static ParseReport parse_report_impl(const json&          definition,
             const bool            valid_type =
                 read_string(node, "type", pointer + "/type", "nodes." + name, type);
 
-            if (node.contains("barrier")) {
+            if (node.contains("barrier") && strict && node["barrier"].is_object() &&
+                node["barrier"].contains("wait_for") &&
+                detail::uses_slot_syntax(node["barrier"]["wait_for"])) {
+                // #363 any_of slots (strict documents only).
+                consumed.insert("barrier");
+                const auto&       barrier         = node["barrier"];
+                const std::string barrier_pointer = pointer + "/barrier";
+                if (auto slots = detail::parse_wait_for_slots(
+                        barrier["wait_for"], "nodes." + name + ".barrier", barrier_pointer,
+                        diagnostics)) {
+                    if (detail::legacy_slots(*slots)) {
+                        std::set<std::string> members;
+                        for (const auto& slot : *slots) members.insert(*slot.begin());
+                        topology.barrier_specs[name] = std::move(members);
+                    } else {
+                        topology.join_specs[name] = JoinSpec{std::move(*slots)};
+                    }
+                }
+                enforce_consumed(barrier, {"wait_for"}, "nodes." + name + ".barrier",
+                                 barrier_pointer, diagnostics);
+            } else if (node.contains("barrier")) {
                 consumed.insert("barrier");
                 const auto&           barrier         = node["barrier"];
                 const std::string     barrier_pointer = pointer + "/barrier";
@@ -1201,6 +1321,7 @@ CompiledGraph GraphCompiler::link(TopologySpec         topology,
     cg.edges             = std::move(topology.edges);
     cg.conditional_edges = std::move(topology.conditional_edges);
     cg.barrier_specs     = std::move(topology.barrier_specs);
+    cg.join_specs        = std::move(topology.join_specs);
     cg.interrupt_before  = std::move(topology.interrupt_before);
     cg.interrupt_after   = std::move(topology.interrupt_after);
     cg.retry_policy      = std::move(topology.retry_policy);
@@ -1238,6 +1359,7 @@ CompiledGraph GraphCompiler::link_local(TopologySpec         topology,
     cg.edges             = std::move(topology.edges);
     cg.conditional_edges = std::move(topology.conditional_edges);
     cg.barrier_specs     = std::move(topology.barrier_specs);
+    cg.join_specs        = std::move(topology.join_specs);
     cg.interrupt_before  = std::move(topology.interrupt_before);
     cg.interrupt_after   = std::move(topology.interrupt_after);
     cg.retry_policy      = std::move(topology.retry_policy);
@@ -1307,6 +1429,9 @@ json TopologySpec::to_json() const {
                     wait_for.push_back(up);
                 n["barrier"] = json{{"wait_for", std::move(wait_for)}};
             }
+            auto jit = join_specs.find(nname);
+            if (jit != join_specs.end())
+                n["barrier"] = json{{"wait_for", detail::print_wait_for(jit->second.slots)}};
             nodes[nname] = std::move(n);
         }
         j["nodes"] = std::move(nodes);
@@ -1370,6 +1495,7 @@ TopologySpec CompiledGraph::topology() const {
     result.edges             = edges;
     result.conditional_edges = conditional_edges;
     result.barrier_specs     = barrier_specs;
+    result.join_specs        = join_specs;
     result.interrupt_before  = interrupt_before;
     result.interrupt_after   = interrupt_after;
     result.retry_policy      = retry_policy;
@@ -1383,6 +1509,11 @@ TopologySpec CompiledGraph::topology() const {
         for (const auto& upstream : wait_for_set)
             wait_for.push_back(upstream);
         node->second["barrier"] = json{{"wait_for", std::move(wait_for)}};
+    }
+    for (const auto& [name, join] : join_specs) {
+        auto node = result.node_defs.find(name);
+        if (node == result.node_defs.end()) continue;
+        node->second["barrier"] = json{{"wait_for", detail::print_wait_for(join.slots)}};
     }
     return result;
 }
@@ -1456,12 +1587,42 @@ json GraphCompiler::canon(const json& definition) {
                     // barrier, so lenient TV flags the drop and strict
                     // mode has already refused it.
                     std::set<std::string> wait_for;
-                    if (v.is_object() && v.contains("wait_for")) {
+                    json                  arr = json::array();
+                    if (v.is_object() && v.contains("wait_for") &&
+                        detail::uses_slot_syntax(v["wait_for"])) {
+                        // #363: the printer's canonical form; entries it
+                        // cannot read are kept so TV still flags them.
+                        std::vector<std::set<std::string>> slots;
+                        json                               unreadable = json::array();
+                        for (const auto& entry : v["wait_for"]) {
+                            if (entry.is_string()) {
+                                slots.push_back({entry.get<std::string>()});
+                                continue;
+                            }
+                            std::set<std::string> slot;
+                            bool                  readable = entry.is_object() && entry.size() == 1 &&
+                                            entry.contains("any_of") && entry["any_of"].is_array();
+                            if (readable)
+                                for (const auto& source : entry["any_of"]) {
+                                    if (!source.is_string()) readable = false;
+                                    else slot.insert(source.get<std::string>());
+                                }
+                            if (readable && !slot.empty())
+                                slots.push_back(std::move(slot));
+                            else
+                                unreadable.push_back(entry);
+                        }
+                        if (detail::legacy_slots(slots) && unreadable.empty()) {
+                            for (const auto& slot : slots) wait_for.insert(*slot.begin());
+                        } else {
+                            arr = detail::print_wait_for(slots);
+                            for (const auto& entry : unreadable) arr.push_back(entry);
+                        }
+                    } else if (v.is_object() && v.contains("wait_for")) {
                         for (const auto& up : v["wait_for"]) {
                             wait_for.insert(up.get<std::string>());
                         }
                     }
-                    json arr = json::array();
                     for (const auto& up : wait_for)
                         arr.push_back(up);
                     json b = json::object();

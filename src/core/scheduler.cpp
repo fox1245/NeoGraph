@@ -20,9 +20,18 @@ Scheduler::Scheduler(const std::vector<Edge>&             edges,
                      const std::vector<ConditionalEdge>&  conditional_edges,
                      BarrierSpecs                         barrier_specs,
                      std::shared_ptr<const GraphRegistry> registry)
+    : Scheduler(edges, conditional_edges, std::move(barrier_specs), JoinSpecs{},
+                std::move(registry)) {}
+
+Scheduler::Scheduler(const std::vector<Edge>&             edges,
+                     const std::vector<ConditionalEdge>&  conditional_edges,
+                     BarrierSpecs                         barrier_specs,
+                     JoinSpecs                            join_specs,
+                     std::shared_ptr<const GraphRegistry> registry)
     : edges_(edges),
       conditional_edges_(conditional_edges),
       barrier_specs_(std::move(barrier_specs)),
+      join_specs_(std::move(join_specs)),
       registry_(std::move(registry)) {}
 
 std::vector<std::string> Scheduler::resolve_next_nodes(
@@ -115,6 +124,7 @@ static NextStepPlan plan_impl(
     const std::vector<StepRouting>& routings,
     const GraphState& state,
     const BarrierSpecs& barrier_specs,
+    const JoinSpecs& join_specs,
     BarrierState* barrier_state) {
 
     NextStepPlan plan;
@@ -142,7 +152,7 @@ static NextStepPlan plan_impl(
     // de-duplicated successor set. Skip the signaler map and the ordered sets,
     // which only barrier gating needs: they cost a node allocation per entry on
     // every super-step of every graph, barriers or not.
-    if (barrier_state == nullptr || barrier_specs.empty()) {
+    if (barrier_state == nullptr || (barrier_specs.empty() && join_specs.empty())) {
         for (const auto& r : routings) {
             for (auto& next : sch.resolve_next_nodes(r.node_name, state)) {
                 if (next == END_NODE) {
@@ -178,7 +188,9 @@ static NextStepPlan plan_impl(
     std::set<std::string> ready_set;
     for (const auto& [target, signalers] : signals) {
         auto spec_it = barrier_specs.find(target);
-        const bool is_barrier = spec_it != barrier_specs.end();
+        auto join_it = join_specs.find(target);
+        const bool is_barrier =
+            spec_it != barrier_specs.end() || join_it != join_specs.end();
 
         if (!is_barrier || barrier_state == nullptr) {
             ready_set.insert(target);
@@ -190,10 +202,22 @@ static NextStepPlan plan_impl(
         auto& accum = (*barrier_state)[target];
         for (const auto& s : signalers) accum.insert(s);
 
-        // Fire iff every required upstream has signaled at least once.
-        const bool satisfied = std::includes(
-            accum.begin(), accum.end(),
-            spec_it->second.begin(), spec_it->second.end());
+        // Fire iff every required upstream has signaled at least once; for an
+        // any_of join (#363), iff every slot holds at least one alternative.
+        bool satisfied = true;
+        if (spec_it != barrier_specs.end()) {
+            satisfied = std::includes(accum.begin(), accum.end(),
+                                      spec_it->second.begin(), spec_it->second.end());
+        } else {
+            for (const auto& slot : join_it->second.slots) {
+                const bool filled = std::any_of(slot.begin(), slot.end(),
+                    [&](const std::string& source) { return accum.count(source) > 0; });
+                if (!filled) {
+                    satisfied = false;
+                    break;
+                }
+            }
+        }
         if (satisfied) {
             ready_set.insert(target);
             accum.clear();  // reset for future loops through the barrier
@@ -209,14 +233,14 @@ static NextStepPlan plan_impl(
 NextStepPlan Scheduler::plan_next_step(
     const std::vector<StepRouting>& routings,
     const GraphState& state) const {
-    return plan_impl(*this, routings, state, barrier_specs_, nullptr);
+    return plan_impl(*this, routings, state, barrier_specs_, join_specs_, nullptr);
 }
 
 NextStepPlan Scheduler::plan_next_step(
     const std::vector<StepRouting>& routings,
     const GraphState& state,
     BarrierState& barrier_state) const {
-    return plan_impl(*this, routings, state, barrier_specs_, &barrier_state);
+    return plan_impl(*this, routings, state, barrier_specs_, join_specs_, &barrier_state);
 }
 
 // Shared zip helper used by both NodeResult overloads.

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=zh-CN source_sha256=6c6a54cfd7a02e2730b5342b393dc0fc8ed9afae8c6ea54bd1196f96006e27d7 -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=zh-CN source_sha256=c4b7c36f1ce541c78785e7cd73889179b47e0c2fac4207ecf4eff50932331aa6 -->
 # Program 诊断
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -138,15 +138,16 @@ Program 编译会返回诊断：失败时为 `ProgramCompileError::diagnostics()
 | <a id="p_core_e5"></a>`P_CORE_E5` | fan-out 的兄弟节点写入同一个 overwrite 通道，最后写入者不确定地获胜。请使用 append reducer。 |
 | <a id="p_core_e6"></a>`P_CORE_E6` | 通道从未被读写、只写不读，或只读却没有初始值。 |
 | <a id="p_core_e7"></a>`P_CORE_E7` | 有节点无法通过 edge 和 route 从 `__start__` 到达。 |
-| <a id="p_core_e8"></a>`P_CORE_E8` | barrier 等待一个从不路由到它的节点，因此 join 永远不会触发。 |
+| <a id="p_core_e8"></a>`P_CORE_E8` | barrier 等待一个从不路由到它的节点，或一个没有任何备选项路由到它的 `any_of` 槽位，因此 join 永远不会触发。 |
 | <a id="p_core_e9"></a>`P_CORE_E9` | 节点有多条普通入边却没有 barrier，每个到达的 super-step 都会运行一次。若是 AND join 请添加 barrier，若是 XOR 合并则可忽略。 |
 | <a id="p_core_e10"></a>`P_CORE_E10` | conditional edge 没有 route、路由了其 condition 从不返回的标签，或留下了未路由的标签。 |
 | <a id="p_core_e11"></a>`P_CORE_E11` | 有节点被困在没有通往 `__end__` 路径的环中。 |
 | <a id="p_core_e12"></a>`P_CORE_E12` | 本地注册表缺少 reducer、节点类型或 condition。 |
 | <a id="p_core_e13"></a>`P_CORE_E13` | 一个通过 conditional edge 路由的节点上还有静态 edge，该 edge 永远不会触发。请删除它或把它改为一条 route。 |
 | <a id="p_core_e14"></a>`P_CORE_E14` | 节点有第二条 conditional edge，只有第一条会路由。请合并它们。 |
-| <a id="p_core_e15"></a>`P_CORE_E15` | barrier 成员可能路由到其 join 之外的地方；一旦如此，运行会以 barrier-stalled 结束。 |
+| <a id="p_core_e15"></a>`P_CORE_E15` | barrier 成员可能路由到其 join 之外的地方；一旦如此，运行会以 barrier-stalled 结束。路由到同一 `any_of` 槽位的另一个备选项不算绕过。 |
 | <a id="p_core_e16"></a>`P_CORE_E16` | 图中有环，但本次编译要求无环图。 |
+| <a id="p_core_e17"></a>`P_CORE_E17` | 同一个 `any_of` 槽位的两个备选项都可能运行：某个 fan-out 不经过 join 就同时到达二者，或一个备选项同时路由到 join 和另一个备选项。第二次到达会开启一个永远不会完成的新轮次，运行以 barrier-stalled 结束。请让备选项在路由上互斥，例如使用 conditional edge。witness 给出 fan-out 节点和两条路径。 |
 
 <a id="registry"></a>
 ## 注册表

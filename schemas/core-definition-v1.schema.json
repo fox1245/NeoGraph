@@ -84,8 +84,27 @@
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/nodeName" },
+              { "$ref": "#/$defs/joinSlot" }
+            ]
+          },
+          "description": "Every slot must be filled before the join runs: a node name by that node's signal, an any_of slot by a signal from any of its alternatives."
+        }
+      }
+    },
+    "joinSlot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["any_of"],
+      "properties": {
+        "any_of": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
           "items": { "$ref": "#/$defs/nodeName" },
-          "description": "Every listed node must signal the join before it runs."
+          "description": "Alternatives that fill this slot (#363). A slot with one alternative is the same as its name."
         }
       }
     },

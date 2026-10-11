@@ -3,6 +3,7 @@
 
 #include "run_context_runtime.h"
 #include "canonical_json.h"
+#include "graph_v2_keys.h"
 #include "managed_budget_journal.h"
 #include <neograph/graph/loader.h>
 #include <neograph/graph/validator.h>
@@ -87,9 +88,27 @@ ToolGate compose_tool_gates(ToolGate parent, ToolGate local) {
 
 // Barriers left holding partial signals when a run stops with nothing ready
 // and without reaching __end__ (issue #357). Such a run did not complete.
-json stalled_barriers(const BarrierState& state, const BarrierSpecs& specs) {
+json stalled_barriers(const BarrierState& state, const BarrierSpecs& specs, const JoinSpecs& joins) {
     json stalls = json::array();
     for (const auto& [node, received] : state) {
+        const auto join = joins.find(node);
+        if (!received.empty() && join != joins.end()) {
+            // #363: slots print as names or {"any_of": [...]}; legacy
+            // barriers below keep their witness bytes.
+            std::vector<std::set<std::string>> missing;
+            for (const auto& slot : join->second.slots) {
+                const bool filled = std::any_of(slot.begin(), slot.end(),
+                    [&](const std::string& source) { return received.count(source) > 0; });
+                if (!filled) missing.push_back(slot);
+            }
+            json got = json::array();
+            for (const auto& signaler : received) got.push_back(signaler);
+            stalls.push_back(json{{"node", node},
+                                  {"wait_for", detail::print_wait_for(join->second.slots)},
+                                  {"received", std::move(got)},
+                                  {"missing", detail::print_wait_for(missing)}});
+            continue;
+        }
         const auto spec = specs.find(node);
         if (received.empty() || spec == specs.end()) continue;
         json wait_for = json::array();
@@ -442,7 +461,8 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     // into AND-join semantics for those specific nodes.
     engine->scheduler_ =
         std::make_unique<Scheduler>(engine->edges_, engine->conditional_edges_,
-                                    std::move(cg.barrier_specs), resources.registry);
+                                    std::move(cg.barrier_specs), std::move(cg.join_specs),
+                                    resources.registry);
 
     GraphEngine* self         = engine.get();
     auto         retry_lookup = [self](const std::string& node_name) {
@@ -2065,7 +2085,8 @@ GraphEngine::execute_graph_async(
         // ends implicitly, and an end reached in an earlier step does not
         // cover a signal that arrives later (#357).
         if (plan.ready.empty() && !plan.hit_explicit_end) {
-            auto stalls = stalled_barriers(barrier_state, scheduler_->barrier_specs());
+            auto stalls = stalled_barriers(barrier_state, scheduler_->barrier_specs(),
+                                           scheduler_->join_specs());
             if (!stalls.empty()) barrier_stall = std::move(stalls);
         }
 

@@ -303,6 +303,7 @@ constexpr std::string_view kDocumentedCodes[] = {
     "P_CORE_E14",
     "P_CORE_E15",
     "P_CORE_E16",
+    "P_CORE_E17",
     "P_CORE_E3",
     "P_CORE_E4",
     "P_CORE_E5",

@@ -1513,6 +1513,90 @@
         "bundle_id": "sha256:c1d15289c96f031167ca8c30b072a6171f3e6582700c777a7f87848722462f10",
         "source_hash": "sha256:7dd20db4ce407513e181d95806edc306135fcb6c8c5254a81a35e91d4cb3da64"
       }
+    },
+    {
+      "all_platforms": {
+        "canonical_program_hash": "sha256:c43bb79071977c037b0e5d96cf75c5d638397fdaaee0151d97e1a5c2a6e40b23",
+        "compiled_plan_identity": "sha256:294a1bcbf58dd9c4fd9afcbd213f359aa06c1ac515563b3d76101eeb218c7235",
+        "control_source": false,
+        "definition_hash": "sha256:8837ad26815ccf0b875aecc1b5b235a3c71b419f9984d9ac38ce9aff3f1f6098",
+        "definition_name": "review",
+        "sealed_diagnostics": []
+      },
+      "definition": {
+        "conditional_edges": [
+          {
+            "condition": "probe.check",
+            "from": "B",
+            "routes": {
+              "fail": "FIX",
+              "pass": "D"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "A"
+          },
+          {
+            "from": "A",
+            "to": "B"
+          },
+          {
+            "from": "A",
+            "to": "C"
+          },
+          {
+            "from": "FIX",
+            "to": "D"
+          },
+          {
+            "from": "C",
+            "to": "D"
+          },
+          {
+            "from": "D",
+            "to": "__end__"
+          }
+        ],
+        "name": "review",
+        "nodes": {
+          "A": {
+            "type": "probe.node"
+          },
+          "B": {
+            "type": "probe.node"
+          },
+          "C": {
+            "type": "probe.node"
+          },
+          "D": {
+            "barrier": {
+              "wait_for": [
+                {
+                  "any_of": [
+                    "B",
+                    "FIX"
+                  ]
+                },
+                "C"
+              ]
+            },
+            "type": "probe.node"
+          },
+          "FIX": {
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "v2.any_of_slots",
+      "posix_quickjs": {
+        "bundle_id": "sha256:8a21f9c3b2c921bd996a326f8710bf402b56a1541a59e6495c28d63dd9b388ac",
+        "source_hash": "sha256:d1d45c2850d7473c0cdb836840c541816ac138fb4e964a23ea2888eb4b0c5c8f"
+      }
     }
   ],
   "format": "neograph-identity-golden",

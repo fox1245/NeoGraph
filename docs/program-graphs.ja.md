@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=ja source_sha256=d4875bd07b38d778142082c08e06659ddac7ee8fac8a704450b82c343e44d9eb -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=ja source_sha256=8082d68c638414c879b2854352e5fd4c95bb82f0ac014d1efa11b852de5991e1 -->
 # Program グラフ機能
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -30,3 +30,24 @@ export function define() {
 - **マイグレーション。** メタデータは `GraphSemanticMigrationAdapter` のトポロジー形状に含まれないため、変更してもマイグレーションを妨げません。`metadata_changes()` は、承認するホストのために追加、削除、変更されたポインターを挙げます。
 
 エラー: 2 回目の呼び出しやオブジェクト以外の引数には `P_JS_GRAPH_ARGUMENT`、ほかに `P_CORE_GC_FIELD_TYPE`、`P_CORE_GC_METADATA_LIMIT`、`P_CORE_GC_METADATA_TEXT`、`P_CORE_GC_FIELD_VALUE`（空のキーや予約されたキー）があります。
+
+## any_of による join スロット
+
+フラグ: `barrier.any_of`。
+
+```js
+graph.conditionalEdge("B", "t.check", {pass: "D", fail: "FIX"})
+  .edge("FIX", "D").edge("C", "D")
+  .barrier("D", [{any_of: ["B", "FIX"]}, "C"]);
+```
+
+`barrier(node, waitFor)` の各項目はノード名か、スロット `{any_of: [...]}` です。join は引き続きスロット単位の AND join です。
+
+- スロットは、選択肢のいずれかが join にシグナルを送ると満たされます。すべてのスロットが満たされると join が実行され、通常の barrier と同じくすべてのシグナルがクリアされます。
+- スロットに属さないノードのシグナルは記録されますが、数には入りません。`Command.goto` と `Send` は従来どおり join を迂回します。
+- 2 つの選択肢が同じ super-step に、または join の実行前に到着しても何も変わりません。join の実行後に到着した選択肢は決して終わらない新しいラウンドを開くため、実行は `P_CORE_BARRIER_STALLED` で終わります（安全側の失敗）。したがって選択肢どうしは排他的にルーティングされるべきで、2 つが両方とも実行され得る場合は `P_CORE_E17` が警告します。
+- Core 定義ではスロットは名前を UTF-8 のバイト順に並べた `{"any_of": [...]}` として出力され、スロットは最小の名前の順に並びます。名前が 1 つのスロットはその名前として出力されるため、`[{any_of: ["B"]}, "C"]` は `["B", "C"]` とバイト列も id も同じです。
+- 止まったスロット join の witness はスロットを挙げます。`wait_for` と `missing` には名前と `{"any_of": [...]}` オブジェクトが入ります。
+- バリデーターはスロットごとに検査します。どの選択肢も join へルーティングしなければ `P_CORE_E8`、メンバーが別の場所へルーティングし得るなら `P_CORE_E15` を出します。同じスロットの別の選択肢へのルートは迂回ではありません。
+
+エラー: 他の形の項目には `P_JS_GRAPH_ARGUMENT`、空または文字列でない `any_of`、`any_of` と並ぶ別のキー、入れ子の `any_of`、スロット内やスロット間で繰り返されたノードには `P_CORE_GC_BARRIER` が出ます。

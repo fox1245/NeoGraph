@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=ja source_sha256=6c6a54cfd7a02e2730b5342b393dc0fc8ed9afae8c6ea54bd1196f96006e27d7 -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=ja source_sha256=c4b7c36f1ce541c78785e7cd73889179b47e0c2fac4207ecf4eff50932331aa6 -->
 # Program 診断
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -138,15 +138,16 @@ Core 定義のパーサーが出す診断です。witness の `core_code` に Co
 | <a id="p_core_e5"></a>`P_CORE_E5` | fan-out の兄弟ノードが同じ overwrite チャネルに書き込み、最後の書き込みが非決定的に勝ちます。append reducer を使ってください。 |
 | <a id="p_core_e6"></a>`P_CORE_E6` | チャネルが読み書きされないか、書かれるだけで読まれないか、読まれるだけで初期値がありません。 |
 | <a id="p_core_e7"></a>`P_CORE_E7` | edge と route で `__start__` から到達できないノードがあります。 |
-| <a id="p_core_e8"></a>`P_CORE_E8` | barrier が自分へルーティングしないノードを待っているため、join は決して発火しません。 |
+| <a id="p_core_e8"></a>`P_CORE_E8` | barrier が自分へルーティングしないノード、またはどの選択肢も自分へルーティングしない `any_of` スロットを待っているため、join は決して発火しません。 |
 | <a id="p_core_e9"></a>`P_CORE_E9` | ノードに通常の in-edge が複数ありますが barrier がありません。到着する super-step ごとに 1 回実行されます。AND join なら barrier を追加し、XOR マージなら無視してください。 |
 | <a id="p_core_e10"></a>`P_CORE_E10` | conditional edge に route がないか、condition が返さないラベルをルーティングしているか、ラベルをルーティングしないまま残しています。 |
 | <a id="p_core_e11"></a>`P_CORE_E11` | ノードが `__end__` への経路のないサイクルに閉じ込められています。 |
 | <a id="p_core_e12"></a>`P_CORE_E12` | ローカルレジストリに reducer、ノード型、condition がありません。 |
 | <a id="p_core_e13"></a>`P_CORE_E13` | conditional edge でルーティングするノードから静的な edge が出ています。この edge は決して発火しません。削除するか route として追加してください。 |
 | <a id="p_core_e14"></a>`P_CORE_E14` | ノードに 2 つ目の conditional edge があります。ルーティングするのは最初の 1 つだけです。まとめてください。 |
-| <a id="p_core_e15"></a>`P_CORE_E15` | barrier のメンバーが自分の join 以外へルーティングし得ます。そうなると実行は barrier-stalled で終わります。 |
+| <a id="p_core_e15"></a>`P_CORE_E15` | barrier のメンバーが自分の join 以外へルーティングし得ます。そうなると実行は barrier-stalled で終わります。同じ `any_of` スロットの別の選択肢へのルートは迂回ではありません。 |
 | <a id="p_core_e16"></a>`P_CORE_E16` | グラフにサイクルがありますが、このコンパイルは非巡回グラフを要求しています。 |
+| <a id="p_core_e17"></a>`P_CORE_E17` | 1 つの `any_of` スロットの 2 つの選択肢が両方とも実行され得ます。fan-out が join を通らずに両方へ届くか、ある選択肢が join と別の選択肢の両方へルーティングします。2 番目の到着は終わらない新しいラウンドを開き、実行は barrier-stalled で終わります。例えば conditional edge を使って選択肢どうしを排他的にルーティングしてください。witness に fan-out ノードと 2 つの経路があります。 |
 
 <a id="registry"></a>
 ## レジストリ

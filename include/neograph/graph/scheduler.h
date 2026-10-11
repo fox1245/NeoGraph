@@ -82,6 +82,26 @@ using BarrierState = std::map<std::string, std::set<std::string>>;
 using BarrierSpecs = std::map<std::string, std::set<std::string>>;
 
 /**
+ * @brief An AND join whose wait_for slots may each list alternatives (#363).
+ *
+ * A slot is filled when any of its alternatives signals the join; the join
+ * fires when every slot is filled, and then all accumulated signals clear
+ * (the same clearing rule as a barrier). Signals from non-members are
+ * recorded in BarrierState and never count. Slots are disjoint and kept in
+ * canonical order: alternatives sorted by UTF-8 bytes, slots by their
+ * smallest source. A spec whose slots are all singletons is a legacy barrier
+ * and lives in BarrierSpecs instead, so its bytes never change.
+ */
+struct JoinSpec {
+    std::vector<std::set<std::string>> slots;
+
+    bool operator==(const JoinSpec&) const = default;
+};
+
+/// Joins with at least one multi-alternative slot, by join node name.
+using JoinSpecs = std::map<std::string, JoinSpec>;
+
+/**
  * @brief Immutable routing oracle for a compiled graph.
  *
  * Scheduler is constructed once per engine compile and shared across
@@ -112,6 +132,13 @@ public:
     Scheduler(const std::vector<Edge>&             edges,
               const std::vector<ConditionalEdge>&  conditional_edges,
               BarrierSpecs                         barrier_specs,
+              std::shared_ptr<const GraphRegistry> registry);
+
+    /// @brief Bind routing with legacy barriers and any_of joins (#363).
+    Scheduler(const std::vector<Edge>&             edges,
+              const std::vector<ConditionalEdge>&  conditional_edges,
+              BarrierSpecs                         barrier_specs,
+              JoinSpecs                            join_specs,
               std::shared_ptr<const GraphRegistry> registry);
 
     /**
@@ -239,10 +266,14 @@ public:
     /// Read-only view of declared barriers (mainly for tests).
     const BarrierSpecs& barrier_specs() const { return barrier_specs_; }
 
+    /// Read-only view of declared any_of joins (#363).
+    const JoinSpecs& join_specs() const { return join_specs_; }
+
 private:
     const std::vector<Edge>& edges_;
     const std::vector<ConditionalEdge>& conditional_edges_;
     BarrierSpecs barrier_specs_;
+    JoinSpecs join_specs_;
     std::shared_ptr<const GraphRegistry> registry_;
 };
 

@@ -132,15 +132,16 @@ These analyze what the graph means. Warnings are returned only; a bundle seals t
 | <a id="p_core_e5"></a>`P_CORE_E5` | Fan-out siblings write the same overwrite channel; the last writer wins nondeterministically. Use an append reducer. |
 | <a id="p_core_e6"></a>`P_CORE_E6` | A channel is never read or written, written but never read, or read but never written and has no initial value. |
 | <a id="p_core_e7"></a>`P_CORE_E7` | Nodes cannot be reached from `__start__` through edges and routes. |
-| <a id="p_core_e8"></a>`P_CORE_E8` | A barrier waits for a node that never routes to it, so the join can never fire. |
+| <a id="p_core_e8"></a>`P_CORE_E8` | A barrier waits for a node, or an `any_of` slot none of whose alternatives, routes to it, so the join can never fire. |
 | <a id="p_core_e9"></a>`P_CORE_E9` | A node has several plain in-edges and no barrier; it runs once per arriving super-step. Add a barrier for an AND join, or ignore it for an XOR merge. |
 | <a id="p_core_e10"></a>`P_CORE_E10` | A conditional edge has no routes, routes a label its condition never returns, or leaves a label unrouted. |
 | <a id="p_core_e11"></a>`P_CORE_E11` | Nodes are trapped in a cycle with no path to `__end__`. |
 | <a id="p_core_e12"></a>`P_CORE_E12` | The local registry lacks a reducer, node type or condition. |
 | <a id="p_core_e13"></a>`P_CORE_E13` | A static edge leaves a node that routes through a conditional edge; it never fires. Remove it or add it as a route. |
 | <a id="p_core_e14"></a>`P_CORE_E14` | A node has a second conditional edge; only the first one routes. Merge them. |
-| <a id="p_core_e15"></a>`P_CORE_E15` | A barrier member can route somewhere other than its join; when it does, the run ends barrier-stalled. |
+| <a id="p_core_e15"></a>`P_CORE_E15` | A barrier member can route somewhere other than its join; when it does, the run ends barrier-stalled. A route to another alternative of the same `any_of` slot is not a bypass. |
 | <a id="p_core_e16"></a>`P_CORE_E16` | The graph has a cycle but this compile requires an acyclic graph. |
+| <a id="p_core_e17"></a>`P_CORE_E17` | Two alternatives of one `any_of` slot can both run: a fan-out reaches both without passing the join, or one alternative routes both into the join and on to the other. The second arrival opens a round that never completes and the run ends barrier-stalled. Make the alternatives route-exclusive, for example through a conditional edge. The witness gives the fan-out node and both paths. |
 
 ## Registry
 

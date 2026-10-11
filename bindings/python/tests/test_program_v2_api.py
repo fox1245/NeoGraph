@@ -235,3 +235,51 @@ def test_metadata_errors_name_the_rule_they_break():
         _compile(_graph('.metadata({a: 1}).metadata({b: 2}).node("A", {type: "v2.task"}).entry("A")'))
     assert raised.value.diagnostics[0]["code"] == "P_JS_GRAPH_ARGUMENT"
 
+
+# ---------------------------------------------------------------------------
+# #363: any_of join slots
+# ---------------------------------------------------------------------------
+
+
+def _issue_357(condition, wait_for='[{any_of: ["B", "FIX"]}, "C"]', extra=""):
+    return _graph(
+        '.node("A", {type: "v2.task"}).node("B", {type: "v2.task"})'
+        '.node("C", {type: "v2.task"}).node("FIX", {type: "v2.task"})'
+        '.node("D", {type: "v2.task"})'
+        '.entry("A").edge("A", "B").edge("A", "C")'
+        f'.conditionalEdge("B", "{condition}", {{pass: "D", fail: "FIX"}})'
+        f'.edge("FIX", "D").edge("C", "D").barrier("D", {wait_for}).exit("D")' + extra
+    )
+
+
+@pytest.mark.parametrize("condition", ["v2.always_pass", "v2.always_fail"])
+def test_issue_357_slot_join_completes_on_both_routes(condition):
+    _host, _version, result = _run(_issue_357(condition))
+    assert result.status == ng.ProgramTerminalStatus.Completed, result.failure
+    assert result.execution_trace[-1] == "D"
+    assert result.execution_trace.count("D") == 1
+    if condition == "v2.always_fail":
+        assert "FIX" in result.execution_trace
+
+
+def test_issue_357_legacy_join_still_stalls_on_the_fail_route():
+    _host, _version, result = _run(_issue_357("v2.always_fail", wait_for='["B", "C"]'))
+    assert result.status == ng.ProgramTerminalStatus.Failed
+    assert result.failure.code == "P_CORE_BARRIER_STALLED"
+
+
+def test_slot_join_interrupt_before_then_resume():
+    host, _version, first = _run(_issue_357("v2.always_fail", extra='.interruptBefore("D")'))
+    assert first.status == ng.ProgramTerminalStatus.Interrupted
+    resumed = host.resume(first.run_id, {}).wait()
+    assert resumed.status == ng.ProgramTerminalStatus.Completed, resumed.failure
+    assert resumed.execution_trace[-1] == "D"
+
+
+def test_singleton_slot_hashes_like_the_legacy_member():
+    legacy = _compile(_issue_357("v2.always_pass", wait_for='["B", "C"]'))
+    wrapped = _compile(_issue_357("v2.always_pass", wait_for='[{any_of: ["B"]}, "C"]'))
+    assert (
+        wrapped.sealed_core_definitions[0]["definition_hash"]
+        == legacy.sealed_core_definitions[0]["definition_hash"]
+    )

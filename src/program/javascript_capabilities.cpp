@@ -66,10 +66,18 @@ json node_list_schema() {
 }
 
 json wait_for_schema() {
+    // A node name, or an any_of slot whose alternatives the join accepts (#363).
+    const json slot{{"type", "object"},
+                    {"additionalProperties", false},
+                    {"required", json::array({"any_of"})},
+                    {"properties", json{{"any_of", json{{"type", "array"},
+                                                        {"minItems", 1},
+                                                        {"uniqueItems", true},
+                                                        {"items", node_name_schema()}}}}}};
     return json{{"type", "array"},
                 {"minItems", 1},
                 {"uniqueItems", true},
-                {"items", node_name_schema()}};
+                {"items", json{{"oneOf", json::array({node_name_schema(), slot})}}}};
 }
 
 json retry_policy_schema() {
@@ -128,7 +136,8 @@ json graph_builder_methods() {
                                                      {"propertyNames", name_schema()},
                                                      {"additionalProperties", target_schema()}})})),
         builder("barrier", "barrier(node, waitFor)", "direct", 2, 2,
-                "barrier(node: string, waitFor: string[]): GraphBuilder;", "graph.barrier",
+                "barrier(node: string, waitFor: Array<string | { any_of: string[] }>): GraphBuilder;",
+                "graph.barrier",
                 json::array({argument("node", node_name_schema()),
                              argument("waitFor", wait_for_schema())})),
         builder("interruptBefore", "interruptBefore(...nodeNames)", "direct", 0, 0xffffffffu,
@@ -167,7 +176,7 @@ constexpr const char* kDtsPrelude =
     "  edge(from: string, to: string): GraphBuilder;\n"
     "  conditionalEdge(from: string, condition: string, routes: Record<string, string>):"
     " GraphBuilder;\n"
-    "  barrier(node: string, waitFor: string[]): GraphBuilder;\n"
+    "  barrier(node: string, waitFor: Array<string | { any_of: string[] }>): GraphBuilder;\n"
     "  interruptBefore(...nodeNames: Array<string | string[]>): GraphBuilder;\n"
     "  interruptAfter(...nodeNames: Array<string | string[]>): GraphBuilder;\n"
     "  retryPolicy(policy: RetryPolicy): GraphBuilder;\n"
@@ -219,7 +228,7 @@ json javascript_authoring_capability_manifest() {
                   {"graph.interrupts", true},
                   {"graph.retry_policy", true},
                   {"graph.metadata", true},
-                  {"barrier.any_of", false},
+                  {"barrier.any_of", true},
                   {"retry_policy.per_node", false},
                   {"failure_edges", false},
                   {"failure_exits", false},

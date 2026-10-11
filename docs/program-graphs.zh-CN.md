@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=zh-CN source_sha256=d4875bd07b38d778142082c08e06659ddac7ee8fac8a704450b82c343e44d9eb -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=zh-CN source_sha256=8082d68c638414c879b2854352e5fd4c95bb82f0ac014d1efa11b852de5991e1 -->
 # Program 图功能
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -30,3 +30,24 @@ export function define() {
 - **迁移。** 元数据不属于 `GraphSemanticMigrationAdapter` 的拓扑形状，因此修改它不会阻止迁移。`metadata_changes()` 为批准迁移的宿主列出新增、删除和更改的指针。
 
 错误：第二次调用或参数不是对象时为 `P_JS_GRAPH_ARGUMENT`，此外还有 `P_CORE_GC_FIELD_TYPE`、`P_CORE_GC_METADATA_LIMIT`、`P_CORE_GC_METADATA_TEXT` 和 `P_CORE_GC_FIELD_VALUE`（空键或保留键）。
+
+## 使用 any_of 的 join 槽位
+
+标志：`barrier.any_of`。
+
+```js
+graph.conditionalEdge("B", "t.check", {pass: "D", fail: "FIX"})
+  .edge("FIX", "D").edge("C", "D")
+  .barrier("D", [{any_of: ["B", "FIX"]}, "C"]);
+```
+
+`barrier(node, waitFor)` 的每一项是一个节点名，或一个槽位 `{any_of: [...]}`。join 仍是按槽位计算的 AND join：
+
+- 槽位中任一备选项向 join 发出信号即填满该槽位。所有槽位都填满后 join 运行，随后与普通 barrier 一样清空全部信号。
+- 槽位之外节点的信号会被记录，但从不计入。`Command.goto` 和 `Send` 仍像以前一样绕过 join。
+- 两个备选项在同一 super-step 到达，或在 join 运行前到达，不会改变任何结果。在 join 运行之后才到达的备选项会开启一个永远不会完成的新轮次，因此运行以 `P_CORE_BARRIER_STALLED` 结束（失败即关闭）。所以备选项应在路由上互斥；当其中两个都可能运行时，`P_CORE_E17` 会发出警告。
+- 在 Core 定义中，槽位输出为名称按 UTF-8 字节排序的 `{"any_of": [...]}`，槽位按各自最小的名称排序。只有一个名称的槽位输出为该名称本身，因此 `[{any_of: ["B"]}, "C"]` 与 `["B", "C"]` 的字节和 id 相同。
+- 停滞的槽位 join 会在其 witness 中列出槽位：`wait_for` 和 `missing` 包含名称和 `{"any_of": [...]}` 对象。
+- 校验器逐个槽位检查：没有任何备选项路由到 join 时报告 `P_CORE_E8`，成员可能路由到别处时报告 `P_CORE_E15`；路由到同一槽位的另一个备选项不算绕过。
+
+错误：其他形状的项报告 `P_JS_GRAPH_ARGUMENT`；空的或非字符串的 `any_of`、与 `any_of` 并列的其他键、嵌套的 `any_of`、在槽位内或槽位之间重复的节点报告 `P_CORE_GC_BARRIER`。

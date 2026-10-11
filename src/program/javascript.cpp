@@ -1475,8 +1475,29 @@ JSValue graph_barrier_impl(JSContext*    context,
     std::string node;
     json        wait_for;
     if (!read_string(context, argv[0], node, "barrier node") ||
-        !read_string_array(context, argv[1], wait_for, "barrier wait_for")) {
+        !read_json(context, argv[1], wait_for, "barrier wait_for")) {
         return JS_EXCEPTION;
+    }
+    // Node names, or {any_of: [node names]} slots (#363). Arrays pass through
+    // unsorted: the Core printer orders by UTF-8 bytes, which JavaScript's
+    // UTF-16 sort would not.
+    bool shaped = wait_for.is_array();
+    if (shaped) {
+        for (const auto& entry : wait_for) {
+            if (entry.is_string()) continue;
+            if (!entry.is_object() || entry.size() != 1 || !entry.contains("any_of") ||
+                !entry["any_of"].is_array()) {
+                shaped = false;
+                break;
+            }
+            for (const auto& source : entry["any_of"]) shaped = shaped && source.is_string();
+            if (!shaped) break;
+        }
+    }
+    if (!shaped) {
+        return graph_error(context, "P_JS_GRAPH_ARGUMENT",
+                           "NeoGraph graph barrier wait_for must be an array of node names or "
+                           "{any_of: [node names]} slots");
     }
     auto nodes = builder->definition["nodes"];
     if (!nodes.contains(node)) {

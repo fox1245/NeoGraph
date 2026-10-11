@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=ko source_sha256=6c6a54cfd7a02e2730b5342b393dc0fc8ed9afae8c6ea54bd1196f96006e27d7 -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=ko source_sha256=c4b7c36f1ce541c78785e7cd73889179b47e0c2fac4207ecf4eff50932331aa6 -->
 # Program 진단
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -138,15 +138,16 @@ Core 정의 파서가 내는 진단입니다. witness의 `core_code`에 Core 코
 | <a id="p_core_e5"></a>`P_CORE_E5` | fan-out 형제 노드들이 같은 overwrite 채널에 씁니다. 마지막 기록이 비결정적으로 이깁니다. append reducer를 사용하세요. |
 | <a id="p_core_e6"></a>`P_CORE_E6` | 채널을 읽지도 쓰지도 않거나, 쓰기만 하고 읽지 않거나, 읽기만 하는데 초기값이 없습니다. |
 | <a id="p_core_e7"></a>`P_CORE_E7` | edge와 route로 `__start__`에서 도달할 수 없는 노드가 있습니다. |
-| <a id="p_core_e8"></a>`P_CORE_E8` | barrier가 자신에게 라우팅하지 않는 노드를 기다리므로 join이 절대 발화하지 않습니다. |
+| <a id="p_core_e8"></a>`P_CORE_E8` | barrier가 자신에게 라우팅하지 않는 노드를, 또는 어떤 대안도 자신에게 라우팅하지 않는 `any_of` 슬롯을 기다리므로 join이 절대 발화하지 않습니다. |
 | <a id="p_core_e9"></a>`P_CORE_E9` | 노드에 일반 in-edge가 여러 개인데 barrier가 없습니다. 도착하는 super-step마다 한 번씩 실행됩니다. AND join이라면 barrier를 추가하고, XOR 병합이라면 무시하세요. |
 | <a id="p_core_e10"></a>`P_CORE_E10` | conditional edge에 route가 없거나, condition이 반환하지 않는 라벨을 라우팅하거나, 라벨을 라우팅하지 않은 채 남겨 둡니다. |
 | <a id="p_core_e11"></a>`P_CORE_E11` | 노드들이 `__end__`로 가는 경로가 없는 사이클에 갇혀 있습니다. |
 | <a id="p_core_e12"></a>`P_CORE_E12` | 로컬 레지스트리에 reducer, 노드 타입, condition이 없습니다. |
 | <a id="p_core_e13"></a>`P_CORE_E13` | conditional edge로 라우팅하는 노드에서 정적 edge가 나갑니다. 이 edge는 절대 발화하지 않습니다. 제거하거나 route로 추가하세요. |
 | <a id="p_core_e14"></a>`P_CORE_E14` | 노드에 두 번째 conditional edge가 있습니다. 첫 번째만 라우팅합니다. 하나로 합치세요. |
-| <a id="p_core_e15"></a>`P_CORE_E15` | barrier 멤버가 자신의 join이 아닌 곳으로 라우팅할 수 있습니다. 그렇게 되면 실행은 barrier-stalled로 끝납니다. |
+| <a id="p_core_e15"></a>`P_CORE_E15` | barrier 멤버가 자신의 join이 아닌 곳으로 라우팅할 수 있습니다. 그렇게 되면 실행은 barrier-stalled로 끝납니다. 같은 `any_of` 슬롯의 다른 대안으로 가는 라우트는 우회가 아닙니다. |
 | <a id="p_core_e16"></a>`P_CORE_E16` | 그래프에 사이클이 있지만 이번 컴파일은 비순환 그래프를 요구합니다. |
+| <a id="p_core_e17"></a>`P_CORE_E17` | 한 `any_of` 슬롯의 두 대안이 모두 실행될 수 있습니다. fan-out이 join을 거치지 않고 둘 다에 닿거나, 한 대안이 join과 다른 대안으로 함께 라우팅합니다. 두 번째 도착은 끝나지 않는 새 라운드를 열고 실행은 barrier-stalled로 끝납니다. 예를 들어 conditional edge를 써서 대안들이 서로 배타적으로 라우팅되게 하세요. witness에 fan-out 노드와 두 경로가 있습니다. |
 
 <a id="registry"></a>
 ## 레지스트리

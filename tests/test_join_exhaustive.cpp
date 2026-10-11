@@ -45,10 +45,9 @@
 //
 // Two switches:
 //
-//  - NEOGRAPH_JOIN_MODEL_ANY_OF (default 0): the Core parser and Scheduler do
-//    not know any_of slots yet (#363, WP4). Slot graphs run in the reference
-//    only. When WP4 lands, set it to 1 and pass the topology's join specs in
-//    scheduler_for().
+//  - NEOGRAPH_JOIN_MODEL_ANY_OF (default 1 since #363 WP4): any_of slot graphs
+//    are parsed by the Core and compared at the scheduler and engine levels.
+//    0 runs them in the reference only, as before the Core knew slots.
 //  - NEOGRAPH_JOIN_MODEL_ENGINE_DETECTS_STALLS (default 1): the engine reports
 //    a stalled run as RunStatus::BarrierStalled with a barrier_stalled witness
 //    (#357), so every engine run, stalled ones included, has to match the
@@ -84,7 +83,7 @@
 #include <vector>
 
 #ifndef NEOGRAPH_JOIN_MODEL_ANY_OF
-#define NEOGRAPH_JOIN_MODEL_ANY_OF 0
+#define NEOGRAPH_JOIN_MODEL_ANY_OF 1
 #endif
 #ifndef NEOGRAPH_JOIN_MODEL_ENGINE_DETECTS_STALLS
 #define NEOGRAPH_JOIN_MODEL_ENGINE_DETECTS_STALLS 1
@@ -504,10 +503,9 @@ void register_model_executables() {
 }
 
 /// The one place the harness builds a Scheduler from a parsed topology.
-/// WP4: pass topology.join_specs here once the Scheduler accepts them.
 std::unique_ptr<Scheduler> scheduler_for(const TopologySpec& topology) {
     return std::make_unique<Scheduler>(topology.edges, topology.conditional_edges,
-                                       topology.barrier_specs);
+                                       topology.barrier_specs, topology.join_specs, nullptr);
 }
 
 class RealScheduler {

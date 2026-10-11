@@ -1947,6 +1947,16 @@ void add_validation_help(PendingDiagnostic&      pending,
     } else if (core.code == "E8") {
         const auto member  = witness_string(witness, "waits_for");
         const auto barrier = witness_string(witness, "barrier");
+        if (member.empty() && witness.is_object() && witness.contains("slot")) {
+            for (const auto& alternative : witness["slot"]) {
+                const auto name = alternative.get<std::string>();
+                pending.help.related.push_back(
+                    {"'" + name + "' has no edge or route into '" + barrier + "'",
+                     diagnostics.help_coordinate("/root/definition/nodes/" +
+                                                 escape_pointer_segment(name))});
+            }
+            return;
+        }
         if (member.empty()) return;
         pending.help.related.push_back(
             {"'" + member + "' has no edge or route into '" + barrier + "'",
@@ -1997,7 +2007,7 @@ void add_validation_help(PendingDiagnostic&      pending,
 // it has no earlier bundle id to keep, and the original rules do not know the
 // new keys (#365 sealing rule (b)).
 bool uses_v2_keys(const graph::TopologySpec& topology) {
-    return !topology.metadata.is_null();
+    return !topology.metadata.is_null() || !topology.join_specs.empty();
 }
 
 // Errors and returned warnings follow the current rules. Sealed warnings come

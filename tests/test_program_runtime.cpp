@@ -4225,6 +4225,48 @@ TEST(ProgramRuntimeTest, GraphSemanticMigrationAdapterListsMetadataChanges) {
     EXPECT_EQ(to_plain.metadata_changes().size(), 3U);
 }
 
+// #363: an any_of join holds barrier state like a legacy barrier, so the
+// adapter lists it among the barriers its projection may carry.
+TEST(ProgramRuntimeTest, GraphSemanticMigrationAdapterListsSlotJoinsAsBarriers) {
+    AdmittedRuntime fixture(1);
+    const auto      slot_document = [](int epoch) {
+        auto document   = program_document("runtime-short-blocking");
+        auto definition = document["root"]["definition"];
+        definition["nodes"] =
+            json{{"work", json{{"type", "runtime-short-blocking"}, {"epoch", epoch}}},
+                 {"left", json{{"type", "runtime-followup"}}},
+                 {"right", json{{"type", "runtime-followup"}}},
+                 {"join",
+                  json{{"type", "runtime-followup"},
+                       {"barrier", json{{"wait_for",
+                                         json::array({json{{"any_of",
+                                                            json::array({"left", "right"})}}})}}}}}};
+        definition["edges"] = json::array({
+            json{{"from", "__start__"}, {"to", "work"}},
+            json{{"from", "work"}, {"to", "left"}},
+            json{{"from", "work"}, {"to", "right"}},
+            json{{"from", "left"}, {"to", "join"}},
+            json{{"from", "right"}, {"to", "join"}},
+            json{{"from", "join"}, {"to", "__end__"}},
+        });
+        document["root"]["definition"] = std::move(definition);
+        return document;
+    };
+    const auto source_version = fixture.admit_document(slot_document(1));
+    const auto target_version = fixture.admit_document(slot_document(2));
+    const auto source_bundle =
+        fixture.store->get_bundle("tenant:runtime", source_version.bundle_id());
+    const auto target_bundle =
+        fixture.store->get_bundle("tenant:runtime", target_version.bundle_id());
+    ASSERT_TRUE(source_bundle);
+    ASSERT_TRUE(target_bundle);
+    const auto adapter = GraphSemanticMigrationAdapter::prepare(
+        source_version, *source_bundle, target_version, *target_bundle);
+    const auto stored = json::parse(adapter.serialize_canonical());
+    EXPECT_EQ(stored.at("barrier_names"), json::array({"join"}));
+    EXPECT_EQ(GraphSemanticMigrationAdapter::parse(adapter.serialize_canonical()).id(), adapter.id());
+}
+
 TEST(ProgramRuntimeTest, GraphSemanticMigrationAdapterRejectsFrontierRename) {
     AdmittedRuntime fixture(1);
     const auto source_version = fixture.admit("runtime-short-blocking");

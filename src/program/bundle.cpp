@@ -337,7 +337,22 @@ void validate_core_definition_v1(const json& definition) {
             if (!barrier.contains("wait_for")) {
                 throw std::invalid_argument("Sealed Core node barrier requires wait_for");
             }
-            require_unique_string_array(barrier["wait_for"], "Sealed Core barrier wait_for", true);
+            if (graph::detail::uses_slot_syntax(barrier["wait_for"])) {
+                // #363 any_of slots: well formed and printed in the one canonical form.
+                std::vector<graph::CompilerDiagnostic> problems;
+                const auto slots = graph::detail::parse_wait_for_slots(
+                    barrier["wait_for"], "Sealed Core barrier", "/barrier", problems);
+                if (!slots)
+                    throw std::invalid_argument("Sealed Core barrier wait_for is malformed: " +
+                                                problems.front().message);
+                if (detail::canonical_json_bytes(graph::detail::print_wait_for(*slots)) !=
+                    detail::canonical_json_bytes(barrier["wait_for"]))
+                    throw std::invalid_argument(
+                        "Sealed Core barrier wait_for is not in canonical slot form");
+            } else {
+                require_unique_string_array(barrier["wait_for"], "Sealed Core barrier wait_for",
+                                            true);
+            }
         }
     }
 

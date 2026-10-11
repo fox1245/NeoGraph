@@ -83,6 +83,8 @@ struct NEOGRAPH_API TopologySpec {
     std::vector<Edge>            edges;
     std::vector<ConditionalEdge> conditional_edges;
     BarrierSpecs                 barrier_specs;
+    /// Joins with any_of slots (#363); a legacy-equivalent spec stays in barrier_specs.
+    JoinSpecs                    join_specs;
     std::set<std::string>        interrupt_before;
     std::set<std::string>        interrupt_after;
     std::optional<RetryPolicy>   retry_policy;
@@ -136,6 +138,7 @@ struct CompiledGraph {
     std::vector<Edge>                                 edges;
     std::vector<ConditionalEdge>                      conditional_edges;
     BarrierSpecs                                      barrier_specs;
+    JoinSpecs                                         join_specs;
     std::set<std::string>                             interrupt_before;
     std::set<std::string>                             interrupt_after;
     /// Present iff the JSON defined a top-level "retry_policy" object.
