@@ -17,6 +17,10 @@
 
 namespace neograph::program {
 
+namespace detail {
+class ProgramBundleAccess;
+}
+
 /**
  * The lowest recoverability/integrity class reachable through an executable
  * closure. Strict is strongest; unmanaged is an explicit developer-authorized
@@ -185,11 +189,21 @@ public:
     const std::vector<ExecutableIdentity>& executable_registry_identities() const noexcept;
     const std::vector<BudgetRequirement>&  declared_budget_requirements() const noexcept;
     const std::vector<SourceMapEntry>&     source_map() const noexcept;
+    /** Sealed diagnostics; part of id() and serialize_canonical(). */
     std::vector<Diagnostic>                diagnostics() const;
+    /**
+     * Diagnostics as the compiler returned them. They add authoring sites
+     * (JavaScript builder call sites) and authoring lints to diagnostics().
+     * They are not sealed, so they never change id(); a bundle that was not
+     * just compiled, such as a parsed one, returns diagnostics().
+     */
+    std::vector<Diagnostic>                compile_diagnostics() const;
     std::string                            serialize_canonical() const;
 
 private:
+    friend class detail::ProgramBundleAccess;
     struct Impl;
+    ProgramBundle(ProgramBundleData data, std::optional<std::vector<Diagnostic>> compiled);
     explicit ProgramBundle(std::shared_ptr<const Impl> impl);
     std::shared_ptr<const Impl> impl_;
 };

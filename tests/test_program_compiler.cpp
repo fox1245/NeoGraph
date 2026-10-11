@@ -1066,14 +1066,25 @@ TEST(ProgramCompilerTest, JavaScriptBuilderDiagnosticsCarryTheirCallSites) {
         "  graph.exit(\"join\");\n"
         "  return graph;\n"
         "}\n"));
+    // The id this program had before call sites existed: they stay out of the seal.
+    EXPECT_EQ(bundle.id(),
+              "sha256:f29627294489ecb6ca85bc0d883216d002b37ebb613411034caf28cbaaf29fde");
+    const auto sealed = find_diagnostic(bundle.diagnostics(), "P_CORE_E6");
+    ASSERT_TRUE(sealed.has_value());
+    EXPECT_EQ(sealed->primary.json_pointer, "");
+    EXPECT_FALSE(sealed->primary.span.has_value());
+    EXPECT_FALSE(find_diagnostic(ProgramBundle::parse(bundle.serialize_canonical())
+                                     .compile_diagnostics(),
+                                 "P_CORE_E6")
+                     ->primary.span.has_value());
 
-    const auto dead_channel = find_diagnostic(bundle.diagnostics(), "P_CORE_E6");
+    const auto dead_channel = find_diagnostic(bundle.compile_diagnostics(), "P_CORE_E6");
     ASSERT_TRUE(dead_channel.has_value());
     EXPECT_EQ(dead_channel->primary.source_id, "call-sites.js");
     EXPECT_EQ(dead_channel->primary.json_pointer, "/root/definition/channels/unused");
     ASSERT_TRUE(dead_channel->primary.span.has_value());
     EXPECT_EQ(dead_channel->primary.span->line_begin, 4U);
-    const auto fan_in = find_diagnostic(bundle.diagnostics(), "P_CORE_E9");
+    const auto fan_in = find_diagnostic(bundle.compile_diagnostics(), "P_CORE_E9");
     ASSERT_TRUE(fan_in.has_value());
     EXPECT_EQ(fan_in->primary.json_pointer, "/root/definition/nodes/join");
     ASSERT_TRUE(fan_in->primary.span.has_value());
@@ -1120,8 +1131,9 @@ TEST(ProgramCompilerTest, JavaScriptConfigControlCharactersWarnAtTheirCallSite) 
         "  return graph;\n"
         "}\n"));
 
+    EXPECT_FALSE(find_diagnostic(bundle.diagnostics(), "P_JS_CONTROL_CHARACTER").has_value());
     std::vector<neograph::program::Diagnostic> warnings;
-    for (const auto& diagnostic : bundle.diagnostics())
+    for (const auto& diagnostic : bundle.compile_diagnostics())
         if (diagnostic.code == "P_JS_CONTROL_CHARACTER") warnings.push_back(diagnostic);
     ASSERT_EQ(warnings.size(), 1U);
     EXPECT_EQ(warnings[0].severity, DiagnosticSeverity::Warning);

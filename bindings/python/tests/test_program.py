@@ -319,3 +319,29 @@ def test_registry_miss_hints_name_the_python_registration_call():
         )
     assert "ng.ReducerRegistry.register_reducer(name, fn)" in str(reducer.value)
     assert "::instance()" not in str(reducer.value)
+
+
+def test_compile_diagnostics_carry_call_sites_while_sealed_ones_do_not():
+    compiler = ng.ProgramCompiler(_registry(), "python-program-test/v1")
+    bundle = compiler.compile(
+        ng.ProgramSource.from_javascript(
+            "python-call-sites.js",
+            "export function define() {\n"
+            '  const graph = ng.graph("main");\n'
+            '  graph.channel("value", {reducer: "overwrite", initial: 0});\n'
+            '  graph.node("work", {type: "python_program_node", pattern: "\\b"});\n'
+            '  graph.entry("work").exit("work");\n'
+            "  return graph;\n"
+            "}\n",
+        )
+    )
+    returned = {d["code"]: d for d in bundle.compile_diagnostics}
+    assert returned["P_CORE_E6"]["span"]["line_begin"] == 3
+    control = returned["P_JS_CONTROL_CHARACTER"]
+    assert control["json_pointer"] == "/root/definition/nodes/work/pattern"
+    sealed = {d["code"]: d for d in bundle.diagnostics}
+    assert sealed["P_CORE_E6"]["span"] is None
+    assert "P_JS_CONTROL_CHARACTER" not in sealed
+    parsed = ng.ProgramBundle.parse(bundle.serialize_canonical())
+    assert parsed.id == bundle.id
+    assert parsed.compile_diagnostics == bundle.diagnostics

@@ -1,6 +1,7 @@
 #include <neograph/program/bundle.h>
 #include <neograph/program/schema.h>
 
+#include "bundle_access.h"
 #include "canonical_json.h"
 
 #include <algorithm>
@@ -1210,9 +1211,15 @@ struct ProgramBundle::Impl {
     std::string                id;
     std::string                canonical_bytes;
     std::optional<ProgramPlan> typed_plan;
+    // Not sealed: never part of data, id or canonical_bytes.
+    std::optional<std::vector<Diagnostic>> compile_diagnostics;
 };
 
-ProgramBundle::ProgramBundle(ProgramBundleData data) {
+ProgramBundle::ProgramBundle(ProgramBundleData data)
+    : ProgramBundle(std::move(data), std::nullopt) {}
+
+ProgramBundle::ProgramBundle(ProgramBundleData                      data,
+                             std::optional<std::vector<Diagnostic>> compiled) {
     ProgramBundleData owned(data);
     normalize_data(owned);
     auto impl   = std::make_shared<Impl>();
@@ -1229,7 +1236,13 @@ ProgramBundle::ProgramBundle(ProgramBundleData data) {
     } catch (const std::exception&) {
         impl->typed_plan.reset();
     }
-    impl_ = std::move(impl);
+    impl->compile_diagnostics = std::move(compiled);
+    impl_                     = std::move(impl);
+}
+
+ProgramBundle detail::ProgramBundleAccess::compiled(ProgramBundleData       data,
+                                                    std::vector<Diagnostic> compile_diagnostics) {
+    return ProgramBundle(std::move(data), std::move(compile_diagnostics));
 }
 
 ProgramBundle::ProgramBundle(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
@@ -1368,6 +1381,14 @@ const std::vector<SourceMapEntry>& ProgramBundle::source_map() const noexcept {
 }
 std::vector<Diagnostic> ProgramBundle::diagnostics() const {
     auto copy = impl_->data.diagnostics;
+    for (auto& diagnostic : copy) {
+        diagnostic.witness = detail::owned_json_copy(diagnostic.witness);
+    }
+    return copy;
+}
+std::vector<Diagnostic> ProgramBundle::compile_diagnostics() const {
+    if (!impl_->compile_diagnostics) return diagnostics();
+    auto copy = *impl_->compile_diagnostics;
     for (auto& diagnostic : copy) {
         diagnostic.witness = detail::owned_json_copy(diagnostic.witness);
     }

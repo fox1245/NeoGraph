@@ -517,9 +517,17 @@ void init_program(py::module_& m) {
             }
             return result;
         })
+        // diagnostics is the sealed copy (part of id); compile_diagnostics is what
+        // the compiler returned, with JavaScript call sites and authoring lints.
         .def_property_readonly("diagnostics", [](const ProgramBundle& value) {
             py::list result;
             for (const auto& diagnostic : value.diagnostics())
+                result.append(diagnostic_to_py(diagnostic));
+            return result;
+        })
+        .def_property_readonly("compile_diagnostics", [](const ProgramBundle& value) {
+            py::list result;
+            for (const auto& diagnostic : value.compile_diagnostics())
                 result.append(diagnostic_to_py(diagnostic));
             return result;
         })

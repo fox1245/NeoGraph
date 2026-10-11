@@ -1,6 +1,7 @@
 #include <neograph/program/admission.h>
 #include <neograph/program/compiler.h>
 
+#include "bundle_access.h"
 #include "canonical_json.h"
 #include "javascript.h"
 #include "registry_access.h"
@@ -178,9 +179,17 @@ std::optional<std::uint64_t> unsigned_integer(const json& value) {
 }
 
 struct PendingDiagnostic {
-    Diagnostic  diagnostic;
-    std::string generated_pointer;
-    std::string canonical_witness;
+    Diagnostic       diagnostic;
+    std::string      generated_pointer;
+    std::string      canonical_witness;
+    // The coordinate a successful bundle seals: no builder call site.
+    SourceCoordinate sealed_primary;
+    bool             sealed = true;
+};
+
+struct ReleasedWarnings {
+    std::vector<Diagnostic> sealed;
+    std::vector<Diagnostic> returned;
 };
 
 class DiagnosticAccumulator {
@@ -209,16 +218,28 @@ public:
         pending.diagnostic.phase    = phase;
         pending.diagnostic.code     = std::move(code);
         pending.diagnostic.severity = severity;
-        pending.diagnostic.primary  = map(pending.generated_pointer);
-        if (span) pending.diagnostic.primary.span = std::move(span);
+        pending.diagnostic.primary  = map(pending.generated_pointer, true);
+        pending.sealed_primary      = map(pending.generated_pointer, false);
+        if (span) pending.diagnostic.primary.span = pending.sealed_primary.span = std::move(span);
         pending.diagnostic.message  = std::move(message);
         pending.diagnostic.witness  = detail::owned_json_copy(witness);
         pending.canonical_witness   = detail::canonical_json_bytes(pending.diagnostic.witness);
         diagnostics_.push_back(std::move(pending));
     }
 
-    // Builder call sites locate diagnostics that no source-map entry covers.
-    // They are never sealed into the bundle source map.
+    // An authoring lint is returned with the compile but never sealed.
+    void add_unsealed_warning(CompilePhase phase,
+                              std::string  code,
+                              std::string  generated_pointer,
+                              std::string  message,
+                              json         witness) {
+        add(phase, std::move(code), DiagnosticSeverity::Warning, std::move(generated_pointer),
+            std::move(message), std::move(witness));
+        diagnostics_.back().sealed = false;
+    }
+
+    // Builder call sites locate returned diagnostics that no source-map entry
+    // covers. They never reach the bundle source map or its sealed diagnostics.
     void add_call_sites(std::vector<SourceMapEntry> call_sites) {
         call_sites_ = std::move(call_sites);
     }
@@ -238,12 +259,17 @@ public:
         throw ProgramCompileError(std::move(result));
     }
 
-    std::vector<Diagnostic> release_warnings() {
+    ReleasedWarnings release_warnings() {
         sort();
-        std::vector<Diagnostic> result;
-        result.reserve(diagnostics_.size());
-        for (auto& pending : diagnostics_)
-            result.push_back(std::move(pending.diagnostic));
+        ReleasedWarnings result;
+        for (auto& pending : diagnostics_) {
+            if (pending.sealed) {
+                auto sealed    = pending.diagnostic;
+                sealed.primary = std::move(pending.sealed_primary);
+                result.sealed.push_back(std::move(sealed));
+            }
+            result.returned.push_back(std::move(pending.diagnostic));
+        }
         diagnostics_.clear();
         return result;
     }
@@ -270,11 +296,12 @@ private:
         return best;
     }
 
-    SourceCoordinate map(std::string_view generated_pointer) const {
+    SourceCoordinate map(std::string_view generated_pointer, bool use_call_sites) const {
         const SourceMapEntry* best = closest_mapping(mappings_, generated_pointer);
         if (!best) {
             // A diagnostic inside a builder-produced subtree points at that call.
-            if (const auto* call = closest_mapping(call_sites_, generated_pointer)) {
+            if (const auto* call =
+                    use_call_sites ? closest_mapping(call_sites_, generated_pointer) : nullptr) {
                 return SourceCoordinate{call->authored.source_id, std::string(generated_pointer),
                                         call->authored.span};
             }
@@ -1541,11 +1568,11 @@ void add_control_character_warnings(const json&            value,
     if (found.empty()) return;
     json characters = json::array();
     for (auto& code : found) characters.push_back(std::move(code));
-    diagnostics.add(CompilePhase::Source, "P_JS_CONTROL_CHARACTER", DiagnosticSeverity::Warning,
-                    pointer,
-                    "JavaScript config string contains a control character; write regular "
-                    "expressions as /.../.source or String.raw`...`",
-                    json{{"control_characters", std::move(characters)}});
+    diagnostics.add_unsealed_warning(
+        CompilePhase::Source, "P_JS_CONTROL_CHARACTER", pointer,
+        "JavaScript config string contains a control character; write regular expressions as "
+        "/.../.source or String.raw`...`",
+        json{{"control_characters", std::move(characters)}});
 }
 
 void add_core_parse_diagnostics(const graph::ParseReport& report,
@@ -2370,8 +2397,14 @@ struct ProgramCompiler::Impl {
             data.executable_registry_identities = std::move(closure.identities);
             data.declared_budget_requirements   = std::move(parsed.budgets);
             data.source_map                     = std::move(source_map);
-            data.diagnostics                    = diagnostics.release_warnings();
-            return ProgramBundle(std::move(data));
+            // Sealed diagnostics keep their pre-call-site coordinates and omit
+            // authoring lints, so a bundle id depends only on the program. The
+            // returned copy carries JavaScript builder call sites and those lints;
+            // see ProgramBundle::compile_diagnostics().
+            auto warnings                       = diagnostics.release_warnings();
+            data.diagnostics                    = std::move(warnings.sealed);
+            return detail::ProgramBundleAccess::compiled(std::move(data),
+                                                         std::move(warnings.returned));
         } catch (const ProgramCompileError&) {
             throw;
         } catch (...) {
