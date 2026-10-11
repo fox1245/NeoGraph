@@ -283,3 +283,35 @@ def test_singleton_slot_hashes_like_the_legacy_member():
         wrapped.sealed_core_definitions[0]["definition_hash"]
         == legacy.sealed_core_definitions[0]["definition_hash"]
     )
+
+
+# ---------------------------------------------------------------------------
+# X2: witness paths, the any_of suggestion and the route table
+# ---------------------------------------------------------------------------
+
+
+def test_e15_suggests_the_slot_that_lets_the_fix_stand_in():
+    bundle = _compile(_issue_357("v2.always_fail", wait_for='["B", "C"]'))
+    bypass = [d for d in bundle.compile_diagnostics if d["code"] == "P_CORE_E15"][0]
+    assert bypass["witness"]["paths"] == {"fail": ["B", "FIX", "D"]}
+    suggestion = bypass["help"]["suggestions"][0]
+    assert suggestion["applicability"] == "maybe"
+    assert suggestion["edits"][0]["value"] == [{"any_of": ["B", "FIX"]}, "C"]
+    assert suggestion["message"].startswith("Let 'FIX' stand in for 'B': graph.barrier(")
+
+
+def test_stalled_run_witness_carries_the_route_from_the_trace():
+    _host, _version, result = _run(_issue_357("v2.always_fail", wait_for='["B", "C"]'))
+    assert result.failure.code == "P_CORE_BARRIER_STALLED"
+    stall = result.failure.witness["stalled_barriers"][0]
+    assert stall["missing"] == ["B"]
+    assert stall["paths"] == {"B": ["B", "FIX"]}
+    assert stall["suggested_wait_for"] == [{"any_of": ["B", "FIX"]}, "C"]
+
+
+def test_echo_routes_returns_the_routed_successor_table():
+    bundle = _compile(_issue_357("v2.always_pass"), echo_routes=True)
+    notes = [d for d in bundle.compile_diagnostics if d["code"] == "P_CORE_ROUTES"]
+    assert len(notes) == 1 and notes[0]["severity"] == "note"
+    assert notes[0]["witness"]["routes"]["B"] == ["D", "FIX"]
+    assert all(d["code"] != "P_CORE_ROUTES" for d in bundle.diagnostics)

@@ -69,6 +69,13 @@ struct ProgramCompilerConfig {
      * accepted program compiles to the same bundle either way.
      */
     bool require_acyclic = false;
+    /**
+     * Return the routed successor table of the root Core (X2) as a
+     * P_CORE_ROUTES note in the returned diagnostics, for tools and models
+     * that need to see how the scheduler will route. Never sealed: the bundle
+     * is the same either way.
+     */
+    bool echo_routes = false;
 };
 
 class NEOGRAPH_PROGRAM_API ProgramCompileError final : public std::runtime_error {

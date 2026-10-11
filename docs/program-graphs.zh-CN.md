@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=zh-CN source_sha256=8082d68c638414c879b2854352e5fd4c95bb82f0ac014d1efa11b852de5991e1 -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=zh-CN source_sha256=e889fd64d1855de1c7d0ddfc3d4a3ce929c2eef0f01d98dfa4b04c87a914103a -->
 # Program 图功能
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -51,3 +51,9 @@ graph.conditionalEdge("B", "t.check", {pass: "D", fail: "FIX"})
 - 校验器逐个槽位检查：没有任何备选项路由到 join 时报告 `P_CORE_E8`，成员可能路由到别处时报告 `P_CORE_E15`；路由到同一槽位的另一个备选项不算绕过。
 
 错误：其他形状的项报告 `P_JS_GRAPH_ARGUMENT`；空的或非字符串的 `any_of`、与 `any_of` 并列的其他键、嵌套的 `any_of`、在槽位内或槽位之间重复的节点报告 `P_CORE_GC_BARRIER`。
+
+## witness 路径与路由表
+
+- **绕过路径。** `P_CORE_E15` 的 witness 带有 `paths`：针对每条绕过路由，给出从成员经过该路由的路由序列；如果它回到 join，则以 join 结束。回到 join 时，join 之前的节点可以替代该成员：witness 会增加 `substitute` 和 `suggested_wait_for`，返回的诊断会建议用它替换 `wait_for`（适用性 `maybe`）。对于 #357 的结构，建议是 `[{"any_of": ["B", "FIX"]}, "C"]`。已经填充其他槽位的节点不会被建议。
+- **停滞路径。** 停滞 join 的 witness（`output["_neograph"]["barrier_stalled"]`，以及 Program 失败中的 `stalled_barriers`）会增加 `paths`：对每个已运行的缺失成员，给出它到某个已向 join 发信号的节点的路由，取自执行轨迹和路由后继映射；存在时也会给出同样的 `suggested_wait_for`。
+- **路由表。** `ProgramCompilerConfig::echo_routes`（Python：`ProgramCompiler(..., echo_routes=True)`）会返回一个 `P_CORE_ROUTES` 注记，其 `witness.routes` 将每个节点映射到调度器可以路由到的目标：其第一条 conditional edge 的路由，否则为其静态 edge。它从不被封存，因此两种情况下包都相同。

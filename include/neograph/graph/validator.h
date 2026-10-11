@@ -23,6 +23,8 @@
 #include <neograph/api.h>
 #include <neograph/graph/compiler.h>
 
+#include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -201,6 +203,17 @@ public:
     static ValidationReport validate(const CompiledGraph&     cg,
                                      const GraphRegistry&     registry,
                                      const ValidationOptions& options);
+
+    /**
+     * @brief The routed successor table the current rules reason over (X2).
+     *
+     * A node with a conditional edge maps to the targets of its first one (the
+     * only edge the scheduler consults); any other node maps to the targets of
+     * its static edges. "__start__" maps to the entry nodes and "__end__"
+     * appears as a target. Nodes without successors are absent.
+     */
+    static std::map<std::string, std::set<std::string>> routed_successors(
+        const TopologySpec& topology);
 };
 
 }  // namespace neograph::graph

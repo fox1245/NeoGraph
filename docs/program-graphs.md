@@ -50,3 +50,9 @@ An entry of `barrier(node, waitFor)` is a node name or a slot `{any_of: [...]}`.
 - The validator checks each slot: `P_CORE_E8` when no alternative routes into the join, and `P_CORE_E15` when a member can route elsewhere; a route to another alternative of the same slot is not a bypass.
 
 Errors: `P_JS_GRAPH_ARGUMENT` for an entry of another shape, and `P_CORE_GC_BARRIER` for an empty or non-string `any_of`, a key next to `any_of`, a nested `any_of`, or a node repeated within or across slots.
+
+## Witness paths and the route table
+
+- **Bypass paths.** A `P_CORE_E15` witness has `paths`: for each bypass route, the route sequence from the member through it, ending at the join when it comes back. When it comes back, the node before the join can stand in for the member: the witness adds `substitute` and `suggested_wait_for`, and the returned diagnostic suggests replacing `wait_for` with it (applicability `maybe`). For the #357 shape the suggestion is `[{"any_of": ["B", "FIX"]}, "C"]`. A node that already fills another slot is never suggested.
+- **Stall paths.** A stalled join's witness (`output["_neograph"]["barrier_stalled"]`, and `stalled_barriers` in a Program failure) adds `paths`, the routes from each missing member that ran to a node that signaled the join, taken from the trace and the routed successor map, and the same `suggested_wait_for` when one exists.
+- **Route table.** `ProgramCompilerConfig::echo_routes` (Python: `ProgramCompiler(..., echo_routes=True)`) returns a `P_CORE_ROUTES` note whose `witness.routes` maps each node to the targets the scheduler can route it to: the routes of its first conditional edge, or else its static edges. It is never sealed, so the bundle is the same either way.

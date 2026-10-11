@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=ko source_sha256=c4b7c36f1ce541c78785e7cd73889179b47e0c2fac4207ecf4eff50932331aa6 -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=ko source_sha256=04c88d44b223662706d62e2676a0ebc37e36410cf1d0f5b61584915e3c80761e -->
 # Program 진단
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -145,9 +145,10 @@ Core 정의 파서가 내는 진단입니다. witness의 `core_code`에 Core 코
 | <a id="p_core_e12"></a>`P_CORE_E12` | 로컬 레지스트리에 reducer, 노드 타입, condition이 없습니다. |
 | <a id="p_core_e13"></a>`P_CORE_E13` | conditional edge로 라우팅하는 노드에서 정적 edge가 나갑니다. 이 edge는 절대 발화하지 않습니다. 제거하거나 route로 추가하세요. |
 | <a id="p_core_e14"></a>`P_CORE_E14` | 노드에 두 번째 conditional edge가 있습니다. 첫 번째만 라우팅합니다. 하나로 합치세요. |
-| <a id="p_core_e15"></a>`P_CORE_E15` | barrier 멤버가 자신의 join이 아닌 곳으로 라우팅할 수 있습니다. 그렇게 되면 실행은 barrier-stalled로 끝납니다. 같은 `any_of` 슬롯의 다른 대안으로 가는 라우트는 우회가 아닙니다. |
+| <a id="p_core_e15"></a>`P_CORE_E15` | barrier 멤버가 자신의 join이 아닌 곳으로 라우팅할 수 있습니다. 그렇게 되면 실행은 barrier-stalled로 끝납니다. 같은 `any_of` 슬롯의 다른 대안으로 가는 라우트는 우회가 아닙니다. `witness.paths`는 우회 라우트마다 경로를 주며, 경로가 조인으로 돌아오면 `suggested_wait_for`와 반환된 제안이 조인 직전 노드를 멤버 대신 쓰게 합니다. |
 | <a id="p_core_e16"></a>`P_CORE_E16` | 그래프에 사이클이 있지만 이번 컴파일은 비순환 그래프를 요구합니다. |
 | <a id="p_core_e17"></a>`P_CORE_E17` | 한 `any_of` 슬롯의 두 대안이 모두 실행될 수 있습니다. fan-out이 join을 거치지 않고 둘 다에 닿거나, 한 대안이 join과 다른 대안으로 함께 라우팅합니다. 두 번째 도착은 끝나지 않는 새 라운드를 열고 실행은 barrier-stalled로 끝납니다. 예를 들어 conditional edge를 써서 대안들이 서로 배타적으로 라우팅되게 하세요. witness에 fan-out 노드와 두 경로가 있습니다. |
+| <a id="p_core_routes"></a>`P_CORE_ROUTES` | `ProgramCompilerConfig::echo_routes`(Python: `echo_routes=True`)를 켰을 때 반환되는 노트입니다. `witness.routes`는 각 노드와 `__start__`를 스케줄러가 라우팅할 수 있는 대상에 대응시킵니다. 봉인되지 않습니다. |
 
 <a id="registry"></a>
 ## 레지스트리
@@ -167,4 +168,4 @@ Core 정의 파서가 내는 진단입니다. witness의 `core_code`에 Core 코
 
 | 코드 | 의미와 해결 방법 |
 |---|---|
-| <a id="p_core_barrier_stalled"></a>`P_CORE_BARRIER_STALLED` | 더 이상 도착할 수 없는 신호를 join이 기다리는 상태로 Core 실행이 멈췄습니다. witness는 멈춘 join마다 `received`와 `missing`을 나열합니다. |
+| <a id="p_core_barrier_stalled"></a>`P_CORE_BARRIER_STALLED` | 더 이상 도착할 수 없는 신호를 join이 기다리는 상태로 Core 실행이 멈췄습니다. witness는 멈춘 join마다 `received`와 `missing`을 나열하며, 실행된 누락 멤버의 `paths`와 트레이스에 대신할 노드가 보이면 `suggested_wait_for`도 함께 줍니다. |

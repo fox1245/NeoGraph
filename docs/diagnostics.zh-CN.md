@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=zh-CN source_sha256=c4b7c36f1ce541c78785e7cd73889179b47e0c2fac4207ecf4eff50932331aa6 -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=zh-CN source_sha256=04c88d44b223662706d62e2676a0ebc37e36410cf1d0f5b61584915e3c80761e -->
 # Program 诊断
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -145,9 +145,10 @@ Program 编译会返回诊断：失败时为 `ProgramCompileError::diagnostics()
 | <a id="p_core_e12"></a>`P_CORE_E12` | 本地注册表缺少 reducer、节点类型或 condition。 |
 | <a id="p_core_e13"></a>`P_CORE_E13` | 一个通过 conditional edge 路由的节点上还有静态 edge，该 edge 永远不会触发。请删除它或把它改为一条 route。 |
 | <a id="p_core_e14"></a>`P_CORE_E14` | 节点有第二条 conditional edge，只有第一条会路由。请合并它们。 |
-| <a id="p_core_e15"></a>`P_CORE_E15` | barrier 成员可能路由到其 join 之外的地方；一旦如此，运行会以 barrier-stalled 结束。路由到同一 `any_of` 槽位的另一个备选项不算绕过。 |
+| <a id="p_core_e15"></a>`P_CORE_E15` | barrier 成员可能路由到其 join 之外的地方；一旦如此，运行会以 barrier-stalled 结束。路由到同一 `any_of` 槽位的另一个备选项不算绕过。`witness.paths` 给出每条绕过路由的路径；当路径回到 join 时，`suggested_wait_for` 和返回的建议会让 join 之前的节点替代该成员。 |
 | <a id="p_core_e16"></a>`P_CORE_E16` | 图中有环，但本次编译要求无环图。 |
 | <a id="p_core_e17"></a>`P_CORE_E17` | 同一个 `any_of` 槽位的两个备选项都可能运行：某个 fan-out 不经过 join 就同时到达二者，或一个备选项同时路由到 join 和另一个备选项。第二次到达会开启一个永远不会完成的新轮次，运行以 barrier-stalled 结束。请让备选项在路由上互斥，例如使用 conditional edge。witness 给出 fan-out 节点和两条路径。 |
+| <a id="p_core_routes"></a>`P_CORE_ROUTES` | 设置 `ProgramCompilerConfig::echo_routes`（Python：`echo_routes=True`）时返回的注记。`witness.routes` 将每个节点以及 `__start__` 映射到调度器可以路由到的目标。它从不被封存。 |
 
 <a id="registry"></a>
 ## 注册表
@@ -167,4 +168,4 @@ Program 编译会返回诊断：失败时为 `ProgramCompileError::diagnostics()
 
 | 代码 | 含义与修复 |
 |---|---|
-| <a id="p_core_barrier_stalled"></a>`P_CORE_BARRIER_STALLED` | Core 运行停止时，join 仍在等待再也不会到达的信号。witness 为每个停滞的 join 列出 `received` 和 `missing`。 |
+| <a id="p_core_barrier_stalled"></a>`P_CORE_BARRIER_STALLED` | Core 运行停止时，join 仍在等待再也不会到达的信号。witness 为每个停滞的 join 列出 `received` 和 `missing`，并给出已运行的缺失成员的 `paths`；当执行轨迹显示存在替代节点时还会给出 `suggested_wait_for`。 |

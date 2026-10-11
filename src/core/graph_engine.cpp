@@ -25,6 +25,11 @@
 #include <stdexcept>
 #include <utility>
 #include <algorithm>
+#include <deque>
+#include <functional>
+#include <map>
+#include <optional>
+#include <set>
 #include <chrono>
 #include <cstdint>
 #include <limits>
@@ -88,7 +93,59 @@ ToolGate compose_tool_gates(ToolGate parent, ToolGate local) {
 
 // Barriers left holding partial signals when a run stops with nothing ready
 // and without reaching __end__ (issue #357). Such a run did not complete.
-json stalled_barriers(const BarrierState& state, const BarrierSpecs& specs, const JoinSpecs& joins) {
+// X2: route sequences of missing members, derived from the trace and the
+// routed successor map: from a member that ran to a node that ran and
+// signaled the join. The first one found suggests that node as the member's
+// stand-in, unless it already fills another slot.
+void add_stall_paths(json&                                     stall,
+                     const std::vector<std::set<std::string>>& slots,
+                     const std::vector<std::string>&           missing_members,
+                     const std::set<std::string>&              received,
+                     const std::set<std::string>&              ran,
+                     const std::function<std::vector<std::string>(const std::string&)>& successors) {
+    json                       paths = json::object();
+    std::optional<std::pair<std::string, std::string>> substitute;
+    for (const auto& member : missing_members) {
+        if (!ran.count(member)) continue;
+        std::map<std::string, std::string> parent{{member, member}};
+        std::deque<std::string>            queue{member};
+        std::optional<std::string>         reached;
+        while (!queue.empty() && !reached) {
+            const auto current = queue.front();
+            queue.pop_front();
+            for (const auto& next : successors(current)) {
+                if (!ran.count(next) || parent.count(next)) continue;
+                parent[next] = current;
+                if (received.count(next)) {
+                    reached = next;
+                    break;
+                }
+                queue.push_back(next);
+            }
+        }
+        if (!reached) continue;
+        std::vector<std::string> path{*reached};
+        while (path.back() != member) path.push_back(parent[path.back()]);
+        std::reverse(path.begin(), path.end());
+        json encoded = json::array();
+        for (const auto& step : path) encoded.push_back(step);
+        paths[member] = std::move(encoded);
+        if (!substitute) substitute = std::make_pair(member, *reached);
+    }
+    if (paths.empty()) return;
+    stall["paths"] = std::move(paths);
+    auto fixed     = slots;
+    for (const auto& slot : fixed)
+        if (slot.count(substitute->second)) return;
+    for (auto& slot : fixed)
+        if (slot.count(substitute->first)) slot.insert(substitute->second);
+    stall["suggested_wait_for"] = detail::print_wait_for(fixed);
+}
+
+json stalled_barriers(const BarrierState& state, const BarrierSpecs& specs, const JoinSpecs& joins,
+                      const std::vector<std::string>& trace,
+                      const std::function<std::vector<std::string>(const std::string&)>& successors) {
+    const std::set<std::string> ran(trace.begin(), trace.end());
     json stalls = json::array();
     for (const auto& [node, received] : state) {
         const auto join = joins.find(node);
@@ -103,10 +160,14 @@ json stalled_barriers(const BarrierState& state, const BarrierSpecs& specs, cons
             }
             json got = json::array();
             for (const auto& signaler : received) got.push_back(signaler);
-            stalls.push_back(json{{"node", node},
-                                  {"wait_for", detail::print_wait_for(join->second.slots)},
-                                  {"received", std::move(got)},
-                                  {"missing", detail::print_wait_for(missing)}});
+            json stall{{"node", node},
+                       {"wait_for", detail::print_wait_for(join->second.slots)},
+                       {"received", std::move(got)},
+                       {"missing", detail::print_wait_for(missing)}};
+            std::vector<std::string> missing_members;
+            for (const auto& slot : missing) missing_members.insert(missing_members.end(), slot.begin(), slot.end());
+            add_stall_paths(stall, join->second.slots, missing_members, received, ran, successors);
+            stalls.push_back(std::move(stall));
             continue;
         }
         const auto spec = specs.find(node);
@@ -119,10 +180,18 @@ json stalled_barriers(const BarrierState& state, const BarrierSpecs& specs, cons
             if (!received.count(member)) missing.push_back(member);
         }
         for (const auto& signaler : received) got.push_back(signaler);
-        stalls.push_back(json{{"node", node},
-                              {"wait_for", std::move(wait_for)},
-                              {"received", std::move(got)},
-                              {"missing", std::move(missing)}});
+        json stall{{"node", node},
+                   {"wait_for", std::move(wait_for)},
+                   {"received", std::move(got)},
+                   {"missing", missing}};
+        std::vector<std::set<std::string>> slots;
+        std::vector<std::string>           missing_members;
+        for (const auto& member : spec->second) {
+            slots.push_back({member});
+            if (!received.count(member)) missing_members.push_back(member);
+        }
+        add_stall_paths(stall, slots, missing_members, received, ran, successors);
+        stalls.push_back(std::move(stall));
     }
     return stalls;
 }
@@ -2085,8 +2154,24 @@ GraphEngine::execute_graph_async(
         // ends implicitly, and an end reached in an earlier step does not
         // cover a signal that arrives later (#357).
         if (plan.ready.empty() && !plan.hit_explicit_end) {
+            // The routes the scheduler takes: a node's first conditional edge,
+            // otherwise its static edges.
+            const auto successors = [this](const std::string& from) {
+                std::vector<std::string> targets;
+                for (const auto& ce : conditional_edges_) {
+                    if (ce.from != from) continue;
+                    for (const auto& [key, target] : ce.routes) {
+                        (void)key;
+                        targets.push_back(target);
+                    }
+                    return targets;
+                }
+                for (const auto& e : edges_)
+                    if (e.from == from) targets.push_back(e.to);
+                return targets;
+            };
             auto stalls = stalled_barriers(barrier_state, scheduler_->barrier_specs(),
-                                           scheduler_->join_specs());
+                                           scheduler_->join_specs(), trace, successors);
             if (!stalls.empty()) barrier_stall = std::move(stalls);
         }
 

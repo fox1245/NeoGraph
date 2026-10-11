@@ -139,9 +139,10 @@ These analyze what the graph means. Warnings are returned only; a bundle seals t
 | <a id="p_core_e12"></a>`P_CORE_E12` | The local registry lacks a reducer, node type or condition. |
 | <a id="p_core_e13"></a>`P_CORE_E13` | A static edge leaves a node that routes through a conditional edge; it never fires. Remove it or add it as a route. |
 | <a id="p_core_e14"></a>`P_CORE_E14` | A node has a second conditional edge; only the first one routes. Merge them. |
-| <a id="p_core_e15"></a>`P_CORE_E15` | A barrier member can route somewhere other than its join; when it does, the run ends barrier-stalled. A route to another alternative of the same `any_of` slot is not a bypass. |
+| <a id="p_core_e15"></a>`P_CORE_E15` | A barrier member can route somewhere other than its join; when it does, the run ends barrier-stalled. A route to another alternative of the same `any_of` slot is not a bypass. `witness.paths` gives each bypass route; when one comes back to the join, `suggested_wait_for` and the returned suggestion let the node before the join stand in for the member. |
 | <a id="p_core_e16"></a>`P_CORE_E16` | The graph has a cycle but this compile requires an acyclic graph. |
 | <a id="p_core_e17"></a>`P_CORE_E17` | Two alternatives of one `any_of` slot can both run: a fan-out reaches both without passing the join, or one alternative routes both into the join and on to the other. The second arrival opens a round that never completes and the run ends barrier-stalled. Make the alternatives route-exclusive, for example through a conditional edge. The witness gives the fan-out node and both paths. |
+| <a id="p_core_routes"></a>`P_CORE_ROUTES` | A note returned when `ProgramCompilerConfig::echo_routes` (Python: `echo_routes=True`) is set. `witness.routes` maps each node, and `__start__`, to the targets the scheduler can route it to. It is never sealed. |
 
 ## Registry
 
@@ -159,4 +160,4 @@ Admission and run failures reach Python as `ng.ProgramAdmissionError` and `ng.Pr
 
 | Code | Meaning and fix |
 |---|---|
-| <a id="p_core_barrier_stalled"></a>`P_CORE_BARRIER_STALLED` | The Core run stopped with a join still waiting for signals that can no longer arrive. The witness lists each stalled join with `received` and `missing`. |
+| <a id="p_core_barrier_stalled"></a>`P_CORE_BARRIER_STALLED` | The Core run stopped with a join still waiting for signals that can no longer arrive. The witness lists each stalled join with `received` and `missing`, plus `paths` from missing members that ran and a `suggested_wait_for` when the trace shows a stand-in. |

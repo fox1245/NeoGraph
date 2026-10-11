@@ -325,6 +325,7 @@ constexpr std::string_view kDocumentedCodes[] = {
     "P_CORE_GC_SCHEMA_VERSION",
     "P_CORE_GC_UNKNOWN_FIELD",
     "P_CORE_ROUNDTRIP",
+    "P_CORE_ROUTES",
     "P_DIAGNOSTICS_TRUNCATED",
     "P_EXPAND_BOUND",
     "P_EXPAND_FAILURE",

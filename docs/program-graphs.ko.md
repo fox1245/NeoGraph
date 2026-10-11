@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=ko source_sha256=8082d68c638414c879b2854352e5fd4c95bb82f0ac014d1efa11b852de5991e1 -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=ko source_sha256=e889fd64d1855de1c7d0ddfc3d4a3ce929c2eef0f01d98dfa4b04c87a914103a -->
 # Program 그래프 기능
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -51,3 +51,9 @@ graph.conditionalEdge("B", "t.check", {pass: "D", fail: "FIX"})
 - 검증기는 슬롯마다 검사합니다. 어떤 대안도 조인으로 라우팅하지 않으면 `P_CORE_E8`, 멤버가 다른 곳으로 라우팅할 수 있으면 `P_CORE_E15`를 냅니다. 같은 슬롯의 다른 대안으로 가는 라우트는 우회가 아닙니다.
 
 오류: 다른 형태의 항목에는 `P_JS_GRAPH_ARGUMENT`, 비었거나 문자열이 아닌 `any_of`, `any_of` 옆의 다른 키, 중첩된 `any_of`, 슬롯 안이나 슬롯 사이에서 반복된 노드에는 `P_CORE_GC_BARRIER`가 납니다.
+
+## Witness 경로와 라우트 표
+
+- **우회 경로.** `P_CORE_E15` witness에는 `paths`가 있습니다. 우회 라우트마다 멤버에서 그 라우트를 거치는 라우트 순서이며, 다시 조인으로 돌아오면 조인에서 끝납니다. 돌아오는 경우 조인 직전의 노드가 멤버를 대신할 수 있으므로 witness에 `substitute`와 `suggested_wait_for`가 추가되고, 반환된 진단은 `wait_for`를 그것으로 바꾸도록 제안합니다(적용 가능성 `maybe`). #357 형태라면 제안은 `[{"any_of": ["B", "FIX"]}, "C"]`입니다. 이미 다른 슬롯을 채우는 노드는 제안하지 않습니다.
+- **멈춤 경로.** 멈춘 조인의 witness(`output["_neograph"]["barrier_stalled"]`, 그리고 Program 실패의 `stalled_barriers`)에는 `paths`가 추가됩니다. 실행된 누락 멤버마다 조인에 신호를 보낸 노드까지의 라우트이며, 트레이스와 라우팅된 후속 노드 맵에서 구합니다. 해당하는 경우 같은 `suggested_wait_for`도 들어갑니다.
+- **라우트 표.** `ProgramCompilerConfig::echo_routes`(Python: `ProgramCompiler(..., echo_routes=True)`)는 `P_CORE_ROUTES` 노트를 반환합니다. 이 노트의 `witness.routes`는 각 노드를 스케줄러가 라우팅할 수 있는 대상, 즉 첫 번째 conditional edge의 라우트나 그렇지 않으면 정적 edge에 대응시킵니다. 봉인되지 않으므로 어느 쪽이든 번들은 같습니다.

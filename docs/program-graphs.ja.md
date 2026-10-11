@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=ja source_sha256=8082d68c638414c879b2854352e5fd4c95bb82f0ac014d1efa11b852de5991e1 -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=ja source_sha256=e889fd64d1855de1c7d0ddfc3d4a3ce929c2eef0f01d98dfa4b04c87a914103a -->
 # Program グラフ機能
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -51,3 +51,9 @@ graph.conditionalEdge("B", "t.check", {pass: "D", fail: "FIX"})
 - バリデーターはスロットごとに検査します。どの選択肢も join へルーティングしなければ `P_CORE_E8`、メンバーが別の場所へルーティングし得るなら `P_CORE_E15` を出します。同じスロットの別の選択肢へのルートは迂回ではありません。
 
 エラー: 他の形の項目には `P_JS_GRAPH_ARGUMENT`、空または文字列でない `any_of`、`any_of` と並ぶ別のキー、入れ子の `any_of`、スロット内やスロット間で繰り返されたノードには `P_CORE_GC_BARRIER` が出ます。
+
+## witness の経路とルート表
+
+- **迂回経路。** `P_CORE_E15` の witness には `paths` があります。迂回ルートごとに、メンバーからそのルートを通るルートの並びで、join に戻る場合は join で終わります。戻る場合は join の直前のノードがメンバーの代わりになれるため、witness に `substitute` と `suggested_wait_for` が加わり、返される診断は `wait_for` をそれに置き換えるよう提案します（適用可能性 `maybe`）。#357 の形なら提案は `[{"any_of": ["B", "FIX"]}, "C"]` です。すでに別のスロットを満たしているノードは提案しません。
+- **停止経路。** 止まった join の witness（`output["_neograph"]["barrier_stalled"]`、および Program の失敗の `stalled_barriers`）に `paths` が加わります。実行された欠けたメンバーごとに、join にシグナルを送ったノードまでのルートで、トレースとルーティング済みの後続マップから求めます。該当する場合は同じ `suggested_wait_for` も入ります。
+- **ルート表。** `ProgramCompilerConfig::echo_routes`（Python: `ProgramCompiler(..., echo_routes=True)`）は `P_CORE_ROUTES` ノートを返します。その `witness.routes` は各ノードを、スケジューラーがルーティングし得る先、つまり最初の conditional edge のルート、なければ静的な edge に対応付けます。封印されないため、どちらでもバンドルは同じです。

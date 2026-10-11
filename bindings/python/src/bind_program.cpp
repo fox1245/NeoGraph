@@ -300,9 +300,11 @@ PolicySnapshot local_policy(const RegistrySnapshot& registry,
 
 ProgramCompilerConfig compiler_config(std::string             compiler_build_id,
                                       JavaScriptCompileLimits javascript_limits,
-                                      bool                    require_acyclic) {
+                                      bool                    require_acyclic,
+                                      bool                    echo_routes = false) {
     ProgramCompilerConfig config{std::move(compiler_build_id), javascript_limits};
     config.require_acyclic = require_acyclic;
+    config.echo_routes     = echo_routes;
     return config;
 }
 
@@ -646,14 +648,15 @@ void init_program(py::module_& m) {
 
     py::class_<ProgramCompiler>(m, "ProgramCompiler")
         .def(py::init([](RegistrySnapshot registry, std::string compiler_build_id,
-                         JavaScriptCompileLimits javascript_limits, bool require_acyclic) {
+                         JavaScriptCompileLimits javascript_limits, bool require_acyclic,
+                         bool echo_routes) {
             return std::make_unique<ProgramCompiler>(
                 std::move(registry),
                 compiler_config(std::move(compiler_build_id), javascript_limits,
-                                require_acyclic));
+                                require_acyclic, echo_routes));
         }), py::arg("registry"), py::arg("compiler_build_id") = "neograph-python-program/v1",
             py::arg("javascript_limits") = JavaScriptCompileLimits{},
-            py::arg("require_acyclic") = false)
+            py::arg("require_acyclic") = false, py::arg("echo_routes") = false)
         .def("compile", [](const ProgramCompiler& self, const ProgramSource& source,
                             py::object budget) {
             return budget.is_none() ? self.compile(source)

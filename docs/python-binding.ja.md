@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=66906ca80c769793fa97e508169dd98367d100ed72de9546c44744b61cac0766 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=84dd7bc5bb93d80b398bd1697c288602f29f93457b4dc6025bb8005c5652411e -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -427,7 +427,7 @@ print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 
 
 `ProgramRegistryBuilder.add_registered_node`、`add_registered_reducer`、`add_registered_condition` は、このプロセスにすでに登録された実行単位をコピーします。登録には `@ng.node` または `ng.NodeFactory.register_type`、`ng.ReducerRegistry.register_reducer`、`ng.ConditionRegistry.register_condition` を使います。登録されていない名前を渡すと、3 つのメソッドはいずれも `ng.ProgramRegistryError` を送出し、メッセージは必要な登録呼び出しを示します。このエラーの `kind` は `"node"`、`"reducer"`、`"condition"` のいずれかで、`name` は見つからなかった名前です。`ValueError` と `RuntimeError` の両方を継承するため、どちらかを捕捉する既存のハンドラーも引き続きこのエラーを捕捉します。レジストリスナップショットにないノードタイプ、リデューサー、条件を使う Program は、代わりにコンパイル時に失敗します。`ProgramCompiler.compile` と `LocalProgramHost.compile_admit` のどちらも、診断 `P_CORE_GC_REGISTRY_MISS` を持つ `ng.ProgramCompileError` を送出します。
 
-各診断 dict には `help` 項目があります。コンパイルが返した診断では `doc`（[診断ガイド](diagnostics.md)の該当項目）、`related`、`suggestions`、`candidates` を持つ dict で、封印された `bundle.diagnostics` では `None` です。例外には常に含まれます。
+各診断 dict には `help` 項目があります。コンパイルが返した診断では `doc`（[診断ガイド](diagnostics.md)の該当項目）、`related`、`suggestions`、`candidates` を持つ dict で、封印された `bundle.diagnostics` では `None` です。例外には常に含まれます。`ProgramCompiler(..., echo_routes=True)` は、ルーティング済みの後続ノード表を持つ `P_CORE_ROUTES` ノートも返します。
 
 `LocalProgramHost`は、オーナースコープのインメモリ便宜ホストです。それでもC++コンパイラ、Catalog、admissionポリシー、遷移ストア、およびProgramRuntimeを使用します。生成された提案は、admission前にホストの意味検証を追加で通過する必要があります。[DSL機能評価](DSL_CAPABILITY_EVAL.md)を参照してください。
 

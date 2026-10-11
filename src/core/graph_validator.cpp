@@ -375,6 +375,68 @@ void check_shadowed_transitions(Ctx& c) {
 
 // ---- E15: barrier member that can route around its join (issue #357) -----
 
+// X2: the shortest routed path from `from` to `to`, or empty.
+std::vector<std::string> shortest_path(const Ctx& c, const std::string& from, const std::string& to) {
+    std::map<std::string, std::string> parent;
+    std::queue<std::string>            q;
+    q.push(from);
+    parent[from] = from;
+    while (!q.empty()) {
+        const auto cur = q.front();
+        q.pop();
+        if (cur == to) break;
+        const auto it = c.succ.find(cur);
+        if (it == c.succ.end()) continue;
+        for (const auto& next : it->second) {
+            if (next == kEnd || parent.count(next)) continue;
+            parent[next] = cur;
+            q.push(next);
+        }
+    }
+    if (!parent.count(to)) return {};
+    std::vector<std::string> path{to};
+    while (path.back() != from) path.push_back(parent[path.back()]);
+    std::reverse(path.begin(), path.end());
+    return path;
+}
+
+// X2: for each bypass route, the route sequence from the member through it:
+// back into the join when it re-enters, otherwise just the first hop. When a
+// sequence re-enters, the node before the join can stand in for the member,
+// so the witness carries the computed any_of fix, unless that node already
+// belongs to another slot.
+void add_bypass_paths(const Ctx&                                c,
+                      const std::string&                        bnode,
+                      const std::string&                        member,
+                      const json&                               bypass,
+                      const std::vector<std::set<std::string>>& slots,
+                      json&                                     witness) {
+    json paths = json::object();
+    std::optional<std::string> substitute;
+    for (const auto& [label, target] : bypass.items()) {
+        const auto name = target.get<std::string>();
+        auto       tail = c.is_node(name) ? shortest_path(c, name, bnode) : std::vector<std::string>{};
+        std::vector<std::string> path{member};
+        if (tail.empty()) {
+            path.push_back(name);
+        } else {
+            path.insert(path.end(), tail.begin(), tail.end());
+            if (!substitute) substitute = path[path.size() - 2];
+        }
+        paths[label] = string_vector_to_array(path);
+    }
+    witness["paths"] = std::move(paths);
+    if (!substitute || *substitute == member || *substitute == bnode) return;
+    std::vector<std::set<std::string>> fixed = slots;
+    for (auto& slot : fixed) {
+        if (slot.count(*substitute)) return;  // already fills another slot
+    }
+    for (auto& slot : fixed)
+        if (slot.count(member)) slot.insert(*substitute);
+    witness["substitute"]         = *substitute;
+    witness["suggested_wait_for"] = detail::print_wait_for(fixed);
+}
+
 void check_barrier_bypass(Ctx& c) {
     for (const auto& [bnode, wait_for] : c.cg.barrier_specs) {
         for (const auto& u : wait_for) {
@@ -393,9 +455,13 @@ void check_barrier_bypass(Ctx& c) {
             auto message = "barrier '" + bnode + "' waits for '" + u + "', but route(s) " +
                            bypass.dump() + " of '" + u + "' lead elsewhere; when one is taken '" +
                            bnode + "' never fires and the run ends as barrier-stalled";
+            std::vector<std::set<std::string>> slots;
+            for (const auto& member : wait_for) slots.push_back({member});
+            json witness{{"barrier", bnode}, {"member", u}, {"routes", bypass}};
+            add_bypass_paths(c, bnode, u, bypass, slots, witness);
             c.warn("E15", "nodes." + bnode + ".barrier",
                    "/nodes/" + pointer_token(bnode) + "/barrier", std::move(message),
-                   json{{"barrier", bnode}, {"member", u}, {"routes", std::move(bypass)}});
+                   std::move(witness));
         }
     }
     // #363: per slot. A route to another alternative of the same slot is not
@@ -420,12 +486,14 @@ void check_barrier_bypass(Ctx& c) {
                                "' lead elsewhere; when one is taken and no other alternative "
                                "arrives, '" +
                                bnode + "' never fires and the run ends as barrier-stalled";
+                json witness{{"barrier", bnode},
+                             {"member", u},
+                             {"slot", string_set_to_array(slot)},
+                             {"routes", bypass}};
+                add_bypass_paths(c, bnode, u, bypass, join.slots, witness);
                 c.warn("E15", "nodes." + bnode + ".barrier",
                        "/nodes/" + pointer_token(bnode) + "/barrier", std::move(message),
-                       json{{"barrier", bnode},
-                            {"member", u},
-                            {"slot", string_set_to_array(slot)},
-                            {"routes", std::move(bypass)}});
+                       std::move(witness));
             }
         }
     }
@@ -901,6 +969,18 @@ std::vector<Diagnostic> run_checks(const TopologySpec&      topology,
 ValidationReport GraphValidator::validate(const TopologySpec&  topology,
                                           const GraphRegistry& registry) {
     return validate(topology, registry, ValidationOptions{});
+}
+
+std::map<std::string, std::set<std::string>> GraphValidator::routed_successors(
+    const TopologySpec& topology) {
+    static GraphRegistry unused_registry;
+    Ctx c{topology, unused_registry, true, {}, {}, {}};
+    for (const auto& [name, node_def] : topology.node_defs) {
+        (void)node_def;
+        c.node_names.insert(name);
+    }
+    build_successors(c);
+    return std::move(c.succ);
 }
 
 ValidationReport GraphValidator::validate(const TopologySpec&      topology,

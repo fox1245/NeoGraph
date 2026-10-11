@@ -1995,6 +1995,21 @@ void add_validation_help(PendingDiagnostic&      pending,
                      SuggestionApplicability::Maybe});
             }
         }
+    } else if (core.code == "E15") {
+        if (!witness.is_object() || !witness.contains("suggested_wait_for")) return;
+        const auto barrier    = witness_string(witness, "barrier");
+        const auto member     = witness_string(witness, "member");
+        const auto substitute = witness_string(witness, "substitute");
+        const json suggested  = witness["suggested_wait_for"];
+        pending.help.suggestions.push_back(
+            {"Let '" + substitute + "' stand in for '" + member + "': " +
+                 (context.javascript ? "graph.barrier(" + json(barrier).dump() + ", " +
+                                           suggested.dump() + ")"
+                                     : "\"wait_for\": " + suggested.dump()),
+             {{"replace",
+               "/root/definition/nodes/" + escape_pointer_segment(barrier) + "/barrier/wait_for", "",
+               suggested}},
+             SuggestionApplicability::Maybe});
     } else if (core.code == "E13") {
         pending.help.suggestions.push_back(
             {"Remove the edge, or add its target as a route of the conditional edge",
@@ -2782,6 +2797,21 @@ struct ProgramCompiler::Impl {
                 detail::RegistrySnapshotAccess::validate_local(registry, topology, current_rules),
                 detail::RegistrySnapshotAccess::validate_local(registry, topology, original_rules),
                 !uses_v2_keys(topology), help, diagnostics);
+            if (config.echo_routes) {
+                // X2: the routed successor table, returned only.
+                json routes = json::object();
+                for (const auto& [from, targets] : graph::GraphValidator::routed_successors(topology)) {
+                    json listed = json::array();
+                    for (const auto& target : targets) listed.push_back(target);
+                    routes[from] = std::move(listed);
+                }
+                auto& note = diagnostics.add(
+                    CompilePhase::CoreValidate, "P_CORE_ROUTES", DiagnosticSeverity::Note,
+                    "/root/definition",
+                    "Routed successors of each node, as the scheduler takes them",
+                    json{{"routes", std::move(routes)}});
+                note.sealed = false;
+            }
             if (diagnostics.has_errors()) diagnostics.throw_error();
             auto closure = resolve_closure(registry, topology, parsed.core_definition, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();

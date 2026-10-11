@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=ja source_sha256=c4b7c36f1ce541c78785e7cd73889179b47e0c2fac4207ecf4eff50932331aa6 -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=ja source_sha256=04c88d44b223662706d62e2676a0ebc37e36410cf1d0f5b61584915e3c80761e -->
 # Program 診断
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -145,9 +145,10 @@ Core 定義のパーサーが出す診断です。witness の `core_code` に Co
 | <a id="p_core_e12"></a>`P_CORE_E12` | ローカルレジストリに reducer、ノード型、condition がありません。 |
 | <a id="p_core_e13"></a>`P_CORE_E13` | conditional edge でルーティングするノードから静的な edge が出ています。この edge は決して発火しません。削除するか route として追加してください。 |
 | <a id="p_core_e14"></a>`P_CORE_E14` | ノードに 2 つ目の conditional edge があります。ルーティングするのは最初の 1 つだけです。まとめてください。 |
-| <a id="p_core_e15"></a>`P_CORE_E15` | barrier のメンバーが自分の join 以外へルーティングし得ます。そうなると実行は barrier-stalled で終わります。同じ `any_of` スロットの別の選択肢へのルートは迂回ではありません。 |
+| <a id="p_core_e15"></a>`P_CORE_E15` | barrier のメンバーが自分の join 以外へルーティングし得ます。そうなると実行は barrier-stalled で終わります。同じ `any_of` スロットの別の選択肢へのルートは迂回ではありません。`witness.paths` は迂回ルートごとの経路を示し、経路が join に戻る場合は `suggested_wait_for` と返される提案が join の直前のノードをメンバーの代わりにします。 |
 | <a id="p_core_e16"></a>`P_CORE_E16` | グラフにサイクルがありますが、このコンパイルは非巡回グラフを要求しています。 |
 | <a id="p_core_e17"></a>`P_CORE_E17` | 1 つの `any_of` スロットの 2 つの選択肢が両方とも実行され得ます。fan-out が join を通らずに両方へ届くか、ある選択肢が join と別の選択肢の両方へルーティングします。2 番目の到着は終わらない新しいラウンドを開き、実行は barrier-stalled で終わります。例えば conditional edge を使って選択肢どうしを排他的にルーティングしてください。witness に fan-out ノードと 2 つの経路があります。 |
+| <a id="p_core_routes"></a>`P_CORE_ROUTES` | `ProgramCompilerConfig::echo_routes`（Python: `echo_routes=True`）を設定したときに返されるノートです。`witness.routes` は各ノードと `__start__` を、スケジューラーがルーティングし得る先に対応付けます。封印されません。 |
 
 <a id="registry"></a>
 ## レジストリ
@@ -167,4 +168,4 @@ Core 定義のパーサーが出す診断です。witness の `core_code` に Co
 
 | コード | 意味と修正方法 |
 |---|---|
-| <a id="p_core_barrier_stalled"></a>`P_CORE_BARRIER_STALLED` | もう届かないシグナルを join が待ったまま Core の実行が止まりました。witness は止まった join ごとに `received` と `missing` を挙げます。 |
+| <a id="p_core_barrier_stalled"></a>`P_CORE_BARRIER_STALLED` | もう届かないシグナルを join が待ったまま Core の実行が止まりました。witness は止まった join ごとに `received` と `missing` を挙げ、実行された欠けたメンバーの `paths` と、トレースに代わりのノードが見えるときは `suggested_wait_for` も示します。 |
