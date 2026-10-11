@@ -16,9 +16,12 @@ on:
       - '.github/workflows/install-consumable.yml'
       - '.github/actions/**'
 
+# A newer push or dispatch cancels the run in progress for the same ref. The
+# nightly schedule does not: it queues behind a dispatched run instead of
+# cancelling it partway through the sanitizer job.
 concurrency:
   group: ci-extended-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
   grpc-graph-contract:
