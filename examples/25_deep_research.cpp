@@ -50,7 +50,10 @@ static std::pair<std::string, std::string> split_url(const std::string& url) {
     if (path_start == std::string::npos) {
         return {url, "/"};
     }
-    return {url.substr(0, path_start), url.substr(path_start)};
+    // Callers append a route ("md"), so the prefix must end in '/'.
+    auto prefix = url.substr(path_start);
+    if (prefix.back() != '/') prefix += '/';
+    return {url.substr(0, path_start), prefix};
 }
 
 // URL-encode for query strings (small subset: letters/digits untouched, space→+,
@@ -249,12 +252,14 @@ private:
 
 int main(int argc, char** argv) {
     // Existing environment variables win — OPENROUTER_API_KEY from a
-    // shell-exported value takes precedence over the .env value.
-    cppdotenv::load_dotenv(".env");
+    // shell-exported value takes precedence over the .env value, which is
+    // found from the cwd or any parent directory like the other examples.
+    cppdotenv::auto_load_dotenv();
 
     const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key) {
-        std::cerr << "Set OPENROUTER_API_KEY in the environment or in ./.env\n";
+        std::cerr << "Set OPENROUTER_API_KEY in the environment or in a .env in the "
+                     "working directory or a parent\n";
         return 1;
     }
 

@@ -20,6 +20,7 @@
 // fetch_url) so the agent can actually reach the web.
 //
 // Usage:
+//   ./example_postgres_react_hitl init-archive        (once, before the others)
 //   ./example_postgres_react_hitl run    "research question"
 //   ./example_postgres_react_hitl resume <thread_id> "approve|feedback"
 //   ./example_postgres_react_hitl status <thread_id>
@@ -28,9 +29,16 @@
 //   OPENROUTER_API_KEY  OpenRouter API key
 //   POSTGRES_URL        libpq connection string
 //                       e.g. postgresql://postgres:test@localhost:55432/neograph
+//   NEOGRAPH_NATIVE_ARCHIVE_DIR       native checkpoint archive directory
+//   NEOGRAPH_NATIVE_ARCHIVE_KEY_FILE  archive key file; its parent directory
+//                                     must be private (0700)
+//   NEOGRAPH_NATIVE_ARCHIVE_OWNER     stable archive owner name
+// `init-archive` provisions that archive once; every other subcommand
+// activates it and fails until it exists.
 //
 // Optional environment:
 //   CRAWL4AI_URL        defaults to http://localhost:11235
+//   CRAWL4AI_API_TOKEN  bearer token the Crawl4AI server was started with
 
 #include <neograph/neograph.h>
 #include "../provider_example_support.h"
@@ -62,7 +70,10 @@ static std::pair<std::string, std::string> split_url(const std::string& url) {
     if (scheme_end == std::string::npos) return {url, "/"};
     auto path_start = url.find('/', scheme_end + 3);
     if (path_start == std::string::npos) return {url, "/"};
-    return {url.substr(0, path_start), url.substr(path_start)};
+    // Callers append a route ("md"), so the prefix must end in '/'.
+    auto prefix = url.substr(path_start);
+    if (prefix.back() != '/') prefix += '/';
+    return {url.substr(0, path_start), prefix};
 }
 
 static std::string url_encode(const std::string& s) {
@@ -319,7 +330,7 @@ static int print_usage() {
         "NEOGRAPH_NATIVE_ARCHIVE_DIR, NEOGRAPH_NATIVE_ARCHIVE_KEY_FILE, "
         "NEOGRAPH_NATIVE_ARCHIVE_OWNER.\n"
         "Provision the archive once with init-archive; its key parent must be private (0700).\n"
-        "Optional env: CRAWL4AI_URL (default http://localhost:11235).\n";
+        "Optional env: CRAWL4AI_URL (default http://localhost:11235), CRAWL4AI_API_TOKEN.\n";
     return 2;
 }
 
