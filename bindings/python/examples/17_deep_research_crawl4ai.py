@@ -11,9 +11,12 @@ Mirrors the C++ example 25_deep_research.cpp's web-search path
 
 ## Setup
 
-    # 1. Crawl4AI container — exposes POST /md returning markdown.
-    docker run -d -p 11235:11235 --shm-size=1g --name crawl4ai \\
-        unclecode/crawl4ai:latest
+    # 1. Crawl4AI container — exposes POST /md returning markdown. Its
+    #    current secure API requires the same CRAWL4AI_API_TOKEN in the
+    #    container and in this client.
+    export CRAWL4AI_API_TOKEN="$(openssl rand -hex 32)"
+    docker run -d -p 127.0.0.1:11235:11235 --shm-size=1g --name crawl4ai \\
+        -e CRAWL4AI_API_TOKEN unclecode/crawl4ai:latest
 
     # 2. Postgres — anywhere libpq can reach.
     docker run -d -p 5432:5432 \\
@@ -26,7 +29,7 @@ Mirrors the C++ example 25_deep_research.cpp's web-search path
 
     # 4. Env (drop into examples/.env or export):
     export OPENAI_API_KEY=sk-...
-    export CRAWL4AI_URL=http://localhost:11235
+    export CRAWL4AI_URL=http://localhost:11235   # plus CRAWL4AI_API_TOKEN from step 1
     export NEOGRAPH_PG_DSN=postgresql://postgres:test@localhost:5432/neograph
 
     # 5. Run.
@@ -52,6 +55,7 @@ from _common import ask_text, ng, schema_provider
 # ─── Config (env-driven) ─────────────────────────────────────────────
 
 CRAWL4AI_URL = os.environ.get("CRAWL4AI_URL", "").rstrip("/")
+CRAWL4AI_API_TOKEN = os.environ.get("CRAWL4AI_API_TOKEN", "")
 PG_DSN = os.environ.get("NEOGRAPH_PG_DSN", "")
 
 RESEARCH_TRIGGER_PATTERN = re.compile(
@@ -66,20 +70,26 @@ class Crawl4AIClient:
     """Thin POST /md wrapper. Mirrors the C++ Crawl4AIClient in
     examples/25_deep_research.cpp."""
 
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, api_token: str = ""):
         if not base_url:
             raise ValueError("Crawl4AIClient requires a non-empty base_url")
         self.base_url = base_url.rstrip("/")
+        self.api_token = api_token
 
     def search_markdown(self, query: str, *, max_chars: int = 8000) -> str:
         """Search via DuckDuckGo HTML, return cleaned markdown of the
         result list. Capped to keep researcher context small."""
         ddg = f"https://duckduckgo.com/html/?q={urllib.parse.quote_plus(query)}"
+        headers = {"Authorization": f"Bearer {self.api_token}"} if self.api_token else {}
         resp = requests.post(
             f"{self.base_url}/md",
             json={"url": ddg, "f": "bm25", "q": query},
+            headers=headers,
             timeout=60,
         )
+        if resp.status_code == 401 and not self.api_token:
+            raise RuntimeError("Crawl4AI /md requires CRAWL4AI_API_TOKEN; configure the "
+                               "same bearer token for the client and server")
         resp.raise_for_status()
         data = resp.json()
         if not data.get("success"):
@@ -90,7 +100,7 @@ class Crawl4AIClient:
 
 SEARCH_CLIENT: Crawl4AIClient | None
 if CRAWL4AI_URL:
-    SEARCH_CLIENT = Crawl4AIClient(CRAWL4AI_URL)
+    SEARCH_CLIENT = Crawl4AIClient(CRAWL4AI_URL, CRAWL4AI_API_TOKEN)
     print(f"[17] using Crawl4AI at {CRAWL4AI_URL}")
 else:
     SEARCH_CLIENT = None
