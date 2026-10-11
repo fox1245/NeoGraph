@@ -18,6 +18,7 @@ These tests drive the sealed-v1 JavaScript Program API through the Python bindin
 | `test_08_live_llm.py` | a Program whose node calls a model: a local peer by default, OpenRouter when enabled; a Python node and a bound `llm_call` |
 | `test_09_bound_llm.py` | `llm_call` bound through `node_context` (#372): reported and estimated costs, refusals before sending (budget, unknown model, router alias), zero budget, ids without a provider, `all` and `quorum` against one budget, a crash after the call is journaled and recovery that charges it once |
 | `test_10_failure_routing.py` | failure routing (#364): a failing TEST routed to an `interruptBefore` handler with its record, resume along the retry and abort routes, author codes, redacted error text, `max_visits`, the `max_node_retries` ceiling, a Program diagnostic inside a node, and a resume in a new process with SQLite |
+| `test_11_attempt_timeout.py` | attempt timeouts (#364): a slow Python node that times out and recovers on retry, a node that always times out routed to its handler as `NG.Timeout` (and failing the run without a handler), a late completion that never reaches the result or the trace, a node that ignores cancellation past its stop deadline (`NG.EffectUncertain`), and a backoff that would cross `wall_time_ms` stopping with kind `deadline` |
 
 `support.py` holds the shared Python nodes, conditions, registry, budgets and JavaScript builders.
 

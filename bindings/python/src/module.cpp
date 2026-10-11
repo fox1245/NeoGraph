@@ -6,6 +6,8 @@
 
 #include "opaque_types.h"
 
+#include <neograph/graph/executor.h>
+
 #include <pybind11/pybind11.h>
 #include <pybind11/stl_bind.h>
 
@@ -142,4 +144,13 @@ PYBIND11_MODULE(_neograph, m) {
 #ifdef NEOGRAPH_PYBIND_HAS_MCP
     neograph::pybind::init_mcp(m);
 #endif
+
+    // A node attempt that ignored its cancellation past its stop deadline
+    // (#364) can outlive its run; when its body is Python it needs the
+    // interpreter to finish. Wait for such attempts before the interpreter
+    // shuts down, with the GIL released so they can.
+    py::module_::import("atexit").attr("register")(py::cpp_function([] {
+        py::gil_scoped_release release;
+        neograph::graph::wait_for_node_attempts();
+    }));
 }

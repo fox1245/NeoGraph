@@ -1217,6 +1217,16 @@ void init_graph(py::module_& m) {
         .def("set_node_retry_policy", &GraphEngine::set_node_retry_policy,
             py::arg("node_name"), py::arg("policy"),
             "Override the runtime retry policy for one node.")
+        .def("set_node_attempt_timeout_ms", &GraphEngine::set_node_attempt_timeout_ms,
+            py::arg("node_name"), py::arg("timeout_ms"),
+            "Set (100 to 3 600 000 ms) or clear (None) a host attempt timeout "
+            "for one node (#364). A timed-out attempt is cancelled and fails "
+            "with NG.Timeout; its late completion is discarded. For a node "
+            "whose definition declares attempt_timeout_ms the shorter of the "
+            "two applies: the host may only tighten it.")
+        .def("resolved_attempt_timeout_ms", &GraphEngine::resolved_attempt_timeout_ms,
+            py::arg("node_name"),
+            "The attempt timeout node_name runs with, in ms, or None (#364).")
 
         .def("set_node_cache_enabled",
             [](GraphEngine& self, const std::string& node_name, bool enabled,

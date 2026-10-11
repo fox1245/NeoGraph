@@ -157,9 +157,12 @@ class Step(ng.GraphNode):
     Config keys (all optional):
       boom: true                 raise RuntimeError
       boom_on_topic: "t"         raise RuntimeError when the "topic" channel is "t"
+      boom_first: true           raise RuntimeError on this node's first call in the test only
       ask: "question"            raise ng.NodeInterrupt until a resume value arrives
       delay_ms: N                cooperative sleep that polls input.ctx.cancel_token
       blocking_sleep_ms: N       plain time.sleep (a node that ignores cancellation)
+      slow_first_ms: N           sleep N ms on this node's first call in the test only;
+                                 with cooperative: true the sleep polls the cancel token
       delay_from_state: true     read the delay in ms from the "delay" channel
       incr: true                 counter += 1
       record_resume: true        write input.ctx.resume_value to the "answer" channel
@@ -186,12 +189,18 @@ class Step(ng.GraphNode):
     def run(self, input):
         config = self._config
         JOURNAL.add("started", self._name)
-        if config.get("boom") or (
+        first_call = JOURNAL.names("started").count(self._name) == 1
+        if config.get("boom") or (config.get("boom_first") and first_call) or (
                 "boom_on_topic" in config and input.state.get("topic") == config["boom_on_topic"]):
             JOURNAL.add("raised", self._name)
             raise RuntimeError(f"boom from {self._name}")
         if config.get("blocking_sleep_ms"):
             time.sleep(config["blocking_sleep_ms"] / 1000.0)
+        if config.get("slow_first_ms") and first_call:
+            if config.get("cooperative"):
+                self._sleep(input, config["slow_first_ms"])
+            else:
+                time.sleep(config["slow_first_ms"] / 1000.0)
         delay = config.get("delay_ms") or 0
         if config.get("delay_from_state"):
             delay = input.state.get("delay") or 0

@@ -8,6 +8,7 @@ receives the original exception object.
 """
 
 import itertools
+import time
 
 import pytest
 
@@ -353,6 +354,70 @@ def test_resolved_retry_policy_only_tightens_a_sealed_node():
     resolved = engine.resolved_retry_policy("work")
     assert resolved.max_retries == 3
     assert resolved.initial_delay_ms == 50
+
+
+def _slow_then_fast_node(first_sleep_s):
+    """A Python node whose first call sleeps (ignoring cancellation); later calls return."""
+    calls = []
+
+    class Node(ng.GraphNode):
+        def __init__(self, name):
+            super().__init__()
+            self._name = name
+
+        def get_name(self):
+            return self._name
+
+        def run(self, _input):
+            calls.append(len(calls))
+            if len(calls) == 1:
+                time.sleep(first_sleep_s)
+            return [ng.ChannelWrite("result", f"call {len(calls) - 1}")]
+
+    return Node, calls
+
+
+def test_a_timed_out_python_attempt_is_retried_and_its_late_result_discarded():
+    node, calls = _slow_then_fast_node(0.6)
+    engine = _routed_engine(node, policy={"attempt_timeout_ms": 150, "max_retries": 1,
+                                          "initial_delay_ms": 10, "max_delay_ms": 10})
+    assert engine.resolved_attempt_timeout_ms("work") == 150
+    result = engine.run(ng.RunConfig())
+    assert result.status == ng.RunStatus.Completed
+    assert len(calls) == 2
+    # The first call returned after its timeout: nothing it wrote counts.
+    assert result.output["channels"]["result"]["value"] == "call 1"
+    assert result.output["channels"]["failures"]["value"] == []
+
+
+def test_attempt_timeout_exhaustion_is_routed_as_ng_timeout():
+    node, calls = _slow_then_fast_node(0.4)
+    engine = _routed_engine(node, policy={"attempt_timeout_ms": 150})
+    result = engine.run(ng.RunConfig())
+    assert result.execution_trace == ["work", "handler"]
+    failures = result.output["channels"]["failures"]["value"]
+    assert failures == [{"node": "work", "kind": "exhausted", "code": "NG.Timeout",
+                         "attempts": 1, "retryable": True, "step": 0, "routed_to": "handler",
+                         "effects": []}]
+    assert len(calls) == 1
+
+
+def test_a_host_attempt_timeout_may_only_tighten_the_definition():
+    node, _calls = _slow_then_fast_node(0.0)
+    engine = _routed_engine(node, policy={"attempt_timeout_ms": 1000})
+    engine.set_node_attempt_timeout_ms("work", 400)
+    assert engine.resolved_attempt_timeout_ms("work") == 400
+    engine.set_node_attempt_timeout_ms("work", 5000)
+    assert engine.resolved_attempt_timeout_ms("work") == 1000
+    engine.set_node_attempt_timeout_ms("work", None)
+    assert engine.resolved_attempt_timeout_ms("work") == 1000
+    assert engine.resolved_attempt_timeout_ms("handler") is None
+    engine.set_node_attempt_timeout_ms("handler", 250)
+    assert engine.resolved_attempt_timeout_ms("handler") == 250
+    with pytest.raises(ValueError):
+        engine.set_node_attempt_timeout_ms("handler", 50)
+    with pytest.raises(ValueError):
+        engine.set_node_attempt_timeout_ms("missing", 500)
 
 
 def test_a_program_diagnostic_raised_by_a_node_is_not_retried():
