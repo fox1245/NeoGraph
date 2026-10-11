@@ -98,12 +98,20 @@ static json seed_core() {
 }
 
 // REAL fitness: gate, then RUN the harness and read the computed acc.
-struct Fit { bool valid = false; double acc = 0; double score = -1e9; };
+// An invalid candidate keeps the first reason it failed, for reporting.
+struct Fit { bool valid = false; double acc = 0; double score = -1e9; std::string error; };
+static Fit invalid(std::string stage, const std::string& message) {
+    return {.error = stage + ": " + message.substr(0, message.find('\n'))};
+}
 static Fit fitness(const json& core, const ng::NodeContext& ctx) {
     try {
         auto cg = ng::GraphCompiler::compile(core, ctx);
-        if (ng::GraphValidator::validate(cg).has_errors()) return {};
-    } catch (const std::exception&) { return {}; }
+        const auto report = ng::GraphValidator::validate(cg);
+        if (report.has_errors()) {
+            const auto* first = report.errors().front();
+            return invalid("validate", first->code + " " + first->message);
+        }
+    } catch (const std::exception& e) { return invalid("compile", e.what()); }
     try {
         auto          engine = ng::GraphEngine::build(core, ng::EngineConfig{.node_context = ctx});
         ng::RunConfig rc; rc.max_steps = 40; rc.input = {{"acc", 0}};
@@ -111,7 +119,7 @@ static Fit fitness(const json& core, const ng::NodeContext& ctx) {
         json av = res.has_channel("acc") ? res.channel<json>("acc") : json(0);
         double a = av.is_number() ? av.get<double>() : 0.0;
         return {true, a, -std::abs(a - kTarget)};
-    } catch (const std::exception&) { return {}; }
+    } catch (const std::exception& e) { return invalid("run", e.what()); }
 }
 
 struct Ind { json core; double score; double acc; std::string origin; };
@@ -215,6 +223,7 @@ int main(int argc, char** argv) {
             if (imp) {
                 Fit f = fitness(*imp, ctx);
                 std::cout << "   [Lamarckian] LLM refinement acc=" << f.acc << "  fitness " << f.score;
+                if (!f.valid) std::cout << "  (invalid harness, " << f.error << ")";
                 if (f.valid && f.score > best.score) {
                     pop.push_back({*imp, f.score, f.acc, "LLM"});
                     std::sort(pop.begin(), pop.end(), [](const Ind& a, const Ind& b) {
