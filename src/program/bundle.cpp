@@ -1,6 +1,7 @@
 #include <neograph/program/bundle.h>
 #include <neograph/program/schema.h>
 
+#include "../core/graph_v2_keys.h"
 #include "bundle_access.h"
 #include "canonical_json.h"
 
@@ -265,7 +266,7 @@ void validate_core_definition_v1(const json& definition) {
     detail::reject_unknown_fields(
         definition, "Sealed Core definition",
         {"schema_version", "name", "channels", "nodes", "edges", "conditional_edges",
-         "interrupt_before", "interrupt_after", "retry_policy"});
+         "interrupt_before", "interrupt_after", "retry_policy", "metadata"});
 
     if (!definition.contains("schema_version")) {
         throw std::invalid_argument("Sealed Core definition requires v1 strict schema_version");
@@ -282,6 +283,17 @@ void validate_core_definition_v1(const json& definition) {
     }
     if (definition.contains("name")) {
         require_nonempty_utf8(require_string(definition, "name"), "Sealed Core definition name");
+    }
+    if (definition.contains("metadata")) {
+        // The same rules as the Core parser; a sealed {} would not be canonical.
+        std::vector<graph::CompilerDiagnostic> problems;
+        graph::detail::append_metadata_diagnostics(definition["metadata"], problems);
+        if (!problems.empty())
+            throw std::invalid_argument("Sealed Core metadata is invalid at " +
+                                        problems.front().json_pointer + ": " +
+                                        problems.front().message);
+        if (definition["metadata"].empty())
+            throw std::invalid_argument("Sealed Core metadata must be omitted when empty");
     }
 
     if (definition.contains("channels")) {

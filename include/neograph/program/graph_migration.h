@@ -15,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace neograph::program {
 
@@ -140,6 +141,16 @@ private:
     std::shared_ptr<const Impl> impl_;
 };
 
+/** One difference between the source and target graph metadata (#362). */
+struct GraphMetadataChange {
+    /// "added", "removed" or "changed".
+    std::string kind;
+    /// RFC 6901 pointer into the Core definition, e.g. "/metadata/owner".
+    std::string json_pointer;
+
+    bool operator==(const GraphMetadataChange&) const = default;
+};
+
 /**
  * Host-admitted P1 semantic bridge for an immutable control-free Core successor.
  *
@@ -170,6 +181,14 @@ public:
     const std::string& source_core_generation_id() const noexcept;
     const std::string& target_core_generation_id() const noexcept;
     const std::string& topology_shape_id() const noexcept;
+    /**
+     * Graph metadata differences between the source and target definitions,
+     * sorted by pointer. Metadata is outside topology_shape_id(), so it never
+     * blocks an adapter; this list lets the approving host review it. It is
+     * evidence computed by prepare() and is not serialized: a parsed adapter
+     * returns an empty list.
+     */
+    const std::vector<GraphMetadataChange>& metadata_changes() const noexcept;
 
     /** Revalidates the exact admitted source/target artifacts. */
     bool binds(const ProgramVersion& source_version, const ProgramBundle& source_bundle,

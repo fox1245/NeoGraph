@@ -708,6 +708,8 @@ struct GraphBuilder {
     bool               sealed       = false;
     std::size_t        native_bytes = 0;
     json               definition;
+    /** .metadata() may be called once per graph (#362). */
+    bool               metadata_set = false;
     /** Program call site of each builder call, keyed by its pointer in definition. */
     std::map<std::string, SourceSpan> call_sites;
 };
@@ -1638,6 +1640,43 @@ JSValue graph_retry_policy(JSContext*    context,
     }
 }
 
+// #362: host-readable author claims, stored as the Core "metadata" object.
+JSValue graph_metadata_impl(JSContext*    context,
+                            JSValueConst  this_value,
+                            int           argc,
+                            JSValueConst* argv) {
+    auto* builder = require_open_builder(context, this_value);
+    if (!builder || !require_arity(context, argc, 1, "metadata")) return JS_EXCEPTION;
+    if (builder->metadata_set) {
+        return graph_error(context, "P_JS_GRAPH_ARGUMENT",
+                           "NeoGraph graph metadata may be set only once per graph");
+    }
+    json metadata;
+    if (!read_json(context, argv[0], metadata, "metadata")) return JS_EXCEPTION;
+    if (!metadata.is_object()) {
+        return graph_error(context, "P_JS_GRAPH_ARGUMENT",
+                           "NeoGraph graph metadata must be an object");
+    }
+    const auto new_size =
+        size_after_object_set(builder->native_bytes, builder->definition, "metadata", metadata);
+    if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
+    builder->definition["metadata"] = std::move(metadata);
+    builder->metadata_set           = true;
+    record_call_site(context, *builder, "/metadata");
+    return return_builder(context, this_value);
+}
+
+JSValue graph_metadata(JSContext* context, JSValueConst this_value, int argc, JSValueConst* argv) {
+    try {
+        return graph_metadata_impl(context, this_value, argc, argv);
+    } catch (const std::exception& error) {
+        return graph_internal_error(context,
+                                    "NeoGraph graph metadata failed: " + bounded_utf8(error.what()));
+    } catch (...) {
+        return graph_internal_error(context, "NeoGraph graph metadata failed unexpectedly");
+    }
+}
+
 JSValue graph_entry_impl(JSContext*    context,
                          JSValueConst  this_value,
                          int           argc,
@@ -1732,6 +1771,7 @@ JSValue create_graph_impl(JSContext* context, JSValueConst, int argc, JSValueCon
         define_method(context, object, "interruptBefore", graph_interrupt_before, 1) &&
         define_method(context, object, "interruptAfter", graph_interrupt_after, 1) &&
         define_method(context, object, "retryPolicy", graph_retry_policy, 1) &&
+        define_method(context, object, "metadata", graph_metadata, 1) &&
         define_method(context, object, "entry", graph_entry, 1) &&
         define_method(context, object, "exit", graph_exit, 1);
     if (!installed || JS_PreventExtensions(context, object) < 0) {

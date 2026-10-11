@@ -194,3 +194,44 @@ def test_compiled_definitions_validate_against_the_core_schema():
     broken = dict(definition, on_exhausted="B")
     assert not validator.is_valid(broken)
 
+
+# ---------------------------------------------------------------------------
+# #362: graph metadata
+# ---------------------------------------------------------------------------
+
+
+_METADATA_JS = _graph(
+    '.metadata({owner: "agent:planner", requirements: ["REQ-12"]})'
+    '.node("A", {type: "v2.task"}).entry("A").exit("A")'
+)
+
+
+def test_issue_362_repro_compiles_and_hosts_read_the_metadata():
+    bundle = _compile(_METADATA_JS)
+    definition = bundle.sealed_core_definitions[0]["definition"]
+    assert definition["metadata"] == {"owner": "agent:planner", "requirements": ["REQ-12"]}
+
+    host = ng.LocalProgramHost(
+        _registry(), "owner:v2-meta", _budget(max_dynamic_compiles=1), "python-v2-host/v1"
+    )
+    hosted = host.compile(ng.ProgramSource.from_javascript("v2.js", _METADATA_JS), _budget())
+    assert hosted.sealed_core_definitions[0]["definition"]["metadata"]["owner"] == "agent:planner"
+
+
+def test_metadata_is_never_part_of_run_state_or_output():
+    _host, _version, result = _run(_METADATA_JS)
+    assert result.status == ng.ProgramTerminalStatus.Completed
+    text = json.dumps(result.output)
+    assert "agent:planner" not in text and "REQ-12" not in text
+
+
+def test_metadata_errors_name_the_rule_they_break():
+    diagnostics = _compile_error(
+        _graph('.metadata({owner: "a\\u200bb"}).node("A", {type: "v2.task"}).entry("A").exit("A")')
+    )
+    hidden = [d for d in diagnostics if d["code"] == "P_CORE_GC_METADATA_TEXT"]
+    assert hidden and hidden[0]["witness"]["code_points"] == ["U+200B"]
+    with pytest.raises(ng.ProgramCompileError) as raised:
+        _compile(_graph('.metadata({a: 1}).metadata({b: 2}).node("A", {type: "v2.task"}).entry("A")'))
+    assert raised.value.diagnostics[0]["code"] == "P_JS_GRAPH_ARGUMENT"
+

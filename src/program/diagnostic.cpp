@@ -315,6 +315,8 @@ constexpr std::string_view kDocumentedCodes[] = {
     "P_CORE_GC_FIELD_REQUIRED",
     "P_CORE_GC_FIELD_TYPE",
     "P_CORE_GC_FIELD_VALUE",
+    "P_CORE_GC_METADATA_LIMIT",
+    "P_CORE_GC_METADATA_TEXT",
     "P_CORE_GC_NODE_CONFIG",
     "P_CORE_GC_NO_ENTRY",
     "P_CORE_GC_REGISTRY_MISS",

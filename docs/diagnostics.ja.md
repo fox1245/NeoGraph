@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=ja source_sha256=9606d98c852ee9e7129e759405a6d4701e1af8f99d67456b19b185ccb9e1e3e9 -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=ja source_sha256=6c6a54cfd7a02e2730b5342b393dc0fc8ed9afae8c6ea54bd1196f96006e27d7 -->
 # Program 診断
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -122,6 +122,8 @@ Core 定義のパーサーが出す診断です。witness の `core_code` に Co
 | <a id="p_core_gc_reserved_node"></a>`P_CORE_GC_RESERVED_NODE` | `__start__` と `__end__` は予約されているため、ノード名に使えません。 |
 | <a id="p_core_gc_no_entry"></a>`P_CORE_GC_NO_ENTRY` | `__start__` から出る edge がないため、何も実行されません。`.entry(node)` を追加してください。 |
 | <a id="p_core_gc_registry_miss"></a>`P_CORE_GC_REGISTRY_MISS` | ノード型、reducer、condition がレジストリのスナップショットにありません。登録するか候補名を使ってください。 |
+| <a id="p_core_gc_metadata_limit"></a>`P_CORE_GC_METADATA_LIMIT` | グラフのメタデータが上限を超えています。上限は正規 JSON で 8 KiB、入れ子の深さ 4、オブジェクトメンバー合計 64、キー 128 バイトです。witness に `kind`、`limit`、`actual` があります。 |
+| <a id="p_core_gc_metadata_text"></a>`P_CORE_GC_METADATA_TEXT` | メタデータのキーや文字列に不可視文字（タブ、改行、復帰以外の C0 制御文字、bidi 制御文字、ゼロ幅文字、タグ文字）や不正な UTF-8 が含まれています。witness にコードポイントが挙げられます。 |
 | <a id="p_core_roundtrip"></a>`P_CORE_ROUNDTRIP` | 解析したグラフが定義をそのまま再出力できません。何かが欠落したか、つなぎ替えられています。コンパイラーの不具合なので報告してください。 |
 
 <a id="core-validator"></a>

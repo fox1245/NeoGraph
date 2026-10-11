@@ -454,6 +454,7 @@ std::string builder_call(const std::vector<std::string>& tokens) {
     if (head == "conditional_edges") return "graph.conditionalEdge(...)";
     if (head == "interrupt_before") return "graph.interruptBefore(...)";
     if (head == "interrupt_after") return "graph.interruptAfter(...)";
+    if (head == "metadata") return "graph.metadata({...})";
     return "ng.graph()";
 }
 
@@ -461,8 +462,9 @@ std::string builder_call(const std::vector<std::string>& tokens) {
 std::vector<std::string> known_core_keys(const std::vector<std::string>& parent,
                                          const json&                     definition) {
     if (parent.empty())
-        return {"schema_version", "name",          "channels",        "nodes",       "edges",
-                "conditional_edges", "interrupt_before", "interrupt_after", "retry_policy"};
+        return {"schema_version",    "name",          "channels",        "nodes",
+                "edges",             "conditional_edges", "interrupt_before", "interrupt_after",
+                "retry_policy",      "metadata"};
     if (parent.size() == 2 && parent[0] == "channels")
         return {"reducer", "initial", "retention", "retention_limit", "persistence"};
     if (parent.size() == 2 && parent[0] == "nodes") return {"type", "barrier"};
@@ -1991,10 +1993,18 @@ void add_validation_help(PendingDiagnostic&      pending,
     }
 }
 
+// A definition that uses any Program API v2 key seals no validator warnings:
+// it has no earlier bundle id to keep, and the original rules do not know the
+// new keys (#365 sealing rule (b)).
+bool uses_v2_keys(const graph::TopologySpec& topology) {
+    return !topology.metadata.is_null();
+}
+
 // Errors and returned warnings follow the current rules. Sealed warnings come
 // from the original rules, so a newer compiler never changes a bundle id.
 void add_validation_diagnostics(const graph::ValidationReport& current,
                                 const graph::ValidationReport& original,
+                                bool                           seal_original_warnings,
                                 const HelpContext&             context,
                                 DiagnosticAccumulator&         diagnostics) {
     const auto& core_definition = context.definition;
@@ -2014,7 +2024,7 @@ void add_validation_diagnostics(const graph::ValidationReport& current,
         }
     }
     for (const auto& core : original.diagnostics) {
-        if (core.severity != "warning") continue;
+        if (!seal_original_warnings || core.severity != "warning") continue;
         diagnostics.add_sealed_warning(CompilePhase::CoreValidate, "P_CORE_" + core.code,
                                        authored_core_pointer(core_definition, core.json_pointer),
                                        core.message, with_core_code(core.witness, core.code));
@@ -2761,7 +2771,7 @@ struct ProgramCompiler::Impl {
             add_validation_diagnostics(
                 detail::RegistrySnapshotAccess::validate_local(registry, topology, current_rules),
                 detail::RegistrySnapshotAccess::validate_local(registry, topology, original_rules),
-                help, diagnostics);
+                !uses_v2_keys(topology), help, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();
             auto closure = resolve_closure(registry, topology, parsed.core_definition, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();

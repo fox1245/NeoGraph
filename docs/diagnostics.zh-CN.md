@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=zh-CN source_sha256=9606d98c852ee9e7129e759405a6d4701e1af8f99d67456b19b185ccb9e1e3e9 -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=zh-CN source_sha256=6c6a54cfd7a02e2730b5342b393dc0fc8ed9afae8c6ea54bd1196f96006e27d7 -->
 # Program 诊断
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -122,6 +122,8 @@ Program 编译会返回诊断：失败时为 `ProgramCompileError::diagnostics()
 | <a id="p_core_gc_reserved_node"></a>`P_CORE_GC_RESERVED_NODE` | `__start__` 和 `__end__` 是保留名称，不能用作节点名。 |
 | <a id="p_core_gc_no_entry"></a>`P_CORE_GC_NO_ENTRY` | 没有从 `__start__` 出发的 edge，因此不会运行任何东西。请添加 `.entry(node)`。 |
 | <a id="p_core_gc_registry_miss"></a>`P_CORE_GC_REGISTRY_MISS` | 注册表快照中缺少节点类型、reducer 或 condition。请注册它或使用候选名称。 |
+| <a id="p_core_gc_metadata_limit"></a>`P_CORE_GC_METADATA_LIMIT` | 图元数据超出了限制：规范 JSON 8 KiB、嵌套深度 4、对象成员总数 64、键长 128 字节。witness 给出 `kind`、`limit` 和 `actual`。 |
+| <a id="p_core_gc_metadata_text"></a>`P_CORE_GC_METADATA_TEXT` | 元数据的键或字符串中含有不可见字符（制表符、换行、回车以外的 C0 控制字符、bidi 控制字符、零宽字符或标签字符）或格式错误的 UTF-8。witness 列出这些码位。 |
 | <a id="p_core_roundtrip"></a>`P_CORE_ROUNDTRIP` | 解析后的图无法原样重新输出定义：有内容被丢弃或被重新连接。这是编译器缺陷，请报告。 |
 
 <a id="core-validator"></a>

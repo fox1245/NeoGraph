@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=564bb022664fcef5418ede7bf7dd3c4af6bbe880f78cbb5572e06edd5f8c9a81 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=cc0117752c1d8fa8ec9171746d2a17d12b318fd52f97d8ba690686c4169b19a7 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -35,6 +35,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ### 新增
 
 - **带类型的节点失败 (#364)。** `NodeFailureError(code, public_message, retryable)` 以 `app.compile_error` 这样的作者代码使节点失败，`retryable = false` 会停止其重试循环。`node_failure_of()` 返回执行器所抛出的 `NodeExecutionError` 上附带的 `NodeFailure` 记录：代码、分类、停止重试的原因、尝试次数、可重试与可路由标志、`public_message` 以及最后一次尝试的 Tool 效果。Python 节点的异常也通过其 `code`、`retryable` 与 `public_message` 属性以相同方式读取，调用方收到的仍是原始异常。
+- **Program：图元数据 (#362)。** `ng.graph("plan").metadata({...})` 将宿主可读的作者声明存为 Core 定义的顶层 `"metadata"` 对象，可从 `bundle.sealed_core_definitions()` 读取（Python：`bundle.sealed_core_definitions[0]["definition"]["metadata"]`）。它随定义一起参与哈希，从不传给节点工厂、状态、检查点、输出或事件。限制为规范 JSON 8 KiB、嵌套深度 4、成员 64 个、键长 1 到 128 字节；不可见字符会报错（`P_CORE_GC_METADATA_LIMIT`、`P_CORE_GC_METADATA_TEXT`）。`GraphSemanticMigrationAdapter::metadata_changes()` 列出元数据差异，这些差异不改变 `topology_shape_id()`。使用 Program API v2 键（包括元数据）的 Core 定义不封存校验器警告；不使用的程序保持原有包 id。`TopologySpec` 和 `CompiledGraph` 新增了成员，布局随之改变。参见 [Program 图功能](docs/program-graphs.md)。
 - **Program：JavaScript 能力清单公开功能标志、签名和参数 schema (#365)。** `javascript_authoring_capability_manifest()` 新增 `features`（每个编写功能一个布尔值，例如 `graph.barrier`、`graph.metadata` 或 `failure_edges`，宿主或模型可据此了解本构建接受哪些功能）、每个方法的 TypeScript `dts` 签名及共享声明 `dts_prelude`，以及每个图构建器参数的 JSON Schema。新增 schema 文件：`schemas/javascript-capability-manifest-v1.schema.json` 描述清单，`schemas/core-definition-v1.schema.json` 描述用于约束解码的封存 Core 定义。
 - **Program：诊断附带自我修复用的 help (#365)。** 编译返回的每个诊断（`ProgramCompileError::diagnostics()`、`ProgramBundle::compile_diagnostics()`、Python 异常的 `.diagnostics`）都带有 `help`：指向新[诊断指南](docs/diagnostics.md)中对应条目的链接、带标签的相关位置、以 RFC 6902 JSON Patch 编辑表示并标明适用性（`machine`、`maybe` 或 `placeholder`）的修复建议，以及 `candidates`，即与未知名称相差不超过两次编辑的已声明名称。关于同一未知名称的诊断会合并为一个，其余位置成为相关位置；最多返回 20 个诊断，错误在前，随后附一个 `P_DIAGNOSTICS_TRUNCATED` 注记。JavaScript 消息使用构建器调用的名称，例如 `graph.retryPolicy({...}) has an unknown field 'on_exhausted'`。封存的诊断从不携带 `help`，因此包 id 不变。`program::Diagnostic` 新增了成员，布局随之改变：请重新构建 C++ 使用方（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 - **Program：`P_JS_CONTROL_CHARACTER` 警告 (#361)。** JavaScript 配置字符串中含有制表符、换行和回车以外的 C0 控制字符时（例如本想写正则单词边界的 `"\b"`），会在该字符串的调用位置发出警告。该警告只出现在编译返回的诊断中。

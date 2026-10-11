@@ -2,7 +2,10 @@
 #include <neograph/graph/node.h>
 #include <neograph/graph/registry.h>
 
+#include "canonical_json.h"
+#include "graph_v2_keys.h"
 #include "routing_policy.h"
+#include "text_safety.h"
 
 #include <algorithm>
 #include <cmath>
@@ -320,7 +323,150 @@ json canon_conditional(const json& e) {
     return out;
 }
 
+// ---- #362 metadata rules ---------------------------------------------------
+
+json unsafe_text_witness(std::string_view text) {
+    std::vector<neograph::detail::UnsafeCodePoint> found;
+    try {
+        found = neograph::detail::find_unsafe_code_points(text);
+    } catch (const neograph::detail::InvalidUtf8Error& error) {
+        return json{{"invalid_utf8_byte_offset", error.byte_offset()}};
+    }
+    if (found.empty()) return nullptr;
+    json        code_points = json::array();
+    json        classes     = json::array();
+    std::set<std::string> seen_points, seen_classes;
+    for (const auto& item : found) {
+        auto point = neograph::detail::format_code_point(item.code_point);
+        if (seen_points.insert(point).second) code_points.push_back(point);
+        const std::string text_class(neograph::detail::to_string(item.text_class));
+        if (seen_classes.insert(text_class).second) classes.push_back(text_class);
+    }
+    return json{{"code_points", std::move(code_points)}, {"classes", std::move(classes)}};
+}
+
+std::size_t metadata_members(const json& value) {
+    std::size_t count = 0;
+    if (value.is_object()) {
+        for (const auto& [key, child] : value.items()) {
+            (void)key;
+            count += 1 + metadata_members(child);
+        }
+    } else if (value.is_array()) {
+        for (const auto& child : value) count += metadata_members(child);
+    }
+    return count;
+}
+
+std::size_t metadata_depth(const json& value) {
+    std::size_t deepest = 0;
+    if (value.is_object()) {
+        for (const auto& [key, child] : value.items()) {
+            (void)key;
+            deepest = std::max(deepest, 1 + metadata_depth(child));
+        }
+    } else if (value.is_array()) {
+        for (const auto& child : value) deepest = std::max(deepest, 1 + metadata_depth(child));
+    }
+    return deepest;
+}
+
+void walk_metadata(const json&                      value,
+                   const std::string&               pointer,
+                   std::size_t                      depth,
+                   std::size_t                      total_depth,
+                   bool&                            depth_reported,
+                   std::vector<CompilerDiagnostic>& diagnostics) {
+    if (depth > detail::kMetadataMaxDepth) {
+        if (!depth_reported) {
+            depth_reported = true;
+            diagnostics.push_back(
+                {"GC_METADATA_LIMIT", pointer,
+                 "metadata nests " + std::to_string(total_depth) + " levels deep; at most " +
+                     std::to_string(detail::kMetadataMaxDepth) + " are allowed",
+                 json{{"kind", "depth"}, {"limit", detail::kMetadataMaxDepth}, {"actual", total_depth}}});
+        }
+        return;
+    }
+    if (value.is_string()) {
+        auto witness = unsafe_text_witness(value.get<std::string>());
+        if (!witness.is_null())
+            diagnostics.push_back({"GC_METADATA_TEXT", pointer,
+                                   "metadata text at " + pointer +
+                                       " contains invisible or ill-formed characters",
+                                   std::move(witness)});
+        return;
+    }
+    if (value.is_array()) {
+        std::size_t index = 0;
+        for (const auto& child : value)
+            walk_metadata(child, pointer + "/" + std::to_string(index++), depth + 1, total_depth,
+                          depth_reported, diagnostics);
+        return;
+    }
+    if (!value.is_object()) return;
+    for (const auto& [key, child] : value.items()) {
+        const auto child_pointer = pointer + "/" + pointer_token(key);
+        if (key.empty()) {
+            diagnostics.push_back({"GC_FIELD_VALUE", child_pointer, "metadata keys must not be empty",
+                                   json{{"expected", "key of 1 to 128 bytes"}, {"actual", key}}});
+            continue;
+        }
+        if (key.size() > detail::kMetadataMaxKeyBytes) {
+            diagnostics.push_back({"GC_METADATA_LIMIT", child_pointer,
+                                   "metadata key is " + std::to_string(key.size()) +
+                                       " bytes long; at most 128 are allowed",
+                                   json{{"kind", "key_bytes"},
+                                        {"limit", detail::kMetadataMaxKeyBytes},
+                                        {"actual", key.size()}}});
+            continue;
+        }
+        if (depth == 0 && key.rfind("neograph.", 0) == 0) {
+            diagnostics.push_back({"GC_FIELD_VALUE", child_pointer,
+                                   "metadata key '" + key + "' uses the reserved prefix 'neograph.'",
+                                   json{{"expected", "a key without the reserved prefix 'neograph.'"},
+                                        {"actual", key}}});
+            continue;
+        }
+        if (auto witness = unsafe_text_witness(key); !witness.is_null()) {
+            diagnostics.push_back({"GC_METADATA_TEXT", child_pointer,
+                                   "metadata key at " + child_pointer +
+                                       " contains invisible or ill-formed characters",
+                                   std::move(witness)});
+            continue;
+        }
+        walk_metadata(child, child_pointer, depth + 1, total_depth, depth_reported, diagnostics);
+    }
+}
+
 }  // namespace
+
+void detail::append_metadata_diagnostics(const json&                      metadata,
+                                         std::vector<CompilerDiagnostic>& diagnostics) {
+    if (!metadata.is_object()) {
+        diagnostics.push_back({"GC_FIELD_TYPE", "/metadata",
+                               "topology '$.metadata' must be an object, got " +
+                                   json_type_name(metadata),
+                               json{{"expected", "object"}, {"actual", json_type_name(metadata)}}});
+        return;
+    }
+    const auto bytes = neograph::detail::canonical_json_bytes(metadata).size();
+    if (bytes > kMetadataMaxBytes) {
+        diagnostics.push_back({"GC_METADATA_LIMIT", "/metadata",
+                               "metadata is " + std::to_string(bytes) +
+                                   " canonical bytes; at most 8192 are allowed",
+                               json{{"kind", "bytes"}, {"limit", kMetadataMaxBytes}, {"actual", bytes}}});
+    }
+    const auto members = metadata_members(metadata);
+    if (members > kMetadataMaxMembers) {
+        diagnostics.push_back({"GC_METADATA_LIMIT", "/metadata",
+                               "metadata has " + std::to_string(members) +
+                                   " object members; at most 64 are allowed",
+                               json{{"kind", "members"}, {"limit", kMetadataMaxMembers}, {"actual", members}}});
+    }
+    bool depth_reported = false;
+    walk_metadata(metadata, "/metadata", 0, metadata_depth(metadata), depth_reported, diagnostics);
+}
 
 bool ParseReport::has_errors() const noexcept {
     return !diagnostics.empty();
@@ -944,6 +1090,16 @@ static ParseReport parse_report_impl(const json&          definition,
         }
     }
 
+    // #362: graph metadata, read under schema_version >= 1 only. {} is absent.
+    if (strict && definition.contains("metadata")) {
+        top_consumed.insert("metadata");
+        const auto& metadata = definition["metadata"];
+        const auto  before   = diagnostics.size();
+        detail::append_metadata_diagnostics(metadata, diagnostics);
+        if (diagnostics.size() == before && !metadata.empty())
+            topology.metadata = neograph::detail::owned_json_copy(metadata);
+    }
+
     // Only static edges from __start__ start a run; without one nothing runs and
     // the run would still report Completed.
     if ((edges_ok || !definition.contains("edges")) && !topology.node_defs.empty() &&
@@ -1049,6 +1205,7 @@ CompiledGraph GraphCompiler::link(TopologySpec         topology,
     cg.interrupt_after   = std::move(topology.interrupt_after);
     cg.retry_policy      = std::move(topology.retry_policy);
     cg.schema_version    = topology.schema_version;
+    cg.metadata          = std::move(topology.metadata);
     if (cg.schema_version == 0) {
         for (auto& edge : cg.conditional_edges) {
             if (edge.routes.empty()) continue;
@@ -1085,6 +1242,7 @@ CompiledGraph GraphCompiler::link_local(TopologySpec         topology,
     cg.interrupt_after   = std::move(topology.interrupt_after);
     cg.retry_policy      = std::move(topology.retry_policy);
     cg.schema_version    = topology.schema_version;
+    cg.metadata          = std::move(topology.metadata);
     if (cg.schema_version == 0) {
         for (auto& edge : cg.conditional_edges) {
             if (edge.routes.empty()) continue;
@@ -1199,6 +1357,9 @@ json TopologySpec::to_json() const {
         };
     }
 
+    // Absent unless used, so definitions without metadata keep their bytes.
+    if (metadata.is_object() && !metadata.empty()) j["metadata"] = metadata;
+
     return j;
 }
 
@@ -1214,6 +1375,7 @@ TopologySpec CompiledGraph::topology() const {
     result.retry_policy      = retry_policy;
     result.schema_version    = schema_version;
     result.node_defs         = node_defs;
+    result.metadata          = metadata;
     for (const auto& [name, wait_for_set] : barrier_specs) {
         auto node = result.node_defs.find(name);
         if (node == result.node_defs.end()) continue;
@@ -1245,10 +1407,16 @@ json GraphCompiler::canon(const json& definition) {
         "interrupt_before",
         "interrupt_after",
         "retry_policy",
+        "metadata",
     };
     for (const auto& [k, v] : definition.items()) {
         if (is_annotation_key(k) || owned.count(k)) continue;
         out[k] = v;
+    }
+    // Metadata is compared as a value; an empty object is the same as none.
+    if (definition.contains("metadata") &&
+        !(definition["metadata"].is_object() && definition["metadata"].empty())) {
+        out["metadata"] = definition["metadata"];
     }
 
     if (definition.contains("schema_version") && definition["schema_version"].is_number_integer() &&

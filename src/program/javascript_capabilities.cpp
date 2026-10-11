@@ -82,6 +82,19 @@ json retry_policy_schema() {
                                     {"max_delay_ms", count}}}};
 }
 
+// #362: at most 8 KiB canonical, depth 4, 64 members, keys of 1-128 bytes, no
+// invisible characters, no top-level "neograph." keys. The schema states what
+// a JSON Schema can; the compiler checks the rest.
+json metadata_schema() {
+    return json{{"type", "object"},
+                {"maxProperties", 64},
+                {"propertyNames",
+                 json{{"type", "string"},
+                      {"minLength", 1},
+                      {"maxLength", 128},
+                      {"not", json{{"pattern", "^neograph\\."}}}}}};
+}
+
 json graph_builder_methods() {
     return json::array({
         builder("node", "node(name, {type, ...config})", "direct", 2, 2,
@@ -130,6 +143,9 @@ json graph_builder_methods() {
                 "retryPolicy({max_retries, initial_delay_ms, backoff_multiplier, max_delay_ms})",
                 "direct", 1, 1, "retryPolicy(policy: RetryPolicy): GraphBuilder;",
                 "graph.retry_policy", json::array({argument("policy", retry_policy_schema())})),
+        builder("metadata", "metadata({...claims})", "direct", 1, 1,
+                "metadata(claims: Record<string, Json>): GraphBuilder;", "graph.metadata",
+                json::array({argument("claims", metadata_schema())})),
         builder("entry", "entry(nodeName)", "direct", 1, 1,
                 "entry(nodeName: string): GraphBuilder;", "graph.core",
                 json::array({argument("nodeName", node_name_schema())})),
@@ -155,6 +171,7 @@ constexpr const char* kDtsPrelude =
     "  interruptBefore(...nodeNames: Array<string | string[]>): GraphBuilder;\n"
     "  interruptAfter(...nodeNames: Array<string | string[]>): GraphBuilder;\n"
     "  retryPolicy(policy: RetryPolicy): GraphBuilder;\n"
+    "  metadata(claims: Record<string, Json>): GraphBuilder;\n"
     "  entry(nodeName: string): GraphBuilder;\n"
     "  exit(nodeName: string): GraphBuilder;\n"
     "}\n"
@@ -201,7 +218,7 @@ json javascript_authoring_capability_manifest() {
                   {"graph.barrier", true},
                   {"graph.interrupts", true},
                   {"graph.retry_policy", true},
-                  {"graph.metadata", false},
+                  {"graph.metadata", true},
                   {"barrier.any_of", false},
                   {"retry_policy.per_node", false},
                   {"failure_edges", false},

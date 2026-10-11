@@ -1463,6 +1463,56 @@
       },
       "frontend": "cpp_builder",
       "id": "cpp.sequence_v2"
+    },
+    {
+      "all_platforms": {
+        "canonical_program_hash": "sha256:f38d67566985c5b5d649c553b71de186f78826d594b3f6086cce38cc39c21788",
+        "compiled_plan_identity": "sha256:fcec78966b77e06220807b778236cce5b9e45044243a5f84fe6ebdfbedf871c9",
+        "control_source": false,
+        "definition_hash": "sha256:fa8b917818d15847c26644422e507e8b79d4637022d565217c9ee60ecb1ef1bd",
+        "definition_name": "plan",
+        "sealed_diagnostics": []
+      },
+      "definition": {
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "draft"
+          },
+          {
+            "from": "draft",
+            "to": "__end__"
+          }
+        ],
+        "metadata": {
+          "limits": {
+            "max_depth": 2,
+            "max_total": 4
+          },
+          "note": "검토 필요",
+          "owner": "agent:planner",
+          "requirements": [
+            "REQ-12",
+            "REQ-7"
+          ]
+        },
+        "name": "plan",
+        "nodes": {
+          "draft": {
+            "type": "probe.node"
+          },
+          "orphan": {
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "v2.graph_metadata",
+      "posix_quickjs": {
+        "bundle_id": "sha256:c1d15289c96f031167ca8c30b072a6171f3e6582700c777a7f87848722462f10",
+        "source_hash": "sha256:7dd20db4ce407513e181d95806edc306135fcb6c8c5254a81a35e91d4cb3da64"
+      }
     }
   ],
   "format": "neograph-identity-golden",

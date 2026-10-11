@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=ko source_sha256=9606d98c852ee9e7129e759405a6d4701e1af8f99d67456b19b185ccb9e1e3e9 -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=ko source_sha256=6c6a54cfd7a02e2730b5342b393dc0fc8ed9afae8c6ea54bd1196f96006e27d7 -->
 # Program 진단
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -122,6 +122,8 @@ Core 정의 파서가 내는 진단입니다. witness의 `core_code`에 Core 코
 | <a id="p_core_gc_reserved_node"></a>`P_CORE_GC_RESERVED_NODE` | `__start__`와 `__end__`는 예약어라서 노드 이름으로 쓸 수 없습니다. |
 | <a id="p_core_gc_no_entry"></a>`P_CORE_GC_NO_ENTRY` | `__start__`에서 나가는 edge가 없어서 아무것도 실행되지 않습니다. `.entry(node)`를 추가하세요. |
 | <a id="p_core_gc_registry_miss"></a>`P_CORE_GC_REGISTRY_MISS` | 노드 타입, reducer, condition이 레지스트리 스냅숏에 없습니다. 등록하거나 후보 이름을 사용하세요. |
+| <a id="p_core_gc_metadata_limit"></a>`P_CORE_GC_METADATA_LIMIT` | 그래프 메타데이터가 한계를 넘었습니다. 정규 JSON 8 KiB, 중첩 깊이 4, 객체 멤버 합계 64개, 키 128바이트가 한계입니다. witness에 `kind`, `limit`, `actual`이 있습니다. |
+| <a id="p_core_gc_metadata_text"></a>`P_CORE_GC_METADATA_TEXT` | 메타데이터 키나 문자열에 보이지 않는 문자(탭, 줄바꿈, 캐리지 리턴 이외의 C0 제어 문자, bidi 제어 문자, 폭이 없는 문자, 태그 문자)나 잘못된 UTF-8이 있습니다. witness에 코드 포인트가 나열됩니다. |
 | <a id="p_core_roundtrip"></a>`P_CORE_ROUNDTRIP` | 파싱된 그래프가 정의를 그대로 다시 내보내지 못합니다. 무언가가 빠졌거나 다르게 연결되었습니다. 컴파일러 결함이므로 보고해 주세요. |
 
 <a id="core-validator"></a>

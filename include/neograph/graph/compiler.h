@@ -88,6 +88,9 @@ struct NEOGRAPH_API TopologySpec {
     std::optional<RetryPolicy>   retry_policy;
     int                          schema_version = 0;
     std::map<std::string, json>  node_defs;
+    /// Host-readable author claims (#362): a nonempty object, or null when
+    /// the definition has none. Hashed with the definition; never state.
+    json                         metadata;
 
     json to_json() const;
 };
@@ -145,6 +148,9 @@ struct CompiledGraph {
     /// see GraphCompiler docs). 0 preserves the historical lenient
     /// behavior for existing files.
     int schema_version = 0;
+
+    /// Graph metadata (#362), carried so to_json() round-trips; null when absent.
+    json metadata;
 
     /// Verbatim copy of each node's JSON definition (config + "type"),
     /// minus the "barrier" key (barriers are re-emitted from

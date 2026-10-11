@@ -287,7 +287,9 @@ TopologyProjection topology_projection(const SealedCoreDefinition& definition) {
     const auto topology = graph::GraphCompiler::parse(definition.definition);
     json       shape = json::object();
     for (const auto& [key, value] : topology.to_json().items()) {
-        if (key != "name") shape[key] = value;
+        // Metadata (#362) is author claims, not topology: hosts review it
+        // through metadata_changes() instead.
+        if (key != "name" && key != "metadata") shape[key] = value;
     }
     json nodes = json::object();
     std::vector<std::string> node_names;
@@ -1154,8 +1156,67 @@ std::string GraphMigrationCapsule::serialize_canonical() const {
     return impl_->canonical_bytes;
 }
 
+namespace {
+
+void collect_metadata_changes(const json&                       source,
+                              const json&                       target,
+                              const std::string&                pointer,
+                              std::vector<GraphMetadataChange>& changes) {
+    const bool source_object = source.is_object();
+    const bool target_object = target.is_object();
+    if (!source_object || !target_object) {
+        if (source.is_null() && !target.is_null())
+            changes.push_back({"added", pointer});
+        else if (!source.is_null() && target.is_null())
+            changes.push_back({"removed", pointer});
+        else if (detail::canonical_json_bytes(source) != detail::canonical_json_bytes(target))
+            changes.push_back({"changed", pointer});
+        return;
+    }
+    std::set<std::string> keys;
+    for (const auto& [key, unused] : source.items()) {
+        (void)unused;
+        keys.insert(key);
+    }
+    for (const auto& [key, unused] : target.items()) {
+        (void)unused;
+        keys.insert(key);
+    }
+    for (const auto& key : keys) {
+        std::string escaped;
+        for (const char character : key) {
+            if (character == '~')
+                escaped += "~0";
+            else if (character == '/')
+                escaped += "~1";
+            else
+                escaped.push_back(character);
+        }
+        collect_metadata_changes(source.contains(key) ? source[key] : json(),
+                                 target.contains(key) ? target[key] : json(),
+                                 pointer + "/" + escaped, changes);
+    }
+}
+
+std::vector<GraphMetadataChange> metadata_changes_between(const SealedCoreDefinition& source,
+                                                          const SealedCoreDefinition& target) {
+    const auto metadata = [](const SealedCoreDefinition& definition) {
+        return definition.definition.contains("metadata") ? definition.definition["metadata"]
+                                                          : json::object();
+    };
+    std::vector<GraphMetadataChange> changes;
+    collect_metadata_changes(metadata(source), metadata(target), "/metadata", changes);
+    std::sort(changes.begin(), changes.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.json_pointer < rhs.json_pointer;
+    });
+    return changes;
+}
+
+}  // namespace
+
 struct GraphSemanticMigrationAdapter::Impl {
-    explicit Impl(SemanticAdapterData value) : data(std::move(value)) {
+    explicit Impl(SemanticAdapterData value, std::vector<GraphMetadataChange> changes = {})
+        : data(std::move(value)), metadata_changes(std::move(changes)) {
         auto encoded = semantic_adapter_body(data);
         id = detail::sha256_identity("graph-semantic-migration-adapter/v1",
                                      detail::canonical_json_bytes(encoded));
@@ -1166,6 +1227,8 @@ struct GraphSemanticMigrationAdapter::Impl {
     SemanticAdapterData data;
     std::string         id;
     std::string         canonical_bytes;
+    // Not serialized: evidence for the approving host (#362).
+    std::vector<GraphMetadataChange> metadata_changes;
 };
 
 GraphSemanticMigrationAdapter::GraphSemanticMigrationAdapter(std::shared_ptr<const Impl> impl)
@@ -1174,8 +1237,17 @@ GraphSemanticMigrationAdapter::GraphSemanticMigrationAdapter(std::shared_ptr<con
 GraphSemanticMigrationAdapter GraphSemanticMigrationAdapter::prepare(
     const ProgramVersion& source_version, const ProgramBundle& source_bundle,
     const ProgramVersion& target_version, const ProgramBundle& target_bundle) {
-    return GraphSemanticMigrationAdapter(std::make_shared<const Impl>(
-        prepare_semantic_adapter_data(source_version, source_bundle, target_version, target_bundle)));
+    auto data = prepare_semantic_adapter_data(source_version, source_bundle, target_version,
+                                              target_bundle);
+    auto changes = metadata_changes_between(native_root_core(source_version, source_bundle).definition,
+                                            native_root_core(target_version, target_bundle).definition);
+    return GraphSemanticMigrationAdapter(
+        std::make_shared<const Impl>(std::move(data), std::move(changes)));
+}
+
+const std::vector<GraphMetadataChange>& GraphSemanticMigrationAdapter::metadata_changes()
+    const noexcept {
+    return impl_->metadata_changes;
 }
 
 GraphSemanticMigrationAdapter GraphSemanticMigrationAdapter::parse(std::string_view stored_bytes) {

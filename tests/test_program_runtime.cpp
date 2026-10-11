@@ -4177,6 +4177,54 @@ TEST(ProgramRuntimeTest, GraphSemanticMigrationAdapterAdmitsShapePreservingSucce
     (void)source.wait();
 }
 
+// #362: metadata is outside the migration shape, and the approving host sees
+// every metadata change through metadata_changes().
+TEST(ProgramRuntimeTest, GraphSemanticMigrationAdapterListsMetadataChanges) {
+    AdmittedRuntime fixture(1);
+    auto            source_document = program_document("runtime-short-blocking");
+    source_document["root"]["definition"]["metadata"] =
+        json{{"owner", "agent:planner"}, {"limits", json{{"depth", 2}, {"total", 4}}},
+             {"retired", true}};
+    auto target_document = program_document("runtime-short-blocking");
+    target_document["root"]["definition"]["metadata"] =
+        json{{"owner", "agent:reviewer"}, {"limits", json{{"depth", 2}, {"total", 8}}},
+             {"requirements", json::array({"REQ-12"})}};
+    const auto source_version = fixture.admit_document(std::move(source_document));
+    const auto target_version = fixture.admit_document(std::move(target_document));
+    const auto source_bundle =
+        fixture.store->get_bundle("tenant:runtime", source_version.bundle_id());
+    const auto target_bundle =
+        fixture.store->get_bundle("tenant:runtime", target_version.bundle_id());
+    ASSERT_TRUE(source_bundle);
+    ASSERT_TRUE(target_bundle);
+    const auto adapter = GraphSemanticMigrationAdapter::prepare(
+        source_version, *source_bundle, target_version, *target_bundle);
+    EXPECT_TRUE(adapter.binds(source_version, *source_bundle, target_version, *target_bundle));
+
+    std::vector<std::pair<std::string, std::string>> changes;
+    for (const auto& change : adapter.metadata_changes())
+        changes.emplace_back(change.kind, change.json_pointer);
+    EXPECT_EQ(changes, (std::vector<std::pair<std::string, std::string>>{
+                           {"changed", "/metadata/limits/total"},
+                           {"changed", "/metadata/owner"},
+                           {"added", "/metadata/requirements"},
+                           {"removed", "/metadata/retired"}}));
+    // The list is evidence for the approving host, not part of the adapter.
+    const auto parsed = GraphSemanticMigrationAdapter::parse(adapter.serialize_canonical());
+    EXPECT_EQ(parsed.id(), adapter.id());
+    EXPECT_TRUE(parsed.metadata_changes().empty());
+
+    // Same topology without metadata: the shape identity does not change.
+    const auto plain_version = fixture.admit("runtime-short-blocking");
+    const auto plain_bundle =
+        fixture.store->get_bundle("tenant:runtime", plain_version.bundle_id());
+    ASSERT_TRUE(plain_bundle);
+    const auto to_plain = GraphSemanticMigrationAdapter::prepare(
+        source_version, *source_bundle, plain_version, *plain_bundle);
+    EXPECT_EQ(to_plain.topology_shape_id(), adapter.topology_shape_id());
+    EXPECT_EQ(to_plain.metadata_changes().size(), 3U);
+}
+
 TEST(ProgramRuntimeTest, GraphSemanticMigrationAdapterRejectsFrontierRename) {
     AdmittedRuntime fixture(1);
     const auto source_version = fixture.admit("runtime-short-blocking");

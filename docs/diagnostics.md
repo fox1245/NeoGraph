@@ -117,6 +117,8 @@ These come from the Core definition parser; the witness carries the Core code as
 | <a id="p_core_gc_reserved_node"></a>`P_CORE_GC_RESERVED_NODE` | `__start__` and `__end__` are reserved and cannot name nodes. |
 | <a id="p_core_gc_no_entry"></a>`P_CORE_GC_NO_ENTRY` | No edge leaves `__start__`, so nothing would run. Add `.entry(node)`. |
 | <a id="p_core_gc_registry_miss"></a>`P_CORE_GC_REGISTRY_MISS` | A node type, reducer or condition is missing from the registry snapshot. Register it or use the candidate. |
+| <a id="p_core_gc_metadata_limit"></a>`P_CORE_GC_METADATA_LIMIT` | Graph metadata is over a limit: 8 KiB of canonical JSON, nesting depth 4, 64 object members in total or 128-byte keys. The witness gives `kind`, `limit` and `actual`. |
+| <a id="p_core_gc_metadata_text"></a>`P_CORE_GC_METADATA_TEXT` | A metadata key or string contains an invisible character (a C0 control other than tab, newline or carriage return, a bidi control, a zero-width character or a tag character) or ill-formed UTF-8. The witness lists the code points. |
 | <a id="p_core_roundtrip"></a>`P_CORE_ROUNDTRIP` | The parsed graph does not re-emit the definition: something was dropped or rewired. This is a compiler fault; report it. |
 
 ## Core validator

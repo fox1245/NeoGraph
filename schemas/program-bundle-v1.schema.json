@@ -259,6 +259,18 @@
         }
       }
     },
+    "coreMetadata": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 64,
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "not": { "pattern": "^neograph\\." }
+      },
+      "description": "Host-readable author claims (#362): at most 8 KiB of canonical JSON, nesting depth 4, 64 object members in total, keys of 1-128 bytes, no invisible characters. Hashed with the definition; never part of run state."
+    },
     "coreRetryPolicy": {
       "type": "object",
       "additionalProperties": false,
@@ -314,7 +326,8 @@
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/nonemptyString" }
         },
-        "retry_policy": { "$ref": "#/$defs/coreRetryPolicy" }
+        "retry_policy": { "$ref": "#/$defs/coreRetryPolicy" },
+        "metadata": { "$ref": "#/$defs/coreMetadata" }
       }
     },
     "sealedCoreDefinition": {
