@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=zh-CN source_sha256=04c88d44b223662706d62e2676a0ebc37e36410cf1d0f5b61584915e3c80761e -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=zh-CN source_sha256=413185162f55011cd68a06a26e630f9298202b4e08d5f3b334b3c050cd4181ca -->
 # Program 诊断
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -124,6 +124,7 @@ Program 编译会返回诊断：失败时为 `ProgramCompileError::diagnostics()
 | <a id="p_core_gc_registry_miss"></a>`P_CORE_GC_REGISTRY_MISS` | 注册表快照中缺少节点类型、reducer 或 condition。请注册它或使用候选名称。 |
 | <a id="p_core_gc_metadata_limit"></a>`P_CORE_GC_METADATA_LIMIT` | 图元数据超出了限制：规范 JSON 8 KiB、嵌套深度 4、对象成员总数 64、键长 128 字节。witness 给出 `kind`、`limit` 和 `actual`。 |
 | <a id="p_core_gc_metadata_text"></a>`P_CORE_GC_METADATA_TEXT` | 元数据的键或字符串中含有不可见字符（制表符、换行、回车以外的 C0 控制字符、bidi 控制字符、零宽字符或标签字符）或格式错误的 UTF-8。witness 列出这些码位。 |
+| <a id="p_core_gc_failure_edge"></a>`P_CORE_GC_FAILURE_EDGE` | failure edge 违反了目标规则。`witness.reason` 为 `sentinel_source`、`duplicate_from`（每个节点只有一条 failure edge）、`sentinel_target`（请改用 failure exit 结束运行）、`self_target`、`join_target`（失败到达从不填充 join 槽位）、`implicit_end_target`（给目标一条 edge 或路由，或把它设为 failure exit）或 `error_channel_reducer`（error channel 必须使用 `append` reducer）。 |
 | <a id="p_core_roundtrip"></a>`P_CORE_ROUNDTRIP` | 解析后的图无法原样重新输出定义：有内容被丢弃或被重新连接。这是编译器缺陷，请报告。 |
 
 <a id="core-validator"></a>
@@ -148,6 +149,7 @@ Program 编译会返回诊断：失败时为 `ProgramCompileError::diagnostics()
 | <a id="p_core_e15"></a>`P_CORE_E15` | barrier 成员可能路由到其 join 之外的地方；一旦如此，运行会以 barrier-stalled 结束。路由到同一 `any_of` 槽位的另一个备选项不算绕过。`witness.paths` 给出每条绕过路由的路径；当路径回到 join 时，`suggested_wait_for` 和返回的建议会让 join 之前的节点替代该成员。 |
 | <a id="p_core_e16"></a>`P_CORE_E16` | 图中有环，但本次编译要求无环图。 |
 | <a id="p_core_e17"></a>`P_CORE_E17` | 同一个 `any_of` 槽位的两个备选项都可能运行：某个 fan-out 不经过 join 就同时到达二者，或一个备选项同时路由到 join 和另一个备选项。第二次到达会开启一个永远不会完成的新轮次，运行以 barrier-stalled 结束。请让备选项在路由上互斥，例如使用 conditional edge。witness 给出 fan-out 节点和两条路径。 |
+| <a id="p_core_e18"></a>`P_CORE_E18` | 节点配置中有一个其节点类型未声明的 `retry_policy` 键，因此没有任何东西读取它。请用 `graph.retryPolicy(node, {...})`（Core：`node_retry_policies`）设置节点的策略。 |
 | <a id="p_core_routes"></a>`P_CORE_ROUTES` | 设置 `ProgramCompilerConfig::echo_routes`（Python：`echo_routes=True`）时返回的注记。`witness.routes` 将每个节点以及 `__start__` 映射到调度器可以路由到的目标。它从不被封存。 |
 
 <a id="registry"></a>

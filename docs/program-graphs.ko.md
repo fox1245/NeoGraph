@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=ko source_sha256=e889fd64d1855de1c7d0ddfc3d4a3ce929c2eef0f01d98dfa4b04c87a914103a -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=ko source_sha256=1ce6e6727adb4b5289341f4898df30cfc1d98ddb98173b1777959ab8cf6c957c -->
 # Program 그래프 기능
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -57,3 +57,35 @@ graph.conditionalEdge("B", "t.check", {pass: "D", fail: "FIX"})
 - **우회 경로.** `P_CORE_E15` witness에는 `paths`가 있습니다. 우회 라우트마다 멤버에서 그 라우트를 거치는 라우트 순서이며, 다시 조인으로 돌아오면 조인에서 끝납니다. 돌아오는 경우 조인 직전의 노드가 멤버를 대신할 수 있으므로 witness에 `substitute`와 `suggested_wait_for`가 추가되고, 반환된 진단은 `wait_for`를 그것으로 바꾸도록 제안합니다(적용 가능성 `maybe`). #357 형태라면 제안은 `[{"any_of": ["B", "FIX"]}, "C"]`입니다. 이미 다른 슬롯을 채우는 노드는 제안하지 않습니다.
 - **멈춤 경로.** 멈춘 조인의 witness(`output["_neograph"]["barrier_stalled"]`, 그리고 Program 실패의 `stalled_barriers`)에는 `paths`가 추가됩니다. 실행된 누락 멤버마다 조인에 신호를 보낸 노드까지의 라우트이며, 트레이스와 라우팅된 후속 노드 맵에서 구합니다. 해당하는 경우 같은 `suggested_wait_for`도 들어갑니다.
 - **라우트 표.** `ProgramCompilerConfig::echo_routes`(Python: `ProgramCompiler(..., echo_routes=True)`)는 `P_CORE_ROUTES` 노트를 반환합니다. 이 노트의 `witness.routes`는 각 노드를 스케줄러가 라우팅할 수 있는 대상, 즉 첫 번째 conditional edge의 라우트나 그렇지 않으면 정적 edge에 대응시킵니다. 봉인되지 않으므로 어느 쪽이든 번들은 같습니다.
+
+## 실패 라우팅 키
+
+플래그: `retry_policy.per_node`, `failure_edges`, `failure_exits`. 컴파일러는 이 키들을 이제 받아들이고 검사하고 봉인하며, 이를 실행하는 런타임이 들어오면 플래그가 켜집니다. 그 전까지 노드 실패는 지금처럼 실행을 실패시킵니다.
+
+```js
+ng.graph("fix")
+  .channel("failures", {reducer: "append", initial: []})
+  .node("IMPLEMENT", {type: "t.task"}).node("TEST", {type: "t.task"})
+  .node("ASK_USER", {type: "t.review"}).node("ABORT", {type: "t.task"})
+  .entry("IMPLEMENT").edge("IMPLEMENT", "TEST").exit("TEST")
+  .conditionalEdge("ASK_USER", "t.decision", {retry: "IMPLEMENT", abort: "ABORT"})
+  .retryPolicy("TEST", {max_retries: 2, non_retryable: ["app.compile_error"], max_visits: 3,
+                        on_failure: "ASK_USER", error_channel: "failures"})
+  .interruptBefore("ASK_USER")
+  .failureExit("ABORT", {code: "plan.user_abort"});
+```
+
+`retryPolicy(node, {...})`는 Core 키 두 개로 낮춰집니다. 타이밍과 정책 필드는 `node_retry_policies`로, `on_failure`와 `error_channel`은 `failure_edges`로 갑니다. `failureExit(node, {code})`는 `failure_exits`를 씁니다. 각 키는 쓰지 않으면 없고, 그래프 단위 `retryPolicy({...})`는 바뀌지 않습니다.
+
+```json
+"node_retry_policies": {"TEST": {"max_retries": 2, "non_retryable": ["app.compile_error"], "max_visits": 3}},
+"failure_edges": [{"from": "TEST", "to": "ASK_USER", "error_channel": "failures"}],
+"failure_exits": {"ABORT": {"code": "plan.user_abort"}}
+```
+
+- **노드별 정책.** 적은 필드만 저장됩니다. `max_retries` 0~10, `initial_delay_ms` 10~60 000, `backoff_multiplier` 1.0~10.0, `max_delay_ms`는 `initial_delay_ms`부터 300 000까지, `non_retryable`(고유 코드 최대 16개), `max_visits` 1~100, `error_text`입니다. `attempt_timeout_ms`는 아직 받지 않습니다. 범위를 벗어나면 `{min, max, actual}`을 담은 `P_CORE_GC_FIELD_VALUE`입니다.
+- **코드.** 작성자 코드는 `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`와 맞아야 하며 `NG.` 접두사는 예약되어 있습니다. `non_retryable`에는 분류기의 코드(`NG.TaskFailed`, `NG.Timeout`, `NG.SubgraphFailed`, 그리고 레퍼런스의 노드 실패 계약에 있는 나머지)도 쓸 수 있습니다.
+- **failure edge.** 노드마다 최대 하나이고 `from` 순으로 정렬됩니다. 대상은 `__start__`, `__end__`, 노드 자신, 조인, 그리고 failure exit가 아니면서 edge나 라우트가 없는 노드일 수 없습니다(`P_CORE_GC_FAILURE_EDGE`). `error_channel`은 `append` reducer를 써야 합니다.
+- **failure exit.** 코드의 기본값은 `NG.Aborted`입니다. failure exit 노드에는 edge나 라우트가 없습니다.
+- **검증.** 알 수 없는 노드와 채널은 `P_CORE_E3`입니다. failure edge는 라우팅된 후속 노드 맵에 들어가므로 도달 가능성, 종료, barrier 우회(`P_CORE_E15`, 라우트 `on_failure`) 검사가 이를 보며, `error_channel`은 쓰인 것으로 셉니다. 노드 타입이 선언하지 않은 노드 설정의 `retry_policy` 키는 `P_CORE_E18`로 보고됩니다. 그래프 단위 `retryPolicy({...})`에 `on_failure`를 쓰면 노드별 형태를 알려 주는 힌트와 함께 `P_CORE_GC_UNKNOWN_FIELD`가 납니다.
+- **마이그레이션.** `failure_edges`와 `failure_exits`는 마이그레이션 어댑터의 토폴로지 형태에 포함되고, `node_retry_policies`는 포함되지 않습니다.

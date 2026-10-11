@@ -568,6 +568,360 @@ std::optional<std::vector<std::set<std::string>>> detail::parse_wait_for_slots(
     return canonical_slots(std::move(slots));
 }
 
+// ---- #364 failure routing keys ---------------------------------------------
+
+bool detail::is_known_failure_code(std::string_view code) noexcept {
+    static constexpr std::string_view kKnown[] = {
+        "NG.BudgetExhausted", "NG.ConfigError",   "NG.EffectCommitted", "NG.EffectUncertain",
+        "NG.LogicError",      "NG.ProviderFailed", "NG.SafetyBlocked",   "NG.SubgraphFailed",
+        "NG.TaskFailed",      "NG.Timeout",        "NG.UnknownFailure"};
+    return std::find(std::begin(kKnown), std::end(kKnown), code) != std::end(kKnown);
+}
+
+namespace {
+
+struct FailureKeyContext {
+    std::set<std::string>              nodes;
+    std::set<std::string>              with_successors;  // static edges or routes
+    std::set<std::string>              joins;
+    std::map<std::string, std::string> channel_reducers;
+};
+
+FailureKeyContext failure_key_context(const json& definition) {
+    FailureKeyContext context;
+    if (definition.contains("nodes") && definition["nodes"].is_object()) {
+        for (const auto& [name, config] : definition["nodes"].items()) {
+            context.nodes.insert(name);
+            if (config.is_object() && config.contains("barrier")) context.joins.insert(name);
+        }
+    }
+    for (const auto* field : {"edges", "conditional_edges"}) {
+        if (!definition.contains(field) || !definition[field].is_array()) continue;
+        for (const auto& edge : definition[field])
+            if (edge.is_object() && edge.contains("from") && edge["from"].is_string())
+                context.with_successors.insert(edge["from"].get<std::string>());
+    }
+    if (definition.contains("channels") && definition["channels"].is_object()) {
+        for (const auto& [name, channel] : definition["channels"].items()) {
+            std::string reducer = "overwrite";
+            if (channel.is_object() && channel.contains("reducer") && channel["reducer"].is_string())
+                reducer = channel["reducer"].get<std::string>();
+            context.channel_reducers[name] = reducer;
+        }
+    }
+    return context;
+}
+
+std::optional<int> bounded_integer(const json& value, const std::string& pointer, long long minimum,
+                                   long long maximum, std::vector<CompilerDiagnostic>& diagnostics) {
+    if (!value.is_number_integer()) {
+        diagnostics.push_back({"GC_FIELD_TYPE", pointer, pointer + " must be an integer",
+                               json{{"expected", "integer"}, {"actual", json_type_name(value)}}});
+        return std::nullopt;
+    }
+    const long long number =
+        value.is_number_unsigned()
+            ? static_cast<long long>(std::min<std::uint64_t>(value.get<std::uint64_t>(),
+                                                             std::numeric_limits<long long>::max()))
+            : value.get<std::int64_t>();
+    if (number < minimum || number > maximum) {
+        diagnostics.push_back({"GC_FIELD_VALUE", pointer,
+                               pointer + " must be between " + std::to_string(minimum) + " and " +
+                                   std::to_string(maximum),
+                               json{{"min", minimum}, {"max", maximum}, {"actual", value}}});
+        return std::nullopt;
+    }
+    return static_cast<int>(number);
+}
+
+void unknown_fields(const json& object, const std::set<std::string>& known, const std::string& pointer,
+                    std::vector<CompilerDiagnostic>& diagnostics) {
+    for (const auto& [key, unused] : object.items()) {
+        (void)unused;
+        if (known.count(key) || is_annotation_key(key)) continue;
+        diagnostics.push_back({"GC_UNKNOWN_FIELD", pointer + "/" + pointer_token(key),
+                               pointer + ": unknown or unconsumed key '" + key + "'",
+                               json{{"field", key}}});
+    }
+}
+
+NodeRetryPolicySpec parse_node_retry_policy(const json& policy, const std::string& pointer,
+                                            std::vector<CompilerDiagnostic>& diagnostics) {
+    NodeRetryPolicySpec spec;
+    unknown_fields(policy,
+                   {"max_retries", "initial_delay_ms", "backoff_multiplier", "max_delay_ms",
+                    "non_retryable", "max_visits", "error_text"},
+                   pointer, diagnostics);
+    if (policy.contains("max_retries"))
+        spec.max_retries = bounded_integer(policy["max_retries"], pointer + "/max_retries", 0, 10, diagnostics);
+    if (policy.contains("initial_delay_ms"))
+        spec.initial_delay_ms =
+            bounded_integer(policy["initial_delay_ms"], pointer + "/initial_delay_ms", 10, 60000, diagnostics);
+    if (policy.contains("max_delay_ms"))
+        spec.max_delay_ms = bounded_integer(policy["max_delay_ms"], pointer + "/max_delay_ms",
+                                            spec.initial_delay_ms.value_or(10), 300000, diagnostics);
+    if (policy.contains("max_visits"))
+        spec.max_visits = bounded_integer(policy["max_visits"], pointer + "/max_visits", 1, 100, diagnostics);
+    if (policy.contains("backoff_multiplier")) {
+        const auto& value = policy["backoff_multiplier"];
+        if (!value.is_number()) {
+            diagnostics.push_back({"GC_FIELD_TYPE", pointer + "/backoff_multiplier",
+                                   pointer + "/backoff_multiplier must be a number",
+                                   json{{"expected", "number"}, {"actual", json_type_name(value)}}});
+        } else if (const auto number = value.get<double>();
+                   !std::isfinite(number) || number < 1.0 || number > 10.0) {
+            diagnostics.push_back({"GC_FIELD_VALUE", pointer + "/backoff_multiplier",
+                                   pointer + "/backoff_multiplier must be between 1.0 and 10.0",
+                                   json{{"min", 1.0}, {"max", 10.0}, {"actual", value}}});
+        } else {
+            spec.backoff_multiplier = number;
+        }
+    }
+    if (policy.contains("error_text")) {
+        if (!policy["error_text"].is_boolean())
+            diagnostics.push_back({"GC_FIELD_TYPE", pointer + "/error_text",
+                                   pointer + "/error_text must be a boolean",
+                                   json{{"expected", "boolean"}, {"actual", json_type_name(policy["error_text"])}}});
+        else
+            spec.error_text = policy["error_text"].get<bool>();
+    }
+    if (policy.contains("non_retryable")) {
+        const auto& codes        = policy["non_retryable"];
+        const auto  list_pointer = pointer + "/non_retryable";
+        if (!codes.is_array()) {
+            diagnostics.push_back({"GC_FIELD_TYPE", list_pointer, list_pointer + " must be an array of codes",
+                                   json{{"expected", "array"}, {"actual", json_type_name(codes)}}});
+        } else if (codes.size() > 16) {
+            diagnostics.push_back({"GC_FIELD_VALUE", list_pointer, list_pointer + " lists at most 16 codes",
+                                   json{{"min", 0}, {"max", 16}, {"actual", codes.size()}}});
+        } else {
+            std::set<std::string> seen;
+            std::size_t           index = 0;
+            for (const auto& code : codes) {
+                const auto at = list_pointer + "/" + std::to_string(index++);
+                if (!code.is_string()) {
+                    diagnostics.push_back({"GC_FIELD_TYPE", at, at + " must be a string",
+                                           json{{"expected", "string"}, {"actual", json_type_name(code)}}});
+                    continue;
+                }
+                const auto text = code.get<std::string>();
+                if (!is_author_failure_code(text) && !detail::is_known_failure_code(text)) {
+                    diagnostics.push_back(
+                        {"GC_FIELD_VALUE", at,
+                         at + ": '" + text +
+                             "' is neither an author code ([a-z][a-z0-9_]*(.[a-z0-9_]+)+) nor a known NG code",
+                         json{{"expected", "author code or known NG code"}, {"actual", text}}});
+                    continue;
+                }
+                if (!seen.insert(text).second) {
+                    diagnostics.push_back({"GC_FIELD_VALUE", at, at + ": '" + text + "' is listed twice",
+                                           json{{"expected", "unique codes"}, {"actual", text}}});
+                }
+            }
+            spec.non_retryable.assign(seen.begin(), seen.end());
+        }
+    }
+    return spec;
+}
+
+}  // namespace
+
+detail::FailureRoutingKeys detail::parse_failure_routing_keys(
+    const json& definition, std::vector<CompilerDiagnostic>& diagnostics) {
+    FailureRoutingKeys keys;
+    const auto         context = failure_key_context(definition);
+    const auto         type_error = [&](const std::string& pointer, const char* expected, const json& value) {
+        diagnostics.push_back({"GC_FIELD_TYPE", pointer,
+                               "topology '" + pointer + "' must be an " + expected + ", got " +
+                                   json_type_name(value),
+                               json{{"expected", expected}, {"actual", json_type_name(value)}}});
+    };
+
+    if (definition.contains("node_retry_policies")) {
+        const auto& policies = definition["node_retry_policies"];
+        if (!policies.is_object()) {
+            type_error("/node_retry_policies", "object", policies);
+        } else {
+            for (const auto& [name, policy] : policies.items()) {
+                const auto pointer = "/node_retry_policies/" + pointer_token(name);
+                if (!policy.is_object()) {
+                    type_error(pointer, "object", policy);
+                    continue;
+                }
+                auto spec = parse_node_retry_policy(policy, pointer, diagnostics);
+                if (!spec.empty()) keys.node_retry_policies[name] = std::move(spec);
+            }
+        }
+    }
+
+    // Exits first: a failure exit is a valid target although it has no successors.
+    if (definition.contains("failure_exits")) {
+        const auto& exits = definition["failure_exits"];
+        if (!exits.is_object()) {
+            type_error("/failure_exits", "object", exits);
+        } else {
+            for (const auto& [name, exit] : exits.items()) {
+                const auto pointer = "/failure_exits/" + pointer_token(name);
+                if (!exit.is_object()) {
+                    type_error(pointer, "object", exit);
+                    continue;
+                }
+                unknown_fields(exit, {"code"}, pointer, diagnostics);
+                FailureExit parsed;
+                if (exit.contains("code")) {
+                    const auto& code = exit["code"];
+                    if (!code.is_string()) {
+                        type_error(pointer + "/code", "string", code);
+                        continue;
+                    }
+                    const auto text = code.get<std::string>();
+                    if (text != "NG.Aborted" && !is_author_failure_code(text)) {
+                        diagnostics.push_back(
+                            {"GC_FIELD_VALUE", pointer + "/code",
+                             pointer + "/code: '" + text +
+                                 "' must be an author code ([a-z][a-z0-9_]*(.[a-z0-9_]+)+); the NG. prefix is reserved",
+                             json{{"expected", "author code"}, {"actual", text}}});
+                        continue;
+                    }
+                    if (text != "NG.Aborted") parsed.code = text;
+                }
+                if (context.with_successors.count(name)) {
+                    diagnostics.push_back({"GC_FIELD_VALUE", pointer,
+                                           "failure exit '" + name +
+                                               "' has outgoing edges or routes; a failure exit ends the run",
+                                           json{{"expected", "a node without outgoing edges or routes"},
+                                                {"actual", name}}});
+                    continue;
+                }
+                keys.failure_exits[name] = std::move(parsed);
+            }
+        }
+    }
+
+    if (definition.contains("failure_edges")) {
+        const auto& edges = definition["failure_edges"];
+        if (!edges.is_array()) {
+            type_error("/failure_edges", "array", edges);
+        } else {
+            std::set<std::string> sources;
+            std::size_t           index = 0;
+            for (const auto& edge : edges) {
+                const auto pointer = "/failure_edges/" + std::to_string(index++);
+                if (!edge.is_object()) {
+                    type_error(pointer, "object", edge);
+                    continue;
+                }
+                unknown_fields(edge, {"from", "to", "error_channel"}, pointer, diagnostics);
+                FailureEdge parsed;
+                bool        shaped = true;
+                for (const auto* field : {"from", "to"}) {
+                    if (!edge.contains(field)) {
+                        diagnostics.push_back({"GC_FIELD_REQUIRED", pointer,
+                                               pointer + ": required field '" + std::string(field) + "' is missing",
+                                               json{{"field", field}}});
+                        shaped = false;
+                    } else if (!edge[field].is_string() || edge[field].get<std::string>().empty()) {
+                        diagnostics.push_back({"GC_FIELD_VALUE", pointer + "/" + field,
+                                               pointer + "/" + field + " must be a node name",
+                                               json{{"expected", "non-empty string"}, {"actual", edge[field]}}});
+                        shaped = false;
+                    }
+                }
+                if (edge.contains("error_channel")) {
+                    if (!edge["error_channel"].is_string() || edge["error_channel"].get<std::string>().empty()) {
+                        diagnostics.push_back({"GC_FIELD_VALUE", pointer + "/error_channel",
+                                               pointer + "/error_channel must be a channel name",
+                                               json{{"expected", "non-empty string"}, {"actual", edge["error_channel"]}}});
+                        shaped = false;
+                    } else {
+                        parsed.error_channel = edge["error_channel"].get<std::string>();
+                    }
+                }
+                if (!shaped) continue;
+                parsed.from = edge["from"].get<std::string>();
+                parsed.to   = edge["to"].get<std::string>();
+                const auto reject = [&](const char* reason, const std::string& why) {
+                    diagnostics.push_back({"GC_FAILURE_EDGE", pointer,
+                                           "failure edge '" + parsed.from + "' -> '" + parsed.to + "': " + why,
+                                           json{{"from", parsed.from}, {"to", parsed.to}, {"reason", reason}}});
+                };
+                if (parsed.from == START_NODE || parsed.from == END_NODE) {
+                    reject("sentinel_source", "only nodes fail");
+                } else if (!sources.insert(parsed.from).second) {
+                    reject("duplicate_from", "a node has at most one failure edge");
+                } else if (parsed.to == START_NODE || parsed.to == END_NODE) {
+                    reject("sentinel_target",
+                           "route failures to a node; end the run with a failure exit instead");
+                } else if (parsed.to == parsed.from) {
+                    reject("self_target", "a node cannot handle its own failure; use max_retries to retry it");
+                } else if (context.nodes.count(parsed.to) && context.joins.count(parsed.to)) {
+                    reject("join_target",
+                           "a failure arrival never fills a join slot, so the join could only stall");
+                } else if (context.nodes.count(parsed.to) && !context.with_successors.count(parsed.to) &&
+                           !keys.failure_exits.count(parsed.to)) {
+                    reject("implicit_end_target",
+                           "the target has no edges or routes; end it with an explicit exit or make it a failure exit");
+                } else if (parsed.error_channel && context.channel_reducers.count(*parsed.error_channel) &&
+                           context.channel_reducers.at(*parsed.error_channel) != "append") {
+                    reject("error_channel_reducer",
+                           "error_channel '" + *parsed.error_channel + "' must use the built-in append reducer");
+                } else {
+                    keys.failure_edges.push_back(std::move(parsed));
+                }
+            }
+            std::sort(keys.failure_edges.begin(), keys.failure_edges.end(),
+                      [](const FailureEdge& lhs, const FailureEdge& rhs) { return lhs.from < rhs.from; });
+        }
+    }
+    return keys;
+}
+
+json detail::print_node_retry_policies(const std::map<std::string, NodeRetryPolicySpec>& policies) {
+    json result = json::object();
+    for (const auto& [name, spec] : policies) {
+        if (spec.empty()) continue;
+        json policy = json::object();
+        if (spec.max_retries) policy["max_retries"] = *spec.max_retries;
+        if (spec.initial_delay_ms) policy["initial_delay_ms"] = *spec.initial_delay_ms;
+        if (spec.backoff_multiplier) policy["backoff_multiplier"] = *spec.backoff_multiplier;
+        if (spec.max_delay_ms) policy["max_delay_ms"] = *spec.max_delay_ms;
+        if (!spec.non_retryable.empty()) {
+            json codes = json::array();
+            for (const auto& code : spec.non_retryable) codes.push_back(code);
+            policy["non_retryable"] = std::move(codes);
+        }
+        if (spec.max_visits) policy["max_visits"] = *spec.max_visits;
+        if (spec.error_text) policy["error_text"] = *spec.error_text;
+        result[name] = std::move(policy);
+    }
+    return result.empty() ? json() : result;
+}
+
+json detail::print_failure_edges(const std::vector<FailureEdge>& edges) {
+    if (edges.empty()) return json();
+    auto sorted = edges;
+    std::sort(sorted.begin(), sorted.end(),
+              [](const FailureEdge& lhs, const FailureEdge& rhs) { return lhs.from < rhs.from; });
+    json result = json::array();
+    for (const auto& edge : sorted) {
+        json value{{"from", edge.from}, {"to", edge.to}};
+        if (edge.error_channel) value["error_channel"] = *edge.error_channel;
+        result.push_back(std::move(value));
+    }
+    return result;
+}
+
+json detail::print_failure_exits(const std::map<std::string, FailureExit>& exits) {
+    if (exits.empty()) return json();
+    json result = json::object();
+    for (const auto& [name, exit] : exits) {
+        json value = json::object();
+        if (!exit.code.empty()) value["code"] = exit.code;
+        result[name] = std::move(value);
+    }
+    return result;
+}
+
 bool ParseReport::has_errors() const noexcept {
     return !diagnostics.empty();
 }
@@ -1201,10 +1555,19 @@ static ParseReport parse_report_impl(const json&          definition,
                 }
             }
             if (strict) {
+                const auto before = diagnostics.size();
                 enforce_consumed(
                     retry,
                     {"max_retries", "initial_delay_ms", "backoff_multiplier", "max_delay_ms"},
                     "retry_policy", "/retry_policy", diagnostics);
+                // #364: failure routes are per node, not graph-wide.
+                for (auto index = before; index < diagnostics.size(); ++index) {
+                    const auto field = diagnostics[index].witness.value("field", std::string());
+                    if (field == "on_failure" || field == "on_exhausted")
+                        diagnostics[index].message +=
+                            "; route a node's failures with node_retry_policies and failure_edges "
+                            "(JavaScript: graph.retryPolicy(node, {on_failure: ...}))";
+                }
             }
             topology.retry_policy = policy;
         }
@@ -1218,6 +1581,17 @@ static ParseReport parse_report_impl(const json&          definition,
         detail::append_metadata_diagnostics(metadata, diagnostics);
         if (diagnostics.size() == before && !metadata.empty())
             topology.metadata = neograph::detail::owned_json_copy(metadata);
+    }
+
+    // #364: failure routing keys, read under schema_version >= 1 only.
+    if (strict && (definition.contains("node_retry_policies") ||
+                   definition.contains("failure_edges") || definition.contains("failure_exits"))) {
+        for (const auto* key : {"node_retry_policies", "failure_edges", "failure_exits"})
+            if (definition.contains(key)) top_consumed.insert(key);
+        auto keys                    = detail::parse_failure_routing_keys(definition, diagnostics);
+        topology.node_retry_policies = std::move(keys.node_retry_policies);
+        topology.failure_edges       = std::move(keys.failure_edges);
+        topology.failure_exits       = std::move(keys.failure_exits);
     }
 
     // Only static edges from __start__ start a run; without one nothing runs and
@@ -1327,6 +1701,9 @@ CompiledGraph GraphCompiler::link(TopologySpec         topology,
     cg.retry_policy      = std::move(topology.retry_policy);
     cg.schema_version    = topology.schema_version;
     cg.metadata          = std::move(topology.metadata);
+    cg.node_retry_policies = std::move(topology.node_retry_policies);
+    cg.failure_edges       = std::move(topology.failure_edges);
+    cg.failure_exits       = std::move(topology.failure_exits);
     if (cg.schema_version == 0) {
         for (auto& edge : cg.conditional_edges) {
             if (edge.routes.empty()) continue;
@@ -1365,6 +1742,9 @@ CompiledGraph GraphCompiler::link_local(TopologySpec         topology,
     cg.retry_policy      = std::move(topology.retry_policy);
     cg.schema_version    = topology.schema_version;
     cg.metadata          = std::move(topology.metadata);
+    cg.node_retry_policies = std::move(topology.node_retry_policies);
+    cg.failure_edges       = std::move(topology.failure_edges);
+    cg.failure_exits       = std::move(topology.failure_exits);
     if (cg.schema_version == 0) {
         for (auto& edge : cg.conditional_edges) {
             if (edge.routes.empty()) continue;
@@ -1485,6 +1865,14 @@ json TopologySpec::to_json() const {
     // Absent unless used, so definitions without metadata keep their bytes.
     if (metadata.is_object() && !metadata.empty()) j["metadata"] = metadata;
 
+    // #364, each absent unless used.
+    if (auto policies = detail::print_node_retry_policies(node_retry_policies); !policies.is_null())
+        j["node_retry_policies"] = std::move(policies);
+    if (auto routes = detail::print_failure_edges(failure_edges); !routes.is_null())
+        j["failure_edges"] = std::move(routes);
+    if (auto exits = detail::print_failure_exits(failure_exits); !exits.is_null())
+        j["failure_exits"] = std::move(exits);
+
     return j;
 }
 
@@ -1502,6 +1890,9 @@ TopologySpec CompiledGraph::topology() const {
     result.schema_version    = schema_version;
     result.node_defs         = node_defs;
     result.metadata          = metadata;
+    result.node_retry_policies = node_retry_policies;
+    result.failure_edges       = failure_edges;
+    result.failure_exits       = failure_exits;
     for (const auto& [name, wait_for_set] : barrier_specs) {
         auto node = result.node_defs.find(name);
         if (node == result.node_defs.end()) continue;
@@ -1539,11 +1930,108 @@ json GraphCompiler::canon(const json& definition) {
         "interrupt_after",
         "retry_policy",
         "metadata",
+        "node_retry_policies",
+        "failure_edges",
+        "failure_exits",
     };
     for (const auto& [k, v] : definition.items()) {
         if (is_annotation_key(k) || owned.count(k)) continue;
         out[k] = v;
     }
+    // #364: the canonical form the printer writes. Defaults are absent, codes
+    // and edges sorted; anything unreadable is kept so TV still flags it.
+    if (definition.contains("node_retry_policies")) {
+        const auto& policies = definition["node_retry_policies"];
+        if (!policies.is_object()) {
+            out["node_retry_policies"] = policies;
+        } else {
+            json canonical_policies = json::object();
+            for (const auto& [name, policy] : policies.items()) {
+                if (!policy.is_object()) {
+                    canonical_policies[name] = policy;
+                    continue;
+                }
+                json p = json::object();
+                for (const auto& [key, value] : policy.items()) {
+                    if (is_annotation_key(key)) continue;
+                    if (key == "backoff_multiplier" && value.is_number()) {
+                        p[key] = value.get<double>();
+                    } else if (key == "non_retryable" && value.is_array()) {
+                        std::set<std::string> codes;
+                        bool                  strings = true;
+                        for (const auto& code : value) {
+                            if (code.is_string()) codes.insert(code.get<std::string>());
+                            else strings = false;
+                        }
+                        if (!strings) {
+                            p[key] = value;
+                        } else if (!codes.empty()) {
+                            json sorted = json::array();
+                            for (const auto& code : codes) sorted.push_back(code);
+                            p[key] = std::move(sorted);
+                        }
+                    } else {
+                        p[key] = value;
+                    }
+                }
+                if (!p.empty()) canonical_policies[name] = std::move(p);
+            }
+            if (!canonical_policies.empty()) out["node_retry_policies"] = std::move(canonical_policies);
+        }
+    }
+    if (definition.contains("failure_edges")) {
+        const auto& edges = definition["failure_edges"];
+        if (!edges.is_array()) {
+            out["failure_edges"] = edges;
+        } else if (!edges.empty()) {
+            std::vector<json> sorted;
+            for (const auto& edge : edges) {
+                json e = json::object();
+                if (edge.is_object()) {
+                    for (const auto& [key, value] : edge.items())
+                        if (!is_annotation_key(key)) e[key] = value;
+                } else {
+                    e = edge;
+                }
+                sorted.push_back(sort_keys(e));
+            }
+            std::stable_sort(sorted.begin(), sorted.end(), [](const json& lhs, const json& rhs) {
+                const auto from = [](const json& value) {
+                    return value.is_object() && value.contains("from") && value["from"].is_string()
+                               ? value["from"].get<std::string>()
+                               : std::string();
+                };
+                return from(lhs) < from(rhs);
+            });
+            json arr = json::array();
+            for (auto& e : sorted) arr.push_back(std::move(e));
+            out["failure_edges"] = std::move(arr);
+        }
+    }
+    if (definition.contains("failure_exits")) {
+        const auto& exits = definition["failure_exits"];
+        if (!exits.is_object()) {
+            out["failure_exits"] = exits;
+        } else if (!exits.empty()) {
+            json canonical_exits = json::object();
+            for (const auto& [name, exit] : exits.items()) {
+                json x = json::object();
+                if (exit.is_object()) {
+                    for (const auto& [key, value] : exit.items()) {
+                        if (is_annotation_key(key)) continue;
+                        if (key == "code" && value.is_string() && value.get<std::string>() == "NG.Aborted")
+                            continue;
+                        x[key] = value;
+                    }
+                } else {
+                    x = exit;
+                }
+                canonical_exits[name] = std::move(x);
+            }
+            out["failure_exits"] = std::move(canonical_exits);
+        }
+    }
+
     // Metadata is compared as a value; an empty object is the same as none.
     if (definition.contains("metadata") &&
         !(definition["metadata"].is_object() && definition["metadata"].empty())) {

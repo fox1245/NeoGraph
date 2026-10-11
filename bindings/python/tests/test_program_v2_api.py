@@ -169,7 +169,9 @@ def test_capability_manifest_validates_against_its_schema():
         _schema("javascript-capability-manifest-v1.schema.json")
     ).validate(manifest)
     for method in manifest["define"]["graph_builder_methods"]:
-        assert manifest["features"][method["feature"]] is True, method["name"]
+        # A method of a feature that is off compiles but does not run yet
+        # (the #364 sugar before its runtime).
+        assert manifest["features"][method["feature"]] is True or method["name"] == "failureExit"
         for argument in method["arguments"]:
             jsonschema.Draft202012Validator.check_schema(argument["schema"])
 
@@ -315,3 +317,48 @@ def test_echo_routes_returns_the_routed_successor_table():
     assert len(notes) == 1 and notes[0]["severity"] == "note"
     assert notes[0]["witness"]["routes"]["B"] == ["D", "FIX"]
     assert all(d["code"] != "P_CORE_ROUTES" for d in bundle.diagnostics)
+
+
+# ---------------------------------------------------------------------------
+# #364: failure routing keys (compile time; the runtime is WP11)
+# ---------------------------------------------------------------------------
+
+
+_FIX_LOOP = (
+    "export function define() {\n"
+    '  return ng.graph("fix").channel("failures", {reducer: "append", initial: []})'
+    '.node("IMPLEMENT", {type: "v2.task"}).node("TEST", {type: "v2.task"})'
+    '.node("ASK_USER", {type: "v2.task"}).node("ABORT", {type: "v2.task"})'
+    '.entry("IMPLEMENT").edge("IMPLEMENT", "TEST").exit("TEST")'
+    '.conditionalEdge("ASK_USER", "v2.always_pass", {pass: "IMPLEMENT", fail: "ABORT"})'
+    '.retryPolicy("TEST", {max_retries: 2, non_retryable: ["app.compile_error"], max_visits: 3,'
+    ' on_failure: "ASK_USER", error_channel: "failures"})'
+    '.interruptBefore("ASK_USER").failureExit("ABORT", {code: "plan.user_abort"})%s;\n'
+    "}\n"
+)
+
+
+def test_retry_policy_sugar_lowers_to_the_failure_routing_keys():
+    bundle = _compile(_FIX_LOOP % "")
+    definition = bundle.sealed_core_definitions[0]["definition"]
+    assert definition["node_retry_policies"] == {
+        "TEST": {"max_retries": 2, "max_visits": 3, "non_retryable": ["app.compile_error"]}
+    }
+    assert definition["failure_edges"] == [
+        {"from": "TEST", "to": "ASK_USER", "error_channel": "failures"}
+    ]
+    assert definition["failure_exits"] == {"ABORT": {"code": "plan.user_abort"}}
+    assert bundle.diagnostics == []
+    features = ng.javascript_authoring_capability_manifest()["features"]
+    assert features["failure_edges"] is False  # on with the runtime (WP11)
+
+
+def test_failure_routing_errors_reach_python_with_their_codes():
+    diagnostics = _compile_error(_FIX_LOOP % '.retryPolicy("ASK_USER", {max_retries: 11})')
+    bound = [d for d in diagnostics if d["code"] == "P_CORE_GC_FIELD_VALUE"]
+    assert bound and bound[0]["witness"]["max"] == 10
+    diagnostics = _compile_error(
+        _FIX_LOOP % '.retryPolicy("IMPLEMENT", {on_failure: "__end__"})'
+    )
+    edge = [d for d in diagnostics if d["code"] == "P_CORE_GC_FAILURE_EDGE"]
+    assert edge and edge[0]["witness"]["reason"] == "sentinel_target"

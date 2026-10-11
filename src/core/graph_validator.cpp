@@ -136,6 +136,42 @@ void check_references(Ctx& c) {
     check_interrupts("interrupt_before", c.cg.interrupt_before);
     check_interrupts("interrupt_after", c.cg.interrupt_after);
 
+    // #364 failure routing keys.
+    std::set<std::string> channels;
+    for (const auto& channel : c.cg.channel_defs) channels.insert(channel.name);
+    i = 0;
+    for (const auto& fe : c.cg.failure_edges) {
+        const std::string path    = "failure_edges[" + std::to_string(i) + "]";
+        const std::string pointer = "/failure_edges/" + std::to_string(i++);
+        for (const auto* end : {&fe.from, &fe.to}) {
+            if (c.is_node(*end)) continue;
+            c.error("E3", path, pointer,
+                    "failure edge '" + fe.from + "' -> '" + fe.to + "' references unknown node '" +
+                        *end + "'",
+                    json{{"from", fe.from}, {"to", fe.to}, {"unknown", *end}});
+        }
+        if (fe.error_channel && !channels.count(*fe.error_channel)) {
+            c.error("E3", path, pointer + "/error_channel",
+                    "failure edge '" + fe.from + "' writes undeclared error_channel '" +
+                        *fe.error_channel + "'",
+                    json{{"from", fe.from}, {"channel", *fe.error_channel}, {"unknown", *fe.error_channel}});
+        }
+    }
+    for (const auto& [name, unused] : c.cg.node_retry_policies) {
+        (void)unused;
+        if (c.is_node(name)) continue;
+        c.error("E3", "node_retry_policies." + name, "/node_retry_policies/" + pointer_token(name),
+                "node_retry_policies names unknown node '" + name + "'",
+                json{{"node", name}, {"unknown", name}});
+    }
+    for (const auto& [name, unused] : c.cg.failure_exits) {
+        (void)unused;
+        if (c.is_node(name)) continue;
+        c.error("E3", "failure_exits." + name, "/failure_exits/" + pointer_token(name),
+                "failure_exits names unknown node '" + name + "'",
+                json{{"node", name}, {"unknown", name}});
+    }
+
     for (const auto& [bnode, join] : c.cg.join_specs) {
         const std::string path    = "nodes." + bnode + ".barrier";
         const std::string pointer = "/nodes/" + pointer_token(bnode) + "/barrier";
@@ -207,6 +243,8 @@ void build_successors(Ctx& c) {
     }
     for (const auto& e : c.cg.edges)
         if (!routed.count(e.from)) c.succ[e.from].insert(e.to);
+    // #364: a failure edge is one more way a node continues.
+    for (const auto& fe : c.cg.failure_edges) c.succ[fe.from].insert(fe.to);
 }
 
 // ---- E7: reachability from __start__ -------------------------------------
@@ -375,6 +413,35 @@ void check_shadowed_transitions(Ctx& c) {
 
 // ---- E15: barrier member that can route around its join (issue #357) -----
 
+// Where member `u` of a join goes. Returns whether it signals the join, and
+// fills `bypass` with the routes that lead elsewhere: its conditional routes
+// (keyed by label), or for a static node nothing, plus its failure edge
+// (keyed "on_failure", #364). A route to __end__ or to another alternative of
+// the member's slot is not a bypass.
+bool member_routes(const Ctx&                   c,
+                   const std::string&           u,
+                   const std::string&           bnode,
+                   const std::set<std::string>& slot,
+                   json&                        bypass) {
+    bool signals = false;
+    if (const auto* routing = c.routing_edge(u)) {
+        for (const auto& [key, target] : routing->routes) {
+            if (target == bnode) signals = true;
+            if (target == bnode || target == kEnd || slot.count(target)) continue;
+            bypass[key == detail::kLegacyDefaultRoute ? std::string(DEFAULT_ROUTE) : key] = target;
+        }
+    } else {
+        for (const auto& e : c.cg.edges)
+            if (e.from == u && e.to == bnode) signals = true;
+    }
+    if (c.original_rules) return signals;
+    for (const auto& fe : c.cg.failure_edges) {
+        if (fe.from != u || fe.to == bnode || slot.count(fe.to)) continue;
+        bypass["on_failure"] = fe.to;
+    }
+    return signals;
+}
+
 // X2: the shortest routed path from `from` to `to`, or empty.
 std::vector<std::string> shortest_path(const Ctx& c, const std::string& from, const std::string& to) {
     std::map<std::string, std::string> parent;
@@ -440,16 +507,9 @@ void add_bypass_paths(const Ctx&                                c,
 void check_barrier_bypass(Ctx& c) {
     for (const auto& [bnode, wait_for] : c.cg.barrier_specs) {
         for (const auto& u : wait_for) {
-            const auto* routing = c.is_node(u) ? c.routing_edge(u) : nullptr;
-            if (!routing) continue;
+            if (!c.is_node(u)) continue;
             json bypass  = json::object();
-            bool signals = false;
-            for (const auto& [key, target] : routing->routes) {
-                if (target == bnode) signals = true;
-                if (target == bnode || target == kEnd) continue;
-                bypass[key == detail::kLegacyDefaultRoute ? std::string(DEFAULT_ROUTE) : key] =
-                    target;
-            }
+            bool signals = member_routes(c, u, bnode, {}, bypass);
             if (!signals || bypass.empty()) continue;  // no signal at all is E8
             // Built before the witness takes `bypass`: argument order is unspecified.
             auto message = "barrier '" + bnode + "' waits for '" + u + "', but route(s) " +
@@ -469,16 +529,9 @@ void check_barrier_bypass(Ctx& c) {
     for (const auto& [bnode, join] : c.cg.join_specs) {
         for (const auto& slot : join.slots) {
             for (const auto& u : slot) {
-                const auto* routing = c.is_node(u) ? c.routing_edge(u) : nullptr;
-                if (!routing) continue;
+                if (!c.is_node(u)) continue;
                 json bypass  = json::object();
-                bool signals = false;
-                for (const auto& [key, target] : routing->routes) {
-                    if (target == bnode) signals = true;
-                    if (target == bnode || target == kEnd || slot.count(target)) continue;
-                    bypass[key == detail::kLegacyDefaultRoute ? std::string(DEFAULT_ROUTE) : key] =
-                        target;
-                }
+                bool signals = member_routes(c, u, bnode, slot, bypass);
                 if (!signals || bypass.empty()) continue;
                 auto message = "barrier '" + bnode + "' waits for any of " +
                                string_set_to_array(slot).dump() + ", but route(s) " +
@@ -658,6 +711,33 @@ void check_acyclic(Ctx& c) {
             json{{"nodes", string_set_to_array(remaining)}});
 }
 
+// ---- E18: a retry_policy key inside node config (#364) ----------------------
+//
+// Only the definition's node_retry_policies (graph.retryPolicy(node, ...))
+// sets a per-node policy. A "retry_policy" config key is read by nothing
+// unless the node's type declares it, so it is silently ignored.
+
+void check_node_retry_policy_config(Ctx& c) {
+    for (const auto& [name, config] : c.cg.node_defs) {
+        if (!config.is_object() || !config.contains("retry_policy")) continue;
+        const auto type   = c.node_type(name);
+        const json schema = c.local_only ? (c.registry.contains_type(type)
+                                                ? c.registry.local_config_schema(type)
+                                                : json())
+                                         : c.registry.config_schema(type);
+        const bool declared = schema.is_object() && schema.contains("properties") &&
+                              schema["properties"].is_object() &&
+                              schema["properties"].contains("retry_policy");
+        if (declared) continue;
+        c.warn("E18", "nodes." + name + ".retry_policy",
+               "/nodes/" + pointer_token(name) + "/retry_policy",
+               "'" + name + "' has a 'retry_policy' config key that its node type '" + type +
+                   "' does not declare, so nothing reads it; set a per-node policy in "
+                   "node_retry_policies (JavaScript: graph.retryPolicy(\"" + name + "\", {...}))",
+               json{{"node", name}, {"type", type}});
+    }
+}
+
 // ---- E9: unsynchronized plain fan-in --------------------------------------
 
 void check_fan_in(Ctx& c) {
@@ -817,6 +897,10 @@ void check_effects(Ctx& c) {
         }
     }
 
+    // #364: a failure edge's error_channel receives the failure record.
+    for (const auto& fe : c.cg.failure_edges)
+        if (fe.error_channel) writers[*fe.error_channel].insert(fe.from);
+
     // E6: dead / write-only / initial-less read-only channels.
     for (const auto& ch : undeclared ? std::set<std::string>{} : declared) {
         const bool r = readers.count(ch) && !readers[ch].empty();
@@ -956,6 +1040,7 @@ std::vector<Diagnostic> run_checks(const TopologySpec&      topology,
         check_shadowed_transitions(c);
         check_barrier_bypass(c);
         check_slot_exclusivity(c);
+        check_node_retry_policy_config(c);
     }
     check_fan_in(c);
     check_routes(c);

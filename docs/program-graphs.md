@@ -56,3 +56,35 @@ Errors: `P_JS_GRAPH_ARGUMENT` for an entry of another shape, and `P_CORE_GC_BARR
 - **Bypass paths.** A `P_CORE_E15` witness has `paths`: for each bypass route, the route sequence from the member through it, ending at the join when it comes back. When it comes back, the node before the join can stand in for the member: the witness adds `substitute` and `suggested_wait_for`, and the returned diagnostic suggests replacing `wait_for` with it (applicability `maybe`). For the #357 shape the suggestion is `[{"any_of": ["B", "FIX"]}, "C"]`. A node that already fills another slot is never suggested.
 - **Stall paths.** A stalled join's witness (`output["_neograph"]["barrier_stalled"]`, and `stalled_barriers` in a Program failure) adds `paths`, the routes from each missing member that ran to a node that signaled the join, taken from the trace and the routed successor map, and the same `suggested_wait_for` when one exists.
 - **Route table.** `ProgramCompilerConfig::echo_routes` (Python: `ProgramCompiler(..., echo_routes=True)`) returns a `P_CORE_ROUTES` note whose `witness.routes` maps each node to the targets the scheduler can route it to: the routes of its first conditional edge, or else its static edges. It is never sealed, so the bundle is the same either way.
+
+## Failure routing keys
+
+Flags: `retry_policy.per_node`, `failure_edges` and `failure_exits`. The compiler accepts, checks and seals these keys now; the flags turn on when the runtime that acts on them lands. Until then a node failure fails the run as before.
+
+```js
+ng.graph("fix")
+  .channel("failures", {reducer: "append", initial: []})
+  .node("IMPLEMENT", {type: "t.task"}).node("TEST", {type: "t.task"})
+  .node("ASK_USER", {type: "t.review"}).node("ABORT", {type: "t.task"})
+  .entry("IMPLEMENT").edge("IMPLEMENT", "TEST").exit("TEST")
+  .conditionalEdge("ASK_USER", "t.decision", {retry: "IMPLEMENT", abort: "ABORT"})
+  .retryPolicy("TEST", {max_retries: 2, non_retryable: ["app.compile_error"], max_visits: 3,
+                        on_failure: "ASK_USER", error_channel: "failures"})
+  .interruptBefore("ASK_USER")
+  .failureExit("ABORT", {code: "plan.user_abort"});
+```
+
+`retryPolicy(node, {...})` lowers to two Core keys: the timing and policy fields go to `node_retry_policies`, and `on_failure` and `error_channel` go to `failure_edges`. `failureExit(node, {code})` writes `failure_exits`. Each key is absent when unused, and the graph-level `retryPolicy({...})` is unchanged.
+
+```json
+"node_retry_policies": {"TEST": {"max_retries": 2, "non_retryable": ["app.compile_error"], "max_visits": 3}},
+"failure_edges": [{"from": "TEST", "to": "ASK_USER", "error_channel": "failures"}],
+"failure_exits": {"ABORT": {"code": "plan.user_abort"}}
+```
+
+- **Per-node policy.** Only the fields written are stored: `max_retries` 0 to 10, `initial_delay_ms` 10 to 60 000, `backoff_multiplier` 1.0 to 10.0, `max_delay_ms` from `initial_delay_ms` to 300 000, `non_retryable` (at most 16 unique codes), `max_visits` 1 to 100 and `error_text`. `attempt_timeout_ms` is not accepted yet. A bound out of range is `P_CORE_GC_FIELD_VALUE` with `{min, max, actual}`.
+- **Codes.** Author codes match `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`; the `NG.` prefix is reserved. `non_retryable` may also list the classifier's codes (`NG.TaskFailed`, `NG.Timeout`, `NG.SubgraphFailed` and the others in the reference's node failure contract).
+- **Failure edges.** At most one per node, sorted by `from`. The target may not be `__start__`, `__end__`, the node itself, a join, or a node without edges or routes unless it is a failure exit (`P_CORE_GC_FAILURE_EDGE`). `error_channel` must use the `append` reducer.
+- **Failure exits.** The code defaults to `NG.Aborted`. A failure-exit node has no edges or routes.
+- **Validation.** Unknown nodes and channels are `P_CORE_E3`. Failure edges join the routed successor map, so reachability, termination and barrier bypass (`P_CORE_E15`, route `on_failure`) see them, and an `error_channel` counts as written. A `retry_policy` key inside node config that the node type does not declare is reported as `P_CORE_E18`. Writing `on_failure` in the graph-level `retryPolicy({...})` is `P_CORE_GC_UNKNOWN_FIELD` with a hint to the per-node form.
+- **Migration.** `failure_edges` and `failure_exits` are part of a migration adapter's topology shape; `node_retry_policies` is not.

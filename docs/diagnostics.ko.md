@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=ko source_sha256=04c88d44b223662706d62e2676a0ebc37e36410cf1d0f5b61584915e3c80761e -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=ko source_sha256=413185162f55011cd68a06a26e630f9298202b4e08d5f3b334b3c050cd4181ca -->
 # Program 진단
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -124,6 +124,7 @@ Core 정의 파서가 내는 진단입니다. witness의 `core_code`에 Core 코
 | <a id="p_core_gc_registry_miss"></a>`P_CORE_GC_REGISTRY_MISS` | 노드 타입, reducer, condition이 레지스트리 스냅숏에 없습니다. 등록하거나 후보 이름을 사용하세요. |
 | <a id="p_core_gc_metadata_limit"></a>`P_CORE_GC_METADATA_LIMIT` | 그래프 메타데이터가 한계를 넘었습니다. 정규 JSON 8 KiB, 중첩 깊이 4, 객체 멤버 합계 64개, 키 128바이트가 한계입니다. witness에 `kind`, `limit`, `actual`이 있습니다. |
 | <a id="p_core_gc_metadata_text"></a>`P_CORE_GC_METADATA_TEXT` | 메타데이터 키나 문자열에 보이지 않는 문자(탭, 줄바꿈, 캐리지 리턴 이외의 C0 제어 문자, bidi 제어 문자, 폭이 없는 문자, 태그 문자)나 잘못된 UTF-8이 있습니다. witness에 코드 포인트가 나열됩니다. |
+| <a id="p_core_gc_failure_edge"></a>`P_CORE_GC_FAILURE_EDGE` | failure edge가 대상 규칙을 어깁니다. `witness.reason`은 `sentinel_source`, `duplicate_from`(노드마다 failure edge 하나), `sentinel_target`(대신 failure exit로 실행을 끝내세요), `self_target`, `join_target`(실패 도착은 조인 슬롯을 채우지 않습니다), `implicit_end_target`(대상에 edge나 라우트를 주거나 failure exit로 만드세요), `error_channel_reducer`(error channel은 `append` reducer를 써야 합니다) 중 하나입니다. |
 | <a id="p_core_roundtrip"></a>`P_CORE_ROUNDTRIP` | 파싱된 그래프가 정의를 그대로 다시 내보내지 못합니다. 무언가가 빠졌거나 다르게 연결되었습니다. 컴파일러 결함이므로 보고해 주세요. |
 
 <a id="core-validator"></a>
@@ -148,6 +149,7 @@ Core 정의 파서가 내는 진단입니다. witness의 `core_code`에 Core 코
 | <a id="p_core_e15"></a>`P_CORE_E15` | barrier 멤버가 자신의 join이 아닌 곳으로 라우팅할 수 있습니다. 그렇게 되면 실행은 barrier-stalled로 끝납니다. 같은 `any_of` 슬롯의 다른 대안으로 가는 라우트는 우회가 아닙니다. `witness.paths`는 우회 라우트마다 경로를 주며, 경로가 조인으로 돌아오면 `suggested_wait_for`와 반환된 제안이 조인 직전 노드를 멤버 대신 쓰게 합니다. |
 | <a id="p_core_e16"></a>`P_CORE_E16` | 그래프에 사이클이 있지만 이번 컴파일은 비순환 그래프를 요구합니다. |
 | <a id="p_core_e17"></a>`P_CORE_E17` | 한 `any_of` 슬롯의 두 대안이 모두 실행될 수 있습니다. fan-out이 join을 거치지 않고 둘 다에 닿거나, 한 대안이 join과 다른 대안으로 함께 라우팅합니다. 두 번째 도착은 끝나지 않는 새 라운드를 열고 실행은 barrier-stalled로 끝납니다. 예를 들어 conditional edge를 써서 대안들이 서로 배타적으로 라우팅되게 하세요. witness에 fan-out 노드와 두 경로가 있습니다. |
+| <a id="p_core_e18"></a>`P_CORE_E18` | 노드 설정에 노드 타입이 선언하지 않은 `retry_policy` 키가 있어서 아무도 읽지 않습니다. 노드의 정책은 `graph.retryPolicy(node, {...})`(Core: `node_retry_policies`)로 지정하세요. |
 | <a id="p_core_routes"></a>`P_CORE_ROUTES` | `ProgramCompilerConfig::echo_routes`(Python: `echo_routes=True`)를 켰을 때 반환되는 노트입니다. `witness.routes`는 각 노드와 `__start__`를 스케줄러가 라우팅할 수 있는 대상에 대응시킵니다. 봉인되지 않습니다. |
 
 <a id="registry"></a>

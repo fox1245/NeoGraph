@@ -17,6 +17,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -710,6 +711,9 @@ struct GraphBuilder {
     json               definition;
     /** .metadata() may be called once per graph (#362). */
     bool               metadata_set = false;
+    /** Nodes with a per-node retryPolicy or a failureExit (#364), once each. */
+    std::set<std::string> retry_policy_nodes;
+    std::set<std::string> failure_exit_nodes;
     /** Program call site of each builder call, keyed by its pointer in definition. */
     std::map<std::string, SourceSpan> call_sites;
 };
@@ -1627,12 +1631,149 @@ JSValue graph_interrupt_after(JSContext*    context,
     }
 }
 
+// #364: retryPolicy(node, {timing..., on_failure?, error_channel?}) lowers to
+// node_retry_policies[node] (timing and policy fields, as written) and one
+// failure_edges entry (on_failure, error_channel). The Core checks the values.
+JSValue graph_node_retry_policy(JSContext*    context,
+                                JSValueConst  this_value,
+                                GraphBuilder& builder,
+                                JSValueConst* argv) {
+    std::string node;
+    json        policy;
+    if (!read_string(context, argv[0], node, "retry policy node") ||
+        !read_json(context, argv[1], policy, "retry policy")) {
+        return JS_EXCEPTION;
+    }
+    if (!policy.is_object()) {
+        return graph_error(context, "P_JS_GRAPH_ARGUMENT",
+                           "NeoGraph graph retryPolicy(node, policy) needs a policy object");
+    }
+    if (!builder.definition["nodes"].contains(node)) {
+        return graph_error(context, "P_JS_GRAPH_ARGUMENT",
+                           "NeoGraph graph retryPolicy node '" + node + "' must already be declared");
+    }
+    if (!builder.retry_policy_nodes.insert(node).second) {
+        return graph_error(context, "P_JS_GRAPH_ARGUMENT",
+                           "NeoGraph graph retryPolicy may be set once per node; '" + node +
+                               "' already has one");
+    }
+    json timing = json::object();
+    json route  = json();
+    json channel = json();
+    for (const auto& [key, value] : policy.items()) {
+        if (key == "on_failure")
+            route = value;
+        else if (key == "error_channel")
+            channel = value;
+        else
+            timing[key] = value;
+    }
+    if (!channel.is_null() && route.is_null()) {
+        return graph_error(context, "P_JS_GRAPH_ARGUMENT",
+                           "NeoGraph graph retryPolicy error_channel needs on_failure");
+    }
+    if (!timing.empty()) {
+        if (!builder.definition.contains("node_retry_policies")) {
+            json created  = json::object();
+            created[node] = std::move(timing);
+            const auto new_size = size_after_object_set(builder.native_bytes, builder.definition,
+                                                        "node_retry_policies", created);
+            if (!prepare_builder_size(context, &builder, new_size)) return JS_EXCEPTION;
+            builder.definition["node_retry_policies"] = std::move(created);
+        } else {
+            auto       existing = builder.definition["node_retry_policies"];
+            const auto new_size = size_after_object_set(builder.native_bytes, existing, node, timing);
+            if (!prepare_builder_size(context, &builder, new_size)) return JS_EXCEPTION;
+            existing[node] = std::move(timing);
+        }
+        record_call_site(context, builder, "/node_retry_policies/" + pointer_segment(node));
+    }
+    if (!route.is_null()) {
+        json edge{{"from", node}, {"to", route}};
+        if (!channel.is_null()) edge["error_channel"] = channel;
+        std::size_t index = 0;
+        if (!builder.definition.contains("failure_edges")) {
+            json       edges    = json::array({edge});
+            const auto new_size = size_after_object_set(builder.native_bytes, builder.definition,
+                                                        "failure_edges", edges);
+            if (!prepare_builder_size(context, &builder, new_size)) return JS_EXCEPTION;
+            builder.definition["failure_edges"] = std::move(edges);
+        } else {
+            auto       edges    = builder.definition["failure_edges"];
+            const auto new_size = size_after_array_append(builder.native_bytes, edges, edge);
+            if (!prepare_builder_size(context, &builder, new_size)) return JS_EXCEPTION;
+            index = edges.size();
+            edges.push_back(std::move(edge));
+        }
+        record_call_site(context, builder, "/failure_edges/" + std::to_string(index));
+    }
+    return return_builder(context, this_value);
+}
+
+// #364: failureExit(node, {code?}) ends the run as failed when node completes.
+JSValue graph_failure_exit_impl(JSContext*    context,
+                                JSValueConst  this_value,
+                                int           argc,
+                                JSValueConst* argv) {
+    auto* builder = require_open_builder(context, this_value);
+    if (!builder) return JS_EXCEPTION;
+    if (argc != 1 && argc != 2) {
+        return graph_error(context, "P_JS_GRAPH_ARGUMENT",
+                           "NeoGraph graph failureExit expects 1 or 2 argument(s)");
+    }
+    std::string node;
+    json        options = json::object();
+    if (!read_string(context, argv[0], node, "failure exit node")) return JS_EXCEPTION;
+    if (argc == 2 && !read_json(context, argv[1], options, "failure exit options")) return JS_EXCEPTION;
+    if (!options.is_object()) {
+        return graph_error(context, "P_JS_GRAPH_ARGUMENT",
+                           "NeoGraph graph failureExit options must be an object");
+    }
+    if (!builder->definition["nodes"].contains(node)) {
+        return graph_error(context, "P_JS_GRAPH_ARGUMENT",
+                           "NeoGraph graph failureExit node '" + node + "' must already be declared");
+    }
+    if (!builder->failure_exit_nodes.insert(node).second) {
+        return graph_error(context, "P_JS_GRAPH_ARGUMENT",
+                           "NeoGraph graph failureExit may be set once per node; '" + node +
+                               "' already is one");
+    }
+    if (!builder->definition.contains("failure_exits")) {
+        json exits = json::object();
+        exits[node] = options;
+        const auto new_size =
+            size_after_object_set(builder->native_bytes, builder->definition, "failure_exits", exits);
+        if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
+        builder->definition["failure_exits"] = std::move(exits);
+    } else {
+        auto       exits    = builder->definition["failure_exits"];
+        const auto new_size = size_after_object_set(builder->native_bytes, exits, node, options);
+        if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
+        exits[node] = std::move(options);
+    }
+    record_call_site(context, *builder, "/failure_exits/" + pointer_segment(node));
+    return return_builder(context, this_value);
+}
+
+JSValue graph_failure_exit(JSContext* context, JSValueConst this_value, int argc, JSValueConst* argv) {
+    try {
+        return graph_failure_exit_impl(context, this_value, argc, argv);
+    } catch (const std::exception& error) {
+        return graph_internal_error(context,
+                                    "NeoGraph graph failureExit failed: " + bounded_utf8(error.what()));
+    } catch (...) {
+        return graph_internal_error(context, "NeoGraph graph failureExit failed unexpectedly");
+    }
+}
+
 JSValue graph_retry_policy_impl(JSContext*    context,
                                 JSValueConst  this_value,
                                 int           argc,
                                 JSValueConst* argv) {
     auto* builder = require_open_builder(context, this_value);
-    if (!builder || !require_arity(context, argc, 1, "retryPolicy")) return JS_EXCEPTION;
+    if (!builder) return JS_EXCEPTION;
+    if (argc == 2) return graph_node_retry_policy(context, this_value, *builder, argv);
+    if (!require_arity(context, argc, 1, "retryPolicy")) return JS_EXCEPTION;
     json policy;
     if (!read_json(context, argv[0], policy, "retry policy")) return JS_EXCEPTION;
     if (!policy.is_object()) {
@@ -1793,6 +1934,7 @@ JSValue create_graph_impl(JSContext* context, JSValueConst, int argc, JSValueCon
         define_method(context, object, "interruptAfter", graph_interrupt_after, 1) &&
         define_method(context, object, "retryPolicy", graph_retry_policy, 1) &&
         define_method(context, object, "metadata", graph_metadata, 1) &&
+        define_method(context, object, "failureExit", graph_failure_exit, 2) &&
         define_method(context, object, "entry", graph_entry, 1) &&
         define_method(context, object, "exit", graph_exit, 1);
     if (!installed || JS_PreventExtensions(context, object) < 0) {

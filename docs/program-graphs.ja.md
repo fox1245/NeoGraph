@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=ja source_sha256=e889fd64d1855de1c7d0ddfc3d4a3ce929c2eef0f01d98dfa4b04c87a914103a -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=ja source_sha256=1ce6e6727adb4b5289341f4898df30cfc1d98ddb98173b1777959ab8cf6c957c -->
 # Program グラフ機能
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -57,3 +57,35 @@ graph.conditionalEdge("B", "t.check", {pass: "D", fail: "FIX"})
 - **迂回経路。** `P_CORE_E15` の witness には `paths` があります。迂回ルートごとに、メンバーからそのルートを通るルートの並びで、join に戻る場合は join で終わります。戻る場合は join の直前のノードがメンバーの代わりになれるため、witness に `substitute` と `suggested_wait_for` が加わり、返される診断は `wait_for` をそれに置き換えるよう提案します（適用可能性 `maybe`）。#357 の形なら提案は `[{"any_of": ["B", "FIX"]}, "C"]` です。すでに別のスロットを満たしているノードは提案しません。
 - **停止経路。** 止まった join の witness（`output["_neograph"]["barrier_stalled"]`、および Program の失敗の `stalled_barriers`）に `paths` が加わります。実行された欠けたメンバーごとに、join にシグナルを送ったノードまでのルートで、トレースとルーティング済みの後続マップから求めます。該当する場合は同じ `suggested_wait_for` も入ります。
 - **ルート表。** `ProgramCompilerConfig::echo_routes`（Python: `ProgramCompiler(..., echo_routes=True)`）は `P_CORE_ROUTES` ノートを返します。その `witness.routes` は各ノードを、スケジューラーがルーティングし得る先、つまり最初の conditional edge のルート、なければ静的な edge に対応付けます。封印されないため、どちらでもバンドルは同じです。
+
+## 失敗ルーティングのキー
+
+フラグ: `retry_policy.per_node`、`failure_edges`、`failure_exits`。コンパイラーはこれらのキーをすでに受け付け、検査し、封印します。それを実行するランタイムが入るとフラグがオンになります。それまではノードの失敗は従来どおり実行を失敗させます。
+
+```js
+ng.graph("fix")
+  .channel("failures", {reducer: "append", initial: []})
+  .node("IMPLEMENT", {type: "t.task"}).node("TEST", {type: "t.task"})
+  .node("ASK_USER", {type: "t.review"}).node("ABORT", {type: "t.task"})
+  .entry("IMPLEMENT").edge("IMPLEMENT", "TEST").exit("TEST")
+  .conditionalEdge("ASK_USER", "t.decision", {retry: "IMPLEMENT", abort: "ABORT"})
+  .retryPolicy("TEST", {max_retries: 2, non_retryable: ["app.compile_error"], max_visits: 3,
+                        on_failure: "ASK_USER", error_channel: "failures"})
+  .interruptBefore("ASK_USER")
+  .failureExit("ABORT", {code: "plan.user_abort"});
+```
+
+`retryPolicy(node, {...})` は 2 つの Core キーに変換されます。タイミングとポリシーのフィールドは `node_retry_policies` に、`on_failure` と `error_channel` は `failure_edges` に入ります。`failureExit(node, {code})` は `failure_exits` を書きます。各キーは使わなければ存在せず、グラフ単位の `retryPolicy({...})` は変わりません。
+
+```json
+"node_retry_policies": {"TEST": {"max_retries": 2, "non_retryable": ["app.compile_error"], "max_visits": 3}},
+"failure_edges": [{"from": "TEST", "to": "ASK_USER", "error_channel": "failures"}],
+"failure_exits": {"ABORT": {"code": "plan.user_abort"}}
+```
+
+- **ノードごとのポリシー。** 書いたフィールドだけが保存されます。`max_retries` 0〜10、`initial_delay_ms` 10〜60 000、`backoff_multiplier` 1.0〜10.0、`max_delay_ms` は `initial_delay_ms` から 300 000 まで、`non_retryable`（一意なコード最大 16 個）、`max_visits` 1〜100、`error_text` です。`attempt_timeout_ms` はまだ受け付けません。範囲外は `{min, max, actual}` を持つ `P_CORE_GC_FIELD_VALUE` です。
+- **コード。** 作成者のコードは `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+` に一致する必要があり、`NG.` 接頭辞は予約されています。`non_retryable` には分類器のコード（`NG.TaskFailed`、`NG.Timeout`、`NG.SubgraphFailed`、およびリファレンスのノード失敗契約にあるその他）も書けます。
+- **failure edge。** ノードごとに最大 1 つで、`from` の順に並べられます。対象は `__start__`、`__end__`、ノード自身、join、そして failure exit ではないのに edge もルートもないノードであってはなりません（`P_CORE_GC_FAILURE_EDGE`）。`error_channel` は `append` reducer を使う必要があります。
+- **failure exit。** コードの既定値は `NG.Aborted` です。failure exit のノードには edge もルートもありません。
+- **検証。** 未知のノードとチャネルは `P_CORE_E3` です。failure edge はルーティング済みの後続マップに入るため、到達可能性、終了、barrier の迂回（`P_CORE_E15`、ルート `on_failure`）の検査がこれを見ます。また `error_channel` は書き込まれたものとして数えます。ノード型が宣言していないノード設定の `retry_policy` キーは `P_CORE_E18` として報告されます。グラフ単位の `retryPolicy({...})` に `on_failure` を書くと、ノードごとの形を示すヒント付きの `P_CORE_GC_UNKNOWN_FIELD` になります。
+- **マイグレーション。** `failure_edges` と `failure_exits` はマイグレーションアダプターのトポロジー形状に含まれ、`node_retry_policies` は含まれません。

@@ -103,6 +103,38 @@ json metadata_schema() {
                       {"not", json{{"pattern", "^neograph\\."}}}}}};
 }
 
+// #364: author codes; the NG. prefix is reserved.
+json failure_code_schema() {
+    return json{{"type", "string"},
+                {"maxLength", 128},
+                {"pattern", "^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)+$"}};
+}
+
+json node_retry_policy_schema() {
+    const auto integer = [](int minimum, int maximum) {
+        return json{{"type", "integer"}, {"minimum", minimum}, {"maximum", maximum}};
+    };
+    return json{
+        {"type", "object"},
+        {"additionalProperties", false},
+        {"properties",
+         json{{"max_retries", integer(0, 10)},
+              {"initial_delay_ms", integer(10, 60000)},
+              {"backoff_multiplier", json{{"type", "number"}, {"minimum", 1.0}, {"maximum", 10.0}}},
+              {"max_delay_ms", integer(10, 300000)},
+              {"non_retryable",
+               json{{"type", "array"},
+                    {"maxItems", 16},
+                    {"uniqueItems", true},
+                    {"items", json{{"anyOf", json::array({failure_code_schema(),
+                                                          json{{"type", "string"},
+                                                               {"pattern", "^NG\\.[A-Za-z]+$"}}})}}}}},
+              {"max_visits", integer(1, 100)},
+              {"error_text", json{{"type", "boolean"}}},
+              {"on_failure", node_name_schema()},
+              {"error_channel", name_schema()}}}};
+}
+
 json graph_builder_methods() {
     return json::array({
         builder("node", "node(name, {type, ...config})", "direct", 2, 2,
@@ -149,9 +181,25 @@ json graph_builder_methods() {
                 "graph.interrupts",
                 json::array({argument("nodeNames", node_list_schema(), false, true)})),
         builder("retryPolicy",
-                "retryPolicy({max_retries, initial_delay_ms, backoff_multiplier, max_delay_ms})",
-                "direct", 1, 1, "retryPolicy(policy: RetryPolicy): GraphBuilder;",
-                "graph.retry_policy", json::array({argument("policy", retry_policy_schema())})),
+                "retryPolicy({max_retries, initial_delay_ms, backoff_multiplier, max_delay_ms}) | "
+                "retryPolicy(node, {max_retries, initial_delay_ms, backoff_multiplier, max_delay_ms, "
+                "non_retryable, max_visits, error_text, on_failure, error_channel})",
+                "direct", 1, 2,
+                "retryPolicy(policyOrNode: RetryPolicy | string, policy?: NodeRetryPolicy): GraphBuilder;",
+                "graph.retry_policy",
+                json::array({argument("policyOrNode",
+                                      json{{"anyOf", json::array({retry_policy_schema(),
+                                                                  node_name_schema()})}}),
+                             argument("policy", node_retry_policy_schema(), true)})),
+        builder("failureExit", "failureExit(node, {code?})", "direct", 1, 2,
+                "failureExit(node: string, options?: { code?: string }): GraphBuilder;",
+                "failure_exits",
+                json::array({argument("node", node_name_schema()),
+                             argument("options",
+                                      json{{"type", "object"},
+                                           {"additionalProperties", false},
+                                           {"properties", json{{"code", failure_code_schema()}}}},
+                                      true)})),
         builder("metadata", "metadata({...claims})", "direct", 1, 1,
                 "metadata(claims: Record<string, Json>): GraphBuilder;", "graph.metadata",
                 json::array({argument("claims", metadata_schema())})),
@@ -170,6 +218,8 @@ constexpr const char* kDtsPrelude =
     "interface ChannelConfig { reducer?: string; initial?: Json; }\n"
     "interface RetryPolicy { max_retries?: number; initial_delay_ms?: number;"
     " backoff_multiplier?: number; max_delay_ms?: number; }\n"
+    "interface NodeRetryPolicy extends RetryPolicy { non_retryable?: string[];"
+    " max_visits?: number; error_text?: boolean; on_failure?: string; error_channel?: string; }\n"
     "interface GraphBuilder {\n"
     "  node(name: string, config: NodeConfig): GraphBuilder;\n"
     "  channel(name: string, config: ChannelConfig): GraphBuilder;\n"
@@ -179,7 +229,8 @@ constexpr const char* kDtsPrelude =
     "  barrier(node: string, waitFor: Array<string | { any_of: string[] }>): GraphBuilder;\n"
     "  interruptBefore(...nodeNames: Array<string | string[]>): GraphBuilder;\n"
     "  interruptAfter(...nodeNames: Array<string | string[]>): GraphBuilder;\n"
-    "  retryPolicy(policy: RetryPolicy): GraphBuilder;\n"
+    "  retryPolicy(policyOrNode: RetryPolicy | string, policy?: NodeRetryPolicy): GraphBuilder;\n"
+    "  failureExit(node: string, options?: { code?: string }): GraphBuilder;\n"
     "  metadata(claims: Record<string, Json>): GraphBuilder;\n"
     "  entry(nodeName: string): GraphBuilder;\n"
     "  exit(nodeName: string): GraphBuilder;\n"

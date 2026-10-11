@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=ja source_sha256=04c88d44b223662706d62e2676a0ebc37e36410cf1d0f5b61584915e3c80761e -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=ja source_sha256=413185162f55011cd68a06a26e630f9298202b4e08d5f3b334b3c050cd4181ca -->
 # Program 診断
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -124,6 +124,7 @@ Core 定義のパーサーが出す診断です。witness の `core_code` に Co
 | <a id="p_core_gc_registry_miss"></a>`P_CORE_GC_REGISTRY_MISS` | ノード型、reducer、condition がレジストリのスナップショットにありません。登録するか候補名を使ってください。 |
 | <a id="p_core_gc_metadata_limit"></a>`P_CORE_GC_METADATA_LIMIT` | グラフのメタデータが上限を超えています。上限は正規 JSON で 8 KiB、入れ子の深さ 4、オブジェクトメンバー合計 64、キー 128 バイトです。witness に `kind`、`limit`、`actual` があります。 |
 | <a id="p_core_gc_metadata_text"></a>`P_CORE_GC_METADATA_TEXT` | メタデータのキーや文字列に不可視文字（タブ、改行、復帰以外の C0 制御文字、bidi 制御文字、ゼロ幅文字、タグ文字）や不正な UTF-8 が含まれています。witness にコードポイントが挙げられます。 |
+| <a id="p_core_gc_failure_edge"></a>`P_CORE_GC_FAILURE_EDGE` | failure edge が対象の規則に反しています。`witness.reason` は `sentinel_source`、`duplicate_from`（ノードごとに failure edge は 1 つ）、`sentinel_target`（代わりに failure exit で実行を終えてください）、`self_target`、`join_target`（失敗の到着は join のスロットを満たしません）、`implicit_end_target`（対象に edge かルートを与えるか、failure exit にしてください）、`error_channel_reducer`（error channel は `append` reducer を使う必要があります）のいずれかです。 |
 | <a id="p_core_roundtrip"></a>`P_CORE_ROUNDTRIP` | 解析したグラフが定義をそのまま再出力できません。何かが欠落したか、つなぎ替えられています。コンパイラーの不具合なので報告してください。 |
 
 <a id="core-validator"></a>
@@ -148,6 +149,7 @@ Core 定義のパーサーが出す診断です。witness の `core_code` に Co
 | <a id="p_core_e15"></a>`P_CORE_E15` | barrier のメンバーが自分の join 以外へルーティングし得ます。そうなると実行は barrier-stalled で終わります。同じ `any_of` スロットの別の選択肢へのルートは迂回ではありません。`witness.paths` は迂回ルートごとの経路を示し、経路が join に戻る場合は `suggested_wait_for` と返される提案が join の直前のノードをメンバーの代わりにします。 |
 | <a id="p_core_e16"></a>`P_CORE_E16` | グラフにサイクルがありますが、このコンパイルは非巡回グラフを要求しています。 |
 | <a id="p_core_e17"></a>`P_CORE_E17` | 1 つの `any_of` スロットの 2 つの選択肢が両方とも実行され得ます。fan-out が join を通らずに両方へ届くか、ある選択肢が join と別の選択肢の両方へルーティングします。2 番目の到着は終わらない新しいラウンドを開き、実行は barrier-stalled で終わります。例えば conditional edge を使って選択肢どうしを排他的にルーティングしてください。witness に fan-out ノードと 2 つの経路があります。 |
+| <a id="p_core_e18"></a>`P_CORE_E18` | ノードの設定に、ノード型が宣言していない `retry_policy` キーがあり、誰も読みません。ノードのポリシーは `graph.retryPolicy(node, {...})`（Core: `node_retry_policies`）で指定してください。 |
 | <a id="p_core_routes"></a>`P_CORE_ROUTES` | `ProgramCompilerConfig::echo_routes`（Python: `echo_routes=True`）を設定したときに返されるノートです。`witness.routes` は各ノードと `__start__` を、スケジューラーがルーティングし得る先に対応付けます。封印されません。 |
 
 <a id="registry"></a>

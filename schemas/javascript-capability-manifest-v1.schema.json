@@ -25,7 +25,7 @@
     "ng_api_version": { "$ref": "#/$defs/positive" },
     "features": {
       "type": "object",
-      "description": "One flag per authoring feature; true when this build accepts it.",
+      "description": "One flag per authoring feature; true when this build compiles and runs it. A builder method of a feature that is off may still compile and validate its arguments.",
       "propertyNames": { "type": "string", "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$" },
       "additionalProperties": { "type": "boolean" },
       "required": [

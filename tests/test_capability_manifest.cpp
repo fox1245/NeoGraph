@@ -86,11 +86,14 @@ TEST(CapabilityManifest, PublishesOneFlagPerFeature) {
     // own flag together with the feature.
     EXPECT_FALSE(features.at("retry.attempt_timeout").get<bool>());
 
-    // Every builder method belongs to an enabled feature.
+    // Every builder method belongs to a published feature. A method of a
+    // feature that is off compiles and validates but does not run yet (the
+    // #364 sugar before its runtime).
     for (const auto& method : manifest.at("define").at("graph_builder_methods")) {
         const auto feature = method.at("feature").get<std::string>();
         ASSERT_TRUE(features.contains(feature)) << method.at("name").dump();
-        EXPECT_TRUE(features.at(feature).get<bool>()) << method.at("name").dump();
+        if (!features.at(feature).get<bool>())
+            EXPECT_EQ(method.at("name").get<std::string>(), "failureExit");
     }
 }
 

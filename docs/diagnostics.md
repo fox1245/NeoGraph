@@ -119,6 +119,7 @@ These come from the Core definition parser; the witness carries the Core code as
 | <a id="p_core_gc_registry_miss"></a>`P_CORE_GC_REGISTRY_MISS` | A node type, reducer or condition is missing from the registry snapshot. Register it or use the candidate. |
 | <a id="p_core_gc_metadata_limit"></a>`P_CORE_GC_METADATA_LIMIT` | Graph metadata is over a limit: 8 KiB of canonical JSON, nesting depth 4, 64 object members in total or 128-byte keys. The witness gives `kind`, `limit` and `actual`. |
 | <a id="p_core_gc_metadata_text"></a>`P_CORE_GC_METADATA_TEXT` | A metadata key or string contains an invisible character (a C0 control other than tab, newline or carriage return, a bidi control, a zero-width character or a tag character) or ill-formed UTF-8. The witness lists the code points. |
+| <a id="p_core_gc_failure_edge"></a>`P_CORE_GC_FAILURE_EDGE` | A failure edge breaks a target rule. `witness.reason` is `sentinel_source`, `duplicate_from` (one failure edge per node), `sentinel_target` (end the run with a failure exit instead), `self_target`, `join_target` (a failure arrival never fills a join slot), `implicit_end_target` (give the target an edge or route, or make it a failure exit) or `error_channel_reducer` (the error channel must use the `append` reducer). |
 | <a id="p_core_roundtrip"></a>`P_CORE_ROUNDTRIP` | The parsed graph does not re-emit the definition: something was dropped or rewired. This is a compiler fault; report it. |
 
 ## Core validator
@@ -142,6 +143,7 @@ These analyze what the graph means. Warnings are returned only; a bundle seals t
 | <a id="p_core_e15"></a>`P_CORE_E15` | A barrier member can route somewhere other than its join; when it does, the run ends barrier-stalled. A route to another alternative of the same `any_of` slot is not a bypass. `witness.paths` gives each bypass route; when one comes back to the join, `suggested_wait_for` and the returned suggestion let the node before the join stand in for the member. |
 | <a id="p_core_e16"></a>`P_CORE_E16` | The graph has a cycle but this compile requires an acyclic graph. |
 | <a id="p_core_e17"></a>`P_CORE_E17` | Two alternatives of one `any_of` slot can both run: a fan-out reaches both without passing the join, or one alternative routes both into the join and on to the other. The second arrival opens a round that never completes and the run ends barrier-stalled. Make the alternatives route-exclusive, for example through a conditional edge. The witness gives the fan-out node and both paths. |
+| <a id="p_core_e18"></a>`P_CORE_E18` | A node config has a `retry_policy` key that its node type does not declare, so nothing reads it. Set the node's policy with `graph.retryPolicy(node, {...})` (Core: `node_retry_policies`). |
 | <a id="p_core_routes"></a>`P_CORE_ROUTES` | A note returned when `ProgramCompilerConfig::echo_routes` (Python: `echo_routes=True`) is set. `witness.routes` maps each node, and `__start__`, to the targets the scheduler can route it to. It is never sealed. |
 
 ## Registry

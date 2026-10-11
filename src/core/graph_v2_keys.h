@@ -13,7 +13,9 @@
 #include <neograph/graph/compiler.h>
 
 #include <cstddef>
+#include <map>
 #include <optional>
+#include <string_view>
 #include <set>
 #include <string>
 #include <vector>
@@ -62,5 +64,33 @@ NEOGRAPH_API std::optional<std::vector<std::set<std::string>>> parse_wait_for_sl
     const std::string&               display,
     const std::string&               pointer,
     std::vector<CompilerDiagnostic>& diagnostics);
+
+/// #364 failure routing keys of one definition.
+struct FailureRoutingKeys {
+    std::map<std::string, NodeRetryPolicySpec> node_retry_policies;
+    std::vector<FailureEdge>                   failure_edges;
+    std::map<std::string, FailureExit>         failure_exits;
+};
+
+/// The NG codes the failure classifier produces; the `NG.` prefix is reserved.
+NEOGRAPH_API bool is_known_failure_code(std::string_view code) noexcept;
+
+/**
+ * Parse and check "node_retry_policies", "failure_edges" and "failure_exits"
+ * of a strict definition. Appends GC_FIELD_TYPE, GC_FIELD_REQUIRED,
+ * GC_FIELD_VALUE (bounds as {min, max, actual}; codes), GC_UNKNOWN_FIELD and
+ * GC_FAILURE_EDGE ({from, to, reason}: sentinel_source, duplicate_from,
+ * sentinel_target, self_target, join_target, implicit_end_target,
+ * error_channel_reducer). Unknown node and channel names are left to the
+ * validator (E3). The returned keys are canonical; a definition that already
+ * is canonical prints back to the same bytes.
+ */
+NEOGRAPH_API FailureRoutingKeys parse_failure_routing_keys(
+    const json& definition, std::vector<CompilerDiagnostic>& diagnostics);
+
+/// The one printer of the three keys; each is null when unused.
+NEOGRAPH_API json print_node_retry_policies(const std::map<std::string, NodeRetryPolicySpec>& policies);
+NEOGRAPH_API json print_failure_edges(const std::vector<FailureEdge>& edges);
+NEOGRAPH_API json print_failure_exits(const std::map<std::string, FailureExit>& exits);
 
 }  // namespace neograph::graph::detail

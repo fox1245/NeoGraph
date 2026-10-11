@@ -289,7 +289,9 @@ TopologyProjection topology_projection(const SealedCoreDefinition& definition) {
     for (const auto& [key, value] : topology.to_json().items()) {
         // Metadata (#362) is author claims, not topology: hosts review it
         // through metadata_changes() instead.
-        if (key != "name" && key != "metadata") shape[key] = value;
+        // node_retry_policies (#364) is timing, not shape; failure_edges and
+        // failure_exits are routes and stay in the shape.
+        if (key != "name" && key != "metadata" && key != "node_retry_policies") shape[key] = value;
     }
     json nodes = json::object();
     std::vector<std::string> node_names;

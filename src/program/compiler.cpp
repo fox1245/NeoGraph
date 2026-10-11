@@ -455,6 +455,11 @@ std::string builder_call(const std::vector<std::string>& tokens) {
     if (head == "interrupt_before") return "graph.interruptBefore(...)";
     if (head == "interrupt_after") return "graph.interruptAfter(...)";
     if (head == "metadata") return "graph.metadata({...})";
+    if (head == "node_retry_policies" && tokens.size() >= 2)
+        return "graph.retryPolicy(" + quoted(tokens[1]) + ", {...})";
+    if (head == "failure_edges") return "graph.retryPolicy(node, {on_failure: ...})";
+    if (head == "failure_exits" && tokens.size() >= 2)
+        return "graph.failureExit(" + quoted(tokens[1]) + ", {...})";
     return "ng.graph()";
 }
 
@@ -464,7 +469,8 @@ std::vector<std::string> known_core_keys(const std::vector<std::string>& parent,
     if (parent.empty())
         return {"schema_version",    "name",          "channels",        "nodes",
                 "edges",             "conditional_edges", "interrupt_before", "interrupt_after",
-                "retry_policy",      "metadata"};
+                "retry_policy",      "metadata",       "node_retry_policies", "failure_edges",
+                "failure_exits"};
     if (parent.size() == 2 && parent[0] == "channels")
         return {"reducer", "initial", "retention", "retention_limit", "persistence"};
     if (parent.size() == 2 && parent[0] == "nodes") return {"type", "barrier"};
@@ -486,6 +492,11 @@ std::vector<std::string> known_core_keys(const std::vector<std::string>& parent,
     }
     if (parent.size() == 1 && parent[0] == "retry_policy")
         return {"max_retries", "initial_delay_ms", "backoff_multiplier", "max_delay_ms"};
+    if (parent.size() == 2 && parent[0] == "node_retry_policies")
+        return {"max_retries", "initial_delay_ms", "backoff_multiplier", "max_delay_ms",
+                "non_retryable", "max_visits", "error_text"};
+    if (parent.size() == 2 && parent[0] == "failure_edges") return {"from", "to", "error_channel"};
+    if (parent.size() == 2 && parent[0] == "failure_exits") return {"code"};
     return {};
 }
 
@@ -503,7 +514,7 @@ std::vector<std::string> reference_paths(const json& definition, const std::stri
         for (const auto& [key, target] : edge["routes"].items())
             check(target, pointer + "/routes/" + escape_pointer_segment(key));
     };
-    for (const auto* field : {"edges", "conditional_edges"}) {
+    for (const auto* field : {"edges", "conditional_edges", "failure_edges"}) {
         if (!definition.contains(field) || !definition[field].is_array()) continue;
         std::size_t index = 0;
         for (const auto& edge : definition[field]) {
@@ -1865,6 +1876,9 @@ void add_core_parse_diagnostics(const graph::ParseReport& report,
         if (core.code == "GC_UNKNOWN_FIELD" && context.javascript && !field.empty() && !tokens.empty()) {
             const std::vector<std::string> parent(tokens.begin(), tokens.end() - 1);
             message = builder_call(parent) + " has an unknown field '" + field + "'";
+            if (parent.size() == 1 && parent[0] == "retry_policy" &&
+                (field == "on_failure" || field == "on_exhausted"))
+                message += "; route a node's failures with graph.retryPolicy(node, {on_failure: ...})";
         }
         auto& pending = diagnostics.add(CompilePhase::CoreParse, "P_CORE_" + core.code,
                                         DiagnosticSeverity::Error, core_pointer(core.json_pointer),
@@ -2022,7 +2036,9 @@ void add_validation_help(PendingDiagnostic&      pending,
 // it has no earlier bundle id to keep, and the original rules do not know the
 // new keys (#365 sealing rule (b)).
 bool uses_v2_keys(const graph::TopologySpec& topology) {
-    return !topology.metadata.is_null() || !topology.join_specs.empty();
+    return !topology.metadata.is_null() || !topology.join_specs.empty() ||
+           !topology.node_retry_policies.empty() || !topology.failure_edges.empty() ||
+           !topology.failure_exits.empty();
 }
 
 // Errors and returned warnings follow the current rules. Sealed warnings come

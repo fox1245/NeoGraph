@@ -71,6 +71,46 @@ struct ChannelDef {
 };
 
 /**
+ * @brief #364: one node's retry fields exactly as the author wrote them.
+ *
+ * Nothing is filled in at compile time: the runtime resolves each unset field
+ * from the host and graph policies. Bounds are checked by the parser.
+ */
+struct NodeRetryPolicySpec {
+    std::optional<int>       max_retries;         ///< 0-10
+    std::optional<int>       initial_delay_ms;    ///< 10-60000
+    std::optional<double>    backoff_multiplier;  ///< 1.0-10.0
+    std::optional<int>       max_delay_ms;        ///< initial_delay_ms-300000
+    std::vector<std::string> non_retryable;       ///< Sorted, unique, at most 16 codes.
+    std::optional<int>       max_visits;          ///< 1-100
+    std::optional<bool>      error_text;
+
+    bool empty() const noexcept {
+        return !max_retries && !initial_delay_ms && !backoff_multiplier && !max_delay_ms &&
+               non_retryable.empty() && !max_visits && !error_text;
+    }
+    bool operator==(const NodeRetryPolicySpec&) const = default;
+};
+
+/// #364: where a node's routable failure goes instead of failing the run.
+struct FailureEdge {
+    std::string                from;
+    std::string                to;
+    /// A channel with the built-in append reducer that receives the failure record.
+    std::optional<std::string> error_channel;
+
+    bool operator==(const FailureEdge&) const = default;
+};
+
+/// #364: a node whose completion ends the run as failed.
+struct FailureExit {
+    /// An author code; empty means the default, NG.Aborted.
+    std::string code;
+
+    bool operator==(const FailureExit&) const = default;
+};
+
+/**
  * @brief Declarative graph topology with no live node instances or runtime state.
  *
  * This is the inspectable boundary between JSON parsing and runtime linking.
@@ -93,6 +133,11 @@ struct NEOGRAPH_API TopologySpec {
     /// Host-readable author claims (#362): a nonempty object, or null when
     /// the definition has none. Hashed with the definition; never state.
     json                         metadata;
+    /// #364 failure routing, read under schema_version >= 1. Absent when unused.
+    std::map<std::string, NodeRetryPolicySpec> node_retry_policies;
+    /// Sorted by the UTF-8 bytes of `from`; at most one per node.
+    std::vector<FailureEdge>                   failure_edges;
+    std::map<std::string, FailureExit>         failure_exits;
 
     json to_json() const;
 };
@@ -154,6 +199,11 @@ struct CompiledGraph {
 
     /// Graph metadata (#362), carried so to_json() round-trips; null when absent.
     json metadata;
+
+    /// #364 failure routing keys, carried so to_json() round-trips.
+    std::map<std::string, NodeRetryPolicySpec> node_retry_policies;
+    std::vector<FailureEdge>                   failure_edges;
+    std::map<std::string, FailureExit>         failure_exits;
 
     /// Verbatim copy of each node's JSON definition (config + "type"),
     /// minus the "barrier" key (barriers are re-emitted from

@@ -937,6 +937,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_graph_metadata.cpp
         test_any_of_slots.cpp
         test_witness_paths.cpp
+        test_failure_routing_keys.cpp
     )
     target_include_directories(neograph_program_v2_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/src/program)

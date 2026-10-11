@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=zh-CN source_sha256=e889fd64d1855de1c7d0ddfc3d4a3ce929c2eef0f01d98dfa4b04c87a914103a -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=zh-CN source_sha256=1ce6e6727adb4b5289341f4898df30cfc1d98ddb98173b1777959ab8cf6c957c -->
 # Program 图功能
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -57,3 +57,35 @@ graph.conditionalEdge("B", "t.check", {pass: "D", fail: "FIX"})
 - **绕过路径。** `P_CORE_E15` 的 witness 带有 `paths`：针对每条绕过路由，给出从成员经过该路由的路由序列；如果它回到 join，则以 join 结束。回到 join 时，join 之前的节点可以替代该成员：witness 会增加 `substitute` 和 `suggested_wait_for`，返回的诊断会建议用它替换 `wait_for`（适用性 `maybe`）。对于 #357 的结构，建议是 `[{"any_of": ["B", "FIX"]}, "C"]`。已经填充其他槽位的节点不会被建议。
 - **停滞路径。** 停滞 join 的 witness（`output["_neograph"]["barrier_stalled"]`，以及 Program 失败中的 `stalled_barriers`）会增加 `paths`：对每个已运行的缺失成员，给出它到某个已向 join 发信号的节点的路由，取自执行轨迹和路由后继映射；存在时也会给出同样的 `suggested_wait_for`。
 - **路由表。** `ProgramCompilerConfig::echo_routes`（Python：`ProgramCompiler(..., echo_routes=True)`）会返回一个 `P_CORE_ROUTES` 注记，其 `witness.routes` 将每个节点映射到调度器可以路由到的目标：其第一条 conditional edge 的路由，否则为其静态 edge。它从不被封存，因此两种情况下包都相同。
+
+## 失败路由键
+
+标志：`retry_policy.per_node`、`failure_edges` 和 `failure_exits`。编译器现在会接受、检查并封存这些键；执行它们的运行时到位后，这些标志才会开启。在此之前，节点失败仍像以前一样使运行失败。
+
+```js
+ng.graph("fix")
+  .channel("failures", {reducer: "append", initial: []})
+  .node("IMPLEMENT", {type: "t.task"}).node("TEST", {type: "t.task"})
+  .node("ASK_USER", {type: "t.review"}).node("ABORT", {type: "t.task"})
+  .entry("IMPLEMENT").edge("IMPLEMENT", "TEST").exit("TEST")
+  .conditionalEdge("ASK_USER", "t.decision", {retry: "IMPLEMENT", abort: "ABORT"})
+  .retryPolicy("TEST", {max_retries: 2, non_retryable: ["app.compile_error"], max_visits: 3,
+                        on_failure: "ASK_USER", error_channel: "failures"})
+  .interruptBefore("ASK_USER")
+  .failureExit("ABORT", {code: "plan.user_abort"});
+```
+
+`retryPolicy(node, {...})` 会降级为两个 Core 键：时间和策略字段进入 `node_retry_policies`，`on_failure` 和 `error_channel` 进入 `failure_edges`。`failureExit(node, {code})` 写入 `failure_exits`。每个键在未使用时都不存在，图级的 `retryPolicy({...})` 保持不变。
+
+```json
+"node_retry_policies": {"TEST": {"max_retries": 2, "non_retryable": ["app.compile_error"], "max_visits": 3}},
+"failure_edges": [{"from": "TEST", "to": "ASK_USER", "error_channel": "failures"}],
+"failure_exits": {"ABORT": {"code": "plan.user_abort"}}
+```
+
+- **节点级策略。** 只保存写出的字段：`max_retries` 0 到 10，`initial_delay_ms` 10 到 60 000，`backoff_multiplier` 1.0 到 10.0，`max_delay_ms` 从 `initial_delay_ms` 到 300 000，`non_retryable`（最多 16 个不重复的代码），`max_visits` 1 到 100，以及 `error_text`。暂不接受 `attempt_timeout_ms`。超出范围报告带 `{min, max, actual}` 的 `P_CORE_GC_FIELD_VALUE`。
+- **代码。** 作者代码须匹配 `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`；`NG.` 前缀是保留的。`non_retryable` 还可以列出分类器的代码（`NG.TaskFailed`、`NG.Timeout`、`NG.SubgraphFailed`，以及参考文档节点失败契约中的其他代码）。
+- **failure edge。** 每个节点最多一条，按 `from` 排序。目标不能是 `__start__`、`__end__`、节点自身、join，也不能是既不是 failure exit 又没有 edge 或路由的节点（`P_CORE_GC_FAILURE_EDGE`）。`error_channel` 必须使用 `append` reducer。
+- **failure exit。** 代码默认为 `NG.Aborted`。failure exit 节点没有 edge 或路由。
+- **校验。** 未知节点和通道报告 `P_CORE_E3`。failure edge 会加入路由后继映射，因此可达性、终止和 barrier 绕过（`P_CORE_E15`，路由 `on_failure`）检查都能看到它们，`error_channel` 也算作已写入。节点类型未声明的节点配置中的 `retry_policy` 键会报告为 `P_CORE_E18`。在图级 `retryPolicy({...})` 中写 `on_failure` 会报告 `P_CORE_GC_UNKNOWN_FIELD`，并提示使用节点级形式。
+- **迁移。** `failure_edges` 和 `failure_exits` 属于迁移适配器的拓扑形状；`node_retry_policies` 不属于。

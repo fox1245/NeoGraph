@@ -276,6 +276,54 @@
         }
       }
     },
+    "coreFailureCode": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z0-9_]+)+$",
+      "description": "An author failure code; the NG. prefix is reserved."
+    },
+    "coreNodeRetryPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "max_retries": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "initial_delay_ms": { "type": "integer", "minimum": 10, "maximum": 60000 },
+        "backoff_multiplier": { "type": "number", "minimum": 1.0, "maximum": 10.0 },
+        "max_delay_ms": { "type": "integer", "minimum": 10, "maximum": 300000 },
+        "non_retryable": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "anyOf": [
+              { "$ref": "#/$defs/coreFailureCode" },
+              { "enum": ["NG.TaskFailed", "NG.Timeout", "NG.SubgraphFailed", "NG.ProviderFailed", "NG.EffectCommitted", "NG.LogicError", "NG.ConfigError", "NG.SafetyBlocked", "NG.BudgetExhausted", "NG.EffectUncertain", "NG.UnknownFailure"] }
+            ]
+          }
+        },
+        "max_visits": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "error_text": { "type": "boolean" }
+      },
+      "description": "Per-node retry fields as written (#364); unset fields come from the host and graph policies at run time."
+    },
+    "coreFailureEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "$ref": "#/$defs/nonemptyString" },
+        "to": { "$ref": "#/$defs/nonemptyString" },
+        "error_channel": { "$ref": "#/$defs/nonemptyString" }
+      },
+      "description": "Where a node's routable failure goes (#364). At most one per node; the target is a node with edges or routes, or a failure exit, and never a join."
+    },
+    "coreFailureExit": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "code": { "$ref": "#/$defs/coreFailureCode" } },
+      "description": "A node whose completion ends the run as failed with this code (default NG.Aborted)."
+    },
     "coreMetadata": {
       "type": "object",
       "minProperties": 1,
@@ -344,7 +392,18 @@
           "items": { "$ref": "#/$defs/nonemptyString" }
         },
         "retry_policy": { "$ref": "#/$defs/coreRetryPolicy" },
-        "metadata": { "$ref": "#/$defs/coreMetadata" }
+        "metadata": { "$ref": "#/$defs/coreMetadata" },
+        "node_retry_policies": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/nonemptyString" },
+          "additionalProperties": { "$ref": "#/$defs/coreNodeRetryPolicy" }
+        },
+        "failure_edges": { "type": "array", "items": { "$ref": "#/$defs/coreFailureEdge" } },
+        "failure_exits": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/nonemptyString" },
+          "additionalProperties": { "$ref": "#/$defs/coreFailureExit" }
+        }
       }
     },
     "sealedCoreDefinition": {

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=405f85cdbc60a035a44ea05b22a20e59b85639e82048103ef7d72930d0ff7c03 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=695e86b87c946bb57947aff93e4940e90308e89c55f0c5b4114272497e0db241 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -34,6 +34,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 新增
 
+- **Program：可以编译失败路由键 (#364)。** `graph.retryPolicy(node, {max_retries, non_retryable, max_visits, error_text, on_failure, error_channel, ...})` 降级为严格 Core 键 `node_retry_policies`（只保存写出的字段，带有 `max_retries` 0 到 10、`max_visits` 1 到 100 等范围）和 `failure_edges`，`graph.failureExit(node, {code})` 写入 `failure_exits`。编译器会检查它们（哨兵、自身、join 或隐式结束目标、同一节点的第二条 edge、非 append 的 error channel 报告 `P_CORE_GC_FAILURE_EDGE`；范围和代码报告 `P_CORE_GC_FIELD_VALUE`；未知名称报告 `P_CORE_E3`），把 failure edge 加入路由后继映射使 E7、E11 和 E15 能看到它们，把 `error_channel` 计为已写入，并对没有任何东西读取的节点配置 `retry_policy` 键发出 `P_CORE_E18` 警告。图级策略中的 `on_failure` 是带提示的未知字段。这些键会被封存，除 `node_retry_policies` 外都属于迁移形状；不使用它们的定义保持原有 id。执行它们的运行时尚未启用：清单标志 `retry_policy.per_node`、`failure_edges` 和 `failure_exits` 仍为关闭，节点失败仍会使运行失败。`TopologySpec` 和 `CompiledGraph` 新增了成员。参见 [Program 图功能](docs/program-graphs.md)。
 - **带类型的节点失败 (#364)。** `NodeFailureError(code, public_message, retryable)` 以 `app.compile_error` 这样的作者代码使节点失败，`retryable = false` 会停止其重试循环。`node_failure_of()` 返回执行器所抛出的 `NodeExecutionError` 上附带的 `NodeFailure` 记录：代码、分类、停止重试的原因、尝试次数、可重试与可路由标志、`public_message` 以及最后一次尝试的 Tool 效果。Python 节点的异常也通过其 `code`、`retryable` 与 `public_message` 属性以相同方式读取，调用方收到的仍是原始异常。
 - **Program：witness 路径、`any_of` 建议和路由表 (#363, #365)。** `P_CORE_E15` 的 witness 现在带有 `paths`，即从 barrier 成员经过每条绕过路由的路由序列；当该序列回到 join 时还带有 `substitute` 和 `suggested_wait_for`：返回的诊断会建议一个 `any_of` 槽位，让 join 之前的节点替代该成员（对 #357 为 `[{"any_of": ["B", "FIX"]}, "C"]`）。停滞运行的 witness 也会增加由执行轨迹和路由后继映射得出的同样的 `paths` 和 `suggested_wait_for`。`ProgramCompilerConfig::echo_routes`（Python：`ProgramCompiler(..., echo_routes=True)`）以 `P_CORE_ROUTES` 注记返回路由后继表，`GraphValidator::routed_successors()` 公开该表。这些都不会被封存。
 - **Program：barrier join 中的 `any_of` 槽位 (#363)。** `barrier("D", [{any_of: ["B", "FIX"]}, "C"])` 为每个槽位等待一个备选项：任一备选项向 join 发出信号即填满槽位，所有槽位填满后 join 运行，随后清空全部信号。#357 的结构现在在两条路由上都能完成。在 join 运行之后才到达的备选项会开启一个永远不会完成的轮次，因此运行以 `P_CORE_BARRIER_STALLED` 结束（失败即关闭）；新警告 `P_CORE_E17` 会报告可能同时运行的备选项。只有一个名称的槽位等同于该名称，因此与旧形式等价的定义保持其字节和 id；其他定义按 UTF-8 字节排序输出到新的 `TopologySpec::join_specs` 中，`CompiledGraph` 和 `Scheduler` 也携带它。校验器逐槽位检查 E3、E8 和 E15，停滞 witness 输出槽位，迁移适配器把槽位 join 列为 barrier。any、quorum 等 join 模式仍然推迟。`Scheduler` 新增了成员和构造函数，布局随之改变。参见 [Program 图功能](docs/program-graphs.md)。

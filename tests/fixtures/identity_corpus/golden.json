@@ -1597,6 +1597,101 @@
         "bundle_id": "sha256:8a21f9c3b2c921bd996a326f8710bf402b56a1541a59e6495c28d63dd9b388ac",
         "source_hash": "sha256:d1d45c2850d7473c0cdb836840c541816ac138fb4e964a23ea2888eb4b0c5c8f"
       }
+    },
+    {
+      "all_platforms": {
+        "canonical_program_hash": "sha256:33e8a615baa5846e222bbf9f2bd2f66a578a4f4cb88f0534f7828d1a9218e78d",
+        "compiled_plan_identity": "sha256:0938f45b9510cd93897169657a346f22a38fa3cfd1da6afabbbfa325615c37ad",
+        "control_source": false,
+        "definition_hash": "sha256:b071fd6bf4e7c297f9081d85bdc1d8bd50ddacdd88162f0a0f3242b4e30fec08",
+        "definition_name": "fix",
+        "sealed_diagnostics": []
+      },
+      "definition": {
+        "channels": {
+          "failures": {
+            "initial": [],
+            "reducer": "append"
+          }
+        },
+        "conditional_edges": [
+          {
+            "condition": "probe.route",
+            "from": "ASK_USER",
+            "routes": {
+              "abort": "ABORT",
+              "retry": "IMPLEMENT"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "IMPLEMENT"
+          },
+          {
+            "from": "IMPLEMENT",
+            "to": "TEST"
+          },
+          {
+            "from": "TEST",
+            "to": "__end__"
+          }
+        ],
+        "failure_edges": [
+          {
+            "error_channel": "failures",
+            "from": "TEST",
+            "to": "ASK_USER"
+          }
+        ],
+        "failure_exits": {
+          "ABORT": {
+            "code": "plan.user_abort"
+          }
+        },
+        "interrupt_before": [
+          "ASK_USER"
+        ],
+        "name": "fix",
+        "node_retry_policies": {
+          "TEST": {
+            "max_retries": 2,
+            "max_visits": 3,
+            "non_retryable": [
+              "NG.Timeout",
+              "app.compile_error"
+            ]
+          }
+        },
+        "nodes": {
+          "ABORT": {
+            "type": "probe.node"
+          },
+          "ASK_USER": {
+            "type": "probe.node"
+          },
+          "IMPLEMENT": {
+            "type": "probe.node"
+          },
+          "TEST": {
+            "type": "probe.node"
+          }
+        },
+        "retry_policy": {
+          "backoff_multiplier": 2,
+          "initial_delay_ms": 10,
+          "max_delay_ms": 100,
+          "max_retries": 1
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "v2.failure_routing",
+      "posix_quickjs": {
+        "bundle_id": "sha256:03ac04baf912f23fb49feaaeb40b3ccdbde9a47c7e2565a739a02fbeea3409fe",
+        "source_hash": "sha256:36c202b81e75e4bce6f7a2a4d59a2d77ebcd46e726c1082e05ca384082a6fdae"
+      }
     }
   ],
   "format": "neograph-identity-golden",

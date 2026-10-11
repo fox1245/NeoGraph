@@ -266,7 +266,8 @@ void validate_core_definition_v1(const json& definition) {
     detail::reject_unknown_fields(
         definition, "Sealed Core definition",
         {"schema_version", "name", "channels", "nodes", "edges", "conditional_edges",
-         "interrupt_before", "interrupt_after", "retry_policy", "metadata"});
+         "interrupt_before", "interrupt_after", "retry_policy", "metadata",
+         "node_retry_policies", "failure_edges", "failure_exits"});
 
     if (!definition.contains("schema_version")) {
         throw std::invalid_argument("Sealed Core definition requires v1 strict schema_version");
@@ -294,6 +295,27 @@ void validate_core_definition_v1(const json& definition) {
                                         problems.front().message);
         if (definition["metadata"].empty())
             throw std::invalid_argument("Sealed Core metadata must be omitted when empty");
+    }
+    if (definition.contains("node_retry_policies") || definition.contains("failure_edges") ||
+        definition.contains("failure_exits")) {
+        // #364: the Core parser's rules, and the one canonical printing.
+        std::vector<graph::CompilerDiagnostic> problems;
+        const auto keys = graph::detail::parse_failure_routing_keys(definition, problems);
+        if (!problems.empty())
+            throw std::invalid_argument("Sealed Core failure routing is invalid at " +
+                                        problems.front().json_pointer + ": " +
+                                        problems.front().message);
+        const auto canonical = [&](const char* key, const json& printed) {
+            if (!definition.contains(key)) return;
+            if (printed.is_null() || detail::canonical_json_bytes(printed) !=
+                                         detail::canonical_json_bytes(definition[key]))
+                throw std::invalid_argument(std::string("Sealed Core ") + key +
+                                            " is not in canonical form");
+        };
+        canonical("node_retry_policies",
+                  graph::detail::print_node_retry_policies(keys.node_retry_policies));
+        canonical("failure_edges", graph::detail::print_failure_edges(keys.failure_edges));
+        canonical("failure_exits", graph::detail::print_failure_exits(keys.failure_exits));
     }
 
     if (definition.contains("channels")) {
