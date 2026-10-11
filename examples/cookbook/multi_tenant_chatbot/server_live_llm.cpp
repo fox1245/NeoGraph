@@ -15,7 +15,11 @@
 //       -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON
 //   cmake --build build-cookbook --target cookbook_multi_tenant_live -j4
 //   ./build-cookbook/cookbook_multi_tenant_live
+//   NG_MULTI_TENANT_REQUESTS=6 NG_MULTI_TENANT_WORKERS=2 \
+//       ./build-cookbook/cookbook_multi_tenant_live      # small live check
 //
+// Defaults: 1,000 requests on 32 workers (about 2,330 model calls). The two
+// variables lower them (requests 1..1000, workers 1..256).
 // Runtime requires OPENROUTER_API_KEY in the repository-root .env (or environment).
 
 #include <neograph/neograph.h>
@@ -25,6 +29,7 @@
 #include <asio/post.hpp>
 #include <asio/thread_pool.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <fstream>
@@ -216,7 +221,7 @@ static long peak_rss_kb() {
     return 0;
 }
 
-int main() {
+int main() try {
     cppdotenv::auto_load_dotenv();
     const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key) {
@@ -236,9 +241,13 @@ int main() {
     auto customers = make_customer_db();
     CompileCache cache;
 
-    const int N_REQUESTS = 1000;    // 1000 동시 LIVE LLM stress test
-    const int N_SESSIONS = 200;     // 평균 5 turn/session
-    const int N_WORKERS  = 32;      // I/O bound — 동시 in-flight 늘리려 worker 증가
+    // 1000 동시 LIVE LLM stress test by default; each request makes 1-3 model calls.
+    const int N_REQUESTS = static_cast<int>(
+        examples::env_count("NG_MULTI_TENANT_REQUESTS", 1000, 1, 1000));
+    const int N_SESSIONS = std::min(200, N_REQUESTS);  // 평균 5 turn/session
+    // I/O bound — 동시 in-flight 늘리려 worker 증가
+    const int N_WORKERS  = static_cast<int>(
+        examples::env_count("NG_MULTI_TENANT_WORKERS", 32, 1, 256));
 
     std::vector<std::string> customer_ids = {
         "alice","bob","charlie","david","eve","frank"
@@ -361,4 +370,8 @@ int main() {
     }
 
     return errors.load() > 0 ? 1 : 0;
+}
+catch (const std::exception& error) {
+    std::cerr << "cookbook_multi_tenant_live: " << error.what() << "\n";
+    return 1;
 }

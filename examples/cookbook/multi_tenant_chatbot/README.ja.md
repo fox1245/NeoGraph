@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=ja source_sha256=5b5b58f71f1129b96f7164783daefd9467d64ba6bc19df7d96ef3a99bfaf8fe6 -->
+<!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=ja source_sha256=df72cedcd3fe0312c5caa1bbdf56af6ac64308e91ab794512ec7ae9ab7d2e268 -->
 # マルチテナントチャットボットサーバー
 
 ## 現在のソース境界と過去の測定
@@ -9,8 +9,8 @@ C++ live は型付き SDK request と完全な不変 Outcome を使用します�
  tenant/topology と捕捉した provider/model/host instruction に結び付きます。信頼 host の tenant 選択、
 quota/store 境界、thread 分離は維持します。portable JSON 要約は native authority ではありません。
 以下の数値/実行記録は過去の資料で、新移行の実行または live pass ではありません。
-live binary は **1,000 request / 32 worker** 固定で、低費用 small-smoke flag はありません。
-単発検証として実行せず、live 鍵/network と別途承認された大きな provider 費用を必要とします。
+live binary の既定値は **1,000 request / 32 worker** で、`NG_MULTI_TENANT_REQUESTS`（1–1,000）と `NG_MULTI_TENANT_WORKERS`（1–256）で小規模な実行向けに下げられます。
+request ごとに model 呼び出しが 1～3 回発生するため（既定値で約 2,330 回）、どの実行にも live 鍵/network と別途承認された provider 費用が必要です。
 価格や zero-error を保証しません。鍵/prompt/artifact は非公開で raw native payload を公開しません。
 provider retry は明示的な一 layer、既定 off。旧 throttle-provider wrapper は現在の public API にありません。
 
@@ -25,7 +25,7 @@ production認証・quota・semantic response・memory capacity保証ではあり
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-**1つのプロセスが、N人の顧客に対してN種類の異なるエージェントトポロジーを同時に提供する。** 測定値：実OpenAI呼び出し1000並行／顧客6／トポロジー3／**ピーク29 MB／エラー0**。
+**1つのプロセスが、N人の顧客に対してN種類の異なるエージェントトポロジーを同時に提供する。** 測定値：実OpenRouter DeepSeekリクエスト1000並行／顧客6／トポロジー3／**ピーク29 MB／エラー0**。
 
 mock workload は捕捉した設定が同等の場合だけ compiled engine を共有します。認証、tenant 選択、store と quota は host の責任です。以下の過去の RSS はそれらの上限ではありません。
 
@@ -132,7 +132,7 @@ cmake --build build --target cookbook_multi_tenant_mock
 ./build/cookbook_multi_tenant_mock
 ```
 
-OpenAIキーなしで動作。NGエンジン容量を測定する（1000件の同時リクエスト／コンパイルキャッシュヒット率／メモリ）。
+providerキーなしで動作。NGエンジン容量を測定する（1000件の同時リクエスト／コンパイルキャッシュヒット率／メモリ）。
 
 ### ライブLLMバージョン（OpenRouter DeepSeek）
 
@@ -140,9 +140,11 @@ OpenAIキーなしで動作。NGエンジン容量を測定する（1000件の�
 # .env must contain OPENROUTER_API_KEY at repo root
 cmake --build build --target cookbook_multi_tenant_live
 ./build/cookbook_multi_tenant_live
+# Small live check: 6 requests (14 model calls) on 2 workers
+NG_MULTI_TENANT_REQUESTS=6 NG_MULTI_TENANT_WORKERS=2 ./build/cookbook_multi_tenant_live
 ```
 
-**コストはプロバイダー依存**（固定されたDeepSeekルートを通る2330回の呼び出し）。
+**コストはプロバイダー依存**（既定値で、固定されたDeepSeekルートを通る約2,330回の呼び出し）。
 
 ## 測定結果
 

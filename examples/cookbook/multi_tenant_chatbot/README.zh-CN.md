@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=zh-CN source_sha256=5b5b58f71f1129b96f7164783daefd9467d64ba6bc19df7d96ef3a99bfaf8fe6 -->
+<!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=zh-CN source_sha256=df72cedcd3fe0312c5caa1bbdf56af6ac64308e91ab794512ec7ae9ab7d2e268 -->
 # 多租户聊天机器人服务器
 
 ## 当前源代码边界与历史测量
@@ -9,8 +9,8 @@ C++ live 使用类型化 SDK request 与完整不可变 Outcome。engine cache i
  tenant/topology 与捕获的 provider/model/host instruction。可信 host 的 tenant 选择、quota/store 边界、
 thread 隔离保持不变。portable JSON 摘要不是 native authority。
 以下数值/运行记录是历史资料，不是新迁移的执行或 live pass。
-live binary 固定 **1,000 request / 32 worker**，没有低成本 small-smoke flag。
-不要作为单次调用验证运行；它需要 live 密钥/network 和单独批准的大量 provider 费用。
+live binary 默认 **1,000 request / 32 worker**，可用 `NG_MULTI_TENANT_REQUESTS`（1–1,000）和 `NG_MULTI_TENANT_WORKERS`（1–256）调低以进行小规模运行。
+每个 request 会产生 1～3 次 model 调用（默认值下约 2,330 次），因此任何运行都需要 live 密钥/network 和单独批准的 provider 费用。
 不保证价格或 zero-error。密钥/prompt/artifact 保持私密，不公开 raw native payload。
 provider retry 是一个显式 layer，默认 off；当前 public API 没有旧 throttle-provider wrapper。
 
@@ -24,7 +24,7 @@ quota、semantic response或memory capacity。isolated-host CLI输出了两个�
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-**一个进程同时为N个客户提供N种不同的智能体拓扑。** 测量结果：1000个并发真实OpenAI调用 / 6个客户 / 3种拓扑 / **峰值29 MB / 0错误**。
+**一个进程同时为N个客户提供N种不同的智能体拓扑。** 测量结果：1000个并发真实OpenRouter DeepSeek请求 / 6个客户 / 3种拓扑 / **峰值29 MB / 0错误**。
 
 mock workload 仅在捕获配置等价时共享 compiled engine。认证、tenant 选择、store 和 quota 仍由 host 负责。下面历史 RSS 不是这些资源的上限。
 
@@ -131,7 +131,7 @@ cmake --build build --target cookbook_multi_tenant_mock
 ./build/cookbook_multi_tenant_mock
 ```
 
-无需 OpenAI 键即可工作。衡量 NG engine capacity（1000 并发请求 / 编译缓存命中率 / 内存）。
+无需 provider 密钥即可工作。衡量 NG engine capacity（1000 并发请求 / 编译缓存命中率 / 内存）。
 
 ### 实时 LLM 版本（OpenRouter DeepSeek）
 
@@ -139,9 +139,11 @@ cmake --build build --target cookbook_multi_tenant_mock
 # .env must contain OPENROUTER_API_KEY at repo root
 cmake --build build --target cookbook_multi_tenant_live
 ./build/cookbook_multi_tenant_live
+# Small live check: 6 requests (14 model calls) on 2 workers
+NG_MULTI_TENANT_REQUESTS=6 NG_MULTI_TENANT_WORKERS=2 ./build/cookbook_multi_tenant_live
 ```
 
-**成本 ≈ 提供商相关**（通过固定的 DeepSeek 路由进行 2330 次调用）。
+**成本 ≈ 提供商相关**（默认值下通过固定的 DeepSeek 路由进行约 2,330 次调用）。
 
 ## 测量值
 

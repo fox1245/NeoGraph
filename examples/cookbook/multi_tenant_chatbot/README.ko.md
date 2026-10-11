@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=ko source_sha256=5b5b58f71f1129b96f7164783daefd9467d64ba6bc19df7d96ef3a99bfaf8fe6 -->
+<!-- neograph-i18n: source=examples/cookbook/multi_tenant_chatbot/README.md locale=ko source_sha256=df72cedcd3fe0312c5caa1bbdf56af6ac64308e91ab794512ec7ae9ab7d2e268 -->
 # 멀티테넌트 챗봇 서버
 
 ## 현재 소스 경계와 과거 측정
@@ -9,8 +9,8 @@ C++ live는 타입 SDK 요청과 전체 불변 Outcome을 사용합니다. engin
 tenant/topology 및 캡처된 provider/model/host instruction에 연결됩니다. 신뢰 host의
 tenant 선택, quota/store 경계, thread 격리는 유지됩니다. portable JSON 요약은 native authority가 아닙니다.
 아래 수치/실행 기록은 과거 자료이며 새 전환의 실행 또는 live pass가 아닙니다.
-live binary는 **1,000 request / 32 worker**를 고정하며 저비용 small-smoke flag가 없습니다.
-단일 호출 검증으로 실행하지 마세요. live 키/네트워크와 별도 승인된 상당한 provider 비용이 필요합니다.
+live binary의 기본값은 **1,000 request / 32 worker**이며, `NG_MULTI_TENANT_REQUESTS`(1–1,000)와 `NG_MULTI_TENANT_WORKERS`(1–256)로 작은 실행을 위해 낮출 수 있습니다.
+request마다 model 호출이 1~3회 발생하므로(기본값에서 약 2,330회), 어떤 실행이든 live 키/네트워크와 별도 승인된 provider 비용이 필요합니다.
 가격이나 zero-error를 보장하지 않습니다. 키/prompt/artifact는 비공개이며 raw native payload를 공개하지 않습니다.
 provider retry는 한 명시적 layer, 기본 off이며 현재 public API에 예전 throttle-provider wrapper는 없습니다.
 
@@ -25,7 +25,7 @@ production 인증·quota·semantic response·memory capacity 보장이 아닙니
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-**하나의 프로세스가 N명의 고객에게 각기 다른 N개의 에이전트 토폴로지로 동시에 서비스를 제공합니다.** 측정값: 1000개의 동시 실제 OpenAI 호출 / 6명의 고객 / 3개의 토폴로지 / **최대 29MB / 오류 0건**.
+**하나의 프로세스가 N명의 고객에게 각기 다른 N개의 에이전트 토폴로지로 동시에 서비스를 제공합니다.** 측정값: 1000개의 동시 실제 OpenRouter DeepSeek 요청 / 6명의 고객 / 3개의 토폴로지 / **최대 29MB / 오류 0건**.
 
 mock workload는 캡처된 설정이 동등할 때만 compiled engine을 공유합니다. 인증, tenant 선택, store와 quota는 host 책임입니다. 아래 과거 RSS는 그 리소스의 상한이 아닙니다.
 
@@ -132,7 +132,7 @@ cmake --build build --target cookbook_multi_tenant_mock
 ./build/cookbook_multi_tenant_mock
 ```
 
-OpenAI 키 없이 작동합니다. NG 엔진 용량을 측정합니다 (동시 요청 1000개 / 컴파일 캐시 적중률 / 메모리).
+provider 키 없이 작동합니다. NG 엔진 용량을 측정합니다 (동시 요청 1000개 / 컴파일 캐시 적중률 / 메모리).
 
 ### 라이브 LLM 버전 (OpenRouter DeepSeek)
 
@@ -140,9 +140,11 @@ OpenAI 키 없이 작동합니다. NG 엔진 용량을 측정합니다 (동시 �
 # .env must contain OPENROUTER_API_KEY at repo root
 cmake --build build --target cookbook_multi_tenant_live
 ./build/cookbook_multi_tenant_live
+# Small live check: 6 requests (14 model calls) on 2 workers
+NG_MULTI_TENANT_REQUESTS=6 NG_MULTI_TENANT_WORKERS=2 ./build/cookbook_multi_tenant_live
 ```
 
-**비용 ≈ 공급자에 따라 다름** (고정 DeepSeek 경로를 통한 호출 2330회).
+**비용 ≈ 공급자에 따라 다름** (기본값에서 고정 DeepSeek 경로를 통한 호출 약 2,330회).
 
 ## 측정값
 

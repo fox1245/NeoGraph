@@ -1408,8 +1408,8 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         # Multi-tenant chatbot cookbook — JSON graph-as-data + compile
         # cache → 한 process 가 N customer 의 N 다른 topology 를 동시
         # 서빙하는 시나리오. 두 변형: (a) Mock provider 로 NG capacity
-        # 만 측정 (외부 의존성 0), (b) 진짜 OpenAI gpt-4o-mini 로
-        # production-like.
+        # 만 측정 (외부 의존성 0), (b) OpenRouter 의 DeepSeek
+        # (~deepseek/deepseek-v4-flash-latest) 로 production-like.
         add_executable(cookbook_multi_tenant_mock
             examples/cookbook/multi_tenant_chatbot/server.cpp)
         target_link_libraries(cookbook_multi_tenant_mock PRIVATE

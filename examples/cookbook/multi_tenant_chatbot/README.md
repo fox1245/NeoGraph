@@ -11,11 +11,12 @@ engine-cache identity binds the tenant/topology and captured provider/model/host
 instructions. Trusted host tenant selection, quota/store boundaries and thread
 isolation remain in force. Portable JSON summaries are not native authority.
 The numerical results and transcripts retained below are historical, not a new
-cutover execution or live pass. The live binary hardcodes **1,000 requests and
-32 workers** and has no cheap small-smoke flag. Do not run it as a single-call
-check: it needs live credentials/network and authorizes substantial provider
-spending only when separately approved. No price or zero-error guarantee is
-inferred. Keep credentials/prompts/artifacts private and never publicly export
+cutover execution or live pass. The live binary defaults to **1,000 requests and
+32 workers**; `NG_MULTI_TENANT_REQUESTS` (1–1,000) and `NG_MULTI_TENANT_WORKERS`
+(1–256) lower them for a small run. Each request makes one to three model calls
+(about 2,330 at the defaults), so any run needs live credentials/network and
+authorizes provider spending only when separately approved. No price or
+zero-error guarantee is inferred. Keep credentials/prompts/artifacts private and never publicly export
 raw native payloads. Provider retry is a single explicit layer, default off;
 there is no retired throttling-provider wrapper in the current public API.
 
@@ -33,7 +34,7 @@ The isolated-host CLI emitted two distinct policy tuples but did not execute a g
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 **One process serves N customers with N different agent topologies simultaneously.**
-Measurements: 1000 concurrent real OpenAI calls / 6 customers / 3 topologies /
+Measurements: 1000 concurrent live OpenRouter DeepSeek requests / 6 customers / 3 topologies /
 **peak 29 MB / 0 errors**.
 
 The mock workload shares compiled engines for equivalent captured configuration.
@@ -172,9 +173,11 @@ compile cache hit rate / memory).
 # .env must contain OPENROUTER_API_KEY at repo root
 cmake --build build --target cookbook_multi_tenant_live
 ./build/cookbook_multi_tenant_live
+# Small live check: 6 requests (14 model calls) on 2 workers
+NG_MULTI_TENANT_REQUESTS=6 NG_MULTI_TENANT_WORKERS=2 ./build/cookbook_multi_tenant_live
 ```
 
-**Cost ≈ provider-dependent** (2330 calls through the pinned DeepSeek route).
+**Cost ≈ provider-dependent** (about 2,330 calls at the defaults through the pinned DeepSeek route).
 
 ## Measurements
 
