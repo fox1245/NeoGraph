@@ -75,6 +75,19 @@ def main():
     ap.add_argument("--iters",  type=int, default=50)
     ap.add_argument("--only",   choices=["neograph", "langgraph"], default=None)
     args = ap.parse_args()
+    if args.warmup < 0 or args.iters < 1:
+        ap.error("--warmup must be nonnegative and --iters must be positive")
+    # This entry point must never select a hosted provider, even when a key or
+    # a real-mode environment has been inherited from another benchmark.
+    try:
+        mock_ms = int(os.environ.get("LLM_MOCK_MS", "0"))
+    except ValueError:
+        ap.error("LLM_MOCK_MS must be a nonnegative integer")
+    if mock_ms < 0:
+        ap.error("bench_mock.py forbids real-provider mode; use bench.py explicitly")
+    os.environ["LLM_MOCK_MS"] = str(mock_ms)
+    os.environ["MOCK_SEARCH"] = "1"
+    os.environ["USE_INMEMORY_CP"] = "1"
 
     print("=" * 78)
     print("Engine-throughput bench (mocked LLM + search)")
@@ -96,9 +109,13 @@ def main():
     runners = {}
     if args.only != "langgraph":
         import dr_neograph
+        if dr_neograph.LLM_MOCK_MS < 0 or not dr_neograph.MOCK_SEARCH:
+            ap.error("NeoGraph runner was imported in non-mock mode; start a fresh process")
         runners["neograph"] = dr_neograph.run_query
     if args.only != "neograph":
         import dr_langgraph
+        if dr_langgraph.LLM_MOCK_MS < 0 or not dr_langgraph.MOCK_SEARCH:
+            ap.error("LangGraph runner was imported in non-mock mode; start a fresh process")
         runners["langgraph"] = dr_langgraph.run_query
     print(f"  done in {(time.perf_counter()-t0)*1000:.1f}ms")
 

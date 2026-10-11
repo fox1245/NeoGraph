@@ -12,6 +12,26 @@ using namespace neograph;
 
 namespace {
 
+class EnvValue {
+public:
+    EnvValue(const char* name, const char* value) : name_(name) {
+        if (const char* previous = std::getenv(name)) previous_ = previous;
+        set(value);
+    }
+    ~EnvValue() { set(previous_ ? previous_->c_str() : nullptr); }
+private:
+    void set(const char* value) {
+#ifdef _WIN32
+        _putenv_s(name_, value ? value : "");
+#else
+        if (value) setenv(name_, value, 1);
+        else unsetenv(name_);
+#endif
+    }
+    const char* name_;
+    std::optional<std::string> previous_;
+};
+
 // Hands out scripted replies and records the caps/efforts it was asked with.
 struct Script {
     std::mutex mutex;
@@ -47,14 +67,17 @@ struct Run {
     std::vector<unsigned> attempts;
     sp::runtime::Result reply;
     std::shared_ptr<UsageAccumulator> usage = std::make_shared<UsageAccumulator>();
+    std::shared_ptr<graph::ProviderOutcomes> outcomes;
 };
 
 Run complete(const std::shared_ptr<Script>& script, std::uint64_t visible_tokens) {
     auto provider = scripted(script);
     graph::RunContext ctx;
     ctx.usage = std::make_shared<UsageAccumulator>();
+    ctx.provider_outcomes = std::make_shared<graph::ProviderOutcomes>();
     Run run;
     run.usage = ctx.usage;
+    run.outcomes = ctx.provider_outcomes;
     run.reply = async::run_sync(jarvis::providers::complete_with_visible_text(ctx,
         [&](unsigned attempt) {
             return jarvis::providers::request(*provider,
@@ -194,6 +217,81 @@ TEST(JarvisProviderSupport, CleanRouterDecisionRetainsTheOriginalCompletion) {
         EXPECT_EQ(run.reply, first);
         EXPECT_EQ(neograph::json::parse(test::text(run.reply)).at("mode"),
                   neograph::json("chat"));
+        EXPECT_EQ(script->caps.size(), 1U);
+    }
+}
+
+TEST(JarvisProviderSupport, ExplicitOutputCapIsNotDoubledOnANewSemanticCall) {
+    EnvValue cap("NG_EXAMPLE_MAX_TOKENS", "1600");
+    EnvValue reasks("NG_EXAMPLE_EMPTY_REASKS", "1");
+    auto script = script_of({completion("", sp::StopKind::MaxTokens, 1600),
+                             completion("Complete reply.", sp::StopKind::EndTurn, 4)});
+    const auto run = complete(script, 220);
+    EXPECT_EQ(test::text(run.reply), "Complete reply.");
+    EXPECT_EQ(script->caps, (std::vector<std::optional<std::uint64_t>>{1600, 1600}));
+    EXPECT_EQ(run.attempts, (std::vector<unsigned>{0, 1}));
+    EXPECT_EQ(script->efforts, (std::vector<std::optional<std::string>>{"low", "low"}));
+    const auto usage = run.usage->snapshot();
+    ASSERT_TRUE(usage.output_total);
+    EXPECT_EQ(usage.output_total->value, 1604U);
+    const auto outcomes = run.outcomes->snapshot();
+    ASSERT_EQ(outcomes.size(), 2U);
+    EXPECT_EQ(std::get<sp::Completion>(*outcomes[0]).stop.kind, sp::StopKind::MaxTokens);
+    EXPECT_EQ(outcomes[1], run.reply);
+}
+
+TEST(JarvisProviderSupport, CallerCanDisableEmptyReasksWithoutLosingTheOutcome) {
+    EnvValue cap("NG_EXAMPLE_MAX_TOKENS", nullptr);
+    EnvValue reasks("NG_EXAMPLE_EMPTY_REASKS", "0");
+    const auto first = completion("", sp::StopKind::MaxTokens, 1244);
+    auto script = script_of({first, completion("not dispatched", sp::StopKind::EndTurn, 4)});
+    try {
+        complete(script, 220);
+        FAIL() << "empty completion must remain a failed spoken turn";
+    } catch (const ProviderOutcomeError& error) {
+        EXPECT_EQ(error.outcome(), first);
+    }
+    EXPECT_EQ(script->caps.size(), 1U);
+}
+
+TEST(JarvisProviderSupport, InvalidControlsFailBeforeProviderDispatch) {
+    for (const auto* value : {"", "-1", "0", "1suffix", "18446744073709551616"}) {
+        EnvValue cap("NG_EXAMPLE_MAX_TOKENS", value);
+        EXPECT_THROW(jarvis::providers::output_budget(220), std::invalid_argument);
+    }
+    EnvValue cap("NG_EXAMPLE_MAX_TOKENS", nullptr);
+    EnvValue reasks("NG_EXAMPLE_EMPTY_REASKS", "2");
+    auto script = script_of({completion("", sp::StopKind::MaxTokens, 1244)});
+    EXPECT_THROW(complete(script, 220), std::invalid_argument);
+    EXPECT_TRUE(script->caps.empty());
+}
+
+TEST(JarvisProviderSupport, PartialOrRefusedTextCannotBecomeACompletedSpokenTurn) {
+    for (const auto stop : {sp::StopKind::MaxTokens, sp::StopKind::Refusal,
+                           sp::StopKind::ContentFilter, sp::StopKind::PauseTurn,
+                           sp::StopKind::Unknown}) {
+        const auto first = completion("Retained partial text", stop, 4);
+        auto script = script_of({first});
+        const auto run = complete(script, 220);
+        EXPECT_EQ(run.reply, first);
+        try {
+            jarvis::providers::require_completed_spoken_output(run.reply);
+            FAIL() << "non-terminal synthesis must not reach TTS";
+        } catch (const ProviderOutcomeError& error) {
+            EXPECT_EQ(error.outcome(), first);
+            EXPECT_EQ(test::text(error.outcome()), "Retained partial text");
+        }
+        EXPECT_EQ(script->caps.size(), 1U);
+    }
+}
+
+TEST(JarvisProviderSupport, CompletedSpokenTextRetainsItsOriginalOutcome) {
+    for (const auto stop : {sp::StopKind::EndTurn, sp::StopKind::StopSequence}) {
+        const auto first = completion("Hello.", stop, 4);
+        auto script = script_of({first});
+        const auto run = complete(script, 220);
+        EXPECT_NO_THROW(jarvis::providers::require_completed_spoken_output(run.reply));
+        EXPECT_EQ(run.reply, first);
         EXPECT_EQ(script->caps.size(), 1U);
     }
 }

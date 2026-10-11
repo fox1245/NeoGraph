@@ -31,6 +31,16 @@ def read_rss_kb(pid: int) -> int:
     return 0
 
 
+def tts_payload(line: str) -> str:
+    prefix = "[jarvis:tts]"
+    if not line.startswith(prefix):
+        return ""
+    payload = line[len(prefix):].strip()
+    if payload.startswith("[") and "]" in payload:
+        payload = payload.split("]", 1)[1].strip()
+    return payload
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cmd", required=True, help="셸 커맨드 (exec 권장 — RSS 측정 대상)")
@@ -40,10 +50,17 @@ def main() -> None:
     ap.add_argument("--delay", type=float, default=0.0, help="턴 간 대기(초) — API 레이트리밋용")
     ap.add_argument("--turn-timeout", type=float, default=120.0)
     ap.add_argument("--ready-timeout", type=float, default=300.0)
+    ap.add_argument("--max-turns", type=int, help="Use only this many actual input turns")
     args = ap.parse_args()
+    if args.max_turns is not None and args.max_turns < 1:
+        ap.error("--max-turns must be positive")
 
     with open(args.turns, encoding="utf-8") as f:
         turns = [ln.rstrip("\n") for ln in f if ln.strip()]
+    if args.max_turns is not None:
+        turns = turns[:args.max_turns]
+    if not turns:
+        ap.error("--turns contains no nonempty input turns")
 
     stderr_log = open(args.out + ".stderr.log", "w")
     t_spawn = time.monotonic()
@@ -111,6 +128,10 @@ def main() -> None:
         ms = (time.monotonic() - t0) * 1000.0
         if line is None:
             print(f"[driver] turn {i} timeout", file=sys.stderr)
+            records.append({"i": i, "ms": None, "reply": None})
+            break
+        if not tts_payload(line):
+            print(f"[driver] turn {i} empty TTS result", file=sys.stderr)
             records.append({"i": i, "ms": None, "reply": None})
             break
         records.append({"i": i, "ms": round(ms, 3),

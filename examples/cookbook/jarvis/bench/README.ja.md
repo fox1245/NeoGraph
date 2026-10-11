@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/README.md locale=ja source_sha256=654b29f033cd6ac7d9dc23dfc92c5a26cf75810462da7c3da4f3df39e9c192dc -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/README.md locale=ja source_sha256=ceb37cb9cb96a2186ff4126745da2bf67ea4bd24dc53d97a6343ffaadf2f7c8f -->
 # JARVIS オーケストレーションベンチマーク — NeoGraph vs LangGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -16,6 +16,12 @@ NeoGraph(C++モックビルド)とLangGraph(Pythonツイン `langgraph_twin.py`)
 ```bash
 OPENROUTER_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + OpenRouter 20 turns × both
 ```
+
+有限な native 専用診断では、実際に追跡されている `turns_openrouter.txt` に対して `bench/driver.py --max-turns 3` を実行し、出力と新しいメモリファイルは owner-private ディレクトリに置いてください。driver は空の入力/TTS payload と、失敗または未完了の実行を拒否します。`NG_EXAMPLE_MAX_TOKENS` は reasoning を含む C++ 呼び出しの出力 cap を固定し、`NG_EXAMPLE_EMPTY_REASKS=0` は空 cap の再要求を無効にします。
+明示 cap が引き上げられることはなく、thinking と元の broker/budget 識別子はそのまま保たれます。空の `config-bench` catalog では三ターンに最大 9 モデル呼び出し（任意の verbatim 再生成を含む）が必要ですが、課金や請求書を保証するものではありません。[Jarvis の制御](../README.md)と[有限な例のコマンド](../../../README.md)を参照してください。
+protocol/入力の回帰テストはリポジトリー root で
+`python -m unittest discover -s examples/cookbook/jarvis/bench -p test_driver.py` により実行します。
+この縮小 native 診断は過去の paired/container/proxy cohort ではありません。
 
 ## 過去の結果(2026-07-05,pre-OpenRouter移行, Groq)
 
