@@ -23,9 +23,11 @@
 // that a single "be balanced" prompt glosses over. The Judge then
 // adjudicates with full context of both strongest cases.
 //
-// Each agent is just a separate system prompt + a shared message history.
-// That's the entire implementation — the pattern is about prompt design,
-// not framework machinery.
+// Each agent is just a separate system prompt + a shared text transcript.
+// A finished turn reaches the other agents as one plain user message, never
+// as the speaker's native output: native replay only continues the request
+// (system prompt and controls) that produced it. That's the entire
+// implementation — the pattern is about prompt design, not framework machinery.
 //
 // Usage:
 //   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
@@ -39,6 +41,7 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -58,6 +61,18 @@ static sp::runtime::Result speak(Provider& p,
     controls.temperature = temperature;
     return p.invoke(make_provider_request(
         p, "~deepseek/deepseek-v4-flash-latest", std::move(messages), {}, std::move(controls)));
+}
+
+// The visible text of a turn that ended normally. A truncated or otherwise
+// unfinished turn stops the debate instead of reaching the other agents.
+static std::string finished_turn(const sp::Outcome& outcome, const std::string& speaker) {
+    const auto& completion = std::get<sp::Completion>(outcome);
+    if (completion.stop.kind != sp::StopKind::EndTurn)
+        throw std::runtime_error(speaker + " did not finish its turn (stop " + completion.stop.raw + ")");
+    auto text = examples::visible_text(outcome);
+    if (text.find_first_not_of(" \t\r\n") == std::string::npos)
+        throw std::runtime_error(speaker + " finished its turn without visible text");
+    return text;
 }
 
 int main() {
@@ -120,11 +135,10 @@ int main() {
             transcript, "It is your turn to argue FOR the claim. Write one paragraph.",
             0.7f));
         outcomes.push_back(pro);
-        std::cout << "[Proponent]\n" << examples::visible_text(*pro) << "\n\n";
+        const auto pro_text = finished_turn(*pro, "Proponent");
+        std::cout << "[Proponent]\n" << pro_text << "\n\n";
         transcript.push_back(examples::message(
-            sp::Role::User, "Proponent (round " + std::to_string(r) + "):"));
-        const auto& pro_messages = std::get<sp::Completion>(*pro).messages;
-        transcript.insert(transcript.end(), pro_messages.begin(), pro_messages.end());
+            sp::Role::User, "Proponent (round " + std::to_string(r) + "): " + pro_text));
 
         // Opponent speaks, sees the proponent's turn
         auto con = examples::require_outcome(speak(*provider, skeptic_sys,
@@ -132,11 +146,10 @@ int main() {
                         "Rebut the Proponent's most recent point directly.",
             0.7f));
         outcomes.push_back(con);
-        std::cout << "[Opponent]\n" << examples::visible_text(*con) << "\n\n";
+        const auto con_text = finished_turn(*con, "Opponent");
+        std::cout << "[Opponent]\n" << con_text << "\n\n";
         transcript.push_back(examples::message(
-            sp::Role::User, "Opponent (round " + std::to_string(r) + "):"));
-        const auto& con_messages = std::get<sp::Completion>(*con).messages;
-        transcript.insert(transcript.end(), con_messages.begin(), con_messages.end());
+            sp::Role::User, "Opponent (round " + std::to_string(r) + "): " + con_text));
     }
 
     // Judge
@@ -144,7 +157,7 @@ int main() {
     auto verdict = examples::require_outcome(speak(*provider, judge_sys,
         transcript, "Render your verdict now.", 0.2f));
     outcomes.push_back(verdict);
-    std::cout << examples::visible_text(*verdict) << "\n\n";
+    std::cout << finished_turn(*verdict, "Judge") << "\n\n";
 
     return 0;
     } catch (const std::exception& e) {
