@@ -107,7 +107,8 @@ static json topology_fanout() {
             {"perspective_a", {{"type", "llm_call"}}},
             {"perspective_b", {{"type", "llm_call"}}},
             {"perspective_c", {{"type", "llm_call"}}},
-            {"merge",         {{"type", "merge"}}},
+            {"merge",         {{"type", "merge"}, {"barrier", {{"wait_for",
+                json::array({"perspective_a", "perspective_b", "perspective_c"})}}}}},
         }},
         {"edges", json::array({
             {{"from", "__start__"},     {"to", "perspective_a"}},
@@ -160,7 +161,7 @@ static std::string llm_judge_topology(
     const std::shared_ptr<neograph::Provider>& provider,
     const std::vector<json>& history,
     const std::string& current_topology,
-    UsageAccumulator& usage)
+    UsageAccumulator& usage, std::vector<sp::runtime::Result>& outcomes)
 {
     std::string hist_str;
     for (const auto& m : history) {
@@ -195,11 +196,18 @@ static std::string llm_judge_topology(
         "\nBest topology for THIS user (one word):"
     }));
 
+    ProviderControls controls;
+    if (std::getenv("NG_EXAMPLE_MAX_TOKENS"))
+        controls.max_output_tokens = examples::output_cap(0);
     auto result = provider->invoke(make_provider_request(
-        *provider, "~deepseek/deepseek-v4-flash-latest", std::move(messages)));
+        *provider, "~deepseek/deepseek-v4-flash-latest", std::move(messages), {}, controls));
+    outcomes.push_back(result);
+    if (!result) throw std::runtime_error("Judge provider returned no owned outcome");
     usage.add(outcome_usage(*result));
     result = outcome_or_throw(std::move(result));
     std::string raw = outcome_text(*result);
+    if (raw.find_first_not_of(" \t\r\n") == std::string::npos)
+        throw ProviderOutcomeError("Judge completed without a topology decision", result, {});
     std::string word;
     for (char c : raw) {
         if (std::isalpha(static_cast<unsigned char>(c)))
@@ -332,7 +340,14 @@ static int run_demo() {
 
     // 5 customer 초기화 — 모두 simple topology 로 시작.
     auto patterns = make_patterns();
+    const auto customer_count = examples::env_count("NG_MULTI_CUSTOMERS", 5, 1, 5);
+    const auto turns = examples::env_count("NG_MULTI_TURNS", 5, 1, 5);
+    patterns.resize(customer_count);
+    for (auto& pattern : patterns) pattern.messages.resize(turns);
+    std::vector<sp::runtime::Result> outcomes;
+    outcomes.reserve(customer_count * (1 + (turns - 1) * 3 + turns));
     std::vector<CustomerState> customers;
+    customers.reserve(customer_count);
     for (auto& p : patterns) {
         CustomerState c;
         c.id = p.id;
@@ -344,7 +359,7 @@ static int run_demo() {
     }
 
     std::cout << "\n=== Multi-customer self-evolving chatbot demo ===\n";
-    std::cout << "5 customer × 5 turn — 각자 별도 evolution timeline\n";
+    std::cout << customer_count << " customers × " << turns << " turns\n";
     std::cout << "All start with 'simple' topology.\n\n";
 
     auto t_start = std::chrono::steady_clock::now();
@@ -364,6 +379,8 @@ static int run_demo() {
             ctx.provider = provider;
             ctx.model = "~deepseek/deepseek-v4-flash-latest";
             ctx.instructions = cust.system_prompt;
+            if (std::getenv("NG_EXAMPLE_MAX_TOKENS"))
+                ctx.provider_controls.max_output_tokens = examples::output_cap(0);
             auto engine = cache.get_or_compile(cust.id, cust.topology_def, ctx);
 
             auto answering_history = cust.native_history;
@@ -375,7 +392,20 @@ static int run_demo() {
             rcfg.provider_messages = std::move(answering_history);
 
             auto result = engine->run(rcfg);
-            cust.native_history = std::move(result.native_messages);
+            if (result.status() != RunStatus::Completed)
+                throw std::runtime_error("Customer answering graph did not complete");
+            for (std::size_t i = 0; i < result.provider_outcomes.size(); ++i) {
+                const auto& outcome = result.provider_outcomes[i];
+                outcomes.push_back(outcome);
+                const auto* done = outcome ? std::get_if<sp::Completion>(&*outcome) : nullptr;
+                const std::string where = " (" + cust.topology_name + " call " + std::to_string(i + 1) +
+                    "/" + std::to_string(result.provider_outcomes.size()) + ", stop " +
+                    (done ? done->stop.raw : std::string("none")) + ")";
+                if (done && done->stop.kind != sp::StopKind::EndTurn)
+                    throw ProviderOutcomeError(("Customer model did not finish normally" + where).c_str(), outcome, {});
+                if (!outcome || outcome_text(*outcome).find_first_not_of(" \t\r\n") == std::string::npos)
+                    throw ProviderOutcomeError(("Customer model completed without visible text" + where).c_str(), outcome, {});
+            }
             auto out_msgs = result.output["channels"]["messages"]["value"];
             std::string final_reply;
             if (out_msgs.is_array()) {
@@ -383,14 +413,17 @@ static int run_demo() {
                     if (m.value("role", "") == "assistant")
                         final_reply = m.value("content", "");
             }
+            if (final_reply.find_first_not_of(" \t\r\n") == std::string::npos)
+                throw std::runtime_error("Customer answering graph produced no visible reply");
+            cust.native_history = std::move(result.native_messages);
 
             cust.history.push_back({{"role", "user"}, {"content", umsg}});
             cust.history.push_back({{"role", "assistant"}, {"content", final_reply}});
 
-            cust.main_llm_calls += (cust.topology_name == "simple") ? 1 : 3;
+            cust.main_llm_calls += static_cast<int>(result.provider_outcomes.size());
 
             std::string suggested = llm_judge_topology(
-                provider, cust.history, cust.topology_name, *reported_usage);
+                provider, cust.history, cust.topology_name, *reported_usage, outcomes);
             cust.judge_llm_calls += 1;
 
             std::string evolve_marker = "";
@@ -401,9 +434,9 @@ static int run_demo() {
                 cust.topology_def = topo_registry[suggested]();
             }
 
-            std::string preview = final_reply.size() > 80
-                ? final_reply.substr(0, 80) + "..."
-                : final_reply;
+            const auto preview_prefix = examples::utf8_prefix(final_reply, 80);
+            std::string preview(preview_prefix);
+            if (preview_prefix.size() < final_reply.size()) preview += "...";
             std::cout << "  Turn " << (turn + 1) << " [" << cust.topology_name
                       << "]: " << preview << evolve_marker << "\n";
         }
@@ -425,7 +458,7 @@ static int run_demo() {
         final_topology_dist[c.topology_name]++;
     }
     std::cout << "Customers:           " << customers.size() << "\n";
-    std::cout << "Total turns:         " << (customers.size() * 5) << "\n";
+    std::cout << "Total turns:         " << (customers.size() * turns) << "\n";
     std::cout << "Total main LLM:      " << total_main << "\n";
     std::cout << "Total judge LLM:     " << total_judge << "\n";
     std::cout << "Total LLM calls:     " << (total_main + total_judge) << "\n";

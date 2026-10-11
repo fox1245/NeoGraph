@@ -16,7 +16,7 @@ import requests
 EX_DIR = Path(__file__).resolve().parents[2] / "bindings" / "python" / "examples"
 sys.path.insert(0, str(EX_DIR))
 
-from _common import ask_text, ng, schema_provider  # noqa: E402
+from _common import ng, provider_messages, schema_provider  # noqa: E402
 
 CRAWL4AI_URL = os.environ.get("CRAWL4AI_URL", "").rstrip("/")
 PG_DSN       = os.environ.get("NEOGRAPH_PG_DSN", "")
@@ -36,6 +36,8 @@ MOCK_SEARCH = os.environ.get("MOCK_SEARCH", "0") == "1"
 FANOUT      = int(os.environ.get("FANOUT", "5"))
 NG_WORKER_COUNT = int(os.environ.get("NG_WORKER_COUNT", "4"))
 USE_INMEMORY = os.environ.get("USE_INMEMORY_CP", "0") == "1"
+if FANOUT < 1 or NG_WORKER_COUNT < 1:
+    raise ValueError("FANOUT and NG_WORKER_COUNT must be positive")
 
 RESEARCH_TRIGGER_PATTERN = re.compile(
     r"(조사|리서치|연구|research|investigate|deep[- ]?dive)", re.IGNORECASE)
@@ -64,7 +66,31 @@ PROVIDER = (None if LLM_MOCK_MS >= 0 else schema_provider(
 def _workload_text(messages, *, temperature=None):
     if LLM_MOCK_MS >= 0:
         return _mock_text(messages)
-    return ask_text(PROVIDER, messages, model=DR_MODEL, temperature=temperature)
+    controls = ng.ProviderControls()
+    if temperature is not None:
+        controls.temperature = temperature
+    controls.max_output_tokens = int(os.environ.get("NG_EXAMPLE_MAX_TOKENS", "1600"))
+    request = ng.make_provider_request(
+        PROVIDER, DR_MODEL, provider_messages(messages), controls=controls)
+    outcome = PROVIDER.invoke(request)
+    completion = outcome.completion
+    reason = None
+    if outcome.failure is not None:
+        reason = f"Provider request failed: {outcome.failure.error.safe_message}"
+    elif completion is None:
+        reason = "Provider returned neither a completion nor a failure"
+    elif completion.stop.kind not in (ng.ProviderStopKind.EndTurn, ng.ProviderStopKind.StopSequence):
+        reason = f"Provider did not complete a benchmark answer: {completion.stop.kind}"
+    elif any(isinstance(part, (ng.ProviderToolCall, ng.InvalidToolCall))
+             for message in completion.messages for part in message.parts):
+        reason = "Provider returned unexpected tool-call output for a text-only benchmark"
+    elif not (text := outcome.text).strip():
+        reason = "Provider completion contains no visible text"
+    if reason:
+        error = RuntimeError(reason)
+        error.outcome = outcome  # Preserve original parts, stop, partial usage and monetary evidence.
+        raise error
+    return text
 
 
 class Crawl4AIClient:
@@ -134,10 +160,11 @@ class ResearchPlanNode(ng.GraphNode):
                 f"주제: {topic}")}],
             temperature=0.0)
         qs = [
-            line.strip().lstrip("-•0123456789. ")
-            for line in text.strip().splitlines()
-            if line.strip()
+            question for line in text.strip().splitlines()
+            if (question := line.strip().lstrip("-•0123456789. ").strip())
         ][:FANOUT]
+        if not qs:
+            raise RuntimeError("Research plan contained no usable sub-questions")
         return [ng.ChannelWrite("sub_questions", qs)]
 
 
@@ -254,6 +281,8 @@ def run_query(query: str, thread_id: str) -> str:
         max_steps=20,
     )
     result = _engine.run(cfg)
+    if result.status != ng.RunStatus.Completed:
+        raise RuntimeError(f"Research graph did not complete: {result.status}")
     msgs = result.output["channels"]["messages"]["value"]
     last = next(
         (m for m in reversed(msgs) if m.get("role") == "assistant"), None)

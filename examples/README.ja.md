@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=7ab0ab562d04442bd8c1190e9d6f8540ba08ff93d2278b1564c3487d652022c8 -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=ce7e094fabd0d6304f5961a14e5ca75acbfa89a345a01c74939bf55595ae91f6 -->
 # C++ API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -251,18 +251,51 @@ Failure、observer/settlement エラー、既に配信した streaming part は�
 付け、不変 outcome は変更せず、部分テキストも再試行しません。空の compression が ladder を
 使い切ると diagnostic を返し、成功した provider result を捏造しません。
 
-例16は完了した空応答だけで最大三回呼び、cap 8,192 と ask ごとの 300秒 deadline を維持します。
-cap を倍増せず、failure も再試行しません。最終回答に visible text がなければエラーを出して 1 で終了します。
+例16は既定 cap 8,192 と ask ごとの300秒 deadlineを維持し、完了した空応答だけで最大三回呼びます。
+cap を倍増せず failure も再試行しません。空の中間応答や無効な evaluator score はゼロにせず失敗し、切れた最終回答は不完全として1で終了します。
 例28の rewrite は low effort と出力512 token を要求し、
 空/空白応答なら元の質問をそのまま返します。provider timeout は180秒です。
 この経路別設定は共有 factory の既定値を変えません。
 
 複数顧客の self-evolving chatbot は judge 履歴の接頭辞を有効な UTF-8 境界で
 200バイト以内に切り、例外をエラーと終了コード1で報告します。The Beast の
-`baldwin_llm --llm` はキーが必須で、offline oracle に置き換えません。型付き要求は
-low effort と cap 1,824 を使い、完了した空の `MaxTokens` 応答だけを cap 3,648 で
-一度再要求します。Provider failure や空応答のままの終了は1で終了します。これは
-上限付き空出力処理であり、Baldwin 学習や ToT 停滞頻度のライブ provider 検証ではありません。
+`baldwin_llm --llm` はキーが必須で offline oracle に置き換えません。型付き要求は
+low effort と既定 cap 1,824 を使い、完了した空の `MaxTokens` 応答だけを既定 cap 3,648 で
+一度再要求します。元の Outcome と実際の各呼び出しの usage は保持します。Provider failure、
+空応答のままの終了や解析不能な演算名は、完了した learner を装わずに1で終了します。ソース修正はライブ検証やパズル成功の主張ではありません。
+
+### issue #190 / #317 の有限診断
+
+`NG_EXAMPLE_MAX_TOKENS` は ToT、Baldwin、Jarvis、`server_multi`、inspection 例 29/30 の明示的な正の呼び出しごとの出力上限です。隠れた reasoning を含み、明示した場合は決して倍増しません。未設定なら元のレシピ既定値はそのままです。`NG_EXAMPLE_EMPTY_REASKS=0` は既存の完了した空 `MaxTokens` 再要求を無効にします。最大/既定は ToT が 2、Baldwin/Jarvis が 1 です。これらは新しい意味上の呼び出しであり、failure や配信済み tool-call 出力の再試行ではありません。Jarvis は別個の broker ordinal、元の admission bank/deadline、実際のすべての Outcome/report を保持します。合格のために thinking 設定を無効にせず、モデル上限の情報を捏造せず、金銭的 grant を更新しません。
+
+次の制御は元の例の作業量を減らすだけです。
+
+| レシピ | 制御と元の既定値 | 再要求無効時の最大呼び出し数 |
+|---|---|---|
+| ToT | `NG_TOT_DEPTH=3` (1..3), `NG_TOT_BRANCHING=3` (1..3), `NG_TOT_BEAM_WIDTH=5` (1..5) | 元は 37、1/1/1 で 3 |
+| Baldwin（両モード） | `NG_BALDWIN_POPULATION=6` (2/4/6), `NG_BALDWIN_GENERATIONS=4` (1..4) | 元は 48、2/1 で 4 |
+| 複数顧客サーバー | `NG_MULTI_CUSTOMERS=5`, `NG_MULTI_TURNS=5` (いずれも 1..5) | 元は 90、顧客 1/4 ターンで 14 |
+
+**別途ホストの支出予約**を行った後、リポジトリー root から実行します。
+
+```sh
+# Representative canaries, not substitutes for the unchanged original workload.
+NG_EXAMPLE_MAX_TOKENS=8192 NG_EXAMPLE_EMPTY_REASKS=0 \
+  NG_TOT_DEPTH=1 NG_TOT_BRANCHING=1 NG_TOT_BEAM_WIDTH=1 \
+  ./build/example_tree_of_thoughts
+NG_EXAMPLE_MAX_TOKENS=8192 NG_EXAMPLE_EMPTY_REASKS=0 \
+  NG_BALDWIN_POPULATION=2 NG_BALDWIN_GENERATIONS=1 \
+  ./build/cookbook_the_beast_baldwin_llm --llm
+NG_EXAMPLE_MAX_TOKENS=8192 NG_MULTI_CUSTOMERS=1 NG_MULTI_TURNS=4 \
+  ./build/cookbook_self_evolving_chatbot_multi
+# These inspection commands retain sensitive native/provider payloads.
+NG_EXAMPLE_MAX_TOKENS=8192 ./build/example_responses_envelope "Reply briefly to hello."
+NG_EXAMPLE_MAX_TOKENS=8192 ./build/example_reasoning_effort
+```
+
+この五つのコマンドはモデル呼び出し 3 + 4 + 14 + 1 + 4 = 26 回、設定出力トークン 212,992 に制限され、入力トークンは別です。ドル価格の証明にも支出の承認にもなりません。所有者が承認したモデル/経路を使い、ログは非公開にしてください。元の作業量の qualification では shape override だけを外し、明示した cap/再要求の選択は記録したままにします。この明示設定では ToT + Baldwin + サーバー全体で最大 175 呼び出し / 設定出力トークン 1,433,600 です。
+
+ToT は空でない最終 `EXPR`/`CHECK` を出力しなければなりません。実際の式を独立に評価し、4 を一つ、7 を一つ、8 を二つ正確に使い、結果が 24 であることを確認してください。モデルのスコアは算術 oracle ではありません。Baldwin は両モードで実際の pipeline fitness と hit 数を示す必要があります。特定の進化 trace を強制したり、live learner を offline oracle に置き換えたりしないでください。サーバーは空でないモデル/judge 出力で、シリアライズ/provider failure なしに選択した第 4 ターンへ到達する必要があります。30 は四つの effort を観測する sweep であり、reasoning トークン、実行時間、正確性の単調性は約束されません。空の回答は Outcome を保持したまま exit 2 になります。29 は回答テキストなしで tool call を返すことが正当にあり得ます。これは envelope の inspection であり、天気回答の benchmark ではありません。Provider failure は引き続き nonzero です。
 
 ### チェックポイントと進化
 
@@ -351,3 +384,19 @@ tool search、`shell.environment` の skills、shell(`container_auto`) です。
 順序付き型付き/raw event と完全な terminal を保持します。hosted tool は route によって未対応または追加費用となり、
 型付き admission は live 互換性保証ではありません。WebSocket/primitive 実行例は残しません。
 Images/Veo/Decisions は別の型付き NeoGraph client で、chat spending grant を継承しません。
+
+Decisions の choice criteria は文字列配列ではなく、choice をキーとするオブジェクトです。
+現在の別個の typed client は、raw `SchemaProvider::request_json()` body を使わずに正しい形を表現します。
+
+```cpp
+#include <neograph/llm/decisions_client.h>
+neograph::llm::DecisionsChoiceQuestion question;
+question.instructions = "Choose whether the supplied answer addresses the question.";
+question.criteria = {{"accept", "The answer addresses the question."},
+                     {"reject", "The answer does not address the question."}};
+neograph::llm::DecisionsRequest request;
+request.state = {{"question", "What is 2 + 2?"}, {"answer", "4"}};
+request.questions.emplace("decision", std::move(question));
+```
+
+これは要求の構築であり、新しい有料要求や vendor 精度の証明ではありません。

@@ -85,6 +85,8 @@ def main():
     ap.add_argument("--iters",  type=int, default=6)
     ap.add_argument("--only",   choices=["neograph", "langgraph"], default=None)
     args = ap.parse_args()
+    if args.warmup < 0 or args.iters < 1:
+        ap.error("--warmup must be nonnegative and --iters must be positive")
 
     print("=" * 70)
     print(f"Deep-research bench: NeoGraph vs LangGraph")
@@ -92,6 +94,7 @@ def main():
     print(f"  warmup: {args.warmup} per side  ·  iters: {args.iters} per side")
     print(f"  model:  {os.environ.get('DR_MODEL', 'gpt-5.4-mini')}")
     print(f"  search: {os.environ.get('CRAWL4AI_URL', '(none)')}")
+    print(f"  output cap per call: {os.environ.get('NG_EXAMPLE_MAX_TOKENS', '1600')}")
     print(f"  pg:     {'configured' if os.environ.get('NEOGRAPH_PG_DSN') else '(none)'}")
     mock_ms = int(os.environ.get("LLM_MOCK_MS", "-1"))
     print(f"  workload: {'mock orchestration' if mock_ms >= 0 else 'real provider'}"

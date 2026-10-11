@@ -654,6 +654,7 @@ void register_custom_node_types(
                                 neograph::graph::make_provider_call_identity(
                                     in.ctx, name_, attempt == 0 ? 0 : 2));
                         });
+                    jarvis::providers::require_completed_spoken_output(reply);
                     std::string final_text = neograph::outcome_text(*reply);
 
                     // ── 복창 가드 — 과거 답변과 trim 후 verbatim 일치하면 1회 재생성.
@@ -698,6 +699,7 @@ void register_custom_node_types(
                                     neograph::graph::make_provider_call_identity(
                                         in.ctx, name_, attempt == 0 ? 1 : 3));
                             });
+                        jarvis::providers::require_completed_spoken_output(retry);
                         final_text = neograph::outcome_text(*retry);
                     }
 

@@ -18,6 +18,19 @@ measures in identical constraints (`--cpus=2 --memory=2g`) container.
 OPENROUTER_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + OpenRouter 20 turns × both
 ```
 
+For finite native-only diagnostics, run `bench/driver.py --max-turns 3` against
+the actual tracked `turns_openrouter.txt`; keep the output and a fresh memory
+file in an owner-private directory. The driver rejects empty inputs/TTS payloads
+and failed/incomplete runs. `NG_EXAMPLE_MAX_TOKENS` fixes the C++ call's output cap
+including reasoning, and `NG_EXAMPLE_EMPTY_REASKS=0` disables empty-cap re-asks.
+An explicit cap is never increased; thinking and original broker/budget identities
+remain intact. With empty `config-bench` catalogs, three turns require at most nine
+model calls (including optional verbatim regeneration), not a guarantee of charge
+or invoice. See [the Jarvis controls](../README.md) and [finite example commands](../../../README.md).
+Run protocol/input regressions from the repository root with
+`python -m unittest discover -s examples/cookbook/jarvis/bench -p test_driver.py`.
+This reduced native diagnostic is not the historical paired/container/proxy cohort.
+
 ## Historical Results (2026-07-05, pre-OpenRouter migration; Groq)
 
 | Metric | NeoGraph | LangGraph | Delta |

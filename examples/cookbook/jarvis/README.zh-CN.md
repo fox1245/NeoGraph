@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=zh-CN source_sha256=202c2f70184732cf88d2eced559f2402f528d8b4f18448b59802d41c826310fc -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=zh-CN source_sha256=f54a315d6278705e37ff35dfc675090e85b00c7efc53c88fe7c93d31a420be61 -->
 # JARVIS — 语音驱动的元编排器
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -9,11 +9,17 @@ C++ 路由器、合成器和专家夹具使用类型化 `ProviderRequest`、`sp:
 
 本地语音是可选项，需要选定的 whisper/Moonshine 模型、ONNX Runtime/Supertonic 资源、miniaudio 和可用的麦克风/扬声器。文本/mock 运行不能证明语音可用。无需云端仅适用于本地/mock。实时请求需要获授权的 `OPENROUTER_API_KEY`、网络与提供方容量，并将提示、对话记忆和附带工具/委派结果发送给 OpenRouter。模型已固定，原生请求设置的 ZDR 不是地域驻留保证。不要将密钥写入日志或版本库。可空 token 用量不是账单金额；费用需要当前端点/模型定价与实际计费用量。
 
-实时 router 与 synthesizer 的输出 cap（名义回复 300 / 220 token）增加 1,024 token 的 reasoning 余量并请求低 reasoning effort，为隐藏 reasoning 与可见文本共用 cap 的模型留出空间。只有已完成的空 `MaxTokens` 响应会用加倍 cap 重新请求一次；其他空完成响应及 provider failure 直接报错，不重新请求。空回复不会被当作成功的发言轮次。`OPENROUTER_BASE_URL` 指定的网关必须使用 `https://`，`OPENROUTER_CA_FILE` 选择基准代理这类私有 TLS 网关的 PEM CA bundle。
+实时 router/synthesizer 的默认输出 cap（名义300 / 220 token）增加1,024推理余量并请求 low effort。仅已完成的空 `MaxTokens` 最多重新请求一次，且只有默认 cap 加倍。正数 `NG_EXAMPLE_MAX_TOKENS` 是包括推理的显式 cap，每次调用保持相同值。`NG_EXAMPLE_EMPTY_REASKS=0` 禁用重新请求（默认/最多1）。其他空响应、provider failure、tool-call 输出不会重发；空发言不是成功。`OPENROUTER_BASE_URL` 网关必须使用 `https://`，`OPENROUTER_CA_FILE` 选择私有 TLS gateway 的 PEM CA。
 
 Tool-call 输出（包括被截断的 invalid call）不会触发空文本重新请求。
 JSON router 在解析前仅接受 text-only `EndTurn` / `StopSequence` 完成；
 截断输出即使看似有效 JSON 也会失败。既有 malformed-JSON fallback 仅用于正常完成的文本。
+部分/拒绝/非最终 synthesis 保留在不可变 Outcome 中，但在 TTS 前失败。已交付的部分文本不会触发额外 provider 调用。
+
+
+自定义的 provider 调用节点使用现有的 runtime-interposition/broker 边界和共享 `record_usage` sink。它们在提取响应文本前保留真实的所有权 outcome，传播取消/deadline 以及本地和宿主两类 observer，并在 observer 抛出异常时保留已 drain 的 outcome。synthesizer 的独立再生成调用使用自己的稳定 call ordinal。受限调用需要已获准的模型限制信息；缺少信息时会在 provider dispatch 前失败，而不是臆造 token 估算。获准 origin 省略默认 HTTPS 端口，使 OpenRouter 路由与策略的规范 origin 一致。
+
+在另行授权的有限验证中，`bench/driver.py --max-turns 3` 使用已跟踪 `bench/turns_openrouter.txt` 的前三行**实际**内容，而不是虚构的预期回复。driver 会拒绝空输入/TTS 结果以及未完成或失败的 child 运行。在 `config-bench` 的空 tool/agent catalog 下，`NG_EXAMPLE_EMPTY_REASKS=0` 将三轮限制为最多 9 次模型调用（每轮 router + synthesis + 可选的逐字再生成）。显式 8,192 token cap 将配置的输出额度限制为 73,728 token；输入、计费用量和金额另计。该 cap 是诊断选择，不是新的默认值或消费授权。请使用全新的 owner-private `JARVIS_MEMORY_FILE`，不要复用实时记忆存储。当前源码变更不是新的 live 运行、语音或 nginx 代理 qualification。
 
 `[jarvis:ttft]` 仅在首个非空 `sp::PartDelta` 且为 `PartKind::Text`、`DeltaChannel::Content` 时发出，不由用量、推理、响应头等事件触发。它表示首次合成文本，不是首次可听见的 TTS 播放。Python REPL driver 仍为 protocol client；pybind benchmark 使用已迁移类型化 binding，需要单独运行证据。当前运行证据仅涵盖实际 CLI 问候、已持久化的合成记忆 turn 和正常 EOF 退出，不验证麦克风捕获、ASR、TTS、pybind 基准或 vendor 推理。下文耗时及语音/live 执行主张仍为历史记录，不是当前迁移的 qualification。
 

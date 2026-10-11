@@ -44,11 +44,12 @@ static sp::runtime::Result ask(Provider& p,
                                std::vector<std::shared_ptr<const sp::Outcome>>& outcomes) {
     ProviderControls controls;
     controls.temperature = temperature;
-    controls.max_output_tokens = 8192;
+    controls.max_output_tokens = examples::output_cap(8192);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
     const std::vector<sp::Message> messages{
         examples::message(sp::Role::System, system), examples::message(sp::Role::User, user)};
-    for (int attempt = 0; attempt < 3; ++attempt) {
+    const auto reasks = examples::empty_reasks(2, 2);
+    for (unsigned attempt = 0; attempt <= reasks; ++attempt) {
         auto request = make_provider_request(p, "~deepseek/deepseek-v4-flash-latest",
             messages, {}, controls);
         request.options.deadline = deadline;
@@ -62,17 +63,27 @@ static sp::runtime::Result ask(Provider& p,
         outcomes.push_back(result);
         examples::require_outcome(result);
         const auto& completion = std::get<sp::Completion>(*result);
-        bool has_output = false;
+        bool has_text = false, has_calls = false;
         for (const auto& message : completion.messages)
             for (const auto& part : message.parts) {
                 if (const auto* text = std::get_if<sp::Text>(&part))
-                    has_output |= !text->value.empty();
-                has_output |= std::holds_alternative<sp::ToolCall>(part)
+                    has_text |= text->value.find_first_not_of(" \t\r\n") != std::string::npos;
+                has_calls |= std::holds_alternative<sp::ToolCall>(part)
                     || std::holds_alternative<sp::InvalidToolCall>(part);
             }
-        if (completion.stop.kind != sp::StopKind::MaxTokens
-            || has_output || attempt == 2)
-            return result;
+        if (has_calls)
+            throw ProviderOutcomeError("ToT received unexpected tool-call output", result,
+                std::make_exception_ptr(std::runtime_error("expected a text-only ToT reply")));
+        if (completion.stop.kind != sp::StopKind::EndTurn &&
+            completion.stop.kind != sp::StopKind::StopSequence &&
+            completion.stop.kind != sp::StopKind::MaxTokens)
+            throw ProviderOutcomeError("ToT did not receive a completed text answer", result, {});
+        if (has_text) return result;
+        if (completion.stop.kind != sp::StopKind::MaxTokens || attempt == reasks)
+            throw ProviderOutcomeError("ToT received no visible text", result,
+                std::make_exception_ptr(std::runtime_error("empty ToT completion")));
+        std::cerr << "ToT: empty MaxTokens completion; additional semantic call "
+                  << (attempt + 1) << "/" << reasks << " at the same output cap\n";
     }
     throw std::logic_error("unreachable ToT completion attempt");
 }
@@ -104,19 +115,21 @@ static std::vector<std::string> expand(Provider& p,
     std::string line;
     for (char c : text) {
         if (c == '\n') {
-            if (!line.empty()) out.push_back(line);
+            if (line.find_first_not_of(" \t\r\n") != std::string::npos)
+                out.push_back(std::move(line));
             line.clear();
         } else {
             line += c;
         }
     }
-    if (!line.empty()) out.push_back(line);
+    if (line.find_first_not_of(" \t\r\n") != std::string::npos)
+        out.push_back(std::move(line));
     while ((int)out.size() > n) out.pop_back();
     return out;
 }
 
 // Ask the LLM to score a thought from 0..10 on how likely it leads to a
-// correct solution. Returns 0 on parse failure.
+// correct solution. Invalid/empty score output fails rather than inventing zero.
 //
 // Critical design note: mini-tier models score sloppily unless forced to
 // actually COMPUTE. The prompt below makes evaluation mechanical: if the
@@ -149,12 +162,21 @@ static float evaluate(Provider& p,
     // Explicit text projection for the evaluator's score grammar.
     const std::string txt = examples::visible_text(*reply);
     size_t pos = txt.find("SCORE:");
-    if (pos == std::string::npos) return 0.0f;
-    try {
-        return std::stof(txt.substr(pos + 6));
-    } catch (...) {
-        return 0.0f;
-    }
+    if (pos == std::string::npos)
+        throw ProviderOutcomeError("ToT evaluator omitted SCORE", reply,
+            std::make_exception_ptr(std::runtime_error("invalid evaluator reply")));
+    const std::string_view score_text(txt.data() + pos + 6, txt.size() - pos - 6);
+    const auto first = score_text.find_first_not_of(" \t");
+    if (first == std::string::npos)
+        throw ProviderOutcomeError("ToT evaluator emitted an empty SCORE", reply, {});
+    int score = -1;
+    const auto* begin = score_text.data() + first;
+    const auto [end, error] = std::from_chars(begin, score_text.data() + score_text.size(), score);
+    const std::string_view tail(end, score_text.data() + score_text.size() - end);
+    if (error != std::errc{} || score < 0 || score > 10 ||
+        tail.find_first_not_of(" \t\r\n") != std::string_view::npos)
+        throw ProviderOutcomeError("ToT evaluator SCORE must be an integer in 0..10", reply, {});
+    return static_cast<float>(score);
 }
 
 int main() {
@@ -186,12 +208,21 @@ int main() {
     // correct path; the paper's 74% solve-rate on 100 puzzles is at
     // b=5. Branching k=3 candidates per state matches the propose-prompt
     // design where the LLM emits 3 next-step continuations.
-    const int DEPTH       = 3;   // search depth (T)
-    const int BRANCHING   = 3;   // candidates per expansion (k)
-    const int BEAM_WIDTH  = 5;   // top-K kept per depth (b)
+    const int DEPTH = static_cast<int>(examples::env_count("NG_TOT_DEPTH", 3, 1, 3));
+    const int BRANCHING = static_cast<int>(examples::env_count("NG_TOT_BRANCHING", 3, 1, 3));
+    const int BEAM_WIDTH = static_cast<int>(examples::env_count("NG_TOT_BEAM_WIDTH", 5, 1, 5));
+    int max_asks = 1, parents = 1;  // final answer plus expansions/evaluations
+    for (int depth = 0; depth < DEPTH; ++depth) {
+        max_asks += parents * (1 + BRANCHING);
+        parents = std::min(BEAM_WIDTH, parents * BRANCHING);
+    }
+    const auto max_calls = max_asks * (1 + examples::empty_reasks(2, 2));
+    std::cout << "Configured maximum provider calls: " << max_calls
+              << "; output cap per call: " << examples::output_cap(8192) << "\n";
 
     // Search states are parsed text; full provider outcomes stay owned separately.
     std::vector<std::shared_ptr<const sp::Outcome>> outcomes;
+    outcomes.reserve(max_calls);
     // Start with one empty root
     std::vector<Node> frontier = {{"", 0.0f}};
 
@@ -245,14 +276,9 @@ int main() {
         0.0f, outcomes);
 
     const std::string final_text = examples::visible_text(*final_reply);
-    if (final_text.find_first_not_of(" \t\r\n") == std::string::npos) {
-        // ask() returns the last empty MaxTokens completion after its bounded
-        // re-asks; an empty answer is a failed run, not a solution.
-        const bool token_limit =
-            std::get<sp::Completion>(*final_reply).stop.kind == sp::StopKind::MaxTokens;
-        std::cerr << "\nError: the final answer has no visible text"
-                  << (token_limit ? " (the provider stopped at the output-token limit)" : "")
-                  << "; no solution was produced.\n";
+    if (std::get<sp::Completion>(*final_reply).stop.kind == sp::StopKind::MaxTokens) {
+        std::cerr << "Final expression was truncated; retained text is incomplete:\n"
+                  << final_text << "\n";
         return 1;
     }
     std::cout << "── Final expression ─────────────────────────────────\n"

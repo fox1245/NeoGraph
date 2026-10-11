@@ -114,8 +114,10 @@ private:
 // request low effort; this is not a guarantee that any particular model fits.
 inline constexpr std::uint64_t reasoning_allowance = 1024;
 
-// Cap for a reply of about `visible_tokens`; each retry attempt doubles it.
+// Only the default cap doubles. An explicit caller cap remains identical on
+// every semantic call, including the separately admitted empty-output re-ask.
 inline std::uint64_t output_budget(std::uint64_t visible_tokens, unsigned attempt = 0) {
+    if (std::getenv("NG_EXAMPLE_MAX_TOKENS")) return examples::output_cap(0);
     return (visible_tokens + reasoning_allowance) << attempt;
 }
 
@@ -161,27 +163,28 @@ inline bool token_limit_without_text(const sp::Outcome& outcome) {
 }
 
 // Only a completed empty MaxTokens reply without tool-call output is eligible
-// for one doubled-cap re-ask. Each attempt has its own node-owned broker ordinal.
+// for at most one re-ask. Each attempt has its own node-owned broker ordinal.
 // Provider failures and all other empty replies remain errors, never fallback
 // success. Both attempts' reported usage is retained.
 template <class MakeRequest, class Invoke>
 asio::awaitable<sp::runtime::Result> complete_with_visible_text(
     const neograph::graph::RunContext& ctx, MakeRequest make_request, Invoke invoke) {
+    const auto reasks = examples::empty_reasks(1, 1);
     for (unsigned attempt = 0;; ++attempt) {
         auto reply = co_await neograph::graph::observe_provider_result(
             ctx, invoke(make_request(attempt), attempt));
         neograph::graph::record_usage(ctx, reply);
         reply = neograph::outcome_or_throw(std::move(reply));
         if (has_visible_text(*reply)) co_return reply;
-        if (attempt == 1 || !token_limit_without_text(*reply)) {
+        if (attempt == reasks || !token_limit_without_text(*reply)) {
             const std::string reason = token_limit_without_text(*reply)
-                ? "output-token limit reached without visible text after one doubled-cap retry"
+                ? "output-token limit reached without visible text; configured re-asks exhausted"
                 : "provider completed without visible text";
             throw neograph::ProviderOutcomeError(reason.c_str(), reply,
                 std::make_exception_ptr(std::runtime_error(reason)));
         }
-        std::cerr << "[jarvis] 출력 토큰 한도(MaxTokens)에서 가시 텍스트 없이 종료 — "
-                     "한도를 두 배로 늘려 1회 재요청\n";
+        std::cerr << "[jarvis] empty MaxTokens completion; one additional semantic call "
+                     "(explicit output cap unchanged, default cap doubles)\n";
     }
 }
 
@@ -196,6 +199,18 @@ inline void require_completed_router_output(const sp::runtime::Result& reply) {
     const std::string reason = "router did not produce a completed text-only decision";
     throw neograph::ProviderOutcomeError(reason.c_str(), reply,
         std::make_exception_ptr(std::runtime_error(reason)));
+}
+
+// Preserve partial text in its Outcome, but never publish a truncated/refused
+// synthesis as a completed spoken turn or dispatch another call for it.
+inline void require_completed_spoken_output(const sp::runtime::Result& reply) {
+    const auto* completion = reply ? std::get_if<sp::Completion>(reply.get()) : nullptr;
+    if (completion &&
+        (completion->stop.kind == sp::StopKind::EndTurn ||
+         completion->stop.kind == sp::StopKind::StopSequence) &&
+        has_visible_text(*reply) && !has_tool_call_output(*reply)) return;
+    throw neograph::ProviderOutcomeError(
+        "synthesizer did not produce a complete text-only spoken reply", reply, {});
 }
 
 inline neograph::ProviderRequest contextual_request(

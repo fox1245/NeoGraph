@@ -44,6 +44,8 @@ int main(int argc, char** argv) {
             std::get<sp::json::Document>(std::move(parameters)));
         sp::responses::Request payload;
         payload.model = model;
+        if (std::getenv("NG_EXAMPLE_MAX_TOKENS"))
+            payload.max_output_tokens = examples::output_cap(0);
         payload.messages.push_back(examples::message(sp::Role::User, question));
         payload.tools.push_back(std::move(weather));
         neograph::ProviderRequest request;

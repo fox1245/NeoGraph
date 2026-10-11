@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=zh-CN source_sha256=d24db116d5f5f587178a373b78a2b9b6b492ad07dcb0c4dfc29288abad0fd636 -->
+<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=zh-CN source_sha256=04ec3704b620015a6f954234c5ee83256367bbd43dbd1f84150346e03a6ab528 -->
 # dr_compare：深度研究编排比较
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -23,6 +23,7 @@
 | `NG_TRANSPORT` | `http-chat` | NG: http-chat 或 http-responses，无 WebSocket；Responses 是不同 API。 |
 | `NG_WORKER_COUNT` | `4` | NG fan-out 工作线程数。 |
 | `DR_MODEL` | `gpt-5.4-mini` | 双方真实调用的显式模型。 |
+| `NG_EXAMPLE_MAX_TOKENS` | `1600` | NG/LG 双侧每次调用的输出上限；不会自动提高。 |
 | `NEOGRAPH_PG_DSN` | `empty` | NG PostgreSQL DSN，为空则使用内存。 |
 | `LANGGRAPH_PG_DSN` | `NEOGRAPH_PG_DSN` | LG PostgreSQL DSN 覆盖。 |
 | `CRAWL4AI_URL` | `empty` | 搜索服务；为空时除模拟外无法搜索。 |
@@ -44,6 +45,9 @@ NeoGraph 仍需添加 HTTP/2 支持的旧说法已过时。这些时间不能验
 以下模拟命令不调用远程模型或持久化。新结果应附源码/SDK/wheel 修订、Python/依赖版本、主机限制、工作线程数、预热、迭代数、检查点模式和失败数。保留历史文件不变。
 两个 harness 均拒绝空报告，若任一预热或测量运行失败则以非零状态退出；时间统计仅包含成功样本。报告通过前，`Failed runs` 必须为 0。在仓库 root 运行 `python -m unittest discover -s benchmarks/dr_compare -p test_bench.py` 可执行无供应商调用的统计回归测试。
 
+`bench_mock.py` 将未设置的 `LLM_MOCK_MS` 设为 0，并在 import 前强制模拟搜索/内存检查点。负延迟或已按真实模式导入的 runner 会在派发前被拒绝，继承的凭据不会触发付费调用。测量迭代必须为正数，预热不能为负数。LG 只提取真实文本块，不将空响应/计划作为成功样本。
+真实路径不会把截断/拒绝/tool/unknown 终止作为已完成报告计时。NG 错误保留原始拥有的 Outcome，LG 错误保留原始 response。无供应商回归测试只验证消费者投影策略，不是 transport/SDK/实时模型证据。
+
 ```sh
 # Install a current-cutover wheel using the Python binding build guide first.
 python -m pip install requests langgraph langchain-openai psutil
@@ -64,4 +68,16 @@ LLM_MOCK_MS=-1 MOCK_SEARCH=0 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
   python bench.py --warmup 2 --iters 5
 ```
 
-此命令不是消费限制。`FANOUT=5` 的研究查询每侧最多进行 7 次逻辑模型调用（plan、5 个研究者、synthesis）。双侧预热 2 次加测量 5 次，在 client retry 前即可派发 98 次逻辑调用。经授权的受限验证必须在基准外部预留调用数及所配置最大输出额度的总和，包括所有 SDK/LangChain retry。NG helper 默认 `NG_EXAMPLE_MAX_TOKENS=1600` 不会设置 LangChain 的输出上限。仅使用主机明确授权的模型、endpoint、凭据及搜索服务。缩减的代表 cohort 不等同于历史多次迭代测量，必须单独标记。
+此命令不是消费限制。`FANOUT=5` 的研究查询每侧最多 7 次逻辑模型调用（plan、5 个研究者、synthesis）。双侧预热 2 次加测量 5 次共 98 次逻辑调用。当前 NG SDK 默认禁用传输重试；LG 显式设置 `max_retries=0`。双侧输出上限均为 `NG_EXAMPLE_MAX_TOKENS=1600`，显式值保持不变。调用数及配置的输出额度总和须在基准外另行授权/预留。仅使用获准的模型、endpoint、凭据及搜索服务；缩减 cohort 必须与历史多次迭代测量区分。
+
+有限的付费供应商诊断（不是延迟比较）如下：
+
+```sh
+# From benchmarks/dr_compare, only after a separate spending reservation.
+: "${OPENAI_API_KEY:?Requires an intentionally authorized hosted credential}"
+env -u NG_WORKER_COUNT LLM_MOCK_MS=-1 MOCK_SEARCH=1 USE_INMEMORY_CP=1 \
+  FANOUT=5 NG_TRANSPORT=http-chat NG_EXAMPLE_MAX_TOKENS=8192 \
+  python bench.py --only neograph --warmup 0 --iters 1
+```
+
+最多 7 次模型调用、配置的输出 token 共 57,344，输入 token 另计。它不执行真实网页搜索，必须标记为付费供应商/模拟搜索，而不是真实搜索 qualification。通过要求 exit 0、1 个成功样本、非空报告及 `Failed runs: 0`；计划、回答或报告任一失败或为空即为失败。8,192 token 额度是显式诊断选择，不是提高默认值、价格估算或消费授权。如有获准且正在运行的 Crawl4AI 服务，可用 `MOCK_SEARCH=0` 在相同模型调用上限内执行真实搜索。

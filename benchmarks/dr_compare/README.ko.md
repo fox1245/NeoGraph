@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=ko source_sha256=d24db116d5f5f587178a373b78a2b9b6b492ad07dcb0c4dfc29288abad0fd636 -->
+<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=ko source_sha256=04ec3704b620015a6f954234c5ee83256367bbd43dbd1f84150346e03a6ab528 -->
 # dr_compare: 심층 조사 오케스트레이션 비교
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -23,6 +23,7 @@
 | `NG_TRANSPORT` | `http-chat` | NG: http-chat 또는 http-responses. WebSocket 없음; Responses는 다른 API입니다. |
 | `NG_WORKER_COUNT` | `4` | NG fan-out 작업자 수. |
 | `DR_MODEL` | `gpt-5.4-mini` | 양쪽 실제 호출의 명시적 모델. |
+| `NG_EXAMPLE_MAX_TOKENS` | `1600` | NG/LG 양쪽의 호출별 출력 상한. 자동으로 늘리지 않습니다. |
 | `NEOGRAPH_PG_DSN` | `empty` | NG PostgreSQL DSN, 없으면 메모리 사용. |
 | `LANGGRAPH_PG_DSN` | `NEOGRAPH_PG_DSN` | LG PostgreSQL DSN 재정의. |
 | `CRAWL4AI_URL` | `empty` | 검색 서비스, 없으면 모의 검색 외에는 검색 불가. |
@@ -44,6 +45,9 @@ NeoGraph에 HTTP/2 지원이 아직 필요하다는 과거 주장은 현재와 �
 아래 모의 명령은 원격 호출과 영속성을 사용하지 않습니다. 새 결과에는 소스/SDK/wheel 리비전, Python/의존성 버전, 호스트 제약, 작업자 수, 예열, 반복 수, 체크포인트 모드, 실패 수를 기록하세요. 과거 파일은 유지하세요.
 두 harness는 빈 보고서를 거부하고 예열/측정 실행 중 하나라도 실패하면 nonzero로 종료합니다. 시간 통계에는 성공 표본만 포함합니다. 통과로 보고하려면 `Failed runs`가 0이어야 합니다. 저장소 root에서 `python -m unittest discover -s benchmarks/dr_compare -p test_bench.py`로 공급자 없는 집계 회귀 테스트를 실행합니다.
 
+`bench_mock.py`는 미설정 `LLM_MOCK_MS`를 0으로 설정하고 import 전에 모의 검색/메모리 체크포인트를 강제합니다. 음수 지연이나 이미 실제 모드로 import된 실행자는 dispatch 전에 거부하므로 상속된 키로 유료 호출하지 않습니다. 측정 반복은 양수, 예열은 0 이상이어야 합니다. LG는 실제 텍스트 블록만 추출하며 빈 응답/계획을 성공 표본으로 취급하지 않습니다.
+실제 경로에서는 잘림/거부/tool/unknown 종료를 완료 보고서로 측정하지 않습니다. NG 오류는 원래 소유 Outcome, LG 오류는 원래 response를 보존합니다. 공급자 없는 회귀 테스트는 소비자 투영 정책만 검증하며 transport/SDK/live 모델 증거가 아닙니다.
+
 ```sh
 # Install a current-cutover wheel using the Python binding build guide first.
 python -m pip install requests langgraph langchain-openai psutil
@@ -64,4 +68,16 @@ LLM_MOCK_MS=-1 MOCK_SEARCH=0 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
   python bench.py --warmup 2 --iters 5
 ```
 
-이 명령은 지출 한도가 아닙니다. `FANOUT=5`인 조사 질의는 각 측에서 최대 7개의 논리 모델 호출(plan, 연구자 5개, synthesis)을 수행합니다. 양쪽 예열 2회와 측정 5회는 client retry 전에도 98개의 논리 호출을 보낼 수 있습니다. 승인된 제한 검증은 모든 SDK/LangChain retry를 포함해 호출 수와 설정한 최대 출력 허용량 합을 벤치마크 외부에서 예약해야 합니다. NG helper 기본 `NG_EXAMPLE_MAX_TOKENS=1600`은 LangChain 출력 상한을 설정하지 않습니다. 호스트가 명시적으로 승인한 모델, endpoint, 자격 증명, 검색 서비스만 사용하세요. 줄인 대표 cohort는 과거 여러 반복 측정과 다르므로 별도로 표시하세요.
+이 명령은 지출 한도가 아닙니다. `FANOUT=5`인 조사 질의는 각 측에서 최대 7개의 논리 모델 호출(plan, 연구자 5개, synthesis)을 수행합니다. 양쪽 예열 2회와 측정 5회는 98개의 논리 호출입니다. 현재 NG SDK 기본값은 transport retry를 끄며 LG는 `max_retries=0`을 명시합니다. 양쪽 출력 상한은 `NG_EXAMPLE_MAX_TOKENS=1600`이며 명시적 값은 그대로 유지합니다. 호출 수와 최대 출력 허용량 합은 벤치마크 외부에서 별도로 승인/예약해야 합니다. 승인된 모델, endpoint, 자격 증명, 검색 서비스만 사용하세요. 줄인 cohort는 과거 여러 반복 측정과 별도로 표시하세요.
+
+유한한 유료 공급자 진단(지연 비교 아님)은 다음과 같습니다.
+
+```sh
+# From benchmarks/dr_compare, only after a separate spending reservation.
+: "${OPENAI_API_KEY:?Requires an intentionally authorized hosted credential}"
+env -u NG_WORKER_COUNT LLM_MOCK_MS=-1 MOCK_SEARCH=1 USE_INMEMORY_CP=1 \
+  FANOUT=5 NG_TRANSPORT=http-chat NG_EXAMPLE_MAX_TOKENS=8192 \
+  python bench.py --only neograph --warmup 0 --iters 1
+```
+
+최대 모델 호출 7회, 설정한 출력 토큰 57,344개이며 입력 토큰은 별도입니다. 실제 웹 검색이 없으므로 실제 검색 qualification이 아니라 유료 공급자/모의 검색으로 표시해야 합니다. 통과하려면 exit 0, 성공 표본 1개, 비어 있지 않은 보고서, `Failed runs: 0`이 필요하며 계획, 답변, 보고서 중 하나라도 실패하거나 비어 있으면 실패입니다. 8,192토큰 허용량은 명시적 진단 선택이지 기본값 인상, 가격 추정, 지출 승인이 아닙니다. 승인된 Crawl4AI 서비스가 실행 중이면 `MOCK_SEARCH=0`으로 같은 모델 호출 상한에서 실제 검색을 실행합니다.

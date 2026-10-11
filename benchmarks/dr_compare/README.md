@@ -25,6 +25,7 @@ The workflow imports requests, LangGraph, and langchain-openai; memory probes us
 | `NG_TRANSPORT` | `http-chat` | NG: http-chat or http-responses. No WebSocket; Responses changes wire API. |
 | `NG_WORKER_COUNT` | `4` | NG worker count for fan-out. |
 | `DR_MODEL` | `gpt-5.4-mini` | Explicit model for real calls on both sides. |
+| `NG_EXAMPLE_MAX_TOKENS` | `1600` | Per-call output cap on both NG and LG; never raised automatically. |
 | `NEOGRAPH_PG_DSN` | `empty` | NG PostgreSQL DSN; without one, falls back to in-memory. |
 | `LANGGRAPH_PG_DSN` | `NEOGRAPH_PG_DSN` | LG PostgreSQL DSN override. |
 | `CRAWL4AI_URL` | `empty` | Search service; no service means search unavailable unless mocked. |
@@ -49,6 +50,17 @@ run fails; timings include only successful samples. `Failed runs` must be zero
 before a cohort is reported as passing. Run the no-provider accounting
 regressions with `python -m unittest discover -s benchmarks/dr_compare -p test_bench.py`
 from the repository root.
+
+`bench_mock.py` sets `LLM_MOCK_MS=0` when unset and forces mock search/in-memory
+checkpoints before importing either runner. Negative delay or a cached non-mock
+runner is rejected before dispatch; inherited credentials cannot select paid work.
+Both harnesses require positive measured iterations and nonnegative warmups.
+LG preserves genuine text blocks rather than stringifying empty/rich responses;
+empty intermediate replies/plans are failures, not successful benchmark samples.
+The real paths also reject truncated/refused/tool/unknown terminals rather than
+timing them as completed reports. NG errors retain the original owned Outcome;
+LG errors retain the original response. The no-provider regressions isolate
+consumer projection policy; they are not transport/SDK or hosted-model evidence.
 
 ```sh
 # Install a current-cutover wheel using the Python binding build guide first.
@@ -77,10 +89,28 @@ LLM_MOCK_MS=-1 MOCK_SEARCH=0 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
 This command is not a spending limit: for `FANOUT=5`, a research query performs
 at most seven logical model calls per side (plan, five researchers, synthesis).
 Two warmups plus five measured runs on both sides can therefore dispatch
-98 logical calls before any client retry. Authorized bounded validation must
-reserve calls and the sum of configured maximum output allowances outside
-the benchmark, including all SDK/LangChain retries. NeoGraph's helper defaults
-to `NG_EXAMPLE_MAX_TOKENS=1600`; this does not configure LangChain's output cap.
+98 logical calls. The current NG SDK default disables transport retries; LG
+explicitly sets `max_retries=0`. Authorized bounded validation must reserve calls
+and the sum of configured output caps outside the benchmark. Both sides use
+`NG_EXAMPLE_MAX_TOKENS=1600` by default; an explicit value is honored unchanged.
 Use only the host's explicitly authorized model, endpoint, credentials, and
 search service. A reduced representative cohort is not the historical
 multi-iteration measurement and must be labeled separately.
+
+A finite paid-provider diagnostic (not a latency comparison) is:
+
+```sh
+# From benchmarks/dr_compare, only after a separate spending reservation.
+: "${OPENAI_API_KEY:?Requires an intentionally authorized hosted credential}"
+env -u NG_WORKER_COUNT LLM_MOCK_MS=-1 MOCK_SEARCH=1 USE_INMEMORY_CP=1 \
+  FANOUT=5 NG_TRANSPORT=http-chat NG_EXAMPLE_MAX_TOKENS=8192 \
+  python bench.py --only neograph --warmup 0 --iters 1
+```
+
+This is at most seven model calls and 57,344 configured output tokens, plus input
+tokens. It has no real web search and must be labelled paid-provider/mock-search,
+not real-search qualification. A pass needs exit 0, one successful sample, a
+nonempty report and `Failed runs: 0`; any failed/empty plan, answer or report fails.
+The 8,192-token allowance is an explicit diagnostic choice, not a raised default,
+price estimate or spending authorization. With an approved running Crawl4AI
+service, `MOCK_SEARCH=0` exercises real search with the same model-call bound.
