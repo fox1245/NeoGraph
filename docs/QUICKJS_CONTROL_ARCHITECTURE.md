@@ -123,8 +123,10 @@ The full allowed-surface, canonical-artifact, removal, and cutover contract is
 
 ### Graph definition
 
-A module may export `define()` to construct Core topology through the sealed
-`ng` graph-builder API. The host evaluates it in a compile context with
+A module must export `define()` to construct Core topology through the sealed
+`ng` graph-builder API; a module without it is rejected with
+`P_JS_DEFINE_MISSING`. `define()` returns one graph, which is the Program's
+only Core. The host evaluates it in a compile context with
 instruction, memory, and time limits and no effectful host calls. The returned
 builder is validated and frozen as canonical strict Core IR before any node can
 run.
@@ -134,7 +136,9 @@ export function define() {
   const graph = ng.graph("review");
   graph.node("writer", {type: "agent", model: "writer-model"});
   graph.node("reviewer", {type: "agent", model: "reviewer-model"});
+  graph.entry("writer");
   graph.edge("writer", "reviewer");
+  graph.exit("reviewer");
   return graph;
 }
 ```
@@ -145,21 +149,34 @@ conditions. NeoGraph does not reproduce those features in the builder API.
 
 ### Program control
 
-A restricted durable control module exports a synchronous generator entry point.
-Generator yields are the only way that profile requests durable NeoGraph work.
+A restricted durable control module exports a synchronous generator entry point
+next to `define()`. Generator yields are the only way that profile requests
+durable NeoGraph work. `ng.callCore()` can name only the Core that `define()`
+returns, by the name passed to `ng.graph()`; any other name fails the run with
+`P_JS_CONTROL_COMMAND`. Steps that `main()` repeats or selects belong in that
+one graph.
+
 ```javascript
+export function define() {
+  const graph = ng.graph("review");
+  graph.channel("draft", {reducer: "overwrite", initial: ""});
+  graph.channel("accepted", {reducer: "overwrite", initial: false});
+  graph.node("reviewer", {type: "reviewer"});
+  graph.node("reviser", {type: "reviser"});
+  graph.entry("reviewer");
+  graph.edge("reviewer", "reviser");
+  graph.exit("reviser");
+  return graph;
+}
+
 export function* main(input) {
-  let draft = input;
+  let draft = input.draft;
 
   for (let attempt = 0; attempt < 5; ++attempt) {
-    const review = yield ng.callCore("reviewer", {draft, attempt});
-    if (review.accepted) return draft;
+    const round = yield ng.callCore("review", {draft, attempt});
+    if (round.accepted) return draft;
 
-    draft = yield ng.callCore("reviser", {
-      draft,
-      feedback: review.feedback,
-    });
-
+    draft = round.draft;
     yield ng.checkpoint({draft, attempt});
   }
 
@@ -178,8 +195,21 @@ JavaScript generator
   -> durable transition publication
   -> pinned GraphEngine or registered host binding
   -> recorded result or failure
-  -> generator.next(recorded outcome)
+  -> completed: generator.next(recorded result)
+  -> failed, timed out, or cancelled: the run ends with the recorded outcome
 ```
+
+Only a completed command resumes the generator. A completed `callCore` returns
+the Core's output: `channels` holds each channel's `value` and `version`,
+`global_version` is the state version, and each channel's value is also copied
+to a top-level key with the channel's name unless that key already exists.
+When a command does not complete, for example because a Core node raised, the
+Core step budget ran out, or the run's wall time expired, `ProgramRuntime`
+records that outcome and returns it as the run's terminal result. The generator
+is not resumed, so a `try`/`catch` around the `yield` never runs; the host reads
+the status and failure from the `ProgramResult`. A join that fails under its
+failure policy ends the run the same way. An interrupted command pauses the run
+instead, and a resume continues that command.
 
 Unknown objects, forged slots, malformed arguments, unsupported commands, and
 commands outside the admitted closure fail before dispatch.

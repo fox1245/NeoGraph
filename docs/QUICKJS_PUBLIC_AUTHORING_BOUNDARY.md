@@ -131,8 +131,10 @@ replay contracts that apply to JavaScript-originated commands.
 
 ### QuickJS `define()` context
 
-A JavaScript module exports synchronous `define()` to construct a graph through
-one sealed, versioned `ng` graph-builder surface.
+A JavaScript module must export synchronous `define()`. It constructs the
+Program's only Core graph through one sealed, versioned `ng` graph-builder
+surface. A module without `define()`, including one that exports only `main()`,
+is rejected with `P_JS_DEFINE_MISSING`.
 
 ```javascript
 export function define() {
@@ -160,27 +162,47 @@ source-map and identity metadata.
 
 ### Restricted QuickJS `main()` context
 
-A restricted JavaScript module exports a synchronous generator `main()` for
-durable Program control.
+A restricted JavaScript module may also export a synchronous generator `main()`
+for durable Program control. Without `main()`, a run executes the Core
+directly. `main()` exists alongside `define()`, never instead of it, and
+`ng.callCore()` can name only the Core that `define()` returns, by the name
+passed to `ng.graph()`. A `callCore` that names any other Core fails the run
+with `P_JS_CONTROL_COMMAND`. Put every step that `main()` needs into that one
+graph and call it again with different input.
 
 ```javascript
+export function define() {
+  const graph = ng.graph("review");
+  graph.channel("draft", { reducer: "overwrite", initial: "" });
+  graph.channel("accepted", { reducer: "overwrite", initial: false });
+  graph.node("reviewer", { type: "reviewer" });
+  graph.node("reviser", { type: "reviser" });
+  graph.entry("reviewer");
+  graph.edge("reviewer", "reviser");
+  graph.exit("reviser");
+  return graph;
+}
+
 export function* main(input) {
   let draft = input.draft;
 
   for (let attempt = 0; attempt < 5; ++attempt) {
-    const review = yield ng.callCore("reviewer", { draft, attempt });
-    if (review.accepted) return { draft, attempt };
+    const round = yield ng.callCore("review", { draft, attempt });
+    if (round.accepted) return { draft, attempt };
 
-    draft = yield ng.callCore("reviser", {
-      draft,
-      feedback: review.feedback,
-    });
+    draft = round.draft;
     yield ng.checkpoint({ draft, attempt });
   }
 
   throw new Error("review attempts exhausted");
 }
 ```
+
+A completed `callCore` resumes the generator with the Core's output object.
+Its `channels` member holds each channel's `value` and `version`, and
+`global_version` is the state version. The value of each channel is also
+copied to a top-level key with the channel's name unless that key already
+exists, which is why the example can read `round.accepted` and `round.draft`.
 
 `ng.callCore()` only constructs an immutable command. It cannot call
 `GraphEngine` directly. At each yield boundary, the host performs the following
@@ -205,8 +227,22 @@ sequenceDiagram
     runtime->>engine: dispatch pinned executable
     engine-->>runtime: canonical terminal outcome
     runtime->>journal: persist outcome
-    runtime-->>js: generator.next(recorded outcome)
+    alt command completed
+        runtime-->>js: generator.next(recorded result)
+    else command failed, timed out, or was cancelled
+        runtime->>runtime: end the run with the recorded outcome
+    end
 ```
+
+Only a completed command resumes the generator. When a yielded command does
+not complete, for example because a Core node raised, the Core step budget ran
+out, or the run's wall time expired, `ProgramRuntime` records that outcome and
+makes it the run's terminal result with the matching status and failure. The
+generator is not resumed: a `try`/`catch` around the `yield` never runs, and the
+host reads the failure from the `ProgramResult`. A join (`ng.all`, `ng.race`,
+`ng.quorum`) that fails under its failure policy ends the run the same way. An
+interrupted command pauses the run instead, and a resume continues that
+command.
 
 JavaScript may use loops, recursion, closures, exceptions, helper modules, and
 ordinary local state. It does not receive direct authority to run a Core node,
