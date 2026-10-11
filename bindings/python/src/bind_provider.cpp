@@ -88,8 +88,9 @@ void init_provider(py::module_& m) {
         .def_property("reasoning_details", [](const ChatMessage& v) { return json_to_py(v.reasoning_details); }, [](ChatMessage& v, py::object x) { v.reasoning_details = py_to_json(x); });
     py::class_<ChatTool>(m, "ChatTool")
         .def(py::init<>())
-        .def(py::init([](std::string name, std::string description, py::object parameters) { return ChatTool{std::move(name), std::move(description), py_to_json(parameters)}; }), py::arg("name") = "", py::arg("description") = "", py::arg("parameters") = py::dict())
+        .def(py::init([](std::string name, std::string description, py::object parameters, std::optional<bool> strict) { return ChatTool{std::move(name), std::move(description), py_to_json(parameters), strict}; }), py::arg("name") = "", py::arg("description") = "", py::arg("parameters") = py::dict(), py::arg("strict") = py::none())
         .def_readwrite("name", &ChatTool::name).def_readwrite("description", &ChatTool::description)
+        .def_readwrite("strict", &ChatTool::strict, "OpenAI Responses strict mode: None keeps the SDK default, which applies only to strict-compatible schemas.")
         .def_property("parameters", [](const ChatTool& v) { return json_to_py(v.parameters); }, [](ChatTool& v, py::object x) { v.parameters=py_to_json(x); });
     py::class_<GeneratedArtifact>(m, "GeneratedArtifact").def(py::init<>())
         .def_readwrite("kind", &GeneratedArtifact::kind).def_readwrite("mime_type", &GeneratedArtifact::mime_type)

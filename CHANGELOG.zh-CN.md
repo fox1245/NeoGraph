@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a546fda3d2b46851f6c1387fb52dd7df3975065dfb6979bc91a8b22b0e4888a9 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=fd68acff39750b317ebcf03a1f48a20e6ccb28de4aa4802c8b6c1d8411c45c06 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -30,6 +30,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 新增
 
+- **`ChatTool::strict` 可按工具设置 OpenAI Responses strict 模式；C++ 使用方须重新构建。** 该标志是默认未设置的 `std::optional<bool>`，由 `make_provider_request` 传入 Responses function 工具。未设置时沿用上文所述的 SDK 默认值，`false` 按原样发送，对不兼容 strict 的 schema 设置 `true` 会在 dispatch 前以 `InvalidRequest` 失败。其他 family 无法发送该标志，因此以 `std::invalid_argument`（Python 中为 `ValueError`）拒绝 `true`，接受 `false`。Python：`ChatTool(..., strict=None)` 及 `strict` 属性。`ChatTool` 增加了 member，layout 随之改变：NeoGraph、C++ 使用方和自定义 `Tool` 实现以及 Python 扩展须一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 - `CheckpointCoordinator::records_pending_writes(parent_cp_id)`:当 `record_pending_write[_async]` 确实会存储内容时返回 true,调用方可据此跳过调用。
 
 ### 修复

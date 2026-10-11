@@ -9,6 +9,7 @@
 #include <core/native.h>
 
 #include <asio/cancellation_state.hpp>
+#include <algorithm>
 #include <type_traits>
 #include <utility>
 #include <asio/system_error.hpp>
@@ -602,6 +603,9 @@ ProviderRequest make_provider_request(
         return std::make_shared<const sp::json::Document>(std::move(*document));
     };
     const auto family = provider.family();
+    if (family != "openai.responses" &&
+        std::any_of(tools.begin(), tools.end(), [](const ChatTool& tool) { return tool.strict.value_or(false); }))
+        throw std::invalid_argument("Strict tool definitions are supported only by the openai.responses family");
     const bool chat_controls = controls.chat_reasoning || controls.include_reasoning ||
         controls.usage_include || !controls.models.empty();
     const bool responses_controls = controls.previous_response_id ||
@@ -685,7 +689,7 @@ ProviderRequest make_provider_request(
         request.service_tier = std::move(controls.service_tier);
         request.required_tool = std::move(controls.required_tool);
         request.tools.reserve(tools.size());
-        for (const auto& tool : tools) request.tools.push_back({tool.name, tool.description, parameters(tool), {}});
+        for (const auto& tool : tools) request.tools.push_back({tool.name, tool.description, parameters(tool), tool.strict, {}});
         result.payload = std::move(request);
     } else if (family == "google.generate") {
         reject(controls.top_p || controls.reasoning_effort || controls.reasoning_summary ||

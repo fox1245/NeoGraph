@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=79727c2b30c2623180976aae1d3a09ad00a17554779a9b48e209c585311165bf -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=5ec78210577bedafa539bd861bf217bb3dcc2f677d9f2ba3c68771334dca1f9e -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -175,6 +175,7 @@ struct ChatTool {
     std::string name;        // Tool name (unique identifier)
     std::string description; // Human-readable description for the LLM
     json parameters;         // JSON Schema describing the tool's parameters
+    std::optional<bool> strict; // OpenAI Responses strict mode; unset keeps the SDK default
 };
 ```
 
@@ -183,6 +184,7 @@ struct ChatTool {
 | `name` | `std::string` | ツール固有の名前 |
 | `description` | `std::string` | ツールの目的を LLM に説明する表示用説明 |
 | `parameters` | `json` | 受け付けるパラメーターを記述する JSON Schema オブジェクト |
+| `strict` | `std::optional<bool>` | この function ツールの OpenAI Responses strict モード。未設定なら SDK policy の既定値に従い、既定値は strict 互換 schema（すべての object が `"additionalProperties": false` を指定し、各 property を `required` に列挙）にのみ適用され、それ以外の schema は `"strict": false` で送信される。`false` はそのまま送信され、互換でない schema に `true` を指定すると dispatch 前に `InvalidRequest` で失敗する。他の family は `true` を拒否する。Python: `ChatTool(..., strict=None)` |
 ### Owned Outcome
 
 プロバイダー呼び出しは `sp::runtime::Result`、すなわち `sp::Completion` または `sp::Failure` を保持する不変の所有 `std::shared_ptr<const sp::Outcome>` を返します。表示テキストだけでなく結果全体を保持してください。順序付きメッセージ/パート、native continuation、存在する wire envelope、順序付き raw 観測、停止の根拠と実際の試行メタデータは呼び出しとクライアント破棄後も残ります。`input_total`、`output_total`、`total` などの使用量カウンターは `std::optional<sp::Count>` で、存在する count は `uint64_t value` と `Evidence` を持ちます。`Usage` は stage、quality、conflict も記録します。欠落は不明であり、ゼロを作りません。失敗も元の部分結果を保持します。`ProviderFailure::outcome()` と `ProviderObserverError::outcome()` は実際の結果を保持し、後者の `cause()` は観測者の例外を保持します。

@@ -200,6 +200,7 @@ struct ChatTool {
     std::string name;        // Tool name (unique identifier)
     std::string description; // Human-readable description for the LLM
     json parameters;         // JSON Schema describing the tool's parameters
+    std::optional<bool> strict; // OpenAI Responses strict mode; unset keeps the SDK default
 };
 ```
 
@@ -208,6 +209,7 @@ struct ChatTool {
 | `name` | `std::string` | Unique tool name |
 | `description` | `std::string` | Description shown to the LLM to explain the tool's purpose |
 | `parameters` | `json` | JSON Schema object describing accepted parameters |
+| `strict` | `std::optional<bool>` | OpenAI Responses strict mode for this function tool. Unset keeps the SDK policy default, which applies only to strict-compatible schemas (every object sets `"additionalProperties": false` and lists each property in `required`); other schemas are sent with `"strict": false`. `false` is sent as given; `true` on an incompatible schema fails before dispatch with `InvalidRequest`. Other families reject `true`. Python: `ChatTool(..., strict=None)` |
 
 ### Owned Outcome
 

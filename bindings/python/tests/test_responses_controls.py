@@ -291,6 +291,34 @@ def test_responses_controls_reject_wrong_family_before_io(typed_peer, family, fi
     assert typed_peer.requests == []
 
 
+def test_chat_tool_strict_round_trips_to_the_responses_body(typed_peer):
+    schema = _tools()[0].parameters
+    assert ng.ChatTool().strict is None
+    assert ng.ChatTool("lookup", "Find a value", schema).strict is None
+    tools = [
+        ng.ChatTool("explicit_false", "Find a value", schema, strict=False),
+        ng.ChatTool("explicit_true", "Find a value", schema, strict=True),
+        ng.ChatTool("unset", "Find a value", schema),
+    ]
+    assert [tool.strict for tool in tools] == [False, True, None]
+    tools[2].strict = True
+    assert tools[2].strict is True
+    tools[2].strict = None
+    assert tools[2].strict is None
+
+    typed_peer.responder = lambda request: _reply(request, [_message("done")])
+    provider = typed_peer.provider("openai.responses")
+    _completed(provider.invoke(_request(provider, [_user("Look up")], tools=tools)))
+    sent = typed_peer.requests[-1]["body"]["tools"]
+    # Unset keeps the SDK default, strict for this strict-compatible schema.
+    assert [(tool["name"], tool["strict"]) for tool in sent] == [
+        ("explicit_false", False), ("explicit_true", True), ("unset", True)]
+
+    chat = typed_peer.provider("openai.chat")
+    with pytest.raises(ValueError, match="openai.responses"):
+        _request(chat, [_user("Look up")], tools=[ng.ChatTool("lookup", "Find a value", schema, strict=True)])
+
+
 class _Conversation:
     """Server-held transcript: requests must contain only the new turn."""
 

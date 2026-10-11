@@ -6,6 +6,7 @@
 #include <map>
 #include <unordered_set>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -62,6 +63,11 @@ struct ChatTool {
     std::string name;         ///< Tool name (must be unique within a session).
     std::string description;  ///< Human-readable description of what the tool does.
     json parameters;          ///< JSON Schema object describing the tool's parameters.
+    /// OpenAI Responses function-tool strict mode. Unset keeps the SDK policy
+    /// default, which applies only to strict-compatible parameter schemas.
+    /// `false` is sent as given. `true` on an incompatible schema fails before
+    /// dispatch. Other families reject `true` because they cannot send it.
+    std::optional<bool> strict;
 };
 
 /// Generated provider media. At least one payload/reference field is populated;

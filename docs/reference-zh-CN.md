@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=79727c2b30c2623180976aae1d3a09ad00a17554779a9b48e209c585311165bf -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=5ec78210577bedafa539bd861bf217bb3dcc2f677d9f2ba3c68771334dca1f9e -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -198,6 +198,7 @@ struct ChatTool {
     std::string name;        // Tool name (unique identifier)
     std::string description; // Human-readable description for the LLM
     json parameters;         // JSON Schema describing the tool's parameters
+    std::optional<bool> strict; // OpenAI Responses strict mode; unset keeps the SDK default
 };
 ```
 
@@ -206,6 +207,7 @@ struct ChatTool {
 | `name` | `std::string` | 唯一的工具名称 |
 | `description` | `std::string` | 显示给 LLM 以解释工具用途的描述 |
 | `parameters` | `json` | 描述可接受参数的 JSON Schema 对象 |
+| `strict` | `std::optional<bool>` | 此 function 工具的 OpenAI Responses strict 模式。未设置时沿用 SDK policy 默认值，该默认值只应用于 strict 兼容的 schema（每个 object 都设置 `"additionalProperties": false` 并在 `required` 中列出每个 property），其他 schema 以 `"strict": false` 发送。`false` 按原样发送；对不兼容的 schema 设置 `true` 会在 dispatch 前以 `InvalidRequest` 失败。其他 family 拒绝 `true`。Python：`ChatTool(..., strict=None)` |
 
 ### Owned Outcome
 

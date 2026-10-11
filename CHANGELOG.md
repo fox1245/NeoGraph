@@ -28,6 +28,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`ChatTool::strict` sets OpenAI Responses strict mode per tool; rebuild C++ consumers.** The flag is a `std::optional<bool>`, unset by default, and `make_provider_request` carries it into the Responses function tool. Unset keeps the SDK default described above, `false` is sent as given, and `true` on a schema that is not strict-compatible fails before dispatch with `InvalidRequest`. The other families cannot send the flag, so they reject `true` with `std::invalid_argument` (`ValueError` in Python) and accept `false`. Python: `ChatTool(..., strict=None)` and the `strict` attribute. `ChatTool` gained a member, which changes its layout: rebuild NeoGraph, C++ consumers and custom `Tool` implementations, and Python extensions together (see [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)).
 - `CheckpointCoordinator::records_pending_writes(parent_cp_id)`: true when `record_pending_write[_async]` would store something, so callers can skip the call.
 
 ### Fixed

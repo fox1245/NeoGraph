@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=da0afac449e09a771aa3d7b42562eaac27be662a6e82c6adeac3ba6bf81e240d -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=d98b32bf8ca01f96e911543560990005713ba597ee01d1b10f841fa54986d88e -->
 # 二进制兼容政策
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -22,6 +22,7 @@ CMake 从 `pyproject.toml` 读取 NeoGraph version，将公开 compiled library 
 - typed-provider 切换：用匹配的 NeoGraph/SchemaProvider SDK header/library rebuild 所有 C++ consumer 和 custom provider。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、旧 descriptor interpreter、Responses WebSocket 已删除，没有 alias。
 - event-driven provider dispatch：CancelToken 使用 `std::stop_source` 并公开 `stop_token()`。`cancel`、`fork`、Asio-slot signature 不变不使旧 inline cancel code 兼容。
 - 已完成 cancel context 的 detach：CancelToken 的公开 layout 增加了 generation 保护的 emit 状态。须一起 rebuild NeoGraph 和所有 native consumer。Detach 在 context 销毁前释放已完成的 slot handler，仍要求 operation 先完成，不会 reset cancel 状态。
+- `ChatTool::strict`：portable 工具定义增加了 member。`ChatTool` 在 `Tool::get_definition()` 和 `make_provider_request` 中按值跨越库边界，须一起 rebuild NeoGraph、所有 native consumer 和 custom `Tool` 以及 Python 扩展。
 - 将来 `1.0.0` 边界把 loader 代际变为 `1`，须 rebuild。generation-1 freeze 是该 release 的政策，不是当前验证结果。
 
 ## 公开接口

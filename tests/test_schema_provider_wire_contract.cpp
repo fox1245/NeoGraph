@@ -58,6 +58,77 @@ TEST(SchemaProviderWireContract, TypedToolsEncodeAcrossAllFiveFamiliesBeforeDisp
     }
 }
 
+namespace {
+const json strict_schema = json::parse(
+    R"({"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false})");
+const json open_schema = json::parse(
+    R"({"type":"object","properties":{"city":{"type":"string"}},"required":["city"]})");
+ProviderControls strict_tool_controls(std::string_view family) {
+    ProviderControls controls;
+    controls.max_output_tokens = 64;
+    if (family != "openai.chat") controls.account_scope = "fixture-account";
+    return controls;
+}
+}
+
+TEST(SchemaProviderWireContract, ChatToolStrictReachesResponsesFunctionTools) {
+    auto provider = wire::provider("openai.responses", "http://127.0.0.1:1");
+    const std::vector<ChatTool> tools = {
+        {"default_compatible", "Unset, strict-compatible schema", strict_schema},
+        {"default_open", "Unset, open schema", open_schema},
+        {"explicit_false", "Explicit false", strict_schema, false},
+        {"explicit_true", "Explicit true", strict_schema, true},
+    };
+    auto prepared = provider->prepare(make_provider_request(
+        *provider, "fixture-model", {test::message("ping", sp::Role::User)}, tools,
+        strict_tool_controls("openai.responses")));
+    ASSERT_TRUE(prepared.valid());
+    const auto sent = json::parse(std::string(prepared.encoded_body())).at("tools");
+    ASSERT_EQ(sent.size(), 4u);
+    // Unset keeps the SDK policy default, which applies only to a
+    // strict-compatible schema and is otherwise sent as false.
+    EXPECT_EQ(sent.at(0).at("name"), "default_compatible");
+    EXPECT_EQ(sent.at(0).at("strict"), true);
+    EXPECT_EQ(sent.at(1).at("name"), "default_open");
+    EXPECT_EQ(sent.at(1).at("strict"), false);
+    EXPECT_EQ(sent.at(2).at("name"), "explicit_false");
+    EXPECT_EQ(sent.at(2).at("strict"), false);
+    EXPECT_EQ(sent.at(3).at("name"), "explicit_true");
+    EXPECT_EQ(sent.at(3).at("strict"), true);
+}
+
+TEST(SchemaProviderWireContract, ExplicitStrictToolOnOpenSchemaFailsBeforeDispatch) {
+    wire::Peer peer(wire::responses_body());
+    auto provider = wire::provider("openai.responses", peer.origin());
+    auto prepared = provider->prepare(make_provider_request(
+        *provider, "fixture-model", {test::message("ping", sp::Role::User)},
+        {ChatTool{"explicit_true", "Explicit true", open_schema, true}},
+        strict_tool_controls("openai.responses")));
+    ASSERT_FALSE(prepared.valid());
+    ASSERT_NE(prepared.error(), nullptr);
+    EXPECT_EQ(prepared.error()->kind, sp::ErrorKind::InvalidRequest);
+    EXPECT_EQ(peer.state->entered, 0u);
+}
+
+TEST(SchemaProviderWireContract, StrictToolIsRejectedOutsideResponses) {
+    for (auto family : families) {
+        if (std::string_view(family) == "openai.responses") continue;
+        SCOPED_TRACE(family);
+        auto provider = wire::provider(family, "http://127.0.0.1:1");
+        EXPECT_THROW(make_provider_request(
+            *provider, "fixture-model", {test::message("ping", sp::Role::User)},
+            {ChatTool{"explicit_true", "Explicit true", strict_schema, true}},
+            strict_tool_controls(family)), std::invalid_argument);
+        // false matches these families' only behaviour and is accepted.
+        auto prepared = provider->prepare(make_provider_request(
+            *provider, "fixture-model", {test::message("ping", sp::Role::User)},
+            {ChatTool{"explicit_false", "Explicit false", strict_schema, false}},
+            strict_tool_controls(family)));
+        ASSERT_TRUE(prepared.valid());
+        EXPECT_EQ(std::string(prepared.encoded_body()).find("\"strict\""), std::string::npos);
+    }
+}
+
 TEST(SchemaProviderWireContract, TypedToolResponsesRemainOwnedAcrossProviders) {
     struct Case { const char* family; const char* response; const char* id; };
     const std::array cases = {
