@@ -343,6 +343,53 @@ def test_a_call_journaled_before_a_crash_is_charged_once_after_recovery(peer, tm
 
 
 # ---------------------------------------------------------------------------
+# Interrupt and resume: each provider call's tokens are charged once (#378)
+# ---------------------------------------------------------------------------
+
+TWO_CALLS = define_graph("""
+    g.channel("messages", {reducer: "append", initial: []});
+    g.node("first", {type: "llm_call"});
+    g.node("second", {type: "llm_call"});
+    g.entry("first");
+    g.edge("first", "second");
+    g.interruptBefore("second");
+    g.exit("second");
+""", name="chat")
+
+
+def durable_bound_host(peer, directory, **options):
+    store = str(directory / "runs")
+    archive = support.provider_archive(store, peer.base_url, provision=True)
+    return make_bound_host(peer.base_url, sqlite_directory=store,
+                           native_history_archive=archive, **options)
+
+
+@pytest.mark.parametrize("durable", [False, True], ids=["in-memory", "sqlite-journal"])
+def test_interrupt_and_resume_charge_each_call_once(peer, tmp_path, durable):
+    if durable and sys.platform == "win32":
+        pytest.skip("NativeArchive custody needs an owner-only protected directory")
+    host = durable_bound_host(peer, tmp_path) if durable else make_bound_host(peer.base_url)
+    run_budget = priced_budget()
+    version = admit(host, TWO_CALLS, run_budget, "chat.js")
+
+    paused = host.run(version, QUESTION, run_budget)
+    assert paused.status == ng.ProgramTerminalStatus.Interrupted, describe(paused)
+    assert paused.usage.model_tokens == 24
+    assert paused.remaining_budget.model_tokens == 1_000_000 - 24
+
+    done = host.resume(paused.run_id, "And of Italy?").wait()
+
+    assert done.status == ng.ProgramTerminalStatus.Completed, describe(done)
+    assert peer.request_count() == 2
+    # The resumed attempt is charged for its own call only: the first call was
+    # settled by the attempt that made it.
+    assert done.usage.model_tokens == 24, describe(done)
+    assert done.remaining_budget.model_tokens == 1_000_000 - 2 * 24
+    assert done.usage.monetary_microunits == 1235
+    assert done.remaining_budget.monetary_microunits == 1_000_000 - 2 * 1235
+
+
+# ---------------------------------------------------------------------------
 # A join member refused for money is the join's failure (#379)
 # ---------------------------------------------------------------------------
 

@@ -323,7 +323,7 @@ SQLiteProgramProviderCallJournal::Impl::AccountedSink& accounted_sink(
 }
 void hydrate_scope(SQLiteProgramProviderCallJournal::Impl& impl,
                    std::string_view owner, std::string_view scope,
-                   const graph::ProviderCallIdentity& identity,
+                   const graph::ProviderCallIdentity& identity, std::uint64_t attempt,
                    std::string_view current_id, const Stored* current,
                    sp::runtime::Result& current_result) {
     if (!identity.usage) {
@@ -370,6 +370,11 @@ void hydrate_scope(SQLiteProgramProviderCallJournal::Impl& impl,
         // The durable journal, not editable report JSON or the attempt number,
         // is authority. Restore each owner/effect/prepared digest once per sink.
         if (!identity.usage->remember_provider_effect(key)) continue;
+        // A claim journaled by an earlier Program attempt was settled into the
+        // run's remaining budget by that attempt's result, and this attempt's
+        // grant already excludes it. Recognise it, never charge it again
+        // (#378). Claims this attempt journaled before a restart are charged.
+        if (row_attempt(*stored) != attempt) continue;
         const auto* completion = restored ? std::get_if<sp::Completion>(restored.get()) : nullptr;
         const bool charged = completion && !completion->attempt.prior_usage_unknown &&
             completion->attempt.transport_internal_resends == 0 &&
@@ -506,7 +511,7 @@ private:
                     existing->family != admitted.family || existing->mode != admitted.mode))
                 throw std::runtime_error("Program provider journal logical call binding conflict");
             sp::runtime::Result restored;
-            hydrate_scope(*impl, owner, admitted.scope, identity, id,
+            hydrate_scope(*impl, owner, admitted.scope, identity, attempt, id,
                           existing ? &*existing : nullptr, restored);
             hydrate_monetary_scope(impl->db, owner, admitted.scope, impl->archive, monetary);
             if (existing) {

@@ -417,11 +417,18 @@ TEST(ProgramProviderJournal, CrashWindowAfterMarkerBeforeOutcomeDoesNotRedispatc
         EXPECT_EQ(journal.inspect(call.owner, call.id())->committed_amount, 2U);
     }
     Journal reopened(db.path);
-    call.attempt = 2;
+    // Recovery restarts the same attempt: its unconfirmed claim stays charged.
     usage = std::make_shared<UsageAccumulator>();
     EXPECT_THROW(invoke_scoped(reopened), std::runtime_error);
     EXPECT_EQ(calls->load(), 1U);
     EXPECT_EQ(usage->total_tokens_wide(), 2U);
+    // A later attempt never redispatches it either, and does not charge it
+    // again: the attempt that made the claim settled it (#378).
+    call.attempt = 2;
+    usage = std::make_shared<UsageAccumulator>();
+    EXPECT_THROW(invoke_scoped(reopened), std::runtime_error);
+    EXPECT_EQ(calls->load(), 1U);
+    EXPECT_EQ(usage->total_tokens_wide(), 0U);
 }
 
 TEST(ProgramProviderJournal, ConcurrentRunsAndSecondModelTurnAreDistinctSlots) {
@@ -1204,7 +1211,7 @@ TEST(ProgramProviderJournal, ReopenedUnknownEffectRetainsReservationWithoutInven
     EXPECT_FALSE(held.reports.input_total);
     EXPECT_FALSE(held.reports.output_total);
     EXPECT_EQ(held.provider_effects.size(), 1U);
-    call.attempt = 2;
+    // Recovery restarts the same attempt, which keeps its reservation.
     auto resumed = std::make_shared<UsageAccumulator>();
     {
         Journal reopened(db.path);
@@ -1220,6 +1227,20 @@ TEST(ProgramProviderJournal, ReopenedUnknownEffectRetainsReservationWithoutInven
         EXPECT_THROW(invoke_bounded(reopened, resumed), std::runtime_error);
         EXPECT_EQ(resumed->authority_snapshot().reserved, 2U);
         EXPECT_EQ(resumed->authority_snapshot().provider_effects, held.provider_effects);
+        EXPECT_EQ(calls->load(), 1U);
+    }
+    // A later attempt recognises the effect without reserving it again: the
+    // attempt that made it settled its reservation into the run (#378).
+    call.attempt = 2;
+    auto advanced = std::make_shared<UsageAccumulator>();
+    {
+        Journal reopened(db.path);
+        EXPECT_THROW(invoke_bounded(reopened, advanced), std::runtime_error);
+        const auto recognised = advanced->authority_snapshot();
+        EXPECT_EQ(recognised.charged, 0U);
+        EXPECT_EQ(recognised.reserved, 0U);
+        EXPECT_EQ(recognised.provider_effects, held.provider_effects);
+        EXPECT_FALSE(recognised.has_report);
         EXPECT_EQ(calls->load(), 1U);
     }
 }
@@ -1283,9 +1304,9 @@ TEST(ProgramProviderJournal, ReopenedCheckpointPrefixHydratesNonrenewableClaimsE
         EXPECT_TRUE(authority.has_report);
         EXPECT_EQ(authority.reports.stage, sp::UsageStage::Partial);
     }
+    // A restart of the same attempt resumes from its checkpoint.
     auto resumed_usage = std::make_shared<UsageAccumulator>();
     Call next = first;
-    next.attempt = 2;
     next.task = "s3:reason";
     Call exhausted = next;
     exhausted.task = "s4:reason";
@@ -1332,7 +1353,6 @@ TEST(ProgramProviderJournal, ReopenedCheckpointPrefixHydratesNonrenewableClaimsE
     }
     {
         Journal reopened_again(db.path);
-        exhausted.attempt = 3;
         const auto denied = invoke_bounded(reopened_again, exhausted, resumed_usage);
         ASSERT_TRUE(denied);
         ASSERT_TRUE(std::holds_alternative<sp::Failure>(*denied));
@@ -1340,6 +1360,23 @@ TEST(ProgramProviderJournal, ReopenedCheckpointPrefixHydratesNonrenewableClaimsE
             << "the same live sink must not charge hydrated receipts again";
         EXPECT_EQ(calls->load(), 3U);
         EXPECT_FALSE(reopened_again.inspect(exhausted.owner, exhausted.id()));
+    }
+    {
+        // A later attempt recognises every journaled effect but charges none
+        // of them again: the attempt that made them settled them into the
+        // run's remaining budget, which is all a later attempt is granted
+        // (#378). It is charged for its own new call only.
+        Journal advanced(db.path);
+        auto advanced_usage = std::make_shared<UsageAccumulator>();
+        Call later = first;
+        later.attempt = 2;
+        later.task = "s5:reason";
+        const auto later_result = invoke_bounded(advanced, later, advanced_usage);
+        ASSERT_TRUE(later_result);
+        EXPECT_TRUE(std::holds_alternative<sp::Completion>(*later_result));
+        EXPECT_EQ(calls->load(), 4U);
+        EXPECT_EQ(advanced_usage->total_tokens_wide(), 2U) << "only the call attempt 2 made";
+        EXPECT_EQ(advanced_usage->authority_snapshot().provider_effects.size(), 4U);
     }
 }
 

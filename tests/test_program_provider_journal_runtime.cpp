@@ -711,6 +711,69 @@ TEST(ProgramProviderJournalRuntime, AdvancedAttemptReusesCompletedSlotWithoutTra
     EXPECT_EQ(reopened.journal().inspect(owner, after[0].id)->original_attempt, "1");
 }
 
+TEST(ProgramProviderJournalRuntime, ResumedAttemptNeverChargesTheTokensOfAReplayedCallAgain) {
+    // #378: the resumed attempt replays attempt 1's journaled call. Attempt 1
+    // settled its tokens into the run's remaining budget, which is all the
+    // resumed attempt is granted, so the replay charges nothing again.
+    TempDir files("replay-tokens");
+    auto shared = std::make_shared<Shared>();
+    shared->interrupt_after_call = true;
+    const std::string owner = "tenant:replay-tokens";
+    const std::string run = "replay-tokens-run";
+    Wire wire(files, shared);
+    const auto version = wire.admit(owner, Topology::Approval);
+    const auto interrupted =
+        wire.runtime().run(owner, version, wire.invocation(run, "", Topology::Approval));
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted) << failure_text(interrupted);
+    const auto journaled = rows(files.provider_db());
+    ASSERT_EQ(journaled.size(), 1U);
+    const auto charged = wire.journal().inspect(owner, journaled[0].id)->committed_amount;
+    ASSERT_GT(charged, 0U);
+    EXPECT_EQ(interrupted.usage().model_tokens, charged);
+    EXPECT_EQ(interrupted.remaining_budget().model_tokens, wire.budget().model_tokens - charged);
+
+    const auto resumed =
+        wire.runtime().resume(owner, run, resume_after(interrupted, "trace-replay-tokens")).wait();
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed) << failure_text(resumed);
+    EXPECT_EQ(shared->transport.load(), 1) << "the journaled reply was replayed";
+    EXPECT_EQ(resumed.usage().model_tokens, 0U) << "attempt 1 already paid for the replayed call";
+    EXPECT_EQ(resumed.remaining_budget().model_tokens,
+              interrupted.remaining_budget().model_tokens);
+}
+
+TEST(ProgramProviderJournalRuntime, ResumedAttemptChargesOnlyItsOwnNewCall) {
+    // #378: attempt 2 makes a new call in the scope where attempt 1 journaled
+    // one. Hydration recognises attempt 1's claim without charging it again.
+    TempDir files("react-tokens");
+    auto shared = std::make_shared<Shared>();
+    shared->script = Script::React;
+    const std::string owner = "tenant:react-tokens";
+    Wire wire(files, shared);
+    const auto version = wire.admit(owner, Topology::ReactPausedBeforeTools);
+    const auto paused = wire.runtime().run(
+        owner, version,
+        wire.invocation("react-tokens-run", "question", Topology::ReactPausedBeforeTools));
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_text(paused);
+    const auto resumed = wire.runtime().resume(owner, "react-tokens-run",
+        resume_after(paused, "trace-react-tokens", json(nullptr))).wait();
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed) << failure_text(resumed);
+    EXPECT_EQ(shared->transport.load(), 2);
+
+    const auto all = rows(files.provider_db());
+    ASSERT_EQ(all.size(), 2U);
+    ASSERT_EQ(all[0].original_attempt, "1");
+    ASSERT_EQ(all[1].original_attempt, "2");
+    const auto first = wire.journal().inspect(owner, all[0].id)->committed_amount;
+    const auto second = wire.journal().inspect(owner, all[1].id)->committed_amount;
+    ASSERT_GT(first, 0U);
+    ASSERT_GT(second, 0U);
+    EXPECT_EQ(paused.usage().model_tokens, first);
+    EXPECT_EQ(resumed.usage().model_tokens, second) << "only the call attempt 2 made";
+    EXPECT_EQ(resumed.remaining_budget().model_tokens,
+              wire.budget().model_tokens - first - second)
+        << "each call is charged once per run";
+}
+
 // (c) ---------------------------------------------------------------------
 
 TEST(ProgramProviderJournalRuntime, MarkerWriteFailureDispatchesNothing) {
