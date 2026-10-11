@@ -507,3 +507,165 @@ TEST(Validator, ValidateLocalReportsEveryRegistryMissWithoutThrowing) {
     EXPECT_EQ(e12[2]->witness["name"].get<std::string>(), "route_channel");
     EXPECT_TRUE(report.has_errors());
 }
+// ---- Issue #358: validate the routes the scheduler actually takes ---------
+
+namespace {
+
+void ensure_routing_types_registered() {
+    ensure_vtypes_registered();
+    // A type whose effects object declares neither reads nor writes: what the
+    // Python binding substitutes for an undeclared node type.
+    NodeFactory::instance().register_type(
+        "vfx_undeclared",
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<VNoopNode>(name);
+        },
+        json::parse(R"({"type":"object"})"), json::object());
+}
+
+ValidationReport validate_with(const json& def, ValidationOptions options = {}) {
+    ensure_routing_types_registered();
+    auto cg = GraphCompiler::compile(def, NodeContext{});
+    return GraphValidator::validate(cg, GraphRegistry::global(), options);
+}
+
+// a's static edge to b is shadowed by a's conditional edge, so b is reachable
+// only through an edge that never fires.
+json shadowed_edge_def(int schema_version) {
+    json def = {
+        {"nodes", {{"a", {{"type", "vnoop"}}}, {"b", {{"type", "vnoop"}}}, {"c", {{"type", "vnoop"}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "a"}},
+                               {{"from", "a"}, {"to", "b"}},
+                               {{"from", "b"}, {"to", "__end__"}},
+                               {{"from", "c"}, {"to", "__end__"}}})},
+        {"conditional_edges",
+         json::array({{{"from", "a"}, {"condition", "vcond_binary"},
+                       {"routes", {{"yes", "c"}, {"no", "c"}}}}})}};
+    if (schema_version != 0) def["schema_version"] = schema_version;
+    return def;
+}
+
+}  // namespace
+
+TEST(Validator, E13_StaticEdgeShadowedByConditionalEdge) {
+    const auto strict = validate_with(shadowed_edge_def(1));
+    const auto e13    = by_code(strict, "E13");
+    ASSERT_EQ(e13.size(), 1u) << strict.summary();
+    EXPECT_EQ(e13[0]->severity, "error");
+    EXPECT_EQ(e13[0]->json_pointer, "/edges/1");
+    EXPECT_EQ(e13[0]->witness["to"], "b");
+    // b is reachable only through the edge that never fires.
+    ASSERT_EQ(by_code(strict, "E7").size(), 1u);
+    EXPECT_EQ(by_code(strict, "E7")[0]->witness["unreachable"], json::array({"b"}));
+
+    const auto legacy = validate_with(shadowed_edge_def(0));
+    ASSERT_EQ(by_code(legacy, "E13").size(), 1u);
+    EXPECT_EQ(by_code(legacy, "E13")[0]->severity, "warning");
+
+    const auto original = validate_with(shadowed_edge_def(1), {.original_rules = true});
+    EXPECT_TRUE(by_code(original, "E13").empty());
+    EXPECT_TRUE(by_code(original, "E7").empty()) << original.summary();
+}
+
+TEST(Validator, E14_SecondConditionalEdgeNeverRoutes) {
+    json def = {
+        {"schema_version", 1},
+        {"nodes", {{"a", {{"type", "vnoop"}}}, {"b", {{"type", "vnoop"}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "a"}},
+                               {{"from", "b"}, {"to", "__end__"}}})},
+        {"conditional_edges",
+         json::array({{{"from", "a"}, {"condition", "vcond_binary"},
+                       {"routes", {{"yes", "b"}, {"no", "b"}}}},
+                      {{"from", "a"}, {"condition", "vcond_binary"},
+                       {"routes", {{"yes", "__end__"}, {"no", "__end__"}}}}})}};
+    const auto report = validate_with(def);
+    const auto e14    = by_code(report, "E14");
+    ASSERT_EQ(e14.size(), 1u) << report.summary();
+    EXPECT_EQ(e14[0]->severity, "error");
+    EXPECT_EQ(e14[0]->json_pointer, "/conditional_edges/1");
+}
+
+TEST(Validator, E8_CountsOnlySignalsTheSchedulerSends) {
+    // a's static edge into the barrier never fires: a routes conditionally.
+    json def = {
+        {"nodes", {{"a", {{"type", "vnoop"}}}, {"b", {{"type", "vnoop"}}},
+                   {"x", {{"type", "vnoop"}}},
+                   {"j", {{"type", "vnoop"}, {"barrier", {{"wait_for", {"a", "b"}}}}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "a"}},
+                               {{"from", "__start__"}, {"to", "b"}},
+                               {{"from", "a"}, {"to", "j"}},
+                               {{"from", "b"}, {"to", "j"}},
+                               {{"from", "x"}, {"to", "__end__"}},
+                               {{"from", "j"}, {"to", "__end__"}}})},
+        {"conditional_edges",
+         json::array({{{"from", "a"}, {"condition", "vcond_binary"},
+                       {"routes", {{"yes", "x"}, {"no", "x"}}}}})}};
+    const auto current = validate_with(def);
+    ASSERT_EQ(by_code(current, "E8").size(), 1u) << current.summary();
+    EXPECT_EQ(by_code(current, "E8")[0]->witness["waits_for"], "a");
+    EXPECT_TRUE(by_code(validate_with(def, {.original_rules = true}), "E8").empty());
+}
+
+TEST(Validator, E15_BarrierMemberRouteBypassesTheJoin) {
+    auto def = [](const std::string& fail_target) {
+        return json{
+            {"nodes", {{"a", {{"type", "vnoop"}}}, {"b", {{"type", "vnoop"}}},
+                       {"c", {{"type", "vnoop"}}}, {"fix", {{"type", "vnoop"}}},
+                       {"d", {{"type", "vnoop"}, {"barrier", {{"wait_for", {"b", "c"}}}}}}}},
+            {"edges", json::array({{{"from", "__start__"}, {"to", "a"}},
+                                   {{"from", "a"}, {"to", "b"}},
+                                   {{"from", "a"}, {"to", "c"}},
+                                   {{"from", "c"}, {"to", "d"}},
+                                   {{"from", "fix"}, {"to", "d"}},
+                                   {{"from", "d"}, {"to", "__end__"}}})},
+            {"conditional_edges",
+             json::array({{{"from", "b"}, {"condition", "vcond_binary"},
+                           {"routes", {{"yes", "d"}, {"no", fail_target}}}}})}};
+    };
+    const auto bypass = validate_with(def("fix"));
+    const auto e15    = by_code(bypass, "E15");
+    ASSERT_EQ(e15.size(), 1u) << bypass.summary();
+    EXPECT_EQ(e15[0]->severity, "warning");
+    EXPECT_EQ(e15[0]->json_pointer, "/nodes/d/barrier");
+    EXPECT_EQ(e15[0]->witness["member"], "b");
+    EXPECT_EQ(e15[0]->witness["routes"], json({{"no", "fix"}}));
+    // Ending the run on the other route is an abort path, not a bypass.
+    EXPECT_TRUE(by_code(validate_with(def("__end__")), "E15").empty());
+    EXPECT_TRUE(by_code(validate_with(def("fix"), {.original_rules = true}), "E15").empty());
+}
+
+TEST(Validator, E6_EffectsWithNeitherReadsNorWritesCountAsUndeclared) {
+    json def = {
+        {"channels", {{"unused", {{"reducer", "overwrite"}}}}},
+        {"nodes", {{"w", {{"type", "vfx_writer"}}}, {"u", {{"type", "vfx_undeclared"}}},
+                   {"r", {{"type", "vfx_reader"}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "w"}},
+                               {{"from", "w"}, {"to", "u"}},
+                               {{"from", "u"}, {"to", "r"}},
+                               {{"from", "r"}, {"to", "__end__"}}})}};
+    def["channels"]["out"] = {{"reducer", "overwrite"}};
+    EXPECT_TRUE(by_code(validate_with(def), "E6").empty());
+    // The original rules count {} as "declares nothing", so they still warn.
+    EXPECT_EQ(by_code(validate_with(def, {.original_rules = true}), "E6").size(), 1u);
+}
+
+TEST(Validator, E16_CyclesFailOnlyWhenAcyclicIsRequired) {
+    json def = {
+        {"nodes", {{"a", {{"type", "vnoop"}}}, {"b", {{"type", "vnoop"}}}, {"c", {{"type", "vnoop"}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "a"}},
+                               {{"from", "a"}, {"to", "b"}},
+                               {{"from", "b"}, {"to", "a"}},
+                               {{"from", "b"}, {"to", "c"}},
+                               {{"from", "c"}, {"to", "__end__"}}})}};
+    EXPECT_TRUE(by_code(validate_with(def), "E16").empty());
+    const auto required = validate_with(def, {.require_acyclic = true});
+    const auto e16      = by_code(required, "E16");
+    ASSERT_EQ(e16.size(), 1u) << required.summary();
+    EXPECT_EQ(e16[0]->severity, "error");
+    EXPECT_EQ(e16[0]->witness["nodes"], json::array({"a", "b"}));
+
+    def["edges"] = json::array({{{"from", "__start__"}, {"to", "a"}},
+                                {{"from", "a"}, {"to", "b"}},
+                                {{"from", "b"}, {"to", "c"}}});
+    EXPECT_TRUE(by_code(validate_with(def, {.require_acyclic = true}), "E16").empty());
+}

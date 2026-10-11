@@ -17,7 +17,8 @@
       "E9:warning"
     ],
     "e10_empty_routes.json": [
-      "E10:error"
+      "E10:error",
+      "E13:error"
     ],
     "e10_closed_uncovered.json": [
       "E10:error"

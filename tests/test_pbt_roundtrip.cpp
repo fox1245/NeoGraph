@@ -107,9 +107,9 @@ GenGraph generate_topology(std::mt19937& rng, GenStats& stats) {
     }
 
     // Conditional edge: route_channel with full known-label coverage
-    // ("default" included — E10-clean). The source keeps its plain
-    // edges in the JSON; the scheduler ignores them (route preempts),
-    // which the reference model must mirror.
+    // ("default" included — E10-clean). The route preempts the source's
+    // plain edges, so a strict document may not keep them (E13): they are
+    // dropped below.
     json conditional_edges = json::array();
     if (chance(60)) {
         const auto& src = g.node_names[pick(g.node_names.size())];
@@ -153,7 +153,7 @@ GenGraph generate_topology(std::mt19937& rng, GenStats& stats) {
     def["nodes"]          = std::move(nodes);
     json earr             = json::array();
     for (const auto& [f, t] : edges)
-        earr.push_back(json{{"from", f}, {"to", t}});
+        if (!g.ce_nodes.count(f)) earr.push_back(json{{"from", f}, {"to", t}});
     def["edges"] = std::move(earr);
     if (!conditional_edges.empty()) def["conditional_edges"] = std::move(conditional_edges);
 

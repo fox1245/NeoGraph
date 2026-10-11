@@ -336,9 +336,9 @@ def test_compile_diagnostics_carry_call_sites_while_sealed_ones_do_not():
         )
     )
     returned = {d["code"]: d for d in bundle.compile_diagnostics}
-    assert returned["P_CORE_E6"]["span"]["line_begin"] == 3
     control = returned["P_JS_CONTROL_CHARACTER"]
     assert control["json_pointer"] == "/root/definition/nodes/work/pattern"
+    assert control["span"]["line_begin"] == 4
     sealed = {d["code"]: d for d in bundle.diagnostics}
     assert sealed["P_CORE_E6"]["span"] is None
     assert "P_JS_CONTROL_CHARACTER" not in sealed
@@ -347,8 +347,8 @@ def test_compile_diagnostics_carry_call_sites_while_sealed_ones_do_not():
     assert parsed.compile_diagnostics == bundle.diagnostics
 
 
-def _stall_host(owner):
-    _trace_host(owner)  # registers the trace node type
+def _stall_registry():
+    _trace_host("python-owner-stall-registry")  # registers the trace node type
     ng.ConditionRegistry.register_condition("python_program_fail", lambda _s: "fail")
     ng.ConditionRegistry.register_condition("python_program_pass", lambda _s: "pass")
     builder = ng.ProgramRegistryBuilder()
@@ -358,8 +358,12 @@ def _stall_host(owner):
     builder.add_registered_reducer("append", "1.0.0", _DIGEST_APPEND)
     builder.add_registered_condition("python_program_fail", "1.0.0", "sha256:" + "5" * 64)
     builder.add_registered_condition("python_program_pass", "1.0.0", "sha256:" + "6" * 64)
+    return builder.build()
+
+
+def _stall_host(owner, **options):
     return ng.LocalProgramHost(
-        builder.build(), owner, _ceiling(), "python-program-host/v1"
+        _stall_registry(), owner, _ceiling(), "python-program-host/v1", **options
     )
 
 
@@ -479,3 +483,68 @@ def test_reserved_node_names_and_missing_entry_fail_compilation():
     with pytest.raises(ng.ProgramCompileError) as raised:
         compiler.compile(no_entry)
     assert raised.value.diagnostics[0]["code"] == "P_JS_GRAPH_ENTRY"
+
+
+def _graph_source(body):
+    return ng.ProgramSource.from_javascript(
+        "python-routing.js",
+        'export function define() { return ng.graph("main")'
+        '.channel("trace", {reducer: "append", initial: []})'
+        '.node("A", {type: "python_program_trace_node"})'
+        '.node("B", {type: "python_program_trace_node"})'
+        '.node("D", {type: "python_program_trace_node"})'
+        '.node("X", {type: "python_program_trace_node"})' + body + "; }",
+    )
+
+
+def _codes(diagnostics):
+    return [d["code"] for d in diagnostics]
+
+
+def test_routing_lints_are_returned_but_the_seal_keeps_its_original_rules():
+    bundle = ng.ProgramCompiler(_stall_registry()).compile(
+        _barrier_source("python_program_fail", "FIX"))
+    returned = {d["code"]: d for d in bundle.compile_diagnostics}
+    bypass = returned["P_CORE_E15"]
+    assert bypass["json_pointer"] == "/root/definition/nodes/D/barrier"
+    assert bypass["witness"]["routes"] == {"fail": "FIX"}
+    # Python node types declare no effects, so E6 cannot tell a channel is unused.
+    assert "P_CORE_E6" not in returned
+    sealed = _codes(bundle.diagnostics)
+    assert "P_CORE_E15" not in sealed
+    assert "P_CORE_E6" in sealed
+
+
+def test_static_edge_shadowed_by_a_conditional_edge_fails_compilation():
+    source = _graph_source(
+        '.entry("A").edge("A", "B").edge("B", "D")'
+        '.conditionalEdge("B", "python_program_pass", {pass: "D", fail: "X"})'
+        '.edge("X", "D").exit("D")')
+    with pytest.raises(ng.ProgramCompileError) as raised:
+        ng.ProgramCompiler(_stall_registry()).compile(source)
+    shadowed = [d for d in raised.value.diagnostics if d["code"] == "P_CORE_E13"]
+    assert shadowed[0]["json_pointer"] == "/root/definition/edges/2"
+
+
+def test_second_conditional_edge_from_a_node_fails_compilation():
+    source = _graph_source(
+        '.entry("A").edge("A", "B")'
+        '.conditionalEdge("B", "python_program_pass", {pass: "D", fail: "X"})'
+        '.conditionalEdge("B", "python_program_fail", {pass: "D", fail: "X"})'
+        '.edge("X", "D").exit("D")')
+    with pytest.raises(ng.ProgramCompileError) as raised:
+        ng.ProgramCompiler(_stall_registry()).compile(source)
+    assert "P_CORE_E14" in _codes(raised.value.diagnostics)
+
+
+def test_require_acyclic_is_an_opt_in_compile_option():
+    cyclic = _graph_source('.entry("A").edge("A", "B").edge("B", "A").edge("B", "D").exit("D")'
+                           '.edge("X", "D")')
+    ng.ProgramCompiler(_stall_registry()).compile(cyclic)  # loops stay valid by default
+    with pytest.raises(ng.ProgramCompileError) as raised:
+        ng.ProgramCompiler(_stall_registry(), require_acyclic=True).compile(cyclic)
+    cycle = [d for d in raised.value.diagnostics if d["code"] == "P_CORE_E16"][0]
+    assert cycle["witness"]["nodes"] == ["A", "B"]
+    host = _stall_host("python-owner-acyclic", require_acyclic=True)
+    with pytest.raises(ng.ProgramCompileError):
+        host.compile(cyclic, _budget())

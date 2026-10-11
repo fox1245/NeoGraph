@@ -1186,6 +1186,56 @@ TEST(ProgramCompilerTest, JavaScriptRejectsAGraphWithoutAnEntry) {
     }
 }
 
+TEST(ProgramCompilerTest, JavaScriptShadowedStaticEdgeFailsAtItsCall) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    try {
+        (void)compiler.compile(ProgramSource::from_javascript(
+            "shadowed.js",
+            "export function define() {\n"
+            "  const graph = ng.graph(\"main\");\n"
+            "  graph.channel(\"value\", {reducer: \"local-reducer\", initial: 0});\n"
+            "  graph.node(\"work\", {type: \"local-node\"}).node(\"next\", {type: \"local-node\"});\n"
+            "  graph.entry(\"work\");\n"
+            "  graph.edge(\"work\", \"next\");\n"
+            "  graph.conditionalEdge(\"work\", \"local-condition\", {done: \"next\"});\n"
+            "  graph.exit(\"next\");\n"
+            "  return graph;\n"
+            "}\n"));
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        const auto shadowed = find_diagnostic(error.diagnostics(), "P_CORE_E13");
+        ASSERT_TRUE(shadowed.has_value());
+        EXPECT_EQ(shadowed->primary.json_pointer, "/root/definition/edges/1");
+        ASSERT_TRUE(shadowed->primary.span.has_value());
+        EXPECT_EQ(shadowed->primary.span->line_begin, 6U);
+    }
+}
+
+TEST(ProgramCompilerTest, RequireAcyclicRejectsCyclicGraphs) {
+    const auto source = ProgramSource::from_javascript(
+        "cycle.js",
+        "export function define() {\n"
+        "  return ng.graph(\"main\")\n"
+        "    .channel(\"value\", {reducer: \"local-reducer\", initial: 0})\n"
+        "    .node(\"work\", {type: \"local-node\"}).node(\"next\", {type: \"local-node\"})\n"
+        "    .entry(\"work\").edge(\"work\", \"next\").edge(\"next\", \"work\").exit(\"next\");\n"
+        "}\n");
+    ProgramCompiler loops(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    EXPECT_NO_THROW((void)loops.compile(source));
+
+    ProgramCompilerConfig config{"program-compiler-test/javascript/v1"};
+    config.require_acyclic = true;
+    ProgramCompiler dag(complete_snapshot(), std::move(config));
+    try {
+        (void)dag.compile(source);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        const auto cycle = find_diagnostic(error.diagnostics(), "P_CORE_E16");
+        ASSERT_TRUE(cycle.has_value());
+        EXPECT_EQ(cycle->witness["nodes"], json::array({"next", "work"}));
+    }
+}
+
 TEST(ProgramCompilerTest, JavaScriptSealedModuleClosureExecutesAtCompileTime) {
     const std::string leaf_source = R"JS(
         export const nodeType = "local-node";

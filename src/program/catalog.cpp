@@ -1570,6 +1570,9 @@ ProgramVersion ProgramCatalog::materialize(
                 detail::RegistrySnapshotAccess::runtime_registry(impl_->registry);
             graph::EngineConfig config;
             config.worker_count = impl_->worker_count;
+            // The compiler already validated this program; judge the sealed
+            // definition by the rules it was sealed under.
+            config.validation.original_rules = true;
             graph::EngineResources resources;
             resources.registry = runtime_registry;
             // The compiled graph already retains the exact bound ToolSet.

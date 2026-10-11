@@ -63,6 +63,12 @@ struct ProgramCompilerConfig {
     std::string javascript_profile = std::string(ProgramSource::JAVASCRIPT_PROFILE);
     std::uint32_t javascript_profile_version = ProgramSource::JAVASCRIPT_PROFILE_VERSION;
     std::uint32_t ng_api_version            = ProgramSource::JAVASCRIPT_NG_API_VERSION;
+    /**
+     * Reject any cycle in the routed Core graph (P_CORE_E16), for hosts that
+     * need a DAG such as plans and checklists. Loops are valid otherwise; an
+     * accepted program compiles to the same bundle either way.
+     */
+    bool require_acyclic = false;
 };
 
 class NEOGRAPH_PROGRAM_API ProgramCompileError final : public std::runtime_error {

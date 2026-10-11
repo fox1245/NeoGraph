@@ -27,6 +27,7 @@
 #include <neograph/graph/state.h>
 #include <neograph/graph/store.h>
 #include <neograph/graph/types.h>
+#include <neograph/graph/validator.h>
 #include <neograph/tool_dispatch.h>   // ToolGate (issue #89)
 #include <neograph/tool_set.h>
 #include <neograph/provider.h>
@@ -106,6 +107,11 @@ struct EngineConfig {
 
     /// Fan-out worker count. One preserves the historical no-pool fast path.
     std::size_t worker_count = 1;
+
+    /// Rules build() and link() validate the topology with. Program admission
+    /// links with ValidationOptions::original_rules, the rules its bundles were
+    /// sealed under.
+    ValidationOptions validation;
 
     /// Pure, context-independent nodes whose results may be reused across
     /// executions. This is an explicit CacheScope::Reusable opt-in; use the

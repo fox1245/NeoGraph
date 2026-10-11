@@ -323,6 +323,13 @@ graph::ValidationReport detail::RegistrySnapshotAccess::validate_local(
     return graph::GraphValidator::validate_local(topology, snapshot.impl_->registry);
 }
 
+graph::ValidationReport detail::RegistrySnapshotAccess::validate_local(
+    const RegistrySnapshot&         snapshot,
+    const graph::TopologySpec&      topology,
+    const graph::ValidationOptions& options) {
+    return graph::GraphValidator::validate_local(topology, snapshot.impl_->registry, options);
+}
+
 graph::CompiledGraph detail::RegistrySnapshotAccess::link_local(const RegistrySnapshot&   snapshot,
                                                                 graph::TopologySpec       topology,
                                                                 const graph::NodeContext& context) {

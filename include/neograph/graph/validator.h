@@ -34,7 +34,7 @@ class GraphRegistry;
 /// One static-analysis finding, with a machine-readable witness
 /// (counterexample) for tooling to highlight.
 struct Diagnostic {
-    std::string code;          ///< "E3".."E12" (topology validation catalog)
+    std::string code;          ///< "E3".."E16" (topology validation catalog)
     std::string severity;      ///< "error" | "warning"
     std::string path;          ///< Legacy JSON-ish display path
     std::string message;       ///< human-readable, self-contained
@@ -75,6 +75,24 @@ private:
     ValidationReport report_;
 };
 
+/**
+ * @brief Rule selection for GraphValidator. Defaults apply the current rules.
+ */
+struct ValidationOptions {
+    /**
+     * Apply only the rules Program bundles have sealed since bundle format v1.
+     * E7/E8/E11 then reason over every declared edge and route, an effects
+     * object counts as declared even when it lists neither reads nor writes,
+     * and E13-E15 are not reported. Program compilation seals warnings from
+     * this rule set so a newer compiler never changes a bundle id; Program
+     * admission links with it so sealed bundles keep materializing.
+     */
+    bool original_rules = false;
+    /// Report every cycle in the routed graph as an E16 error, for hosts that
+    /// need a DAG (plans, checklists). Loops are otherwise valid.
+    bool require_acyclic = false;
+};
+
 class NEOGRAPH_API GraphValidator {
 public:
     /// @brief Validate declarative topology before runtime node creation.
@@ -86,6 +104,16 @@ public:
     /// @brief Validate topology references without process-global fallback.
     static ValidationReport validate_local(const TopologySpec&  topology,
                                            const GraphRegistry& registry);
+
+    /// @brief Validate with explicit rule selection.
+    static ValidationReport validate(const TopologySpec&      topology,
+                                     const GraphRegistry&     registry,
+                                     const ValidationOptions& options);
+
+    /// @brief Local-registry validation with explicit rule selection.
+    static ValidationReport validate_local(const TopologySpec&      topology,
+                                           const GraphRegistry&     registry,
+                                           const ValidationOptions& options);
 
     /**
      * @brief Validate and wrap a topology, throwing when any error is found.
@@ -150,6 +178,11 @@ public:
 
     /// @brief Validate a compiled graph without process-global fallback.
     static ValidationReport validate_local(const CompiledGraph& cg, const GraphRegistry& registry);
+
+    /// @brief Validate a compiled graph with explicit rule selection.
+    static ValidationReport validate(const CompiledGraph&     cg,
+                                     const GraphRegistry&     registry,
+                                     const ValidationOptions& options);
 };
 
 }  // namespace neograph::graph

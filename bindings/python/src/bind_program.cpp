@@ -244,6 +244,14 @@ PolicySnapshot local_policy(const RegistrySnapshot& registry,
     return std::move(builder).build();
 }
 
+ProgramCompilerConfig compiler_config(std::string             compiler_build_id,
+                                      JavaScriptCompileLimits javascript_limits,
+                                      bool                    require_acyclic) {
+    ProgramCompilerConfig config{std::move(compiler_build_id), javascript_limits};
+    config.require_acyclic = require_acyclic;
+    return config;
+}
+
 class LocalProgramHost {
 public:
     LocalProgramHost(RegistrySnapshot registry,
@@ -252,14 +260,15 @@ public:
                      std::string compiler_build_id,
                      std::size_t scheduler_threads,
                      std::shared_ptr<sp::NativeArchive> native_history_archive,
-                     JavaScriptCompileLimits javascript_limits)
+                     JavaScriptCompileLimits javascript_limits,
+                     bool require_acyclic)
         : registry_(std::move(registry)),
           owner_scope_(std::move(owner_scope)),
           compiler_build_id_(std::move(compiler_build_id)),
           profile_(local_profile(registry_)),
           policy_(local_policy(registry_, profile_, owner_scope_, budget_ceiling)),
           compiler_(std::make_shared<ProgramCompiler>(
-              registry_, ProgramCompilerConfig{compiler_build_id_, javascript_limits})),
+              registry_, compiler_config(compiler_build_id_, javascript_limits, require_acyclic))),
           store_(std::make_shared<InMemoryProgramStore>()),
           catalog_(std::make_shared<ProgramCatalog>(CatalogConfig{
               store_, registry_, std::make_shared<EngineGenerationCache>(), compiler_build_id_})),
@@ -548,12 +557,14 @@ void init_program(py::module_& m) {
 
     py::class_<ProgramCompiler>(m, "ProgramCompiler")
         .def(py::init([](RegistrySnapshot registry, std::string compiler_build_id,
-                         JavaScriptCompileLimits javascript_limits) {
+                         JavaScriptCompileLimits javascript_limits, bool require_acyclic) {
             return std::make_unique<ProgramCompiler>(
                 std::move(registry),
-                ProgramCompilerConfig{std::move(compiler_build_id), javascript_limits});
+                compiler_config(std::move(compiler_build_id), javascript_limits,
+                                require_acyclic));
         }), py::arg("registry"), py::arg("compiler_build_id") = "neograph-python-program/v1",
-            py::arg("javascript_limits") = JavaScriptCompileLimits{})
+            py::arg("javascript_limits") = JavaScriptCompileLimits{},
+            py::arg("require_acyclic") = false)
         .def("compile", [](const ProgramCompiler& self, const ProgramSource& source,
                             py::object budget) {
             try {
@@ -663,12 +674,13 @@ void init_program(py::module_& m) {
         "Owner-scoped in-memory Program compiler, Catalog, and durable runtime. "
         "It uses the same C++ ProgramRuntime as native callers.")
         .def(py::init<RegistrySnapshot, std::string, RunBudget, std::string, std::size_t,
-                      std::shared_ptr<sp::NativeArchive>, JavaScriptCompileLimits>(),
+                      std::shared_ptr<sp::NativeArchive>, JavaScriptCompileLimits, bool>(),
              py::arg("registry"), py::arg("owner_scope"), py::arg("budget_ceiling"),
              py::arg("compiler_build_id") = "neograph-python-program/v1",
              py::arg("scheduler_threads") = 1,
              py::arg("native_history_archive") = nullptr,
-             py::arg("javascript_limits") = JavaScriptCompileLimits{})
+             py::arg("javascript_limits") = JavaScriptCompileLimits{},
+             py::arg("require_acyclic") = false)
         .def_property_readonly("owner_scope", &LocalProgramHost::owner_scope)
         .def("compile", &LocalProgramHost::compile)
         .def("admit", &LocalProgramHost::admit)

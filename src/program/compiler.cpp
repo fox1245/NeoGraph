@@ -184,7 +184,8 @@ struct PendingDiagnostic {
     std::string      canonical_witness;
     // The coordinate a successful bundle seals: no builder call site.
     SourceCoordinate sealed_primary;
-    bool             sealed = true;
+    bool             sealed   = true;
+    bool             returned = true;
 };
 
 struct ReleasedWarnings {
@@ -238,6 +239,18 @@ public:
         diagnostics_.back().sealed = false;
     }
 
+    // A warning under the original validation rules: sealed, but not returned
+    // (the current rules report their own version of it).
+    void add_sealed_warning(CompilePhase phase,
+                            std::string  code,
+                            std::string  generated_pointer,
+                            std::string  message,
+                            json         witness) {
+        add(phase, std::move(code), DiagnosticSeverity::Warning, std::move(generated_pointer),
+            std::move(message), std::move(witness));
+        diagnostics_.back().returned = false;
+    }
+
     // Builder call sites locate returned diagnostics that no source-map entry
     // covers. They never reach the bundle source map or its sealed diagnostics.
     void add_call_sites(std::vector<SourceMapEntry> call_sites) {
@@ -255,7 +268,7 @@ public:
         std::vector<Diagnostic> result;
         result.reserve(diagnostics_.size());
         for (auto& pending : diagnostics_)
-            result.push_back(std::move(pending.diagnostic));
+            if (pending.returned) result.push_back(std::move(pending.diagnostic));
         throw ProgramCompileError(std::move(result));
     }
 
@@ -268,7 +281,7 @@ public:
                 sealed.primary = std::move(pending.sealed_primary);
                 result.sealed.push_back(std::move(sealed));
             }
-            result.returned.push_back(std::move(pending.diagnostic));
+            if (pending.returned) result.returned.push_back(std::move(pending.diagnostic));
         }
         diagnostics_.clear();
         return result;
@@ -1593,15 +1606,29 @@ void add_roundtrip_diagnostics(const graph::RoundTripReport& report,
     }
 }
 
-void add_validation_diagnostics(const graph::ValidationReport& report,
+// Errors and returned warnings follow the current rules. Sealed warnings come
+// from the original rules, so a newer compiler never changes a bundle id.
+void add_validation_diagnostics(const graph::ValidationReport& current,
+                                const graph::ValidationReport& original,
                                 const json&                    core_definition,
                                 DiagnosticAccumulator&         diagnostics) {
-    for (const auto& core : report.diagnostics) {
-        const auto severity =
-            core.severity == "warning" ? DiagnosticSeverity::Warning : DiagnosticSeverity::Error;
-        diagnostics.add(CompilePhase::CoreValidate, "P_CORE_" + core.code, severity,
-                        authored_core_pointer(core_definition, core.json_pointer), core.message,
-                        with_core_code(core.witness, core.code));
+    for (const auto& core : current.diagnostics) {
+        auto pointer = authored_core_pointer(core_definition, core.json_pointer);
+        if (core.severity == "warning") {
+            diagnostics.add_unsealed_warning(CompilePhase::CoreValidate, "P_CORE_" + core.code,
+                                             std::move(pointer), core.message,
+                                             with_core_code(core.witness, core.code));
+        } else {
+            diagnostics.add(CompilePhase::CoreValidate, "P_CORE_" + core.code,
+                            DiagnosticSeverity::Error, std::move(pointer), core.message,
+                            with_core_code(core.witness, core.code));
+        }
+    }
+    for (const auto& core : original.diagnostics) {
+        if (core.severity != "warning") continue;
+        diagnostics.add_sealed_warning(CompilePhase::CoreValidate, "P_CORE_" + core.code,
+                                       authored_core_pointer(core_definition, core.json_pointer),
+                                       core.message, with_core_code(core.witness, core.code));
     }
 }
 
@@ -2334,9 +2361,14 @@ struct ProgramCompiler::Impl {
                 parsed.core_definition, topology);
             add_roundtrip_diagnostics(roundtrip, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();
-            const auto validation =
-                detail::RegistrySnapshotAccess::validate_local(registry, topology);
-            add_validation_diagnostics(validation, parsed.core_definition, diagnostics);
+            graph::ValidationOptions current_rules;
+            current_rules.require_acyclic = config.require_acyclic;
+            graph::ValidationOptions original_rules;
+            original_rules.original_rules = true;
+            add_validation_diagnostics(
+                detail::RegistrySnapshotAccess::validate_local(registry, topology, current_rules),
+                detail::RegistrySnapshotAccess::validate_local(registry, topology, original_rules),
+                parsed.core_definition, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();
             auto closure = resolve_closure(registry, topology, parsed.core_definition, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();
@@ -2397,10 +2429,11 @@ struct ProgramCompiler::Impl {
             data.executable_registry_identities = std::move(closure.identities);
             data.declared_budget_requirements   = std::move(parsed.budgets);
             data.source_map                     = std::move(source_map);
-            // Sealed diagnostics keep their pre-call-site coordinates and omit
-            // authoring lints, so a bundle id depends only on the program. The
-            // returned copy carries JavaScript builder call sites and those lints;
-            // see ProgramBundle::compile_diagnostics().
+            // Sealed diagnostics keep their pre-call-site coordinates and the
+            // original validation rules, and omit authoring lints, so a bundle id
+            // depends only on the program. The returned copy carries JavaScript
+            // builder call sites, the current rules and those lints; see
+            // ProgramBundle::compile_diagnostics().
             auto warnings                       = diagnostics.release_warnings();
             data.diagnostics                    = std::move(warnings.sealed);
             return detail::ProgramBundleAccess::compiled(std::move(data),

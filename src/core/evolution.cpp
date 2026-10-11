@@ -81,6 +81,16 @@ MutationResult op_toggle_conditional_edge(const json& core, std::mt19937& rng) {
         !mutated["conditional_edges"].is_array())
         mutated["conditional_edges"] = json::array();
     mutated["conditional_edges"].push_back(std::move(ce));
+    // A node with a conditional edge routes only through it, so its static
+    // edges would never fire (E13 rejects them in strict cores): drop them.
+    if (mutated.contains("edges") && mutated["edges"].is_array()) {
+        json kept = json::array();
+        for (size_t i = 0; i < mutated["edges"].size(); ++i) {
+            json edge = mutated["edges"][i];
+            if (!(edge.contains("from") && edge["from"] == target)) kept.push_back(std::move(edge));
+        }
+        mutated["edges"] = std::move(kept);
+    }
 
     return {std::move(mutated),
             "toggle_ce: added conditional edge from " + target};

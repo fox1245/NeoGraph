@@ -243,7 +243,7 @@ std::unique_ptr<GraphEngine> GraphEngine::build(const json&     definition,
 
     // Static semantics operate on the declarative topology before factories
     // create runtime nodes. Legacy documents keep warning-only behavior.
-    report_validation(GraphValidator::validate(topology, registry),
+    report_validation(GraphValidator::validate(topology, registry, config.validation),
                       topology.schema_version);
 
     auto cg = GraphCompiler::link(std::move(topology), config.node_context, registry);
@@ -351,7 +351,8 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     // heuristic lint is suppressed to keep existing graphs quiet.
     if (validate) {
         const auto& registry = resources.registry ? *resources.registry : GraphRegistry::global();
-        report_validation(GraphValidator::validate(cg, registry), cg.schema_version);
+        report_validation(GraphValidator::validate(cg, registry, config.validation),
+                          cg.schema_version);
     }
 
     auto engine = std::unique_ptr<GraphEngine>(new GraphEngine());

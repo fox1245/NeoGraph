@@ -43,8 +43,8 @@ struct Ctx {
     const GraphRegistry&  registry;
     bool                  local_only = false;
     std::set<std::string> node_names;
-    // Static successor map: plain edges + every user-declared conditional
-    // route target.
+    // Successor map shared by E7/E8/E11: the routes the scheduler takes, or
+    // under the original rules every declared edge and route target.
     std::map<std::string, std::set<std::string>> succ;
     std::vector<Diagnostic>                      out;
 
@@ -59,7 +59,17 @@ struct Ctx {
                        std::move(witness), std::move(pointer)});
     }
 
+    bool original_rules = false;
+
     bool is_node(const std::string& n) const { return node_names.count(n) > 0; }
+
+    // The conditional edge that routes a source: the scheduler consults only
+    // the first one, and then never fires the source's static edges.
+    const ConditionalEdge* routing_edge(const std::string& source) const {
+        for (const auto& ce : cg.conditional_edges)
+            if (ce.from == source) return &ce;
+        return nullptr;
+    }
 
     std::string node_type(const std::string& n) const {
         auto it = cg.node_defs.find(n);
@@ -134,14 +144,32 @@ void check_references(Ctx& c) {
 // ---- successor map (shared by E7/E8/E11) --------------------------------
 
 void build_successors(Ctx& c) {
-    for (const auto& e : c.cg.edges)
-        c.succ[e.from].insert(e.to);
+    if (c.original_rules) {
+        for (const auto& e : c.cg.edges)
+            c.succ[e.from].insert(e.to);
+        for (const auto& ce : c.cg.conditional_edges) {
+            for (const auto& [key, target] : ce.routes) {
+                if (key == detail::kLegacyDefaultRoute) continue;
+                c.succ[ce.from].insert(target);
+            }
+        }
+        return;
+    }
+    // Route the way the scheduler does: a source with a conditional edge goes
+    // only where its first conditional edge sends it (a schema-v0 legacy
+    // default included); any other source fires every static edge. __start__
+    // is entered through static edges only.
+    std::set<std::string> routed;
     for (const auto& ce : c.cg.conditional_edges) {
+        if (ce.from == kStart || !routed.insert(ce.from).second) continue;
+        auto& successors = c.succ[ce.from];
         for (const auto& [key, target] : ce.routes) {
-            if (key == detail::kLegacyDefaultRoute) continue;
-            c.succ[ce.from].insert(target);
+            (void)key;
+            successors.insert(target);
         }
     }
+    for (const auto& e : c.cg.edges)
+        if (!routed.count(e.from)) c.succ[e.from].insert(e.to);
 }
 
 // ---- E7: reachability from __start__ -------------------------------------
@@ -247,6 +275,118 @@ void check_barriers(Ctx& c) {
     }
 }
 
+// ---- E13/E14: transitions the scheduler never takes (issue #358) ----------
+//
+// Errors for strict documents (schema_version >= 1); legacy documents warn.
+
+void check_shadowed_transitions(Ctx& c) {
+    const bool strict = c.cg.schema_version >= 1;
+    auto       report = [&](std::string code, std::string path, std::string pointer,
+                      std::string message, json witness) {
+        if (strict)
+            c.error(std::move(code), std::move(path), std::move(pointer), std::move(message),
+                    std::move(witness));
+        else
+            c.warn(std::move(code), std::move(path), std::move(pointer), std::move(message),
+                   std::move(witness));
+    };
+    size_t i = 0;
+    for (const auto& ce : c.cg.conditional_edges) {
+        const std::string path    = "conditional_edges[" + std::to_string(i) + "]";
+        const std::string pointer = "/conditional_edges/" + std::to_string(i++);
+        const auto*       routing = c.routing_edge(ce.from);
+        if (ce.from == kStart || routing == &ce) continue;
+        report("E14", path, pointer,
+               "'" + ce.from + "' already routes through condition '" + routing->condition +
+                   "'; only a node's first conditional edge routes, so this one never fires",
+               json{{"from", ce.from},
+                    {"condition", ce.condition},
+                    {"routing_condition", routing->condition}});
+    }
+    i = 0;
+    for (const auto& e : c.cg.edges) {
+        const std::string path    = "edges[" + std::to_string(i) + "]";
+        const std::string pointer = "/edges/" + std::to_string(i++);
+        const auto*       routing = e.from == kStart ? nullptr : c.routing_edge(e.from);
+        if (!routing) continue;
+        report("E13", path, pointer,
+               "edge '" + e.from + "' -> '" + e.to + "' never fires: '" + e.from +
+                   "' routes through its conditional edge (condition '" + routing->condition +
+                   "'), which replaces its static edges",
+               json{{"from", e.from}, {"to", e.to}, {"routing_condition", routing->condition}});
+    }
+}
+
+// ---- E15: barrier member that can route around its join (issue #357) -----
+
+void check_barrier_bypass(Ctx& c) {
+    for (const auto& [bnode, wait_for] : c.cg.barrier_specs) {
+        for (const auto& u : wait_for) {
+            const auto* routing = c.is_node(u) ? c.routing_edge(u) : nullptr;
+            if (!routing) continue;
+            json bypass  = json::object();
+            bool signals = false;
+            for (const auto& [key, target] : routing->routes) {
+                if (target == bnode) signals = true;
+                if (target == bnode || target == kEnd) continue;
+                bypass[key == detail::kLegacyDefaultRoute ? std::string(DEFAULT_ROUTE) : key] =
+                    target;
+            }
+            if (!signals || bypass.empty()) continue;  // no signal at all is E8
+            c.warn("E15", "nodes." + bnode + ".barrier",
+                   "/nodes/" + pointer_token(bnode) + "/barrier",
+                   "barrier '" + bnode + "' waits for '" + u + "', but route(s) " +
+                       bypass.dump() + " of '" + u + "' lead elsewhere; when one is taken '" +
+                       bnode + "' never fires and the run ends as barrier-stalled",
+                   json{{"barrier", bnode}, {"member", u}, {"routes", std::move(bypass)}});
+        }
+    }
+}
+
+// ---- E16: cycles, for hosts that require a DAG ------------------------------
+
+void check_acyclic(Ctx& c) {
+    std::map<std::string, std::set<std::string>> in, out;
+    for (const auto& n : c.node_names) {
+        in[n];
+        out[n];
+    }
+    for (const auto& [from, targets] : c.succ) {
+        if (!c.is_node(from)) continue;
+        for (const auto& to : targets) {
+            if (!c.is_node(to)) continue;
+            out[from].insert(to);
+            in[to].insert(from);
+        }
+    }
+    // Peel nodes with no remaining predecessor, then nodes with no remaining
+    // successor; whatever is left lies on or between cycles.
+    std::set<std::string> remaining = c.node_names;
+    for (const bool forward : {true, false}) {
+        auto& degree  = forward ? in : out;
+        auto& reverse = forward ? out : in;
+        std::vector<std::string> ready;
+        for (const auto& n : remaining) {
+            std::erase_if(degree[n], [&](const std::string& m) { return !remaining.count(m); });
+            if (degree[n].empty()) ready.push_back(n);
+        }
+        while (!ready.empty()) {
+            const auto n = ready.back();
+            ready.pop_back();
+            if (!remaining.erase(n)) continue;
+            for (const auto& m : reverse[n]) {
+                if (degree[m].erase(n) && degree[m].empty() && remaining.count(m))
+                    ready.push_back(m);
+            }
+        }
+    }
+    if (remaining.empty()) return;
+    c.error("E16", "$", "",
+            "graph has a cycle through " + string_set_to_array(remaining).dump() +
+                " but this compile requires an acyclic graph",
+            json{{"nodes", string_set_to_array(remaining)}});
+}
+
 // ---- E9: unsynchronized plain fan-in --------------------------------------
 
 void check_fan_in(Ctx& c) {
@@ -343,12 +483,18 @@ void check_effects(Ctx& c) {
     std::map<std::string, std::pair<std::set<std::string>, std::set<std::string>>>
                           node_rw;  // node -> (reads, writes)
     std::set<std::string> exported;
+    bool                  undeclared = false;
     for (const auto& n : c.node_names) {
         const json eff = c.local_only ? (c.registry.contains_type(c.node_type(n))
                                              ? c.registry.local_node_effects(c.node_type(n))
                                              : json())
                                       : c.registry.node_effects(c.node_type(n));
         if (eff.is_null() || !eff.is_object()) return;  // gate: skip family
+        // An effects object listing neither reads nor writes declares nothing
+        // (bindings substitute {} for an undeclared node type). E4/E5 remain
+        // per-node facts, but E6 can no longer prove a channel unused.
+        if (!c.original_rules && !eff.contains("reads") && !eff.contains("writes"))
+            undeclared = true;
         std::set<std::string> reads, writes;
         if (eff.contains("reads"))
             for (const auto& ch : eff["reads"])
@@ -400,7 +546,7 @@ void check_effects(Ctx& c) {
     }
 
     // E6: dead / write-only / initial-less read-only channels.
-    for (const auto& ch : declared) {
+    for (const auto& ch : undeclared ? std::set<std::string>{} : declared) {
         const bool r = readers.count(ch) && !readers[ch].empty();
         const bool w = writers.count(ch) && !writers[ch].empty();
         // Conditions read channels too (route_channel reads __route__)
@@ -515,9 +661,14 @@ ValidationReport GraphValidator::validate(const TopologySpec& topology) {
     return validate(topology, GraphRegistry::global());
 }
 
-ValidationReport GraphValidator::validate(const TopologySpec&  topology,
-                                          const GraphRegistry& registry) {
-    Ctx c{topology, registry, false, {}, {}, {}};
+namespace {
+
+std::vector<Diagnostic> run_checks(const TopologySpec&      topology,
+                                   const GraphRegistry&     registry,
+                                   bool                     local_only,
+                                   const ValidationOptions& options) {
+    Ctx c{topology, registry, local_only, {}, {}, {}};
+    c.original_rules = options.original_rules;
     for (const auto& [name, node_def] : topology.node_defs) {
         (void)node_def;
         c.node_names.insert(name);
@@ -529,30 +680,45 @@ ValidationReport GraphValidator::validate(const TopologySpec&  topology,
     check_reachability(c, reachable);
     check_termination(c, reachable);
     check_barriers(c);
+    if (!c.original_rules) {
+        check_shadowed_transitions(c);
+        check_barrier_bypass(c);
+    }
     check_fan_in(c);
     check_routes(c);
     check_effects(c);
+    if (options.require_acyclic) check_acyclic(c);
+    return std::move(c.out);
+}
 
-    return ValidationReport{std::move(c.out)};
+}  // namespace
+
+ValidationReport GraphValidator::validate(const TopologySpec&  topology,
+                                          const GraphRegistry& registry) {
+    return validate(topology, registry, ValidationOptions{});
+}
+
+ValidationReport GraphValidator::validate(const TopologySpec&      topology,
+                                          const GraphRegistry&     registry,
+                                          const ValidationOptions& options) {
+    return ValidationReport{run_checks(topology, registry, false, options)};
+}
+
+ValidationReport GraphValidator::validate(const CompiledGraph&     cg,
+                                          const GraphRegistry&     registry,
+                                          const ValidationOptions& options) {
+    return validate(cg.topology(), registry, options);
 }
 
 ValidationReport GraphValidator::validate_local(const TopologySpec&  topology,
                                                 const GraphRegistry& registry) {
-    Ctx c{topology, registry, true, {}, {}, {}};
-    for (const auto& [name, node_def] : topology.node_defs) {
-        (void)node_def;
-        c.node_names.insert(name);
-    }
-    check_references(c);
-    build_successors(c);
-    const auto reachable = reachable_from_start(c);
-    check_reachability(c, reachable);
-    check_termination(c, reachable);
-    check_barriers(c);
-    check_fan_in(c);
-    check_routes(c);
-    check_effects(c);
-    ValidationReport report{std::move(c.out)};
+    return validate_local(topology, registry, ValidationOptions{});
+}
+
+ValidationReport GraphValidator::validate_local(const TopologySpec&      topology,
+                                                const GraphRegistry&     registry,
+                                                const ValidationOptions& options) {
+    ValidationReport report{run_checks(topology, registry, true, options)};
     for (const auto& channel : topology.channel_defs) {
         if (!registry.contains_reducer(channel.reducer_name)) {
             report.diagnostics.push_back(
