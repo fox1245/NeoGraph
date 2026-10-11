@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=zh-CN source_sha256=591a0e3c95e94867174067a6ec417eab92f57dfe3ceb8af5cb4f844c92b127b1 -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=zh-CN source_sha256=ba8de002d040f5f18052d1e8d7971509fa764fcf24fb3859a39cf510c181c2c2 -->
 # Program 图功能
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -117,7 +117,7 @@ TEST 会尝试三次。如果仍然失败，运行并不会失败：TEST 被路�
 
 标志：`diagnostics.soundness_check`。`ProgramCompilerConfig::soundness_check`（Python：`ProgramCompiler(..., soundness_check=True)` 或 `LocalProgramHost(..., soundness_check=True)`）会探索根图的路由所允许的每一个运行，并返回它的发现。它默认关闭，并且与路由表一样从不被封存：无论开关与否，包都相同。使用 `GraphValidator` 的 C++ 调用方设置 `ValidationOptions::soundness_check`。
 
-检查按调度器的方式推进 super-step。状态包括就绪节点的集合、每个 join 持有的信号（含 `any_of` 槽位），以及每个带 `max_visits` 的节点的访问次数。conditional edge 可以走它的任意一条路由，带失败 edge 的节点可以改走该 edge，failure exit 会结束运行。每个发现都是一个警告，其 `witness.trace` 是展示该发现的最短运行，每个 super-step 一项：运行过的节点（`ready`）以及它们所走的路由（`routes`，失败 edge 为 `on_failure`）。
+检查按调度器的方式推进 super-step。状态包括就绪节点的集合、每个 join 持有的信号（含 `any_of` 槽位），以及每个带 `max_visits` 的节点的访问次数。与运行时一样，只有该节点的 failure edge 目标完成时，访问次数才会重置。conditional edge 可以走它的任意一条路由，带失败 edge 的节点可以改走该 edge，failure exit 会结束运行。每个发现都是一个警告，其 `witness.trace` 是展示该发现的最短运行，每个 super-step 一项：运行过的节点（`ready`）以及它们所走的路由（`routes`，失败 edge 为 `on_failure`）。
 
 | 代码 | 发现 |
 |---|---|

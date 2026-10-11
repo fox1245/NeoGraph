@@ -116,7 +116,7 @@ TEST is tried three times. If it still fails, the run does not fail: TEST routes
 
 Flag: `diagnostics.soundness_check`. `ProgramCompilerConfig::soundness_check` (Python: `ProgramCompiler(..., soundness_check=True)` or `LocalProgramHost(..., soundness_check=True)`) explores every run of the root graph that its routes allow and returns what it finds. It is off by default and, like the route table, never sealed: the bundle is the same either way. A C++ caller of `GraphValidator` sets `ValidationOptions::soundness_check`.
 
-The check takes super-steps the way the scheduler does. A state is the set of ready nodes, the signals each join holds (`any_of` slots included) and the visit count of each node with `max_visits`. A conditional edge may take any of its routes, a node with a failure edge may take that edge instead, and a failure exit ends the run. Each finding is a warning whose `witness.trace` is the shortest run that shows it, one entry per super-step: the nodes that ran (`ready`) and the routes they took (`routes`, with `on_failure` for a failure edge).
+The check takes super-steps the way the scheduler does. A state is the set of ready nodes, the signals each join holds (`any_of` slots included) and the visit count of each node with `max_visits`, which resets, as at run time, only when that node's failure-edge target completes. A conditional edge may take any of its routes, a node with a failure edge may take that edge instead, and a failure exit ends the run. Each finding is a warning whose `witness.trace` is the shortest run that shows it, one entry per super-step: the nodes that ran (`ready`) and the routes they took (`routes`, with `on_failure` for a failure edge).
 
 | Code | Finding |
 |---|---|

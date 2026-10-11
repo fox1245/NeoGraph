@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=ko source_sha256=591a0e3c95e94867174067a6ec417eab92f57dfe3ceb8af5cb4f844c92b127b1 -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=ko source_sha256=ba8de002d040f5f18052d1e8d7971509fa764fcf24fb3859a39cf510c181c2c2 -->
 # Program 그래프 기능
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -117,7 +117,7 @@ TEST는 세 번 시도됩니다. 그래도 실패하면 실행은 실패하지 �
 
 플래그: `diagnostics.soundness_check`. `ProgramCompilerConfig::soundness_check`(Python: `ProgramCompiler(..., soundness_check=True)` 또는 `LocalProgramHost(..., soundness_check=True)`)는 루트 그래프의 라우트가 허용하는 모든 실행을 탐색하고 찾은 것을 반환합니다. 기본값은 꺼짐이며, 라우트 표처럼 봉인되지 않으므로 어느 쪽이든 번들은 같습니다. `GraphValidator`를 쓰는 C++ 호출자는 `ValidationOptions::soundness_check`를 설정합니다.
 
-검사는 스케줄러와 같은 방식으로 super-step을 진행합니다. 상태는 실행 준비된 노드 집합, 각 join이 쥔 신호(`any_of` 슬롯 포함), 그리고 `max_visits`가 있는 노드별 방문 횟수입니다. conditional edge는 어느 라우트든 택할 수 있고, 실패 edge가 있는 노드는 대신 그 edge를 택할 수 있으며, failure exit는 실행을 끝냅니다. 발견 사항은 모두 경고이고, `witness.trace`는 이를 보여 주는 가장 짧은 실행으로 super-step마다 항목 하나씩입니다. 실행된 노드(`ready`)와 그 노드가 택한 라우트(`routes`, 실패 edge는 `on_failure`)가 들어 있습니다.
+검사는 스케줄러와 같은 방식으로 super-step을 진행합니다. 상태는 실행 준비된 노드 집합, 각 join이 쥔 신호(`any_of` 슬롯 포함), 그리고 `max_visits`가 있는 노드별 방문 횟수입니다. 방문 횟수는 실행 때와 같이 그 노드의 failure edge 대상이 완료될 때만 초기화됩니다. conditional edge는 어느 라우트든 택할 수 있고, 실패 edge가 있는 노드는 대신 그 edge를 택할 수 있으며, failure exit는 실행을 끝냅니다. 발견 사항은 모두 경고이고, `witness.trace`는 이를 보여 주는 가장 짧은 실행으로 super-step마다 항목 하나씩입니다. 실행된 노드(`ready`)와 그 노드가 택한 라우트(`routes`, 실패 edge는 `on_failure`)가 들어 있습니다.
 
 | 코드 | 발견 사항 |
 |---|---|

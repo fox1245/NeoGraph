@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=ja source_sha256=591a0e3c95e94867174067a6ec417eab92f57dfe3ceb8af5cb4f844c92b127b1 -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=ja source_sha256=ba8de002d040f5f18052d1e8d7971509fa764fcf24fb3859a39cf510c181c2c2 -->
 # Program グラフ機能
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -117,7 +117,7 @@ TEST は 3 回試行されます。それでも失敗すると、実行は失敗
 
 フラグ: `diagnostics.soundness_check`。`ProgramCompilerConfig::soundness_check`（Python: `ProgramCompiler(..., soundness_check=True)` または `LocalProgramHost(..., soundness_check=True)`）は、ルートグラフのルートが許すすべての実行を探索し、見つけたものを返します。既定ではオフで、ルート表と同じく封印されないため、どちらでもバンドルは同じです。`GraphValidator` を使う C++ の呼び出し側は `ValidationOptions::soundness_check` を設定します。
 
-チェックはスケジューラーと同じように super-step を進めます。状態は、実行準備のできたノードの集合、各 join が保持するシグナル（`any_of` スロットを含む）、そして `max_visits` を持つノードごとの訪問回数です。conditional edge はどのルートも取り得て、失敗 edge を持つノードは代わりにその edge を取り得て、failure exit は実行を終えます。検出結果はすべて警告で、`witness.trace` はそれを示す最短の実行を super-step ごとに 1 項目ずつ並べたものです。実行されたノード（`ready`）と、それらが取ったルート（`routes`、失敗 edge は `on_failure`）が入ります。
+チェックはスケジューラーと同じように super-step を進めます。状態は、実行準備のできたノードの集合、各 join が保持するシグナル（`any_of` スロットを含む）、そして `max_visits` を持つノードごとの訪問回数です。訪問回数は実行時と同じく、そのノードの failure edge の対象が完了したときだけリセットされます。conditional edge はどのルートも取り得て、失敗 edge を持つノードは代わりにその edge を取り得て、failure exit は実行を終えます。検出結果はすべて警告で、`witness.trace` はそれを示す最短の実行を super-step ごとに 1 項目ずつ並べたものです。実行されたノード（`ready`）と、それらが取ったルート（`routes`、失敗 edge は `on_failure`）が入ります。
 
 | コード | 検出結果 |
 |---|---|

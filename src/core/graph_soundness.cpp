@@ -462,7 +462,10 @@ private:
         std::vector<char> signalled(joins_.size(), 0);
         bool              explicit_end = false;
         bool              failure_exit = false;
-        std::vector<int>  ran;
+        // Nodes that completed: as in the runtime (#364), only a failure
+        // target that completes resets the counters of the nodes routed to
+        // it, not one that fails and takes its own failure edge.
+        std::vector<int>  completed;
         for (std::size_t k = 0; k < ready.size(); ++k) {
             const int   u      = ready[k];
             const auto& choice = options[k];
@@ -473,8 +476,8 @@ private:
                 continue;
             }
             const auto& node = nodes_[static_cast<std::size_t>(u)];
+            if (option.kind == Kind::Normal) completed.push_back(u);
             if (option.kind != Kind::VisitLimit) {
-                ran.push_back(u);
                 if (node.visit_slot >= 0) {
                     auto& visits = step.next.visits[static_cast<std::size_t>(node.visit_slot)];
                     visits       = static_cast<std::uint8_t>(std::min(visits + 1, node.max_visits));
@@ -495,7 +498,7 @@ private:
                 }
             }
         }
-        for (const auto u : ran)
+        for (const auto u : completed)
             for (const auto slot : nodes_[static_cast<std::size_t>(u)].resets)
                 step.next.visits[static_cast<std::size_t>(slot)] = 0;
         for (std::size_t j = 0; j < joins_.size(); ++j) {

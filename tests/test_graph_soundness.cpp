@@ -373,6 +373,24 @@ TEST(Soundness, AVisitLimitWithoutAFailureEdgeFailsTheRun) {
     EXPECT_NE(s1[0].message.find("fails at a visit limit"), std::string::npos) << s1[0].message;
 }
 
+TEST(Soundness, OnlyACompletedFailureTargetResetsTheVisitCounter) {
+    // T (max_visits 1) fails over to H; H fails back to T or completes into T.
+    // As in the runtime, the counter resets only when H completes: after H
+    // itself fails and routes, T is still at its limit and takes its failure
+    // edge without running. Three states: T fresh, H with T at its limit, and
+    // T at its limit. Resetting when H merely ran would never reach the last.
+    auto graph = definition(json{{"T", node()}, {"H", node()}},
+                            json::array({edge("__start__", "T"), edge("T", "__end__"), edge("H", "T")}));
+    graph["node_retry_policies"] = json{{"T", json{{"max_visits", 1}}}};
+    graph["failure_edges"]       = json::array({json{{"from", "T"}, {"to", "H"}}, json{{"from", "H"}, {"to", "T"}}});
+    const auto report            = check(graph);
+    EXPECT_EQ(report.status, SoundnessStatus::Checked);
+    EXPECT_EQ(report.states, 3U);
+    EXPECT_TRUE(report.outcomes.completed);
+    EXPECT_FALSE(report.outcomes.failed);
+    EXPECT_TRUE(report.outcomes.cyclic);
+}
+
 TEST(Soundness, DeclaredGotoOrSendLeavesARegionNotAnalyzable) {
     for (const auto* type : {"s.router", "s.sender"}) {
         const auto report = check(definition(
