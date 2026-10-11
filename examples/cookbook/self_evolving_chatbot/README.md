@@ -8,7 +8,9 @@ The existing browser and HTTP protocol are unchanged. Alice/Bob owner scopes,
 reviewed-template generation, role-specific prompts, effect/capability grants,
 exact checkpoint lineage and nonrenewable budgets remain host-owned.
 
-The retained `server_multi.cpp` live-provider path uses a 180-second timeout.
+The retained `server_multi.cpp` live-provider path allows 600 seconds per call, enough for an
+8,192-token answer at the slowest observed rate, and fails a connection that stays silent for
+30 seconds (OpenRouter sends headers at once and keepalive whitespace every few seconds).
 This does not change ProgramChat's `--provider-timeout-seconds` range/default
 or the shared provider factory default, and does not enable failure redispatch.
 

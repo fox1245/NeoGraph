@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=e7bb3e4608b1e5f3af734a49afa0976e6b65090989f96eda60028e0c60afc094 -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=72d9de3ebec44aa6eb7f92a3cabc4a08d177461e8869eaff2b0bd003b353c8d3 -->
 # 自进化聊天机器人
 
 ## 当前类型化 Program chat 契约
@@ -8,7 +8,9 @@
 现有 browser/HTTP protocol 不变。Alice/Bob owner scope、reviewed-template generation、
 角色 prompt、effect/capability grant、精确 checkpoint lineage 与 nonrenewable budget 均由 host 拥有。
 
-保留的 `server_multi.cpp` live-provider 路径 timeout 为180秒。
+保留的 `server_multi.cpp` live-provider 路径每次调用允许600秒，即使按观测到的最慢速度也能完成
+8,192 token 的回答；连接若30秒内没有任何字节则判为失败
+（OpenRouter 会立即发送响应头，并在生成期间每隔几秒发送 keepalive 空白）。
 不改变 ProgramChat 的 `--provider-timeout-seconds` 范围/默认值或共享 provider factory 默认值，
 也不启用 failure 重发。
 
