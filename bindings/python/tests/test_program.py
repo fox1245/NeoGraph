@@ -225,3 +225,22 @@ def test_resume_defaults_to_the_single_awaiting_pending_call():
     resumed = host.resume(interrupted.run_id, {"ok": True}).wait()
     assert resumed.status == ng.ProgramTerminalStatus.Completed
     assert resumed.output["channels"]["trace"]["value"] == ["A", "B"]
+
+
+def test_failed_result_keeps_the_trace_of_nodes_that_completed():
+    host = _trace_host("python-owner-failed-trace")
+    version = host.compile_admit(
+        _trace_source(
+            '.node("A", {type: "python_program_trace_node"})'
+            '.node("B", {type: "python_program_trace_node"})'
+            '.node("C", {type: "python_program_trace_node", fail: true})'
+            '.entry("A").edge("A", "B").edge("B", "C").exit("C")'
+        ),
+        _budget(),
+    )
+    result = host.run(version, {}, _budget())
+    assert result.status == ng.ProgramTerminalStatus.Failed
+    assert result.failure.core_node == "C"
+    assert result.execution_trace == ["A", "B"]
+    parsed = ng.ProgramResult.parse(result.serialize_canonical())
+    assert parsed.execution_trace == ["A", "B"]

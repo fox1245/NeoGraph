@@ -5886,6 +5886,34 @@ TEST(ProgramRuntimeTest, JavaScriptJoinCollectsFailuresInDeclarationOrder) {
     EXPECT_EQ(completed_calls.load(), 0U);
 }
 
+TEST(ProgramRuntimeTest, JavaScriptCoreFailureKeepsTheTraceOfCompletedNodes) {
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(
+        "export function define() {\n"
+        "  const graph = ng.graph(\"main\");\n"
+        "  graph.channel(\"value\", {reducer: \"runtime-overwrite\", initial: \"\"});\n"
+        "  graph.node(\"first\", {type: \"runtime-completed\"});\n"
+        "  graph.node(\"second\", {type: \"runtime-completed\"});\n"
+        "  graph.node(\"work\", {type: \"runtime-failing\"});\n"
+        "  graph.entry(\"first\");\n"
+        "  graph.edge(\"first\", \"second\");\n"
+        "  graph.edge(\"second\", \"work\");\n"
+        "  graph.exit(\"work\");\n"
+        "  return graph;\n"
+        "}\n");
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(), "trace-failed-trace", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->core_node, "work");
+    EXPECT_EQ(result.execution_trace(), std::vector<std::string>({"first", "second"}));
+    EXPECT_EQ(ProgramResult::parse(result.serialize_canonical()).execution_trace(),
+              result.execution_trace());
+}
+
 TEST(ProgramRuntimeTest, JavaScriptAwaitTimeoutCancelsDirectCoreWork) {
     blocking_calls.store(0);
     AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);

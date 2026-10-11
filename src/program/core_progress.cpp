@@ -13,6 +13,15 @@ bool is_synthetic_start(const graph::GraphEvent& event) {
 }  // namespace
 
 void AttemptCoreProgress::observe(const graph::GraphEvent& event) noexcept {
+    if (event.type == graph::GraphEvent::Type::NODE_END) {
+        try {
+            std::lock_guard lock(completed_mutex_);
+            completed_.push_back(event.node_name);
+        } catch (...) {
+            // The trace is diagnostic; an allocation failure must not fail the run.
+        }
+        return;
+    }
     if (event.type != graph::GraphEvent::Type::NODE_START || is_synthetic_start(event)) return;
 
     if (!event.data.is_object() || !event.data.contains("step") ||
@@ -30,6 +39,11 @@ void AttemptCoreProgress::observe(const graph::GraphEvent& event) noexcept {
             return;
         }
     }
+}
+
+std::vector<std::string> AttemptCoreProgress::completed_nodes() const {
+    std::lock_guard lock(completed_mutex_);
+    return completed_;
 }
 
 }  // namespace neograph::program::detail

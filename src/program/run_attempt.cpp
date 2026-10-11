@@ -4944,6 +4944,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             outcome.failure->core_node    = error.core_node;
             retain_provider_failure(*outcome.failure, error.cause);
         }
+        outcome.execution_trace          = core_progress->completed_nodes();
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
         outcome.usage.model_tokens       = model_tokens(usage);
         outcome.usage.program_operations = operation_count;
@@ -4961,6 +4962,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", error.what(), error.node_name(),
                                  static_cast<std::uint32_t>(error.attempts()));
         retain_provider_failure(*outcome.failure, error.cause());
+        outcome.execution_trace          = core_progress->completed_nodes();
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
         outcome.usage.model_tokens       = model_tokens(usage);
         outcome.usage.program_operations = operation_count;
@@ -4991,6 +4993,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     } catch (const std::exception& error) {
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", error.what());
         retain_provider_failure(*outcome.failure, std::current_exception());
+        outcome.execution_trace          = core_progress->completed_nodes();
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
         outcome.usage.model_tokens       = model_tokens(usage);
         outcome.usage.program_operations = operation_count;
