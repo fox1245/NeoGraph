@@ -211,3 +211,60 @@ def test_spawn_has_no_child_binding_in_the_python_host():
     result = host.run(version, {}, run_budget)
     assert result.status == ng.ProgramTerminalStatus.Failed, describe(result)
     assert result.failure.code == "P_CHILD_BINDING"
+
+
+# A failing join member, and a slow sibling declared before it that the join
+# cancels: the run reports the member's own failure (#379).
+FAILING_WORKER = define_graph("""
+    g.node("worker", {type: "e2e.step", delay_from_state: true, boom_on_topic: "boom"});
+    g.entry("worker");
+    g.exit("worker");
+""", name="work")
+
+
+def _join_with_a_failing_member(join):
+    return timed_run(with_main(FAILING_WORKER, join), scheduler_threads=4)
+
+
+def _assert_member_failure(result, elapsed):
+    assert result.status == ng.ProgramTerminalStatus.Failed, describe(result)
+    assert result.failure.code == "P_RUNTIME_CORE_FAILURE", describe(result)
+    assert "boom from worker" in result.failure.message, describe(result)
+    assert JOURNAL.names("raised") == ["worker"]
+    assert JOURNAL.names("cancelled") == ["worker"], "the slow sibling was cancelled"
+    assert elapsed < 2.5, f"the join waited {elapsed:.2f}s for its cancelled sibling"
+
+
+def test_all_reports_the_failing_member_not_the_sibling_it_cancelled():
+    result, elapsed = _join_with_a_failing_member("""
+        yield ng.all([
+          ng.callCore("work", {topic: "slow", delay: 5000}, "slow"),
+          ng.callCore("work", {topic: "boom"}, "boom")
+        ], {max_in_flight: 2}, "fan");
+        return {unreachable: true};
+    """)
+    _assert_member_failure(result, elapsed)
+
+
+def test_race_reports_the_failing_member_not_the_sibling_it_cancelled():
+    result, elapsed = _join_with_a_failing_member("""
+        return yield ng.race([
+          ng.callCore("work", {topic: "slow", delay: 5000}, "slow"),
+          ng.callCore("work", {topic: "boom"}, "boom")
+        ], {max_in_flight: 2}, "race");
+    """)
+    _assert_member_failure(result, elapsed)
+
+
+def test_unreachable_quorum_reports_its_own_failure_not_a_cancelled_member():
+    result, elapsed = _join_with_a_failing_member("""
+        return yield ng.quorum([
+          ng.callCore("work", {topic: "slow", delay: 5000}, "slow"),
+          ng.callCore("work", {topic: "boom"}, "boom")
+        ], {required_successes: 2, max_in_flight: 2}, "quorum");
+    """)
+    assert result.status == ng.ProgramTerminalStatus.Failed, describe(result)
+    assert result.failure.code == "P_QUORUM_UNREACHABLE", describe(result)
+    assert JOURNAL.names("raised") == ["worker"]
+    assert JOURNAL.names("cancelled") == ["worker"]
+    assert elapsed < 2.5, f"the quorum waited {elapsed:.2f}s for its cancelled member"

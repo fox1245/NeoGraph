@@ -395,6 +395,27 @@ private:
     bool complete_first_;
 };
 
+// Fails when its "value" channel is "fail"; otherwise waits until cancelled.
+class ValueGatedNode final : public GraphNode {
+public:
+    explicit ValueGatedNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        if (input.state.get("value") == json("fail"))
+            throw std::runtime_error("join member failure sentinel");
+        auto timer = asio::steady_timer(co_await asio::this_coro::executor);
+        timer.expires_after(std::chrono::seconds(5));
+        co_await timer.async_wait(
+            asio::bind_cancellation_slot(input.ctx.cancel_token->slot(), asio::use_awaitable));
+        co_return NodeOutput{};
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
 class BlockingNode final : public GraphNode {
 public:
     explicit BlockingNode(std::string               name,
@@ -649,6 +670,12 @@ RegistrySnapshot runtime_registry(
         },
         json{{"type", "object"}}, json::object());
 
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-value-gated", 'e'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<ValueGatedNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
     builder.add_node(
         manifest(ExecutableKind::Node, "runtime-blocking", '5'),
         [](const std::string& name, const json&, const NodeContext&) {
@@ -6012,6 +6039,33 @@ TEST(ProgramRuntimeTest, JavaScriptJoinCollectsFailuresInDeclarationOrder) {
     EXPECT_EQ(completed_calls.load(), 0U);
 }
 
+TEST(ProgramRuntimeTest, JavaScriptFailFastJoinReportsTheFailureThatStoppedIt) {
+    // #379: the member declared first is cancelled because its sibling
+    // failed. The join reports the sibling's failure, not that cancellation.
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-value-gated", R"JS(
+    yield ng.all([
+        ng.callCore("main", {value: "wait"}, "fail-fast:waiting"),
+        ng.callCore("main", {value: "fail"}, "fail-fast:failing")
+    ], {max_in_flight: 2}, "fail-fast");
+    return {unreachable: true};
+)JS"));
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto result  = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(2), "trace-js-fail-fast", {}});
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE") << result.failure()->message;
+    EXPECT_NE(result.failure()->message.find("join member failure sentinel"), std::string::npos)
+        << result.failure()->message;
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(4))
+        << "the waiting member was cancelled";
+}
+
 TEST(ProgramRuntimeTest, ProgramPathKeepsLintAndFanOutNoticesOffStderr) {
     // Program admission reports lint through diagnostics, and Program hosts
     // cannot change EngineConfig::worker_count, so neither belongs on stderr.
@@ -8413,6 +8467,30 @@ TEST(ProgramRuntimeTest, ParallelJoinsAllBranchesInPlanOrder) {
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(result.output(), json::array({json{{"branch", 1}}, json{{"branch", 2}}}));
     EXPECT_EQ(completed_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, ParallelReportsTheBranchFailureNotTheSiblingItCancelled) {
+    // #379, the plan-level sibling of the JavaScript join: the branch that
+    // fails cancels the other one, whose cancellation never replaces the
+    // failure.
+    map_fail_first_calls.store(0);
+    map_fail_first_active.store(0);
+    AdmittedRuntime fixture(2);
+    const auto      result = run_orchestration(
+        fixture,
+        orchestration_document(json{{"op", "parallel"},
+                                    {"branches", json::array({json{{"op", "call_core"}},
+                                                              json{{"op", "call_core"}}})}},
+                               "runtime-map-fail-first"),
+        json::object(), "trace-parallel-failure");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE") << result.failure()->message;
+    EXPECT_NE(result.failure()->message.find("map fail-fast sentinel"), std::string::npos)
+        << result.failure()->message;
+    EXPECT_EQ(map_fail_first_calls.load(), 2U);
+    EXPECT_EQ(map_fail_first_active.load(), 0U);
 }
 
 TEST(ProgramRuntimeTest, ParallelImmediateBranchesRetainTheirCompletionSignal) {

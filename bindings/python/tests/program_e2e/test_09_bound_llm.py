@@ -199,10 +199,10 @@ def test_all_refuses_the_member_that_does_not_fit(peer):
                                monetary_microunits=HOLD + HOLD // 2)
     _host, _version, result = run_bound(peer, text, run_budget, scheduler_threads=2)
 
-    # The member that does not fit is refused before sending; the join then
-    # fails (and may report a cancelled sibling as its failure).
-    assert result.status in (ng.ProgramTerminalStatus.BudgetExhausted,
-                             ng.ProgramTerminalStatus.Failed), describe(result)
+    # The member that does not fit is refused before sending, and the join
+    # reports that refusal, never the sibling it cancelled (#379).
+    assert result.status == ng.ProgramTerminalStatus.BudgetExhausted, describe(result)
+    assert result.failure.code == "P_MONEY_BUDGET"
     assert peer.request_count() <= 1
     assert result.usage.monetary_microunits <= run_budget.monetary_microunits
 
@@ -340,3 +340,38 @@ def test_a_call_journaled_before_a_crash_is_charged_once_after_recovery(peer, tm
     assert outcome["records"] == [{"evidence": "reported", "microunits": 1235, "replayed": True}]
     assert outcome["monetary"] == 1235, "charged once, and not lost"
     assert outcome["remaining"] == 1_000_000 - 1235
+
+
+# ---------------------------------------------------------------------------
+# A join member refused for money is the join's failure (#379)
+# ---------------------------------------------------------------------------
+
+ROUTED = define_graph("""
+    g.channel("messages", {reducer: "append", initial: []});
+    g.node("route", {type: "e2e.step"});
+    g.node("llm", {type: "llm_call"});
+    g.node("wait", {type: "e2e.step", delay_ms: 5000});
+    g.entry("route");
+    g.conditionalEdge("route", "e2e.route_by_topic", {billing: "llm", general: "wait"});
+    g.exit("llm");
+    g.exit("wait");
+""", name="chat")
+
+
+def test_a_refused_member_is_the_join_failure_not_the_sibling_it_cancelled(peer):
+    text = with_main(ROUTED, """
+        yield ng.all([
+          ng.callCore("chat", {topic: "general"}, "wait"),
+          ng.callCore("chat", {topic: "billing",
+                               messages: [{role: "user", content: "a"}]}, "ask")
+        ], {max_in_flight: 2}, "fan");
+        return {unreachable: true};
+    """)
+    run_budget = priced_budget(max_concurrency=2, max_program_operations=8,
+                               monetary_microunits=HOLD - 1)
+    _host, _version, result = run_bound(peer, text, run_budget, scheduler_threads=2)
+
+    assert result.status == ng.ProgramTerminalStatus.BudgetExhausted, describe(result)
+    assert result.failure.code == "P_MONEY_BUDGET", describe(result)
+    assert peer.request_count() == 0
+    assert support.JOURNAL.names("cancelled") == ["wait"]

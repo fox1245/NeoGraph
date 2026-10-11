@@ -2882,7 +2882,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                 {
                                     std::lock_guard lock(parallel->mutex);
                                     if (error) {
-                                        parallel->error = error;
+                                        // The first error stops the join; a
+                                        // sibling's cancellation never
+                                        // replaces it (#379).
+                                        if (!parallel->error) parallel->error = error;
                                         cancel_siblings = true;
                                     } else {
                                         parallel->results[index] = std::move(result);
@@ -4406,7 +4409,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     co_return joined;
                 }
 
-                std::optional<std::size_t> first_failure;
+                // A fail-fast join reports the member whose failure stopped
+                // it; siblings it cancelled never replace that failure (#379).
+                // Collect mode stops on no member and reports the first
+                // failure in declaration order, as parallel_map does.
+                std::optional<std::size_t> first_failure =
+                    collect ? std::optional<std::size_t>{} : winner;
                 for (std::size_t i = 0; i < results.size(); ++i) {
                     if (results[i]) {
                         joined.output.push_back(results[i]->output);
