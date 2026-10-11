@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=bb9b10ad0da8c0fe95a5458eef227f43a5d00f1161d51cfcf5e7af278cc072a7 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=57d2b58aac0897a65e440868837d93b00e4a1123e9bfd5abcc1b332eb7888d51 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -17,6 +17,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 变更
 
+- **采用 SchemaProvider `maint/interface6` 分支上已合并的 PR #21 提交 `83112573ba59e3b561fc33c22394638be7aa5294`：SDK 0.3.0、interface/shared ABI 6 不变，并加入路由网关修复。** Responses 与 Messages 现在接受已声明的 OpenRouter origin 针对 `~deepseek/deepseek-v4-flash-latest` 等路由别名返回的实际服务模型名；此前此类 Responses 调用都会以 `invalid response protocol (HTTP 200)` 失败。服务模型在同一响应内不得变化，replay 仍绑定到请求的模型。NeoGraph 的 API 与 ABI 均无变化。
 - **采用合并的 SchemaProvider PR #16 提交 `3b88e4ba020c3a4d39ff0660014e7292b516b7cb`，须以 SDK 0.3.0 EXACT、interface/shared ABI 6 重建。** 这取代下方记录的先前 interface-5 SDK 步骤的当前要求。blocking 调用使用单一 async SDK pipeline，继续拒绝 event-loop/callback worker 重入。outcome、usage 观测、journal、native archive 重载与 Python 类型化值保留服务商报告金额、status、source、evidence、rounding 和冲突。canonical v2 JSON 仅在金额元数据完全缺失时省略 `provider_cost`，保持旧缺失记录 bytes 不变。零和 BYOK false 等金额证据阻止将未知 token hold 当作 proven-not-sent 退款；金额不转换为 token 或支出权限。Native archive v3 和 portable JSON v2 不变。
 - **Core 引擎速度恢复到 v0.11.1 的水平。** 在历史测量中,3 节点顺序基准从每次运行 10.19 µs 降到 6.29 µs(v0.11.1:6.10),parallel-3 基准从 30.03 µs 降到 15.66 µs(15.80);每个线程各用一个引擎时,2、4、8 线程下的单线程耗时与 v0.11.1 相同。损失来自每个 fan-out 分支一个 strand、每个节点一次 `RunContext` 拷贝、包住上下文绑定注册表的进程级 mutex(现为 64 个分片)、由多个 JSON 文档构建的状态快照、什么都不返回的协程调用(没有 Send 时的 `run_sends_async`、没有检查点时的 `record_pending_write_async`)以及调度器中的有序集合。各提交的测量数据见 #343。
 - **只链接 `neograph::core` 的程序不再加载 libcurl。** `neograph::core` 链接了 SchemaProvider 的运行时,而该运行时链接了 libcurl 传输层,因此仅运行图的进程也会加载 libcurl 及其所需的约 25 个库(基准测试启动时常驻内存 12.7 MB,v0.11.1 为 5.0 MB)。现在只有 `neograph::llm` 链接传输层;同一基准测试以 7.7 MB 启动,共享库从 36 个减少到 7 个。不使用 `neograph::llm` 而自行构造 `sp::runtime::Client` 的代码必须链接 `SchemaProvider::transport`。SchemaProvider 已固定到包含此拆分的修订版本。参见 #347。

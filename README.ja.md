@@ -145,7 +145,7 @@ sp::runtime::Result first_call(
 
 `ChatMessage`、`ChatTool`、JSONは可搬な表現です。真正なネイティブ履歴は、ネイティブチェックポイントのサイドカーとともにメモリ内に保持できます。ネイティブ履歴を永続化するには、実物の`sp::NativeArchive`と、所有者専用の非公開領域で保護された保管・管理が必要です。可搬なJSONでは、この権限を再構成できません。アーカイブは独立した鍵で保管・管理の真正性を検証します。暗号化でも、ベンダー発行元の認証でもありません。アーカイブ本体、鍵、ネイティブblob、生の通信観測データを公開しないでください。永続化の失敗、オブザーバー、管理対象の予算バンク、リプレイの境界については、[プロバイダーリファレンス](docs/reference-en.md)と[移行ガイド](docs/migration-v0.4-to-v1.0.md)を参照してください。
 
-型付きAPIへの切り替えに伴い、`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、記述子インタープリター、ResponsesのWebSocket経路は削除されました。C++側の利用コードを再コンパイルし、独自のプロバイダーを移行してください。互換エイリアスはありません。SDKパッケージは`0.3.0` alpha、公開マージコミット`3b88e4ba020c3a4d39ff0660014e7292b516b7cb`に固定され、インターフェースリビジョンは6、共有ABIは6です。金額使用量メタデータが公開レイアウトを変えるため、SDKの利用コード、NeoGraph、Python拡張を一緒に再ビルドしてください。Native archive v3とportable JSON v2は変わらず、この世代がSDKインターフェースの安定版であることを示すものではありません。
+型付きAPIへの切り替えに伴い、`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、記述子インタープリター、ResponsesのWebSocket経路は削除されました。C++側の利用コードを再コンパイルし、独自のプロバイダーを移行してください。互換エイリアスはありません。SDKパッケージは`0.3.0` alpha、公開マージコミット`83112573ba59e3b561fc33c22394638be7aa5294`に固定され、インターフェースリビジョンは6、共有ABIは6です。金額使用量メタデータが公開レイアウトを変えるため、SDKの利用コード、NeoGraph、Python拡張を一緒に再ビルドしてください。Native archive v3とportable JSON v2は変わらず、この世代がSDKインターフェースの安定版であることを示すものではありません。
 
 ## Python
 

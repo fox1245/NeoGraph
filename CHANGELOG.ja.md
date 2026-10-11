@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=bb9b10ad0da8c0fe95a5458eef227f43a5d00f1161d51cfcf5e7af278cc072a7 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=57d2b58aac0897a65e440868837d93b00e4a1123e9bfd5abcc1b332eb7888d51 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -17,6 +17,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ### 変更
 
+- **SchemaProvider の `maint/interface6` ブランチにマージされた PR #21 の `83112573ba59e3b561fc33c22394638be7aa5294` を採用します。SDK 0.3.0、interface/shared ABI 6 はそのままで、ルーティングゲートウェイの修正が加わります。** Responses と Messages は、宣言済みの OpenRouter origin が `~deepseek/deepseek-v4-flash-latest` のようなルーティングエイリアスに対して返す実際のサービングモデル名を受け入れるようになりました。以前はこのような Responses 呼び出しがすべて `invalid response protocol (HTTP 200)` で失敗していました。サービングモデルは 1 つの応答内で変わってはならず、replay は要求したモデルに束縛されたままです。NeoGraph の API・ABI に変更はありません。
 - **マージ済みSchemaProvider PR #16の`3b88e4ba020c3a4d39ff0660014e7292b516b7cb`を採用し、SDK 0.3.0 EXACT、interface/shared ABI 6で再ビルドします。** 以下に記録した以前のinterface-5 SDK手順を置き換えます。blocking呼び出しは単一async SDK pipelineを使い、event-loop/callback workerからの再入拒否を維持します。outcome、usage観測、journal、native archive再読込、Python型付き値はprovider報告金額、status、source、evidence、rounding、競合を保持します。canonical v2 JSONは金額情報が完全に欠落する場合のみ`provider_cost`を省略し、過去の欠落のみのbytesを保持します。ゼロやBYOK falseも金額の根拠であり、不明なtoken holdをproven-not-sentとして返金させません。金額をtokenや支出権限に変換しません。Native archive v3とportable JSON v2は変わりません。
 - **Core エンジンの速度を v0.11.1 の水準に戻しました。** 過去の測定では、3 ノードの逐次ベンチマークが 1 回あたり 10.19 µs から 6.29 µs に(v0.11.1: 6.10)、parallel-3 が 30.03 µs から 15.66 µs に(15.80)短縮され、スレッドごとにエンジンを 1 つ使う場合のスレッドあたりの時間も 2・4・8 スレッドで v0.11.1 と同じです。損失の原因は、fan-out の枝ごとの strand、ノードごとの `RunContext` コピー、コンテキスト束縛レジストリを囲んでいたプロセス全体の mutex(現在は 64 シャード)、複数の JSON ドキュメントで作っていた状態スナップショット、何も返さないコルーチン呼び出し(Send がない `run_sends_async`、チェックポイントがないときの `record_pending_write_async`)、スケジューラの順序付き集合でした。コミットごとの測定値は #343 にあります。
 - **`neograph::core` だけをリンクするプログラムは libcurl を読み込まなくなりました。** `neograph::core` が SchemaProvider のランタイムをリンクし、そのランタイムが libcurl のトランスポートをリンクしていたため、グラフだけを実行するプロセスでも libcurl とそれが必要とする約 25 個のライブラリを読み込んでいました(ベンチマーク開始時の常駐メモリは 12.7 MB、v0.11.1 は 5.0 MB)。トランスポートをリンクするのは `neograph::llm` だけになり、同じベンチマークは 7.7 MB で始まり、共有ライブラリは 36 個から 7 個になりました。`neograph::llm` を使わずに `sp::runtime::Client` を自分で構築するコードは `SchemaProvider::transport` をリンクする必要があります。SchemaProvider はこの分離を含むリビジョンに固定されます。#347 を参照してください。

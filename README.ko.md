@@ -145,7 +145,7 @@ sp::runtime::Result first_call(
 
 `ChatMessage`, `ChatTool`, JSON은 이식 가능한 투영 표현입니다. 진본 네이티브 이력은 네이티브 체크포인트 사이드카와 함께 메모리에 유지할 수 있습니다. 네이티브 이력을 영속적으로 보존하려면 실제 `sp::NativeArchive`와 소유자만 접근할 수 있도록 보호된 보관 책임 체계가 필요합니다. 이식 가능한 JSON으로는 이 권한을 재현할 수 없습니다. 아카이브는 독립적인 키로 보관 책임의 진위를 인증합니다. 이는 암호화도, 공급업체 발급자 인증도 아닙니다. 아카이브 본문, 키, 네이티브 blob, 원시 통신 관측값을 공개하지 마세요. 영속화 실패, 관측자, 관리형 예산 은행, 재생 경계는 [provider 참조](docs/reference-en.md)와 [마이그레이션 가이드](docs/migration-v0.4-to-v1.0.md)를 참고하세요.
 
-타입 지정 인터페이스로의 전환으로 `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, 디스크립터 인터프리터, Responses WebSocket 경로가 제거됩니다. C++ 사용 코드를 다시 컴파일하고 사용자 정의 provider를 마이그레이션해야 합니다. 호환성 별칭은 제공하지 않습니다. SDK 패키지는 `0.3.0` alpha이며 공개 병합 커밋 `3b88e4ba020c3a4d39ff0660014e7292b516b7cb`에 고정됩니다. 인터페이스 리비전과 공유 ABI는 6입니다. 금액 사용량 메타데이터가 공개 레이아웃을 바꾸므로 SDK 사용 코드, NeoGraph, Python 확장을 함께 다시 빌드해야 합니다. Native archive v3와 portable JSON v2는 그대로이며, 이 세대가 SDK 인터페이스의 안정성을 선언하는 것은 아닙니다.
+타입 지정 인터페이스로의 전환으로 `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, 디스크립터 인터프리터, Responses WebSocket 경로가 제거됩니다. C++ 사용 코드를 다시 컴파일하고 사용자 정의 provider를 마이그레이션해야 합니다. 호환성 별칭은 제공하지 않습니다. SDK 패키지는 `0.3.0` alpha이며 공개 병합 커밋 `83112573ba59e3b561fc33c22394638be7aa5294`에 고정됩니다. 인터페이스 리비전과 공유 ABI는 6입니다. 금액 사용량 메타데이터가 공개 레이아웃을 바꾸므로 SDK 사용 코드, NeoGraph, Python 확장을 함께 다시 빌드해야 합니다. Native archive v3와 portable JSON v2는 그대로이며, 이 세대가 SDK 인터페이스의 안정성을 선언하는 것은 아닙니다.
 
 ## Python
 
