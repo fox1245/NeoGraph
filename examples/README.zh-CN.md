@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=ce7e094fabd0d6304f5961a14e5ca75acbfa89a345a01c74939bf55595ae91f6 -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=846d75a5b1fd0b5e4bc8d7066fd8d67ec3104821aa97c338b78a5f7a7faacb92 -->
 # C++ API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -117,7 +117,7 @@ OPENROUTER_API_KEY=sk-or-...
 | 43 | [`43_store_personalization.cpp`](43_store_personalization.cpp) | 离线 | 在 node 内通过 `in.ctx.store` 访问跨 thread 的 `Store` — 从共享命名空间记忆得到每用户 node 行为。 |
 | 51 | [`51_minimal.cpp`](51_minimal.cpp) | 离线 | 最短可工作程序 — 构建、运行、`result.channel<T>("name")`。新用户模板。 |
 | 52 | [`52_export_schema.cpp`](52_export_schema.cpp) | 离线 | `NodeFactory::export_schema()` → topology JSON Schema dump。无代码可视化编辑器构建 palette 时使用的版本锁定真实来源。 |
-| 56 | [`56_history_compaction.cpp`](56_history_compaction.cpp) | 离线（可选 OpenRouter） | 有界 message window — history 超出预算时，被丢弃的 prefix 会替换为 LLM 写出的 summary。默认使用 mock provider。 |
+| 56 | [`56_history_compaction.cpp`](56_history_compaction.cpp) | 离线 | 有界 message window — history 超出预算时，被丢弃的 prefix 会替换为 LLM 写出的 summary。始终使用 mock summarizer，不读取 API key。 |
 ### 真实 LLM — provider、工具、ReAct
 
 | # | 文件 | 设置 | 展示内容 |
@@ -343,8 +343,8 @@ provider 请求与 Outcome 是独立类型化对象，不是 topology JSON。
 尤其是示例 21（MCP 扇出，确定性 planner）和 27（异步并发，
 用 `steady_timer` 代替 LLM 延迟）展示了不花 token 的引擎管线。
 gRPC 套件（52–55, 57）也不需要 key，但需要 `-DNEOGRAPH_BUILD_GRPC=ON`
-（`grpc++` / `protoc`）；56（`history_compaction`）默认使用 mock provider，
-只有存在 key 时才会触碰 OpenRouter。
+（`grpc++` / `protoc`）；56（`history_compaction`）始终使用 mock summarizer，
+不读取 API key。
 ## CMake 配置后重新运行
 
 构建出的二进制文件位于构建目录根部，命名为 `example_<short_name>`

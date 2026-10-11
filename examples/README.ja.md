@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=ce7e094fabd0d6304f5961a14e5ca75acbfa89a345a01c74939bf55595ae91f6 -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=846d75a5b1fd0b5e4bc8d7066fd8d67ec3104821aa97c338b78a5f7a7faacb92 -->
 # C++ API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -123,7 +123,7 @@ OPENROUTER_API_KEY=sk-or-...
 | 43 | [`43_store_personalization.cpp`](43_store_personalization.cpp) |オフライン |クロススレッド `Store` は、`in.ctx.store` を介してノード内から到達しました。共有名前空間メモリからのユーザーごとのノードの動作です。 |
 | 51 | [`51_minimal.cpp`](51_minimal.cpp) |オフライン |最も短い動作プログラム — ビルド、実行、`result.channel<T>("name")`。新しいユーザーのテンプレート。 |
 | 52 | [`52_export_schema.cpp`](52_export_schema.cpp) |オフライン | `NodeFactory::export_schema()` → トポロジ JSON スキーマ ダンプ。コードレスビジュアルエディターがパレットを構築する、バージョンがロックされた信頼できる情報源。 |
-| 56 | [`56_history_compaction.cpp`](56_history_compaction.cpp) |オフライン (オプションの OpenRouter) |境界付きメッセージ ウィンドウ - 履歴が予算を超えると、削除されたプレフィックスが LLM によって作成された概要に置き換えられます。デフォルトではモックプロバイダー。 |
+| 56 | [`56_history_compaction.cpp`](56_history_compaction.cpp) |オフライン |境界付きメッセージ ウィンドウ - 履歴が予算を超えると、削除されたプレフィックスが LLM によって作成された概要に置き換えられます。常にモックの要約器を使い、API key は読みません。 |
 
 ### 本物の LLM — プロバイダー、ツール、ReAct
 
@@ -359,7 +359,7 @@ provider リクエストと Outcome は topology JSON とは別の型付きオ�
 31 例は API key なしで実行できます。例 21 は固定 MCP planner、
 27 は `steady_timer` で model latency を代用し、token を使わず engine 動作を示します。
 gRPC 例 (52–55, 57) も key 不要ですが、`-DNEOGRAPH_BUILD_GRPC=ON` と `grpc++`/`protoc` が必要です。
-56 (`history_compaction`) は既定で mock provider を使い、key がある場合のみ OpenRouter に接続します。
+56 (`history_compaction`) は常に mock の要約器を使い、API key を読みません。
 
 ## CMake 構成後の再実行
 

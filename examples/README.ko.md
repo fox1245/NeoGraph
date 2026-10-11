@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=ce7e094fabd0d6304f5961a14e5ca75acbfa89a345a01c74939bf55595ae91f6 -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=846d75a5b1fd0b5e4bc8d7066fd8d67ec3104821aa97c338b78a5f7a7faacb92 -->
 # C++ API 예제
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
@@ -124,7 +124,7 @@ OPENROUTER_API_KEY=sk-or-...
 | 43 |[`43_store_personalization.cpp`](43_store_personalization.cpp)|오프라인|`in.ctx.store`를 통해 노드 내부에서 도달한 크로스 스레드 `Store` — 공유 네임스페이스 메모리의 사용자별 노드 동작입니다.|
 | 51 |[`51_minimal.cpp`](51_minimal.cpp)|오프라인|가장 짧은 작업 프로그램 — 빌드, 실행, `result.channel<T>("name")`. 신규 사용자 템플릿.|
 | 52 |[`52_export_schema.cpp`](52_export_schema.cpp)|오프라인|`NodeFactory::export_schema()` → 토폴로지 JSON 스키마 덤프. 코드가 없는 시각적 편집기가 팔레트를 구성하는 버전 고정 소스입니다.|
-| 56 |[`56_history_compaction.cpp`](56_history_compaction.cpp)|오프라인(선택적 OpenRouter)|제한된 메시지 창 — 기록이 예산을 초과하면 삭제된 접두사가 LLM로 작성된 요약으로 대체됩니다. 기본적으로 모의 공급자.|
+| 56 |[`56_history_compaction.cpp`](56_history_compaction.cpp)|오프라인|제한된 메시지 창 — 기록이 예산을 초과하면 삭제된 접두사가 LLM로 작성된 요약으로 대체됩니다. 항상 모의 요약기를 사용하며 API 키를 읽지 않습니다.|
 
 ### Real LLM — 공급자, 도구, ReAct
 
@@ -360,7 +360,7 @@ agent status text, 첫 artifact text, 마지막 agent history text 순서로 답
 31개 예제는 API 키 없이 실행할 수 있습니다. 예제 21은 고정 MCP planner,
 27은 `steady_timer`로 모델 지연을 대신하며 token을 쓰지 않고 engine 동작을 보여줍니다.
 gRPC 예제(52–55, 57)도 키가 없지만 `-DNEOGRAPH_BUILD_GRPC=ON`과 `grpc++`/`protoc`가 필요합니다.
-56(`history_compaction`)은 기본 mock provider이며 키가 있을 때만 OpenRouter에 접근합니다.
+56(`history_compaction`)은 항상 mock 요약기를 사용하며 API 키를 읽지 않습니다.
 
 ## CMake 구성 후 다시 실행
 

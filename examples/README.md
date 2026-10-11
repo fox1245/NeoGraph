@@ -131,7 +131,7 @@ demonstrate, not by file number.
 | 43 | [`43_store_personalization.cpp`](43_store_personalization.cpp) | offline | Cross-thread `Store` reached from inside a node via `in.ctx.store` — per-user node behaviour from shared namespaced memory. |
 | 51 | [`51_minimal.cpp`](51_minimal.cpp) | offline | The shortest working program — build, run, `result.channel<T>("name")`. The fresh-user template. |
 | 52 | [`52_export_schema.cpp`](52_export_schema.cpp) | offline | `NodeFactory::export_schema()` → topology JSON Schema dump. The version-locked source of truth a codeless visual editor builds its palette from. |
-| 56 | [`56_history_compaction.cpp`](56_history_compaction.cpp) | offline (optional OpenRouter) | Bounded message window — when history exceeds the budget the dropped prefix is replaced by an LLM-written summary. Mock provider by default. |
+| 56 | [`56_history_compaction.cpp`](56_history_compaction.cpp) | offline | Bounded message window — when history exceeds the budget the dropped prefix is replaced by an LLM-written summary. Always uses a mock summarizer; no API key is read. |
 
 ### Real LLM — providers, tools, ReAct
 
@@ -402,8 +402,8 @@ floor. Examples 21 (MCP fanout, deterministic planner) and 27 (async
 concurrency, `steady_timer` stand-in for LLM latency) in particular
 demonstrate engine plumbing without spending a token. The gRPC suite
 (52–55, 57) is also key-free but needs `-DNEOGRAPH_BUILD_GRPC=ON`
-(`grpc++` / `protoc`); 56 (`history_compaction`) defaults to a mock
-provider and only touches OpenRouter if a key is present.
+(`grpc++` / `protoc`); 56 (`history_compaction`) always uses a mock
+summarizer and never reads an API key.
 
 ## Re-running after CMake config
 
