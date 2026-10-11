@@ -30,6 +30,11 @@ struct ProgramCoreProviderCallContext {
     /// The attempt's monetary account. Null for recorded replay, which never
     /// spends. Brokers that price calls charge it; others may ignore it.
     std::shared_ptr<ProgramMonetaryAccount> monetary_account;
+    /// Set only when the runtime settles an attempt that never runs again (a
+    /// run its expired execution lease ends). Brokers that journal calls
+    /// charge it, when they are bound, the tokens of the calls this attempt
+    /// journaled in the operation, as they charge its monetary account.
+    std::shared_ptr<UsageAccumulator> journaled_usage;
 };
 
 /** Host binding for one Program operation. No credential is stored here. */

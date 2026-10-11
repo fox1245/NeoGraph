@@ -519,3 +519,108 @@ def test_resume_of_a_paused_join_never_resends_or_recharges_a_settled_call(peer,
     assert done.usage.monetary_microunits == 0
     assert done.remaining_budget.model_tokens == 1_000_000 - 24
     assert done.remaining_budget.monetary_microunits == 1_000_000 - 1235
+
+
+# ---------------------------------------------------------------------------
+# An expired execution lease charges a journaled call's tokens with its money
+# (#381)
+# ---------------------------------------------------------------------------
+
+_LEASE_SETUP = r'''
+import json, os, sys, threading
+import neograph_engine as ng
+from program_e2e import support as s
+
+base_url, store, first = sys.argv[1], sys.argv[2], sys.argv[3] == "first"
+STARTED = threading.Event()
+
+
+class DieOnce(ng.GraphNode):
+    """Kills its process, once the run id is printed, in the crashing process."""
+
+    def __init__(self, name):
+        super().__init__()
+        self._name = name
+
+    def get_name(self):
+        return self._name
+
+    def run(self, input):
+        if os.environ.get("E2E_DIE") == "1":
+            STARTED.wait(30)
+            print(json.dumps({"dying": True}), flush=True)
+            os._exit(9)
+        return [ng.ChannelWrite("trace", [self._name])]
+
+
+ng.NodeFactory.register_type("e2e.die_once", lambda name, config, ctx: DieOnce(name))
+TEXT = s.define_graph("""
+    g.channel("messages", {reducer: "append",
+                           initial: [{role: "user", content: "What is the capital of France?"}]});
+    g.node("llm", {type: "llm_call"});
+    g.node("after", {type: "e2e.die_once"});
+    g.entry("llm");
+    g.edge("llm", "after");
+    g.exit("after");
+""", name="chat")
+# Without child budgets the run holds a root execution lease for its wall time.
+BUDGET = s.priced_budget(wall_time_ms=3_000)
+archive = s.provider_archive(store, base_url, provision=first)
+host = s.make_bound_host(base_url, sqlite_directory=store, extra_node_types=("e2e.die_once",),
+                         native_history_archive=archive)
+'''
+
+_LEASE_CRASHING_PROCESS = _LEASE_SETUP + r'''
+version = s.admit(host, TEXT, BUDGET, "chat.js")
+os.environ["E2E_DIE"] = "1"
+handle = host.start(version, {}, BUDGET)
+print(json.dumps({"run_id": handle.run_id}), flush=True)
+STARTED.set()
+handle.wait()
+print(json.dumps({"unreachable": True}), flush=True)
+'''
+
+_LEASE_EXPIRED_PROCESS = _LEASE_SETUP + r'''
+import time
+deadline = time.monotonic() + 30
+while True:
+    try:
+        result = host.reconnect(sys.argv[4]).wait()
+        break
+    except RuntimeError as error:
+        if "P_RUN_LEASE_HELD" not in str(error) or time.monotonic() > deadline:
+            raise
+        time.sleep(0.1)
+print(json.dumps({
+    "status": str(result.status), "code": result.failure.code if result.failure else None,
+    "tokens": result.usage.model_tokens,
+    "remaining_tokens": result.remaining_budget.model_tokens,
+    "monetary": result.usage.monetary_microunits,
+    "remaining_monetary": result.remaining_budget.monetary_microunits,
+}), flush=True)
+'''
+
+
+@slow
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="NativeArchive custody needs an owner-only protected directory")
+def test_an_expired_lease_charges_the_journaled_calls_tokens_with_its_money(peer, tmp_path):
+    store = str(tmp_path / "runs")
+    crashed = run_python(_LEASE_CRASHING_PROCESS, peer.base_url, store, "first", timeout=120)
+    assert crashed.returncode == 9, (crashed.returncode, crashed.stdout, crashed.stderr[-2000:])
+    lines = [json.loads(line) for line in crashed.stdout.splitlines() if line.startswith("{")]
+    assert lines[-1] == {"dying": True}
+    assert peer.request_count() == 1, "the model call happened before the crash"
+
+    expired = run_python(_LEASE_EXPIRED_PROCESS, peer.base_url, store, "again",
+                         lines[0]["run_id"], timeout=120)
+    assert expired.returncode == 0, expired.stderr[-2000:]
+    outcome = last_json_line(expired.stdout)
+    assert outcome["status"] == "ProgramTerminalStatus.TimedOut", outcome
+    assert outcome["code"] == "P_RUN_LEASE_EXPIRED"
+    assert peer.request_count() == 1
+    # Money was already charged on this path (#372); tokens are charged too.
+    assert outcome["monetary"] == 1235
+    assert outcome["remaining_monetary"] == 1_000_000 - 1235
+    assert outcome["tokens"] == 24, outcome
+    assert outcome["remaining_tokens"] == 1_000_000 - 24, outcome

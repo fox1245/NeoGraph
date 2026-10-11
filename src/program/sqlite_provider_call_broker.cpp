@@ -679,17 +679,28 @@ ProgramCoreProviderCallBinding SQLiteProgramProviderCallJournal::bind_priced(
         throw std::invalid_argument("Program provider archive owner scope mismatch");
     if (!neograph::detail::is_sha256_identity(provider_identity))
         throw std::invalid_argument("Program provider binding identity must be a deployment sha256 digest");
+    const auto scope = hash("scope", {{"owner_scope", std::string(context.owner_scope)},
+                                      {"program_version_id", std::string(context.program_version_id)},
+                                      {"run_id", std::string(context.run_id)},
+                                      {"operation_id", std::string(context.operation_id)}});
     if (context.monetary_account) {
         // Charge this operation's calls journaled by this attempt before a
         // restart now, even when the restarted Core never calls them again.
         std::lock_guard lock(impl_->mutex);
-        hydrate_monetary_scope(
-            impl_->db, context.owner_scope,
-            hash("scope", {{"owner_scope", std::string(context.owner_scope)},
-                           {"program_version_id", std::string(context.program_version_id)},
-                           {"run_id", std::string(context.run_id)},
-                           {"operation_id", std::string(context.operation_id)}}),
-            impl_->archive, context.monetary_account);
+        hydrate_monetary_scope(impl_->db, context.owner_scope, scope, impl_->archive,
+                               context.monetary_account);
+    }
+    if (context.journaled_usage) {
+        // An attempt settled without running again is charged the tokens of
+        // its journaled calls here, as its money above (#381).
+        std::lock_guard lock(impl_->mutex);
+        graph::ProviderCallIdentity identity;
+        identity.owner_scope = std::string(context.owner_scope);
+        identity.run_id      = std::string(context.run_id);
+        identity.usage       = context.journaled_usage;
+        sp::runtime::Result unused;
+        hydrate_scope(*impl_, context.owner_scope, scope, identity, context.attempt, {}, nullptr,
+                      unused);
     }
     return {std::string(context.owner_scope), std::string(context.program_version_id),
             std::string(context.run_id), std::string(context.operation_id), context.attempt,

@@ -313,6 +313,8 @@ struct Options {
     // Child-capable roots use checkpoint recovery rather than migration leases.
     // Set at admission and keep identical across every process generation.
     bool child_capable = false;
+    // A root execution lease lasts the run's wall time.
+    std::uint64_t wall_time_ms = 10000;
 };
 
 class Wire {
@@ -505,7 +507,7 @@ public:
         return *version;
     }
     RunBudget budget() const {
-        return RunBudget{10000, options_.model_tokens, 0, 1, 1, 20, 0,
+        return RunBudget{options_.wall_time_ms, options_.model_tokens, 0, 1, 1, 20, 0,
                          options_.child_capable ? 1U : 0U,
                          options_.child_capable ? 1U : 0U};
     }
@@ -1053,6 +1055,61 @@ TEST(ProgramProviderJournalRuntime, RootExecutionLeaseRejectsCrashRecoveryBefore
         EXPECT_EQ(error.diagnostic().code, "P_RUN_LEASE_HELD");
     }
     EXPECT_EQ(recovery->transport.load(), 0);
+    EXPECT_TRUE(same_rows(rows(image.provider_db()), crashed));
+}
+
+TEST(ProgramProviderJournalRuntime, ExpiredLeaseChargesTheJournaledCallsTokensOnce) {
+    // #381: the process stops after a journaled provider call, the root
+    // execution lease expires, and reconnect ends the run TimedOut. Like its
+    // money (#372), the call's tokens are charged to that result, once.
+    TempDir files("lease-expiry");
+    TempDir image("lease-expiry-image");
+    auto shared = std::make_shared<Shared>();
+    shared->after_call = [&] { crash_image(files.path, image.path); };
+    Options options;
+    options.wall_time_ms = 1500;
+    const std::string owner = "tenant:lease-expiry";
+    const std::string run = "lease-expiry-run";
+    {
+        Wire wire(files, shared, options);
+        const auto version = wire.admit(owner, Topology::Approval);
+        const auto done =
+            wire.runtime().run(owner, version, wire.invocation(run, "", Topology::Approval));
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_text(done);
+    }
+    ASSERT_EQ(shared->transport.load(), 1);
+    const auto crashed = rows(image.provider_db());
+    ASSERT_EQ(crashed.size(), 1U);
+    ASSERT_EQ(crashed[0].state, "succeeded");
+    std::int64_t expires_at_ms = 0;
+    {
+        SQLiteProgramTransitionStore transitions(image.program_db());
+        const auto record = transitions.load(owner, run);
+        ASSERT_TRUE(record);
+        ASSERT_EQ(record->continuation().state, ContinuationState::Running);
+        const auto lease = transitions.load_execution_lease(owner, run);
+        ASSERT_TRUE(lease) << "a root without child budgets holds an execution lease";
+        expires_at_ms = lease->expires_at_ms();
+    }
+    const auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    };
+    while (now_ms() <= expires_at_ms) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    auto recovery = std::make_shared<Shared>();
+    Wire restarted(image, recovery, options);
+    const auto charged = restarted.journal().inspect(owner, crashed[0].id)->committed_amount;
+    ASSERT_GT(charged, 0U);
+    const auto timed_out = restarted.runtime().reconnect(owner, run).wait();
+
+    ASSERT_EQ(timed_out.status(), ProgramTerminalStatus::TimedOut) << failure_text(timed_out);
+    ASSERT_TRUE(timed_out.failure());
+    EXPECT_EQ(timed_out.failure()->code, "P_RUN_LEASE_EXPIRED");
+    EXPECT_EQ(recovery->transport.load(), 0);
+    EXPECT_EQ(timed_out.usage().model_tokens, charged);
+    EXPECT_EQ(timed_out.remaining_budget().model_tokens, options.model_tokens - charged);
     EXPECT_TRUE(same_rows(rows(image.provider_db()), crashed));
 }
 

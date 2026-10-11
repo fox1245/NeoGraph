@@ -168,6 +168,9 @@ public:
         std::string_view operation_id) const;
     /// The attempt's monetary account, passed to provider call resolvers.
     void set_monetary_account(std::shared_ptr<ProgramMonetaryAccount> account);
+    /// The token account of an attempt settled without running again, passed
+    /// to provider call resolvers (#381).
+    void set_journaled_usage(std::shared_ptr<UsageAccumulator> usage);
     void emit_lifecycle_hook(HookPhase phase, const ProgramEvent& event,
                              std::optional<ProgramTerminalStatus> status = {},
                              bool observe_cancellation = true) const;
@@ -320,6 +323,7 @@ private:
     ProgramCoreProviderCallResolver             core_provider_call_resolver_;
     bool                                        require_core_provider_call_broker_ = false;
     std::shared_ptr<ProgramMonetaryAccount>     monetary_account_;
+    std::shared_ptr<UsageAccumulator>           journaled_usage_;
     std::atomic<bool>                          hook_runtime_enabled_{false};
     std::shared_ptr<TaskGraphFragmentStore>  task_graph_fragments_;
     TaskGraphExpansionPolicyResolver         task_graph_policy_resolver_;
