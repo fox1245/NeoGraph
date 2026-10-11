@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ko source_sha256=e7bb3e4608b1e5f3af734a49afa0976e6b65090989f96eda60028e0c60afc094 -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ko source_sha256=72d9de3ebec44aa6eb7f92a3cabc4a08d177461e8869eaff2b0bd003b353c8d3 -->
 # 매턴 하니스를 제안하는 챗봇
 
 ## 현재 타입 Program chat 계약
@@ -9,7 +9,9 @@
 reviewed-template generation, 역할별 prompt, effect/capability grant,
 정확한 checkpoint lineage와 nonrenewable budget은 host가 소유합니다.
 
-기존 `server_multi.cpp` live-provider 경로의 timeout은 180초입니다.
+기존 `server_multi.cpp` live-provider 경로는 호출당 600초를 허용해, 관측된 가장 느린 속도로도
+8,192토큰 답변을 마칠 수 있게 합니다. 30초 동안 아무 바이트도 오지 않는 연결은 실패로 처리합니다
+(OpenRouter는 헤더를 즉시 보내고 생성 중에는 몇 초마다 keepalive 공백을 보냅니다).
 ProgramChat의 `--provider-timeout-seconds` 범위/기본값이나 공유 provider factory의 기본값은
 바꾸지 않으며 failure 재전송도 활성화하지 않습니다.
 

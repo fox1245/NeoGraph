@@ -3,18 +3,47 @@
 #include <neograph/llm/schema_provider.h>
 #include <json/json.h>
 #include <core/request_controls.h>
+#include <charconv>
 #include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <limits>
 #include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace examples {
 inline constexpr const char* openrouter_model = "~deepseek/deepseek-v4-flash-latest";
+
+// Finite demonstration controls, not model-limit facts, a monetary grant or a
+// replacement for host admission. Unset values preserve each recipe's default.
+inline std::uint64_t env_count(const char* name, std::uint64_t fallback,
+                               std::uint64_t minimum = 1,
+                               std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max()) {
+    const char* raw = std::getenv(name);
+    if (!raw) return fallback;
+    const std::string_view text(raw);
+    std::uint64_t value = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || end != text.data() + text.size() ||
+        text.empty() || value < minimum || value > maximum)
+        throw std::invalid_argument(std::string(name) + " is outside its supported integer range");
+    return value;
+}
+
+inline std::uint64_t output_cap(std::uint64_t fallback) {
+    return env_count("NG_EXAMPLE_MAX_TOKENS", fallback);
+}
+
+inline unsigned empty_reasks(unsigned fallback, unsigned maximum) {
+    return static_cast<unsigned>(env_count("NG_EXAMPLE_EMPTY_REASKS", fallback, 0, maximum));
+}
 
 // Actual closed/versioned SDK admission, not an editable request-body override.
 inline sp::descriptor::ValidatedDescriptor admitted_descriptor(
@@ -47,10 +76,17 @@ inline sp::descriptor::ValidatedDescriptor openrouter_descriptor(std::string fam
 inline std::unique_ptr<neograph::llm::SchemaProvider> make_openrouter_provider(
     std::string api_key, std::string family = "responses",
     std::chrono::milliseconds timeout = std::chrono::seconds(120),
-    std::optional<sp::OpenRouterRouting> routing = std::nullopt) {
+    std::optional<sp::OpenRouterRouting> routing = std::nullopt,
+    std::optional<std::chrono::milliseconds> stall_timeout = std::nullopt) {
     sp::runtime::Options options;
     options.api_key = std::move(api_key);
     options.default_timeout = timeout;
+    if (stall_timeout) {
+        // OpenRouter answers with headers at once and sends keepalive whitespace every few
+        // seconds while it generates, so a quiet connection is a stall, not a slow generation.
+        options.transport.first_byte_timeout = *stall_timeout;
+        options.transport.idle_timeout = *stall_timeout;
+    }
     if (!routing) routing.emplace();
     if (!routing->zdr) routing->zdr = true;
     neograph::llm::SchemaProvider::Defaults defaults;

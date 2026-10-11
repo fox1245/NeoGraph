@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=7ab0ab562d04442bd8c1190e9d6f8540ba08ff93d2278b1564c3487d652022c8 -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=ce7e094fabd0d6304f5961a14e5ca75acbfa89a345a01c74939bf55595ae91f6 -->
 # C++ API 예제
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
@@ -252,18 +252,51 @@ Failure, observer/settlement 오류, 이미 전달한 streaming part는 추가 �
 표시하며 불변 outcome을 수정하거나 부분 텍스트를 재시도하지 않습니다. 빈 compression이
 ladder를 소진하면 diagnostic을 반환하며 성공한 provider result를 꾸며내지 않습니다.
 
-예제 16은 완료된 빈 응답에만 최대 세 번 호출하고 cap 8,192와 ask당 deadline 300초를 유지합니다.
-cap을 두 배로 늘리거나 failure를 재시도하지 않습니다. 최종 답변에 visible text가 없으면 오류를 출력하고
-1로 종료합니다. 예제 28의 rewrite는 low effort와 출력
+예제 16은 기본 cap 8,192와 ask당 deadline 300초를 유지하며 완료된 빈 응답에만 최대 세 번 호출합니다.
+cap을 두 배로 늘리거나 failure를 재시도하지 않습니다. 빈 중간 응답/잘못된 evaluator 점수는
+0점으로 바꾸지 않고 실패하며, 잘린 최종 답변은 불완전한 결과로 1로 종료합니다. 예제 28의 rewrite는 low effort와 출력
 512 token을 요청하고 빈/공백 응답이면 원래 질문을 그대로 반환합니다. provider timeout은
 180초입니다. 이 경로별 설정은 공유 factory의 기본값을 바꾸지 않습니다.
 
 다중 고객 self-evolving chatbot은 judge 이력 접두사를 유효한 UTF-8 경계에서 200바이트
 이내로 자르고 예외를 오류와 종료 코드 1로 보고합니다. The Beast의 `baldwin_llm --llm`은
-키를 요구하며 오프라인 oracle로 대체하지 않습니다. 타입 요청은 low effort와 cap 1,824를
-사용하며 완료된 빈 `MaxTokens` 응답만 cap 3,648로 한 번 재요청합니다. Provider 실패나
-끝내 빈 응답은 1로 종료합니다. 이는 제한된 빈 출력 처리이며 Baldwin 학습이나 ToT 정체
-빈도에 대한 라이브 provider 검증은 아닙니다.
+키를 요구하며 오프라인 oracle로 대체하지 않습니다. 타입 요청은 low effort와 기본 cap 1,824를
+사용하며 완료된 빈 `MaxTokens` 응답만 기본 cap 3,648로 한 번 재요청합니다. 원래 Outcome과
+실제 호출별 usage는 보존합니다. Provider 실패, 끝내 빈 응답, 파싱 불가능한 연산 이름은
+완료된 learner로 가장하지 않고 1로 종료합니다. 이 소스 수정은 라이브 provider 검증이나 퍼즐 성공 주장이 아닙니다.
+
+### 이슈 #190 / #317의 유한 진단
+
+`NG_EXAMPLE_MAX_TOKENS`는 ToT, Baldwin, Jarvis, `server_multi` 및 inspection 예제 29/30의 명시적인 양수 호출별 출력 상한입니다. 숨은 reasoning을 포함하며 명시적으로 지정하면 절대 두 배로 늘리지 않습니다. 설정하지 않으면 원래 레시피 기본값을 그대로 유지합니다. `NG_EXAMPLE_EMPTY_REASKS=0`은 기존의 완료된 빈 `MaxTokens` 재요청을 끕니다. 최대/기본값은 ToT 2, Baldwin/Jarvis 1입니다. 이는 새로운 의미적 호출이며 실패나 이미 전달된 tool-call 출력의 재시도가 아닙니다. Jarvis는 별도의 broker ordinal, 원래 admission bank/deadline, 모든 실제 Outcome/report를 유지합니다. 통과를 위해 thinking 설정을 끄지 않으며, 모델 한도 정보를 지어내지 않고, 금전 grant를 갱신하지 않습니다.
+
+다음 제어는 원래 예제 작업량을 줄이기만 합니다.
+
+| 레시피 | 제어와 원래 기본값 | 재요청을 끈 최대 호출 수 |
+|---|---|---|
+| ToT | `NG_TOT_DEPTH=3` (1..3), `NG_TOT_BRANCHING=3` (1..3), `NG_TOT_BEAM_WIDTH=5` (1..5) | 원래 37; 1/1/1에서 3 |
+| Baldwin, 두 모드 | `NG_BALDWIN_POPULATION=6` (2/4/6), `NG_BALDWIN_GENERATIONS=4` (1..4) | 원래 48; 2/1에서 4 |
+| 다중 고객 서버 | `NG_MULTI_CUSTOMERS=5`, `NG_MULTI_TURNS=5` (둘 다 1..5) | 원래 90; 고객 1명/4턴에서 14 |
+
+**별도의 호스트 지출 예약** 후 저장소 root에서 실행합니다.
+
+```sh
+# Representative canaries, not substitutes for the unchanged original workload.
+NG_EXAMPLE_MAX_TOKENS=8192 NG_EXAMPLE_EMPTY_REASKS=0 \
+  NG_TOT_DEPTH=1 NG_TOT_BRANCHING=1 NG_TOT_BEAM_WIDTH=1 \
+  ./build/example_tree_of_thoughts
+NG_EXAMPLE_MAX_TOKENS=8192 NG_EXAMPLE_EMPTY_REASKS=0 \
+  NG_BALDWIN_POPULATION=2 NG_BALDWIN_GENERATIONS=1 \
+  ./build/cookbook_the_beast_baldwin_llm --llm
+NG_EXAMPLE_MAX_TOKENS=8192 NG_MULTI_CUSTOMERS=1 NG_MULTI_TURNS=4 \
+  ./build/cookbook_self_evolving_chatbot_multi
+# These inspection commands retain sensitive native/provider payloads.
+NG_EXAMPLE_MAX_TOKENS=8192 ./build/example_responses_envelope "Reply briefly to hello."
+NG_EXAMPLE_MAX_TOKENS=8192 ./build/example_reasoning_effort
+```
+
+이 다섯 명령은 모델 호출 3 + 4 + 14 + 1 + 4 = 26회와 설정된 출력 토큰 212,992개로 제한되며 입력 토큰은 별도입니다. 달러 가격을 입증하거나 지출을 승인하지 않습니다. 소유자가 승인한 모델/경로를 사용하고 로그는 비공개로 유지하세요. 원래 작업량 qualification은 shape override만 빼고 명시적 cap/재요청 선택은 기록해 둡니다. 이 명시적 설정에서 전체 ToT + Baldwin + 서버는 최대 175회 호출 / 설정된 출력 토큰 1,433,600개입니다.
+
+ToT는 비어 있지 않은 최종 `EXPR`/`CHECK`를 출력해야 합니다. 실제 식을 독립적으로 계산해 4 하나, 7 하나, 8 두 개를 정확히 사용하고 결과가 24인지 확인하세요. 모델의 점수는 산술 oracle이 아닙니다. Baldwin은 두 모드 모두 실제 pipeline fitness와 hit 수를 보여야 합니다. 특정 진화 trace를 강제하거나 live learner를 오프라인 oracle로 대체하지 마세요. 서버는 비어 있지 않은 모델/judge 출력과 직렬화/provider 실패 없이 선택한 네 번째 턴에 도달해야 합니다. 30은 네 가지 effort를 관찰하는 sweep입니다. reasoning 토큰, 실행 시간, 정확도의 단조성은 약속하지 않으며 빈 답변은 Outcome을 보존한 채 exit 2를 반환합니다. 29는 답변 텍스트 없이 tool call만 반환하는 것이 정상일 수 있습니다. 이는 envelope inspection이지 날씨 답변 benchmark가 아닙니다. Provider 실패는 계속 nonzero입니다.
 
 ### 체크포인트 및 진화
 
@@ -352,3 +385,19 @@ tool search, `shell.environment`의 skills, shell(`container_auto`)입니다.
 순서 있는 타입/raw event와 전체 terminal을 유지합니다. hosted tool은 route에 따라 지원되지 않거나
 추가 비용이 발생할 수 있습니다. 타입 admission은 live 호환성 보장이 아닙니다.
 WebSocket/primitive 실행 예제는 유지하지 않습니다. Images/Veo/Decisions는 별도 타입 NeoGraph client이며 chat spending grant를 상속하지 않습니다.
+
+Decisions choice criteria는 문자열 배열이 아니라 choice를 키로 하는 객체입니다.
+현재 별도 typed client는 raw `SchemaProvider::request_json()` body 없이 올바른 형태를 표현합니다.
+
+```cpp
+#include <neograph/llm/decisions_client.h>
+neograph::llm::DecisionsChoiceQuestion question;
+question.instructions = "Choose whether the supplied answer addresses the question.";
+question.criteria = {{"accept", "The answer addresses the question."},
+                     {"reject", "The answer does not address the question."}};
+neograph::llm::DecisionsRequest request;
+request.state = {{"question", "What is 2 + 2?"}, {"answer", "4"}};
+request.questions.emplace("decision", std::move(question));
+```
+
+이는 요청 구성일 뿐 새 유료 요청이나 vendor 정확도의 증거가 아닙니다.

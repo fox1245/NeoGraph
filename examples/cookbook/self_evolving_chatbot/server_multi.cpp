@@ -107,7 +107,8 @@ static json topology_fanout() {
             {"perspective_a", {{"type", "llm_call"}}},
             {"perspective_b", {{"type", "llm_call"}}},
             {"perspective_c", {{"type", "llm_call"}}},
-            {"merge",         {{"type", "merge"}}},
+            {"merge",         {{"type", "merge"}, {"barrier", {{"wait_for",
+                json::array({"perspective_a", "perspective_b", "perspective_c"})}}}}},
         }},
         {"edges", json::array({
             {{"from", "__start__"},     {"to", "perspective_a"}},
@@ -146,7 +147,9 @@ public:
             std::shared_lock lk(mu_);
             if (auto it = cache_.find(key); it != cache_.end()) return it->second;
         }
-        auto raw = GraphEngine::build(def, EngineConfig{.node_context = ctx});
+        EngineConfig config{.node_context = ctx};
+        config.worker_count = 3;  // the fanout topology runs its three perspectives at once
+        auto raw = GraphEngine::build(def, config);
         std::shared_ptr<GraphEngine> engine(raw.release());
         std::unique_lock lk(mu_);
         return cache_.emplace(std::move(key), engine).first->second;
@@ -154,13 +157,70 @@ public:
     std::size_t size() { std::shared_lock lk(mu_); return cache_.size(); }
 };
 
+// ── Diagnostics (stderr): attempt evidence and token counts, never bodies ──
+
+static std::string count_text(const std::optional<sp::Count>& count) {
+    return count ? std::to_string(count->value) : std::string("?");
+}
+
+static void print_outcome_evidence(const sp::runtime::Result& outcome, const std::string& label) {
+    if (!outcome) { std::cerr << "  [diag] " << label << ": no outcome\n"; return; }
+    if (const auto* done = std::get_if<sp::Completion>(&*outcome)) {
+        std::cerr << "  [diag] " << label << ": completed, stop " << done->stop.raw
+                  << ", output " << count_text(done->usage.output_total)
+                  << " (reasoning " << count_text(done->usage.reasoning) << ") tokens, response_head_seen "
+                  << done->attempt.response_head_seen << ", wire attempts " << done->attempt.attempts << "\n";
+        if (done->stop.kind != sp::StopKind::EndTurn) {
+            // Show how a cut-off answer ends (repetition loop vs. long answer), never the whole body.
+            auto text = outcome_text(*outcome);
+            auto tail = text.size() > 240 ? text.substr(text.size() - 240) : text;
+            for (auto& c : tail) if (c == '\n' || c == '\r') c = ' ';
+            std::cerr << "  [diag]   visible text " << text.size() << " bytes, ends: ..." << tail << "\n";
+        }
+        return;
+    }
+    const auto& failure = std::get<sp::Failure>(*outcome);
+    const auto& error = failure.error;
+    std::cerr << "  [diag] " << label << ": failure kind " << static_cast<int>(error.kind)
+              << " (" << error.safe_message << "), http_status " << error.http_status
+              << ", response_head_seen " << error.attempt.response_head_seen
+              << ", request_may_have_left " << error.attempt.request_may_have_left
+              << ", wire attempts " << error.attempt.attempts
+              << ", partial output " << count_text(failure.partial.usage.output_total)
+              << " (reasoning " << count_text(failure.partial.usage.reasoning) << ") tokens, partial stop "
+              << (failure.partial.stop ? failure.partial.stop->raw : std::string("none")) << "\n";
+}
+
+// Walk node -> provider exception causes and print what each layer observed.
+static void print_failure_evidence(std::exception_ptr error) {
+    for (int depth = 0; error && depth < 6; ++depth) {
+        try {
+            std::rethrow_exception(error);
+        } catch (const NodeExecutionError& e) {
+            std::cerr << "  [diag] node " << e.node_name() << " after " << e.attempts() << " attempt(s)\n";
+            error = e.cause();
+        } catch (const ProviderFailure& e) {
+            print_outcome_evidence(e.outcome(), "provider");
+            return;
+        } catch (const ProviderOutcomeError& e) {
+            print_outcome_evidence(e.outcome(), "provider");
+            error = e.cause();
+        } catch (const std::exception& e) {
+            std::cerr << "  [diag] cause: " << e.what() << "\n";
+            return;
+        } catch (...) {
+            return;
+        }
+    }
+}
+
 // ── LLM judge (server.cpp 와 동일 prompt) ────────────────────────────
 
 static std::string llm_judge_topology(
     const std::shared_ptr<neograph::Provider>& provider,
     const std::vector<json>& history,
     const std::string& current_topology,
-    UsageAccumulator& usage)
+    UsageAccumulator& usage, std::vector<sp::runtime::Result>& outcomes)
 {
     std::string hist_str;
     for (const auto& m : history) {
@@ -195,11 +255,18 @@ static std::string llm_judge_topology(
         "\nBest topology for THIS user (one word):"
     }));
 
+    ProviderControls controls;
+    if (std::getenv("NG_EXAMPLE_MAX_TOKENS"))
+        controls.max_output_tokens = examples::output_cap(0);
     auto result = provider->invoke(make_provider_request(
-        *provider, "~deepseek/deepseek-v4-flash-latest", std::move(messages)));
+        *provider, "~deepseek/deepseek-v4-flash-latest", std::move(messages), {}, controls));
+    outcomes.push_back(result);
+    if (!result) throw std::runtime_error("Judge provider returned no owned outcome");
     usage.add(outcome_usage(*result));
     result = outcome_or_throw(std::move(result));
     std::string raw = outcome_text(*result);
+    if (raw.find_first_not_of(" \t\r\n") == std::string::npos)
+        throw ProviderOutcomeError("Judge completed without a topology decision", result, {});
     std::string word;
     for (char c : raw) {
         if (std::isalpha(static_cast<unsigned char>(c)))
@@ -319,7 +386,10 @@ static int run_demo() {
         return 1;
     }
 
-    std::shared_ptr<Provider> provider = examples::make_openrouter_provider(api_key, "chat", std::chrono::seconds(180));
+    std::shared_ptr<Provider> provider = examples::make_openrouter_provider(
+        // A full 8192-token answer needs about 300 s at the slowest observed ~26 tokens/s;
+        // a 30 s stall bound still fails a silent connection quickly.
+        api_key, "chat", std::chrono::seconds(600), std::nullopt, std::chrono::seconds(30));
 
     NodeFactory::instance().register_type("merge",
         [](const std::string& name, const json&, const NodeContext&) {
@@ -332,7 +402,14 @@ static int run_demo() {
 
     // 5 customer 초기화 — 모두 simple topology 로 시작.
     auto patterns = make_patterns();
+    const auto customer_count = examples::env_count("NG_MULTI_CUSTOMERS", 5, 1, 5);
+    const auto turns = examples::env_count("NG_MULTI_TURNS", 5, 1, 5);
+    patterns.resize(customer_count);
+    for (auto& pattern : patterns) pattern.messages.resize(turns);
+    std::vector<sp::runtime::Result> outcomes;
+    outcomes.reserve(customer_count * (1 + (turns - 1) * 3 + turns));
     std::vector<CustomerState> customers;
+    customers.reserve(customer_count);
     for (auto& p : patterns) {
         CustomerState c;
         c.id = p.id;
@@ -344,7 +421,7 @@ static int run_demo() {
     }
 
     std::cout << "\n=== Multi-customer self-evolving chatbot demo ===\n";
-    std::cout << "5 customer × 5 turn — 각자 별도 evolution timeline\n";
+    std::cout << customer_count << " customers × " << turns << " turns\n";
     std::cout << "All start with 'simple' topology.\n\n";
 
     auto t_start = std::chrono::steady_clock::now();
@@ -363,7 +440,11 @@ static int run_demo() {
             NodeContext ctx;
             ctx.provider = provider;
             ctx.model = "~deepseek/deepseek-v4-flash-latest";
-            ctx.instructions = cust.system_prompt;
+            // A chat answer, not an essay: without a length instruction some routed backends
+            // write comparison questions out to the full output cap.
+            ctx.instructions = cust.system_prompt + " Keep each answer under 300 words.";
+            if (std::getenv("NG_EXAMPLE_MAX_TOKENS"))
+                ctx.provider_controls.max_output_tokens = examples::output_cap(0);
             auto engine = cache.get_or_compile(cust.id, cust.topology_def, ctx);
 
             auto answering_history = cust.native_history;
@@ -374,8 +455,37 @@ static int run_demo() {
             rcfg.thread_id = cust.id + "__main";
             rcfg.provider_messages = std::move(answering_history);
 
-            auto result = engine->run(rcfg);
-            cust.native_history = std::move(result.native_messages);
+            const auto turn_start = std::chrono::steady_clock::now();
+            const auto turn_seconds = [&] {
+                return std::chrono::duration<double>(std::chrono::steady_clock::now() - turn_start).count();
+            };
+            RunResult result;
+            try {
+                result = engine->run(rcfg);
+            } catch (...) {
+                std::cerr << "  [diag] turn " << (turn + 1) << " [" << cust.topology_name << "] failed after "
+                          << turn_seconds() << " s\n";
+                print_failure_evidence(std::current_exception());
+                throw;
+            }
+            std::cerr << "  [diag] turn " << (turn + 1) << " [" << cust.topology_name << "] took "
+                      << turn_seconds() << " s\n";
+            for (std::size_t i = 0; i < result.provider_outcomes.size(); ++i)
+                print_outcome_evidence(result.provider_outcomes[i], "call " + std::to_string(i + 1));
+            if (result.status() != RunStatus::Completed)
+                throw std::runtime_error("Customer answering graph did not complete");
+            for (std::size_t i = 0; i < result.provider_outcomes.size(); ++i) {
+                const auto& outcome = result.provider_outcomes[i];
+                outcomes.push_back(outcome);
+                const auto* done = outcome ? std::get_if<sp::Completion>(&*outcome) : nullptr;
+                const std::string where = " (" + cust.topology_name + " call " + std::to_string(i + 1) +
+                    "/" + std::to_string(result.provider_outcomes.size()) + ", stop " +
+                    (done ? done->stop.raw : std::string("none")) + ")";
+                if (done && done->stop.kind != sp::StopKind::EndTurn)
+                    throw ProviderOutcomeError(("Customer model did not finish normally" + where).c_str(), outcome, {});
+                if (!outcome || outcome_text(*outcome).find_first_not_of(" \t\r\n") == std::string::npos)
+                    throw ProviderOutcomeError(("Customer model completed without visible text" + where).c_str(), outcome, {});
+            }
             auto out_msgs = result.output["channels"]["messages"]["value"];
             std::string final_reply;
             if (out_msgs.is_array()) {
@@ -383,14 +493,17 @@ static int run_demo() {
                     if (m.value("role", "") == "assistant")
                         final_reply = m.value("content", "");
             }
+            if (final_reply.find_first_not_of(" \t\r\n") == std::string::npos)
+                throw std::runtime_error("Customer answering graph produced no visible reply");
+            cust.native_history = std::move(result.native_messages);
 
             cust.history.push_back({{"role", "user"}, {"content", umsg}});
             cust.history.push_back({{"role", "assistant"}, {"content", final_reply}});
 
-            cust.main_llm_calls += (cust.topology_name == "simple") ? 1 : 3;
+            cust.main_llm_calls += static_cast<int>(result.provider_outcomes.size());
 
             std::string suggested = llm_judge_topology(
-                provider, cust.history, cust.topology_name, *reported_usage);
+                provider, cust.history, cust.topology_name, *reported_usage, outcomes);
             cust.judge_llm_calls += 1;
 
             std::string evolve_marker = "";
@@ -401,9 +514,9 @@ static int run_demo() {
                 cust.topology_def = topo_registry[suggested]();
             }
 
-            std::string preview = final_reply.size() > 80
-                ? final_reply.substr(0, 80) + "..."
-                : final_reply;
+            const auto preview_prefix = examples::utf8_prefix(final_reply, 80);
+            std::string preview(preview_prefix);
+            if (preview_prefix.size() < final_reply.size()) preview += "...";
             std::cout << "  Turn " << (turn + 1) << " [" << cust.topology_name
                       << "]: " << preview << evolve_marker << "\n";
         }
@@ -425,7 +538,7 @@ static int run_demo() {
         final_topology_dist[c.topology_name]++;
     }
     std::cout << "Customers:           " << customers.size() << "\n";
-    std::cout << "Total turns:         " << (customers.size() * 5) << "\n";
+    std::cout << "Total turns:         " << (customers.size() * turns) << "\n";
     std::cout << "Total main LLM:      " << total_main << "\n";
     std::cout << "Total judge LLM:     " << total_judge << "\n";
     std::cout << "Total LLM calls:     " << (total_main + total_judge) << "\n";

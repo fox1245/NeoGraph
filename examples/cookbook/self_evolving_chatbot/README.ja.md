@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ja source_sha256=e7bb3e4608b1e5f3af734a49afa0976e6b65090989f96eda60028e0c60afc094 -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ja source_sha256=72d9de3ebec44aa6eb7f92a3cabc4a08d177461e8869eaff2b0bd003b353c8d3 -->
 # 自己進化型チャットボット
 
 ## 現在の型付き Program chat 契約
@@ -8,7 +8,9 @@
 既存 browser/HTTP protocol は不変です。Alice/Bob owner scope、reviewed-template generation、
 役割別 prompt、effect/capability grant、正確な checkpoint lineage、nonrenewable budget は host が所有します。
 
-既存 `server_multi.cpp` live-provider 経路の timeout は180秒です。
+既存 `server_multi.cpp` live-provider 経路は 1 呼び出しあたり600秒を許容し、観測された最も遅い速度でも
+8,192トークンの回答を完了できるようにします。30秒間何のバイトも届かない接続は失敗として扱います
+（OpenRouter はヘッダーを即座に送り、生成中は数秒ごとに keepalive の空白を送ります）。
 ProgramChat の `--provider-timeout-seconds` 範囲/既定値や共有 provider factory の既定値は
 変えず、failure 再送も有効にしません。
 

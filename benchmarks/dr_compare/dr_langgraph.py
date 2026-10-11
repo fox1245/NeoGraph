@@ -3,7 +3,7 @@
 Same topology, same prompts, same model, same Crawl4AI search,
 same Postgres checkpoint backend (langgraph_checkpoint_postgres).
 Only the engine + transport differ:
-  * NeoGraph: C++ engine, asio thread-pool fan-out, WebSocket Responses.
+  * NeoGraph: C++ engine, asio thread-pool fan-out, HTTP Chat by default.
   * LangGraph: Python engine, asyncio fan-out, HTTP via httpx.
 
 Returns the final assistant markdown report. Used by bench.py."""
@@ -31,6 +31,11 @@ LLM_MOCK_MS  = int(os.environ.get("LLM_MOCK_MS", "-1"))  # -1 = real LLM
 MOCK_SEARCH  = os.environ.get("MOCK_SEARCH", "0") == "1"
 FANOUT       = int(os.environ.get("FANOUT", "5"))
 USE_INMEMORY = os.environ.get("USE_INMEMORY_CP", "0") == "1"
+if FANOUT < 1:
+    raise ValueError("FANOUT must be positive")
+MAX_OUTPUT_TOKENS = int(os.environ.get("NG_EXAMPLE_MAX_TOKENS", "1600"))
+if MAX_OUTPUT_TOKENS < 1:
+    raise ValueError("NG_EXAMPLE_MAX_TOKENS must be positive")
 
 RESEARCH_TRIGGER_PATTERN = re.compile(
     r"(조사|리서치|연구|research|investigate|deep[- ]?dive)", re.IGNORECASE)
@@ -61,12 +66,14 @@ class _MockLGModel:
 if LLM_MOCK_MS >= 0:
     _LLM = _MockLGModel(LLM_MOCK_MS)
 else:
-    # Single ChatOpenAI client; httpx reuses an HTTP/2 connection pool
-    # under the hood so successive calls amortise TCP/TLS setup.
+    # One client reuses its HTTP connection pool; HTTP/2 negotiation is not
+    # asserted by this benchmark.
     # OPENAI_API_BASE routes to Groq / vLLM / etc. when set — same
     # env var the NeoGraph side reads in _common.schema_provider().
     _api_base = os.environ.get("OPENAI_API_BASE", "").rstrip("/")
-    _kwargs = {"model": DR_MODEL, "api_key": os.environ.get("OPENAI_API_KEY")}
+    _kwargs = {"model": DR_MODEL, "api_key": os.environ.get("OPENAI_API_KEY"),
+               "max_tokens": MAX_OUTPUT_TOKENS, "max_retries": 0,
+               "timeout": int(os.environ.get("NG_EXAMPLE_TIMEOUT_SECONDS", "180"))}
     if _api_base:
         _kwargs["base_url"] = _api_base + ("/v1" if not _api_base.endswith("/v1") else "")
     _LLM = ChatOpenAI(**_kwargs)
@@ -114,7 +121,25 @@ def _llm_text(prompt: str, *, temperature: float | None = None) -> str:
     """One-shot LLM call returning bare text."""
     llm = _LLM if temperature is None else _LLM.bind(temperature=temperature)
     resp = llm.invoke([HumanMessage(content=prompt)])
-    return resp.content if isinstance(resp.content, str) else str(resp.content)
+    if LLM_MOCK_MS < 0:
+        finish_reason = resp.response_metadata.get("finish_reason")
+        if finish_reason != "stop" or resp.tool_calls or resp.invalid_tool_calls:
+            error = RuntimeError(f"Provider did not complete a text-only benchmark answer: {finish_reason}")
+            error.response = resp
+            raise error
+    if isinstance(resp.content, str):
+        text = resp.content
+    elif isinstance(resp.content, list):
+        text = "".join(part["text"] for part in resp.content
+                       if isinstance(part, dict) and part.get("type") == "text"
+                       and isinstance(part.get("text"), str))
+    else:
+        text = ""
+    if not text.strip():
+        error = RuntimeError("Provider completion contains no visible text")
+        error.response = resp
+        raise error
+    return text
 
 
 def router(state: State) -> Command:
@@ -142,10 +167,11 @@ def research_plan(state: State) -> dict:
         f"주제: {topic}",
         temperature=0.0)
     qs = [
-        line.strip().lstrip("-•0123456789. ")
-        for line in text.strip().splitlines()
-        if line.strip()
+        question for line in text.strip().splitlines()
+        if (question := line.strip().lstrip("-•0123456789. ").strip())
     ][:FANOUT]
+    if not qs:
+        raise RuntimeError("Research plan contained no usable sub-questions")
     return {"sub_questions": qs}
 
 

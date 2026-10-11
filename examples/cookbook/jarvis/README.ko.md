@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=ko source_sha256=202c2f70184732cf88d2eced559f2402f528d8b4f18448b59802d41c826310fc -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=ko source_sha256=f54a315d6278705e37ff35dfc675090e85b00c7efc53c88fe7c93d31a420be61 -->
 # JARVIS — 음성 기반 메타 오케스트레이터
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -9,11 +9,17 @@ C++ 라우터·합성기·전문가 픽스처는 타입 `ProviderRequest`, `sp::
 
 로컬 음성은 선택 사항이며 선택한 whisper/Moonshine 모델, ONNX Runtime/Supertonic 자산, miniaudio 및 사용 가능한 마이크·스피커가 필요하다. 텍스트/mock 실행은 음성 동작의 증거가 아니다. 클라우드 불필요는 로컬/mock에만 해당한다. 라이브 요청에는 승인된 `OPENROUTER_API_KEY`, 네트워크·제공자 용량이 필요하며 프롬프트, 대화 메모리, 첨부 도구/위임 결과를 OpenRouter로 전송한다. 모델은 고정되어 있고 네이티브 요청의 ZDR은 지역 상주 보장이 아니다. 키를 로그·저장소에 넣지 않는다. nullable 토큰 사용량은 청구액이 아니며 비용에는 현재 엔드포인트/모델 가격과 실제 청구 사용량이 필요하다.
 
-라이브 router와 synthesizer의 출력 cap(명목 응답 300 / 220 토큰)에는 1,024 토큰의 reasoning 여유분을 더하고 낮은 reasoning effort를 요청한다. 숨은 reasoning과 가시 텍스트가 cap을 공유하는 모델을 위한 여유분이다. 완료된 빈 `MaxTokens` 응답만 cap을 두 배로 늘려 한 번 다시 요청하며, 다른 빈 완료 응답이나 provider 실패는 재요청 없이 오류가 된다. 빈 응답은 성공한 발화 턴으로 처리하지 않는다. `OPENROUTER_BASE_URL`로 지정하는 게이트웨이는 `https://`여야 하며, `OPENROUTER_CA_FILE`은 벤치마크 프록시 같은 사설 TLS 게이트웨이용 PEM CA 번들을 선택한다.
+라이브 router/synthesizer의 기본 출력 cap(명목 300 / 220 토큰)은 reasoning 여유 1,024를 더하고 low effort를 요청합니다. 완료된 빈 `MaxTokens`만 최대 한 번 재요청하며 기본 cap만 두 배로 늘립니다. 양수 `NG_EXAMPLE_MAX_TOKENS`는 추론을 포함한 명시적 cap으로 매 호출 동일하게 유지됩니다. `NG_EXAMPLE_EMPTY_REASKS=0`은 재요청을 끕니다(기본/최대1). 다른 빈 응답, provider 실패, tool-call 출력은 재요청하지 않습니다. 빈 발화는 성공하지 않습니다. `OPENROUTER_BASE_URL` 게이트웨이는 `https://`가 필수이고 `OPENROUTER_CA_FILE`은 사설 TLS gateway의 PEM CA를 선택합니다.
 
 잘린 invalid call을 포함한 tool-call 출력은 빈 텍스트 재요청을 유발하지 않는다.
 JSON router는 파싱 전에 text-only `EndTurn` / `StopSequence` 완료만 허용하며,
 잘린 출력은 JSON이 유효해 보여도 실패한다. 기존 잘못된 JSON fallback은 정상 완료 텍스트에만 적용된다.
+부분/거부/비최종 synthesis는 불변 Outcome에 유지하되 TTS 전에 실패합니다. 이미 전달된 부분 텍스트로 추가 제공자 호출을 하지 않습니다.
+
+
+사용자 정의 provider 호출 노드는 기존 runtime-interposition/broker 경계와 공유 `record_usage` sink를 사용합니다. 응답 텍스트를 추출하기 전에 실제 소유 outcome을 보존하고, 취소/deadline과 로컬·호스트 observer를 모두 전파하며, observer가 예외를 던져도 drain된 outcome을 보존합니다. synthesizer의 별도 재생성 호출은 고유한 안정 call ordinal을 사용합니다. 제한된 호출에는 승인된 모델 한도 정보가 필요하며, 정보가 없으면 토큰 추정치를 지어내지 않고 provider dispatch 전에 실패합니다. 승인된 origin에서는 기본 HTTPS 포트를 생략하므로 OpenRouter 라우팅이 정책의 정규 origin과 일치합니다.
+
+별도로 승인된 유한 검증에서 `bench/driver.py --max-turns 3`은 꾸며낸 예상 응답이 아니라 추적된 `bench/turns_openrouter.txt`의 **실제** 첫 세 줄을 사용합니다. driver는 빈 입력/TTS 결과와 불완전하거나 실패한 child 실행을 거부합니다. `config-bench`의 빈 tool/agent catalog에서 `NG_EXAMPLE_EMPTY_REASKS=0`이면 세 턴은 최대 9회 모델 호출(턴마다 router + synthesis + 선택적 verbatim 재생성)로 제한됩니다. 명시적 8,192토큰 cap이면 설정된 출력 허용량은 최대 73,728토큰이며 입력, 청구 대상 사용량, 금액은 별도입니다. 이 cap은 진단용 선택이지 새 기본값이나 지출 승인이 아닙니다. 새 owner-private `JARVIS_MEMORY_FILE`을 사용하고 라이브 메모리 저장소를 재사용하지 마세요. 현재 소스 변경은 새 live 실행, 음성, nginx 프록시 qualification이 아닙니다.
 
 `[jarvis:ttft]`는 비어 있지 않은 첫 `sp::PartDelta` 중 `PartKind::Text`와 `DeltaChannel::Content`에만 발생하며 사용량·추론·헤더 이벤트는 제외한다. 첫 합성 텍스트 시점이지 실제 TTS 청취 시작이 아니다. Python REPL driver는 protocol client이며 pybind benchmark는 전환된 타입 binding을 사용하므로 별도 실행 증거가 필요하다. 현재 실행 증거는 실제 CLI 인사, 영속화된 합성 메모리 turn과 정상 EOF 종료에 한정된다. 마이크 입력·ASR·TTS·pybind 벤치나 vendor 추론을 검증하지 않는다. 아래 시간·음성/live 실행 주장은 과거 기록이며 현재 전환 qualification이 아니다.
 

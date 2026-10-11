@@ -8,14 +8,29 @@ The C++ router, synthesizer and specialist fixtures use typed `ProviderRequest`,
 
 Local voice is optional and needs the selected whisper/Moonshine models, ONNX Runtime/Supertonic assets, miniaudio and usable microphone/speaker devices; text/mock operation is not proof of working voice. Cloud-free applies only to local/mock operation. Live requests require an authorized `OPENROUTER_API_KEY`, network access and provider capacity, and send prompts, conversation memory and attached tool/delegation results to OpenRouter. The live model is pinned; the native request sets ZDR, not a residency guarantee. Keep keys out of logs and version control. Provider token usage is nullable accounting, not a monetary bill: cost requires current endpoint/model pricing and billable usage.
 
-Live router and synthesizer output caps (300 / 220 nominal reply tokens) add a 1,024-token reasoning allowance and request low reasoning effort, leaving headroom for models that share the cap between hidden reasoning and visible text. A completed empty `MaxTokens` reply gets one doubled-cap re-ask; other empty completions and provider failures are errors without a re-ask. Empty replies never become a successful spoken turn. Gateways configured through `OPENROUTER_BASE_URL` must use `https://`; `OPENROUTER_CA_FILE` selects the PEM CA bundle for a private TLS gateway such as the benchmark proxy.
+Live router and synthesizer default output caps (300 / 220 nominal reply tokens) add a 1,024-token reasoning allowance and request low reasoning effort. A completed empty `MaxTokens` reply gets at most one re-ask; only the default cap doubles. `NG_EXAMPLE_MAX_TOKENS` is an explicit positive output cap including reasoning and remains unchanged on every call. `NG_EXAMPLE_EMPTY_REASKS=0` disables that re-ask (default/maximum 1). Other empty completions and provider failures remain errors; tool-call output is not re-asked. Empty replies never become a successful spoken turn. Gateways configured through `OPENROUTER_BASE_URL` must use `https://`; `OPENROUTER_CA_FILE` selects the PEM CA bundle for a private TLS gateway such as the benchmark proxy.
 
 Tool-call output, including truncated invalid calls, never triggers an empty-text re-ask.
 The JSON router accepts only text-only `EndTurn` / `StopSequence` completions before
 parsing; truncated output fails even if it happens to contain valid-looking JSON.
 Its existing malformed-JSON fallback applies only to cleanly completed text.
+Partial, refused or non-terminal synthesis remains in its immutable Outcome but
+fails before TTS; delivered partial text never triggers another provider call.
+
 
 Custom provider-calling nodes use the existing runtime-interposition/broker boundary and shared `record_usage` sink. They retain the real owned outcome before extracting response text, propagate cancellation/deadlines and both local and host observers, and preserve drained outcomes when an observer throws. The synthesizer's distinct regeneration call uses its own stable call ordinal. Bounded calls require admitted model-limit facts; missing facts fail before provider dispatch rather than inventing a token estimate. Default HTTPS ports are omitted from the admitted origin so OpenRouter routing matches the policy's canonical origin.
+
+For separately authorized finite validation, `bench/driver.py --max-turns 3` uses
+the first three **actual** lines of tracked `bench/turns_openrouter.txt`, not
+fabricated expected replies. The driver rejects empty inputs/TTS results and
+incomplete or failed child runs. With `config-bench`'s empty tool/agent catalogs,
+`NG_EXAMPLE_EMPTY_REASKS=0` bounds three turns to at most nine model calls
+(router + synthesis + optional verbatim regeneration per turn). An explicit
+8,192-token cap bounds configured output allowances to 73,728 tokens; input,
+billable usage and money remain separate. This cap is a diagnostic choice, not a
+new default or spending grant. Use a fresh owner-private `JARVIS_MEMORY_FILE`;
+do not reuse a live memory store. Current source changes are not a new live-run,
+voice or nginx-proxy qualification.
 
 `[jarvis:ttft]` is emitted on the first nonempty `sp::PartDelta` with `PartKind::Text` and `DeltaChannel::Content`, not on usage, reasoning, headers or other events. It measures first synthesis text, not first audible TTS playback. Python REPL drivers remain protocol clients; pybind benchmarks use the migrated typed bindings and need separate execution evidence. Current runtime evidence covers the actual CLI greeting, a persisted synthetic memory turn and graceful EOF. It does not qualify microphone capture, ASR, TTS, pybind benchmarks or vendor inference. Timings and voice/live execution statements retained below remain historical, not current cutover qualification.
 
