@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=907ec7240b5062b879e11564967eeba0a334b88d55f30d5d97eb56ca2d1b5d14 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=663b2f87a2ed7c9bd7c2f04054729a318ed751df736052db7f5ffb140d4e6bea -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -15,6 +15,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 변경됨
 
+- **예제 11(Clay 챗봇)을 새로 디자인했습니다.** 텍스트는 UTF-8을 인식하는 측정과 함께 시스템 TrueType/OpenType 글꼴을 사용하므로 한글과 다른 문자가 렌더링됩니다(`NEOGRAPH_CHAT_FONT`, `NEOGRAPH_CHAT_BOLD_FONT`, `NEOGRAPH_CHAT_MONO_FONT`로 선택을 바꿀 수 있습니다). 창에는 모델과 상태를 보여 주는 헤더, 아바타, 코드 블록을 포함한 가벼운 Markdown, 추천 질문이 있는 환영 카드, 새 출력을 따라가는 스크롤바, 답변이 스트리밍되는 동안 Send 버튼이 Stop으로 바뀌는 입력창이 있습니다. Stop과 종료는 답변을 취소합니다.
 - **SchemaProvider `maint/interface6`의 현재 tip인 `0d536be66017dfb8c4c91d21f4f62bd8ce698d55`를 채택합니다.** OpenAI Responses를 쓰는 그래프·에이전트 도구 루프는 도구의 parameter schema가 strict 호환이 아닐 때(예: `additionalProperties`를 열어 둔 MCP 도구 schema) 더 이상 HTTP 400(`InvalidRequest`)으로 실패하지 않습니다. policy의 strict 기본값은 모든 object가 `"additionalProperties": false`를 지정하고 각 property를 `required`에 나열한 schema에만 적용되며, 그 밖의 도구는 `"strict": false`로 전송됩니다. 호환되지 않는 schema에 명시적으로 `strict = true`를 지정하면 dispatch 전에 도구 이름과 처음 실패한 JSON pointer를 담은 `InvalidRequest`로 실패합니다. `created` 타임스탬프가 chunk마다 증가하는 OpenAI 호환 로컬 서버의 Chat 스트림은 더 이상 `ProtocolCorrupt`로 실패하지 않습니다. 값이 감소하거나 `id`·`model`이 바뀌면 여전히 실패합니다. Responses `response.failed` 이벤트나 버퍼링된 실패 본문처럼 codec이 이미 받아들인 in-band 벤더 실패는 이제 크기와 관계없이 자체 오류 코드로 분류됩니다. 이전에는 runtime `max_error_bytes`(기본 64 KiB)를 넘는 실패, 예를 들어 hosted `image_generation` 결과를 되풀이하는 3 MB `response.failed`가 벤더의 실패 대신 `RetryClass::Never`인 `ResourceLimit`으로 보고되었습니다. runtime이 직접 버퍼링하고 파싱하는 오류는 계속 `max_error_bytes`로 제한됩니다. SDK 0.3.0과 interface/shared ABI 6은 그대로입니다.
 - **SchemaProvider `maint/interface6`에 병합된 PR #25의 `f7cb27e68ee02f3a27d01c31af85bcac96f00963`을 채택합니다.** `Usage::input_uncached`가 모든 family에서 같은 규칙(입력 − 캐시 읽기 − 캐시 쓰기, 쓰기 카운터를 보내지 않는 wire에서만 없는 값을 0으로 간주)을 따릅니다. OpenAI 직결 Chat도 이제 이 값을 보고하고, Responses는 보고된 캐시 쓰기를 뺍니다. Gemini stop 종류는 테스트로 고정했습니다. SDK 0.3.0과 interface/shared ABI 6은 그대로입니다.
 - **SchemaProvider `maint/interface6`에 병합된 PR #23의 `45dd2ad36e18717adae3e2d10b2b9c8bb0e85471`을 채택합니다. 사용량이 벤더 값과 정확히 일치합니다.** 실제 API 호출로 확인했습니다. OpenRouter Messages 스트리밍이 끝의 `[DONE]` 때문에 실패하지 않고 보고된 비용도 담습니다. Chat은 `video_tokens` 같은 벤더 세부 카운터를 보존합니다. 보고된 USD 금액이 벤더 10진값과 같아져(+1 nanoUSD 없음) 입력 + 출력 = 합계가 성립합니다. Gemini는 합계가 증명하면 추론 0을 보고하고, Interactions는 modality를 이름으로 기록하며, `claude-haiku-4-5` 같은 Anthropic 별칭은 날짜가 붙은 모델로 응답돼도 받아들입니다. 저장된 결과에 `CostRounding::CeilingShortestDecimal`이 올 수 있으며, 이전 기록도 그대로 읽히고 Python은 `ProviderCostRounding.CeilingShortestDecimal`을 노출합니다. SDK 0.3.0과 interface/shared ABI 6은 그대로입니다.
@@ -28,11 +29,17 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 추가됨
 
+- **Program: `P_JS_CONTROL_CHARACTER` 경고 (#361).** JavaScript 설정 문자열에 탭, 줄바꿈, 캐리지 리턴 이외의 C0 제어 문자가 들어 있으면(예: 정규식 단어 경계로 쓴 `"\b"`) 해당 문자열의 호출 위치에서 경고합니다. 이 경고는 컴파일이 반환하는 진단에만 들어갑니다.
 - **`ChatTool::strict`로 도구별 OpenAI Responses strict 모드를 지정합니다. C++ 사용 코드를 재빌드해야 합니다.** 이 플래그는 기본값이 비어 있는 `std::optional<bool>`이며, `make_provider_request`가 Responses function 도구로 전달합니다. 비워 두면 위에 설명한 SDK 기본값을 따르고, `false`는 그대로 전송되며, strict 호환이 아닌 schema에 `true`를 지정하면 dispatch 전에 `InvalidRequest`로 실패합니다. 다른 family는 이 플래그를 보낼 수 없으므로 `true`는 `std::invalid_argument`(Python에서는 `ValueError`)로 거부하고 `false`는 받아들입니다. Python: `ChatTool(..., strict=None)`과 `strict` 속성. `ChatTool`에 member가 추가되어 layout이 바뀌었으므로 NeoGraph, C++ 사용 코드와 custom `Tool` 구현, Python 확장을 함께 재빌드하세요([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참고).
 - `CheckpointCoordinator::records_pending_writes(parent_cp_id)`: `record_pending_write[_async]`가 실제로 저장할 때 true를 반환하므로 호출자가 호출 자체를 건너뛸 수 있습니다.
 
 ### 수정됨
 
+- **Program: `LocalProgramHost.resume(run_id, value)`가 pending id 없이 동작합니다 (#359).** 대기 중인 호출이 하나면 그 호출을 재개하고, 없거나 여러 개면 `result.interrupt.pending_input.call_id`를 안내하는 `ValueError`를 냅니다. 명시한 id는 정확히 일치해야 하는 계약을 유지합니다.
+- **Program: 실패한 run이 완료된 노드의 trace를 유지합니다 (#359).** `execution_trace`는 실패 전에 끝난 노드를 나열하고 `failure.core_node`는 예외를 던진 노드를 가리킵니다. 실패 결과의 identity도 그에 따라 바뀝니다.
+- **Program: 컴파일 시점 JavaScript가 run 예산의 wall time을 지킵니다 (#360).** 끝나지 않는 `define()`은 60초가 아니라 컴파일러 한도와 예산 `wall_time_ms` 중 작은 값에서 `P_JS_TIMEOUT`으로 멈춥니다. Python은 `ProgramCompiler`와 `LocalProgramHost`의 `javascript_limits=`에 `ng.ProgramJavaScriptCompileLimits`를 넘겨 컴파일 한도를 정합니다.
+- **Program: 작성 진단이 원본 위치를 가리킵니다 (#361).** JavaScript 빌더 진단은 컴파일이 반환하는 진단(`ProgramBundle::compile_diagnostics()`, Python `bundle.compile_diagnostics`)에 호출 위치(pointer, 줄, 열)를 담습니다. bundle에 봉인되는 진단은 그대로이므로 bundle id는 바뀌지 않습니다. 컴파일 실패는 `ng.ProgramCompileError`(`RuntimeError`)를 내며, 메시지는 `source:line:col`로 끝나고 `.diagnostics`에 세부 정보가 있습니다. 레지스트리 누락 힌트는 Python 등록 호출 이름을 안내합니다.
+- **예제가 처음부터 끝까지 실행됩니다.** 모든 예제를 실제 provider나 오프라인 모드로 실행하고 실패를 고쳤습니다. 다중 에이전트 토론과 자기진화 챗봇은 다르게 구성된 호출에 네이티브 상태를 재생하는 대신 턴을 이식 가능한 텍스트로 넘깁니다. the-beast 변형은 모델이 작성한 `llm_call` 노드에 모델을 지정하고, 공유 zero-data-retention provider 팩토리를 쓰며, 실행 실패를 보고합니다. A2A 클라이언트는 예제 38의 포트를 기본값으로 씁니다. Harness MCP 서버는 토큰 없이 loopback HTTP에서 동작합니다. 예제 34는 생성 이미지용 스트림 한도를 올리고 그 섹션에 이미지 입력이 가능한 모델을 씁니다. program chatbot 데모 정책은 descriptor 정책 revision 4와 맞습니다. 멀티테넌트 live 서버는 `NG_MULTI_TENANT_REQUESTS`와 `NG_MULTI_TENANT_WORKERS`를 받습니다. Crawl4AI 클라이언트는 경로가 있는 base URL을 받아들이고 bearer 토큰을 보냅니다. RE 에이전트는 키가 필요해지기 전에 GhidraMCP 백엔드를 확인합니다.
 - **병렬 도구 dispatch의 fallback이 잡은 도구 실패가 올바른 JSON이 됩니다.** 여러 호출을 묶은 batch에서 호출별 오류 처리 밖에서 실패한 호출의 도구 메시지를 문자열 연결로 `{"error": "..."}` 형태로 만들었기 때문에, 예외 텍스트에 따옴표, 역슬래시, 줄바꿈이 있으면 잘못된 JSON이 되었습니다. 이제 JSON 라이브러리로 직렬화합니다.
 - **`outputSchema`를 선언한 MCP 도구의 오류 메시지가 보존됩니다.** 클라이언트가 `isError`를 확인하기 전에 output schema를 검증했기 때문에, `structuredContent` 없는 정상적인 오류 결과가 "MCP tool advertised outputSchema but returned no structuredContent"로 실패했고 `[FUNCTION_NOT_FOUND] No function found named 'x'` 같은 도구의 메시지는 호출자에게도 모델에게도 전달되지 않았습니다. 이제 MCP 명세가 허용하고 공식 Python SDK가 하는 것처럼 오류 결과는 output schema 검증을 건너뛰며, 성공 결과는 계속 검증합니다.
 - **Program publication은 node handle 이동 대입에 의존하지 않고 libc++에서 빌드됩니다.** 모든 index publication 뒤 추출한 handle을 직접 초기화해 라이브러리별 `noexcept` trait 없이 commit 원자성을 유지합니다.

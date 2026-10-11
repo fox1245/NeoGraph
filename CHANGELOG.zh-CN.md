@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=907ec7240b5062b879e11564967eeba0a334b88d55f30d5d97eb56ca2d1b5d14 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=663b2f87a2ed7c9bd7c2f04054729a318ed751df736052db7f5ffb140d4e6bea -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -17,6 +17,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 变更
 
+- **示例 11（Clay 聊天机器人）已重新设计。** 文本使用系统 TrueType/OpenType 字体并按 UTF-8 测量，因此韩文等文字都能显示（可用 `NEOGRAPH_CHAT_FONT`、`NEOGRAPH_CHAT_BOLD_FONT`、`NEOGRAPH_CHAT_MONO_FONT` 覆盖选择）。窗口包含显示模型与状态的标题栏、头像、带代码块的轻量 Markdown、带建议的欢迎卡片、跟随新输出的滚动条，以及在回复流式输出期间 Send 按钮变为 Stop 的输入框；Stop 和退出都会取消回复。
 - **采用 SchemaProvider `maint/interface6` 当前最新提交 `0d536be66017dfb8c4c91d21f4f62bd8ce698d55`。** 使用 OpenAI Responses 的图和 agent 工具循环，在工具的 parameter schema 不兼容 strict 时（例如未关闭 `additionalProperties` 的 MCP 工具 schema）不再以 HTTP 400（`InvalidRequest`）失败：policy 的 strict 默认值只应用于每个 object 都设置 `"additionalProperties": false` 并在 `required` 中列出每个 property 的 schema，其他工具以 `"strict": false` 发送。对不兼容的 schema 显式设置 `strict = true` 会在 dispatch 前以 `InvalidRequest` 失败，并指出工具名和第一个失败的 JSON pointer。`created` 时间戳在 chunk 之间递增的 OpenAI 兼容本地服务器的 Chat 流不再以 `ProtocolCorrupt` 失败；该值减小，或 `id`、`model` 改变时仍会失败。codec 已接受的 in-band 供应商失败（例如 Responses 的 `response.failed` 事件或缓冲的失败响应体）现在无论大小都按其自身错误码分类。此前，超过 runtime `max_error_bytes`（默认 64 KiB）的失败，例如重复 hosted `image_generation` 结果的 3 MB `response.failed`，会被报告为 `RetryClass::Never` 的 `ResourceLimit`，而不是供应商的失败。runtime 自行缓冲并解析的错误仍受 `max_error_bytes` 限制。SDK 0.3.0 与 interface/shared ABI 6 不变。
 - **采用 SchemaProvider `maint/interface6` 上已合并的 PR #25 提交 `f7cb27e68ee02f3a27d01c31af85bcac96f00963`。** `Usage::input_uncached` 在所有 family 中遵循同一规则（输入 − 缓存读取 − 缓存写入；仅在从不发送写入计数的 wire 上将缺失值视为 0）：直连 OpenAI Chat 现在也会报告该值，Responses 会减去上报的缓存写入。Gemini 的 stop 类型已由测试固定。SDK 0.3.0 与 interface/shared ABI 6 不变。
 - **采用 SchemaProvider `maint/interface6` 上已合并的 PR #23 提交 `45dd2ad36e18717adae3e2d10b2b9c8bb0e85471`：用量与供应商数值完全一致。** 已通过真实 API 调用验证：OpenRouter Messages 流式响应不再因末尾的 `[DONE]` 失败，并带有上报的费用；Chat 保留 `video_tokens` 等供应商明细计数；上报的 USD 金额与供应商十进制值一致（不再多 1 nanoUSD），输入 + 输出 = 合计；Gemini 在合计可证明时报告推理为 0；Interactions 按名称记录 modality；`claude-haiku-4-5` 等 Anthropic 别名在以带日期模型应答时也被接受。保存的结果可能带有 `CostRounding::CeilingShortestDecimal`，旧记录仍可读取，Python 暴露 `ProviderCostRounding.CeilingShortestDecimal`。SDK 0.3.0 与 interface/shared ABI 6 不变。
@@ -30,11 +31,17 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 新增
 
+- **Program：`P_JS_CONTROL_CHARACTER` 警告 (#361)。** JavaScript 配置字符串中含有制表符、换行和回车以外的 C0 控制字符时（例如本想写正则单词边界的 `"\b"`），会在该字符串的调用位置发出警告。该警告只出现在编译返回的诊断中。
 - **`ChatTool::strict` 可按工具设置 OpenAI Responses strict 模式；C++ 使用方须重新构建。** 该标志是默认未设置的 `std::optional<bool>`，由 `make_provider_request` 传入 Responses function 工具。未设置时沿用上文所述的 SDK 默认值，`false` 按原样发送，对不兼容 strict 的 schema 设置 `true` 会在 dispatch 前以 `InvalidRequest` 失败。其他 family 无法发送该标志，因此以 `std::invalid_argument`（Python 中为 `ValueError`）拒绝 `true`，接受 `false`。Python：`ChatTool(..., strict=None)` 及 `strict` 属性。`ChatTool` 增加了 member，layout 随之改变：NeoGraph、C++ 使用方和自定义 `Tool` 实现以及 Python 扩展须一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 - `CheckpointCoordinator::records_pending_writes(parent_cp_id)`:当 `record_pending_write[_async]` 确实会存储内容时返回 true,调用方可据此跳过调用。
 
 ### 修复
 
+- **Program：`LocalProgramHost.resume(run_id, value)` 无需 pending id 即可使用 (#359)。** 只有一个等待中的调用时恢复该调用；没有或有多个时抛出指向 `result.interrupt.pending_input.call_id` 的 `ValueError`。显式 id 仍保持精确匹配的约定。
+- **Program：失败的运行会保留已完成节点的 trace (#359)。** `execution_trace` 列出失败前已完成的节点，`failure.core_node` 指出抛出异常的节点。失败结果的 identity 随之变化。
+- **Program：编译期 JavaScript 遵守运行预算的 wall time (#360)。** 不终止的 `define()` 会在编译器上限与预算 `wall_time_ms` 中较小者处以 `P_JS_TIMEOUT` 停止，而不是 60 秒之后。Python 通过 `ProgramCompiler` 和 `LocalProgramHost` 的 `javascript_limits=` 传入 `ng.ProgramJavaScriptCompileLimits` 来设置编译上限。
+- **Program：编写期诊断指向源码位置 (#361)。** JavaScript 构建器诊断在编译返回的诊断中（`ProgramBundle::compile_diagnostics()`，Python `bundle.compile_diagnostics`）携带调用位置（pointer、行、列）。封存进 bundle 的诊断保持不变，因此 bundle id 保持稳定。编译失败会抛出 `ng.ProgramCompileError`（`RuntimeError` 子类），其消息以 `source:line:col` 结尾，`.diagnostics` 携带详细信息。注册表缺失提示会给出 Python 的注册调用名。
+- **示例可端到端运行。** 所有示例都已用真实 provider 或离线模式运行，并修复了失败：多智能体辩论和自我进化聊天机器人以可移植文本传递轮次，而不是把原生状态重放到配置不同的调用中；the-beast 各变体为模型编写的 `llm_call` 节点指定模型，使用共享的 zero-data-retention provider 工厂并报告运行失败；A2A 客户端默认使用示例 38 的端口；Harness MCP 服务器可在无 token 的 loopback HTTP 上工作；示例 34 为生成图片提高流限制，并在该部分使用支持图片输入的模型；program chatbot 演示策略与 descriptor 策略 revision 4 一致；多租户 live 服务器接受 `NG_MULTI_TENANT_REQUESTS` 和 `NG_MULTI_TENANT_WORKERS`；Crawl4AI 客户端接受带路径的 base URL 并发送 bearer token；RE 智能体在需要密钥之前先检查 GhidraMCP 后端。
 - **并行工具 dispatch 的 fallback 捕获的工具失败现在是合法 JSON。** 在多调用 batch 中，若某个调用在逐调用错误处理之外失败，其工具消息以字符串拼接构造为 `{"error": "..."}`，异常文本中的引号、反斜杠或换行会产生非法 JSON。现在改用 JSON 库序列化。
 - **声明了 `outputSchema` 的 MCP 工具的错误消息得以保留。** 客户端在检查 `isError` 之前就验证 output schema，因此不带 `structuredContent` 的合法错误结果会以 "MCP tool advertised outputSchema but returned no structuredContent" 失败，`[FUNCTION_NOT_FOUND] No function found named 'x'` 之类的工具消息既到不了调用方，也到不了模型。现在按照 MCP 规范的允许和官方 Python SDK 的做法，错误结果跳过 output schema 验证；成功结果仍会验证。
 - **Program publication无需node handle移动赋值即可使用libc++构建。** 在所有index publication之后直接初始化提取的handle，不依赖库特定的`noexcept` trait，同时保留commit原子性。
