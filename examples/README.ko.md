@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=846d75a5b1fd0b5e4bc8d7066fd8d67ec3104821aa97c338b78a5f7a7faacb92 -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=c647e2de2645fa72af2e130f78afd2e39578470154e591de344bc8f826b4dd26 -->
 # C++ API 예제
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
@@ -166,7 +166,7 @@ OPENROUTER_API_KEY=sk-or-...
 | 23 |[`23_mcp_multi.cpp`](23_mcp_multi.cpp)|OpenRouter + 서버 2개|하나의 에이전트, 두 개의 MCP 서버(HTTP + stdio), 도구가 하나의 목록으로 병합되었습니다. LLM는 두 가지 모두를 투명하게 선택합니다.|
 | 21 |[`21_mcp_fanout.cpp`](21_mcp_fanout.cpp)|MCP HTTP 서버(LLM 없음)|고정 planner가 MCP 호출마다 Send 하나를 만들고 `make_parallel_group`으로 동시에 실행합니다. 모델 호출은 없지만 MCP 서버에 연결할 수 있어야 합니다.|
 | 20 |[`20_mcp_hitl.cpp`](20_mcp_hitl.cpp)|OpenRouter + MCP HTTP 서버|`interrupt_before` 모든 MCP 도구 호출 — 운영자는 보류 중인 도구 이름 + 인수를 확인하고 승인하고 재개합니다.|
-| 24 |[`24_mcp_feedback.cpp`](24_mcp_feedback.cpp)|OpenRouter + MCP HTTP 서버|교환원은 상담원의 답변 초안을 읽고 피드백을 입력합니다. 두 번째 실행에서는 해당 피드백을 새로운 대화 컨텍스트로 통합합니다.|
+| 24 |[`24_mcp_feedback.cpp`](24_mcp_feedback.cpp)|OpenRouter + MCP HTTP 서버|코드에 고정된(입력받지 않는) 운영자 피드백 턴이 에이전트의 답변 초안을 지적합니다. 두 번째 실행에서는 해당 피드백을 새로운 대화 컨텍스트로 통합합니다.|
 
 ### 비동기, 동시성, 성능
 

@@ -173,7 +173,7 @@ demonstrate, not by file number.
 | 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | OpenRouter + 2 servers | One agent, two MCP servers (HTTP + stdio), tools merged into one list — LLM picks across both transparently. |
 | 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | MCP HTTP server (no LLM) | A fixed planner emits one Send per MCP call; `make_parallel_group` runs them concurrently. No model call; the MCP server must still be reachable. |
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | OpenRouter + MCP HTTP server | `interrupt_before` any MCP tool call — operator sees the pending tool name + args, approves, resumes. |
-| 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | OpenRouter + MCP HTTP server | Operator reads the agent's draft answer and types feedback; the second run incorporates that feedback as new conversational context. |
+| 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | OpenRouter + MCP HTTP server | A scripted operator turn (fixed in the code, not typed) critiques the agent's draft answer; the second run incorporates that feedback as new conversational context. |
 
 ### Async, concurrency, performance
 

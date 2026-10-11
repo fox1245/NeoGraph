@@ -6,13 +6,14 @@
 //
 // Prerequisites:
 //   1. Set OPENROUTER_API_KEY in the .env file
-//   2. Run an MCP server (e.g., python server.py --transport streamable-http --port 8000)
+//   2. Run an MCP server, e.g. the demo server (time/calculate/weather tools)
+//      on port 8000: pip install fastmcp && python examples/demo_mcp_server.py
 //
 // Usage:
 //   ./example_mcp_agent <MCP_SERVER_URL> "<question>"
 //
 // Example:
-//   ./example_mcp_agent http://localhost:8000 "Recommend dog food for me"
+//   ./example_mcp_agent http://127.0.0.1:8000 "Use the calculate tool to compute 15 * 28 + 7."
 
 #include <neograph/neograph.h>
 #include "provider_example_support.h"
@@ -31,7 +32,8 @@ int main(int argc, char* argv[]) {
     try {
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0] << " <MCP_SERVER_URL> \"<question>\"\n"
-                  << "Example: " << argv[0] << " http://localhost:8000 \"Recommend dog food for me\"\n";
+                  << "Example: " << argv[0]
+                  << " http://127.0.0.1:8000 \"Use the calculate tool to compute 15 * 28 + 7.\"\n";
         return 1;
     }
 

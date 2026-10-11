@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=846d75a5b1fd0b5e4bc8d7066fd8d67ec3104821aa97c338b78a5f7a7faacb92 -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=c647e2de2645fa72af2e130f78afd2e39578470154e591de344bc8f826b4dd26 -->
 # C++ API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -165,7 +165,7 @@ OPENROUTER_API_KEY=sk-or-...
 | 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | OpenRouter + 2 サーバー | 1 つのエージェント、2 つの MCP サーバー (HTTP + stdio)、ツールを 1 つのリストへ統合し、LLM が両方から透過的に選択します。 |
 | 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | MCP HTTP サーバー (LLM なし) | 固定 planner が MCP 呼び出しごとに Send を作り、`make_parallel_group` で同時実行します。モデル呼び出しはありませんが、MCP サーバーへの接続は必要です。 |
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | OpenRouter + MCP HTTP サーバー | `interrupt_before` で任意の MCP ツール呼び出しを止め、オペレーターが確認・承認して再開します。 |
-| 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | OpenRouter + MCP HTTP サーバー | オペレーターが回答草案を読み、フィードバックを入力します。2 回目の実行はそれを会話コンテキストへ取り込みます。 |
+| 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | OpenRouter + MCP HTTP サーバー | コードに固定された（入力は受け付けない）オペレーターのフィードバックが回答草案を指摘します。2 回目の実行はそれを会話コンテキストへ取り込みます。 |
 
 ### 非同期、同時実行、パフォーマンス
 

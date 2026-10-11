@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=846d75a5b1fd0b5e4bc8d7066fd8d67ec3104821aa97c338b78a5f7a7faacb92 -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=c647e2de2645fa72af2e130f78afd2e39578470154e591de344bc8f826b4dd26 -->
 # C++ API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -158,7 +158,7 @@ OPENROUTER_API_KEY=sk-or-...
 | 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | OpenRouter + 2 servers | 一个 agent、两个 MCP server（HTTP + stdio），工具合并到同一个列表 — LLM 能透明地跨两者选择。 |
 | 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | MCP HTTP server（无 LLM） | Planner 为每次 MCP 调用发出一个 Send；`make_parallel_group` 并发运行它们。确定性 — LLM 轴上保持离线，因为 demo 中工具由手写逻辑选择。 |
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | OpenRouter + MCP HTTP server | 在任何 MCP 工具调用前 `interrupt_before` — operator 看到待处理工具名 + 参数，批准后 resume。 |
-| 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | OpenRouter + MCP HTTP server | Operator 阅读 agent 的草稿答案并输入反馈；第二次运行会把反馈作为新的对话上下文纳入。 |
+| 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | OpenRouter + MCP HTTP server | 代码中写定（不读取输入）的 operator 反馈指出 agent 草稿答案的不足；第二次运行会把反馈作为新的对话上下文纳入。 |
 
 ### 异步、并发、性能
 
