@@ -786,6 +786,10 @@ std::optional<Replayed> replay(const Graph& graph, const json& steps, std::uint3
         for (const auto& [name, label] : step["routes"].items()) {
             const int  u     = std::stoi(name.substr(1));
             const auto value = label.get<std::string>();
+            if (value == "on_failure" && graph.failer == u) {  // #364: the failure edge
+                choice.fail |= bit(u);
+                continue;
+            }
             if (!graph.routes[u].conditional || (value != "a" && value != "b")) {
                 problem = "step " + std::to_string(i) + " routes " + step["routes"].dump();
                 return std::nullopt;
@@ -911,7 +915,11 @@ void compare(const Graph& graph, AgreementTotals& totals) {
 }  // namespace
 
 TEST(SoundnessAgreement, VerdictsMatchTheReferenceOnEveryHarnessGraph) {
-    const auto limits = bounds();
+    auto limits = bounds();
+    // With the #364 failure routes of the join harness: a failing node takes
+    // its failure edge, which the check models as a nondeterministic choice
+    // (NEOGRAPH_JOIN_MODEL_FAILERS=0 leaves them out).
+    limits.failers = env_int("NEOGRAPH_JOIN_MODEL_FAILERS", 1) != 0;
     const auto start  = std::chrono::steady_clock::now();
     AgreementTotals totals;
     for_each_graph(limits, [&](const Graph& graph) { compare(graph, totals); });
