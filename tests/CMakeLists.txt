@@ -127,6 +127,9 @@ if(NEOGRAPH_BUILD_PROGRAM)
     if(TARGET neograph::llm)
         target_link_libraries(neograph_program_tests PRIVATE neograph::llm)
         target_compile_definitions(neograph_program_tests PRIVATE NEOGRAPH_PROGRAM_TESTS_HAVE_LLM)
+    else()
+        # Fixtures construct sp::runtime::Client, whose constructor neograph::llm normally brings in.
+        target_link_libraries(neograph_program_tests PRIVATE SchemaProvider::transport)
     endif()
     if(MSVC)
         # test_program_runtime.cpp intentionally exercises the complete durable
@@ -408,7 +411,7 @@ if(NEOGRAPH_BUILD_GRPC)
     add_executable(neograph_grpc_graph_contract_tests
         test_graph_host_grpc_contract.cpp)
     target_link_libraries(neograph_grpc_graph_contract_tests PRIVATE
-        neograph::grpc GTest::gtest_main)
+        neograph::grpc SchemaProvider::transport GTest::gtest_main)
     add_test(NAME neograph.grpc_graph_contract
              COMMAND neograph_grpc_graph_contract_tests)
 endif()
