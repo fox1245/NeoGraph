@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import neograph_engine as ng
 
 
@@ -130,3 +132,19 @@ def test_disable_after_enable_stops_caching():
     e.run(ng.RunConfig(thread_id="c", input={}, max_steps=5))
     # Both subsequent runs hit the node — disabled lookups skip the cache.
     assert node.calls == 3
+
+
+def test_per_node_settings_reject_unknown_node_names():
+    # Issue #376: a setting for a node the graph does not have was accepted
+    # and silently ignored.
+    e, _node = _build()
+    policy = ng.RetryPolicy()
+    policy.max_retries = 2
+    with pytest.raises(ValueError, match="'wrok'.*work"):
+        e.set_node_retry_policy("wrok", policy)
+    with pytest.raises(ValueError, match="'wrok'"):
+        e.set_node_cache_enabled("wrok", True)
+    with pytest.raises(ValueError, match="'wrok'"):
+        e.set_node_cache_enabled("wrok", True, ng.CacheScope.Reusable)
+    e.set_node_retry_policy("work", policy)
+    e.set_node_cache_enabled("work", True)

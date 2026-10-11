@@ -92,7 +92,8 @@ struct EngineConfig {
     /// Optional override for the topology's default retry policy.
     std::optional<RetryPolicy> retry_policy;
 
-    /// Per-node retry overrides applied before the first run.
+    /// Per-node retry overrides applied before the first run. build() and
+    /// link() throw std::invalid_argument for a name the graph has no node for.
     std::map<std::string, RetryPolicy> node_retry_policies;
 
     /// Engine-wide tool policy, preserved across run() and resume().
@@ -122,6 +123,7 @@ struct EngineConfig {
     /// Pure, context-independent nodes whose results may be reused across
     /// executions. This is an explicit CacheScope::Reusable opt-in; use the
     /// two-argument set_node_cache_enabled() API for execution-local caching.
+    /// Like every per-node setting, each name must be a node of the graph.
     std::set<std::string> cached_nodes;
 
     /// Global NodeCache entry bound. Zero preserves unbounded behavior.
@@ -130,6 +132,7 @@ struct EngineConfig {
     /// Explicit per-node cache policy. Unlike cached_nodes, this may opt
     /// into execution-local caching or a reusable context partition.
     /// Entries here take precedence over cached_nodes for the same node.
+    /// Each key must be a node of the graph.
     std::map<std::string, CacheKeyPolicy> node_cache_policies;
 
     /// Controlled provider dispatch for built-in LLMCallNode instances.
@@ -969,6 +972,7 @@ public:
      * @brief Set a retry policy for a specific node (overrides default).
      * @param node_name Name of the node.
      * @param policy Retry policy for this specific node.
+     * @throws std::invalid_argument if the graph has no node named node_name.
      */
     void set_node_retry_policy(const std::string& node_name, const RetryPolicy& policy);
 
@@ -1035,6 +1039,7 @@ public:
      *
      * @param node_name Name of the node to enable / disable.
      * @param enabled   True to enable caching; false to disable.
+     * @throws std::invalid_argument if the graph has no node named node_name.
      */
     void set_node_cache_enabled(const std::string& node_name, bool enabled);
 

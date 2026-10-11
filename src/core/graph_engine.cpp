@@ -337,6 +337,31 @@ std::unique_ptr<GraphEngine> GraphEngine::link(ValidatedTopology topology,
     return link_impl(std::move(cg), std::move(config), std::move(resources), false);
 }
 
+namespace {
+
+// A per-node setting must name a node of this graph. An unknown name used to be
+// stored and then never applied (#376).
+void require_graph_node(const std::map<std::string, std::unique_ptr<GraphNode>>& nodes,
+                        const std::string& graph_name, const char* setting,
+                        const std::string& node_name) {
+    if (nodes.count(node_name)) return;
+    constexpr std::size_t kListed = 20;
+    std::string known;
+    std::size_t listed = 0;
+    for (const auto& entry : nodes) {
+        if (listed == kListed) {
+            known += ", ...";
+            break;
+        }
+        known += (listed++ ? ", '" : "'") + entry.first + "'";
+    }
+    throw std::invalid_argument(std::string(setting) + ": graph '" + graph_name +
+                                "' has no node '" + node_name + "' (nodes: " +
+                                (known.empty() ? "none" : known) + ")");
+}
+
+}  // namespace
+
 std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
                                                     EngineConfig    config,
                                                     EngineResources resources,
@@ -357,6 +382,13 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
         report_validation(GraphValidator::validate(cg, registry, config.validation),
                           cg.schema_version, config.stderr_notices);
     }
+
+    for (const auto& entry : config.node_retry_policies)
+        require_graph_node(cg.nodes, cg.name, "EngineConfig::node_retry_policies", entry.first);
+    for (const auto& node_name : config.cached_nodes)
+        require_graph_node(cg.nodes, cg.name, "EngineConfig::cached_nodes", node_name);
+    for (const auto& entry : config.node_cache_policies)
+        require_graph_node(cg.nodes, cg.name, "EngineConfig::node_cache_policies", entry.first);
 
     auto engine = std::unique_ptr<GraphEngine>(new GraphEngine());
     engine->budget_graph_identity_ = neograph::detail::sha256_identity(
@@ -497,6 +529,7 @@ void GraphEngine::set_retry_policy(const RetryPolicy& policy) {
 }
 
 void GraphEngine::set_node_retry_policy(const std::string& node_name, const RetryPolicy& policy) {
+    require_graph_node(nodes_, name_, "set_node_retry_policy", node_name);
     node_retry_policies_[node_name] = policy;
 }
 
@@ -540,6 +573,7 @@ void GraphEngine::set_worker_count_auto() {
 
 void GraphEngine::set_node_cache_enabled(const std::string& node_name,
                                           bool enabled) {
+    require_graph_node(nodes_, name_, "set_node_cache_enabled", node_name);
     node_cache_.set_policy(node_name, CacheKeyPolicy{});
     node_cache_.set_enabled(node_name, enabled);
 }
@@ -2198,6 +2232,7 @@ GraphEngine::execute_graph_async(
 void GraphEngine::set_node_cache_enabled(const std::string& node_name,
                                          bool enabled,
                                          CacheKeyPolicy policy) {
+    require_graph_node(nodes_, name_, "set_node_cache_enabled", node_name);
     node_cache_.set_policy(node_name, std::move(policy));
     node_cache_.set_enabled(node_name, enabled);
 }

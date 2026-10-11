@@ -705,3 +705,71 @@ TEST(EngineResourcesTest, RejectsAmbiguousOwnedToolBindings) {
         (void)GraphEngine::build(one_node_graph("unused"), std::move(config), std::move(resources)),
         std::invalid_argument);
 }
+
+// Issue #376: a per-node setting for a node the graph does not have used to
+// be accepted and silently ignored. It is rejected, naming the node.
+namespace {
+
+template <typename Call>
+void expect_unknown_node_rejected(Call&& call, const std::string& node) {
+    try {
+        call();
+        ADD_FAILURE() << "a per-node setting for unknown node '" << node << "' was accepted";
+    } catch (const std::invalid_argument& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("'" + node + "'"), std::string::npos) << message;
+        EXPECT_NE(message.find("work"), std::string::npos) << message;  // the known nodes
+    }
+}
+
+void register_echo_once() {
+    register_node("engine_config_unknown_node", [](const std::string&, const json&,
+                                                   const NodeContext&) {
+        return std::make_unique<EchoNode>();
+    });
+}
+
+}  // namespace
+
+TEST(EngineConfigTest, PerNodeSettersRejectUnknownNodeNames) {
+    register_echo_once();
+    auto engine = GraphEngine::build(one_node_graph("engine_config_unknown_node"), EngineConfig{});
+    RetryPolicy policy;
+    policy.max_retries = 2;
+    expect_unknown_node_rejected([&] { engine->set_node_retry_policy("wrok", policy); }, "wrok");
+    expect_unknown_node_rejected([&] { engine->set_node_cache_enabled("wrok", true); }, "wrok");
+    expect_unknown_node_rejected([&] { engine->set_node_cache_enabled("wrok", false); }, "wrok");
+    expect_unknown_node_rejected(
+        [&] { engine->set_node_cache_enabled("wrok", true, CacheKeyPolicy{}); }, "wrok");
+    // The routing sentinels are not nodes either.
+    expect_unknown_node_rejected(
+        [&] { engine->set_node_retry_policy("__start__", policy); }, "__start__");
+
+    EXPECT_NO_THROW(engine->set_node_retry_policy("work", policy));
+    EXPECT_NO_THROW(engine->set_node_cache_enabled("work", true));
+}
+
+TEST(EngineConfigTest, BuildRejectsPerNodeConfigForUnknownNodes) {
+    register_echo_once();
+    expect_unknown_node_rejected([] {
+        EngineConfig config;
+        config.node_retry_policies["wrok"] = RetryPolicy{};
+        (void)GraphEngine::build(one_node_graph("engine_config_unknown_node"), std::move(config));
+    }, "wrok");
+    expect_unknown_node_rejected([] {
+        EngineConfig config;
+        config.cached_nodes.insert("wrok");
+        (void)GraphEngine::build(one_node_graph("engine_config_unknown_node"), std::move(config));
+    }, "wrok");
+    expect_unknown_node_rejected([] {
+        EngineConfig config;
+        config.node_cache_policies.emplace("wrok", CacheKeyPolicy{});
+        (void)GraphEngine::build(one_node_graph("engine_config_unknown_node"), std::move(config));
+    }, "wrok");
+
+    EngineConfig valid;
+    valid.node_retry_policies["work"] = RetryPolicy{};
+    valid.cached_nodes.insert("work");
+    EXPECT_NO_THROW((void)GraphEngine::build(one_node_graph("engine_config_unknown_node"),
+                                             std::move(valid)));
+}
