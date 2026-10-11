@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=ja source_sha256=ba8de002d040f5f18052d1e8d7971509fa764fcf24fb3859a39cf510c181c2c2 -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=ja source_sha256=d826f6691e4419255724c79828e57e5bc1d349a20ee0a5c24d67512366199812 -->
 # Program グラフ機能
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -60,7 +60,7 @@ graph.conditionalEdge("B", "t.check", {pass: "D", fail: "FIX"})
 
 ## 失敗のルーティング
 
-フラグ: `retry_policy.per_node`、`failure_edges`、`failure_exits`。
+フラグ: `retry_policy.per_node`、`failure_edges`、`failure_exits`、`retry.attempt_timeout`。
 
 ```js
 ng.graph("fix")
@@ -87,7 +87,7 @@ TEST は 3 回試行されます。それでも失敗すると、実行は失敗
 
 ### キー
 
-- **ノードごとのポリシー。** 書いたフィールドだけが保存されます。`max_retries` 0〜10、`initial_delay_ms` 10〜60 000、`backoff_multiplier` 1.0〜10.0、`max_delay_ms` は `initial_delay_ms` から 300 000 まで、`non_retryable`（一意なコード最大 16 個）、`max_visits` 1〜100、`error_text` です。`attempt_timeout_ms` はまだ受け付けません。範囲外は `{min, max, actual}` を持つ `P_CORE_GC_FIELD_VALUE` です。
+- **ノードごとのポリシー。** 書いたフィールドだけが保存されます。`max_retries` 0〜10、`initial_delay_ms` 10〜60 000、`backoff_multiplier` 1.0〜10.0、`max_delay_ms` は `initial_delay_ms` から 300 000 まで、`non_retryable`（一意なコード最大 16 個）、`max_visits` 1〜100、`error_text`、`attempt_timeout_ms` 100〜3 600 000 です。範囲外は `{min, max, actual}` を持つ `P_CORE_GC_FIELD_VALUE` です。
 - **コード。** 作成者のコードは `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+` に一致する必要があり、`NG.` 接頭辞は予約されています。`non_retryable` には分類器のコード（`NG.TaskFailed`、`NG.Timeout`、`NG.SubgraphFailed`、およびリファレンスのノード失敗契約にあるその他）も書けます。
 - **failure edge。** ノードごとに最大 1 つで、`from` の順に並べられます。対象は `__start__`、`__end__`、ノード自身、join、そして failure exit ではないのに edge もルートもないノードであってはなりません（`P_CORE_GC_FAILURE_EDGE`）。`error_channel` は `append` reducer を使う必要があります。
 - **failure exit。** コードの既定値は `NG.Aborted` です。failure exit のノードには edge もルートもありません。
@@ -104,14 +104,30 @@ TEST は 3 回試行されます。それでも失敗すると、実行は失敗
   {"node": "TEST", "kind": "exhausted", "code": "NG.TaskFailed", "attempts": 3, "retryable": true,
    "step": 1, "routed_to": "ASK_USER", "effects": []}
   ```
-  `kind` は `exhausted`、`non_retryable`、`effect_committed`、`ceiling`、`visit_limit`、`deadline`（試行タイムアウト用に予約）のいずれかです。`effects` は最後の試行の仲介された Tool の効果を `{tool, ordinal, status}` で並べます。
+  `kind` は `exhausted`、`non_retryable`、`effect_committed`、`ceiling`、`visit_limit`、`deadline`（バックオフが実行の期限を越えるところだった）のいずれかです。`effects` は最後の試行の仲介された Tool の効果を `{tool, ordinal, status}` で並べます。
 - **自由テキスト**はノードごとに `error_text: true` で選び、ホストの redactor が必要です。`EngineConfig::failure_text_redactor`、`CatalogConfig::failure_text_redactor`、または Python の `GraphEngine.compile` と `LocalProgramHost` の `failure_text_redactor=` です。出所は型付きの公開メッセージ（`NodeFailureError` の `public_message` や Python の例外の `public_message` 属性）だけで、例外のテキストは決して使いません。redactor が残すテキストを返すと、エンジンは C0、双方向、ゼロ幅、タグの文字を取り除き、UTF-8 の境界で 512 バイトに切り詰め、`"detail": {"untrusted_text": "..."}` として保存します。redactor がなければテキストは書きません。
 - **割り込み。** 対象に `interruptBefore` があると、割り込みの値に `{"reason": "failure_route", "failure": record}` が入ります。Program では `result.interrupt.value` と `result.interrupt.pending_input.core_interrupt_value` です。
 - **イベント。** あきらめたノードの `ERROR` イベントには `handled`（失敗がルーティングされたら true）と、ルーティングされた場合は `routed_to` があります。
 - **ループの上限: `max_visits`。** これを宣言したノードは最大でその回数だけ実行されます。次の活性化は実行されず `NG.VisitLimit`（`kind` `visit_limit`、試行 0 回）で失敗し、ノードの failure edge に沿ってルーティングされるか、edge がなければ実行を失敗させます。カウンターは failure edge の対象が完了するとリセットされます。カウンターは宣言したノードについてだけ、チェックポイントのメタデータの `_neograph.node_visits` にあります。ステップ予算は引き続き全体の安全装置です。
 - **failure exit。** failure exit のノードが完了すると、実行はその super-step の後に `output["_neograph"]["failure_exit"] = {node, code}` と `RunStatus::FailureExit`（Python は `RunStatus.FailureExit`、`RunInvocation` は `Error`）で終わります。Program の実行は宣言されたコードで `Failed` になり、`core_node` はそのノードです。
 - **再試行の上限。** `RunBudget::max_node_retries`（Python は `ProgramRunBudget.max_node_retries`）は実行全体、つまりすべての Core 呼び出し、ノード、分岐、`Send`、サブグラフのノード再試行を制限します。上限に達すると `kind` `ceiling` で再試行をやめます。使った再試行は `ProgramUsage::node_retries`、残りは `remaining_budget.max_node_retries` です。なければ上限はなく、2 つのフィールドは設定されたときだけシリアライズされます。`ng.spawn` で始めた子は親の上限を受け継ぎます。Program の外では `NodeRetryCeiling` を `RunMetadata::node_retry_ceiling` として渡します。
-- **Program でルーティングされない失敗。** failure edge のないノードの失敗は、Program を `P_RUNTIME_CORE_FAILURE` ではなく分類されたコード（`NG.TaskFailed`、作成者のコード、`NG.ProviderFailed` など）で `Failed` にし、`failure.witness.node_failure` には `{node, code, kind, attempts, retryable, routable}` が入ります。オーケストレーション計画の `retry` 操作も同じ分類器に問い合わせます。再試行可能な失敗の後でだけ本体を再実行し、コミットされた効果、再試行しないクラス、到達した再試行上限の後には再実行しません。
+- **Program でルーティングされない失敗。** failure edge のないノードの失敗は、Program を `P_RUNTIME_CORE_FAILURE` ではなく分類されたコード（`NG.TaskFailed`、作成者のコード、`NG.ProviderFailed` など）で `Failed` にし、`failure.witness.node_failure` には `{node, code, kind, attempts, retryable, routable}` が入ります。オーケストレーション計画の `retry` 操作も同じ分類器に問い合わせます。再試行可能な失敗の後でだけ本体を再実行し、コミットされた効果、再試行しないクラス、到達した再試行上限、期限での停止の後には再実行しません。
+
+### 試行タイムアウトと期限
+
+フラグ: `retry.attempt_timeout`。
+
+```js
+graph.retryPolicy("TEST", {attempt_timeout_ms: 30000, max_retries: 2, on_failure: "ASK_USER"});
+```
+
+- **タイムアウトした試行。** `attempt_timeout_ms` はノードの各試行を制限します。時間が過ぎると、その試行は自分のキャンセルトークン（ノードの `ctx.cancel_token`、実行のトークンの子）を通じてキャンセルされ、`NG.Timeout` で失敗します。この失敗は通常の失敗と同じく再試行され、ルーティングできます。最初のタイムアウトで止めるには `NG.Timeout` を `non_retryable` に挙げます。最初の終了イベントが勝ちます。タイムアウトの時刻かその後に完了した試行は、タイマーがまだ発火していなくてもタイムアウトしたものです。
+- **遅れた完了は捨てられます。** タイムアウトした試行がその後に行うことは何も反映されません。書き込みと結果は捨てられ、その試行が発するイベントは実行のコールバックに届かず、その試行が始める仲介された Tool 呼び出しはトークンがキャンセルされているので拒否されます。次の試行はキャンセルされた試行が止まってから始まるので、一つのノードの二つの試行が重なることはありません。
+- **停止の期限。** キャンセルされた試行には、実行に与えられていたのと同じだけ、少なくとも 1 秒の停止猶予があります。それまでに止まらない試行はまだ効果を実行中かもしれないため、ノードは再試行もルーティングもされない `NG.EffectUncertain` で失敗し、実行は失敗します。その試行はバックグラウンドで続き、戻るまで自分のノードを生かしておきます。`wait_for_node_attempts()` はそのような試行を待ち、Python バインディングはインタープリターの終了時にこれを呼びます。冪等でない効果をコミットしてから止まった試行はこれまでどおり `NG.EffectCommitted` で失敗し、仲介された効果を不確定のまま残した試行は調停のために実行を一時停止します。
+- **すべての経路。** 静的なノード、fan-out の分岐、一つまたは複数の `Send` の対象、サブグラフのノードが同じ経路をたどります。サブグラフのノードの子の実行は、その試行とともにキャンセルされます。タイムアウトした試行の後のクラッシュは実行中だった試行で再開し、再開がタイムアウトした試行の結果を適用することはありません。
+- **ホストのタイムアウト。** `GraphEngine::set_node_attempt_timeout_ms(node, ms)`（Python `set_node_attempt_timeout_ms`、`None` で解除）は、定義にタイムアウトのないノードにタイムアウトを設定します。定義にタイムアウトのあるノードでは、ホストは短くすることしかできず、二つのうち短いほうが使われます。`resolved_attempt_timeout_ms(node)` がその結果を返します。
+- **ノード本体が実行される場所。** 実行を駆動するコルーチンは、タイムアウトのある本体を実行せず、Program の実行ではどのノード本体も実行しません。そうした本体はプロセス全体のワーカープール（`NEOGRAPH_NODE_ATTEMPT_THREADS`、1〜1024、既定 32）で実行されるので、スレッドを占有する本体も、自分のタイムアウトや、join のメンバーと `await` のタイマーが共有する Program スケジューラーを占有しません。これは Python のノードだけでなく C++ のノードと Core のサブグラフにも当てはまります。ほかの `GraphEngine` の実行では、タイムアウトのない本体は引き続き呼び出し元のスレッドで実行されます。
+- **期限を考慮したバックオフ。** 次の試行の前のバックオフが実行の期限（Program の `wall_time_ms`、Program の外では `RunMetadata::deadline`）を越えるなら、ノードは予算が実行を終えるまで眠るのではなく、ただちに `kind` `deadline` で再試行をやめます。失敗は自分のコード（`NG.TaskFailed`、`NG.Timeout` など）を保ち、ノードの failure edge に沿ってルーティングされるか、それがなければ実行を失敗させます。
 
 ## 健全性チェック
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=c488f5d4496f80786dc3df6777e35022584f2ac654e1e4a9039f77b7d5dbd83b -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=67ca829b6ef931fa0677424ca6fa666dd0593ba61bde293b8f3ad1290ca89ab2 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -556,6 +556,8 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 `on_failure`가 있는 `retryPolicy(node, {...})`는 노드의 최종 실패를 실행을 실패시키는 대신 핸들러로 라우팅합니다. 규칙은 [Program 그래프 기능](program-graphs.md#failure-routing)에 있습니다. Python 노드는 예외 속성으로 실패를 표시합니다. 문자열 `code`(`app.compile_error` 같은 작성자 코드), 불리언 `retryable`, 문자열 `public_message`입니다. `str(exc)`는 레코드에 절대 들어가지 않습니다. 노드가 `ng.ProgramDiagnosticError`, `ng.ProgramCompileError`, `ng.ProgramAdmissionError`를 발생시키면 구성 판정(`NG.ConfigError`)이 되며, 재시도하지도 라우팅하지도 않습니다. 핸들러에 `interruptBefore`가 있으면 실행은 `Interrupted`로 멈추고 `result.interrupt.pending_input.core_interrupt_value`에 `{"reason": "failure_route", "failure": record}`가 들어 있습니다. `host.resume(run_id, value)`는 핸들러에서 이어 갑니다. failure exit는 선언된 코드로 실행을 `Failed`로 끝내고, failure edge가 없는 노드 실패는 분류된 코드(`NG.TaskFailed`, 작성자 코드 등)로 `Failed`가 됩니다.
 
 `ProgramRunBudget.max_node_retries`(기본값 `None`, 상한 없음)는 실행 전체의 노드 재시도를 제한합니다. `result.usage.node_retries`가 그 횟수이고 `result.remaining_budget.max_node_retries`가 남은 양입니다. `compile_admit`은 이를 봉인하지 않으므로 다시 컴파일하지 않고도 실행마다 설정할 수 있습니다. `LocalProgramHost(..., failure_text_redactor=fn)`와 `GraphEngine.compile(..., failure_text_redactor=fn)`은 `error_text`를 설정한 노드를 위한 redactor를 받습니다. `fn`은 `{"node", "code", "kind", "attempts", "retryable", "public_message"}`를 받아 남길 텍스트나 `None`을 돌려줍니다. 없으면 텍스트를 쓰지 않습니다. `GraphEngine`에서는 failure exit 뒤 `result.status`가 `ng.RunStatus.FailureExit`이고, `engine.resolved_retry_policy(node)`는 노드가 실제로 쓰는 재시도 타이밍을 돌려줍니다.
+
+`retryPolicy(node, {attempt_timeout_ms: ...})`는 노드의 각 시도를 제한합니다(100~3 600 000 ms). 타임아웃된 시도에서는 `input.ctx.cancel_token.is_cancelled()`가 참이 되고, 시도는 다른 실패처럼 재시도되고 라우팅될 수 있는 `NG.Timeout`으로 실패합니다. 그 뒤에 시도가 돌려주는 것은 모두 버려집니다. Python 본문은 선점할 수 없으므로, 잠들거나 블로킹하는 노드는 토큰을 확인해야 합니다. 다음 시도는 타임아웃된 시도가 반환한 뒤에야 시작하며, 정지 마감 시각(다시 타임아웃만큼, 최소 1초) 안에 반환하지 않은 시도는 `NG.EffectUncertain`으로 실행을 실패시킵니다. 그런 본문은 백그라운드에서 계속 실행되고, 바인딩은 인터프리터가 종료될 때 이를 기다립니다. 실행의 `wall_time_ms`를 넘게 될 백오프는 kind `deadline`으로 재시도를 멈춥니다. `GraphEngine`에서는 `engine.set_node_attempt_timeout_ms(node, ms)`가 호스트 타임아웃을 설정하고(`None`이면 지우며, 정의 자체의 타임아웃은 줄이기만 할 수 있습니다), `engine.resolved_attempt_timeout_ms(node)`가 노드가 실제로 쓰는 타임아웃을 돌려줍니다. [Program 그래프 기능](program-graphs.md#attempt-timeouts-and-the-deadline)을 참고하세요.
 
 ### 스케줄러 스레드, 워커, 타임아웃
 

@@ -59,7 +59,7 @@ Errors: `P_JS_GRAPH_ARGUMENT` for an entry of another shape, and `P_CORE_GC_BARR
 
 ## Failure routing
 
-Flags: `retry_policy.per_node`, `failure_edges` and `failure_exits`.
+Flags: `retry_policy.per_node`, `failure_edges`, `failure_exits` and `retry.attempt_timeout`.
 
 ```js
 ng.graph("fix")
@@ -86,7 +86,7 @@ TEST is tried three times. If it still fails, the run does not fail: TEST routes
 
 ### Keys
 
-- **Per-node policy.** Only the fields written are stored: `max_retries` 0 to 10, `initial_delay_ms` 10 to 60 000, `backoff_multiplier` 1.0 to 10.0, `max_delay_ms` from `initial_delay_ms` to 300 000, `non_retryable` (at most 16 unique codes), `max_visits` 1 to 100 and `error_text`. `attempt_timeout_ms` is not accepted yet. A bound out of range is `P_CORE_GC_FIELD_VALUE` with `{min, max, actual}`.
+- **Per-node policy.** Only the fields written are stored: `max_retries` 0 to 10, `initial_delay_ms` 10 to 60 000, `backoff_multiplier` 1.0 to 10.0, `max_delay_ms` from `initial_delay_ms` to 300 000, `non_retryable` (at most 16 unique codes), `max_visits` 1 to 100, `error_text`, and `attempt_timeout_ms` 100 to 3 600 000. A bound out of range is `P_CORE_GC_FIELD_VALUE` with `{min, max, actual}`.
 - **Codes.** Author codes match `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`; the `NG.` prefix is reserved. `non_retryable` may also list the classifier's codes (`NG.TaskFailed`, `NG.Timeout`, `NG.SubgraphFailed` and the others in the reference's node failure contract).
 - **Failure edges.** At most one per node, sorted by `from`. The target may not be `__start__`, `__end__`, the node itself, a join, or a node without edges or routes unless it is a failure exit (`P_CORE_GC_FAILURE_EDGE`). `error_channel` must use the `append` reducer.
 - **Failure exits.** The code defaults to `NG.Aborted`. A failure-exit node has no edges or routes.
@@ -103,14 +103,30 @@ TEST is tried three times. If it still fails, the run does not fail: TEST routes
   {"node": "TEST", "kind": "exhausted", "code": "NG.TaskFailed", "attempts": 3, "retryable": true,
    "step": 1, "routed_to": "ASK_USER", "effects": []}
   ```
-  `kind` is `exhausted`, `non_retryable`, `effect_committed`, `ceiling`, `visit_limit` or `deadline` (reserved for attempt timeouts). `effects` lists the final attempt's mediated Tool effects as `{tool, ordinal, status}`.
+  `kind` is `exhausted`, `non_retryable`, `effect_committed`, `ceiling`, `visit_limit` or `deadline` (a backoff would have crossed the run's deadline). `effects` lists the final attempt's mediated Tool effects as `{tool, ordinal, status}`.
 - **Free text** is opt-in per node with `error_text: true`, and needs the host's redactor: `EngineConfig::failure_text_redactor`, `CatalogConfig::failure_text_redactor`, or `failure_text_redactor=` on Python's `GraphEngine.compile` and `LocalProgramHost`. Its only source is a typed public message (the `public_message` of a `NodeFailureError` or a Python exception's `public_message` attribute), never the exception text. The redactor returns the text to keep; the engine strips C0, bidirectional, zero-width and tag characters, cuts the text to 512 bytes on a UTF-8 boundary and stores it as `"detail": {"untrusted_text": "..."}`. Without a redactor no text is written.
 - **Interrupts.** When the target has `interruptBefore`, the interrupt value carries `{"reason": "failure_route", "failure": record}`. In a Program it is `result.interrupt.value` and `result.interrupt.pending_input.core_interrupt_value`.
 - **Events.** The `ERROR` event of a node that gave up says `handled` (true when the failure was routed) and, when routed, `routed_to`.
 - **Loop bound: `max_visits`.** A node that declares it runs at most that many times; its next activation does not run and fails with `NG.VisitLimit` (`kind` `visit_limit`, 0 attempts), routed along the node's failure edge, or failing the run without one. The counter resets when the failure edge's target completes. It lives in checkpoint metadata as `_neograph.node_visits`, only for declaring nodes. The step budget stays the global backstop.
 - **Failure exits.** When a failure-exit node completes, the run ends after that super-step with `output["_neograph"]["failure_exit"] = {node, code}` and `RunStatus::FailureExit` (Python `RunStatus.FailureExit`; a `RunInvocation` reports `Error`). A Program run ends `Failed` with the declared code and `core_node` set to that node.
 - **Retry ceiling.** `RunBudget::max_node_retries` (Python `ProgramRunBudget.max_node_retries`) caps node retries across the whole run: every Core call, node, branch, `Send` and subgraph. Reaching it stops retrying with `kind` `ceiling`. The retries taken are `ProgramUsage::node_retries`, and what is left is `remaining_budget.max_node_retries`. Absent means no ceiling, and both fields are serialized only when set. A child started by `ng.spawn` inherits its parent's ceiling. Outside a Program, pass a `NodeRetryCeiling` as `RunMetadata::node_retry_ceiling`.
-- **Unrouted failures in a Program.** A node failure without a failure edge ends the Program `Failed` with the classified code (`NG.TaskFailed`, an author code, `NG.ProviderFailed`, ...) rather than `P_RUNTIME_CORE_FAILURE`, and `failure.witness.node_failure` holds `{node, code, kind, attempts, retryable, routable}`. The `retry` operation of an orchestration plan asks the same classifier: it runs its body again only after a retryable failure, never after a committed effect, a class that is not retried, or a reached retry ceiling.
+- **Unrouted failures in a Program.** A node failure without a failure edge ends the Program `Failed` with the classified code (`NG.TaskFailed`, an author code, `NG.ProviderFailed`, ...) rather than `P_RUNTIME_CORE_FAILURE`, and `failure.witness.node_failure` holds `{node, code, kind, attempts, retryable, routable}`. The `retry` operation of an orchestration plan asks the same classifier: it runs its body again only after a retryable failure, never after a committed effect, a class that is not retried, a reached retry ceiling or a stop at the deadline.
+
+### Attempt timeouts and the deadline
+
+Flag: `retry.attempt_timeout`.
+
+```js
+graph.retryPolicy("TEST", {attempt_timeout_ms: 30000, max_retries: 2, on_failure: "ASK_USER"});
+```
+
+- **A timed-out attempt.** `attempt_timeout_ms` limits each attempt of the node. When it passes, the attempt is cancelled through its own cancel token (`ctx.cancel_token` of the node, a child of the run's token) and fails with `NG.Timeout`, which is retried and routable like an ordinary failure; list `NG.Timeout` in `non_retryable` to stop at the first timeout. The first terminal event wins: an attempt that completes at or after its timeout has timed out, whether or not the timer has fired yet.
+- **The late completion is discarded.** Whatever a timed-out attempt does afterwards counts for nothing: its writes and result are dropped, the events it emits never reach the run's callback, and a mediated Tool call it starts is refused, because its token is cancelled. The next attempt starts only after the cancelled one has stopped, so two attempts of a node never overlap.
+- **The stop deadline.** A cancelled attempt has as long to stop as it had to run, and at least one second. One that has not stopped by then may still be performing effects: the node fails with `NG.EffectUncertain`, which is neither retried nor routed, so the run fails. The attempt goes on in the background and keeps its node alive until it returns; `wait_for_node_attempts()` waits for such attempts, and the Python binding calls it when the interpreter exits. An attempt that stopped after committing a non-idempotent effect fails with `NG.EffectCommitted` as before, and one that left a mediated effect uncertain pauses the run for reconciliation.
+- **Every path.** Static nodes, fan-out branches, one or many `Send` targets and subgraph nodes take the same path; a subgraph node's child run is cancelled with its attempt. A crash after timed-out attempts resumes in the attempt that was running, and a resume never applies the result of a timed-out attempt.
+- **Host timeouts.** `GraphEngine::set_node_attempt_timeout_ms(node, ms)` (Python `set_node_attempt_timeout_ms`, `None` clears it) sets a timeout for a node whose definition has none. For a node that has one, the host may only shorten it: the shorter of the two applies. `resolved_attempt_timeout_ms(node)` returns the result.
+- **Where node bodies run.** The coroutine that drives a run never runs a body that has a timeout, and in a Program run it runs no node body at all: such a body runs on a process-wide worker pool (`NEOGRAPH_NODE_ATTEMPT_THREADS`, 1 to 1024, default 32), so a body that blocks its thread holds neither its own timeout nor the Program scheduler that join members and `await` timers share. This covers C++ nodes and Core subgraphs as well as Python nodes. Other `GraphEngine` runs keep running untimed bodies on the calling thread.
+- **Deadline-aware backoff.** When the backoff before the next attempt would cross the run's deadline (a Program's `wall_time_ms`; `RunMetadata::deadline` outside a Program), the node stops retrying at once with `kind` `deadline` instead of sleeping until the budget ends the run. The failure keeps its code (`NG.TaskFailed`, `NG.Timeout`, ...) and is routed along the node's failure edge, or fails the run without one.
 
 ## Soundness check
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=7f14d0a85a3ad1660e3d1991ebc6c164d34ae37640a7537c55c04fff6756d105 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=d537d10f0fb01dbdb8441bd38d53ec4469ce213c5de1831048f608611eb5b9ff -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -537,22 +537,24 @@ public:
 | 分類(深刻度の低い順) | コード | 発生元 | リトライ | ルーティング |
 |------|------|------|------|------|
 | Ordinary | `NG.TaskFailed`、`NG.SubgraphFailed` または作成者コード | `std::runtime_error` とそのサブクラス、`NodeFailureError`、Python の例外、根本原因が Ordinary のサブグラフの失敗 | する。作成者がリトライ不可とした場合を除く | 可 |
-| Timeout | `NG.Timeout` | 試行のタイムアウト用に予約 | する | 可 |
+| Timeout | `NG.Timeout` | `attempt_timeout_ms` を超えてキャンセルされ、止まった試行（`NodeAttemptTimeout`） | する | 可 |
 | ProviderFailed | `NG.ProviderFailed` | 一時的な `ProviderFailure`: トランスポート、途切れた応答、期限、過負荷、レート制限、または HTTP 5xx ステータスのリモート失敗 | しない。プロバイダーのリトライはプロバイダーランタイムが担当します | 可 |
 | EffectCommitted | `NG.EffectCommitted` | 試行が冪等でない Tool の効果をコミットした | 決してしない | 可。ハンドラーが補償できます |
 | LogicError | `NG.LogicError` | 整合性チェックを含む `std::logic_error` | しない | 不可 |
 | ConfigError | `NG.ConfigError` | プロバイダーの構成、リクエスト、認証、権限、not-found、または誤用による失敗。Program の診断(C++ または Python の `ProgramDiagnosticError`、コンパイルや承認のエラー)のように `ConfigurationFailure` を併せて継承した例外 | しない | 不可 |
 | SafetyBlocked | `NG.SafetyBlocked` | コンテンツフィルターまたは拒否で止まったプロバイダーの失敗 | しない | 不可 |
 | BudgetExhausted | `NG.BudgetExhausted` | 予算またはクォータの枯渇 | しない | 不可 |
-| EffectUncertain | `NG.EffectUncertain` | 結果が不明なプロバイダーディスパッチを含む `ProviderOutcomeError`、または結果が不明な Tool の効果 | しない | 不可 |
+| EffectUncertain | `NG.EffectUncertain` | 結果が不明なプロバイダーディスパッチを含む `ProviderOutcomeError`、結果が不明な Tool の効果、または停止の期限までに止まらなかったタイムアウトした試行 | しない | 不可 |
 | UnknownFailure | `NG.UnknownFailure` | `std::bad_alloc` またはその他すべての例外型 | しない | 不可 |
 | 実行制御 | なし | `NodeInterrupt`、`HookBoundaryBlocked`、キャンセル | しない | 不可。実行はこれまでどおり一時停止または停止します |
 
-`NG.` 接頭辞は予約されています。作成者コードは `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+` に一致します。C++ のノードは `NodeFailureError(code, public_message, retryable)` を送出します。Python のノードは文字列の `code` 属性と、任意で真偽値の `retryable` と文字列の `public_message` を持つ任意の例外を送出し、呼び出し元はそれでも元の例外を受け取ります。エグゼキューターがノードをあきらめると、送出する `NodeExecutionError` に `NodeFailure` レコードが付き、`node_failure_of()` がそれを返します。レコードにはコード、分類、リトライをやめた理由(`exhausted`、`non_retryable`、`effect_committed`、実行のリトライ上限に達したときの `ceiling`、ノードが `max_visits` を超えて活性化されたときの `visit_limit`)、試行回数、リトライ可否とルーティング可否のフラグ、`public_message`、そして最後の試行の効果が `{tool, ordinal, status}` として入ります。`what()` は決してコピーしません。ノードの `non_retryable` に書かれたコードはリトライしません。
+`NG.` 接頭辞は予約されています。作成者コードは `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+` に一致します。C++ のノードは `NodeFailureError(code, public_message, retryable)` を送出します。Python のノードは文字列の `code` 属性と、任意で真偽値の `retryable` と文字列の `public_message` を持つ任意の例外を送出し、呼び出し元はそれでも元の例外を受け取ります。エグゼキューターがノードをあきらめると、送出する `NodeExecutionError` に `NodeFailure` レコードが付き、`node_failure_of()` がそれを返します。レコードにはコード、分類、リトライをやめた理由(`exhausted`、`non_retryable`、`effect_committed`、実行のリトライ上限に達したときの `ceiling`、次の試行の前のバックオフが実行の期限を越えるところだったときの `deadline`、ノードが `max_visits` を超えて活性化されたときの `visit_limit`)、試行回数、リトライ可否とルーティング可否のフラグ、`public_message`、そして最後の試行の効果が `{tool, ordinal, status}` として入ります。`what()` は決してコピーしません。ノードの `non_retryable` に書かれたコードはリトライしません。
 
 **ルーティング可能な失敗は、実行を失敗させる代わりに処理できます。** ノードが failure edge(`failure_edges`、[Program のグラフ機能](program-graphs.md#failure-routing))を持つと、実行器は何も送出しません。失敗した試行は何も書かず、構造化されたレコードが 1 つ edge の `error_channel` に入り、ノードは edge の対象にだけルーティングされます。レコードには正確に `node`、`kind`、`code`、`attempts`、`retryable`、`step`、`routed_to`、`effects` が入り、ノードが `error_text` で選び、ホストの `EngineConfig::failure_text_redactor` が `public_message` からテキストを残したときだけ `detail.untrusted_text` が加わります。ノードはトレースと `interruptAfter` では実行されたものとして数え、ノードの保留書き込みが処理された結果を持つため、再開はノードを再実行せずにルートを再生し、ノードの `ERROR` イベントは `handled: true` と `routed_to` を伝えます。静的ノード、ファンアウトの分岐、`Send` の対象、サブグラフのノードは、同期と非同期のどちらの入口からでもこの経路をたどります。ルーティングできない失敗や、failure edge のないノードの失敗は、上のとおり送出されます。
 
 **試行ごとに独自の効果名前空間があります。** 試行 0 はタスク id(`s3:act`)を使うので、既存のジャーナルはスロットをそのまま保ちます。試行 k は `s3:act#a<k>` を使い、その中で呼び出しの序数がやり直されます。Tool の効果、プロバイダー呼び出し、サブグラフのスレッドはすべて試行に従うため、リトライが以前の試行の効果を再生したり衝突したりすることはありません。`ProviderCallBroker` はリトライのたびに新しい呼び出しスロットを受け取ります。試行 k の開始前に、エグゼキューターはその試行の名前空間をキーとする空の保留書き込みを記録します。チェックポイントストアのスキーマ変更は不要です。クラッシュや割り込みの後の再開は、開始済みの最新の試行をその名前空間で続けるので、`ToolEffectBroker` はその試行がコミットしたものを再生し、残りのリトライ回数も保たれます。`ToolEffectBroker` の下では、冪等でない効果(`ReadOnly` でも `ExternalRead` でもなく `Idempotent` でもないポリシーで成功した呼び出し)をコミットした試行は決してリトライされず、結果が不明な効果は、ノードがその割り込みを捕捉して別のエラーを送出した場合でも、`tool_effect_reconciliation` の割り込みで実行を一時停止させます。ノードが実行したサブグラフの効果は、そのノードの試行に含まれます。
+
+**試行タイムアウトと実行の期限。** ノードごとのポリシーに `attempt_timeout_ms` があると（または定義の値を短くすることしかできないホストのタイムアウト `GraphEngine::set_node_attempt_timeout_ms` があると）、ノードの各試行は実行を駆動するコルーチンの外で実行され、タイムアウトが過ぎると自分の子の `CancelToken` を通じてキャンセルされます。最初の終了イベントが勝つので、タイムアウトの時刻かその後の完了はタイムアウトです。タイムアウトした試行の遅れた完了は捨てられます。書き込みも保留中の書き込みもタイムアウト後のイベントもなく、その試行が始める仲介された Tool 呼び出しは拒否されます。試行は止まってから `NG.Timeout` で失敗し、次の試行はそのときに初めて始まります。停止の期限（もう一度タイムアウト分、少なくとも 1 秒）内に止まらない試行は `NG.EffectUncertain` で失敗するので、実行は失敗します。その試行はバックグラウンドで続いて自分のノードを生かしておき、`wait_for_node_attempts()` がそれを待ちます。次の試行の前のバックオフが `RunContext::deadline`（Program の wall-time 予算）を越えるなら、ノードは kind `deadline` でリトライをやめ、失敗のコードを保ちます。Program の実行では、すべてのノード本体がこのように Program スケジューラーの外で実行されます。[Program のグラフ機能](program-graphs.md#attempt-timeouts-and-the-deadline)を参照してください。
 
 ---
 <a id="4-graph-types"></a>

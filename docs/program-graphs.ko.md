@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=ko source_sha256=ba8de002d040f5f18052d1e8d7971509fa764fcf24fb3859a39cf510c181c2c2 -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=ko source_sha256=d826f6691e4419255724c79828e57e5bc1d349a20ee0a5c24d67512366199812 -->
 # Program 그래프 기능
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -60,7 +60,7 @@ graph.conditionalEdge("B", "t.check", {pass: "D", fail: "FIX"})
 
 ## 실패 라우팅
 
-플래그: `retry_policy.per_node`, `failure_edges`, `failure_exits`.
+플래그: `retry_policy.per_node`, `failure_edges`, `failure_exits`, `retry.attempt_timeout`.
 
 ```js
 ng.graph("fix")
@@ -87,7 +87,7 @@ TEST는 세 번 시도됩니다. 그래도 실패하면 실행은 실패하지 �
 
 ### 키
 
-- **노드별 정책.** 적은 필드만 저장됩니다. `max_retries` 0~10, `initial_delay_ms` 10~60 000, `backoff_multiplier` 1.0~10.0, `max_delay_ms`는 `initial_delay_ms`부터 300 000까지, `non_retryable`(고유 코드 최대 16개), `max_visits` 1~100, `error_text`입니다. `attempt_timeout_ms`는 아직 받지 않습니다. 범위를 벗어나면 `{min, max, actual}`을 담은 `P_CORE_GC_FIELD_VALUE`입니다.
+- **노드별 정책.** 적은 필드만 저장됩니다. `max_retries` 0~10, `initial_delay_ms` 10~60 000, `backoff_multiplier` 1.0~10.0, `max_delay_ms`는 `initial_delay_ms`부터 300 000까지, `non_retryable`(고유 코드 최대 16개), `max_visits` 1~100, `error_text`, `attempt_timeout_ms` 100~3 600 000입니다. 범위를 벗어나면 `{min, max, actual}`을 담은 `P_CORE_GC_FIELD_VALUE`입니다.
 - **코드.** 작성자 코드는 `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`와 맞아야 하며 `NG.` 접두사는 예약되어 있습니다. `non_retryable`에는 분류기의 코드(`NG.TaskFailed`, `NG.Timeout`, `NG.SubgraphFailed`, 그리고 레퍼런스의 노드 실패 계약에 있는 나머지)도 쓸 수 있습니다.
 - **failure edge.** 노드마다 최대 하나이고 `from` 순으로 정렬됩니다. 대상은 `__start__`, `__end__`, 노드 자신, 조인, 그리고 failure exit가 아니면서 edge나 라우트가 없는 노드일 수 없습니다(`P_CORE_GC_FAILURE_EDGE`). `error_channel`은 `append` reducer를 써야 합니다.
 - **failure exit.** 코드의 기본값은 `NG.Aborted`입니다. failure exit 노드에는 edge나 라우트가 없습니다.
@@ -104,14 +104,30 @@ TEST는 세 번 시도됩니다. 그래도 실패하면 실행은 실패하지 �
   {"node": "TEST", "kind": "exhausted", "code": "NG.TaskFailed", "attempts": 3, "retryable": true,
    "step": 1, "routed_to": "ASK_USER", "effects": []}
   ```
-  `kind`는 `exhausted`, `non_retryable`, `effect_committed`, `ceiling`, `visit_limit`, `deadline`(시도 타임아웃용으로 예약) 중 하나입니다. `effects`는 마지막 시도의 중개된 Tool 효과를 `{tool, ordinal, status}`로 나열합니다.
+  `kind`는 `exhausted`, `non_retryable`, `effect_committed`, `ceiling`, `visit_limit`, `deadline`(백오프가 실행의 마감 시각을 넘었을 것임) 중 하나입니다. `effects`는 마지막 시도의 중개된 Tool 효과를 `{tool, ordinal, status}`로 나열합니다.
 - **자유 텍스트**는 노드마다 `error_text: true`로 선택하며 호스트의 redactor가 필요합니다. `EngineConfig::failure_text_redactor`, `CatalogConfig::failure_text_redactor`, 또는 Python `GraphEngine.compile`과 `LocalProgramHost`의 `failure_text_redactor=`입니다. 출처는 타입이 있는 공개 메시지(`NodeFailureError`의 `public_message`나 Python 예외의 `public_message` 속성)뿐이고 예외 텍스트는 절대 쓰지 않습니다. redactor가 남길 텍스트를 돌려주면 엔진은 C0, 양방향, 너비 0, 태그 문자를 제거하고 UTF-8 경계에서 512바이트로 자른 뒤 `"detail": {"untrusted_text": "..."}`로 저장합니다. redactor가 없으면 텍스트를 쓰지 않습니다.
 - **인터럽트.** 대상에 `interruptBefore`가 있으면 인터럽트 값에 `{"reason": "failure_route", "failure": record}`가 들어갑니다. Program에서는 `result.interrupt.value`와 `result.interrupt.pending_input.core_interrupt_value`입니다.
 - **이벤트.** 포기한 노드의 `ERROR` 이벤트에는 `handled`(실패가 라우팅되면 true)와, 라우팅된 경우 `routed_to`가 있습니다.
 - **루프 상한: `max_visits`.** 이를 선언한 노드는 최대 그 횟수만큼 실행됩니다. 다음 활성화는 실행되지 않고 `NG.VisitLimit`(`kind` `visit_limit`, 시도 0번)으로 실패하며, 노드의 failure edge를 따라 라우팅되거나 edge가 없으면 실행을 실패시킵니다. 카운터는 failure edge의 대상이 완료되면 초기화됩니다. 카운터는 선언한 노드에 대해서만 체크포인트 메타데이터의 `_neograph.node_visits`에 있습니다. 스텝 예산은 여전히 전체 안전장치입니다.
 - **failure exit.** failure exit 노드가 완료되면 실행은 그 super-step 뒤에 `output["_neograph"]["failure_exit"] = {node, code}`와 `RunStatus::FailureExit`(Python `RunStatus.FailureExit`, `RunInvocation`은 `Error`)로 끝납니다. Program 실행은 선언된 코드로 `Failed`가 되고 `core_node`는 그 노드입니다.
 - **재시도 상한.** `RunBudget::max_node_retries`(Python `ProgramRunBudget.max_node_retries`)는 실행 전체, 즉 모든 Core 호출, 노드, 분기, `Send`, 서브그래프의 노드 재시도를 제한합니다. 상한에 이르면 `kind` `ceiling`으로 재시도를 멈춥니다. 사용한 재시도는 `ProgramUsage::node_retries`, 남은 양은 `remaining_budget.max_node_retries`입니다. 없으면 상한이 없으며, 두 필드는 설정된 경우에만 직렬화됩니다. `ng.spawn`으로 시작한 자식은 부모의 상한을 물려받습니다. Program 밖에서는 `NodeRetryCeiling`을 `RunMetadata::node_retry_ceiling`으로 넘깁니다.
-- **Program에서 라우팅되지 않은 실패.** failure edge가 없는 노드 실패는 Program을 `P_RUNTIME_CORE_FAILURE` 대신 분류된 코드(`NG.TaskFailed`, 작성자 코드, `NG.ProviderFailed` 등)로 `Failed`가 되게 하고, `failure.witness.node_failure`에는 `{node, code, kind, attempts, retryable, routable}`이 들어갑니다. 오케스트레이션 계획의 `retry` 연산도 같은 분류기에 묻습니다. 재시도할 수 있는 실패 뒤에만 본문을 다시 실행하고, 커밋된 효과, 재시도하지 않는 클래스, 도달한 재시도 상한 뒤에는 다시 실행하지 않습니다.
+- **Program에서 라우팅되지 않은 실패.** failure edge가 없는 노드 실패는 Program을 `P_RUNTIME_CORE_FAILURE` 대신 분류된 코드(`NG.TaskFailed`, 작성자 코드, `NG.ProviderFailed` 등)로 `Failed`가 되게 하고, `failure.witness.node_failure`에는 `{node, code, kind, attempts, retryable, routable}`이 들어갑니다. 오케스트레이션 계획의 `retry` 연산도 같은 분류기에 묻습니다. 재시도할 수 있는 실패 뒤에만 본문을 다시 실행하고, 커밋된 효과, 재시도하지 않는 클래스, 도달한 재시도 상한, 마감 시각에서의 중단 뒤에는 다시 실행하지 않습니다.
+
+### 시도 타임아웃과 마감 시각
+
+플래그: `retry.attempt_timeout`.
+
+```js
+graph.retryPolicy("TEST", {attempt_timeout_ms: 30000, max_retries: 2, on_failure: "ASK_USER"});
+```
+
+- **타임아웃된 시도.** `attempt_timeout_ms`는 노드의 각 시도를 제한합니다. 시간이 지나면 그 시도는 자기 취소 토큰(노드의 `ctx.cancel_token`, 실행 토큰의 자식)으로 취소되고 `NG.Timeout`으로 실패합니다. 이 실패는 일반 실패처럼 재시도되고 라우팅될 수 있습니다. 첫 타임아웃에서 멈추려면 `NG.Timeout`을 `non_retryable`에 넣으세요. 먼저 일어난 종료 이벤트가 이깁니다. 타임아웃 시각이나 그 뒤에 완료된 시도는 타이머가 아직 울리지 않았더라도 타임아웃된 것입니다.
+- **늦은 완료는 버려집니다.** 타임아웃된 시도가 그 뒤에 하는 일은 아무것도 반영되지 않습니다. 쓰기와 결과는 버려지고, 그 시도가 내보내는 이벤트는 실행의 콜백에 닿지 않으며, 그 시도가 시작하는 중개된 Tool 호출은 토큰이 취소되어 있으므로 거부됩니다. 다음 시도는 취소된 시도가 멈춘 뒤에야 시작하므로 한 노드의 두 시도가 겹치는 일은 없습니다.
+- **정지 마감 시각.** 취소된 시도는 실행에 주어졌던 시간만큼, 최소 1초 안에 멈춰야 합니다. 그때까지 멈추지 않은 시도는 여전히 효과를 수행하고 있을 수 있으므로, 노드는 재시도도 라우팅도 되지 않는 `NG.EffectUncertain`으로 실패하고 실행이 실패합니다. 그 시도는 백그라운드에서 계속되며 반환할 때까지 자기 노드를 살려 둡니다. `wait_for_node_attempts()`는 그런 시도를 기다리고, Python 바인딩은 인터프리터가 종료될 때 이를 호출합니다. 비멱등 효과를 커밋한 뒤 멈춘 시도는 이전처럼 `NG.EffectCommitted`로 실패하고, 중개된 효과를 불확실하게 남긴 시도는 조정(reconciliation)을 위해 실행을 일시 정지합니다.
+- **모든 경로.** 정적 노드, fan-out 분기, 하나 또는 여러 `Send` 대상, 서브그래프 노드가 같은 경로를 따릅니다. 서브그래프 노드의 자식 실행은 그 시도와 함께 취소됩니다. 타임아웃된 시도들 뒤의 크래시는 실행 중이던 시도에서 재개하며, 재개는 타임아웃된 시도의 결과를 절대 적용하지 않습니다.
+- **호스트 타임아웃.** `GraphEngine::set_node_attempt_timeout_ms(node, ms)`(Python `set_node_attempt_timeout_ms`, `None`이면 지움)는 정의에 타임아웃이 없는 노드에 타임아웃을 설정합니다. 정의에 타임아웃이 있는 노드에 대해서는 호스트가 줄이기만 할 수 있어서 둘 중 짧은 쪽이 적용됩니다. `resolved_attempt_timeout_ms(node)`가 그 결과를 돌려줍니다.
+- **노드 본문이 실행되는 곳.** 실행을 구동하는 코루틴은 타임아웃이 있는 본문을 실행하지 않으며, Program 실행에서는 어떤 노드 본문도 실행하지 않습니다. 그런 본문은 프로세스 전체의 워커 풀(`NEOGRAPH_NODE_ATTEMPT_THREADS`, 1~1024, 기본 32)에서 실행되므로, 스레드를 붙잡는 본문도 자기 타임아웃이나 조인 멤버와 `await` 타이머가 공유하는 Program 스케줄러를 붙잡지 않습니다. 이는 Python 노드뿐 아니라 C++ 노드와 Core 서브그래프에도 적용됩니다. 다른 `GraphEngine` 실행은 타임아웃이 없는 본문을 계속 호출 스레드에서 실행합니다.
+- **마감 시각을 고려한 백오프.** 다음 시도 전의 백오프가 실행의 마감 시각(Program의 `wall_time_ms`, Program 밖에서는 `RunMetadata::deadline`)을 넘게 되면, 노드는 예산이 실행을 끝낼 때까지 잠들지 않고 곧바로 `kind` `deadline`으로 재시도를 멈춥니다. 실패는 자기 코드(`NG.TaskFailed`, `NG.Timeout` 등)를 유지하며, 노드의 failure edge를 따라 라우팅되거나, 없으면 실행을 실패시킵니다.
 
 ## 건전성 검사
 

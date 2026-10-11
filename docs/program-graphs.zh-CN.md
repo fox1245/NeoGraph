@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=zh-CN source_sha256=ba8de002d040f5f18052d1e8d7971509fa764fcf24fb3859a39cf510c181c2c2 -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=zh-CN source_sha256=d826f6691e4419255724c79828e57e5bc1d349a20ee0a5c24d67512366199812 -->
 # Program 图功能
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -60,7 +60,7 @@ graph.conditionalEdge("B", "t.check", {pass: "D", fail: "FIX"})
 
 ## 失败路由
 
-标志：`retry_policy.per_node`、`failure_edges` 和 `failure_exits`。
+标志：`retry_policy.per_node`、`failure_edges`、`failure_exits` 和 `retry.attempt_timeout`。
 
 ```js
 ng.graph("fix")
@@ -87,7 +87,7 @@ TEST 会尝试三次。如果仍然失败，运行并不会失败：TEST 被路�
 
 ### 键
 
-- **节点级策略。** 只保存写出的字段：`max_retries` 0 到 10，`initial_delay_ms` 10 到 60 000，`backoff_multiplier` 1.0 到 10.0，`max_delay_ms` 从 `initial_delay_ms` 到 300 000，`non_retryable`（最多 16 个不重复的代码），`max_visits` 1 到 100，以及 `error_text`。暂不接受 `attempt_timeout_ms`。超出范围报告带 `{min, max, actual}` 的 `P_CORE_GC_FIELD_VALUE`。
+- **节点级策略。** 只保存写出的字段：`max_retries` 0 到 10，`initial_delay_ms` 10 到 60 000，`backoff_multiplier` 1.0 到 10.0，`max_delay_ms` 从 `initial_delay_ms` 到 300 000，`non_retryable`（最多 16 个不重复的代码），`max_visits` 1 到 100，`error_text`，以及 `attempt_timeout_ms` 100 到 3 600 000。超出范围报告带 `{min, max, actual}` 的 `P_CORE_GC_FIELD_VALUE`。
 - **代码。** 作者代码须匹配 `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`；`NG.` 前缀是保留的。`non_retryable` 还可以列出分类器的代码（`NG.TaskFailed`、`NG.Timeout`、`NG.SubgraphFailed`，以及参考文档节点失败契约中的其他代码）。
 - **failure edge。** 每个节点最多一条，按 `from` 排序。目标不能是 `__start__`、`__end__`、节点自身、join，也不能是既不是 failure exit 又没有 edge 或路由的节点（`P_CORE_GC_FAILURE_EDGE`）。`error_channel` 必须使用 `append` reducer。
 - **failure exit。** 代码默认为 `NG.Aborted`。failure exit 节点没有 edge 或路由。
@@ -104,14 +104,30 @@ TEST 会尝试三次。如果仍然失败，运行并不会失败：TEST 被路�
   {"node": "TEST", "kind": "exhausted", "code": "NG.TaskFailed", "attempts": 3, "retryable": true,
    "step": 1, "routed_to": "ASK_USER", "effects": []}
   ```
-  `kind` 是 `exhausted`、`non_retryable`、`effect_committed`、`ceiling`、`visit_limit` 或 `deadline`（为尝试超时保留）之一。`effects` 以 `{tool, ordinal, status}` 列出最后一次尝试经中介的 Tool 效果。
+  `kind` 是 `exhausted`、`non_retryable`、`effect_committed`、`ceiling`、`visit_limit` 或 `deadline`（退避会越过运行的截止时间）之一。`effects` 以 `{tool, ordinal, status}` 列出最后一次尝试经中介的 Tool 效果。
 - **自由文本**需要按节点用 `error_text: true` 选择启用，并且需要宿主的 redactor：`EngineConfig::failure_text_redactor`、`CatalogConfig::failure_text_redactor`，或 Python `GraphEngine.compile` 和 `LocalProgramHost` 的 `failure_text_redactor=`。其唯一来源是带类型的公开消息（`NodeFailureError` 的 `public_message`，或 Python 异常的 `public_message` 属性），从不使用异常文本。redactor 返回要保留的文本；引擎去除 C0、双向、零宽和标签字符，在 UTF-8 边界处截断到 512 字节，并保存为 `"detail": {"untrusted_text": "..."}`。没有 redactor 时不写入文本。
 - **中断。** 当目标有 `interruptBefore` 时，中断值带有 `{"reason": "failure_route", "failure": record}`。在 Program 中它是 `result.interrupt.value` 和 `result.interrupt.pending_input.core_interrupt_value`。
 - **事件。** 放弃的节点的 `ERROR` 事件带有 `handled`（失败被路由时为 true），以及被路由时的 `routed_to`。
 - **循环上限：`max_visits`。** 声明了它的节点最多运行这么多次；下一次激活不会运行，而是以 `NG.VisitLimit`（`kind` 为 `visit_limit`，0 次尝试）失败，沿该节点的 failure edge 路由；没有 failure edge 时使运行失败。failure edge 的目标完成时计数器重置。计数器只对声明了它的节点保存在检查点元数据的 `_neograph.node_visits` 中。步数预算仍是全局的最后保障。
 - **failure exit。** failure exit 节点完成时，运行在该 super-step 之后结束，带有 `output["_neograph"]["failure_exit"] = {node, code}` 和 `RunStatus::FailureExit`（Python 为 `RunStatus.FailureExit`；`RunInvocation` 报告 `Error`）。Program 运行以声明的代码结束为 `Failed`，`core_node` 为该节点。
 - **重试上限。** `RunBudget::max_node_retries`（Python 为 `ProgramRunBudget.max_node_retries`）限制整个运行中的节点重试：所有 Core 调用、节点、分支、`Send` 和子图。达到上限时以 `kind` `ceiling` 停止重试。已用的重试为 `ProgramUsage::node_retries`，剩余的为 `remaining_budget.max_node_retries`。不设置表示没有上限，这两个字段只在设置时才序列化。由 `ng.spawn` 启动的子运行继承父运行的上限。在 Program 之外，把 `NodeRetryCeiling` 作为 `RunMetadata::node_retry_ceiling` 传入。
-- **Program 中未被路由的失败。** 没有 failure edge 的节点失败会使 Program 以分类后的代码（`NG.TaskFailed`、作者代码、`NG.ProviderFailed` 等）而不是 `P_RUNTIME_CORE_FAILURE` 结束为 `Failed`，`failure.witness.node_failure` 中保存 `{node, code, kind, attempts, retryable, routable}`。编排计划的 `retry` 操作也询问同一个分类器：只有在可重试的失败之后才再次运行其主体，提交过的效果、不重试的类别或已达到的重试上限之后都不会再次运行。
+- **Program 中未被路由的失败。** 没有 failure edge 的节点失败会使 Program 以分类后的代码（`NG.TaskFailed`、作者代码、`NG.ProviderFailed` 等）而不是 `P_RUNTIME_CORE_FAILURE` 结束为 `Failed`，`failure.witness.node_failure` 中保存 `{node, code, kind, attempts, retryable, routable}`。编排计划的 `retry` 操作也询问同一个分类器：只有在可重试的失败之后才再次运行其主体，提交过的效果、不重试的类别、已达到的重试上限或在截止时间停止之后都不会再次运行。
+
+### 尝试超时与截止时间
+
+标志：`retry.attempt_timeout`。
+
+```js
+graph.retryPolicy("TEST", {attempt_timeout_ms: 30000, max_retries: 2, on_failure: "ASK_USER"});
+```
+
+- **超时的尝试。** `attempt_timeout_ms` 限制节点的每一次尝试。时间一到，该尝试就通过它自己的取消令牌（节点的 `ctx.cancel_token`，运行令牌的子令牌）被取消，并以 `NG.Timeout` 失败。这种失败像普通失败一样会被重试，也可以被路由；要在第一次超时就停止，把 `NG.Timeout` 列入 `non_retryable`。第一个终止事件获胜：在超时时刻或之后完成的尝试就是超时了，无论计时器是否已经触发。
+- **迟到的完成被丢弃。** 超时的尝试之后所做的一切都不算数：它的写入和结果被丢弃，它发出的事件不会到达运行的回调，它发起的经中介的 Tool 调用会被拒绝，因为它的令牌已被取消。下一次尝试只在被取消的尝试停止之后才开始，所以同一节点的两次尝试从不重叠。
+- **停止截止时间。** 被取消的尝试有与其运行时间一样长、至少一秒的时间来停止。到那时仍未停止的尝试可能仍在执行效果：节点以 `NG.EffectUncertain` 失败，既不重试也不路由，因此运行失败。该尝试在后台继续，并在返回之前保持其节点存活；`wait_for_node_attempts()` 等待这类尝试，Python 绑定在解释器退出时调用它。提交了非幂等效果之后才停止的尝试与以前一样以 `NG.EffectCommitted` 失败，留下不确定的经中介效果的尝试会暂停运行以进行对账。
+- **所有路径。** 静态节点、fan-out 分支、一个或多个 `Send` 目标以及子图节点走同一条路径；子图节点的子运行会随其尝试一起被取消。超时尝试之后的崩溃会在正在运行的那次尝试中恢复，恢复从不应用超时尝试的结果。
+- **宿主超时。** `GraphEngine::set_node_attempt_timeout_ms(node, ms)`（Python `set_node_attempt_timeout_ms`，`None` 表示清除）为定义中没有超时的节点设置超时。对于定义中有超时的节点，宿主只能缩短它：取两者中较短的一个。`resolved_attempt_timeout_ms(node)` 返回结果。
+- **节点主体在哪里运行。** 驱动运行的协程从不运行带超时的主体，在 Program 运行中则不运行任何节点主体：这类主体在进程范围的工作线程池（`NEOGRAPH_NODE_ATTEMPT_THREADS`，1 到 1024，默认 32）上运行，因此阻塞其线程的主体既不会占住自己的超时，也不会占住 join 成员和 `await` 计时器共享的 Program 调度器。这不仅适用于 Python 节点，也适用于 C++ 节点和 Core 子图。其他 `GraphEngine` 运行仍在调用线程上运行不带超时的主体。
+- **感知截止时间的退避。** 当下一次尝试之前的退避会越过运行的截止时间（Program 的 `wall_time_ms`；Program 之外为 `RunMetadata::deadline`）时，节点会立即以 `kind` `deadline` 停止重试，而不是一直睡到预算结束运行。失败保留其代码（`NG.TaskFailed`、`NG.Timeout` 等），沿节点的 failure edge 路由，没有 failure edge 时则使运行失败。
 
 ## 健全性检查
 

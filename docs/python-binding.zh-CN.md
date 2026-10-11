@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=c488f5d4496f80786dc3df6777e35022584f2ac654e1e4a9039f77b7d5dbd83b -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=67ca829b6ef931fa0677424ca6fa666dd0593ba61bde293b8f3ad1290ca89ab2 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -555,6 +555,8 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 带 `on_failure` 的 `retryPolicy(node, {...})` 会把节点的最终失败路由到处理节点，而不是使运行失败；规则见 [Program 图功能](program-graphs.md#failure-routing)。Python 节点用异常属性标明失败：字符串 `code`（如 `app.compile_error` 这样的作者代码）、布尔值 `retryable` 和字符串 `public_message`。`str(exc)` 永远不会进入记录。节点抛出 `ng.ProgramDiagnosticError`、`ng.ProgramCompileError` 或 `ng.ProgramAdmissionError` 时，属于配置判定（`NG.ConfigError`），从不重试也从不路由。处理节点有 `interruptBefore` 时，运行以 `Interrupted` 停止，`result.interrupt.pending_input.core_interrupt_value` 中是 `{"reason": "failure_route", "failure": record}`；`host.resume(run_id, value)` 会从处理节点继续。failure exit 以声明的代码使运行以 `Failed` 结束，没有 failure edge 的节点失败则以分类后的代码（`NG.TaskFailed`、作者代码等）结束为 `Failed`。
 
 `ProgramRunBudget.max_node_retries`（默认 `None`，即没有上限）限制整个运行中的节点重试；`result.usage.node_retries` 为已用次数，`result.remaining_budget.max_node_retries` 为剩余量。`compile_admit` 不会封存它，因此每次运行都可以设置而无需重新编译。`LocalProgramHost(..., failure_text_redactor=fn)` 和 `GraphEngine.compile(..., failure_text_redactor=fn)` 接受给设置了 `error_text` 的节点使用的 redactor：`fn` 接收 `{"node", "code", "kind", "attempts", "retryable", "public_message"}`，返回要保留的文本或 `None`。没有它时不写入文本。在 `GraphEngine` 上，failure exit 之后 `result.status` 为 `ng.RunStatus.FailureExit`，`engine.resolved_retry_policy(node)` 返回节点实际使用的重试时间。
+
+`retryPolicy(node, {attempt_timeout_ms: ...})` 限制节点的每次尝试（100 到 3 600 000 ms）。超时的尝试会看到 `input.ctx.cancel_token.is_cancelled()` 变为真，并以 `NG.Timeout` 失败，它像其他失败一样会被重试、可被路由；之后它返回的任何内容都会被丢弃。Python 主体无法被抢占，所以会休眠或阻塞的节点应检查令牌：下一次尝试只在超时的尝试返回之后才开始，在停止截止时间（再一个超时时长，至少一秒）内未返回的尝试会以 `NG.EffectUncertain` 使运行失败。这样的主体会在后台继续运行，绑定会在解释器退出时等待它。会越过运行 `wall_time_ms` 的退避以 kind `deadline` 停止重试。在 `GraphEngine` 上，`engine.set_node_attempt_timeout_ms(node, ms)` 设置宿主超时（`None` 表示清除；定义自身的超时只能缩短），`engine.resolved_attempt_timeout_ms(node)` 返回节点实际使用的超时。参见 [Program 图功能](program-graphs.md#attempt-timeouts-and-the-deadline)。
 
 ### 调度线程、worker 与超时
 

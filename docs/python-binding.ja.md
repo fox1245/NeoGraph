@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=c488f5d4496f80786dc3df6777e35022584f2ac654e1e4a9039f77b7d5dbd83b -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=67ca829b6ef931fa0677424ca6fa666dd0593ba61bde293b8f3ad1290ca89ab2 -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -556,6 +556,8 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 `on_failure` を持つ `retryPolicy(node, {...})` は、ノードの最終的な失敗を、実行を失敗させる代わりにハンドラーへルーティングします。規則は [Program のグラフ機能](program-graphs.md#failure-routing)にあります。Python のノードは例外の属性で失敗を示します。文字列の `code`(`app.compile_error` のような作成者コード)、真偽値の `retryable`、文字列の `public_message` です。`str(exc)` は決してレコードに入りません。ノードが `ng.ProgramDiagnosticError`、`ng.ProgramCompileError`、`ng.ProgramAdmissionError` を送出すると構成の判定(`NG.ConfigError`)となり、リトライもルーティングもされません。ハンドラーに `interruptBefore` があると、実行は `Interrupted` で止まり、`result.interrupt.pending_input.core_interrupt_value` に `{"reason": "failure_route", "failure": record}` が入ります。`host.resume(run_id, value)` はハンドラーから続けます。failure exit は宣言されたコードで実行を `Failed` で終え、failure edge のないノードの失敗は分類されたコード(`NG.TaskFailed`、作成者コードなど)で `Failed` になります。
 
 `ProgramRunBudget.max_node_retries`(既定値 `None`、上限なし)は実行全体のノードのリトライを制限します。`result.usage.node_retries` がその回数で、`result.remaining_budget.max_node_retries` が残りです。`compile_admit` はこれを封印しないので、再コンパイルせずに実行ごとに設定できます。`LocalProgramHost(..., failure_text_redactor=fn)` と `GraphEngine.compile(..., failure_text_redactor=fn)` は、`error_text` を設定したノードのための redactor を受け取ります。`fn` は `{"node", "code", "kind", "attempts", "retryable", "public_message"}` を受け取り、残すテキストか `None` を返します。なければテキストは書きません。`GraphEngine` では failure exit の後 `result.status` が `ng.RunStatus.FailureExit` になり、`engine.resolved_retry_policy(node)` はノードが実際に使うリトライのタイミングを返します。
+
+`retryPolicy(node, {attempt_timeout_ms: ...})` はノードの各試行を制限します（100〜3 600 000 ms）。タイムアウトした試行では `input.ctx.cancel_token.is_cancelled()` が真になり、試行はほかの失敗と同じくリトライされルーティングできる `NG.Timeout` で失敗します。その後に試行が返すものはすべて捨てられます。Python の本体は横取りできないので、眠ったりブロックしたりするノードはトークンを確認してください。次の試行はタイムアウトした試行が戻ってから始まり、停止の期限（もう一度タイムアウト分、少なくとも 1 秒）内に戻らない試行は `NG.EffectUncertain` で実行を失敗させます。そのような本体はバックグラウンドで実行を続け、バインディングはインタープリターの終了時にそれを待ちます。実行の `wall_time_ms` を越えるバックオフは kind `deadline` でリトライをやめます。`GraphEngine` では `engine.set_node_attempt_timeout_ms(node, ms)` がホストのタイムアウトを設定し（`None` で解除し、定義自体のタイムアウトは短くすることしかできません）、`engine.resolved_attempt_timeout_ms(node)` がノードが実際に使うタイムアウトを返します。[Program のグラフ機能](program-graphs.md#attempt-timeouts-and-the-deadline)を参照してください。
 
 ### スケジューラースレッド、ワーカー、タイムアウト
 

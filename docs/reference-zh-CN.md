@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=7f14d0a85a3ad1660e3d1991ebc6c164d34ae37640a7537c55c04fff6756d105 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=d537d10f0fb01dbdb8441bd38d53ec4469ce213c5de1831048f608611eb5b9ff -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -573,22 +573,24 @@ public:
 | 分类（由轻到重） | 代码 | 来源 | 重试 | 可路由 |
 |------|------|------|------|------|
 | Ordinary | `NG.TaskFailed`、`NG.SubgraphFailed` 或作者代码 | `std::runtime_error` 及其子类、`NodeFailureError`、Python 异常、根因为 Ordinary 的子图失败 | 是，作者标记为不可重试时除外 | 是 |
-| Timeout | `NG.Timeout` | 为尝试超时保留 | 是 | 是 |
+| Timeout | `NG.Timeout` | 超过 `attempt_timeout_ms`、被取消并已停止的尝试（`NodeAttemptTimeout`） | 是 | 是 |
 | ProviderFailed | `NG.ProviderFailed` | 暂时性的 `ProviderFailure`：传输、响应被截断、截止时间、过载、限流，或 HTTP 5xx 状态的远程失败 | 否，Provider 重试由 Provider 运行时负责 | 是 |
 | EffectCommitted | `NG.EffectCommitted` | 该尝试提交了非幂等的 Tool 效果 | 从不 | 是，处理节点可以进行补偿 |
 | LogicError | `NG.LogicError` | `std::logic_error`，包括完整性检查 | 否 | 否 |
 | ConfigError | `NG.ConfigError` | Provider 的配置、请求、认证、权限、not-found 或误用失败；同时继承 `ConfigurationFailure` 的异常，例如 Program 诊断（C++ 或 Python 的 `ProgramDiagnosticError`、编译或准入错误） | 否 | 否 |
 | SafetyBlocked | `NG.SafetyBlocked` | 因内容过滤或拒绝而停止的 Provider 失败 | 否 | 否 |
 | BudgetExhausted | `NG.BudgetExhausted` | 预算或配额耗尽 | 否 | 否 |
-| EffectUncertain | `NG.EffectUncertain` | `ProviderOutcomeError`（包括结果未知的 Provider 分发），或结果未知的 Tool 效果 | 否 | 否 |
+| EffectUncertain | `NG.EffectUncertain` | `ProviderOutcomeError`（包括结果未知的 Provider 分发）、结果未知的 Tool 效果，或在停止截止时间前未停止的超时尝试 | 否 | 否 |
 | UnknownFailure | `NG.UnknownFailure` | `std::bad_alloc` 或其他任何异常类型 | 否 | 否 |
 | 运行控制 | 无 | `NodeInterrupt`、`HookBoundaryBlocked`、取消 | 否 | 否，运行照旧暂停或停止 |
 
-`NG.` 前缀为保留前缀。作者代码须匹配 `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`。C++ 节点抛出 `NodeFailureError(code, public_message, retryable)`。Python 节点抛出任意带有字符串 `code` 属性的异常，并可附带布尔值 `retryable` 与字符串 `public_message`；调用方收到的仍是原始异常。执行器放弃一个节点时，它抛出的 `NodeExecutionError` 带有一条 `NodeFailure` 记录，可通过 `node_failure_of()` 取得。记录包含代码、分类、停止重试的原因（`exhausted`、`non_retryable`、`effect_committed`，达到运行重试上限时为 `ceiling`，节点激活超过 `max_visits` 时为 `visit_limit`）、尝试次数、可重试与可路由标志、`public_message`，以及最后一次尝试的效果（形如 `{tool, ordinal, status}`）。它从不复制 `what()`。节点 `non_retryable` 中列出的代码不会重试。
+`NG.` 前缀为保留前缀。作者代码须匹配 `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`。C++ 节点抛出 `NodeFailureError(code, public_message, retryable)`。Python 节点抛出任意带有字符串 `code` 属性的异常，并可附带布尔值 `retryable` 与字符串 `public_message`；调用方收到的仍是原始异常。执行器放弃一个节点时，它抛出的 `NodeExecutionError` 带有一条 `NodeFailure` 记录，可通过 `node_failure_of()` 取得。记录包含代码、分类、停止重试的原因（`exhausted`、`non_retryable`、`effect_committed`，达到运行重试上限时为 `ceiling`，下一次尝试之前的退避会越过运行截止时间时为 `deadline`，节点激活超过 `max_visits` 时为 `visit_limit`）、尝试次数、可重试与可路由标志、`public_message`，以及最后一次尝试的效果（形如 `{tool, ordinal, status}`）。它从不复制 `what()`。节点 `non_retryable` 中列出的代码不会重试。
 
 **可路由的失败可以被处理，而不是使运行失败。** 当节点有 failure edge（`failure_edges`，见 [Program 图功能](program-graphs.md#failure-routing)）时，执行器不抛出任何异常：失败的尝试不写入任何内容，一条结构化记录进入该边的 `error_channel`，节点只路由到该边的目标。记录恰好包含 `node`、`kind`、`code`、`attempts`、`retryable`、`step`、`routed_to` 和 `effects`；只有当节点通过 `error_text` 启用、且宿主的 `EngineConfig::failure_text_redactor` 从 `public_message` 中保留了文本时，才会加上 `detail.untrusted_text`。该节点在执行轨迹和 `interruptAfter` 中计为已运行，其待写记录保存已处理的结果，因此恢复会重放路由而不会再次运行该节点；其 `ERROR` 事件带有 `handled: true` 和 `routed_to`。静态节点、扇出分支、`Send` 目标和子图节点，无论经由同步还是异步入口，都走这条路径。不可路由的失败，或没有 failure edge 的节点的失败，仍按上文抛出。
 
 **每次尝试都有自己的效果命名空间。** 尝试 0 使用任务 id（`s3:act`），因此现有日志的槽位保持不变。尝试 k 使用 `s3:act#a<k>`，调用序号在其中重新开始。Tool 效果、Provider 调用和子图线程都跟随尝试，因此重试绝不会重放或冲突于先前尝试的效果；`ProviderCallBroker` 在每次重试时看到新的调用槽位。尝试 k 开始之前，执行器会以该尝试的命名空间为键记录一条空的待写记录；检查点存储无需更改模式。崩溃或中断之后的恢复会在其命名空间中继续最近一次已开始的尝试，因此 `ToolEffectBroker` 会重放该尝试已提交的内容，剩余的重试次数也得以保留。在 `ToolEffectBroker` 下，提交了非幂等效果（以 `ReadOnly`、`ExternalRead` 以外且非 `Idempotent` 的策略成功的调用）的尝试绝不会被重试；结果未知的效果会以 `tool_effect_reconciliation` 中断暂停运行，即使节点捕获了该中断并抛出了其他错误也是如此。节点所运行子图的效果计入该节点的尝试。
+
+**尝试超时与运行的截止时间。** 节点级策略中有 `attempt_timeout_ms` 时（或有只能缩短定义值的宿主超时 `GraphEngine::set_node_attempt_timeout_ms` 时），节点的每次尝试都在驱动运行的协程之外运行，超时一到就通过它自己的子 `CancelToken` 被取消。第一个终止事件获胜：在超时时刻或之后的完成就是超时。超时尝试的迟到完成会被丢弃：没有写入、没有待写记录、超时后没有事件，它发起的经中介的 Tool 调用会被拒绝。尝试在停止之后以 `NG.Timeout` 失败，下一次尝试此时才开始。在停止截止时间（再一个超时时长，至少一秒）内未停止的尝试以 `NG.EffectUncertain` 失败，因此运行失败；它在后台继续并保持其节点存活，`wait_for_node_attempts()` 会等待它。当下一次尝试之前的退避会越过 `RunContext::deadline`（Program 的 wall-time 预算）时，节点以 kind `deadline` 停止重试并保留失败的代码。在 Program 运行中，所有节点主体都以这种方式在 Program 调度器之外运行。参见 [Program 图功能](program-graphs.md#attempt-timeouts-and-the-deadline)。
 
 ---
 
