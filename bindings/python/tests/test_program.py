@@ -281,3 +281,24 @@ def test_program_compilers_accept_javascript_compile_limits():
     with pytest.raises(RuntimeError, match="P_JS_TIMEOUT"):
         host.compile(source, _budget())
     assert time.monotonic() - started < 5
+
+
+def test_compile_error_reports_the_javascript_source_location():
+    compiler = ng.ProgramCompiler(_registry(), "python-program-test/v1")
+    source = ng.ProgramSource.from_javascript(
+        "python-syntax.js",
+        "export function define() {\n"
+        '  return ng.graph("main")\n'
+        '    .node("A", {type: "python_program_node" goal: "x"})\n'
+        '    .entry("A").exit("A");\n'
+        "}\n",
+    )
+    with pytest.raises(RuntimeError) as raised:
+        compiler.compile(source)
+    assert "python-syntax.js:3:" in str(raised.value)
+    assert isinstance(raised.value, ng.ProgramCompileError)
+    diagnostic = raised.value.diagnostics[0]
+    assert diagnostic["code"] == "P_JS_EVALUATION"
+    assert diagnostic["source_id"] == "python-syntax.js"
+    assert diagnostic["span"]["line_begin"] == 3
+    assert diagnostic["witness"]["engine"] == "quickjs"

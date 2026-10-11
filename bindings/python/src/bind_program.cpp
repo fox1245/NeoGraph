@@ -43,13 +43,44 @@ ExecutableManifest registered_manifest(ExecutableKind kind,
                               guarantee};
 }
 
-std::runtime_error python_compile_error(const ProgramCompileError& error) {
+py::dict diagnostic_to_py(const Diagnostic& diagnostic) {
+    py::object span = py::none();
+    if (const auto& value = diagnostic.primary.span) {
+        span = py::dict("byte_begin"_a = value->byte_begin, "byte_end"_a = value->byte_end,
+                        "line_begin"_a = value->line_begin,
+                        "column_begin"_a = value->column_begin, "line_end"_a = value->line_end,
+                        "column_end"_a = value->column_end);
+    }
+    return py::dict("code"_a = diagnostic.code,
+                    "severity"_a = std::string(to_string(diagnostic.severity)),
+                    "phase"_a = std::string(to_string(diagnostic.phase)),
+                    "message"_a = diagnostic.message,
+                    "source_id"_a = diagnostic.primary.source_id,
+                    "json_pointer"_a = diagnostic.primary.json_pointer, "span"_a = span,
+                    "witness"_a = json_to_py(diagnostic.witness));
+}
+
+// Raises neograph_engine.ProgramCompileError, a RuntimeError subclass whose
+// .diagnostics keeps each diagnostic's source site and witness.
+[[noreturn]] void raise_compile_error(const ProgramCompileError& error) {
     std::string message = "Program compilation failed";
+    py::list    diagnostics;
     for (const auto& diagnostic : error.diagnostics()) {
         message += "\n" + diagnostic.code + " " + diagnostic.primary.json_pointer +
                    ": " + diagnostic.message;
+        if (const auto& span = diagnostic.primary.span) {
+            message += " (" + diagnostic.primary.source_id + ":" +
+                       std::to_string(span->line_begin) + ":" +
+                       std::to_string(span->column_begin) + ")";
+        }
+        diagnostics.append(diagnostic_to_py(diagnostic));
     }
-    return std::runtime_error(std::move(message));
+    const auto type =
+        py::module_::import("neograph_engine._neograph").attr("ProgramCompileError");
+    auto exception           = type(message);
+    exception.attr("diagnostics") = std::move(diagnostics);
+    PyErr_SetObject(type.ptr(), exception.ptr());
+    throw py::error_already_set();
 }
 
 class ProgramRegistryBuilderBinding {
@@ -229,7 +260,7 @@ public:
         try {
             return compiler_->compile(source, budget);
         } catch (const ProgramCompileError& error) {
-            throw python_compile_error(error);
+            raise_compile_error(error);
         }
     }
 
@@ -458,11 +489,8 @@ void init_program(py::module_& m) {
         })
         .def_property_readonly("diagnostics", [](const ProgramBundle& value) {
             py::list result;
-            for (const auto& diagnostic : value.diagnostics()) {
-                result.append(py::dict("code"_a = diagnostic.code,
-                                       "message"_a = diagnostic.message,
-                                       "witness"_a = json_to_py(diagnostic.witness)));
-            }
+            for (const auto& diagnostic : value.diagnostics())
+                result.append(diagnostic_to_py(diagnostic));
             return result;
         })
         .def("serialize_canonical", &ProgramBundle::serialize_canonical);
@@ -478,6 +506,8 @@ void init_program(py::module_& m) {
         .def_readwrite("max_generated_document_bytes",
                        &JavaScriptCompileLimits::max_generated_document_bytes);
 
+    py::exception<ProgramCompileError>(m, "ProgramCompileError", PyExc_RuntimeError);
+
     py::class_<ProgramCompiler>(m, "ProgramCompiler")
         .def(py::init([](RegistrySnapshot registry, std::string compiler_build_id,
                          JavaScriptCompileLimits javascript_limits) {
@@ -492,7 +522,7 @@ void init_program(py::module_& m) {
                 return budget.is_none() ? self.compile(source)
                                         : self.compile(source, budget.cast<RunBudget>());
             } catch (const ProgramCompileError& error) {
-                throw python_compile_error(error);
+                raise_compile_error(error);
             }
         }, py::arg("source"), py::arg("budget") = py::none());
 
