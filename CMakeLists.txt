@@ -2157,10 +2157,11 @@ endif()
 # ===========================================================================
 # Python bindings (pybind11)
 #
-# Optional. Builds the `_neograph` C extension under build/neograph/, with
-# the `neograph/` package layout next to it so a `PYTHONPATH=build python`
-# can `import neograph`. Wheel packaging is downstream of this option;
-# see bindings/python/README for details.
+# Optional. Builds the `_neograph` C extension under build/neograph_engine/,
+# with the `neograph_engine/` package layout next to it so a
+# `PYTHONPATH=build python` can `import neograph_engine` once the package's
+# Python dependencies (pydantic>=2, certifi) are installed. Wheel packaging is
+# downstream of this option; see bindings/python/CMakeLists.txt for details.
 # ===========================================================================
 if(NEOGRAPH_BUILD_PYBIND)
     add_subdirectory(bindings/python)

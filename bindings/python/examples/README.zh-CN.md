@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/examples/README.md locale=zh-CN source_sha256=a1ffbe746f41909d860beac33ef1f3ea473e10ad6162985e4fba7b3810b4dd22 -->
+<!-- neograph-i18n: source=bindings/python/examples/README.md locale=zh-CN source_sha256=5ec25b467bef853ac9df52be725f8c16b6c63aef9ab5f6f5b64c974749579bee -->
 # Python API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -13,6 +13,8 @@ python 01_minimal.py
 ```
 
 请在此目录下运行命令。`python-dotenv` 是可选依赖：如果希望 `_common.py` 加载示例或仓库中最近的 `.env`，请安装它。已导出的环境变量优先。缺少托管服务凭据属于错误，不能算作验证成功。
+
+若要改用源码构建运行，请使用 `-DNEOGRAPH_BUILD_PYBIND=ON` 配置，并将 `PYTHONPATH` 设为构建目录。构建树不会安装该包的 Python 依赖，请先运行 `pip install 'pydantic>=2' certifi`。`import neograph_engine` 需要 pydantic；缺少 certifi 时，TLS 使用主机的信任存储。
 
 运行托管服务示例时，请设置 `OPENAI_API_KEY`，也可以设置 `OPENAI_MODEL`（默认为 `gpt-4.1-mini`）。`_common.py` 接受封闭形式的 OpenAI Chat 或 Responses 描述符，再构造 `SchemaProvider`。类型化 SDK 使用 libcurl HTTP；已移除的提供方类、补全参数、WebSocket 路径和传输后端选择器均不可用。
 

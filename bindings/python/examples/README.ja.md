@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/examples/README.md locale=ja source_sha256=a1ffbe746f41909d860beac33ef1f3ea473e10ad6162985e4fba7b3810b4dd22 -->
+<!-- neograph-i18n: source=bindings/python/examples/README.md locale=ja source_sha256=5ec25b467bef853ac9df52be725f8c16b6c63aef9ab5f6f5b64c974749579bee -->
 # Python API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -13,6 +13,8 @@ python 01_minimal.py
 ```
 
 コマンドはこのディレクトリで実行してください。`python-dotenv` は任意です。`_common.py` で例またはリポジトリ内の最も近い `.env` を読み込む場合にインストールしてください。エクスポート済みの環境変数が優先されます。ホスト型サービスの認証情報が欠けている場合はエラーであり、検証の成功にはなりません。
+
+wheel の代わりにソースビルドで実行するには、`-DNEOGRAPH_BUILD_PYBIND=ON` で構成し、`PYTHONPATH` にビルドディレクトリを設定してください。ビルドツリーはパッケージの Python 依存関係をインストールしないため、先に `pip install 'pydantic>=2' certifi` を実行してください。`import neograph_engine` には pydantic が必要です。certifi がない場合、TLS はホストのトラストストアを使います。
 
 ホスト型サービスを使う例では、`OPENAI_API_KEY` を設定し、必要に応じて `OPENAI_MODEL`（既定値は `gpt-4.1-mini`）も設定してください。`_common.py` は閉じた形式の OpenAI Chat または Responses 記述子を受け入れ、`SchemaProvider` を構築します。型付き SDK は libcurl HTTP を使います。削除されたプロバイダークラス、完了パラメーター、WebSocket 経路、トランスポートバックエンドの選択機能は利用できません。
 

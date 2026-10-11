@@ -17,6 +17,11 @@
 #
 #   PYTHONPATH=build python -c "import neograph_engine; print(neograph_engine.__version__)"
 #
+# The build tree installs none of the package's Python dependencies
+# (pyproject.toml `dependencies`): `pip install 'pydantic>=2' certifi` first.
+# The import fails without pydantic; without certifi, TLS uses the host's
+# trust store.
+#
 # Note: distribution name (PyPI) is `neograph-engine`, Python import
 # name is `neograph_engine`. The C extension itself stays `_neograph`
 # (private; lives inside the package). The bare `neograph` name on
@@ -159,7 +164,8 @@ target_compile_definitions(_neograph PRIVATE
     "NEOGRAPH_PY_VERSION=\"${_NEOGRAPH_VERSION}\"")
 
 # Locate the binding next to neograph_engine/__init__.py inside the build
-# tree so PYTHONPATH=build works out of the box. CMAKE_LIBRARY_OUTPUT_DIRECTORY
+# tree so PYTHONPATH=build finds the package without installing it (its Python
+# dependencies still need installing; see the header). CMAKE_LIBRARY_OUTPUT_DIRECTORY
 # is the canonical place for module-style libraries (which pybind11_add_module
 # creates as MODULE-typed).
 set(_NEOGRAPH_PY_PKG_DIR "${CMAKE_BINARY_DIR}/neograph_engine")

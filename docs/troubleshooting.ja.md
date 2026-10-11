@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=7f1eeda183c21890031bb9b18196a7377f140553c17f4362974f8d7341588208 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=a349458203a2d6478b8a97e88b0b36692884bb81da88c4faa5d18f599713b2d3 -->
 # トラブルシューティング
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -22,6 +22,8 @@ cmake -S . -B build -DCMAKE_PREFIX_PATH="$SDK_PREFIX" \
   -DNEOGRAPH_BUILD_PYBIND=ON
 cmake --build build -j
 ```
+
+ビルドツリーはインストール済みパッケージではない。`PYTHONPATH=build python -c "import neograph_engine"` の前に `pip install 'pydantic>=2' certifi` で wheel の Python 依存関係を入れる。pydantic がなければ import は失敗し、certifi がなければ TLS はホストのトラストストアを使う。
 
 `Could NOT find CURL` は `NEOGRAPH_USE_LIBCURL` 無効化では直らない。flag は NeoGraph の任意 CurlH2Pool を制御し、SDK 必須 transport ではない。libcurl 開発 file（Debian/Ubuntu は `libcurl4-openssl-dev`、Fedora は `libcurl-devel`）と一貫した toolchain/prefix を用意する。
 

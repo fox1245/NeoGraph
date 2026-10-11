@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=7f1eeda183c21890031bb9b18196a7377f140553c17f4362974f8d7341588208 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=a349458203a2d6478b8a97e88b0b36692884bb81da88c4faa5d18f599713b2d3 -->
 # 故障排除
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -22,6 +22,8 @@ cmake -S . -B build -DCMAKE_PREFIX_PATH="$SDK_PREFIX" \
   -DNEOGRAPH_BUILD_PYBIND=ON
 cmake --build build -j
 ```
+
+构建树不是已安装的包。在 `PYTHONPATH=build python -c "import neograph_engine"` 之前，先用 `pip install 'pydantic>=2' certifi` 安装 wheel 的 Python 依赖：缺少 pydantic 时 import 会失败，缺少 certifi 时 TLS 使用主机信任存储。
 
 `Could NOT find CURL` 不能靠禁用 `NEOGRAPH_USE_LIBCURL` 修复；该 flag 控制 NeoGraph 可选 CurlH2Pool，不控制 SDK 必需 transport。安装 libcurl 开发文件（Debian/Ubuntu 的 `libcurl4-openssl-dev`、Fedora 的 `libcurl-devel`），使用一致 toolchain/prefix。
 

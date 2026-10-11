@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=7f1eeda183c21890031bb9b18196a7377f140553c17f4362974f8d7341588208 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=a349458203a2d6478b8a97e88b0b36692884bb81da88c4faa5d18f599713b2d3 -->
 # 문제 해결
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -22,6 +22,8 @@ cmake -S . -B build -DCMAKE_PREFIX_PATH="$SDK_PREFIX" \
   -DNEOGRAPH_BUILD_PYBIND=ON
 cmake --build build -j
 ```
+
+빌드 트리는 설치된 패키지가 아니다. `PYTHONPATH=build python -c "import neograph_engine"` 전에 `pip install 'pydantic>=2' certifi`로 wheel의 Python 의존성을 설치한다. pydantic이 없으면 import가 실패하고, certifi가 없으면 TLS는 호스트 신뢰 저장소를 사용한다.
 
 `Could NOT find CURL`은 `NEOGRAPH_USE_LIBCURL`을 꺼서 해결되지 않는다. 이 flag는 NeoGraph 선택적 CurlH2Pool만 제어하며 SDK의 필수 transport는 아니다. libcurl 개발 파일(Debian/Ubuntu의 `libcurl4-openssl-dev`, Fedora의 `libcurl-devel`)과 일관된 toolchain/prefix를 제공한다.
 

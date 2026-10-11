@@ -22,6 +22,8 @@ cmake -S . -B build -DCMAKE_PREFIX_PATH="$SDK_PREFIX" \
 cmake --build build -j
 ```
 
+The build tree is not an installed package. Before `PYTHONPATH=build python -c "import neograph_engine"`, install the wheel's Python dependencies with `pip install 'pydantic>=2' certifi`: the import fails without pydantic, and without certifi TLS uses the host's trust store.
+
 `Could NOT find CURL` is not fixed by disabling `NEOGRAPH_USE_LIBCURL`: that flag controls NeoGraph's optional CurlH2Pool, not the SDK's mandatory transport. Install libcurl development files (`libcurl4-openssl-dev` on Debian/Ubuntu, `libcurl-devel` on Fedora) and use a consistent toolchain/prefix.
 
 SQLite and PostgreSQL are optional NeoGraph components. Supply their development packages or explicitly disable `NEOGRAPH_BUILD_SQLITE`/`NEOGRAPH_BUILD_POSTGRES`. This does not remove the SDK runtime. For unresolved binding symbols after a header/API change, reconfigure and rebuild all consumers against matching headers/libraries in a fresh build directory.

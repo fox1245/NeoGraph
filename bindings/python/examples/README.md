@@ -13,6 +13,8 @@ python 01_minimal.py
 
 Run commands from this directory. `python-dotenv` is optional: install it if you want `_common.py` to load the nearest example/repository `.env`. Exported environment variables take precedence. Missing hosted credentials are an error, not a successful verification run.
 
+To run them against a source build instead, configure with `-DNEOGRAPH_BUILD_PYBIND=ON` and set `PYTHONPATH` to the build directory. A build tree does not install the package's Python dependencies: run `pip install 'pydantic>=2' certifi` first. `import neograph_engine` requires pydantic; without certifi, TLS uses the host's trust store.
+
 For hosted examples, set `OPENAI_API_KEY` and optionally `OPENAI_MODEL` (default `gpt-4.1-mini`). `_common.py` admits a closed OpenAI Chat or Responses descriptor, then constructs `SchemaProvider`. The typed SDK uses libcurl HTTP; the removed provider classes, completion parameters, WebSocket path, and transport-backend selector are not available.
 
 For no-key protocol qualification, set `OPENAI_API_BASE` to a faithful loopback Chat/Responses peer. It must implement the route and response shape used by the example, not return a Python mock. Use `NG_EXAMPLE_CA_FILE` for a local TLS CA. `NG_PROVIDER_DESCRIPTOR` can instead name a complete admitted descriptor JSON file, including a gateway prefix, routes, and allowed headers. A base URL is not a full `/v1/chat/completions` route. See [the Python binding guide](../../../docs/python-binding.md) for the typed request/outcome contract.
