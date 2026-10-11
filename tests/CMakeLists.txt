@@ -951,3 +951,14 @@ if(NEOGRAPH_BUILD_PROGRAM)
     endif()
     neograph_discover_tests(neograph_program_v2_tests PROPERTIES LABELS "program;program-v2")
 endif()
+
+# Pricing registry for monetary Program budgets (#372): catalog loading,
+# reservations and settlements. No network.
+if(NEOGRAPH_BUILD_PROGRAM)
+    add_executable(neograph_pricing_tests test_pricing.cpp)
+    target_include_directories(neograph_pricing_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/program)
+    target_link_libraries(neograph_pricing_tests PRIVATE neograph::program GTest::gtest_main)
+    target_compile_definitions(neograph_pricing_tests PRIVATE
+        NEOGRAPH_PRICING_CATALOG="${PROJECT_SOURCE_DIR}/data/pricing/catalog.json")
+    neograph_discover_tests(neograph_pricing_tests PROPERTIES LABELS pricing)
+endif()

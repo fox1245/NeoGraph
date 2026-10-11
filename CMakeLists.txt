@@ -615,6 +615,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/core_progress.cpp
         src/program/run_attempt.cpp
         src/program/invocation.cpp
+        src/program/pricing.cpp
     )
     target_include_directories(neograph_program
         PUBLIC
