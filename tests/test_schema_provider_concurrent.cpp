@@ -43,12 +43,18 @@ TEST(SchemaProviderConcurrent, RateLimitedFailureCarriesRetryAfter) {
     peer.state->status = 429;
     peer.state->retry_after = "7";
     auto provider = wire::provider("anthropic.messages", peer.origin());
+    const auto started = std::chrono::steady_clock::now();
     const auto result = provider->invoke(wire::request("anthropic.messages"));
+    const auto elapsed = std::chrono::steady_clock::now() - started;
     ASSERT_TRUE(std::holds_alternative<sp::Failure>(*result));
     EXPECT_EQ(wire::failure(result).error.kind, sp::ErrorKind::RateLimited);
     EXPECT_EQ(wire::failure(result).error.http_status, 429);
     ASSERT_TRUE(wire::failure(result).error.retry_after);
-    EXPECT_EQ(*wire::failure(result).error.retry_after, std::chrono::seconds(7));
+    // The SDK reports the wait still remaining when the failure is formed, so time spent
+    // after the header arrived (noticeable under sanitizers) has already been subtracted.
+    const auto retry_after = *wire::failure(result).error.retry_after;
+    EXPECT_LE(retry_after, std::chrono::seconds(7));
+    EXPECT_GE(retry_after, std::chrono::seconds(7) - elapsed);
     EXPECT_EQ(peer.state->entered, 1u);
 }
 
