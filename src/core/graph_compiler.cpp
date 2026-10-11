@@ -359,7 +359,7 @@ std::string ParseReport::summary() const {
         message +=
             "\nAnnotation keys ('_'/'x-' prefixes) are always allowed. "
             "Remove 'schema_version' to fall back to lenient parsing. "
-            "See docs/troubleshooting.md \"Strict topology validation\".";
+            "See docs/troubleshooting.md \"Graph definitions and registration\".";
     }
     return message;
 }
