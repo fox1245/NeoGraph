@@ -464,3 +464,58 @@ def test_a_refused_member_is_the_join_failure_not_the_sibling_it_cancelled(peer)
     assert result.failure.code == "P_MONEY_BUDGET", describe(result)
     assert peer.request_count() == 0
     assert support.JOURNAL.names("cancelled") == ["wait"]
+
+
+# ---------------------------------------------------------------------------
+# A paused join charges a settled member's call once (#380)
+# ---------------------------------------------------------------------------
+
+ASK_OR_CALL = define_graph("""
+    g.channel("messages", {reducer: "append", initial: []});
+    g.node("route", {type: "e2e.step"});
+    g.node("llm", {type: "llm_call"});
+    g.node("confirm", {type: "e2e.step", ask: "ok?"});
+    g.entry("route");
+    g.conditionalEdge("route", "e2e.route_by_topic", {billing: "llm", general: "confirm"});
+    g.exit("llm");
+    g.exit("confirm");
+""", name="chat")
+
+
+@pytest.mark.parametrize("durable", [False, True], ids=["in-memory", "sqlite-journal"])
+def test_resume_of_a_paused_join_never_resends_or_recharges_a_settled_call(peer, tmp_path,
+                                                                         durable):
+    # Before the fix, an in-memory host abandoned the member's call when the
+    # other member asked (holding its reservation), then sent it again on resume.
+    if durable and sys.platform == "win32":
+        pytest.skip("NativeArchive custody needs an owner-only protected directory")
+    text = with_main(ASK_OR_CALL, """
+        const replies = yield ng.all([
+          ng.callCore("chat", {topic: "billing", messages: [{role: "user", content: "a"}]}, "call"),
+          ng.callCore("chat", {topic: "general"}, "confirm")
+        ], {max_in_flight: 2}, "fan");
+        return {reply: replies[0].messages[1].content, answer: replies[1].answer};
+    """)
+    host = (durable_bound_host(peer, tmp_path, scheduler_threads=2) if durable
+            else make_bound_host(peer.base_url, scheduler_threads=2))
+    run_budget = priced_budget(max_concurrency=2, max_program_operations=8)
+    version = admit(host, text, run_budget, "chat.js")
+
+    paused = host.run(version, {}, run_budget)
+
+    assert paused.status == ng.ProgramTerminalStatus.Interrupted, describe(paused)
+    assert paused.interrupt.core_node == "confirm"
+    assert peer.request_count() == 1
+    assert paused.usage.model_tokens == 24
+    assert paused.usage.monetary_microunits == 1235
+
+    done = host.resume(paused.run_id, {"ok": True}).wait()
+
+    assert done.status == ng.ProgramTerminalStatus.Completed, describe(done)
+    assert done.output == {"reply": "Paris.", "answer": {"ok": True}}
+    assert peer.request_count() == 1, "the settled member is replayed, its call not resent"
+    assert support.JOURNAL.names().count("route") == 2, "and its nodes do not run again"
+    assert done.usage.model_tokens == 0
+    assert done.usage.monetary_microunits == 0
+    assert done.remaining_budget.model_tokens == 1_000_000 - 24
+    assert done.remaining_budget.monetary_microunits == 1_000_000 - 1235

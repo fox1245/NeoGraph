@@ -518,6 +518,55 @@ private:
     std::string name_;
 };
 
+// A join member driven by its "value" channel (#380): "ask" interrupts until
+// it is resumed, "fail" throws, "slow" finishes after a short cancellable wait,
+// and any other value finishes at once. Every run is counted by its value.
+std::mutex                      join_member_mutex;
+std::map<std::string, unsigned> join_member_runs;
+
+void reset_join_member_runs() {
+    std::lock_guard lock(join_member_mutex);
+    join_member_runs.clear();
+}
+
+unsigned join_member_runs_of(const std::string& value) {
+    std::lock_guard lock(join_member_mutex);
+    const auto      found = join_member_runs.find(value);
+    return found == join_member_runs.end() ? 0U : found->second;
+}
+
+class JoinMemberNode final : public GraphNode {
+public:
+    explicit JoinMemberNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        const auto value = input.state.get("value").get<std::string>();
+        {
+            std::lock_guard lock(join_member_mutex);
+            ++join_member_runs[value];
+        }
+        if (value == "fail") throw std::runtime_error("join member failure sentinel");
+        if (value == "ask" && !input.ctx.resume_value)
+            throw NodeInterrupt("join member approval", json{{"request", "approve"}});
+        if (value == "slow") {
+            auto timer = asio::steady_timer(co_await asio::this_coro::executor);
+            timer.expires_after(std::chrono::milliseconds(300));
+            co_await timer.async_wait(
+                asio::bind_cancellation_slot(input.ctx.cancel_token->slot(), asio::use_awaitable));
+        }
+        NodeOutput output;
+        output.writes.push_back(ChannelWrite{
+            "value", value == "ask" ? input.ctx.resume_value->at("decision")
+                                    : json("done:" + value)});
+        co_return output;
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
 class BlockingNode final : public GraphNode {
 public:
     explicit BlockingNode(std::string               name,
@@ -799,6 +848,12 @@ RegistrySnapshot runtime_registry(
         manifest(ExecutableKind::Node, "runtime-value-gated", 'e'),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<ValueGatedNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-join-member", 'e'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<JoinMemberNode>(name);
         },
         json{{"type", "object"}}, json::object());
     builder.add_node(
@@ -6350,6 +6405,375 @@ TEST(ProgramRuntimeTest, JavaScriptFailFastJoinReportsTheFailureThatStoppedIt) {
         << result.failure()->message;
     EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(4))
         << "the waiting member was cancelled";
+}
+
+// ---------------------------------------------------------------------------
+// A member's interrupt pauses its join (#380)
+// ---------------------------------------------------------------------------
+
+namespace {
+// The run and checkpoint stores of a join test: in memory, or SQLite files
+// that are removed afterwards.
+struct JoinTestStores {
+    explicit JoinTestStores(bool durable) {
+        if (!durable) return;
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE) && \
+    defined(NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE_CHECKPOINT)
+        static std::atomic<unsigned> sequence{0};
+        directory = std::filesystem::temp_directory_path() /
+                    ("neograph-runtime-paused-join-" +
+                     std::to_string(
+                         std::chrono::steady_clock::now().time_since_epoch().count()) +
+                     "-" + std::to_string(sequence.fetch_add(1)));
+        std::filesystem::create_directories(directory);
+        transitions =
+            std::make_shared<SQLiteProgramTransitionStore>((directory / "program.db").string());
+        checkpoints =
+            std::make_shared<SqliteCheckpointStore>((directory / "checkpoints.db").string());
+#endif
+    }
+    ~JoinTestStores() {
+        transitions.reset();
+        checkpoints.reset();
+        std::error_code ignored;
+        if (!directory.empty()) std::filesystem::remove_all(directory, ignored);
+    }
+    JoinTestStores(const JoinTestStores&)            = delete;
+    JoinTestStores& operator=(const JoinTestStores&) = delete;
+
+    std::filesystem::path                   directory;
+    std::shared_ptr<ProgramTransitionStore> transitions;
+    std::shared_ptr<CheckpointStore>        checkpoints;
+};
+
+std::vector<bool> join_test_store_kinds() {
+    std::vector<bool> durable{false};
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE) && \
+    defined(NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE_CHECKPOINT)
+    durable.push_back(true);
+#endif
+    return durable;
+}
+
+struct EmitCountingSink final : public ProgramEventSink {
+    void on_event(const ProgramEvent& event) override {
+        if (event.kind == ProgramEventKind::Emit) emits.fetch_add(1);
+    }
+    std::atomic<unsigned> emits{0};
+};
+
+ProgramResult run_join(AdmittedRuntime& fixture, const std::string& body,
+                       std::shared_ptr<ProgramEventSink> events = {}) {
+    const auto version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-join-member", body));
+    return fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(3), "trace-js-paused-join",
+                          std::move(events)});
+}
+
+ProgramResult approve(AdmittedRuntime& fixture, const ProgramResult& interrupted,
+                      std::shared_ptr<ProgramEventSink> events = {}) {
+    return fixture.runtime
+        ->resume("tenant:runtime", interrupted.run_id(),
+                 resume_for(interrupted, json{{"decision", "approved"}},
+                            "trace-js-paused-join-resume", std::move(events)))
+        .wait();
+}
+
+std::vector<std::string> settled_members_of(AdmittedRuntime& fixture, const ProgramResult& run) {
+    std::vector<std::string> members;
+    const auto commands = fixture.journal->load_javascript_commands("tenant:runtime", run.run_id());
+    if (commands.empty() || !commands.back().settled_members()) return members;
+    for (const auto& [member, record] : commands.back().settled_members()->items())
+        members.push_back(member);
+    return members;
+}
+}  // namespace
+
+TEST(ProgramRuntimeTest, JavaScriptAllPausedByAMemberResumesItAndReplaysTheSettledMember) {
+    // #380: one member completes and the other interrupts. The join is
+    // Interrupted on the paused member, the run resumes from that member's
+    // checkpoint, and the command journal records the completed member, which
+    // resume replays instead of running again. In memory and on SQLite alike.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        reset_join_member_runs();
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                                ExecutionGuarantee::Unmanaged, true);
+        const auto interrupted = run_join(fixture, R"JS(
+    const replies = yield ng.all([
+        ng.callCore("main", {value: "done"}, "pause:done"),
+        ng.callCore("main", {value: "ask"}, "pause:ask")
+    ], {max_in_flight: 2}, "pause:all");
+    return {values: replies.map((reply) => reply.value)};
+)JS");
+
+        ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+            << failure_detail(interrupted);
+        ASSERT_TRUE(interrupted.interrupt() && interrupted.interrupt()->pending_input);
+        EXPECT_EQ(interrupted.interrupt()->pending_input->operation_id(),
+                  "root.javascript.1/member/1");
+        ASSERT_TRUE(interrupted.checkpoint().has_value());
+        const auto paused_at =
+            fixture.checkpoints->load_by_id(interrupted.checkpoint()->checkpoint_id);
+        ASSERT_TRUE(paused_at.has_value());
+        EXPECT_EQ(paused_at->interrupt_phase, CheckpointPhase::NodeInterrupt)
+            << "the run resumes the paused member, whichever member wrote last";
+        EXPECT_EQ(interrupted.execution_trace(), std::vector<std::string>{"work"});
+        EXPECT_EQ(settled_members_of(fixture, interrupted),
+                  std::vector<std::string>{"root.javascript.1/member/0"});
+
+        const auto resumed = approve(fixture, interrupted);
+
+        ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed) << failure_detail(resumed);
+        EXPECT_EQ(resumed.output(), (json{{"values", json::array({"done:done", "approved"})}}));
+        EXPECT_EQ(join_member_runs_of("done"), 1U) << "the completed member is replayed";
+        EXPECT_EQ(join_member_runs_of("ask"), 2U);
+        EXPECT_EQ(resumed.execution_trace(), std::vector<std::string>{"work"});
+        const auto commands =
+            fixture.journal->load_javascript_commands("tenant:runtime", resumed.run_id());
+        ASSERT_EQ(commands.size(), 3U);
+        EXPECT_EQ(commands.front().coordinate_id(), commands.back().coordinate_id());
+        EXPECT_TRUE(commands.back().completed());
+    }
+}
+
+TEST(ProgramRuntimeTest, JavaScriptPausedJoinKeepsASettledMemberOfAnyKind) {
+    // #380: an emit member that settled before the pause is replayed from the
+    // journal too: the resumed join does not emit it again.
+    reset_join_member_runs();
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    auto            first_events = std::make_shared<EmitCountingSink>();
+    const auto      interrupted  = run_join(fixture, R"JS(
+    const replies = yield ng.all([
+        ng.emit({id: "kept"}, "pause:emit"),
+        ng.callCore("main", {value: "ask"}, "pause:ask")
+    ], {max_in_flight: 2}, "pause:all");
+    return {emitted: replies[0], decision: replies[1].value};
+)JS",
+                                     first_events);
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << failure_detail(interrupted);
+    EXPECT_EQ(first_events->emits.load(), 1U);
+
+    auto       resumed_events = std::make_shared<EmitCountingSink>();
+    const auto resumed        = approve(fixture, interrupted, resumed_events);
+
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed) << failure_detail(resumed);
+    EXPECT_EQ(resumed.output(),
+              (json{{"emitted", json{{"id", "kept"}}}, {"decision", "approved"}}));
+    EXPECT_EQ(resumed_events->emits.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptPausedJoinLaunchesNoFurtherMember) {
+    // #380: the pause stops the join from launching members that have not
+    // started; they run once the paused member resumes.
+    reset_join_member_runs();
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      interrupted = run_join(fixture, R"JS(
+    const replies = yield ng.all([
+        ng.callCore("main", {value: "ask"}, "pause:ask"),
+        ng.callCore("main", {value: "done"}, "pause:later")
+    ], {max_in_flight: 1}, "pause:all");
+    return {values: replies.map((reply) => reply.value)};
+)JS");
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << failure_detail(interrupted);
+    EXPECT_EQ(join_member_runs_of("done"), 0U);
+    EXPECT_TRUE(settled_members_of(fixture, interrupted).empty());
+
+    const auto resumed = approve(fixture, interrupted);
+
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed) << failure_detail(resumed);
+    EXPECT_EQ(resumed.output(), (json{{"values", json::array({"approved", "done:done"})}}));
+    EXPECT_EQ(join_member_runs_of("done"), 1U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptPausedNestedJoinReplaysItsSettledMembers) {
+    // #380: a nested join that pauses records its own settled members with
+    // the outer join's, and resume replays both levels.
+    reset_join_member_runs();
+    AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      interrupted = run_join(fixture, R"JS(
+    const replies = yield ng.all([
+        ng.all([
+            ng.callCore("main", {value: "inner"}, "nested:inner"),
+            ng.callCore("main", {value: "ask"}, "nested:ask")
+        ], {max_in_flight: 2}, "nested:inner-join"),
+        ng.callCore("main", {value: "outer"}, "nested:outer")
+    ], {max_in_flight: 2}, "nested:outer-join");
+    return {inner: replies[0].map((reply) => reply.value), outer: replies[1].value};
+)JS");
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << failure_detail(interrupted);
+    EXPECT_EQ(settled_members_of(fixture, interrupted),
+              (std::vector<std::string>{"root.javascript.1/member/0/member/0",
+                                        "root.javascript.1/member/1"}));
+
+    const auto resumed = approve(fixture, interrupted);
+
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed) << failure_detail(resumed);
+    EXPECT_EQ(resumed.output(), (json{{"inner", json::array({"done:inner", "approved"})},
+                                      {"outer", "done:outer"}}));
+    EXPECT_EQ(join_member_runs_of("inner"), 1U);
+    EXPECT_EQ(join_member_runs_of("outer"), 1U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptFailFastAllFailsOnAFailureWhileAMemberIsPaused) {
+    // #380: a pause does not hold back a fail-fast failure.
+    reset_join_member_runs();
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      result = run_join(fixture, R"JS(
+    yield ng.all([
+        ng.callCore("main", {value: "ask"}, "pause:ask"),
+        ng.callCore("main", {value: "fail"}, "pause:fail")
+    ], {max_in_flight: 2}, "pause:all");
+    return {unreachable: true};
+)JS");
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed) << failure_detail(result);
+    EXPECT_NE(result.failure()->message.find("join member failure sentinel"), std::string::npos)
+        << failure_detail(result);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptCollectingAllKeepsASettledFailureAcrossThePause) {
+    // #380: a collecting join keeps the failure a member reached before the
+    // pause; resume reports it without running that member again.
+    reset_join_member_runs();
+    AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      interrupted = run_join(fixture, R"JS(
+    yield ng.all([
+        ng.callCore("main", {value: "ask"}, "collect:ask"),
+        ng.callCore("main", {value: "fail"}, "collect:fail"),
+        ng.callCore("main", {value: "done"}, "collect:done")
+    ], {max_in_flight: 3, collect: true}, "collect:all");
+    return {unreachable: true};
+)JS");
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << failure_detail(interrupted);
+    EXPECT_EQ(settled_members_of(fixture, interrupted),
+              (std::vector<std::string>{"root.javascript.1/member/1",
+                                        "root.javascript.1/member/2"}));
+
+    const auto resumed = approve(fixture, interrupted);
+
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Failed) << failure_detail(resumed);
+    EXPECT_NE(resumed.failure()->message.find("join member failure sentinel"), std::string::npos)
+        << failure_detail(resumed);
+    ASSERT_TRUE(resumed.output().is_array());
+    ASSERT_EQ(resumed.output().size(), 3U);
+    EXPECT_EQ(resumed.output()[0]["value"], "approved");
+    EXPECT_TRUE(resumed.output()[1].is_null());
+    EXPECT_EQ(resumed.output()[2]["value"], "done:done");
+    EXPECT_EQ(join_member_runs_of("fail"), 1U);
+    EXPECT_EQ(join_member_runs_of("done"), 1U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptRaceIsWonByAMemberThatFinishesWhileAnotherIsPaused) {
+    // #380: a paused member has not finished, so it cannot win a race; the
+    // member that finishes does, and the question is never asked again.
+    reset_join_member_runs();
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      result = run_join(fixture, R"JS(
+    const winner = yield ng.race([
+        ng.callCore("main", {value: "ask"}, "race:ask"),
+        ng.callCore("main", {value: "slow"}, "race:slow")
+    ], {max_in_flight: 2}, "race:pause");
+    return {winner: winner.value};
+)JS");
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_detail(result);
+    EXPECT_EQ(result.output(), (json{{"winner", "done:slow"}}));
+    EXPECT_EQ(join_member_runs_of("ask"), 1U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptRaceOfPausedMembersResumesTheFirstDeclared) {
+    // #380: when every member pauses, the race is Interrupted on the first
+    // one declared; once it resumes and finishes it wins the race.
+    reset_join_member_runs();
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      interrupted = run_join(fixture, R"JS(
+    const winner = yield ng.race([
+        ng.callCore("main", {value: "ask"}, "race:first"),
+        ng.callCore("main", {value: "ask"}, "race:second")
+    ], {max_in_flight: 2}, "race:pause");
+    return {winner: winner.value};
+)JS");
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << failure_detail(interrupted);
+    ASSERT_TRUE(interrupted.interrupt() && interrupted.interrupt()->pending_input);
+    EXPECT_EQ(interrupted.interrupt()->pending_input->operation_id(),
+              "root.javascript.1/member/0");
+    EXPECT_TRUE(settled_members_of(fixture, interrupted).empty());
+
+    const auto resumed = approve(fixture, interrupted);
+
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed) << failure_detail(resumed);
+    EXPECT_EQ(resumed.output(), (json{{"winner", "approved"}}));
+}
+
+TEST(ProgramRuntimeTest, JavaScriptQuorumMetWithoutItsPausedMemberCompletes) {
+    // #380: the members that finish meet the quorum; the paused member is
+    // not needed and the question is never asked again.
+    reset_join_member_runs();
+    AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      result = run_join(fixture, R"JS(
+    const replies = yield ng.quorum([
+        ng.callCore("main", {value: "ask"}, "quorum:ask"),
+        ng.callCore("main", {value: "done"}, "quorum:done"),
+        ng.callCore("main", {value: "slow"}, "quorum:slow")
+    ], {required_successes: 2, max_in_flight: 3}, "quorum:pause");
+    return {values: replies.map((reply) => reply.value)};
+)JS");
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_detail(result);
+    EXPECT_EQ(result.output(), (json{{"values", json::array({"done:done", "done:slow"})}}));
+    EXPECT_EQ(join_member_runs_of("ask"), 1U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptQuorumThatNeedsItsPausedMemberWaitsForIt) {
+    // #380: the quorum cannot be met without the paused member, which may
+    // still succeed, so it is neither met nor out of reach: the join pauses,
+    // and resume replays the member that succeeded.
+    reset_join_member_runs();
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      interrupted = run_join(fixture, R"JS(
+    const replies = yield ng.quorum([
+        ng.callCore("main", {value: "ask"}, "quorum:ask"),
+        ng.callCore("main", {value: "done"}, "quorum:done")
+    ], {required_successes: 2, max_in_flight: 2}, "quorum:pause");
+    return {values: replies.map((reply) => reply.value)};
+)JS");
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << failure_detail(interrupted);
+    EXPECT_EQ(settled_members_of(fixture, interrupted),
+              std::vector<std::string>{"root.javascript.1/member/1"});
+
+    const auto resumed = approve(fixture, interrupted);
+
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed) << failure_detail(resumed);
+    EXPECT_EQ(resumed.output(), (json{{"values", json::array({"approved", "done:done"})}}));
+    EXPECT_EQ(join_member_runs_of("done"), 1U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptQuorumOutOfReachFailsWhileAMemberIsPaused) {
+    // #380: two failures put the quorum out of reach even if the paused
+    // member succeeds, so the join fails instead of pausing.
+    reset_join_member_runs();
+    AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      result = run_join(fixture, R"JS(
+    yield ng.quorum([
+        ng.callCore("main", {value: "ask"}, "quorum:ask"),
+        ng.callCore("main", {value: "fail"}, "quorum:fail-1"),
+        ng.callCore("main", {value: "fail"}, "quorum:fail-2")
+    ], {required_successes: 2, max_in_flight: 3}, "quorum:pause");
+    return {unreachable: true};
+)JS");
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed) << failure_detail(result);
+    EXPECT_EQ(result.failure()->code, "P_QUORUM_UNREACHABLE");
 }
 
 TEST(ProgramRuntimeTest, ProgramPathKeepsLintAndFanOutNoticesOffStderr) {

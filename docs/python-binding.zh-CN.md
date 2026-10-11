@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=38bcd6479d516c0cd386b6f0ed4a32d22a3795688615beec3035819c7631f1c3 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=c488f5d4496f80786dc3df6777e35022584f2ac654e1e4a9039f77b7d5dbd83b -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -458,7 +458,7 @@ JavaScript Program 必须导出 `define()`，它返回一个图构建器。该�
 
 ### 失败的命令会结束运行
 
-只有完成的命令才会恢复 `main()`。当 yield 出的命令未能完成时，例如 `callCore` 的节点抛出异常、耗尽 Core 步数预算、停在再也无法触发的 barrier 上或超过 wall-time 限制，`ProgramRuntime` 会记录该结果，并把它作为运行的最终结果，带有相应的 `status` 和 `failure`。生成器不会被恢复：包住 `yield` 的 `try`/`catch` 不会执行，之后的 JavaScript 也不会执行。按其失败策略失败的 join（`ng.all`、`ng.race`、`ng.quorum`）也会以同样方式结束运行。在 Python 中通过 `result.status` 和 `result.failure` 处理失败。被中断的命令则不同：运行以 `Interrupted` 停止，`resume()` 会继续该命令。
+只有完成的命令才会恢复 `main()`。当 yield 出的命令未能完成时，例如 `callCore` 的节点抛出异常、耗尽 Core 步数预算、停在再也无法触发的 barrier 上或超过 wall-time 限制，`ProgramRuntime` 会记录该结果，并把它作为运行的最终结果，带有相应的 `status` 和 `failure`。生成器不会被恢复：包住 `yield` 的 `try`/`catch` 不会执行，之后的 JavaScript 也不会执行。按其失败策略失败的 join（`ng.all`、`ng.race`、`ng.quorum`）也会以同样方式结束运行。在 Python 中通过 `result.status` 和 `result.failure` 处理失败。被中断的命令则不同：运行以 `Interrupted` 停止，`resume()` 会继续该命令。被中断的 join 成员会暂停其 join：join 不再启动新成员，并让已在运行的成员运行结束。如果它们的结果决定了 join（fail-fast 失败、race 的胜者、已满足或已无法达到的 quorum），join 就以此结束。否则运行在第一个被暂停的成员上以 `Interrupted` 停止，`resume()` 会继续该成员，并从命令日志重放已结束的成员，不会再次运行或再次计费。
 
 ### 图检查与 barrier 停滞
 

@@ -31,6 +31,13 @@ struct ProgramJavaScriptCommandJournalEntryData {
     std::optional<std::string> effect_identity;
     /** Null for a durable pending head; present for an authoritative result. */
     std::optional<json>        terminal_result;
+    /**
+     * Pending entries only: the members of a paused join that already
+     * settled, as an object from member operation id to that member's
+     * recorded result. A paused join appends it after its pending head, and
+     * the attempt that resumes the join replays these members from it.
+     */
+    std::optional<json>        settled_members;
 };
 
 /**
@@ -43,7 +50,8 @@ struct ProgramJavaScriptCommandJournalEntryData {
  */
 class NEOGRAPH_PROGRAM_API ProgramJavaScriptCommandJournalEntry final {
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+    /// Version 2 adds settled_members; entries without it keep version 1.
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
 
     explicit ProgramJavaScriptCommandJournalEntry(
         ProgramJavaScriptCommandJournalEntryData data);
@@ -55,6 +63,7 @@ public:
     const JavaScriptCommand&   command() const noexcept;
     std::optional<std::string> effect_identity() const;
     std::optional<json>        terminal_result() const;
+    std::optional<json>        settled_members() const;
     bool                       pending() const noexcept;
     bool                       completed() const noexcept;
     /** Stable identity for the command coordinate, excluding the result. */

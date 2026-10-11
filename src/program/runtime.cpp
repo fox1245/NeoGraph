@@ -3819,7 +3819,8 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
     std::optional<std::string> effect_identity,
     std::optional<json>        terminal_result,
     std::optional<RunBudget>   remaining_budget,
-    std::optional<RunBudget>   inflight_reservation) {
+    std::optional<RunBudget>   inflight_reservation,
+    std::optional<json>        settled_members) {
     if (remaining_budget)
         remaining_budget->max_dynamic_compiles = std::min<std::uint64_t>(
             remaining_budget->max_dynamic_compiles, dynamic_compile_ceiling.load());
@@ -3864,12 +3865,19 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
                            ? ProgramTransitionPublishResult::AlreadyPresent
                            : ProgramTransitionPublishResult::Conflict;
             }
-            if (!terminal_result) return ProgramTransitionPublishResult::AlreadyPresent;
+            if (!terminal_result && found->settled_members() == settled_members)
+                return ProgramTransitionPublishResult::AlreadyPresent;
+            if (!terminal_result && !settled_members)
+                return ProgramTransitionPublishResult::AlreadyPresent;
         }
+        // Settled members belong to an existing pending coordinate.
+        if (settled_members && (terminal_result || !found))
+            return ProgramTransitionPublishResult::Conflict;
 
         const auto sequence = head->latest_command ? head->latest_command->sequence() + 1 : 1;
         ProgramJavaScriptCommandJournalEntry entry(ProgramJavaScriptCommandJournalEntryData{
-            sequence, bundle_id, command_ordinal, command, effect_identity, terminal_result});
+            sequence, bundle_id, command_ordinal, command, effect_identity, terminal_result,
+            settled_members});
         // A completed command becomes replayable as soon as its terminal
         // journal entry is durable. Publish every event staged by that command
         // and its newest checkpoint in the same CAS so crash recovery cannot

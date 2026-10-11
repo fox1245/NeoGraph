@@ -565,7 +565,19 @@ struct PlanExecution {
     std::optional<ProgramFailure>   failure;
     std::vector<std::string>        execution_trace;
     bool                            returned = false;
+    // The checkpoint an interrupted CallCore paused at, which the run resumes
+    // from. A paused join carries the one of the member it resumes (#380).
+    std::optional<CoreCheckpointIdentity> interrupt_checkpoint;
+    // A paused join: the recorded result of each member that settled, by
+    // member operation id, including those of paused nested joins (#380).
+    json settled_members = json::object();
 };
+
+// A join member that settled before its join paused, replayed from its
+// recorded result by the attempt that resumes the join (#380).
+asio::awaitable<PlanExecution> replay_settled_member(PlanExecution settled) {
+    co_return settled;
+}
 
 [[noreturn]] void throw_runtime_diagnostic(std::string code,
                                            std::string message,
@@ -3754,6 +3766,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             [&](JavaScriptGenerator& session) -> asio::awaitable<PlanExecution> {
             const auto executor = co_await                     asio::this_coro::executor;
             std::optional<std::pair<std::string, std::string>> exact_core_resume;
+            // The settled members of the paused join this attempt resumes (#380).
+            json resumed_join_members = json::object();
             bool supplied_core_resume_required = false;
             bool supplied_core_resume_consumed = false;
 
@@ -3995,6 +4009,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         result.status = ProgramTerminalStatus::Interrupted;
                         result.interrupt =
                             decode_core_interrupt(*control, operation_id, invocation.result);
+                        result.interrupt_checkpoint = invocation.checkpoint;
                     } else if (core_status == graph::RunStatus::StepLimit) {
                         result = fail(ProgramTerminalStatus::BudgetExhausted, "P_CORE_STEP_BUDGET",
                                       "Core step budget exhausted");
@@ -4221,6 +4236,32 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     co_return fail(ProgramTerminalStatus::Failed, "P_JS_CONTROL_COMMAND",
                                    "JavaScript join bounds are invalid");
 
+                // A member that interrupts pauses the join (#380). The join
+                // launches no further member, lets the members already running
+                // finish and keeps every result they reach. If those results
+                // end the join by its own rule (a fail-fast failure, a race
+                // winner, a quorum met or out of reach), it ends that way;
+                // otherwise it is Interrupted on its first paused member in
+                // declaration order, and the members that settled are recorded
+                // in the command journal. The attempt that resumes the join
+                // replays them from that record, continues the paused member
+                // with the resume value and runs every other member again.
+                std::vector<std::optional<PlanExecution>> replayed(members.size());
+                std::vector<std::optional<json>>          replay_records(members.size());
+                for (std::size_t index = 0; index < members.size(); ++index) {
+                    const auto member_operation = operation_id + "/member/" + std::to_string(index);
+                    const auto record           = resumed_join_members.find(member_operation);
+                    if (record == resumed_join_members.end()) continue;
+                    auto recorded = decode_javascript_command_result(record.value(), *control);
+                    PlanExecution settled;
+                    settled.status  = recorded.status;
+                    settled.output  = std::move(recorded.output);
+                    settled.failure = std::move(recorded.failure);
+                    // Its nodes ran, and were reported, in an earlier attempt (#374).
+                    replayed[index]       = std::move(settled);
+                    replay_records[index] = record.value();
+                }
+
                 struct JoinState {
                     std::mutex                                         mutex;
                     std::vector<std::optional<PlanExecution>>          results;
@@ -4233,6 +4274,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     std::size_t                                        active              = 0;
                     std::size_t                                        completed           = 0;
                     bool                                               terminal            = false;
+                    bool                                               paused              = false;
                     bool                                               selection_scheduled = false;
                     bool                       initial_launches_registered                 = false;
                     std::optional<std::size_t> winner;
@@ -4252,6 +4294,19 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 state->completion =
                     std::make_shared<asio::experimental::channel<void(asio::error_code, int)>>(
                         completion_executor, 1);
+                // An interrupted member is paused: it has not settled.
+                const auto interrupted = [](const std::exception_ptr&           error,
+                                            const std::optional<PlanExecution>& result) {
+                    return !error && result && result->status == ProgramTerminalStatus::Interrupted;
+                };
+                // The join has nothing left to wait for once it is decided, or
+                // every member finished, or it is paused and none is running.
+                const auto settled = [](const JoinState& join, std::size_t member_count) {
+                    if (!join.initial_launches_registered || join.active != 0) return false;
+                    if (join.terminal) return true;
+                    return !join.selection_scheduled &&
+                           (join.completed == member_count || join.paused);
+                };
 
                 // A member can complete before the initial launch loop finishes. Completion
                 // handlers therefore retain this dispatcher rather than a reference to a
@@ -4267,15 +4322,17 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     }
                     asio::co_spawn(
                         completion_executor,
-                        execute_command(
-                            members[index], operation_id + "/member/" + std::to_string(index),
-                            state->tokens[index], state->scopes[index], scope_depth + 1, false,
-                            false),
+                        replayed[index]
+                            ? replay_settled_member(*replayed[index])
+                            : execute_command(members[index],
+                                              operation_id + "/member/" + std::to_string(index),
+                                              state->tokens[index], state->scopes[index],
+                                              scope_depth + 1, false, false),
                         asio::bind_executor(
                             completion_executor,
                             [state, index, launch_member, &members, mode, collect, required, cap,
-                             operation_token,
-                             completion_executor](std::exception_ptr error, PlanExecution result) {
+                             operation_token, completion_executor, interrupted,
+                             settled](std::exception_ptr error, PlanExecution result) {
                                 bool                     post_selection = false;
                                 bool                     cancel_all     = false;
                                 std::vector<std::size_t> to_launch;
@@ -4289,20 +4346,21 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                     ++state->completed;
                                     if (state->active != 0) --state->active;
 
-                                    const auto member_failed = [&] {
-                                        if (error) return true;
-                                        return state->results[index]->status !=
-                                               ProgramTerminalStatus::Completed;
-                                    };
+                                    const bool paused =
+                                        interrupted(state->errors[index], state->results[index]);
+                                    const bool member_failed =
+                                        !paused && (error || state->results[index]->status !=
+                                                                 ProgramTerminalStatus::Completed);
+                                    if (paused) state->paused = true;
                                     if (operation_token->is_cancelled() && !state->terminal) {
                                         state->terminal = true;
                                         cancel_all      = true;
-                                    } else if (mode == "race" && !state->terminal) {
+                                    } else if (mode == "race" && !paused && !state->terminal) {
                                         if (!state->selection_scheduled) {
                                             state->selection_scheduled = true;
                                             post_selection             = true;
                                         }
-                                    } else if (mode == "all" && !collect && member_failed() &&
+                                    } else if (mode == "all" && !collect && member_failed &&
                                                !state->terminal) {
                                         if (!state->selection_scheduled) {
                                             state->selection_scheduled = true;
@@ -4310,11 +4368,16 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                         }
                                     } else if (mode == "quorum" && !state->terminal) {
                                         std::size_t successes = 0;
-                                        for (std::size_t i = 0; i < state->results.size(); ++i)
-                                            if (state->finished[i] && state->results[i] &&
-                                                state->results[i]->status ==
-                                                    ProgramTerminalStatus::Completed)
+                                        std::size_t waiting   = 0;
+                                        for (std::size_t i = 0; i < state->results.size(); ++i) {
+                                            if (!state->finished[i]) continue;
+                                            if (interrupted(state->errors[i], state->results[i]))
+                                                ++waiting;
+                                            else if (state->results[i] &&
+                                                     state->results[i]->status ==
+                                                         ProgramTerminalStatus::Completed)
                                                 ++successes;
+                                        }
                                         if (successes >= required) {
                                             for (std::size_t i = 0; i < state->results.size();
                                                  ++i)
@@ -4323,8 +4386,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                                         ProgramTerminalStatus::Completed)
                                                     state->quorum_members.push_back(i);
                                         }
+                                        // A paused member may still succeed once it resumes.
                                         if (successes >= required ||
-                                            successes + (members.size() - state->completed) <
+                                            successes + waiting +
+                                                    (members.size() - state->completed) <
                                                 required) {
                                             state->terminal = true;
                                             cancel_all      = true;
@@ -4332,31 +4397,32 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                     }
 
                                     if (state->initial_launches_registered && !state->terminal &&
-                                        !state->selection_scheduled && !post_selection &&
-                                        state->next < members.size()) {
+                                        !state->paused && !state->selection_scheduled &&
+                                        !post_selection && state->next < members.size()) {
                                         while (state->next < members.size() && state->active < cap)
                                             to_launch.push_back(state->next++);
                                     }
-                                    if (state->initial_launches_registered && to_launch.empty() &&
-                                        state->terminal && state->active == 0)
-                                        signal_completion = true;
-                                    if (state->initial_launches_registered && to_launch.empty() &&
-                                        !state->terminal && !state->selection_scheduled &&
-                                        !post_selection && state->completed == members.size() &&
-                                        state->active == 0)
-                                        signal_completion = true;
+                                    signal_completion =
+                                        to_launch.empty() && settled(*state, members.size());
                                 }
                                 if (post_selection) {
                                     asio::post(completion_executor, [state, mode, collect,
-                                                                     operation_token]() {
+                                                                     operation_token, interrupted,
+                                                                     settled,
+                                                                     member_count =
+                                                                         members.size()]() {
                                         std::vector<std::size_t> to_cancel;
                                         bool                     signal_completion = false;
                                         {
                                             std::lock_guard lock(state->mutex);
                                             if (!state->terminal) {
-                                                // Settle on the first member to finish.
+                                                // Settle on the first member to finish; a
+                                                // paused member has not finished.
                                                 std::optional<std::size_t> selected;
                                                 for (const auto i : state->finish_order) {
+                                                    if (interrupted(state->errors[i],
+                                                                    state->results[i]))
+                                                        continue;
                                                     const bool failed =
                                                         state->errors[i] || !state->results[i] ||
                                                         state->results[i]->status !=
@@ -4373,11 +4439,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                                          i < state->started.size(); ++i)
                                                         if (state->started[i] && i != *selected)
                                                             to_cancel.push_back(i);
+                                                } else {
+                                                    state->selection_scheduled = false;
                                                 }
                                             }
-                                            if (state->initial_launches_registered &&
-                                                state->terminal && state->active == 0)
-                                                signal_completion = true;
+                                            signal_completion = settled(*state, member_count);
                                         }
                                         for (const auto index : to_cancel) {
                                             if (state->scopes[index])
@@ -4421,17 +4487,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     // A fast member may finish while this loop is still registering its
                     // siblings. Do not permit that completion to close the join early.
                     state->initial_launches_registered = true;
-                    if (!state->terminal && !state->selection_scheduled &&
+                    if (!state->terminal && !state->paused && !state->selection_scheduled &&
                         state->next < members.size()) {
                         while (state->next < members.size() && state->active < cap)
                             deferred_launches.push_back(state->next++);
                     }
-                    if (deferred_launches.empty() && state->terminal && state->active == 0)
-                        signal_completion = true;
-                    if (deferred_launches.empty() && !state->terminal &&
-                        !state->selection_scheduled && state->completed == members.size() &&
-                        state->active == 0)
-                        signal_completion = true;
+                    signal_completion =
+                        deferred_launches.empty() && settled(*state, members.size());
                 }
                 for (const auto index : deferred_launches)
                     (*launch_member)(index);
@@ -4453,12 +4515,77 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 std::vector<std::exception_ptr>           errors;
                 std::optional<std::size_t>                winner;
                 std::vector<std::size_t>                  quorum_members;
+                bool                                      decided = false;
+                bool                                      paused  = false;
                 {
                     std::lock_guard lock(state->mutex);
                     results        = std::move(state->results);
                     errors         = std::move(state->errors);
                     winner         = state->winner;
                     quorum_members = state->quorum_members;
+                    decided        = state->terminal;
+                    paused         = state->paused;
+                }
+                if (paused && !decided) {
+                    // The join is Interrupted on its first paused member. Its
+                    // output holds the results so far in declaration order.
+                    PlanExecution paused_join;
+                    paused_join.status = ProgramTerminalStatus::Interrupted;
+                    paused_join.output = json::array();
+                    std::optional<std::size_t> resumed_member;
+                    for (std::size_t i = 0; i < results.size(); ++i) {
+                        const auto& member = results[i];
+                        paused_join.output.push_back(
+                            member && member->status == ProgramTerminalStatus::Completed
+                                ? member->output
+                                : json(nullptr));
+                        if (!member) continue;
+                        paused_join.execution_trace.insert(paused_join.execution_trace.end(),
+                                                           member->execution_trace.begin(),
+                                                           member->execution_trace.end());
+                        if (member->status == ProgramTerminalStatus::Interrupted) {
+                            if (!resumed_member) resumed_member = i;
+                            // A paused nested join keeps the members that settled in it.
+                            for (const auto& [key, record] : member->settled_members.items())
+                                paused_join.settled_members[key] = record;
+                            continue;
+                        }
+                        // Only a member's own end is kept; one cancelled with the
+                        // run, for example, starts again on resume.
+                        if (member->status != ProgramTerminalStatus::Completed &&
+                            member->status != ProgramTerminalStatus::Failed &&
+                            member->status != ProgramTerminalStatus::BudgetExhausted &&
+                            member->status != ProgramTerminalStatus::TimedOut)
+                            continue;
+                        const auto member_operation =
+                            operation_id + "/member/" + std::to_string(i);
+                        if (replay_records[i]) {
+                            paused_join.settled_members[member_operation] = *replay_records[i];
+                            continue;
+                        }
+                        auto recorded = *member;
+                        if (recorded.failure && recorded.failure->provider_outcome) {
+                            try {
+                                detail::persist_provider_failure(
+                                    *recorded.failure,
+                                    detail::provider_failure_custody(
+                                        control->owner_scope, control->run_id,
+                                        control->program_version_id, control->bundle_id,
+                                        recorded.failure->operation_id, control->attempt),
+                                    control->native_history_archive);
+                            } catch (...) {
+                                // Without its evidence the member runs again on resume.
+                                continue;
+                            }
+                        }
+                        paused_join.settled_members[member_operation] =
+                            javascript_command_terminal_result(
+                                recorded, to_string(recorded.status), ProgramUsage{});
+                    }
+                    auto& resumed = *results[*resumed_member];
+                    paused_join.interrupt            = std::move(resumed.interrupt);
+                    paused_join.interrupt_checkpoint = std::move(resumed.interrupt_checkpoint);
+                    co_return paused_join;
                 }
                 const auto make_member_failure =
                     [&](std::size_t index, const std::exception_ptr& error,
@@ -4806,6 +4933,17 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         exact_core_resume = std::pair{*resume_operation, *checkpoint_id};
                         supplied_core_resume_required = true;
                         exact_resume_authorized       = true;
+                        if (const auto settled = prior->settled_members()) {
+                            const auto member_prefix = operation_id + "/member/";
+                            for (const auto& [member, record] : settled->items()) {
+                                if (!member.starts_with(member_prefix) || member == *resume_operation)
+                                    throw_runtime_diagnostic(
+                                        "P_JS_COMMAND_JOURNAL_MISMATCH",
+                                        "Recorded join members do not match the paused join",
+                                        json{{"command_ordinal", ordinal}, {"member", member}});
+                            }
+                            resumed_join_members = *settled;
+                        }
                     } else {
                         // Already-published non-Core work is never dispatch
                         // authority. It must be explicitly reconciled.
@@ -4937,6 +5075,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         plan_failure(ProgramTerminalStatus::Failed, "P_RUNTIME_CORE_FAILURE",
                                      "Unknown JavaScript command failure", operation_id);
                 }
+                resumed_join_members = json::object();
                 javascript_trace.insert(javascript_trace.end(),
                                         command_result.execution_trace.begin(),
                                         command_result.execution_trace.end());
@@ -4958,6 +5097,27 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 settled_javascript_wall_time_ms += command_usage.wall_time_ms;
 
                 if (command_result.status == ProgramTerminalStatus::Interrupted) {
+                    // A join resumes the member it paused on, whichever member
+                    // wrote the last checkpoint (#380).
+                    if (command_result.interrupt_checkpoint) {
+                        std::lock_guard lock(plan_mutex);
+                        last_root_checkpoint = command_result.interrupt_checkpoint;
+                    }
+                    // Record the members of a paused join that settled, so the
+                    // attempt that resumes it replays them instead of running
+                    // and charging them again (#380).
+                    if (!command_result.settled_members.empty() && !control->recorded_replay) {
+                        const auto recorded = control->publish_javascript_command(
+                            ordinal, command_value, effect_id, std::nullopt, std::nullopt,
+                            std::nullopt, command_result.settled_members);
+                        if (recorded != ProgramTransitionPublishResult::Published &&
+                            recorded != ProgramTransitionPublishResult::AlreadyPresent) {
+                            throw_runtime_diagnostic(
+                                "P_JS_COMMAND_JOURNAL",
+                                "Could not durably record the settled members of a paused join",
+                                json{{"command_ordinal", ordinal}, {"effect_identity", effect_id}});
+                        }
+                    }
                     if (root_checkpoint()) {
                         unreconciled_javascript_remaining.reset();
                     }

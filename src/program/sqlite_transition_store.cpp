@@ -547,14 +547,16 @@ bool valid_command_history_append(
             });
         if (found == prior.rend()) {
             if (entry.command_ordinal() != highest_ordinal + 1 || !entry.pending() ||
-                (!prior.empty() && prior.back().pending()))
+                entry.settled_members() || (!prior.empty() && prior.back().pending()))
                 return false;
             highest_ordinal = entry.command_ordinal();
             prior.push_back(entry);
             continue;
         }
-        if (!found->pending() || !entry.completed() ||
-            !same_command_coordinate(*found, entry)) {
+        // A paused join may record its settled members as further pending
+        // entries of the same coordinate before its one terminal result.
+        if (!found->pending() || !same_command_coordinate(*found, entry) ||
+            (!entry.completed() && !entry.settled_members())) {
             return false;
         }
         prior.push_back(entry);

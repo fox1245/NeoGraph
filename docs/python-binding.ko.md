@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=38bcd6479d516c0cd386b6f0ed4a32d22a3795688615beec3035819c7631f1c3 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=c488f5d4496f80786dc3df6777e35022584f2ac654e1e4a9039f77b7d5dbd83b -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -459,7 +459,7 @@ JavaScript Program은 그래프 빌더 하나를 반환하는 `define()`을 반�
 
 ### 실패한 명령은 실행을 끝냅니다
 
-완료된 명령만 `main()`을 재개합니다. yield된 명령이 완료되지 않으면, 예를 들어 노드가 예외를 던졌거나 Core 단계 예산을 소진했거나 더 이상 발화할 수 없는 barrier에서 멈췄거나 wall-time 제한을 넘긴 `callCore`라면, `ProgramRuntime`은 그 결과를 기록하고 해당 `status`와 `failure`를 가진 실행의 최종 결과로 만듭니다. 제너레이터는 재개되지 않습니다. `yield`를 감싼 `try`/`catch`는 실행되지 않으며, 이후의 JavaScript도 실행되지 않습니다. 실패 정책에 따라 실패한 join(`ng.all`, `ng.race`, `ng.quorum`)도 같은 방식으로 실행을 끝냅니다. Python에서는 `result.status`와 `result.failure`로 실패를 처리하십시오. 중단(interrupt)된 명령은 다릅니다. 실행은 `Interrupted`로 멈추고, `resume()`이 그 명령을 이어서 실행합니다.
+완료된 명령만 `main()`을 재개합니다. yield된 명령이 완료되지 않으면, 예를 들어 노드가 예외를 던졌거나 Core 단계 예산을 소진했거나 더 이상 발화할 수 없는 barrier에서 멈췄거나 wall-time 제한을 넘긴 `callCore`라면, `ProgramRuntime`은 그 결과를 기록하고 해당 `status`와 `failure`를 가진 실행의 최종 결과로 만듭니다. 제너레이터는 재개되지 않습니다. `yield`를 감싼 `try`/`catch`는 실행되지 않으며, 이후의 JavaScript도 실행되지 않습니다. 실패 정책에 따라 실패한 join(`ng.all`, `ng.race`, `ng.quorum`)도 같은 방식으로 실행을 끝냅니다. Python에서는 `result.status`와 `result.failure`로 실패를 처리하십시오. 중단(interrupt)된 명령은 다릅니다. 실행은 `Interrupted`로 멈추고, `resume()`이 그 명령을 이어서 실행합니다. 중단된 join 멤버는 그 join을 일시 정지합니다. join은 더 이상 멤버를 시작하지 않고, 이미 실행 중인 멤버는 끝나게 둡니다. 그 결과가 join을 결정하면(fail-fast 실패, race 승자, 충족되었거나 도달할 수 없게 된 quorum) join은 그렇게 끝납니다. 그렇지 않으면 실행은 첫 번째로 일시 정지된 멤버에서 `Interrupted`로 멈추고, `resume()`은 그 멤버를 이어서 실행하며 끝난 멤버는 명령 저널에서 재생하므로 다시 실행하거나 다시 청구하지 않습니다.
 
 ### 그래프 검사와 barrier 정체
 

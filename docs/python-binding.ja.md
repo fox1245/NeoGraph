@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=38bcd6479d516c0cd386b6f0ed4a32d22a3795688615beec3035819c7631f1c3 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=c488f5d4496f80786dc3df6777e35022584f2ac654e1e4a9039f77b7d5dbd83b -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -459,7 +459,7 @@ JavaScript Programは、グラフビルダーを1つ返す`define()`をexportす
 
 ### 失敗したコマンドは実行を終了する
 
-`main()`を再開するのは完了したコマンドだけです。yieldされたコマンドが完了しない場合、たとえばノードが例外を送出した、Coreのステップ予算を使い切った、もう発火できないbarrierで止まった、またはwall-time制限を超えた`callCore`では、`ProgramRuntime`はその結果を記録し、対応する`status`と`failure`を持つ実行の最終結果にします。ジェネレーターは再開されません。`yield`を囲む`try`/`catch`は実行されず、その後のJavaScriptも実行されません。失敗ポリシーに従って失敗したjoin（`ng.all`、`ng.race`、`ng.quorum`）も同じように実行を終了します。Pythonでは`result.status`と`result.failure`で失敗を処理してください。割り込まれたコマンドは異なります。実行は`Interrupted`として停止し、`resume()`がそのコマンドを続行します。
+`main()`を再開するのは完了したコマンドだけです。yieldされたコマンドが完了しない場合、たとえばノードが例外を送出した、Coreのステップ予算を使い切った、もう発火できないbarrierで止まった、またはwall-time制限を超えた`callCore`では、`ProgramRuntime`はその結果を記録し、対応する`status`と`failure`を持つ実行の最終結果にします。ジェネレーターは再開されません。`yield`を囲む`try`/`catch`は実行されず、その後のJavaScriptも実行されません。失敗ポリシーに従って失敗したjoin（`ng.all`、`ng.race`、`ng.quorum`）も同じように実行を終了します。Pythonでは`result.status`と`result.failure`で失敗を処理してください。割り込まれたコマンドは異なります。実行は`Interrupted`として停止し、`resume()`がそのコマンドを続行します。割り込まれたjoinメンバーはそのjoinを一時停止します。joinはそれ以上メンバーを開始せず、すでに実行中のメンバーは終了させます。その結果でjoinが決まる場合（fail-fastの失敗、raceの勝者、達成されたか到達不能になったquorum）、joinはそのように終了します。そうでなければ実行は最初に一時停止したメンバーで`Interrupted`として停止し、`resume()`はそのメンバーを続行し、終了したメンバーはコマンドジャーナルから再生するため、再実行も再課金もしません。
 
 ### グラフのチェックとbarrierの停滞
 

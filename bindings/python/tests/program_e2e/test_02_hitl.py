@@ -323,3 +323,110 @@ def test_recovery_of_a_resumed_attempt_keeps_its_resume_value(kind, tmp_path):
     # The recovered attempt resumed "deploy" with the resume value, as the
     # attempt that crashed did, not with the run input.
     assert outcome["answer"] == {"approved": True}, outcome
+
+
+# ---------------------------------------------------------------------------
+# A member's interrupt pauses its join (#380). The join launches no further
+# member, lets running members finish and keeps what they reach. Unless that
+# ends the join by its own rule, it is Interrupted on its first paused member;
+# resume replays the settled members and continues the paused one.
+# ---------------------------------------------------------------------------
+
+ROUTED = define_graph("""
+    g.node("route", {type: "e2e.step"});
+    g.node("work", {type: "e2e.step", delay_from_state: true});
+    g.node("confirm", {type: "e2e.step", ask: "ok?"});
+    g.entry("route");
+    g.conditionalEdge("route", "e2e.route_by_topic", {billing: "work", general: "confirm"});
+    g.exit("work");
+    g.exit("confirm");
+""", name="chat")
+
+WORK = '{topic: "billing"}'
+ASK = '{topic: "general"}'
+SLOW_WORK = '{topic: "billing", delay: 300}'
+
+
+def _join_program(join, members, options):
+    calls = ",\n          ".join(f'ng.callCore("chat", {member}, "member{index}")'
+                                for index, member in enumerate(members))
+    return with_main(ROUTED, f"""
+        const replies = yield ng.{join}([
+          {calls}
+        ], {options}, "join");
+        return Array.isArray(replies) ? replies.map((reply) => reply.trace) : replies.trace;
+    """)
+
+
+def _paused_join(text, host=None, members=2):
+    host = host or make_host(scheduler_threads=members)
+    run_budget = budget(max_concurrency=members, max_program_operations=8)
+    version = admit(host, text, run_budget)
+    return host, host.run(version, {}, run_budget)
+
+
+@pytest.mark.parametrize("durable", [False, True], ids=["in-memory", "sqlite"])
+def test_an_interrupted_member_pauses_all_and_resume_replays_the_completed_one(durable, tmp_path):
+    # Before the fix, a SQLite host resumed the completed member's checkpoint
+    # and asked again, and an in-memory host ran the completed member twice.
+    options = {"sqlite_directory": str(tmp_path / "runs")} if durable else {}
+    host, paused = _paused_join(_join_program("all", [WORK, ASK], "{max_in_flight: 2}"),
+                                make_host(scheduler_threads=2, **options))
+
+    assert paused.status == ng.ProgramTerminalStatus.Interrupted, describe(paused)
+    assert paused.interrupt.core_node == "confirm"
+    assert paused.output[1] is None
+    assert paused.execution_trace == ["route", "work", "route"]
+
+    done = host.resume(paused.run_id, {"ok": True}).wait()
+
+    assert done.status == ng.ProgramTerminalStatus.Completed, describe(done)
+    assert done.output == [["route", "work"], ["route", "confirm"]]
+    assert done.execution_trace == ["confirm"]
+    # The completed member was replayed: "work" ran once, and nothing asked twice.
+    assert sorted(JOURNAL.names()) == ["confirm", "route", "route", "work"]
+    assert JOURNAL.names("asked") == ["confirm"]
+
+
+def test_a_race_is_won_by_the_member_that_finishes_while_another_is_paused():
+    # A paused member has not finished: the member that does wins the race.
+    _host, result = _paused_join(_join_program("race", [ASK, SLOW_WORK], "{max_in_flight: 2}"))
+
+    assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
+    assert result.output == ["route", "work"]
+    assert JOURNAL.names("asked") == ["confirm"]
+
+
+def test_a_race_of_paused_members_resumes_the_first_declared():
+    host, paused = _paused_join(_join_program("race", [ASK, ASK], "{max_in_flight: 2}"))
+
+    assert paused.status == ng.ProgramTerminalStatus.Interrupted, describe(paused)
+    assert paused.interrupt.pending_input.operation_id == "root.javascript.1/member/0"
+
+    done = host.resume(paused.run_id, {"ok": True}).wait()
+
+    assert done.status == ng.ProgramTerminalStatus.Completed, describe(done)
+    assert done.output == ["route", "confirm"]
+
+
+def test_a_quorum_met_without_its_paused_member_completes():
+    _host, result = _paused_join(
+        _join_program("quorum", [ASK, WORK, SLOW_WORK],
+                      "{required_successes: 2, max_in_flight: 3}"), members=3)
+
+    assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
+    assert result.output == [["route", "work"], ["route", "work"]]
+    assert JOURNAL.names("asked") == ["confirm"]
+
+
+def test_a_quorum_that_needs_its_paused_member_waits_for_it():
+    host, paused = _paused_join(
+        _join_program("quorum", [ASK, WORK], "{required_successes: 2, max_in_flight: 2}"))
+
+    assert paused.status == ng.ProgramTerminalStatus.Interrupted, describe(paused)
+
+    done = host.resume(paused.run_id, {"ok": True}).wait()
+
+    assert done.status == ng.ProgramTerminalStatus.Completed, describe(done)
+    assert done.output == [["route", "confirm"], ["route", "work"]]
+    assert JOURNAL.names().count("work") == 1

@@ -55,19 +55,28 @@ std::string coordinate_id_for(const ProgramJavaScriptCommandJournalEntryData& da
                                    detail::canonical_json_bytes(coordinate_body(data)));
 }
 
+// Only an entry that carries settled members uses version 2, so the ids of
+// all other entries stay unchanged.
+std::uint32_t storage_schema_version(const ProgramJavaScriptCommandJournalEntryData& data) {
+    return data.settled_members ? ProgramJavaScriptCommandJournalEntry::STORAGE_SCHEMA_VERSION
+                                : 1U;
+}
+
 json entry_body(const ProgramJavaScriptCommandJournalEntryData& data) {
-    return json{{"format", std::string(FORMAT)},
-                {"storage_schema_version",
-                 ProgramJavaScriptCommandJournalEntry::STORAGE_SCHEMA_VERSION},
-                {"sequence", data.sequence},
-                {"bundle_id", data.bundle_id},
-                {"command_ordinal", data.command_ordinal},
-                {"command", data.command.to_json()},
-                {"effect_identity",
-                 data.effect_identity ? json(*data.effect_identity) : json(nullptr)},
-                {"terminal_result",
-                 data.terminal_result ? detail::owned_json_copy(*data.terminal_result)
-                                      : json(nullptr)}};
+    auto body = json{{"format", std::string(FORMAT)},
+                     {"storage_schema_version", storage_schema_version(data)},
+                     {"sequence", data.sequence},
+                     {"bundle_id", data.bundle_id},
+                     {"command_ordinal", data.command_ordinal},
+                     {"command", data.command.to_json()},
+                     {"effect_identity",
+                      data.effect_identity ? json(*data.effect_identity) : json(nullptr)},
+                     {"terminal_result",
+                      data.terminal_result ? detail::owned_json_copy(*data.terminal_result)
+                                           : json(nullptr)}};
+    if (data.settled_members)
+        body["settled_members"] = detail::owned_json_copy(*data.settled_members);
+    return body;
 }
 
 std::string entry_id_for(const ProgramJavaScriptCommandJournalEntryData& data) {
@@ -92,6 +101,16 @@ void validate_data(const ProgramJavaScriptCommandJournalEntryData& data) {
         // runtime validates the command-specific envelope before replay; the
         // journal only guarantees that the retained value is owned JSON.
         (void)detail::canonical_json_bytes(*data.terminal_result);
+    }
+    if (data.settled_members) {
+        // Member results are opaque here as well; the runtime validates each
+        // one before it replays the member.
+        if (data.terminal_result || data.command.kind() != JavaScriptCommandKind::Join ||
+            !data.settled_members->is_object() || data.settled_members->empty()) {
+            throw std::invalid_argument(
+                "JavaScript command journal settled members belong to a pending join");
+        }
+        (void)detail::canonical_json_bytes(*data.settled_members);
     }
 }
 
@@ -118,6 +137,9 @@ ProgramJavaScriptCommandJournalEntry::ProgramJavaScriptCommandJournalEntry(
     data.terminal_result = data.terminal_result
                                ? std::optional<json>(detail::owned_json_copy(*data.terminal_result))
                                : std::nullopt;
+    data.settled_members = data.settled_members
+                               ? std::optional<json>(detail::owned_json_copy(*data.settled_members))
+                               : std::nullopt;
     impl_ = std::make_shared<const Impl>(std::move(data));
 }
 
@@ -134,9 +156,15 @@ ProgramJavaScriptCommandJournalEntry ProgramJavaScriptCommandJournalEntry::parse
     detail::reject_unknown_fields(
         value, "Stored JavaScript command journal entry",
         {"format", "storage_schema_version", "id", "sequence", "bundle_id",
-         "command_ordinal", "command", "effect_identity", "terminal_result"});
-    if (require_uint32(value, "storage_schema_version") != STORAGE_SCHEMA_VERSION) {
+         "command_ordinal", "command", "effect_identity", "terminal_result",
+         "settled_members"});
+    const auto schema_version = require_uint32(value, "storage_schema_version");
+    if (schema_version == 0 || schema_version > STORAGE_SCHEMA_VERSION) {
         throw std::invalid_argument("Stored JavaScript command journal schema unsupported");
+    }
+    if ((schema_version == STORAGE_SCHEMA_VERSION) != value.contains("settled_members")) {
+        throw std::invalid_argument(
+            "Stored JavaScript command journal settled members disagree with its schema");
     }
     const auto& effect = value.at("effect_identity");
     std::optional<std::string> effect_identity;
@@ -152,7 +180,10 @@ ProgramJavaScriptCommandJournalEntry ProgramJavaScriptCommandJournalEntry::parse
             require_uint64(value, "command_ordinal"),
             JavaScriptCommand::from_json(value.at("command")),
             std::move(effect_identity),
-            std::move(terminal_result)});
+            std::move(terminal_result),
+            value.contains("settled_members")
+                ? std::optional<json>(detail::owned_json_copy(value.at("settled_members")))
+                : std::nullopt});
     if (parsed.id() != require_string(value, "id")) {
         throw std::invalid_argument("Stored JavaScript command journal entry id mismatch");
     }
@@ -182,6 +213,12 @@ std::optional<std::string> ProgramJavaScriptCommandJournalEntry::effect_identity
 std::optional<json> ProgramJavaScriptCommandJournalEntry::terminal_result() const {
     return impl_->data.terminal_result
                ? std::optional<json>(detail::owned_json_copy(*impl_->data.terminal_result))
+               : std::nullopt;
+}
+
+std::optional<json> ProgramJavaScriptCommandJournalEntry::settled_members() const {
+    return impl_->data.settled_members
+               ? std::optional<json>(detail::owned_json_copy(*impl_->data.settled_members))
                : std::nullopt;
 }
 
