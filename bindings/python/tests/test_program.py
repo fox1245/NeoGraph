@@ -160,3 +160,68 @@ def test_program_preserves_core_failure_in_terminal_result():
     assert parsed.failure.code == result.failure.code
     assert parsed.failure.core_node == result.failure.core_node
     assert parsed.failure.provider_outcome is None
+
+
+_DIGEST_TRACE_NODE = "sha256:" + "3" * 64
+_DIGEST_APPEND = "sha256:" + "4" * 64
+
+
+class _TraceNode(ng.GraphNode):
+    def __init__(self, name, config):
+        super().__init__()
+        self._name = name
+        self._fail = bool(config.get("fail"))
+
+    def get_name(self):
+        return self._name
+
+    def run(self, _input):
+        if self._fail:
+            raise RuntimeError("trace node failed on purpose")
+        return [ng.ChannelWrite("trace", [self._name])]
+
+
+def _trace_host(owner):
+    ng.NodeFactory.register_type(
+        "python_program_trace_node",
+        lambda name, config, _ctx: _TraceNode(name, config),
+    )
+    builder = ng.ProgramRegistryBuilder()
+    builder.add_registered_node(
+        "python_program_trace_node", "1.0.0", _DIGEST_TRACE_NODE
+    )
+    builder.add_registered_reducer("append", "1.0.0", _DIGEST_APPEND)
+    return ng.LocalProgramHost(
+        builder.build(), owner, _ceiling(), "python-program-host/v1"
+    )
+
+
+def _trace_source(body):
+    return ng.ProgramSource.from_javascript(
+        "python-trace.js",
+        'export function define() { return ng.graph("main")'
+        '.channel("trace", {reducer: "append", initial: []})' + body + "; }",
+    )
+
+
+def test_resume_defaults_to_the_single_awaiting_pending_call():
+    host = _trace_host("python-owner-resume")
+    version = host.compile_admit(
+        _trace_source(
+            '.node("A", {type: "python_program_trace_node"})'
+            '.node("B", {type: "python_program_trace_node"})'
+            '.entry("A").edge("A", "B").interruptBefore("B").exit("B")'
+        ),
+        _budget(),
+    )
+    interrupted = host.run(version, {}, _budget())
+    assert interrupted.status == ng.ProgramTerminalStatus.Interrupted
+    call_id = interrupted.interrupt.pending_input.call_id
+
+    # An explicit id keeps the exact-match contract.
+    with pytest.raises(RuntimeError, match="exact pending call"):
+        host.resume(interrupted.run_id, {"ok": True}, "not-" + call_id)
+
+    resumed = host.resume(interrupted.run_id, {"ok": True}).wait()
+    assert resumed.status == ng.ProgramTerminalStatus.Completed
+    assert resumed.output["channels"]["trace"]["value"] == ["A", "B"]

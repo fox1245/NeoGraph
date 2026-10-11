@@ -297,18 +297,41 @@ public:
 
     ProgramHandle resume(std::string run_id,
                          py::object value,
-                         std::string pending_id,
+                         std::optional<std::string> pending_id,
                          std::string trace_id) {
         auto owned_value = py_to_json(value);
+        auto exact_id    = pending_id ? std::move(*pending_id) : awaiting_pending_id(run_id);
         py::gil_scoped_release release;
         return runtime_->resume(owner_scope_, std::move(run_id),
                                 ProgramResume{std::move(owned_value), std::move(trace_id), {},
-                                              std::move(pending_id)});
+                                              std::move(exact_id)});
     }
 
     const std::string& owner_scope() const noexcept { return owner_scope_; }
 
 private:
+    // The runtime accepts only the exact pending call id. Without one, address
+    // the run's single awaiting call; any other run state keeps the empty id so
+    // the runtime reports its own diagnostic.
+    std::string awaiting_pending_id(const std::string& run_id) const {
+        const auto record = transitions_->load(owner_scope_, run_id);
+        if (!record || record->continuation().state != ContinuationState::Interrupted) return {};
+        const auto input  = record->pending_input();
+        const auto effect = record->pending_effect();
+        if (!input && !effect) return {};
+        std::vector<std::string> awaiting;
+        if (input && input->state() == ProgramPendingState::Awaiting)
+            awaiting.push_back(input->call_id());
+        if (effect && effect->state() == ProgramPendingState::Awaiting)
+            awaiting.push_back(effect->call_id());
+        if (awaiting.size() == 1) return awaiting.front();
+        throw py::value_error("resume() needs pending_id: run '" + run_id + "' has " +
+                              std::to_string(awaiting.size()) +
+                              " awaiting pending calls; pass the exact id from "
+                              "result.interrupt.pending_input.call_id "
+                              "(or result.interrupt.pending_effect.call_id)");
+    }
+
     RegistrySnapshot registry_;
     std::string owner_scope_;
     std::string compiler_build_id_;
@@ -581,8 +604,11 @@ void init_program(py::module_& m) {
              py::arg("version"), py::arg("input"), py::arg("budget"),
              py::arg("trace_id") = "python-program")
         .def("resume", &LocalProgramHost::resume,
-             py::arg("run_id"), py::arg("value"), py::arg("pending_id") = "",
-             py::arg("trace_id") = "python-program-resume");
+             py::arg("run_id"), py::arg("value"), py::arg("pending_id") = py::none(),
+             py::arg("trace_id") = "python-program-resume",
+             "Resume an interrupted run. Without pending_id, the run's single awaiting "
+             "pending call is addressed; pass result.interrupt.pending_input.call_id "
+             "to name it exactly.");
 }
 
 }  // namespace neograph::pybind
