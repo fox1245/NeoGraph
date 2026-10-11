@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=72d9de3ebec44aa6eb7f92a3cabc4a08d177461e8869eaff2b0bd003b353c8d3 -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=7d554cef7ff138fd563b7ecd7739dc7f01a8a641aec41c5fdd0b38d33db5d01c -->
 # 自进化聊天机器人
 
 ## 当前类型化 Program chat 契约
@@ -102,7 +102,8 @@ output limit 发送为 [OpenRouter chat API](https://openrouter.ai/docs/api/api-
 
 ```bash
 export NEOGRAPH_CHAT_POSTGRES_URL='postgresql://USER:PASSWORD@127.0.0.1:PORT/DATABASE'
-./build-chat/cookbook_program_chatbot --mock --session postgres-demo
+./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
+  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --session postgres-demo
 ```
 
 有此变量时 chat/Program persistence 用 PostgreSQL，否则 `--db` 选择 SQLite。各 backend 可在 build 时关闭。

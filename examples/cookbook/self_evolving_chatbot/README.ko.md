@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ko source_sha256=72d9de3ebec44aa6eb7f92a3cabc4a08d177461e8869eaff2b0bd003b353c8d3 -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ko source_sha256=7d554cef7ff138fd563b7ecd7739dc7f01a8a641aec41c5fdd0b38d33db5d01c -->
 # 매턴 하니스를 제안하는 챗봇
 
 ## 현재 타입 Program chat 계약
@@ -107,7 +107,8 @@ WSL native Docker에서 전용 PostgreSQL DB를 만들고 같은 shell에서 URL
 
 ```bash
 export NEOGRAPH_CHAT_POSTGRES_URL='postgresql://USER:PASSWORD@127.0.0.1:PORT/DATABASE'
-./build-chat/cookbook_program_chatbot --mock --session postgres-demo
+./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
+  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --session postgres-demo
 ```
 
 이 변수가 있으면 chat와 Program persistence가 PostgreSQL을, 없으면 `--db`가 SQLite를 선택합니다. 각 backend는 빌드에서 끌 수 있습니다.

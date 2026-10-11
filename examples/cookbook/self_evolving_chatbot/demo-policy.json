@@ -56,6 +56,13 @@
         "stop": "EndTurn",
         "tool_calls": "ToolUse"
       },
+      "temperature_forbidden_model_prefixes": [
+        "gpt-5",
+        "gpt-6",
+        "o1",
+        "o3",
+        "o4"
+      ],
       "temperature_range": [
         0,
         2
@@ -97,7 +104,9 @@
       "header_versions": [
         "2023-06-01"
       ],
-      "openrouter_origins": [],
+      "openrouter_origins": [
+        "https://openrouter.ai"
+      ],
       "reasoning_efforts": [],
       "reasoning_summaries": [],
       "required_output_cap": true,
@@ -178,6 +187,13 @@
         "stop_sequence": "StopSequence",
         "tool_use": "ToolUse"
       },
+      "temperature_forbidden_model_prefixes": [
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-fable-"
+      ],
       "temperature_range": [
         0,
         1
@@ -272,6 +288,13 @@
         "content_filter": "ContentFilter",
         "max_output_tokens": "MaxTokens"
       },
+      "temperature_forbidden_model_prefixes": [
+        "gpt-5",
+        "gpt-6",
+        "o1",
+        "o3",
+        "o4"
+      ],
       "temperature_range": [
         0,
         2
@@ -323,11 +346,17 @@
         "SAFETY": "ContentFilter",
         "STOP": "EndTurn"
       },
+      "temperature_forbidden_model_prefixes": [],
       "temperature_range": [
         0,
         2
       ],
-      "thinking_levels": [],
+      "thinking_levels": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
       "thinking_minimum": 0,
       "thinking_top_p_minimum": 0,
       "top_p_range": [
@@ -375,6 +404,7 @@
         "max_output_tokens": "MaxTokens",
         "requires_action": "ToolUse"
       },
+      "temperature_forbidden_model_prefixes": [],
       "temperature_range": [
         0,
         2
@@ -415,6 +445,6 @@
       "output_limit": 65536
     }
   ],
-  "revision": 3,
+  "revision": 4,
   "version": 1
 }

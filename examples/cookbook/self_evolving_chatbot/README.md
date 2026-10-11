@@ -163,7 +163,8 @@ not a production deployment/migration manager.
 
 ```bash
 export NEOGRAPH_CHAT_POSTGRES_URL='postgresql://USER:PASSWORD@127.0.0.1:PORT/DATABASE'
-./build-chat/cookbook_program_chatbot --mock --session postgres-demo
+./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
+  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --session postgres-demo
 ```
 
 When the variable is present, both chat and Program persistence use PostgreSQL.
