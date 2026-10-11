@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=ba7bc78e107bf6ae0eb0f629071a28038e4ff8c2eef2dfa7aa4f435d4dab63bb -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=79727c2b30c2623180976aae1d3a09ad00a17554779a9b48e209c585311165bf -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -356,6 +356,8 @@ sp::runtime::Result call_provider(
 | `google.interactions` | `max_output_tokens`, `thinking_level`(optional string), `thinking_summaries`, `service_tier`, `required_tool`, `system`, `account_scope`; Generate의 enum `gemini_thinking_level`은 적용되지 않는다 |
 
 Chat의 `sp::chat::ReasoningOptions`는 optional `effort`, `max_tokens`, `exclude`, `enabled`를 담는다. 이 nested reasoning object, `include_reasoning`, `usage_include`, 대체 `models`는 policy가 선언한 OpenRouter origin에서만 허용된다. `sp::OpenRouterRouting`도 Chat/Responses/Messages의 선언된 OpenRouter origin에서만 지원한다. gateway 형태 모델 이름이 다른 origin을 승인하지 않는다. SDK payload는 family별 typed tool 선언, Responses `hosted_tools`, strict/deferred tool 옵션도 제공한다. raw JSON 대신 실제 payload variant를 사용한다.
+
+Responses SSE는 종료 이벤트 `response.completed` 또는 `response.incomplete`를 요구합니다. `response.done`은 같은 완전한 종료 Responses envelope(completed 또는 incomplete)를 담은 별칭일 때만 허용되며, 종료가 아니거나 형식이 잘못된 `response.done`은 프로토콜 오류로 실패합니다. `response.content_part.delta`를 비롯해 목록에 없는 이벤트는 `Unsupported`입니다. 선언된 OpenRouter origin에서는 Responses와 Messages가 `~vendor/model-latest` 같은 라우팅 별칭에 대해 게이트웨이가 보고하는 실제 모델명도 받아들입니다. 서빙 모델은 한 응답 안에서 바뀌면 안 되고, replay는 요청한 모델에 묶인 채로 유지됩니다.
 
 | SDK 타입 | 닫힌 값 또는 멤버 |
 |---|---|

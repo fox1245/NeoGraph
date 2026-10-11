@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=ba7bc78e107bf6ae0eb0f629071a28038e4ff8c2eef2dfa7aa4f435d4dab63bb -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=79727c2b30c2623180976aae1d3a09ad00a17554779a9b48e209c585311165bf -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -327,6 +327,8 @@ sp::runtime::Result call_provider(
 | `google.interactions` | `max_output_tokens`, `thinking_level` (optional string), `thinking_summaries`, `service_tier`, `required_tool`, `system`, `account_scope`; Generate の enum `gemini_thinking_level` は適用されません |
 
 Chat の `sp::chat::ReasoningOptions` は optional `effort`, `max_tokens`, `exclude`, `enabled` を持ちます。この nested reasoning object、`include_reasoning`、`usage_include`、代替 `models` は policy 宣言済み OpenRouter origin に限ります。`sp::OpenRouterRouting` も Chat/Responses/Messages の宣言済み OpenRouter origin のみです。gateway 形式のモデル名では別 origin を承認できません。SDK payload は family ごとの typed tool 宣言、Responses `hosted_tools`、strict/deferred tool option も持ちます。raw JSON でなく実際の payload variant を使います。
+
+Responses SSE には終了イベント `response.completed` または `response.incomplete` が必要です。`response.done` は同じ完全な終了 Responses envelope（completed または incomplete）を運ぶエイリアスの場合にのみ受け入れられ、終了でない、または形式が不正な `response.done` はプロトコルエラーとして失敗します。`response.content_part.delta` などリストにないイベントは `Unsupported` です。宣言済みの OpenRouter origin では、Responses と Messages は `~vendor/model-latest` のようなルーティングエイリアスに対してゲートウェイが報告する実際のモデル名も受け入れます。サービングモデルは 1 つの応答内で変わってはならず、replay は要求したモデルに束縛されたままです。
 
 | SDK 型 | 閉じた値またはメンバー |
 |---|---|

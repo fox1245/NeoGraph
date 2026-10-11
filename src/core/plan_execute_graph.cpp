@@ -207,7 +207,11 @@ public:
                 histories->set(task, continuation);
                 outcome_or_throw(completion);
                 calls = pending_client_tool_calls(returned);
-                if (calls.empty()) { result_text = outcome_text(*completion); break; }
+                if (calls.empty()) {
+                    if (paused_turn(*completion)) continue;  // resend the history, paused turn included
+                    result_text = outcome_text(*completion);
+                    break;
+                }
             }
             ToolGateContext gate;
             gate.resume_value = in.ctx.resume_value;

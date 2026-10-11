@@ -358,6 +358,8 @@ sp::runtime::Result call_provider(
 
 Chat's `sp::chat::ReasoningOptions` contains optional `effort`, `max_tokens`, `exclude` and `enabled`. Its nested reasoning object, `include_reasoning`, `usage_include` and alternative `models` require a policy-declared OpenRouter origin. `sp::OpenRouterRouting` is supported only on declared OpenRouter origins for Chat, Responses and Messages; choosing a gateway-shaped model name does not admit a different origin. SDK requests also expose typed family tool definitions, Responses `hosted_tools` and strict/deferred tool options; use the actual payload variant for those fields rather than adding raw JSON.
 
+Responses SSE requires a terminal `response.completed` or `response.incomplete` event. `response.done` is accepted only as an alias carrying the same full terminal Responses envelope (completed or incomplete); a nonterminal or malformed `response.done` fails as a protocol error, and `response.content_part.delta` or any other unlisted event is `Unsupported`. On a declared OpenRouter origin, Responses and Messages also accept the concrete model the gateway reports for a routing alias such as `~vendor/model-latest`; the served model must stay the same for the whole response, and replay stays bound to the requested model.
+
 | SDK type | Closed values or members |
 |---|---|
 | `sp::responses::Verbosity` | `Low`, `Medium`, `High` |
