@@ -494,7 +494,7 @@ std::vector<std::string> known_core_keys(const std::vector<std::string>& parent,
         return {"max_retries", "initial_delay_ms", "backoff_multiplier", "max_delay_ms"};
     if (parent.size() == 2 && parent[0] == "node_retry_policies")
         return {"max_retries", "initial_delay_ms", "backoff_multiplier", "max_delay_ms",
-                "non_retryable", "max_visits", "error_text"};
+                "non_retryable", "max_visits", "error_text", "attempt_timeout_ms"};
     if (parent.size() == 2 && parent[0] == "failure_edges") return {"from", "to", "error_channel"};
     if (parent.size() == 2 && parent[0] == "failure_exits") return {"code"};
     return {};

@@ -650,7 +650,7 @@ NodeRetryPolicySpec parse_node_retry_policy(const json& policy, const std::strin
     NodeRetryPolicySpec spec;
     unknown_fields(policy,
                    {"max_retries", "initial_delay_ms", "backoff_multiplier", "max_delay_ms",
-                    "non_retryable", "max_visits", "error_text"},
+                    "non_retryable", "max_visits", "error_text", "attempt_timeout_ms"},
                    pointer, diagnostics);
     if (policy.contains("max_retries"))
         spec.max_retries = bounded_integer(policy["max_retries"], pointer + "/max_retries", 0, 10, diagnostics);
@@ -662,6 +662,10 @@ NodeRetryPolicySpec parse_node_retry_policy(const json& policy, const std::strin
                                             spec.initial_delay_ms.value_or(10), 300000, diagnostics);
     if (policy.contains("max_visits"))
         spec.max_visits = bounded_integer(policy["max_visits"], pointer + "/max_visits", 1, 100, diagnostics);
+    if (policy.contains("attempt_timeout_ms"))
+        spec.attempt_timeout_ms =
+            bounded_integer(policy["attempt_timeout_ms"], pointer + "/attempt_timeout_ms",
+                            kMinAttemptTimeoutMs, kMaxAttemptTimeoutMs, diagnostics);
     if (policy.contains("backoff_multiplier")) {
         const auto& value = policy["backoff_multiplier"];
         if (!value.is_number()) {
@@ -892,6 +896,7 @@ json detail::print_node_retry_policies(const std::map<std::string, NodeRetryPoli
         }
         if (spec.max_visits) policy["max_visits"] = *spec.max_visits;
         if (spec.error_text) policy["error_text"] = *spec.error_text;
+        if (spec.attempt_timeout_ms) policy["attempt_timeout_ms"] = *spec.attempt_timeout_ms;
         result[name] = std::move(policy);
     }
     return result.empty() ? json() : result;

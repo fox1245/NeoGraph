@@ -1692,6 +1692,71 @@
         "bundle_id": "sha256:03ac04baf912f23fb49feaaeb40b3ccdbde9a47c7e2565a739a02fbeea3409fe",
         "source_hash": "sha256:36c202b81e75e4bce6f7a2a4d59a2d77ebcd46e726c1082e05ca384082a6fdae"
       }
+    },
+    {
+      "all_platforms": {
+        "canonical_program_hash": "sha256:fb36e87f9f8bcd5e23db51143b0823068fd69ae3047984fc45e887f0458d8c0b",
+        "compiled_plan_identity": "sha256:7147d17faf9f17df6f5eedddaa64962029e5b353184b5755f329031369a97cb0",
+        "control_source": false,
+        "definition_hash": "sha256:1a62f35f922d1a0281c59439c7e8bd024b2485c6a2773717256355af71da0370",
+        "definition_name": "timed",
+        "sealed_diagnostics": []
+      },
+      "definition": {
+        "channels": {
+          "failures": {
+            "initial": [],
+            "reducer": "append"
+          }
+        },
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "FETCH"
+          },
+          {
+            "from": "FETCH",
+            "to": "__end__"
+          },
+          {
+            "from": "FALLBACK",
+            "to": "__end__"
+          }
+        ],
+        "failure_edges": [
+          {
+            "error_channel": "failures",
+            "from": "FETCH",
+            "to": "FALLBACK"
+          }
+        ],
+        "name": "timed",
+        "node_retry_policies": {
+          "FETCH": {
+            "attempt_timeout_ms": 30000,
+            "initial_delay_ms": 100,
+            "max_retries": 2,
+            "non_retryable": [
+              "NG.Timeout"
+            ]
+          }
+        },
+        "nodes": {
+          "FALLBACK": {
+            "type": "probe.node"
+          },
+          "FETCH": {
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "v2.attempt_timeout",
+      "posix_quickjs": {
+        "bundle_id": "sha256:788d030875b9b20f65c25595a86f378ba9fdc49fae0182693aeff0a694edb1c2",
+        "source_hash": "sha256:fa039d4d5348d7755523aafe09c5852f034bdac5ec515d9c080f857601d1827d"
+      }
     }
   ],
   "format": "neograph-identity-golden",

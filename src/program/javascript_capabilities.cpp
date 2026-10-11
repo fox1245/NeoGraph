@@ -131,6 +131,7 @@ json node_retry_policy_schema() {
                                                                {"pattern", "^NG\\.[A-Za-z]+$"}}})}}}}},
               {"max_visits", integer(1, 100)},
               {"error_text", json{{"type", "boolean"}}},
+              {"attempt_timeout_ms", integer(100, 3600000)},
               {"on_failure", node_name_schema()},
               {"error_channel", name_schema()}}}};
 }
@@ -183,7 +184,7 @@ json graph_builder_methods() {
         builder("retryPolicy",
                 "retryPolicy({max_retries, initial_delay_ms, backoff_multiplier, max_delay_ms}) | "
                 "retryPolicy(node, {max_retries, initial_delay_ms, backoff_multiplier, max_delay_ms, "
-                "non_retryable, max_visits, error_text, on_failure, error_channel})",
+                "non_retryable, max_visits, error_text, attempt_timeout_ms, on_failure, error_channel})",
                 "direct", 1, 2,
                 "retryPolicy(policyOrNode: RetryPolicy | string, policy?: NodeRetryPolicy): GraphBuilder;",
                 "graph.retry_policy",
@@ -219,7 +220,8 @@ constexpr const char* kDtsPrelude =
     "interface RetryPolicy { max_retries?: number; initial_delay_ms?: number;"
     " backoff_multiplier?: number; max_delay_ms?: number; }\n"
     "interface NodeRetryPolicy extends RetryPolicy { non_retryable?: string[];"
-    " max_visits?: number; error_text?: boolean; on_failure?: string; error_channel?: string; }\n"
+    " max_visits?: number; error_text?: boolean; attempt_timeout_ms?: number; on_failure?: string;"
+    " error_channel?: string; }\n"
     "interface GraphBuilder {\n"
     "  node(name: string, config: NodeConfig): GraphBuilder;\n"
     "  channel(name: string, config: ChannelConfig): GraphBuilder;\n"

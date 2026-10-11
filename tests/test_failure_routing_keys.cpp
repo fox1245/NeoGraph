@@ -201,16 +201,49 @@ TEST(FailureRoutingKeys, NonRetryableCodesAreUniqueKnownAndBounded) {
               (std::vector<std::string>{"GC_FIELD_VALUE@/node_retry_policies/TEST/non_retryable"}));
 }
 
-TEST(FailureRoutingKeys, UnknownFieldsIncludingAttemptTimeoutAreRejected) {
-    EXPECT_EQ(codes_of(parse_errors(with_keys(fix_loop(), json{{"TEST", json{{"attempt_timeout_ms", 1000}}}},
+TEST(FailureRoutingKeys, UnknownFieldsAreRejected) {
+    EXPECT_EQ(codes_of(parse_errors(with_keys(fix_loop(), json{{"TEST", json{{"attempt_timeout", 1000}}}},
                                               nullptr, nullptr))),
-              (std::vector<std::string>{"GC_UNKNOWN_FIELD@/node_retry_policies/TEST/attempt_timeout_ms"}));
+              (std::vector<std::string>{"GC_UNKNOWN_FIELD@/node_retry_policies/TEST/attempt_timeout"}));
     EXPECT_EQ(codes_of(parse_errors(with_keys(fix_loop(), nullptr,
                                               json::array({json{{"from", "TEST"}, {"to", "ASK_USER"}, {"via", "x"}}}),
                                               nullptr))),
               (std::vector<std::string>{"GC_UNKNOWN_FIELD@/failure_edges/0/via"}));
     EXPECT_EQ(codes_of(parse_errors(with_keys(fix_loop(), nullptr, nullptr, json{{"ABORT", json{{"why", "x"}}}}))),
               (std::vector<std::string>{"GC_UNKNOWN_FIELD@/failure_exits/ABORT/why"}));
+}
+
+// WP12: attempt_timeout_ms is accepted within 100 to 3 600 000 ms, stored as
+// written and omitted when unused.
+TEST(FailureRoutingKeys, AttemptTimeoutIsBoundedAndKeptAsWritten) {
+    const auto with_timeout = [](json value) {
+        return with_keys(fix_loop(), json{{"TEST", json{{"attempt_timeout_ms", std::move(value)}}}},
+                         nullptr, nullptr);
+    };
+    for (const int accepted : {100, 1500, 3600000}) {
+        const auto definition = with_timeout(accepted);
+        EXPECT_TRUE(parse_errors(definition).empty()) << accepted;
+        const auto topology = GraphCompiler::parse(definition);
+        EXPECT_EQ(topology.node_retry_policies.at("TEST").attempt_timeout_ms, accepted);
+        EXPECT_FALSE(topology.node_retry_policies.at("TEST").max_retries.has_value());
+        EXPECT_EQ(canonical(topology.to_json()["node_retry_policies"]),
+                  canonical(json{{"TEST", json{{"attempt_timeout_ms", accepted}}}}));
+        EXPECT_NO_THROW(GraphCompiler::verify_roundtrip(definition, topology));
+    }
+    for (const int rejected : {0, 99, 3600001}) {
+        const auto errors = parse_errors(with_timeout(rejected));
+        ASSERT_EQ(codes_of(errors),
+                  (std::vector<std::string>{"GC_FIELD_VALUE@/node_retry_policies/TEST/attempt_timeout_ms"}))
+            << rejected;
+        EXPECT_EQ(errors[0].witness, (json{{"min", 100}, {"max", 3600000}, {"actual", rejected}})) << rejected;
+    }
+    EXPECT_EQ(codes_of(parse_errors(with_timeout("1000"))),
+              (std::vector<std::string>{"GC_FIELD_TYPE@/node_retry_policies/TEST/attempt_timeout_ms"}));
+    EXPECT_EQ(codes_of(parse_errors(with_timeout(1500.5))),
+              (std::vector<std::string>{"GC_FIELD_TYPE@/node_retry_policies/TEST/attempt_timeout_ms"}));
+    // Unused, the field is absent: the design keys print exactly as before.
+    EXPECT_FALSE(GraphCompiler::parse(design_keys()).to_json()["node_retry_policies"]["TEST"].contains(
+        "attempt_timeout_ms"));
 }
 
 TEST(FailureRoutingKeys, GraphLevelOnFailureIsUnknownWithAHint) {
@@ -450,14 +483,49 @@ TEST(FailureRoutingKeys, JavaScriptSugarRejectsMisuse) {
 TEST(FailureRoutingKeys, JavaScriptPolicyErrorsNameTheBuilderCall) {
     const auto outcome = compile(js_source(R"JS(export function define() {
         return ng.graph("fix").node("TEST", {type: "t.task"}).entry("TEST").exit("TEST")
-          .retryPolicy("TEST", {max_retries: 2, attempt_timeout_ms: 1000});
+          .retryPolicy("TEST", {max_retries: 2, atempt_timeout_ms: 1000});
     })JS"));
     ASSERT_FALSE(outcome.ok());
     const auto unknown = with_code(outcome.returned, "P_CORE_GC_UNKNOWN_FIELD");
     ASSERT_EQ(unknown.size(), 1U) << codes(outcome.returned);
-    EXPECT_EQ(unknown[0].message.rfind("graph.retryPolicy(\"TEST\", {...}) has an unknown field 'attempt_timeout_ms'", 0), 0U)
+    EXPECT_EQ(unknown[0].message.rfind("graph.retryPolicy(\"TEST\", {...}) has an unknown field 'atempt_timeout_ms'", 0), 0U)
         << unknown[0].message;
     EXPECT_TRUE(unknown[0].primary.span.has_value());
+    // The field it meant is offered (Damerau distance 1).
+    ASSERT_TRUE(unknown[0].help.has_value());
+    const auto& candidates = unknown[0].help->candidates;
+    EXPECT_NE(std::find(candidates.begin(), candidates.end(), "attempt_timeout_ms"), candidates.end());
+}
+
+// WP12: retryPolicy(node, {attempt_timeout_ms}) lowers into
+// node_retry_policies[node] like the other timing fields; a bound out of range
+// is the Core's diagnostic at the builder call.
+TEST(FailureRoutingKeys, JavaScriptSugarLowersTheAttemptTimeout) {
+    const auto outcome = compile(js_source(R"JS(export function define() {
+        return ng.graph("fix")
+          .channel("failures", {reducer: "append", initial: []})
+          .node("TEST", {type: "t.task"}).node("ASK_USER", {type: "t.task"})
+          .entry("TEST").exit("TEST").exit("ASK_USER")
+          .retryPolicy("TEST", {max_retries: 1, attempt_timeout_ms: 1500,
+                                on_failure: "ASK_USER", error_channel: "failures"});
+    })JS"));
+    ASSERT_TRUE(outcome.ok()) << codes(outcome.returned);
+    const auto definition = outcome.bundle->sealed_core_definitions().at(0).definition;
+    EXPECT_EQ(canonical(definition["node_retry_policies"]),
+              canonical(json::parse(R"({"TEST":{"attempt_timeout_ms":1500,"max_retries":1}})")));
+    EXPECT_EQ(canonical(definition["failure_edges"]),
+              canonical(json::parse(R"([{"error_channel":"failures","from":"TEST","to":"ASK_USER"}])")));
+
+    const auto out_of_range = compile(js_source(R"JS(export function define() {
+        return ng.graph("fix").node("TEST", {type: "t.task"}).entry("TEST").exit("TEST")
+          .retryPolicy("TEST", {attempt_timeout_ms: 50});
+    })JS"));
+    ASSERT_FALSE(out_of_range.ok());
+    const auto bound = with_code(out_of_range.returned, "P_CORE_GC_FIELD_VALUE");
+    ASSERT_EQ(bound.size(), 1U) << codes(out_of_range.returned);
+    EXPECT_EQ(bound[0].witness.value("min", 0), 100);
+    EXPECT_EQ(bound[0].witness.value("max", 0), 3600000);
+    EXPECT_TRUE(bound[0].primary.span.has_value());
 }
 
 #endif

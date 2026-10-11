@@ -70,6 +70,10 @@ struct ChannelDef {
     ChannelPersistencePolicy persistence = ChannelPersistencePolicy::Checkpoint;
 };
 
+/// #364 bounds of NodeRetryPolicySpec::attempt_timeout_ms (milliseconds).
+inline constexpr int kMinAttemptTimeoutMs = 100;
+inline constexpr int kMaxAttemptTimeoutMs = 3'600'000;
+
 /**
  * @brief #364: one node's retry fields exactly as the author wrote them.
  *
@@ -84,10 +88,14 @@ struct NodeRetryPolicySpec {
     std::vector<std::string> non_retryable;       ///< Sorted, unique, at most 16 codes.
     std::optional<int>       max_visits;          ///< 1-100
     std::optional<bool>      error_text;
+    /// Per-attempt time limit (milliseconds), kMinAttemptTimeoutMs to
+    /// kMaxAttemptTimeoutMs. A timed-out attempt is cancelled and fails with
+    /// NG.Timeout, which is retried and routable.
+    std::optional<int>       attempt_timeout_ms;
 
     bool empty() const noexcept {
         return !max_retries && !initial_delay_ms && !backoff_multiplier && !max_delay_ms &&
-               non_retryable.empty() && !max_visits && !error_text;
+               non_retryable.empty() && !max_visits && !error_text && !attempt_timeout_ms;
     }
     bool operator==(const NodeRetryPolicySpec&) const = default;
 };

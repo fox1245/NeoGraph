@@ -303,7 +303,8 @@
           }
         },
         "max_visits": { "type": "integer", "minimum": 1, "maximum": 100 },
-        "error_text": { "type": "boolean" }
+        "error_text": { "type": "boolean" },
+        "attempt_timeout_ms": { "type": "integer", "minimum": 100, "maximum": 3600000 }
       },
       "description": "Per-node retry fields as written (#364); unset fields come from the host and graph policies at run time."
     },

@@ -46,6 +46,7 @@
     {"id": "cpp.sequence_v2", "frontend": "cpp_builder", "source": "sources/cpp_sequence_v2.json"},
     {"id": "v2.graph_metadata", "frontend": "javascript", "source": "sources/v2_graph_metadata.js"},
     {"id": "v2.any_of_slots", "frontend": "javascript", "source": "sources/v2_any_of_slots.js"},
-    {"id": "v2.failure_routing", "frontend": "javascript", "source": "sources/v2_failure_routing.js"}
+    {"id": "v2.failure_routing", "frontend": "javascript", "source": "sources/v2_failure_routing.js"},
+    {"id": "v2.attempt_timeout", "frontend": "javascript", "source": "sources/v2_attempt_timeout.js"}
   ]
 }
