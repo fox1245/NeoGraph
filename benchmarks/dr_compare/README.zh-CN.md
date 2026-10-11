@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=zh-CN source_sha256=6488ecaf5f1d66af2ce0d47303f2669079794eb8b1c45152c0f8ef117d4efc2f -->
+<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=zh-CN source_sha256=bfae563f03ec9f91cf291586a4feca81a3f022a7f48a3fc3b54b5e5db4f80d6b -->
 # dr_compare：深度研究编排比较
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -23,6 +23,7 @@
 | `NG_TRANSPORT` | `http-chat` | NG: http-chat 或 http-responses，无 WebSocket；Responses 是不同 API。 |
 | `NG_WORKER_COUNT` | `4` | NG fan-out 工作线程数。 |
 | `DR_MODEL` | `gpt-5.4-mini` | 双方真实调用的显式模型。 |
+| `DR_PLAN_TEMPERATURE` | 未设置 | 双方规划步骤的 temperature；未设置则不发送（`gpt-5.4-mini` 等推理模型会拒绝）。 |
 | `NG_EXAMPLE_MAX_TOKENS` | `1600` | NG/LG 双侧每次调用的输出上限；不会自动提高。 |
 | `NEOGRAPH_PG_DSN` | `empty` | NG PostgreSQL DSN，为空则使用内存。 |
 | `LANGGRAPH_PG_DSN` | `NEOGRAPH_PG_DSN` | LG PostgreSQL DSN 覆盖。 |

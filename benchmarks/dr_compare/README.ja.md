@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=ja source_sha256=6488ecaf5f1d66af2ce0d47303f2669079794eb8b1c45152c0f8ef117d4efc2f -->
+<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=ja source_sha256=bfae563f03ec9f91cf291586a4feca81a3f022a7f48a3fc3b54b5e5db4f80d6b -->
 # dr_compare: ディープリサーチのオーケストレーション比較
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -23,6 +23,7 @@
 | `NG_TRANSPORT` | `http-chat` | NG: http-chatかhttp-responses。WebSocketなし、Responsesは別API。 |
 | `NG_WORKER_COUNT` | `4` | NG fan-outワーカー数。 |
 | `DR_MODEL` | `gpt-5.4-mini` | 両側の実呼び出しで明示するモデル。 |
+| `DR_PLAN_TEMPERATURE` | 未設定 | 両側の計画段階の temperature。未設定なら送信しません（`gpt-5.4-mini` などの推論モデルは拒否）。 |
 | `NG_EXAMPLE_MAX_TOKENS` | `1600` | NG/LG両側の呼び出しごとの出力上限。自動的に増やしません。 |
 | `NEOGRAPH_PG_DSN` | `empty` | NG PostgreSQL DSN、空ならメモリ内。 |
 | `LANGGRAPH_PG_DSN` | `NEOGRAPH_PG_DSN` | LG PostgreSQL DSNの上書き。 |

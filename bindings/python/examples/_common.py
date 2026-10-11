@@ -69,7 +69,9 @@ def schema_provider(schema: str = "openai", *, http_version=None):
             "bindings": {
                 "model": "model", "messages": "input" if responses else "messages",
                 "stream": "stream",
-                "max_output_tokens": "max_output_tokens" if responses else "max_tokens",
+                # OpenAI Chat rejects max_tokens for reasoning models (gpt-5.x, o-series);
+                # max_completion_tokens is accepted by every current Chat model.
+                "max_output_tokens": "max_output_tokens" if responses else "max_completion_tokens",
                 "usage": ["usage"],
             },
             "stop_reasons": ({"completed": "EndTurn", "max_output_tokens": "MaxTokens",

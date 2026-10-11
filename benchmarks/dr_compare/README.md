@@ -25,6 +25,7 @@ The workflow imports requests, LangGraph, and langchain-openai; memory probes us
 | `NG_TRANSPORT` | `http-chat` | NG: http-chat or http-responses. No WebSocket; Responses changes wire API. |
 | `NG_WORKER_COUNT` | `4` | NG worker count for fan-out. |
 | `DR_MODEL` | `gpt-5.4-mini` | Explicit model for real calls on both sides. |
+| `DR_PLAN_TEMPERATURE` | unset | Planner temperature on both sides; unset sends none, because reasoning models such as `gpt-5.4-mini` reject it. |
 | `NG_EXAMPLE_MAX_TOKENS` | `1600` | Per-call output cap on both NG and LG; never raised automatically. |
 | `NEOGRAPH_PG_DSN` | `empty` | NG PostgreSQL DSN; without one, falls back to in-memory. |
 | `LANGGRAPH_PG_DSN` | `NEOGRAPH_PG_DSN` | LG PostgreSQL DSN override. |

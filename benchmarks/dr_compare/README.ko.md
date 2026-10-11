@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=ko source_sha256=6488ecaf5f1d66af2ce0d47303f2669079794eb8b1c45152c0f8ef117d4efc2f -->
+<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=ko source_sha256=bfae563f03ec9f91cf291586a4feca81a3f022a7f48a3fc3b54b5e5db4f80d6b -->
 # dr_compare: 심층 조사 오케스트레이션 비교
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -23,6 +23,7 @@
 | `NG_TRANSPORT` | `http-chat` | NG: http-chat 또는 http-responses. WebSocket 없음; Responses는 다른 API입니다. |
 | `NG_WORKER_COUNT` | `4` | NG fan-out 작업자 수. |
 | `DR_MODEL` | `gpt-5.4-mini` | 양쪽 실제 호출의 명시적 모델. |
+| `DR_PLAN_TEMPERATURE` | 미설정 | 양쪽 계획 단계의 temperature. 미설정이면 보내지 않습니다(`gpt-5.4-mini` 같은 추론 모델은 거부). |
 | `NG_EXAMPLE_MAX_TOKENS` | `1600` | NG/LG 양쪽의 호출별 출력 상한. 자동으로 늘리지 않습니다. |
 | `NEOGRAPH_PG_DSN` | `empty` | NG PostgreSQL DSN, 없으면 메모리 사용. |
 | `LANGGRAPH_PG_DSN` | `NEOGRAPH_PG_DSN` | LG PostgreSQL DSN 재정의. |

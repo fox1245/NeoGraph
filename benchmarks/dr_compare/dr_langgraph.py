@@ -25,6 +25,8 @@ from langgraph.types import Command, Send
 CRAWL4AI_URL = os.environ.get("CRAWL4AI_URL", "").rstrip("/")
 PG_DSN       = os.environ.get("LANGGRAPH_PG_DSN", os.environ.get("NEOGRAPH_PG_DSN", ""))
 DR_MODEL     = os.environ.get("DR_MODEL", "gpt-5.4-mini")
+# Planner temperature; unset sends none because reasoning models such as gpt-5.4-mini reject it.
+PLAN_TEMPERATURE = float(os.environ["DR_PLAN_TEMPERATURE"]) if os.environ.get("DR_PLAN_TEMPERATURE") else None
 
 # Bench-mode env knobs (mirror dr_neograph.py).
 LLM_MOCK_MS  = int(os.environ.get("LLM_MOCK_MS", "-1"))  # -1 = real LLM
@@ -165,7 +167,7 @@ def research_plan(state: State) -> dict:
         "다음 주제를 심층 조사하기 위한 sub-question 3-5개로 분해. "
         "각각 독립적으로 답변 가능한 형태. 한 줄에 하나, 번호/글머리표 없이.\n\n"
         f"주제: {topic}",
-        temperature=0.0)
+        temperature=PLAN_TEMPERATURE)
     qs = [
         question for line in text.strip().splitlines()
         if (question := line.strip().lstrip("-•0123456789. ").strip())
