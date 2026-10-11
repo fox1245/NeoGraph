@@ -1,6 +1,8 @@
 #include <neograph/program/sqlite_provider_call_broker.h>
 #include <neograph/provider_outcome_codec.h>
 #include <neograph/graph/cancel.h>
+#include <neograph/graph/types.h>
+#include <neograph/hook_outbox.h>
 
 #include "../core/canonical_json.h"
 
@@ -428,7 +430,8 @@ private:
                     // Replay preserves the entire outcome and emits no events.
                     co_return restored;
                 }
-                throw std::runtime_error("Program provider journal dispatch outcome uncertain; reconciliation required");
+                throw ProgramProviderDispatchUncertainError(
+                    "Program provider journal dispatch outcome uncertain; reconciliation required");
             }
             try {
                 claim = reserve_provider_dispatch(prepared, ProviderDispatchBudget{
@@ -475,7 +478,24 @@ private:
                 save_outcome(impl->db, owner, id, "reconciliation_required", "", "", "", admitted.claim);
                 tx.commit();
             } catch (...) {}
-            throw;
+            // Run control keeps its type. Anything else becomes a typed
+            // uncertain outcome, so no retry, from this slot or a fresh one,
+            // sends the request again (#364). It keeps the transport's message.
+            try {
+                throw;
+            } catch (const graph::CancelledException&) {
+                throw;
+            } catch (const graph::NodeInterrupt&) {
+                throw;
+            } catch (const HookBoundaryBlocked&) {
+                throw;
+            } catch (const std::exception& error) {
+                throw ProgramProviderDispatchUncertainError(error.what(), std::current_exception());
+            } catch (...) {
+                throw ProgramProviderDispatchUncertainError(
+                    "Program provider journal dispatch outcome uncertain; reconciliation required",
+                    std::current_exception());
+            }
         }
         if (claim.active()) admitted.committed = claim.settle(result);
         else {

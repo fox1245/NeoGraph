@@ -32,6 +32,23 @@ private:
     std::exception_ptr observer_error_;
 };
 
+/** A dispatch may have reached the provider, but no outcome is known: the
+ * transport raised instead of returning one, or an earlier dispatch of this
+ * logical call is still unresolved. It carries no outcome; when the transport
+ * raised, what() is the transport's message and cause() its exception. The
+ * journal marker stands: this is
+ * not permission to dispatch again, under this call slot or a fresh one, so
+ * node retries and failure routes treat it as an uncertain effect
+ * (NG.EffectUncertain). Reconcile it with
+ * SQLiteProgramProviderCallJournal::reconcile_success.
+ */
+class NEOGRAPH_PROGRAM_API ProgramProviderDispatchUncertainError final : public ProviderOutcomeError {
+public:
+    explicit ProgramProviderDispatchUncertainError(std::string message,
+                                                   std::exception_ptr cause = {})
+        : ProviderOutcomeError(message.c_str(), nullptr, std::move(cause)) {}
+};
+
 /** Host-owned SQLite dispatch journal. Share the journal across resolver calls/runs.
  * A marker means transport MAY have occurred; it does not prove provider receipt
  * or exactly-once execution. Pending/uncertain calls require external reconciliation.

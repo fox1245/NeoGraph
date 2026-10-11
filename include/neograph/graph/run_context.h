@@ -170,7 +170,9 @@ inline asio::awaitable<sp::runtime::Result> observe_provider_result(
     try {
         co_return co_await std::move(operation);
     } catch (const ProviderOutcomeError& error) {
-        record_usage(ctx, error.outcome());
+        // An uncertain dispatch carries no outcome, so there is nothing to
+        // record; it must still leave as the typed uncertain failure.
+        if (error.outcome()) record_usage(ctx, error.outcome());
         throw;
     } catch (const ProviderFailure& error) {
         record_usage(ctx, error.outcome());

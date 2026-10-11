@@ -253,6 +253,87 @@ TEST(ProgramProviderJournal, DispatchedMarkerSurvivesCrashWindowAndRequiresEvide
                  std::runtime_error);
 }
 
+// #364: a failure after the request may have been sent is a typed uncertain
+// outcome, so a node retry (which now calls from a fresh slot) can never send
+// the request a second time.
+TEST(ProgramProviderJournal, AFailureAfterDispatchIsTypedUncertainAndNeverRedispatched) {
+    Database db("typed-uncertain");
+    auto transport = std::make_shared<Transport>();
+    transport->fail_after_send = true;
+    Call call;
+    Journal journal(db.path);
+    try {
+        (void)invoke(journal, call, transport);
+        FAIL() << "a failure after dispatch must be an uncertain outcome";
+    } catch (const ProgramProviderDispatchUncertainError& error) {
+        EXPECT_FALSE(error.outcome());
+        ASSERT_TRUE(error.cause());
+        EXPECT_THROW(std::rethrow_exception(error.cause()), std::runtime_error);
+        // The transport's message is kept; the type says the outcome is unknown.
+        EXPECT_STREQ(error.what(), "transport disconnected after send");
+    }
+    // The unresolved slot stays uncertain, typed, and is never sent again.
+    transport->fail_after_send = false;
+    EXPECT_THROW(invoke(journal, call, transport), ProgramProviderDispatchUncertainError);
+    EXPECT_EQ(transport->calls, 1);
+    ASSERT_TRUE(journal.inspect(call.owner, call.id()));
+    EXPECT_EQ(journal.inspect(call.owner, call.id())->state, Journal::State::ReconciliationRequired);
+}
+
+TEST(ProgramProviderJournal, ANodeRetryNeverRedispatchesAnUncertainProviderCall) {
+    using namespace neograph::graph;
+    Database db("retry-uncertain");
+    Journal journal(db.path);
+    auto transport = std::make_shared<Transport>();
+    transport->fail_after_send = true;
+    NodeContext nodes;
+    nodes.provider = transport;
+    nodes.model = "model";
+    const json definition{
+        {"name", "provider-journal-retry"},
+        {"channels", {{"messages", {{"reducer", "append"}}}}},
+        {"nodes", {{"reason", {{"type", "llm_call"}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "reason"}},
+                                {{"from", "reason"}, {"to", "__end__"}}})}};
+    auto engine = GraphEngine::compile(definition, nodes);
+    RetryPolicy retry;
+    retry.max_retries = 2;
+    retry.initial_delay_ms = 1;
+    retry.backoff_multiplier = 1.0f;
+    retry.max_delay_ms = 1;
+    engine->set_retry_policy(retry);
+    Call call;
+    RunResources resources;
+    resources.provider_call_broker = journal.bind(call.context(), digest('a')).broker;
+    RunConfig config;
+    config.thread_id = call.thread;
+    config.input = {{"messages", json::array({{{"role", "user"}, {"content", "question"}}})}};
+    RunMetadata metadata;
+    metadata.owner_scope = call.owner;
+    metadata.run_id = call.run;
+    std::exception_ptr error;
+    try {
+        (void)neograph::async::run_sync(engine->run_async(config, metadata, std::move(resources)));
+    } catch (...) {
+        error = std::current_exception();
+    }
+    ASSERT_TRUE(error);
+    const auto record = node_failure_of(error);
+    ASSERT_TRUE(record);
+    EXPECT_EQ(record->node, "reason");
+    EXPECT_EQ(record->code, "NG.EffectUncertain");
+    EXPECT_EQ(record->failure_class, NodeFailureClass::EffectUncertain);
+    EXPECT_FALSE(record->retryable);
+    EXPECT_FALSE(record->routable);
+    EXPECT_EQ(record->attempts, 1);
+    EXPECT_EQ(transport->calls, 1);
+    call.task = "s0:reason";
+    ASSERT_TRUE(journal.inspect(call.owner, call.id()));
+    EXPECT_EQ(journal.inspect(call.owner, call.id())->state, Journal::State::ReconciliationRequired);
+    call.task = "s0:reason#a1";
+    EXPECT_FALSE(journal.inspect(call.owner, call.id()));
+}
+
 TEST(ProgramProviderJournal, PreDispatchPersistenceFailureAndStaleScopeNeverCallTransport) {
     Database db("failure");
     Journal journal(db.path);
