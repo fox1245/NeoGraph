@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=663b2f87a2ed7c9bd7c2f04054729a318ed751df736052db7f5ffb140d4e6bea -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=245d4d6d1a2ba92e79783c8528da5e39d54e7447cbe72d413eecd14ee921eafa -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -43,6 +43,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **Program：编写期诊断指向源码位置 (#361)。** JavaScript 构建器诊断在编译返回的诊断中（`ProgramBundle::compile_diagnostics()`，Python `bundle.compile_diagnostics`）携带调用位置（pointer、行、列）。封存进 bundle 的诊断保持不变，因此 bundle id 保持稳定。编译失败会抛出 `ng.ProgramCompileError`（`RuntimeError` 子类），其消息以 `source:line:col` 结尾，`.diagnostics` 携带详细信息。注册表缺失提示会给出 Python 的注册调用名。
 - **示例可端到端运行。** 所有示例都已用真实 provider 或离线模式运行，并修复了失败：多智能体辩论和自我进化聊天机器人以可移植文本传递轮次，而不是把原生状态重放到配置不同的调用中；the-beast 各变体为模型编写的 `llm_call` 节点指定模型，使用共享的 zero-data-retention provider 工厂并报告运行失败；A2A 客户端默认使用示例 38 的端口；Harness MCP 服务器可在无 token 的 loopback HTTP 上工作；示例 34 为生成图片提高流限制，并在该部分使用支持图片输入的模型；program chatbot 演示策略与 descriptor 策略 revision 4 一致；多租户 live 服务器接受 `NG_MULTI_TENANT_REQUESTS` 和 `NG_MULTI_TENANT_WORKERS`；Crawl4AI 客户端接受带路径的 base URL 并发送 bearer token；RE 智能体在需要密钥之前先检查 GhidraMCP 后端。
 - **并行工具 dispatch 的 fallback 捕获的工具失败现在是合法 JSON。** 在多调用 batch 中，若某个调用在逐调用错误处理之外失败，其工具消息以字符串拼接构造为 `{"error": "..."}`，异常文本中的引号、反斜杠或换行会产生非法 JSON。现在改用 JSON 库序列化。
+- **所有工具路径上的工具失败遵循同一契约。** 在多调用 batch 中，`HookBoundaryBlocked` 会变成模型可以读取并绕过的 `{"error": ...}` 工具消息，而单个调用则会停止运行；现在两者都会停止运行。工具代码在 C++ 或 Python 中抛出的 `HookBoundaryBlocked` 或 `NodeInterrupt`，此前在所有路径上都被 `ToolExecutionController` 转换为失败的工具结果；现在它会停止或暂停运行，因此工具可以请求人工确认。无法运行的强制工具 Hook（例如 `llm::Agent` 运行没有 owner scope 时）现在会阻断运行，而不是让每个调用都以发给模型的消息失败。抛出异常的 `get_name()` 现在无论在单个调用还是 batch 中都成为该调用的 `failed` 结果，此前单个调用会使节点失败；只携带 `error`、并以非错误结果到达模型的 batch fallback 消息，现在与任何失败调用一样具有 `tool_status` 和 `{"error", "status", "retryable", "effect_uncertain"}` 结构。节点重试策略不再重试 `HookBoundaryBlocked`；当 batch 中多个调用都使运行停止时，按取消、Hook 阻断、中断的顺序优先。Python 的 `HookBoundaryBlocked` 新增 `invocation_id` 与 `state`。参见[工具失败契约](docs/reference-en.md#tool-failure-contract)。
 - **声明了 `outputSchema` 的 MCP 工具的错误消息得以保留。** 客户端在检查 `isError` 之前就验证 output schema，因此不带 `structuredContent` 的合法错误结果会以 "MCP tool advertised outputSchema but returned no structuredContent" 失败，`[FUNCTION_NOT_FOUND] No function found named 'x'` 之类的工具消息既到不了调用方，也到不了模型。现在按照 MCP 规范的允许和官方 Python SDK 的做法，错误结果跳过 output schema 验证；成功结果仍会验证。
 - **Program publication无需node handle移动赋值即可使用libc++构建。** 在所有index publication之后直接初始化提取的handle，不依赖库特定的`noexcept` trait，同时保留commit原子性。
 - **Windows interface-6 archive fixture原子地创建私有custody目录。** 禁止继承、仅允许当前用户的DACL满足native archive admission，保留所有outcome、金额证据、replay和错误binding检查。
