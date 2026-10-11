@@ -354,6 +354,7 @@ int main(int argc, char** argv) {
         if (!key || !*key) { std::cerr << "OPENROUTER_API_KEY not set (or use --selftest)\n"; return 2; }
         provider = examples::make_openrouter_provider(key, "chat");
         ctx.provider = provider;
+        ctx.model = "~deepseek/deepseek-v4-flash-latest";  // llm_call takes its model only from here
     }
 
     const std::string sys =

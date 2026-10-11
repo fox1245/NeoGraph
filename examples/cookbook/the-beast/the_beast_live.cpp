@@ -74,7 +74,7 @@ json channel_of(const json& serialized, const std::string& name) {
     return json::array();
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
     cppdotenv::auto_load_dotenv();
     const char* key = std::getenv("OPENROUTER_API_KEY");
     if (!key || !*key) {
@@ -93,6 +93,7 @@ int main(int argc, char** argv) {
 
     ng::NodeContext ctx;
     ctx.provider = provider;
+    ctx.model = model;  // llm_call takes its model only from here
 
     std::cout << "============ THE BEAST (live) ============\n"
                  "Author: "
@@ -227,4 +228,8 @@ int main(int argc, char** argv) {
 
     std::cout << "\nThe model wrote it. The compiler proved it. The Beast ran it.\n";
     return 0;
+}
+catch (const std::exception& error) {
+    std::cerr << "the_beast_live: " << error.what() << "\n";
+    return 1;
 }

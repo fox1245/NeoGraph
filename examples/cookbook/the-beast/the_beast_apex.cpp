@@ -109,7 +109,7 @@ json extract_json(const std::string& text) {
     return json::parse(text.substr(a, b - a + 1));
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
     cppdotenv::auto_load_dotenv();
     const char* key = std::getenv("OPENROUTER_API_KEY");
     if (!key || !*key) { std::cerr << "OPENROUTER_API_KEY not set\n"; return 2; }
@@ -131,6 +131,7 @@ int main(int argc, char** argv) {
 
     ng::NodeContext ctx;
     ctx.provider = provider;
+    ctx.model = "~deepseek/deepseek-v4-flash-latest";  // llm_call takes its model only from here
 
     std::cout << "============ THE BEAST (apex) ============\n"
                  "The model devours a tool catalog and writes a tool-calling\n"
@@ -241,4 +242,8 @@ int main(int argc, char** argv) {
     std::cout << "\nThe model wrote the agent. The compiler proved it. "
                  "The agent ate the tools.\n";
     return 0;
+}
+catch (const std::exception& error) {
+    std::cerr << "the_beast_apex: " << error.what() << "\n";
+    return 1;
 }

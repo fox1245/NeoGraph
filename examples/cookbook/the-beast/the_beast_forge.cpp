@@ -136,7 +136,7 @@ static std::vector<std::string> tool_names(neograph::mcp::MCPClient& c) {
     return out;
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
     cppdotenv::auto_load_dotenv();
     const char* key = std::getenv("OPENROUTER_API_KEY");
     if (!key || !*key) { std::cerr << "OPENROUTER_API_KEY not set\n"; return 2; }
@@ -229,6 +229,7 @@ int main(int argc, char** argv) {
     }
     ng::NodeContext ctx;
     ctx.provider = provider;
+    ctx.model = "~deepseek/deepseek-v4-flash-latest";  // llm_call takes its model only from here
 
     // ---------- PHASE 4: AUTHOR the ReAct harness (3 gates + self-repair) ----------
     std::cout << "── AUTHOR · the model writes a ReAct agent over the full catalog ──\n";
@@ -300,4 +301,8 @@ int main(int argc, char** argv) {
     std::cout << "\nIt discovered tools, forged the missing one, and used them all.\n";
     { std::error_code ec; fs::remove(forged_path, ec); }   // clean the forged server file
     return 0;   // MCPClients + engine tear down here (subprocesses reaped)
+}
+catch (const std::exception& error) {
+    std::cerr << "the_beast_forge: " << error.what() << "\n";
+    return 1;
 }
