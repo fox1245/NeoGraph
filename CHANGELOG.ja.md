@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=ae3606fa9d465e79b277ba9791866402d3f9de5ad045d91383fbe4defe49585e -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=970a8be5a07cbb65ea97cf88cf99277f3afd55ee1fd3f126776a1da698dfead4 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -17,6 +17,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ### 変更
 
+- **SchemaProvider の `maint/interface6` にマージされた PR #25 の `f7cb27e68ee02f3a27d01c31af85bcac96f00963` を採用します。** `Usage::input_uncached` はすべての family で同じ規則（入力 − キャッシュ読み取り − キャッシュ書き込み。書き込みカウンタを送らない wire でのみ欠落値を0とみなす）に従います。OpenAI 直結の Chat もこの値を報告し、Responses は報告されたキャッシュ書き込みを差し引きます。Gemini の stop 種別はテストで固定しました。SDK 0.3.0 と interface/shared ABI 6 は変わりません。
 - **SchemaProvider の `maint/interface6` にマージされた PR #23 の `45dd2ad36e18717adae3e2d10b2b9c8bb0e85471` を採用します。使用量がベンダー値と正確に一致します。** 実際の API 呼び出しで確認しました。OpenRouter Messages のストリーミングは末尾の `[DONE]` で失敗せず、報告されたコストも保持します。Chat は `video_tokens` などのベンダー詳細カウンタを保持します。報告される USD 金額がベンダーの10進値と一致し（+1 nanoUSD なし）、入力 + 出力 = 合計が成り立ちます。Gemini は合計が証明する場合に推論0を報告し、Interactions は modality を名前で記録し、`claude-haiku-4-5` のような Anthropic エイリアスは日付付きモデルで応答されても受け入れます。保存された結果に `CostRounding::CeilingShortestDecimal` が入ることがあり、以前の記録もそのまま読め、Python は `ProviderCostRounding.CeilingShortestDecimal` を公開します。SDK 0.3.0 と interface/shared ABI 6 は変わりません。
 - **`llm::Agent` と deep-research、plan-execute のツールループが一時停止したターンを継続します (#311)。** `sp::StopKind::PauseTurn`（Anthropic/Chat の `pause_turn`）を受け取ると、一時停止した assistant ターンを含む履歴をそのまま再送し、既存の反復回数の予算内で動作します。以前は一時停止したターンを最終結果として返していました。同じ判定は `paused_turn()` で利用できます。リファレンスに Responses の `response.done` エイリアス規則と、宣言済みゲートウェイのサービングモデル規則を記載しました。
 - **SchemaProvider の `maint/interface6` ブランチにマージされた PR #21 の `83112573ba59e3b561fc33c22394638be7aa5294` を採用します。SDK 0.3.0、interface/shared ABI 6 はそのままで、ルーティングゲートウェイの修正が加わります。** Responses と Messages は、宣言済みの OpenRouter origin が `~deepseek/deepseek-v4-flash-latest` のようなルーティングエイリアスに対して返す実際のサービングモデル名を受け入れるようになりました。以前はこのような Responses 呼び出しがすべて `invalid response protocol (HTTP 200)` で失敗していました。サービングモデルは 1 つの応答内で変わってはならず、replay は要求したモデルに束縛されたままです。NeoGraph の API・ABI に変更はありません。

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=ae3606fa9d465e79b277ba9791866402d3f9de5ad045d91383fbe4defe49585e -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=970a8be5a07cbb65ea97cf88cf99277f3afd55ee1fd3f126776a1da698dfead4 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -17,6 +17,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 变更
 
+- **采用 SchemaProvider `maint/interface6` 上已合并的 PR #25 提交 `f7cb27e68ee02f3a27d01c31af85bcac96f00963`。** `Usage::input_uncached` 在所有 family 中遵循同一规则（输入 − 缓存读取 − 缓存写入；仅在从不发送写入计数的 wire 上将缺失值视为 0）：直连 OpenAI Chat 现在也会报告该值，Responses 会减去上报的缓存写入。Gemini 的 stop 类型已由测试固定。SDK 0.3.0 与 interface/shared ABI 6 不变。
 - **采用 SchemaProvider `maint/interface6` 上已合并的 PR #23 提交 `45dd2ad36e18717adae3e2d10b2b9c8bb0e85471`：用量与供应商数值完全一致。** 已通过真实 API 调用验证：OpenRouter Messages 流式响应不再因末尾的 `[DONE]` 失败，并带有上报的费用；Chat 保留 `video_tokens` 等供应商明细计数；上报的 USD 金额与供应商十进制值一致（不再多 1 nanoUSD），输入 + 输出 = 合计；Gemini 在合计可证明时报告推理为 0；Interactions 按名称记录 modality；`claude-haiku-4-5` 等 Anthropic 别名在以带日期模型应答时也被接受。保存的结果可能带有 `CostRounding::CeilingShortestDecimal`，旧记录仍可读取，Python 暴露 `ProviderCostRounding.CeilingShortestDecimal`。SDK 0.3.0 与 interface/shared ABI 6 不变。
 - **`llm::Agent` 以及 deep-research、plan-execute 工具循环会继续被暂停的轮次 (#311)。** 收到 `sp::StopKind::PauseTurn`（Anthropic/Chat 的 `pause_turn`）时，它们会在现有迭代预算内重新发送包含该暂停 assistant 轮次的历史，而不再把暂停的轮次当作最终结果返回。同样的判断可通过 `paused_turn()` 使用。参考文档现已说明 Responses 的 `response.done` 别名规则以及已声明网关的服务模型规则。
 - **采用 SchemaProvider `maint/interface6` 分支上已合并的 PR #21 提交 `83112573ba59e3b561fc33c22394638be7aa5294`：SDK 0.3.0、interface/shared ABI 6 不变，并加入路由网关修复。** Responses 与 Messages 现在接受已声明的 OpenRouter origin 针对 `~deepseek/deepseek-v4-flash-latest` 等路由别名返回的实际服务模型名；此前此类 Responses 调用都会以 `invalid response protocol (HTTP 200)` 失败。服务模型在同一响应内不得变化，replay 仍绑定到请求的模型。NeoGraph 的 API 与 ABI 均无变化。
