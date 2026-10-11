@@ -31,6 +31,7 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -222,7 +223,10 @@ struct CustomerRecord {
     std::string topology_name;
     json        topology_def;
     std::string system_prompt;
-    std::vector<sp::Message> native_history; // Authoritative in-memory answering history.
+    // Portable user/final-reply text. Native output can't be carried over: the
+    // topology changes between turns, and fan-out branches don't extend each
+    // other's request prefix, so the next turn's calls could not replay it.
+    std::vector<sp::Message> answer_history;
     std::vector<json> history;              // Portable final-text observations for the judge.
     std::vector<std::pair<int, std::string>> evolution_log;  // (turn, topology)
 };
@@ -241,7 +245,7 @@ static long peak_rss_kb() {
 
 // ── (5) main — 5-turn 시뮬레이션, 매 turn 끝에 judge → evolve ────────
 
-int main() {
+static int run_demo() {
     cppdotenv::auto_load_dotenv();
     const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key) {
@@ -297,7 +301,7 @@ int main() {
         ctx.instructions = alice.system_prompt;
         auto engine = cache.get_or_compile(alice.id, alice.topology_def, ctx);
 
-        auto answering_history = alice.native_history;
+        auto answering_history = alice.answer_history;
         answering_history.push_back(portable_message({"user", umsg}));
 
         RunConfig rcfg;
@@ -306,7 +310,6 @@ int main() {
         rcfg.provider_messages = std::move(answering_history);
 
         auto result = engine->run(rcfg);
-        alice.native_history = std::move(result.native_messages);
         auto out_msgs = result.output["channels"]["messages"]["value"];
 
         // 마지막 assistant 응답 추출.
@@ -316,6 +319,10 @@ int main() {
                 if (m.value("role", "") == "assistant")
                     final_reply = m.value("content", "");
         }
+        if (final_reply.find_first_not_of(" \t\r\n") == std::string::npos)
+            throw std::runtime_error("Answering graph produced no visible reply");
+        alice.answer_history.push_back(portable_message({"user", umsg}));
+        alice.answer_history.push_back(portable_message({"assistant", final_reply}));
         std::cout << "Bot:  " << (final_reply.size() > 200
                                   ? final_reply.substr(0, 200) + "..."
                                   : final_reply) << "\n";
@@ -382,4 +389,18 @@ int main() {
     std::cout << "    not data — runtime reshape requires module reload + state loss.\n";
 
     return 0;
+}
+
+// Report provider and node failures with a deliberate failure exit, rather
+// than leaving them uncaught at the process boundary.
+int main() {
+    try {
+        return run_demo();
+    } catch (const std::exception& error) {
+        std::cout << std::flush;
+        std::cerr << "cookbook_self_evolving_chatbot: " << error.what() << "\n";
+    } catch (...) {
+        std::cerr << "cookbook_self_evolving_chatbot: unknown error\n";
+    }
+    return 1;
 }

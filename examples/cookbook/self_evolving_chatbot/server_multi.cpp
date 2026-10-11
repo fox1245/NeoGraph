@@ -357,7 +357,11 @@ struct CustomerState {
     std::string topology_name;
     json        topology_def;
     std::string system_prompt;
-    std::vector<sp::Message> native_history; // Exact answering history, tenant-private.
+    // Portable user/final-reply text, tenant-private. Native output can't be
+    // carried over: the topology changes between turns, and fan-out branches
+    // don't extend each other's request prefix, so the next turn's calls could
+    // not replay it.
+    std::vector<sp::Message> answer_history;
     std::vector<json> history;              // Portable final-text observations for the judge.
     std::vector<std::pair<int, std::string>> evolution_log;
     int main_llm_calls = 0;
@@ -447,7 +451,7 @@ static int run_demo() {
                 ctx.provider_controls.max_output_tokens = examples::output_cap(0);
             auto engine = cache.get_or_compile(cust.id, cust.topology_def, ctx);
 
-            auto answering_history = cust.native_history;
+            auto answering_history = cust.answer_history;
             answering_history.push_back(portable_message({"user", umsg}));
 
             RunConfig rcfg;
@@ -495,7 +499,8 @@ static int run_demo() {
             }
             if (final_reply.find_first_not_of(" \t\r\n") == std::string::npos)
                 throw std::runtime_error("Customer answering graph produced no visible reply");
-            cust.native_history = std::move(result.native_messages);
+            cust.answer_history.push_back(portable_message({"user", umsg}));
+            cust.answer_history.push_back(portable_message({"assistant", final_reply}));
 
             cust.history.push_back({{"role", "user"}, {"content", umsg}});
             cust.history.push_back({{"role", "assistant"}, {"content", final_reply}});
