@@ -77,10 +77,12 @@ inline std::unique_ptr<neograph::llm::SchemaProvider> make_openrouter_provider(
     std::string api_key, std::string family = "responses",
     std::chrono::milliseconds timeout = std::chrono::seconds(120),
     std::optional<sp::OpenRouterRouting> routing = std::nullopt,
-    std::optional<std::chrono::milliseconds> stall_timeout = std::nullopt) {
+    std::optional<std::chrono::milliseconds> stall_timeout = std::nullopt,
+    std::optional<sp::runtime::Limits> limits = std::nullopt) {
     sp::runtime::Options options;
     options.api_key = std::move(api_key);
     options.default_timeout = timeout;
+    if (limits) options.limits = *limits;
     if (stall_timeout) {
         // OpenRouter answers with headers at once and sends keepalive whitespace every few
         // seconds while it generates, so a quiet connection is a stall, not a slow generation.

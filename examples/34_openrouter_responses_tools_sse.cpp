@@ -4,10 +4,13 @@
 // including unknown types. Function tools are advertised here, not executed.
 // OPENROUTER_VECTOR_STORE_ID gates file_search; OPENROUTER_SKILL_ID overrides
 // the curated openai-spreadsheets skill mounted in shell.environment.
+// A section succeeds only when its tool's output item completes, not on any
+// Completion: a model can answer without ever calling the tool.
 
 #include "provider_example_support.h"
 
 #include <cppdotenv/dotenv.hpp>
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <functional>
@@ -110,10 +113,39 @@ void print_event(const sp::Event& event) {
     }, event);
 }
 
+// True when a completed output item has one of `types` (OpenRouter names its
+// own server tools "openrouter:<tool>"; OpenAI-hosted items end in "_call").
+bool has_output_item(const std::vector<sp::RawWire>& events, const std::vector<std::string>& types) {
+    for (const auto& event : events) {
+        if (event.type != "response.output_item.done" || !event.payload) continue;
+        const auto type = event.payload->root().get("item").get("type");
+        if (type.is_string() && std::find(types.begin(), types.end(), type.as_string()) != types.end())
+            return true;
+    }
+    return false;
+}
+
+// An image_generation output item carries the whole base64 image in one SSE
+// line and event, past the runtime's 1 MiB default bounds for each. The image
+// is repeated in response.completed, so the stream, response and retained
+// content totals (16 MiB defaults) get headroom too. These explicit bounds fit
+// an encoded image of up to 8 MiB and stay far below the admitted ceilings.
+sp::runtime::Limits image_limits() {
+    constexpr std::size_t MiB = 1024 * 1024;
+    sp::runtime::Limits limits;
+    limits.sse.max_line_bytes = 8 * MiB;
+    limits.sse.max_event_bytes = 8 * MiB;
+    limits.sse.max_total_bytes = 32 * MiB;
+    limits.max_response_bytes = 32 * MiB;
+    limits.semantic.max_content_bytes = 32 * MiB;
+    return limits;
+}
+
 struct Section {
     std::string name;
     std::function<sp::responses::Request()> build;
     std::function<std::string()> skip_reason;
+    std::vector<std::string> tool_items;  // output item types that prove the tool ran
 };
 struct SectionResult {
     std::string name;
@@ -130,7 +162,8 @@ int main() {
             std::cerr << "Set OPENROUTER_API_KEY (env or .env)\n";
             return 1;
         }
-        auto provider = examples::make_openrouter_provider(api_key, "responses");
+        auto provider = examples::make_openrouter_provider(
+            api_key, "responses", std::chrono::seconds(120), std::nullopt, std::nullopt, image_limits());
         const auto no_skip = [] { return std::string{}; };
         const std::vector<Section> sections = {
             {"function (custom calculator)", [] {
@@ -141,22 +174,22 @@ int main() {
                     "Evaluate a mathematical expression. Required for any arithmetic.",
                     R"({"type":"object","properties":{"expression":{"type":"string"}},"required":["expression"],"additionalProperties":false})"));
                 return request;
-            }, no_skip},
+            }, no_skip, {"function_call"}},
             {"web_search", [] {
                 auto request = user_request(
                     "Search the web for the official release date of Linux kernel 6.0 and reply with just the date.");
                 request.hosted_tools.emplace_back(sp::responses::WebSearchTool{});
                 return request;
-            }, no_skip},
+            }, no_skip, {"openrouter:web_search", "web_search_call"}},
             {"image_generation", [] {
                 auto request = user_request(
-                    "Generate a 256x256 image of a small cube. Reply 'done' once generated.");
+                    "Generate a 1024x1024 image of a small cube. Reply 'done' once generated.");
                 sp::responses::ImageGenerationTool tool;
                 tool.size = "1024x1024";
                 tool.quality = "low";
                 request.hosted_tools.emplace_back(std::move(tool));
                 return request;
-            }, no_skip},
+            }, no_skip, {"openrouter:image_generation", "image_generation_call"}},
             {"file_search", [] {
                 auto request = user_request(
                     "Search the indexed files for the term 'NeoGraph' and summarize what it is in one sentence.");
@@ -168,7 +201,7 @@ int main() {
             }, [] {
                 return std::getenv("OPENROUTER_VECTOR_STORE_ID") ? std::string{}
                     : std::string{"set OPENROUTER_VECTOR_STORE_ID to a pre-built store"};
-            }},
+            }, {"openrouter:file_search", "file_search_call"}},
             {"tool_search (OpenRouter DeepSeek)", [] {
                 auto request = user_request(
                     "I need to know the current Unix epoch time. Use any available tool to get it.");
@@ -180,7 +213,7 @@ int main() {
                     "Returns the current weather for a city.",
                     R"({"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false})", true));
                 return request;
-            }, no_skip},
+            }, no_skip, {"openrouter:tool_search", "tool_search_call"}},
             {"skills (mounted in shell.environment)", [] {
                 auto request = user_request(
                     "Use any available skill to summarize what skills are available to you. Reply in one sentence.");
@@ -190,14 +223,14 @@ int main() {
                     skill ? skill : "openai-spreadsheets"});
                 request.hosted_tools.emplace_back(std::move(shell));
                 return request;
-            }, no_skip},
+            }, no_skip, {"shell_call"}},
             {"shell (container_auto)", [] {
                 auto request = user_request(
                     "Use the shell tool to print the current working directory and the contents of /etc/os-release. "
                     "Then reply with one sentence summarizing the OS.");
                 request.hosted_tools.emplace_back(sp::responses::ShellTool{});
                 return request;
-            }, no_skip}
+            }, no_skip, {"shell_call"}}
         };
         std::vector<SectionResult> results;
         results.reserve(sections.size());
@@ -231,6 +264,10 @@ int main() {
                           << neograph::outcome_projection_json(*result.outcome).dump(2) << "\n";
                 if (const auto* failure = std::get_if<sp::Failure>(result.outcome.get())) {
                     std::cout << "  ERROR: " << failure->error.safe_message << "\n";
+                    ++failed;
+                } else if (!has_output_item(result.wire_events, section.tool_items)) {
+                    std::cout << "  FAILED: completed without a " << section.tool_items.front()
+                              << " output item; the tool did not run\n";
                     ++failed;
                 } else ++succeeded;
             } catch (const std::exception& error) {
