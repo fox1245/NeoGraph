@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ja source_sha256=0ed7fca0268a366ef69a1087706909ad01e375f3f529b13b8be0035926f559ac -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ja source_sha256=a9b2426138faa8e51665146bcdb5ff4b4bad70882618a41b3420db5f8b51cb47 -->
 # The Beast — 生成・進化・ロールバック
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -401,7 +401,7 @@ $ ./build/cookbook_the_beast_baldwin_llm       # oracle learner (default, offlin
 total learner invocations: Baldwin 23 vs Lamarck 5  (Lamarck banked its way to fewer)
 ```
 
-観察可能な違いは適合度ではなく（両方ともターゲットに到達する）、**ゲノム経済**である：Lamarckは学習者の作業を遺伝に銀行化する（遺伝子はコミットし、呼び出しはゼロに落ちる）；Baldwinは毎世代再学習する（遺伝子は可塑性のままで、呼び出しは高いまま）。デフォルトでは決定的な**オラクル**学習者でオフライン実行するか、`--llm`と`OPENROUTER_API_KEY`で**モデル**を学習者にする——その場合、それらの呼び出しは実際のAPI呼び出しであり、遺伝は文字通り、モデルに一度支払うことと毎世代支払うことの違いである。これが「モデルの修正は遺伝可能になるか？」の具体的な意味である——主張ではなくトレースとして示される。（`--llm`パスはネットワークを必要とし、呼び出し/パース失敗時にはオラクルにフォールバックしてログを取るため、デモは常に完了する。）
+観察可能な違いは適合度ではなく（両方ともターゲットに到達する）、**ゲノム経済**である：Lamarckは学習者の作業を遺伝に銀行化する（遺伝子はコミットし、呼び出しはゼロに落ちる）；Baldwinは毎世代再学習する（遺伝子は可塑性のままで、呼び出しは高いまま）。デフォルトでは決定的な**オラクル**学習者でオフライン実行するか、`--llm`と`OPENROUTER_API_KEY`で**モデル**を学習者にする——その場合、それらの呼び出しは実際のAPI呼び出しであり、遺伝は文字通り、モデルに一度支払うことと毎世代支払うことの違いである。これが「モデルの修正は遺伝可能になるか？」の具体的な意味である——主張ではなくトレースとして示される。（`--llm`パスはネットワークを必要とし、呼び出しが失敗するか応答をパースできない場合、オラクルにフォールバックせず終了ステータス1で実行を止める。）
 
 ## Novelist — 前提を入れると、ライトノベル長の`.txt`が出てくる
 

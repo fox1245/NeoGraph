@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ko source_sha256=0ed7fca0268a366ef69a1087706909ad01e375f3f529b13b8be0035926f559ac -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ko source_sha256=a9b2426138faa8e51665146bcdb5ff4b4bad70882618a41b3420db5f8b51cb47 -->
 # The Beast — 생성 · 진화 · 롤백
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -401,7 +401,7 @@ $ ./build/cookbook_the_beast_baldwin_llm       # oracle learner (default, offlin
 total learner invocations: Baldwin 23 vs Lamarck 5  (Lamarck banked its way to fewer)
 ```
 
-관찰 가능한 차이는 적합성(둘 다 목표에 도달함)이 아니라 **게놈 경제성(genome economy)**입니다: Lamarck은 학습자의 작업을 유전에 은행처럼 저장합니다(유전자가 확정되고 호출이 0으로 떨어짐); Baldwin은 매 세대마다 다시 학습합니다(유전자는 가소성을 유지하고 호출은 높게 유지됨). 기본값인 결정적 **오라클(oracle)** 학습자로 오프라인 실행하거나, `--llm`와 함께 `OPENROUTER_API_KEY`를 사용하여 **모델**을 학습자로 만들 수 있습니다 — 이 경우 해당 호출은 실제 API 호출이며, 유전은 말 그대로 모델에 한 번 지불하는 것과 매 세대마다 지불하는 것의 차이입니다. 이것이 "모델의 수정이 유전 가능해지는가?"의 구체적 의미입니다 — 단언이 아닌 추적으로 표시됩니다. (`--llm` 경로는 네트워크가 필요하며, 호출/파싱 실패 시 오라클로 폴백하고 로그를 남기므로 데모는 항상 완료됩니다.)
+관찰 가능한 차이는 적합성(둘 다 목표에 도달함)이 아니라 **게놈 경제성(genome economy)**입니다: Lamarck은 학습자의 작업을 유전에 은행처럼 저장합니다(유전자가 확정되고 호출이 0으로 떨어짐); Baldwin은 매 세대마다 다시 학습합니다(유전자는 가소성을 유지하고 호출은 높게 유지됨). 기본값인 결정적 **오라클(oracle)** 학습자로 오프라인 실행하거나, `--llm`와 함께 `OPENROUTER_API_KEY`를 사용하여 **모델**을 학습자로 만들 수 있습니다 — 이 경우 해당 호출은 실제 API 호출이며, 유전은 말 그대로 모델에 한 번 지불하는 것과 매 세대마다 지불하는 것의 차이입니다. 이것이 "모델의 수정이 유전 가능해지는가?"의 구체적 의미입니다 — 단언이 아닌 추적으로 표시됩니다. (`--llm` 경로는 네트워크가 필요하며, 호출이 실패하거나 응답을 파싱할 수 없으면 오라클로 폴백하지 않고 종료 상태 1로 실행을 중단합니다.)
 
 ## Novelist — 전제 하나가 들어가면 라이트노벨 길이의 `.txt`가 나옵니다
 

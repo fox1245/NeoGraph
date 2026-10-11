@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=zh-CN source_sha256=0ed7fca0268a366ef69a1087706909ad01e375f3f529b13b8be0035926f559ac -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=zh-CN source_sha256=a9b2426138faa8e51665146bcdb5ff4b4bad70882618a41b3420db5f8b51cb47 -->
 # The Beast — 生成 · 演化 · 回滚
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -401,7 +401,7 @@ $ ./build/cookbook_the_beast_baldwin_llm       # oracle learner (default, offlin
 total learner invocations: Baldwin 23 vs Lamarck 5  (Lamarck banked its way to fewer)
 ```
 
-可观察的差异不是适应度（两者都达到目标），而是**基因组经济性**：Lamarck将学习者的工作存入遗传（基因承诺化，调用降至零）；Baldwin每代重新学习（基因保持可塑性，调用保持高位）。离线运行使用确定性**预言机**学习者（默认），或使用`--llm`配合`OPENROUTER_API_KEY`使**模型**成为学习者——在这种情况下，这些调用是真实的API调用，而遗传性字面上就是支付模型一次与每代支付模型之间的区别。这就是"模型的修复是否变得可遗传？"的具体含义——以轨迹展示，而非断言。（`--llm`路径需要网络；它回退到预言机并在任何调用/解析失败时记录日志，因此演示始终完成。）
+可观察的差异不是适应度（两者都达到目标），而是**基因组经济性**：Lamarck将学习者的工作存入遗传（基因承诺化，调用降至零）；Baldwin每代重新学习（基因保持可塑性，调用保持高位）。离线运行使用确定性**预言机**学习者（默认），或使用`--llm`配合`OPENROUTER_API_KEY`使**模型**成为学习者——在这种情况下，这些调用是真实的API调用，而遗传性字面上就是支付模型一次与每代支付模型之间的区别。这就是"模型的修复是否变得可遗传？"的具体含义——以轨迹展示，而非断言。（`--llm`路径需要网络；调用失败或回复无法解析时，运行会以退出状态 1 终止，而不会回退到预言机。）
 
 ## Novelist——输入一个前提，输出一篇轻小说长度的`.txt`
 

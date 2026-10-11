@@ -27,13 +27,15 @@
 // plastic. That is the honest, concrete meaning of "does the fix become
 // heritable?" — shown as a trace, not asserted.
 //
-// Offline (no key): a deterministic ORACLE learner (enumerates the small fill
-// space) stands in for the model, so the mechanism runs and prints identically
-// minus the network. With OPENROUTER_API_KEY: the model is the learner.
+// Default (offline, even with a key set): a deterministic ORACLE learner
+// (enumerates the small fill space) stands in for the model, so the mechanism
+// runs and prints identically minus the network. With --llm (which requires
+// OPENROUTER_API_KEY) the model is the learner; a failed call or unparseable
+// reply ends the run with exit status 1, with no fallback to the oracle.
 //
 // Build:  cmake --build build --target cookbook_the_beast_baldwin_llm
 // Run:    ./build/cookbook_the_beast_baldwin_llm            # oracle learner
-//         OPENROUTER_API_KEY=... ./build/cookbook_the_beast_baldwin_llm
+//         OPENROUTER_API_KEY=... ./build/cookbook_the_beast_baldwin_llm --llm
 
 #include <neograph/neograph.h>
 #include <neograph/graph/loader.h>

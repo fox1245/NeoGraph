@@ -683,8 +683,9 @@ stay high). Run offline with a deterministic **oracle** learner (default), or
 case those invocations are real API calls, and heredity is literally the
 difference between paying the model once and paying it every generation. This is
 the concrete meaning of "does the model's fix become heritable?" — shown as a
-trace, not asserted. (The `--llm` path needs network; it falls back to the
-oracle and logs on any call/parse failure, so the demo always completes.)
+trace, not asserted. (The `--llm` path needs network; a failed call or an
+unparseable reply stops the run with exit status 1 instead of falling back to the
+oracle.)
 
 ## Novelist — a premise in, a light-novel-length `.txt` out
 
