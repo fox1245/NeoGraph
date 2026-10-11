@@ -354,10 +354,14 @@ PolicySnapshot local_policy(const RegistrySnapshot& registry,
 ProgramCompilerConfig compiler_config(std::string             compiler_build_id,
                                       JavaScriptCompileLimits javascript_limits,
                                       bool                    require_acyclic,
-                                      bool                    echo_routes = false) {
+                                      bool                    echo_routes         = false,
+                                      bool                    soundness_check     = false,
+                                      std::size_t             soundness_state_cap = 100000) {
     ProgramCompilerConfig config{std::move(compiler_build_id), javascript_limits};
-    config.require_acyclic = require_acyclic;
-    config.echo_routes     = echo_routes;
+    config.require_acyclic     = require_acyclic;
+    config.echo_routes         = echo_routes;
+    config.soundness_check     = soundness_check;
+    config.soundness_state_cap = soundness_state_cap;
     return config;
 }
 
@@ -410,14 +414,17 @@ public:
                      std::size_t worker_count,
                      py::object node_context_object,
                      std::optional<std::string> binding_label,
-                     std::optional<std::string> sqlite_directory)
+                     std::optional<std::string> sqlite_directory,
+                     bool soundness_check,
+                     std::size_t soundness_state_cap)
         : registry_(std::move(registry)),
           owner_scope_(std::move(owner_scope)),
           compiler_build_id_(std::move(compiler_build_id)),
           profile_(local_profile(registry_)),
           policy_(local_policy(registry_, profile_, owner_scope_, budget_ceiling)),
           compiler_(std::make_shared<ProgramCompiler>(
-              registry_, compiler_config(compiler_build_id_, javascript_limits, require_acyclic))),
+              registry_, compiler_config(compiler_build_id_, javascript_limits, require_acyclic,
+                                         false, soundness_check, soundness_state_cap))),
           stores_(host_stores(sqlite_directory, native_history_archive)) {
         std::optional<NodeContext> node_context;
         if (!node_context_object.is_none()) {
@@ -821,14 +828,20 @@ void init_program(py::module_& m) {
     py::class_<ProgramCompiler>(m, "ProgramCompiler")
         .def(py::init([](RegistrySnapshot registry, std::string compiler_build_id,
                          JavaScriptCompileLimits javascript_limits, bool require_acyclic,
-                         bool echo_routes) {
+                         bool echo_routes, bool soundness_check, std::size_t soundness_state_cap) {
             return std::make_unique<ProgramCompiler>(
                 std::move(registry),
                 compiler_config(std::move(compiler_build_id), javascript_limits,
-                                require_acyclic, echo_routes));
+                                require_acyclic, echo_routes, soundness_check,
+                                soundness_state_cap));
         }), py::arg("registry"), py::arg("compiler_build_id") = "neograph-python-program/v1",
             py::arg("javascript_limits") = JavaScriptCompileLimits{},
-            py::arg("require_acyclic") = false, py::arg("echo_routes") = false)
+            py::arg("require_acyclic") = false, py::arg("echo_routes") = false,
+            py::arg("soundness_check") = false, py::arg("soundness_state_cap") = 100000,
+            "Compile Program sources against a registry snapshot. soundness_check=True "
+            "also explores every run of the root Core and returns P_CORE_S1-P_CORE_S5 "
+            "warnings and a P_CORE_SOUNDNESS summary in compile_diagnostics; the bundle "
+            "is the same either way.")
         .def("compile", [](const ProgramCompiler& self, const ProgramSource& source,
                             py::object budget) {
             return budget.is_none() ? self.compile(source)
@@ -948,7 +961,7 @@ void init_program(py::module_& m) {
         .def(py::init<RegistrySnapshot, std::string, RunBudget, std::string, std::size_t,
                       std::shared_ptr<sp::NativeArchive>, JavaScriptCompileLimits, bool,
                       std::size_t, py::object, std::optional<std::string>,
-                      std::optional<std::string>>(),
+                      std::optional<std::string>, bool, std::size_t>(),
              py::arg("registry"), py::arg("owner_scope"), py::arg("budget_ceiling"),
              py::arg("compiler_build_id") = "neograph-python-program/v1",
              py::arg("scheduler_threads") = 1,
@@ -958,7 +971,9 @@ void init_program(py::module_& m) {
              py::arg("worker_count") = 1,
              py::arg("node_context") = py::none(),
              py::arg("binding_label") = py::none(),
-             py::arg("sqlite_directory") = py::none())
+             py::arg("sqlite_directory") = py::none(),
+             py::arg("soundness_check") = false,
+             py::arg("soundness_state_cap") = 100000)
         .def_property_readonly("owner_scope", &LocalProgramHost::owner_scope)
         .def("reconnect", &LocalProgramHost::reconnect, py::arg("run_id"),
              "Continue a run that a stopped process left running, from this host's "

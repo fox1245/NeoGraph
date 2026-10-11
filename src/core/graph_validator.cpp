@@ -2,6 +2,7 @@
 #include <neograph/graph/registry.h>
 #include <neograph/graph/validator.h>
 
+#include "graph_soundness.h"
 #include "graph_v2_keys.h"
 #include "routing_policy.h"
 
@@ -1049,6 +1050,20 @@ std::vector<Diagnostic> run_checks(const TopologySpec&      topology,
     return std::move(c.out);
 }
 
+// X3: the opt-in soundness check runs last, and only on a topology without
+// errors; its findings and summary follow the other diagnostics.
+void append_soundness(ValidationReport&        report,
+                      const TopologySpec&      topology,
+                      const GraphRegistry&     registry,
+                      bool                     local_only,
+                      const ValidationOptions& options) {
+    if (!options.soundness_check || options.original_rules || report.has_errors()) return;
+    auto soundness = check_soundness(topology, registry,
+                                     SoundnessOptions{options.soundness_state_cap, local_only});
+    for (auto& finding : soundness.findings) report.diagnostics.push_back(std::move(finding));
+    report.diagnostics.push_back(std::move(soundness.summary));
+}
+
 }  // namespace
 
 ValidationReport GraphValidator::validate(const TopologySpec&  topology,
@@ -1071,7 +1086,9 @@ std::map<std::string, std::set<std::string>> GraphValidator::routed_successors(
 ValidationReport GraphValidator::validate(const TopologySpec&      topology,
                                           const GraphRegistry&     registry,
                                           const ValidationOptions& options) {
-    return ValidationReport{run_checks(topology, registry, false, options)};
+    ValidationReport report{run_checks(topology, registry, false, options)};
+    append_soundness(report, topology, registry, false, options);
+    return report;
 }
 
 ValidationReport GraphValidator::validate(const CompiledGraph&     cg,
@@ -1121,6 +1138,7 @@ ValidationReport GraphValidator::validate_local(const TopologySpec&      topolog
         }
         ++index;
     }
+    append_soundness(report, topology, registry, true, options);
     return report;
 }
 

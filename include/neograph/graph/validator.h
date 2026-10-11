@@ -23,6 +23,7 @@
 #include <neograph/api.h>
 #include <neograph/graph/compiler.h>
 
+#include <cstddef>
 #include <map>
 #include <set>
 #include <string>
@@ -36,8 +37,8 @@ class GraphRegistry;
 /// One static-analysis finding, with a machine-readable witness
 /// (counterexample) for tooling to highlight.
 struct Diagnostic {
-    std::string code;          ///< "E3".."E16" (topology validation catalog)
-    std::string severity;      ///< "error" | "warning"
+    std::string code;          ///< "E3".."E18", "S1".."S5", "SOUNDNESS"
+    std::string severity;      ///< "error" | "warning" | "note" (the soundness summary only)
     std::string path;          ///< Legacy JSON-ish display path
     std::string message;       ///< human-readable, self-contained
     json        witness;       ///< machine-readable counterexample
@@ -93,6 +94,16 @@ struct ValidationOptions {
     /// Report every cycle in the routed graph as an E16 error, for hosts that
     /// need a DAG (plans, checklists). Loops are otherwise valid.
     bool require_acyclic = false;
+    /**
+     * Opt-in soundness check (X3) of a topology without errors: explore every
+     * run the routes allow and report S1-S5 warnings with witness traces, plus
+     * a SOUNDNESS summary that is a note when every run was explored and a
+     * warning when the check was partial or stopped at the state cap. Ignored
+     * under original_rules.
+     */
+    bool soundness_check = false;
+    /// States the soundness check visits at most before it reports "not checked".
+    std::size_t soundness_state_cap = 100000;
 };
 
 class NEOGRAPH_API GraphValidator {
@@ -182,6 +193,11 @@ public:
      *        join can no longer fire and the run ends BarrierStalled.
      *  - E16 any cycle in the routed graph (error), reported only with
      *        ValidationOptions::require_acyclic.
+     *  - S1-S5 and the SOUNDNESS summary, only with
+     *        ValidationOptions::soundness_check and no errors: the runs the
+     *        routes allow, explored state by state (option to complete,
+     *        proper completion, dead joins, loops with no exit, co-ready
+     *        overwrite writers).
      *
      * E7, E8 and E11 follow the routes the scheduler takes: a node with a
      * conditional edge contributes only its first conditional edge's routes.

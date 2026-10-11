@@ -1932,6 +1932,117 @@ std::string authored_message(const graph::Diagnostic& core, bool javascript) {
     return message;
 }
 
+// The node names of printed wait_for entries: names and {"any_of": [...]} slots.
+std::vector<std::string> wait_for_names(const json& entries) {
+    std::vector<std::string> names;
+    if (!entries.is_array()) return names;
+    for (const auto& entry : entries) {
+        if (entry.is_string()) {
+            names.push_back(entry.get<std::string>());
+        } else if (entry.is_object() && entry.contains("any_of") && entry["any_of"].is_array()) {
+            for (const auto& name : entry["any_of"])
+                if (name.is_string()) names.push_back(name.get<std::string>());
+        }
+    }
+    return names;
+}
+
+// X3 help for a soundness finding (returned copies only): where its witness
+// trace chose routes, the joins and nodes it names, and the fixes the witness
+// supports.
+void add_soundness_help(PendingDiagnostic&           pending,
+                        const graph::Diagnostic&     core,
+                        const HelpContext&           context,
+                        const DiagnosticAccumulator& diagnostics) {
+    const auto& witness = core.witness;
+    if (!witness.is_object()) return;
+    const auto locate = [&](const std::string& core_pointer_text) {
+        return diagnostics.help_coordinate(authored_core_pointer(context.definition, core_pointer_text));
+    };
+    const auto node_at = [&](const std::string& node) {
+        return diagnostics.help_coordinate("/root/definition/nodes/" + escape_pointer_segment(node));
+    };
+    if (witness.contains("choices") && witness["choices"].is_array()) {
+        for (const auto& choice : witness["choices"]) {
+            const auto node  = witness_string(choice, "node");
+            const auto route = witness_string(choice, "route");
+            const auto at    = witness_string(choice, "pointer");
+            if (node.empty() || at.empty()) continue;
+            const auto what = route == "on_failure"    ? std::string("its failure edge")
+                              : route == "visit_limit" ? std::string("its failure edge at the visit limit")
+                                                       : "route '" + route + "'";
+            pending.help.related.push_back({"'" + node + "' takes " + what + " here", locate(at)});
+        }
+    }
+    if (core.code == "S1" && witness.contains("stalls_at")) {
+        for (const auto& join : witness["stalls_at"]) {
+            const auto name = join.get<std::string>();
+            pending.help.related.push_back(
+                {"'" + name + "' never fires after this point",
+                 diagnostics.help_coordinate("/root/definition/nodes/" + escape_pointer_segment(name) +
+                                             "/barrier")});
+        }
+    } else if (core.code == "S2" && witness.contains("suggested_wait_for")) {
+        const auto barrier    = witness_string(witness, "barrier");
+        const auto substitute = witness_string(witness, "substitute");
+        const json suggested  = witness["suggested_wait_for"];
+        pending.help.suggestions.push_back(
+            {"Let '" + substitute + "' fill the missing slot: " +
+                 (context.javascript ? "graph.barrier(" + json(barrier).dump() + ", " + suggested.dump() + ")"
+                                     : "\"wait_for\": " + suggested.dump()),
+             {{"replace",
+               "/root/definition/nodes/" + escape_pointer_segment(barrier) + "/barrier/wait_for", "",
+               suggested}},
+             SuggestionApplicability::Maybe});
+    } else if (core.code == "S3" && witness.contains("slots_never_filled")) {
+        const auto barrier = witness_string(witness, "barrier");
+        for (const auto& name : wait_for_names(witness["slots_never_filled"]))
+            pending.help.related.push_back({"'" + name + "' never signals '" + barrier + "'", node_at(name)});
+    } else if (core.code == "S4") {
+        if (witness.contains("nodes") && witness["nodes"].is_array()) {
+            for (const auto& name : witness["nodes"])
+                pending.help.related.push_back({"'" + name.get<std::string>() + "' runs in the loop",
+                                                node_at(name.get<std::string>())});
+        }
+        // A conditional node in the loop can route out of it.
+        if (witness.contains("cycle") && witness["cycle"].is_array()) {
+            for (const auto& choice : witness.contains("choices") ? witness["choices"] : json::array()) {
+                const auto node  = witness_string(choice, "node");
+                const auto route = witness_string(choice, "route");
+                const auto at    = witness_string(choice, "pointer");
+                if (route == "on_failure" || route == "visit_limit" ||
+                    at.rfind("/conditional_edges/", 0) != 0)
+                    continue;
+                bool in_cycle = false;
+                for (const auto& step : witness["cycle"])
+                    in_cycle = in_cycle || (step["routes"].contains(node));
+                if (!in_cycle) continue;
+                pending.help.suggestions.push_back(
+                    {"Give '" + node + "' a route that leaves the loop, for example to __end__",
+                     {{"add", authored_core_pointer(context.definition, at + "/routes/<label>"), "",
+                       json("__end__")}},
+                     SuggestionApplicability::Placeholder});
+                break;
+            }
+        }
+    } else if (core.code == "S5") {
+        const auto channel = witness_string(witness, "channel");
+        if (witness.contains("writers") && witness["writers"].is_array()) {
+            for (const auto& name : witness["writers"])
+                pending.help.related.push_back(
+                    {"'" + name.get<std::string>() + "' writes '" + channel + "'", node_at(name.get<std::string>())});
+        }
+        if (!channel.empty())
+            pending.help.suggestions.push_back(
+                {context.javascript ? "Give the channel an append reducer: graph.channel(" + json(channel).dump() +
+                                          ", {reducer: \"append\"})"
+                                    : "Give channel " + json(channel).dump() + " the \"append\" reducer",
+                 {{"add", "/root/definition/channels/" + escape_pointer_segment(channel) + "/reducer", "",
+                   json("append")}},
+                 SuggestionApplicability::Maybe});
+    }
+}
+
 // Help for a Core validator finding (returned copies only).
 void add_validation_help(PendingDiagnostic&      pending,
                          const graph::Diagnostic& core,
@@ -2029,6 +2140,15 @@ void add_validation_help(PendingDiagnostic&      pending,
             {"Remove the edge, or add its target as a route of the conditional edge",
              {{"remove", pointer, "", nullptr}},
              SuggestionApplicability::Maybe});
+    } else if (core.code.size() == 2 && core.code[0] == 'S') {
+        add_soundness_help(pending, core, context, diagnostics);
+    } else if (core.code == "SOUNDNESS" && witness.is_object() && witness.contains("not_analyzable")) {
+        for (const auto& entry : witness["not_analyzable"]) {
+            const auto node = witness_string(entry, "node");
+            pending.help.related.push_back(
+                {"the node type of '" + node + "' declares Command.goto or Send",
+                 diagnostics.help_coordinate("/root/definition/nodes/" + escape_pointer_segment(node))});
+        }
     }
 }
 
@@ -2056,6 +2176,13 @@ void add_validation_diagnostics(const graph::ValidationReport& current,
             auto& pending = diagnostics.add_unsealed_warning(
                 CompilePhase::CoreValidate, "P_CORE_" + core.code, pointer,
                 authored_message(core, javascript), with_core_code(core.witness, core.code));
+            add_validation_help(pending, core, pointer, context, diagnostics);
+        } else if (core.severity == "note") {
+            // The soundness summary (X3): returned only, like every current-rule note.
+            auto& pending = diagnostics.add(CompilePhase::CoreValidate, "P_CORE_" + core.code,
+                                            DiagnosticSeverity::Note, pointer, core.message,
+                                            with_core_code(core.witness, core.code));
+            pending.sealed = false;
             add_validation_help(pending, core, pointer, context, diagnostics);
         } else {
             auto& pending = diagnostics.add(CompilePhase::CoreValidate, "P_CORE_" + core.code,
@@ -2806,7 +2933,9 @@ struct ProgramCompiler::Impl {
             add_roundtrip_diagnostics(roundtrip, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();
             graph::ValidationOptions current_rules;
-            current_rules.require_acyclic = config.require_acyclic;
+            current_rules.require_acyclic     = config.require_acyclic;
+            current_rules.soundness_check     = config.soundness_check;
+            current_rules.soundness_state_cap = config.soundness_state_cap;
             graph::ValidationOptions original_rules;
             original_rules.original_rules = true;
             add_validation_diagnostics(

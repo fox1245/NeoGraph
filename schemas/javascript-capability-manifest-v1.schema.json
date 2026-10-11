@@ -42,7 +42,8 @@
         "failure_exits",
         "retry.attempt_timeout",
         "diagnostics.help",
-        "diagnostics.echo_routes"
+        "diagnostics.echo_routes",
+        "diagnostics.soundness_check"
       ]
     },
     "schemas": {

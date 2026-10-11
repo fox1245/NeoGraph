@@ -285,7 +285,8 @@ json javascript_authoring_capability_manifest() {
                   {"failure_exits", false},
                   {"retry.attempt_timeout", false},
                   {"diagnostics.help", true},
-                  {"diagnostics.echo_routes", true}};
+                  {"diagnostics.echo_routes", true},
+                  {"diagnostics.soundness_check", true}};
     return {{"schema_version", 1},
             {"javascript_profile", std::string(ProgramSource::JAVASCRIPT_PROFILE)},
             {"javascript_profile_version", ProgramSource::JAVASCRIPT_PROFILE_VERSION},

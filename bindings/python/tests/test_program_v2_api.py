@@ -362,3 +362,98 @@ def test_failure_routing_errors_reach_python_with_their_codes():
     )
     edge = [d for d in diagnostics if d["code"] == "P_CORE_GC_FAILURE_EDGE"]
     assert edge and edge[0]["witness"]["reason"] == "sentinel_target"
+
+
+# ---------------------------------------------------------------------------
+# X3: the opt-in soundness check
+# ---------------------------------------------------------------------------
+
+
+def _findings(bundle, code):
+    return [d for d in bundle.compile_diagnostics if d["code"] == code]
+
+
+def test_soundness_check_returns_witness_traces_and_never_seals_them():
+    source = _issue_357("v2.always_fail", wait_for='["B", "C"]')
+    plain = _compile(source)
+    checked = _compile(source, soundness_check=True)
+    assert checked.id == plain.id
+    assert checked.serialize_canonical() == plain.serialize_canonical()
+    assert not any(d["code"].startswith("P_CORE_S") for d in checked.diagnostics)
+    assert not _findings(plain, "P_CORE_SOUNDNESS")
+
+    stall = _findings(checked, "P_CORE_S2")
+    assert len(stall) == 1 and stall[0]["severity"] == "warning"
+    witness = stall[0]["witness"]
+    assert witness["kind"] == "stalled"
+    assert witness["trace"] == [
+        {"ready": ["A"], "routes": {}},
+        {"ready": ["B", "C"], "routes": {"B": "fail"}},
+        {"ready": ["FIX"], "routes": {}},
+    ]
+    assert witness["received"] == ["C", "FIX"] and witness["missing"] == ["B"]
+    assert witness["suggested_wait_for"] == [{"any_of": ["B", "FIX"]}, "C"]
+    help = stall[0]["help"]
+    assert help["doc"] == "docs/diagnostics.md#p_core_s2"
+    assert help["suggestions"][0]["edits"][0]["value"] == [{"any_of": ["B", "FIX"]}, "C"]
+    assert help["related"][0]["label"] == "'B' takes route 'fail' here"
+
+    dead_end = _findings(checked, "P_CORE_S1")
+    assert len(dead_end) == 1
+    assert dead_end[0]["witness"]["state"] == {"ready": ["FIX"], "pending": {"D": ["C"]}}
+
+    summary = _findings(checked, "P_CORE_SOUNDNESS")
+    assert len(summary) == 1 and summary[0]["severity"] == "note"
+    assert summary[0]["witness"]["status"] == "checked"
+    assert summary[0]["witness"]["outcomes"] == ["completed", "stalled"]
+    assert ng.javascript_authoring_capability_manifest()["features"]["diagnostics.soundness_check"]
+
+
+def test_soundness_check_finds_nothing_once_the_slot_lets_fix_stand_in():
+    bundle = _compile(_issue_357("v2.always_fail"), soundness_check=True)
+    assert not [d for d in bundle.compile_diagnostics if d["code"].startswith("P_CORE_S") and
+                d["code"] != "P_CORE_SOUNDNESS"]
+    summary = _findings(bundle, "P_CORE_SOUNDNESS")[0]
+    assert summary["severity"] == "note" and summary["witness"]["outcomes"] == ["completed"]
+
+
+def test_soundness_stall_finding_matches_the_run_through_local_program_host():
+    # The S2 witness is the run the runtime takes on the fail route.
+    host = ng.LocalProgramHost(
+        _registry(), "owner:v2-soundness", _budget(max_dynamic_compiles=1),
+        "python-v2-host/v1", soundness_check=True,
+    )
+    source = ng.ProgramSource.from_javascript(
+        "v2.js", _issue_357("v2.always_fail", wait_for='["B", "C"]')
+    )
+    bundle = host.compile(source, _budget())
+    stall = _findings(bundle, "P_CORE_S2")[0]["witness"]
+    result = host.run(host.admit(bundle), {}, _budget())
+    assert result.failure.code == "P_CORE_BARRIER_STALLED"
+    stalled = result.failure.witness["stalled_barriers"][0]
+    assert stalled["node"] == stall["barrier"] == "D"
+    assert stalled["received"] == stall["received"]
+    assert stalled["missing"] == stall["missing"]
+    ran = [node for step in stall["trace"] for node in step["ready"]]
+    assert sorted(result.execution_trace) == sorted(ran)
+
+
+def test_soundness_check_models_failure_edges_and_failure_exits():
+    bundle = _compile(_FIX_LOOP % "", soundness_check=True)
+    assert not [d for d in bundle.compile_diagnostics if d["code"].startswith("P_CORE_S") and
+                d["code"] != "P_CORE_SOUNDNESS"]
+    summary = _findings(bundle, "P_CORE_SOUNDNESS")[0]["witness"]
+    assert summary["status"] == "checked"
+    assert summary["outcomes"] == ["completed", "failure_exit", "step_limit"]
+
+
+def test_soundness_state_cap_reports_not_checked():
+    bundle = _compile(
+        _issue_357("v2.always_fail", wait_for='["B", "C"]'),
+        soundness_check=True,
+        soundness_state_cap=2,
+    )
+    summary = _findings(bundle, "P_CORE_SOUNDNESS")
+    assert len(summary) == 1 and summary[0]["severity"] == "warning"
+    assert summary[0]["witness"]["status"] == "not_checked"
+    assert not _findings(bundle, "P_CORE_S1")

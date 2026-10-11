@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=zh-CN source_sha256=413185162f55011cd68a06a26e630f9298202b4e08d5f3b334b3c050cd4181ca -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=zh-CN source_sha256=5c1c2ad78a7b23f226e6dc81de38cb4ced8da6b151590f20ccd4be8a6161ce46 -->
 # Program 诊断
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -10,6 +10,7 @@ Program 编译会返回诊断：失败时为 `ProgramCompileError::diagnostics()
 - [JavaScript 前端](#javascript-frontend)
 - [Core 解析器](#core-parser)
 - [Core 校验器](#core-validator)
+- [健全性检查](#soundness-check)
 - [注册表](#registry)
 - [运行时与准入](#runtime-and-admission)
 
@@ -151,6 +152,20 @@ Program 编译会返回诊断：失败时为 `ProgramCompileError::diagnostics()
 | <a id="p_core_e17"></a>`P_CORE_E17` | 同一个 `any_of` 槽位的两个备选项都可能运行：某个 fan-out 不经过 join 就同时到达二者，或一个备选项同时路由到 join 和另一个备选项。第二次到达会开启一个永远不会完成的新轮次，运行以 barrier-stalled 结束。请让备选项在路由上互斥，例如使用 conditional edge。witness 给出 fan-out 节点和两条路径。 |
 | <a id="p_core_e18"></a>`P_CORE_E18` | 节点配置中有一个其节点类型未声明的 `retry_policy` 键，因此没有任何东西读取它。请用 `graph.retryPolicy(node, {...})`（Core：`node_retry_policies`）设置节点的策略。 |
 | <a id="p_core_routes"></a>`P_CORE_ROUTES` | 设置 `ProgramCompilerConfig::echo_routes`（Python：`echo_routes=True`）时返回的注记。`witness.routes` 将每个节点以及 `__start__` 映射到调度器可以路由到的目标。它从不被封存。 |
+
+<a id="soundness-check"></a>
+## 健全性检查
+
+这些诊断来自可选启用的健全性检查 `ProgramCompilerConfig::soundness_check`（Python：`soundness_check=True`）；参见 [Program 图功能](program-graphs.md#soundness-check)。它们只会被返回，从不被封存。`witness.trace` 列出展示该发现的最短运行的各个 super-step：`ready` 是运行过的节点，`routes` 是每个有选择的节点所走的路由（失败 edge 为 `on_failure`，被 `max_visits` 强制时为 `visit_limit`）。`witness.choices` 列出这些路由选择以及声明每个选择的 edge 的 Core 指针，`help.related` 指向它们。
+
+| 代码 | 含义与修复 |
+|---|---|
+| <a id="p_core_s1"></a>`P_CORE_S1` | 可完成性：从 trace 到达的状态（`witness.state`）出发，没有任何运行能够完成。每个后续运行要么在 `stalls_at` 中的 join 处以 barrier-stalled 结束，要么在访问上限处失败，要么循环；`ends` 说明是哪一种。让 join 等待每条路由都会提供的东西（例如一个 `any_of` 槽位），或把该分支路由回 join。 |
+| <a id="p_core_s2"></a>`P_CORE_S2` | 正确完成：运行结束时某个 join 仍持有信号。`kind` 为 `stalled`（运行以 `P_CORE_BARRIER_STALLED` 失败）或 `completed`（显式结束丢弃了信号，运行报告为完成）。witness 给出 `received` 和 `missing`。当停滞缺少一个槽位且有一个槽位之外的节点发出了信号时，`suggested_wait_for` 让该节点填补这个槽位，返回的建议会应用它。 |
+| <a id="p_core_s3"></a>`P_CORE_S3` | 某个 join 在任何运行中都不会触发。`kind` 为 `dead`（没有任何节点向它发信号）或 `unfireable`（信号会到达，但所有槽位从不同时被填满）；`slots_never_filled` 列出没有任何运行向其发信号的槽位。仅在探索了所有运行时报告。 |
+| <a id="p_core_s4"></a>`P_CORE_S4` | 运行可能进入一个永远离不开的循环，因此只会在 step 上限处停止。`nodes` 列出循环中的节点，`trace` 通向循环，`cycle` 绕循环一圈。给循环中的某个 conditional 节点一条离开循环的路由；返回的建议是一个 placeholder。 |
+| <a id="p_core_s5"></a>`P_CORE_S5` | 写同一个 overwrite 通道的两个节点可能在同一个 super-step 中运行（`P_CORE_E5` 报告的 fan-out 兄弟之外的情形），因此最后写入者的胜出是不确定的。使用 append reducer（返回的建议）或让写入者串行执行。仅在每个节点类型都有 effect 契约时报告。 |
+| <a id="p_core_soundness"></a>`P_CORE_SOUNDNESS` | 摘要。探索了所有运行时 `status` 为 `checked`（注记），否则为 `partial` 或 `not_checked`（警告）。witness 给出 `states`、`transitions`、`state_cap`、已探索运行所到达的 `outcomes` 以及按代码统计的 `findings`。`partial` 时，`not_analyzable` 列出类型声明了 `Command.goto` 或 `Send` 的节点以及到达各节点的 trace；它们之后的运行未被探索。`not_checked` 表示达到了 `soundness_state_cap`。 |
 
 <a id="registry"></a>
 ## 注册表

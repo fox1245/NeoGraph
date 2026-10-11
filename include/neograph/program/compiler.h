@@ -76,6 +76,17 @@ struct ProgramCompilerConfig {
      * is the same either way.
      */
     bool echo_routes = false;
+    /**
+     * Run the opt-in soundness check (X3) on the root Core and return its
+     * findings as P_CORE_S1-P_CORE_S5 warnings with witness traces, plus a
+     * P_CORE_SOUNDNESS summary: a note when every run was explored, a warning
+     * when runs after a node declaring Command.goto or Send were not
+     * analyzable or the state cap was reached. Never sealed: the bundle is the
+     * same either way.
+     */
+    bool soundness_check = false;
+    /// States the soundness check visits at most before it reports "not checked".
+    std::size_t soundness_state_cap = 100000;
 };
 
 class NEOGRAPH_PROGRAM_API ProgramCompileError final : public std::runtime_error {

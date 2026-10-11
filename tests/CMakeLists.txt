@@ -937,6 +937,23 @@ add_executable(neograph_join_model_tests test_join_exhaustive.cpp)
 target_link_libraries(neograph_join_model_tests PRIVATE neograph::core GTest::gtest_main)
 neograph_discover_tests(neograph_join_model_tests PROPERTIES LABELS "core;join-model" TIMEOUT 300)
 
+# Opt-in soundness check (X3): findings on hand-written graphs, the Program
+# compiler path, and agreement with the join harness's reference interpreter on
+# every graph of its family. NEOGRAPH_JOIN_MODEL_BOUND=extended runs the larger
+# bound here too.
+add_executable(neograph_graph_soundness_tests test_graph_soundness.cpp)
+target_link_libraries(neograph_graph_soundness_tests PRIVATE neograph::core GTest::gtest_main)
+if(NEOGRAPH_BUILD_PROGRAM)
+    target_include_directories(neograph_graph_soundness_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/program)
+    target_link_libraries(neograph_graph_soundness_tests PRIVATE neograph::program)
+    target_compile_definitions(neograph_graph_soundness_tests PRIVATE NEOGRAPH_SOUNDNESS_HAVE_PROGRAM)
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        target_compile_definitions(neograph_graph_soundness_tests PRIVATE
+            NEOGRAPH_SOUNDNESS_HAVE_QUICKJS)
+    endif()
+endif()
+neograph_discover_tests(neograph_graph_soundness_tests PROPERTIES LABELS "core;soundness" TIMEOUT 300)
+
 if(NEOGRAPH_BUILD_PROGRAM)
     # Program API v2 (#362-#365): diagnostics help, the capability manifest,
     # graph metadata, any_of join slots, witness paths and failure routing keys.

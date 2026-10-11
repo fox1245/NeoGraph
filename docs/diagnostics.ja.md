@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=ja source_sha256=413185162f55011cd68a06a26e630f9298202b4e08d5f3b334b3c050cd4181ca -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=ja source_sha256=5c1c2ad78a7b23f226e6dc81de38cb4ced8da6b151590f20ccd4be8a6161ce46 -->
 # Program 診断
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -10,6 +10,7 @@ Program のコンパイルは診断を返します。失敗時は `ProgramCompil
 - [JavaScript フロントエンド](#javascript-frontend)
 - [Core パーサー](#core-parser)
 - [Core バリデーター](#core-validator)
+- [健全性チェック](#soundness-check)
 - [レジストリ](#registry)
 - [ランタイムとアドミッション](#runtime-and-admission)
 
@@ -151,6 +152,20 @@ Core 定義のパーサーが出す診断です。witness の `core_code` に Co
 | <a id="p_core_e17"></a>`P_CORE_E17` | 1 つの `any_of` スロットの 2 つの選択肢が両方とも実行され得ます。fan-out が join を通らずに両方へ届くか、ある選択肢が join と別の選択肢の両方へルーティングします。2 番目の到着は終わらない新しいラウンドを開き、実行は barrier-stalled で終わります。例えば conditional edge を使って選択肢どうしを排他的にルーティングしてください。witness に fan-out ノードと 2 つの経路があります。 |
 | <a id="p_core_e18"></a>`P_CORE_E18` | ノードの設定に、ノード型が宣言していない `retry_policy` キーがあり、誰も読みません。ノードのポリシーは `graph.retryPolicy(node, {...})`（Core: `node_retry_policies`）で指定してください。 |
 | <a id="p_core_routes"></a>`P_CORE_ROUTES` | `ProgramCompilerConfig::echo_routes`（Python: `echo_routes=True`）を設定したときに返されるノートです。`witness.routes` は各ノードと `__start__` を、スケジューラーがルーティングし得る先に対応付けます。封印されません。 |
+
+<a id="soundness-check"></a>
+## 健全性チェック
+
+オプトインの健全性チェック `ProgramCompilerConfig::soundness_check`（Python: `soundness_check=True`）が出す診断です。[Program グラフの機能](program-graphs.md#soundness-check)を参照してください。返されるだけで、封印されません。`witness.trace` は検出結果を示す最短の実行の super-step の並びです。`ready` は実行されたノード、`routes` は選択肢のあるノードが選んだルートです（失敗 edge は `on_failure`、`max_visits` により強制された場合は `visit_limit`）。`witness.choices` はそれらのルート選択と、各選択を宣言した edge の Core ポインターを列挙し、`help.related` がその位置を指します。
+
+| コード | 意味と修正方法 |
+|---|---|
+| <a id="p_core_s1"></a>`P_CORE_S1` | 完了可能性: trace が到達した状態（`witness.state`）からは、どの実行も完了できません。後続の実行はすべて `stalls_at` の join で barrier-stalled で終わるか、訪問上限で失敗するか、ループします。どれかは `ends` にあります。join がすべてのルートから得られるものを待つようにする（たとえば `any_of` スロット）か、その分岐を join へ戻してください。 |
+| <a id="p_core_s2"></a>`P_CORE_S2` | 正しい完了: join がまだシグナルを保持したまま実行が終わります。`kind` は `stalled`（実行は `P_CORE_BARRIER_STALLED` で失敗）または `completed`（明示的な終了がシグナルを捨て、実行は完了と報告される）です。witness には `received` と `missing` があります。停止でスロットが 1 つ欠け、スロット外のノード 1 つがシグナルを送った場合、`suggested_wait_for` はそのノードにスロットを埋めさせ、返される提案がそれを適用します。 |
+| <a id="p_core_s3"></a>`P_CORE_S3` | join がどの実行でも発火しません。`kind` は `dead`（何もシグナルを送らない）または `unfireable`（シグナルは届くがすべてのスロットが同時に埋まらない）で、`slots_never_filled` はどの実行もシグナルを送らないスロットです。すべての実行を探索したときだけ報告します。 |
+| <a id="p_core_s4"></a>`P_CORE_S4` | 実行が抜け出せないループに入り得るため、step 上限でしか止まりません。`nodes` はループ、`trace` はループまでの経路、`cycle` はループの一周です。ループ内の conditional ノードにループの外へ出るルートを与えてください。返される提案は placeholder です。 |
+| <a id="p_core_s5"></a>`P_CORE_S5` | 同じ overwrite チャネルに書く 2 つのノードが同じ super-step で実行され得るため（`P_CORE_E5` が報告する fan-out の兄弟以外）、最後の書き込みが非決定的に勝ちます。append reducer を使う（返される提案）か、書き込むノードを直列化してください。すべてのノードタイプに effect 契約がある場合だけ報告します。 |
+| <a id="p_core_soundness"></a>`P_CORE_SOUNDNESS` | 要約です。すべての実行を探索した場合は `status` が `checked`（ノート）、そうでなければ `partial` または `not_checked`（警告）です。witness には `states`、`transitions`、`state_cap`、探索した実行が到達する `outcomes`、コードごとの `findings` があります。`partial` の場合、`not_analyzable` にタイプが `Command.goto` または `Send` を宣言したノードとそこまでの trace があり、その後の実行は探索していません。`not_checked` は `soundness_state_cap` に達したことを意味します。 |
 
 <a id="registry"></a>
 ## レジストリ

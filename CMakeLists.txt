@@ -476,6 +476,7 @@ set(NEOGRAPH_CORE_SOURCES
     src/core/graph_safe_point.cpp
     src/core/graph_compiler.cpp
     src/core/graph_validator.cpp
+    src/core/graph_soundness.cpp
     src/core/graph_coordinator.cpp
     src/core/graph_executor.cpp
     src/core/node_cache.cpp

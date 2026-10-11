@@ -9,6 +9,7 @@ A Program compilation returns diagnostics: `ProgramCompileError::diagnostics()` 
 - [JavaScript frontend](#javascript-frontend)
 - [Core parser](#core-parser)
 - [Core validator](#core-validator)
+- [Soundness check](#soundness-check)
 - [Registry](#registry)
 - [Runtime and admission](#runtime-and-admission)
 
@@ -145,6 +146,19 @@ These analyze what the graph means. Warnings are returned only; a bundle seals t
 | <a id="p_core_e17"></a>`P_CORE_E17` | Two alternatives of one `any_of` slot can both run: a fan-out reaches both without passing the join, or one alternative routes both into the join and on to the other. The second arrival opens a round that never completes and the run ends barrier-stalled. Make the alternatives route-exclusive, for example through a conditional edge. The witness gives the fan-out node and both paths. |
 | <a id="p_core_e18"></a>`P_CORE_E18` | A node config has a `retry_policy` key that its node type does not declare, so nothing reads it. Set the node's policy with `graph.retryPolicy(node, {...})` (Core: `node_retry_policies`). |
 | <a id="p_core_routes"></a>`P_CORE_ROUTES` | A note returned when `ProgramCompilerConfig::echo_routes` (Python: `echo_routes=True`) is set. `witness.routes` maps each node, and `__start__`, to the targets the scheduler can route it to. It is never sealed. |
+
+## Soundness check
+
+These come from the opt-in soundness check, `ProgramCompilerConfig::soundness_check` (Python: `soundness_check=True`); see [Program graph features](program-graphs.md#soundness-check). They are returned only and never sealed. `witness.trace` lists the super-steps of the shortest run that shows a finding: `ready` names the nodes that ran and `routes` the route each one with a choice took (`on_failure` for a failure edge, `visit_limit` when `max_visits` forced it). `witness.choices` lists those route choices with the Core pointer of the edge that declares each, and `help.related` points at them.
+
+| Code | Meaning and fix |
+|---|---|
+| <a id="p_core_s1"></a>`P_CORE_S1` | Option to complete: from the state the trace reaches (`witness.state`), no run can complete. Every continuation ends barrier-stalled at a join in `stalls_at`, fails at a visit limit, or loops; `ends` names which. Make the join wait for something every route provides, for example an `any_of` slot, or route the branch back to it. |
+| <a id="p_core_s2"></a>`P_CORE_S2` | Proper completion: a run ends while a join still holds signals. `kind` is `stalled` (the run fails with `P_CORE_BARRIER_STALLED`) or `completed` (an explicit end discards the signals and the run reports completed). The witness gives `received` and `missing`. When a stall misses one slot and one node outside the slots signalled, `suggested_wait_for` lets that node fill the slot, and the returned suggestion applies it. |
+| <a id="p_core_s3"></a>`P_CORE_S3` | A join never fires on any run. `kind` is `dead` (nothing signals it) or `unfireable` (signals arrive but never fill every slot together); `slots_never_filled` lists the slots no run signals. Reported only when every run was explored. |
+| <a id="p_core_s4"></a>`P_CORE_S4` | A run can enter a loop it never leaves, so it stops only at the step limit. `nodes` lists the loop, `trace` leads to it and `cycle` goes around it once. Give a conditional node in the loop a route out of it; the returned suggestion is a placeholder. |
+| <a id="p_core_s5"></a>`P_CORE_S5` | Two nodes that write the same overwrite channel can run in the same super-step, beyond the fan-out siblings `P_CORE_E5` reports, so the last writer wins nondeterministically. Use an append reducer (the returned suggestion) or serialize the writers. Reported only when every node type has an effect contract. |
+| <a id="p_core_soundness"></a>`P_CORE_SOUNDNESS` | The summary. `status` is `checked` (a note) when every run was explored, `partial` or `not_checked` (a warning) otherwise. The witness gives `states`, `transitions`, `state_cap`, the `outcomes` the explored runs reach and the `findings` per code. `partial` lists in `not_analyzable` the nodes whose types declare `Command.goto` or `Send`, with the trace that reaches each; runs after them were not explored. `not_checked` means `soundness_state_cap` was reached. |
 
 ## Registry
 

@@ -328,6 +328,12 @@ constexpr std::string_view kDocumentedCodes[] = {
     "P_CORE_GC_UNKNOWN_FIELD",
     "P_CORE_ROUNDTRIP",
     "P_CORE_ROUTES",
+    "P_CORE_S1",
+    "P_CORE_S2",
+    "P_CORE_S3",
+    "P_CORE_S4",
+    "P_CORE_S5",
+    "P_CORE_SOUNDNESS",
     "P_DIAGNOSTICS_TRUNCATED",
     "P_EXPAND_BOUND",
     "P_EXPAND_FAILURE",
@@ -463,6 +469,8 @@ std::string diagnostic_doc_link(std::string_view code) {
         family = "core-parser";
     else if (starts_with(code, "P_CORE_E") && code.size() > 8 && code[8] >= '0' && code[8] <= '9')
         family = "core-validator";
+    else if (starts_with(code, "P_CORE_S") && code.size() > 8 && code[8] >= '0' && code[8] <= '9')
+        family = "soundness-check";
     else if (starts_with(code, "P_JS_") || starts_with(code, "P_IMPORT_"))
         family = "javascript-frontend";
     else if (starts_with(code, "P_REGISTRY_"))

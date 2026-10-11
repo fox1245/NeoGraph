@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=ko source_sha256=413185162f55011cd68a06a26e630f9298202b4e08d5f3b334b3c050cd4181ca -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=ko source_sha256=5c1c2ad78a7b23f226e6dc81de38cb4ced8da6b151590f20ccd4be8a6161ce46 -->
 # Program 진단
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -10,6 +10,7 @@ Program 컴파일은 진단을 반환합니다. 실패하면 `ProgramCompileErro
 - [JavaScript 프런트엔드](#javascript-frontend)
 - [Core 파서](#core-parser)
 - [Core 검증기](#core-validator)
+- [건전성 검사](#soundness-check)
 - [레지스트리](#registry)
 - [런타임과 승인](#runtime-and-admission)
 
@@ -151,6 +152,20 @@ Core 정의 파서가 내는 진단입니다. witness의 `core_code`에 Core 코
 | <a id="p_core_e17"></a>`P_CORE_E17` | 한 `any_of` 슬롯의 두 대안이 모두 실행될 수 있습니다. fan-out이 join을 거치지 않고 둘 다에 닿거나, 한 대안이 join과 다른 대안으로 함께 라우팅합니다. 두 번째 도착은 끝나지 않는 새 라운드를 열고 실행은 barrier-stalled로 끝납니다. 예를 들어 conditional edge를 써서 대안들이 서로 배타적으로 라우팅되게 하세요. witness에 fan-out 노드와 두 경로가 있습니다. |
 | <a id="p_core_e18"></a>`P_CORE_E18` | 노드 설정에 노드 타입이 선언하지 않은 `retry_policy` 키가 있어서 아무도 읽지 않습니다. 노드의 정책은 `graph.retryPolicy(node, {...})`(Core: `node_retry_policies`)로 지정하세요. |
 | <a id="p_core_routes"></a>`P_CORE_ROUTES` | `ProgramCompilerConfig::echo_routes`(Python: `echo_routes=True`)를 켰을 때 반환되는 노트입니다. `witness.routes`는 각 노드와 `__start__`를 스케줄러가 라우팅할 수 있는 대상에 대응시킵니다. 봉인되지 않습니다. |
+
+<a id="soundness-check"></a>
+## 건전성 검사
+
+옵트인 건전성 검사 `ProgramCompilerConfig::soundness_check`(Python: `soundness_check=True`)가 내는 진단입니다. [Program 그래프 기능](program-graphs.md#soundness-check)을 참고하세요. 반환만 되고 봉인되지 않습니다. `witness.trace`는 발견 사항을 보여 주는 가장 짧은 실행의 super-step 목록입니다. `ready`는 실행된 노드, `routes`는 선택지가 있는 노드가 택한 라우트입니다(실패 edge는 `on_failure`, `max_visits` 때문에 강제된 경우는 `visit_limit`). `witness.choices`는 그 라우트 선택과 각 선택을 선언한 edge의 Core 포인터를 나열하고, `help.related`가 그 위치를 가리킵니다.
+
+| 코드 | 의미와 해결 방법 |
+|---|---|
+| <a id="p_core_s1"></a>`P_CORE_S1` | 완료 가능성: trace가 도달한 상태(`witness.state`)에서는 어떤 실행도 완료할 수 없습니다. 모든 후속 실행이 `stalls_at`의 join에서 barrier-stalled로 끝나거나, 방문 한도에서 실패하거나, 반복합니다. 어느 쪽인지는 `ends`에 있습니다. join이 모든 라우트가 제공하는 것을 기다리게 하거나(예: `any_of` 슬롯), 그 분기를 join으로 다시 라우팅하세요. |
+| <a id="p_core_s2"></a>`P_CORE_S2` | 올바른 완료: join이 아직 신호를 쥔 채 실행이 끝납니다. `kind`는 `stalled`(실행이 `P_CORE_BARRIER_STALLED`로 실패) 또는 `completed`(명시적 종료가 신호를 버리고 실행은 완료로 보고됨)입니다. witness에는 `received`와 `missing`이 있습니다. 멈춤에서 슬롯 하나가 비어 있고 슬롯 밖의 노드 하나가 신호를 보냈다면, `suggested_wait_for`는 그 노드가 슬롯을 채우게 하며 반환된 제안이 이를 적용합니다. |
+| <a id="p_core_s3"></a>`P_CORE_S3` | join이 어떤 실행에서도 발화하지 않습니다. `kind`는 `dead`(아무것도 신호를 보내지 않음) 또는 `unfireable`(신호는 오지만 모든 슬롯이 함께 채워지지 않음)이며, `slots_never_filled`는 어떤 실행도 신호를 보내지 않는 슬롯입니다. 모든 실행을 탐색했을 때만 보고합니다. |
+| <a id="p_core_s4"></a>`P_CORE_S4` | 실행이 빠져나오지 못하는 루프에 들어갈 수 있어 step 한도에서만 멈춥니다. `nodes`는 루프, `trace`는 루프까지의 경로, `cycle`은 루프 한 바퀴입니다. 루프 안의 conditional 노드에 루프 밖으로 나가는 라우트를 주세요. 반환된 제안은 placeholder입니다. |
+| <a id="p_core_s5"></a>`P_CORE_S5` | 같은 overwrite 채널에 쓰는 두 노드가 같은 super-step에서 실행될 수 있어(`P_CORE_E5`가 보고하는 fan-out 형제 외의 경우) 마지막 기록이 비결정적으로 이깁니다. append reducer를 쓰거나(반환된 제안) 쓰는 노드를 직렬화하세요. 모든 노드 타입에 effect 계약이 있을 때만 보고합니다. |
+| <a id="p_core_soundness"></a>`P_CORE_SOUNDNESS` | 요약입니다. 모든 실행을 탐색했으면 `status`가 `checked`(노트)이고, 그렇지 않으면 `partial` 또는 `not_checked`(경고)입니다. witness에는 `states`, `transitions`, `state_cap`, 탐색한 실행이 도달하는 `outcomes`, 코드별 `findings`가 있습니다. `partial`이면 `not_analyzable`에 타입이 `Command.goto`나 `Send`를 선언한 노드와 그 노드까지의 trace가 있으며, 그 뒤의 실행은 탐색하지 않았습니다. `not_checked`는 `soundness_state_cap`에 도달했다는 뜻입니다. |
 
 <a id="registry"></a>
 ## 레지스트리
