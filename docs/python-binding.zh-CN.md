@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=8dc07611a5d489c5f48231f91efa341362b9f2a47558a81ad11f2ca60b4d38af -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=6a8285e075e0dcaa0f233cc49e84ffc1f3d4dbc5f28c88908e2d26fcd1b7f29c -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -374,7 +374,8 @@ import neograph_engine as ng
 
 @ng.node("my_node")
 def my_node(state):
-    return [ng.ChannelWrite("value", state.get("value", 0) + 1)]
+    # GraphState.get takes only the channel name; a missing channel is None.
+    return [ng.ChannelWrite("value", (state.get("value") or 0) + 1)]
 
 registry = (
     ng.ProgramRegistryBuilder()
@@ -419,7 +420,7 @@ run_budget.max_core_steps = 20
 host = ng.LocalProgramHost(registry, "tenant-a", ceiling)
 version = host.compile_admit(source, run_budget)
 result = host.run(version, {}, run_budget)
-print(result.status, result.output)
+print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 1
 ```
 
 `LocalProgramHost` 是一个所有者作用域的内存便捷宿主。它仍然使用 C++ 编译器、Catalog、准入(admission)策略、转换存储和 ProgramRuntime。生成的提案在准入(admission)前还应通过宿主语义验证器；参见 [DSL 能力评估](DSL_CAPABILITY_EVAL.md)。
@@ -435,6 +436,48 @@ print(result.status, result.output)
 ```python
 manifest = ng.javascript_authoring_capability_manifest()
 ```
+
+### 模块结构与 `callCore`
+
+JavaScript Program 必须导出 `define()`，它返回一个图构建器。该图是 Program 唯一的 Core。缺少 `define()` 时，编译会抛出带 `P_JS_DEFINE_MISSING` 的 `ProgramCompileError`，因此只导出 `main()` 的模块会被拒绝。`main()` 是可选的；没有它时，运行会直接执行 Core。
+
+`ng.callCore(name, input, sourceSite)` 必须用传给 `ng.graph(...)` 的名称（上例中为 `"main"`）指定该 Core。使用其他名称会使运行以 `P_JS_CONTROL_COMMAND` 失败。要运行不同的步骤，请把它们放进该图，并用不同的输入再次调用。每种节点类型在传给 `add_registered_node` 之前，都要先用 `@ng.node` 或 `ng.NodeFactory.register_type` 注册；使用未注册类型的 Program 无法通过准入(admission)。
+
+完成的 `callCore` 会把 Core 的输出对象返回给 `main()`。上面的快速入门把它原样作为 `result.output` 返回：
+
+```json
+{"channels": {"value": {"value": 1, "version": 1}}, "global_version": 1, "value": 1}
+```
+
+`channels` 保存每个通道的 `value` 和 `version`。除非同名的顶层键已存在，每个通道的值还会复制到以通道名命名的顶层键，因此 `main()` 可以读取 `result.value`；名为 `channels` 或 `global_version` 的通道只能在 `channels` 下访问。barrier 列表按排序后存储：`graph.barrier("join", ["zeta", "alpha"])` 在 `bundle.sealed_core_definitions` 中显示为 `{"wait_for": ["alpha", "zeta"]}`，顺序没有任何影响。
+
+### 失败的命令会结束运行
+
+只有完成的命令才会恢复 `main()`。当 yield 出的命令未能完成时，例如 `callCore` 的节点抛出异常、耗尽 Core 步数预算或超过 wall-time 限制，`ProgramRuntime` 会记录该结果，并把它作为运行的最终结果，带有相应的 `status` 和 `failure`。生成器不会被恢复：包住 `yield` 的 `try`/`catch` 不会执行，之后的 JavaScript 也不会执行。按其失败策略失败的 join（`ng.all`、`ng.race`、`ng.quorum`）也会以同样方式结束运行。在 Python 中通过 `result.status` 和 `result.failure` 处理失败。被中断的命令则不同：运行以 `Interrupted` 停止，`resume()` 会继续该命令。
+
+### 子 Program
+
+`ng.spawn` 需要子绑定解析器，而 `LocalProgramHost` 不配置它。因此，从 Python 发起的每个 `ng.spawn` 都会使运行以 `P_CHILD_BINDING`（"Program spawn has no configured child binding resolver"）失败。子 Program 需要一个设置了 `RuntimeConfig::child_binding_resolver` 的 C++ 宿主；该解析器把每个绑定名映射到 `link_module_child` 返回的 `ModuleLinkReceipt` 以及已准入(admission)的子 `ProgramVersion`。子 Program 的生命周期参见[递归智能体](PROGRAM_RECURSIVE_HARNESSES.md)。
+
+### 预算
+
+传给 `LocalProgramHost` 的 `budget_ceiling` 会成为准入(admission)策略的上限。除 `max_child_depth` 和 `max_total_children` 外，每个字段都必须为正数；即使 Program 从不调用模型，`model_tokens`、`monetary_microunits` 和 `max_dynamic_compiles` 也必须为正数。否则构造函数会抛出列出零值字段的 `ValueError`。两个子字段必须同时为零或同时为正数。
+
+`compile_admit(source, budget)` 和 `compile(source, budget)` 会把 `budget` 作为每个字段的最小值和最大值封存进 bundle；封存预算超过上限的 bundle 会在准入(admission)时被拒绝。针对该版本的每次 `run`、`start` 和 `start_active` 调用都必须逐字段传入相同的值。更大或更小的预算会抛出 `RuntimeError: Program invocation budget is outside its admitted bounds`。要使用不同的预算，请重新编译并准入(admission)；结果是一个新的 `ProgramVersion`。运行预算的 `wall_time_ms`、`max_concurrency`、`max_program_operations` 和 `max_core_steps` 必须为正数；`model_tokens` 和 `monetary_microunits` 可以为零。
+
+### 调度线程与超时
+
+`LocalProgramHost(..., scheduler_threads=1)` 设置执行运行的 `ProgramRuntime` 调度池的线程数，必须至少为 1。Python 节点在运行期间会占用一个调度线程。在默认的单线程下，宿主的所有运行共享该线程：某个运行的 Python 节点执行期间，其他运行不会推进，运行等待的时间也计入其 `wall_time_ms`。要让多个运行同时推进，请增大 `scheduler_threads`。它们的 Python 代码仍在 GIL 下运行，因此 CPU 密集型节点不会并行；节点在释放 GIL 时（例如在 `time.sleep`、I/O 或原生调用中）才会重叠执行。
+
+wall-time 限制不会中断正在运行的 Python 节点。时间用尽时，运行时会取消该运行，结果在节点返回后才到达，`status` 为 `TimedOut`，`failure.code` 为 `P_RUNTIME_TIMEOUT`。失败消息来自被取消的 Core 运行，因此请检查 `status` 或 `failure.code`，而不是消息文本。
+
+在一次 Core 运行内，无论 `scheduler_threads` 为多少，fan-out 分支都会依次执行：Catalog 为每个 Core 引擎只构建一个 worker，而 `LocalProgramHost` 没有更改它的选项。此类图打印的 fan-out 警告建议设置 `EngineConfig::worker_count`，但它只适用于 `GraphEngine`；设置 `NEOGRAPH_SUPPRESS_FANOUT_WARNING=1` 可隐藏该警告。
+
+### 内存状态与恢复
+
+`LocalProgramHost` 把 bundle、版本、激活、运行记录和检查点保存在宿主对象内部的内存中，不向磁盘写入任何内容。请在启动该运行的宿主实例仍然存在时，通过该实例恢复运行。进程重启后，或从另一个 `LocalProgramHost` 调用时，`resume()` 会抛出 `RuntimeError: Program run was not found`。持久化的 Program 存储（SQLite 和 PostgreSQL）是 C++ 宿主 API。
+
+`resume()` 返回的结果中，`execution_trace` 只列出恢复后运行的 Core 节点；中断前运行的节点出现在被中断的结果中。对于在 `b` 之前中断的 Core `a → b → c`，被中断的结果为 `["a"]`，恢复后的结果为 `["b", "c"]`。
 
 ## 强制生命周期 Hooks
 

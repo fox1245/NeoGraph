@@ -93,6 +93,23 @@ The default worker_count is `1`, so no engine-owned pool is created. I/O branche
 
 An admin state/history/update/fork call during any run/resume on the same engine fails with `std::logic_error`. Cancel/drain and await completion first; do not suppress the exception. Same-thread-id concurrent executions have unspecified checkpoint interleaving, and separate engines sharing a store need host coordination. See [concurrency](concurrency.md).
 
+## Python Program errors
+
+These come from `LocalProgramHost` and the QuickJS Program compiler. The rules behind them are in [Program and QuickJS](python-binding.md#program-and-quickjs).
+
+| Error | Cause | Fix |
+|---|---|---|
+| `TypeError: get(): incompatible function arguments` from a node | `GraphState.get` takes only the channel name | Use `state.get("value") or 0` |
+| `P_JS_DEFINE_MISSING` | The module does not export `define()` | Export `define()` and return the Program's one graph |
+| `P_JS_CONTROL_COMMAND`: JavaScript command references a Core outside the admitted root | `ng.callCore` names a graph other than the one `define()` returns | Use the name passed to `ng.graph(...)` |
+| `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | A listed ceiling field is zero | Make it positive, even if the Program never calls a model |
+| `RuntimeError: Program invocation budget is outside its admitted bounds` | The run budget differs from the budget given to `compile_admit` | Pass the same budget, or compile and admit again |
+| `P_CHILD_BINDING` from `ng.spawn` | `LocalProgramHost` has no child-binding resolver | Run child Programs in a C++ host |
+| `RuntimeError: Program run was not found` from `resume()` | The run belongs to another or a destroyed `LocalProgramHost` | Resume through the host that started the run |
+| `RuntimeError: Program admission failed with N diagnostic(s)` | For example, a node type that `NodeFactory` does not know | Register the type before `add_registered_node` |
+
+A failed `callCore` ends the run with that failure; `main()` cannot catch it with `try`/`catch`. Check `result.status` and `result.failure` in Python.
+
 ## Checkpoint and PostgreSQL failures
 
 A missing PostgresCheckpointStore export can mean the wheel/source build disabled the component; inspect that artifact's configuration, not an older wheel's feature list. Install matching libpq when building the optional target. In a connection URI, percent-encode special password characters or use libpq's key=value form; never publish actual credentials.

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=8dc07611a5d489c5f48231f91efa341362b9f2a47558a81ad11f2ca60b4d38af -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=6a8285e075e0dcaa0f233cc49e84ffc1f3d4dbc5f28c88908e2d26fcd1b7f29c -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -375,7 +375,8 @@ import neograph_engine as ng
 
 @ng.node("my_node")
 def my_node(state):
-    return [ng.ChannelWrite("value", state.get("value", 0) + 1)]
+    # GraphState.get takes only the channel name; a missing channel is None.
+    return [ng.ChannelWrite("value", (state.get("value") or 0) + 1)]
 
 registry = (
     ng.ProgramRegistryBuilder()
@@ -420,7 +421,7 @@ run_budget.max_core_steps = 20
 host = ng.LocalProgramHost(registry, "tenant-a", ceiling)
 version = host.compile_admit(source, run_budget)
 result = host.run(version, {}, run_budget)
-print(result.status, result.output)
+print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 1
 ```
 
 `LocalProgramHost`は、オーナースコープのインメモリ便宜ホストです。それでもC++コンパイラ、Catalog、admissionポリシー、遷移ストア、およびProgramRuntimeを使用します。生成された提案は、admission前にホストの意味検証を追加で通過する必要があります。[DSL機能評価](DSL_CAPABILITY_EVAL.md)を参照してください。
@@ -436,6 +437,48 @@ print(result.status, result.output)
 ```python
 manifest = ng.javascript_authoring_capability_manifest()
 ```
+
+### モジュールの構成と`callCore`
+
+JavaScript Programは、グラフビルダーを1つ返す`define()`をexportする必要があります。そのグラフがProgramの唯一のCoreです。`define()`がないとコンパイルは`P_JS_DEFINE_MISSING`を伴う`ProgramCompileError`を送出するため、`main()`だけをexportするモジュールは拒否されます。`main()`は任意で、ない場合は実行時にCoreが直接実行されます。
+
+`ng.callCore(name, input, sourceSite)`は、`ng.graph(...)`に渡した名前（上の例では`"main"`）でそのCoreを指定する必要があります。ほかの名前を指定すると、実行は`P_JS_CONTROL_COMMAND`で失敗します。異なるステップを実行するには、それらをそのグラフに入れ、異なる入力で再び呼び出してください。各ノード型は、`add_registered_node`に渡す前に`@ng.node`または`ng.NodeFactory.register_type`で登録してください。登録されていない型を使うProgramはadmissionされません。
+
+完了した`callCore`は、Coreの出力オブジェクトを`main()`に返します。上のクイックスタートはそれをそのまま`result.output`として返します：
+
+```json
+{"channels": {"value": {"value": 1, "version": 1}}, "global_version": 1, "value": 1}
+```
+
+`channels`には各チャネルの`value`と`version`が入ります。各チャネルの値は、同名のトップレベルキーが既にない限り、チャネル名のトップレベルキーにもコピーされるため、`main()`は`result.value`を読めます。`channels`または`global_version`という名前のチャネルは`channels`の下でのみ参照できます。barrierのリストはソートして保存されます。`graph.barrier("join", ["zeta", "alpha"])`は`bundle.sealed_core_definitions`に`{"wait_for": ["alpha", "zeta"]}`として現れ、順序は何の影響もありません。
+
+### 失敗したコマンドは実行を終了する
+
+`main()`を再開するのは完了したコマンドだけです。yieldされたコマンドが完了しない場合、たとえばノードが例外を送出した、Coreのステップ予算を使い切った、またはwall-time制限を超えた`callCore`では、`ProgramRuntime`はその結果を記録し、対応する`status`と`failure`を持つ実行の最終結果にします。ジェネレーターは再開されません。`yield`を囲む`try`/`catch`は実行されず、その後のJavaScriptも実行されません。失敗ポリシーに従って失敗したjoin（`ng.all`、`ng.race`、`ng.quorum`）も同じように実行を終了します。Pythonでは`result.status`と`result.failure`で失敗を処理してください。割り込まれたコマンドは異なります。実行は`Interrupted`として停止し、`resume()`がそのコマンドを続行します。
+
+### 子Program
+
+`ng.spawn`には子バインディングリゾルバーが必要ですが、`LocalProgramHost`はそれを構成しません。そのため、Pythonからの`ng.spawn`はすべて`P_CHILD_BINDING`（"Program spawn has no configured child binding resolver"）で実行を失敗させます。子Programには、`RuntimeConfig::child_binding_resolver`を設定するC++ホストが必要です。このリゾルバーは各バインディング名を、`link_module_child`が返す`ModuleLinkReceipt`とadmission済みの子`ProgramVersion`に対応付けます。子のライフサイクルは[再帰エージェント](PROGRAM_RECURSIVE_HARNESSES.md)を参照してください。
+
+### 予算
+
+`LocalProgramHost`に渡した`budget_ceiling`はadmissionポリシーの上限になります。`max_child_depth`と`max_total_children`を除くすべてのフィールドは正である必要があり、モデルを呼び出さないProgramでも`model_tokens`、`monetary_microunits`、`max_dynamic_compiles`は正でなければなりません。そうでない場合、コンストラクターはゼロのフィールド名を示す`ValueError`を送出します。2つの子フィールドは、両方ゼロか両方正である必要があります。
+
+`compile_admit(source, budget)`と`compile(source, budget)`は、`budget`をすべてのフィールドの最小値かつ最大値としてバンドルに封印し、封印された予算が上限を超えるバンドルはadmissionで拒否されます。そのバージョンに対する各`run`、`start`、`start_active`呼び出しは、フィールドごとに同じ値を渡す必要があります。より大きい予算や小さい予算は`RuntimeError: Program invocation budget is outside its admitted bounds`を送出します。別の予算を使うには、再度コンパイルしてadmissionしてください。その結果は新しい`ProgramVersion`です。実行予算の`wall_time_ms`、`max_concurrency`、`max_program_operations`、`max_core_steps`は正である必要があり、`model_tokens`と`monetary_microunits`はゼロでも構いません。
+
+### スケジューラースレッドとタイムアウト
+
+`LocalProgramHost(..., scheduler_threads=1)`は、実行を処理する`ProgramRuntime`スケジューラープールのスレッド数を設定し、1以上である必要があります。Pythonノードは実行中、スケジューラースレッドを1つ占有します。既定の1スレッドでは、ホストのすべての実行がそのスレッドを共有します。ある実行のPythonノードが動いている間はほかの実行は進まず、実行が待った時間もその実行の`wall_time_ms`に含まれます。複数の実行を同時に進めるには`scheduler_threads`を増やしてください。それでもPythonコードはGILの下で実行されるため、CPUバウンドのノードは並列に実行されません。ノードが重なって実行されるのは、`time.sleep`、I/O、ネイティブ呼び出しなどでGILを解放している間です。
+
+wall-time制限は実行中のPythonノードを中断しません。時間切れになるとランタイムは実行をキャンセルし、結果はノードが戻った後に`status` `TimedOut`、`failure.code` `P_RUNTIME_TIMEOUT`で届きます。失敗メッセージはキャンセルされたCore実行から来るため、メッセージのテキストではなく`status`または`failure.code`を確認してください。
+
+1つのCore実行の中では、fan-outの分岐は`scheduler_threads`の値にかかわらず1つずつ順に実行されます。CatalogはCoreエンジンをそれぞれワーカー1つで構築し、`LocalProgramHost`にはそれを変えるオプションがないためです。このようなグラフで出力されるfan-out警告は`EngineConfig::worker_count`を勧めますが、これは`GraphEngine`にのみ適用されます。警告を隠すには`NEOGRAPH_SUPPRESS_FANOUT_WARNING=1`を設定してください。
+
+### インメモリ状態と再開
+
+`LocalProgramHost`は、バンドル、バージョン、アクティベーション、実行記録、チェックポイントをホストオブジェクト内のメモリに保持し、ディスクには何も書き込みません。実行は、それを開始したホストインスタンスが存在している間に、そのインスタンスを通じて再開してください。プロセスの再起動後や別の`LocalProgramHost`からは、`resume()`が`RuntimeError: Program run was not found`を送出します。永続的なProgramストア（SQLiteとPostgreSQL）はC++ホストのAPIです。
+
+`resume()`が返した結果の`execution_trace`には、再開後に実行されたCoreノードだけが並びます。割り込み前に実行されたノードは、割り込まれた結果に現れます。`b`の前で割り込むCore `a → b → c`では、割り込まれた結果は`["a"]`、再開後の結果は`["b", "c"]`になります。
 
 ## 必須ライフサイクルHook
 

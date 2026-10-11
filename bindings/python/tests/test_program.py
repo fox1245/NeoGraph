@@ -147,6 +147,45 @@ def test_zero_ceiling_error_names_each_zero_field():
     assert str(raised.value).endswith("zero: model_tokens, max_dynamic_compiles")
 
 
+def test_documented_quickstart_returns_the_call_core_output_shape():
+    # docs/python-binding.md "Program and QuickJS": GraphState.get takes one
+    # argument, and callCore returns channels plus top-level value aliases.
+    @ng.node("python_program_quickstart_node")
+    def quickstart_node(state):
+        return [ng.ChannelWrite("value", (state.get("value") or 0) + 1)]
+
+    builder = ng.ProgramRegistryBuilder()
+    builder.add_registered_node("python_program_quickstart_node", "1.0.0", _DIGEST_NODE)
+    builder.add_registered_reducer("overwrite", "1.0.0", _DIGEST_REDUCER)
+    host = ng.LocalProgramHost(builder.build(), "python-owner-quickstart", _ceiling())
+    source = ng.ProgramSource.from_javascript(
+        "python-quickstart.js",
+        """
+export function define() {
+  const graph = ng.graph("main");
+  graph.channel("value", {reducer: "overwrite", initial: 0});
+  graph.node("work", {type: "python_program_quickstart_node"});
+  graph.entry("work");
+  graph.exit("work");
+  return graph;
+}
+
+export function* main(input) {
+  return yield ng.callCore("main", input, "python:main");
+}
+""",
+    )
+    version = host.compile_admit(source, _budget())
+    result = host.run(version, {}, _budget())
+
+    assert result.status == ng.ProgramTerminalStatus.Completed
+    assert result.output == {
+        "channels": {"value": {"value": 1, "version": 1}},
+        "global_version": 1,
+        "value": 1,
+    }
+
+
 def test_program_preserves_core_failure_in_terminal_result():
     class FailingNode(ng.GraphNode):
         def get_name(self):

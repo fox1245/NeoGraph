@@ -377,7 +377,8 @@ import neograph_engine as ng
 
 @ng.node("my_node")
 def my_node(state):
-    return [ng.ChannelWrite("value", state.get("value", 0) + 1)]
+    # GraphState.get takes only the channel name; a missing channel is None.
+    return [ng.ChannelWrite("value", (state.get("value") or 0) + 1)]
 
 registry = (
     ng.ProgramRegistryBuilder()
@@ -422,7 +423,7 @@ run_budget.max_core_steps = 20
 host = ng.LocalProgramHost(registry, "tenant-a", ceiling)
 version = host.compile_admit(source, run_budget)
 result = host.run(version, {}, run_budget)
-print(result.status, result.output)
+print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 1
 ```
 
 `LocalProgramHost` is an owner-scoped in-memory convenience host. It still uses the C++ compiler, Catalog, admission policy, transition store and ProgramRuntime. Generated proposals should additionally pass a host semantic validator before admission; see [DSL capability evaluation](DSL_CAPABILITY_EVAL.md).
@@ -438,6 +439,48 @@ The exact installed JavaScript vocabulary is available as a dict:
 ```python
 manifest = ng.javascript_authoring_capability_manifest()
 ```
+
+### Module shape and `callCore`
+
+A JavaScript Program must export `define()`, which returns one graph builder. That graph is the Program's only Core. Without `define()`, compilation raises `ProgramCompileError` with `P_JS_DEFINE_MISSING`, so a module that exports only `main()` is rejected. `main()` is optional; without it, a run executes the Core directly.
+
+`ng.callCore(name, input, sourceSite)` must name that Core by the name given to `ng.graph(...)`, which is `"main"` in the example above. Any other name fails the run with `P_JS_CONTROL_COMMAND`. To run different steps, put them in that graph and call it again with different input. Register every node type with `@ng.node` or `ng.NodeFactory.register_type` before passing it to `add_registered_node`; a Program that uses an unregistered type cannot be admitted.
+
+A completed `callCore` returns the Core's output object to `main()`. The quickstart above returns it unchanged as `result.output`:
+
+```json
+{"channels": {"value": {"value": 1, "version": 1}}, "global_version": 1, "value": 1}
+```
+
+`channels` holds each channel's `value` and `version`. Each channel's value is also copied to a top-level key with the channel's name unless that key already exists, so `main()` can read `result.value`; a channel named `channels` or `global_version` is reachable only under `channels`. Barrier lists are stored sorted: `graph.barrier("join", ["zeta", "alpha"])` appears as `{"wait_for": ["alpha", "zeta"]}` in `bundle.sealed_core_definitions`, and the order has no effect.
+
+### Failed commands end the run
+
+Only a completed command resumes `main()`. When a yielded command does not complete, for example a `callCore` whose node raises, which exhausts the Core step budget, or which runs past the wall-time limit, `ProgramRuntime` records that outcome and makes it the run's terminal result with the matching `status` and `failure`. The generator is not resumed: a `try`/`catch` around the `yield` never runs, and no later JavaScript executes. A join (`ng.all`, `ng.race`, `ng.quorum`) that fails under its failure policy ends the run the same way. Handle failures in Python through `result.status` and `result.failure`. An interrupted command is different: the run stops as `Interrupted`, and `resume()` continues that command.
+
+### Child Programs
+
+`ng.spawn` needs a child-binding resolver, and `LocalProgramHost` configures none. Every `ng.spawn` from Python therefore fails the run with `P_CHILD_BINDING` ("Program spawn has no configured child binding resolver"). Child Programs need a C++ host that sets `RuntimeConfig::child_binding_resolver`, which maps each binding name to the `ModuleLinkReceipt` from `link_module_child` and the admitted child `ProgramVersion`. See [recursive agents](PROGRAM_RECURSIVE_HARNESSES.md) for the child lifecycle.
+
+### Budgets
+
+The `budget_ceiling` passed to `LocalProgramHost` becomes the admission policy's ceiling. Every field except `max_child_depth` and `max_total_children` must be positive, including `model_tokens`, `monetary_microunits` and `max_dynamic_compiles`, even for a Program that never calls a model. Otherwise the constructor raises `ValueError` naming the zero fields. The two child fields must be both zero or both positive.
+
+`compile_admit(source, budget)` and `compile(source, budget)` seal `budget` into the bundle as both the minimum and the maximum of every field, and admission rejects a bundle whose sealed budget exceeds the ceiling. Each `run`, `start` and `start_active` call for that version must pass the same values, field for field. A larger or smaller budget raises `RuntimeError: Program invocation budget is outside its admitted bounds`. To use a different budget, compile and admit again; the result is a new `ProgramVersion`. A run budget needs positive `wall_time_ms`, `max_concurrency`, `max_program_operations` and `max_core_steps`; `model_tokens` and `monetary_microunits` may be zero.
+
+### Scheduler threads and timeouts
+
+`LocalProgramHost(..., scheduler_threads=1)` sets the number of threads in the `ProgramRuntime` scheduler pool that executes runs; it must be at least 1. A Python node occupies a scheduler thread for as long as it runs. With the default single thread, all runs of the host share that thread: while one run's Python node runs, no other run makes progress, and the time a run spends waiting counts against its `wall_time_ms`. Raise `scheduler_threads` to let several runs progress at once. Their Python code still runs under the GIL, so CPU-bound nodes do not run in parallel; nodes overlap while they release the GIL, for example in `time.sleep`, I/O or a native call.
+
+The wall-time limit does not interrupt a running Python node. When the time runs out, the runtime cancels the run, and the result arrives once the node returns, with `status` `TimedOut` and `failure.code` `P_RUNTIME_TIMEOUT`. The failure message comes from the cancelled Core run, so check `status` or `failure.code` rather than the message text.
+
+Within one Core run, fan-out branches execute one after another whatever `scheduler_threads` is: the Catalog builds each Core engine with a single worker, and `LocalProgramHost` has no option to change that. The fan-out warning printed for such a graph recommends `EngineConfig::worker_count`, which applies only to `GraphEngine`; set `NEOGRAPH_SUPPRESS_FANOUT_WARNING=1` to hide it.
+
+### In-memory state and resume
+
+`LocalProgramHost` keeps bundles, versions, activations, run records and checkpoints in memory inside the host object, and writes nothing to disk. Resume a run through the host instance that started it, while that object is alive. After a process restart, or from another `LocalProgramHost`, `resume()` raises `RuntimeError: Program run was not found`. Durable Program stores (SQLite and PostgreSQL) are C++ host APIs.
+
+The `execution_trace` of a result returned by `resume()` lists only the Core nodes that ran after the resume; nodes that ran before the interrupt appear in the interrupted result. For a Core `a → b → c` that interrupts before `b`, the interrupted result has `["a"]` and the resumed result has `["b", "c"]`.
 
 ## Mandatory lifecycle Hooks
 
