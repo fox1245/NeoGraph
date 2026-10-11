@@ -32,7 +32,8 @@ void init_state(py::module_& m) {
                          std::vector<std::shared_ptr<neograph::Tool>> tools,
                          const std::string& model,
                          const std::string& instructions,
-                         py::object extra_config) {
+                         py::object extra_config,
+                         py::object provider_controls) {
             NodeContext ctx;
             ctx.provider = own_python_provider(std::move(provider));
             // Native Tool values passed directly to the bound constructor
@@ -41,13 +42,16 @@ void init_state(py::module_& m) {
             ctx.model = model;
             ctx.instructions = instructions;
             ctx.extra_config = py_to_json(extra_config);
+            if (!provider_controls.is_none())
+                ctx.provider_controls = provider_controls.cast<neograph::ProviderControls>();
             return ctx;
         }),
             py::arg("provider") = py::none(),
             py::arg("tools") = std::vector<std::shared_ptr<neograph::Tool>>{},
             py::arg("model") = "",
             py::arg("instructions") = "",
-            py::arg("extra_config") = py::dict())
+            py::arg("extra_config") = py::dict(),
+            py::arg("provider_controls") = py::none())
         .def_property("provider",
             [](const NodeContext& c) { return c.provider; },
             [](NodeContext& c, py::object provider) {
@@ -55,6 +59,9 @@ void init_state(py::module_& m) {
             })
         .def_readwrite("model", &NodeContext::model)
         .def_readwrite("instructions", &NodeContext::instructions)
+        .def_readwrite("provider_controls", &NodeContext::provider_controls,
+            "Typed request controls the built-in llm_call node sends, such as "
+            "max_output_tokens and OpenRouter routing.")
         .def_property("extra_config",
             [](const NodeContext& c) { return json_to_py(c.extra_config); },
             [](NodeContext& c, py::object v) { c.extra_config = py_to_json(v); });

@@ -5,65 +5,41 @@ Completions peer started by the test, so the wiring (descriptor, ZDR routing,
 output cap, typed outcome, usage) is verified with no key and no paid call.
 
 Live (opt-in): NEOGRAPH_E2E_LIVE=1 and OPENROUTER_API_KEY=... run the same
-Program against https://openrouter.ai with ~deepseek/deepseek-v4-flash-latest
-(override with OPENROUTER_MODEL), max_output_tokens=64 and provider.zdr=true.
-The key is read from the environment only.
+Programs against https://openrouter.ai. The key is read from the environment
+only.
 
-The model call lives in a Python node, not the built-in `llm_call` node:
-Python cannot bind a Provider into a Program yet (#366), see
-test_03_failures.py.
+Two shapes are covered:
+
+- a Python node that owns one provider call (the host keeps the provider;
+  the Program's budgets do not see the call), with
+  ~deepseek/deepseek-v4-flash-latest (override with OPENROUTER_MODEL);
+- the built-in llm_call node bound to the provider through
+  LocalProgramHost(node_context=..., binding_label=...) (#372): the call is
+  priced against the run's monetary budget and settled from OpenRouter's
+  reported cost. It needs a model whose catalog entry has a route ceiling,
+  deepseek/deepseek-v4-flash-0731 by default (override with
+  OPENROUTER_PRICED_MODEL); a router alias cannot be bounded and is refused.
 """
 
-import http.server
-import json
 import os
-import threading
-from urllib.parse import urlsplit
 
 import pytest
 
 import neograph_engine as ng
 
-from .support import admit, budget, ceiling, describe, digest, make_host
+from . import support
+from .support import (ChatPeer, admit, budget, ceiling, define_graph, describe, digest,
+                      make_bound_host, make_host, openrouter_provider, priced_budget,
+                      route_ceiling_hold)
 
 LIVE = os.environ.get("NEOGRAPH_E2E_LIVE") == "1" and bool(os.environ.get("OPENROUTER_API_KEY"))
 MODEL = os.environ.get("OPENROUTER_MODEL", "~deepseek/deepseek-v4-flash-latest")
-MAX_OUTPUT_TOKENS = 64
+PRICED_MODEL = os.environ.get("OPENROUTER_PRICED_MODEL", support.PRICED_MODEL)
+MAX_OUTPUT_TOKENS = support.OUTPUT_CAP
 
 needs_llm = pytest.mark.skipif(not getattr(ng, "_HAVE_LLM", False),
                                reason="neograph_engine was built without the LLM target")
-
-
-def openrouter_provider(base_url, api_key):
-    """SchemaProvider for OpenRouter Chat Completions, as in
-    examples/cookbook/openrouter-provider/via_openai_compat.py."""
-    from neograph_engine.llm import SchemaProvider
-
-    endpoint = urlsplit(base_url.rstrip("/"))
-    origin = f"{endpoint.scheme}://{endpoint.netloc}"
-    path = endpoint.path.rstrip("/") + "/chat/completions"
-    policy = None
-    if endpoint.hostname in {"127.0.0.1", "::1"}:
-        # Declare the loopback peer as an OpenRouter origin through the closed
-        # policy loader, exactly like the cookbook's no-cost smoke.
-        families = json.loads(ng.provider_policy_json())
-        for family in families["families"]:
-            if family["family"] == "openai.chat":
-                family["openrouter_origins"].append(origin)
-        policy = ng.load_provider_policy(json.dumps(families), ng.provider_codec_defaults_json())
-    descriptor = ng.load_provider_descriptor(json.dumps({
-        "descriptor_version": 1,
-        "revision": 1,
-        "id": "e2e-openrouter-chat",
-        "family": "openai.chat",
-        "connection": {"base_url": origin, "paths": {"buffered": path, "streaming": path}},
-    }), policy)
-    routing = ng.OpenRouterRouting()
-    routing.zdr = True
-    defaults = ng.SchemaProviderDefaults()
-    defaults.provider = routing
-    options = ng.ProviderRuntimeOptions(api_key=api_key, default_timeout_ms=120_000)
-    return SchemaProvider(descriptor, options, defaults), routing
+live = pytest.mark.skipif(not LIVE, reason="live: set NEOGRAPH_E2E_LIVE=1 and OPENROUTER_API_KEY")
 
 
 class ModelAnswer(ng.GraphNode):
@@ -124,6 +100,13 @@ export function* main(input) {
 }
 """
 
+BOUND_CHAT_PROGRAM = define_graph("""
+    g.channel("messages", {reducer: "append", initial: []});
+    g.node("llm", {type: "llm_call"});
+    g.entry("llm");
+    g.exit("llm");
+""", name="chat")
+
 
 def run_chat_program(provider, routing, question):
     ng.NodeFactory.register_type(
@@ -138,47 +121,28 @@ def run_chat_program(provider, routing, question):
     return host.run(version, {"question": question}, run_budget)
 
 
-class _ChatPeer(http.server.BaseHTTPRequestHandler):
-    requests = []
-
-    def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
-        type(self).requests.append({"path": self.path, "body": body,
-                                    "auth": self.headers.get("Authorization")})
-        reply = json.dumps({
-            "id": "chatcmpl-e2e", "object": "chat.completion", "created": 1,
-            "model": body.get("model"),
-            "choices": [{"index": 0, "finish_reason": "stop",
-                         "message": {"role": "assistant", "content": "Paris."}}],
-            "usage": {"prompt_tokens": 21, "completion_tokens": 3, "total_tokens": 24},
-        }).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(reply)))
-        self.end_headers()
-        self.wfile.write(reply)
-
-    def log_message(self, *args):
-        pass
+def run_bound_chat_program(base_url, api_key, model, question):
+    controls = support.chat_controls()
+    controls.usage_include = True  # ask OpenRouter for usage.cost
+    host = make_bound_host(base_url, model=model, api_key=api_key, controls=controls,
+                           budget_ceiling=support.ceiling(wall_time_ms=180_000,
+                                                          model_tokens=10_000_000,
+                                                          monetary_microunits=10_000_000))
+    run_budget = priced_budget(wall_time_ms=150_000, max_core_steps=5)
+    version = admit(host, BOUND_CHAT_PROGRAM, run_budget, "chat.js")
+    return host.run(version, {"messages": [{"role": "user", "content": question}]}, run_budget)
 
 
 @pytest.fixture
 def chat_peer():
-    _ChatPeer.requests = []
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ChatPeer)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_address[1]}/api/v1", _ChatPeer.requests
-    finally:
-        server.shutdown()
-        server.server_close()
+    with ChatPeer() as peer:
+        peer.usage = {"prompt_tokens": 21, "completion_tokens": 3, "total_tokens": 24}
+        yield peer
 
 
 @needs_llm
 def test_program_model_call_wiring_against_a_loopback_peer(chat_peer):
-    base_url, requests = chat_peer
-    provider, routing = openrouter_provider(base_url, "local-smoke")
+    provider, routing = openrouter_provider(chat_peer.base_url, "local-smoke")
 
     result = run_chat_program(provider, routing, "What is the capital of France?")
 
@@ -186,7 +150,7 @@ def test_program_model_call_wiring_against_a_loopback_peer(chat_peer):
     assert result.output["text"] == "Paris."
     assert result.output["usage"] == {"input": 21, "output": 3}
     assert result.execution_trace == ["answer"]
-    [sent] = requests
+    [sent] = chat_peer.requests
     assert sent["path"] == "/api/v1/chat/completions"
     assert sent["auth"] == "Bearer local-smoke"
     body = sent["body"]
@@ -198,8 +162,27 @@ def test_program_model_call_wiring_against_a_loopback_peer(chat_peer):
 
 
 @needs_llm
+def test_bound_llm_call_wiring_against_a_loopback_peer(chat_peer):
+    chat_peer.usage = {"prompt_tokens": 21, "completion_tokens": 3, "total_tokens": 24,
+                       "cost": 0.001234567}
+
+    result = run_bound_chat_program(chat_peer.base_url, "local-smoke", support.PRICED_MODEL,
+                                    "What is the capital of France?")
+
+    assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
+    [record] = result.monetary_records
+    assert (record.evidence, record.microunits) == ("reported", 1235)
+    assert record.reserved_microunits == route_ceiling_hold()
+    assert result.usage.monetary_microunits == 1235
+    [sent] = chat_peer.requests
+    assert sent["auth"] == "Bearer local-smoke"
+    assert sent["body"]["model"] == support.PRICED_MODEL
+    assert sent["body"]["usage"] == {"include": True}, sent["body"]
+
+
+@needs_llm
 @pytest.mark.live
-@pytest.mark.skipif(not LIVE, reason="live: set NEOGRAPH_E2E_LIVE=1 and OPENROUTER_API_KEY")
+@live
 def test_live_openrouter_model_call_inside_a_program():
     base_url = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
     provider, routing = openrouter_provider(base_url, os.environ["OPENROUTER_API_KEY"])
@@ -211,3 +194,22 @@ def test_live_openrouter_model_call_inside_a_program():
     usage = result.output["usage"]
     assert usage["input"] and usage["input"] > 0, usage
     assert usage["output"] and 0 < usage["output"] <= MAX_OUTPUT_TOKENS, usage
+
+
+@needs_llm
+@pytest.mark.live
+@live
+def test_live_openrouter_bound_llm_call_is_priced():
+    base_url = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+
+    result = run_bound_chat_program(base_url, os.environ["OPENROUTER_API_KEY"], PRICED_MODEL,
+                                    "What is the capital of France? One word.")
+
+    assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
+    assert 0 < result.usage.model_tokens
+    [record] = result.monetary_records
+    assert record.evidence in ("reported", "estimated"), record
+    assert record.origin == "openrouter" and record.model == PRICED_MODEL
+    assert 0 < record.microunits <= record.reserved_microunits, record
+    assert result.usage.monetary_microunits == record.microunits
+    assert result.remaining_budget.monetary_microunits == 1_000_000 - record.microunits

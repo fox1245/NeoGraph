@@ -89,6 +89,14 @@ if(TARGET neograph::program)
     target_sources(_neograph PRIVATE src/bind_program.cpp)
     target_link_libraries(_neograph PRIVATE neograph::program)
     target_compile_definitions(_neograph PRIVATE NEOGRAPH_PYBIND_HAS_PROGRAM)
+    # Exported internal helpers (canonical identities) used by the host binding.
+    target_include_directories(_neograph PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    # Durable LocalProgramHost(sqlite_directory=...): SQLite Program stores,
+    # checkpoints and the provider-call journal.
+    if(TARGET neograph::program_sqlite AND TARGET neograph::sqlite)
+        target_link_libraries(_neograph PRIVATE neograph::program_sqlite neograph::sqlite)
+        target_compile_definitions(_neograph PRIVATE NEOGRAPH_PYBIND_HAS_PROGRAM_SQLITE)
+    endif()
 endif()
 
 # MCP client (Model Context Protocol). Bound only when neograph::mcp was

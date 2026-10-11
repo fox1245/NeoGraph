@@ -4,12 +4,22 @@
 #include <neograph/graph/loader.h>
 #include <neograph/program/program.h>
 #include <neograph/program/store.h>
+#ifdef NEOGRAPH_PYBIND_HAS_PROGRAM_SQLITE
+#include <neograph/graph/sqlite_checkpoint.h>
+#include <neograph/program/sqlite_provider_call_broker.h>
+#include <neograph/program/sqlite_store.h>
+#include <neograph/program/sqlite_transition_store.h>
+#endif
+
+#include "program/provider_binding.h"
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -152,14 +162,56 @@ public:
     ProgramRegistryBuilderBinding()
         : builder_(std::make_unique<RegistrySnapshotBuilder>()) {}
 
+    // A provider entry is metadata: an exact identity a node can require. The
+    // host binds the provider object itself through LocalProgramHost (#372).
+    ProgramRegistryBuilderBinding& add_provider(const std::string& name,
+                                                std::string semantic_version,
+                                                std::string implementation_digest) {
+        require_open();
+        if (providers_.contains(name))
+            throw py::value_error("add_provider: provider '" + name + "' is already registered");
+        auto manifest = registered_manifest(ExecutableKind::Provider, name,
+                                            std::move(semantic_version),
+                                            std::move(implementation_digest), {}, {},
+                                            ExecutionGuarantee::Strict);
+        const auto identity = manifest.identity;
+        builder_->add_provider(std::move(manifest),
+                               ProviderMetadata{json::object(), json::object()});
+        providers_.emplace(name, identity);
+        return *this;
+    }
+
     ProgramRegistryBuilderBinding& add_registered_node(
         const std::string& type,
         std::string semantic_version,
         std::string implementation_digest,
         std::vector<std::string> capabilities,
         std::vector<std::string> effects,
-        ExecutionGuarantee guarantee) {
+        ExecutionGuarantee guarantee,
+        std::optional<std::string> provider) {
         require_open();
+        if (provider) {
+            // Only the reviewed Core llm_call node may hold a bound provider;
+            // it sends every call through the host's pricing broker.
+            if (type != "llm_call")
+                throw py::value_error("add_registered_node: provider= binds only the built-in "
+                                      "'llm_call' node, not '" + type + "'");
+            const auto found = providers_.find(*provider);
+            if (found == providers_.end())
+                throw py::value_error("add_registered_node: provider '" + *provider +
+                                      "' is not registered; call add_provider(\"" + *provider +
+                                      "\", ...) first");
+            auto manifest = registered_manifest(ExecutableKind::Node, type,
+                                                std::move(semantic_version),
+                                                std::move(implementation_digest),
+                                                std::move(capabilities), std::move(effects),
+                                                guarantee);
+            // A static requirement, so the registry fingerprint and every
+            // bundle that uses the node name the exact provider identity.
+            manifest.required_executables = {found->second};
+            builder_->add_core_llm_call(std::move(manifest), {});
+            return *this;
+        }
         // The manifest copies the type's config schema and effects now, so the
         // type must already be registered (#370).
         const auto types = NodeFactory::instance().registered_types();
@@ -237,6 +289,7 @@ private:
     }
 
     std::unique_ptr<RegistrySnapshotBuilder> builder_;
+    std::map<std::string, ExecutableIdentity> providers_;
 };
 
 BudgetLimits budget_limits(const RunBudget& value) {
@@ -308,14 +361,40 @@ ProgramCompilerConfig compiler_config(std::string             compiler_build_id,
     return config;
 }
 
-CatalogConfig catalog_config(std::shared_ptr<InMemoryProgramStore> store,
-                             RegistrySnapshot                      registry,
-                             std::string                           compiler_build_id,
-                             std::size_t                           worker_count) {
-    CatalogConfig config{std::move(store), std::move(registry),
-                         std::make_shared<EngineGenerationCache>(), std::move(compiler_build_id)};
-    config.worker_count = worker_count;
-    return config;
+struct HostStores {
+    std::shared_ptr<ProgramStore>            program;
+    std::shared_ptr<ProgramTransitionStore>  transitions;
+    std::shared_ptr<graph::CheckpointStore>  checkpoints;
+#ifdef NEOGRAPH_PYBIND_HAS_PROGRAM_SQLITE
+    std::shared_ptr<SQLiteProgramProviderCallJournal> journal;
+#endif
+};
+
+// In memory by default. With a directory, every store is a SQLite file in it
+// and runs survive the process: program.db, checkpoints.db, provider_calls.db.
+HostStores host_stores(const std::optional<std::string>& directory,
+                       const std::shared_ptr<sp::NativeArchive>& archive) {
+    HostStores stores;
+    if (!directory) {
+        stores.program     = std::make_shared<InMemoryProgramStore>();
+        stores.transitions = std::make_shared<InMemoryProgramTransitionStore>();
+        stores.checkpoints = std::make_shared<InMemoryCheckpointStore>();
+        return stores;
+    }
+#ifdef NEOGRAPH_PYBIND_HAS_PROGRAM_SQLITE
+    const std::filesystem::path root(*directory);
+    std::filesystem::create_directories(root);
+    const auto program = (root / "program.db").string();
+    stores.program     = std::make_shared<SQLiteProgramStore>(program);
+    stores.transitions = std::make_shared<SQLiteProgramTransitionStore>(program);
+    stores.checkpoints = std::make_shared<graph::SqliteCheckpointStore>((root / "checkpoints.db").string());
+    stores.journal     = std::make_shared<SQLiteProgramProviderCallJournal>(
+        (root / "provider_calls.db").string(), archive);
+    return stores;
+#else
+    (void)archive;
+    throw py::value_error("sqlite_directory needs neograph_engine built with NEOGRAPH_BUILD_SQLITE");
+#endif
 }
 
 class LocalProgramHost {
@@ -328,7 +407,10 @@ public:
                      std::shared_ptr<sp::NativeArchive> native_history_archive,
                      JavaScriptCompileLimits javascript_limits,
                      bool require_acyclic,
-                     std::size_t worker_count)
+                     std::size_t worker_count,
+                     py::object node_context_object,
+                     std::optional<std::string> binding_label,
+                     std::optional<std::string> sqlite_directory)
         : registry_(std::move(registry)),
           owner_scope_(std::move(owner_scope)),
           compiler_build_id_(std::move(compiler_build_id)),
@@ -336,17 +418,66 @@ public:
           policy_(local_policy(registry_, profile_, owner_scope_, budget_ceiling)),
           compiler_(std::make_shared<ProgramCompiler>(
               registry_, compiler_config(compiler_build_id_, javascript_limits, require_acyclic))),
-          store_(std::make_shared<InMemoryProgramStore>()),
-          catalog_(std::make_shared<ProgramCatalog>(
-              catalog_config(store_, registry_, compiler_build_id_, worker_count))),
-          checkpoints_(std::make_shared<InMemoryCheckpointStore>()),
-          transitions_(std::make_shared<InMemoryProgramTransitionStore>()) {
+          stores_(host_stores(sqlite_directory, native_history_archive)) {
+        std::optional<NodeContext> node_context;
+        if (!node_context_object.is_none()) {
+            // Python tools live on the wrapper, outside the C++ context.
+            if (py::hasattr(node_context_object, "_pytools") &&
+                py::len(node_context_object.attr("_pytools")) != 0)
+                throw py::value_error("LocalProgramHost binds no tools; pass a NodeContext without tools");
+            node_context = node_context_object.cast<NodeContext>();
+        }
+        std::string label;
+        if (node_context) {
+            if (!node_context->provider)
+                throw py::value_error("node_context needs a provider: ng.NodeContext(provider=...)");
+            if (!node_context->tools.view().empty())
+                throw py::value_error("LocalProgramHost binds no tools; pass a NodeContext without tools");
+            if (!binding_label)
+                throw py::value_error("node_context needs binding_label=..., a non-secret name for "
+                                      "this provider binding");
+            label = neograph::program::detail::validated_binding_label(*binding_label);
+        } else if (binding_label) {
+            throw py::value_error("binding_label names a provider binding; pass node_context too");
+        }
+        if (node_context && sqlite_directory && !native_history_archive)
+            throw py::value_error(
+                "a durable host that binds a provider needs native_history_archive=...: its "
+                "provider-call journal keeps every outcome under the archive's native custody");
+        CatalogConfig catalog{stores_.program, registry_, std::make_shared<EngineGenerationCache>(),
+                              compiler_build_id_};
+        catalog.worker_count      = worker_count;
+        catalog.capability_binder = neograph::program::detail::single_provider_binder(node_context, label);
+        catalog_ = std::make_shared<ProgramCatalog>(std::move(catalog));
+
         RuntimeConfig config;
         config.catalog = catalog_;
-        config.checkpoints = checkpoints_;
-        config.transitions = transitions_;
+        config.checkpoints = stores_.checkpoints;
+        config.transitions = stores_.transitions;
         config.scheduler_threads = scheduler_threads;
         config.native_history_archive = std::move(native_history_archive);
+        if (node_context) {
+            // Every built-in provider call goes through a pricing broker: the
+            // SQLite journal when the host is durable, in process otherwise.
+            config.require_core_provider_call_broker = true;
+#ifdef NEOGRAPH_PYBIND_HAS_PROGRAM_SQLITE
+            if (stores_.journal) {
+                // The journal keys the deployment by the label, never by the key.
+                const auto deployment = neograph::program::detail::provider_deployment_identity(label);
+                config.core_provider_call_resolver =
+                    [journal = stores_.journal, deployment](const ProgramCoreProviderCallContext& context)
+                    -> std::optional<ProgramCoreProviderCallBinding> {
+                    return journal->bind_priced(context, deployment);
+                };
+            }
+#endif
+            if (!config.core_provider_call_resolver) {
+                config.core_provider_call_resolver = [](const ProgramCoreProviderCallContext& context)
+                    -> std::optional<ProgramCoreProviderCallBinding> {
+                    return bind_priced_provider_call(context);
+                };
+            }
+        }
         runtime_ = std::make_unique<ProgramRuntime>(std::move(config));
     }
 
@@ -429,6 +560,13 @@ public:
                                                  std::move(trace_id), {}});
     }
 
+    // Continue a run that a stopped process left running, from the durable
+    // stores. Recovery never sends a journaled provider request again.
+    ProgramHandle reconnect(const std::string& run_id) {
+        py::gil_scoped_release release;
+        return runtime_->reconnect(owner_scope_, run_id);
+    }
+
     ProgramHandle resume(std::string run_id,
                          py::object value,
                          std::optional<std::string> pending_id,
@@ -441,7 +579,7 @@ public:
                                     ProgramResume{std::move(owned_value), std::move(trace_id), {},
                                                   std::move(exact_id)});
         } catch (const ProgramDiagnosticError& error) {
-            if (error.diagnostic().code != "P_RUN_NOT_FOUND") throw;
+            if (error.diagnostic().code != "P_RUN_NOT_FOUND" || durable_) throw;
             // Runs live only in this host's memory; say so (#370).
             auto diagnostic    = error.diagnostic();
             diagnostic.message = "run '" + run_id +
@@ -458,7 +596,7 @@ private:
     // the run's single awaiting call; any other run state keeps the empty id so
     // the runtime reports its own diagnostic.
     std::string awaiting_pending_id(const std::string& run_id) const {
-        const auto record = transitions_->load(owner_scope_, run_id);
+        const auto record = stores_.transitions->load(owner_scope_, run_id);
         if (!record || record->continuation().state != ContinuationState::Interrupted) return {};
         const auto input  = record->pending_input();
         const auto effect = record->pending_effect();
@@ -482,10 +620,9 @@ private:
     AdmissionProfile profile_;
     PolicySnapshot policy_;
     std::shared_ptr<ProgramCompiler> compiler_;
-    std::shared_ptr<InMemoryProgramStore> store_;
+    HostStores stores_;
+    bool durable_ = stores_.program && !std::dynamic_pointer_cast<InMemoryProgramStore>(stores_.program);
     std::shared_ptr<ProgramCatalog> catalog_;
-    std::shared_ptr<InMemoryCheckpointStore> checkpoints_;
-    std::shared_ptr<InMemoryProgramTransitionStore> transitions_;
     std::unique_ptr<ProgramRuntime> runtime_;
 };
 
@@ -542,6 +679,34 @@ void init_program(py::module_& m) {
         .def_readonly("core_steps", &ProgramUsage::core_steps)
         .def_readonly("peak_concurrency", &ProgramUsage::peak_concurrency);
 
+    py::class_<ProgramMonetaryRecord>(m, "ProgramMonetaryRecord",
+        "One priced provider call of a Program attempt, in micro-USD (1e-6 USD). evidence is "
+        "'reported' (the provider's own cost), 'estimated' (the price catalog applied to the "
+        "reported tokens; catalog_version and catalog_digest name it) or 'held' (outcome or "
+        "usage unknown, so the reservation is charged; reason says why).")
+        .def_readonly("call_id", &ProgramMonetaryRecord::call_id)
+        .def_readonly("operation_id", &ProgramMonetaryRecord::operation_id)
+        .def_readonly("node", &ProgramMonetaryRecord::node)
+        .def_readonly("origin", &ProgramMonetaryRecord::origin)
+        .def_readonly("model", &ProgramMonetaryRecord::model)
+        .def_property_readonly("evidence", [](const ProgramMonetaryRecord& value) {
+            return std::string(to_string(value.evidence));
+        })
+        .def_readonly("microunits", &ProgramMonetaryRecord::microunits)
+        .def_readonly("reserved_microunits", &ProgramMonetaryRecord::reserved_microunits)
+        .def_readonly("basis", &ProgramMonetaryRecord::basis)
+        .def_readonly("catalog_version", &ProgramMonetaryRecord::catalog_version)
+        .def_readonly("catalog_digest", &ProgramMonetaryRecord::catalog_digest)
+        .def_readonly("conservative", &ProgramMonetaryRecord::conservative)
+        .def_readonly("may_undercount", &ProgramMonetaryRecord::may_undercount)
+        .def_readonly("replayed", &ProgramMonetaryRecord::replayed)
+        .def_readonly("reason", &ProgramMonetaryRecord::reason)
+        .def("__repr__", [](const ProgramMonetaryRecord& value) {
+            return "<ProgramMonetaryRecord " + value.model + " " +
+                   std::string(to_string(value.evidence)) + " " +
+                   std::to_string(value.microunits) + ">";
+        });
+
     py::class_<ProgramSource> source(m, "ProgramSource");
     source.def_static("from_javascript",
                       [](std::string source_id, std::string source_text) {
@@ -567,12 +732,19 @@ void init_program(py::module_& m) {
 
     py::class_<ProgramRegistryBuilderBinding>(m, "ProgramRegistryBuilder")
         .def(py::init<>())
+        .def("add_provider", &ProgramRegistryBuilderBinding::add_provider,
+             py::arg("name"), py::arg("semantic_version"), py::arg("implementation_digest"),
+             py::return_value_policy::reference_internal,
+             "Register a provider identity that llm_call nodes can require "
+             "(add_registered_node(\"llm_call\", ..., provider=name)). The provider object is "
+             "bound by LocalProgramHost(node_context=..., binding_label=...).")
         .def("add_registered_node", &ProgramRegistryBuilderBinding::add_registered_node,
              py::arg("type_name"), py::arg("semantic_version"),
              py::arg("implementation_digest"),
              py::arg("required_capabilities") = std::vector<std::string>{},
              py::arg("declared_effects") = std::vector<std::string>{},
              py::arg("execution_guarantee") = ExecutionGuarantee::Strict,
+             py::arg("provider") = py::none(),
              py::return_value_policy::reference_internal)
         .def("add_registered_reducer", &ProgramRegistryBuilderBinding::add_registered_reducer,
              py::arg("name"), py::arg("semantic_version"),
@@ -732,6 +904,8 @@ void init_program(py::module_& m) {
             return json_to_py(value.output());
         })
         .def_property_readonly("usage", &ProgramResult::usage)
+        .def_property_readonly("monetary_records", &ProgramResult::monetary_records,
+                               "Priced provider calls of this attempt, in settlement order.")
         .def_property_readonly("remaining_budget", &ProgramResult::remaining_budget)
         .def_property_readonly("execution_trace", &ProgramResult::execution_trace)
         .def_property_readonly("failure", &ProgramResult::failure)
@@ -765,18 +939,30 @@ void init_program(py::module_& m) {
         "drives concurrent callCore work and deadlines; worker_count sizes each "
         "Core engine's pool for parallel fan-out inside a graph (1 runs fan-out "
         "branches on the scheduler thread) and must not exceed an admitted "
-        "Program's max_concurrency.")
+        "Program's max_concurrency. node_context binds a provider to the llm_call "
+        "nodes registered with provider=...; binding_label is its non-secret name in "
+        "Program identities. Bound calls are priced against each run's "
+        "monetary_microunits budget (0 grants nothing). sqlite_directory keeps runs, "
+        "checkpoints and a provider-call journal in SQLite files there, so a run "
+        "survives the process (reconnect, resume).")
         .def(py::init<RegistrySnapshot, std::string, RunBudget, std::string, std::size_t,
                       std::shared_ptr<sp::NativeArchive>, JavaScriptCompileLimits, bool,
-                      std::size_t>(),
+                      std::size_t, py::object, std::optional<std::string>,
+                      std::optional<std::string>>(),
              py::arg("registry"), py::arg("owner_scope"), py::arg("budget_ceiling"),
              py::arg("compiler_build_id") = "neograph-python-program/v1",
              py::arg("scheduler_threads") = 1,
              py::arg("native_history_archive") = nullptr,
              py::arg("javascript_limits") = JavaScriptCompileLimits{},
              py::arg("require_acyclic") = false,
-             py::arg("worker_count") = 1)
+             py::arg("worker_count") = 1,
+             py::arg("node_context") = py::none(),
+             py::arg("binding_label") = py::none(),
+             py::arg("sqlite_directory") = py::none())
         .def_property_readonly("owner_scope", &LocalProgramHost::owner_scope)
+        .def("reconnect", &LocalProgramHost::reconnect, py::arg("run_id"),
+             "Continue a run that a stopped process left running, from this host's "
+             "sqlite_directory. A journaled provider call is not sent again.")
         .def("compile", &LocalProgramHost::compile)
         .def("admit", &LocalProgramHost::admit)
         .def("compile_admit", &LocalProgramHost::compile_admit)

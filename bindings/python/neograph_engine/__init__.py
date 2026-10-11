@@ -346,6 +346,7 @@ try:
         ProgramTerminalStatus,
         ProgramRunBudget,
         ProgramUsage,
+        ProgramMonetaryRecord,
         ProgramSource,
         ProgramRegistrySnapshot,
         ProgramRegistryBuilder,
@@ -536,7 +537,10 @@ class AsyncTool(Tool):
 
 
 class NodeContext(_CppNodeContext):
-    """Engine context — provider, tools, model, instructions.
+    """Engine context — provider, tools, model, instructions, provider_controls.
+
+    ``provider_controls`` (``ProviderControls``) are the typed request controls
+    the built-in ``llm_call`` node sends, such as ``max_output_tokens``.
 
     Python ``tools`` live in the ``_pytools`` attribute; the compile binding
     wraps them into an owned C++ ``ToolSet`` before constructing nodes. The
@@ -548,12 +552,14 @@ class NodeContext(_CppNodeContext):
     """
 
     def __init__(self, provider=None, tools=None,
-                 model="", instructions="", extra_config=None):
+                 model="", instructions="", extra_config=None,
+                 provider_controls=None):
         super().__init__(
             provider=provider,
             model=model,
             instructions=instructions,
             extra_config=extra_config or {},
+            provider_controls=provider_controls,
         )
         # compile() snapshots this replaceable Python list into a ToolSet.
         self._pytools = list(tools or [])
@@ -908,6 +914,7 @@ if _HAVE_PROGRAM:
         "ProgramTerminalStatus",
         "ProgramRunBudget",
         "ProgramUsage",
+        "ProgramMonetaryRecord",
         "ProgramSource",
         "ProgramRegistrySnapshot",
         "ProgramRegistryBuilder",

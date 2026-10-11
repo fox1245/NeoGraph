@@ -14,6 +14,7 @@ registers the same node types and builds the same registry in every process.
 from __future__ import annotations
 
 import hashlib
+import http.server
 import json
 import os
 import subprocess
@@ -21,6 +22,7 @@ import sys
 import textwrap
 import threading
 import time
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -421,3 +423,230 @@ def last_json_line(stdout: str):
         if line.startswith("{"):
             return json.loads(line)
     raise AssertionError(f"no JSON line in subprocess output:\n{stdout}")
+
+
+# --------------------------------------------------------------------------
+# Model calls: an OpenRouter Chat Completions provider and a loopback peer
+# --------------------------------------------------------------------------
+
+REPO_DIR = os.path.dirname(os.path.dirname(os.path.dirname(TESTS_DIR)))
+CATALOG_PATH = os.path.join(REPO_DIR, "data", "pricing", "catalog.json")
+
+# A price catalog entry with an OpenRouter route ceiling.
+PRICED_MODEL = "deepseek/deepseek-v4-flash-0731"
+# Declared in the loopback peer's SDK policy so a call's reservation stays small.
+PRICED_INPUT_LIMIT = 100_000
+OUTPUT_CAP = 64
+
+
+def openrouter_descriptor(base_url, *, input_limits=None):
+    """The validated descriptor openrouter_provider() uses."""
+    endpoint = urlsplit(base_url.rstrip("/"))
+    origin = f"{endpoint.scheme}://{endpoint.netloc}"
+    path = endpoint.path.rstrip("/") + "/chat/completions"
+    policy = None
+    loopback = endpoint.hostname in {"127.0.0.1", "::1"}
+    if loopback or input_limits:
+        document = json.loads(ng.provider_policy_json())
+        chat = next(f for f in document["families"] if f["family"] == "openai.chat")
+        if loopback:
+            chat["openrouter_origins"].append(origin)
+        for model, limit in (input_limits or {}).items():
+            document["models"].append({"family": "openai.chat", "model": model,
+                                       "defaults": chat["defaults"], "output_limit": None,
+                                       "input_limit": limit})
+        policy = ng.load_provider_policy(json.dumps(document), ng.provider_codec_defaults_json())
+    return ng.load_provider_descriptor(json.dumps({
+        "descriptor_version": 1,
+        "revision": 1,
+        "id": "e2e-openrouter-chat",
+        "family": "openai.chat",
+        "connection": {"base_url": origin, "paths": {"buffered": path, "streaming": path}},
+    }), policy)
+
+
+def openrouter_provider(base_url, api_key, *, input_limits=None, timeout_ms=120_000):
+    """SchemaProvider for OpenRouter Chat Completions, as in
+    examples/cookbook/openrouter-provider/via_openai_compat.py.
+
+    A loopback base URL is declared an OpenRouter origin through the closed
+    policy loader, exactly like the cookbook's no-cost smoke: the SDK then
+    admits OpenRouter routing and parses usage.cost, and the price catalog
+    prices the endpoint as OpenRouter. input_limits maps a model to the input
+    token limit the SDK policy declares for it.
+    """
+    from neograph_engine.llm import SchemaProvider
+
+    descriptor = openrouter_descriptor(base_url, input_limits=input_limits)
+    routing = ng.OpenRouterRouting()
+    routing.zdr = True
+    defaults = ng.SchemaProviderDefaults()
+    defaults.provider = routing
+    options = ng.ProviderRuntimeOptions(api_key=api_key, default_timeout_ms=timeout_ms)
+    return SchemaProvider(descriptor, options, defaults), routing
+
+
+class ChatPeer:
+    """Loopback Chat Completions peer. It records every request it receives.
+
+    usage is the reply's usage object; add "cost" for OpenRouter's reported
+    cost in USD. A streaming request (the built-in llm_call node streams inside
+    a Program) is answered with SSE chunks, the usage in the last one, as
+    OpenRouter does. A request whose last user message contains "slow" is
+    answered after slow_seconds.
+    """
+
+    def __init__(self):
+        self.requests = []
+        self.reply = "Paris."
+        self.usage = {"prompt_tokens": 21, "completion_tokens": 3, "total_tokens": 24,
+                      "cost": 0.001234567}
+        self.slow_seconds = 5.0
+        self._lock = threading.Lock()
+        peer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+                with peer._lock:
+                    peer.requests.append({"path": self.path, "body": body,
+                                          "auth": self.headers.get("Authorization")})
+                last = (body.get("messages") or [{}])[-1].get("content") or ""
+                if "slow" in str(last):
+                    time.sleep(peer.slow_seconds)
+                base = {"id": "chatcmpl-e2e", "created": 1, "model": body.get("model")}
+                if body.get("stream"):
+                    frames = [
+                        {**base, "object": "chat.completion.chunk",
+                         "choices": [{"index": 0, "finish_reason": None,
+                                      "delta": {"role": "assistant", "content": peer.reply}}]},
+                        {**base, "object": "chat.completion.chunk",
+                         "choices": [{"index": 0, "finish_reason": "stop", "delta": {}}]},
+                    ]
+                    if peer.usage is not None:
+                        frames.append({**base, "object": "chat.completion.chunk", "choices": [],
+                                       "usage": peer.usage})
+                    reply = ("".join("data: " + json.dumps(frame) + "\n\n" for frame in frames)
+                             + "data: [DONE]\n\n").encode()
+                    content_type = "text/event-stream"
+                else:
+                    document = {**base, "object": "chat.completion",
+                                "choices": [{"index": 0, "finish_reason": "stop",
+                                             "message": {"role": "assistant",
+                                                         "content": peer.reply}}]}
+                    if peer.usage is not None:
+                        document["usage"] = peer.usage
+                    reply = json.dumps(document).encode()
+                    content_type = "application/json"
+                try:
+                    self.send_response(200)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(len(reply)))
+                    self.end_headers()
+                    self.wfile.write(reply)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            def log_message(self, *args):
+                pass
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def base_url(self):
+        return f"http://127.0.0.1:{self._server.server_address[1]}/api/v1"
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._server.shutdown()
+        self._server.server_close()
+
+    def request_count(self):
+        with self._lock:
+            return len(self.requests)
+
+
+def chat_controls():
+    controls = ng.ProviderControls()
+    controls.max_output_tokens = OUTPUT_CAP
+    return controls
+
+
+def build_priced_registry(extra_node_types=()):
+    """The shared registry plus provider "openrouter" and an llm_call node bound to it."""
+    builder = ng.ProgramRegistryBuilder()
+    for node_type in (*NODE_TYPES, *extra_node_types):
+        builder.add_registered_node(node_type, "1.0.0", digest("node:" + node_type))
+    for name in CONDITIONS:
+        builder.add_registered_condition(name, "1.0.0", digest("condition:" + name))
+    for reducer in ("append", "overwrite"):
+        builder.add_registered_reducer(reducer, "1.0.0", digest("reducer:" + reducer))
+    builder.add_provider("openrouter", "1.0.0", digest("provider:openrouter"))
+    builder.add_registered_node("llm_call", "1.0.0", digest("node:llm_call"), provider="openrouter")
+    return builder.build()
+
+
+def make_bound_host(base_url, *, model=PRICED_MODEL, owner="tenant:priced", budget_ceiling=None,
+                    sqlite_directory=None, api_key="local-smoke", input_limits=None,
+                    controls=None, extra_node_types=(), **kwargs):
+    """A LocalProgramHost whose llm_call nodes call `model` at `base_url`."""
+    provider, _routing = openrouter_provider(
+        base_url, api_key,
+        input_limits={model: PRICED_INPUT_LIMIT} if input_limits is None else input_limits)
+    context = ng.NodeContext(provider=provider, model=model,
+                             provider_controls=controls or chat_controls())
+    return ng.LocalProgramHost(
+        build_priced_registry(extra_node_types), owner,
+        budget_ceiling if budget_ceiling is not None else PRICED_CEILING,
+        node_context=context, binding_label="e2e-openrouter",
+        sqlite_directory=sqlite_directory, **kwargs)
+
+
+# A policy ceiling with room for model tokens and money.
+PRICED_CEILING = ceiling(model_tokens=10_000_000, monetary_microunits=10_000_000)
+
+
+def provider_archive(directory, base_url, owner="tenant:priced", *, provision):
+    """NativeArchive custody for a durable host's provider journal.
+
+    The key file lives apart from the records, in an owner-only directory.
+    """
+    custody = os.path.join(directory, "custody")
+    os.makedirs(custody, mode=0o700, exist_ok=True)
+    records, key = os.path.join(custody, "records"), os.path.join(custody, "archive-key")
+    descriptor = openrouter_descriptor(base_url, input_limits={PRICED_MODEL: PRICED_INPUT_LIMIT})
+    opened = (ng.NativeArchive.provision if provision else ng.NativeArchive.open)(
+        records, key, owner, descriptor)
+    if not isinstance(opened, ng.NativeArchive):
+        raise RuntimeError(f"native archive: {opened}")
+    return opened
+
+
+def priced_budget(**overrides):
+    """A run budget with room for model tokens and money."""
+    values = dict(model_tokens=1_000_000, monetary_microunits=1_000_000)
+    values.update(overrides)
+    return budget(**values)
+
+
+def route_ceiling_hold(model=PRICED_MODEL, input_tokens=PRICED_INPUT_LIMIT, output_tokens=OUTPUT_CAP):
+    """The reservation the catalog makes for one call, in microunits (rounded up)."""
+    with open(CATALOG_PATH, encoding="utf-8") as handle:
+        catalog = json.load(handle)
+    entry = next(e for e in catalog["entries"]
+                 if e["origin"] == "openrouter" and model in [e["model"], *e.get("aliases", [])])
+    ceiling_rates = entry["route_ceiling"]
+
+    def micro(rate):  # USD per million tokens -> micro-USD per million tokens
+        whole, _, fraction = rate.partition(".")
+        return int(whole) * 1_000_000 + int((fraction + "000000")[:6])
+
+    top_input = max(micro(ceiling_rates[key]) for key in ("input", "cache_read", "cache_write")
+                    if key in ceiling_rates)
+    exact = input_tokens * top_input + output_tokens * micro(ceiling_rates["output"])
+    return -(-exact // 1_000_000)
