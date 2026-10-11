@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=9f39d7f45e349f711b78286906fa619a7f2c2ab5b284284d204c4970b2999f8f -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=907ec7240b5062b879e11564967eeba0a334b88d55f30d5d97eb56ca2d1b5d14 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -33,6 +33,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 수정됨
 
+- **병렬 도구 dispatch의 fallback이 잡은 도구 실패가 올바른 JSON이 됩니다.** 여러 호출을 묶은 batch에서 호출별 오류 처리 밖에서 실패한 호출의 도구 메시지를 문자열 연결로 `{"error": "..."}` 형태로 만들었기 때문에, 예외 텍스트에 따옴표, 역슬래시, 줄바꿈이 있으면 잘못된 JSON이 되었습니다. 이제 JSON 라이브러리로 직렬화합니다.
 - **`outputSchema`를 선언한 MCP 도구의 오류 메시지가 보존됩니다.** 클라이언트가 `isError`를 확인하기 전에 output schema를 검증했기 때문에, `structuredContent` 없는 정상적인 오류 결과가 "MCP tool advertised outputSchema but returned no structuredContent"로 실패했고 `[FUNCTION_NOT_FOUND] No function found named 'x'` 같은 도구의 메시지는 호출자에게도 모델에게도 전달되지 않았습니다. 이제 MCP 명세가 허용하고 공식 Python SDK가 하는 것처럼 오류 결과는 output schema 검증을 건너뛰며, 성공 결과는 계속 검증합니다.
 - **Program publication은 node handle 이동 대입에 의존하지 않고 libc++에서 빌드됩니다.** 모든 index publication 뒤 추출한 handle을 직접 초기화해 라이브러리별 `noexcept` trait 없이 commit 원자성을 유지합니다.
 - **Windows interface-6 archive fixture는 비공개 custody 디렉터리를 원자적으로 생성합니다.** 상속을 차단한 현재 사용자 전용 DACL로 native archive admission을 충족하며 outcome·금액 근거·replay·잘못된 binding 검증을 모두 유지합니다.

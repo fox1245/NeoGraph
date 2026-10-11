@@ -282,11 +282,11 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
                     && error.code() == asio::error::operation_aborted) {
                     throw graph::CancelledException("tool operation aborted");
                 }
-                m.content = std::string(R"({"error": ")") + error.what() + "\"}";
+                m.content = json{{"error", error.what()}}.dump();
             } catch (const std::exception& e) {
-                m.content = std::string(R"({"error": ")") + e.what() + "\"}";
+                m.content = json{{"error", e.what()}}.dump();
             } catch (...) {
-                m.content = R"({"error": "unknown tool failure"})";
+                m.content = json{{"error", "unknown tool failure"}}.dump();
             }
             if (execution.effect_broker) {
                 m.tool_status = std::string(to_string(ToolTerminalStatus::ReconciliationRequired));

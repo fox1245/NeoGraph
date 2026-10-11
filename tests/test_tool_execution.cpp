@@ -545,6 +545,34 @@ TEST(ToolDispatch, EmitsTypedTerminalStatusInToolMessages) {
     EXPECT_EQ(serialized.at("tool_status"), "succeeded");
 }
 
+// Tool lookup runs outside a worker's own error handling, so a throwing
+// get_name() reaches the batch fallback. Its message must stay valid JSON.
+TEST(ToolDispatch, BatchFallbackErrorIsEscapedJson) {
+    static const std::string message =
+        "tool said \"no\" at C:\\tools\\probe\nsecond line\ttab";
+    class ThrowingNameTool final : public Tool {
+    public:
+        ChatTool get_definition() const override {
+            return {"probe", "throws on lookup", json{{"type", "object"}}};
+        }
+        std::string execute(const json&) override { return "unreachable"; }
+        std::string get_name() const override { throw std::runtime_error(message); }
+    };
+    ThrowingNameTool tool;
+    const auto messages = neograph::async::run_sync(dispatch_tool_calls(
+        {ToolCall{"call-a", "probe", "{}"}, ToolCall{"call-b", "probe", "{}"}},
+        {&tool}, {}, {}, {}));
+    ASSERT_EQ(messages.size(), 2U);
+    for (const auto& item : messages) {
+        SCOPED_TRACE(item.tool_call_id);
+        const auto content = json::parse(item.content);
+        ASSERT_TRUE(content.is_object()) << item.content;
+        EXPECT_EQ(content.at("error").get<std::string>(), message);
+    }
+    EXPECT_EQ(messages[0].tool_call_id, "call-a");
+    EXPECT_EQ(messages[1].tool_call_id, "call-b");
+}
+
 TEST(ToolExecutionController, RetriesOnlyAfterPolicyAllowsIdempotentCalls) {
     FlakyProbeTool tool;
     auto policies = std::make_shared<ToolExecutionPolicyRegistry>();

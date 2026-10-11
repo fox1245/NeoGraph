@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=9f39d7f45e349f711b78286906fa619a7f2c2ab5b284284d204c4970b2999f8f -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=907ec7240b5062b879e11564967eeba0a334b88d55f30d5d97eb56ca2d1b5d14 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -35,6 +35,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 
+- **并行工具 dispatch 的 fallback 捕获的工具失败现在是合法 JSON。** 在多调用 batch 中，若某个调用在逐调用错误处理之外失败，其工具消息以字符串拼接构造为 `{"error": "..."}`，异常文本中的引号、反斜杠或换行会产生非法 JSON。现在改用 JSON 库序列化。
 - **声明了 `outputSchema` 的 MCP 工具的错误消息得以保留。** 客户端在检查 `isError` 之前就验证 output schema，因此不带 `structuredContent` 的合法错误结果会以 "MCP tool advertised outputSchema but returned no structuredContent" 失败，`[FUNCTION_NOT_FOUND] No function found named 'x'` 之类的工具消息既到不了调用方，也到不了模型。现在按照 MCP 规范的允许和官方 Python SDK 的做法，错误结果跳过 output schema 验证；成功结果仍会验证。
 - **Program publication无需node handle移动赋值即可使用libc++构建。** 在所有index publication之后直接初始化提取的handle，不依赖库特定的`noexcept` trait，同时保留commit原子性。
 - **Windows interface-6 archive fixture原子地创建私有custody目录。** 禁止继承、仅允许当前用户的DACL满足native archive admission，保留所有outcome、金额证据、replay和错误binding检查。
