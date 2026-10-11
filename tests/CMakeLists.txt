@@ -530,8 +530,17 @@ endif()
 
 include(GoogleTest)
 
+# gtest_discover_tests lists each test binary's tests after it is built and
+# gives up after 5 s by default. On a loaded CI runner (seen on the Windows
+# Visual Studio lane) listing a large binary can take longer, which fails the
+# build, so every test binary is discovered through this wrapper with a 120 s
+# limit. Extra arguments are passed through unchanged.
+function(neograph_discover_tests target)
+    gtest_discover_tests(${target} DISCOVERY_TIMEOUT 120 ${ARGN})
+endfunction()
+
 if(TARGET neograph_mcp_hook_rpc_tests)
-    gtest_discover_tests(neograph_mcp_hook_rpc_tests)
+    neograph_discover_tests(neograph_mcp_hook_rpc_tests)
 endif()
 
 # Keep durable runtime-contract verification independent from optional provider
@@ -544,7 +553,7 @@ target_link_libraries(neograph_runtime_context_tests PRIVATE
     neograph::core
     GTest::gtest_main
 )
-gtest_discover_tests(neograph_runtime_context_tests)
+neograph_discover_tests(neograph_runtime_context_tests)
 
 # Hook planning is Core-only and intentionally does not depend on providers,
 # model tool calls, or optional transport libraries.
@@ -556,7 +565,7 @@ target_link_libraries(neograph_hook_tests PRIVATE
     neograph::core
     GTest::gtest_main
 )
-gtest_discover_tests(neograph_hook_tests)
+neograph_discover_tests(neograph_hook_tests)
 
 add_executable(neograph_hook_rpc_tests
     test_hook_rpc.cpp
@@ -565,7 +574,7 @@ target_link_libraries(neograph_hook_rpc_tests PRIVATE
     neograph::core
     GTest::gtest_main
 )
-gtest_discover_tests(neograph_hook_rpc_tests)
+neograph_discover_tests(neograph_hook_rpc_tests)
 
 add_executable(neograph_context_store_tests
     test_context_store.cpp
@@ -574,7 +583,7 @@ target_link_libraries(neograph_context_store_tests PRIVATE
     neograph::core
     GTest::gtest_main
 )
-gtest_discover_tests(neograph_context_store_tests)
+neograph_discover_tests(neograph_context_store_tests)
 
 if(NEOGRAPH_BUILD_SQLITE)
     # Keep runtime-store migration and outcome lifecycle tests independently
@@ -589,7 +598,7 @@ if(NEOGRAPH_BUILD_SQLITE)
         SQLite::SQLite3
         GTest::gtest_main
     )
-    gtest_discover_tests(neograph_sqlite_runtime_store_tests)
+    neograph_discover_tests(neograph_sqlite_runtime_store_tests)
     if(TARGET neograph::llm)
         target_link_libraries(neograph_sqlite_runtime_store_tests PRIVATE neograph::llm)
         target_compile_definitions(neograph_sqlite_runtime_store_tests PRIVATE NEOGRAPH_SQLITE_TOOL_TESTS_HAVE_LLM)
@@ -606,7 +615,7 @@ target_link_libraries(neograph_runtime_turn_tests PRIVATE
     SchemaProvider::transport
     GTest::gtest_main
 )
-gtest_discover_tests(neograph_runtime_turn_tests)
+neograph_discover_tests(neograph_runtime_turn_tests)
 
 if(TARGET neograph::llm)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -643,7 +652,7 @@ target_link_libraries(neograph_graph_safe_point_tests PRIVATE
     neograph::core
     GTest::gtest_main
 )
-gtest_discover_tests(neograph_graph_safe_point_tests)
+neograph_discover_tests(neograph_graph_safe_point_tests)
 
 # Cross-repository compatibility metadata is owner-local. Keep its fail-closed
 # check available without making a clean public checkout depend on private files.
@@ -675,26 +684,26 @@ if(TARGET neograph_program_tests)
         # checkpoint fixture while other test cases remain parallelizable.
         set(NEOGRAPH_PROGRAM_PG_LOCKED_TESTS
             "ProgramCatalogTest.PostgreSQLProgramStoreReopensActivationAndOwnerVisibility:ProgramTransitionStoreTest.PostgreSQL*:*ProgramChildSynthesisPersistence.*/*PostgreSQL*:*ProgramChildSynthesisCrash.*/*PostgreSQL*:ProgramChildSynthesisPostgreSQL.*")
-        gtest_discover_tests(neograph_program_tests
+        neograph_discover_tests(neograph_program_tests
             TEST_FILTER "${NEOGRAPH_PROGRAM_PG_LOCKED_TESTS}"
             PROPERTIES RESOURCE_LOCK postgres_test_db)
-        gtest_discover_tests(neograph_program_tests
+        neograph_discover_tests(neograph_program_tests
             TEST_FILTER "-${NEOGRAPH_PROGRAM_PG_LOCKED_TESTS}")
     else()
-        gtest_discover_tests(neograph_program_tests)
+        neograph_discover_tests(neograph_program_tests)
     endif()
 endif()
 if(TARGET neograph_harness_program_store_tests)
-    gtest_discover_tests(neograph_harness_program_store_tests)
+    neograph_discover_tests(neograph_harness_program_store_tests)
 endif()
 if(TARGET neograph_a2a_agent_card_candidate_tests)
-    gtest_discover_tests(neograph_a2a_agent_card_candidate_tests)
+    neograph_discover_tests(neograph_a2a_agent_card_candidate_tests)
 endif()
 if(TARGET neograph_acp_tests)
-    gtest_discover_tests(neograph_acp_tests)
+    neograph_discover_tests(neograph_acp_tests)
 endif()
 if(TARGET neograph_quickjs_tests)
-    gtest_discover_tests(neograph_quickjs_tests)
+    neograph_discover_tests(neograph_quickjs_tests)
 endif()
 if(TARGET neograph_quickjs)
     add_test(NAME QuickJS.MsvcPortSource
@@ -720,7 +729,7 @@ if(TARGET neograph_mcp_stdio_fd_fallback)
     endif()
 endif()
 if(TARGET neograph_a2a_agent_card_candidate_tests)
-    gtest_discover_tests(neograph_a2a_agent_card_candidate_tests)
+    neograph_discover_tests(neograph_a2a_agent_card_candidate_tests)
 endif()
 
 if(NEOGRAPH_BUILD_POSTGRES)
@@ -792,22 +801,22 @@ if(NEOGRAPH_BUILD_POSTGRES)
     # tables; the Postgres suite's drop_schema() must not race those fixtures.
     set(NEOGRAPH_PG_LOCKED_TESTS
         "PostgresCheckpointTest.*:ChannelWriteModeTest.OverwriteSurvivesReplayThroughPostgres:SubgraphPersistence.PostgreSQL*")
-    gtest_discover_tests(neograph_tests
+    neograph_discover_tests(neograph_tests
         TEST_FILTER "${NEOGRAPH_PG_LOCKED_TESTS}"
         PROPERTIES RESOURCE_LOCK postgres_test_db
     )
-    gtest_discover_tests(neograph_tests
+    neograph_discover_tests(neograph_tests
         TEST_FILTER "-${NEOGRAPH_PG_LOCKED_TESTS}"
     )
 else()
-    gtest_discover_tests(neograph_tests)
+    neograph_discover_tests(neograph_tests)
 endif()
 
 # History preservation and summary trust, including authentic native fixtures.
 add_executable(neograph_history_compaction_tests test_history_compaction.cpp)
 target_link_libraries(neograph_history_compaction_tests PRIVATE
     neograph::core SchemaProvider::transport GTest::gtest_main)
-gtest_discover_tests(neograph_history_compaction_tests)
+neograph_discover_tests(neograph_history_compaction_tests)
 
 if(NEOGRAPH_BUILD_PROGRAM)
     add_executable(neograph_program_join_signal_tests test_program_join_signal.cpp)
@@ -815,14 +824,14 @@ if(NEOGRAPH_BUILD_PROGRAM)
         ${PROJECT_SOURCE_DIR}/src/program)
     target_compile_features(neograph_program_join_signal_tests PRIVATE cxx_std_20)
     target_link_libraries(neograph_program_join_signal_tests PRIVATE asio GTest::gtest_main)
-    gtest_discover_tests(neograph_program_join_signal_tests)
+    neograph_discover_tests(neograph_program_join_signal_tests)
 endif()
 
 if(TARGET neograph::llm AND TARGET httplib AND TARGET OpenSSL::SSL)
     add_executable(neograph_tool_result_grouping_tests test_tool_result_grouping.cpp)
     target_link_libraries(neograph_tool_result_grouping_tests PRIVATE
         neograph::core neograph::llm httplib OpenSSL::SSL OpenSSL::Crypto GTest::gtest_main)
-    gtest_discover_tests(neograph_tool_result_grouping_tests)
+    neograph_discover_tests(neograph_tool_result_grouping_tests)
 endif()
 
 if(TARGET neograph::llm)
@@ -830,7 +839,7 @@ if(TARGET neograph::llm)
         test_example_utf8_prefix.cpp test_jarvis_provider_support.cpp)
     target_link_libraries(neograph_example_support_tests PRIVATE
         neograph::core neograph::llm GTest::gtest_main)
-    gtest_discover_tests(neograph_example_support_tests)
+    neograph_discover_tests(neograph_example_support_tests)
 endif()
 
 if(TARGET neograph_program_sqlite AND TARGET neograph_sqlite AND TARGET neograph::llm)
@@ -839,7 +848,7 @@ if(TARGET neograph_program_sqlite AND TARGET neograph_sqlite AND TARGET neograph
     target_link_libraries(neograph_program_provider_journal_runtime_tests PRIVATE
         neograph::program neograph::program_sqlite neograph::sqlite
         neograph::llm SQLite::SQLite3 GTest::gtest_main)
-    gtest_discover_tests(neograph_program_provider_journal_runtime_tests)
+    neograph_discover_tests(neograph_program_provider_journal_runtime_tests)
 endif()
 
 if(NEOGRAPH_BUILD_SQLITE)
@@ -858,7 +867,7 @@ if(NEOGRAPH_BUILD_SQLITE)
             NEOGRAPH_TOOL_EFFECT_TESTS_HAVE_PROGRAM)
         target_link_libraries(neograph_tool_effect_integration_tests PRIVATE neograph::program_sqlite)
     endif()
-    gtest_discover_tests(neograph_tool_effect_integration_tests)
+    neograph_discover_tests(neograph_tool_effect_integration_tests)
 endif()
 
 if(TARGET neograph::llm)
@@ -872,7 +881,7 @@ if(TARGET neograph::llm)
     endif()
     target_include_directories(neograph_schema_provider_interface6_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/deps)
-    gtest_discover_tests(neograph_schema_provider_interface6_tests
+    neograph_discover_tests(neograph_schema_provider_interface6_tests
         PROPERTIES TIMEOUT 60 LABELS "provider;interface6;model-free")
 endif()
 
@@ -880,7 +889,7 @@ endif()
 # work packages that change Core and Program files never edit these lists.
 add_executable(neograph_text_safety_tests test_text_safety.cpp)
 target_link_libraries(neograph_text_safety_tests PRIVATE neograph::core GTest::gtest_main)
-gtest_discover_tests(neograph_text_safety_tests PROPERTIES LABELS "core;text-safety")
+neograph_discover_tests(neograph_text_safety_tests PROPERTIES LABELS "core;text-safety")
 
 if(NEOGRAPH_BUILD_PROGRAM)
     # Golden identity corpus: pins definition hashes, compiled-plan identities
@@ -894,7 +903,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         target_compile_definitions(neograph_identity_golden_tests PRIVATE
             NEOGRAPH_IDENTITY_CORPUS_HAVE_QUICKJS)
     endif()
-    gtest_discover_tests(neograph_identity_golden_tests PROPERTIES LABELS "program;identity")
+    neograph_discover_tests(neograph_identity_golden_tests PROPERTIES LABELS "program;identity")
 endif()
 
 # Bounded-exhaustive join harness: the real Scheduler and GraphEngine against
@@ -902,4 +911,4 @@ endif()
 # model). NEOGRAPH_JOIN_MODEL_BOUND=extended runs the larger bound.
 add_executable(neograph_join_model_tests test_join_exhaustive.cpp)
 target_link_libraries(neograph_join_model_tests PRIVATE neograph::core GTest::gtest_main)
-gtest_discover_tests(neograph_join_model_tests PROPERTIES LABELS "core;join-model" TIMEOUT 300)
+neograph_discover_tests(neograph_join_model_tests PROPERTIES LABELS "core;join-model" TIMEOUT 300)
