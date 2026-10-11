@@ -548,3 +548,22 @@ def test_require_acyclic_is_an_opt_in_compile_option():
     host = _stall_host("python-owner-acyclic", require_acyclic=True)
     with pytest.raises(ng.ProgramCompileError):
         host.compile(cyclic, _budget())
+
+
+def test_program_path_keeps_lint_and_fan_out_notices_off_stderr(capfd):
+    host = _trace_host("python-owner-quiet")
+    version = host.compile_admit(
+        _trace_source(
+            '.node("A", {type: "python_program_trace_node"})'
+            '.node("B", {type: "python_program_trace_node"})'
+            '.node("C", {type: "python_program_trace_node"})'
+            '.node("D", {type: "python_program_trace_node"})'
+            '.entry("A").edge("A", "B").edge("A", "C").edge("B", "D").edge("C", "D").exit("D")'
+        ),
+        _budget(),
+    )
+    result = host.run(version, {}, _budget())
+    assert result.status == ng.ProgramTerminalStatus.Completed
+    err = capfd.readouterr().err
+    assert "[neograph] lint" not in err
+    assert "executing serially" not in err

@@ -113,6 +113,12 @@ struct EngineConfig {
     /// sealed under.
     ValidationOptions validation;
 
+    /// Print engine notices to stderr: validation lint from build() and link(),
+    /// and the one-time "fan-out is executing serially" notice. Hosts that
+    /// report through their own diagnostics, such as Program admission and
+    /// runs, turn this off; validation errors still throw.
+    bool stderr_notices = true;
+
     /// Pure, context-independent nodes whose results may be reused across
     /// executions. This is an explicit CacheScope::Reusable opt-in; use the
     /// two-argument set_node_cache_enabled() API for execution-local caching.
@@ -1209,6 +1215,10 @@ private:
     /// joins the pool workers *before* executor_ and its node refs
     /// are freed.
     std::unique_ptr<asio::thread_pool> pool_;
+
+    /// EngineConfig::stderr_notices, reapplied whenever set_worker_count()
+    /// rebuilds the executor.
+    bool stderr_notices_ = true;
 
     /// Per-node result cache (opt-in via set_node_cache_enabled).
     /// Stored by value so the engine owns it; NodeExecutor holds a

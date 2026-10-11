@@ -1573,6 +1573,9 @@ ProgramVersion ProgramCatalog::materialize(
             // The compiler already validated this program; judge the sealed
             // definition by the rules it was sealed under.
             config.validation.original_rules = true;
+            // Program hosts report lint through diagnostics and cannot change
+            // the engine's worker count, so engine notices stay off stderr.
+            config.stderr_notices = false;
             graph::EngineResources resources;
             resources.registry = runtime_registry;
             // The compiled graph already retains the exact bound ToolSet.

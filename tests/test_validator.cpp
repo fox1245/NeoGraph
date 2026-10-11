@@ -669,3 +669,28 @@ TEST(Validator, E16_CyclesFailOnlyWhenAcyclicIsRequired) {
                                 {{"from", "b"}, {"to", "c"}}});
     EXPECT_TRUE(by_code(validate_with(def, {.require_acyclic = true}), "E16").empty());
 }
+
+TEST(ValidatorEngine, CoreBuildStillPrintsLintUnlessNoticesAreOff) {
+    ensure_vtypes_registered();
+    const json def = {
+        {"schema_version", 1},
+        {"nodes", {{"s", {{"type", "vnoop"}}}, {"l", {{"type", "vnoop"}}},
+                   {"r", {{"type", "vnoop"}}}, {"j", {{"type", "vnoop"}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "s"}},
+                               {{"from", "s"}, {"to", "l"}},
+                               {{"from", "s"}, {"to", "r"}},
+                               {{"from", "l"}, {"to", "j"}},
+                               {{"from", "r"}, {"to", "j"}},
+                               {{"from", "j"}, {"to", "__end__"}}})}};
+
+    testing::internal::CaptureStderr();
+    (void)GraphEngine::build(def, EngineConfig{});
+    const auto printed = testing::internal::GetCapturedStderr();
+    EXPECT_NE(printed.find("[neograph] lint [E9]"), std::string::npos) << printed;
+
+    EngineConfig quiet;
+    quiet.stderr_notices = false;
+    testing::internal::CaptureStderr();
+    (void)GraphEngine::build(def, std::move(quiet));
+    EXPECT_EQ(testing::internal::GetCapturedStderr(), "");
+}

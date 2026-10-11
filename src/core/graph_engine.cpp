@@ -110,19 +110,21 @@ json stalled_barriers(const BarrierState& state, const BarrierSpecs& specs) {
 
 constexpr const char* kBarrierStalled = "barrier_stalled";
 
-void report_validation(const ValidationReport& report, int schema_version) {
+void report_validation(const ValidationReport& report, int schema_version, bool print) {
     if (schema_version >= 1) {
         if (report.has_errors()) {
             throw std::runtime_error(
                 "graph validation failed (schema_version "
                 + std::to_string(schema_version) + "):\n" + report.summary());
         }
+        if (!print) return;
         for (const auto* warning : report.warnings()) {
             std::fprintf(stderr, "[neograph] lint [%s] %s: %s\n",
                          warning->code.c_str(), warning->path.c_str(),
                          warning->message.c_str());
         }
     } else {
+        if (!print) return;
         for (const auto* error : report.errors()) {
             std::fprintf(stderr, "[neograph] warning: [%s] %s: %s\n",
                          error->code.c_str(), error->path.c_str(),
@@ -244,7 +246,7 @@ std::unique_ptr<GraphEngine> GraphEngine::build(const json&     definition,
     // Static semantics operate on the declarative topology before factories
     // create runtime nodes. Legacy documents keep warning-only behavior.
     report_validation(GraphValidator::validate(topology, registry, config.validation),
-                      topology.schema_version);
+                      topology.schema_version, config.stderr_notices);
 
     auto cg = GraphCompiler::link(std::move(topology), config.node_context, registry);
     return link_impl(std::move(cg), std::move(config), std::move(resources), false);
@@ -328,7 +330,8 @@ std::unique_ptr<GraphEngine> GraphEngine::link(ValidatedTopology topology,
                                             : GraphRegistry::global().snapshot();
     config.node_context.registry = resources.registry;
     const auto& registry = resources.registry ? *resources.registry : GraphRegistry::global();
-    report_validation(topology.report(), topology.topology().schema_version);
+    report_validation(topology.report(), topology.topology().schema_version,
+                      config.stderr_notices);
     auto cg = GraphCompiler::link(std::move(topology).release(),
                                   config.node_context, registry);
     return link_impl(std::move(cg), std::move(config), std::move(resources), false);
@@ -352,7 +355,7 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     if (validate) {
         const auto& registry = resources.registry ? *resources.registry : GraphRegistry::global();
         report_validation(GraphValidator::validate(cg, registry, config.validation),
-                          cg.schema_version);
+                          cg.schema_version, config.stderr_notices);
     }
 
     auto engine = std::unique_ptr<GraphEngine>(new GraphEngine());
@@ -446,6 +449,7 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     // bodies, large fan-out, etc.) call `set_worker_count_auto()` or
     // `set_worker_count(N)` explicitly. The opt-in surface is
     // documented in `docs/migration-v0.4-to-v1.0.md`.
+    engine->stderr_notices_ = config.stderr_notices;
     engine->set_worker_count(config.worker_count);
     return engine;
 }
@@ -521,6 +525,8 @@ void GraphEngine::set_worker_count(std::size_t n) {
         pool_.reset();
         executor_ = std::make_unique<NodeExecutor>(nodes_, channel_defs_, std::move(retry_lookup),
                                                    std::move(registry), nullptr, &node_cache_);
+        // The notice is one-shot per executor; marking it sent keeps it quiet.
+        if (!stderr_notices_) executor_->warned_serial_fanout_.store(true);
         return;
     }
     pool_ = std::make_unique<asio::thread_pool>(n);

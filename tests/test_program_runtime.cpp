@@ -5886,6 +5886,31 @@ TEST(ProgramRuntimeTest, JavaScriptJoinCollectsFailuresInDeclarationOrder) {
     EXPECT_EQ(completed_calls.load(), 0U);
 }
 
+TEST(ProgramRuntimeTest, ProgramPathKeepsLintAndFanOutNoticesOffStderr) {
+    // Program admission reports lint through diagnostics, and Program hosts
+    // cannot change EngineConfig::worker_count, so neither belongs on stderr.
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    testing::internal::CaptureStderr();
+    const auto version = fixture.admit_javascript(
+        "export function define() {\n"
+        "  const graph = ng.graph(\"main\");\n"
+        "  graph.channel(\"value\", {reducer: \"runtime-overwrite\", initial: \"\"});\n"
+        "  for (const name of [\"split\", \"left\", \"right\", \"join\"])\n"
+        "    graph.node(name, {type: \"runtime-completed\"});\n"
+        "  graph.entry(\"split\").edge(\"split\", \"left\").edge(\"split\", \"right\");\n"
+        "  graph.edge(\"left\", \"join\").edge(\"right\", \"join\").exit(\"join\");\n"
+        "  return graph;\n"
+        "}\n");
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(), "trace-quiet-stderr", {}});
+    const auto output = testing::internal::GetCapturedStderr();
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(output.find("[neograph] lint"), std::string::npos) << output;
+    EXPECT_EQ(output.find("executing serially"), std::string::npos) << output;
+}
+
 TEST(ProgramRuntimeTest, JavaScriptCoreFailureKeepsTheTraceOfCompletedNodes) {
     AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
     const auto      version = fixture.admit_javascript(
