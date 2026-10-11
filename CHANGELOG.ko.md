@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=1c2f1ede1fdd1bee82fb8b7a4e7d43e581ce6ede2a2bae8dd98e0f6b00a1a3e3 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=e5b466acd86fb3de789e2d2dd34699f615b8366f014fec2e382ec522b1ded62d -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -51,6 +51,9 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 수정됨
 
+- **Program: 재개된 시도의 크래시 복구가 재개 값으로 이어집니다 (#377).** 복구는 `resume()`, `reconcile()` 또는 `fork()`가 시작한 시도를, 그 시도가 체크포인트를 재개할 때 쓴 값이 아니라 실행 입력으로 다시 실행했습니다. `define()` Program의 노드는 실행 입력을 재개 값으로 보았고, `main()` Program의 중단된 `callCore`는 명령의 입력으로 재개되었으며, 제공자가 바인딩되어 있으면 SQLite 저널이 "logical call binding conflict"로 실패했습니다(fail closed). 이제 실행 레코드가 그 값 `ProgramRunRecord::attempt_resume()`을 시도가 시작되기 전에 내구적으로 담고, 복구는 그 값으로 재개합니다. 이 값을 담은 레코드는 실행 레코드 저장 스키마 5를 쓰고, 다른 모든 레코드는 스키마, 바이트, id를 그대로 유지하며, 저장된 레코드는 바뀌지 않고 로드됩니다. `ProgramRunRecordData`에 멤버가 추가되었으므로 C++ 소비자를 다시 빌드하세요([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참고). 포크된 `main()` Program의 첫 시도는 아직 다루지 않습니다.
+- **Program: 재생된 제공자 호출의 토큰은 실행당 한 번만 청구됩니다 (#378).** SQLite 제공자 저널을 쓰는 중단과 재개에서, 재개된 시도는 이전 시도가 저널에 기록하고 정산한 호출의 모델 토큰을 다시 청구했습니다. 새 요청이 없는데도 남은 `model_tokens`가 999,976에서 999,952로 줄었습니다. 저널은 여전히 그 호출들을 알아보므로 다시 보내지도 다시 세지도 않지만, 이제 시도에는 그 시도가 직접 기록한 호출만 청구합니다. #372의 금액 회계가 이미 그렇게 했습니다. 크래시 전에 기록된 호출은 복구 후에도 한 번 청구되고, 노드 재시도의 새 호출은 청구됩니다.
+- **Program: 조인은 자신을 멈춘 실패를 보고합니다 (#379).** fail-fast `ng.all`은 선언 순서로 첫 번째 실패 멤버를 보고했기 때문에, 먼저 선언되었고 다른 멤버가 실패해서 취소된 형제가 그 실패를 대신했습니다. `P_MONEY_BUDGET`으로 거절된 멤버가 작업 취소로 보고되었습니다. 이제 조인은 자신을 멈춘 실패를 낸 멤버를 보고하며, `collect`에서는 여전히 선언 순서로 첫 실패를 보고합니다. 계획 수준의 `parallel` 작업에도 같은 결함이 있어서 취소된 브랜치가 자신을 취소한 실패를 대신했습니다. `ng.race`와 `ng.quorum`은 이미 올바르게 동작했고, 이제 테스트가 둘 다 고정합니다.
 - **노드 재시도가 더 이상 이전 시도의 효과와 충돌하지 않습니다 (#364).** 하나의 호출 범위가 재시도 루프 전체를 감싸고 있어서 모든 시도가 첫 시도의 효과 태스크 id와 호출 서수를 재사용했습니다. 그래서 `ToolEffectBroker` 아래에서 재시도는 첫 시도의 영수증을 재생하거나 인수가 바뀌었다는 이유로 거부되었고, 재시도 중 크래시가 나면 첫 시도의 슬롯에서 재개되었습니다.
 - **확인되지 않은 Program 제공자 디스패치는 불확실한 결과입니다 (#364).** SQLite 제공자 저널이 디스패치 마커를 커밋한 뒤 전송 계층이 예외를 던지면 원래 예외가 그대로 다시 던져졌고, 노드 재시도가 요청을 다시 보낼 수 있었습니다. 이제 저널은 이 경우와, 해결되지 않은 슬롯을 나중에 다시 호출하는 경우에 결과가 없는 `ProviderOutcomeError`인 `ProgramProviderDispatchUncertainError`를 던집니다. 이 실패는 재시도되거나 라우팅되지 않습니다.
 - **Program: `LocalProgramHost.resume(run_id, value)`가 pending id 없이 동작합니다 (#359).** 대기 중인 호출이 하나면 그 호출을 재개하고, 없거나 여러 개면 `result.interrupt.pending_input.call_id`를 안내하는 `ValueError`를 냅니다. 명시한 id는 정확히 일치해야 하는 계약을 유지합니다.

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=1c2f1ede1fdd1bee82fb8b7a4e7d43e581ce6ede2a2bae8dd98e0f6b00a1a3e3 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=e5b466acd86fb3de789e2d2dd34699f615b8366f014fec2e382ec522b1ded62d -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -53,6 +53,9 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 
+- **Program：恢复的尝试在崩溃恢复后以其恢复值继续 (#377)。** 崩溃恢复会以运行的输入重新执行由 `resume()`、`reconcile()` 或 `fork()` 启动的尝试，而不是该尝试恢复其检查点时使用的值。`define()` Program 的节点把运行的输入当作恢复值，`main()` Program 中被中断的 `callCore` 以命令的输入恢复，绑定了提供者时 SQLite 日志会以 "logical call binding conflict" 失败（fail closed）。运行记录现在在尝试开始前持久地保存该值 `ProgramRunRecord::attempt_resume()`，恢复时以它继续。带有该值的记录使用运行记录存储模式 5；其他记录保持各自的模式、字节和 id，已存储的记录照常加载。`ProgramRunRecordData` 新增了成员：请重新构建 C++ 使用方（参见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。派生（fork）的 `main()` Program 的第一次尝试尚未覆盖。
+- **Program：重放的提供者调用的令牌每次运行只计费一次 (#378)。** 在使用 SQLite 提供者日志的中断与恢复中，恢复的尝试会再次计入先前尝试已记录并结算的调用的模型令牌：没有新请求，剩余的 `model_tokens` 却从 999,976 降到 999,952。日志仍然识别这些调用，因此既不重发也不重复计数，但只为尝试计入它自己记录的调用，#372 的金额计费已经这样做。崩溃前记录的调用在恢复后仍计费一次，节点重试的新调用照常计费。
+- **Program：join 报告使其停止的失败 (#379)。** fail-fast 的 `ng.all` 按声明顺序报告第一个失败的成员，因此一个先声明、因另一成员失败而被取消的兄弟会取代那个失败：以 `P_MONEY_BUDGET` 被拒的成员被报告为操作已取消。join 现在报告使其停止的那个成员的失败；使用 `collect` 时仍按声明顺序报告第一个失败。计划级的 `parallel` 操作也有同样的缺陷，被取消的分支会取代使其取消的失败。`ng.race` 与 `ng.quorum` 原本就是正确的，现在由测试固定。
 - **节点重试不再与先前尝试的效果冲突 (#364)。** 过去一个调用作用域覆盖了整个重试循环，所以每次尝试都复用第一次尝试的效果任务 id 与调用序号：在 `ToolEffectBroker` 下，重试会重放第一次尝试的回执，或因参数改变而被拒绝；重试期间发生崩溃后，恢复也会落在第一次尝试的槽位上。
 - **未确认的 Program Provider 分发是结果不确定的效果 (#364)。** 当 SQLite Provider 日志提交分发标记之后传输层抛出异常时，原始异常被直接重新抛出，节点重试可能再次发送请求。现在日志在这种情况下，以及稍后再次调用尚未解决的槽位时，抛出 `ProgramProviderDispatchUncertainError`（一个不带结果的 `ProviderOutcomeError`）；它既不会被重试也不会被路由。
 - **Program：`LocalProgramHost.resume(run_id, value)` 无需 pending id 即可使用 (#359)。** 只有一个等待中的调用时恢复该调用；没有或有多个时抛出指向 `result.interrupt.pending_input.call_id` 的 `ValueError`。显式 id 仍保持精确匹配的约定。
