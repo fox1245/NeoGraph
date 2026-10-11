@@ -339,12 +339,13 @@ credentials. Credential-bearing modes (`secret_injected`, `host_brokered`),
 remote HTTP MCP, and arbitrary shell/CLI execution remain unsupported.
 
 The installable example supports adoption with the provider worker executor only.
-It consumes a separately reviewed JSON approval, never auto-consent environment
-flags:
+It consumes a separately reviewed JSON approval file, never auto-consent
+environment flags. `NEOGRAPH_HARNESS_MCP_APPROVAL` holds the file's path (at
+most 1 MiB), not its contents:
 
 ```bash
 export NEOGRAPH_HARNESS_MCP_SOURCE="$HOME/.config/opencode/opencode.json"
-export NEOGRAPH_HARNESS_MCP_APPROVAL="$(cat approved-mcp.json)"
+export NEOGRAPH_HARNESS_MCP_APPROVAL="$PWD/approved-mcp.json"
 neograph-harness-mcp --executor provider
 ```
 

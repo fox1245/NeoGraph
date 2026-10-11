@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=2e87c5474a8d04c4b693c8a6fee8af73bf5617ee1ac23320a7fb9c252b6ed66d -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=28a9a662c3ef7d8d9cb07fd906175bab8441ae5661e102ae500057418c3db496 -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -185,11 +185,11 @@ neograph-harness-mcp --executor provider
 
 采用的客户端使用绝对可执行路径、规范 cwd、替换式环境变量允许列表、有界协议帧及 stderr，以及进程树关闭机制。Windows 启动使用继承句柄允许列表和关闭即终止的 Job Object。状态记录仅包含哈希和名称，不包含 argv、原始配置、stderr 或凭证。携带凭证的模式（`secret_injected`、`host_brokered`）、远程 HTTP MCP 和任意 shell/CLI 执行仍不受支持。
 
-可安装示例仅支持与提供者工作者执行器一起采用配置。它读取经过单独审查的 JSON 批准对象，不使用自动同意环境标记：
+可安装示例仅支持与提供者工作者执行器一起采用配置。它读取经过单独审查的 JSON 批准文件，不使用自动同意环境标记。`NEOGRAPH_HARNESS_MCP_APPROVAL` 保存该文件的路径（不超过 1 MiB），而不是其内容：
 
 ```bash
 export NEOGRAPH_HARNESS_MCP_SOURCE="$HOME/.config/opencode/opencode.json"
-export NEOGRAPH_HARNESS_MCP_APPROVAL="$(cat approved-mcp.json)"
+export NEOGRAPH_HARNESS_MCP_APPROVAL="$PWD/approved-mcp.json"
 neograph-harness-mcp --executor provider
 ```
 

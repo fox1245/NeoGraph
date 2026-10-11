@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=2e87c5474a8d04c4b693c8a6fee8af73bf5617ee1ac23320a7fb9c252b6ed66d -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=28a9a662c3ef7d8d9cb07fd906175bab8441ae5661e102ae500057418c3db496 -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -192,11 +192,11 @@ neograph-harness-mcp --executor provider
 
 採用したクライアントは、絶対パスの実行ファイル、正規化済み cwd、許可リストによる置換環境、上限付きのプロトコルフレーム・stderr、プロセスツリーの停止を使います。Windows の起動では、継承ハンドルの許可リストと、クローズ時に終了する Job Object を使います。ステータスレコードにはハッシュと名前を含め、argv、生の設定、stderr、認証情報は含めません。認証情報を使うモード（`secret_injected`、`host_brokered`）、リモート HTTP MCP、任意のシェル・CLI 実行は未対応です。
 
-インストール可能なサンプルで採用を使えるのは、プロバイダーワーカー実行器のみです。別途レビューされた JSON 承認を受け取り、自動同意の環境変数フラグは使いません。
+インストール可能なサンプルで採用を使えるのは、プロバイダーワーカー実行器のみです。別途レビューされた JSON 承認ファイルを受け取り、自動同意の環境変数フラグは使いません。`NEOGRAPH_HARNESS_MCP_APPROVAL` にはファイルの内容ではなくパス（最大 1 MiB）を指定します。
 
 ```bash
 export NEOGRAPH_HARNESS_MCP_SOURCE="$HOME/.config/opencode/opencode.json"
-export NEOGRAPH_HARNESS_MCP_APPROVAL="$(cat approved-mcp.json)"
+export NEOGRAPH_HARNESS_MCP_APPROVAL="$PWD/approved-mcp.json"
 neograph-harness-mcp --executor provider
 ```
 

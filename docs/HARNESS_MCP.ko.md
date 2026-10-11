@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=2e87c5474a8d04c4b693c8a6fee8af73bf5617ee1ac23320a7fb9c252b6ed66d -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=28a9a662c3ef7d8d9cb07fd906175bab8441ae5661e102ae500057418c3db496 -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -274,11 +274,12 @@ Credential-bearing `secret_injected`/`host_brokered` mode, remote HTTP MCP,
 임의 shell/CLI 실행은 지원하지 않는다.
 
 설치 example의 adoption은 provider worker executor만 지원한다.
-별도 review된 JSON approval을 받으며 auto-consent environment flag를 쓰지 않는다:
+별도 review된 JSON approval 파일을 받으며 auto-consent environment flag를 쓰지 않는다.
+`NEOGRAPH_HARNESS_MCP_APPROVAL`에는 파일 내용이 아니라 파일 경로(최대 1 MiB)를 넣는다:
 
 ```bash
 export NEOGRAPH_HARNESS_MCP_SOURCE="$HOME/.config/opencode/opencode.json"
-export NEOGRAPH_HARNESS_MCP_APPROVAL="$(cat approved-mcp.json)"
+export NEOGRAPH_HARNESS_MCP_APPROVAL="$PWD/approved-mcp.json"
 neograph-harness-mcp --executor provider
 ```
 
