@@ -896,7 +896,9 @@ std::shared_ptr<StdioSession> StdioSession::spawn_impl(
             break;
         }
         constexpr char message[] = "MCP stdio exec failed\n";
-        (void)::write(STDERR_FILENO, message, sizeof(message) - 1);
+        // Best effort: exit status 127 reports the failure if stderr is unusable.
+        [[maybe_unused]] const auto written =
+            ::write(STDERR_FILENO, message, sizeof(message) - 1);
         std::_Exit(127);
     }
 
