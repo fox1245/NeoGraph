@@ -332,15 +332,35 @@ std::string ParseReport::summary() const {
                                     diagnostics.front().code == "GC_REGISTRY_MISS")) {
         return diagnostics.front().message;
     }
-    std::string message =
-        "strict topology validation failed, " + std::to_string(diagnostics.size()) + " error(s):";
+    // Only unknown keys and node config schemas are checked by strict parsing
+    // alone, so only they carry the lenient fallback hint. A reserved node name
+    // or a missing entry is an error at every schema version (#375).
+    bool        lenient_relaxes = false;
+    std::string fixes;
+    for (const auto& diagnostic : diagnostics) {
+        const auto& code = diagnostic.code;
+        if (code == "GC_UNKNOWN_FIELD" || code == "GC_NODE_CONFIG") lenient_relaxes = true;
+        const char* fix = code == "GC_RESERVED_NODE"
+            ? "Rename the node: \"__start__\" and \"__end__\" mark the graph's entry and "
+              "exit and may appear only in edges."
+            : code == "GC_NO_ENTRY"
+            ? "Add an edge from \"__start__\" to the node the run starts at, e.g. "
+              "{\"from\": \"__start__\", \"to\": \"<node>\"}."
+            : nullptr;
+        if (fix && fixes.find(fix) == std::string::npos) fixes += std::string("\n") + fix;
+    }
+    std::string message = std::string(lenient_relaxes ? "strict " : "") +
+        "topology validation failed, " + std::to_string(diagnostics.size()) + " error(s):";
     for (const auto& diagnostic : diagnostics) {
         message += "\n  - " + diagnostic.message;
     }
-    message +=
-        "\nAnnotation keys ('_'/'x-' prefixes) are always allowed. "
-        "Remove 'schema_version' to fall back to lenient parsing. "
-        "See docs/troubleshooting.md \"Strict topology validation\".";
+    message += fixes;
+    if (lenient_relaxes) {
+        message +=
+            "\nAnnotation keys ('_'/'x-' prefixes) are always allowed. "
+            "Remove 'schema_version' to fall back to lenient parsing. "
+            "See docs/troubleshooting.md \"Strict topology validation\".";
+    }
     return message;
 }
 

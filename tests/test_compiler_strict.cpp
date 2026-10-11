@@ -684,6 +684,60 @@ TEST(CompilerDiagnostics, ReservedNodeNamesAreRejectedInEverySchemaVersion) {
     }
 }
 
+namespace {
+std::string parse_error(const json& def) {
+    try {
+        (void)GraphCompiler::parse(def);
+    } catch (const std::runtime_error& error) {
+        return error.what();
+    }
+    ADD_FAILURE() << "expected the document to be rejected: " << def.dump();
+    return {};
+}
+constexpr std::string_view kLenientHint = "Remove 'schema_version'";
+}  // namespace
+
+// Issue #375: lenient parsing does not relax a reserved node name or a missing
+// entry, so their errors say what to fix instead of suggesting to remove
+// schema_version, with or without one.
+TEST(CompilerDiagnostics, EveryVersionErrorsGiveAFixInsteadOfTheLenientHint) {
+    ensure_types_registered();
+    for (const int version : {0, 1}) {
+        auto reserved                = minimal_strict();
+        reserved["nodes"]["__end__"] = json{{"type", "snoop"}};
+        auto no_entry                = minimal_strict();
+        no_entry["edges"]            = json::array({{{"from", "a"}, {"to", "__end__"}}});
+        if (version == 0) {
+            reserved = without_key(reserved, "schema_version");
+            no_entry = without_key(no_entry, "schema_version");
+        }
+        const auto reserved_error = parse_error(reserved);
+        EXPECT_EQ(reserved_error.find(kLenientHint), std::string::npos) << reserved_error;
+        EXPECT_NE(reserved_error.find("Rename the node"), std::string::npos) << reserved_error;
+        const auto no_entry_error = parse_error(no_entry);
+        EXPECT_EQ(no_entry_error.find(kLenientHint), std::string::npos) << no_entry_error;
+        EXPECT_NE(no_entry_error.find("Add an edge from \"__start__\""), std::string::npos)
+            << no_entry_error;
+    }
+}
+
+// Unknown keys are what lenient parsing relaxes, so they keep the hint, also
+// next to an error that applies at every version.
+TEST(CompilerDiagnostics, LenientHintStaysForErrorsLenientParsingRelaxes) {
+    ensure_types_registered();
+    auto unknown     = minimal_strict();
+    unknown["typo"]  = true;
+    const auto alone = parse_error(unknown);
+    EXPECT_NE(alone.find(kLenientHint), std::string::npos) << alone;
+    unknown["nodes"]["__start__"] = json{{"type", "snoop"}};
+    const auto mixed              = parse_error(unknown);
+    EXPECT_NE(mixed.find(kLenientHint), std::string::npos) << mixed;
+    EXPECT_NE(mixed.find("Rename the node"), std::string::npos) << mixed;
+    // A legacy document has no schema_version to remove.
+    const auto legacy = parse_error(json{{"nodes", json::array()}});
+    EXPECT_EQ(legacy.find(kLenientHint), std::string::npos) << legacy;
+}
+
 // Issue #358: without an edge from __start__ nothing runs, yet the run used to
 // report Completed. A graph with nodes but no entry is rejected.
 TEST(CompilerDiagnostics, GraphWithNodesButNoEntryIsRejected) {

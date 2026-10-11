@@ -84,3 +84,39 @@ def test_legacy_edge_fields_keep_keyed_object_compatibility(field, entry):
         field: entry,
     }
     ng.GraphEngine.compile(definition, ng.NodeContext())
+
+
+LENIENT_HINT = "Remove 'schema_version'"
+
+
+@pytest.mark.parametrize("schema_version", [None, 1], ids=["legacy", "strict"])
+@pytest.mark.parametrize(
+    "case,nodes,edges,fix",
+    [
+        ("reserved-node", {"__start__": {"type": "a"}, "a": {"type": "a"}},
+         [{"from": "__start__", "to": "a"}], "Rename the node"),
+        ("no-entry", {"a": {"type": "a"}},
+         [{"from": "a", "to": "__end__"}], 'Add an edge from "__start__"'),
+    ],
+)
+def test_every_version_errors_say_what_to_fix(case, nodes, edges, fix, schema_version):
+    # Issue #375: lenient parsing does not relax these rules, so removing
+    # schema_version cannot help; the error says what to change instead.
+    definition = {"nodes": nodes, "edges": edges}
+    if schema_version is not None:
+        definition["schema_version"] = schema_version
+    with pytest.raises(RuntimeError) as raised:
+        ng.GraphEngine.compile(definition, ng.NodeContext())
+    message = str(raised.value)
+    assert fix in message, message
+    assert LENIENT_HINT not in message, message
+
+
+def test_unknown_keys_keep_the_lenient_hint():
+    definition = {
+        "schema_version": 1,
+        "nodes": {},
+        "edgez": [],
+    }
+    with pytest.raises(RuntimeError, match=LENIENT_HINT):
+        ng.GraphEngine.compile(definition, ng.NodeContext())
