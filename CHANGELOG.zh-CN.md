@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=722acb52a20fd9db38d34d3f82d5ad53d026c052d2c85f001020e583026bfc9f -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=585d21b154dbb8d407d304ce219e9d7b22937bfb9a2ea9a96abfaa562073aef4 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -18,6 +18,8 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ### 变更
 
 - **C++ 使用方须重新构建：图和 Program 结构体增加了 member (#357, #358, #361, #367)。** `EngineConfig` 增加了 `validation` 和 `stderr_notices`，`RunMetadata` 和 `RunContext` 增加了 `shared_scheduler`，`ProgramCompilerConfig` 增加了 `require_acyclic`，`GraphEngine` 增加了一个 private member，`RunStatus` 增加了 `BarrierStalled`。这些改变了 layout：NeoGraph、C++ 使用方和 Python 扩展须一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。列出所有值的 `RunStatus` `switch` 需要一个 `BarrierStalled` 分支。
+- **节点重试与工具失败遵循同一个失败分类器 (#364)。** 节点重试循环和工具失败契约都询问同一个分类器。分类器会遍历整条原因链（`NodeExecutionError` 的原因、`std::nested_exception`、子图失败），并采用找到的最严重分类。仍会重试的：`std::runtime_error` 及其子类（包括 Program 诊断）、取消之外的 asio 错误，以及根因为上述之一的子图失败。不再重试的：根因为 `std::logic_error` 或未知异常的子图失败、`std::runtime_error` 与 `std::logic_error` 体系之外的任何异常（包括 `throw 42`），以及位于 `std::nested_exception` 之后的配额失败。工具原因链中任意位置的运行控制信号（例如工具所运行的图的失败中包含的 Hook 阻断）现在会停止运行，而不再变成工具消息。参见[节点失败契约](docs/reference-en.md#node-failure-contract)。
+- **节点重试的每次尝试都有自己的效果命名空间 (#364)。** 尝试 0 沿用任务 id（`s3:act`），因此现有日志的槽位保持不变；尝试 k 使用 `s3:act#a<k>`。因此重试会向 `ProviderCallBroker` 请求新的调用槽位而不是第一次尝试的槽位，被重试节点所运行的子图也会在新的子线程中开始。尝试 k 开始之前，一条以其命名空间为键的空待写记录会记下这次开始，因此恢复会继续该尝试并保留剩余的重试次数，而不是从尝试 0 重新开始。在 `ToolEffectBroker` 下，提交了非幂等效果的尝试绝不会被重试，并以 `NG.EffectCommitted` 失败；结果未知的效果会暂停运行以便核对，即使节点把该中断变成了错误也是如此。
 - **示例 11（Clay 聊天机器人）已重新设计。** 文本使用系统 TrueType/OpenType 字体并按 UTF-8 测量，因此韩文等文字都能显示（可用 `NEOGRAPH_CHAT_FONT`、`NEOGRAPH_CHAT_BOLD_FONT`、`NEOGRAPH_CHAT_MONO_FONT` 覆盖选择）。窗口包含显示模型与状态的标题栏、头像、带代码块的轻量 Markdown、带建议的欢迎卡片、跟随新输出的滚动条，以及在回复流式输出期间 Send 按钮变为 Stop 的输入框；Stop 和退出都会取消回复。
 - **采用 SchemaProvider `maint/interface6` 当前最新提交 `0d536be66017dfb8c4c91d21f4f62bd8ce698d55`。** 使用 OpenAI Responses 的图和 agent 工具循环，在工具的 parameter schema 不兼容 strict 时（例如未关闭 `additionalProperties` 的 MCP 工具 schema）不再以 HTTP 400（`InvalidRequest`）失败：policy 的 strict 默认值只应用于每个 object 都设置 `"additionalProperties": false` 并在 `required` 中列出每个 property 的 schema，其他工具以 `"strict": false` 发送。对不兼容的 schema 显式设置 `strict = true` 会在 dispatch 前以 `InvalidRequest` 失败，并指出工具名和第一个失败的 JSON pointer。`created` 时间戳在 chunk 之间递增的 OpenAI 兼容本地服务器的 Chat 流不再以 `ProtocolCorrupt` 失败；该值减小，或 `id`、`model` 改变时仍会失败。codec 已接受的 in-band 供应商失败（例如 Responses 的 `response.failed` 事件或缓冲的失败响应体）现在无论大小都按其自身错误码分类。此前，超过 runtime `max_error_bytes`（默认 64 KiB）的失败，例如重复 hosted `image_generation` 结果的 3 MB `response.failed`，会被报告为 `RetryClass::Never` 的 `ResourceLimit`，而不是供应商的失败。runtime 自行缓冲并解析的错误仍受 `max_error_bytes` 限制。SDK 0.3.0 与 interface/shared ABI 6 不变。
 - **采用 SchemaProvider `maint/interface6` 上已合并的 PR #25 提交 `f7cb27e68ee02f3a27d01c31af85bcac96f00963`。** `Usage::input_uncached` 在所有 family 中遵循同一规则（输入 − 缓存读取 − 缓存写入；仅在从不发送写入计数的 wire 上将缺失值视为 0）：直连 OpenAI Chat 现在也会报告该值，Responses 会减去上报的缓存写入。Gemini 的 stop 类型已由测试固定。SDK 0.3.0 与 interface/shared ABI 6 不变。
@@ -32,6 +34,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 新增
 
+- **带类型的节点失败 (#364)。** `NodeFailureError(code, public_message, retryable)` 以 `app.compile_error` 这样的作者代码使节点失败，`retryable = false` 会停止其重试循环。`node_failure_of()` 返回执行器所抛出的 `NodeExecutionError` 上附带的 `NodeFailure` 记录：代码、分类、停止重试的原因、尝试次数、可重试与可路由标志、`public_message` 以及最后一次尝试的 Tool 效果。Python 节点的异常也通过其 `code`、`retryable` 与 `public_message` 属性以相同方式读取，调用方收到的仍是原始异常。
 - **Program：`P_JS_CONTROL_CHARACTER` 警告 (#361)。** JavaScript 配置字符串中含有制表符、换行和回车以外的 C0 控制字符时（例如本想写正则单词边界的 `"\b"`），会在该字符串的调用位置发出警告。该警告只出现在编译返回的诊断中。
 - **拓扑验证遵循 scheduler 实际采用的路由，并新增报告四类问题 (#357, #358)。** 带有 conditional edge 的节点只通过其第一条 conditional edge 路由，因此 E7（不可达节点）、E8（barrier liveness）和 E11（没有通往 `__end__` 的路径）不再计入该节点的 static edge 或之后的 conditional edge。E13 报告从同时带有 conditional edge 的节点发出的 static edge，这种 edge 永远不会触发。E14 报告同一节点的第二条 conditional edge，这种 edge 永远不会路由。E15（警告）报告其 route 通向 join 或 `__end__` 以外位置的 barrier 成员；走该 route 时，运行以 barrier-stalled 结束。E16（错误，需显式启用）为需要 DAG 的宿主报告任何环；可通过 `ValidationOptions::require_acyclic`、`ProgramCompilerConfig::require_acyclic`，或 Python `ProgramCompiler` 与 `LocalProgramHost` 上的 `require_acyclic=True` 启用。既不列出 reads 也不列出 writes 的 effects 契约现在视为未声明，因此 E6 不再把 Python 节点写入的通道报告为 dead(#361)。**行为变更：** E13 和 E14 在 strict 文档（`schema_version` 1 及以上，包括所有 JavaScript Program）中是错误，因此此类图不再能编译；legacy 文档会收到警告。bundle id 不变：Program 编译按当前规则失败并通过 `compile_diagnostics` 返回其警告，但封存的是先前规则的警告（`ValidationOptions::original_rules`），准入(admission)也按这些规则 link，因此先前封存的 bundle 仍可继续 materialize。`EngineConfig::validation` 选择 `GraphEngine` build 和 link 时使用的规则。
 - **`EngineConfig::stderr_notices` (#361)。** 默认值为 `true`。为 `false` 时，`build()` 和 `link()` 不会把验证 lint 打印到 stderr（错误仍会抛出），也不会打印 fan-out 串行运行的一次性提示。Program Catalog 在关闭该选项的情况下 link 其引擎，因此 `compile_admit` 不再打印 `[neograph] lint [E6] ...`，Program 运行也不再打印提及 `EngineConfig::worker_count`（`LocalProgramHost` 用户无法设置的选项）的提示。Program lint 只通过诊断到达调用方。
@@ -41,6 +44,8 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 
+- **节点重试不再与先前尝试的效果冲突 (#364)。** 过去一个调用作用域覆盖了整个重试循环，所以每次尝试都复用第一次尝试的效果任务 id 与调用序号：在 `ToolEffectBroker` 下，重试会重放第一次尝试的回执，或因参数改变而被拒绝；重试期间发生崩溃后，恢复也会落在第一次尝试的槽位上。
+- **未确认的 Program Provider 分发是结果不确定的效果 (#364)。** 当 SQLite Provider 日志提交分发标记之后传输层抛出异常时，原始异常被直接重新抛出，节点重试可能再次发送请求。现在日志在这种情况下，以及稍后再次调用尚未解决的槽位时，抛出 `ProgramProviderDispatchUncertainError`（一个不带结果的 `ProviderOutcomeError`）；它既不会被重试也不会被路由。
 - **Program：`LocalProgramHost.resume(run_id, value)` 无需 pending id 即可使用 (#359)。** 只有一个等待中的调用时恢复该调用；没有或有多个时抛出指向 `result.interrupt.pending_input.call_id` 的 `ValueError`。显式 id 仍保持精确匹配的约定。
 - **Program：失败的运行会保留已完成节点的 trace (#359)。** `execution_trace` 列出失败前已完成的节点，`failure.core_node` 指出抛出异常的节点。失败结果的 identity 随之变化。
 - **Program：编译期 JavaScript 遵守运行预算的 wall time (#360)。** 不终止的 `define()` 会在编译器上限与预算 `wall_time_ms` 中较小者处以 `P_JS_TIMEOUT` 停止，而不是 60 秒之后。Python 通过 `ProgramCompiler` 和 `LocalProgramHost` 的 `javascript_limits=` 传入 `ng.ProgramJavaScriptCompileLimits` 来设置编译上限。

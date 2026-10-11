@@ -68,6 +68,7 @@ target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::r
 - [3. Tool Interface](#3-tool-interface)
   - [Tool](#tool)
   - [Tool failure contract](#tool-failure-contract)
+  - [Node failure contract](#node-failure-contract)
 - [4. Graph Types](#4-graph-types)
   - [ReducerType](#reducertype)
   - [ReducerFn](#reducerfn)
@@ -526,6 +527,28 @@ Every path that runs a model's tool calls applies the same rules: `dispatch_tool
 
 The first three rows never reach the model. A tool result sets `tool_status`, and a failed one carries `{"error", "status", "retryable", "effect_uncertain"}`, in one call or a batch. In a batch the other calls finish first; when several calls stop the run, cancellation wins over a Hook block and a Hook block over an interrupt. A `NodeInterrupt` raised by a tool lets its siblings run, and resume runs the whole batch again; to ask before anything runs, use a `ToolGate`. The run deadline (`RunMetadata::deadline`) bounds Hooks and provider calls; a tool's own limits are its policy's `execution_timeout` and `queue_timeout`. Tool Hooks run where the `ToolExecutionContext` carries a `HookRuntime` (`dispatch_tool_calls`, `llm::Agent::set_hook_runtime`); a graph engine's `HookRuntime` publishes checkpoint Hooks only.
 
+### Node failure contract
+
+When a node throws, one classifier decides whether its retry policy may run it again and whether the failure may be routed to a failure handler. It walks the whole cause chain (`NodeExecutionError` causes, `std::nested_exception` and the failures of subgraphs the node ran), and the most severe class found anywhere in it wins. The tool failure contract above uses the same classifier: a run control signal anywhere in a tool's cause chain stops the run, for example a Hook block inside the failure of a graph the tool ran.
+
+| Class (least to most severe) | Code | Raised by | Retried | Routable |
+|------|------|------|------|------|
+| Ordinary | `NG.TaskFailed`, `NG.SubgraphFailed` or an author code | `std::runtime_error` and its subclasses, `NodeFailureError`, a Python exception, a subgraph failure whose root is ordinary | yes, unless the author marked it not retryable | yes |
+| Timeout | `NG.Timeout` | reserved for attempt timeouts | yes | yes |
+| ProviderFailed | `NG.ProviderFailed` | a transient `ProviderFailure`: transport, truncated response, deadline, overloaded, rate limited, or a remote failure with an HTTP 5xx status | no: the provider runtime owns provider retries | yes |
+| EffectCommitted | `NG.EffectCommitted` | the attempt committed a non-idempotent Tool effect | never | yes, so a handler can compensate |
+| LogicError | `NG.LogicError` | `std::logic_error`, including integrity checks | no | no |
+| ConfigError | `NG.ConfigError` | provider configuration, request, authentication, permission, not-found or misuse failures | no | no |
+| SafetyBlocked | `NG.SafetyBlocked` | a provider failure that stopped on a content filter or a refusal | no | no |
+| BudgetExhausted | `NG.BudgetExhausted` | budget or quota exhaustion | no | no |
+| EffectUncertain | `NG.EffectUncertain` | `ProviderOutcomeError`, including a provider dispatch whose outcome is unknown, or a Tool effect whose outcome is unknown | no | no |
+| UnknownFailure | `NG.UnknownFailure` | `std::bad_alloc` or any other exception type | no | no |
+| Run control | none | `NodeInterrupt`, `HookBoundaryBlocked`, cancellation | no | no: the run pauses or stops as before |
+
+The `NG.` prefix is reserved. An author code matches `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`. A C++ node throws `NodeFailureError(code, public_message, retryable)`. A Python node raises any exception with a string `code` attribute, and optionally a boolean `retryable` and a string `public_message`; the caller still receives the original exception. When the executor gives up on a node, the `NodeExecutionError` it throws carries a `NodeFailure` record, which `node_failure_of()` returns. The record holds the code, the class, why retrying stopped (`exhausted`, `non_retryable` or `effect_committed`), the number of attempts, the retryable and routable flags, `public_message`, and the effects of the final attempt as `{tool, ordinal, status}`. It never copies `what()`.
+
+**Every attempt has its own effect namespace.** Attempt 0 uses the task id (`s3:act`), so existing journals keep their slots. Attempt k uses `s3:act#a<k>`, and call ordinals start again inside it. Tool effects, provider calls and subgraph threads all follow the attempt, so a retry never replays or collides with an earlier attempt's effects; a `ProviderCallBroker` sees a fresh call slot for each retry. Before attempt k starts, the executor records an empty pending write keyed by the attempt's namespace; checkpoint stores need no schema change. A resume after a crash or an interrupt continues the latest attempt that started, in its namespace, so a `ToolEffectBroker` replays what that attempt committed, and the remaining retry budget is kept. Under a `ToolEffectBroker`, an attempt that committed a non-idempotent effect (a call that succeeded under a policy other than `ReadOnly` or `ExternalRead` and not `Idempotent`) is never retried, and an effect whose outcome is unknown pauses the run with the `tool_effect_reconciliation` interrupt even when the node caught that interrupt and raised another error. The effects of subgraphs a node runs count for that node's attempt.
+
 ---
 
 ## 4. Graph Types
@@ -713,6 +736,9 @@ struct RetryPolicy {
 Delay for retry `n` is `min(initial_delay_ms * backoff_multiplier^n, max_delay_ms)`,
 optionally multiplied by `1 + uniform(-jitter_pct, +jitter_pct)` when
 `jitter_pct > 0`.
+
+Which failures are retried, and how the effects of separate attempts are kept
+apart, is described in the node failure contract (section 3).
 
 ### StreamMode
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=79d19a918a6df3f67153f395833f482e0df7e305f42aa8da0601f65de233bb78 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=eed77b7b5f8b7e8d02f6a78c6d7c14e93910e97515e111ade966568f30f61a20 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -55,6 +55,7 @@ target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::r
 - [3. Tool インターフェース](#3-tool-interface)
   - [Tool](#tool)
   - [ツール失敗の契約](#tool-failure-contract)
+  - [ノード失敗の契約](#node-failure-contract)
 - [4. グラフ型](#4-graph-types)
   - [ReducerType](#reducertype)
   - [ReducerFn](#reducerfn)
@@ -490,6 +491,29 @@ public:
 
 最初の 3 行がモデルに届くことはありません。ツール結果は `tool_status` を設定し、失敗した結果は 1 回の呼び出しでも batch でも `{"error", "status", "retryable", "effect_uncertain"}` を持ちます。batch では他の呼び出しが先に最後まで実行され、複数の呼び出しが実行を停止させる場合は、キャンセルが Hook のブロックより、Hook のブロックが割り込みより優先されます。ツールが送出した `NodeInterrupt` があっても兄弟の呼び出しは実行され、再開すると batch 全体が再び実行されます。何かが実行される前に確認するには `ToolGate` を使ってください。実行の期限(`RunMetadata::deadline`)は Hook とプロバイダー呼び出しを制限し、ツール自体の上限はポリシーの `execution_timeout` と `queue_timeout` です。ツールの Hook は `ToolExecutionContext` が `HookRuntime` を持つ場所(`dispatch_tool_calls`、`llm::Agent::set_hook_runtime`)で実行され、グラフエンジンの `HookRuntime` はチェックポイント Hook だけを発行します。
 
+<a id="node-failure-contract"></a>
+### ノード失敗の契約
+
+ノードが例外を送出すると、そのリトライポリシーがノードを再実行してよいか、また失敗を失敗ハンドラーへルーティングしてよいかを、1 つの分類器が決めます。分類器は原因の連鎖全体(`NodeExecutionError` の原因、`std::nested_exception`、ノードが実行したサブグラフの失敗)をたどり、連鎖のどこかで見つかった最も深刻な分類が結果になります。上のツール失敗の契約も同じ分類器を使います。そのため、ツールの原因の連鎖のどこかに実行制御のシグナルがあれば実行は停止します。たとえば、ツールが実行したグラフの失敗に含まれる Hook のブロックがそれに当たります。
+
+| 分類(深刻度の低い順) | コード | 発生元 | リトライ | ルーティング |
+|------|------|------|------|------|
+| Ordinary | `NG.TaskFailed`、`NG.SubgraphFailed` または作成者コード | `std::runtime_error` とそのサブクラス、`NodeFailureError`、Python の例外、根本原因が Ordinary のサブグラフの失敗 | する。作成者がリトライ不可とした場合を除く | 可 |
+| Timeout | `NG.Timeout` | 試行のタイムアウト用に予約 | する | 可 |
+| ProviderFailed | `NG.ProviderFailed` | 一時的な `ProviderFailure`: トランスポート、途切れた応答、期限、過負荷、レート制限、または HTTP 5xx ステータスのリモート失敗 | しない。プロバイダーのリトライはプロバイダーランタイムが担当します | 可 |
+| EffectCommitted | `NG.EffectCommitted` | 試行が冪等でない Tool の効果をコミットした | 決してしない | 可。ハンドラーが補償できます |
+| LogicError | `NG.LogicError` | 整合性チェックを含む `std::logic_error` | しない | 不可 |
+| ConfigError | `NG.ConfigError` | プロバイダーの構成、リクエスト、認証、権限、not-found、または誤用による失敗 | しない | 不可 |
+| SafetyBlocked | `NG.SafetyBlocked` | コンテンツフィルターまたは拒否で止まったプロバイダーの失敗 | しない | 不可 |
+| BudgetExhausted | `NG.BudgetExhausted` | 予算またはクォータの枯渇 | しない | 不可 |
+| EffectUncertain | `NG.EffectUncertain` | 結果が不明なプロバイダーディスパッチを含む `ProviderOutcomeError`、または結果が不明な Tool の効果 | しない | 不可 |
+| UnknownFailure | `NG.UnknownFailure` | `std::bad_alloc` またはその他すべての例外型 | しない | 不可 |
+| 実行制御 | なし | `NodeInterrupt`、`HookBoundaryBlocked`、キャンセル | しない | 不可。実行はこれまでどおり一時停止または停止します |
+
+`NG.` 接頭辞は予約されています。作成者コードは `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+` に一致します。C++ のノードは `NodeFailureError(code, public_message, retryable)` を送出します。Python のノードは文字列の `code` 属性と、任意で真偽値の `retryable` と文字列の `public_message` を持つ任意の例外を送出し、呼び出し元はそれでも元の例外を受け取ります。エグゼキューターがノードをあきらめると、送出する `NodeExecutionError` に `NodeFailure` レコードが付き、`node_failure_of()` がそれを返します。レコードにはコード、分類、リトライをやめた理由(`exhausted`、`non_retryable` または `effect_committed`)、試行回数、リトライ可否とルーティング可否のフラグ、`public_message`、そして最後の試行の効果が `{tool, ordinal, status}` として入ります。`what()` は決してコピーしません。
+
+**試行ごとに独自の効果名前空間があります。** 試行 0 はタスク id(`s3:act`)を使うので、既存のジャーナルはスロットをそのまま保ちます。試行 k は `s3:act#a<k>` を使い、その中で呼び出しの序数がやり直されます。Tool の効果、プロバイダー呼び出し、サブグラフのスレッドはすべて試行に従うため、リトライが以前の試行の効果を再生したり衝突したりすることはありません。`ProviderCallBroker` はリトライのたびに新しい呼び出しスロットを受け取ります。試行 k の開始前に、エグゼキューターはその試行の名前空間をキーとする空の保留書き込みを記録します。チェックポイントストアのスキーマ変更は不要です。クラッシュや割り込みの後の再開は、開始済みの最新の試行をその名前空間で続けるので、`ToolEffectBroker` はその試行がコミットしたものを再生し、残りのリトライ回数も保たれます。`ToolEffectBroker` の下では、冪等でない効果(`ReadOnly` でも `ExternalRead` でもなく `Idempotent` でもないポリシーで成功した呼び出し)をコミットした試行は決してリトライされず、結果が不明な効果は、ノードがその割り込みを捕捉して別のエラーを送出した場合でも、`tool_effect_reconciliation` の割り込みで実行を一時停止させます。ノードが実行したサブグラフの効果は、そのノードの試行に含まれます。
+
 ---
 <a id="4-graph-types"></a>
 ## 4. グラフ型
@@ -639,6 +663,8 @@ struct RetryPolicy {
 ```
 
 再試行 `n` の遅延は `min(initial_delay_ms * backoff_multiplier^n, max_delay_ms)` で、`jitter_pct > 0` の場合は任意で `1 + uniform(-jitter_pct, +jitter_pct)` を乗じます。
+
+どの失敗をリトライするか、また試行ごとの効果をどう分けるかは、ノード失敗の契約(3 章)で説明しています。
 ### StreamMode
 ストリーミング実行中にどのイベントを発行するかを制御するビットフィールドフラグです。
 ```cpp

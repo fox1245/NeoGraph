@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=79d19a918a6df3f67153f395833f482e0df7e305f42aa8da0601f65de233bb78 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=eed77b7b5f8b7e8d02f6a78c6d7c14e93910e97515e111ade966568f30f61a20 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -65,6 +65,7 @@ target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::r
 - [3. Tool 接口](#3-tool-interface)
   - [Tool](#tool)
   - [工具失败契约](#tool-failure-contract)
+  - [节点失败契约](#node-failure-contract)
 - [4. 图类型](#4-graph-types)
   - [ReducerType](#reducertype)
   - [ReducerFn](#reducerfn)
@@ -526,6 +527,29 @@ public:
 
 前三行永远不会到达模型。工具结果会设置 `tool_status`，失败的结果无论是单个调用还是 batch 都带有 `{"error", "status", "retryable", "effect_uncertain"}`。在 batch 中，其他调用会先执行完毕；当多个调用都使运行停止时，取消优先于 Hook 阻断，Hook 阻断优先于中断。工具抛出的 `NodeInterrupt` 不会阻止其兄弟调用运行，恢复时整个 batch 会再次运行；若要在任何调用运行之前询问，请使用 `ToolGate`。运行截止时间（`RunMetadata::deadline`）约束 Hook 与 Provider 调用；工具自身的限制是其策略的 `execution_timeout` 与 `queue_timeout`。工具 Hook 在 `ToolExecutionContext` 携带 `HookRuntime` 的地方运行（`dispatch_tool_calls`、`llm::Agent::set_hook_runtime`）；图引擎的 `HookRuntime` 只发布检查点 Hook。
 
+<a id="node-failure-contract"></a>
+### 节点失败契约
+
+节点抛出异常时，由同一个分类器决定其重试策略能否再次运行它，以及该失败能否路由到失败处理节点。分类器会遍历整条原因链（`NodeExecutionError` 的原因、`std::nested_exception` 以及该节点所运行子图的失败），在链上任意位置找到的最严重分类即为结果。上面的工具失败契约使用同一个分类器：工具原因链中任意位置出现运行控制信号都会停止运行，例如工具所运行的图的失败中包含的 Hook 阻断。
+
+| 分类（由轻到重） | 代码 | 来源 | 重试 | 可路由 |
+|------|------|------|------|------|
+| Ordinary | `NG.TaskFailed`、`NG.SubgraphFailed` 或作者代码 | `std::runtime_error` 及其子类、`NodeFailureError`、Python 异常、根因为 Ordinary 的子图失败 | 是，作者标记为不可重试时除外 | 是 |
+| Timeout | `NG.Timeout` | 为尝试超时保留 | 是 | 是 |
+| ProviderFailed | `NG.ProviderFailed` | 暂时性的 `ProviderFailure`：传输、响应被截断、截止时间、过载、限流，或 HTTP 5xx 状态的远程失败 | 否，Provider 重试由 Provider 运行时负责 | 是 |
+| EffectCommitted | `NG.EffectCommitted` | 该尝试提交了非幂等的 Tool 效果 | 从不 | 是，处理节点可以进行补偿 |
+| LogicError | `NG.LogicError` | `std::logic_error`，包括完整性检查 | 否 | 否 |
+| ConfigError | `NG.ConfigError` | Provider 的配置、请求、认证、权限、not-found 或误用失败 | 否 | 否 |
+| SafetyBlocked | `NG.SafetyBlocked` | 因内容过滤或拒绝而停止的 Provider 失败 | 否 | 否 |
+| BudgetExhausted | `NG.BudgetExhausted` | 预算或配额耗尽 | 否 | 否 |
+| EffectUncertain | `NG.EffectUncertain` | `ProviderOutcomeError`（包括结果未知的 Provider 分发），或结果未知的 Tool 效果 | 否 | 否 |
+| UnknownFailure | `NG.UnknownFailure` | `std::bad_alloc` 或其他任何异常类型 | 否 | 否 |
+| 运行控制 | 无 | `NodeInterrupt`、`HookBoundaryBlocked`、取消 | 否 | 否，运行照旧暂停或停止 |
+
+`NG.` 前缀为保留前缀。作者代码须匹配 `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`。C++ 节点抛出 `NodeFailureError(code, public_message, retryable)`。Python 节点抛出任意带有字符串 `code` 属性的异常，并可附带布尔值 `retryable` 与字符串 `public_message`；调用方收到的仍是原始异常。执行器放弃一个节点时，它抛出的 `NodeExecutionError` 带有一条 `NodeFailure` 记录，可通过 `node_failure_of()` 取得。记录包含代码、分类、停止重试的原因（`exhausted`、`non_retryable` 或 `effect_committed`）、尝试次数、可重试与可路由标志、`public_message`，以及最后一次尝试的效果（形如 `{tool, ordinal, status}`）。它从不复制 `what()`。
+
+**每次尝试都有自己的效果命名空间。** 尝试 0 使用任务 id（`s3:act`），因此现有日志的槽位保持不变。尝试 k 使用 `s3:act#a<k>`，调用序号在其中重新开始。Tool 效果、Provider 调用和子图线程都跟随尝试，因此重试绝不会重放或冲突于先前尝试的效果；`ProviderCallBroker` 在每次重试时看到新的调用槽位。尝试 k 开始之前，执行器会以该尝试的命名空间为键记录一条空的待写记录；检查点存储无需更改模式。崩溃或中断之后的恢复会在其命名空间中继续最近一次已开始的尝试，因此 `ToolEffectBroker` 会重放该尝试已提交的内容，剩余的重试次数也得以保留。在 `ToolEffectBroker` 下，提交了非幂等效果（以 `ReadOnly`、`ExternalRead` 以外且非 `Idempotent` 的策略成功的调用）的尝试绝不会被重试；结果未知的效果会以 `tool_effect_reconciliation` 中断暂停运行，即使节点捕获了该中断并抛出了其他错误也是如此。节点所运行子图的效果计入该节点的尝试。
+
 ---
 
 <a id="4-graph-types"></a>
@@ -709,6 +733,8 @@ struct RetryPolicy {
 第 `n` 次重试的延迟为
 `min(initial_delay_ms * backoff_multiplier^n, max_delay_ms)`，当
 `jitter_pct > 0` 时可选地乘以 `1 + uniform(-jitter_pct, +jitter_pct)`。
+
+哪些失败会被重试，以及各次尝试的效果如何彼此隔离，见节点失败契约（第 3 节）。
 
 ### StreamMode
 

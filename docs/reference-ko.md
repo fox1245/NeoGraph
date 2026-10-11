@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=79d19a918a6df3f67153f395833f482e0df7e305f42aa8da0601f65de233bb78 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=eed77b7b5f8b7e8d02f6a78c6d7c14e93910e97515e111ade966568f30f61a20 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -67,6 +67,7 @@ target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::r
 - [3. Tool Interface](#3-tool-interface)
   - [Tool](#tool)
   - [도구 실패 계약](#tool-failure-contract)
+  - [노드 실패 계약](#node-failure-contract)
 - [4. Graph Types](#4-graph-types)
   - [ReducerType](#reducertype)
   - [ReducerFn](#reducerfn)
@@ -526,6 +527,29 @@ public:
 
 처음 세 행은 결코 모델에 도달하지 않습니다. 도구 결과는 `tool_status`를 설정하며, 실패한 결과는 단일 호출이든 batch든 `{"error", "status", "retryable", "effect_uncertain"}`를 담습니다. batch에서는 다른 호출이 먼저 끝까지 실행되며, 여러 호출이 실행을 중단시키면 취소가 Hook 차단보다, Hook 차단이 인터럽트보다 우선합니다. 도구가 발생시킨 `NodeInterrupt`가 있어도 형제 호출은 실행되며, 재개하면 batch 전체가 다시 실행됩니다. 아무것도 실행되기 전에 묻으려면 `ToolGate`를 사용하세요. 실행 기한(`RunMetadata::deadline`)은 Hook과 제공자 호출을 제한하며, 도구 자체의 한도는 정책의 `execution_timeout`과 `queue_timeout`입니다. 도구 Hook은 `ToolExecutionContext`가 `HookRuntime`을 지닌 곳(`dispatch_tool_calls`, `llm::Agent::set_hook_runtime`)에서 실행되며, 그래프 엔진의 `HookRuntime`은 체크포인트 Hook만 게시합니다.
 
+<a id="node-failure-contract"></a>
+### 노드 실패 계약
+
+노드가 예외를 던지면, 재시도 정책이 그 노드를 다시 실행할 수 있는지와 실패를 실패 핸들러로 라우팅할 수 있는지를 하나의 분류기가 결정합니다. 분류기는 원인 사슬 전체(`NodeExecutionError`의 원인, `std::nested_exception`, 노드가 실행한 서브그래프의 실패)를 따라가며, 사슬 어디에서든 발견된 가장 심각한 분류가 결과가 됩니다. 위의 도구 실패 계약도 같은 분류기를 사용합니다. 따라서 도구의 원인 사슬 어디에든 실행 제어 신호가 있으면 실행이 중단됩니다. 예를 들어 도구가 실행한 그래프의 실패 안에 들어 있는 Hook 차단이 그렇습니다.
+
+| 분류(덜 심각한 것부터) | 코드 | 발생 원인 | 재시도 | 라우팅 |
+|------|------|------|------|------|
+| Ordinary | `NG.TaskFailed`, `NG.SubgraphFailed` 또는 작성자 코드 | `std::runtime_error`와 그 하위 클래스, `NodeFailureError`, Python 예외, 근본 원인이 Ordinary인 서브그래프 실패 | 예. 작성자가 재시도 불가로 표시한 경우는 제외 | 예 |
+| Timeout | `NG.Timeout` | 시도 타임아웃용으로 예약됨 | 예 | 예 |
+| ProviderFailed | `NG.ProviderFailed` | 일시적인 `ProviderFailure`: 전송, 잘린 응답, 기한, 과부하, 속도 제한, 또는 HTTP 5xx 상태의 원격 실패 | 아니요. 제공자 재시도는 제공자 런타임이 담당합니다 | 예 |
+| EffectCommitted | `NG.EffectCommitted` | 시도가 멱등하지 않은 Tool 효과를 커밋함 | 절대 안 함 | 예. 핸들러가 보상할 수 있습니다 |
+| LogicError | `NG.LogicError` | 무결성 검사를 포함한 `std::logic_error` | 아니요 | 아니요 |
+| ConfigError | `NG.ConfigError` | 제공자 구성, 요청, 인증, 권한, not-found 또는 오용 실패 | 아니요 | 아니요 |
+| SafetyBlocked | `NG.SafetyBlocked` | 콘텐츠 필터나 거부로 멈춘 제공자 실패 | 아니요 | 아니요 |
+| BudgetExhausted | `NG.BudgetExhausted` | 예산 또는 할당량 소진 | 아니요 | 아니요 |
+| EffectUncertain | `NG.EffectUncertain` | 결과를 알 수 없는 제공자 디스패치를 포함한 `ProviderOutcomeError`, 또는 결과를 알 수 없는 Tool 효과 | 아니요 | 아니요 |
+| UnknownFailure | `NG.UnknownFailure` | `std::bad_alloc` 또는 그 밖의 모든 예외 타입 | 아니요 | 아니요 |
+| 실행 제어 | 없음 | `NodeInterrupt`, `HookBoundaryBlocked`, 취소 | 아니요 | 아니요. 실행은 이전처럼 일시 정지하거나 중단됩니다 |
+
+`NG.` 접두사는 예약되어 있습니다. 작성자 코드는 `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`에 맞아야 합니다. C++ 노드는 `NodeFailureError(code, public_message, retryable)`를 던집니다. Python 노드는 문자열 `code` 속성과, 선택적으로 불리언 `retryable`과 문자열 `public_message`를 가진 아무 예외나 발생시키면 되며, 호출자는 여전히 원래 예외를 받습니다. 실행기가 노드를 포기하면 던지는 `NodeExecutionError`에 `NodeFailure` 레코드가 실리며, `node_failure_of()`가 이를 반환합니다. 레코드에는 코드, 분류, 재시도를 멈춘 이유(`exhausted`, `non_retryable` 또는 `effect_committed`), 시도 횟수, 재시도 가능 및 라우팅 가능 플래그, `public_message`, 그리고 마지막 시도의 효과가 `{tool, ordinal, status}` 형태로 담깁니다. `what()`은 절대 복사하지 않습니다.
+
+**시도마다 고유한 효과 네임스페이스가 있습니다.** 시도 0은 태스크 id(`s3:act`)를 사용하므로 기존 저널의 슬롯이 그대로 유지됩니다. 시도 k는 `s3:act#a<k>`를 사용하며, 그 안에서 호출 서수가 다시 시작됩니다. Tool 효과, 제공자 호출, 서브그래프 스레드가 모두 시도를 따르므로, 재시도가 이전 시도의 효과를 재생하거나 그것과 충돌하는 일이 없습니다. `ProviderCallBroker`는 재시도마다 새 호출 슬롯을 봅니다. 시도 k가 시작되기 전에 실행기는 그 시도의 네임스페이스를 키로 하는 빈 대기 쓰기를 기록하며, 체크포인트 저장소의 스키마는 바뀌지 않습니다. 크래시나 인터럽트 후의 재개는 시작된 가장 최근 시도를 그 네임스페이스에서 이어 가므로, `ToolEffectBroker`는 그 시도가 커밋한 것을 재생하고 남은 재시도 횟수도 유지됩니다. `ToolEffectBroker` 아래에서, 멱등하지 않은 효과(`ReadOnly`나 `ExternalRead`가 아니고 `Idempotent`도 아닌 정책으로 성공한 호출)를 커밋한 시도는 절대 재시도되지 않으며, 결과를 알 수 없는 효과는 노드가 그 인터럽트를 잡고 다른 오류를 발생시켰더라도 `tool_effect_reconciliation` 인터럽트로 실행을 일시 정지시킵니다. 노드가 실행한 서브그래프의 효과는 그 노드의 시도에 포함됩니다.
+
 ---
 
 ## 4. Graph Types
@@ -713,6 +737,8 @@ struct RetryPolicy {
 Delay for retry `n` is `min(initial_delay_ms * backoff_multiplier^n, max_delay_ms)`,
 optionally multiplied by `1 + uniform(-jitter_pct, +jitter_pct)` when
 `jitter_pct > 0`.
+
+어떤 실패를 재시도하는지, 그리고 시도마다 효과를 어떻게 분리하는지는 노드 실패 계약(3절)에 설명되어 있습니다.
 
 ### StreamMode
 
