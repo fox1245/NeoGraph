@@ -42,7 +42,9 @@ std::string errors_of(const std::vector<std::string>& errors) {
     return result;
 }
 
-const json& builder_method(const json& manifest, std::string_view name) {
+// Returned by value: iterating a json array yields elements that do not outlive
+// the loop, so a reference to one would dangle.
+json builder_method(const json& manifest, std::string_view name) {
     for (const auto& method : manifest.at("define").at("graph_builder_methods"))
         if (method.at("name").get<std::string>() == name) return method;
     throw std::runtime_error("no builder method " + std::string(name));
