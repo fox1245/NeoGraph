@@ -927,3 +927,22 @@ endif()
 add_executable(neograph_join_model_tests test_join_exhaustive.cpp)
 target_link_libraries(neograph_join_model_tests PRIVATE neograph::core GTest::gtest_main)
 neograph_discover_tests(neograph_join_model_tests PROPERTIES LABELS "core;join-model" TIMEOUT 300)
+
+if(NEOGRAPH_BUILD_PROGRAM)
+    # Program API v2 (#362-#365): diagnostics help, the capability manifest,
+    # graph metadata, any_of join slots, witness paths and failure routing keys.
+    add_executable(neograph_program_v2_tests
+        test_program_diagnostics_help.cpp
+    )
+    target_include_directories(neograph_program_v2_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/program)
+    target_link_libraries(neograph_program_v2_tests PRIVATE
+        neograph::program GTest::gtest_main)
+    target_compile_definitions(neograph_program_v2_tests PRIVATE
+        NEOGRAPH_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        target_compile_definitions(neograph_program_v2_tests PRIVATE
+            NEOGRAPH_V2_TESTS_HAVE_QUICKJS)
+    endif()
+    neograph_discover_tests(neograph_program_v2_tests PROPERTIES LABELS "program;program-v2")
+endif()

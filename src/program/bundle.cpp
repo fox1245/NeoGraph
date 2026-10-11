@@ -471,6 +471,8 @@ void normalize_data(ProgramBundleData& data) {
     }
     for (auto& diagnostic : data.diagnostics) {
         diagnostic.witness = detail::owned_json_copy(diagnostic.witness);
+        // Help (X1) belongs to returned diagnostics; it never reaches the id.
+        diagnostic.help.reset();
     }
     if (data.source_kind != SourceKind::CanonicalJson &&
         data.source_kind != SourceKind::CppBuilder && data.source_kind != SourceKind::JavaScript) {

@@ -44,7 +44,9 @@ ExecutableManifest registered_manifest(ExecutableKind kind,
                               guarantee};
 }
 
-py::dict diagnostic_to_py(const Diagnostic& diagnostic) {
+// `help` (X1) is a dict for returned diagnostics and None for sealed ones. An
+// exception always carries it: a diagnostic without help gets its doc link.
+py::dict diagnostic_to_py(const Diagnostic& diagnostic, bool for_exception = false) {
     py::object span = py::none();
     if (const auto& value = diagnostic.primary.span) {
         span = py::dict("byte_begin"_a = value->byte_begin, "byte_end"_a = value->byte_end,
@@ -52,13 +54,21 @@ py::dict diagnostic_to_py(const Diagnostic& diagnostic) {
                         "column_begin"_a = value->column_begin, "line_end"_a = value->line_end,
                         "column_end"_a = value->column_end);
     }
+    py::object help = py::none();
+    if (diagnostic.help || for_exception) {
+        const auto value =
+            diagnostic.help.value_or(DiagnosticHelp{diagnostic_doc_link(diagnostic.code), {}, {}, {}});
+        neograph::json encoded;
+        to_json(encoded, value);
+        help = json_to_py(encoded);
+    }
     return py::dict("code"_a = diagnostic.code,
                     "severity"_a = std::string(to_string(diagnostic.severity)),
                     "phase"_a = std::string(to_string(diagnostic.phase)),
                     "message"_a = diagnostic.message,
                     "source_id"_a = diagnostic.primary.source_id,
                     "json_pointer"_a = diagnostic.primary.json_pointer, "span"_a = span,
-                    "witness"_a = json_to_py(diagnostic.witness));
+                    "witness"_a = json_to_py(diagnostic.witness), "help"_a = help);
 }
 
 // Sets neograph_engine.<type_name>, a RuntimeError subclass. Its message lists
@@ -76,7 +86,7 @@ void set_program_error(const char*                    type_name,
                        std::to_string(span->line_begin) + ":" +
                        std::to_string(span->column_begin) + ")";
         }
-        diagnostics.append(diagnostic_to_py(diagnostic));
+        diagnostics.append(diagnostic_to_py(diagnostic, true));
     }
     const auto type = py::module_::import("neograph_engine._neograph").attr(type_name);
     auto exception           = type(message);

@@ -186,6 +186,12 @@ struct PendingDiagnostic {
     SourceCoordinate sealed_primary;
     bool             sealed   = true;
     bool             returned = true;
+    // Returned copies only (X1). Diagnostics that share a cascade key report
+    // one root cause, such as one unknown name: the first one is returned and
+    // the others become its related locations.
+    DiagnosticHelp help;
+    std::string    cascade_key;
+    std::string    cascade_label;
 };
 
 struct ReleasedWarnings {
@@ -207,13 +213,14 @@ public:
         });
     }
 
-    void add(CompilePhase       phase,
-             std::string        code,
-             DiagnosticSeverity severity,
-             std::string        generated_pointer,
-             std::string        message,
-             json               witness = json::object(),
-             std::optional<SourceSpan> span = std::nullopt) {
+    // The returned reference is valid until the next add.
+    PendingDiagnostic& add(CompilePhase       phase,
+                           std::string        code,
+                           DiagnosticSeverity severity,
+                           std::string        generated_pointer,
+                           std::string        message,
+                           json               witness = json::object(),
+                           std::optional<SourceSpan> span = std::nullopt) {
         PendingDiagnostic pending;
         pending.generated_pointer   = std::move(generated_pointer);
         pending.diagnostic.phase    = phase;
@@ -225,18 +232,21 @@ public:
         pending.diagnostic.message  = std::move(message);
         pending.diagnostic.witness  = detail::owned_json_copy(witness);
         pending.canonical_witness   = detail::canonical_json_bytes(pending.diagnostic.witness);
+        pending.help.doc            = diagnostic_doc_link(pending.diagnostic.code);
         diagnostics_.push_back(std::move(pending));
+        return diagnostics_.back();
     }
 
     // An authoring lint is returned with the compile but never sealed.
-    void add_unsealed_warning(CompilePhase phase,
-                              std::string  code,
-                              std::string  generated_pointer,
-                              std::string  message,
-                              json         witness) {
-        add(phase, std::move(code), DiagnosticSeverity::Warning, std::move(generated_pointer),
-            std::move(message), std::move(witness));
-        diagnostics_.back().sealed = false;
+    PendingDiagnostic& add_unsealed_warning(CompilePhase phase,
+                                            std::string  code,
+                                            std::string  generated_pointer,
+                                            std::string  message,
+                                            json         witness) {
+        auto& pending = add(phase, std::move(code), DiagnosticSeverity::Warning,
+                            std::move(generated_pointer), std::move(message), std::move(witness));
+        pending.sealed = false;
+        return pending;
     }
 
     // A warning under the original validation rules: sealed, but not returned
@@ -249,6 +259,15 @@ public:
         add(phase, std::move(code), DiagnosticSeverity::Warning, std::move(generated_pointer),
             std::move(message), std::move(witness));
         diagnostics_.back().returned = false;
+    }
+
+    // Where a help entry points: the builder call site when one covers the
+    // pointer, and otherwise the generated pointer itself, even for a
+    // JavaScript source (help is returned only, so it may be precise).
+    SourceCoordinate help_coordinate(std::string_view generated_pointer) const {
+        auto coordinate = map(generated_pointer, true);
+        if (coordinate.json_pointer.empty()) coordinate.json_pointer = std::string(generated_pointer);
+        return coordinate;
     }
 
     // Builder call sites locate returned diagnostics that no source-map entry
@@ -265,29 +284,64 @@ public:
 
     [[noreturn]] void throw_error() {
         sort();
-        std::vector<Diagnostic> result;
-        result.reserve(diagnostics_.size());
-        for (auto& pending : diagnostics_)
-            if (pending.returned) result.push_back(std::move(pending.diagnostic));
-        throw ProgramCompileError(std::move(result));
+        throw ProgramCompileError(returned_diagnostics());
     }
 
     ReleasedWarnings release_warnings() {
         sort();
         ReleasedWarnings result;
         for (auto& pending : diagnostics_) {
-            if (pending.sealed) {
-                auto sealed    = pending.diagnostic;
-                sealed.primary = std::move(pending.sealed_primary);
-                result.sealed.push_back(std::move(sealed));
-            }
-            if (pending.returned) result.returned.push_back(std::move(pending.diagnostic));
+            if (!pending.sealed) continue;
+            auto sealed    = sealed_diagnostic(pending.diagnostic);
+            sealed.primary = pending.sealed_primary;
+            result.sealed.push_back(std::move(sealed));
         }
+        result.returned = returned_diagnostics();
         diagnostics_.clear();
         return result;
     }
 
 private:
+    // The returned copies, in order: help attached, each cascade folded into
+    // its first diagnostic, and at most MAX_RETURNED_DIAGNOSTICS of them
+    // (errors first) plus a note counting the rest.
+    std::vector<Diagnostic> returned_diagnostics() const {
+        std::vector<Diagnostic>            result;
+        std::map<std::string, std::size_t> first_of_cascade;
+        for (const auto& pending : diagnostics_) {
+            if (!pending.returned) continue;
+            if (!pending.cascade_key.empty()) {
+                const auto [found, inserted] =
+                    first_of_cascade.emplace(pending.cascade_key, result.size());
+                if (!inserted) {
+                    result[found->second].help->related.push_back(
+                        {pending.cascade_label, help_coordinate(pending.generated_pointer)});
+                    continue;
+                }
+            }
+            auto diagnostic = pending.diagnostic;
+            diagnostic.help = pending.help;
+            result.push_back(std::move(diagnostic));
+        }
+        if (result.size() <= MAX_RETURNED_DIAGNOSTICS) return result;
+        std::stable_sort(result.begin(), result.end(), [](const auto& lhs, const auto& rhs) {
+            return static_cast<int>(lhs.severity) < static_cast<int>(rhs.severity);
+        });
+        const auto omitted = result.size() - MAX_RETURNED_DIAGNOSTICS;
+        result.resize(MAX_RETURNED_DIAGNOSTICS);
+        Diagnostic note;
+        note.phase    = CompilePhase::Seal;
+        note.code     = std::string(DIAGNOSTICS_TRUNCATED_CODE);
+        note.severity = DiagnosticSeverity::Note;
+        note.primary  = SourceCoordinate{source_id_, "", std::nullopt};
+        note.message  = std::to_string(omitted) +
+                       " more diagnostic(s) omitted; fix the ones above and compile again";
+        note.witness  = json{{"omitted", omitted}, {"limit", MAX_RETURNED_DIAGNOSTICS}};
+        note.help     = DiagnosticHelp{diagnostic_doc_link(note.code), {}, {}, {}};
+        result.push_back(std::move(note));
+        return result;
+    }
+
     void sort() {
         std::sort(diagnostics_.begin(), diagnostics_.end(), [](const auto& lhs, const auto& rhs) {
             return std::tuple{static_cast<int>(lhs.diagnostic.phase), lhs.generated_pointer,
@@ -336,17 +390,222 @@ private:
     std::vector<PendingDiagnostic> diagnostics_;
 };
 
+// ---------------------------------------------------------------------------
+// X1 help: candidates, suggestions and related locations (returned only)
+// ---------------------------------------------------------------------------
+
+std::vector<std::string> pointer_tokens(std::string_view pointer) {
+    std::vector<std::string> tokens;
+    if (pointer.empty()) return tokens;
+    std::size_t begin = 1;
+    while (true) {
+        const auto end = pointer.find('/', begin);
+        std::string token(pointer.substr(begin, end == std::string_view::npos ? std::string_view::npos
+                                                                            : end - begin));
+        std::string unescaped;
+        for (std::size_t index = 0; index < token.size(); ++index) {
+            if (token[index] == '~' && index + 1 < token.size() &&
+                (token[index + 1] == '0' || token[index + 1] == '1')) {
+                unescaped.push_back(token[index + 1] == '0' ? '~' : '/');
+                ++index;
+            } else {
+                unescaped.push_back(token[index]);
+            }
+        }
+        tokens.push_back(std::move(unescaped));
+        if (end == std::string_view::npos) break;
+        begin = end + 1;
+    }
+    return tokens;
+}
+
+std::string pointer_of(const std::vector<std::string>& tokens, std::size_t count) {
+    std::string result;
+    for (std::size_t index = 0; index < count && index < tokens.size(); ++index)
+        result = child_pointer(result, tokens[index]);
+    return result;
+}
+
+void add_rename_help(DiagnosticHelp&                 help,
+                     std::string_view                parent,
+                     const std::string&              field,
+                     const std::vector<std::string>& known) {
+    help.candidates = diagnostic_name_candidates(field, known);
+    if (help.candidates.empty()) return;
+    const auto& best = help.candidates.front();
+    help.suggestions.push_back({"Rename '" + field + "' to '" + best + "'",
+                                {{"move", child_pointer(parent, best), child_pointer(parent, field),
+                                  nullptr}},
+                                SuggestionApplicability::Maybe});
+}
+
+// What the author wrote for a Core pointer, as a JavaScript builder call.
+std::string builder_call(const std::vector<std::string>& tokens) {
+    const auto quoted = [](const std::string& value) { return json(value).dump(); };
+    if (tokens.empty()) return "ng.graph()";
+    const auto& head = tokens[0];
+    if (head == "retry_policy") return "graph.retryPolicy({...})";
+    if (head == "nodes" && tokens.size() >= 3 && tokens[2] == "barrier")
+        return "graph.barrier(" + quoted(tokens[1]) + ", [...])";
+    if (head == "nodes" && tokens.size() >= 2) return "graph.node(" + quoted(tokens[1]) + ", {...})";
+    if (head == "channels" && tokens.size() >= 2)
+        return "graph.channel(" + quoted(tokens[1]) + ", {...})";
+    if (head == "edges") return "graph.edge(...)";
+    if (head == "conditional_edges") return "graph.conditionalEdge(...)";
+    if (head == "interrupt_before") return "graph.interruptBefore(...)";
+    if (head == "interrupt_after") return "graph.interruptAfter(...)";
+    return "ng.graph()";
+}
+
+// Keys the strict Core parser reads in the object at `parent`.
+std::vector<std::string> known_core_keys(const std::vector<std::string>& parent,
+                                         const json&                     definition) {
+    if (parent.empty())
+        return {"schema_version", "name",          "channels",        "nodes",       "edges",
+                "conditional_edges", "interrupt_before", "interrupt_after", "retry_policy"};
+    if (parent.size() == 2 && parent[0] == "channels")
+        return {"reducer", "initial", "retention", "retention_limit", "persistence"};
+    if (parent.size() == 2 && parent[0] == "nodes") return {"type", "barrier"};
+    if (parent.size() == 3 && parent[0] == "nodes" && parent[2] == "barrier") return {"wait_for"};
+    if (parent.size() == 2 && parent[0] == "conditional_edges") return {"from", "condition", "routes"};
+    if (parent.size() == 2 && parent[0] == "edges") {
+        const auto edge = definition.is_object() && definition.contains("edges") &&
+                                  definition["edges"].is_array()
+                              ? definition["edges"]
+                              : json::array();
+        std::size_t index = 0;
+        for (const auto digit : parent[1]) {
+            if (digit < '0' || digit > '9') return {"from", "to"};
+            index = index * 10 + static_cast<std::size_t>(digit - '0');
+        }
+        if (index < edge.size() && is_inline_conditional(edge[index]))
+            return {"from", "condition", "routes", "type"};
+        return {"from", "to"};
+    }
+    if (parent.size() == 1 && parent[0] == "retry_policy")
+        return {"max_retries", "initial_delay_ms", "backoff_multiplier", "max_delay_ms"};
+    return {};
+}
+
+// Program-document pointers of every string in a node-reference position
+// (edges, routes, barrier members, interrupts) equal to `name`, sorted.
+std::vector<std::string> reference_paths(const json& definition, const std::string& name) {
+    std::vector<std::string> paths;
+    if (!definition.is_object()) return paths;
+    const std::string base  = "/root/definition";
+    const auto        check = [&](const json& value, std::string pointer) {
+        if (value.is_string() && value.get<std::string>() == name) paths.push_back(std::move(pointer));
+    };
+    const auto routes = [&](const json& edge, const std::string& pointer) {
+        if (!edge.contains("routes") || !edge["routes"].is_object()) return;
+        for (const auto& [key, target] : edge["routes"].items())
+            check(target, pointer + "/routes/" + escape_pointer_segment(key));
+    };
+    for (const auto* field : {"edges", "conditional_edges"}) {
+        if (!definition.contains(field) || !definition[field].is_array()) continue;
+        std::size_t index = 0;
+        for (const auto& edge : definition[field]) {
+            const auto pointer = base + "/" + field + "/" + std::to_string(index++);
+            if (!edge.is_object()) continue;
+            if (edge.contains("from")) check(edge["from"], pointer + "/from");
+            if (edge.contains("to")) check(edge["to"], pointer + "/to");
+            routes(edge, pointer);
+        }
+    }
+    if (definition.contains("nodes") && definition["nodes"].is_object()) {
+        for (const auto& [node, config] : definition["nodes"].items()) {
+            if (!config.is_object() || !config.contains("barrier") ||
+                !config["barrier"].is_object() || !config["barrier"].contains("wait_for") ||
+                !config["barrier"]["wait_for"].is_array())
+                continue;
+            const auto  pointer = base + "/nodes/" + escape_pointer_segment(node) + "/barrier/wait_for";
+            std::size_t index   = 0;
+            for (const auto& entry : config["barrier"]["wait_for"]) {
+                const auto entry_pointer = pointer + "/" + std::to_string(index++);
+                check(entry, entry_pointer);
+                if (!entry.is_object() || !entry.contains("any_of") || !entry["any_of"].is_array())
+                    continue;
+                std::size_t alternative = 0;
+                for (const auto& source : entry["any_of"])
+                    check(source, entry_pointer + "/any_of/" + std::to_string(alternative++));
+            }
+        }
+    }
+    for (const auto* field : {"interrupt_before", "interrupt_after"}) {
+        if (!definition.contains(field) || !definition[field].is_array()) continue;
+        std::size_t index = 0;
+        for (const auto& node : definition[field])
+            check(node, base + "/" + field + "/" + std::to_string(index++));
+    }
+    std::sort(paths.begin(), paths.end());
+    return paths;
+}
+
+struct HelpContext {
+    bool                                               javascript = false;
+    json                                               definition = json::object();
+    std::vector<std::string>                           nodes;
+    std::vector<std::string>                           channels;
+    std::map<ExecutableKind, std::vector<std::string>> registry;
+};
+
+HelpContext help_context(const RegistrySnapshot& registry, const json& definition, bool javascript) {
+    HelpContext context;
+    context.javascript = javascript;
+    context.definition = definition;
+    for (const auto* field : {"nodes", "channels"}) {
+        if (!definition.is_object() || !definition.contains(field) || !definition[field].is_object())
+            continue;
+        auto& names = std::string(field) == "nodes" ? context.nodes : context.channels;
+        for (const auto& [name, unused] : definition[field].items()) {
+            (void)unused;
+            names.push_back(name);
+        }
+    }
+    for (const auto& identity : registry.identities())
+        context.registry[identity.kind].push_back(identity.name);
+    return context;
+}
+
+std::optional<ExecutableKind> registry_kind(std::string_view kind) {
+    if (kind == "node") return ExecutableKind::Node;
+    if (kind == "reducer") return ExecutableKind::Reducer;
+    if (kind == "condition") return ExecutableKind::Condition;
+    return std::nullopt;
+}
+
+// An unknown registry name: candidates of its kind and the replacement edit.
+void add_registry_help(PendingDiagnostic&   pending,
+                       const HelpContext&   context,
+                       ExecutableKind       kind,
+                       const std::string&   name,
+                       const std::string&   generated_pointer) {
+    const auto found = context.registry.find(kind);
+    if (found != context.registry.end())
+        pending.help.candidates = diagnostic_name_candidates(name, found->second);
+    pending.cascade_key   = "registry:" + std::string(to_string(kind)) + ":" + name;
+    pending.cascade_label = "also uses '" + name + "'";
+    if (pending.help.candidates.empty()) return;
+    const auto& best = pending.help.candidates.front();
+    pending.help.suggestions.push_back({"Replace '" + name + "' with '" + best + "'",
+                                        {{"replace", generated_pointer, "", json(best)}},
+                                        SuggestionApplicability::Maybe});
+}
+
 void add_unknown_fields(DiagnosticAccumulator&                  diagnostics,
                         const json&                             value,
                         std::string_view                        pointer,
                         std::initializer_list<std::string_view> allowed) {
     if (!value.is_object()) return;
+    const std::vector<std::string> known(allowed.begin(), allowed.end());
     for (const auto& [field, ignored] : value.items()) {
         (void)ignored;
         if (std::find(allowed.begin(), allowed.end(), field) != allowed.end()) continue;
-        diagnostics.add(CompilePhase::Schema, "P_SCHEMA_UNKNOWN_FIELD", DiagnosticSeverity::Error,
-                        child_pointer(pointer, field), "Unknown field in closed Program-v1 object",
-                        json{{"field", field}});
+        auto& pending = diagnostics.add(CompilePhase::Schema, "P_SCHEMA_UNKNOWN_FIELD",
+                                        DiagnosticSeverity::Error, child_pointer(pointer, field),
+                                        "Unknown field in closed Program-v1 object",
+                                        json{{"field", field}});
+        add_rename_help(pending.help, pointer, field, known);
     }
 }
 
@@ -1588,12 +1847,47 @@ void add_control_character_warnings(const json&            value,
         json{{"control_characters", std::move(characters)}});
 }
 
+std::string witness_string(const json& witness, std::string_view key) {
+    const std::string owned(key);
+    if (!witness.is_object() || !witness.contains(owned) || !witness[owned].is_string()) return {};
+    return witness[owned].get<std::string>();
+}
+
 void add_core_parse_diagnostics(const graph::ParseReport& report,
+                                const HelpContext&        context,
                                 DiagnosticAccumulator&    diagnostics) {
     for (const auto& core : report.diagnostics) {
-        diagnostics.add(CompilePhase::CoreParse, "P_CORE_" + core.code, DiagnosticSeverity::Error,
-                        core_pointer(core.json_pointer), core.message,
-                        with_core_code(core.witness, core.code));
+        auto       message = core.message;
+        const auto tokens  = pointer_tokens(core.json_pointer);
+        const auto field   = witness_string(core.witness, "field");
+        if (core.code == "GC_UNKNOWN_FIELD" && context.javascript && !field.empty() && !tokens.empty()) {
+            const std::vector<std::string> parent(tokens.begin(), tokens.end() - 1);
+            message = builder_call(parent) + " has an unknown field '" + field + "'";
+        }
+        auto& pending = diagnostics.add(CompilePhase::CoreParse, "P_CORE_" + core.code,
+                                        DiagnosticSeverity::Error, core_pointer(core.json_pointer),
+                                        std::move(message), with_core_code(core.witness, core.code));
+        if (core.code == "GC_UNKNOWN_FIELD" && !field.empty() && !tokens.empty()) {
+            const std::vector<std::string> parent(tokens.begin(), tokens.end() - 1);
+            add_rename_help(pending.help, core_pointer(pointer_of(parent, parent.size())), field,
+                            known_core_keys(parent, context.definition));
+        } else if (core.code == "GC_REGISTRY_MISS") {
+            const auto kind = registry_kind(witness_string(core.witness, "kind"));
+            const auto name = witness_string(core.witness, "name");
+            if (kind && !name.empty())
+                add_registry_help(pending, context, *kind, name, core_pointer(core.json_pointer));
+        } else if (core.code == "GC_NO_ENTRY") {
+            const bool has_edges = context.definition.is_object() &&
+                                   context.definition.contains("edges") &&
+                                   context.definition["edges"].is_array();
+            const json edge{{"from", "__start__"}, {"to", "<node>"}};
+            pending.help.suggestions.push_back(
+                {context.javascript ? "Add graph.entry(<node>) for the node that runs first"
+                                    : "Add an edge from __start__ to the node that runs first",
+                 {has_edges ? SuggestionEdit{"add", "/root/definition/edges/-", "", edge}
+                            : SuggestionEdit{"add", "/root/definition/edges", "", json::array({edge})}},
+                 SuggestionApplicability::Placeholder});
+        }
     }
 }
 
@@ -1622,23 +1916,101 @@ std::string authored_message(const graph::Diagnostic& core, bool javascript) {
     return message;
 }
 
+// Help for a Core validator finding (returned copies only).
+void add_validation_help(PendingDiagnostic&      pending,
+                         const graph::Diagnostic& core,
+                         const std::string&       pointer,
+                         const HelpContext&       context,
+                         const DiagnosticAccumulator& diagnostics) {
+    const auto& witness = core.witness;
+    if (core.code == "E3") {
+        const auto unknown = witness_string(witness, "unknown");
+        if (unknown.empty()) return;
+        pending.cascade_key     = "node:" + unknown;
+        pending.cascade_label   = "also references '" + unknown + "'";
+        pending.help.candidates = diagnostic_name_candidates(unknown, context.nodes);
+        if (pending.help.candidates.empty()) return;
+        const auto&          best = pending.help.candidates.front();
+        DiagnosticSuggestion rename{"Replace '" + unknown + "' with '" + best + "'", {},
+                                    SuggestionApplicability::Maybe};
+        for (auto& path : reference_paths(context.definition, unknown))
+            rename.edits.push_back({"replace", std::move(path), "", json(best)});
+        if (!rename.edits.empty()) pending.help.suggestions.push_back(std::move(rename));
+    } else if (core.code == "E4") {
+        const auto channel = witness_string(witness, "channel");
+        if (channel.empty()) return;
+        pending.cascade_key     = "channel:" + channel;
+        pending.cascade_label   = "also uses '" + channel + "'";
+        pending.help.candidates = diagnostic_name_candidates(channel, context.channels);
+    } else if (core.code == "E8") {
+        const auto member  = witness_string(witness, "waits_for");
+        const auto barrier = witness_string(witness, "barrier");
+        if (member.empty()) return;
+        pending.help.related.push_back(
+            {"'" + member + "' has no edge or route into '" + barrier + "'",
+             diagnostics.help_coordinate("/root/definition/nodes/" + escape_pointer_segment(member))});
+    } else if (core.code == "E9") {
+        const auto node = witness_string(witness, "node");
+        if (node.empty() || !witness.contains("sources")) return;
+        const json sources = witness["sources"];
+        std::string listed;
+        for (const auto& source : sources) listed += (listed.empty() ? "" : ", ") + source.dump();
+        pending.help.suggestions.push_back(
+            {context.javascript
+                 ? "Join the sources with graph.barrier(" + json(node).dump() + ", [" + listed +
+                       "]) if both run"
+                 : "Join the sources with \"barrier\": {\"wait_for\": [" + listed + "]} on " +
+                       json(node).dump() + " if both run",
+             {{"add", "/root/definition/nodes/" + escape_pointer_segment(node) + "/barrier", "",
+               json{{"wait_for", sources}}}},
+             SuggestionApplicability::Maybe});
+    } else if (core.code == "E10") {
+        if (witness.is_object() && witness.contains("uncovered") && witness["uncovered"].is_array()) {
+            for (const auto& label : witness["uncovered"]) {
+                const auto name = label.get<std::string>();
+                pending.help.suggestions.push_back(
+                    {"Route label '" + name + "' to a node or __end__",
+                     {{"add", pointer + "/routes/" + escape_pointer_segment(name), "", json("<node>")}},
+                     SuggestionApplicability::Placeholder});
+            }
+        }
+        if (witness.is_object() && witness.contains("dead_keys") && witness["dead_keys"].is_array()) {
+            for (const auto& key : witness["dead_keys"]) {
+                const auto name = key.get<std::string>();
+                pending.help.suggestions.push_back(
+                    {"Remove route '" + name + "', which the condition never returns",
+                     {{"remove", pointer + "/routes/" + escape_pointer_segment(name), "", nullptr}},
+                     SuggestionApplicability::Maybe});
+            }
+        }
+    } else if (core.code == "E13") {
+        pending.help.suggestions.push_back(
+            {"Remove the edge, or add its target as a route of the conditional edge",
+             {{"remove", pointer, "", nullptr}},
+             SuggestionApplicability::Maybe});
+    }
+}
+
 // Errors and returned warnings follow the current rules. Sealed warnings come
 // from the original rules, so a newer compiler never changes a bundle id.
 void add_validation_diagnostics(const graph::ValidationReport& current,
                                 const graph::ValidationReport& original,
-                                const json&                    core_definition,
-                                bool                           javascript,
+                                const HelpContext&             context,
                                 DiagnosticAccumulator&         diagnostics) {
+    const auto& core_definition = context.definition;
+    const bool  javascript      = context.javascript;
     for (const auto& core : current.diagnostics) {
         auto pointer = authored_core_pointer(core_definition, core.json_pointer);
         if (core.severity == "warning") {
-            diagnostics.add_unsealed_warning(CompilePhase::CoreValidate, "P_CORE_" + core.code,
-                                             std::move(pointer), authored_message(core, javascript),
-                                             with_core_code(core.witness, core.code));
+            auto& pending = diagnostics.add_unsealed_warning(
+                CompilePhase::CoreValidate, "P_CORE_" + core.code, pointer,
+                authored_message(core, javascript), with_core_code(core.witness, core.code));
+            add_validation_help(pending, core, pointer, context, diagnostics);
         } else {
-            diagnostics.add(CompilePhase::CoreValidate, "P_CORE_" + core.code,
-                            DiagnosticSeverity::Error, std::move(pointer), core.message,
-                            with_core_code(core.witness, core.code));
+            auto& pending = diagnostics.add(CompilePhase::CoreValidate, "P_CORE_" + core.code,
+                                            DiagnosticSeverity::Error, pointer, core.message,
+                                            with_core_code(core.witness, core.code));
+            add_validation_help(pending, core, pointer, context, diagnostics);
         }
     }
     for (const auto& core : original.diagnostics) {
@@ -1701,11 +2073,13 @@ ClosureResult resolve_closure(const RegistrySnapshot&    registry,
                 registry, reference.kind, reference.name);
             work.push_back({manifest.identity, reference.pointer, std::nullopt});
         } catch (const std::out_of_range&) {
-            diagnostics.add(
+            auto& pending = diagnostics.add(
                 CompilePhase::Resolve, "P_REGISTRY_MISSING", DiagnosticSeverity::Error,
                 reference.pointer,
                 "Referenced executable is absent from the local RegistrySnapshot",
                 json{{"kind", std::string(to_string(reference.kind))}, {"name", reference.name}});
+            add_registry_help(pending, help_context(registry, core_definition, false),
+                              reference.kind, reference.name, reference.pointer);
         }
     }
     for (const auto& [node_name, definition] : topology.node_defs) {
@@ -2355,9 +2729,11 @@ struct ProgramCompiler::Impl {
             if (source.kind() == SourceKind::JavaScript)
                 add_control_character_warnings(parsed.core_definition, "/root/definition",
                                                diagnostics);
+            const auto help = help_context(registry, parsed.core_definition,
+                                           source.kind() == SourceKind::JavaScript);
             const auto parse_report = detail::RegistrySnapshotAccess::parse_local_report(
                 registry, parsed.core_definition);
-            add_core_parse_diagnostics(parse_report, diagnostics);
+            add_core_parse_diagnostics(parse_report, help, diagnostics);
             if (!parse_report.topology && !diagnostics.has_errors()) {
                 diagnostics.add(CompilePhase::Seal, "P_COMPILER_INTERNAL",
                                 DiagnosticSeverity::Error, "/root/definition",
@@ -2385,7 +2761,7 @@ struct ProgramCompiler::Impl {
             add_validation_diagnostics(
                 detail::RegistrySnapshotAccess::validate_local(registry, topology, current_rules),
                 detail::RegistrySnapshotAccess::validate_local(registry, topology, original_rules),
-                parsed.core_definition, source.kind() == SourceKind::JavaScript, diagnostics);
+                help, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();
             auto closure = resolve_closure(registry, topology, parsed.core_definition, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();

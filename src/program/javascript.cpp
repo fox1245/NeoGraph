@@ -1535,6 +1535,7 @@ JSValue graph_interrupt_before_impl(JSContext*    context,
                                                     "interrupt_before", nodes);
         if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
         builder->definition["interrupt_before"] = std::move(nodes);
+        record_call_site(context, *builder, "/interrupt_before");
     } else {
         auto       interrupts = builder->definition["interrupt_before"];
         const auto added      = canonical_size(nodes) - 2u + (interrupts.empty() ? 0u : 1u);
@@ -1575,6 +1576,7 @@ JSValue graph_interrupt_after_impl(JSContext*    context,
                                                     "interrupt_after", nodes);
         if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
         builder->definition["interrupt_after"] = std::move(nodes);
+        record_call_site(context, *builder, "/interrupt_after");
     } else {
         auto       interrupts = builder->definition["interrupt_after"];
         const auto added      = canonical_size(nodes) - 2u + (interrupts.empty() ? 0u : 1u);
@@ -1618,6 +1620,7 @@ JSValue graph_retry_policy_impl(JSContext*    context,
         size_after_object_set(builder->native_bytes, builder->definition, "retry_policy", policy);
     if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
     builder->definition["retry_policy"] = std::move(policy);
+    record_call_site(context, *builder, "/retry_policy");
     return return_builder(context, this_value);
 }
 

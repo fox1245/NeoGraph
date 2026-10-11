@@ -87,11 +87,11 @@ void check_references(Ctx& c) {
         const std::string pointer = "/edges/" + std::to_string(i++);
         if (e.from != kStart && !c.is_node(e.from)) {
             c.error("E3", path, pointer, "edge 'from' references unknown node '" + e.from + "'",
-                    json{{"edge_from", e.from}, {"edge_to", e.to}});
+                    json{{"edge_from", e.from}, {"edge_to", e.to}, {"unknown", e.from}});
         }
         if (e.to != kEnd && !c.is_node(e.to)) {
             c.error("E3", path, pointer, "edge 'to' references unknown node '" + e.to + "'",
-                    json{{"edge_from", e.from}, {"edge_to", e.to}});
+                    json{{"edge_from", e.from}, {"edge_to", e.to}, {"unknown", e.to}});
         }
     }
     i = 0;
@@ -101,14 +101,17 @@ void check_references(Ctx& c) {
         if (!c.is_node(ce.from)) {
             c.error("E3", path, pointer,
                     "conditional edge 'from' references unknown node '" + ce.from + "'",
-                    json{{"from", ce.from}});
+                    json{{"from", ce.from}, {"unknown", ce.from}});
         }
         for (const auto& [key, target] : ce.routes) {
             if (key == detail::kLegacyDefaultRoute) continue;
             if (target != kEnd && !c.is_node(target)) {
                 c.error("E3", path + ".routes." + key, pointer + "/routes/" + pointer_token(key),
                         "route '" + key + "' targets unknown node '" + target + "'",
-                        json{{"from", ce.from}, {"route", key}, {"target", target}});
+                        json{{"from", ce.from},
+                             {"route", key},
+                             {"target", target},
+                             {"unknown", target}});
             }
         }
     }
@@ -117,7 +120,7 @@ void check_references(Ctx& c) {
             if (!c.is_node(n)) {
                 c.error("E3", which, "/" + std::string(which),
                         std::string(which) + " references unknown node '" + n + "'",
-                        json{{"node", n}});
+                        json{{"node", n}, {"unknown", n}});
             }
         }
     };
@@ -135,7 +138,7 @@ void check_references(Ctx& c) {
                         json{{"barrier", bnode}, {"waits_for", u}});
             } else if (!c.is_node(u)) {
                 c.error("E3", path, pointer, "barrier wait_for references unknown node '" + u + "'",
-                        json{{"barrier", bnode}, {"waits_for", u}});
+                        json{{"barrier", bnode}, {"waits_for", u}, {"unknown", u}});
             }
         }
     }
