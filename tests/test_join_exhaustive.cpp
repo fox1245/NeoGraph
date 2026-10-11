@@ -43,18 +43,19 @@
 // slots. Duplicates up to node renaming are kept. NEOGRAPH_JOIN_MODEL_NODES,
 // _ENGINE_NODES and _STEPS override single limits.
 //
-// Two switches mark work that has not landed on this base:
+// Two switches:
 //
 //  - NEOGRAPH_JOIN_MODEL_ANY_OF (default 0): the Core parser and Scheduler do
 //    not know any_of slots yet (#363, WP4). Slot graphs run in the reference
 //    only. When WP4 lands, set it to 1 and pass the topology's join specs in
 //    scheduler_for().
-//  - NEOGRAPH_JOIN_MODEL_ENGINE_DETECTS_STALLS (default 0): this base ends a
-//    stalled run Completed (#357). Those runs are counted as the known
-//    disagreement and must differ from the reference in the outcome only.
-//    When the bug-stream stall detection lands, set it to 1 and teach
-//    engine_outcome() how a stalled run is reported; every counted run then
-//    has to match.
+//  - NEOGRAPH_JOIN_MODEL_ENGINE_DETECTS_STALLS (default 1): the engine reports
+//    a stalled run as RunStatus::BarrierStalled with a barrier_stalled witness
+//    (#357), so every engine run, stalled ones included, has to match the
+//    reference, and a stall's witness has to name the signals the reference
+//    leaves waiting. Setting it to 0 counts a run that stalls in the reference
+//    but ends Completed in the engine as a known disagreement instead of a
+//    mismatch; that is only for measuring a base without stall detection.
 
 #include <neograph/graph/compiler.h>
 #include <neograph/graph/engine.h>
@@ -86,7 +87,7 @@
 #define NEOGRAPH_JOIN_MODEL_ANY_OF 0
 #endif
 #ifndef NEOGRAPH_JOIN_MODEL_ENGINE_DETECTS_STALLS
-#define NEOGRAPH_JOIN_MODEL_ENGINE_DETECTS_STALLS 0
+#define NEOGRAPH_JOIN_MODEL_ENGINE_DETECTS_STALLS 1
 #endif
 
 namespace {
@@ -257,7 +258,9 @@ Step reference_step(const Graph& graph, std::uint32_t ready, std::uint32_t pendi
     return out;
 }
 
-enum class Outcome { Completed, Stalled, StepLimit };
+// Unexpected is never a reference outcome: an engine status the model has no
+// counterpart for (Interrupted, SafePoint) always mismatches.
+enum class Outcome { Completed, Stalled, StepLimit, Unexpected };
 
 const char* to_string(Outcome outcome) {
     switch (outcome) {
@@ -267,6 +270,8 @@ const char* to_string(Outcome outcome) {
             return "Failed(barrier stalled)";
         case Outcome::StepLimit:
             return "StepLimit";
+        case Outcome::Unexpected:
+            return "unexpected status";
     }
     return "?";
 }
@@ -576,6 +581,7 @@ struct Totals {
     std::uint64_t completed = 0, stalled = 0, explicit_end_completions = 0;
     std::uint64_t cyclic_graphs = 0, late_alternative_stalls = 0;
     std::uint64_t engine_graphs = 0, engine_skipped_invalid = 0, engine_runs = 0;
+    std::uint64_t engine_stalls = 0;
     std::uint64_t engine_known_stall_disagreements = 0, engine_step_limits = 0;
     std::uint64_t engine_known_member_waiting = 0, engine_known_non_member_only = 0;
     std::vector<std::string> failures;
@@ -739,13 +745,32 @@ void for_each_path(const Graph& graph, int max_steps, const std::function<void(c
     walk(bit(0), 0);
 }
 
-/// How this base reports a run. It has no stall detection, so a stalled run
-/// reads as Completed here (see NEOGRAPH_JOIN_MODEL_ENGINE_DETECTS_STALLS).
+/// How the engine reports a run: RunResult::status(), where a stalled run is
+/// RunStatus::BarrierStalled (#357).
 Outcome engine_outcome(const RunResult& result) {
-    if (result.output.contains("_neograph") &&
-        result.output["_neograph"].value("max_steps_exhausted", false))
-        return Outcome::StepLimit;
-    return Outcome::Completed;
+    switch (result.status()) {
+        case RunStatus::Completed:
+            return Outcome::Completed;
+        case RunStatus::BarrierStalled:
+            return Outcome::Stalled;
+        case RunStatus::StepLimit:
+            return Outcome::StepLimit;
+        default:
+            return Outcome::Unexpected;
+    }
+}
+
+/// The signals a stalled run's witness says the join still holds, or nullopt
+/// when the witness does not list exactly the model's one join.
+std::optional<std::uint32_t> stalled_signals(const Graph& graph, const RunResult& result) {
+    const auto& stalls = result.output["_neograph"]["barrier_stalled"];
+    if (!stalls.is_array() || stalls.size() != 1) return std::nullopt;
+    const auto& stall = stalls[0];
+    if (stall.value("node", "") != node_name(graph.join())) return std::nullopt;
+    std::uint32_t received = 0;
+    for (const auto& signaler : stall["received"])
+        received |= bit(std::stoi(signaler.get<std::string>().substr(1)));
+    return received;
 }
 
 /// An engine for the strict (schema 1) document, or nullptr when the validator
@@ -786,8 +811,18 @@ void run_engine(const Graph& graph, const Bounds& limits, Totals& totals) {
         }
         const auto actual = engine_outcome(result);
         if (path.outcome == Outcome::StepLimit) ++totals.engine_step_limits;
+        if (path.outcome == Outcome::Stalled) ++totals.engine_stalls;
         const bool same_trace = ready_sets == path.ready_sets;
-        if (same_trace && actual == path.outcome) return;
+        std::string witness_problem;
+        if (same_trace && actual == Outcome::Stalled && path.outcome == Outcome::Stalled) {
+            const auto received = stalled_signals(graph, result);
+            if (received != path.final_pending)
+                witness_problem = "\n  barrier_stalled witness " +
+                                  result.output["_neograph"]["barrier_stalled"].dump() +
+                                  ", reference waiting " +
+                                  mask_names(path.final_pending, graph.n);
+        }
+        if (same_trace && actual == path.outcome && witness_problem.empty()) return;
         if (same_trace && !NEOGRAPH_JOIN_MODEL_ENGINE_DETECTS_STALLS &&
             path.outcome == Outcome::Stalled && actual == Outcome::Completed) {
             ++totals.engine_known_stall_disagreements;
@@ -805,6 +840,7 @@ void run_engine(const Graph& graph, const Bounds& limits, Totals& totals) {
         for (const auto ready : path.ready_sets) out << " " << mask_names(ready, graph.n);
         out << "\n  engine    " << to_string(actual) << " steps";
         for (const auto ready : ready_sets) out << " " << mask_names(ready, graph.n);
+        out << witness_problem;
         totals.fail(out.str());
     });
 }
@@ -826,8 +862,12 @@ void report(const char* title, const Bounds& limits, const Totals& totals, doubl
     if (totals.engine_graphs || totals.engine_skipped_invalid)
         std::cout << "  engine runs " << totals.engine_runs << " over " << totals.engine_graphs
                   << " graphs (skipped with validator errors " << totals.engine_skipped_invalid
-                  << "), step limits " << totals.engine_step_limits
-                  << "\n  known #357 disagreements (reference stalls, engine completes) "
+                  << "), step limits " << totals.engine_step_limits << ", stalls "
+                  << totals.engine_stalls
+                  << (NEOGRAPH_JOIN_MODEL_ENGINE_DETECTS_STALLS ? " (all compared)" : "")
+                  << "\n";
+    if (totals.engine_known_stall_disagreements)
+        std::cout << "  known #357 disagreements (reference stalls, engine completes) "
                   << totals.engine_known_stall_disagreements << ": a member waiting "
                   << totals.engine_known_member_waiting << ", only non-member signals waiting "
                   << totals.engine_known_non_member_only << "\n";
@@ -1050,25 +1090,29 @@ TEST(JoinModel, EngineRunsMatchTheReference) {
     expect_clean(totals);
 }
 
-// #357 on this base: runs that stall in the reference end Completed in the
-// engine. These are the smallest targets the bug-stream stall detection must
-// turn into failures; flip NEOGRAPH_JOIN_MODEL_ENGINE_DETECTS_STALLS then.
-TEST(JoinModel, KnownIssue357StalledRunsEndCompleted) {
+// #357 regression: runs that stall in the reference. The engine used to end
+// them Completed; it now stops them as RunStatus::BarrierStalled (an Error
+// invocation, a Failed Program run) with a witness naming the join, the
+// signals it holds and the members it still misses.
+TEST(JoinModel, Issue357StalledRunsFailBarrierStalled) {
     register_model_executables();
     struct Case {
-        const char*              name;
-        Graph                    graph;
-        json                     script;
-        std::vector<Choice>      choices;
-        std::size_t              trace_size;
+        const char*         name;
+        Graph               graph;
+        json                script;
+        std::vector<Choice> choices;
+        std::size_t         trace_size;
+        std::uint32_t       received;
+        std::uint32_t       missing;
     };
     const Choice none{0, 0}, fail{bit(1), 0};
     const std::vector<Case> cases{
-        // #357: A, B, C, FIX run; D waits for B and C and never runs.
+        // #357: A, B, C, FIX run; D waits for B and C and never runs. C and the
+        // non-member FIX signaled it.
         {"issue 357, fail route", issue_357({bit(1), bit(2)}),
          json{{"n0", json::array({"-"})}, {"n1", json::array({"b"})},
               {"n2", json::array({"-"})}, {"n3", json::array({"-"})}},
-         {none, fail, none, none}, 4},
+         {none, fail, none, none}, 4, bit(2) | bit(3), bit(1)},
         // A=n0 -> {B=n1, J=n3}; B routes "b" to X=n2, which has no successors (an
         // implicit end). J waits for A and B and keeps A's signal.
         {"member waiting after an implicit end",
@@ -1076,12 +1120,19 @@ TEST(JoinModel, KnownIssue357StalledRunsEndCompleted) {
                         Route{false, {kEnd}}},
                     {bit(0), bit(1)}),
          json{{"n0", json::array({"-"})}, {"n1", json::array({"b"})}, {"n2", json::array({"-"})}},
-         {none, fail, none}, 3},
+         {none, fail, none}, 3, bit(0), bit(1)},
         // n0 -> n1; the join n1 waits for n0 and routes only to itself, so its
         // own (non-member) signal is left waiting.
         {"only a non-member signal waiting",
          graph_from(2, {Route{false, {1}}, Route{false, {1}}}, {bit(0)}),
-         json{{"n0", json::array({"-"})}, {"n1", json::array({"-"})}}, {none, none}, 2},
+         json{{"n0", json::array({"-"})}, {"n1", json::array({"-"})}}, {none, none}, 2, bit(1),
+         bit(0)},
+    };
+    const auto names = [](std::uint32_t value, int n) {
+        json result = json::array();
+        for (int u = 0; u < n; ++u)
+            if (value & bit(u)) result.push_back(node_name(u));
+        return result;
     };
     for (const auto& item : cases) {
         EXPECT_EQ(reference_run(item.graph, item.choices).outcome, Outcome::Stalled) << item.name;
@@ -1092,11 +1143,13 @@ TEST(JoinModel, KnownIssue357StalledRunsEndCompleted) {
         config.max_steps = 8;
         const auto result = engine->run(config);
         EXPECT_EQ(result.execution_trace.size(), item.trace_size) << item.name;
-#if NEOGRAPH_JOIN_MODEL_ENGINE_DETECTS_STALLS
+        EXPECT_EQ(result.status(), RunStatus::BarrierStalled) << item.name;
         EXPECT_EQ(engine_outcome(result), Outcome::Stalled) << item.name;
-#else
-        EXPECT_EQ(engine_outcome(result), Outcome::Completed)
-            << item.name << ": stall detection landed; flip the switch";
-#endif
+        const auto& stalls = result.output["_neograph"]["barrier_stalled"];
+        ASSERT_TRUE(stalls.is_array()) << item.name;
+        ASSERT_EQ(stalls.size(), 1U) << item.name;
+        EXPECT_EQ(stalls[0]["node"], node_name(item.graph.join())) << item.name;
+        EXPECT_EQ(stalls[0]["received"], names(item.received, item.graph.n)) << item.name;
+        EXPECT_EQ(stalls[0]["missing"], names(item.missing, item.graph.n)) << item.name;
     }
 }

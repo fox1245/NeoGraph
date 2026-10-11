@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=7d75fd1992cfe85b15819ac73a1979c2e120505d4329cdd01ef3c33267021492 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=dd6643ac7acc1c663fb9d4c9852d5b973c7a484a51a38879092e5bdabee5ccf6 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -421,6 +421,8 @@ version = host.compile_admit(source, run_budget)
 result = host.run(version, {}, run_budget)
 print(result.status, result.output)
 ```
+
+`ProgramRegistryBuilder.add_registered_node`、`add_registered_reducer` 和 `add_registered_condition` 复制本进程中已经注册的可执行单元。注册方式为 `@ng.node` 或 `ng.NodeFactory.register_type`、`ng.ReducerRegistry.register_reducer`、`ng.ConditionRegistry.register_condition`。传入未注册的名称时，这三个方法都会抛出 `ng.ProgramRegistryError`，消息会指出所需的注册调用。该错误的 `kind` 为 `"node"`、`"reducer"` 或 `"condition"`，`name` 为缺失的名称。它同时继承 `ValueError` 和 `RuntimeError`，因此捕获其中任一类型的现有处理代码仍能捕获它。使用注册表快照中不存在的节点类型、reducer 或条件的 Program 会改为在编译时失败：`ProgramCompiler.compile` 和 `LocalProgramHost.compile_admit` 都会抛出带有诊断 `P_CORE_GC_REGISTRY_MISS` 的 `ng.ProgramCompileError`。
 
 `LocalProgramHost` 是一个所有者作用域的内存便捷宿主。它仍然使用 C++ 编译器、Catalog、准入(admission)策略、转换存储和 ProgramRuntime。生成的提案在准入(admission)前还应通过宿主语义验证器；参见 [DSL 能力评估](DSL_CAPABILITY_EVAL.md)。
 

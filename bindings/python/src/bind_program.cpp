@@ -102,22 +102,39 @@ void translate_program_errors(std::exception_ptr error) {
 }
 
 // Core registry misses name the C++ registration call. Python callers register
-// through the module wrappers, so rewrite the hint; any other error is rethrown.
-[[noreturn]] void rethrow_with_python_hint(const std::runtime_error& error) {
+// through the module wrappers, so rewrite the hint.
+std::string with_python_hint(std::string message) {
     static constexpr std::pair<std::string_view, std::string_view> spellings[] = {
         {"ReducerRegistry::instance().register_reducer(name, fn)",
          "ng.ReducerRegistry.register_reducer(name, fn)"},
         {"ConditionRegistry::instance().register_condition(name, fn)",
          "ng.ConditionRegistry.register_condition(name, fn)"},
     };
-    std::string message = error.what();
     for (const auto& [cpp, python] : spellings) {
         if (const auto found = message.find(cpp); found != std::string::npos) {
             message.replace(found, cpp.size(), python);
-            throw std::runtime_error(std::move(message));
+            break;
         }
     }
-    throw;
+    return message;
+}
+
+// Every ProgramRegistryBuilder.add_registered_* call that names an executable
+// the process registry does not hold raises neograph_engine.ProgramRegistryError.
+// It subclasses both ValueError (what add_registered_node raised) and
+// RuntimeError (what the reducer and condition calls raised), so existing
+// handlers keep catching it. .kind is "node", "reducer" or "condition" and
+// .name is the missing name.
+[[noreturn]] void raise_registry_miss(const char*        kind,
+                                      const std::string& name,
+                                      const std::string& message) {
+    const auto type =
+        py::module_::import("neograph_engine._neograph").attr("ProgramRegistryError");
+    auto exception         = type(message);
+    exception.attr("kind") = kind;
+    exception.attr("name") = name;
+    PyErr_SetObject(type.ptr(), exception.ptr());
+    throw py::error_already_set();
 }
 
 class ProgramRegistryBuilderBinding {
@@ -137,10 +154,11 @@ public:
         // type must already be registered (#370).
         const auto types = NodeFactory::instance().registered_types();
         if (std::find(types.begin(), types.end(), type) == types.end()) {
-            throw py::value_error(
+            raise_registry_miss(
+                "node", type,
                 "add_registered_node: node type '" + type +
-                "' is not registered; register it first with @ng.node(\"" + type +
-                "\") or ng.NodeFactory.register_type(\"" + type + "\", factory)");
+                    "' is not registered; register it first with @ng.node(\"" + type +
+                    "\") or ng.NodeFactory.register_type(\"" + type + "\", factory)");
         }
         auto schema = NodeFactory::instance().config_schema(type);
         auto node_effects = NodeFactory::instance().node_effects(type);
@@ -166,7 +184,7 @@ public:
         try {
             reducer = ReducerRegistry::instance().get(name);
         } catch (const std::runtime_error& error) {
-            rethrow_with_python_hint(error);
+            raise_registry_miss("reducer", name, with_python_hint(error.what()));
         }
         builder_->add_reducer(
             registered_manifest(ExecutableKind::Reducer, name, std::move(semantic_version),
@@ -185,7 +203,7 @@ public:
         try {
             condition = ConditionRegistry::instance().get(name);
         } catch (const std::runtime_error& error) {
-            rethrow_with_python_hint(error);
+            raise_registry_miss("condition", name, with_python_hint(error.what()));
         }
         auto spec = ConditionRegistry::instance().condition_spec(name);
         builder_->add_condition(
@@ -600,6 +618,21 @@ void init_program(py::module_& m) {
     py::exception<ProgramAdmissionError>(m, "ProgramAdmissionError", PyExc_RuntimeError);
     py::exception<ProgramDiagnosticError>(m, "ProgramDiagnosticError", PyExc_RuntimeError);
     py::register_exception_translator(&translate_program_errors);
+    {
+        // Raised by raise_registry_miss for node, reducer and condition misses
+        // alike. Both bases keep the earlier handlers working.
+        const auto name = m.attr("__name__").cast<std::string>() + ".ProgramRegistryError";
+        const auto bases =
+            py::make_tuple(py::handle(PyExc_ValueError), py::handle(PyExc_RuntimeError));
+        PyObject* type = PyErr_NewExceptionWithDoc(
+            name.c_str(),
+            "A ProgramRegistryBuilder.add_registered_* call named an executable that is "
+            "not registered in this process. Subclasses ValueError and RuntimeError; "
+            ".kind is 'node', 'reducer' or 'condition' and .name is the missing name.",
+            bases.ptr(), nullptr);
+        if (type == nullptr) throw py::error_already_set();
+        m.attr("ProgramRegistryError") = py::reinterpret_steal<py::object>(type);
+    }
 
     py::class_<ProgramCompiler>(m, "ProgramCompiler")
         .def(py::init([](RegistrySnapshot registry, std::string compiler_build_id,

@@ -425,6 +425,8 @@ result = host.run(version, {}, run_budget)
 print(result.status, result.output)
 ```
 
+`ProgramRegistryBuilder.add_registered_node`, `add_registered_reducer` and `add_registered_condition` copy an executable that is already registered in this process, through `@ng.node` or `ng.NodeFactory.register_type`, `ng.ReducerRegistry.register_reducer` or `ng.ConditionRegistry.register_condition`. Each raises `ng.ProgramRegistryError` for a name that is not registered, and the message names the registration call. The error's `kind` is `"node"`, `"reducer"` or `"condition"`, and its `name` is the missing name. It subclasses both `ValueError` and `RuntimeError`, so handlers written for either keep catching it. A Program that uses a node type, reducer or condition missing from the registry snapshot fails at compile time instead, in `ProgramCompiler.compile` and `LocalProgramHost.compile_admit` alike, with `ng.ProgramCompileError` and the diagnostic `P_CORE_GC_REGISTRY_MISS`.
+
 `LocalProgramHost` is an owner-scoped in-memory convenience host. It still uses the C++ compiler, Catalog, admission policy, transition store and ProgramRuntime. Generated proposals should additionally pass a host semantic validator before admission; see [DSL capability evaluation](DSL_CAPABILITY_EVAL.md).
 
 Destroying `LocalProgramHost` releases the caller's GIL while its actual `ProgramRuntime` cancels, drains and joins scheduler work, so active Python nodes can finish. It reacquires the GIL before destroying the remaining host members; their Python callback/object owners keep GIL-safe destruction.

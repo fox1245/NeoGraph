@@ -951,3 +951,69 @@ def test_add_registered_node_requires_a_registered_node_type():
     assert "python_program_never_registered" in message
     assert "@ng.node" in message
     assert "ng.NodeFactory.register_type" in message
+
+
+def test_registry_misses_raise_one_error_type_for_every_kind():
+    assert issubclass(ng.ProgramRegistryError, ValueError)
+    assert issubclass(ng.ProgramRegistryError, RuntimeError)
+    builder = ng.ProgramRegistryBuilder()
+    misses = {
+        "node": lambda name: builder.add_registered_node(name, "1.0.0", _DIGEST_NODE),
+        "reducer": lambda name: builder.add_registered_reducer(name, "1.0.0", _DIGEST_REDUCER),
+        "condition": lambda name: builder.add_registered_condition(name, "1.0.0", _DIGEST_NODE),
+    }
+    for kind, add in misses.items():
+        name = "python_program_missing_" + kind
+        # Each miss stays catchable as the ValueError and RuntimeError raised before.
+        for legacy in (ValueError, RuntimeError):
+            with pytest.raises(legacy):
+                add(name)
+        with pytest.raises(ng.ProgramRegistryError) as raised:
+            add(name)
+        assert type(raised.value) is ng.ProgramRegistryError
+        assert raised.value.kind == kind
+        assert raised.value.name == name
+        assert name in str(raised.value)
+    # A miss leaves the builder usable.
+    builder.add_registered_reducer("overwrite", "1.0.0", _DIGEST_REDUCER)
+    assert builder.build().fingerprint
+
+
+def test_compile_time_registry_misses_raise_program_compile_error_for_every_kind():
+    def source(node_type="python_program_node", reducer="overwrite", condition=None):
+        route = (
+            f'graph.node("B", {{type: "python_program_node"}});\n'
+            f'  graph.conditionalEdge("A", "{condition}", {{a: "B", b: "B"}});\n'
+            '  graph.exit("B");'
+            if condition
+            else 'graph.exit("A");'
+        )
+        return ng.ProgramSource.from_javascript(
+            "python-snapshot-miss.js",
+            "export function define() {\n"
+            '  const graph = ng.graph("main");\n'
+            f'  graph.channel("value", {{reducer: "{reducer}", initial: 0}});\n'
+            f'  graph.node("A", {{type: "{node_type}"}});\n'
+            '  graph.entry("A");\n'
+            f"  {route}\n"
+            "  return graph;\n"
+            "}\n",
+        )
+
+    # Names the registry snapshot does not hold, one per executable kind.
+    sources = {
+        "node": source(node_type="python_program_snapshot_missing_node"),
+        "reducer": source(reducer="python_program_snapshot_missing_reducer"),
+        "condition": source(condition="python_program_snapshot_missing_condition"),
+    }
+    compiler = ng.ProgramCompiler(_registry(), "python-program-test/v1")
+    host = ng.LocalProgramHost(
+        _registry(), "python-owner-snapshot-miss", _ceiling(), "python-program-host/v1"
+    )
+    for kind, program in sources.items():
+        for compile_ in (compiler.compile, lambda s: host.compile_admit(s, _budget())):
+            with pytest.raises(ng.ProgramCompileError) as raised:
+                compile_(program)
+            codes = [diagnostic["code"] for diagnostic in raised.value.diagnostics]
+            assert codes == ["P_CORE_GC_REGISTRY_MISS"], kind
+            assert "python_program_snapshot_missing_" + kind in str(raised.value)
