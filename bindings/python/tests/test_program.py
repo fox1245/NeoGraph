@@ -865,3 +865,89 @@ def test_second_core_call_raising_node_interrupt_is_resumable():
     done = host.resume(run.run_id, {"ok": True}).wait()
     assert done.status == ng.ProgramTerminalStatus.Completed
     assert done.output["trace"] == ["a", "ask"]
+
+
+# Issue #370: messages and settings aimed at the Program user.
+
+
+def test_resume_of_unknown_run_says_runs_live_in_the_host():
+    host = _trace_host("python-owner-unknown-run")
+    with pytest.raises(ng.ProgramDiagnosticError) as raised:
+        host.resume("run-not-in-this-host", {"ok": True})
+    message = str(raised.value)
+    assert "run 'run-not-in-this-host' was not found in this LocalProgramHost" in message
+    assert "runs are kept in memory by the host that started them" in message
+    assert raised.value.diagnostics[0]["code"] == "P_RUN_NOT_FOUND"
+
+
+def test_fan_in_hint_names_the_javascript_barrier_call():
+    host = _trace_host("python-owner-fan-in-hint")
+    bundle = host.compile(
+        _trace_source(
+            '.node("A", {type: "python_program_trace_node"})'
+            '.node("B", {type: "python_program_trace_node"})'
+            '.node("C", {type: "python_program_trace_node"})'
+            '.node("J", {type: "python_program_trace_node"})'
+            '.entry("A").edge("A", "B").edge("A", "C").edge("B", "J").edge("C", "J").exit("J")'
+        ),
+        _budget(),
+    )
+    hints = [d for d in bundle.compile_diagnostics if d["code"] == "P_CORE_E9"]
+    assert hints, bundle.compile_diagnostics
+    assert 'graph.barrier("J", [...])' in hints[0]["message"]
+    assert '"barrier":' not in hints[0]["message"]
+
+
+def test_local_program_host_worker_count_reaches_the_catalog():
+    program = _sleep_program('return (yield ng.callCore("work", {delay: 10}, "w")).topic;')
+    # The admitted budget pins max_concurrency to 4.
+    with pytest.raises(ng.ProgramAdmissionError) as raised:
+        _sleep_host("python-owner-workers-over", worker_count=5).compile_admit(
+            program, _join_budget())
+    policy = [d for d in raised.value.diagnostics if d["code"] == "P_ADMIT_POLICY"]
+    assert policy and policy[0]["witness"]["worker_count"] == 5
+
+    host = _sleep_host("python-owner-workers", worker_count=4)
+    result = host.run(host.compile_admit(program, _join_budget()), {}, _join_budget())
+    assert result.status == ng.ProgramTerminalStatus.Completed
+
+
+def test_wall_time_timeout_names_the_budget_and_keeps_the_trace():
+    _trace_host("python-owner-wall-time-types")  # registers the trace node type
+    ng.NodeFactory.register_type(
+        "python_program_sleep_node", lambda name, config, _ctx: _SleepNode(name, config))
+    builder = ng.ProgramRegistryBuilder()
+    builder.add_registered_node("python_program_trace_node", "1.0.0", _DIGEST_TRACE_NODE)
+    builder.add_registered_node("python_program_sleep_node", "1.0.0", "sha256:" + "7" * 64)
+    builder.add_registered_reducer("append", "1.0.0", _DIGEST_APPEND)
+    builder.add_registered_reducer("overwrite", "1.0.0", _DIGEST_REDUCER)
+    host = ng.LocalProgramHost(
+        builder.build(), "python-owner-wall-time", _ceiling(), "python-program-host/v1")
+    source = ng.ProgramSource.from_javascript(
+        "python-wall-time.js",
+        'export function define() { return ng.graph("main")'
+        '.channel("trace", {reducer: "append", initial: []})'
+        '.channel("delay", {reducer: "overwrite", initial: 5000})'
+        '.channel("topic", {reducer: "overwrite", initial: ""})'
+        '.node("first", {type: "python_program_trace_node"})'
+        '.node("slow", {type: "python_program_sleep_node"})'
+        '.entry("first").edge("first", "slow").exit("slow"); }',
+    )
+    budget = _budget()
+    budget.wall_time_ms = 300
+    result = host.run(host.compile_admit(source, budget), {}, budget)
+    assert result.status == ng.ProgramTerminalStatus.TimedOut
+    assert result.failure.code == "P_RUNTIME_TIMEOUT"
+    assert result.failure.message == "Program wall-time budget (300 ms) expired"
+    assert result.failure.witness["cause_message"]
+    assert result.execution_trace == ["first"]
+
+
+def test_add_registered_node_requires_a_registered_node_type():
+    builder = ng.ProgramRegistryBuilder()
+    with pytest.raises(ValueError) as raised:
+        builder.add_registered_node("python_program_never_registered", "1.0.0", _DIGEST_NODE)
+    message = str(raised.value)
+    assert "python_program_never_registered" in message
+    assert "@ng.node" in message
+    assert "ng.NodeFactory.register_type" in message

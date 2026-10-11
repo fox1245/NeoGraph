@@ -133,6 +133,15 @@ public:
         std::vector<std::string> effects,
         ExecutionGuarantee guarantee) {
         require_open();
+        // The manifest copies the type's config schema and effects now, so the
+        // type must already be registered (#370).
+        const auto types = NodeFactory::instance().registered_types();
+        if (std::find(types.begin(), types.end(), type) == types.end()) {
+            throw py::value_error(
+                "add_registered_node: node type '" + type +
+                "' is not registered; register it first with @ng.node(\"" + type +
+                "\") or ng.NodeFactory.register_type(\"" + type + "\", factory)");
+        }
         auto schema = NodeFactory::instance().config_schema(type);
         auto node_effects = NodeFactory::instance().node_effects(type);
         if (!schema.is_object()) schema = json{{"type", "object"}};
@@ -269,6 +278,16 @@ ProgramCompilerConfig compiler_config(std::string             compiler_build_id,
     return config;
 }
 
+CatalogConfig catalog_config(std::shared_ptr<InMemoryProgramStore> store,
+                             RegistrySnapshot                      registry,
+                             std::string                           compiler_build_id,
+                             std::size_t                           worker_count) {
+    CatalogConfig config{std::move(store), std::move(registry),
+                         std::make_shared<EngineGenerationCache>(), std::move(compiler_build_id)};
+    config.worker_count = worker_count;
+    return config;
+}
+
 class LocalProgramHost {
 public:
     LocalProgramHost(RegistrySnapshot registry,
@@ -278,7 +297,8 @@ public:
                      std::size_t scheduler_threads,
                      std::shared_ptr<sp::NativeArchive> native_history_archive,
                      JavaScriptCompileLimits javascript_limits,
-                     bool require_acyclic)
+                     bool require_acyclic,
+                     std::size_t worker_count)
         : registry_(std::move(registry)),
           owner_scope_(std::move(owner_scope)),
           compiler_build_id_(std::move(compiler_build_id)),
@@ -287,8 +307,8 @@ public:
           compiler_(std::make_shared<ProgramCompiler>(
               registry_, compiler_config(compiler_build_id_, javascript_limits, require_acyclic))),
           store_(std::make_shared<InMemoryProgramStore>()),
-          catalog_(std::make_shared<ProgramCatalog>(CatalogConfig{
-              store_, registry_, std::make_shared<EngineGenerationCache>(), compiler_build_id_})),
+          catalog_(std::make_shared<ProgramCatalog>(
+              catalog_config(store_, registry_, compiler_build_id_, worker_count))),
           checkpoints_(std::make_shared<InMemoryCheckpointStore>()),
           transitions_(std::make_shared<InMemoryProgramTransitionStore>()) {
         RuntimeConfig config;
@@ -386,9 +406,19 @@ public:
         auto owned_value = py_to_json(value);
         auto exact_id    = pending_id ? std::move(*pending_id) : awaiting_pending_id(run_id);
         py::gil_scoped_release release;
-        return runtime_->resume(owner_scope_, std::move(run_id),
-                                ProgramResume{std::move(owned_value), std::move(trace_id), {},
-                                              std::move(exact_id)});
+        try {
+            return runtime_->resume(owner_scope_, run_id,
+                                    ProgramResume{std::move(owned_value), std::move(trace_id), {},
+                                                  std::move(exact_id)});
+        } catch (const ProgramDiagnosticError& error) {
+            if (error.diagnostic().code != "P_RUN_NOT_FOUND") throw;
+            // Runs live only in this host's memory; say so (#370).
+            auto diagnostic    = error.diagnostic();
+            diagnostic.message = "run '" + run_id +
+                "' was not found in this LocalProgramHost; runs are kept in memory by the "
+                "host that started them";
+            throw ProgramDiagnosticError(std::move(diagnostic));
+        }
     }
 
     const std::string& owner_scope() const noexcept { return owner_scope_; }
@@ -684,15 +714,22 @@ void init_program(py::module_& m) {
 
     py::class_<LocalProgramHost>(m, "LocalProgramHost",
         "Owner-scoped in-memory Program compiler, Catalog, and durable runtime. "
-        "It uses the same C++ ProgramRuntime as native callers.")
+        "It uses the same C++ ProgramRuntime as native callers. Runs live only in "
+        "this host's memory. scheduler_threads sizes the Program scheduler that "
+        "drives concurrent callCore work and deadlines; worker_count sizes each "
+        "Core engine's pool for parallel fan-out inside a graph (1 runs fan-out "
+        "branches on the scheduler thread) and must not exceed an admitted "
+        "Program's max_concurrency.")
         .def(py::init<RegistrySnapshot, std::string, RunBudget, std::string, std::size_t,
-                      std::shared_ptr<sp::NativeArchive>, JavaScriptCompileLimits, bool>(),
+                      std::shared_ptr<sp::NativeArchive>, JavaScriptCompileLimits, bool,
+                      std::size_t>(),
              py::arg("registry"), py::arg("owner_scope"), py::arg("budget_ceiling"),
              py::arg("compiler_build_id") = "neograph-python-program/v1",
              py::arg("scheduler_threads") = 1,
              py::arg("native_history_archive") = nullptr,
              py::arg("javascript_limits") = JavaScriptCompileLimits{},
-             py::arg("require_acyclic") = false)
+             py::arg("require_acyclic") = false,
+             py::arg("worker_count") = 1)
         .def_property_readonly("owner_scope", &LocalProgramHost::owner_scope)
         .def("compile", &LocalProgramHost::compile)
         .def("admit", &LocalProgramHost::admit)

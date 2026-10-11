@@ -1092,6 +1092,14 @@ TEST(ProgramCompilerTest, JavaScriptBuilderDiagnosticsCarryTheirCallSites) {
     EXPECT_EQ(dead_channel->primary.span->line_begin, 4U);
     const auto fan_in = find_diagnostic(bundle.compile_diagnostics(), "P_CORE_E9");
     ASSERT_TRUE(fan_in.has_value());
+    // A JavaScript author is told the builder call; the sealed copy keeps the
+    // Core wording so the bundle id above does not move (#370).
+    EXPECT_NE(fan_in->message.find("graph.barrier(\"join\", [...])"), std::string::npos)
+        << fan_in->message;
+    const auto sealed_fan_in = find_diagnostic(bundle.diagnostics(), "P_CORE_E9");
+    ASSERT_TRUE(sealed_fan_in.has_value());
+    EXPECT_NE(sealed_fan_in->message.find("\"barrier\": {\"wait_for\": [...]}"),
+              std::string::npos);
     EXPECT_EQ(fan_in->primary.json_pointer, "/root/definition/nodes/join");
     ASSERT_TRUE(fan_in->primary.span.has_value());
     EXPECT_EQ(fan_in->primary.span->line_begin, 8U);

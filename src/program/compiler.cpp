@@ -1606,17 +1606,34 @@ void add_roundtrip_diagnostics(const graph::RoundTripReport& report,
     }
 }
 
+// The Core validator words its hints for the JSON definition. A JavaScript
+// author writes the builder call instead; only returned copies are reworded,
+// sealed text never changes (#370).
+std::string authored_message(const graph::Diagnostic& core, bool javascript) {
+    static constexpr std::string_view json_barrier = "\"barrier\": {\"wait_for\": [...]}";
+    auto message = core.message;
+    if (!javascript || core.code != "E9") return message;
+    const auto found = message.find(json_barrier);
+    if (found == std::string::npos || !core.witness.is_object() ||
+        !core.witness.contains("node") || !core.witness["node"].is_string())
+        return message;
+    message.replace(found, json_barrier.size(),
+                    "graph.barrier(" + core.witness["node"].dump() + ", [...])");
+    return message;
+}
+
 // Errors and returned warnings follow the current rules. Sealed warnings come
 // from the original rules, so a newer compiler never changes a bundle id.
 void add_validation_diagnostics(const graph::ValidationReport& current,
                                 const graph::ValidationReport& original,
                                 const json&                    core_definition,
+                                bool                           javascript,
                                 DiagnosticAccumulator&         diagnostics) {
     for (const auto& core : current.diagnostics) {
         auto pointer = authored_core_pointer(core_definition, core.json_pointer);
         if (core.severity == "warning") {
             diagnostics.add_unsealed_warning(CompilePhase::CoreValidate, "P_CORE_" + core.code,
-                                             std::move(pointer), core.message,
+                                             std::move(pointer), authored_message(core, javascript),
                                              with_core_code(core.witness, core.code));
         } else {
             diagnostics.add(CompilePhase::CoreValidate, "P_CORE_" + core.code,
@@ -2368,7 +2385,7 @@ struct ProgramCompiler::Impl {
             add_validation_diagnostics(
                 detail::RegistrySnapshotAccess::validate_local(registry, topology, current_rules),
                 detail::RegistrySnapshotAccess::validate_local(registry, topology, original_rules),
-                parsed.core_definition, diagnostics);
+                parsed.core_definition, source.kind() == SourceKind::JavaScript, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();
             auto closure = resolve_closure(registry, topology, parsed.core_definition, diagnostics);
             if (diagnostics.has_errors()) diagnostics.throw_error();

@@ -1192,7 +1192,10 @@ std::uint64_t model_tokens(const std::shared_ptr<UsageAccumulator>& usage) noexc
     return total <= 0 ? 0 : static_cast<std::uint64_t>(total);
 }
 
-bool apply_terminal_cause(RunOutcome& outcome, CancellationCause cause, std::string_view message) {
+bool apply_terminal_cause(const std::shared_ptr<RunControl>& control,
+                          RunOutcome&                        outcome,
+                          CancellationCause                  cause,
+                          std::string_view                   message) {
     if (cause == CancellationCause::None) return false;
     auto provider_outcome = outcome.failure ? std::move(outcome.failure->provider_outcome)
                                            : sp::runtime::Result{};
@@ -1211,9 +1214,17 @@ bool apply_terminal_cause(RunOutcome& outcome, CancellationCause cause, std::str
     }
     outcome.status  = cause == CancellationCause::Timeout ? ProgramTerminalStatus::TimedOut
                                                           : ProgramTerminalStatus::Cancelled;
+    // A timeout names the budget that expired; the text of whatever the
+    // cancellation interrupted stays in the witness (#370).
+    auto failure_message = safe_failure_message(std::string(message));
+    if (cause == CancellationCause::Timeout) {
+        causal_witness["cause_message"] = std::move(failure_message);
+        failure_message = "Program wall-time budget (" +
+            std::to_string(control->granted_budget.wall_time_ms) + " ms) expired";
+    }
     outcome.failure = ProgramFailure{
         cause == CancellationCause::Timeout ? "P_RUNTIME_TIMEOUT" : "P_RUNTIME_CANCELLED",
-        safe_failure_message(std::string(message)),
+        std::move(failure_message),
         "root",
         "",
         0,
@@ -4942,7 +4953,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 ? plan_result.failure->message
                 : std::string("Program attempt was cancelled");
         outcome.failure = std::move(plan_result.failure);
-        if (apply_terminal_cause(outcome, terminal_cause, cancellation_message)) {
+        if (apply_terminal_cause(control, outcome, terminal_cause, cancellation_message)) {
         } else if (plan_result.status != ProgramTerminalStatus::Completed) {
             outcome.status    = plan_result.status;
             outcome.interrupt = std::move(plan_result.interrupt);
@@ -4983,9 +4994,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
-        apply_terminal_cause(outcome, terminal_cause_at_deadline(control, deadline), error.what());
+        apply_terminal_cause(control, outcome, terminal_cause_at_deadline(control, deadline), error.what());
         apply_durable_javascript_disposition(outcome);
     } catch (const graph::CancelledException& error) {
+        outcome.execution_trace          = core_progress->completed_nodes();
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
         outcome.usage.model_tokens       = model_tokens(usage);
         outcome.usage.program_operations = operation_count;
@@ -4995,7 +5007,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.checkpoint               = control->latest_checkpoint();
         auto cause                       = terminal_cause_at_deadline(control, deadline);
         if (cause == CancellationCause::None) cause = CancellationCause::User;
-        apply_terminal_cause(outcome, cause, error.what());
+        apply_terminal_cause(control, outcome, cause, error.what());
         apply_durable_javascript_disposition(outcome);
     } catch (const NestedOperationFailure& error) {
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", error.what(),
@@ -5013,7 +5025,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         const auto cause                 = terminal_cause_at_deadline(control, deadline);
-        if (!apply_terminal_cause(outcome, cause, error.what()) && error.checkpoint_incompatible &&
+        if (!apply_terminal_cause(control, outcome, cause, error.what()) && error.checkpoint_incompatible &&
             checkpoint_id) {
             apply_checkpoint_incompatible(outcome, control, *checkpoint_id, resume_checkpoint,
                                           error.what());
@@ -5030,7 +5042,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
-        apply_terminal_cause(outcome, terminal_cause_at_deadline(control, deadline), error.what());
+        apply_terminal_cause(control, outcome, terminal_cause_at_deadline(control, deadline), error.what());
         apply_durable_javascript_disposition(outcome);
     } catch (const ProgramDiagnosticError& error) {
         const auto& diagnostic   = error.diagnostic();
@@ -5042,13 +5054,14 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome = failed_outcome(control, diagnostic.code, diagnostic.message);
         if (outcome.failure) outcome.failure->operation_id = operation_id;
         if (outcome.failure) outcome.failure->witness = diagnostic.witness;
+        outcome.execution_trace          = core_progress->completed_nodes();
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
         outcome.usage.model_tokens       = model_tokens(usage);
         outcome.usage.program_operations = operation_count;
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
-        apply_terminal_cause(outcome, terminal_cause_at_deadline(control, deadline),
+        apply_terminal_cause(control, outcome, terminal_cause_at_deadline(control, deadline),
                              diagnostic.message);
         apply_durable_javascript_disposition(outcome);
     } catch (const std::exception& error) {
@@ -5062,7 +5075,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         const auto cause                 = terminal_cause_at_deadline(control, deadline);
-        if (!apply_terminal_cause(outcome, cause, error.what()) && checkpoint_id &&
+        if (!apply_terminal_cause(control, outcome, cause, error.what()) && checkpoint_id &&
             !checkpoint_is_available(*control, *checkpoint_id)) {
             apply_checkpoint_incompatible(outcome, control, *checkpoint_id, resume_checkpoint,
                                           error.what());
@@ -5075,7 +5088,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
-        apply_terminal_cause(outcome, terminal_cause_at_deadline(control, deadline),
+        apply_terminal_cause(control, outcome, terminal_cause_at_deadline(control, deadline),
                              "Unknown Core failure");
         apply_durable_javascript_disposition(outcome);
     }
