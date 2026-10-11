@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=e251f5896d92eb33dea97610c600584fe74f8a1bf47195e4d9c807e54f901501 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=0d83e62e8cc14ec8bfa3d0d263eb93ba58b67f39b295e10c46ea4834c5d94ae5 -->
 # NeoGraph 핵심 개념 — 해설 가이드
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -407,6 +407,8 @@ result = await engine.resume_async(thread_id="t1",
                                    checkpoint_id=result.checkpoint_id,
                                    new_input={...})  # optional
 ```
+
+재개는 자신이 답하는 인터럽트의 게이트만 건너뜁니다. `interrupt_before` 일시 정지를 재개하면 붙잡아 둔 노드가 실행되고, `NodeInterrupt`를 재개하면 그 스텝이 이어집니다. 그 밖의 재개, 예를 들어 `interrupt_after` 일시 정지 뒤의 재개나 프로세스가 멈춘 뒤 스텝 체크포인트에서의 복구는 곧 실행할 `interrupt_before` 노드 앞에서 여전히 멈춥니다.
 
 ### `NodeInterrupt`를 통한 동적 인터럽트
 

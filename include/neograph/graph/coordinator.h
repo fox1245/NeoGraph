@@ -69,6 +69,9 @@ struct ResumeContext {
     json metadata;               ///< Checkpoint metadata including lifecycle guard.
     int start_step = 0;          ///< Phase-adjusted step to re-enter at.
     CheckpointPhase phase = CheckpointPhase::Completed;
+    /// The checkpoint's current_node: for a Before checkpoint, the node whose
+    /// interrupt_before gate saved it.
+    std::string current_node;
     std::vector<std::string> next_nodes;
 
     /// Partially-completed super-step writes, keyed by task_id. The

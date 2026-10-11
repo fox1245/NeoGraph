@@ -430,3 +430,198 @@ def test_a_quorum_that_needs_its_paused_member_waits_for_it():
     assert done.status == ng.ProgramTerminalStatus.Completed, describe(done)
     assert done.output == [["route", "confirm"], ["route", "work"]]
     assert JOURNAL.names().count("work") == 1
+
+
+# ---------------------------------------------------------------------------
+# Only a resume that answers an interrupt skips that interrupt's gate (#382).
+# Answering the review after "draft" (interruptAfter) is not an approval of
+# "deploy" (interruptBefore): the resumed run still asks before "deploy", in
+# the process that resumed it and in the one that recovers it after a crash.
+# ---------------------------------------------------------------------------
+
+REVIEWED_RELEASE = define_graph("""
+    g.node("draft", {type: "e2e.step"});
+    g.node("deploy", {type: "e2e.step", record_resume: true});
+    g.entry("draft");
+    g.edge("draft", "deploy");
+    g.interruptAfter("draft");
+    g.interruptBefore("deploy");
+    g.exit("deploy");
+""", name="release")
+
+
+def test_answering_a_review_after_a_node_does_not_approve_the_next_gate():
+    host, _version, reviewed = _interrupted(REVIEWED_RELEASE)
+    assert reviewed.interrupt.core_node == "draft"
+
+    gated = host.resume(reviewed.run_id, {"reviewed": True}).wait()
+
+    assert gated.status == ng.ProgramTerminalStatus.Interrupted, describe(gated)
+    assert gated.interrupt.core_node == "deploy"
+    assert JOURNAL.names() == ["draft"], "deploy ran without its approval"
+
+    done = host.resume(gated.run_id, {"approved": True}).wait()
+
+    assert done.status == ng.ProgramTerminalStatus.Completed, describe(done)
+    assert trace_channel(done) == ["draft", "deploy"]
+    assert channel(done, "answer") == {"approved": True}
+
+
+_GATE_CRASH_SETUP = r'''
+import json, os, sys
+import neograph_engine as ng
+from program_e2e import support as s
+from program_e2e.test_02_hitl import REVIEWED_RELEASE
+
+store, kind = sys.argv[1], sys.argv[2]
+TEXT = REVIEWED_RELEASE if kind == "define" else s.with_main(REVIEWED_RELEASE, """
+    const reply = yield ng.callCore("release", {topic: input.topic}, "release");
+    return {answer: reply.answer, trace: reply.trace};
+""")
+CEILING = s.ceiling(max_child_depth=1, max_total_children=1)
+BUDGET = s.budget(max_child_depth=1, max_total_children=1)
+host = s.make_host("tenant:gate-crash", budget_ceiling=CEILING, sqlite_directory=store)
+version = s.admit(host, TEXT, BUDGET)
+
+
+def report(result):
+    trace = (result.output or {}).get("trace") if kind == "main" else s.trace_channel(result)
+    print(json.dumps({"status": str(result.status), "run_id": result.run_id,
+                      "node": result.interrupt.core_node if result.interrupt else None,
+                      "trace": trace, "ran": s.JOURNAL.names(), "failure": s.describe(result)}),
+          flush=True)
+'''
+
+_GATE_CRASH_REVIEW = _GATE_CRASH_SETUP + r'''
+report(host.run(version, {"topic": "release"}, BUDGET))
+os._exit(0)  # no orderly shutdown: the process is simply gone
+'''
+
+_GATE_CRASH_ANSWER = _GATE_CRASH_SETUP + r'''
+host.resume(sys.argv[3], {"reviewed": True})
+print(json.dumps({"ran": s.JOURNAL.names()}), flush=True)
+os._exit(0)  # gone while the resumed attempt may still be running
+'''
+
+_GATE_CRASH_RECOVER = _GATE_CRASH_SETUP + r'''
+gated = host.reconnect(sys.argv[3]).wait()
+report(gated)
+if gated.status == ng.ProgramTerminalStatus.Interrupted:
+    report(host.resume(sys.argv[3], {"approved": True}).wait())
+'''
+
+
+@slow
+@pytest.mark.parametrize("kind", ["define", "main"])
+def test_recovery_of_an_answered_review_still_asks_before_the_gated_node(kind, tmp_path):
+    store = str(tmp_path / "runs")
+    first = run_python(_GATE_CRASH_REVIEW, store, kind)
+    assert first.returncode == 0, first.stderr[-2000:]
+    reviewed = last_json_line(first.stdout)
+    assert reviewed["status"] == "ProgramTerminalStatus.Interrupted", reviewed
+    assert reviewed["node"] == "draft"
+
+    second = run_python(_GATE_CRASH_ANSWER, store, kind, reviewed["run_id"])
+    assert second.returncode == 0, second.stderr[-2000:]
+    assert "deploy" not in last_json_line(second.stdout)["ran"]
+
+    third = run_python(_GATE_CRASH_RECOVER, store, kind, reviewed["run_id"])
+    assert third.returncode == 0, third.stderr[-2000:]
+    lines = [json.loads(line) for line in third.stdout.splitlines() if line.startswith("{")]
+    gated = lines[0]
+    # The recovered run asks before "deploy"; nothing ran it without approval.
+    assert gated["status"] == "ProgramTerminalStatus.Interrupted", gated
+    assert gated["node"] == "deploy", gated
+    assert gated["ran"] == [], gated
+    done = lines[1]
+    assert done["status"] == "ProgramTerminalStatus.Completed", done
+    assert done["ran"] == ["deploy"], done
+    assert done["trace"] == ["draft", "deploy"], done
+
+
+# The Core engine on its own: the process is gone after a step committed and
+# before the next step's interrupt was saved. Recovery resumes the committed
+# step's checkpoint and still asks before the gated node.
+
+_CORE_GATE_CRASH = r'''
+import json, os, sys
+import neograph_engine as ng
+from program_e2e import support as s
+from program_e2e.test_02_hitl import APPROVAL_GATE
+
+path, phase = sys.argv[1], sys.argv[2]
+bundle = ng.ProgramCompiler(s.build_registry()).compile(s.source(APPROVAL_GATE), s.budget())
+definition = bundle.sealed_core_definitions[0]["definition"]
+
+
+class StopsBeforeTheInterrupt(ng.CheckpointStore):
+    """Delegates to SQLite; the process dies when the interrupt would be saved."""
+
+    def __init__(self, inner):
+        super().__init__()
+        self._inner = inner
+
+    def save(self, cp):
+        if cp.interrupt_phase == ng.CheckpointPhase.Before:
+            print(json.dumps({"ran": s.JOURNAL.names(), "dying": True}), flush=True)
+            os._exit(9)
+        self._inner.save(cp)
+
+    def load_latest(self, thread_id):
+        return self._inner.load_latest(thread_id)
+
+    def load_by_id(self, checkpoint_id):
+        return self._inner.load_by_id(checkpoint_id)
+
+    def list(self, thread_id, limit=100):
+        return self._inner.list(thread_id, limit)
+
+    def delete_thread(self, thread_id):
+        self._inner.delete_thread(thread_id)
+
+    def put_writes(self, thread_id, parent_id, write):
+        self._inner.put_writes(thread_id, parent_id, write)
+
+    def get_writes(self, thread_id, parent_id):
+        return self._inner.get_writes(thread_id, parent_id)
+
+    def clear_writes(self, thread_id, parent_id):
+        self._inner.clear_writes(thread_id, parent_id)
+
+    def requires_managed_budget(self, thread_id):
+        return self._inner.requires_managed_budget(thread_id)
+
+
+if phase == "crash":
+    engine = ng.GraphEngine.compile(definition, ng.NodeContext(),
+                                    StopsBeforeTheInterrupt(ng.SqliteCheckpointStore(path)))
+    engine.run(ng.RunConfig(thread_id="gate"))
+    print(json.dumps({"unreachable": True}), flush=True)
+else:
+    engine = ng.GraphEngine.compile(definition, ng.NodeContext(), ng.SqliteCheckpointStore(path))
+    latest = ng.SqliteCheckpointStore(path).load_latest("gate")
+    recovered = engine.resume("gate")
+    gated = {"phase": str(latest.interrupt_phase), "interrupted": recovered.interrupted,
+             "node": recovered.interrupt_node, "ran": s.JOURNAL.names()}
+    approved = engine.resume("gate", {"approved": True})
+    print(json.dumps({"gated": gated, "interrupted": approved.interrupted,
+                      "ran": s.JOURNAL.names(), "answer": s.channel(approved, "answer")}),
+          flush=True)
+'''
+
+
+@slow
+def test_core_recovery_between_a_commit_and_the_interrupt_save_still_asks(tmp_path):
+    path = str(tmp_path / "checkpoints.db")
+    crashed = run_python(_CORE_GATE_CRASH, path, "crash")
+    assert crashed.returncode == 9, (crashed.returncode, crashed.stdout, crashed.stderr[-2000:])
+    assert last_json_line(crashed.stdout)["ran"] == ["draft"]
+
+    recovered = run_python(_CORE_GATE_CRASH, path, "recover")
+    assert recovered.returncode == 0, recovered.stderr[-2000:]
+    outcome = last_json_line(recovered.stdout)
+    assert outcome["gated"] == {"phase": "CheckpointPhase.Completed", "interrupted": True,
+                                "node": "deploy", "ran": []}, outcome
+    assert outcome["interrupted"] is False
+    assert outcome["ran"] == ["deploy"]
+    assert outcome["answer"] == {"approved": True}

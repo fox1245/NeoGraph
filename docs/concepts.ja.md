@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=e251f5896d92eb33dea97610c600584fe74f8a1bf47195e4d9c807e54f901501 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=0d83e62e8cc14ec8bfa3d0d263eb93ba58b67f39b295e10c46ea4834c5d94ae5 -->
 # NeoGraphのコアコンセプト— 解説ガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -407,6 +407,8 @@ result = await engine.resume_async(thread_id="t1",
                                    checkpoint_id=result.checkpoint_id,
                                    new_input={...})  # optional
 ```
+
+再開は、それが答える割り込みのゲートだけを飛ばします。`interrupt_before` の一時停止を再開すると止めていたノードが実行され、`NodeInterrupt` を再開するとそのステップが続きます。それ以外の再開、たとえば `interrupt_after` の一時停止後の再開や、プロセス停止後のステップのチェックポイントからの復旧は、これから実行する `interrupt_before` ノードの前で引き続き停止します。
 
 ### `NodeInterrupt`による動的割り込み
 

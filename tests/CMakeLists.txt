@@ -919,6 +919,12 @@ if(NEOGRAPH_BUILD_SQLITE)
     target_link_libraries(neograph_node_failure_effect_tests PRIVATE
         neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
     neograph_discover_tests(neograph_node_failure_effect_tests PROPERTIES LABELS "core;node-failure")
+    # #382: only a resume that answers an interrupt skips its interrupt_before
+    # gate, including recovery from a Completed checkpoint on SQLite.
+    add_executable(neograph_interrupt_gate_tests test_interrupt_resume_gate.cpp)
+    target_link_libraries(neograph_interrupt_gate_tests PRIVATE
+        neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
+    neograph_discover_tests(neograph_interrupt_gate_tests PROPERTIES LABELS "core;interrupt")
 endif()
 
 if(NEOGRAPH_BUILD_PROGRAM)

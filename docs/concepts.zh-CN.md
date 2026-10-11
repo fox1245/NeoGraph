@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=e251f5896d92eb33dea97610c600584fe74f8a1bf47195e4d9c807e54f901501 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=0d83e62e8cc14ec8bfa3d0d263eb93ba58b67f39b295e10c46ea4834c5d94ae5 -->
 # NeoGraph 核心概念——叙事指南
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -407,6 +407,8 @@ result = await engine.resume_async(thread_id="t1",
                                    checkpoint_id=result.checkpoint_id,
                                    new_input={...})  # optional
 ```
+
+恢复只会跳过它所回答的那个中断的闸门。恢复 `interrupt_before` 暂停会运行被拦下的节点，恢复 `NodeInterrupt` 会继续其所在的步骤。其他任何恢复，例如 `interrupt_after` 暂停之后的恢复，或进程停止后从某个步骤的检查点进行的恢复，仍会在即将运行的 `interrupt_before` 节点之前暂停。
 
 ### 通过 `NodeInterrupt` 进行动态中断
 

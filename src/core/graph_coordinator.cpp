@@ -346,6 +346,7 @@ ResumeContext CheckpointCoordinator::load_for_resume() const {
     ctx.native_history = cp_opt->native_history;
     ctx.metadata       = cp_opt->metadata;
     ctx.phase          = detail::checkpoint_resume_phase(*cp_opt);
+    ctx.current_node   = cp_opt->current_node;
     ctx.next_nodes     = cp_opt->next_nodes;
     ctx.barrier_state  = cp_opt->barrier_state;
 
@@ -509,6 +510,7 @@ asio::awaitable<ResumeContext> CheckpointCoordinator::load_for_resume_async() co
     ctx.native_history = cp_opt->native_history;
     ctx.metadata       = cp_opt->metadata;
     ctx.phase          = detail::checkpoint_resume_phase(*cp_opt);
+    ctx.current_node   = cp_opt->current_node;
     ctx.next_nodes     = cp_opt->next_nodes;
     ctx.barrier_state  = cp_opt->barrier_state;
 
@@ -544,6 +546,7 @@ asio::awaitable<ResumeContext> CheckpointCoordinator::load_for_resume_by_id_asyn
     ctx.native_history = cp_opt->native_history;
     ctx.metadata       = cp_opt->metadata;
     ctx.phase          = detail::checkpoint_resume_phase(*cp_opt);
+    ctx.current_node   = cp_opt->current_node;
     ctx.next_nodes     = cp_opt->next_nodes;
     ctx.barrier_state  = cp_opt->barrier_state;
 

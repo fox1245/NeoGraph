@@ -1717,6 +1717,17 @@ GraphEngine::execute_graph_async(
     const RunMetadata& metadata,
     const RuntimeResources* resources) {
     const bool is_resume = resume_context.has_value();
+    // #382: only a resume that answers an interrupt skips that interrupt's
+    // gate. An interrupt_before pause re-enters the step it held, and a
+    // NodeInterrupt re-enters a step that already passed its gate. Every other
+    // resume (after interrupt_after, from a step's Completed checkpoint after
+    // a crash, from an update or a safe point) evaluates interrupt_before for
+    // the nodes it is about to run.
+    const bool resume_answers_gate =
+        is_resume &&
+        (resume_context->phase == CheckpointPhase::NodeInterrupt ||
+         (resume_context->phase == CheckpointPhase::Before &&
+          interrupt_before_.count(resume_context->current_node) != 0));
 
     // The RAII guard releases admission after every normal, cancelled, or
     // exceptional completion; the resume path holds a second count while
@@ -2083,7 +2094,7 @@ GraphEngine::execute_graph_async(
         if (ready.empty()) break;
 
         // --- interrupt_before check ---
-        bool is_resume_entry = (is_resume && step == start_step);
+        bool is_resume_entry = (resume_answers_gate && step == start_step);
         if (!is_resume_entry) {
             for (const auto& node_name : ready) {
                 if (interrupt_before_.count(node_name) && coord.enabled()) {

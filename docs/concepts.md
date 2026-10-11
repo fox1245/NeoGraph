@@ -455,6 +455,8 @@ result = await engine.resume_async(thread_id="t1",
                                    new_input={...})  # optional
 ```
 
+A resume skips only the gate of the interrupt it answers. Resuming an `interrupt_before` pause runs the node it held, and resuming a `NodeInterrupt` continues its step. Any other resume, such as one after an `interrupt_after` pause or recovery from a step's checkpoint after the process stopped, still pauses before an `interrupt_before` node it is about to run.
+
 ### Dynamic interrupts via `NodeInterrupt`
 
 Throw from inside a node body (Python: `raise ng.NodeInterrupt(reason)`,
