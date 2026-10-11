@@ -79,9 +79,15 @@ static sp::runtime::Result ask(Provider& p,
             completion.stop.kind != sp::StopKind::MaxTokens)
             throw ProviderOutcomeError("ToT did not receive a completed text answer", result, {});
         if (has_text) return result;
-        if (completion.stop.kind != sp::StopKind::MaxTokens || attempt == reasks)
-            throw ProviderOutcomeError("ToT received no visible text", result,
+        if (completion.stop.kind != sp::StopKind::MaxTokens || attempt == reasks) {
+            // Say whether the turn ended normally or at the cap, and how much was reasoning.
+            const auto count = [](const std::optional<sp::Count>& c) { return c ? std::to_string(c->value) : std::string("?"); };
+            const std::string message = "ToT received no visible text (stop " + completion.stop.raw +
+                ", output " + count(completion.usage.output_total) + " tokens, reasoning " +
+                count(completion.usage.reasoning) + ")";
+            throw ProviderOutcomeError(message.c_str(), result,
                 std::make_exception_ptr(std::runtime_error("empty ToT completion")));
+        }
         std::cerr << "ToT: empty MaxTokens completion; additional semantic call "
                   << (attempt + 1) << "/" << reasks << " at the same output cap\n";
     }
