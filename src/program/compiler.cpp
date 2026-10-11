@@ -10,6 +10,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <initializer_list>
 #include <functional>
 #include <map>
@@ -1510,6 +1511,43 @@ json with_core_code(const json& witness, std::string_view core_code) {
     return json{{"core_code", std::string(core_code)}, {"core_witness", witness}};
 }
 
+// In a JavaScript string "\b" is U+0008 and "\d" is "d", so a regular
+// expression written as a plain string reaches its config silently changed.
+// Tab, newline and carriage return are ordinary text; other C0 characters warn.
+void add_control_character_warnings(const json&            value,
+                                    const std::string&     pointer,
+                                    DiagnosticAccumulator& diagnostics) {
+    if (value.is_object()) {
+        for (const auto& [key, child] : value.items())
+            add_control_character_warnings(child, child_pointer(pointer, key), diagnostics);
+        return;
+    }
+    if (value.is_array()) {
+        std::size_t index = 0;
+        for (const auto& child : value)
+            add_control_character_warnings(child, pointer + "/" + std::to_string(index++),
+                                           diagnostics);
+        return;
+    }
+    if (!value.is_string()) return;
+    std::vector<std::string> found;
+    for (const unsigned char character : value.get<std::string>()) {
+        if (character >= 0x20 || character == '\t' || character == '\n' || character == '\r')
+            continue;
+        char code[8];
+        std::snprintf(code, sizeof(code), "U+%04X", static_cast<unsigned>(character));
+        if (std::find(found.begin(), found.end(), code) == found.end()) found.emplace_back(code);
+    }
+    if (found.empty()) return;
+    json characters = json::array();
+    for (auto& code : found) characters.push_back(std::move(code));
+    diagnostics.add(CompilePhase::Source, "P_JS_CONTROL_CHARACTER", DiagnosticSeverity::Warning,
+                    pointer,
+                    "JavaScript config string contains a control character; write regular "
+                    "expressions as /.../.source or String.raw`...`",
+                    json{{"control_characters", std::move(characters)}});
+}
+
 void add_core_parse_diagnostics(const graph::ParseReport& report,
                                 DiagnosticAccumulator&    diagnostics) {
     for (const auto& core : report.diagnostics) {
@@ -2243,6 +2281,9 @@ struct ProgramCompiler::Impl {
             }
             auto parsed = parse_program(source, document, diagnostics, control_source.has_value());
             if (diagnostics.has_errors()) diagnostics.throw_error();
+            if (source.kind() == SourceKind::JavaScript)
+                add_control_character_warnings(parsed.core_definition, "/root/definition",
+                                               diagnostics);
             const auto parse_report = detail::RegistrySnapshotAccess::parse_local_report(
                 registry, parsed.core_definition);
             add_core_parse_diagnostics(parse_report, diagnostics);

@@ -1104,6 +1104,33 @@ TEST(ProgramCompilerTest, JavaScriptBuilderDiagnosticsCarryTheirCallSites) {
     }
 }
 
+TEST(ProgramCompilerTest, JavaScriptConfigControlCharactersWarnAtTheirCallSite) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    // A regex written as a plain JavaScript string: "\b" becomes U+0008.
+    const auto bundle = compiler.compile(ProgramSource::from_javascript(
+        "control.js",
+        "export function define() {\n"
+        "  const graph = ng.graph(\"main\");\n"
+        "  graph.channel(\"value\", {reducer: \"local-reducer\", initial: 0});\n"
+        "  graph.node(\"work\", {type: \"local-node\",\n"
+        "                        pattern: \"\\b[1-9]\\d* failed\",\n"
+        "                        text: \"tab\\tnewline\\ncarriage\\r\"});\n"
+        "  graph.entry(\"work\");\n"
+        "  graph.exit(\"work\");\n"
+        "  return graph;\n"
+        "}\n"));
+
+    std::vector<neograph::program::Diagnostic> warnings;
+    for (const auto& diagnostic : bundle.diagnostics())
+        if (diagnostic.code == "P_JS_CONTROL_CHARACTER") warnings.push_back(diagnostic);
+    ASSERT_EQ(warnings.size(), 1U);
+    EXPECT_EQ(warnings[0].severity, DiagnosticSeverity::Warning);
+    EXPECT_EQ(warnings[0].primary.json_pointer, "/root/definition/nodes/work/pattern");
+    ASSERT_TRUE(warnings[0].primary.span.has_value());
+    EXPECT_EQ(warnings[0].primary.span->line_begin, 4U);
+    EXPECT_EQ(warnings[0].witness["control_characters"], json::array({"U+0008"}));
+}
+
 TEST(ProgramCompilerTest, JavaScriptSealedModuleClosureExecutesAtCompileTime) {
     const std::string leaf_source = R"JS(
         export const nodeType = "local-node";
