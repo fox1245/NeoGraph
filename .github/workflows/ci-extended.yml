@@ -37,7 +37,9 @@ jobs:
         run: python scripts/verify_ci.py grpc --work-dir build-grpc --jobs auto
 
   # Actual hosted ARM64, not an x86 substitute. PG remains build-only here.
+  # Skipped for now: Linux ARM64 is built and tested on our own ARM server instead.
   build-and-test-arm64:
+    if: ${{ false }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     steps:
