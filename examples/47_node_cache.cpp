@@ -1,11 +1,12 @@
-// NeoGraph Example 42: Per-node result cache (NodeCache)
+// NeoGraph Example 47: Per-node result cache (NodeCache)
 //
 // Demonstrates GraphEngine::set_node_cache_enabled with an explicit reusable
 // scope. Default caching is execution-local; use CacheScope::Reusable only for
 // a node proved independent of all RunContext values.
 //
 // We instrument a counter node so we can prove the cache short-circuits
-// the second run; hit_count must be 1, miss_count must be 1.
+// the second run; a third run with new input misses again, so hit_count
+// must be 1 and miss_count must be 2.
 //
 // Usage: ./example_node_cache
 

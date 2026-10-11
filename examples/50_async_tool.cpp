@@ -1,4 +1,4 @@
-// NeoGraph Example 45: AsyncTool — coroutine-shaped tool execution
+// NeoGraph Example 50: AsyncTool — coroutine-shaped tool execution
 //
 // Tools that fetch over the network, RPC into MCP, or query an async
 // DB are naturally awaitable. AsyncTool gives them a coroutine slot

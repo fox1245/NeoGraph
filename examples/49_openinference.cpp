@@ -1,4 +1,4 @@
-// NeoGraph Example 44: OpenInference observability (v0.6.0 feature)
+// NeoGraph Example 49: OpenInference observability (v0.6.0 feature)
 //
 // Wires a minimal Tracer adapter (prints spans to stderr) into the
 // engine via openinference_tracer() and wraps a mock Provider in

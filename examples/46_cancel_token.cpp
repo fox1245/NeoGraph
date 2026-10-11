@@ -1,4 +1,4 @@
-// NeoGraph Example 41: Cooperative cancellation via CancelToken
+// NeoGraph Example 46: Cooperative cancellation via CancelToken
 //
 // Demonstrates how a long-running graph can be aborted from another
 // thread (or signal handler, or HTTP cancel button) by sharing a
