@@ -287,7 +287,8 @@ void init_provider_values(py::module_& m) {
         .value("UnknownCurrency", sp::CostStatus::UnknownCurrency)
         .value("Conflict", sp::CostStatus::Conflict);
     py::enum_<sp::CostRounding>(m, "ProviderCostRounding")
-        .value("CeilingParsedBinary64", sp::CostRounding::CeilingParsedBinary64);
+        .value("CeilingParsedBinary64", sp::CostRounding::CeilingParsedBinary64)
+        .value("CeilingShortestDecimal", sp::CostRounding::CeilingShortestDecimal);
     py::class_<sp::UsdAmount>(m, "ProviderUsdAmount")
         .def_readonly("nano_usd", &sp::UsdAmount::nano_usd)
         .def_readonly("evidence", &sp::UsdAmount::evidence)

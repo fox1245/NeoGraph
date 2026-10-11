@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=8de8f71c38693e7f5be786f998612e6e76bd71342a6f4e91988c5f065c26acad -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=ae3606fa9d465e79b277ba9791866402d3f9de5ad045d91383fbe4defe49585e -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -17,6 +17,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ### 変更
 
+- **SchemaProvider の `maint/interface6` にマージされた PR #23 の `45dd2ad36e18717adae3e2d10b2b9c8bb0e85471` を採用します。使用量がベンダー値と正確に一致します。** 実際の API 呼び出しで確認しました。OpenRouter Messages のストリーミングは末尾の `[DONE]` で失敗せず、報告されたコストも保持します。Chat は `video_tokens` などのベンダー詳細カウンタを保持します。報告される USD 金額がベンダーの10進値と一致し（+1 nanoUSD なし）、入力 + 出力 = 合計が成り立ちます。Gemini は合計が証明する場合に推論0を報告し、Interactions は modality を名前で記録し、`claude-haiku-4-5` のような Anthropic エイリアスは日付付きモデルで応答されても受け入れます。保存された結果に `CostRounding::CeilingShortestDecimal` が入ることがあり、以前の記録もそのまま読め、Python は `ProviderCostRounding.CeilingShortestDecimal` を公開します。SDK 0.3.0 と interface/shared ABI 6 は変わりません。
 - **`llm::Agent` と deep-research、plan-execute のツールループが一時停止したターンを継続します (#311)。** `sp::StopKind::PauseTurn`（Anthropic/Chat の `pause_turn`）を受け取ると、一時停止した assistant ターンを含む履歴をそのまま再送し、既存の反復回数の予算内で動作します。以前は一時停止したターンを最終結果として返していました。同じ判定は `paused_turn()` で利用できます。リファレンスに Responses の `response.done` エイリアス規則と、宣言済みゲートウェイのサービングモデル規則を記載しました。
 - **SchemaProvider の `maint/interface6` ブランチにマージされた PR #21 の `83112573ba59e3b561fc33c22394638be7aa5294` を採用します。SDK 0.3.0、interface/shared ABI 6 はそのままで、ルーティングゲートウェイの修正が加わります。** Responses と Messages は、宣言済みの OpenRouter origin が `~deepseek/deepseek-v4-flash-latest` のようなルーティングエイリアスに対して返す実際のサービングモデル名を受け入れるようになりました。以前はこのような Responses 呼び出しがすべて `invalid response protocol (HTTP 200)` で失敗していました。サービングモデルは 1 つの応答内で変わってはならず、replay は要求したモデルに束縛されたままです。NeoGraph の API・ABI に変更はありません。
 - **マージ済みSchemaProvider PR #16の`3b88e4ba020c3a4d39ff0660014e7292b516b7cb`を採用し、SDK 0.3.0 EXACT、interface/shared ABI 6で再ビルドします。** 以下に記録した以前のinterface-5 SDK手順を置き換えます。blocking呼び出しは単一async SDK pipelineを使い、event-loop/callback workerからの再入拒否を維持します。outcome、usage観測、journal、native archive再読込、Python型付き値はprovider報告金額、status、source、evidence、rounding、競合を保持します。canonical v2 JSONは金額情報が完全に欠落する場合のみ`provider_cost`を省略し、過去の欠落のみのbytesを保持します。ゼロやBYOK falseも金額の根拠であり、不明なtoken holdをproven-not-sentとして返金させません。金額をtokenや支出権限に変換しません。Native archive v3とportable JSON v2は変わりません。

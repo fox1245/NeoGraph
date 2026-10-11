@@ -289,7 +289,7 @@ inline void validate_provider_cost(const sp::ProviderReportedCost& value) {
             require(value.source == sp::CostSource::OpenRouterUsd &&
                         amount.nano_usd <= (std::uint64_t{1} << 53) &&
                         valid(amount.evidence, sp::Evidence::Derived) &&
-                        amount.rounding == sp::CostRounding::CeilingParsedBinary64,
+                        valid(amount.rounding, sp::CostRounding::CeilingShortestDecimal),
                     "Invalid provider USD amount");
         }
         require(status != sp::CostStatus::UnknownCurrency ||
@@ -318,7 +318,7 @@ inline std::optional<sp::UsdAmount> parse_usd_amount(const json& value) {
     if (value.is_null()) return {};
     return sp::UsdAmount{counter(value.at("nano_usd")),
         enumeration(value.at("evidence"), sp::Evidence::Derived),
-        enumeration(value.at("rounding"), sp::CostRounding::CeilingParsedBinary64)};
+        enumeration(value.at("rounding"), sp::CostRounding::CeilingShortestDecimal)};
 }
 inline json provider_cost(const sp::ProviderReportedCost& value) {
     validate_provider_cost(value);

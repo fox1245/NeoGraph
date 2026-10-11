@@ -287,6 +287,19 @@ TEST(SchemaProviderInterface6, MissingCostsKeepOldCanonicalUsageBytesAndZeroIsEv
     EXPECT_FALSE(provider_failure_proves_not_sent(contradictory));
 }
 
+TEST(SchemaProviderInterface6, StoredUsdAmountsDecodeBothRoundingContracts) {
+    namespace codec = neograph::provider_codec::detail;
+    // Records written before the shortest-decimal contract carry rounding 0 and keep decoding.
+    const auto legacy = codec::parse_usd_amount(json{{"nano_usd", 1501}, {"evidence", 0}, {"rounding", 0}});
+    ASSERT_TRUE(legacy);
+    EXPECT_EQ(legacy->rounding, sp::CostRounding::CeilingParsedBinary64);
+    const auto current = codec::parse_usd_amount(json{{"nano_usd", 1500}, {"evidence", 0}, {"rounding", 1}});
+    ASSERT_TRUE(current);
+    EXPECT_EQ(current->rounding, sp::CostRounding::CeilingShortestDecimal);
+    EXPECT_EQ(codec::usd_amount(current), (json{{"nano_usd", 1500}, {"evidence", 0}, {"rounding", 1}}));
+    EXPECT_THROW(codec::parse_usd_amount(json{{"nano_usd", 1}, {"evidence", 0}, {"rounding", 2}}), std::runtime_error);
+}
+
 TEST(SchemaProviderInterface6, EveryMonetaryFieldStatusSurvivesObservationAndTrustedArchive) {
     wire::Peer peer(wire::responses_body());
     auto descriptor = cost_descriptor("openai.responses", peer.origin());
@@ -299,7 +312,7 @@ TEST(SchemaProviderInterface6, EveryMonetaryFieldStatusSurvivesObservationAndTru
     struct Case { const char* amount; sp::CostStatus status; std::uint64_t nanos; };
     const std::array cases{
         Case{"null", sp::CostStatus::Missing, 0}, Case{"0", sp::CostStatus::Available, 0},
-        Case{"0.1", sp::CostStatus::Available, 100000001},
+        Case{"0.1", sp::CostStatus::Available, 100000000},  // exact decimal, no binary64 ceiling
         Case{"1e-10", sp::CostStatus::Available, 1},
         Case{"\"invalid\"", sp::CostStatus::Malformed, 0},
         Case{"9007199.5", sp::CostStatus::PrecisionExceeded, 0},
@@ -324,7 +337,7 @@ TEST(SchemaProviderInterface6, EveryMonetaryFieldStatusSurvivesObservationAndTru
                 ASSERT_TRUE(amounts[field]);
                 EXPECT_EQ(amounts[field]->nano_usd, scenario.nanos);
                 EXPECT_EQ(amounts[field]->evidence, sp::Evidence::Reported);
-                EXPECT_EQ(amounts[field]->rounding, sp::CostRounding::CeilingParsedBinary64);
+                EXPECT_EQ(amounts[field]->rounding, sp::CostRounding::CeilingShortestDecimal);
             } else EXPECT_FALSE(amounts[field]);
             expect_archive_roundtrip(result, archive, names[field]);
         }

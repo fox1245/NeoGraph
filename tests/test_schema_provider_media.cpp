@@ -108,17 +108,15 @@ TEST(SchemaProviderMedia, GeminiInlineMediaAndThoughtMetadataStayOrderedAndOwned
         EXPECT_EQ(usage.input_total->evidence, sp::Evidence::Reported);
         EXPECT_EQ(usage.provider_reported_total->value, 0u);
         EXPECT_EQ(usage.provider_reported_total->evidence, sp::Evidence::Reported);
-        ASSERT_EQ(usage.output_total.has_value(), thoughts);
-        ASSERT_EQ(usage.total.has_value(), thoughts);
-        ASSERT_EQ(usage.reasoning.has_value(), thoughts);
-        if (thoughts) {
-            EXPECT_EQ(usage.reasoning->value, 0u);
-            EXPECT_EQ(usage.reasoning->evidence, sp::Evidence::Reported);
-            EXPECT_EQ(usage.output_total->value, 0u);
-            EXPECT_EQ(usage.output_total->evidence, sp::Evidence::Derived);
-            EXPECT_EQ(usage.total->value, 0u);
-            EXPECT_EQ(usage.total->evidence, sp::Evidence::Derived);
-        }
+        // An absent thoughtsTokenCount is still zero when totalTokenCount equals prompt + candidates,
+        // so the SDK derives the same counters either way; only the reasoning evidence differs.
+        ASSERT_TRUE(usage.output_total); ASSERT_TRUE(usage.total); ASSERT_TRUE(usage.reasoning);
+        EXPECT_EQ(usage.reasoning->value, 0u);
+        EXPECT_EQ(usage.reasoning->evidence, thoughts ? sp::Evidence::Reported : sp::Evidence::Derived);
+        EXPECT_EQ(usage.output_total->value, 0u);
+        EXPECT_EQ(usage.output_total->evidence, sp::Evidence::Derived);
+        EXPECT_EQ(usage.total->value, 0u);
+        EXPECT_EQ(usage.total->evidence, sp::Evidence::Derived);
         EXPECT_EQ(usage.stage, sp::UsageStage::Final);
         EXPECT_EQ(usage.quality, sp::UsageQuality::Consistent);
         ASSERT_TRUE(message.wire_output);

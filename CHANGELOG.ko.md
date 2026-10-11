@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=8de8f71c38693e7f5be786f998612e6e76bd71342a6f4e91988c5f065c26acad -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=ae3606fa9d465e79b277ba9791866402d3f9de5ad045d91383fbe4defe49585e -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -15,6 +15,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 변경됨
 
+- **SchemaProvider `maint/interface6`에 병합된 PR #23의 `45dd2ad36e18717adae3e2d10b2b9c8bb0e85471`을 채택합니다. 사용량이 벤더 값과 정확히 일치합니다.** 실제 API 호출로 확인했습니다. OpenRouter Messages 스트리밍이 끝의 `[DONE]` 때문에 실패하지 않고 보고된 비용도 담습니다. Chat은 `video_tokens` 같은 벤더 세부 카운터를 보존합니다. 보고된 USD 금액이 벤더 10진값과 같아져(+1 nanoUSD 없음) 입력 + 출력 = 합계가 성립합니다. Gemini는 합계가 증명하면 추론 0을 보고하고, Interactions는 modality를 이름으로 기록하며, `claude-haiku-4-5` 같은 Anthropic 별칭은 날짜가 붙은 모델로 응답돼도 받아들입니다. 저장된 결과에 `CostRounding::CeilingShortestDecimal`이 올 수 있으며, 이전 기록도 그대로 읽히고 Python은 `ProviderCostRounding.CeilingShortestDecimal`을 노출합니다. SDK 0.3.0과 interface/shared ABI 6은 그대로입니다.
 - **`llm::Agent`와 deep-research, plan-execute 도구 루프가 일시정지된 턴을 이어갑니다 (#311).** `sp::StopKind::PauseTurn`(Anthropic/Chat `pause_turn`)을 받으면 일시정지된 assistant 턴을 그대로 둔 채 기록을 다시 보내며, 기존 반복 횟수 예산 안에서 동작합니다. 이전에는 일시정지된 턴을 최종 결과처럼 반환했습니다. 같은 판정은 `paused_turn()`으로 쓸 수 있습니다. 레퍼런스에 Responses `response.done` 별칭 규칙과 선언된 게이트웨이의 서빙 모델 규칙을 문서화했습니다.
 - **SchemaProvider `maint/interface6` 브랜치에 병합된 PR #21의 `83112573ba59e3b561fc33c22394638be7aa5294`를 채택합니다. SDK 0.3.0, interface/shared ABI 6은 그대로이고 라우팅 게이트웨이 수정이 추가됩니다.** Responses와 Messages는 이제 선언된 OpenRouter origin이 `~deepseek/deepseek-v4-flash-latest` 같은 라우팅 별칭에 대해 돌려주는 실제 서빙 모델명을 받아들입니다. 이전에는 이런 Responses 호출이 모두 `invalid response protocol (HTTP 200)`으로 실패했습니다. 서빙 모델은 한 응답 안에서 바뀌면 안 되고, replay는 요청한 모델에 묶인 채로 유지됩니다. NeoGraph API·ABI 변경은 없습니다.
 - **병합된 SchemaProvider PR #16의 `3b88e4ba020c3a4d39ff0660014e7292b516b7cb`를 채택하며 SDK 0.3.0 EXACT, interface/shared ABI 6로 재빌드합니다.** 아래에 기록한 이전 interface-5 SDK 단계의 현재 요구사항을 대체합니다. blocking 호출은 단일 async SDK pipeline을 쓰고 event-loop/callback worker 재진입 거부를 유지합니다. outcome, usage 관측, journal, native archive 재로드 및 Python 타입 값은 공급자 보고 금액, status, source, evidence, rounding과 충돌을 보존합니다. canonical v2 JSON은 금액 메타데이터가 전혀 없을 때만 `provider_cost`를 생략하여 과거 부재 기록의 bytes를 유지합니다. 0과 BYOK false를 포함한 금액 근거가 있으면 알 수 없는 token hold를 proven-not-sent로 환불하지 않습니다. 금액은 token 또는 지출 권한으로 변환하지 않습니다. Native archive v3와 portable JSON v2는 그대로입니다.
