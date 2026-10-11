@@ -1811,8 +1811,18 @@ GraphEngine::execute_graph_async(
     }
 
     std::vector<std::string> trace;
-    bool hit_end = false;
+    // Only an explicit end (an edge or route to __end__, or Command.goto
+    // __end__) means the run chose to finish; a node with no successors ends
+    // implicitly and says nothing about a join still waiting elsewhere.
+    bool explicit_end = false;
     json barrier_stall;  // null unless the run stopped at an unsatisfiable barrier
+    // Every checkpoint carries the stall witness once known, so resuming or
+    // forking any of them reports the stall instead of completion.
+    const auto checkpoint_metadata = [&] {
+        auto metadata = detail::checkpoint_metadata_for(ctx);
+        if (!barrier_stall.is_null()) metadata["_neograph"][kBarrierStalled] = barrier_stall;
+        return metadata;
+    };
     std::vector<Send> pending_sends;
     if (safe_point_request &&
         start_step >= std::numeric_limits<int>::max() - 1) {
@@ -1841,7 +1851,7 @@ GraphEngine::execute_graph_async(
                 const std::string parent_cp_id = last_checkpoint_id;
                 auto checkpoint = co_await coord.commit_super_step_async(
                     state, trace_tag, ready, step, parent_cp_id, barrier_state,
-                    detail::checkpoint_metadata_for(ctx));
+                    checkpoint_metadata());
                 last_checkpoint_id = std::move(checkpoint.id);
             }
             RunResult result;
@@ -1878,7 +1888,7 @@ GraphEngine::execute_graph_async(
                     auto cp_id = co_await coord.save_super_step_async(state,
                         node_name, ready,
                         CheckpointPhase::Before, step, last_checkpoint_id,
-                        barrier_state, detail::checkpoint_metadata_for(ctx));
+                        barrier_state, checkpoint_metadata());
 
                     RunResult result;
                     result.usage = ctx.usage->snapshot();   // #88
@@ -1995,36 +2005,46 @@ GraphEngine::execute_graph_async(
                           state.serialize_runtime()});
         }
 
+        // Plan the next super-step once, before interrupt_after: an After
+        // checkpoint must resume with the same barrier gating and command
+        // gotos as an uninterrupted run. Build the unified routing list:
+        // original ready-set first, then Send-spawned tasks in fan-in order.
+        // plan_impl unions everyone's edges and applies barrier gating. Per-task
+        // command_goto preempts via plan_impl's Pass 1, matching the
+        // documented "any command_goto wins" semantic.
+        std::vector<StepRouting> unified_routings;
+        unified_routings.reserve(step_results.size() + send_routings.size());
+        for (size_t i = 0; i < step_results.size(); ++i) {
+            StepRouting r;
+            r.node_name = ready[i];
+            if (step_results[i].command
+                && !step_results[i].command->goto_node.empty()) {
+                r.command_goto = step_results[i].command->goto_node;
+            }
+            unified_routings.push_back(std::move(r));
+        }
+        for (auto& sr : send_routings) {
+            unified_routings.push_back(std::move(sr));
+        }
+
+        auto plan = scheduler_->plan_next_step(
+            unified_routings, state, barrier_state);
+        explicit_end = explicit_end || plan.hit_explicit_end;
+        if (plan.ready.empty() && !explicit_end) {
+            auto stalls = stalled_barriers(barrier_state, scheduler_->barrier_specs());
+            if (!stalls.empty()) barrier_stall = std::move(stalls);
+        }
+
         // --- interrupt_after check ---
         for (const auto& node_name : ready) {
             if (interrupt_after_.count(node_name) && coord.enabled()) {
-                std::set<std::string> union_next;
-                for (const auto& rn : ready) {
-                    for (const auto& nx : scheduler_->resolve_next_nodes(rn, state)) {
-                        union_next.insert(nx);
-                    }
-                }
-                // Send-spawned tasks also influence the next super-step;
-                // include their goto / default edges in the snapshot so
-                // a checkpoint resumed after the interrupt knows the
-                // full successor set.
-                for (const auto& sr : send_routings) {
-                    if (sr.command_goto) {
-                        union_next.insert(*sr.command_goto);
-                    } else {
-                        for (const auto& nx :
-                                scheduler_->resolve_next_nodes(sr.node_name, state)) {
-                            union_next.insert(nx);
-                        }
-                    }
-                }
-                std::vector<std::string> nexts(union_next.begin(), union_next.end());
+                std::vector<std::string> nexts = plan.ready;
                 if (nexts.empty()) nexts.push_back(std::string(END_NODE));
 
                 auto cp_id = co_await coord.save_super_step_async(state,
                     node_name, nexts, CheckpointPhase::After, step,
                     last_checkpoint_id, barrier_state,
-                    detail::checkpoint_metadata_for(ctx));
+                    checkpoint_metadata());
 
                 RunResult result;
                 result.usage = ctx.usage->snapshot();   // #88
@@ -2050,34 +2070,7 @@ GraphEngine::execute_graph_async(
             }
         }
 
-        // Build the unified routing list: original ready-set first,
-        // then Send-spawned tasks in fan-in order. plan_impl unions
-        // everyone's edges and applies barrier gating. Per-task
-        // command_goto preempts via plan_impl's Pass 1, matching the
-        // documented "any command_goto wins" semantic.
-        std::vector<StepRouting> unified_routings;
-        unified_routings.reserve(step_results.size() + send_routings.size());
-        for (size_t i = 0; i < step_results.size(); ++i) {
-            StepRouting r;
-            r.node_name = ready[i];
-            if (step_results[i].command
-                && !step_results[i].command->goto_node.empty()) {
-                r.command_goto = step_results[i].command->goto_node;
-            }
-            unified_routings.push_back(std::move(r));
-        }
-        for (auto& sr : send_routings) {
-            unified_routings.push_back(std::move(sr));
-        }
-
-        auto plan = scheduler_->plan_next_step(
-            unified_routings, state, barrier_state);
-        hit_end = hit_end || plan.hit_end;
-        ready  = std::move(plan.ready);
-        if (ready.empty() && !hit_end) {
-            auto stalls = stalled_barriers(barrier_state, scheduler_->barrier_specs());
-            if (!stalls.empty()) barrier_stall = std::move(stalls);
-        }
+        ready = std::move(plan.ready);
 
         if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
             if (plan.winning_command_goto) {
@@ -2108,13 +2101,9 @@ GraphEngine::execute_graph_async(
         const std::string trace_tag = trace.empty()
             ? (std::string("__step__") + std::to_string(step))
             : trace.back();
-        auto checkpoint_metadata = detail::checkpoint_metadata_for(ctx);
-        // A resumed stalled checkpoint must report the stall, not completion.
-        if (!barrier_stall.is_null())
-            checkpoint_metadata["_neograph"][kBarrierStalled] = barrier_stall;
         auto checkpoint = co_await coord.commit_super_step_async(
             state, trace_tag, next_nodes_for_cp, step, parent_cp_id,
-            barrier_state, std::move(checkpoint_metadata));
+            barrier_state, checkpoint_metadata());
         last_checkpoint_id = checkpoint.id;
         replay_results.clear();
 

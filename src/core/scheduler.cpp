@@ -88,6 +88,14 @@ std::vector<std::string> Scheduler::resolve_next_nodes(
     return successors;
 }
 
+bool Scheduler::ends_implicitly(const std::string& node) const {
+    for (const auto& ce : conditional_edges_)
+        if (ce.from == node) return false;
+    for (const auto& e : edges_)
+        if (e.from == node) return false;
+    return true;
+}
+
 std::vector<std::string> Scheduler::plan_start_step() const {
     std::vector<std::string> out;
     for (const auto& e : edges_) {
@@ -122,7 +130,8 @@ static NextStepPlan plan_impl(
     if (command_goto) {
         plan.winning_command_goto = command_goto;
         if (*command_goto == std::string(END_NODE)) {
-            plan.hit_end = true;
+            plan.hit_end          = true;
+            plan.hit_explicit_end = true;
         } else {
             plan.ready.push_back(*command_goto);
         }
@@ -138,6 +147,7 @@ static NextStepPlan plan_impl(
             for (auto& next : sch.resolve_next_nodes(r.node_name, state)) {
                 if (next == END_NODE) {
                     plan.hit_end = true;
+                    if (!sch.ends_implicitly(r.node_name)) plan.hit_explicit_end = true;
                 } else {
                     plan.ready.push_back(std::move(next));
                 }
@@ -156,6 +166,7 @@ static NextStepPlan plan_impl(
         for (const auto& next : sch.resolve_next_nodes(r.node_name, state)) {
             if (next == std::string(END_NODE)) {
                 plan.hit_end = true;
+                if (!sch.ends_implicitly(r.node_name)) plan.hit_explicit_end = true;
             } else {
                 signals[next].insert(r.node_name);
             }

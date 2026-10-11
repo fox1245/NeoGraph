@@ -326,3 +326,164 @@ TEST(BarrierStall, AbortRouteToEndStaysCompleted) {
     EXPECT_EQ(result.status(), RunStatus::Completed);
     EXPECT_FALSE(result.barrier_stalled());
 }
+
+// ---- #357 follow-ups: implicit ends, interruptAfter gating, metadata -------
+
+namespace {
+
+class SendingNode : public GraphNode {
+public:
+    explicit SendingNode(std::string n) : name_(std::move(n)) {}
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{name_ + "_done", json(true)});
+        out.sends.push_back(Send{"worker", json::object()});
+        co_return out;
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+// Records whether C had already written when it ran.
+class JoinObserver : public GraphNode {
+public:
+    explicit JoinObserver(std::string n) : name_(std::move(n)) {}
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"D_saw_C", json(!in.state.get("C_done").is_null())});
+        co_return out;
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+json channels_for(std::initializer_list<const char*> names) {
+    json channels = json::object();
+    for (const char* name : names)
+        channels[std::string(name) + "_done"] = {{"reducer", "overwrite"}};
+    return channels;
+}
+
+// The issue's stall shape plus an extra branch out of A.
+json stall_with_extra_branch(const std::string& extra_type) {
+    json def               = make_bypass_graph("stall_fail", "FIX");
+    def["channels"]        = channels_for({"A", "B", "C", "D", "FIX", "X", "worker"});
+    def["nodes"]["X"]      = {{"type", extra_type}};
+    def["nodes"]["worker"] = {{"type", "hit_stall"}};
+    def["edges"].push_back({{"from", "A"}, {"to", "X"}});
+    return def;
+}
+
+}  // namespace
+
+TEST(BarrierStall, ImplicitDeadEndElsewhereDoesNotHideTheStall) {
+    std::atomic<int> hits{0};
+    register_bypass_types(&hits);
+    // X has no outgoing edges: it ends implicitly, which says nothing about D.
+    auto engine = GraphEngine::compile(stall_with_extra_branch("hit_stall"), NodeContext{});
+    EXPECT_EQ(engine->run(RunConfig{}).status(), RunStatus::BarrierStalled);
+}
+
+TEST(BarrierStall, SendWorkerWithoutEdgesDoesNotHideTheStall) {
+    std::atomic<int> hits{0};
+    register_bypass_types(&hits);
+    NodeFactory::instance().register_type(
+        "send_stall", [](const std::string& n, const json&, const NodeContext&) {
+            return std::make_unique<SendingNode>(n);
+        });
+    auto engine = GraphEngine::compile(stall_with_extra_branch("send_stall"), NodeContext{});
+    const auto result = engine->run(RunConfig{});
+    EXPECT_EQ(result.status(), RunStatus::BarrierStalled);
+    EXPECT_NE(std::find(result.execution_trace.begin(), result.execution_trace.end(),
+                        "worker[send]"),
+              result.execution_trace.end());
+}
+
+TEST(BarrierStall, InterruptAfterAnEarlySourceKeepsTheJoinGated) {
+    std::atomic<int> hits{0};
+    register_bypass_types(&hits);
+    NodeFactory::instance().register_type(
+        "join_observer", [](const std::string& n, const json&, const NodeContext&) {
+            return std::make_unique<JoinObserver>(n);
+        });
+    json def = {
+        {"name", "interrupt_after_gate"},
+        {"channels", channels_for({"A", "B", "C1", "C", "D"})},
+        {"nodes", {{"A", {{"type", "hit_stall"}}}, {"B", {{"type", "hit_stall"}}},
+                   {"C1", {{"type", "hit_stall"}}}, {"C", {{"type", "hit_stall"}}},
+                   {"D", {{"type", "join_observer"}, {"barrier", {{"wait_for", {"B", "C"}}}}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "A"}},
+                               {{"from", "A"}, {"to", "B"}},
+                               {{"from", "A"}, {"to", "C1"}},
+                               {{"from", "C1"}, {"to", "C"}},
+                               {{"from", "B"}, {"to", "D"}},
+                               {{"from", "C"}, {"to", "D"}},
+                               {{"from", "D"}, {"to", "__end__"}}})},
+        {"interrupt_after", {"B"}}};
+    def["channels"]["D_saw_C"] = {{"reducer", "overwrite"}};
+    auto store  = std::make_shared<InMemoryCheckpointStore>();
+    auto engine = GraphEngine::compile(def, NodeContext{}, store);
+    RunConfig cfg;
+    cfg.thread_id = "after-early-source";
+    ASSERT_TRUE(engine->run(cfg).interrupted);
+
+    // C has not arrived: D must wait for it (a later super-step), then run once.
+    const auto resumed = engine->resume("after-early-source");
+    EXPECT_EQ(resumed.status(), RunStatus::Completed);
+    EXPECT_EQ(resumed.execution_trace, (std::vector<std::string>{"C", "D"}));
+    EXPECT_EQ(resumed.output["channels"]["D_saw_C"]["value"], json(true));
+}
+
+TEST(BarrierStall, InterruptAfterTheLastSourceLetsTheJoinRun) {
+    std::atomic<int> hits{0};
+    register_bypass_types(&hits);
+    json def = {
+        {"name", "interrupt_after_last"},
+        {"channels", channels_for({"A", "B1", "B", "C", "D"})},
+        {"nodes", {{"A", {{"type", "hit_stall"}}}, {"B1", {{"type", "hit_stall"}}},
+                   {"B", {{"type", "hit_stall"}}}, {"C", {{"type", "hit_stall"}}},
+                   {"D", {{"type", "hit_stall"}, {"barrier", {{"wait_for", {"B", "C"}}}}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "A"}},
+                               {{"from", "A"}, {"to", "B1"}},
+                               {{"from", "A"}, {"to", "C"}},
+                               {{"from", "B1"}, {"to", "B"}},
+                               {{"from", "B"}, {"to", "D"}},
+                               {{"from", "C"}, {"to", "D"}},
+                               {{"from", "D"}, {"to", "__end__"}}})},
+        {"interrupt_after", {"B"}}};
+    auto store  = std::make_shared<InMemoryCheckpointStore>();
+    auto engine = GraphEngine::compile(def, NodeContext{}, store);
+    RunConfig cfg;
+    cfg.thread_id = "after-last-source";
+    ASSERT_TRUE(engine->run(cfg).interrupted);
+
+    const auto resumed = engine->resume("after-last-source");
+    EXPECT_EQ(resumed.status(), RunStatus::Completed);
+    EXPECT_EQ(resumed.execution_trace, (std::vector<std::string>{"D"}));
+}
+
+TEST(BarrierStall, StallSurvivesInterruptAfterResumeAndFork) {
+    std::atomic<int> hits{0};
+    register_bypass_types(&hits);
+    json def                = make_bypass_graph("stall_fail", "FIX");
+    def["interrupt_after"]  = {"FIX"};
+    auto store  = std::make_shared<InMemoryCheckpointStore>();
+    auto engine = GraphEngine::compile(def, NodeContext{}, store);
+    RunConfig cfg;
+    cfg.thread_id = "stall-interrupt";
+    ASSERT_TRUE(engine->run(cfg).interrupted);
+
+    // FIX was the last node that could run; its checkpoint already knows D stalled.
+    const auto resumed = engine->resume("stall-interrupt");
+    EXPECT_EQ(resumed.status(), RunStatus::BarrierStalled);
+    EXPECT_EQ(resumed.output["_neograph"]["barrier_stalled"][0]["missing"],
+              json::array({"B"}));
+
+    (void)engine->fork("stall-interrupt", "stall-fork");
+    EXPECT_EQ(engine->resume("stall-fork").status(), RunStatus::BarrierStalled);
+    EXPECT_EQ(engine->resume("stall-interrupt").status(), RunStatus::BarrierStalled);
+}

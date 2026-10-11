@@ -59,6 +59,10 @@ struct StepRouting {
 struct NextStepPlan {
     std::vector<std::string> ready;
     bool hit_end = false;
+    /// `END_NODE` was reached explicitly: an edge or route to it, or a
+    /// Command.goto. A node that ends only because it has no successors
+    /// sets `hit_end` but not this.
+    bool hit_explicit_end = false;
     std::optional<std::string> winning_command_goto;
 };
 
@@ -227,6 +231,10 @@ public:
                                 const std::vector<NodeResult>& results,
                                 const GraphState& state,
                                 BarrierState& barrier_state) const;
+
+    /// True when `node` has neither a conditional edge nor a static edge, so
+    /// it reaches `END_NODE` only implicitly.
+    bool ends_implicitly(const std::string& node) const;
 
     /// Read-only view of declared barriers (mainly for tests).
     const BarrierSpecs& barrier_specs() const { return barrier_specs_; }

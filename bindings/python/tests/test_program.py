@@ -764,3 +764,25 @@ def test_llm_call_without_provider_is_rejected_at_program_admission():
         host.compile_admit(source, _budget())
     provider = [d for d in raised.value.diagnostics if d["code"] == "P_ADMIT_PROVIDER"]
     assert provider and provider[0]["witness"]["node"] == "llm"
+
+
+def test_program_barrier_stall_is_reported_after_an_implicit_end_elsewhere():
+    host = _stall_host("python-owner-barrier-implicit-end")
+    # X has no outgoing edges: it ends implicitly while D still waits for B.
+    source = ng.ProgramSource.from_javascript(
+        "python-barrier-implicit-end.js",
+        'export function define() { return ng.graph("main")'
+        '.channel("trace", {reducer: "append", initial: []})'
+        '.node("A", {type: "python_program_trace_node"})'
+        '.node("B", {type: "python_program_trace_node"})'
+        '.node("C", {type: "python_program_trace_node"})'
+        '.node("D", {type: "python_program_trace_node"})'
+        '.node("FIX", {type: "python_program_trace_node"})'
+        '.node("X", {type: "python_program_trace_node"})'
+        '.entry("A").edge("A", "B").edge("A", "C").edge("A", "X")'
+        '.conditionalEdge("B", "python_program_fail", {pass: "D", fail: "FIX"})'
+        '.edge("FIX", "D").edge("C", "D").barrier("D", ["B", "C"]).exit("D"); }',
+    )
+    result = host.run(host.compile_admit(source, _budget()), {}, _budget())
+    assert result.status == ng.ProgramTerminalStatus.Failed
+    assert result.failure.code == "P_CORE_BARRIER_STALLED"
