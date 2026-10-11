@@ -1661,6 +1661,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 metadata.run_id      = control->run_id;
                 metadata.owner_scope = control->owner_scope;
                 metadata.trace_id    = control->trace_id;
+                // Join members and await timers share this scheduler.
+                metadata.shared_scheduler = true;
                 auto operation_checkpoints = control->checkpoints;
                 if (next_resume && resume_checkpoint_content_id) {
                     operation_checkpoints =
@@ -3920,6 +3922,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         std::exception_ptr                  error;
                         bool                                finished  = false;
                         bool                                timed_out = false;
+                        std::chrono::steady_clock::time_point deadline;
                         std::shared_ptr<asio::steady_timer> timer;
                         std::shared_ptr<asio::experimental::channel<void(asio::error_code, int)>>
                             completion;
@@ -3928,7 +3931,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     const auto completion_executor = asio::make_strand(executor);
                     await_state->timer =
                         std::make_shared<asio::steady_timer>(completion_executor);
-                    await_state->timer->expires_after(std::chrono::milliseconds(*timeout));
+                    await_state->deadline =
+                        std::chrono::steady_clock::now() + std::chrono::milliseconds(*timeout);
+                    await_state->timer->expires_at(await_state->deadline);
                     await_state->completion =
                         std::make_shared<asio::experimental::channel<void(asio::error_code, int)>>(
                             completion_executor, 1);
@@ -3944,7 +3949,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                     std::lock_guard lock(await_state->mutex);
                                     if (!await_state->finished) {
                                         await_state->finished = true;
-                                        await_state->error    = error;
+                                        // Completing after the deadline is a timeout,
+                                        // whether or not the timer has fired yet.
+                                        if (std::chrono::steady_clock::now() >=
+                                            await_state->deadline)
+                                            await_state->timed_out = true;
+                                        await_state->error = error;
                                         if (!error) await_state->result = std::move(result);
                                         signal = true;
                                     }
@@ -4002,10 +4012,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         awaited_error  = await_state->error;
                         timed_out      = await_state->timed_out;
                     }
-                    if (awaited_error) std::rethrow_exception(awaited_error);
+                    // A child cancelled by the timeout may fail with an error; the
+                    // timeout is still the outcome.
                     if (timed_out)
                         co_return fail(ProgramTerminalStatus::TimedOut, "P_AWAIT_TIMEOUT",
                                        "JavaScript await operation timed out");
+                    if (awaited_error) std::rethrow_exception(awaited_error);
                     if (!awaited_result)
                         co_return fail(ProgramTerminalStatus::Failed, "P_JS_AWAIT",
                                        "JavaScript await completed without a result");
@@ -4096,6 +4108,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     bool                                               selection_scheduled = false;
                     bool                       initial_launches_registered                 = false;
                     std::optional<std::size_t> winner;
+                    std::vector<std::size_t>   finish_order;
+                    std::vector<std::size_t>   quorum_members;  // successes that met it
                     std::shared_ptr<asio::experimental::channel<void(asio::error_code, int)>>
                         completion;
                 };
@@ -4143,6 +4157,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                     state->errors[index] = error;
                                     if (!error) state->results[index] = std::move(result);
                                     state->finished[index] = true;
+                                    state->finish_order.push_back(index);
                                     ++state->completed;
                                     if (state->active != 0) --state->active;
 
@@ -4172,6 +4187,14 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                                 state->results[i]->status ==
                                                     ProgramTerminalStatus::Completed)
                                                 ++successes;
+                                        if (successes >= required) {
+                                            for (std::size_t i = 0; i < state->results.size();
+                                                 ++i)
+                                                if (state->finished[i] && state->results[i] &&
+                                                    state->results[i]->status ==
+                                                        ProgramTerminalStatus::Completed)
+                                                    state->quorum_members.push_back(i);
+                                        }
                                         if (successes >= required ||
                                             successes + (members.size() - state->completed) <
                                                 required) {
@@ -4203,17 +4226,17 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                         {
                                             std::lock_guard lock(state->mutex);
                                             if (!state->terminal) {
+                                                // Settle on the first member to finish.
                                                 std::optional<std::size_t> selected;
-                                                for (std::size_t i = 0; i < state->finished.size();
-                                                     ++i) {
-                                                    if (!state->finished[i]) continue;
+                                                for (const auto i : state->finish_order) {
                                                     const bool failed =
                                                         state->errors[i] || !state->results[i] ||
                                                         state->results[i]->status !=
                                                             ProgramTerminalStatus::Completed;
-                                                    if ((mode == "race" || (!collect && failed)) &&
-                                                        (!selected || i < *selected))
+                                                    if (mode == "race" || (!collect && failed)) {
                                                         selected = i;
+                                                        break;
+                                                    }
                                                 }
                                                 if (selected) {
                                                     state->winner   = selected;
@@ -4301,11 +4324,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 std::vector<std::optional<PlanExecution>> results;
                 std::vector<std::exception_ptr>           errors;
                 std::optional<std::size_t>                winner;
+                std::vector<std::size_t>                  quorum_members;
                 {
                     std::lock_guard lock(state->mutex);
-                    results = std::move(state->results);
-                    errors  = std::move(state->errors);
-                    winner  = state->winner;
+                    results        = std::move(state->results);
+                    errors         = std::move(state->errors);
+                    winner         = state->winner;
+                    quorum_members = state->quorum_members;
                 }
                 const auto make_member_failure =
                     [&](std::size_t index, const std::exception_ptr& error,
@@ -4332,8 +4357,14 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     co_return joined;
                 }
                 if (mode == "quorum") {
+                    // A quorum settles on the successes that met it; members that
+                    // finish while the rest are cancelled do not join the result.
                     std::size_t successes = 0;
                     for (std::size_t i = 0; i < results.size(); ++i) {
+                        if (!quorum_members.empty() &&
+                            std::find(quorum_members.begin(), quorum_members.end(), i) ==
+                                quorum_members.end())
+                            continue;
                         if (results[i] && results[i]->status == ProgramTerminalStatus::Completed) {
                             ++successes;
                             joined.output.push_back(results[i]->output);

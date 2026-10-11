@@ -284,6 +284,11 @@ struct RunMetadata {
     std::string owner_scope;
     /// Shared sibling-cancellation scope for budget-aware nodes.
     std::shared_ptr<CancelToken> budget_cancel_token;
+    /// The host runs this graph on a scheduler it shares with other runs and
+    /// its own timers (the Program runtime). Node bodies that block their
+    /// thread should run elsewhere; the Python binding does. Copied into
+    /// RunContext::shared_scheduler.
+    bool shared_scheduler = false;
 };
 
 /// @brief Normal, paused, or step-limited outcome of a successful run call.

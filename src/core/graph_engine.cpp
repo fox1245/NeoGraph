@@ -1444,6 +1444,7 @@ asio::awaitable<GraphEngine::SubgraphRunResult> GraphEngine::run_subgraph_async(
     metadata.run_id              = parent.run_id;
     metadata.owner_scope        = parent.tool_execution_identity.owner_scope;
     metadata.budget_cancel_token = parent.budget_cancel_token;
+    metadata.shared_scheduler    = parent.shared_scheduler;
 
     RuntimeResources resources;
     auto parent_runtime = detail::runtime_for(parent);
@@ -1630,6 +1631,7 @@ GraphEngine::execute_graph_async(
             : (ctx.cancel_token ? ctx.cancel_token->fork()
                                  : std::make_shared<CancelToken>());
     ctx.deadline     = metadata.deadline;
+    ctx.shared_scheduler = metadata.shared_scheduler;
     ctx.trace_id     = metadata.trace_id;
     ctx.thread_id    = config.thread_id;
     ctx.stream_mode  = stream_mode;

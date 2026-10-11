@@ -260,6 +260,23 @@ asio::thread_pool& async_tool_pool() {
     return pool;
 }
 
+// Worker pool for Python node bodies on a shared host scheduler (#367, #368).
+//
+// A Program runtime runs join members and await timers on one scheduler. A
+// Python node body holds its thread until it returns, so it runs here instead;
+// the GIL is still taken for the call itself. NEOGRAPH_PYTHON_NODE_THREADS
+// bounds how many bodies can be in flight.
+asio::thread_pool& python_node_pool() {
+    static asio::thread_pool pool([] {
+        if (const char* env = std::getenv("NEOGRAPH_PYTHON_NODE_THREADS")) {
+            long n = std::strtol(env, nullptr, 10);
+            if (n > 0 && n <= 1024) return static_cast<std::size_t>(n);
+        }
+        return static_cast<std::size_t>(32);
+    }());
+    return pool;
+}
+
 // Lets a Python-owned C++ tool (an MCPTool, say) satisfy the engine's
 // `unique_ptr<Tool>` ownership while Python keeps its shared_ptr. Forwards
 // everything, and — the point — forwards `execute_async` to the real tool, so a
@@ -421,6 +438,23 @@ public:
     // They receive cancellation explicitly through input.ctx.cancel_token
     // and attach that handle to any provider request they issue.
     asio::awaitable<NodeResult> run(NodeInput in) override {
+        // On a shared host scheduler the body would hold the scheduler thread
+        // for its whole duration, stalling sibling join members and await
+        // timers (#367, #368). Elsewhere the body keeps running inline.
+        if (in.ctx.shared_scheduler) {
+            co_return co_await asio::co_spawn(python_node_pool().get_executor(),
+                                              run_on_worker(this, &in), asio::use_awaitable);
+        }
+        co_return call_python(in);
+    }
+
+private:
+    // `in` lives in the awaiting run() frame, which outlives this call.
+    static asio::awaitable<NodeResult> run_on_worker(PyGraphNodeOwner* self, NodeInput* in) {
+        co_return self->call_python(*in);
+    }
+
+    NodeResult call_python(NodeInput& in) {
         NodeResult result;
         // Captured under the GIL, thrown after releasing it — see
         // translate_node_interrupt.
@@ -438,10 +472,9 @@ public:
             }
         }
         if (interrupt) throw *interrupt;
-        co_return result;
+        return result;
     }
 
-private:
     py::object py_obj_;
 };
 

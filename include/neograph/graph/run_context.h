@@ -91,6 +91,10 @@ struct RunContext {
     /// Absolute monotonic-clock deadline supplied through RunMetadata, when set.
     std::optional<std::chrono::steady_clock::time_point> deadline;
 
+    /// RunMetadata::shared_scheduler: blocking node bodies should not hold the
+    /// calling executor, which other runs and host timers share.
+    bool shared_scheduler = false;
+
     /// Per-run trace correlator supplied through RunMetadata.
     std::string trace_id;
 

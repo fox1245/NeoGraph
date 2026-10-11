@@ -567,3 +567,126 @@ def test_program_path_keeps_lint_and_fan_out_notices_off_stderr(capfd):
     err = capfd.readouterr().err
     assert "[neograph] lint" not in err
     assert "executing serially" not in err
+
+
+class _SleepNode(ng.GraphNode):
+    """Sleeps for the "delay" channel (ms): cooperatively, polling the cancel
+    token, or blocking (a node that ignores cancellation)."""
+
+    def __init__(self, name, config):
+        super().__init__()
+        self._name = name
+        self._blocking = bool(config.get("blocking"))
+
+    def get_name(self):
+        return self._name
+
+    def run(self, input):
+        delay = (input.state.get("delay") or 0) / 1000.0
+        if self._blocking:
+            time.sleep(delay)
+        else:
+            token = input.ctx.cancel_token
+            deadline = time.monotonic() + delay
+            while time.monotonic() < deadline:
+                if token is not None and token.is_cancelled():
+                    raise RuntimeError("observed cancellation")
+                time.sleep(0.005)
+        return [ng.ChannelWrite("topic", input.state.get("topic"))]
+
+
+def _join_budget():
+    value = _budget()
+    value.max_concurrency = 4
+    return value
+
+
+def _sleep_host(owner, **options):
+    ng.NodeFactory.register_type(
+        "python_program_sleep_node", lambda name, config, _ctx: _SleepNode(name, config))
+    builder = ng.ProgramRegistryBuilder()
+    builder.add_registered_node("python_program_sleep_node", "1.0.0", "sha256:" + "7" * 64)
+    builder.add_registered_reducer("overwrite", "1.0.0", _DIGEST_REDUCER)
+    ceiling = _join_budget()
+    ceiling.max_dynamic_compiles = 2
+    return ng.LocalProgramHost(builder.build(), owner, ceiling, "python-program-host/v1", **options)
+
+
+def _sleep_program(main_body, blocking=False):
+    flag = ", blocking: true" if blocking else ""
+    return ng.ProgramSource.from_javascript(
+        "python-sleep.js",
+        'export function define() { const g = ng.graph("work");'
+        ' g.channel("delay", {reducer: "overwrite", initial: 0});'
+        ' g.channel("topic", {reducer: "overwrite", initial: ""});'
+        f' g.node("sleep", {{type: "python_program_sleep_node"{flag}}});'
+        ' g.entry("sleep"); g.exit("sleep"); return g; }\n'
+        "export function* main(input) {\n" + main_body + "\n}\n",
+    )
+
+
+def _timed_run(host, source):
+    version = host.compile_admit(source, _join_budget())
+    started = time.monotonic()
+    result = host.run(version, {}, _join_budget())
+    elapsed = time.monotonic() - started
+    assert result.program_version_id == version.id
+    assert ng.ProgramResult.parse(result.serialize_canonical()).id == result.id
+    return result, elapsed
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+def test_join_members_with_python_nodes_run_concurrently(threads):
+    host = _sleep_host("python-owner-join-all", scheduler_threads=threads)
+    result, elapsed = _timed_run(host, _sleep_program(
+        'return (yield ng.all([ng.callCore("work", {delay: 800}, "a"),'
+        ' ng.callCore("work", {delay: 800}, "b")], {max_in_flight: 2}, "fan")).length;'))
+    assert result.status == ng.ProgramTerminalStatus.Completed
+    assert result.output == 2
+    assert result.usage.peak_concurrency == 2
+    assert elapsed < 1.3, f"two 800 ms members took {elapsed:.2f}s"
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+def test_race_settles_on_the_first_member_to_finish(threads):
+    host = _sleep_host("python-owner-join-race", scheduler_threads=threads)
+    result, elapsed = _timed_run(host, _sleep_program(
+        'const winner = yield ng.race([ng.callCore("work", {topic: "slow", delay: 1500}, "slow"),'
+        ' ng.callCore("work", {topic: "fast", delay: 20}, "fast")], {max_in_flight: 2}, "race");'
+        " return winner.topic;"))
+    assert result.status == ng.ProgramTerminalStatus.Completed
+    assert result.output == "fast"
+    assert elapsed < 1.0, f"race took {elapsed:.2f}s"
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+def test_quorum_settles_at_the_required_successes(threads):
+    host = _sleep_host("python-owner-join-quorum", scheduler_threads=threads)
+    result, elapsed = _timed_run(host, _sleep_program(
+        'const ok = yield ng.quorum([ng.callCore("work", {topic: "slow", delay: 1500}, "slow"),'
+        ' ng.callCore("work", {topic: "f1", delay: 10}, "f1"),'
+        ' ng.callCore("work", {topic: "f2", delay: 10}, "f2")],'
+        ' {required_successes: 2, max_in_flight: 3}, "quorum");'
+        " return ok.map((r) => r.topic);"))
+    assert result.status == ng.ProgramTerminalStatus.Completed
+    assert sorted(result.output) == ["f1", "f2"]
+    assert elapsed < 1.0, f"quorum took {elapsed:.2f}s"
+
+
+def test_await_timeout_is_enforced_with_the_default_host():
+    host = _sleep_host("python-owner-await-default")  # scheduler_threads=1
+    result, elapsed = _timed_run(host, _sleep_program(
+        'return yield ng.await(ng.callCore("work", {delay: 3000}, "slow"), 150, "deadline");'))
+    assert result.status == ng.ProgramTerminalStatus.TimedOut
+    assert result.failure.code == "P_AWAIT_TIMEOUT"
+    assert elapsed < 1.5, f"await(..., 150) returned after {elapsed:.2f}s"
+
+
+def test_await_does_not_accept_a_completion_after_its_deadline():
+    # The node ignores cancellation and finishes after the deadline.
+    host = _sleep_host("python-owner-await-late")
+    result, _ = _timed_run(host, _sleep_program(
+        'return yield ng.await(ng.callCore("work", {delay: 400}, "late"), 100, "deadline");',
+        blocking=True))
+    assert result.status == ng.ProgramTerminalStatus.TimedOut
+    assert result.failure.code == "P_AWAIT_TIMEOUT"
