@@ -1569,6 +1569,21 @@ ProgramVersion ProgramCatalog::materialize(
                            "Factory-linked topology does not preserve the admitted exact plan");
                 linked.throw_error();
             }
+            // A model-calling node needs a provider binding; without one its
+            // first run could only fail (#366).
+            for (const auto& [node_name, node] : compiled.nodes) {
+                const auto* llm    = dynamic_cast<const graph::LLMCallNode*>(node.get());
+                const auto* intent = dynamic_cast<const graph::IntentClassifierNode*>(node.get());
+                if ((llm && !llm->has_provider()) || (intent && !intent->has_provider())) {
+                    linked.add("P_ADMIT_PROVIDER",
+                               "/sealed_core_definitions/0/definition/nodes/" +
+                                   escape_pointer_segment(node_name),
+                               "Node '" + node_name +
+                                   "' calls a model but this host bound no provider to it",
+                               json{{"node", node_name}});
+                }
+            }
+            if (!linked.empty()) linked.throw_error();
 
             auto provider = context.provider;
             auto runtime_registry =

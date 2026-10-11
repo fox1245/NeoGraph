@@ -210,6 +210,9 @@ public:
 
     std::string get_name() const override { return name_; }
 
+    /// False when built from a NodeContext without a provider; run() then fails.
+    bool has_provider() const noexcept { return provider_ != nullptr; }
+
 private:
     std::string              name_;
     std::shared_ptr<Provider> provider_;
@@ -283,6 +286,9 @@ public:
     /// Streams per-token events when ``in.stream_cb`` is non-null.
     asio::awaitable<NodeOutput> run(NodeInput in) override;
     std::string get_name() const override { return name_; }
+
+    /// False when built from a NodeContext without a provider; run() then fails.
+    bool has_provider() const noexcept { return provider_ != nullptr; }
 
 private:
     std::string               name_;

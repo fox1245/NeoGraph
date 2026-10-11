@@ -123,3 +123,23 @@ TEST(ErrorMessagesFriendly, ApplyWritesUnknownChannelListsDeclaredAndHint) {
         EXPECT_TRUE(contains(msg, "Declared channels:")) << msg;
     }
 }
+
+// Issue #366: an llm_call node without a provider used to abort the process.
+TEST(ErrorMessagesFriendly, LlmCallWithoutProviderFailsTheRunInsteadOfAborting) {
+    const json definition = {
+        {"name", "no_provider"},
+        {"channels", {{"messages", {{"reducer", "append"}}}}},
+        {"nodes", {{"llm", {{"type", "llm_call"}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "llm"}},
+                               {{"from", "llm"}, {"to", "__end__"}}})}};
+    auto engine = GraphEngine::compile(definition, NodeContext{});
+    try {
+        (void)engine->run(RunConfig{});
+        FAIL() << "expected the run to fail";
+    } catch (const NodeExecutionError& error) {
+        EXPECT_EQ(error.node_name(), "llm");
+        EXPECT_NE(std::string(error.what()).find("has no provider"), std::string::npos)
+            << error.what();
+        EXPECT_EQ(error.attempts(), 1);
+    }
+}

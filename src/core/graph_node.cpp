@@ -74,6 +74,21 @@ std::string SyncGraphNode::get_name() const {
 // LLMCallNode
 // =========================================================================
 
+namespace {
+
+// A model-calling node built without a provider used to dereference null and
+// abort the process (#366). Fail the node instead; logic_error is not retried.
+void require_provider(const std::shared_ptr<Provider>& provider,
+                      const std::string&               node,
+                      const char*                      type) {
+    if (provider) return;
+    throw std::invalid_argument(std::string(type) + " node '" + node +
+                                "' has no provider; set NodeContext::provider before "
+                                "compiling (a Program binds one through its host)");
+}
+
+}  // namespace
+
 LLMCallNode::LLMCallNode(const std::string& name, const NodeContext& ctx)
     : name_(name)
     , provider_(ctx.provider)
@@ -99,6 +114,7 @@ ProviderRequest LLMCallNode::build_params(const GraphState& state) const {
 }
 
 asio::awaitable<NodeOutput> LLMCallNode::run(NodeInput in) {
+    require_provider(provider_, name_, "llm_call");
     auto request = build_params(in.state);
     request.cancel_token = in.ctx.cancel_token;
     request.options.deadline = in.ctx.deadline;
@@ -216,6 +232,7 @@ std::vector<ChannelWrite> IntentClassifierNode::route_from(const std::string& in
 }
 
 asio::awaitable<NodeOutput> IntentClassifierNode::run(NodeInput in) {
+    require_provider(provider_, name_, "intent_classifier");
     auto params = build_params(in.state);
     params.cancel_token = in.ctx.cancel_token;
 

@@ -733,3 +733,34 @@ def test_budget_ceiling_errors_name_the_field():
     ceiling.model_tokens = 0
     with pytest.raises(ValueError, match="model_tokens"):
         ng.LocalProgramHost(_registry(), "python-owner-zero-ceiling", ceiling)
+
+
+_LLM_GRAPH = {
+    "name": "no_provider",
+    "channels": {"messages": {"reducer": "append"}},
+    "nodes": {"llm": {"type": "llm_call"}},
+    "edges": [{"from": ng.START_NODE, "to": "llm"}, {"from": "llm", "to": ng.END_NODE}],
+}
+
+
+def test_llm_call_without_provider_fails_the_core_run_cleanly():
+    engine = ng.GraphEngine.compile(_LLM_GRAPH, ng.NodeContext())
+    with pytest.raises(Exception, match="has no provider"):
+        engine.run(ng.RunConfig())
+
+
+def test_llm_call_without_provider_is_rejected_at_program_admission():
+    builder = ng.ProgramRegistryBuilder()
+    builder.add_registered_node("llm_call", "1.0.0", "sha256:" + "8" * 64)
+    builder.add_registered_reducer("append", "1.0.0", _DIGEST_APPEND)
+    host = ng.LocalProgramHost(builder.build(), "python-owner-llm", _ceiling())
+    source = ng.ProgramSource.from_javascript(
+        "python-llm.js",
+        'export function define() { return ng.graph("g")'
+        '.channel("messages", {reducer: "append", initial: []})'
+        '.node("llm", {type: "llm_call"}).entry("llm").exit("llm"); }',
+    )
+    with pytest.raises(ng.ProgramAdmissionError) as raised:
+        host.compile_admit(source, _budget())
+    provider = [d for d in raised.value.diagnostics if d["code"] == "P_ADMIT_PROVIDER"]
+    assert provider and provider[0]["witness"]["node"] == "llm"
