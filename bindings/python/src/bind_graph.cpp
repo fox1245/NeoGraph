@@ -39,6 +39,7 @@
 // completion back. GIL is acquired on the asio side before any
 // Python ops, including freeing the captured Future / loop refs.
 
+#include "failure_text_redactor.h"
 #include "json_bridge.h"
 #include "opaque_types.h"
 #include "provider_bridge.h"
@@ -572,7 +573,8 @@ void init_graph(py::module_& m) {
         .value("Interrupted", RunStatus::Interrupted)
         .value("StepLimit", RunStatus::StepLimit)
         .value("SafePoint", RunStatus::SafePoint)
-        .value("BarrierStalled", RunStatus::BarrierStalled);
+        .value("BarrierStalled", RunStatus::BarrierStalled)
+        .value("FailureExit", RunStatus::FailureExit);
     py::class_<RunResult>(m, "RunResult",
         "Run completion record: serialized final state, interrupt info, "
         "checkpoint id, and execution trace.")
@@ -596,7 +598,10 @@ void init_graph(py::module_& m) {
         .def_property_readonly("barrier_stalled", &RunResult::barrier_stalled,
             "True when the run stopped at a barrier that can no longer fire "
             "without reaching __end__; details in output['_neograph']['barrier_stalled'].")
-        .def_property_readonly("safe_point_reached", &RunResult::safe_point_reached);
+        .def_property_readonly("safe_point_reached", &RunResult::safe_point_reached)
+        .def_property_readonly("failure_exited", &RunResult::failure_exited,
+            "True when a failure-exit node completed (#364); {'node', 'code'} is at "
+            "output['_neograph']['failure_exit'] and status is RunStatus.FailureExit.");
 
     // ── CheckpointStore (abstract base) + InMemoryCheckpointStore ────────
     //
@@ -843,7 +848,8 @@ void init_graph(py::module_& m) {
             [](py::object definition,
                py::object ctx_obj,
                py::object store_obj,
-               std::shared_ptr<GraphRegistry> registry) {
+               std::shared_ptr<GraphRegistry> registry,
+               py::object failure_text_redactor) {
                 // Take the Python wrapper as py::object (rather than
                 // const NodeContext&) so we can read the `_pytools`
                 // dynamic attr carrying user-defined Python Tool
@@ -864,10 +870,12 @@ void init_graph(py::module_& m) {
                     : store_obj.cast<std::shared_ptr<CheckpointStore>>();
                 auto j = py_to_json(definition);
                 std::unique_ptr<GraphEngine> unique;
-                if (registry) {
+                if (registry || !failure_text_redactor.is_none()) {
                     EngineConfig config;
                     config.node_context = ctx;
                     config.checkpoint_store = std::move(store);
+                    config.failure_text_redactor =
+                        neograph::pybind::python_failure_text_redactor(failure_text_redactor);
                     EngineResources resources;
                     resources.registry = registry;
                     unique = GraphEngine::build(j, std::move(config), std::move(resources));
@@ -885,6 +893,7 @@ void init_graph(py::module_& m) {
             py::arg("ctx"),
             py::arg("store") = py::none(),
             py::arg("registry") = nullptr,
+            py::arg("failure_text_redactor") = py::none(),
             "Compile a graph from a JSON-shaped Python dict.\n\n"
             "Args:\n"
             "    definition: JSON graph definition (nodes, edges, "
@@ -895,7 +904,12 @@ void init_graph(py::module_& m) {
             "    registry: Optional engine-scoped GraphRegistry. If omitted, "
             "uses the legacy process-global registrations. If supplied, "
             "its built-ins and local registrations are snapshotted before "
-            "compilation; later mutation cannot affect this engine.\n\n"
+            "compilation; later mutation cannot affect this engine.\n"
+            "    failure_text_redactor: Optional callable for the free text of "
+            "#364 failure records, for nodes whose retry policy sets "
+            "error_text. It receives {'node', 'code', 'kind', 'attempts', "
+            "'retryable', 'public_message'} and returns the text to keep "
+            "(str) or None; without it no text is written.\n\n"
             "Raises ``RuntimeError`` on bad shape.")
 
         .def("run",
@@ -1195,6 +1209,11 @@ void init_graph(py::module_& m) {
             py::arg("policy"),
             "Install the runtime default retry policy after compile.")
 
+        .def("resolved_retry_policy", &GraphEngine::resolved_retry_policy,
+            py::arg("node_name"),
+            "The retry timing node_name runs with: the default, then the "
+            "definition's per-node fields, then a host per-node policy, which "
+            "may only tighten a node whose definition declares one (#364).")
         .def("set_node_retry_policy", &GraphEngine::set_node_retry_policy,
             py::arg("node_name"), py::arg("policy"),
             "Override the runtime retry policy for one node.")

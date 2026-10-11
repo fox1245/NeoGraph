@@ -275,3 +275,90 @@ def test_a_program_resumes_a_paused_retry_attempt_with_the_budget_left():
     assert finished.failure.core_node == "check"
     assert finished.failure.attempts == 2
     assert len(calls) == 3
+
+
+# ---------------------------------------------------------------------------
+# Failure routing through the Core engine (#364)
+# ---------------------------------------------------------------------------
+
+
+def _routed_engine(node_class, policy=None, exits=None, redactor=None):
+    type_name = f"node_failure_{next(_ids)}"
+    ng.NodeFactory.register_type(type_name, lambda name, _config, _ctx: node_class(name))
+    definition = {
+        "schema_version": 1,
+        "name": "node_failure_routing",
+        "channels": {"result": {"reducer": "overwrite"},
+                     "failures": {"reducer": "append", "initial": []}},
+        "nodes": {"work": {"type": type_name}, "handler": {"type": "node_failure_prep"}},
+        "edges": [{"from": ng.START_NODE, "to": "work"}, {"from": "work", "to": ng.END_NODE},
+                  {"from": "handler", "to": ng.END_NODE}],
+        "node_retry_policies": {"work": policy or {"max_retries": 1, "initial_delay_ms": 10,
+                                                   "backoff_multiplier": 1.0,
+                                                   "max_delay_ms": 10}},
+        "failure_edges": [{"from": "work", "to": "handler", "error_channel": "failures"}],
+    }
+    if exits:
+        definition["failure_exits"] = exits
+        definition["edges"] = [edge for edge in definition["edges"] if edge["from"] not in exits]
+    return ng.GraphEngine.compile(definition, ng.NodeContext(),
+                                  failure_text_redactor=redactor)
+
+
+def test_a_routed_python_failure_completes_through_its_handler():
+    node, calls = _failing_node(lambda: CompileError("does not build"))
+    result = _routed_engine(node).run(ng.RunConfig())
+    assert result.status == ng.RunStatus.Completed
+    assert len(calls) == 1  # app.compile_error is not retryable
+    assert result.execution_trace == ["work", "handler"]
+    failures = result.output["channels"]["failures"]["value"]
+    assert failures == [{"node": "work", "kind": "non_retryable", "code": "app.compile_error",
+                         "attempts": 1, "retryable": False, "step": 0, "routed_to": "handler",
+                         "effects": []}]
+
+
+def test_the_redactor_sees_public_message_only():
+    class Secret(Exception):
+        public_message = "token=hunter2"
+
+    seen = []
+
+    def redact(failure):
+        seen.append(failure)
+        return failure["public_message"].replace("hunter2", "***")
+
+    node, _calls = _failing_node(lambda: Secret("what() is never a source"))
+    engine = _routed_engine(node, policy={"error_text": True}, redactor=redact)
+    failures = engine.run(ng.RunConfig()).output["channels"]["failures"]["value"]
+    assert failures[0]["detail"] == {"untrusted_text": "token=***"}
+    assert seen[0]["public_message"] == "token=hunter2"
+
+
+def test_a_failure_routed_to_a_failure_exit_reports_failure_exit():
+    node, _calls = _failing_node(lambda: RuntimeError("fails"))
+    engine = _routed_engine(node, exits={"handler": {"code": "plan.stop"}})
+    result = engine.run(ng.RunConfig())
+    assert result.status == ng.RunStatus.FailureExit
+    assert result.failure_exited
+    assert result.output["_neograph"]["failure_exit"] == {"node": "handler", "code": "plan.stop"}
+
+
+def test_resolved_retry_policy_only_tightens_a_sealed_node():
+    node, _calls = _failing_node(lambda: RuntimeError("x"))
+    engine = _routed_engine(node, policy={"max_retries": 3, "initial_delay_ms": 50})
+    host = ng.RetryPolicy()
+    host.max_retries = 8
+    host.initial_delay_ms = 10
+    engine.set_node_retry_policy("work", host)
+    resolved = engine.resolved_retry_policy("work")
+    assert resolved.max_retries == 3
+    assert resolved.initial_delay_ms == 50
+
+
+def test_a_program_diagnostic_raised_by_a_node_is_not_retried():
+    if not getattr(ng, "_HAVE_PROGRAM", False):
+        pytest.skip("neograph_engine was built without Program")
+    node, calls = _failing_node(lambda: ng.ProgramDiagnosticError("a definition verdict"))
+    with pytest.raises(ng.ProgramDiagnosticError):
+        _engine(node).run(ng.RunConfig())
+    assert len(calls) == 1

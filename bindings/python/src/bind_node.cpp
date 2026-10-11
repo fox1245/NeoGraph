@@ -186,6 +186,23 @@ translate_node_interrupt(py::error_already_set& e) {
     return neograph::graph::NodeInterrupt(reason, std::move(value));
 }
 
+// True for the Program diagnostic exceptions (#364): a configuration verdict.
+bool is_program_diagnostic(const py::object& exc) {
+    try {
+        const auto module = py::module_::import("neograph_engine._neograph");
+        for (const char* name :
+             {"ProgramDiagnosticError", "ProgramCompileError", "ProgramAdmissionError"}) {
+            if (!py::hasattr(module, name)) continue;
+            const int matched = PyObject_IsInstance(exc.ptr(), module.attr(name).ptr());
+            if (matched == 1) return true;
+            if (matched < 0) PyErr_Clear();
+        }
+    } catch (const py::error_already_set&) {
+        PyErr_Clear();
+    }
+    return false;
+}
+
 // Translate any other Python exception from a node body into a typed node
 // failure (#364). The failure classifier cannot read Python attributes, so they
 // are read here, under the GIL:
@@ -196,10 +213,12 @@ translate_node_interrupt(py::error_already_set& e) {
 //     NG.TaskFailed.
 //   - `retryable`: a bool; False stops the node's retry loop.
 //   - `public_message`: a str, the only text a failure record may carry.
+//   - A Program diagnostic exception (ProgramDiagnosticError and friends) is a
+//     configuration verdict: NG.ConfigError, never retried or routed.
 //
 // The original exception rides along and is what Python callers receive.
 // Must be called inside the catch block that holds @p e, with the GIL held.
-PythonNodeFailure translate_node_failure(py::error_already_set& e) {
+std::exception_ptr translate_node_failure(py::error_already_set& e) {
     std::string code;
     std::string public_message;
     std::optional<bool> retryable;
@@ -221,8 +240,13 @@ PythonNodeFailure translate_node_failure(py::error_already_set& e) {
         retryable = value.cast<bool>();
     if (const auto value = attribute("public_message"); py::isinstance<py::str>(value))
         public_message = value.cast<std::string>();
-    return PythonNodeFailure(e.what(), std::move(code), std::move(public_message), retryable,
-                             std::current_exception());
+    if (is_program_diagnostic(exc))
+        return std::make_exception_ptr(PythonNodeConfigurationFailure(
+            e.what(), std::move(code), std::move(public_message), retryable,
+            std::current_exception()));
+    return std::make_exception_ptr(PythonNodeFailure(e.what(), std::move(code),
+                                                     std::move(public_message), retryable,
+                                                     std::current_exception()));
 }
 
 // The run control signals a Python *tool* can raise, as the C++ exceptions the
@@ -499,7 +523,7 @@ private:
         // Captured under the GIL, thrown after releasing it — see
         // translate_node_interrupt.
         std::optional<neograph::graph::NodeInterrupt> interrupt;
-        std::optional<PythonNodeFailure> failure;
+        std::exception_ptr failure;
         {
             py::gil_scoped_acquire g;
             py::object py_input = py::cast(&in,
@@ -514,7 +538,7 @@ private:
             }
         }
         if (interrupt) throw *interrupt;
-        if (failure) throw *failure;
+        if (failure) std::rethrow_exception(failure);
         return result;
     }
 

@@ -241,6 +241,70 @@ class Square(ng.GraphNode):
         return [ng.ChannelWrite("results", [item * item])]
 
 
+class ChecksFailed(Exception):
+    """What TEST raises in the failure-routing scenarios (#364).
+
+    The binding reads `code` (an author code), `retryable` and
+    `public_message` from the exception; it never reads str(exc) into a record.
+    """
+
+    def __init__(self, message, code=None, public_message=None, retryable=None):
+        super().__init__(message)
+        if code is not None:
+            self.code = code
+        if public_message is not None:
+            self.public_message = public_message
+        if retryable is not None:
+            self.retryable = retryable
+
+
+class FixTest(ng.GraphNode):
+    """TEST in the failure-routing scenarios: fails until the "fixed" channel is true.
+
+    Config keys (all optional): code, public_message, retryable (copied onto
+    the raised ChecksFailed), diagnostic (raise ng.ProgramDiagnosticError instead).
+    """
+
+    def __init__(self, name, config):
+        super().__init__()
+        self._name = name
+        self._config = dict(config or {})
+
+    def get_name(self):
+        return self._name
+
+    def run(self, input):
+        JOURNAL.add("started", self._name)
+        if not input.state.get("fixed"):
+            JOURNAL.add("raised", self._name)
+            if self._config.get("diagnostic"):
+                raise ng.ProgramDiagnosticError("a Program diagnostic inside a node")
+            raise ChecksFailed(f"tests failed in {self._name}",
+                              code=self._config.get("code"),
+                              public_message=self._config.get("public_message"),
+                              retryable=self._config.get("retryable"))
+        JOURNAL.add("ran", self._name)
+        return [ng.ChannelWrite("trace", [self._name])]
+
+
+class Review(ng.GraphNode):
+    """ASK_USER: records the human's answer ({"decision", "fix"}) from the resume value."""
+
+    def __init__(self, name):
+        super().__init__()
+        self._name = name
+
+    def get_name(self):
+        return self._name
+
+    def run(self, input):
+        answer = input.ctx.resume_value or {}
+        JOURNAL.add("ran", self._name)
+        return [ng.ChannelWrite("trace", [self._name]),
+                ng.ChannelWrite("decision", answer.get("decision", "abort")),
+                ng.ChannelWrite("fixed", bool(answer.get("fix")))]
+
+
 def _route_by_topic(state):
     return "billing" if state.get("topic") == "billing" else "general"
 
@@ -250,6 +314,11 @@ def _until_target(state):
 
 
 NODE_TYPES = ("e2e.step", "e2e.fan", "e2e.square")
+# The #364 failure-routing scenarios (test_09) add these to their registry.
+FAILURE_NODE_TYPES = ("e2e.fix_test", "e2e.review")
+FAILURE_CONDITIONS = {
+    "e2e.decision": lambda state: state.get("decision") or "abort",
+}
 CONDITIONS = {
     "e2e.route_by_topic": _route_by_topic,
     "e2e.always_fail": lambda state: "fail",
@@ -264,7 +333,9 @@ def register_python_types() -> None:
     ng.NodeFactory.register_type("e2e.step", lambda name, config, ctx: Step(name, config))
     ng.NodeFactory.register_type("e2e.fan", lambda name, config, ctx: Fan(name))
     ng.NodeFactory.register_type("e2e.square", lambda name, config, ctx: Square(name))
-    for name, fn in CONDITIONS.items():
+    ng.NodeFactory.register_type("e2e.fix_test", lambda name, config, ctx: FixTest(name, config))
+    ng.NodeFactory.register_type("e2e.review", lambda name, config, ctx: Review(name))
+    for name, fn in {**CONDITIONS, **FAILURE_CONDITIONS}.items():
         ng.ConditionRegistry.register_condition(name, fn)
 
 
@@ -275,11 +346,11 @@ def digest(label: str) -> str:
     return "sha256:" + hashlib.sha256(label.encode()).hexdigest()
 
 
-def build_registry(extra_node_types=()) -> "ng.ProgramRegistrySnapshot":
+def build_registry(extra_node_types=(), extra_conditions=()) -> "ng.ProgramRegistrySnapshot":
     builder = ng.ProgramRegistryBuilder()
     for node_type in (*NODE_TYPES, *extra_node_types):
         builder.add_registered_node(node_type, "1.0.0", digest("node:" + node_type))
-    for name in CONDITIONS:
+    for name in (*CONDITIONS, *extra_conditions):
         builder.add_registered_condition(name, "1.0.0", digest("condition:" + name))
     for reducer in ("append", "overwrite"):
         builder.add_registered_reducer(reducer, "1.0.0", digest("reducer:" + reducer))

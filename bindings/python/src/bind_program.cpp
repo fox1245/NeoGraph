@@ -1,3 +1,4 @@
+#include "failure_text_redactor.h"
 #include "json_bridge.h"
 #include "provider_bridge.h"
 
@@ -416,7 +417,8 @@ public:
                      std::optional<std::string> binding_label,
                      std::optional<std::string> sqlite_directory,
                      bool soundness_check,
-                     std::size_t soundness_state_cap)
+                     std::size_t soundness_state_cap,
+                     py::object failure_text_redactor)
         : registry_(std::move(registry)),
           owner_scope_(std::move(owner_scope)),
           compiler_build_id_(std::move(compiler_build_id)),
@@ -455,6 +457,8 @@ public:
                               compiler_build_id_};
         catalog.worker_count      = worker_count;
         catalog.capability_binder = neograph::program::detail::single_provider_binder(node_context, label);
+        catalog.failure_text_redactor =
+            neograph::pybind::python_failure_text_redactor(std::move(failure_text_redactor));
         catalog_ = std::make_shared<ProgramCatalog>(std::move(catalog));
 
         RuntimeConfig config;
@@ -676,7 +680,9 @@ void init_program(py::module_& m) {
         .def_readwrite("max_core_steps", &RunBudget::max_core_steps)
         .def_readwrite("max_dynamic_compiles", &RunBudget::max_dynamic_compiles)
         .def_readwrite("max_child_depth", &RunBudget::max_child_depth)
-        .def_readwrite("max_total_children", &RunBudget::max_total_children);
+        .def_readwrite("max_total_children", &RunBudget::max_total_children)
+        .def_readwrite("max_node_retries", &RunBudget::max_node_retries,
+                       "Run-level ceiling on node retries (#364); None means none.");
 
     py::class_<ProgramUsage>(m, "ProgramUsage")
         .def_readonly("wall_time_ms", &ProgramUsage::wall_time_ms)
@@ -684,7 +690,9 @@ void init_program(py::module_& m) {
         .def_readonly("monetary_microunits", &ProgramUsage::monetary_microunits)
         .def_readonly("program_operations", &ProgramUsage::program_operations)
         .def_readonly("core_steps", &ProgramUsage::core_steps)
-        .def_readonly("peak_concurrency", &ProgramUsage::peak_concurrency);
+        .def_readonly("peak_concurrency", &ProgramUsage::peak_concurrency)
+        .def_readonly("node_retries", &ProgramUsage::node_retries,
+                      "Node retries taken under max_node_retries (#364).");
 
     py::class_<ProgramMonetaryRecord>(m, "ProgramMonetaryRecord",
         "One priced provider call of a Program attempt, in micro-USD (1e-6 USD). evidence is "
@@ -886,6 +894,10 @@ void init_program(py::module_& m) {
         .def_property_readonly("payload", [](const ProgramPendingInput& value) { return json_to_py(value.payload()); })
         .def_property_readonly("result_schema", [](const ProgramPendingInput& value) { return json_to_py(value.result_schema()); })
         .def_property_readonly("expires_at_unix_ms", &ProgramPendingInput::expires_at_unix_ms)
+        .def_property_readonly("core_node", &ProgramPendingInput::core_node)
+        .def_property_readonly("core_interrupt_value", [](const ProgramPendingInput& value) {
+            return json_to_py(value.core_interrupt_value());
+        })
         .def("serialize_canonical", &ProgramPendingInput::serialize_canonical);
     py::class_<ProgramPendingEffect>(m, "ProgramPendingEffect")
         .def_property_readonly("operation_id", &ProgramPendingEffect::operation_id)
@@ -957,11 +969,13 @@ void init_program(py::module_& m) {
         "Program identities. Bound calls are priced against each run's "
         "monetary_microunits budget (0 grants nothing). sqlite_directory keeps runs, "
         "checkpoints and a provider-call journal in SQLite files there, so a run "
-        "survives the process (reconnect, resume).")
+        "survives the process (reconnect, resume). failure_text_redactor is the #364 "
+        "hook for the free text of failure records (see GraphEngine.compile); "
+        "without it no text is written.")
         .def(py::init<RegistrySnapshot, std::string, RunBudget, std::string, std::size_t,
                       std::shared_ptr<sp::NativeArchive>, JavaScriptCompileLimits, bool,
                       std::size_t, py::object, std::optional<std::string>,
-                      std::optional<std::string>, bool, std::size_t>(),
+                      std::optional<std::string>, bool, std::size_t, py::object>(),
              py::arg("registry"), py::arg("owner_scope"), py::arg("budget_ceiling"),
              py::arg("compiler_build_id") = "neograph-python-program/v1",
              py::arg("scheduler_threads") = 1,
@@ -973,7 +987,8 @@ void init_program(py::module_& m) {
              py::arg("binding_label") = py::none(),
              py::arg("sqlite_directory") = py::none(),
              py::arg("soundness_check") = false,
-             py::arg("soundness_state_cap") = 100000)
+             py::arg("soundness_state_cap") = 100000,
+             py::arg("failure_text_redactor") = py::none())
         .def_property_readonly("owner_scope", &LocalProgramHost::owner_scope)
         .def("reconnect", &LocalProgramHost::reconnect, py::arg("run_id"),
              "Continue a run that a stopped process left running, from this host's "

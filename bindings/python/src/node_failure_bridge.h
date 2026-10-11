@@ -15,7 +15,7 @@
 
 namespace neograph::pybind {
 
-class PythonNodeFailure final : public graph::NodeFailureError {
+class PythonNodeFailure : public graph::NodeFailureError {
 public:
     /// `what` is the Python error's text, so NodeExecutionError messages do
     /// not change. `code` is empty or an author code.
@@ -29,6 +29,15 @@ public:
 
 private:
     std::exception_ptr python_error_;
+};
+
+/// A Program diagnostic raised by a Python node body (ProgramDiagnosticError,
+/// ProgramCompileError or ProgramAdmissionError): a configuration verdict,
+/// NG.ConfigError for the classifier, like the C++ exception (#364).
+class PythonNodeConfigurationFailure final : public PythonNodeFailure,
+                                             public graph::ConfigurationFailure {
+public:
+    using PythonNodeFailure::PythonNodeFailure;
 };
 
 }  // namespace neograph::pybind
