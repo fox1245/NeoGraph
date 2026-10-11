@@ -4,7 +4,7 @@ import pytest
 
 import neograph_engine as ng
 
-from .support import (admit, budget, build_registry, ceiling, define_graph, digest, known_issue,
+from .support import (admit, budget, build_registry, ceiling, define_graph, digest,
                       make_host, source)
 
 
@@ -130,8 +130,14 @@ def test_lint_warnings_carry_call_sites_while_the_sealed_copy_is_spanless():
     assert e9["severity"] == "warning"
     assert e9["span"]["line_begin"] == _line_of(FAN_IN, 'g.node("C"')
 
+    # The sealed copy keeps the rules bundles were first sealed under, so ids do
+    # not change (#358, #361): it still reports E6 for the channels that only
+    # Python nodes write, which the returned diagnostics no longer do.
     sealed = bundle.diagnostics
-    assert sorted(d["code"] for d in sealed) == sorted(d["code"] for d in bundle.compile_diagnostics)
+    sealed_codes = {d["code"] for d in sealed}
+    returned_codes = {d["code"] for d in bundle.compile_diagnostics}
+    assert "P_CORE_E9" in sealed_codes
+    assert "P_CORE_E6" in sealed_codes and "P_CORE_E6" not in returned_codes
     assert all(d["span"] is None and d["json_pointer"] == "" for d in sealed)
 
     serialized = bundle.serialize_canonical()
@@ -167,8 +173,6 @@ def test_control_character_in_a_config_string_warns_and_string_raw_fixes_it():
     assert clean.sealed_core_definitions[0]["definition"]["nodes"]["A"]["pattern"] == r"\b[1-9]\d* failed"
 
 
-@known_issue("#361.4", "admission (Core link) still prints '[neograph] lint [E6] ...' to stderr "
-             "for every channel a Python node writes")
 def test_admission_prints_no_lint_lines_to_stderr(capfd):
     host = make_host()
     capfd.readouterr()
@@ -177,9 +181,6 @@ def test_admission_prints_no_lint_lines_to_stderr(capfd):
     assert "[neograph] lint" not in captured.err, captured.err
 
 
-@known_issue("#369", "admission errors reach Python as RuntimeError('Program admission failed "
-             "with 1 diagnostic(s)') with no codes, pointers or .diagnostics; the binding does not "
-             "translate ProgramAdmissionError")
 def test_admission_failure_exposes_its_diagnostics():
     # The Program compiles, but its run budget asks for more Core steps than
     # the host's policy ceiling allows; only admission can see that.

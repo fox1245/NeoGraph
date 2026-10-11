@@ -2,7 +2,7 @@
 
 import neograph_engine as ng
 
-from .support import (JOURNAL, admit, budget, define_graph, describe, known_issue, last_json_line,
+from .support import (JOURNAL, admit, budget, define_graph, describe, last_json_line,
                       make_host, run_program, run_python, slow, with_main)
 
 PIPELINE = define_graph("""
@@ -110,9 +110,8 @@ def test_exception_thrown_by_main_fails_the_run():
 def test_failed_call_core_terminates_main_without_reaching_catch():
     """A Core failure ends the run; it is not thrown into the generator.
 
-    docs/QUICKJS_CONTROL_ARCHITECTURE.md describes the yield result as
-    'recorded result or failure -> generator.next(recorded outcome)', which a
-    reader can take to mean the failure is catchable. Today it is not.
+    The QuickJS and Python guides say so (#370): only a completed command
+    resumes the generator, so a try/catch around the yield never runs.
     """
     text = with_main(define_graph('g.node("w", {type: "e2e.step", boom: true}); g.entry("w"); g.exit("w");'),
                      """
@@ -160,11 +159,8 @@ except Exception as error:
 
 
 @slow
-@known_issue("#366", "an llm_call node with no bound Provider aborts the interpreter: "
-             "LLMCallNode dereferences a null provider and LocalProgramHost has no capability "
-             "binder, so every Python Program llm_call hits it")
 def test_llm_call_node_without_a_provider_is_rejected_at_admission():
-    # A fresh interpreter, because today the scenario kills the process.
+    # A fresh interpreter: before the fix (#366) the scenario killed the process.
     completed = run_python(_LLM_CALL_WITHOUT_PROVIDER, timeout=60)
     assert completed.returncode == 0, (
         f"interpreter died with exit code {completed.returncode}: {completed.stderr[-600:]}")

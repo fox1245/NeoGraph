@@ -7,7 +7,7 @@ import pytest
 import neograph_engine as ng
 
 from .support import (JOURNAL, admit, budget, build_registry, ceiling, channel, define_graph,
-                      describe, known_issue, make_host, run_program, slow, source, trace_channel,
+                      describe, make_host, run_program, slow, source, trace_channel,
                       with_main)
 
 SPIN_DEFINE = "export function define() {\n  let i = 0;\n  while (true) { i++; }\n}\n"
@@ -179,9 +179,6 @@ def test_run_budget_must_equal_the_admitted_budget():
     assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
 
 
-@known_issue("#369", "the start-budget rejection drops its diagnostic: Python sees only 'Program "
-             "invocation budget is outside its admitted bounds' without the P_START_BUDGET code or "
-             "the resource/minimum/maximum/granted witness")
 def test_budget_rejection_names_the_offending_resource():
     host = make_host()
     version = admit(host, BOUNDED, budget(max_core_steps=20))
@@ -191,10 +188,6 @@ def test_budget_rejection_names_the_offending_resource():
     assert "max_core_steps" in message and "P_START_BUDGET" in message, message
 
 
-@known_issue("#370.7", "a LocalProgramHost ceiling with model_tokens=0 (a Program that never "
-             "calls a model) is rejected with 'Every policy budget ceiling except child budgets "
-             "must be positive', which names no field; the docs do not say every ceiling must be "
-             "positive")
 def test_zero_model_token_ceiling_is_accepted_or_names_the_field():
     try:
         make_host(budget_ceiling=ceiling(model_tokens=0, monetary_microunits=0))

@@ -1,66 +1,30 @@
 """Scenario 1: the quickstart flow a Python user follows from docs/python-binding.md."""
 
+import re
+from pathlib import Path
+
 import pytest
 
 import neograph_engine as ng
 
-from .support import (JOURNAL, TRIAGE, admit, budget, build_registry, channel, define_graph,
-                      describe, known_issue, last_json_line, make_host, run_python, slow, source,
+from .support import (JOURNAL, TESTS_DIR, TRIAGE, admit, budget, build_registry, channel,
+                      define_graph, describe, last_json_line, make_host, run_python, slow, source,
                       trace_channel)
 
 
-# The docs/python-binding.md "Program and QuickJS" example, copied verbatim.
-DOC_EXAMPLE = r'''
-import neograph_engine as ng
+_GUIDE = Path(TESTS_DIR).parents[2] / "docs" / "python-binding.md"
 
-@ng.node("my_node")
-def my_node(state):
-    return [ng.ChannelWrite("value", state.get("value", 0) + 1)]
 
-registry = (
-    ng.ProgramRegistryBuilder()
-    .add_registered_node(
-        "my_node", "1.0.0", "sha256:" + "1" * 64
-    )
-    .add_registered_reducer(
-        "overwrite", "1.0.0", "sha256:" + "2" * 64
-    )
-    .build()
-)
-
-source = ng.ProgramSource.from_javascript("agent.js", r"""
-export function define() {
-  const graph = ng.graph("main");
-  graph.channel("value", {reducer: "overwrite", initial: 0});
-  graph.node("work", {type: "my_node"});
-  graph.entry("work");
-  graph.exit("work");
-  return graph;
-}
-export function* main(input) {
-  return yield ng.callCore("main", input, "python:main");
-}
-""")
-
-ceiling = ng.ProgramRunBudget()
-ceiling.wall_time_ms = 10_000
-ceiling.model_tokens = 1_000
-ceiling.monetary_microunits = 1_000
-ceiling.max_concurrency = 2
-ceiling.max_program_operations = 32
-ceiling.max_core_steps = 20
-ceiling.max_dynamic_compiles = 1
-
-run_budget = ng.ProgramRunBudget()
-run_budget.wall_time_ms = 10_000
-run_budget.max_concurrency = 2
-run_budget.max_program_operations = 32
-run_budget.max_core_steps = 20
-
-host = ng.LocalProgramHost(registry, "tenant-a", ceiling)
-version = host.compile_admit(source, run_budget)
-result = host.run(version, {}, run_budget)
-'''
+def _doc_example():
+    """The first Python block of the guide's "Program and QuickJS" section, read
+    from the guide itself so that the test follows the published text."""
+    if not _GUIDE.is_file():
+        pytest.skip(f"{_GUIDE} is not part of this checkout")
+    text = _GUIDE.read_text(encoding="utf-8")
+    section = text[text.index("\n## Program and QuickJS\n"):]
+    match = re.search(r"^```python\n(.*?)^```", section, re.MULTILINE | re.DOTALL)
+    assert match, "the Program and QuickJS section has no Python example"
+    return match.group(1)
 
 
 def _run_doc_example(code):
@@ -69,17 +33,8 @@ def _run_doc_example(code):
     return scope["result"]
 
 
-@known_issue("#370.1", "docs/python-binding.md calls state.get('value', 0) but GraphState.get() "
-             "takes one argument; the documented example ends Failed with a TypeError")
 def test_docs_program_example_runs_verbatim():
-    result = _run_doc_example(DOC_EXAMPLE)
-    assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
-    assert result.output["channels"]["value"]["value"] == 1
-
-
-def test_docs_program_example_with_one_argument_state_read():
-    fixed = DOC_EXAMPLE.replace('state.get("value", 0)', '(state.get("value") or 0)')
-    result = _run_doc_example(fixed)
+    result = _run_doc_example(_doc_example())
     assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
     # main() returns the callCore outcome: canonical channels plus value aliases.
     assert result.output["channels"]["value"]["value"] == 1

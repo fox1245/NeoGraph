@@ -5,7 +5,7 @@ import pytest
 import neograph_engine as ng
 
 from .support import (APPROVAL_GATE, JOURNAL, admit, budget, channel, define_graph, describe,
-                      known_issue, last_json_line, make_host, run_python, slow, trace_channel,
+                      last_json_line, make_host, run_python, slow, trace_channel,
                       with_main)
 
 DYNAMIC_QUESTION = define_graph("""
@@ -197,10 +197,8 @@ print(json.dumps({"statuses": statuses, "output": result.output}))
 
 
 @slow
-@known_issue("#371", "a main() whose second callCore is interrupted aborts the process "
-             "(std::terminate from src/program/result.cpp inside a scheduler coroutine)")
 def test_second_interrupted_call_core_in_main_resumes():
-    # A fresh interpreter, because today the scenario kills the process.
+    # A fresh interpreter: before the fix (#371) the scenario killed the process.
     completed = run_python(_TWO_CALL_CORES, timeout=60)
     assert completed.returncode == 0, (
         f"interpreter died with exit code {completed.returncode}: {completed.stderr[-600:]}")

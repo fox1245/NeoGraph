@@ -11,7 +11,7 @@ import pytest
 
 import neograph_engine as ng
 
-from .support import (JOURNAL, admit, budget, ceiling, define_graph, describe, known_issue,
+from .support import (JOURNAL, admit, budget, ceiling, define_graph, describe,
                       make_host, slow, source, with_main)
 
 WORKER = define_graph("""
@@ -101,14 +101,8 @@ def test_quorum_of_ready_members():
 
 THREADS = pytest.mark.parametrize("scheduler_threads", [None, 4], ids=["default-threads", "4-threads"])
 
-_SERIAL_JOIN = ("join members share one strand and a Python node's run() holds it, so "
-                "all/race/quorum members execute one after another while usage.peak_concurrency "
-                "still reports 2")
-
-
 @slow
 @THREADS
-@known_issue("#367", _SERIAL_JOIN + "; all() of two 800 ms Python members takes ~1.6 s")
 def test_all_runs_python_members_concurrently(scheduler_threads):
     result, elapsed = timed_run(program("""
         return (yield ng.all([
@@ -123,8 +117,6 @@ def test_all_runs_python_members_concurrently(scheduler_threads):
 
 @slow
 @THREADS
-@known_issue("#367", _SERIAL_JOIN + "; race() returns the slow first-declared member after it "
-             "finishes instead of the fast one")
 def test_race_returns_the_first_member_to_finish(scheduler_threads):
     result, elapsed = timed_run(program("""
         const winner = yield ng.race([
@@ -140,7 +132,6 @@ def test_race_returns_the_first_member_to_finish(scheduler_threads):
 
 @slow
 @THREADS
-@known_issue("#367", _SERIAL_JOIN + "; quorum() waits for the slow member and includes it")
 def test_quorum_does_not_wait_for_a_slow_member(scheduler_threads):
     result, elapsed = timed_run(program("""
         const ok = yield ng.quorum([
@@ -171,10 +162,6 @@ def test_await_timeout_cancels_a_slow_child_with_scheduler_threads():
 
 
 @slow
-@known_issue("#368", "with the default LocalProgramHost (scheduler_threads=1) the await() timer "
-             "cannot fire while a Python node holds the only thread, and a completion that "
-             "arrives after the deadline is accepted: the run returns Completed with the late "
-             "result after 3 s instead of TimedOut")
 def test_await_timeout_cancels_a_slow_child_with_the_default_host():
     result, elapsed = timed_run(AWAIT_SLOW)
     assert result.status == ng.ProgramTerminalStatus.TimedOut, describe(result)

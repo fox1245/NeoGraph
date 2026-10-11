@@ -4,7 +4,7 @@ import pytest
 
 import neograph_engine as ng
 
-from .support import (JOURNAL, budget, build_registry, channel, define_graph, describe, known_issue,
+from .support import (JOURNAL, budget, build_registry, channel, define_graph, describe,
                       make_host, run_program, source, trace_channel)
 
 
@@ -141,8 +141,6 @@ export function define() {
 """
 
 
-@known_issue("#357", "barrier + conditional fail route: D never runs, yet the run reports "
-             "Completed")
 def test_barrier_bypassed_by_a_conditional_fail_route_does_not_report_completed():
     _host, _version, result = run_program(ISSUE_357 % "e2e.always_fail")
     assert result.status == ng.ProgramTerminalStatus.Failed, describe(result)
@@ -162,7 +160,6 @@ def _compile(text):
 
 
 @pytest.mark.parametrize("reserved", ["__end__", "__start__"])
-@known_issue("#358", "a node named __start__/__end__ compiles into a self-loop")
 def test_reserved_node_names_are_rejected(reserved):
     if reserved == "__end__":
         body = f'g.node("A", {{type: "e2e.step"}}); g.node("{reserved}", {{type: "e2e.step"}}); ' \
@@ -175,16 +172,12 @@ def test_reserved_node_names_are_rejected(reserved):
     assert reserved in str(raised.value)
 
 
-@known_issue("#358", "a define() graph without entry() compiles (only a P_CORE_E7 warning) "
-             "and runs to Completed with an empty trace")
 def test_missing_entry_is_rejected():
     text = define_graph('g.node("A", {type: "e2e.step"}); g.exit("A");')
     with pytest.raises(ng.ProgramCompileError):
         _compile(text)
 
 
-@known_issue("#358", "a static edge next to a conditional route out of the same node compiles "
-             "with no dedicated diagnostic, and the static edge is silently ignored")
 def test_static_edge_overlapping_a_conditional_route_is_rejected():
     text = define_graph("""
         g.node("A", {type: "e2e.step"});
