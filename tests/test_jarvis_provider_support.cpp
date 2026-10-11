@@ -256,6 +256,10 @@ TEST(JarvisProviderSupport, CallerCanDisableEmptyReasksWithoutLosingTheOutcome) 
 
 TEST(JarvisProviderSupport, InvalidControlsFailBeforeProviderDispatch) {
     for (const auto* value : {"", "-1", "0", "1suffix", "18446744073709551616"}) {
+#ifdef _WIN32
+        // _putenv_s with an empty value removes the variable, so "set but empty" cannot occur.
+        if (*value == '\0') continue;
+#endif
         EnvValue cap("NG_EXAMPLE_MAX_TOKENS", value);
         EXPECT_THROW(jarvis::providers::output_budget(220), std::invalid_argument);
     }
