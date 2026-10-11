@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=4b60f3f5da8c193b45612166c7cfad3b9a22a09a0ca1a44d4feba1699c77fd43 -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=6531e69a1e6216f8e0af425d54551d6dc5f586eb0d1104f81d5daa0dbbb7aedb -->
 # Program API エンドツーエンドシナリオ
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -16,7 +16,8 @@
 | `test_05_diagnostics.py` | 構文エラーとビルダーエラーのソース位置、レジストリの欠落、lint のスパン、制御文字、承認エラー |
 | `test_06_graph_shapes.py` | バリア結合、条件付きルーティング、`Send` によるマップリデュース、サブグラフ、不正なグラフ形状 |
 | `test_07_main_programs.py` | `callCore`、`all`、`race`、`quorum`、`await` のタイムアウト、`cancelScope`、外部キャンセル、`spawn` |
-| `test_08_live_llm.py` | ノードがモデルを呼び出す Program：既定はローカルピア、有効にすると OpenRouter |
+| `test_08_live_llm.py` | ノードがモデルを呼び出す Program：既定はローカルピア、有効にすると OpenRouter。Python ノードとバインドされた `llm_call` |
+| `test_09_bound_llm.py` | `node_context` でバインドした `llm_call`（#372）：報告費用と推定費用、送信前の拒否（予算、未知のモデル、router alias）、ゼロ予算、プロバイダーのない Program の id、1 つの予算に対する `all` と `quorum`、呼び出しが journal に記録された後のクラッシュと 1 回だけ請求する復旧 |
 
 `support.py` には、共有の Python ノード、条件、レジストリ、予算、JavaScript ビルダーがあります。
 
@@ -35,14 +36,14 @@ PYTHONPATH=build:bindings/python python -m pytest -q bindings/python/tests/progr
 
 ## ライブモデルテスト
 
-`test_live_openrouter_model_call_inside_a_program` は有料の OpenRouter リクエストを 1 回送ります（`max_output_tokens=64`、データ非保持のルーティング）。両方の変数が設定されていない限りスキップされ、CI はこれらを設定しません。
+`test_live_openrouter_model_call_inside_a_program` と `test_live_openrouter_bound_llm_call_is_priced` は、それぞれ有料の OpenRouter リクエストを 1 回送ります（`max_output_tokens=64`、データ非保持のルーティング）。2 つ目は `LocalProgramHost(node_context=...)` でバインドした組み込み `llm_call` を 1,000,000 microunit（1 USD）の金額予算で実行し、精算済みの記録を確認します。両方の変数が設定されていない限りスキップされ、CI はこれらを設定しません。
 
 ```bash
 NEOGRAPH_E2E_LIVE=1 OPENROUTER_API_KEY=... PYTHONPATH=build:bindings/python \
   python -m pytest -q -rs bindings/python/tests/program_e2e/test_08_live_llm.py
 ```
 
-キーは環境変数からのみ読み取ります。`OPENROUTER_MODEL` と `OPENROUTER_BASE_URL` でモデルとエンドポイントを変更できます。
+キーは環境変数からのみ読み取ります。`OPENROUTER_MODEL`、`OPENROUTER_PRICED_MODEL`（カタログ項目に route ceiling のあるモデル、既定は `deepseek/deepseek-v4-flash-0731`）、`OPENROUTER_BASE_URL` でモデルとエンドポイントを変更できます。
 
 ## 既知の問題
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=e394ecfa1780a5909da233a0135fc56913eff5296a3a245d2a61cafa4a652bca -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=148e6f43f5fc83e1ed4fb51cd904caebac7583a6e23bb50857ebf9af1e34bbe3 -->
 # 故障排除
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -107,7 +107,8 @@ write 的 channel 名必须准确存在。condition 返回 route label；open co
 | `P_CORE_E13` 或 `P_CORE_E14` | node 在第一条 conditional edge 之外还有 static edge 或第二条 conditional edge；二者都永远不会触发 | 把每个 target 都放进第一条 conditional edge 的 route 中 |
 | `P_JS_CONTROL_COMMAND`: JavaScript command references a Core outside the admitted root | `ng.callCore` 指定了 `define()` 所返回 graph 之外的 graph | 使用传给 `ng.graph(...)` 的名称 |
 | `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | 列出的 ceiling field 为零 | 即使 Program 不调用 model，也设为正数 |
-| `ng.ProgramAdmissionError` 中的 `P_ADMIT_PROVIDER` | 存在 `llm_call` 或 `intent_classifier` node，而 `LocalProgramHost` 不绑定 provider | 从 Python node 调用 model |
+| `ng.ProgramAdmissionError` 中的 `P_ADMIT_PROVIDER` | `llm_call` node 需要宿主未绑定的 provider，或 `llm_call` / `intent_classifier` node 注册时未带 `provider=` | 用 `add_provider(...)` 与 `add_registered_node("llm_call", ..., provider=...)` 注册，并向 `LocalProgramHost` 传入 `node_context=` 与 `binding_label=` |
+| `P_MONEY_BUDGET`（`BudgetExhausted`）或其他 `P_MONEY_*` 代码（`Failed`），且 provider 没有收到请求 | 已绑定调用的预留超出 `monetary_microunits`（0 不授予任何额度），或无法确定上限：未知 model 或 origin、没有 route ceiling 的 router alias、没有输出上限、未知输入限制，或价格目录不建模的功能 | 提高 `monetary_microunits`、设置 `provider_controls.max_output_tokens`，或使用有目录条目的 model；见[计价证据与价格目录](reference-en.md#pricing-evidence-and-the-price-catalog) |
 | `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | run budget 与传给 `compile_admit` 的 budget 不同 | 传入相同的 budget，或重新 compile 并准入(admission) |
 | `ng.spawn` 抛出的 `P_CHILD_BINDING` | `LocalProgramHost` 没有 child binding resolver | 在 C++ host 中运行 child Program |
 | `resume()` 抛出的 `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost` | run 属于另一个或已销毁的 `LocalProgramHost` | 通过启动该 run 的 host 恢复 |

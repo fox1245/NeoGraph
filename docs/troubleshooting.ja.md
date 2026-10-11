@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=e394ecfa1780a5909da233a0135fc56913eff5296a3a245d2a61cafa4a652bca -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=148e6f43f5fc83e1ed4fb51cd904caebac7583a6e23bb50857ebf9af1e34bbe3 -->
 # トラブルシューティング
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -107,7 +107,8 @@ write の channel 名は正確に存在する必要がある。condition は rou
 | `P_CORE_E13` または `P_CORE_E14` | node の最初の conditional edge と並んで static edge か 2 つ目の conditional edge があり、どちらも決して発火しない | すべての target を最初の conditional edge の route に入れる |
 | `P_JS_CONTROL_COMMAND`: JavaScript command references a Core outside the admitted root | `ng.callCore` が `define()` の返す graph 以外を指定している | `ng.graph(...)` に渡した名前を使う |
 | `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | 列挙された ceiling field がゼロ | Program が model を呼ばなくても正の値にする |
-| `ng.ProgramAdmissionError` の `P_ADMIT_PROVIDER` | `llm_call` または `intent_classifier` node があり、`LocalProgramHost` は provider をバインドしない | Python node から model を呼ぶ |
+| `ng.ProgramAdmissionError` の `P_ADMIT_PROVIDER` | `llm_call` node がホストのバインドしない provider を必要とする、または `llm_call` か `intent_classifier` node が `provider=` なしで登録された | `add_provider(...)` と `add_registered_node("llm_call", ..., provider=...)` で登録し、`LocalProgramHost` に `node_context=` と `binding_label=` を渡す |
+| `P_MONEY_BUDGET`（`BudgetExhausted`）または他の `P_MONEY_*` コード（`Failed`）で、provider はリクエストを受けていない | バインドされた呼び出しの予約が `monetary_microunits` に収まらない（0 は何も与えない）、または上限を決められない：未知の model や origin、route ceiling のない router alias、出力 cap がない、入力上限が分からない、価格カタログが反映しない機能 | `monetary_microunits` を増やす、`provider_controls.max_output_tokens` を設定する、またはカタログ項目のある model を使う。[価格の証拠と価格カタログ](reference-en.md#pricing-evidence-and-the-price-catalog) を参照 |
 | `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | run budget が `compile_admit` に渡した budget と異なる | 同じ budget を渡すか、再度 compile して admission する |
 | `ng.spawn` から出る `P_CHILD_BINDING` | `LocalProgramHost` には child binding resolver がない | child Program は C++ host で実行する |
 | `resume()` から出る `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost` | run が別の、または破棄済みの `LocalProgramHost` に属する | run を開始した host を通じて再開する |

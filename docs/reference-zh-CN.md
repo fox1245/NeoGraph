@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=fd254446a38ba37a4eb53e45e783363f0a7514e2951f012b20d4284b20b1f882 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=551d94ffcb4f64d5d9c087f18d1e1e3fd0e9a5e9eecfac60ec90acc9596ab409 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -452,22 +452,39 @@ Python SDK 的 vector/map getter 返回独立值：`ProviderMessage.parts`、`Pr
 <a id="pricing-evidence-and-the-price-catalog"></a>
 ### 计价证据与价格目录
 
-provider 带价格绑定到 `llm_call` 节点后，Program 运行的 `monetary_microunits` 上限按 micro-USD 计数（1 microunit = 1e-6 USD）。该绑定是后续工作。它将使用的计价组件已在仓库中，且为内部组件：`src/program/pricing.h` 不会安装，也不承诺 ABI。
+Program 运行的 `monetary_microunits` 预算按 micro-USD 计数（1 microunit = 1e-6 USD）。当主机把内置 `llm_call` 节点的 provider 调用交给计价 broker 时，调用才会被计价：进程内使用 `bind_priced_provider_call(context)`，需要崩溃安全的重放时使用 `SQLiteProgramProviderCallJournal::bind_priced(context, deployment)`。运行时通过 `ProgramCoreProviderCallContext::monetary_account` 把 attempt 的金额账户交给每个 broker。Python 的 `LocalProgramHost(node_context=..., binding_label=...)` 总是为其调用计价（[Python 指南](python-binding.md#model-calling-nodes)）。与所有 `RunBudget` 字段一样，`monetary_microunits` 是授予运行的数量，`0` 表示什么也不授予：子运行与 fork 的预算从父运行的数量中划出，使用了模型 token 却以 `model_tokens = 0` 完成的运行会报告为 `BudgetExhausted`。#372 之前没有任何东西收取金额；现在 `monetary_microunits = 0` 的运行会在发送前拒绝每一个被计价的调用。计价代码是内部的（`src/program/pricing.h`、`monetary.h`），不承诺 ABI。
 
-每次结算的调用都带有以下两种证据之一：
+分发之前，broker 为已准备的请求计价。origin 是 URL 与 descriptor base URL 匹配的目录 origin；若 SDK 策略把该 base URL 声明为 OpenRouter origin，则为 `openrouter`。hold 是请求的输入上限与输出上限对应的目录预留，乘以一次分发可能计费的模型调用次数（`Provider::invocation_upper_bound`）。输入上限是该模型已知的最小输入限制：SDK 策略的限制、目录的 `max_input_tokens` 或其上下文窗口。每个输入 token 按最贵的输入档计价，每个输出 token 按最贵的输出费率计价，aggregator 上使用 route ceiling。无法确定上限的调用，或 hold 超出剩余预算的调用，会在产生任何请求或 journal marker 之前被拒绝。节点以表示未发送的合成 provider 失败而失败，运行的 `ProgramFailure` 写明原因；`failure.witness["monetary"]` 包含 origin、model、上限与目录：
+
+| 代码 | 状态 | 拒绝原因 |
+|---|---|---|
+| `P_MONEY_UNKNOWN_ORIGIN` | `Failed` | provider endpoint 不是目录 origin |
+| `P_MONEY_UNKNOWN_MODEL` | `Failed` | 目录中没有该 origin 与 model 的条目 |
+| `P_MONEY_UNMODELED` | `Failed` | 请求使用了目录不建模的内容：非标准 service tier、OpenRouter 模型回退（`models`）、Responses hosted tool 或 Anthropic 服务器工具 |
+| `P_MONEY_NO_OUTPUT_CAP` | `Failed` | 请求没有输出 token 上限 |
+| `P_MONEY_NO_INPUT_BOUND` | `Failed` | 不知道该模型的输入限制 |
+| `P_MONEY_NO_UPPER_BOUND` | `Failed` | aggregator 条目没有 route ceiling，例如 router alias |
+| `P_MONEY_BUDGET` | `BudgetExhausted` | hold 超出剩余的 `monetary_microunits` |
+
+得到结果后，hold 恰好结算一次，attempt 的 `ProgramResult::monetary_records()`（Python 为 `result.monetary_records`）为每次调用增加一条 `ProgramMonetaryRecord`，字段为 `call_id`（journal 的逻辑调用 slot）、`operation_id`、`node`、`origin`、`model`、`evidence`、`microunits`、`reserved_microunits`、`basis`、`catalog_version`、`catalog_digest`、`conservative`、`may_undercount`、`replayed` 与 `reason`。`ProgramUsage::monetary_microunits` 是该 attempt 的收费与仍未结束的 hold 之和：
 
 | 证据 | 条件 | 金额 |
 |---|---|---|
-| `reported` | 响应带有 provider 自己的费用：OpenRouter 的 `usage.cost`，SDK 将其解析为以 nano-USD 计的 `Usage::provider_cost`。BYOK 时加上报告的 upstream 费用。 | 报告金额，向上取整到整数 microunit。 |
-| `estimated` | 没有可用的报告费用。 | 目录费率乘以报告的 token 分段，每次调用只向上取整一次。记录中写明目录版本和 digest。 |
+| `reported` | 响应带有 provider 自己的费用：OpenRouter 的 `usage.cost`，由 SDK 解析为以 nano-USD 计的 `Usage::provider_cost`。BYOK 时加上报告的 upstream 费用。 | 报告金额向上取整到整数 microunit。 |
+| `estimated` | 没有报告费用的最终且一致的 usage。 | 目录费率乘以报告的 token 档，每次调用向上取整一次。记录写明目录的 version 与 digest。 |
+| `held` | 结果未知（transport 异常、取消、超时）、请求在失败前可能已发出、SDK 重发了 transport 尝试，或 usage 不完整或不一致。 | hold。 |
 
-dispatch 之前，预算预检从目录预留一个上界：每个输入 token 按输入上界所选 tier 中最贵的输入分段费率计算，每个输出 token 按最贵的输出费率计算。最终用量在这些上界内时，估算值不会超过其预留值。用量未报告的分段按其可能计费的最高费率计算。部分、失败或不一致的用量不结算任何金额，调用方保留 hold。
+证明什么也没有发送的失败会释放 hold 且不留记录。超过 hold 的费用（在 OpenRouter 请求未固定到 ceiling 时可能出现）按报告收费，费用超出预算的运行以 `BudgetExhausted` 结束。并发调用（`ng.all`、`ng.race`、`ng.quorum`、并行节点）在同一个账户上预留，放不下的成员会被拒绝。节点重试在自己的 effect namespace（`task#a<k>`）下调用，因此每次尝试的调用都是新调用，会再次收费。
 
-目录 [`data/pricing/catalog.json`](../data/pricing/catalog.json) 以 origin 和 model 为键。经 Google AI Studio 和经 Vertex AI global endpoint 访问的 Gemini 是不同条目，OpenAI、Anthropic 和 OpenRouter 也一样。每个条目记录 `source_url`（官方价格页面，或 OpenRouter models API）和 `retrieved` 日期。费率是以每百万 token 美元计的十进制字符串，涵盖输入、输出、缓存读取、缓存写入（Anthropic 的 5 分钟与 1 小时 TTL）和图像输出分段，并可带提示长度 tier。条目按标准 service tier 定价；batch、flex、priority tier，Anthropic 的仅限美国 inference_geo 与 fast mode，服务端工具费用和按请求收费均未建模。OpenRouter 会把同一模型路由到价格不同的多个 endpoint，因此其条目另有 `route_ceiling`，即编写条目时最贵的 endpoint，预留使用它。`~deepseek/deepseek-v4-flash-latest` 这类 router alias 不列出 endpoint，因此没有 ceiling，无法预留。没有条目的模型就没有价格：带金额上限的运行必须拒绝该调用（fail closed），不计预算地运行它是宿主的显式决定。
+`bind_priced` 把调用的记录写入其 journal 行：随 dispatched marker 写入 held 记录，随结果写入结算后的记录。同一 Program attempt 在进程停止前记录的调用，会在恢复后的 attempt 绑定该 operation 时收费一次并标记为 `replayed`，无论 Core 是否再次调用它；这也包括通过 execution lease 过期而恢复的仅 define() 运行。较早 attempt 记录的调用已由该 attempt 的结果结算进剩余预算，后续 attempt 重放其结果时不会再次收费。recorded replay 从不花钱。
 
-NeoGraph 运行时从不获取价格。[`scripts/check_price_drift.py`](../scripts/check_price_drift.py) 将目录与 OpenRouter 的 models 和 endpoints 列表、LiteLLM 的社区价格文件（只是需要核对的信号，不是事实）比较，设置了 `GCP_BILLING_API_KEY` 时还与 Cloud Billing Catalog API 中的 Vertex AI SKU 比较。它输出表格（`--json` 输出 JSON），漂移超过 `--tolerance` 时以 1 退出，且从不修改目录。每周的 `Price drift` 工作流运行它；OpenRouter 和 LiteLLM 不需要 secret。
+绑定目前还不会在请求上固定任何东西：OpenRouter 的 `provider.max_price` 需要 `OpenRouterRouting::max_price`，而固定版本的 SchemaProvider SDK 尚无此字段。在此之前，预留已经使用 route ceiling，更贵 endpoint 的报告费用按报告收费。
 
-组织费用报告（OpenAI 的 organization costs endpoint、Anthropic 的 cost report）需要 admin 密钥、按时间桶聚合且到达较晚，因此运行时不使用它们。宿主可以事后将 `reported` 和 `estimated` 记录与之对账。
+目录 [`data/pricing/catalog.json`](../data/pricing/catalog.json) 在构建时编译进 `neograph::program`，运行时只用这些字节计价。键为 origin 和 model。经由 Google AI Studio 的 Gemini 与经由 Vertex AI global endpoint 的 Gemini 是不同条目，OpenAI、Anthropic 和 OpenRouter 也同样分开。每个条目记录 `source_url`（官方价格页面或 OpenRouter models API）与 `retrieved` 日期。费率是以每百万 token 美元计的十进制字符串，涵盖输入、输出、缓存读取、缓存写入（Anthropic 的 5 分钟与 1 小时 TTL）和图像输出各档，并可选按提示长度分 tier。条目按标准 service tier 计价；batch、flex、priority tier，Anthropic 仅限美国的 inference_geo 与 fast mode，服务器工具费用和按请求收费均未建模。OpenRouter 把一个模型路由到价格不同的多个 endpoint，因此其条目带有 `route_ceiling`，即编写条目时最贵的 endpoint，预留使用它。像 `~deepseek/deepseek-v4-flash-latest` 这样的 router alias 不列出 endpoint，因此没有 ceiling，无法预留。没有条目的模型没有价格，对它的计价调用会被拒绝。
+
+NeoGraph 运行时从不获取价格。[`scripts/check_price_drift.py`](../scripts/check_price_drift.py) 把目录与 OpenRouter 的 models 和 endpoints 列表、LiteLLM 社区价格文件（只是需要核对的信号，并非事实）以及在设置 `GCP_BILLING_API_KEY` 时 Cloud Billing Catalog API 中的 Vertex AI SKU 进行比较。它输出表格（`--json` 输出 JSON），漂移超过 `--tolerance` 时以 1 退出，且从不修改目录。每周的 `Price drift` 工作流运行它；OpenRouter 与 LiteLLM 不需要 secret。
+
+组织费用报告（OpenAI 的 organization costs endpoint、Anthropic 的 cost report）需要管理员密钥，按时间段汇总且到达较晚，因此运行时不使用它们。主机可以事后用它们核对 `reported` 与 `estimated` 记录。
 
 ---
 

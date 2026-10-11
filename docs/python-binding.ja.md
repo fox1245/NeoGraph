@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=84dd7bc5bb93d80b398bd1697c288602f29f93457b4dc6025bb8005c5652411e -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=b19f6a37a9acd8ace536049ebbe5f393c410692084097d2150946e9555187111 -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -489,9 +489,57 @@ Pythonで送出されるProgramのエラーは型付きで、診断を保持し�
 
 コンパイルに成功したバンドルは2つのリストを持ちます。`bundle.compile_diagnostics`はコンパイラが返したもので、JavaScriptの呼び出し位置を`span`に持つ現在のルールでの警告と、`P_JS_CONTROL_CHARACTER`のような作成時の警告が入ります。作成者にはこのリストを見せてください。`bundle.diagnostics`はバンドルに封印され、`bundle.id`の対象となるコピーです。バンドルが最初に封印されたときのルールと文言を保つため、新しいコンパイラでもバンドルidは変わらず、そのため内容が異なることがあります。spanを持たず、Pythonノードだけが書き込むチャネルに対する`P_CORE_E6`のように、現在のルールでは除かれた警告がまだ含まれることがあります。コンパイラも`LocalProgramHost`も、stderrにlintを出力しません。
 
+<a id="model-calling-nodes"></a>
 ### モデルを呼び出すノード
 
-`LocalProgramHost`はプロバイダーをバインドしないため、グラフに`llm_call`または`intent_classifier`ノードを持つProgramはadmissionされません。`compile_admit`は、そのノードを示す`P_ADMIT_PROVIDER`を伴う`ng.ProgramAdmissionError`を送出します。代わりにPythonノードからモデルを呼び出してください。そのような呼び出しはProgramの`usage.model_tokens`には計上されません。
+`LocalProgramHost`は、admissionするProgramの組み込み`llm_call`ノードにプロバイダーを1つバインドします。レジストリはプロバイダーの名前とそれを必要とするノードを宣言し、ホストは秘密でない`binding_label`のもとでプロバイダーオブジェクト、モデル、リクエスト制御を提供します。
+
+```python
+from neograph_engine.llm import SchemaProvider
+
+registry = (
+    ng.ProgramRegistryBuilder()
+    .add_provider("openrouter", "1.0.0", "sha256:" + "3" * 64)
+    .add_registered_node("llm_call", "1.0.0", "sha256:" + "4" * 64, provider="openrouter")
+    .add_registered_reducer("append", "1.0.0", "sha256:" + "5" * 64)
+    .build()
+)
+controls = ng.ProviderControls()
+controls.max_output_tokens = 256
+ceiling.model_tokens = 100_000
+ceiling.monetary_microunits = 500_000
+# descriptor and options as in "Descriptor and runtime policy" above
+host = ng.LocalProgramHost(
+    registry, "tenant-a", ceiling,
+    node_context=ng.NodeContext(provider=SchemaProvider(descriptor, options),
+                                model="deepseek/deepseek-v4-flash-0731",
+                                provider_controls=controls),
+    binding_label="openrouter-prod")
+
+source = ng.ProgramSource.from_javascript("chat.js", r'''
+export function define() {
+  const graph = ng.graph("chat");
+  graph.channel("messages", {reducer: "append", initial: []});
+  graph.node("llm", {type: "llm_call"});
+  graph.entry("llm");
+  graph.exit("llm");
+  return graph;
+}
+''')
+run_budget.model_tokens = 100_000
+run_budget.monetary_microunits = 500_000  # 0.50 USD
+version = host.compile_admit(source, run_budget)
+result = host.run(version, {"messages": [{"role": "user", "content": "Hi"}]}, run_budget)
+print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_records])
+```
+
+`add_provider(name, semantic_version, implementation_digest)`はプロバイダーのidentityを登録し、`add_registered_node("llm_call", ..., provider=name)`はそのidentityを静的な要件として持つ組み込みノードを登録します。`provider=`がバインドするのは`llm_call`だけで、それ以外のタイプや未知のプロバイダーには`ValueError`を送出します。ホストはdescriptor idにかかわらず`node_context`のプロバイダーをその名前にバインドします。`NodeContext(provider_controls=...)`はノードが送るtypedな`ProviderControls`（`max_output_tokens`など）を受け取ります。`node_context`にはプロバイダーと`binding_label`が必要で、ツールは持てません。
+
+バインディングのうちidentityに入るのはラベルだけです。プロバイダーを必要とするProgramバージョンは、ラベルとプロバイダーのレジストリidentityのダイジェストをidentityとするcapability receiptを持ちます。プロバイダーのキー、endpoint、モデルは含まれないため、モデルを変えてもバージョンidは変わらず、ラベルを変えると変わります。プロバイダーを必要としないProgramはreceiptを持たず、バンドルidとバージョンidを保ちます。ラベルは`a-z`、`0-9`、`.`、`_`、`-`、`:`からなる1〜64文字で、英字か数字で始まり、APIキーのように見えてはいけません。`node_context`がないと、プロバイダーを必要とするProgramはadmissionで`P_ADMIT_PROVIDER`により拒否され、`provider=`なしで登録した`llm_call`または`intent_classifier`ノードを持つProgramも同様です。
+
+各呼び出しは、NeoGraphにコンパイルされた価格カタログで実行の`monetary_microunits`に対して価格が付けられます。リクエストを送る前に呼び出しの上限を予約します。上限を決められない呼び出し（カタログ項目のないモデル、route ceilingのないrouter alias、出力capのないリクエスト）や、予約が残り予算に収まらない呼び出しは何も送らないうちに拒否され、実行は`P_MONEY_*`コードで失敗します。すべての`ProgramRunBudget`フィールドと同じく`monetary_microunits = 0`は何も与えないため、そのような実行はすべての呼び出しを拒否します。応答の後、`result.monetary_records`には呼び出しごとに`ng.ProgramMonetaryRecord`が1つ、`evidence`とともに入ります。`reported`（OpenRouterの`usage.cost`）、`estimated`（カタログ料金。`catalog_version`と`catalog_digest`がカタログを示す）、`held`（結果やusageが分からないため予約額を請求）のいずれかです。`result.usage.monetary_microunits`はその合計です。コード、上限、精算の規則は[価格の証拠と価格カタログ](reference-en.md#pricing-evidence-and-the-price-catalog)にあります。
+
+モデルを呼び出すPythonノードはプロバイダーを自分で持ち、Programの予算はその呼び出しを見ません。
 
 ### 子Program
 
@@ -501,7 +549,7 @@ Pythonで送出されるProgramのエラーは型付きで、診断を保持し�
 
 `LocalProgramHost`に渡した`budget_ceiling`はadmissionポリシーの上限になります。`max_child_depth`と`max_total_children`を除くすべてのフィールドは正である必要があり、モデルを呼び出さないProgramでも`model_tokens`、`monetary_microunits`、`max_dynamic_compiles`は正でなければなりません。そうでない場合、コンストラクターはゼロのフィールド名を示す`ValueError`を送出します。2つの子フィールドは、両方ゼロか両方正である必要があります。
 
-`compile_admit(source, budget)`と`compile(source, budget)`は、`budget`をすべてのフィールドの最小値かつ最大値としてバンドルに封印し、封印された予算が上限を超えるバンドルはadmissionで拒否されます。そのバージョンに対する各`run`、`start`、`start_active`呼び出しは、フィールドごとに同じ値を渡す必要があります。より大きい予算や小さい予算は`P_START_BUDGET`を伴う`ng.ProgramDiagnosticError`を送出し、そのメッセージは値が異なる最初のフィールドを示します。たとえば`Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`です。別の予算を使うには、再度コンパイルしてadmissionしてください。その結果は新しい`ProgramVersion`です。実行予算の`wall_time_ms`、`max_concurrency`、`max_program_operations`、`max_core_steps`は正である必要があり、`model_tokens`と`monetary_microunits`はゼロでも構いません。
+`compile_admit(source, budget)`と`compile(source, budget)`は、`budget`をすべてのフィールドの最小値かつ最大値としてバンドルに封印し、封印された予算が上限を超えるバンドルはadmissionで拒否されます。そのバージョンに対する各`run`、`start`、`start_active`呼び出しは、フィールドごとに同じ値を渡す必要があります。より大きい予算や小さい予算は`P_START_BUDGET`を伴う`ng.ProgramDiagnosticError`を送出し、そのメッセージは値が異なる最初のフィールドを示します。たとえば`Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`です。別の予算を使うには、再度コンパイルしてadmissionしてください。その結果は新しい`ProgramVersion`です。実行予算の`wall_time_ms`、`max_concurrency`、`max_program_operations`、`max_core_steps`は正である必要があり、`model_tokens`と`monetary_microunits`はゼロでも構いません。ゼロは何も与えません。`model_tokens = 0`でモデルトークンを使った実行は`BudgetExhausted`で終わり、`monetary_microunits = 0`では価格の付くプロバイダー呼び出しはすべて送信前に拒否されます（[モデルを呼び出すノード](#model-calling-nodes)を参照）。
 
 ### スケジューラースレッド、ワーカー、タイムアウト
 
@@ -515,7 +563,9 @@ Programエンジンはstderrにlintもfan-outの通知も出力しません。`E
 
 ### インメモリ状態と再開
 
-`LocalProgramHost`は、バンドル、バージョン、アクティベーション、実行記録、チェックポイントをホストオブジェクト内のメモリに保持し、ディスクには何も書き込みません。実行は、それを開始したホストインスタンスが存在している間に、そのインスタンスを通じて再開してください。プロセスの再起動後や別の`LocalProgramHost`からは、`resume()`が`P_RUN_NOT_FOUND`を伴う`ng.ProgramDiagnosticError`を送出します。メッセージは`run '<id>' was not found in this LocalProgramHost; runs are kept in memory by the host that started them`です。永続的なProgramストア（SQLiteとPostgreSQL）はC++ホストのAPIです。
+既定では、`LocalProgramHost`はバンドル、バージョン、アクティベーション、実行記録、チェックポイントをホストオブジェクト内のメモリに保持し、ディスクには何も書き込みません。実行は、それを開始したホストインスタンスが存在している間に、そのインスタンスを通じて再開してください。プロセスの再起動後や別の`LocalProgramHost`からは、`resume()`が`P_RUN_NOT_FOUND`を伴う`ng.ProgramDiagnosticError`を送出します。メッセージは`run '<id>' was not found in this LocalProgramHost; runs are kept in memory by the host that started them`です。PostgreSQLのProgramストアはC++ホストのAPIです。
+
+`sqlite_directory=path`を渡すと、ホストはバンドル、バージョン、実行記録、チェックポイントをそのディレクトリのSQLiteファイル（`program.db`、`checkpoints.db`）に、プロバイダー呼び出しをプロバイダー呼び出しjournal（`provider_calls.db`）に保持するため、実行はプロセスを越えて残ります。同じディレクトリと同じレジストリで開いたホストが実行を続けます。`resume()`は中断された実行を続け、`reconnect(run_id)`は停止したプロセスが実行中のまま残した実行を続けます。復旧はjournalに記録されたリクエストを再送しません。journalが応答を再生し、呼び出しは1回だけ請求されます。プロバイダーをバインドするホストには`native_history_archive=`も必要です（初回は`ng.NativeArchive.provision`、以後は`ng.NativeArchive.open`）。journalがすべての応答をarchiveのcustodyのもとに保持するためです。子予算のない`define()`のみのProgram実行は、wall timeの間execution leaseを持ちます。`reconnect()`はleaseが切れるまで`P_RUN_LEASE_HELD`を送出し、その後は実行を`TimedOut`で終えてjournalに記録された呼び出しを請求します。クラッシュからの復旧は、実行の最後の永続チェックポイント（たとえば中断が残したもの）から再開します。
 
 `resume(run_id, value)`はハンドルを返します。結果を得るには`.wait()`を呼び出してください。`pending_id`がなければ、実行で待機中の唯一の呼び出しを再開します。待機中の呼び出しがない、または複数ある場合は`ValueError`を送出します。呼び出しを正確に指定するには、`result.interrupt.pending_input.call_id`を`pending_id`として渡してください。
 

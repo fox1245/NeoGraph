@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=84dd7bc5bb93d80b398bd1697c288602f29f93457b4dc6025bb8005c5652411e -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=b19f6a37a9acd8ace536049ebbe5f393c410692084097d2150946e9555187111 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -488,9 +488,57 @@ barrier 在其 `wait_for` 列表中的每个节点都路由到它之后才会触
 
 编译成功的 bundle 带有两个列表。`bundle.compile_diagnostics` 是编译器返回的内容：当前规则下的警告（JavaScript 调用位置在 `span` 中），以及 `P_JS_CONTROL_CHARACTER` 等编写警告。请向作者展示此列表。`bundle.diagnostics` 是封存进 bundle 并由 `bundle.id` 覆盖的副本。它保留 bundle 最初封存时的规则和措辞，因此更新的编译器不会改变 bundle id，也正因如此它可能与前者不同：它没有 span，并且可能仍列出当前规则已删除的警告，例如针对只有 Python 节点写入的通道的 `P_CORE_E6`。编译器和 `LocalProgramHost` 都不会向 stderr 打印 lint。
 
+<a id="model-calling-nodes"></a>
 ### 调用模型的节点
 
-`LocalProgramHost` 不绑定任何提供商，因此图中含有 `llm_call` 或 `intent_classifier` 节点的 Program 无法通过准入(admission)：`compile_admit` 会抛出带有 `P_ADMIT_PROVIDER` 的 `ng.ProgramAdmissionError`，并指明该节点。请改为从 Python 节点调用模型。此类调用不计入 Program 的 `usage.model_tokens`。
+`LocalProgramHost` 为它准入(admission)的 Program 中的内置 `llm_call` 节点绑定一个提供商。注册表按名称声明提供商以及需要它的节点；宿主在一个非机密的 `binding_label` 下提供提供商对象、模型和请求控制：
+
+```python
+from neograph_engine.llm import SchemaProvider
+
+registry = (
+    ng.ProgramRegistryBuilder()
+    .add_provider("openrouter", "1.0.0", "sha256:" + "3" * 64)
+    .add_registered_node("llm_call", "1.0.0", "sha256:" + "4" * 64, provider="openrouter")
+    .add_registered_reducer("append", "1.0.0", "sha256:" + "5" * 64)
+    .build()
+)
+controls = ng.ProviderControls()
+controls.max_output_tokens = 256
+ceiling.model_tokens = 100_000
+ceiling.monetary_microunits = 500_000
+# descriptor and options as in "Descriptor and runtime policy" above
+host = ng.LocalProgramHost(
+    registry, "tenant-a", ceiling,
+    node_context=ng.NodeContext(provider=SchemaProvider(descriptor, options),
+                                model="deepseek/deepseek-v4-flash-0731",
+                                provider_controls=controls),
+    binding_label="openrouter-prod")
+
+source = ng.ProgramSource.from_javascript("chat.js", r'''
+export function define() {
+  const graph = ng.graph("chat");
+  graph.channel("messages", {reducer: "append", initial: []});
+  graph.node("llm", {type: "llm_call"});
+  graph.entry("llm");
+  graph.exit("llm");
+  return graph;
+}
+''')
+run_budget.model_tokens = 100_000
+run_budget.monetary_microunits = 500_000  # 0.50 USD
+version = host.compile_admit(source, run_budget)
+result = host.run(version, {"messages": [{"role": "user", "content": "Hi"}]}, run_budget)
+print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_records])
+```
+
+`add_provider(name, semantic_version, implementation_digest)` 注册提供商的 identity，`add_registered_node("llm_call", ..., provider=name)` 把以该 identity 为静态需求的内置节点注册进去。`provider=` 只绑定 `llm_call`，对其他类型或未知提供商抛出 `ValueError`。无论 descriptor id 是什么，宿主都把 `node_context` 的提供商绑定到该名称。`NodeContext(provider_controls=...)` 接受节点发送的 typed `ProviderControls`，例如 `max_output_tokens`。`node_context` 需要提供商和 `binding_label`，且不能带工具。
+
+绑定中只有标签进入 identity。需要该提供商的 Program 版本带有一个 capability receipt，其 identity 是标签与提供商注册表 identity 的摘要；提供商的密钥、endpoint 和模型不在其中，因此更换模型不改变版本 id，更换标签会改变它。不需要提供商的 Program 没有 receipt，bundle id 与版本 id 保持不变。标签必须是由 `a-z`、`0-9`、`.`、`_`、`-` 和 `:` 组成的 1 到 64 个字符，以字母或数字开头，且不能看起来像 API 密钥。没有 `node_context` 时，需要该提供商的 Program 在准入时以 `P_ADMIT_PROVIDER` 被拒绝；含有未带 `provider=` 注册的 `llm_call` 或 `intent_classifier` 节点的 Program 也一样。
+
+每次调用都依据编译进 NeoGraph 的价格目录，针对运行的 `monetary_microunits` 计价。发送请求之前会预留调用的上限。无法确定上限的调用（没有目录条目的模型、没有 route ceiling 的 router alias、没有输出上限的请求）或预留超出剩余预算的调用，会在发送任何内容之前被拒绝，运行以 `P_MONEY_*` 代码失败。与所有 `ProgramRunBudget` 字段一样，`monetary_microunits = 0` 不授予任何额度，因此这样的运行会拒绝所有调用。收到回复后，`result.monetary_records` 为每次调用保存一条 `ng.ProgramMonetaryRecord` 及其 `evidence`：`reported`（OpenRouter 的 `usage.cost`）、`estimated`（目录费率；`catalog_version` 与 `catalog_digest` 指明目录）或 `held`（结果或 usage 未知，因此收取预留额）。`result.usage.monetary_microunits` 是它们的总和。代码、上限与结算规则见[计价证据与价格目录](reference-en.md#pricing-evidence-and-the-price-catalog)。
+
+调用模型的 Python 节点自己持有提供商，Program 预算看不到这类调用。
 
 ### 子 Program
 
@@ -500,7 +548,7 @@ barrier 在其 `wait_for` 列表中的每个节点都路由到它之后才会触
 
 传给 `LocalProgramHost` 的 `budget_ceiling` 会成为准入(admission)策略的上限。除 `max_child_depth` 和 `max_total_children` 外，每个字段都必须为正数；即使 Program 从不调用模型，`model_tokens`、`monetary_microunits` 和 `max_dynamic_compiles` 也必须为正数。否则构造函数会抛出列出零值字段的 `ValueError`。两个子字段必须同时为零或同时为正数。
 
-`compile_admit(source, budget)` 和 `compile(source, budget)` 会把 `budget` 作为每个字段的最小值和最大值封存进 bundle；封存预算超过上限的 bundle 会在准入(admission)时被拒绝。针对该版本的每次 `run`、`start` 和 `start_active` 调用都必须逐字段传入相同的值。更大或更小的预算会抛出带 `P_START_BUDGET` 的 `ng.ProgramDiagnosticError`，其消息会指出第一个不同的字段，例如 `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`。要使用不同的预算，请重新编译并准入(admission)；结果是一个新的 `ProgramVersion`。运行预算的 `wall_time_ms`、`max_concurrency`、`max_program_operations` 和 `max_core_steps` 必须为正数；`model_tokens` 和 `monetary_microunits` 可以为零。
+`compile_admit(source, budget)` 和 `compile(source, budget)` 会把 `budget` 作为每个字段的最小值和最大值封存进 bundle；封存预算超过上限的 bundle 会在准入(admission)时被拒绝。针对该版本的每次 `run`、`start` 和 `start_active` 调用都必须逐字段传入相同的值。更大或更小的预算会抛出带 `P_START_BUDGET` 的 `ng.ProgramDiagnosticError`，其消息会指出第一个不同的字段，例如 `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`。要使用不同的预算，请重新编译并准入(admission)；结果是一个新的 `ProgramVersion`。运行预算的 `wall_time_ms`、`max_concurrency`、`max_program_operations` 和 `max_core_steps` 必须为正数；`model_tokens` 和 `monetary_microunits` 可以为零。零表示不授予任何额度：以 `model_tokens = 0` 使用了模型 token 的运行以 `BudgetExhausted` 结束；`monetary_microunits = 0` 时，每个被计价的提供商调用都会在发送前被拒绝（见[调用模型的节点](#model-calling-nodes)）。
 
 ### 调度线程、worker 与超时
 
@@ -514,7 +562,9 @@ Program 引擎不会向 stderr 打印 lint，也不会打印 fan-out 提示。�
 
 ### 内存状态与恢复
 
-`LocalProgramHost` 把 bundle、版本、激活、运行记录和检查点保存在宿主对象内部的内存中，不向磁盘写入任何内容。请在启动该运行的宿主实例仍然存在时，通过该实例恢复运行。进程重启后，或从另一个 `LocalProgramHost` 调用时，`resume()` 会抛出带 `P_RUN_NOT_FOUND` 的 `ng.ProgramDiagnosticError`：`run '<id>' was not found in this LocalProgramHost; runs are kept in memory by the host that started them`。持久化的 Program 存储（SQLite 和 PostgreSQL）是 C++ 宿主 API。
+默认情况下，`LocalProgramHost` 把 bundle、版本、激活、运行记录和检查点保存在宿主对象内部的内存中，不向磁盘写入任何内容。请在启动该运行的宿主实例仍然存在时，通过该实例恢复运行。进程重启后，或从另一个 `LocalProgramHost` 调用时，`resume()` 会抛出带 `P_RUN_NOT_FOUND` 的 `ng.ProgramDiagnosticError`：`run '<id>' was not found in this LocalProgramHost; runs are kept in memory by the host that started them`。PostgreSQL Program 存储是 C++ 宿主 API。
+
+传入 `sqlite_directory=path` 时，宿主把 bundle、版本、运行记录和检查点保存在该目录的 SQLite 文件（`program.db`、`checkpoints.db`）中，把提供商调用保存在提供商调用 journal（`provider_calls.db`）中，因此运行能在进程之后留存：用同一目录和同一注册表打开的宿主会继续它。`resume()` 继续被中断的运行，`reconnect(run_id)` 继续停止的进程留下的仍在运行中的运行。恢复从不重新发送 journal 记录过的请求：journal 重放回复，调用只收费一次。绑定提供商的宿主还需要 `native_history_archive=`（第一次用 `ng.NativeArchive.provision`，之后用 `ng.NativeArchive.open`），因为 journal 把每个回复保存在该 archive 的 custody 之下。没有子预算的仅 `define()` Program 运行在其 wall time 内持有 execution lease：在 lease 过期前 `reconnect()` 抛出 `P_RUN_LEASE_HELD`，之后以 `TimedOut` 结束运行，并对 journal 记录的调用收费。崩溃恢复从运行最后一个持久检查点（例如中断留下的检查点）继续。
 
 `resume(run_id, value)` 返回一个句柄；调用 `.wait()` 获取结果。不传 `pending_id` 时，它会恢复该运行中唯一正在等待的调用。没有调用或有多个调用在等待时，它会抛出 `ValueError`；请把 `result.interrupt.pending_input.call_id` 作为 `pending_id` 传入，以精确指定该调用。
 

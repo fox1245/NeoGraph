@@ -15,7 +15,8 @@ These tests drive the sealed-v1 JavaScript Program API through the Python bindin
 | `test_05_diagnostics.py` | source locations for syntax and builder errors, registry misses, lint spans, control characters, admission errors |
 | `test_06_graph_shapes.py` | barrier joins, conditional routing, `Send` map-reduce, subgraphs, invalid graph shapes |
 | `test_07_main_programs.py` | `callCore`, `all`, `race`, `quorum`, `await` timeouts, `cancelScope`, external cancel, `spawn` |
-| `test_08_live_llm.py` | a Program whose node calls a model: a local peer by default, OpenRouter when enabled |
+| `test_08_live_llm.py` | a Program whose node calls a model: a local peer by default, OpenRouter when enabled; a Python node and a bound `llm_call` |
+| `test_09_bound_llm.py` | `llm_call` bound through `node_context` (#372): reported and estimated costs, refusals before sending (budget, unknown model, router alias), zero budget, ids without a provider, `all` and `quorum` against one budget, a crash after the call is journaled and recovery that charges it once |
 
 `support.py` holds the shared Python nodes, conditions, registry, budgets and JavaScript builders.
 
@@ -34,14 +35,14 @@ The offline scenarios take about 20 seconds; `-m "not slow"` skips the ones that
 
 ## Live model test
 
-`test_live_openrouter_model_call_inside_a_program` makes one paid OpenRouter request (`max_output_tokens=64`, zero data retention routing). It is skipped unless both variables are set, and CI never sets them:
+`test_live_openrouter_model_call_inside_a_program` and `test_live_openrouter_bound_llm_call_is_priced` each make one paid OpenRouter request (`max_output_tokens=64`, zero data retention routing). The second runs the built-in `llm_call` bound through `LocalProgramHost(node_context=...)` under a 1,000,000-microunit (1 USD) monetary budget and checks the settled record. They are skipped unless both variables are set, and CI never sets them:
 
 ```bash
 NEOGRAPH_E2E_LIVE=1 OPENROUTER_API_KEY=... PYTHONPATH=build:bindings/python \
   python -m pytest -q -rs bindings/python/tests/program_e2e/test_08_live_llm.py
 ```
 
-The key is read only from the environment. `OPENROUTER_MODEL` and `OPENROUTER_BASE_URL` override the model and the endpoint.
+The key is read only from the environment. `OPENROUTER_MODEL`, `OPENROUTER_PRICED_MODEL` (a model whose catalog entry has a route ceiling, `deepseek/deepseek-v4-flash-0731` by default) and `OPENROUTER_BASE_URL` override the models and the endpoint.
 
 ## Known issues
 

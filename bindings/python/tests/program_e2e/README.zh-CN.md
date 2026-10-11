@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=4b60f3f5da8c193b45612166c7cfad3b9a22a09a0ca1a44d4feba1699c77fd43 -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=6531e69a1e6216f8e0af425d54551d6dc5f586eb0d1104f81d5daa0dbbb7aedb -->
 # Program API 端到端场景
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -16,7 +16,8 @@
 | `test_05_diagnostics.py` | 语法错误和构建器错误的源码位置、注册表缺失、lint 范围、控制字符、准入错误 |
 | `test_06_graph_shapes.py` | 屏障汇合、条件路由、`Send` 映射归约、子图、无效的图形状 |
 | `test_07_main_programs.py` | `callCore`、`all`、`race`、`quorum`、`await` 超时、`cancelScope`、外部取消、`spawn` |
-| `test_08_live_llm.py` | 节点调用模型的 Program：默认使用本地对端，启用后使用 OpenRouter |
+| `test_08_live_llm.py` | 节点调用模型的 Program：默认使用本地对端，启用后使用 OpenRouter；Python 节点与绑定的 `llm_call` |
+| `test_09_bound_llm.py` | 通过 `node_context` 绑定的 `llm_call`（#372）：报告费用与估算费用、发送前的拒绝（预算、未知模型、router alias）、零预算、无提供商 Program 的 id、同一预算下的 `all` 与 `quorum`、调用记入 journal 后的崩溃以及只收费一次的恢复 |
 
 `support.py` 包含共享的 Python 节点、条件、注册表、预算和 JavaScript 构建器。
 
@@ -35,14 +36,14 @@ PYTHONPATH=build:bindings/python python -m pytest -q bindings/python/tests/progr
 
 ## 在线模型测试
 
-`test_live_openrouter_model_call_inside_a_program` 会发送一次付费的 OpenRouter 请求（`max_output_tokens=64`，零数据保留路由）。除非两个变量都已设置，否则会被跳过，CI 从不设置它们：
+`test_live_openrouter_model_call_inside_a_program` 与 `test_live_openrouter_bound_llm_call_is_priced` 各发送一次付费的 OpenRouter 请求（`max_output_tokens=64`，零数据保留路由）。第二个测试在 1,000,000 microunit（1 USD）的金额预算下运行通过 `LocalProgramHost(node_context=...)` 绑定的内置 `llm_call`，并检查结算后的记录。除非两个变量都已设置，否则会被跳过，CI 从不设置它们：
 
 ```bash
 NEOGRAPH_E2E_LIVE=1 OPENROUTER_API_KEY=... PYTHONPATH=build:bindings/python \
   python -m pytest -q -rs bindings/python/tests/program_e2e/test_08_live_llm.py
 ```
 
-密钥只从环境变量读取。`OPENROUTER_MODEL` 和 `OPENROUTER_BASE_URL` 可覆盖模型和端点。
+密钥只从环境变量读取。`OPENROUTER_MODEL`、`OPENROUTER_PRICED_MODEL`（目录条目带 route ceiling 的模型，默认 `deepseek/deepseek-v4-flash-0731`）和 `OPENROUTER_BASE_URL` 可覆盖模型和端点。
 
 ## 已知问题
 

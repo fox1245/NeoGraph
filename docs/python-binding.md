@@ -493,7 +493,54 @@ A bundle that compiles carries two lists. `bundle.compile_diagnostics` is what t
 
 ### Model-calling nodes
 
-`LocalProgramHost` binds no provider, so a Program whose graph has an `llm_call` or `intent_classifier` node cannot be admitted: `compile_admit` raises `ng.ProgramAdmissionError` with `P_ADMIT_PROVIDER` naming the node. Call a model from a Python node instead. Such a call is not counted in the Program's `usage.model_tokens`.
+A `LocalProgramHost` binds one provider to the built-in `llm_call` nodes of the Programs it admits. The registry declares the provider by name and the nodes that require it; the host supplies the provider object, the model and the request controls, under a non-secret `binding_label`:
+
+```python
+from neograph_engine.llm import SchemaProvider
+
+registry = (
+    ng.ProgramRegistryBuilder()
+    .add_provider("openrouter", "1.0.0", "sha256:" + "3" * 64)
+    .add_registered_node("llm_call", "1.0.0", "sha256:" + "4" * 64, provider="openrouter")
+    .add_registered_reducer("append", "1.0.0", "sha256:" + "5" * 64)
+    .build()
+)
+controls = ng.ProviderControls()
+controls.max_output_tokens = 256
+ceiling.model_tokens = 100_000
+ceiling.monetary_microunits = 500_000
+# descriptor and options as in "Descriptor and runtime policy" above
+host = ng.LocalProgramHost(
+    registry, "tenant-a", ceiling,
+    node_context=ng.NodeContext(provider=SchemaProvider(descriptor, options),
+                                model="deepseek/deepseek-v4-flash-0731",
+                                provider_controls=controls),
+    binding_label="openrouter-prod")
+
+source = ng.ProgramSource.from_javascript("chat.js", r'''
+export function define() {
+  const graph = ng.graph("chat");
+  graph.channel("messages", {reducer: "append", initial: []});
+  graph.node("llm", {type: "llm_call"});
+  graph.entry("llm");
+  graph.exit("llm");
+  return graph;
+}
+''')
+run_budget.model_tokens = 100_000
+run_budget.monetary_microunits = 500_000  # 0.50 USD
+version = host.compile_admit(source, run_budget)
+result = host.run(version, {"messages": [{"role": "user", "content": "Hi"}]}, run_budget)
+print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_records])
+```
+
+`add_provider(name, semantic_version, implementation_digest)` registers the provider's identity, and `add_registered_node("llm_call", ..., provider=name)` registers the built-in node with that identity as a static requirement. `provider=` binds only `llm_call` and raises `ValueError` for any other type or an unknown provider. The host binds its `node_context` provider to that name whatever its descriptor id. `NodeContext(provider_controls=...)` takes the typed `ProviderControls` the node sends, such as `max_output_tokens`. A `node_context` needs a provider and `binding_label`, and no tools.
+
+The label is the only part of the binding in any identity. A Program version that requires the provider carries a capability receipt whose identity is a digest of the label and the provider's registry identity; the provider's key, endpoint and model are not in it, so changing the model keeps the version id and changing the label changes it. A Program that requires no provider gets no receipt and keeps its bundle and version ids. The label must be 1 to 64 characters of `a-z`, `0-9`, `.`, `_`, `-` and `:`, starting with a letter or digit, and must not look like an API key. Without `node_context`, a Program that requires the provider is rejected at admission with `P_ADMIT_PROVIDER`, and so is a Program with an `llm_call` or `intent_classifier` node registered without `provider=`.
+
+Each call is priced against the run's `monetary_microunits` from the price catalog compiled into NeoGraph. Before the request is sent, the call's upper bound is reserved. A call that cannot be bounded (a model without a catalog entry, a router alias without a route ceiling, a request without an output cap) or whose reservation does not fit the remaining budget is refused before anything is sent, and the run fails with a `P_MONEY_*` code. Like every `ProgramRunBudget` field, `monetary_microunits = 0` grants nothing, so such a run refuses every call. After the reply, `result.monetary_records` holds one `ng.ProgramMonetaryRecord` per call with its `evidence`: `reported` (OpenRouter `usage.cost`), `estimated` (catalog rates; `catalog_version` and `catalog_digest` name the catalog) or `held` (the outcome or usage is unknown, so the reservation is charged). `result.usage.monetary_microunits` is their sum. The codes, the bounds and the settlement rules are in [Pricing evidence and the price catalog](reference-en.md#pricing-evidence-and-the-price-catalog).
+
+A Python node that calls a model owns its provider itself; the Program budgets do not see such a call.
 
 ### Child Programs
 
@@ -503,7 +550,7 @@ A bundle that compiles carries two lists. `bundle.compile_diagnostics` is what t
 
 The `budget_ceiling` passed to `LocalProgramHost` becomes the admission policy's ceiling. Every field except `max_child_depth` and `max_total_children` must be positive, including `model_tokens`, `monetary_microunits` and `max_dynamic_compiles`, even for a Program that never calls a model. Otherwise the constructor raises `ValueError` naming the zero fields. The two child fields must be both zero or both positive.
 
-`compile_admit(source, budget)` and `compile(source, budget)` seal `budget` into the bundle as both the minimum and the maximum of every field, and admission rejects a bundle whose sealed budget exceeds the ceiling. Each `run`, `start` and `start_active` call for that version must pass the same values, field for field. A larger or smaller budget raises `ng.ProgramDiagnosticError` with `P_START_BUDGET`, whose message names the first field that differs, for example `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`. To use a different budget, compile and admit again; the result is a new `ProgramVersion`. A run budget needs positive `wall_time_ms`, `max_concurrency`, `max_program_operations` and `max_core_steps`; `model_tokens` and `monetary_microunits` may be zero.
+`compile_admit(source, budget)` and `compile(source, budget)` seal `budget` into the bundle as both the minimum and the maximum of every field, and admission rejects a bundle whose sealed budget exceeds the ceiling. Each `run`, `start` and `start_active` call for that version must pass the same values, field for field. A larger or smaller budget raises `ng.ProgramDiagnosticError` with `P_START_BUDGET`, whose message names the first field that differs, for example `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`. To use a different budget, compile and admit again; the result is a new `ProgramVersion`. A run budget needs positive `wall_time_ms`, `max_concurrency`, `max_program_operations` and `max_core_steps`; `model_tokens` and `monetary_microunits` may be zero. Zero grants nothing: a run that uses model tokens with `model_tokens = 0` ends `BudgetExhausted`, and with `monetary_microunits = 0` every priced provider call is refused before it is sent (see [Model-calling nodes](#model-calling-nodes)).
 
 ### Scheduler threads, workers and timeouts
 
@@ -517,7 +564,9 @@ Program engines print no lint and no fan-out notice to stderr. The notice that r
 
 ### In-memory state and resume
 
-`LocalProgramHost` keeps bundles, versions, activations, run records and checkpoints in memory inside the host object, and writes nothing to disk. Resume a run through the host instance that started it, while that object is alive. After a process restart, or from another `LocalProgramHost`, `resume()` raises `ng.ProgramDiagnosticError` with `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost; runs are kept in memory by the host that started them`. Durable Program stores (SQLite and PostgreSQL) are C++ host APIs.
+By default `LocalProgramHost` keeps bundles, versions, activations, run records and checkpoints in memory inside the host object, and writes nothing to disk. Resume a run through the host instance that started it, while that object is alive. After a process restart, or from another `LocalProgramHost`, `resume()` raises `ng.ProgramDiagnosticError` with `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost; runs are kept in memory by the host that started them`. PostgreSQL Program stores are a C++ host API.
+
+With `sqlite_directory=path` the host keeps bundles, versions, run records and checkpoints in SQLite files in that directory (`program.db`, `checkpoints.db`) and its provider calls in a provider-call journal (`provider_calls.db`), so a run survives the process: a host opened on the same directory with the same registry continues it. `resume()` continues an interrupted run, and `reconnect(run_id)` continues a run that a stopped process left running. Recovery never sends a journaled request again: the journal replays the reply, and the call is charged once. A host that binds a provider also needs `native_history_archive=` (`ng.NativeArchive.provision` the first time, `ng.NativeArchive.open` later), because the journal keeps every reply under the archive's custody. A `define()`-only Program run without child budgets holds an execution lease for its wall time: `reconnect()` raises `P_RUN_LEASE_HELD` until the lease expires, then ends the run `TimedOut` and charges the calls it had journaled. Crash recovery resumes from the run's last durable checkpoint, for example the one an interrupt left.
 
 `resume(run_id, value)` returns a handle; call `.wait()` for the result. Without `pending_id` it resumes the run's single awaiting call. When none or several calls are awaiting, it raises `ValueError`; pass `result.interrupt.pending_input.call_id` as `pending_id` to name the call exactly.
 

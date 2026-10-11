@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=e394ecfa1780a5909da233a0135fc56913eff5296a3a245d2a61cafa4a652bca -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=148e6f43f5fc83e1ed4fb51cd904caebac7583a6e23bb50857ebf9af1e34bbe3 -->
 # 문제 해결
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -107,7 +107,8 @@ write의 channel 이름은 정확히 존재해야 한다. condition은 route lab
 | `P_CORE_E13` 또는 `P_CORE_E14` | node의 첫 conditional edge 옆에 static edge나 두 번째 conditional edge가 있으며, 어느 쪽도 발화하지 않는다 | 모든 target을 첫 conditional edge의 route에 넣는다 |
 | `P_JS_CONTROL_COMMAND`: JavaScript command references a Core outside the admitted root | `ng.callCore`가 `define()`이 반환한 graph가 아닌 다른 graph를 지정한다 | `ng.graph(...)`에 전달한 이름을 쓴다 |
 | `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | 나열된 ceiling field가 0이다 | Program이 model을 호출하지 않더라도 양수로 설정한다 |
-| `ng.ProgramAdmissionError`의 `P_ADMIT_PROVIDER` | `llm_call` 또는 `intent_classifier` node가 있는데 `LocalProgramHost`는 provider를 바인딩하지 않는다 | Python node에서 model을 호출한다 |
+| `ng.ProgramAdmissionError`의 `P_ADMIT_PROVIDER` | `llm_call` node가 호스트가 바인딩하지 않은 provider를 요구하거나, `llm_call` 또는 `intent_classifier` node가 `provider=` 없이 등록되었다 | `add_provider(...)`와 `add_registered_node("llm_call", ..., provider=...)`로 등록하고 `LocalProgramHost`에 `node_context=`와 `binding_label=`을 전달한다 |
+| `P_MONEY_BUDGET`(`BudgetExhausted`) 또는 다른 `P_MONEY_*` 코드(`Failed`)이고 provider가 요청을 받지 않았다 | 바인딩된 호출의 예약이 `monetary_microunits`에 들어가지 않거나(0은 아무것도 부여하지 않음), 상한을 정할 수 없다: 알 수 없는 model 또는 origin, route ceiling 없는 router alias, 출력 cap 없음, 알려진 입력 한도 없음, 가격 카탈로그가 반영하지 않는 기능 | `monetary_microunits`를 늘리거나, `provider_controls.max_output_tokens`를 설정하거나, 카탈로그 항목이 있는 model을 쓴다. [가격 증거와 가격 카탈로그](reference-en.md#pricing-evidence-and-the-price-catalog) 참조 |
 | `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | run budget이 `compile_admit`에 전달한 budget과 다르다 | 같은 budget을 전달하거나 다시 compile하고 승인(admission)한다 |
 | `ng.spawn`에서 발생한 `P_CHILD_BINDING` | `LocalProgramHost`에는 child binding resolver가 없다 | child Program은 C++ host에서 실행한다 |
 | `resume()`에서 발생한 `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost` | run이 다른 `LocalProgramHost`나 이미 소멸한 `LocalProgramHost`에 속한다 | run을 시작한 host를 통해 재개한다 |

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=84dd7bc5bb93d80b398bd1697c288602f29f93457b4dc6025bb8005c5652411e -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=b19f6a37a9acd8ace536049ebbe5f393c410692084097d2150946e9555187111 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -489,9 +489,57 @@ Python에서 발생하는 Program 오류는 타입이 지정되어 있고 진단
 
 컴파일에 성공한 번들은 두 목록을 가집니다. `bundle.compile_diagnostics`는 컴파일러가 반환한 그대로의 목록으로, JavaScript 호출 위치를 `span`에 담은 현재 규칙의 경고와 `P_JS_CONTROL_CHARACTER` 같은 작성 경고가 들어 있습니다. 작성자에게는 이 목록을 보여 주십시오. `bundle.diagnostics`는 번들에 봉인되어 `bundle.id`가 포괄하는 사본입니다. 이 사본은 번들이 처음 봉인될 때의 규칙과 문구를 유지하므로 새 컴파일러가 번들 id를 바꾸지 않으며, 그 때문에 내용이 다를 수 있습니다. span이 없고, Python 노드만 쓰는 채널에 대한 `P_CORE_E6`처럼 현재 규칙에서는 빠진 경고가 여전히 들어 있을 수 있습니다. 컴파일러도 `LocalProgramHost`도 stderr에 lint를 출력하지 않습니다.
 
+<a id="model-calling-nodes"></a>
 ### 모델을 호출하는 노드
 
-`LocalProgramHost`는 제공자를 바인딩하지 않으므로, 그래프에 `llm_call` 또는 `intent_classifier` 노드가 있는 Program은 승인(admission)될 수 없습니다. `compile_admit`는 그 노드를 지목하는 `P_ADMIT_PROVIDER`가 담긴 `ng.ProgramAdmissionError`를 발생시킵니다. 대신 Python 노드에서 모델을 호출하십시오. 이런 호출은 Program의 `usage.model_tokens`에 집계되지 않습니다.
+`LocalProgramHost`는 자신이 승인(admission)하는 Program의 내장 `llm_call` 노드에 제공자 하나를 바인딩합니다. 레지스트리는 제공자의 이름과 그것을 요구하는 노드를 선언하고, 호스트는 비밀이 아닌 `binding_label` 아래에서 제공자 객체, 모델, 요청 제어를 제공합니다.
+
+```python
+from neograph_engine.llm import SchemaProvider
+
+registry = (
+    ng.ProgramRegistryBuilder()
+    .add_provider("openrouter", "1.0.0", "sha256:" + "3" * 64)
+    .add_registered_node("llm_call", "1.0.0", "sha256:" + "4" * 64, provider="openrouter")
+    .add_registered_reducer("append", "1.0.0", "sha256:" + "5" * 64)
+    .build()
+)
+controls = ng.ProviderControls()
+controls.max_output_tokens = 256
+ceiling.model_tokens = 100_000
+ceiling.monetary_microunits = 500_000
+# descriptor and options as in "Descriptor and runtime policy" above
+host = ng.LocalProgramHost(
+    registry, "tenant-a", ceiling,
+    node_context=ng.NodeContext(provider=SchemaProvider(descriptor, options),
+                                model="deepseek/deepseek-v4-flash-0731",
+                                provider_controls=controls),
+    binding_label="openrouter-prod")
+
+source = ng.ProgramSource.from_javascript("chat.js", r'''
+export function define() {
+  const graph = ng.graph("chat");
+  graph.channel("messages", {reducer: "append", initial: []});
+  graph.node("llm", {type: "llm_call"});
+  graph.entry("llm");
+  graph.exit("llm");
+  return graph;
+}
+''')
+run_budget.model_tokens = 100_000
+run_budget.monetary_microunits = 500_000  # 0.50 USD
+version = host.compile_admit(source, run_budget)
+result = host.run(version, {"messages": [{"role": "user", "content": "Hi"}]}, run_budget)
+print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_records])
+```
+
+`add_provider(name, semantic_version, implementation_digest)`는 제공자의 identity를 등록하고, `add_registered_node("llm_call", ..., provider=name)`은 그 identity를 정적 요구 사항으로 가진 내장 노드를 등록합니다. `provider=`는 `llm_call`만 바인딩하며 다른 타입이나 알 수 없는 제공자에는 `ValueError`를 발생시킵니다. 호스트는 descriptor id와 상관없이 `node_context`의 제공자를 그 이름에 바인딩합니다. `NodeContext(provider_controls=...)`는 노드가 보내는 typed `ProviderControls`(예: `max_output_tokens`)를 받습니다. `node_context`에는 제공자와 `binding_label`이 필요하며 도구는 없어야 합니다.
+
+바인딩 가운데 identity에 들어가는 것은 레이블뿐입니다. 제공자를 요구하는 Program 버전은 레이블과 제공자의 레지스트리 identity를 다이제스트한 capability receipt를 가집니다. 제공자의 키, endpoint, 모델은 여기에 들어가지 않으므로 모델을 바꿔도 버전 id는 그대로이고 레이블을 바꾸면 달라집니다. 제공자를 요구하지 않는 Program은 receipt가 없으며 번들 id와 버전 id를 그대로 유지합니다. 레이블은 `a-z`, `0-9`, `.`, `_`, `-`, `:`로 된 1~64자이고 영문자나 숫자로 시작해야 하며 API 키처럼 보이면 안 됩니다. `node_context` 없이 제공자를 요구하는 Program은 승인(admission)에서 `P_ADMIT_PROVIDER`로 거부되며, `provider=` 없이 등록한 `llm_call` 또는 `intent_classifier` 노드를 가진 Program도 마찬가지입니다.
+
+각 호출은 NeoGraph에 컴파일된 가격 카탈로그로 실행의 `monetary_microunits`에 대해 가격이 매겨집니다. 요청을 보내기 전에 호출의 상한을 예약합니다. 상한을 정할 수 없는 호출(카탈로그 항목이 없는 모델, route ceiling이 없는 router alias, 출력 cap이 없는 요청)이나 예약이 남은 예산에 들어가지 않는 호출은 아무것도 보내기 전에 거부되며, 실행은 `P_MONEY_*` 코드로 실패합니다. 모든 `ProgramRunBudget` 필드와 마찬가지로 `monetary_microunits = 0`은 아무것도 부여하지 않으므로 그런 실행은 모든 호출을 거부합니다. 응답 뒤에는 `result.monetary_records`에 호출마다 `ng.ProgramMonetaryRecord` 하나가 `evidence`와 함께 들어갑니다. `reported`(OpenRouter `usage.cost`), `estimated`(카탈로그 요율이며 `catalog_version`과 `catalog_digest`가 카탈로그를 가리킴), `held`(결과나 usage를 알 수 없어 예약액을 청구) 중 하나입니다. `result.usage.monetary_microunits`는 그 합입니다. 코드, 상한, 정산 규칙은 [가격 증거와 가격 카탈로그](reference-en.md#pricing-evidence-and-the-price-catalog)에 있습니다.
+
+모델을 호출하는 Python 노드는 제공자를 직접 소유하며, Program 예산은 그런 호출을 보지 못합니다.
 
 ### 자식 Program
 
@@ -501,7 +549,7 @@ Python에서 발생하는 Program 오류는 타입이 지정되어 있고 진단
 
 `LocalProgramHost`에 전달한 `budget_ceiling`은 승인(admission) 정책의 상한이 됩니다. `max_child_depth`와 `max_total_children`을 제외한 모든 필드는 양수여야 하며, 모델을 전혀 호출하지 않는 Program이라도 `model_tokens`, `monetary_microunits`, `max_dynamic_compiles` 역시 양수여야 합니다. 그렇지 않으면 생성자가 0인 필드 이름을 담은 `ValueError`를 발생시킵니다. 두 자식 필드는 둘 다 0이거나 둘 다 양수여야 합니다.
 
-`compile_admit(source, budget)`와 `compile(source, budget)`는 `budget`을 모든 필드의 최솟값이자 최댓값으로 번들에 봉인하며, 봉인된 예산이 상한을 넘는 번들은 승인(admission)에서 거부됩니다. 그 버전에 대한 각 `run`, `start`, `start_active` 호출은 필드마다 같은 값을 전달해야 합니다. 더 크거나 작은 예산은 `P_START_BUDGET`이 담긴 `ng.ProgramDiagnosticError`를 발생시키며, 그 메시지에는 값이 다른 첫 번째 필드가 나옵니다. 예를 들면 `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`입니다. 다른 예산을 쓰려면 다시 컴파일하고 승인(admission)하십시오. 그 결과는 새 `ProgramVersion`입니다. 실행 예산의 `wall_time_ms`, `max_concurrency`, `max_program_operations`, `max_core_steps`는 양수여야 하며, `model_tokens`와 `monetary_microunits`는 0이어도 됩니다.
+`compile_admit(source, budget)`와 `compile(source, budget)`는 `budget`을 모든 필드의 최솟값이자 최댓값으로 번들에 봉인하며, 봉인된 예산이 상한을 넘는 번들은 승인(admission)에서 거부됩니다. 그 버전에 대한 각 `run`, `start`, `start_active` 호출은 필드마다 같은 값을 전달해야 합니다. 더 크거나 작은 예산은 `P_START_BUDGET`이 담긴 `ng.ProgramDiagnosticError`를 발생시키며, 그 메시지에는 값이 다른 첫 번째 필드가 나옵니다. 예를 들면 `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`입니다. 다른 예산을 쓰려면 다시 컴파일하고 승인(admission)하십시오. 그 결과는 새 `ProgramVersion`입니다. 실행 예산의 `wall_time_ms`, `max_concurrency`, `max_program_operations`, `max_core_steps`는 양수여야 하며, `model_tokens`와 `monetary_microunits`는 0이어도 됩니다. 0은 아무것도 부여하지 않습니다. `model_tokens = 0`으로 모델 토큰을 쓴 실행은 `BudgetExhausted`로 끝나고, `monetary_microunits = 0`이면 가격이 매겨지는 모든 제공자 호출이 보내기 전에 거부됩니다([모델을 호출하는 노드](#model-calling-nodes) 참조).
 
 ### 스케줄러 스레드, 워커, 타임아웃
 
@@ -515,7 +563,9 @@ Program 엔진은 stderr에 lint도 fan-out 안내도 출력하지 않습니다.
 
 ### 인메모리 상태와 재개
 
-`LocalProgramHost`는 번들, 버전, 활성화, 실행 기록, 체크포인트를 호스트 객체 내부의 메모리에 보관하며 디스크에는 아무것도 쓰지 않습니다. 실행은 그 실행을 시작한 호스트 인스턴스가 살아 있는 동안 그 인스턴스를 통해 재개하십시오. 프로세스를 재시작한 뒤나 다른 `LocalProgramHost`에서는 `resume()`이 `P_RUN_NOT_FOUND`가 담긴 `ng.ProgramDiagnosticError`를 발생시킵니다. 메시지는 `run '<id>' was not found in this LocalProgramHost; runs are kept in memory by the host that started them`입니다. 내구성 있는 Program 저장소(SQLite, PostgreSQL)는 C++ 호스트 API입니다.
+기본적으로 `LocalProgramHost`는 번들, 버전, 활성화, 실행 기록, 체크포인트를 호스트 객체 내부의 메모리에 보관하며 디스크에는 아무것도 쓰지 않습니다. 실행은 그 실행을 시작한 호스트 인스턴스가 살아 있는 동안 그 인스턴스를 통해 재개하십시오. 프로세스를 재시작한 뒤나 다른 `LocalProgramHost`에서는 `resume()`이 `P_RUN_NOT_FOUND`가 담긴 `ng.ProgramDiagnosticError`를 발생시킵니다. 메시지는 `run '<id>' was not found in this LocalProgramHost; runs are kept in memory by the host that started them`입니다. PostgreSQL Program 저장소는 C++ 호스트 API입니다.
+
+`sqlite_directory=path`를 주면 호스트는 번들, 버전, 실행 기록, 체크포인트를 그 디렉터리의 SQLite 파일(`program.db`, `checkpoints.db`)에, 제공자 호출을 제공자 호출 journal(`provider_calls.db`)에 보관하므로 실행이 프로세스보다 오래 남습니다. 같은 디렉터리와 같은 레지스트리로 연 호스트가 실행을 이어 갑니다. `resume()`은 중단된 실행을 이어 가고, `reconnect(run_id)`는 멈춘 프로세스가 실행 중인 채로 남긴 실행을 이어 갑니다. 복구는 journal에 기록된 요청을 다시 보내지 않습니다. journal이 응답을 재생하고 호출은 한 번만 청구됩니다. 제공자를 바인딩하는 호스트에는 `native_history_archive=`도 필요합니다(처음에는 `ng.NativeArchive.provision`, 이후에는 `ng.NativeArchive.open`). journal이 모든 응답을 archive의 custody 아래에 보관하기 때문입니다. 자식 예산이 없는 `define()` 전용 Program 실행은 wall time 동안 execution lease를 가집니다. `reconnect()`는 lease가 만료될 때까지 `P_RUN_LEASE_HELD`를 발생시키고, 그 뒤에는 실행을 `TimedOut`으로 끝내며 journal에 기록된 호출을 청구합니다. 크래시 복구는 실행의 마지막 내구 체크포인트(예: 중단이 남긴 체크포인트)에서 재개합니다.
 
 `resume(run_id, value)`는 핸들을 반환합니다. 결과를 받으려면 `.wait()`를 호출하십시오. `pending_id`가 없으면 실행에서 대기 중인 유일한 호출을 재개합니다. 대기 중인 호출이 없거나 여러 개이면 `ValueError`를 발생시킵니다. 호출을 정확히 지정하려면 `result.interrupt.pending_input.call_id`를 `pending_id`로 전달하십시오.
 
