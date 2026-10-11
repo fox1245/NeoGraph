@@ -1,0 +1,53 @@
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=4b60f3f5da8c193b45612166c7cfad3b9a22a09a0ca1a44d4feba1699c77fd43 -->
+# Program API エンドツーエンドシナリオ
+
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
+これらのテストは、[Python ガイド](../../../../docs/python-binding.md)を読んだユーザーと同じ方法で、Python バインディングを通じて sealed-v1 JavaScript Program API を動かします。Python の `GraphNode` クラス、登録済みの条件、`ProgramRegistryBuilder` のスナップショット、`ProgramCompiler`、`LocalProgramHost` を使います。Program と QuickJS 制御を有効にしてビルドした `neograph_engine` が必要で、どちらかが無い場合このパッケージはスキップされます。
+
+## 対象範囲
+
+| ファイル | シナリオ |
+|---|---|
+| `test_01_quickstart.py` | ドキュメントの例、Python ノードと条件を使う `define()` グラフ、プロセスをまたぐ識別子、アクティベーションとロールバック |
+| `test_02_hitl.py` | `interruptBefore`、`NodeInterrupt`、既定および明示的な pending id、`main()` 内の割り込み、プロセス再起動後の再開 |
+| `test_03_failures.py` | ノードの例外、fan-out 分岐の失敗、`main()` の throw、失敗した `callCore`、プロバイダーの無い `llm_call` |
+| `test_04_budgets.py` | コンパイル時と実行時の JavaScript タイムアウト、ステップと操作の予算、実時間によるキャンセル、承認済み予算 |
+| `test_05_diagnostics.py` | 構文エラーとビルダーエラーのソース位置、レジストリの欠落、lint のスパン、制御文字、承認エラー |
+| `test_06_graph_shapes.py` | バリア結合、条件付きルーティング、`Send` によるマップリデュース、サブグラフ、不正なグラフ形状 |
+| `test_07_main_programs.py` | `callCore`、`all`、`race`、`quorum`、`await` のタイムアウト、`cancelScope`、外部キャンセル、`spawn` |
+| `test_08_live_llm.py` | ノードがモデルを呼び出す Program：既定はローカルピア、有効にすると OpenRouter |
+
+`support.py` には、共有の Python ノード、条件、レジストリ、予算、JavaScript ビルダーがあります。
+
+## 実行
+
+リポジトリのルートで、Python バインディング、Program、QuickJS 制御を有効にしたビルドを使って実行します。
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNEOGRAPH_BUILD_PYBIND=ON \
+  -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON
+cmake --build build
+PYTHONPATH=build:bindings/python python -m pytest -q bindings/python/tests/program_e2e
+```
+
+オフラインのシナリオは約 20 秒かかります。`-m "not slow"` を付けると、意図的に 1 秒以上待つシナリオをスキップします。CI は、すべての push と pull request で、ネイティブ Linux レーン（`scripts/verify_ci.py native-linux`）の `bindings/python/tests/` の一部としてこれらを実行します。
+
+## ライブモデルテスト
+
+`test_live_openrouter_model_call_inside_a_program` は有料の OpenRouter リクエストを 1 回送ります（`max_output_tokens=64`、データ非保持のルーティング）。両方の変数が設定されていない限りスキップされ、CI はこれらを設定しません。
+
+```bash
+NEOGRAPH_E2E_LIVE=1 OPENROUTER_API_KEY=... PYTHONPATH=build:bindings/python \
+  python -m pytest -q -rs bindings/python/tests/program_e2e/test_08_live_llm.py
+```
+
+キーは環境変数からのみ読み取ります。`OPENROUTER_MODEL` と `OPENROUTER_BASE_URL` でモデルとエンドポイントを変更できます。
+
+## 既知の問題
+
+意図した動作は決まっているがまだ実装されていないシナリオには、strict な `xfail` である `support.known_issue("#NNN", reason)` を付けます。修正が入るとテストが成功し、strict モードはそれを失敗として報告するため、同じ変更でマーカーを削除する必要があります。現在の失敗を確認するには次を実行します。
+
+```bash
+PYTHONPATH=build:bindings/python python -m pytest -q --runxfail -m known_issue bindings/python/tests/program_e2e
+```
