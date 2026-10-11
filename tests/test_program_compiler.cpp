@@ -1066,9 +1066,15 @@ TEST(ProgramCompilerTest, JavaScriptBuilderDiagnosticsCarryTheirCallSites) {
         "  graph.exit(\"join\");\n"
         "  return graph;\n"
         "}\n"));
-    // The id this program had before call sites existed: they stay out of the seal.
+    // Call sites stay out of the seal. The id this program had before call sites
+    // existed is pinned for the POSIX QuickJS build identity; MSVC builds seal a
+    // different JAVASCRIPT_QUICKJS_BUILD_OPTIONS, so their ids differ by design.
+#if !defined(_MSC_VER)
     EXPECT_EQ(bundle.id(),
               "sha256:f29627294489ecb6ca85bc0d883216d002b37ebb613411034caf28cbaaf29fde");
+#endif
+    for (const auto& diagnostic : bundle.diagnostics())
+        EXPECT_FALSE(diagnostic.primary.span.has_value()) << diagnostic.code;
     const auto sealed = find_diagnostic(bundle.diagnostics(), "P_CORE_E6");
     ASSERT_TRUE(sealed.has_value());
     EXPECT_EQ(sealed->primary.json_pointer, "");
