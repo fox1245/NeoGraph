@@ -23,6 +23,7 @@ struct State {
     std::vector<json> requests;
     std::vector<std::string> paths, authorization;
     std::string body;
+    std::vector<std::string> next_bodies;  // served in order after `body`, one per request
     std::string content_type = "application/json";
     int status = 200;
     std::string retry_after;
@@ -47,6 +48,10 @@ public:
             res.status = owned->status;
             if (!owned->retry_after.empty()) res.set_header("Retry-After", owned->retry_after);
             res.set_content(owned->body, owned->content_type);
+            if (!owned->next_bodies.empty()) {
+                owned->body = std::move(owned->next_bodies.front());
+                owned->next_bodies.erase(owned->next_bodies.begin());
+            }
             ++owned->finished;
             owned->cv.notify_all();
         });

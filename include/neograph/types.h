@@ -365,6 +365,9 @@ inline void from_json(const json& j, ChatMessage& msg) {
  *                    `StopReason::details`, Chat `refusal`, a Responses refusal item).
  *  - `PauseTurn`     the vendor paused a long server-side turn; resend the
  *                    history to continue (Anthropic/Chat `pause_turn`).
+ *                    `llm::Agent` and the deep-research and plan-execute
+ *                    tool loops do this themselves within their iteration
+ *                    budget; direct provider callers resend it themselves.
  *  - `ContextLimit`  the context window was exceeded mid-turn (Anthropic
  *                    `model_context_window_exceeded`, Chat `context_length_exceeded`).
  *  - `MalformedCall` the model produced an unusable tool call (Gemini
@@ -429,6 +432,12 @@ inline std::vector<ToolCall> client_tool_calls(const sp::Message& message) {
         call && call->kind == sp::ToolCallKind::ClientExecuted && call->input && call->input->root().is_object())
         result.push_back({call->id, call->name, call->input->root().dump()});
     return result;
+}
+// A completed turn the vendor paused (`sp::StopKind::PauseTurn`). The documented
+// continuation resends the history, including that assistant turn, unchanged.
+inline bool paused_turn(const sp::Outcome& outcome) noexcept {
+    const auto* completion = std::get_if<sp::Completion>(&outcome);
+    return completion && completion->stop.kind == sp::StopKind::PauseTurn;
 }
 inline std::vector<ToolCall> pending_client_tool_calls(const std::vector<sp::Message>& history) {
     std::map<std::string_view, const sp::ToolCall*> pending;

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=ba7bc78e107bf6ae0eb0f629071a28038e4ff8c2eef2dfa7aa4f435d4dab63bb -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=79727c2b30c2623180976aae1d3a09ad00a17554779a9b48e209c585311165bf -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -357,6 +357,8 @@ sp::runtime::Result call_provider(
 | `google.interactions` | `max_output_tokens`, `thinking_level`（optional string）, `thinking_summaries`, `service_tier`, `required_tool`, `system`, `account_scope`; Generate 的 enum `gemini_thinking_level` 不适用 |
 
 Chat 的 `sp::chat::ReasoningOptions` 包含 optional `effort`, `max_tokens`, `exclude`, `enabled`。其 nested reasoning object、`include_reasoning`、`usage_include`、备用 `models` 需要 policy 声明的 OpenRouter origin。`sp::OpenRouterRouting` 也仅适用于 Chat/Responses/Messages 的声明 OpenRouter origin。gateway 形式的模型名不会批准其他 origin。SDK payload 还提供 family typed tool 声明、Responses `hosted_tools`、strict/deferred tool 选项；使用实际 payload variant，不添加 raw JSON。
+
+Responses SSE 要求终止事件 `response.completed` 或 `response.incomplete`。`response.done` 仅在作为携带相同完整终止 Responses envelope（completed 或 incomplete）的别名时被接受；非终止或格式错误的 `response.done` 会以协议错误失败，`response.content_part.delta` 及其他未列出的事件为 `Unsupported`。在已声明的 OpenRouter origin 上，Responses 与 Messages 还接受网关针对 `~vendor/model-latest` 等路由别名报告的实际模型名；服务模型在同一响应内不得变化，replay 仍绑定到请求的模型。
 
 | SDK 类型 | 封闭值或成员 |
 |---|---|

@@ -487,3 +487,40 @@ TEST(ToolResultGrouping, GeminiTerminalsFollowTheDocumentedStopTable) {
         }
     }
 }
+
+// pause_turn: the Agent resends the history, paused assistant turn included,
+// instead of returning the paused turn as if it were final (#311).
+TEST(AgentPauseTurn, ResendsHistoryWithPausedTurnUntilTheModelFinishes) {
+    const auto paused = json{{"id", "msg"}, {"type", "message"}, {"model", "fixture-model"}, {"role", "assistant"},
+        {"content", json::array({{{"type", "text"}, {"text", "still searching"}}})}, {"stop_reason", "pause_turn"},
+        {"usage", {{"input_tokens", 3}, {"output_tokens", 2}}}}.dump();
+    wire::Peer peer(paused);
+    { std::lock_guard lock(peer.state->mutex); peer.state->next_bodies = {reply("anthropic.messages", {})}; }
+    std::shared_ptr<Provider> provider = std::make_shared<BoundedWireProvider>("anthropic.messages", peer.origin());
+    llm::Agent agent(provider, {}, "Be brief.", "fixture-model");
+    std::vector<sp::Message> messages{user_text("find it")};
+    auto result = agent.run(messages, 3);
+    ASSERT_TRUE(result && std::holds_alternative<sp::Completion>(*result));
+    EXPECT_EQ(std::get<sp::Completion>(*result).stop.kind, sp::StopKind::EndTurn);
+    EXPECT_EQ(test::text(result), "both done");
+    std::lock_guard lock(peer.state->mutex);
+    ASSERT_EQ(peer.state->requests.size(), 2u);
+    const auto& resent = peer.state->requests[1].at("messages");
+    ASSERT_EQ(resent.size(), 2u);
+    EXPECT_EQ(resent[0].at("role"), "user");
+    EXPECT_EQ(resent[1].at("role"), "assistant");
+    EXPECT_EQ(resent[1].at("content").at(0).at("text"), "still searching");
+}
+
+TEST(AgentPauseTurn, RepeatedPausesStayWithinTheIterationBudget) {
+    const auto paused = json{{"id", "msg"}, {"type", "message"}, {"model", "fixture-model"}, {"role", "assistant"},
+        {"content", json::array({{{"type", "text"}, {"text", "still searching"}}})}, {"stop_reason", "pause_turn"},
+        {"usage", {{"input_tokens", 3}, {"output_tokens", 2}}}}.dump();
+    wire::Peer peer(paused);
+    std::shared_ptr<Provider> provider = std::make_shared<BoundedWireProvider>("anthropic.messages", peer.origin());
+    llm::Agent agent(provider, {}, "Be brief.", "fixture-model");
+    std::vector<sp::Message> messages{user_text("find it")};
+    EXPECT_THROW(agent.run(messages, 2), std::runtime_error);
+    std::lock_guard lock(peer.state->mutex);
+    EXPECT_EQ(peer.state->requests.size(), 2u);
+}

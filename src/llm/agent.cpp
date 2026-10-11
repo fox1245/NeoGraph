@@ -136,7 +136,10 @@ sp::runtime::Result Agent::run_loop(std::vector<sp::Message>& messages, int max_
         outcomes_.push_back(result);
         outcome_or_throw(result); // Failure retains full partial messages and typed error.
         auto calls = pending_client_tool_calls(returned);
-        if (calls.empty()) return result;
+        if (calls.empty()) {
+            if (paused_turn(*result)) continue;  // resend the history, paused turn included
+            return result;
+        }
         append_tool_results(messages, std::move(calls), tool_ptrs(), tool_gate_, execution);
         dispatched_tools = true;
     }
