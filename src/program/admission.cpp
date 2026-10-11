@@ -6,6 +6,8 @@
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -130,20 +132,27 @@ ExecutableIdentity parse_identity(const json& value) {
 }
 
 void validate_budget(const BudgetLimits& value) {
-    const std::pair<const char*, std::uint64_t> required[] = {
+    // Name every zero field: a Program that never calls a model still needs
+    // positive model_tokens, monetary_microunits and max_dynamic_compiles.
+    const std::pair<std::string_view, std::uint64_t> required[] = {
         {"wall_time_ms", value.wall_time_ms},
         {"model_tokens", value.model_tokens},
         {"monetary_microunits", value.monetary_microunits},
         {"max_concurrency", value.max_concurrency},
         {"max_program_operations", value.max_program_operations},
         {"max_core_steps", value.max_core_steps},
-        {"max_dynamic_compiles", value.max_dynamic_compiles}};
-    for (const auto& [name, limit] : required) {
-        if (limit == 0) {
-            throw std::invalid_argument(
-                std::string("Policy budget ceiling ") + name +
-                " must be positive; every ceiling except the child budgets is required");
-        }
+        {"max_dynamic_compiles", value.max_dynamic_compiles},
+    };
+    std::string zero_fields;
+    for (const auto& [field, amount] : required) {
+        if (amount != 0) continue;
+        if (!zero_fields.empty()) zero_fields += ", ";
+        zero_fields += field;
+    }
+    if (!zero_fields.empty()) {
+        throw std::invalid_argument(
+            "Every policy budget ceiling except child budgets must be positive; zero: " +
+            zero_fields);
     }
     if ((value.max_child_depth == 0) != (value.max_total_children == 0)) {
         throw std::invalid_argument(

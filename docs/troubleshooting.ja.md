@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=a349458203a2d6478b8a97e88b0b36692884bb81da88c4faa5d18f599713b2d3 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=e394ecfa1780a5909da233a0135fc56913eff5296a3a245d2a61cafa4a652bca -->
 # トラブルシューティング
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -93,6 +93,28 @@ write の channel 名は正確に存在する必要がある。condition は rou
 既定 worker_count `1` は engine pool を作らない。I/O branch は suspend 時に重なり、単一 caller thread の CPU body は直列。pool が有効なら並行実行前に `set_worker_count(N)`/`set_worker_count_auto()` を設定する。native operation が GIL を解放しなければ Python CPU callback は直列のまま。
 
 同じ engine の run/resume 中に admin state/history/update/fork を呼ぶと `std::logic_error`。cancel/drain して完了を待ち、例外を隠さない。同じ thread_id の並行実行は checkpoint 順序が未規定で、store を共有する別 engine は host 調整が必要。[並行実行](concurrency.md)を参照。
+
+## Python Program のエラー
+
+`LocalProgramHost` と QuickJS Program compiler から出るエラー。背景の規則は [Program と QuickJS](python-binding.md#program-and-quickjs) を参照。
+
+| エラー | 原因 | 対処 |
+|---|---|---|
+| node から出る `TypeError: get(): incompatible function arguments` | `GraphState.get` は channel 名だけを受け取る | `state.get("value") or 0` を使う |
+| `add_registered_node`、`add_registered_reducer` または `add_registered_condition` から出る `ng.ProgramRegistryError` | node type、reducer または condition がこの process に登録されていない | 先に `@ng.node`、`ng.NodeFactory.register_type`、`ng.ReducerRegistry.register_reducer` または `ng.ConditionRegistry.register_condition` で登録する |
+| `P_JS_DEFINE_MISSING` | module が `define()` を export していない | `define()` を export し、Program の graph を 1 つ返す |
+| `P_JS_GRAPH_ENTRY`、または `__start__` か `__end__` という名前の node に対する `P_JS_GRAPH_ARGUMENT` | graph に `.entry()` がない、または node が予約名を使っている | `.entry()` を呼び、node 名を変える。`.entry()` と `.exit()` が sentinel を接続する |
+| `P_CORE_E13` または `P_CORE_E14` | node の最初の conditional edge と並んで static edge か 2 つ目の conditional edge があり、どちらも決して発火しない | すべての target を最初の conditional edge の route に入れる |
+| `P_JS_CONTROL_COMMAND`: JavaScript command references a Core outside the admitted root | `ng.callCore` が `define()` の返す graph 以外を指定している | `ng.graph(...)` に渡した名前を使う |
+| `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | 列挙された ceiling field がゼロ | Program が model を呼ばなくても正の値にする |
+| `ng.ProgramAdmissionError` の `P_ADMIT_PROVIDER` | `llm_call` または `intent_classifier` node があり、`LocalProgramHost` は provider をバインドしない | Python node から model を呼ぶ |
+| `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | run budget が `compile_admit` に渡した budget と異なる | 同じ budget を渡すか、再度 compile して admission する |
+| `ng.spawn` から出る `P_CHILD_BINDING` | `LocalProgramHost` には child binding resolver がない | child Program は C++ host で実行する |
+| `resume()` から出る `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost` | run が別の、または破棄済みの `LocalProgramHost` に属する | run を開始した host を通じて再開する |
+| `P_CORE_BARRIER_STALLED` | barrier member が join につながらない route を通ったため、join がもう発火できない | すべての member を join か `__end__` へルーティングする。`P_CORE_E15` は compile 時にそのような route を警告する |
+| `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | run が `wall_time_ms` を使い切った。中断された operation のテキストは `failure.witness["cause_message"]` にある | より大きい `wall_time_ms` で再度 compile して admission する |
+
+失敗した `callCore` はその失敗で run を終了し、`main()` は `try`/`catch` で捕捉できない。Python で `result.status` と `result.failure` を確認する。
 
 ## checkpoint と PostgreSQL failure
 

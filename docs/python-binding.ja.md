@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=dd6643ac7acc1c663fb9d4c9852d5b973c7a484a51a38879092e5bdabee5ccf6 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=b546abc4e5c70be66da6420f47a1745c8f71aab16d643d6f64d4ac61701c5e83 -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -348,6 +348,7 @@ metadata = ng.RunMetadata(
     owner_scope="tenant-a",
 )
 result = engine.run(config, metadata)
+checkpoint_id = result.checkpoint_id
 
 # Never substitutes a newer checkpoint:
 result = engine.resume_from(config, checkpoint_id, {"approved": True}, metadata)
@@ -375,7 +376,8 @@ import neograph_engine as ng
 
 @ng.node("my_node")
 def my_node(state):
-    return [ng.ChannelWrite("value", state.get("value", 0) + 1)]
+    # GraphState.get takes only the channel name; a missing channel is None.
+    return [ng.ChannelWrite("value", (state.get("value") or 0) + 1)]
 
 registry = (
     ng.ProgramRegistryBuilder()
@@ -420,7 +422,7 @@ run_budget.max_core_steps = 20
 host = ng.LocalProgramHost(registry, "tenant-a", ceiling)
 version = host.compile_admit(source, run_budget)
 result = host.run(version, {}, run_budget)
-print(result.status, result.output)
+print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 1
 ```
 
 `ProgramRegistryBuilder.add_registered_node`、`add_registered_reducer`、`add_registered_condition` は、このプロセスにすでに登録された実行単位をコピーします。登録には `@ng.node` または `ng.NodeFactory.register_type`、`ng.ReducerRegistry.register_reducer`、`ng.ConditionRegistry.register_condition` を使います。登録されていない名前を渡すと、3 つのメソッドはいずれも `ng.ProgramRegistryError` を送出し、メッセージは必要な登録呼び出しを示します。このエラーの `kind` は `"node"`、`"reducer"`、`"condition"` のいずれかで、`name` は見つからなかった名前です。`ValueError` と `RuntimeError` の両方を継承するため、どちらかを捕捉する既存のハンドラーも引き続きこのエラーを捕捉します。レジストリスナップショットにないノードタイプ、リデューサー、条件を使う Program は、代わりにコンパイル時に失敗します。`ProgramCompiler.compile` と `LocalProgramHost.compile_admit` のどちらも、診断 `P_CORE_GC_REGISTRY_MISS` を持つ `ng.ProgramCompileError` を送出します。
@@ -438,6 +440,84 @@ print(result.status, result.output)
 ```python
 manifest = ng.javascript_authoring_capability_manifest()
 ```
+
+### モジュールの構成と`callCore`
+
+JavaScript Programは、グラフビルダーを1つ返す`define()`をexportする必要があります。そのグラフがProgramの唯一のCoreです。`define()`がないとコンパイルは`P_JS_DEFINE_MISSING`を伴う`ProgramCompileError`を送出するため、`main()`だけをexportするモジュールは拒否されます。`main()`は任意で、ない場合は実行時にCoreが直接実行されます。
+
+`ng.callCore(name, input, sourceSite)`は、`ng.graph(...)`に渡した名前（上の例では`"main"`）でそのCoreを指定する必要があります。ほかの名前を指定すると、実行は`P_JS_CONTROL_COMMAND`で失敗します。異なるステップを実行するには、それらをそのグラフに入れ、異なる入力で再び呼び出してください。各ノード型は、`add_registered_node`に渡す前に`@ng.node`または`ng.NodeFactory.register_type`で登録してください。このメソッドは、登録されていない型に対して`ng.ProgramRegistryError`を送出します。
+
+完了した`callCore`は、Coreの出力オブジェクトを`main()`に返します。上のクイックスタートはそれをそのまま`result.output`として返します：
+
+```json
+{"channels": {"value": {"value": 1, "version": 1}}, "global_version": 1, "value": 1}
+```
+
+`channels`には各チャネルの`value`と`version`が入ります。各チャネルの値は、同名のトップレベルキーが既にない限り、チャネル名のトップレベルキーにもコピーされるため、`main()`は`result.value`を読めます。`channels`または`global_version`という名前のチャネルは`channels`の下でのみ参照できます。barrierのリストはソートして保存されます。`graph.barrier("join", ["zeta", "alpha"])`は`bundle.sealed_core_definitions`に`{"wait_for": ["alpha", "zeta"]}`として現れ、順序は何の影響もありません。
+
+### 失敗したコマンドは実行を終了する
+
+`main()`を再開するのは完了したコマンドだけです。yieldされたコマンドが完了しない場合、たとえばノードが例外を送出した、Coreのステップ予算を使い切った、もう発火できないbarrierで止まった、またはwall-time制限を超えた`callCore`では、`ProgramRuntime`はその結果を記録し、対応する`status`と`failure`を持つ実行の最終結果にします。ジェネレーターは再開されません。`yield`を囲む`try`/`catch`は実行されず、その後のJavaScriptも実行されません。失敗ポリシーに従って失敗したjoin（`ng.all`、`ng.race`、`ng.quorum`）も同じように実行を終了します。Pythonでは`result.status`と`result.failure`で失敗を処理してください。割り込まれたコマンドは異なります。実行は`Interrupted`として停止し、`resume()`がそのコマンドを続行します。
+
+### グラフのチェックとbarrierの停滞
+
+コンパイルは、スケジューラーが実際にたどる経路に沿ってCoreグラフをチェックします。条件付きエッジを持つノードは、最初の条件付きエッジだけを通じてルーティングします。JavaScript Programは厳格なドキュメントであるため、次のそれぞれが`ng.ProgramCompileError`を送出します：
+
+- `P_JS_GRAPH_ARGUMENT`：ノード名を`__start__`または`__end__`とする`.node()`呼び出しで発生;
+- `P_JS_GRAPH_ENTRY`：`define()`がノードはあるが`.entry()`のないグラフを返したときに発生;
+- `P_CORE_E13`：条件付きエッジも持つノードから出る静的エッジに対して発生（そのエッジは決して発火しないため）;
+- `P_CORE_E14`：同じノードから出る2つ目の条件付きエッジに対して発生（それによってルーティングされることは決してないため）。
+
+`P_CORE_E15`は`bundle.compile_diagnostics`に入る警告です。barrierのメンバーにjoinや`__end__`以外の場所へ向かう経路があり、その経路を通るとjoinが停滞します。ループは有効です。すべての循環を`P_CORE_E16`で拒否するには（たとえば計画やチェックリストの場合）、`ProgramCompiler`または`LocalProgramHost`に`require_acyclic=True`を渡してください。
+
+barrierは、`wait_for`リストのすべてのノードがそこへルーティングした時点で発火します。別の方法でjoinに到達するノード、たとえばメンバーの失敗経路上にある修正（fix-up）ノードは、そのメンバーの代わりにはなりません。実行するものが何も残っておらず、joinがまだシグナルを保持している場合、実行は完了しません。`P_CORE_BARRIER_STALLED`で`Failed`として終了し、`failure.core_node`はそのjoinを示し、`failure.witness["stalled_barriers"]`は停滞した各joinについて、その`wait_for`、`received`、`missing`ノードを列挙します。このような実行を正常に終了させるのは、最後のsuper-stepにおける`__end__`への明示的な経路だけです。つまり、`__end__`への静的エッジ（`.exit()`が書き込むもの）、`__end__`への条件付き経路、または`Command.goto("__end__")`です。後続のないノードでは正常に終了せず、それより前のsuper-stepでの明示的な終了でも同様です。同じ状態の`GraphEngine`実行は`ng.RunStatus.BarrierStalled`を返し、`result.output["_neograph"]["barrier_stalled"]`に同じ詳細が入ります。
+
+### エラーと診断
+
+Pythonで送出されるProgramのエラーは型付きで、診断を保持します：
+
+| 例外 | 送出元 | 基底クラス |
+|---|---|---|
+| `ng.ProgramCompileError` | `ProgramCompiler.compile`、`LocalProgramHost.compile`、`compile_admit` | `RuntimeError` |
+| `ng.ProgramAdmissionError` | `LocalProgramHost.admit`、`compile_admit`（例：`P_ADMIT_POLICY`または`P_ADMIT_PROVIDER`） | `RuntimeError` |
+| `ng.ProgramDiagnosticError` | `run`、`start`、`start_active`、`resume`（例：`P_START_BUDGET`または`P_RUN_NOT_FOUND`） | `RuntimeError` |
+| `ng.ProgramRegistryError` | `ProgramRegistryBuilder.add_registered_node`、`add_registered_reducer`、`add_registered_condition` | `ValueError`、`RuntimeError` |
+
+最初の3つのメッセージは`Program compilation failed`、`Program admission failed`または`Program operation failed`で始まり、その後に診断ごとに1行が続きます。各行には診断のコード、JSONポインター、メッセージがあり、ソース位置を持つ診断には`(source:line:col)`も付きます。`.diagnostics`は、`code`、`severity`、`phase`、`message`、`source_id`、`json_pointer`、`span`、`witness`を持つdictのリストです。
+
+コンパイルに成功したバンドルは2つのリストを持ちます。`bundle.compile_diagnostics`はコンパイラが返したもので、JavaScriptの呼び出し位置を`span`に持つ現在のルールでの警告と、`P_JS_CONTROL_CHARACTER`のような作成時の警告が入ります。作成者にはこのリストを見せてください。`bundle.diagnostics`はバンドルに封印され、`bundle.id`の対象となるコピーです。バンドルが最初に封印されたときのルールと文言を保つため、新しいコンパイラでもバンドルidは変わらず、そのため内容が異なることがあります。spanを持たず、Pythonノードだけが書き込むチャネルに対する`P_CORE_E6`のように、現在のルールでは除かれた警告がまだ含まれることがあります。コンパイラも`LocalProgramHost`も、stderrにlintを出力しません。
+
+### モデルを呼び出すノード
+
+`LocalProgramHost`はプロバイダーをバインドしないため、グラフに`llm_call`または`intent_classifier`ノードを持つProgramはadmissionされません。`compile_admit`は、そのノードを示す`P_ADMIT_PROVIDER`を伴う`ng.ProgramAdmissionError`を送出します。代わりにPythonノードからモデルを呼び出してください。そのような呼び出しはProgramの`usage.model_tokens`には計上されません。
+
+### 子Program
+
+`ng.spawn`には子バインディングリゾルバーが必要ですが、`LocalProgramHost`はそれを構成しません。そのため、Pythonからの`ng.spawn`はすべて`P_CHILD_BINDING`（"Program spawn has no configured child binding resolver"）で実行を失敗させます。子Programには、`RuntimeConfig::child_binding_resolver`を設定するC++ホストが必要です。このリゾルバーは各バインディング名を、`link_module_child`が返す`ModuleLinkReceipt`とadmission済みの子`ProgramVersion`に対応付けます。子のライフサイクルは[再帰エージェント](PROGRAM_RECURSIVE_HARNESSES.md)を参照してください。
+
+### 予算
+
+`LocalProgramHost`に渡した`budget_ceiling`はadmissionポリシーの上限になります。`max_child_depth`と`max_total_children`を除くすべてのフィールドは正である必要があり、モデルを呼び出さないProgramでも`model_tokens`、`monetary_microunits`、`max_dynamic_compiles`は正でなければなりません。そうでない場合、コンストラクターはゼロのフィールド名を示す`ValueError`を送出します。2つの子フィールドは、両方ゼロか両方正である必要があります。
+
+`compile_admit(source, budget)`と`compile(source, budget)`は、`budget`をすべてのフィールドの最小値かつ最大値としてバンドルに封印し、封印された予算が上限を超えるバンドルはadmissionで拒否されます。そのバージョンに対する各`run`、`start`、`start_active`呼び出しは、フィールドごとに同じ値を渡す必要があります。より大きい予算や小さい予算は`P_START_BUDGET`を伴う`ng.ProgramDiagnosticError`を送出し、そのメッセージは値が異なる最初のフィールドを示します。たとえば`Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`です。別の予算を使うには、再度コンパイルしてadmissionしてください。その結果は新しい`ProgramVersion`です。実行予算の`wall_time_ms`、`max_concurrency`、`max_program_operations`、`max_core_steps`は正である必要があり、`model_tokens`と`monetary_microunits`はゼロでも構いません。
+
+### スケジューラースレッド、ワーカー、タイムアウト
+
+`LocalProgramHost(..., scheduler_threads=1, worker_count=1)`は2つのスレッド設定を受け取ります。`scheduler_threads`は、実行を駆動する（JavaScript制御、`callCore`のディスパッチ、join、デッドライン）`ProgramRuntime`スケジューラープールのスレッド数を設定します。1以上である必要があります。`worker_count`は、1つのグラフ内のfan-outに使われる各Coreエンジンのワーカープールを設定し、admission済みProgramの`max_concurrency`を超えてはなりません。既定値の1では、fan-outの分岐はスケジューラースレッド上で実行されます。
+
+Program実行中、Pythonノードの本体はスケジューラースレッドを占有しません。本体はバインディングが所有するワーカープールで実行され、既定では32スレッドです。変更するには、最初のProgram実行の前に`NEOGRAPH_PYTHON_NODE_THREADS`を1から1024までの値に設定してください。既定の1つのスケジューラースレッドでも、ホストの複数の実行、`ng.all`、`ng.race`、`ng.quorum`のメンバー、1つのCore実行のfan-out分岐は同時に進み、ノードの実行中にもデッドラインが発火します。`ng.race`は最初に終わったメンバーを返し、`ng.quorum`は必要な成功がそろった時点で返ります。それでもPythonコードはGILの下で実行されるため、CPUバウンドのノードは並列に実行されません。ノードが重なって実行されるのは、`time.sleep`、I/O、ネイティブ呼び出しなどでGILを解放している間です。通常の`GraphEngine`実行は、引き続き呼び出し元のスレッドでPythonノードの本体を実行します。
+
+どちらの制限も実行中のPythonノードを中断しません。キャンセルは協調的です。実行の`wall_time_ms`が尽きるとランタイムは実行をキャンセルし、結果は実行中のノードが戻った後に`status` `TimedOut`、`failure.code` `P_RUNTIME_TIMEOUT`、メッセージ`Program wall-time budget (N ms) expired`で届きます。タイムアウトが中断した操作のテキストは`failure.witness["cause_message"]`にあります。`ng.await(command, timeoutMs, sourceSite)`のデッドラインを過ぎると、実行は`P_AWAIT_TIMEOUT`で`TimedOut`として終了し、デッドライン後に届いた完了は受け付けられません。どちらの場合も子のCore実行はキャンセルされます。`input.ctx.cancel_token.is_cancelled()`を確認するノードは早めに停止し、それを無視するノードは戻るまで結果を遅らせます。`TimedOut`と`Cancelled`の結果は、完了したCoreノードを`execution_trace`に列挙します。
+
+Programエンジンはstderrにlintもfan-outの通知も出力しません。`EngineConfig::worker_count`を勧める通知は、自分で構築した`GraphEngine`からのみ出ます。
+
+### インメモリ状態と再開
+
+`LocalProgramHost`は、バンドル、バージョン、アクティベーション、実行記録、チェックポイントをホストオブジェクト内のメモリに保持し、ディスクには何も書き込みません。実行は、それを開始したホストインスタンスが存在している間に、そのインスタンスを通じて再開してください。プロセスの再起動後や別の`LocalProgramHost`からは、`resume()`が`P_RUN_NOT_FOUND`を伴う`ng.ProgramDiagnosticError`を送出します。メッセージは`run '<id>' was not found in this LocalProgramHost; runs are kept in memory by the host that started them`です。永続的なProgramストア（SQLiteとPostgreSQL）はC++ホストのAPIです。
+
+`resume(run_id, value)`はハンドルを返します。結果を得るには`.wait()`を呼び出してください。`pending_id`がなければ、実行で待機中の唯一の呼び出しを再開します。待機中の呼び出しがない、または複数ある場合は`ValueError`を送出します。呼び出しを正確に指定するには、`result.interrupt.pending_input.call_id`を`pending_id`として渡してください。
+
+`resume()`が返した結果の`execution_trace`には、再開後に実行されたCoreノードだけが並びます。割り込み前に実行されたノードは、割り込まれた結果に現れます。`b`の前で割り込むCore `a → b → c`では、割り込まれた結果は`["a"]`、再開後の結果は`["b", "c"]`になります。
 
 ## 必須ライフサイクルHook
 
@@ -561,7 +641,7 @@ for interface in card.supported_interfaces:
 
 params = a2a.MessageSendParams()
 params.message.message_id = str(uuid4())
-params.message.role = "user"
+params.message.role = a2a.Role.User
 params.message.parts = [
     a2a.Part.text_part("Explain this item."),
     a2a.Part.text_part("Keep the answer short."),

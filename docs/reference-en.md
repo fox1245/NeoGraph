@@ -1472,7 +1472,8 @@ struct RunResult {
     std::vector<std::string> execution_trace;    // Ordered list of executed node names
 
     bool max_steps_exhausted() const noexcept;    // Limit stopped runnable work
-    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit, or SafePoint
+    bool barrier_stalled() const noexcept;        // A barrier can no longer fire
+    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit, SafePoint, or BarrierStalled
 
     template <typename T> T channel(const std::string& name) const;
     template <typename T> T channel(const ChannelKey<T>& key) const;
@@ -1500,7 +1501,8 @@ run while runnable work remained. A graph that reaches `__end__` exactly on its
 last permitted step returns `false`.
 
 `status()` returns `RunStatus::Completed`, `RunStatus::Interrupted`,
-`RunStatus::StepLimit`, or `RunStatus::SafePoint` without changing the public `RunResult` data layout.
+`RunStatus::StepLimit`, `RunStatus::SafePoint`, or `RunStatus::BarrierStalled` without changing the public `RunResult` data layout.
+`BarrierStalled` means that nothing was ready, the final super-step did not route to `__end__` explicitly, and a barrier still held signals, so the join can no longer fire. `barrier_stalled()` is then true, and `output["_neograph"]["barrier_stalled"]` lists each stalled join as `{node, wait_for, received, missing}`.
 `ChannelKey<T>` binds a reusable channel name to its expected C++ type:
 
 ```cpp

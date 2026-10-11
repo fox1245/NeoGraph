@@ -186,7 +186,7 @@ result = engine.run(ng.RunConfig(thread_id="t1", input={"name": "NeoGraph"}))
 print(result.output["channels"]["messages"]["value"])
 ```
 
-预期消息内容为 `Hello, NeoGraph!`。Python 还提供 Program 编译和执行、Hooks、运行时上下文要求、严格配置、SQLite 持久化，以及从确切检查点恢复。类型化提供方使用 `ProviderMessage` 和 `make_provider_request`，随后调用 `prepare`/`dispatch` 或 `invoke`；outcome 保留由原生对象持有的完成或失败证据。这些消息与图的便利类型 `ChatMessage` 值不同。阻塞式提供方调用会释放 GIL；`asyncio.to_thread` 可以将它们移出事件循环线程。完整的提供方和 Program 输入见 [Python 示例](bindings/python/examples/README.md)。
+预期消息内容为 `Hello, NeoGraph!`。Python 还提供 Program 编译和执行、Hooks、运行时上下文要求、严格配置、SQLite 持久化，以及从确切检查点恢复。类型化提供方使用 `ProviderMessage` 和 `make_provider_request`，随后调用 `prepare`/`dispatch` 或 `invoke`；outcome 保留由原生对象持有的完成或失败证据。这些消息与图的便利类型 `ChatMessage` 值不同。阻塞式提供方调用会释放 GIL；`asyncio.to_thread` 可以将它们移出事件循环线程。完整的提供方输入见 [Python 示例](bindings/python/examples/README.md)，可运行的 Program 示例及其规则见 [Python 绑定指南](docs/python-binding.md#program-and-quickjs)。
 
 ## 适用工作负载与限制
 

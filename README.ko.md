@@ -186,7 +186,7 @@ result = engine.run(ng.RunConfig(thread_id="t1", input={"name": "NeoGraph"}))
 print(result.output["channels"]["messages"]["value"])
 ```
 
-예상 메시지 내용은 `Hello, NeoGraph!`입니다. Python에서도 Program 컴파일 및 실행, Hooks, 런타임 컨텍스트 요구 사항, 엄격한 프로필, SQLite 영속성, 정확한 체크포인트 재개를 사용할 수 있습니다. 타입 지정 provider는 `ProviderMessage`와 `make_provider_request`를 사용한 다음 `prepare`/`dispatch` 또는 `invoke`를 호출합니다. outcome은 네이티브 객체가 소유하는 완료 또는 실패 근거를 유지합니다. 이 메시지는 그래프 편의 타입인 `ChatMessage` 값과 다릅니다. 블로킹 provider 호출은 GIL을 해제합니다. `asyncio.to_thread`를 사용하면 이벤트 루프 스레드 밖에서 실행할 수 있습니다. 완전한 provider 및 Program 입력은 [Python 예제](bindings/python/examples/README.md)를 참고하세요.
+예상 메시지 내용은 `Hello, NeoGraph!`입니다. Python에서도 Program 컴파일 및 실행, Hooks, 런타임 컨텍스트 요구 사항, 엄격한 프로필, SQLite 영속성, 정확한 체크포인트 재개를 사용할 수 있습니다. 타입 지정 provider는 `ProviderMessage`와 `make_provider_request`를 사용한 다음 `prepare`/`dispatch` 또는 `invoke`를 호출합니다. outcome은 네이티브 객체가 소유하는 완료 또는 실패 근거를 유지합니다. 이 메시지는 그래프 편의 타입인 `ChatMessage` 값과 다릅니다. 블로킹 provider 호출은 GIL을 해제합니다. `asyncio.to_thread`를 사용하면 이벤트 루프 스레드 밖에서 실행할 수 있습니다. 완전한 provider 입력은 [Python 예제](bindings/python/examples/README.md)를, 실행 가능한 Program 예제와 그 규칙은 [Python 바인딩 가이드](docs/python-binding.md#program-and-quickjs)를 참고하세요.
 
 ## 적합한 작업과 한계
 

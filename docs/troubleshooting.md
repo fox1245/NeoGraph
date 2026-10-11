@@ -93,6 +93,28 @@ The default worker_count is `1`, so no engine-owned pool is created. I/O branche
 
 An admin state/history/update/fork call during any run/resume on the same engine fails with `std::logic_error`. Cancel/drain and await completion first; do not suppress the exception. Same-thread-id concurrent executions have unspecified checkpoint interleaving, and separate engines sharing a store need host coordination. See [concurrency](concurrency.md).
 
+## Python Program errors
+
+These come from `LocalProgramHost` and the QuickJS Program compiler. The rules behind them are in [Program and QuickJS](python-binding.md#program-and-quickjs).
+
+| Error | Cause | Fix |
+|---|---|---|
+| `TypeError: get(): incompatible function arguments` from a node | `GraphState.get` takes only the channel name | Use `state.get("value") or 0` |
+| `ng.ProgramRegistryError` from `add_registered_node`, `add_registered_reducer` or `add_registered_condition` | The node type, reducer or condition is not registered in this process | Register it first with `@ng.node`, `ng.NodeFactory.register_type`, `ng.ReducerRegistry.register_reducer` or `ng.ConditionRegistry.register_condition` |
+| `P_JS_DEFINE_MISSING` | The module does not export `define()` | Export `define()` and return the Program's one graph |
+| `P_JS_GRAPH_ENTRY` or `P_JS_GRAPH_ARGUMENT` for a node named `__start__` or `__end__` | The graph has no `.entry()`, or a node uses a reserved name | Call `.entry()`, and rename the node; `.entry()` and `.exit()` connect the sentinels |
+| `P_CORE_E13` or `P_CORE_E14` | A node has a static edge or a second conditional edge next to its first conditional edge; neither ever fires | Put every target in the first conditional edge's routes |
+| `P_JS_CONTROL_COMMAND`: JavaScript command references a Core outside the admitted root | `ng.callCore` names a graph other than the one `define()` returns | Use the name passed to `ng.graph(...)` |
+| `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | A listed ceiling field is zero | Make it positive, even if the Program never calls a model |
+| `P_ADMIT_PROVIDER` in `ng.ProgramAdmissionError` | An `llm_call` or `intent_classifier` node, and `LocalProgramHost` binds no provider | Call the model from a Python node |
+| `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | The run budget differs from the budget given to `compile_admit` | Pass the same budget, or compile and admit again |
+| `P_CHILD_BINDING` from `ng.spawn` | `LocalProgramHost` has no child-binding resolver | Run child Programs in a C++ host |
+| `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost` from `resume()` | The run belongs to another or a destroyed `LocalProgramHost` | Resume through the host that started the run |
+| `P_CORE_BARRIER_STALLED` | A barrier member took a route that does not lead to the join, so the join can no longer fire | Route every member to the join or to `__end__`; `P_CORE_E15` warns about such routes at compile time |
+| `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | The run used up `wall_time_ms`; the interrupted operation's text is in `failure.witness["cause_message"]` | Compile and admit again with a larger `wall_time_ms` |
+
+A failed `callCore` ends the run with that failure; `main()` cannot catch it with `try`/`catch`. Check `result.status` and `result.failure` in Python.
+
 ## Checkpoint and PostgreSQL failures
 
 A missing PostgresCheckpointStore export can mean the wheel/source build disabled the component; inspect that artifact's configuration, not an older wheel's feature list. Install matching libpq when building the optional target. In a connection URI, percent-encode special password characters or use libpq's key=value form; never publish actual credentials.

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=c25f1ee42f162b617b8f9c49113760dd467dc0819ef8683c0f08975a44759b0c -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=79d19a918a6df3f67153f395833f482e0df7e305f42aa8da0601f65de233bb78 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -1406,7 +1406,8 @@ struct RunResult {
     std::vector<std::string> execution_trace;    // Ordered list of executed node names
 
     bool max_steps_exhausted() const noexcept;    // Limit stopped runnable work
-    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit, or SafePoint
+    bool barrier_stalled() const noexcept;        // A barrier can no longer fire
+    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit, SafePoint, or BarrierStalled
 
     template <typename T> T channel(const std::string& name) const;
     template <typename T> T channel(const ChannelKey<T>& key) const;
@@ -1433,7 +1434,8 @@ resume 或 continuation 时，`provider_outcomes` 保留原始结果，再依次
 `true`。一个恰好在最后一步允许时到达 `__end__` 的图返回 `false`。
 
 `status()` 返回 `RunStatus::Completed`、`RunStatus::Interrupted`、
-`RunStatus::StepLimit` 或 `RunStatus::SafePoint`，而不更改公开 `RunResult` 的数据布局。
+`RunStatus::StepLimit`、`RunStatus::SafePoint` 或 `RunStatus::BarrierStalled`，而不更改公开 `RunResult` 的数据布局。
+`BarrierStalled` 表示没有可运行的节点、最后一个 super-step 没有显式路由到 `__end__`，而 barrier 仍持有信号，因此 join 再也无法触发。此时 `barrier_stalled()` 为 true，`output["_neograph"]["barrier_stalled"]` 以 `{node, wait_for, received, missing}` 列出每个停滞的 join。
 `ChannelKey<T>` 将可复用的通道名称绑定到其预期的 C++ 类型：
 
 ```cpp

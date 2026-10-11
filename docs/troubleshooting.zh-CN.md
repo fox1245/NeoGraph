@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=a349458203a2d6478b8a97e88b0b36692884bb81da88c4faa5d18f599713b2d3 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=e394ecfa1780a5909da233a0135fc56913eff5296a3a245d2a61cafa4a652bca -->
 # 故障排除
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -93,6 +93,28 @@ write 的 channel 名必须准确存在。condition 返回 route label；open co
 默认 worker_count `1` 不创建 engine pool。I/O branch 在 suspend 时仍可重叠；单 caller 线程的 CPU body 串行。需要 pool 时在并发执行前设置 `set_worker_count(N)`/`set_worker_count_auto()`。除非 native operation 释放 GIL，Python CPU callback 仍串行。
 
 同 engine 的 run/resume 期间 admin state/history/update/fork 以 `std::logic_error` 失败。先 cancel/drain 并等待完成，不隐藏异常。同 thread_id 并发执行的 checkpoint 交错未规定；共享 store 的不同 engine 需要 host 协调。参见[并发](concurrency.md)。
+
+## Python Program 错误
+
+这些错误来自 `LocalProgramHost` 和 QuickJS Program compiler。背后的规则见 [Program 与 QuickJS](python-binding.md#program-and-quickjs)。
+
+| 错误 | 原因 | 解决 |
+|---|---|---|
+| node 抛出的 `TypeError: get(): incompatible function arguments` | `GraphState.get` 只接受 channel 名 | 使用 `state.get("value") or 0` |
+| `add_registered_node`、`add_registered_reducer` 或 `add_registered_condition` 抛出的 `ng.ProgramRegistryError` | 该 node type、reducer 或 condition 未在本 process 中注册 | 先用 `@ng.node`、`ng.NodeFactory.register_type`、`ng.ReducerRegistry.register_reducer` 或 `ng.ConditionRegistry.register_condition` 注册 |
+| `P_JS_DEFINE_MISSING` | module 未导出 `define()` | 导出 `define()` 并返回 Program 的唯一 graph |
+| `P_JS_GRAPH_ENTRY`，或针对名为 `__start__` 或 `__end__` 的 node 的 `P_JS_GRAPH_ARGUMENT` | graph 没有 `.entry()`，或 node 使用了保留名 | 调用 `.entry()` 并重命名该 node；`.entry()` 和 `.exit()` 会连接 sentinel |
+| `P_CORE_E13` 或 `P_CORE_E14` | node 在第一条 conditional edge 之外还有 static edge 或第二条 conditional edge；二者都永远不会触发 | 把每个 target 都放进第一条 conditional edge 的 route 中 |
+| `P_JS_CONTROL_COMMAND`: JavaScript command references a Core outside the admitted root | `ng.callCore` 指定了 `define()` 所返回 graph 之外的 graph | 使用传给 `ng.graph(...)` 的名称 |
+| `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | 列出的 ceiling field 为零 | 即使 Program 不调用 model，也设为正数 |
+| `ng.ProgramAdmissionError` 中的 `P_ADMIT_PROVIDER` | 存在 `llm_call` 或 `intent_classifier` node，而 `LocalProgramHost` 不绑定 provider | 从 Python node 调用 model |
+| `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | run budget 与传给 `compile_admit` 的 budget 不同 | 传入相同的 budget，或重新 compile 并准入(admission) |
+| `ng.spawn` 抛出的 `P_CHILD_BINDING` | `LocalProgramHost` 没有 child binding resolver | 在 C++ host 中运行 child Program |
+| `resume()` 抛出的 `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost` | run 属于另一个或已销毁的 `LocalProgramHost` | 通过启动该 run 的 host 恢复 |
+| `P_CORE_BARRIER_STALLED` | barrier member 走了一条不通往 join 的 route，因此 join 再也无法触发 | 把每个 member 都路由到 join 或 `__end__`；`P_CORE_E15` 会在 compile 时对这类 route 发出警告 |
+| `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | run 用尽了 `wall_time_ms`；被中断 operation 的文本在 `failure.witness["cause_message"]` 中 | 用更大的 `wall_time_ms` 重新 compile 并准入(admission) |
+
+失败的 `callCore` 会以该失败结束 run，`main()` 无法用 `try`/`catch` 捕获。在 Python 中检查 `result.status` 和 `result.failure`。
 
 ## checkpoint 与 PostgreSQL failure
 

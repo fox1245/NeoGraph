@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=0f718bca31f68497ef00b56cb3dd01cd534f53f3dfd2a42741524fae51a18a36 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=f214e2eb2f3fb413ba8d478de118b78c1e58d304a066da7e7fb7b8588c1c776d -->
 # NeoGraphのコアコンセプト— 解説ガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -596,7 +596,7 @@ LLM span は公開 role/text projection、宣言済み scalar、既知 usage cou
 
 ### Python RunResult の status と state を読む
 
-`result.status` は typed `Completed`、`Interrupted`、`StepLimit`、`SafePoint` 状態を公開します。`result.output` は portable 最終 state、`result.interrupted`、`result.max_steps_exhausted`、`result.execution_trace` は run の観測です。`result.native_messages`、`result.provider_outcomes` は全 typed provider 証拠を保持します。[Python binding ガイド](python-binding.md#hitl-and-state)を参照してください。
+`result.status` は typed `Completed`、`Interrupted`、`StepLimit`、`SafePoint`、`BarrierStalled` 状態を公開します。`BarrierStalled` は、barrier がもう発火できず、run が `__end__` に到達せずに止まったことを示します。`result.output` は portable 最終 state、`result.interrupted`、`result.max_steps_exhausted`、`result.execution_trace` は run の観測です。`result.native_messages`、`result.provider_outcomes` は全 typed provider 証拠を保持します。[Python binding ガイド](python-binding.md#hitl-and-state)を参照してください。
 
 ### 「不明なリデューサー：<name>」
 

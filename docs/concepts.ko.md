@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=0f718bca31f68497ef00b56cb3dd01cd534f53f3dfd2a42741524fae51a18a36 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=f214e2eb2f3fb413ba8d478de118b78c1e58d304a066da7e7fb7b8588c1c776d -->
 # NeoGraph 핵심 개념 — 해설 가이드
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -596,7 +596,7 @@ LLM span에는 공개 role/text projection, 선언된 scalar와 알려진 usage 
 
 ### Python RunResult 상태와 state 읽기
 
-`result.status`는 typed `Completed`, `Interrupted`, `StepLimit`, `SafePoint` 상태를 노출한다. `result.output`은 portable 최종 state이며 `result.interrupted`, `result.max_steps_exhausted`, `result.execution_trace`는 run을 설명한다. `result.native_messages`, `result.provider_outcomes`는 전체 typed provider 증거를 보존한다. [Python binding 안내](python-binding.md#hitl-and-state)를 참조한다.
+`result.status`는 typed `Completed`, `Interrupted`, `StepLimit`, `SafePoint`, `BarrierStalled` 상태를 노출한다. `BarrierStalled`는 barrier가 더 이상 발화할 수 없어 run이 `__end__`에 도달하지 못하고 멈췄다는 뜻이다. `result.output`은 portable 최종 state이며 `result.interrupted`, `result.max_steps_exhausted`, `result.execution_trace`는 run을 설명한다. `result.native_messages`, `result.provider_outcomes`는 전체 typed provider 증거를 보존한다. [Python binding 안내](python-binding.md#hitl-and-state)를 참조한다.
 
 ### "알 수 없는 리듀서: <name>"
 

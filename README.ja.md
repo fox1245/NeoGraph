@@ -186,7 +186,7 @@ result = engine.run(ng.RunConfig(thread_id="t1", input={"name": "NeoGraph"}))
 print(result.output["channels"]["messages"]["value"])
 ```
 
-期待されるメッセージ内容は`Hello, NeoGraph!`です。Pythonでは、Programのコンパイルと実行、Hooks、ランタイムコンテキスト要件、厳密なプロファイル、SQLiteによる永続化、保存したチェックポイントからの正確な再開も公開しています。型付きプロバイダーでは`ProviderMessage`と`make_provider_request`を使い、続いて`prepare`/`dispatch`または`invoke`を呼び出します。結果は、ネイティブ側が所有する完了または失敗の根拠を保持します。これらのメッセージは、グラフで扱いやすくするための`ChatMessage`値とは異なります。ブロッキングするプロバイダー呼び出しはGILを解放します。`asyncio.to_thread`を使うと、イベントループのスレッド以外で実行できます。プロバイダーとProgramの完全な入力例は[Pythonサンプル](bindings/python/examples/README.md)を参照してください。
+期待されるメッセージ内容は`Hello, NeoGraph!`です。Pythonでは、Programのコンパイルと実行、Hooks、ランタイムコンテキスト要件、厳密なプロファイル、SQLiteによる永続化、保存したチェックポイントからの正確な再開も公開しています。型付きプロバイダーでは`ProviderMessage`と`make_provider_request`を使い、続いて`prepare`/`dispatch`または`invoke`を呼び出します。結果は、ネイティブ側が所有する完了または失敗の根拠を保持します。これらのメッセージは、グラフで扱いやすくするための`ChatMessage`値とは異なります。ブロッキングするプロバイダー呼び出しはGILを解放します。`asyncio.to_thread`を使うと、イベントループのスレッド以外で実行できます。プロバイダーの完全な入力例は[Pythonサンプル](bindings/python/examples/README.md)を、実行可能なProgramの例とその規則は[Pythonバインディングガイド](docs/python-binding.md#program-and-quickjs)を参照してください。
 
 ## 適したワークロードと制約
 

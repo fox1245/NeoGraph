@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=c25f1ee42f162b617b8f9c49113760dd467dc0819ef8683c0f08975a44759b0c -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=79d19a918a6df3f67153f395833f482e0df7e305f42aa8da0601f65de233bb78 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -1263,7 +1263,8 @@ struct RunResult {
     std::vector<std::string> execution_trace;    // Ordered list of executed node names
 
     bool max_steps_exhausted() const noexcept;    // Limit stopped runnable work
-    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit, or SafePoint
+    bool barrier_stalled() const noexcept;        // A barrier can no longer fire
+    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit, SafePoint, or BarrierStalled
 
     template <typename T> T channel(const std::string& name) const;
     template <typename T> T channel(const ChannelKey<T>& key) const;
@@ -1289,7 +1290,8 @@ resume や continuation では、`provider_outcomes` は元の結果に新しく
 許可された最後のステップで `__end__` に到達したグラフは
 `false` を返します。
 `status()` は `RunStatus::Completed`、`RunStatus::Interrupted`、
-`RunStatus::StepLimit`、または `RunStatus::SafePoint` のいずれかを返します。公開 `RunResult` のデータレイアウトは変わりません。
+`RunStatus::StepLimit`、`RunStatus::SafePoint`、または `RunStatus::BarrierStalled` のいずれかを返します。公開 `RunResult` のデータレイアウトは変わりません。
+`BarrierStalled` は、実行可能なノードがなく、最後の super-step が `__end__` へ明示的にルーティングせず、barrier がまだシグナルを保持しているため join がもう発火できないことを示します。このとき `barrier_stalled()` は true になり、`output["_neograph"]["barrier_stalled"]` は停滞した join ごとに `{node, wait_for, received, missing}` を列挙します。
 `ChannelKey<T>` は再利用可能なチャネル名を、期待する C++ 型に結び付けます:
 ```cpp
 inline const ChannelKey<std::string> Answer{"answer"};

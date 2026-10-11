@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=0f718bca31f68497ef00b56cb3dd01cd534f53f3dfd2a42741524fae51a18a36 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=f214e2eb2f3fb413ba8d478de118b78c1e58d304a066da7e7fb7b8588c1c776d -->
 # NeoGraph 核心概念——叙事指南
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -596,7 +596,7 @@ LLM span 仅含公开 role/text projection、已声明 scalar 和已知 usage co
 
 ### 读取 Python RunResult status 与 state
 
-`result.status` 公开 typed `Completed`、`Interrupted`、`StepLimit`、`SafePoint` 状态。`result.output` 是 portable 最终 state；`result.interrupted`、`result.max_steps_exhausted`、`result.execution_trace` 描述 run。`result.native_messages`、`result.provider_outcomes` 保留完整 typed provider 证据。参见 [Python binding 指南](python-binding.md#hitl-and-state)。
+`result.status` 公开 typed `Completed`、`Interrupted`、`StepLimit`、`SafePoint`、`BarrierStalled` 状态；`BarrierStalled` 表示 barrier 再也无法触发，run 未到达 `__end__` 就停止了。`result.output` 是 portable 最终 state；`result.interrupted`、`result.max_steps_exhausted`、`result.execution_trace` 描述 run。`result.native_messages`、`result.provider_outcomes` 保留完整 typed provider 证据。参见 [Python binding 指南](python-binding.md#hitl-and-state)。
 
 ### “Unknown reducer: <name>”
 

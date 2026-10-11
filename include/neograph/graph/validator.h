@@ -164,9 +164,27 @@ public:
      *        E6 dead channel — declared but never read nor written,
      *        write-only unless declared as externally consumed through
      *        an effect contract's optional `exports`, or read-only
-     *        without an initial value (warnings).
+     *        without an initial value (warnings). An effect contract
+     *        that lists neither reads nor writes counts as undeclared.
      *  - E12 local registry membership: validate_local reports missing
      *        reducers, node types, and conditions as errors instead of throwing.
+     *  - E13 a static edge out of a node that also has a conditional edge;
+     *        the node routes only through its conditional edge, so the
+     *        static edge never fires.
+     *  - E14 a second conditional edge from the same node; only a node's
+     *        first conditional edge routes.
+     *        E13 and E14 are errors for strict documents (schema_version
+     *        >= 1) and warnings for legacy documents.
+     *  - E15 a barrier member with a route that leads somewhere other than
+     *        the join or __end__ (warning): when that route is taken the
+     *        join can no longer fire and the run ends BarrierStalled.
+     *  - E16 any cycle in the routed graph (error), reported only with
+     *        ValidationOptions::require_acyclic.
+     *
+     * E7, E8 and E11 follow the routes the scheduler takes: a node with a
+     * conditional edge contributes only its first conditional edge's routes.
+     * ValidationOptions::original_rules selects the rule set Program bundles
+     * were first sealed under (no E13-E15, every declared edge counted).
      *
      * Pure function of the CompiledGraph + registries; does not
      * execute anything.

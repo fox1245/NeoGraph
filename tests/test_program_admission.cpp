@@ -283,6 +283,38 @@ TEST(PolicySnapshotTest, EnforcesTrustedNativeCapabilityAndFiniteBudgets) {
     EXPECT_THROW((void)std::move(unbounded).build(), std::invalid_argument);
 }
 
+TEST(PolicySnapshotTest, ZeroBudgetCeilingErrorNamesEachZeroField) {
+    const auto admission = admission_profile(registry_snapshot());
+    auto       ceiling   = finite_budget();
+    ceiling.model_tokens         = 0;
+    ceiling.max_dynamic_compiles = 0;
+    PolicySnapshotBuilder builder;
+    builder.id("policy")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant")
+        .admission_profile(admission)
+        .budget_ceiling(ceiling);
+    try {
+        (void)std::move(builder).build();
+        FAIL() << "a zero budget ceiling field must be rejected";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_STREQ(error.what(),
+                     "Every policy budget ceiling except child budgets must be positive; "
+                     "zero: model_tokens, max_dynamic_compiles");
+    }
+
+    auto parsed = json::parse(policy_snapshot(admission).serialize_canonical());
+    parsed["budget_ceiling"]["monetary_microunits"] = 0;
+    try {
+        (void)PolicySnapshot::parse(parsed.dump());
+        FAIL() << "a zero budget ceiling field must be rejected on parse";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find("zero: monetary_microunits"),
+                  std::string::npos)
+            << error.what();
+    }
+}
+
 TEST(ProgramVersionAdmissionTest, RejectsProfilePolicyOwnerAndRegistryMismatches) {
     const auto registry_a = registry_snapshot("a");
     const auto registry_b = registry_snapshot("b");

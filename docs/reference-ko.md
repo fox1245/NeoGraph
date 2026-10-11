@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=c25f1ee42f162b617b8f9c49113760dd467dc0819ef8683c0f08975a44759b0c -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=79d19a918a6df3f67153f395833f482e0df7e305f42aa8da0601f65de233bb78 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -1426,7 +1426,8 @@ struct RunResult {
     std::vector<std::string> execution_trace;    // Ordered list of executed node names
 
     bool max_steps_exhausted() const noexcept;    // Limit stopped runnable work
-    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit, or SafePoint
+    bool barrier_stalled() const noexcept;        // A barrier can no longer fire
+    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit, SafePoint, or BarrierStalled
 
     template <typename T> T channel(const std::string& name) const;
     template <typename T> T channel(const ChannelKey<T>& key) const;
@@ -1454,7 +1455,8 @@ run while runnable work remained. A graph that reaches `__end__` exactly on its
 last permitted step returns `false`.
 
 `status()` returns `RunStatus::Completed`, `RunStatus::Interrupted`,
-`RunStatus::StepLimit`, or `RunStatus::SafePoint` without changing the public `RunResult` data layout.
+`RunStatus::StepLimit`, `RunStatus::SafePoint`, or `RunStatus::BarrierStalled` without changing the public `RunResult` data layout.
+`BarrierStalled`는 실행할 노드가 없고, 마지막 super-step이 `__end__`로 명시적으로 라우팅하지 않았으며, barrier가 아직 신호를 쥐고 있어 join이 더 이상 발화할 수 없다는 뜻입니다. 이때 `barrier_stalled()`는 true이고, `output["_neograph"]["barrier_stalled"]`는 정체된 join마다 `{node, wait_for, received, missing}`를 나열합니다.
 `ChannelKey<T>` binds a reusable channel name to its expected C++ type:
 
 ```cpp

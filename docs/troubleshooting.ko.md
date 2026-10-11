@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=a349458203a2d6478b8a97e88b0b36692884bb81da88c4faa5d18f599713b2d3 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=e394ecfa1780a5909da233a0135fc56913eff5296a3a245d2a61cafa4a652bca -->
 # 문제 해결
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -93,6 +93,28 @@ write의 channel 이름은 정확히 존재해야 한다. condition은 route lab
 기본 worker_count `1`은 engine pool을 만들지 않는다. I/O branch는 suspend 시 겹치며 단일 caller 스레드의 CPU body는 직렬 실행된다. pool이 도움이 되면 동시 실행 전에 `set_worker_count(N)`/`set_worker_count_auto()`를 설정한다. native operation이 GIL을 해제하지 않으면 Python CPU callback은 여전히 직렬이다.
 
 같은 engine의 run/resume 중 admin state/history/update/fork는 `std::logic_error`로 실패한다. 취소·drain하고 완료를 기다린 뒤 호출한다. 오류를 숨기지 않는다. 같은 thread_id 동시 실행은 checkpoint 순서가 미정이며 store를 공유하는 다른 engine은 host 조정이 필요하다. [동시성](concurrency.md)을 참고한다.
+
+## Python Program 오류
+
+`LocalProgramHost`와 QuickJS Program compiler에서 나오는 오류다. 배경 규칙은 [Program 및 QuickJS](python-binding.md#program-and-quickjs)에 있다.
+
+| 오류 | 원인 | 해결 |
+|---|---|---|
+| node에서 발생한 `TypeError: get(): incompatible function arguments` | `GraphState.get`은 channel 이름만 받는다 | `state.get("value") or 0`을 쓴다 |
+| `add_registered_node`, `add_registered_reducer` 또는 `add_registered_condition`에서 발생한 `ng.ProgramRegistryError` | node type, reducer 또는 condition이 이 process에 등록되어 있지 않다 | 먼저 `@ng.node`, `ng.NodeFactory.register_type`, `ng.ReducerRegistry.register_reducer` 또는 `ng.ConditionRegistry.register_condition`으로 등록한다 |
+| `P_JS_DEFINE_MISSING` | module이 `define()`을 export하지 않는다 | `define()`을 export하고 Program의 graph 하나를 반환한다 |
+| `P_JS_GRAPH_ENTRY`, 또는 이름이 `__start__`나 `__end__`인 node에 대한 `P_JS_GRAPH_ARGUMENT` | graph에 `.entry()`가 없거나 node가 예약된 이름을 쓴다 | `.entry()`를 호출하고 node 이름을 바꾼다. `.entry()`와 `.exit()`가 sentinel을 연결한다 |
+| `P_CORE_E13` 또는 `P_CORE_E14` | node의 첫 conditional edge 옆에 static edge나 두 번째 conditional edge가 있으며, 어느 쪽도 발화하지 않는다 | 모든 target을 첫 conditional edge의 route에 넣는다 |
+| `P_JS_CONTROL_COMMAND`: JavaScript command references a Core outside the admitted root | `ng.callCore`가 `define()`이 반환한 graph가 아닌 다른 graph를 지정한다 | `ng.graph(...)`에 전달한 이름을 쓴다 |
+| `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | 나열된 ceiling field가 0이다 | Program이 model을 호출하지 않더라도 양수로 설정한다 |
+| `ng.ProgramAdmissionError`의 `P_ADMIT_PROVIDER` | `llm_call` 또는 `intent_classifier` node가 있는데 `LocalProgramHost`는 provider를 바인딩하지 않는다 | Python node에서 model을 호출한다 |
+| `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | run budget이 `compile_admit`에 전달한 budget과 다르다 | 같은 budget을 전달하거나 다시 compile하고 승인(admission)한다 |
+| `ng.spawn`에서 발생한 `P_CHILD_BINDING` | `LocalProgramHost`에는 child binding resolver가 없다 | child Program은 C++ host에서 실행한다 |
+| `resume()`에서 발생한 `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost` | run이 다른 `LocalProgramHost`나 이미 소멸한 `LocalProgramHost`에 속한다 | run을 시작한 host를 통해 재개한다 |
+| `P_CORE_BARRIER_STALLED` | barrier member가 join으로 이어지지 않는 route를 택해 join이 더 이상 발화할 수 없다 | 모든 member를 join이나 `__end__`로 라우팅한다. `P_CORE_E15`가 compile 시점에 이런 route를 경고한다 |
+| `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | run이 `wall_time_ms`를 다 썼다. 중단된 operation의 텍스트는 `failure.witness["cause_message"]`에 있다 | 더 큰 `wall_time_ms`로 다시 compile하고 승인(admission)한다 |
+
+실패한 `callCore`는 그 실패로 run을 끝내며 `main()`은 `try`/`catch`로 잡을 수 없다. Python에서 `result.status`와 `result.failure`를 확인한다.
 
 ## checkpoint와 PostgreSQL 실패
 

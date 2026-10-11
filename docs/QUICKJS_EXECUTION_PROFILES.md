@@ -65,16 +65,29 @@ flowchart TB
 ## Restricted durable execution
 
 The existing synchronous-generator ABI remains the only default durable control
-path:
+path. The module also exports `define()`, whose graph is the Program's only
+Core, and `ng.callCore()` names that Core:
 
 ```javascript
+export function define() {
+  const graph = ng.graph("review");
+  graph.channel("draft", {reducer: "overwrite", initial: ""});
+  graph.channel("accepted", {reducer: "overwrite", initial: false});
+  graph.node("reviewer", {type: "reviewer"});
+  graph.node("reviser", {type: "reviser"});
+  graph.entry("reviewer");
+  graph.edge("reviewer", "reviser");
+  graph.exit("reviser");
+  return graph;
+}
+
 export function* main(input) {
   let draft = input.draft;
 
   for (let attempt = 0; attempt < 5; ++attempt) {
-    const review = yield ng.callCore("reviewer", {draft, attempt});
-    if (review.accepted) return {draft, attempt};
-    draft = yield ng.callCore("reviser", {draft, feedback: review.feedback});
+    const round = yield ng.callCore("review", {draft, attempt});
+    if (round.accepted) return {draft, attempt};
+    draft = round.draft;
   }
 
   throw new Error("review attempts exhausted");
@@ -84,9 +97,12 @@ export function* main(input) {
 A generated command is an opaque host-created value. At the yield boundary,
 `ProgramRuntime` validates its registered schema, import slot, capability,
 budget, ownership, source site, and replay coordinate; journals it before
-dispatch; records its terminal outcome; and resumes the generator with that
-canonical outcome. Recovery replays pinned source only through recorded
-outcomes, so a completed non-idempotent effect is not dispatched twice.
+dispatch; and records its terminal outcome. A completed outcome resumes the
+generator with that canonical result. Any other outcome, such as a failed or
+timed-out `callCore`, ends the run with that outcome without resuming the
+generator, so `main()` cannot catch it. Recovery replays pinned source only
+through recorded outcomes, so a completed non-idempotent effect is not
+dispatched twice.
 
 The current implementation intentionally rejects top-level await and requires
 this generator shape. That is an execution ABI choice, not a claim that
@@ -100,9 +116,10 @@ command kind, or scheduler:
 
 ```javascript
 // trusted helper module; ordinary source code, not a NeoGraph DSL
+// define() is the one shown above, so "review" is the module's only Core.
 function* retryUntil(input, maxAttempts) {
   for (let attempt = 0; attempt < maxAttempts; ++attempt) {
-    const result = yield ng.callCore("reviewer", {input, attempt});
+    const result = yield ng.callCore("review", {input, attempt});
     if (result.accepted) return result;
   }
   throw new Error("retry exhausted");

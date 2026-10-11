@@ -185,7 +185,7 @@ result = engine.run(ng.RunConfig(thread_id="t1", input={"name": "NeoGraph"}))
 print(result.output["channels"]["messages"]["value"])
 ```
 
-The expected message content is `Hello, NeoGraph!`. Python also exposes Program compilation and execution, Hooks, runtime-context requirements, strict profiles, SQLite durability, and exact checkpoint resume. Typed providers use `ProviderMessage` and `make_provider_request`, then `prepare`/`dispatch` or `invoke`; outcomes retain native-owned completion or failure evidence. These messages differ from graph convenience `ChatMessage` values. Blocking provider calls release the GIL; `asyncio.to_thread` can move them off an event-loop thread. See the [Python examples](bindings/python/examples/README.md) for complete provider and Program inputs.
+The expected message content is `Hello, NeoGraph!`. Python also exposes Program compilation and execution, Hooks, runtime-context requirements, strict profiles, SQLite durability, and exact checkpoint resume. Typed providers use `ProviderMessage` and `make_provider_request`, then `prepare`/`dispatch` or `invoke`; outcomes retain native-owned completion or failure evidence. These messages differ from graph convenience `ChatMessage` values. Blocking provider calls release the GIL; `asyncio.to_thread` can move them off an event-loop thread. See the [Python examples](bindings/python/examples/README.md) for complete provider inputs, and the [Python binding guide](docs/python-binding.md#program-and-quickjs) for a runnable Program example and its rules.
 
 ## Workloads and limits
 

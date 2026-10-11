@@ -350,6 +350,7 @@ metadata = ng.RunMetadata(
     owner_scope="tenant-a",
 )
 result = engine.run(config, metadata)
+checkpoint_id = result.checkpoint_id
 
 # Never substitutes a newer checkpoint:
 result = engine.resume_from(config, checkpoint_id, {"approved": True}, metadata)
@@ -377,7 +378,8 @@ import neograph_engine as ng
 
 @ng.node("my_node")
 def my_node(state):
-    return [ng.ChannelWrite("value", state.get("value", 0) + 1)]
+    # GraphState.get takes only the channel name; a missing channel is None.
+    return [ng.ChannelWrite("value", (state.get("value") or 0) + 1)]
 
 registry = (
     ng.ProgramRegistryBuilder()
@@ -422,7 +424,7 @@ run_budget.max_core_steps = 20
 host = ng.LocalProgramHost(registry, "tenant-a", ceiling)
 version = host.compile_admit(source, run_budget)
 result = host.run(version, {}, run_budget)
-print(result.status, result.output)
+print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 1
 ```
 
 `ProgramRegistryBuilder.add_registered_node`, `add_registered_reducer` and `add_registered_condition` copy an executable that is already registered in this process, through `@ng.node` or `ng.NodeFactory.register_type`, `ng.ReducerRegistry.register_reducer` or `ng.ConditionRegistry.register_condition`. Each raises `ng.ProgramRegistryError` for a name that is not registered, and the message names the registration call. The error's `kind` is `"node"`, `"reducer"` or `"condition"`, and its `name` is the missing name. It subclasses both `ValueError` and `RuntimeError`, so handlers written for either keep catching it. A Program that uses a node type, reducer or condition missing from the registry snapshot fails at compile time instead, in `ProgramCompiler.compile` and `LocalProgramHost.compile_admit` alike, with `ng.ProgramCompileError` and the diagnostic `P_CORE_GC_REGISTRY_MISS`.
@@ -440,6 +442,84 @@ The exact installed JavaScript vocabulary is available as a dict:
 ```python
 manifest = ng.javascript_authoring_capability_manifest()
 ```
+
+### Module shape and `callCore`
+
+A JavaScript Program must export `define()`, which returns one graph builder. That graph is the Program's only Core. Without `define()`, compilation raises `ProgramCompileError` with `P_JS_DEFINE_MISSING`, so a module that exports only `main()` is rejected. `main()` is optional; without it, a run executes the Core directly.
+
+`ng.callCore(name, input, sourceSite)` must name that Core by the name given to `ng.graph(...)`, which is `"main"` in the example above. Any other name fails the run with `P_JS_CONTROL_COMMAND`. To run different steps, put them in that graph and call it again with different input. Register every node type with `@ng.node` or `ng.NodeFactory.register_type` before passing it to `add_registered_node`, which raises `ng.ProgramRegistryError` for a type that is not registered.
+
+A completed `callCore` returns the Core's output object to `main()`. The quickstart above returns it unchanged as `result.output`:
+
+```json
+{"channels": {"value": {"value": 1, "version": 1}}, "global_version": 1, "value": 1}
+```
+
+`channels` holds each channel's `value` and `version`. Each channel's value is also copied to a top-level key with the channel's name unless that key already exists, so `main()` can read `result.value`; a channel named `channels` or `global_version` is reachable only under `channels`. Barrier lists are stored sorted: `graph.barrier("join", ["zeta", "alpha"])` appears as `{"wait_for": ["alpha", "zeta"]}` in `bundle.sealed_core_definitions`, and the order has no effect.
+
+### Failed commands end the run
+
+Only a completed command resumes `main()`. When a yielded command does not complete, for example a `callCore` whose node raises, which exhausts the Core step budget, which stops at a barrier that can no longer fire, or which runs past the wall-time limit, `ProgramRuntime` records that outcome and makes it the run's terminal result with the matching `status` and `failure`. The generator is not resumed: a `try`/`catch` around the `yield` never runs, and no later JavaScript executes. A join (`ng.all`, `ng.race`, `ng.quorum`) that fails under its failure policy ends the run the same way. Handle failures in Python through `result.status` and `result.failure`. An interrupted command is different: the run stops as `Interrupted`, and `resume()` continues that command.
+
+### Graph checks and barrier stalls
+
+Compilation checks the Core graph along the routes the scheduler actually takes: a node with a conditional edge routes only through its first conditional edge. A JavaScript Program is a strict document, so each of these raises `ng.ProgramCompileError`:
+
+- `P_JS_GRAPH_ARGUMENT` at a `.node()` call that names a node `__start__` or `__end__`;
+- `P_JS_GRAPH_ENTRY` when `define()` returns a graph with nodes but no `.entry()`;
+- `P_CORE_E13` for a static edge out of a node that also has a conditional edge, because that edge never fires;
+- `P_CORE_E14` for a second conditional edge from the same node, because it never routes.
+
+`P_CORE_E15` is a warning in `bundle.compile_diagnostics`: a barrier member has a route that leads somewhere other than the join or `__end__`, and taking it stalls the join. Loops are valid; pass `require_acyclic=True` to `ProgramCompiler` or `LocalProgramHost` to reject every cycle with `P_CORE_E16`, for example for plans and checklists.
+
+A barrier fires once every node in its `wait_for` list has routed to it. A node that reaches the join some other way, for example a fix-up node on a member's failure route, does not stand in for that member. When a run has nothing left to run and a join still holds signals, it does not complete: it ends `Failed` with `P_CORE_BARRIER_STALLED`, `failure.core_node` names the join, and `failure.witness["stalled_barriers"]` lists each stalled join with its `wait_for`, `received` and `missing` nodes. Only an explicit route to `__end__` in the final super-step ends such a run normally: a static edge to `__end__` (which `.exit()` writes), a conditional route to `__end__`, or `Command.goto("__end__")`. A node without successors does not, and neither does an explicit end in an earlier super-step. A `GraphEngine` run in the same state returns `ng.RunStatus.BarrierStalled`, and `result.output["_neograph"]["barrier_stalled"]` holds the same details.
+
+### Errors and diagnostics
+
+Program errors raised in Python are typed and keep their diagnostics:
+
+| Exception | Raised by | Subclasses |
+|---|---|---|
+| `ng.ProgramCompileError` | `ProgramCompiler.compile`, `LocalProgramHost.compile` and `compile_admit` | `RuntimeError` |
+| `ng.ProgramAdmissionError` | `LocalProgramHost.admit` and `compile_admit`, for example `P_ADMIT_POLICY` or `P_ADMIT_PROVIDER` | `RuntimeError` |
+| `ng.ProgramDiagnosticError` | `run`, `start`, `start_active` and `resume`, for example `P_START_BUDGET` or `P_RUN_NOT_FOUND` | `RuntimeError` |
+| `ng.ProgramRegistryError` | `ProgramRegistryBuilder.add_registered_node`, `add_registered_reducer` and `add_registered_condition` | `ValueError`, `RuntimeError` |
+
+The message of the first three starts with `Program compilation failed`, `Program admission failed` or `Program operation failed`, followed by one line per diagnostic: its code, JSON pointer and message, and `(source:line:col)` when it has a source site. `.diagnostics` is a list of dicts with `code`, `severity`, `phase`, `message`, `source_id`, `json_pointer`, `span` and `witness`.
+
+A bundle that compiles carries two lists. `bundle.compile_diagnostics` is what the compiler returned: warnings under the current rules, with JavaScript call sites in `span`, and authoring warnings such as `P_JS_CONTROL_CHARACTER`. Show this list to authors. `bundle.diagnostics` is the copy sealed into the bundle and covered by `bundle.id`. It keeps the rules and wording that bundles were first sealed under, so a newer compiler does not change a bundle id, and it can therefore differ: it has no spans and may still list warnings the current rules dropped, such as `P_CORE_E6` for a channel that only Python nodes write. Neither the compiler nor `LocalProgramHost` prints lint to stderr.
+
+### Model-calling nodes
+
+`LocalProgramHost` binds no provider, so a Program whose graph has an `llm_call` or `intent_classifier` node cannot be admitted: `compile_admit` raises `ng.ProgramAdmissionError` with `P_ADMIT_PROVIDER` naming the node. Call a model from a Python node instead. Such a call is not counted in the Program's `usage.model_tokens`.
+
+### Child Programs
+
+`ng.spawn` needs a child-binding resolver, and `LocalProgramHost` configures none. Every `ng.spawn` from Python therefore fails the run with `P_CHILD_BINDING` ("Program spawn has no configured child binding resolver"). Child Programs need a C++ host that sets `RuntimeConfig::child_binding_resolver`, which maps each binding name to the `ModuleLinkReceipt` from `link_module_child` and the admitted child `ProgramVersion`. See [recursive agents](PROGRAM_RECURSIVE_HARNESSES.md) for the child lifecycle.
+
+### Budgets
+
+The `budget_ceiling` passed to `LocalProgramHost` becomes the admission policy's ceiling. Every field except `max_child_depth` and `max_total_children` must be positive, including `model_tokens`, `monetary_microunits` and `max_dynamic_compiles`, even for a Program that never calls a model. Otherwise the constructor raises `ValueError` naming the zero fields. The two child fields must be both zero or both positive.
+
+`compile_admit(source, budget)` and `compile(source, budget)` seal `budget` into the bundle as both the minimum and the maximum of every field, and admission rejects a bundle whose sealed budget exceeds the ceiling. Each `run`, `start` and `start_active` call for that version must pass the same values, field for field. A larger or smaller budget raises `ng.ProgramDiagnosticError` with `P_START_BUDGET`, whose message names the first field that differs, for example `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`. To use a different budget, compile and admit again; the result is a new `ProgramVersion`. A run budget needs positive `wall_time_ms`, `max_concurrency`, `max_program_operations` and `max_core_steps`; `model_tokens` and `monetary_microunits` may be zero.
+
+### Scheduler threads, workers and timeouts
+
+`LocalProgramHost(..., scheduler_threads=1, worker_count=1)` takes two thread settings. `scheduler_threads` sets the number of threads in the `ProgramRuntime` scheduler pool that drives runs: JavaScript control, `callCore` dispatch, joins and deadlines. It must be at least 1. `worker_count` sets the worker pool of each Core engine for fan-out inside one graph, and must not exceed the admitted Program's `max_concurrency`; with the default 1, fan-out branches run on the scheduler thread.
+
+A Python node body does not occupy a scheduler thread during a Program run. It runs on a worker pool that the binding owns, 32 threads by default; set `NEOGRAPH_PYTHON_NODE_THREADS` to a value from 1 to 1024 before the first Program run to change it. Even with the default single scheduler thread, several runs of the host, the members of `ng.all`, `ng.race` and `ng.quorum`, and the fan-out branches of one Core run make progress at the same time, and deadlines fire while a node runs. `ng.race` returns the first member to finish, and `ng.quorum` returns once the required successes are in. Python code still runs under the GIL, so CPU-bound nodes do not run in parallel; nodes overlap while they release the GIL, for example in `time.sleep`, I/O or a native call. A plain `GraphEngine` run keeps running Python node bodies on the calling thread.
+
+Neither limit interrupts a running Python node; cancellation is cooperative. When the run's `wall_time_ms` runs out, the runtime cancels the run, and the result arrives once the running node returns, with `status` `TimedOut`, `failure.code` `P_RUNTIME_TIMEOUT` and the message `Program wall-time budget (N ms) expired`. The text of the operation that the timeout interrupted is in `failure.witness["cause_message"]`. When the deadline of `ng.await(command, timeoutMs, sourceSite)` passes, the run ends `TimedOut` with `P_AWAIT_TIMEOUT`, and a completion that arrives after the deadline is not accepted. In both cases the child Core run is cancelled; a node that checks `input.ctx.cancel_token.is_cancelled()` stops early, and one that ignores it delays the result until it returns. `TimedOut` and `Cancelled` results list the Core nodes that completed in `execution_trace`.
+
+Program engines print no lint and no fan-out notice to stderr. The notice that recommends `EngineConfig::worker_count` comes only from a `GraphEngine` you build yourself.
+
+### In-memory state and resume
+
+`LocalProgramHost` keeps bundles, versions, activations, run records and checkpoints in memory inside the host object, and writes nothing to disk. Resume a run through the host instance that started it, while that object is alive. After a process restart, or from another `LocalProgramHost`, `resume()` raises `ng.ProgramDiagnosticError` with `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost; runs are kept in memory by the host that started them`. Durable Program stores (SQLite and PostgreSQL) are C++ host APIs.
+
+`resume(run_id, value)` returns a handle; call `.wait()` for the result. Without `pending_id` it resumes the run's single awaiting call. When none or several calls are awaiting, it raises `ValueError`; pass `result.interrupt.pending_input.call_id` as `pending_id` to name the call exactly.
+
+The `execution_trace` of a result returned by `resume()` lists only the Core nodes that ran after the resume; nodes that ran before the interrupt appear in the interrupted result. For a Core `a → b → c` that interrupts before `b`, the interrupted result has `["a"]` and the resumed result has `["b", "c"]`.
 
 ## Mandatory lifecycle Hooks
 
@@ -563,7 +643,7 @@ for interface in card.supported_interfaces:
 
 params = a2a.MessageSendParams()
 params.message.message_id = str(uuid4())
-params.message.role = "user"
+params.message.role = a2a.Role.User
 params.message.parts = [
     a2a.Part.text_part("Explain this item."),
     a2a.Part.text_part("Keep the answer short."),

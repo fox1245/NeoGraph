@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=dd6643ac7acc1c663fb9d4c9852d5b973c7a484a51a38879092e5bdabee5ccf6 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=b546abc4e5c70be66da6420f47a1745c8f71aab16d643d6f64d4ac61701c5e83 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -347,6 +347,7 @@ metadata = ng.RunMetadata(
     owner_scope="tenant-a",
 )
 result = engine.run(config, metadata)
+checkpoint_id = result.checkpoint_id
 
 # Never substitutes a newer checkpoint:
 result = engine.resume_from(config, checkpoint_id, {"approved": True}, metadata)
@@ -374,7 +375,8 @@ import neograph_engine as ng
 
 @ng.node("my_node")
 def my_node(state):
-    return [ng.ChannelWrite("value", state.get("value", 0) + 1)]
+    # GraphState.get takes only the channel name; a missing channel is None.
+    return [ng.ChannelWrite("value", (state.get("value") or 0) + 1)]
 
 registry = (
     ng.ProgramRegistryBuilder()
@@ -419,7 +421,7 @@ run_budget.max_core_steps = 20
 host = ng.LocalProgramHost(registry, "tenant-a", ceiling)
 version = host.compile_admit(source, run_budget)
 result = host.run(version, {}, run_budget)
-print(result.status, result.output)
+print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 1
 ```
 
 `ProgramRegistryBuilder.add_registered_node`、`add_registered_reducer` 和 `add_registered_condition` 复制本进程中已经注册的可执行单元。注册方式为 `@ng.node` 或 `ng.NodeFactory.register_type`、`ng.ReducerRegistry.register_reducer`、`ng.ConditionRegistry.register_condition`。传入未注册的名称时，这三个方法都会抛出 `ng.ProgramRegistryError`，消息会指出所需的注册调用。该错误的 `kind` 为 `"node"`、`"reducer"` 或 `"condition"`，`name` 为缺失的名称。它同时继承 `ValueError` 和 `RuntimeError`，因此捕获其中任一类型的现有处理代码仍能捕获它。使用注册表快照中不存在的节点类型、reducer 或条件的 Program 会改为在编译时失败：`ProgramCompiler.compile` 和 `LocalProgramHost.compile_admit` 都会抛出带有诊断 `P_CORE_GC_REGISTRY_MISS` 的 `ng.ProgramCompileError`。
@@ -437,6 +439,84 @@ print(result.status, result.output)
 ```python
 manifest = ng.javascript_authoring_capability_manifest()
 ```
+
+### 模块结构与 `callCore`
+
+JavaScript Program 必须导出 `define()`，它返回一个图构建器。该图是 Program 唯一的 Core。缺少 `define()` 时，编译会抛出带 `P_JS_DEFINE_MISSING` 的 `ProgramCompileError`，因此只导出 `main()` 的模块会被拒绝。`main()` 是可选的；没有它时，运行会直接执行 Core。
+
+`ng.callCore(name, input, sourceSite)` 必须用传给 `ng.graph(...)` 的名称（上例中为 `"main"`）指定该 Core。使用其他名称会使运行以 `P_JS_CONTROL_COMMAND` 失败。要运行不同的步骤，请把它们放进该图，并用不同的输入再次调用。每种节点类型在传给 `add_registered_node` 之前，都要先用 `@ng.node` 或 `ng.NodeFactory.register_type` 注册；对于未注册的类型，该方法会抛出 `ng.ProgramRegistryError`。
+
+完成的 `callCore` 会把 Core 的输出对象返回给 `main()`。上面的快速入门把它原样作为 `result.output` 返回：
+
+```json
+{"channels": {"value": {"value": 1, "version": 1}}, "global_version": 1, "value": 1}
+```
+
+`channels` 保存每个通道的 `value` 和 `version`。除非同名的顶层键已存在，每个通道的值还会复制到以通道名命名的顶层键，因此 `main()` 可以读取 `result.value`；名为 `channels` 或 `global_version` 的通道只能在 `channels` 下访问。barrier 列表按排序后存储：`graph.barrier("join", ["zeta", "alpha"])` 在 `bundle.sealed_core_definitions` 中显示为 `{"wait_for": ["alpha", "zeta"]}`，顺序没有任何影响。
+
+### 失败的命令会结束运行
+
+只有完成的命令才会恢复 `main()`。当 yield 出的命令未能完成时，例如 `callCore` 的节点抛出异常、耗尽 Core 步数预算、停在再也无法触发的 barrier 上或超过 wall-time 限制，`ProgramRuntime` 会记录该结果，并把它作为运行的最终结果，带有相应的 `status` 和 `failure`。生成器不会被恢复：包住 `yield` 的 `try`/`catch` 不会执行，之后的 JavaScript 也不会执行。按其失败策略失败的 join（`ng.all`、`ng.race`、`ng.quorum`）也会以同样方式结束运行。在 Python 中通过 `result.status` 和 `result.failure` 处理失败。被中断的命令则不同：运行以 `Interrupted` 停止，`resume()` 会继续该命令。
+
+### 图检查与 barrier 停滞
+
+编译会沿调度器实际采用的路由检查 Core 图：带条件边的节点只通过其第一条条件边路由。JavaScript Program 是严格文档，因此以下每一项都会抛出 `ng.ProgramCompileError`：
+
+- `P_JS_GRAPH_ARGUMENT`：出现在把节点命名为 `__start__` 或 `__end__` 的 `.node()` 调用处；
+- `P_JS_GRAPH_ENTRY`：`define()` 返回的图有节点但没有 `.entry()` 时；
+- `P_CORE_E13`：针对同时带有条件边的节点发出的静态边，因为该边永远不会触发；
+- `P_CORE_E14`：针对同一节点的第二条条件边，因为它永远不会路由。
+
+`P_CORE_E15` 是 `bundle.compile_diagnostics` 中的警告：某个 barrier 成员有一条通往 join 或 `__end__` 以外位置的路由，走这条路由会使 join 停滞。循环是有效的；要以 `P_CORE_E16` 拒绝所有循环（例如用于计划和检查清单），请向 `ProgramCompiler` 或 `LocalProgramHost` 传入 `require_acyclic=True`。
+
+barrier 在其 `wait_for` 列表中的每个节点都路由到它之后才会触发。以其他方式到达 join 的节点（例如成员失败路由上的修复(fix-up)节点）不能代替该成员。当运行已没有可运行的内容而 join 仍持有信号时，运行不会完成：它以 `P_CORE_BARRIER_STALLED` 结束为 `Failed`，`failure.core_node` 指明该 join，`failure.witness["stalled_barriers"]` 列出每个停滞的 join 及其 `wait_for`、`received` 和 `missing` 节点。只有最后一个 super-step 中通往 `__end__` 的显式路由才能让这样的运行正常结束：通往 `__end__` 的静态边（由 `.exit()` 写入）、通往 `__end__` 的条件路由，或 `Command.goto("__end__")`。没有后继的节点不行，更早 super-step 中的显式结束也不行。处于相同状态的 `GraphEngine` 运行返回 `ng.RunStatus.BarrierStalled`，`result.output["_neograph"]["barrier_stalled"]` 包含相同的详细信息。
+
+### 错误与诊断
+
+在 Python 中抛出的 Program 错误是类型化的，并保留其诊断：
+
+| 异常 | 抛出方 | 基类 |
+|---|---|---|
+| `ng.ProgramCompileError` | `ProgramCompiler.compile`、`LocalProgramHost.compile` 和 `compile_admit` | `RuntimeError` |
+| `ng.ProgramAdmissionError` | `LocalProgramHost.admit` 和 `compile_admit`，例如 `P_ADMIT_POLICY` 或 `P_ADMIT_PROVIDER` | `RuntimeError` |
+| `ng.ProgramDiagnosticError` | `run`、`start`、`start_active` 和 `resume`，例如 `P_START_BUDGET` 或 `P_RUN_NOT_FOUND` | `RuntimeError` |
+| `ng.ProgramRegistryError` | `ProgramRegistryBuilder.add_registered_node`、`add_registered_reducer` 和 `add_registered_condition` | `ValueError`、`RuntimeError` |
+
+前三种错误的消息以 `Program compilation failed`、`Program admission failed` 或 `Program operation failed` 开头，后面每个诊断占一行：其代码、JSON 指针和消息，有源位置时还有 `(source:line:col)`。`.diagnostics` 是字典列表，每个字典包含 `code`、`severity`、`phase`、`message`、`source_id`、`json_pointer`、`span` 和 `witness`。
+
+编译成功的 bundle 带有两个列表。`bundle.compile_diagnostics` 是编译器返回的内容：当前规则下的警告（JavaScript 调用位置在 `span` 中），以及 `P_JS_CONTROL_CHARACTER` 等编写警告。请向作者展示此列表。`bundle.diagnostics` 是封存进 bundle 并由 `bundle.id` 覆盖的副本。它保留 bundle 最初封存时的规则和措辞，因此更新的编译器不会改变 bundle id，也正因如此它可能与前者不同：它没有 span，并且可能仍列出当前规则已删除的警告，例如针对只有 Python 节点写入的通道的 `P_CORE_E6`。编译器和 `LocalProgramHost` 都不会向 stderr 打印 lint。
+
+### 调用模型的节点
+
+`LocalProgramHost` 不绑定任何提供商，因此图中含有 `llm_call` 或 `intent_classifier` 节点的 Program 无法通过准入(admission)：`compile_admit` 会抛出带有 `P_ADMIT_PROVIDER` 的 `ng.ProgramAdmissionError`，并指明该节点。请改为从 Python 节点调用模型。此类调用不计入 Program 的 `usage.model_tokens`。
+
+### 子 Program
+
+`ng.spawn` 需要子绑定解析器，而 `LocalProgramHost` 不配置它。因此，从 Python 发起的每个 `ng.spawn` 都会使运行以 `P_CHILD_BINDING`（"Program spawn has no configured child binding resolver"）失败。子 Program 需要一个设置了 `RuntimeConfig::child_binding_resolver` 的 C++ 宿主；该解析器把每个绑定名映射到 `link_module_child` 返回的 `ModuleLinkReceipt` 以及已准入(admission)的子 `ProgramVersion`。子 Program 的生命周期参见[递归智能体](PROGRAM_RECURSIVE_HARNESSES.md)。
+
+### 预算
+
+传给 `LocalProgramHost` 的 `budget_ceiling` 会成为准入(admission)策略的上限。除 `max_child_depth` 和 `max_total_children` 外，每个字段都必须为正数；即使 Program 从不调用模型，`model_tokens`、`monetary_microunits` 和 `max_dynamic_compiles` 也必须为正数。否则构造函数会抛出列出零值字段的 `ValueError`。两个子字段必须同时为零或同时为正数。
+
+`compile_admit(source, budget)` 和 `compile(source, budget)` 会把 `budget` 作为每个字段的最小值和最大值封存进 bundle；封存预算超过上限的 bundle 会在准入(admission)时被拒绝。针对该版本的每次 `run`、`start` 和 `start_active` 调用都必须逐字段传入相同的值。更大或更小的预算会抛出带 `P_START_BUDGET` 的 `ng.ProgramDiagnosticError`，其消息会指出第一个不同的字段，例如 `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`。要使用不同的预算，请重新编译并准入(admission)；结果是一个新的 `ProgramVersion`。运行预算的 `wall_time_ms`、`max_concurrency`、`max_program_operations` 和 `max_core_steps` 必须为正数；`model_tokens` 和 `monetary_microunits` 可以为零。
+
+### 调度线程、worker 与超时
+
+`LocalProgramHost(..., scheduler_threads=1, worker_count=1)` 接受两个线程设置。`scheduler_threads` 设置驱动运行（JavaScript 控制、`callCore` 分派、join 和截止时间）的 `ProgramRuntime` 调度池的线程数。它必须至少为 1。`worker_count` 设置每个 Core 引擎用于单个图内 fan-out 的 worker 池，且不得超过已准入(admission) Program 的 `max_concurrency`；默认值为 1 时，fan-out 分支在调度线程上运行。
+
+在 Program 运行期间，Python 节点主体不会占用调度线程。它在由绑定持有的 worker 池上运行，默认 32 个线程；要更改，请在首次 Program 运行之前把 `NEOGRAPH_PYTHON_NODE_THREADS` 设为 1 到 1024 之间的值。即使使用默认的单个调度线程，宿主的多个运行、`ng.all`、`ng.race` 和 `ng.quorum` 的成员，以及一次 Core 运行的 fan-out 分支也会同时推进，并且截止时间会在节点运行期间触发。`ng.race` 返回第一个完成的成员，`ng.quorum` 在所需的成功数到齐后返回。Python 代码仍在 GIL 下运行，因此 CPU 密集型节点不会并行；节点在释放 GIL 时（例如在 `time.sleep`、I/O 或原生调用中）才会重叠执行。普通的 `GraphEngine` 运行仍在调用线程上运行 Python 节点主体。
+
+两种限制都不会中断正在运行的 Python 节点；取消是协作式的。运行的 `wall_time_ms` 用尽时，运行时会取消该运行，结果在正在运行的节点返回后才到达，`status` 为 `TimedOut`，`failure.code` 为 `P_RUNTIME_TIMEOUT`，消息为 `Program wall-time budget (N ms) expired`。被超时中断的操作的文本位于 `failure.witness["cause_message"]`。`ng.await(command, timeoutMs, sourceSite)` 的截止时间过后，运行以 `P_AWAIT_TIMEOUT` 结束为 `TimedOut`，截止时间之后到达的完成不会被接受。在这两种情况下，子 Core 运行都会被取消；检查 `input.ctx.cancel_token.is_cancelled()` 的节点会提前停止，忽略它的节点会把结果推迟到它返回为止。`TimedOut` 和 `Cancelled` 结果会在 `execution_trace` 中列出已完成的 Core 节点。
+
+Program 引擎不会向 stderr 打印 lint，也不会打印 fan-out 提示。建议设置 `EngineConfig::worker_count` 的提示只来自你自己构建的 `GraphEngine`。
+
+### 内存状态与恢复
+
+`LocalProgramHost` 把 bundle、版本、激活、运行记录和检查点保存在宿主对象内部的内存中，不向磁盘写入任何内容。请在启动该运行的宿主实例仍然存在时，通过该实例恢复运行。进程重启后，或从另一个 `LocalProgramHost` 调用时，`resume()` 会抛出带 `P_RUN_NOT_FOUND` 的 `ng.ProgramDiagnosticError`：`run '<id>' was not found in this LocalProgramHost; runs are kept in memory by the host that started them`。持久化的 Program 存储（SQLite 和 PostgreSQL）是 C++ 宿主 API。
+
+`resume(run_id, value)` 返回一个句柄；调用 `.wait()` 获取结果。不传 `pending_id` 时，它会恢复该运行中唯一正在等待的调用。没有调用或有多个调用在等待时，它会抛出 `ValueError`；请把 `result.interrupt.pending_input.call_id` 作为 `pending_id` 传入，以精确指定该调用。
+
+`resume()` 返回的结果中，`execution_trace` 只列出恢复后运行的 Core 节点；中断前运行的节点出现在被中断的结果中。对于在 `b` 之前中断的 Core `a → b → c`，被中断的结果为 `["a"]`，恢复后的结果为 `["b", "c"]`。
 
 ## 强制生命周期 Hooks
 
@@ -560,7 +640,7 @@ for interface in card.supported_interfaces:
 
 params = a2a.MessageSendParams()
 params.message.message_id = str(uuid4())
-params.message.role = "user"
+params.message.role = a2a.Role.User
 params.message.parts = [
     a2a.Part.text_part("Explain this item."),
     a2a.Part.text_part("Keep the answer short."),

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=dd6643ac7acc1c663fb9d4c9852d5b973c7a484a51a38879092e5bdabee5ccf6 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=b546abc4e5c70be66da6420f47a1745c8f71aab16d643d6f64d4ac61701c5e83 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -348,6 +348,7 @@ metadata = ng.RunMetadata(
     owner_scope="tenant-a",
 )
 result = engine.run(config, metadata)
+checkpoint_id = result.checkpoint_id
 
 # Never substitutes a newer checkpoint:
 result = engine.resume_from(config, checkpoint_id, {"approved": True}, metadata)
@@ -375,7 +376,8 @@ import neograph_engine as ng
 
 @ng.node("my_node")
 def my_node(state):
-    return [ng.ChannelWrite("value", state.get("value", 0) + 1)]
+    # GraphState.get takes only the channel name; a missing channel is None.
+    return [ng.ChannelWrite("value", (state.get("value") or 0) + 1)]
 
 registry = (
     ng.ProgramRegistryBuilder()
@@ -420,7 +422,7 @@ run_budget.max_core_steps = 20
 host = ng.LocalProgramHost(registry, "tenant-a", ceiling)
 version = host.compile_admit(source, run_budget)
 result = host.run(version, {}, run_budget)
-print(result.status, result.output)
+print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 1
 ```
 
 `ProgramRegistryBuilder.add_registered_node`, `add_registered_reducer`, `add_registered_condition`은 이 프로세스에 이미 등록된 실행 단위를 복사합니다. 등록은 `@ng.node` 또는 `ng.NodeFactory.register_type`, `ng.ReducerRegistry.register_reducer`, `ng.ConditionRegistry.register_condition`으로 합니다. 등록되지 않은 이름을 넘기면 세 메서드 모두 `ng.ProgramRegistryError`를 발생시키고, 메시지는 필요한 등록 호출을 알려 줍니다. 이 오류의 `kind`는 `"node"`, `"reducer"`, `"condition"` 중 하나이고 `name`은 누락된 이름입니다. `ValueError`와 `RuntimeError`를 모두 상속하므로 둘 중 어느 쪽을 잡던 기존 처리기도 그대로 이 오류를 잡습니다. 레지스트리 스냅샷에 없는 노드 타입, 리듀서 또는 조건을 쓰는 Program은 대신 컴파일 시점에 실패합니다. `ProgramCompiler.compile`과 `LocalProgramHost.compile_admit` 모두 진단 `P_CORE_GC_REGISTRY_MISS`가 담긴 `ng.ProgramCompileError`를 발생시킵니다.
@@ -438,6 +440,84 @@ print(result.status, result.output)
 ```python
 manifest = ng.javascript_authoring_capability_manifest()
 ```
+
+### 모듈 구조와 `callCore`
+
+JavaScript Program은 그래프 빌더 하나를 반환하는 `define()`을 반드시 export해야 합니다. 그 그래프가 Program의 유일한 Core입니다. `define()`이 없으면 컴파일이 `P_JS_DEFINE_MISSING`과 함께 `ProgramCompileError`를 발생시키므로, `main()`만 export하는 모듈은 거부됩니다. `main()`은 선택 사항이며, 없으면 실행 시 Core를 직접 실행합니다.
+
+`ng.callCore(name, input, sourceSite)`는 `ng.graph(...)`에 전달한 이름(위 예제에서는 `"main"`)으로 그 Core를 지정해야 합니다. 다른 이름을 쓰면 실행이 `P_JS_CONTROL_COMMAND`로 실패합니다. 서로 다른 단계를 실행하려면 그 단계들을 해당 그래프에 넣고 다른 입력으로 다시 호출하십시오. 모든 노드 타입은 `add_registered_node`에 전달하기 전에 `@ng.node` 또는 `ng.NodeFactory.register_type`으로 등록하십시오. 이 메서드는 등록되지 않은 타입에 대해 `ng.ProgramRegistryError`를 발생시킵니다.
+
+완료된 `callCore`는 Core의 출력 객체를 `main()`에 돌려줍니다. 위 빠른 시작 예제는 이를 그대로 `result.output`으로 반환합니다:
+
+```json
+{"channels": {"value": {"value": 1, "version": 1}}, "global_version": 1, "value": 1}
+```
+
+`channels`에는 각 채널의 `value`와 `version`이 들어 있습니다. 각 채널의 값은 같은 이름의 최상위 키가 이미 있지 않은 한 채널 이름의 최상위 키로도 복사되므로, `main()`에서 `result.value`를 읽을 수 있습니다. 이름이 `channels` 또는 `global_version`인 채널은 `channels` 아래에서만 접근할 수 있습니다. barrier 목록은 정렬되어 저장됩니다. `graph.barrier("join", ["zeta", "alpha"])`는 `bundle.sealed_core_definitions`에 `{"wait_for": ["alpha", "zeta"]}`로 나타나며, 순서는 아무 영향이 없습니다.
+
+### 실패한 명령은 실행을 끝냅니다
+
+완료된 명령만 `main()`을 재개합니다. yield된 명령이 완료되지 않으면, 예를 들어 노드가 예외를 던졌거나 Core 단계 예산을 소진했거나 더 이상 발화할 수 없는 barrier에서 멈췄거나 wall-time 제한을 넘긴 `callCore`라면, `ProgramRuntime`은 그 결과를 기록하고 해당 `status`와 `failure`를 가진 실행의 최종 결과로 만듭니다. 제너레이터는 재개되지 않습니다. `yield`를 감싼 `try`/`catch`는 실행되지 않으며, 이후의 JavaScript도 실행되지 않습니다. 실패 정책에 따라 실패한 join(`ng.all`, `ng.race`, `ng.quorum`)도 같은 방식으로 실행을 끝냅니다. Python에서는 `result.status`와 `result.failure`로 실패를 처리하십시오. 중단(interrupt)된 명령은 다릅니다. 실행은 `Interrupted`로 멈추고, `resume()`이 그 명령을 이어서 실행합니다.
+
+### 그래프 검사와 barrier 정체
+
+컴파일은 스케줄러가 실제로 택하는 경로를 따라 Core 그래프를 검사합니다. 조건부 엣지가 있는 노드는 첫 번째 조건부 엣지로만 라우팅합니다. JavaScript Program은 엄격한 문서이므로 다음은 각각 `ng.ProgramCompileError`를 발생시킵니다:
+
+- `P_JS_GRAPH_ARGUMENT`: 노드 이름을 `__start__` 또는 `__end__`로 지정하는 `.node()` 호출에서 발생;
+- `P_JS_GRAPH_ENTRY`: `define()`이 노드는 있지만 `.entry()`가 없는 그래프를 반환할 때 발생;
+- `P_CORE_E13`: 조건부 엣지도 가진 노드에서 나가는 정적 엣지에 대해 발생(그 엣지는 결코 발화하지 않음);
+- `P_CORE_E14`: 같은 노드에서 나가는 두 번째 조건부 엣지에 대해 발생(그 엣지로는 결코 라우팅되지 않음).
+
+`P_CORE_E15`는 `bundle.compile_diagnostics`에 담기는 경고입니다. barrier 멤버에 join이나 `__end__`가 아닌 다른 곳으로 이어지는 경로가 있고, 그 경로를 타면 join이 정체됩니다. 루프는 유효합니다. 모든 순환을 `P_CORE_E16`으로 거부하려면(예: 계획과 체크리스트) `ProgramCompiler` 또는 `LocalProgramHost`에 `require_acyclic=True`를 전달하십시오.
+
+barrier는 `wait_for` 목록의 모든 노드가 그 barrier로 라우팅한 뒤에 발화합니다. 다른 방식으로 join에 도달하는 노드, 예를 들어 멤버의 실패 경로에 있는 보정(fix-up) 노드는 그 멤버를 대신하지 않습니다. 실행할 것이 더 남지 않았는데 join이 아직 신호를 쥐고 있으면 실행은 완료되지 않습니다. `P_CORE_BARRIER_STALLED`와 함께 `Failed`로 끝나고, `failure.core_node`는 그 join을 가리키며, `failure.witness["stalled_barriers"]`는 정체된 join마다 그 `wait_for`, `received`, `missing` 노드를 나열합니다. 이런 실행을 정상적으로 끝내는 것은 마지막 super-step에서 `__end__`로 향하는 명시적 경로뿐입니다. 즉 `__end__`로 가는 정적 엣지(`.exit()`가 만드는 엣지), `__end__`로 가는 조건부 경로, 또는 `Command.goto("__end__")`입니다. 후속 노드가 없는 노드로는 정상적으로 끝나지 않으며, 더 이른 super-step의 명시적 종료로도 마찬가지입니다. 같은 상태의 `GraphEngine` 실행은 `ng.RunStatus.BarrierStalled`를 반환하고, `result.output["_neograph"]["barrier_stalled"]`에 같은 세부 정보가 담깁니다.
+
+### 오류와 진단
+
+Python에서 발생하는 Program 오류는 타입이 지정되어 있고 진단을 보존합니다:
+
+| 예외 | 발생 위치 | 상위 클래스 |
+|---|---|---|
+| `ng.ProgramCompileError` | `ProgramCompiler.compile`, `LocalProgramHost.compile`, `compile_admit` | `RuntimeError` |
+| `ng.ProgramAdmissionError` | `LocalProgramHost.admit`, `compile_admit` (예: `P_ADMIT_POLICY` 또는 `P_ADMIT_PROVIDER`) | `RuntimeError` |
+| `ng.ProgramDiagnosticError` | `run`, `start`, `start_active`, `resume` (예: `P_START_BUDGET` 또는 `P_RUN_NOT_FOUND`) | `RuntimeError` |
+| `ng.ProgramRegistryError` | `ProgramRegistryBuilder.add_registered_node`, `add_registered_reducer`, `add_registered_condition` | `ValueError`, `RuntimeError` |
+
+앞의 세 예외의 메시지는 `Program compilation failed`, `Program admission failed` 또는 `Program operation failed`로 시작하고, 그 뒤에 진단마다 한 줄이 이어집니다. 각 줄에는 진단의 코드, JSON 포인터, 메시지가 있고, 소스 위치가 있는 진단이면 `(source:line:col)`도 붙습니다. `.diagnostics`는 `code`, `severity`, `phase`, `message`, `source_id`, `json_pointer`, `span`, `witness`를 가진 dict의 리스트입니다.
+
+컴파일에 성공한 번들은 두 목록을 가집니다. `bundle.compile_diagnostics`는 컴파일러가 반환한 그대로의 목록으로, JavaScript 호출 위치를 `span`에 담은 현재 규칙의 경고와 `P_JS_CONTROL_CHARACTER` 같은 작성 경고가 들어 있습니다. 작성자에게는 이 목록을 보여 주십시오. `bundle.diagnostics`는 번들에 봉인되어 `bundle.id`가 포괄하는 사본입니다. 이 사본은 번들이 처음 봉인될 때의 규칙과 문구를 유지하므로 새 컴파일러가 번들 id를 바꾸지 않으며, 그 때문에 내용이 다를 수 있습니다. span이 없고, Python 노드만 쓰는 채널에 대한 `P_CORE_E6`처럼 현재 규칙에서는 빠진 경고가 여전히 들어 있을 수 있습니다. 컴파일러도 `LocalProgramHost`도 stderr에 lint를 출력하지 않습니다.
+
+### 모델을 호출하는 노드
+
+`LocalProgramHost`는 제공자를 바인딩하지 않으므로, 그래프에 `llm_call` 또는 `intent_classifier` 노드가 있는 Program은 승인(admission)될 수 없습니다. `compile_admit`는 그 노드를 지목하는 `P_ADMIT_PROVIDER`가 담긴 `ng.ProgramAdmissionError`를 발생시킵니다. 대신 Python 노드에서 모델을 호출하십시오. 이런 호출은 Program의 `usage.model_tokens`에 집계되지 않습니다.
+
+### 자식 Program
+
+`ng.spawn`에는 자식 바인딩 리졸버가 필요한데, `LocalProgramHost`는 이를 구성하지 않습니다. 따라서 Python에서 호출한 모든 `ng.spawn`은 `P_CHILD_BINDING`("Program spawn has no configured child binding resolver")으로 실행을 실패시킵니다. 자식 Program에는 `RuntimeConfig::child_binding_resolver`를 설정하는 C++ 호스트가 필요합니다. 이 리졸버는 각 바인딩 이름을 `link_module_child`가 반환한 `ModuleLinkReceipt`와 승인(admission)된 자식 `ProgramVersion`에 대응시킵니다. 자식 수명 주기는 [재귀 에이전트](PROGRAM_RECURSIVE_HARNESSES.md)를 참조하십시오.
+
+### 예산
+
+`LocalProgramHost`에 전달한 `budget_ceiling`은 승인(admission) 정책의 상한이 됩니다. `max_child_depth`와 `max_total_children`을 제외한 모든 필드는 양수여야 하며, 모델을 전혀 호출하지 않는 Program이라도 `model_tokens`, `monetary_microunits`, `max_dynamic_compiles` 역시 양수여야 합니다. 그렇지 않으면 생성자가 0인 필드 이름을 담은 `ValueError`를 발생시킵니다. 두 자식 필드는 둘 다 0이거나 둘 다 양수여야 합니다.
+
+`compile_admit(source, budget)`와 `compile(source, budget)`는 `budget`을 모든 필드의 최솟값이자 최댓값으로 번들에 봉인하며, 봉인된 예산이 상한을 넘는 번들은 승인(admission)에서 거부됩니다. 그 버전에 대한 각 `run`, `start`, `start_active` 호출은 필드마다 같은 값을 전달해야 합니다. 더 크거나 작은 예산은 `P_START_BUDGET`이 담긴 `ng.ProgramDiagnosticError`를 발생시키며, 그 메시지에는 값이 다른 첫 번째 필드가 나옵니다. 예를 들면 `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`입니다. 다른 예산을 쓰려면 다시 컴파일하고 승인(admission)하십시오. 그 결과는 새 `ProgramVersion`입니다. 실행 예산의 `wall_time_ms`, `max_concurrency`, `max_program_operations`, `max_core_steps`는 양수여야 하며, `model_tokens`와 `monetary_microunits`는 0이어도 됩니다.
+
+### 스케줄러 스레드, 워커, 타임아웃
+
+`LocalProgramHost(..., scheduler_threads=1, worker_count=1)`는 두 가지 스레드 설정을 받습니다. `scheduler_threads`는 실행을 구동하는(JavaScript 제어, `callCore` 디스패치, join, 데드라인) `ProgramRuntime` 스케줄러 풀의 스레드 수를 정합니다. 1 이상이어야 합니다. `worker_count`는 하나의 그래프 안의 fan-out에 쓰이는 각 Core 엔진의 워커 풀을 정하며, 승인(admission)된 Program의 `max_concurrency`를 넘으면 안 됩니다. 기본값 1에서는 fan-out 분기가 스케줄러 스레드에서 실행됩니다.
+
+Python 노드 본문은 Program 실행 중에 스케줄러 스레드를 점유하지 않습니다. 본문은 바인딩이 소유한 워커 풀에서 실행되며, 이 풀은 기본적으로 스레드 32개입니다. 바꾸려면 첫 Program 실행 전에 `NEOGRAPH_PYTHON_NODE_THREADS`를 1부터 1024까지의 값으로 설정하십시오. 기본값인 스케줄러 스레드 하나로도 호스트의 여러 실행, `ng.all`, `ng.race`, `ng.quorum`의 멤버, 하나의 Core 실행의 fan-out 분기가 동시에 진행되며, 노드가 실행되는 동안에도 데드라인이 발동합니다. `ng.race`는 가장 먼저 끝난 멤버를 반환하고, `ng.quorum`은 필요한 성공이 모이면 반환합니다. 그래도 Python 코드는 GIL 아래에서 실행되므로 CPU 위주의 노드는 병렬로 실행되지 않습니다. 노드는 `time.sleep`, I/O, 네이티브 호출 등에서 GIL을 해제하는 동안 겹쳐 실행됩니다. 일반 `GraphEngine` 실행은 여전히 호출 스레드에서 Python 노드 본문을 실행합니다.
+
+두 제한 모두 실행 중인 Python 노드를 중단시키지 않습니다. 취소는 협력적으로 이루어집니다. 실행의 `wall_time_ms`가 다 되면 런타임은 실행을 취소하고, 결과는 실행 중인 노드가 반환된 뒤에 `status` `TimedOut`, `failure.code` `P_RUNTIME_TIMEOUT`, 메시지 `Program wall-time budget (N ms) expired`로 도착합니다. 타임아웃이 중단시킨 작업의 텍스트는 `failure.witness["cause_message"]`에 있습니다. `ng.await(command, timeoutMs, sourceSite)`의 데드라인이 지나면 실행은 `P_AWAIT_TIMEOUT`과 함께 `TimedOut`으로 끝나며, 데드라인 이후에 도착한 완료는 받아들여지지 않습니다. 두 경우 모두 자식 Core 실행이 취소됩니다. `input.ctx.cancel_token.is_cancelled()`를 확인하는 노드는 일찍 멈추고, 이를 무시하는 노드는 반환될 때까지 결과를 늦춥니다. `TimedOut`과 `Cancelled` 결과는 완료된 Core 노드를 `execution_trace`에 나열합니다.
+
+Program 엔진은 stderr에 lint도 fan-out 안내도 출력하지 않습니다. `EngineConfig::worker_count`를 권하는 안내는 직접 만든 `GraphEngine`에서만 나옵니다.
+
+### 인메모리 상태와 재개
+
+`LocalProgramHost`는 번들, 버전, 활성화, 실행 기록, 체크포인트를 호스트 객체 내부의 메모리에 보관하며 디스크에는 아무것도 쓰지 않습니다. 실행은 그 실행을 시작한 호스트 인스턴스가 살아 있는 동안 그 인스턴스를 통해 재개하십시오. 프로세스를 재시작한 뒤나 다른 `LocalProgramHost`에서는 `resume()`이 `P_RUN_NOT_FOUND`가 담긴 `ng.ProgramDiagnosticError`를 발생시킵니다. 메시지는 `run '<id>' was not found in this LocalProgramHost; runs are kept in memory by the host that started them`입니다. 내구성 있는 Program 저장소(SQLite, PostgreSQL)는 C++ 호스트 API입니다.
+
+`resume(run_id, value)`는 핸들을 반환합니다. 결과를 받으려면 `.wait()`를 호출하십시오. `pending_id`가 없으면 실행에서 대기 중인 유일한 호출을 재개합니다. 대기 중인 호출이 없거나 여러 개이면 `ValueError`를 발생시킵니다. 호출을 정확히 지정하려면 `result.interrupt.pending_input.call_id`를 `pending_id`로 전달하십시오.
+
+`resume()`이 반환한 결과의 `execution_trace`에는 재개 이후에 실행된 Core 노드만 나열됩니다. 중단 전에 실행된 노드는 중단된 결과에 나타납니다. `b` 앞에서 중단되는 Core `a → b → c`라면 중단된 결과는 `["a"]`, 재개된 결과는 `["b", "c"]`를 가집니다.
 
 ## 필수 수명 주기 Hooks
 
@@ -561,7 +641,7 @@ for interface in card.supported_interfaces:
 
 params = a2a.MessageSendParams()
 params.message.message_id = str(uuid4())
-params.message.role = "user"
+params.message.role = a2a.Role.User
 params.message.parts = [
     a2a.Part.text_part("Explain this item."),
     a2a.Part.text_part("Keep the answer short."),
