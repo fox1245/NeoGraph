@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ja source_sha256=b0fae62c9be25c3d689e9b3e593d7cb4bead7a6eae7460e70e5fc8e3e0804f6c -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ja source_sha256=0ed7fca0268a366ef69a1087706909ad01e375f3f529b13b8be0035926f559ac -->
 # The Beast — 生成・進化・ロールバック
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -13,7 +13,7 @@ Forge は low reasoning effort と300秒 provider timeout を使い、ask ごと
 Failure、observer/settlement エラー、内容のある部分応答は追加呼出しを起こしません。
 この budget recovery は compiler/初期化 repair と別で、interface-4 ソース契約であり新しい live pass ではありません。
 
-非公開OpenRouter経路 `~deepseek/deepseek-v4-flash-latest`、`zdr: true`、`only: ["morph"]`、`allow_fallbacks: false` を維持する。適格エンドポイントがなければ他社へ開示せず失敗する。ZDRと過去のUS所在地記録は常駐・現在の可用性保証ではない。ライブには承認されたキー、ネットワーク/提供者と有料容量が必要で、プロンプト・スキーマ・診断・ネイティブ履歴をこの経路へ送信する。生成した Python server の実行は独立した local code-execution trust boundary で、NeoGraph の Python provider binding とは別です。キー・非公開プロンプトを公開しない。nullableトークン数は金額ではなく、価格と実際の請求対象使用量が必要。
+非公開OpenRouter経路 `~deepseek/deepseek-v4-flash-latest` と `zdr: true`（共有のサンプル provider factory）を維持する。適格なデータ非保持（ZDR）エンドポイントがなければ、データを保持する提供者へ開示せず失敗する。ZDRエンドポイントの記載は常駐・現在の可用性保証ではない。ライブには承認されたキー、ネットワーク/提供者と有料容量が必要で、プロンプト・スキーマ・診断・ネイティブ履歴をこの経路へ送信する。生成した Python server の実行は独立した local code-execution trust boundary で、NeoGraph の Python provider binding とは別です。キー・非公開プロンプトを公開しない。nullableトークン数は金額ではなく、価格と実際の請求対象使用量が必要。
 
 保存済み interface-3 の範囲限定実行証拠は実際のオフライン strict Core コンパイル・進化・checkpoint rollback のみ。すべての live/apex/forge/script 変種や vendor 推論の検証ではない。以下のコンソール・ベンチ・fuzz・live 実行記録は過去の証拠で、interface-4 測定ではない。整合性 gate は明記された構造/効果契約の性質を扱い、提供者の通信・プライバシー・モデルの意味的真実を証明しない。Python provider binding は型付き API に従い、その検証はこの C++ 実行とは別です。
 
@@ -97,7 +97,7 @@ $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```
 
-`the_beast_live.cpp`は`~deepseek/deepseek-v4-flash-latest`を`provider: {"zdr": true, "only": ["morph"], "allow_fallbacks": false}`に固定する。検証時点で、OpenRouterはMorphのデータセンターを米国としてリストし、そのモデル/プロバイダエンドポイントをZDR対応としてリストしていた。これは厳密なプロバイダ選択であり、OpenRouterのリージョン内常駐保証ではない：その文書化されたリージョン内保証は現在、エンタープライズEUルートである。Morphの適格エンドポイントが利用できない場合、プロンプトを別のプロバイダに送信するのではなく、リクエストは失敗する。
+`the_beast_live.cpp`と`the_beast_copy_ninja.cpp`は、共有のサンプル provider factory を通じて`~deepseek/deepseek-v4-flash-latest`を`provider: {"zdr": true}`で送信する。OpenRouterはデータ非保持（ZDR）としてリストしたエンドポイントにのみルーティングし、それらの間でフォールバックすることがある。ZDRは保持ポリシーであり、OpenRouterのリージョン内常駐保証ではない：その文書化されたリージョン内保証は現在、エンタープライズEUルートである。ZDRエンドポイントが利用できない場合、プロンプトをデータを保持するプロバイダに送信するのではなく、リクエストは失敗する。
 
 live author 経路の provider timeout は180秒です。Forge の別の300秒 timeout は制限付き generation 呼出しに使い、どちらも共有 provider factory の既定値を変えません。
 

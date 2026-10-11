@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=zh-CN source_sha256=c1f59cee25dec6acb7c278971998594a9bfe75ebfa0beb55a5a8984ea62b0ea1 -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=zh-CN source_sha256=e7b1391ddc95470be622551937b4ac833623fd97280f71e2d09cc07865360b8b -->
 # 一致性门控的健全性——一个形式化伴随文档
 
 **Languages:** [English](SOUNDNESS.md) | [한국어](SOUNDNESS.ko.md) | [日本語](SOUNDNESS.ja.md) | [简体中文](SOUNDNESS.zh-CN.md)
@@ -11,7 +11,7 @@ interface-4 [Forge 源码契约](README.md) 将空 `MaxTokens` 恢复限制为�
 固定300秒 deadline，保留 outcome/usage。
 不会重试 failure 或 observer/settlement 错误。
 
-保留私有 OpenRouter 路由 `~deepseek/deepseek-v4-flash-latest`，`zdr: true`、`only: ["morph"]`、`allow_fallbacks: false`：无合格端点则失败，不向其他提供方披露。ZDR 和历史美国端点记录不是驻留或当前可用性保证。实时执行需要获授权的密钥、网络/提供方及付费容量；提示、导出模式、诊断和原生历史会发送至该路由。生成的 Python server 执行有独立 local code-execution trust boundary，与 NeoGraph Python provider binding 分开。不要公开密钥或私有提示。可空 token 计数不是美元费用，需定价和实际计费用量。
+保留私有 OpenRouter 路由 `~deepseek/deepseek-v4-flash-latest` 与 `zdr: true`（共享示例 provider factory）：无合格的零数据保留（ZDR）端点则失败，不向保留数据的提供方披露。ZDR 端点列表不是驻留或当前可用性保证。实时执行需要获授权的密钥、网络/提供方及付费容量；提示、导出模式、诊断和原生历史会发送至该路由。生成的 Python server 执行有独立 local code-execution trust boundary，与 NeoGraph Python provider binding 分开。不要公开密钥或私有提示。可空 token 计数不是美元费用，需定价和实际计费用量。
 
 保留的 interface-3 限定范围运行证据涵盖实际离线 strict Core 编译、演化及 checkpoint rollback，不验证所有 live/apex/forge/script 变体或 vendor 推理。下文控制台、基准、fuzz 和 live 执行记录仍为历史证据，不是 interface-4 测量。一致性 gate 仅建立所声明的结构/效果契约性质，不证明提供方传输、隐私正确性或模型语义真实性。Python provider binding 现遵循类型化 API；验证与这些 C++ 运行分开。
 

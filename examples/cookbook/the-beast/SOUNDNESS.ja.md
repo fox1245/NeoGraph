@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=ja source_sha256=c1f59cee25dec6acb7c278971998594a9bfe75ebfa0beb55a5a8984ea62b0ea1 -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=ja source_sha256=e7b1391ddc95470be622551937b4ac833623fd97280f71e2d09cc07865360b8b -->
 # コヒーレンス・ゲートの健全性 — 正式なコンパニオン
 
 **Languages:** [English](SOUNDNESS.md) | [한국어](SOUNDNESS.ko.md) | [日本語](SOUNDNESS.ja.md) | [简体中文](SOUNDNESS.zh-CN.md)
@@ -11,7 +11,7 @@ interface-4 [Forge ソース契約](README.md) は空の `MaxTokens` 回復を�
 制限し、300秒 deadline を固定して outcome/usage を保持します。
 failure や observer/settlement エラーは再試行しません。
 
-非公開OpenRouter経路 `~deepseek/deepseek-v4-flash-latest`、`zdr: true`、`only: ["morph"]`、`allow_fallbacks: false` を維持する。適格エンドポイントがなければ他社へ開示せず失敗する。ZDRと過去のUS所在地記録は常駐・現在の可用性保証ではない。ライブには承認されたキー、ネットワーク/提供者と有料容量が必要で、プロンプト・スキーマ・診断・ネイティブ履歴をこの経路へ送信する。生成した Python server の実行は独立した local code-execution trust boundary で、NeoGraph の Python provider binding とは別です。キー・非公開プロンプトを公開しない。nullableトークン数は金額ではなく、価格と実際の請求対象使用量が必要。
+非公開OpenRouter経路 `~deepseek/deepseek-v4-flash-latest` と `zdr: true`（共有のサンプル provider factory）を維持する。適格なデータ非保持（ZDR）エンドポイントがなければ、データを保持する提供者へ開示せず失敗する。ZDRエンドポイントの記載は常駐・現在の可用性保証ではない。ライブには承認されたキー、ネットワーク/提供者と有料容量が必要で、プロンプト・スキーマ・診断・ネイティブ履歴をこの経路へ送信する。生成した Python server の実行は独立した local code-execution trust boundary で、NeoGraph の Python provider binding とは別です。キー・非公開プロンプトを公開しない。nullableトークン数は金額ではなく、価格と実際の請求対象使用量が必要。
 
 保存済み interface-3 の範囲限定実行証拠は実際のオフライン strict Core コンパイル・進化・checkpoint rollback のみ。すべての live/apex/forge/script 変種や vendor 推論の検証ではない。以下のコンソール・ベンチ・fuzz・live 実行記録は過去の証拠で、interface-4 測定ではない。整合性 gate は明記された構造/効果契約の性質を扱い、提供者の通信・プライバシー・モデルの意味的真実を証明しない。Python provider binding は型付き API に従い、その検証はこの C++ 実行とは別です。
 

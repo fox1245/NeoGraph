@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=zh-CN source_sha256=b0fae62c9be25c3d689e9b3e593d7cb4bead7a6eae7460e70e5fc8e3e0804f6c -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=zh-CN source_sha256=0ed7fca0268a366ef69a1087706909ad01e375f3f529b13b8be0035926f559ac -->
 # The Beast — 生成 · 演化 · 回滚
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -13,7 +13,7 @@ Forge 使用 low reasoning effort 和300秒 provider timeout，每次 ask 固定
 Failure、observer/settlement 错误、有内容的部分响应不触发额外调用。此 budget recovery
 与 compiler/初始化 repair 分开，是 interface-4 源码契约，不是新的 live 通过。
 
-保留私有 OpenRouter 路由 `~deepseek/deepseek-v4-flash-latest`，`zdr: true`、`only: ["morph"]`、`allow_fallbacks: false`：无合格端点则失败，不向其他提供方披露。ZDR 和历史美国端点记录不是驻留或当前可用性保证。实时执行需要获授权的密钥、网络/提供方及付费容量；提示、导出模式、诊断和原生历史会发送至该路由。生成的 Python server 执行有独立 local code-execution trust boundary，与 NeoGraph Python provider binding 分开。不要公开密钥或私有提示。可空 token 计数不是美元费用，需定价和实际计费用量。
+保留私有 OpenRouter 路由 `~deepseek/deepseek-v4-flash-latest` 与 `zdr: true`（共享示例 provider factory）：无合格的零数据保留（ZDR）端点则失败，不向保留数据的提供方披露。ZDR 端点列表不是驻留或当前可用性保证。实时执行需要获授权的密钥、网络/提供方及付费容量；提示、导出模式、诊断和原生历史会发送至该路由。生成的 Python server 执行有独立 local code-execution trust boundary，与 NeoGraph Python provider binding 分开。不要公开密钥或私有提示。可空 token 计数不是美元费用，需定价和实际计费用量。
 
 保留的 interface-3 限定范围运行证据涵盖实际离线 strict Core 编译、演化及 checkpoint rollback，不验证所有 live/apex/forge/script 变体或 vendor 推理。下文控制台、基准、fuzz 和 live 执行记录仍为历史证据，不是 interface-4 测量。一致性 gate 仅建立所声明的结构/效果契约性质，不证明提供方传输、隐私正确性或模型语义真实性。Python provider binding 现遵循类型化 API；验证与这些 C++ 运行分开。
 
@@ -97,7 +97,7 @@ $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```
 
-`the_beast_live.cpp` 将 `~deepseek/deepseek-v4-flash-latest` 固定到 `provider: {"zdr": true, "only": ["morph"], "allow_fallbacks": false}`。在验证时，OpenRouter 将 Morph 的数据中心列为美国，并将该模型/提供商端点列为支持 ZDR。这是严格的提供商选择，而非 OpenRouter 的区域驻留保证：其文档化的区域驻留保证目前是企业 EU 路由。如果 Morph 的合格端点不可用，请求将失败，而不是将提示发送到不同的提供商。
+`the_beast_live.cpp` 和 `the_beast_copy_ninja.cpp` 通过共享示例 provider factory，以 `provider: {"zdr": true}` 发送 `~deepseek/deepseek-v4-flash-latest`。OpenRouter 只会路由到其列为零数据保留（ZDR）的端点，并可在这些端点之间回退。ZDR 是数据保留策略，而非 OpenRouter 的区域驻留保证：其文档化的区域驻留保证目前是企业 EU 路由。如果没有可用的 ZDR 端点，请求将失败，而不是将提示发送到保留数据的提供商。
 
 live author 路径的 provider timeout 为180秒；Forge 的独立300秒 timeout 用于有限 generation 调用，两者都不改变共享 provider factory 默认值。
 

@@ -218,13 +218,9 @@ int main(int argc, char** argv) {
     register_local_copy_ninja_node(harness);
 
     const std::string model            = "~deepseek/deepseek-v4-flash-latest";
-    sp::OpenRouterRouting provider_routing;
-    provider_routing.zdr = true;
-    provider_routing.only = {"morph"};
-    provider_routing.allow_fallbacks = false;
+    // The shared example factory routes only to ZDR endpoints (`zdr: true`).
     std::shared_ptr<neograph::Provider> provider =
-        examples::make_openrouter_provider(
-            key, "chat", std::chrono::seconds(180), std::move(provider_routing));
+        examples::make_openrouter_provider(key, "chat", std::chrono::seconds(180));
     auto usage = std::make_shared<neograph::UsageAccumulator>();
     beast::UsageReport usage_report(usage);
 

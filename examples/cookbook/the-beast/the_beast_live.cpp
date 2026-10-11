@@ -14,8 +14,9 @@
 // creative; coherence is proven.
 //
 // Setup:  put OPENROUTER_API_KEY=sk-or-... in .env beside the binary
-//         (or export it). Pins DeepSeek V4 Flash 0731 to Morph's advertised
-//         US ZDR endpoint; an unavailable endpoint fails rather than falling back.
+//         (or export it). Routes DeepSeek V4 Flash only to OpenRouter's zero
+//         data retention (ZDR) endpoints; with no eligible endpoint the
+//         request fails rather than reaching a provider that retains data.
 // Build:  cmake --build build --target cookbook_the_beast_live
 // Run:    ./build/cookbook_the_beast_live
 
@@ -83,18 +84,10 @@ int main(int argc, char** argv) {
     register_beast_node();
 
     const std::string model            = "~deepseek/deepseek-v4-flash-latest";
-    sp::OpenRouterRouting provider_routing;
-    provider_routing.zdr = true;
-    provider_routing.only = {"morph"};
-    provider_routing.allow_fallbacks = false;
-    // `zdr` enforces retention policy; the `only` constraint pins this sample
-    // to Morph. OpenRouter's public provider metadata advertised Morph's
-    // datacenters as US on 2026-08-08. This is not a generic residency API.
-    // Source: https://openrouter.ai/docs/guides/routing/provider-selection
+    // The shared example factory routes only to ZDR endpoints (`zdr: true`).
     // Source: https://openrouter.ai/docs/guides/features/zdr
     std::shared_ptr<neograph::Provider> provider =
-        examples::make_openrouter_provider(
-            key, "chat", std::chrono::seconds(180), std::move(provider_routing));
+        examples::make_openrouter_provider(key, "chat", std::chrono::seconds(180));
     auto usage = std::make_shared<neograph::UsageAccumulator>();
     beast::UsageReport usage_report(usage);
 
@@ -103,7 +96,7 @@ int main(int argc, char** argv) {
 
     std::cout << "============ THE BEAST (live) ============\n"
                  "Author: "
-              << model << " via OpenRouter (Morph US ZDR route).\n"
+              << model << " via OpenRouter (ZDR endpoints only).\n"
               << "The model writes the harness; the compiler proves it coherent.\n\n";
 
     // Hand the model the engine's real schema — the exact palette this

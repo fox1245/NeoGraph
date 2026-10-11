@@ -14,7 +14,7 @@ observer/settlement errors and nonempty partial replies do not trigger another
 call; this budget recovery is separate from compiler/initialization repair.
 These are interface-4 source contracts, not a new live-provider pass.
 
-Keep the private OpenRouter route `~deepseek/deepseek-v4-flash-latest` with `zdr: true`, `only: ["morph"]`, `allow_fallbacks: false`: no eligible endpoint means failure, not disclosure to another provider. ZDR and historical US endpoint listings are not a residency guarantee or proof of current availability. Live execution requires an authorized key, network/provider availability and paid capacity; prompts, exported schemas, diagnostics and native history are sent to that route. Generated Python server execution has its own local code-execution trust boundary, separate from NeoGraph's Python provider bindings. Never publish keys or private prompts. Nullable token counters are not a dollar cost; pricing and actual billable usage are prerequisites.
+Keep the private OpenRouter route `~deepseek/deepseek-v4-flash-latest` with `zdr: true` (the shared example provider factory): no eligible zero-data-retention endpoint means failure, not disclosure to a provider that retains data. ZDR endpoint listings are not a residency guarantee or proof of current availability. Live execution requires an authorized key, network/provider availability and paid capacity; prompts, exported schemas, diagnostics and native history are sent to that route. Generated Python server execution has its own local code-execution trust boundary, separate from NeoGraph's Python provider bindings. Never publish keys or private prompts. Nullable token counters are not a dollar cost; pricing and actual billable usage are prerequisites.
 
 Preserved interface-3 scoped runtime evidence covers actual offline strict Core compilation, evolution and checkpoint rollback. It does not qualify every live/apex/forge/script variant or vendor inference. Retained console transcripts, benchmark/fuzz results and live execution claims below remain historical, not interface-4 measurements. Coherence gates establish their stated structural/effect-contract properties, not provider transport/privacy correctness or model semantic truth. The Python provider bindings now follow the typed API; their verification is separate from these C++ runs.
 
@@ -139,14 +139,14 @@ $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```
 
-`the_beast_live.cpp` pins `~deepseek/deepseek-v4-flash-latest` to
-`provider: {"zdr": true, "only": ["morph"], "allow_fallbacks": false}`.
-At the time of verification, OpenRouter listed Morph's datacenters as US and
-listed that model/provider endpoint as ZDR-capable. This is a strict provider
-selection, not OpenRouter's in-region residency guarantee: its documented
-in-region guarantee is currently the enterprise EU route. If Morph's eligible
-endpoint is unavailable, the request fails rather than sending the prompt to a
-different provider.
+`the_beast_live.cpp` and `the_beast_copy_ninja.cpp` send
+`~deepseek/deepseek-v4-flash-latest` with `provider: {"zdr": true}` through the
+shared example provider factory. OpenRouter then routes only to endpoints it
+lists as zero data retention and may fall back among them. ZDR is a retention
+policy, not OpenRouter's in-region residency guarantee: its documented
+in-region guarantee is currently the enterprise EU route. If no ZDR endpoint is
+available, the request fails rather than sending the prompt to a provider that
+retains data.
 
 The live author path uses a 180-second provider timeout. Forge's separate
 300-second timeout accommodates its bounded generation calls; neither setting
