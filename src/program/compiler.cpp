@@ -2195,7 +2195,16 @@ struct ProgramCompiler::Impl {
             std::optional<ProgramSource> control_source;
             try {
                 if (source.kind() == SourceKind::JavaScript) {
-                    auto evaluation = detail::evaluate_javascript_source(source, config.javascript);
+                    // A host-declared budget also bounds compile-time evaluation. The
+                    // deadline only stops evaluation; it never changes a sealed document.
+                    auto limits = config.javascript;
+                    if (javascript_budget_bounds) {
+                        limits.max_wall_time_ms = std::min(
+                            limits.max_wall_time_ms,
+                            std::max<std::uint64_t>(
+                                1, javascript_budget_bounds->maximum.wall_time_ms));
+                    }
+                    auto evaluation = detail::evaluate_javascript_source(source, limits);
                     document        = std::move(evaluation.document);
                     if (javascript_budget_bounds)
                         document["declared_budget_requirements"] =

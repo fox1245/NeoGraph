@@ -1,5 +1,7 @@
 """Python parity for NeoGraph's optional Program / QuickJS control plane."""
 
+import time
+
 import pytest
 
 import neograph_engine as ng
@@ -244,3 +246,38 @@ def test_failed_result_keeps_the_trace_of_nodes_that_completed():
     assert result.execution_trace == ["A", "B"]
     parsed = ng.ProgramResult.parse(result.serialize_canonical())
     assert parsed.execution_trace == ["A", "B"]
+
+
+_SPIN = "export function define() { let i = 0; while (true) { i++; } }"
+
+
+def test_compile_time_javascript_stops_at_the_budget_wall_time():
+    compiler = ng.ProgramCompiler(_registry(), "python-program-test/v1")
+    budget = _budget()
+    budget.wall_time_ms = 300
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="P_JS_TIMEOUT"):
+        compiler.compile(ng.ProgramSource.from_javascript("spin.js", _SPIN), budget)
+    assert time.monotonic() - started < 5
+
+
+def test_program_compilers_accept_javascript_compile_limits():
+    limits = ng.ProgramJavaScriptCompileLimits()
+    assert limits.max_wall_time_ms == 60_000
+    limits.max_wall_time_ms = 300
+    source = ng.ProgramSource.from_javascript("spin.js", _SPIN)
+
+    compiler = ng.ProgramCompiler(_registry(), "python-program-test/v1", limits)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="P_JS_TIMEOUT"):
+        compiler.compile(source)
+    assert time.monotonic() - started < 5
+
+    host = ng.LocalProgramHost(
+        _registry(), "python-owner-limits", _ceiling(), "python-program-host/v1",
+        javascript_limits=limits,
+    )
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="P_JS_TIMEOUT"):
+        host.compile(source, _budget())
+    assert time.monotonic() - started < 5

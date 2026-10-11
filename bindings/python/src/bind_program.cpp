@@ -190,14 +190,15 @@ public:
                      RunBudget budget_ceiling,
                      std::string compiler_build_id,
                      std::size_t scheduler_threads,
-                     std::shared_ptr<sp::NativeArchive> native_history_archive)
+                     std::shared_ptr<sp::NativeArchive> native_history_archive,
+                     JavaScriptCompileLimits javascript_limits)
         : registry_(std::move(registry)),
           owner_scope_(std::move(owner_scope)),
           compiler_build_id_(std::move(compiler_build_id)),
           profile_(local_profile(registry_)),
           policy_(local_policy(registry_, profile_, owner_scope_, budget_ceiling)),
           compiler_(std::make_shared<ProgramCompiler>(
-              registry_, ProgramCompilerConfig{compiler_build_id_})),
+              registry_, ProgramCompilerConfig{compiler_build_id_, javascript_limits})),
           store_(std::make_shared<InMemoryProgramStore>()),
           catalog_(std::make_shared<ProgramCatalog>(CatalogConfig{
               store_, registry_, std::make_shared<EngineGenerationCache>(), compiler_build_id_})),
@@ -466,11 +467,25 @@ void init_program(py::module_& m) {
         })
         .def("serialize_canonical", &ProgramBundle::serialize_canonical);
 
+    py::class_<JavaScriptCompileLimits>(m, "ProgramJavaScriptCompileLimits",
+        "Host ceilings for compile-time JavaScript evaluation. A budget passed to "
+        "compile() lowers the wall-time ceiling to its wall_time_ms.")
+        .def(py::init<>())
+        .def_readwrite("memory_limit_bytes", &JavaScriptCompileLimits::memory_limit_bytes)
+        .def_readwrite("max_stack_bytes", &JavaScriptCompileLimits::max_stack_bytes)
+        .def_readwrite("max_interrupt_polls", &JavaScriptCompileLimits::max_interrupt_polls)
+        .def_readwrite("max_wall_time_ms", &JavaScriptCompileLimits::max_wall_time_ms)
+        .def_readwrite("max_generated_document_bytes",
+                       &JavaScriptCompileLimits::max_generated_document_bytes);
+
     py::class_<ProgramCompiler>(m, "ProgramCompiler")
-        .def(py::init([](RegistrySnapshot registry, std::string compiler_build_id) {
+        .def(py::init([](RegistrySnapshot registry, std::string compiler_build_id,
+                         JavaScriptCompileLimits javascript_limits) {
             return std::make_unique<ProgramCompiler>(
-                std::move(registry), ProgramCompilerConfig{std::move(compiler_build_id)});
-        }), py::arg("registry"), py::arg("compiler_build_id") = "neograph-python-program/v1")
+                std::move(registry),
+                ProgramCompilerConfig{std::move(compiler_build_id), javascript_limits});
+        }), py::arg("registry"), py::arg("compiler_build_id") = "neograph-python-program/v1",
+            py::arg("javascript_limits") = JavaScriptCompileLimits{})
         .def("compile", [](const ProgramCompiler& self, const ProgramSource& source,
                             py::object budget) {
             try {
@@ -580,11 +595,12 @@ void init_program(py::module_& m) {
         "Owner-scoped in-memory Program compiler, Catalog, and durable runtime. "
         "It uses the same C++ ProgramRuntime as native callers.")
         .def(py::init<RegistrySnapshot, std::string, RunBudget, std::string, std::size_t,
-                      std::shared_ptr<sp::NativeArchive>>(),
+                      std::shared_ptr<sp::NativeArchive>, JavaScriptCompileLimits>(),
              py::arg("registry"), py::arg("owner_scope"), py::arg("budget_ceiling"),
              py::arg("compiler_build_id") = "neograph-python-program/v1",
              py::arg("scheduler_threads") = 1,
-             py::arg("native_history_archive") = nullptr)
+             py::arg("native_history_archive") = nullptr,
+             py::arg("javascript_limits") = JavaScriptCompileLimits{})
         .def_property_readonly("owner_scope", &LocalProgramHost::owner_scope)
         .def("compile", &LocalProgramHost::compile)
         .def("admit", &LocalProgramHost::admit)

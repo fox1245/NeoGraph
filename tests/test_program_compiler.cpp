@@ -780,6 +780,31 @@ TEST(ProgramCompilerTest, JavaScriptSourceStopsAtItsWallTimeCeiling) {
     }
 }
 
+TEST(ProgramCompilerTest, JavaScriptSourceStopsAtItsDeclaredBudgetWallTime) {
+    ProgramCompilerConfig config;
+    config.compiler_build_id = "program-compiler-test/javascript-budget-wall-time/v1";
+    config.javascript.max_interrupt_polls = std::numeric_limits<std::uint64_t>::max();
+    ProgramCompiler compiler(complete_snapshot(), std::move(config));
+    const auto source = ProgramSource::from_javascript(
+        "budget-wall-time.js", "export function define() { while (true) { } }");
+    const RunBudget budget{200, 1000, 1, 2, 4, 20, 0, 0, 0};
+
+    const auto started = std::chrono::steady_clock::now();
+    try {
+        (void)compiler.compile(source, budget);
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+        const auto timeout = std::find_if(
+            error.diagnostics().begin(), error.diagnostics().end(),
+            [](const auto& diagnostic) { return diagnostic.code == "P_JS_TIMEOUT"; });
+        ASSERT_NE(timeout, error.diagnostics().end());
+        EXPECT_EQ(timeout->witness["max_wall_time_ms"].get<std::uint64_t>(), 200U);
+        // The configured ceiling keeps its 60 s default; the budget must win.
+        EXPECT_LT(elapsed, std::chrono::seconds(30));
+    }
+}
+
 TEST(ProgramCompilerTest, JavaScriptGraphBuilderAccountsNativeDocumentBytes) {
     ProgramCompilerConfig config;
     config.compiler_build_id                  = "program-compiler-test/javascript-bytes/v1";
