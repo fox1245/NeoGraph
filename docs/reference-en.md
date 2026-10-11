@@ -65,6 +65,7 @@ target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::r
 - [2. Provider Interface](#2-provider-interface)
   - [ProviderRequest / ProviderControls](#providerrequest--providercontrols)
   - [PreparedProviderRequest / ProviderBudgetClaim](#preparedproviderrequest--providerbudgetclaim)
+  - [Pricing evidence and the price catalog](#pricing-evidence-and-the-price-catalog)
 - [3. Tool Interface](#3-tool-interface)
   - [Tool](#tool)
   - [Tool failure contract](#tool-failure-contract)
@@ -447,6 +448,25 @@ When native code calls a Python provider's `prepare` override, returning `None` 
 The previously recorded installed find_package Program C++/C ABI/dualQuickJS consumers and NeoGraph/SchemaProvider typed two-request lifetime/native/raw/mismatch consumer passed on their recorded snapshot. Those results do not establish interface-4 package validation; matching declarations alone do not prove a new runtime result or broader platform support.
 
 Current SDK4 Linux x86_64 evidence covers all 27 registered cases: 25 passed in the initial full run; after correcting two obsolete assertions, `native_archive` and `stop_reasoning_preservation` passed in a focused 2/2 run. This was not a second full-suite 27/27 run. The unchanged buffered/SSE Stop probe and exact installed SDK README consumer also passed. The latter exercised one credential-free request per zero-usage, unknown-usage and HTTP-400-failure variant. These SDK results do not establish a new NeoGraph native build/wheel pass or Windows/macOS/ARM64/HTTP3 qualification.
+
+### Pricing evidence and the price catalog
+
+A Program run's `monetary_microunits` ceiling counts micro-USD (one microunit is 1e-6 USD) once a provider is bound to its `llm_call` nodes with prices. That binding is upcoming work. The pricing pieces it will use are in the repository and are internal: `src/program/pricing.h` is not installed and carries no ABI promise.
+
+Every settled call carries one of two kinds of evidence:
+
+| Evidence | When | Amount |
+|---|---|---|
+| `reported` | The response carries the provider's own cost: OpenRouter `usage.cost`, which the SDK parses into `Usage::provider_cost` in nano-USD. With BYOK the reported upstream charge is added. | The reported amount, rounded up to whole microunits. |
+| `estimated` | No usable reported cost. | Catalog rates times the reported token bands, rounded up once per call. The record names the catalog version and digest. |
+
+Before dispatch, the budget preflight reserves an upper bound from the catalog: every input token at the dearest input band of the tier that the input bound selects, every output token at the dearest output rate. For final usage within those bounds, an estimate never exceeds its reservation. A band the usage does not report is priced at the highest rate it could have billed at. Partial, failed or inconsistent usage settles nothing, and the caller keeps the hold.
+
+The catalog, [`data/pricing/catalog.json`](../data/pricing/catalog.json), is keyed by origin and model. Gemini through Google AI Studio and through the Vertex AI global endpoint are separate entries, as are OpenAI, Anthropic and OpenRouter. Each entry records a `source_url` (the official pricing page, or the OpenRouter models API) and the `retrieved` date. Rates are decimal strings in USD per million tokens for input, output, cache reads, cache writes (Anthropic's 5-minute and 1-hour TTLs) and image output, with optional prompt-length tiers. Entries price the standard service tier; batch, flex and priority tiers, Anthropic's US-only inference_geo and fast mode, server-tool fees and per-request fees are not modeled. OpenRouter routes one model to endpoints with different prices, so its entries add a `route_ceiling`, the dearest endpoint when the entry was written, and reservations use it. A router alias such as `~deepseek/deepseek-v4-flash-latest` lists no endpoints, so it has no ceiling and cannot be reserved. A model without an entry has no price: a run with a monetary ceiling must refuse the call (fail closed), and running it unbudgeted is an explicit host decision.
+
+NeoGraph never fetches prices at run time. [`scripts/check_price_drift.py`](../scripts/check_price_drift.py) compares the catalog with OpenRouter's models and endpoints listings, with LiteLLM's community price file (a signal to check, not the truth), and with Vertex AI SKUs from the Cloud Billing Catalog API when `GCP_BILLING_API_KEY` is set. It prints a table (`--json` prints JSON), exits 1 on drift beyond `--tolerance`, and never edits the catalog. The weekly `Price drift` workflow runs it; OpenRouter and LiteLLM need no secret.
+
+Organization cost reports (OpenAI's organization costs endpoint, Anthropic's cost report) need admin keys, aggregate by time bucket and arrive late, so the runtime does not use them. A host can reconcile its `reported` and `estimated` records against them afterwards.
 
 ---
 

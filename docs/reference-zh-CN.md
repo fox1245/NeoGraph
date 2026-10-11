@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=eed77b7b5f8b7e8d02f6a78c6d7c14e93910e97515e111ade966568f30f61a20 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=fd254446a38ba37a4eb53e45e783363f0a7514e2951f012b20d4284b20b1f882 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -62,6 +62,7 @@ target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::r
 - [2. Provider 接口](#2-provider-interface)
   - [ProviderRequest / ProviderControls](#providerrequest--providercontrols)
   - [PreparedProviderRequest / ProviderBudgetClaim](#preparedproviderrequest--providerbudgetclaim)
+  - [计价证据与价格目录](#pricing-evidence-and-the-price-catalog)
 - [3. Tool 接口](#3-tool-interface)
   - [Tool](#tool)
   - [工具失败契约](#tool-failure-contract)
@@ -447,6 +448,26 @@ Python SDK 的 vector/map getter 返回独立值：`ProviderMessage.parts`、`Pr
 此前记录的 installed find_package Program C++/C ABI/dualQuickJS consumer 和 NeoGraph/SchemaProvider typed2-request lifetime/native/raw/mismatch consumer 在当时 snapshot 上 pass。这不证明 interface-4 package 验证；仅声明匹配不证明新 runtime 结果或更广 platform 支持。
 
 当前 SDK4 Linux x86_64 证据覆盖全部 27 个注册 case：首次 full run 中 25 个 pass；修正两个 obsolete assertion 后，`native_archive` 与 `stop_reasoning_preservation` 在 focused 2/2 run 中 pass。这不是第二次 full-suite 27/27 run。未改 buffered/SSE Stop probe 和已安装 SDK 的 exact README consumer 也 pass。后者每个 zero-usage、unknown-usage、HTTP-400-failure variant 执行一个无 credential 请求。这些 SDK 结果不证明新 NeoGraph native build/wheel pass 或 Windows/macOS/ARM64/HTTP3 验证。
+
+<a id="pricing-evidence-and-the-price-catalog"></a>
+### 计价证据与价格目录
+
+provider 带价格绑定到 `llm_call` 节点后，Program 运行的 `monetary_microunits` 上限按 micro-USD 计数（1 microunit = 1e-6 USD）。该绑定是后续工作。它将使用的计价组件已在仓库中，且为内部组件：`src/program/pricing.h` 不会安装，也不承诺 ABI。
+
+每次结算的调用都带有以下两种证据之一：
+
+| 证据 | 条件 | 金额 |
+|---|---|---|
+| `reported` | 响应带有 provider 自己的费用：OpenRouter 的 `usage.cost`，SDK 将其解析为以 nano-USD 计的 `Usage::provider_cost`。BYOK 时加上报告的 upstream 费用。 | 报告金额，向上取整到整数 microunit。 |
+| `estimated` | 没有可用的报告费用。 | 目录费率乘以报告的 token 分段，每次调用只向上取整一次。记录中写明目录版本和 digest。 |
+
+dispatch 之前，预算预检从目录预留一个上界：每个输入 token 按输入上界所选 tier 中最贵的输入分段费率计算，每个输出 token 按最贵的输出费率计算。最终用量在这些上界内时，估算值不会超过其预留值。用量未报告的分段按其可能计费的最高费率计算。部分、失败或不一致的用量不结算任何金额，调用方保留 hold。
+
+目录 [`data/pricing/catalog.json`](../data/pricing/catalog.json) 以 origin 和 model 为键。经 Google AI Studio 和经 Vertex AI global endpoint 访问的 Gemini 是不同条目，OpenAI、Anthropic 和 OpenRouter 也一样。每个条目记录 `source_url`（官方价格页面，或 OpenRouter models API）和 `retrieved` 日期。费率是以每百万 token 美元计的十进制字符串，涵盖输入、输出、缓存读取、缓存写入（Anthropic 的 5 分钟与 1 小时 TTL）和图像输出分段，并可带提示长度 tier。条目按标准 service tier 定价；batch、flex、priority tier，Anthropic 的仅限美国 inference_geo 与 fast mode，服务端工具费用和按请求收费均未建模。OpenRouter 会把同一模型路由到价格不同的多个 endpoint，因此其条目另有 `route_ceiling`，即编写条目时最贵的 endpoint，预留使用它。`~deepseek/deepseek-v4-flash-latest` 这类 router alias 不列出 endpoint，因此没有 ceiling，无法预留。没有条目的模型就没有价格：带金额上限的运行必须拒绝该调用（fail closed），不计预算地运行它是宿主的显式决定。
+
+NeoGraph 运行时从不获取价格。[`scripts/check_price_drift.py`](../scripts/check_price_drift.py) 将目录与 OpenRouter 的 models 和 endpoints 列表、LiteLLM 的社区价格文件（只是需要核对的信号，不是事实）比较，设置了 `GCP_BILLING_API_KEY` 时还与 Cloud Billing Catalog API 中的 Vertex AI SKU 比较。它输出表格（`--json` 输出 JSON），漂移超过 `--tolerance` 时以 1 退出，且从不修改目录。每周的 `Price drift` 工作流运行它；OpenRouter 和 LiteLLM 不需要 secret。
+
+组织费用报告（OpenAI 的 organization costs endpoint、Anthropic 的 cost report）需要 admin 密钥、按时间桶聚合且到达较晚，因此运行时不使用它们。宿主可以事后将 `reported` 和 `estimated` 记录与之对账。
 
 ---
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=eed77b7b5f8b7e8d02f6a78c6d7c14e93910e97515e111ade966568f30f61a20 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=fd254446a38ba37a4eb53e45e783363f0a7514e2951f012b20d4284b20b1f882 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -64,6 +64,7 @@ target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::r
 - [2. Provider Interface](#2-provider-interface)
   - [ProviderRequest / ProviderControls](#providerrequest--providercontrols)
   - [PreparedProviderRequest / ProviderBudgetClaim](#preparedproviderrequest--providerbudgetclaim)
+  - [가격 증거와 가격 카탈로그](#pricing-evidence-and-the-price-catalog)
 - [3. Tool Interface](#3-tool-interface)
   - [Tool](#tool)
   - [도구 실패 계약](#tool-failure-contract)
@@ -446,6 +447,26 @@ Python SDK의 vector/map getter는 분리된 값을 반환한다: `ProviderMessa
 이전에 기록한 installed find_package Program C++/C ABI/dualQuickJS consumer와 NeoGraph/SchemaProvider typed2-request lifetime/native/raw/mismatch consumer는 당시 snapshot에서 pass했다. 이 결과가 interface-4 package 검증을 입증하지는 않는다. 선언 일치만으로 새 runtime 결과나 더 넓은 platform 지원을 증명하지 않는다.
 
 현재 SDK4 Linux x86_64 증거는 등록된 27 case를 모두 다룬다. 최초 full run에서 25개가 pass했고 obsolete assertion 두 개를 고친 뒤 `native_archive`와 `stop_reasoning_preservation`이 focused 2/2로 pass했다. 두 번째 full-suite 27/27 실행은 아니다. 변경 없는 buffered/SSE Stop probe와 설치 SDK의 exact README consumer도 pass했다. 후자는 zero-usage, unknown-usage, HTTP-400-failure variant마다 credential 없는 요청 하나를 실행했다. 이 SDK 결과는 새 NeoGraph native build/wheel pass나 Windows/macOS/ARM64/HTTP3 검증을 입증하지 않는다.
+
+<a id="pricing-evidence-and-the-price-catalog"></a>
+### 가격 증거와 가격 카탈로그
+
+provider가 가격과 함께 `llm_call` 노드에 바인딩되면 Program 실행의 `monetary_microunits` 상한은 micro-USD(1 microunit = 1e-6 USD)를 센다. 그 바인딩은 후속 작업이다. 바인딩이 쓸 가격 구성 요소는 이미 저장소에 있으며 내부용이다. `src/program/pricing.h`는 설치되지 않고 ABI를 약속하지 않는다.
+
+정산된 호출마다 다음 두 증거 중 하나가 붙는다.
+
+| 증거 | 조건 | 금액 |
+|---|---|---|
+| `reported` | 응답에 provider 자신의 비용이 있다. OpenRouter `usage.cost`이며 SDK가 nano-USD 단위의 `Usage::provider_cost`로 파싱한다. BYOK이면 보고된 upstream 요금을 더한다. | 보고된 금액을 정수 microunit으로 올림한다. |
+| `estimated` | 쓸 수 있는 보고 비용이 없다. | 카탈로그 요율에 보고된 토큰 구간을 곱하고 호출마다 한 번 올림한다. 기록에 카탈로그 버전과 digest가 남는다. |
+
+dispatch 전 예산 사전 점검은 카탈로그에서 상한을 예약한다. 모든 입력 토큰은 입력 상한이 고르는 tier에서 가장 비싼 입력 구간 요율로, 모든 출력 토큰은 가장 비싼 출력 요율로 계산한다. 최종 사용량이 그 상한 안에 있으면 추정액은 예약액을 넘지 않는다. 사용량이 보고하지 않은 구간은 청구될 수 있었던 가장 높은 요율로 계산한다. 부분·실패·불일치 사용량은 아무것도 정산하지 않으며 호출자는 hold를 유지한다.
+
+카탈로그 [`data/pricing/catalog.json`](../data/pricing/catalog.json)의 키는 origin과 model이다. Google AI Studio를 거친 Gemini와 Vertex AI global endpoint를 거친 Gemini는 별개 항목이며 OpenAI, Anthropic, OpenRouter도 마찬가지다. 항목마다 `source_url`(공식 가격 페이지 또는 OpenRouter models API)과 `retrieved` 날짜를 기록한다. 요율은 백만 토큰당 USD를 나타내는 10진 문자열이며 입력, 출력, 캐시 읽기, 캐시 쓰기(Anthropic의 5분·1시간 TTL), 이미지 출력 구간과 선택적 프롬프트 길이 tier를 담는다. 항목은 표준 service tier 가격이며 batch·flex·priority tier, Anthropic의 US 전용 inference_geo와 fast mode, 서버 도구 요금, 요청당 요금은 반영하지 않는다. OpenRouter는 한 모델을 가격이 다른 여러 endpoint로 라우팅하므로 해당 항목에는 작성 시점에 가장 비싼 endpoint인 `route_ceiling`이 있고 예약은 이것을 쓴다. `~deepseek/deepseek-v4-flash-latest` 같은 router alias는 endpoint를 나열하지 않으므로 ceiling이 없고 예약할 수 없다. 항목이 없는 모델에는 가격이 없다. 금액 상한이 있는 실행은 호출을 거부해야 하고(fail closed), 예산 없이 실행하는 것은 호스트가 명시적으로 내리는 결정이다.
+
+NeoGraph는 실행 중에 가격을 가져오지 않는다. [`scripts/check_price_drift.py`](../scripts/check_price_drift.py)는 카탈로그를 OpenRouter의 models·endpoints 목록, LiteLLM 커뮤니티 가격 파일(진실이 아니라 확인할 신호), 그리고 `GCP_BILLING_API_KEY`가 설정된 경우 Cloud Billing Catalog API의 Vertex AI SKU와 비교한다. 표를 출력하고(`--json`이면 JSON) `--tolerance`를 넘는 drift가 있으면 1로 종료하며 카탈로그를 고치지 않는다. 주간 `Price drift` 워크플로가 이를 실행하며 OpenRouter와 LiteLLM에는 secret이 필요 없다.
+
+조직 비용 보고(OpenAI organization costs endpoint, Anthropic cost report)는 admin 키가 필요하고 시간 구간으로 집계되며 늦게 도착하므로 런타임은 쓰지 않는다. 호스트는 `reported`·`estimated` 기록을 나중에 이 보고와 대조할 수 있다.
 
 ---
 
