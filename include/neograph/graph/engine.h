@@ -280,6 +280,9 @@ enum class RunStatus {
     Interrupted,
     StepLimit,
     SafePoint,
+    /// Nothing was ready, __end__ was never reached, and a barrier still held
+    /// partial signals: the join can no longer fire (issue #357).
+    BarrierStalled,
 };
 
 /**
@@ -348,11 +351,22 @@ struct RunResult {
         return metadata.is_object() && metadata.value("safe_point", false);
     }
 
+    /// True when the run stopped with nothing ready and __end__ never reached
+    /// while a barrier still held partial signals. The stalled joins are listed
+    /// at output["_neograph"]["barrier_stalled"] as {node, wait_for, received,
+    /// missing} objects.
+    inline bool barrier_stalled() const noexcept {
+        if (!output.is_object()) return false;
+        const auto metadata = output["_neograph"];
+        return metadata.is_object() && metadata.contains("barrier_stalled");
+    }
+
     /// @brief Return a typed outcome without changing the legacy result layout.
     RunStatus status() const noexcept {
         if (interrupted) return RunStatus::Interrupted;
         if (safe_point_reached()) return RunStatus::SafePoint;
         if (max_steps_exhausted()) return RunStatus::StepLimit;
+        if (barrier_stalled()) return RunStatus::BarrierStalled;
         return RunStatus::Completed;
     }
 

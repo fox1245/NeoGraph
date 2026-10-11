@@ -79,6 +79,11 @@ InvocationResult RunInvocation::classify(RunResult result) {
         case RunStatus::SafePoint:
             outcome.status = InvocationStatus::SafePoint;
             break;
+        case RunStatus::BarrierStalled:
+            outcome.status = InvocationStatus::Error;
+            outcome.error  = "graph stopped at a barrier that can no longer fire, "
+                             "without reaching __end__";
+            break;
     }
     return outcome;
 }

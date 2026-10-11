@@ -345,3 +345,115 @@ def test_compile_diagnostics_carry_call_sites_while_sealed_ones_do_not():
     parsed = ng.ProgramBundle.parse(bundle.serialize_canonical())
     assert parsed.id == bundle.id
     assert parsed.compile_diagnostics == bundle.diagnostics
+
+
+def _stall_host(owner):
+    _trace_host(owner)  # registers the trace node type
+    ng.ConditionRegistry.register_condition("python_program_fail", lambda _s: "fail")
+    ng.ConditionRegistry.register_condition("python_program_pass", lambda _s: "pass")
+    builder = ng.ProgramRegistryBuilder()
+    builder.add_registered_node(
+        "python_program_trace_node", "1.0.0", _DIGEST_TRACE_NODE
+    )
+    builder.add_registered_reducer("append", "1.0.0", _DIGEST_APPEND)
+    builder.add_registered_condition("python_program_fail", "1.0.0", "sha256:" + "5" * 64)
+    builder.add_registered_condition("python_program_pass", "1.0.0", "sha256:" + "6" * 64)
+    return ng.LocalProgramHost(
+        builder.build(), owner, _ceiling(), "python-program-host/v1"
+    )
+
+
+def _barrier_source(condition, fail_target, control=False):
+    text = (
+        'export function define() { return ng.graph("main")'
+        '.channel("trace", {reducer: "append", initial: []})'
+        '.node("A", {type: "python_program_trace_node"})'
+        '.node("B", {type: "python_program_trace_node"})'
+        '.node("C", {type: "python_program_trace_node"})'
+        '.node("D", {type: "python_program_trace_node"})'
+        '.node("FIX", {type: "python_program_trace_node"})'
+        '.entry("A").edge("A", "B").edge("A", "C")'
+        f'.conditionalEdge("B", "{condition}", {{pass: "D", fail: "{fail_target}"}})'
+        '.edge("FIX", "D").edge("C", "D")'
+        '.barrier("D", ["B", "C"])'
+        '.exit("D"); }'
+    )
+    if control:
+        text += '\nexport function* main(input) { return yield ng.callCore("main", input, "stall"); }\n'
+    return ng.ProgramSource.from_javascript("python-barrier.js", text)
+
+
+def test_program_barrier_stall_fails_instead_of_completing():
+    host = _stall_host("python-owner-barrier-stall")
+    version = host.compile_admit(_barrier_source("python_program_fail", "FIX"), _budget())
+    result = host.run(version, {}, _budget())
+
+    assert result.status == ng.ProgramTerminalStatus.Failed
+    assert result.failure.code == "P_CORE_BARRIER_STALLED"
+    assert result.failure.core_node == "D"
+    stall = result.failure.witness["stalled_barriers"][0]
+    assert stall["missing"] == ["B"]
+    assert stall["received"] == ["C", "FIX"]
+    assert result.execution_trace == ["A", "B", "C", "FIX"]
+
+
+def test_program_barrier_routes_that_join_or_end_still_complete():
+    host = _stall_host("python-owner-barrier-pass")
+    joined = host.run(
+        host.compile_admit(_barrier_source("python_program_pass", "FIX"), _budget()),
+        {}, _budget())
+    assert joined.status == ng.ProgramTerminalStatus.Completed
+    assert joined.execution_trace[-1] == "D"
+
+    ended = host.run(
+        host.compile_admit(_barrier_source("python_program_fail", "__end__"), _budget()),
+        {}, _budget())
+    assert ended.status == ng.ProgramTerminalStatus.Completed
+
+
+def test_core_engine_reports_and_resumes_a_barrier_stall():
+    _trace_host("python-owner-core-stall")
+    ng.ConditionRegistry.register_condition("python_program_fail", lambda _s: "fail")
+    definition = {
+        "name": "barrier_stall",
+        "channels": {"trace": {"reducer": "append", "initial": []}},
+        "nodes": {
+            "A": {"type": "python_program_trace_node"},
+            "B": {"type": "python_program_trace_node"},
+            "C": {"type": "python_program_trace_node"},
+            "FIX": {"type": "python_program_trace_node"},
+            "D": {"type": "python_program_trace_node", "barrier": {"wait_for": ["B", "C"]}},
+        },
+        "edges": [
+            {"from": ng.START_NODE, "to": "A"},
+            {"from": "A", "to": "B"},
+            {"from": "A", "to": "C"},
+            {"from": "C", "to": "D"},
+            {"from": "FIX", "to": "D"},
+            {"from": "D", "to": ng.END_NODE},
+        ],
+        "conditional_edges": [
+            {"from": "B", "condition": "python_program_fail",
+             "routes": {"pass": "D", "fail": "FIX"}},
+        ],
+    }
+    engine = ng.GraphEngine.compile(definition, ng.NodeContext(), ng.InMemoryCheckpointStore())
+    cfg = ng.RunConfig()
+    cfg.thread_id = "python-barrier-stall"
+    result = engine.run(cfg)
+    assert result.status == ng.RunStatus.BarrierStalled
+    assert result.barrier_stalled is True
+    assert result.output["_neograph"]["barrier_stalled"][0]["missing"] == ["B"]
+
+    resumed = engine.resume("python-barrier-stall", None)
+    assert resumed.status == ng.RunStatus.BarrierStalled
+
+
+def test_program_barrier_stall_fails_through_a_javascript_control_call():
+    host = _stall_host("python-owner-barrier-main")
+    source = _barrier_source("python_program_fail", "FIX", control=True)
+    result = host.run(host.compile_admit(source, _budget()), {}, _budget())
+
+    assert result.status == ng.ProgramTerminalStatus.Failed
+    assert result.failure.code == "P_CORE_BARRIER_STALLED"
+    assert result.failure.witness["stalled_barriers"][0]["missing"] == ["B"]

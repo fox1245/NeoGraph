@@ -1154,6 +1154,27 @@ void apply_checkpoint_incompatible(RunOutcome&                                  
     }
 }
 
+// A Core run that stopped at a barrier which can no longer fire did not
+// complete; its witness lists each stalled join and its missing members.
+json stalled_barriers_of(const graph::RunResult& result) {
+    if (!result.barrier_stalled()) return json();
+    const json& output = result.output;  // const access never inserts keys
+    return output["_neograph"]["barrier_stalled"];
+}
+
+ProgramFailure barrier_stall_failure(std::string operation_id, json stalls) {
+    std::string node;
+    if (stalls.is_array() && !stalls.empty() && stalls[0].is_object())
+        node = stalls[0].value("node", std::string());
+    return ProgramFailure{"P_CORE_BARRIER_STALLED",
+                          "Core run stopped at a barrier that can no longer fire, "
+                          "without reaching __end__",
+                          std::move(operation_id),
+                          std::move(node),
+                          0,
+                          json{{"stalled_barriers", std::move(stalls)}}};
+}
+
 RunOutcome failed_outcome(const std::shared_ptr<RunControl>& control,
                           std::string                        code,
                           std::string                        message,
@@ -2656,6 +2677,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 active_concurrency.fetch_sub(1, std::memory_order_relaxed);
 
                 const auto    core_status = invocation.result.status();
+                const auto    stalls      = stalled_barriers_of(invocation.result);
                 PlanExecution result;
                 result.output          = std::move(invocation.result.output);
                 result.execution_trace = std::move(invocation.result.execution_trace);
@@ -2676,6 +2698,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                                     invocation.result.interrupt_node,
                                                     0,
                                                     json::object()};
+                } else if (core_status == graph::RunStatus::BarrierStalled) {
+                    result.status  = ProgramTerminalStatus::Failed;
+                    result.failure = barrier_stall_failure(operation_id, stalls);
                 }
                 co_return result;
             }
@@ -3832,11 +3857,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                                    ProgramCheckpointEvent{*invocation.checkpoint});
                     }
 
+                    // Classify before the output (which carries the status) is moved.
+                    const auto    core_status = invocation.result.status();
+                    const auto    stalls      = stalled_barriers_of(invocation.result);
                     PlanExecution result;
                     result.output =
                         javascript_control_response(std::move(invocation.result.output));
                     result.execution_trace = std::move(invocation.result.execution_trace);
-                    const auto core_status = invocation.result.status();
                     if (core_status == graph::RunStatus::Interrupted) {
                         result.status = ProgramTerminalStatus::Interrupted;
                         result.interrupt =
@@ -3844,6 +3871,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     } else if (core_status == graph::RunStatus::StepLimit) {
                         result = fail(ProgramTerminalStatus::BudgetExhausted, "P_CORE_STEP_BUDGET",
                                       "Core step budget exhausted");
+                    } else if (core_status == graph::RunStatus::BarrierStalled) {
+                        result.status  = ProgramTerminalStatus::Failed;
+                        result.failure = barrier_stall_failure(operation_id, stalls);
                     }
                     co_return result;
                 }

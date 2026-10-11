@@ -230,3 +230,99 @@ TEST(BarrierPersistence, LegacyV1BlobLoadsWithEmptyBarrierState) {
     // here so the invariant is checked alongside the other v2 tests.
     EXPECT_TRUE(cp.barrier_state.empty());
 }
+
+// =========================================================================
+// 6. A barrier that can no longer fire does not end the run as Completed
+//    (issue #357). B reaches the join only through a conditional route, and
+//    its "fail" route detours through FIX, which is not a wait_for member.
+// =========================================================================
+
+static json make_bypass_graph(const std::string& condition, const std::string& fail_target) {
+    json channels = json::object();
+    for (const char* name : {"A", "B", "C", "D", "FIX"})
+        channels[std::string(name) + "_done"] = {{"reducer", "overwrite"}};
+    return {
+        {"name", "barrier_bypass"},
+        {"channels", channels},
+        {"nodes", {
+            {"A",   {{"type", "hit_stall"}}},
+            {"B",   {{"type", "hit_stall"}}},
+            {"C",   {{"type", "hit_stall"}}},
+            {"FIX", {{"type", "hit_stall"}}},
+            {"D", {
+                {"type", "hit_stall"},
+                {"barrier", {{"wait_for", {"B", "C"}}}}
+            }}
+        }},
+        {"edges", json::array({
+            {{"from", "__start__"}, {"to", "A"}},
+            {{"from", "A"},   {"to", "B"}},
+            {{"from", "A"},   {"to", "C"}},
+            {{"from", "C"},   {"to", "D"}},
+            {{"from", "FIX"}, {"to", "D"}},
+            {{"from", "D"},   {"to", "__end__"}}
+        })},
+        {"conditional_edges", json::array({
+            {{"from", "B"}, {"condition", condition},
+             {"routes", {{"pass", "D"}, {"fail", fail_target}}}}
+        })}
+    };
+}
+
+static void register_bypass_types(std::atomic<int>* hits) {
+    NodeFactory::instance().register_type("hit_stall", make_hit_factory(hits));
+    ConditionRegistry::instance().register_condition(
+        "stall_fail", [](const GraphState&) { return std::string("fail"); });
+    ConditionRegistry::instance().register_condition(
+        "stall_pass", [](const GraphState&) { return std::string("pass"); });
+}
+
+TEST(BarrierStall, ConditionalBypassReportsTheStallInsteadOfCompleted) {
+    std::atomic<int> hits{0};
+    register_bypass_types(&hits);
+    auto store  = std::make_shared<InMemoryCheckpointStore>();
+    auto engine = GraphEngine::compile(make_bypass_graph("stall_fail", "FIX"), NodeContext{}, store);
+
+    RunConfig cfg;
+    cfg.thread_id = "barrier-stall";
+    const auto result = engine->run(cfg);
+
+    EXPECT_EQ(result.status(), RunStatus::BarrierStalled);
+    EXPECT_TRUE(result.barrier_stalled());
+    EXPECT_EQ(result.execution_trace, (std::vector<std::string>{"A", "B", "C", "FIX"}));
+    const auto stalls = result.output["_neograph"]["barrier_stalled"];
+    ASSERT_TRUE(stalls.is_array());
+    ASSERT_EQ(stalls.size(), 1U);
+    EXPECT_EQ(stalls[0]["node"], json("D"));
+    EXPECT_EQ(stalls[0]["wait_for"], json::array({"B", "C"}));
+    EXPECT_EQ(stalls[0]["received"], json::array({"C", "FIX"}));
+    EXPECT_EQ(stalls[0]["missing"], json::array({"B"}));
+
+    // The stalled checkpoint keeps its reason: resuming it reports the stall again.
+    const auto resumed = engine->resume("barrier-stall");
+    EXPECT_EQ(resumed.status(), RunStatus::BarrierStalled);
+    EXPECT_EQ(resumed.output["_neograph"]["barrier_stalled"], stalls);
+}
+
+TEST(BarrierStall, PassRouteReachesTheJoinAndCompletes) {
+    std::atomic<int> hits{0};
+    register_bypass_types(&hits);
+    auto engine = GraphEngine::compile(make_bypass_graph("stall_pass", "FIX"), NodeContext{});
+
+    const auto result = engine->run(RunConfig{});
+
+    EXPECT_EQ(result.status(), RunStatus::Completed);
+    EXPECT_FALSE(result.barrier_stalled());
+    EXPECT_EQ(result.execution_trace.back(), "D");
+}
+
+TEST(BarrierStall, AbortRouteToEndStaysCompleted) {
+    std::atomic<int> hits{0};
+    register_bypass_types(&hits);
+    auto engine = GraphEngine::compile(make_bypass_graph("stall_fail", "__end__"), NodeContext{});
+
+    const auto result = engine->run(RunConfig{});
+
+    EXPECT_EQ(result.status(), RunStatus::Completed);
+    EXPECT_FALSE(result.barrier_stalled());
+}

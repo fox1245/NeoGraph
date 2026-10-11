@@ -571,7 +571,8 @@ void init_graph(py::module_& m) {
         .value("Completed", RunStatus::Completed)
         .value("Interrupted", RunStatus::Interrupted)
         .value("StepLimit", RunStatus::StepLimit)
-        .value("SafePoint", RunStatus::SafePoint);
+        .value("SafePoint", RunStatus::SafePoint)
+        .value("BarrierStalled", RunStatus::BarrierStalled);
     py::class_<RunResult>(m, "RunResult",
         "Run completion record: serialized final state, interrupt info, "
         "checkpoint id, and execution trace.")
@@ -592,6 +593,9 @@ void init_graph(py::module_& m) {
         .def_readonly("usage", &RunResult::usage,
             "Actual nullable cumulative provider reports, not conservative reservations.")
         .def_property_readonly("status", &RunResult::status)
+        .def_property_readonly("barrier_stalled", &RunResult::barrier_stalled,
+            "True when the run stopped at a barrier that can no longer fire "
+            "without reaching __end__; details in output['_neograph']['barrier_stalled'].")
         .def_property_readonly("safe_point_reached", &RunResult::safe_point_reached);
 
     // ── CheckpointStore (abstract base) + InMemoryCheckpointStore ────────

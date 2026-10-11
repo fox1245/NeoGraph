@@ -283,6 +283,10 @@ Score evaluate_impl(const json& core, const Task& task, const NodeContext& ctx,
                         std::to_string(super_steps) + " super-steps";
         return score;
     }
+    if (result.status() == RunStatus::BarrierStalled) {
+        score.summary = "execution stalled at a barrier that can no longer fire";
+        return score;
+    }
     if (result.status() == RunStatus::Interrupted) {
         score.summary = "execution interrupted at node '" +
                         result.interrupt_node + "'";

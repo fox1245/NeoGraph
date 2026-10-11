@@ -85,6 +85,31 @@ ToolGate compose_tool_gates(ToolGate parent, ToolGate local) {
     };
 }
 
+// Barriers left holding partial signals when a run stops with nothing ready
+// and without reaching __end__ (issue #357). Such a run did not complete.
+json stalled_barriers(const BarrierState& state, const BarrierSpecs& specs) {
+    json stalls = json::array();
+    for (const auto& [node, received] : state) {
+        const auto spec = specs.find(node);
+        if (received.empty() || spec == specs.end()) continue;
+        json wait_for = json::array();
+        json got      = json::array();
+        json missing  = json::array();
+        for (const auto& member : spec->second) {
+            wait_for.push_back(member);
+            if (!received.count(member)) missing.push_back(member);
+        }
+        for (const auto& signaler : received) got.push_back(signaler);
+        stalls.push_back(json{{"node", node},
+                              {"wait_for", std::move(wait_for)},
+                              {"received", std::move(got)},
+                              {"missing", std::move(missing)}});
+    }
+    return stalls;
+}
+
+constexpr const char* kBarrierStalled = "barrier_stalled";
+
 void report_validation(const ValidationReport& report, int schema_version) {
     if (schema_version >= 1) {
         if (report.has_errors()) {
@@ -1374,6 +1399,12 @@ asio::awaitable<RunResult> GraphEngine::resume_execute_async(
         completed_state.activate_budget_authority(true);
         RunResult result;
         result.output = resume_context.channel_values;
+        const json& stored_metadata = resume_context.metadata;
+        if (stored_metadata.is_object() && stored_metadata["_neograph"].is_object() &&
+            stored_metadata["_neograph"].contains(kBarrierStalled)) {
+            result.output["_neograph"][kBarrierStalled] =
+                stored_metadata["_neograph"][kBarrierStalled];
+        }
         result.native_messages = completed_state.captured_provider_messages().value_or(std::vector<sp::Message>{});
         result.provider_outcomes = completed_state.provider_outcomes();
         if (const auto bank = completed_state.budget_bank()) result.usage = bank->snapshot();
@@ -1772,6 +1803,7 @@ GraphEngine::execute_graph_async(
 
     std::vector<std::string> trace;
     bool hit_end = false;
+    json barrier_stall;  // null unless the run stopped at an unsatisfiable barrier
     std::vector<Send> pending_sends;
     if (safe_point_request &&
         start_step >= std::numeric_limits<int>::max() - 1) {
@@ -2033,6 +2065,10 @@ GraphEngine::execute_graph_async(
             unified_routings, state, barrier_state);
         hit_end = hit_end || plan.hit_end;
         ready  = std::move(plan.ready);
+        if (ready.empty() && !hit_end) {
+            auto stalls = stalled_barriers(barrier_state, scheduler_->barrier_specs());
+            if (!stalls.empty()) barrier_stall = std::move(stalls);
+        }
 
         if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
             if (plan.winning_command_goto) {
@@ -2063,9 +2099,13 @@ GraphEngine::execute_graph_async(
         const std::string trace_tag = trace.empty()
             ? (std::string("__step__") + std::to_string(step))
             : trace.back();
+        auto checkpoint_metadata = detail::checkpoint_metadata_for(ctx);
+        // A resumed stalled checkpoint must report the stall, not completion.
+        if (!barrier_stall.is_null())
+            checkpoint_metadata["_neograph"][kBarrierStalled] = barrier_stall;
         auto checkpoint = co_await coord.commit_super_step_async(
             state, trace_tag, next_nodes_for_cp, step, parent_cp_id,
-            barrier_state, detail::checkpoint_metadata_for(ctx));
+            barrier_state, std::move(checkpoint_metadata));
         last_checkpoint_id = checkpoint.id;
         replay_results.clear();
 
@@ -2096,6 +2136,7 @@ GraphEngine::execute_graph_async(
             {"max_steps_exhausted", true}
         };
     }
+    if (!barrier_stall.is_null()) result.output["_neograph"][kBarrierStalled] = barrier_stall;
     if (!last_checkpoint_id.empty()) {
         result.checkpoint_id = last_checkpoint_id;
     }
