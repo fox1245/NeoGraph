@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=a85f65d34d9f9d6112729356028aa150f05ef89a1f2381407ee5cbf54b130054 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=38bcd6479d516c0cd386b6f0ed4a32d22a3795688615beec3035819c7631f1c3 -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -550,6 +550,12 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 `LocalProgramHost`に渡した`budget_ceiling`はadmissionポリシーの上限になります。`max_child_depth`と`max_total_children`を除くすべてのフィールドは正である必要があり、モデルを呼び出さないProgramでも`model_tokens`、`monetary_microunits`、`max_dynamic_compiles`は正でなければなりません。そうでない場合、コンストラクターはゼロのフィールド名を示す`ValueError`を送出します。2つの子フィールドは、両方ゼロか両方正である必要があります。
 
 `compile_admit(source, budget)`と`compile(source, budget)`は、`budget`をすべてのフィールドの最小値かつ最大値としてバンドルに封印し、封印された予算が上限を超えるバンドルはadmissionで拒否されます。そのバージョンに対する各`run`、`start`、`start_active`呼び出しは、フィールドごとに同じ値を渡す必要があります。より大きい予算や小さい予算は`P_START_BUDGET`を伴う`ng.ProgramDiagnosticError`を送出し、そのメッセージは値が異なる最初のフィールドを示します。たとえば`Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`です。別の予算を使うには、再度コンパイルしてadmissionしてください。その結果は新しい`ProgramVersion`です。実行予算の`wall_time_ms`、`max_concurrency`、`max_program_operations`、`max_core_steps`は正である必要があり、`model_tokens`と`monetary_microunits`はゼロでも構いません。ゼロは何も与えません。`model_tokens = 0`でモデルトークンを使った実行は`BudgetExhausted`で終わり、`monetary_microunits = 0`では価格の付くプロバイダー呼び出しはすべて送信前に拒否されます（[モデルを呼び出すノード](#model-calling-nodes)を参照）。
+
+### 失敗のルーティング
+
+`on_failure` を持つ `retryPolicy(node, {...})` は、ノードの最終的な失敗を、実行を失敗させる代わりにハンドラーへルーティングします。規則は [Program のグラフ機能](program-graphs.md#failure-routing)にあります。Python のノードは例外の属性で失敗を示します。文字列の `code`(`app.compile_error` のような作成者コード)、真偽値の `retryable`、文字列の `public_message` です。`str(exc)` は決してレコードに入りません。ノードが `ng.ProgramDiagnosticError`、`ng.ProgramCompileError`、`ng.ProgramAdmissionError` を送出すると構成の判定(`NG.ConfigError`)となり、リトライもルーティングもされません。ハンドラーに `interruptBefore` があると、実行は `Interrupted` で止まり、`result.interrupt.pending_input.core_interrupt_value` に `{"reason": "failure_route", "failure": record}` が入ります。`host.resume(run_id, value)` はハンドラーから続けます。failure exit は宣言されたコードで実行を `Failed` で終え、failure edge のないノードの失敗は分類されたコード(`NG.TaskFailed`、作成者コードなど)で `Failed` になります。
+
+`ProgramRunBudget.max_node_retries`(既定値 `None`、上限なし)は実行全体のノードのリトライを制限します。`result.usage.node_retries` がその回数で、`result.remaining_budget.max_node_retries` が残りです。`compile_admit` はこれを封印しないので、再コンパイルせずに実行ごとに設定できます。`LocalProgramHost(..., failure_text_redactor=fn)` と `GraphEngine.compile(..., failure_text_redactor=fn)` は、`error_text` を設定したノードのための redactor を受け取ります。`fn` は `{"node", "code", "kind", "attempts", "retryable", "public_message"}` を受け取り、残すテキストか `None` を返します。なければテキストは書きません。`GraphEngine` では failure exit の後 `result.status` が `ng.RunStatus.FailureExit` になり、`engine.resolved_retry_policy(node)` はノードが実際に使うリトライのタイミングを返します。
 
 ### スケジューラースレッド、ワーカー、タイムアウト
 

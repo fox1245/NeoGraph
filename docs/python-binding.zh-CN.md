@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=a85f65d34d9f9d6112729356028aa150f05ef89a1f2381407ee5cbf54b130054 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=38bcd6479d516c0cd386b6f0ed4a32d22a3795688615beec3035819c7631f1c3 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -549,6 +549,12 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 传给 `LocalProgramHost` 的 `budget_ceiling` 会成为准入(admission)策略的上限。除 `max_child_depth` 和 `max_total_children` 外，每个字段都必须为正数；即使 Program 从不调用模型，`model_tokens`、`monetary_microunits` 和 `max_dynamic_compiles` 也必须为正数。否则构造函数会抛出列出零值字段的 `ValueError`。两个子字段必须同时为零或同时为正数。
 
 `compile_admit(source, budget)` 和 `compile(source, budget)` 会把 `budget` 作为每个字段的最小值和最大值封存进 bundle；封存预算超过上限的 bundle 会在准入(admission)时被拒绝。针对该版本的每次 `run`、`start` 和 `start_active` 调用都必须逐字段传入相同的值。更大或更小的预算会抛出带 `P_START_BUDGET` 的 `ng.ProgramDiagnosticError`，其消息会指出第一个不同的字段，例如 `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`。要使用不同的预算，请重新编译并准入(admission)；结果是一个新的 `ProgramVersion`。运行预算的 `wall_time_ms`、`max_concurrency`、`max_program_operations` 和 `max_core_steps` 必须为正数；`model_tokens` 和 `monetary_microunits` 可以为零。零表示不授予任何额度：以 `model_tokens = 0` 使用了模型 token 的运行以 `BudgetExhausted` 结束；`monetary_microunits = 0` 时，每个被计价的提供商调用都会在发送前被拒绝（见[调用模型的节点](#model-calling-nodes)）。
+
+### 失败路由
+
+带 `on_failure` 的 `retryPolicy(node, {...})` 会把节点的最终失败路由到处理节点，而不是使运行失败；规则见 [Program 图功能](program-graphs.md#failure-routing)。Python 节点用异常属性标明失败：字符串 `code`（如 `app.compile_error` 这样的作者代码）、布尔值 `retryable` 和字符串 `public_message`。`str(exc)` 永远不会进入记录。节点抛出 `ng.ProgramDiagnosticError`、`ng.ProgramCompileError` 或 `ng.ProgramAdmissionError` 时，属于配置判定（`NG.ConfigError`），从不重试也从不路由。处理节点有 `interruptBefore` 时，运行以 `Interrupted` 停止，`result.interrupt.pending_input.core_interrupt_value` 中是 `{"reason": "failure_route", "failure": record}`；`host.resume(run_id, value)` 会从处理节点继续。failure exit 以声明的代码使运行以 `Failed` 结束，没有 failure edge 的节点失败则以分类后的代码（`NG.TaskFailed`、作者代码等）结束为 `Failed`。
+
+`ProgramRunBudget.max_node_retries`（默认 `None`，即没有上限）限制整个运行中的节点重试；`result.usage.node_retries` 为已用次数，`result.remaining_budget.max_node_retries` 为剩余量。`compile_admit` 不会封存它，因此每次运行都可以设置而无需重新编译。`LocalProgramHost(..., failure_text_redactor=fn)` 和 `GraphEngine.compile(..., failure_text_redactor=fn)` 接受给设置了 `error_text` 的节点使用的 redactor：`fn` 接收 `{"node", "code", "kind", "attempts", "retryable", "public_message"}`，返回要保留的文本或 `None`。没有它时不写入文本。在 `GraphEngine` 上，failure exit 之后 `result.status` 为 `ng.RunStatus.FailureExit`，`engine.resolved_retry_policy(node)` 返回节点实际使用的重试时间。
 
 ### 调度线程、worker 与超时
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/model/README.md locale=ja source_sha256=ebc1899d90bb82a927d22ab53185e0a8eb158ece9982be9b3b138d329fc47be1 -->
+<!-- neograph-i18n: source=tests/model/README.md locale=ja source_sha256=39036d07e843a8120cb5ee7f36521353e0c42c468b608c4b0f7909b22286dac0 -->
 # Join モデル (#363)
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -25,6 +25,8 @@
 
 したがって、残った `any_of` 代替が join が exit する super-step に到着すれば実行は完了し、一つ後の
 super-step に到着して、ほかに準備完了のものがなければ実行は失敗します。
+
+C++ のハーネスは失敗ルート(#364)も扱います。failure edge に沿って失敗したノードはその edge の対象にだけルーティングされ、`Command.goto` は引き続きそれより優先されます。失敗の対象は join や `__end__` にはなれないため、上の規則はそのまま成り立ち、この TLA+ モデルは failure edge を含みません。
 
 ## 不変条件
 

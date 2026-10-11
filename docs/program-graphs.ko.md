@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=ko source_sha256=8420d512c29d33a10e5e137f6f4c3a359704ff6b43290fdcb2c87547987fbb6e -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=ko source_sha256=591a0e3c95e94867174067a6ec417eab92f57dfe3ceb8af5cb4f844c92b127b1 -->
 # Program 그래프 기능
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -58,9 +58,9 @@ graph.conditionalEdge("B", "t.check", {pass: "D", fail: "FIX"})
 - **멈춤 경로.** 멈춘 조인의 witness(`output["_neograph"]["barrier_stalled"]`, 그리고 Program 실패의 `stalled_barriers`)에는 `paths`가 추가됩니다. 실행된 누락 멤버마다 조인에 신호를 보낸 노드까지의 라우트이며, 트레이스와 라우팅된 후속 노드 맵에서 구합니다. 해당하는 경우 같은 `suggested_wait_for`도 들어갑니다.
 - **라우트 표.** `ProgramCompilerConfig::echo_routes`(Python: `ProgramCompiler(..., echo_routes=True)`)는 `P_CORE_ROUTES` 노트를 반환합니다. 이 노트의 `witness.routes`는 각 노드를 스케줄러가 라우팅할 수 있는 대상, 즉 첫 번째 conditional edge의 라우트나 그렇지 않으면 정적 edge에 대응시킵니다. 봉인되지 않으므로 어느 쪽이든 번들은 같습니다.
 
-## 실패 라우팅 키
+## 실패 라우팅
 
-플래그: `retry_policy.per_node`, `failure_edges`, `failure_exits`. 컴파일러는 이 키들을 이제 받아들이고 검사하고 봉인하며, 이를 실행하는 런타임이 들어오면 플래그가 켜집니다. 그 전까지 노드 실패는 지금처럼 실행을 실패시킵니다.
+플래그: `retry_policy.per_node`, `failure_edges`, `failure_exits`.
 
 ```js
 ng.graph("fix")
@@ -75,6 +75,8 @@ ng.graph("fix")
   .failureExit("ABORT", {code: "plan.user_abort"});
 ```
 
+TEST는 세 번 시도됩니다. 그래도 실패하면 실행은 실패하지 않습니다. TEST는 ASK_USER로 라우팅되고, ASK_USER는 실패 레코드를 들고 사람의 답을 기다리며 멈춥니다. `retry`라고 답하면 IMPLEMENT와 TEST가 다시 실행되고, `abort`라고 답하면 failure exit인 ABORT가 실행되어 실행은 `plan.user_abort`로 `Failed`로 끝나며 결코 `Completed`를 보고하지 않습니다.
+
 `retryPolicy(node, {...})`는 Core 키 두 개로 낮춰집니다. 타이밍과 정책 필드는 `node_retry_policies`로, `on_failure`와 `error_channel`은 `failure_edges`로 갑니다. `failureExit(node, {code})`는 `failure_exits`를 씁니다. 각 키는 쓰지 않으면 없고, 그래프 단위 `retryPolicy({...})`는 바뀌지 않습니다.
 
 ```json
@@ -83,12 +85,33 @@ ng.graph("fix")
 "failure_exits": {"ABORT": {"code": "plan.user_abort"}}
 ```
 
+### 키
+
 - **노드별 정책.** 적은 필드만 저장됩니다. `max_retries` 0~10, `initial_delay_ms` 10~60 000, `backoff_multiplier` 1.0~10.0, `max_delay_ms`는 `initial_delay_ms`부터 300 000까지, `non_retryable`(고유 코드 최대 16개), `max_visits` 1~100, `error_text`입니다. `attempt_timeout_ms`는 아직 받지 않습니다. 범위를 벗어나면 `{min, max, actual}`을 담은 `P_CORE_GC_FIELD_VALUE`입니다.
 - **코드.** 작성자 코드는 `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`와 맞아야 하며 `NG.` 접두사는 예약되어 있습니다. `non_retryable`에는 분류기의 코드(`NG.TaskFailed`, `NG.Timeout`, `NG.SubgraphFailed`, 그리고 레퍼런스의 노드 실패 계약에 있는 나머지)도 쓸 수 있습니다.
 - **failure edge.** 노드마다 최대 하나이고 `from` 순으로 정렬됩니다. 대상은 `__start__`, `__end__`, 노드 자신, 조인, 그리고 failure exit가 아니면서 edge나 라우트가 없는 노드일 수 없습니다(`P_CORE_GC_FAILURE_EDGE`). `error_channel`은 `append` reducer를 써야 합니다.
 - **failure exit.** 코드의 기본값은 `NG.Aborted`입니다. failure exit 노드에는 edge나 라우트가 없습니다.
 - **검증.** 알 수 없는 노드와 채널은 `P_CORE_E3`입니다. failure edge는 라우팅된 후속 노드 맵에 들어가므로 도달 가능성, 종료, barrier 우회(`P_CORE_E15`, 라우트 `on_failure`) 검사가 이를 보며, `error_channel`은 쓰인 것으로 셉니다. 노드 타입이 선언하지 않은 노드 설정의 `retry_policy` 키는 `P_CORE_E18`로 보고됩니다. 그래프 단위 `retryPolicy({...})`에 `on_failure`를 쓰면 노드별 형태를 알려 주는 힌트와 함께 `P_CORE_GC_UNKNOWN_FIELD`가 납니다.
 - **마이그레이션.** `failure_edges`와 `failure_exits`는 마이그레이션 어댑터의 토폴로지 형태에 포함되고, `node_retry_policies`는 포함되지 않습니다.
+
+### 실행 시점
+
+- **재시도 타이밍**은 필드마다 정해집니다. 호스트 기본값(`EngineConfig::retry_policy`, `set_retry_policy`), 없으면 그래프의 `retryPolicy`, 그것도 없으면 내장 기본값에서 시작해 노드 자신의 필드가 덮어씁니다. 호스트의 노드별 정책(`EngineConfig::node_retry_policies`, `set_node_retry_policy`)은 노드별 정책이 없는 노드에서는 지금처럼 결과를 대체합니다. 노드별 정책이 있는 노드에서는 각 필드를 조이기만 할 수 있습니다. `max_retries`는 더 작은 값, 지연과 배수는 더 큰 값을 쓰며, 이런 노드는 10번 넘게 재시도하지 않습니다. 결과는 `GraphEngine::resolved_retry_policy(node)`로 볼 수 있습니다.
+- **무엇을 재시도하고 라우팅할지**는 분류기(레퍼런스의 노드 실패 계약)가 정합니다. `non_retryable`에 적힌 코드는 재시도하지 않습니다. 노드 안에서 발생한 Program 진단(`ProgramDiagnosticError`, 또는 컴파일이나 승인 오류)은 `NG.ConfigError`이며 재시도하지도, 라우팅하지도 않습니다.
+- **처리된 실패.** 노드가 라우팅할 수 있는 실패로 포기하고 failure edge가 있으면 실행은 계속됩니다. 실패한 시도는 아무것도 쓰지 않고, `error_channel`이 있으면 노드의 super-step에서 레코드 하나가 거기에 추가되며, 노드는 자기 edge나 라우트에 신호를 보내지 않고 edge의 대상으로만 라우팅됩니다. 같은 super-step의 형제 노드는 평소처럼 결과를 적용하고, 그 super-step의 `Command.goto`는 실패 라우트를 포함한 모든 라우트보다 여전히 우선합니다. 실패로 도착한 신호는 조인 슬롯을 채우지 않습니다. #357 형태처럼 실행된 핸들러가 멤버를 대신할 수 있습니다. 노드는 트레이스와 `interruptAfter`에서 실행된 것으로 셈하며, 노드의 pending write가 처리된 결과를 기록하므로 크래시 뒤 재개는 노드를 다시 실행하지 않고 라우트를 재생합니다. 정적 노드, 팬아웃 분기, 하나 또는 여러 `Send` 대상, 서브그래프 노드가 모두 똑같이 동작합니다. 라우팅할 수 없는 실패나 failure edge가 없는 노드의 실패는 지금처럼 실행을 실패시킵니다.
+- **레코드**에는 구조화된 필드만 들어갑니다.
+  ```json
+  {"node": "TEST", "kind": "exhausted", "code": "NG.TaskFailed", "attempts": 3, "retryable": true,
+   "step": 1, "routed_to": "ASK_USER", "effects": []}
+  ```
+  `kind`는 `exhausted`, `non_retryable`, `effect_committed`, `ceiling`, `visit_limit`, `deadline`(시도 타임아웃용으로 예약) 중 하나입니다. `effects`는 마지막 시도의 중개된 Tool 효과를 `{tool, ordinal, status}`로 나열합니다.
+- **자유 텍스트**는 노드마다 `error_text: true`로 선택하며 호스트의 redactor가 필요합니다. `EngineConfig::failure_text_redactor`, `CatalogConfig::failure_text_redactor`, 또는 Python `GraphEngine.compile`과 `LocalProgramHost`의 `failure_text_redactor=`입니다. 출처는 타입이 있는 공개 메시지(`NodeFailureError`의 `public_message`나 Python 예외의 `public_message` 속성)뿐이고 예외 텍스트는 절대 쓰지 않습니다. redactor가 남길 텍스트를 돌려주면 엔진은 C0, 양방향, 너비 0, 태그 문자를 제거하고 UTF-8 경계에서 512바이트로 자른 뒤 `"detail": {"untrusted_text": "..."}`로 저장합니다. redactor가 없으면 텍스트를 쓰지 않습니다.
+- **인터럽트.** 대상에 `interruptBefore`가 있으면 인터럽트 값에 `{"reason": "failure_route", "failure": record}`가 들어갑니다. Program에서는 `result.interrupt.value`와 `result.interrupt.pending_input.core_interrupt_value`입니다.
+- **이벤트.** 포기한 노드의 `ERROR` 이벤트에는 `handled`(실패가 라우팅되면 true)와, 라우팅된 경우 `routed_to`가 있습니다.
+- **루프 상한: `max_visits`.** 이를 선언한 노드는 최대 그 횟수만큼 실행됩니다. 다음 활성화는 실행되지 않고 `NG.VisitLimit`(`kind` `visit_limit`, 시도 0번)으로 실패하며, 노드의 failure edge를 따라 라우팅되거나 edge가 없으면 실행을 실패시킵니다. 카운터는 failure edge의 대상이 완료되면 초기화됩니다. 카운터는 선언한 노드에 대해서만 체크포인트 메타데이터의 `_neograph.node_visits`에 있습니다. 스텝 예산은 여전히 전체 안전장치입니다.
+- **failure exit.** failure exit 노드가 완료되면 실행은 그 super-step 뒤에 `output["_neograph"]["failure_exit"] = {node, code}`와 `RunStatus::FailureExit`(Python `RunStatus.FailureExit`, `RunInvocation`은 `Error`)로 끝납니다. Program 실행은 선언된 코드로 `Failed`가 되고 `core_node`는 그 노드입니다.
+- **재시도 상한.** `RunBudget::max_node_retries`(Python `ProgramRunBudget.max_node_retries`)는 실행 전체, 즉 모든 Core 호출, 노드, 분기, `Send`, 서브그래프의 노드 재시도를 제한합니다. 상한에 이르면 `kind` `ceiling`으로 재시도를 멈춥니다. 사용한 재시도는 `ProgramUsage::node_retries`, 남은 양은 `remaining_budget.max_node_retries`입니다. 없으면 상한이 없으며, 두 필드는 설정된 경우에만 직렬화됩니다. `ng.spawn`으로 시작한 자식은 부모의 상한을 물려받습니다. Program 밖에서는 `NodeRetryCeiling`을 `RunMetadata::node_retry_ceiling`으로 넘깁니다.
+- **Program에서 라우팅되지 않은 실패.** failure edge가 없는 노드 실패는 Program을 `P_RUNTIME_CORE_FAILURE` 대신 분류된 코드(`NG.TaskFailed`, 작성자 코드, `NG.ProviderFailed` 등)로 `Failed`가 되게 하고, `failure.witness.node_failure`에는 `{node, code, kind, attempts, retryable, routable}`이 들어갑니다. 오케스트레이션 계획의 `retry` 연산도 같은 분류기에 묻습니다. 재시도할 수 있는 실패 뒤에만 본문을 다시 실행하고, 커밋된 효과, 재시도하지 않는 클래스, 도달한 재시도 상한 뒤에는 다시 실행하지 않습니다.
 
 ## 건전성 검사
 

@@ -27,6 +27,8 @@ So a leftover `any_of` alternative that arrives in the super-step in which the
 join exits completes, and one that arrives a super-step later, with nothing
 else ready, fails.
 
+The C++ harness also covers failure routes (#364): a node that fails along its failure edge routes to that edge's target only, and `Command.goto` still preempts it. A failure target is never a join or `__end__`, so the rules above hold unchanged; this TLA+ model does not include failure edges.
+
 ## Invariants
 
 | Name | Meaning |

@@ -665,7 +665,7 @@ contention on small fan-outs, so bench with both 1 and N.
 
 ### Reading Python RunResult status and state
 
-`result.status` exposes the typed `Completed`, `Interrupted`, `StepLimit`, `SafePoint` or `BarrierStalled` status; `BarrierStalled` means that a barrier can no longer fire and the run stopped without reaching `__end__`. `result.output` remains the portable final state; `result.interrupted`, `result.max_steps_exhausted` and `result.execution_trace` describe the run. `result.native_messages` and `result.provider_outcomes` retain full typed provider evidence. See the [Python binding guide](python-binding.md#hitl-and-state).
+`result.status` exposes the typed `Completed`, `Interrupted`, `StepLimit`, `SafePoint`, `BarrierStalled` or `FailureExit` status; `BarrierStalled` means that a barrier can no longer fire and the run stopped without reaching `__end__`, and `FailureExit` that a failure-exit node completed and the run ended as failed. `result.output` remains the portable final state; `result.interrupted`, `result.max_steps_exhausted` and `result.execution_trace` describe the run. `result.native_messages` and `result.provider_outcomes` retain full typed provider evidence. See the [Python binding guide](python-binding.md#hitl-and-state).
 
 ### "Unknown reducer: <name>"
 

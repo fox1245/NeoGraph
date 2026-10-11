@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/model/README.md locale=zh-CN source_sha256=ebc1899d90bb82a927d22ab53185e0a8eb158ece9982be9b3b138d329fc47be1 -->
+<!-- neograph-i18n: source=tests/model/README.md locale=zh-CN source_sha256=39036d07e843a8120cb5ee7f36521353e0c42c468b608c4b0f7909b22286dac0 -->
 # Join 模型 (#363)
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -22,6 +22,8 @@
 
 因此，若剩余的 `any_of` 备选项在 join 退出的那个 super-step 到达，运行完成；若它晚一个 super-step 到达，
 且没有其他内容就绪，运行失败。
+
+C++ 测试框架还覆盖失败路由（#364）：沿 failure edge 失败的节点只路由到该边的目标，`Command.goto` 仍然优先于它。失败目标不能是 join 或 `__end__`，因此上述规则保持不变；本 TLA+ 模型不包含 failure edge。
 
 ## 不变式
 

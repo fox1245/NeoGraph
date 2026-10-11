@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/model/README.md locale=ko source_sha256=ebc1899d90bb82a927d22ab53185e0a8eb158ece9982be9b3b138d329fc47be1 -->
+<!-- neograph-i18n: source=tests/model/README.md locale=ko source_sha256=39036d07e843a8120cb5ee7f36521353e0c42c468b608c4b0f7909b22286dac0 -->
 # Join 모델 (#363)
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -25,6 +25,8 @@ slot에는 여러 `any_of` 대안(alternative)이 들어갈 수 있으며, 이�
 
 따라서 남은 `any_of` 대안이 join이 exit하는 super-step에 도착하면 실행은 완료되고, 한 super-step 뒤에
 도착하면서 그 밖에 준비된 것이 없으면 실행은 실패합니다.
+
+C++ 하네스는 실패 라우트(#364)도 다룹니다. failure edge를 따라 실패한 노드는 그 edge의 대상으로만 라우팅되며, `Command.goto`는 여전히 이보다 우선합니다. 실패 대상은 조인이나 `__end__`가 될 수 없으므로 위 규칙은 그대로 성립하며, 이 TLA+ 모델은 failure edge를 포함하지 않습니다.
 
 ## 불변식
 

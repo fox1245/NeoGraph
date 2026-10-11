@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=551d94ffcb4f64d5d9c087f18d1e1e3fd0e9a5e9eecfac60ec90acc9596ab409 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=7f14d0a85a3ad1660e3d1991ebc6c164d34ae37640a7537c55c04fff6756d105 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -541,14 +541,16 @@ public:
 | ProviderFailed | `NG.ProviderFailed` | 一時的な `ProviderFailure`: トランスポート、途切れた応答、期限、過負荷、レート制限、または HTTP 5xx ステータスのリモート失敗 | しない。プロバイダーのリトライはプロバイダーランタイムが担当します | 可 |
 | EffectCommitted | `NG.EffectCommitted` | 試行が冪等でない Tool の効果をコミットした | 決してしない | 可。ハンドラーが補償できます |
 | LogicError | `NG.LogicError` | 整合性チェックを含む `std::logic_error` | しない | 不可 |
-| ConfigError | `NG.ConfigError` | プロバイダーの構成、リクエスト、認証、権限、not-found、または誤用による失敗 | しない | 不可 |
+| ConfigError | `NG.ConfigError` | プロバイダーの構成、リクエスト、認証、権限、not-found、または誤用による失敗。Program の診断(C++ または Python の `ProgramDiagnosticError`、コンパイルや承認のエラー)のように `ConfigurationFailure` を併せて継承した例外 | しない | 不可 |
 | SafetyBlocked | `NG.SafetyBlocked` | コンテンツフィルターまたは拒否で止まったプロバイダーの失敗 | しない | 不可 |
 | BudgetExhausted | `NG.BudgetExhausted` | 予算またはクォータの枯渇 | しない | 不可 |
 | EffectUncertain | `NG.EffectUncertain` | 結果が不明なプロバイダーディスパッチを含む `ProviderOutcomeError`、または結果が不明な Tool の効果 | しない | 不可 |
 | UnknownFailure | `NG.UnknownFailure` | `std::bad_alloc` またはその他すべての例外型 | しない | 不可 |
 | 実行制御 | なし | `NodeInterrupt`、`HookBoundaryBlocked`、キャンセル | しない | 不可。実行はこれまでどおり一時停止または停止します |
 
-`NG.` 接頭辞は予約されています。作成者コードは `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+` に一致します。C++ のノードは `NodeFailureError(code, public_message, retryable)` を送出します。Python のノードは文字列の `code` 属性と、任意で真偽値の `retryable` と文字列の `public_message` を持つ任意の例外を送出し、呼び出し元はそれでも元の例外を受け取ります。エグゼキューターがノードをあきらめると、送出する `NodeExecutionError` に `NodeFailure` レコードが付き、`node_failure_of()` がそれを返します。レコードにはコード、分類、リトライをやめた理由(`exhausted`、`non_retryable` または `effect_committed`)、試行回数、リトライ可否とルーティング可否のフラグ、`public_message`、そして最後の試行の効果が `{tool, ordinal, status}` として入ります。`what()` は決してコピーしません。
+`NG.` 接頭辞は予約されています。作成者コードは `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+` に一致します。C++ のノードは `NodeFailureError(code, public_message, retryable)` を送出します。Python のノードは文字列の `code` 属性と、任意で真偽値の `retryable` と文字列の `public_message` を持つ任意の例外を送出し、呼び出し元はそれでも元の例外を受け取ります。エグゼキューターがノードをあきらめると、送出する `NodeExecutionError` に `NodeFailure` レコードが付き、`node_failure_of()` がそれを返します。レコードにはコード、分類、リトライをやめた理由(`exhausted`、`non_retryable`、`effect_committed`、実行のリトライ上限に達したときの `ceiling`、ノードが `max_visits` を超えて活性化されたときの `visit_limit`)、試行回数、リトライ可否とルーティング可否のフラグ、`public_message`、そして最後の試行の効果が `{tool, ordinal, status}` として入ります。`what()` は決してコピーしません。ノードの `non_retryable` に書かれたコードはリトライしません。
+
+**ルーティング可能な失敗は、実行を失敗させる代わりに処理できます。** ノードが failure edge(`failure_edges`、[Program のグラフ機能](program-graphs.md#failure-routing))を持つと、実行器は何も送出しません。失敗した試行は何も書かず、構造化されたレコードが 1 つ edge の `error_channel` に入り、ノードは edge の対象にだけルーティングされます。レコードには正確に `node`、`kind`、`code`、`attempts`、`retryable`、`step`、`routed_to`、`effects` が入り、ノードが `error_text` で選び、ホストの `EngineConfig::failure_text_redactor` が `public_message` からテキストを残したときだけ `detail.untrusted_text` が加わります。ノードはトレースと `interruptAfter` では実行されたものとして数え、ノードの保留書き込みが処理された結果を持つため、再開はノードを再実行せずにルートを再生し、ノードの `ERROR` イベントは `handled: true` と `routed_to` を伝えます。静的ノード、ファンアウトの分岐、`Send` の対象、サブグラフのノードは、同期と非同期のどちらの入口からでもこの経路をたどります。ルーティングできない失敗や、failure edge のないノードの失敗は、上のとおり送出されます。
 
 **試行ごとに独自の効果名前空間があります。** 試行 0 はタスク id(`s3:act`)を使うので、既存のジャーナルはスロットをそのまま保ちます。試行 k は `s3:act#a<k>` を使い、その中で呼び出しの序数がやり直されます。Tool の効果、プロバイダー呼び出し、サブグラフのスレッドはすべて試行に従うため、リトライが以前の試行の効果を再生したり衝突したりすることはありません。`ProviderCallBroker` はリトライのたびに新しい呼び出しスロットを受け取ります。試行 k の開始前に、エグゼキューターはその試行の名前空間をキーとする空の保留書き込みを記録します。チェックポイントストアのスキーマ変更は不要です。クラッシュや割り込みの後の再開は、開始済みの最新の試行をその名前空間で続けるので、`ToolEffectBroker` はその試行がコミットしたものを再生し、残りのリトライ回数も保たれます。`ToolEffectBroker` の下では、冪等でない効果(`ReadOnly` でも `ExternalRead` でもなく `Idempotent` でもないポリシーで成功した呼び出し)をコミットした試行は決してリトライされず、結果が不明な効果は、ノードがその割り込みを捕捉して別のエラーを送出した場合でも、`tool_effect_reconciliation` の割り込みで実行を一時停止させます。ノードが実行したサブグラフの効果は、そのノードの試行に含まれます。
 
@@ -1328,7 +1330,8 @@ struct RunResult {
 
     bool max_steps_exhausted() const noexcept;    // Limit stopped runnable work
     bool barrier_stalled() const noexcept;        // A barrier can no longer fire
-    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit, SafePoint, or BarrierStalled
+    bool failure_exited() const noexcept;         // A failure-exit node completed (#364)
+    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit, SafePoint, BarrierStalled or FailureExit
 
     template <typename T> T channel(const std::string& name) const;
     template <typename T> T channel(const ChannelKey<T>& key) const;
@@ -1354,8 +1357,9 @@ resume や continuation では、`provider_outcomes` は元の結果に新しく
 許可された最後のステップで `__end__` に到達したグラフは
 `false` を返します。
 `status()` は `RunStatus::Completed`、`RunStatus::Interrupted`、
-`RunStatus::StepLimit`、`RunStatus::SafePoint`、または `RunStatus::BarrierStalled` のいずれかを返します。公開 `RunResult` のデータレイアウトは変わりません。
+`RunStatus::StepLimit`、`RunStatus::SafePoint`、`RunStatus::BarrierStalled`、または `RunStatus::FailureExit` のいずれかを返します。公開 `RunResult` のデータレイアウトは変わりません。
 `BarrierStalled` は、実行可能なノードがなく、最後の super-step が `__end__` へ明示的にルーティングせず、barrier がまだシグナルを保持しているため join がもう発火できないことを示します。このとき `barrier_stalled()` は true になり、`output["_neograph"]["barrier_stalled"]` は停滞した join ごとに `{node, wait_for, received, missing}` を列挙します。
+`FailureExit`(#364)は、failure exit のノードが完了し、実行が失敗として終わったことを示します。`failure_exited()` は true になり、`output["_neograph"]["failure_exit"]` は `{node, code}` です。`RunInvocation` はこれを `Error` として報告します。
 `ChannelKey<T>` は再利用可能なチャネル名を、期待する C++ 型に結び付けます:
 ```cpp
 inline const ChannelKey<std::string> Answer{"answer"};

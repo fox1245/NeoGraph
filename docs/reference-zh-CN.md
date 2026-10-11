@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=551d94ffcb4f64d5d9c087f18d1e1e3fd0e9a5e9eecfac60ec90acc9596ab409 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=7f14d0a85a3ad1660e3d1991ebc6c164d34ae37640a7537c55c04fff6756d105 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -577,14 +577,16 @@ public:
 | ProviderFailed | `NG.ProviderFailed` | 暂时性的 `ProviderFailure`：传输、响应被截断、截止时间、过载、限流，或 HTTP 5xx 状态的远程失败 | 否，Provider 重试由 Provider 运行时负责 | 是 |
 | EffectCommitted | `NG.EffectCommitted` | 该尝试提交了非幂等的 Tool 效果 | 从不 | 是，处理节点可以进行补偿 |
 | LogicError | `NG.LogicError` | `std::logic_error`，包括完整性检查 | 否 | 否 |
-| ConfigError | `NG.ConfigError` | Provider 的配置、请求、认证、权限、not-found 或误用失败 | 否 | 否 |
+| ConfigError | `NG.ConfigError` | Provider 的配置、请求、认证、权限、not-found 或误用失败；同时继承 `ConfigurationFailure` 的异常，例如 Program 诊断（C++ 或 Python 的 `ProgramDiagnosticError`、编译或准入错误） | 否 | 否 |
 | SafetyBlocked | `NG.SafetyBlocked` | 因内容过滤或拒绝而停止的 Provider 失败 | 否 | 否 |
 | BudgetExhausted | `NG.BudgetExhausted` | 预算或配额耗尽 | 否 | 否 |
 | EffectUncertain | `NG.EffectUncertain` | `ProviderOutcomeError`（包括结果未知的 Provider 分发），或结果未知的 Tool 效果 | 否 | 否 |
 | UnknownFailure | `NG.UnknownFailure` | `std::bad_alloc` 或其他任何异常类型 | 否 | 否 |
 | 运行控制 | 无 | `NodeInterrupt`、`HookBoundaryBlocked`、取消 | 否 | 否，运行照旧暂停或停止 |
 
-`NG.` 前缀为保留前缀。作者代码须匹配 `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`。C++ 节点抛出 `NodeFailureError(code, public_message, retryable)`。Python 节点抛出任意带有字符串 `code` 属性的异常，并可附带布尔值 `retryable` 与字符串 `public_message`；调用方收到的仍是原始异常。执行器放弃一个节点时，它抛出的 `NodeExecutionError` 带有一条 `NodeFailure` 记录，可通过 `node_failure_of()` 取得。记录包含代码、分类、停止重试的原因（`exhausted`、`non_retryable` 或 `effect_committed`）、尝试次数、可重试与可路由标志、`public_message`，以及最后一次尝试的效果（形如 `{tool, ordinal, status}`）。它从不复制 `what()`。
+`NG.` 前缀为保留前缀。作者代码须匹配 `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`。C++ 节点抛出 `NodeFailureError(code, public_message, retryable)`。Python 节点抛出任意带有字符串 `code` 属性的异常，并可附带布尔值 `retryable` 与字符串 `public_message`；调用方收到的仍是原始异常。执行器放弃一个节点时，它抛出的 `NodeExecutionError` 带有一条 `NodeFailure` 记录，可通过 `node_failure_of()` 取得。记录包含代码、分类、停止重试的原因（`exhausted`、`non_retryable`、`effect_committed`，达到运行重试上限时为 `ceiling`，节点激活超过 `max_visits` 时为 `visit_limit`）、尝试次数、可重试与可路由标志、`public_message`，以及最后一次尝试的效果（形如 `{tool, ordinal, status}`）。它从不复制 `what()`。节点 `non_retryable` 中列出的代码不会重试。
+
+**可路由的失败可以被处理，而不是使运行失败。** 当节点有 failure edge（`failure_edges`，见 [Program 图功能](program-graphs.md#failure-routing)）时，执行器不抛出任何异常：失败的尝试不写入任何内容，一条结构化记录进入该边的 `error_channel`，节点只路由到该边的目标。记录恰好包含 `node`、`kind`、`code`、`attempts`、`retryable`、`step`、`routed_to` 和 `effects`；只有当节点通过 `error_text` 启用、且宿主的 `EngineConfig::failure_text_redactor` 从 `public_message` 中保留了文本时，才会加上 `detail.untrusted_text`。该节点在执行轨迹和 `interruptAfter` 中计为已运行，其待写记录保存已处理的结果，因此恢复会重放路由而不会再次运行该节点；其 `ERROR` 事件带有 `handled: true` 和 `routed_to`。静态节点、扇出分支、`Send` 目标和子图节点，无论经由同步还是异步入口，都走这条路径。不可路由的失败，或没有 failure edge 的节点的失败，仍按上文抛出。
 
 **每次尝试都有自己的效果命名空间。** 尝试 0 使用任务 id（`s3:act`），因此现有日志的槽位保持不变。尝试 k 使用 `s3:act#a<k>`，调用序号在其中重新开始。Tool 效果、Provider 调用和子图线程都跟随尝试，因此重试绝不会重放或冲突于先前尝试的效果；`ProviderCallBroker` 在每次重试时看到新的调用槽位。尝试 k 开始之前，执行器会以该尝试的命名空间为键记录一条空的待写记录；检查点存储无需更改模式。崩溃或中断之后的恢复会在其命名空间中继续最近一次已开始的尝试，因此 `ToolEffectBroker` 会重放该尝试已提交的内容，剩余的重试次数也得以保留。在 `ToolEffectBroker` 下，提交了非幂等效果（以 `ReadOnly`、`ExternalRead` 以外且非 `Idempotent` 的策略成功的调用）的尝试绝不会被重试；结果未知的效果会以 `tool_effect_reconciliation` 中断暂停运行，即使节点捕获了该中断并抛出了其他错误也是如此。节点所运行子图的效果计入该节点的尝试。
 
@@ -1471,7 +1473,8 @@ struct RunResult {
 
     bool max_steps_exhausted() const noexcept;    // Limit stopped runnable work
     bool barrier_stalled() const noexcept;        // A barrier can no longer fire
-    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit, SafePoint, or BarrierStalled
+    bool failure_exited() const noexcept;         // A failure-exit node completed (#364)
+    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit, SafePoint, BarrierStalled or FailureExit
 
     template <typename T> T channel(const std::string& name) const;
     template <typename T> T channel(const ChannelKey<T>& key) const;
@@ -1498,8 +1501,9 @@ resume 或 continuation 时，`provider_outcomes` 保留原始结果，再依次
 `true`。一个恰好在最后一步允许时到达 `__end__` 的图返回 `false`。
 
 `status()` 返回 `RunStatus::Completed`、`RunStatus::Interrupted`、
-`RunStatus::StepLimit`、`RunStatus::SafePoint` 或 `RunStatus::BarrierStalled`，而不更改公开 `RunResult` 的数据布局。
+`RunStatus::StepLimit`、`RunStatus::SafePoint`、`RunStatus::BarrierStalled` 或 `RunStatus::FailureExit`，而不更改公开 `RunResult` 的数据布局。
 `BarrierStalled` 表示没有可运行的节点、最后一个 super-step 没有显式路由到 `__end__`，而 barrier 仍持有信号，因此 join 再也无法触发。此时 `barrier_stalled()` 为 true，`output["_neograph"]["barrier_stalled"]` 以 `{node, wait_for, received, missing}` 列出每个停滞的 join。
+`FailureExit`（#364）表示 failure exit 节点已完成，运行以失败结束：`failure_exited()` 为 true，`output["_neograph"]["failure_exit"]` 为 `{node, code}`。`RunInvocation` 将其报告为 `Error`。
 `ChannelKey<T>` 将可复用的通道名称绑定到其预期的 C++ 类型：
 
 ```cpp

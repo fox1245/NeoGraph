@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=551d94ffcb4f64d5d9c087f18d1e1e3fd0e9a5e9eecfac60ec90acc9596ab409 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=7f14d0a85a3ad1660e3d1991ebc6c164d34ae37640a7537c55c04fff6756d105 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -577,14 +577,16 @@ public:
 | ProviderFailed | `NG.ProviderFailed` | 일시적인 `ProviderFailure`: 전송, 잘린 응답, 기한, 과부하, 속도 제한, 또는 HTTP 5xx 상태의 원격 실패 | 아니요. 제공자 재시도는 제공자 런타임이 담당합니다 | 예 |
 | EffectCommitted | `NG.EffectCommitted` | 시도가 멱등하지 않은 Tool 효과를 커밋함 | 절대 안 함 | 예. 핸들러가 보상할 수 있습니다 |
 | LogicError | `NG.LogicError` | 무결성 검사를 포함한 `std::logic_error` | 아니요 | 아니요 |
-| ConfigError | `NG.ConfigError` | 제공자 구성, 요청, 인증, 권한, not-found 또는 오용 실패 | 아니요 | 아니요 |
+| ConfigError | `NG.ConfigError` | 제공자 구성, 요청, 인증, 권한, not-found 또는 오용 실패. Program 진단(C++나 Python의 `ProgramDiagnosticError`, 컴파일 또는 승인 오류)처럼 `ConfigurationFailure`를 함께 상속한 예외 | 아니요 | 아니요 |
 | SafetyBlocked | `NG.SafetyBlocked` | 콘텐츠 필터나 거부로 멈춘 제공자 실패 | 아니요 | 아니요 |
 | BudgetExhausted | `NG.BudgetExhausted` | 예산 또는 할당량 소진 | 아니요 | 아니요 |
 | EffectUncertain | `NG.EffectUncertain` | 결과를 알 수 없는 제공자 디스패치를 포함한 `ProviderOutcomeError`, 또는 결과를 알 수 없는 Tool 효과 | 아니요 | 아니요 |
 | UnknownFailure | `NG.UnknownFailure` | `std::bad_alloc` 또는 그 밖의 모든 예외 타입 | 아니요 | 아니요 |
 | 실행 제어 | 없음 | `NodeInterrupt`, `HookBoundaryBlocked`, 취소 | 아니요 | 아니요. 실행은 이전처럼 일시 정지하거나 중단됩니다 |
 
-`NG.` 접두사는 예약되어 있습니다. 작성자 코드는 `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`에 맞아야 합니다. C++ 노드는 `NodeFailureError(code, public_message, retryable)`를 던집니다. Python 노드는 문자열 `code` 속성과, 선택적으로 불리언 `retryable`과 문자열 `public_message`를 가진 아무 예외나 발생시키면 되며, 호출자는 여전히 원래 예외를 받습니다. 실행기가 노드를 포기하면 던지는 `NodeExecutionError`에 `NodeFailure` 레코드가 실리며, `node_failure_of()`가 이를 반환합니다. 레코드에는 코드, 분류, 재시도를 멈춘 이유(`exhausted`, `non_retryable` 또는 `effect_committed`), 시도 횟수, 재시도 가능 및 라우팅 가능 플래그, `public_message`, 그리고 마지막 시도의 효과가 `{tool, ordinal, status}` 형태로 담깁니다. `what()`은 절대 복사하지 않습니다.
+`NG.` 접두사는 예약되어 있습니다. 작성자 코드는 `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`에 맞아야 합니다. C++ 노드는 `NodeFailureError(code, public_message, retryable)`를 던집니다. Python 노드는 문자열 `code` 속성과, 선택적으로 불리언 `retryable`과 문자열 `public_message`를 가진 아무 예외나 발생시키면 되며, 호출자는 여전히 원래 예외를 받습니다. 실행기가 노드를 포기하면 던지는 `NodeExecutionError`에 `NodeFailure` 레코드가 실리며, `node_failure_of()`가 이를 반환합니다. 레코드에는 코드, 분류, 재시도를 멈춘 이유(`exhausted`, `non_retryable`, `effect_committed`, 실행의 재시도 상한에 이르면 `ceiling`, 노드가 `max_visits`를 넘어 활성화되면 `visit_limit`), 시도 횟수, 재시도 가능 및 라우팅 가능 플래그, `public_message`, 그리고 마지막 시도의 효과가 `{tool, ordinal, status}` 형태로 담깁니다. `what()`은 절대 복사하지 않습니다. 노드의 `non_retryable`에 적힌 코드는 재시도하지 않습니다.
+
+**라우팅할 수 있는 실패는 실행을 실패시키는 대신 처리될 수 있습니다.** 노드에 failure edge(`failure_edges`, [Program 그래프 기능](program-graphs.md#failure-routing))가 있으면 실행기는 아무것도 던지지 않습니다. 실패한 시도는 아무것도 쓰지 않고, 구조화된 레코드 하나가 edge의 `error_channel`로 가며, 노드는 edge의 대상으로만 라우팅됩니다. 레코드에는 정확히 `node`, `kind`, `code`, `attempts`, `retryable`, `step`, `routed_to`, `effects`가 있고, 노드가 `error_text`로 선택하고 호스트의 `EngineConfig::failure_text_redactor`가 `public_message`에서 텍스트를 남길 때만 `detail.untrusted_text`가 추가됩니다. 노드는 트레이스와 `interruptAfter`에서 실행된 것으로 세며, 노드의 대기 쓰기에 처리된 결과가 담기므로 재개는 노드를 다시 실행하지 않고 라우트를 재생하고, 노드의 `ERROR` 이벤트는 `handled: true`와 `routed_to`를 알려 줍니다. 정적 노드, 팬아웃 분기, `Send` 대상, 서브그래프 노드가 동기와 비동기 진입점 모두에서 이 경로를 따릅니다. 라우팅할 수 없는 실패나 failure edge가 없는 노드의 실패는 위와 같이 던져집니다.
 
 **시도마다 고유한 효과 네임스페이스가 있습니다.** 시도 0은 태스크 id(`s3:act`)를 사용하므로 기존 저널의 슬롯이 그대로 유지됩니다. 시도 k는 `s3:act#a<k>`를 사용하며, 그 안에서 호출 서수가 다시 시작됩니다. Tool 효과, 제공자 호출, 서브그래프 스레드가 모두 시도를 따르므로, 재시도가 이전 시도의 효과를 재생하거나 그것과 충돌하는 일이 없습니다. `ProviderCallBroker`는 재시도마다 새 호출 슬롯을 봅니다. 시도 k가 시작되기 전에 실행기는 그 시도의 네임스페이스를 키로 하는 빈 대기 쓰기를 기록하며, 체크포인트 저장소의 스키마는 바뀌지 않습니다. 크래시나 인터럽트 후의 재개는 시작된 가장 최근 시도를 그 네임스페이스에서 이어 가므로, `ToolEffectBroker`는 그 시도가 커밋한 것을 재생하고 남은 재시도 횟수도 유지됩니다. `ToolEffectBroker` 아래에서, 멱등하지 않은 효과(`ReadOnly`나 `ExternalRead`가 아니고 `Idempotent`도 아닌 정책으로 성공한 호출)를 커밋한 시도는 절대 재시도되지 않으며, 결과를 알 수 없는 효과는 노드가 그 인터럽트를 잡고 다른 오류를 발생시켰더라도 `tool_effect_reconciliation` 인터럽트로 실행을 일시 정지시킵니다. 노드가 실행한 서브그래프의 효과는 그 노드의 시도에 포함됩니다.
 
@@ -1491,7 +1493,8 @@ struct RunResult {
 
     bool max_steps_exhausted() const noexcept;    // Limit stopped runnable work
     bool barrier_stalled() const noexcept;        // A barrier can no longer fire
-    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit, SafePoint, or BarrierStalled
+    bool failure_exited() const noexcept;         // A failure-exit node completed (#364)
+    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit, SafePoint, BarrierStalled or FailureExit
 
     template <typename T> T channel(const std::string& name) const;
     template <typename T> T channel(const ChannelKey<T>& key) const;
@@ -1519,8 +1522,9 @@ run while runnable work remained. A graph that reaches `__end__` exactly on its
 last permitted step returns `false`.
 
 `status()` returns `RunStatus::Completed`, `RunStatus::Interrupted`,
-`RunStatus::StepLimit`, `RunStatus::SafePoint`, or `RunStatus::BarrierStalled` without changing the public `RunResult` data layout.
+`RunStatus::StepLimit`, `RunStatus::SafePoint`, `RunStatus::BarrierStalled`, or `RunStatus::FailureExit` without changing the public `RunResult` data layout.
 `BarrierStalled`는 실행할 노드가 없고, 마지막 super-step이 `__end__`로 명시적으로 라우팅하지 않았으며, barrier가 아직 신호를 쥐고 있어 join이 더 이상 발화할 수 없다는 뜻입니다. 이때 `barrier_stalled()`는 true이고, `output["_neograph"]["barrier_stalled"]`는 정체된 join마다 `{node, wait_for, received, missing}`를 나열합니다.
+`FailureExit`(#364)는 failure exit 노드가 완료되어 실행이 실패로 끝났다는 뜻입니다. `failure_exited()`가 true이고 `output["_neograph"]["failure_exit"]`는 `{node, code}`입니다. `RunInvocation`은 이를 `Error`로 보고합니다.
 `ChannelKey<T>` binds a reusable channel name to its expected C++ type:
 
 ```cpp

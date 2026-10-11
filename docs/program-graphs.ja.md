@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=ja source_sha256=8420d512c29d33a10e5e137f6f4c3a359704ff6b43290fdcb2c87547987fbb6e -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=ja source_sha256=591a0e3c95e94867174067a6ec417eab92f57dfe3ceb8af5cb4f844c92b127b1 -->
 # Program グラフ機能
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -58,9 +58,9 @@ graph.conditionalEdge("B", "t.check", {pass: "D", fail: "FIX"})
 - **停止経路。** 止まった join の witness（`output["_neograph"]["barrier_stalled"]`、および Program の失敗の `stalled_barriers`）に `paths` が加わります。実行された欠けたメンバーごとに、join にシグナルを送ったノードまでのルートで、トレースとルーティング済みの後続マップから求めます。該当する場合は同じ `suggested_wait_for` も入ります。
 - **ルート表。** `ProgramCompilerConfig::echo_routes`（Python: `ProgramCompiler(..., echo_routes=True)`）は `P_CORE_ROUTES` ノートを返します。その `witness.routes` は各ノードを、スケジューラーがルーティングし得る先、つまり最初の conditional edge のルート、なければ静的な edge に対応付けます。封印されないため、どちらでもバンドルは同じです。
 
-## 失敗ルーティングのキー
+## 失敗のルーティング
 
-フラグ: `retry_policy.per_node`、`failure_edges`、`failure_exits`。コンパイラーはこれらのキーをすでに受け付け、検査し、封印します。それを実行するランタイムが入るとフラグがオンになります。それまではノードの失敗は従来どおり実行を失敗させます。
+フラグ: `retry_policy.per_node`、`failure_edges`、`failure_exits`。
 
 ```js
 ng.graph("fix")
@@ -75,6 +75,8 @@ ng.graph("fix")
   .failureExit("ABORT", {code: "plan.user_abort"});
 ```
 
+TEST は 3 回試行されます。それでも失敗すると、実行は失敗しません。TEST は ASK_USER にルーティングされ、ASK_USER は失敗レコードを持って人の回答を待つために停止します。`retry` と答えると IMPLEMENT と TEST が再び実行され、`abort` と答えると failure exit である ABORT が実行されるため、実行は `plan.user_abort` で `Failed` として終わり、決して `Completed` を報告しません。
+
 `retryPolicy(node, {...})` は 2 つの Core キーに変換されます。タイミングとポリシーのフィールドは `node_retry_policies` に、`on_failure` と `error_channel` は `failure_edges` に入ります。`failureExit(node, {code})` は `failure_exits` を書きます。各キーは使わなければ存在せず、グラフ単位の `retryPolicy({...})` は変わりません。
 
 ```json
@@ -83,12 +85,33 @@ ng.graph("fix")
 "failure_exits": {"ABORT": {"code": "plan.user_abort"}}
 ```
 
+### キー
+
 - **ノードごとのポリシー。** 書いたフィールドだけが保存されます。`max_retries` 0〜10、`initial_delay_ms` 10〜60 000、`backoff_multiplier` 1.0〜10.0、`max_delay_ms` は `initial_delay_ms` から 300 000 まで、`non_retryable`（一意なコード最大 16 個）、`max_visits` 1〜100、`error_text` です。`attempt_timeout_ms` はまだ受け付けません。範囲外は `{min, max, actual}` を持つ `P_CORE_GC_FIELD_VALUE` です。
 - **コード。** 作成者のコードは `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+` に一致する必要があり、`NG.` 接頭辞は予約されています。`non_retryable` には分類器のコード（`NG.TaskFailed`、`NG.Timeout`、`NG.SubgraphFailed`、およびリファレンスのノード失敗契約にあるその他）も書けます。
 - **failure edge。** ノードごとに最大 1 つで、`from` の順に並べられます。対象は `__start__`、`__end__`、ノード自身、join、そして failure exit ではないのに edge もルートもないノードであってはなりません（`P_CORE_GC_FAILURE_EDGE`）。`error_channel` は `append` reducer を使う必要があります。
 - **failure exit。** コードの既定値は `NG.Aborted` です。failure exit のノードには edge もルートもありません。
 - **検証。** 未知のノードとチャネルは `P_CORE_E3` です。failure edge はルーティング済みの後続マップに入るため、到達可能性、終了、barrier の迂回（`P_CORE_E15`、ルート `on_failure`）の検査がこれを見ます。また `error_channel` は書き込まれたものとして数えます。ノード型が宣言していないノード設定の `retry_policy` キーは `P_CORE_E18` として報告されます。グラフ単位の `retryPolicy({...})` に `on_failure` を書くと、ノードごとの形を示すヒント付きの `P_CORE_GC_UNKNOWN_FIELD` になります。
 - **マイグレーション。** `failure_edges` と `failure_exits` はマイグレーションアダプターのトポロジー形状に含まれ、`node_retry_policies` は含まれません。
+
+### 実行時
+
+- **再試行のタイミング**はフィールドごとに決まります。ホストの既定値（`EngineConfig::retry_policy`、`set_retry_policy`）、なければグラフの `retryPolicy`、それもなければ組み込みの既定値から始め、ノード自身のフィールドで上書きします。ホストのノードごとのポリシー（`EngineConfig::node_retry_policies`、`set_node_retry_policy`）は、ノードごとのポリシーを持たないノードではこれまでどおり結果を置き換えます。持つノードでは各フィールドを厳しくすることしかできません。`max_retries` は小さい方、遅延と倍率は大きい方を使い、そのようなノードは 10 回を超えて再試行しません。結果は `GraphEngine::resolved_retry_policy(node)` で確認できます。
+- **何を再試行し、何をルーティングするか**は分類器（リファレンスのノード失敗契約）が決めます。`non_retryable` に書かれたコードは再試行しません。ノードの中で発生した Program の診断（`ProgramDiagnosticError`、またはコンパイルや承認のエラー）は `NG.ConfigError` で、再試行もルーティングもされません。
+- **処理された失敗。** ノードがルーティング可能な失敗であきらめ、failure edge を持つ場合、実行は続きます。失敗した試行は何も書かず、`error_channel` があればノードの super-step でそこにレコードが 1 つ追加され、ノードは自分の edge やルートには信号を送らず、edge の対象にだけルーティングされます。同じ super-step の兄弟ノードは通常どおり結果を適用し、その super-step の `Command.goto` は失敗ルートを含むすべてのルートより引き続き優先されます。失敗による到着は join のスロットを満たしません。#357 の形のように、実行されたハンドラーがメンバーの代わりになれます。ノードはトレースと `interruptAfter` では実行されたものとして数え、ノードの pending write が処理された結果を記録するため、クラッシュ後の再開はノードを再実行せずにルートを再生します。静的ノード、ファンアウトの分岐、1 つまたは複数の `Send` の対象、サブグラフのノードはすべて同じように動きます。ルーティングできない失敗や、failure edge のないノードの失敗は、これまでどおり実行を失敗させます。
+- **レコード**には構造化されたフィールドだけが入ります。
+  ```json
+  {"node": "TEST", "kind": "exhausted", "code": "NG.TaskFailed", "attempts": 3, "retryable": true,
+   "step": 1, "routed_to": "ASK_USER", "effects": []}
+  ```
+  `kind` は `exhausted`、`non_retryable`、`effect_committed`、`ceiling`、`visit_limit`、`deadline`（試行タイムアウト用に予約）のいずれかです。`effects` は最後の試行の仲介された Tool の効果を `{tool, ordinal, status}` で並べます。
+- **自由テキスト**はノードごとに `error_text: true` で選び、ホストの redactor が必要です。`EngineConfig::failure_text_redactor`、`CatalogConfig::failure_text_redactor`、または Python の `GraphEngine.compile` と `LocalProgramHost` の `failure_text_redactor=` です。出所は型付きの公開メッセージ（`NodeFailureError` の `public_message` や Python の例外の `public_message` 属性）だけで、例外のテキストは決して使いません。redactor が残すテキストを返すと、エンジンは C0、双方向、ゼロ幅、タグの文字を取り除き、UTF-8 の境界で 512 バイトに切り詰め、`"detail": {"untrusted_text": "..."}` として保存します。redactor がなければテキストは書きません。
+- **割り込み。** 対象に `interruptBefore` があると、割り込みの値に `{"reason": "failure_route", "failure": record}` が入ります。Program では `result.interrupt.value` と `result.interrupt.pending_input.core_interrupt_value` です。
+- **イベント。** あきらめたノードの `ERROR` イベントには `handled`（失敗がルーティングされたら true）と、ルーティングされた場合は `routed_to` があります。
+- **ループの上限: `max_visits`。** これを宣言したノードは最大でその回数だけ実行されます。次の活性化は実行されず `NG.VisitLimit`（`kind` `visit_limit`、試行 0 回）で失敗し、ノードの failure edge に沿ってルーティングされるか、edge がなければ実行を失敗させます。カウンターは failure edge の対象が完了するとリセットされます。カウンターは宣言したノードについてだけ、チェックポイントのメタデータの `_neograph.node_visits` にあります。ステップ予算は引き続き全体の安全装置です。
+- **failure exit。** failure exit のノードが完了すると、実行はその super-step の後に `output["_neograph"]["failure_exit"] = {node, code}` と `RunStatus::FailureExit`（Python は `RunStatus.FailureExit`、`RunInvocation` は `Error`）で終わります。Program の実行は宣言されたコードで `Failed` になり、`core_node` はそのノードです。
+- **再試行の上限。** `RunBudget::max_node_retries`（Python は `ProgramRunBudget.max_node_retries`）は実行全体、つまりすべての Core 呼び出し、ノード、分岐、`Send`、サブグラフのノード再試行を制限します。上限に達すると `kind` `ceiling` で再試行をやめます。使った再試行は `ProgramUsage::node_retries`、残りは `remaining_budget.max_node_retries` です。なければ上限はなく、2 つのフィールドは設定されたときだけシリアライズされます。`ng.spawn` で始めた子は親の上限を受け継ぎます。Program の外では `NodeRetryCeiling` を `RunMetadata::node_retry_ceiling` として渡します。
+- **Program でルーティングされない失敗。** failure edge のないノードの失敗は、Program を `P_RUNTIME_CORE_FAILURE` ではなく分類されたコード（`NG.TaskFailed`、作成者のコード、`NG.ProviderFailed` など）で `Failed` にし、`failure.witness.node_failure` には `{node, code, kind, attempts, retryable, routable}` が入ります。オーケストレーション計画の `retry` 操作も同じ分類器に問い合わせます。再試行可能な失敗の後でだけ本体を再実行し、コミットされた効果、再試行しないクラス、到達した再試行上限の後には再実行しません。
 
 ## 健全性チェック
 

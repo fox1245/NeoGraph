@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=ja source_sha256=5c1c2ad78a7b23f226e6dc81de38cb4ced8da6b151590f20ccd4be8a6161ce46 -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=ja source_sha256=19c234158e09885ff4fb5bc8e8882e0e7b88c44a47398dab835822e3c65e466e -->
 # Program 診断
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -182,6 +182,8 @@ Core 定義のパーサーが出す診断です。witness の `core_code` に Co
 ## ランタイムとアドミッション
 
 アドミッションと実行の失敗は Python に `ng.ProgramAdmissionError` と `ng.ProgramDiagnosticError` として届き、実行結果にはコード付きの `failure` が入ります。コードに専用の項目がない場合、`help.doc` はこのセクションを指します。
+
+Core のノードの失敗は診断ではありません。#364 以降、その `failure.code` はノード失敗の分類器のコード(`NG.TaskFailed`、`app.compile_error` のような作成者コード、`NG.ProviderFailed` など)で、`failure.witness.node_failure` にレコードが入ります。failure exit は宣言されたコードで実行を終えます([Program のグラフ機能](program-graphs.md#failure-routing)を参照)。`P_RUNTIME_CORE_FAILURE` はノード失敗のレコードを持たない Core の失敗にだけ残ります。
 
 | コード | 意味と修正方法 |
 |---|---|

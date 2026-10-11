@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=6531e69a1e6216f8e0af425d54551d6dc5f586eb0d1104f81d5daa0dbbb7aedb -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=f632c47d08258686275918da39e1e1904db93d3dfd521e2eb56211fd3709a8a6 -->
 # Program API 엔드투엔드 시나리오
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -18,6 +18,7 @@
 | `test_07_main_programs.py` | `callCore`, `all`, `race`, `quorum`, `await` 시간 초과, `cancelScope`, 외부 취소, `spawn` |
 | `test_08_live_llm.py` | 노드가 모델을 호출하는 Program: 기본은 로컬 피어, 활성화하면 OpenRouter. Python 노드와 바인딩된 `llm_call` |
 | `test_09_bound_llm.py` | `node_context`로 바인딩한 `llm_call`(#372): 보고 비용과 추정 비용, 보내기 전 거부(예산, 알 수 없는 모델, router alias), 0 예산, 공급자 없는 Program의 id, 한 예산에 대한 `all`과 `quorum`, 호출이 journal에 기록된 뒤의 크래시와 한 번만 청구하는 복구 |
+| `test_10_failure_routing.py` | 실패 라우팅(#364): 실패한 TEST가 레코드와 함께 `interruptBefore` 핸들러로 라우팅됨, retry와 abort 라우트로 재개, 작성자 코드, 가린 오류 텍스트, `max_visits`, `max_node_retries` 상한, 노드 안의 Program 진단, SQLite를 쓰는 새 프로세스에서의 재개 |
 
 `support.py`에는 공유하는 Python 노드, 조건, 레지스트리, 예산, JavaScript 빌더가 있습니다.
 

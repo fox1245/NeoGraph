@@ -57,9 +57,9 @@ Errors: `P_JS_GRAPH_ARGUMENT` for an entry of another shape, and `P_CORE_GC_BARR
 - **Stall paths.** A stalled join's witness (`output["_neograph"]["barrier_stalled"]`, and `stalled_barriers` in a Program failure) adds `paths`, the routes from each missing member that ran to a node that signaled the join, taken from the trace and the routed successor map, and the same `suggested_wait_for` when one exists.
 - **Route table.** `ProgramCompilerConfig::echo_routes` (Python: `ProgramCompiler(..., echo_routes=True)`) returns a `P_CORE_ROUTES` note whose `witness.routes` maps each node to the targets the scheduler can route it to: the routes of its first conditional edge, or else its static edges. It is never sealed, so the bundle is the same either way.
 
-## Failure routing keys
+## Failure routing
 
-Flags: `retry_policy.per_node`, `failure_edges` and `failure_exits`. The compiler accepts, checks and seals these keys now; the flags turn on when the runtime that acts on them lands. Until then a node failure fails the run as before.
+Flags: `retry_policy.per_node`, `failure_edges` and `failure_exits`.
 
 ```js
 ng.graph("fix")
@@ -74,6 +74,8 @@ ng.graph("fix")
   .failureExit("ABORT", {code: "plan.user_abort"});
 ```
 
+TEST is tried three times. If it still fails, the run does not fail: TEST routes to ASK_USER, which pauses for a human with the failure record. Answering `retry` runs IMPLEMENT and TEST again; answering `abort` runs ABORT, a failure exit, so the run ends `Failed` with `plan.user_abort` and never reports `Completed`.
+
 `retryPolicy(node, {...})` lowers to two Core keys: the timing and policy fields go to `node_retry_policies`, and `on_failure` and `error_channel` go to `failure_edges`. `failureExit(node, {code})` writes `failure_exits`. Each key is absent when unused, and the graph-level `retryPolicy({...})` is unchanged.
 
 ```json
@@ -82,12 +84,33 @@ ng.graph("fix")
 "failure_exits": {"ABORT": {"code": "plan.user_abort"}}
 ```
 
+### Keys
+
 - **Per-node policy.** Only the fields written are stored: `max_retries` 0 to 10, `initial_delay_ms` 10 to 60 000, `backoff_multiplier` 1.0 to 10.0, `max_delay_ms` from `initial_delay_ms` to 300 000, `non_retryable` (at most 16 unique codes), `max_visits` 1 to 100 and `error_text`. `attempt_timeout_ms` is not accepted yet. A bound out of range is `P_CORE_GC_FIELD_VALUE` with `{min, max, actual}`.
 - **Codes.** Author codes match `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`; the `NG.` prefix is reserved. `non_retryable` may also list the classifier's codes (`NG.TaskFailed`, `NG.Timeout`, `NG.SubgraphFailed` and the others in the reference's node failure contract).
 - **Failure edges.** At most one per node, sorted by `from`. The target may not be `__start__`, `__end__`, the node itself, a join, or a node without edges or routes unless it is a failure exit (`P_CORE_GC_FAILURE_EDGE`). `error_channel` must use the `append` reducer.
 - **Failure exits.** The code defaults to `NG.Aborted`. A failure-exit node has no edges or routes.
 - **Validation.** Unknown nodes and channels are `P_CORE_E3`. Failure edges join the routed successor map, so reachability, termination and barrier bypass (`P_CORE_E15`, route `on_failure`) see them, and an `error_channel` counts as written. A `retry_policy` key inside node config that the node type does not declare is reported as `P_CORE_E18`. Writing `on_failure` in the graph-level `retryPolicy({...})` is `P_CORE_GC_UNKNOWN_FIELD` with a hint to the per-node form.
 - **Migration.** `failure_edges` and `failure_exits` are part of a migration adapter's topology shape; `node_retry_policies` is not.
+
+### At run time
+
+- **Retry timing** is resolved per field: the host default (`EngineConfig::retry_policy`, `set_retry_policy`), otherwise the graph's `retryPolicy`, otherwise the built-in default; then the node's own fields. A host per-node policy (`EngineConfig::node_retry_policies`, `set_node_retry_policy`) replaces the result for a node without a per-node policy, as before. For a node with one, the host may only tighten each field: the smaller `max_retries`, the larger delays and multiplier; such a node never retries more than 10 times. `GraphEngine::resolved_retry_policy(node)` returns the result.
+- **What is retried and routed** is the classifier's decision (the reference's node failure contract). A code listed in `non_retryable` is not retried. A Program diagnostic raised inside a node (`ProgramDiagnosticError`, or a compile or admission error) is `NG.ConfigError`: never retried, never routed.
+- **A handled failure.** When a node gives up with a routable failure and has a failure edge, the run goes on. The node's failed attempts write nothing; one record is appended to its `error_channel`, when it has one, in the node's super-step; and the node routes to the edge's target only, without signaling its own edges or routes. Siblings in the same super-step apply their results as usual, and a `Command.goto` in that super-step still preempts every route, the failure route included. A failure arrival never fills a join slot; a handler that runs can stand in for the member, as in the #357 shape. The node counts as run for the trace and for `interruptAfter`, and its pending write records the handled outcome, so a resume after a crash replays the route without running the node again. Static nodes, fan-out branches, one or many `Send` targets and subgraph nodes behave the same. A failure that is not routable, or one of a node without a failure edge, fails the run as before.
+- **The record** holds structured fields only:
+  ```json
+  {"node": "TEST", "kind": "exhausted", "code": "NG.TaskFailed", "attempts": 3, "retryable": true,
+   "step": 1, "routed_to": "ASK_USER", "effects": []}
+  ```
+  `kind` is `exhausted`, `non_retryable`, `effect_committed`, `ceiling`, `visit_limit` or `deadline` (reserved for attempt timeouts). `effects` lists the final attempt's mediated Tool effects as `{tool, ordinal, status}`.
+- **Free text** is opt-in per node with `error_text: true`, and needs the host's redactor: `EngineConfig::failure_text_redactor`, `CatalogConfig::failure_text_redactor`, or `failure_text_redactor=` on Python's `GraphEngine.compile` and `LocalProgramHost`. Its only source is a typed public message (the `public_message` of a `NodeFailureError` or a Python exception's `public_message` attribute), never the exception text. The redactor returns the text to keep; the engine strips C0, bidirectional, zero-width and tag characters, cuts the text to 512 bytes on a UTF-8 boundary and stores it as `"detail": {"untrusted_text": "..."}`. Without a redactor no text is written.
+- **Interrupts.** When the target has `interruptBefore`, the interrupt value carries `{"reason": "failure_route", "failure": record}`. In a Program it is `result.interrupt.value` and `result.interrupt.pending_input.core_interrupt_value`.
+- **Events.** The `ERROR` event of a node that gave up says `handled` (true when the failure was routed) and, when routed, `routed_to`.
+- **Loop bound: `max_visits`.** A node that declares it runs at most that many times; its next activation does not run and fails with `NG.VisitLimit` (`kind` `visit_limit`, 0 attempts), routed along the node's failure edge, or failing the run without one. The counter resets when the failure edge's target completes. It lives in checkpoint metadata as `_neograph.node_visits`, only for declaring nodes. The step budget stays the global backstop.
+- **Failure exits.** When a failure-exit node completes, the run ends after that super-step with `output["_neograph"]["failure_exit"] = {node, code}` and `RunStatus::FailureExit` (Python `RunStatus.FailureExit`; a `RunInvocation` reports `Error`). A Program run ends `Failed` with the declared code and `core_node` set to that node.
+- **Retry ceiling.** `RunBudget::max_node_retries` (Python `ProgramRunBudget.max_node_retries`) caps node retries across the whole run: every Core call, node, branch, `Send` and subgraph. Reaching it stops retrying with `kind` `ceiling`. The retries taken are `ProgramUsage::node_retries`, and what is left is `remaining_budget.max_node_retries`. Absent means no ceiling, and both fields are serialized only when set. A child started by `ng.spawn` inherits its parent's ceiling. Outside a Program, pass a `NodeRetryCeiling` as `RunMetadata::node_retry_ceiling`.
+- **Unrouted failures in a Program.** A node failure without a failure edge ends the Program `Failed` with the classified code (`NG.TaskFailed`, an author code, `NG.ProviderFailed`, ...) rather than `P_RUNTIME_CORE_FAILURE`, and `failure.witness.node_failure` holds `{node, code, kind, attempts, retryable, routable}`. The `retry` operation of an orchestration plan asks the same classifier: it runs its body again only after a retryable failure, never after a committed effect, a class that is not retried, or a reached retry ceiling.
 
 ## Soundness check
 

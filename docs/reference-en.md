@@ -575,14 +575,16 @@ When a node throws, one classifier decides whether its retry policy may run it a
 | ProviderFailed | `NG.ProviderFailed` | a transient `ProviderFailure`: transport, truncated response, deadline, overloaded, rate limited, or a remote failure with an HTTP 5xx status | no: the provider runtime owns provider retries | yes |
 | EffectCommitted | `NG.EffectCommitted` | the attempt committed a non-idempotent Tool effect | never | yes, so a handler can compensate |
 | LogicError | `NG.LogicError` | `std::logic_error`, including integrity checks | no | no |
-| ConfigError | `NG.ConfigError` | provider configuration, request, authentication, permission, not-found or misuse failures | no | no |
+| ConfigError | `NG.ConfigError` | provider configuration, request, authentication, permission, not-found or misuse failures; an exception that mixes in `ConfigurationFailure`, such as a Program diagnostic (`ProgramDiagnosticError`, a compile or admission error, in C++ or Python) | no | no |
 | SafetyBlocked | `NG.SafetyBlocked` | a provider failure that stopped on a content filter or a refusal | no | no |
 | BudgetExhausted | `NG.BudgetExhausted` | budget or quota exhaustion | no | no |
 | EffectUncertain | `NG.EffectUncertain` | `ProviderOutcomeError`, including a provider dispatch whose outcome is unknown, or a Tool effect whose outcome is unknown | no | no |
 | UnknownFailure | `NG.UnknownFailure` | `std::bad_alloc` or any other exception type | no | no |
 | Run control | none | `NodeInterrupt`, `HookBoundaryBlocked`, cancellation | no | no: the run pauses or stops as before |
 
-The `NG.` prefix is reserved. An author code matches `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`. A C++ node throws `NodeFailureError(code, public_message, retryable)`. A Python node raises any exception with a string `code` attribute, and optionally a boolean `retryable` and a string `public_message`; the caller still receives the original exception. When the executor gives up on a node, the `NodeExecutionError` it throws carries a `NodeFailure` record, which `node_failure_of()` returns. The record holds the code, the class, why retrying stopped (`exhausted`, `non_retryable` or `effect_committed`), the number of attempts, the retryable and routable flags, `public_message`, and the effects of the final attempt as `{tool, ordinal, status}`. It never copies `what()`.
+The `NG.` prefix is reserved. An author code matches `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`. A C++ node throws `NodeFailureError(code, public_message, retryable)`. A Python node raises any exception with a string `code` attribute, and optionally a boolean `retryable` and a string `public_message`; the caller still receives the original exception. When the executor gives up on a node, the `NodeExecutionError` it throws carries a `NodeFailure` record, which `node_failure_of()` returns. The record holds the code, the class, why retrying stopped (`exhausted`, `non_retryable`, `effect_committed`, `ceiling` when the run's retry ceiling was reached, or `visit_limit` when the node was activated past its `max_visits`), the number of attempts, the retryable and routable flags, `public_message`, and the effects of the final attempt as `{tool, ordinal, status}`. It never copies `what()`. A code listed in the node's `non_retryable` is not retried.
+
+**A routable failure can be handled instead of failing the run.** When the node has a failure edge (`failure_edges`; [Program graph features](program-graphs.md#failure-routing)), the executor throws nothing: the failed attempts write nothing, one structured record goes to the edge's `error_channel`, and the node routes to the edge's target only. The record has exactly `node`, `kind`, `code`, `attempts`, `retryable`, `step`, `routed_to` and `effects`, plus `detail.untrusted_text` only when the node opts in with `error_text` and the host's `EngineConfig::failure_text_redactor` keeps text from `public_message`. The node counts as run for the trace and `interruptAfter`, its pending write holds the handled outcome so a resume replays the route without running the node again, and its `ERROR` event says `handled: true` and `routed_to`. Static nodes, fan-out branches, `Send` targets and subgraph nodes all take this path, through both the sync and async entry points. A failure that is not routable, or of a node without a failure edge, is thrown as above.
 
 **Every attempt has its own effect namespace.** Attempt 0 uses the task id (`s3:act`), so existing journals keep their slots. Attempt k uses `s3:act#a<k>`, and call ordinals start again inside it. Tool effects, provider calls and subgraph threads all follow the attempt, so a retry never replays or collides with an earlier attempt's effects; a `ProviderCallBroker` sees a fresh call slot for each retry. Before attempt k starts, the executor records an empty pending write keyed by the attempt's namespace; checkpoint stores need no schema change. A resume after a crash or an interrupt continues the latest attempt that started, in its namespace, so a `ToolEffectBroker` replays what that attempt committed, and the remaining retry budget is kept. Under a `ToolEffectBroker`, an attempt that committed a non-idempotent effect (a call that succeeded under a policy other than `ReadOnly` or `ExternalRead` and not `Idempotent`) is never retried, and an effect whose outcome is unknown pauses the run with the `tool_effect_reconciliation` interrupt even when the node caught that interrupt and raised another error. The effects of subgraphs a node runs count for that node's attempt.
 
@@ -1536,7 +1538,8 @@ struct RunResult {
 
     bool max_steps_exhausted() const noexcept;    // Limit stopped runnable work
     bool barrier_stalled() const noexcept;        // A barrier can no longer fire
-    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit, SafePoint, or BarrierStalled
+    bool failure_exited() const noexcept;         // A failure-exit node completed (#364)
+    RunStatus status() const noexcept;            // Completed, Interrupted, StepLimit, SafePoint, BarrierStalled or FailureExit
 
     template <typename T> T channel(const std::string& name) const;
     template <typename T> T channel(const ChannelKey<T>& key) const;
@@ -1564,8 +1567,9 @@ run while runnable work remained. A graph that reaches `__end__` exactly on its
 last permitted step returns `false`.
 
 `status()` returns `RunStatus::Completed`, `RunStatus::Interrupted`,
-`RunStatus::StepLimit`, `RunStatus::SafePoint`, or `RunStatus::BarrierStalled` without changing the public `RunResult` data layout.
+`RunStatus::StepLimit`, `RunStatus::SafePoint`, `RunStatus::BarrierStalled`, or `RunStatus::FailureExit` without changing the public `RunResult` data layout.
 `BarrierStalled` means that nothing was ready, the final super-step did not route to `__end__` explicitly, and a barrier still held signals, so the join can no longer fire. `barrier_stalled()` is then true, and `output["_neograph"]["barrier_stalled"]` lists each stalled join as `{node, wait_for, received, missing}`.
+`FailureExit` (#364) means that a failure-exit node completed and the run ended as failed: `failure_exited()` is true and `output["_neograph"]["failure_exit"]` is `{node, code}`. A `RunInvocation` reports it as `Error`.
 `ChannelKey<T>` binds a reusable channel name to its expected C++ type:
 
 ```cpp

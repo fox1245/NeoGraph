@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=zh-CN source_sha256=5c1c2ad78a7b23f226e6dc81de38cb4ced8da6b151590f20ccd4be8a6161ce46 -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=zh-CN source_sha256=19c234158e09885ff4fb5bc8e8882e0e7b88c44a47398dab835822e3c65e466e -->
 # Program 诊断
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -182,6 +182,8 @@ Program 编译会返回诊断：失败时为 `ProgramCompileError::diagnostics()
 ## 运行时与准入
 
 准入失败和运行失败会以 `ng.ProgramAdmissionError` 和 `ng.ProgramDiagnosticError` 传给 Python，运行结果中带有含代码的 `failure`。若代码没有专门条目，其 `help.doc` 指向本节。
+
+Core 节点的失败不是诊断：自 #364 起，其 `failure.code` 是节点失败分类器给出的代码（`NG.TaskFailed`、`app.compile_error` 这样的作者代码、`NG.ProviderFailed` 等），`failure.witness.node_failure` 中保存记录；failure exit 以声明的代码结束运行（见 [Program 图功能](program-graphs.md#failure-routing)）。`P_RUNTIME_CORE_FAILURE` 只保留给没有节点失败记录的 Core 失败。
 
 | 代码 | 含义与修复 |
 |---|---|

@@ -174,6 +174,8 @@ These come from the opt-in soundness check, `ProgramCompilerConfig::soundness_ch
 
 Admission and run failures reach Python as `ng.ProgramAdmissionError` and `ng.ProgramDiagnosticError`, and run results carry a `failure` with a code. Their `help.doc` links this section unless the code has its own entry.
 
+A failure of a Core node is not a diagnostic: since #364 its `failure.code` is the node failure classifier's code (`NG.TaskFailed`, an author code such as `app.compile_error`, `NG.ProviderFailed`, ...) and `failure.witness.node_failure` holds the record, and a failure exit ends the run with its declared code (see [Program graph features](program-graphs.md#failure-routing)). `P_RUNTIME_CORE_FAILURE` remains for Core failures without a node failure record.
+
 | Code | Meaning and fix |
 |---|---|
 | <a id="p_core_barrier_stalled"></a>`P_CORE_BARRIER_STALLED` | The Core run stopped with a join still waiting for signals that can no longer arrive. The witness lists each stalled join with `received` and `missing`, plus `paths` from missing members that ran and a `suggested_wait_for` when the trace shows a stand-in. |

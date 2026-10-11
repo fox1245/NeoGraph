@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=ko source_sha256=5c1c2ad78a7b23f226e6dc81de38cb4ced8da6b151590f20ccd4be8a6161ce46 -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=ko source_sha256=19c234158e09885ff4fb5bc8e8882e0e7b88c44a47398dab835822e3c65e466e -->
 # Program 진단
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -182,6 +182,8 @@ Core 정의 파서가 내는 진단입니다. witness의 `core_code`에 Core 코
 ## 런타임과 승인
 
 승인 실패와 실행 실패는 Python에 `ng.ProgramAdmissionError`와 `ng.ProgramDiagnosticError`로 전달되며, 실행 결과에는 코드가 있는 `failure`가 들어 있습니다. 코드에 전용 항목이 없으면 `help.doc`은 이 섹션을 가리킵니다.
+
+Core 노드의 실패는 진단이 아닙니다. #364부터 그 `failure.code`는 노드 실패 분류기의 코드(`NG.TaskFailed`, `app.compile_error` 같은 작성자 코드, `NG.ProviderFailed` 등)이고 `failure.witness.node_failure`에 레코드가 담기며, failure exit는 선언된 코드로 실행을 끝냅니다([Program 그래프 기능](program-graphs.md#failure-routing) 참고). `P_RUNTIME_CORE_FAILURE`는 노드 실패 레코드가 없는 Core 실패에만 남습니다.
 
 | 코드 | 의미와 해결 방법 |
 |---|---|

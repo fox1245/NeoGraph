@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=a85f65d34d9f9d6112729356028aa150f05ef89a1f2381407ee5cbf54b130054 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=38bcd6479d516c0cd386b6f0ed4a32d22a3795688615beec3035819c7631f1c3 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -550,6 +550,12 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 `LocalProgramHost`에 전달한 `budget_ceiling`은 승인(admission) 정책의 상한이 됩니다. `max_child_depth`와 `max_total_children`을 제외한 모든 필드는 양수여야 하며, 모델을 전혀 호출하지 않는 Program이라도 `model_tokens`, `monetary_microunits`, `max_dynamic_compiles` 역시 양수여야 합니다. 그렇지 않으면 생성자가 0인 필드 이름을 담은 `ValueError`를 발생시킵니다. 두 자식 필드는 둘 다 0이거나 둘 다 양수여야 합니다.
 
 `compile_admit(source, budget)`와 `compile(source, budget)`는 `budget`을 모든 필드의 최솟값이자 최댓값으로 번들에 봉인하며, 봉인된 예산이 상한을 넘는 번들은 승인(admission)에서 거부됩니다. 그 버전에 대한 각 `run`, `start`, `start_active` 호출은 필드마다 같은 값을 전달해야 합니다. 더 크거나 작은 예산은 `P_START_BUDGET`이 담긴 `ng.ProgramDiagnosticError`를 발생시키며, 그 메시지에는 값이 다른 첫 번째 필드가 나옵니다. 예를 들면 `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`입니다. 다른 예산을 쓰려면 다시 컴파일하고 승인(admission)하십시오. 그 결과는 새 `ProgramVersion`입니다. 실행 예산의 `wall_time_ms`, `max_concurrency`, `max_program_operations`, `max_core_steps`는 양수여야 하며, `model_tokens`와 `monetary_microunits`는 0이어도 됩니다. 0은 아무것도 부여하지 않습니다. `model_tokens = 0`으로 모델 토큰을 쓴 실행은 `BudgetExhausted`로 끝나고, `monetary_microunits = 0`이면 가격이 매겨지는 모든 제공자 호출이 보내기 전에 거부됩니다([모델을 호출하는 노드](#model-calling-nodes) 참조).
+
+### 실패 라우팅
+
+`on_failure`가 있는 `retryPolicy(node, {...})`는 노드의 최종 실패를 실행을 실패시키는 대신 핸들러로 라우팅합니다. 규칙은 [Program 그래프 기능](program-graphs.md#failure-routing)에 있습니다. Python 노드는 예외 속성으로 실패를 표시합니다. 문자열 `code`(`app.compile_error` 같은 작성자 코드), 불리언 `retryable`, 문자열 `public_message`입니다. `str(exc)`는 레코드에 절대 들어가지 않습니다. 노드가 `ng.ProgramDiagnosticError`, `ng.ProgramCompileError`, `ng.ProgramAdmissionError`를 발생시키면 구성 판정(`NG.ConfigError`)이 되며, 재시도하지도 라우팅하지도 않습니다. 핸들러에 `interruptBefore`가 있으면 실행은 `Interrupted`로 멈추고 `result.interrupt.pending_input.core_interrupt_value`에 `{"reason": "failure_route", "failure": record}`가 들어 있습니다. `host.resume(run_id, value)`는 핸들러에서 이어 갑니다. failure exit는 선언된 코드로 실행을 `Failed`로 끝내고, failure edge가 없는 노드 실패는 분류된 코드(`NG.TaskFailed`, 작성자 코드 등)로 `Failed`가 됩니다.
+
+`ProgramRunBudget.max_node_retries`(기본값 `None`, 상한 없음)는 실행 전체의 노드 재시도를 제한합니다. `result.usage.node_retries`가 그 횟수이고 `result.remaining_budget.max_node_retries`가 남은 양입니다. `compile_admit`은 이를 봉인하지 않으므로 다시 컴파일하지 않고도 실행마다 설정할 수 있습니다. `LocalProgramHost(..., failure_text_redactor=fn)`와 `GraphEngine.compile(..., failure_text_redactor=fn)`은 `error_text`를 설정한 노드를 위한 redactor를 받습니다. `fn`은 `{"node", "code", "kind", "attempts", "retryable", "public_message"}`를 받아 남길 텍스트나 `None`을 돌려줍니다. 없으면 텍스트를 쓰지 않습니다. `GraphEngine`에서는 failure exit 뒤 `result.status`가 `ng.RunStatus.FailureExit`이고, `engine.resolved_retry_policy(node)`는 노드가 실제로 쓰는 재시도 타이밍을 돌려줍니다.
 
 ### 스케줄러 스레드, 워커, 타임아웃
 
