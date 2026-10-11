@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=663b2f87a2ed7c9bd7c2f04054729a318ed751df736052db7f5ffb140d4e6bea -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eb014248f5c8f64efa245b8288d64655c5de948b9d49415b656ca73232f2e953 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -41,6 +41,8 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **Program：失败的运行会保留已完成节点的 trace (#359)。** `execution_trace` 列出失败前已完成的节点，`failure.core_node` 指出抛出异常的节点。失败结果的 identity 随之变化。
 - **Program：编译期 JavaScript 遵守运行预算的 wall time (#360)。** 不终止的 `define()` 会在编译器上限与预算 `wall_time_ms` 中较小者处以 `P_JS_TIMEOUT` 停止，而不是 60 秒之后。Python 通过 `ProgramCompiler` 和 `LocalProgramHost` 的 `javascript_limits=` 传入 `ng.ProgramJavaScriptCompileLimits` 来设置编译上限。
 - **Program：编写期诊断指向源码位置 (#361)。** JavaScript 构建器诊断在编译返回的诊断中（`ProgramBundle::compile_diagnostics()`，Python `bundle.compile_diagnostics`）携带调用位置（pointer、行、列）。封存进 bundle 的诊断保持不变，因此 bundle id 保持稳定。编译失败会抛出 `ng.ProgramCompileError`（`RuntimeError` 子类），其消息以 `source:line:col` 结尾，`.diagnostics` 携带详细信息。注册表缺失提示会给出 Python 的注册调用名。
+- **Program：为零的预算上限会指出相应字段 (#370)。** `PolicySnapshot` 和 Python `LocalProgramHost` 会以 `Every policy budget ceiling except child budgets must be positive; zero: model_tokens, max_dynamic_compiles` 的形式拒绝含零字段的上限，并列出每个为零的字段。`max_child_depth` 和 `max_total_children` 仍可同时为零。
+- **Program：Python 与 QuickJS 文档与运行时一致 (#370)。** Python Program 快速入门重新可以运行：旧示例用绑定不接受的默认值参数调用了 `GraphState.get`。QuickJS 的 `main()` 示例导出 `define()` 并且只调用该 Core，并说明失败的 `callCore` 会结束运行，而不会进入 `try`/`catch`。Python 绑定指南现在涵盖 `callCore` 结果的形状、按排序存储的 barrier `wait_for`、在 `LocalProgramHost` 下以 `P_CHILD_BINDING` 失败的 `ng.spawn`、`compile_admit` 固定的预算、所有字段都必须为正的上限、`scheduler_threads`（默认 1；运行中的 Python 节点占用一个调度线程）、只存在于内存中的运行，以及恢复后的 `execution_trace`；故障排除指南列出了对应的错误。README 指向该 Program 示例，而不是不使用 Program API 的 Python 示例。
 - **示例可端到端运行。** 所有示例都已用真实 provider 或离线模式运行，并修复了失败：多智能体辩论和自我进化聊天机器人以可移植文本传递轮次，而不是把原生状态重放到配置不同的调用中；the-beast 各变体为模型编写的 `llm_call` 节点指定模型，使用共享的 zero-data-retention provider 工厂并报告运行失败；A2A 客户端默认使用示例 38 的端口；Harness MCP 服务器可在无 token 的 loopback HTTP 上工作；示例 34 为生成图片提高流限制，并在该部分使用支持图片输入的模型；program chatbot 演示策略与 descriptor 策略 revision 4 一致；多租户 live 服务器接受 `NG_MULTI_TENANT_REQUESTS` 和 `NG_MULTI_TENANT_WORKERS`；Crawl4AI 客户端接受带路径的 base URL 并发送 bearer token；RE 智能体在需要密钥之前先检查 GhidraMCP 后端。
 - **并行工具 dispatch 的 fallback 捕获的工具失败现在是合法 JSON。** 在多调用 batch 中，若某个调用在逐调用错误处理之外失败，其工具消息以字符串拼接构造为 `{"error": "..."}`，异常文本中的引号、反斜杠或换行会产生非法 JSON。现在改用 JSON 库序列化。
 - **声明了 `outputSchema` 的 MCP 工具的错误消息得以保留。** 客户端在检查 `isError` 之前就验证 output schema，因此不带 `structuredContent` 的合法错误结果会以 "MCP tool advertised outputSchema but returned no structuredContent" 失败，`[FUNCTION_NOT_FOUND] No function found named 'x'` 之类的工具消息既到不了调用方，也到不了模型。现在按照 MCP 规范的允许和官方 Python SDK 的做法，错误结果跳过 output schema 验证；成功结果仍会验证。
