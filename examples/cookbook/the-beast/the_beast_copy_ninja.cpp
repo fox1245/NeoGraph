@@ -5,7 +5,7 @@
 // discovery data: no card-provided endpoint, text, credential, or source code
 // can reach the graph. The generated graph may invoke only CopyNinjaNode.
 //
-// Setup: put OPENROUTER_API_KEY=sk-or-... in .env beside the binary
+// Setup: put OPENROUTER_API_KEY=sk-or-... in .env in the working directory or a parent
 // Build: cmake --build build --target cookbook_the_beast_copy_ninja
 // Run:   ./build/cookbook_the_beast_copy_ninja "Grace"
 
@@ -205,7 +205,7 @@ int main(int argc, char** argv) {
     cppdotenv::auto_load_dotenv();
     const char* key = std::getenv("OPENROUTER_API_KEY");
     if (!key || !*key) {
-        std::cerr << "OPENROUTER_API_KEY not set (env or .env beside the binary)\n";
+        std::cerr << "OPENROUTER_API_KEY not set (env, or .env in the working directory or a parent)\n";
         return 2;
     }
 

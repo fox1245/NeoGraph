@@ -82,7 +82,7 @@ int main() {
     const char* api_key = std::getenv("OPENROUTER_API_KEY");
     if (!api_key) {
         std::cerr << "Set OPENROUTER_API_KEY environment variable "
-                     "(or put it in .env beside the binary)\n";
+                     "(or put it in .env in the working directory or a parent)\n";
         return 1;
     }
 
