@@ -545,8 +545,8 @@ TEST(ToolDispatch, EmitsTypedTerminalStatusInToolMessages) {
     EXPECT_EQ(serialized.at("tool_status"), "succeeded");
 }
 
-// Tool lookup runs outside a worker's own error handling, so a throwing
-// get_name() reaches the batch fallback. Its message must stay valid JSON.
+// A throwing get_name() is the failure of the call being resolved, in one
+// call or a batch. Its message must stay valid JSON.
 TEST(ToolDispatch, BatchFallbackErrorIsEscapedJson) {
     static const std::string message =
         "tool said \"no\" at C:\\tools\\probe\nsecond line\ttab";

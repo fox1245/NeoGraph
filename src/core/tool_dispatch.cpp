@@ -1,8 +1,11 @@
 #include <neograph/tool_dispatch.h>
 #include <neograph/tool_effect_broker.h>
+#include <neograph/hook_outbox.h>
 #include <neograph/hook_runtime.h>
 #include <neograph/graph/cancel.h>
 #include <neograph/graph/types.h>   // NodeInterrupt — the gate's Interrupt verdict
+
+#include "tool_failure.h"
 
 #include <asio/co_spawn.hpp>
 #include <asio/deferred.hpp>
@@ -18,6 +21,24 @@
 namespace neograph {
 namespace {
 std::atomic<std::uint64_t> next_host_tool_request{0};
+
+// The one shape of a failed call's tool message, wherever the failure was met.
+ChatMessage failure_message(const ToolCall& call, ToolTerminalStatus status, std::string error,
+                            bool retryable = false, bool uncertain = false) {
+    ChatMessage message;
+    message.role = "tool";
+    message.tool_call_id = call.id;
+    message.tool_name = call.name;
+    message.tool_status = std::string(to_string(status));
+    message.tool_retryable = retryable;
+    message.tool_effect_uncertain = uncertain;
+    message.content = json{{"error", std::move(error)},
+                           {"status", message.tool_status},
+                           {"retryable", retryable},
+                           {"effect_uncertain", uncertain}}
+                          .dump();
+    return message;
+}
 }
 
 asio::awaitable<std::vector<ChatMessage>>
@@ -72,10 +93,11 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
 
     // ── Phase 2: act ──────────────────────────────────────────────────────
     //
-    // One worker per call. Resolves the tool, awaits execute_async, and folds
-    // every failure mode (unknown tool, bad arguments, throwing tool) into the
-    // returned message so a worker never propagates an exception into the
-    // parallel group.
+    // One worker per call. Resolves the tool, awaits execute_async, and applies
+    // the tool failure contract (tool_failure.h) to anything that goes wrong:
+    // an ordinary failure (unknown tool, bad arguments, a throwing tool or
+    // lookup) becomes the call's tool message; a run control signal (Hook
+    // block, interrupt, cancellation) leaves the worker and stops the batch.
     throw_if_cancelled("before tool dispatch");
 
     auto worker = [tools, execution](std::size_t call_index, ToolCall tc,
@@ -88,42 +110,38 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
             return std::chrono::system_clock::now() +
                    std::chrono::duration_cast<std::chrono::system_clock::duration>(remaining);
         };
-        if (execution.cancel_token) {
-            execution.cancel_token->throw_if_cancelled("before tool execution");
-        }
-        ChatMessage tool_msg;
-        tool_msg.role         = "tool";
-        tool_msg.tool_call_id = tc.id;
-        tool_msg.tool_name    = tc.name;
-        const auto set_failure = [&tool_msg](ToolTerminalStatus status,
-                                             std::string error,
-                                             bool retryable = false,
-                                             bool uncertain = false) {
-            tool_msg.tool_status = std::string(to_string(status));
-            tool_msg.tool_retryable = retryable;
-            tool_msg.tool_effect_uncertain = uncertain;
-            tool_msg.content = json{{"error", std::move(error)},
-                                    {"status", tool_msg.tool_status},
-                                    {"retryable", retryable},
-                                    {"effect_uncertain", uncertain}}
-                                   .dump();
-        };
 
         // A denial is a result, not an error and not silence: the model has to
         // see it, or it will simply ask for the same tool again next turn.
         if (decision && decision->kind == ToolDecision::Kind::Deny) {
-            set_failure(ToolTerminalStatus::Rejected, decision->reason);
-            co_return tool_msg;
+            co_return failure_message(tc, ToolTerminalStatus::Rejected, decision->reason);
         }
 
-        auto it = std::find_if(tools.begin(), tools.end(),
-            [&](Tool* t) { return t->get_name() == tc.name; });
-        if (it == tools.end()) {
-            set_failure(ToolTerminalStatus::Rejected, "Tool not found: " + tc.name);
-            co_return tool_msg;
-        }
+        ChatMessage tool_msg;
+        tool_msg.role         = "tool";
+        tool_msg.tool_call_id = tc.id;
+        tool_msg.tool_name    = tc.name;
         bool broker_invoked = false;
+        // Set while a lifecycle Hook is emitted for this call.
+        bool at_hook_boundary = false;
+        std::exception_ptr failure;
         try {
+            if (execution.cancel_token) {
+                execution.cancel_token->throw_if_cancelled("before tool execution");
+            }
+            // Resolving the name runs tool code (get_name), so it is handled
+            // like the call itself, not as a failure of the whole batch.
+            Tool* tool = nullptr;
+            for (Tool* candidate : tools) {
+                if (candidate->get_name() == tc.name) {
+                    tool = candidate;
+                    break;
+                }
+            }
+            if (!tool) {
+                co_return failure_message(tc, ToolTerminalStatus::Rejected,
+                                          "Tool not found: " + tc.name);
+            }
             // The gate may rewrite the arguments — that is how ambient values
             // (tenant, thread, credentials) get injected without every tool
             // having to know about them. No rewrite means what the model sent.
@@ -136,6 +154,7 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
                     next_host_tool_request.fetch_add(1, std::memory_order_relaxed) + 1);
             }
             if (execution.hook_runtime) {
+                at_hook_boundary = true;
                 // GCC 13 ICEs when the returned awaitable is consumed as a temporary.
                 auto emission = execution.hook_runtime->emit_async(
                     HookPhase::BeforeToolExecution, "tool_execution",
@@ -145,6 +164,7 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
                          {"request_id", call_execution.identity.request_id}},
                     execution.cancel_token, hook_deadline());
                 co_await std::move(emission);
+                at_hook_boundary = false;
             }
             auto controller = call_execution.controller
                             ? call_execution.controller
@@ -166,10 +186,10 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
                 call_execution.controller = controller;
                 broker_invoked = true;
                 result = co_await call_execution.effect_broker->execute(
-                    std::move(identity), **it, std::move(args), call_execution);
+                    std::move(identity), *tool, std::move(args), call_execution);
             } else {
                 result = co_await controller->execute_result_async(
-                    **it, std::move(args), call_execution);
+                    *tool, std::move(args), call_execution);
             }
             tool_msg.tool_status = std::string(to_string(result.status));
             tool_msg.tool_retryable = result.retryable;
@@ -187,6 +207,7 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
                     .dump();
             }
             if (execution.hook_runtime) {
+                at_hook_boundary = true;
                 auto emission = execution.hook_runtime->emit_async(
                     HookPhase::AfterToolExecution, "tool_execution",
                     call_execution.identity.owner_scope, call_execution.identity.root_run_id,
@@ -195,28 +216,34 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
                          {"request_id", call_execution.identity.request_id}},
                     execution.cancel_token, hook_deadline());
                 co_await std::move(emission);
+                at_hook_boundary = false;
             }
+            // Cancellation is graph control flow, not a tool result that the
+            // model should consume before the run terminates.
             if (execution.cancel_token) {
                 execution.cancel_token->throw_if_cancelled("after tool execution");
             }
-        } catch (const HookBoundaryBlocked&) {
-            throw;
-        } catch (const graph::CancelledException&) {
-            // Cancellation is graph control flow, not a tool result that the
-            // model should consume before the run terminates.
-            throw;
-        } catch (const asio::system_error& error) {
-            if (execution.cancel_token && execution.cancel_token->is_cancelled()
-                && error.code() == asio::error::operation_aborted) {
-                throw graph::CancelledException("tool operation aborted");
+        } catch (...) {
+            failure = std::current_exception();
+        }
+        if (failure) {
+            const auto kind = detail::classify_tool_failure(failure, execution.cancel_token.get());
+            if (detail::stops_run(kind)) detail::rethrow_run_stop(failure, kind);
+            if (at_hook_boundary) {
+                // A mandatory Hook that could not even run (say, the run has
+                // no owner scope to attribute the event to) fails closed like
+                // a Hook that ran and failed. Its error is not the tool's: the
+                // model must not read it, and after the tool ran it must not
+                // replace a result whose effect already happened.
+                throw HookBoundaryBlocked({}, HookExecutionState::Failed,
+                                          "lifecycle hook could not run: " +
+                                              detail::tool_failure_message(failure));
             }
-            set_failure(broker_invoked ? ToolTerminalStatus::ReconciliationRequired
-                                       : ToolTerminalStatus::Failed,
-                        error.what(), false, broker_invoked);
-        } catch (const std::exception& e) {
-            set_failure(broker_invoked ? ToolTerminalStatus::ReconciliationRequired
-                                       : ToolTerminalStatus::Failed,
-                        e.what(), false, broker_invoked);
+            // Once the broker has the call, its effect may have happened.
+            co_return failure_message(tc,
+                broker_invoked ? ToolTerminalStatus::ReconciliationRequired
+                               : ToolTerminalStatus::Failed,
+                detail::tool_failure_message(failure), false, broker_invoked);
         }
         co_return tool_msg;
     };
@@ -238,11 +265,55 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
         }
     };
 
+    // Every call's outcome is settled the same way, one call or many, in call
+    // order whatever the completion order was. A run control signal from any
+    // call stops the batch: cancellation first, then a Hook block, then an
+    // interrupt, then the earliest call. Only then can an unresolved effect
+    // pause the run for reconciliation, and only then do the messages return.
+    const auto settle = [&](const std::vector<std::exception_ptr>& errors,
+                            std::vector<ChatMessage> values) {
+        std::exception_ptr stop;
+        auto stop_kind = detail::ToolFailureClass::ToolError;
+        for (const auto& error : errors) {
+            if (!error) continue;
+            const auto kind = detail::classify_tool_failure(error, execution.cancel_token.get());
+            if (kind > stop_kind) {
+                stop = error;
+                stop_kind = kind;
+            }
+        }
+        if (stop) detail::rethrow_run_stop(stop, stop_kind);
+
+        std::vector<ChatMessage> settled;
+        settled.reserve(values.size());
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (!errors[i]) {
+                settled.push_back(std::move(values[i]));
+                continue;
+            }
+            // A worker handles its own failures, so this is the defensive
+            // case (e.g. bad_alloc while building a message). It still gets
+            // the typed shape; under a broker the effect may have happened.
+            const bool uncertain = static_cast<bool>(execution.effect_broker);
+            settled.push_back(failure_message(
+                calls[i],
+                uncertain ? ToolTerminalStatus::ReconciliationRequired : ToolTerminalStatus::Failed,
+                detail::tool_failure_message(errors[i]), false, uncertain));
+        }
+        stop_on_uncertain_effect(settled);
+        return settled;
+    };
+
     // Single call: run inline, skip the parallel-group machinery.
     if (calls.size() == 1) {
-        results.push_back(co_await worker(0, calls.front(), decision_for(0)));
-        stop_on_uncertain_effect(results);
-        co_return results;
+        std::vector<std::exception_ptr> errors(1);
+        std::vector<ChatMessage> values(1);
+        try {
+            values[0] = co_await worker(0, calls.front(), decision_for(0));
+        } catch (...) {
+            errors[0] = std::current_exception();
+        }
+        co_return settle(errors, std::move(values));
     }
 
     // Multiple calls: fan them out via the same parallel-group idiom the engine
@@ -263,42 +334,7 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
         std::move(ops))
         .async_wait(asio::experimental::wait_for_all(), asio::use_awaitable);
     (void)order;  // results are applied in call order, not completion order
-
-    results.reserve(values.size());
-    for (std::size_t i = 0; i < values.size(); ++i) {
-        if (excs[i]) {
-            // Workers catch their own exceptions, so this is a defensive
-            // fallback (e.g. bad_alloc) keyed to the originating call.
-            ChatMessage m;
-            m.role         = "tool";
-            m.tool_call_id = calls[i].id;
-            m.tool_name    = calls[i].name;
-            try {
-                std::rethrow_exception(excs[i]);
-            } catch (const graph::CancelledException&) {
-                throw;
-            } catch (const asio::system_error& error) {
-                if (execution.cancel_token && execution.cancel_token->is_cancelled()
-                    && error.code() == asio::error::operation_aborted) {
-                    throw graph::CancelledException("tool operation aborted");
-                }
-                m.content = json{{"error", error.what()}}.dump();
-            } catch (const std::exception& e) {
-                m.content = json{{"error", e.what()}}.dump();
-            } catch (...) {
-                m.content = json{{"error", "unknown tool failure"}}.dump();
-            }
-            if (execution.effect_broker) {
-                m.tool_status = std::string(to_string(ToolTerminalStatus::ReconciliationRequired));
-                m.tool_effect_uncertain = true;
-            }
-            results.push_back(std::move(m));
-        } else {
-            results.push_back(std::move(values[i]));
-        }
-    }
-    stop_on_uncertain_effect(results);
-    co_return results;
+    co_return settle(excs, std::move(values));
 }
 
 }  // namespace neograph

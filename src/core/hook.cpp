@@ -1,6 +1,7 @@
 #include <neograph/hook.h>
 
 #include "canonical_json.h"
+#include "tool_failure.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -120,5 +121,22 @@ HookRegistry::HookRegistry(HookTargetResolver resolver, std::set<std::string> ma
 void HookRegistry::admit(HookDefinition definition) { const auto target = target_resolver_(definition.data().target_id); if (!target) throw std::invalid_argument("Hook target is not admitted"); HookInvocationData invocation; invocation.definition_id = definition.id(); invocation.event_id = "sha256:" + std::string(64, '0'); invocation.target_id = definition.data().target_id; invocation.phase = definition.data().phase; invocation.delivery = definition.data().delivery; invocation.failure_mode = definition.data().failure_mode; invocation.idempotency = definition.data().idempotency; invocation.effect = definition.data().effect; invocation.required_capabilities = definition.data().required_capabilities; invocation.host_mapper_id = definition.data().input_mapper.host_mapper_id; validate_invocation(invocation); validate_target(invocation, *target); if (definition.data().input_mapper.kind == HookInputMapperKind::HostMapper && !admitted_host_mapper_ids_.count(definition.data().input_mapper.host_mapper_id)) throw std::invalid_argument("Hook host mapper is not admitted"); definitions_.push_back(std::move(definition)); std::sort(definitions_.begin(), definitions_.end(), [](const auto& a, const auto& b) { return std::tie(a.data().priority, a.id()) < std::tie(b.data().priority, b.id()); }); }
 std::vector<HookInvocation> HookRegistry::plan(const RuntimeEvent& event) const { std::vector<HookInvocation> result; for (const auto& definition : definitions_) { if (definition.data().phase != event.phase() || !matches(definition.data().predicate, event)) continue; const auto arguments = definition.data().input_mapper.kind == HookInputMapperKind::HostMapper ? json::object() : canonical_json(map_arguments(definition.data().input_mapper, event), "Hook mapped arguments"); result.push_back(HookInvocation::create({{}, definition.id(), event.id(), definition.data().target_id, definition.data().phase, definition.data().delivery, definition.data().failure_mode, definition.data().idempotency, definition.data().effect, definition.data().required_capabilities, definition.data().input_mapper.host_mapper_id, arguments})); } return result; }
 NativeHookExecutionAdapter::NativeHookExecutionAdapter(HookTargetResolver resolver, std::shared_ptr<ToolExecutionController> controller, HookHostMapper mapper, std::set<std::string> mapper_ids) : target_resolver_(std::move(resolver)), controller_(std::move(controller)), host_mapper_(std::move(mapper)), admitted_host_mapper_ids_(std::move(mapper_ids)) { if (!target_resolver_ || !controller_) throw std::invalid_argument("Hook execution requires a resolver and controller"); for (const auto& id : admitted_host_mapper_ids_) detail::validate_token(id, "Hook host mapper id"); }
-asio::awaitable<ToolExecutionResult> NativeHookExecutionAdapter::execute_result_async(const HookInvocation& invocation, const RuntimeEvent& event, ToolExecutionContext context) const { if (invocation.data().event_id != event.id() || invocation.data().phase != event.phase()) throw std::invalid_argument("Hook invocation does not match runtime event"); const auto target = target_resolver_(invocation.data().target_id); if (!target) throw std::invalid_argument("Hook target is not admitted"); validate_target(invocation.data(), *target); auto arguments = invocation.data().arguments; if (!invocation.data().host_mapper_id.empty()) { if (!host_mapper_ || !admitted_host_mapper_ids_.count(invocation.data().host_mapper_id)) throw std::invalid_argument("Hook host mapper is not admitted"); arguments = canonical_json(host_mapper_(invocation.data().host_mapper_id, event), "Hook host mapper output"); } if (context.identity.request_id.empty()) context.identity.request_id = invocation.id(); context.controller = controller_; co_return co_await controller_->execute_result_async(*target->tool, std::move(arguments), std::move(context)); }
+asio::awaitable<ToolExecutionResult> NativeHookExecutionAdapter::execute_result_async(const HookInvocation& invocation, const RuntimeEvent& event, ToolExecutionContext context) const { if (invocation.data().event_id != event.id() || invocation.data().phase != event.phase()) throw std::invalid_argument("Hook invocation does not match runtime event"); const auto target = target_resolver_(invocation.data().target_id); if (!target) throw std::invalid_argument("Hook target is not admitted"); validate_target(invocation.data(), *target); auto arguments = invocation.data().arguments; if (!invocation.data().host_mapper_id.empty()) { if (!host_mapper_ || !admitted_host_mapper_ids_.count(invocation.data().host_mapper_id)) throw std::invalid_argument("Hook host mapper is not admitted"); arguments = canonical_json(host_mapper_(invocation.data().host_mapper_id, event), "Hook host mapper output"); } if (context.identity.request_id.empty()) context.identity.request_id = invocation.id(); context.controller = controller_;
+    std::exception_ptr stopped;
+    try {
+        co_return co_await controller_->execute_result_async(*target->tool, std::move(arguments), std::move(context));
+    } catch (...) {
+        stopped = std::current_exception();
+    }
+    // A Hook target is not a model's tool call. A run control signal raised
+    // inside it (a nested Hook block, a request for a human) is this attempt
+    // failing, settled like any other exception from the target; the Hook's
+    // own failure mode then decides the boundary. Cancellation stays control
+    // flow.
+    const auto kind = detail::classify_tool_failure(stopped, nullptr);
+    if (kind != detail::ToolFailureClass::HookBlocked && kind != detail::ToolFailureClass::Interrupted)
+        std::rethrow_exception(stopped);
+    co_return detail::ordinary_tool_failure(controller_->policies()->resolve(target->tool->get_name()),
+                                            true, detail::tool_failure_message(stopped));
+}
 } // namespace neograph

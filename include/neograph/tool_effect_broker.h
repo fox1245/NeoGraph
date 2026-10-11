@@ -42,8 +42,9 @@ struct ToolEffectIdentity {
  * perform the effect, or return a verified stored result without executing.
  *
  * An ordinary thrown exception is conservatively exposed as an uncertain
- * effect; cancellation remains graph control flow. A confirmed pre-dispatch
- * refusal should return an explicit failed result.
+ * effect; cancellation, a HookBoundaryBlocked and a NodeInterrupt remain run
+ * control flow and propagate. A confirmed pre-dispatch refusal should return
+ * an explicit failed result.
  * Core does not claim that a particular host broker is durable or exactly once.
  */
 class NEOGRAPH_API ToolEffectBroker {

@@ -8,6 +8,7 @@
 
 #include "canonical_json.h"
 #include "run_context_runtime.h"
+#include "tool_failure.h"
 #include <asio/co_spawn.hpp>
 #include <asio/deferred.hpp>
 #include <asio/error.hpp>
@@ -345,9 +346,11 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
             // SDK runtime owns provider retry policy and attempt evidence.
             // Re-running the node would start a fresh unrelated operation.
             throw_node_error(std::current_exception(), attempt + 1);
-        } catch (const NodeExecutionError&) {
+        } catch (const NodeExecutionError& nested) {
             auto error = std::current_exception();
-            if (has_provider_outcome(error))
+            if (has_provider_outcome(error) ||
+                ::neograph::detail::classify_tool_failure(nested.cause(), nullptr) ==
+                    ::neograph::detail::ToolFailureClass::HookBlocked)
                 throw_node_error(std::move(error), attempt + 1);
             retryable_err = std::move(error);
         } catch (const asio::system_error& error) {
@@ -375,8 +378,15 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
         } catch (...) {
             // runtime_error, network/timeout errors, third-party
             // exceptions: assume transient and let the retry loop
-            // decide based on attempt count + policy.
-            retryable_err = std::current_exception();
+            // decide based on attempt count + policy. A HookBoundaryBlocked
+            // is not transient: it is a mandatory Hook's policy decision, and
+            // re-running the node would re-run work (a whole tool batch) to
+            // ask the same question again.
+            auto error = std::current_exception();
+            if (::neograph::detail::classify_tool_failure(error, nullptr) ==
+                ::neograph::detail::ToolFailureClass::HookBlocked)
+                throw_node_error(std::move(error), attempt + 1);
+            retryable_err = std::move(error);
         }
 
         if (ok_result) {

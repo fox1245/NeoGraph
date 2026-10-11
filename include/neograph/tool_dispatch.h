@@ -152,10 +152,24 @@ using ToolGate =
  * Results come back in **call order**, not completion order, so the caller's
  * message history is deterministic regardless of which tool finished first.
  *
- * Never throws on a per-call failure. A call naming an unregistered tool, an
- * unparseable argument payload, or a tool that throws all yield a tool message
- * whose content is an `{"error": "..."}` object — the model sees the failure and
- * can react to it, which is the behavior both callers already had.
+ * **Failure contract** (the same for one call and for a batch; see "Tool
+ * failure contract" in the reference):
+ *
+ * - An ordinary per-call failure never throws. A call naming an unregistered
+ *   tool (`rejected`), an unparseable argument payload, a tool whose lookup
+ *   or execution throws, or a typed controller result such as `timed_out`
+ *   all yield a tool message with `tool_status` set and content
+ *   `{"error", "status", "retryable", "effect_uncertain"}`: the model sees the
+ *   failure and can react to it.
+ * - Run control signals are never turned into a tool message. A
+ *   `HookBoundaryBlocked` (from a lifecycle Hook or from tool code),
+ *   a `NodeInterrupt` (from the gate or from tool code) and cancellation of
+ *   `execution.cancel_token` propagate with their original type and fields.
+ *   In a batch the other calls run to completion first; if several calls stop
+ *   the run, cancellation wins, then a Hook block, then an interrupt, then the
+ *   earliest call.
+ * - With an effect broker, a call whose effect is uncertain pauses the run
+ *   with a `NodeInterrupt` whose payload kind is `tool_effect_reconciliation`.
  *
  * @param calls Tool calls from the assistant message. Taken **by value**: this
  *        is a coroutine, and a reference parameter would dangle across the first
@@ -169,10 +183,14 @@ using ToolGate =
  * @param execution Per-invocation context. The graph path supplies its
  *        cancellation token; standalone Agent calls retain the empty default.
  *
- * @throws NodeInterrupt when the gate returns Interrupt for any call. On the
- *         graph path the engine catches it, checkpoints, and hands the caller a
- *         paused `RunResult`. On the Agent path — which has no checkpoint
- *         machinery — it surfaces to the caller of `Agent::run`.
+ * @throws NodeInterrupt when the gate returns Interrupt for any call, or tool
+ *         code raises one. On the graph path the engine catches it,
+ *         checkpoints, and hands the caller a paused `RunResult`. On the Agent
+ *         path — which has no checkpoint machinery — it surfaces to the caller
+ *         of `Agent::run`.
+ * @throws HookBoundaryBlocked when a mandatory Hook blocks a call or tool code
+ *         raises one.
+ * @throws graph::CancelledException when the run's cancel token is cancelled.
  *
  * **Gating happens before execution, and that ordering is the design.** A
  * permission gate that runs the command and then asks is not a permission gate.

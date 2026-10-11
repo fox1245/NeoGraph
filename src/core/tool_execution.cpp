@@ -3,6 +3,8 @@
 #include <neograph/graph/cancel.h>
 #include <neograph/tool.h>
 
+#include "tool_failure.h"
+
 #include <asio/experimental/awaitable_operators.hpp>
 #include <asio/async_result.hpp>
 #include <asio/bind_executor.hpp>
@@ -1146,6 +1148,11 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
                     if (error.code() == asio::error::operation_aborted) throw;
                     last_error = std::current_exception();
                 } catch (...) {
+                    // A Hook block or interrupt from tool code is never retried.
+                    if (detail::stops_run(detail::classify_tool_failure(
+                            std::current_exception(), nullptr))) {
+                        throw;
+                    }
                     last_error = std::current_exception();
                 }
                 if (output) co_return std::move(*output);
@@ -1267,14 +1274,17 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
         co_return publish_singleflight(ToolExecutionResult{
             ToolTerminalStatus::Failed, {}, error.what(), false, false});
     } catch (const std::exception& error) {
-        const auto uncertain = started
-            && policy.effect != ToolEffectClass::ReadOnly
-            && policy.effect != ToolEffectClass::ExternalRead
-            && policy.idempotency != ToolIdempotency::Idempotent;
-        co_return publish_singleflight(ToolExecutionResult{
-            uncertain ? ToolTerminalStatus::ReconciliationRequired
-                      : ToolTerminalStatus::Failed,
-            {}, error.what(), false, uncertain});
+        auto result = detail::ordinary_tool_failure(policy, started, error.what());
+        if (detail::stops_run(detail::classify_tool_failure(std::current_exception(), nullptr))) {
+            // A HookBoundaryBlocked or NodeInterrupt raised by tool code (a
+            // nested run's Hook block, a request for a human) belongs to the
+            // run, not to the tool's result: the dispatcher stops the run with
+            // it (tool_failure.h). Single-flight followers still get the
+            // result they would have seen, so none waits for a dead leader.
+            (void)publish_singleflight(std::move(result));
+            throw;
+        }
+        co_return publish_singleflight(std::move(result));
     } catch (...) {
         co_return publish_singleflight(ToolExecutionResult{
             started ? ToolTerminalStatus::ReconciliationRequired

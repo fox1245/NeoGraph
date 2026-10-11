@@ -291,7 +291,16 @@ public:
     ToolExecutionController(const ToolExecutionController&) = delete;
     ToolExecutionController& operator=(const ToolExecutionController&) = delete;
 
-    /** Typed terminal contract shared by all tool implementations. */
+    /**
+     * Typed terminal contract shared by all tool implementations.
+     *
+     * Every failure becomes a typed result, cancellation included
+     * (CancelledBeforeStart / CancellationRequested), except the run control
+     * signals that tool code can raise: HookBoundaryBlocked and
+     * graph::NodeInterrupt propagate unchanged, so no caller can turn them
+     * into a result a model reads. See "Tool failure contract" in the
+     * reference.
+     */
     asio::awaitable<ToolExecutionResult> execute_result_async(
         Tool& tool, json arguments, ToolExecutionContext context);
 
