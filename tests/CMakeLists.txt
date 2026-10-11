@@ -875,3 +875,9 @@ if(TARGET neograph::llm)
     gtest_discover_tests(neograph_schema_provider_interface6_tests
         PROPERTIES TIMEOUT 60 LABELS "provider;interface6;model-free")
 endif()
+
+# Program API v2 guards (#363-#365). Each suite is its own executable so the
+# work packages that change Core and Program files never edit these lists.
+add_executable(neograph_text_safety_tests test_text_safety.cpp)
+target_link_libraries(neograph_text_safety_tests PRIVATE neograph::core GTest::gtest_main)
+gtest_discover_tests(neograph_text_safety_tests PROPERTIES LABELS "core;text-safety")
