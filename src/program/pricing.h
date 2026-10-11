@@ -14,8 +14,8 @@
  *
  * Internal header: it lives under src/ and is not installed. The symbols are
  * exported only so that other NeoGraph libraries (and the Python binding) can
- * link them in shared builds; they carry no compatibility promise. The binding
- * that applies them to `llm_call` nodes is separate work.
+ * link them in shared builds; they carry no compatibility promise. The
+ * provider binding that applies them to `llm_call` nodes is in monetary.h.
  *
  * Units. One microunit is 1e-6 USD; the catalog currency is USD and nothing
  * here converts currencies. Catalog rates are decimal strings in USD per
@@ -39,7 +39,8 @@
  * PricingError::UnknownModel. The catalog never guesses a price. The caller
  * chooses the policy: a run with a monetary ceiling must fail closed (refuse
  * the call); running the call unbudgeted is a host decision that the record
- * must state. The planned `llm_call` binding fails closed by default.
+ * must state. The `llm_call` binding refuses on a run with a ceiling and
+ * records the call as unpriced on a run without one.
  *
  * Aggregators. An origin marked "aggregator" (OpenRouter) routes one model to
  * several upstream endpoints whose prices differ, so the listed price is not a
@@ -235,6 +236,11 @@ public:
     static PriceCatalog parse(std::string_view json_text);
     /** Read and parse a catalog file. Throws CatalogError. */
     static PriceCatalog load(const std::filesystem::path& path);
+    /**
+     * The catalog compiled into this library from data/pricing/catalog.json
+     * at build time. Parsed once; the runtime prices calls only from it.
+     */
+    static const PriceCatalog& builtin();
 
     const std::string&         version() const noexcept { return version_; }
     /** SHA-256 identity of the canonical catalog JSON, recorded with estimates. */

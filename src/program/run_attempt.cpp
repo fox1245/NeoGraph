@@ -6,6 +6,7 @@
 #include "canonical_json.h"
 #include "core_progress.h"
 #include "javascript.h"
+#include "monetary.h"
 #include "run_control.h"
 #include "provider_failure.h"
 #include "strand_join_signal.h"
@@ -1368,6 +1369,15 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         usage->restore_authority(std::move(control->recorded_replay->provider_authority));
         usage->seal_observation();
     }
+    // Recorded replay never spends money: its provider outcomes are captured.
+    const auto monetary = control->recorded_replay
+        ? std::shared_ptr<ProgramMonetaryAccount>{}
+        : std::make_shared<ProgramMonetaryAccount>(control->granted_budget.monetary_microunits,
+                                                   control->attempt);
+    control->set_monetary_account(monetary);
+    const auto monetary_used = [&monetary]() -> std::uint64_t {
+        return monetary ? monetary->used() : 0;
+    };
     auto                     core_progress         = std::make_shared<AttemptCoreProgress>();
     std::uint64_t            operation_count       = 0;
     std::uint64_t            dynamic_compile_count = 0;
@@ -1758,6 +1768,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 ProgramUsage consumed;
                 consumed.wall_time_ms = elapsed_ms(started_at);
                 consumed.model_tokens = model_tokens(usage);
+                consumed.monetary_microunits = monetary_used();
                 consumed.program_operations = operation_count;
                 consumed.core_steps = core_progress->steps();
                 consumed.peak_concurrency =
@@ -4777,6 +4788,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
 
                 const auto    model_before       = model_tokens(usage);
+                const auto    money_before       = monetary_used();
                 const auto    steps_before       = core_progress->steps();
                 const auto    command_started_at = std::chrono::steady_clock::now();
                 PlanExecution command_result;
@@ -4830,7 +4842,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 const ProgramUsage command_usage{
                     std::min(elapsed_ms(command_started_at), resource_reservation.wall_time_ms),
                     subtract_saturated(model_tokens(usage), model_before),
-                    0,
+                    subtract_saturated(monetary_used(), money_before),
                     subtract_saturated(operations_after, operations_before),
                     subtract_saturated(core_progress->steps(), steps_before),
                     static_cast<std::uint32_t>(
@@ -4946,6 +4958,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.execution_trace          = std::move(plan_result.execution_trace);
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
         outcome.usage.model_tokens       = model_tokens(usage);
+        outcome.usage.monetary_microunits = monetary_used();
         outcome.usage.program_operations = operation_count;
         outcome.usage.core_steps         = core_progress->steps();
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
@@ -4969,6 +4982,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         } else if (outcome.usage.core_steps > control->granted_budget.max_core_steps ||
                    (!control->recorded_replay &&
                     outcome.usage.model_tokens > control->granted_budget.model_tokens) ||
+                   (monetary && monetary->exceeded()) ||
                    outcome.usage.wall_time_ms > control->granted_budget.wall_time_ms) {
             outcome.status = ProgramTerminalStatus::BudgetExhausted;
         } else {
@@ -4999,6 +5013,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome                          = failed_outcome(control, "P_EVENT_SINK", error.what());
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
         outcome.usage.model_tokens       = model_tokens(usage);
+        outcome.usage.monetary_microunits = monetary_used();
         outcome.usage.program_operations = operation_count;
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
@@ -5009,6 +5024,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.execution_trace          = core_progress->completed_nodes();
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
         outcome.usage.model_tokens       = model_tokens(usage);
+        outcome.usage.monetary_microunits = monetary_used();
         outcome.usage.program_operations = operation_count;
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
@@ -5029,6 +5045,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.execution_trace          = core_progress->completed_nodes();
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
         outcome.usage.model_tokens       = model_tokens(usage);
+        outcome.usage.monetary_microunits = monetary_used();
         outcome.usage.program_operations = operation_count;
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
@@ -5047,6 +5064,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.execution_trace          = core_progress->completed_nodes();
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
         outcome.usage.model_tokens       = model_tokens(usage);
+        outcome.usage.monetary_microunits = monetary_used();
         outcome.usage.program_operations = operation_count;
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
@@ -5066,6 +5084,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.execution_trace          = core_progress->completed_nodes();
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
         outcome.usage.model_tokens       = model_tokens(usage);
+        outcome.usage.monetary_microunits = monetary_used();
         outcome.usage.program_operations = operation_count;
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
@@ -5079,6 +5098,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.execution_trace          = core_progress->completed_nodes();
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
         outcome.usage.model_tokens       = model_tokens(usage);
+        outcome.usage.monetary_microunits = monetary_used();
         outcome.usage.program_operations = operation_count;
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
@@ -5154,6 +5174,23 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
             }
         }
+    }
+    if (monetary) {
+        // A refused call returns a synthetic not-sent failure; name it by its
+        // P_MONEY_* code. A budget too small for the reservation exhausts the run.
+        if (outcome.failure && outcome.failure->provider_outcome) {
+            if (const auto refusal = monetary->refusal_for(outcome.failure->provider_outcome)) {
+                outcome.failure->code    = refusal->code;
+                outcome.failure->message = refusal->message;
+                if (!outcome.failure->witness.is_object()) outcome.failure->witness = json::object();
+                outcome.failure->witness["monetary"] = refusal->witness;
+                if (refusal->budget && outcome.status == ProgramTerminalStatus::Failed)
+                    outcome.status = ProgramTerminalStatus::BudgetExhausted;
+            }
+        }
+        outcome.monetary_records = monetary->records();
+    } else if (control->recorded_replay) {
+        outcome.remaining_budget.monetary_microunits = control->granted_budget.monetary_microunits;
     }
     outcome.provider_budget_authority = usage->authority_snapshot();
     cancel_deadline_timer(control->deadline_executor, std::move(timer));

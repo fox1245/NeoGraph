@@ -6,6 +6,7 @@
 
 #include "canonical_json.h"
 #include "catalog_access.h"
+#include "monetary.h"
 #include "run_control.h"
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -2062,14 +2063,21 @@ void RunControl::set_core_provider_call_resolver(ProgramCoreProviderCallResolver
     require_core_provider_call_broker_ = required;
 }
 
+void RunControl::set_monetary_account(std::shared_ptr<ProgramMonetaryAccount> account) {
+    std::lock_guard lock(mutex_);
+    monetary_account_ = std::move(account);
+}
+
 std::shared_ptr<graph::ProviderCallBroker> RunControl::resolve_core_provider_call_broker(
     std::string_view operation_id) const {
     ProgramCoreProviderCallResolver resolver;
     bool required;
+    std::shared_ptr<ProgramMonetaryAccount> monetary;
     {
         std::lock_guard lock(mutex_);
         resolver = core_provider_call_resolver_;
         required = require_core_provider_call_broker_;
+        monetary = monetary_account_;
     }
     if (!resolver) {
         if (required)
@@ -2077,7 +2085,7 @@ std::shared_ptr<graph::ProviderCallBroker> RunControl::resolve_core_provider_cal
         return {};
     }
     const auto binding = resolver(ProgramCoreProviderCallContext{
-        owner_scope, program_version_id, run_id, operation_id, attempt});
+        owner_scope, program_version_id, run_id, operation_id, attempt, std::move(monetary)});
     if (!binding || binding->owner_scope != owner_scope ||
         binding->program_version_id != program_version_id ||
         binding->run_id != run_id || binding->operation_id != operation_id ||
@@ -2558,7 +2566,8 @@ ProgramResult RunControl::make_result(RunOutcome outcome) const {
         outcome.status, run_id, program_version_id, bundle_id, operation_id, attempt,
         std::move(outcome.output), outcome.usage, outcome.remaining_budget,
         std::move(outcome.checkpoint), std::move(outcome.interrupt), std::move(outcome.failure),
-        std::move(outcome.execution_trace), std::move(outcome.provider_budget_authority)},
+        std::move(outcome.execution_trace), std::move(outcome.provider_budget_authority),
+        std::move(outcome.monetary_records)},
         owner_scope, native_history_archive);
 }
 
@@ -7809,6 +7818,23 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
                 "Program execution lease exhausted its wall-time budget", "root",
                 pinned->root->core_name, 0,
                 json{{"lease_id", execution_lease->id()}}};
+            if (impl_->config.core_provider_call_resolver) {
+                // The stopped attempt's journaled calls were never settled into
+                // the run's budget. Binding the root operation charges them,
+                // once, to this terminal result (#372).
+                const auto monetary = std::make_shared<ProgramMonetaryAccount>(
+                    record->remaining_budget().monetary_microunits,
+                    record->continuation().attempt);
+                expired_control->set_monetary_account(monetary);
+                (void)expired_control->resolve_core_provider_call_broker(
+                    pinned->bundle.typed_orchestration_plan().root_id());
+                const auto charged = monetary->used();
+                timed_out.usage.monetary_microunits = charged;
+                timed_out.remaining_budget.monetary_microunits =
+                    charged >= timed_out.remaining_budget.monetary_microunits
+                        ? 0 : timed_out.remaining_budget.monetary_microunits - charged;
+                timed_out.monetary_records = monetary->records();
+            }
             expired_control->complete(std::move(timed_out));
             const auto result = expired_control->try_result();
             if (result && result->status() == ProgramTerminalStatus::TimedOut) {

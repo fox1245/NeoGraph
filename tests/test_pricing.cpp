@@ -585,3 +585,12 @@ TEST(PricingReserve, EstimatesNeverExceedTheirReservation) {
     }
     EXPECT_GT(checked, 3'000u);
 }
+
+TEST(Pricing, BuiltinCatalogIsTheRepositoryCatalog) {
+    // The runtime prices calls only from the catalog compiled into the library.
+    const auto& builtin = PriceCatalog::builtin();
+    const auto  source  = PriceCatalog::load(NEOGRAPH_PRICING_CATALOG);
+    EXPECT_EQ(builtin.digest(), source.digest());
+    EXPECT_EQ(builtin.version(), source.version());
+    EXPECT_EQ(&builtin, &PriceCatalog::builtin()) << "parsed once";
+}

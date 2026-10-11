@@ -58,12 +58,61 @@ struct RunBudget {
 struct ProgramUsage {
     std::uint64_t wall_time_ms        = 0;
     std::uint64_t model_tokens        = 0;
+    /// Micro-USD charged to this attempt by priced provider calls: settled
+    /// amounts plus the reservations of calls whose outcome is unknown.
     std::uint64_t monetary_microunits = 0;
     std::uint64_t program_operations  = 0;
     std::uint64_t core_steps          = 0;
     std::uint32_t peak_concurrency    = 0;
 
     bool operator==(const ProgramUsage&) const = default;
+};
+
+/** Where the amount of one priced provider call came from. */
+enum class ProgramMonetaryEvidence : std::uint8_t {
+    /// The provider's own cost for the call (OpenRouter `usage.cost`).
+    Reported,
+    /// The price catalog applied to the call's reported token usage.
+    Estimated,
+    /// The outcome or its usage is unknown, so the call's reservation is charged.
+    Held,
+};
+
+NEOGRAPH_PROGRAM_API std::string_view to_string(ProgramMonetaryEvidence evidence) noexcept;
+NEOGRAPH_PROGRAM_API ProgramMonetaryEvidence
+program_monetary_evidence_from_string(std::string_view value);
+
+/** One provider call of a Program attempt, priced in micro-USD (1e-6 USD). */
+struct ProgramMonetaryRecord {
+    /// Stable logical call slot, the provider journal's dispatch id.
+    std::string             call_id;
+    std::string             operation_id;
+    /// Core node that made the call.
+    std::string             node;
+    /// Price catalog origin, for example "openrouter".
+    std::string             origin;
+    std::string             model;
+    ProgramMonetaryEvidence evidence = ProgramMonetaryEvidence::Estimated;
+    /// Amount charged to the run.
+    std::uint64_t           microunits = 0;
+    /// Preflight reservation; 0 when none could be computed.
+    std::uint64_t           reserved_microunits = 0;
+    /// "provider_reported", "list_rates" or "route_ceiling".
+    std::string             basis;
+    /// The catalog that priced an estimated or held amount.
+    std::string             catalog_version;
+    std::string             catalog_digest;
+    /// Some tokens were priced at the highest rate they could have billed at.
+    bool                    conservative = false;
+    /// An aggregator estimate at the list price: the served endpoint may have cost more.
+    bool                    may_undercount = false;
+    /// Restored from the provider journal after a restart; its request was
+    /// sent once, before the restart.
+    bool                    replayed = false;
+    /// Why an amount is held (the usage state or the unknown outcome).
+    std::string             reason;
+
+    bool operator==(const ProgramMonetaryRecord&) const = default;
 };
 
 struct CoreCheckpointIdentity {
@@ -120,6 +169,8 @@ struct ProgramResultData {
     /// Actual bank custody, authenticated by the enclosing owner-scoped run journal.
     /// Reported usage is separate from charged credit and UnknownHold reservations.
     std::optional<UsageAccumulator::AuthoritySnapshot> provider_budget_authority;
+    /// Priced provider calls of this attempt, in settlement order.
+    std::vector<ProgramMonetaryRecord> monetary_records;
 };
 
 class NEOGRAPH_PROGRAM_API ProgramResult {
@@ -153,6 +204,9 @@ public:
     std::optional<ProgramFailure>         failure() const;
     std::vector<std::string>              execution_trace() const;
     const std::optional<UsageAccumulator::AuthoritySnapshot>& provider_budget_authority() const noexcept;
+    /// Priced provider calls of this attempt, in settlement order. Empty when
+    /// no call went through a pricing broker.
+    const std::vector<ProgramMonetaryRecord>& monetary_records() const noexcept;
 
 private:
     using ConstructionData = ProgramResultData;

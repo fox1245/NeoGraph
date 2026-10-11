@@ -15,6 +15,10 @@
 #include <utility>
 
 namespace neograph::program::pricing {
+namespace detail {
+// Defined in the CMake-generated pricing_catalog_data.cpp.
+std::string_view builtin_catalog_json() noexcept;
+}  // namespace detail
 namespace {
 
 constexpr std::uint64_t    kMillion  = 1'000'000;
@@ -490,6 +494,13 @@ PriceCatalog PriceCatalog::load(const std::filesystem::path& path) {
     buffer << input.rdbuf();
     if (!input.good() && !input.eof()) fail("file", "cannot read " + path.string());
     return parse(buffer.str());
+}
+
+const PriceCatalog& PriceCatalog::builtin() {
+    // Parsed on first use; a catalog that fails to load fails the build's
+    // tests, never a request at run time with a guessed price.
+    static const PriceCatalog catalog = parse(detail::builtin_catalog_json());
+    return catalog;
 }
 
 const Origin* PriceCatalog::find_origin(std::string_view id) const noexcept {

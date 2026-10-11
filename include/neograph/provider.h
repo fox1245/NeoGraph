@@ -202,6 +202,10 @@ public:
     asio::awaitable<sp::runtime::Result> invoke_async(ProviderRequest request);
     static std::string request_digest(const PreparedProviderRequest& request);
     static std::optional<std::uint64_t> conservative_token_upper_bound(const PreparedProviderRequest& request);
+    /// Most model invocations one dispatch of this request can bill: the
+    /// request's model invocations times the transport attempts its retry
+    /// policy allows. Empty when the prepared request does not state them.
+    static std::optional<std::uint64_t> invocation_upper_bound(const PreparedProviderRequest& request);
 protected:
     using LocalDispatch = std::function<asio::awaitable<sp::runtime::Result>(
         const PreparedProviderRequest&, const std::function<void(const sp::Event&)>&)>;

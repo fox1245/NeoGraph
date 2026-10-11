@@ -5,6 +5,7 @@
 #include <neograph/hook_outbox.h>
 
 #include "../core/canonical_json.h"
+#include "monetary.h"
 
 #include <sqlite3.h>
 
@@ -80,16 +81,12 @@ private:
 };
 
 std::string hash(std::string_view purpose, const json& value) {
-    return detail::sha256_identity(slot_domain, purpose, detail::canonical_json_bytes(value));
+    return neograph::detail::sha256_identity(slot_domain, purpose, neograph::detail::canonical_json_bytes(value));
 }
 std::string dispatch_id(const ProgramCoreProviderCallContext& context,
                         const graph::ProviderCallIdentity& call) {
-    return hash("slot", {{"owner_scope", std::string(context.owner_scope)},
-                         {"program_version_id", std::string(context.program_version_id)},
-                         {"run_id", std::string(context.run_id)},
-                         {"operation_id", std::string(context.operation_id)},
-                         {"thread_id", call.thread_id}, {"task_id", call.task_id},
-                         {"node_name", call.node_name}, {"call_ordinal", call.call_ordinal}});
+    // Shared with the in-process pricing broker; the same bytes as hash("slot", ...).
+    return program::detail::provider_call_slot_id(context, call);
 }
 void validate_context(const ProgramCoreProviderCallContext& context) {
     if (context.owner_scope.empty() || context.program_version_id.empty() ||
@@ -141,6 +138,10 @@ struct SQLiteProgramProviderCallJournal::Impl {
             add_column("logical_scope", "ALTER TABLE ng_program_provider_calls ADD COLUMN logical_scope TEXT NOT NULL DEFAULT ''");
             add_column("claim_amount", "ALTER TABLE ng_program_provider_calls ADD COLUMN claim_amount TEXT NOT NULL DEFAULT ''");
             add_column("committed_amount", "ALTER TABLE ng_program_provider_calls ADD COLUMN committed_amount TEXT NOT NULL DEFAULT ''");
+            // The priced call's ProgramMonetaryRecord (#372): written as the held
+            // provisional record with the dispatched marker, replaced by the
+            // settled record with the outcome, emptied when nothing was sent.
+            add_column("monetary_record", "ALTER TABLE ng_program_provider_calls ADD COLUMN monetary_record TEXT NOT NULL DEFAULT ''");
             execute(db, "CREATE INDEX IF NOT EXISTS ng_program_provider_scope ON ng_program_provider_calls(owner_scope,logical_scope)");
         } catch (...) {
             sqlite3_close_v2(db);
@@ -164,6 +165,7 @@ struct Stored {
     std::string encoding_version, provider_name, family, mode, deadline;
     std::string scope;
     std::uint64_t claim = 0, committed = 0;
+    std::string monetary;
 };
 std::uint64_t parse_amount(std::string_view value) {
     std::uint64_t result = 0;
@@ -190,7 +192,7 @@ std::uint64_t committed_amount(const sp::Outcome& outcome, std::uint64_t claim) 
     return provider_failure_proves_not_sent(failure) ? 0 : claim;
 }
 std::string archive_binding(std::string_view owner, std::string_view id, const Stored& row) {
-    return detail::canonical_json_bytes(json{
+    return neograph::detail::canonical_json_bytes(json{
         {"owner_scope", std::string(owner)}, {"dispatch_id", std::string(id)},
         {"request_digest", row.request}, {"provider_binding_identity", row.provider},
         {"provider_name", row.provider_name}, {"model", row.model}, {"family", row.family},
@@ -199,8 +201,8 @@ std::string archive_binding(std::string_view owner, std::string_view id, const S
 }
 sp::runtime::Result restore_outcome(const Stored& row, std::string_view owner,
                                     std::string_view id, const std::shared_ptr<sp::NativeArchive>& archive) {
-    const auto value = detail::parse_json_strict(row.completion);
-    if (detail::canonical_json_bytes(value) != row.completion)
+    const auto value = neograph::detail::parse_json_strict(row.completion);
+    if (neograph::detail::canonical_json_bytes(value) != row.completion)
         throw std::runtime_error("Noncanonical Program provider outcome");
     return provider_codec::decode_outcome(value, archive, archive_binding(owner, id, row));
 }
@@ -209,7 +211,7 @@ std::optional<Stored> load(sqlite3* db, std::string_view owner, std::string_view
     Statement query(db, "SELECT slot,request_digest,provider_binding_identity,model,"
                         "original_attempt,state,completion,outcome_digest,evidence_identity,"
                         "encoding_version,provider_name,family,mode,original_deadline,"
-                        "logical_scope,claim_amount,committed_amount "
+                        "logical_scope,claim_amount,committed_amount,monetary_record "
                         "FROM ng_program_provider_calls WHERE owner_scope=?1 AND dispatch_id=?2");
     query.bind(1, owner);
     query.bind(2, id);
@@ -219,17 +221,18 @@ std::optional<Stored> load(sqlite3* db, std::string_view owner, std::string_view
     Stored row{query.column(0), query.column(1), query.column(2), query.column(3),
                query.column(4), query.column(5), query.column(6), query.column(7), query.column(8),
                query.column(9), query.column(10), query.column(11), query.column(12), query.column(13),
-               query.column(14), parse_amount(query.column(15)), parse_amount(query.column(16))};
+               query.column(14), parse_amount(query.column(15)), parse_amount(query.column(16)),
+               query.column(17)};
     if (query.next()) throw std::runtime_error("Duplicate Program provider journal slot");
-    const auto slot_value = detail::parse_json_strict(row.slot);
-    if (detail::canonical_json_bytes(slot_value) != row.slot ||
+    const auto slot_value = neograph::detail::parse_json_strict(row.slot);
+    if (neograph::detail::canonical_json_bytes(slot_value) != row.slot ||
         hash("slot", slot_value) != id ||
         slot_value.at("owner_scope").get<std::string>() != owner ||
-        !detail::is_sha256_identity(row.request) ||
-        !detail::is_sha256_identity(row.provider) ||
+        !neograph::detail::is_sha256_identity(row.request) ||
+        !neograph::detail::is_sha256_identity(row.provider) ||
         row.model.empty() || row.attempt.empty() || row.provider_name.empty() ||
         row.family.empty() || (row.mode != "collect" && row.mode != "stream") || row.deadline.empty() ||
-        (!row.evidence.empty() && !detail::is_sha256_identity(row.evidence)) ||
+        (!row.evidence.empty() && !neograph::detail::is_sha256_identity(row.evidence)) ||
         row.scope != scope_digest(slot_value))
         throw std::runtime_error("Corrupt Program provider journal dispatch binding");
     if (archive && archive->owner_scope() != owner)
@@ -239,10 +242,10 @@ std::optional<Stored> load(sqlite3* db, std::string_view owner, std::string_view
         throw std::runtime_error("Corrupt Program provider journal state");
     if (!row.completion.empty()) {
         if (row.state == "dispatched" ||
-            row.outcome != detail::sha256_identity(outcome_domain, "outcome", row.completion))
+            row.outcome != neograph::detail::sha256_identity(outcome_domain, "outcome", row.completion))
             throw std::runtime_error("Corrupt Program provider journal outcome");
-        const auto encoded = detail::parse_json_strict(row.completion);
-        if (detail::canonical_json_bytes(encoded) != row.completion ||
+        const auto encoded = neograph::detail::parse_json_strict(row.completion);
+        if (neograph::detail::canonical_json_bytes(encoded) != row.completion ||
             encoded.at("schema") != provider_codec::outcome_schema ||
             ((row.state == "succeeded") != (encoded.at("kind") == "completion")))
             throw std::runtime_error("Program provider journal terminal outcome mismatch");
@@ -250,7 +253,65 @@ std::optional<Stored> load(sqlite3* db, std::string_view owner, std::string_view
                !row.outcome.empty() || !row.evidence.empty() || row.committed != row.claim) {
         throw std::runtime_error("Corrupt pending Program provider journal outcome");
     }
+    if (!row.monetary.empty()) {
+        // A call proven not sent charges nothing and keeps no record.
+        if (row.state == "failed")
+            throw std::runtime_error("Corrupt Program provider journal monetary record");
+        const auto value = neograph::detail::parse_json_strict(row.monetary);
+        if (neograph::detail::canonical_json_bytes(value) != row.monetary)
+            throw std::runtime_error("Noncanonical Program provider journal monetary record");
+        const auto record = program::detail::decode_monetary_record(value);
+        if (record.call_id != id)
+            throw std::runtime_error("Program provider journal monetary record names another call");
+    }
     return row;
+}
+
+std::uint64_t row_attempt(const Stored& row) {
+    return parse_amount(row.attempt);
+}
+
+std::string monetary_key(std::string_view owner, std::string_view id) {
+    return hash("monetary", {{"owner_scope", owner}, {"dispatch_id", id}});
+}
+
+std::string encode_monetary(const std::optional<ProgramMonetaryRecord>& record) {
+    return record ? neograph::detail::canonical_json_bytes(
+                        program::detail::encode_monetary_record(*record))
+                  : std::string();
+}
+
+// Charge the calls of one operation scope that this attempt journaled before
+// a restart, once per account. A call journaled by an earlier attempt was
+// settled into the run's remaining budget by that attempt's result, so it is
+// only marked as accounted (#372).
+void hydrate_monetary_scope(sqlite3* db, std::string_view owner, std::string_view scope,
+                            const std::shared_ptr<sp::NativeArchive>& archive,
+                            const std::shared_ptr<ProgramMonetaryAccount>& account) {
+    if (!account) return;
+    if (!account->remember(hash("monetary-scope", {{"owner_scope", owner}, {"scope", scope}})))
+        return;
+    std::vector<std::string> ids;
+    {
+        Statement rows(db, "SELECT dispatch_id FROM ng_program_provider_calls "
+                           "WHERE owner_scope=?1 AND logical_scope=?2");
+        rows.bind(1, owner);
+        rows.bind(2, scope);
+        while (rows.next()) ids.push_back(rows.column(0));
+    }
+    for (const auto& id : ids) {
+        const auto stored = load(db, owner, id, archive);
+        if (!stored) throw std::runtime_error("Program provider claim disappeared during recovery");
+        const auto key = monetary_key(owner, id);
+        if (stored->monetary.empty() || row_attempt(*stored) != account->attempt()) {
+            (void)account->remember(key);
+            continue;
+        }
+        auto record = program::detail::decode_monetary_record(
+            neograph::detail::parse_json_strict(stored->monetary));
+        record.replayed = true;
+        (void)account->restore(key, std::move(record));
+    }
 }
 SQLiteProgramProviderCallJournal::Impl::AccountedSink& accounted_sink(
     SQLiteProgramProviderCallJournal::Impl& impl, const std::shared_ptr<UsageAccumulator>& usage) {
@@ -278,7 +339,7 @@ void hydrate_scope(SQLiteProgramProviderCallJournal::Impl& impl,
     rows.bind(2, scope);
     while (rows.next()) {
         const auto id = rows.column(0);
-        const auto slot = detail::parse_json_strict(rows.column(1));
+        const auto slot = neograph::detail::parse_json_strict(rows.column(1));
         if (scope_digest(slot) != scope) continue;
         std::optional<Stored> loaded;
         const Stored* stored = current && id == current_id ? current : nullptr;
@@ -329,13 +390,19 @@ void hydrate_scope(SQLiteProgramProviderCallJournal::Impl& impl,
 }
 void save_outcome(sqlite3* db, std::string_view owner, std::string_view id,
                   std::string_view state, std::string_view completion,
-                  std::string_view outcome, std::string_view evidence, std::uint64_t committed) {
-    Statement update(db, "UPDATE ng_program_provider_calls SET state=?3,completion=?4,"
-                         "outcome_digest=?5,evidence_identity=?6,committed_amount=?7 "
-                         "WHERE owner_scope=?1 AND dispatch_id=?2 AND state IN ('dispatched','reconciliation_required')");
+                  std::string_view outcome, std::string_view evidence, std::uint64_t committed,
+                  std::optional<std::string_view> monetary = std::nullopt) {
+    Statement update(db, monetary
+        ? "UPDATE ng_program_provider_calls SET state=?3,completion=?4,"
+          "outcome_digest=?5,evidence_identity=?6,committed_amount=?7,monetary_record=?8 "
+          "WHERE owner_scope=?1 AND dispatch_id=?2 AND state IN ('dispatched','reconciliation_required')"
+        : "UPDATE ng_program_provider_calls SET state=?3,completion=?4,"
+          "outcome_digest=?5,evidence_identity=?6,committed_amount=?7 "
+          "WHERE owner_scope=?1 AND dispatch_id=?2 AND state IN ('dispatched','reconciliation_required')");
     update.bind(1, owner); update.bind(2, id); update.bind(3, state);
     update.bind(4, completion); update.bind(5, outcome); update.bind(6, evidence);
     update.bind(7, std::to_string(committed));
+    if (monetary) update.bind(8, *monetary);
     update.done();
     if (sqlite3_changes(db) != 1) throw std::runtime_error("Program provider journal settlement conflict");
 }
@@ -345,20 +412,22 @@ public:
                 ProgramCoreProviderCallContext context, std::string provider_identity)
         : impl_(std::move(impl)), owner_(context.owner_scope), version_(context.program_version_id),
           run_(context.run_id), operation_(context.operation_id), attempt_(context.attempt),
-          provider_identity_(std::move(provider_identity)) {}
+          provider_identity_(std::move(provider_identity)),
+          monetary_(std::move(context.monetary_account)) {}
 
     asio::awaitable<sp::runtime::Result> invoke(graph::ProviderCallIdentity identity,
                                                std::shared_ptr<Provider> provider,
                                                ProviderRequest request) override {
         return invoke_owned(impl_, owner_, version_, run_, operation_, attempt_,
-                            provider_identity_, std::move(identity), std::move(provider),
-                            std::move(request));
+                            provider_identity_, monetary_, std::move(identity),
+                            std::move(provider), std::move(request));
     }
 private:
     static asio::awaitable<sp::runtime::Result> invoke_owned(
         std::shared_ptr<SQLiteProgramProviderCallJournal::Impl> impl,
         std::string owner, std::string version, std::string run, std::string operation,
         std::uint64_t attempt, std::string provider_identity,
+        std::shared_ptr<ProgramMonetaryAccount> monetary,
         graph::ProviderCallIdentity identity, std::shared_ptr<Provider> provider,
         ProviderRequest request) {
         if (!provider || identity.owner_scope != owner || identity.run_id != run ||
@@ -369,8 +438,11 @@ private:
         const auto provider_name = provider->get_name();
         if (provider_name.empty())
             throw std::invalid_argument("Program provider capability identity is empty");
-        // Admission and encoding happen exactly once, before any durable
-        // dispatched marker. Dropping this handle cannot dispatch transport.
+        // Admission and encoding happen before any durable dispatched marker.
+        // Dropping this handle cannot dispatch transport.
+        const auto unmodeled = program::detail::unmodeled_feature(request);
+        std::optional<ProviderRequest> pinnable;
+        if (monetary) pinnable = request;
         auto prepared = provider->prepare(std::move(request));
         if (!prepared.valid()) {
             sp::Failure failure;
@@ -382,6 +454,23 @@ private:
             }
             co_return std::make_shared<const sp::Outcome>(std::move(failure));
         }
+        const ProgramCoreProviderCallContext context{owner, version, run, operation, attempt};
+        const auto id = dispatch_id(context, identity);
+        // Price the call first: pinning the route ceiling changes the request,
+        // and everything below must see the request that is actually sent.
+        program::detail::MonetaryHold hold;
+        if (monetary) {
+            auto quote = program::detail::assess_monetary_call(
+                pricing::PriceCatalog::builtin(), unmodeled, prepared);
+            if (quote.pin && program::detail::pin_route_max_price(*pinnable, *quote.pin)) {
+                prepared = provider->prepare(std::move(*pinnable));
+                if (!prepared.valid())
+                    throw std::logic_error("A pinned route ceiling made the request invalid");
+            }
+            hold = program::detail::MonetaryHold(
+                monetary, std::move(quote),
+                program::detail::MonetaryCallSite{id, operation, identity.node_name});
+        }
         if (prepared.requires_native_custody() && !impl->archive)
             throw std::invalid_argument("Program provider requires configured trusted native custody");
         if (impl->archive) {
@@ -389,10 +478,8 @@ private:
             if (!descriptor || !impl->archive->matches_descriptor(*descriptor))
                 throw std::invalid_argument("Program provider native custody admission is incompatible");
         }
-        const ProgramCoreProviderCallContext context{owner, version, run, operation, attempt};
-        const auto id = dispatch_id(context, identity);
         Stored admitted;
-        admitted.slot = detail::canonical_json_bytes(json{
+        admitted.slot = neograph::detail::canonical_json_bytes(json{
             {"owner_scope", owner}, {"program_version_id", version}, {"run_id", run},
             {"operation_id", operation}, {"thread_id", identity.thread_id},
             {"task_id", identity.task_id}, {"node_name", identity.node_name},
@@ -421,6 +508,7 @@ private:
             sp::runtime::Result restored;
             hydrate_scope(*impl, owner, admitted.scope, identity, id,
                           existing ? &*existing : nullptr, restored);
+            hydrate_monetary_scope(impl->db, owner, admitted.scope, impl->archive, monetary);
             if (existing) {
                 if (!existing->completion.empty()) {
                     if (!restored) restored = restore_outcome(*existing, owner, id, impl->archive);
@@ -433,20 +521,30 @@ private:
                 throw ProgramProviderDispatchUncertainError(
                     "Program provider journal dispatch outcome uncertain; reconciliation required");
             }
+            // Monetary preflight: a call that cannot be bounded, or whose hold
+            // does not fit, is refused here, before any marker or transport.
+            if (auto refused = hold.preflight()) co_return refused;
             try {
                 claim = reserve_provider_dispatch(prepared, ProviderDispatchBudget{
                     identity.usage, identity.model_token_budget,
                     identity.budget_exhausted, identity.budget_cancel_token});
             } catch (const ProviderFailure& error) {
+                hold.release();
                 co_return error.outcome();
             }
             admitted.claim = claim.amount();
             admitted.committed = admitted.claim;
+            // The provisional record charges the hold if the outcome is never known.
+            admitted.monetary = hold.active()
+                ? encode_monetary(program::detail::unknown_outcome_record(
+                      hold.quote(), program::detail::MonetaryCallSite{id, operation, identity.node_name},
+                      "the outcome is unknown"))
+                : std::string();
             Statement insert(impl->db, "INSERT INTO ng_program_provider_calls "
                              "(owner_scope,dispatch_id,slot,request_digest,provider_binding_identity,"
                              "model,original_attempt,state,encoding_version,provider_name,family,mode,original_deadline,"
-                             "logical_scope,claim_amount,committed_amount)"
-                             " VALUES(?1,?2,?3,?4,?5,?6,?7,'dispatched','2',?8,?9,?10,?11,?12,?13,?14)");
+                             "logical_scope,claim_amount,committed_amount,monetary_record)"
+                             " VALUES(?1,?2,?3,?4,?5,?6,?7,'dispatched','2',?8,?9,?10,?11,?12,?13,?14,?15)");
             insert.bind(1, owner); insert.bind(2, id); insert.bind(3, admitted.slot);
             insert.bind(4, admitted.request); insert.bind(5, admitted.provider);
             insert.bind(6, admitted.model); insert.bind(7, admitted.attempt);
@@ -454,9 +552,12 @@ private:
             insert.bind(10, admitted.mode); insert.bind(11, admitted.deadline);
             insert.bind(12, admitted.scope); insert.bind(13, std::to_string(admitted.claim));
             insert.bind(14, std::to_string(admitted.committed));
+            insert.bind(15, admitted.monetary);
             insert.done();
             tx.commit();  // write-ahead barrier: no transport before durable commit
             claim.mark_dispatched();
+            hold.mark_dispatched();
+            hold.remember(monetary_key(owner, id));
             if (identity.usage && !identity.usage->remember_provider_effect(accounting_key(owner, id, admitted)))
                 throw std::runtime_error("Program provider effect was accounted without its expected durable receipt");
         }
@@ -471,7 +572,9 @@ private:
             if (!result) throw;
         } catch (...) {
             // No exception proves non-delivery. The immutable marker remains
-            // authoritative even when this best-effort annotation fails.
+            // authoritative even when this best-effort annotation fails. The
+            // provisional monetary record (the hold) stays the charge.
+            hold.settle_unknown("the dispatch raised without an outcome");
             try {
                 std::lock_guard lock(impl->mutex);
                 Transaction tx(impl->db);
@@ -506,16 +609,24 @@ private:
                 else identity.usage->observe(std::get<sp::Failure>(*result).partial.usage);
             }
         }
+        // Settle the money before persisting: the call happened whether or not
+        // the journal write below succeeds.
+        auto monetary_record = hold.record_for(result);
+        const auto monetary_bytes = hold.active() ? std::optional<std::string>(encode_monetary(monetary_record))
+                                                  : std::optional<std::string>();
+        hold.settle_record(std::move(monetary_record));
         try {
-            const auto canonical = detail::canonical_json_bytes(provider_codec::encode_outcome(
+            const auto canonical = neograph::detail::canonical_json_bytes(provider_codec::encode_outcome(
                 *result, impl->archive, archive_binding(owner, id, admitted)));
-            const auto outcome = detail::sha256_identity(outcome_domain, "outcome", canonical);
+            const auto outcome = neograph::detail::sha256_identity(outcome_domain, "outcome", canonical);
             const auto* failure = std::get_if<sp::Failure>(result.get());
             const auto state = !failure ? "succeeded"
                 : provider_failure_proves_not_sent(*failure) ? "failed" : "reconciliation_required";
             std::lock_guard lock(impl->mutex);
             Transaction tx(impl->db);
-            save_outcome(impl->db, owner, id, state, canonical, outcome, "", admitted.committed);
+            save_outcome(impl->db, owner, id, state, canonical, outcome, "", admitted.committed,
+                         monetary_bytes ? std::optional<std::string_view>(*monetary_bytes)
+                                        : std::nullopt);
             tx.commit();
         } catch (...) {
             // Preserve the actual model result and original storage cause;
@@ -530,6 +641,7 @@ private:
     std::string owner_, version_, run_, operation_;
     std::uint64_t attempt_;
     std::string provider_identity_;
+    std::shared_ptr<ProgramMonetaryAccount> monetary_;
 };
 }  // namespace
 
@@ -550,11 +662,30 @@ std::string SQLiteProgramProviderCallJournal::logical_call_id(
 
 ProgramCoreProviderCallBinding SQLiteProgramProviderCallJournal::bind(
     const ProgramCoreProviderCallContext& context, std::string provider_identity) {
+    auto unpriced             = context;
+    unpriced.monetary_account = nullptr;
+    return bind_priced(unpriced, std::move(provider_identity));
+}
+
+ProgramCoreProviderCallBinding SQLiteProgramProviderCallJournal::bind_priced(
+    const ProgramCoreProviderCallContext& context, std::string provider_identity) {
     validate_context(context);
     if (impl_->archive && impl_->archive->owner_scope() != context.owner_scope)
         throw std::invalid_argument("Program provider archive owner scope mismatch");
-    if (!detail::is_sha256_identity(provider_identity))
+    if (!neograph::detail::is_sha256_identity(provider_identity))
         throw std::invalid_argument("Program provider binding identity must be a deployment sha256 digest");
+    if (context.monetary_account) {
+        // Charge this operation's calls journaled by this attempt before a
+        // restart now, even when the restarted Core never calls them again.
+        std::lock_guard lock(impl_->mutex);
+        hydrate_monetary_scope(
+            impl_->db, context.owner_scope,
+            hash("scope", {{"owner_scope", std::string(context.owner_scope)},
+                           {"program_version_id", std::string(context.program_version_id)},
+                           {"run_id", std::string(context.run_id)},
+                           {"operation_id", std::string(context.operation_id)}}),
+            impl_->archive, context.monetary_account);
+    }
     return {std::string(context.owner_scope), std::string(context.program_version_id),
             std::string(context.run_id), std::string(context.operation_id), context.attempt,
             std::make_shared<BoundBroker>(impl_, context, std::move(provider_identity))};
@@ -570,19 +701,23 @@ SQLiteProgramProviderCallJournal::inspect(std::string_view owner, std::string_vi
         if (committed_amount(*restored, stored->claim) != stored->committed)
             throw std::runtime_error("Program provider persisted authority differs from the full outcome");
     }
+    std::optional<ProgramMonetaryRecord> monetary;
+    if (!stored->monetary.empty())
+        monetary = program::detail::decode_monetary_record(
+            neograph::detail::parse_json_strict(stored->monetary));
     return Record{stored->state == "succeeded" ? State::Succeeded
                   : stored->state == "dispatched" ? State::Dispatched
                   : stored->state == "failed" ? State::Failed
                   : State::ReconciliationRequired,
                   stored->request, stored->provider, stored->attempt, stored->outcome,
                   stored->provider_name, stored->model, stored->family, stored->mode,
-                  stored->deadline, 2, stored->claim, stored->committed};
+                  stored->deadline, 2, stored->claim, stored->committed, std::move(monetary)};
 }
 
 void SQLiteProgramProviderCallJournal::reconcile_success(
     std::string_view owner, std::string_view id, std::string evidence,
     sp::runtime::Result completion) {
-    if (owner.empty() || id.empty() || !detail::is_sha256_identity(evidence) ||
+    if (owner.empty() || id.empty() || !neograph::detail::is_sha256_identity(evidence) ||
         !completion || !std::holds_alternative<sp::Completion>(*completion))
         throw std::invalid_argument("Program provider reconciliation needs a full completion and scoped external evidence identity");
     std::lock_guard lock(impl_->mutex);
@@ -599,9 +734,9 @@ void SQLiteProgramProviderCallJournal::reconcile_success(
     } else {
         auto reconciled = *existing;
         reconciled.committed = committed_amount(*completion, reconciled.claim);
-        const auto canonical = detail::canonical_json_bytes(provider_codec::encode_outcome(
+        const auto canonical = neograph::detail::canonical_json_bytes(provider_codec::encode_outcome(
             *completion, impl_->archive, archive_binding(owner, id, reconciled)));
-        const auto outcome = detail::sha256_identity(outcome_domain, "outcome", canonical);
+        const auto outcome = neograph::detail::sha256_identity(outcome_domain, "outcome", canonical);
         save_outcome(impl_->db, owner, id, "succeeded", canonical, outcome, evidence, reconciled.committed);
     }
     tx.commit();

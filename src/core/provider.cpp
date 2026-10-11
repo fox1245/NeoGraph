@@ -792,22 +792,29 @@ const std::vector<sp::Message>& provider_request_messages(const ProviderRequest&
         } else return payload.messages;
     }, request.payload);
 }
+std::optional<std::uint64_t> Provider::invocation_upper_bound(const PreparedProviderRequest& request) {
+    if (!request.valid()) return {};
+    const auto* retry = request.impl_->prepared.retry_policy();
+    const auto invocations = request.impl_->prepared.model_invocation_limit();
+    if (!retry || !invocations) return {};
+    const auto attempts = retry->enabled ? retry->max_attempts : 1;
+    if (!attempts || *invocations > std::numeric_limits<std::uint64_t>::max() / attempts) return {};
+    const auto possible = *invocations * attempts;
+    if (!possible) return {};
+    return possible;
+}
 std::optional<std::uint64_t> Provider::conservative_token_upper_bound(const PreparedProviderRequest& request) {
     if (!request.valid()) return {};
     const auto* descriptor = request.impl_->prepared.descriptor();
-    const auto* retry = request.impl_->prepared.retry_policy();
-    const auto invocations = request.impl_->prepared.model_invocation_limit();
-    if (!descriptor || !retry || !invocations) return {};
+    const auto possible = invocation_upper_bound(request);
+    if (!descriptor || !possible) return {};
     const auto input = descriptor->policy()->input_limit(request.family(), request.model());
     const auto output = request.max_output_tokens() ? request.max_output_tokens()
         : descriptor->policy()->output_limit(request.family(), request.model());
     if (!input || !output || *output > std::numeric_limits<std::uint64_t>::max() - *input) return {};
     const auto per_invocation = *input + *output;
-    const auto attempts = retry->enabled ? retry->max_attempts : 1;
-    if (!attempts || *invocations > std::numeric_limits<std::uint64_t>::max() / attempts) return {};
-    const auto possible = *invocations * attempts;
-    if (!possible || per_invocation > std::numeric_limits<std::uint64_t>::max() / possible) return {};
-    return per_invocation * possible;
+    if (per_invocation > std::numeric_limits<std::uint64_t>::max() / *possible) return {};
+    return per_invocation * *possible;
 }
 ProviderBudgetClaim::ProviderBudgetClaim() = default;
 ProviderBudgetClaim::ProviderBudgetClaim(ProviderDispatchBudget budget, std::uint64_t amount)

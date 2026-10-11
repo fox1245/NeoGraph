@@ -849,6 +849,15 @@ if(TARGET neograph_program_sqlite AND TARGET neograph_sqlite AND TARGET neograph
         neograph::program neograph::program_sqlite neograph::sqlite
         neograph::llm SQLite::SQLite3 GTest::gtest_main)
     neograph_discover_tests(neograph_program_provider_journal_runtime_tests)
+
+    # A host-bound provider for llm_call nodes and monetary budgets (#372).
+    add_executable(neograph_program_provider_binding_tests test_program_provider_binding.cpp)
+    target_include_directories(neograph_program_provider_binding_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/program)
+    target_link_libraries(neograph_program_provider_binding_tests PRIVATE
+        neograph::program neograph::program_sqlite neograph::sqlite
+        neograph::llm SQLite::SQLite3 GTest::gtest_main)
+    neograph_discover_tests(neograph_program_provider_binding_tests)
 endif()
 
 if(NEOGRAPH_BUILD_SQLITE)

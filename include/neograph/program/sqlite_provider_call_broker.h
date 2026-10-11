@@ -1,6 +1,7 @@
 #pragma once
 
 #include <neograph/program/core_provider_call.h>
+#include <neograph/program/result.h>
 #include <neograph/types.h>
 #include <neograph/provider.h>
 #include <core/native_archive.h>
@@ -66,6 +67,15 @@ public:
      */
     ProgramCoreProviderCallBinding bind(const ProgramCoreProviderCallContext& context,
                                         std::string provider_binding_identity);
+    /** bind() that also prices every call against the context's monetary
+     * account, as bind_priced_provider_call() does, and keeps the call's
+     * ProgramMonetaryRecord in its row with the outcome. A call this attempt
+     * journaled before a restart is charged once, when the restarted attempt
+     * binds its operation; a call an earlier attempt journaled was settled by
+     * that attempt's result and is never charged again.
+     */
+    ProgramCoreProviderCallBinding bind_priced(const ProgramCoreProviderCallContext& context,
+                                               std::string provider_binding_identity);
     /** Stable across Program attempts; request content is bound to the slot. */
     static std::string logical_call_id(const ProgramCoreProviderCallContext& context,
                                        const graph::ProviderCallIdentity& call);
@@ -86,6 +96,10 @@ public:
         /// Conservative authority, not provider-reported usage.
         std::uint64_t claim_amount;
         std::uint64_t committed_amount;
+        /// The priced call's record: the held provisional record while the
+        /// outcome is unknown, the settled record after it. Empty when the call
+        /// was not priced or nothing was sent.
+        std::optional<ProgramMonetaryRecord> monetary_record;
     };
     std::optional<Record> inspect(std::string_view owner_scope,
                                   std::string_view dispatch_id) const;

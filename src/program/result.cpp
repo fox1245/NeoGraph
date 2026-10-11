@@ -2,6 +2,7 @@
 #include <neograph/provider_outcome_codec.h>
 
 #include "canonical_json.h"
+#include "monetary.h"
 #include "provider_failure.h"
 #include <algorithm>
 
@@ -202,6 +203,7 @@ void validate_data(const ProgramResultData& d) {
         }
     }
     for (const auto& node : d.execution_trace) detail::validate_token(node,"Program result execution trace node");
+    for (const auto& record : d.monetary_records) detail::validate_monetary_record(record);
     if (d.provider_budget_authority) {
         const auto& authority = *d.provider_budget_authority;
         const auto maximum = std::numeric_limits<std::uint64_t>::max();
@@ -218,9 +220,18 @@ void validate_data(const ProgramResultData& d) {
     }
 }
 json result_body(const ProgramResultData& d) {
-    return json{{"format",std::string(RESULT_FORMAT)},{"storage_schema_version",RESULT_SCHEMA_VERSION},{"status",std::string(to_string(d.status))},{"run_id",d.run_id},{"program_version_id",d.program_version_id},{"bundle_id",d.bundle_id},{"operation_id",d.operation_id},{"attempt",d.attempt},{"output",d.output},{"usage",encode_usage(d.usage)},{"remaining_budget",encode_budget(d.remaining_budget)},{"checkpoint",d.checkpoint ? encode_checkpoint(*d.checkpoint) : json(nullptr)},{"interrupt",d.interrupt ? encode_interrupt(*d.interrupt) : json(nullptr)},{"failure",d.failure ? encode_failure(*d.failure) : json(nullptr)},{"execution_trace",d.execution_trace},
+    auto body = json{{"format",std::string(RESULT_FORMAT)},{"storage_schema_version",RESULT_SCHEMA_VERSION},{"status",std::string(to_string(d.status))},{"run_id",d.run_id},{"program_version_id",d.program_version_id},{"bundle_id",d.bundle_id},{"operation_id",d.operation_id},{"attempt",d.attempt},{"output",d.output},{"usage",encode_usage(d.usage)},{"remaining_budget",encode_budget(d.remaining_budget)},{"checkpoint",d.checkpoint ? encode_checkpoint(*d.checkpoint) : json(nullptr)},{"interrupt",d.interrupt ? encode_interrupt(*d.interrupt) : json(nullptr)},{"failure",d.failure ? encode_failure(*d.failure) : json(nullptr)},{"execution_trace",d.execution_trace},
                 {"provider_budget_authority", d.provider_budget_authority
                     ? encode_provider_authority(*d.provider_budget_authority) : json(nullptr)}};
+    // Absent unless a call was priced, so results without priced calls keep
+    // their bytes and ids (#372).
+    if (!d.monetary_records.empty()) {
+        json records = json::array();
+        for (const auto& record : d.monetary_records)
+            records.push_back(detail::encode_monetary_record(record));
+        body["monetary_records"] = std::move(records);
+    }
+    return body;
 }
 }  // namespace
 
@@ -299,7 +310,7 @@ ProgramResult ProgramResult::create(ProgramResultData d) {
 ProgramResult ProgramResult::parse(std::string_view bytes) {
     json v; try { v=detail::parse_json_strict(bytes); } catch(const std::exception& e){throw std::invalid_argument(std::string("Invalid stored ProgramResult JSON: ")+e.what());}
     if(!v.is_object()||require_string(v,"format")!=RESULT_FORMAT)throw std::invalid_argument("Stored ProgramResult has unknown format");
-    detail::reject_unknown_fields(v,"Stored ProgramResult",{"format","storage_schema_version","id","status","run_id","program_version_id","bundle_id","operation_id","attempt","output","usage","remaining_budget","checkpoint","interrupt","failure","execution_trace","provider_budget_authority"});
+    detail::reject_unknown_fields(v,"Stored ProgramResult",{"format","storage_schema_version","id","status","run_id","program_version_id","bundle_id","operation_id","attempt","output","usage","remaining_budget","checkpoint","interrupt","failure","execution_trace","provider_budget_authority","monetary_records"});
     if(require_u32(v,"storage_schema_version")!=RESULT_SCHEMA_VERSION)throw std::invalid_argument("Stored ProgramResult schema version is unsupported");
     ProgramResultData d; d.status=program_terminal_status_from_string(require_string(v,"status")); d.run_id=require_string(v,"run_id"); d.program_version_id=require_string(v,"program_version_id"); d.bundle_id=require_string(v,"bundle_id"); d.operation_id=require_string(v,"operation_id"); d.attempt=require_u64(v,"attempt"); d.output=require_value(v,"output"); d.usage=parse_usage(require_value(v,"usage")); d.remaining_budget=parse_budget(require_value(v,"remaining_budget"));
     const auto& c=require_value(v,"checkpoint"); const auto& i=require_value(v,"interrupt"); const auto& f=require_value(v,"failure"); if(!c.is_null())d.checkpoint=parse_checkpoint(c); if(!i.is_null())d.interrupt=parse_interrupt(i); if(!f.is_null())d.failure=parse_failure(f);
@@ -311,6 +322,13 @@ ProgramResult ProgramResult::parse(std::string_view bytes) {
     const auto& trace=require_value(v,"execution_trace"); if(!trace.is_array())throw std::invalid_argument("Program result execution_trace must be an array"); for(const auto& n:trace){if(!n.is_string())throw std::invalid_argument("Program result execution trace entries must be strings");d.execution_trace.push_back(n.get<std::string>());}
     const auto& authority = require_value(v, "provider_budget_authority");
     if (!authority.is_null()) d.provider_budget_authority = parse_provider_authority(authority);
+    if (v.contains("monetary_records")) {
+        const auto& records = v.at("monetary_records");
+        if (!records.is_array() || records.empty())
+            throw std::invalid_argument("Program result monetary_records must be a non-empty array");
+        for (const auto& record : records)
+            d.monetary_records.push_back(detail::decode_monetary_record(record));
+    }
     validate_data(d);
     ProgramResult result(std::move(d));
     if (result.id() != require_string(v, "id"))
@@ -369,4 +387,8 @@ const std::string& ProgramResult::id()const noexcept{return impl_->id;} ProgramT
 const std::optional<neograph::UsageAccumulator::AuthoritySnapshot>&
 neograph::program::ProgramResult::provider_budget_authority() const noexcept {
     return impl_->data.provider_budget_authority;
+}
+const std::vector<neograph::program::ProgramMonetaryRecord>&
+neograph::program::ProgramResult::monetary_records() const noexcept {
+    return impl_->data.monetary_records;
 }
