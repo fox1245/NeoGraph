@@ -275,8 +275,9 @@ bool node_failure_retryable(NodeFailureClass failure_class) noexcept {
 }
 
 bool node_failure_routable(NodeFailureClass failure_class) noexcept {
-    return failure_class == NodeFailureClass::Ordinary || failure_class == NodeFailureClass::Timeout ||
-           failure_class == NodeFailureClass::ProviderFailed;
+    // The routable classes are exactly the four least severe ones. A committed
+    // effect is never retried, but a failure route may run its compensation.
+    return failure_class <= NodeFailureClass::EffectCommitted;
 }
 
 const char* to_string(NodeFailureKind kind) noexcept {

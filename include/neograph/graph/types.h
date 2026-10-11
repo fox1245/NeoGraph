@@ -274,7 +274,8 @@ private:
  * ("Node failure contract" in the reference). It walks the whole cause chain
  * (NodeExecutionError causes, std::nested_exception, subgraph failures) and
  * the most severe class found anywhere wins. The values are ordered by that
- * severity. Only Ordinary, Timeout and ProviderFailed are routable.
+ * severity. The four least severe classes (Ordinary, Timeout, ProviderFailed,
+ * EffectCommitted) are routable; only Ordinary and Timeout are retried.
  */
 enum class NodeFailureClass : std::uint8_t {
     /// NG.TaskFailed, NG.SubgraphFailed or an author code. Retried unless the
@@ -288,7 +289,8 @@ enum class NodeFailureClass : std::uint8_t {
     /// runtime owns provider retries. Routable.
     ProviderFailed = 2,
     /// NG.EffectCommitted: the attempt committed a non-idempotent effect, so
-    /// running the node again could repeat it. Never retried. Not routable.
+    /// running the node again could repeat it. Never retried. Routable, so a
+    /// failure route can compensate the effects listed in NodeFailure::effects.
     EffectCommitted = 3,
     /// NG.LogicError: std::logic_error, which includes integrity checks.
     LogicError = 4,

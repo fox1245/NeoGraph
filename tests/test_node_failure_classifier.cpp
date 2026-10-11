@@ -3,9 +3,10 @@
 // classify_node_failure walks the whole cause chain (NodeExecutionError causes,
 // std::nested_exception, nested subgraph failures) and the most severe class
 // found anywhere wins. Only ordinary failures (NG.TaskFailed, NG.SubgraphFailed,
-// author codes), NG.Timeout and transient provider failures (NG.ProviderFailed)
-// are routable. The node retry loop and the tool failure contract take their
-// decisions from the same verdict.
+// author codes), NG.Timeout, transient provider failures (NG.ProviderFailed)
+// and committed effects (NG.EffectCommitted, never retried) are routable. The
+// node retry loop and the tool failure contract take their decisions from the
+// same verdict.
 //
 // The first half is the classification table, one row per class. The second
 // half drives the real NodeExecutor and records the retry decision for every
@@ -292,10 +293,12 @@ TEST(NodeFailureClassifier, ClassTableIsConsistent) {
     for (int value = 0; value <= static_cast<int>(Class::Cancelled); ++value) {
         const auto failure_class = static_cast<Class>(value);
         SCOPED_TRACE(node_failure_code(failure_class));
-        // Only Ordinary, Timeout and ProviderFailed are routable.
+        // Only Ordinary, Timeout, ProviderFailed and EffectCommitted are
+        // routable: a committed effect may route to a compensating handler.
         EXPECT_EQ(node_failure_routable(failure_class),
                   failure_class == Class::Ordinary || failure_class == Class::Timeout ||
-                      failure_class == Class::ProviderFailed);
+                      failure_class == Class::ProviderFailed ||
+                      failure_class == Class::EffectCommitted);
         // Only Ordinary and Timeout are retried.
         EXPECT_EQ(node_failure_retryable(failure_class),
                   failure_class == Class::Ordinary || failure_class == Class::Timeout);

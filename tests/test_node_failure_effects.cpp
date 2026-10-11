@@ -358,7 +358,9 @@ TEST(NodeFailureEffects, AnAttemptThatCommittedAWriteIsNotRetried) {
         EXPECT_EQ(record->failure_class, graph::NodeFailureClass::EffectCommitted);
         EXPECT_EQ(record->kind, graph::NodeFailureKind::EffectCommitted);
         EXPECT_FALSE(record->retryable);
-        EXPECT_FALSE(record->routable);
+        // Never retried, but routable: a failure route can run compensation,
+        // and the record names the effects it has to compensate.
+        EXPECT_TRUE(record->routable);
         EXPECT_EQ(record->attempts, 1);
         EXPECT_EQ(record->effects,
                   (std::vector<graph::NodeFailureEffect>{{"ledger", 0, "succeeded"}}));
@@ -472,6 +474,7 @@ TEST(NodeFailureEffects, ACommittedWriteInsideASubgraphStopsTheParentsRetry) {
     EXPECT_EQ(record->node, "act");
     EXPECT_EQ(record->code, "NG.EffectCommitted");
     EXPECT_EQ(record->kind, graph::NodeFailureKind::EffectCommitted);
+    EXPECT_TRUE(record->routable);
     EXPECT_EQ(record->effects,
               (std::vector<graph::NodeFailureEffect>{{"ledger", 0, "succeeded"}}));
     // The innermost dispatch context is kept: the child node that failed.
