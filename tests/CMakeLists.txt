@@ -930,6 +930,13 @@ if(NEOGRAPH_BUILD_SQLITE)
     target_link_libraries(neograph_interrupt_gate_tests PRIVATE
         neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
     neograph_discover_tests(neograph_interrupt_gate_tests PROPERTIES LABELS "core;interrupt")
+    # #364 attempt timeouts and deadline-aware backoff (WP12) on the
+    # dispatched-attempt execution model (#367, #368): the late completion is
+    # discarded on every dispatch path, the stop deadline, crash-resume.
+    add_executable(neograph_attempt_timeout_tests test_attempt_timeout.cpp)
+    target_link_libraries(neograph_attempt_timeout_tests PRIVATE
+        neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
+    neograph_discover_tests(neograph_attempt_timeout_tests PROPERTIES LABELS "core;failure-routing")
 endif()
 
 if(NEOGRAPH_BUILD_PROGRAM)

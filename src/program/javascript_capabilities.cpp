@@ -285,7 +285,7 @@ json javascript_authoring_capability_manifest() {
                   {"retry_policy.per_node", true},
                   {"failure_edges", true},
                   {"failure_exits", true},
-                  {"retry.attempt_timeout", false},
+                  {"retry.attempt_timeout", true},
                   {"diagnostics.help", true},
                   {"diagnostics.echo_routes", true},
                   {"diagnostics.soundness_check", true}};

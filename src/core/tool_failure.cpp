@@ -186,6 +186,11 @@ private:
         } catch (const graph::NodeInterrupt& failure) {
             found(NodeFailureClass::Interrupted);
             return {{}, nested_of(failure)};
+        } catch (const graph::NodeAttemptTimeout& failure) {
+            // An attempt that did not stop after its timeout may still be
+            // performing effects.
+            found(failure.stopped() ? NodeFailureClass::Timeout : NodeFailureClass::EffectUncertain);
+            return {{}, nested_of(failure)};
         } catch (const graph::ConfigurationFailure& failure) {
             // A configuration or definition verdict, such as a Program
             // diagnostic: the same input reproduces it.

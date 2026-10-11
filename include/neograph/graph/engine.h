@@ -584,6 +584,12 @@ struct RunResult {
  */
 class NEOGRAPH_API GraphEngine {
 public:
+    /// A node attempt that ignored its cancellation past its stop deadline
+    /// (#364) can outlive its run and this engine; it keeps the node it runs,
+    /// and the tools the engine owns, until it finishes. The destructor does
+    /// not wait for it.
+    ~GraphEngine();
+
     void set_native_history_archive(std::shared_ptr<sp::NativeArchive> archive) {
         native_history_archive_ = std::move(archive);
     }
@@ -1056,6 +1062,35 @@ public:
     }
 
     /**
+     * @brief Set or clear a host attempt timeout for one node (#364).
+     *
+     * Each attempt of the node may run this long. A timed-out attempt is
+     * cancelled through its own CancelToken, its late completion is
+     * discarded, and it fails with NG.Timeout, which the node's retry policy
+     * retries and a failure edge can route. The next attempt starts only
+     * after the cancelled one has stopped; one that does not stop by its stop
+     * deadline (the timeout again, at least one second) fails the run with
+     * NG.EffectUncertain.
+     *
+     * The timeout a node runs with is the shorter of the definition's
+     * node_retry_policies[node].attempt_timeout_ms and this host value, when
+     * either is set: like the other fields of a definition's per-node policy,
+     * the host may only tighten it, never lengthen or remove it. For a node
+     * without a definition timeout the host value applies as is.
+     *
+     * @param node_name Name of the node.
+     * @param timeout_ms 100 to 3 600 000 milliseconds; std::nullopt clears
+     *        the host value.
+     * @throws std::invalid_argument for an unknown node or a value out of range.
+     */
+    void set_node_attempt_timeout_ms(const std::string& node_name, std::optional<int> timeout_ms);
+
+    /// The attempt timeout `node_name` runs with, in milliseconds, after the
+    /// resolution described at set_node_attempt_timeout_ms(); none when the
+    /// node has no timeout.
+    std::optional<int> resolved_attempt_timeout_ms(const std::string& node_name) const;
+
+    /**
      * @brief Resize (or install) the engine-owned worker pool for
      *        parallel fan-out.
      *
@@ -1301,6 +1336,9 @@ private:
     /// #364: failure edges, failure exits and per-node failure policy. Never
     /// null after link; shared with the executor.
     std::shared_ptr<const detail::FailureRouting> failure_routing_;
+    /// #364: host attempt timeouts (milliseconds) by node; a node with a
+    /// definition timeout runs with the shorter of the two.
+    std::map<std::string, int> node_attempt_timeouts_;
 
     /// Optional fan-out worker pool. Null by default; populated only
     /// when set_worker_count() is called. When present,
@@ -1327,6 +1365,10 @@ private:
     /// engine-wide policy also excludes same-thread races; distinct engines
     /// sharing one checkpoint store still require host-level coordination.
     mutable std::atomic<int> active_runs_{0};
+
+    /// Node attempts dispatched off the orchestrator that are still running;
+    /// shared with the executor. The destructor hands nodes_ to them.
+    std::shared_ptr<detail::AttemptQuiescence> attempt_quiescence_;
 };
 
 } // namespace neograph::graph

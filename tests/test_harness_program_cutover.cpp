@@ -856,7 +856,12 @@ TEST(HarnessProgramCutover, ProgramBudgetCancellationStopsWorkerGraph) {
     const auto terminal = await_terminal(service, started.at("run_id").get<std::string>());
 
     EXPECT_EQ(terminal.at("status"), "max_steps_exhausted") << terminal.dump();
-    EXPECT_EQ(provider->started(), 1);
+    // The two workers' node bodies run side by side, off the Program scheduler
+    // (#367, #368): the second one either never reaches the provider, because
+    // the first one's report exhausted the budget, or is cancelled by it there
+    // (the provider's second call only returns once it is cancelled).
+    EXPECT_GE(provider->started(), 1);
+    EXPECT_LE(provider->started(), 2);
 }
 
 TEST(HarnessProgramCutover, ProviderToolRoundBudgetCancelsRepeatedToolRequests) {

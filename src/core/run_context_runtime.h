@@ -5,6 +5,7 @@
 #include <neograph/graph/provider_call_broker.h>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -150,6 +151,50 @@ private:
     std::vector<Entry> entries_;
     std::atomic<bool> committed_{false};
     std::atomic<bool> uncertain_{false};
+};
+
+/// Node attempts dispatched off the orchestrator (#364, #367, #368) that are
+/// still running. An attempt that did not stop by its stop deadline outlives
+/// its run, and it still runs one of its engine's nodes. The engine shares one
+/// of these with its executor; when it is destroyed while such an attempt runs,
+/// it hands its nodes (and the tools they use) over with adopt(), and the last
+/// attempt to finish releases them. Nothing waits: a destructor that blocked
+/// would deadlock a host whose node needs a lock the destroying thread holds
+/// (the Python GIL, for one).
+class AttemptQuiescence {
+public:
+    void enter() {
+        std::lock_guard lock(mutex_);
+        ++active_;
+    }
+    void leave() {
+        std::vector<std::shared_ptr<void>> released;
+        {
+            std::lock_guard lock(mutex_);
+            if (active_ > 0 && --active_ == 0) released.swap(remains_);
+        }
+        // Released here, outside the lock, on the last attempt's thread.
+    }
+    /// Keeps `remains` alive until no dispatched attempt is running.
+    void adopt(std::shared_ptr<void> remains) {
+        {
+            std::lock_guard lock(mutex_);
+            if (active_ > 0) {
+                remains_.push_back(std::move(remains));
+                return;
+            }
+        }
+        // Nothing runs any more: released here.
+    }
+    std::size_t active() const {
+        std::lock_guard lock(mutex_);
+        return active_;
+    }
+
+private:
+    mutable std::mutex                 mutex_;
+    std::size_t                        active_ = 0;
+    std::vector<std::shared_ptr<void>> remains_;
 };
 
 /// The effect namespace of attempt `attempt` of the invocation `task_id`:

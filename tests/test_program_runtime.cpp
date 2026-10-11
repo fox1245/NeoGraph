@@ -520,6 +520,7 @@ private:
 
 // A join member driven by its "value" channel (#380): "ask" interrupts until
 // it is resumed, "fail" throws, "slow" finishes after a short cancellable wait,
+// "block" holds its thread for 800 ms and ignores cancellation (#367, #368),
 // and any other value finishes at once. Every run is counted by its value.
 std::mutex                      join_member_mutex;
 std::map<std::string, unsigned> join_member_runs;
@@ -554,6 +555,7 @@ public:
             co_await timer.async_wait(
                 asio::bind_cancellation_slot(input.ctx.cancel_token->slot(), asio::use_awaitable));
         }
+        if (value == "block") std::this_thread::sleep_for(std::chrono::milliseconds(800));
         NodeOutput output;
         output.writes.push_back(ChannelWrite{
             "value", value == "ask" ? input.ctx.resume_value->at("decision")
@@ -610,6 +612,28 @@ public:
 private:
     std::string name_;
 };
+
+// A Core subgraph whose one node is a JoinMemberNode, so a Core graph can run
+// a join member one level down (#367, #368).
+std::shared_ptr<GraphEngine> join_member_subgraph() {
+    static const std::shared_ptr<GraphEngine> engine = [] {
+        NodeFactory::instance().register_type(
+            "runtime-test-join-member-child",
+            [](const std::string& name, const json&, const NodeContext&) {
+                return std::make_unique<JoinMemberNode>(name);
+            },
+            json{{"type", "object"}});
+        const json definition{
+            {"name", "join_member_child"},
+            {"channels", json{{"value", json{{"reducer", "overwrite"}, {"initial", ""}}}}},
+            {"nodes", json{{"inner", json{{"type", "runtime-test-join-member-child"}}}}},
+            {"edges", json::array({json{{"from", "__start__"}, {"to", "inner"}},
+                                   json{{"from", "inner"}, {"to", "__end__"}}})}};
+        return std::shared_ptr<GraphEngine>(
+            GraphEngine::compile(definition, NodeContext{}).release());
+    }();
+    return engine;
+}
 
 class BlockingNode final : public GraphNode {
 public:
@@ -904,6 +928,12 @@ RegistrySnapshot runtime_registry(
         manifest(ExecutableKind::Node, "runtime-parallel-branch", 'f'),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<ParallelBranchNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-subgraph-member", 'e'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<SubgraphNode>(name, join_member_subgraph());
         },
         json{{"type", "object"}}, json::object());
     builder.add_node(
@@ -6739,6 +6769,69 @@ TEST(ProgramRuntimeTest, JavaScriptRaceIsWonByAMemberThatFinishesWhileAnotherIsP
     EXPECT_EQ(join_member_runs_of("ask"), 1U);
 }
 
+// #367, #368: a C++ node body never holds the Program scheduler. With one
+// scheduler thread, a member whose node blocks its thread still lets the other
+// member run and win; the blocked member's late completion is discarded.
+TEST(ProgramRuntimeTest, JavaScriptRaceIsWonByTheFastMemberWhileACppNodeBlocksItsThread) {
+    reset_join_member_runs();
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      result = run_join(fixture, R"JS(
+    const winner = yield ng.race([
+        ng.callCore("main", {value: "block"}, "race:block"),
+        ng.callCore("main", {value: "quick"}, "race:quick")
+    ], {max_in_flight: 2}, "race:blocking");
+    return {winner: winner.value};
+)JS");
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_detail(result);
+    EXPECT_EQ(result.output(), (json{{"winner", "done:quick"}}));
+    EXPECT_EQ(join_member_runs_of("block"), 1U);
+    EXPECT_EQ(join_member_runs_of("quick"), 1U);
+    EXPECT_EQ(result.output().dump().find("done:block"), std::string::npos);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptAllOfBlockingCppNodesRunsTheirBodiesSideBySide) {
+    reset_join_member_runs();
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      started = std::chrono::steady_clock::now();
+    const auto      result  = run_join(fixture, R"JS(
+    const values = yield ng.all([
+        ng.callCore("main", {value: "block"}, "all:first"),
+        ng.callCore("main", {value: "block"}, "all:second")
+    ], {max_in_flight: 2}, "all:blocking");
+    return {values: values.map((member) => member.value)};
+)JS");
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_detail(result);
+    EXPECT_EQ(result.output(), (json{{"values", json::array({"done:block", "done:block"})}}));
+    EXPECT_EQ(join_member_runs_of("block"), 2U);
+    // Two 800 ms bodies on one scheduler thread: side by side, not in turn.
+    EXPECT_LT(elapsed, std::chrono::milliseconds(1400));
+}
+
+TEST(ProgramRuntimeTest, JavaScriptRaceIsWonByTheFastMemberWhileASubgraphNodeBlocks) {
+    // The same through a Core subgraph: the blocking node runs one level down.
+    reset_join_member_runs();
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-subgraph-member", R"JS(
+    const winner = yield ng.race([
+        ng.callCore("main", {value: "block"}, "race:block"),
+        ng.callCore("main", {value: "quick"}, "race:quick")
+    ], {max_in_flight: 2}, "race:subgraph");
+    return {winner: winner.value};
+)JS"));
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(3), "trace-js-subgraph-race", {}});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_detail(result);
+    EXPECT_EQ(result.output(), (json{{"winner", "done:quick"}}));
+    EXPECT_EQ(join_member_runs_of("block"), 1U);
+    EXPECT_EQ(join_member_runs_of("quick"), 1U);
+}
+
 TEST(ProgramRuntimeTest, JavaScriptRaceOfPausedMembersResumesTheFirstDeclared) {
     // #380: when every member pauses, the race is Interrupted on the first
     // one declared; once it resumes and finishes it wins the race.
@@ -8329,21 +8422,29 @@ TEST(ProgramRuntimeTest, HostAdmissionRequiresControllerAndResolverTogether) {
 }
 
 TEST(ProgramRuntimeTest, QueueWaitCountsAgainstWallTimeBudget) {
-    scheduler_blocking_calls.store(0);
     completed_calls.store(0);
     AdmittedRuntime fixture(1);
-    const auto      blocker_version = fixture.admit("runtime-scheduler-blocking");
+    const auto      blocker_version = fixture.admit("runtime-completed");
     const auto      queued_version  = fixture.admit("runtime-completed");
 
+    // Node bodies no longer run on the Program scheduler (#367, #368), but
+    // event delivery does: the blocker's sink holds the only scheduler thread
+    // on its first Core event, so the second run waits in the queue.
+    std::atomic<bool> scheduler_held{false};
+    auto              blocker_sink = std::make_shared<CallbackSink>();
+    blocker_sink->set_callback([&scheduler_held](const ProgramEvent& event) {
+        if (event.kind != ProgramEventKind::Core || scheduler_held.exchange(true)) return;
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    });
     auto blocker_budget         = grant();
     blocker_budget.wall_time_ms = 5000;
     auto blocker                = fixture.runtime->start(
         "tenant:runtime", blocker_version,
-        ProgramInvocation{json::object(), blocker_budget, "trace-queue-blocker", {}});
-    for (int i = 0; i < 100 && scheduler_blocking_calls.load() == 0; ++i) {
+        ProgramInvocation{json::object(), blocker_budget, "trace-queue-blocker", blocker_sink});
+    for (int i = 0; i < 1000 && !scheduler_held.load(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    ASSERT_EQ(scheduler_blocking_calls.load(), 1U);
+    ASSERT_TRUE(scheduler_held.load());
 
     auto queued_budget         = grant();
     queued_budget.wall_time_ms = 20;
@@ -8356,8 +8457,9 @@ TEST(ProgramRuntimeTest, QueueWaitCountsAgainstWallTimeBudget) {
     EXPECT_EQ(queued.failure()->code, "P_RUNTIME_TIMEOUT");
     EXPECT_EQ(queued.usage().core_steps, 0U);
     EXPECT_EQ(queued.remaining_budget().wall_time_ms, 0U);
-    EXPECT_EQ(completed_calls.load(), 0U);
     EXPECT_EQ(blocker.wait().status(), ProgramTerminalStatus::Completed);
+    // Only the blocker's node ran.
+    EXPECT_EQ(completed_calls.load(), 1U);
 }
 
 TEST(ProgramRuntimeTest, WallTimeExpiresWhenSingleSchedulerThreadIsBlocked) {
@@ -9284,6 +9386,36 @@ TEST(ProgramRuntimeTest, NodeRetryCeilingIsARunBudgetField) {
     EXPECT_FALSE(unbounded.remaining_budget().max_node_retries);
     const auto plain = unbounded.serialize_canonical();
     EXPECT_EQ(plain.find("node_retries"), std::string::npos);
+}
+
+// #364 (WP12): a Core backoff that would cross the run's wall-time deadline
+// stops retrying with kind "deadline" instead of sleeping until the budget
+// ends the run, and the Program retry operation does not run the body again
+// after such a stop.
+TEST(ProgramRuntimeTest, ABackoffPastTheWallTimeDeadlineStopsWithKindDeadline) {
+    classified_failure_calls.store(0);
+    AdmittedRuntime fixture;
+    auto document = orchestration_document(
+        json{{"op", "retry"}, {"max_attempts", 3}, {"body", json{{"op", "call_core"}}}},
+        "runtime-classified-ordinary");
+    document["root"]["definition"]["retry_policy"] =
+        json{{"max_retries", 3}, {"initial_delay_ms", 5000}, {"backoff_multiplier", 1.0},
+             {"max_delay_ms", 5000}};
+    const auto version = fixture.admit_document(std::move(document));
+    const auto started = std::chrono::steady_clock::now();
+    const auto result  = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), RunBudget{1500, 1000, 1000, 4, 32, 20, 0, 0, 0},
+                          "trace-deadline-backoff", {}});
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    EXPECT_LT(elapsed, std::chrono::milliseconds(1500)) << "the backoff slept toward the deadline";
+    EXPECT_EQ(classified_failure_calls.load(), 1U);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "NG.TaskFailed");
+    EXPECT_EQ(result.failure()->witness["node_failure"]["kind"], json("deadline"));
+    EXPECT_EQ(result.failure()->witness["node_failure"]["attempts"], json(1));
 }
 
 // #364: a failure-exit node fails the Program with its declared code.

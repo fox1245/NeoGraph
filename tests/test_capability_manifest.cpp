@@ -84,9 +84,10 @@ TEST(CapabilityManifest, PublishesOneFlagPerFeature) {
                                 "graph.barrier", "graph.interrupts", "graph.retry_policy",
                                 "diagnostics.help"})
         EXPECT_TRUE(features.at(enabled).get<bool>()) << enabled;
-    // Flags for work packages that have not landed yet. Each package flips its
-    // own flag together with the feature.
-    EXPECT_FALSE(features.at("retry.attempt_timeout").get<bool>());
+    // Every work package flipped its own flag together with the feature; the
+    // last one was attempt timeouts (WP12).
+    for (const auto& [feature, enabled] : features.items())
+        EXPECT_TRUE(enabled.get<bool>()) << feature;
 
     // Every builder method belongs to a published feature, and every such
     // feature compiles and runs (#364 turned on the failure routing runtime).

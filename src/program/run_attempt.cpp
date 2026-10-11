@@ -1040,12 +1040,14 @@ void apply_node_failure(ProgramFailure& failure, const std::exception_ptr& cause
 
 // #364: whether the Program Retry operation may run a failed body again. The
 // node failure classifier decides, from the executor's record when there is
-// one: only ordinary failures are retried, never a committed or uncertain
-// effect, a provider, configuration, logic or budget failure, a node past its
-// visit limit, or a node stopped by the run's retry ceiling.
+// one: only ordinary failures and attempt timeouts are retried, never a
+// committed or uncertain effect, a provider, configuration, logic or budget
+// failure, a node past its visit limit, or a node that stopped retrying at the
+// run's retry ceiling or because a backoff would cross the run's deadline.
 bool program_retryable(const std::exception_ptr& error, const graph::CancelToken* token) {
     if (const auto record = node_failure_in(error))
-        return record->retryable && record->kind != graph::NodeFailureKind::Ceiling;
+        return record->retryable && record->kind != graph::NodeFailureKind::Ceiling &&
+               record->kind != graph::NodeFailureKind::Deadline;
     return ::neograph::detail::classify_node_failure(error, token).retryable;
 }
 

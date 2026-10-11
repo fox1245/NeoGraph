@@ -14,7 +14,8 @@
  * causes, std::nested_exception, subgraph failures) and returns the most
  * severe graph::NodeFailureClass found anywhere in it. It is an allowlist:
  * only the runtime_error family, typed author failures (NodeFailureError),
- * transient provider failures and committed effects are routable, and
+ * attempt timeouts (NodeAttemptTimeout of a stopped attempt), transient
+ * provider failures and committed effects are routable, and
  * anything it does not know is NG.UnknownFailure.
  *
  * The tool contract, documented for users in the reference ("Tool failure

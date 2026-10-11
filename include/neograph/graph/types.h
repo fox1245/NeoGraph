@@ -15,6 +15,7 @@
 #include <neograph/tool_set.h>
 #include <neograph/types.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -282,8 +283,8 @@ enum class NodeFailureClass : std::uint8_t {
     /// NG.TaskFailed, NG.SubgraphFailed or an author code. Retried unless the
     /// author marked it non-retryable. Routable.
     Ordinary = 0,
-    /// NG.Timeout: an attempt timeout. Retried. Routable. Reserved: nothing
-    /// produces it until attempt timeouts land.
+    /// NG.Timeout: the attempt ran past its `attempt_timeout_ms`, was
+    /// cancelled, and stopped (NodeAttemptTimeout). Retried. Routable.
     Timeout = 1,
     /// NG.ProviderFailed: a transient provider failure (transport, timeout,
     /// server, overloaded, rate limited). Not retried, because the provider
@@ -323,7 +324,9 @@ enum class NodeFailureKind : std::uint8_t {
     /// codes rule out a retry.
     NonRetryable,
     EffectCommitted,  ///< The final attempt committed a non-idempotent effect.
-    Deadline,         ///< Reserved: a retry would cross the run deadline.
+    /// The backoff before the next attempt would cross the run's deadline
+    /// (RunContext::deadline, a Program's wall-time budget).
+    Deadline,
     /// The run-level retry ceiling (Program RunBudget::max_node_retries) was
     /// reached before a retry.
     Ceiling,
@@ -426,6 +429,47 @@ private:
     std::string         code_;
     std::string         public_message_;
     std::optional<bool> retryable_;
+};
+
+/**
+ * @brief A node attempt ran past its `attempt_timeout_ms` (#364).
+ *
+ * The executor raises it as the cause of an attempt that timed out; node code
+ * never throws it. The attempt was cancelled through its own CancelToken (a
+ * child of the run's) and whatever it returned or threw afterwards was
+ * discarded. When it stopped before its stop deadline, stopped() is true and
+ * the failure is NG.Timeout, which is retried and routable. When it did not,
+ * its effects are uncertain: the failure is NG.EffectUncertain, which is
+ * neither retried nor routed, so the run fails.
+ */
+class NEOGRAPH_API NodeAttemptTimeout : public std::runtime_error {
+public:
+    NodeAttemptTimeout(std::string node, int attempt, std::chrono::milliseconds timeout,
+                       bool stopped)
+        : std::runtime_error(what_of(node, attempt, timeout, stopped)), node_(std::move(node)),
+          attempt_(attempt), timeout_(timeout), stopped_(stopped) {}
+
+    /// The node whose attempt timed out.
+    const std::string& node() const noexcept { return node_; }
+    /// The attempt that timed out: 0 for the first one.
+    int attempt() const noexcept { return attempt_; }
+    std::chrono::milliseconds timeout() const noexcept { return timeout_; }
+    /// The cancelled attempt stopped before its stop deadline.
+    bool stopped() const noexcept { return stopped_; }
+
+private:
+    static std::string what_of(const std::string& node, int attempt,
+                               std::chrono::milliseconds timeout, bool stopped) {
+        auto text = "Node '" + node + "' attempt " + std::to_string(attempt + 1) +
+                    " timed out after " + std::to_string(timeout.count()) + " ms";
+        if (!stopped) text += " and did not stop by its stop deadline; its effects are uncertain";
+        return text;
+    }
+
+    std::string               node_;
+    int                       attempt_ = 0;
+    std::chrono::milliseconds timeout_{0};
+    bool                      stopped_ = true;
 };
 
 /// The record the executor attached to @p error, or null when the executor's

@@ -426,8 +426,8 @@ TEST(FailureRoutingKeys, CapabilityFlagsAreOnWithTheRuntime) {
     EXPECT_TRUE(features.at("retry_policy.per_node").get<bool>());
     EXPECT_TRUE(features.at("failure_edges").get<bool>());
     EXPECT_TRUE(features.at("failure_exits").get<bool>());
-    // Attempt timeouts are WP12.
-    EXPECT_FALSE(features.at("retry.attempt_timeout").get<bool>());
+    // Attempt timeouts and deadline-aware backoff landed with WP12.
+    EXPECT_TRUE(features.at("retry.attempt_timeout").get<bool>());
     bool found = false;
     for (const auto& method : javascript_authoring_capability_manifest().at("define").at("graph_builder_methods"))
         found = found || method.at("name").get<std::string>() == "failureExit";

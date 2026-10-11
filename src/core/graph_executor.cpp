@@ -11,24 +11,30 @@
 #include "run_context_runtime.h"
 #include "text_safety.h"
 #include "tool_failure.h"
+#include <asio/as_tuple.hpp>
+#include <asio/bind_cancellation_slot.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/deferred.hpp>
 #include <asio/error.hpp>
 #include <asio/experimental/parallel_group.hpp>
+#include <asio/post.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/strand.hpp>
 #include <asio/system_error.hpp>
 #include <asio/this_coro.hpp>
+#include <asio/thread_pool.hpp>
 #include <asio/use_awaitable.hpp>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <sstream>
@@ -210,6 +216,284 @@ asio::awaitable<void> record_attempt_start(const CheckpointCoordinator& coord,
 }
 
 }  // namespace
+
+// =========================================================================
+// Dispatched attempts (#364 attempt timeouts; the #367/#368 execution model)
+// =========================================================================
+//
+// The orchestrator (the coroutine driving the super-step) never runs a node
+// body itself when the body could hold its thread: on a shared host scheduler
+// (RunContext::shared_scheduler, the Program runtime) and for every attempt
+// that has a timeout. Such an attempt is one dispatched unit:
+//
+//   * it runs on a worker strand of attempt_pool(), with a CancelToken of its
+//     own (a child of the run's) and an EventFence around its events;
+//   * the first terminal event wins: either the body completes, or its
+//     timeout passes. Completing at or after the timeout counts as the
+//     timeout, whether or not the timer has fired yet;
+//   * after a timeout the attempt is cancelled through its token and its
+//     events are fenced off, and everything it returns or throws afterwards
+//     (its late completion) is discarded: no writes, no events, no pending
+//     write. The orchestrator waits for it to stop, so a retry never overlaps
+//     the attempt it replaces;
+//   * an attempt that does not stop by its stop deadline is detached: the run
+//     fails with NG.EffectUncertain. A detached attempt owns everything it
+//     uses except its node; an engine destroyed before it finishes hands its
+//     nodes over to it (AttemptQuiescence::adopt).
+
+namespace {
+
+using AttemptClock = std::chrono::steady_clock;
+
+// How long a cancelled attempt has to stop: as long as it had to run, and at
+// least a second.
+constexpr std::chrono::milliseconds kMinAttemptStopGrace{1000};
+
+// Worker threads for dispatched node attempts. Process-wide, created on first
+// use; NEOGRAPH_NODE_ATTEMPT_THREADS (1-1024) overrides the default of 32. A
+// blocking body holds one thread while it runs.
+asio::thread_pool& attempt_pool() {
+    static asio::thread_pool pool([] {
+        if (const char* env = std::getenv("NEOGRAPH_NODE_ATTEMPT_THREADS")) {
+            const long n = std::strtol(env, nullptr, 10);
+            if (n > 0 && n <= 1024) return static_cast<std::size_t>(n);
+        }
+        return static_cast<std::size_t>(32);
+    }());
+    return pool;
+}
+
+// The events one dispatched attempt emits through NodeInput::stream_cb. Once
+// the attempt's terminal event is a timeout, nothing more it emits reaches the
+// run's callback. Delivery holds the mutex, so closing waits for an event in
+// flight and no event of the attempt can follow what the orchestrator emits
+// next.
+struct EventFence {
+    std::mutex                 mutex;
+    bool                       closed = false;
+    const GraphStreamCallback* sink   = nullptr;
+
+    void deliver(const GraphEvent& event) {
+        std::lock_guard lock(mutex);
+        if (!closed) (*sink)(event);
+    }
+    void close() {
+        std::lock_guard lock(mutex);
+        closed = true;
+    }
+};
+
+struct QuiescenceLease {
+    std::shared_ptr<detail::AttemptQuiescence> owner;
+    ~QuiescenceLease() {
+        if (owner) owner->leave();
+    }
+};
+
+// Every dispatched attempt of the process, until it and everything it holds
+// is released: wait_for_node_attempts(). Never destroyed, so it stays usable
+// while the process exits.
+struct RunningAttempts {
+    std::mutex              mutex;
+    std::condition_variable idle;
+    std::size_t             count = 0;
+};
+
+RunningAttempts& running_attempts() {
+    static auto* const instance = new RunningAttempts();
+    return *instance;
+}
+
+struct ProcessAttemptLease {
+    ProcessAttemptLease() {
+        auto&           running = running_attempts();
+        std::lock_guard lock(running.mutex);
+        ++running.count;
+    }
+    ~ProcessAttemptLease() {
+        auto&           running = running_attempts();
+        std::lock_guard lock(running.mutex);
+        if (--running.count == 0) running.idle.notify_all();
+    }
+    ProcessAttemptLease(const ProcessAttemptLease&)            = delete;
+    ProcessAttemptLease& operator=(const ProcessAttemptLease&) = delete;
+};
+
+// One dispatched node attempt. Shared by the orchestrator, the body coroutine
+// and its completion handler.
+struct DispatchedAttempt {
+    // Declared first, released last: the process count, then the engine's,
+    // whose release may release the engine's nodes.
+    ProcessAttemptLease process_lease;
+    QuiescenceLease     quiescence;
+
+    GraphNode*                  node  = nullptr;
+    const GraphState*           state = nullptr;
+    // A timed attempt can be detached, so it reads its own copy of the state.
+    std::unique_ptr<GraphState> owned_state;
+    RunContext                  context;
+    // Binds `context` to the run; declared after it so it is released first.
+    std::optional<detail::ScopedInvocationRuntime> scope;
+    std::shared_ptr<CancelToken> token;      // context.cancel_token: the attempt's own
+    std::shared_ptr<CancelToken> execution;  // the body co_spawn's cancellation slot
+    std::shared_ptr<EventFence>  events;
+    GraphStreamCallback          fenced_sink;
+
+    std::mutex                               mutex;
+    std::optional<AttemptClock::time_point>  timeout_at;
+    bool                                     settled   = false;  // a terminal event won
+    bool                                     timed_out = false;
+    bool                                     stopped   = false;  // the body finished
+    bool                                     detached  = false;  // nobody waits any more
+    std::optional<NodeResult>                result;
+    std::exception_ptr                       error;
+    // Wakes the waiting orchestrator; set only while it waits.
+    std::function<void()>                    wake;
+
+    // The body finished. Its outcome counts only if it is the first terminal
+    // event and it arrived before the timeout.
+    void finish(std::optional<NodeResult> outcome, std::exception_ptr failure) {
+        std::lock_guard lock(mutex);
+        stopped = true;
+        if (!settled) {
+            settled = true;
+            if (timeout_at && AttemptClock::now() >= *timeout_at) {
+                timed_out = true;
+            } else {
+                result = std::move(outcome);
+                error  = std::move(failure);
+            }
+        }
+        if (wake) wake();
+    }
+};
+
+asio::awaitable<void> run_dispatched_body(std::shared_ptr<DispatchedAttempt> unit) {
+    {
+        // Timed out before a worker picked it up: the node never runs.
+        std::lock_guard lock(unit->mutex);
+        if (unit->settled) {
+            unit->stopped = true;
+            if (unit->wake) unit->wake();
+            co_return;
+        }
+    }
+    // A run cancelled before the body starts does not start it. Its token may
+    // have been cancelled before it was bound to this strand, and that emit,
+    // queued first, cannot reach a slot the node has not connected yet.
+    if (unit->token->is_cancelled()) {
+        unit->finish(std::nullopt, std::make_exception_ptr(CancelledException(
+                                       "node attempt cancelled before it started")));
+        co_return;
+    }
+    std::optional<NodeResult> result;
+    std::exception_ptr        error;
+    try {
+        NodeInput in{*unit->state, unit->context, unit->events ? &unit->fenced_sink : nullptr};
+        result.emplace(co_await unit->node->run(in));
+    } catch (...) {
+        error = std::current_exception();
+    }
+    unit->finish(std::move(result), std::move(error));
+}
+
+void start_dispatched_body(const std::shared_ptr<DispatchedAttempt>& unit) {
+    // As for a run (GraphEngine::run_async): the token the node sees is bound
+    // to the serial executor the body runs on, so a node may bind its slot()
+    // to what it awaits; the body's own co_spawn uses a separate child token,
+    // so cancelling the attempt aborts what the body awaits either way.
+    const auto token_executor =
+        unit->token->bind_executor(asio::make_strand(attempt_pool().get_executor()));
+    const auto body_executor = unit->execution->bind_executor(token_executor);
+    asio::post(body_executor, [unit, body_executor] {
+        try {
+            asio::co_spawn(body_executor, run_dispatched_body(unit),
+                           asio::bind_cancellation_slot(
+                               unit->execution->slot(),
+                               [unit, body_executor](std::exception_ptr error) {
+                                   if (error) unit->finish(std::nullopt, std::move(error));
+                                   asio::post(body_executor, [unit] {
+                                       unit->execution->unbind_executor();
+                                       unit->token->unbind_executor();
+                                   });
+                               }));
+        } catch (...) {
+            unit->finish(std::nullopt, std::current_exception());
+        }
+    });
+}
+
+// Runs on a strand of the orchestrator's executor until the attempt settles:
+// it completed, or it timed out and then stopped, or it timed out and did not
+// stop by its stop deadline (detached).
+asio::awaitable<void> await_dispatched(std::shared_ptr<DispatchedAttempt> unit,
+                                       std::chrono::milliseconds          stop_grace) {
+    const auto executor = co_await asio::this_coro::executor;
+    auto       timer    = std::make_shared<asio::steady_timer>(executor);
+    {
+        std::lock_guard lock(unit->mutex);
+        unit->wake = [executor, timer] { asio::post(executor, [timer] { timer->cancel(); }); };
+    }
+    std::optional<AttemptClock::time_point> stop_deadline;
+    for (;;) {
+        bool                    cancel_attempt = false;
+        bool                    done           = false;
+        AttemptClock::time_point wake_at{};
+        {
+            std::lock_guard lock(unit->mutex);
+            const auto      now = AttemptClock::now();
+            if (unit->stopped) {
+                done = true;
+            } else {
+                if (!unit->settled && unit->timeout_at && now >= *unit->timeout_at) {
+                    unit->settled   = true;
+                    unit->timed_out = true;
+                }
+                if (unit->timed_out && !stop_deadline) {
+                    stop_deadline  = now + stop_grace;
+                    cancel_attempt = true;
+                }
+                if (stop_deadline && now >= *stop_deadline) {
+                    unit->detached = true;
+                    done           = true;
+                } else if (stop_deadline) {
+                    wake_at = *stop_deadline;
+                } else {
+                    wake_at = unit->timeout_at ? *unit->timeout_at : now + std::chrono::hours(24);
+                }
+            }
+            // No wake-up is posted once the orchestrator stops waiting.
+            if (done) unit->wake = nullptr;
+        }
+        if (cancel_attempt) {
+            if (unit->events) unit->events->close();
+            unit->token->cancel();
+        }
+        if (done) break;
+        timer->expires_at(wake_at);
+        co_await timer->async_wait(asio::as_tuple(asio::use_awaitable));
+    }
+    // A late completion settles as a timeout too; fence whatever is left.
+    bool timed_out = false;
+    {
+        std::lock_guard lock(unit->mutex);
+        timed_out = unit->timed_out;
+    }
+    if (timed_out && unit->events) unit->events->close();
+}
+
+}  // namespace
+
+bool wait_for_node_attempts(std::chrono::milliseconds timeout) {
+    auto&            running = running_attempts();
+    std::unique_lock lock(running.mutex);
+    const auto       idle = [&running] { return running.count == 0; };
+    if (timeout == std::chrono::milliseconds::max()) {
+        running.idle.wait(lock, idle);
+        return true;
+    }
+    return running.idle.wait_for(lock, timeout, idle);
+}
 
 // =========================================================================
 // NodeExecutor construction + helpers
@@ -491,6 +775,9 @@ asio::awaitable<NodeResult> NodeExecutor::execute_attempts_async(
     }
 
     auto policy = retry_policy_for_(node_name);
+    // #364: each attempt may run this long (milliseconds); none without one.
+    const std::optional<int> attempt_timeout =
+        attempt_timeout_for_ ? attempt_timeout_for_(node_name) : std::nullopt;
 
     // A resumed invocation continues the attempt that was in flight: the
     // latest attempt whose start was recorded. Its effects replay from the
@@ -550,7 +837,85 @@ asio::awaitable<NodeResult> NodeExecutor::execute_attempts_async(
         std::optional<NodeResult>                 ok_result;
         std::exception_ptr                        failure;
         std::shared_ptr<detail::AttemptEffectLog> effects;
-        {
+        // False only for a timed-out attempt that did not stop by its stop
+        // deadline: it may still be running.
+        bool attempt_stopped   = true;
+        bool attempt_timed_out = false;
+        if (attempt_timeout || ctx.shared_scheduler) {
+            // A dispatched unit: the body runs off this coroutine's executor
+            // (see "Dispatched attempts" above).
+            auto unit  = std::make_shared<DispatchedAttempt>();
+            unit->node = node_it->second.get();
+            if (attempt_timeout) {
+                unit->owned_state = std::make_unique<GraphState>();
+                init_state(*unit->owned_state);
+                unit->owned_state->copy_provider_history_from(state);
+                unit->owned_state->restore_runtime(state.serialize_runtime());
+                unit->state = unit->owned_state.get();
+            } else {
+                unit->state = &state;
+            }
+            // The attempt's own token: run cancellation cascades into it, and
+            // a timeout cancels it alone.
+            const auto run_token =
+                ctx.cancel_token ? ctx.cancel_token : std::make_shared<CancelToken>();
+            unit->context              = ctx;
+            unit->token                = run_token->fork();
+            unit->execution            = unit->token->fork();
+            unit->context.cancel_token = unit->token;
+            if (slot) {
+                unit->scope.emplace(ctx, unit->context, effect_namespace, true);
+            } else {
+                const auto parent = detail::runtime_for(ctx);
+                unit->scope.emplace(ctx, unit->context,
+                                    parent ? parent.invocation_id() : std::string_view{});
+            }
+            effects = unit->scope->effects();
+            if (cb) {
+                unit->events       = std::make_shared<EventFence>();
+                unit->events->sink = &cb;
+                unit->fenced_sink  = [events = unit->events](const GraphEvent& event) {
+                    events->deliver(event);
+                };
+            }
+            if (attempt_quiescence_) {
+                attempt_quiescence_->enter();
+                unit->quiescence.owner = attempt_quiescence_;
+            }
+            if (attempt_timeout)
+                unit->timeout_at = AttemptClock::now() + std::chrono::milliseconds(*attempt_timeout);
+            start_dispatched_body(unit);
+            const auto stop_grace = std::max(std::chrono::milliseconds(attempt_timeout.value_or(0)),
+                                             kMinAttemptStopGrace);
+            // Run cancellation reaches the body through its token; the wait
+            // itself is not cancelled, so a cancelled run still waits for
+            // the body to stop, as an inline body would be waited for.
+            co_await asio::co_spawn(
+                asio::make_strand(ex), await_dispatched(unit, stop_grace),
+                asio::bind_cancellation_slot(asio::cancellation_slot(), asio::use_awaitable));
+            {
+                std::lock_guard lock(unit->mutex);
+                attempt_timed_out = unit->timed_out;
+                attempt_stopped   = !unit->detached;
+                if (!attempt_timed_out) {
+                    ok_result = std::move(unit->result);
+                    failure   = std::move(unit->error);
+                }
+            }
+            if (attempt_timed_out) {
+                // The late completion, if any, is discarded.
+                ok_result.reset();
+                failure = std::make_exception_ptr(NodeAttemptTimeout(
+                    node_name, attempt, std::chrono::milliseconds(*attempt_timeout), attempt_stopped));
+                // Run control wins over the attempt's own timeout.
+                if (ctx.cancel_token && ctx.cancel_token->is_cancelled())
+                    throw CancelledException("node " + node_name +
+                                             " cancelled after its attempt timed out");
+            } else if (!ok_result && !failure) {
+                failure = std::make_exception_ptr(
+                    std::logic_error("Node '" + node_name + "' attempt finished without an outcome"));
+            }
+        } else {
             std::optional<ScopedInvocationContext> scope;
             if (slot) scope.emplace(ctx, effect_namespace);
             if (scope) effects = scope->effects();
@@ -611,7 +976,9 @@ asio::awaitable<NodeResult> NodeExecutor::execute_attempts_async(
         // An effect of this attempt whose outcome is unknown is never retried
         // or routed: the run pauses for reconciliation, as mediated dispatch
         // does when it sees one, even if the node turned that into an error.
-        if (effects && effects->uncertain()) {
+        // An attempt still running past its stop deadline does not pause: its
+        // effects are uncertain as a whole and the run fails (below).
+        if (attempt_stopped && effects && effects->uncertain()) {
             if (slot && slot->interrupted_attempt) *slot->interrupted_attempt = attempt;
             throw NodeInterrupt("Mediated Tool effect requires reconciliation",
                                 json{{"kind", "tool_effect_reconciliation"},
@@ -642,6 +1009,30 @@ asio::awaitable<NodeResult> NodeExecutor::execute_attempts_async(
                                                   : NodeFailureKind::NonRetryable;
             co_return give_up(std::move(failure), attempt + 1, verdict, kind, effects);
         }
+
+        // Apply jitter to break thundering-herd lockstep when N
+        // parallel branches retry against the same upstream. The
+        // policy default is jitter_pct=0 (deterministic, back-compat);
+        // callers configuring fan-out workloads should set ~0.2.
+        int actual_delay = delay_ms;
+        if (policy.jitter_pct > 0.0f && delay_ms > 0) {
+            // Per-thread RNG so concurrent branches don't share state.
+            thread_local std::mt19937             rng{std::random_device{}()};
+            float                                 pct = std::min(1.0f, policy.jitter_pct);
+            std::uniform_real_distribution<float> dist(-pct, pct);
+            const double scaled = static_cast<double>(delay_ms) * (1.0 + dist(rng));
+            actual_delay = static_cast<int>(std::clamp(
+                scaled, 0.0, static_cast<double>(std::numeric_limits<int>::max())));
+        }
+
+        // #364: a backoff that would cross the run's deadline (a Program's
+        // wall-time budget) stops retrying now, instead of sleeping until the
+        // budget stops the run.
+        if (ctx.deadline &&
+            AttemptClock::now() + std::chrono::milliseconds(actual_delay) >= *ctx.deadline)
+            co_return give_up(std::move(failure), attempt + 1, verdict, NodeFailureKind::Deadline,
+                              effects);
+
         // #364: the run-level retry ceiling. Reaching it stops retrying.
         if (const auto run_runtime = detail::runtime_for(ctx);
             run_runtime && run_runtime->node_retry_ceiling &&
@@ -665,24 +1056,11 @@ asio::awaitable<NodeResult> NodeExecutor::execute_attempts_async(
                                {"error", what}}});
         }
 
-        // Apply jitter to break thundering-herd lockstep when N
-        // parallel branches retry against the same upstream. The
-        // policy default is jitter_pct=0 (deterministic, back-compat);
-        // callers configuring fan-out workloads should set ~0.2.
-        int actual_delay = delay_ms;
-        if (policy.jitter_pct > 0.0f && delay_ms > 0) {
-            // Per-thread RNG so concurrent branches don't share state.
-            thread_local std::mt19937             rng{std::random_device{}()};
-            float                                 pct = std::min(1.0f, policy.jitter_pct);
-            std::uniform_real_distribution<float> dist(-pct, pct);
-            const double scaled = static_cast<double>(delay_ms) * (1.0 + dist(rng));
-            actual_delay = static_cast<int>(std::clamp(
-                scaled, 0.0, static_cast<double>(std::numeric_limits<int>::max())));
-        }
-
         asio::steady_timer timer(ex);
         timer.expires_after(std::chrono::milliseconds(actual_delay));
         co_await timer.async_wait(asio::use_awaitable);
+        // A run cancelled during the backoff starts no further attempt.
+        if (ctx.cancel_token) ctx.cancel_token->throw_if_cancelled("node " + node_name + " retry");
 
         delay_ms = next_delay_ms(delay_ms, policy);
     }

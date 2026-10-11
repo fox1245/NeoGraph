@@ -547,6 +547,11 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
         engine->nodes_, engine->channel_defs_, std::move(retry_lookup),
         std::move(resources.registry), nullptr, &engine->node_cache_);
     engine->executor_->failure_routing_ = engine->failure_routing_.get();
+    engine->attempt_quiescence_ = std::make_shared<detail::AttemptQuiescence>();
+    engine->executor_->attempt_timeout_for_ = [self](const std::string& node_name) {
+        return self->resolved_attempt_timeout_ms(node_name);
+    };
+    engine->executor_->attempt_quiescence_ = engine->attempt_quiescence_;
 
     // NodeExecutor owns retry + fan-out + Send invocation. Bind the
     // retry-policy lookup to this engine's per-node override map so
@@ -629,6 +634,54 @@ void GraphEngine::set_node_retry_policy(const std::string& node_name, const Retr
     node_retry_policies_[node_name] = policy;
 }
 
+GraphEngine::~GraphEngine() {
+    // A dispatched attempt that ignored its cancellation past its stop
+    // deadline outlives its run (#364) and still runs one of nodes_. Hand the
+    // nodes, and the tools they may use, to the last such attempt instead of
+    // destroying them under it.
+    if (attempt_quiescence_ && attempt_quiescence_->active() > 0) {
+        struct Remains {
+            std::map<std::string, std::unique_ptr<GraphNode>> nodes;
+            ToolSet                                           tools;
+            std::vector<std::unique_ptr<Tool>>                owned_tools;
+        };
+        auto remains         = std::make_shared<Remains>();
+        remains->nodes       = std::move(nodes_);
+        remains->tools       = std::move(tools_);
+        remains->owned_tools = std::move(owned_tools_);
+        attempt_quiescence_->adopt(std::move(remains));
+    }
+}
+
+void GraphEngine::set_node_attempt_timeout_ms(const std::string& node_name,
+                                              std::optional<int> timeout_ms) {
+    require_graph_node(nodes_, name_, "set_node_attempt_timeout_ms", node_name);
+    if (!timeout_ms) {
+        node_attempt_timeouts_.erase(node_name);
+        return;
+    }
+    if (*timeout_ms < kMinAttemptTimeoutMs || *timeout_ms > kMaxAttemptTimeoutMs)
+        throw std::invalid_argument("set_node_attempt_timeout_ms: the timeout for node '" +
+                                    node_name + "' must be between " +
+                                    std::to_string(kMinAttemptTimeoutMs) + " and " +
+                                    std::to_string(kMaxAttemptTimeoutMs) + " ms, got " +
+                                    std::to_string(*timeout_ms));
+    node_attempt_timeouts_[node_name] = *timeout_ms;
+}
+
+std::optional<int> GraphEngine::resolved_attempt_timeout_ms(const std::string& node_name) const {
+    // #364, tighten-only: the definition's per-node timeout, then a host
+    // timeout that may only shorten it. Without a definition timeout the host
+    // timeout applies as is; there is no graph-wide default.
+    std::optional<int> resolved;
+    if (const auto sealed = sealed_retry_policies_.find(node_name);
+        sealed != sealed_retry_policies_.end())
+        resolved = sealed->second.attempt_timeout_ms;
+    if (const auto host = node_attempt_timeouts_.find(node_name); host != node_attempt_timeouts_.end())
+        resolved = resolved ? std::min(*resolved, host->second) : host->second;
+    return resolved;
+}
+
 void GraphEngine::set_worker_count(std::size_t n) {
     if (n < 1) n = 1;
     // The same admission gate as state administration closes the old
@@ -655,6 +708,10 @@ void GraphEngine::set_worker_count(std::size_t n) {
         executor_ = std::make_unique<NodeExecutor>(nodes_, channel_defs_, std::move(retry_lookup),
                                                    std::move(registry), nullptr, &node_cache_);
         executor_->failure_routing_ = failure_routing_.get();
+        executor_->attempt_timeout_for_ = [self](const std::string& node_name) {
+            return self->resolved_attempt_timeout_ms(node_name);
+        };
+        executor_->attempt_quiescence_ = attempt_quiescence_;
         // The notice is one-shot per executor; marking it sent keeps it quiet.
         if (!stderr_notices_) executor_->warned_serial_fanout_.store(true);
         return;
@@ -663,6 +720,10 @@ void GraphEngine::set_worker_count(std::size_t n) {
     executor_ = std::make_unique<NodeExecutor>(nodes_, channel_defs_, std::move(retry_lookup),
                                                std::move(registry), pool_.get(), &node_cache_);
     executor_->failure_routing_ = failure_routing_.get();
+    executor_->attempt_timeout_for_ = [self](const std::string& node_name) {
+        return self->resolved_attempt_timeout_ms(node_name);
+    };
+    executor_->attempt_quiescence_ = attempt_quiescence_;
 }
 
 void GraphEngine::set_worker_count_auto() {

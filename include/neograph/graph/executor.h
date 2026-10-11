@@ -51,9 +51,11 @@
 #include <asio/thread_pool.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -77,6 +79,9 @@ namespace detail {
 struct InvocationSlot;
 /// #364 failure routing of one linked engine. Defined in failure_routing.h.
 struct FailureRouting;
+/// Node attempts dispatched off the orchestrator that are still running.
+/// Defined in run_context_runtime.h.
+class AttemptQuiescence;
 }  // namespace detail
 
 /**
@@ -92,6 +97,8 @@ struct FailureRouting;
 class NEOGRAPH_API NodeExecutor {
 public:
     using RetryPolicyLookup = std::function<RetryPolicy(const std::string&)>;
+    /// #364: a node's resolved attempt timeout in milliseconds, or none.
+    using AttemptTimeoutLookup = std::function<std::optional<int>(const std::string&)>;
 
     /// @param nodes Map of node_name → GraphNode owned by the engine.
     ///              Must outlive this executor (engine owns both).
@@ -286,6 +293,26 @@ private:
     /// #364: the engine's failure routing; null for an executor built
     /// outside an engine. Owned by the engine, which outlives this executor.
     const detail::FailureRouting* failure_routing_ = nullptr;
+    /// #364: each node's attempt timeout; empty means none for every node.
+    AttemptTimeoutLookup attempt_timeout_for_;
+    /// The engine's count of dispatched attempts still running; its
+    /// destructor hands them its nodes. Null outside an engine.
+    std::shared_ptr<detail::AttemptQuiescence> attempt_quiescence_;
 };
+
+/**
+ * @brief Wait until no node attempt dispatched off its run's orchestrator is
+ *        running anywhere in this process (#364, #367, #368).
+ *
+ * An attempt that ignored its cancellation past its stop deadline outlives the
+ * run that timed it out (the run failed with NG.EffectUncertain). A host that
+ * is about to exit, or to tear down what such a node uses, can wait for it
+ * here. The Python binding does so at interpreter exit.
+ *
+ * @param timeout How long to wait; milliseconds::max() waits without a limit.
+ * @return True when no dispatched attempt is running.
+ */
+NEOGRAPH_API bool wait_for_node_attempts(
+    std::chrono::milliseconds timeout = std::chrono::milliseconds::max());
 
 } // namespace neograph::graph
