@@ -154,6 +154,7 @@ class Step(ng.GraphNode):
 
     Config keys (all optional):
       boom: true                 raise RuntimeError
+      boom_on_topic: "t"         raise RuntimeError when the "topic" channel is "t"
       ask: "question"            raise ng.NodeInterrupt until a resume value arrives
       delay_ms: N                cooperative sleep that polls input.ctx.cancel_token
       blocking_sleep_ms: N       plain time.sleep (a node that ignores cancellation)
@@ -183,7 +184,8 @@ class Step(ng.GraphNode):
     def run(self, input):
         config = self._config
         JOURNAL.add("started", self._name)
-        if config.get("boom"):
+        if config.get("boom") or (
+                "boom_on_topic" in config and input.state.get("topic") == config["boom_on_topic"]):
             JOURNAL.add("raised", self._name)
             raise RuntimeError(f"boom from {self._name}")
         if config.get("blocking_sleep_ms"):

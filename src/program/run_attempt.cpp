@@ -4919,7 +4919,14 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         "Admitted JavaScript control source no longer exports main(input)");
                 }
                 plan_result = co_await execute_javascript_control(*session);
-                plan_result.execution_trace = std::move(javascript_trace);
+                // A command that fails reports no Core nodes of its own: its
+                // Core threw. A failed attempt therefore lists every node that
+                // completed in it, as a define()-only attempt does (#359).
+                plan_result.execution_trace =
+                    plan_result.status == ProgramTerminalStatus::Completed ||
+                            plan_result.status == ProgramTerminalStatus::Interrupted
+                        ? std::move(javascript_trace)
+                        : core_progress->completed_nodes();
             } catch (const JavaScriptCompileError& error) {
                 if (error.code() == "P_JS_TIMEOUT") {
                     control->cancel(CancellationCause::Timeout);

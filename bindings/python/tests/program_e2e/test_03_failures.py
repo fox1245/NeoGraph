@@ -129,6 +129,33 @@ def test_failed_call_core_terminates_main_without_reaching_catch():
     assert result.failure.core_node == "w"
 
 
+
+def test_failed_call_core_in_main_lists_the_nodes_it_ran():
+    """A failing callCore keeps the trace a define()-only run reports."""
+    text = with_main(PIPELINE, 'return yield ng.callCore("pipeline", {}, "run");')
+    _host, _version, result = run_program(text)
+    assert result.status == ng.ProgramTerminalStatus.Failed, describe(result)
+    assert result.failure.core_node == "validate"
+    assert result.execution_trace == ["fetch", "parse"]
+    assert JOURNAL.names() == ["fetch", "parse"]
+
+
+def test_failed_call_core_after_a_completed_one_lists_both():
+    text = with_main(define_graph("""
+        g.node("fetch", {type: "e2e.step"});
+        g.node("check", {type: "e2e.step", boom_on_topic: "bad"});
+        g.entry("fetch");
+        g.edge("fetch", "check");
+        g.exit("check");
+    """), """
+        yield ng.callCore("work", {topic: "good"}, "first");
+        return yield ng.callCore("work", {topic: "bad"}, "second");
+    """)
+    _host, _version, result = run_program(text)
+    assert result.status == ng.ProgramTerminalStatus.Failed, describe(result)
+    assert result.failure.core_node == "check"
+    assert result.execution_trace == ["fetch", "check", "fetch"]
+
 _LLM_CALL_WITHOUT_PROVIDER = r'''
 import json
 import neograph_engine as ng
