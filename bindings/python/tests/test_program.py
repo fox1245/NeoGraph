@@ -138,6 +138,15 @@ def test_local_program_host_active_start_pins_admitted_version():
     assert host.activation().id == activation.id
 
 
+def test_zero_ceiling_error_names_each_zero_field():
+    ceiling = _ceiling()
+    ceiling.model_tokens = 0
+    ceiling.max_dynamic_compiles = 0
+    with pytest.raises(ValueError) as raised:
+        ng.LocalProgramHost(_registry(), "python-owner-zero", ceiling)
+    assert str(raised.value).endswith("zero: model_tokens, max_dynamic_compiles")
+
+
 def test_program_preserves_core_failure_in_terminal_result():
     class FailingNode(ng.GraphNode):
         def get_name(self):
