@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=c647e2de2645fa72af2e130f78afd2e39578470154e591de344bc8f826b4dd26 -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=130e5724d5cf9649044dd1d6ef65259b930d91dbcb457014c00980389b9ab927 -->
 # C++ API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -214,9 +214,11 @@ OPENROUTER_API_KEY=sk-or-...
 
 | # | 文件 | 设置 | 展示内容 |
 |---|------|-------|---------------|
-| 11 | [`11_clay_chatbot.cpp`](11_clay_chatbot.cpp) | Clay + Raylib (`-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`) | 带 Clay/Raylib UI 的多轮聊天。纯 C++ 桌面应用，NeoGraph 后端。Mock 或 `--live`。 |
+| 11 | [`11_clay_chatbot.cpp`](11_clay_chatbot.cpp) | Clay + Raylib (`-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`) | 纯 C++ 桌面多轮聊天：Clay 负责窗口布局，Raylib 负责绘制，回复从 NeoGraph 智能体流式到达。默认使用 mock，`--live` 使用 OpenRouter。可渲染代码块、列表和非拉丁文字，Stop 可取消回复。 |
 | 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | OpenRouter + Ghidra + ghidra-mcp | 逆向工程 agent，通过 Ghidra 从去除符号的二进制恢复函数名和摘要。历史端到端结果为：6 个函数的 crackme，matched_score 0.92。完整流水线在独立的私有仓库 `fox1245/re-agent` 中维护。 |
 | 36 | [`36_classifier_fanout.cpp`](36_classifier_fanout.cpp) | 离线 | 五个小“classifier”（情感 / 毒性 / 语言 / 主题 / 意图）通过 Send 扇出并并行运行。墙钟时间 ≈ max(per-classifier)，不是求和 — 小模型边缘故事。Mock 5 ms 延迟作为 DistilBERT/MiniLM pass 的替身；inline `[ONNX SWAP-IN]` block 展示使用 `Ort::Session` 的 30 行替换。没有推理运行时依赖。 |
+
+示例 11 从源码构建 Raylib，在 Linux 上需要 X11 和 OpenGL 开发头文件（例如 `libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev`）。文本使用通过 fontconfig 或常见安装路径找到的系统 TrueType/OpenType 字体。可用 `NEOGRAPH_CHAT_FONT`，以及可选的 `NEOGRAPH_CHAT_BOLD_FONT` 和 `NEOGRAPH_CHAT_MONO_FONT` 指定文件；`font.ttc#N` 选择字体集合中的第 N 个 face。按键：Enter 发送，Esc 清空输入，Ctrl+V 粘贴，Ctrl+Q 退出；回复流式输出期间，Send 按钮变为 Stop。
 
 示例 35 要求通过 `GHIDRA_MCP_BRIDGE` 指定 `bridge_mcp_ghidra.py` 脚本路径。`GHIDRA_MCP_PYTHON` 选择解释器，默认值为 `python3`；`GHIDRA_SERVER_URL` 选择插件端点，默认值为 `http://127.0.0.1:18080/`。运行前须启动 Ghidra 及其 MCP 插件。此示例还需要 `OPENROUTER_API_KEY`，并调用付费模型。上面的分数是历史观测值，不是新的运行结果，也不是普遍的准确率保证。
 

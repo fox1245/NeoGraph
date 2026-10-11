@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=c647e2de2645fa72af2e130f78afd2e39578470154e591de344bc8f826b4dd26 -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=130e5724d5cf9649044dd1d6ef65259b930d91dbcb457014c00980389b9ab927 -->
 # C++ API 예제
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
@@ -222,9 +222,11 @@ OPENROUTER_API_KEY=sk-or-...
 
 | # |파일|설정|그것이 보여주는 것|
 |---|------|-------|---------------|
-| 11 |[`11_clay_chatbot.cpp`](11_clay_chatbot.cpp)|클레이 + Raylib (`-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`)|Clay/Raylib UI를 사용한 다중 회전 채팅. Pure-C++ 데스크톱 앱, NeoGraph 백엔드. 모의 또는 `--live`.|
+| 11 |[`11_clay_chatbot.cpp`](11_clay_chatbot.cpp)|Clay + Raylib (`-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`)|순수 C++ 데스크톱 다중 턴 채팅입니다. Clay가 창을 배치하고 Raylib가 그리며, 답변은 NeoGraph 에이전트에서 스트리밍됩니다. 기본은 mock이고 `--live`면 OpenRouter를 씁니다. 코드 블록, 목록, 비라틴 문자를 렌더링하며 Stop으로 답변을 취소할 수 있습니다.|
 | 35 |[`35_re_agent.cpp`](35_re_agent.cpp)|OpenRouter + Ghidra + ghidra-mcp|리버스 엔지니어링 에이전트: Ghidra로 심볼이 제거된 바이너리의 함수 이름과 요약을 복원한다. 과거 종단 간 결과는 함수 6개인 crackme에서 matched_score 0.92였다. 전체 파이프라인은 별도의 비공개 `fox1245/re-agent` 저장소에서 관리한다.|
 | 36 |[`36_classifier_fanout.cpp`](36_classifier_fanout.cpp)|오프라인|5개의 작은 "분류자"(감정/독성/언어/주제/의도)가 Send를 통해 팬아웃되어 병렬로 실행됩니다. 벽 시간 ≒ max(per-classifier)(합계 아님) — 소형 모델 에지 스토리입니다. DistilBERT/MiniLM 패스에 대한 5ms 지연 대기 시간을 모의합니다. 인라인 `[ONNX SWAP-IN]` 블록은 `Ort::Session`를 사용한 30라인 대체를 보여줍니다. 추론 런타임 종속성이 없습니다.|
+
+예제 11은 Raylib를 소스에서 빌드하므로 Linux에서는 X11과 OpenGL 개발 헤더가 필요합니다(예: `libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev`). 텍스트는 fontconfig나 일반적인 설치 경로에서 찾은 시스템 TrueType/OpenType 글꼴을 사용합니다. `NEOGRAPH_CHAT_FONT`와, 필요하면 `NEOGRAPH_CHAT_BOLD_FONT`, `NEOGRAPH_CHAT_MONO_FONT`로 파일을 지정할 수 있으며, `font.ttc#N`은 글꼴 모음의 N번째 face를 고릅니다. 키: Enter 전송, Esc 입력 지우기, Ctrl+V 붙여넣기, Ctrl+Q 종료이며, 답변이 스트리밍되는 동안 Send 버튼은 Stop이 됩니다.
 
 예제 35에는 `bridge_mcp_ghidra.py` 스크립트 경로를 지정하는 `GHIDRA_MCP_BRIDGE`가 필요하다. `GHIDRA_MCP_PYTHON`은 인터프리터를 선택하며 기본값은 `python3`이다. `GHIDRA_SERVER_URL`은 플러그인 엔드포인트를 선택하며 기본값은 `http://127.0.0.1:18080/`이다. 실행 전에 Ghidra와 MCP 플러그인을 시작해야 한다. 이 예제는 `OPENROUTER_API_KEY`도 필요하며 유료 모델을 호출한다. 위 점수는 과거 관측값으로, 새 실행 결과나 일반적인 정확도 보장이 아니다.
 

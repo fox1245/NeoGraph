@@ -229,9 +229,11 @@ Built only with `-DNEOGRAPH_BUILD_GRPC=ON` (needs `grpc++` / `protoc`).
 
 | # | File | Setup | What it shows |
 |---|------|-------|---------------|
-| 11 | [`11_clay_chatbot.cpp`](11_clay_chatbot.cpp) | Clay + Raylib (`-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`) | Multi-turn chat with a Clay/Raylib UI. Pure-C++ desktop app, NeoGraph backend. Mock or `--live`. |
+| 11 | [`11_clay_chatbot.cpp`](11_clay_chatbot.cpp) | Clay + Raylib (`-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`) | Multi-turn desktop chat in pure C++: Clay lays out the window, Raylib draws it, and replies stream in from a NeoGraph agent. Mock by default, `--live` for OpenRouter. Renders code blocks, lists and non-Latin text; Stop cancels a reply. |
 | 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | OpenRouter + Ghidra + ghidra-mcp | Reverse-engineering agent — recovers function names + summaries from a stripped binary via Ghidra. Historical end-to-end result: matched_score 0.92 on a 6-function crackme. The full pipeline is maintained separately in the private `fox1245/re-agent` repository. |
 | 36 | [`36_classifier_fanout.cpp`](36_classifier_fanout.cpp) | offline | Five small "classifiers" (sentiment / toxicity / language / topic / intent) fan out via Send and run in parallel. Wall time ≈ max(per-classifier), not sum — the small-model edge story. Mock 5 ms latency stand-in for a DistilBERT/MiniLM pass; inline `[ONNX SWAP-IN]` block shows the 30-line replacement using `Ort::Session`. No inference runtime dependency. |
+
+Example 11 builds Raylib from source; on Linux that needs the X11 and OpenGL development headers (for example `libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev`). Text uses a system TrueType/OpenType font found through fontconfig or common install paths. Set `NEOGRAPH_CHAT_FONT`, and optionally `NEOGRAPH_CHAT_BOLD_FONT` and `NEOGRAPH_CHAT_MONO_FONT`, to choose the files; `font.ttc#N` selects face N of a collection. Keys: Enter sends, Esc clears the input, Ctrl+V pastes, Ctrl+Q quits, and while a reply streams the Send button becomes Stop.
 
 Example 35 requires `GHIDRA_MCP_BRIDGE` to name your `bridge_mcp_ghidra.py` script. `GHIDRA_MCP_PYTHON` selects its interpreter (default `python3`); `GHIDRA_SERVER_URL` selects the plugin endpoint (default `http://127.0.0.1:18080/`). Start Ghidra and its MCP plugin before running the example. The showcase also requires `OPENROUTER_API_KEY` and makes paid model calls; the historical score above is not a new run or a general accuracy guarantee.
 

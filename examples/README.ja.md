@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=c647e2de2645fa72af2e130f78afd2e39578470154e591de344bc8f826b4dd26 -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=130e5724d5cf9649044dd1d6ef65259b930d91dbcb457014c00980389b9ab927 -->
 # C++ API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -221,9 +221,11 @@ OPENROUTER_API_KEY=sk-or-...
 
 | # |ファイル |セットアップ |それが示すもの |
 |---|------|-------|---------------|
-| 11 | [`11_clay_chatbot.cpp`](11_clay_chatbot.cpp) |クレイ+レイリブ (`-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`) | Clay/Raylib UI を使用したマルチターン チャット。 Pure-C++ デスクトップ アプリ、NeoGraph バックエンド。モックまたは`--live`。 |
+| 11 | [`11_clay_chatbot.cpp`](11_clay_chatbot.cpp) | Clay + Raylib (`-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`) | 純粋な C++ のデスクトップ マルチターン チャットです。Clay がウィンドウをレイアウトし、Raylib が描画し、応答は NeoGraph エージェントからストリーミングされます。既定は mock、`--live` で OpenRouter を使います。コード ブロック、リスト、非ラテン文字を描画し、Stop で応答を取り消せます。 |
 | 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | OpenRouter + Ghidra + ghidra-mcp | リバースエンジニアリングエージェント。Ghidra でシンボルを除去したバイナリの関数名と概要を復元します。過去のエンドツーエンド結果は、6 関数の crackme で matched_score 0.92 でした。完全なパイプラインは別の非公開リポジトリ `fox1245/re-agent` で管理されています。 |
 | 36 | [`36_classifier_fanout.cpp`](36_classifier_fanout.cpp) |オフライン | 5 つの小さな「分類子」 (感情 / 毒性 / 言語 / トピック / 意図) が Send を介して展開され、並行して実行されます。経過時間 ≈ 合計ではなく最大 (分類子ごと) — 小規模モデルのエッジ ストーリー。 DistilBERT/MiniLM パスの 5 ms レイテンシの代用を模擬します。インライン `[ONNX SWAP-IN]` ブロックは、`Ort::Session` を使用した 30 行の置換を示します。推論ランタイムの依存関係はありません。 |
+
+例 11 は Raylib をソースからビルドするため、Linux では X11 と OpenGL の開発ヘッダーが必要です(例: `libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev`)。テキストには fontconfig または一般的なインストール パスで見つかったシステムの TrueType/OpenType フォントを使います。`NEOGRAPH_CHAT_FONT` と、必要に応じて `NEOGRAPH_CHAT_BOLD_FONT`、`NEOGRAPH_CHAT_MONO_FONT` でファイルを指定でき、`font.ttc#N` はフォント コレクションの N 番目の face を選びます。キー: Enter で送信、Esc で入力を消去、Ctrl+V で貼り付け、Ctrl+Q で終了。応答のストリーミング中は Send ボタンが Stop になります。
 
 例 35 には、`bridge_mcp_ghidra.py` スクリプトのパスを指定する `GHIDRA_MCP_BRIDGE` が必要です。`GHIDRA_MCP_PYTHON` はインタープリターを選択し、既定値は `python3` です。`GHIDRA_SERVER_URL` はプラグインのエンドポイントを選択し、既定値は `http://127.0.0.1:18080/` です。実行前に Ghidra と MCP プラグインを起動してください。この例には `OPENROUTER_API_KEY` も必要で、有料モデルを呼び出します。上のスコアは過去の観測値であり、新しい実行結果や一般的な精度保証ではありません。
 
