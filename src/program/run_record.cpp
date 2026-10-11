@@ -325,6 +325,12 @@ void validate(const ProgramRunRecordData& d) {
         }
     }
     if (!d.logical_run_id.empty()) detail::validate_token(d.logical_run_id, "Program logical run");
+    if (d.attempt_resume &&
+        (d.continuation.state != ContinuationState::Running || !d.exact_checkpoint ||
+         d.attempt_resume->checkpoint_id != d.exact_checkpoint->checkpoint_id)) {
+        throw std::invalid_argument(
+            "Program attempt resume value must bind the running attempt's exact checkpoint");
+    }
     std::set<std::string, std::less<>> child_ids;
     for (const auto& child : d.children) {
         detail::validate_token(child.child_run_id, "Program child run_id");
@@ -414,6 +420,10 @@ json body(const ProgramRunRecordData& d, std::uint32_t schema_version) {
             ? json(*d.exact_checkpoint_content_id) : json(nullptr);
     }
     if (!d.logical_run_id.empty()) value["logical_run_id"] = d.logical_run_id;
+    if (d.attempt_resume) {
+        value["attempt_resume"] = json{{"checkpoint_id", d.attempt_resume->checkpoint_id},
+                                       {"value", d.attempt_resume->value}};
+    }
     if (!d.children.empty()) {
         value["children"] = json::array();
         for (const auto& child : d.children) value["children"].push_back(child_body(child));
@@ -432,6 +442,10 @@ bool ProgramPersistedInvocation::operator==(const ProgramPersistedInvocation& ot
     return granted_budget == other.granted_budget && trace_id == other.trace_id &&
            parent_run_id == other.parent_run_id && child_depth == other.child_depth &&
            detail::canonical_json_bytes(input) == detail::canonical_json_bytes(other.input);
+}
+bool ProgramAttemptResume::operator==(const ProgramAttemptResume& other) const {
+    return checkpoint_id == other.checkpoint_id &&
+           detail::canonical_json_bytes(value) == detail::canonical_json_bytes(other.value);
 }
 bool ProgramChildRecord::operator==(const ProgramChildRecord& other) const {
     return detail::canonical_json_bytes(child_body(*this)) ==
@@ -495,12 +509,15 @@ ProgramRunRecord ProgramRunRecord::create(ProgramRunRecordData d) {
         !detail::is_sha256_identity(*d.recorded_binding_set_fingerprint)) {
         throw std::invalid_argument("Recorded binding set fingerprint must be a sha256 identity");
     }
+    // Each version is used only by the records that need it, so the ids of
+    // all other records stay unchanged.
     const auto schema =
-        !d.logical_run_id.empty() ||
+        d.attempt_resume ? STORAGE_SCHEMA_VERSION
+        : !d.logical_run_id.empty() ||
                 std::any_of(d.children.begin(), d.children.end(),
                             [](const auto& child) { return child.terminal_generation != 0; })
-            ? STORAGE_SCHEMA_VERSION
-            : 3;
+            ? 4U
+            : 3U;
     return ProgramRunRecord(std::make_shared<const Impl>(std::move(d), schema));
 }
 ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
@@ -515,11 +532,13 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
         throw std::invalid_argument("Stored ProgramRunRecord has unknown format");
     }
     const auto schema_version = r32(v, "storage_schema_version");
-    if (schema_version != 2 && schema_version != 3 && schema_version != STORAGE_SCHEMA_VERSION) {
+    if (schema_version < 2 || schema_version > STORAGE_SCHEMA_VERSION) {
         throw std::invalid_argument("Stored ProgramRunRecord schema version is unsupported");
     }
     if (schema_version < 4 && v.contains("logical_run_id"))
         throw std::invalid_argument("Legacy run cannot carry logical identity");
+    if (schema_version < 5 && v.contains("attempt_resume"))
+        throw std::invalid_argument("Legacy run cannot carry an attempt resume value");
     if (schema_version == 2) {
         detail::reject_unknown_fields(
             v, "Stored ProgramRunRecord",
@@ -561,7 +580,8 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
                                        "created_at_ms",
                                        "updated_at_ms",
                                        "children",
-                                       "logical_run_id"});
+                                       "logical_run_id",
+                                       "attempt_resume"});
     }
     ProgramRunRecordData d;
     d.owner_scope         = rs(v, "owner_scope");
@@ -572,6 +592,13 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
     d.invocation = RunInvocation::parse(detail::canonical_json_bytes(rv(v, "invocation")));
     d.child_depth = r32(v, "child_depth");
     if (v.contains("logical_run_id")) d.logical_run_id = rs(v, "logical_run_id");
+    if (v.contains("attempt_resume")) {
+        const auto& resume = rv(v, "attempt_resume");
+        if (!resume.is_object())
+            throw std::invalid_argument("Program attempt resume must be an object");
+        detail::reject_unknown_fields(resume, "Program attempt resume", {"checkpoint_id", "value"});
+        d.attempt_resume = ProgramAttemptResume{rs(resume, "checkpoint_id"), rv(resume, "value")};
+    }
     const auto& continuation = rv(v, "continuation");
     if (!continuation.is_object()) {
         throw std::invalid_argument("Program continuation must be an object");
@@ -661,6 +688,9 @@ std::optional<CoreCheckpointIdentity> ProgramRunRecord::exact_checkpoint() const
 const std::optional<std::string>&
 ProgramRunRecord::exact_checkpoint_content_id() const noexcept {
     return impl_->data.exact_checkpoint_content_id;
+}
+const std::optional<ProgramAttemptResume>& ProgramRunRecord::attempt_resume() const noexcept {
+    return impl_->data.attempt_resume;
 }
 std::optional<ProgramPendingInput> ProgramRunRecord::pending_input() const {
     return impl_->data.pending_input;

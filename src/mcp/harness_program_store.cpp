@@ -583,6 +583,10 @@ program::JournalAppendResult HarnessBoundedProgramJournal::compare_append(
     if (record.core_checkpoint == current->exact_checkpoint()) {
         next_data.exact_checkpoint_content_id =
             current->exact_checkpoint_content_id();
+        // A running resumed attempt keeps the value it resumes with (#377).
+        if (record.continuation.state == program::ContinuationState::Running &&
+            record.continuation.attempt == current->continuation().attempt)
+            next_data.attempt_resume = current->attempt_resume();
     }
     next_data.pending_input       = current->pending_input();
     next_data.pending_effect      = current->pending_effect();

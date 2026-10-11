@@ -30,6 +30,19 @@ struct ProgramPersistedInvocation {
     NEOGRAPH_PROGRAM_API bool operator==(const ProgramPersistedInvocation&) const;
 };
 
+/**
+ * The value with which a running attempt resumes its exact checkpoint: the
+ * resume or reconciliation value for a define()-only Program, the pending
+ * callCore's resume value for a main() Program. Recovery of the attempt resumes
+ * the same checkpoint with the same value (#377).
+ */
+struct ProgramAttemptResume {
+    std::string checkpoint_id;
+    json        value;
+
+    NEOGRAPH_PROGRAM_API bool operator==(const ProgramAttemptResume&) const;
+};
+
 enum class ProgramChildState : std::uint8_t {
     Publishing,
     Dispatched,
@@ -84,12 +97,15 @@ struct ProgramRunRecordData {
     std::int64_t                          updated_at_ms    = 0;
     /// Stable agent identity across replacement generations; empty means run_id.
     std::string logical_run_id;
+    /// Present only while a resumed attempt runs from exact_checkpoint.
+    std::optional<ProgramAttemptResume> attempt_resume;
 };
 
 /** Deep-owned, content-addressed run snapshot used for reconnect and CAS publication. */
 class NEOGRAPH_PROGRAM_API ProgramRunRecord {
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 4;
+    /// Version 5 adds attempt_resume; records without it keep version 3 or 4.
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 5;
 
     static ProgramRunRecord create(ProgramRunRecordData data);
     static ProgramRunRecord parse(std::string_view stored_bytes);
@@ -106,6 +122,7 @@ public:
     RunBudget remaining_budget() const noexcept;
     std::optional<CoreCheckpointIdentity> exact_checkpoint() const;
     const std::optional<std::string>& exact_checkpoint_content_id() const noexcept;
+    const std::optional<ProgramAttemptResume>& attempt_resume() const noexcept;
     std::optional<ProgramPendingInput> pending_input() const;
     std::optional<ProgramPendingEffect> pending_effect() const;
     std::optional<ProgramResult> terminal_result() const;

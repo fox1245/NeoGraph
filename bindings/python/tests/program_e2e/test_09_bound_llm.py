@@ -342,6 +342,48 @@ def test_a_call_journaled_before_a_crash_is_charged_once_after_recovery(peer, tm
     assert outcome["remaining"] == 1_000_000 - 1235
 
 
+# A resume value that feeds the request: Core appends it to "messages" as a
+# user turn, so recovery with any other value would build a different request
+# (#377).
+ANSWER = "Answer in one word."
+
+_CRASHING_WITH_A_RESUME_VALUE = _RECOVERY_SETUP + r'''
+version = s.admit(host, TEXT, BUDGET, "chat.js")
+paused = host.run(version, {"topic": "run input"}, BUDGET)
+print(json.dumps({"status": str(paused.status), "run_id": paused.run_id}), flush=True)
+os.environ["E2E_DIE"] = "1"
+done = host.resume(paused.run_id, sys.argv[4]).wait()
+print(json.dumps({"unreachable": s.describe(done)}), flush=True)
+'''
+
+
+@slow
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="NativeArchive custody needs an owner-only protected directory")
+def test_recovery_of_a_resumed_attempt_rebuilds_the_journaled_request(peer, tmp_path):
+    store = str(tmp_path / "runs")
+    crashed = run_python(_CRASHING_WITH_A_RESUME_VALUE, peer.base_url, store, "first", ANSWER,
+                         timeout=120)
+    assert crashed.returncode == 9, (crashed.returncode, crashed.stdout, crashed.stderr[-2000:])
+    lines = [json.loads(line) for line in crashed.stdout.splitlines() if line.startswith("{")]
+    assert lines[0]["status"] == "ProgramTerminalStatus.Interrupted"
+    assert lines[-1] == {"dying": True}
+    [sent] = peer.requests
+    assert ANSWER in json.dumps(sent["body"]["messages"][-1])
+
+    recovered = run_python(_RECOVERING_PROCESS, peer.base_url, store, "again", lines[0]["run_id"],
+                           timeout=120)
+    assert recovered.returncode == 0, recovered.stderr[-2000:]
+    outcome = last_json_line(recovered.stdout)
+    # Recovery resumes with the same value, so the journal recognises the
+    # request and replays its reply: no binding conflict, nothing resent.
+    assert outcome["status"] == "ProgramTerminalStatus.Completed", outcome["failure"]
+    assert outcome["attempt"] == 2
+    assert peer.request_count() == 1, "the peer saw exactly the requests of an uncrashed run"
+    assert outcome["records"] == [{"evidence": "reported", "microunits": 1235, "replayed": True}]
+    assert outcome["monetary"] == 1235
+
+
 # ---------------------------------------------------------------------------
 # Interrupt and resume: each provider call's tokens are charged once (#378)
 # ---------------------------------------------------------------------------

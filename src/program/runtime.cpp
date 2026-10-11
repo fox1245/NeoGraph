@@ -162,6 +162,7 @@ ProgramTransitionPublication continuing_running_publication(
     data.remaining_budget = remaining;
     data.exact_checkpoint = previous.exact_checkpoint();
     data.exact_checkpoint_content_id = previous.exact_checkpoint_content_id();
+    data.attempt_resume = previous.attempt_resume();
     data.pending_input = previous.pending_input();
     data.pending_effect = previous.pending_effect();
     data.terminal_result = previous.terminal_result();
@@ -1371,6 +1372,7 @@ ChildRecordPublication publish_child_record_unlocked(
         data.remaining_budget                 = previous->remaining_budget();
         data.exact_checkpoint                 = previous->exact_checkpoint();
         data.exact_checkpoint_content_id      = previous->exact_checkpoint_content_id();
+        data.attempt_resume                   = previous->attempt_resume();
         data.pending_input                    = previous->pending_input();
         data.pending_effect                   = previous->pending_effect();
         data.terminal_result                  = previous->terminal_result();
@@ -1517,7 +1519,8 @@ ProgramTransitionPublication initial_publication(
     std::optional<ProgramPendingEffect>     pending_effect        = std::nullopt,
     std::optional<std::int64_t>             timestamp             = std::nullopt,
     std::optional<std::string>              checkpoint_content_id = std::nullopt,
-    std::vector<ProgramChildRecord>         inherited_children    = {}) {
+    std::vector<ProgramChildRecord>         inherited_children    = {},
+    std::optional<ProgramAttemptResume>     attempt_resume        = std::nullopt) {
     auto journal = initial_record(control, checkpoint, timestamp);
     ProgramRunRecordData data;
     data.owner_scope         = control.owner_scope;
@@ -1533,6 +1536,7 @@ ProgramTransitionPublication initial_publication(
     data.remaining_budget    = control.granted_budget;
     data.exact_checkpoint    = std::move(checkpoint);
     data.exact_checkpoint_content_id = std::move(checkpoint_content_id);
+    data.attempt_resume      = std::move(attempt_resume);
     data.pending_input       = std::move(pending_input);
     data.pending_effect      = std::move(pending_effect);
     if (fork_receipt) {
@@ -3631,6 +3635,7 @@ void RunControl::release_graph_migration(std::uint64_t request_id) noexcept {
                     data.exact_checkpoint = previous->exact_checkpoint();
                     data.exact_checkpoint_content_id =
                         previous->exact_checkpoint_content_id();
+                    data.attempt_resume = previous->attempt_resume();
                     data.pending_input = previous->pending_input();
                     data.pending_effect = previous->pending_effect();
                     data.terminal_result = previous->terminal_result();
@@ -3779,6 +3784,7 @@ bool RunControl::consume_dynamic_compile() {
         data.remaining_budget                 = remaining;
         data.exact_checkpoint                 = previous->exact_checkpoint();
         data.exact_checkpoint_content_id      = previous->exact_checkpoint_content_id();
+        data.attempt_resume                   = previous->attempt_resume();
         data.pending_input                    = previous->pending_input();
         data.pending_effect                   = previous->pending_effect();
         data.terminal_result                  = previous->terminal_result();
@@ -3902,6 +3908,7 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
         data.exact_checkpoint                 = latest_command_checkpoint;
         if (latest_command_checkpoint == previous->exact_checkpoint()) {
             data.exact_checkpoint_content_id = previous->exact_checkpoint_content_id();
+            data.attempt_resume = previous->attempt_resume();
         }
         data.pending_input                    = previous->pending_input();
         data.pending_effect                   = previous->pending_effect();
@@ -6097,9 +6104,16 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
         impl_->config.require_core_provider_call_broker);
     const auto started =
         control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{invocation.budget});
+    // The fork's first attempt resumes the cloned checkpoint with the resume
+    // value; its recovery must too (#377).
+    auto fork_resume = control->materialized->bundle.control_source()
+        ? std::optional<ProgramAttemptResume>{}
+        : std::optional<ProgramAttemptResume>{
+              ProgramAttemptResume{target_checkpoint.checkpoint_id, resume_value.value}};
     auto publication =
         initial_publication(*control, started, target_checkpoint, receipt, std::nullopt,
-                            std::move(fork_pending_input), std::move(fork_pending_effect));
+                            std::move(fork_pending_input), std::move(fork_pending_effect),
+                            std::nullopt, std::nullopt, {}, std::move(fork_resume));
     if (!source_contexts.empty()) {
         publication.context_publication = transfer_context_to_run(source_contexts.back(), run_id);
     }
@@ -7955,9 +7969,20 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         }
         auto registration = impl_->register_control(control, successor_generation);
         if (!registration.inserted) return ProgramHandle(std::move(registration.control));
-        spawn_run_attempt(impl_->pool, control, record->invocation().input,
+        // A resumed attempt resumes its checkpoint with the value it was
+        // resumed with, never with the run input (#377).
+        const auto& attempt_resume = record->attempt_resume();
+        const bool  resumed_attempt = attempt_resume && resume_checkpoint_id &&
+                                     attempt_resume->checkpoint_id == *resume_checkpoint_id;
+        const bool  control_source = control->materialized->bundle.control_source().has_value();
+        spawn_run_attempt(impl_->pool, control,
+                          resumed_attempt && !control_source ? attempt_resume->value
+                                                             : record->invocation().input,
                           std::move(resume_checkpoint_id), impl_->config.host_admission,
-                          impl_->config.host_admission_resolver);
+                          impl_->config.host_admission_resolver,
+                          resumed_attempt && control_source
+                              ? std::optional<json>{attempt_resume->value}
+                              : std::nullopt);
         return ProgramHandle(std::move(control));
     }
     const bool requires_result =
@@ -8289,6 +8314,13 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     }
     data.pending_input                    = std::move(pending_input);
     data.pending_effect                   = std::move(pending_effect);
+    // The value this attempt resumes its checkpoint with, durable before the
+    // attempt starts, so that recovery continues the same attempt (#377).
+    if (javascript_commands.empty() ||
+        (javascript_pending && javascript_pending->core_resume_operation_id &&
+         !reconcile_javascript_command)) {
+        data.attempt_resume = ProgramAttemptResume{checkpoint.checkpoint_id, resume_value.value};
+    }
     data.fork_receipt                     = previous->fork_receipt();
     data.fork_source_run_id               = previous->fork_source_run_id();
     data.fork_source_program_version_id   = previous->fork_source_program_version_id();
@@ -8634,6 +8666,8 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
     }
     data.pending_input                    = previous->pending_input();
     data.pending_effect                   = update.value;
+    if (completed && (javascript_commands.empty() || resume_javascript_core))
+        data.attempt_resume = ProgramAttemptResume{checkpoint.checkpoint_id, *resolution.result};
     data.terminal_result                  = terminal;
     data.fork_receipt                     = previous->fork_receipt();
     data.fork_source_run_id               = previous->fork_source_run_id();

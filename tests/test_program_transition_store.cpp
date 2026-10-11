@@ -1371,6 +1371,51 @@ TEST(ProgramTransitionStoreTest, CanonicalValuesRejectTamper) {
     EXPECT_THROW((void)ProgramRunRecord::parse(run_bytes), std::invalid_argument);
 }
 
+TEST(ProgramTransitionStoreTest, AttemptResumeValueRoundTripsAndLeavesOtherRecordIdsUnchanged) {
+    // #377: only a record that carries the value of a resumed attempt uses
+    // storage schema 5; every other record keeps its schema and its id.
+    const auto start      = start_publication();
+    const auto plain      = start.run_record.serialize_canonical();
+    const auto has_schema = [](const std::string& bytes, int version) {
+        return bytes.find("\"storage_schema_version\":" + std::to_string(version)) !=
+               std::string::npos;
+    };
+    EXPECT_TRUE(has_schema(plain, 3));
+    EXPECT_EQ(plain.find("attempt_resume"), std::string::npos);
+    EXPECT_EQ(ProgramRunRecord::parse(plain).id(), start.run_record.id());
+    EXPECT_FALSE(ProgramRunRecord::parse(plain).attempt_resume());
+
+    auto data             = copy_run_record_data(start.run_record);
+    data.exact_checkpoint = checkpoint();
+    const auto without    = ProgramRunRecord::create(data);
+    data.attempt_resume =
+        ProgramAttemptResume{checkpoint().checkpoint_id, json{{"approved", true}}};
+    const auto resumed = ProgramRunRecord::create(data);
+    const auto bytes   = resumed.serialize_canonical();
+    EXPECT_TRUE(has_schema(without.serialize_canonical(), 3));
+    EXPECT_TRUE(has_schema(bytes, 5));
+    EXPECT_NE(resumed.id(), without.id());
+    const auto parsed = ProgramRunRecord::parse(bytes);
+    EXPECT_EQ(parsed.id(), resumed.id());
+    EXPECT_EQ(parsed.serialize_canonical(), bytes);
+    ASSERT_TRUE(parsed.attempt_resume());
+    EXPECT_EQ(*parsed.attempt_resume(), *data.attempt_resume);
+
+    // A legacy record cannot carry the value.
+    auto legacy = bytes;
+    legacy.replace(legacy.find("\"storage_schema_version\":5"), 26,
+                   "\"storage_schema_version\":4");
+    EXPECT_THROW((void)ProgramRunRecord::parse(legacy), std::invalid_argument);
+
+    // The value binds the running attempt's exact checkpoint.
+    auto other_checkpoint = data;
+    other_checkpoint.attempt_resume->checkpoint_id = "checkpoint-2";
+    EXPECT_THROW((void)ProgramRunRecord::create(other_checkpoint), std::invalid_argument);
+    auto no_checkpoint             = data;
+    no_checkpoint.exact_checkpoint = std::nullopt;
+    EXPECT_THROW((void)ProgramRunRecord::create(no_checkpoint), std::invalid_argument);
+}
+
 TEST(ProgramTransitionStoreTest, PublicationCanonicalWireMatchesReferenceTree) {
     const auto start       = start_publication();
     const auto publication = interrupted_effect_publication(start);

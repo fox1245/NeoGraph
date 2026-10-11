@@ -1,5 +1,7 @@
 """Scenario 2: human-in-the-loop interrupt and resume."""
 
+import json
+
 import pytest
 
 import neograph_engine as ng
@@ -230,3 +232,94 @@ def test_second_interrupted_call_core_in_main_resumes():
                                    "ProgramTerminalStatus.Interrupted",
                                    "ProgramTerminalStatus.Completed"], outcome
     assert outcome["output"] == {"first": "one", "second": "two"}, outcome
+
+
+# ---------------------------------------------------------------------------
+# Crash during a resumed attempt: recovery continues it with the resume value
+# (#377). The run input and the resume value differ, so recovery with the
+# wrong one is visible in the "answer" channel.
+# ---------------------------------------------------------------------------
+
+_RESUMED_CRASH_SETUP = r'''
+import json, os, sys
+import neograph_engine as ng
+from program_e2e import support as s
+
+store, kind = sys.argv[1], sys.argv[2]
+
+
+class DieOnce(ng.GraphNode):
+    """Kills its process when it runs in the crashing process."""
+
+    def __init__(self, name):
+        super().__init__()
+        self._name = name
+
+    def get_name(self):
+        return self._name
+
+    def run(self, input):
+        if os.environ.get("E2E_DIE") == "1":
+            print(json.dumps({"dying": True}), flush=True)
+            os._exit(9)
+        return [ng.ChannelWrite("trace", [self._name])]
+
+
+ng.NodeFactory.register_type("e2e.die_once", lambda name, config, ctx: DieOnce(name))
+GRAPH = s.define_graph("""
+    g.node("draft", {type: "e2e.step"});
+    g.node("deploy", {type: "e2e.step", record_resume: true});
+    g.node("after", {type: "e2e.die_once"});
+    g.entry("draft");
+    g.edge("draft", "deploy");
+    g.edge("deploy", "after");
+    g.interruptBefore("deploy");
+    g.exit("after");
+""", name="release")
+TEXT = GRAPH if kind == "define" else s.with_main(GRAPH, """
+    const reply = yield ng.callCore("release", {topic: input.topic}, "release");
+    return {answer: reply.answer, trace: reply.trace};
+""")
+# Child budgets make a define() run recover from its checkpoint after a crash.
+CEILING = s.ceiling(max_child_depth=1, max_total_children=1)
+BUDGET = s.budget(max_child_depth=1, max_total_children=1)
+host = s.make_host("tenant:resumed-crash",
+                   registry=s.build_registry(extra_node_types=("e2e.die_once",)),
+                   budget_ceiling=CEILING, sqlite_directory=store)
+version = s.admit(host, TEXT, BUDGET)
+'''
+
+_RESUMED_CRASH_FIRST = _RESUMED_CRASH_SETUP + r'''
+paused = host.run(version, {"topic": "original input"}, BUDGET)
+print(json.dumps({"status": str(paused.status), "run_id": paused.run_id}), flush=True)
+os.environ["E2E_DIE"] = "1"
+done = host.resume(paused.run_id, {"approved": True}).wait()
+print(json.dumps({"unreachable": s.describe(done)}), flush=True)
+'''
+
+_RESUMED_CRASH_RECOVERY = _RESUMED_CRASH_SETUP + r'''
+result = host.reconnect(sys.argv[3]).wait()
+answer = (result.output or {}).get("answer") if kind == "main" else s.channel(result, "answer")
+print(json.dumps({"status": str(result.status), "attempt": result.attempt, "answer": answer,
+                  "failure": s.describe(result)}), flush=True)
+'''
+
+
+@slow
+@pytest.mark.parametrize("kind", ["define", "main"])
+def test_recovery_of_a_resumed_attempt_keeps_its_resume_value(kind, tmp_path):
+    store = str(tmp_path / "runs")
+    crashed = run_python(_RESUMED_CRASH_FIRST, store, kind)
+    assert crashed.returncode == 9, (crashed.returncode, crashed.stdout, crashed.stderr[-2000:])
+    lines = [json.loads(line) for line in crashed.stdout.splitlines() if line.startswith("{")]
+    assert lines[0]["status"] == "ProgramTerminalStatus.Interrupted"
+    assert lines[-1] == {"dying": True}
+
+    recovered = run_python(_RESUMED_CRASH_RECOVERY, store, kind, lines[0]["run_id"])
+    assert recovered.returncode == 0, recovered.stderr[-2000:]
+    outcome = last_json_line(recovered.stdout)
+    assert outcome["status"] == "ProgramTerminalStatus.Completed", outcome["failure"]
+    assert outcome["attempt"] == 2
+    # The recovered attempt resumed "deploy" with the resume value, as the
+    # attempt that crashed did, not with the run input.
+    assert outcome["answer"] == {"approved": True}, outcome

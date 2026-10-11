@@ -177,6 +177,10 @@ struct Shared {
     bool interrupt_after_call = false;
     bool interrupt_on_uncertain = false;
     bool interrupt_before_call = false;
+    // The prompt carries the resume value, so the request depends on it.
+    bool prompt_from_resume = false;
+    // Runs after the provider call returned and its outcome was journaled.
+    std::function<void()> after_call;
 
     std::vector<Observed> snapshot() {
         std::lock_guard lock(mutex);
@@ -263,7 +267,10 @@ public:
     asio::awaitable<graph::NodeOutput> run(graph::NodeInput in) override {
         if (shared_->interrupt_before_call && !in.ctx.resume_value)
             throw graph::NodeInterrupt("approve provider dispatch", json{{"request", "approve"}});
-        auto request = neograph::test::request(shared_->node_model, shared_->node_prompt);
+        auto prompt = shared_->node_prompt;
+        if (shared_->prompt_from_resume && in.ctx.resume_value)
+            prompt += "|" + in.ctx.resume_value->dump();
+        auto request = neograph::test::request(shared_->node_model, prompt);
         std::get<sp::chat::Request>(request.payload).max_output_tokens = 1;
         const auto broker = graph::provider_call_broker(in.ctx);
         if (!broker) throw std::runtime_error("Program provider broker is absent");
@@ -280,6 +287,7 @@ public:
             throw;
         }
         graph::record_usage(in.ctx, result);
+        if (shared_->after_call) shared_->after_call();
         if (shared_->interrupt_after_call && !in.ctx.resume_value)
             throw graph::NodeInterrupt("approve model output", json{{"request", "approve"}});
         graph::NodeOutput output;
@@ -959,6 +967,64 @@ TEST(ProgramProviderJournalRuntime, CrashBetweenMarkerAndOutcomeIsNeverRedispatc
         << failure_text(recovered);
     EXPECT_EQ(recovery->transport.load(), 0) << "recovery must not send the unconfirmed request again";
     EXPECT_EQ(recovery->tool_executions.load(), 0);
+    EXPECT_TRUE(same_rows(rows(image.provider_db()), crashed));
+}
+
+TEST(ProgramProviderJournalRuntime, RecoveredResumedAttemptRebuildsItsRequestFromTheResumeValue) {
+    // #377: the resume value shapes the request. Recovery of the resumed
+    // attempt resumes with the same value, so it rebuilds the journaled
+    // request and replays its reply instead of failing on a binding conflict.
+    TempDir files("resumed-crash");
+    TempDir image("resumed-crash-image");
+    auto shared = std::make_shared<Shared>();
+    shared->interrupt_before_call = true;
+    shared->prompt_from_resume = true;
+    shared->after_call = [&] { crash_image(files.path, image.path); };
+    Options options;
+    options.child_capable = true;
+    const std::string owner = "tenant:resumed-crash";
+    const std::string run = "resumed-crash-run";
+    const json approval{{"approved", true}};
+    const auto expected = "answer(question|" + approval.dump() + ")";
+    {
+        Wire wire(files, shared, options);
+        const auto version = wire.admit(owner, Topology::Approval);
+        const auto paused =
+            wire.runtime().run(owner, version, wire.invocation(run, "", Topology::Approval));
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_text(paused);
+        ASSERT_EQ(shared->transport.load(), 0);
+        const auto done = wire.runtime().resume(owner, run,
+            resume_after(paused, "trace-resumed-crash", approval)).wait();
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_text(done);
+        ASSERT_EQ(done.attempt(), 2U);
+        EXPECT_EQ(done.output()["channels"]["value"]["value"], expected);
+    }
+    ASSERT_EQ(shared->transport.load(), 1);
+    const auto crashed = rows(image.provider_db());
+    ASSERT_EQ(crashed.size(), 1U);
+    EXPECT_EQ(crashed[0].state, "succeeded");
+    {
+        SQLiteProgramTransitionStore transitions(image.program_db());
+        const auto record = transitions.load(owner, run);
+        ASSERT_TRUE(record);
+        EXPECT_EQ(record->continuation().state, ContinuationState::Running);
+        EXPECT_EQ(record->continuation().attempt, 2U);
+        ASSERT_TRUE(record->attempt_resume()) << "durable before the attempt started";
+        ASSERT_TRUE(record->exact_checkpoint());
+        EXPECT_EQ(record->attempt_resume()->checkpoint_id,
+                  record->exact_checkpoint()->checkpoint_id);
+        EXPECT_EQ(record->attempt_resume()->value, approval);
+    }
+
+    auto recovery = std::make_shared<Shared>();
+    recovery->interrupt_before_call = true;
+    recovery->prompt_from_resume = true;
+    Wire restarted(image, recovery, options);
+    const auto recovered = restarted.runtime().reconnect(owner, run).wait();
+    ASSERT_EQ(recovered.status(), ProgramTerminalStatus::Completed) << failure_text(recovered);
+    EXPECT_EQ(recovered.attempt(), 2U);
+    EXPECT_EQ(recovery->transport.load(), 0) << "the journaled reply was replayed, not resent";
+    EXPECT_EQ(recovered.output()["channels"]["value"]["value"], expected);
     EXPECT_TRUE(same_rows(rows(image.provider_db()), crashed));
 }
 

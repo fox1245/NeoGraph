@@ -395,6 +395,79 @@ private:
     bool complete_first_;
 };
 
+// Interrupts for a value (an input, or an effect result). Given one, it runs
+// the hook a test armed, once, then writes the value it saw. A hook that
+// blocks holds the attempt as if its process had stopped there.
+std::mutex            resumed_value_hook_mutex;
+std::function<void()> resumed_value_hook;
+
+class ResumeHookNode final : public GraphNode {
+public:
+    ResumeHookNode(std::string name, bool effect) : name_(std::move(name)), effect_(effect) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        ++interrupt_calls;
+        if (!input.ctx.resume_value) {
+            if (!effect_) throw NodeInterrupt("approval required", json{{"request", "approve"}});
+            throw NodeInterrupt(
+                "capability result required",
+                json{{"__neograph_program_pending_kind", "effect"},
+                     {"call_id", "call-effect-1"},
+                     {"result_schema", json{{"type", "object"}}},
+                     {"effect", json{{"effect_id", "effect-search-1"},
+                                     {"idempotency", "non_idempotent"},
+                                     {"tool", "search"},
+                                     {"arguments", json{{"query", "neo"}}}}},
+                     {"expires_at_unix_ms", 4102444800000ULL}});
+        }
+        std::function<void()> hook;
+        {
+            std::lock_guard lock(resumed_value_hook_mutex);
+            hook = std::exchange(resumed_value_hook, nullptr);
+        }
+        if (hook) hook();
+        NodeOutput output;
+        output.writes.push_back(ChannelWrite{"value", input.ctx.resume_value->dump()});
+        co_return output;
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+    bool        effect_;
+};
+
+// Holds the next resumed attempt inside its node until released.
+class HeldResumedAttempt {
+public:
+    HeldResumedAttempt() {
+        std::lock_guard lock(resumed_value_hook_mutex);
+        resumed_value_hook = [this] {
+            entered_.set_value();
+            released_.wait();
+        };
+    }
+    ~HeldResumedAttempt() {
+        release();
+        std::lock_guard lock(resumed_value_hook_mutex);
+        resumed_value_hook = nullptr;
+    }
+    bool entered() {
+        return entered_future_.wait_for(std::chrono::seconds(10)) == std::future_status::ready;
+    }
+    void release() {
+        if (!released_flag_.exchange(true)) release_.set_value();
+    }
+
+private:
+    std::promise<void>       entered_;
+    std::future<void>        entered_future_ = entered_.get_future();
+    std::promise<void>       release_;
+    std::shared_future<void> released_ = release_.get_future().share();
+    std::atomic<bool>        released_flag_{false};
+};
+
 // Fails when its "value" channel is "fail"; otherwise waits until cancelled.
 class ValueGatedNode final : public GraphNode {
 public:
@@ -670,6 +743,18 @@ RegistrySnapshot runtime_registry(
         },
         json{{"type", "object"}}, json::object());
 
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-resume-hook", 'c'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<ResumeHookNode>(name, false);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-resume-hook-effect", 'c'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<ResumeHookNode>(name, true);
+        },
+        json{{"type", "object"}}, json::object());
     builder.add_node(
         manifest(ExecutableKind::Node, "runtime-value-gated", 'e'),
         [](const std::string& name, const json&, const NodeContext&) {
@@ -3370,6 +3455,138 @@ TEST(ProgramRuntimeTest, ReconnectInterruptedResumesExactCheckpointOnceWithoutIn
     EXPECT_EQ(interrupt_calls.load(), 2U);
 }
 
+// #377: crash recovery of an attempt started by resume, reconcile or fork
+// resumes the attempt's checkpoint with the value that attempt was started
+// with, never with the run input. Child budgets make a define()-only run
+// recover from its checkpoint instead of fencing on a root execution lease.
+json recoverable_document(std::string node_type) {
+    auto document = program_document(std::move(node_type));
+    document["declared_budget_requirements"][7]["maximum"] = 1;
+    document["declared_budget_requirements"][8]["maximum"] = 1;
+    return document;
+}
+
+RunBudget recoverable_grant() {
+    return RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 1, 1};
+}
+
+std::string failure_detail(const ProgramResult& result) {
+    return result.failure() ? result.failure()->code + ": " + result.failure()->message + " " +
+                                  result.failure()->witness.dump()
+                            : "no failure detail";
+}
+
+TEST(ProgramRuntimeTest, RecoveryOfAResumedAttemptResumesWithItsValueNotTheRunInput) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(1);
+    const auto      version = fixture.admit_document(recoverable_document("runtime-resume-hook"));
+    const auto interrupted  = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json{{"decision", "run input"}}, recoverable_grant(),
+                           "trace-resumed-crash", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << failure_detail(interrupted);
+
+    HeldResumedAttempt held;
+    auto original = fixture.runtime->resume(
+        "tenant:runtime", interrupted.run_id(),
+        resume_for(interrupted, json{{"decision", "approved"}}, "trace-resumed-crash-resume"));
+    ASSERT_TRUE(held.entered());
+
+    // The resumed attempt stops inside its node; a fresh runtime over the
+    // same stores recovers it.
+    auto       fresh     = fixture.make_runtime();
+    const auto recovered = fresh->reconnect("tenant:runtime", interrupted.run_id()).wait();
+    ASSERT_EQ(recovered.status(), ProgramTerminalStatus::Completed) << failure_detail(recovered);
+    EXPECT_EQ(recovered.attempt(), 2U);
+    EXPECT_EQ(recovered.output()["channels"]["value"]["value"],
+              (json{{"decision", "approved"}}.dump()));
+    EXPECT_EQ(interrupt_calls.load(), 3U);
+    held.release();
+    (void)original.wait();
+}
+
+TEST(ProgramRuntimeTest, RecoveryOfAReconciledAttemptResumesWithTheReconciledResult) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(1);
+    const auto      version =
+        fixture.admit_document(recoverable_document("runtime-resume-hook-effect"));
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json{{"result", "run input"}}, recoverable_grant(),
+                           "trace-reconciled-crash", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << failure_detail(interrupted);
+    ASSERT_TRUE(interrupted.interrupt() && interrupted.interrupt()->pending_effect);
+    const auto pending = *interrupted.interrupt()->pending_effect;
+    ASSERT_EQ(fixture.runtime
+                  ->reconcile("tenant:runtime", interrupted.run_id(),
+                              ProgramEffectResolution{pending.call_id(),
+                                                      ProgramEffectReconciliation::Unknown,
+                                                      std::nullopt,
+                                                      "trace-reconciled-crash-unknown",
+                                                      {}})
+                  .wait()
+                  .status(),
+              ProgramTerminalStatus::AmbiguousEffect);
+
+    HeldResumedAttempt held;
+    auto original = fixture.runtime->reconcile(
+        "tenant:runtime", interrupted.run_id(),
+        ProgramEffectResolution{pending.call_id(), ProgramEffectReconciliation::Completed,
+                                json{{"result", "reconciled"}}, "trace-reconciled-crash-resume",
+                                {}});
+    ASSERT_TRUE(held.entered());
+
+    auto       fresh     = fixture.make_runtime();
+    const auto recovered = fresh->reconnect("tenant:runtime", interrupted.run_id()).wait();
+    ASSERT_EQ(recovered.status(), ProgramTerminalStatus::Completed) << failure_detail(recovered);
+    EXPECT_EQ(recovered.attempt(), 2U);
+    EXPECT_EQ(recovered.output()["channels"]["value"]["value"],
+              (json{{"result", "reconciled"}}.dump()));
+    held.release();
+    (void)original.wait();
+}
+
+TEST(ProgramRuntimeTest, RecoveryOfAForkedAttemptResumesWithTheForkResumeValue) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(1);
+    const auto      version = fixture.admit_document(recoverable_document("runtime-resume-hook"));
+    const auto      source  = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), recoverable_grant(), "trace-forked-crash-source", {}});
+    ASSERT_EQ(source.status(), ProgramTerminalStatus::Interrupted) << failure_detail(source);
+    ASSERT_TRUE(source.checkpoint());
+
+    RunInvocation invocation;
+    invocation.owner_scope        = "tenant:runtime";
+    invocation.agent_id           = "test-forked-crash";
+    invocation.program_version_id = version.id();
+    invocation.run_id             = "forked-crash-target";
+    invocation.budget             = source.remaining_budget();
+    invocation.input              = json{{"decision", "fork input"}};
+    invocation.message_sequence   = 1;
+    invocation.idempotency_key    = "test-forked-crash:1";
+    invocation.correlation_id     = "trace-forked-crash-target";
+    invocation.validate();
+
+    HeldResumedAttempt held;
+    auto               original = fixture.runtime->fork(
+        ExactProgramCheckpointReference{source.run_id(), source.checkpoint()->checkpoint_id},
+        invocation,
+        ProgramResume{json{{"decision", "forked"}}, "trace-forked-crash-resume", {},
+                      pending_call_id(source)});
+    ASSERT_TRUE(held.entered());
+
+    auto       fresh     = fixture.make_runtime();
+    const auto recovered = fresh->reconnect("tenant:runtime", "forked-crash-target").wait();
+    ASSERT_EQ(recovered.status(), ProgramTerminalStatus::Completed) << failure_detail(recovered);
+    EXPECT_EQ(recovered.output()["channels"]["value"]["value"],
+              (json{{"decision", "forked"}}.dump()));
+    held.release();
+    (void)original.wait();
+}
+
 TEST(ProgramRuntimeTest, TypedPendingEffectPublishesOnceAndResumesByExactCallIdentity) {
     interrupt_calls.store(0);
     AdmittedRuntime fixture;
@@ -6037,6 +6254,35 @@ TEST(ProgramRuntimeTest, JavaScriptJoinCollectsFailuresInDeclarationOrder) {
     EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
     EXPECT_EQ(result.output(), json::array({json{{"id", "ok"}}, nullptr}));
     EXPECT_EQ(completed_calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, RecoveryOfAResumedJavaScriptCallCoreResumesWithItsValue) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-resume-hook", R"JS(
+    const reply = yield ng.callCore("main", {decision: input.decision}, "approval");
+    return {value: reply.value};
+)JS"));
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json{{"decision", "run input"}}, javascript_budget(1),
+                          "trace-js-resumed-crash", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << failure_detail(interrupted);
+
+    HeldResumedAttempt held;
+    auto original = fixture.runtime->resume(
+        "tenant:runtime", interrupted.run_id(),
+        resume_for(interrupted, json{{"decision", "approved"}}, "trace-js-resumed-crash-resume"));
+    ASSERT_TRUE(held.entered());
+
+    auto       fresh     = fixture.make_runtime();
+    const auto recovered = fresh->reconnect("tenant:runtime", interrupted.run_id()).wait();
+    ASSERT_EQ(recovered.status(), ProgramTerminalStatus::Completed) << failure_detail(recovered);
+    EXPECT_EQ(recovered.output(), (json{{"value", json{{"decision", "approved"}}.dump()}}));
+    held.release();
+    (void)original.wait();
 }
 
 TEST(ProgramRuntimeTest, JavaScriptFailFastJoinReportsTheFailureThatStoppedIt) {
