@@ -46,7 +46,8 @@ struct NEOGRAPH_API MCPHttpServerConfig {
      *
      * Sessions are bound to this scope, so a different valid principal cannot
      * reuse a leaked MCP-Session-Id. OAuth/JWT validation belongs here or in a
-     * trusted reverse proxy, never in GraphEngine or HarnessService.
+     * trusted reverse proxy, never in GraphEngine or HarnessService. Without an
+     * authorizer (allowed only on loopback binds) the scope is empty.
      */
     BearerAuthorizer bearer_authorizer;
 };

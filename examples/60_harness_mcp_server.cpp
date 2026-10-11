@@ -395,7 +395,11 @@ int main(int argc, char** argv) {
         neograph::mcp::MCPHttpServer server(
             [harness_config, server_config, host_config](std::string_view owner_scope) {
                 auto scoped_host = host_config;
-                scoped_host.snapshots.owner_scope = std::string(owner_scope);
+                // With a bearer token every session carries the authorizer's
+                // non-empty scope. Without one (loopback binds only) the
+                // transport passes an empty scope; keep the local owner scope.
+                if (!owner_scope.empty())
+                    scoped_host.snapshots.owner_scope = std::string(owner_scope);
                 auto harness = std::make_shared<neograph::mcp::HarnessService>(
                     harness_config, nullptr,
                     neograph::mcp::make_harness_program_service_resources(std::move(scoped_host)));

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=01b4115c436243f90da697e06b1474fbbbc430bfa05e8dc301b252d9b518f7db -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=2e87c5474a8d04c4b693c8a6fee8af73bf5617ee1ac23320a7fb9c252b6ed66d -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -341,7 +341,7 @@ export NEOGRAPH_HARNESS_HTTP_PORT=8080
 - 提供されたすべての`Origin`は、`NEOGRAPH_HARNESS_ALLOWED_ORIGINS`（実行可能ファイル内ではカンマ区切り）のエントリと完全に一致しない限り拒否されます。
 - `NEOGRAPH_HARNESS_BEARER_TOKEN`は、実行可能ファイルの単一プリンシパルベアラー境界を有効にします。ライブラリ埋め込みでは`MCPHttpServerConfig::bearer_authorizer`をOAuth/JWT検証に使用し、安定したプリンシパル/スコープを返すことができます。
 - セッションは返された認可スコープにバインドされます。別の有効なプリンシパルは、漏洩した`Mcp-Session-Id`を再利用できません。
-- `MCPHttpServer`ファクトリは検証済みスコープを受け取り、`MCPHttpServerSession`オーナーを返します。マルチテナント埋め込みは、分離されたHarnessレコード/チェックポイントストアを選択するためにスコープを使用する必要があります。認証状態はグラフランタイム自体には入りません。
+- `MCPHttpServer`ファクトリは検証済みスコープを受け取り、`MCPHttpServerSession`オーナーを返します。マルチテナント埋め込みは、分離されたHarnessレコード/チェックポイントストアを選択するためにスコープを使用する必要があります。認証状態はグラフランタイム自体には入りません。オーソライザーがない場合（ループバックへのバインドでのみ許可）スコープは空で、実行ファイルは単一のローカルオーナースコープを維持します。
 - リクエストペイロード、HTTPワーカー、キュー、セッション、レスポンス待機の制限は`MCPHttpServerConfig`によって境界付けられる。
 
 `neograph::mcp::ScopedHarnessStore` は、公開 ID とスキーマで定義されたレコード・ジャーナル参照を、可逆なテナント名前空間に対応付けます。不透明なリクエスト、結果、イベントのペイロードは書き換えません。File・SQLite ストアはこの非公開 ID を受け入れます。長すぎる File キーには固定長のハッシュファイル名を使い、短いキーのパスは変更しません。SQLite の保持処理は、単一トランザクション内で件数と削除候補を選択した名前空間に限定し、他のテナントや保護されたソース参照を維持します。このストレージ境界は、認証済みスコープや、アプリケーションのプロバイダー・ツール・クォータポリシーを置き換えません。

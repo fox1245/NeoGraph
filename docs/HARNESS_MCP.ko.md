@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=01b4115c436243f90da697e06b1474fbbbc430bfa05e8dc301b252d9b518f7db -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=2e87c5474a8d04c4b693c8a6fee8af73bf5617ee1ac23320a7fb9c252b6ed66d -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -438,7 +438,7 @@ export NEOGRAPH_HARNESS_HTTP_PORT=8080
 - 제공된 모든 `Origin`는 `NEOGRAPH_HARNESS_ALLOWED_ORIGINS`(실행 파일에서 쉼표로 구분됨)의 항목과 정확히 일치하지 않는 한 거부됩니다.
 - `NEOGRAPH_HARNESS_BEARER_TOKEN`는 실행 파일의 단일-주체 bearer 경계를 활성화합니다. 라이브러리 임베딩은 OAuth/JWT 검증을 위해 `MCPHttpServerConfig::bearer_authorizer`를 사용하고 안정적인 주체/범위를 반환할 수 있습니다.
 - 세션은 반환된 권한 부여 범위에 바인딩됩니다. 다른 유효한 주체는 유출된 `Mcp-Session-Id`를 재사용할 수 없습니다.
-- The `MCPHttpServer` 팩토리는 검증된 범위를 수신하고 `MCPHttpServerSession` 소유자를 반환합니다. 멀티테넌트 임베딩은 범위를 사용하여 격리된 Harness 레코드/체크포인트 저장소를 선택해야 합니다. 인증 상태는 그래프 런타임 자체에 들어가지 않습니다.
+- The `MCPHttpServer` 팩토리는 검증된 범위를 수신하고 `MCPHttpServerSession` 소유자를 반환합니다. 멀티테넌트 임베딩은 범위를 사용하여 격리된 Harness 레코드/체크포인트 저장소를 선택해야 합니다. 인증 상태는 그래프 런타임 자체에 들어가지 않습니다. authorizer가 없으면(루프백 바인드에서만 허용) 범위는 비어 있으며, 실행 파일은 단일 로컬 소유자 범위를 유지합니다.
 - 요청 페이로드, HTTP 작업자, 큐, 세션 및 응답 대기 한도는 `MCPHttpServerConfig`에 의해 제한됩니다.
 
 `neograph::mcp::ScopedHarnessStore`는 public ID와 schema 소유 record/journal

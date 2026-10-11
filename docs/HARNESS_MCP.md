@@ -595,7 +595,8 @@ Security defaults are transport-level and do not couple authentication to
 - The `MCPHttpServer` factory receives that validated scope and returns an
   `MCPHttpServerSession` owner. Multi-tenant embeddings must use the scope to
   select isolated Harness record/checkpoint stores; no auth state enters the
-  graph runtime itself.
+  graph runtime itself. Without an authorizer (loopback binds only) the scope
+  is empty, and the executable keeps its single local owner scope.
 - Request payload, HTTP worker, queue, session, and response-wait limits are
   bounded by `MCPHttpServerConfig`.
 

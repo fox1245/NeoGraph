@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=01b4115c436243f90da697e06b1474fbbbc430bfa05e8dc301b252d9b518f7db -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=2e87c5474a8d04c4b693c8a6fee8af73bf5617ee1ac23320a7fb9c252b6ed66d -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -333,7 +333,7 @@ export NEOGRAPH_HARNESS_HTTP_PORT=8080
 - 提供的每个 `Origin` 都会遭到拒绝，除非它与 `NEOGRAPH_HARNESS_ALLOWED_ORIGINS`（可执行文件中为逗号分隔）中的条目完全匹配。
 - `NEOGRAPH_HARNESS_BEARER_TOKEN` 启用可执行文件的单主体 bearer 边界。库嵌入可使用 `MCPHttpServerConfig::bearer_authorizer` 进行 OAuth/JWT 验证，并返回稳定的主体/作用域。
 - 会话与返回的授权作用域绑定。不同的有效主体无法重用泄露的 `Mcp-Session-Id`。
-- `MCPHttpServer` 工厂接收该已验证作用域，并返回 `MCPHttpServerSession` 所有者。多租户嵌入必须使用该作用域选择隔离的 Harness 记录/检查点存储；无任何身份验证状态进入图运行时本身。
+- `MCPHttpServer` 工厂接收该已验证作用域，并返回 `MCPHttpServerSession` 所有者。多租户嵌入必须使用该作用域选择隔离的 Harness 记录/检查点存储；无任何身份验证状态进入图运行时本身。未配置授权器时（仅允许回环绑定），作用域为空，可执行文件保留其单一本地所有者作用域。
 - 请求有效负载、HTTP 工作线程、队列、会话以及响应等待限制均受 `MCPHttpServerConfig` 约束。
 
 `neograph::mcp::ScopedHarnessStore` 将公开 ID 和由模式定义的记录及日志引用映射到可逆的租户命名空间；不改写不透明的请求、结果或事件负载。File 和 SQLite 存储接受这些私有 ID。过长的 File 键使用定长哈希文件名，不改变短键路径。SQLite 保留机制在一个事务中将计数和删除候选项限定到所选命名空间，保护其他租户及受保护的源引用。这项存储边界不能代替已认证作用域或应用的提供者、工具及配额策略。
