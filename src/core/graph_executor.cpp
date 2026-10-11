@@ -22,9 +22,11 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <random>
 #include <sstream>
@@ -443,17 +445,21 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
             thread_local std::mt19937             rng{std::random_device{}()};
             float                                 pct = std::min(1.0f, policy.jitter_pct);
             std::uniform_real_distribution<float> dist(-pct, pct);
-            float                                 scaled = delay_ms * (1.0f + dist(rng));
-            if (scaled < 0.0f) scaled = 0.0f;
-            actual_delay = static_cast<int>(scaled);
+            const double scaled = static_cast<double>(delay_ms) * (1.0 + dist(rng));
+            actual_delay = static_cast<int>(std::clamp(
+                scaled, 0.0, static_cast<double>(std::numeric_limits<int>::max())));
         }
 
         asio::steady_timer timer(ex);
         timer.expires_after(std::chrono::milliseconds(actual_delay));
         co_await timer.async_wait(asio::use_awaitable);
 
-        delay_ms =
-            std::min(static_cast<int>(delay_ms * policy.backoff_multiplier), policy.max_delay_ms);
+        // Compute in double and clamp before converting: casting a product
+        // outside int range to int is undefined behaviour.
+        double next = static_cast<double>(delay_ms) * static_cast<double>(policy.backoff_multiplier);
+        if (std::isnan(next) || next > policy.max_delay_ms) next = policy.max_delay_ms;
+        if (next < 0.0) next = 0.0;
+        delay_ms = static_cast<int>(next);
     }
 
     throw std::runtime_error("Unreachable: async retry loop exited without return or throw");

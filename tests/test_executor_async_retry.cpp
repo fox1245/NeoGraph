@@ -431,3 +431,34 @@ TEST(ExecutorAsyncRetry, BackoffDoesNotBlockIoContext) {
         << "ticks=" << ticks.load()
         << " — async retry sleep appears to block io_context";
 }
+
+// The next delay is delay * multiplier clamped to max_delay_ms. The product
+// was cast to int before the clamp, which is undefined once it leaves int
+// range; on common targets it became negative and later retries stopped waiting.
+TEST(ExecutorAsyncRetry, BackoffClampsAnOverflowingProduct) {
+    RetryPolicy p;
+    p.max_retries        = 3;
+    p.initial_delay_ms   = 1;
+    p.backoff_multiplier = 1e30f;
+    p.max_delay_ms       = 20;
+    ExecutorHarness h(std::make_unique<FlakyNode>("flaky", 3), p);
+
+    asio::io_context          io;
+    std::optional<NodeResult> got;
+    const auto                started = std::chrono::steady_clock::now();
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            GraphState state;
+            init_state(state, h.channel_defs);
+            got = co_await h.executor.execute_node_with_retry_async(
+                "flaky", state, nullptr, StreamMode::ALL, RunContext{});
+        },
+        asio::detached);
+    io.run();
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    ASSERT_TRUE(got.has_value());
+    // 1 ms, then the clamped 20 ms twice.
+    EXPECT_GE(elapsed, std::chrono::milliseconds(35));
+}
