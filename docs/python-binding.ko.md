@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=8dc07611a5d489c5f48231f91efa341362b9f2a47558a81ad11f2ca60b4d38af -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=7d75fd1992cfe85b15819ac73a1979c2e120505d4329cdd01ef3c33267021492 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -463,6 +463,8 @@ engine.set_hook_runtime(runtime)
 ```
 
 `FailClosed` 하의 콜백 실패는 보호된 런타임 경계를 차단합니다. `Continue`는 관찰 손실이 허용 가능한 경우에만 사용할 수 있습니다.
+
+`HookBoundaryBlocked`는 차단한 Hook의 `invocation_id`와 `state`(`"failed"`, `"timed_out"` 등)를 담습니다. Python 도구는 [도구 실패 계약](reference-en.md#tool-failure-contract)을 따릅니다. 도구 안에서 발생한 `HookBoundaryBlocked`(예: 중첩된 엔진 실행에서 발생한 것)는 실행을 중단하고 `NodeInterrupt`는 실행을 일시 정지하며, 그 밖의 예외는 모델이 읽는 도구 결과가 됩니다.
 
 ## 런타임 컨텍스트, Skill 및 엄격한 디스패치
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=5ec78210577bedafa539bd861bf217bb3dcc2f677d9f2ba3c68771334dca1f9e -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=c25f1ee42f162b617b8f9c49113760dd467dc0819ef8683c0f08975a44759b0c -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -64,6 +64,7 @@ target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::r
   - [PreparedProviderRequest / ProviderBudgetClaim](#preparedproviderrequest--providerbudgetclaim)
 - [3. Tool 接口](#3-tool-interface)
   - [Tool](#tool)
+  - [工具失败契约](#tool-failure-contract)
 - [4. 图类型](#4-graph-types)
   - [ReducerType](#reducertype)
   - [ReducerFn](#reducerfn)
@@ -507,6 +508,23 @@ public:
     std::string get_name() const override { return "get_weather"; }
 };
 ```
+
+<a id="tool-failure-contract"></a>
+### 工具失败契约
+
+所有执行模型工具调用的路径都应用相同的规则：处理单个调用或 batch 的 `dispatch_tool_calls`、`tool_dispatch` 节点（包括 Program 的 Core `tool_dispatch`）、`llm::Agent::run` 与 `run_stream`、plan-and-execute 的 executor 以及 deep-research 的 researcher，C++、MCP 与 Python 工具均是如此。
+
+| 失败 | 结果 |
+|------|------|
+| `HookBoundaryBlocked`：强制 Hook 失败、超时或无法运行，或工具代码抛出了它 | 运行以该异常停止，其 invocation id 与 state 保持不变。节点重试策略不会重试它。 |
+| 运行的 `CancelToken` 被取消 | 运行以 `graph::CancelledException` 停止。 |
+| 来自 `ToolGate` 或工具代码的 `NodeInterrupt` | 运行暂停；`llm::Agent` 将其抛给调用方。 |
+| 未知工具，或 gate 的 `Deny` | 状态为 `rejected` 的工具结果。 |
+| 工具代码或其查找抛出的异常（C++、Python、MCP 的 `isError` 结果或 JSON-RPC 错误），或无法解析的参数 | 状态为 `failed` 的工具结果；若调用已开始且其执行策略不能排除已产生效果，则为 `reconciliation_required`。 |
+| 带类型的控制器状态，如 `timed_out`、`expired`、`killed` 或 `input_required` | 带有该状态的工具结果。 |
+| 在 `ToolEffectBroker` 下效果不确定的工具结果 | 运行以 payload `kind` 为 `tool_effect_reconciliation` 的 `NodeInterrupt` 暂停。 |
+
+前三行永远不会到达模型。工具结果会设置 `tool_status`，失败的结果无论是单个调用还是 batch 都带有 `{"error", "status", "retryable", "effect_uncertain"}`。在 batch 中，其他调用会先执行完毕；当多个调用都使运行停止时，取消优先于 Hook 阻断，Hook 阻断优先于中断。工具抛出的 `NodeInterrupt` 不会阻止其兄弟调用运行，恢复时整个 batch 会再次运行；若要在任何调用运行之前询问，请使用 `ToolGate`。运行截止时间（`RunMetadata::deadline`）约束 Hook 与 Provider 调用；工具自身的限制是其策略的 `execution_timeout` 与 `queue_timeout`。工具 Hook 在 `ToolExecutionContext` 携带 `HookRuntime` 的地方运行（`dispatch_tool_calls`、`llm::Agent::set_hook_runtime`）；图引擎的 `HookRuntime` 只发布检查点 Hook。
 
 ---
 

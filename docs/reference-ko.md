@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=5ec78210577bedafa539bd861bf217bb3dcc2f677d9f2ba3c68771334dca1f9e -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=c25f1ee42f162b617b8f9c49113760dd467dc0819ef8683c0f08975a44759b0c -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -66,6 +66,7 @@ target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::r
   - [PreparedProviderRequest / ProviderBudgetClaim](#preparedproviderrequest--providerbudgetclaim)
 - [3. Tool Interface](#3-tool-interface)
   - [Tool](#tool)
+  - [도구 실패 계약](#tool-failure-contract)
 - [4. Graph Types](#4-graph-types)
   - [ReducerType](#reducertype)
   - [ReducerFn](#reducerfn)
@@ -507,6 +508,23 @@ public:
     std::string get_name() const override { return "get_weather"; }
 };
 ```
+
+<a id="tool-failure-contract"></a>
+### 도구 실패 계약
+
+모델의 도구 호출을 실행하는 모든 경로가 같은 규칙을 적용합니다. 단일 호출이나 batch를 처리하는 `dispatch_tool_calls`, `tool_dispatch` 노드(Program의 Core `tool_dispatch` 포함), `llm::Agent::run`과 `run_stream`, plan-and-execute 실행기, deep-research 연구자가 여기에 해당하며, C++, MCP, Python 도구 모두 마찬가지입니다.
+
+| 실패 | 결과 |
+|------|------|
+| `HookBoundaryBlocked`: 필수 Hook이 실패했거나, 시간을 초과했거나, 실행될 수 없었거나, 도구 코드가 이를 발생시킴 | 실행이 그 예외로 중단되며, invocation id와 state는 그대로 유지됩니다. 노드 재시도 정책은 이를 재시도하지 않습니다. |
+| 실행의 `CancelToken`이 취소됨 | 실행이 `graph::CancelledException`으로 중단됩니다. |
+| `ToolGate` 또는 도구 코드에서 발생한 `NodeInterrupt` | 실행이 일시 정지합니다. `llm::Agent`는 이를 호출자에게 던집니다. |
+| 알 수 없는 도구, 또는 게이트의 `Deny` | 상태가 `rejected`인 도구 결과. |
+| 도구 코드나 도구 조회에서 발생한 예외(C++, Python, MCP `isError` 결과 또는 JSON-RPC 오류), 또는 파싱할 수 없는 인수 | 상태가 `failed`인 도구 결과. 호출이 이미 시작되었고 실행 정책이 효과의 발생을 배제하지 않으면 `reconciliation_required`. |
+| `timed_out`, `expired`, `killed`, `input_required` 같은 타입이 지정된 컨트롤러 상태 | 그 상태를 가진 도구 결과. |
+| `ToolEffectBroker` 아래에서 효과가 불확실한 도구 결과 | 페이로드 `kind`가 `tool_effect_reconciliation`인 `NodeInterrupt`로 실행이 일시 정지합니다. |
+
+처음 세 행은 결코 모델에 도달하지 않습니다. 도구 결과는 `tool_status`를 설정하며, 실패한 결과는 단일 호출이든 batch든 `{"error", "status", "retryable", "effect_uncertain"}`를 담습니다. batch에서는 다른 호출이 먼저 끝까지 실행되며, 여러 호출이 실행을 중단시키면 취소가 Hook 차단보다, Hook 차단이 인터럽트보다 우선합니다. 도구가 발생시킨 `NodeInterrupt`가 있어도 형제 호출은 실행되며, 재개하면 batch 전체가 다시 실행됩니다. 아무것도 실행되기 전에 묻으려면 `ToolGate`를 사용하세요. 실행 기한(`RunMetadata::deadline`)은 Hook과 제공자 호출을 제한하며, 도구 자체의 한도는 정책의 `execution_timeout`과 `queue_timeout`입니다. 도구 Hook은 `ToolExecutionContext`가 `HookRuntime`을 지닌 곳(`dispatch_tool_calls`, `llm::Agent::set_hook_runtime`)에서 실행되며, 그래프 엔진의 `HookRuntime`은 체크포인트 Hook만 게시합니다.
 
 ---
 

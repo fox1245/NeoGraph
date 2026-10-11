@@ -466,6 +466,8 @@ engine.set_hook_runtime(runtime)
 
 A callback failure under `FailClosed` blocks the protected runtime boundary. `Continue` is available only when observational loss is acceptable.
 
+`HookBoundaryBlocked` carries the blocked Hook's `invocation_id` and its `state` (`"failed"`, `"timed_out"`, ...). Python tools follow the [tool failure contract](reference-en.md#tool-failure-contract): a `HookBoundaryBlocked` raised inside a tool (for example by a nested engine run) stops the run and a `NodeInterrupt` pauses it, while any other exception becomes a tool result the model reads.
+
 ## Runtime context, Skills and strict dispatch
 
 The binding exposes immutable RAW history records, context artifacts, epochs, required Skills/constraints, transformation receipts and provider dispatch receipts.

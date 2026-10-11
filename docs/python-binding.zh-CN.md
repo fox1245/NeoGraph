@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=8dc07611a5d489c5f48231f91efa341362b9f2a47558a81ad11f2ca60b4d38af -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=7d75fd1992cfe85b15819ac73a1979c2e120505d4329cdd01ef3c33267021492 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -462,6 +462,8 @@ engine.set_hook_runtime(runtime)
 ```
 
 在 `FailClosed` 下的回调失败会阻塞受保护的运行时边界。仅当可接受观测性损失时，`Continue` 才可用。
+
+`HookBoundaryBlocked` 携带发生阻断的 Hook 的 `invocation_id` 及其 `state`（`"failed"`、`"timed_out"` 等）。Python 工具遵循[工具失败契约](reference-en.md#tool-failure-contract)：在工具内抛出的 `HookBoundaryBlocked`（例如来自嵌套的引擎运行）会停止运行，`NodeInterrupt` 会暂停运行，其他任何异常都会成为模型读取的工具结果。
 
 ## 运行时上下文、Skills 与严格分发
 

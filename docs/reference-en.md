@@ -67,6 +67,7 @@ target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::r
   - [PreparedProviderRequest / ProviderBudgetClaim](#preparedproviderrequest--providerbudgetclaim)
 - [3. Tool Interface](#3-tool-interface)
   - [Tool](#tool)
+  - [Tool failure contract](#tool-failure-contract)
 - [4. Graph Types](#4-graph-types)
   - [ReducerType](#reducertype)
   - [ReducerFn](#reducerfn)
@@ -508,6 +509,22 @@ public:
     std::string get_name() const override { return "get_weather"; }
 };
 ```
+
+### Tool failure contract
+
+Every path that runs a model's tool calls applies the same rules: `dispatch_tool_calls` for one call or a batch, the `tool_dispatch` node (Program's Core `tool_dispatch` included), `llm::Agent::run` and `run_stream`, the plan-and-execute executor and the deep-research researcher, for C++, MCP and Python tools alike.
+
+| Failure | Outcome |
+|---------|---------|
+| `HookBoundaryBlocked`: a mandatory Hook failed, timed out or could not run, or tool code raised one | The run stops with that exception, its invocation id and state intact. A node retry policy does not retry it. |
+| The run's `CancelToken` is cancelled | The run stops with `graph::CancelledException`. |
+| `NodeInterrupt` from a `ToolGate` or from tool code | The run pauses; `llm::Agent` throws it to its caller. |
+| Unknown tool, or a gate's `Deny` | A tool result with status `rejected`. |
+| An exception from tool code or its lookup (C++, Python, an MCP `isError` result or JSON-RPC error), or unparseable arguments | A tool result with status `failed`, or `reconciliation_required` when the call had started and its execution policy does not rule out an effect. |
+| A typed controller status such as `timed_out`, `expired`, `killed` or `input_required` | A tool result with that status. |
+| A tool result with an uncertain effect, under a `ToolEffectBroker` | The run pauses with a `NodeInterrupt` whose payload `kind` is `tool_effect_reconciliation`. |
+
+The first three rows never reach the model. A tool result sets `tool_status`, and a failed one carries `{"error", "status", "retryable", "effect_uncertain"}`, in one call or a batch. In a batch the other calls finish first; when several calls stop the run, cancellation wins over a Hook block and a Hook block over an interrupt. A `NodeInterrupt` raised by a tool lets its siblings run, and resume runs the whole batch again; to ask before anything runs, use a `ToolGate`. The run deadline (`RunMetadata::deadline`) bounds Hooks and provider calls; a tool's own limits are its policy's `execution_timeout` and `queue_timeout`. Tool Hooks run where the `ToolExecutionContext` carries a `HookRuntime` (`dispatch_tool_calls`, `llm::Agent::set_hook_runtime`); a graph engine's `HookRuntime` publishes checkpoint Hooks only.
 
 ---
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=5ec78210577bedafa539bd861bf217bb3dcc2f677d9f2ba3c68771334dca1f9e -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=c25f1ee42f162b617b8f9c49113760dd467dc0819ef8683c0f08975a44759b0c -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -54,6 +54,7 @@ target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::r
   - [PreparedProviderRequest / ProviderBudgetClaim](#preparedproviderrequest--providerbudgetclaim)
 - [3. Tool インターフェース](#3-tool-interface)
   - [Tool](#tool)
+  - [ツール失敗の契約](#tool-failure-contract)
 - [4. グラフ型](#4-graph-types)
   - [ReducerType](#reducertype)
   - [ReducerFn](#reducerfn)
@@ -471,6 +472,23 @@ public:
     std::string get_name() const override { return "get_weather"; }
 };
 ```
+
+<a id="tool-failure-contract"></a>
+### ツール失敗の契約
+
+モデルのツール呼び出しを実行するすべての経路が同じ規則を適用します。1 回の呼び出しまたは batch を処理する `dispatch_tool_calls`、`tool_dispatch` ノード(Program の Core `tool_dispatch` を含む)、`llm::Agent::run` と `run_stream`、plan-and-execute の executor、deep-research の researcher が対象で、C++、MCP、Python のツールでも同じです。
+
+| 失敗 | 結果 |
+|------|------|
+| `HookBoundaryBlocked`: 必須 Hook が失敗した、タイムアウトした、実行できなかった、またはツールコードがそれを送出した | その例外で実行が停止し、invocation id と state はそのまま保たれます。ノードのリトライポリシーはこれをリトライしません。 |
+| 実行の `CancelToken` がキャンセルされた | `graph::CancelledException` で実行が停止します。 |
+| `ToolGate` またはツールコードからの `NodeInterrupt` | 実行が一時停止します。`llm::Agent` はそれを呼び出し元に送出します。 |
+| 未知のツール、またはゲートの `Deny` | ステータス `rejected` のツール結果。 |
+| ツールコードまたはその検索から送出された例外(C++、Python、MCP の `isError` 結果または JSON-RPC エラー)、または解析できない引数 | ステータス `failed` のツール結果。呼び出しが開始済みで、実行ポリシーが効果の発生を否定しない場合は `reconciliation_required`。 |
+| `timed_out`、`expired`、`killed`、`input_required` などの型付きコントローラーステータス | そのステータスのツール結果。 |
+| `ToolEffectBroker` の下で効果が不確定なツール結果 | ペイロードの `kind` が `tool_effect_reconciliation` である `NodeInterrupt` で実行が一時停止します。 |
+
+最初の 3 行がモデルに届くことはありません。ツール結果は `tool_status` を設定し、失敗した結果は 1 回の呼び出しでも batch でも `{"error", "status", "retryable", "effect_uncertain"}` を持ちます。batch では他の呼び出しが先に最後まで実行され、複数の呼び出しが実行を停止させる場合は、キャンセルが Hook のブロックより、Hook のブロックが割り込みより優先されます。ツールが送出した `NodeInterrupt` があっても兄弟の呼び出しは実行され、再開すると batch 全体が再び実行されます。何かが実行される前に確認するには `ToolGate` を使ってください。実行の期限(`RunMetadata::deadline`)は Hook とプロバイダー呼び出しを制限し、ツール自体の上限はポリシーの `execution_timeout` と `queue_timeout` です。ツールの Hook は `ToolExecutionContext` が `HookRuntime` を持つ場所(`dispatch_tool_calls`、`llm::Agent::set_hook_runtime`)で実行され、グラフエンジンの `HookRuntime` はチェックポイント Hook だけを発行します。
 
 ---
 <a id="4-graph-types"></a>

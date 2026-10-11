@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=8dc07611a5d489c5f48231f91efa341362b9f2a47558a81ad11f2ca60b4d38af -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=7d75fd1992cfe85b15819ac73a1979c2e120505d4329cdd01ef3c33267021492 -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -463,6 +463,8 @@ engine.set_hook_runtime(runtime)
 ```
 
 `FailClosed`下でのコールバック失敗は、保護されたランタイム境界をブロックします。`Continue`は、観測上の損失が許容される場合にのみ利用可能です。
+
+`HookBoundaryBlocked` は、ブロックした Hook の `invocation_id` と `state`(`"failed"`、`"timed_out"` など)を持ちます。Python ツールは[ツール失敗の契約](reference-en.md#tool-failure-contract)に従います。ツール内で送出された `HookBoundaryBlocked`(たとえば入れ子のエンジン実行から)は実行を停止し、`NodeInterrupt` は実行を一時停止します。それ以外の例外は、モデルが読むツール結果になります。
 
 ## ランタイムコンテキスト、Skill、および厳格なディスパッチ
 
