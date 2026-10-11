@@ -336,6 +336,14 @@ void validate(const ProgramRunRecordData& d) {
         throw std::invalid_argument(
             "Program attempt resume value must bind the running attempt's exact checkpoint");
     }
+    if (d.settled_branches &&
+        (!d.settled_branches->is_object() || d.settled_branches->empty() ||
+         !d.exact_checkpoint ||
+         (d.continuation.state != ContinuationState::Running &&
+          d.continuation.state != ContinuationState::Interrupted))) {
+        throw std::invalid_argument(
+            "Program settled branches belong to a paused or resumed run's exact checkpoint");
+    }
     std::set<std::string, std::less<>> child_ids;
     for (const auto& child : d.children) {
         detail::validate_token(child.child_run_id, "Program child run_id");
@@ -429,6 +437,7 @@ json body(const ProgramRunRecordData& d, std::uint32_t schema_version) {
         value["attempt_resume"] = json{{"checkpoint_id", d.attempt_resume->checkpoint_id},
                                        {"value", d.attempt_resume->value}};
     }
+    if (d.settled_branches) value["settled_branches"] = *d.settled_branches;
     if (!d.children.empty()) {
         value["children"] = json::array();
         for (const auto& child : d.children) value["children"].push_back(child_body(child));
@@ -517,7 +526,8 @@ ProgramRunRecord ProgramRunRecord::create(ProgramRunRecordData d) {
     // Each version is used only by the records that need it, so the ids of
     // all other records stay unchanged.
     const auto schema =
-        d.attempt_resume ? STORAGE_SCHEMA_VERSION
+        d.settled_branches ? STORAGE_SCHEMA_VERSION
+        : d.attempt_resume ? 5U
         : !d.logical_run_id.empty() ||
                 std::any_of(d.children.begin(), d.children.end(),
                             [](const auto& child) { return child.terminal_generation != 0; })
@@ -544,6 +554,8 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
         throw std::invalid_argument("Legacy run cannot carry logical identity");
     if (schema_version < 5 && v.contains("attempt_resume"))
         throw std::invalid_argument("Legacy run cannot carry an attempt resume value");
+    if (schema_version < 6 && v.contains("settled_branches"))
+        throw std::invalid_argument("Legacy run cannot carry settled branches");
     if (schema_version == 2) {
         detail::reject_unknown_fields(
             v, "Stored ProgramRunRecord",
@@ -586,7 +598,8 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
                                        "updated_at_ms",
                                        "children",
                                        "logical_run_id",
-                                       "attempt_resume"});
+                                       "attempt_resume",
+                                       "settled_branches"});
     }
     ProgramRunRecordData d;
     d.owner_scope         = rs(v, "owner_scope");
@@ -604,6 +617,8 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
         detail::reject_unknown_fields(resume, "Program attempt resume", {"checkpoint_id", "value"});
         d.attempt_resume = ProgramAttemptResume{rs(resume, "checkpoint_id"), rv(resume, "value")};
     }
+    if (v.contains("settled_branches"))
+        d.settled_branches = detail::owned_json_copy(rv(v, "settled_branches"));
     const auto& continuation = rv(v, "continuation");
     if (!continuation.is_object()) {
         throw std::invalid_argument("Program continuation must be an object");
@@ -696,6 +711,11 @@ ProgramRunRecord::exact_checkpoint_content_id() const noexcept {
 }
 const std::optional<ProgramAttemptResume>& ProgramRunRecord::attempt_resume() const noexcept {
     return impl_->data.attempt_resume;
+}
+std::optional<json> ProgramRunRecord::settled_branches() const {
+    return impl_->data.settled_branches
+               ? std::optional<json>(detail::owned_json_copy(*impl_->data.settled_branches))
+               : std::nullopt;
 }
 std::optional<ProgramPendingInput> ProgramRunRecord::pending_input() const {
     return impl_->data.pending_input;

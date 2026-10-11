@@ -265,6 +265,10 @@ public:
     std::optional<ProgramResult>          try_result() const;
     std::vector<ProgramEvent>             events_after(std::uint64_t sequence) const;
     std::optional<CoreCheckpointIdentity> latest_checkpoint() const;
+    /// The branches the paused plan-level parallel operations of this attempt
+    /// recorded (#384); its Interrupted record carries them.
+    void                                  set_settled_branches(json branches);
+    std::optional<json>                   settled_branches() const;
     std::optional<ExactProgramHandoff>    latest_handoff() const;
     void set_handoff_coordination_mutex(
         std::shared_ptr<std::recursive_mutex> coordination_mutex,
@@ -307,6 +311,7 @@ private:
     std::optional<ProgramResult>           result_;
     std::vector<ProgramEvent>              events_;
     std::optional<CoreCheckpointIdentity>  latest_checkpoint_;
+    std::optional<json>                    settled_branches_;
     std::shared_ptr<ProgramEventSink>      sink_;
     CompletionCallback                     completion_callback_;
     mutable std::vector<AsyncWaiter>       waiters_;

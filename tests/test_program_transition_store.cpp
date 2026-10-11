@@ -1416,6 +1416,50 @@ TEST(ProgramTransitionStoreTest, AttemptResumeValueRoundTripsAndLeavesOtherRecor
     EXPECT_THROW((void)ProgramRunRecord::create(no_checkpoint), std::invalid_argument);
 }
 
+TEST(ProgramTransitionStoreTest, SettledBranchesRoundTripAndLeaveOtherRecordIdsUnchanged) {
+    // #384: only a record that carries the branches a paused plan-level
+    // parallel recorded uses storage schema 6; every other record keeps its
+    // schema and its id.
+    const auto has_schema = [](const std::string& bytes, int version) {
+        return bytes.find("\"storage_schema_version\":" + std::to_string(version)) !=
+               std::string::npos;
+    };
+    auto data             = copy_run_record_data(start_publication().run_record);
+    data.exact_checkpoint = checkpoint();
+    data.attempt_resume   = ProgramAttemptResume{checkpoint().checkpoint_id, json{{"ok", true}}};
+    const auto without    = ProgramRunRecord::create(data);
+    EXPECT_TRUE(has_schema(without.serialize_canonical(), 5));
+    EXPECT_FALSE(without.settled_branches());
+
+    const json branches{{"root.0", json{{"kind", "settled"}, {"returned", false},
+                                        {"result", json{{"status", "completed"}}}}}};
+    data.settled_branches = branches;
+    const auto settled    = ProgramRunRecord::create(data);
+    const auto bytes      = settled.serialize_canonical();
+    EXPECT_TRUE(has_schema(bytes, 6));
+    EXPECT_NE(settled.id(), without.id());
+    const auto parsed = ProgramRunRecord::parse(bytes);
+    EXPECT_EQ(parsed.id(), settled.id());
+    EXPECT_EQ(parsed.serialize_canonical(), bytes);
+    ASSERT_TRUE(parsed.settled_branches());
+    EXPECT_EQ(*parsed.settled_branches(), branches);
+
+    // A legacy record cannot carry them.
+    auto legacy = bytes;
+    legacy.replace(legacy.find("\"storage_schema_version\":6"), 26,
+                   "\"storage_schema_version\":5");
+    EXPECT_THROW((void)ProgramRunRecord::parse(legacy), std::invalid_argument);
+
+    // They belong to an exact checkpoint, and are never empty.
+    auto empty             = data;
+    empty.settled_branches = json::object();
+    EXPECT_THROW((void)ProgramRunRecord::create(empty), std::invalid_argument);
+    auto no_checkpoint             = data;
+    no_checkpoint.attempt_resume   = std::nullopt;
+    no_checkpoint.exact_checkpoint = std::nullopt;
+    EXPECT_THROW((void)ProgramRunRecord::create(no_checkpoint), std::invalid_argument);
+}
+
 TEST(ProgramTransitionStoreTest, PublicationCanonicalWireMatchesReferenceTree) {
     const auto start       = start_publication();
     const auto publication = interrupted_effect_publication(start);

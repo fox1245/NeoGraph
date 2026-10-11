@@ -99,13 +99,20 @@ struct ProgramRunRecordData {
     std::string logical_run_id;
     /// Present only while a resumed attempt runs from exact_checkpoint.
     std::optional<ProgramAttemptResume> attempt_resume;
+    /// The branches that the plan-level parallel operations of an Interrupted
+    /// run recorded when they paused, by branch operation id: the result of
+    /// each branch that finished and the question of each other paused branch
+    /// (#384). An Interrupted record and the Running record of the attempt that
+    /// resumes it carry them; the attempt replays them.
+    std::optional<json> settled_branches;
 };
 
 /** Deep-owned, content-addressed run snapshot used for reconnect and CAS publication. */
 class NEOGRAPH_PROGRAM_API ProgramRunRecord {
 public:
-    /// Version 5 adds attempt_resume; records without it keep version 3 or 4.
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 5;
+    /// Version 5 adds attempt_resume and version 6 settled_branches; a record
+    /// keeps the lowest version that can hold it (3 or 4 without either).
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 6;
 
     static ProgramRunRecord create(ProgramRunRecordData data);
     static ProgramRunRecord parse(std::string_view stored_bytes);
@@ -123,6 +130,7 @@ public:
     std::optional<CoreCheckpointIdentity> exact_checkpoint() const;
     const std::optional<std::string>& exact_checkpoint_content_id() const noexcept;
     const std::optional<ProgramAttemptResume>& attempt_resume() const noexcept;
+    std::optional<json> settled_branches() const;
     std::optional<ProgramPendingInput> pending_input() const;
     std::optional<ProgramPendingEffect> pending_effect() const;
     std::optional<ProgramResult> terminal_result() const;

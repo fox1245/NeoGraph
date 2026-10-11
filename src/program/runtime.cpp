@@ -164,6 +164,7 @@ ProgramTransitionPublication continuing_running_publication(
     data.exact_checkpoint = previous.exact_checkpoint();
     data.exact_checkpoint_content_id = previous.exact_checkpoint_content_id();
     data.attempt_resume = previous.attempt_resume();
+    data.settled_branches = previous.settled_branches();
     data.pending_input = previous.pending_input();
     data.pending_effect = previous.pending_effect();
     data.terminal_result = previous.terminal_result();
@@ -1374,6 +1375,7 @@ ChildRecordPublication publish_child_record_unlocked(
         data.exact_checkpoint                 = previous->exact_checkpoint();
         data.exact_checkpoint_content_id      = previous->exact_checkpoint_content_id();
         data.attempt_resume                   = previous->attempt_resume();
+        data.settled_branches                 = previous->settled_branches();
         data.pending_input                    = previous->pending_input();
         data.pending_effect                   = previous->pending_effect();
         data.terminal_result                  = previous->terminal_result();
@@ -1736,6 +1738,10 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
                 data.pending_input  = interrupt->pending_input;
                 data.pending_effect = interrupt->pending_effect;
             }
+            // #384: the branches of the plan-level parallels that paused,
+            // which the attempt that resumes the run replays.
+            if (result.status() == ProgramTerminalStatus::Interrupted && result.checkpoint())
+                data.settled_branches = control.settled_branches();
             data.terminal_result                  = result;
             data.fork_receipt                     = previous->fork_receipt();
             data.fork_source_run_id               = previous->fork_source_run_id();
@@ -2941,6 +2947,18 @@ std::optional<CoreCheckpointIdentity> RunControl::latest_checkpoint() const {
     return latest_checkpoint_;
 }
 
+void RunControl::set_settled_branches(json branches) {
+    std::lock_guard lock(mutex_);
+    settled_branches_ = branches.is_object() && !branches.empty()
+                            ? std::optional<json>(std::move(branches))
+                            : std::nullopt;
+}
+
+std::optional<json> RunControl::settled_branches() const {
+    std::lock_guard lock(mutex_);
+    return settled_branches_;
+}
+
 std::optional<ExactProgramHandoff> RunControl::latest_handoff() const {
     const auto record  = transitions->load(owner_scope, run_id);
     const auto journal = transitions->latest(owner_scope, run_id);
@@ -3645,6 +3663,7 @@ void RunControl::release_graph_migration(std::uint64_t request_id) noexcept {
                     data.exact_checkpoint_content_id =
                         previous->exact_checkpoint_content_id();
                     data.attempt_resume = previous->attempt_resume();
+                    data.settled_branches = previous->settled_branches();
                     data.pending_input = previous->pending_input();
                     data.pending_effect = previous->pending_effect();
                     data.terminal_result = previous->terminal_result();
@@ -3794,6 +3813,7 @@ bool RunControl::consume_dynamic_compile() {
         data.exact_checkpoint                 = previous->exact_checkpoint();
         data.exact_checkpoint_content_id      = previous->exact_checkpoint_content_id();
         data.attempt_resume                   = previous->attempt_resume();
+        data.settled_branches                 = previous->settled_branches();
         data.pending_input                    = previous->pending_input();
         data.pending_effect                   = previous->pending_effect();
         data.terminal_result                  = previous->terminal_result();
@@ -8341,6 +8361,9 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     }
     data.pending_input                    = std::move(pending_input);
     data.pending_effect                   = std::move(pending_effect);
+    // The branches the paused parallels recorded, replayed by this attempt
+    // and by its recovery (#384).
+    data.settled_branches                 = previous->settled_branches();
     // The value this attempt resumes its checkpoint with, durable before the
     // attempt starts, so that recovery continues the same attempt (#377).
     if (javascript_commands.empty() ||
@@ -8695,6 +8718,9 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
     data.pending_effect                   = update.value;
     if (completed && (javascript_commands.empty() || resume_javascript_core))
         data.attempt_resume = ProgramAttemptResume{checkpoint.checkpoint_id, *resolution.result};
+    // The attempt that continues a paused plan-level parallel replays its
+    // branches (#384).
+    if (completed) data.settled_branches = previous->settled_branches();
     data.terminal_result                  = terminal;
     data.fork_receipt                     = previous->fork_receipt();
     data.fork_source_run_id               = previous->fork_source_run_id();

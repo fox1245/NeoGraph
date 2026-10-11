@@ -450,7 +450,13 @@ The Program compiler lowers authoring sugar to a small orchestration plan:
 
 - `call_core`: invoke one immutable Core graph generation;
 - `sequence`: run children in order;
-- `parallel`: run bounded children concurrently and join all;
+- `parallel`: run bounded children concurrently and join all. A child whose
+  Core call interrupts pauses it: a failing child still ends it, otherwise the
+  run stops `Interrupted` on the first paused child, and the run record keeps
+  the result of each child that finished and the question of each other paused
+  child. Resume continues the child it answers, replays the finished ones
+  without running or charging them again, and lets every other paused child ask
+  its own question again;
 - `race`: complete on a declared winner rule and cancel the remaining children;
 - `branch`: select a child from a typed condition result;
 - `loop`: repeat a child under a declared condition and hard iteration limit;

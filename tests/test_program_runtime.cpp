@@ -567,6 +567,50 @@ private:
     std::string name_;
 };
 
+// A branch of a plan-level parallel (#384), driven by its "value" channel:
+// "ask" interrupts until it is resumed, and "one" lets the first branch that
+// runs finish while every other one asks. A resumed branch writes the decision
+// it was given. Each counter counts one kind of run.
+std::atomic<unsigned> parallel_branch_finished{0};
+std::atomic<unsigned> parallel_branch_asked{0};
+std::atomic<unsigned> parallel_branch_answered{0};
+std::atomic<bool>     parallel_branch_first_taken{false};
+
+void reset_parallel_branches() {
+    parallel_branch_finished.store(0);
+    parallel_branch_asked.store(0);
+    parallel_branch_answered.store(0);
+    parallel_branch_first_taken.store(false);
+}
+
+class ParallelBranchNode final : public GraphNode {
+public:
+    explicit ParallelBranchNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        NodeOutput output;
+        if (input.ctx.resume_value) {
+            parallel_branch_answered.fetch_add(1);
+            output.writes.push_back(ChannelWrite{"value", input.ctx.resume_value->at("decision")});
+            co_return output;
+        }
+        bool taken = false;
+        if (input.state.get("value") == json("one") &&
+            parallel_branch_first_taken.compare_exchange_strong(taken, true)) {
+            parallel_branch_finished.fetch_add(1);
+            output.writes.push_back(ChannelWrite{"value", json("done")});
+            co_return output;
+        }
+        parallel_branch_asked.fetch_add(1);
+        throw NodeInterrupt("parallel branch approval", json{{"request", "approve"}});
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
 class BlockingNode final : public GraphNode {
 public:
     explicit BlockingNode(std::string               name,
@@ -854,6 +898,12 @@ RegistrySnapshot runtime_registry(
         manifest(ExecutableKind::Node, "runtime-join-member", 'e'),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<JoinMemberNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-parallel-branch", 'f'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<ParallelBranchNode>(name);
         },
         json{{"type", "object"}}, json::object());
     builder.add_node(
@@ -9336,6 +9386,156 @@ TEST(ProgramRuntimeTest, ParallelImmediateBranchesRetainTheirCompletionSignal) {
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(result.output(), json::array({1, 2, 3}));
+}
+
+// ---------------------------------------------------------------------------
+// A branch's interrupt pauses a plan-level parallel (#384)
+// ---------------------------------------------------------------------------
+
+namespace {
+ProgramResult run_parallel_plan(AdmittedRuntime& fixture, json input) {
+    const auto version = fixture.admit_document(orchestration_document(
+        json{{"op", "parallel"},
+             {"branches", json::array({json{{"op", "call_core"}}, json{{"op", "call_core"}}})}},
+        "runtime-parallel-branch"));
+    return fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{std::move(input), RunBudget{10000, 1000, 1000, 2, 32, 20, 0, 0, 0},
+                          "trace-plan-parallel-pause", {}});
+}
+
+ProgramResult answer(AdmittedRuntime& fixture, const ProgramResult& interrupted,
+                     const std::string& decision) {
+    return fixture.runtime
+        ->resume("tenant:runtime", interrupted.run_id(),
+                 resume_for(interrupted, json{{"decision", decision}},
+                            "trace-plan-parallel-answer"))
+        .wait();
+}
+
+json branch_value(const ProgramResult& result, std::size_t index) {
+    return result.output()[index]["channels"]["value"]["value"];
+}
+
+CheckpointPhase paused_phase(AdmittedRuntime& fixture, const ProgramResult& result) {
+    const auto stored = fixture.checkpoints->load_by_id(result.checkpoint()->checkpoint_id);
+    return stored ? stored->interrupt_phase : CheckpointPhase::Completed;
+}
+}  // namespace
+
+TEST(ProgramRuntimeTest, PlanParallelPausedByBothBranchesAsksEachOfThemInTurn) {
+    // #384: both branches ask. Resume answers the first; the second asks its
+    // own question again instead of running on the first one's answer, and
+    // resume then answers it. Nothing runs twice. In memory and on SQLite.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        reset_parallel_branches();
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                                ExecutionGuarantee::Unmanaged, true);
+
+        const auto first = run_parallel_plan(fixture, json{{"value", "ask"}});
+        ASSERT_EQ(first.status(), ProgramTerminalStatus::Interrupted) << failure_detail(first);
+        ASSERT_TRUE(first.interrupt() && first.interrupt()->pending_input);
+        EXPECT_EQ(first.interrupt()->pending_input->operation_id(), "root.0");
+        ASSERT_TRUE(first.checkpoint().has_value());
+        EXPECT_EQ(paused_phase(fixture, first), CheckpointPhase::NodeInterrupt);
+        EXPECT_EQ(parallel_branch_asked.load(), 2U);
+
+        const auto second = answer(fixture, first, "first");
+        ASSERT_EQ(second.status(), ProgramTerminalStatus::Interrupted) << failure_detail(second);
+        ASSERT_TRUE(second.interrupt() && second.interrupt()->pending_input);
+        EXPECT_EQ(second.interrupt()->pending_input->operation_id(), "root.1")
+            << "the other paused branch asks its own question";
+        EXPECT_EQ(second.interrupt()->core_node, "work");
+        ASSERT_TRUE(second.checkpoint().has_value());
+        EXPECT_EQ(paused_phase(fixture, second), CheckpointPhase::NodeInterrupt);
+        EXPECT_EQ(parallel_branch_answered.load(), 1U);
+        EXPECT_EQ(parallel_branch_asked.load(), 2U) << "a paused branch is not run again to ask";
+
+        const auto done = answer(fixture, second, "second");
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+        EXPECT_EQ(branch_value(done, 0), json("first"));
+        EXPECT_EQ(branch_value(done, 1), json("second"));
+        EXPECT_EQ(parallel_branch_answered.load(), 2U) << "the answered branch is replayed";
+        EXPECT_EQ(parallel_branch_asked.load(), 2U);
+    }
+}
+
+TEST(ProgramRuntimeTest, PlanParallelReplaysTheBranchThatFinishedBeforeThePause) {
+    // #384: one branch finishes and the other asks. Resume answers the paused
+    // branch and replays the finished one from its record: it does not run,
+    // and is not charged, again.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        reset_parallel_branches();
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                                ExecutionGuarantee::Unmanaged, true);
+
+        const auto paused = run_parallel_plan(fixture, json{{"value", "one"}});
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+        EXPECT_EQ(paused_phase(fixture, paused), CheckpointPhase::NodeInterrupt)
+            << "the run resumes the paused branch, whichever branch wrote last";
+        const std::size_t finished_index =
+            paused.interrupt()->pending_input->operation_id() == "root.0" ? 1 : 0;
+        EXPECT_TRUE(paused.output()[1 - finished_index].is_null());
+        EXPECT_EQ(paused.output()[finished_index]["channels"]["value"]["value"], json("done"));
+
+        const auto done = answer(fixture, paused, "approved");
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+        EXPECT_EQ(branch_value(done, finished_index), json("done"));
+        EXPECT_EQ(branch_value(done, 1 - finished_index), json("approved"));
+        EXPECT_EQ(parallel_branch_finished.load(), 1U) << "the finished branch is replayed";
+        EXPECT_EQ(parallel_branch_asked.load(), 1U);
+        EXPECT_EQ(parallel_branch_answered.load(), 1U);
+        EXPECT_EQ(done.usage().core_steps, 1U) << "only the answered branch ran a Core step";
+    }
+}
+
+TEST(ProgramRuntimeTest, NestedPlanParallelsAskEveryPausedCallInTurnAcrossRestarts) {
+    // #384: root.0 and the two branches of the nested parallel root.1 all ask.
+    // Each resume answers the call it names and the others ask again, in
+    // declaration order; the record of each paused or finished branch survives
+    // the next pause and a restart of the runtime over the same stores.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        reset_parallel_branches();
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(3, stores.checkpoints, stores.transitions, {},
+                                ExecutionGuarantee::Unmanaged, true);
+        const json nested{
+            {"op", "parallel"},
+            {"branches", json::array({json{{"op", "call_core"}}, json{{"op", "call_core"}}})}};
+        const auto version = fixture.admit_document(orchestration_document(
+            json{{"op", "parallel"}, {"branches", json::array({json{{"op", "call_core"}}, nested})}},
+            "runtime-parallel-branch"));
+        auto result = fixture.runtime->run(
+            "tenant:runtime", version,
+            ProgramInvocation{json{{"value", "ask"}}, RunBudget{10000, 1000, 1000, 3, 32, 20, 0, 0, 0},
+                              "trace-nested-plan-parallel-pause", {}});
+        EXPECT_EQ(parallel_branch_asked.load(), 3U);
+
+        for (const auto* named : {"root.0", "root.1.0", "root.1.1"}) {
+            SCOPED_TRACE(named);
+            ASSERT_EQ(result.status(), ProgramTerminalStatus::Interrupted) << failure_detail(result);
+            ASSERT_TRUE(result.interrupt() && result.interrupt()->pending_input);
+            EXPECT_EQ(result.interrupt()->pending_input->operation_id(), named);
+            EXPECT_EQ(paused_phase(fixture, result), CheckpointPhase::NodeInterrupt);
+            fixture.recreate_catalog_and_runtime();
+            (void)fixture.admit_document(orchestration_document(
+                json{{"op", "parallel"},
+                     {"branches", json::array({json{{"op", "call_core"}}, nested})}},
+                "runtime-parallel-branch"));
+            result = answer(fixture, result, named);
+        }
+        ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_detail(result);
+        EXPECT_EQ(branch_value(result, 0), json("root.0"));
+        EXPECT_EQ(result.output()[1][0]["channels"]["value"]["value"], json("root.1.0"));
+        EXPECT_EQ(result.output()[1][1]["channels"]["value"]["value"], json("root.1.1"));
+        EXPECT_EQ(parallel_branch_asked.load(), 3U) << "a paused call is never run again to ask";
+        EXPECT_EQ(parallel_branch_answered.load(), 3U) << "an answered call is replayed";
+    }
 }
 
 TEST(ProgramRuntimeTest, NestedParallelCannotExceedRunConcurrencyGrant) {
