@@ -522,7 +522,7 @@ TEST(GraphProviderBrokerTest, ReplaysWithoutTransportAndKeepsConcurrentRunsScope
     EXPECT_EQ(replayed[0].node_name, "reason");
 }
 
-TEST(GraphProviderBrokerTest, NodeRetryKeepsOneLogicalTaskIdentity) {
+TEST(GraphProviderBrokerTest, NodeRetryGetsAFreshCallSlotPerAttempt) {
     auto provider = std::make_shared<BrokerProbeProvider>();
     NodeContext context;
     context.provider = provider;
@@ -538,8 +538,13 @@ TEST(GraphProviderBrokerTest, NodeRetryKeepsOneLogicalTaskIdentity) {
     EXPECT_FALSE(run_broker_probe(*engine, "retry-thread", "retry-run", broker).interrupted);
     const auto seen = broker->identities();
     ASSERT_EQ(seen.size(), 2U);
-    EXPECT_EQ(seen[0].task_id, seen[1].task_id);
+    // Every retry attempt has its own effect namespace (#364): attempt 0 keeps
+    // the task id and attempt 1 calls from "<task>#a1", so a retry never
+    // collides with an earlier attempt's call. The broker denied the first
+    // call, so the provider ran once.
+    EXPECT_EQ(seen[1].task_id, seen[0].task_id + "#a1");
     EXPECT_EQ(seen[0].thread_id, seen[1].thread_id);
+    EXPECT_EQ(seen[0].call_ordinal, seen[1].call_ordinal);
     EXPECT_EQ(provider->calls.load(), 1U);
 }
 

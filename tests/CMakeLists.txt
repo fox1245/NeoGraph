@@ -899,6 +899,12 @@ if(NOT BUILD_SHARED_LIBS)
     target_link_libraries(neograph_node_failure_tests PRIVATE neograph::core GTest::gtest_main)
     neograph_discover_tests(neograph_node_failure_tests PROPERTIES LABELS "core;node-failure")
 endif()
+if(NEOGRAPH_BUILD_SQLITE)
+    add_executable(neograph_node_failure_effect_tests test_node_failure_effects.cpp)
+    target_link_libraries(neograph_node_failure_effect_tests PRIVATE
+        neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
+    neograph_discover_tests(neograph_node_failure_effect_tests PROPERTIES LABELS "core;node-failure")
+endif()
 
 if(NEOGRAPH_BUILD_PROGRAM)
     # Golden identity corpus: pins definition hashes, compiled-plan identities

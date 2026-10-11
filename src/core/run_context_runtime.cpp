@@ -3,9 +3,13 @@
 #include "channel_write_codec.h"
 #include "managed_budget_journal.h"
 
+#include <neograph/tool_effect_broker.h>
+
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <mutex>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -39,16 +43,10 @@ public:
         shard_for(hash).install(key, hash, binding);
     }
 
-    /// Installs `binding` for `key` with the run-wide state `parent` is bound
-    /// to (or `fallback` when it is bound to nothing). The parent's scope is
-    /// alive for the whole call, so its binding cannot go away between the
-    /// lookup and the install.
-    void install_inheriting(const RunContext* parent, const RunContext* key, RuntimeBinding& binding,
-                            const std::shared_ptr<const RunContextRuntime>& fallback) {
-        const std::uint64_t parent_hash = hash_of(parent);
-        std::shared_ptr<const RunContextRuntime> inherited = shard_for(parent_hash).run_of(parent, parent_hash);
-        binding.run = inherited ? std::move(inherited) : fallback;
-        install(key, binding);
+    /// The run-wide state `key` is bound to, or null.
+    std::shared_ptr<const RunContextRuntime> run_of(const RunContext* key) const {
+        const std::uint64_t hash = hash_of(key);
+        return shard_for(hash).run_of(key, hash);
     }
 
     void uninstall(const RunContext* key, const RuntimeBinding& binding) {
@@ -287,11 +285,111 @@ ScopedRunContextRuntime::~ScopedRunContextRuntime() {
     if (installed_) registry().uninstall(context_, binding_);
 }
 
+void AttemptEffectLog::record(Entry entry, bool committed, bool uncertain) {
+    {
+        std::lock_guard lock(mutex_);
+        entries_.push_back(std::move(entry));
+    }
+    if (committed) committed_.store(true, std::memory_order_release);
+    if (uncertain) uncertain_.store(true, std::memory_order_release);
+}
+
+std::vector<AttemptEffectLog::Entry> AttemptEffectLog::entries() const {
+    std::vector<Entry> entries;
+    {
+        std::lock_guard lock(mutex_);
+        entries = entries_;
+    }
+    std::stable_sort(entries.begin(), entries.end(), [](const Entry& left, const Entry& right) {
+        return std::tie(left.thread_id, left.task_id, left.ordinal) <
+               std::tie(right.thread_id, right.task_id, right.ordinal);
+    });
+    return entries;
+}
+
+std::string attempt_effect_namespace(std::string_view task_id, int attempt) {
+    std::string id(task_id);
+    if (attempt > 0) id += "#a" + std::to_string(attempt);
+    return id;
+}
+
+namespace {
+
+// The run's ToolEffectBroker as one node attempt sees it: every call is passed
+// through unchanged and its outcome recorded in the attempt's log. A subgraph
+// the attempt runs inherits this broker, so its calls are recorded here too.
+class RecordingToolEffectBroker final : public ToolEffectBroker {
+public:
+    RecordingToolEffectBroker(std::shared_ptr<ToolEffectBroker> inner,
+                              std::shared_ptr<AttemptEffectLog> log)
+        : inner_(std::move(inner)), log_(std::move(log)) {}
+
+    asio::awaitable<ToolExecutionResult> execute(ToolEffectIdentity identity, Tool& tool,
+                                                 json arguments,
+                                                 ToolExecutionContext context) override {
+        AttemptEffectLog::Entry entry;
+        entry.thread_id = identity.thread_id;
+        entry.task_id = identity.task_id;
+        entry.ordinal = identity.call_ordinal;
+        bool effectful = true;
+        ToolExecutionResult result;
+        std::exception_ptr failure;
+        try {
+            entry.tool = tool.get_name();
+            const auto controller =
+                context.controller ? context.controller : default_tool_execution_controller();
+            const auto policy = controller->policies()->resolve(entry.tool);
+            // The same rule as an uncertain tool failure (tool_failure.h): only
+            // a read, or an idempotent call, rules out a repeated effect.
+            effectful = policy.effect != ToolEffectClass::ReadOnly &&
+                        policy.effect != ToolEffectClass::ExternalRead &&
+                        policy.idempotency != ToolIdempotency::Idempotent;
+            result = co_await inner_->execute(std::move(identity), tool, std::move(arguments),
+                                              std::move(context));
+        } catch (...) {
+            failure = std::current_exception();
+        }
+        if (failure) {
+            // A broker that throws leaves the effect unresolved (its marker
+            // may be on disk), whatever the exception was.
+            entry.status = ToolTerminalStatus::ReconciliationRequired;
+            log_->record(std::move(entry), false, true);
+            std::rethrow_exception(failure);
+        }
+        const bool uncertain =
+            result.effect_uncertain || result.status == ToolTerminalStatus::ReconciliationRequired;
+        entry.status = result.status;
+        log_->record(std::move(entry), !uncertain && result.succeeded() && effectful, uncertain);
+        co_return result;
+    }
+
+private:
+    std::shared_ptr<ToolEffectBroker> inner_;
+    std::shared_ptr<AttemptEffectLog> log_;
+};
+
+}  // namespace
+
 ScopedInvocationRuntime::ScopedInvocationRuntime(
-    const RunContext& parent, const RunContext& context, std::string_view invocation_id)
+    const RunContext& parent, const RunContext& context, std::string_view invocation_id,
+    bool record_effects)
     : context_(&context) {
     binding_.invocation_id.assign(invocation_id.data(), invocation_id.size());
-    registry().install_inheriting(&parent, context_, binding_, empty_runtime());
+    // The parent's scope is alive for the whole call, so its binding cannot go
+    // away between this lookup and the install below.
+    std::shared_ptr<const RunContextRuntime> run = registry().run_of(&parent);
+    if (!run) run = empty_runtime();
+    if (record_effects && run->tool_effect_broker) {
+        // The attempt sees the run-wide state with its broker recorded; the
+        // run-wide state itself is shared and stays untouched.
+        effects_ = std::make_shared<AttemptEffectLog>();
+        auto attempt = std::make_shared<RunContextRuntime>(*run);
+        attempt->tool_effect_broker =
+            std::make_shared<RecordingToolEffectBroker>(run->tool_effect_broker, effects_);
+        run = std::move(attempt);
+    }
+    binding_.run = std::move(run);
+    registry().install(context_, binding_);
 }
 
 ScopedInvocationRuntime::~ScopedInvocationRuntime() {

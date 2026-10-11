@@ -109,17 +109,33 @@ inline std::string make_send_task_id(int                step,
 // nodes running side by side (fan-out branches, or overlapping calls into one
 // NodeExecutor) never see each other's identity and keep value semantics for
 // callable state such as `on_provider_event`.
+//
+// The scope is per attempt (#364): attempt k of task "s3:act" is bound to the
+// effect namespace "s3:act#a<k>" (attempt 0 to "s3:act" itself), and records
+// the mediated Tool effects that attempt performs.
 class ScopedInvocationContext {
 public:
-    ScopedInvocationContext(const RunContext& parent, const std::string& task_id)
-        : context_(parent), runtime_scope_(parent, context_, task_id) {}
+    ScopedInvocationContext(const RunContext& parent, std::string_view invocation_id)
+        : context_(parent), runtime_scope_(parent, context_, invocation_id, true) {}
 
     const RunContext& context() const { return context_; }
+    const std::shared_ptr<detail::AttemptEffectLog>& effects() const {
+        return runtime_scope_.effects();
+    }
 
 private:
     RunContext                       context_;
     detail::ScopedInvocationRuntime  runtime_scope_;
 };
+
+int next_delay_ms(int delay_ms, const RetryPolicy& policy) {
+    // Compute in double and clamp before converting: casting a product
+    // outside int range to int is undefined behaviour.
+    double next = static_cast<double>(delay_ms) * static_cast<double>(policy.backoff_multiplier);
+    if (std::isnan(next) || next > policy.max_delay_ms) next = policy.max_delay_ms;
+    if (next < 0.0) next = 0.0;
+    return static_cast<int>(next);
+}
 
 
 void apply_node_result(GraphState& state, const NodeResult& result, const RunContext& context) {
@@ -129,6 +145,43 @@ void apply_node_result(GraphState& state, const NodeResult& result, const RunCon
         state.apply_writes(result.command->updates);
         detail::append_applied_writes(context, result.command->updates);
     }
+}
+
+}  // namespace
+
+namespace detail {
+
+struct InvocationSlot {
+    /// The invocation's stable task id; attempt 0's effect namespace. Points
+    /// into the caller's frame, which outlives the retry loop.
+    std::string_view task_id;
+    int step = 0;
+    /// Pending writes of the super-step being resumed. A pending write keyed
+    /// by an attempt's effect namespace records that the attempt started.
+    const std::unordered_map<std::string, NodeResult>* replay = nullptr;
+    const CheckpointCoordinator* coord = nullptr;
+    const std::string* parent_cp_id = nullptr;
+    /// Out: the attempt that was running when the node paused.
+    int* interrupted_attempt = nullptr;
+};
+
+}  // namespace detail
+
+namespace {
+
+// Records that attempt `attempt` of `slot` started, under `checkpoint_id`.
+// Stores need no schema change: it is an empty pending write keyed by the
+// attempt's effect namespace, which no node's task id equals.
+asio::awaitable<void> record_attempt_start(const CheckpointCoordinator& coord,
+                                           const std::string& checkpoint_id,
+                                           std::string_view task_id,
+                                           const std::string& node_name, int attempt,
+                                           int step) {
+    if (attempt <= 0 || !coord.records_pending_writes(checkpoint_id)) co_return;
+    const auto effect_namespace = detail::attempt_effect_namespace(task_id, attempt);
+    NodeResult started;
+    co_await coord.record_pending_write_async(checkpoint_id, effect_namespace, effect_namespace,
+                                              node_name, started, step);
 }
 
 }  // namespace
@@ -246,6 +299,16 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
     const GraphStreamCallback& cb,
     StreamMode                 stream_mode,
     const RunContext&          ctx) {
+    co_return co_await execute_attempts_async(node_name, state, cb, stream_mode, ctx, nullptr);
+}
+
+asio::awaitable<NodeResult> NodeExecutor::execute_attempts_async(
+    const std::string&         node_name,
+    GraphState&                state,
+    const GraphStreamCallback& cb,
+    StreamMode                 stream_mode,
+    const RunContext&          ctx,
+    detail::InvocationSlot*    slot) {
     // Dispatch through the unified ``run(NodeInput)`` virtual. ``ctx``
     // and the optional streaming callback reach the user-overridable
     // surface directly.
@@ -277,8 +340,20 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
         }
     }
 
-    auto policy   = retry_policy_for_(node_name);
-    int  delay_ms = policy.initial_delay_ms;
+    auto policy = retry_policy_for_(node_name);
+
+    // A resumed invocation continues the attempt that was in flight: the
+    // latest attempt whose start was recorded. Its effects replay from the
+    // broker; only the attempts after it are new.
+    int first_attempt = 0;
+    if (slot && slot->replay && !slot->replay->empty()) {
+        while (first_attempt < std::numeric_limits<int>::max() &&
+               slot->replay->count(detail::attempt_effect_namespace(slot->task_id, first_attempt + 1)))
+            ++first_attempt;
+    }
+    const int last_attempt = std::max(policy.max_retries, first_attempt);
+    int       delay_ms     = policy.initial_delay_ms;
+    for (int waited = 0; waited < first_attempt; ++waited) delay_ms = next_delay_ms(delay_ms, policy);
 
     auto ex = co_await asio::this_coro::executor;
 
@@ -286,7 +361,8 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
     // carries the classified record (graph::node_failure_of).
     auto fail_node = [&](std::exception_ptr cause, int attempts,
                          const ::neograph::detail::NodeFailureVerdict& verdict,
-                         NodeFailureKind kind) -> void {
+                         NodeFailureKind kind,
+                         const std::shared_ptr<detail::AttemptEffectLog>& effects) -> void {
         auto record            = std::make_shared<NodeFailure>();
         record->node           = node_name;
         record->code           = verdict.code;
@@ -296,6 +372,11 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
         record->retryable      = verdict.retryable;
         record->routable       = verdict.routable;
         record->attempts       = attempts;
+        if (effects) {
+            for (auto& entry : effects->entries())
+                record->effects.push_back(NodeFailureEffect{
+                    std::move(entry.tool), entry.ordinal, std::string(to_string(entry.status))});
+        }
         std::shared_ptr<const NodeFailure> failure = std::move(record);
 
         // A subgraph may fail inside this node. The outer retry policy has now
@@ -342,7 +423,37 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
             std::move(error_node), error_attempts, std::move(error_cause), std::move(failure));
     };
 
-    for (int attempt = 0; attempt <= policy.max_retries; ++attempt) {
+    for (int attempt = first_attempt; attempt <= last_attempt; ++attempt) {
+        // Every attempt has its own effect namespace (#364): attempt 0 the
+        // task id itself, attempt k "task#a<k>". A new attempt first records
+        // that it started, so a crash-resume continues it instead of starting
+        // over in an earlier attempt's slots.
+        std::string      later_attempt_namespace;
+        std::string_view effect_namespace;
+        if (slot) {
+            effect_namespace = slot->task_id;
+            if (attempt > 0) {
+                later_attempt_namespace = detail::attempt_effect_namespace(slot->task_id, attempt);
+                effect_namespace        = later_attempt_namespace;
+                // A node literally named "<node>#a<k>" would share this
+                // namespace in the same super-step; refuse instead.
+                const auto colon = later_attempt_namespace.find(':');
+                if (colon != std::string::npos &&
+                    nodes_.count(later_attempt_namespace.substr(colon + 1))) {
+                    auto collision = std::make_exception_ptr(std::logic_error(
+                        "Node '" + later_attempt_namespace.substr(colon + 1) +
+                        "' is named like retry attempt " + std::to_string(attempt) + " of node '" +
+                        node_name + "'; rename it"));
+                    fail_node(collision, attempt,
+                              ::neograph::detail::classify_node_failure(collision, nullptr),
+                              NodeFailureKind::NonRetryable, nullptr);
+                }
+            }
+            if (attempt > first_attempt && slot->coord && slot->parent_cp_id)
+                co_await record_attempt_start(*slot->coord, *slot->parent_cp_id, slot->task_id,
+                                              node_name, attempt, slot->step);
+        }
+
         if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
             json data;
             data["step"] = ctx.step;
@@ -352,16 +463,21 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
 
         // Capture the outcome of one attempt without co_await inside a
         // catch block (GCC 13 ICEs on that shape).
-        std::optional<NodeResult> ok_result;
-        std::exception_ptr        failure;
-
-        try {
-            // Single dispatch point. NodeInput bundles state, per-run
-            // context, and the optional streaming callback.
-            NodeInput in{state, ctx, cb ? &cb : nullptr};
-            ok_result.emplace(co_await node_it->second->run(in));
-        } catch (...) {
-            failure = std::current_exception();
+        std::optional<NodeResult>                 ok_result;
+        std::exception_ptr                        failure;
+        std::shared_ptr<detail::AttemptEffectLog> effects;
+        {
+            std::optional<ScopedInvocationContext> scope;
+            if (slot) scope.emplace(ctx, effect_namespace);
+            if (scope) effects = scope->effects();
+            try {
+                // Single dispatch point. NodeInput bundles state, per-run
+                // context, and the optional streaming callback.
+                NodeInput in{state, scope ? scope->context() : ctx, cb ? &cb : nullptr};
+                ok_result.emplace(co_await node_it->second->run(in));
+            } catch (...) {
+                failure = std::current_exception();
+            }
         }
 
         if (ok_result) {
@@ -391,6 +507,8 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
         try {
             std::rethrow_exception(failure);
         } catch (const NodeInterrupt&) {
+            // Resume continues this attempt.
+            if (slot && slot->interrupted_attempt) *slot->interrupted_attempt = attempt;
             throw;
         } catch (const CancelledException&) {
             throw;
@@ -406,15 +524,36 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
             }
         } catch (...) {}
 
-        // Every other retry decision is the shared classifier's
-        // (tool_failure.h): ordinary failures are retried unless the author
-        // said otherwise; nothing else is.
-        const auto verdict = ::neograph::detail::classify_node_failure(
-            failure, ctx.cancel_token.get());
-        if (!verdict.retryable || attempt >= policy.max_retries) {
-            fail_node(std::move(failure), attempt + 1, verdict,
-                      verdict.retryable ? NodeFailureKind::Exhausted
-                                        : NodeFailureKind::NonRetryable);
+        // An effect of this attempt whose outcome is unknown is never retried
+        // or routed: the run pauses for reconciliation, as mediated dispatch
+        // does when it sees one, even if the node turned that into an error.
+        if (effects && effects->uncertain()) {
+            if (slot && slot->interrupted_attempt) *slot->interrupted_attempt = attempt;
+            throw NodeInterrupt("Mediated Tool effect requires reconciliation",
+                                json{{"kind", "tool_effect_reconciliation"},
+                                     {"thread_id", ctx.thread_id},
+                                     {"task_id", std::string(effect_namespace)}});
+        }
+
+        // Every other decision is the shared classifier's (tool_failure.h):
+        // ordinary failures are retried unless the author said otherwise;
+        // nothing else is. An attempt that committed a non-idempotent effect
+        // is not retried either, or the next attempt would repeat the effect.
+        auto verdict = ::neograph::detail::classify_node_failure(failure, ctx.cancel_token.get());
+        if (effects && effects->committed() &&
+            verdict.failure_class < NodeFailureClass::EffectCommitted) {
+            verdict.failure_class = NodeFailureClass::EffectCommitted;
+            verdict.code          = node_failure_code(NodeFailureClass::EffectCommitted);
+            verdict.public_message.clear();
+            verdict.retryable = false;
+            verdict.routable  = node_failure_routable(NodeFailureClass::EffectCommitted);
+        }
+        if (!verdict.retryable || attempt >= last_attempt) {
+            const auto kind = verdict.failure_class == NodeFailureClass::EffectCommitted
+                                  ? NodeFailureKind::EffectCommitted
+                              : verdict.retryable ? NodeFailureKind::Exhausted
+                                                  : NodeFailureKind::NonRetryable;
+            fail_node(std::move(failure), attempt + 1, verdict, kind, effects);
         }
 
         if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
@@ -452,12 +591,7 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
         timer.expires_after(std::chrono::milliseconds(actual_delay));
         co_await timer.async_wait(asio::use_awaitable);
 
-        // Compute in double and clamp before converting: casting a product
-        // outside int range to int is undefined behaviour.
-        double next = static_cast<double>(delay_ms) * static_cast<double>(policy.backoff_multiplier);
-        if (std::isnan(next) || next > policy.max_delay_ms) next = policy.max_delay_ms;
-        if (next < 0.0) next = 0.0;
-        delay_ms = static_cast<int>(next);
+        delay_ms = next_delay_ms(delay_ms, policy);
     }
 
     throw std::runtime_error("Unreachable: async retry loop exited without return or throw");
@@ -486,6 +620,8 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
     // out of the coroutine untouched.
     std::optional<NodeResult>    ok_result;
     std::optional<NodeInterrupt> interrupt;
+    int                          interrupted_attempt = 0;
+    detail::InvocationSlot slot{task_id, step, &replay, &coord, &parent_cp_id, &interrupted_attempt};
 
     try {
         auto replay_it = replay.find(task_id);
@@ -494,9 +630,8 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
             // do NOT re-record. Just apply the recorded writes.
             ok_result.emplace(replay_it->second);
         } else {
-            ScopedInvocationContext node_ctx(ctx, task_id);
-            ok_result.emplace(co_await execute_node_with_retry_async(
-                node_name, state, cb, stream_mode, node_ctx.context()));
+            ok_result.emplace(co_await execute_attempts_async(
+                node_name, state, cb, stream_mode, ctx, &slot));
 
             // Record BEFORE apply_writes so a crash between the two
             // still leaves a durable log for resume to replay.
@@ -523,9 +658,14 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
         // body trips build_special_member_call).
         std::vector<std::string> next_nodes;
         next_nodes.push_back(node_name);
-        co_await coord.save_super_step_async(state, node_name, next_nodes,
-                                             CheckpointPhase::NodeInterrupt, step, parent_cp_id,
-                                             barrier_state, detail::checkpoint_metadata_for(ctx));
+        const auto interrupt_cp_id = co_await coord.save_super_step_async(
+            state, node_name, next_nodes, CheckpointPhase::NodeInterrupt, step, parent_cp_id,
+            barrier_state, detail::checkpoint_metadata_for(ctx));
+        // Without a parent checkpoint the attempt's start was not recorded;
+        // record it under the interrupt's own checkpoint so resume continues it.
+        if (parent_cp_id.empty())
+            co_await record_attempt_start(coord, interrupt_cp_id, task_id, node_name,
+                                          interrupted_attempt, step);
         // The executor is the only layer that knows the graph's name for
         // this node — the node body does not.
         interrupt->set_node(node_name);
@@ -582,21 +722,25 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
         if (replay_it != replay.end()) {
             nr = replay_it->second;
         } else {
+            int                    interrupted_attempt = 0;
+            detail::InvocationSlot slot{task_id,       step, &replay, &coord, &parent_cp_id,
+                                        &interrupted_attempt};
             // GCC-13: cannot co_await inside a catch handler. Classify
             // here, save + rethrow outside the try/catch.
             try {
-                ScopedInvocationContext node_ctx(ctx, task_id);
-                nr = co_await execute_node_with_retry_async(node_name, state, cb, stream_mode,
-                                                            node_ctx.context());
+                nr = co_await execute_attempts_async(node_name, state, cb, stream_mode, ctx, &slot);
             } catch (const NodeInterrupt& ni) {
                 interrupt = ni;
             }
             if (interrupt) {
                 std::vector<std::string> next_nodes;
                 next_nodes.push_back(node_name);
-                co_await coord.save_super_step_async(
+                const auto interrupt_cp_id = co_await coord.save_super_step_async(
                     state, node_name, next_nodes, CheckpointPhase::NodeInterrupt, step,
                     parent_cp_id, barrier_state, detail::checkpoint_metadata_for(ctx));
+                if (parent_cp_id.empty())
+                    co_await record_attempt_start(coord, interrupt_cp_id, task_id, node_name,
+                                                  interrupted_attempt, step);
                 interrupt->set_node(node_name);
                 throw *interrupt;
             }
@@ -638,15 +782,19 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
     // returns. If a future change introduces opportunistic
     // cancellation that abandons the parallel_group early, switch
     // these captures to by-value copies first.
-    auto worker = [&, this](std::string node_name) -> asio::awaitable<NodeResult> {
+    // The attempt each branch was in when it paused; written by that branch
+    // only, read after the group has finished.
+    std::vector<int> interrupted_attempts(ready.size(), 0);
+    auto worker = [&, this](std::size_t index) -> asio::awaitable<NodeResult> {
+        const std::string& node_name = ready[index];
         const std::string task_id   = make_static_task_id(step, node_name);
         auto              replay_it = replay.find(task_id);
         if (replay_it != replay.end()) {
             co_return replay_it->second;
         }
-        ScopedInvocationContext node_ctx(ctx, task_id);
-        auto nr = co_await execute_node_with_retry_async(node_name, state, cb, stream_mode,
-                                                         node_ctx.context());
+        detail::InvocationSlot slot{task_id,       step, &replay, &coord, &parent_cp_id,
+                                    &interrupted_attempts[index]};
+        auto nr = co_await execute_attempts_async(node_name, state, cb, stream_mode, ctx, &slot);
         if (coord.records_pending_writes(parent_cp_id))
             co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, node_name, nr,
                                                        step);
@@ -676,12 +824,12 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
                                     : asio::any_io_executor(asio::make_strand(branch_ex));
     };
     using DeferredOp = decltype(asio::co_spawn(
-        std::declval<asio::any_io_executor>(), worker(std::declval<std::string>()),
+        std::declval<asio::any_io_executor>(), worker(std::size_t{0}),
         asio::deferred));
     std::vector<DeferredOp> ops;
     ops.reserve(ready.size());
-    for (const auto& node_name : ready) {
-        ops.push_back(asio::co_spawn(make_branch_executor(), worker(node_name), asio::deferred));
+    for (std::size_t index = 0; index < ready.size(); ++index) {
+        ops.push_back(asio::co_spawn(make_branch_executor(), worker(index), asio::deferred));
     }
 
     // wait_for_all returns:
@@ -734,9 +882,16 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
             // the co_await arg list (nested brace-init trips the ICE).
             std::vector<std::string> next_nodes;
             next_nodes = ready;
-            co_await coord.save_super_step_async(
+            const auto interrupt_cp_id = co_await coord.save_super_step_async(
                 state, first_exception_node, next_nodes, CheckpointPhase::NodeInterrupt, step,
                 parent_cp_id, barrier_state, detail::checkpoint_metadata_for(ctx));
+            if (parent_cp_id.empty()) {
+                for (std::size_t i = 0; i < ready.size(); ++i) {
+                    const auto branch_task_id = make_static_task_id(step, ready[i]);
+                    co_await record_attempt_start(coord, interrupt_cp_id, branch_task_id, ready[i],
+                                                  interrupted_attempts[i], step);
+                }
+            }
             // Drop the worker eptr and throw a fresh NodeInterrupt —
             // see comment above the loop. The fresh exception is
             // wholly owned by the current (main) thread.
@@ -822,9 +977,8 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
             nr = replay_it->second;
         } else {
             apply_input(state, s.input);
-            ScopedInvocationContext node_ctx(ctx, task_id);
-            nr = co_await execute_node_with_retry_async(s.target_node, state, cb, stream_mode,
-                                                        node_ctx.context());
+            detail::InvocationSlot slot{task_id, step, &replay, &coord, &parent_cp_id, nullptr};
+            nr = co_await execute_attempts_async(s.target_node, state, cb, stream_mode, ctx, &slot);
             if (coord.records_pending_writes(parent_cp_id))
                 co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, s.target_node,
                                                           nr, step);
@@ -883,9 +1037,9 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
         // is captured by value into this worker lambda — no
         // serialize/restore hop, no manual forward.
 
-        ScopedInvocationContext node_ctx(ctx, task_id);
-        auto nr = co_await execute_node_with_retry_async(s.target_node, send_state, cb, stream_mode,
-                                                         node_ctx.context());
+        detail::InvocationSlot slot{task_id, step, &replay, &coord, &parent_cp_id, nullptr};
+        auto nr = co_await execute_attempts_async(s.target_node, send_state, cb, stream_mode, ctx,
+                                                  &slot);
         if (coord.records_pending_writes(parent_cp_id))
             co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, s.target_node, nr,
                                                       step);

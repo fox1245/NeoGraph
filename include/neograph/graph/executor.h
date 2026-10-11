@@ -70,6 +70,13 @@ class GraphRegistry;
 /// (``graph_executor.cpp``) pulls in ``engine.h`` to see the layout.
 struct RunContext;
 
+namespace detail {
+/// Where one node invocation sits in a super-step: its task id plus what the
+/// retry loop needs to give every attempt its own effect namespace and to
+/// record that an attempt started. Defined in graph_executor.cpp.
+struct InvocationSlot;
+}  // namespace detail
+
 /**
  * @brief Stateless-per-call node invocation dispatcher.
  *
@@ -220,6 +227,17 @@ public:
 
 private:
     friend class GraphEngine;
+
+    /// The retry loop. With a slot, every attempt runs under its own
+    /// invocation scope and effect namespace and attempt k >= 1 first records
+    /// that it started; without one, `ctx` is used as given.
+    asio::awaitable<NodeResult> execute_attempts_async(
+        const std::string& node_name,
+        GraphState& state,
+        const GraphStreamCallback& cb,
+        StreamMode stream_mode,
+        const RunContext& ctx,
+        detail::InvocationSlot* slot);
 
     /// Initialize a clean GraphState using the engine's channel defs.
     /// Used by the multi-send path to build each target's isolated copy.

@@ -4,7 +4,10 @@
 #include <neograph/graph/run_context.h>
 #include <neograph/graph/provider_call_broker.h>
 
+#include <atomic>
+#include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -87,22 +90,66 @@ private:
     bool installed_ = false;
 };
 
+/// The mediated Tool effects of one node attempt (#364). The attempt's
+/// ToolEffectBroker records every call it settles, including the calls of any
+/// subgraph the attempt runs, so the retry loop knows whether the attempt
+/// committed a non-idempotent effect or left one uncertain.
+class AttemptEffectLog {
+public:
+    struct Entry {
+        std::string thread_id;
+        std::string task_id;
+        std::uint64_t ordinal = 0;
+        std::string tool;
+        ToolTerminalStatus status = ToolTerminalStatus::Failed;
+    };
+
+    /// @param committed the call succeeded under a policy that does not rule
+    ///        out a non-idempotent effect.
+    /// @param uncertain the call's effect may or may not have happened.
+    void record(Entry entry, bool committed, bool uncertain);
+
+    bool committed() const noexcept { return committed_.load(std::memory_order_acquire); }
+    bool uncertain() const noexcept { return uncertain_.load(std::memory_order_acquire); }
+    /// Every recorded call, ordered by (thread, task, ordinal) so the order
+    /// does not depend on which call of a batch settled first.
+    std::vector<Entry> entries() const;
+
+private:
+    mutable std::mutex mutex_;
+    std::vector<Entry> entries_;
+    std::atomic<bool> committed_{false};
+    std::atomic<bool> uncertain_{false};
+};
+
+/// The effect namespace of attempt `attempt` of the invocation `task_id`:
+/// the task id itself for attempt 0, so existing journals keep their slots,
+/// and `task_id + "#a" + attempt` after it.
+std::string attempt_effect_namespace(std::string_view task_id, int attempt);
+
 /// Binds `context` (the RunContext one node invocation receives) to the
 /// run-wide state `parent` is bound to, plus the task id of that invocation.
 /// A context must be bound by at most one invocation scope at a time; if a
 /// context is rebound, the scopes must end in reverse order.
 class ScopedInvocationRuntime {
 public:
+    /// With `record_effects`, and when the run has a ToolEffectBroker, the
+    /// context sees that broker through an AttemptEffectLog recorder.
     ScopedInvocationRuntime(const RunContext& parent, const RunContext& context,
-                            std::string_view invocation_id);
+                            std::string_view invocation_id, bool record_effects = false);
     ~ScopedInvocationRuntime();
 
     ScopedInvocationRuntime(const ScopedInvocationRuntime&) = delete;
     ScopedInvocationRuntime& operator=(const ScopedInvocationRuntime&) = delete;
 
+    /// The log of this attempt's mediated effects; null unless effects are
+    /// recorded and the run has a ToolEffectBroker.
+    const std::shared_ptr<AttemptEffectLog>& effects() const noexcept { return effects_; }
+
 private:
     const RunContext* context_ = nullptr;
     RuntimeBinding binding_;
+    std::shared_ptr<AttemptEffectLog> effects_;
 };
 
 }  // namespace neograph::graph::detail
