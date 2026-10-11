@@ -157,3 +157,48 @@ TEST(PlanExecuteGraph, AcceptsFencedJsonAndNumberedListFallbacks) {
     EXPECT_EQ(past[0]["step"].get<std::string>(), "one");
     EXPECT_EQ(past[1]["step"].get<std::string>(), "two");
 }
+
+// pause_turn: the executor resends its history, paused turn included, and
+// records only the finished answer (#311).
+TEST(PlanExecuteGraph, ExecutorContinuesAPausedTurn) {
+    struct Script {
+        std::mutex mutex;
+        std::vector<sp::runtime::Result> results;
+        std::vector<std::vector<sp::Message>> requests;
+    };
+    auto script = std::make_shared<Script>();
+    auto paused = test::success("still working");
+    {
+        auto copy = std::make_shared<sp::Outcome>(*paused);
+        std::get<sp::Completion>(*copy).stop = {sp::StopKind::PauseTurn, "pause_turn"};
+        paused = std::move(copy);
+    }
+    script->results = {test::success(R"(["step A"])"), paused, test::success("did A"), test::success("FINAL")};
+    auto provider = std::make_shared<test::LocalProvider>(
+        [script](ProviderRequest request, const PreparedProviderRequest&,
+                 const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+            std::lock_guard lock(script->mutex);
+            script->requests.push_back(provider_request_messages(request));
+            if (script->results.empty()) throw std::logic_error("scripted responses exhausted");
+            auto next = script->results.front();
+            script->results.erase(script->results.begin());
+            co_return next;
+        }, "scripted");
+    auto engine = create_plan_execute_graph(provider, {}, "plan", "execute", "respond", "gpt-test", 3);
+    RunConfig cfg;
+    cfg.input = json::object();
+    cfg.input["messages"] = json::array({json{{"role", "user"}, {"content", "do A"}}});
+    cfg.max_steps = 20;
+    auto result = engine->run(cfg);
+    std::lock_guard lock(script->mutex);
+    ASSERT_EQ(script->requests.size(), 4u) << "planner + paused executor + resumed executor + responder";
+    const auto& resumed = script->requests[2];
+    ASSERT_FALSE(resumed.empty());
+    EXPECT_EQ(resumed.back().role, sp::Role::Assistant);
+    const auto* resumed_text = std::get_if<sp::Text>(&resumed.back().parts.at(0));
+    ASSERT_NE(resumed_text, nullptr);
+    EXPECT_EQ(resumed_text->value, "still working");
+    auto past = result.output["channels"]["past_steps"]["value"];
+    ASSERT_EQ(past.size(), 1u);
+    EXPECT_EQ(past[0]["result"].get<std::string>(), "did A");
+}
