@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=b19f6a37a9acd8ace536049ebbe5f393c410692084097d2150946e9555187111 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=a85f65d34d9f9d6112729356028aa150f05ef89a1f2381407ee5cbf54b130054 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -426,7 +426,7 @@ print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 
 
 `ProgramRegistryBuilder.add_registered_node`、`add_registered_reducer` 和 `add_registered_condition` 复制本进程中已经注册的可执行单元。注册方式为 `@ng.node` 或 `ng.NodeFactory.register_type`、`ng.ReducerRegistry.register_reducer`、`ng.ConditionRegistry.register_condition`。传入未注册的名称时，这三个方法都会抛出 `ng.ProgramRegistryError`，消息会指出所需的注册调用。该错误的 `kind` 为 `"node"`、`"reducer"` 或 `"condition"`，`name` 为缺失的名称。它同时继承 `ValueError` 和 `RuntimeError`，因此捕获其中任一类型的现有处理代码仍能捕获它。使用注册表快照中不存在的节点类型、reducer 或条件的 Program 会改为在编译时失败：`ProgramCompiler.compile` 和 `LocalProgramHost.compile_admit` 都会抛出带有诊断 `P_CORE_GC_REGISTRY_MISS` 的 `ng.ProgramCompileError`。
 
-每个诊断 dict 都有 `help` 项：对编译返回的诊断，它是包含 `doc`（[诊断指南](diagnostics.md)中的对应条目）、`related`、`suggestions` 和 `candidates` 的 dict；对封存的 `bundle.diagnostics`，它为 `None`。异常中总是带有它。`ProgramCompiler(..., echo_routes=True)` 还会返回一个包含路由后继表的 `P_CORE_ROUTES` 注记。
+每个诊断 dict 都有 `help` 项：对编译返回的诊断，它是包含 `doc`（[诊断指南](diagnostics.md)中的对应条目）、`related`、`suggestions` 和 `candidates` 的 dict；对封存的 `bundle.diagnostics`，它为 `None`。异常中总是带有它。`ProgramCompiler(..., echo_routes=True)` 还会返回一个包含路由后继表的 `P_CORE_ROUTES` 注记。在 `ProgramCompiler` 或 `LocalProgramHost` 上传入 `soundness_check=True` 会运行[健全性检查](program-graphs.md#soundness-check)，返回带 witness trace 的 `P_CORE_S1` 至 `P_CORE_S5` 警告以及 `P_CORE_SOUNDNESS` 摘要。它们都不会被封存。
 
 `LocalProgramHost` 是一个所有者作用域的内存便捷宿主。它仍然使用 C++ 编译器、Catalog、准入(admission)策略、转换存储和 ProgramRuntime。生成的提案在准入(admission)前还应通过宿主语义验证器；参见 [DSL 能力评估](DSL_CAPABILITY_EVAL.md)。
 

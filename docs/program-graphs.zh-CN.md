@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=zh-CN source_sha256=1ce6e6727adb4b5289341f4898df30cfc1d98ddb98173b1777959ab8cf6c957c -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=zh-CN source_sha256=8420d512c29d33a10e5e137f6f4c3a359704ff6b43290fdcb2c87547987fbb6e -->
 # Program 图功能
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -89,3 +89,38 @@ ng.graph("fix")
 - **failure exit。** 代码默认为 `NG.Aborted`。failure exit 节点没有 edge 或路由。
 - **校验。** 未知节点和通道报告 `P_CORE_E3`。failure edge 会加入路由后继映射，因此可达性、终止和 barrier 绕过（`P_CORE_E15`，路由 `on_failure`）检查都能看到它们，`error_channel` 也算作已写入。节点类型未声明的节点配置中的 `retry_policy` 键会报告为 `P_CORE_E18`。在图级 `retryPolicy({...})` 中写 `on_failure` 会报告 `P_CORE_GC_UNKNOWN_FIELD`，并提示使用节点级形式。
 - **迁移。** `failure_edges` 和 `failure_exits` 属于迁移适配器的拓扑形状；`node_retry_policies` 不属于。
+
+## 健全性检查
+
+标志：`diagnostics.soundness_check`。`ProgramCompilerConfig::soundness_check`（Python：`ProgramCompiler(..., soundness_check=True)` 或 `LocalProgramHost(..., soundness_check=True)`）会探索根图的路由所允许的每一个运行，并返回它的发现。它默认关闭，并且与路由表一样从不被封存：无论开关与否，包都相同。使用 `GraphValidator` 的 C++ 调用方设置 `ValidationOptions::soundness_check`。
+
+检查按调度器的方式推进 super-step。状态包括就绪节点的集合、每个 join 持有的信号（含 `any_of` 槽位），以及每个带 `max_visits` 的节点的访问次数。conditional edge 可以走它的任意一条路由，带失败 edge 的节点可以改走该 edge，failure exit 会结束运行。每个发现都是一个警告，其 `witness.trace` 是展示该发现的最短运行，每个 super-step 一项：运行过的节点（`ready`）以及它们所走的路由（`routes`，失败 edge 为 `on_failure`）。
+
+| 代码 | 发现 |
+|---|---|
+| `P_CORE_S1` | 从某一时刻起，没有任何运行能够完成：每个后续运行要么以 barrier-stalled 结束，要么在访问上限处失败，要么循环。 |
+| `P_CORE_S2` | 运行结束时某个 join 仍持有信号：以 barrier-stalled 结束，或者显式结束丢弃了这些信号。 |
+| `P_CORE_S3` | 某个 join 在任何运行中都不会触发。 |
+| `P_CORE_S4` | 运行可能进入一个没有出口的循环，此后只会在 step 上限处停止。 |
+| `P_CORE_S5` | 写同一个 overwrite 通道的两个节点可能在同一个 super-step 中运行（`P_CORE_E5` 报告的 fan-out 兄弟之外的情形）。 |
+
+`P_CORE_SOUNDNESS` 摘要说明检查进行到了哪一步：探索了每个运行时为注记，否则为警告。它从不声称未探索的内容：
+
+- 可能返回 `Command.goto` 或 `Send` 的节点类型应在其 effect 契约中声明，即 `"control": ["goto"]` 或 `["send"]`。这类节点就绪之后的运行无法分析：摘要会列出这些节点，`P_CORE_S1` 和 `P_CORE_S4` 只在探索了全部后续运行的地方报告，`P_CORE_S3` 则完全不报告。检查信任这些契约，因此未声明却返回 `Command.goto` 的节点类型会按其声明的路由来分析。
+- `soundness_state_cap`（默认 100 000 个状态）限制工作量。检查达到该上限时，摘要为 `not_checked`，只返回在此之前找到的 `P_CORE_S2` 和 `P_CORE_S5` 发现。
+
+对于 `barrier("D", ["B", "C"])` 的 #357 结构：
+
+```python
+compiler = ng.ProgramCompiler(registry, soundness_check=True)
+bundle = compiler.compile(ng.ProgramSource.from_javascript("plan.js", source))
+stall = [d for d in bundle.compile_diagnostics if d["code"] == "P_CORE_S2"][0]
+stall["witness"]["trace"]
+# [{"ready": ["A"], "routes": {}},
+#  {"ready": ["B", "C"], "routes": {"B": "fail"}},
+#  {"ready": ["FIX"], "routes": {}}]
+stall["witness"]["missing"]             # ["B"]
+stall["witness"]["suggested_wait_for"]  # [{"any_of": ["B", "FIX"]}, "C"]
+```
+
+`P_CORE_S1` 从 `B` 走了 `fail` 的那一刻起报告同一个图。使用 `barrier("D", [{any_of: ["B", "FIX"]}, "C"])` 时检查什么也找不到，摘要注记会说明它探索了每个运行。[诊断指南](diagnostics.md#soundness-check)说明了每种 witness。

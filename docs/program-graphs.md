@@ -88,3 +88,38 @@ ng.graph("fix")
 - **Failure exits.** The code defaults to `NG.Aborted`. A failure-exit node has no edges or routes.
 - **Validation.** Unknown nodes and channels are `P_CORE_E3`. Failure edges join the routed successor map, so reachability, termination and barrier bypass (`P_CORE_E15`, route `on_failure`) see them, and an `error_channel` counts as written. A `retry_policy` key inside node config that the node type does not declare is reported as `P_CORE_E18`. Writing `on_failure` in the graph-level `retryPolicy({...})` is `P_CORE_GC_UNKNOWN_FIELD` with a hint to the per-node form.
 - **Migration.** `failure_edges` and `failure_exits` are part of a migration adapter's topology shape; `node_retry_policies` is not.
+
+## Soundness check
+
+Flag: `diagnostics.soundness_check`. `ProgramCompilerConfig::soundness_check` (Python: `ProgramCompiler(..., soundness_check=True)` or `LocalProgramHost(..., soundness_check=True)`) explores every run of the root graph that its routes allow and returns what it finds. It is off by default and, like the route table, never sealed: the bundle is the same either way. A C++ caller of `GraphValidator` sets `ValidationOptions::soundness_check`.
+
+The check takes super-steps the way the scheduler does. A state is the set of ready nodes, the signals each join holds (`any_of` slots included) and the visit count of each node with `max_visits`. A conditional edge may take any of its routes, a node with a failure edge may take that edge instead, and a failure exit ends the run. Each finding is a warning whose `witness.trace` is the shortest run that shows it, one entry per super-step: the nodes that ran (`ready`) and the routes they took (`routes`, with `on_failure` for a failure edge).
+
+| Code | Finding |
+|---|---|
+| `P_CORE_S1` | From some point no run can complete: every continuation ends barrier-stalled, fails at a visit limit or loops. |
+| `P_CORE_S2` | A run ends while a join still holds signals: barrier-stalled, or through an explicit end that discards them. |
+| `P_CORE_S3` | A join never fires on any run. |
+| `P_CORE_S4` | A run can enter a loop with no exit and then stops only at the step limit. |
+| `P_CORE_S5` | Two nodes that write one overwrite channel can run in the same super-step (beyond the fan-out siblings `P_CORE_E5` reports). |
+
+A `P_CORE_SOUNDNESS` summary says how far the check got: a note when it explored every run, a warning when it did not. It never claims what it did not explore:
+
+- A node type that may return `Command.goto` or `Send` declares it in its effect contract, `"control": ["goto"]` or `["send"]`. Runs after such a node is ready are not analyzable: the summary lists those nodes, `P_CORE_S1` and `P_CORE_S4` are reported only where every continuation was explored, and `P_CORE_S3` not at all. The check trusts the contracts, so a node type that returns `Command.goto` without declaring it is analyzed by its declared routes.
+- `soundness_state_cap` (default 100 000 states) bounds the work. When the check reaches it, the summary says `not_checked` and only the `P_CORE_S2` and `P_CORE_S5` findings found before it are returned.
+
+For the #357 shape with `barrier("D", ["B", "C"])`:
+
+```python
+compiler = ng.ProgramCompiler(registry, soundness_check=True)
+bundle = compiler.compile(ng.ProgramSource.from_javascript("plan.js", source))
+stall = [d for d in bundle.compile_diagnostics if d["code"] == "P_CORE_S2"][0]
+stall["witness"]["trace"]
+# [{"ready": ["A"], "routes": {}},
+#  {"ready": ["B", "C"], "routes": {"B": "fail"}},
+#  {"ready": ["FIX"], "routes": {}}]
+stall["witness"]["missing"]             # ["B"]
+stall["witness"]["suggested_wait_for"]  # [{"any_of": ["B", "FIX"]}, "C"]
+```
+
+`P_CORE_S1` reports the same graph from the point where `B` has taken `fail`. With `barrier("D", [{any_of: ["B", "FIX"]}, "C"])` the check finds nothing, and the summary note says it explored every run. The [diagnostics guide](diagnostics.md#soundness-check) describes each witness.

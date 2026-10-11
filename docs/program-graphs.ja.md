@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=ja source_sha256=1ce6e6727adb4b5289341f4898df30cfc1d98ddb98173b1777959ab8cf6c957c -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=ja source_sha256=8420d512c29d33a10e5e137f6f4c3a359704ff6b43290fdcb2c87547987fbb6e -->
 # Program グラフ機能
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -89,3 +89,38 @@ ng.graph("fix")
 - **failure exit。** コードの既定値は `NG.Aborted` です。failure exit のノードには edge もルートもありません。
 - **検証。** 未知のノードとチャネルは `P_CORE_E3` です。failure edge はルーティング済みの後続マップに入るため、到達可能性、終了、barrier の迂回（`P_CORE_E15`、ルート `on_failure`）の検査がこれを見ます。また `error_channel` は書き込まれたものとして数えます。ノード型が宣言していないノード設定の `retry_policy` キーは `P_CORE_E18` として報告されます。グラフ単位の `retryPolicy({...})` に `on_failure` を書くと、ノードごとの形を示すヒント付きの `P_CORE_GC_UNKNOWN_FIELD` になります。
 - **マイグレーション。** `failure_edges` と `failure_exits` はマイグレーションアダプターのトポロジー形状に含まれ、`node_retry_policies` は含まれません。
+
+## 健全性チェック
+
+フラグ: `diagnostics.soundness_check`。`ProgramCompilerConfig::soundness_check`（Python: `ProgramCompiler(..., soundness_check=True)` または `LocalProgramHost(..., soundness_check=True)`）は、ルートグラフのルートが許すすべての実行を探索し、見つけたものを返します。既定ではオフで、ルート表と同じく封印されないため、どちらでもバンドルは同じです。`GraphValidator` を使う C++ の呼び出し側は `ValidationOptions::soundness_check` を設定します。
+
+チェックはスケジューラーと同じように super-step を進めます。状態は、実行準備のできたノードの集合、各 join が保持するシグナル（`any_of` スロットを含む）、そして `max_visits` を持つノードごとの訪問回数です。conditional edge はどのルートも取り得て、失敗 edge を持つノードは代わりにその edge を取り得て、failure exit は実行を終えます。検出結果はすべて警告で、`witness.trace` はそれを示す最短の実行を super-step ごとに 1 項目ずつ並べたものです。実行されたノード（`ready`）と、それらが取ったルート（`routes`、失敗 edge は `on_failure`）が入ります。
+
+| コード | 検出結果 |
+|---|---|
+| `P_CORE_S1` | ある時点から、どの実行も完了できません。後続の実行はすべて barrier-stalled で終わるか、訪問上限で失敗するか、ループします。 |
+| `P_CORE_S2` | join がまだシグナルを保持したまま実行が終わります。barrier-stalled で終わるか、明示的な終了がシグナルを捨てます。 |
+| `P_CORE_S3` | join がどの実行でも発火しません。 |
+| `P_CORE_S4` | 実行が出口のないループに入り得て、その場合は step 上限でしか止まりません。 |
+| `P_CORE_S5` | 1 つの overwrite チャネルに書く 2 つのノードが同じ super-step で実行され得ます（`P_CORE_E5` が報告する fan-out の兄弟以外）。 |
+
+`P_CORE_SOUNDNESS` の要約は、チェックがどこまで行ったかを示します。すべての実行を探索した場合はノート、そうでない場合は警告です。探索していないことは決して主張しません。
+
+- `Command.goto` または `Send` を返し得るノードタイプは、effect 契約に `"control": ["goto"]` または `["send"]` としてそれを宣言します。そのようなノードが準備された後の実行は解析できません。要約がそれらのノードを列挙し、`P_CORE_S1` と `P_CORE_S4` はすべての後続の実行を探索した箇所でのみ報告し、`P_CORE_S3` はまったく報告しません。チェックは契約を信頼するため、宣言せずに `Command.goto` を返すノードタイプは宣言されたルートどおりに解析されます。
+- `soundness_state_cap`（既定 100 000 状態）が作業量を制限します。チェックがそこに達すると要約は `not_checked` となり、それまでに見つかった `P_CORE_S2` と `P_CORE_S5` の検出結果だけが返されます。
+
+`barrier("D", ["B", "C"])` の #357 の形の場合:
+
+```python
+compiler = ng.ProgramCompiler(registry, soundness_check=True)
+bundle = compiler.compile(ng.ProgramSource.from_javascript("plan.js", source))
+stall = [d for d in bundle.compile_diagnostics if d["code"] == "P_CORE_S2"][0]
+stall["witness"]["trace"]
+# [{"ready": ["A"], "routes": {}},
+#  {"ready": ["B", "C"], "routes": {"B": "fail"}},
+#  {"ready": ["FIX"], "routes": {}}]
+stall["witness"]["missing"]             # ["B"]
+stall["witness"]["suggested_wait_for"]  # [{"any_of": ["B", "FIX"]}, "C"]
+```
+
+`P_CORE_S1` は同じグラフを、`B` が `fail` を取った時点から報告します。`barrier("D", [{any_of: ["B", "FIX"]}, "C"])` ならチェックは何も見つけず、要約のノートはすべての実行を探索したことを示します。各 witness は[診断ガイド](diagnostics.md#soundness-check)で説明しています。

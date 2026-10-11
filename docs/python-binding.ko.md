@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=b19f6a37a9acd8ace536049ebbe5f393c410692084097d2150946e9555187111 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=a85f65d34d9f9d6112729356028aa150f05ef89a1f2381407ee5cbf54b130054 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -427,7 +427,7 @@ print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 
 
 `ProgramRegistryBuilder.add_registered_node`, `add_registered_reducer`, `add_registered_condition`은 이 프로세스에 이미 등록된 실행 단위를 복사합니다. 등록은 `@ng.node` 또는 `ng.NodeFactory.register_type`, `ng.ReducerRegistry.register_reducer`, `ng.ConditionRegistry.register_condition`으로 합니다. 등록되지 않은 이름을 넘기면 세 메서드 모두 `ng.ProgramRegistryError`를 발생시키고, 메시지는 필요한 등록 호출을 알려 줍니다. 이 오류의 `kind`는 `"node"`, `"reducer"`, `"condition"` 중 하나이고 `name`은 누락된 이름입니다. `ValueError`와 `RuntimeError`를 모두 상속하므로 둘 중 어느 쪽을 잡던 기존 처리기도 그대로 이 오류를 잡습니다. 레지스트리 스냅샷에 없는 노드 타입, 리듀서 또는 조건을 쓰는 Program은 대신 컴파일 시점에 실패합니다. `ProgramCompiler.compile`과 `LocalProgramHost.compile_admit` 모두 진단 `P_CORE_GC_REGISTRY_MISS`가 담긴 `ng.ProgramCompileError`를 발생시킵니다.
 
-각 진단 dict에는 `help` 항목이 있습니다. 컴파일이 반환한 진단에서는 `doc`([진단 가이드](diagnostics.md)의 해당 항목), `related`, `suggestions`, `candidates`가 담긴 dict이고, 봉인된 `bundle.diagnostics`에서는 `None`입니다. 예외에는 항상 들어 있습니다. `ProgramCompiler(..., echo_routes=True)`는 라우팅된 후속 노드 표를 담은 `P_CORE_ROUTES` 노트도 반환합니다.
+각 진단 dict에는 `help` 항목이 있습니다. 컴파일이 반환한 진단에서는 `doc`([진단 가이드](diagnostics.md)의 해당 항목), `related`, `suggestions`, `candidates`가 담긴 dict이고, 봉인된 `bundle.diagnostics`에서는 `None`입니다. 예외에는 항상 들어 있습니다. `ProgramCompiler(..., echo_routes=True)`는 라우팅된 후속 노드 표를 담은 `P_CORE_ROUTES` 노트도 반환합니다. `ProgramCompiler`나 `LocalProgramHost`에 `soundness_check=True`를 주면 [건전성 검사](program-graphs.md#soundness-check)가 실행되어 witness trace가 있는 `P_CORE_S1`~`P_CORE_S5` 경고와 `P_CORE_SOUNDNESS` 요약이 반환됩니다. 이들 중 어느 것도 봉인되지 않습니다.
 
 `LocalProgramHost`는 소유자 범위의 인메모리 편의 호스트입니다. 여전히 C++ 컴파일러, Catalog, 승인(admission) 정책, 전환 저장소 및 ProgramRuntime을 사용합니다. 생성된 제안은 승인(admission) 전에 호스트 의미 검증을 추가로 통과해야 합니다. [DSL 기능 평가](DSL_CAPABILITY_EVAL.md)를 참조하십시오.
 

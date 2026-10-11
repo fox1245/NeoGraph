@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=ko source_sha256=1ce6e6727adb4b5289341f4898df30cfc1d98ddb98173b1777959ab8cf6c957c -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=ko source_sha256=8420d512c29d33a10e5e137f6f4c3a359704ff6b43290fdcb2c87547987fbb6e -->
 # Program 그래프 기능
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -89,3 +89,38 @@ ng.graph("fix")
 - **failure exit.** 코드의 기본값은 `NG.Aborted`입니다. failure exit 노드에는 edge나 라우트가 없습니다.
 - **검증.** 알 수 없는 노드와 채널은 `P_CORE_E3`입니다. failure edge는 라우팅된 후속 노드 맵에 들어가므로 도달 가능성, 종료, barrier 우회(`P_CORE_E15`, 라우트 `on_failure`) 검사가 이를 보며, `error_channel`은 쓰인 것으로 셉니다. 노드 타입이 선언하지 않은 노드 설정의 `retry_policy` 키는 `P_CORE_E18`로 보고됩니다. 그래프 단위 `retryPolicy({...})`에 `on_failure`를 쓰면 노드별 형태를 알려 주는 힌트와 함께 `P_CORE_GC_UNKNOWN_FIELD`가 납니다.
 - **마이그레이션.** `failure_edges`와 `failure_exits`는 마이그레이션 어댑터의 토폴로지 형태에 포함되고, `node_retry_policies`는 포함되지 않습니다.
+
+## 건전성 검사
+
+플래그: `diagnostics.soundness_check`. `ProgramCompilerConfig::soundness_check`(Python: `ProgramCompiler(..., soundness_check=True)` 또는 `LocalProgramHost(..., soundness_check=True)`)는 루트 그래프의 라우트가 허용하는 모든 실행을 탐색하고 찾은 것을 반환합니다. 기본값은 꺼짐이며, 라우트 표처럼 봉인되지 않으므로 어느 쪽이든 번들은 같습니다. `GraphValidator`를 쓰는 C++ 호출자는 `ValidationOptions::soundness_check`를 설정합니다.
+
+검사는 스케줄러와 같은 방식으로 super-step을 진행합니다. 상태는 실행 준비된 노드 집합, 각 join이 쥔 신호(`any_of` 슬롯 포함), 그리고 `max_visits`가 있는 노드별 방문 횟수입니다. conditional edge는 어느 라우트든 택할 수 있고, 실패 edge가 있는 노드는 대신 그 edge를 택할 수 있으며, failure exit는 실행을 끝냅니다. 발견 사항은 모두 경고이고, `witness.trace`는 이를 보여 주는 가장 짧은 실행으로 super-step마다 항목 하나씩입니다. 실행된 노드(`ready`)와 그 노드가 택한 라우트(`routes`, 실패 edge는 `on_failure`)가 들어 있습니다.
+
+| 코드 | 발견 사항 |
+|---|---|
+| `P_CORE_S1` | 어떤 시점부터 어떤 실행도 완료할 수 없습니다. 모든 후속 실행이 barrier-stalled로 끝나거나, 방문 한도에서 실패하거나, 반복합니다. |
+| `P_CORE_S2` | join이 아직 신호를 쥔 채 실행이 끝납니다. barrier-stalled로 끝나거나, 명시적 종료가 신호를 버립니다. |
+| `P_CORE_S3` | join이 어떤 실행에서도 발화하지 않습니다. |
+| `P_CORE_S4` | 실행이 출구 없는 루프에 들어갈 수 있고, 그러면 step 한도에서만 멈춥니다. |
+| `P_CORE_S5` | 한 overwrite 채널에 쓰는 두 노드가 같은 super-step에서 실행될 수 있습니다(`P_CORE_E5`가 보고하는 fan-out 형제 외의 경우). |
+
+`P_CORE_SOUNDNESS` 요약은 검사가 어디까지 했는지 알려 줍니다. 모든 실행을 탐색했으면 노트, 그렇지 않으면 경고입니다. 탐색하지 않은 것은 결코 주장하지 않습니다.
+
+- `Command.goto`나 `Send`를 반환할 수 있는 노드 타입은 effect 계약에 `"control": ["goto"]` 또는 `["send"]`로 이를 선언합니다. 그런 노드가 준비된 뒤의 실행은 분석할 수 없습니다. 요약이 그 노드들을 나열하고, `P_CORE_S1`과 `P_CORE_S4`는 모든 후속 실행을 탐색한 곳에서만, `P_CORE_S3`는 아예 보고하지 않습니다. 검사는 계약을 신뢰하므로, 선언하지 않고 `Command.goto`를 반환하는 노드 타입은 선언된 라우트대로 분석됩니다.
+- `soundness_state_cap`(기본 100 000 상태)이 작업량을 제한합니다. 검사가 여기에 도달하면 요약은 `not_checked`이고, 그 전에 찾은 `P_CORE_S2`와 `P_CORE_S5` 발견 사항만 반환됩니다.
+
+`barrier("D", ["B", "C"])`인 #357 형태라면:
+
+```python
+compiler = ng.ProgramCompiler(registry, soundness_check=True)
+bundle = compiler.compile(ng.ProgramSource.from_javascript("plan.js", source))
+stall = [d for d in bundle.compile_diagnostics if d["code"] == "P_CORE_S2"][0]
+stall["witness"]["trace"]
+# [{"ready": ["A"], "routes": {}},
+#  {"ready": ["B", "C"], "routes": {"B": "fail"}},
+#  {"ready": ["FIX"], "routes": {}}]
+stall["witness"]["missing"]             # ["B"]
+stall["witness"]["suggested_wait_for"]  # [{"any_of": ["B", "FIX"]}, "C"]
+```
+
+`P_CORE_S1`은 같은 그래프를 `B`가 `fail`을 택한 시점부터 보고합니다. `barrier("D", [{any_of: ["B", "FIX"]}, "C"])`라면 검사는 아무것도 찾지 않고, 요약 노트는 모든 실행을 탐색했다고 알려 줍니다. 각 witness는 [진단 가이드](diagnostics.md#soundness-check)에서 설명합니다.
