@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=130e5724d5cf9649044dd1d6ef65259b930d91dbcb457014c00980389b9ab927 -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=c11de6b910a8425c3b03fae8b1bb9fd2f95ed32b17c591cee0007b93464bd9ff -->
 # C++ API 예제
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
@@ -228,7 +228,7 @@ OPENROUTER_API_KEY=sk-or-...
 
 예제 11은 Raylib를 소스에서 빌드하므로 Linux에서는 X11과 OpenGL 개발 헤더가 필요합니다(예: `libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev`). 텍스트는 fontconfig나 일반적인 설치 경로에서 찾은 시스템 TrueType/OpenType 글꼴을 사용합니다. `NEOGRAPH_CHAT_FONT`와, 필요하면 `NEOGRAPH_CHAT_BOLD_FONT`, `NEOGRAPH_CHAT_MONO_FONT`로 파일을 지정할 수 있으며, `font.ttc#N`은 글꼴 모음의 N번째 face를 고릅니다. 키: Enter 전송, Esc 입력 지우기, Ctrl+V 붙여넣기, Ctrl+Q 종료이며, 답변이 스트리밍되는 동안 Send 버튼은 Stop이 됩니다.
 
-예제 35에는 `bridge_mcp_ghidra.py` 스크립트 경로를 지정하는 `GHIDRA_MCP_BRIDGE`가 필요하다. `GHIDRA_MCP_PYTHON`은 인터프리터를 선택하며 기본값은 `python3`이다. `GHIDRA_SERVER_URL`은 플러그인 엔드포인트를 선택하며 기본값은 `http://127.0.0.1:18080/`이다. 실행 전에 Ghidra와 MCP 플러그인을 시작해야 한다. 이 예제는 `OPENROUTER_API_KEY`도 필요하며 유료 모델을 호출한다. 위 점수는 과거 관측값으로, 새 실행 결과나 일반적인 정확도 보장이 아니다.
+예제 35에는 `bridge_mcp_ghidra.py` 스크립트 경로를 지정하는 `GHIDRA_MCP_BRIDGE`가 필요하다. `GHIDRA_MCP_PYTHON`은 인터프리터를 선택하며 기본값은 `python3`이다. `GHIDRA_SERVER_URL`은 GhidraMCP 백엔드 엔드포인트를 선택하며 기본값은 `http://127.0.0.1:18080/`이다. 실행 전에 GhidraMCP 백엔드를 켜고 프로그램을 연 Ghidra를 시작해야 한다. 예제는 모델을 호출하기 전에 도구를 찾고 `list_methods`를 한 번 호출하며, 백엔드가 응답하지 않으면 상태 2로 종료한다. 일부 GhidraMCP 릴리스는 백엔드가 내려가 있어도 모든 도구를 나열하기 때문이다. 이 예제는 그다음에 확인하는 비어 있지 않은 `OPENROUTER_API_KEY`도 필요하며 유료 모델을 호출한다. 위 점수는 과거 관측값으로, 새 실행 결과나 일반적인 정확도 보장이 아니다.
 
 ## 보존된 예제 계약
 

@@ -1,7 +1,7 @@
 // NeoGraph RE Agent — shared building blocks (header-only).
 //
-// Shared provider setup, Ghidra MCP discovery, tool selection, and final-text
-// extraction for the sequential and parallel RE examples.
+// Shared provider setup, GhidraMCP discovery and backend check, tool selection,
+// and final-text extraction for the sequential and parallel RE examples.
 #pragma once
 
 #include <neograph/neograph.h>
@@ -123,21 +123,25 @@ struct GhidraBridge {
     std::vector<std::unique_ptr<neograph::Tool>> tools;
 };
 
-/// Spawn the ghidra-mcp stdio bridge subprocess and discover its tools.
+/// Spawn the GhidraMCP stdio server subprocess and discover its tools.
 ///
 /// Env overrides:
-///   * GHIDRA_MCP_BRIDGE  — required path to bridge_mcp_ghidra.py.
+///   * GHIDRA_MCP_BRIDGE  — required path to the GhidraMCP server script
+///                          (bridge_mcp_ghidra.py).
 ///   * GHIDRA_MCP_PYTHON  — Python executable (default: python3).
-///   * GHIDRA_SERVER_URL  — http://host:port/ of the plugin server.
+///   * GHIDRA_SERVER_URL  — http://host:port/ of the GhidraMCP backend
+///                          (default: http://127.0.0.1:18080/).
 ///   * LOCAL_TOOL_SUBSET  — when set, keep only the 4 RE-relevant
 ///                          tools (list_methods, decompile_function,
 ///                          rename_function, set_decompiler_comment).
 ///                          Use for local 4-8B models whose attention
-///                          drowns in 27 tool descriptions.
+///                          drowns in the full tool list; its size
+///                          varies by GhidraMCP release.
 ///
 /// Throws on subprocess spawn / handshake failure (propagated from
-/// MCPClient). Returns an empty `tools` vector if the Ghidra GUI side
-/// is not up — caller should treat that as an actionable error.
+/// MCPClient). Tool discovery does not prove the backend is reachable:
+/// some GhidraMCP releases list every tool while their backend is down.
+/// Call `check_ghidra_backend` before starting the model loop.
 inline GhidraBridge spawn_ghidra_bridge() {
     const char* bridge_path = std::getenv("GHIDRA_MCP_BRIDGE");
     const char* python = std::getenv("GHIDRA_MCP_PYTHON");
@@ -159,10 +163,7 @@ inline GhidraBridge spawn_ghidra_bridge() {
     out.tools = out.client->get_tools();
     std::cerr << "[*] " << out.tools.size() << " ghidra-mcp tools discovered.\n";
 
-    if (out.tools.empty()) {
-        std::cerr << "[!] No tools — is the Ghidra GUI running with a project open?\n";
-        return out;
-    }
+    if (out.tools.empty()) return out;
 
     if (std::getenv("LOCAL_TOOL_SUBSET")) {
         std::vector<std::unique_ptr<neograph::Tool>> kept;
@@ -183,6 +184,34 @@ inline GhidraBridge spawn_ghidra_bridge() {
         std::cerr << "    - " << t->get_definition().name << "\n";
     }
     return out;
+}
+
+/// Check that the GhidraMCP backend answers, before any model call.
+///
+/// Calls `list_methods` for one entry; the call must return a non-error MCP
+/// result. Returns an empty string on success, otherwise the reason, such as
+/// the server's own error text.
+inline std::string check_ghidra_backend(const GhidraBridge& bridge) {
+    for (const auto& tool : bridge.tools) {
+        if (tool->get_name() != "list_methods") continue;
+        auto* mcp_tool = dynamic_cast<neograph::mcp::MCPTool*>(tool.get());
+        if (!mcp_tool) return "list_methods is not an MCP tool";
+        try {
+            const auto result = mcp_tool->execute_result(
+                neograph::json{{"offset", 0}, {"limit", 1}});
+            if (!result.is_error) return {};
+            std::string text;
+            for (const auto& item : result.content) {
+                if (item.value("type", "") != "text") continue;
+                if (!text.empty()) text += "\n";
+                text += item.value("text", "");
+            }
+            return text.empty() ? "list_methods returned an MCP error result" : text;
+        } catch (const std::exception& e) {
+            return e.what();
+        }
+    }
+    return "the GhidraMCP server does not list list_methods";
 }
 
 /// Explicit final-text display projection of the trusted native history.

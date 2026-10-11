@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=130e5724d5cf9649044dd1d6ef65259b930d91dbcb457014c00980389b9ab927 -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=c11de6b910a8425c3b03fae8b1bb9fd2f95ed32b17c591cee0007b93464bd9ff -->
 # C++ API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -220,7 +220,7 @@ OPENROUTER_API_KEY=sk-or-...
 
 示例 11 从源码构建 Raylib，在 Linux 上需要 X11 和 OpenGL 开发头文件（例如 `libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev`）。文本使用通过 fontconfig 或常见安装路径找到的系统 TrueType/OpenType 字体。可用 `NEOGRAPH_CHAT_FONT`，以及可选的 `NEOGRAPH_CHAT_BOLD_FONT` 和 `NEOGRAPH_CHAT_MONO_FONT` 指定文件；`font.ttc#N` 选择字体集合中的第 N 个 face。按键：Enter 发送，Esc 清空输入，Ctrl+V 粘贴，Ctrl+Q 退出；回复流式输出期间，Send 按钮变为 Stop。
 
-示例 35 要求通过 `GHIDRA_MCP_BRIDGE` 指定 `bridge_mcp_ghidra.py` 脚本路径。`GHIDRA_MCP_PYTHON` 选择解释器，默认值为 `python3`；`GHIDRA_SERVER_URL` 选择插件端点，默认值为 `http://127.0.0.1:18080/`。运行前须启动 Ghidra 及其 MCP 插件。此示例还需要 `OPENROUTER_API_KEY`，并调用付费模型。上面的分数是历史观测值，不是新的运行结果，也不是普遍的准确率保证。
+示例 35 要求通过 `GHIDRA_MCP_BRIDGE` 指定 `bridge_mcp_ghidra.py` 脚本路径。`GHIDRA_MCP_PYTHON` 选择解释器，默认值为 `python3`；`GHIDRA_SERVER_URL` 选择 GhidraMCP 后端端点，默认值为 `http://127.0.0.1:18080/`。运行前须启动已启用 GhidraMCP 后端并打开程序的 Ghidra。示例在调用模型之前会发现工具并调用一次 `list_methods`，后端无响应时以状态 2 退出，因为某些 GhidraMCP 版本即使后端未运行也会列出全部工具。此示例还需要非空的 `OPENROUTER_API_KEY`（在此之后检查），并调用付费模型。上面的分数是历史观测值，不是新的运行结果，也不是普遍的准确率保证。
 
 ## 保留的示例契约
 
