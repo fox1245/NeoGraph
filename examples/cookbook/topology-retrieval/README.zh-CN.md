@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/topology-retrieval/README.md locale=zh-CN source_sha256=8b3cf3e1c0116355c04cbe12f0598d39f87cd41810fbadbc8983611adc0b584f -->
+<!-- neograph-i18n: source=examples/cookbook/topology-retrieval/README.md locale=zh-CN source_sha256=4bf80dfe9ee4f9b5ecc5600f0e9cccb2827274126f79069003e43d9ff4ad1451 -->
 # 本地拓扑检索
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -26,7 +26,7 @@ python topology_retrieval.py --query "preserve a running graph frontier"
 
 非模拟命令通过 `OPENROUTER_API_KEY` 获取 BGE-M3 Embedding 和 Voyage 重排序结果。它绝不执行检索到的拓扑。返回的候选仍必须解析精确的已准入 ProgramVersion，并通过 NeoGraph 兼容性、权威性、预算和迁移检查。
 
-NeoGraph侧消费者是C++ `example_topology_retrieval`目标。它接受重新排序后的候选项键，从`ProgramCatalog`中解析确切的已准入束，证明P1适配器，并执行持久的第二代迁移。构建并运行：
+NeoGraph侧消费者是C++ `example_topology_retrieval`目标。它接受重新排序后的候选项键，从`ProgramCatalog`中解析确切的已准入束，证明P1适配器，并执行持久的第二代迁移。其他迁移类别（`handoff_replace`、`new_run_only`）的候选项无法延续进行中的运行，因此消费者会改为将其报告为不适用，并以退出状态 3 结束。构建并运行：
 
 启用 Program，并通过 `CMAKE_PREFIX_PATH` 或 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` 提供 SchemaProvider，先配置 NeoGraph 树。此 model-free consumer 也需要 SDK。SDK transport 当前验证范围是 Linux/POSIX。
 

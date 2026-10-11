@@ -7,7 +7,11 @@
 // transition one running lineage at a durable GraphEngine safe point.
 //
 // Build: cmake --build build --target example_topology_retrieval
-// Run:   ./example_topology_retrieval
+// Run:   ./example_topology_retrieval [--candidate-key KEY]
+//
+// Exit status: 0 migrated and verified; 1 migration not verified; 2 error or a
+// key outside the retrieval catalog; 3 a catalog candidate whose migration
+// class cannot continue an in-flight run (reported, not attempted).
 
 #include <neograph/neograph.h>
 #include <neograph/program/program.h>
@@ -168,7 +172,8 @@ ProgramSource source_program(std::uint64_t migration_epoch) {
 
 struct RerankedTopologyCandidate {
     std::string candidate_key;
-    std::string topology_version_id;
+    std::string migration_class;      // as published by the retrieval catalog
+    std::string topology_version_id;  // admitted target; empty unless p1_migrate
 };
 
 }  // namespace
@@ -202,8 +207,14 @@ int main(int argc, char** argv) {
         // An external dense + BM25 -> RRF -> rerank service returns a stable
         // candidate key. The local registry maps it to the current admitted
         // ProgramVersion; a model never supplies graph JSON or execution authority.
+        // It lists every key the retrieval catalog can return. Only a
+        // p1_migrate candidate can continue this running lineage; the others
+        // need a new run or a checkpoint handoff, which is reported instead.
         const std::vector<RerankedTopologyCandidate> candidate_registry = {
-            {"shape-preserving-implementation-evolution", target_version.id()},
+            {"shape-preserving-implementation-evolution", "p1_migrate", target_version.id()},
+            {"checkpoint-handoff-replacement", "handoff_replace", {}},
+            {"parallel-evidence-review", "new_run_only", {}},
+            {"bounded-child-task-graph", "new_run_only", {}},
         };
         const auto selected = std::find_if(
             candidate_registry.begin(), candidate_registry.end(),
@@ -212,6 +223,17 @@ int main(int argc, char** argv) {
             });
         if (selected == candidate_registry.end()) {
             throw std::runtime_error("Retrieved candidate key is not in the admitted topology registry");
+        }
+        if (selected->migration_class != "p1_migrate") {
+            std::cout << json{
+                {"candidate", {{"candidate_key", selected->candidate_key},
+                               {"migration_class", selected->migration_class}}},
+                {"migration", "not_applicable"},
+                {"reason", "only a p1_migrate candidate can continue an in-flight run; "
+                           "start a new run or a checkpoint handoff instead"},
+                {"verified", false},
+            }.dump() << '\n';
+            return 3;
         }
         const auto candidate = catalog->resolve_version("topology-retrieval", selected->topology_version_id);
         if (!candidate) throw std::runtime_error("Retrieved TopologyVersionId was not admitted");

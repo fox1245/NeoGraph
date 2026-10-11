@@ -36,7 +36,9 @@ compatibility, authority, budget, and migration checks.
 The NeoGraph-side consumer is the C++ `example_topology_retrieval` target. It
 accepts the reranked candidate key, resolves the exact admitted
 bundle from `ProgramCatalog`, proves the P1 adapter, and performs a durable
-generation-2 migration. Configure the NeoGraph tree with Program enabled and SchemaProvider supplied via
+generation-2 migration. A candidate of another migration class
+(`handoff_replace`, `new_run_only`) cannot continue an in-flight run, so the
+consumer reports it as not applicable with exit status 3 instead. Configure the NeoGraph tree with Program enabled and SchemaProvider supplied via
 `CMAKE_PREFIX_PATH` or `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`, even for this
 model-free consumer. Current SDK transport qualification is Linux/POSIX. Build
 and run it with:

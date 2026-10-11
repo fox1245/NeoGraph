@@ -32,10 +32,15 @@ def main() -> int:
 
     consumer = subprocess.run(
         [str(args.consumer), "--candidate-key", decision["candidate_key"]],
-        check=True, text=True, capture_output=True,
+        text=True, capture_output=True,
     )
+    # Exit 3: a catalog candidate whose migration class cannot continue an
+    # in-flight run; the consumer reports it instead of migrating.
+    if consumer.returncode not in (0, 3):
+        raise subprocess.CalledProcessError(consumer.returncode, consumer.args,
+                                            consumer.stdout, consumer.stderr)
     result = json.loads(consumer.stdout)
-    if not result.get("verified"):
+    if consumer.returncode == 0 and not result.get("verified"):
         raise RuntimeError("NeoGraph consumer did not verify the retrieved candidate")
     print(json.dumps({"retrieval": decision, "neograph": result}, indent=2))
     return 0
