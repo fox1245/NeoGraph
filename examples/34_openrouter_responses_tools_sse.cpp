@@ -6,6 +6,8 @@
 // the curated openai-spreadsheets skill mounted in shell.environment.
 // A section succeeds only when its tool's output item completes, not on any
 // Completion: a model can answer without ever calling the tool.
+// The gateway feeds a generated image back to the model, so image_generation
+// needs a model that accepts image input; the default chat model is text-only.
 
 #include "provider_example_support.h"
 
@@ -39,9 +41,12 @@ sp::responses::ToolDefinition function_tool(
     return tool;
 }
 
-sp::responses::Request user_request(std::string prompt) {
+// Text-and-image sibling of examples::openrouter_model, for the image_generation section.
+constexpr const char* image_capable_model = "deepseek/deepseek-v4-flash-vision-exp";
+
+sp::responses::Request user_request(std::string prompt, const char* model = examples::openrouter_model) {
     sp::responses::Request request;
-    request.model = examples::openrouter_model;
+    request.model = model;
     request.messages.push_back(examples::message(sp::Role::User, std::move(prompt)));
     return request;
 }
@@ -183,7 +188,8 @@ int main() {
             }, no_skip, {"openrouter:web_search", "web_search_call"}},
             {"image_generation", [] {
                 auto request = user_request(
-                    "Generate a 1024x1024 image of a small cube. Reply 'done' once generated.");
+                    "Generate a 1024x1024 image of a small cube. Reply 'done' once generated.",
+                    image_capable_model);
                 sp::responses::ImageGenerationTool tool;
                 tool.size = "1024x1024";
                 tool.quality = "low";
