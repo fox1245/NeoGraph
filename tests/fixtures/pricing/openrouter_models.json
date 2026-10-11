@@ -1,0 +1,153 @@
+{
+ "data": [
+  {
+   "id": "deepseek/deepseek-v4-flash-vision-exp",
+   "canonical_slug": "deepseek/deepseek-v4-flash-vision-exp-20260821",
+   "name": "DeepSeek: DeepSeek V4 Flash Vision Exp",
+   "created": 1787311563,
+   "context_length": 1048576,
+   "pricing": {
+    "prompt": "0.0000002156",
+    "completion": "0.0000006468",
+    "input_cache_read": "0.00000000686"
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 262144,
+    "is_moderated": false
+   }
+  },
+  {
+   "id": "deepseek/deepseek-v4-pro-0813",
+   "canonical_slug": "deepseek/deepseek-v4-pro-20260813",
+   "name": "DeepSeek: DeepSeek V4 Pro 0813",
+   "created": 1786549364,
+   "context_length": 1048576,
+   "pricing": {
+    "prompt": "0.00000066",
+    "completion": "0.00000198",
+    "input_cache_read": "0.000000022",
+    "overrides": [
+     {
+      "utc_days": [
+       "saturday",
+       "sunday"
+      ],
+      "prompt": "0.00000066",
+      "completion": "0.00000198",
+      "input_cache_read": "0.000000022"
+     },
+     {
+      "utc_days": [
+       "monday",
+       "tuesday",
+       "wednesday",
+       "thursday",
+       "friday"
+      ],
+      "utc_start": 0,
+      "utc_end": 100,
+      "prompt": "0.00000066",
+      "completion": "0.00000198",
+      "input_cache_read": "0.000000022"
+     },
+     {
+      "utc_days": [
+       "monday",
+       "tuesday",
+       "wednesday",
+       "thursday",
+       "friday"
+      ],
+      "utc_start": 100,
+      "utc_end": 400,
+      "prompt": "0.00000132",
+      "completion": "0.00000396",
+      "input_cache_read": "0.000000044"
+     },
+     {
+      "utc_days": [
+       "monday",
+       "tuesday",
+       "wednesday",
+       "thursday",
+       "friday"
+      ],
+      "utc_start": 400,
+      "utc_end": 600,
+      "prompt": "0.00000066",
+      "completion": "0.00000198",
+      "input_cache_read": "0.000000022"
+     },
+     {
+      "utc_days": [
+       "monday",
+       "tuesday",
+       "wednesday",
+       "thursday",
+       "friday"
+      ],
+      "utc_start": 600,
+      "utc_end": 1000,
+      "prompt": "0.00000132",
+      "completion": "0.00000396",
+      "input_cache_read": "0.000000044"
+     },
+     {
+      "utc_days": [
+       "monday",
+       "tuesday",
+       "wednesday",
+       "thursday",
+       "friday"
+      ],
+      "utc_start": 1000,
+      "utc_end": 0,
+      "prompt": "0.00000066",
+      "completion": "0.00000198",
+      "input_cache_read": "0.000000022"
+     }
+    ]
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 393216,
+    "is_moderated": false
+   }
+  },
+  {
+   "id": "~deepseek/deepseek-v4-flash-latest",
+   "canonical_slug": "~deepseek/deepseek-v4-flash-latest",
+   "name": "DeepSeek: DeepSeek V4 Flash Latest",
+   "created": 1785606009,
+   "context_length": 1048576,
+   "pricing": {
+    "prompt": "0.000000018",
+    "completion": "0.00000064",
+    "input_cache_read": "0.000000018"
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 943718,
+    "is_moderated": false
+   }
+  },
+  {
+   "id": "deepseek/deepseek-v4-flash-0731",
+   "canonical_slug": "deepseek/deepseek-v4-flash-20260731",
+   "name": "DeepSeek: DeepSeek V4 Flash 0731",
+   "created": 1785478908,
+   "context_length": 1048576,
+   "pricing": {
+    "prompt": "0.000000018",
+    "completion": "0.00000064",
+    "input_cache_read": "0.000000018"
+   },
+   "top_provider": {
+    "context_length": 1048576,
+    "max_completion_tokens": 943718,
+    "is_moderated": false
+   }
+  }
+ ]
+}

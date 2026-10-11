@@ -1,0 +1,65 @@
+{
+ "skus": [
+  {
+   "name": "services/0000-SYNTHETIC-0002/skus/SYN-0001",
+   "skuId": "SYN-0001",
+   "description": "Synthetic: Gemini 3.1 Flash Lite Image input tokens (global)",
+   "serviceRegions": [
+    "global"
+   ],
+   "pricingInfo": [
+    {
+     "pricingExpression": {
+      "usageUnit": "count",
+      "usageUnitDescription": "count",
+      "baseUnit": "count",
+      "baseUnitDescription": "count",
+      "baseUnitConversionFactor": 1,
+      "displayQuantity": 1,
+      "tieredRates": [
+       {
+        "startUsageAmount": 0,
+        "unitPrice": {
+         "currencyCode": "USD",
+         "units": "0",
+         "nanos": 250
+        }
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "services/0000-SYNTHETIC-0002/skus/SYN-0002",
+   "skuId": "SYN-0002",
+   "description": "Synthetic: Gemini 3.1 Flash Lite Image cached input tokens (global)",
+   "serviceRegions": [
+    "global"
+   ],
+   "pricingInfo": [
+    {
+     "pricingExpression": {
+      "usageUnit": "count",
+      "usageUnitDescription": "count",
+      "baseUnit": "count",
+      "baseUnitDescription": "count",
+      "baseUnitConversionFactor": 1,
+      "displayQuantity": 1,
+      "tieredRates": [
+       {
+        "startUsageAmount": 0,
+        "unitPrice": {
+         "currencyCode": "USD",
+         "units": "0",
+         "nanos": 25
+        }
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ],
+ "nextPageToken": "page-2"
+}

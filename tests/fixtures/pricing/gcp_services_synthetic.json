@@ -1,0 +1,15 @@
+{
+ "services": [
+  {
+   "name": "services/0000-SYNTHETIC-0001",
+   "serviceId": "0000-SYNTHETIC-0001",
+   "displayName": "Compute Engine"
+  },
+  {
+   "name": "services/0000-SYNTHETIC-0002",
+   "serviceId": "0000-SYNTHETIC-0002",
+   "displayName": "Vertex AI"
+  }
+ ],
+ "nextPageToken": ""
+}

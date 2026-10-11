@@ -953,7 +953,8 @@ if(NEOGRAPH_BUILD_PROGRAM)
 endif()
 
 # Pricing registry for monetary Program budgets (#372): catalog loading,
-# reservations and settlements. No network.
+# reservations and settlements, plus the stdlib-only drift checker on
+# recorded fixtures. Neither touches the network.
 if(NEOGRAPH_BUILD_PROGRAM)
     add_executable(neograph_pricing_tests test_pricing.cpp)
     target_include_directories(neograph_pricing_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/program)
@@ -961,4 +962,10 @@ if(NEOGRAPH_BUILD_PROGRAM)
     target_compile_definitions(neograph_pricing_tests PRIVATE
         NEOGRAPH_PRICING_CATALOG="${PROJECT_SOURCE_DIR}/data/pricing/catalog.json")
     neograph_discover_tests(neograph_pricing_tests PROPERTIES LABELS pricing)
+endif()
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME Pricing.DriftScript
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test_price_drift.py)
+    set_tests_properties(Pricing.DriftScript PROPERTIES LABELS "pricing;metadata")
 endif()
