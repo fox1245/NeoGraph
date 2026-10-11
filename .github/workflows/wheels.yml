@@ -108,6 +108,14 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
       - name: Provision wheel build frontend
         run: python -m pip install cibuildwheel==2.23.0
+      # Keep cibuildwheel's downloaded Python installers and virtualenv, so a run that already
+      # has them does not depend on those upstream hosts being reachable.
+      - name: Restore cibuildwheel downloads
+        id: cibw-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/cibuildwheel-cache
+          key: cibuildwheel-2.23.0-${{ runner.os }}-${{ matrix.platform.arch }}-${{ matrix.python }}
       # vcpkg's binary archives are reused across runs. vcpkg names each archive by an ABI hash, so
       # it uses only a matching one and rebuilds the rest; the key is per runner image so a new image
       # saves its own archives, and restore-keys let it start from the previous image's.
@@ -154,7 +162,15 @@ jobs:
       # Platform dependency bootstrap, repair and installed-wheel gates remain authoritative in
       # pyproject.toml (including cold-load/LGPL checks).
       - name: Build, repair and exercise the installed wheel
+        env:
+          CIBW_CACHE_PATH: ${{ runner.temp }}/cibuildwheel-cache
         run: python source-dist/source/scripts/verify_ci.py wheel --work-dir build-wheels --jobs auto --arch ${{ matrix.platform.arch }} --python ${{ matrix.python }}
+      - name: Save cibuildwheel downloads
+        if: always() && steps.cibw-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/cibuildwheel-cache
+          key: cibuildwheel-2.23.0-${{ runner.os }}-${{ matrix.platform.arch }}-${{ matrix.python }}
       - name: Save vcpkg binary archives (Windows)
         if: always() && runner.os == 'Windows' && steps.vcpkg-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
