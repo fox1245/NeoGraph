@@ -558,7 +558,10 @@ ContextAssemblyReceipt ContextAssemblyReceipt::create_structural(ContextAssembly
     validate_range(data.raw_from_sequence == 0 ? std::string_view{} : std::string_view{"receipt"},
                    data.raw_from_sequence, data.raw_through_sequence, "Context assembly");
     if (data.mandatory_input_tokens > data.estimated_input_tokens)
-        throw std::invalid_argument("Mandatory token count exceeds estimated input tokens");
+        throw std::invalid_argument(
+            "Mandatory input tokens (" + std::to_string(data.mandatory_input_tokens) +
+            ") exceed the estimated input tokens (" +
+            std::to_string(data.estimated_input_tokens) + ") they are part of");
     json body{{"format", "neograph-context-assembly-receipt"},
               {"storage_schema_version", STORAGE_SCHEMA_VERSION},
               {"context_epoch_id", data.context_epoch_id},

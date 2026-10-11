@@ -386,6 +386,110 @@ TEST(RuntimeTurnAssembler, EnforcesGeneralRequiredContextAndCountsMandatoryToken
                  std::invalid_argument);
 }
 
+namespace {
+
+struct RequiredContextFixture {
+    InMemoryContextStore store;
+    std::vector<ContextArtifact> artifacts;
+    std::optional<ContextEpoch> epoch;
+    RuntimeContextRequirements requirements;
+};
+
+// One short RAW user message plus one required Skill and `constraints`
+// required hard constraints, selected by a Strict epoch.
+void prepare_required_context(RequiredContextFixture& fixture, std::size_t constraints,
+                              const std::string& skill_text,
+                              const std::string& constraint_text) {
+    const ContextStoreFeed feed{"owner", "feed"};
+    const auto first = history(1, std::nullopt);
+    ASSERT_EQ(fixture.store.append_history(feed, first, std::nullopt),
+              ContextStoreAppendResult::Appended);
+    const auto raw = fixture.store.snapshot_history(feed, 1, 1);
+    const auto skill = artifact("skill", skill_text, ContextPlacement::BeforeLatestUser, 0, true);
+    fixture.artifacts.push_back(skill);
+    fixture.requirements.required_artifact_ids.push_back(skill.id());
+    fixture.requirements.required_skill_artifact_ids.push_back(skill.id());
+    for (std::size_t index = 0; index < constraints; ++index) {
+        const auto constraint = hard_constraint(constraint_text + " #" + std::to_string(index));
+        fixture.artifacts.push_back(constraint);
+        fixture.requirements.required_artifact_ids.push_back(constraint.id());
+    }
+    ContextEpochData epoch_data;
+    epoch_data.run_id = "required-context-" + std::to_string(constraints);
+    epoch_data.sequence = 1;
+    epoch_data.feed_id = "feed";
+    epoch_data.raw_from_sequence = 1;
+    epoch_data.raw_through_sequence = 1;
+    epoch_data.raw_window_digest = raw.digest;
+    epoch_data.guarantee_profile = RuntimeGuaranteeProfile::Strict;
+    for (const auto& item : fixture.artifacts) {
+        ASSERT_EQ(fixture.store.put_artifact("owner", item), ContextArtifactPutResult::Stored);
+        epoch_data.artifact_ids.push_back(item.id());
+    }
+    fixture.epoch = ContextEpoch::create(std::move(epoch_data));
+}
+
+}  // namespace
+
+// Issue #373: the mandatory estimate came from the message projection JSON and
+// the input estimate from the smaller wire body, so a short history with two or
+// more required artifacts failed "mandatory exceeds input". Both now count the
+// bytes the prepared request carries.
+TEST(RuntimeTurnAssembler, ShortHistoryWithSeveralRequiredArtifactsIsAdmitted) {
+    for (const std::size_t constraints : {1u, 2u, 5u}) {
+        RequiredContextFixture fixture;
+        prepare_required_context(fixture, constraints, "Always run the verifier.",
+                                 "Never publish without verification.");
+        auto provider = assembly_provider();
+        const auto turn = RuntimeTurnAssembler(fixture.store, 32'000, fixture.requirements)
+                              .assemble(provider, "owner", *fixture.epoch, assembly_template());
+        const auto& receipt = turn.assembly_receipt;
+        EXPECT_GT(receipt.mandatory_input_tokens(), 0u) << constraints;
+        EXPECT_LE(receipt.mandatory_input_tokens(), receipt.estimated_input_tokens())
+            << constraints;
+        EXPECT_EQ(receipt.estimated_input_tokens(),
+                  RuntimeTurnAssembler::estimate_input_tokens(turn.request));
+        EXPECT_EQ(admitted_messages(provider, turn.request).size(), constraints + 2);
+    }
+}
+
+// Required content larger than the whole budget is a genuine overflow: the
+// turn is blocked before dispatch.
+TEST(RuntimeTurnAssembler, RequiredArtifactsOverTheBudgetAreBlocked) {
+    RequiredContextFixture fixture;
+    std::string long_text;
+    for (int i = 0; i < 40; ++i) long_text += "verify before publishing. ";
+    prepare_required_context(fixture, 2, long_text, long_text);
+    auto provider = assembly_provider();
+    EXPECT_THROW(RuntimeTurnAssembler(fixture.store, 64, fixture.requirements)
+                     .assemble(provider, "owner", *fixture.epoch, assembly_template()),
+                 ContextBudgetBlocked);
+}
+
+TEST(RuntimeTurnAssembler, ReceiptRejectsMandatoryTokensAboveTheInputEstimate) {
+    ContextEpochData epoch_data;
+    epoch_data.run_id = "receipt-run";
+    epoch_data.sequence = 1;
+    epoch_data.raw_window_digest = sha('1');
+    const auto epoch = ContextEpoch::create(std::move(epoch_data));
+    ContextAssemblyReceiptData data;
+    data.context_epoch_id = epoch.id();
+    data.normalized_request_digest = sha('2');
+    data.message_window_digest = sha('3');
+    data.estimated_input_tokens = 40;
+    data.mandatory_input_tokens = 41;
+    try {
+        (void)ContextAssemblyReceipt::create(data, epoch, {});
+        FAIL() << "a receipt whose mandatory tokens exceed its input was accepted";
+    } catch (const std::invalid_argument& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("(41)"), std::string::npos) << message;
+        EXPECT_NE(message.find("(40)"), std::string::npos) << message;
+    }
+    data.mandatory_input_tokens = 40;
+    EXPECT_EQ(ContextAssemblyReceipt::create(data, epoch, {}).mandatory_input_tokens(), 40u);
+}
+
 TEST(RuntimeTurnAssembler, NormalizedDigestCoversRequestShapeButExcludesCancellationIdentity) {
     auto provider = assembly_provider();
     auto request = test::request("model", "hello");

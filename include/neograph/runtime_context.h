@@ -189,7 +189,9 @@ struct ContextAssemblyReceiptData {
     std::vector<std::string> required_skill_artifact_ids;
     std::uint64_t            raw_from_sequence = 0;
     std::uint64_t            raw_through_sequence = 0;
+    /** Bytes of the prepared request body, three per token. */
     std::uint64_t            estimated_input_tokens = 0;
+    /** Bytes of required artifact text on the same basis; never above the estimate. */
     std::uint64_t            mandatory_input_tokens = 0;
 };
 

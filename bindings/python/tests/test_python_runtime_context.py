@@ -213,6 +213,104 @@ def test_strict_runtime_profile_uses_sqlite_durable_stores(tmp_path, provider_pe
     assert not profile.active
 
 
+def _required_artifact(kind, text, digest_char):
+    data = ng.ContextArtifactData()
+    data.kind = kind
+    data.producer_id = "python-host-policy"
+    data.source_digest = _sha(digest_char)
+    data.media_type = "text/markdown"
+    data.required = True
+    data.content = {"text": text}
+    return ng.ContextArtifact.create(data)
+
+
+def _strict_profile_with_required_artifacts(tmp_path, provider_peer, max_input_tokens,
+                                            skill_text, constraint_text):
+    # The documented strict path: durable SQLite stores, one required Skill and
+    # one hard constraint, and a single short RAW user message.
+    provider = provider_peer.provider()
+    contexts = ng.SQLiteContextStore(str(tmp_path / "runtime.sqlite3"))
+    receipts = ng.SQLiteProviderDispatchReceiptStore(str(tmp_path / "runtime.sqlite3"))
+    skill = _required_artifact(ng.ContextArtifactKind.RequiredSkill, skill_text, "1")
+    constraint = _required_artifact(ng.ContextArtifactKind.HardConstraint, constraint_text, "2")
+    for artifact in (skill, constraint):
+        assert contexts.put_artifact("tenant-a", artifact) == ng.ContextArtifactPutResult.Stored
+    feed = ng.ContextStoreFeed("tenant-a", "feed")
+    record = _record()
+    assert contexts.append_history(feed, record, None) == ng.ContextStoreAppendResult.Appended
+    epoch_data = ng.ContextEpochData()
+    epoch_data.run_id = "strict-run"
+    epoch_data.sequence = 1
+    epoch_data.feed_id = "feed"
+    epoch_data.raw_from_sequence = 1
+    epoch_data.raw_through_sequence = 1
+    epoch_data.raw_window_digest = contexts.snapshot_history(feed, 1, 1).digest
+    epoch_data.artifact_ids = [skill.id, constraint.id]
+    epoch_data.guarantee_profile = ng.RuntimeGuaranteeProfile.Strict
+    profile = ng.StrictRuntimeProfile(
+        provider,
+        contexts,
+        receipts,
+        ng.create_hook_runtime([], {}),
+        _sha("a"),
+        max_input_tokens=max_input_tokens,
+        required_context_artifact_ids=[constraint.id],
+        required_skill_artifact_ids=[skill.id],
+    )
+    profile.activate("tenant-a", ng.ContextEpoch.create(epoch_data))
+    return provider, profile
+
+
+def test_strict_profile_admits_short_history_with_two_required_artifacts(
+        tmp_path, provider_peer):
+    # Issue #373: the mandatory estimate used the message projection JSON and
+    # the input estimate the smaller wire body, so a short history with two
+    # required artifacts was rejected as "mandatory exceeds input".
+    provider, profile = _strict_profile_with_required_artifacts(
+        tmp_path, provider_peer, 32_000,
+        "Always run the verifier.", "Never publish without verification.")
+
+    outcome = profile.invoke(ng.make_provider_request(provider, "model", []))
+
+    assert outcome.failure is None
+    logical, = provider_peer.logical_requests
+    assert [(message["role"], message["text"]) for message in logical] == [
+        ("system", "Always run the verifier."),
+        ("system", "Never publish without verification."),
+        ("user", "hello-1"),
+    ]
+
+
+def test_strict_profile_still_blocks_required_artifacts_over_the_budget(
+        tmp_path, provider_peer):
+    # Required content larger than the whole input budget is a genuine
+    # overflow: the turn is blocked before anything is sent.
+    provider, profile = _strict_profile_with_required_artifacts(
+        tmp_path, provider_peer, 64, "verify " * 40, "never publish " * 20)
+
+    with pytest.raises(ng.ContextBudgetBlocked):
+        profile.invoke(ng.make_provider_request(provider, "model", []))
+    assert provider_peer.requests == []
+
+
+def test_assembly_receipt_rejects_mandatory_tokens_above_the_input_estimate():
+    epoch_data = ng.ContextEpochData()
+    epoch_data.run_id = "receipt-run"
+    epoch_data.sequence = 1
+    epoch_data.raw_window_digest = _sha("3")
+    epoch = ng.ContextEpoch.create(epoch_data)
+    data = ng.ContextAssemblyReceiptData()
+    data.context_epoch_id = epoch.id
+    data.normalized_request_digest = _sha("4")
+    data.message_window_digest = _sha("5")
+    data.estimated_input_tokens = 40
+    data.mandatory_input_tokens = 41
+    with pytest.raises(ValueError, match=r"\(41\).*\(40\)"):
+        ng.ContextAssemblyReceipt.create(data, epoch, [])
+    data.mandatory_input_tokens = 40
+    assert ng.ContextAssemblyReceipt.create(data, epoch, []).mandatory_input_tokens == 40
+
+
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="NativeArchive custody needs an owner-only protected DACL on the parent directory; "

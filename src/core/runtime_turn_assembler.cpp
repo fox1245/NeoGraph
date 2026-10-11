@@ -27,9 +27,21 @@ json messages_json(const std::vector<sp::Message>& messages) {
     return result;
 }
 
-std::uint64_t estimate_json_tokens(const json& value) {
-    const auto bytes = detail::canonical_json_bytes(value).size();
-    return static_cast<std::uint64_t>(bytes / 3u + (bytes % 3u != 0));
+// Input and mandatory tokens share one basis: bytes the prepared request
+// carries, three per token (#373).
+std::uint64_t tokens_for_bytes(std::uint64_t bytes) {
+    return bytes / 3u + (bytes % 3u != 0);
+}
+
+// A rendered artifact contributes its text to the request. Every provider
+// encoding carries that text at least byte for byte; its role and framing are
+// request overhead, counted in the input estimate only.
+std::uint64_t text_bytes(const sp::Message& message) {
+    std::uint64_t bytes = 0;
+    for (const auto& part : message.parts) {
+        if (const auto* text = std::get_if<sp::Text>(&part)) bytes += text->value.size();
+    }
+    return bytes;
 }
 
 void verify_history(const std::vector<RuntimeHistoryRecord>& records,
@@ -151,8 +163,7 @@ RuntimeTurnAssembler::RuntimeTurnAssembler(RuntimeTurnAssembler&&) noexcept = de
 RuntimeTurnAssembler& RuntimeTurnAssembler::operator=(RuntimeTurnAssembler&&) noexcept = default;
 
 std::uint64_t RuntimeTurnAssembler::estimate_input_tokens(const PreparedProviderRequest& request) {
-    const auto bytes = request.encoded_body().size();
-    return static_cast<std::uint64_t>(bytes / 3u + (bytes % 3u != 0));
+    return tokens_for_bytes(request.encoded_body().size());
 }
 
 std::string RuntimeTurnAssembler::normalized_request_digest(const PreparedProviderRequest& request) {
@@ -246,12 +257,10 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
     std::vector<sp::Message> before;
     std::vector<sp::Message> after_user;
     std::vector<sp::Message> after_history;
-    std::uint64_t mandatory = 0;
+    std::uint64_t mandatory_bytes = 0;
     for (const auto& item : selected) {
         const auto rendered = render_artifact(item.artifact);
-        if (item.artifact.required()) {
-            mandatory += estimate_json_tokens(messages_json({rendered}));
-        }
+        if (item.artifact.required()) mandatory_bytes += text_bytes(rendered);
         if (item.artifact.placement() == ContextPlacement::BeforeHistory) {
             before_history.push_back(rendered);
         } else if (item.artifact.placement() == ContextPlacement::BeforeLatestUser) {
@@ -318,7 +327,7 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
     receipt_data.raw_from_sequence = epoch.raw_from_sequence();
     receipt_data.raw_through_sequence = epoch.raw_through_sequence();
     receipt_data.estimated_input_tokens = estimate_input_tokens(prepared);
-    receipt_data.mandatory_input_tokens = mandatory;
+    receipt_data.mandatory_input_tokens = tokens_for_bytes(mandatory_bytes);
     if (impl_->max_input_tokens != 0 &&
         receipt_data.estimated_input_tokens > impl_->max_input_tokens) {
         throw ContextBudgetBlocked();
