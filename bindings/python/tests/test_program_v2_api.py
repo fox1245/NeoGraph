@@ -150,3 +150,47 @@ def test_admission_and_runtime_exceptions_link_their_documentation():
         host.resume("no-such-run", {})
     diagnostic = raised.value.diagnostics[0]
     assert diagnostic["help"]["doc"].startswith("docs/diagnostics.md#")
+
+
+# ---------------------------------------------------------------------------
+# X4: capability manifest and schemas
+# ---------------------------------------------------------------------------
+
+
+def _schema(name):
+    with open(_REPO / "schemas" / name, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def test_capability_manifest_validates_against_its_schema():
+    jsonschema = pytest.importorskip("jsonschema")
+    manifest = ng.javascript_authoring_capability_manifest()
+    jsonschema.Draft202012Validator(
+        _schema("javascript-capability-manifest-v1.schema.json")
+    ).validate(manifest)
+    for method in manifest["define"]["graph_builder_methods"]:
+        assert manifest["features"][method["feature"]] is True, method["name"]
+        for argument in method["arguments"]:
+            jsonschema.Draft202012Validator.check_schema(argument["schema"])
+
+
+def test_compiled_definitions_validate_against_the_core_schema():
+    jsonschema = pytest.importorskip("jsonschema")
+    validator = jsonschema.Draft202012Validator(_schema("core-definition-v1.schema.json"))
+    bundle = _compile(
+        _graph(
+            '.node("A", {type: "v2.task"}).node("B", {type: "v2.task"})'
+            '.entry("A").conditionalEdge("A", "v2.always_pass", {pass: "B", fail: "__end__"})'
+            '.exit("B").retryPolicy({max_retries: 1})'
+        )
+    )
+    definition = bundle.sealed_core_definitions[0]["definition"]
+    validator.validate(definition)
+    golden = json.loads(
+        (_REPO / "tests" / "fixtures" / "identity_corpus" / "golden.json").read_text("utf-8")
+    )
+    for entry in golden["entries"]:
+        validator.validate(entry["definition"])
+    broken = dict(definition, on_exhausted="B")
+    assert not validator.is_valid(broken)
+

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/DSL_CAPABILITY_EVAL.md locale=zh-CN source_sha256=7ac0e8bb68d88e27682b67247d72e6d408b05e9f23c6ff59967e81cf9f6b3b30 -->
+<!-- neograph-i18n: source=docs/DSL_CAPABILITY_EVAL.md locale=zh-CN source_sha256=440d5d76af8cf05685dddfa06df9dee587f74851719820ff655b0a220bdb1b49 -->
 # QuickJS DSL能力与模型综合评估
 
 **Languages:** [English](DSL_CAPABILITY_EVAL.md) | [한국어](DSL_CAPABILITY_EVAL.ko.md) | [日本語](DSL_CAPABILITY_EVAL.ja.md) | [简体中文](DSL_CAPABILITY_EVAL.zh-CN.md)
@@ -139,3 +139,5 @@ capability manifest + exact admitted identifiers
 NeoGraph 现在在 `ProgramSynthesisGateway`中强制执行此边界：每个网关配置必须提供宿主拥有的语义验证器。成功的验证会在 Catalog 准入(admission)之前生成内容寻址的收据；被拒绝的决策会抛出 `ProgramSynthesisValidationError`，保留确切的证据，并且绝不调用准入(admission)解析器。已消耗的动态编译预留仍然保持已消耗状态。
 
 `javascript_authoring_capability_manifest()` 以机器可读数据的形式暴露已安装的graph-builder和命令词汇表、精确签名、分类、限制及profile约束。一致性测试将该清单与QuickJS两个上下文中实际安装的属性进行比较，从而API漂移会使测试套件失败。
+
+该清单还公开 `features`（每个编写功能一个布尔标志，例如 `graph.metadata`、`barrier.any_of` 或 `failure_edges`）、每个方法的 TypeScript `dts` 签名及其共享声明 `dts_prelude`，以及每个图构建器参数的 JSON Schema。两份 schema 文件为其提供支撑：[`schemas/javascript-capability-manifest-v1.schema.json`](../schemas/javascript-capability-manifest-v1.schema.json) 描述清单本身，[`schemas/core-definition-v1.schema.json`](../schemas/core-definition-v1.schema.json) 描述封存的 Core 定义，用于对生成的定义进行约束解码。测试用其 schema 校验清单，并用 Core schema 校验黄金标识语料库中的定义。

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/DSL_CAPABILITY_EVAL.md locale=ja source_sha256=7ac0e8bb68d88e27682b67247d72e6d408b05e9f23c6ff59967e81cf9f6b3b30 -->
+<!-- neograph-i18n: source=docs/DSL_CAPABILITY_EVAL.md locale=ja source_sha256=440d5d76af8cf05685dddfa06df9dee587f74851719820ff655b0a220bdb1b49 -->
 # QuickJS DSL 能力とモデル合成評価
 
 **Languages:** [English](DSL_CAPABILITY_EVAL.md) | [한국어](DSL_CAPABILITY_EVAL.ko.md) | [日本語](DSL_CAPABILITY_EVAL.ja.md) | [简体中文](DSL_CAPABILITY_EVAL.zh-CN.md)
@@ -143,3 +143,5 @@ capability manifest + exact admitted identifiers
 NeoGraphは現在、`ProgramSynthesisGateway`でこの境界を強制します: すべてのゲートウェイ設定は、ホスト所有の意味検証ボリッドを提供しなければなりません。検証が成功すると、Catalog admissionの前にコンテンツアドレス指定のレシートが生成されます。拒否された決定は`ProgramSynthesisValidationError`をスローし、正確な証拠を保持し、admissionリゾルバを決して呼び出しません。すでに消費された動的コンパイル予約は消費されたままです。
 
 `javascript_authoring_capability_manifest()`は、インストールされたグラフビルダーとコマンド語彙、正確なシグネチャ、分類、制限、プロファイル制約を機械可読データとして公開します。適合性テストは、そのマニフェストを両方のQuickJSコンテキストに実際にインストールされたプロパティと比較するため、APIドリフトはテストスイートを失敗させます。
+
+マニフェストは、作成機能ごとに 1 つのブール値フラグを持つ `features`（例: `graph.metadata`、`barrier.any_of`、`failure_edges`）、すべてのメソッドの TypeScript `dts` シグネチャと共通宣言をまとめた `dts_prelude`、そしてグラフビルダーの引数ごとの JSON Schema も公開します。これを支えるスキーマファイルは 2 つあります。[`schemas/javascript-capability-manifest-v1.schema.json`](../schemas/javascript-capability-manifest-v1.schema.json) はマニフェスト自体を、[`schemas/core-definition-v1.schema.json`](../schemas/core-definition-v1.schema.json) は生成された定義を制約付きデコードできるよう封印済みの Core 定義を記述します。テストは、マニフェストをそのスキーマで、ゴールデン識別子コーパスの定義を Core スキーマで検証します。

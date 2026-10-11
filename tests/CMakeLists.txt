@@ -933,6 +933,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
     # graph metadata, any_of join slots, witness paths and failure routing keys.
     add_executable(neograph_program_v2_tests
         test_program_diagnostics_help.cpp
+        test_capability_manifest.cpp
     )
     target_include_directories(neograph_program_v2_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/src/program)

@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/core-definition-v1.schema.json",
+  "title": "NeoGraph strict Core definition v1",
+  "description": "A Core graph definition as a Program seals it (schema_version 1). Use it to constrain generated definitions; the compiler still checks references, routes and registry names.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "name", "nodes", "edges"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "name": { "$ref": "#/$defs/name" },
+    "channels": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/name" },
+      "additionalProperties": { "$ref": "#/$defs/channel" }
+    },
+    "nodes": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/nodeName" },
+      "additionalProperties": { "$ref": "#/$defs/node" }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/edge" },
+          { "$ref": "#/$defs/inlineConditionalEdge" }
+        ]
+      }
+    },
+    "conditional_edges": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/conditionalEdge" }
+    },
+    "interrupt_before": { "$ref": "#/$defs/nodeList" },
+    "interrupt_after": { "$ref": "#/$defs/nodeList" },
+    "retry_policy": { "$ref": "#/$defs/retryPolicy" }
+  },
+  "$defs": {
+    "name": { "type": "string", "minLength": 1 },
+    "nodeName": {
+      "type": "string",
+      "minLength": 1,
+      "not": { "enum": ["__start__", "__end__"] }
+    },
+    "edgeSource": { "type": "string", "minLength": 1, "not": { "const": "__end__" } },
+    "edgeTarget": { "type": "string", "minLength": 1, "not": { "const": "__start__" } },
+    "nodeList": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/nodeName" }
+    },
+    "channel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reducer": {
+          "$ref": "#/$defs/name",
+          "description": "A registered reducer, such as overwrite or append. Defaults to overwrite."
+        },
+        "initial": { "description": "The value the channel starts with." }
+      }
+    },
+    "barrier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wait_for"],
+      "properties": {
+        "wait_for": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nodeName" },
+          "description": "Every listed node must signal the join before it runs."
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": ["type"],
+      "propertyNames": { "$ref": "#/$defs/name" },
+      "properties": {
+        "type": { "$ref": "#/$defs/name", "description": "A registered node type." },
+        "barrier": { "$ref": "#/$defs/barrier" }
+      },
+      "additionalProperties": true
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "$ref": "#/$defs/edgeSource" },
+        "to": { "$ref": "#/$defs/edgeTarget" }
+      }
+    },
+    "routes": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/name" },
+      "additionalProperties": { "$ref": "#/$defs/edgeTarget" }
+    },
+    "conditionalEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "condition", "routes"],
+      "properties": {
+        "from": { "$ref": "#/$defs/nodeName" },
+        "condition": { "$ref": "#/$defs/name", "description": "A registered condition." },
+        "routes": { "$ref": "#/$defs/routes" }
+      }
+    },
+    "inlineConditionalEdge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "condition", "routes"],
+      "properties": {
+        "from": { "$ref": "#/$defs/nodeName" },
+        "condition": { "$ref": "#/$defs/name" },
+        "type": { "const": "conditional" },
+        "routes": { "$ref": "#/$defs/routes" }
+      }
+    },
+    "retryPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_retries": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "initial_delay_ms": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "backoff_multiplier": { "type": "number" },
+        "max_delay_ms": { "type": "integer", "minimum": 0, "maximum": 2147483647 }
+      }
+    }
+  }
+}

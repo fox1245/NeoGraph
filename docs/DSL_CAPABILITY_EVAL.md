@@ -180,3 +180,14 @@ and command vocabulary, exact signatures, classifications, limits, and profile
 constraints as machine-readable data. Conformance tests compare that manifest
 with the actual properties installed in both QuickJS contexts so API drift fails
 the test suite.
+
+The manifest also publishes `features`, one boolean flag per authoring feature
+(for example `graph.metadata`, `barrier.any_of` or `failure_edges`), a TypeScript
+`dts` signature for every method with shared declarations in `dts_prelude`, and a
+JSON Schema for every graph-builder argument. Two schema files back it:
+[`schemas/javascript-capability-manifest-v1.schema.json`](../schemas/javascript-capability-manifest-v1.schema.json)
+describes the manifest itself, and
+[`schemas/core-definition-v1.schema.json`](../schemas/core-definition-v1.schema.json)
+describes a sealed Core definition, for constrained decoding of generated
+definitions. Tests validate the manifest against its schema and the definitions
+of the golden identity corpus against the Core schema.

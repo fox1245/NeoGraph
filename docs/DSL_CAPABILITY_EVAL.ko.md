@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/DSL_CAPABILITY_EVAL.md locale=ko source_sha256=7ac0e8bb68d88e27682b67247d72e6d408b05e9f23c6ff59967e81cf9f6b3b30 -->
+<!-- neograph-i18n: source=docs/DSL_CAPABILITY_EVAL.md locale=ko source_sha256=440d5d76af8cf05685dddfa06df9dee587f74851719820ff655b0a220bdb1b49 -->
 # QuickJS DSL 기능 및 모델 합성 평가
 
 **Languages:** [English](DSL_CAPABILITY_EVAL.md) | [한국어](DSL_CAPABILITY_EVAL.ko.md) | [日本語](DSL_CAPABILITY_EVAL.ja.md) | [简体中文](DSL_CAPABILITY_EVAL.zh-CN.md)
@@ -141,3 +141,5 @@ capability manifest + exact admitted identifiers
 NeoGraph는 이제 `ProgramSynthesisGateway`에서 이 경계를 강제합니다: 모든 게이트웨이 구성은 호스트 소유 의미 검증기를 제공해야 합니다. 검증 성공 시 Catalog 승인(admission) 전에 콘텐츠 주소 기반 영수증을 생성하며, 거부된 결정은 `ProgramSynthesisValidationError`를 발생시키고, 정확한 증거를 보존하며, 승인(admission) 리졸버를 절대 호출하지 않습니다. 이미 소비된 동적 컴파일 예약은 계속 소비된 상태로 유지됩니다.
 
 `javascript_authoring_capability_manifest()`는 설치된 그래프 빌더 및 명령 어휘, 정확한 서명, 분류, 제한 및 프로필 제약 사항을 기계가 읽을 수 있는 데이터로 노출합니다. 적합성 테스트는 해당 매니페스트를 두 QuickJS 컨텍스트에 설치된 실제 속성과 비교하므로 API 드리프트가 발생하면 테스트 스위트가 실패합니다.
+
+매니페스트는 작성 기능마다 불리언 플래그 하나를 두는 `features`(예: `graph.metadata`, `barrier.any_of`, `failure_edges`), 모든 메서드의 TypeScript `dts` 시그니처와 공통 선언을 담은 `dts_prelude`, 그리고 그래프 빌더 인수마다 JSON Schema도 공개합니다. 이를 뒷받침하는 스키마 파일은 두 개입니다. [`schemas/javascript-capability-manifest-v1.schema.json`](../schemas/javascript-capability-manifest-v1.schema.json)은 매니페스트 자체를, [`schemas/core-definition-v1.schema.json`](../schemas/core-definition-v1.schema.json)은 생성된 정의를 제약 디코딩할 수 있도록 봉인된 Core 정의를 기술합니다. 테스트는 매니페스트를 그 스키마로, 골든 아이덴티티 코퍼스의 정의를 Core 스키마로 검증합니다.
