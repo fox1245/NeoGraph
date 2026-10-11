@@ -206,6 +206,27 @@ void init_hooks(py::module_& m) {
 
     py::class_<HookRuntime, std::shared_ptr<HookRuntime>>(m, "HookRuntime");
     py::register_exception<HookBoundaryBlocked>(m, "HookBoundaryBlocked");
+    // Registered after the plain translator, so pybind11 tries it first: the
+    // Python exception keeps the typed fields of the C++ one, invocation_id
+    // and state ("failed", "timed_out", ...), as a Python tool or caller
+    // needs them to tell which Hook blocked and why.
+    py::register_exception_translator([](std::exception_ptr pointer) {
+        if (!pointer) return;
+        try {
+            std::rethrow_exception(pointer);
+        } catch (const HookBoundaryBlocked& error) {
+            try {
+                py::object type = py::module_::import("neograph_engine._neograph")
+                                      .attr("HookBoundaryBlocked");
+                py::object instance = type(py::str(error.what()));
+                instance.attr("invocation_id") = py::str(error.invocation_id());
+                instance.attr("state") = py::str(std::string(to_string(error.state())));
+                PyErr_SetObject(type.ptr(), instance.ptr());
+            } catch (py::error_already_set& failure) {
+                failure.restore();
+            }
+        }
+    });
     m.def("create_hook_runtime", &make_python_hook_runtime,
           py::arg("definitions"), py::arg("callbacks"),
           py::arg("timeout_ms") = 30'000,

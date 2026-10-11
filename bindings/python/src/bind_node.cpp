@@ -35,6 +35,7 @@
 #include <neograph/graph/state.h>
 #include <neograph/graph/store.h>
 #include <neograph/graph/types.h>
+#include <neograph/hook_outbox.h>
 
 #include <asio/awaitable.hpp>
 #include <asio/co_spawn.hpp>
@@ -184,6 +185,57 @@ translate_node_interrupt(py::error_already_set& e) {
     return neograph::graph::NodeInterrupt(reason, std::move(value));
 }
 
+// The run control signals a Python *tool* can raise, as the C++ exceptions the
+// tool failure contract recognises: a NodeInterrupt pauses the run and a
+// HookBoundaryBlocked (typically escaping a nested engine run inside the tool)
+// stops it, exactly as they would from a C++ tool. Everything else stays the
+// Python error, which the dispatcher turns into a tool message. Same
+// discipline as translate_node_interrupt: read under the GIL, throw after it.
+struct PythonToolControlSignal {
+    std::optional<neograph::graph::NodeInterrupt> interrupt;
+    std::optional<neograph::HookBoundaryBlocked> hook_blocked;
+    explicit operator bool() const { return interrupt || hook_blocked; }
+    [[noreturn]] void raise() const {
+        if (interrupt) throw *interrupt;
+        throw *hook_blocked;
+    }
+};
+
+PythonToolControlSignal translate_tool_control_signal(py::error_already_set& e) {
+    PythonToolControlSignal signal;
+    signal.interrupt = translate_node_interrupt(e);
+    if (signal.interrupt) return signal;
+    py::object type;
+    try {
+        type = py::module_::import("neograph_engine").attr("HookBoundaryBlocked");
+    } catch (const py::error_already_set&) {
+        return signal;
+    }
+    if (!e.matches(type)) return signal;
+    py::object exc = e.value();
+    std::string invocation_id;
+    auto state = neograph::HookExecutionState::Failed;
+    if (py::hasattr(exc, "invocation_id") && !exc.attr("invocation_id").is_none()) {
+        invocation_id = py::str(exc.attr("invocation_id")).cast<std::string>();
+    }
+    if (py::hasattr(exc, "state") && !exc.attr("state").is_none()) {
+        const auto name = py::str(exc.attr("state")).cast<std::string>();
+        for (auto candidate : {neograph::HookExecutionState::Triggered,
+                               neograph::HookExecutionState::Pending,
+                               neograph::HookExecutionState::Dispatched,
+                               neograph::HookExecutionState::Succeeded,
+                               neograph::HookExecutionState::Failed,
+                               neograph::HookExecutionState::TimedOut,
+                               neograph::HookExecutionState::ReconciliationRequired,
+                               neograph::HookExecutionState::Cancelled}) {
+            if (neograph::to_string(candidate) == name) state = candidate;
+        }
+    }
+    signal.hook_blocked.emplace(std::move(invocation_id), state,
+                                py::str(exc).cast<std::string>());
+    return signal;
+}
+
 // PyToolOwner: bridges the C++ Tool interface to a held Python user
 // object. Created at GraphEngine.compile() time from the
 // `_pytools` attribute on the Python NodeContext wrapper, then retained
@@ -283,8 +335,17 @@ public:
     }
 
     std::string execute(const json& arguments) override {
-        py::gil_scoped_acquire g;
-        return call_python(arguments);
+        PythonToolControlSignal signal;
+        {
+            py::gil_scoped_acquire g;
+            try {
+                return call_python(arguments);
+            } catch (py::error_already_set& e) {
+                signal = translate_tool_control_signal(e);
+                if (!signal) throw;   // an ordinary failure: the model sees it
+            }
+        }
+        signal.raise();
     }
 
     // The whole of issue #96 is this override.
@@ -327,8 +388,7 @@ private:
     // the run, and copying a py::object here would touch a CPython refcount
     // without the GIL.)
     static asio::awaitable<std::string> offload(PyToolOwner* self, json arguments) {
-        py::gil_scoped_acquire g;
-        co_return self->call_python(arguments);
+        co_return self->execute(arguments);
     }
 
     py::object py_obj_;
