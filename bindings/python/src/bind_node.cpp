@@ -25,6 +25,7 @@
 //     GIL-acquiring deleter so concurrent compiles do not race Python cleanup.
 
 #include "json_bridge.h"
+#include "node_failure_bridge.h"
 #include "opaque_types.h"
 #include "provider_bridge.h"
 
@@ -183,6 +184,45 @@ translate_node_interrupt(py::error_already_set& e) {
         if (!v.is_none()) value = py_to_json(v);
     }
     return neograph::graph::NodeInterrupt(reason, std::move(value));
+}
+
+// Translate any other Python exception from a node body into a typed node
+// failure (#364). The failure classifier cannot read Python attributes, so they
+// are read here, under the GIL:
+//
+//   - `code`: a string author code (`app.compile_error`; see
+//     is_author_failure_code) names the failure. Anything else, such as an
+//     HTTP status in `code` or a vendor code, is ignored: the failure is
+//     NG.TaskFailed.
+//   - `retryable`: a bool; False stops the node's retry loop.
+//   - `public_message`: a str, the only text a failure record may carry.
+//
+// The original exception rides along and is what Python callers receive.
+// Must be called inside the catch block that holds @p e, with the GIL held.
+PythonNodeFailure translate_node_failure(py::error_already_set& e) {
+    std::string code;
+    std::string public_message;
+    std::optional<bool> retryable;
+    py::object exc = e.value();
+    // Reading an attribute runs Python code (properties, __getattr__); any
+    // error there leaves the attribute unread.
+    const auto attribute = [&exc](const char* name) -> py::object {
+        try {
+            if (py::hasattr(exc, name)) return exc.attr(name);
+        } catch (const py::error_already_set&) {
+        }
+        return py::none();
+    };
+    if (const auto value = attribute("code"); py::isinstance<py::str>(value)) {
+        auto text = value.cast<std::string>();
+        if (neograph::graph::is_author_failure_code(text)) code = std::move(text);
+    }
+    if (const auto value = attribute("retryable"); py::isinstance<py::bool_>(value))
+        retryable = value.cast<bool>();
+    if (const auto value = attribute("public_message"); py::isinstance<py::str>(value))
+        public_message = value.cast<std::string>();
+    return PythonNodeFailure(e.what(), std::move(code), std::move(public_message), retryable,
+                             std::current_exception());
 }
 
 // The run control signals a Python *tool* can raise, as the C++ exceptions the
@@ -459,6 +499,7 @@ private:
         // Captured under the GIL, thrown after releasing it — see
         // translate_node_interrupt.
         std::optional<neograph::graph::NodeInterrupt> interrupt;
+        std::optional<PythonNodeFailure> failure;
         {
             py::gil_scoped_acquire g;
             py::object py_input = py::cast(&in,
@@ -468,10 +509,12 @@ private:
                 result = coerce_to_node_result(res);
             } catch (py::error_already_set& e) {
                 interrupt = translate_node_interrupt(e);
-                if (!interrupt) throw;   // a real error, not a pause
+                // A real error, not a pause: a typed node failure.
+                if (!interrupt) failure = translate_node_failure(e);
             }
         }
         if (interrupt) throw *interrupt;
+        if (failure) throw *failure;
         return result;
     }
 

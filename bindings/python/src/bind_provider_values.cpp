@@ -1,6 +1,7 @@
 // Typed SDK values and owned provider observations. JSON fields below are
 // data-only copies; native replay remains in the original C++ shared owners.
 #include "json_bridge.h"
+#include "node_failure_bridge.h"
 #include "provider_bridge.h"
 #include <core/native.h>
 #include <core/native_archive.h>
@@ -83,6 +84,9 @@ py::object provider_cause(const std::exception_ptr& cause) {
     // through the dispatcher, which consumes error_already_set's restore state.
     try { std::rethrow_exception(cause); }
     catch (py::error_already_set& error) { return retain_python_error(error); }
+    // A Python node body's exception travels as a typed node failure; the
+    // caller receives the original Python exception.
+    catch (const PythonNodeFailure& failure) { return provider_cause(failure.python_error()); }
     catch (...) {}
     try { py::cpp_function([cause] { std::rethrow_exception(cause); })(); }
     catch (py::error_already_set& error) { return retain_python_error(error); }

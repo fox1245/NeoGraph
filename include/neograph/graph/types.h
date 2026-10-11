@@ -23,6 +23,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -265,6 +266,164 @@ private:
     int                attempts_;
     std::exception_ptr cause_;
 };
+
+/**
+ * @brief What a node failure means for retry and for failure routing.
+ *
+ * One classifier decides it for every node failure and every tool failure
+ * ("Node failure contract" in the reference). It walks the whole cause chain
+ * (NodeExecutionError causes, std::nested_exception, subgraph failures) and
+ * the most severe class found anywhere wins. The values are ordered by that
+ * severity. Only Ordinary, Timeout and ProviderFailed are routable.
+ */
+enum class NodeFailureClass : std::uint8_t {
+    /// NG.TaskFailed, NG.SubgraphFailed or an author code. Retried unless the
+    /// author marked it non-retryable. Routable.
+    Ordinary = 0,
+    /// NG.Timeout: an attempt timeout. Retried. Routable. Reserved: nothing
+    /// produces it until attempt timeouts land.
+    Timeout = 1,
+    /// NG.ProviderFailed: a transient provider failure (transport, timeout,
+    /// server, overloaded, rate limited). Not retried, because the provider
+    /// runtime owns provider retries. Routable.
+    ProviderFailed = 2,
+    /// NG.EffectCommitted: the attempt committed a non-idempotent effect, so
+    /// running the node again could repeat it. Never retried. Not routable.
+    EffectCommitted = 3,
+    /// NG.LogicError: std::logic_error, which includes integrity checks.
+    LogicError = 4,
+    /// NG.ConfigError: configuration or misuse, including provider request,
+    /// authentication and permission failures.
+    ConfigError = 5,
+    /// NG.SafetyBlocked: a provider safety block.
+    SafetyBlocked = 6,
+    /// NG.BudgetExhausted: budget or quota exhaustion.
+    BudgetExhausted = 7,
+    /// NG.EffectUncertain: an effect whose outcome is not known
+    /// (ProviderOutcomeError, an unconfirmed Tool effect).
+    EffectUncertain = 8,
+    /// NG.UnknownFailure: std::bad_alloc, an exception outside the known
+    /// families, or a non-standard exception.
+    Unknown = 9,
+    /// Run control: NodeInterrupt. Stops the run as before.
+    Interrupted = 10,
+    /// Run control: HookBoundaryBlocked. Stops the run as before.
+    HookBlocked = 11,
+    /// Run control: cancellation. Stops the run as before.
+    Cancelled = 12,
+};
+
+/// Why the executor stopped trying a failed node.
+enum class NodeFailureKind : std::uint8_t {
+    Exhausted,        ///< Retryable, but every allowed attempt failed.
+    NonRetryable,     ///< The failure's class or author hint rules out a retry.
+    EffectCommitted,  ///< The final attempt committed a non-idempotent effect.
+    Deadline,         ///< Reserved: a retry would cross the run deadline.
+    Ceiling,          ///< Reserved: the run-level retry ceiling was reached.
+    VisitLimit,       ///< Reserved: the node's visit limit was reached.
+};
+
+/// The stable code of a class: "NG.TaskFailed", "NG.LogicError", ...
+NEOGRAPH_API const char* node_failure_code(NodeFailureClass failure_class) noexcept;
+/// Whether a failure of this class may be retried at all.
+NEOGRAPH_API bool node_failure_retryable(NodeFailureClass failure_class) noexcept;
+/// Whether a failure of this class may be routed to a failure handler.
+NEOGRAPH_API bool node_failure_routable(NodeFailureClass failure_class) noexcept;
+/// "exhausted", "non_retryable", "effect_committed", "deadline", "ceiling",
+/// "visit_limit".
+NEOGRAPH_API const char* to_string(NodeFailureKind kind) noexcept;
+/// True for an author code: `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`, at most 128
+/// bytes. The `NG.` prefix is reserved and never matches.
+NEOGRAPH_API bool is_author_failure_code(std::string_view code) noexcept;
+
+/// One mediated Tool effect of a node attempt, as seen by the run's
+/// ToolEffectBroker. `status` is the to_string() of its ToolTerminalStatus.
+struct NodeFailureEffect {
+    std::string   tool;
+    std::uint64_t ordinal = 0;
+    std::string   status;
+    bool operator==(const NodeFailureEffect&) const = default;
+};
+
+/**
+ * @brief The classified outcome of a failed node.
+ *
+ * The executor attaches one to the NodeExecutionError it throws when it gives
+ * up on a node; read it with node_failure_of(). It holds structured fields
+ * only: `public_message` comes from typed safe sources (NodeFailureError, a
+ * Python exception's `public_message` attribute), never from what().
+ */
+struct NodeFailure {
+    /// The node whose retry loop gave up.
+    std::string node;
+    /// "NG.TaskFailed", "NG.SubgraphFailed", an author code, ...
+    std::string code;
+    std::string public_message;
+    NodeFailureClass failure_class = NodeFailureClass::Ordinary;
+    NodeFailureKind kind = NodeFailureKind::NonRetryable;
+    /// The failure itself was retryable (its class and the author's hint),
+    /// whether or not attempts were left.
+    bool retryable = false;
+    bool routable = false;
+    /// Attempts made, counting attempts made before a crash-resume.
+    int attempts = 0;
+    /// Effects of the final attempt through the run's ToolEffectBroker, in
+    /// the order they settled; empty without a broker. An earlier attempt
+    /// cannot have committed a non-idempotent effect: it would not have been
+    /// retried.
+    std::vector<NodeFailureEffect> effects;
+};
+
+/**
+ * @brief Fail a node with an author code.
+ *
+ * @code
+ * throw NodeFailureError("app.compile_error", "the patch does not compile",
+ *                        false);  // never retry this
+ * @endcode
+ *
+ * The code must be an author code (is_author_failure_code()); otherwise the
+ * constructor throws std::invalid_argument. A `retryable` of false stops the
+ * retry loop. `public_message` is the only text a failure record may carry.
+ */
+class NEOGRAPH_API NodeFailureError : public std::runtime_error {
+public:
+    explicit NodeFailureError(std::string code, std::string public_message = {},
+                              std::optional<bool> retryable = std::nullopt)
+        : NodeFailureError(what_of(code, public_message), code, public_message, retryable) {}
+
+    /// The author code; empty when the failure carries none (NG.TaskFailed).
+    const std::string& code() const noexcept { return code_; }
+    const std::string& public_message() const noexcept { return public_message_; }
+    std::optional<bool> retryable() const noexcept { return retryable_; }
+
+protected:
+    /// For bindings that translate a foreign error: what() keeps that error's
+    /// text. `code` must be empty or an author code.
+    NodeFailureError(std::string what, std::string code, std::string public_message,
+                     std::optional<bool> retryable)
+        : std::runtime_error(std::move(what)), code_(std::move(code)),
+          public_message_(std::move(public_message)), retryable_(retryable) {}
+
+private:
+    static std::string what_of(const std::string& code, const std::string& public_message) {
+        if (!is_author_failure_code(code))
+            throw std::invalid_argument(
+                "NodeFailureError code must match [a-z][a-z0-9_]*(.[a-z0-9_]+)+ "
+                "and must not use the reserved NG. prefix");
+        return public_message.empty() ? code : code + ": " + public_message;
+    }
+
+    std::string         code_;
+    std::string         public_message_;
+    std::optional<bool> retryable_;
+};
+
+/// The record the executor attached to @p error, or null when the executor's
+/// retry loop did not throw @p error.
+NEOGRAPH_API const NodeFailure* node_failure_of(const NodeExecutionError& error) noexcept;
+/// Same for a captured exception: empty unless it is such a NodeExecutionError.
+NEOGRAPH_API std::optional<NodeFailure> node_failure_of(const std::exception_ptr& error);
 
 /**
  * @brief Dynamic fan-out request (map-reduce pattern).

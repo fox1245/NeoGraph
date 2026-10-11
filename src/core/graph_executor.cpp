@@ -282,7 +282,43 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
 
     auto ex = co_await asio::this_coro::executor;
 
-    auto throw_node_error = [&](std::exception_ptr cause, int attempts) -> void {
+    // Give up on the node: report it, then throw the NodeExecutionError that
+    // carries the classified record (graph::node_failure_of).
+    auto fail_node = [&](std::exception_ptr cause, int attempts,
+                         const ::neograph::detail::NodeFailureVerdict& verdict,
+                         NodeFailureKind kind) -> void {
+        auto record            = std::make_shared<NodeFailure>();
+        record->node           = node_name;
+        record->code           = verdict.code;
+        record->public_message = verdict.public_message;
+        record->failure_class  = verdict.failure_class;
+        record->kind           = kind;
+        record->retryable      = verdict.retryable;
+        record->routable       = verdict.routable;
+        record->attempts       = attempts;
+        std::shared_ptr<const NodeFailure> failure = std::move(record);
+
+        // A subgraph may fail inside this node. The outer retry policy has now
+        // been honored; keep the innermost dispatch context (node name,
+        // attempts, cause) as before, now with this node's record.
+        std::string error_node = node_name;
+        int         error_attempts = attempts;
+        std::exception_ptr error_cause = cause;
+        try {
+            std::rethrow_exception(cause);
+        } catch (const NodeExecutionError& inner) {
+            // An inner error that nests a secondary failure keeps its exact
+            // shape; it is rethrown as it was.
+            if (const auto* nested = dynamic_cast<const std::nested_exception*>(&inner);
+                nested && nested->nested_ptr())
+                error_cause = nullptr;
+            else {
+                error_node     = inner.node_name();
+                error_attempts = inner.attempts();
+                error_cause    = inner.cause();
+            }
+        } catch (...) {}
+
         if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
             std::string what = "unknown";
             try {
@@ -297,17 +333,13 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
                 if (!has_provider_outcome(cause)) throw;
                 // Keep provider evidence as the primary node cause; a failing
                 // terminal observer remains inspectable as a nested exception.
-                std::throw_with_nested(NodeExecutionError(node_name, attempts, std::move(cause)));
+                std::throw_with_nested(::neograph::detail::ClassifiedNodeExecutionError(
+                    node_name, attempts, std::move(cause), std::move(failure)));
             }
         }
-        try {
-            std::rethrow_exception(cause);
-        } catch (const NodeExecutionError&) {
-            // A subgraph may fail inside this node. The outer retry policy has
-            // now been honored; keep the innermost dispatch context intact.
-            throw;
-        } catch (...) {}
-        throw NodeExecutionError(node_name, attempts, std::move(cause));
+        if (!error_cause) std::rethrow_exception(cause);
+        throw ::neograph::detail::ClassifiedNodeExecutionError(
+            std::move(error_node), error_attempts, std::move(error_cause), std::move(failure));
     };
 
     for (int attempt = 0; attempt <= policy.max_retries; ++attempt) {
@@ -319,76 +351,17 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
         }
 
         // Capture the outcome of one attempt without co_await inside a
-        // catch block (GCC 13 ICEs on that shape). NodeInterrupt is
-        // re-thrown immediately so it short-circuits the loop just
-        // like the sync path.
+        // catch block (GCC 13 ICEs on that shape).
         std::optional<NodeResult> ok_result;
-        std::exception_ptr        retryable_err;
+        std::exception_ptr        failure;
 
         try {
             // Single dispatch point. NodeInput bundles state, per-run
             // context, and the optional streaming callback.
             NodeInput in{state, ctx, cb ? &cb : nullptr};
             ok_result.emplace(co_await node_it->second->run(in));
-        } catch (const NodeInterrupt&) {
-            // NodeInterrupt is a control-flow signal, not a retryable
-            // error. Bubble out of the coroutine so the caller can save
-            // a NodeInterrupt checkpoint, matching the sync path.
-            throw;
-        } catch (const CancelledException&) {
-            // Cancellation is a control-flow signal, not a retryable
-            // node error. Re-entering the node would start fresh work
-            // after the run has already been cancelled.
-            throw;
-        } catch (const ProviderOutcomeError&) {
-            // The provider effect has already drained. Retrying a host
-            // observer/settlement failure would issue a fresh provider effect.
-            throw_node_error(std::current_exception(), attempt + 1);
-        } catch (const ProviderFailure&) {
-            // SDK runtime owns provider retry policy and attempt evidence.
-            // Re-running the node would start a fresh unrelated operation.
-            throw_node_error(std::current_exception(), attempt + 1);
-        } catch (const NodeExecutionError& nested) {
-            auto error = std::current_exception();
-            if (has_provider_outcome(error) ||
-                ::neograph::detail::classify_tool_failure(nested.cause(), nullptr) ==
-                    ::neograph::detail::ToolFailureClass::HookBlocked)
-                throw_node_error(std::move(error), attempt + 1);
-            retryable_err = std::move(error);
-        } catch (const asio::system_error& error) {
-            // Socket/timer cancellation enters node code as
-            // operation_aborted. Once this operation's token is set, that is
-            // cancellation control flow, not a retryable transport failure.
-            if (ctx.cancel_token && ctx.cancel_token->is_cancelled() &&
-                error.code() == asio::error::operation_aborted) {
-                throw CancelledException("node " + node_name + " operation aborted");
-            }
-            retryable_err = std::current_exception();
-        } catch (const std::bad_alloc&) {
-            // OOM is not retryable. Sleeping then re-running won't
-            // free memory; it just delays the inevitable failure
-            // and risks compounding allocator pressure.
-            throw;
-        } catch (const std::logic_error&) {
-            // logic_error and its subclasses (invalid_argument,
-            // out_of_range, length_error, domain_error, future_error)
-            // signal programming bugs — assertions, contract
-            // violations. Retrying produces the same bug. Surface
-            // immediately so the bug shows up loud rather than as
-            // a slow retry-exhaustion timeout.
-            throw_node_error(std::current_exception(), attempt + 1);
         } catch (...) {
-            // runtime_error, network/timeout errors, third-party
-            // exceptions: assume transient and let the retry loop
-            // decide based on attempt count + policy. A HookBoundaryBlocked
-            // is not transient: it is a mandatory Hook's policy decision, and
-            // re-running the node would re-run work (a whole tool batch) to
-            // ask the same question again.
-            auto error = std::current_exception();
-            if (::neograph::detail::classify_tool_failure(error, nullptr) ==
-                ::neograph::detail::ToolFailureClass::HookBlocked)
-                throw_node_error(std::move(error), attempt + 1);
-            retryable_err = std::move(error);
+            failure = std::current_exception();
         }
 
         if (ok_result) {
@@ -413,16 +386,41 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
             co_return std::move(nr);
         }
 
-        // Retry path. retryable_err must be populated since neither the
-        // result nor a NodeInterrupt path was taken.
-        if (attempt >= policy.max_retries) {
-            throw_node_error(retryable_err, attempt + 1);
+        // Control flow leaves unwrapped, as before: an interrupt pauses the
+        // run, a cancellation stops it, and OOM is not a node failure.
+        try {
+            std::rethrow_exception(failure);
+        } catch (const NodeInterrupt&) {
+            throw;
+        } catch (const CancelledException&) {
+            throw;
+        } catch (const std::bad_alloc&) {
+            throw;
+        } catch (const asio::system_error& error) {
+            // Socket/timer cancellation enters node code as
+            // operation_aborted. Once this operation's token is set, that is
+            // cancellation control flow, not a retryable transport failure.
+            if (ctx.cancel_token && ctx.cancel_token->is_cancelled() &&
+                error.code() == asio::error::operation_aborted) {
+                throw CancelledException("node " + node_name + " operation aborted");
+            }
+        } catch (...) {}
+
+        // Every other retry decision is the shared classifier's
+        // (tool_failure.h): ordinary failures are retried unless the author
+        // said otherwise; nothing else is.
+        const auto verdict = ::neograph::detail::classify_node_failure(
+            failure, ctx.cancel_token.get());
+        if (!verdict.retryable || attempt >= policy.max_retries) {
+            fail_node(std::move(failure), attempt + 1, verdict,
+                      verdict.retryable ? NodeFailureKind::Exhausted
+                                        : NodeFailureKind::NonRetryable);
         }
 
         if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
             std::string what;
             try {
-                std::rethrow_exception(retryable_err);
+                std::rethrow_exception(failure);
             } catch (const std::exception& e) {
                 what = safe_exception_message(e);
             } catch (...) {

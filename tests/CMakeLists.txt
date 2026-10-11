@@ -891,6 +891,15 @@ add_executable(neograph_text_safety_tests test_text_safety.cpp)
 target_link_libraries(neograph_text_safety_tests PRIVATE neograph::core GTest::gtest_main)
 neograph_discover_tests(neograph_text_safety_tests PROPERTIES LABELS "core;text-safety")
 
+# One classifier for node and tool failures, and effect-aware node retry
+# (#364). Reaches into core internals (tool_failure.h), so it is built only
+# against the static core, like test_run_context_runtime_registry.cpp.
+if(NOT BUILD_SHARED_LIBS)
+    add_executable(neograph_node_failure_tests test_node_failure_classifier.cpp)
+    target_link_libraries(neograph_node_failure_tests PRIVATE neograph::core GTest::gtest_main)
+    neograph_discover_tests(neograph_node_failure_tests PROPERTIES LABELS "core;node-failure")
+endif()
+
 if(NEOGRAPH_BUILD_PROGRAM)
     # Golden identity corpus: pins definition hashes, compiled-plan identities
     # and bundle ids. Regenerating it is opt-in; see test_identity_golden.cpp.

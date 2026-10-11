@@ -1,29 +1,39 @@
 /**
  * @file tool_failure.h
- * @brief Internal: the one failure classification for model-requested tools.
+ * @brief Internal: the one failure classification for nodes and tools.
  *
  * Every path that executes a model's tool calls (dispatch_tool_calls for one
- * call or a batch, the ToolExecutionController, the node retry loop) asks this
- * helper what a failure means instead of keeping its own list of exception
- * types. Before it existed the paths kept separate lists and drifted: a batch
- * turned a HookBoundaryBlocked into a tool message the model could read and
- * route around, while a single call stopped the run.
+ * call or a batch, the ToolExecutionController) and the node retry loop ask
+ * this helper what a failure means instead of keeping their own lists of
+ * exception types. Before it existed the paths kept separate lists and
+ * drifted: a batch turned a HookBoundaryBlocked into a tool message the model
+ * could read and route around, while a single call stopped the run; the retry
+ * loop retried a subgraph failure whose root was a logic error.
  *
- * The contract, documented for users in the reference ("Tool failure
- * contract"):
+ * classify_node_failure walks the whole cause chain (NodeExecutionError
+ * causes, std::nested_exception, subgraph failures) and returns the most
+ * severe graph::NodeFailureClass found anywhere in it. It is an allowlist:
+ * only the runtime_error family, typed author failures (NodeFailureError) and
+ * transient provider failures are routable, and anything it does not know is
+ * NG.UnknownFailure.
+ *
+ * The tool contract, documented for users in the reference ("Tool failure
+ * contract"), is the same verdict:
  *
  *  - Run control signals stop the run and are never turned into a tool
  *    message: HookBoundaryBlocked (a mandatory lifecycle Hook blocked),
  *    graph::NodeInterrupt (a human has to answer) and cancellation of the
- *    run's CancelToken.
+ *    run's CancelToken, wherever they appear in the cause chain.
  *  - Every other failure becomes a tool message with a typed status that the
  *    model sees, so it can react.
  */
 #pragma once
 
+#include <neograph/graph/types.h>
 #include <neograph/tool_execution.h>
 
 #include <exception>
+#include <memory>
 #include <string>
 
 namespace neograph::graph {
@@ -70,5 +80,35 @@ std::string tool_failure_message(const std::exception_ptr& error);
 /// started under a policy that does not rule out an effect is uncertain.
 ToolExecutionResult ordinary_tool_failure(const ToolExecutionPolicy& policy, bool started,
                                           std::string error);
+
+/// The classifier's verdict on one failure and its whole cause chain.
+struct NodeFailureVerdict {
+    graph::NodeFailureClass failure_class = graph::NodeFailureClass::Unknown;
+    /// "NG.TaskFailed", "NG.SubgraphFailed", an author code, ...
+    std::string code;
+    /// Text from typed safe sources only (NodeFailureError::public_message).
+    std::string public_message;
+    bool retryable = false;
+    bool routable = false;
+};
+
+/// Classify @p error. See NodeFailureClass for the classes and their order.
+NodeFailureVerdict classify_node_failure(const std::exception_ptr& error,
+                                         const graph::CancelToken* run_token) noexcept;
+
+/// The NodeExecutionError the node retry loop throws: it carries the
+/// NodeFailure record that graph::node_failure_of() returns. Not final, so
+/// std::throw_with_nested can still nest a secondary failure under it.
+class ClassifiedNodeExecutionError : public graph::NodeExecutionError {
+public:
+    ClassifiedNodeExecutionError(std::string node_name, int attempts, std::exception_ptr cause,
+                                 std::shared_ptr<const graph::NodeFailure> failure)
+        : NodeExecutionError(std::move(node_name), attempts, std::move(cause)),
+          failure_(std::move(failure)) {}
+    const std::shared_ptr<const graph::NodeFailure>& failure() const noexcept { return failure_; }
+
+private:
+    std::shared_ptr<const graph::NodeFailure> failure_;
+};
 
 }  // namespace neograph::detail
