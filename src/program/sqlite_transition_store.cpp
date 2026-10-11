@@ -700,7 +700,7 @@ bool valid_command_reservation_transition(
         return false;
     auto usage               = publication.run_record.terminal_result()->usage();
     usage.program_operations = 0;
-    return is_valid_program_journal_reservation_settlement(previous_journal, next_journal, usage);
+    return is_valid_program_journal_reservation_release(previous_journal, next_journal, usage);
 }
 
 bool valid_initial_publication(const ProgramTransitionPublication& publication) {

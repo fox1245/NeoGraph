@@ -254,6 +254,48 @@ TEST(ProgramJournalTest, ReservationSettlementMayAdvanceToAnotherThreadOfSameCor
         next_checkpoint, 30});
     EXPECT_FALSE(is_valid_program_journal_reservation_settlement(pending, wrong_core, measured));
 }
+// Issue #371: an interrupted CallCore releases its reservation with the
+// attempt's cumulative usage, which also counts work an earlier command in the
+// same attempt already settled. The release is bounded, not exact.
+TEST(ProgramJournalTest, InterruptedReservationReleaseIsBoundedByAttemptUsage) {
+    auto available         = remaining_budget();
+    available.wall_time_ms = 9000;
+    RunBudget reservation;
+    reservation.wall_time_ms = 1000;
+    const auto pending       = ProgramJournalRecord::create(
+        ProgramJournalRecordData{{},
+                                 "run-1",
+                                 digest('1'),
+                                 digest('2'),
+                                 1,
+                                 ProgramContinuation{"root", ContinuationState::Running, 1},
+                                 available,
+                                 reservation,
+                                 checkpoint(),
+                                 20});
+    const auto released = [&](std::uint64_t wall, std::uint64_t concurrency_delta = 0) {
+        auto budget            = remaining_budget();
+        budget.wall_time_ms    = wall;
+        budget.max_concurrency += concurrency_delta;
+        auto next_checkpoint          = checkpoint();
+        next_checkpoint.checkpoint_id = "checkpoint-2";
+        return ProgramJournalRecord::create(ProgramJournalRecordData{
+            pending.id, pending.run_id, pending.program_version_id, pending.bundle_id, 2,
+            ProgramContinuation{"root", ContinuationState::Interrupted, 1}, budget,
+            empty_budget(), next_checkpoint, 30});
+    };
+    // 1500 ms of attempt usage: 1000 settled by an earlier command, 500 here.
+    const ProgramUsage attempt{1500, 0, 0, 0, 0, 0};
+    EXPECT_FALSE(is_valid_program_journal_reservation_settlement(pending, released(9500), attempt));
+    EXPECT_TRUE(is_valid_program_journal_reservation_release(pending, released(9500), attempt));
+    EXPECT_TRUE(is_valid_program_journal_reservation_release(pending, released(10000), attempt));
+    EXPECT_TRUE(is_valid_program_journal_reservation_release(pending, released(8500), attempt));
+    // Never more than the whole reservation back, never more than usage charged.
+    EXPECT_FALSE(is_valid_program_journal_reservation_release(pending, released(10001), attempt));
+    EXPECT_FALSE(is_valid_program_journal_reservation_release(pending, released(8499), attempt));
+    // Resources without usage must come back exactly.
+    EXPECT_FALSE(is_valid_program_journal_reservation_release(pending, released(9500, 1), attempt));
+}
 TEST(ProgramJournalTest, UnresolvedExternalWorkRetainsDurableReservation) {
     const auto start     = start_record();
     auto       available = start.remaining_budget;

@@ -786,3 +786,82 @@ def test_program_barrier_stall_is_reported_after_an_implicit_end_elsewhere():
     result = host.run(host.compile_admit(source, _budget()), {}, _budget())
     assert result.status == ng.ProgramTerminalStatus.Failed
     assert result.failure.code == "P_CORE_BARRIER_STALLED"
+
+
+class _AskNode(ng.GraphNode):
+    """Pauses with NodeInterrupt when the "ask" channel is set, until resumed."""
+
+    def __init__(self, name):
+        super().__init__()
+        self._name = name
+
+    def get_name(self):
+        return self._name
+
+    def run(self, input):
+        if input.state.get("ask") and input.ctx.resume_value is None:
+            raise ng.NodeInterrupt({"question": "approve?"}, reason="needs approval")
+        return [ng.ChannelWrite("trace", [self._name])]
+
+
+def _two_call_host(owner):
+    _trace_host(owner)  # registers the trace node type
+    ng.NodeFactory.register_type("python_program_ask_node", lambda name, _c, _x: _AskNode(name))
+    builder = ng.ProgramRegistryBuilder()
+    builder.add_registered_node("python_program_trace_node", "1.0.0", _DIGEST_TRACE_NODE)
+    builder.add_registered_node("python_program_ask_node", "1.0.0", "sha256:" + "9" * 64)
+    builder.add_registered_reducer("append", "1.0.0", _DIGEST_APPEND)
+    builder.add_registered_reducer("overwrite", "1.0.0", _DIGEST_REDUCER)
+    return ng.LocalProgramHost(builder.build(), owner, _ceiling(), "python-program-host/v1")
+
+
+_TWO_CALLS = (
+    "export function* main() {\n"
+    '  yield ng.callCore("main", {}, "first");\n'
+    '  return yield ng.callCore("main", {}, "second");\n'
+    "}\n"
+)
+
+
+def test_two_interrupted_core_calls_each_resume():
+    host = _two_call_host("python-owner-two-interrupts")
+    source = ng.ProgramSource.from_javascript(
+        "python-two-interrupts.js",
+        'export function define() { return ng.graph("main")'
+        '.channel("trace", {reducer: "append", initial: []})'
+        '.node("a", {type: "python_program_trace_node"})'
+        '.node("b", {type: "python_program_trace_node"})'
+        '.entry("a").edge("a", "b").exit("b").interruptBefore("b"); }\n' + _TWO_CALLS,
+    )
+    result = host.run(host.compile_admit(source, _budget()), {}, _budget())
+    assert result.status == ng.ProgramTerminalStatus.Interrupted
+    resumed = host.resume(result.run_id, {"ok": True}).wait()
+    assert resumed.status == ng.ProgramTerminalStatus.Interrupted
+    assert resumed.interrupt.core_node == "b"
+    done = host.resume(resumed.run_id, {"ok": True}).wait()
+    assert done.status == ng.ProgramTerminalStatus.Completed
+    assert done.output["trace"] == ["a", "b"]
+
+
+def test_second_core_call_raising_node_interrupt_is_resumable():
+    host = _two_call_host("python-owner-second-interrupt")
+    source = ng.ProgramSource.from_javascript(
+        "python-second-interrupt.js",
+        'export function define() { return ng.graph("main")'
+        '.channel("trace", {reducer: "append", initial: []})'
+        '.channel("ask", {reducer: "overwrite", initial: false})'
+        '.node("a", {type: "python_program_trace_node"})'
+        '.node("ask", {type: "python_program_ask_node"})'
+        '.entry("a").edge("a", "ask").exit("ask"); }\n'
+        "export function* main() {\n"
+        '  yield ng.callCore("main", {}, "first");\n'
+        '  return yield ng.callCore("main", {ask: true}, "second");\n'
+        "}\n",
+    )
+    # The first call completes; the second pauses inside run().
+    run = host.run(host.compile_admit(source, _budget()), {}, _budget())
+    assert run.status == ng.ProgramTerminalStatus.Interrupted
+    assert run.interrupt.core_node == "ask"
+    done = host.resume(run.run_id, {"ok": True}).wait()
+    assert done.status == ng.ProgramTerminalStatus.Completed
+    assert done.output["trace"] == ["a", "ask"]

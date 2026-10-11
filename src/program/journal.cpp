@@ -505,6 +505,34 @@ bool is_valid_program_journal_reservation_settlement(const ProgramJournalRecord&
            next.remaining_budget == expected;
 }
 
+bool is_valid_program_journal_reservation_release(const ProgramJournalRecord& previous,
+                                                  const ProgramJournalRecord& next,
+                                                  const ProgramUsage&         usage) noexcept {
+    if (budget_is_empty(previous.inflight_reservation) ||
+        !budget_is_empty(next.inflight_reservation) ||
+        !valid_transition_impl(previous, next, true)) {
+        return false;
+    }
+    RunBudget whole;  // previous remainder plus the whole reservation
+    if (!settled_reservation_budget(previous, ProgramUsage{}, whole)) return false;
+    const auto& got    = next.remaining_budget;
+    const auto  within = [](std::uint64_t value, std::uint64_t whole_value, std::uint64_t used) {
+        const auto floor = whole_value > used ? whole_value - used : 0;
+        return floor <= value && value <= whole_value;
+    };
+    return within(got.wall_time_ms, whole.wall_time_ms, usage.wall_time_ms) &&
+           within(got.model_tokens, whole.model_tokens, usage.model_tokens) &&
+           within(got.monetary_microunits, whole.monetary_microunits,
+                  usage.monetary_microunits) &&
+           within(got.max_program_operations, whole.max_program_operations,
+                  usage.program_operations) &&
+           within(got.max_core_steps, whole.max_core_steps, usage.core_steps) &&
+           got.max_concurrency == whole.max_concurrency &&
+           got.max_dynamic_compiles == whole.max_dynamic_compiles &&
+           got.max_child_depth == whole.max_child_depth &&
+           got.max_total_children == whole.max_total_children;
+}
+
 ProgramJournalRecord ProgramJournalRecord::create(ProgramJournalRecordData data) {
     ProgramJournalRecord record;
     record.previous_id          = std::move(data.previous_id);

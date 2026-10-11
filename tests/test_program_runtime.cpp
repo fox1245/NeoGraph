@@ -220,6 +220,26 @@ private:
     std::string name_;
 };
 
+// Runs a hook (set by a test) and then pauses: the hook can arm a store fault
+// so that the interrupted run's terminal publication fails.
+std::function<void()> before_fault_interrupt;
+
+class FaultInterruptNode final : public GraphNode {
+public:
+    explicit FaultInterruptNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        if (before_fault_interrupt) before_fault_interrupt();
+        throw NodeInterrupt("approval required", json{{"request", "approve"}});
+        co_return NodeOutput{};
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
 class AlwaysInterruptNode final : public GraphNode {
 public:
     explicit AlwaysInterruptNode(std::string name) : name_(std::move(name)) {}
@@ -572,6 +592,12 @@ RegistrySnapshot runtime_registry(
         manifest(ExecutableKind::Node, "runtime-interrupt", '2'),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<InterruptNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-fault-interrupt", '2'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<FaultInterruptNode>(name);
         },
         json{{"type", "object"}}, json::object());
     builder.add_node(
@@ -2111,7 +2137,8 @@ public:
         MissingAfterCoreLoad,
         FailMigrationTargetSave,
         WrongMigrationContentAtConsumingLoad,
-        DelayMigrationTargetSave
+        DelayMigrationTargetSave,
+        FailTerminalSave
     };
 
     void arm(Mode mode) {
@@ -2125,11 +2152,19 @@ public:
     std::uint32_t migration_target_save_failures() const noexcept {
         return migration_target_save_failures_.load();
     }
+    std::uint32_t terminal_save_failures() const noexcept {
+        return terminal_save_failures_.load();
+    }
     bool migration_target_save_started() const noexcept {
         return migration_target_save_started_.load();
     }
 
     void save(const Checkpoint& checkpoint) override {
+        if (mode_.load() == Mode::FailTerminalSave && checkpoint.metadata.is_object() &&
+            checkpoint.metadata.contains("neograph_program")) {
+            terminal_save_failures_.fetch_add(1);
+            throw 7;  // not derived from std::exception
+        }
         if (mode_.load() == Mode::DelayMigrationTargetSave &&
             checkpoint.metadata.is_object() &&
             checkpoint.metadata.contains("migrated_from")) {
@@ -2220,6 +2255,7 @@ private:
     std::atomic<Mode>                        mode_{Mode::Normal};
     std::atomic<std::uint32_t>               exact_loads_{0};
     std::atomic<std::uint32_t>               migration_target_save_failures_{0};
+    std::atomic<std::uint32_t> terminal_save_failures_{0};
     std::atomic<std::uint32_t>               migration_target_loads_{0};
     std::atomic<bool>                        migration_target_save_started_{false};
 };
@@ -6859,6 +6895,119 @@ TEST(ProgramRuntimeTest, FailedExactResumeIgnoresNewerOrphanForUsage) {
     EXPECT_EQ(resumed.remaining_budget().max_core_steps,
               interrupted.remaining_budget().max_core_steps - 1);
 }
+
+// Issue #371: a failed terminal publication of an interrupted run built a
+// Failed result that still carried the interrupt, which threw inside the
+// scheduler and terminated the process.
+TEST(ProgramRuntimeTest, FailedInterruptPublicationFailsTheRunCleanly) {
+    AdmittedRuntime fixture;
+    auto store = std::dynamic_pointer_cast<InMemoryProgramTransitionStore>(fixture.journal);
+    ASSERT_TRUE(store);
+    before_fault_interrupt = [store] {
+        store->fail_next_publication_for_testing(ProgramTransitionFaultPoint::BeforeCommit);
+    };
+    const auto version = fixture.admit("runtime-fault-interrupt");
+    const auto result  = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-interrupt-publication", {}});
+    before_fault_interrupt = nullptr;
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_JOURNAL_CONFLICT");
+    EXPECT_FALSE(result.interrupt().has_value());
+}
+
+// Issue #371: an exception escaping terminalization inside the scheduler
+// fails the run with a typed result instead of terminating the process.
+TEST(ProgramRuntimeTest, ExceptionEscapingTerminalizationFailsTheRunCleanly) {
+    auto            checkpoints = std::make_shared<AdversarialCheckpointStore>();
+    AdmittedRuntime fixture(1, checkpoints);
+    const auto      version = fixture.admit("runtime-failing");
+    checkpoints->arm(AdversarialCheckpointStore::Mode::FailTerminalSave);
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-terminal-escape", {}});
+
+    EXPECT_GE(checkpoints->terminal_save_failures(), 1U);
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_RUNTIME_INTERNAL");
+    EXPECT_FALSE(result.interrupt().has_value());
+    // The runtime stays usable after the failed terminalization.
+    checkpoints->arm(AdversarialCheckpointStore::Mode::Normal);
+    const auto next = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-terminal-escape-next", {}});
+    EXPECT_NE(next.status(), ProgramTerminalStatus::Interrupted);
+    EXPECT_EQ(checkpoints->terminal_save_failures(), 1U);
+}
+
+// Issue #371: each interrupted callCore of one JavaScript main() is a
+// resumable Interrupted result, on every transition store.
+void expect_two_interrupted_core_calls_resume(std::shared_ptr<ProgramTransitionStore> store) {
+    AdmittedRuntime fixture(1, {}, std::move(store), {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+                graph.node("ask", {type: "runtime-interrupt"});
+                graph.entry("ask");
+                graph.exit("ask");
+                return graph;
+            }
+
+            export function* main(input) {
+                const first = yield ng.callCore("main", {}, "first");
+                const second = yield ng.callCore("main", {}, "second");
+                return {first: first.value, second: second.value};
+            }
+        )JS");
+
+    auto budget                   = grant();
+    budget.max_program_operations = 2;  // one per callCore
+    const auto first              = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), budget, "trace-two-interrupts", {}});
+    ASSERT_EQ(first.status(), ProgramTerminalStatus::Interrupted)
+        << (first.failure() ? first.failure()->code : std::string{});
+    const auto second = fixture.runtime->resume(
+        "tenant:runtime", first.run_id(),
+        resume_for(first, json{{"decision", "one"}}, "trace-two-interrupts-1")).wait();
+    ASSERT_EQ(second.status(), ProgramTerminalStatus::Interrupted)
+        << (second.failure() ? second.failure()->code : std::string{});
+    ASSERT_TRUE(second.interrupt().has_value());
+    const auto done = fixture.runtime->resume(
+        "tenant:runtime", second.run_id(),
+        resume_for(second, json{{"decision", "two"}}, "trace-two-interrupts-2")).wait();
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed)
+        << (done.failure() ? done.failure()->code : std::string{});
+    EXPECT_EQ(done.output(), (json{{"first", "one"}, {"second", "two"}}));
+    EXPECT_LE(done.remaining_budget().wall_time_ms, budget.wall_time_ms);
+    EXPECT_LE(done.remaining_budget().max_core_steps, budget.max_core_steps);
+}
+
+TEST(ProgramRuntimeTest, TwoInterruptedCoreCallsEachResumeInMemory) {
+    expect_two_interrupted_core_calls_resume({});
+}
+
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+TEST(ProgramRuntimeTest, TwoInterruptedCoreCallsEachResumeOnSqlite) {
+    const auto path = std::filesystem::temp_directory_path() /
+        ("neograph-two-interrupts-" + Checkpoint::generate_id() + ".db");
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+    } cleanup{path};
+    expect_two_interrupted_core_calls_resume(
+        std::make_shared<SQLiteProgramTransitionStore>(path.string()));
+}
+#endif
 
 TEST(ProgramRuntimeTest, CoreFailureIsClassifiedWithNodeAndAttempt) {
     AdmittedRuntime fixture;

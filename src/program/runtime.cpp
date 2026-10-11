@@ -2548,6 +2548,12 @@ void RunControl::emit(std::string_view    event_operation_id,
 }
 
 ProgramResult RunControl::make_result(RunOutcome outcome) const {
+    // Only a resumable result carries an interrupt. Fallback paths (failed
+    // publication, retirement, a blocking hook) switch the status after the
+    // interrupt was attached; keeping it would make the result invalid (#371).
+    if (outcome.status != ProgramTerminalStatus::Interrupted &&
+        outcome.status != ProgramTerminalStatus::AmbiguousEffect)
+        outcome.interrupt.reset();
     return ProgramResult::create_for_runtime(ProgramResult::ConstructionData{
         outcome.status, run_id, program_version_id, bundle_id, operation_id, attempt,
         std::move(outcome.output), outcome.usage, outcome.remaining_budget,
@@ -2804,7 +2810,46 @@ void RunControl::complete(RunOutcome outcome) noexcept {
             }
         });
     } catch (...) {
-        std::terminate();
+        fail_closed(std::current_exception());
+    }
+}
+
+void RunControl::fail_closed(std::exception_ptr error) noexcept {
+    // An exception escaping terminalization must not take the host process
+    // down (#371). Deliver an internal failure to waiters; the durable record
+    // keeps whatever was last published.
+    try {
+        std::string message = "Program terminalization failed";
+        try {
+            if (error) std::rethrow_exception(error);
+        } catch (const std::exception& failure) {
+            message += ": ";
+            message += failure.what();
+        } catch (...) {}
+        for (auto& c : message)  // keep the failure text valid whatever what() held
+            if (static_cast<unsigned char>(c) < 0x20 || static_cast<unsigned char>(c) > 0x7e)
+                c = '?';
+        RunOutcome failed;
+        failed.status           = ProgramTerminalStatus::Failed;
+        failed.remaining_budget = granted_budget;
+        failed.failure =
+            ProgramFailure{"P_RUNTIME_INTERNAL", std::move(message), "root", "", 0, json::object()};
+        auto                     result = make_result(std::move(failed));
+        std::vector<AsyncWaiter> waiters;
+        {
+            std::lock_guard lock(mutex_);
+            if (result_) return;
+            result_ = std::move(result);
+            sink_.reset();
+            waiters.swap(waiters_);
+            cv_.notify_all();
+        }
+        asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
+            for (const auto& waiter : waiters)
+                if (auto timer = waiter.timer.lock()) timer->cancel();
+        });
+    } catch (...) {
+        std::terminate();  // not even a minimal failure could be delivered
     }
 }
 

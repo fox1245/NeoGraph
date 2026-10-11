@@ -111,6 +111,19 @@ NEOGRAPH_PROGRAM_API bool is_valid_program_journal_reservation_settlement(
     const ProgramJournalRecord& next,
     const ProgramUsage&         usage) noexcept;
 
+/**
+ * True when `next` releases `previous`'s reservation for a CallCore that was
+ * interrupted rather than completed. `usage` is the attempt's terminal usage,
+ * which also counts work an earlier command in the same attempt already
+ * settled. Each usage-bearing resource may therefore come back anywhere from
+ * reservation minus usage up to the whole reservation, never more; every other
+ * resource returns exactly.
+ */
+NEOGRAPH_PROGRAM_API bool is_valid_program_journal_reservation_release(
+    const ProgramJournalRecord& previous,
+    const ProgramJournalRecord& next,
+    const ProgramUsage&         usage) noexcept;
+
 class NEOGRAPH_PROGRAM_API InMemoryProgramJournal final : public ProgramJournal {
 public:
     InMemoryProgramJournal();

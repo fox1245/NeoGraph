@@ -222,6 +222,8 @@ public:
                       ProgramEventKind kind,
                       ProgramEventPayload payload);
     void         complete(RunOutcome outcome) noexcept;
+    /// Deliver an internal failure when terminalization itself throws.
+    void         fail_closed(std::exception_ptr error) noexcept;
     /**
      * Atomically append one JavaScript yielded-command journal entry while
      * the attempt remains Running.  A terminal result may complete an
