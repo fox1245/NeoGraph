@@ -120,6 +120,29 @@ def test_interrupt_inside_main_call_core_resumes_into_the_generator():
     assert resumed.output == {"decision": {"ship": True}, "trace": ["confirm"]}
 
 
+def test_each_result_of_two_interrupting_call_cores_lists_the_nodes_it_ran():
+    # Issue #374: the traces were one attempt late: ["draft"], ["draft"],
+    # ["deploy", "deploy"].
+    text = with_main(APPROVAL_GATE, """
+        const first = yield ng.callCore("release", {}, "first");
+        const second = yield ng.callCore("release", {}, "second");
+        return {first: first.answer, second: second.answer};
+    """)
+    host, _version, result = _interrupted(text)
+    traces = [result.execution_trace]
+    for answer in ("one", "two"):
+        assert result.status == ng.ProgramTerminalStatus.Interrupted, describe(result)
+        result = host.resume(result.run_id, answer).wait()
+        traces.append(result.execution_trace)
+
+    assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
+    assert result.output == {"first": "one", "second": "two"}
+    assert traces == [["draft"], ["deploy", "draft"], ["deploy"]]
+    # Every node ran exactly once, and the traces together list them in order.
+    assert JOURNAL.names() == ["draft", "deploy", "draft", "deploy"]
+    assert [node for trace in traces for node in trace] == JOURNAL.names()
+
+
 # ---------------------------------------------------------------------------
 # Restart: interrupt in process A, resume in process B.
 # ---------------------------------------------------------------------------

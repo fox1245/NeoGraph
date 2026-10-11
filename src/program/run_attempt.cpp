@@ -3638,6 +3638,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                      json{{"operation", std::string(to_string(op))}});
         };
 
+        // Core nodes this attempt ran, across every JavaScript command. Each
+        // result reports exactly these, whichever command ends the attempt; a
+        // command completed by an earlier attempt was reported then (#374).
+        std::vector<std::string> javascript_trace;
         auto execute_javascript_control =
             [&](JavaScriptGenerator& session) -> asio::awaitable<PlanExecution> {
             const auto executor = co_await                     asio::this_coro::executor;
@@ -4624,7 +4628,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                     "Captured command result lost its exact target CAS");
                             unreconciled_javascript_remaining = remaining;
                             settled_javascript_wall_time_ms = replay_work.wall_time_ms;
-                            result.execution_trace.insert(result.execution_trace.end(),
+                            javascript_trace.insert(javascript_trace.end(),
                                 replayed.execution_trace.begin(), replayed.execution_trace.end());
                             if (replayed.status != ProgramTerminalStatus::Completed)
                                 co_return replayed;
@@ -4633,9 +4637,6 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             response = std::move(replayed.output);
                             continue;
                         }
-                        result.execution_trace.insert(result.execution_trace.end(),
-                                                      recorded.execution_trace.begin(),
-                                                      recorded.execution_trace.end());
                         if (recorded.status != ProgramTerminalStatus::Completed) {
                             PlanExecution replayed;
                             replayed.status          = recorded.status;
@@ -4817,9 +4818,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         plan_failure(ProgramTerminalStatus::Failed, "P_RUNTIME_CORE_FAILURE",
                                      "Unknown JavaScript command failure", operation_id);
                 }
-                result.execution_trace.insert(result.execution_trace.end(),
-                                              command_result.execution_trace.begin(),
-                                              command_result.execution_trace.end());
+                javascript_trace.insert(javascript_trace.end(),
+                                        command_result.execution_trace.begin(),
+                                        command_result.execution_trace.end());
 
                 std::uint64_t operations_after = 0;
                 {
@@ -4918,6 +4919,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         "Admitted JavaScript control source no longer exports main(input)");
                 }
                 plan_result = co_await execute_javascript_control(*session);
+                plan_result.execution_trace = std::move(javascript_trace);
             } catch (const JavaScriptCompileError& error) {
                 if (error.code() == "P_JS_TIMEOUT") {
                     control->cancel(CancellationCause::Timeout);

@@ -7009,6 +7009,84 @@ TEST(ProgramRuntimeTest, TwoInterruptedCoreCallsEachResumeOnSqlite) {
 }
 #endif
 
+// Issue #374: with two interrupting callCores in one main(), each result's
+// execution_trace was one attempt late: ["draft"], ["draft"],
+// ["deploy", "deploy"]. Each result lists exactly the Core nodes that ran
+// since the previous result, in order.
+void expect_each_result_lists_the_nodes_it_ran(std::shared_ptr<ProgramTransitionStore> store) {
+    using Trace = std::vector<std::string>;
+    AdmittedRuntime fixture(1, {}, std::move(store), {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(
+        R"JS(
+            export function define() {
+                const graph = ng.graph("release");
+                graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+                graph.node("draft", {type: "runtime-completed"});
+                graph.node("deploy", {type: "runtime-completed"});
+                graph.entry("draft");
+                graph.edge("draft", "deploy");
+                graph.interruptBefore("deploy");
+                graph.exit("deploy");
+                return graph;
+            }
+
+            export function* main(input) {
+                const first = yield ng.callCore("release", {}, "first");
+                yield ng.checkpoint({between: true}, "between");
+                const second = yield ng.callCore("release", {}, "second");
+                return {first: first.value, second: second.value};
+            }
+        )JS");
+
+    auto budget                   = grant();
+    budget.max_program_operations = 3;  // two callCores and a checkpoint
+    const auto first              = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), budget, "trace-attribution", {}});
+    ASSERT_EQ(first.status(), ProgramTerminalStatus::Interrupted)
+        << (first.failure() ? first.failure()->code : std::string{});
+    EXPECT_EQ(first.execution_trace(), (Trace{"draft"}));
+
+    // The resume finishes the first callCore and the second one pauses.
+    const auto second = fixture.runtime->resume(
+        "tenant:runtime", first.run_id(),
+        resume_for(first, json{{"decision", "one"}}, "trace-attribution-1")).wait();
+    ASSERT_EQ(second.status(), ProgramTerminalStatus::Interrupted)
+        << (second.failure() ? second.failure()->code : std::string{});
+    EXPECT_EQ(second.execution_trace(), (Trace{"deploy", "draft"}));
+
+    // The completed first callCore is replayed from the journal, not re-run.
+    const auto done = fixture.runtime->resume(
+        "tenant:runtime", second.run_id(),
+        resume_for(second, json{{"decision", "two"}}, "trace-attribution-2")).wait();
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed)
+        << (done.failure() ? done.failure()->code : std::string{});
+    EXPECT_EQ(done.execution_trace(), (Trace{"deploy"}));
+    EXPECT_EQ(ProgramResult::parse(done.serialize_canonical()).execution_trace(),
+              done.execution_trace());
+    EXPECT_EQ(done.output(), (json{{"first", "completed"}, {"second", "completed"}}));
+}
+
+TEST(ProgramRuntimeTest, EachResumedResultListsTheNodesItRanInMemory) {
+    expect_each_result_lists_the_nodes_it_ran({});
+}
+
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+TEST(ProgramRuntimeTest, EachResumedResultListsTheNodesItRanOnSqlite) {
+    const auto path = std::filesystem::temp_directory_path() /
+        ("neograph-trace-attribution-" + Checkpoint::generate_id() + ".db");
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+    } cleanup{path};
+    expect_each_result_lists_the_nodes_it_ran(
+        std::make_shared<SQLiteProgramTransitionStore>(path.string()));
+}
+#endif
+
 TEST(ProgramRuntimeTest, CoreFailureIsClassifiedWithNodeAndAttempt) {
     AdmittedRuntime fixture;
     const auto      version = fixture.admit("runtime-failing");
