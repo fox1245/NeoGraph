@@ -790,7 +790,8 @@ void validate_budgets(const ProgramBundle&  bundle,
         }
         if (!structural) {
             diagnostics.add("P_ADMIT_SEMANTIC_MISMATCH", "/declared_budget_requirements",
-                            "Budget record violates the Program-v1 structural floor",
+                            "Budget record for " + budget.resource +
+                                " violates the Program-v1 structural floor",
                             json{{"resource", budget.resource},
                                  {"minimum", budget.minimum},
                                  {"maximum", budget.maximum}});
@@ -798,7 +799,9 @@ void validate_budgets(const ProgramBundle&  bundle,
         const auto ceiling = policy_ceiling(resource, policy.budget_ceiling());
         if (budget.maximum > ceiling) {
             diagnostics.add("P_ADMIT_POLICY", "/declared_budget_requirements",
-                            "Declared budget maximum exceeds the policy ceiling",
+                            "Declared " + budget.resource + " maximum " +
+                                std::to_string(budget.maximum) + " exceeds the policy ceiling " +
+                                std::to_string(ceiling),
                             json{{"resource", budget.resource},
                                  {"maximum", budget.maximum},
                                  {"policy_ceiling", ceiling}});
@@ -1251,7 +1254,9 @@ ProgramVersion ProgramCatalog::materialize(
         impl_->worker_count > concurrency->maximum) {
         diagnostics.add(
             "P_ADMIT_POLICY", "/declared_budget_requirements",
-            "Catalog worker_count exceeds the admitted concurrency bound",
+            "Catalog worker_count " + std::to_string(impl_->worker_count) +
+                " exceeds the admitted max_concurrency " +
+                std::to_string(concurrency->maximum),
             json{{"worker_count", impl_->worker_count}, {"max_concurrency", concurrency->maximum}});
     }
 

@@ -690,3 +690,46 @@ def test_await_does_not_accept_a_completion_after_its_deadline():
         blocking=True))
     assert result.status == ng.ProgramTerminalStatus.TimedOut
     assert result.failure.code == "P_AWAIT_TIMEOUT"
+
+
+def _simple_trace_source():
+    return _trace_source('.node("A", {type: "python_program_trace_node"}).entry("A").exit("A")')
+
+
+def test_admission_errors_are_typed_and_carry_diagnostics():
+    host = _trace_host("python-owner-admission-error")
+    above_ceiling = _budget()
+    above_ceiling.wall_time_ms = 20_000  # the host ceiling is 10 000 ms
+    with pytest.raises(RuntimeError) as raised:
+        host.compile_admit(_simple_trace_source(), above_ceiling)
+    error = raised.value
+    assert isinstance(error, ng.ProgramAdmissionError)
+    assert error.diagnostics
+    assert all(d["code"].startswith("P_ADMIT_") for d in error.diagnostics)
+    assert error.diagnostics[0]["code"] in str(error)
+    assert "wall_time_ms maximum 20000 exceeds the policy ceiling 10000" in str(error)
+
+
+def test_runtime_diagnostic_errors_are_typed_and_name_the_bound():
+    host = _trace_host("python-owner-runtime-error")
+    version = host.compile_admit(_simple_trace_source(), _budget())
+    other = _budget()
+    other.wall_time_ms = 9_000  # compile_admit pinned 10 000 ms exactly
+    with pytest.raises(RuntimeError) as raised:
+        host.run(version, {}, other)
+    error = raised.value
+    assert isinstance(error, ng.ProgramDiagnosticError)
+    diagnostic = error.diagnostics[0]
+    assert diagnostic["code"] == "P_START_BUDGET"
+    assert diagnostic["witness"]["resource"] == "wall_time_ms"
+    assert diagnostic["witness"]["granted"] == 9_000
+    message = str(error)
+    assert "P_START_BUDGET" in message
+    assert "wall_time_ms" in message and "9000" in message and "10000" in message
+
+
+def test_budget_ceiling_errors_name_the_field():
+    ceiling = _ceiling()
+    ceiling.model_tokens = 0
+    with pytest.raises(ValueError, match="model_tokens"):
+        ng.LocalProgramHost(_registry(), "python-owner-zero-ceiling", ceiling)

@@ -799,20 +799,34 @@ void validate_invocation(const detail::MaterializedProgram& materialized,
                     });
     constexpr auto max_safe_wall_time_ms =
         static_cast<std::uint64_t>(std::numeric_limits<std::chrono::milliseconds::rep>::max()) / 2;
-    if (budget.wall_time_ms == 0 || budget.wall_time_ms > max_safe_wall_time_ms ||
-        budget.max_concurrency == 0 || budget.max_program_operations == 0 ||
-        budget.max_core_steps == 0 ||
-        budget.max_core_steps > static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
-        (!has_dynamic_expansion && budget.max_dynamic_compiles != 0 &&
-         !materialized.bundle.control_source()) ||
-        (has_dynamic_expansion && budget.max_dynamic_compiles == 0) ||
-        budget.max_child_depth > MAX_SUPPORTED_CHILD_DEPTH ||
-        ((budget.max_child_depth == 0) != (budget.max_total_children == 0))) {
-        throw_runtime_diagnostic(
-            "P_START_BUDGET",
-            "Program requires positive wall/Core/operation/concurrency limits, "
-            "a dynamic-compilation grant only for JavaScript control or expand_task_graph, and "
-            "an unpaired child budget is forbidden");
+    // Name the first rule the invocation budget breaks.
+    std::string invalid;
+    if (budget.wall_time_ms == 0)
+        invalid = "wall_time_ms must be positive";
+    else if (budget.wall_time_ms > max_safe_wall_time_ms)
+        invalid = "wall_time_ms exceeds " + std::to_string(max_safe_wall_time_ms);
+    else if (budget.max_concurrency == 0)
+        invalid = "max_concurrency must be positive";
+    else if (budget.max_program_operations == 0)
+        invalid = "max_program_operations must be positive";
+    else if (budget.max_core_steps == 0)
+        invalid = "max_core_steps must be positive";
+    else if (budget.max_core_steps > static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
+        invalid = "max_core_steps exceeds " + std::to_string(std::numeric_limits<int>::max());
+    else if (!has_dynamic_expansion && budget.max_dynamic_compiles != 0 &&
+             !materialized.bundle.control_source())
+        invalid = "max_dynamic_compiles must be 0 unless the Program uses JavaScript control "
+                  "or expand_task_graph";
+    else if (has_dynamic_expansion && budget.max_dynamic_compiles == 0)
+        invalid = "max_dynamic_compiles must be positive for a Program that uses "
+                  "expand_task_graph";
+    else if (budget.max_child_depth > MAX_SUPPORTED_CHILD_DEPTH)
+        invalid = "max_child_depth exceeds " + std::to_string(MAX_SUPPORTED_CHILD_DEPTH);
+    else if ((budget.max_child_depth == 0) != (budget.max_total_children == 0))
+        invalid = "max_child_depth and max_total_children must be enabled together";
+    if (!invalid.empty()) {
+        throw_runtime_diagnostic("P_START_BUDGET", "Program invocation budget is invalid: " + invalid,
+                                 json{{"rule", invalid}});
     }
 
     const auto ceiling = materialized.version.policy_snapshot().budget_ceiling();
@@ -821,7 +835,12 @@ void validate_invocation(const detail::MaterializedProgram& materialized,
         const auto allowed = ceiling_value(ceiling, requirement.resource);
         if (granted < requirement.minimum || granted > requirement.maximum || granted > allowed) {
             throw_runtime_diagnostic("P_START_BUDGET",
-                                     "Program invocation budget is outside its admitted bounds",
+                                     "Program invocation budget " + requirement.resource + "=" +
+                                         std::to_string(granted) +
+                                         " is outside its admitted bounds [" +
+                                         std::to_string(requirement.minimum) + ", " +
+                                         std::to_string(requirement.maximum) +
+                                         "] (policy ceiling " + std::to_string(allowed) + ")",
                                      json{{"resource", requirement.resource},
                                           {"minimum", requirement.minimum},
                                           {"maximum", requirement.maximum},

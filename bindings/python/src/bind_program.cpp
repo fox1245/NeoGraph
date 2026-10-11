@@ -61,12 +61,14 @@ py::dict diagnostic_to_py(const Diagnostic& diagnostic) {
                     "witness"_a = json_to_py(diagnostic.witness));
 }
 
-// Raises neograph_engine.ProgramCompileError, a RuntimeError subclass whose
-// .diagnostics keeps each diagnostic's source site and witness.
-[[noreturn]] void raise_compile_error(const ProgramCompileError& error) {
-    std::string message = "Program compilation failed";
-    py::list    diagnostics;
-    for (const auto& diagnostic : error.diagnostics()) {
+// Sets neograph_engine.<type_name>, a RuntimeError subclass. Its message lists
+// every diagnostic with its code, and .diagnostics keeps each diagnostic's
+// source site and witness.
+void set_program_error(const char*                    type_name,
+                       std::string                    message,
+                       const std::vector<Diagnostic>& program_diagnostics) {
+    py::list diagnostics;
+    for (const auto& diagnostic : program_diagnostics) {
         message += "\n" + diagnostic.code + " " + diagnostic.primary.json_pointer +
                    ": " + diagnostic.message;
         if (const auto& span = diagnostic.primary.span) {
@@ -76,12 +78,27 @@ py::dict diagnostic_to_py(const Diagnostic& diagnostic) {
         }
         diagnostics.append(diagnostic_to_py(diagnostic));
     }
-    const auto type =
-        py::module_::import("neograph_engine._neograph").attr("ProgramCompileError");
+    const auto type = py::module_::import("neograph_engine._neograph").attr(type_name);
     auto exception           = type(message);
     exception.attr("diagnostics") = std::move(diagnostics);
     PyErr_SetObject(type.ptr(), exception.ptr());
-    throw py::error_already_set();
+}
+
+// Compile, admission and runtime diagnostic errors all reach Python as typed
+// exceptions with their diagnostics, from any binding entry point.
+void translate_program_errors(std::exception_ptr error) {
+    try {
+        if (error) std::rethrow_exception(error);
+    } catch (const ProgramCompileError& failure) {
+        set_program_error("ProgramCompileError", "Program compilation failed",
+                          failure.diagnostics());
+    } catch (const ProgramAdmissionError& failure) {
+        set_program_error("ProgramAdmissionError", "Program admission failed",
+                          failure.diagnostics());
+    } catch (const ProgramDiagnosticError& failure) {
+        set_program_error("ProgramDiagnosticError", "Program operation failed",
+                          {failure.diagnostic()});
+    }
 }
 
 // Core registry misses name the C++ registration call. Python callers register
@@ -296,11 +313,7 @@ public:
     }
 
     ProgramBundle compile(const ProgramSource& source, const RunBudget& budget) const {
-        try {
-            return compiler_->compile(source, budget);
-        } catch (const ProgramCompileError& error) {
-            raise_compile_error(error);
-        }
+        return compiler_->compile(source, budget);
     }
 
     ProgramVersion admit(const ProgramBundle& bundle) {
@@ -554,6 +567,9 @@ void init_program(py::module_& m) {
                        &JavaScriptCompileLimits::max_generated_document_bytes);
 
     py::exception<ProgramCompileError>(m, "ProgramCompileError", PyExc_RuntimeError);
+    py::exception<ProgramAdmissionError>(m, "ProgramAdmissionError", PyExc_RuntimeError);
+    py::exception<ProgramDiagnosticError>(m, "ProgramDiagnosticError", PyExc_RuntimeError);
+    py::register_exception_translator(&translate_program_errors);
 
     py::class_<ProgramCompiler>(m, "ProgramCompiler")
         .def(py::init([](RegistrySnapshot registry, std::string compiler_build_id,
@@ -567,12 +583,8 @@ void init_program(py::module_& m) {
             py::arg("require_acyclic") = false)
         .def("compile", [](const ProgramCompiler& self, const ProgramSource& source,
                             py::object budget) {
-            try {
-                return budget.is_none() ? self.compile(source)
-                                        : self.compile(source, budget.cast<RunBudget>());
-            } catch (const ProgramCompileError& error) {
-                raise_compile_error(error);
-            }
+            return budget.is_none() ? self.compile(source)
+                                    : self.compile(source, budget.cast<RunBudget>());
         }, py::arg("source"), py::arg("budget") = py::none());
 
     py::class_<ProgramVersion> version(m, "ProgramVersion");
