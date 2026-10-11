@@ -1,5 +1,7 @@
 # Golden identity corpus
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 `manifest.json` lists Program sources and the registry they compile against.
 `golden.json` pins what each one compiles to: the sealed Core definition, its
 `definition_hash`, the compiled-plan identity, the sealed diagnostics and the

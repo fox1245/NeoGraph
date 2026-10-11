@@ -1,5 +1,7 @@
 # Join model (#363)
 
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
 `BarrierJoin.tla` models BSP super-steps with one AND join whose `wait_for`
 slots may hold several `any_of` alternatives, the approved scope of #363 (join
 modes are deferred). `tests/test_join_exhaustive.cpp` states the same rules as
