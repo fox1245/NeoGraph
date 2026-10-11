@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=7ab0ab562d04442bd8c1190e9d6f8540ba08ff93d2278b1564c3487d652022c8 -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=ce7e094fabd0d6304f5961a14e5ca75acbfa89a345a01c74939bf55595ae91f6 -->
 # C++ API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -242,17 +242,50 @@ ladder。每次额外调用使用新 ordinal，通过原 bank 的 admission，�
 不修改不可变 outcome，不重试部分文本。空 compression 耗尽 ladder 后返回 diagnostic，
 不会伪造成功的 provider result。
 
-示例16只对已完成的空响应调用最多三次，保持8,192 cap 和每次 ask 的300秒 deadline；
-不加倍 cap，也不重试 failure。最终答案没有 visible text 时打印错误并以 1 退出。
+示例16保持默认8,192 cap 和每次 ask 的300秒 deadline，只对已完成的空响应最多调用三次；
+不加倍 cap，也不重试 failure。空中间响应或无效 evaluator 分数不会被替换成零；截断的最终回答作为不完整结果以1退出。
 示例28的 rewrite 请求 low effort 和512输出 token，
 空/空白响应时原样返回原问题，provider timeout 为180秒。
 这些路径设置不改变共享 factory 的默认值。
 
 多客户 self-evolving chatbot 在有效 UTF-8 边界内将 judge 历史前缀限制为200字节，
 并在异常时报告错误且以1退出。The Beast 的 `baldwin_llm --llm` 必须提供密钥，
-不会改用 offline oracle。类型化请求使用 low effort 和1,824 cap；只有已完成的空
-`MaxTokens` 响应会以3,648 cap 重新请求一次。Provider failure 或仍为空的响应以1退出。
-这处理的是有界空输出，而非对 Baldwin 学习或 ToT 停滞频率的实时 provider 验证。
+不会改用 offline oracle。类型化请求使用 low effort 和默认1,824 cap；只有已完成的空
+`MaxTokens` 响应会以默认3,648 cap 重新请求一次。原始 Outcome 和每次实际调用的 usage 均保留。
+Provider failure、仍为空的响应或无法解析的运算名以1退出，而不会伪装成已完成的 learner。这些源码修复不是实时验证或解题成功声明。
+
+### issue #190 / #317 的有限诊断
+
+`NG_EXAMPLE_MAX_TOKENS` 是 ToT、Baldwin、Jarvis、`server_multi` 以及 inspection 示例 29/30 的显式正数单次调用输出上限。它包含隐藏的 reasoning，显式提供时永不加倍。未设置时，原始配方默认值保持不变。`NG_EXAMPLE_EMPTY_REASKS=0` 禁用现有的已完成空 `MaxTokens` 重新请求；最大/默认值对 ToT 为 2，对 Baldwin/Jarvis 为 1。这些是新的语义调用，绝不是对 failure 或已交付 tool-call 输出的重试。Jarvis 保留独立的 broker ordinal、原始 admission bank/deadline 以及每个实际 Outcome/report。不会为了通过而禁用任何 thinking 设置，不会虚构模型上限信息，也不会续期金钱 grant。
+
+以下控制项只会减少原始示例的工作量：
+
+| 配方 | 控制项与原始默认值 | 禁用重新请求时的最大调用数 |
+|---|---|---|
+| ToT | `NG_TOT_DEPTH=3` (1..3), `NG_TOT_BRANCHING=3` (1..3), `NG_TOT_BEAM_WIDTH=5` (1..5) | 原始 37；1/1/1 时 3 |
+| Baldwin（两种模式） | `NG_BALDWIN_POPULATION=6` (2/4/6), `NG_BALDWIN_GENERATIONS=4` (1..4) | 原始 48；2/1 时 4 |
+| 多客户服务器 | `NG_MULTI_CUSTOMERS=5`, `NG_MULTI_TURNS=5` (均为 1..5) | 原始 90；1 个客户/4 轮时 14 |
+
+在**另行预留主机消费额度**后，从仓库 root 运行：
+
+```sh
+# Representative canaries, not substitutes for the unchanged original workload.
+NG_EXAMPLE_MAX_TOKENS=8192 NG_EXAMPLE_EMPTY_REASKS=0 \
+  NG_TOT_DEPTH=1 NG_TOT_BRANCHING=1 NG_TOT_BEAM_WIDTH=1 \
+  ./build/example_tree_of_thoughts
+NG_EXAMPLE_MAX_TOKENS=8192 NG_EXAMPLE_EMPTY_REASKS=0 \
+  NG_BALDWIN_POPULATION=2 NG_BALDWIN_GENERATIONS=1 \
+  ./build/cookbook_the_beast_baldwin_llm --llm
+NG_EXAMPLE_MAX_TOKENS=8192 NG_MULTI_CUSTOMERS=1 NG_MULTI_TURNS=4 \
+  ./build/cookbook_self_evolving_chatbot_multi
+# These inspection commands retain sensitive native/provider payloads.
+NG_EXAMPLE_MAX_TOKENS=8192 ./build/example_responses_envelope "Reply briefly to hello."
+NG_EXAMPLE_MAX_TOKENS=8192 ./build/example_reasoning_effort
+```
+
+这五条命令最多 3 + 4 + 14 + 1 + 4 = 26 次模型调用和 212,992 个配置输出 token，输入 token 另计。它们既不证明美元价格，也不授权消费。请使用所有者批准的模型/路由，并保持日志私密。原始工作量 qualification 只去掉 shape override，仍记录显式 cap/重新请求选择；在这些显式设置下，完整的 ToT + Baldwin + 服务器最多 175 次调用 / 1,433,600 个配置输出 token。
+
+ToT 必须输出非空的最终 `EXPR`/`CHECK`；请独立计算实际表达式，确认恰好使用一个 4、一个 7 和两个 8，且结果为 24。模型的评分不是算术 oracle。Baldwin 必须在两种模式下显示实际的 pipeline fitness 和命中数；不要强制特定的进化轨迹，也不要用 offline oracle 替代其 live learner。服务器必须以非空的模型/judge 输出到达所选的第四轮，且没有序列化/provider failure。30 是观察四种 effort 的 sweep：不承诺 reasoning token、耗时和正确性单调；空回答以 exit 2 退出并保留其 Outcome。29 可能合理地只返回 tool call 而没有回答文本；它是 envelope inspection，不是天气回答 benchmark。Provider failure 仍为非零退出。
 
 ### 检查点与演化
 
@@ -334,3 +367,19 @@ tool search、`shell.environment` 的 skills 和 shell(`container_auto`)。
 保留全部有序类型化/raw event 和完整 terminal。hosted tool 可能不被 route 支持或产生额外费用；
 类型化 admission 不是 live 兼容保证。不保留 WebSocket/primitive 可运行示例。
 Images/Veo/Decisions 是独立类型化 NeoGraph client，不继承 chat spending grant。
+
+Decisions 的 choice criteria 是以 choice 为键的对象，而不是字符串数组。
+当前独立的 typed client 无需 raw `SchemaProvider::request_json()` body 即可表达有效结构：
+
+```cpp
+#include <neograph/llm/decisions_client.h>
+neograph::llm::DecisionsChoiceQuestion question;
+question.instructions = "Choose whether the supplied answer addresses the question.";
+question.criteria = {{"accept", "The answer addresses the question."},
+                     {"reject", "The answer does not address the question."}};
+neograph::llm::DecisionsRequest request;
+request.state = {{"question", "What is 2 + 2?"}, {"answer", "4"}};
+request.questions.emplace("decision", std::move(question));
+```
+
+这只是请求构造，不是新的付费请求，也不证明 vendor 准确性。

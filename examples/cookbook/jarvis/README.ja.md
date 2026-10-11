@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=ja source_sha256=202c2f70184732cf88d2eced559f2402f528d8b4f18448b59802d41c826310fc -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=ja source_sha256=f54a315d6278705e37ff35dfc675090e85b00c7efc53c88fe7c93d31a420be61 -->
 # JARVIS — 音声駆動型メタ・オーケストレーター
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -9,11 +9,17 @@ C++ルーター・合成器・専門家フィクスチャは型付き `ProviderR
 
 ローカル音声は任意で、選択したwhisper/Moonshineモデル、ONNX Runtime/Supertonic資産、miniaudio、利用可能なマイク・スピーカーが必要。テキスト/mock動作は音声動作の証拠ではない。クラウド不要はローカル/mockのみ。ライブには承認された `OPENROUTER_API_KEY`、ネットワーク・提供者容量が必要で、プロンプト・会話メモリ・添付ツール/委譲結果をOpenRouterへ送信する。モデルは固定され、ネイティブ要求のZDRは地域内常駐保証ではない。キーをログ・リポジトリへ入れない。nullableトークン使用量は請求額ではなく、費用には現行のエンドポイント/モデル価格と実際の請求対象使用量が必要。
 
-ライブの router と synthesizer の出力 cap（名目返答 300 / 220 トークン）には 1,024 トークンの reasoning 余裕を加え、低い reasoning effort を要求する。隠れた reasoning と可視テキストで cap を共有するモデルのための余裕である。完了済みの空の `MaxTokens` 応答だけを cap 二倍で一度再要求し、それ以外の空の完了応答や provider failure は再要求せずエラーにする。空の返答を成功した発話ターンとして扱わない。`OPENROUTER_BASE_URL` で指定するゲートウェイは `https://` が必須で、`OPENROUTER_CA_FILE` はベンチマークプロキシなどの私的 TLS ゲートウェイ用 PEM CA バンドルを選択する。
+ライブ router/synthesizer の既定出力 cap（名目300 / 220 token）は推論余裕1,024を加えて low effort を要求します。完了した空 `MaxTokens` だけを最大一回再要求し、既定 cap だけを倍増します。正の `NG_EXAMPLE_MAX_TOKENS` は推論を含む明示 cap として全呼び出しで同じ値を維持します。`NG_EXAMPLE_EMPTY_REASKS=0` は再要求を無効化します（既定/最大1）。他の空応答、provider failure、tool-call 出力を再要求しません。空発話は成功ではありません。`OPENROUTER_BASE_URL` gateway は `https://` が必須で、`OPENROUTER_CA_FILE` は私的 TLS gateway の PEM CA を選択します。
 
 切断された invalid call を含む tool-call 出力では、空テキストの再要求を行わない。
 JSON router は解析前に text-only の `EndTurn` / `StopSequence` 完了だけを許可し、
 切断出力は有効な JSON に見えても失敗する。既存の不正 JSON fallback は正常完了テキストだけに適用する。
+部分/拒否/非最終 synthesis は不変 Outcome に保持しますが TTS 前に失敗します。配信済み部分テキストで追加の provider 呼び出しは行いません。
+
+
+カスタム provider 呼び出しノードは既存の runtime-interposition/broker 境界と共有 `record_usage` sink を使います。応答テキストを取り出す前に実際の所有 outcome を保持し、キャンセル/deadline とローカル・ホスト両方の observer を伝播し、observer が例外を投げても drain 済み outcome を保持します。synthesizer の別個の再生成呼び出しは独自の安定した call ordinal を使います。上限付き呼び出しには承認済みのモデル上限情報が必要で、情報がなければトークン見積もりを捏造せず provider dispatch 前に失敗します。承認済み origin では既定の HTTPS ポートを省略するため、OpenRouter のルーティングがポリシーの正規 origin と一致します。
+
+別途承認された有限検証では、`bench/driver.py --max-turns 3` は捏造した期待応答ではなく、追跡済み `bench/turns_openrouter.txt` の**実際の**最初の三行を使います。driver は空の入力/TTS 結果と、未完了または失敗した child 実行を拒否します。`config-bench` の空の tool/agent catalog で `NG_EXAMPLE_EMPTY_REASKS=0` とすると、三ターンは最大 9 モデル呼び出し（ターンごとに router + synthesis + 任意の verbatim 再生成）に制限されます。明示的な 8,192 トークン cap では設定出力許容量は最大 73,728 トークンで、入力、請求対象使用量、金額は別です。この cap は診断上の選択であり、新しい既定値や支出承認ではありません。新しい owner-private `JARVIS_MEMORY_FILE` を使い、ライブのメモリストアを再利用しないでください。現在のソース変更は新たな live 実行、音声、nginx プロキシの qualification ではありません。
 
 `[jarvis:ttft]` は最初の非空 `sp::PartDelta` の `PartKind::Text`・`DeltaChannel::Content` で発生し、使用量・推論・ヘッダーイベントでは発生しない。最初の合成テキストであり、実際のTTS音声開始ではない。Python REPL driver は protocol client です。pybind benchmark は移行済み型付き binding を使い、別の実行証拠が必要です。現在の実行証拠は実際のCLI挨拶、永続化した合成メモリturn、正常なEOF終了に限定される。マイク入力・ASR・TTS・pybindベンチやvendor推論の検証ではない。以下の時間・音声/live実行主張は過去の記録であり、現在の移行qualificationではない。
 

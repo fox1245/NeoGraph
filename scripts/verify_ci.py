@@ -40,6 +40,12 @@ TSAN_EXAMPLES = (
 
 
 TIMINGS = []
+# cibuildwheel downloads its Python installers and virtualenv before it builds anything. A
+# transient upstream outage there is retried; a failure anywhere else is reported unchanged.
+CIBW_DOWNLOAD_FAILURE = re.compile(r'cibuildwheel[\\/]util\.py", line \d+, in download')
+TRANSIENT_NETWORK_ERROR = re.compile(
+    r"HTTP Error 5\d\d|URLError|ConnectionResetError|RemoteDisconnected|IncompleteRead|TimeoutError")
+CIBW_DOWNLOAD_RETRY_DELAYS = (30, 60)
 SLOW_COMMAND_SECONDS = 20
 
 
@@ -57,6 +63,29 @@ def run(command, *, env=None, cwd=ROOT, capture=False, timeout=None):
         TIMINGS.append((printable, elapsed))
         if elapsed >= SLOW_COMMAND_SECONDS:
             print(f"  [{elapsed:.0f}s] {printable[:80]}", flush=True)
+
+
+def run_cibuildwheel(command, *, env):
+    """Run cibuildwheel, retrying only a transient failure of its bootstrap download."""
+    for delay in (*CIBW_DOWNLOAD_RETRY_DELAYS, None):
+        printable = subprocess.list2cmdline([str(arg) for arg in command])
+        print("+ " + printable, flush=True)
+        started = time.monotonic()
+        tail = []
+        with subprocess.Popen([str(arg) for arg in command], cwd=ROOT, env=env, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
+            for line in process.stdout:
+                sys.stdout.write(line)
+                tail = (tail + [line])[-200:]
+            code = process.wait()
+        TIMINGS.append((printable, time.monotonic() - started))
+        if code == 0:
+            return
+        text = "".join(tail)
+        if delay is None or not (CIBW_DOWNLOAD_FAILURE.search(text) and TRANSIENT_NETWORK_ERROR.search(text)):
+            raise subprocess.CalledProcessError(code, command)
+        print(f"cibuildwheel bootstrap download failed transiently; retrying in {delay}s", flush=True)
+        time.sleep(delay)
 
 
 def write_timing_summary(profile):
@@ -427,7 +456,7 @@ def packaging(args):
             env["OPENSSL_CONF"] = (installed / "x64-windows/tools/openssl/openssl.cnf").as_posix()
             env["PATH"] = os.pathsep.join((str(installed / "x64-windows/tools/openssl"),
                                            str(installed / "x64-windows/bin"), env["PATH"]))
-        run([sys.executable, "-m", "cibuildwheel", ROOT, "--output-dir", args.work_dir / "wheelhouse"], env=env)
+        run_cibuildwheel([sys.executable, "-m", "cibuildwheel", ROOT, "--output-dir", args.work_dir / "wheelhouse"], env=env)
 
 
 def main():

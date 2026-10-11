@@ -172,34 +172,43 @@ static std::optional<Genome> parse_ops(const Genome& g, const std::string& reply
 // LLM learner: the model chooses ops for the plastic stages to hit TARGET.
 struct LLMLearner : Learner {
     std::shared_ptr<neograph::Provider> prov;
-    explicit LLMLearner(std::shared_ptr<neograph::Provider> p) : prov(std::move(p)) {}
-    const char* label() const override { return "LLM(deepseek-v4-flash-0731)"; }
+    std::vector<sp::runtime::Result> outcomes;
+    explicit LLMLearner(std::shared_ptr<neograph::Provider> p) : prov(std::move(p)) {
+        outcomes.reserve(examples::env_count("NG_BALDWIN_POPULATION", 6, 2, 6) *
+            examples::env_count("NG_BALDWIN_GENERATIONS", 4, 1, 4) *
+            (1 + examples::empty_reasks(1, 1)));
+    }
+    const char* label() const override { return "LLM(~deepseek/deepseek-v4-flash-latest)"; }
     std::optional<Genome> fill(const Genome& g, const ng::NodeContext& ctx) override {
         std::vector<int> plastic;
         for (int i = 0; i < N; ++i) if (g[i] == PLASTIC) plastic.push_back(i);
         if (plastic.empty()) return g;
         neograph::ProviderControls controls;
         // Output caps include hidden reasoning as well as the operation names.
-        // Only a completed empty MaxTokens response gets one doubled-cap re-ask.
-        controls.temperature = 0.2; controls.max_output_tokens = 800 + 1024;
+        // Only a completed empty MaxTokens response gets a bounded re-ask;
+        // a caller-supplied output cap is never raised.
+        controls.temperature = 0.2; controls.max_output_tokens = examples::output_cap(800 + 1024);
         controls.reasoning_effort = "low";
         std::string committed;
         for (int i = 0; i < N; ++i)
             committed += "  stage " + std::to_string(i) + ": " +
                          (g[i] == PLASTIC ? "?" : OPS[g[i]].name) + "\n";
         std::string reply;
-        for (int attempt = 0; attempt < 2; ++attempt) {
+        const auto reasks = examples::empty_reasks(1, 1);
+        for (unsigned attempt = 0; attempt <= reasks; ++attempt) {
             std::vector<sp::Message> messages{
                 neograph::portable_message({"system",
                  "You assemble an arithmetic pipeline. acc starts at 0; each stage applies "
                  "acc<-op(acc) in order. Ops: add2(+2) add3(+3) mul2(*2) mul5(*5) sub1(-1). "
-                 "Choose an op for each '?' stage so the final acc equals the target. Reply "
-                 "with just the op name(s) for the '?' stage(s), in stage order."}),
+                 "Choose an op for each '?' stage so the final acc is as close as possible to "
+                 "the target (exactly equal when reachable). Always reply with just the op "
+                 "name(s) for the '?' stage(s), in stage order."}),
                 neograph::portable_message(
                     {"user", "Target acc = " + std::to_string((int)TARGET) + ". Pipeline:\n" + committed})};
             ++invocations;
             sp::runtime::Result response = prov->invoke(neograph::make_provider_request(
                 *prov, "~deepseek/deepseek-v4-flash-latest", std::move(messages), {}, controls));
+            outcomes.push_back(response);
             if (response) usage.add(neograph::outcome_usage(*response));
             response = neograph::outcome_or_throw(std::move(response));
             bool has_tool_call_output = false;
@@ -215,9 +224,11 @@ struct LLMLearner : Learner {
             if (reply.find_first_not_of(" \t\r\n") != std::string::npos) break;
             const bool token_limit =
                 std::get<sp::Completion>(*response).stop.kind == sp::StopKind::MaxTokens;
-            if (attempt == 0 && token_limit) {
-                std::cerr << "   [LLM] empty MaxTokens reply; retrying once with a doubled cap\n";
-                controls.max_output_tokens = *controls.max_output_tokens * 2;
+            if (attempt < reasks && token_limit) {
+                std::cerr << "   [LLM] empty MaxTokens reply; one additional semantic call"
+                             " (explicit cap unchanged, default cap doubles)\n";
+                if (!std::getenv("NG_EXAMPLE_MAX_TOKENS"))
+                    controls.max_output_tokens = *controls.max_output_tokens * 2;
                 continue;
             }
             throw neograph::ProviderOutcomeError(
@@ -226,7 +237,9 @@ struct LLMLearner : Learner {
                 response, std::make_exception_ptr(std::runtime_error("empty LLM reply")));
         }
         auto out = parse_ops(g, reply);
-        if (!out) std::cerr << "   [LLM] unparseable: " << reply.substr(0, 80) << "\n";
+        if (!out)
+            throw neograph::ProviderOutcomeError("LLM returned unparseable operation names",
+                outcomes.back(), std::make_exception_ptr(std::runtime_error("invalid learner output")));
         return out;
     }
 };
@@ -236,7 +249,9 @@ enum class Mode { Baldwin, Lamarck };
 // A small memetic run: prints the per-generation trace of the toggle's effect.
 static void run(Mode mode, Learner& learner,
                 const ng::NodeContext& ctx, std::mt19937& rng) {
-    const int P = 6, kGens = 4;
+    const int P = static_cast<int>(examples::env_count("NG_BALDWIN_POPULATION", 6, 2, 6));
+    const int kGens = static_cast<int>(examples::env_count("NG_BALDWIN_GENERATIONS", 4, 1, 4));
+    if (P % 2 != 0) throw std::invalid_argument("NG_BALDWIN_POPULATION must be even");
     // init: every individual has stage 0 committed (add3) and 2-3 plastic
     std::vector<Genome> pop(P);
     for (auto& ind : pop) {

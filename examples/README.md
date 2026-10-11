@@ -263,9 +263,10 @@ with an `Incomplete` annotation only in the public projection; the immutable out
 is unchanged and the partial text is not retried. Exhausted empty compression yields
 a diagnostic, not a fabricated successful provider result.
 
-Example 16 keeps an 8,192-token cap across at most three completed-empty calls and
-pins one 300-second deadline per ask; it does not double the cap or retry failures.
-If the final answer still has no visible text, it prints an error and exits 1.
+Example 16 defaults to an 8,192-token cap across at most three completed-empty calls
+and pins one 300-second deadline per ask; it does not double the cap or retry failures.
+Empty intermediate replies and invalid evaluator scores fail instead of becoming
+score zero. A truncated final expression remains incomplete and exits 1.
 Example 28's rewrite requests low effort and 512 output tokens, returns the original
 question unchanged when the reply is empty/whitespace, and uses a 180-second provider
 timeout. These path-specific settings leave the shared factory default unchanged.
@@ -273,10 +274,66 @@ timeout. These path-specific settings leave the shared factory default unchanged
 The multi-customer self-evolving chatbot keeps judge-history prefixes within 200 bytes
 at valid UTF-8 boundaries and reports exceptions with exit 1. The Beast's
 `baldwin_llm --llm` requires a key instead of substituting its offline oracle. Its
-typed request uses low effort and a 1,824-token cap; only an empty completed
-`MaxTokens` reply gets one 3,648-token re-ask. Provider failures or exhausted empty
-replies exit 1. This addresses bounded empty-output handling, not a live-provider
-qualification of Baldwin learning or ToT stall frequency.
+typed request uses low effort and a default 1,824-token cap; only an empty completed
+`MaxTokens` reply gets one default 3,648-token re-ask. Every original Outcome and
+actual call's usage remains owned. Provider failures, empty exhausted replies and
+unparseable operation names exit 1 rather than masquerading as a completed learner.
+These source fixes are not a live-provider qualification or a puzzle-success claim.
+
+### Finite diagnostics for issues #190 / #317
+
+`NG_EXAMPLE_MAX_TOKENS` is an explicit positive per-call output cap for ToT,
+Baldwin, Jarvis, `server_multi` and inspection examples 29/30. It includes hidden
+reasoning and is never doubled when explicitly supplied. When unset, original
+recipe defaults remain unchanged. `NG_EXAMPLE_EMPTY_REASKS=0` disables the existing
+completed-empty `MaxTokens` re-asks; maximum/default is 2 for ToT and 1 for
+Baldwin/Jarvis. These are new semantic calls, never retries of failures or delivered
+tool-call output. Jarvis keeps separate broker ordinals, the original admission
+bank/deadline and every actual Outcome/report. No thinking setting is disabled
+to obtain a pass, no model-limit facts are invented and no monetary grant is renewed.
+
+The following controls only reduce the original example workloads:
+
+| Recipe | Controls and original defaults | Maximum calls with re-asks disabled |
+|---|---|---|
+| ToT | `NG_TOT_DEPTH=3` (1..3), `NG_TOT_BRANCHING=3` (1..3), `NG_TOT_BEAM_WIDTH=5` (1..5) | 37 original; 3 at 1/1/1 |
+| Baldwin, both modes | `NG_BALDWIN_POPULATION=6` (2/4/6), `NG_BALDWIN_GENERATIONS=4` (1..4) | 48 original; 4 at 2/1 |
+| Multi-customer server | `NG_MULTI_CUSTOMERS=5`, `NG_MULTI_TURNS=5` (both 1..5) | 90 original; 14 at 1 customer/4 turns |
+
+After a **separate host spending reservation**, from the repository root:
+
+```sh
+# Representative canaries, not substitutes for the unchanged original workload.
+NG_EXAMPLE_MAX_TOKENS=8192 NG_EXAMPLE_EMPTY_REASKS=0 \
+  NG_TOT_DEPTH=1 NG_TOT_BRANCHING=1 NG_TOT_BEAM_WIDTH=1 \
+  ./build/example_tree_of_thoughts
+NG_EXAMPLE_MAX_TOKENS=8192 NG_EXAMPLE_EMPTY_REASKS=0 \
+  NG_BALDWIN_POPULATION=2 NG_BALDWIN_GENERATIONS=1 \
+  ./build/cookbook_the_beast_baldwin_llm --llm
+NG_EXAMPLE_MAX_TOKENS=8192 NG_MULTI_CUSTOMERS=1 NG_MULTI_TURNS=4 \
+  ./build/cookbook_self_evolving_chatbot_multi
+# These inspection commands retain sensitive native/provider payloads.
+NG_EXAMPLE_MAX_TOKENS=8192 ./build/example_responses_envelope "Reply briefly to hello."
+NG_EXAMPLE_MAX_TOKENS=8192 ./build/example_reasoning_effort
+```
+
+These five commands bound 3 + 4 + 14 + 1 + 4 = 26 model calls and 212,992
+configured output tokens, with input tokens separate. They neither prove a dollar
+price nor authorize spending. Use the owner-approved model/route and keep logs
+private. Original-workload qualification omits only the shape overrides, leaving
+explicit cap/re-ask choices recorded; full ToT + Baldwin + server is at most
+175 calls / 1,433,600 configured output tokens at these explicit settings.
+
+ToT must print a nonempty final `EXPR`/`CHECK`; independently evaluate the actual
+expression, verify exactly one 4, one 7 and two 8s and a result of 24. The model's
+score is not an arithmetic oracle. Baldwin must show actual pipeline fitness and
+hit counts for both modes; do not force a particular evolutionary trace or replace
+its live learner with the offline oracle. The server must reach the selected fourth
+turn with nonempty model/judge output and no serialization/provider failure.
+30 is an observational four-effort sweep: reasoning tokens, wall time and correctness
+are not promised to be monotonic; an empty answer gives exit 2 with its Outcome
+retained. 29 may legitimately return a tool call without answer text; it is envelope
+inspection, not a weather-answer benchmark. Provider failures remain nonzero.
 
 ### Checkpoints and evolution
 
@@ -376,3 +433,20 @@ be unsupported by the chosen route or incur additional charges; typed admission
 is not a live compatibility guarantee. No WebSocket/primitive runnable example
 is retained. Images/Veo/Decisions are separate typed NeoGraph clients and do not
 inherit a chat-run spending grant.
+
+Decisions choice criteria are an object keyed by choice, not a string array.
+The current separate typed client expresses the valid shape without a raw
+`SchemaProvider::request_json()` body:
+
+```cpp
+#include <neograph/llm/decisions_client.h>
+neograph::llm::DecisionsChoiceQuestion question;
+question.instructions = "Choose whether the supplied answer addresses the question.";
+question.criteria = {{"accept", "The answer addresses the question."},
+                     {"reject", "The answer does not address the question."}};
+neograph::llm::DecisionsRequest request;
+request.state = {{"question", "What is 2 + 2?"}, {"answer", "4"}};
+request.questions.emplace("decision", std::move(question));
+```
+
+This is request construction, not a new paid request or proof of vendor accuracy.

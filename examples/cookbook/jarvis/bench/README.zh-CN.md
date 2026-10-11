@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/README.md locale=zh-CN source_sha256=654b29f033cd6ac7d9dc23dfc92c5a26cf75810462da7c3da4f3df39e9c192dc -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/bench/README.md locale=zh-CN source_sha256=ceb37cb9cb96a2186ff4126745da2bf67ea4bd24dc53d97a6343ffaadf2f7c8f -->
 # JARVIS 编排基准测试 — NeoGraph 与 LangGraph 对比
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -16,6 +16,12 @@ C++ 路由器、合成器和专家夹具使用类型化 `ProviderRequest`、`sp:
 ```bash
 OPENROUTER_API_KEY=... bash bench/run_bench.sh     # mock 200 turns + OpenRouter 20 turns × both
 ```
+
+如需有限的仅 native 诊断，请针对实际跟踪的 `turns_openrouter.txt` 运行 `bench/driver.py --max-turns 3`，并将输出和全新的记忆文件放在 owner-private 目录中。driver 会拒绝空输入/TTS payload 以及失败或未完成的运行。`NG_EXAMPLE_MAX_TOKENS` 固定 C++ 调用包含 reasoning 在内的输出 cap，`NG_EXAMPLE_EMPTY_REASKS=0` 禁用空 cap 重新请求。
+显式 cap 永远不会被提高；thinking 以及原始 broker/budget 标识保持不变。在空的 `config-bench` catalog 下，三轮最多需要 9 次模型调用（包括可选的逐字再生成），这并不保证产生费用或账单。参见 [Jarvis 控制项](../README.md)和[有限示例命令](../../../README.md)。
+在仓库 root 运行
+`python -m unittest discover -s examples/cookbook/jarvis/bench -p test_driver.py` 执行 protocol/输入回归测试。
+这一缩减的 native 诊断不是历史上的 paired/container/proxy cohort。
 
 ## 历史结果（2026-07-05，OpenRouter 迁移前；Groq运行）
 

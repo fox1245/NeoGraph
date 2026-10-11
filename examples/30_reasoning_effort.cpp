@@ -27,6 +27,8 @@ Trial run_one(neograph::Provider& provider, const std::string& model,
               const std::string& question, const std::string& effort) {
     sp::responses::Request payload;
     payload.model = model;
+    if (std::getenv("NG_EXAMPLE_MAX_TOKENS"))
+        payload.max_output_tokens = examples::output_cap(0);
     payload.messages.push_back(examples::message(sp::Role::User, question));
     payload.reasoning = sp::responses::ReasoningOptions{effort, std::nullopt};
     neograph::ProviderRequest request;
@@ -105,7 +107,13 @@ int main(int argc, char** argv) {
                 }
                 // Display projection only; the full ordered parts/native seals remain
                 // owned by trial.outcome rather than replaced by the visible answer.
-                std::cout << "  answer       : " << examples::visible_text(*trial.outcome) << "\n";
+                const auto answer = examples::visible_text(*trial.outcome);
+                if (std::holds_alternative<sp::Completion>(*trial.outcome) &&
+                    answer.find_first_not_of(" \t\r\n") == std::string::npos) {
+                    ++failed;
+                    std::cout << "  EMPTY        : no visible answer; outcome retained, not retried\n";
+                }
+                std::cout << "  answer       : " << answer << "\n";
                 std::cout << "  full outcome : "
                           << neograph::outcome_projection_json(*trial.outcome).dump(2) << "\n";
             } catch (const std::exception& error) {
