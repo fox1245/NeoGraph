@@ -5,6 +5,7 @@
 #include <neograph/provider.h>
 
 #include "canonical_json.h"
+#include "node_retry_budget.h"
 #include "catalog_access.h"
 #include "monetary.h"
 #include "run_control.h"
@@ -4561,6 +4562,8 @@ struct ProgramRuntime::Impl {
             } else {
                 budget.max_total_children = 0;
             }
+            // #364: a spawned child runs under its parent's retry ceiling.
+            budget.max_node_retries = parent->granted_budget.max_node_retries;
             const auto child_run_id = detail::sha256_identity(
                 "program-dsl-child/v1",
                 detail::canonical_json_bytes(

@@ -288,6 +288,35 @@ private:
     bool        non_idempotent_ = false;
 };
 
+// #364: counts its calls and fails the way it was asked to.
+std::atomic<unsigned> classified_failure_calls{0};
+class ClassifiedFailureNode final : public GraphNode {
+public:
+    enum class Kind { Ordinary, Logic, Diagnostic };
+    ClassifiedFailureNode(std::string name, Kind kind) : name_(std::move(name)), kind_(kind) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        ++classified_failure_calls;
+        if (kind_ == Kind::Logic) throw std::logic_error("integrity check failed");
+        if (kind_ == Kind::Diagnostic) {
+            neograph::program::Diagnostic diagnostic;
+            diagnostic.phase    = CompilePhase::Seal;
+            diagnostic.code     = "P_TEST_DIAGNOSTIC";
+            diagnostic.severity = DiagnosticSeverity::Error;
+            diagnostic.primary  = {"runtime", "", std::nullopt};
+            diagnostic.message  = "a Program diagnostic inside a node";
+            throw ProgramDiagnosticError(std::move(diagnostic));
+        }
+        throw std::runtime_error("ordinary failure");
+        co_return NodeOutput{};
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+    Kind        kind_;
+};
+
 class FailingNode final : public GraphNode {
 public:
     explicit FailingNode(std::string name, std::string message = "classified core failure")
@@ -718,6 +747,17 @@ RegistrySnapshot runtime_registry(
             return std::make_unique<FailingNode>(name);
         },
         json{{"type", "object"}}, json::object());
+    for (const auto& [type, kind] :
+         {std::pair{"runtime-classified-ordinary", ClassifiedFailureNode::Kind::Ordinary},
+          std::pair{"runtime-classified-logic", ClassifiedFailureNode::Kind::Logic},
+          std::pair{"runtime-classified-diagnostic", ClassifiedFailureNode::Kind::Diagnostic}}) {
+        builder.add_node(
+            manifest(ExecutableKind::Node, type, '9'),
+            [kind = kind](const std::string& name, const json&, const NodeContext&) {
+                return std::make_unique<ClassifiedFailureNode>(name, kind);
+            },
+            json{{"type", "object"}}, json::object());
+    }
     builder.add_node(
         manifest(ExecutableKind::Node, "runtime-failing-non-utf8", '5'),
         [](const std::string& name, const json&, const NodeContext&) {
@@ -6251,7 +6291,7 @@ TEST(ProgramRuntimeTest, JavaScriptJoinCollectsFailuresInDeclarationOrder) {
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
-    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.failure()->code, "NG.TaskFailed");
     EXPECT_EQ(result.output(), json::array({json{{"id", "ok"}}, nullptr}));
     EXPECT_EQ(completed_calls.load(), 0U);
 }
@@ -6305,7 +6345,7 @@ TEST(ProgramRuntimeTest, JavaScriptFailFastJoinReportsTheFailureThatStoppedIt) {
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
-    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE") << result.failure()->message;
+    EXPECT_EQ(result.failure()->code, "NG.TaskFailed") << result.failure()->message;
     EXPECT_NE(result.failure()->message.find("join member failure sentinel"), std::string::npos)
         << result.failure()->message;
     EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(4))
@@ -7215,7 +7255,7 @@ TEST(ProgramRuntimeTest, FailedResumeUsesAttemptLocalCoreStepAccounting) {
 
     EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(resumed.failure().has_value());
-    EXPECT_EQ(resumed.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(resumed.failure()->code, "NG.TaskFailed");
     EXPECT_EQ(resumed.usage().core_steps, 1U);
     EXPECT_EQ(resumed.remaining_budget().max_core_steps,
               interrupted.remaining_budget().max_core_steps - 1);
@@ -7232,7 +7272,7 @@ TEST(ProgramRuntimeTest, FailedFanoutChargesOneCoreSuperstep) {
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
-    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.failure()->code, "NG.TaskFailed");
     EXPECT_EQ(completed_calls.load(), 1U);
     EXPECT_EQ(result.usage().core_steps, 1U);
     EXPECT_EQ(result.remaining_budget().max_core_steps, grant().max_core_steps - 1);
@@ -7280,7 +7320,7 @@ TEST(ProgramRuntimeTest, FailedExactResumeIgnoresNewerOrphanForUsage) {
 
     EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(resumed.failure().has_value());
-    EXPECT_EQ(resumed.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(resumed.failure()->code, "NG.TaskFailed");
     EXPECT_EQ(resumed.usage().core_steps, 1U);
     EXPECT_EQ(resumed.remaining_budget().max_core_steps,
               interrupted.remaining_budget().max_core_steps - 1);
@@ -7486,7 +7526,11 @@ TEST(ProgramRuntimeTest, CoreFailureIsClassifiedWithNodeAndAttempt) {
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
-    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    // #364: the classified node failure code, and its record as the witness.
+    EXPECT_EQ(result.failure()->code, "NG.TaskFailed");
+    EXPECT_EQ(result.failure()->witness["node_failure"],
+              (json{{"node", "work"}, {"code", "NG.TaskFailed"}, {"kind", "exhausted"},
+                    {"attempts", 1}, {"retryable", true}, {"routable", true}}));
     EXPECT_EQ(result.failure()->core_node, "work");
     EXPECT_EQ(result.failure()->attempts, 1U);
     const auto latest = fixture.journal->latest("tenant:runtime", result.run_id());
@@ -7505,7 +7549,7 @@ TEST(ProgramRuntimeTest, NonUtf8NodeErrorPreservesJournaledCoreFailure) {
 
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
-    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.failure()->code, "NG.TaskFailed");
     EXPECT_NE(result.failure()->message.find("\\xC7"), std::string::npos);
     const auto events = fixture.journal->load_events("tenant:runtime", result.run_id(), 0);
     ASSERT_FALSE(events.empty());
@@ -7535,7 +7579,7 @@ TEST(ProgramRuntimeTest, NonUtf8SystemErrorPreservesPlatformCode) {
 
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
-    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.failure()->code, "NG.TaskFailed");
     const auto events = fixture.journal->load_events("tenant:runtime", result.run_id(), 0);
     bool saw_system_error = false;
     for (const auto& event : events) {
@@ -7560,7 +7604,7 @@ TEST(ProgramRuntimeTest, RejectedCoreEventDoesNotConsumeSequence) {
 
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
-    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.failure()->code, "NG.TaskFailed");
     EXPECT_NE(result.failure()->message.find("node failed after rejected event"),
               std::string::npos);
     const auto events = fixture.journal->load_events("tenant:runtime", result.run_id(), 0);
@@ -8670,10 +8714,123 @@ TEST(ProgramRuntimeTest, RetryRetriesCoreFailuresAndPreservesFailureClassificati
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
-    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.failure()->code, "NG.TaskFailed");
     EXPECT_EQ(result.failure()->operation_id, "root.0");
     EXPECT_EQ(result.failure()->witness["source_pointer"], "/root/body");
     EXPECT_EQ(result.failure()->attempts, 2U);
+}
+
+// #364: the Program Retry operation asks the node failure classifier. A
+// failure it does not retry fails the run as if there were no Retry.
+TEST(ProgramRuntimeTest, RetryLeavesANonRetryableCoreFailureToTheClassifier) {
+    classified_failure_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      result = run_orchestration(
+        fixture,
+        orchestration_document(
+            json{{"op", "retry"}, {"max_attempts", 3}, {"body", json{{"op", "call_core"}}}},
+            "runtime-classified-logic"),
+        json::object(), "trace-retry-logic");
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    EXPECT_EQ(classified_failure_calls.load(), 1U);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "NG.LogicError");
+    EXPECT_EQ(result.failure()->witness["node_failure"]["routable"], json(false));
+
+    classified_failure_calls.store(0);
+    const auto ordinary = run_orchestration(
+        fixture,
+        orchestration_document(
+            json{{"op", "retry"}, {"max_attempts", 3}, {"body", json{{"op", "call_core"}}}},
+            "runtime-classified-ordinary"),
+        json::object(), "trace-retry-ordinary");
+    EXPECT_EQ(ordinary.status(), ProgramTerminalStatus::Failed);
+    EXPECT_EQ(classified_failure_calls.load(), 3U);
+    EXPECT_EQ(ordinary.failure()->code, "NG.TaskFailed");
+    EXPECT_EQ(ordinary.failure()->attempts, 3U);
+}
+
+namespace {
+
+// program_document with a graph-level Core retry policy.
+json retrying_program_document(std::string node_type, int max_retries) {
+    auto document = program_document(std::move(node_type));
+    document["root"]["definition"]["retry_policy"] =
+        json{{"max_retries", max_retries}, {"initial_delay_ms", 1}, {"backoff_multiplier", 1.0},
+             {"max_delay_ms", 1}};
+    return document;
+}
+
+}  // namespace
+
+// #364: a Program diagnostic raised inside a node is a configuration verdict
+// (NG.ConfigError): the node retry loop does not run it again.
+TEST(ProgramRuntimeTest, AProgramDiagnosticInsideANodeIsNeverRetried) {
+    classified_failure_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit_document(retrying_program_document("runtime-classified-diagnostic", 2));
+    const auto result  = fixture.runtime->run(
+        "tenant:runtime", version, ProgramInvocation{json::object(), grant(), "trace-diagnostic", {}});
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    EXPECT_EQ(classified_failure_calls.load(), 1U);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "NG.ConfigError");
+    EXPECT_EQ(result.failure()->witness["node_failure"]["kind"], json("non_retryable"));
+}
+
+// #364: RunBudget::max_node_retries caps node retries across the run, is
+// reported as ProgramUsage::node_retries, and both are serialized only when set.
+TEST(ProgramRuntimeTest, NodeRetryCeilingIsARunBudgetField) {
+    classified_failure_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit_document(retrying_program_document("runtime-classified-ordinary", 3));
+    auto       budget  = grant();
+    budget.max_node_retries = 1;
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version, ProgramInvocation{json::object(), budget, "trace-ceiling", {}});
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    EXPECT_EQ(classified_failure_calls.load(), 2U);
+    EXPECT_EQ(result.usage().node_retries, 1U);
+    EXPECT_EQ(result.remaining_budget().max_node_retries, std::optional<std::uint64_t>(0));
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->witness["node_failure"]["kind"], json("ceiling"));
+    const auto bytes = result.serialize_canonical();
+    EXPECT_NE(bytes.find("\"node_retries\":1"), std::string::npos);
+    EXPECT_NE(bytes.find("\"max_node_retries\":0"), std::string::npos);
+    EXPECT_EQ(ProgramResult::parse(bytes).id(), result.id());
+    EXPECT_EQ(ProgramResult::parse(bytes).remaining_budget(), result.remaining_budget());
+
+    // Without a ceiling nothing is counted and nothing new is serialized.
+    classified_failure_calls.store(0);
+    const auto unbounded = fixture.runtime->run(
+        "tenant:runtime", version, ProgramInvocation{json::object(), grant(), "trace-no-ceiling", {}});
+    EXPECT_EQ(classified_failure_calls.load(), 4U);
+    EXPECT_EQ(unbounded.usage().node_retries, 0U);
+    EXPECT_FALSE(unbounded.remaining_budget().max_node_retries);
+    const auto plain = unbounded.serialize_canonical();
+    EXPECT_EQ(plain.find("node_retries"), std::string::npos);
+}
+
+// #364: a failure-exit node fails the Program with its declared code.
+TEST(ProgramRuntimeTest, AFailureExitFailsTheProgramWithItsCode) {
+    AdmittedRuntime fixture;
+    auto            document = program_document("runtime-completed");
+    auto            core     = document["root"]["definition"];
+    core["nodes"]["ABORT"]   = json{{"type", "runtime-completed"}};
+    core["edges"] = json::array({json{{"from", "__start__"}, {"to", "work"}},
+                                 json{{"from", "work"}, {"to", "ABORT"}}});
+    core["failure_exits"] = json{{"ABORT", json{{"code", "plan.user_abort"}}}};
+    document["root"]["definition"] = std::move(core);
+    const auto version = fixture.admit_document(std::move(document));
+    const auto result  = fixture.runtime->run(
+        "tenant:runtime", version, ProgramInvocation{json::object(), grant(), "trace-exit", {}});
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "plan.user_abort");
+    EXPECT_EQ(result.failure()->core_node, "ABORT");
+    EXPECT_EQ(result.failure()->witness["failure_exit"],
+              (json{{"node", "ABORT"}, {"code", "plan.user_abort"}}));
 }
 
 TEST(ProgramRuntimeTest, DeepNestedCoreFailurePreservesOperationAndSourceCoordinate) {
@@ -8691,7 +8848,7 @@ TEST(ProgramRuntimeTest, DeepNestedCoreFailurePreservesOperationAndSourceCoordin
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
-    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.failure()->code, "NG.TaskFailed");
     EXPECT_EQ(result.failure()->operation_id, "root.0.0.0");
     EXPECT_EQ(result.failure()->witness["source_pointer"], "/root/children/0/then/body");
 }
@@ -8732,7 +8889,7 @@ TEST(ProgramRuntimeTest, ParallelReportsTheBranchFailureNotTheSiblingItCancelled
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
-    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE") << result.failure()->message;
+    EXPECT_EQ(result.failure()->code, "NG.TaskFailed") << result.failure()->message;
     EXPECT_NE(result.failure()->message.find("map fail-fast sentinel"), std::string::npos)
         << result.failure()->message;
     EXPECT_EQ(map_fail_first_calls.load(), 2U);
@@ -8980,7 +9137,7 @@ TEST(ProgramRuntimeTest, AwaitPropagatesChildFailureBeforeTimeout) {
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
-    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.failure()->code, "NG.TaskFailed");
     EXPECT_EQ(result.failure()->operation_id, "root.0");
     EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now() - started)
@@ -10091,7 +10248,7 @@ TEST(ProgramRuntimeTest, ParallelMapCollectWaitsForEveryChildFailure) {
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
-    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.failure()->code, "NG.TaskFailed");
     EXPECT_EQ(result.failure()->operation_id, "root");
     EXPECT_EQ(result.failure()->witness["item_index"], 0U);
     const auto children = parent.snapshot().children();
@@ -10121,7 +10278,7 @@ TEST(ProgramRuntimeTest, ParallelMapFailFastStopsLaunchingAfterFirstFailedItem) 
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
-    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.failure()->code, "NG.TaskFailed");
     EXPECT_EQ(result.failure()->witness["item_index"], 0U);
     const auto children =
         fixture.runtime->reconnect("tenant:runtime", result.run_id()).snapshot().children();
@@ -10152,7 +10309,7 @@ TEST(ProgramRuntimeTest, ParallelMapFailFastCancelsActiveSiblingAfterFailure) {
     const auto result = parent.wait();
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(result.failure().has_value());
-    EXPECT_EQ(result.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    EXPECT_EQ(result.failure()->code, "NG.TaskFailed");
     EXPECT_EQ(map_fail_first_calls.load(), 2U);
     EXPECT_EQ(map_fail_first_active.load(), 0U);
 

@@ -51,6 +51,10 @@ struct RunBudget {
     std::uint32_t max_child_depth = 0;
     /// Reserved descendants, including the child subtree grant, for this run.
     std::uint64_t max_total_children = 0;
+    /// #364: run-level ceiling on node retries across every Core call, node,
+    /// fan-out branch, Send and subgraph of the run. Absent means none.
+    /// Reaching it stops retrying with kind `ceiling`. Serialized only when set.
+    std::optional<std::uint64_t> max_node_retries;
 
     bool operator==(const RunBudget&) const = default;
 };
@@ -64,6 +68,9 @@ struct ProgramUsage {
     std::uint64_t program_operations  = 0;
     std::uint64_t core_steps          = 0;
     std::uint32_t peak_concurrency    = 0;
+    /// #364: node retries taken under RunBudget::max_node_retries; counted
+    /// only when the run has that ceiling. Serialized only when nonzero.
+    std::uint64_t node_retries        = 0;
 
     bool operator==(const ProgramUsage&) const = default;
 };

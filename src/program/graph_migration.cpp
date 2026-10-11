@@ -10,6 +10,7 @@
 #include <neograph/program/version.h>
 
 #include "canonical_json.h"
+#include "node_retry_budget.h"
 
 #include <algorithm>
 #include <chrono>
@@ -733,7 +734,8 @@ bool budget_at_most(const RunBudget& value, const RunBudget& limit) noexcept {
            value.max_core_steps <= limit.max_core_steps &&
            value.max_dynamic_compiles <= limit.max_dynamic_compiles &&
            value.max_child_depth <= limit.max_child_depth &&
-           value.max_total_children <= limit.max_total_children;
+           value.max_total_children <= limit.max_total_children &&
+           detail::node_retries_within(value.max_node_retries, limit.max_node_retries);
 }
 
 bool budget_at_most(const RunBudget& value, const BudgetLimits& limit) noexcept {

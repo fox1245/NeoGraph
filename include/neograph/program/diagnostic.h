@@ -5,6 +5,7 @@
 #pragma once
 
 #include <neograph/api.h>
+#include <neograph/graph/configuration_failure.h>
 #include <neograph/json.h>
 
 #include <cstddef>
@@ -152,7 +153,11 @@ NEOGRAPH_PROGRAM_API void from_json(const json& value, DiagnosticHelp& help);
 NEOGRAPH_PROGRAM_API void to_json(json& value, const Diagnostic& diagnostic);
 NEOGRAPH_PROGRAM_API void from_json(const json& value, Diagnostic& diagnostic);
 
-class NEOGRAPH_PROGRAM_API ProgramDiagnosticError : public std::runtime_error {
+/// A Program diagnostic raised at runtime. It is also a
+/// graph::ConfigurationFailure: inside a Core node, the node failure
+/// classifier treats it as NG.ConfigError, never retried and never routed.
+class NEOGRAPH_PROGRAM_API ProgramDiagnosticError : public std::runtime_error,
+                                                    public graph::ConfigurationFailure {
 public:
     explicit ProgramDiagnosticError(Diagnostic diagnostic);
     const Diagnostic& diagnostic() const noexcept;

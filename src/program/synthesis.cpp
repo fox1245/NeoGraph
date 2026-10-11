@@ -2,6 +2,7 @@
 #include <neograph/program/synthesis.h>
 
 #include "canonical_json.h"
+#include "node_retry_budget.h"
 
 #include <algorithm>
 #include <limits>
@@ -29,7 +30,7 @@ void normalize_tokens(std::vector<std::string>& values, std::string_view field) 
 }
 
 json budget_json(const RunBudget& value) {
-    return {{"wall_time_ms", value.wall_time_ms},
+    json encoded{{"wall_time_ms", value.wall_time_ms},
             {"model_tokens", value.model_tokens},
             {"monetary_microunits", value.monetary_microunits},
             {"max_concurrency", value.max_concurrency},
@@ -38,6 +39,8 @@ json budget_json(const RunBudget& value) {
             {"max_dynamic_compiles", value.max_dynamic_compiles},
             {"max_child_depth", value.max_child_depth},
             {"max_total_children", value.max_total_children}};
+    detail::encode_node_retries(encoded, value);
+    return encoded;
 }
 
 std::uint64_t required_unsigned(const json&      value,
@@ -63,7 +66,8 @@ RunBudget budget_from(const json& value) {
         value, "Stored synthesis budget",
         {"wall_time_ms", "model_tokens", "monetary_microunits",
          "max_concurrency", "max_program_operations", "max_core_steps",
-         "max_dynamic_compiles", "max_child_depth", "max_total_children"});
+         "max_dynamic_compiles", "max_child_depth", "max_total_children",
+         "max_node_retries"});
     RunBudget result;
     result.wall_time_ms        = required_unsigned(value, "wall_time_ms");
     result.model_tokens        = required_unsigned(value, "model_tokens");
@@ -76,6 +80,7 @@ RunBudget budget_from(const json& value) {
     result.max_child_depth =
         static_cast<std::uint32_t>(required_unsigned(value, "max_child_depth", UINT32_MAX));
     result.max_total_children = required_unsigned(value, "max_total_children");
+    result.max_node_retries   = detail::decode_node_retries(value);
     return result;
 }
 
@@ -88,7 +93,8 @@ bool no_budget_increase(const RunBudget& before, const RunBudget& after) {
            after.max_core_steps <= before.max_core_steps &&
            after.max_dynamic_compiles <= before.max_dynamic_compiles &&
            after.max_child_depth <= before.max_child_depth &&
-           after.max_total_children <= before.max_total_children;
+           after.max_total_children <= before.max_total_children &&
+           detail::node_retries_within(after.max_node_retries, before.max_node_retries);
 }
 
 bool budget_fits(const RunBudget& request, const RunBudget& available) {

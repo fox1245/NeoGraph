@@ -228,7 +228,7 @@ def _join_with_a_failing_member(join):
 
 def _assert_member_failure(result, elapsed):
     assert result.status == ng.ProgramTerminalStatus.Failed, describe(result)
-    assert result.failure.code == "P_RUNTIME_CORE_FAILURE", describe(result)
+    assert result.failure.code == "NG.TaskFailed"  # the classified node failure (#364), describe(result)
     assert "boom from worker" in result.failure.message, describe(result)
     assert JOURNAL.names("raised") == ["worker"]
     assert JOURNAL.names("cancelled") == ["worker"], "the slow sibling was cancelled"

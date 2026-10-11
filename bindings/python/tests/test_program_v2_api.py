@@ -169,9 +169,8 @@ def test_capability_manifest_validates_against_its_schema():
         _schema("javascript-capability-manifest-v1.schema.json")
     ).validate(manifest)
     for method in manifest["define"]["graph_builder_methods"]:
-        # A method of a feature that is off compiles but does not run yet
-        # (the #364 sugar before its runtime).
-        assert manifest["features"][method["feature"]] is True or method["name"] == "failureExit"
+        # Every builder method's feature compiles and runs.
+        assert manifest["features"][method["feature"]] is True, method["name"]
         for argument in method["arguments"]:
             jsonschema.Draft202012Validator.check_schema(argument["schema"])
 
@@ -320,7 +319,7 @@ def test_echo_routes_returns_the_routed_successor_table():
 
 
 # ---------------------------------------------------------------------------
-# #364: failure routing keys (compile time; the runtime is WP11)
+# #364: failure routing keys (compile time; program_e2e/test_09 runs them)
 # ---------------------------------------------------------------------------
 
 
@@ -350,7 +349,9 @@ def test_retry_policy_sugar_lowers_to_the_failure_routing_keys():
     assert definition["failure_exits"] == {"ABORT": {"code": "plan.user_abort"}}
     assert bundle.diagnostics == []
     features = ng.javascript_authoring_capability_manifest()["features"]
-    assert features["failure_edges"] is False  # on with the runtime (WP11)
+    assert features["retry_policy.per_node"] is True
+    assert features["failure_edges"] is True
+    assert features["failure_exits"] is True
 
 
 def test_failure_routing_errors_reach_python_with_their_codes():

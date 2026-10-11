@@ -32,7 +32,11 @@ def test_node_failure_mid_graph():
     assert result.status == ng.ProgramTerminalStatus.Failed, describe(result)
     _assert_not_success(result)
     failure = result.failure
-    assert failure.code == "P_RUNTIME_CORE_FAILURE"
+    # The classified node failure code (#364); the record is the witness.
+    assert failure.code == "NG.TaskFailed"
+    assert failure.witness["node_failure"] == {
+        "node": "validate", "code": "NG.TaskFailed", "kind": "exhausted", "attempts": 1,
+        "retryable": True, "routable": True}
     assert failure.core_node == "validate"
     assert "boom from validate" in failure.message
     assert failure.attempts == 1
@@ -125,7 +129,7 @@ def test_failed_call_core_terminates_main_without_reaching_catch():
     _host, _version, result = run_program(text)
     assert result.status == ng.ProgramTerminalStatus.Failed, describe(result)
     _assert_not_success(result)
-    assert result.failure.code == "P_RUNTIME_CORE_FAILURE"
+    assert result.failure.code == "NG.TaskFailed"
     assert result.failure.core_node == "w"
 
 

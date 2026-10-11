@@ -4,6 +4,8 @@
  */
 #pragma once
 
+#include <neograph/graph/configuration_failure.h>
+#include <neograph/graph/types.h>
 #include <neograph/program/activation.h>
 #include <neograph/program/admission.h>
 #include <neograph/program/migration.h>
@@ -39,7 +41,10 @@ struct ProgramAdmission {
     std::vector<DependencyReceipt> dependency_receipts;
 };
 
-class NEOGRAPH_PROGRAM_API ProgramAdmissionError final : public std::runtime_error {
+/// Also a graph::ConfigurationFailure (#364): inside a Core node it is
+/// NG.ConfigError, never retried and never routed.
+class NEOGRAPH_PROGRAM_API ProgramAdmissionError final : public std::runtime_error,
+                                          public graph::ConfigurationFailure {
 public:
     explicit ProgramAdmissionError(std::vector<Diagnostic> diagnostics);
 
@@ -121,6 +126,14 @@ struct CatalogConfig {
      */
     std::function<RecordedCapabilityMaterialization(const ProgramVersion&, const std::vector<ProgramEvent>&)>
         recorded_capability_binder;
+    /**
+     * #364: the redactor every Core engine this Catalog links uses for the
+     * free text of failure records (graph::FailureTextRedactor). Empty writes
+     * no text. It is a host policy: Catalogs that share an
+     * EngineGenerationCache with different redactors need distinct
+     * materialization_context_identity values.
+     */
+    graph::FailureTextRedactor failure_text_redactor;
 };
 
 class NEOGRAPH_PROGRAM_API ProgramCatalog {

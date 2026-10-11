@@ -2,6 +2,7 @@
 #include <neograph/program/run_record.h>
 
 #include "canonical_json.h"
+#include "node_retry_budget.h"
 
 #include <limits>
 #include <set>
@@ -67,7 +68,7 @@ std::optional<std::string> require_optional_identity(const json& value, std::str
 }
 
 json encode_budget(const RunBudget& budget) {
-    return {{"wall_time_ms", budget.wall_time_ms},
+    json encoded{{"wall_time_ms", budget.wall_time_ms},
             {"model_tokens", budget.model_tokens},
             {"monetary_microunits", budget.monetary_microunits},
             {"max_concurrency", budget.max_concurrency},
@@ -76,6 +77,8 @@ json encode_budget(const RunBudget& budget) {
             {"max_dynamic_compiles", budget.max_dynamic_compiles},
             {"max_child_depth", budget.max_child_depth},
             {"max_total_children", budget.max_total_children}};
+    detail::encode_node_retries(encoded, budget);
+    return encoded;
 }
 
 RunBudget parse_budget(const json& value) {
@@ -84,13 +87,15 @@ RunBudget parse_budget(const json& value) {
         value, "Program lineage budget",
         {"wall_time_ms", "model_tokens", "monetary_microunits", "max_concurrency",
          "max_program_operations", "max_core_steps", "max_dynamic_compiles", "max_child_depth",
-         "max_total_children"});
-    return {
+         "max_total_children", "max_node_retries"});
+    RunBudget budget{
         require_uint64(value, "wall_time_ms"),           require_uint64(value, "model_tokens"),
         require_uint64(value, "monetary_microunits"),    require_uint32(value, "max_concurrency"),
         require_uint64(value, "max_program_operations"), require_uint64(value, "max_core_steps"),
         require_uint64(value, "max_dynamic_compiles"),   require_uint32(value, "max_child_depth"),
         require_uint64(value, "max_total_children")};
+    budget.max_node_retries = detail::decode_node_retries(value);
+    return budget;
 }
 
 void require_identity(const std::string& value, std::string_view name) {
@@ -361,7 +366,10 @@ bool budget_total_at_most(const ProgramRunLineage& value, const ProgramRunLineag
            sum_at_most(available.max_child_depth, reserved.max_child_depth,
                        limit_available.max_child_depth, limit_reserved.max_child_depth) &&
            sum_at_most(available.max_total_children, reserved.max_total_children,
-                        limit_available.max_total_children, limit_reserved.max_total_children);
+                        limit_available.max_total_children, limit_reserved.max_total_children) &&
+           // The retry ceiling is never reserved: compare the available values.
+           detail::node_retries_within(available.max_node_retries,
+                                       limit_available.max_node_retries);
 }
 
 bool budget_at_least(const RunBudget& value, const RunBudget& limit) noexcept {
@@ -372,7 +380,8 @@ bool budget_at_least(const RunBudget& value, const RunBudget& limit) noexcept {
            value.max_core_steps >= limit.max_core_steps &&
            value.max_dynamic_compiles >= limit.max_dynamic_compiles &&
            value.max_child_depth >= limit.max_child_depth &&
-           value.max_total_children >= limit.max_total_children;
+           value.max_total_children >= limit.max_total_children &&
+           detail::node_retries_within(limit.max_node_retries, value.max_node_retries);
 }
 
 }  // namespace

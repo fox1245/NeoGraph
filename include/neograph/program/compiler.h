@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <neograph/graph/configuration_failure.h>
 #include <neograph/program/bundle.h>
 #include <neograph/program/module.h>
 #include <neograph/program/schema.h>
@@ -89,7 +90,10 @@ struct ProgramCompilerConfig {
     std::size_t soundness_state_cap = 100000;
 };
 
-class NEOGRAPH_PROGRAM_API ProgramCompileError final : public std::runtime_error {
+/// Also a graph::ConfigurationFailure (#364): inside a Core node it is
+/// NG.ConfigError, never retried and never routed.
+class NEOGRAPH_PROGRAM_API ProgramCompileError final : public std::runtime_error,
+                                          public graph::ConfigurationFailure {
 public:
     explicit ProgramCompileError(std::vector<Diagnostic> diagnostics);
     const std::vector<Diagnostic>& diagnostics() const noexcept;

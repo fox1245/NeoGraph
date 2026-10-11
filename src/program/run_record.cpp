@@ -1,6 +1,7 @@
 #include <neograph/program/run_record.h>
 
 #include "canonical_json.h"
+#include "node_retry_budget.h"
 
 #include <algorithm>
 #include <limits>
@@ -47,7 +48,7 @@ json rv(const json& v, std::string_view key) {
     return v[k];
 }
 json eb(const RunBudget& b) {
-    return {{"wall_time_ms", b.wall_time_ms},
+    json encoded{{"wall_time_ms", b.wall_time_ms},
             {"model_tokens", b.model_tokens},
             {"monetary_microunits", b.monetary_microunits},
             {"max_concurrency", b.max_concurrency},
@@ -56,6 +57,8 @@ json eb(const RunBudget& b) {
             {"max_dynamic_compiles", b.max_dynamic_compiles},
             {"max_child_depth", b.max_child_depth},
             {"max_total_children", b.max_total_children}};
+    detail::encode_node_retries(encoded, b);
+    return encoded;
 }
 RunBudget db(const json& v) {
     if (!v.is_object()) throw std::invalid_argument("Program run budget must be an object");
@@ -63,12 +66,14 @@ RunBudget db(const json& v) {
         v, "Program run budget",
         {"wall_time_ms", "model_tokens", "monetary_microunits", "max_concurrency",
          "max_program_operations", "max_core_steps", "max_dynamic_compiles", "max_child_depth",
-         "max_total_children"});
-    return {ru(v, "wall_time_ms"),           ru(v, "model_tokens"),
-            ru(v, "monetary_microunits"),    r32(v, "max_concurrency"),
-            ru(v, "max_program_operations"), ru(v, "max_core_steps"),
-            ru(v, "max_dynamic_compiles"),   r32(v, "max_child_depth"),
-            ru(v, "max_total_children")};
+         "max_total_children", "max_node_retries"});
+    RunBudget budget{ru(v, "wall_time_ms"),           ru(v, "model_tokens"),
+                     ru(v, "monetary_microunits"),    r32(v, "max_concurrency"),
+                     ru(v, "max_program_operations"), ru(v, "max_core_steps"),
+                     ru(v, "max_dynamic_compiles"),   r32(v, "max_child_depth"),
+                     ru(v, "max_total_children")};
+    budget.max_node_retries = detail::decode_node_retries(v);
+    return budget;
 }
 json invocation_body(const ProgramPersistedInvocation& invocation) {
     json value{{"input", invocation.input},

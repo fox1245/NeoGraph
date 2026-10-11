@@ -3,6 +3,7 @@
 #include "command_publication_head.h"
 
 #include "canonical_json.h"
+#include "node_retry_budget.h"
 
 #include <algorithm>
 #include <functional>
@@ -396,7 +397,8 @@ bool budget_increased(const RunBudget& next, const RunBudget& previous) noexcept
            next.max_core_steps > previous.max_core_steps ||
            next.max_dynamic_compiles > previous.max_dynamic_compiles ||
            next.max_child_depth > previous.max_child_depth ||
-           next.max_total_children > previous.max_total_children;
+           next.max_total_children > previous.max_total_children ||
+           !detail::node_retries_within(next.max_node_retries, previous.max_node_retries);
 }
 
 template <typename Integer>
@@ -538,7 +540,10 @@ bool fork_allocation_fits(const ProgramRunLineage& previous,
            fits(previous.remaining_budget().max_child_depth,
                 debited.remaining_budget().max_child_depth, target.max_child_depth) &&
            fits(previous.remaining_budget().max_total_children,
-                debited.remaining_budget().max_total_children, target.max_total_children);
+                debited.remaining_budget().max_total_children, target.max_total_children) &&
+           // A child's retry ceiling is its own; the parent's is never debited.
+           debited.remaining_budget().max_node_retries ==
+               previous.remaining_budget().max_node_retries;
 }
 
 std::optional<ProgramUsage> command_terminal_usage(

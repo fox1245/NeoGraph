@@ -4,12 +4,14 @@
 #include <neograph/program/sqlite_provider_call_broker.h>
 
 #include "canonical_json.h"
+#include "node_retry_budget.h"
 #include "core_progress.h"
 #include "javascript.h"
 #include "monetary.h"
 #include "run_control.h"
 #include "provider_failure.h"
 #include "strand_join_signal.h"
+#include "../core/tool_failure.h"
 #include <asio/as_tuple.hpp>
 #include <asio/bind_executor.hpp>
 #include <asio/co_spawn.hpp>
@@ -90,6 +92,8 @@ RunBudget settle_budget(const RunBudget& granted, const ProgramUsage& usage) {
     remaining.max_dynamic_compiles = granted.max_dynamic_compiles;
     remaining.max_child_depth      = granted.max_child_depth;
     remaining.max_total_children   = granted.max_total_children;
+    remaining.max_node_retries =
+        detail::remaining_node_retries(granted.max_node_retries, usage.node_retries);
     return remaining;
 }
 
@@ -961,7 +965,10 @@ PlanExecution plan_result_from_child(const ProgramResult& child_result) {
     result.execution_trace = child_result.execution_trace();
     return result;
 }
-class NestedOperationFailure final : public std::runtime_error {
+// Also a std::nested_exception: it is constructed in the handler of the Core
+// failure it reports, so nested_ptr() is that failure (a NodeExecutionError
+// with the executor's record), and the node failure classifier walks it.
+class NestedOperationFailure final : public std::runtime_error, public std::nested_exception {
 public:
     NestedOperationFailure(std::string   operation_id,
                            std::string   message,
@@ -981,6 +988,52 @@ public:
     bool          checkpoint_incompatible = false;
     std::exception_ptr cause;
 };
+
+// #364: the executor's record of a Core node failure, through any
+// NestedOperationFailure wrapping it; empty for other failures.
+std::optional<graph::NodeFailure> node_failure_in(std::exception_ptr error) {
+    for (int depth = 0; error && depth < 64; ++depth) {
+        try {
+            std::rethrow_exception(error);
+        } catch (const graph::NodeExecutionError& failure) {
+            if (const auto* record = graph::node_failure_of(failure)) return *record;
+            return std::nullopt;
+        } catch (const NestedOperationFailure& failure) {
+            error = failure.nested_ptr();
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+    return std::nullopt;
+}
+
+// #364: a Core node failure fails the Program with its classified code (an
+// author code, NG.TaskFailed, NG.ProviderFailed, ...) instead of
+// P_RUNTIME_CORE_FAILURE, and its structured record as witness.node_failure.
+// A failure without an executor record keeps its code.
+void apply_node_failure(ProgramFailure& failure, const std::exception_ptr& cause) {
+    const auto record = node_failure_in(cause);
+    if (!record) return;
+    failure.code = record->code;
+    if (!failure.witness.is_object()) failure.witness = json::object();
+    failure.witness["node_failure"] = json{{"node", record->node},
+                                           {"code", record->code},
+                                           {"kind", graph::to_string(record->kind)},
+                                           {"attempts", record->attempts},
+                                           {"retryable", record->retryable},
+                                           {"routable", record->routable}};
+}
+
+// #364: whether the Program Retry operation may run a failed body again. The
+// node failure classifier decides, from the executor's record when there is
+// one: only ordinary failures are retried, never a committed or uncertain
+// effect, a provider, configuration, logic or budget failure, a node past its
+// visit limit, or a node stopped by the run's retry ceiling.
+bool program_retryable(const std::exception_ptr& error, const graph::CancelToken* token) {
+    if (const auto record = node_failure_in(error))
+        return record->retryable && record->kind != graph::NodeFailureKind::Ceiling;
+    return ::neograph::detail::classify_node_failure(error, token).retryable;
+}
 
 sp::runtime::Result provider_outcome_in(std::exception_ptr cause) {
     while (cause) {
@@ -1161,6 +1214,24 @@ json stalled_barriers_of(const graph::RunResult& result) {
     if (!result.barrier_stalled()) return json();
     const json& output = result.output;  // const access never inserts keys
     return output["_neograph"]["barrier_stalled"];
+}
+
+// #364: a Core run that ended at a failure exit failed with the exit's code.
+json failure_exit_of(const graph::RunResult& result) {
+    if (!result.failure_exited()) return json();
+    const json& output = result.output;  // const access never inserts keys
+    return output["_neograph"]["failure_exit"];
+}
+
+ProgramFailure failure_exit_failure(std::string operation_id, const json& exit) {
+    auto node = exit.value("node", std::string());
+    auto code = exit.value("code", std::string(graph::kAbortedCode));
+    return ProgramFailure{std::move(code),
+                          "Core run ended at failure exit '" + node + "'",
+                          std::move(operation_id),
+                          std::move(node),
+                          0,
+                          json{{"failure_exit", exit}}};
 }
 
 ProgramFailure barrier_stall_failure(std::string operation_id, json stalls) {
@@ -1383,6 +1454,15 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     std::uint64_t            dynamic_compile_count = 0;
     std::atomic<std::size_t> active_concurrency{0};
     std::atomic<std::size_t> peak_concurrency{0};
+    // #364: RunBudget::max_node_retries, shared by every Core call of the
+    // attempt; its use is reported as ProgramUsage::node_retries.
+    const auto node_retry_ceiling =
+        control->granted_budget.max_node_retries
+            ? std::make_shared<graph::NodeRetryCeiling>(*control->granted_budget.max_node_retries)
+            : std::shared_ptr<graph::NodeRetryCeiling>{};
+    const auto node_retries_used = [&node_retry_ceiling]() noexcept -> std::uint64_t {
+        return node_retry_ceiling ? node_retry_ceiling->used() : 0;
+    };
     std::optional<RunBudget> unreconciled_javascript_remaining;
     struct ActiveJavaScriptCommand {
         std::uint64_t     ordinal = 0;
@@ -1684,6 +1764,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 metadata.trace_id    = control->trace_id;
                 // Join members and await timers share this scheduler.
                 metadata.shared_scheduler = true;
+                metadata.node_retry_ceiling = node_retry_ceiling;
                 auto operation_checkpoints = control->checkpoints;
                 if (next_resume && resume_checkpoint_content_id) {
                     operation_checkpoints =
@@ -1773,6 +1854,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 consumed.core_steps = core_progress->steps();
                 consumed.peak_concurrency =
                     peak_concurrency.load(std::memory_order_relaxed);
+                consumed.node_retries = node_retries_used();
                 co_await control->hold_graph_migration(
                     *captured, settle_budget(control->granted_budget, consumed));
                 operation_token->throw_if_cancelled("graph migration safe point");
@@ -2702,6 +2784,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
 
                 const auto    core_status = invocation.result.status();
                 const auto    stalls      = stalled_barriers_of(invocation.result);
+                const auto    exit        = failure_exit_of(invocation.result);
                 PlanExecution result;
                 result.output          = std::move(invocation.result.output);
                 result.execution_trace = std::move(invocation.result.execution_trace);
@@ -2725,6 +2808,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 } else if (core_status == graph::RunStatus::BarrierStalled) {
                     result.status  = ProgramTerminalStatus::Failed;
                     result.failure = barrier_stall_failure(operation_id, stalls);
+                } else if (core_status == graph::RunStatus::FailureExit) {
+                    result.status  = ProgramTerminalStatus::Failed;
+                    result.failure = failure_exit_failure(operation_id, exit);
                 }
                 co_return result;
             }
@@ -2798,27 +2884,35 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     } catch (const graph::CancelledException&) {
                         throw;
                     } catch (const NestedOperationFailure& error) {
-                        if (error.checkpoint_incompatible || provider_outcome_in(error.cause)) throw;
+                        // #364: the node failure classifier decides; a failure
+                        // it does not retry fails as if there were no Retry.
+                        if (error.checkpoint_incompatible ||
+                            !program_retryable(std::current_exception(), operation_token.get()))
+                            throw;
                         if (attempt + 1 == maximum) {
                             auto terminal = plan_failure(ProgramTerminalStatus::Failed,
                                                          "P_RUNTIME_CORE_FAILURE", error.what(),
                                                          error.operation_id);
                             terminal.failure->core_node = error.core_node;
                             terminal.failure->attempts  = static_cast<std::uint32_t>(attempt + 1);
+                            apply_node_failure(*terminal.failure, std::current_exception());
                             co_return terminal;
                         }
                     } catch (const graph::NodeExecutionError& error) {
-                        if (provider_outcome_in(error.cause())) throw;
+                        if (!program_retryable(std::current_exception(), operation_token.get()))
+                            throw;
                         if (attempt + 1 == maximum) {
                             auto terminal =
                                 plan_failure(ProgramTerminalStatus::Failed,
                                              "P_RUNTIME_CORE_FAILURE", error.what(), operation_id);
                             terminal.failure->core_node = error.node_name();
                             terminal.failure->attempts  = static_cast<std::uint32_t>(attempt + 1);
+                            apply_node_failure(*terminal.failure, std::current_exception());
                             co_return terminal;
                         }
                     } catch (const std::exception& error) {
-                        if (provider_outcome_in(std::current_exception())) throw;
+                        if (!program_retryable(std::current_exception(), operation_token.get()))
+                            throw;
                         if (attempt + 1 == maximum) {
                             auto terminal =
                                 plan_failure(ProgramTerminalStatus::Failed,
@@ -3865,6 +3959,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         result.failure->core_node = error.node_name();
                         result.failure->attempts  = static_cast<std::uint32_t>(error.attempts());
                         retain_provider_failure(*result.failure, error.cause());
+                        apply_node_failure(*result.failure, std::current_exception());
                         co_return result;
                     } catch (const std::exception& error) {
                         active_concurrency.fetch_sub(1, std::memory_order_relaxed);
@@ -3891,6 +3986,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     // Classify before the output (which carries the status) is moved.
                     const auto    core_status = invocation.result.status();
                     const auto    stalls      = stalled_barriers_of(invocation.result);
+                    const auto    exit        = failure_exit_of(invocation.result);
                     PlanExecution result;
                     result.output =
                         javascript_control_response(std::move(invocation.result.output));
@@ -3905,6 +4001,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     } else if (core_status == graph::RunStatus::BarrierStalled) {
                         result.status  = ProgramTerminalStatus::Failed;
                         result.failure = barrier_stall_failure(operation_id, stalls);
+                    } else if (core_status == graph::RunStatus::FailureExit) {
+                        result.status  = ProgramTerminalStatus::Failed;
+                        result.failure = failure_exit_failure(operation_id, exit);
                     }
                     co_return result;
                 }
@@ -4970,6 +5069,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.usage.program_operations = operation_count;
         outcome.usage.core_steps         = core_progress->steps();
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
+        outcome.usage.node_retries       = node_retries_used();
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         outcome.checkpoint               = last_root_checkpoint;
         if (!outcome.checkpoint && resume_checkpoint) outcome.checkpoint = resume_checkpoint;
@@ -5025,6 +5125,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.usage.program_operations = operation_count;
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
+        outcome.usage.node_retries       = node_retries_used();
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         apply_terminal_cause(control, outcome, terminal_cause_at_deadline(control, deadline), error.what());
         apply_durable_javascript_disposition(outcome);
@@ -5036,6 +5137,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.usage.program_operations = operation_count;
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
+        outcome.usage.node_retries       = node_retries_used();
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         outcome.checkpoint               = control->latest_checkpoint();
         auto cause                       = terminal_cause_at_deadline(control, deadline);
@@ -5049,6 +5151,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             outcome.failure->operation_id = error.operation_id;
             outcome.failure->core_node    = error.core_node;
             retain_provider_failure(*outcome.failure, error.cause);
+            apply_node_failure(*outcome.failure, std::current_exception());
         }
         outcome.execution_trace          = core_progress->completed_nodes();
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
@@ -5057,6 +5160,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.usage.program_operations = operation_count;
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
+        outcome.usage.node_retries       = node_retries_used();
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         const auto cause                 = terminal_cause_at_deadline(control, deadline);
         if (!apply_terminal_cause(control, outcome, cause, error.what()) && error.checkpoint_incompatible &&
@@ -5069,6 +5173,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", error.what(), error.node_name(),
                                  static_cast<std::uint32_t>(error.attempts()));
         retain_provider_failure(*outcome.failure, error.cause());
+        apply_node_failure(*outcome.failure, std::current_exception());
         outcome.execution_trace          = core_progress->completed_nodes();
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
         outcome.usage.model_tokens       = model_tokens(usage);
@@ -5076,6 +5181,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.usage.program_operations = operation_count;
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
+        outcome.usage.node_retries       = node_retries_used();
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         apply_terminal_cause(control, outcome, terminal_cause_at_deadline(control, deadline), error.what());
         apply_durable_javascript_disposition(outcome);
@@ -5096,6 +5202,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.usage.program_operations = operation_count;
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
+        outcome.usage.node_retries       = node_retries_used();
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         apply_terminal_cause(control, outcome, terminal_cause_at_deadline(control, deadline),
                              diagnostic.message);
@@ -5110,6 +5217,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.usage.program_operations = operation_count;
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
+        outcome.usage.node_retries       = node_retries_used();
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         const auto cause                 = terminal_cause_at_deadline(control, deadline);
         if (!apply_terminal_cause(control, outcome, cause, error.what()) && checkpoint_id &&
@@ -5124,6 +5232,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.usage.program_operations = operation_count;
         outcome.usage.core_steps         = failed_core_steps(*control, core_progress->steps());
         outcome.usage.peak_concurrency   = peak_concurrency.load(std::memory_order_relaxed);
+        outcome.usage.node_retries       = node_retries_used();
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         apply_terminal_cause(control, outcome, terminal_cause_at_deadline(control, deadline),
                              "Unknown Core failure");

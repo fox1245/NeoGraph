@@ -3,6 +3,7 @@
 
 #include "canonical_json.h"
 #include "monetary.h"
+#include "node_retry_budget.h"
 #include "provider_failure.h"
 #include <algorithm>
 
@@ -43,20 +44,28 @@ json require_value(const json& v, std::string_view key) {
     return v[k];
 }
 json encode_budget(const RunBudget& b) {
-    return json{{"wall_time_ms", b.wall_time_ms}, {"model_tokens", b.model_tokens}, {"monetary_microunits", b.monetary_microunits}, {"max_concurrency", b.max_concurrency}, {"max_program_operations", b.max_program_operations}, {"max_core_steps", b.max_core_steps}, {"max_dynamic_compiles", b.max_dynamic_compiles}, {"max_child_depth", b.max_child_depth}, {"max_total_children", b.max_total_children}};
+    auto encoded = json{{"wall_time_ms", b.wall_time_ms}, {"model_tokens", b.model_tokens}, {"monetary_microunits", b.monetary_microunits}, {"max_concurrency", b.max_concurrency}, {"max_program_operations", b.max_program_operations}, {"max_core_steps", b.max_core_steps}, {"max_dynamic_compiles", b.max_dynamic_compiles}, {"max_child_depth", b.max_child_depth}, {"max_total_children", b.max_total_children}};
+    detail::encode_node_retries(encoded, b);
+    return encoded;
 }
 RunBudget parse_budget(const json& v) {
     if (!v.is_object()) throw std::invalid_argument("Program result budget must be an object");
-    detail::reject_unknown_fields(v, "Program result budget", {"wall_time_ms", "model_tokens", "monetary_microunits", "max_concurrency", "max_program_operations", "max_core_steps", "max_dynamic_compiles", "max_child_depth", "max_total_children"});
-    return {require_u64(v,"wall_time_ms"), require_u64(v,"model_tokens"), require_u64(v,"monetary_microunits"), require_u32(v,"max_concurrency"), require_u64(v,"max_program_operations"), require_u64(v,"max_core_steps"), require_u64(v,"max_dynamic_compiles"), require_u32(v,"max_child_depth"), require_u64(v,"max_total_children")};
+    detail::reject_unknown_fields(v, "Program result budget", {"wall_time_ms", "model_tokens", "monetary_microunits", "max_concurrency", "max_program_operations", "max_core_steps", "max_dynamic_compiles", "max_child_depth", "max_total_children", "max_node_retries"});
+    RunBudget budget{require_u64(v,"wall_time_ms"), require_u64(v,"model_tokens"), require_u64(v,"monetary_microunits"), require_u32(v,"max_concurrency"), require_u64(v,"max_program_operations"), require_u64(v,"max_core_steps"), require_u64(v,"max_dynamic_compiles"), require_u32(v,"max_child_depth"), require_u64(v,"max_total_children")};
+    budget.max_node_retries = detail::decode_node_retries(v);
+    return budget;
 }
 json encode_usage(const ProgramUsage& u) {
-    return json{{"wall_time_ms",u.wall_time_ms},{"model_tokens",u.model_tokens},{"monetary_microunits",u.monetary_microunits},{"program_operations",u.program_operations},{"core_steps",u.core_steps},{"peak_concurrency",u.peak_concurrency}};
+    auto encoded = json{{"wall_time_ms",u.wall_time_ms},{"model_tokens",u.model_tokens},{"monetary_microunits",u.monetary_microunits},{"program_operations",u.program_operations},{"core_steps",u.core_steps},{"peak_concurrency",u.peak_concurrency}};
+    detail::encode_node_retry_usage(encoded, u);
+    return encoded;
 }
 ProgramUsage parse_usage(const json& v) {
     if (!v.is_object()) throw std::invalid_argument("Program result usage must be an object");
-    detail::reject_unknown_fields(v,"Program result usage",{"wall_time_ms","model_tokens","monetary_microunits","program_operations","core_steps","peak_concurrency"});
-    return {require_u64(v,"wall_time_ms"),require_u64(v,"model_tokens"),require_u64(v,"monetary_microunits"),require_u64(v,"program_operations"),require_u64(v,"core_steps"),require_u32(v,"peak_concurrency")};
+    detail::reject_unknown_fields(v,"Program result usage",{"wall_time_ms","model_tokens","monetary_microunits","program_operations","core_steps","peak_concurrency","node_retries"});
+    ProgramUsage usage{require_u64(v,"wall_time_ms"),require_u64(v,"model_tokens"),require_u64(v,"monetary_microunits"),require_u64(v,"program_operations"),require_u64(v,"core_steps"),require_u32(v,"peak_concurrency")};
+    usage.node_retries = detail::decode_node_retry_usage(v);
+    return usage;
 }
 json encode_provider_authority(const UsageAccumulator::AuthoritySnapshot& authority) {
     return json{{"charged", authority.charged}, {"reserved", authority.reserved},

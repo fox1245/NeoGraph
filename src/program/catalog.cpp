@@ -5,6 +5,7 @@
 #include <neograph/program/replay.h>
 
 #include "canonical_json.h"
+#include "node_retry_budget.h"
 #include "catalog_access.h"
 #include "registry_access.h"
 
@@ -933,6 +934,7 @@ struct ProgramCatalog::Impl {
     std::string                            host_identity;
     std::function<RecordedCapabilityMaterialization(const ProgramVersion&, const std::vector<ProgramEvent>&)>
         recorded_capability_binder;
+    graph::FailureTextRedactor failure_text_redactor;
 
     mutable std::mutex mutex;
     std::unordered_map<std::string, std::shared_ptr<const detail::MaterializedProgram>>
@@ -974,6 +976,7 @@ ProgramCatalog::ProgramCatalog(CatalogConfig config) {
                                    std::move(config.materialization_context_identity),
                                    std::move(config.module_store), std::move(config.host_identity),
                                    std::move(config.recorded_capability_binder));
+    impl_->failure_text_redactor = std::move(config.failure_text_redactor);
 }
 
 ProgramCatalog::ProgramCatalog(ProgramCatalog&&) noexcept            = default;
@@ -1596,6 +1599,8 @@ ProgramVersion ProgramCatalog::materialize(
             // Program hosts report lint through diagnostics and cannot change
             // the engine's worker count, so engine notices stay off stderr.
             config.stderr_notices = false;
+            // #364: the host's redactor for opt-in failure-record text.
+            config.failure_text_redactor = impl_->failure_text_redactor;
             graph::EngineResources resources;
             resources.registry = runtime_registry;
             // The compiled graph already retains the exact bound ToolSet.

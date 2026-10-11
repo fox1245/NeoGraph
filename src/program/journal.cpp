@@ -1,6 +1,7 @@
 #include <neograph/program/journal.h>
 
 #include "canonical_json.h"
+#include "node_retry_budget.h"
 
 #include <limits>
 #include <mutex>
@@ -72,7 +73,7 @@ void require_sha256(std::string_view value, std::string_view field) {
 }
 
 json encode_budget(const RunBudget& budget) {
-    return json{{"wall_time_ms", budget.wall_time_ms},
+    auto encoded = json{{"wall_time_ms", budget.wall_time_ms},
                 {"model_tokens", budget.model_tokens},
                 {"monetary_microunits", budget.monetary_microunits},
                 {"max_concurrency", budget.max_concurrency},
@@ -81,6 +82,8 @@ json encode_budget(const RunBudget& budget) {
                 {"max_dynamic_compiles", budget.max_dynamic_compiles},
                 {"max_child_depth", budget.max_child_depth},
                 {"max_total_children", budget.max_total_children}};
+    detail::encode_node_retries(encoded, budget);
+    return encoded;
 }
 
 RunBudget parse_budget(const json& value, std::string_view name) {
@@ -89,13 +92,15 @@ RunBudget parse_budget(const json& value, std::string_view name) {
         value, name,
         {"wall_time_ms", "model_tokens", "monetary_microunits", "max_concurrency",
          "max_program_operations", "max_core_steps", "max_dynamic_compiles", "max_child_depth",
-         "max_total_children"});
-    return RunBudget{
+         "max_total_children", "max_node_retries"});
+    RunBudget budget{
         require_uint64(value, "wall_time_ms"),           require_uint64(value, "model_tokens"),
         require_uint64(value, "monetary_microunits"),    require_uint32(value, "max_concurrency"),
         require_uint64(value, "max_program_operations"), require_uint64(value, "max_core_steps"),
         require_uint64(value, "max_dynamic_compiles"),   require_uint32(value, "max_child_depth"),
         require_uint64(value, "max_total_children")};
+    budget.max_node_retries = detail::decode_node_retries(value);
+    return budget;
 }
 
 bool budget_is_empty(const RunBudget& budget) noexcept {
@@ -103,7 +108,7 @@ bool budget_is_empty(const RunBudget& budget) noexcept {
            budget.monetary_microunits == 0 && budget.max_concurrency == 0 &&
            budget.max_program_operations == 0 && budget.max_core_steps == 0 &&
            budget.max_dynamic_compiles == 0 && budget.max_child_depth == 0 &&
-           budget.max_total_children == 0;
+           budget.max_total_children == 0 && !budget.max_node_retries;
 }
 bool budget_at_most(const RunBudget& value, const RunBudget& limit) noexcept {
     return value.wall_time_ms <= limit.wall_time_ms && value.model_tokens <= limit.model_tokens &&
@@ -113,7 +118,8 @@ bool budget_at_most(const RunBudget& value, const RunBudget& limit) noexcept {
            value.max_core_steps <= limit.max_core_steps &&
            value.max_dynamic_compiles <= limit.max_dynamic_compiles &&
            value.max_child_depth <= limit.max_child_depth &&
-           value.max_total_children <= limit.max_total_children;
+           value.max_total_children <= limit.max_total_children &&
+           detail::node_retries_within(value.max_node_retries, limit.max_node_retries);
 }
 
 template <typename Integer>
@@ -155,7 +161,10 @@ bool budget_total_at_most(const RunBudget& value_available,
            sum_at_most(value_available.max_child_depth, value_reserved.max_child_depth,
                        limit_available.max_child_depth, limit_reserved.max_child_depth) &&
            sum_at_most(value_available.max_total_children, value_reserved.max_total_children,
-                       limit_available.max_total_children, limit_reserved.max_total_children);
+                       limit_available.max_total_children, limit_reserved.max_total_children) &&
+           // The retry ceiling is never reserved: compare the available values.
+           detail::node_retries_within(value_available.max_node_retries,
+                                       limit_available.max_node_retries);
 }
 template <typename Integer>
 bool checked_total(Integer available, Integer reserved, Integer& total) noexcept {
@@ -203,6 +212,8 @@ bool settled_reservation_budget(const ProgramJournalRecord& previous,
     settled.monetary_microunits -= usage.monetary_microunits;
     settled.max_program_operations -= usage.program_operations;
     settled.max_core_steps -= usage.core_steps;
+    // The retry ceiling is not part of a reservation; it carries over.
+    settled.max_node_retries = previous.remaining_budget.max_node_retries;
     return true;
 }
 
@@ -530,7 +541,8 @@ bool is_valid_program_journal_reservation_release(const ProgramJournalRecord& pr
            got.max_concurrency == whole.max_concurrency &&
            got.max_dynamic_compiles == whole.max_dynamic_compiles &&
            got.max_child_depth == whole.max_child_depth &&
-           got.max_total_children == whole.max_total_children;
+           got.max_total_children == whole.max_total_children &&
+           got.max_node_retries == whole.max_node_retries;
 }
 
 ProgramJournalRecord ProgramJournalRecord::create(ProgramJournalRecordData data) {

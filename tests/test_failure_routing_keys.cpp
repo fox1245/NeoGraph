@@ -1,6 +1,7 @@
 // #364 Core keys, JavaScript sugar, validation and migration shape (Program
-// API v2, WP10). The runtime that acts on them is WP11; these tests pin what
-// the compiler accepts, how it canonicalizes it, and every error.
+// API v2, WP10). These tests pin what the compiler accepts, how it
+// canonicalizes it, and every error; test_failure_routing_runtime.cpp covers
+// the runtime that acts on them (WP11).
 //
 //   "node_retry_policies": {"TEST": {"max_retries": 2, "max_visits": 3, ...}},
 //   "failure_edges": [{"from": "TEST", "to": "ASK_USER", "error_channel": "failures"}],
@@ -385,12 +386,15 @@ TEST(FailureRoutingKeys, BundlesSealTheKeysAndNoValidatorWarnings) {
                  std::invalid_argument);
 }
 
-TEST(FailureRoutingKeys, CapabilityFlagsWaitForTheRuntime) {
-    // The keys compile now; the flags turn on with the runtime (WP11).
+TEST(FailureRoutingKeys, CapabilityFlagsAreOnWithTheRuntime) {
+    // A flag means "compiles and runs": the keys compiled since WP10, and the
+    // runtime that acts on them landed with WP11.
     const auto features = javascript_authoring_capability_manifest().at("features");
-    EXPECT_FALSE(features.at("retry_policy.per_node").get<bool>());
-    EXPECT_FALSE(features.at("failure_edges").get<bool>());
-    EXPECT_FALSE(features.at("failure_exits").get<bool>());
+    EXPECT_TRUE(features.at("retry_policy.per_node").get<bool>());
+    EXPECT_TRUE(features.at("failure_edges").get<bool>());
+    EXPECT_TRUE(features.at("failure_exits").get<bool>());
+    // Attempt timeouts are WP12.
+    EXPECT_FALSE(features.at("retry.attempt_timeout").get<bool>());
     bool found = false;
     for (const auto& method : javascript_authoring_capability_manifest().at("define").at("graph_builder_methods"))
         found = found || method.at("name").get<std::string>() == "failureExit";

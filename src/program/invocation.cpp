@@ -1,6 +1,7 @@
 #include <neograph/program/invocation.h>
 
 #include "canonical_json.h"
+#include "node_retry_budget.h"
 
 #include <limits>
 #include <stdexcept>
@@ -45,7 +46,7 @@ json required_value(const json& value, std::string_view field) {
 }
 
 json encode_budget(const RunBudget& budget) {
-    return json{{"wall_time_ms", budget.wall_time_ms},
+    auto encoded = json{{"wall_time_ms", budget.wall_time_ms},
                 {"model_tokens", budget.model_tokens},
                 {"monetary_microunits", budget.monetary_microunits},
                 {"max_concurrency", budget.max_concurrency},
@@ -54,6 +55,8 @@ json encode_budget(const RunBudget& budget) {
                 {"max_dynamic_compiles", budget.max_dynamic_compiles},
                 {"max_child_depth", budget.max_child_depth},
                 {"max_total_children", budget.max_total_children}};
+    detail::encode_node_retries(encoded, budget);
+    return encoded;
 }
 
 RunBudget decode_budget(const json& value) {
@@ -68,8 +71,9 @@ RunBudget decode_budget(const json& value) {
                                    "max_core_steps",
                                    "max_dynamic_compiles",
                                    "max_child_depth",
-                                   "max_total_children"});
-    return RunBudget{required_unsigned(value, "wall_time_ms"),
+                                   "max_total_children",
+                                   "max_node_retries"});
+    RunBudget budget{required_unsigned(value, "wall_time_ms"),
                      required_unsigned(value, "model_tokens"),
                      required_unsigned(value, "monetary_microunits"),
                      required_u32(value, "max_concurrency"),
@@ -78,6 +82,8 @@ RunBudget decode_budget(const json& value) {
                      required_unsigned(value, "max_dynamic_compiles"),
                      required_u32(value, "max_child_depth"),
                      required_unsigned(value, "max_total_children")};
+    budget.max_node_retries = detail::decode_node_retries(value);
+    return budget;
 }
 
 json encode_artifact(const InvocationArtifactReference& artifact) {
