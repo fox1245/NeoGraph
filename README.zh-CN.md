@@ -145,7 +145,7 @@ sp::runtime::Result first_call(
 
 `ChatMessage`、`ChatTool` 和 JSON 是可移植投影。真实的原生历史可以与原生检查点伴随数据一起保留在内存中；持久化原生历史需要真正的 `sp::NativeArchive`，以及受保护的、所有者私有的保管机制。可移植 JSON 无法重建这类权限。归档通过独立密钥认证保管关系；它既不是加密，也不是服务商签发者身份认证。不要公开归档内容、密钥、原生二进制数据或原始线路观测。[提供方参考](docs/reference-en.md)和[迁移指南](docs/migration-v0.4-to-v1.0.md)介绍了持久化失败、观察器、托管预算银行和重放边界。
 
-这次类型化接口切换移除了 `CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器和 Responses WebSocket 路径。C++ 使用方需要重新编译，并迁移自定义提供方；没有兼容别名。SDK 包为 `0.3.0` alpha，固定到公开合并提交 `3b88e4ba020c3a4d39ff0660014e7292b516b7cb`，接口修订号和共享 ABI 均为 6。金额用量元数据改变了公开布局，SDK 使用方、NeoGraph 和 Python 扩展必须一起重新构建。Native archive v3 与 portable JSON v2 不变；这一代并不表示 SDK 接口已经稳定。
+这次类型化接口切换移除了 `CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器和 Responses WebSocket 路径。C++ 使用方需要重新编译，并迁移自定义提供方；没有兼容别名。SDK 包为 `0.3.0` alpha，固定到公开合并提交 `83112573ba59e3b561fc33c22394638be7aa5294`，接口修订号和共享 ABI 均为 6。金额用量元数据改变了公开布局，SDK 使用方、NeoGraph 和 Python 扩展必须一起重新构建。Native archive v3 与 portable JSON v2 不变；这一代并不表示 SDK 接口已经稳定。
 
 ## Python
 
