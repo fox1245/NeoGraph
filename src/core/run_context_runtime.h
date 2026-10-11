@@ -20,6 +20,15 @@ namespace neograph::graph::detail {
 
 class FailureRunState;
 
+/// How a run stopped, once that is known: a barrier stall's witness, or the
+/// {node, code} of a failure exit; null until then. Every checkpoint the run
+/// saves afterwards carries it (#383). Only the run's own coroutine reads and
+/// writes it.
+struct RunStatusMarks {
+    json barrier_stall;
+    json failure_exit;
+};
+
 struct SubgraphWriteJournal {
     std::vector<ChannelWrite> writes;
     std::string parent_call_id;
@@ -40,6 +49,8 @@ struct RunContextRuntime {
     std::shared_ptr<NodeRetryCeiling> node_retry_ceiling;
     /// #364: visit counters of this graph run; null without max_visits.
     std::shared_ptr<FailureRunState> failure_state;
+    /// #383: how this graph run stopped, once known; null outside a run.
+    std::shared_ptr<RunStatusMarks> status_marks;
 };
 
 /// What a RunContext is bound to while a scope below is alive: the state the
@@ -74,7 +85,16 @@ RuntimeView runtime_for(const RunContext& context);
 void append_applied_writes(const RunContext& context,
                            const std::vector<ChannelWrite>& writes);
 
-json checkpoint_metadata_for(const RunContext& context);
+/// When a checkpoint is saved. One saved during a super-step (a
+/// NodeInterrupt) resumes that step; one saved between steps (a gate, a step
+/// commit, a budget stop) resumes the next.
+enum class CheckpointTiming { DuringStep, BetweenSteps };
+
+/// The run metadata of a checkpoint, the same on every save path (#383): the
+/// subgraph identity and write journal, how the run stopped once known, and
+/// the max_visits counters a resume continues from (from the start of the
+/// step during a step, as they are between steps).
+json checkpoint_metadata_for(const RunContext& context, CheckpointTiming timing);
 json managed_budget_scope_metadata(const std::shared_ptr<OwnedManagedBudgetLease>& lease);
 CheckpointPhase checkpoint_resume_phase(const Checkpoint& checkpoint);
 

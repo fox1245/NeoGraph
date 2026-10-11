@@ -199,22 +199,6 @@ json stalled_barriers(const BarrierState& state, const BarrierSpecs& specs, cons
 
 constexpr const char* kBarrierStalled = "barrier_stalled";
 
-// Checkpoint metadata without "_neograph.node_visits" (#364); "_neograph"
-// goes too when nothing else is in it.
-json without_node_visits(const json& metadata) {
-    json owned = json::object();
-    for (const auto& [key, value] : metadata["_neograph"].items())
-        if (key != "node_visits") owned[key] = value;
-    json result = json::object();
-    for (const auto& [key, value] : metadata.items()) {
-        if (key != "_neograph")
-            result[key] = value;
-        else if (!owned.empty())
-            result[key] = owned;
-    }
-    return result;
-}
-
 void report_validation(const ValidationReport& report, int schema_version, bool print) {
     if (schema_version >= 1) {
         if (report.has_errors()) {
@@ -1878,6 +1862,9 @@ GraphEngine::execute_graph_async(
         failure_state          = std::make_shared<detail::FailureRunState>();
         runtime->failure_state = failure_state;
     }
+    // #383: how the run stopped, once known; every checkpoint carries it.
+    const auto status_marks = std::make_shared<detail::RunStatusMarks>();
+    runtime->status_marks   = status_marks;
     detail::ScopedRunContextRuntime runtime_scope(ctx, std::move(runtime));
 
     std::string last_checkpoint_id;
@@ -2006,35 +1993,22 @@ GraphEngine::execute_graph_async(
     if (owned_lease && !budget_source) {
         last_checkpoint_id = co_await coord.save_super_step_async(
             state, "__managed_bank_root__", ready, CheckpointPhase::Before, start_step,
-            last_checkpoint_id, barrier_state, detail::checkpoint_metadata_for(ctx));
+            last_checkpoint_id, barrier_state,
+            detail::checkpoint_metadata_for(ctx, detail::CheckpointTiming::BetweenSteps));
     }
 
     std::vector<std::string> trace;
-    json barrier_stall;  // null unless the run stopped at an unsatisfiable barrier
+    // Null unless the run stopped at an unsatisfiable barrier.
+    json& barrier_stall = status_marks->barrier_stall;
     // #364: {node, code} once a failure-exit node completed; null otherwise.
-    json failure_exit;
+    json& failure_exit = status_marks->failure_exit;
     // #364: failure records that routed to a node in the previous super-step,
     // by target: the interrupt payload when the target has interruptBefore.
     std::map<std::string, json> failure_arrivals;
-    // Every checkpoint carries the stall witness once known, so resuming or
-    // forking any of them reports the stall instead of completion.
+    // Checkpoints saved here are saved between steps; the executor saves the
+    // ones during a step. Both build their metadata with the same helper (#383).
     const auto checkpoint_metadata = [&] {
-        auto metadata = detail::checkpoint_metadata_for(ctx);
-        if (!barrier_stall.is_null()) metadata["_neograph"][kBarrierStalled] = barrier_stall;
-        if (!failure_exit.is_null()) metadata["_neograph"]["failure_exit"] = failure_exit;
-        if (failure_state) {
-            // A checkpoint saved between steps resumes the next step: it keeps
-            // the counters as they are now.
-            auto visits = failure_state->visits();
-            if (!visits.is_null()) {
-                metadata["_neograph"]["node_visits"] = std::move(visits);
-            } else if (metadata.is_object() && metadata.contains("_neograph") &&
-                       metadata["_neograph"].is_object() &&
-                       metadata["_neograph"].contains("node_visits")) {
-                metadata = without_node_visits(metadata);
-            }
-        }
-        return metadata;
+        return detail::checkpoint_metadata_for(ctx, detail::CheckpointTiming::BetweenSteps);
     };
     std::vector<Send> pending_sends;
     if (safe_point_request &&

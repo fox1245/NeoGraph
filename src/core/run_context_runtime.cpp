@@ -22,6 +22,25 @@ constexpr const char* kMetadataNamespace = "_neograph";
 constexpr const char* kJournalVersion = "subgraph_write_journal_version";
 constexpr const char* kJournal = "subgraph_write_journal";
 constexpr const char* kGraphInvocation = "subgraph_invocation_id";
+constexpr const char* kBarrierStalled = "barrier_stalled";
+constexpr const char* kFailureExit = "failure_exit";
+constexpr const char* kNodeVisits = "node_visits";
+
+// Checkpoint metadata without "_neograph.node_visits" (#364); "_neograph"
+// goes too when nothing else is in it.
+json without_node_visits(const json& metadata) {
+    json owned = json::object();
+    for (const auto& [key, value] : metadata[kMetadataNamespace].items())
+        if (key != kNodeVisits) owned[key] = value;
+    json result = json::object();
+    for (const auto& [key, value] : metadata.items()) {
+        if (key != kMetadataNamespace)
+            result[key] = value;
+        else if (!owned.empty())
+            result[key] = owned;
+    }
+    return result;
+}
 
 /// Maps a live RunContext to its binding. Every node invocation registers and
 /// unregisters one entry, and invocations of unrelated runs overlap on many
@@ -222,7 +241,7 @@ CheckpointPhase checkpoint_resume_phase(const Checkpoint& checkpoint) {
         metadata["_neograph"]["admin_resume_phase"].get<std::string>());
 }
 
-json checkpoint_metadata_for(const RunContext& context) {
+json checkpoint_metadata_for(const RunContext& context, CheckpointTiming timing) {
     auto runtime = runtime_for(context);
     if (!runtime || !runtime->checkpoint_store) return json();
 
@@ -244,7 +263,27 @@ json checkpoint_metadata_for(const RunContext& context) {
     // step, so it keeps the visit counters from before the step.
     if (runtime->failure_state) {
         auto visits = runtime->failure_state->step_start_visits();
-        if (!visits.is_null()) metadata[kMetadataNamespace]["node_visits"] = std::move(visits);
+        if (!visits.is_null()) metadata[kMetadataNamespace][kNodeVisits] = std::move(visits);
+    }
+    // #383: once known, how the run stopped is on every checkpoint, so
+    // resuming or forking any of them reports it instead of completion.
+    if (runtime->status_marks) {
+        if (!runtime->status_marks->barrier_stall.is_null())
+            metadata[kMetadataNamespace][kBarrierStalled] = runtime->status_marks->barrier_stall;
+        if (!runtime->status_marks->failure_exit.is_null())
+            metadata[kMetadataNamespace][kFailureExit] = runtime->status_marks->failure_exit;
+    }
+    // A checkpoint saved between steps resumes the next step: it keeps the
+    // counters as they are now.
+    if (timing == CheckpointTiming::BetweenSteps && runtime->failure_state) {
+        auto visits = runtime->failure_state->visits();
+        if (!visits.is_null()) {
+            metadata[kMetadataNamespace][kNodeVisits] = std::move(visits);
+        } else if (metadata.is_object() && metadata.contains(kMetadataNamespace) &&
+                   metadata[kMetadataNamespace].is_object() &&
+                   metadata[kMetadataNamespace].contains(kNodeVisits)) {
+            metadata = without_node_visits(metadata);
+        }
     }
     return metadata;
 }

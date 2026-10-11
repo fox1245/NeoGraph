@@ -754,7 +754,8 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
         next_nodes.push_back(node_name);
         const auto interrupt_cp_id = co_await coord.save_super_step_async(
             state, node_name, next_nodes, CheckpointPhase::NodeInterrupt, step, parent_cp_id,
-            barrier_state, detail::checkpoint_metadata_for(ctx));
+            barrier_state,
+            detail::checkpoint_metadata_for(ctx, detail::CheckpointTiming::DuringStep));
         // Without a parent checkpoint the attempt's start was not recorded;
         // record it under the interrupt's own checkpoint so resume continues it.
         if (parent_cp_id.empty())
@@ -834,7 +835,8 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
                 next_nodes.push_back(node_name);
                 const auto interrupt_cp_id = co_await coord.save_super_step_async(
                     state, node_name, next_nodes, CheckpointPhase::NodeInterrupt, step,
-                    parent_cp_id, barrier_state, detail::checkpoint_metadata_for(ctx));
+                    parent_cp_id, barrier_state,
+                    detail::checkpoint_metadata_for(ctx, detail::CheckpointTiming::DuringStep));
                 if (parent_cp_id.empty())
                     co_await record_attempt_start(coord, interrupt_cp_id, task_id, node_name,
                                                   interrupted_attempt, step);
@@ -986,7 +988,8 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
             next_nodes = ready;
             const auto interrupt_cp_id = co_await coord.save_super_step_async(
                 state, first_exception_node, next_nodes, CheckpointPhase::NodeInterrupt, step,
-                parent_cp_id, barrier_state, detail::checkpoint_metadata_for(ctx));
+                parent_cp_id, barrier_state,
+                detail::checkpoint_metadata_for(ctx, detail::CheckpointTiming::DuringStep));
             if (parent_cp_id.empty()) {
                 for (std::size_t i = 0; i < ready.size(); ++i) {
                     const auto branch_task_id = make_static_task_id(step, ready[i]);

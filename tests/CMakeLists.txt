@@ -907,6 +907,11 @@ if(NOT BUILD_SHARED_LIBS)
     add_executable(neograph_node_failure_tests test_node_failure_classifier.cpp)
     target_link_libraries(neograph_node_failure_tests PRIVATE neograph::core GTest::gtest_main)
     neograph_discover_tests(neograph_node_failure_tests PROPERTIES LABELS "core;node-failure")
+    # #383: every checkpoint save path writes the same run metadata for the
+    # same run state; also checks the one helper they share (core internals).
+    add_executable(neograph_checkpoint_metadata_tests test_checkpoint_run_metadata.cpp)
+    target_link_libraries(neograph_checkpoint_metadata_tests PRIVATE neograph::core GTest::gtest_main)
+    neograph_discover_tests(neograph_checkpoint_metadata_tests PROPERTIES LABELS "core;checkpoint")
 endif()
 if(NEOGRAPH_BUILD_SQLITE)
     # #364 failure routing runtime: handled failures on every dispatch path,
