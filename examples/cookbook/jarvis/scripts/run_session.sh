@@ -11,7 +11,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-BUILD_DIR="${NEOGRAPH_BUILD_DIR:-${BUILD_DIR:-$ROOT/build}}"
+BUILD_DIR="${NEOGRAPH_BUILD_DIR:-${BUILD_DIR:-$ROOT/build-jarvis}}"  # same default as run_jarvis.sh and the README
 CONFIG_SUFFIX="${JARVIS_BUILD_CONFIG:+/$JARVIS_BUILD_CONFIG}"
 JARVIS_BIN_DIR="$BUILD_DIR/examples/cookbook/jarvis$CONFIG_SUFFIX"
 if [[ ! -x "$JARVIS_BIN_DIR/cookbook_jarvis" && -x "$BUILD_DIR$CONFIG_SUFFIX/cookbook_jarvis" ]]; then
