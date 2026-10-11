@@ -428,7 +428,7 @@ TEST(RegistrySnapshotTest, CopiedCallableSurvivesBuilderAndCallerMutation) {
     const json definition = {
         {"schema_version", 1},
         {"nodes", json{{"work", json{{"type", "local-node"}, {"value", 7}}}}},
-        {"edges", json::array()},
+        {"edges", json::array({json{{"from", "__start__"}, {"to", "work"}}})},
         {"conditional_edges", json::array()},
     };
     auto topology =

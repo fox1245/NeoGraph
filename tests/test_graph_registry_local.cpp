@@ -40,7 +40,7 @@ NodeFactoryFn factory(std::atomic<int>* calls = nullptr) {
 json node_definition(std::string type) {
     return json{{"schema_version", 1},
                 {"nodes", json{{"work", json{{"type", std::move(type)}}}}},
-                {"edges", json::array()},
+                {"edges", json::array({json{{"from", "__start__"}, {"to", "work"}}})},
                 {"conditional_edges", json::array()}};
 }
 
@@ -88,11 +88,12 @@ TEST(GraphRegistryLocalTest, LenientLocalParsePreservesEmptyEndpointCompatibilit
                         json::object());
     const json definition = {
         {"nodes", json{{"work", json{{"type", "core-local-lenient-node"}}}}},
-        {"edges", json::array({json{{"from", ""}, {"to", "work"}}})},
+        {"edges", json::array({json{{"from", ""}, {"to", "work"}},
+                               json{{"from", "__start__"}, {"to", "work"}}})},
     };
 
     const auto topology = GraphCompiler::parse_local(definition, local);
-    ASSERT_EQ(topology.edges.size(), 1U);
+    ASSERT_EQ(topology.edges.size(), 2U);
     EXPECT_EQ(topology.edges.front().from, "");
     EXPECT_EQ(topology.edges.front().to, "work");
 }

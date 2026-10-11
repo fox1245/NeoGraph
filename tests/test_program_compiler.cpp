@@ -1149,6 +1149,43 @@ TEST(ProgramCompilerTest, JavaScriptConfigControlCharactersWarnAtTheirCallSite) 
     EXPECT_EQ(warnings[0].witness["control_characters"], json::array({"U+0008"}));
 }
 
+TEST(ProgramCompilerTest, JavaScriptRejectsReservedNodeNamesAtTheCall) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    try {
+        (void)compiler.compile(ProgramSource::from_javascript(
+            "reserved.js",
+            "export function define() {\n"
+            "  const graph = ng.graph(\"main\").node(\"work\", {type: \"local-node\"});\n"
+            "  graph.node(\"__end__\", {type: \"local-node\"});\n"
+            "  return graph.entry(\"work\").exit(\"work\");\n"
+            "}\n"));
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        const auto reserved = find_diagnostic(error.diagnostics(), "P_JS_GRAPH_ARGUMENT");
+        ASSERT_TRUE(reserved.has_value());
+        EXPECT_NE(reserved->message.find("reserved"), std::string::npos) << reserved->message;
+        ASSERT_TRUE(reserved->primary.span.has_value());
+        EXPECT_EQ(reserved->primary.span->line_begin, 3U);
+    }
+}
+
+TEST(ProgramCompilerTest, JavaScriptRejectsAGraphWithoutAnEntry) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    try {
+        (void)compiler.compile(ProgramSource::from_javascript(
+            "no-entry.js",
+            "export function define() {\n"
+            "  return ng.graph(\"main\").node(\"work\", {type: \"local-node\"}).exit(\"work\");\n"
+            "}\n"));
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        const auto entry = find_diagnostic(error.diagnostics(), "P_JS_GRAPH_ENTRY");
+        ASSERT_TRUE(entry.has_value());
+        ASSERT_TRUE(entry->primary.span.has_value());
+        EXPECT_EQ(entry->primary.span->line_begin, 1U);
+    }
+}
+
 TEST(ProgramCompilerTest, JavaScriptSealedModuleClosureExecutesAtCompileTime) {
     const std::string leaf_source = R"JS(
         export const nodeType = "local-node";
@@ -2029,7 +2066,8 @@ TEST(ProgramCompilerTest, MapsCoreParseAndValidationDiagnosticsThroughEscapedSou
     auto              definition   = json{{"schema_version", 1},
                                           {"name", "main"},
                                           {"nodes", json{{escaped_node, json{{"type", "strict-node"}}}}},
-                                          {"edges", json::array()},
+                                          {"edges", json::array({json{{"from", "__start__"},
+                                                                       {"to", escaped_node}}})},
                                           {"conditional_edges", json::array()}};
     SourceSpan        exact_span{10, 20, 2, 1, 2, 11};
     SourceMapEntry    mapping{"/root/definition/nodes/a~1b~0.[x]",

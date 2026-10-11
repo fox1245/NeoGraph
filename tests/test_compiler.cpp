@@ -199,7 +199,7 @@ TEST(GraphCompiler, NodesInstantiatedViaFactory) {
     json def = {{"nodes", {
         {"a", {{"type", "noop"}}},
         {"b", {{"type", "noop"}}}
-    }}};
+    }}, {"edges", json::array({{{"from", "__start__"}, {"to", "a"}}})}};
     auto cg = GraphCompiler::compile(def, NodeContext{});
     EXPECT_EQ(cg.nodes.size(), 2u);
     ASSERT_NE(cg.nodes.find("a"), cg.nodes.end());
@@ -216,7 +216,7 @@ TEST(GraphCompiler, BarrierSpecsCollected) {
             {"type", "noop"},
             {"barrier", {{"wait_for", {"a", "b"}}}}
         }}
-    }}};
+    }}, {"edges", json::array({{{"from", "__start__"}, {"to", "a"}}})}};
     auto cg = GraphCompiler::compile(def, NodeContext{});
     ASSERT_EQ(cg.barrier_specs.size(), 1u);
     auto it = cg.barrier_specs.find("join");
@@ -231,7 +231,7 @@ TEST(GraphCompiler, EmptyBarrierWaitForIsIgnored) {
             {"type", "noop"},
             {"barrier", {{"wait_for", json::array()}}}
         }}
-    }}};
+    }}, {"edges", json::array({{{"from", "__start__"}, {"to", "x"}}})}};
     auto cg = GraphCompiler::compile(def, NodeContext{});
     // An empty wait_for is not a barrier — don't pollute barrier_specs
     // with entries that would never fire.

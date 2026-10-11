@@ -1286,6 +1286,11 @@ JSValue graph_node_impl(JSContext* context, JSValueConst this_value, int argc, J
         !read_json(context, argv[1], config, "node configuration")) {
         return JS_EXCEPTION;
     }
+    if (name == "__start__" || name == "__end__") {
+        return graph_error(context, "P_JS_GRAPH_ARGUMENT",
+                           "NeoGraph graph node name '" + name +
+                               "' is reserved for the graph's entry/exit; use .entry() and .exit()");
+    }
     if (!config.is_object()) {
         return graph_error(context, "P_JS_GRAPH_ARGUMENT",
                            "NeoGraph graph node configuration must be an object");
@@ -2878,6 +2883,17 @@ JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&      
             call_sites.push_back({generated, SourceCoordinate{source.source_id(), generated, span}});
         }
         JS_FreeValue(scope.context(), builder);
+        // Only an edge from __start__ starts a run; without .entry() nothing runs.
+        bool has_entry = false;
+        if (definition.contains("edges"))
+            for (const auto& edge : definition["edges"])
+                has_entry = has_entry || edge["from"].get<std::string>() == "__start__";
+        if (!has_entry && !definition["nodes"].empty()) {
+            throw JavaScriptCompileError(
+                "P_JS_GRAPH_ENTRY",
+                "JavaScript define() returned a graph without .entry(node); nothing would run",
+                json{{"engine", "quickjs"}}, source_span_for_token(script, "define"));
+        }
         const auto canonical_definition = detail::canonical_json_bytes(definition);
         if (canonical_definition.size() > limits.max_generated_document_bytes) {
             throw JavaScriptCompileError(

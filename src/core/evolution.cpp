@@ -208,7 +208,20 @@ MutationResult op_remove_edge(const json& core, std::mt19937& rng) {
     if (n < 2)
         return {std::nullopt, "remove_edge: need >1 edges"};
 
-    size_t idx = std::uniform_int_distribution<size_t>(0, n - 1)(rng);
+    // Keep at least one edge from __start__: without an entry nothing runs and
+    // the candidate no longer compiles.
+    std::vector<size_t> removable;
+    size_t              entries = 0;
+    for (size_t i = 0; i < n; ++i)
+        if (core["edges"][i].value("from", std::string()) == "__start__") ++entries;
+    for (size_t i = 0; i < n; ++i) {
+        const bool entry = core["edges"][i].value("from", std::string()) == "__start__";
+        if (!entry || entries > 1) removable.push_back(i);
+    }
+    if (removable.empty())
+        return {std::nullopt, "remove_edge: only the entry edge is removable"};
+
+    size_t idx = removable[std::uniform_int_distribution<size_t>(0, removable.size() - 1)(rng)];
     json mutated = json::parse(core.dump());
     json new_edges = json::array();
     for (size_t i = 0; i < n; ++i) {

@@ -437,7 +437,9 @@ TEST(CompilerDiagnostics, RoundTripReportIsTotalForMalformedAuthoredShapes) {
 
 TEST(LenientCompiler, UnknownTopLevelKeyStillIgnored) {
     ensure_types_registered();
-    json def = {{"nodes", {{"a", {{"type", "snoop"}}}}}, {"conditionnal_edges", json::array()}};
+    json def = {{"nodes", {{"a", {{"type", "snoop"}}}}},
+                {"conditionnal_edges", json::array()},
+                {"edges", json::array({{{"from", "__start__"}, {"to", "a"}}})}};
     auto cg  = GraphCompiler::compile(def, NodeContext{});
     EXPECT_TRUE(cg.conditional_edges.empty());
     EXPECT_EQ(cg.schema_version, 0);
@@ -446,7 +448,8 @@ TEST(LenientCompiler, UnknownTopLevelKeyStillIgnored) {
 TEST(LenientCompiler, EmptyBarrierStillDropped) {
     ensure_types_registered();
     json def = {
-        {"nodes", {{"a", {{"type", "snoop"}, {"barrier", {{"wait_for", json::array()}}}}}}}};
+        {"nodes", {{"a", {{"type", "snoop"}, {"barrier", {{"wait_for", json::array()}}}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "a"}}})}};
     auto cg = GraphCompiler::compile(def, NodeContext{});
     EXPECT_TRUE(cg.barrier_specs.empty());
 }
@@ -458,6 +461,7 @@ TEST(LenientCompiler, EmptyStringsAndNegativeRetryKeepHistoricalParseBehavior) {
     def["name"]             = "";
     def["nodes"]["a"][""]   = 1;
     def["edges"][0]["from"] = "";
+    def["edges"].push_back(json{{"from", "__start__"}, {"to", "a"}});
     def["retry_policy"]     = json{{"max_retries", -1}};
 
     const auto topology = GraphCompiler::parse(def);
@@ -471,7 +475,8 @@ TEST(LenientCompiler, EmptyStringsAndNegativeRetryKeepHistoricalParseBehavior) {
 TEST(LenientCompiler, InvalidDeclaredNodeSchemaStillUsesLegacyFactoryBehavior) {
     ensure_types_registered();
     json def = {
-        {"nodes", {{"v", {{"type", "snoop_validated"}, {"count", "many"}, {"mode", "turbo"}}}}}};
+        {"nodes", {{"v", {{"type", "snoop_validated"}, {"count", "many"}, {"mode", "turbo"}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "v"}}})}};
     EXPECT_NO_THROW(GraphCompiler::compile(def, NodeContext{}));
 }
 
@@ -651,4 +656,47 @@ TEST(TranslationValidation, LenientDocumentWarnsButDoesNotThrow) {
     auto cg  = GraphCompiler::compile(def, NodeContext{});
     cg.conditional_edges.clear();
     EXPECT_NO_THROW(GraphCompiler::verify_roundtrip(def, cg));
+}
+
+namespace {
+bool has_code_at(const ParseReport& report, std::string_view code, std::string_view pointer) {
+    return std::any_of(report.diagnostics.begin(), report.diagnostics.end(),
+                       [&](const auto& diagnostic) {
+                           return diagnostic.code == code && diagnostic.json_pointer == pointer;
+                       });
+}
+}  // namespace
+
+// Issue #358: __start__/__end__ are routing sentinels. A node with either name
+// is shadowed by the sentinel, so every schema version rejects it.
+TEST(CompilerDiagnostics, ReservedNodeNamesAreRejectedInEverySchemaVersion) {
+    ensure_types_registered();
+    for (const std::string reserved : {"__start__", "__end__"}) {
+        for (const int version : {0, 1}) {
+            auto def                = minimal_strict();
+            def["nodes"][reserved]  = json{{"type", "snoop"}};
+            if (version == 0) def = without_key(def, "schema_version");
+            const auto report = GraphCompiler::parse_report(def, GraphRegistry::global());
+            EXPECT_TRUE(has_code_at(report, "GC_RESERVED_NODE", "/nodes/" + reserved))
+                << reserved << " schema_version " << version;
+            EXPECT_THROW((void)GraphCompiler::parse(def), std::runtime_error);
+        }
+    }
+}
+
+// Issue #358: without an edge from __start__ nothing runs, yet the run used to
+// report Completed. A graph with nodes but no entry is rejected.
+TEST(CompilerDiagnostics, GraphWithNodesButNoEntryIsRejected) {
+    ensure_types_registered();
+    for (const int version : {0, 1}) {
+        auto def     = minimal_strict();
+        def["edges"] = json::array({{{"from", "a"}, {"to", "__end__"}}});
+        if (version == 0) def = without_key(def, "schema_version");
+        const auto report = GraphCompiler::parse_report(def, GraphRegistry::global());
+        EXPECT_TRUE(has_code_at(report, "GC_NO_ENTRY", "/edges")) << "schema_version " << version;
+    }
+    // A graph without nodes has nothing to enter.
+    const auto empty = GraphCompiler::parse_report(
+        json{{"schema_version", 1}, {"nodes", json::object()}}, GraphRegistry::global());
+    EXPECT_FALSE(empty.has_errors());
 }

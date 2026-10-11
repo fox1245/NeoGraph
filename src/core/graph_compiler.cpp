@@ -606,6 +606,14 @@ static ParseReport parse_report_impl(const json&          definition,
                 diagnostics.push_back({"GC_FIELD_VALUE", pointer, "node name must not be empty",
                                        json{{"expected", "non-empty string"}, {"actual", name}}});
             }
+            // The routing sentinels shadow any node of the same name: edges to
+            // __end__ end the run and __start__ is never scheduled as a node.
+            if (name == START_NODE || name == END_NODE) {
+                diagnostics.push_back(
+                    {"GC_RESERVED_NODE", pointer,
+                     "node name '" + name + "' is reserved for the graph's entry/exit sentinel",
+                     json{{"node", name}}});
+            }
             if (!node.is_object()) {
                 field_type(pointer, "topology 'nodes." + name + "'", "object", node);
                 continue;
@@ -914,6 +922,16 @@ static ParseReport parse_report_impl(const json&          definition,
             }
             topology.retry_policy = policy;
         }
+    }
+
+    // Only static edges from __start__ start a run; without one nothing runs and
+    // the run would still report Completed.
+    if ((edges_ok || !definition.contains("edges")) && !topology.node_defs.empty() &&
+        std::none_of(topology.edges.begin(), topology.edges.end(),
+                     [](const Edge& edge) { return edge.from == START_NODE; })) {
+        diagnostics.push_back({"GC_NO_ENTRY", "/edges",
+                               "graph has nodes but no edge from __start__, so nothing would run",
+                               json{{"nodes", topology.node_defs.size()}}});
     }
 
     if (strict) enforce_consumed(definition, top_consumed, "$", "", diagnostics);

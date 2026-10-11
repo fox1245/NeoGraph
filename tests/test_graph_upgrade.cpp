@@ -111,6 +111,7 @@ TEST(Upgrade, QuarantinePreservesExistingAnnotationsOnNameCollision) {
         {"nodes", {{"a", {{"type", "enoop"},
                             {"barrier", {{"wait_for", json::array()}}},
                             {"x-upgraded-barrier", "existing-node-annotation"}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "a"}}})},
     };
 
     const json up = GraphCompiler::upgrade_to_latest(legacy);

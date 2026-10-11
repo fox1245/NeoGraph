@@ -457,3 +457,25 @@ def test_program_barrier_stall_fails_through_a_javascript_control_call():
     assert result.status == ng.ProgramTerminalStatus.Failed
     assert result.failure.code == "P_CORE_BARRIER_STALLED"
     assert result.failure.witness["stalled_barriers"][0]["missing"] == ["B"]
+
+
+def test_reserved_node_names_and_missing_entry_fail_compilation():
+    compiler = ng.ProgramCompiler(_registry(), "python-program-test/v1")
+    reserved = ng.ProgramSource.from_javascript(
+        "python-reserved.js",
+        'export function define() { return ng.graph("g")'
+        '.node("A", {type: "python_program_node"}).node("__end__", {type: "python_program_node"})'
+        '.entry("A").edge("A", "__end__").exit("__end__"); }',
+    )
+    with pytest.raises(ng.ProgramCompileError) as raised:
+        compiler.compile(reserved)
+    assert raised.value.diagnostics[0]["code"] == "P_JS_GRAPH_ARGUMENT"
+    assert "reserved" in raised.value.diagnostics[0]["message"]
+
+    no_entry = ng.ProgramSource.from_javascript(
+        "python-no-entry.js",
+        'export function define() { return ng.graph("g").node("A", {type: "python_program_node"}); }',
+    )
+    with pytest.raises(ng.ProgramCompileError) as raised:
+        compiler.compile(no_entry)
+    assert raised.value.diagnostics[0]["code"] == "P_JS_GRAPH_ENTRY"
