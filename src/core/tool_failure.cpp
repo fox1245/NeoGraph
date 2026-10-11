@@ -186,6 +186,12 @@ private:
         } catch (const graph::NodeInterrupt& failure) {
             found(NodeFailureClass::Interrupted);
             return {{}, nested_of(failure)};
+        } catch (const graph::ConfigurationFailure& failure) {
+            // A configuration or definition verdict, such as a Program
+            // diagnostic: the same input reproduces it.
+            found(NodeFailureClass::ConfigError);
+            if (const auto* nested = dynamic_cast<const std::nested_exception*>(&failure))
+                return {{}, nested->nested_ptr()};
         } catch (const graph::NodeFailureError& failure) {
             found(NodeFailureClass::Ordinary, failure.code(), failure.public_message());
             if (failure.retryable() == false) not_retryable_ = true;
@@ -250,6 +256,8 @@ NodeFailureVerdict classify_node_failure(const std::exception_ptr& error,
 }  // namespace neograph::detail
 
 namespace neograph::graph {
+
+ConfigurationFailure::~ConfigurationFailure() = default;
 
 const char* node_failure_code(NodeFailureClass failure_class) noexcept {
     switch (failure_class) {

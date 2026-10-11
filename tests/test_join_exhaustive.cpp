@@ -30,6 +30,11 @@
 //     end in an earlier super-step does not either.
 //  5. A run that still has ready nodes after max_steps super-steps hits the
 //     step limit.
+//  6. A node that fails and has a failure edge (#364) routes to its failure
+//     target only; its own routes are not taken. The target is never a join
+//     and never __end__, so a failure arrival never fills a slot (a handler
+//     that runs may stand in for the failed member). Command.goto preempts a
+//     failure route like every other route (rule 3).
 //
 // Family (default "ci" bound; NEOGRAPH_JOIN_MODEL_BOUND=extended for the full
 // one): nodes n0..n{N-1}, n0 is the entry and n{N-1} the join. Every node,
@@ -40,7 +45,13 @@
 // at most one node may return Command.goto(__end__), and every node is
 // reachable. The join waits for a nonempty subset of its other static
 // predecessors, as legacy singleton slots or as every partition into any_of
-// slots. Duplicates up to node renaming are kept. NEOGRAPH_JOIN_MODEL_NODES,
+// slots. At most one node may fail, along a failure edge to a node that is
+// neither itself, the join, nor an implicit end (the compiler's target rules).
+// A failure edge is combined with a Command.goto ender on graphs of up to
+// three nodes (ci) or four (extended), engine runs combine them on two-node
+// graphs only, and an engine path fails at most once.
+// NEOGRAPH_JOIN_MODEL_FAILERS=0 leaves failure edges out of the family.
+// Duplicates up to node renaming are kept. NEOGRAPH_JOIN_MODEL_NODES,
 // _ENGINE_NODES and _STEPS override single limits.
 //
 // Two switches:
@@ -97,6 +108,14 @@ using neograph::json;
 using namespace neograph::graph;
 using namespace join_model;
 
+/// The shared bound, with the #364 failure routes the harness also checks
+/// (NEOGRAPH_JOIN_MODEL_FAILERS=0 leaves them out).
+Bounds harness_bounds() {
+    auto limits    = bounds();
+    limits.failers = env_int("NEOGRAPH_JOIN_MODEL_FAILERS", 1) != 0;
+    return limits;
+}
+
 // ---------------------------------------------------------------------------
 // The real Core
 // ---------------------------------------------------------------------------
@@ -114,7 +133,11 @@ public:
         std::size_t visit  = 0;
         for (const auto& event : events)
             if (event[1].get<std::string>() == name_) ++visit;
+        // A failed visit leaves no event, only its failure record.
+        for (const auto& failure : input.state.get("failures"))
+            if (failure["node"].get<std::string>() == name_) ++visit;
         const auto choice = input.state.get("script")[name_][visit].get<std::string>();
+        if (choice == "x") throw std::runtime_error("scripted failure of " + name_);
         NodeOutput out;
         out.writes.push_back(ChannelWrite{
             "events", json::array({json::array({input.ctx.step, name_})})});
@@ -158,8 +181,11 @@ void register_model_executables() {
 
 /// The one place the harness builds a Scheduler from a parsed topology.
 std::unique_ptr<Scheduler> scheduler_for(const TopologySpec& topology) {
+    std::map<std::string, std::string> failure_targets;
+    for (const auto& edge : topology.failure_edges) failure_targets[edge.from] = edge.to;
     return std::make_unique<Scheduler>(topology.edges, topology.conditional_edges,
-                                       topology.barrier_specs, topology.join_specs, nullptr);
+                                       topology.barrier_specs, topology.join_specs,
+                                       std::move(failure_targets), nullptr);
 }
 
 class RealScheduler {
@@ -178,6 +204,7 @@ public:
     Step step(std::uint32_t ready, std::uint32_t pending, Choice choice, std::string& problem) {
         std::vector<ChannelWrite> labels;
         std::vector<StepRouting>  routings;
+        std::vector<bool>         failed;
         for (int u = 0; u < graph_.n; ++u) {
             if (!(ready & bit(u))) continue;
             if (graph_.routes[u].conditional)
@@ -186,12 +213,14 @@ public:
             StepRouting routing{node_name(u), std::nullopt};
             if (choice.end & bit(u)) routing.command_goto = "__end__";
             routings.push_back(std::move(routing));
+            failed.push_back((choice.fail & bit(u)) != 0);
         }
         if (!labels.empty()) state_.apply_writes(labels);
         BarrierState barrier;
         const auto   join = node_name(graph_.join());
         if (pending) barrier[join] = names(pending);
-        const auto plan = scheduler_->plan_next_step(routings, state_, barrier);
+        const auto plan = choice.fail ? scheduler_->plan_next_step(routings, state_, barrier, failed)
+                                      : scheduler_->plan_next_step(routings, state_, barrier);
 
         Step out;
         out.ready   = mask(plan.ready);
@@ -228,7 +257,7 @@ private:
 // ---------------------------------------------------------------------------
 
 struct Totals {
-    std::uint64_t graphs = 0, legacy_graphs = 0, any_of_graphs = 0;
+    std::uint64_t graphs = 0, legacy_graphs = 0, any_of_graphs = 0, failure_graphs = 0;
     std::uint64_t states = 0, transitions = 0;
     std::uint64_t completed = 0, stalled = 0, explicit_end_completions = 0;
     std::uint64_t cyclic_graphs = 0, late_alternative_stalls = 0;
@@ -252,7 +281,8 @@ std::string describe_step(const Graph& graph, std::uint32_t ready, std::uint32_t
     std::ostringstream out;
     out << "graph " << describe(graph) << "\n  ready " << mask_names(ready, graph.n)
         << " pending " << mask_names(pending, graph.n) << " label_b "
-        << mask_names(choice.label_b, graph.n) << " end " << mask_names(choice.end, graph.n);
+        << mask_names(choice.label_b, graph.n) << " end " << mask_names(choice.end, graph.n)
+        << " fail " << mask_names(choice.fail, graph.n);
     return out.str();
 }
 
@@ -358,6 +388,9 @@ struct Path {
 
 void for_each_path(const Graph& graph, int max_steps, const std::function<void(const Path&)>& visit) {
     Path path;
+    // The failer fails at most once per path: enough to drive every failure
+    // route through the engine without multiplying looping paths.
+    bool failed = false;
     std::function<void(std::uint32_t, std::uint32_t)> walk = [&](std::uint32_t ready,
                                                                   std::uint32_t pending) {
         if (static_cast<int>(path.ready_sets.size()) == max_steps) {
@@ -367,12 +400,16 @@ void for_each_path(const Graph& graph, int max_steps, const std::function<void(c
         }
         path.ready_sets.push_back(ready);
         for_each_choice(graph, ready, [&](Choice choice) {
+            if (choice.fail && failed) return;
+            const bool failing = choice.fail != 0;
+            if (failing) failed = true;
             for (int u = 0; u < graph.n; ++u) {
                 if (!(ready & bit(u))) continue;
                 std::string entry = graph.routes[u].conditional
                                         ? ((choice.label_b & bit(u)) ? "b" : "a")
                                         : "-";
                 if (choice.end & bit(u)) entry += "!";
+                if (choice.fail & bit(u)) entry = "x";
                 path.script[node_name(u)].push_back(std::move(entry));
             }
             const auto next = reference_step(graph, ready, pending, choice);
@@ -385,6 +422,7 @@ void for_each_path(const Graph& graph, int max_steps, const std::function<void(c
             }
             for (int u = 0; u < graph.n; ++u)
                 if (ready & bit(u)) path.script[node_name(u)].pop_back();
+            if (failing) failed = false;
         });
         path.ready_sets.pop_back();
     };
@@ -450,11 +488,15 @@ void run_engine(const Graph& graph, const Bounds& limits, Totals& totals) {
         const auto result = engine->run(config);
 
         std::vector<std::uint32_t> ready_sets;
-        for (const auto& event : result.output["channels"]["events"]["value"]) {
-            const auto step = event[0].get<std::size_t>();
+        const auto mark = [&](std::size_t step, const std::string& name) {
             if (ready_sets.size() <= step) ready_sets.resize(step + 1, 0);
-            ready_sets[step] |= bit(std::stoi(event[1].get<std::string>().substr(1)));
-        }
+            ready_sets[step] |= bit(std::stoi(name.substr(1)));
+        };
+        for (const auto& event : result.output["channels"]["events"]["value"])
+            mark(event[0].get<std::size_t>(), event[1].get<std::string>());
+        // A failed node ran in its super-step too; its record says which.
+        for (const auto& failure : result.output["channels"]["failures"]["value"])
+            mark(failure["step"].get<std::size_t>(), failure["node"].get<std::string>());
         const auto actual = engine_outcome(result);
         if (path.outcome == Outcome::StepLimit) ++totals.engine_step_limits;
         if (path.outcome == Outcome::Stalled) ++totals.engine_stalls;
@@ -497,7 +539,8 @@ void report(const char* title, const Bounds& limits, const Totals& totals, doubl
               << ", fan-out<=" << limits.max_fanout << ", back edges<=" << limits.max_back_edges
               << ", enders<=" << (limits.enders ? 1 : 0) << ", steps<=" << limits.max_steps
               << ")\n  graphs " << totals.graphs << " (legacy " << totals.legacy_graphs
-              << ", any_of " << totals.any_of_graphs << ")\n";
+              << ", any_of " << totals.any_of_graphs << "; with a failure edge "
+              << totals.failure_graphs << ")\n";
     if (totals.states)
         std::cout << "  states " << totals.states << ", transitions " << totals.transitions
                   << ", graphs with cyclic runs " << totals.cyclic_graphs
@@ -625,6 +668,33 @@ TEST(JoinModel, ReferenceStatesTheApprovedSemantics) {
     EXPECT_EQ(reference_step(legacy, bit(3), 0, none).pending, bit(3));
     EXPECT_EQ(reference_step(legacy, bit(3), 0, none).ready, 0U);
 
+    // #364, rule 6: B fails instead of picking a label, along a failure edge to
+    // FIX. A failure arrival never fills a slot: with the legacy barrier the run
+    // stalls; with [{any_of: ["B", "FIX"]}, "C"] FIX stands in for B.
+    const Choice b_fails{0, 0, bit(1)};
+    auto legacy_failing = legacy;
+    legacy_failing.failer      = 1;
+    legacy_failing.fail_target = 3;
+    const auto failed_legacy = reference_run(legacy_failing, {none, b_fails, none, none});
+    EXPECT_EQ(failed_legacy.outcome, Outcome::Stalled);
+    EXPECT_EQ(failed_legacy.ready_sets,
+              (std::vector<std::uint32_t>{bit(0), bit(1) | bit(2), bit(3)}));
+    auto slot_failing = slot;
+    slot_failing.failer      = 1;
+    slot_failing.fail_target = 3;
+    const auto failed_slot = reference_run(slot_failing, {none, b_fails, none, none, none});
+    EXPECT_EQ(failed_slot.outcome, Outcome::Completed);
+    EXPECT_EQ(failed_slot.ready_sets,
+              (std::vector<std::uint32_t>{bit(0), bit(1) | bit(2), bit(3), bit(4)}));
+    // A static fan-out node that fails takes none of its edges.
+    EXPECT_EQ(reference_step(legacy_failing, bit(1), 0, b_fails).ready, bit(3));
+    // Command.goto(__end__) by a sibling preempts the failure route.
+    auto ending_sibling = legacy_failing;
+    ending_sibling.ender = 2;
+    const auto preempted = reference_step(ending_sibling, bit(1) | bit(2), 0, Choice{0, bit(2), bit(1)});
+    EXPECT_EQ(preempted.ready, 0U);
+    EXPECT_TRUE(preempted.explicit_end);
+
     // Command.goto(__end__) in the final super-step suppresses the stall.
     auto ended = legacy;
     ended.ender = 3;  // FIX may end the run explicitly
@@ -657,12 +727,13 @@ TEST(JoinModel, ReferenceStatesTheApprovedSemantics) {
 
 TEST(JoinModel, SchedulerMatchesTheReferenceForLegacyBarriers) {
     register_model_executables();
-    const auto limits = bounds();
+    const auto limits = harness_bounds();
     const auto start  = std::chrono::steady_clock::now();
     Totals     totals;
     for_each_graph(limits, [&](const Graph& graph) {
         if (graph.any_of()) return;
         ++totals.graphs;
+        if (graph.failer >= 0) ++totals.failure_graphs;
         ++totals.legacy_graphs;
         RealScheduler real(graph);
         explore(graph, &real, totals);
@@ -670,16 +741,18 @@ TEST(JoinModel, SchedulerMatchesTheReferenceForLegacyBarriers) {
     report("Scheduler::plan_next_step vs reference, legacy barriers", limits, totals,
            seconds_since(start));
     EXPECT_GT(totals.graphs, 1000U);
+    if (limits.failers) EXPECT_GT(totals.failure_graphs, 1000U) << "the family must include failure edges (#364)";
     expect_clean(totals);
 }
 
 TEST(JoinModel, ReferenceInvariantsHoldForAnyOfSlots) {
-    const auto limits = bounds();
+    const auto limits = harness_bounds();
     const auto start  = std::chrono::steady_clock::now();
     Totals     totals;
     for_each_graph(limits, [&](const Graph& graph) {
         if (!graph.any_of()) return;
         ++totals.graphs;
+        if (graph.failer >= 0) ++totals.failure_graphs;
         ++totals.any_of_graphs;
         explore(graph, nullptr, totals);
     });
@@ -695,12 +768,13 @@ TEST(JoinModel, SchedulerMatchesTheReferenceForAnyOfSlots) {
                     "NEOGRAPH_JOIN_MODEL_ANY_OF=1 when the Scheduler supports them";
 #else
     register_model_executables();
-    const auto limits = bounds();
+    const auto limits = harness_bounds();
     const auto start  = std::chrono::steady_clock::now();
     Totals     totals;
     for_each_graph(limits, [&](const Graph& graph) {
         if (!graph.any_of()) return;
         ++totals.graphs;
+        if (graph.failer >= 0) ++totals.failure_graphs;
         ++totals.any_of_graphs;
         RealScheduler real(graph);
         explore(graph, &real, totals);
@@ -713,18 +787,23 @@ TEST(JoinModel, SchedulerMatchesTheReferenceForAnyOfSlots) {
 
 TEST(JoinModel, EngineRunsMatchTheReference) {
     register_model_executables();
-    auto limits      = bounds();
+    auto limits      = harness_bounds();
     limits.max_nodes = std::min(limits.max_nodes, limits.engine_max_nodes);
+    // The scheduler level already combines failure edges with enders on
+    // larger graphs; engine runs do so only on two-node graphs.
+    limits.failers_with_enders_max_nodes = 2;
     const auto start = std::chrono::steady_clock::now();
     Totals     totals;
     for_each_graph(limits, [&](const Graph& graph) {
         if (graph.any_of() && !NEOGRAPH_JOIN_MODEL_ANY_OF) return;
         ++totals.graphs;
+        if (graph.failer >= 0) ++totals.failure_graphs;
         (graph.any_of() ? totals.any_of_graphs : totals.legacy_graphs)++;
         run_engine(graph, limits, totals);
     });
     report("GraphEngine runs vs reference", limits, totals, seconds_since(start));
     EXPECT_GT(totals.engine_runs, 1000U);
+    if (limits.failers) EXPECT_GT(totals.failure_graphs, 100U) << "engine runs must include failure edges (#364)";
     expect_clean(totals);
 }
 

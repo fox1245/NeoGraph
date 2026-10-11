@@ -141,6 +141,14 @@ public:
               JoinSpecs                            join_specs,
               std::shared_ptr<const GraphRegistry> registry);
 
+    /// @brief Also bind failure edges (#364): failing node -> failure target.
+    Scheduler(const std::vector<Edge>&             edges,
+              const std::vector<ConditionalEdge>&  conditional_edges,
+              BarrierSpecs                         barrier_specs,
+              JoinSpecs                            join_specs,
+              std::map<std::string, std::string>   failure_targets,
+              std::shared_ptr<const GraphRegistry> registry);
+
     /**
      * @brief Resolve the direct successors of a node.
      *
@@ -259,6 +267,26 @@ public:
                                 const GraphState& state,
                                 BarrierState& barrier_state) const;
 
+    /**
+     * @brief Barrier-aware planning with handled failures (#364).
+     *
+     * `failed[i]` marks `routings[i]` as a handled failure: that node routes
+     * to its failure target only, and its edges and routes are not signaled.
+     * A failure target is never `__end__` and never a join, so a failure
+     * arrival never fills a slot. Everything else is the barrier-aware rule
+     * above; in particular a Command.goto in the same super-step preempts
+     * every route, failure routes included. `failed` must be empty or have
+     * one entry per routing; a failed node without a failure edge throws
+     * std::logic_error.
+     */
+    NextStepPlan plan_next_step(const std::vector<StepRouting>& routings,
+                                const GraphState& state,
+                                BarrierState& barrier_state,
+                                const std::vector<bool>& failed) const;
+
+    /// The failure target of `node`, or null when it has no failure edge.
+    const std::string* failure_target(const std::string& node) const;
+
     /// True when `node` has neither a conditional edge nor a static edge, so
     /// it reaches `END_NODE` only implicitly.
     bool ends_implicitly(const std::string& node) const;
@@ -275,6 +303,7 @@ private:
     BarrierSpecs barrier_specs_;
     JoinSpecs join_specs_;
     std::shared_ptr<const GraphRegistry> registry_;
+    std::map<std::string, std::string> failure_targets_;
 };
 
 } // namespace neograph::graph

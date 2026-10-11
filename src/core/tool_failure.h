@@ -93,8 +93,10 @@ struct NodeFailureVerdict {
 };
 
 /// Classify @p error. See NodeFailureClass for the classes and their order.
-NodeFailureVerdict classify_node_failure(const std::exception_ptr& error,
-                                         const graph::CancelToken* run_token) noexcept;
+/// Exported for other NeoGraph libraries (the Program runtime's Retry
+/// operation and failure codes, #364); no compatibility promise.
+NEOGRAPH_API NodeFailureVerdict classify_node_failure(const std::exception_ptr& error,
+                                                      const graph::CancelToken* run_token) noexcept;
 
 /// The NodeExecutionError the node retry loop throws: it carries the
 /// NodeFailure record that graph::node_failure_of() returns. Not final, so

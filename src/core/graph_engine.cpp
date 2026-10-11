@@ -3,6 +3,7 @@
 
 #include "run_context_runtime.h"
 #include "canonical_json.h"
+#include "failure_routing.h"
 #include "graph_v2_keys.h"
 #include "managed_budget_journal.h"
 #include <neograph/graph/loader.h>
@@ -197,6 +198,22 @@ json stalled_barriers(const BarrierState& state, const BarrierSpecs& specs, cons
 }
 
 constexpr const char* kBarrierStalled = "barrier_stalled";
+
+// Checkpoint metadata without "_neograph.node_visits" (#364); "_neograph"
+// goes too when nothing else is in it.
+json without_node_visits(const json& metadata) {
+    json owned = json::object();
+    for (const auto& [key, value] : metadata["_neograph"].items())
+        if (key != "node_visits") owned[key] = value;
+    json result = json::object();
+    for (const auto& [key, value] : metadata.items()) {
+        if (key != "_neograph")
+            result[key] = value;
+        else if (!owned.empty())
+            result[key] = owned;
+    }
+    return result;
+}
 
 void report_validation(const ValidationReport& report, int schema_version, bool print) {
     if (schema_version >= 1) {
@@ -501,6 +518,11 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
         engine->default_retry_policy_ = *config.retry_policy;
     }
     engine->node_retry_policies_ = std::move(config.node_retry_policies);
+    // #364: failure edges, failure exits and per-node failure policy.
+    engine->failure_routing_ = std::make_shared<const detail::FailureRouting>(
+        detail::FailureRouting::build(cg.node_retry_policies, cg.failure_edges, cg.failure_exits,
+                                      std::move(config.failure_text_redactor)));
+    engine->sealed_retry_policies_ = std::move(cg.node_retry_policies);
     engine->checkpoint_store_    = std::move(config.checkpoint_store);
     engine->store_               = std::move(config.store);
     engine->tool_gate_           = std::move(config.tool_gate);
@@ -531,7 +553,7 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     engine->scheduler_ =
         std::make_unique<Scheduler>(engine->edges_, engine->conditional_edges_,
                                     std::move(cg.barrier_specs), std::move(cg.join_specs),
-                                    resources.registry);
+                                    engine->failure_routing_->targets, resources.registry);
 
     GraphEngine* self         = engine.get();
     auto         retry_lookup = [self](const std::string& node_name) {
@@ -540,6 +562,7 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     engine->executor_ = std::make_unique<NodeExecutor>(
         engine->nodes_, engine->channel_defs_, std::move(retry_lookup),
         std::move(resources.registry), nullptr, &engine->node_cache_);
+    engine->executor_->failure_routing_ = engine->failure_routing_.get();
 
     // NodeExecutor owns retry + fan-out + Send invocation. Bind the
     // retry-policy lookup to this engine's per-node override map so
@@ -647,6 +670,7 @@ void GraphEngine::set_worker_count(std::size_t n) {
         pool_.reset();
         executor_ = std::make_unique<NodeExecutor>(nodes_, channel_defs_, std::move(retry_lookup),
                                                    std::move(registry), nullptr, &node_cache_);
+        executor_->failure_routing_ = failure_routing_.get();
         // The notice is one-shot per executor; marking it sent keeps it quiet.
         if (!stderr_notices_) executor_->warned_serial_fanout_.store(true);
         return;
@@ -654,6 +678,7 @@ void GraphEngine::set_worker_count(std::size_t n) {
     pool_ = std::make_unique<asio::thread_pool>(n);
     executor_ = std::make_unique<NodeExecutor>(nodes_, channel_defs_, std::move(retry_lookup),
                                                std::move(registry), pool_.get(), &node_cache_);
+    executor_->failure_routing_ = failure_routing_.get();
 }
 
 void GraphEngine::set_worker_count_auto() {
@@ -676,9 +701,33 @@ void GraphEngine::set_node_cache_max_entries(std::size_t max_entries) {
 }
 
 RetryPolicy GraphEngine::get_retry_policy(const std::string& node_name) const {
-    auto it = node_retry_policies_.find(node_name);
-    if (it != node_retry_policies_.end()) return it->second;
-    return default_retry_policy_;
+    const auto host   = node_retry_policies_.find(node_name);
+    const auto sealed = sealed_retry_policies_.find(node_name);
+    if (sealed == sealed_retry_policies_.end()) {
+        // No per-node policy in the definition: a host per-node policy
+        // replaces the default, as it always did.
+        return host != node_retry_policies_.end() ? host->second : default_retry_policy_;
+    }
+    // #364, per field: the default, then the definition's per-node fields,
+    // then a host per-node policy that may only tighten.
+    constexpr int kMaxNodeRetries = 10;
+    RetryPolicy resolved = default_retry_policy_;
+    const auto& spec     = sealed->second;
+    if (spec.max_retries) resolved.max_retries = *spec.max_retries;
+    if (spec.initial_delay_ms) resolved.initial_delay_ms = *spec.initial_delay_ms;
+    if (spec.backoff_multiplier)
+        resolved.backoff_multiplier = static_cast<float>(*spec.backoff_multiplier);
+    if (spec.max_delay_ms) resolved.max_delay_ms = *spec.max_delay_ms;
+    resolved.max_retries = std::clamp(resolved.max_retries, 0, kMaxNodeRetries);
+    if (host != node_retry_policies_.end()) {
+        const auto& tighter         = host->second;
+        resolved.max_retries        = std::min(resolved.max_retries, std::max(tighter.max_retries, 0));
+        resolved.initial_delay_ms   = std::max(resolved.initial_delay_ms, tighter.initial_delay_ms);
+        resolved.max_delay_ms       = std::max(resolved.max_delay_ms, tighter.max_delay_ms);
+        resolved.backoff_multiplier = std::max(resolved.backoff_multiplier, tighter.backoff_multiplier);
+        resolved.jitter_pct         = tighter.jitter_pct;
+    }
+    return resolved;
 }
 
 void GraphEngine::enter_execution() {
@@ -1535,6 +1584,12 @@ asio::awaitable<RunResult> GraphEngine::resume_execute_async(
             result.output["_neograph"][kBarrierStalled] =
                 stored_metadata["_neograph"][kBarrierStalled];
         }
+        // #364: a run that ended at a failure exit stays failed on resume.
+        if (stored_metadata.is_object() && stored_metadata["_neograph"].is_object() &&
+            stored_metadata["_neograph"].contains("failure_exit")) {
+            result.output["_neograph"]["failure_exit"] =
+                stored_metadata["_neograph"]["failure_exit"];
+        }
         result.native_messages = completed_state.captured_provider_messages().value_or(std::vector<sp::Message>{});
         result.provider_outcomes = completed_state.provider_outcomes();
         if (const auto bank = completed_state.budget_bank()) result.usage = bank->snapshot();
@@ -1571,6 +1626,8 @@ asio::awaitable<GraphEngine::SubgraphRunResult> GraphEngine::run_subgraph_async(
 
     RuntimeResources resources;
     auto parent_runtime = detail::runtime_for(parent);
+    // #364: a subgraph's retries count toward its parent run's ceiling.
+    if (parent_runtime) metadata.node_retry_ceiling = parent_runtime->node_retry_ceiling;
     if (parent_runtime && parent_runtime->checkpoint_store) {
         resources.checkpoint_store = parent_runtime->checkpoint_store;
     }
@@ -1803,6 +1860,13 @@ GraphEngine::execute_graph_async(
         runtime->subgraph_write_journal = resources->subgraph_write_journal;
     }
     runtime->is_resume = is_resume;
+    // #364: the run-level retry ceiling, and this run's visit counters.
+    runtime->node_retry_ceiling = metadata.node_retry_ceiling;
+    std::shared_ptr<detail::FailureRunState> failure_state;
+    if (failure_routing_->counts_visits()) {
+        failure_state          = std::make_shared<detail::FailureRunState>();
+        runtime->failure_state = failure_state;
+    }
     detail::ScopedRunContextRuntime runtime_scope(ctx, std::move(runtime));
 
     std::string last_checkpoint_id;
@@ -1820,6 +1884,7 @@ GraphEngine::execute_graph_async(
             reject_missing_original_managed_bank();
         state.restore_checkpoint(
             loaded.channel_values, checkpoint_ephemeral_guard(loaded.metadata), loaded.native_history);
+        if (failure_state) failure_state->restore(loaded.metadata);
         budget_source = loaded.managed_budget_source;
         last_checkpoint_id = loaded.checkpoint_id;
         start_step         = loaded.start_step;
@@ -1935,11 +2000,29 @@ GraphEngine::execute_graph_async(
 
     std::vector<std::string> trace;
     json barrier_stall;  // null unless the run stopped at an unsatisfiable barrier
+    // #364: {node, code} once a failure-exit node completed; null otherwise.
+    json failure_exit;
+    // #364: failure records that routed to a node in the previous super-step,
+    // by target: the interrupt payload when the target has interruptBefore.
+    std::map<std::string, json> failure_arrivals;
     // Every checkpoint carries the stall witness once known, so resuming or
     // forking any of them reports the stall instead of completion.
     const auto checkpoint_metadata = [&] {
         auto metadata = detail::checkpoint_metadata_for(ctx);
         if (!barrier_stall.is_null()) metadata["_neograph"][kBarrierStalled] = barrier_stall;
+        if (!failure_exit.is_null()) metadata["_neograph"]["failure_exit"] = failure_exit;
+        if (failure_state) {
+            // A checkpoint saved between steps resumes the next step: it keeps
+            // the counters as they are now.
+            auto visits = failure_state->visits();
+            if (!visits.is_null()) {
+                metadata["_neograph"]["node_visits"] = std::move(visits);
+            } else if (metadata.is_object() && metadata.contains("_neograph") &&
+                       metadata["_neograph"].is_object() &&
+                       metadata["_neograph"].contains("node_visits")) {
+                metadata = without_node_visits(metadata);
+            }
+        }
         return metadata;
     };
     std::vector<Send> pending_sends;
@@ -2018,6 +2101,12 @@ GraphEngine::execute_graph_async(
                     result.interrupt_node  = node_name;
                     json iv;
                     iv["message"] = "Interrupt before node: " + node_name;
+                    // #364: a failure route brought the run here.
+                    if (const auto arrival = failure_arrivals.find(node_name);
+                        arrival != failure_arrivals.end()) {
+                        iv["reason"]  = "failure_route";
+                        iv["failure"] = arrival->second;
+                    }
                     result.interrupt_value = iv;
                     result.checkpoint_id   = cp_id;
                     result.execution_trace = std::move(trace);
@@ -2037,6 +2126,8 @@ GraphEngine::execute_graph_async(
         // --- Execute ready nodes ---
         pending_sends.clear();
         std::vector<NodeResult> step_results;
+        if (failure_state) failure_state->mark_step_start();
+        failure_arrivals.clear();
 
         // Capture NodeInterrupt outside the catch (GCC-13-safe) so the
         // checkpoint lookup that follows can do its own work.
@@ -2113,10 +2204,11 @@ GraphEngine::execute_graph_async(
         // Most steps spawn no Send; calling the coroutine for an empty batch
         // would still allocate and tear down its frame just to return nothing.
         std::vector<StepRouting> send_routings;
+        std::vector<json>        send_failures;
         if (!pending_sends.empty()) {
-            send_routings = co_await executor_->run_sends_async(
+            send_routings = co_await executor_->run_sends_impl_async(
                 pending_sends, step, state, replay_results,
-                coord, last_checkpoint_id, trace, cb, stream_mode, ctx);
+                coord, last_checkpoint_id, trace, cb, stream_mode, ctx, &send_failures);
         }
 
         if (cb && has_mode(stream_mode, StreamMode::VALUES)) {
@@ -2146,8 +2238,49 @@ GraphEngine::execute_graph_async(
             unified_routings.push_back(std::move(sr));
         }
 
-        auto plan = scheduler_->plan_next_step(
-            unified_routings, state, barrier_state);
+        // #364: which invocations failed as handled and route along their
+        // failure edge. The first record per target is the interrupt payload
+        // if the target has interruptBefore.
+        std::vector<bool> handled;
+        if (failure_routing_->routes()) {
+            handled.assign(unified_routings.size(), false);
+            for (std::size_t i = 0; i < unified_routings.size(); ++i) {
+                const json* record = i < step_results.size()
+                    ? detail::failure_route_record(step_results[i])
+                    : (send_failures[i - step_results.size()].is_null()
+                           ? nullptr : &send_failures[i - step_results.size()]);
+                if (!record) continue;
+                handled[i] = true;
+                if (const auto* target = scheduler_->failure_target(unified_routings[i].node_name))
+                    failure_arrivals.emplace(*target, *record);
+            }
+            if (std::none_of(handled.begin(), handled.end(), [](bool value) { return value; }))
+                handled.clear();
+        }
+        // #364: a completed failure target resets the visit counters of the
+        // nodes routed to it; a completed failure-exit node ends the run.
+        for (std::size_t i = 0; (failure_state || !failure_routing_->exits.empty()) &&
+                                i < unified_routings.size();
+             ++i) {
+            if (!handled.empty() && handled[i]) continue;
+            const auto& completed = unified_routings[i].node_name;
+            if (failure_state) failure_state->target_completed(*failure_routing_, completed);
+            if (failure_exit.is_null()) {
+                const auto exit = failure_routing_->exits.find(completed);
+                if (exit != failure_routing_->exits.end())
+                    failure_exit = json{{"node", completed}, {"code", exit->second}};
+            }
+        }
+
+        auto plan = handled.empty()
+            ? scheduler_->plan_next_step(unified_routings, state, barrier_state)
+            : scheduler_->plan_next_step(unified_routings, state, barrier_state, handled);
+        if (!failure_exit.is_null()) {
+            // An abort ends the run after this super-step, explicitly.
+            plan.ready.clear();
+            plan.hit_end          = true;
+            plan.hit_explicit_end = true;
+        }
         // A run that stops with a join still holding signals (from members or
         // not) stalled, unless this final step chose to finish: an edge or
         // route to __end__, or Command.goto __end__. A node with no successors
@@ -2158,6 +2291,9 @@ GraphEngine::execute_graph_async(
             // otherwise its static edges.
             const auto successors = [this](const std::string& from) {
                 std::vector<std::string> targets;
+                // #364: a failure edge is a route too.
+                if (const auto* target = scheduler_->failure_target(from))
+                    targets.push_back(*target);
                 for (const auto& ce : conditional_edges_) {
                     if (ce.from != from) continue;
                     for (const auto& [key, target] : ce.routes) {
@@ -2275,6 +2411,7 @@ GraphEngine::execute_graph_async(
         };
     }
     if (!barrier_stall.is_null()) result.output["_neograph"][kBarrierStalled] = barrier_stall;
+    if (!failure_exit.is_null()) result.output["_neograph"]["failure_exit"] = failure_exit;
     if (!last_checkpoint_id.empty()) {
         result.checkpoint_id = last_checkpoint_id;
     }

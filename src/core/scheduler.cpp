@@ -28,11 +28,26 @@ Scheduler::Scheduler(const std::vector<Edge>&             edges,
                      BarrierSpecs                         barrier_specs,
                      JoinSpecs                            join_specs,
                      std::shared_ptr<const GraphRegistry> registry)
+    : Scheduler(edges, conditional_edges, std::move(barrier_specs), std::move(join_specs), {},
+                std::move(registry)) {}
+
+Scheduler::Scheduler(const std::vector<Edge>&             edges,
+                     const std::vector<ConditionalEdge>&  conditional_edges,
+                     BarrierSpecs                         barrier_specs,
+                     JoinSpecs                            join_specs,
+                     std::map<std::string, std::string>   failure_targets,
+                     std::shared_ptr<const GraphRegistry> registry)
     : edges_(edges),
       conditional_edges_(conditional_edges),
       barrier_specs_(std::move(barrier_specs)),
       join_specs_(std::move(join_specs)),
-      registry_(std::move(registry)) {}
+      registry_(std::move(registry)),
+      failure_targets_(std::move(failure_targets)) {}
+
+const std::string* Scheduler::failure_target(const std::string& node) const {
+    const auto found = failure_targets_.find(node);
+    return found == failure_targets_.end() ? nullptr : &found->second;
+}
 
 std::vector<std::string> Scheduler::resolve_next_nodes(
     const std::string& current, const GraphState& state) const {
@@ -125,9 +140,26 @@ static NextStepPlan plan_impl(
     const GraphState& state,
     const BarrierSpecs& barrier_specs,
     const JoinSpecs& join_specs,
-    BarrierState* barrier_state) {
+    BarrierState* barrier_state,
+    const std::vector<bool>* failed = nullptr) {
 
     NextStepPlan plan;
+    if (failed && !failed->empty() && failed->size() != routings.size()) {
+        throw std::invalid_argument(
+            "Scheduler::plan_next_step: failed and routings size mismatch");
+    }
+    // A handled failure (#364) routes along its failure edge only.
+    const auto successors_of = [&](std::size_t index) -> std::vector<std::string> {
+        const auto& node = routings[index].node_name;
+        if (failed && !failed->empty() && (*failed)[index]) {
+            const auto* target = sch.failure_target(node);
+            if (!target)
+                throw std::logic_error("Node '" + node +
+                                       "' failed as handled but has no failure edge");
+            return {*target};
+        }
+        return sch.resolve_next_nodes(node, state);
+    };
 
     // Pass 1: Command.goto override — preempts everything, including
     // barriers. Last-writer-wins follows the supplied routing order; callers
@@ -153,8 +185,9 @@ static NextStepPlan plan_impl(
     // which only barrier gating needs: they cost a node allocation per entry on
     // every super-step of every graph, barriers or not.
     if (barrier_state == nullptr || (barrier_specs.empty() && join_specs.empty())) {
-        for (const auto& r : routings) {
-            for (auto& next : sch.resolve_next_nodes(r.node_name, state)) {
+        for (std::size_t index = 0; index < routings.size(); ++index) {
+            const auto& r = routings[index];
+            for (auto& next : successors_of(index)) {
                 if (next == END_NODE) {
                     plan.hit_end = true;
                     if (!sch.ends_implicitly(r.node_name)) plan.hit_explicit_end = true;
@@ -172,8 +205,9 @@ static NextStepPlan plan_impl(
     // WHICH upstreams fired this super-step. Non-barrier targets are
     // still just deduped via std::set semantics.
     std::map<std::string, std::set<std::string>> signals;
-    for (const auto& r : routings) {
-        for (const auto& next : sch.resolve_next_nodes(r.node_name, state)) {
+    for (std::size_t index = 0; index < routings.size(); ++index) {
+        const auto& r = routings[index];
+        for (const auto& next : successors_of(index)) {
             if (next == std::string(END_NODE)) {
                 plan.hit_end = true;
                 if (!sch.ends_implicitly(r.node_name)) plan.hit_explicit_end = true;
@@ -241,6 +275,14 @@ NextStepPlan Scheduler::plan_next_step(
     const GraphState& state,
     BarrierState& barrier_state) const {
     return plan_impl(*this, routings, state, barrier_specs_, join_specs_, &barrier_state);
+}
+
+NextStepPlan Scheduler::plan_next_step(
+    const std::vector<StepRouting>& routings,
+    const GraphState& state,
+    BarrierState& barrier_state,
+    const std::vector<bool>& failed) const {
+    return plan_impl(*this, routings, state, barrier_specs_, join_specs_, &barrier_state, &failed);
 }
 
 // Shared zip helper used by both NodeResult overloads.

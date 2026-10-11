@@ -84,6 +84,15 @@ InvocationResult RunInvocation::classify(RunResult result) {
             outcome.error  = "graph stopped at a barrier that can no longer fire, "
                              "without reaching __end__";
             break;
+        case RunStatus::FailureExit: {
+            // #364: a failure-exit node completed; the run ended as failed.
+            const json& output = outcome.run_result->output;
+            const auto  exit   = output["_neograph"]["failure_exit"];
+            outcome.status = InvocationStatus::Error;
+            outcome.error  = "graph ended at failure exit '" + exit.value("node", std::string()) +
+                             "' with code " + exit.value("code", std::string());
+            break;
+        }
     }
     return outcome;
 }

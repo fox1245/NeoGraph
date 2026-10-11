@@ -909,6 +909,12 @@ if(NOT BUILD_SHARED_LIBS)
     neograph_discover_tests(neograph_node_failure_tests PROPERTIES LABELS "core;node-failure")
 endif()
 if(NEOGRAPH_BUILD_SQLITE)
+    # #364 failure routing runtime: handled failures on every dispatch path,
+    # retry timing, the ceiling, max_visits, failure exits, crash-resume.
+    add_executable(neograph_failure_routing_tests test_failure_routing_runtime.cpp)
+    target_link_libraries(neograph_failure_routing_tests PRIVATE
+        neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
+    neograph_discover_tests(neograph_failure_routing_tests PROPERTIES LABELS "core;failure-routing")
     add_executable(neograph_node_failure_effect_tests test_node_failure_effects.cpp)
     target_link_libraries(neograph_node_failure_effect_tests PRIVATE
         neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)

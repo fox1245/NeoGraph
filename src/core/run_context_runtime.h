@@ -12,7 +12,13 @@
 #include <string_view>
 #include <vector>
 
+namespace neograph::graph {
+class NodeRetryCeiling;
+}
+
 namespace neograph::graph::detail {
+
+class FailureRunState;
 
 struct SubgraphWriteJournal {
     std::vector<ChannelWrite> writes;
@@ -30,6 +36,10 @@ struct RunContextRuntime {
     std::shared_ptr<ToolEffectBroker> tool_effect_broker;
     ToolEffectGrantIdentity tool_effect_grant;
     bool is_resume = false;
+    /// #364: the run-level retry ceiling, shared with subgraphs; may be null.
+    std::shared_ptr<NodeRetryCeiling> node_retry_ceiling;
+    /// #364: visit counters of this graph run; null without max_visits.
+    std::shared_ptr<FailureRunState> failure_state;
 };
 
 /// What a RunContext is bound to while a scope below is alive: the state the

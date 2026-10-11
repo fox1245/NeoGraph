@@ -52,7 +52,10 @@ class RuntimeInterpositionController;
 namespace neograph::graph {
 
 class ValidatedTopology;
-namespace detail { struct SubgraphWriteJournal; }
+namespace detail {
+struct SubgraphWriteJournal;
+struct FailureRouting;
+}  // namespace detail
 
 /// Both execution evidence and the failed durable disposition remain visible.
 class NEOGRAPH_API ManagedBudgetLeaseReleaseError final : public ProviderOutcomeError {
@@ -94,6 +97,9 @@ struct EngineConfig {
 
     /// Per-node retry overrides applied before the first run. build() and
     /// link() throw std::invalid_argument for a name the graph has no node for.
+    /// For a node whose definition declares a per-node policy
+    /// (node_retry_policies, #364), an override may only tighten each field;
+    /// see GraphEngine::set_node_retry_policy().
     std::map<std::string, RetryPolicy> node_retry_policies;
 
     /// Engine-wide tool policy, preserved across run() and resume().
@@ -138,6 +144,11 @@ struct EngineConfig {
     /// Controlled provider dispatch for built-in LLMCallNode instances.
     std::shared_ptr<::neograph::RuntimeInterpositionController> runtime_interposition;
     std::shared_ptr<sp::NativeArchive> native_history_archive;
+
+    /// #364: the free text a failure record may carry, for nodes whose retry
+    /// policy opts in with `error_text: true`. Empty writes no text. See
+    /// FailureTextRedactor.
+    FailureTextRedactor failure_text_redactor;
 };
 
 /**
@@ -273,6 +284,42 @@ struct RunConfig {
 };
 
 /**
+ * @brief A run-level ceiling on node retries (#364).
+ *
+ * One object is shared by every node, fan-out branch, Send and subgraph of
+ * the runs it is passed to through RunMetadata::node_retry_ceiling. Before
+ * each retry the executor takes one unit; when none is left, it stops
+ * retrying that node with kind `ceiling`, and the node is routed along its
+ * failure edge or fails the run. The Program runtime passes one per attempt
+ * for RunBudget::max_node_retries and reports used() as
+ * ProgramUsage::node_retries. A resumed attempt is not a retry and takes
+ * nothing.
+ */
+class NodeRetryCeiling {
+public:
+    explicit NodeRetryCeiling(std::uint64_t limit) noexcept : limit_(limit) {}
+    NodeRetryCeiling(const NodeRetryCeiling&) = delete;
+    NodeRetryCeiling& operator=(const NodeRetryCeiling&) = delete;
+
+    /// Take one retry. False, and nothing taken, when the ceiling is reached.
+    bool try_take() noexcept {
+        auto used = used_.load(std::memory_order_relaxed);
+        while (used < limit_) {
+            if (used_.compare_exchange_weak(used, used + 1, std::memory_order_acq_rel,
+                                            std::memory_order_relaxed))
+                return true;
+        }
+        return false;
+    }
+    std::uint64_t used() const noexcept { return used_.load(std::memory_order_acquire); }
+    std::uint64_t limit() const noexcept { return limit_; }
+
+private:
+    std::uint64_t              limit_;
+    std::atomic<std::uint64_t> used_{0};
+};
+
+/**
  * @brief Optional per-run metadata without changing the stable RunConfig ABI.
  *
  * The engine copies this metadata into RunContext and preserves it through
@@ -292,6 +339,9 @@ struct RunMetadata {
     /// thread should run elsewhere; the Python binding does. Copied into
     /// RunContext::shared_scheduler.
     bool shared_scheduler = false;
+    /// #364: the run-level retry ceiling; null means none. Subgraphs share
+    /// their parent's.
+    std::shared_ptr<NodeRetryCeiling> node_retry_ceiling;
 };
 
 /// @brief Normal, paused, or step-limited outcome of a successful run call.
@@ -303,6 +353,9 @@ enum class RunStatus {
     /// Nothing was ready, __end__ was never reached, and a barrier still held
     /// partial signals: the join can no longer fire (issue #357).
     BarrierStalled,
+    /// A failure-exit node completed (#364): the run ended as failed with the
+    /// node's declared code, at output["_neograph"]["failure_exit"].
+    FailureExit,
 };
 
 /**
@@ -381,11 +434,21 @@ struct RunResult {
         return metadata.is_object() && metadata.contains("barrier_stalled");
     }
 
+    /// True when a failure-exit node completed (#364). The node and its
+    /// declared code are at output["_neograph"]["failure_exit"] as
+    /// {"node", "code"}; the code is NG.Aborted when the node declares none.
+    inline bool failure_exited() const noexcept {
+        if (!output.is_object()) return false;
+        const auto metadata = output["_neograph"];
+        return metadata.is_object() && metadata.contains("failure_exit");
+    }
+
     /// @brief Return a typed outcome without changing the legacy result layout.
     RunStatus status() const noexcept {
         if (interrupted) return RunStatus::Interrupted;
         if (safe_point_reached()) return RunStatus::SafePoint;
         if (max_steps_exhausted()) return RunStatus::StepLimit;
+        if (failure_exited()) return RunStatus::FailureExit;
         if (barrier_stalled()) return RunStatus::BarrierStalled;
         return RunStatus::Completed;
     }
@@ -970,11 +1033,27 @@ public:
 
     /**
      * @brief Set a retry policy for a specific node (overrides default).
+     *
+     * The timing a node runs with is resolved per field (#364): the default
+     * (set_retry_policy / EngineConfig::retry_policy, else the definition's
+     * retry_policy, else RetryPolicy{}), then the fields of the definition's
+     * per-node policy (node_retry_policies). For a node without such a
+     * policy, this host policy replaces the result, as before. For a node
+     * with one, the host may only tighten: max_retries takes the minimum,
+     * the delays and the multiplier the maximum, and jitter_pct is the
+     * host's; max_retries never exceeds 10 for such a node.
+     *
      * @param node_name Name of the node.
      * @param policy Retry policy for this specific node.
      * @throws std::invalid_argument if the graph has no node named node_name.
      */
     void set_node_retry_policy(const std::string& node_name, const RetryPolicy& policy);
+
+    /// The retry timing `node_name` runs with after the per-field resolution
+    /// described at set_node_retry_policy().
+    RetryPolicy resolved_retry_policy(const std::string& node_name) const {
+        return get_retry_policy(node_name);
+    }
 
     /**
      * @brief Resize (or install) the engine-owned worker pool for
@@ -1216,6 +1295,12 @@ private:
     // Retry policies
     RetryPolicy default_retry_policy_;
     std::map<std::string, RetryPolicy> node_retry_policies_;
+    /// #364: the definition's per-node retry policies (node_retry_policies).
+    /// A host per-node policy may only tighten the timing of these nodes.
+    std::map<std::string, NodeRetryPolicySpec> sealed_retry_policies_;
+    /// #364: failure edges, failure exits and per-node failure policy. Never
+    /// null after link; shared with the executor.
+    std::shared_ptr<const detail::FailureRouting> failure_routing_;
 
     /// Optional fan-out worker pool. Null by default; populated only
     /// when set_worker_count() is called. When present,

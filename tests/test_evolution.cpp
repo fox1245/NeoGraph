@@ -207,6 +207,20 @@ TEST(Evolution, EvaluateRunsAndComparesDeclaredOutputChannels) {
     EXPECT_NE(incorrect.summary.find("result"), std::string::npos);
 }
 
+TEST(Evolution, AFailureExitIsNotACorrectCandidate) {
+    // #364: the channels match, but the run ended at a failure exit.
+    evaluation_node_registered();
+    NodeContext ctx;
+    Task task = evaluation_task();
+    json aborted = evaluation_core("copy");
+    aborted["failure_exits"] = {{"candidate", {{"code", "plan.abort"}}}};
+
+    auto score = evaluate(aborted, task, ctx);
+    EXPECT_TRUE(score.executed);
+    EXPECT_FALSE(score.correct);
+    EXPECT_NE(score.summary.find("failure exit 'candidate'"), std::string::npos) << score.summary;
+}
+
 TEST(Evolution, ExpectedSuperStepsContributeToCorrectCandidateCost) {
     evaluation_node_registered();
     NodeContext ctx;

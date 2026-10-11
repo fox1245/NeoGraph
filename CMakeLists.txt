@@ -486,6 +486,7 @@ set(NEOGRAPH_CORE_SOURCES
     src/core/graph_node.cpp
     src/core/tool_dispatch.cpp
     src/core/tool_failure.cpp
+    src/core/failure_routing.cpp
     src/core/text_safety.cpp
     src/core/graph_loader.cpp
     src/core/graph_checkpoint.cpp

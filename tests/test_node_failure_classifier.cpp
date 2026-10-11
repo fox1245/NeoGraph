@@ -84,6 +84,11 @@ struct UnrelatedException : std::exception {
     const char* what() const noexcept override { return "outside every known family"; }
 };
 
+// A configuration verdict, like program::ProgramDiagnosticError (#364).
+struct DiagnosticFailure : std::runtime_error, ConfigurationFailure {
+    using std::runtime_error::runtime_error;
+};
+
 struct Row {
     const char* name;
     std::function<std::exception_ptr()> error;
@@ -219,6 +224,30 @@ std::vector<Row> table() {
              return in_subgraph(provider(sp::ErrorKind::Overloaded));
          },
          Class::ProviderFailed, "NG.ProviderFailed", false, true},
+        // ── Configuration verdicts (a ConfigurationFailure, #364) ────────
+        {"configuration failure", [] { return make(DiagnosticFailure("P_START_BUDGET")); },
+         Class::ConfigError, "NG.ConfigError", false, false},
+        {"configuration failure inside a subgraph", [] {
+             return in_subgraph(in_subgraph(make(DiagnosticFailure("P_CHILD_BUDGET")), "leaf"));
+         },
+         Class::ConfigError, "NG.ConfigError", false, false},
+        {"configuration failure behind std::nested_exception", [] {
+             return nested(make(DiagnosticFailure("P_RUNTIME_PLAN")), "wrapper");
+         },
+         Class::ConfigError, "NG.ConfigError", false, false},
+        {"configuration failure that nests an author code", [] {
+             try {
+                 try {
+                     throw NodeFailureError("app.inner");
+                 } catch (...) {
+                     std::throw_with_nested(DiagnosticFailure("P_RUNTIME_PLAN"));
+                 }
+             } catch (...) {
+                 return std::current_exception();
+             }
+             return std::exception_ptr{};
+         },
+         Class::ConfigError, "NG.ConfigError", false, false},
     };
 }
 
@@ -445,8 +474,8 @@ TEST(NodeFailureRetry, NonRetryableAuthorCodeRunsOnce) {
 // Retry audit: what the loop did on a84bced next to the classifier's decision.
 
 TEST(NodeFailureRetry, AuditRuntimeErrorFamilyStillRetried) {
-    // Unchanged: runtime_error and its family (including Program diagnostics,
-    // which Core sees as runtime_error) are ordinary.
+    // Unchanged: runtime_error and its family are ordinary. (A Program
+    // diagnostic is not: it carries the ConfigurationFailure marker, #364.)
     struct DiagnosticLike : std::runtime_error { using std::runtime_error::runtime_error; };
     Harness h(throws(DiagnosticLike("P_RUNTIME_SOMETHING")));
     (void)h.run();
@@ -551,4 +580,14 @@ TEST(NodeFailureRetry, AuditUnchangedNonRetryableFamilies) {
         EXPECT_THROW(std::rethrow_exception(oom.run()), std::bad_alloc);
         EXPECT_EQ(oom.node->calls.load(), 1);
     }
+}
+
+TEST(NodeFailureRetry, AConfigurationVerdictRunsOnceAndIsNotRoutable) {
+    Harness h(throws(DiagnosticFailure("P_START_BUDGET")));
+    const auto record = record_of(h.run());
+    EXPECT_EQ(h.node->calls.load(), 1);
+    ASSERT_TRUE(record);
+    EXPECT_EQ(record->code, "NG.ConfigError");
+    EXPECT_EQ(record->kind, NodeFailureKind::NonRetryable);
+    EXPECT_FALSE(record->routable);
 }

@@ -43,6 +43,8 @@ struct Graph {
     std::vector<Route>         routes;
     int                        ender = -1;  // node that may return Command.goto(__end__)
     std::vector<std::uint32_t> slots;       // join wait_for: one alternative mask per slot
+    int                        failer      = -1;  // node that may fail (#364)
+    int                        fail_target = -1;  // its failure edge's target
 
     int           join() const { return n - 1; }
     std::uint32_t members() const {
@@ -85,6 +87,7 @@ inline json definition(const Graph& graph, int schema_version, bool engine) {
     if (engine) {
         channels["events"] = json{{"reducer", "append"}, {"initial", json::array()}};
         channels["script"] = json{{"reducer", "overwrite"}, {"initial", json::object()}};
+        channels["failures"] = json{{"reducer", "append"}, {"initial", json::array()}};
     }
     json nodes      = json::object();
     json edges      = json::array({json{{"from", "__start__"}, {"to", node_name(0)}}});
@@ -113,6 +116,13 @@ inline json definition(const Graph& graph, int schema_version, bool engine) {
                 {"edges", std::move(edges)},
                 {"conditional_edges", std::move(conditions)}};
     if (schema_version > 0) result["schema_version"] = schema_version;
+    if (graph.failer >= 0) {
+        // Engine runs record failures in "failures"; the step and node of a
+        // record are how the harness sees a failed node's super-step.
+        json failure_edge{{"from", node_name(graph.failer)}, {"to", node_name(graph.fail_target)}};
+        if (engine) failure_edge["error_channel"] = "failures";
+        result["failure_edges"] = json::array({std::move(failure_edge)});
+    }
     return result;
 }
 
@@ -123,10 +133,12 @@ inline std::string describe(const Graph& graph) { return definition(graph, 1, fa
 // ---------------------------------------------------------------------------
 
 /// One super-step's decisions: bit u of label_b sends conditional node u along
-/// label "b" (else "a"); bit u of end makes node u return Command.goto(__end__).
+/// label "b" (else "a"); bit u of end makes node u return Command.goto(__end__);
+/// bit u of fail makes node u fail along its failure edge (#364).
 struct Choice {
     std::uint32_t label_b = 0;
     std::uint32_t end     = 0;
+    std::uint32_t fail    = 0;
 };
 
 struct Step {
@@ -149,6 +161,10 @@ inline Step reference_step(const Graph& graph, std::uint32_t ready, std::uint32_
     std::uint32_t to_join = 0;
     for (int u = 0; u < graph.n; ++u) {
         if (!(ready & bit(u))) continue;
+        if (choice.fail & bit(u)) {  // rule 6: only the failure route
+            out.ready |= bit(graph.fail_target);
+            continue;
+        }
         const auto& route = graph.routes[u];
         if (route.conditional) {
             const int target = route.targets[(choice.label_b >> u) & 1U];
@@ -209,14 +225,21 @@ inline Outcome quiescent_outcome(const Step& last) {
 
 template <class Fn>
 inline void for_each_choice(const Graph& graph, std::uint32_t ready, Fn&& visit) {
-    const std::uint32_t labels = ready & graph.conditional_nodes();
-    const std::uint32_t enders = graph.ender >= 0 ? ready & bit(graph.ender) : 0;
-    // Enumerate every submask of each decision set.
+    const std::uint32_t labels  = ready & graph.conditional_nodes();
+    const std::uint32_t enders  = graph.ender >= 0 ? ready & bit(graph.ender) : 0;
+    const std::uint32_t failers = graph.failer >= 0 ? ready & bit(graph.failer) : 0;
+    // Enumerate every submask of each decision set. A failing node returns
+    // nothing, so it neither ends the run nor picks a label.
     std::uint32_t label = labels;
     while (true) {
         std::uint32_t end = enders;
         while (true) {
-            visit(Choice{label, end});
+            std::uint32_t fail = failers;
+            while (true) {
+                if (!(fail & (end | label))) visit(Choice{label, end, fail});
+                if (fail == 0) break;
+                fail = (fail - 1) & failers;
+            }
             if (end == 0) break;
             end = (end - 1) & enders;
         }
@@ -238,6 +261,12 @@ struct Bounds {
     bool        enders           = true;
     int         engine_max_nodes = 3;
     int         max_steps        = 8;
+    /// #364: also enumerate one failing node with a failure edge. Off unless
+    /// a test asks for it (the join harness does).
+    bool        failers          = false;
+    /// Graphs above this size combine a failure edge with a Command.goto
+    /// ender only in the extended bound; smaller ones always do.
+    int         failers_with_enders_max_nodes = 3;
 };
 
 inline int env_int(const char* name, int fallback) {
@@ -253,6 +282,7 @@ inline Bounds bounds() {
         result.max_nodes        = 5;
         result.engine_max_nodes = 4;
         result.max_steps        = 10;
+        result.failers_with_enders_max_nodes = 4;
     } else {
         result.name = "ci";
     }
@@ -352,7 +382,23 @@ inline void for_each_graph(const Bounds& limits, Fn&& visit) {
                         graph.slots = std::move(slots);
                         for (int ender = -1; ender < (limits.enders ? n : 0); ++ender) {
                             graph.ender = ender;
+                            // #364: no failure edge, or one valid failure edge.
+                            graph.failer = graph.fail_target = -1;
                             visit(static_cast<const Graph&>(graph));
+                            if (!limits.failers ||
+                                (ender >= 0 && n > limits.failers_with_enders_max_nodes))
+                                continue;
+                            for (int failer = 0; failer < n; ++failer) {
+                                for (int target = 0; target < n; ++target) {
+                                    if (target == failer || target == graph.join() ||
+                                        graph.routes[target].targets.empty())
+                                        continue;
+                                    graph.failer      = failer;
+                                    graph.fail_target = target;
+                                    visit(static_cast<const Graph&>(graph));
+                                }
+                            }
+                            graph.failer = graph.fail_target = -1;
                         }
                     });
                 }

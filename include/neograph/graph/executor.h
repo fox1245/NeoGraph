@@ -75,6 +75,8 @@ namespace detail {
 /// retry loop needs to give every attempt its own effect namespace and to
 /// record that an attempt started. Defined in graph_executor.cpp.
 struct InvocationSlot;
+/// #364 failure routing of one linked engine. Defined in failure_routing.h.
+struct FailureRouting;
 }  // namespace detail
 
 /**
@@ -228,6 +230,22 @@ public:
 private:
     friend class GraphEngine;
 
+    /// run_sends_async, also reporting which Sends failed as handled (#364):
+    /// `failure_records[i]` is the failure record when Send i routes along
+    /// its failure edge, and null otherwise.
+    asio::awaitable<std::vector<StepRouting>> run_sends_impl_async(
+        const std::vector<Send>& sends,
+        int step,
+        GraphState& state,
+        const std::unordered_map<std::string, NodeResult>& replay,
+        CheckpointCoordinator& coord,
+        const std::string& parent_cp_id,
+        std::vector<std::string>& trace,
+        const GraphStreamCallback& cb,
+        StreamMode stream_mode,
+        const RunContext& ctx,
+        std::vector<json>* failure_records);
+
     /// The retry loop. With a slot, every attempt runs under its own
     /// invocation scope and effect namespace and attempt k >= 1 first records
     /// that it started; without one, `ctx` is used as given.
@@ -265,6 +283,9 @@ private:
     asio::thread_pool* fan_out_pool_ = nullptr;
     NodeCache*         node_cache_   = nullptr;
     mutable std::atomic<bool> warned_serial_fanout_{false};
+    /// #364: the engine's failure routing; null for an executor built
+    /// outside an engine. Owned by the engine, which outlives this executor.
+    const detail::FailureRouting* failure_routing_ = nullptr;
 };
 
 } // namespace neograph::graph

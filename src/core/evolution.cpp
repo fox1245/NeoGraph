@@ -310,6 +310,13 @@ Score evaluate_impl(const json& core, const Task& task, const NodeContext& ctx,
         score.summary = "execution stalled at a barrier that can no longer fire";
         return score;
     }
+    if (result.status() == RunStatus::FailureExit) {
+        // #364: an abort is a failed run, whatever the channels hold.
+        const json& output = result.output;
+        score.summary = "execution ended at failure exit '" +
+                        output["_neograph"]["failure_exit"].value("node", std::string()) + "'";
+        return score;
+    }
     if (result.status() == RunStatus::Interrupted) {
         score.summary = "execution interrupted at node '" +
                         result.interrupt_node + "'";

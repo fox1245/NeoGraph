@@ -9,6 +9,7 @@
 #pragma once
 
 #include <neograph/api.h>
+#include <neograph/graph/configuration_failure.h>
 #include <neograph/provider.h>
 #include <neograph/tool.h>
 #include <neograph/tool_set.h>
@@ -318,11 +319,17 @@ enum class NodeFailureClass : std::uint8_t {
 /// Why the executor stopped trying a failed node.
 enum class NodeFailureKind : std::uint8_t {
     Exhausted,        ///< Retryable, but every allowed attempt failed.
-    NonRetryable,     ///< The failure's class or author hint rules out a retry.
+    /// The failure's class, the author's hint or the node's `non_retryable`
+    /// codes rule out a retry.
+    NonRetryable,
     EffectCommitted,  ///< The final attempt committed a non-idempotent effect.
     Deadline,         ///< Reserved: a retry would cross the run deadline.
-    Ceiling,          ///< Reserved: the run-level retry ceiling was reached.
-    VisitLimit,       ///< Reserved: the node's visit limit was reached.
+    /// The run-level retry ceiling (Program RunBudget::max_node_retries) was
+    /// reached before a retry.
+    Ceiling,
+    /// The node was activated once more than its `max_visits`; it did not run
+    /// (code NG.VisitLimit, 0 attempts).
+    VisitLimit,
 };
 
 /// The stable code of a class: "NG.TaskFailed", "NG.LogicError", ...
@@ -426,6 +433,27 @@ private:
 NEOGRAPH_API const NodeFailure* node_failure_of(const NodeExecutionError& error) noexcept;
 /// Same for a captured exception: empty unless it is such a NodeExecutionError.
 NEOGRAPH_API std::optional<NodeFailure> node_failure_of(const std::exception_ptr& error);
+
+/**
+ * @brief Decides the free text a failure record may carry (#364).
+ *
+ * A node whose retry policy sets `error_text: true` asks for free text in the
+ * failure record its failure route writes. The text comes only from typed
+ * safe sources (NodeFailure::public_message: NodeFailureError, a Python
+ * exception's `public_message` attribute), never from what(). The host's
+ * redactor receives the whole record and returns the text to keep; an empty
+ * string keeps none, and without a redactor no text is written. The engine
+ * then strips C0, bidirectional, zero-width and tag characters and truncates
+ * the result to 512 bytes on a UTF-8 boundary. It runs on the executor, once
+ * per handled failure, possibly from parallel branches at the same time, so it
+ * must be thread-safe; a redactor that throws keeps no text.
+ */
+using FailureTextRedactor = std::function<std::string(const NodeFailure& failure)>;
+
+/// NG.VisitLimit: the code of a node activated once more than its max_visits.
+inline constexpr const char* kVisitLimitCode = "NG.VisitLimit";
+/// NG.Aborted: the code of a failure exit that declares none.
+inline constexpr const char* kAbortedCode = "NG.Aborted";
 
 /**
  * @brief Dynamic fan-out request (map-reduce pattern).

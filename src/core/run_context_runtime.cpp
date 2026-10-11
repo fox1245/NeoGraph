@@ -2,6 +2,7 @@
 
 #include "channel_write_codec.h"
 #include "managed_budget_journal.h"
+#include "failure_routing.h"
 
 #include <neograph/tool_effect_broker.h>
 
@@ -238,6 +239,12 @@ json checkpoint_metadata_for(const RunContext& context) {
         if (!runtime->subgraph_write_journal->parent_call_id.empty())
             metadata[kMetadataNamespace]["subgraph_parent_call_id"] =
                 runtime->subgraph_write_journal->parent_call_id;
+    }
+    // #364: a checkpoint saved during a step (a NodeInterrupt) resumes that
+    // step, so it keeps the visit counters from before the step.
+    if (runtime->failure_state) {
+        auto visits = runtime->failure_state->step_start_visits();
+        if (!visits.is_null()) metadata[kMetadataNamespace]["node_visits"] = std::move(visits);
     }
     return metadata;
 }
