@@ -1,0 +1,1472 @@
+{
+  "compiler_build_id": "neograph-identity-corpus/v1",
+  "entries": [
+    {
+      "all_platforms": {
+        "canonical_program_hash": "sha256:3a26ce6df12fcba76fe2e76f78905dae723a873d0eeb272e4f2a4358e2cdad22",
+        "compiled_plan_identity": "sha256:e0f6884224d33dd8ded62a6d06e35d80dabd605c7f806ed309ebebed0f9480e3",
+        "control_source": false,
+        "definition_hash": "sha256:45e0bb195b718d07ed938b1a27c6e870f1f2720b5e751fff870c685b989f8e6a",
+        "definition_name": "capability",
+        "sealed_diagnostics": [
+          {
+            "code": "P_CORE_E6",
+            "json_pointer": ""
+          }
+        ]
+      },
+      "definition": {
+        "channels": {
+          "value": {
+            "initial": 0,
+            "reducer": "probe.overwrite"
+          }
+        },
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "input"
+          },
+          {
+            "from": "input",
+            "to": "transform"
+          },
+          {
+            "from": "transform",
+            "to": "output"
+          },
+          {
+            "from": "output",
+            "to": "__end__"
+          }
+        ],
+        "name": "capability",
+        "nodes": {
+          "input": {
+            "stage": "input",
+            "type": "probe.node"
+          },
+          "output": {
+            "stage": "output",
+            "type": "probe.node"
+          },
+          "transform": {
+            "stage": "transform",
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "dsl.graph_basics",
+      "posix_quickjs": {
+        "bundle_id": "sha256:ea117e852f0d545c8b2fce1b28c54a4e62ab1e0664ccf21fb5c5b3d39b71edca",
+        "source_hash": "sha256:0c4c303c2b9b115aa5c9c2093a076e86fe9d0d189b33260c9c65267e77ef18a0"
+      }
+    },
+    {
+      "all_platforms": {
+        "canonical_program_hash": "sha256:d501f60b1145d32d9671b6d54dd1c9ec42e8812124a62ed38fe2429d638711ea",
+        "compiled_plan_identity": "sha256:d8a9a3e69af777553203d618b5bd6e85744ab746340faa4c0b2d3eb219617c9e",
+        "control_source": false,
+        "definition_hash": "sha256:018863e53570860cffebed83ddaa8ce493a21176df0db86f08f0dbdc1075ba76",
+        "definition_name": "capability",
+        "sealed_diagnostics": []
+      },
+      "definition": {
+        "conditional_edges": [
+          {
+            "condition": "probe.route",
+            "from": "router",
+            "routes": {
+              "left": "left",
+              "right": "right"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "router"
+          },
+          {
+            "from": "left",
+            "to": "__end__"
+          },
+          {
+            "from": "right",
+            "to": "__end__"
+          }
+        ],
+        "name": "capability",
+        "nodes": {
+          "left": {
+            "type": "probe.node"
+          },
+          "right": {
+            "type": "probe.node"
+          },
+          "router": {
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "dsl.graph_routing",
+      "posix_quickjs": {
+        "bundle_id": "sha256:3534ec5482f42c7cea367e03d2900b558e5992e0e61cf3f86c41226af9821cea",
+        "source_hash": "sha256:2dc758e99797ddc9ffde2898a02a78f7c151540807323aa9de9a3044b163e536"
+      }
+    },
+    {
+      "all_platforms": {
+        "canonical_program_hash": "sha256:c118c9303c63e65920243e06fac7b27195c22ff75197e7e915587eac261a3cbf",
+        "compiled_plan_identity": "sha256:8f5c5cd0c3ca400daad42ecb355650d268c9fabfe184d53fa7bdec61dcf57690",
+        "control_source": false,
+        "definition_hash": "sha256:63c060bbfb1a9ec42a189e362e8dfc8614a2a9bc2f8170ea3ed245e013d42984",
+        "definition_name": "capability",
+        "sealed_diagnostics": []
+      },
+      "definition": {
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "split"
+          },
+          {
+            "from": "split",
+            "to": "left"
+          },
+          {
+            "from": "split",
+            "to": "right"
+          },
+          {
+            "from": "left",
+            "to": "join"
+          },
+          {
+            "from": "right",
+            "to": "join"
+          },
+          {
+            "from": "join",
+            "to": "__end__"
+          }
+        ],
+        "name": "capability",
+        "nodes": {
+          "join": {
+            "barrier": {
+              "wait_for": [
+                "left",
+                "right"
+              ]
+            },
+            "type": "probe.node"
+          },
+          "left": {
+            "type": "probe.node"
+          },
+          "right": {
+            "type": "probe.node"
+          },
+          "split": {
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "dsl.graph_fanout_barrier",
+      "posix_quickjs": {
+        "bundle_id": "sha256:89315fabc5af2e0bb167725e4a0bdcae7273af91c00cdc9799691cae2bc1ae70",
+        "source_hash": "sha256:8ba4fbd1140259c692c1a967c583bfe3f55e035ee92e2e5ff6a41ad350b333dd"
+      }
+    },
+    {
+      "all_platforms": {
+        "canonical_program_hash": "sha256:877b948785c284371466e5da35e9fd57d2cf5e65359533e2fae3b53e8480ee8f",
+        "compiled_plan_identity": "sha256:851800604f51fcf601cb4467fa180c89520d41c3f071d1b76401ab634f40a717",
+        "control_source": false,
+        "definition_hash": "sha256:fc2e68d242b67646b30761311134fac0680e997fa56e9c0408cd27a5a8f53065",
+        "definition_name": "capability",
+        "sealed_diagnostics": []
+      },
+      "definition": {
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "work"
+          },
+          {
+            "from": "work",
+            "to": "__end__"
+          }
+        ],
+        "interrupt_after": [
+          "work"
+        ],
+        "interrupt_before": [
+          "work"
+        ],
+        "name": "capability",
+        "nodes": {
+          "work": {
+            "type": "probe.node"
+          }
+        },
+        "retry_policy": {
+          "backoff_multiplier": 2,
+          "initial_delay_ms": 10,
+          "max_delay_ms": 100,
+          "max_retries": 2
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "dsl.graph_hitl_retry",
+      "posix_quickjs": {
+        "bundle_id": "sha256:c3c53d02fa7adb81849bca30c423f28057e93b6e487dd0bfa5f994557caf11c9",
+        "source_hash": "sha256:8c0ffb3c2feb4c3bf952e2a421e1cb04efe31c3ff807a75bf177be4f55209fd0"
+      }
+    },
+    {
+      "all_platforms": {
+        "canonical_program_hash": "sha256:62c2605c5aaff91481113f75f73a9ebc38faabc193fb62c154a07c005fd3a794",
+        "compiled_plan_identity": "sha256:2935efa9cd5d8b951187749158072e22956b07b630d97678ad8a2bc892c7feb1",
+        "control_source": false,
+        "definition_hash": "sha256:1888428b071b60351f28b614a7333e4894856c7cafab42deb0337c5d978cbebf",
+        "definition_name": "capability",
+        "sealed_diagnostics": []
+      },
+      "definition": {
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "dispatch"
+          },
+          {
+            "from": "dispatch",
+            "to": "approval"
+          },
+          {
+            "from": "approval",
+            "to": "__end__"
+          }
+        ],
+        "name": "capability",
+        "nodes": {
+          "approval": {
+            "type": "probe.dynamic-interrupt"
+          },
+          "dispatch": {
+            "type": "probe.dynamic-send"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "dsl.registry_mediated",
+      "posix_quickjs": {
+        "bundle_id": "sha256:cf9233db0059602c3db04ed7f16f18fdc46000bfcf67631be6f0f9c861a5b2d2",
+        "source_hash": "sha256:c0d3cf817b422df82a2bb6c858c02d7c281ba98dbfef9304613404f53a07fde4"
+      }
+    },
+    {
+      "all_platforms": {
+        "compiled_plan_identity": "sha256:4b22afc99077b9bce213e62a113ce9eec0b0e82232624c58bc970045fee7dd50",
+        "control_source": true,
+        "definition_hash": "sha256:8d9cb62a6497735025f52672df7f85648cdb8532d1cfda1f9f36bfb19778e105",
+        "definition_name": "capability",
+        "sealed_diagnostics": []
+      },
+      "definition": {
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "work"
+          },
+          {
+            "from": "work",
+            "to": "__end__"
+          }
+        ],
+        "name": "capability",
+        "nodes": {
+          "work": {
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "dsl.program_control_flow",
+      "posix_quickjs": {
+        "bundle_id": "sha256:88f1a4563755ea6a713a58689e8a22fc81b7a0ee69e543e06a24712fa4f674ff",
+        "canonical_program_hash": "sha256:6c78ec843438f4cea230c5606287ba2371960ed8261d6fcd7befbdffa45f8e29",
+        "source_hash": "sha256:e082c7b74b5893dbf1e967ec3b6fd6d1ab87a2c8bd4331ba15ce31e8ebb5db56"
+      }
+    },
+    {
+      "all_platforms": {
+        "compiled_plan_identity": "sha256:4b22afc99077b9bce213e62a113ce9eec0b0e82232624c58bc970045fee7dd50",
+        "control_source": true,
+        "definition_hash": "sha256:8d9cb62a6497735025f52672df7f85648cdb8532d1cfda1f9f36bfb19778e105",
+        "definition_name": "capability",
+        "sealed_diagnostics": []
+      },
+      "definition": {
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "work"
+          },
+          {
+            "from": "work",
+            "to": "__end__"
+          }
+        ],
+        "name": "capability",
+        "nodes": {
+          "work": {
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "dsl.program_map",
+      "posix_quickjs": {
+        "bundle_id": "sha256:987c0c553da09813f5254bfb898214f43df8af8a676c01d3aa2be9fefc20c310",
+        "canonical_program_hash": "sha256:6c78ec843438f4cea230c5606287ba2371960ed8261d6fcd7befbdffa45f8e29",
+        "source_hash": "sha256:87d5180c0d76bfa187772ccf932fe1da0e3283dc3902fb6851e4ea73592be57e"
+      }
+    },
+    {
+      "all_platforms": {
+        "compiled_plan_identity": "sha256:4b22afc99077b9bce213e62a113ce9eec0b0e82232624c58bc970045fee7dd50",
+        "control_source": true,
+        "definition_hash": "sha256:8d9cb62a6497735025f52672df7f85648cdb8532d1cfda1f9f36bfb19778e105",
+        "definition_name": "capability",
+        "sealed_diagnostics": []
+      },
+      "definition": {
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "work"
+          },
+          {
+            "from": "work",
+            "to": "__end__"
+          }
+        ],
+        "name": "capability",
+        "nodes": {
+          "work": {
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "dsl.program_structured_concurrency",
+      "posix_quickjs": {
+        "bundle_id": "sha256:4ee76670f161a46d37ebea457dfe9032343a5683d947c9ec09b686233e920b93",
+        "canonical_program_hash": "sha256:6c78ec843438f4cea230c5606287ba2371960ed8261d6fcd7befbdffa45f8e29",
+        "source_hash": "sha256:b99743163d5b552a3d41087aca259e7ec51d9ba955992eb72d2b81d39bfd0598"
+      }
+    },
+    {
+      "all_platforms": {
+        "compiled_plan_identity": "sha256:4b22afc99077b9bce213e62a113ce9eec0b0e82232624c58bc970045fee7dd50",
+        "control_source": true,
+        "definition_hash": "sha256:8d9cb62a6497735025f52672df7f85648cdb8532d1cfda1f9f36bfb19778e105",
+        "definition_name": "capability",
+        "sealed_diagnostics": []
+      },
+      "definition": {
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "work"
+          },
+          {
+            "from": "work",
+            "to": "__end__"
+          }
+        ],
+        "name": "capability",
+        "nodes": {
+          "work": {
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "dsl.program_spawn_await",
+      "posix_quickjs": {
+        "bundle_id": "sha256:a61851d964321a07719d745c67fee02d8633d8f6c7226fc0f98bef763502355c",
+        "canonical_program_hash": "sha256:6c78ec843438f4cea230c5606287ba2371960ed8261d6fcd7befbdffa45f8e29",
+        "source_hash": "sha256:6b3d6f1ae300deb49dd49b22d7e89c08a8b68da52507cfa53544162df3e834ca"
+      }
+    },
+    {
+      "all_platforms": {
+        "compiled_plan_identity": "sha256:4b22afc99077b9bce213e62a113ce9eec0b0e82232624c58bc970045fee7dd50",
+        "control_source": true,
+        "definition_hash": "sha256:8d9cb62a6497735025f52672df7f85648cdb8532d1cfda1f9f36bfb19778e105",
+        "definition_name": "capability",
+        "sealed_diagnostics": []
+      },
+      "definition": {
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "work"
+          },
+          {
+            "from": "work",
+            "to": "__end__"
+          }
+        ],
+        "name": "capability",
+        "nodes": {
+          "work": {
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "dsl.program_durability",
+      "posix_quickjs": {
+        "bundle_id": "sha256:be666b3436842380a9f1b079118eed6d47b402e003308fbaff9a313e5621836a",
+        "canonical_program_hash": "sha256:6c78ec843438f4cea230c5606287ba2371960ed8261d6fcd7befbdffa45f8e29",
+        "source_hash": "sha256:567ffd1d357cf4995e8f7ffb4441807af6f58dc193c2d506829811a1704c1dfc"
+      }
+    },
+    {
+      "all_platforms": {
+        "compiled_plan_identity": "sha256:4b22afc99077b9bce213e62a113ce9eec0b0e82232624c58bc970045fee7dd50",
+        "control_source": true,
+        "definition_hash": "sha256:8d9cb62a6497735025f52672df7f85648cdb8532d1cfda1f9f36bfb19778e105",
+        "definition_name": "capability",
+        "sealed_diagnostics": []
+      },
+      "definition": {
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "work"
+          },
+          {
+            "from": "work",
+            "to": "__end__"
+          }
+        ],
+        "name": "capability",
+        "nodes": {
+          "work": {
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "dsl.program_host_capability",
+      "posix_quickjs": {
+        "bundle_id": "sha256:badee7223cecc0cce8ed45faac225688b60d73be0faf61f452441fc49b8a4e4d",
+        "canonical_program_hash": "sha256:6c78ec843438f4cea230c5606287ba2371960ed8261d6fcd7befbdffa45f8e29",
+        "source_hash": "sha256:450132b9cabf3690ffbefee0ee47607e4fcfecad9760e03613dc422dd7a6a8c6"
+      }
+    },
+    {
+      "all_platforms": {
+        "canonical_program_hash": "sha256:02ed871bf0acdf16258179358ed88e183d1a21590191d8c63e5392c8cc67220c",
+        "compiled_plan_identity": "sha256:d931f260c5b440521a93edd509ba04b0e261ecde80c0394ea2629be5a4135df4",
+        "control_source": false,
+        "definition_hash": "sha256:1aac6e761c1dbeb160de7c3b9b39153a9f9fc0564bd89dd53a37be51aa4c3046",
+        "definition_name": "plan",
+        "sealed_diagnostics": [
+          {
+            "code": "P_CORE_E6",
+            "json_pointer": ""
+          }
+        ]
+      },
+      "definition": {
+        "channels": {
+          "trace": {
+            "initial": [],
+            "reducer": "append"
+          }
+        },
+        "conditional_edges": [
+          {
+            "condition": "probe.check",
+            "from": "B",
+            "routes": {
+              "fail": "FIX",
+              "pass": "D"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "A"
+          },
+          {
+            "from": "A",
+            "to": "B"
+          },
+          {
+            "from": "A",
+            "to": "C"
+          },
+          {
+            "from": "FIX",
+            "to": "D"
+          },
+          {
+            "from": "C",
+            "to": "D"
+          },
+          {
+            "from": "D",
+            "to": "__end__"
+          }
+        ],
+        "name": "plan",
+        "nodes": {
+          "A": {
+            "type": "probe.node"
+          },
+          "B": {
+            "type": "probe.node"
+          },
+          "C": {
+            "type": "probe.node"
+          },
+          "D": {
+            "barrier": {
+              "wait_for": [
+                "B",
+                "C"
+              ]
+            },
+            "type": "probe.node"
+          },
+          "FIX": {
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "js.barrier_conditional_route",
+      "posix_quickjs": {
+        "bundle_id": "sha256:2118f084e0f291fd2b0a02d6ff80ce193f60dd51516b299b405a5332f626f793",
+        "source_hash": "sha256:4bf65fcda9a94616900681138989aee1fa20c2f6c258c12014fdad3813d9e65a"
+      }
+    },
+    {
+      "all_platforms": {
+        "canonical_program_hash": "sha256:0088fa14f811bfd9ae20d6882d13be4929d57299d4b884b2b7834f466370190b",
+        "compiled_plan_identity": "sha256:5f78ca7c5f95e8b2d9fdff3691df980cd3bdbbfc850ab6a0174620a909bd4964",
+        "control_source": false,
+        "definition_hash": "sha256:4bbdab311956a3f63da74f468e8b6d808850c7780ed37f1f95365953e560e63e",
+        "definition_name": "joins",
+        "sealed_diagnostics": []
+      },
+      "definition": {
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "split"
+          },
+          {
+            "from": "split",
+            "to": "left"
+          },
+          {
+            "from": "split",
+            "to": "middle"
+          },
+          {
+            "from": "split",
+            "to": "right"
+          },
+          {
+            "from": "left",
+            "to": "gate"
+          },
+          {
+            "from": "gate",
+            "to": "join"
+          },
+          {
+            "from": "middle",
+            "to": "join"
+          },
+          {
+            "from": "right",
+            "to": "join"
+          },
+          {
+            "from": "join",
+            "to": "__end__"
+          }
+        ],
+        "name": "joins",
+        "nodes": {
+          "gate": {
+            "barrier": {
+              "wait_for": [
+                "left"
+              ]
+            },
+            "type": "probe.node"
+          },
+          "join": {
+            "barrier": {
+              "wait_for": [
+                "gate",
+                "middle",
+                "right"
+              ]
+            },
+            "type": "probe.node"
+          },
+          "left": {
+            "type": "probe.node"
+          },
+          "middle": {
+            "type": "probe.node"
+          },
+          "right": {
+            "type": "probe.node"
+          },
+          "split": {
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "js.barrier_single_member",
+      "posix_quickjs": {
+        "bundle_id": "sha256:2b79c8f5b262ce9e2485cd74353d360b30d100ae6cb79b11b8dd40f8fad48a95",
+        "source_hash": "sha256:8bea4d3825303cae70f372a3fa253f42b6141e6e4c07475139440abf7768117a"
+      }
+    },
+    {
+      "all_platforms": {
+        "canonical_program_hash": "sha256:a6de6302de28259458c93b739ba03dbd57964459bf02ce998f0be6a4bd00bdf9",
+        "compiled_plan_identity": "sha256:039f95b58b85ca1736e5f26ea36c516f974903e550a1544d5e6a4013346c0f63",
+        "control_source": false,
+        "definition_hash": "sha256:5d8b122954f896e231e31fb3827eecbd7943d015671990adb7e43e1ebbff0516",
+        "definition_name": "unicode",
+        "sealed_diagnostics": []
+      },
+      "definition": {
+        "edges": [
+          {
+            "from": "start",
+            "to": "😀"
+          },
+          {
+            "from": "😀",
+            "to": "join"
+          },
+          {
+            "from": "start",
+            "to": "ｚ"
+          },
+          {
+            "from": "ｚ",
+            "to": "join"
+          },
+          {
+            "from": "start",
+            "to": "é"
+          },
+          {
+            "from": "é",
+            "to": "join"
+          },
+          {
+            "from": "start",
+            "to": "z"
+          },
+          {
+            "from": "z",
+            "to": "join"
+          },
+          {
+            "from": "start",
+            "to": "Z"
+          },
+          {
+            "from": "Z",
+            "to": "join"
+          },
+          {
+            "from": "__start__",
+            "to": "start"
+          },
+          {
+            "from": "join",
+            "to": "__end__"
+          }
+        ],
+        "name": "unicode",
+        "nodes": {
+          "Z": {
+            "label": "Z",
+            "type": "probe.node"
+          },
+          "join": {
+            "barrier": {
+              "wait_for": [
+                "Z",
+                "z",
+                "é",
+                "ｚ",
+                "😀"
+              ]
+            },
+            "type": "probe.node"
+          },
+          "start": {
+            "type": "probe.node"
+          },
+          "z": {
+            "label": "z",
+            "type": "probe.node"
+          },
+          "é": {
+            "label": "é",
+            "type": "probe.node"
+          },
+          "ｚ": {
+            "label": "ｚ",
+            "type": "probe.node"
+          },
+          "😀": {
+            "label": "😀",
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "js.barrier_unicode_order",
+      "posix_quickjs": {
+        "bundle_id": "sha256:d82db101c4edde742593f9c7136229f13e94288fb5a409c8c812c5a488cbf923",
+        "source_hash": "sha256:201125fe8858e38f5872d7fe5958630baf92204a903a993b31c5f6ce689dfd02"
+      }
+    },
+    {
+      "all_platforms": {
+        "canonical_program_hash": "sha256:4b7f7c350169860db3c856834cf30b4e3e1010fde8f31262e75d06477efdd79c",
+        "compiled_plan_identity": "sha256:e9d64be2dd262822c7f9ffb9f52cb3e2cce7f831cf0a31cec4dec4b356f47db8",
+        "control_source": false,
+        "definition_hash": "sha256:979b739ef5e8350552ac775b5bdda3efed3943229909e9ccaa8cda1def64c0cc",
+        "definition_name": "outer",
+        "sealed_diagnostics": [
+          {
+            "code": "P_CORE_E7",
+            "json_pointer": ""
+          },
+          {
+            "code": "P_CORE_E6",
+            "json_pointer": ""
+          },
+          {
+            "code": "P_CORE_E6",
+            "json_pointer": ""
+          },
+          {
+            "code": "P_CORE_E6",
+            "json_pointer": ""
+          },
+          {
+            "code": "P_CORE_E9",
+            "json_pointer": ""
+          }
+        ]
+      },
+      "definition": {
+        "channels": {
+          "results": {
+            "initial": [],
+            "reducer": "append"
+          },
+          "score": {
+            "initial": 0.25,
+            "reducer": "probe.overwrite"
+          },
+          "summary": {
+            "initial": {
+              "count": 0,
+              "ok": true,
+              "tags": [
+                "a",
+                "b"
+              ]
+            },
+            "reducer": "overwrite"
+          }
+        },
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "fanout"
+          },
+          {
+            "from": "fanout",
+            "to": "nested"
+          },
+          {
+            "from": "nested",
+            "to": "review"
+          },
+          {
+            "from": "worker",
+            "to": "review"
+          },
+          {
+            "from": "review",
+            "to": "__end__"
+          }
+        ],
+        "name": "outer",
+        "nodes": {
+          "fanout": {
+            "limit": 3,
+            "targets": [
+              "worker"
+            ],
+            "type": "probe.dynamic-send"
+          },
+          "nested": {
+            "definition": {
+              "channels": {
+                "notes": {
+                  "initial": [],
+                  "reducer": "append"
+                }
+              },
+              "edges": [
+                {
+                  "from": "__start__",
+                  "to": "step"
+                },
+                {
+                  "from": "step",
+                  "to": "__end__"
+                }
+              ],
+              "name": "inner",
+              "nodes": {
+                "step": {
+                  "type": "probe.node"
+                }
+              },
+              "schema_version": 1
+            },
+            "input_map": {
+              "results": "notes"
+            },
+            "output_map": {
+              "notes": "results"
+            },
+            "type": "probe.subgraph"
+          },
+          "review": {
+            "prompt": "approve?",
+            "type": "probe.dynamic-interrupt"
+          },
+          "worker": {
+            "flags": {
+              "strict": true
+            },
+            "type": "probe.node",
+            "weight": 1.5
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "js.send_subgraph_channels",
+      "posix_quickjs": {
+        "bundle_id": "sha256:274fdbead0df546d1d530b0cfb768175ede1126cf0aac55a9bee268d7d5afaa7",
+        "source_hash": "sha256:a4b517e74ceae9b566e85d304adbf33bfa08c41f215f41c4d732df8259bb3088"
+      }
+    },
+    {
+      "all_platforms": {
+        "canonical_program_hash": "sha256:8ce0215223ce3f3d9ae38d4d7a711f7b215db9deb73f5b7a9ec65bb909b342fe",
+        "compiled_plan_identity": "sha256:3fffcfac3adb63478e8115356f13bd9180410a881f56d2a1ffe5326c85b639ae",
+        "control_source": false,
+        "definition_hash": "sha256:c0336a119a8af4ab5caa3eae7fd71c6a8d17af7f5374bb3b2d3bc8d90de50a87",
+        "definition_name": "loop",
+        "sealed_diagnostics": [
+          {
+            "code": "P_CORE_E6",
+            "json_pointer": ""
+          }
+        ]
+      },
+      "definition": {
+        "channels": {
+          "attempts": {
+            "initial": 0,
+            "reducer": "probe.overwrite"
+          }
+        },
+        "conditional_edges": [
+          {
+            "condition": "probe.more",
+            "from": "check",
+            "routes": {
+              "again": "work",
+              "default": "report",
+              "done": "report",
+              "stop": "__end__"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "plan"
+          },
+          {
+            "from": "plan",
+            "to": "work"
+          },
+          {
+            "from": "work",
+            "to": "check"
+          },
+          {
+            "from": "report",
+            "to": "__end__"
+          }
+        ],
+        "interrupt_after": [
+          "check"
+        ],
+        "interrupt_before": [
+          "report",
+          "work"
+        ],
+        "name": "loop",
+        "nodes": {
+          "check": {
+            "type": "probe.node"
+          },
+          "plan": {
+            "type": "probe.node"
+          },
+          "report": {
+            "type": "probe.node"
+          },
+          "work": {
+            "type": "probe.node"
+          }
+        },
+        "retry_policy": {
+          "backoff_multiplier": 1.5,
+          "initial_delay_ms": 25,
+          "max_delay_ms": 400,
+          "max_retries": 3
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "js.retry_interrupts_loop",
+      "posix_quickjs": {
+        "bundle_id": "sha256:ac0f5c4ac809b837af0c5ebf0bd1ebde14b7463ab2293f448fedcaff0cb3030d",
+        "source_hash": "sha256:ece6c4d37f830f36f6d01f0aec7d85c2861f4ab948fc0cf273f1f402231b3518"
+      }
+    },
+    {
+      "all_platforms": {
+        "compiled_plan_identity": "sha256:1ad698f583eb3afca7edd6b00c39231e8c79bb991503be2880f6ca98505e7241",
+        "control_source": true,
+        "definition_hash": "sha256:660ea943272af7058b1b4cd481ff620a42a6f07db9d62cd527d061c223746e38",
+        "definition_name": "review",
+        "sealed_diagnostics": []
+      },
+      "definition": {
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "A"
+          },
+          {
+            "from": "A",
+            "to": "B"
+          },
+          {
+            "from": "A",
+            "to": "C"
+          },
+          {
+            "from": "B",
+            "to": "D"
+          },
+          {
+            "from": "C",
+            "to": "D"
+          },
+          {
+            "from": "D",
+            "to": "__end__"
+          }
+        ],
+        "name": "review",
+        "nodes": {
+          "A": {
+            "type": "probe.node"
+          },
+          "B": {
+            "type": "probe.node"
+          },
+          "C": {
+            "type": "probe.node"
+          },
+          "D": {
+            "barrier": {
+              "wait_for": [
+                "B",
+                "C"
+              ]
+            },
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "javascript",
+      "id": "js.main_branch_loop",
+      "posix_quickjs": {
+        "bundle_id": "sha256:e167da2b0051f52fd16d5a2268c7823f6fd3915a74a3a3b5af2452056c2cb0f4",
+        "canonical_program_hash": "sha256:75bf49e8a0e423711dbab487027bccd3437d028df65be6eb334cbdc415b9050d",
+        "source_hash": "sha256:7eedb7643fe481b0b801ee805d6a458522a9e6a0f24f433ce924829050be8e2e"
+      }
+    },
+    {
+      "all_platforms": {
+        "bundle_id": "sha256:cf8eea44ff062efb23a4d4efdcb90e30465db0d18bc9ed441f3d0fbc4d6bb5cc",
+        "canonical_program_hash": "sha256:5996d155879adeecd35b92ca2d4d2d3819eb6ba36b14a1a73716df8af8a4a8f7",
+        "compiled_plan_identity": "sha256:6a17162a49263d26f86d74710bb70972ae553dcefa2bcece8a8e99bc38336000",
+        "control_source": false,
+        "definition_hash": "sha256:d8240ef6fe908269f2f95f14d145bfa7cf9f345962fb4256596b303d314d4720",
+        "definition_name": "main",
+        "sealed_diagnostics": [
+          {
+            "code": "P_CORE_E6",
+            "json_pointer": "/root/definition/channels/value"
+          }
+        ],
+        "source_hash": "sha256:37387a575ca1b9c530b5c44113db380a596d37505b296924c4fe3954db846dfa"
+      },
+      "definition": {
+        "channels": {
+          "value": {
+            "initial": 0,
+            "reducer": "probe.overwrite"
+          }
+        },
+        "conditional_edges": [
+          {
+            "condition": "probe.route",
+            "from": "work",
+            "routes": {
+              "left": "__end__",
+              "right": "__end__"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "work"
+          }
+        ],
+        "name": "main",
+        "nodes": {
+          "work": {
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "cpp_builder",
+      "id": "cpp.minimal"
+    },
+    {
+      "all_platforms": {
+        "bundle_id": "sha256:a251b8af930a861607fe715a3abde63ca06a450e0147a8414372dfaf542c4cbf",
+        "canonical_program_hash": "sha256:bf17c76af937975085f34e44edebbd60dabde3de2ad98a0506191ddb7c3a7098",
+        "compiled_plan_identity": "sha256:d931f260c5b440521a93edd509ba04b0e261ecde80c0394ea2629be5a4135df4",
+        "control_source": false,
+        "definition_hash": "sha256:1aac6e761c1dbeb160de7c3b9b39153a9f9fc0564bd89dd53a37be51aa4c3046",
+        "definition_name": "plan",
+        "sealed_diagnostics": [
+          {
+            "code": "P_CORE_E6",
+            "json_pointer": "/root/definition/channels/trace"
+          }
+        ],
+        "source_hash": "sha256:d6520422f72b365cea36b0c5cc413eb0bc4dc531e87e17ca99cdf8dee33954d9"
+      },
+      "definition": {
+        "channels": {
+          "trace": {
+            "initial": [],
+            "reducer": "append"
+          }
+        },
+        "conditional_edges": [
+          {
+            "condition": "probe.check",
+            "from": "B",
+            "routes": {
+              "fail": "FIX",
+              "pass": "D"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "A"
+          },
+          {
+            "from": "A",
+            "to": "B"
+          },
+          {
+            "from": "A",
+            "to": "C"
+          },
+          {
+            "from": "FIX",
+            "to": "D"
+          },
+          {
+            "from": "C",
+            "to": "D"
+          },
+          {
+            "from": "D",
+            "to": "__end__"
+          }
+        ],
+        "name": "plan",
+        "nodes": {
+          "A": {
+            "type": "probe.node"
+          },
+          "B": {
+            "type": "probe.node"
+          },
+          "C": {
+            "type": "probe.node"
+          },
+          "D": {
+            "barrier": {
+              "wait_for": [
+                "B",
+                "C"
+              ]
+            },
+            "type": "probe.node"
+          },
+          "FIX": {
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "cpp_builder",
+      "id": "cpp.barrier_conditional_route"
+    },
+    {
+      "all_platforms": {
+        "bundle_id": "sha256:e1ffc12e69ba1138bf7ca54074c196f895d53da0f7f30269a42ef80c51dea1de",
+        "canonical_program_hash": "sha256:f2c518f39bc4698606e9bf4b71573ca6c7fd055c55554de1fb352ce540505255",
+        "compiled_plan_identity": "sha256:13deb821467b184fe41e81b03e7c93ef4a070a2b6f69f90c9dccdd21d90a1ee6",
+        "control_source": false,
+        "definition_hash": "sha256:dc0bc22a9ee0f7c4cc8f7f131ce3e784fa43003006602f9826fad6c9408a92a0",
+        "definition_name": "unicode",
+        "sealed_diagnostics": [],
+        "source_hash": "sha256:f8569fecb9a0b36e1ed4b8ee253497c483447882e2341e9131d1dc519143f7cf"
+      },
+      "definition": {
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "start"
+          },
+          {
+            "from": "start",
+            "to": "😀"
+          },
+          {
+            "from": "start",
+            "to": "ｚ"
+          },
+          {
+            "from": "start",
+            "to": "é"
+          },
+          {
+            "from": "😀",
+            "to": "join"
+          },
+          {
+            "from": "ｚ",
+            "to": "join"
+          },
+          {
+            "from": "é",
+            "to": "join"
+          },
+          {
+            "from": "join",
+            "to": "__end__"
+          }
+        ],
+        "name": "unicode",
+        "nodes": {
+          "join": {
+            "barrier": {
+              "wait_for": [
+                "é",
+                "ｚ",
+                "😀"
+              ]
+            },
+            "type": "probe.node"
+          },
+          "start": {
+            "type": "probe.node"
+          },
+          "é": {
+            "type": "probe.node"
+          },
+          "ｚ": {
+            "type": "probe.node"
+          },
+          "😀": {
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "cpp_builder",
+      "id": "cpp.barrier_unicode_order"
+    },
+    {
+      "all_platforms": {
+        "bundle_id": "sha256:7927af942682a746f3cf59f36beccc33dd59d1d6cb5e839c078acddc9d416165",
+        "canonical_program_hash": "sha256:7f8017976c402098d94ad60521016288dd406854b61575c96de5b1cff5c0d2d7",
+        "compiled_plan_identity": "sha256:a7a34f6e7f6e44d646504dce5b8c5610ee7ab98c1bfef06c35aff44d556e2ca7",
+        "control_source": false,
+        "definition_hash": "sha256:dd5bba331359c24134b66eaf13c4dac3a28c1d5deee2855ec2218f95700f36f0",
+        "definition_name": "outer",
+        "sealed_diagnostics": [
+          {
+            "code": "P_CORE_E7",
+            "json_pointer": "/root/definition"
+          },
+          {
+            "code": "P_CORE_E6",
+            "json_pointer": "/root/definition/channels/results"
+          },
+          {
+            "code": "P_CORE_E6",
+            "json_pointer": "/root/definition/channels/score"
+          },
+          {
+            "code": "P_CORE_E6",
+            "json_pointer": "/root/definition/channels/summary"
+          }
+        ],
+        "source_hash": "sha256:869f97363d28ffd0319e7d31d46169f1f28f8c34d563a5df225d138c3c34cd79"
+      },
+      "definition": {
+        "channels": {
+          "results": {
+            "initial": [],
+            "reducer": "append"
+          },
+          "score": {
+            "initial": 0.5,
+            "reducer": "probe.overwrite"
+          },
+          "summary": {
+            "initial": {
+              "count": 0,
+              "ok": true
+            },
+            "reducer": "overwrite"
+          }
+        },
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "fanout"
+          },
+          {
+            "from": "fanout",
+            "to": "nested"
+          },
+          {
+            "from": "nested",
+            "to": "join"
+          },
+          {
+            "from": "worker",
+            "to": "join"
+          },
+          {
+            "from": "join",
+            "to": "review"
+          },
+          {
+            "from": "review",
+            "to": "__end__"
+          }
+        ],
+        "interrupt_after": [
+          "join",
+          "nested"
+        ],
+        "interrupt_before": [
+          "review"
+        ],
+        "name": "outer",
+        "nodes": {
+          "fanout": {
+            "targets": [
+              "worker"
+            ],
+            "type": "probe.dynamic-send"
+          },
+          "join": {
+            "barrier": {
+              "wait_for": [
+                "nested",
+                "worker"
+              ]
+            },
+            "type": "probe.node"
+          },
+          "nested": {
+            "definition": {
+              "edges": [
+                {
+                  "from": "__start__",
+                  "to": "step"
+                },
+                {
+                  "from": "step",
+                  "to": "__end__"
+                }
+              ],
+              "name": "inner",
+              "nodes": {
+                "step": {
+                  "type": "probe.node"
+                }
+              },
+              "schema_version": 1
+            },
+            "input_map": {
+              "results": "notes"
+            },
+            "output_map": {
+              "notes": "results"
+            },
+            "type": "probe.subgraph"
+          },
+          "review": {
+            "type": "probe.dynamic-interrupt"
+          },
+          "worker": {
+            "type": "probe.node",
+            "weight": 2.5
+          }
+        },
+        "retry_policy": {
+          "backoff_multiplier": 2,
+          "initial_delay_ms": 10,
+          "max_delay_ms": 100,
+          "max_retries": 2
+        },
+        "schema_version": 1
+      },
+      "frontend": "cpp_builder",
+      "id": "cpp.send_subgraph_retry"
+    },
+    {
+      "all_platforms": {
+        "bundle_id": "sha256:1a682ddb580e47323368e175e5f61b69734a658b8f898804ada11646c98fddca",
+        "canonical_program_hash": "sha256:6118e415e30d45786e740c4d581137b338d88d6c491b2e85f1d0084b741d5e78",
+        "compiled_plan_identity": "sha256:411ed146826587f0a292ccc472ba3ec9e07d6a5403ba07e57fb6c300f9e27608",
+        "control_source": false,
+        "definition_hash": "sha256:e0a6d6b728018a771928c6deb77f18964259d46b1624daa5b764a9ed3cdf7016",
+        "definition_name": "main",
+        "sealed_diagnostics": [
+          {
+            "code": "P_CORE_E6",
+            "json_pointer": "/root/definition/channels/value"
+          }
+        ],
+        "source_hash": "sha256:394898db622625635052b65f3d04e9774f74ea88437bf1fb911877649b4e1132"
+      },
+      "definition": {
+        "channels": {
+          "value": {
+            "initial": 0,
+            "reducer": "probe.overwrite"
+          }
+        },
+        "edges": [
+          {
+            "from": "__start__",
+            "to": "work"
+          },
+          {
+            "from": "work",
+            "to": "__end__"
+          }
+        ],
+        "name": "main",
+        "nodes": {
+          "work": {
+            "type": "probe.node"
+          }
+        },
+        "schema_version": 1
+      },
+      "frontend": "cpp_builder",
+      "id": "cpp.sequence_v2"
+    }
+  ],
+  "format": "neograph-identity-golden",
+  "format_version": 1,
+  "posix_quickjs_build_options": "CONFIG_VERSION=2026-06-04;QUICKJS_LIBC=disabled;STD_OS=disabled;DYNAMIC_MODULES=disabled",
+  "registry_fingerprint": "sha256:dc29286eac9d861283c4a550f8b5bb89bd0eb29fad51505be289387f8c0306a7"
+}

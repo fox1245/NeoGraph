@@ -1,0 +1,43 @@
+{
+  "program_schema_version": 1,
+  "input_contract": {"schema_version": 1, "schema": {}},
+  "output_contract": {"schema_version": 1, "schema": {"type": "object"}},
+  "root": {
+    "op": "call_core",
+    "name": "plan",
+    "definition": {
+      "schema_version": 1,
+      "name": "plan",
+      "channels": {"trace": {"reducer": "append", "initial": []}},
+      "nodes": {
+        "A": {"type": "probe.node"},
+        "B": {"type": "probe.node"},
+        "C": {"type": "probe.node"},
+        "D": {"type": "probe.node", "barrier": {"wait_for": ["C", "B"]}},
+        "FIX": {"type": "probe.node"}
+      },
+      "edges": [
+        {"from": "__start__", "to": "A"},
+        {"from": "A", "to": "B"},
+        {"from": "A", "to": "C"},
+        {"from": "FIX", "to": "D"},
+        {"from": "C", "to": "D"},
+        {"from": "D", "to": "__end__"}
+      ],
+      "conditional_edges": [
+        {"from": "B", "condition": "probe.check", "routes": {"pass": "D", "fail": "FIX"}}
+      ]
+    }
+  },
+  "declared_budget_requirements": [
+    {"resource": "wall_time_ms", "minimum": 1, "maximum": 60000},
+    {"resource": "model_tokens", "minimum": 0, "maximum": 10000},
+    {"resource": "monetary_microunits", "minimum": 0, "maximum": 1000000},
+    {"resource": "max_concurrency", "minimum": 1, "maximum": 4},
+    {"resource": "max_program_operations", "minimum": 1, "maximum": 1},
+    {"resource": "max_core_steps", "minimum": 1, "maximum": 100},
+    {"resource": "max_dynamic_compiles", "minimum": 0, "maximum": 0},
+    {"resource": "max_child_depth", "minimum": 0, "maximum": 0},
+    {"resource": "max_total_children", "minimum": 0, "maximum": 0}
+  ]
+}

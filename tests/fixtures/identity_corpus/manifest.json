@@ -1,0 +1,48 @@
+{
+  "format": "neograph-identity-corpus",
+  "format_version": 1,
+  "compiler_build_id": "neograph-identity-corpus/v1",
+  "registry": {
+    "attestation": "python-registered-executable",
+    "nodes": [
+      {"name": "probe.node", "semantic_version": "1.0.0", "implementation_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"},
+      {"name": "probe.dynamic-send", "semantic_version": "1.0.0", "implementation_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+      {"name": "probe.dynamic-interrupt", "semantic_version": "1.0.0", "implementation_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"},
+      {"name": "probe.subgraph", "semantic_version": "1.0.0", "implementation_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"}
+    ],
+    "reducers": [
+      {"name": "append", "semantic_version": "1.0.0", "implementation_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555"},
+      {"name": "overwrite", "semantic_version": "1.0.0", "implementation_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666"},
+      {"name": "probe.overwrite", "semantic_version": "1.0.0", "implementation_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"}
+    ],
+    "conditions": [
+      {"name": "probe.route", "semantic_version": "1.0.0", "implementation_digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888"},
+      {"name": "probe.check", "semantic_version": "1.0.0", "implementation_digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"},
+      {"name": "probe.more", "semantic_version": "1.0.0", "implementation_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    ]
+  },
+  "entries": [
+    {"id": "dsl.graph_basics", "frontend": "javascript", "source": "../dsl_capabilities/graph_basics.js"},
+    {"id": "dsl.graph_routing", "frontend": "javascript", "source": "../dsl_capabilities/graph_routing.js"},
+    {"id": "dsl.graph_fanout_barrier", "frontend": "javascript", "source": "../dsl_capabilities/graph_fanout_barrier.js"},
+    {"id": "dsl.graph_hitl_retry", "frontend": "javascript", "source": "../dsl_capabilities/graph_hitl_retry.js"},
+    {"id": "dsl.registry_mediated", "frontend": "javascript", "source": "../dsl_capabilities/registry_mediated.js"},
+    {"id": "dsl.program_control_flow", "frontend": "javascript", "source": "../dsl_capabilities/program_control_flow.js"},
+    {"id": "dsl.program_map", "frontend": "javascript", "source": "../dsl_capabilities/program_map.js"},
+    {"id": "dsl.program_structured_concurrency", "frontend": "javascript", "source": "../dsl_capabilities/program_structured_concurrency.js"},
+    {"id": "dsl.program_spawn_await", "frontend": "javascript", "source": "../dsl_capabilities/program_spawn_await.js"},
+    {"id": "dsl.program_durability", "frontend": "javascript", "source": "../dsl_capabilities/program_durability.js"},
+    {"id": "dsl.program_host_capability", "frontend": "javascript", "source": "../dsl_capabilities/program_host_capability.js"},
+    {"id": "js.barrier_conditional_route", "frontend": "javascript", "source": "sources/barrier_conditional_route.js"},
+    {"id": "js.barrier_single_member", "frontend": "javascript", "source": "sources/barrier_single_member.js"},
+    {"id": "js.barrier_unicode_order", "frontend": "javascript", "source": "sources/barrier_unicode_order.js"},
+    {"id": "js.send_subgraph_channels", "frontend": "javascript", "source": "sources/send_subgraph_channels.js"},
+    {"id": "js.retry_interrupts_loop", "frontend": "javascript", "source": "sources/retry_interrupts_loop.js"},
+    {"id": "js.main_branch_loop", "frontend": "javascript", "source": "sources/main_branch_loop.js"},
+    {"id": "cpp.minimal", "frontend": "cpp_builder", "source": "sources/cpp_minimal.json"},
+    {"id": "cpp.barrier_conditional_route", "frontend": "cpp_builder", "source": "sources/cpp_barrier_conditional_route.json"},
+    {"id": "cpp.barrier_unicode_order", "frontend": "cpp_builder", "source": "sources/cpp_barrier_unicode_order.json"},
+    {"id": "cpp.send_subgraph_retry", "frontend": "cpp_builder", "source": "sources/cpp_send_subgraph_retry.json"},
+    {"id": "cpp.sequence_v2", "frontend": "cpp_builder", "source": "sources/cpp_sequence_v2.json"}
+  ]
+}

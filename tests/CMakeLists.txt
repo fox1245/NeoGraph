@@ -881,3 +881,18 @@ endif()
 add_executable(neograph_text_safety_tests test_text_safety.cpp)
 target_link_libraries(neograph_text_safety_tests PRIVATE neograph::core GTest::gtest_main)
 gtest_discover_tests(neograph_text_safety_tests PROPERTIES LABELS "core;text-safety")
+
+if(NEOGRAPH_BUILD_PROGRAM)
+    # Golden identity corpus: pins definition hashes, compiled-plan identities
+    # and bundle ids. Regenerating it is opt-in; see test_identity_golden.cpp.
+    add_executable(neograph_identity_golden_tests test_identity_golden.cpp)
+    target_link_libraries(neograph_identity_golden_tests PRIVATE
+        neograph::program GTest::gtest_main)
+    target_compile_definitions(neograph_identity_golden_tests PRIVATE
+        NEOGRAPH_IDENTITY_CORPUS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/identity_corpus")
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        target_compile_definitions(neograph_identity_golden_tests PRIVATE
+            NEOGRAPH_IDENTITY_CORPUS_HAVE_QUICKJS)
+    endif()
+    gtest_discover_tests(neograph_identity_golden_tests PROPERTIES LABELS "program;identity")
+endif()

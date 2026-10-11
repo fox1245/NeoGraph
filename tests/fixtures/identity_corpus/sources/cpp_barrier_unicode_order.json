@@ -1,0 +1,41 @@
+{
+  "program_schema_version": 1,
+  "input_contract": {"schema_version": 1, "schema": {}},
+  "output_contract": {"schema_version": 1, "schema": {}},
+  "root": {
+    "op": "call_core",
+    "name": "unicode",
+    "definition": {
+      "schema_version": 1,
+      "name": "unicode",
+      "nodes": {
+        "start": {"type": "probe.node"},
+        "😀": {"type": "probe.node"},
+        "ｚ": {"type": "probe.node"},
+        "é": {"type": "probe.node"},
+        "join": {"type": "probe.node", "barrier": {"wait_for": ["😀", "ｚ", "é"]}}
+      },
+      "edges": [
+        {"from": "__start__", "to": "start"},
+        {"from": "start", "to": "😀"},
+        {"from": "start", "to": "ｚ"},
+        {"from": "start", "to": "é"},
+        {"from": "😀", "to": "join"},
+        {"from": "ｚ", "to": "join"},
+        {"from": "é", "to": "join"},
+        {"from": "join", "to": "__end__"}
+      ]
+    }
+  },
+  "declared_budget_requirements": [
+    {"resource": "wall_time_ms", "minimum": 1, "maximum": 60000},
+    {"resource": "model_tokens", "minimum": 0, "maximum": 10000},
+    {"resource": "monetary_microunits", "minimum": 0, "maximum": 1000000},
+    {"resource": "max_concurrency", "minimum": 1, "maximum": 4},
+    {"resource": "max_program_operations", "minimum": 1, "maximum": 1},
+    {"resource": "max_core_steps", "minimum": 1, "maximum": 100},
+    {"resource": "max_dynamic_compiles", "minimum": 0, "maximum": 0},
+    {"resource": "max_child_depth", "minimum": 0, "maximum": 0},
+    {"resource": "max_total_children", "minimum": 0, "maximum": 0}
+  ]
+}

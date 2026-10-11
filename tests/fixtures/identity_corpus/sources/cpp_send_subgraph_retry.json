@@ -1,0 +1,57 @@
+{
+  "program_schema_version": 1,
+  "input_contract": {"schema_version": 1, "schema": {}},
+  "output_contract": {"schema_version": 1, "schema": {}},
+  "root": {
+    "op": "call_core",
+    "name": "outer",
+    "definition": {
+      "schema_version": 1,
+      "name": "outer",
+      "channels": {
+        "results": {"reducer": "append", "initial": []},
+        "summary": {"reducer": "overwrite", "initial": {"count": 0, "ok": true}},
+        "score": {"reducer": "probe.overwrite", "initial": 0.5}
+      },
+      "nodes": {
+        "fanout": {"type": "probe.dynamic-send", "targets": ["worker"]},
+        "worker": {"type": "probe.node", "weight": 2.5},
+        "nested": {
+          "type": "probe.subgraph",
+          "definition": {
+            "schema_version": 1,
+            "name": "inner",
+            "nodes": {"step": {"type": "probe.node"}},
+            "edges": [{"from": "__start__", "to": "step"}, {"from": "step", "to": "__end__"}]
+          },
+          "input_map": {"results": "notes"},
+          "output_map": {"notes": "results"}
+        },
+        "review": {"type": "probe.dynamic-interrupt"},
+        "join": {"type": "probe.node", "barrier": {"wait_for": ["nested", "worker"]}}
+      },
+      "edges": [
+        {"from": "__start__", "to": "fanout"},
+        {"from": "fanout", "to": "nested"},
+        {"from": "nested", "to": "join"},
+        {"from": "worker", "to": "join"},
+        {"from": "join", "to": "review"},
+        {"from": "review", "to": "__end__"}
+      ],
+      "interrupt_before": ["review"],
+      "interrupt_after": ["join", "nested"],
+      "retry_policy": {"max_retries": 2, "initial_delay_ms": 10, "backoff_multiplier": 2.0, "max_delay_ms": 100}
+    }
+  },
+  "declared_budget_requirements": [
+    {"resource": "wall_time_ms", "minimum": 1, "maximum": 60000},
+    {"resource": "model_tokens", "minimum": 0, "maximum": 10000},
+    {"resource": "monetary_microunits", "minimum": 0, "maximum": 1000000},
+    {"resource": "max_concurrency", "minimum": 1, "maximum": 4},
+    {"resource": "max_program_operations", "minimum": 1, "maximum": 1},
+    {"resource": "max_core_steps", "minimum": 1, "maximum": 100},
+    {"resource": "max_dynamic_compiles", "minimum": 0, "maximum": 0},
+    {"resource": "max_child_depth", "minimum": 0, "maximum": 0},
+    {"resource": "max_total_children", "minimum": 0, "maximum": 0}
+  ]
+}
