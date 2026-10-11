@@ -26,7 +26,7 @@ class ScriptedProvider : public test::LocalProvider {
     };
     explicit ScriptedProvider(std::shared_ptr<State> state)
         : LocalProvider([state](ProviderRequest, const PreparedProviderRequest&,
-                               const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+                               const test::LocalProvider::EventCallback&) -> asio::awaitable<sp::runtime::Result> {
             std::lock_guard lock(state->mutex);
             ++state->calls;
             if (state->queue.empty()) throw std::logic_error("scripted responses exhausted");
@@ -176,7 +176,7 @@ TEST(PlanExecuteGraph, ExecutorContinuesAPausedTurn) {
     script->results = {test::success(R"(["step A"])"), paused, test::success("did A"), test::success("FINAL")};
     auto provider = std::make_shared<test::LocalProvider>(
         [script](ProviderRequest request, const PreparedProviderRequest&,
-                 const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+                 const test::LocalProvider::EventCallback&) -> asio::awaitable<sp::runtime::Result> {
             std::lock_guard lock(script->mutex);
             script->requests.push_back(provider_request_messages(request));
             if (script->results.empty()) throw std::logic_error("scripted responses exhausted");
