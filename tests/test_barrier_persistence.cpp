@@ -403,6 +403,79 @@ TEST(BarrierStall, SendWorkerWithoutEdgesDoesNotHideTheStall) {
               result.execution_trace.end());
 }
 
+// Only an explicit route to __end__ in the final super-step, the step after
+// which nothing is ready, keeps a pending join from being a stall. An end
+// reached in an earlier step does not cover a straggler that arrives later.
+namespace {
+json stall_node(const char* type = "hit_stall") { return {{"type", type}}; }
+}  // namespace
+
+TEST(BarrierStall, ExitBeforeAStragglerReachesTheJoinIsAStall) {
+    std::atomic<int> hits{0};
+    register_bypass_types(&hits);
+    // D needs only B: it fires and exits at step 3. C3 is not a member; it
+    // reaches D at step 4 with nothing else ready.
+    const json def = {
+        {"name", "exit_then_straggler"},
+        {"channels", channels_for({"A", "B", "C1", "C2", "C3", "D"})},
+        {"nodes", {{"A", stall_node()}, {"B", stall_node()}, {"C1", stall_node()},
+                   {"C2", stall_node()}, {"C3", stall_node()},
+                   {"D", {{"type", "hit_stall"}, {"barrier", {{"wait_for", {"B"}}}}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "A"}},
+                               {{"from", "A"}, {"to", "B"}},
+                               {{"from", "A"}, {"to", "C1"}},
+                               {{"from", "B"}, {"to", "D"}},
+                               {{"from", "C1"}, {"to", "C2"}},
+                               {{"from", "C2"}, {"to", "C3"}},
+                               {{"from", "C3"}, {"to", "D"}},
+                               {{"from", "D"}, {"to", "__end__"}}})}};
+    auto engine = GraphEngine::compile(def, NodeContext{});
+
+    const auto result = engine->run(RunConfig{});
+
+    EXPECT_EQ(result.status(), RunStatus::BarrierStalled);
+    EXPECT_EQ(result.execution_trace.back(), "C3");
+    const auto stalls = result.output["_neograph"]["barrier_stalled"];
+    ASSERT_TRUE(stalls.is_array());
+    ASSERT_EQ(stalls.size(), 1U);
+    EXPECT_EQ(stalls[0]["node"], json("D"));
+    EXPECT_EQ(stalls[0]["received"], json::array({"C3"}));
+    EXPECT_EQ(stalls[0]["missing"], json::array({"B"}));
+}
+
+TEST(BarrierStall, AbortRouteBeforeAStragglerReachesTheJoinIsAStall) {
+    std::atomic<int> hits{0};
+    register_bypass_types(&hits);
+    // B aborts to __end__ at step 2; C2 reaches D at step 3 with nothing ready.
+    const json def = {
+        {"name", "abort_then_straggler"},
+        {"channels", channels_for({"A", "B", "C", "C2", "D"})},
+        {"nodes", {{"A", stall_node()}, {"B", stall_node()}, {"C", stall_node()},
+                   {"C2", stall_node()},
+                   {"D", {{"type", "hit_stall"}, {"barrier", {{"wait_for", {"B", "C2"}}}}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", "A"}},
+                               {{"from", "A"}, {"to", "B"}},
+                               {{"from", "A"}, {"to", "C"}},
+                               {{"from", "C"}, {"to", "C2"}},
+                               {{"from", "C2"}, {"to", "D"}},
+                               {{"from", "D"}, {"to", "__end__"}}})},
+        {"conditional_edges",
+         json::array({{{"from", "B"},
+                       {"condition", "stall_fail"},
+                       {"routes", {{"pass", "D"}, {"fail", "__end__"}}}}})}};
+    auto engine = GraphEngine::compile(def, NodeContext{});
+
+    const auto result = engine->run(RunConfig{});
+
+    EXPECT_EQ(result.status(), RunStatus::BarrierStalled);
+    EXPECT_EQ(result.execution_trace, (std::vector<std::string>{"A", "B", "C", "C2"}));
+    const auto stalls = result.output["_neograph"]["barrier_stalled"];
+    ASSERT_TRUE(stalls.is_array());
+    ASSERT_EQ(stalls.size(), 1U);
+    EXPECT_EQ(stalls[0]["received"], json::array({"C2"}));
+    EXPECT_EQ(stalls[0]["missing"], json::array({"B"}));
+}
+
 TEST(BarrierStall, InterruptAfterAnEarlySourceKeepsTheJoinGated) {
     std::atomic<int> hits{0};
     register_bypass_types(&hits);

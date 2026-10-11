@@ -1811,10 +1811,6 @@ GraphEngine::execute_graph_async(
     }
 
     std::vector<std::string> trace;
-    // Only an explicit end (an edge or route to __end__, or Command.goto
-    // __end__) means the run chose to finish; a node with no successors ends
-    // implicitly and says nothing about a join still waiting elsewhere.
-    bool explicit_end = false;
     json barrier_stall;  // null unless the run stopped at an unsatisfiable barrier
     // Every checkpoint carries the stall witness once known, so resuming or
     // forking any of them reports the stall instead of completion.
@@ -2029,8 +2025,12 @@ GraphEngine::execute_graph_async(
 
         auto plan = scheduler_->plan_next_step(
             unified_routings, state, barrier_state);
-        explicit_end = explicit_end || plan.hit_explicit_end;
-        if (plan.ready.empty() && !explicit_end) {
+        // A run that stops with a join still holding signals (from members or
+        // not) stalled, unless this final step chose to finish: an edge or
+        // route to __end__, or Command.goto __end__. A node with no successors
+        // ends implicitly, and an end reached in an earlier step does not
+        // cover a signal that arrives later (#357).
+        if (plan.ready.empty() && !plan.hit_explicit_end) {
             auto stalls = stalled_barriers(barrier_state, scheduler_->barrier_specs());
             if (!stalls.empty()) barrier_stall = std::move(stalls);
         }
