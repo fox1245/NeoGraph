@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -13,6 +14,7 @@
 #include <cstdlib>
 #include <functional>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -529,6 +531,8 @@ struct DefinitionCapture {
     std::size_t           native_builder_bytes     = 0;
     std::size_t           max_native_builder_bytes = kMaxGeneratedDocumentBytes;
     AllocationAccounting* accounting               = nullptr;
+    std::string_view      source;
+    std::size_t           call_site_bytes          = 0;
 };
 
 void record_failure(DefinitionCapture* capture,
@@ -704,6 +708,8 @@ struct GraphBuilder {
     bool               sealed       = false;
     std::size_t        native_bytes = 0;
     json               definition;
+    /** Program call site of each builder call, keyed by its pointer in definition. */
+    std::map<std::string, SourceSpan> call_sites;
 };
 
 JSClassID      graph_builder_class_id = JS_INVALID_CLASS_ID;
@@ -1186,6 +1192,83 @@ JSValue return_builder(JSContext* context, JSValueConst this_value) {
     return JS_DupValue(context, this_value);
 }
 
+std::string pointer_segment(std::string_view segment) {
+    std::string result;
+    result.reserve(segment.size());
+    for (const char value : segment) {
+        if (value == '~')
+            result += "~0";
+        else if (value == '/')
+            result += "~1";
+        else
+            result.push_back(value);
+    }
+    return result;
+}
+
+// The innermost `<program>` frame of a QuickJS backtrace, e.g.
+// "    at define (<program>:3:9)".
+std::optional<SourceSpan> program_frame_span(std::string_view stack, std::string_view source) {
+    while (!stack.empty()) {
+        const auto newline = stack.find('\n');
+        auto       frame   = stack.substr(0, newline);
+        stack = newline == std::string_view::npos ? std::string_view{} : stack.substr(newline + 1);
+        const auto open = frame.rfind('(');
+        if (frame.empty() || frame.back() != ')' || open == std::string_view::npos) continue;
+        frame                = frame.substr(open + 1, frame.size() - open - 2);
+        const auto col_colon = frame.rfind(':');
+        if (col_colon == std::string_view::npos || col_colon == 0) continue;
+        const auto line_colon = frame.rfind(':', col_colon - 1);
+        if (line_colon == std::string_view::npos || frame.substr(0, line_colon) != "<program>")
+            continue;
+        std::int32_t line   = 0;
+        std::int32_t column = 0;
+        const auto   line_text = frame.substr(line_colon + 1, col_colon - line_colon - 1);
+        const auto   col_text  = frame.substr(col_colon + 1);
+        if (std::from_chars(line_text.data(), line_text.data() + line_text.size(), line).ec !=
+                std::errc{} ||
+            std::from_chars(col_text.data(), col_text.data() + col_text.size(), column).ec !=
+                std::errc{})
+            continue;
+        return source_span_from_line_column(source, line, column);
+    }
+    return std::nullopt;
+}
+
+// Call sites are host memory outside the QuickJS limit. Past this bound a
+// diagnostic simply has no span; compilation itself is unaffected.
+constexpr std::size_t kMaxCallSiteBytes = 1u << 20;
+
+// Remember which program call produced a generated subtree. QuickJS reports
+// the calling frame only through an error backtrace, so one is built and
+// discarded here; a missing site leaves the diagnostic without a span.
+void record_call_site(JSContext* context, GraphBuilder& builder, std::string pointer) {
+    auto* capture = builder.capture;
+    if (!capture || capture->source.empty()) return;
+    const auto bytes = pointer.size() + sizeof(SourceSpan);
+    if (bytes > kMaxCallSiteBytes - std::min(capture->call_site_bytes, kMaxCallSiteBytes)) return;
+    JS_ThrowInternalError(context, "NeoGraph builder call site");
+    JSValue                   error = JS_GetException(context);
+    JSValue                   stack = JS_GetPropertyStr(context, error, "stack");
+    std::optional<SourceSpan> span;
+    if (JS_IsString(stack)) {
+        std::size_t size = 0;
+        if (const char* text = JS_ToCStringLen(context, &size, stack)) {
+            span = program_frame_span(std::string_view(text, size), capture->source);
+            JS_FreeCString(context, text);
+        }
+    }
+    JS_FreeValue(context, stack);
+    JS_FreeValue(context, error);
+    if (JS_HasException(context)) {
+        JSValue ignored = JS_GetException(context);
+        JS_FreeValue(context, ignored);
+    }
+    if (!span) return;
+    capture->call_site_bytes += bytes;
+    builder.call_sites[std::move(pointer)] = *span;
+}
+
 bool require_arity(JSContext* context, int actual, int expected, std::string_view operation) {
     if (actual == expected) return true;
     graph_error(context, "P_JS_GRAPH_ARGUMENT",
@@ -1215,6 +1298,7 @@ JSValue graph_node_impl(JSContext* context, JSValueConst this_value, int argc, J
     const auto new_size = size_after_object_set(builder->native_bytes, nodes, name, config);
     if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
     nodes[name] = std::move(config);
+    record_call_site(context, *builder, "/nodes/" + pointer_segment(name));
     return return_builder(context, this_value);
 }
 
@@ -1262,6 +1346,7 @@ JSValue graph_channel_impl(JSContext*    context,
         if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
         channels[name] = std::move(config);
     }
+    record_call_site(context, *builder, "/channels/" + pointer_segment(name));
     return return_builder(context, this_value);
 }
 
@@ -1287,12 +1372,15 @@ bool append_edge(JSContext*         context,
             size_after_object_set(builder.native_bytes, builder.definition, "edges", edges);
         if (!prepare_builder_size(context, &builder, new_size)) return false;
         builder.definition["edges"] = std::move(edges);
+        record_call_site(context, builder, "/edges/0");
         return true;
     }
     auto       edges    = builder.definition["edges"];
+    const auto index    = edges.size();
     const auto new_size = size_after_array_append(builder.native_bytes, edges, edge);
     if (!prepare_builder_size(context, &builder, new_size)) return false;
     edges.push_back(std::move(edge));
+    record_call_site(context, builder, "/edges/" + std::to_string(index));
     return true;
 }
 
@@ -1339,6 +1427,7 @@ JSValue graph_conditional_edge_impl(JSContext*    context,
                            "NeoGraph graph conditional edge routes must be an object");
     }
     json conditional{{"from", from}, {"condition", condition}, {"routes", std::move(routes)}};
+    std::size_t index = 0;
     if (!builder->definition.contains("conditional_edges")) {
         json       edges    = json::array({conditional});
         const auto new_size = size_after_object_set(builder->native_bytes, builder->definition,
@@ -1349,8 +1438,10 @@ JSValue graph_conditional_edge_impl(JSContext*    context,
         auto       edges    = builder->definition["conditional_edges"];
         const auto new_size = size_after_array_append(builder->native_bytes, edges, conditional);
         if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
+        index = edges.size();
         edges.push_back(std::move(conditional));
     }
+    record_call_site(context, *builder, "/conditional_edges/" + std::to_string(index));
     return return_builder(context, this_value);
 }
 
@@ -1391,6 +1482,7 @@ JSValue graph_barrier_impl(JSContext*    context,
         size_after_object_set(builder->native_bytes, node_config, "barrier", barrier);
     if (!prepare_builder_size(context, builder, new_size)) return JS_EXCEPTION;
     node_config["barrier"] = std::move(barrier);
+    record_call_site(context, *builder, "/nodes/" + pointer_segment(node) + "/barrier");
     return return_builder(context, this_value);
 }
 
@@ -2668,6 +2760,7 @@ JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&      
     DefinitionCapture capture;
     capture.max_native_builder_bytes = limits.max_generated_document_bytes;
     capture.accounting               = &scope.accounting();
+    capture.source                   = script;
     JS_SetContextOpaque(scope.context(), &capture);
     try {
         install_host(scope.context(), HostContext::Definition);
@@ -2778,6 +2871,12 @@ JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&      
         }
         graph->sealed   = true;
         auto definition = detail::owned_json_copy(graph->definition);
+        std::vector<SourceMapEntry> call_sites;
+        call_sites.reserve(graph->call_sites.size());
+        for (const auto& [pointer, span] : graph->call_sites) {
+            auto generated = "/root/definition" + pointer;
+            call_sites.push_back({generated, SourceCoordinate{source.source_id(), generated, span}});
+        }
         JS_FreeValue(scope.context(), builder);
         const auto canonical_definition = detail::canonical_json_bytes(definition);
         if (canonical_definition.size() > limits.max_generated_document_bytes) {
@@ -2790,7 +2889,7 @@ JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&      
         }
         JS_SetContextOpaque(scope.context(), nullptr);
         return JavaScriptSourceEvaluation{projected_program_document(definition),
-                                          has_control_generator};
+                                          has_control_generator, std::move(call_sites)};
     } catch (...) {
         JS_SetContextOpaque(scope.context(), nullptr);
         throw;

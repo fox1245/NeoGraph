@@ -216,6 +216,12 @@ public:
         diagnostics_.push_back(std::move(pending));
     }
 
+    // Builder call sites locate diagnostics that no source-map entry covers.
+    // They are never sealed into the bundle source map.
+    void add_call_sites(std::vector<SourceMapEntry> call_sites) {
+        call_sites_ = std::move(call_sites);
+    }
+
     bool has_errors() const noexcept {
         return std::any_of(diagnostics_.begin(), diagnostics_.end(), [](const auto& pending) {
             return pending.diagnostic.severity == DiagnosticSeverity::Error;
@@ -251,15 +257,26 @@ private:
         });
     }
 
-    SourceCoordinate map(std::string_view generated_pointer) const {
+    static const SourceMapEntry* closest_mapping(const std::vector<SourceMapEntry>& mappings,
+                                                 std::string_view generated_pointer) {
         const SourceMapEntry* best = nullptr;
-        for (const auto& entry : mappings_) {
+        for (const auto& entry : mappings) {
             if (!is_ancestor_pointer(entry.generated_pointer, generated_pointer)) continue;
             if (!best || entry.generated_pointer.size() > best->generated_pointer.size()) {
                 best = &entry;
             }
         }
+        return best;
+    }
+
+    SourceCoordinate map(std::string_view generated_pointer) const {
+        const SourceMapEntry* best = closest_mapping(mappings_, generated_pointer);
         if (!best) {
+            // A diagnostic inside a builder-produced subtree points at that call.
+            if (const auto* call = closest_mapping(call_sites_, generated_pointer)) {
+                return SourceCoordinate{call->authored.source_id, std::string(generated_pointer),
+                                        call->authored.span};
+            }
             return SourceCoordinate{
                 source_id_, javascript_source_ ? std::string{} : std::string(generated_pointer),
                 std::nullopt};
@@ -274,6 +291,7 @@ private:
     std::string                    source_id_;
     bool                           javascript_source_;
     std::vector<SourceMapEntry>    mappings_;
+    std::vector<SourceMapEntry>    call_sites_;
     std::vector<PendingDiagnostic> diagnostics_;
 };
 
@@ -2206,6 +2224,7 @@ struct ProgramCompiler::Impl {
                     }
                     auto evaluation = detail::evaluate_javascript_source(source, limits);
                     document        = std::move(evaluation.document);
+                    diagnostics.add_call_sites(std::move(evaluation.call_sites));
                     if (javascript_budget_bounds)
                         document["declared_budget_requirements"] =
                             budget_document(*javascript_budget_bounds);

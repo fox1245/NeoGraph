@@ -11,6 +11,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 namespace neograph::program {
 struct JavaScriptCompileLimits;
 }
@@ -38,6 +39,11 @@ private:
 struct JavaScriptSourceEvaluation {
     json document;
     bool has_control_generator = false;
+    /**
+     * The graph-builder call that produced each generated subtree, keyed by
+     * its pointer in document. Diagnostics only; never sealed into a bundle.
+     */
+    std::vector<SourceMapEntry> call_sites;
 };
 
 // Evaluates a sealed SourceKind::JavaScript source in the private QuickJS

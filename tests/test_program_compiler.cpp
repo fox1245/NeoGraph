@@ -1040,6 +1040,70 @@ TEST(ProgramCompilerTest, JavaScriptBridgeDiagnosticsCarryExactSourceSites) {
     }
 }
 
+std::optional<neograph::program::Diagnostic> find_diagnostic(
+    const std::vector<neograph::program::Diagnostic>& diagnostics, std::string_view code) {
+    const auto found = std::find_if(diagnostics.begin(), diagnostics.end(),
+                                    [code](const auto& value) { return value.code == code; });
+    if (found == diagnostics.end()) return std::nullopt;
+    return *found;
+}
+
+TEST(ProgramCompilerTest, JavaScriptBuilderDiagnosticsCarryTheirCallSites) {
+    ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
+    const auto      bundle = compiler.compile(ProgramSource::from_javascript(
+        "call-sites.js",
+        "export function define() {\n"
+        "  const graph = ng.graph(\"main\");\n"
+        "  graph.channel(\"value\", {reducer: \"local-reducer\", initial: 0});\n"
+        "  graph.channel(\"unused\", {reducer: \"local-reducer\", initial: 0});\n"
+        "  graph.node(\"start\", {type: \"local-node\"});\n"
+        "  graph.node(\"left\", {type: \"local-node\"});\n"
+        "  graph.node(\"right\", {type: \"local-node\"});\n"
+        "  graph.node(\"join\", {type: \"local-node\"});\n"
+        "  graph.entry(\"start\");\n"
+        "  graph.edge(\"start\", \"left\").edge(\"start\", \"right\");\n"
+        "  graph.edge(\"left\", \"join\").edge(\"right\", \"join\");\n"
+        "  graph.exit(\"join\");\n"
+        "  return graph;\n"
+        "}\n"));
+
+    const auto dead_channel = find_diagnostic(bundle.diagnostics(), "P_CORE_E6");
+    ASSERT_TRUE(dead_channel.has_value());
+    EXPECT_EQ(dead_channel->primary.source_id, "call-sites.js");
+    EXPECT_EQ(dead_channel->primary.json_pointer, "/root/definition/channels/unused");
+    ASSERT_TRUE(dead_channel->primary.span.has_value());
+    EXPECT_EQ(dead_channel->primary.span->line_begin, 4U);
+    const auto fan_in = find_diagnostic(bundle.diagnostics(), "P_CORE_E9");
+    ASSERT_TRUE(fan_in.has_value());
+    EXPECT_EQ(fan_in->primary.json_pointer, "/root/definition/nodes/join");
+    ASSERT_TRUE(fan_in->primary.span.has_value());
+    EXPECT_EQ(fan_in->primary.span->line_begin, 8U);
+
+    try {
+        (void)compiler.compile(ProgramSource::from_javascript(
+            "call-site-error.js",
+            "export function define() {\n"
+            "  const graph = ng.graph(\"main\");\n"
+            "  graph.channel(\"value\", {reducer: \"local-reducer\", initial: 0});\n"
+            "  graph.node(\"work\", {type: \"local-node\"});\n"
+            "  graph.entry(\"work\");\n"
+            "  graph.edge(\"work\", \"missing\");\n"
+            "  graph.exit(\"work\");\n"
+            "  return graph;\n"
+            "}\n"));
+        FAIL() << "expected ProgramCompileError";
+    } catch (const ProgramCompileError& error) {
+        const auto dangling = std::find_if(
+            error.diagnostics().begin(), error.diagnostics().end(), [](const auto& diagnostic) {
+                return diagnostic.primary.json_pointer.starts_with("/root/definition/edges/1");
+            });
+        ASSERT_NE(dangling, error.diagnostics().end());
+        EXPECT_EQ(dangling->primary.source_id, "call-site-error.js");
+        ASSERT_TRUE(dangling->primary.span.has_value());
+        EXPECT_EQ(dangling->primary.span->line_begin, 6U);
+    }
+}
+
 TEST(ProgramCompilerTest, JavaScriptSealedModuleClosureExecutesAtCompileTime) {
     const std::string leaf_source = R"JS(
         export const nodeType = "local-node";
