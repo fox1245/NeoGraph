@@ -8,12 +8,12 @@
 //      registered with NodeFactory.
 //
 // Usage:
-//   ./build-pybind/example_a2a_client [base-url] [prompt]
+//   ./build/example_a2a_client [base-url] [prompt]
 //
-// Defaults: base-url=http://127.0.0.1:8080, prompt="Say hi from NeoGraph"
-// Start an A2A server first (e.g. a2a-python's `agent_helloworld.py`)
-// so AgentCard discovery succeeds; otherwise the example reports the
-// connect failure and exits 0 (env-skip semantics).
+// Defaults: base-url=http://127.0.0.1:8087, prompt="Say hi from NeoGraph"
+// Start an A2A server first — `./build/example_a2a_server serve` listens
+// on that default URL — so AgentCard discovery succeeds; otherwise the
+// example reports the connect failure and exits 1.
 
 #include <neograph/neograph.h>
 #include <neograph/a2a/client.h>
@@ -54,14 +54,14 @@ void print_card(const AgentCard& c) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string base_url = (argc >= 2) ? argv[1] : "http://127.0.0.1:8080";
+    std::string base_url = (argc >= 2) ? argv[1] : "http://127.0.0.1:8087";
     std::string prompt   = (argc >= 3) ? argv[2] : "Say hi from NeoGraph.";
 
     std::cout << "[*] Connecting to A2A agent at " << base_url << "\n\n";
 
     auto client = std::make_shared<A2AClient>(base_url);
-    // Tight timeout — when no demo server is running we want fast skip,
-    // not a 30 s hang.
+    // Tight timeout — when no demo server is running we want a fast
+    // failure, not a 30 s hang.
     client->set_timeout(std::chrono::seconds(5));
 
     // Phase 1 — discovery.
@@ -70,9 +70,9 @@ int main(int argc, char** argv) {
         card = client->fetch_agent_card();
         print_card(card);
     } catch (const std::exception& e) {
-        std::cerr << "Skipping (AgentCard discovery failed): " << e.what() << "\n";
+        std::cerr << "AgentCard discovery failed: " << e.what() << "\n";
         std::cerr << "  hint: start an A2A server on " << base_url << " first\n";
-        return 0;  // env-skip per run_all_cpp_examples.sh classifier
+        return 1;
     }
 
     // Phase 2 — direct send.

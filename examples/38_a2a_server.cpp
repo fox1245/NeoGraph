@@ -18,8 +18,8 @@
 //     process boundaries. On signal it stops the server cleanly and exits.
 //
 // Usage:
-//   ./build-pybind/example_a2a_server [port]          (default 8087, 0=auto)
-//   ./build-pybind/example_a2a_server [port] serve    (stay up until Ctrl-C)
+//   ./build/example_a2a_server [port]          (default 8087, 0=auto)
+//   ./build/example_a2a_server [port] serve    (stay up until Ctrl-C)
 
 #include <neograph/neograph.h>
 #include <neograph/a2a/server.h>
