@@ -1473,7 +1473,9 @@ void validate_schema_value(const json& value, const json& schema,
 
 void validate_tool_result(const CallToolResult& result,
                           const json& output_schema) {
-    if (output_schema.is_null()) return;
+    // outputSchema describes successful results. An error result may omit
+    // structuredContent, and its content carries the tool's error message.
+    if (output_schema.is_null() || result.is_error) return;
     if (result.structured_content.is_null()) {
         throw std::runtime_error(
             "MCP tool advertised outputSchema but returned no structuredContent");

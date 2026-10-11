@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=fd68acff39750b317ebcf03a1f48a20e6ccb28de4aa4802c8b6c1d8411c45c06 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=9f39d7f45e349f711b78286906fa619a7f2c2ab5b284284d204c4970b2999f8f -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -35,6 +35,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ### 修正
 
+- **`outputSchema` を宣言した MCP ツールのエラーメッセージが保持されます。** クライアントは `isError` を確認する前に output schema を検証していたため、`structuredContent` のない正当なエラー結果が "MCP tool advertised outputSchema but returned no structuredContent" で失敗し、`[FUNCTION_NOT_FOUND] No function found named 'x'` のようなツールのメッセージは呼び出し側にもモデルにも届きませんでした。MCP 仕様が認め、公式 Python SDK が行うとおり、エラー結果は output schema の検証を省略するようになりました。成功した結果は引き続き検証します。
 - **Program publicationはnode handleのムーブ代入に依存せずlibc++でビルドできます。** 全index publicationの後で抽出したhandleを直接初期化し、ライブラリ固有の`noexcept` traitなしでcommitの原子性を保持します。
 - **Windowsのinterface-6 archive fixtureは非公開custodyディレクトリを原子的に作成します。** 継承を遮断した現在ユーザー専用DACLでnative archive admissionを満たし、outcome・金額の根拠・replay・誤ったbindingの検証をすべて維持します。
 - **Anthropic MessagesとGeminiの並列client-tool結果を一つのturnに保持します。** 隣接するportableな結果専用メッセージをfamily encode前にまとめ、mixed・native・turn境界は維持します。他のAPI familyと保存historyは変更しません(#311)。

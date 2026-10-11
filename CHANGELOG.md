@@ -33,6 +33,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **MCP tool errors keep their message when the tool declares `outputSchema`.** The client validated the output schema before checking `isError`, so a legal error result without `structuredContent` failed with "MCP tool advertised outputSchema but returned no structuredContent", and the tool's message, such as `[FUNCTION_NOT_FOUND] No function found named 'x'`, never reached the caller or the model. Error results now skip output-schema validation, as the MCP specification allows and the official Python SDK does; successful results are still validated.
 - **Program publication builds with libc++ without relying on node-handle move assignment.** Lease retirement directly initializes the extracted handle after all index publications, preserving commit atomicity without a library-specific `noexcept` trait.
 - **Windows interface-6 archive fixtures create private custody directories atomically.** A protected, current-user-only DACL satisfies native archive admission; all outcome, monetary evidence, replay and wrong-binding assertions remain enabled.
 - **Parallel client-tool results retain one turn for Anthropic Messages and Gemini.** Adjacent portable result-only messages are grouped before family encoding; mixed, native and turn boundaries remain intact. Other API families and stored history are unchanged (#311).

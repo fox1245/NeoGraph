@@ -18,6 +18,7 @@
 #include <neograph/mcp/client.h>
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/cancel.h>
+#include <neograph/tool_dispatch.h>
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
@@ -589,6 +590,101 @@ TEST(MCPClientAsync, StrictLifecyclePaginationAndRichResults) {
     EXPECT_GE(provider_calls.load(), 1);
     EXPECT_EQ(call_count.load(), 5);
 
+}
+
+// MCP allows an isError result without structuredContent even when the tool
+// declares outputSchema. The tool's own message must reach the caller instead
+// of an output-schema validation error.
+TEST(MCPClientAsync, ErrorResultSkipsOutputSchemaValidation) {
+    const std::string tool_message =
+        "[FUNCTION_NOT_FOUND] No function found named 'x'";
+    std::atomic<int> call_count{0};
+
+    httplib::Server svr;
+    svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+        const auto request = json::parse(req.body);
+        const auto method = request.value("method", std::string{});
+        const int id = request.value("id", 0);
+        auto reply = [&](json result) {
+            res.set_content(json{{"jsonrpc", "2.0"}, {"id", id},
+                                 {"result", std::move(result)}}.dump(),
+                            "application/json");
+        };
+        if (method == "initialize") {
+            reply({{"protocolVersion", "2025-11-25"},
+                   {"capabilities", {{"tools", json::object()}}},
+                   {"serverInfo", {{"name", "typed-errors"}, {"version", "1"}}}});
+        } else if (method == "notifications/initialized") {
+            res.status = 204;
+        } else if (method == "tools/list") {
+            reply({{"tools", json::array({{
+                {"name", "decompile_function"},
+                {"description", "Decompile a function by name"},
+                {"inputSchema", {{"type", "object"},
+                                 {"properties", {{"name", {{"type", "string"}}}}},
+                                 {"required", json::array({"name"})}}},
+                {"outputSchema", {{"type", "object"},
+                                  {"properties", {{"result", {{"type", "string"}}}}},
+                                  {"required", json::array({"result"})}}},
+            }})}});
+        } else if (method == "tools/call") {
+            call_count.fetch_add(1, std::memory_order_relaxed);
+            reply({{"content", json::array({{{"type", "text"},
+                                              {"text", tool_message}}})},
+                   {"isError", true}});
+        } else {
+            res.set_content(json{{"jsonrpc", "2.0"}, {"id", id},
+                                 {"error", {{"code", -32601},
+                                            {"message", "method not found"}}}}.dump(),
+                            "application/json");
+        }
+    });
+    ServerGuard server(svr);
+    ASSERT_TRUE(svr.is_running());
+
+    mcp::MCPClient client(
+        "http://127.0.0.1:" + std::to_string(server.port) + "/mcp");
+    auto tools = client.get_tools();
+    ASSERT_EQ(tools.size(), 1u);
+    auto* tool = dynamic_cast<mcp::MCPTool*>(tools[0].get());
+    ASSERT_NE(tool, nullptr);
+    ASSERT_FALSE(tool->get_mcp_definition().output_schema.is_null());
+    const json arguments{{"name", "x"}};
+
+    // Client call path.
+    const auto direct = client.call_tool_result("decompile_function", arguments);
+    EXPECT_TRUE(direct.is_error);
+    ASSERT_EQ(direct.content.size(), 1u);
+    EXPECT_EQ(direct.content[0].value("text", ""), tool_message);
+
+    // Tool result path.
+    const auto result = tool->execute_result(arguments);
+    EXPECT_TRUE(result.is_error);
+    EXPECT_TRUE(result.structured_content.is_null());
+    ASSERT_EQ(result.content.size(), 1u);
+    EXPECT_EQ(result.content[0].value("text", ""), tool_message);
+
+    // Tool execution reports the tool's message, not a validation failure.
+    try {
+        (void)tool->execute(arguments);
+        FAIL() << "expected the MCP tool error";
+    } catch (const std::runtime_error& e) {
+        const std::string what = e.what();
+        EXPECT_NE(what.find(tool_message), std::string::npos) << what;
+        EXPECT_EQ(what.find("outputSchema"), std::string::npos) << what;
+    }
+
+    // Graph tool dispatch hands the same message to the model.
+    const auto messages = async::run_sync(dispatch_tool_calls(
+        {ToolCall{"call-1", "decompile_function", arguments.dump()}},
+        {tool}, {}, {}, {}));
+    ASSERT_EQ(messages.size(), 1u);
+    EXPECT_NE(messages[0].tool_status, "succeeded");
+    const auto content = json::parse(messages[0].content);
+    const auto error = content.value("error", std::string{});
+    EXPECT_NE(error.find(tool_message), std::string::npos) << messages[0].content;
+    EXPECT_EQ(error.find("outputSchema"), std::string::npos) << messages[0].content;
+    EXPECT_EQ(call_count.load(), 4);
 }
 
 TEST(MCPClientAsync, ConfiguredRequestTimeoutIsEnforced) {
