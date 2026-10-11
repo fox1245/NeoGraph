@@ -302,3 +302,20 @@ def test_compile_error_reports_the_javascript_source_location():
     assert diagnostic["source_id"] == "python-syntax.js"
     assert diagnostic["span"]["line_begin"] == 3
     assert diagnostic["witness"]["engine"] == "quickjs"
+
+
+def test_registry_miss_hints_name_the_python_registration_call():
+    builder = ng.ProgramRegistryBuilder()
+    with pytest.raises(RuntimeError) as condition:
+        builder.add_registered_condition(
+            "python_program_unregistered", "1.0.0", _DIGEST_NODE
+        )
+    assert "ng.ConditionRegistry.register_condition(name, fn)" in str(condition.value)
+    assert "::instance()" not in str(condition.value)
+
+    with pytest.raises(RuntimeError) as reducer:
+        builder.add_registered_reducer(
+            "python_program_unregistered", "1.0.0", _DIGEST_REDUCER
+        )
+    assert "ng.ReducerRegistry.register_reducer(name, fn)" in str(reducer.value)
+    assert "::instance()" not in str(reducer.value)

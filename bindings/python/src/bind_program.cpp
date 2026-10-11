@@ -14,6 +14,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -83,6 +84,25 @@ py::dict diagnostic_to_py(const Diagnostic& diagnostic) {
     throw py::error_already_set();
 }
 
+// Core registry misses name the C++ registration call. Python callers register
+// through the module wrappers, so rewrite the hint; any other error is rethrown.
+[[noreturn]] void rethrow_with_python_hint(const std::runtime_error& error) {
+    static constexpr std::pair<std::string_view, std::string_view> spellings[] = {
+        {"ReducerRegistry::instance().register_reducer(name, fn)",
+         "ng.ReducerRegistry.register_reducer(name, fn)"},
+        {"ConditionRegistry::instance().register_condition(name, fn)",
+         "ng.ConditionRegistry.register_condition(name, fn)"},
+    };
+    std::string message = error.what();
+    for (const auto& [cpp, python] : spellings) {
+        if (const auto found = message.find(cpp); found != std::string::npos) {
+            message.replace(found, cpp.size(), python);
+            throw std::runtime_error(std::move(message));
+        }
+    }
+    throw;
+}
+
 class ProgramRegistryBuilderBinding {
 public:
     ProgramRegistryBuilderBinding()
@@ -116,7 +136,12 @@ public:
         std::string semantic_version,
         std::string implementation_digest) {
         require_open();
-        auto reducer = ReducerRegistry::instance().get(name);
+        ReducerFn reducer;
+        try {
+            reducer = ReducerRegistry::instance().get(name);
+        } catch (const std::runtime_error& error) {
+            rethrow_with_python_hint(error);
+        }
         builder_->add_reducer(
             registered_manifest(ExecutableKind::Reducer, name, std::move(semantic_version),
                                 std::move(implementation_digest), {}, {},
@@ -130,7 +155,12 @@ public:
         std::string semantic_version,
         std::string implementation_digest) {
         require_open();
-        auto condition = ConditionRegistry::instance().get(name);
+        ConditionFn condition;
+        try {
+            condition = ConditionRegistry::instance().get(name);
+        } catch (const std::runtime_error& error) {
+            rethrow_with_python_hint(error);
+        }
         auto spec = ConditionRegistry::instance().condition_spec(name);
         builder_->add_condition(
             registered_manifest(ExecutableKind::Condition, name, std::move(semantic_version),
