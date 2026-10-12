@@ -372,6 +372,7 @@ struct MCPServer::Impl {
         if (message.empty()) return {false, rpc_error(-32600, "empty JSON-RPC batch", nullptr)};
         auto batch = std::make_shared<Batch>();
         batch->deliver = std::move(deliver);
+        bool any_deferred = false;
         for (std::size_t i = 0; i < message.size(); ++i) {
             const json element = message[i];
             {
@@ -386,14 +387,20 @@ struct MCPServer::Impl {
                     if (batch->add(std::move(response))) batch->deliver(batch->answer());
                 });
             }
-            if (!outcome.deferred) batch->add(std::move(outcome.response));
+            if (outcome.deferred) any_deferred = true;
+            else batch->add(std::move(outcome.response));
         }
-        // Every message was given to the server: when nothing runs any more,
-        // the answer is ready now; otherwise the last tool call delivers it.
-        if (batch->add(std::nullopt)) {
+        // Every message was given to the server. A batch without a deferred
+        // call is answered now. One with a tool call is always answered
+        // through deliver, by whichever finishes last (this thread too, when
+        // the calls were quick), so the way it is answered never depends on
+        // timing.
+        const bool last = batch->add(std::nullopt);
+        if (!any_deferred) {
             auto answer = batch->answer();
             return {false, answer ? std::move(*answer) : json()};
         }
+        if (last) batch->deliver(batch->answer());
         return {true, json()};
     }
 

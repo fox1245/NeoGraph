@@ -931,6 +931,42 @@ TEST(MCPServerTest, BatchesAreAnsweredForTheRevisionsThatHaveThem) {
     }
 }
 
+// A batch with a tool call is answered through the response sink even when
+// the call finishes before the server has read the rest of the batch: how a
+// batch is answered must not depend on timing.
+TEST(MCPServerTest, ABatchWhoseToolCallFinishesFirstIsStillAnsweredThroughTheSink) {
+    MCPServer server(config());
+    std::promise<void> returned;
+    std::shared_future<void> call_returned = returned.get_future().share();
+    server.register_tool(echo_definition(), [&returned](const json& arguments, const auto&) {
+        auto result = echo_result(arguments);
+        returned.set_value();
+        return result;
+    });
+    // The method after the call runs on this thread and waits until the call
+    // has returned and settled, so the call's answer is in before the batch
+    // ends.
+    server.register_method("test/after_call", [call_returned](const json&, const json&) {
+        call_returned.wait();
+        std::this_thread::sleep_for(200ms);
+        return json::object();
+    });
+    initialize_as(server, "2025-03-26");
+    CapturingSink sink;
+    server.set_response_sink(sink.sink());
+    const json batch = json::array({
+        request("c", "tools/call", {{"name", "echo"}, {"arguments", {{"value", "z"}}}}),
+        request("a", "test/after_call"),
+    });
+    EXPECT_TRUE(server.handle_message(batch).is_null());
+    std::unique_lock lock(sink.mutex);
+    ASSERT_TRUE(sink.cv.wait_for(lock, 5s, [&] { return !sink.responses.empty(); }));
+    ASSERT_EQ(sink.responses.size(), 1u);
+    ASSERT_TRUE(sink.responses[0].is_array()) << sink.responses[0].dump();
+    EXPECT_EQ(by_id(sink.responses[0], "c")["result"]["content"][0]["text"], "z");
+    EXPECT_EQ(by_id(sink.responses[0], "a")["result"], json::object());
+}
+
 // MCP 2025-06-18 removed JSON-RPC batching: a batch from such a client, or
 // from one that has not initialized (initialize is never part of a batch), is
 // one invalid request.
