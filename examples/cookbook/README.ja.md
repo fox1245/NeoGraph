@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=ja source_sha256=a538b0ffd268e27f136a0cba74305c6cdb040309cc49d6416f66492ab0472ff1 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=ja source_sha256=0bfa46d3872a8953485c8bccd989c02eacbfcae7c36b7cb1dce75129fd8e01ad -->
 # NeoGraph Cookbooks
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -48,6 +48,9 @@ native archive は認証された owner-private custody であり、暗号化や
 | [`jarvis/`](jarvis/) | 音声駆動のメタオーケストレーター。任意のローカル ASR/TTS が、4 方向ルーター(chat/direct/delegate/parallel)、MCP ツール、A2A の専門家、保存された会話メモリを包む。ローカルまたはモックでの動作はクラウド不要で、ライブ推論には OpenRouter を使う。 |
 | [`minimal-mcp/`](minimal-mcp/) | **モデルも API キーも使わない** MCP クライアントの往復。約 60 行の標準ライブラリだけの stdio サーバーと、`initialize` → `tools/list` → `tools/call` を実行する C++ のハーネス。NeoGraph の MCP クライアントに必要なのはワイヤープロトコルを話すプロセスだけで、相手はどんなものでもよいことを示す。 |
 | [`openrouter-provider/`](openrouter-provider/) | 型付きの Python OpenRouter プロバイダーリクエストと、不変の outcome。互換性と実行証拠は recipe を参照。 |
+| [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | コンパイルキャッシュを通して、1 つのプロセスが多数の顧客のトポロジーを処理する。モックのバイナリには何も要らず、ライブ版にはキーが必要。 |
+| [`self_evolving_chatbot/`](self_evolving_chatbot/) | 顧客ごとにトポロジーを選び、進化させるチャットサーバー。ProgramChat には `--mock` モードがあり、Core のサーバーにはキーが必要。 |
+| [`topology-retrieval/`](topology-retrieval/) | サンプル 64 に入力を渡す候補の選択(dense、BM25、順位融合、再ランキング)。`--mock` には `pip install faiss-cpu numpy` が必要。 |
 
 各クックブックには、作業中に見つかった引っかかりも記録してあります。公開 API の粗い部分を探すのに役立ちます。
 

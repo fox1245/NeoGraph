@@ -59,6 +59,9 @@ not provide a standalone build.
 | [`jarvis/`](jarvis/) | Voice-driven meta-orchestrator. Optional local ASR/TTS surrounds a four-way router (chat/direct/delegate/parallel), MCP tools, A2A specialists and stored conversation memory. Local/mock operation is cloud-free; live inference uses OpenRouter. |
 | [`minimal-mcp/`](minimal-mcp/) | MCP client round-trip with **no model and no API key**: a ~60-line standard-library stdio server + a C++ harness that does `initialize` → `tools/list` → `tools/call`. Shows NeoGraph's MCP client only needs a process that speaks the wire protocol — the peer can be anything. |
 | [`openrouter-provider/`](openrouter-provider/) | Typed Python OpenRouter provider requests and immutable outcomes; see the recipe for compatibility and execution evidence. |
+| [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | One process serving many customers' topologies through a compile cache. The mock binary needs nothing; the live one needs a key. |
+| [`self_evolving_chatbot/`](self_evolving_chatbot/) | Chat servers that choose and evolve topologies per customer. ProgramChat has a `--mock` mode; the Core servers need a key. |
+| [`topology-retrieval/`](topology-retrieval/) | Candidate selection (dense, BM25, rank fusion, rerank) feeding example 64. `--mock` needs `pip install faiss-cpu numpy`. |
 
 Each cookbook also documents the friction it surfaced — useful for
 finding the rough edges of the public API.

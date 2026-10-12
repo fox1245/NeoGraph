@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=ko source_sha256=a538b0ffd268e27f136a0cba74305c6cdb040309cc49d6416f66492ab0472ff1 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=ko source_sha256=0bfa46d3872a8953485c8bccd989c02eacbfcae7c36b7cb1dce75129fd8e01ad -->
 # NeoGraph 쿡북
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -48,6 +48,9 @@ vendor inference, 음성, 모든 Beast live 변형이나 전용 live multitenant
 | [`jarvis/`](jarvis/) | 음성 기반 메타 오케스트레이터. 선택 사항인 로컬 ASR/TTS가 4방향 라우터(chat/direct/delegate/parallel), MCP 도구, A2A 전문가, 저장되는 대화 메모리를 감싼다. 로컬/mock 동작에는 클라우드가 필요 없고 live 추론은 OpenRouter를 쓴다. |
 | [`minimal-mcp/`](minimal-mcp/) | **모델도 API 키도 없는** MCP 클라이언트 왕복. 표준 라이브러리만 쓰는 약 60줄짜리 stdio 서버와, `initialize` → `tools/list` → `tools/call`을 수행하는 C++ 하네스로 이루어진다. NeoGraph의 MCP 클라이언트에는 와이어 프로토콜을 말하는 프로세스만 있으면 되고, 상대(peer)는 무엇이든 될 수 있음을 보여 준다. |
 | [`openrouter-provider/`](openrouter-provider/) | 타입 Python OpenRouter provider 요청과 불변 outcome. 호환성과 실행 증거는 이 레시피에 있다. |
+| [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | 컴파일 캐시를 거쳐 한 프로세스가 여러 고객의 토폴로지를 서비스한다. mock 바이너리는 아무것도 필요 없고, live 바이너리는 키가 필요하다. |
+| [`self_evolving_chatbot/`](self_evolving_chatbot/) | 고객마다 토폴로지를 고르고 진화시키는 채팅 서버. ProgramChat에는 `--mock` 모드가 있고, Core 서버는 키가 필요하다. |
+| [`topology-retrieval/`](topology-retrieval/) | 예제 64로 이어지는 후보 선택(dense, BM25, 순위 결합, 재순위). `--mock`은 `pip install faiss-cpu numpy`가 필요하다. |
 
 각 쿡북은 작업 중 부딪힌 마찰점도 문서로 남기며, 공개 API의 거친 부분을 찾는 데 도움이 됩니다.
 

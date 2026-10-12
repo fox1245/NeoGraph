@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=zh-CN source_sha256=a538b0ffd268e27f136a0cba74305c6cdb040309cc49d6416f66492ab0472ff1 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=zh-CN source_sha256=0bfa46d3872a8953485c8bccd989c02eacbfcae7c36b7cb1dce75129fd8e01ad -->
 # NeoGraph Cookbooks
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -47,6 +47,9 @@ native archive 是经过认证的 owner-private custody，不是加密或 vendor
 | [`jarvis/`](jarvis/) | 语音驱动元编排器。可选本地 ASR/TTS 结合 chat/direct/delegate/parallel 四路 router、MCP tools、A2A specialists 和会话 memory。本地/mock 无需云端；live 推理使用 OpenRouter。 |
 | [`minimal-mcp/`](minimal-mcp/) | MCP 客户端往返通信，**无需模型、无需 API 密钥**：一个约 60 行的标准库 stdio 服务器 + 一个 C++ 测试框架，它执行 `initialize` → `tools/list` → `tools/call`。这表明 NeoGraph 的 MCP 客户端只需要一个会说 wire 协议的进程，对端可以是任何东西。 |
 | [`openrouter-provider/`](openrouter-provider/) | 类型化的 Python OpenRouter provider 请求与不可变 outcome；兼容性和运行证据见对应 recipe。 |
+| [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | 一个进程通过编译缓存为许多客户的拓扑提供服务。模拟二进制什么都不需要，实时版本需要 key。 |
+| [`self_evolving_chatbot/`](self_evolving_chatbot/) | 按客户选择并演化拓扑的聊天服务器。ProgramChat 有 `--mock` 模式，Core 服务器需要 key。 |
+| [`topology-retrieval/`](topology-retrieval/) | 为示例 64 提供输入的候选选择（稠密、BM25、排名融合、重排）。`--mock` 需要 `pip install faiss-cpu numpy`。 |
 
 每份 cookbook 还记录了它暴露的摩擦点，有助于找出公共 API 的粗糙之处。
 
