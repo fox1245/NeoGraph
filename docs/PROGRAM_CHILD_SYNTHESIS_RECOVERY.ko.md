@@ -3,61 +3,61 @@
 
 **Languages:** [English](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md) | [한국어](PROGRAM_CHILD_SYNTHESIS_RECOVERY.ko.md) | [日本語](PROGRAM_CHILD_SYNTHESIS_RECOVERY.ja.md) | [简体中文](PROGRAM_CHILD_SYNTHESIS_RECOVERY.zh-CN.md)
 
-N3는 SQLite와 PostgreSQL에서 검토된 source를 사용하는 단일 자식 checkpoint 시나리오를 검증한다. 복구는 이제 기록된 child operation과 분류되지 않은 외부 effect를 구분하며, Core dispatch에 영속 checkpoint나 result가 없으면 명시적인 reconciliation을 계속 요구한다.
+N3는 SQLite와 PostgreSQL에서 검토된 소스를 쓰는 단일 자식 체크포인트 시나리오를 검증합니다. 복구는 이제 기록된 자식 연산과 분류되지 않은 외부 효과를 구분합니다. Core dispatch에 영속 체크포인트나 결과가 없을 때는 명시적인 조정(reconciliation)을 그대로 요구합니다.
 
 ## 복구 규칙
 
-복구에서 dispatch를 검토하기 전에 부모 command journal이 승인된 Program, command ordinal, payload, effect 신원과 일치해야 한다. `spawn` 또는 합성된 `spawn`으로 끝나는 `await` chain만 이 복구 경로를 사용할 수 있다. 호스트는 grant, 원래 generation, 실제 compile 차감, 생성된 binding을 재검증한다. 이미 기록된 dispatch도 정확한 child run ID와 canonical input에 일치해야 한다.
+복구가 dispatch를 고려하기 전에, 부모 명령 저널이 승인(admission)된 Program, 명령 순번, payload, effect 식별자와 일치해야 합니다. 이 복구 경로를 탈 수 있는 것은 `spawn`, 또는 합성된 `spawn`으로 끝나는 `await` 체인뿐입니다. 호스트는 grant, 원래 세대, 실제 컴파일 차감, 생성된 binding을 다시 검증합니다. 이전에 기록된 dispatch가 있다면 자식 run ID와 정규 input도 정확히 일치해야 합니다.
 
-복구는 command의 기존 resource reservation과 operation 차감을 재사용한다. 같은 command에 다시 비용을 부과하거나 dynamic compilation을 하나 더 부여하지 않는다. child reservation 재구성에는 대기 중인 command가 보유한 resource가 포함된다. 이 재구성은 process-local accounting view를 바꾸는 것이지 영속 budget을 바꾸는 것이 아니다. 기존 child record와 terminal result가 계속 기준이 된다.
+복구는 명령에 이미 잡혀 있는 리소스 예약과 연산 차감을 재사용합니다. 같은 명령에 비용을 다시 청구하지 않고, 동적 컴파일을 추가로 허용하지도 않습니다. 자식 예약을 재구성할 때는 대기 중인 명령이 쥐고 있는 리소스도 포함하는데, 이 재구성이 바꾸는 것은 프로세스 로컬 회계 뷰이고 영속 예산은 바뀌지 않습니다. 이미 있는 자식 레코드와 최종 결과가 계속 최종 권위를 갖습니다.
 
-동일한 `Compiling` 또는 `Validating` publication이 이미 존재한다는 사실은 새 호출자가 그 작업을 소유한다는 증거가 아니다. `Published`를 받은 writer만 claim한 stage를 시작할 수 있다. 동시 cold recovery test는 이 publication 전에 독립 process 두 개를 동기화하고, 성공한 worker 하나, conflict 하나, semantic validation 한 번을 요구한다.
+똑같은 `Compiling`이나 `Validating` 게시가 이미 있다고 해서 새로 호출한 쪽이 그 작업을 소유한다는 증거가 되지는 않습니다. `Published`를 받은 writer만 claim한 단계를 시작할 수 있습니다. 동시 콜드 복구 테스트는 이 게시 전에 독립된 두 프로세스를 동기화하고, 작업자 하나가 성공하고, 충돌이 한 번 나며, 의미 검증이 한 번만 실행될 것을 요구합니다.
 
-## Process-exit matrix
+## 프로세스 종료 매트릭스
 
-각 case는 선택한 publication 이후 destructor 없이 process를 종료한 다음 새 Catalog, transition, checkpoint store를 연다. 두 database가 같은 case를 실행한다.
+각 케이스는 선택한 게시 직후 소멸자를 실행하지 않고 프로세스를 종료한 다음, 새로운 Catalog, 전이, 체크포인트 저장소를 엽니다. 두 데이터베이스가 같은 케이스를 실행합니다.
 
 | 중단 지점 | 요구되는 복구 |
 |---|---|
-| `Reserved` | 기존 reservation으로 한 번 컴파일 |
-| `Compiling` | 차감을 보존하고 reconciliation 요구 |
-| `Compiled` | bundle 재사용 |
-| `Validating` | 차감을 보존하고 reconciliation 요구 |
-| `Validated` | semantic 증거 재사용 |
-| `Admitting` | 고정된 admission 재사용 |
-| `Admitted` | 승인된 version 바인딩 |
-| `Bound` | 기록된 parent command 실행 |
-| `Dispatching` | child 신원과 input 재사용 |
-| `Spawned` | 기존 child 복구 또는 불확실한 Core dispatch에 명시적 reconciliation |
-| Child relation `Publishing` | 기존 child의 최초 publication 완료 |
-| Child relation `Dispatched` | replay-safe가 아닌 Core 작업에 checkpoint/result가 없으면 reconciliation |
-| Child terminal result | result 재사용; 완료된 child를 다시 실행하지 않음 |
-| Parent child-result attachment | 기존 join result 재사용 |
-| Parent command result | 기록된 command result replay |
-| Parent terminal result | 동일한 terminal result 신원 반환 |
+| `Reserved` | 기존 예약으로 한 번만 컴파일한다 |
+| `Compiling` | 차감을 유지하고 조정(reconciliation)을 요구한다 |
+| `Compiled` | 번들을 재사용한다 |
+| `Validating` | 차감을 유지하고 조정(reconciliation)을 요구한다 |
+| `Validated` | 의미 검증 증거를 재사용한다 |
+| `Admitting` | 고정된 승인(admission)을 재사용한다 |
+| `Admitted` | 승인된 버전에 binding한다 |
+| `Bound` | 기록된 부모 명령을 실행한다 |
+| `Dispatching` | 자식 식별자와 input을 재사용한다 |
+| `Spawned` | 기존 자식을 복구하거나, 불확실한 Core dispatch를 명시적으로 조정(reconcile)한다 |
+| 자식 관계 `Publishing` | 기존 자식의 초기 게시를 마무리한다 |
+| 자식 관계 `Dispatched` | 재생(replay)에 안전하지 않은 Core 작업에 체크포인트/결과가 없으면 조정(reconcile)한다 |
+| 자식 최종 결과 | 결과를 재사용한다. 완료된 자식을 다시 실행하지 않는다 |
+| 부모의 자식 결과 연결 | 기존 join 결과를 재사용한다 |
+| 부모 명령 결과 | 기록된 명령 결과를 재생(replay)한다 |
+| 부모 최종 결과 | 같은 최종 결과 식별자를 반환한다 |
 
-database마다 process-exit 경계 16개와 두 process 간 복구 race 하나를 다룬다. test는 원래 child 신원, 영속 child relation 하나, 단일 compile 차감, 유지된 command-operation 수도 검증한다. execution marker로 process exit 이후 완료된 child 작업이 반복되지 않음을 확인한다.
+데이터베이스마다 프로세스 종료 지점은 16개이고, 두 프로세스가 경합하는 복구도 하나씩 있습니다. 테스트는 원래 자식 식별자, 영속 자식 관계 하나, 컴파일 차감 한 번, 유지된 명령 연산 횟수도 확인합니다. 실행 마커로는 완료된 자식 작업이 프로세스 종료를 거치며 반복되지 않았는지 확인합니다.
 
-## 불확실한 자식 실행
+## 자식 실행 결과가 불확실한 경우
 
-`Dispatched` relation만으로는 process가 사라지기 전에 Core 작업이 실행되었는지 확정할 수 없다. child가 여전히 running으로 기록되어 있고 정확한 checkpoint가 없으며 그 plan이 checkpoint 없이 replay하기에 안전하지 않으면 parent reconnect는 안전하게 거부한다. `recover_child_synthesis`는 child ID와 input을 유지하면서 `P_CHILD_SYNTHESIS_CHILD_UNCERTAIN`을 가진 `ReconciliationRequired`를 기록한다.
+`Dispatched` 관계만으로는 프로세스가 사라지기 전에 Core 작업이 실행되었는지 알 수 없습니다. 자식이 여전히 실행 중으로 기록되어 있고, 정확한 체크포인트가 없으며, 그 플랜이 체크포인트 없이 재생(replay)하기에 안전하지 않다면 부모를 다시 연결할 때 실패 시 차단으로 동작합니다. `recover_child_synthesis`는 자식 ID와 input을 유지한 채 `P_CHILD_SYNTHESIS_CHILD_UNCERTAIN`과 함께 `ReconciliationRequired`를 기록합니다.
 
-이 inactive-parent 복구 검사는 살아 있는 부모에 reconnect하는 경우를 lost execution으로 잘못 분류하지 않는다. live reconnect는 기존 attempt를 반환한다.
+비활성 부모에 대한 이 복구 검사는 실행 중인 부모에 다시 연결하는 것을 실행 유실로 잘못 분류하지 않습니다. 실행 중인 부모에 다시 연결하면 기존 시도를 반환합니다.
 
-불확실성 처리는 synthesis record가 이미 `Spawned`라고 표시해도 적용된다. record는 이전 artifact를 바꾸지 않고 reconciliation 처리를 append할 수 있다. 대체 child를 발급하거나 성공 result를 만들어 내지 않는다. 이 변경은 자동 reconciliation 승인 API를 제공하지 않는다.
+불확실성 처리는 합성 레코드가 이미 `Spawned`라고 되어 있어도 적용됩니다. 레코드는 앞선 산출물을 바꾸지 않고 이 조정 처리 방침을 추가할 수 있습니다. 대체 자식을 새로 만들거나 성공 결과를 꾸며내지는 않습니다. 이 변경은 자동 조정 승인 API를 제공하지 않습니다.
 
 ## 추가 검사
 
-- reservation acknowledgement를 잃은 뒤 synthesis history를 읽을 수 없더라도 compile 단위를 환급할 수 없다. 읽기가 복구되면 원래 요청을 재사용한다.
-- PostgreSQL test는 reservation transaction 안에서 database connection을 종료한다. 새 connection은 원래 부모와 부분 reservation이 없음을 확인하며, 다음 attempt는 한 번만 차감한다.
-- semantic validation 중 cancellation이 발생하면 admission이나 child dispatch에 도달할 수 없다.
-- Catalog activation은 생성된 binding을 다른 version으로 돌릴 수 없다.
-- retention pin은 필요한 version을 보존한다. 호스트가 child version을 제거하면 캐시된 synthesis 증거로 실행할 수 없다. 모든 synthesis history에서 retention root를 자동 수집하는 일은 계속 호스트 책임이다.
-- Program replacement는 compile 차감을 유지하며 오래된 run의 연결되지 않은 generated binding을 successor generation으로 넘기지 않는다. 연결된 descendant는 이제 [재귀 Harness 계약](PROGRAM_RECURSIVE_HARNESSES.md)을 통해 유지할 수 있다.
-- PostgreSQL test는 process-exit matrix와 connection-termination case를 포함해 기존 CTest database resource lock을 공유한다.
+- 예약 확인 응답을 잃은 뒤 합성 이력을 읽을 수 없게 되더라도 컴파일 1건을 환불할 수 없습니다. 다시 읽을 수 있게 되면 원래 요청을 재사용합니다.
+- PostgreSQL 테스트는 예약 트랜잭션 안에서 데이터베이스 연결을 끊습니다. 새 연결에서는 원래의 부모가 보이고 일부만 반영된 예약은 없으며, 이어지는 시도는 한 번만 차감합니다.
+- 의미 검증 중에 취소하면 승인(admission)이나 자식 dispatch에는 도달하지 않습니다.
+- Catalog 활성화로 생성된 binding을 다른 버전으로 돌릴 수 없습니다.
+- 보존 핀(retention pin)이 필요한 버전을 지킵니다. 호스트가 자식 버전을 제거하면 캐시된 합성 증거로는 그 버전을 실행할 수 없습니다. 모든 합성 이력에서 보존 루트를 자동으로 수집하는 일은 계속 호스트의 책임입니다.
+- Program을 교체해도 컴파일 차감은 유지되며, 이전 run에서 연결되지 않은 생성된 binding이 후임 세대로 넘어가지는 않습니다. 연결된 자손은 이제 [재귀 Harness 계약](PROGRAM_RECURSIVE_HARNESSES.md)을 통해 유지할 수 있습니다.
+- PostgreSQL 테스트는 프로세스 종료 매트릭스와 연결 종료 케이스를 포함해 기존 CTest 데이터베이스 리소스 락을 공유합니다.
 
-## 이 검증의 한도
+## 이 검증의 한계
 
-이 검증은 명시된 수직 시나리오의 process 및 connection failure를 다룬다. 모든 외부 effect의 exactly-once, power-loss 검증, host 간 database failover, 불확실한 Core/provider 결과의 자동 해결을 주장하지 않는다. mixed host effect가 포함된 일반 structured join은 기존 reconciliation 동작을 유지한다. 여러 generated child tree, 임의의 외부 validator 중 cancellation, 전체 graph-migration 조합, retention-root 자동 탐색, synthesis performance 및 storage-growth 검증은 별도 검증이 필요하다.
+이것은 명시한 세로형(vertical) 시나리오에 대한 프로세스 및 연결 장애 검증입니다. 외부 효과가 어디서나 정확히 한 번만 일어난다거나, 정전 상황까지 검증했다거나, 호스트 간 데이터베이스 장애 조치(failover)를 다룬다거나, 불확실한 Core/provider 결과를 자동으로 해소한다는 주장이 아닙니다. 여러 종류의 호스트 효과가 섞인 일반 구조화 join은 기존의 조정(reconciliation) 동작을 그대로 따릅니다. 생성된 자식 트리가 여럿인 경우, 임의의 외부 검증기가 실행되는 중의 취소, 그래프 마이그레이션의 모든 조합, 보존 루트의 자동 탐색, 합성의 성능과 저장 공간 증가는 별도로 검증해야 합니다.
 
-호스트 통합은 [영속성 계약](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)을, 변경되지 않은 검토 source 및 권한 경계는 [권한 부여 계약](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md)을 참조한다.
+호스트 통합은 [영속화 계약](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)을, 달라지지 않은 검토된 소스와 권한의 경계는 [인가 계약](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md)을 참고하세요.
