@@ -1,19 +1,19 @@
 <!-- neograph-i18n: source=examples/cookbook/jarvis/docs/architecture.md locale=ja source_sha256=ed7f628ae6ae172e9e2cbd3d681d4880b503f251e10b745e7be089fbcdc42200 -->
-# JARVIS Graph — ノード別詳細
+# JARVISグラフ — ノードごとの詳細
 
 **Languages:** [English](architecture.md) | [한국어](architecture.ko.md) | [日本語](architecture.ja.md) | [简体中文](architecture.zh-CN.md)
 
-## 型付きプロバイダー移行 — ソースの状態
+## 型付きプロバイダーへの移行 — ソースの状況
 
-C++ルーター・合成器・専門家フィクスチャは型付き `ProviderRequest`、`sp::Message`、`sp::Event` と完全な不変 `sp::Outcome` (`sp::runtime::Result`) を使用し、旧文字列応答APIではない。`src/provider_support.h` のJarvis/coder/researcher mockは固定ルーターJSON、ユーザーテキストecho、明示的な架空の研究応答を返す。キーやネットワーク提供者は不要だが、本物の研究・推論ではない。以下の既存設定/プロファイルのパスを、この文書変更で作成・修正することはない。
+C++のルーター、シンセサイザー、スペシャリストのフィクスチャは、型付きの `ProviderRequest`、`sp::Message`、`sp::Event` を使います。プロバイダーの結果は、従来のレスポンス文字列ではなく、完全な不変の `sp::Outcome` の値（`sp::runtime::Result`）です。`src/provider_support.h` には、ローカルのJarvis／coder／researcherのモックプロファイルが実装されています。ルーターは決定的なJSONを返し、ユーザーのテキストをそのままエコーし、リサーチャーは合成であると明示した返信を返します。これらのフィクスチャに、認証情報もネットワークのプロバイダーも必要ありませんが、実際のリサーチも、エキスパートの推論も提供しません。以下に出てくる既存の設定とプロファイルのパスは、今回のドキュメントの更新では、修復も作成もしていません。
 
-ローカル音声は任意で、選択したwhisper/Moonshineモデル、ONNX Runtime/Supertonic資産、miniaudio、利用可能なマイク・スピーカーが必要。テキスト/mock動作は音声動作の証拠ではない。クラウド不要はローカル/mockのみ。ライブには承認された `OPENROUTER_API_KEY`、ネットワーク・提供者容量が必要で、プロンプト・会話メモリ・添付ツール/委譲結果をOpenRouterへ送信する。モデルは固定され、ネイティブ要求のZDRは地域内常駐保証ではない。キーをログ・リポジトリへ入れない。nullableトークン使用量は請求額ではなく、費用には現行のエンドポイント/モデル価格と実際の請求対象使用量が必要。
+ローカルの音声は任意です。選択したwhisper／Moonshineのモデル、ONNX Runtime／Supertonicのアセット、miniaudio、使えるマイクとスピーカーが必要です。テキストやモックで動くことは、音声が動作する証拠にはなりません。クラウドを使わないと言えるのは、ローカルまたはモックで動かす場合だけです。実際のリクエストには、承認された `OPENROUTER_API_KEY`、ネットワークへのアクセス、プロバイダーの処理能力が必要です。プロンプト、会話のメモリ、添付されたツールや委任の結果が、OpenRouterに送られます。実際に使うモデルは固定されています。ネイティブのリクエストはZDRを設定しますが、データの所在地（residency）を保証するものではありません。キーは、ログやバージョン管理に含めないでください。プロバイダーのトークン使用量は、null値になりうる集計であり、金額の請求ではありません。コストを求めるには、現在のエンドポイントとモデルの料金、および課金対象の使用量が必要です。
 
-`[jarvis:ttft]` は最初の非空 `sp::PartDelta` の `PartKind::Text`・`DeltaChannel::Content` で発生し、使用量・推論・ヘッダーイベントでは発生しない。最初の合成テキストであり、実際のTTS音声開始ではない。Python REPL driver は protocol client です。pybind benchmark は移行済み型付き binding を使い、別の実行証拠が必要です。 保存された C++ 証拠は CLI 挨拶、synthetic memory の永続化、正常 EOF に限定されます。以下の voice/live timing は過去の記録で移行後の経路を検証しません。
+`[jarvis:ttft]` が出力されるのは、`PartKind::Text` かつ `DeltaChannel::Content` の `sp::PartDelta` で、空でないものを最初に受け取ったときです。使用量、推論、ヘッダー、その他のイベントでは出力されません。これが測るのは、最初の合成テキストまでの時間で、TTSの音声が最初に再生されるまでの時間ではありません。Python REPLのドライバーは、引き続きプロトコルのクライアントです。pybindのベンチマークは、移行後の型付きバインディングを使いますが、別に実行したエビデンスが必要です。保存してあるC++のエビデンスが対象としているのは、CLIのあいさつ、合成したメモリの永続化、EOFでの正常終了です。以下の音声とライブの所要時間は過去のもので、移行後の経路の適格性確認にはなりません。
 
-`config/jarvis_graph.json`内の各ノードが何を行うか、そしてなぜその位置にあるのか。README.mdの図と併せて読むのが最適です。
+`config/jarvis_graph.json` の各ノードが何をするのか、そしてなぜその位置にあるのかを説明します。README.mdの図とあわせて読むのが最適です。
 
-## 1ターンのライフスパン
+## 1ターンの流れ
 
 ```
 T0  Microphone active, Tony utterance start detected
@@ -28,106 +28,106 @@ T8  TTS first chunk playback starts ← point where Tony "starts hearing" the re
 T9  TTS last chunk playback complete, microphone reactivated waiting
 ```
 
-T0→T8はJARVISの認識応答時間です。目標分布は次のとおりです:
-- 短い応答 (直接 + skip_synthesis): T0→T8 ≈ 1.0〜1.5秒
-- 通常 (直接 + synth): T0→T8 ≈ 2.0〜3.0秒
-- 委任 (delegate): T0→T8 ≈ 3.0〜8.0秒 (エキスパートの作業時間に依存)
-- 包括的 (並列 + synth): T0→T8 ≈ 2.5〜4.0秒
+T0→T8は、JARVISの応答時間としてユーザーが感じる時間です。目標とする分布は、次のとおりです。
+- 短い回答（direct＋skip_synthesis）：T0→T8は約1.0〜1.5秒
+- 通常（direct＋synth）：T0→T8は約2.0〜3.0秒
+- 委任（delegate）：T0→T8は約3.0〜8.0秒（エキスパートの作業時間によって変わる）
+- 総合的な回答（parallel＋synth）：T0→T8は約2.5〜4.0秒
 
-## ノード別詳細
+## ノードごとの詳細
 
-### mic_capture (`voice_in`) — ライブマイク実装
-- デフォルトはstdinモード (テキスト / `wav:/path`)。**`use_microphone:true`またはenv `JARVIS_MIC=1`** がライブマイクキャプチャを有効化します。
-- `miniaudio` キャプチャデバイスは16kHzモノラルf32をコールバック→ミューテックスバッファへストリーミングします
-- VADワーカースレッドは`Silero VAD`(ONNX)推論を512サンプル(32ms)ウィンドウで実行→音声確率
-- `vad_threshold`(0.5)を超えた場合、録音が開始され（カットオフを防ぐため200msのプリロール）、500msの連続無音で発話を終了判定→PCMがutterance queue
-- 250ms未満のノイズは無視。`max_utterance_seconds`を超えた場合、強制終了。
-- **デバイス初期化失敗時(WSL2オーディオブリッジなし、など)の自動stdinフォールバック** — クラッシュしません。WSLg/PulseAudioソースが利用可能であればWSL2上でライブ動作します。
+### mic_capture（`voice_in`）— ライブマイクに対応済み
+- デフォルトはstdinモード（テキスト、または `wav:/path`）です。**`use_microphone:true` または環境変数 `JARVIS_MIC=1`** で、ライブのマイク入力が有効になります。
+- `miniaudio` のキャプチャデバイスが、16 kHz・モノラル・f32の音声をコールバックにストリーミングし、ミューテックスで保護したバッファにためます。
+- VADのワーカースレッドが、512サンプル（32 ms）のウィンドウごとに `Silero VAD`（ONNX）で推論し、音声の確率を求めます。
+- `vad_threshold`（0.5）を超えると録音を開始します（途切れを防ぐため、200 msのプリロールを含みます）。500 ms無音が続くと、発話が終わったとみなします。PCMが発話キューに入れられ、run()がvoice_inを受け取ります。
+- 250 ms未満のノイズは無視されます。`max_utterance_seconds` を超えると、強制的に終了します。
+- **デバイスの初期化に失敗した場合（WSL2のオーディオブリッジがない場合など）は、自動でstdinにフォールバックします。** クラッシュはしません。WSLg／PulseAudioのソースがあれば、WSL2でもライブで動作します。
 
-### stt (`whisper_stt` または `moonshine_stt`)
-- ノードの生存期間中、単一の whisper.cpp モデルを再利用します（再ロードコストなし ×）
-- `language="auto"` は最初の30秒（または発話全体）から自動検出します
-- 出力: `user_text`（単一文字列）、`user_lang`（ISOコード）
-- 認識信頼度が低すぎる場合は空文字列 — ルーター段階でターンはスキップされます
+### stt（`whisper_stt` または `moonshine_stt`）
+- ノードが存在する間、1つのwhisper.cppモデルを再利用します（再読み込みのコストはかかりません）。
+- `language="auto"` では、最初の30秒（または発話全体）から言語を自動で検出します。
+- 出力は、`user_text`（単一の文字列）と `user_lang`（ISOコード）です。
+- 認識の信頼度が低すぎる場合は、空の文字列になります。そのターンは、ルーターの段階でスキップされます。
 
-**GPU アクセラレーション（whisper.cpp ROCm/HIP）**: 同梱の whisper.cpp は CPU のみ対応のため、whisper-large-v3-turbo は CPU で約32秒かかります（jfk では11秒）— ライブ用途には不適切です。AMD GPU（gfx1201=R9700、ROCm≥7.2）では `bash scripts/build_whisper_hip.sh` を実行して GGML_HIP ビルドを生成します → whisper_install を置き換え → **約7秒（4.5倍）**。run_jarvis.sh は自動的に ROCm ランタイムと WSL dxg ブリッジ（HSA_ENABLE_DXG_DETECTION）を読み込みます。GPU があれば設定はリアルタイム用に large のままにできます。GPU がない場合は、whisper-small（CPU 約8秒）に切り替えます。
+**GPUによる高速化（whisper.cpp ROCm/HIP）**：同梱のwhisper.cppはCPU専用なので、whisper-large-v3-turboは、CPUで約32秒かかります（jfkでは11秒）。ライブでの利用には向きません。AMD GPU（gfx1201＝R9700、ROCm 7.2以上）では、`bash scripts/build_whisper_hip.sh` を実行してGGML_HIPビルドを作り、whisper_installを置き換えると、**約7秒（4.5倍）**になります。run_jarvis.shは、ROCmランタイムとWSLのdxgブリッジ（HSA_ENABLE_DXG_DETECTION）を自動で読み込みます。GPUがあれば、設定をlargeのままリアルタイムで使えます。GPUがない場合は、whisper-small（CPUで約8秒）に切り替えます。
 
-**代替オプション `moonshine_stt`**（Moonshine-tiny ONNX）: 27M の超軽量モデル。raw 16kHz 波形入力（メル特徴量ではない）。seq2seq（エンコーダ + 2モデル分離デコーダ + KVキャッシュ）。supertonic TTS と ONNX Runtime を共有します。言語固有のフレーバーモデルであるため、`user_lang` は設定固定です（tiny-ko = "ko"）。トークナイザーは tokenizer.json 内の SentencePiece BPE から直接デコードします（▁→空白 + ByteFallback + Fuse）。config stt.type で値の切り替えが可能で、Python optimum リファレンスで 55 トークンの文字レベル一致を検証済みです。int8（約28MB）はフル ORT ビルドが必要です（同梱の縮小ビルドは ConvInteger を除外しているため）— デフォルトは fp32（約183MB）。
+**代替の選択肢 `moonshine_stt`**（Moonshine-tiny ONNX）：27Mの超軽量モデルで、入力はメルスペクトログラムではなく、16 kHzの生の波形です。構成はseq2seq（エンコーダー、2つに分かれたデコーダーモデル、KVキャッシュ）です。supertonicのTTSとONNX Runtimeを共有します。言語ごとのモデルなので、`user_lang` は設定で固定します（tiny-koなら "ko"）。トークナイザーは、tokenizer.jsonのSentencePiece BPEから直接デコードします（▁→スペース、ByteFallback、Fuse）。設定のstt.typeを切り替えるだけで差し替えられます。Pythonのoptimumのリファレンスとは、55トークンの文字レベルで一致することを確認済みです。int8（約28 MB）には、フルビルドのORTが必要です（同梱の縮小ビルドにはConvIntegerがありません）。そのため、デフォルトはfp32（約183 MB）です。
 
-### text_or_voice (`channel_merge`)
-- voice_in（STT経由）と text_in（外部 A2A）の間でアクティブなパスを選択します
-- 両方が空の場合は空のターン — グラフは1サイクル通過します
-- 外部 A2A 呼び出しには `user_lang` も含める必要があります（"en" が欠落している場合は "en" を想定）
+### text_or_voice（`channel_merge`）
+- voice_in（STTを通ったもの）と、text_in（外部のA2A）のうち、有効なほうの経路を選びます。
+- 両方が空なら、空のターンになります。グラフは1サイクルをそのまま通過します。
+- 外部のA2A呼び出しにも、`user_lang` を含める必要があります（ない場合は "en" とみなします）。
 
-### memory_lookup (`memory_lookup`)
-- NeoGraph の `Store` `jarvis.tony` ネームスペースから読み取ります
-- 直近の N ターン + プリファレンス + last_topic を単一の `memory_context` プッシュに結合します
-- コスト×、常にグラフ開始時に実行されます
+### memory_lookup（`memory_lookup`）
+- NeoGraphの `Store` の `jarvis.tony` 名前空間から読み取ります。
+- 直近N回分のターン、設定値、last_topicをまとめて、1つの `memory_context` にして渡します。
+- コストはかかりません。常に、グラフの開始時に実行されます。
 
-### router (`intent_classifier`)
-- OpenRouter経由でDeepSeekモデルを固定（約200〜400ms）
-- システムプロンプト = persona.txt [router] + MCPカタログテキスト + エージェントレジストリテキスト
-- 出力JSON検証：パース失敗 → フォールバック（mode=chat）。ツール・エージェント名はカタログ・レジストリと照合；実在しない場合はchatに降格（LLMが捏造した`delegate_to:"null"`が下流に流れるのを防止）
-- Chatモードはツール・委任なしで直接response_synthへ進む — 挨拶、自己紹介、会話の想起などのユースケース向け
+### router（`intent_classifier`）
+- OpenRouter経由で、固定したDeepSeekのモデルを使います（約200〜400 ms）。
+- システムプロンプトは、persona.txtの[router]に、MCPカタログのテキストとエージェントレジストリのテキストを加えたものです。
+- 出力のJSONを検証します。パースに失敗した場合はフォールバックします（mode=chat）。ツール名とエージェント名は、カタログとレジストリに照らして確認し、実在しなければchatに降格します（LLMが作り出した `delegate_to:"null"` が下流に流れるのを防ぎます）。
+- chatモードは、ツールも委任も使わず、response_synthに直接進みます。あいさつ、自己紹介、会話の振り返りに使います。
 
 ### direct_branch（`tool_dispatch`）
-- `route_decision.tool_calls[0]`を一度だけディスパッチ
-- 結果を`tool_results`チャネルに追記
-- skip_synthesis=trueの場合、次のノードをバイパスしてTTSへ直接送る
+- `route_decision.tool_calls[0]` を1回ディスパッチします。
+- 結果を、`tool_results` チャネルに追加します。
+- skip_synthesis=trueの場合は、次のノードを飛ばして、直接TTSに進みます。
 
 ### parallel_branch（`parallel_tool_fanout`）
-- すべての`route_decision.tool_calls`を同時に実行（`make_parallel_group`）
-- `max_concurrent`による上限（デフォルト4）
-- すべての結果を順番に`tool_results`に追記 → reducerがシンセサイザーに使用
+- `route_decision.tool_calls` をすべて同時に実行します（`make_parallel_group`）。
+- 上限は `max_concurrent` で指定します（デフォルトは4）。
+- すべての結果を、順番に `tool_results` に追加します。リデューサーが、シンセサイザー向けにそれを使います。
 
 ### delegate_branch（`a2a_delegate`）
-- user_textを`route_decision.delegate_to`が指すA2Aエンドポイントに送信
-- `timeout_seconds`を超過した場合のエラー応答（JARVISが音声で「エキスパートが応答していません」と発話）
-- 応答から最初に`[SUMMARY]`行を抽出 → `delegated_reply`に保存
+- `route_decision.delegate_to` が指すA2Aエンドポイントに、user_textを送ります。
+- `timeout_seconds` を超えると、エラーのレスポンスを返します（JARVISは、音声で「エキスパートが応答していません」と伝えます）。
+- レスポンスから `[SUMMARY]` の行を最初に取り出し、`delegated_reply` に保存します。
 
-### response_synth (`llm_call`)
-- OpenRouter経由でDeepSeekモデルを固定使用（約800〜1500ms）
-- システムプロンプト = persona.txt [synth]（言語指示 + セッション境界コメント付き）
-- 会話履歴（memory_context.recent_turns）は**ユーザー/アシスタント役割ターンのmessages配列として渡される** — 以前は、ユーザーメッセージ内のインラインJSONにより、モデルが過去の回答をそのままコンテンツとして扱っていた（メモリ鸚鵡）。
-- 現在のターンのユーザーメッセージ = ユーザーテキスト + ツール結果 / 委任された返信を結合。
-- 逐語ガード: 出力がトリム後に過去の回答と完全一致する場合、一度だけ再生成
-- 出力 = `final_text`（TTSが読み上げる文字列）
-- skip_synthesis=true パスではバイパス（synth_skipがこの位置を占める）
+### response_synth（`llm_call`）
+- OpenRouter経由で、固定したDeepSeekのモデルを使います（約800〜1500 ms）。
+- システムプロンプトは、persona.txtの[synth]に、言語の指示とセッション境界のコメントを加えたものです。
+- 会話履歴（memory_context.recent_turns）は、**userとassistantのロールのターンからなるメッセージ配列として渡します**。以前は、履歴をユーザーメッセージの中にインラインのJSONとして入れていたため、モデルが過去の回答をそのままコンテンツとして扱ってしまいました（メモリのオウム返し）。
+- 現在のターンのユーザーメッセージは、user_textに、tool_resultsやdelegated_replyを付けたものです。
+- verbatimガード：出力をtrimしたものが、過去の回答と完全に一致した場合は、1回だけ再生成します。
+- 出力は `final_text`（TTSが読み上げる文字列）です。
+- skip_synthesis=trueの経路では、このノードを通りません（この位置にはsynth_skipが入ります）。
 
-### synth_skip (`passthrough`)
-- tool_resultsの最後の項目（通常はツールの生レスポンス）をfinal_textとして直接コピー
-- Example: Time tool returns "3:30 PM" → 直接voice応答
-- JARVIS応答速度の秘密兵器 — 約1秒の大規模LLM呼び出しをまるごと節約
+### synth_skip（`passthrough`）
+- tool_resultsの最後の項目（通常は、ツールの生のレスポンス）を、そのままfinal_textにコピーします。
+- 例：Timeツールが「午後3:30」を返したら、そのまま音声にします。
+- JARVISの応答が速い理由です。約1秒かかる大きなLLM呼び出しを、まるごと省けます。
 
-### memory_commit (`memory_commit`)
-- このターンのuser_text + final_text + 使用ツール名をStore turnsに追記
-- 次のターンのmemory_lookupがこれらをルーターコンテキスト用に取得
-- TTSとparallelにasynchronous処理可能 - currently seriesで実行。
+### memory_commit（`memory_commit`）
+- このターンのuser_text、final_text、使ったツール名を、Storeのturnsに追加します。
+- 次のターンのmemory_lookupが、これを取り出して、ルーターのコンテキストに使います。
+- TTSと並行して、非同期に処理することもできますが、現在は直列です。
 
-### tts (`supertonic_tts`)
-- 上位音推論：final_text + user_lang → 44.1kHz PCM
-- miniaudioのスピーカー再生を開始 → 最初のチャンクは約100〜300ミリ秒後
-- Barge-in は未実装です。再生中の microphone input は破棄します。
+### tts（`supertonic_tts`）
+- supertonicが、final_textとuser_langから推論して、44.1 kHzのPCMを作ります。
+- miniaudioのスピーカー再生を開始します。最初のチャンクが鳴るまで、約100〜300 msかかります。
+- バージイン（割り込み発話）は実装されていません。再生中のマイク入力は破棄されます。
 
-## Graph外部 — バックグラウンドトリガー / A2Aサーバー
+## グラフの外側 — バックグラウンドトリガーとA2Aサーバー
 
-main graph は cycle ごとに一発話と応答を処理します。A2A server は実装済みですが、以下の background trigger は未実装の設計です。
+メイングラフが処理するのは、1サイクルにつき1回の発話と応答です。A2Aサーバーは実装済みです。以下のバックグラウンドトリガーは、未実装の設計の説明です。
 
-### バックグラウンドトリガーグラフ
-- 別の`GraphEngine`(または単に std::thread)
-- タイマー / 外部イベントを監視する
-- イベント発生時にJARVISメインの`text_in`チャンネルへメッセージを注入する
-- JARVISがトニーの質問前に発話する（「サー、10分後に会議です。」）
+### バックグラウンドトリガーのグラフ
+- 別の `GraphEngine`（または、単なるstd::thread）を使います。
+- タイマーや外部のイベントを監視します。
+- イベントが起きたら、JARVISのメイングラフの `text_in` チャネルにメッセージを入れます。
+- JARVISは、Tonyが尋ねる前に話しかけます（「サー、10分後に会議があります」）。
 
-### A2A. Server (JARVIS を外部に公開)
-- `self`の`agent_registry.json`内のセクションに基づく
-- :同じエンジンを`GraphAgentAdapter`でラップして公開します（例38のパターン）
-- 外部テキスト入力はSTTステージをスキップし、`text_in` → ルーターへ直接進みます
-- 応答はテキストとして返送するか、ローカルのTTSで同時に再生することができます。
+### A2Aサーバー（JARVISを外部に公開する）
+- `agent_registry.json` の `self` セクションに基づきます。
+- 同じエンジンを `GraphAgentAdapter` で包んで公開します（サンプル38のパターン）。
+- 外部からのテキスト入力は、STTの段階を飛ばして、`text_in` からルーターに直接入ります。
+- 応答は、テキストで返すこともできますし、同時にローカルのTTSで再生することもできます。
 
-## 既知の制限 / 次のバージョン
+## 既知の制限と次のバージョン
 
-- **Barge-in は非対応** — TTS再生中のマイク入力を無視します。v2でキャンセルトークンを追加します。
-- **マルチスピーカーは非対応** — 一人を想定しています。話者分離には別のノード(例:pyannote)が必要です。
-- **Long-memory compression** — lookup は既定で最近六 turn を読み、commit は最新 24 turn を保持します。古い turn は要約せず破棄します。
-- **Catalog hot-reload** — startup 時に catalog を読みます。変更後は再起動してください。自動 reload は未実装です。
+- **バージインには未対応** — TTSの再生中は、マイク入力が無視されます。v2で、キャンセルトークンを追加する予定です。
+- **複数の話者には未対応** — 話者は1人であるとみなします。話者を分離するには、別のノードが必要です（たとえばpyannote）。
+- **長期メモリの圧縮** — 検索のデフォルトは直近6ターンで、コミットでは最新の24ターンを保持します。それより古いターンは、要約されずに破棄されます。
+- **カタログのホットリロード** — カタログは起動時に読み込みます。編集したら再起動してください。自動での再読み込みは実装されていません。
