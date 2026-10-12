@@ -14,7 +14,7 @@ OpenRouter baai/bge-m3 (dense, max length 8192)
   -> NeoGraph compatibility and admission planner
 ```
 
-ローカル密インデックスは永続的なFaiss `IndexIDMap2(IndexHNSWFlat)`として格納され、`topologies.faiss` として保存されています。信頼されるローカルな companion `topologies.manifest.pkl` には、vector-IDマッピング、BGEモデルスラッグ、8192トークンポリシー、記述子フィンガープリント、およびインデックスハッシュが記録されています。信頼できないソースからpickleをロードしないでください。
+ローカル密インデックスは永続的なFaiss `IndexIDMap2(IndexHNSWFlat)`として格納され、`topologies.faiss` として保存されています。信頼されるローカルな companion `topologies.manifest.pkl` には、vector-IDマッピング、BGEモデルスラッグ、8192トークンポリシー、記述子フィンガープリント、およびインデックスハッシュが記録されています。信頼できないソースからpickleをロードしないでください。 インデックスは既定では一時ディレクトリに作られ、プログラムの終了時に削除されます。実行をまたいで残すには `--index-dir` を指定してください。
 
 インストールと実行:
 

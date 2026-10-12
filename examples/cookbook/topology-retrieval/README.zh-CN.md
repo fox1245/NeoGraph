@@ -14,7 +14,7 @@ OpenRouter baai/bge-m3 (dense, max length 8192)
   -> NeoGraph compatibility and admission planner
 ```
 
-本地稠密索引是一个持久化的 Faiss `IndexIDMap2(IndexHNSWFlat)`，存储为 `topologies.faiss`。配套的受信本地 `topologies.manifest.pkl` 记录向量-ID 映射、BGE 模型 slug、8192 token 策略、描述符指纹以及索引哈希。请勿从不受信任的来源加载 pickle。
+本地稠密索引是一个持久化的 Faiss `IndexIDMap2(IndexHNSWFlat)`，存储为 `topologies.faiss`。配套的受信本地 `topologies.manifest.pkl` 记录向量-ID 映射、BGE 模型 slug、8192 token 策略、描述符指纹以及索引哈希。请勿从不受信任的来源加载 pickle。 默认情况下索引放在临时目录中，程序退出时删除。要在多次运行之间保留，请指定 `--index-dir`。
 
 安装并运行：
 

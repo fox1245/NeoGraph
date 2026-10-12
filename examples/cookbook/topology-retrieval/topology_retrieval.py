@@ -15,16 +15,26 @@ Dependencies:
     python -m pip install faiss-cpu numpy
 
 Usage:
-    # Uses OPENROUTER_API_KEY from the environment or a parent .env file.
+    # Uses OPENROUTER_API_KEY from the process environment (no .env file is read).
     python topology_retrieval.py --query "preserve a running graph frontier while updating implementation"
 
     # No network; deterministic stand-in vectors/relevance scores.
     python topology_retrieval.py --mock --query "find a graph migration topology"
+
+    # The Faiss index and its manifest live in a temporary directory that is removed on exit.
+    # Pass --index-dir to keep them between runs.
+
+smoke-requires: faiss, numpy
+smoke-args: --mock --query "preserve a running graph frontier while updating implementation"
+smoke-expect: "candidate_key": "shape-preserving-implementation-evolution"
+smoke-expect: "action": "p1_migrate"
+smoke-expect: "pipeline": [
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -32,6 +42,7 @@ import os
 import pickle
 import re
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -145,20 +156,6 @@ CATALOG = tuple(
         ),
     )
 )
-
-
-def load_dotenv() -> None:
-    """Load the first .env found from the current directory upward."""
-    for directory in (Path.cwd(), *Path.cwd().parents):
-        path = directory / ".env"
-        if not path.is_file():
-            continue
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line or line.lstrip().startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-        return
 
 
 def truncate_for_bge_m3(text: str) -> str:
@@ -352,63 +349,68 @@ def rerank(
 def main() -> int:
     parser = argparse.ArgumentParser(description="NeoGraph local topology retrieval cookbook")
     parser.add_argument("--query", required=True, help="Task or developer instruction to retrieve for")
-    parser.add_argument("--index-dir", type=Path, default=Path(".neograph-topology-index"))
+    parser.add_argument("--index-dir", type=Path, default=None,
+                        help="Keep the Faiss index and manifest here (default: a temporary directory "
+                             "removed on exit)")
     parser.add_argument("--mock", action="store_true", help="Use deterministic offline embeddings/reranking")
     parser.add_argument("--rebuild", action="store_true", help="Discard local Faiss/manifest artifacts first")
     args = parser.parse_args()
 
-    load_dotenv()
     api_key = os.getenv("OPENROUTER_API_KEY", "")
     if not args.mock and not api_key:
         parser.error("OPENROUTER_API_KEY is required unless --mock is set")
-    if args.rebuild:
-        for path in (args.index_dir / "topologies.faiss", args.index_dir / "topologies.manifest.pkl"):
-            path.unlink(missing_ok=True)
 
-    index_store = PersistentFaissIndex(args.index_dir)
-    dense_index, manifest = index_store.load_or_build(CATALOG, api_key, args.mock)
-    query_vector = bge_m3_embeddings([args.query], api_key, args.mock)[0]
-    dense = index_store.search(dense_index, query_vector, top_k=40)
-    bm25 = Bm25Index([candidate.retrieval_document() for candidate in CATALOG]).search(args.query, top_k=40)
-    vector_to_catalog = {candidate.vector_id: candidate for candidate in CATALOG}
-    dense_for_rrf = [(vector_id, score) for vector_id, score in dense if vector_id in vector_to_catalog]
-    bm25_for_rrf = [(CATALOG[index].vector_id, score) for index, score in bm25]
-    fused = reciprocal_rank_fusion(dense_for_rrf, bm25_for_rrf, top_k=20)
-    fused_candidates = [vector_to_catalog[vector_id] for vector_id, _ in fused]
-    reranked, rerank_response_id = rerank(args.query, fused_candidates, api_key, args.mock, top_k=5)
+    with contextlib.ExitStack() as stack:
+        index_dir = args.index_dir or Path(
+            stack.enter_context(tempfile.TemporaryDirectory(prefix="neograph-topology-")))
+        if args.rebuild:
+            for path in (index_dir / "topologies.faiss", index_dir / "topologies.manifest.pkl"):
+                path.unlink(missing_ok=True)
 
-    if reranked:
-        selected, relevance = reranked[0]
-        decision = {
-            "action": selected.migration_class,
-            "candidate_key": selected.candidate_key,
-            "topology_version_id": selected.topology_version_id,
-            "candidate_descriptor_sha256": selected.descriptor_sha256,
-            "planner_required": "resolve exact ProgramVersion, then rerun NeoGraph compatibility/admission",
-            "rerank_relevance": relevance,
-        }
-    else:
-        decision = {
-            "action": "dsl_synthesis_request",
-            "planner_required": "create ProgramSynthesisProposal; proposal has no execution authority",
-        }
+        index_store = PersistentFaissIndex(index_dir)
+        dense_index, manifest = index_store.load_or_build(CATALOG, api_key, args.mock)
+        query_vector = bge_m3_embeddings([args.query], api_key, args.mock)[0]
+        dense = index_store.search(dense_index, query_vector, top_k=40)
+        bm25 = Bm25Index([candidate.retrieval_document() for candidate in CATALOG]).search(args.query, top_k=40)
+        vector_to_catalog = {candidate.vector_id: candidate for candidate in CATALOG}
+        dense_for_rrf = [(vector_id, score) for vector_id, score in dense if vector_id in vector_to_catalog]
+        bm25_for_rrf = [(CATALOG[index].vector_id, score) for index, score in bm25]
+        fused = reciprocal_rank_fusion(dense_for_rrf, bm25_for_rrf, top_k=20)
+        fused_candidates = [vector_to_catalog[vector_id] for vector_id, _ in fused]
+        reranked, rerank_response_id = rerank(args.query, fused_candidates, api_key, args.mock, top_k=5)
 
-    print(json.dumps({
-        "schema_version": 1,
-        "pipeline": ["dense", "bm25", "rrf", "rerank"],
-        "dense": {
-            "model": manifest["dense_model"],
-            "max_length_tokens": manifest["max_length_tokens"],
-            "faiss_index": str(index_store._index_path),
-            "manifest": str(index_store._manifest_path),
-            "index_sha256": manifest["index_sha256"],
-            "results": dense_for_rrf,
-        },
-        "bm25": {"results": bm25_for_rrf},
-        "rrf": {"results": fused},
-        "rerank": {"model": "mock" if args.mock else RERANK_MODEL, "response_id": rerank_response_id},
-        "decision": decision,
-    }, indent=2))
+        if reranked:
+            selected, relevance = reranked[0]
+            decision = {
+                "action": selected.migration_class,
+                "candidate_key": selected.candidate_key,
+                "topology_version_id": selected.topology_version_id,
+                "candidate_descriptor_sha256": selected.descriptor_sha256,
+                "planner_required": "resolve exact ProgramVersion, then rerun NeoGraph compatibility/admission",
+                "rerank_relevance": relevance,
+            }
+        else:
+            decision = {
+                "action": "dsl_synthesis_request",
+                "planner_required": "create ProgramSynthesisProposal; proposal has no execution authority",
+            }
+
+        print(json.dumps({
+            "schema_version": 1,
+            "pipeline": ["dense", "bm25", "rrf", "rerank"],
+            "dense": {
+                "model": manifest["dense_model"],
+                "max_length_tokens": manifest["max_length_tokens"],
+                "faiss_index": str(index_store._index_path),
+                "manifest": str(index_store._manifest_path),
+                "index_sha256": manifest["index_sha256"],
+                "results": dense_for_rrf,
+            },
+            "bm25": {"results": bm25_for_rrf},
+            "rrf": {"results": fused},
+            "rerank": {"model": "mock" if args.mock else RERANK_MODEL, "response_id": rerank_response_id},
+            "decision": decision,
+        }, indent=2))
     return 0
 
 

@@ -15,13 +15,15 @@ def main() -> int:
     parser.add_argument("--consumer", required=True, type=Path,
                         help="Path to example_topology_retrieval executable")
     parser.add_argument("--query", required=True)
-    parser.add_argument("--index-dir", type=Path, default=Path(".neograph-topology-index"))
+    parser.add_argument("--index-dir", type=Path, default=None,
+                        help="Keep the retriever's Faiss index here (default: a temporary directory)")
     parser.add_argument("--mock", action="store_true")
     args = parser.parse_args()
 
     retriever = Path(__file__).with_name("topology_retrieval.py")
-    command = [sys.executable, str(retriever), "--query", args.query,
-               "--index-dir", str(args.index_dir)]
+    command = [sys.executable, str(retriever), "--query", args.query]
+    if args.index_dir:
+        command += ["--index-dir", str(args.index_dir)]
     if args.mock:
         command.append("--mock")
     retrieval = subprocess.run(command, check=True, text=True, capture_output=True)

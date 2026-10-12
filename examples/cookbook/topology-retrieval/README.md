@@ -18,7 +18,7 @@ The local dense index is a persistent Faiss
 `IndexIDMap2(IndexHNSWFlat)` stored as `topologies.faiss`. A companion trusted
 local `topologies.manifest.pkl` records vector-ID mappings, the BGE model slug,
 the 8192-token policy, descriptor fingerprints, and the index hash. Do not load
-the pickle from an untrusted source.
+the pickle from an untrusted source. By default the index lives in a temporary directory that is removed when the program exits; pass `--index-dir` to keep it between runs.
 
 Install and run:
 
