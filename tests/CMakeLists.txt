@@ -902,9 +902,12 @@ if(TARGET neograph_program_sqlite AND TARGET neograph_sqlite AND TARGET neograph
         neograph::llm SQLite::SQLite3 GTest::gtest_main)
     neograph_discover_tests(neograph_program_provider_binding_tests)
 
-    # Program crash-recovery regressions found by the resume model harness,
-    # on the harness's fixtures (program_resume_fixture.h).
-    add_executable(neograph_program_resume_model_tests test_program_join_recovery.cpp)
+    # Bounded-exhaustive resume/replay harness at the Program level: the
+    # runtime as LocalProgramHost wires it, against a reference of the
+    # join/interrupt and once-per-run charging contract.
+    # NEOGRAPH_PROGRAM_RESUME_MODEL_BOUND=extended runs the larger bound.
+    add_executable(neograph_program_resume_model_tests
+        test_program_resume_model.cpp test_program_join_recovery.cpp)
     target_include_directories(neograph_program_resume_model_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/src/program)
     target_link_libraries(neograph_program_resume_model_tests PRIVATE
