@@ -121,7 +121,7 @@ python 01_minimal.py
 |---|---|---|---|
 | 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | yes | 启动本地 MCP 服务器，发现 `fetch`，并用显式可重入策略执行三次调用。需要启用 MCP 的构建，冒烟测试在 Linux 上进行。 |
 | 27 | [`27_a2a_server.py`](27_a2a_server.py) | yes | 通过官方 A2A SDK 托管智能体：`127.0.0.1:9999` 上的 agent card 与 JSON-RPC，以及流式 artifact。`--self-check` 在空闲端口上启动服务器，并用 SDK 自带的客户端进行两轮对话。需要 `neograph-engine[a2a]`。 |
-| 28 | [`28_acp_agent.py`](28_acp_agent.py) | service | 通过官方 ACP SDK 在 stdio 上托管智能体：initialize、创建会话、prompt、token 更新、`end_turn`。需要 `neograph-engine[acp]`。 |
+| 28 | [`28_acp_agent.py`](28_acp_agent.py) | yes | 通过官方 ACP SDK 在 stdio 上托管智能体：initialize、创建会话、prompt、token 更新、`end_turn`。`--self-check` 把智能体作为子进程运行，并用 SDK 的客户端进行两轮对话。需要 `neograph-engine[acp]`。 |
 
 ### 持久化与运维
 
