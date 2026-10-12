@@ -75,6 +75,7 @@ python 01_minimal.py
 | 77 | [`77_dynamic_interrupt.py`](77_dynamic_interrupt.py) | yes | `NodeInterrupt`：节点抛出它，载荷告诉调用方要问什么，`resume` 把答复（批准或拒绝）交还给节点。 |
 | 78 | [`78_max_steps.py`](78_max_steps.py) | yes | `max_steps`：循环被步数上限截停，结果会明确告知（`max_steps_exhausted`、`RunStatus.StepLimit`）；恰好在最后一步自行结束的运行不会被标记。 |
 | 79 | [`79_channels.py`](79_channels.py) | yes | 通道与 reducer：`overwrite` 与 `append` 的区别、`initial` 初始值，以及由所有通道共用同一个写入计数器的通道版本。 |
+| 80 | [`80_custom_registries.py`](80_custom_registries.py) | yes | 自定义 reducer 与条件：用 `ReducerRegistry.register_reducer` 无论顺序如何都保留三位评委的最高分，再用 `ConditionRegistry.register_condition` 按它选择路径。 |
 
 ### 智能体模式
 

@@ -75,6 +75,7 @@ python 01_minimal.py
 | 77 | [`77_dynamic_interrupt.py`](77_dynamic_interrupt.py) | yes | `NodeInterrupt`: 노드가 이를 발생시키면, 페이로드가 호출한 쪽에 물어볼 내용을 알려 주고, `resume`이 답(승인 또는 거절)을 노드에 돌려줍니다. |
 | 78 | [`78_max_steps.py`](78_max_steps.py) | yes | `max_steps`: 루프가 단계 한도에서 멈추고, 결과가 그 사실을 알려 줍니다(`max_steps_exhausted`, `RunStatus.StepLimit`). 마지막 단계에서 스스로 끝난 실행은 표시되지 않습니다. |
 | 79 | [`79_channels.py`](79_channels.py) | yes | 채널과 reducer: `overwrite`와 `append`의 차이, `initial` 값, 그리고 모든 채널이 하나의 쓰기 카운터를 공유하는 채널 버전. |
+| 80 | [`80_custom_registries.py`](80_custom_registries.py) | yes | 직접 만든 reducer와 조건: `ReducerRegistry.register_reducer`로 심사 세 명의 점수 중 가장 높은 값을 순서와 상관없이 남기고, `ConditionRegistry.register_condition`으로 그 값에 따라 경로를 고릅니다. |
 
 ### 에이전트 패턴
 

@@ -74,6 +74,7 @@ The remaining Core features, with no model involved. Example 14 writes `my_graph
 | 77 | [`77_dynamic_interrupt.py`](77_dynamic_interrupt.py) | yes | `NodeInterrupt`: a node raises it, the payload tells the caller what to ask, and `resume` hands the answer back to the node (approve or refuse). |
 | 78 | [`78_max_steps.py`](78_max_steps.py) | yes | `max_steps`: a loop is stopped by the step limit and the result says so (`max_steps_exhausted`, `RunStatus.StepLimit`); a run that ends on the last step is not flagged. |
 | 79 | [`79_channels.py`](79_channels.py) | yes | Channels and reducers: `overwrite` against `append`, `initial` values, and channel versions as one shared write counter. |
+| 80 | [`80_custom_registries.py`](80_custom_registries.py) | yes | Your own reducer and condition: `ReducerRegistry.register_reducer` keeps the highest of three judges' scores in any order, and `ConditionRegistry.register_condition` routes on it. |
 
 ### Agent patterns
 

@@ -75,6 +75,7 @@ python 01_minimal.py
 | 77 | [`77_dynamic_interrupt.py`](77_dynamic_interrupt.py) | yes | `NodeInterrupt`。ノードがこれを送出すると、ペイロードが呼び出し側に尋ねる内容を伝え、`resume` が答え（承認または拒否）をノードに返します。 |
 | 78 | [`78_max_steps.py`](78_max_steps.py) | yes | `max_steps`。ループがステップ上限で止まり、結果がそれを知らせます（`max_steps_exhausted`、`RunStatus.StepLimit`）。最後のステップで自然に終わった実行には印が付きません。 |
 | 79 | [`79_channels.py`](79_channels.py) | yes | チャンネルと reducer。`overwrite` と `append` の違い、`initial` の値、そして全チャンネルが 1 つの書き込みカウンターを共有するチャンネルバージョン。 |
+| 80 | [`80_custom_registries.py`](80_custom_registries.py) | yes | 独自の reducer と条件。`ReducerRegistry.register_reducer` で審査員 3 人のスコアの最大値を順序に関係なく残し、`ConditionRegistry.register_condition` でその値によって経路を選びます。 |
 
 ### エージェントパターン
 
