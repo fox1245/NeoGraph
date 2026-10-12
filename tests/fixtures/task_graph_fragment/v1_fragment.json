@@ -1,0 +1,148 @@
+{
+  "aggregate_budget": {
+    "model_tokens": 16000,
+    "monetary_microunits": 0,
+    "output_bytes": 0,
+    "wall_time_ms": 90000
+  },
+  "capability_effect_closure": [],
+  "child_depth": 0,
+  "expansion_operation_id": "op-expand",
+  "fragment_id": "sha256:35a9f1a77b82038ee62a60e4ad9afd89be8d13d005e0ab1eca2efbbe133d609f",
+  "join": {
+    "kind": "all"
+  },
+  "owner_scope": "tenant-a",
+  "parent_program_version_id": "version-parent",
+  "parent_run_id": "run-parent",
+  "proposal_hash": "sha256:eca11e4afc04106a713c8a61fe82e63d3774f1924bf544bf764427249a3d9e1a",
+  "schema_version": 1,
+  "source_map": [],
+  "tasks": [
+    {
+      "budget": {
+        "model_tokens": 12000,
+        "monetary_microunits": 0,
+        "output_bytes": 0,
+        "wall_time_ms": 60000
+      },
+      "capabilities": [],
+      "child_binding": "child-0",
+      "depends_on": [],
+      "effects": [],
+      "id": "research-api",
+      "input_bindings": [],
+      "input_fields": [
+        "/question"
+      ],
+      "operation_id": "sha256:2ab37045eb0f871e54b70fa0b8a9fc455ed18b1c37b26cced40a6bcc3a661f7a",
+      "output_artifacts": [
+        {
+          "artifact": "findings",
+          "fields": [
+            "/summary",
+            "/sources"
+          ]
+        }
+      ],
+      "reserved_budget": {
+        "model_tokens": 12000,
+        "monetary_microunits": 0,
+        "output_bytes": 0,
+        "wall_time_ms": 60000
+      },
+      "template_id": "researcher/v3",
+      "template_identity": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "budget": {
+        "model_tokens": 4000,
+        "monetary_microunits": 0,
+        "output_bytes": 0,
+        "wall_time_ms": 30000
+      },
+      "capabilities": [],
+      "child_binding": "child-1",
+      "depends_on": [
+        "research-api"
+      ],
+      "effects": [],
+      "id": "review-security",
+      "input_bindings": [
+        {
+          "from": {
+            "artifact": "findings",
+            "field": "/summary",
+            "task": "research-api"
+          },
+          "to": {
+            "field": "/candidate_summary"
+          }
+        }
+      ],
+      "input_fields": [
+        "/candidate_summary"
+      ],
+      "operation_id": "sha256:665c35a7dea169c35ed0ad6ce37f9b25a921a4093fd1068f5b477057f628cedf",
+      "output_artifacts": [
+        {
+          "artifact": "review",
+          "fields": [
+            "/decision"
+          ]
+        }
+      ],
+      "reserved_budget": {
+        "model_tokens": 4000,
+        "monetary_microunits": 0,
+        "output_bytes": 0,
+        "wall_time_ms": 30000
+      },
+      "template_id": "security-reviewer/v2",
+      "template_identity": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "template_receipts": [
+    {
+      "capabilities": [],
+      "child_binding": "child-0",
+      "content_identity": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "effects": [],
+      "executable_identity": "worker-0",
+      "input_fields": [
+        "/question"
+      ],
+      "kind": "node",
+      "output_artifacts": [
+        {
+          "artifact": "findings",
+          "fields": [
+            "/summary",
+            "/sources"
+          ]
+        }
+      ],
+      "template_id": "researcher/v3"
+    },
+    {
+      "capabilities": [],
+      "child_binding": "child-1",
+      "content_identity": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "effects": [],
+      "executable_identity": "worker-1",
+      "input_fields": [
+        "/candidate_summary"
+      ],
+      "kind": "node",
+      "output_artifacts": [
+        {
+          "artifact": "review",
+          "fields": [
+            "/decision"
+          ]
+        }
+      ],
+      "template_id": "security-reviewer/v2"
+    }
+  ]
+}

@@ -431,6 +431,22 @@ void validate_budget_ceiling(DiagnosticAccumulator&        diagnostics,
     }
 }
 
+// Schema 2 (#412): a dimension the template can spend must be stated. A task that
+// leaves it at 0 is counted as 0 by the sums but, in a schema-1 fragment, is launched with the
+// link's whole ceiling, so the aggregate would under-count what the planner can make the run spend.
+void validate_explicit_budget(DiagnosticAccumulator& diagnostics,
+                              const TaskGraphBudget& requested,
+                              const TaskGraphBudget& template_ceiling,
+                              std::string_view       pointer) {
+    for (const auto& [resource, amount, maximum] : budget_dimensions(requested, template_ceiling)) {
+        if (amount != 0 || maximum == 0) continue;
+        diagnostics.add(child_pointer(pointer, resource), "P_PROPOSAL_BUDGET_ZERO",
+                        "Schema 2 task budget must state a non-zero amount for every dimension "
+                        "its template can spend",
+                        json{{"resource", resource}, {"template_ceiling", maximum}});
+    }
+}
+
 struct BudgetSum {
     TaskGraphBudget total;
     std::array<bool, 4> overflow = {};
@@ -503,11 +519,12 @@ json task_to_json(const TaskGraphTask& task) {
                       {"output_bytes", task.budget.output_bytes}}}};
 }
 
-json proposal_to_json(const std::vector<TaskGraphTask>& tasks, const TaskGraphJoinPolicy& join) {
+json proposal_to_json(const std::vector<TaskGraphTask>& tasks, const TaskGraphJoinPolicy& join,
+                      std::uint32_t schema_version) {
     json encoded_tasks = json::array();
     for (const auto& task : tasks)
         encoded_tasks.push_back(task_to_json(task));
-    return json{{"schema_version", TaskGraphProposal::SCHEMA_VERSION},
+    return json{{"schema_version", schema_version},
                 {"tasks", std::move(encoded_tasks)},
                 {"join", json{{"kind", std::string(to_string(join.kind))}}}};
 }
@@ -647,6 +664,9 @@ std::vector<SourceMapEntry> canonical_source_map(
 
 void validate_options(TaskGraphProposalOptions& options) {
     detail::validate_token(options.source_id, "Task graph proposal source_id");
+    if (options.limits.min_schema_version == 0 ||
+        options.limits.min_schema_version > TaskGraphProposal::SCHEMA_VERSION_2)
+        throw std::invalid_argument("Task graph proposal min_schema_version must be 1 or 2");
     if (options.limits.max_tasks == 0)
         throw std::invalid_argument("Task graph proposal max_tasks must be positive");
     if (options.limits.max_depth == 0)
@@ -732,6 +752,7 @@ void validate_options(TaskGraphProposalOptions& options) {
 }  // namespace
 
 struct TaskGraphProposal::Impl {
+    std::uint32_t                 schema_version = SCHEMA_VERSION;
     std::string                   source_id;
     std::vector<SourceMapEntry>   source_map;
     std::vector<TaskGraphTask>    tasks;
@@ -776,14 +797,23 @@ TaskGraphProposal TaskGraphProposal::parse(const json& proposal, TaskGraphPropos
     }
     add_unknown_fields(diagnostics, document, "", {"schema_version", "tasks", "join"});
 
+    std::uint32_t schema_version = SCHEMA_VERSION;
     if (!document.contains("schema_version")) {
         diagnostics.add("/schema_version", "P_PROPOSAL_REQUIRED_FIELD",
                         "TaskGraphProposal field is required", json{{"field", "schema_version"}});
     } else if (const auto version = unsigned_integer(document["schema_version"])) {
-        if (*version != SCHEMA_VERSION) {
+        if (*version != SCHEMA_VERSION && *version != SCHEMA_VERSION_2) {
             diagnostics.add("/schema_version", "P_PROPOSAL_SCHEMA_VERSION",
                             "TaskGraphProposal schema_version is unsupported",
-                            json{{"supported", SCHEMA_VERSION}, {"actual", *version}});
+                            json{{"supported", json::array({SCHEMA_VERSION, SCHEMA_VERSION_2})},
+                                 {"actual", *version}});
+        } else if (*version < options.limits.min_schema_version) {
+            diagnostics.add("/schema_version", "P_PROPOSAL_SCHEMA_VERSION",
+                            "TaskGraphProposal schema_version is below the host minimum",
+                            json{{"minimum", options.limits.min_schema_version},
+                                 {"actual", *version}});
+        } else {
+            schema_version = static_cast<std::uint32_t>(*version);
         }
     } else {
         diagnostics.add("/schema_version", "P_PROPOSAL_TYPE",
@@ -948,6 +978,12 @@ TaskGraphProposal TaskGraphProposal::parse(const json& proposal, TaskGraphPropos
                                     parsed.template_contract->budget_ceiling,
                                     child_pointer(index_pointer("/tasks", parsed.index), "budget"),
                                     "template");
+            if (schema_version >= SCHEMA_VERSION_2) {
+                validate_explicit_budget(diagnostics, parsed.task.budget,
+                                         parsed.template_contract->budget_ceiling,
+                                         child_pointer(index_pointer("/tasks", parsed.index),
+                                                       "budget"));
+            }
         }
     }
     validate_total_budget(diagnostics, sum_budgets(parsed_tasks), options.limits.total_budget_ceiling);
@@ -1019,13 +1055,14 @@ TaskGraphProposal TaskGraphProposal::parse(const json& proposal, TaskGraphPropos
     for (auto& record : canonical_records)
         result->tasks.push_back(std::move(record.task));
     result->join = *parsed_join;
-    result->document = proposal_to_json(result->tasks, result->join);
+    result->schema_version = schema_version;
+    result->document = proposal_to_json(result->tasks, result->join, schema_version);
     result->canonical_bytes = detail::canonical_json_bytes(result->document);
     result->id = detail::sha256_identity("program-task-graph-proposal/v1", result->canonical_bytes);
     return TaskGraphProposal(std::move(result));
 }
 
-std::uint32_t TaskGraphProposal::schema_version() const noexcept { return SCHEMA_VERSION; }
+std::uint32_t TaskGraphProposal::schema_version() const noexcept { return impl_->schema_version; }
 const std::string& TaskGraphProposal::source_id() const noexcept { return impl_->source_id; }
 const std::vector<SourceMapEntry>& TaskGraphProposal::source_map() const noexcept {
     return impl_->source_map;

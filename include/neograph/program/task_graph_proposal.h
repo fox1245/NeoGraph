@@ -68,6 +68,14 @@ struct TaskGraphProposalLimits {
     std::uint64_t    max_depth = 0;
     TaskGraphBudget  per_task_budget_ceiling;
     TaskGraphBudget  total_budget_ceiling;
+    /**
+     * Lowest proposal schema version this host accepts. Schema 1 lets a task
+     * leave a budget dimension unset; the launched child then receives the
+     * link's whole ceiling for it while the aggregate counts it as 0 (#412).
+     * A host that takes proposals from a planner sets this to 2, which
+     * requires every budget dimension to be explicit.
+     */
+    std::uint32_t    min_schema_version = 1;
 
     bool operator==(const TaskGraphProposalLimits&) const = default;
 };
@@ -143,16 +151,23 @@ private:
 };
 
 /**
- * Deeply owned canonical TaskGraphProposal-v1.
+ * Deeply owned canonical TaskGraphProposal.
  *
  * Equivalent JSON key, task, dependency, and binding order normalizes to the
  * same canonical bytes and identity. The identity deliberately excludes
  * source-map provenance and trusted policy/template details; those remain
  * inputs to later compilation and admission receipts.
+ *
+ * Schema 1 is the original document. Schema 2 requires every task to state a
+ * non-zero amount for each budget dimension in which its template has a
+ * non-zero ceiling (`P_PROPOSAL_BUDGET_ZERO`), so that the aggregate counts
+ * what each launched task receives. A schema-1 document keeps its canonical
+ * bytes and identity.
  */
 class NEOGRAPH_PROGRAM_API TaskGraphProposal final {
 public:
-    static constexpr std::uint32_t SCHEMA_VERSION = 1;
+    static constexpr std::uint32_t SCHEMA_VERSION   = 1;
+    static constexpr std::uint32_t SCHEMA_VERSION_2 = 2;
 
     TaskGraphProposal(const TaskGraphProposal&)            = default;
     TaskGraphProposal& operator=(const TaskGraphProposal&) = default;

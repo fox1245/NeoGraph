@@ -48,6 +48,14 @@ bool budget_leq(const TaskGraphBudget& value, const TaskGraphBudget& ceiling) {
            value.output_bytes <= ceiling.output_bytes;
 }
 
+// Schema 2: every dimension the template can spend is stated (see P_PROPOSAL_BUDGET_ZERO).
+bool budget_explicit(const TaskGraphBudget& value, const TaskGraphBudget& template_ceiling) {
+    return (value.wall_time_ms != 0 || template_ceiling.wall_time_ms == 0) &&
+           (value.model_tokens != 0 || template_ceiling.model_tokens == 0) &&
+           (value.monetary_microunits != 0 || template_ceiling.monetary_microunits == 0) &&
+           (value.output_bytes != 0 || template_ceiling.output_bytes == 0);
+}
+
 TaskGraphBudget budget_from_limits(const BudgetLimits& limits) {
     return {limits.wall_time_ms, limits.model_tokens, limits.monetary_microunits,
             std::numeric_limits<std::uint64_t>::max()};
@@ -139,7 +147,8 @@ std::vector<std::string> sorted_unique(std::vector<std::string> values) {
     return values;
 }
 
-json fragment_identity_json(const TaskGraphFragmentCompileOptions& options,
+json fragment_identity_json(std::uint32_t schema_version,
+                            const TaskGraphFragmentCompileOptions& options,
                             const TaskGraphProposal& proposal,
                             const std::vector<CompiledTaskGraphTask>& tasks,
                             const TaskGraphJoinPolicy& join,
@@ -150,7 +159,7 @@ json fragment_identity_json(const TaskGraphFragmentCompileOptions& options,
     for (const auto& task : tasks) task_json.push_back(task_to_json(task));
     json receipt_json = json::array();
     for (const auto& receipt : receipts) receipt_json.push_back(receipt_to_json(receipt));
-    return json{{"schema_version", CompiledTaskGraphFragment::SCHEMA_VERSION},
+    return json{{"schema_version", schema_version},
                 {"owner_scope", options.owner_scope},
                 {"parent_run_id", options.parent_run_id},
                 {"expansion_operation_id", options.expansion_operation_id},
@@ -441,7 +450,8 @@ CompiledTaskGraphFragment CompiledTaskGraphFragment::parse(std::string_view stor
          "expansion_operation_id", "parent_program_version_id", "child_depth", "proposal_hash",
          "tasks", "join", "aggregate_budget", "template_receipts", "capability_effect_closure",
          "source_map"});
-    if (required_uint32(document, "schema_version") != SCHEMA_VERSION)
+    const auto schema_version = required_uint32(document, "schema_version");
+    if (schema_version != SCHEMA_VERSION && schema_version != SCHEMA_VERSION_2)
         throw std::invalid_argument("Unsupported stored task graph fragment schema_version");
     if (!document.contains("tasks") || !document.at("tasks").is_array())
         throw std::invalid_argument("Stored task graph fragment tasks must be an array");
@@ -545,6 +555,7 @@ CompiledTaskGraphFragment CompiledTaskGraphFragment::parse(std::string_view stor
         throw std::invalid_argument("Stored task graph fragment fragment_id does not match content");
 
     auto impl = std::make_shared<CompiledTaskGraphFragment::Impl>();
+    impl->schema_version = schema_version;
     impl->fragment_id = fragment_id;
     impl->owner_scope = owner_scope;
     impl->parent_run_id = parent_run_id;
@@ -744,6 +755,10 @@ CompiledTaskGraphFragment TaskGraphFragmentCompiler::compile(
     std::set<std::string, std::less<>> closure = effective_capabilities;
     closure.insert(effective_effects.begin(), effective_effects.end());
 
+    const std::uint32_t fragment_schema_version =
+        proposal.schema_version() >= TaskGraphProposal::SCHEMA_VERSION_2
+            ? CompiledTaskGraphFragment::SCHEMA_VERSION_2
+            : CompiledTaskGraphFragment::SCHEMA_VERSION;
     std::vector<CompiledTaskGraphTask> tasks;
     tasks.reserve(proposal.tasks().size());
     std::vector<TaskGraphTemplateReceipt> receipts;
@@ -767,6 +782,10 @@ CompiledTaskGraphFragment TaskGraphFragmentCompiler::compile(
         }
         if (!budget_leq(task.budget, contract.budget_ceiling))
             throw std::invalid_argument("Task graph task budget exceeds its template ceiling");
+        if (fragment_schema_version >= CompiledTaskGraphFragment::SCHEMA_VERSION_2 &&
+            !budget_explicit(task.budget, contract.budget_ceiling))
+            throw std::invalid_argument(
+                "Task graph schema 2 task budget leaves a spendable dimension at zero");
         aggregate = add_budget(aggregate, task.budget);
         edge_count += task.depends_on.size();
 
@@ -809,8 +828,9 @@ CompiledTaskGraphFragment TaskGraphFragmentCompiler::compile(
         tasks.size() > options.remaining_budget.max_total_children)
         throw std::invalid_argument("Task graph task count exceeds the remaining child ceiling");
     std::vector<std::string> closure_values(closure.begin(), closure.end());
-    const auto identity_input = fragment_identity_json(options, proposal, tasks, proposal.join(),
-                                                       receipts, closure_values, aggregate);
+    const auto identity_input = fragment_identity_json(fragment_schema_version, options, proposal,
+                                                       tasks, proposal.join(), receipts,
+                                                       closure_values, aggregate);
     const auto fragment_id = detail::sha256_identity(
         "program-task-graph-fragment/v1", canonical_json_bytes(identity_input));
     for (auto& task : tasks) task.operation_id = task_operation_id(fragment_id, task.task_id);
@@ -826,6 +846,7 @@ CompiledTaskGraphFragment TaskGraphFragmentCompiler::compile(
     for (const auto& task : tasks) document["tasks"].push_back(task_to_json(task));
 
     auto impl = std::make_shared<CompiledTaskGraphFragment::Impl>();
+    impl->schema_version = fragment_schema_version;
     impl->fragment_id = fragment_id;
     impl->owner_scope = options.owner_scope;
     impl->parent_run_id = options.parent_run_id;

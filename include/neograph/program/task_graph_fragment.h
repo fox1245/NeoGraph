@@ -65,7 +65,11 @@ struct NEOGRAPH_PROGRAM_API CompiledTaskGraphTask {
  */
 class NEOGRAPH_PROGRAM_API CompiledTaskGraphFragment final {
 public:
+    /// Fragment of a schema-1 proposal. Its bytes and identity are unchanged.
     static constexpr std::uint32_t SCHEMA_VERSION = 1;
+    /// Fragment of a schema-2 proposal. Every reserved budget dimension is exact:
+    /// a task is launched with, and held to, what the aggregate counted (#412).
+    static constexpr std::uint32_t SCHEMA_VERSION_2 = 2;
 
     CompiledTaskGraphFragment(const CompiledTaskGraphFragment&)            = default;
     CompiledTaskGraphFragment& operator=(const CompiledTaskGraphFragment&) = default;

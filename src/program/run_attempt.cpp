@@ -418,7 +418,8 @@ std::optional<json> json_path_value(const json& value, std::string_view path) {
     return current;
 }
 std::optional<ProgramFailure> validate_task_output(const CompiledTaskGraphTask& task,
-                                                   const std::optional<json>&   output) {
+                                                   const std::optional<json>&   output,
+                                                   bool                         exact_budget) {
     if (!output) {
         if (task.output_artifacts.empty()) return std::nullopt;
         return ProgramFailure{"P_TASK_OUTPUT_CONTRACT",
@@ -440,7 +441,7 @@ std::optional<ProgramFailure> validate_task_output(const CompiledTaskGraphTask& 
             }
         }
     }
-    if (task.reserved_budget.output_bytes != 0 &&
+    if ((exact_budget || task.reserved_budget.output_bytes != 0) &&
         output->dump().size() > task.reserved_budget.output_bytes) {
         return ProgramFailure{"P_TASK_OUTPUT_BUDGET",
                               "Task output exceeds its reserved output byte budget",
@@ -2460,6 +2461,20 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 TaskGraphProposal parsed_proposal = [&]() -> TaskGraphProposal {
                     try {
                         return TaskGraphProposal::parse(proposal, proposal_options);
+                    } catch (const TaskGraphProposalError& error) {
+                        // The planner's mistakes are data the host can act on: name the first
+                        // few diagnostics by code and pointer.
+                        json diagnostics = json::array();
+                        for (const auto& diagnostic : error.diagnostics()) {
+                            if (diagnostics.size() >= 16) break;
+                            diagnostics.push_back(json{{"code", diagnostic.code},
+                                                       {"pointer", diagnostic.primary.json_pointer}});
+                        }
+                        throw_runtime_diagnostic(
+                            "P_EXPAND_REJECTED",
+                            std::string("expand_task_graph proposal was rejected: ") + error.what(),
+                            json{{"operation_id", operation.id()},
+                                 {"diagnostics", std::move(diagnostics)}});
                     } catch (const std::exception& error) {
                         throw_runtime_diagnostic(
                             "P_EXPAND_REJECTED",
@@ -2573,6 +2588,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
             }
             const auto& fragment = durable->record.fragment;
+            // A schema-2 fragment is held to what its aggregate counted (#412).
+            const bool exact_budget =
+                fragment.schema_version() >= CompiledTaskGraphFragment::SCHEMA_VERSION_2;
 
             auto failure_json = [](const std::optional<ProgramFailure>& failure) {
                 if (!failure) return json::object();
@@ -2769,7 +2787,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 try {
                     auto child = control->launch_child(task.child_binding, std::move(child_input),
                                                        operation.id(), result.attempt_identity,
-                                                       task.reserved_budget);
+                                                       task.reserved_budget, exact_budget);
                     result.child_run_id = child->run_id;
                     bool cancel_child = false;
                     {
@@ -2784,7 +2802,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     result.output           = child_result.output();
                     result.failure          = child_result.failure();
                     if (result.status == ProgramTerminalStatus::Completed && !result.failure) {
-                        result.failure = validate_task_output(task, result.output);
+                        result.failure = validate_task_output(task, result.output, exact_budget);
                         if (result.failure) result.status = ProgramTerminalStatus::Failed;
                     }
                 } catch (const ProgramDiagnosticError& error) {

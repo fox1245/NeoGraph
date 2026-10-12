@@ -2384,7 +2384,8 @@ std::shared_ptr<RunControl> RunControl::launch_child(
     json                           input,
     std::string_view               operation_id,
     std::string_view               execution_key,
-    std::optional<TaskGraphBudget> budget_override) const {
+    std::optional<TaskGraphBudget> budget_override,
+    bool                           exact_budget) const {
     ChildLaunchCallback callback;
     {
         std::lock_guard lock(mutex_);
@@ -2397,7 +2398,7 @@ std::shared_ptr<RunControl> RunControl::launch_child(
                                       {"operation_id", std::string(operation_id)}});
     try {
         return callback(binding_name, std::move(input), operation_id, execution_key,
-                        std::move(budget_override));
+                        std::move(budget_override), exact_budget);
     } catch (const ProgramDiagnosticError& error) {
         auto diagnostic = error.diagnostic();
         if (!diagnostic.witness.is_object()) diagnostic.witness = json::object();
@@ -4802,7 +4803,8 @@ struct ProgramRuntime::Impl {
                                                std::string_view binding_name, json input,
                                                std::string_view               operation_id,
                                                std::string_view               execution_key,
-                                               std::optional<TaskGraphBudget> budget_override) {
+                                               std::optional<TaskGraphBudget> budget_override,
+                                               bool                           exact_budget) {
             const auto parent = weak_control.lock();
             if (!parent) throw std::runtime_error("Parent Program control expired");
             if (parent->cancellation_cause() != detail::CancellationCause::None)
@@ -4846,7 +4848,11 @@ struct ProgramRuntime::Impl {
                              limits.max_dynamic_compiles,   limits.max_child_depth,
                              limits.max_total_children};
             if (budget_override) {
-                const auto apply_requested = [](std::uint64_t requested, std::uint64_t ceiling) {
+                // Schema-1 fragments read 0 as "the link's whole ceiling". Schema-2 fragments
+                // are exact: the child gets what the aggregate counted, and 0 grants nothing.
+                const auto apply_requested = [exact_budget](std::uint64_t requested,
+                                                            std::uint64_t ceiling) {
+                    if (exact_budget) return std::min(requested, ceiling);
                     return requested == 0 ? ceiling : std::min(requested, ceiling);
                 };
                 budget.wall_time_ms =

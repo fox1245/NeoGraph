@@ -72,10 +72,13 @@ struct RunOutcome {
 };
 
 class RunControl;
+// The last two arguments are a task-graph budget override and whether it is exact. An
+// inexact override (schema-1 fragments) reads 0 as "the link's whole ceiling"; an exact one
+// (schema-2 fragments) reads 0 as nothing, as RunBudget does (#412).
 using ChildLaunchCallback =
     std::function<std::shared_ptr<RunControl>(std::string_view, json, std::string_view,
                                               std::string_view,
-                                              std::optional<TaskGraphBudget>)>;
+                                              std::optional<TaskGraphBudget>, bool)>;
 using ChildBindingValidationCallback = std::function<void(std::string_view, std::string_view)>;
 enum class ChildRecoveryMode { None, Synthesis, Existing };
 using ChildRecoveryCallback =
@@ -237,7 +240,8 @@ public:
         json             input,
         std::string_view operation_id,
         std::string_view execution_key,
-        std::optional<TaskGraphBudget> budget_override = std::nullopt) const;
+        std::optional<TaskGraphBudget> budget_override = std::nullopt,
+        bool                           exact_budget    = false) const;
     void validate_child_binding(std::string_view binding_name, std::string_view operation_id) const;
 
     ProgramEvent stage_event(ProgramEventKind kind, ProgramEventPayload payload);

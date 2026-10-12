@@ -84,6 +84,21 @@ json valid_proposal() {
     };
 }
 
+// Schema 2 states every budget dimension the template can spend.
+json valid_proposal_v2() {
+    auto document = valid_proposal();
+    document["schema_version"] = 2;
+    document["tasks"][0]["budget"] = json{{"wall_time_ms", 30000},
+                                          {"model_tokens", 4000},
+                                          {"monetary_microunits", 400000},
+                                          {"output_bytes", 2048}};
+    document["tasks"][1]["budget"] = json{{"wall_time_ms", 60000},
+                                          {"model_tokens", 12000},
+                                          {"monetary_microunits", 1000000},
+                                          {"output_bytes", 4096}};
+    return document;
+}
+
 std::filesystem::path proposal_corpus_dir() {
     return std::filesystem::path(__FILE__).parent_path() / "fixtures" / "task_graph_proposal";
 }
@@ -93,6 +108,20 @@ json load_json(const std::filesystem::path& path) {
     EXPECT_TRUE(input.is_open()) << "cannot open " << path;
     return json::parse(std::string((std::istreambuf_iterator<char>(input)),
                                    std::istreambuf_iterator<char>()));
+}
+
+std::string read_text_file(const std::filesystem::path& path) {
+    std::ifstream input(path);
+    EXPECT_TRUE(input.is_open()) << "cannot open " << path;
+    return std::string((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+}
+
+json without_source_map(const json& document) {
+    json result = json::object();
+    for (const auto& [key, value] : document.items()) {
+        if (key != "source_map") result[key] = value;
+    }
+    return result;
 }
 
 std::vector<std::string> diagnostic_codes(const std::vector<Diagnostic>& diagnostics) {
@@ -287,6 +316,128 @@ TEST(TaskGraphProposalTest, PreservesOriginalBindingCoordinatesAfterMalformedEnt
     EXPECT_EQ(diagnostic.primary.json_pointer, "/response/binding");
 }
 
+// #412. The aggregate must count what each launched task receives. A task that leaves a
+// dimension at 0 is counted as 0 by the sums but, in a schema-1 fragment, is launched with the
+// link's whole ceiling. Schema 2 requires the dimension to be stated.
+TEST(TaskGraphProposalTest, SchemaOneKeepsItsCanonicalBytesAndIdentity) {
+    const auto proposal = TaskGraphProposal::parse(valid_proposal(), proposal_options());
+
+    EXPECT_EQ(proposal.schema_version(), 1U);
+    // Derived independently of the library (sorted-key compact JSON, then the identity digest).
+    EXPECT_EQ(
+        proposal.serialize_canonical(),
+        R"({"join":{"kind":"all"},"schema_version":1,"tasks":[{"budget":{"model_tokens":12000,"monetary_microunits":0,"output_bytes":0,"wall_time_ms":60000},"depends_on":[],"id":"research-api","input_bindings":[],"template":"researcher/v3"},{"budget":{"model_tokens":4000,"monetary_microunits":0,"output_bytes":0,"wall_time_ms":30000},"depends_on":["research-api"],"id":"review-security","input_bindings":[{"from":{"artifact":"findings","field":"/summary","task":"research-api"},"to":{"field":"/candidate_summary"}}],"template":"security-reviewer/v2"}]})");
+    EXPECT_EQ(proposal.id(),
+              "sha256:eca11e4afc04106a713c8a61fe82e63d3774f1924bf544bf764427249a3d9e1a");
+}
+
+TEST(TaskGraphProposalTest, SchemaTwoAcceptsExplicitBudgetsAndRecordsItsVersion) {
+    const auto proposal = TaskGraphProposal::parse(valid_proposal_v2(), proposal_options());
+
+    EXPECT_EQ(proposal.schema_version(), 2U);
+    EXPECT_EQ(proposal.to_json()["schema_version"], 2);
+    EXPECT_NE(proposal.id(),
+              TaskGraphProposal::parse(valid_proposal(), proposal_options()).id());
+    EXPECT_EQ(proposal.tasks()[0].id, "research-api");
+    EXPECT_EQ(proposal.tasks()[0].budget, budget(60000, 12000, 1000000, 4096));
+}
+
+TEST(TaskGraphProposalTest, SchemaTwoRequiresEveryDimensionTheTemplateCanSpend) {
+    auto document              = valid_proposal();  // monetary_microunits and output_bytes unset
+    document["schema_version"] = 2;
+
+    const auto diagnostics = proposal_errors(std::move(document));
+
+    std::vector<std::string> pointers;
+    for (const auto& diagnostic : diagnostics) {
+        EXPECT_EQ(diagnostic.code, "P_PROPOSAL_BUDGET_ZERO");
+        pointers.push_back(diagnostic.primary.json_pointer);
+    }
+    std::sort(pointers.begin(), pointers.end());
+    EXPECT_EQ(pointers,
+              (std::vector<std::string>{"/tasks/0/budget/monetary_microunits",
+                                        "/tasks/0/budget/output_bytes",
+                                        "/tasks/1/budget/monetary_microunits",
+                                        "/tasks/1/budget/output_bytes"}));
+    EXPECT_EQ(diagnostics[0].witness["template_ceiling"].is_number_unsigned(), true);
+}
+
+TEST(TaskGraphProposalTest, SchemaTwoAcceptsZeroWhereTheTemplateCeilingIsZero) {
+    auto options = proposal_options();
+    for (auto& contract : options.template_allowlist)
+        contract.budget_ceiling.monetary_microunits = 0;
+    auto document = valid_proposal_v2();
+    document["tasks"][0]["budget"]["monetary_microunits"] = 0;
+    document["tasks"][1]["budget"]["monetary_microunits"] = 0;
+
+    EXPECT_NO_THROW((void)TaskGraphProposal::parse(document, options));
+
+    // Stating an amount the template cannot spend is still a ceiling violation.
+    document["tasks"][0]["budget"]["monetary_microunits"] = 1;
+    EXPECT_TRUE(contains_code(proposal_errors(document, options), "P_PROPOSAL_LIMIT_TASK_BUDGET"));
+}
+
+TEST(TaskGraphProposalTest, UnsetDimensionsHideAnAggregateOverrunOnlyInSchemaOne) {
+    // Three tasks may each spend up to 1,000,000 monetary microunits, and the plan may spend
+    // 1,500,000. Leaving the dimension unset sums to 0 under schema 1.
+    auto options = proposal_options();
+    options.limits.max_tasks = 4;
+    auto document            = json{{"schema_version", 1},
+                                    {"tasks", json::array()},
+                                    {"join", json{{"kind", "all"}}}};
+    for (const auto* id : {"a", "b", "c"}) {
+        document["tasks"].push_back(json{{"id", id},
+                                         {"template", "researcher/v3"},
+                                         {"input_bindings", json::array()},
+                                         {"depends_on", json::array()},
+                                         {"budget", json{{"wall_time_ms", 1000}, {"model_tokens", 10}}}});
+    }
+
+    const auto legacy = TaskGraphProposal::parse(document, options);
+    TaskGraphBudget counted;
+    for (const auto& task : legacy.tasks()) counted.monetary_microunits += task.budget.monetary_microunits;
+    EXPECT_EQ(counted.monetary_microunits, 0U);  // schema 1 is unchanged: the hole #412 describes
+
+    document["schema_version"] = 2;
+    const auto unset = proposal_errors(document, options);
+    ASSERT_EQ(unset.size(), 6U);  // monetary_microunits and output_bytes of three tasks
+    for (const auto& diagnostic : unset) EXPECT_EQ(diagnostic.code, "P_PROPOSAL_BUDGET_ZERO");
+
+    for (std::size_t index = 0; index < document["tasks"].size(); ++index) {
+        document["tasks"][index]["budget"]["monetary_microunits"] = 1000000;
+        document["tasks"][index]["budget"]["output_bytes"]        = 1024;
+    }
+    const auto stated = proposal_errors(document, options);
+    ASSERT_EQ(stated.size(), 1U);
+    EXPECT_EQ(stated[0].code, "P_PROPOSAL_LIMIT_TOTAL_BUDGET");  // 3,000,000 > 1,500,000
+    EXPECT_EQ(stated[0].witness["resource"], "monetary_microunits");
+}
+
+TEST(TaskGraphProposalTest, HostMinimumSchemaRefusesSchemaOne) {
+    auto options                     = proposal_options();
+    options.limits.min_schema_version = 2;
+
+    const auto diagnostics = proposal_errors(valid_proposal(), options);
+    ASSERT_EQ(diagnostics.size(), 1U);
+    EXPECT_EQ(diagnostics[0].code, "P_PROPOSAL_SCHEMA_VERSION");
+    EXPECT_EQ(diagnostics[0].witness["minimum"], 2);
+
+    EXPECT_NO_THROW((void)TaskGraphProposal::parse(valid_proposal_v2(), options));
+
+    options.limits.min_schema_version = 3;
+    EXPECT_THROW((void)TaskGraphProposal::parse(valid_proposal_v2(), options),
+                 std::invalid_argument);
+}
+
+TEST(TaskGraphProposalTest, UnknownSchemaVersionIsRefused) {
+    auto document              = valid_proposal();
+    document["schema_version"] = 3;
+    const auto diagnostics     = proposal_errors(std::move(document));
+    ASSERT_EQ(diagnostics.size(), 1U);
+    EXPECT_EQ(diagnostics[0].code, "P_PROPOSAL_SCHEMA_VERSION");
+    EXPECT_EQ(diagnostics[0].witness["supported"], json::array({1, 2}));
+}
+
 
 namespace {
 
@@ -405,5 +556,59 @@ TEST(TaskGraphFragmentTest, RejectsRecordTaskSetOrOperationMismatches) {
     auto record = fragment_record(compiled_fragment());
     record.tasks[0].operation_id = "sha256:" + std::string(64, 'e');
     EXPECT_THROW(TaskGraphFragmentRecord::parse(record.serialize_canonical()),
+                 std::invalid_argument);
+}
+
+TEST(TaskGraphFragmentTest, SchemaOneFragmentKeepsItsStoredBytesAndIdentity) {
+    // tests/fixtures/task_graph_fragment/v1_fragment.json was derived independently of the
+    // library (sorted-key compact JSON and the identity digests), not captured from compile().
+    const auto stored = read_text_file(std::filesystem::path(__FILE__).parent_path() /
+                                       "fixtures" / "task_graph_fragment" / "v1_fragment.json");
+    const auto parsed = CompiledTaskGraphFragment::parse(stored);
+    const auto fragment = compiled_fragment();
+
+    EXPECT_EQ(parsed.schema_version(), 1U);
+    EXPECT_EQ(fragment.schema_version(), 1U);
+    EXPECT_EQ(fragment.fragment_id(), parsed.fragment_id());
+    EXPECT_EQ(fragment.fragment_id(),
+              "sha256:35a9f1a77b82038ee62a60e4ad9afd89be8d13d005e0ab1eca2efbbe133d609f");
+    ASSERT_EQ(fragment.tasks().size(), parsed.tasks().size());
+    for (std::size_t index = 0; index < parsed.tasks().size(); ++index)
+        EXPECT_EQ(fragment.tasks()[index], parsed.tasks()[index]);
+    EXPECT_EQ(without_source_map(fragment.to_json()), without_source_map(parsed.to_json()));
+}
+
+TEST(TaskGraphFragmentTest, SchemaTwoProposalCompilesToSchemaTwoFragmentWithExactReservations) {
+    const auto proposal = TaskGraphProposal::parse(valid_proposal_v2(), proposal_options());
+    const auto fragment = TaskGraphFragmentCompiler::compile(proposal, fragment_compile_options());
+
+    EXPECT_EQ(fragment.schema_version(), 2U);
+    EXPECT_NE(fragment.fragment_id(), compiled_fragment().fragment_id());
+    TaskGraphBudget reserved;
+    for (const auto& task : fragment.tasks()) {
+        EXPECT_EQ(task.reserved_budget, task.requested_budget);
+        reserved.wall_time_ms += task.reserved_budget.wall_time_ms;
+        reserved.model_tokens += task.reserved_budget.model_tokens;
+        reserved.monetary_microunits += task.reserved_budget.monetary_microunits;
+        reserved.output_bytes += task.reserved_budget.output_bytes;
+    }
+    EXPECT_EQ(fragment.aggregate_budget(), reserved);
+    const auto parsed = CompiledTaskGraphFragment::parse(fragment.serialize_canonical());
+    EXPECT_EQ(parsed, fragment);
+    EXPECT_EQ(parsed.schema_version(), 2U);
+}
+
+TEST(TaskGraphFragmentTest, CompileRefusesASchemaTwoTaskThatLeavesASpendableDimensionAtZero) {
+    // Parse under a template that cannot spend money, then compile under one that can: the
+    // compiler repeats the check against the trusted list it is given.
+    auto parse_options = proposal_options();
+    for (auto& contract : parse_options.template_allowlist)
+        contract.budget_ceiling.monetary_microunits = 0;
+    auto document = valid_proposal_v2();
+    document["tasks"][0]["budget"]["monetary_microunits"] = 0;
+    document["tasks"][1]["budget"]["monetary_microunits"] = 0;
+    const auto proposal = TaskGraphProposal::parse(document, parse_options);
+
+    EXPECT_THROW((void)TaskGraphFragmentCompiler::compile(proposal, fragment_compile_options()),
                  std::invalid_argument);
 }

@@ -12026,6 +12026,217 @@ TEST(ProgramRuntimeTest, ExpandTaskGraphPublishesAndBindsDependentChildTasks) {
     }
 }
 
+// #412. A task graph aggregate must count what each launched task receives. Schema-1
+// fragments keep their behaviour (an unset dimension is launched with the link ceiling);
+// schema-2 fragments launch every task with exactly what its reservation counted.
+namespace {
+
+json expansion_task_json(const char* id, std::vector<std::string> dependencies, json budget) {
+    json bindings = json::array();
+    for (const auto& dependency : dependencies) {
+        bindings.push_back(json{{"from", json{{"task", dependency},
+                                              {"artifact", "result"},
+                                              {"field", "/channels/value/value"}}},
+                                {"to", json{{"field", "/item"}}}});
+    }
+    return json{{"id", id},
+                {"template", "runtime-map/v1"},
+                {"input_bindings", std::move(bindings)},
+                {"depends_on", std::move(dependencies)},
+                {"budget", std::move(budget)}};
+}
+
+json two_task_expansion_proposal(std::uint32_t schema_version, json seed_budget,
+                                 json dependent_budget) {
+    return json{{"schema_version", schema_version},
+                {"tasks", json::array({expansion_task_json("seed", {}, std::move(seed_budget)),
+                                       expansion_task_json("dependent", {"seed"},
+                                                           std::move(dependent_budget))})},
+                {"join", json{{"kind", "all"}}}};
+}
+
+std::unique_ptr<ProgramRuntime> expansion_runtime_with_policy(
+    AdmittedRuntime& fixture, std::function<void(TaskGraphExpansionPolicy&)> adjust) {
+    RuntimeConfig config{
+        fixture.catalog, fixture.checkpoints, {}, fixture.journal, fixture.scheduler_thread_count,
+        [bindings = fixture.child_bindings](std::string_view owner, std::string_view version,
+                                            std::string_view binding) {
+            return bindings->resolve(owner, version, binding);
+        }};
+    config.task_graph_fragments       = fixture.task_graph_fragments;
+    config.task_graph_policy_resolver = [adjust = std::move(adjust)](
+                                            std::string_view owner, std::string_view,
+                                            std::string_view)
+        -> std::optional<TaskGraphExpansionPolicy> {
+        if (owner != "tenant:runtime") return std::nullopt;
+        auto policy = expansion_policy();
+        if (adjust) adjust(policy);
+        return policy;
+    };
+    config.child_quota = fixture.child_quota;
+    return std::make_unique<ProgramRuntime>(std::move(config));
+}
+
+struct ExpansionBudgetRun {
+    ProgramHandle                 parent;
+    ProgramResult                 result;
+    TaskGraphFragmentRecord       record;
+    std::map<std::string, RunBudget> granted;  // task id -> budget the child was launched with
+};
+
+ExpansionBudgetRun run_budgeted_expansion(AdmittedRuntime& fixture, json proposal) {
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(expand_task_graph_document(std::move(proposal))),
+        fixture.admit_document(parallel_map_echo_child_document()),
+        BudgetLimits{3333, 333, 333, 1, 1, 6, 0, 0, 0});
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json{{"item", "seed"}}, RunBudget{10000, 1000, 1000, 1, 2, 20, 1, 2, 2},
+                          "trace-expansion-budget", {}});
+    auto result = parent.wait();
+    const auto fragment_id = result.output().contains("fragment_id")
+                                 ? result.output()["fragment_id"].get<std::string>()
+                                 : std::string();
+    auto record = fixture.task_graph_fragments->load(fragment_id);
+    if (!record) throw std::runtime_error("expansion published no fragment");
+    std::map<std::string, RunBudget> granted;
+    for (const auto& task : record->tasks) {
+        if (!task.child_run_id) continue;
+        for (const auto& child : parent.snapshot().children()) {
+            if (child.child_run_id == *task.child_run_id)
+                granted[task.task_id] = child.invocation.granted_budget;
+        }
+    }
+    return ExpansionBudgetRun{std::move(parent), std::move(result), std::move(*record),
+                              std::move(granted)};
+}
+
+}  // namespace
+
+TEST(ProgramRuntimeTest, ExpandTaskGraphSchemaTwoLaunchesEachTaskWithWhatTheAggregateCounted) {
+    AdmittedRuntime fixture(2);
+    const auto run = run_budgeted_expansion(
+        fixture, two_task_expansion_proposal(
+                     2, json{{"wall_time_ms", 700}, {"model_tokens", 7},
+                             {"monetary_microunits", 9}, {"output_bytes", 2048}},
+                     json{{"wall_time_ms", 400}, {"model_tokens", 4},
+                          {"monetary_microunits", 5}, {"output_bytes", 1024}}));
+
+    ASSERT_EQ(run.result.status(), ProgramTerminalStatus::Completed)
+        << run.result.serialize_canonical();
+    EXPECT_EQ(run.record.fragment.schema_version(), 2U);
+    ASSERT_EQ(run.granted.size(), 2U);
+    EXPECT_EQ(run.granted.at("seed").wall_time_ms, 700U);
+    EXPECT_EQ(run.granted.at("seed").model_tokens, 7U);
+    EXPECT_EQ(run.granted.at("seed").monetary_microunits, 9U);
+    EXPECT_EQ(run.granted.at("dependent").wall_time_ms, 400U);
+    EXPECT_EQ(run.granted.at("dependent").model_tokens, 4U);
+    EXPECT_EQ(run.granted.at("dependent").monetary_microunits, 5U);
+    // What the aggregate counted is what the children were granted.
+    TaskGraphBudget granted_total;
+    for (const auto& [id, granted] : run.granted) {
+        granted_total.wall_time_ms += granted.wall_time_ms;
+        granted_total.model_tokens += granted.model_tokens;
+        granted_total.monetary_microunits += granted.monetary_microunits;
+    }
+    const auto& aggregate = run.record.fragment.aggregate_budget();
+    EXPECT_EQ(granted_total.wall_time_ms, aggregate.wall_time_ms);
+    EXPECT_EQ(granted_total.model_tokens, aggregate.model_tokens);
+    EXPECT_EQ(granted_total.monetary_microunits, aggregate.monetary_microunits);
+    EXPECT_EQ(aggregate.output_bytes, 3072U);
+}
+
+TEST(ProgramRuntimeTest, ExpandTaskGraphSchemaOneStillLaunchesAnUnsetDimensionWithTheLinkCeiling) {
+    // Published schema-1 data keeps its behaviour: the monetary dimension is unset, counted as
+    // 0, and the child is launched with the link's 333. Hosts close this by setting
+    // TaskGraphProposalLimits::min_schema_version to 2.
+    AdmittedRuntime fixture(2);
+    const auto run = run_budgeted_expansion(fixture, expansion_proposal());
+
+    ASSERT_EQ(run.result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(run.record.fragment.schema_version(), 1U);
+    EXPECT_EQ(run.record.fragment.aggregate_budget().monetary_microunits, 0U);
+    ASSERT_EQ(run.granted.size(), 2U);
+    for (const auto& [id, granted] : run.granted) {
+        EXPECT_EQ(granted.wall_time_ms, 100U);
+        EXPECT_EQ(granted.model_tokens, 1U);
+        EXPECT_EQ(granted.monetary_microunits, 333U);
+    }
+}
+
+TEST(ProgramRuntimeTest, ExpandTaskGraphSchemaTwoRefusesUnsetDimensionsBeforeAnythingRuns) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2);
+    const auto linked = link_child_versions(
+        fixture,
+        fixture.admit_document(expand_task_graph_document(two_task_expansion_proposal(
+            2, json{{"wall_time_ms", 100}, {"model_tokens", 1}},
+            json{{"wall_time_ms", 100}, {"model_tokens", 1}}))),
+        fixture.admit_document(parallel_map_echo_child_document()),
+        BudgetLimits{3333, 333, 333, 1, 1, 6, 0, 0, 0});
+
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json{{"item", "seed"}}, RunBudget{10000, 1000, 1000, 1, 2, 20, 1, 2, 2},
+                          "trace-expansion-budget-refused", {}});
+    const auto result = parent.wait();
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_EXPAND_REJECTED");
+    const auto& diagnostics = result.failure()->witness["diagnostics"];
+    ASSERT_EQ(diagnostics.size(), 4U);  // monetary_microunits and output_bytes of both tasks
+    for (std::size_t index = 0; index < diagnostics.size(); ++index)
+        EXPECT_EQ(diagnostics[index]["code"], "P_PROPOSAL_BUDGET_ZERO");
+    EXPECT_EQ(completed_calls.load(), 0U);
+    EXPECT_TRUE(parent.snapshot().children().empty());
+}
+
+TEST(ProgramRuntimeTest, ExpandTaskGraphSchemaTwoZeroGrantsNothingWhereTheTemplateCannotSpend) {
+    // A template whose monetary ceiling is 0 is stated as 0 and the child is launched with 0,
+    // not with the link's 333 (schema 1 would launch it with 333).
+    AdmittedRuntime fixture(2);
+    fixture.runtime = expansion_runtime_with_policy(fixture, [](TaskGraphExpansionPolicy& policy) {
+        policy.template_allowlist.front().budget_ceiling.monetary_microunits = 0;
+        policy.limits.per_task_budget_ceiling.monetary_microunits = 0;
+        policy.limits.total_budget_ceiling.monetary_microunits = 0;
+    });
+    const auto run = run_budgeted_expansion(
+        fixture, two_task_expansion_proposal(
+                     2, json{{"wall_time_ms", 700}, {"model_tokens", 7}, {"output_bytes", 2048}},
+                     json{{"wall_time_ms", 400}, {"model_tokens", 4}, {"output_bytes", 1024}}));
+
+    ASSERT_EQ(run.result.status(), ProgramTerminalStatus::Completed)
+        << run.result.serialize_canonical();
+    ASSERT_EQ(run.granted.size(), 2U);
+    for (const auto& [id, granted] : run.granted) EXPECT_EQ(granted.monetary_microunits, 0U);
+}
+
+TEST(ProgramRuntimeTest, ExpandTaskGraphSchemaTwoHoldsAnOutputToItsReservedBytes) {
+    // Schema 1 reads an output_bytes of 0 as unbounded. Schema 2 reads it as 0 bytes.
+    for (const std::uint32_t schema : {1U, 2U}) {
+        SCOPED_TRACE(schema);
+        AdmittedRuntime fixture(2);
+        fixture.runtime = expansion_runtime_with_policy(
+            fixture, [](TaskGraphExpansionPolicy& policy) {
+                policy.template_allowlist.front().budget_ceiling.output_bytes = 0;
+                policy.limits.per_task_budget_ceiling.output_bytes = 0;
+                policy.limits.total_budget_ceiling.output_bytes = 0;
+            });
+        json budget{{"wall_time_ms", 700}, {"model_tokens", 7}, {"monetary_microunits", 9}};
+        const auto run = run_budgeted_expansion(
+            fixture, two_task_expansion_proposal(schema, budget, budget));
+        if (schema == 1U) {
+            EXPECT_EQ(run.result.status(), ProgramTerminalStatus::Completed);
+        } else {
+            EXPECT_EQ(run.result.status(), ProgramTerminalStatus::Failed);
+            ASSERT_FALSE(run.record.tasks.empty());
+            ASSERT_TRUE(run.record.tasks[0].failure.has_value());
+            EXPECT_EQ((*run.record.tasks[0].failure)["code"], "P_TASK_OUTPUT_BUDGET");
+        }
+    }
+}
+
 TEST(ProgramRuntimeTest, MapExecutesItemsSerially) {
     blocking_calls.store(0);
     blocking_active.store(0);
