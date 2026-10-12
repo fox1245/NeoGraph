@@ -1,7 +1,7 @@
 """40 - Attempt timeout: a slow node is stopped, fails with NG.Timeout and succeeds on the retry.
 
-`retryPolicy("work", {attempt_timeout_ms: 200, max_retries: 1})` limits every attempt of
-`work` to 200 ms. When the limit passes, the attempt is cancelled through its own cancel
+`retryPolicy("work", {attempt_timeout_ms: 400, max_retries: 1})` limits every attempt of
+`work` to 400 ms. When the limit passes, the attempt is cancelled through its own cancel
 token (`input.ctx.cancel_token`) and fails with NG.Timeout, which is retried like any other
 failure. A Python body cannot be preempted, so a node that may block should poll the token.
 Whatever a timed-out attempt returns later is discarded. Run 1 is slow once and then fast;
@@ -46,7 +46,7 @@ export function define() {
     .channel("always_slow", {reducer: "overwrite", initial: false})
     .node("work", {type: "work.slow"})
     .entry("work").exit("work")
-    .retryPolicy("work", {attempt_timeout_ms: 200, max_retries: 1, initial_delay_ms: 10,
+    .retryPolicy("work", {attempt_timeout_ms: 400, max_retries: 1, initial_delay_ms: 10,
                           backoff_multiplier: 1, max_delay_ms: 10});
 }
 """
