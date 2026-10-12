@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=2962897559c898e519f7e7e74330d36d24a93196ced03cf208c8dbaa6a1fb8c5 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=ab1f701c13b8ad5b2fc85625d9afb884f19753f7eed6c13e5ab2fc7bf8ce34bd -->
 # NeoGraph 핵심 개념 — 처음부터 읽는 안내서
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -611,8 +611,8 @@ wheel 0.1.6 이하를 쓰고 있을 때 생기는 문제입니다. 번들된 Ope
 
 ## 다음에 볼 문서
 
-- [Python 예제](../bindings/python/examples/) — 위에서 설명한 개념을 모두 다루는
-  독립 실행 스크립트 21개.
-- [C++ 예제](../examples/) — 같은 구성의 프로그램 36개.
+- [Python 예제](../bindings/python/examples/) — 위에서 설명한 개념을 하나씩 보여 주는
+  독립 실행 스크립트. 대부분 오프라인 실행 가능.
+- [C++ 예제](../examples/) — 같은 구성의 프로그램.
 - [`reference-en.md`](reference-en.md) — 클래스별로 정리한 전체 API.
 - [`ASYNC_GUIDE.md`](ASYNC_GUIDE.md) — 비동기/코루틴 계층 심층 설명.

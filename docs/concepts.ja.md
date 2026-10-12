@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=2962897559c898e519f7e7e74330d36d24a93196ced03cf208c8dbaa6a1fb8c5 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=ab1f701c13b8ad5b2fc85625d9afb884f19753f7eed6c13e5ab2fc7bf8ce34bd -->
 # NeoGraphのコアコンセプト — 解説ガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -612,7 +612,7 @@ wheelのバージョンが0.1.6以下です。同梱されているOpenSSLに、
 
 ## 次に読むもの
 
-- [Pythonのサンプル](../bindings/python/examples/)：ここまでの概念をすべて扱う、21本の自己完結したスクリプト。
-- [C++のサンプル](../examples/)：同じ構成の36本のプログラム。
+- [Pythonのサンプル](../bindings/python/examples/)：ここまでの概念を1つずつ示す、自己完結したスクリプト。多くはオフラインで実行できます。
+- [C++のサンプル](../examples/)：同じ構成のプログラム。
 - [`reference-en.md`](reference-en.md)：クラスごとにAPIをすべて説明するリファレンス。
 - [`ASYNC_GUIDE.md`](ASYNC_GUIDE.md)：非同期／コルーチン層の詳細な解説。

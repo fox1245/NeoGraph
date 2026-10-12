@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/mcp.md locale=ko source_sha256=80bd7bdc9c6f1ce78d2a983d301efb7b71c311622189b6a31ad3f9853303d587 -->
+<!-- neograph-i18n: source=docs/mcp.md locale=ko source_sha256=a15f153b3a6f238098a942ab3557e4e8bf8b6744e69db01a1067c0e19fd38c6d -->
 # MCP: 그래프를 도구로 공개하고, 도구를 쓰는 그래프 만들기
 
 **Languages:** [English](mcp.md) | [한국어](mcp.ko.md) | [日本語](mcp.ja.md) | [简体中文](mcp.zh-CN.md)
@@ -270,7 +270,7 @@ int main(int argc, char** argv) {
 
 앞 절의 서버 경로를 넘겨 `./remote_word_count ./word_count_server`로 실행하면 `count: 8`을 출력합니다.
 
-모델이 도구를 직접 고르게 하려면 `MCPClient::get_tools()`로 서버의 도구를 NeoGraph `Tool` 객체로 받습니다. 이를 `NodeContext::tools`에 넣으면(Python에서는 `ng.NodeContext(tools=client.get_tools())`) `tool_dispatch` 노드가 모델이 요청한 호출을 실행합니다. [C++ 예제](../examples/README.md)와 [Python 예제](../bindings/python/examples/README.md)에 MCP 에이전트가 있으며, 모델이 필요하므로 API 키도 필요합니다.
+모델이 도구를 직접 고르게 하려면 `MCPClient::get_tools()`로 서버의 도구를 NeoGraph `Tool` 객체로 받습니다. 이를 `NodeContext::tools`에 넣으면(Python에서는 `ng.NodeContext(tools=client.get_tools())`) `tool_dispatch` 노드가 모델이 요청한 호출을 실행합니다. [C++ 예제](../examples/README.md)에는 MCP 에이전트(03, 20, 22~24)가 있으며 API 키가 필요 없습니다. 표준 라이브러리만 쓰는 데모 서버 `examples/mcp_demo_server.py`가 도구를 제공하고, 스크립트로 만든 모델이 LLM 역할을 합니다. 실제 모델을 쓰려면 `--live`를 붙이며, 이때는 `OPENROUTER_API_KEY`가 필요합니다. [Python 예제 26](../bindings/python/examples/README.md)은 로컬 MCP 서버를 직접 띄우며 역시 키가 필요 없습니다.
 
 ## Streamable HTTP로 공개하기
 

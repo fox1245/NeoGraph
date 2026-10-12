@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=zh-CN source_sha256=5b3ffe1d3d93798f327361964ca4727642d8ba1b413092edcb30b3b48bca0d17 -->
+<!-- neograph-i18n: source=docs/a2a.md locale=zh-CN source_sha256=e66a91176c76ffd278b84027d339011bc77f1f321caaa761da98e2db92c9457c -->
 # A2A：智能体调用智能体
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
@@ -119,6 +119,7 @@ int main() {
 工作方式如下：
 
 - 服务器把用户消息的文本放进图的 `prompt` 通道，并从 `response` 通道读取智能体的回答。要改变这一点，请在 `GraphAgentAdapter` 中重写 `input_channel()`、`output_channel()`、`build_initial_state()`、`build_output_artifact()`（用于返回工件）或 `build_resume_value()`，并把适配器作为构造函数的第三个参数传入。
+- 默认适配器只把最终回答放在已完成任务的状态消息里。任务没有工件，因此读取工件的客户端什么也拿不到。要把回答作为工件返回，请重写 `build_output_artifact()`。[示例 78](../examples/78_a2a_input_required.cpp) 就用这种方式把 `response` 通道提升为工件。
 - 一次图运行就是一个任务，任务 ID 就是这次运行的 `thread_id`。每个任务在自己的工作线程上运行，所以连接断开后任务仍会继续。服务器同时最多接收 32 个任务，更多的会收到 JSON-RPC 错误 `-32603`，原因为 `RESOURCE_EXHAUSTED`。
 - `interrupt_before`（或节点抛出的 `NodeInterrupt`）会让任务进入 `input-required`。状态消息中是原因，`metadata["neograph/interrupt"]` 中是节点和检查点；用同一个任务 ID 发送后续消息，就会从该检查点恢复运行。后续消息的文本就是恢复值。如果没有检查点存储，图会以后续消息为输入从头再运行一遍，所以图可能暂停时，请给引擎配置一个存储。
 - 卡片通过 `GET /.well-known/agent-card.json` 提供，JSON-RPC 端点是 `POST /`。没有设置 `AgentCard::url` 时，卡片公布的是客户端所访问的地址。

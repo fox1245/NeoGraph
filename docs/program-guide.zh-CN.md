@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=6f69f4c493387ec533fd315d4e5a294d10e695e59765446ee310d4add2d1b624 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=f7f84669d25b4da0ad592f00baa07f77ad731cc06e1a4411070dd04832769be7 -->
 # Program 指南：协调图的 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -15,13 +15,15 @@
 
 Program 层需要包含 Program 和 QuickJS 控制的构建：`pip install neograph-engine` 已经包含，源码构建需要 `-DNEOGRAPH_BUILD_PYBIND=ON -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON`（然后执行 `pip install pydantic certifi`，并把构建目录加入 `PYTHONPATH`）。
 
-下面的示例用到了失败路由、`fork` 和 SQLite 状态目录。PyPI 上的 0.13.1 wheel 没有这些，请用当前源码构建的版本来运行。在 C++ 中，请从 `examples/63_program_quickstart.cpp` 入手。
+下面的示例用到了失败路由、`fork` 和 SQLite 状态目录。PyPI 上的 0.13.1 wheel 没有这些，请用当前源码构建的版本来运行；用到这些功能的示例（Python 32、35 和 36）也一样。想从更小的示例开始，可以运行 [`29_program_hello.py`](../bindings/python/examples/29_program_hello.py)，它用不到一百行完成一个 Program 的编译、准入(admission)和运行。在 C++ 中，请从 [`65_program_javascript.cpp`](../examples/65_program_javascript.cpp) 入手。
 
 ## 完整示例：发布检查
 
 一个发布作业并行检查三个服务。`payments` 的检查失败了。作业没有整体失败，而是把失败送到评审步骤，作业在那里等待人工处理。人批准发布后，其他服务不用重新检查，作业随即完成。同一个作业在预算之内运行。
 
 示例由三个 Python 文件组成。`release_program.py` 放每次运行都不变的全部内容，`run_release.py` 和 `restart.py` 使用它。
+
+下面的代码把失败路由、供审阅的暂停、预算和重启放进同一个故事。仓库里为其中每一部分都有一个可运行的单独示例：[`32_program_failure_routing.py`](../bindings/python/examples/32_program_failure_routing.py)（失败路由，以及操作员的 `retry` 或 `abort`）、[`34_program_pause_resume.py`](../bindings/python/examples/34_program_pause_resume.py)（`interruptBefore` 和 `host.resume`）、[`33_program_budgets.py`](../bindings/python/examples/33_program_budgets.py)、[`35_program_fork.py`](../bindings/python/examples/35_program_fork.py) 和 [`36_program_crash_recovery.py`](../bindings/python/examples/36_program_crash_recovery.py)。与之对应的 C++ 示例是 [66](../examples/66_program_failure_routing.cpp) 到 [69](../examples/69_program_crash_recovery.cpp)。
 
 ### 1. 节点代码
 

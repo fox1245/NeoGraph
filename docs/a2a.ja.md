@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=ja source_sha256=5b3ffe1d3d93798f327361964ca4727642d8ba1b413092edcb30b3b48bca0d17 -->
+<!-- neograph-i18n: source=docs/a2a.md locale=ja source_sha256=e66a91176c76ffd278b84027d339011bc77f1f321caaa761da98e2db92c9457c -->
 # A2A: エージェントがエージェントを呼び出す
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
@@ -119,6 +119,7 @@ int main() {
 仕組みは次のとおりです。
 
 - サーバーは、ユーザーのメッセージのテキストをグラフの `prompt` チャネルに入れ、エージェントの答えを `response` チャネルから読みます。これを変えるには、`GraphAgentAdapter` の `input_channel()`、`output_channel()`、`build_initial_state()`、`build_output_artifact()`(アーティファクトを返すとき)、`build_resume_value()` のうち必要なものをオーバーライドし、アダプターをコンストラクターの3番目の引数に渡します。
+- 既定のアダプターは、最終的な答えを完了したタスクのステータスメッセージにだけ入れます。タスクにアーティファクトはないので、アーティファクトを読むクライアントは何も受け取れません。答えをアーティファクトとして返すには、`build_output_artifact()` をオーバーライドします。[サンプル 78](../examples/78_a2a_input_required.cpp) は、`response` チャネルをこの方法でアーティファクトにしています。
 - グラフの実行1回がタスク1つで、タスク ID はその実行の `thread_id` です。タスクはそれぞれ専用のワーカースレッドで動くので、接続が切れてもタスクは続きます。サーバーが同時に受け付けるタスクは32件までで、それを超えると JSON-RPC エラー `-32603`(理由 `RESOURCE_EXHAUSTED`)が返ります。
 - `interrupt_before`(またはノードが投げた `NodeInterrupt`)は、タスクを `input-required` にします。ステータスメッセージには理由が、`metadata["neograph/interrupt"]` にはノードとチェックポイントが入り、同じタスク ID で続きのメッセージを送ると、そのチェックポイントから実行が再開されます。続きのメッセージのテキストが再開値になります。チェックポイントストアがなければ、続きのメッセージを入力にしてグラフを最初からやり直すので、グラフが停止する可能性があるなら、エンジンにストアを持たせてください。
 - カードは `GET /.well-known/agent-card.json` で、JSON-RPC のエンドポイントは `POST /` で提供されます。`AgentCard::url` がなければ、カードはクライアントがアクセスしたアドレスを示します。

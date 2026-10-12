@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/mcp.md locale=zh-CN source_sha256=80bd7bdc9c6f1ce78d2a983d301efb7b71c311622189b6a31ad3f9853303d587 -->
+<!-- neograph-i18n: source=docs/mcp.md locale=zh-CN source_sha256=a15f153b3a6f238098a942ab3557e4e8bf8b6744e69db01a1067c0e19fd38c6d -->
 # MCP：把图公开为工具，以及使用工具的图
 
 **Languages:** [English](mcp.md) | [한국어](mcp.ko.md) | [日本語](mcp.ja.md) | [简体中文](mcp.zh-CN.md)
@@ -270,7 +270,7 @@ int main(int argc, char** argv) {
 
 传入上一节服务器的路径来运行：`./remote_word_count ./word_count_server`，输出 `count: 8`。
 
-如果要让模型自己选择工具，用 `MCPClient::get_tools()` 把服务器的工具取成 NeoGraph 的 `Tool` 对象，放入 `NodeContext::tools`（Python 中是 `ng.NodeContext(tools=client.get_tools())`），`tool_dispatch` 节点就会执行模型请求的调用。[C++ 示例](../examples/README.md)和 [Python 示例](../bindings/python/examples/README.md)里有 MCP 智能体，它们需要模型，因此也需要 API 密钥。
+如果要让模型自己选择工具，用 `MCPClient::get_tools()` 把服务器的工具取成 NeoGraph 的 `Tool` 对象，放入 `NodeContext::tools`（Python 中是 `ng.NodeContext(tools=client.get_tools())`），`tool_dispatch` 节点就会执行模型请求的调用。[C++ 示例](../examples/README.md)里有 MCP 智能体（03、20、22 至 24），不需要 API 密钥：仅用标准库的演示服务器 `examples/mcp_demo_server.py` 提供工具，由脚本化的模型充当 LLM。加上 `--live` 可换用真实模型，这时需要 `OPENROUTER_API_KEY`。[Python 示例 26](../bindings/python/examples/README.md) 自己启动本地 MCP 服务器，同样不需要密钥。
 
 ## 通过 Streamable HTTP 提供服务
 

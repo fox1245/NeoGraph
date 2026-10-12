@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=ko source_sha256=5b3ffe1d3d93798f327361964ca4727642d8ba1b413092edcb30b3b48bca0d17 -->
+<!-- neograph-i18n: source=docs/a2a.md locale=ko source_sha256=e66a91176c76ffd278b84027d339011bc77f1f321caaa761da98e2db92c9457c -->
 # A2A: 에이전트끼리 호출하기
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
@@ -119,6 +119,7 @@ int main() {
 동작 방식은 다음과 같습니다.
 
 - 서버는 사용자 메시지의 텍스트를 그래프의 `prompt` 채널에 넣고, 에이전트의 답을 `response` 채널에서 읽습니다. 이를 바꾸려면 `GraphAgentAdapter`에서 `input_channel()`, `output_channel()`, `build_initial_state()`, `build_output_artifact()`(아티팩트를 돌려줄 때), `build_resume_value()` 중 필요한 것을 재정의하고, 어댑터를 생성자의 세 번째 인자로 넘기세요.
+- 기본 어댑터는 최종 답을 완료된 태스크의 상태 메시지에만 담습니다. 태스크에는 아티팩트가 없으므로 아티팩트를 읽는 클라이언트는 아무것도 받지 못합니다. 답을 아티팩트로 돌려주려면 `build_output_artifact()`를 재정의하세요. [예제 78](../examples/78_a2a_input_required.cpp)이 `response` 채널을 이런 방식으로 아티팩트로 만듭니다.
 - 그래프 실행 하나가 태스크 하나이며, 태스크 ID는 그 실행의 `thread_id`입니다. 태스크마다 자신의 워커 스레드에서 실행되므로, 연결이 끊겨도 태스크는 계속됩니다. 서버는 동시에 태스크 32개까지 받으며, 그 이상은 JSON-RPC 오류 `-32603`(사유 `RESOURCE_EXHAUSTED`)을 받습니다.
 - `interrupt_before`(또는 노드가 던진 `NodeInterrupt`)가 태스크를 `input-required` 상태로 만듭니다. 상태 메시지에는 사유가, `metadata["neograph/interrupt"]`에는 노드와 체크포인트가 담기며, 같은 태스크 ID로 후속 메시지를 보내면 그 체크포인트에서 실행을 재개합니다. 후속 메시지의 텍스트가 재개 값이 됩니다. 체크포인트 저장소가 없으면 후속 메시지를 입력으로 삼아 그래프를 처음부터 다시 실행하므로, 그래프가 멈출 수 있다면 엔진에 저장소를 지정하세요.
 - 카드는 `GET /.well-known/agent-card.json`으로, JSON-RPC 엔드포인트는 `POST /`로 제공합니다. `AgentCard::url`이 없으면 카드는 클라이언트가 접속한 주소를 알립니다.
