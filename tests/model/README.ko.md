@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/model/README.md locale=ko source_sha256=4ab02b678a96ff4f83b64df76fa5e351f8972eadfb5f9fbdf138149dd53a24cb -->
+<!-- neograph-i18n: source=tests/model/README.md locale=ko source_sha256=da1d60a2c19590a22ffc97a53d9a3d8ed0817cae7f42d76bc9520ddd42b6831a -->
 # Join 모델 (#363)
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -103,7 +103,8 @@ spec에서 이름을 붙인 #357 그래프(legacy barrier, `any_of` slot, 서로
 ### Program 하네스
 
 JavaScript `main()` 프로그램(`callCore`, 멤버 둘을 함께 또는 하나씩 실행하는 `ng.all`,
-`ng.race`, `ng.quorum`, 그리고 `ng.await`)과 타입 있는 plan(`parallel`, 셋 중 둘의 `quorum`,
+`ng.race`, `ng.quorum`, `ng.await`, 그리고 Core step에서 둘 다 질문할 수 있는 노드 두 개를 실행하는
+`callCore`, #388과 #394)과 타입 있는 plan(`parallel`, 셋 중 둘의 `quorum`,
 `sequence`)을, 바인딩된 provider를 호출하고 질문할 수 있는 노드 하나짜리 Core 위에서 실행합니다.
 호스트는 `LocalProgramHost`와 같은 방식으로 구성합니다. 프로세스 내 가격 브로커를 쓰는 메모리
 호스트, 또는 모든 저장소를 한 SQLite 파일에 두고 SQLite provider 저널을 쓰는 호스트입니다.
@@ -131,7 +132,7 @@ provider는 보낸 요청을 세는 로컬 전송 위의 실제 SDK 클라이언
 | 게이트 | `Ok`나 `Ask`에 하나 | 어떤 노드에든 하나, 또는 `interrupt_before` 둘 |
 
 CI 범위에서 Core 하네스는 그래프 2,196개와 Ask 종류마다 답 스케줄 약 6,100개, 각각 약 83,000번의
-실행을 다룹니다. Program 하네스는 JavaScript 프로그램 112개와 plan 18개, 약 750개의 스케줄을
+실행을 다룹니다. Program 하네스는 JavaScript 프로그램 124개와 plan 18개, 약 920개의 스케줄을
 실행합니다. 각 테스트는 워커 네 개로 1분 안에 끝납니다.
 
 변수: `NEOGRAPH_RESUME_MODEL_NODES`, `_SPECIAL`, `_SPECIAL_LARGEST`, `_ANSWERS`, `_CRASHES`는 개별

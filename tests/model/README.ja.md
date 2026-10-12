@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/model/README.md locale=ja source_sha256=4ab02b678a96ff4f83b64df76fa5e351f8972eadfb5f9fbdf138149dd53a24cb -->
+<!-- neograph-i18n: source=tests/model/README.md locale=ja source_sha256=da1d60a2c19590a22ffc97a53d9a3d8ed0817cae7f42d76bc9520ddd42b6831a -->
 # Join モデル (#363)
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -104,7 +104,8 @@ java -XX:+UseParallelGC -cp /path/to/tla2tools.jar tlc2.TLC \
 ### Program ハーネス
 
 JavaScript の `main()` プログラム（`callCore`、メンバー 2 つを一緒にまたは 1 つずつ実行する
-`ng.all`、`ng.race`、`ng.quorum`、そして `ng.await`）と型付き plan（`parallel`、3 つのうち 2 つの
+`ng.all`、`ng.race`、`ng.quorum`、`ng.await`、そして Core の step で両方が尋ねうるノード 2 つを
+実行する `callCore`、#388 と #394）と型付き plan（`parallel`、3 つのうち 2 つの
 `quorum`、`sequence`）を、バインドされた provider を呼び出し質問できるノード 1 つの Core 上で実行
 します。ホストは `LocalProgramHost` と同じ構成です。プロセス内の価格付きブローカーを使うメモリの
 ホスト、またはすべてのストアを 1 つの SQLite ファイルに置き SQLite provider ジャーナルを使うホスト
@@ -132,7 +133,7 @@ P1 は「1 回送り 1 回課金する」も扱います。リクエスト数と
 | ゲート | `Ok` か `Ask` に 1 つ | どのノードにも 1 つ、または `interrupt_before` 2 つ |
 
 CI 範囲では、Core ハーネスはグラフ 2,196 個と Ask の種類ごとに約 6,100 の回答スケジュール、それぞれ
-約 83,000 回の実行を扱います。Program ハーネスは JavaScript プログラム 112 個と plan 18 個、約 750 の
+約 83,000 回の実行を扱います。Program ハーネスは JavaScript プログラム 124 個と plan 18 個、約 920 の
 スケジュールを実行します。各テストはワーカー 4 つで 1 分以内に終わります。
 
 変数：`NEOGRAPH_RESUME_MODEL_NODES`、`_SPECIAL`、`_SPECIAL_LARGEST`、`_ANSWERS`、`_CRASHES` は個々の

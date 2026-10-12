@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/model/README.md locale=zh-CN source_sha256=4ab02b678a96ff4f83b64df76fa5e351f8972eadfb5f9fbdf138149dd53a24cb -->
+<!-- neograph-i18n: source=tests/model/README.md locale=zh-CN source_sha256=da1d60a2c19590a22ffc97a53d9a3d8ed0817cae7f42d76bc9520ddd42b6831a -->
 # Join 模型 (#363)
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -91,7 +91,7 @@ step 的每个闸门单独回答，只有已回答的闸门放行（#382、#396�
 ### Program 测试框架
 
 JavaScript `main()` 程序（`callCore`，同时或逐个运行两个成员的 `ng.all`、`ng.race`、`ng.quorum`，
-以及 `ng.await`）和带类型的 plan（`parallel`、三取二的 `quorum`、`sequence`），运行在只有一个节点的
+`ng.await`，以及其 Core step 运行两个都可能提问的节点的 `callCore`，#388 和 #394）和带类型的 plan（`parallel`、三取二的 `quorum`、`sequence`），运行在只有一个节点的
 Core 上，该节点可以调用已绑定的 provider，也可以提问。宿主按 `LocalProgramHost` 的方式装配：使用进程内
 计价代理的内存宿主，或把所有存储放在一个 SQLite 文件中并使用 SQLite provider 日志的宿主。provider 是
 运行在本地传输上的真实 SDK 客户端，该传输会统计它发送的请求。P1 还覆盖"只发送一次、只计费一次"：
@@ -114,7 +114,7 @@ fork 会再次发送、再次计费被暂停的调用在提问前发出的 provi
 | 闸门 | 在 `Ok` 或 `Ask` 上一个 | 任意节点上一个，或两个 `interrupt_before` |
 
 在 CI 范围中，Core 测试框架覆盖 2,196 个图，每种 Ask 约 6,100 个回答调度，各约 83,000 次运行；Program
-测试框架运行 112 个 JavaScript 程序和 18 个 plan，约 750 个调度。每个测试用四个工作线程在一分钟内完成。
+测试框架运行 124 个 JavaScript 程序和 18 个 plan，约 920 个调度。每个测试用四个工作线程在一分钟内完成。
 
 变量：`NEOGRAPH_RESUME_MODEL_NODES`、`_SPECIAL`、`_SPECIAL_LARGEST`、`_ANSWERS` 和 `_CRASHES` 覆盖单项
 上限；`NEOGRAPH_RESUME_MODEL_SQLITE=0` 去掉 SQLite；`NEOGRAPH_RESUME_MODEL_THREADS` 设置工作线程数（默认

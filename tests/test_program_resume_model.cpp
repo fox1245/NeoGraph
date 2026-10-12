@@ -76,7 +76,9 @@ struct Member {
 
 /// One yielded command of main(): a callCore, a join of callCores, or an
 /// awaited callCore.
-enum class Op { Call, All, Race, Quorum, Await };
+/// Pair: one callCore whose Core step runs two nodes, "work" and "side"
+/// (members[0] and members[1]); both may ask in that step (#388, #394).
+enum class Op { Call, All, Race, Quorum, Await, Pair };
 struct Command {
     Op                  op = Op::Call;
     std::vector<Member> members;
@@ -118,6 +120,11 @@ std::string program_js(const Spec& spec) {
             case Op::Call:
                 body << "  out.push((yield " << call_js(command.members[0], label) << ").out);\n";
                 break;
+            case Op::Pair:
+                body << "  {\n    const reply = yield ng.callCore(\"main\", {value: \"" << to_string(command.members[0].beh)
+                     << ":" << command.members[0].tag << "\", side: \"" << to_string(command.members[1].beh) << ":"
+                     << command.members[1].tag << "\"}, \"" << label << "\");\n    out.push([reply.out, reply.side_out]);\n  }\n";
+                break;
             case Op::Await:
                 body << "  out.push((yield ng.await(" << call_js(command.members[0], label + "m0") << ", 600000, \""
                      << label << "\")).out);\n";
@@ -147,6 +154,7 @@ std::string describe(const Spec& spec) {
         out << (c ? "; " : "")
             << (command.op == Op::Call     ? "call"
                 : command.op == Op::Await  ? "await"
+                : command.op == Op::Pair   ? "pair"
                 : command.op == Op::All    ? "all"
                 : command.op == Op::Race   ? "race"
                                            : "quorum" + std::to_string(command.required));
@@ -248,6 +256,31 @@ Expected reference(const Spec& spec, std::size_t max_answers) {
             expected.out.push_back(result.value);
             continue;
         }
+        if (command.op == Op::Pair) {
+            // One Core step with two nodes (#388): it pauses on every node that
+            // asks, on "work" first; a resume answers that one, and the other
+            // runs again and asks again. A failure ends the step (#392).
+            std::vector<Result> nodes;
+            for (const auto& member : command.members) nodes.push_back(run(member, {}));
+            while (true) {
+                for (const auto& node : nodes)
+                    if (node.kind == Kind::Failed) {
+                        expected.status = ProgramTerminalStatus::Failed;
+                        return expected;
+                    }
+                std::optional<std::size_t> first;
+                for (std::size_t m = 0; m < nodes.size() && !first; ++m)
+                    if (nodes[m].kind == Kind::Asked) first = m;
+                if (!first) break;
+                std::string answer;
+                if (!pause(base, command.members[*first], answer)) return expected;
+                for (std::size_t m = 0; m < nodes.size(); ++m)
+                    if (nodes[m].kind == Kind::Asked)
+                        nodes[m] = run(command.members[m], m == *first ? answer : std::string());
+            }
+            expected.out.push_back(json::array({nodes[0].value, nodes[1].value}));
+            continue;
+        }
         const bool one_wins = command.op == Op::Race || (command.op == Op::Quorum && command.required == 1);
         if (one_wins) {
             // The family keeps only races with one member that finishes on its
@@ -321,6 +354,10 @@ std::vector<Spec> program_family(int max_commands) {
     for (const auto beh : all) {
         commands.push_back(Command{Op::Call, {Member{beh, ""}}});
         commands.push_back(Command{Op::Await, {Member{beh, ""}}});
+        // Two nodes of one Core step: every pair of the steps that ask or call.
+        for (const auto side : all)
+            if (beh != Beh::Fail && side != Beh::Fail && (asks(beh) || asks(side)))
+                commands.push_back(Command{Op::Pair, {Member{beh, ""}, Member{side, ""}}});
     }
     for (const auto a : all) {
         for (const auto b : all) {
@@ -382,7 +419,9 @@ json core_definition() {
                 {"name", "main"},
                 {"channels", json{{"value", json{{"reducer", "overwrite"}, {"initial", ""}}},
                                   {"k", json{{"reducer", "overwrite"}, {"initial", 0}}},
-                                  {"out", json{{"reducer", "overwrite"}, {"initial", ""}}}}},
+                                  {"out", json{{"reducer", "overwrite"}, {"initial", ""}}},
+                                  {"side", json{{"reducer", "overwrite"}, {"initial", ""}}},
+                                  {"side_out", json{{"reducer", "overwrite"}, {"initial", ""}}}}},
                 {"nodes", json{{"work", json{{"type", "rm.step"}}}}},
                 {"edges", json::array({json{{"from", "__start__"}, {"to", "work"}},
                                        json{{"from", "work"}, {"to", "__end__"}}})},

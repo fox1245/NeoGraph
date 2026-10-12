@@ -339,16 +339,19 @@ std::string next_world_id() {
 ///  - fail:    throws.
 class StepNode final : public graph::GraphNode {
 public:
-    StepNode(std::string name, std::shared_ptr<Provider> provider)
-        : name_(std::move(name)), provider_(std::move(provider)) {}
+    StepNode(std::string name, std::shared_ptr<Provider> provider, bool side)
+        : name_(std::move(name)), provider_(std::move(provider)), side_(side) {}
     std::string get_name() const override { return name_; }
 
     asio::awaitable<graph::NodeOutput> run(graph::NodeInput in) override {
+        // The side node runs beside "work" in the Core's one step: it takes
+        // its step from "side" and does nothing when there is none.
+        if (side_ && in.state.get("side").get<std::string>().empty()) co_return graph::NodeOutput{};
         // A plan passes a call's whole result as the next call's input, which
         // sets no channel: the next call of a plan sequence asks.
-        auto steps = in.state.get("value").get<std::string>();
+        auto steps = in.state.get(side_ ? "side" : "value").get<std::string>();
         if (steps.empty()) steps = "ask:z";
-        const auto index = in.state.get("k").get<std::size_t>();
+        const auto index = side_ ? std::size_t{0} : in.state.get("k").get<std::size_t>();
         std::string value;
         std::size_t begin = 0;
         for (std::size_t position = 0; position <= index; ++position) {
@@ -400,14 +403,15 @@ public:
         }
         run.finished = true;
         world.journal.record(std::move(run));
-        output.writes.push_back(graph::ChannelWrite{"out", json(written)});
-        output.writes.push_back(graph::ChannelWrite{"k", json(index + 1)});
+        output.writes.push_back(graph::ChannelWrite{side_ ? "side_out" : "out", json(written)});
+        if (!side_) output.writes.push_back(graph::ChannelWrite{"k", json(index + 1)});
         co_return output;
     }
 
 private:
     std::string               name_;
     std::shared_ptr<Provider> provider_;
+    bool                      side_ = false;
 };
 
 class CountingCheckpointStore final : public graph::CheckpointStore {
@@ -557,10 +561,11 @@ RegistrySnapshot model_registry() {
     builder.add_provider(manifest(kProviderIdentity), ProviderMetadata{json::object(), json::object()});
     builder.add_host_brokered_node(
         manifest({ExecutableKind::Node, "rm.step", "1.0.0", digest('2')}, {kProviderIdentity}),
-        [](const std::string& name, const json&, const graph::NodeContext& context) {
-            return std::make_unique<StepNode>(name, context.provider);
+        [](const std::string& name, const json& config, const graph::NodeContext& context) {
+            return std::make_unique<StepNode>(name, context.provider, config.value("side", false));
         },
-        json{{"type", "object"}}, json{{"writes", json::array({"out", "k"})}, {"exports", json::array({"out", "k"})}});
+        json{{"type", "object"}},
+        json{{"writes", json::array({"out", "k", "side_out"})}, {"exports", json::array({"out", "k", "side_out"})}});
     builder.add_reducer(manifest({ExecutableKind::Reducer, "overwrite", "1.0.0", digest('3')}),
                         [](const json&, const json& incoming) { return incoming; });
     return std::move(builder).build();
@@ -695,9 +700,14 @@ std::string javascript_program(const std::string& body) {
            "  graph.channel(\"value\", {reducer: \"overwrite\", initial: \"\"});\n"
            "  graph.channel(\"k\", {reducer: \"overwrite\", initial: 0});\n"
            "  graph.channel(\"out\", {reducer: \"overwrite\", initial: \"\"});\n"
+           "  graph.channel(\"side\", {reducer: \"overwrite\", initial: \"\"});\n"
+           "  graph.channel(\"side_out\", {reducer: \"overwrite\", initial: \"\"});\n"
            "  graph.node(\"work\", {type: \"rm.step\"});\n"
+           "  graph.node(\"side\", {type: \"rm.step\", side: true});\n"
            "  graph.entry(\"work\");\n"
+           "  graph.entry(\"side\");\n"
            "  graph.exit(\"work\");\n"
+           "  graph.exit(\"side\");\n"
            "  return graph;\n"
            "}\n\n"
            "export function* main(input) {\n" + body + "\n}\n";

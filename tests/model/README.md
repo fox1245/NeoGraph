@@ -119,7 +119,8 @@ ordinary interrupt of its step (#392).
 ### Program harness
 
 JavaScript `main()` programs (`callCore`, `ng.all`, `ng.race` and `ng.quorum`
-of two members run together or one at a time, and `ng.await`) and typed plans
+of two members run together or one at a time, `ng.await`, and a `callCore`
+whose Core step runs two nodes that may both ask, #388 and #394) and typed plans
 (`parallel`, a two-of-three `quorum`, `sequence`) over a one-node Core whose
 node may call a bound provider and may ask. The host is wired as
 `LocalProgramHost` wires one: in memory with the in-process priced broker, or
@@ -152,7 +153,7 @@ which a resume of the source replays.
 
 At the CI bound the Core harness runs 2,196 graphs and about 6,100 answer
 schedules for each kind of ask, some 83,000 runs each; the Program harness runs
-112 JavaScript programs and 18 plans, about 750 schedules. Each test takes
+124 JavaScript programs and 18 plans, about 920 schedules. Each test takes
 under a minute on four workers.
 
 Variables: `NEOGRAPH_RESUME_MODEL_NODES`, `_SPECIAL`, `_SPECIAL_LARGEST`,
