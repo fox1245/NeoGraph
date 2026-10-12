@@ -1,0 +1,350 @@
+# Program guide: JavaScript that coordinates graphs
+
+**Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
+
+A graph has a fixed shape: its nodes, edges and channels are decided when it is compiled. A Program is a small JavaScript module that the host compiles, admits and runs, and that sits one level above the graph. It exports `define()`, which returns the one graph the Program owns, and optionally `main()`, a generator that decides how that graph is run: how many copies at once, how their results are joined, what happens when the budget runs out. The runtime records every step of `main()` in a journal, so a run can pause for a person, stop, and continue.
+
+This page explains the model and walks through one complete Program. The rules are in the [Python binding guide](python-binding.md#program-and-quickjs), the graph features in [Program graph features](program-graphs.md) and the error codes in the [diagnostics guide](diagnostics.md).
+
+## When to use a Program
+
+Use a plain graph when one graph and its checkpoints are enough. A Program is for work around the graph: running several copies in parallel and joining them with a rule (`ng.all`, `ng.race`, `ng.quorum`), keeping a budget over a whole run, recording a run so it can resume in another process, and letting a host admit code that a model or a user wrote. The JavaScript cannot reach the file system, the network, a clock, a random source, `eval`, dynamic `import`, `Promise` or `async`. All it can do is build a graph and yield commands to the runtime. Every node type, condition and reducer it names must be in a registry that the host built, so a generated Program cannot run code the host did not register.
+
+## Requirements
+
+The Program layer needs a build with Program and QuickJS control: `pip install neograph-engine` includes them, and a source build needs `-DNEOGRAPH_BUILD_PYBIND=ON -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON` (then `pip install pydantic certifi` and put the build directory on `PYTHONPATH`).
+
+The example below uses failure routing, `fork` and the SQLite state directory. The 0.13.1 wheel on PyPI does not have them, so run it against a build of the current source. In C++, start from `examples/63_program_quickstart.cpp`.
+
+## A worked example: a release check
+
+A release job checks three services in parallel. The checks of `payments` fail. Instead of failing the whole job, the failure goes to a review step, where the job waits for a person. The person approves the release, the other services are not checked again, and the job finishes. The same job runs under a budget.
+
+The example is three Python files. `release_program.py` holds everything that does not change between runs; `run_release.py` and `restart.py` use it.
+
+<!-- TODO(link): replace the listings below with a link to the Program example under examples/ once the examples overhaul adds it. -->
+
+### 1. The node code
+
+The nodes are ordinary Python. `check` fails for `payments`. A failure names itself with the attributes `code`, `public_message` and `retryable` of the exception; the text of the exception never leaves the node. `Review` runs after a person has answered, and the answer is its resume value.
+
+```python
+import hashlib
+
+import neograph_engine as ng
+
+
+# 1. The node code. Programs refer to these by name; they stay ordinary Python.
+
+CHECKED = []   # which services ran their checks, to show that nothing runs twice
+
+class ChecksFailed(Exception):
+    code = "release.checks_failed"        # an author code: lower-case, dotted
+    public_message = "the release checks failed"
+    retryable = True
+
+
+@ng.node("release.check")
+def check(state):
+    service = state.get("service")
+    CHECKED.append(service)
+    if service == "payments":
+        raise ChecksFailed(f"{service}: 2 tests failed")
+    return [ng.ChannelWrite("report", [f"{service}: checks passed"])]
+
+
+class Review(ng.GraphNode):
+    """Runs after a person answered; the answer is the resume value."""
+
+    def __init__(self, name):
+        super().__init__()
+        self._name = name
+
+    def get_name(self):
+        return self._name
+
+    def run(self, input):
+        answer = input.ctx.resume_value or {}
+        return [ng.ChannelWrite("decision", answer.get("decision", "hold"))]
+
+
+@ng.node("release.ship")
+def ship(state):
+    return [ng.ChannelWrite("report", [f"{state.get('service')}: shipped"])]
+
+
+@ng.node("release.hold")
+def hold(state):
+    return [ng.ChannelWrite("report", [f"{state.get('service')}: held"])]
+
+
+ng.NodeFactory.register_type("release.review", lambda name, config, ctx: Review(name))
+ng.ConditionRegistry.register_condition(
+    "release.decision", lambda state: state.get("decision") or "hold")
+```
+
+### 2. The registry
+
+A registry is the list of executable names a Program may use, each with a version and a digest. The host builds it from nodes, conditions and reducers that are already registered in this process.
+
+```python
+# 2. The registry: the only executable names a Program may use.
+
+def digest(label):
+    return "sha256:" + hashlib.sha256(label.encode()).hexdigest()
+
+
+def build_registry():
+    builder = ng.ProgramRegistryBuilder()
+    for node_type in ("release.check", "release.review", "release.ship", "release.hold"):
+        builder.add_registered_node(node_type, "1.0.0", digest(node_type))
+    builder.add_registered_condition("release.decision", "1.0.0", digest("release.decision"))
+    for reducer in ("append", "overwrite"):
+        builder.add_registered_reducer(reducer, "1.0.0", digest(reducer))
+    return builder.build()
+```
+
+### 3. The Program
+
+`define()` describes the graph. `check` is tried twice (`max_retries: 1`). If it still fails, the failure goes to `review` instead of ending the run, and a record of the failure is appended to the `failures` channel. `review` is held by `interruptBefore`, so the run stops there and waits for an answer. After the answer, the condition `release.decision` sends the run on to `ship` or to `hold`, which is a failure exit: it ends the run `Failed` with the code `release.held`.
+
+`main()` runs the graph once for each service with `ng.all`, at most three at a time, and returns the reports in the order of the services.
+
+```python
+# 3. The Program: define() describes the graph, main() coordinates runs of it.
+
+SOURCE = r'''
+export function define() {
+  const g = ng.graph("release");
+  g.channel("service", {reducer: "overwrite", initial: ""});
+  g.channel("report", {reducer: "append", initial: []});
+  g.channel("failures", {reducer: "append", initial: []});
+  g.channel("decision", {reducer: "overwrite", initial: ""});
+  g.node("check", {type: "release.check"});
+  g.node("review", {type: "release.review"});
+  g.node("ship", {type: "release.ship"});
+  g.node("hold", {type: "release.hold"});
+  g.entry("check");
+  g.edge("check", "ship");
+  g.exit("ship");
+  // Two attempts. Then the failure goes to "review" instead of failing the run.
+  g.retryPolicy("check", {max_retries: 1, initial_delay_ms: 10, backoff_multiplier: 1,
+                          max_delay_ms: 10, on_failure: "review", error_channel: "failures"});
+  g.interruptBefore("review");               // a person answers before "review" runs
+  g.conditionalEdge("review", "release.decision", {approve: "ship", hold: "hold"});
+  g.failureExit("hold", {code: "release.held"});
+  return g;
+}
+
+export function* main(input) {
+  const results = yield ng.all(
+    input.services.map((name) => ng.callCore("release", {service: name}, "release:" + name)),
+    {max_in_flight: 3}, "fan-out");
+  return results.map((result) => result.report);
+}
+'''
+```
+
+Two rules to keep in mind. `ng.callCore` can name only the graph that `define()` returns, by the name given to `ng.graph()`. And a failed command ends the run: the generator is not resumed, so a `try`/`catch` around a `yield` never runs. Handle failures in the graph, as `retryPolicy` does here, or read `result.status` and `result.failure` in the host.
+
+### 4. Budgets and the host
+
+The host has a ceiling for every Program it admits. A Program is admitted together with one run budget, and every run of that version must use exactly that budget. The ceiling's fields, except the two child limits, must be positive even for a Program that never calls a model.
+
+```python
+# 4. The budgets. The host ceiling bounds every Program; the run budget bounds one run.
+
+def budget(**fields):
+    value = ng.ProgramRunBudget()
+    for name, number in fields.items():
+        setattr(value, name, number)
+    return value
+
+
+ceiling = budget(wall_time_ms=120_000, model_tokens=1, monetary_microunits=1,
+                 max_concurrency=8, max_program_operations=64, max_core_steps=2_000,
+                 max_dynamic_compiles=1)
+run_budget = budget(wall_time_ms=10_000, max_concurrency=6, max_program_operations=16,
+                    max_core_steps=50)
+
+
+def admit(host, run_budget):
+    """Compile the Program, check it against the host's ceiling and return its version."""
+    source = ng.ProgramSource.from_javascript("release.js", SOURCE)
+    return host.compile_admit(source, run_budget)
+
+
+def make_host(state_dir=None):
+    host = ng.LocalProgramHost(build_registry(), "tenant:docs", ceiling,
+                               sqlite_directory=state_dir)
+    return host, admit(host, run_budget)
+```
+
+`compile_admit` compiles the source, checks the bundle against the ceiling and returns a `ProgramVersion`. The same source, registry and budget give the same version id in another process; the tests check this across processes.
+
+### 5. Run it, and pause
+
+Create `run_release.py`:
+
+```python
+from release_program import CHECKED, admit, budget, make_host, run_budget
+
+host, version = make_host()
+
+# Run: "payments" fails its checks, so the run pauses for a person.
+
+services = {"services": ["api", "payments", "web"]}
+paused = host.run(version, services, run_budget)
+print(paused.status)
+print(paused.interrupt.core_node, paused.interrupt.value["failure"]["code"])
+```
+
+```text
+ProgramTerminalStatus.Interrupted
+review release.checks_failed
+```
+
+`api` and `web` finished their checks. `payments` failed twice, so its failure was routed to `review`, and the run stopped with the status `Interrupted`. `result.interrupt.core_node` names the node that waits, and `result.interrupt.value` holds `{"reason": "failure_route", "failure": {...}}`, where the failure record has `node`, `kind` (`exhausted` here), `code`, `attempts`, `retryable`, `step`, `routed_to` and `effects`. The reports of `api` and `web` are already in the run.
+
+### 6. Fork it to try the other answer
+
+```python
+# Fork the paused run to see what "hold" would do. The original stays paused.
+# The fork's budget is taken out of the paused run's remaining budget.
+
+fork_budget = budget(wall_time_ms=2_000, max_concurrency=3, max_program_operations=8,
+                     max_core_steps=20)
+forked = host.fork(paused.run_id, {"decision": "hold"}, version, fork_budget).wait()
+print(forked.status, forked.failure.code)
+```
+
+```text
+ProgramTerminalStatus.Failed release.held
+```
+
+`fork` starts a new run from the paused run's checkpoint and answers the question with `"hold"`. The fork ends `Failed` with the code of the failure exit. The original run is still paused. Finished work is replayed, not run again.
+
+The fork's budget is taken out of the original run's remaining budget, field by field, including `max_concurrency`. The join needs three, the run has six, so three are left for the original. When a fork takes all of a resource, the original cannot continue; we saw `P_CONCURRENCY_BUDGET` and `P_TRANSITION_CONFLICT` in that case.
+
+### 7. Resume with the answer
+
+```python
+# Resume the original with "approve". The other services do not run again.
+
+done = host.resume(paused.run_id, {"decision": "approve"}).wait()
+print(done.status)
+print(done.output)
+print(sorted(CHECKED))
+```
+
+```text
+ProgramTerminalStatus.Completed
+[['api: checks passed', 'api: shipped'], ['payments: shipped'], ['web: checks passed', 'web: shipped']]
+['api', 'payments', 'payments', 'web']
+```
+
+`resume` answers the pending question and continues the same run. `payments` skips its checks and ships, because a person approved it. The last line shows that nothing ran twice: `api` and `web` appear once, `payments` twice (its two failed attempts).
+
+### 8. A budget that is too small
+
+```python
+# A budget that is too small refuses the join before any member starts.
+
+small = budget(wall_time_ms=10_000, max_concurrency=6, max_program_operations=2,
+               max_core_steps=50)
+refused = host.run(admit(host, small), services, small)
+print(refused.status, refused.failure.code)
+```
+
+```text
+ProgramTerminalStatus.BudgetExhausted P_PROGRAM_OPERATION_BUDGET
+```
+
+The join needs more Program operations than this budget allows (`max_program_operations=2`). The runtime refuses the whole join before it starts any member, so no service is checked. A new budget means a new `compile_admit` and a new version; `host.run` with a budget that differs from the admitted one raises `P_START_BUDGET`.
+
+### 9. Survive a restart
+
+By default `LocalProgramHost` keeps everything in memory, and `resume` works only through the host object that started the run. With `sqlite_directory` the host keeps runs, versions and checkpoints in SQLite files, so a new process can continue the run. It must use the same registry and admit the same Program.
+
+Create `restart.py`:
+
+```python
+import sys
+
+from release_program import make_host, run_budget
+
+state_dir, step = sys.argv[1], sys.argv[2]
+host, version = make_host(state_dir)
+
+if step == "start":
+    paused = host.run(version, {"services": ["api", "payments", "web"]}, run_budget)
+    print(paused.status, paused.run_id)
+else:
+    done = host.resume(sys.argv[3], {"decision": "approve"}).wait()
+    print(done.status, done.output)
+```
+
+```bash
+python restart.py state start
+python restart.py state resume run-...
+```
+
+The first command prints the status `Interrupted` and the run id; pass that id to the second, which prints `Completed` and the reports. The directory `state` holds `program.db`, `checkpoints.db` and `provider_calls.db`.
+
+## What `define()` can say
+
+`ng.graph(name)` returns a builder. All methods return the builder.
+
+| Method | Meaning |
+|---|---|
+| `channel(name, {reducer, initial})` | A state channel with a reducer (`overwrite`, `append` or a registered one). |
+| `node(name, {type, ...config})` | A node of a registered type; the other keys are its configuration. |
+| `edge(from, to)`, `conditionalEdge(from, condition, routes)` | Static and routed edges. The condition is a registered name. |
+| `entry(node)`, `exit(node)` | Connect `__start__` and `__end__`. |
+| `barrier(node, waitFor)` | A join that waits for every listed node or `{any_of: [...]}` slot. |
+| `interruptBefore(...)`, `interruptAfter(...)` | Pause the run before or after the node and wait for an answer. |
+| `retryPolicy(node, {...})` | Retries, timeouts and, with `on_failure`, a failure edge. |
+| `failureExit(node, {code})` | A node that ends the run `Failed` with that code. |
+| `metadata({...})` | Claims about the graph; grants nothing. |
+
+`ng.javascript_authoring_capability_manifest()` returns the exact vocabulary this build accepts, with TypeScript declarations in `dts_prelude`. [Program graph features](program-graphs.md) describes the less common keys.
+
+## What `main()` can yield
+
+Each `yield` hands one command to the runtime and receives the command's result when it completes.
+
+| Command | Result |
+|---|---|
+| `ng.callCore(name, input, site)` | Runs the graph and returns its output: `channels` with each channel's `value` and `version`, and each channel's value also under its own name. |
+| `ng.all(members, options, site)` (`ng.parallel` is the same) | Runs the member commands concurrently, `max_in_flight` at a time, and returns their results in the order given. A failed member fails the run. |
+| `ng.race(members, options, site)` | Returns the result of the first member to finish. |
+| `ng.quorum(members, required, site)` | Returns once the required number of members succeeded. |
+| `ng.await(command, timeoutMs, site)` | Waits for one command up to a deadline. A deadline that passes ends the run `TimedOut` with `P_AWAIT_TIMEOUT`. |
+| `ng.spawn(binding, input, site)` | Starts a child Program. It needs a C++ host with a child-binding resolver; `LocalProgramHost` has none and fails with `P_CHILD_BINDING`. |
+| `ng.emit(value, site)`, `ng.checkpoint(value, site)` | Record `value` in the run's journal and return it. Each counts as one Program operation. |
+| `ng.cancelScope(scope, reason, site)` | Cancels the run (`scope` is `"current"`); the run ends `Cancelled` with `P_RUNTIME_CANCELLED`. |
+
+The last argument of each command is a label for the call site. A paused member of `ng.all` pauses the run: the other members finish, the run is `Interrupted`, and `resume` answers the paused member.
+
+## Statuses
+
+`ProgramResult.status` is a `ProgramTerminalStatus`. Read `result.failure` (`code`, `message`, `core_node`, `witness`) when it is not `Completed`.
+
+| Status | Meaning |
+|---|---|
+| `Completed` | `main()` returned, or the graph reached its exit. `result.output` holds the value. |
+| `Interrupted` | The run waits for an answer; `result.interrupt` says where. `resume` or `fork` continues it. |
+| `Failed` | A failure the graph did not route, a failure exit, or `main()` threw. `result.failure.code` names it. |
+| `BudgetExhausted` | A budgeted resource ran out, for example `P_PROGRAM_OPERATION_BUDGET`, `P_CORE_STEP_BUDGET` or `P_CONCURRENCY_BUDGET`. |
+| `TimedOut` | The run's `wall_time_ms` or an `ng.await` deadline passed. |
+| `Cancelled` | `ng.cancelScope` or the handle's `cancel()` stopped the run. |
+
+`AmbiguousEffect` and `CheckpointIncompatible` also exist; see `include/neograph/program/result.h`.
+
+## Budgets
+
+A `ProgramRunBudget` has ten fields: `wall_time_ms`, `model_tokens`, `monetary_microunits`, `max_concurrency`, `max_program_operations`, `max_core_steps`, `max_dynamic_compiles`, `max_child_depth`, `max_total_children` and `max_node_retries`. `result.usage` counts what a run used and `result.remaining_budget` is what is left. Zero grants nothing: a run with `model_tokens = 0` that calls a model ends `BudgetExhausted`. The ceiling, the admitted budget and the model-cost rules are in the [Python binding guide](python-binding.md#budgets).
+
+## Where the behaviour is tested
+
+Each step of the example corresponds to scenarios in `bindings/python/tests/program_e2e`: `test_07_main_programs.py` (`ng.all`, `race`, `quorum`, `await`), `test_10_failure_routing.py` (the failure route and the approval), `test_02_hitl.py` (interrupt and resume, in memory and after a restart), `test_04_budgets.py` (budgets), and `test_13_fork_replays_the_paused_step.py` and `test_20_javascript_fork.py` (forks). The [README of that directory](../bindings/python/tests/program_e2e/README.md) lists all of them. The Hooks, provider calls and child Programs that the example leaves out are covered in the [Python binding guide](python-binding.md) and in [recursive Harnesses](PROGRAM_RECURSIVE_HARNESSES.md).
