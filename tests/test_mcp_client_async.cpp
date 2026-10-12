@@ -1127,7 +1127,9 @@ TEST(MCPClientAsync, StructuredContentIsCheckedAsJsonSchema2020_12) {
 // D2 / MCP-C-11: the client accepts only the revisions it supports, and
 // disconnects from a server that answers another one.
 TEST(MCPClientAsync, AcceptsOnlyKnownProtocolRevisions) {
-    for (const std::string answer : {"2025-06-18", "2025-03-26", "1999-01-01"}) {
+    // 2024-11-05 is what the official SDK clients still accept too; a server
+    // that answers it over Streamable HTTP is reachable.
+    for (const std::string answer : {"2025-06-18", "2025-03-26", "2024-11-05", "1999-01-01"}) {
         httplib::Server svr;
         std::mutex mu;
         std::vector<std::string> versions_sent;

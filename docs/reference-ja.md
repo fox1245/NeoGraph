@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=09bef4cf7abb7279b4dcbfce5b8013c150cc8e2ec17aa762d919137c55689c47 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=489ca2ce11e7f8849245f35f0f79fb10480c4ef9ebb6d01fe29661c0eb33d97e -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -2688,7 +2688,7 @@ public:
 ```
 
 
-**ワイヤプロトコル:** NeoGraph の MCP クライアントは `protocolVersion = "2025-11-25"` を提示し、サーバーが `2025-11-25`、`2025-06-18`、`2025-03-26` のいずれかで応答すれば受け入れます (`MCP_SUPPORTED_PROTOCOL_VERSIONS`)。それ以外の応答では、両方のバージョンを示すプロトコルエラーで `initialize` が失敗し、MCP のバージョンネゴシエーションが求めるとおりクライアントは切断します。HTTP は以後のすべてのリクエストの `MCP-Protocol-Version` ヘッダーでネゴシエートされたバージョンを送ります。MCP `2026-07-28` (`initialize` もセッションもない) にはまだ対応していません。その版だけを提供するサーバーは `-32022` でハンドシェイクを拒否し、呼び出し元には `MCPError` として届きます。
+**ワイヤプロトコル:** NeoGraph の MCP クライアントは `protocolVersion = "2025-11-25"` を提示し、公式 SDK クライアントと同様に、サーバーが `2025-11-25`、`2025-06-18`、`2025-03-26`、`2024-11-05` のいずれかで応答すれば受け入れます (`MCP_CLIENT_PROTOCOL_VERSIONS`)。`2024-11-05` のサーバーには stdio または Streamable HTTP で接続し、以前の HTTP+SSE トランスポートには対応しません。それ以外の応答では、両方のバージョンを示すプロトコルエラーで `initialize` が失敗し、MCP のバージョンネゴシエーションが求めるとおりクライアントは切断します。HTTP は以後のすべてのリクエストの `MCP-Protocol-Version` ヘッダーでネゴシエートされたバージョンを送ります。MCP `2026-07-28` (`initialize` もセッションもない) にはまだ対応していません。その版だけを提供するサーバーは `-32022` でハンドシェイクを拒否し、呼び出し元には `MCPError` として届きます。
 
 **セッションとトランスポートの所有:** 両方のコンストラクタは同じプロトコルセッションを作ります。セッションは JSON-RPC id、応答の検証、初期化 (initialized 通知を含む)、ページ送り、ツール結果の変換を所有します。まだハンドシェイクしていないクライアントで `rpc_call_async()` から送ったリクエストは、先にハンドシェイクを行います。エンドポイント URL、ヘッダー、ネゴシエートされた `Mcp-Session-Id`、リクエストタイムアウトは HTTP トランスポートだけが所有し、サブプロセス、パイプ、リーダー、応答 id の多重分離器は stdio トランスポートだけが所有します。検出されたツールはプロトコルセッションを保持するため、`MCPClient` の破棄後も使えます。セッションは、クライアントまたはツールへの最後の参照が解放されたときに終わります。
 

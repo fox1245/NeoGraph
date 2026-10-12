@@ -12,6 +12,9 @@ Pinned SDK: mcp==2.3.0 (see ../requirements.txt).  Two flavours:
 Transports: --transport stdio | http.  HTTP options: --stateless, --json-response,
 --path, --port, --idle-timeout (seconds; small values reproduce session expiry).
 
+--protocol-version V   answer every initialize with revision V (such as 2024-11-05),
+                       as a server that supports only that revision does.
+
 --record FILE   HTTP only: append one JSON line per HTTP exchange (request
                 method/path/headers/body, response status/headers/body).
 --events FILE   append one JSON line per server-side observation (cancellations,
@@ -50,6 +53,16 @@ PNG_1PX = base64.b64encode(
 WAV_EMPTY = base64.b64encode(
     b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00@\x1f\x00\x00\x80>\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
 ).decode()
+
+
+def offer_only(version: str) -> None:
+    """Make the SDK's initialize negotiation offer only `version`: a client
+    that asks for anything else gets it as the counter-offer. The HTTP
+    transport still accepts every handshake revision in MCP-Protocol-Version."""
+    import mcp.server.runner as runner
+
+    runner.HANDSHAKE_PROTOCOL_VERSIONS = (version,)
+    runner.LATEST_HANDSHAKE_VERSION = version
 
 
 def event(kind: str, **fields: Any) -> None:
@@ -328,7 +341,10 @@ def main() -> None:
     p.add_argument("--server-request-timeout", type=float, default=4.0)
     p.add_argument("--event-store", action="store_true", help="enable resumability (priming events)")
     p.add_argument("--retry-interval", type=int, default=200, help="SSE retry field in ms")
+    p.add_argument("--protocol-version", help="the only revision the handshake offers")
     ARGS = p.parse_args()
+    if ARGS.protocol_version:
+        offer_only(ARGS.protocol_version)
 
     if ARGS.flavor == "mcpserver":
         server = build_mcpserver()

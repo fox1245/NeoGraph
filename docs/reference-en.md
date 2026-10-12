@@ -3108,8 +3108,10 @@ public:
 ```
 
 **Wire protocol:** NeoGraph's MCP client offers `protocolVersion =
-"2025-11-25"` and accepts a server that answers `2025-11-25`, `2025-06-18` or
-`2025-03-26` (`MCP_SUPPORTED_PROTOCOL_VERSIONS`). Any other answer fails
+"2025-11-25"` and, as the official SDK clients do, accepts a server that
+answers `2025-11-25`, `2025-06-18`, `2025-03-26` or `2024-11-05`
+(`MCP_CLIENT_PROTOCOL_VERSIONS`). A `2024-11-05` server is reached over stdio or
+Streamable HTTP; the older HTTP+SSE transport is not spoken. Any other answer fails
 `initialize` with a protocol error naming both and the client disconnects, as
 MCP's version negotiation asks. HTTP sends the negotiated version in the
 `MCP-Protocol-Version` header of every later request. MCP `2026-07-28` (no

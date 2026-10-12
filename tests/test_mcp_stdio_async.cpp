@@ -440,6 +440,36 @@ TEST(MCPStdioAsync, SpawnClosesInheritedHighFileDescriptor) {
 }
 #endif
 
+TEST(MCPStdioAsync, AServerThatAnswers20241105IsUsable) {
+    // MCP 2024-11-05 servers are still deployed, and the official SDK clients
+    // still accept that revision; so does this client, over stdio.
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    const char* script =
+        "import json,sys\n"
+        "for line in sys.stdin:\n"
+        "  m=json.loads(line)\n"
+        "  if 'id' not in m or 'method' not in m: continue\n"
+        "  if m['method']=='initialize':\n"
+        "    r={'protocolVersion':'2024-11-05','capabilities':{'tools':{}},"
+        "'serverInfo':{'name':'old','version':'1'}}\n"
+        "  elif m['method']=='tools/list':\n"
+        "    r={'tools':[{'name':'echo','description':'Echo',"
+        "'inputSchema':{'type':'object','properties':{'text':{'type':'string'}}}}]}\n"
+        "  elif m['method']=='tools/call':\n"
+        "    r={'content':[{'type':'text','text':m['params']['arguments']['text']}]}\n"
+        "  else:\n"
+        "    print(json.dumps({'jsonrpc':'2.0','id':m['id'],'error':"
+        "{'code':-32601,'message':'no'}}),flush=True); continue\n"
+        "  print(json.dumps({'jsonrpc':'2.0','id':m['id'],'result':r}),flush=True)\n";
+    mcp::MCPClient client({python_cmd(), "-c", script});
+    ASSERT_TRUE(client.initialize("old-server"));
+    EXPECT_EQ(client.get_initialize_result().protocol_version, "2024-11-05");
+    const auto tools = client.get_tools();
+    ASSERT_EQ(tools.size(), 1u);
+    EXPECT_EQ(tools[0]->get_name(), "echo");
+    EXPECT_EQ(tools[0]->execute(json{{"text", "hi"}}), "hi");
+}
+
 TEST(MCPStdioAsync, HardenedStartupUsesStartupRatherThanRequestTimeout) {
     if (!python3_available()) GTEST_SKIP() << "python not available";
     auto config = boundary_config("startup");

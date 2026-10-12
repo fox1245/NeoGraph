@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=09bef4cf7abb7279b4dcbfce5b8013c150cc8e2ec17aa762d919137c55689c47 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=489ca2ce11e7f8849245f35f0f79fb10480c4ef9ebb6d01fe29661c0eb33d97e -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3049,8 +3049,9 @@ public:
 
 
 **와이어 프로토콜:** NeoGraph의 MCP 클라이언트는 `protocolVersion = "2025-11-25"`를 제안하고,
-서버가 `2025-11-25`, `2025-06-18` 또는 `2025-03-26`으로 응답하면 받아들입니다
-(`MCP_SUPPORTED_PROTOCOL_VERSIONS`). 그 밖의 응답이면 두 버전을 모두 밝히는 프로토콜 오류로
+공식 SDK 클라이언트처럼 서버가 `2025-11-25`, `2025-06-18`, `2025-03-26` 또는 `2024-11-05`로
+응답하면 받아들입니다(`MCP_CLIENT_PROTOCOL_VERSIONS`). `2024-11-05` 서버에는 stdio나
+Streamable HTTP로 연결하며, 이전의 HTTP+SSE 전송은 지원하지 않습니다. 그 밖의 응답이면 두 버전을 모두 밝히는 프로토콜 오류로
 `initialize`가 실패하고, MCP의 버전 협상이 요구하는 대로 클라이언트는 연결을 끊습니다.
 HTTP는 이후의 모든 요청의 `MCP-Protocol-Version` 헤더에 협상된 버전을 보냅니다. MCP
 `2026-07-28`(`initialize`도 세션도 없음)은 아직 지원하지 않습니다. 그 개정판만 제공하는

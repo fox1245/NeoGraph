@@ -96,7 +96,16 @@ def main():
     p.add_argument("--record")
     p.add_argument("--events")
     p.add_argument("--flavor", default="fastmcp")  # accepted for a uniform command line
+    p.add_argument("--protocol-version", help="the only revision the handshake offers")
     ARGS, _ = p.parse_known_args()
+    if ARGS.protocol_version:
+        # mcp 1.x negotiates in ServerSession against these two names; the
+        # HTTP transport keeps its own list, so the header still validates.
+        import mcp.server.session as session
+        import mcp.types as types
+
+        session.SUPPORTED_PROTOCOL_VERSIONS = [ARGS.protocol_version]
+        types.LATEST_PROTOCOL_VERSION = ARGS.protocol_version
     mcp = build(ARGS.stateless, ARGS.json_response, ARGS.path)
     if ARGS.transport == "stdio":
         mcp.run("stdio")

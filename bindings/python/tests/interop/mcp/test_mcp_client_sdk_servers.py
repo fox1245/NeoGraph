@@ -134,6 +134,32 @@ def test_http_request_headers(peer: Peer, request):
         assert not problems, problems
 
 
+OLD_REVISION = "2024-11-05"
+
+
+@pytest.mark.parametrize("peer", _params(PEERS + PY1_PEERS, lambda p: p.sdk in ("py", "py1")))
+def test_a_server_that_negotiates_2024_11_05_is_usable(peer: Peer, request):
+    """Lifecycle: an official Python server that offers only 2024-11-05 answers that
+    revision to the client's 2025-11-25; the official clients accept it, and so does
+    NeoGraph's, over stdio and Streamable HTTP (no legacy HTTP+SSE transport)."""
+    with server(peer, _name(request), extra=["--protocol-version", OLD_REVISION]) as run:
+        client = _initialized(run)
+        assert client.get_initialize_result().protocol_version == OLD_REVISION
+        assert "echo" in [d.name for d in client.get_tool_definitions()]
+        assert client.call_tool("echo", {"text": "old"})["content"][0]["text"] == "old"
+        if peer.transport == "http":
+            problems = []
+            for ex in run.http_exchanges()[1:]:
+                h = ex["http"]["headers"]
+                if ex["http"]["method"] == "POST" and h.get("mcp-protocol-version") != OLD_REVISION:
+                    problems.append(("mcp-protocol-version", short(ex["message"]),
+                                     h.get("mcp-protocol-version")))
+                if ex["http"]["status"] >= 400 and ex["http"]["method"] == "POST":
+                    problems.append(("rejected", ex["http"]["status"],
+                                     short(ex["http"]["response_body"])))
+            assert not problems, problems
+
+
 # --------------------------------------------------------------------------- tools
 
 @pytest.mark.parametrize("peer", ALL)

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=09bef4cf7abb7279b4dcbfce5b8013c150cc8e2ec17aa762d919137c55689c47 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=489ca2ce11e7f8849245f35f0f79fb10480c4ef9ebb6d01fe29661c0eb33d97e -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2990,9 +2990,10 @@ public:
 ```
 
 
-**线路协议：** NeoGraph 的 MCP 客户端提出 `protocolVersion = "2025-11-25"`，并接受答复
-`2025-11-25`、`2025-06-18` 或 `2025-03-26` 的服务器（`MCP_SUPPORTED_PROTOCOL_VERSIONS`）。
-其他答复会使 `initialize` 以同时指明两个版本的协议错误失败，并按 MCP 版本协商的要求断开
+**线路协议：** NeoGraph 的 MCP 客户端提出 `protocolVersion = "2025-11-25"`，并像官方 SDK
+客户端一样接受答复 `2025-11-25`、`2025-06-18`、`2025-03-26` 或 `2024-11-05` 的服务器
+（`MCP_CLIENT_PROTOCOL_VERSIONS`）。连接 `2024-11-05` 服务器使用 stdio 或 Streamable HTTP，
+不支持更早的 HTTP+SSE 传输。其他答复会使 `initialize` 以同时指明两个版本的协议错误失败，并按 MCP 版本协商的要求断开
 连接。HTTP 在之后每个请求的 `MCP-Protocol-Version` 头中发送协商的版本。尚不支持 MCP
 `2026-07-28`（没有 `initialize`，也没有会话）：只提供该修订版的服务器以 `-32022` 拒绝握手，
 调用方收到的是 `MCPError`。
