@@ -201,9 +201,19 @@ PendingInterrupt pending_interrupt(std::string task_id, const std::string& node,
 // of its NodeInterrupt checkpoint, which lists them when there are several.
 json record_step_interrupts(const RunContext& ctx, std::vector<PendingInterrupt> interrupts) {
     const auto runtime = detail::runtime_for(ctx);
-    if (runtime && runtime->step_interrupts) runtime->step_interrupts->list = interrupts;
+    if (runtime && runtime->step_interrupts) {
+        runtime->step_interrupts->list = interrupts;
+        runtime->step_interrupts->checkpoint_id.clear();
+    }
     return detail::with_pending_interrupts(
         detail::checkpoint_metadata_for(ctx, detail::CheckpointTiming::DuringStep), interrupts);
+}
+
+// #386: the NodeInterrupt checkpoint saved for the step's interrupts, which the
+// run reports.
+void record_interrupt_checkpoint(const RunContext& ctx, const std::string& checkpoint_id) {
+    const auto runtime = detail::runtime_for(ctx);
+    if (runtime && runtime->step_interrupts) runtime->step_interrupts->checkpoint_id = checkpoint_id;
 }
 
 }  // namespace
@@ -288,22 +298,22 @@ asio::awaitable<void> record_attempt_start(const CheckpointCoordinator& coord,
 // finished, so without a checkpoint before the step their results, and those
 // of the Sends that finished, are recorded under the interrupt checkpoint
 // itself; resume replays them instead of running them again. `finished[i]` is
-// the result of Send i when it finished.
-asio::awaitable<void> save_send_interrupt(const CheckpointCoordinator&          coord,
-                                          const GraphState&                     step_state,
-                                          const detail::SendStep&               send_step,
-                                          const std::vector<Send>&              sends,
-                                          const std::vector<const NodeResult*>& finished,
-                                          const std::vector<int>& interrupted_attempts,
-                                          std::size_t interrupted, int step,
-                                          const std::string& parent_cp_id,
-                                          const json&        metadata) {
+// the result of Send i when it finished. Returns the checkpoint's id.
+asio::awaitable<std::string> save_send_interrupt(const CheckpointCoordinator&          coord,
+                                                 const GraphState&                     step_state,
+                                                 const detail::SendStep&               send_step,
+                                                 const std::vector<Send>&              sends,
+                                                 const std::vector<const NodeResult*>& finished,
+                                                 const std::vector<int>& interrupted_attempts,
+                                                 std::size_t interrupted, int step,
+                                                 const std::string& parent_cp_id,
+                                                 const json&        metadata) {
     // GCC-13: build the vector outside the co_await argument list.
     std::vector<std::string> next_nodes = send_step.ready;
     const auto interrupt_cp_id = co_await coord.save_super_step_async(
         step_state, sends[interrupted].target_node, next_nodes, CheckpointPhase::NodeInterrupt,
         step, parent_cp_id, send_step.barrier_state, metadata);
-    if (!parent_cp_id.empty()) co_return;
+    if (!parent_cp_id.empty()) co_return interrupt_cp_id;
     for (std::size_t i = 0; i < send_step.ready.size() && i < send_step.results.size(); ++i) {
         const auto task_id = make_static_task_id(step, send_step.ready[i]);
         co_await coord.record_pending_write_async(interrupt_cp_id, task_id, task_id,
@@ -318,6 +328,7 @@ asio::awaitable<void> save_send_interrupt(const CheckpointCoordinator&          
             co_await record_attempt_start(coord, interrupt_cp_id, task_id, sends[si].target_node,
                                           interrupted_attempts[si], step);
     }
+    co_return interrupt_cp_id;
 }
 
 }  // namespace
@@ -1250,6 +1261,7 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
         // The executor is the only layer that knows the graph's name for
         // this node — the node body does not.
         interrupt->set_node(node_name);
+        record_interrupt_checkpoint(ctx, interrupt_cp_id);
         throw *interrupt;
     }
 
@@ -1330,6 +1342,7 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
                     co_await record_attempt_start(coord, interrupt_cp_id, task_id, node_name,
                                                   interrupted_attempt, step);
                 interrupt->set_node(node_name);
+                record_interrupt_checkpoint(ctx, interrupt_cp_id);
                 throw *interrupt;
             }
             if (coord.records_pending_writes(parent_cp_id))
@@ -1505,6 +1518,7 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
             // wholly owned by the current (main) thread.
             first_exception = nullptr;
             interrupt->set_node(first_exception_node);
+            record_interrupt_checkpoint(ctx, interrupt_cp_id);
             throw *interrupt;
         }
         std::rethrow_exception(first_exception);
@@ -1615,9 +1629,11 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
         init_state(step_state);
         step_state.copy_provider_history_from(state);
         step_state.restore_runtime(*runtime->step_start->state);
-        co_await save_send_interrupt(coord, step_state, *send_step, sends, finished,
-                                     interrupted_attempts, interrupted, step, parent_cp_id,
-                                     metadata);
+        const auto checkpoint_id =
+            co_await save_send_interrupt(coord, step_state, *send_step, sends, finished,
+                                         interrupted_attempts, interrupted, step, parent_cp_id,
+                                         metadata);
+        record_interrupt_checkpoint(ctx, checkpoint_id);
     };
 
     // #389: every Send runs on a state of its own, one Send or many: the state

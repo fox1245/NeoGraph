@@ -194,18 +194,30 @@ public:
     std::thread::id last_thread;
 };
 
+// Each sync-only save waits for the executor to run a posted handler. A
+// NodeInterrupt pause saves its checkpoint through the async default, which
+// offloads the save, so the executor keeps running; the run then reports that
+// checkpoint without loading the thread's latest (#386).
 class InterruptProgressStore final : public InMemoryCheckpointStore {
 public:
     asio::io_context* io = nullptr;
     std::atomic<bool> progress{false};
-    bool progressed_during_load = false;
-    std::optional<Checkpoint> load_latest(const std::string& thread) override {
+    std::atomic<bool> blocked_save{false};
+    std::atomic<int>  saves{0};
+    std::atomic<int>  latest_loads{0};
+    void save(const Checkpoint& checkpoint) override {
+        ++saves;
+        progress.store(false, std::memory_order_release);
         asio::post(*io, [this] { progress.store(true, std::memory_order_release); });
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
         while (!progress.load(std::memory_order_acquire) &&
                std::chrono::steady_clock::now() < deadline)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        progressed_during_load = progress.load(std::memory_order_acquire);
+        if (!progress.load(std::memory_order_acquire)) blocked_save = true;
+        InMemoryCheckpointStore::save(checkpoint);
+    }
+    std::optional<Checkpoint> load_latest(const std::string& thread) override {
+        ++latest_loads;
         return InMemoryCheckpointStore::load_latest(thread);
     }
 };
@@ -445,7 +457,7 @@ TEST(CheckpointCapabilities, AsyncAdapterRejectsNullBackend) {
     EXPECT_THROW((void)adapt_async_checkpoint_store(nullptr), std::invalid_argument);
 }
 
-TEST(CheckpointAsyncDefault, NodeInterruptLatestLoadAllowsExecutorProgress) {
+TEST(CheckpointAsyncDefault, NodeInterruptCheckpointSaveAllowsExecutorProgress) {
     using neograph::json;
     NodeFactory::instance().register_type("interrupt_progress_regression",
         [](const std::string&, const json&, const NodeContext&) {
@@ -472,6 +484,10 @@ TEST(CheckpointAsyncDefault, NodeInterruptLatestLoadAllowsExecutorProgress) {
     if (error) std::rethrow_exception(error);
     ASSERT_TRUE(result);
     EXPECT_TRUE(result->interrupted);
-    EXPECT_FALSE(result->checkpoint_id.empty());
-    EXPECT_TRUE(store->progressed_during_load);
+    const auto saved = store->InMemoryCheckpointStore::load_by_id(result->checkpoint_id);
+    ASSERT_TRUE(saved);
+    EXPECT_EQ(saved->interrupt_phase, CheckpointPhase::NodeInterrupt);
+    EXPECT_GE(store->saves.load(), 1);
+    EXPECT_FALSE(store->blocked_save.load());
+    EXPECT_EQ(store->latest_loads.load(), 0);
 }

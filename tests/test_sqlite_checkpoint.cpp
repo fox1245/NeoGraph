@@ -1010,3 +1010,97 @@ TEST(SqliteCheckpointNativeHistory, FreshManagedBankAuthenticatesHeldClaimsScope
     EXPECT_EQ(restored_authority.at("reports"), neograph::provider_codec::encode_usage(completed.usage));
 }
 #endif
+
+// #386: SQLite orders a thread's checkpoints by (timestamp_ms, step). Two runs
+// on one thread inside one millisecond (a Program plan's Core calls on its root
+// thread, where fsync returns at once) tie on the timestamp, and the earlier
+// run's last checkpoint has the higher step: it is the thread's "latest". A run
+// that pauses on a NodeInterrupt reports the checkpoint it saved, so resuming it
+// runs the paused node instead of replaying the earlier run's completed state.
+namespace {
+
+class OneMillisecondSqliteStore final : public SqliteCheckpointStore {
+public:
+    using SqliteCheckpointStore::SqliteCheckpointStore;
+    void save(const Checkpoint& cp) override {
+        Checkpoint pinned = cp;
+        pinned.timestamp  = 1;
+        SqliteCheckpointStore::save(pinned);
+    }
+};
+
+std::atomic<int> coarse_gate_resumed{0};
+
+class CoarseGateNode final : public GraphNode {
+public:
+    asio::awaitable<NodeResult> run(NodeInput in) override {
+        NodeResult out;
+        if (in.ctx.resume_value) {
+            ++coarse_gate_resumed;
+            out.writes.push_back(ChannelWrite{"value", *in.ctx.resume_value});
+            co_return out;
+        }
+        if (in.state.get("value") == json("ask")) throw NodeInterrupt("approval");
+        out.writes.push_back(ChannelWrite{"value", json("passed")});
+        co_return out;
+    }
+    std::string get_name() const override { return "gate"; }
+};
+
+class CoarseTailNode final : public GraphNode {
+public:
+    asio::awaitable<NodeResult> run(NodeInput) override {
+        NodeResult out;
+        out.writes.push_back(ChannelWrite{"tail", json(true)});
+        co_return out;
+    }
+    std::string get_name() const override { return "tail"; }
+};
+
+}  // namespace
+
+TEST(SqliteCheckpointCoarseClock, NodeInterruptReportsTheCheckpointItSaved) {
+    NodeFactory::instance().register_type(
+        "coarse_gate", [](const std::string&, const json&, const NodeContext&) {
+            return std::make_unique<CoarseGateNode>();
+        });
+    NodeFactory::instance().register_type(
+        "coarse_tail", [](const std::string&, const json&, const NodeContext&) {
+            return std::make_unique<CoarseTailNode>();
+        });
+    const json definition{
+        {"name", "coarse_clock"},
+        {"channels", {{"value", {{"reducer", "overwrite"}}}, {"tail", {{"reducer", "overwrite"}}}}},
+        {"nodes", {{"gate", {{"type", "coarse_gate"}}}, {"tail", {{"type", "coarse_tail"}}}}},
+        {"edges", json::array({json{{"from", "__start__"}, {"to", "gate"}},
+                               json{{"from", "gate"}, {"to", "tail"}},
+                               json{{"from", "tail"}, {"to", "__end__"}}})}};
+    coarse_gate_resumed.store(0);
+    auto store  = std::make_shared<OneMillisecondSqliteStore>(":memory:");
+    auto engine = GraphEngine::compile(definition, NodeContext{}, store);
+
+    RunConfig first;
+    first.thread_id = "coarse-clock";
+    first.input     = json{{"value", "go"}};
+    const auto finished = engine->run(first);
+    ASSERT_FALSE(finished.interrupted);
+
+    RunConfig second = first;
+    second.input     = json{{"value", "ask"}};
+    const auto paused = engine->run(second);
+    ASSERT_TRUE(paused.interrupted);
+    const auto latest = store->load_latest("coarse-clock");
+    ASSERT_TRUE(latest);
+    ASSERT_EQ(latest->id, finished.checkpoint_id)
+        << "the timestamps tie, so the first run's last checkpoint is the latest";
+    const auto saved = store->load_by_id(paused.checkpoint_id);
+    ASSERT_TRUE(saved);
+    EXPECT_EQ(saved->interrupt_phase, CheckpointPhase::NodeInterrupt);
+    EXPECT_EQ(saved->next_nodes, std::vector<std::string>{"gate"});
+
+    const auto resumed = engine->resume_from(second, paused.checkpoint_id, json("answered"));
+    EXPECT_FALSE(resumed.interrupted);
+    EXPECT_EQ(coarse_gate_resumed.load(), 1) << "the paused node runs with the answer";
+    EXPECT_EQ(resumed.output["channels"]["value"]["value"], json("answered"));
+    EXPECT_EQ(resumed.output["channels"]["tail"]["value"], json(true));
+}

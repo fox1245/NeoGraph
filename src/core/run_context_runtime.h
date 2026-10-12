@@ -62,6 +62,10 @@ struct SendStep {
 /// reports them. Only the run's own coroutine reads and writes it.
 struct StepInterrupts {
     std::vector<PendingInterrupt> list;
+    /// #386: the NodeInterrupt checkpoint the executor saved for them, which
+    /// the run reports; empty when it saved none. The thread's latest
+    /// checkpoint in a store can be another run's.
+    std::string checkpoint_id;
 };
 
 struct SubgraphWriteJournal {

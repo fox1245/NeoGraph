@@ -10406,6 +10406,61 @@ TEST(ProgramRuntimeTest, PlanResumeContinuesAMapAtItsPausedItem) {
     }
 }
 
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE) && \
+    defined(NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE_CHECKPOINT)
+namespace {
+// Saves every checkpoint in the same millisecond, as SQLite does on a host
+// whose fsync returns at once. SQLite orders a thread's checkpoints by
+// (timestamp_ms, step).
+class OneMillisecondCheckpointStore final : public SqliteCheckpointStore {
+public:
+    using SqliteCheckpointStore::SqliteCheckpointStore;
+    void save(const Checkpoint& checkpoint) override {
+        Checkpoint pinned = checkpoint;
+        pinned.timestamp  = 1;
+        SqliteCheckpointStore::save(pinned);
+    }
+};
+}  // namespace
+
+TEST(ProgramRuntimeTest, PlanResumeAnswersThePausedCallWhoseCheckpointTiesAnEarlierCall) {
+    // #386: A and then B run on the plan's root Core thread, and B asks. A's
+    // last checkpoint and B's question are saved in the same millisecond, and
+    // A's has the higher step, so it is the thread's latest. The run still
+    // pauses on B's checkpoint, and resume runs B with the answer instead of
+    // replaying A's completed state.
+    JoinTestStores stores(true);
+    stores.checkpoints = std::make_shared<OneMillisecondCheckpointStore>(
+        (stores.directory / "coarse-checkpoints.db").string());
+    AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                            ExecutionGuarantee::Unmanaged, true);
+    reset_plan_steps([](std::size_t ordinal, const NodeInput&) -> json {
+        if (ordinal == 2) return json{{"ask", true}};
+        return json{{"write", "A" + std::to_string(ordinal)}};
+    });
+    const auto version =
+        admit_plan(fixture, plan_sequence(json::array({plan_call(), plan_call()})));
+
+    const auto paused = run_plan(fixture, version, "plan-coarse-clock");
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+    EXPECT_EQ(paused_operation(paused), "root.1");
+    ASSERT_TRUE(paused.checkpoint().has_value());
+    const auto latest =
+        stores.checkpoints->load_latest(plan_root_thread(version, "plan-coarse-clock"));
+    ASSERT_TRUE(latest.has_value());
+    ASSERT_NE(latest->interrupt_phase, CheckpointPhase::NodeInterrupt)
+        << "this test needs A's last checkpoint to be the thread's latest";
+    EXPECT_EQ(paused_phase(fixture, paused), CheckpointPhase::NodeInterrupt);
+
+    const auto done = decide(fixture, paused, "approved");
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+    EXPECT_EQ(channel_value(done.output()), json("approved"));
+    EXPECT_EQ(plan_steps_counted(false), 2U);
+    EXPECT_EQ(plan_steps_counted(true), 1U) << "B runs with the answer";
+    EXPECT_EQ(done.usage().core_steps, 1U);
+}
+#endif
+
 TEST(ProgramRuntimeTest, PlanResumeContinuesTheRaceBranchThatWon) {
     // #386: a race's first branch asks while the second blocks; the question
     // wins and the race pauses on it. Resume continues the winner alone: the

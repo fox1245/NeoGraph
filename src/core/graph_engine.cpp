@@ -2230,6 +2230,7 @@ GraphEngine::execute_graph_async(
         failure_arrivals.clear();
         step_start->state.reset();
         step_interrupts->list.clear();
+        step_interrupts->checkpoint_id.clear();
         const auto step_trace_size = trace.size();
 
         // Capture NodeInterrupt outside the catch (GCC-13-safe) so the
@@ -2313,9 +2314,18 @@ GraphEngine::execute_graph_async(
             if (!result.interrupts.empty()) result.interrupt_id = result.interrupts.front().id;
             result.execution_trace = std::move(trace);
 
+            // The checkpoint the executor saved for this pause, not the
+            // thread's latest: a store orders a thread's checkpoints by
+            // millisecond timestamp, then step, and every run on a thread
+            // starts again at step 0, so an earlier run's last checkpoint
+            // saved in the same millisecond is "latest" (#386).
             if (coord.enabled()) {
-                auto cp_opt = co_await coord.store()->load_latest_async(coord.thread_id());
-                if (cp_opt) result.checkpoint_id = cp_opt->id;
+                if (!step_interrupts->checkpoint_id.empty()) {
+                    result.checkpoint_id = step_interrupts->checkpoint_id;
+                } else {
+                    auto cp_opt = co_await coord.store()->load_latest_async(coord.thread_id());
+                    if (cp_opt) result.checkpoint_id = cp_opt->id;
+                }
             }
             co_return result;
         }
