@@ -1341,8 +1341,11 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
             error.effect_uncertain, error.exit_code, error.signal_number,
             error.output_truncated});
     } catch (const std::length_error& error) {
-        co_return publish_singleflight(ToolExecutionResult{
-            ToolTerminalStatus::Failed, {}, error.what(), false, false});
+        // An output over output_limit_bytes arrives after the tool ran: like
+        // any failure after it started, the effect of a call whose policy
+        // does not rule one out (neither a read nor idempotent) is uncertain.
+        co_return publish_singleflight(
+            detail::ordinary_tool_failure(policy, started, error.what()));
     } catch (const std::exception& error) {
         auto result = detail::ordinary_tool_failure(policy, started, error.what());
         if (detail::stops_run(detail::classify_tool_failure(std::current_exception(), nullptr))) {

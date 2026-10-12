@@ -422,6 +422,7 @@ TEST(ToolExecutionController, TypedResultDistinguishesSuccessAndOutputFailure) {
     auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
     ToolExecutionPolicy policy;
     policy.implementation = ToolExecutionImplementation::BlockingThread;
+    policy.effect = ToolEffectClass::ReadOnly;
     policy.output_limit_bytes = 2;
     policies->upsert("probe", policy);
     auto controller = std::make_shared<ToolExecutionController>(
@@ -442,6 +443,49 @@ TEST(ToolExecutionController, TypedResultDistinguishesSuccessAndOutputFailure) {
     EXPECT_EQ(failure.status, ToolTerminalStatus::Failed);
     EXPECT_FALSE(failure.succeeded());
     EXPECT_FALSE(failure.error.empty());
+}
+
+// An output over output_limit_bytes arrives after the tool ran. Only a read,
+// or an idempotent call, rules out an effect: any other call's effect is
+// uncertain (reconciliation_required), as for every failure after it started.
+TEST(ToolExecutionController, OutputOverTheLimitOfAnEffectfulToolIsEffectUncertain) {
+    struct Case {
+        const char* name;
+        ToolEffectClass effect;
+        ToolIdempotency idempotency;
+        ToolTerminalStatus status;
+        bool uncertain;
+    };
+    const std::vector<Case> cases{
+        {"read-only", ToolEffectClass::ReadOnly, ToolIdempotency::Unknown,
+         ToolTerminalStatus::Failed, false},
+        {"external-read", ToolEffectClass::ExternalRead, ToolIdempotency::Unknown,
+         ToolTerminalStatus::Failed, false},
+        {"idempotent-write", ToolEffectClass::ExternalWrite, ToolIdempotency::Idempotent,
+         ToolTerminalStatus::Failed, false},
+        {"non-idempotent-write", ToolEffectClass::ExternalWrite, ToolIdempotency::NonIdempotent,
+         ToolTerminalStatus::ReconciliationRequired, true},
+        {"unknown-effect", ToolEffectClass::Unknown, ToolIdempotency::Unknown,
+         ToolTerminalStatus::ReconciliationRequired, true},
+    };
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.name);
+        BlockingProbeTool tool(1ms);
+        auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
+        ToolExecutionPolicy policy;
+        policy.implementation = ToolExecutionImplementation::BlockingThread;
+        policy.effect = c.effect;
+        policy.idempotency = c.idempotency;
+        policy.output_limit_bytes = 1;
+        policies->upsert("probe", policy);
+        auto controller = std::make_shared<ToolExecutionController>(
+            ToolExecutionControllerConfig{policies, std::make_shared<ResourceArbiter>()});
+        const auto result = neograph::async::run_sync(
+            controller->execute_result_async(tool, json::object(), {}));
+        EXPECT_EQ(result.status, c.status) << result.error;
+        EXPECT_EQ(result.effect_uncertain, c.uncertain);
+        EXPECT_NE(result.error.find("output_limit_bytes"), std::string::npos) << result.error;
+    }
 }
 
 TEST(ToolExecutionController, RejectsUnsafeSingleFlightPolicies) {
