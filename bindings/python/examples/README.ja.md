@@ -107,6 +107,7 @@ python 01_minimal.py
 | 33 | [`33_program_budgets.py`](33_program_budgets.py) | yes | バインドされた `llm_call` ノード 2 つが各 600 トークンを報告し、予算は 1,000 トークンなので、実行は `BudgetExhausted` で終わります。承認された予算と異なる予算での実行は `P_START_BUDGET` で拒否されます。 |
 | 34 | [`34_program_pause_resume.py`](34_program_pause_resume.py) | yes | `interruptBefore` が b ノードの前で実行を止め、`host.resume(run_id, value)` が続きを実行します。停止時の trace は `['a']`、再開後は `['b', 'c']` で、`main()` はオペレーターの答えを返して終わります。 |
 | 35 | [`35_program_fork.py`](35_program_fork.py) | yes | 終わったモデル呼び出しの隣で止まった実行を、別の答えで fork します。終わった呼び出しはチェックポイントからリプレイされるので、スクリプト済みモデルが受け取るリクエストは合計 1 回で、fork にトークンは課金されません。 |
+| 36 | [`36_program_crash_recovery.py`](36_program_crash_recovery.py) | yes | プロセス A は Program を質問まで実行し、答えを受けてモデルを呼んだあと終了します。プロセス B が同じ `sqlite_directory` を開いて `reconnect` を呼ぶと実行が完了し、ジャーナルの応答はリプレイされ、呼び出しの課金は 1 回だけです。Linux と macOS のみ。 |
 
 ### プロトコル: MCP、A2A、ACP
 
