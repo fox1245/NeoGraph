@@ -1,68 +1,68 @@
 <!-- neograph-i18n: source=docs/PROGRAM_CHILD_SYNTHESIS_CONTRACT.md locale=ja source_sha256=b4350a0091100913423075c5ccded5a70741490d738e4bfaabaa0e42158b2c9e -->
-# 子 Program の合成: ホスト認可契約
+# 子Programの合成：ホストの認可の契約
 
 **Languages:** [English](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md) | [한국어](PROGRAM_CHILD_SYNTHESIS_CONTRACT.ko.md) | [日本語](PROGRAM_CHILD_SYNTHESIS_CONTRACT.ja.md) | [简体中文](PROGRAM_CHILD_SYNTHESIS_CONTRACT.zh-CN.md)
 
-状態: N1 のホスト境界と N2 の永続ランタイム統合は実装済み。[SQLite/PostgreSQL の永続化と復旧](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)を参照。Program 側の専用提出経路とモデルによる生成は、今後の作業として残る。
+状況：N1のホスト境界と、N2の永続的なランタイム統合は、実装済みです。[SQLite/PostgreSQLでの永続化と復旧](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)を参照してください。Program側の専用の提出と、モデルによる生成は、今後の作業です。
 
-## エントリと所有権
+## エントリとオーナーシップ
 
-`ProgramSynthesisGateway::synthesize_child(proposal, grant, parent)` は、別途選択した `ProgramChildSynthesisGrant` の下でのみ proposal を受け入れる。ホストは親の version、run record、lineage head、generation を読み込み、`ProgramChildSynthesisParent` に格納する。これらのスナップショットと grant は、ホスト自身のストアとレビュー済みテンプレートポリシーから取得しなければならない。要求元の Program から取得してはならない。
+`ProgramSynthesisGateway::synthesize_child(proposal, grant, parent)` が提案を受け付けるのは、別に選ばれた `ProgramChildSynthesisGrant` がある場合だけです。ホストは、親のバージョン、実行レコード、系統のヘッド、世代を、`ProgramChildSynthesisParent` に読み込みます。これらのスナップショットとグラントは、ホスト自身のストアと、レビュー済みのテンプレートのポリシーから取得する必要があります。要求元のProgramから取得してはいけません。
 
-最初の境界は、レビュー済みテンプレートの正確な**具体化結果**を承認する。grant は `template_identity` と `program_synthesis_source_identity(source)` を結び付ける。後者は import の識別情報、封印された module 本体、ソース座標、runtime/profile の識別情報を含む、完全な正規ソースエンベロープを対象とする。ホストは grant を発行する前に具体化結果を描画してレビューする。この API は、テンプレート描画やそのパラメータスキーマを実装しない。grant は意味検証器とタスク契約の識別情報も固定する。子のコンパイルには親の封印済み registry フィンガープリントを使わなければならない。この初回提供の範囲では、同じソーステキストから異なる登録済み実装を選ぶことはできない。
+最初の境界でadmissionされるのは、レビュー済みのテンプレートの、正確な**インスタンス化**です。そのグラントは、`template_identity` と `program_synthesis_source_identity(source)` を結び付けます。後者は、importのID、シール済みのモジュール本体、ソース座標、ランタイムとプロファイルのIDを含む、正規のソースエンベロープ全体を対象にします。ホストは、このグラントを発行する前に、インスタンス化したものを描画してレビューします。テンプレートの描画と、そのパラメーターのスキーマは、このAPIでは実装されていません。グラントは、意味検証のバリデーターと、タスク契約のIDも固定します。子のコンパイルは、親のシール済みレジストリのフィンガープリントを使わなければなりません。この最初の提供では、ソースのテキストが同じでも、異なる登録済みの実装を選ぶことはできません。
 
-保存済み grant のハッシュは完全性を証明するが、発行者は証明しない。呼び出し元が自作した grant を解析できても、その使用許可にはならない。gateway は、ホスト grant と親スナップショットの代わりにシリアライズ済み認可受領記録を受け付けない。
+保存されたグラントのハッシュが証明するのは整合性であり、誰が発行したかではありません。呼び出し側が自分で作ったグラントをパースできたとしても、それを使ってよいことにはなりません。ゲートウェイは、ホストのグラントと親のスナップショットの代わりに、シリアライズされた認可のレシートを受け付けません。
 
-## 予約前の検査
+## 予約の前のチェック
 
-純粋操作 `authorize_program_child_synthesis` は次を検査する。
+副作用のない `authorize_program_child_synthesis` は、次を確認します。
 
-- owner、parent run、親の ProgramVersion と bundle、親ポリシーのフィンガープリント、lineage 識別情報、有効な generation、正確な record/journal/head の組み合わせ。
-- 親スナップショットが実行中であり、終端状態ではないこと。
-- レビュー済みソースの正確な識別情報、正規ソースエンベロープのバイト列、封印済み module 数。
-- 要求した能力・副作用がホスト grant と親ポリシーの両方に収まり、import した module の識別情報が親ポリシーに収まること。
-- 子 budget の九つの全次元がホスト上限と親の利用可能な残量に収まること。親の進行中予約から借りてはならない。
-- コンパイル一回、子一つ、子孫深度一段分の余裕。
-- 親の実行保証を弱めない、子の保証下限。
+- オーナー、親の実行、親のProgramVersionとバンドル、親のポリシーのフィンガープリント、系統のID、アクティブな世代、レコード・ジャーナル・ヘッドの正確な組み合わせ
+- 親のスナップショットが、実行中で、終了していないこと
+- レビュー済みのソースの正確なID、正規のソースエンベロープのバイト列、シール済みモジュールの数
+- 要求されたcapabilityと効果を、ホストのグラントと親のポリシーの両方に対して、importされたモジュールのIDを、親のポリシーに対して
+- 子の予算の9つの次元すべてを、ホストの上限と、親の利用可能な残りに対して（親の実行中の予約は借りずに）
+- コンパイル1回、子1つ、子孫の深さ1段の余裕
+- 親の実行の保証を弱めない、子の保証の下限
 
-これらの検査はリソースを予約しない。不変で読み取り専用の `ProgramChildSynthesisAuthorization` 証拠を生成する。他の子の予約や容量は、通常の `ProgramRuntime::start_child` 境界で引き続き検査しなければならない。同時に得た事前検査結果は、それぞれ独立した budget grant ではない。
+これらのチェックは、リソースを予約しません。変更できない、読み取り専用の `ProgramChildSynthesisAuthorization` のエビデンスを生成します。他の子の予約や容量は、通常の `ProgramRuntime::start_child` の境界で、引き続き確認する必要があります。並行して行われた事前チェックの結果は、それぞれが独立した予算のグラントになるわけではありません。
 
 ## 予約とコンパイル
 
-子エントリには `ProgramSynthesisGatewayConfig::reserve_child` が必須である。そのシグネチャは proposal と authorization の両方を受け取り、compare-and-swap の対象となる正確な `source_lineage_head_id` と `parent_remaining` も含む。その head に対してコンパイル一回分を原子的に差し引くか、別の generation に課金せず失敗しなければならない。新しい head を再読み込みし、黙ってその head に対する予約へ切り替えてはならない。ホストは実行所有権、キャンセル、現在有効な deadline も検査し、予約の精算時に経過 wall time を課金する。保存済みスナップショットは、その wall-time 割当が現在も利用可能だという証拠にはならない。
+子のエントリには、`ProgramSynthesisGatewayConfig::reserve_child` が必要です。そのシグネチャは、提案と認可の両方を受け取ります。認可には、compare-and-swapの対象となる、正確な `source_lineage_head_id` と `parent_remaining` が含まれます。このコールバックは、そのヘッドに対して、コンパイル1回分をアトミックに引き落とすか、別の世代に課金せずに失敗しなければなりません。より新しいヘッドを読み込み直して、黙ってそちらに対して予約してはいけません。ホストは、実行のオーナーシップ、キャンセル、生きているデッドラインも確認し、予約を精算するときに、経過した実時間を課金します。保存されたスナップショットがあっても、その実時間の許容量が、いまも使えることの証明にはなりません。
 
-返される `ProgramSynthesisReservation` は、同じ proposal、lineage、source head、開始 budget に結び付かなければならない。gateway は compiler 評価の前に、開始 budget の変更、誤った head、予約後 budget の不足、子・深度容量の喪失を拒否する。予約の構築自体も独立して、コンパイルの差し引きが正確に一回分であることを要求し、budget の増加を禁止する。
+返される `ProgramSynthesisReservation` は、同じ提案、系統、コピー元のヘッド、開始時の予算を結び付けていなければなりません。ゲートウェイは、開始時の予算が変わっている場合、ヘッドが違う場合、予約後の予算が足りない場合、子や深さの容量がなくなった場合に、コンパイラーによる評価の前に拒否します。予約の構築も、独立して、コンパイルの引き落としがちょうど1回分であることを要求し、予算が増えることを禁じています。
 
-子のコンパイルには、親のより大きい残 budget ではなく、要求した子の budget 上限を使う。コンパイルはソース識別情報、要求した能力・副作用の閉包、認可済み保証下限を保持しなければならない。必須のホスト意味検証器は grant の validator と contract の識別情報に一致し、Catalog 承認前に実行する。生成された子ポリシーには、要求を超える能力・副作用の許可や、提出ソースの import に含まれない module の許可を持たせてはならない。意味検証で拒否されても、先に差し引いたコンパイル分は戻さない。再試行には、特定 head に対応する有効な予約が必要である。古い事前検査証拠を再利用して budget を補充してはならない。
+子のコンパイルが使うのは、要求された子の予算の上限です。親の、より大きな残りの予算ではありません。コンパイルは、ソースのID、要求されたcapabilityと効果のクロージャー、認可された保証の下限を、保たなければなりません。必須のホストの意味検証は、グラントのバリデーターおよび契約のIDと一致している必要があり、Catalogのadmissionの前に実行されます。生成される子のポリシーは、要求を超えるcapabilityと効果の権限や、提出されたソースのimportの範囲外のモジュールの権限を、持つことはできません。意味検証による却下で、先に行ったコンパイルの引き落としが取り消されることはありません。リトライには、そのヘッド固有の有効な予約が必要です。古い事前チェックのエビデンスを再利用して、予算を補充してはいけません。
 
-子専用 gateway は汎用 `reserve` コールバックを省略できる。その場合、汎用 `synthesize()` エントリを呼ぶと失敗する。逆に、既存の後継合成 gateway は、`reserve` を設定しただけでは子合成の許可を得ない。いずれのエントリも他方へフォールバックしない。
+子専用のゲートウェイは、汎用の `reserve` コールバックを省略できます。その場合、汎用の `synthesize()` を呼び出すと失敗します。逆に、既存の後継用のゲートウェイは、`reserve` が設定されているというだけでは、子の合成の権限を得ません。どちらのエントリも、もう一方にフォールバックしません。
 
-## JavaScript の budget と保証の境界
+## JavaScriptの予算と保証の境界
 
-Generator Program は、ホスト所有の `ProgramBudgetBounds` と Catalog ポリシーを通じて、ゼロでない動的コンパイル上限を受け取れるようになった。デフォルトのコンパイルは引き続き動的コンパイルをゼロ回とする。呼び出し元が `start` 時にその上限を増やすことはできない。宣言専用 JavaScript と、`expand_task_graph` を含まない通常の C++ plan は、動的コンパイルをゼロとする構造規則を維持する。
+ジェネレーターのProgramは、ホストが所有する `ProgramBudgetBounds` とCatalogのポリシーを通じて、0でない動的コンパイルの上限を受け取れるようになりました。デフォルトのコンパイルは、引き続き動的コンパイルを0回しか許可しません。呼び出し側が、`start` でこの上限を増やすことはできません。宣言だけのJavaScriptと、`expand_task_graph` を使わない通常のC++プランは、動的コンパイル0回という構造上の規則を保ちます。
 
-この budget 変更は、JavaScript コマンドや暗黙の compiler アクセスを追加しない。`ng.hostCapability` は既存の trusted-native インターフェースのままであり、N1 はそこへ合成プラグインを導入せず、native C ABI も変更しない。
+この予算の変更で、JavaScriptのコマンドも、環境依存のコンパイラーへのアクセスも、追加されません。`ng.hostCapability` は、従来の、信頼されたネイティブのインターフェースのままです。N1は、そこに合成のプラグインを組み込むことも、ネイティブのC ABIを変更することもしません。
 
-現在の compiler は generator control を保守的に `Unmanaged` と分類する。制限された generator 言語 profile を、自動的に `Strict` 実行保証を与えるものとして示してはならない。N1 はこの分類を維持する。レビュー済みの宣言専用の子は、Core 閉包が Strict なら Strict grant を満たせる。generator の子は proposal で要求しただけでは、その保証下限を通過できない。より弱い子を承認するには、明示的に互換なホスト grant と親保証が必要であり、コンパイル中に黙って下限を下げてはならない。
+現在のコンパイラーは、保守的に、ジェネレーターの制御を `Unmanaged` とラベル付けします。機能を絞ったジェネレーターの言語プロファイルを、自動的に `Strict` の実行保証のラベルであるかのように扱ってはいけません。N1は、この分類を保ちます。レビュー済みの、宣言だけの子は、そのCoreのクロージャーがStrictであれば、Strictのグラントを満たせます。ジェネレーターの子は、提案がそれを要求しているというだけでは、その下限を満たせません。より弱い子をadmissionするには、互換性のある明示的なホストのグラントと、親の保証が必要です。コンパイル中に、黙って下限を下げることはありません。
 
 ## 診断
 
 | コード | 境界 |
 |---|---|
-| `P_CHILD_SYNTHESIS_OWNER` | Owner の不一致 |
-| `P_CHILD_SYNTHESIS_GENERATION` | 誤った run/version/policy、古いまたは不整合な head、無効な generation |
-| `P_CHILD_SYNTHESIS_SOURCE` | 未レビューの具体化結果、または source/module のサイズ制限 |
-| `P_CHILD_SYNTHESIS_REGISTRY` | コンパイル済みの子が異なる封印済み registry を使う |
-| `P_CHILD_SYNTHESIS_SEMANTICS` | Validator または task-contract の識別情報が変わった |
-| `P_CHILD_SYNTHESIS_AUTHORITY` | 要求または子の承認ポリシーが権限を拡張する |
-| `P_CHILD_SYNTHESIS_BUDGET` | 無効な実行 budget、または compile/child/depth/host 容量の不足 |
-| `P_CHILD_SYNTHESIS_RESERVATION` | 予約が認可済み head と残 budget に結び付いていない |
-| `P_CHILD_SYNTHESIS_GUARANTEE` | Grant またはコンパイル済みの子が保証下限に違反する |
+| `P_CHILD_SYNTHESIS_OWNER` | オーナーの不一致 |
+| `P_CHILD_SYNTHESIS_GENERATION` | 実行、バージョン、ポリシーの誤り、古い、または一貫しないヘッド、アクティブでない世代 |
+| `P_CHILD_SYNTHESIS_SOURCE` | レビューされていないインスタンス化、またはソース／モジュールのサイズの上限 |
+| `P_CHILD_SYNTHESIS_REGISTRY` | コンパイルされた子が、別のシール済みレジストリを使っている |
+| `P_CHILD_SYNTHESIS_SEMANTICS` | バリデーターまたはタスク契約のIDが変わった |
+| `P_CHILD_SYNTHESIS_AUTHORITY` | リクエストまたは子のadmissionポリシーが、権限を広げている |
+| `P_CHILD_SYNTHESIS_BUDGET` | 実行の予算が不正、またはコンパイル／子／深さ／ホストの容量が足りない |
+| `P_CHILD_SYNTHESIS_RESERVATION` | 予約が、認可されたヘッドと残りの予算を結び付けていない |
+| `P_CHILD_SYNTHESIS_GUARANTEE` | グラントまたはコンパイルされた子が、保証の下限に違反している |
 
-`ProgramSynthesisValidationError` は、引き続き意味検証の拒否証拠を保持する。コンパイルエラーは既存の compiler 診断を維持する。保存 budget のデコーダは、正規識別情報の検証前に負数、小数、範囲外の整数を拒否する。無効な数値がラップアラウンドし、それ以外は有効な保存 ID に化けることはできない。
+意味検証による却下のエビデンスは、引き続き `ProgramSynthesisValidationError` が持ちます。コンパイルエラーは、既存のコンパイラーの診断を保持します。保存された予算のデコーダーは、正規のIDを検証する前に、負の整数、小数、範囲外の整数を拒否します。不正な数値が、桁あふれして、それ以外は有効な保存済みのIDになることはありません。
 
-## 永続統合と残る検証範囲
+## 永続的な統合と、残る適格性確認
 
-単独の `synthesize_child` API は承認で終わる。N2 runtime API は、SQLite と PostgreSQL において、原子的予約、永続的な段階別結果、parent-run/generation スコープの binding、既存の子ライフサイクルによる dispatch を追加する。構成、復旧動作、N3 障害マトリクスと明示された制限については[永続化契約](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)を参照。authorization 値は証拠のままであり、新たな認可と誤認され得る公開の保存値コンストラクタはない。
+単独の `synthesize_child` APIは、admissionで終わります。N2のランタイムAPIは、アトミックな予約、永続的なステージごとの結果、親の実行と世代をスコープとするバインディング、SQLiteとPostgreSQLでの既存の子のライフサイクルを通じたディスパッチを、追加します。設定、復旧の動作、N3の障害マトリクス、その限界については、[永続化の契約](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)を参照してください。認可の値は、エビデンスのままです。新しい認可と取り違えられるような、保存された値から構築する公開のコンストラクターはありません。
 
-この C++ API 追加に伴い、Program consumer の再ビルドが必要である。既存の後継合成結果形式、JavaScript コマンドプロトコル、native control C ABI、Core-only の依存境界は変わらない。
+C++のAPIが追加されたため、Programのコンシューマーを再ビルドする必要があります。既存の後継の合成結果のフォーマット、JavaScriptのコマンドプロトコル、ネイティブ制御のC ABI、Coreだけに依存する境界は、変わりません。

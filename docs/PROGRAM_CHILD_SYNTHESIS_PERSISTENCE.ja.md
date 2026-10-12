@@ -1,21 +1,22 @@
 <!-- neograph-i18n: source=docs/PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md locale=ja source_sha256=7a6203d69da6c363bf3c4c5b6aa5b1b1fcd2f36c656c6f22bffc36cddeeb1e72 -->
-# 子合成の永続化
+# 子の合成の永続化
 
 **Languages:** [English](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md) | [한국어](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.ko.md) | [日本語](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.ja.md) | [简体中文](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.zh-CN.md)
 
-状態: インメモリ参照ストア、SQLite、PostgreSQL 向けの N2 は実装済み。単一の子シナリオに対する N3 復旧検証は、[復旧マトリクス](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md)に記載する。ホストエントリポイントは、既存のトップレベル checkpoint と既存の `ng.spawn` / `ng.await` 子ライフサイクルを使う。これは範囲を限定したレビュー済みソースの経路であり、モデル generator、テンプレート renderer、新しい DSL コマンドを実装するものではない。
+状況：N2は、インメモリのリファレンスストア、SQLite、PostgreSQLで実装済みです。1つの子を対象にしたシナリオに対する、N3の復旧の適格性確認は、[復旧マトリクス](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md)に記載しています。ホストのエントリポイントは、既存のトップレベルのチェックポイントと、既存の `ng.spawn` / `ng.await` の子のライフサイクルを使います。これは、レビュー済みのソースに限った経路です。モデルのジェネレーター、テンプレートのレンダラー、新しいDSLのコマンドは、実装していません。
 
-## ホスト統合
+## ホストの統合
 
-`RuntimeConfig::child_synthesis_gateway` と `child_synthesis_grant_resolver` を設定する。リゾルバは `(owner_scope, parent_run_id, grant_id)` を使い、信頼済みホストポリシーから正確な grant を選択しなければならない。合成レコードから grant を読み込んでも、その権限は確立されない。
+`RuntimeConfig::child_synthesis_gateway` と `child_synthesis_grant_resolver` を設定します。リゾルバーは、信頼できるホストのポリシーから、`(owner_scope, parent_run_id, grant_id)` を使って、正確なグラントを選ぶ必要があります。合成のレコードからグラントを読み込んでも、その権限が成立するわけではありません。
 
-1. 親の次のトップレベル checkpoint で `ProgramHandoff` を取得できるようにする。
-2. 親 run、有効な lineage、generation を読み込み、[認可契約](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md)に従って、レビュー済みソースの具体化結果と grant を選択する。
-3. handoff を保持したまま、`ProgramRuntime::prepare_child_synthesis(owner, parent, handoff, proposal, grant, binding_name)` を呼ぶ。
-4. 返されたレコードが `Bound` に達したら handoff を解放する。
-5. 親は通常の `ng.spawn` / `ng.await` 経路でその binding 名を使う。
+1. 親の次のトップレベルのチェックポイントに、`ProgramHandoff` を用意します。
+2. 親の実行、アクティブな系統、世代を読み込み、[認可の契約](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md)に従って、レビュー済みのソースのインスタンス化とグラントを選びます。
+3. handoffを保持したまま、`ProgramRuntime::prepare_child_synthesis(owner, parent, handoff,
+   proposal, grant, binding_name)` を呼び出します。
+4. 返されたレコードが `Bound` になったら、handoffを解放します。
+5. 親は、そのバインディング名を、通常の `ng.spawn` / `ng.await` の経路で使います。
 
-たとえば、承認済みの親は次を yield できる。
+たとえば、admission済みの親は、次のようにyieldできます。
 
 ```javascript
 yield ng.checkpoint({request: "reviewed-child"}, "synthesis:request");
@@ -26,44 +27,44 @@ return yield ng.await(
 );
 ```
 
-checkpoint 要求をレビュー済みソースとポリシーへどう対応付けるかはホストが決定する。checkpoint payload は、自分自身にコンパイル権限や実行権限を与えられない。永続経路ではランタイムトランザクションが予約を管理し、gateway の単独 `reserve` / `reserve_child` コールバックは呼ばない。
+チェックポイントのリクエストを、レビュー済みのソースとポリシーにどう対応付けるかは、ホストが決めます。チェックポイントのペイロードが、自分自身にコンパイルや実行の権限を与えることはできません。永続的な経路では、ランタイムのトランザクションを通じて予約を管理します。ゲートウェイの単独の `reserve` や `reserve_child` コールバックは、呼び出しません。
 
-## 原子的な公開
+## アトミックな公開
 
-`ProgramTransitionPublication::child_synthesis_records` は、親の run snapshot、journal head、lineage と同じトランザクションで、不変レコードを一つ追加する。最初の `Reserved` レコードは、正確な直前の親 snapshot、元の lineage、結果の lineage、動的コンパイル一単位の差し引きに結び付かなければならない。競合する要求が同一の budget 遷移を再利用し、別の binding を賄うことはできない。同一の公開の再試行は `AlreadyPresent` を返す。
+`ProgramTransitionPublication::child_synthesis_records` は、親の実行スナップショット、ジャーナルのヘッド、系統と同じトランザクションの中で、変更できないレコードを1件追加します。最初の `Reserved` レコードは、直前の親のスナップショット、コピー元の系統、結果の系統、動的コンパイル1単位の引き落としを、正確に結び付けていなければなりません。内容が食い違うリクエストが、同一の予算遷移を再利用して、別のバインディングの費用をまかなうことはできません。まったく同じ公開をリトライすると、`AlreadyPresent` が返ります。
 
-SQLite は既存の `BEGIN IMMEDIATE` トランザクションを使う。PostgreSQL は既存のトランザクションと owner advisory lock を使う。両者とも合成ログへ追記し、追記順で検証済み request head を再構築する。書き込みが失敗すると、親、lineage、合成レコードをまとめてロールバックする。インメモリ参照実装は強い例外保証を維持する。
+SQLiteは、既存の `BEGIN IMMEDIATE` トランザクションを使います。PostgreSQLは、既存のトランザクションと、オーナー単位のアドバイザリロックを使います。どちらも、合成ログに追記し、検証済みのリクエストのヘッドを、追記した順に再構築します。書き込みが失敗すると、親、系統、合成レコードが、まとめてロールバックされます。インメモリのリファレンスは、強い例外保証を保ちます。
 
-合成レコードを持つ公開は storage schema 6 を使う。通常の公開は引き続き schema 5 としてシリアライズし、reader は schema 1–5 の対応を維持する。`load_child_syntheses(owner, parent_run)` は現在の request head を返す。この履歴に対応しないカスタムストアでは、基底実装は安全側に失敗する。動的 budget を持つ run の復旧には、この読み取り機能が必要である。
+合成レコードを含む公開は、ストレージのスキーマ6を使います。通常の公開は、引き続きスキーマ5でシリアライズされ、リーダーはスキーマ1〜5を引き続き読めます。`load_child_syntheses(owner, parent_run)` は、現在のリクエストのヘッドを返します。この履歴をサポートしないカスタムストアに対して、基底の実装はフェイルクローズになります。動的な予算を持つ実行の復旧には、この読み取り機能が必要です。
 
-レコードの上限は 8 MiB と 16 revision である。proposal、元のホスト grant と親 context、reservation、累積した段階出力を保持する。正規識別情報と段階検証は、過去の成果物の変更、異なる generation、binding の改名、証拠の改変を拒否する。binding 名は一つの parent run 内で一意である。SQL ログは追記専用であり、大きな履歴の保持方針と圧縮は今後の作業として残る。
+レコードは、8 MiBと16リビジョンに制限されます。提案、元のホストのグラントと親のコンテキスト、予約、これまでのステージごとの出力の累積を保持します。正規のIDとステージの検証によって、変更された過去のアーティファクト、異なる世代、名前を変えたバインディング、書き換えられたエビデンスは、拒否されます。バインディング名は、1つの親の実行の中で一意です。SQLのログは追記専用です。大きな履歴の保持と圧縮は、今後の作業です。
 
-## 段階と復旧
+## ステージと復旧
 
-| 永続状態 | 復旧後の次の操作 |
+| 永続化された状態 | 復旧後の次の動作 |
 |---|---|
-| `Reserved` | 実行権を確保し、一度だけコンパイルする |
-| `Compiling` | `ReconciliationRequired` とする。不確実なコンパイルを再実行しない |
-| `Compiled` | 保存済み bundle を再利用し、意味検証の実行権を確保する |
-| `Validating` | `ReconciliationRequired` とする。不確実な validator を再実行しない |
-| `Validated` | 受理済みの受領記録と証拠を再利用し、承認ポリシーを選ぶ |
-| `Admitting` | 凍結済み承認と冪等な Catalog 承認を再利用する |
-| `Admitted` | スコープ付き module 受領記録を使い、正確な承認済み version をリンクする |
-| `Bound` | 親の通常の child command を再開する |
-| `Dispatching` | 記録済み child ID と input を `start_child` で再利用する |
-| `Spawned` | 子・結果を再利用するか、永続 checkpoint のない Core dispatch を照合する |
-| `Failed` / `ReconciliationRequired` | 結果を保持し、親の自動 replay を禁止する |
+| `Reserved` | claimして、1回だけコンパイルします |
+| `Compiling` | `ReconciliationRequired` にします。不確かなコンパイルをリプレイしません |
+| `Compiled` | 保存済みのバンドルを再利用し、意味検証をclaimします |
+| `Validating` | `ReconciliationRequired` にします。不確かなバリデーターを再実行しません |
+| `Validated` | 受理されたレシートとエビデンスを再利用し、admissionポリシーを選びます |
+| `Admitting` | 固定されたadmissionと、冪等なCatalogのadmissionを再利用します |
+| `Admitted` | スコープ付きのモジュールレシートを使って、admission済みの正確なバージョンをリンクします |
+| `Bound` | 親の通常の子のコマンドを再開します |
+| `Dispatching` | 記録済みの子のIDと入力を、`start_child` を通じて再利用します |
+| `Spawned` | 子と結果を再利用します。永続的なチェックポイントのないCoreのディスパッチは、照合します |
+| `Failed` / `ReconciliationRequired` | 結果を保持し、親の自動リプレイをブロックします |
 
-未完了の合成を持つ非稼働の親を再接続する前に、`recover_child_synthesis(owner, parent_run, proposal_id)` を呼ぶ。稼働中の親には、保持した checkpoint API が必要である。復旧のたびにホスト権限を選び直し、元の generation を検査する。完了済みの意味検証と凍結済み承認は再利用する。意味検証による拒否は受領記録と証拠を保持し、承認へ進むことはない。
+合成が未完了の、アクティブでない親に再接続する前に、`recover_child_synthesis(owner, parent_run, proposal_id)` を呼び出します。生きている親には、保持されたチェックポイントのAPIが必要です。復旧のたびに、ホストの権限を選び直し、元の世代を確認します。完了済みの意味検証と、固定されたadmissionは、再利用されます。意味検証による却下は、そのレシートとエビデンスを保持し、admissionには進みません。
 
-生成された binding は、静的リゾルバの parent-version スコープではなく、実際の parent run と generation を使って解決する。dispatch は `start_child` の前に安定した child ID と input を記録する。一つの grant で二つ目の呼び出しを作ることはできない。通常の子 budget、公開、実行、join が引き続き最終的な根拠となる。
+生成されたバインディングは、静的なリゾルバーの親バージョンのスコープではなく、実際の親の実行と世代を使って解決されます。ディスパッチは、`start_child` の前に、安定した子のIDと入力を記録します。1つのグラントで、2回目の呼び出しを作ることはできません。通常の子の予算管理、公開、実行、joinが、引き続き正式なものです。
 
-完了、再試行、復旧、およびコミット確認応答の喪失時にも、親はコンパイル差し引き分を保持する。合成は経過 wall time を差し引く。復旧した attempt でも元の合成 deadline を保持する。spawn 状態の公開は、既存コマンドの進行中予約を保持する。
+親は、完了、リトライ、復旧のいずれでも、コンパイルの引き落としを保持します。コミットの応答が失われた場合も同様です。合成は、経過した実時間を引き落とします。復旧した試行も、元の合成のデッドラインを保持します。spawnの状態の公開では、既存のコマンドの、実行中の予約が保たれます。
 
-## 検証と残る作業
+## 適格性確認と、残る作業
 
-backend 適合性テストは、spawn/join 成功、正規形式の往復、owner/run 分離、重複要求と同時要求、backend 書き込み失敗時のロールバック、コミット済み段階の再利用、意味検証の拒否、grant 失効、不確実な compile/validation 実行権の確保を対象とする。Linux の process-exit テストは、承認の凍結後にデストラクタを呼ばず終了し、SQLite と PostgreSQL の両方で Program store、transition store、checkpoint store を再オープンしてから、子の join に成功する。
+バックエンドの適合性テストが対象にするのは、spawnとjoinの成功、正規化のラウンドトリップ、オーナーと実行の分離、重複したリクエストと並行するリクエスト、バックエンドの書き込み失敗時のロールバック、コミット済みのステージの再利用、意味検証による却下、取り消されたグラント、あいまいなコンパイルや検証のclaimです。Linuxのプロセス終了のテストでは、固定されたadmissionの後で、デストラクターを実行せずにプロセスを終了させます。SQLiteとPostgreSQLの両方で、Programストア、遷移ストア、チェックポイントストアを開き直し、そのうえで、子を正常にjoinします。
 
-[N3 復旧マトリクス](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md)は、データベースごとの 16 process-exit 境界、複数プロセスによる同時復旧、確認応答の喪失、実際の PostgreSQL 接続切断、キャンセル、version 保持、activation、Program replacement まで対象を広げる。その制限は明示したままである。自動照合 authorizer はなく、一般的な混合副作用 join、電源断、ホスト間 failover、graph 移行・保持のすべての組み合わせは、単一の子シナリオの対象外である。
+[N3の復旧マトリクス](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md)は、対象を、データベースごとに16のプロセス終了の境界、並行するプロセスでの復旧、失われた応答、実際のPostgreSQLの接続切断、キャンセル、バージョンの保持、アクティベーション、Programの置き換えへと広げます。限界も明示されています。自動で照合を認可する仕組みはありません。さまざまな効果が混在する一般的なjoin、電源断、ホストをまたぐフェイルオーバー、グラフのマイグレーションと保持のすべての組み合わせは、1つの子を対象にしたこのシナリオでは対象外です。
 
-この変更は公開 C++ 型、virtual method、構成フィールドを追加する。すべての Program consumer を再ビルドし、古い object を新しい library と混在させてはならない。Core-only の依存や native control C ABI の変更は追加しない。
+これにより、公開されるC++の型、仮想メソッド、設定フィールドが増えます。すべてのProgramのコンシューマーを再ビルドしてください。古いオブジェクトを、新しいライブラリと混在させないでください。Coreだけに依存する依存関係の追加や、ネイティブ制御のC ABIの変更はありません。
