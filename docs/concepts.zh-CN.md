@@ -1,26 +1,28 @@
 <!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=3ddbf9b3903df0b61f2694ecfbb12af0682b96f25f81d50b4efc4865c4c576a1 -->
-# NeoGraph 核心概念——叙事指南
+# NeoGraph 核心概念导读
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
 
-先阅读本文，再查看示例。各节按构建图的顺序介绍 channel、node、edge、fan-out、路由、检查点和流式传输。
+建议先读本文，再看示例。各节的顺序就是搭建一张图的顺序：通道、节点、边、fan-out、路由、检查点和流式输出。
 
-熟悉 LangGraph 的读者会认识带 reducer 的 channel、`Send`、`Command` 和检查点。NeoGraph 的 [Core 与 ProgramRuntime](../README.md#core-and-programruntime) 职责不同；本指南从 Core 图执行开始。Python provider 调用使用 typed [binding 契约](python-binding.md)，而不是已删除的 completion 类。
+用过 LangGraph 的读者，对带 reducer 的通道、`Send`、`Command` 和检查点不会陌生。NeoGraph 的 [Core 与 ProgramRuntime](../README.md#core-and-programruntime) 各有职责，本文从 Core 的图执行讲起。Python 里调用 provider 走带类型的 [绑定契约](python-binding.md)，不再使用已移除的 completion 类。
 
 ---
 
 ## 目录
 
-（第 8.5 节在 v0.6.0 中添加——`Tracing — OpenTelemetry + Phoenix / Langfuse`。编号标题保持 1-9 以保持外部文档链接稳定；8.5 位于 Streaming 和 Common pitfalls 之间。）
+（第 8.5 节是 v0.6.0 新增的，标题为 `Tracing — OpenTelemetry + Phoenix / Langfuse`。
+编号标题仍然是 1-9，这样外部文档里的链接不会失效；
+8.5 位于“流式事件”和“常见陷阱”之间。）
 
 
-1. [整体概览](#1-the-big-picture)
+1. [总体概览](#1-the-big-picture)
 2. [通道与 reducer](#2-channels--reducers)
 3. [节点](#3-nodes)
 4. [边与条件路由](#4-edges--conditional-routing)
-5. [Send — 动态 fan-out](#5-send--dynamic-fan-out)
-6. [Command — 路由覆盖 + 状态补丁](#6-command--routing-override--state-patch)
-7. [检查点、中断、HITL](#7-checkpoints-interrupts-hitl)
+5. [Send：动态 fan-out](#5-send--dynamic-fan-out)
+6. [Command：覆盖路由并修补状态](#6-command--routing-override--state-patch)
+7. [检查点、中断与 HITL](#7-checkpoints-interrupts-hitl)
 8. [流式事件](#8-streaming-events)
 9. [常见陷阱](#9-common-pitfalls)
 
@@ -29,16 +31,16 @@
 <a id="1-the-big-picture"></a>
 ## 1. 总体概览
 
-一个 NeoGraph **图**由四部分组成：
+一张 NeoGraph **图**由四部分组成：
 
-| 部分 | 它是什么 | 由……定义 |
+| 部分 | 含义 | 定义位置 |
 |---|---|---|
-| **通道** | 共享状态中的命名槽位。每个都有一个归约器，定义新写入如何与现有值组合。 | `definition["channels"]` |
-| **节点** | 读取状态、发出写入（并可选择`Send` / `Command`）的函数。 | `definition["nodes"]` |
-| **边** | 静态下一节点指针。 | `definition["edges"]` |
-| **条件边** | 谓词驱动的路由——基于状态从多个下一节点中选择一个。 | `definition["conditional_edges"]` |
+| **通道** | 共享状态中有名字的槽位。每个通道都有一个 reducer，规定新写入如何与已有的值合并。 | `definition["channels"]` |
+| **节点** | 读取状态并发出写入的函数，也可以发出 `Send` 或 `Command`。 | `definition["nodes"]` |
+| **边** | 固定的“下一个节点”指向。 | `definition["edges"]` |
+| **条件边** | 由谓词决定的路由，根据状态从多个后继节点中选一个。 | `definition["conditional_edges"]` |
 
-执行是一个**超步循环**：
+执行过程是一个**超步循环**：
 
 ```
 1. ready_set = nodes routed from __start__
@@ -49,16 +51,16 @@
    d. combine routing signals and evaluate updated state → new ready_set
 ```
 
-普通 ready batch 读取该 batch 更新前的 channel 状态。执行中的兄弟 node 不能读取另一兄弟返回的写入。引擎缓冲这些写入，在 batch 结束后通过 reducer 合并，再以更新后的状态评估路由。这是图调度，不会同步模型内部计算。
+普通的就绪批次读到的，是这一批更新之前的通道状态。同一批里的兄弟节点，在执行期间看不到彼此返回的写入：引擎先缓存这些写入，等整批跑完，再交给 reducer 合并，然后基于更新后的状态计算路由。这是图的调度机制，引擎不负责同步模型内部的计算。
 
-例如 `counter` 从 0 开始，两个 ready node 都返回 `counter + 1`，两者读取的都是 0。overwrite reducer 的结果是 1，而不是 2。向自定义 sum reducer 分别写入增量 1，才可合并为 2。无论一个还是多个，每个 `Send` 都在应用了自身 payload 的隔离状态副本上运行，因此 payload 不会进入共享状态（#389）。Reducer 顺序本身不能保证模型响应或外部效果可复现。
+例如 `counter` 初始为 0，两个就绪节点都返回 `counter + 1`，两者读到的都是 0。overwrite reducer 的结果是 1，而不是 2；换成自定义的求和 reducer，两个值为 1 的增量写入才会合并成 2。每个 `Send`（不论一个还是多个）都在一份隔离的状态副本上运行，副本里已应用该 `Send` 自己的 payload，所以 payload 不会进入共享状态（#389）。reducer 的合并顺序并不能让模型的响应或外部副作用变得可复现。
 
 ---
 
 <a id="2-channels--reducers"></a>
-## 2. 通道与归约器
+## 2. 通道与 reducer
 
-每一份状态都存在于一个命名通道中。通道跨节点和超步持久存在；节点通过写入通道进行通信。
+所有状态都放在有名字的通道里。默认情况下，通道的物化值会跨超步、跨检查点保留；节点之间通过写通道来通信。写入如何合并、数组保留多少、是否进入检查点，这三件事相互独立。
 
 ### 定义通道
 
@@ -70,46 +72,46 @@
 }
 ```
 
-### 内置归约器
+### 内置 reducer
 
-| 归约器 | 新写入语义 | 典型用途 |
+| Reducer | 新写入的语义 | 典型用途 |
 |---|---|---|
-| `"overwrite"` | 新值替换旧值。并行写入时后写者胜。 | 单值暂存（当前节点、当前问题、路由提示）。 |
-| `"append"` | 新列表（必须是列表！）被级联到现有列表。顺序：先前步骤的值在前，本步骤的写入按节点执行顺序追加。 | 对话消息、搜索结果、fan-out 收集。 |
+| `"overwrite"` | 新值替换旧值。并行写入时，最后写入者胜出。 | 存放单个值的暂存区（当前节点、当前问题、路由提示）。 |
+| `"append"` | 新写入必须是列表，会拼接到现有列表之后。此前各步的值在前；并行节点按调度器的就绪顺序（不是完成顺序）依次合并，每个节点内部再按其返回的顺序。 | 对话消息、搜索结果、fan-out 的收集结果。 |
 
-> 两个 reducer 都在引擎启动时于 `ReducerRegistry::ReducerRegistry()` 中注册（[`src/core/graph_loader.cpp`](../src/core/graph_loader.cpp)）。自定义 reducer 通过 C++ 的 `ReducerRegistry::register_reducer(name, fn)` 或 Python（自 v0.1.9 起）注册：
+> 两个 reducer 都在引擎启动时由 `ReducerRegistry::ReducerRegistry()` 注册（[`src/core/graph_loader.cpp`](../src/core/graph_loader.cpp)）。自定义 reducer 可以在 C++ 中用 `ReducerRegistry::register_reducer(name, fn)` 注册，也可以在 Python 中注册（自 v0.1.9 起）：
 >
 > ```python
 > ng.ReducerRegistry.register_reducer("sum",
 >     lambda current, incoming: (current or 0) + incoming)
 > ```
 >
-> Python 可调用对象在 GIL 下运行；并发 Send fan-out 会像 Python 自定义节点一样在其上串行化。重新注册名称会替换之前的 reducer。
+> Python 可调用对象在 GIL 下运行；并发的 Send fan-out 会像 Python 自定义节点一样，在 GIL 上串行执行。对同一个名称重复注册，会替换之前的 reducer。
 
-### Channel 生命周期与 checkpoint 契约
+### 通道的生命周期与检查点契约
 
-Reducer 合并写入。数组 retention 是独立策略：`unbounded`（默认）、`latest`，或具有正数 `retention_limit` 的 `bounded`。Retention 在每次写入后裁剪数组，包括 `ChannelWrite.Mode.Overwrite`；`latest` 保留最后一个元素，直到下一次写入。Persistence 独立选择 `checkpoint`（默认，materialized 值与 version）或 `ephemeral`（持久 checkpoint 省略两者）。Bounded retention 改变可见历史，不只是存储大小。
+reducer 负责合并写入。数组保留是另一项独立的策略，有三种取值：`unbounded`（默认）、`latest`，以及带正整数 `retention_limit` 的 `bounded`。每次写入之后都会按该策略裁剪数组，`ChannelWrite.Mode.Overwrite` 也不例外；`latest` 只保留最后一个元素，直到下一次写入把它替换掉。持久化方式同样独立选择：`checkpoint`（默认，保存物化值和版本）或 `ephemeral`（持久检查点里两者都不保存）。bounded 改变的是能看到的历史，而不只是占用多少存储。
 
-引擎按 node 返回写入的顺序、static batch 的 scheduler-ready 顺序、多 `Send` 的调用顺序合并，不使用完成顺序。Pending write 重放到相同 task slot。Overwrite 是有序 last-writer-wins，append 保留元素顺序。自定义 reducer 在 replay 时应纯粹且稳定。Regrouping 要求结果相同则需结合律；顺序独立才需交换律。显式 overwrite 绕过 reducer 后仍应用 retention。这些规则不保证模型响应或外部效果可复现。
+引擎合并写入时，同一节点的多条写入按返回顺序，静态批次按调度器的就绪顺序，多个 `Send` 的结果按调用顺序，与谁先完成无关。待定写入（pending write）重放时，也回到相同的任务槽位。overwrite 是有序的“最后写入者胜出”，append 保持元素顺序。自定义 reducer 应当是纯函数，并且重放时结果稳定。如果要求重新分组后结果不变，reducer 需要满足结合律；只有要求结果与顺序无关，才需要满足交换律。显式 overwrite 会绕过 reducer，之后仍会应用保留策略。以上规则都不保证模型输出或外部副作用可复现。
 
-Ephemeral 值跨 superstep 存活，不在每 step reset。每个 checkpoint 记录声明的 ephemeral 名称及是否已写入，但不保存值。Resume、`resume_if_exists`、exact-ID resume、state update 拒绝已写入的 ephemeral 状态、旧 checkpoint 缺失的 guard 或已改变的 ephemeral channel 集合。第一次 ephemeral 写入前的 checkpoint 可按文档顺序 replay pending write 并 resume。`update_state` 拒绝 ephemeral 写入。多 `Send` in-process worker 在隔离副本中继承 live ephemeral 值。正确性所需状态应持久化到 checkpoint，或在新 run 中从持久输入重建。
+ephemeral 值在各个超步之间一直有效，不会每步重置。每个检查点会记录声明过的 ephemeral 通道名，以及这些通道是否写入过，但不保存它们的值。恢复运行、`resume_if_exists`、按精确 ID 恢复和状态更新，遇到下列情况都会拒绝：ephemeral 状态已有写入；旧检查点里缺少这个 guard；ephemeral 通道的集合发生了变化。第一次写入 ephemeral 通道之前的检查点仍然可以恢复，其待定写入按文档规定的顺序重放。`update_state` 拒绝写入 ephemeral 通道。多 `Send` 的进程内 worker 会在各自的隔离副本中继承当前的 ephemeral 值。对正确性至关重要的状态，要么放进检查点，要么在新的运行中从持久化的输入重建。
 
-`GraphState::restore` 拒绝具有 ephemeral channel 的图。使用匹配 guard 的 `restore_checkpoint`，或对含全部 live 值与 version 的同 process snapshot 使用 `restore_runtime`。Guard 使用 checkpoint metadata，不改变 channel blob layout 或 store schema。无 ephemeral channel 的图仍可使用旧 full-value checkpoint。Downgrade 到无 guard binary 前，需 drain ephemeral thread 及 fork，或从持久输入重新开始；旧 reader 不能强制新增 guard。
+`GraphState::restore` 会拒绝带 ephemeral 通道的图。请改用带匹配 guard 的 `restore_checkpoint`；如果是同一进程内、包含全部当前值和版本的快照，则用 `restore_runtime`。guard 存放在检查点的元数据里，不改变通道 blob 的布局，也不改变存储的 schema。没有 ephemeral 通道的图，仍然可以使用旧的完整值检查点。要降级到不带这些 guard 的二进制之前，应先排空使用 ephemeral 通道的线程和分叉，或者从持久化的输入重新启动它们；旧版本的读取方无法强制执行这个新增的 guard。
 
-Checkpoint channel 使用 full materialized snapshot。Memory、SQLite、PostgreSQL 去重未改变的 `(thread, channel, version)` 值，但 append 历史每次写入都改变 version，因此 snapshot 仍增长。Pending write 记录未完成 superstep 的成功 task，不是通用 channel delta。当前不提供 per-step reset 策略；安全设计必须定义写入及路由后 reset、interrupt、replay 和 Send 行为，不能与 ephemeral persistence 混淆。
+进入检查点的通道保存的是完整的物化快照。Memory、SQLite 和 PostgreSQL 都会对没有变化的 `(thread, channel, version)` 值去重，但 append 的历史每次写入都会改变版本，快照仍然会增大。待定写入记录的是未完成超步中已成功的任务，不是通用的通道增量。目前没有“每步重置”的策略：要安全地设计它，必须规定写入和路由之后的重置时机，以及中断、重放和 Send 下的行为。它也不能与 ephemeral 持久化混为一谈。
 
-Delta-backed checkpoint 是设计，不是 channel 设置。该格式会从 full snapshot 重放有序 `{channel, version, write mode, value}` delta，最多 *K* 个（可加 byte 阈值）。它必须保留 overwrite、retention、version、reducer identity，并在清除 pending write 前原子 publish snapshot/delta 与 checkpoint pointer；拒绝缺失 link、version gap、未知 reducer 或失败 replay。采用它需要新 schema version 和实测收益。将现有 snapshot 移为 base 而不伪造历史 delta；可逆 rollout 保留 old-reader full snapshot；若有 delta-only record，除非以原 reducer registry materialize，否则拒绝 downgrade。当前 store 保持 full-snapshot 方式。
+基于增量（delta）的检查点目前只是设计，不是通道设置。这种格式会在完整快照的基础上，按顺序重放最多 *K* 个 `{channel, version, write mode, value}` 增量（也可以再加字节数阈值）。它必须保留 overwrite、保留策略、版本和 reducer 的标识；在清除待定写入之前，要以原子方式发布快照、增量和检查点指针；遇到缺失的链接、版本跳号、未知的 reducer 或重放失败时，必须拒绝。要采用它，需要新的 schema 版本，并且有实测的收益。迁移时，把现有快照作为基线，不凭空编造增量；在可回退的上线期间，要为旧版本的读取方保留完整快照；如果记录里只有增量，除非原来的 reducer 注册表能把它们物化，否则拒绝降级。当前的存储仍然是完整快照方式。
 
-以 `bench_checkpoint_store --threads 1 --iters 1 --history-steps 256 --payload 512 --backends memory,sqlite` 测量 baseline；仅在隔离 local DB 上添加 `postgres` 和 `--pg-url`。各行报告 logical serialized byte、save/load p50/p95、reconstruction depth；legacy 行报告 blob count。Allocation request 使用 `heaptrack bench_checkpoint_store --threads 1 --iters 1 --history-steps 256 --payload 512 --backends memory`。Native JSON/SQL allocator 并非都被 C++ `operator new` 捕获。用相同 payload、history、backend 对比实测值。Logical byte 不等于 durable physical byte。SQLite 使用退出时删除的唯一 temporary DB；`--sqlite-path` 保留新 file 并拒绝已有 path。
+基线用 `bench_checkpoint_store --threads 1 --iters 1 --history-steps 256 --payload 512 --backends memory,sqlite` 测量；只有在隔离的本地数据库上，才加上 `postgres` 和 `--pg-url`。每一行报告逻辑序列化字节数、保存和加载的 p50/p95，以及重建深度；legacy 行报告 blob 数量。要统计内存分配请求，运行 `heaptrack bench_checkpoint_store --threads 1 --iters 1 --history-steps 256 --payload 512 --backends memory`。原生的 JSON 和 SQL 分配器，并不都在 C++ `operator new` 的截获范围内。对比时要使用相同的 payload、历史长度和后端配置，依据实测而不是估算的收益。逻辑字节数不等于持久化后实际占用的物理字节数。SQLite 使用退出时删除的唯一临时数据库；`--sqlite-path` 会保留新建的文件，并拒绝已存在的路径。
 
-已记录的 Linux x86-64 Debug baseline 为一个 thread、256 history step、512-byte message、一次 iteration。它是历史测量，不是性能目标：
+下面记录的一次 Linux x86-64 Debug 基线，使用 1 个线程、256 个历史步、512 字节的消息，只迭代 1 次。这些是历史测量值，不是性能目标：
 
-| Backend | Logical checkpoint bytes | Save p50/p95 (µs) | Load p50/p95 (µs) | Replay depth |
+| Backend | 逻辑检查点字节数 | 保存 p50/p95 (µs) | 加载 p50/p95 (µs) | 重放深度 |
 | --- | ---: | ---: | ---: | ---: |
 | Memory | 17,814,952 | 54 / 138 | 141 / 382 | 1 |
 | SQLite | 17,814,952 | 289 / 1,589 | 176 / 474 | 1 |
 
-删除前的另一次 repeat 测得 SQLite DB/WAL 为 14,811,136 / 4,210,672 byte（总计 19,021,808）。计算包括构建及 JSON parse 在内的 process-wide `malloc`、`calloc`、非零 `realloc` request 的 Linux `LD_PRELOAD` shim，与 `--history-steps 0` 相比测得 Memory 额外 88,277 request / 605,289,027 requested byte，SQLite 为 114,295 / 867,319,964。这是累计 request，不是 live memory 或 store-only allocation。Aligned/internal allocation 未被捕获。Shim 不是依赖；形成结论前使用支持的 profiler 及多次 warm run。
+在数据库删除之前另测了一次，SQLite 数据库和 WAL 的大小分别为 14,811,136 / 4,210,672 字节（共 19,021,808 字节）。另外用 Linux 的 `LD_PRELOAD` shim 统计了整个进程的 `malloc`、`calloc` 和非零 `realloc` 请求，包含对象构造和 JSON 解析。与 `--history-steps 0` 相比，Memory 多出 88,277 次请求、共 605,289,027 请求字节，SQLite 多出 114,295 次、867,319,964 字节。这些是累计的请求量，不是存活内存，也不只是存储层的分配。对齐分配和内部分配没有截获。这个 shim 不是项目依赖；下结论之前，请使用受支持的 profiler，并在预热后多跑几次。
 
 ### 写入通道
 
@@ -123,10 +125,10 @@ return [
 ```
 
 值的形状必须与 reducer 匹配：
-- `"append"` → 必须是列表（将被拼接）。
+- `"append"` → 必须是列表（会被拼接）。
 - `"overwrite"` → 任何可 JSON 序列化的值。
 
-### 从节点读取状态
+### 在节点中读取状态
 
 ```python
 def run(self, input):
@@ -135,31 +137,31 @@ def run(self, input):
     ...
 ```
 
-`state.get(channel)` 返回通道的当前值，如果通道存在但尚未被写入，则返回 `None`。对于聊天消息的类型化访问，`state.get_messages()` 返回 `list[ChatMessage]`（从 `messages` 通道解析）——由 `llm_call` 内部使用。
+`state.get(channel)` 返回通道的当前值；如果通道存在但还没写入过，返回 `None`。要以带类型的方式访问聊天消息，用 `state.get_messages()`，它返回 `list[ChatMessage]`（从 `messages` 通道解析而来），`llm_call` 内部就是这样用的。
 
 ### 版本
 
-每个通道携带一个单调递增的 `version` 编号。引擎将其用于检查点差异比较和 `state.channel_version(name)` 检查 API。你通常不会直接读取它。
+每个通道都带一个单调递增的 `version` 编号。引擎用它做检查点的差异比较，也用它提供 `state.channel_version(name)` 这个检查接口。一般不需要直接读它。
 
 ---
 
 <a id="3-nodes"></a>
 ## 3. 节点
 
-注册节点类型的三种方式，按控制程度递增排列：
+注册节点类型有三种方式，控制程度依次提高：
 
 ### 3.1 内置节点
 
-| `type`（JSON 格式） | 功能 | 配置 |
+| `type`（JSON 中） | 作用 | 配置 |
 |---|---|---|
-| `llm_call` | 准备一次拥有所有权的 typed 请求，经 gate/reserve/receipt 后 dispatch 同一 handle，保留全部顺序消息及完整结果。 | 读取`provider`、`model`、`instructions`、`tools`自`NodeContext`。 |
-| `tool_dispatch` | 查看最新助手消息的 `tool_calls`，通过 `Tool::execute` 执行每一项，追加 `{role: "tool", tool_call_id, content}` 结果。 | 读取 `tools` 从 `NodeContext`. |
-| `intent_classifier` | LLM 将用户意图分类为 N 个标签之一，并将所选标签写入 `__route__`。与 `route_channel` 条件配对使用。 | `extra_config: {labels, prompt_template}` |
-| `subgraph` | 将另一个图嵌入为单个节点。内部状态通过配置的键映射进行映射。 | `extra_config: {graph_def, input_keys, output_keys}` |
+| `llm_call` | 准备一个归自己所有的带类型请求，依次经过 gate、reserve、receipt 处理后，分发同一个句柄，并保留所有按序的消息和完整结果。 | 从 `NodeContext` 读取 `provider`、`model`、`instructions`、`tools`。 |
+| `tool_dispatch` | 查看最近一条 assistant 消息的 `tool_calls`，通过 `Tool::execute` 逐个执行，并追加 `{role: "tool", tool_call_id, content}` 形式的结果。 | 从 `NodeContext` 读取 `tools`。 |
+| `intent_classifier` | 由 LLM 把用户意图归入 N 个标签之一，并把选中的标签写入 `__route__`。与 `route_channel` 条件配合使用。 | `extra_config: {labels, prompt_template}` |
+| `subgraph` | 把另一张图嵌入为一个节点。内部状态按配置的键映射对应起来。 | `extra_config: {graph_def, input_keys, output_keys}` |
 
 ### 3.2 `@ng.node` 装饰器（仅限 Python）
 
-定义只写节点的最短方式：
+这是定义只写入节点的最短写法：
 
 ```python
 @ng.node("greet")
@@ -169,11 +171,11 @@ def greet_node(state):
         [{"role": "assistant", "content": f"Hello, {name}!"}])]
 ```
 
-被装饰的函数必须返回一个 `list[ChannelWrite]`（或 `None`，视为 `[]`）。它不能发出 `Send` 或 `Command`——对于这些情况，请继承 `GraphNode`。
+被装饰的函数必须返回 `list[ChannelWrite]`（返回 `None` 时按 `[]` 处理）。它不能发出 `Send` 或 `Command`；需要的话，请继承 `GraphNode`。
 
 ### 3.3 完整的 `GraphNode` 子类
 
-重写 `run(input)` 以获得完全控制。它于 v0.4.0 中引入，并且从 v0.9.0 起是唯一的自定义节点入口点——一个方法，一个签名：
+覆盖 `run(input)` 即可获得完全的控制。它在 v0.4.0 引入，从 v0.9.0 起成为自定义节点唯一的入口：一个方法，一种签名。
 
 ```python
 class Researcher(ng.GraphNode):
@@ -197,13 +199,13 @@ class Researcher(ng.GraphNode):
         )
 ```
 
-Python 在 `input.ctx` 上公开 `cancel_token`、`usage`、`thread_id`、`step`、`stream_mode`、`store`、`resume_value`、`trace_id`、`run_id`、`model_token_budget` 和 typed provider 证据。Deadline 通过 `has_deadline`、`deadline_remaining_ms` 查看；原始 C++ steady-clock 值保持不透明。C++ 调用者通过 `RunMetadata` 提供 deadline 和 trace metadata，并传播到嵌套 subgraph。
+Python 在 `input.ctx` 上提供 `cancel_token`、`usage`、`thread_id`、`step`、`stream_mode`、`store`、`resume_value`、`trace_id`、`run_id`、`model_token_budget`，以及带类型的 provider 证据。检查截止时间用 `has_deadline` 和 `deadline_remaining_ms`；C++ 的 steady-clock 原始值是不透明的。C++ 调用方通过 `RunMetadata` 传入截止时间和 trace 元数据，这些信息会传播到嵌套的子图。
 
-您也可以返回一个裸的 `list[ChannelWrite]` 当您不需要 `Send` 或 `Command` — 绑定时会自动将其提升为一个 `NodeResult` 。
+如果不需要 `Send` 或 `Command`，也可以直接返回一个裸的 `list[ChannelWrite]`，绑定层会自动把它提升为 `NodeResult`。
 
-> **从 v0.3.x 迁移：** 已移除的 pre-v0.4 多入口节点 API 有一个替代方案：重写 `run(input)`。从 `input.state` 读取状态，当非 None 时通过 `input.stream_cb` 发出令牌，并从 `input.ctx.cancel_token` 读取取消令牌。
+> **从 v0.3.x 迁移：** v0.4 之前的多入口节点 API 已移除，只有一个替代方案：覆盖 `run(input)`。从 `input.state` 读取状态；`input.stream_cb` 不为 None 时，通过它发出 token；取消令牌从 `input.ctx.cancel_token` 读取。
 
-注册该类型，以便JSON加载器可以实例化它：
+注册这个类型，JSON 加载器才能实例化它：
 
 ```python
 ng.NodeFactory.register_type(
@@ -212,11 +214,11 @@ ng.NodeFactory.register_type(
 )
 ```
 
-工厂会看到 `(name, per-node config, NodeContext)`，因此同一个类可以在多个名称下以不同配置实例化。
+工厂函数拿到的参数是 `(name, per-node config, NodeContext)`，因此同一个类可以用不同的名称和配置实例化多次。
 
-### 3.4 工具（独立概念，由 `tool_dispatch` 使用）
+### 3.4 工具（独立的概念，由 `tool_dispatch` 调用）
 
-`Tool` 不是节点——它是 `tool_dispatch` 调用的东西。继承 `ng.Tool`，重写三个方法，将实例传入 `NodeContext(tools=[…])`：
+`Tool` 不是节点，而是 `tool_dispatch` 去调用的对象。继承 `ng.Tool`，覆盖三个方法，再把实例传给 `NodeContext(tools=[…])`：
 
 ```python
 class CalcTool(ng.Tool):
@@ -225,7 +227,7 @@ class CalcTool(ng.Tool):
     def execute(self, args):  return str(args["x"] * 2)
 ```
 
-引擎在编译时获得工具列表的所有权——你的本地引用之后可以释放。
+编译时引擎会接管工具列表的所有权，之后本地持有的引用可以释放。
 
 ---
 
@@ -242,11 +244,11 @@ class CalcTool(ng.Tool):
 ]
 ```
 
-来自同一源节点的多条边fan-out（每个后继者进入下一个超级步骤的ready集合）。从一个超级步骤到同一目标的两条边会去重为对目标的一次执行。
+同一个源节点引出多条边时会 fan-out（每个后继节点都进入下一个超步的就绪集合）。同一个超步里有两条边指向同一个目标时，会去重，目标只执行一次。
 
 ### 条件边
 
-条件边运行一个**命名条件**，并从 `routes` 映射中选择下一个节点：
+条件边会运行一个**具名条件**，并从 `routes` 映射里选出下一个节点：
 
 ```python
 "conditional_edges": [
@@ -258,14 +260,14 @@ class CalcTool(ng.Tool):
 ]
 ```
 
-条件名称解析为引擎中注册的`ConditionFn`。两个作为内置项提供：
+条件名会解析为引擎中注册的某个 `ConditionFn`。内置了两个：
 
-| 条件 | 返回值 | 何时使用 |
+| 条件 | 返回值 | 适用场景 |
 |---|---|---|
-| `has_tool_calls` | `"true"` 如果最新的助手消息具有非空的 `tool_calls`; `"false"` 否则。 | ReAct 循环 — 持续调度工具，直到LLM停止请求。 |
-| `route_channel` | `__route__`通道中的任何字符串；回退到`"default"`。 | 与`intent_classifier`配对使用，以实现显式意图路由。 |
+| `has_tool_calls` | 最近一条 assistant 消息的 `tool_calls` 非空时返回 `"true"`，否则返回 `"false"`。 | ReAct 循环：一直分发工具，直到 LLM 不再请求。 |
+| `route_channel` | 返回 `__route__` 通道里的字符串；没有时回退为 `"default"`。 | 与 `intent_classifier` 配合，做显式的意图路由。 |
 
-自定义条件通过C++的`ConditionRegistry::register_condition(name, fn)`或Python（自v0.1.9起）注册：
+自定义条件可以在 C++ 中用 `ConditionRegistry::register_condition(name, fn)` 注册，也可以在 Python 中注册（自 v0.1.9 起）：
 
 ```python
 def is_long(state):
@@ -275,11 +277,11 @@ def is_long(state):
 ng.ConditionRegistry.register_condition("is_long", is_long)
 ```
 
-可调用对象接收实时的`GraphState`（因此`state.get(channel)`和`state.get_messages()`可以工作），并且必须返回一个与条件边的`routes`键之一匹配的字符串。
+可调用对象收到的是当前的 `GraphState`（所以 `state.get(channel)` 和 `state.get_messages()` 都能用），必须返回一个字符串，且与该条件边 `routes` 中的某个键相同。
 
-### 两种等效形式——自 v0.1.8 起均可用
+### 两种等价写法，自 v0.1.8 起都可用
 
-条件边可以位于`edges`数组内部（带有`condition`字段）**或**在单独的`conditional_edges`块中。两种形式都被接受；选择更清晰的一种：
+条件边可以写在 `edges` 数组里（带 `condition` 字段），**也可以**写在单独的 `conditional_edges` 块里。两种写法都接受，选更清楚的一种即可：
 
 ```python
 # Form A — top-level (LangGraph parity, recommended for Python)
@@ -293,14 +295,14 @@ ng.ConditionRegistry.register_condition("is_long", is_long)
 ]
 ```
 
-> **历史：** 在v0.1.8之前，形式A被图编译器静默丢弃——README和每个Python示例都使用它，因此ReAct循环退化为单次LLM调用。在提交`e23a523`中修复。如果你在≤0.1.7的wheel上看到此问题，请升级。
+> **历史：** v0.1.8 之前，图编译器会悄悄丢掉写法 A。README 和所有 Python 示例用的恰好都是它，结果 ReAct 循环退化成只调用一次 LLM。该问题已在提交 `e23a523` 中修复。如果在 ≤ 0.1.7 的 wheel 上遇到这种现象，请升级。
 
 ---
 
 <a id="5-send--dynamic-fan-out"></a>
-## 5. 发送 — 动态fan-out
+## 5. Send：动态 fan-out
 
-`Send` 允许 node 在运行时选择 target 调用次数，例如每个 topic 一个 researcher。引擎在普通 ready batch 返回且写入应用后，在同一编号 superstep 内执行发出的 Send。
+`Send` 让节点在运行时决定要调用目标节点多少次，比如每个主题派一个 researcher。引擎先等普通的就绪批次返回、并应用完它们的写入，再执行发出的 Send，这些 Send 仍属于同一个编号的超步。
 
 ```python
 class Planner(ng.GraphNode):
@@ -314,11 +316,11 @@ class Planner(ng.GraphNode):
 
 ### 心智模型
 
-引擎每个 `Send` 调用一次 compiled target，不保证新建 node object。因此 target 必须安全处理并发调用的 member state。Payload 在 target 读取 channel 前应用。无论该步发出一个还是多个 Send，每个 Send 都在 ready batch 后状态的隔离副本上应用自身 payload 运行，因此 payload 只对该 Send 的执行（包括每次重试尝试）可见，下一步和最终状态都看不到它（#389）。全部 Send 完成后，按调用顺序合并返回写入。随后合并普通 node 和 Send target 的信号，规划下一 ready batch 的路由。
+每个 `Send` 会让引擎调用一次编译好的目标节点，但不保证每次都是新的节点对象。因此 Send 的目标节点必须能安全处理并发调用下的成员状态。payload 会在目标节点读取通道之前应用。每个 Send（这一步派发的是一个还是多个都一样）都在就绪批次之后的状态副本上运行，这份副本是隔离的，已应用该 Send 自己的 payload。所以 payload 只对该 Send 自己的执行可见（包括它的每一次重试），不会泄漏到下一步，也不会出现在最终状态里（#389）。所有 Send 都结束后，它们返回的写入按调用顺序合并。随后，路由把普通节点和 Send 目标节点发出的信号合在一起，得出下一个就绪批次。
 
-抛出 `NodeInterrupt` 的 Send target 会像 ready batch 中的 node 一样暂停 run。它的 `NodeInterrupt` 检查点会重新进入整个 superstep：保存该 step 开始时的状态，并把该 step 的 ready node 记为 next node，暂停的结果也报告该状态。恢复会重新执行该 step。已完成的 ready node 和 Send 重放其记录的结果，不会再次执行或再次计费；暂停的 Send 以及其他未完成的 Send 会以相同的 task id 带着恢复值运行，因此其先前 attempt 记入日志的 provider 调用会被重放。若 step 之前没有检查点（例如位于入口的 map node），已完成的结果会记录在该中断检查点本身之下。
+Send 的目标节点抛出 `NodeInterrupt` 时，会像就绪批次中的节点一样暂停运行。它的 `NodeInterrupt` 检查点会重新进入整个超步：检查点里保存的是这一步开始时的状态，并把这一步的就绪节点列为下一批节点，暂停结果报告的也是这份状态。恢复时会把这一步重新跑一遍。已完成的每个就绪节点和每个 Send 直接重放已记录的结果，不会再次运行，也不会再次计费；暂停的那个 Send 以及其他没有完成的 Send，则在相同的 task id 下带着恢复值运行，所以它们之前的尝试已写入日志的 provider 调用会被重放。如果这一步之前没有检查点（例如入口处的 map 节点），已完成的结果就记录在中断检查点本身之下。
 
-### 常见形态：fan-out 5，fan-in至汇总器
+### 常见形态：fan-out 出 5 路，再 fan-in 到 summarizer
 
 ```
 planner ─┬─ Send("researcher", {topic: "A"})  ─┐
@@ -328,13 +330,13 @@ planner ─┬─ Send("researcher", {topic: "A"})  ─┐
          └─ Send("researcher", {topic: "E"})  ─┘
 ```
 
-`researcher` 的出边就是 `{"from": "researcher", "to": "summarizer"}` —— 与静态边相同的去重规则，因此 summarizer 只运行一次。
+`researcher` 的出边就是 `{"from": "researcher", "to": "summarizer"}`，与静态边适用同样的去重规则，所以 summarizer 只运行一次。
 
-### 工作线程数调优
+### 调整 worker 数量
 
-`build()` 默认 `EngineConfig::worker_count == 1`，不创建 engine-owned thread pool，而在调用者 coroutine executor 上 dispatch 分支。Coroutine I/O 可重叠，单 thread executor 上 CPU-bound 工作可能串行化。Multi-thread caller executor 或并发 run 仍要求安全处理 node member state。
+`build()` 默认 `EngineConfig::worker_count == 1`，因此不会创建引擎自己的线程池，而是在调用方的协程执行器上分发各分支。协程中的 I/O 可以重叠；CPU 密集的工作在单线程执行器上可能变成串行。调用方的执行器是多线程，或者有多个运行同时进行时，节点的成员状态仍然必须是线程安全的。
 
-要实现真正的并行，请显式选择加入一个池。精确选择 N 以匹配您的 fan-out 宽度，或使用 `set_worker_count_auto()` 来获取 `hardware_concurrency()`（回退值为 4）：
+要真正并行，需要显式选用线程池。N 取与 fan-out 宽度一致的值，或者用 `set_worker_count_auto()`，取 `hardware_concurrency()`（取不到时回退为 4）：
 
 ```python
 engine.set_worker_count(5)           # match a 5-way Send
@@ -342,14 +344,14 @@ engine.set_worker_count(5)           # match a 5-way Send
 engine.set_worker_count_auto()       # hardware_concurrency()
 ```
 
-当多 Send（或多出边）fan-out 在未选择线程池的情况下运行时，NeoGraph 会发出一次性 stderr 警告，使静默串行的情况不会在雷达下溜走。若你有意驱动串行 fan-out（例如对 worker=1 快速路径进行基准测试），可用 `NEOGRAPH_SUPPRESS_FANOUT_WARNING=1` 抑制该警告。
+多 Send（或多条出边）的 fan-out 在没有选用线程池的情况下运行时，NeoGraph 会向 stderr 输出一次警告，免得默默串行执行的情况没人注意。如果确实要串行 fan-out（例如测试 worker=1 快速路径的基准），可以设置 `NEOGRAPH_SUPPRESS_FANOUT_WARNING=1` 关闭警告。
 
 ---
 
 <a id="6-command--routing-override--state-patch"></a>
-## 6. Command — 路由覆盖 + 状态补丁
+## 6. Command：覆盖路由并修补状态
 
-`Command` 允许节点在同一个返回值中决定下一步去向并变更状态。它绕过常规出边。
+`Command` 让节点在同一个返回值里，既决定下一步去哪里，又修改状态。它会绕过常规的出边。
 
 ```python
 class Evaluator(ng.GraphNode):
@@ -372,28 +374,28 @@ class Evaluator(ng.GraphNode):
             )
 ```
 
-### Command与条件边的使用场景
+### Command 与条件边，何时用哪个
 
-- **条件边**：路由依赖于不需要使用节点逻辑的状态谓词。更清晰、声明式。
-- **Command**：路由依赖于最自然地在节点内部编写的逻辑 — 多标准评分、内容检查、重试决策。也是原子性更新状态并同时选择下一个节点的唯一方式。
+- **条件边**：路由取决于状态上的某个谓词，不需要节点逻辑。更简洁，也是声明式的。
+- **Command**：路由取决于最适合写在节点里的逻辑，比如多条件打分、检查内容、决定是否重试。它也是唯一能原子地同时更新状态并选择下一个节点的方式。
 
-### fan-in 下后写者胜出
+### fan-in 时最后写入者胜出
 
-若多个兄弟返回非空 `Command.goto_node`，传入路由顺序中的最后一个 command 覆盖普通 edge 和 barrier。Static batch 提供 ready 顺序；多 `Send` 提供调用顺序，而非完成顺序。所有返回的 command update 仍通过写入 pipeline 合并。若冲突 command 会改变 workflow，宜只让一个 node 决定路由。
+如果多个兄弟节点都返回了非空的 `Command.goto_node`，则取路由顺序中最后一个 command，它会覆盖普通的边和屏障（barrier）。静态批次提供的是就绪顺序；多 `Send` 提供的是调用顺序，而不是完成顺序。所有返回的 command 更新仍然会经过写入管线合并。如果相互冲突的 command 会改变工作流的走向，最好只设一个负责路由决策的节点。
 
 ---
 
 <a id="7-checkpoints-interrupts-hitl"></a>
-## 7. 检查点、中断、HITL
+## 7. 检查点、中断与 HITL
 
-### 设置检查点存储库
+### 配置检查点存储
 
 ```python
 engine.set_checkpoint_store(ng.InMemoryCheckpointStore())
 # or: engine.set_checkpoint_store(ng.PostgresCheckpointStore(...))   # if built with PG
 ```
 
-附加存储后，每个超级步骤都会以 `(thread_id, checkpoint_id)` 为键向存储写入一个检查点。`RunResult.checkpoint_id` 字段是最新的一个。
+挂上存储后，每个超步都会向存储写入一个检查点，键为 `(thread_id, checkpoint_id)`。`RunResult.checkpoint_id` 字段是最新的那一个。
 
 ### 静态中断点
 
@@ -402,7 +404,7 @@ engine.set_checkpoint_store(ng.InMemoryCheckpointStore())
 "interrupt_after":  ["llm"],       # pause after, before routing
 ```
 
-引擎返回一个 `RunResult`，其中 `interrupted=True` 和 `interrupt_node` 已设置。要恢复：
+引擎会返回 `interrupted=True` 且设置了 `interrupt_node` 的 `RunResult`。恢复运行的方法如下：
 
 ```python
 result = await engine.resume_async(thread_id="t1",
@@ -410,83 +412,83 @@ result = await engine.resume_async(thread_id="t1",
                                    new_input={...})  # optional
 ```
 
-恢复只会跳过它所回答的那个中断的闸门。恢复 `interrupt_before` 暂停会运行被拦下的节点，恢复 `NodeInterrupt` 会继续其所在的步骤。其他任何恢复，例如 `interrupt_after` 暂停之后的恢复，或进程停止后从某个步骤的检查点进行的恢复，仍会在即将运行的 `interrupt_before` 节点之前暂停。恢复值只交给 `interrupt_before` 暂停所拦下的节点，不交给其他节点；`interrupt_after` 暂停之后的恢复或从其他任何检查点的恢复不会把它交给任何节点（#393）。同一步中同时就绪的多个带闸门节点会逐个回答（#396）：恢复回答 run 所停的那个闸门，在该步运行之前，该步中闸门尚未被回答的其他带闸门节点会以自己的 `interrupt_before` 暂停再次停下 run。该步的所有闸门都被回答后，该步才运行，每个带闸门节点收到对其自身闸门的回答。
+恢复只会跳过它所回应的那个中断的闸门。恢复 `interrupt_before` 暂停，会运行被它拦下的节点；恢复 `NodeInterrupt`，则继续该中断所在的那一步。其他恢复方式，比如 `interrupt_after` 暂停之后的恢复，或进程停止后从某一步的检查点恢复，在即将运行 `interrupt_before` 节点时仍会先暂停。恢复值只交给 `interrupt_before` 暂停所拦下的那个节点，不交给其他节点；`interrupt_after` 暂停之后的恢复，或从其他任何检查点恢复，都不会把恢复值交给任何节点（#393）。同一步里有多个带闸门的节点同时就绪时，要逐个回应（#396）：一次恢复只回应运行所停在的那个闸门；该步运行之前，其余尚未回应闸门的带闸门节点，会各自以自己的 `interrupt_before` 暂停再次让运行停下。该步的所有闸门都回应后，这一步才会运行，每个带闸门的节点收到的是对它自己那个闸门的回应。
 
-### 通过 `NodeInterrupt` 进行动态中断
+### 通过 `NodeInterrupt` 动态中断
 
-从节点主体内部抛出（Python：`raise ng.NodeInterrupt(reason)`，C++：`throw NodeInterrupt(...)`）。引擎捕获、持久化状态、返回一个在抛出节点处中断的 `RunResult` —— 使用相同的恢复 API。这对 ready batch 中的节点和 `Send` target 同样适用，在所有同步、异步和流式入口上都一致。暂停的步骤中已完成的兄弟节点在恢复时会被重放而不是再次运行，前面没有检查点的步骤也是如此。
+在节点函数体内抛出即可（Python：`raise ng.NodeInterrupt(reason)`；C++：`throw NodeInterrupt(...)`）。引擎会捕获它、持久化状态，并返回一个在抛出处的节点中断的 `RunResult`，恢复用的是同一套 API。不论是就绪批次里的节点还是 `Send` 的目标节点，也不论走同步、异步还是流式入口，都是如此。暂停的那一步中已经完成的兄弟节点，恢复时是重放，不会再运行一次；即使这一步之前没有检查点，也一样。
 
-同一步中的多个中断会逐个回答（#388）。当一个超步中的多个节点或 Send 抛出 `NodeInterrupt` 时，run 会在所有这些中断上暂停：`RunResult.interrupts` 以 `{id, node, value}` 列出每一个，其中 id 是暂停调用的 task id（`s3:review`，Send 为 `s3:send[1]:worker:<hash>`），`interrupt_node`、`interrupt_value` 和 `interrupt_id` 报告第一个。恢复回答 `interrupt_id=`（C++ `RunMetadata::resume_interrupt_id`）指定的中断，或第一个中断；该步中其他暂停的节点或 Send 会在没有该值的情况下再次运行并再次提出自己的问题，下一次恢复回答它。指定一个不在等待中的中断会在任何内容运行之前抛出 `ValueError`（C++ `std::invalid_argument`）。在多个中断上暂停的检查点会在其元数据（`_neograph.interrupts`）中列出它们；在一个中断上暂停的检查点保持不变。该值只送达暂停步骤中被回答的调用（#393）：恢复后的 run 中后续步骤的节点看不到 `ctx.resume_value`，因此在那里提问的节点或 tool gate 会再次暂停 run，而不会拿走另一个问题的答案。通过父图恢复的子图经由父图中被回答的节点收到自己的答案。带有 `messages` 通道的图仍会在其中以用户消息的形式收到该值。JavaScript join 以及计划级 `parallel` 和 `quorum` 遵循相同规则：每次恢复回答一个暂停的成员，其余成员再次提问。
+同一步里的多个中断要逐个回应（#388）。一个超步中有多个节点或 Send 抛出 `NodeInterrupt` 时，运行会在这些中断上全部暂停：`RunResult.interrupts` 以 `{id, node, value}` 的形式列出每一个，其中 id 是被暂停的那次调用的 task id（节点形如 `s3:review`，Send 形如 `s3:send[1]:worker:<hash>`），`interrupt_node`、`interrupt_value` 和 `interrupt_id` 报告的是第一个。一次恢复回应的是 `interrupt_id=` 指定的那个中断（C++ 中是 `RunMetadata::resume_interrupt_id`），未指定则回应第一个；这一步里其余被暂停的节点或 Send 会在没有该值的情况下重新运行，再次提出各自的问题，由下一次恢复来回应。指定一个并不处于等待状态的中断，会在任何节点运行之前抛出 `ValueError`（C++ 中是 `std::invalid_argument`）。在多个中断上暂停的检查点，会在元数据（`_neograph.interrupts`）中列出它们；只在一个中断上暂停的检查点，格式不变。恢复值只送达这个暂停步骤中被回应的那次调用（#393）：恢复后的运行中，后续各步的节点都看不到 `ctx.resume_value`，所以在那里提问的节点或工具闸门会再次暂停运行，而不会把别的问题的答案拿去用。通过父图恢复的子图，经由父图中被回应的节点拿到它的答案。带有 `messages` 通道的图，仍会在该通道里以用户消息的形式收到这个值。JavaScript 的 join 以及计划级的 `parallel` 和 `quorum` 遵循同样的规则：每次恢复回应一个暂停的成员，其余成员重新提问。
 
-兄弟节点以不同方式结束的步骤，无论它们的索引或完成顺序如何，都按同一条规则结束（#392）。该规则适用于 fan-out 的分支和同一步的 Send，无论一个 worker 还是多个。run 被取消时 run 停止。否则，不确定的效果，即 payload `kind` 为 `tool_effect_reconciliation` 的 `NodeInterrupt`，即使有兄弟节点失败也会让该步为对账（reconciliation）而暂停，因为结束 run 会丢弃一个无人知道结果的效果；此暂停只报告这些中断，而没有记录结果的失败兄弟节点会在该步恢复时再次运行。否则，失败会以派发顺序（ready 顺序，然后是 Send 顺序）中的第一个失败使 run 失败：该步的普通中断不会被报告，也不会为它们保存检查点。否则，该步如上所述在所有中断上暂停。沿 failure edge 路由的失败是节点的结果，与完成相同：兄弟节点的中断仍会使该步暂停，路由在该步完成时进行。JavaScript join 以及计划级 `parallel` 和 `quorum` 以同样的方式对成员排序（#397）：因不确定效果而暂停的成员，除非成功已决定结果（race 胜者、已满足的 quorum），即使在失败成员旁也会让 join 在第一个这样的成员上暂停；失败的成员会被记录，并在 join 恢复时、待恢复所答复的成员运行到结束并落定其效果之后结束 join（#400）。join 暂停时，无论声明顺序如何，因不确定效果而暂停的成员都先于因普通问题而暂停的成员被询问（#401）。收集式 `ng.all`（`collect: true`）是上述规则的有意例外：它会等待所有成员（包括暂停的成员）结束后才报告，因此当另一个成员因普通问题而暂停时，成员的失败不会结束它。它会在该成员处暂停，并在所有成员都落定后报告该失败（#401）。
+兄弟节点以不同方式结束的一步，不论它们的序号或完成顺序如何，都按同一条规则收尾（#392）。这条规则对 fan-out 的各分支和同一步里的各个 Send 都成立，不论只有一个 worker 还是有多个。运行被取消时，该步停止。否则，如果存在不确定的副作用，即 payload 的 `kind` 为 `tool_effect_reconciliation` 的 `NodeInterrupt`，那么即使有兄弟节点失败，这一步也会为对账而暂停，因为此时结束运行会丢下一个谁也不知道结果的副作用；这次暂停只报告这类中断，而失败的兄弟节点没有记录结果，会在该步恢复时重新运行。否则，只要有失败，运行就以派发顺序（先按就绪顺序，再按 Send 顺序）中的第一个失败而失败：这一步里普通的中断不会被报告，也不会为它们保存检查点。再否则，这一步在所有中断上暂停，如上所述。沿失败边（failure edge）路由的失败属于节点的结果，与正常完成一样：兄弟节点的中断仍会让这一步暂停，等这一步完成后才走这条路由。JavaScript 的 join 以及计划级的 `parallel` 和 `quorum`，对成员按同样的方式排序（#397）：有成员因不确定的副作用而暂停时，即使旁边有成员失败，join 也会停在第一个这样的成员上，除非已有成功的结果决定了 join 的结果（race 的胜出者、已满足的 quorum）；失败的成员会被记录下来，待恢复所回应的那个成员运行结束、并且它的副作用有了定论之后，失败成员再让 join 结束（#400）。无论 join 因何暂停，因不确定副作用而暂停的成员，都比因普通问题而暂停的成员先被询问，与声明顺序无关（#401）。收集式的 `ng.all`（`collect: true`）是上述规则有意设置的例外：它要等所有成员（包括暂停的成员）都结束后才报告，所以只要还有成员因普通问题而暂停，某个成员的失败就不会让它结束；它会停在那里，等所有成员都有了结果，再报告这个失败（#401）。
 
-当暂停决策取决于中间节点输出时非常有用（例如“LLM 是否产生了值得展示给人类的东西？”）。
+当是否暂停取决于节点的中间输出时，这种方式很有用（例如：“LLM 的产出是否值得展示给人看？”）。
 
 ### 时间旅行
 
-`engine.fork(source_thread_id, new_thread_id, checkpoint_id="")` 将检查点复制到调用方指定的目标线程，并返回新检查点 ID。省略检查点 ID 时选择源线程的最新检查点。副本保留待执行的 continuation；编辑状态本身不会安排新工作。 `NodeInterrupt` 检查点的 fork 还会携带暂停超步的 pending write，因此恢复 fork 时会像恢复源检查点一样重放该步中已完成的节点和 Send，而不是再次运行它们及其 provider 调用（#390）。源检查点保留自己的 write。
+`engine.fork(source_thread_id, new_thread_id, checkpoint_id="")` 把一个检查点复制到调用方指定的目标线程，并返回新检查点的 ID。省略检查点 ID 时，取源线程最新的检查点。副本保留待继续的 continuation；编辑状态不会安排新的工作。`NodeInterrupt` 检查点的 fork 还会带上暂停超步的待定写入，所以恢复这个 fork 时，会像恢复源检查点一样，重放该步中已完成的节点和 Send，而不会把它们连同 provider 调用再跑一遍（#390）。源检查点保留它自己的写入。
 
-Resume 已完成且 `next_nodes == ["__end__"]` 的 continuation 时，只恢复保存的结果，不执行节点。要在编辑后的状态上继续暂停的工作，应从 `get_state_history()` 选择仍有待执行节点的精确早期检查点 ID，fork 该 ID，编辑副本后再 resume。历史上的空 `next_nodes` 向量有所不同：未指定精确 ID 的 latest resume 保留开始新执行的旧行为，而 exact-ID resume 仍固定于指定快照。
+恢复一个 `next_nodes == ["__end__"]` 的已完成 continuation，只会还原已保存的结果，不执行任何节点。想在编辑后的状态上继续已暂停的工作，请从 `get_state_history()` 中选一个仍有待执行节点的、更早的确切检查点，fork 这个 ID，编辑 fork 出来的副本，再恢复它。历史快照中 `next_nodes` 为空向量的情况有所不同：不指定确切 ID、只恢复最新状态时，保持新开一次运行的原有行为；按确切 ID 恢复则固定在那份快照上。
 
-[Example 08](../examples/08_state_management.cpp) 保留新 turn 流程：fork 已完成的检查点，编辑用户消息，再以 `resume_if_exists=true` 调用 `run()`；仅当这次新执行中断时才 resume。它不是 resume 暂停 fork 的示例。
+[示例 08](../examples/08_state_management.cpp)沿用新一轮对话（new-turn）的流程：fork 一个已完成的检查点，修改用户消息，再用 `resume_if_exists=true` 调用 `run()`；只有这次新运行发生中断时才恢复。它并没有演示如何恢复一个已暂停的 fork。
 
-`ChatMessage` / `ChatTool` 和 JSON 只是 portable projection，不是 native 权限。Portable 格式仍为 [`provider-message-v2`](../schemas/provider-message-v2.schema.json)、[`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)。真实 C++ checkpoint sidecar 保留内存 native seal。持久 native 历史需要 host-owned `sp::NativeArchive`：closed v3 / `spna3` 使用独立密钥提供经认证的 owner-private custody；archive v2 被拒绝，不升级或解释。认证绑定全部 semantic descriptor 选择（origin/path/header、policy、请求 field mapping、usage path、stop mapping）、owner 和精确 custody binding。这不是加密或 vendor-issuer 认证；不得公开 archive 正文、密钥、native blob 或 raw wire 观测。Archive 是证据存储，不是资金 grant 或 spending lease。Program/external bank 仍由独立 journal 拥有，复制 snapshot 不能创建 credit。
+`ChatMessage` / `ChatTool` 和 JSON 只是可移植的投影（portable projection），并不具备 native 权限。可移植格式仍然是 [`provider-message-v2`](../schemas/provider-message-v2.schema.json) 和 [`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)。真正的 C++ 检查点 sidecar 把 native seal 保存在内存里。要持久保存 native 历史，需要由宿主持有的 `sp::NativeArchive`：封闭的 v3 / `spna3` 格式，带经过认证的、归 owner 私有的托管（custody），并使用独立的密钥。archive v2 会被拒绝，既不会升级，也不会被解释。认证绑定的内容包括：描述符里每一项语义选择（origin、路径、header、policy、请求字段映射、usage 路径和 stop 映射）、owner，以及确切的托管绑定。它既不是加密，也不是对 vendor 签发方的认证；不要公开 archive 的正文、密钥、native blob 或原始的 wire 观测数据。archive 只是证据存储，不是资金 grant，也不是消费租约（spending lease）。Program 和外部的 bank 仍由各自独立的 journal 持有；复制快照不能凭空产生额度（credit）。
 
-Provider 历史有不同模式。同一路径的 native continuation 在原 binding 下保留真实 reasoning、signature 和有序 tool group。Gemini 默认为 `NativeOnly`；显式 `PortableForeign` 接纳调用方创建且不带 native seal、wire output 或 signature 的 assistant text 和 tool call。只有第一个外部 function call 获得 Google 文档规定的 bypass marker；text-only turn 不获得 signature。此 projection 不授予 native 权限，也不会修复失败的 native seal 或将其降级为 portable。它不会让任意跨 vendor 历史都具有 native 可移植性。
+provider 的历史有几种不同的模式。走同一条路由时，native continuation 会在原来的绑定下，保留真实的 reasoning、签名和有序的工具调用组。Gemini 默认使用 `NativeOnly`；显式指定 `PortableForeign` 时，接受调用方自己构造的 assistant 文本和工具调用，这些内容没有 native seal、wire 输出和签名。只有第一个外来的 function call 会带上 Google 文档规定的绕过标记；纯文本的轮次不带签名。这种投影不授予 native 权限，也不会修复或降级一个校验失败的 native seal。它也不意味着任意多 vendor 混合的历史都能原样在 native 层面移植。
 
-Responses `previous_response_id` 选择 provider 保存的会话状态；请求只携带新输入。Client-tool 所有权需要本地证据时，`previous_response_history` 提供真实的先前所有权证据，不作为重复输入发送。Cursor 既不是完整 native replay seal，也不是 archive 权限，仍受 origin、route、model、configuration 和完成状态检查约束。
+Responses 的 `previous_response_id` 用来选定由 provider 保存的会话状态，此时请求只携带新的输入。当客户端工具的归属需要本地证据时，由 `previous_response_history` 提供真实的先前归属证据，它不会作为重复输入发出去。游标（cursor）既不是完整的 native replay seal，也不具备 archive 权限；它仍然要通过 origin、路由、模型、配置和完成状态的检查。
 
-当前 SDK interface revision 和 shared-library generation 均为 4；使用方必须以匹配的 header 和 library 重新构建。Output generation cap 与 native replay configuration 分开，在每次调用中接受 admission 和 accounting。提高新 semantic call 的 cap 不会续期原 bank、grant 或 deadline。除明确文档化的 per-turn 选择外，content、prefix、origin、route、policy、tools 和 reasoning controls 的 binding 保持不变。Portable JSON v2 与 native archive v3 / `spna3` 不变；下方历史 ABI3 测量不是 interface4 结果。
+当前的 SDK 接口修订版和共享库代数（generation）都是 4；使用方必须针对匹配的头文件和库重新构建。输出生成上限在每次调用时都要经过准入(admission)并计入用量，与 native replay 的配置分开。为一次新的语义调用调高它，不会续期原来的 bank、grant 或截止时间。除了文档里明确列出的逐轮可选项，content、prefix、origin、路由、policy、工具和 reasoning 控制都保持绑定。可移植 JSON v2 和 native archive v3 / `spna3` 保持不变；下文的历史 ABI3 测量值不是 interface4 的结果。
 
-Python 公开与 C++ 相同的所有权 request/outcome 边界：`make_provider_request`、`Provider.prepare`、`dispatch` 和 `invoke`。Provider 历史使用带 typed part 的 `ProviderMessage`；`ChatMessage` 仍是图的便利 projection。SDK 失败可通过 `ProviderOutcome.failure` 读取，host observer/settlement 异常保留 `outcome` 和 `cause`。构造器及 GIL/回调行为参见 [Python binding 指南](python-binding.md)。
+Python 暴露的所有权式 request/outcome 边界与 C++ 相同：`make_provider_request`、`Provider.prepare`、`dispatch` 和 `invoke`。provider 的历史请使用带类型化部分（typed parts）的 `ProviderMessage`；`ChatMessage` 仍只是方便图使用的投影。SDK 返回的失败可以通过 `ProviderOutcome.failure` 读取，而宿主的 observer 或结算（settlement）抛出的异常会保留 `outcome` 和 `cause`。构造函数以及 GIL 和回调的行为，请看 [Python 绑定指南](python-binding.md)。
 
-`input_total`、`output_total` 和 `total` 等用量计数器为 `std::optional<sp::Count>`；存在的 count 有 `uint64_t value` 和 `Evidence`。`Usage` 还记录 stage、quality 和 conflict。缺失表示未知，不应伪造零值。
+`input_total`、`output_total`、`total` 等用量计数器的类型是 `std::optional<sp::Count>`；有值的计数带有 `uint64_t value` 和 `Evidence`。`Usage` 还会记录 stage、quality 和 conflicts。缺失表示未知，绝不会被当成 0。
 
-`UsageAccumulator::snapshot()` 返回累计报告。`total_tokens_wide()` 返回已计费 token 与未解决预留之和，不能把它显示为报告用量。结算要求具有 input/output count 的 final、consistent 报告，并计入有依据的最大 total，不截断超额用量。任何累计报告缺少 counter，汇总该 counter 也为未知。预留、本地计费和 vendor 发票是不同的记录。
+`UsageAccumulator::snapshot()` 返回累计的报告。`total_tokens_wide()` 返回已计费的 token 数加上尚未结清的预留量，不能把它当作上报的用量显示出来。结算要求报告是最终的、前后一致的，且带有 input 和 output 计数；结算按有依据的最大总量计费，超出的用量也不做截断。只要累计的某份报告里缺少某个计数器，汇总后该计数器仍然是未知。预留、本地计费和 vendor 的发票是不同的记录。
 
-**Standalone bank journal 修正——当前契约已修订；实际 runtime 证据如下。** Owner-approved protocol 要求单调 trusted-store namespace obligation，以及真实不可变 original owner/thread/graph scope、ceiling、deadline/clock identity、generation。只有对全部 checkpoint commitment/revision 的精确 durable head CAS 才可发放 host-owned opaque lease。精确 pending effect window 必须在 provider I/O 前持久化；结算必须采用真实 SDK outcome 及实际 charge、nullable report、hold、dedup identity。Checkpoint 与 next head 必须在同一 owned actor/revision 下原子 publish。删除 bank metadata、prune checkpoint、replay old authenticated snapshot、覆盖同一 ID 或失去 actor 都不能授予 credit。已有 65 hold 时将 ceiling 130 降至 129，不能再批准另一个 65；已证明 no-effect 的失败可 release unchanged head，使 authentic 130 恢复仍可进行。Crash/unknown/lost-lease window 保持 hold，不 refund/retry/fallback。Plain/pristine archive 配置不授予 money/native spending lease；当前 `config.usage` 不能替换既有 standalone obligation，Program/external-bank journal 所有权不变。这是要求契约。实际 currency/custody 证据与 instrumentation 限制见下文，不是稳定 released API 保证。
+**独立 bank journal 的修正：当前契约已修订，实际运行的证据见下文。** 经 owner 批准的协议要求：有一个单调的、受信存储命名空间义务（obligation），以及真实且不可变的原始 owner/thread/graph 作用域、上限（ceiling）、截止时间/时钟标识和 generation。只有对完整检查点承诺（commitment）和 revision 做精确的持久 head CAS，才能签发由宿主持有的不透明租约（lease）。精确的 pending effect 窗口必须在 provider I/O 之前持久化；结算必须使用真实的 SDK outcome 和实际计费，以及可空的 report、hold 和去重标识。检查点和下一个 head 必须在同一个 owned actor/revision 下原子发布。删除 bank 元数据、裁剪（prune）检查点、重放旧的已认证快照、覆盖同一个 ID 或丢失 actor，都不能产生额度（credit）。已有 65 的 hold 时，把上限 130 收紧到 129，不能再准入另一个 65；已证明没有副作用的失败，可以释放保持不变的 head，使真实的 130 恢复仍能进行。崩溃、未知、租约丢失的窗口一直处于 hold 状态，不退款、不重试、不降级（fallback）。普通/原始（plain/pristine）的 archive 配置不授予资金或 native 消费租约，当前的 `config.usage` 也不能替换已有的独立义务；Program 和外部 bank 的 journal 所有权不变。这是必须满足的契约；实际的币种/托管证据和测量手段的局限见下文，它不是稳定发布的 API 保证。
 
-**当前声明；集成 runtime 证据如下:** `<neograph/graph/checkpoint.h>` 声明 `ManagedBudgetLeaseScope`，包含 `owner_scope`、logical `thread_id`、private backend `storage_thread_id`、`graph_identity`、`original_ceiling`、`original_deadline_ticks`、`deadline_clock_identity`。`OwnedManagedBudgetLease` 暴露 read-only `scope()`、`actor_id()`、不可变 `bank_generation()`、`revision()`、`head_checkpoint_id()`、`head_commitment()`，没有公开 authority-import constructor。`ManagedBudgetEffectReceipt` 暴露 `active()`、`effect_id()`、`claim_amount()`、`request_digest()`；default receipt 不授予权限。`CheckpointStore` 声明 `acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment)`、`begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest)`、`settle_managed_budget_effect(lease, effect, genuine_outcome, authority)`、`publish_managed_budget_checkpoint(lease, checkpoint)`、`release_managed_budget_lease(lease)` 及 `_async` counterpart。Sync `CheckpointStoreCore` 与 `AsyncCheckpointStore` 暴露各自 variant。`managed_budget_checkpoint_commitment(checkpoint)` 绑定完整持久 checkpoint，而非仅 bank JSON。这些声明不证明 backend CAS、currency 安全性、installed ABI 兼容性或实际成功的 runtime 路径。
+**当前声明；集成运行的证据见下文：** `<neograph/graph/checkpoint.h>` 声明了 `ManagedBudgetLeaseScope`，包含 `owner_scope`、逻辑 `thread_id`、私有的后端 `storage_thread_id`、`graph_identity`、`original_ceiling`、`original_deadline_ticks` 和 `deadline_clock_identity`。`OwnedManagedBudgetLease` 提供只读的 `scope()`、`actor_id()`、不可变的 `bank_generation()`、`revision()`、`head_checkpoint_id()` 和 `head_commitment()`；它没有可导入权限的公开构造函数。`ManagedBudgetEffectReceipt` 提供 `active()`、`effect_id()`、`claim_amount()` 和 `request_digest()`；默认构造的 receipt 不授予任何东西。`CheckpointStore` 声明了 `acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment)`、`begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest)`、`settle_managed_budget_effect(lease, effect, genuine_outcome, authority)`、`publish_managed_budget_checkpoint(lease, checkpoint)` 和 `release_managed_budget_lease(lease)`，以及对应的 `_async` 版本。同步的 `CheckpointStoreCore` 和 `AsyncCheckpointStore` 各自提供相应的变体。`managed_budget_checkpoint_commitment(checkpoint)` 覆盖完整的持久检查点，而不只是 bank 的 JSON。这些声明本身并不能证明后端的 CAS、币种安全、已安装 ABI 的兼容性，或某条运行路径已被成功演练。
 
-**真实 InMemory shared-bank fork 已保留并实证。** 原始真实 C++ fork 使用 ONE original financial journal 和 trusted current branch head，不复制 grant。`publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)` 及 `_async` 要求 authentic current source/full commitment 与实际 same-bank native C++ pointer；durable standalone fork 仍明确 unsupported。`OwnedManagedBudgetLease::scope()` 及 original owner/thread/graph、ceiling、deadline/clock、generation 保持不可变。Read-only store-issued `execution_thread_id()` / `execution_storage_thread_id()` 单独选择 execution branch；`GraphState::budget_original_thread_id()` 标识原始 financial bank。精确 selected-branch head CAS 和 global actor/revision 将所有 branch 对 canonical current counter、pending effect、burned identity 串行化。Original/fork branch 保持可用但不补充额度。Stale snapshot、checkpoint copy、imported JSON 不能发放 alias 或回退 head。原始 root30 → charge3 → original continuation6 → fork lower20 → continuation9 same-bank 证明在未修改 test_graph_engine.cpp:810–913 中 PASSED；saved original ceiling30 不同于 effective fork ceiling20；widening31 和 JSON-only restore 必须拒绝。Unbounded reported observation 是事实 data，不是 finite grant。只有已证明 zero-effect 的 lease 能 release unchanged head；unknown/pending effect 保留 obligation。
+**真实的 InMemory shared-bank fork 已保留并经过验证。** 最初那个真实的 C++ fork 使用唯一一份原始的 financial journal 和受信的当前分支 head，而不是复制出来的 grant。`publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)`（及 `_async`）要求提供真实的当前源及其完整 commitment，以及指向同一个 bank 的实际 native C++ 指针；持久化的独立 fork 仍明确不支持。`OwnedManagedBudgetLease::scope()` 以及原始 owner/thread/graph、上限、截止时间/时钟和 generation 保持不可变。只读的、由存储签发的 `execution_thread_id()` / `execution_storage_thread_id()` 单独指定执行分支；`GraphState::budget_original_thread_id()` 标识原始的 financial bank。对所选分支 head 做精确 CAS，再加全局的 actor/revision，使所有分支针对规范的当前计数器、pending effect 和已作废（burned）的标识串行化。原分支和 fork 分支都保持可用，无需补充额度；过期的快照、复制的检查点和导入的 JSON 都不能产生别名（alias）或回退 head。原有的 root30 → charge3 → original continuation6 → fork lower20 → continuation9 同一 bank 的验证，在未改动的 test_graph_engine.cpp:810–913 中通过（PASSED）；保存的原始上限 30 与 fork 的有效上限 20 是两回事；放宽到 31 以及仅用 JSON 恢复，都必须被拒绝。上报的无上限观测值是事实数据，不是有限的 grant。只有已证明零副作用的租约才能释放保持不变的 head；未知或 pending 的副作用会保留其义务。
 
-**当前 release-error 契约；实际 suite/probe 如下。** `<neograph/graph/engine.h>` 中 `graph::ManagedBudgetLeaseReleaseError` 继承 `ProviderOutcomeError`。`cause()` 保留原始 execution exception，`release_error()` 暴露次要 durable lease-disposition 失败。`outcome()` 在存在真实 SDK 证据时保留它，若没有 SDK outcome 则为 null；release 失败不能伪造结果或授权重新 dispatch。Closed `_neograph_managed_budget_scope` metadata 描述原始 logical scope/cap/deadline clock/generation，但只是 data，不是 backend CAS 权限。
+**当前的释放错误（release-error）契约；实际演练的测试集/探针见下文。** `<neograph/graph/engine.h>` 中的 `graph::ManagedBudgetLeaseReleaseError` 派生自 `ProviderOutcomeError`。`cause()` 保留原始的执行异常，`release_error()` 暴露次要的、持久化租约处置阶段的失败。`outcome()` 在有真实 SDK 证据时保留该证据，没有 SDK outcome 时为 null；释放失败既不能凭空构造 outcome，也不允许重新分发。封闭的 `_neograph_managed_budget_scope` 元数据描述原始的逻辑作用域、上限、截止时间时钟和 generation，但它只是数据，不具备后端 CAS 的权威。
 
-**Archive-owner/retention 契约；实际 suite/probe 如下。** 只有 finite standalone root 或 authenticated finite source 才从真实配置的 `sp::NativeArchive::owner_scope()` 继承省略的 original owner；unbounded/plain owner metadata 语义不变。显式冲突的 archive owner 在 lease acquire 前拒绝。`CheckpointStore::retains_native_checkpoint() const noexcept` 及对应 Core/Async storage capability 默认 false；真实 InMemory backend override 为 true，wrapper 必须委托真实 retention。此 read-only 描述允许合法 unleased/plain/unbounded C++ native checkpoint custody，但不授予 spending credit 或 native replay authority。Leased custody 使用真实 store-issued receipt，而非 JSON flag 或猜测的 store type。
+**Archive owner 与留存（retention）契约；实际演练的测试集/探针见下文。** 只有有限的独立根（finite standalone root）或经认证的有限来源，才会从真实配置的 `sp::NativeArchive::owner_scope()` 继承被省略的原始 owner；无限（unbounded）或普通（plain）的 owner 元数据语义不变。显式冲突的 archive owner 会在获取租约之前被拒绝。`CheckpointStore::retains_native_checkpoint() const noexcept` 以及 Core/Async 对应的存储能力，默认返回 false；真实的 InMemory 后端重写为 true，包装器必须把真实的留存能力转发下去。这个只读的描述，允许合法的、未加租约/普通/无限的 C++ native 检查点托管，但它既不授予消费额度（credit），也不授予 native replay 权限。加了租约的托管使用存储实际签发的 receipt，而不是 JSON 标志或猜测出来的存储类型。
 
-**Native-custody pre-I/O gate；实际 suite/probe 如下。** Managed effect begin 在任何 pending-effect/slot/held-window 修改前要求真实绑定的 NativeArchive 或实际 local store-issued private C++ retention capability。Private capability 不从 JSON import，也不经 wire 传输。C++ sidecar 无法跨越边界，因此即使 remote backend 是 InMemory，gRPC 仍要求真实 client/server archive。Archive 未提供 finite source owner 时，原始 anonymous owner scope 保持空值；真实 archive binding 必须匹配 original scope。Financial head/lease 证据本身不证明 native-custody readiness。
+**native 托管的 I/O 前闸门（pre-I/O gate）；实际演练的测试集/探针见下文。** 开始一个受管的副作用（managed effect）之前，在修改任何 pending effect、slot 或 held 窗口之前，必须有真正绑定的 NativeArchive，或者存储实际签发的本地私有 C++ 留存能力。这个私有能力不会从 JSON 导入，也不会通过 wire 传输。即使远端后端是 InMemory，gRPC 也要求客户端和服务端各有真实的 archive，因为 C++ sidecar 无法跨越这条边界。没有 archive 提供有限的来源 owner 时，原始的匿名 owner 作用域保持为空；真实的 archive 绑定必须与原始作用域一致。只有 financial head/租约的证据，并不能证明 native 托管已经就绪。
 
-`ProgramFailure` 保留 live `provider_outcome`、`provider_cause`。Canonical factual SDK witness 将真实 archive custody 绑定到 owner/run/version/bundle/operation/attempt；Runtime 在暴露恢复后的失败前立即恢复配置的 custody。公开 data-only `ProgramResult::create()` 不能用预填 witness 绕过；未解析完的 parsed seal 不是可执行结果。进程重启后原始 exception pointer 不可用（`provider_cause == nullptr`），不会从 text 重建。无法持久化的失败不能 serialize/publish/replay。
+`ProgramFailure` 保留存活的 `provider_outcome` 和 `provider_cause`。它规范的、事实性的 SDK witness，把真实的 archive 托管绑定到 owner/run/version/bundle/operation/attempt；Runtime 在暴露恢复出来的失败之前，会先主动恢复配置好的托管。公开的、纯数据的 `ProgramResult::create()` 不能用预先填好的 witness 绕过这一步，未解析完成的 parsed seal 也不是可执行的结果。进程重启之后，原来的异常指针不再可用（`provider_cause == nullptr`），也不会根据文本重建。无法持久化的失败，也就无法序列化、发布或重放。
 
-`RecordedBindingSet` 是 source-bound move-only data，不是调用方提供的 dispatcher。可信 Catalog `recorded_capability_binder` 独立读取真实持久 source event，materialize captured-only capability。`ProgramRuntime::replay_recorded()` 检查原始 selected-source permission，再通过 durable CAS 转移真实剩余 bank；inherited spend 不是新的 model grant。旧 `start_recorded` 续期 API 已删除。InMemory/File/SQLite/PostgreSQL Program store 在整个执行期间保留精确不可变 owned lease，不因 expiry 续期。Controlled JavaScript 仍验证 underlying capability manifest，消费精确 completed command 结果，不重新 dispatch external effect。
+`RecordedBindingSet` 是绑定到来源（source-bound）、只能移动的数据，不是调用方提供的 dispatcher。受信的 Catalog `recorded_capability_binder` 根据真实持久化的来源事件，独立地物化出只含已捕获内容的能力（captured-only capabilities）。`ProgramRuntime::replay_recorded()` 先检查原来所选来源的权限，再通过持久的 CAS 转移实际剩余的 bank；继承下来的花费不是新的模型 grant。旧的 `start_recorded` 续期 API 已经移除。InMemory、File、SQLite 和 PostgreSQL 的 Program 存储，在整个执行期间保留那份确切的、不可变的、归自己所有的租约；过期不会使它续期。受控的 JavaScript 仍会校验底层的 capability manifest，并消费确切的已完成命令结果，不会重新分发外部副作用。
 
-**Recorded-control causal fix 已在 full suite 实证。** Captured command replay 在执行前仅为新的 CPU wall-time/Core work 建立 durable reservation，再通过 result CAS publish 测量 work 与新产生的 Core checkpoint。不消耗新的 model、money、Program-operation allowance，也不重新 dispatch captured external effect。未结算 reservation 保持 debit。Reservation 选择认证 settlement transition，而非曾拒绝首个新 Core checkpoint 的普通 Running→Running transition。Await channel receive、timer wait/cancel、handoff wait 的开始/release 在所属 executor/strand 上串行化；既有 Recorded CPU/Memory await/handoff scenario 在 full suite pass；remote TSan coverage 限制如下明确保留。
+**Recorded-control 因果修复已在完整测试集中验证。** 重放已捕获的命令时，执行之前只为新增的 CPU 挂钟时间和 Core 工作做持久的预留，然后通过结果 CAS 发布测得的工作量，以及新产生的 Core 检查点。它不消耗新的模型、资金或 Program 操作额度，也不会重新分发已捕获的外部副作用。未对账的预留仍然记为已扣减。这笔预留会选择经认证的结算转换，而不是曾经拒绝首个新 Core 检查点的普通 Running→Running 转换。await 通道的接收、定时器的等待/取消、以及 handoff 等待的发起/释放，都在各自所属的 executor/strand 上串行化；现有的 Recorded CPU/Memory await/handoff 场景在完整测试集中通过；远端 TSan 覆盖的局限仍在下文明确列出。
 
-以下观察记录于本次文档整理之前。它们是历史证据，不是新测试运行，也不保证所有 platform、transport 或 security 属性。
+下面这些观测记录于本次文档校对之前。它们是历史证据，不是新的测试运行结果，也不保证适用于所有平台、传输方式或安全属性。
 
-**付费观测已完成；不是普遍 qualification。** 原始 `SPQUAL1` base630/1000000 microUSD 不变；同一原始 ledger 中 ONE hash-chained `A` 接纳批准的 extension480/3000000，aggregate1110/4000000。Calls/spent/hold/settlement 累积，不产生新 grant ID/header/reset。精确 declaration byte/file identity 和 original authorization/baseline/catalog/activation/ledger-prefix hash/totals 仍固定；删除、替换、变更均 fail closed。最终 canonical ledger 为 calls1110/spent437958/held1287828 microUSD、eventA1、limits1110/4000000；spent+held US$1.725786 是 LOCAL catalogue meter，不是 invoice。记录的 five-family60-pair baseline 完成600 request：Chat60/60、Responses60/60、Messages60/60、Generate56/60（incorrect-vision SSE4次）、Interactions57/60（incorrect-vision buffered1次/SSE2次）；合计293/300 pair，不是300/300。其他 old600 financial record 保留，但不是完整 behavioral proof。此前 M5/media one-shot cohort 不变。此前 Google3-round prerequisite 保留 invalid-tool2次/unreadable-positive1次失败状态。不批准更多付费调用。最终 SDK 证据与 native-axis 限制不同于 baseline 成功。 此前 activation/reopen smoke 保留为两次 reopen 后 calls610/spent219159/held751233、SDK meter/canary/vision4-test19.38秒 pass；这是限定的历史 checkpoint，不是最终 ledger totals。此前验证的 Chat60-pair cohort 保留实际 attempt120、UpperBound charge120、无 UnknownHold。
+**已完成的付费观测；并非通用的资格认证（qualification）。** 最初的 `SPQUAL1` 基线为 630/1000000 microUSD，保持不变；同一份原始账本（ledger）里，由一个哈希链接的 `A` 接纳了获批的扩展额度 480/3000000，合计 1110/4000000，调用数、已花费额度、hold 和结算都是累计的，没有新的 grant ID、header，也没有重置。确切的声明字节/文件标识，以及原始的授权/基线/catalog/激活/账本前缀的哈希和总额都保持固定；删除、替换或改动都按“失败时关闭”处理。最终的规范账本为：调用 1110 次、已花费 437958、hold 1287828 microUSD，eventA1，上限 1110/4000000；已花费加 hold 共计 1.725786 美元，这是本地 catalogue 的计量，不是发票。文档记录的五个 family、每个 60 对的基线共完成 600 次请求：Chat 60/60、Responses 60/60、Messages 60/60、Generate 56/60（4 次 vision 判断错误，均为 SSE）、Interactions 57/60（1 次 buffered、2 次 SSE 的 vision 判断错误）；合计 293/300 对，不是 300/300。其他旧的 600 次相关财务记录被保留，但并不构成完整的行为证明。更早的 M5/media 一次性 cohort 保持不变。更早的三轮 Google 前置条件检查，仍保留 2 次 invalid-tool 和 1 次 unreadable-positive 失败。不再授权任何付费调用。最终的 SDK 证据和 native-axis 的局限，与基线的成功是两回事。更早的激活/重新打开（reopen）冒烟测试，仍记录为两次 reopen 后调用 610、已花费 219159、hold 751233，SDK 的 meter/canary/vision 4 个测试在 19.38 秒内通过；这些都是特定范围内的历史检查点，不是最终的账本总数。更早验证过的 Chat 60 对 cohort 仍保留 120 次实际尝试、120 次 UpperBound 计费，没有 UnknownHold。
 
-**Native-axis 观测不是 cryptographic 验证或 native consumption/equivalence。** Generate 接纳 mutation/omission/duplication。Interactions 接纳 isolated genuine source/positive control、one-owner signature mutation、thought-carrier omission、call-carrier omission、duplication。删除全部 thought/signature 返回 generic400；保留 THOUGHT item 而删除全部 signature field 也返回 generic400。最后一次 capture 只有 local encoded-original retention control，没有 same-capture server positive；此前 positive cohort 仍是真实证据。这仅建立 aggregate-carrier-absence boundary，不证明 issuer/signature 验证或 vendor consumption。实际 report：SDK `config/qualification-extension-results.json`、`qualification-final-summary.json`、`qualification-native-axis-results.json`、`qualification-combined-omission-results.json`、`qualification-signature-presence-results.json`；prerequisite-failed/not-run/negative-inconclusive 状态保持为事实。 Thought-only/carrier-only omission 在仍有其他 carrier 时被接纳；这不加强 issuer-validation/native-consumption 声明。
+**native-axis 观测：不是密码学验证，也不代表 native 消费或等价。** Generate 接受了篡改（mutation）、省略（omission）和重复（duplication）。Interactions 接受了孤立的真实来源/正向对照、单个 owner 的签名篡改、省略 thought-carrier、省略 call-carrier，以及重复。删除全部 thought 和签名，返回 generic 400；删除全部签名字段、但保留 THOUGHT 项，同样返回 generic 400。最后一次采集（capture）只有本地的、编码后原件的留存对照，没有同一次采集中的服务端正向结果；更早的正向 cohort 仍然是真实的。这些观测只确立了“整体 carrier 缺失”的边界，不能证明 issuer/签名校验或 vendor 的消费。实际报告：SDK 的 `config/qualification-extension-results.json`、`qualification-final-summary.json`、`qualification-native-axis-results.json`、`qualification-combined-omission-results.json` 和 `qualification-signature-presence-results.json`；前置条件失败、未运行、负向结果不确定这几种状态，如实保留。只要还剩另一个 carrier，仅省略 thought 或仅省略 carrier 的请求就被接受；这并不能加强 issuer 校验或 native 消费方面的任何说法。
 
-**实际集成证明及剩余限制。** 最新 Core full run：2242 test、失败0、skip16（RAM process-loss 不适用14项/live-credential gate2项）、130.17秒。`PgNestedJsonRoundTrips` 精确保留 duplicate key/order/null metadata、blob、residual，0.18秒 pass。未修改的原始 shared-bank fork 和既有 Recorded CPU/Memory await/handoff scenario 均 pass。真实 wrappedMemory/SQLite/PostgreSQL/gRPC finite130/hold65/lower129/strip/old-head/pruning/no-archive/import probe 在 plain 和 ASan+UBSan pass。LOCAL Memory/SQLite/PostgreSQL TSan scope7项 pass、warning0。包含 system Abseil/Protobuf 的 full mixed gRPC TSan 为 exit66，dependency/generated-RPC stack 有 race warning402项。这是 instrumentation/coverage 限制，不是已证明的 false positive；不声称 remote TSan/race-free，不 suppress warning。Installed find_package Program C++/C ABI/dualQuickJS3个 consumer pass。Fresh installed NeoGraph/SchemaProvider typed consumer 实际2个 HTTP request、coroutine 开始前 provider 销毁、native/tool replay、refusal、known-zero/raw 保留、实际 LinkedMismatch 拒绝均 pass。Browser Alice/Bob isolation、generation2 replacement 已实际目视验证；PostgreSQL Program Chat black-box6项18.989秒 pass。最新 SDK26/26、失败0、74.07秒 pass。最终 ReleaseGraph16配置 ×fresh process3次/48记录以38.29秒、失败0、全部 actual protocol/owned-outcome check pass 完成。NeoGraph `benchmarks/provider-cutover-final-results.json` 和 `benchmarks/provider-cutover-final-summary.json` 保留独立最终 cohort。测量期间未执行 compiler/付费 model；历史 cohort 不变，不声明 semantic/resource equivalence。Unstable SDK/ABI3 不是稳定 release 或更广 platform qualification。
+**实际的集成验证与遗留局限。** 最近一次 Core 完整运行：2242 个测试，0 失败，16 个跳过（14 个 RAM 进程丢失用例不适用，2 个需要真实凭据的闸门），耗时 130.17 秒。`PgNestedJsonRoundTrips` 精确保留了重复的键、顺序、null 元数据、blob 和 residual，用时 0.18 秒。未改动的原始 shared-bank fork 和现有的 Recorded CPU/Memory await/handoff 场景均通过。针对真实包装的 Memory/SQLite/PostgreSQL/gRPC，执行了 finite130/hold65/lower129/strip/old-head/pruning/no-archive/import 这组探针，普通构建和 ASan+UBSan 构建下均通过。本地 Memory/SQLite/PostgreSQL 的 TSan 范围：7 项通过，0 个警告。含系统 Abseil/Protobuf 的完整混合 gRPC TSan 以退出码 66 结束，在依赖库和生成的 RPC 栈里有 402 条 race 警告：这是插桩/覆盖范围的局限，不是已证实的误报；我们不声称远端 TSan 无 race，也没有屏蔽任何警告。已安装的 find_package Program C++/C ABI/双 QuickJS 这 3 个使用方均通过。全新安装的 NeoGraph/SchemaProvider 类型化使用方通过了：2 次真实的 HTTP 请求、协程启动前销毁 provider、native/工具重放、refusal、已知为零/原始值的保留，以及真实的 LinkedMismatch 拒绝。浏览器中 Alice/Bob 的隔离和 generation 2 的替换，已经目视验证；PostgreSQL Program Chat 的 6 个黑盒测试在 18.989 秒内通过。最近一次 SDK：26/26 通过，0 失败，74.07 秒。最终的 ReleaseGraph：16 种配置 ×3 次全新进程重复，共 48 条记录，用时 38.29 秒完成，0 失败，所有实际的协议/owned-outcome 检查均通过。NeoGraph 的 `benchmarks/provider-cutover-final-results.json` 和 `benchmarks/provider-cutover-final-summary.json` 保存了这个独立的最终 cohort。测量期间没有运行编译器，也没有调用付费模型；历史 cohort 保持不变，也不声称语义或资源上等价。不稳定的 SDK/ABI3 既不是稳定发布，也不是对更多平台的资格认证。
 
-Host 交付 limit、extent-bounded 诊断/raw 证据、共同 provider error 及最小 media 证据见 [typed provider reference](reference-en.md#owned-outcome)。
+宿主的交付限制、有范围上限的诊断/原始证据、常见的 provider 错误，以及最小化的媒体证据，见 [typed provider reference](reference-en.md#owned-outcome)。
 
 ---
 
 <a id="8-streaming-events"></a>
 ## 8. 流式事件
 
-`run_stream` / `run_stream_async` 在事件触发时调用回调。模式是可按位 OR 的位掩码：
+`run_stream` / `run_stream_async` 会在事件触发时调用回调。模式是可以按位或组合的位掩码：
 
-| 模式 | 触发 |
+| 模式 | 发出的事件 |
 |---|---|
-| `EVENTS` | `NODE_START`, `NODE_END`, `INTERRUPT` |
-| `TOKENS` | `LLM_TOKEN` 针对来自 `Provider` 的每个流式令牌 |
-| `DEBUG` | `__routing__` 事件，显示下一就绪集合 |
-| `VALUES` | `__state__` 事件，包含每个超级步骤后的完整状态 |
-| `UPDATES` | `CHANNEL_WRITE` 每个 `ChannelWrite` 的事件 |
-| `ALL` | 以上所有 |
+| `EVENTS` | `NODE_START`、`NODE_END`、`INTERRUPT` |
+| `TOKENS` | `Provider` 流式返回的每个 token 对应一个 `LLM_TOKEN` |
+| `DEBUG` | `__routing__` 事件，显示下一批就绪节点 |
+| `VALUES` | `__state__` 事件，每个超步结束后给出完整状态 |
+| `UPDATES` | 每个 `ChannelWrite` 对应一个 `CHANNEL_WRITE` 事件 |
+| `ALL` | 以上全部 |
 
 ```python
 def cb(event):
@@ -498,9 +500,9 @@ engine.run_stream(
     cb)
 ```
 
-> **注意：** `event.node_name`（而非 `event.node`）。C++ 结构体字段为 `node_name`；pybind 保留原始名称。
+> **注意：** 用 `event.node_name`，不是 `event.node`。C++ 结构体的字段是 `node_name`，pybind 保留了原名。
 
-对于聊天形式的流式传输（兼容 LangChain 的消息字典，带有增量 `content_so_far`），请使用辅助函数：
+要做聊天形态的流式输出（与 LangChain 兼容的消息字典，带增量的 `content_so_far`），请使用辅助函数：
 
 ```python
 from neograph_engine import message_stream
@@ -511,9 +513,9 @@ engine.run_stream(
     message_stream(lambda chunk: print(chunk["content"], end="", flush=True)))
 ```
 
-### `asio::io_context.run()` 放置（C++）
+### `asio::io_context.run()` 的放置位置（C++）
 
-当从 C++ 驱动 `engine.run_stream_async()` 时，外部 `asio::io_context.run()` 应从应用程序的主线程（或任何已通过正常进程启动路径初始化的长生命周期线程）调用。已验证良好的形态：
+在 C++ 中驱动 `engine.run_stream_async()` 时，最外层的 `asio::io_context.run()` 应当在应用的主线程上调用（或者在任何经由正常进程启动路径初始化过的长生命周期线程上调用）。经过测试、确认可用的写法：
 
 ```cpp
 // Main-thread driver — what examples/40 and the SchemaProvider tests use.
@@ -536,13 +538,13 @@ std::thread t([&]() {
 t.join();
 ```
 
-> 旧 issue #16 曾观察到部分 glibc/OpenSSL 组合在每请求嵌套 `io.run()` 与旧 child-thread provider streaming bridge 下发生 `getaddrinfo` SEGV。该 bridge 已由 typed 切换删除。当时结构测试未完整重现 downstream HTTPS/sanitizer/load 条件，不是当前验证。当前调用方使用显式 `ProviderMode` 与 `invoke_async` / `dispatch_async`，应从既有长寿命 executor 驱动，而非嵌套每请求 loop。不得伪造单个 token 或重发 completion 作为绕过。
+> 历史问题 #16 曾在某些 glibc/OpenSSL 组合上观察到：在每个请求里嵌套 `io.run()`，并配合旧的子线程 provider 流式桥接，会在 `getaddrinfo` 中出现 SEGV。类型化切换（typed cutover）已移除这个桥接；当时那次结构性测试的结果，并未穷尽复现下游的 HTTPS/sanitizer/负载条件，也不是当前的资格认证。当前的调用方应通过 `invoke_async` / `dispatch_async` 显式指定 `ProviderMode`，并在已有的长生命周期 executor 上驱动工作，而不要嵌套每个请求各自的事件循环。不要把合成单个假 token，或重新发送一次 completion 当作变通办法。
 
 ---
 
 ## 8.5. Tracing — OpenTelemetry + Phoenix / Langfuse
 
-`neograph_engine.tracing.otel_tracer` 与 `neograph_engine.openinference.openinference_tracer` 把 graph event 转为 run/node span。后者记录 `CHAIN` 标签和 node payload projection。每次 run 选择一个 graph callback。要把模型调用记录为 `LLM` span，应在 graph compile 前用 `OpenInferenceProvider(inner, tracer, *, span_name="llm.complete")` 包装 typed provider。Wrapper 使用 native C++ observer 及继承的 `prepare`/一次性 `dispatch` 或 `invoke`。准备或丢弃 request 不打开 span；已准入 dispatch 打开 span，保留原 owned outcome、取消、deadline 与 typed event。Tracer 失败不替换 provider 结果或异常。
+`neograph_engine.tracing.otel_tracer` 和 `neograph_engine.openinference.openinference_tracer` 会把图事件转成 run 和 node 的 span。后者把 span 标记为 `CHAIN`，并记录节点 payload 的投影。每次运行只选一个图回调。要把模型调用记录为 `LLM` span，需要在编译图之前，用 `OpenInferenceProvider(inner, tracer, *, span_name="llm.complete")` 包装带类型的 provider。这个包装器使用 C++ 原生的 observer，沿用继承来的 `prepare` 和一次性的 `dispatch` 或 `invoke`。准备请求或放弃请求都不会开启 span；通过准入(admission)的 dispatch 才会开启 span，并且不会改变它所拥有的 outcome、取消、截止时间或类型化事件。tracer 的失败不会替换 provider 的结果或异常。
 
 ```python
 from opentelemetry import context as otel_context
@@ -577,52 +579,52 @@ def trace_graph(graph_spec, inner_provider, model, cfg):
         provider.shutdown()
 ```
 
-Local Phoenix endpoint 使用 `docker run -d -p 6006:6006 -p 4317:4317 arizephoenix/phoenix:latest`，并安装 `opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp`。将 graph specification、现有 provider、明确的 model 与 `RunConfig` 传给 `trace_graph`。`ParentContextTracer` 明确将 run root 传入 worker dispatch，不保证自动 cross-thread 或 node 级 parent 传播。Python 使用 dispatch 时的 active OTel context，prepared operation 在其生命周期内保留 tracer adapter。
+要在本地启动 Phoenix 端点，运行 `docker run -d -p 6006:6006 -p 4317:4317 arizephoenix/phoenix:latest`，并安装 `opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp`。调用 `trace_graph` 时，传入图规格、一个已有的 provider、明确指定的模型和一个 `RunConfig`。`ParentContextTracer` 会把运行的根 span 显式带入 worker 的分发中；不承诺自动跨线程传播，也不承诺按节点自动传播父 span。Python 在 dispatch 时使用当前活动的 OTel 上下文，已准备好的操作在其生命周期内一直持有 tracer 适配器。
 
-LLM span 仅含公开 role/text projection、已声明 scalar 和已知 usage count。已知零值会记录，未知值被省略。Native replay/reasoning、raw wire envelope/event 和 encoded request body 不进入 trace；真实 custody 保留在 request/outcome。包括失败 partial report 的 usage 属性不能证明 vendor charge 或 budget authority；charged/reserved accounting 由 `UsageAccumulator.authority_snapshot()` 与 Program 的 `provider_budget_authority` 负责。
+LLM span 包含公开的 role/文本投影、声明过的标量，以及已知的用量计数。已知为零的值会记录，未知的则省略。native replay/reasoning、原始的 wire 信封/事件和编码后的请求体都不进入 trace，它们仍由 request/outcome 真实保管。用量属性（包括失败时上报的部分报告）既不能证明 vendor 实际收费，也不构成预算权限；已计费和已预留的核算，归 `UsageAccumulator.authority_snapshot()` 和 Program 的 `provider_budget_authority` 负责。
 
-公开 text、异常消息及 graph payload 仍可能含 application secret。应选择或 redact exporter 接收的数据，参见 [OpenTelemetry 敏感数据指引](https://opentelemetry.io/docs/security/handling-sensitive-data/)。[OpenInference convention](https://github.com/Arize-ai/openinference/blob/main/spec/semantic_conventions.md) 定义 `CHAIN` 和 `LLM`；[参考](reference-en.md#105-observability--opentelemetry--openinference)列出 NeoGraph 的属性 subset、token event、Python typed 调用示例及 C++ 生命周期要求。
+公开文本、异常信息和图的 payload 仍可能含有应用的机密。请自行选择，或脱敏后再交给 exporter；参见 [OpenTelemetry 关于敏感数据的指引](https://opentelemetry.io/docs/security/handling-sensitive-data/)。`CHAIN` 和 `LLM` 由 [OpenInference 规范](https://github.com/Arize-ai/openinference/blob/main/spec/semantic_conventions.md)定义；[参考文档](reference-en.md#105-observability--opentelemetry--openinference)列出了 NeoGraph 支持的属性子集、token 事件、Python 带类型调用的示例，以及 C++ 的生命周期要求。
 
 ---
 
 <a id="9-common-pitfalls"></a>
 ## 9. 常见陷阱
 
-这些均已被真实用户遇到；从 [`docs/troubleshooting.md`](troubleshooting.md) 交叉引用。
+下面这些问题都有真实用户遇到过，[`docs/troubleshooting.md`](troubleshooting.md) 中也有对应的交叉引用。
 
-### “我的ReAct循环只运行一次”
+### “我的 ReAct 循环只运行一次”
 
-你使用的是 wheel ≤ 0.1.7。图编译器静默丢弃了 `conditional_edges` 块。升级到 ≥ 0.1.8。使用 `result.execution_trace == ['llm', 'dispatch', 'llm']` 验证（不仅仅是 `['llm']`）。
+这是 wheel ≤ 0.1.7 的问题：图编译器悄悄丢掉了 `conditional_edges` 块。升级到 ≥ 0.1.8，并用 `result.execution_trace == ['llm', 'dispatch', 'llm']` 验证（而不只是 `['llm']`）。
 
-### “Provider调用挂起60秒然后报错”
+### “provider 调用挂起 60 秒后报错”
 
-你使用的是 wheel ≤ 0.1.6。捆绑的 OpenSSL 硬编码了 RHEL CA 路径，这些路径在 Ubuntu / Debian / macOS 上不存在。升级到 ≥ 0.1.7（导入时自动将 `SSL_CERT_FILE` 设置为 certifi 的捆绑包）或手动设置 `SSL_CERT_FILE`。
+这是 wheel ≤ 0.1.6 的问题：内置的 OpenSSL 把 RHEL 的 CA 路径写死了，而这些路径在 Ubuntu / Debian / macOS 上并不存在。升级到 ≥ 0.1.7（导入时会自动把 `SSL_CERT_FILE` 设为 certifi 的证书包），或者手动设置 `SSL_CERT_FILE`。
 
-### “我的fan-out比我预期的要慢”
+### “我的 fan-out 比预期慢”
 
-`compile()` 默认为 `set_worker_count(1)` （无引擎拥有的线程池——fan-out 分支在调用方的执行器上串行运行）。如需真正的并行，请调用 `engine.set_worker_count(N)` ，其中 N 与您的 Send fan-out 宽度匹配，或 `engine.set_worker_count_auto()` 用于 `hardware_concurrency()`。NeoGraph 还会在首次多 Send fan-out 在未选择加入池的情况下运行时，向 stderr 打印一次性警告——这是提示，而非错误。Python 自定义节点在小型 fan-out 上会遇到 GIL 争用，因此请同时使用 1 和 N 进行基准测试。
+`compile()` 默认调用 `set_worker_count(1)`（引擎不创建自己的线程池，fan-out 的各分支在调用方的 executor 上串行运行）。要真正并行，请调用 `engine.set_worker_count(N)`，N 取与 Send 的 fan-out 宽度一致的值；或者调用 `engine.set_worker_count_auto()`，取 `hardware_concurrency()`。多 Send 的 fan-out 在没有选用线程池的情况下首次运行时，NeoGraph 还会向 stderr 输出一次警告，这只是提示，不是错误。fan-out 规模较小时，Python 自定义节点会遇到 GIL 争用，所以 N 和 1 两种配置都要测一下。
 
-### 读取 Python RunResult status 与 state
+### 读取 Python RunResult 的 status 和状态
 
-`result.status` 公开 typed `Completed`、`Interrupted`、`StepLimit`、`SafePoint`、`BarrierStalled`、`FailureExit` 状态；`BarrierStalled` 表示 barrier 再也无法触发，run 未到达 `__end__` 就停止了，`FailureExit` 表示 failure exit 节点已完成，run 以失败结束。`result.output` 是 portable 最终 state；`result.interrupted`、`result.max_steps_exhausted`、`result.execution_trace` 描述 run。`result.native_messages`、`result.provider_outcomes` 保留完整 typed provider 证据。参见 [Python binding 指南](python-binding.md#hitl-and-state)。
+`result.status` 给出带类型的状态：`Completed`、`Interrupted`、`StepLimit`、`SafePoint`、`BarrierStalled` 或 `FailureExit`。其中 `BarrierStalled` 表示某个屏障再也无法触发，运行在没有到达 `__end__` 的情况下停止；`FailureExit` 表示某个失败退出节点已执行完毕，运行以失败告终。`result.output` 仍然是可移植的最终状态；`result.interrupted`、`result.max_steps_exhausted` 和 `result.execution_trace` 描述这次运行。`result.native_messages` 和 `result.provider_outcomes` 保留完整的带类型 provider 证据。参见 [Python 绑定指南](python-binding.md#hitl-and-state)。
 
 ### “Unknown reducer: <name>”
 
-内置两个reducer：`overwrite`和`append`。请在编译前通过C++的`ReducerRegistry::register_reducer`或Python的`ng.ReducerRegistry.register_reducer`注册自定义reducer。
+内置的 reducer 只有两个：`overwrite` 和 `append`。自定义 reducer 要在编译之前注册，C++ 用 `ReducerRegistry::register_reducer`，Python 用 `ng.ReducerRegistry.register_reducer`。
 
-### “条件已注册，但我的条件边没有触发”
+### “条件已注册，但条件边没有触发”
 
-验证表单是加载器接受的表单（[§4](#4-edges--conditional-routing) 中的表单 A 或表单 B）— 自 v0.1.8 起两者均可用。在较旧的 wheel 上，仅表单 B 可用。
+先确认写法是加载器接受的那种（[§4](#4-edges--conditional-routing) 中的写法 A 或写法 B），两种从 v0.1.8 起都可用。更老的 wheel 只支持写法 B。
 
-### execution_trace 只显示起始节点
+### “execution_trace 只显示起始节点”
 
-路由回退至`__end__`。最可能的原因是起始节点缺少边，或者您的条件返回了不在`routes`映射中的值，且显式`"default"`路由指向`__end__`。严格图不再按映射顺序选择路由：开放或未指定的条件在声明时使用`"default"`，否则引擎会抛出包含源节点、条件和返回标签的错误。封闭条件若返回其声明标签之外的值，则始终抛出错误。
+路由落到了 `__end__`。最可能的原因是起始节点缺少出边，或者条件返回的值不在 `routes` 映射里，而显式声明的 `"default"` 路由又指向 `__end__`。严格的图不再按映射的排列顺序选择路由：开放的（open）或未指定的条件，在声明了 `"default"` 时使用它，否则引擎抛出异常，信息中包含源节点、条件和返回的标签。封闭的（closed）条件一旦返回了它声明的标签之外的值，一定会抛出异常。
 
 ---
 
-## 下一步去哪里
+## 接下来读什么
 
-- [Python 示例](../bindings/python/examples/) — 21 个自包含脚本，涵盖上述所有概念。
-- [C++ 示例](../examples/) — 36 个结构相同的程序。
-- [`reference-en.md`](reference-en.md) — 逐类详尽的 API。
-- [`ASYNC_GUIDE.md`](ASYNC_GUIDE.md) — 深入探讨异步/协程层。
+- [Python 示例](../bindings/python/examples/)：21 个可独立运行的脚本，覆盖以上每个概念。
+- [C++ 示例](../examples/)：36 个程序，结构相同。
+- [`reference-en.md`](reference-en.md)：逐个类列出的完整 API。
+- [`ASYNC_GUIDE.md`](ASYNC_GUIDE.md)：深入讲解异步/协程层。
