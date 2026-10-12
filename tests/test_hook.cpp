@@ -651,6 +651,52 @@ TEST(HookExecutionStates, ATargetThatTimedOutIsTimedOut) {
     EXPECT_EQ(entry->data().attempt_count, 1u) << "a timed-out target is final";
 }
 
+TEST(HookExecutionStates, AControllerRetryNeverRunsATimedOutTargetAgain) {
+    // The owner's decision: a Hook target that timed out is final, because
+    // it may still be running. A policy that lets the tool execution
+    // controller retry the target (an idempotent, read-only target with
+    // retry_max_attempts > 1) must not start it again after a timeout.
+    class Counting final : public Tool, public ContextualAsyncTool {
+    public:
+        ChatTool get_definition() const override { return {"audit", "", json::object()}; }
+        std::string get_name() const override { return "audit"; }
+        std::string execute(const json&) override { return "unused"; }
+        asio::awaitable<std::string> execute_async(const json&, ToolExecutionContext) override {
+            ++starts;
+            asio::steady_timer timer(co_await asio::this_coro::executor);
+            timer.expires_after(std::chrono::seconds(2));
+            co_await timer.async_wait(asio::use_awaitable);
+            co_return "late";
+        }
+        std::atomic<int> starts{0};
+    } tool;
+    auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
+    ToolExecutionPolicy policy;
+    policy.execution_timeout = std::chrono::milliseconds(50);
+    policy.effect = ToolEffectClass::ReadOnly;
+    policy.idempotency = ToolIdempotency::Idempotent;
+    policy.retry_max_attempts = 3;
+    policies->upsert("audit", policy);
+    auto controller = std::make_shared<ToolExecutionController>(
+        ToolExecutionControllerConfig{policies, nullptr});
+    auto fixture = hook_fixture(tool, controller);
+    auto journal = std::make_shared<InMemoryHookJournal>();
+    MandatoryHookRunner runner(journal, fixture.registry, fixture.adapter);
+    EXPECT_EQ(blocked_state(runner, std::chrono::system_clock::now() + std::chrono::minutes(1), 3),
+              HookExecutionState::TimedOut);
+    EXPECT_EQ(tool.starts.load(), 1) << "the controller started a timed-out target again";
+    const auto entry = journal->get(fixture.invocation.id());
+    EXPECT_EQ(entry->data().state, HookExecutionState::TimedOut);
+    EXPECT_EQ(entry->data().attempt_count, 1u);
+
+    // The same policy still retries the tool when it is called as a tool:
+    // only Hook targets are final after a timeout.
+    tool.starts = 0;
+    const auto direct = async::run_sync(controller->execute_result_async(tool, json::object(), {}));
+    EXPECT_EQ(direct.status, ToolTerminalStatus::TimedOut);
+    EXPECT_EQ(tool.starts.load(), 3);
+}
+
 TEST(HookExecutionStates, ALongNonUtf8FailureIsStillRecorded) {
     // A failure message longer than a receipt holds, ending mid-sequence, is
     // truncated on a code point boundary and repaired, not lost.

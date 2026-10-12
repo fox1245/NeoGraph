@@ -124,7 +124,9 @@ NativeHookExecutionAdapter::NativeHookExecutionAdapter(HookTargetResolver resolv
 asio::awaitable<ToolExecutionResult> NativeHookExecutionAdapter::execute_result_async(const HookInvocation& invocation, const RuntimeEvent& event, ToolExecutionContext context) const { if (invocation.data().event_id != event.id() || invocation.data().phase != event.phase()) throw std::invalid_argument("Hook invocation does not match runtime event"); const auto target = target_resolver_(invocation.data().target_id); if (!target) throw std::invalid_argument("Hook target is not admitted"); validate_target(invocation.data(), *target); auto arguments = invocation.data().arguments; if (!invocation.data().host_mapper_id.empty()) { if (!host_mapper_ || !admitted_host_mapper_ids_.count(invocation.data().host_mapper_id)) throw std::invalid_argument("Hook host mapper is not admitted"); arguments = canonical_json(host_mapper_(invocation.data().host_mapper_id, event), "Hook host mapper output"); } if (context.identity.request_id.empty()) context.identity.request_id = invocation.id(); context.controller = controller_;
     std::exception_ptr stopped;
     try {
-        co_return co_await controller_->execute_result_async(*target->tool, std::move(arguments), std::move(context));
+        // A target that timed out is final: the controller does not retry it.
+        co_return co_await controller_->execute_hook_target_async(*target->tool, std::move(arguments),
+                                                                  std::move(context));
     } catch (...) {
         stopped = std::current_exception();
     }

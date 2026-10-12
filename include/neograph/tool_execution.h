@@ -352,6 +352,15 @@ public:
     [[nodiscard]] std::shared_ptr<HostAdmissionController> host_admission() const;
 
 private:
+    friend class NativeHookExecutionAdapter;
+    /// A Hook target's attempt: as execute_result_async, except that an
+    /// attempt that timed out is final whatever retry_max_attempts allows,
+    /// because the timed-out target may still be running.
+    asio::awaitable<ToolExecutionResult> execute_hook_target_async(
+        Tool& tool, json arguments, ToolExecutionContext context);
+    asio::awaitable<ToolExecutionResult> execute_result_async(
+        Tool& tool, json arguments, ToolExecutionContext context, bool retry_after_timeout);
+
     class Impl;
     std::unique_ptr<Impl> impl_;
 };

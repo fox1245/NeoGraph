@@ -1013,6 +1013,16 @@ ToolExecutionController::~ToolExecutionController() = default;
 
 asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_async(
     Tool& tool, json arguments, ToolExecutionContext context) {
+    co_return co_await execute_result_async(tool, std::move(arguments), std::move(context), true);
+}
+
+asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_hook_target_async(
+    Tool& tool, json arguments, ToolExecutionContext context) {
+    co_return co_await execute_result_async(tool, std::move(arguments), std::move(context), false);
+}
+
+asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_async(
+    Tool& tool, json arguments, ToolExecutionContext context, bool retry_after_timeout) {
     const auto policy = impl_->policies->resolve(tool.get_name());
     bool started = false;
     std::shared_ptr<SingleFlightState> singleflight_state;
@@ -1171,6 +1181,13 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
                     throw;
                 } catch (const asio::system_error& error) {
                     if (error.code() == asio::error::operation_aborted) throw;
+                    // A Hook target that timed out is final (the owner's
+                    // decision): it may still be running.
+                    if (!retry_after_timeout && error.code() == asio::error::timed_out) throw;
+                    last_error = std::current_exception();
+                } catch (const detail::ProcessBridgeError& error) {
+                    if (!retry_after_timeout && error.status == ToolTerminalStatus::TimedOut)
+                        throw;
                     last_error = std::current_exception();
                 } catch (...) {
                     // A Hook block or interrupt from tool code is never retried.
