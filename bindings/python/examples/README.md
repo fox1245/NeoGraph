@@ -102,6 +102,7 @@ The restricted JavaScript Program API runs on top of Core graphs: `ProgramRegist
 | 29 | [`29_program_hello.py`](29_program_hello.py) | yes | A JavaScript Program defines one graph with a Python node and runs it on `LocalProgramHost`; prints `status: Completed`, `value: 1`, `trace: ['work']`. |
 | 30 | [`30_program_barrier_join.py`](30_program_barrier_join.py) | yes | Three reviewers run in parallel and a `barrier` waits for all of them. When one reviewer routes elsewhere, the Program ends `Failed` with `P_CORE_BARRIER_STALLED` and a witness naming the missing node. |
 | 31 | [`31_program_any_of_join.py`](31_program_any_of_join.py) | yes | A join over two plain members stalls when a fix-up node takes over for one of them. The compiler's own suggestion, an `{any_of: [...]}` slot, is applied to the source and the repaired Program completes. |
+| 32 | [`32_program_failure_routing.py`](32_program_failure_routing.py) | yes | TEST fails, is retried twice, and its final failure is routed to a handler with `interruptBefore`. The operator resumes with `retry` and the Program completes, or with `abort` and a failure exit ends it `Failed` with `plan.user_abort`. |
 
 ### Protocols: MCP, A2A, ACP
 

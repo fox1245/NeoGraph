@@ -103,6 +103,7 @@ python 01_minimal.py
 | 29 | [`29_program_hello.py`](29_program_hello.py) | yes | JavaScript Program이 Python 노드가 있는 그래프 하나를 정의하고 `LocalProgramHost`에서 실행합니다. `status: Completed`, `value: 1`, `trace: ['work']`를 출력합니다. |
 | 30 | [`30_program_barrier_join.py`](30_program_barrier_join.py) | yes | 검토자 세 명이 병렬로 실행되고 `barrier`가 모두를 기다립니다. 한 명이 다른 곳으로 라우팅하면 Program은 `Failed`로 끝나며, `P_CORE_BARRIER_STALLED`와 빠진 노드를 알려 주는 witness가 남습니다. |
 | 31 | [`31_program_any_of_join.py`](31_program_any_of_join.py) | yes | 일반 멤버 둘을 기다리는 join은 한쪽을 대신하는 보정 노드가 끼어들면 멈춥니다. 컴파일러가 알려 준 제안인 `{any_of: [...]}` 슬롯을 소스에 적용하면 고친 Program이 완료됩니다. |
+| 32 | [`32_program_failure_routing.py`](32_program_failure_routing.py) | yes | TEST가 실패해 두 번 재시도된 뒤, 마지막 실패가 `interruptBefore`가 걸린 처리 노드로 라우팅됩니다. 운영자가 `retry`로 재개하면 Program이 완료되고, `abort`로 재개하면 실패 종료 노드가 `plan.user_abort` 코드와 함께 `Failed`로 끝냅니다. |
 
 ### 프로토콜: MCP, A2A, ACP
 

@@ -103,6 +103,7 @@ python 01_minimal.py
 | 29 | [`29_program_hello.py`](29_program_hello.py) | yes | JavaScript の Program が Python ノードを持つグラフを 1 つ定義し、`LocalProgramHost` で実行します。`status: Completed`、`value: 1`、`trace: ['work']` を出力します。 |
 | 30 | [`30_program_barrier_join.py`](30_program_barrier_join.py) | yes | レビュアー 3 人が並列に動き、`barrier` が全員を待ちます。1 人が別のノードへルーティングすると、Program は `Failed` で終わり、`P_CORE_BARRIER_STALLED` と、来なかったノードを示す witness が残ります。 |
 | 31 | [`31_program_any_of_join.py`](31_program_any_of_join.py) | yes | 通常のメンバー 2 つを待つ join は、片方を肩代わりする修正ノードが入ると止まります。コンパイラ自身の提案である `{any_of: [...]}` スロットをソースに適用すると、直した Program は完了します。 |
+| 32 | [`32_program_failure_routing.py`](32_program_failure_routing.py) | yes | TEST が失敗して 2 回再試行され、最後の失敗は `interruptBefore` 付きのハンドラーへルーティングされます。オペレーターが `retry` で再開すると Program は完了し、`abort` で再開すると失敗終了ノードが `plan.user_abort` を付けて `Failed` で終わらせます。 |
 
 ### プロトコル: MCP、A2A、ACP
 
