@@ -2,9 +2,8 @@
 //
 // Spawns an MCP stdio server (subprocess), discovers its tools, then calls
 // each tool directly and prints the result. This isolates the MCP protocol
-// round-trip from any LLM dependency: the other bundled MCP examples
-// (03 / 20 / 22) wrap the client in a ReAct loop using the pinned
-// OpenRouter DeepSeek model, which hides the fact that the protocol layer
+// round-trip from any model: the other MCP examples (03, 20 to 24) hand the
+// client to a ReAct loop, which hides the fact that the protocol layer is
 // peer-agnostic.
 //
 // Pair it with min_stdio_server.py (a ~60-line stdlib server, no fastmcp):

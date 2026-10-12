@@ -3,7 +3,7 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-本仓库中的所有其他MCP示例（03 / 20 / 21 / 22）都将MCP客户端封装在ReAct循环中，该循环使用固定的OpenRouter DeepSeek模型，而且大多数MCP教程都假定你在服务端使用`pip install fastmcp`（这大约会拉取~60个包）。这掩盖了一个有用的事实：
+本仓库其他 MCP 示例（03、20 至 24）把 MCP 客户端交给由脚本化模型驱动的 ReAct 循环，而大多数 MCP 教程默认服务端要 `pip install fastmcp`（约 60 个包）。本食谱去掉循环，只展示客户端，因此下面这个事实一目了然：
 
 > 对端只需实现 stdio MCP protocol。C++ client 链接
 > `libneograph_mcp` 及其传递 native 依赖；对端不需要 Python MCP
