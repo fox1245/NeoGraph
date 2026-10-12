@@ -14,6 +14,7 @@ Run:
 smoke-expect: status:  auto-approved (>=100)
 smoke-expect: status:  needs human review
 smoke-expect: status:  rejected (negative)
+smoke-forbid: [neograph] lint
 """
 
 import neograph_engine as ng
@@ -86,12 +87,14 @@ definition = {
         "manual": {"type": "stub"},
         "reject": {"type": "stub"},
     },
-    # Default edges — Command overrides these. The default `from
-    # guard → accept` would always pick accept; Command lets us
-    # short-circuit to manual / reject based on input.
+    # These edges list the places `guard` may send work. The Command it returns picks one and
+    # overrides the rest; without a Command all three would run. Declaring them also tells the
+    # topology check that accept, manual and reject can be reached.
     "edges": [
         {"from": ng.START_NODE, "to": "guard"},
         {"from": "guard",  "to": "accept"},
+        {"from": "guard",  "to": "manual"},
+        {"from": "guard",  "to": "reject"},
         {"from": "accept", "to": ng.END_NODE},
         {"from": "manual", "to": ng.END_NODE},
         {"from": "reject", "to": ng.END_NODE},
