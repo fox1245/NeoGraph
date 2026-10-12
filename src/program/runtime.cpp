@@ -393,6 +393,46 @@ std::string core_thread_identity(std::string_view run_id,
     return detail::sha256_identity("program-core-thread/v1", identity);
 }
 
+// #386: the replay records of a paused plan (settled_branches) that a run
+// continuing `source` in another run, `run_id` of `target`, carries. A
+// paused call's record names its checkpoint in the source run; the
+// continuation gets its own copy, on the call's Core thread in the new run,
+// so that answering the call there never writes into the source run.
+std::optional<json> continued_replay_records(const ProgramRunRecord&         source,
+                                             std::string_view                run_id,
+                                             const detail::MaterializedProgram& target,
+                                             graph::CheckpointStore&         checkpoints) {
+    const auto records = source.settled_branches();
+    if (!records) return std::nullopt;
+    json carried = json::object();
+    for (const auto& [key, stored] : records->items()) {
+        auto record = detail::owned_json_copy(stored);
+        if (record.is_object() && record.contains("kind") && record["kind"] == json("paused")) {
+            const auto checkpoint_id = record["checkpoint"]["checkpoint_id"].get<std::string>();
+            const auto loaded        = checkpoints.load_by_id(checkpoint_id);
+            if (!loaded || loaded->id != checkpoint_id)
+                throw_runtime_diagnostic("P_CHECKPOINT_NOT_FOUND",
+                                         "A paused call's checkpoint was not found");
+            auto copy      = *loaded;
+            copy.id        = graph::Checkpoint::generate_id();
+            copy.thread_id = core_thread_identity(run_id, target.root->compiled_plan_identity,
+                                                  record["operation_id"].get<std::string>());
+            copy.parent_id = loaded->id;
+            copy.metadata["forked_from"] =
+                json{{"thread_id", loaded->thread_id}, {"checkpoint_id", loaded->id}};
+            copy.timestamp = std::max<std::int64_t>(now_ms(), loaded->timestamp + 1);
+            checkpoints.save(copy);
+            record["checkpoint"] = json{{"core_name", target.root->core_name},
+                                        {"core_generation_id", target.root->compiled_plan_identity},
+                                        {"core_thread_id", copy.thread_id},
+                                        {"checkpoint_id", copy.id},
+                                        {"checkpoint_schema_version", copy.schema_version}};
+        }
+        carried[key] = std::move(record);
+    }
+    return carried;
+}
+
 std::optional<std::string> javascript_call_core_operation_for_thread(
     const JavaScriptCommand& command,
     std::string              operation_id,
@@ -1523,7 +1563,8 @@ ProgramTransitionPublication initial_publication(
     std::optional<std::int64_t>             timestamp             = std::nullopt,
     std::optional<std::string>              checkpoint_content_id = std::nullopt,
     std::vector<ProgramChildRecord>         inherited_children    = {},
-    std::optional<ProgramAttemptResume>     attempt_resume        = std::nullopt) {
+    std::optional<ProgramAttemptResume>     attempt_resume        = std::nullopt,
+    std::optional<json>                     settled_branches      = std::nullopt) {
     auto journal = initial_record(control, checkpoint, timestamp);
     ProgramRunRecordData data;
     data.owner_scope         = control.owner_scope;
@@ -1540,6 +1581,7 @@ ProgramTransitionPublication initial_publication(
     data.exact_checkpoint    = std::move(checkpoint);
     data.exact_checkpoint_content_id = std::move(checkpoint_content_id);
     data.attempt_resume      = std::move(attempt_resume);
+    data.settled_branches    = std::move(settled_branches);
     data.pending_input       = std::move(pending_input);
     data.pending_effect      = std::move(pending_effect);
     if (fork_receipt) {
@@ -1738,8 +1780,8 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
                 data.pending_input  = interrupt->pending_input;
                 data.pending_effect = interrupt->pending_effect;
             }
-            // #384: the branches of the plan-level parallels that paused,
-            // which the attempt that resumes the run replays.
+            // #384, #386: what the paused plan recorded, which the attempt
+            // that resumes the run replays.
             if (result.status() == ProgramTerminalStatus::Interrupted && result.checkpoint())
                 data.settled_branches = control.settled_branches();
             data.terminal_result                  = result;
@@ -6149,10 +6191,15 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
         ? std::optional<ProgramAttemptResume>{}
         : std::optional<ProgramAttemptResume>{
               ProgramAttemptResume{target_checkpoint.checkpoint_id, resume_value.value}};
+    // #386: the fork replays what the source's paused plan finished, as a
+    // resume of the source would.
+    auto fork_records = continued_replay_records(*source_record, run_id, *control->materialized,
+                                                 *impl_->config.checkpoints);
     auto publication =
         initial_publication(*control, started, target_checkpoint, receipt, std::nullopt,
                             std::move(fork_pending_input), std::move(fork_pending_effect),
-                            std::nullopt, std::nullopt, {}, std::move(fork_resume));
+                            std::nullopt, std::nullopt, {}, std::move(fork_resume),
+                            std::move(fork_records));
     if (!source_contexts.empty()) {
         publication.context_publication = transfer_context_to_run(source_contexts.back(), run_id);
     }
@@ -6990,10 +7037,14 @@ ProgramHandle ProgramRuntime::migrate_graph(
     started.timestamp_ms = transition_time;
     started = ProgramEvent::create(std::move(started));
     control->adopt_published_event(started);
+    // #386: the same replay records as any continuation of the source.
+    auto migrated_records = continued_replay_records(*source_record, target_run_id,
+                                                     *control->materialized,
+                                                     *impl_->config.checkpoints);
     auto publication = initial_publication(
         *control, started, target_checkpoint, std::nullopt, std::nullopt,
         std::nullopt, std::nullopt, transition_time,
-        target_checkpoint_content_id);
+        target_checkpoint_content_id, {}, std::nullopt, std::move(migrated_records));
     if (!source_contexts.empty()) {
         publication.context_publication =
             transfer_context_to_run(source_contexts.back(), target_run_id);
@@ -8361,8 +8412,8 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     }
     data.pending_input                    = std::move(pending_input);
     data.pending_effect                   = std::move(pending_effect);
-    // The branches the paused parallels recorded, replayed by this attempt
-    // and by its recovery (#384).
+    // What the paused plan recorded, replayed by this attempt and by its
+    // recovery (#384, #386).
     data.settled_branches                 = previous->settled_branches();
     // The value this attempt resumes its checkpoint with, durable before the
     // attempt starts, so that recovery continues the same attempt (#377).
@@ -8718,9 +8769,10 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
     data.pending_effect                   = update.value;
     if (completed && (javascript_commands.empty() || resume_javascript_core))
         data.attempt_resume = ProgramAttemptResume{checkpoint.checkpoint_id, *resolution.result};
-    // The attempt that continues a paused plan-level parallel replays its
-    // branches (#384).
-    if (completed) data.settled_branches = previous->settled_branches();
+    // The attempt that continues a paused plan replays what it recorded
+    // (#384, #386); an effect left ambiguous keeps the records for the
+    // reconciliation that completes it.
+    if (completed || ambiguous) data.settled_branches = previous->settled_branches();
     data.terminal_result                  = terminal;
     data.fork_receipt                     = previous->fork_receipt();
     data.fork_source_run_id               = previous->fork_source_run_id();

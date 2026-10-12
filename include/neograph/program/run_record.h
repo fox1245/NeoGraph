@@ -99,11 +99,19 @@ struct ProgramRunRecordData {
     std::string logical_run_id;
     /// Present only while a resumed attempt runs from exact_checkpoint.
     std::optional<ProgramAttemptResume> attempt_resume;
-    /// The branches that the plan-level parallel operations of an Interrupted
-    /// run recorded when they paused, by branch operation id: the result of
-    /// each branch that finished and the question of each other paused branch
-    /// (#384). An Interrupted record and the Running record of the attempt that
-    /// resumes it carry them; the attempt replays them.
+    /// What a paused plan-level Program recorded for the attempt that resumes
+    /// it, by plan operation id (#384, #386): the result of each parallel
+    /// branch that finished ("settled"), the question and checkpoint of each
+    /// call that paused on a question other than the one the run pauses on
+    /// ("paused"), and, for each operation the run was executing, how far it
+    /// got ("entered": the next child of a sequence, the iteration of a loop,
+    /// the attempt of a retry, the item of a map, the winner of a race, with
+    /// the state that position had; the root's record also holds the plan's
+    /// input). The paused record (Interrupted or AmbiguousEffect) carries
+    /// them, and so does the Running record of every attempt that continues
+    /// it: resume, reconcile, fork and graph migration, and the recovery of
+    /// any of them. The attempt replays them: what finished is not run, or
+    /// charged, again.
     std::optional<json> settled_branches;
 };
 

@@ -635,6 +635,130 @@ std::shared_ptr<GraphEngine> join_member_subgraph() {
     return engine;
 }
 
+
+// #386: the Core node of the plan resume tests. A run that resumes runs the
+// armed resume hook (resumed_value_hook) and writes the decision it was
+// given; every other run gets an ordinal (1, 2, ... over the runs that did not
+// resume) and does what the test's script returns for it: {"write": value},
+// {"ask": true}, {"fail": message} or {"effect": true}. Each run is recorded
+// with its Core thread; two runs active on one thread at once set the overlap
+// flag. With a delay, each run first sleeps, so concurrent runs overlap.
+struct PlanStepRun {
+    std::size_t ordinal = 0;
+    std::string thread_id;
+    bool        resumed = false;
+};
+std::mutex                                         plan_step_mutex;
+std::vector<PlanStepRun>                           plan_step_runs;
+std::set<std::string>                              plan_step_active_threads;
+std::atomic<bool>                                  plan_step_overlap{false};
+std::chrono::milliseconds                          plan_step_delay{0};
+std::function<json(std::size_t, const NodeInput&)> plan_step_script;
+
+void reset_plan_steps(std::function<json(std::size_t, const NodeInput&)> script,
+                      std::chrono::milliseconds                          delay = {}) {
+    std::lock_guard lock(plan_step_mutex);
+    plan_step_runs.clear();
+    plan_step_active_threads.clear();
+    plan_step_overlap.store(false);
+    plan_step_delay  = delay;
+    plan_step_script = std::move(script);
+}
+
+std::vector<PlanStepRun> plan_steps() {
+    std::lock_guard lock(plan_step_mutex);
+    return plan_step_runs;
+}
+
+std::size_t plan_steps_counted(bool resumed) {
+    const auto runs = plan_steps();
+    return static_cast<std::size_t>(std::count_if(
+        runs.begin(), runs.end(), [resumed](const PlanStepRun& run) { return run.resumed == resumed; }));
+}
+
+class PlanStepNode final : public GraphNode {
+public:
+    explicit PlanStepNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        const bool                                         resumed = bool(input.ctx.resume_value);
+        std::size_t                                        ordinal = 0;
+        std::chrono::milliseconds                          delay{0};
+        std::function<json(std::size_t, const NodeInput&)> script;
+        {
+            std::lock_guard lock(plan_step_mutex);
+            if (!resumed) {
+                ordinal = 1 + static_cast<std::size_t>(std::count_if(
+                                  plan_step_runs.begin(), plan_step_runs.end(),
+                                  [](const PlanStepRun& run) { return !run.resumed; }));
+            }
+            plan_step_runs.push_back(PlanStepRun{ordinal, input.ctx.thread_id, resumed});
+            if (!plan_step_active_threads.insert(input.ctx.thread_id).second)
+                plan_step_overlap.store(true);
+            delay  = plan_step_delay;
+            script = plan_step_script;
+        }
+        struct Leave {
+            std::string thread;
+            ~Leave() {
+                std::lock_guard lock(plan_step_mutex);
+                plan_step_active_threads.erase(thread);
+            }
+        } leave{input.ctx.thread_id};
+        if (delay.count() > 0) {
+            auto timer = asio::steady_timer(co_await asio::this_coro::executor);
+            timer.expires_after(delay);
+            co_await timer.async_wait(asio::use_awaitable);
+        }
+        NodeOutput output;
+        if (resumed) {
+            std::function<void()> hook;
+            {
+                std::lock_guard lock(resumed_value_hook_mutex);
+                hook = std::exchange(resumed_value_hook, nullptr);
+            }
+            if (hook) hook();
+            const auto& answer = *input.ctx.resume_value;
+            output.writes.push_back(ChannelWrite{
+                "value", answer.is_object() && answer.contains("decision") ? answer.at("decision")
+                                                                           : answer});
+            co_return output;
+        }
+        const auto action = script ? script(ordinal, input) : json{{"write", "done"}};
+        if (action.contains("ask"))
+            throw NodeInterrupt("plan step approval", json{{"ordinal", ordinal}});
+        if (action.contains("fail"))
+            throw std::runtime_error(action.at("fail").get<std::string>());
+        if (action.contains("effect"))
+            throw NodeInterrupt(
+                "capability result required",
+                json{{"__neograph_program_pending_kind", "effect"},
+                     {"call_id", "call-plan-effect-" + std::to_string(ordinal)},
+                     {"result_schema", json{{"type", "object"}}},
+                     {"effect", json{{"effect_id", "effect-plan-" + std::to_string(ordinal)},
+                                     {"idempotency", "non_idempotent"},
+                                     {"tool", "search"},
+                                     {"arguments", json{{"query", "neo"}}}}},
+                     {"expires_at_unix_ms", 4102444800000ULL}});
+        if (action.contains("block")) {
+            // Holds until the run cancels it, as a losing race branch.
+            auto timer = asio::steady_timer(co_await asio::this_coro::executor);
+            timer.expires_after(std::chrono::seconds(5));
+            co_await timer.async_wait(
+                asio::bind_cancellation_slot(input.ctx.cancel_token->slot(), asio::use_awaitable));
+            output.writes.push_back(ChannelWrite{"value", "unblocked"});
+            co_return output;
+        }
+        output.writes.push_back(ChannelWrite{"value", action.at("write")});
+        co_return output;
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
 class BlockingNode final : public GraphNode {
 public:
     explicit BlockingNode(std::string               name,
@@ -934,6 +1058,12 @@ RegistrySnapshot runtime_registry(
         manifest(ExecutableKind::Node, "runtime-subgraph-member", 'e'),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<SubgraphNode>(name, join_member_subgraph());
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-plan-step", 'a'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<PlanStepNode>(name);
         },
         json{{"type", "object"}}, json::object());
     builder.add_node(
@@ -9668,6 +9798,457 @@ TEST(ProgramRuntimeTest, NestedPlanParallelsAskEveryPausedCallInTurnAcrossRestar
         EXPECT_EQ(parallel_branch_asked.load(), 3U) << "a paused call is never run again to ask";
         EXPECT_EQ(parallel_branch_answered.load(), 3U) << "an answered call is replayed";
     }
+}
+
+// ---------------------------------------------------------------------------
+// A plan resume replays what the paused run finished (#386)
+// ---------------------------------------------------------------------------
+
+namespace {
+json plan_call() { return json{{"op", "call_core"}}; }
+json plan_return(json value) { return json{{"op", "return"}, {"value", std::move(value)}}; }
+json plan_sequence(json children) {
+    return json{{"op", "sequence"}, {"children", std::move(children)}};
+}
+json plan_parallel(json branches) {
+    return json{{"op", "parallel"}, {"branches", std::move(branches)}};
+}
+
+RunBudget plan_budget() { return RunBudget{10000, 1000, 1000, 4, 32, 20, 0, 0, 0}; }
+
+ProgramVersion admit_plan(AdmittedRuntime& fixture, json root) {
+    return fixture.admit_document(orchestration_document(std::move(root), "runtime-plan-step"));
+}
+
+ProgramResult run_plan(AdmittedRuntime& fixture, const ProgramVersion& version,
+                       const std::string& run_id, json input = json{{"value", "start"}}) {
+    ProgramInvocation invocation{std::move(input), plan_budget(), "trace-plan-resume-" + run_id,
+                                 {}};
+    invocation.requested_run_id = run_id;
+    return fixture.runtime->run("tenant:runtime", version, std::move(invocation));
+}
+
+ProgramResult decide(AdmittedRuntime& fixture, const ProgramResult& interrupted,
+                     const std::string& decision) {
+    return fixture.runtime
+        ->resume("tenant:runtime", interrupted.run_id(),
+                 resume_for(interrupted, json{{"decision", decision}}, "trace-plan-decide"))
+        .wait();
+}
+
+std::string paused_operation(const ProgramResult& result) {
+    if (!result.interrupt()) return {};
+    if (result.interrupt()->pending_input) return result.interrupt()->pending_input->operation_id();
+    if (result.interrupt()->pending_effect) return result.interrupt()->pending_effect->operation_id();
+    return {};
+}
+
+std::string plan_root_thread(const ProgramVersion& version, const std::string& run_id) {
+    return program_root_core_thread_id(
+        run_id, version.core_materialization_receipt().plans.front().compiled_plan_identity);
+}
+
+json channel_value(const json& output) { return output["channels"]["value"]["value"]; }
+}  // namespace
+
+TEST(ProgramRuntimeTest, PlanResumeReplaysTheOperationsBeforeThePausedCallAndKeepsTheBranchArm) {
+    // #386: A finishes, a branch on A's output selects a sequence, and B in it
+    // asks. Resume answers B. A is replayed: it does not run, and is not
+    // charged, again, and the branch sees A's output, not the resume value.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                                ExecutionGuarantee::Unmanaged, true);
+        reset_plan_steps([](std::size_t ordinal, const NodeInput&) -> json {
+            if (ordinal == 1) return json{{"write", "A1"}};
+            if (ordinal == 2) return json{{"ask", true}};
+            return json{{"write", "A" + std::to_string(ordinal)}};
+        });
+        const auto version = admit_plan(
+            fixture,
+            plan_sequence(json::array(
+                {plan_call(),
+                 json{{"op", "branch"},
+                      {"condition", json{{"path", "/channels/value/value"}, {"equals", "A1"}}},
+                      {"then", plan_sequence(json::array(
+                                   {plan_call(), plan_return(json{{"arm", "then"}})}))},
+                      {"else", plan_return(json{{"arm", "else"}})}}})));
+
+        const auto paused = run_plan(fixture, version, "plan-prefix");
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+        EXPECT_EQ(paused_operation(paused), "root.1.0.0");
+        EXPECT_EQ(paused.usage().program_operations, 5U);
+
+        const auto done = decide(fixture, paused, "approved");
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+        EXPECT_EQ(done.output(), json({{"arm", "then"}}))
+            << "the branch sees A's output, not the resume value";
+        EXPECT_EQ(plan_steps_counted(false), 2U) << "A is replayed, not run again";
+        EXPECT_EQ(plan_steps_counted(true), 1U);
+        EXPECT_EQ(done.usage().core_steps, 1U) << "only B's resumed step ran";
+        EXPECT_EQ(done.usage().program_operations, 1U) << "only the return after B is new";
+    }
+}
+
+TEST(ProgramRuntimeTest, PlanResumeContinuesALoopAtItsPausedIteration) {
+    // #386: iteration 0 of the loop runs X and Y; iteration 1 runs X and Y
+    // asks. Resume answers Y with "stop" and the loop ends. Neither
+    // iteration 0 nor X of iteration 1 runs again.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                                ExecutionGuarantee::Unmanaged, true);
+        reset_plan_steps([](std::size_t ordinal, const NodeInput&) -> json {
+            if (ordinal == 4) return json{{"ask", true}};
+            return json{{"write", "step" + std::to_string(ordinal)}};
+        });
+        const auto version = admit_plan(
+            fixture, json{{"op", "loop"},
+                          {"condition", json{{"path", "/channels/value/value"},
+                                             {"not_equals", "stop"}}},
+                          {"max_iterations", 3},
+                          {"body", plan_sequence(json::array({plan_call(), plan_call()}))}});
+
+        const auto paused = run_plan(fixture, version, "plan-loop");
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+        EXPECT_EQ(paused_operation(paused), "root.0.1");
+
+        const auto done = decide(fixture, paused, "stop");
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+        EXPECT_EQ(channel_value(done.output()), json("stop"));
+        EXPECT_EQ(plan_steps_counted(false), 4U) << "no earlier call runs again";
+        EXPECT_EQ(plan_steps_counted(true), 1U);
+        EXPECT_EQ(done.usage().program_operations, 0U) << "the loop and its body continue";
+    }
+}
+
+TEST(ProgramRuntimeTest, PlanResumeContinuesARetryAtItsPausedAttempt) {
+    // #386: A finishes, then the retry's first attempt fails and its second
+    // asks. Resume answers the second attempt; A and the failed attempt do not
+    // run again.
+    JoinTestStores  stores(false);
+    AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                            ExecutionGuarantee::Unmanaged, true);
+    reset_plan_steps([](std::size_t ordinal, const NodeInput&) -> json {
+        if (ordinal == 2) return json{{"fail", "transient plan step failure"}};
+        if (ordinal == 3) return json{{"ask", true}};
+        return json{{"write", "A" + std::to_string(ordinal)}};
+    });
+    const auto version = admit_plan(
+        fixture, plan_sequence(json::array(
+                     {plan_call(), json{{"op", "retry"}, {"max_attempts", 3}, {"body", plan_call()}}})));
+
+    const auto paused = run_plan(fixture, version, "plan-retry");
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+    EXPECT_EQ(paused_operation(paused), "root.1.0");
+
+    const auto done = decide(fixture, paused, "retried");
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+    EXPECT_EQ(channel_value(done.output()), json("retried"));
+    EXPECT_EQ(plan_steps_counted(false), 3U) << "A and the failed attempt are not run again";
+    EXPECT_EQ(plan_steps_counted(true), 1U);
+}
+
+TEST(ProgramRuntimeTest, PlanResumeContinuesAMapAtItsPausedItem) {
+    // #386: the map's second item asks. Resume answers it, keeps the first
+    // item's result without running it again, then runs the third.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                                ExecutionGuarantee::Unmanaged, true);
+        reset_plan_steps([](std::size_t, const NodeInput& input) -> json {
+            const auto item = input.state.get("value");
+            if (item == json("i1")) return json{{"ask", true}};
+            return json{{"write", item.get<std::string>() + "-done"}};
+        });
+        const auto version = admit_plan(
+            fixture, plan_sequence(json::array(
+                         {plan_call(),
+                          json{{"op", "map"},
+                               {"items", json::array({json{{"value", "i0"}}, json{{"value", "i1"}},
+                                                      json{{"value", "i2"}}})},
+                               {"body", plan_call()}}})));
+
+        const auto paused = run_plan(fixture, version, "plan-map");
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+        EXPECT_EQ(paused_operation(paused), "root.1.0");
+
+        const auto done = decide(fixture, paused, "answered");
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+        ASSERT_TRUE(done.output().is_array());
+        ASSERT_EQ(done.output().size(), 3U);
+        EXPECT_EQ(channel_value(done.output()[0]), json("i0-done"));
+        EXPECT_EQ(channel_value(done.output()[1]), json("answered"));
+        EXPECT_EQ(channel_value(done.output()[2]), json("i2-done"));
+        EXPECT_EQ(plan_steps_counted(false), 4U) << "the first call and item 0 run once";
+        EXPECT_EQ(plan_steps_counted(true), 1U);
+    }
+}
+
+TEST(ProgramRuntimeTest, PlanResumeContinuesTheRaceBranchThatWon) {
+    // #386: a race's first branch asks while the second blocks; the question
+    // wins and the race pauses on it. Resume continues the winner alone: the
+    // cancelled loser does not run again.
+    JoinTestStores  stores(false);
+    AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                            ExecutionGuarantee::Unmanaged, true);
+    const auto version = admit_plan(
+        fixture, json{{"op", "race"}, {"branches", json::array({plan_call(), plan_call()})}});
+    const auto root_thread = plan_root_thread(version, "plan-race");
+    reset_plan_steps([root_thread](std::size_t, const NodeInput& input) -> json {
+        if (input.ctx.thread_id == root_thread) return json{{"ask", true}};
+        return json{{"block", true}};
+    });
+
+    const auto paused = run_plan(fixture, version, "plan-race");
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+    EXPECT_EQ(paused_operation(paused), "root.0");
+
+    const auto done = decide(fixture, paused, "won");
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+    EXPECT_EQ(channel_value(done.output()), json("won"));
+    EXPECT_EQ(plan_steps_counted(false), 2U) << "the cancelled loser is not run again";
+    EXPECT_EQ(plan_steps_counted(true), 1U);
+}
+
+TEST(ProgramRuntimeTest, EachConcurrentPlanBranchRunsOnItsOwnCoreThread) {
+    // #386: branch 0 of a parallel continues on the parallel's own Core
+    // thread. Branch 0 of a nested parallel therefore no longer shares the
+    // root thread with the root's branch 0 while both run; the root's branch
+    // 0 keeps the root thread, as before.
+    AdmittedRuntime fixture(3);
+    reset_plan_steps([](std::size_t, const NodeInput&) { return json{{"write", "ok"}}; },
+                     std::chrono::milliseconds(150));
+    const auto version = admit_plan(
+        fixture, plan_parallel(json::array(
+                     {plan_call(), plan_parallel(json::array({plan_call(), plan_call()}))})));
+    ProgramInvocation invocation{json{{"value", "start"}}, RunBudget{10000, 1000, 1000, 3, 32, 20, 0, 0, 0},
+                                 "trace-plan-threads", {}};
+    invocation.requested_run_id = "plan-threads";
+    const auto done = fixture.runtime->run("tenant:runtime", version, std::move(invocation));
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+
+    const auto runs = plan_steps();
+    ASSERT_EQ(runs.size(), 3U);
+    std::set<std::string> threads;
+    for (const auto& run : runs) threads.insert(run.thread_id);
+    EXPECT_EQ(threads.size(), 3U) << "three concurrent Core calls, three Core threads";
+    EXPECT_FALSE(plan_step_overlap.load()) << "no Core thread ran two calls at once";
+    EXPECT_EQ(threads.count(plan_root_thread(version, "plan-threads")), 1U)
+        << "the root's branch 0 keeps the root thread";
+}
+
+TEST(ProgramRuntimeTest, ForkOfAPausedPlanReplaysWhatTheSourceFinished) {
+    // #386: A finishes, then both branches of a parallel ask. The fork answers
+    // the first: A is replayed, not run again, and the other branch asks its
+    // own question again from a checkpoint the fork cloned into its own run.
+    JoinTestStores  stores(false);
+    AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                            ExecutionGuarantee::Unmanaged, true);
+    reset_plan_steps([](std::size_t ordinal, const NodeInput&) -> json {
+        if (ordinal == 1) return json{{"write", "A"}};
+        return json{{"ask", true}};
+    });
+    const auto version = admit_plan(
+        fixture, plan_sequence(json::array(
+                     {plan_call(), plan_parallel(json::array({plan_call(), plan_call()}))})));
+    const auto source = run_plan(fixture, version, "plan-fork-source");
+    ASSERT_EQ(source.status(), ProgramTerminalStatus::Interrupted) << failure_detail(source);
+    EXPECT_EQ(paused_operation(source), "root.1.0");
+    const auto source_record = fixture.journal->load("tenant:runtime", source.run_id());
+    ASSERT_TRUE(source_record && source_record->settled_branches());
+    const auto source_branch = (*source_record->settled_branches())["root.1.1"];
+    ASSERT_EQ(source_branch["kind"], json("paused"));
+
+    const auto forked = fixture.runtime
+                            ->fork("tenant:runtime",
+                                   ExactProgramCheckpointReference{
+                                       source.run_id(), source.checkpoint()->checkpoint_id},
+                                   version,
+                                   ProgramInvocation{json{{"value", "start"}},
+                                                     source.remaining_budget(), "trace-plan-fork",
+                                                     {}, "plan-fork-target"},
+                                   resume_for(source, json{{"decision", "first"}},
+                                              "trace-plan-fork-resume"))
+                            .wait();
+    ASSERT_EQ(forked.status(), ProgramTerminalStatus::Interrupted) << failure_detail(forked);
+    EXPECT_EQ(paused_operation(forked), "root.1.1") << "the other branch asks again";
+    ASSERT_TRUE(forked.checkpoint().has_value());
+    EXPECT_NE(forked.checkpoint()->core_thread_id,
+              source_branch["checkpoint"]["core_thread_id"].get<std::string>())
+        << "the fork continues from its own copy of the branch's checkpoint";
+    EXPECT_EQ(plan_steps_counted(false), 3U) << "A and the branches asked once each";
+
+    const auto done = decide(fixture, forked, "second");
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+    ASSERT_TRUE(done.output().is_array());
+    EXPECT_EQ(channel_value(done.output()[0]), json("first"));
+    EXPECT_EQ(channel_value(done.output()[1]), json("second"));
+    EXPECT_EQ(plan_steps_counted(false), 3U) << "A never runs again";
+    EXPECT_EQ(plan_steps_counted(true), 2U);
+}
+
+TEST(ProgramRuntimeTest, ForkOfAPlanPausedInALaterBranchContinuesThatBranch) {
+    // #386: A finishes and B, the second branch, asks. A fork copies B's
+    // checkpoint into its own run's root thread; the answered call continues
+    // on the thread of its checkpoint, whatever thread the plan gives B, and A
+    // replays from its record.
+    JoinTestStores  stores(false);
+    AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                            ExecutionGuarantee::Unmanaged, true);
+    const auto version =
+        admit_plan(fixture, plan_parallel(json::array({plan_call(), plan_call()})));
+    const auto source_root = plan_root_thread(version, "plan-fork-later");
+    reset_plan_steps([source_root](std::size_t, const NodeInput& input) -> json {
+        if (input.ctx.thread_id == source_root) return json{{"write", "A"}};
+        return json{{"ask", true}};
+    });
+    const auto source = run_plan(fixture, version, "plan-fork-later");
+    ASSERT_EQ(source.status(), ProgramTerminalStatus::Interrupted) << failure_detail(source);
+    EXPECT_EQ(paused_operation(source), "root.1");
+    EXPECT_NE(source.checkpoint()->core_thread_id, source_root) << "B runs on its own thread";
+
+    const auto forked = fixture.runtime
+                            ->fork("tenant:runtime",
+                                   ExactProgramCheckpointReference{
+                                       source.run_id(), source.checkpoint()->checkpoint_id},
+                                   version,
+                                   ProgramInvocation{json{{"value", "start"}},
+                                                     source.remaining_budget(),
+                                                     "trace-plan-fork-later", {},
+                                                     "plan-fork-later-target"},
+                                   resume_for(source, json{{"decision", "B"}},
+                                              "trace-plan-fork-later-resume"))
+                            .wait();
+    ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed) << failure_detail(forked);
+    ASSERT_TRUE(forked.output().is_array());
+    EXPECT_EQ(channel_value(forked.output()[0]), json("A"));
+    EXPECT_EQ(channel_value(forked.output()[1]), json("B"));
+    EXPECT_EQ(plan_steps_counted(false), 2U) << "A is replayed in the fork, not run again";
+    EXPECT_EQ(plan_steps_counted(true), 1U);
+}
+
+TEST(ProgramRuntimeTest, ReconcileOfAPausedPlanReplaysWhatTheRunFinished) {
+    // #386: A finishes, then E leaves an effect to reconcile. The completed
+    // reconciliation continues E with its result; A does not run again.
+    JoinTestStores  stores(false);
+    AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                            ExecutionGuarantee::Unmanaged, true);
+    reset_plan_steps([](std::size_t ordinal, const NodeInput&) -> json {
+        if (ordinal == 1) return json{{"write", "A"}};
+        return json{{"effect", true}};
+    });
+    const auto version =
+        admit_plan(fixture, plan_sequence(json::array({plan_call(), plan_call()})));
+    const auto paused = run_plan(fixture, version, "plan-reconcile");
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+    ASSERT_TRUE(paused.interrupt() && paused.interrupt()->pending_effect);
+    const auto pending = *paused.interrupt()->pending_effect;
+    ASSERT_EQ(fixture.runtime
+                  ->reconcile("tenant:runtime", paused.run_id(),
+                              ProgramEffectResolution{pending.call_id(),
+                                                      ProgramEffectReconciliation::Unknown,
+                                                      std::nullopt, "trace-plan-unknown", {}})
+                  .wait()
+                  .status(),
+              ProgramTerminalStatus::AmbiguousEffect);
+
+    const auto done =
+        fixture.runtime
+            ->reconcile("tenant:runtime", paused.run_id(),
+                        ProgramEffectResolution{pending.call_id(),
+                                                ProgramEffectReconciliation::Completed,
+                                                json{{"decision", "reconciled"}},
+                                                "trace-plan-reconciled", {}})
+            .wait();
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+    EXPECT_EQ(channel_value(done.output()), json("reconciled"));
+    EXPECT_EQ(plan_steps_counted(false), 2U) << "A is replayed, not run again";
+    EXPECT_EQ(plan_steps_counted(true), 1U);
+}
+
+TEST(ProgramRuntimeTest, RecoveryOfAResumedPlanAttemptReplaysWhatTheRunFinished) {
+    // #386: the attempt that resumes B stops inside B; a fresh runtime over
+    // the same stores recovers it, and replays A from the record too.
+    AdmittedRuntime fixture(1);
+    reset_plan_steps([](std::size_t ordinal, const NodeInput&) -> json {
+        if (ordinal == 1) return json{{"write", "A"}};
+        return json{{"ask", true}};
+    });
+    const auto version =
+        admit_plan(fixture, plan_sequence(json::array({plan_call(), plan_call()})));
+    const auto paused = run_plan(fixture, version, "plan-recovery");
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+
+    HeldResumedAttempt held;
+    auto original = fixture.runtime->resume(
+        "tenant:runtime", paused.run_id(),
+        resume_for(paused, json{{"decision", "recovered"}}, "trace-plan-recovery-resume"));
+    ASSERT_TRUE(held.entered());
+
+    auto       fresh     = fixture.make_runtime();
+    const auto recovered = fresh->reconnect("tenant:runtime", paused.run_id()).wait();
+    ASSERT_EQ(recovered.status(), ProgramTerminalStatus::Completed) << failure_detail(recovered);
+    EXPECT_EQ(channel_value(recovered.output()), json("recovered"));
+    EXPECT_EQ(plan_steps_counted(false), 2U) << "A is replayed by the recovered attempt too";
+    held.release();
+    (void)original.wait();
+}
+
+TEST(ProgramRuntimeTest, AReplacementOrAGraphMigrationNeverContinuesAPausedPlan) {
+    // #386: resume, reconcile, recovery and fork carry the plan's replay
+    // records. Replacement and graph migration cannot continue a paused plan
+    // at all, so they have none to carry: replacement needs a quiescent
+    // JavaScript source, and graph migration a single root CallCore.
+    JoinTestStores  stores(false);
+    AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                            ExecutionGuarantee::Unmanaged, true);
+    reset_plan_steps([](std::size_t ordinal, const NodeInput&) -> json {
+        if (ordinal == 1) return json{{"write", "A"}};
+        return json{{"ask", true}};
+    });
+    const auto version =
+        admit_plan(fixture, plan_sequence(json::array({plan_call(), plan_call()})));
+    const auto paused = run_plan(fixture, version, "plan-no-handoff");
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+    const auto record = fixture.journal->load("tenant:runtime", paused.run_id());
+    ASSERT_TRUE(record && record->settled_branches());
+
+    const auto target =
+        fixture.admit_javascript(javascript_runtime_source("runtime-completed", "return 1;"));
+    try {
+        (void)fixture.runtime->replace(
+            "tenant:runtime",
+            ExactProgramHandoffReference{paused.run_id(), record->journal_head(), "coordinate",
+                                         "entry"},
+            target,
+            ProgramInvocation{json{{"handoff", json::object()}, {"previous_run_id", paused.run_id()}},
+                              paused.remaining_budget(), "trace-plan-replace", {}});
+        FAIL() << "a paused plan was replaced";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_REPLACEMENT_STATE");
+    }
+
+    EXPECT_EQ(fixture.journal->load("tenant:runtime", paused.run_id())->id(), record->id())
+        << "the paused run is untouched";
+
+    // Graph migration takes a live run, and refuses any plan but one root
+    // CallCore before it holds the run anywhere.
+    reset_plan_steps([](std::size_t, const NodeInput&) { return json{{"block", true}}; });
+    ProgramInvocation invocation{json{{"value", "start"}}, plan_budget(), "trace-plan-live", {}};
+    invocation.requested_run_id = "plan-live";
+    auto live = fixture.runtime->start("tenant:runtime", version, std::move(invocation));
+    try {
+        (void)fixture.runtime->migrate_graph(live, ProgramGraphMigrationTarget{version.id()});
+        FAIL() << "a plan was migrated";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_GRAPH_MIGRATION_INCOMPATIBLE");
+    }
+    (void)live.cancel();
+    EXPECT_EQ(live.wait().status(), ProgramTerminalStatus::Cancelled);
 }
 
 TEST(ProgramRuntimeTest, NestedParallelCannotExceedRunConcurrencyGrant) {

@@ -569,8 +569,13 @@ struct PlanExecution {
     // from. A paused join carries the one of the member it resumes (#380).
     std::optional<CoreCheckpointIdentity> interrupt_checkpoint;
     // A paused join: the recorded result of each member that settled, by
-    // member operation id, including those of paused nested joins (#380).
+    // member operation id, including those of paused nested joins (#380). A
+    // paused plan: the records its operations left for the attempt that
+    // resumes it, by operation id (#384, #386).
     json settled_members = json::object();
+    // A paused plan operation: how far it got, for its "entered" record
+    // (#386). Set by the operation, consumed by the plan executor.
+    std::optional<json> reentry;
 };
 
 // A join member that settled before its join paused, replayed from its
@@ -662,7 +667,8 @@ void append_trace(PlanExecution& target, PlanExecution&& source) {
         target.interrupt            = std::move(source.interrupt);
         target.failure              = std::move(source.failure);
         target.interrupt_checkpoint = std::move(source.interrupt_checkpoint);
-        target.settled_members      = std::move(source.settled_members);
+        for (const auto& [key, record] : source.settled_members.items())
+            target.settled_members[key] = record;
     }
 }
 
@@ -1431,15 +1437,29 @@ ProgramInterrupt decode_core_interrupt(const RunControl&       control,
                             ProgramPendingInput(std::move(pending)), std::nullopt};
 }
 
-// A plan-level parallel that pauses records its branches (#384), by branch
-// operation id: the result of each branch that finished, and the call and
-// checkpoint of each other paused branch. The attempt that resumes the run
-// replays them. The result uses the codec of a JavaScript join's settled
-// members (#380).
-bool operation_within(std::string_view operation_id, std::string_view ancestor) noexcept {
-    return operation_id == ancestor ||
-           (operation_id.size() > ancestor.size() && operation_id.starts_with(ancestor) &&
-            operation_id[ancestor.size()] == '.');
+// A paused plan records what the attempt that resumes it replays, by
+// operation id (#384, #386):
+//   {"kind": "settled", ...}  a parallel branch that finished: its result,
+//                             with the codec of a JavaScript join's settled
+//                             members (#380);
+//   {"kind": "paused", ...}   a call that paused on a question other than
+//                             the one the run pauses on: its question and
+//                             checkpoint;
+//   {"kind": "entered", ...}  an operation the run was executing: it is
+//                             re-entered without being charged again, and
+//                             continues where it was (the next child of a
+//                             sequence, the iteration of a loop, the attempt
+//                             of a retry, the item of a map, the winner of a
+//                             race), with the state that position had. The
+//                             root's record also holds the plan's input.
+// The cursor of an entered record, bounds-checked.
+std::uint64_t reentry_position(const json& record, const char* field, std::uint64_t bound) {
+    if (!record.contains(field) || !record.at(field).is_number_unsigned() ||
+        record.at(field).get<std::uint64_t>() >= bound)
+        throw_runtime_diagnostic("P_PLAN_REPLAY_RECORD",
+                                 "Recorded plan operation position is malformed",
+                                 json{{"field", field}});
+    return record.at(field).get<std::uint64_t>();
 }
 
 json settled_branch_record(const PlanExecution& branch) {
@@ -1470,18 +1490,19 @@ std::optional<json> paused_branch_record(const PlanExecution& branch) {
                                      checkpoint.checkpoint_schema_version}}}};
 }
 
-// A recorded branch as the parallel sees it: one that finished returns its
-// result again; a paused one asks its question again, at its checkpoint.
+// A settled or paused record as its operation sees it again: one that
+// finished returns its result again; a paused call asks its question again,
+// at its checkpoint.
 PlanExecution replay_branch_record(const json& record, const RunControl& control) {
     const auto malformed = [] {
-        throw_runtime_diagnostic("P_PLAN_PARALLEL_RECORD",
-                                 "Recorded parallel branch is malformed");
+        throw_runtime_diagnostic("P_PLAN_REPLAY_RECORD",
+                                 "Recorded plan operation is malformed");
     };
     if (!record.is_object() || !record.contains("kind") || !record.at("kind").is_string())
         malformed();
     const auto kind = record.at("kind").get<std::string>();
     if (kind == "settled") {
-        detail::reject_unknown_fields(record, "Recorded parallel branch",
+        detail::reject_unknown_fields(record, "Recorded plan operation",
                                       {"kind", "returned", "result"});
         if (!record.contains("returned") || !record.at("returned").is_boolean() ||
             !record.contains("result"))
@@ -1496,7 +1517,7 @@ PlanExecution replay_branch_record(const json& record, const RunControl& control
         return settled;
     }
     if (kind != "paused") malformed();
-    detail::reject_unknown_fields(record, "Recorded parallel branch",
+    detail::reject_unknown_fields(record, "Recorded plan operation",
                                   {"kind", "operation_id", "core_node", "value", "checkpoint"});
     for (const auto* field : {"operation_id", "core_node"})
         if (!record.contains(field) || !record.at(field).is_string()) malformed();
@@ -1504,7 +1525,7 @@ PlanExecution replay_branch_record(const json& record, const RunControl& control
         !record.at("checkpoint").is_object())
         malformed();
     const auto& stored = record.at("checkpoint");
-    detail::reject_unknown_fields(stored, "Recorded parallel branch checkpoint",
+    detail::reject_unknown_fields(stored, "Recorded plan call checkpoint",
                                   {"core_name", "core_generation_id", "core_thread_id",
                                    "checkpoint_id", "checkpoint_schema_version"});
     for (const auto* field : {"core_name", "core_generation_id", "core_thread_id", "checkpoint_id"})
@@ -1520,7 +1541,7 @@ PlanExecution replay_branch_record(const json& record, const RunControl& control
         static_cast<std::uint32_t>(stored.at("checkpoint_schema_version").get<std::uint64_t>())};
     if (!checkpoint_matches_generation(control, checkpoint))
         throw_runtime_diagnostic("P_CHECKPOINT_INCOMPATIBLE",
-                                 "Recorded parallel branch checkpoint is incompatible");
+                                 "Recorded plan call checkpoint is incompatible");
     graph::RunResult question;
     question.interrupt_node  = record.at("core_node").get<std::string>();
     question.interrupt_value = detail::owned_json_copy(record.at("value"));
@@ -1686,12 +1707,15 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         std::mutex                            plan_mutex;
         std::optional<std::string>            resume_id = checkpoint_id;
         std::optional<CoreCheckpointIdentity> last_root_checkpoint;
-        // #384: a resumed plan continues the Core call its pending question
-        // names, and its paused parallels replay the branches they recorded.
-        // Records are used once (plan_mutex).
+        // #384, #386: a resumed plan continues the Core call its pending
+        // question names, with the value it was resumed with, and replays
+        // everything else the paused run recorded (settled_branches). Every
+        // other operation runs on the state it had the first time. Records are
+        // used once (plan_mutex).
         std::optional<std::string> resume_operation;
-        json                       resumed_branches = json::object();
-        std::set<std::string>      replayed_branch_records;
+        std::optional<json>        resume_answer;
+        json                       replay_records = json::object();
+        std::set<std::string>      replayed_records;
         if (checkpoint_id && !control_source && !control->recorded_replay) {
             const auto durable = control->transitions->load(control->owner_scope, control->run_id);
             if (durable && durable->exact_checkpoint() &&
@@ -1702,9 +1726,17 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     resume_operation = effect->operation_id();
                 if (resume_operation && !typed_plan.find(*resume_operation))
                     resume_operation.reset();
-                if (const auto settled = durable->settled_branches()) resumed_branches = *settled;
+                if (const auto settled = durable->settled_branches()) replay_records = *settled;
             }
         }
+        auto take_replay_record = [&](const std::string& operation_id) -> std::optional<json> {
+            std::lock_guard lock(plan_mutex);
+            if (replayed_records.count(operation_id)) return std::nullopt;
+            const auto record = replay_records.find(operation_id);
+            if (record == replay_records.end()) return std::nullopt;
+            replayed_records.insert(operation_id);
+            return detail::owned_json_copy(record.value());
+        };
         std::map<std::string, std::uint64_t>  spawn_occurrences;
         auto root_checkpoint = [&]() -> std::optional<CoreCheckpointIdentity> {
             std::lock_guard lock(plan_mutex);
@@ -2809,10 +2841,16 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         std::function<asio::awaitable<PlanExecution>(std::string, json, std::string, std::uint32_t,
                                                      std::shared_ptr<graph::CancelToken>)>
             execute;
-        execute = [&](std::string operation_id, json state, std::string thread_id,
-                      std::uint32_t                       child_depth,
-                      std::shared_ptr<graph::CancelToken> operation_token)
-            -> asio::awaitable<PlanExecution> {
+        // One operation. `entered` is its record when the paused run this
+        // attempt resumes was executing it (#386).
+        std::function<asio::awaitable<PlanExecution>(std::string, json, std::string, std::uint32_t,
+                                                     std::shared_ptr<graph::CancelToken>,
+                                                     const json*)>
+            run_operation;
+        run_operation = [&](std::string operation_id, json state, std::string thread_id,
+                            std::uint32_t                       child_depth,
+                            std::shared_ptr<graph::CancelToken> operation_token,
+                            const json* entered) -> asio::awaitable<PlanExecution> {
             const auto* found = typed_plan.find(operation_id);
             if (!found) {
                 throw_runtime_diagnostic("P_RUNTIME_PLAN",
@@ -2842,7 +2880,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         operation_id);
                 found_coordinate->second.pop_front();
             }
-            if (op != ProgramOperationKind::CallCore) {
+            // A re-entered operation was charged, and reported, when it started.
+            if (op != ProgramOperationKind::CallCore && !entered) {
                 if (!control->recorded_replay)
                     if (auto failure = charge_operation(operation_id)) co_return std::move(*failure);
                 control->emit(operation_id, ProgramEventKind::OperationStarted, coordinate);
@@ -2854,6 +2893,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     if (resume_id && (!resume_operation || *resume_operation == operation_id)) {
                         resume = std::move(resume_id);
                         resume_id.reset();
+                        // #386: the answered call continues its checkpoint, on
+                        // that checkpoint's Core thread, with the value the run
+                        // was resumed with; the plan keeps its own state.
+                        if (resume_checkpoint) thread_id = resume_checkpoint->core_thread_id;
+                        if (resume_answer) state = detail::owned_json_copy(*resume_answer);
                     } else if (!control->recorded_replay) {
                         if (operation_count >= control->granted_budget.max_program_operations)
                             co_return plan_failure(ProgramTerminalStatus::BudgetExhausted,
@@ -2952,14 +2996,31 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 co_return result;
             }
             if (op == ProgramOperationKind::Sequence) {
+                const auto&   children = dispatch.children;
                 PlanExecution result;
-                result.output = std::move(state);
-                for (const auto& child : dispatch.children) {
-                    auto child_result = co_await execute(child, result.output, thread_id,
+                result.output     = std::move(state);
+                std::size_t first = 0;
+                // #386: a resumed sequence continues at the child it paused in,
+                // with that child's input.
+                if (entered && entered->contains("next")) {
+                    first = static_cast<std::size_t>(
+                        reentry_position(*entered, "next", children.size()));
+                    if (entered->contains("state"))
+                        result.output = detail::owned_json_copy(entered->at("state"));
+                }
+                for (std::size_t index = first; index < children.size(); ++index) {
+                    auto child_result = co_await execute(children[index], result.output, thread_id,
                                                          child_depth, operation_token);
+                    std::optional<json> reentry;
+                    if (child_result.status == ProgramTerminalStatus::Interrupted) {
+                        reentry = json{{"next", index}};
+                        if (index > 0) (*reentry)["state"] = result.output;
+                    }
                     append_trace(result, std::move(child_result));
-                    if (result.status != ProgramTerminalStatus::Completed || result.returned)
+                    if (result.status != ProgramTerminalStatus::Completed || result.returned) {
+                        result.reentry = std::move(reentry);
                         co_return result;
+                    }
                 }
                 co_return result;
             }
@@ -2979,16 +3040,33 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
 
             if (op == ProgramOperationKind::Loop) {
                 PlanExecution result;
-                result.output      = std::move(state);
-                const auto maximum = *operation.max_iterations();
-                for (std::uint64_t iteration = 0;
-                     iteration < maximum && condition_matches(result.output, operation.condition());
-                     ++iteration) {
+                result.output       = std::move(state);
+                const auto maximum  = *operation.max_iterations();
+                // #386: a resumed loop continues the iteration it paused in, with
+                // that iteration's input; its condition held then.
+                const bool resumed  = entered && entered->contains("iteration");
+                std::uint64_t first = 0;
+                if (resumed) {
+                    first = reentry_position(*entered, "iteration", maximum);
+                    if (entered->contains("state"))
+                        result.output = detail::owned_json_copy(entered->at("state"));
+                }
+                for (std::uint64_t iteration = first; iteration < maximum; ++iteration) {
+                    if (!(resumed && iteration == first) &&
+                        !condition_matches(result.output, operation.condition()))
+                        break;
                     auto body = co_await execute(*dispatch.body, result.output, thread_id,
                                                  child_depth, operation_token);
+                    std::optional<json> reentry;
+                    if (body.status == ProgramTerminalStatus::Interrupted) {
+                        reentry = json{{"iteration", iteration}};
+                        if (iteration > 0) (*reentry)["state"] = result.output;
+                    }
                     append_trace(result, std::move(body));
-                    if (result.status != ProgramTerminalStatus::Completed || result.returned)
+                    if (result.status != ProgramTerminalStatus::Completed || result.returned) {
+                        result.reentry = std::move(reentry);
                         co_return result;
+                    }
                 }
                 if (condition_matches(result.output, operation.condition())) {
                     auto bounded =
@@ -3004,12 +3082,19 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             if (op == ProgramOperationKind::Retry) {
                 const auto                   maximum = *operation.max_attempts();
                 std::optional<PlanExecution> last_result;
-                for (std::uint64_t attempt = 0; attempt < maximum; ++attempt) {
+                // #386: a resumed retry continues the attempt it paused in; the
+                // attempts before it failed and are not run again.
+                const std::uint64_t first = entered && entered->contains("attempt")
+                                                ? reentry_position(*entered, "attempt", maximum)
+                                                : 0;
+                for (std::uint64_t attempt = first; attempt < maximum; ++attempt) {
                     try {
                         auto attempt_result = co_await execute(*dispatch.body, state, thread_id,
                                                                child_depth, operation_token);
                         if (attempt_result.status == ProgramTerminalStatus::Completed)
                             co_return attempt_result;
+                        if (attempt_result.status == ProgramTerminalStatus::Interrupted && attempt > 0)
+                            attempt_result.reentry = json{{"attempt", attempt}};
                         if (attempt_result.status == ProgramTerminalStatus::Interrupted ||
                             attempt_result.status == ProgramTerminalStatus::Cancelled ||
                             attempt_result.status == ProgramTerminalStatus::TimedOut ||
@@ -3073,38 +3158,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         operation_id);
 
                 // #384: a branch's interrupt pauses the parallel. The attempt
-                // that resumes the run replays the branches the pause recorded:
-                // one that finished, without running or charging it again, and
-                // a paused one other than the one the resume answers, which
-                // asks its own question again. The branch that holds the
-                // answered call runs.
-                std::vector<std::optional<PlanExecution>> replayed(branches.size());
-                {
-                    std::lock_guard lock(plan_mutex);
-                    for (std::size_t index = 0; index < branches.size(); ++index) {
-                        const auto& branch_id = branches[index];
-                        if (resume_id && resume_operation &&
-                            operation_within(*resume_operation, branch_id))
-                            continue;
-                        if (replayed_branch_records.count(branch_id)) continue;
-                        const auto record = resumed_branches.find(branch_id);
-                        if (record == resumed_branches.end()) continue;
-                        auto replay = replay_branch_record(record.value(), *control);
-                        replayed_branch_records.insert(branch_id);
-                        // A paused branch keeps the records of the parallels inside it.
-                        if (replay.status == ProgramTerminalStatus::Interrupted) {
-                            for (const auto& [key, nested] : resumed_branches.items()) {
-                                if (key == branch_id || !operation_within(key, branch_id) ||
-                                    replayed_branch_records.count(key))
-                                    continue;
-                                replay.settled_members[key] = nested;
-                                replayed_branch_records.insert(key);
-                            }
-                        }
-                        replayed[index] = std::move(replay);
-                    }
-                }
-
+                // that resumes the run replays what the pause recorded (see
+                // execute): a branch that finished returns its result without
+                // running or being charged again, a call that paused on another
+                // question asks it again, and the branch that holds the
+                // answered call continues.
                 struct ParallelState {
                     std::mutex                                       mutex;
                     std::vector<std::optional<PlanExecution>>        results;
@@ -3130,16 +3188,16 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     parallel->branch_tokens.push_back(operation_token->fork());
                 }
                 for (std::size_t index = 0; index < branches.size(); ++index) {
-                    const auto& branch_id     = branches[index];
-                    const auto  branch_thread = index == 0
-                                                    ? control->core_thread_id
-                                                    : operation_thread_id(*control, branch_id);
-                    auto        branch_token  = parallel->branch_tokens[index];
+                    const auto& branch_id = branches[index];
+                    // #386: branch 0 continues on the parallel's own Core
+                    // thread, every other branch on its own, so no two
+                    // concurrent branches, at any depth, share one.
+                    const auto branch_thread =
+                        index == 0 ? thread_id : operation_thread_id(*control, branch_id);
+                    auto branch_token = parallel->branch_tokens[index];
                     asio::co_spawn(
                         executor,
-                        replayed[index]
-                            ? replay_settled_member(std::move(*replayed[index]))
-                            : execute(branch_id, state, branch_thread, child_depth, branch_token),
+                        execute(branch_id, state, branch_thread, child_depth, branch_token),
                         asio::bind_executor(
                             completion_executor,
                             [parallel, index](std::exception_ptr error, PlanExecution result) {
@@ -3219,9 +3277,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     for (const auto& [key, record] : branch.settled_members.items())
                         result.settled_members[key] = record;
                     if (index == *paused) continue;
-                    // Without a record the branch runs again on resume.
-                    if (auto record = paused_branch_record(branch))
-                        result.settled_members[branches[index]] = std::move(*record);
+                    // The call it paused on asks again on resume (#386: by the
+                    // call's operation id, so that the branch around it is
+                    // re-entered). Without a record the call runs again.
+                    if (auto record = paused_branch_record(branch)) {
+                        const auto call = record->at("operation_id").get<std::string>();
+                        result.settled_members[call] = std::move(*record);
+                    }
                 }
                 if (const auto decided = pause ? paused : failed) {
                     auto& branch                = *parallel_results[*decided];
@@ -3242,6 +3304,19 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
 
                 const auto& first  = branches[0];
                 const auto& second = branches[1];
+                // #386: a race that paused on its winner's question continues
+                // that branch alone; the loser was cancelled.
+                if (entered && entered->contains("winner")) {
+                    const auto winner = static_cast<std::size_t>(
+                        reentry_position(*entered, "winner", branches.size()));
+                    auto result = co_await execute(
+                        branches[winner], std::move(state),
+                        winner == 0 ? thread_id : operation_thread_id(*control, branches[winner]),
+                        child_depth, operation_token);
+                    if (result.status == ProgramTerminalStatus::Interrupted)
+                        result.reentry = json{{"winner", winner}};
+                    co_return result;
+                }
                 // A race winner is the first completion; if both branches become
                 // ready in one scheduler turn, declaration order is the tie break.
                 // Wait for the losing coroutine to observe cancellation before this
@@ -3270,9 +3345,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 race->tokens.push_back(operation_token->fork());
                 const std::array<std::string, 2> ids{first, second};
                 for (std::size_t index = 0; index < ids.size(); ++index) {
-                    const auto branch_thread = index == 0
-                                                   ? control->core_thread_id
-                                                   : operation_thread_id(*control, ids[index]);
+                    // #386: branch 0 continues on the race's own Core thread.
+                    const auto branch_thread =
+                        index == 0 ? thread_id : operation_thread_id(*control, ids[index]);
                     asio::co_spawn(
                         executor,
                         execute(ids[index], state, branch_thread, child_depth, race->tokens[index]),
@@ -3350,6 +3425,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 if (errors[index]) std::rethrow_exception(errors[index]);
                 if (!results[index])
                     throw_runtime_diagnostic("P_RUNTIME_RACE", "Race winner has no result");
+                if (results[index]->status == ProgramTerminalStatus::Interrupted)
+                    results[index]->reentry = json{{"winner", index}};
                 co_return std::move(*results[index]);
             }
             if (op == ProgramOperationKind::Quorum) {
@@ -3379,10 +3456,22 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             }
 
             if (op == ProgramOperationKind::Map) {
+                const auto    items = operation.items();
                 PlanExecution result;
-                result.output = json::array();
-                for (const auto& item : operation.items()) {
-                    auto mapped = co_await execute(*dispatch.body, item,
+                result.output     = json::array();
+                std::size_t first = 0;
+                // #386: a resumed map continues the item it paused in, after the
+                // results of the items before it.
+                if (entered && entered->contains("item")) {
+                    first = static_cast<std::size_t>(
+                        reentry_position(*entered, "item", items.size()));
+                    if (entered->contains("outputs"))
+                        result.output = detail::owned_json_copy(entered->at("outputs"));
+                    result.returned = entered->value("returned", false);
+                }
+                for (std::size_t index = first; index < items.size(); ++index) {
+                    auto mapped = co_await execute(*dispatch.body,
+                                                   detail::owned_json_copy(items[index]),
                                                    operation_thread_id(*control, operation_id),
                                                    child_depth, operation_token);
                     result.execution_trace.insert(
@@ -3391,9 +3480,15 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         std::make_move_iterator(mapped.execution_trace.end()));
                     result.returned = result.returned || mapped.returned;
                     if (mapped.status != ProgramTerminalStatus::Completed) {
-                        result.status    = mapped.status;
-                        result.interrupt = std::move(mapped.interrupt);
-                        result.failure   = std::move(mapped.failure);
+                        result.status               = mapped.status;
+                        result.interrupt            = std::move(mapped.interrupt);
+                        result.failure              = std::move(mapped.failure);
+                        result.interrupt_checkpoint = std::move(mapped.interrupt_checkpoint);
+                        result.settled_members      = std::move(mapped.settled_members);
+                        if (result.status == ProgramTerminalStatus::Interrupted)
+                            result.reentry = json{{"item", index},
+                                                  {"outputs", result.output},
+                                                  {"returned", result.returned}};
                         co_return result;
                     }
                     result.output.push_back(std::move(mapped.output));
@@ -3946,6 +4041,39 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
 
             throw_runtime_diagnostic("P_RUNTIME_PLAN", "Admitted Program operation is unsupported",
                                      json{{"operation", std::string(to_string(op))}});
+        };
+        // #386: an operation the paused run finished, or a call it left asking
+        // another question, replays its record; one it was executing is
+        // re-entered from its record; every other one runs. An operation that
+        // pauses records how far it got, and the root the plan's input.
+        execute = [&](std::string operation_id, json state, std::string thread_id,
+                      std::uint32_t                       child_depth,
+                      std::shared_ptr<graph::CancelToken> operation_token)
+            -> asio::awaitable<PlanExecution> {
+            const auto record  = take_replay_record(operation_id);
+            const bool entered = record && record->is_object() && record->contains("kind") &&
+                                 record->at("kind") == json("entered");
+            if (record && !entered) co_return replay_branch_record(*record, *control);
+            if (entered && record->contains("input"))
+                state = detail::owned_json_copy(record->at("input"));
+            const auto* found = typed_plan.find(operation_id);
+            const bool  call  = found && found->dispatch().operation == ProgramOperationKind::CallCore;
+            std::optional<json> root_input;
+            if (!call && operation_id == root_id) root_input = state;
+            const auto key    = operation_id;
+            auto       result = co_await run_operation(std::move(operation_id), std::move(state),
+                                                       std::move(thread_id), child_depth,
+                                                       std::move(operation_token),
+                                                       entered ? &*record : nullptr);
+            if (result.status == ProgramTerminalStatus::Interrupted && !call) {
+                json position{{"kind", "entered"}};
+                if (result.reentry)
+                    for (const auto& [field, value] : result.reentry->items()) position[field] = value;
+                if (root_input) position["input"] = std::move(*root_input);
+                result.settled_members[key] = std::move(position);
+            }
+            result.reentry.reset();
+            co_return result;
         };
 
         // Core nodes this attempt ran, across every JavaScript command. Each
@@ -5406,11 +5534,22 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 throw_runtime_diagnostic(error.code(), error.what(), error.witness());
             }
         } else {
-            plan_result = co_await execute(root_id, std::move(input), control->core_thread_id, 0,
-                                           control->cancel_token);
-            // A paused parallel resumes the branch it paused on, whichever
-            // branch wrote the last checkpoint, and its Interrupted record
-            // carries the branches it recorded (#384).
+            // #386: a resumed plan runs again from its root on the plan's own
+            // input and root Core thread; the value it was resumed with goes to
+            // the call it answers, and what the paused run finished replays.
+            auto plan_input = std::move(input);
+            if (checkpoint_id) {
+                resume_answer = std::move(plan_input);
+                plan_input    = detail::owned_json_copy(control->persisted_invocation.input);
+            }
+            plan_result = co_await execute(
+                root_id, std::move(plan_input),
+                program_root_core_thread_id(control->run_id,
+                                            control->materialized->root->compiled_plan_identity),
+                0, control->cancel_token);
+            // A paused plan resumes the call it paused on, whichever call wrote
+            // the last checkpoint, and its Interrupted record carries what it
+            // recorded (#384, #386).
             if (plan_result.status == ProgramTerminalStatus::Interrupted) {
                 if (plan_result.interrupt_checkpoint) {
                     std::lock_guard lock(plan_mutex);

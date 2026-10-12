@@ -471,6 +471,29 @@ The Program compiler lowers authoring sugar to a small orchestration plan:
 compiler expansions or bounded compatibility sugar over this vocabulary. They
 do not add feature-specific branches to Core or GraphEngine.
 
+A plan that pauses resumes where it stopped. Its paused run record keeps, by
+operation id, what the attempt that resumes it replays: the result of each
+`parallel` child that finished, the question and checkpoint of each other
+paused call, and, for each operation the run was executing, how far it got
+(the next child of a `sequence`, the iteration of a `loop`, the attempt of a
+`retry`, the item of a `map`, the winner of a `race`) with the state of that
+position; the root's record keeps the plan's input. Resume runs the plan again
+from its root. An operation that finished replays its record and is neither
+run nor charged again (tokens, money, Core steps and Program operations are
+charged once per run), an operation the run was executing continues where it
+was, a `branch` evaluates its condition on the state it saw the first time,
+and only the call the resume answers receives the resume value. Resume,
+reconcile, fork and graph migration carry these records, and so does the
+recovery of each; a fork gives every recorded paused call its own copy of its
+checkpoint. Replacement never continues a paused plan: it continues a
+quiescent JavaScript source.
+
+Concurrent calls never share a Core thread. The first child of a `parallel` or
+`race` continues on the operation's own Core thread and every other child runs
+on a thread of its own, so a child of a nested `parallel` never shares the root
+thread with the root's first child. A call that a resume answers continues on
+the thread of its checkpoint.
+
 The current implementation uses a typed immutable operation graph whose nodes
 retain source coordinates and directly reference compiled Core generations or
 other Program nodes. It directly schedules `sequence`, `branch`, `return`,

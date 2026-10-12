@@ -340,7 +340,8 @@ void validate(const ProgramRunRecordData& d) {
         (!d.settled_branches->is_object() || d.settled_branches->empty() ||
          !d.exact_checkpoint ||
          (d.continuation.state != ContinuationState::Running &&
-          d.continuation.state != ContinuationState::Interrupted))) {
+          d.continuation.state != ContinuationState::Interrupted &&
+          d.continuation.state != ContinuationState::AmbiguousEffect))) {
         throw std::invalid_argument(
             "Program settled branches belong to a paused or resumed run's exact checkpoint");
     }

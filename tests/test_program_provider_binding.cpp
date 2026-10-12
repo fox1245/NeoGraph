@@ -195,6 +195,12 @@ struct Script {
     std::atomic<int>  node_runs{0};
     // Run by every "after" node with its name.
     std::function<void(const std::string&)> after;
+    // #386: the "check" node asks, until resumed, on this Core thread, and
+    // finishes on every other one.
+    std::string      ask_thread;
+    std::atomic<int> checks_asked{0};
+    std::atomic<int> checks_finished{0};
+    std::atomic<int> checks_answered{0};
 };
 
 class BrokeredCall final : public graph::GraphNode {
@@ -246,6 +252,34 @@ private:
     std::string name_;
 };
 
+// #386: asks on the Core thread the script names until it is resumed, and
+// finishes everywhere else.
+class CheckNode final : public graph::GraphNode {
+public:
+    CheckNode(std::string name, std::shared_ptr<Script> script)
+        : name_(std::move(name)), script_(std::move(script)) {}
+    std::string get_name() const override { return name_; }
+    asio::awaitable<graph::NodeOutput> run(graph::NodeInput in) override {
+        graph::NodeOutput output;
+        if (in.ctx.resume_value) {
+            ++script_->checks_answered;
+            output.writes.push_back(graph::ChannelWrite{"value", *in.ctx.resume_value});
+            co_return output;
+        }
+        if (in.ctx.thread_id == script_->ask_thread) {
+            ++script_->checks_asked;
+            throw graph::NodeInterrupt("approve the check", json{{"request", "approve"}});
+        }
+        ++script_->checks_finished;
+        output.writes.push_back(graph::ChannelWrite{"value", "checked"});
+        co_return output;
+    }
+
+private:
+    std::string             name_;
+    std::shared_ptr<Script> script_;
+};
+
 class AfterNode final : public graph::GraphNode {
 public:
     AfterNode(std::string name, std::shared_ptr<Script> script)
@@ -267,7 +301,17 @@ private:
 // One host: registry, binder, catalog, runtime
 // ---------------------------------------------------------------------------
 
-enum class Shape { AfterOnly, Llm, LlmThenAfter, TwoLlms, Brokered, BrokeredThenAfter, SendsToBrokered };
+enum class Shape {
+    AfterOnly,
+    Llm,
+    LlmThenAfter,
+    TwoLlms,
+    Brokered,
+    BrokeredThenAfter,
+    SendsToBrokered,
+    // #386: the model on the first call of a plan, a check on every later one.
+    PlanRoute
+};
 
 struct HostOptions {
     std::string   label        = "test-binding";
@@ -325,6 +369,17 @@ public:
                              return std::make_unique<AfterNode>(name, script);
                          },
                          json{{"type", "object"}}, json{{"writes", json::array({"done"})}});
+        builder.add_node(manifest({ExecutableKind::Node, "check", "1.0.0", digest('8')}),
+                         [script = script_](const std::string& name, const json&, const graph::NodeContext&) {
+                             return std::make_unique<CheckNode>(name, script);
+                         },
+                         json{{"type", "object"}}, json{{"writes", json::array({"value"})}});
+        // A plan's first call has no final_response yet: it goes to the model.
+        builder.add_condition(manifest({ExecutableKind::Condition, "plan_route", "1.0.0", digest('9')}),
+                              [](const graph::GraphState& state) -> std::string {
+                                  return state.get("final_response") == json("") ? "llm" : "check";
+                              },
+                              graph::ConditionSpec{{"check", "llm"}, false});
         builder.add_node(manifest({ExecutableKind::Node, "send_fan", "1.0.0", digest('7')}),
                          [](const std::string& name, const json&, const graph::NodeContext&) {
                              return std::make_unique<SendFan>(name);
@@ -437,6 +492,17 @@ public:
                 definition["nodes"] = {{"work", {{"type", "brokered_call"}}}};
                 definition["edges"] = json::array({edge("__start__", "work"), edge("work", "__end__")});
                 break;
+            case Shape::PlanRoute:
+                definition["channels"]["final_response"] = {{"reducer", "overwrite"}, {"initial", ""}};
+                definition["nodes"] = {{"start", {{"type", "after"}}},
+                                       {"llm", {{"type", "llm_call"}}},
+                                       {"check", {{"type", "check"}}}};
+                definition["edges"] = json::array({edge("__start__", "start"), edge("llm", "__end__"),
+                                                   edge("check", "__end__")});
+                definition["conditional_edges"] = json::array(
+                    {json{{"from", "start"}, {"condition", "plan_route"},
+                          {"routes", {{"llm", "llm"}, {"check", "check"}}}}});
+                break;
             case Shape::SendsToBrokered:
                 definition["nodes"] = {{"fan", {{"type", "send_fan"}}}, {"work", {{"type", "brokered_call"}}}};
                 definition["edges"] = json::array(
@@ -465,6 +531,41 @@ public:
                           json{{"resource", "max_total_children"}, {"minimum", 0}, {"maximum", child}}})}};
         ProgramCompiler compiler(*registry_, {"binding-test/v1"});
         return compiler.compile(ProgramSource::from_cpp_builder("binding-test", 2, std::move(document)));
+    }
+
+    // #386: a plan over the Core of `shape`, with room for its operations.
+    ProgramVersion admit_plan(json root, Shape shape) {
+        root["name"]       = "main";
+        root["definition"] = definition(shape);
+        json document{
+            {"program_schema_version", 2U},
+            {"input_contract", {{"schema_version", 1}, {"schema", json::object()}}},
+            {"output_contract", {{"schema_version", 1}, {"schema", json::object()}}},
+            {"root", std::move(root)},
+            {"declared_budget_requirements",
+             json::array({json{{"resource", "wall_time_ms"}, {"minimum", 1}, {"maximum", 100000}},
+                          json{{"resource", "model_tokens"}, {"minimum", 0}, {"maximum", 10000000}},
+                          json{{"resource", "monetary_microunits"}, {"minimum", 0}, {"maximum", 1000000000}},
+                          json{{"resource", "max_concurrency"}, {"minimum", 1}, {"maximum", 2}},
+                          json{{"resource", "max_program_operations"}, {"minimum", 1}, {"maximum", 16}},
+                          json{{"resource", "max_core_steps"}, {"minimum", 1}, {"maximum", 20}},
+                          json{{"resource", "max_dynamic_compiles"}, {"minimum", 0}, {"maximum", 0}},
+                          json{{"resource", "max_child_depth"}, {"minimum", 0}, {"maximum", 0}},
+                          json{{"resource", "max_total_children"}, {"minimum", 0}, {"maximum", 0}}})}};
+        ProgramCompiler compiler(*registry_, {"binding-test/v1"});
+        auto bundle = compiler.compile(ProgramSource::from_cpp_builder("binding-plan", 2, std::move(document)));
+        PolicySnapshotBuilder policy;
+        policy.id("binding-plan-policy").semantic_version("1.0.0").owner_scope(kOwner)
+            .admission_profile(*profile_)
+            .budget_ceiling(BudgetLimits{100000, 10000000, 1000000000, 2, 16, 20, 1, 0, 0});
+        return catalog_->admit(bundle, ProgramAdmission{kOwner, *profile_, std::move(policy).build(), {}});
+    }
+
+    ProgramResult run_plan(const ProgramVersion& version, const std::string& run_id) {
+        auto invocation   = this->invocation(run_id);
+        invocation.budget = RunBudget{options_.wall_time_ms, options_.model_tokens, options_.monetary,
+                                      2, 16, 20, 0, 0, 0};
+        return runtime_->run(kOwner, version, std::move(invocation));
     }
 
     ProgramVersion admit(Shape shape) {
@@ -1020,6 +1121,67 @@ TEST(ProgramProviderBindingJournal, AResumedSendReplaysItsJournaledCall) {
     EXPECT_EQ(h.script().node_runs.load(), 4) << "both Sends ran once more, with the answer";
     EXPECT_EQ(journal_states(files.provider_db()),
               (std::vector<std::string>{"succeeded", "succeeded"}));
+}
+
+TEST(ProgramProviderBindingJournal, APlanResumeNeverResendsOrRechargesTheCallBeforeThePause) {
+    // #386: a plan sequence[A, parallel[B, C], branch]: A's Core calls the
+    // model, B asks, C finishes, and the branch reads A's reply as carried by
+    // C. Resume answers B. A is replayed: its request is not sent again, its
+    // tokens and money are charged once, and the branch takes the arm A's
+    // reply chose. A rerun would get another reply and take the other arm.
+    for (const bool durable : {false, true}) {
+        SCOPED_TRACE(durable ? "SQLite journal" : "in memory");
+        TempDir files("plan-resume");
+        auto    peer = std::make_shared<Peer>();
+        peer->reply  = [](int ordinal, const ProviderRequest&) {
+            return neograph::test::success(ordinal == 1 ? "Paris." : "Rome.",
+                                           with_cost(final_usage(21, 3), 1'234'567));
+        };
+        HostOptions options;
+        options.monetary = 100'000;
+        options.workers  = 2;
+        Host       h(peer, options, durable ? &files : nullptr);
+        const auto call    = json{{"op", "call_core"}};
+        const auto version = h.admit_plan(
+            json{{"op", "sequence"},
+                 {"children",
+                  json::array(
+                      {call,
+                       json{{"op", "parallel"}, {"branches", json::array({call, call})}},
+                       json{{"op", "branch"},
+                            {"condition", json{{"path", "/1/channels/final_response/value"},
+                                               {"equals", "Paris."}}},
+                            {"then", json{{"op", "return"}, {"value", json{{"arm", "then"}}}}},
+                            {"else", json{{"op", "return"}, {"value", json{{"arm", "else"}}}}}}})}},
+            Shape::PlanRoute);
+        // B is branch 0 of a parallel at the plan's root: it runs on the root thread.
+        h.script().ask_thread = program_root_core_thread_id(
+            "plan-run", version.core_materialization_receipt().plans.front().compiled_plan_identity);
+
+        const auto paused = h.run_plan(version, "plan-run");
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_text(paused);
+        ASSERT_TRUE(paused.interrupt() && paused.interrupt()->pending_input);
+        EXPECT_EQ(paused.interrupt()->pending_input->operation_id(), "root.1.0");
+        EXPECT_EQ(peer->transport.load(), 1);
+        EXPECT_EQ(paused.usage().model_tokens, 24U);
+        EXPECT_EQ(paused.usage().monetary_microunits, 1235U);
+        EXPECT_EQ(h.script().checks_asked.load(), 1);
+        EXPECT_EQ(h.script().checks_finished.load(), 1);
+
+        const auto done =
+            h.runtime().resume(kOwner, "plan-run", resume_after(paused, "trace-plan-resume")).wait();
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_text(done);
+        EXPECT_EQ(done.output(), json({{"arm", "then"}})) << "the branch takes the arm A's reply chose";
+        EXPECT_EQ(peer->transport.load(), 1) << "A's request is never sent again";
+        EXPECT_EQ(done.usage().model_tokens, 0U);
+        EXPECT_EQ(done.usage().monetary_microunits, 0U);
+        EXPECT_TRUE(done.monetary_records().empty()) << "A was charged by the attempt that ran it";
+        EXPECT_EQ(done.remaining_budget().model_tokens, options.model_tokens - 24U);
+        EXPECT_EQ(done.remaining_budget().monetary_microunits, 100'000U - 1235U);
+        EXPECT_EQ(h.script().checks_asked.load(), 1);
+        EXPECT_EQ(h.script().checks_finished.load(), 1) << "C is replayed, not run again";
+        EXPECT_EQ(h.script().checks_answered.load(), 1);
+    }
 }
 
 TEST(ProgramProviderBindingJournal, InMemoryAResumedNodeThatCallsAgainPaysAgain) {

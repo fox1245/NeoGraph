@@ -265,8 +265,8 @@ public:
     std::optional<ProgramResult>          try_result() const;
     std::vector<ProgramEvent>             events_after(std::uint64_t sequence) const;
     std::optional<CoreCheckpointIdentity> latest_checkpoint() const;
-    /// The branches the paused plan-level parallel operations of this attempt
-    /// recorded (#384); its Interrupted record carries them.
+    /// What the paused plan of this attempt recorded for the attempt that
+    /// resumes it (#384, #386); its Interrupted record carries them.
     void                                  set_settled_branches(json branches);
     std::optional<json>                   settled_branches() const;
     std::optional<ExactProgramHandoff>    latest_handoff() const;
