@@ -596,18 +596,10 @@ unsigned join_member_runs_of(const std::string& value) {
     return found == join_member_runs.end() ? 0U : found->second;
 }
 
-// No join member body may still be running once a run has returned. MSVC's
-// ASan builds finish unwinding a coroutine that left through an exception a
-// little after its awaiter resumed (the toolchain has a known coroutine
-// catch-funclet defect), so under that configuration alone the count is given
-// a short bounded time to reach zero; everywhere else it must already be zero.
-void expect_join_members_stopped() {
-#if defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__)
-    for (int i = 0; i < 300 && join_member_active.load() != 0; ++i)
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-#endif
-    EXPECT_EQ(join_member_active.load(), 0U);
-}
+// No join member body may still be running once a run has returned. The
+// member leaves the count by ordinary code before any exception leaves it, so
+// the count does not depend on when a compiler finishes unwinding the frame.
+void expect_join_members_stopped() { EXPECT_EQ(join_member_active.load(), 0U); }
 
 class JoinMemberNode final : public GraphNode {
 public:
@@ -621,31 +613,52 @@ public:
         }
         join_member_active.fetch_add(1, std::memory_order_relaxed);
         ActiveCallGuard active(join_member_active);
-        if (value == "fail") throw std::runtime_error("join member failure sentinel");
-        if ((value == "ask" || value == "ask-slow") && !input.ctx.resume_value)
+        // Every way out through an exception leaves the count first, by
+        // ordinary code: a test that checks the run waited for the body must
+        // not depend on when a compiler unwinds a coroutine frame.
+        if (value == "fail") {
+            active.leave();
+            throw std::runtime_error("join member failure sentinel");
+        }
+        if ((value == "ask" || value == "ask-slow") && !input.ctx.resume_value) {
+            active.leave();
             throw NodeInterrupt("join member approval", json{{"request", "approve"}});
+        }
         // #397: the interrupt the Core raises for an effect whose outcome is
         // unknown, until the member is resumed.
-        if (value == "reconcile" && !input.ctx.resume_value)
+        if (value == "reconcile" && !input.ctx.resume_value) {
+            active.leave();
             throw NodeInterrupt("Mediated Tool effect requires reconciliation",
                                 json{{"kind", "tool_effect_reconciliation"},
                                      {"thread_id", input.ctx.thread_id},
                                      {"task_id", "join-member"}});
+        }
         // #397: fails after a short cancellable wait, so that a member that
         // pauses at once has paused first.
         if (value == "fail-slow") {
             auto timer = asio::steady_timer(co_await asio::this_coro::executor);
             timer.expires_after(std::chrono::milliseconds(300));
-            co_await timer.async_wait(
-                asio::bind_cancellation_slot(input.ctx.cancel_token->slot(), asio::use_awaitable));
+            asio::error_code ended;
+            co_await timer.async_wait(asio::bind_cancellation_slot(
+                input.ctx.cancel_token->slot(), asio::redirect_error(asio::use_awaitable, ended)));
+            if (ended) {
+                active.leave();
+                throw asio::system_error(ended);
+            }
+            active.leave();
             throw std::runtime_error("join member failure sentinel");
         }
         // #391: an answered "ask-slow" takes 1.2 s before it finishes.
         if (value == "slow" || value == "ask-slow") {
             auto timer = asio::steady_timer(co_await asio::this_coro::executor);
             timer.expires_after(std::chrono::milliseconds(value == "slow" ? 300 : 1200));
-            co_await timer.async_wait(
-                asio::bind_cancellation_slot(input.ctx.cancel_token->slot(), asio::use_awaitable));
+            asio::error_code ended;
+            co_await timer.async_wait(asio::bind_cancellation_slot(
+                input.ctx.cancel_token->slot(), asio::redirect_error(asio::use_awaitable, ended)));
+            if (ended) {
+                active.leave();
+                throw asio::system_error(ended);
+            }
         }
         if (value == "block") std::this_thread::sleep_for(std::chrono::milliseconds(800));
         // #400: an answered "reconcile" settles its effect after a short
@@ -653,8 +666,13 @@ public:
         if (value == "reconcile") {
             auto timer = asio::steady_timer(co_await asio::this_coro::executor);
             timer.expires_after(std::chrono::milliseconds(200));
-            co_await timer.async_wait(
-                asio::bind_cancellation_slot(input.ctx.cancel_token->slot(), asio::use_awaitable));
+            asio::error_code ended;
+            co_await timer.async_wait(asio::bind_cancellation_slot(
+                input.ctx.cancel_token->slot(), asio::redirect_error(asio::use_awaitable, ended)));
+            if (ended) {
+                active.leave();
+                throw asio::system_error(ended);
+            }
             std::lock_guard lock(join_member_mutex);
             ++join_member_runs["reconcile:settled"];
         }
