@@ -92,7 +92,7 @@ The Beast는 하네스를 엄격한 Core JSON으로 직접 작성하고 컴파�
 `the_beast.cpp`는 오프라인이다 (스텁 작성자). [`the_beast_live.cpp`](the_beast_live.cpp)가 실제다: 라이브 LLM에 `NodeFactory::export_schema()` (이 엔진 빌드가 수용하는 정확한 팔레트 — 엔진의 스키마 자체이므로 드리프트할 수 없다, [`../../52_export_schema.cpp`](../../52_export_schema.cpp) 참조)이 전달되고 엄격한 Core JSON으로 하네스를 작성하도록 요청받는다. 반환된 것은 무엇이든 동일한 컴파일러와 검증 게이트를 통과한다; 거부 진단 시 진단이 대화에 직접 피드백되고 모델이 다시 작성한다 — 진정한 self-repair loop.
 
 ```console
-$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek V4 Flash 0731 via OpenRouter
+$ export OPENROUTER_API_KEY=sk-or-...              # DeepSeek V4 Flash 0731 via OpenRouter
 $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```

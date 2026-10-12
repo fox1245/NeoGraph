@@ -92,7 +92,7 @@ The Beast 直接以严格的 Core JSON 形式编写一个 harness，并按顺序
 `the_beast.cpp` 是离线的（存根作者）。[`the_beast_live.cpp`](the_beast_live.cpp) 是真实的东西：一个实时 LLM 被交给 `NodeFactory::export_schema()`（此引擎构建接受的精确调色板 — 它不能漂移，因为它*就是*引擎的模式，参见 [`../../52_export_schema.cpp`](../../52_export_schema.cpp)）并被要求以严格的 Core JSON 编写测试框架。无论它返回什么，都经过相同的编译器和验证门；在拒绝时，诊断信息直接反馈到对话中，模型重写 — 一个真正的自我修复循环。
 
 ```console
-$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek V4 Flash 0731 via OpenRouter
+$ export OPENROUTER_API_KEY=sk-or-...              # DeepSeek V4 Flash 0731 via OpenRouter
 $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```

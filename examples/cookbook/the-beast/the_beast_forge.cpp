@@ -16,7 +16,7 @@
 // Beast wrote this run), a real tools/list round-trip on each, and a real
 // ReAct loop. Only the authoring model is remote (deepseek/deepseek-v4-flash).
 //
-// Setup:  OPENROUTER_API_KEY in .env ; python3 on PATH.
+// Setup:  export OPENROUTER_API_KEY=sk-or-... ; python3 on PATH.
 // Build:  cmake --build build --target cookbook_the_beast_forge
 // Run:    ./build/cookbook_the_beast_forge ["task"]
 //
@@ -30,7 +30,6 @@
 #include "../../provider_example_support.h"
 #include "beast_common.h"
 
-#include <cppdotenv/dotenv.hpp>
 
 #include <cstdlib>
 #include <filesystem>
@@ -139,7 +138,6 @@ static std::vector<std::string> tool_names(neograph::mcp::MCPClient& c) {
 }
 
 int main(int argc, char** argv) try {
-    cppdotenv::auto_load_dotenv();
     const char* key = std::getenv("OPENROUTER_API_KEY");
     if (!key || !*key) { std::cerr << "OPENROUTER_API_KEY not set\n"; return 2; }
     std::shared_ptr<neograph::Provider> provider =

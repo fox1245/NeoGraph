@@ -134,7 +134,7 @@ are fed straight back into the conversation and the model rewrites — a
 genuine self-repair loop.
 
 ```console
-$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek V4 Flash 0731 via OpenRouter
+$ export OPENROUTER_API_KEY=sk-or-...              # DeepSeek V4 Flash 0731 via OpenRouter
 $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```

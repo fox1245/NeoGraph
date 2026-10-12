@@ -92,7 +92,7 @@ The Beastはハーネスを厳密なCore JSONとして直接作成し、それ�
 `the_beast.cpp`はオフラインである（スタブ作成者）。[`the_beast_live.cpp`](the_beast_live.cpp)が本物である：ライブLLMに`NodeFactory::export_schema()`（このエンジンビルドが受け入れる正確なパレット — エンジンのスキーマそのものであるため、ドリフトできない。[`../../52_export_schema.cpp`](../../52_export_schema.cpp)を参照）が渡され、厳密なCore JSONとしてハーネスを作成するよう求められる。返されたものは何であれ、同じコンパイラと検証ゲートを通過する。棄却時には、診断情報が会話に直接フィードバックされ、モデルが書き直す — 真の自己修復ループである。
 
 ```console
-$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek V4 Flash 0731 via OpenRouter
+$ export OPENROUTER_API_KEY=sk-or-...              # DeepSeek V4 Flash 0731 via OpenRouter
 $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```
