@@ -1,32 +1,32 @@
 <!-- neograph-i18n: source=docs/PROGRAM_COMMAND_HEAD_OPTIMIZATION.md locale=ja source_sha256=52b5dae9fe5c514792e6ec85508f8e548faef3d737711c484cd04294fa3542ef -->
-# Command publication head の最適化 — 2026-09-07
+# コマンド公開のヘッドの最適化 — 2026-09-07
 
 **Languages:** [English](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md) | [한국어](PROGRAM_COMMAND_HEAD_OPTIMIZATION.ko.md) | [日本語](PROGRAM_COMMAND_HEAD_OPTIMIZATION.ja.md) | [简体中文](PROGRAM_COMMAND_HEAD_OPTIMIZATION.zh-CN.md)
 
-この変更は JavaScript コマンドの公開前の読み取りを減らす。run/journal を別々に読み込み、command history 全体を実体化する代わりに、run、journal、最新 command を一緒に読む。永続公開、CAS、reservation、checkpoint、recovery の semantics は変更しない。
+この変更は、JavaScriptのコマンドを公開する前の読み取りを減らします。実行とジャーナルを別々に読み込み、コマンドの履歴全体を実体化する代わりに、実行、ジャーナル、最新のコマンドを、まとめて1回で読みます。永続的な公開、CAS、予約、チェックポイント、復旧の意味は、変わりません。
 
 ## 実装
 
-- `ProgramTransitionStore::load_command_publication_head` は、一貫した run/journal の組と最新 command append を返す。memory は一つの不変 snapshot を使い、SQLite と PostgreSQL は一つの statement と既存の `(owner_scope, run_id, sequence)` primary key を使う。
-- database projection は未使用の migration と last-publication bytes を省く。最新 command の sequence と coordinate を正規値と照合し、run/owner/bundle/journal の結び付きを検証する。
-- 通常の append と settlement は最新 command を使う。過去の coordinate への retry は引き続き完全な history を使う。replay と store 側の append/reservation 検証は、従来どおり history を調べる。history scan を完全に除去するものではない。
-- 既存 C++ store wrapper は、既存 virtual read を使い、二回目の run read で囲む fallback を得る。同時変更は安全側に失敗する。wrapper は独自の filtering と authority semantics を維持して新しい read を実装できる。
-- schema migration、新しい index、cache lifetime、durability setting、graph generation、compiler identity、model configuration の変更はない。
-- 公開 C++ virtual interface に method を一つ追加した。Program library と C++ consumer を一緒に再ビルドすること。既存 wrapper の source compatibility は検証対象であるが、prebuilt C++ consumer の ABI compatibility は前提にしない。
+- `ProgramTransitionStore::load_command_publication_head` は、整合した実行とジャーナルの組と、最新のコマンドの追記を返します。メモリストアは、変更できないスナップショットを1つ使います。SQLiteとPostgreSQLは、1つのステートメントと、既存の `(owner_scope, run_id, sequence)` 主キーを使います。
+- データベースの射影は、使わないマイグレーションと最後の公開のバイト列を省きます。最新のコマンドのシーケンスと座標は、その正規の値と照合されます。実行、オーナー、バンドル、ジャーナルの結び付きも検証されます。
+- 通常の追記と精算は、最新のコマンドを使います。より古い座標のリトライは、引き続き、履歴全体を使います。リプレイと、ストア側の追記や予約の検証も、これまでどおり履歴を調べます。履歴のスキャンをすべてなくしたわけではありません。
+- 既存のC++のストアラッパーには、既存の仮想メソッドの読み取りを使うフォールバックが用意され、2回目の実行の読み取りで挟んで整合性を確認します。並行して変更が起きた場合は、フェイルクローズになります。ラッパーは、独自のフィルタリングと権限の意味を保ったまま、この新しい読み取りを実装できます。
+- スキーマのマイグレーション、新しいインデックス、キャッシュの寿命、永続性の設定、グラフの世代、コンパイラーのID、モデルの設定は、変更していません。
+- 公開されるC++の仮想インターフェースにメソッドが1つ増えました。Programライブラリと、C++のコンシューマーは、まとめて再ビルドしてください。既存のラッパーのソース互換性は確認していますが、ビルド済みのC++のコンシューマーは、ABI互換ではないものとして扱ってください。
 
 ## 正しさ
 
-WSL GCC Debug の Program suite は **680 テストに成功**し、**該当しない memory-store process-restart ケース二件を skip**した。追加した七テストと拡張した backend history テストは、不変 snapshot、独立 reader/writer connection、fallback wrapper、分断された fallback read、選択 tail の破損、上限付き tail read を対象とする。過去の破損は引き続き full-history read で拒否する。
+WSL上のGCC DebugビルドのProgramスイートは、**680テスト**が通り、**対象外のメモリストアのプロセス再起動のケース2件はスキップ**されました。追加した7つのテストと、拡張したバックエンドの履歴テストは、変更できないスナップショット、独立したリーダーとライターの接続、フォールバックのラッパー、フォールバックの読み取り中の不整合（torn read）、選択した末尾の破損、上限付きの末尾の読み取りを、対象にしています。過去の破損は、引き続き、履歴全体の読み取りで拒否されます。
 
-suite 全体は、command recovery、lineage CAS、再帰 child replacement、補充不能な budget、SQLite/PostgreSQL の実際の process-loss 境界も実行した。この変更に対して Windows や sanitizer の再実行は主張しない。
+スイート全体では、SQLiteとPostgreSQLでの、コマンドの復旧、系統のCAS、再帰的な子の置き換え、更新できない予算、実際のプロセス喪失の境界も確認しました。この変更について、Windowsやサニタイザーでの再実行は、主張していません。
 
-## ペア Release 比較
+## ペアで比較したReleaseビルドの結果
 
-baseline と同じ Ryzen 7 5800X / WSL2 Ubuntu 24.04 / GCC 13.3 Release 構成を使った。比較前に両 binary を凍結した。ケースごとに独立した process pair 五組を使い、各プロセスで warmup 三回と測定 invocation 12 回を実行した。ケース順と AB/BA 順を交互にする。PostgreSQL は native WSL Docker とプロセスごとの新しい database、SQLite は新しい WSL-ext4 file を使う。ペア測定中に build や他の test job は実行していない。
+ベースラインと同じ、Ryzen 7 5800X／WSL2 Ubuntu 24.04／GCC 13.3のRelease構成です。比較の前に、2つのバイナリは固定しました。ケースごとに、独立したプロセスのペアを5組ずつ実行し、各プロセスは、ウォームアップ3回と、計測する呼び出し12回を行います。ケースとAB/BAの順序は、交互にしました。PostgreSQLは、WSLのネイティブなDockerを使い、プロセスごとに新しいデータベースを作ります。SQLiteは、WSLのext4上に新しいファイルを作ります。ペアでの測定の間、ビルドや他のテストのジョブは実行しませんでした。
 
-変更前 binary の hash は元の baseline と一致する。以下の変更前/変更後測定は、この記録を作成した同じ作業ターンで一緒に測定したものであり、過去の wall-clock 時間との比較に代わる。JIT や LLM は関与しない。
+変更前のバイナリのハッシュは、元のベースラインと一致します。以下の、変更前と変更後の現在の測定結果が、古い実時間との比較に取って代わります。これらは、同じ回に続けて測定しました。JITもLLMも関与しません。
 
-| ケース | 変更前中央値 (ms) | 変更後中央値 (ms) | ペア削減率の中央値 | ペアの変更後/変更前の範囲 |
+| ケース | 変更前の中央値（ms） | 変更後の中央値（ms） | ペアでの削減率の中央値 | ペアでの変更後／変更前の範囲 |
 | --- | --- | --- | --- | --- |
 | direct-0 | 0.0076 | 0.0077 | -2.71% | 1.0007–1.0418 |
 | memory-cpp-0 | 2.0373 | 2.0332 | -0.58% | 0.9857–1.0336 |
@@ -41,26 +41,26 @@ baseline と同じ Ryzen 7 5800X / WSL2 Ubuntu 24.04 / GCC 13.3 Release 構成�
 | postgres-javascript-0-commands-16 | 1035.1816 | 922.3063 | +10.90% | 0.8689–0.9304 |
 | postgres-cpp-0 | 49.0719 | 48.2794 | +1.48% | 0.9555–1.0062 |
 
-削減率は paired process median から計算するため、二つの独立した集約中央値の比率と一致する必要はない。ペアのばらつきの範囲内の小差からは結論を出せない。direct Core と C++ Program 行は負の対照であり、最適化した command-publication read は使わない。小 payload の memory ケースでは、明確な高速化は確認できない。
+削減率は、ペアにしたプロセスの中央値から計算しているため、独立して集計した2つの中央値の比とは、一致しないことがあります。ペアのばらつきの範囲内の小さな差は、結論が出せません。direct CoreとC++ Programの行は、ネガティブコントロールで、最適化したコマンド公開の読み取りは、ここでは使われません。ペイロードの小さいメモリのケースでは、明確な高速化は確認できません。
 
-小さな direct-Core の兆候を受け、一つの広い対照検査を行った。七つの paired process で、各プロセスに warmup 100 回、測定 direct invocation 10,000 回を使った。変更後/変更前比の中央値は 1.0098、ペア範囲は 0.9825–1.0123 だった。生結果は `direct-control/` に保持する。Core source や library code は変更していない。この検査は有意な Core 性能変化を確認するものではない。
+direct Coreで小さな差が見られたため、より広い対照の確認を1回行いました。7組のペアのプロセスで、それぞれ100回のウォームアップと、10,000回の直接の呼び出しを測定しました。変更後／変更前の比の中央値は1.0098で、ペアごとの範囲は0.9825〜1.0123でした。生の結果は `direct-control/` に残してあります。Coreのソースやライブラリのコードは変更していません。この確認から、Coreの性能に意味のある変化があったとは言えません。
 
-## Database API の回数
+## データベースAPIの呼び出し回数
 
-別の計装付き比較では、invocation 一回と四回を比較し、その差を二度測った。各 run 当たりの回数差は、二回の反復で全て同じだった。この計装の時間は主要比較に使わない。SQLite step call は row iteration を含み、libpq は同期呼び出しだけを対象とする。
+別に、計装を入れた比較を行いました。呼び出しを1回にした場合と4回にした場合を比べ、その差を2回繰り返しました。実行ごとの回数の差は、2回の繰り返しですべて同一でした。この計装での時間は、主要な比較には使っていません。SQLiteのstep呼び出しには、行の反復が含まれます。libpqは、同期の呼び出しだけが対象です。
 
-| Backend / Program run 当たり Core call | 変更前 SQL API call | 変更後 SQL API call | 変更前 commit | 変更後 commit |
+| バックエンド／Programの実行あたりのCore呼び出し回数 | 変更前のSQL API呼び出し回数 | 変更後のSQL API呼び出し回数 | 変更前のコミット回数 | 変更後のコミット回数 |
 | --- | --- | --- | --- | --- |
 | sqlite / 1 | 135 | 130 | 9 | 9 |
 | sqlite / 16 | 2715 | 2155 | 114 | 114 |
 | postgres / 1 | 108 | 104 | 4 | 4 |
 | postgres / 16 | 1053 | 989 | 34 | 34 |
 
-PostgreSQL commit 列は同期 libpq の部分集合だけであり、async checkpoint 経路の全 transaction 数ではない。両 binary は同じ persistence interface を実行し、測定範囲で同じ commit 数を維持する。
+PostgreSQLのコミットの列は、同期のlibpqの範囲だけの値です。非同期のチェックポイントの経路のトランザクションの総数ではありません。2つのバイナリは、同じ永続化のインターフェースを実行し、測定した範囲で、コミット回数は変わりません。
 
-## 再現と証拠
+## 再現方法とエビデンス
 
-変更前 revision（`8fce5e14`）と変更後 revision から、同一の Release option で `bench_program_cost` をビルドする。両 binary を保持する。使い捨て Postgres container を稼働させ、`NEOGRAPH_COST_POSTGRES_URL` を設定した状態で実行する。
+変更前のリビジョン（`8fce5e14`）と、変更後のリビジョンから、同じReleaseのオプションで `bench_program_cost` をビルドします。2つのバイナリは、保存しておきます。使い捨てのPostgresコンテナーを起動し、`NEOGRAPH_COST_POSTGRES_URL` を設定した状態で、次を実行します。
 
 ```sh
 python3 scripts/compare_program_costs.py \
@@ -70,6 +70,6 @@ python3 scripts/compare_program_costs.py \
   --postgres-container neograph-n2-postgres
 ```
 
-詳しい方法: [Program cost 測定](PROGRAM_COST_MEASUREMENT.md)。生の paired sample、回数、source/binary hash、verification log は `artifacts/program-command-head-20260907/` にローカル保持する。大きな SQLite file は WSL に置く。runner は出力 directory を上書きせず、既存の application database も再利用しない。
+詳しい方法は、[Programのコスト測定](PROGRAM_COST_MEASUREMENT.md)にあります。ペアの生のサンプル、回数、ソースとバイナリのハッシュ、検証のログは、ローカルの `artifacts/program-command-head-20260907/` に保存してあります。大きなSQLiteのファイルは、WSLに残してあります。ランナーは、出力ディレクトリを上書きせず、既存のアプリケーションのデータベースも再利用しません。
 
-次に残る対象は、publication と replay 中の full-history validation/materialization、および canonical record 構築である。この変更は、それらのコストが除去されたことや、JIT が役立つことを示すものではない。
+次に残っている対象は、公開とリプレイの間の履歴全体の検証と実体化、および正規のレコードの構築です。この変更から、それらのコストがなくなったとも、JITが役立つとも言えません。

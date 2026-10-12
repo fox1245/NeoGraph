@@ -1,15 +1,15 @@
 <!-- neograph-i18n: source=docs/PROGRAM_COST_MEASUREMENT.md locale=ja source_sha256=f22d74f413d9d1665f1444d3a29a05212e4d0ff9c515be846e5439fabe2177e1 -->
-# Program コストの測定
+# Programのコストの測定
 
 **Languages:** [English](PROGRAM_COST_MEASUREMENT.md) | [한국어](PROGRAM_COST_MEASUREMENT.ko.md) | [日本語](PROGRAM_COST_MEASUREMENT.ja.md) | [简体中文](PROGRAM_COST_MEASUREMENT.zh-CN.md)
 
-`bench_program_cost` と `scripts/run_program_costs.py` は、どの Program コストを最適化するかを決めるための診断 baseline を提供する。runtime semantics は変更せず、事前登録済み QuickJS performance gate も置き換えない。LLM、network model call、model credential は不要である。
+`bench_program_cost` と `scripts/run_program_costs.py` は、Programのどのコストを最適化するかを決めるための、診断用のベースラインを提供します。ランタイムの意味は変わらず、事前に登録されたQuickJSの性能ゲートの代わりにもなりません。LLM、ネットワーク越しのモデル呼び出し、モデルの認証情報は、必要ありません。
 
-実装比較用の `scripts/compare_program_costs.py` は、新しい process pair で二つの凍結済み `bench_program_cost` binary を交互に実行する。最初の比較は [Command publication head 最適化](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md) に記載する。続く [canonical JSON 最適化](PROGRAM_CANONICAL_JSON_OPTIMIZATION.md) は、AgentX disassembly と CPU sampling で native 文字列処理の変更を選ぶ。その次の [SHA-256 最適化](PROGRAM_SHA256_OPTIMIZATION.md) は、独立に検証した portable fallback と runtime 判定付き CPU 高速化を追加する。`bench_canonical_json CASE BYTES ITERATIONS` は、ASCII、Unicode、混合、escape の多い文字列を、scalar output oracle に対して別途実行する。
+実装どうしを比較するには、`scripts/compare_program_costs.py` が、固定した2つの `bench_program_cost` のバイナリを、新しいプロセスのペアで交互に実行します。この方法による最初の比較は、[コマンド公開のヘッドの最適化](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md)に記載しています。その次の[正規化JSONの最適化](PROGRAM_CANONICAL_JSON_OPTIMIZATION.md)では、AgentXによる逆アセンブルとCPUのサンプリングで、ネイティブの文字列処理の変更を選びました。さらにその次の[SHA-256の最適化](PROGRAM_SHA256_OPTIMIZATION.md)は、実行時に有効にするCPUによる高速化を追加し、独立して検証した移植可能なフォールバックを備えています。`bench_canonical_json CASE BYTES ITERATIONS` は、ASCII、Unicode、混在、エスケープの多い文字列を、スカラーな出力のオラクルと照らして、別に確認します。
 
-## Build と実行
+## ビルドと実行
 
-native filesystem 上の最適化 build を使う。Linux の例:
+最適化したビルドを、ネイティブなファイルシステム上で使います。たとえば、Linuxでは次のようにします。
 
 ```sh
 cmake -S . -B build-cost -G Ninja \
@@ -23,44 +23,44 @@ python3 scripts/run_program_costs.py \
   --build-dir build-cost --output-dir /tmp/neograph-cost-results
 ```
 
-runner は**新しい**出力 directory を要求する。デフォルトのマトリクスは memory と SQLite、独立した process repetition 七回、warmup invocation 十回、lifecycle ケースごとの測定 invocation 100 回を使う。`--iterations` と `--warmup` は lifecycle/direct ケースを制御し、generator microbenchmark は command 1,000 回を使う。ケースは逐次実行し、反復ごとに正順/逆順を交互にする。SQLite file は出力 directory に置き、調査用に残す。
+ランナーには、**新しい**出力ディレクトリが必要です。デフォルトのマトリクスは、メモリとSQLiteを使い、独立したプロセスの繰り返しを7回、ウォームアップの呼び出しを10回、ライフサイクルのケースごとに計測する呼び出しを100回行います。`--iterations` と `--warmup` は、ライフサイクルとdirectのケースを制御します。ジェネレーターのマイクロベンチマークは、コマンド1,000個を使います。ケースは、繰り返しごとに順方向と逆方向を交互にして、直列に実行されます。SQLiteのファイルは、出力ディレクトリに作られ、調査のために残ります。
 
-PostgreSQL を含めるには、まず専用のローカル test container を起動し、公開された localhost 接続 URL を `NEOGRAPH_COST_POSTGRES_URL` に設定して、`--postgres-container <container-name>` を追加する。runner は公開 port を検査する。sample ごとに一意な名前の database を作り、終了後にその database だけを削除する。container の開始・停止は行わず、URL に記載した database を使うことも削除することもない。使い捨て server は、`postgres` が `docker exec` を通じて database を作成・削除できなければならない。application server を対象にしてはならない。認証情報は metadata や command record に書き込まない。
+PostgreSQLを含めるには、まず専用のローカルのテスト用コンテナーを起動し、`NEOGRAPH_COST_POSTGRES_URL` に、そのコンテナーが公開しているlocalhostの接続URLを設定して、`--postgres-container <container-name>` を追加します。ランナーは、公開されたポートを確認します。サンプルごとに一意な名前のデータベースを作り、終わった後でそのデータベースだけを削除します。コンテナーの起動や停止は行いません。URLに書かれたデータベースを使うことも、削除することもありません。使い捨てのサーバーは、`docker exec` を通じて、`postgres` がデータベースを作成・削除することを許可している必要があります。アプリケーションのサーバーを対象にしないでください。認証情報は、メタデータにもコマンドの記録にも書き込まれません。
 
-## 各測定範囲に含むもの
+## 各スコープに含まれるもの
 
-| ケース | 含むもの | 除外するもの |
+| ケース | 含まれるもの | 含まれないもの |
 | --- | --- | --- |
-| `direct` | warm `GraphEngine::run`、逐次 increment node 三つ、state channel 二つ | Program admission、journal、checkpoint persistence、JS |
-| `lifecycle --mode cpp` | 承認済み C++ builder v1 Program、実際の Core、result 構築、journal と checkpoint | JavaScript control 実行。compilation/admission は別の cold field |
-| `lifecycle --mode javascript` | 承認済み `define()` + generator `main()`、実際の Core、JS/C++ conversion、command journal と checkpoint | compilation/admission は別の cold field |
-| `generator` | generator open/compile/init、最初の `next`、繰り返す host-command 往復、terminal conversion、teardown | 実際の Core、scheduling、journal、database I/O。response は合成 |
-| `resident` | 最初の command 後に停止した複数の独立 QuickJS runtime | 完全な Program agent、catalog、engine、journal storage |
-| 既存の primitive/control ケース | `bench_quickjs_primitives` と `bench_quickjs_control` に記載済みの範囲 | これらの sample は enabled/disabled gate の実行ではない |
+| `direct` | ウォーム状態の `GraphEngine::run`、直列のインクリメントノード3つ、状態チャネル2つ | Programのadmission、ジャーナル、チェックポイントの永続化、JS |
+| `lifecycle --mode cpp` | admission済みのC++ビルダーv1のProgram、実際のCore、結果の構築、ジャーナルとチェックポイント | JavaScriptによる制御の実行。コンパイルとadmissionは、コールドの別のフィールドです |
+| `lifecycle --mode javascript` | admission済みの `define()` とジェネレーターの `main()`、実際のCore、JSとC++の変換、コマンドジャーナルとチェックポイント | コンパイルとadmissionは、コールドの別のフィールドです |
+| `generator` | ジェネレーターのオープン／コンパイル／初期化、最初の `next`、ホストコマンドの往復の繰り返し、最終的な変換、後始末 | 実際のCore、スケジューリング、ジャーナル、データベースI/O。応答は合成したものです |
+| `resident` | 最初のコマンドの後で一時停止した、独立した複数のQuickJSランタイム | 完全なProgramのエージェント、カタログ、エンジン、ジャーナルのストレージ |
+| 既存のプリミティブとcontrolのケース | `bench_quickjs_primitives` と `bench_quickjs_control` にすでに記載されているスコープ | これらのサンプルは、有効／無効のゲートを比較した実行ではありません |
 
-direct、C++、JavaScript run には、同じ三ノード topology、increment behavior、payload channel を使う。実際の各 run は counter `3` と完全で不変な payload を持って終了しなければならない。payload size は 0、4,096、65,536 byte である。JavaScript の multi-command 行は同じ Core graph を四回または 16 回実行し、毎回 counter input をゼロに戻す。最終 counter は `3` になる。
+directの実行、C++の実行、JavaScriptの実行では、同じ3ノードのトポロジー、インクリメントの動作、ペイロードのチャネルを使います。実際の実行は、いずれも、カウンターが `3` で、ペイロードがそのまま変わらずに終わらなければなりません。ペイロードのサイズは、0、4,096、65,536バイトです。JavaScriptの複数コマンドの行は、同じCoreグラフを4回または16回実行し、そのたびにカウンターの入力を0にリセットします。最後は、カウンターが `3` で終わります。
 
-C++ v1 は Program operation を正確に一つ承認する。JavaScript generator は、すべての command-count 行に対応するため、ホスト宣言の 64-operation 上限を使う。両者は同じその他の resource ceiling と scheduler thread 一つを使う。source form と command-journaling semantics が異なるため、JavaScript から C++ を差し引いても interpreter time を分離することには**ならない**。
+C++ v1がadmissionするProgramのオペレーションは、ちょうど1つです。JavaScriptのジェネレーターは、すべてのコマンド数の行に対応するため、ホストが宣言した64オペレーションの上限を使います。どちらも、残りのリソースの上限は同じで、スケジューラースレッドは1つです。ソースの形式と、コマンドをジャーナルに記録する意味が異なるため、JavaScriptからC++を引いても、インタープリターの時間は取り出せ**ません**。
 
-各 lifecycle ケースは、選択した backend から ProgramStore、CheckpointStore、ProgramTransitionStore を構築する。memory mode は実際の in-memory journal/checkpoint value を保持し、persistence interface を迂回しない。SQLite は、store ごとに独立した connection を持つ一つの database file を使う。既存 CheckpointStore は WAL と `synchronous=NORMAL` を設定し、Program store connection は SQLite synchronous のデフォルトを維持する。PostgreSQL は既存 store 実装と四 connection の checkpoint pool を使う。結果比較では実際の server setting を記録すること。これらは backend のデフォルトであり、同じ電源断保証を主張するものではない。
+ライフサイクルのケースごとに、選んだバックエンドから、ProgramStore、CheckpointStore、ProgramTransitionStoreを構築します。メモリモードでも、実際のインメモリのジャーナルとチェックポイントの値を保持し、永続化のインターフェースを迂回することはありません。SQLiteは、独立したストア接続を持つ、1つのデータベースファイルを使います。既存のCheckpointStoreはWALと `synchronous=NORMAL` を設定します。Programストアの接続は、SQLiteのsynchronousのデフォルトのままです。PostgreSQLは、既存のストアの実装と、4接続のチェックポイントプールを使います。結果を比較するときは、実際のサーバー設定を記録してください。これらはバックエンドのデフォルトであり、電源断に対する保証が同一であるという主張ではありません。
 
-## 時間と memory field の読み方
+## 時間とメモリのフィールドの読み方
 
-`samples` はすべての測定 invocation を含み、`first_run` は warmup 完了前に別途記録する。`cold` は store 構築、Program compilation、admission、Runtime 構築を含む。これらの field は fixture setup の一部を除くため、process startup の完全な内訳ではない。
+`samples` には、計測したすべての呼び出しが入ります。`first_run` は、ウォームアップが終わる前に、別に記録されます。`cold` には、ストアの構築、Programのコンパイル、admission、Runtimeの構築が含まれます。これらのフィールドは、フィクスチャのセットアップの一部を含まないため、プロセスの起動時間の完全な内訳ではありません。
 
-一つの逐次 invocation 内で、`before_core_us`、`core_span_us`、`after_core_us`、`wake_us` は Program event timestamp を使い、開始から wait 復帰までの wall time を分割する。**Core event 区間は純粋な Core CPU time ではない。** checkpoint 作業と、multi-command 行では Core call 間の時間を含む。`start_us` と `post_start_us` は二つ目の分割を提供する。二つの分割を足し合わせてはならない。Core 作業は `start()` が戻る前に開始する場合がある。
+直列な1回の呼び出しの中で、`before_core_us`、`core_span_us`、`after_core_us`、`wake_us` は、Programのイベントのタイムスタンプを使って、開始から待機が戻るまでの実時間を分割します。**Coreのイベント区間は、純粋なCoreのCPU時間ではありません。** チェックポイントの処理が含まれ、複数コマンドの行では、Coreの呼び出しの間の時間も含まれます。`start_us` と `post_start_us` は、もう1つの分割を提供します。2つの分割を足し合わせてはいけません。`start()` が戻る前に、Coreの処理が始まることがあるためです。
 
-event sink は atomic timestamp を記録する。したがって lifecycle 結果はこの observer を含むが、direct/generator ケースには event sink がない。これらは診断時間であり、observer のない最小 latency を主張するものではない。
+イベントシンクは、アトミックなタイムスタンプを記録します。そのため、ライフサイクルの結果にはこのオブザーバーの影響が含まれ、direct／generatorのケースにはイベントシンクがありません。これらは診断用の時間であり、オブザーバーのない場合の最小のレイテンシーを示すものではありません。
 
-runner は最初に各 process を集約し、その後に独立した process 結果を集約する。`invocation_median.total_us.median` は process median の中央値である。`invocation_p95.total_us.median` は process 内 p95 の中央値である。percentile は nearest rank を使い、process sample が七つなら、process-level p95 はその最大値となる。生 sample、MAD、極値は残す。中央値の小差から統計的有意性を推定してはならない。
+ランナーは、まずプロセスごとに集計し、次に、それらの独立したプロセスの結果を集計します。`invocation_median.total_us.median` は、プロセスごとの中央値の中央値です。`invocation_p95.total_us.median` は、プロセス内のp95の中央値です。パーセンタイルには、nearest rank法を使います。プロセスのサンプルが7つのとき、プロセスレベルのp95は、その最大値になります。生のサンプル、MAD、極値も参照できます。中央値の小さな差から、統計的な有意性を推測してはいけません。
 
-Linux RSS は process memory であり、JS allocation accounting ではない。lifecycle RSS の増加は、保持した run history と allocator behavior を含む。resident-generator RSS は runtime/bootstrap overhead と allocator granularity を含む。増分占有量を推定するには、より大きい generator 数の間の傾きを使う。いずれも recursive agent 一つの全 memory 測定ではない。他 platform の memory field がゼロなのは、Linux 専用 probe を利用できないことを意味する。
+LinuxのRSSは、プロセスのメモリであり、JSのメモリ確保の会計ではありません。ライフサイクルのRSSの増加には、保持されている実行履歴とアロケーターの挙動が含まれます。常駐するジェネレーターのRSSには、ランタイムの初期化のオーバーヘッドと、アロケーターの粒度が含まれます。増分の占有量を見積もるには、ジェネレーターの数が多い範囲での傾きを使ってください。どちらも、再帰的なエージェント1つあたりの総メモリの測定ではありません。他のプラットフォームでメモリのフィールドが0になっているのは、Linux専用のプローブが使えないという意味です。
 
-runner は binary/source hash、source commit、tracked diff hash、CMake option、CPU、process affinity を記録する。report とともに生証拠を保持し、測定 run 中に binary を再ビルドしてはならない。
+ランナーは、バイナリとソースのハッシュ、ソースのコミットと追跡対象の差分のハッシュ、CMakeのオプション、CPUとプロセスのアフィニティを記録します。報告には、生のエビデンスを添えて保管してください。測定の実行中に、バイナリをビルドし直してはいけません。
 
-## Linux での任意の database API 診断
+## Linuxでの、データベースAPIのオプションの診断
 
-`benchmarks/program_store_profile.c` は、Program runtime を変えずに database-library call の回数と時間を記録できる。主たる非 profile マトリクスが完了した**後**に、別途ビルドする。
+`benchmarks/program_store_profile.c` は、Programのランタイムを変更せずに、データベースライブラリの呼び出し回数と時間を計測できます。プロファイラーを使わない主要なマトリクスが**終わった後で**、これを別にビルドします。
 
 ```sh
 cc -O2 -shared -fPIC -I/usr/include/postgresql \
@@ -71,8 +71,8 @@ LD_PRELOAD=/tmp/program_store_profile.so \
   --storage /tmp/new-cost-profile.sqlite --iterations 40 --warmup 0
 ```
 
-profiler は分類と集計回数・時間だけを記録し、SQL text、parameter、credential は決して記録しない。`sqlite3_step`、または同期 `PQexec` と `PQexecParams`、および transaction control を含む `sqlite3_exec` を測定する。二重計上を避けるため、`exec` 内のネストした SQLite step は除外する。SQLite row iteration は、一つの query に対して `step` を複数回呼ぶ場合がある。async libpq call、接続確立、SQLite prepare time、呼び出し元の serialization は、これらの API interval 外である。process 全体の total は constructor、schema 作成、admission、warmup を含む。profiling は overhead を追加し、同時 API interval は重なり得るため、正確な CPU 内訳として baseline wall time からこれらの値を差し引いてはならない。固定 setup call 数と run ごとの call を分けるには、invocation 数を変えて、新しい database での run を比較する。
+プロファイラーが記録するのは、カテゴリと、回数・時間の集計だけです。SQLの文字列、パラメーター、認証情報は記録しません。計測するのは、`sqlite3_step`、または同期の `PQexec` と `PQexecParams`、そして `sqlite3_exec`（トランザクション制御を含む）です。二重に数えないように、`exec` の内側でのSQLiteの入れ子の step は除外します。SQLiteでは、1つのクエリの行を反復するときに、`step` が複数回呼ばれることがあります。非同期のlibpqの呼び出し、接続の確立、SQLiteのprepareの時間、呼び出し側のシリアライズは、これらのAPIの区間の外にあります。プロセス全体の合計には、コンストラクター、スキーマの作成、admission、ウォームアップが含まれます。プロファイリングはオーバーヘッドを加え、並行するAPIの区間は重なりうるため、これらの値を、CPUの正確な内訳として、ベースラインの実時間から引いてはいけません。固定のセットアップの呼び出し回数と、実行ごとの呼び出し回数を分けるには、呼び出し回数を変えて、新しいデータベースでの実行を比較してください。
 
-## この baseline の境界
+## このベースラインの境界
 
-このマトリクスは、逐次の合成実行と停止中 generator の占有量を測定する。tenant fairness、同時 throughput、recursive spawn、live replacement、process-loss recovery、本番 storage、JIT backend は検証しない。generator replay 行は、記録済みの合成 command response を replay し、完全な永続再接続を測定しない。JIT の可能性を評価するには、warmup、compilation、memory cost を含む実際の比較が必要である。
+このマトリクスが測定するのは、直列に実行した合成のワークロードと、一時停止したジェネレーターが占める量です。テナント間の公平性、並行スループット、再帰的なspawn、ライブな置き換え、プロセス喪失からの復旧、本番のストレージ、JITバックエンドについては、適格性確認をしていません。ジェネレーターのリプレイの行は、記録した合成のコマンド応答をリプレイするもので、永続的な再接続全体の時間を測るものではありません。JITの可能性を判断するには、ウォームアップ、コンパイル、メモリのコストを含めた、実際の比較が必要です。

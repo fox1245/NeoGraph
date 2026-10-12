@@ -1,38 +1,38 @@
 <!-- neograph-i18n: source=docs/PROGRAM_SHA256_OPTIMIZATION.md locale=ja source_sha256=7e4fa7e81f456ac2c8027d75d34ccf3f85a9cbc18acbd7cef91f1282558b981a -->
-# SHA-256 の CPU 高速化 — 2026-09-07
+# SHA-256のCPUによる高速化 — 2026-09-07
 
 **Languages:** [English](PROGRAM_SHA256_OPTIMIZATION.md) | [한국어](PROGRAM_SHA256_OPTIMIZATION.ko.md) | [日本語](PROGRAM_SHA256_OPTIMIZATION.ja.md) | [简体中文](PROGRAM_SHA256_OPTIMIZATION.zh-CN.md)
 
-実行時判定で使う x86 SHA 命令により、64 KiB の identity hash の測定コストは約 **6.2 倍**高速になった。先行する canonical JSON 最適化（`779be451`）と比べ、大入力ケースのペア測定では、Program latency が **memory store で約 28%、SQLite で約 20%、PostgreSQL で約 8%**改善した。小入力の database ケースでは、有意な改善を確認できなかった。
+実行時に有効にするx86のSHA命令によって、測定した64 KiBのIDハッシュのコストは、約**6.2倍**に減りました。直前の正規化JSONの最適化（`779be451`）と比べると、入力が大きいケースで、ペアで測定したProgramのレイテンシーは、**メモリストアで約28%、SQLiteで約20%、PostgreSQLで約8%**改善しました。データベースを使う小さなケースでは、意味のある改善は確認できませんでした。
 
 ## 実装と互換性
 
-元の scalar SHA-256 圧縮と padding を `canonical_json.cpp` から内部 `sha256.cpp` module へ移した。独立した非インライン x86-64 関数が、SHA 命令で round と message schedule を処理する。register layout は、出典を明記した public-domain の [SHA-Intrinsics 参照実装](https://github.com/noloader/SHA-Intrinsics/blob/d03795497f3e4576083fc2cd8fe0b924f24d0bb2/sha256-x86.c)に従う。実装は四つの vector を循環させる schedule を使う。元の scalar 実装も利用可能なままである。
+もとのスカラーなSHA-256の圧縮関数とパディングは、`canonical_json.cpp` から、内部の `sha256.cpp` モジュールに移しました。インライン展開されない別のx86-64の関数が、SHA命令でラウンドとメッセージスケジュールを実行します。そのレジスタ配置は、出典を明記したパブリックドメインの[SHA-Intrinsicsのリファレンス](https://github.com/noloader/SHA-Intrinsics/blob/d03795497f3e4576083fc2cd8fe0b924f24d0bb2/sha256-x86.c)に従っています。実装は、4本のベクトルを回転させるスケジュールを使います。もとのスカラーな実装も、引き続き使えます。
 
-自動 dispatch は、CPUID basic leaf の存在、SSSE3、SSE4.1、SHA 対応を検査してから高速化関数を選ぶ。GCC/Clang の命令有効化はその関数に限定し、global architecture flag は使わない。MSVC も、同じ runtime check の下で同じ intrinsic をコンパイルする。他の architecture と `NEOGRAPH_ENABLE_SHA256_ACCELERATION=OFF` の build は portable 経路を選ぶ。追加の library dependency は導入していない。
+自動ディスパッチは、高速化した関数を選ぶ前に、CPUIDの基本リーフが使えること、SSSE3、SSE4.1、SHAのサポートを確認します。GCCやClangで命令を有効にするのは、その関数の中だけで、アーキテクチャ全体に影響するフラグは使いません。MSVCも、同じ実行時チェックの背後で、同じintrinsicsをコンパイルします。他のアーキテクチャや、`NEOGRAPH_ENABLE_SHA256_ACCELERATION=OFF` でビルドした場合は、移植可能なパスが選ばれます。ライブラリの依存は、追加していません。
 
-非公開 backend selector は、プロセス全体の挙動を変えずに portable/hardware を強制する正しさのテストを可能にする。installed SDK には含まれない。hardware を明示的に選び、利用できない場合は例外を投げる。digest state は呼び出しごとにローカルであり、CPU の利用可否と選択した function pointer だけをキャッシュする。
+内部用のバックエンドセレクターによって、プロセス全体の動作を変えずに、移植可能なパスとハードウェアのパスを強制して、正しさをテストできます。これは、インストールされるSDKの一部ではありません。ハードウェアを明示的に選んだときに、使えない場合は例外が送出されます。ダイジェストの状態は、呼び出しごとのローカルなものです。キャッシュされるのは、CPUが使えるかどうかと、選ばれた関数ポインターだけです。
 
-identity framing は変わらない。`preamble || NUL || domain || NUL || decimal(payload byte length) || NUL || payload` である。padding、全 256 digest bit、小文字 hexadecimal、`sha256:` prefix を保持する。既存の input-buffer 構築も維持する。この変更は streaming、hash caching、弱い checksum、新しい storage format、異なる authority/budget 規則を導入しない。
+IDのフレーミングは変わりません。`preamble || NUL || domain || NUL || decimal(payload byte length) || NUL || payload` です。パディング、ダイジェストの256ビットすべて、小文字の16進数、`sha256:` の接頭辞は、そのまま保たれます。既存の入力バッファの構築も、そのままです。この変更で、ストリーミング、ハッシュのキャッシュ、弱いチェックサム、新しい保存形式、異なる権限や予算の規則は、導入されません。
 
-命令 semantics の参照: [Intel SHA extensions](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sha-extensions.html)。実行環境の Ryzen は必要な x86 instruction bit を公開するため、Intel vendor だけに限定する dispatch ではない。
+命令の意味に関するリファレンスは、[Intel SHA拡張](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sha-extensions.html)です。測定に使ったRyzenは、必要なx86の命令ビットを公開しています。Intel製のCPUだけを対象にしたディスパッチではありません。
 
 ## 検証
 
-- 空入力、`abc`、56-byte vector、百万個の `a` byte を含む、標準 SHA-256 既知解。
-- binary payload、padding 境界、unaligned input view、identity framing、埋め込み NUL に対する、独立した Python-hashlib vector 35 件。
-- portable、automatic、hardware 出力を比較する決定的な 512-input corpus、および独立 hash の同時実行。
-- CPU-feature predicate テストは、leaf の欠如や必須 instruction bit のいずれかの欠如を拒否する。
-- Linux ASan/UBSan: 通常 build と高速化無効 build の両方で SHA テスト全六件が成功した。leak detection を有効にし、suppression は使っていない。
-- Windows MSVC x64: hardware 利用可能時と高速化をコンパイルから除外した場合の両方で、独立 vector 35 件が成功した。これは native backend の正しさの検証であり、Windows Program suite 全体や性能の主張ではない。
-- 対象を絞った Core suite: PostgreSQL checkpoint と identity consumer を含め 217 件が成功した。
-- Program suite 全体: 680 件が成功し、memory store には該当しない process-restart ケース二件を skip した。保存 identity の golden、SQLite/PostgreSQL 復旧、replacement、lineage、budget は引き続き対象となっている。
+- 標準のSHA-256の既知の答え（空の入力、`abc`、56バイトのベクトル、`a` を100万バイト）
+- Pythonのhashlibで独立に求めた35個のベクトル（バイナリのペイロード、パディングの境界、アラインされていない入力ビュー、IDのフレーミング、埋め込まれたNUL）
+- 決定的な512個の入力のコーパスで、移植可能なパス、自動、ハードウェアの出力を比較。独立したハッシュの並行実行も確認
+- CPU機能の判定のテストは、リーフがない場合や、必要な命令ビットが1つでも欠けている場合を拒否
+- Linux ASan/UBSan：6つのSHAテストすべてが、通常のビルドと、高速化を無効にしたビルドの両方で通過。リーク検出は有効で、suppressionなし
+- Windows MSVC x64：独立した35個のベクトルが、ハードウェアが使える状態と、高速化をコンパイルから外した状態の両方で通過。これはネイティブバックエンドの正しさの確認であり、WindowsでのProgramスイート全体や性能の主張ではありません
+- Coreに絞ったスイート：217テストが通過（PostgreSQLのチェックポイントとIDのコンシューマーを含む）
+- Programスイート全体：680テストが通過。対象外のメモリストアのプロセス再起動のケース2件はスキップ。保存済みのゴールデンなID、SQLiteとPostgreSQLでの復旧、置き換え、系統、予算も、引き続き対象
 
-## 独立した identity-hash 比較
+## IDハッシュ単体の比較
 
-入力サイズごとに新しい process pair 七組、warmup 20 回、各プロセスで hash 500 回を測定し、1 MiB では 100 回に減らした。AB/BA とケース順を交互にする。benchmark には変更していない identity framing と hex encoding を含む。返されたすべての digest を Python hashlib で独立に検査する。以下の時間は process median の中央値であり、削減率は paired ratio の中央値を使う。
+入力サイズごとに、新しいプロセスのペアを7組実行しました。ウォームアップは20回、プロセスあたりの計測は500回のハッシュで、1 MiBでは100回に減らしています。AB/BAとケースの順序は、交互にしました。ベンチマークには、変わっていないIDのフレーミングと16進数のエンコードが含まれます。返されたダイジェストはすべて、Pythonのhashlibで独立に検証しています。以下の時間は、プロセスごとの中央値の中央値です。削減率には、ペアの比の中央値を使っています。
 
-| Payload bytes | 変更前 (µs) | 変更後 (µs) | ペア削減率 |
+| ペイロードのバイト数 | 変更前（µs） | 変更後（µs） | ペアでの削減率 |
 | --- | --- | --- | --- |
 | 0 | 0.391 | 0.240 | +38.62% |
 | 32 | 0.591 | 0.291 | +50.76% |
@@ -45,11 +45,11 @@ identity framing は変わらない。`preamble || NUL || domain || NUL || decim
 | 65536 | 190.305 | 30.727 | +83.79% |
 | 1048576 | 3367.703 | 507.140 | +84.14% |
 
-## Program 比較
+## Programの比較
 
-同じ Ryzen 7 5800X、WSL2 Ubuntu 24.04、repository hardening を含む GCC 13.3 Release `-O3 -DNDEBUG`、Runtime scheduler thread 一つ、native-WSL PostgreSQL 16.15 構成を使った。両 binary は凍結済みである。各ケースで process pair 五組、プロセスごとに warmup 三回と測定呼び出し 12 回を行い、各プロセスに新しい SQLite/PostgreSQL database を用いた。このペア時間測定中に build、profiler、他のテストは実行していない。
+同じRyzen 7 5800X、WSL2 Ubuntu 24.04、GCC 13.3のRelease（`-O3 -DNDEBUG`、リポジトリの堅牢化を含む）、Runtimeのスケジューラースレッド1つ、WSLネイティブのPostgreSQL 16.15の構成です。2つのバイナリは固定しました。ケースごとに、5組のプロセスのペアを実行し、プロセスあたり、ウォームアップ3回と、計測する呼び出し12回を行います。SQLiteとPostgreSQLのデータベースは、プロセスごとに新しく作ります。これらのタイミング測定のペアの間、ビルド、プロファイラー、他のテストは実行しませんでした。
 
-| ケース | 変更前 (ms) | 変更後 (ms) | ペア削減率 | ペアの変更後/変更前の範囲 |
+| ケース | 変更前（ms） | 変更後（ms） | ペアでの削減率 | ペアでの変更後／変更前の範囲 |
 | --- | --- | --- | --- | --- |
 | direct-0 | 0.0081 | 0.0129 | -3.22% | 0.5786–1.6575 |
 | memory-cpp-0 | 2.0560 | 1.9606 | +4.64% | 0.8751–0.9940 |
@@ -64,26 +64,26 @@ identity framing は変わらない。`preamble || NUL || domain || NUL || decim
 | postgres-javascript-0-commands-16 | 992.9859 | 991.9219 | +0.21% | 0.9310–1.0355 |
 | postgres-cpp-0 | 53.1536 | 53.1421 | +0.81% | 0.9605–1.0069 |
 
-ペア百分率は、別々に集約した中央値列の比率と一致する必要はない。大入力の改善は五組すべてで一貫していた。比率が 1 の両側に分布する小ケースでは結論を出せない。これは普遍的な高速化でも LLM 応答時間の比較でもない。
+ペアでの割合は、独立して集計した中央値の列の比とは、一致しないことがあります。入力が大きいケースの改善は、5組のペアすべてで一貫していました。比が1の両側にまたがる小さなケースは、結論が出せません。これは、あらゆる場合の高速化でも、LLMの応答時間の比較でもありません。
 
-微小な direct-Core 行にはノイズがあったため、より広い対照測定として七組、warmup 100 回、測定 direct invocation 10,000 回を使った。変更後/変更前比の中央値は 1.0014、範囲は 0.9838–1.0331 だった。有意な direct-Core の変化は確認できない。
+極小のdirect Coreの行はばらつきが大きかったため、より広い対照として、7組のペアで、100回のウォームアップと10,000回の直接の呼び出しを測定しました。変更後／変更前の比の中央値は1.0014で、範囲は0.9838〜1.0331でした。direct Coreに意味のある変化があったとは言えません。
 
-## 機械語と追加の証拠
+## 機械語と追加のエビデンス
 
-owner-local の AgentX radare2 read-only peer が、content-addressed な変更後 ELF を調査した。symbol 境界内の disassembly では、`compress_x86_sha` 内の `SHA256RNDS2`、`SHA256MSG1`、`SHA256MSG2`、調査した portable compressor に SHA 命令がないこと、availability check 内の CPUID 命令を確認した。専用関数は baseline 経路から分離されている。
+オーナー側ローカルのAgentXのradare2（読み取り専用のピア）が、内容でアドレス指定された、変更後のELFを調べました。シンボルの範囲で区切った逆アセンブルによって、`compress_x86_sha` の中に `SHA256RNDS2`、`SHA256MSG1`、`SHA256MSG2` があること、調べた移植可能な圧縮関数にSHA命令がないこと、利用可否のチェックにCPUID命令があることを確認しました。特殊化した関数は、ベースラインの経路から分離されています。
 
-変更後の 64 KiB memory workload に対する software CPU-clock profile は、損失ゼロで 1,418 sample を収集した。hardware compressor は sample の約 9.31%、unescaped-string scanning は 17.91% だった。約 39% は未解決の shared-library symbol に残っており、追加の帰属調査なしにすべて allocation に割り当ててはならない。これはプロセス全体の leaf-IP profile であり、wall time の内訳ではなく、主要な時間測定にも使っていない。
+変更後の、64 KiBのメモリのワークロードに対するソフトウェアのCPUクロックによるプロファイルでは、サンプルを1,418個取得し、欠落はありませんでした。ハードウェアの圧縮関数がサンプルの約9.31%、エスケープされていない文字列のスキャンが17.91%を占めました。約39%は、解決できない共有ライブラリのシンボルに残りました。さらに調べるまでは、これをすべてメモリ確保のせいにしてはいけません。これはプロセス全体のleaf-IPのプロファイルであり、実時間の内訳ではありません。主要な時間の比較には使っていません。
 
-AgentX は owner が直接認可した analysis peer として使った。AgentX model WorkOrder や Analysis Graph provenance の取り込みは主張しない。その service configuration は変更していない。
+AgentXは、オーナーが直接許可した分析用のピアとして使いました。AgentXのモデルのWorkOrderや、Analysis Graphの来歴のインポートは、行っていません。そのサービス設定は変更していません。
 
-## 再現と保持した証拠
+## 再現方法と、保存してあるエビデンス
 
-変更前 revision（`779be451`）と変更後 revision で、同一の Release option を使って `bench_sha256` と `bench_program_cost` をビルドする。新しい identity benchmark source は、旧 Core library に対してコンパイルできる。例:
+変更前のリビジョン（`779be451`）と、変更後のリビジョンで、同じReleaseのオプションを使って、`bench_sha256` と `bench_program_cost` をビルドします。新しいIDのベンチマークのソースは、古いCoreライブラリに対してもコンパイルできます。例を示します。
 
 ```sh
 bench_sha256 65536 500
 ```
 
-end-to-end 比較には[ペア Program runner](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md) を使う。build 時に高速化を無効にするには `-DNEOGRAPH_ENABLE_SHA256_ACCELERATION=OFF` を設定する。
+エンドツーエンドの比較には、[ペアで実行するProgramのランナー](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md)を使います。ビルド時に高速化を無効にするには、`-DNEOGRAPH_ENABLE_SHA256_ACCELERATION=OFF` を設定します。
 
-生結果、独立 vector、source/binary hash、upstream source identity、AgentX RPC 記録、範囲を限定した assembly、CPU sample/map、Windows smoke log、test log は、`artifacts/program-sha256-20260907/` にローカル保持している。database file は WSL に置く。認証情報は含めない。
+生の結果、独立に求めたベクトル、ソースとバイナリのハッシュ、上流のソースのID、AgentXのRPCの記録、範囲を限った逆アセンブル、CPUサンプルとマップ、Windowsのスモークテストのログ、テストのログは、ローカルの `artifacts/program-sha256-20260907/` に保存してあります。データベースのファイルは、WSLに残してあります。認証情報は含まれていません。

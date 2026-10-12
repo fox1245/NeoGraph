@@ -1,111 +1,111 @@
 <!-- neograph-i18n: source=docs/PROGRAM_COST_BASELINE_2026-09-07.md locale=ja source_sha256=a0929a5678214c2e42de563f8e5eb1d0137f06092e7ca01d27aa3a727b351339 -->
-# Program コストの baseline — 2026-09-07
+# Programのコストのベースライン — 2026-09-07
 
 **Languages:** [English](PROGRAM_COST_BASELINE_2026-09-07.md) | [한국어](PROGRAM_COST_BASELINE_2026-09-07.ko.md) | [日本語](PROGRAM_COST_BASELINE_2026-09-07.ja.md) | [简体中文](PROGRAM_COST_BASELINE_2026-09-07.zh-CN.md)
 
-小 payload の baseline は、Program の管理処理と永続ストア処理を最初の最適化対象として示す。JavaScript の解釈が支配的なコストだとは確認しておらず、JIT の高速化も測定していない。
+ペイロードが小さい場合のベースラインから、最初の最適化の対象は、Programの帳簿処理と、永続ストアの処理だと分かります。JavaScriptの解釈が支配的なコストであるとは言えません。また、JITによる高速化は測定していません。
 
 ## 環境と方法
 
-- ベースの source: `319f8748c986a2f345ae6de88abb42d89eef9837` と、`metadata.json` の source/binary hash に記録した測定専用の追加。
-- AMD Ryzen 7 5800X、WSL2 Ubuntu 24.04、利用可能な logical CPU は 16。GCC 13.3、Release `-O3 -DNDEBUG`、repository hardening 有効。
-- binary と SQLite database は WSL ext4 filesystem 上に置く。PostgreSQL 16.15 は native WSL Docker 内でローカル Docker volume を使い、localhost TCP で接続する。`fsync`、`synchronous_commit`、`full_page_writes` は有効、WAL sync method は `fdatasync`。
-- ケースごとに新しいプロセス七つを使い、各 lifecycle/direct process で warmup 十回と測定 invocation 四十回を実行した。Runtime scheduler thread は一つで、同時 test job や model call はない。この desktop/VM は、分離された bare-metal benchmark host ではない。
-- 成功した process sample は 308、ケースは 44。実際のすべての invocation で counter と payload 出力を検査した。ケース順は反復ごとに正順/逆順を交互にする。
-- 主要値は七つの process median の中央値である。以下の p95 は、七つの process 内 nearest-rank p95 の中央値であり、統計的に独立な pooled p95 ではない。
-- 生 metadata、case、sample、summary は `artifacts/program-costs-20260907/` にローカル保持する。SQLite database は WSL 内の `/tmp/neograph-program-costs-20260907/` に残し、database file は commit しない。
+- ソースの基点：`319f8748c986a2f345ae6de88abb42d89eef9837` に、測定専用の追加を加えたもの。追加分は、`metadata.json` のソースとバイナリのハッシュに記録されています。
+- AMD Ryzen 7 5800X、WSL2 Ubuntu 24.04、利用できる論理CPUは16個。GCC 13.3、Release（`-O3 -DNDEBUG`）、リポジトリの堅牢化は有効。
+- バイナリとSQLiteのデータベースは、WSLのext4ファイルシステム上に置きました。PostgreSQL 16.15は、WSLのネイティブなDockerで、ローカルのDockerボリュームを使って動かし、localhostのTCPで接続します。`fsync`、`synchronous_commit`、`full_page_writes` はオンで、WALの同期方式は `fdatasync` です。
+- ケースごとに、新しいプロセスを7つ使い、ライフサイクルとdirectの各プロセスは、ウォームアップ10回と、計測する呼び出し40回を行います。Runtimeのスケジューラースレッドは1つで、並行するテストのジョブも、モデル呼び出しもありません。このデスクトップ（VM）は、隔離されたベアメタルのベンチマーク専用ホストではありません。
+- 成功したプロセスのサンプルは308個、ケースは44個です。実際の呼び出しは、すべて、カウンターとペイロードの出力を確認しています。ケースの順序は、繰り返しごとに順方向と逆方向を交互にしました。
+- 主要な値は、7つのプロセスの中央値の中央値です。以下のp95は、プロセス内のnearest rank法によるp95、7つの中央値です。統計的に独立した、全体をまとめたp95ではありません。
+- 生のメタデータ、ケース、サンプル、集計は、ローカルの `artifacts/program-costs-20260907/` に保存してあります。SQLiteのデータベースは、WSLの `/tmp/neograph-program-costs-20260907/` の下に残してあり、データベースのファイルはコミットしていません。
 
-[測定の定義と再現](PROGRAM_COST_MEASUREMENT.md)を参照。この診断マトリクスは、既存 QuickJS acceptance gate を置き換えない。
+測定項目の定義と再現方法は、[測定の定義と再現方法](PROGRAM_COST_MEASUREMENT.md)を参照してください。この診断用のマトリクスは、既存のQuickJSの受け入れゲートの代わりにはなりません。
 
-## Core 一回の呼び出し、空 payload
+## Coreの呼び出しが1回、ペイロードが空の場合
 
-| 経路 | 中央値 (ms) | プロセス内 p95 (ms) | プロセス間中央値の MAD (ms) |
+| 経路 | 中央値（ms） | プロセス内p95（ms） | 中央値のプロセス間MAD（ms） |
 | --- | --- | --- | --- |
-| Core 直接、checkpoint なし | 0.0074 | 0.0076 | 0.0000 |
-| C++ Program / memory | 2.0031 | 2.2607 | 0.0355 |
-| JavaScript Program / memory | 3.3192 | 3.4898 | 0.0196 |
-| C++ Program / SQLite | 8.5885 | 13.5360 | 0.1155 |
-| JavaScript Program / SQLite | 16.4288 | 20.9731 | 0.0253 |
-| C++ Program / PostgreSQL | 49.0355 | 51.2952 | 0.5896 |
-| JavaScript Program / PostgreSQL | 80.1248 | 82.8138 | 0.5005 |
+| Coreを直接（チェックポイントなし） | 0.0074 | 0.0076 | 0.0000 |
+| C++ Program／メモリ | 2.0031 | 2.2607 | 0.0355 |
+| JavaScript Program／メモリ | 3.3192 | 3.4898 | 0.0196 |
+| C++ Program／SQLite | 8.5885 | 13.5360 | 0.1155 |
+| JavaScript Program／SQLite | 16.4288 | 20.9731 | 0.0253 |
+| C++ Program／PostgreSQL | 49.0355 | 51.2952 | 0.5896 |
+| JavaScript Program／PostgreSQL | 80.1248 | 82.8138 | 0.5005 |
 
-direct Core 行は Program lifecycle と checkpoint semantics を除く。Program との比率は全処理範囲の比較であり、同等の永続性を持つ engine の比較や regression の証拠ではない。C++ Program も実際の journal/checkpoint 処理を行う。JS–C++ 差には interpreter だけでなく、追加の command journaling と conversion も含む。
+Coreを直接実行する行には、Programのライフサイクルとチェックポイントの意味が含まれません。Programとの比は、全体の処理の大きさの比較です。永続性が同等のエンジンどうしの比較ではなく、リグレッションの証拠でもありません。C++ Programも、実際のジャーナルとチェックポイントの処理を行っています。JSとC++の差には、インタープリターだけでなく、追加のコマンドジャーナルと変換が含まれます。
 
-## Payload サイズの影響
+## ペイロードサイズによる変化
 
-| 経路 | 0 bytes (ms) | 4 KiB (ms) | 64 KiB (ms) |
+| 経路 | 0バイト（ms） | 4 KiB（ms） | 64 KiB（ms） |
 | --- | --- | --- | --- |
-| Core 直接 | 0.0074 | 0.0079 | 0.1308 |
-| C++ Program / memory | 2.0031 | 2.8567 | 12.2975 |
-| JavaScript Program / memory | 3.3192 | 5.2922 | 30.8116 |
-| JavaScript Program / SQLite | 16.4288 | 23.9060 | 130.6772 |
-| JavaScript Program / PostgreSQL | 80.1248 | 93.5064 | 252.1259 |
+| Coreを直接 | 0.0074 | 0.0079 | 0.1308 |
+| C++ Program／メモリ | 2.0031 | 2.8567 | 12.2975 |
+| JavaScript Program／メモリ | 3.3192 | 5.2922 | 30.8116 |
+| JavaScript Program／SQLite | 16.4288 | 23.9060 | 130.6772 |
+| JavaScript Program／PostgreSQL | 80.1248 | 93.5064 | 252.1259 |
 
-payload は実際の channel state を通じて渡し、不変であることを検査する。model output や模擬 network delay ではない。
+ペイロードは、実際のチャネルの状態を通して運ばれ、変化していないことが確認されます。モデルの出力でも、模擬したネットワーク遅延でもありません。
 
-## Generator と bridge のコスト
+## ジェネレーターとブリッジのコスト
 
-| Payload | Open (µs) | 最初の command (µs) | warm command 往復 (µs) | 終端 next (µs) | Close (µs) |
+| ペイロード | オープン（µs） | 最初のコマンド（µs） | ウォーム状態のコマンドの往復（µs） | 終了時のnext（µs） | クローズ（µs） |
 | --- | --- | --- | --- | --- | --- |
 | 0 | 330.34 | 45.65 | 26.66 | 5.73 | 35.85 |
 | 4096 | 349.72 | 171.95 | 153.32 | 30.99 | 39.99 |
 | 65536 | 811.60 | 2038.30 | 2088.19 | 423.18 | 41.01 |
 
-これらの分離した呼び出しは、合成した Core response を使う。warm 往復時間は native JSON serialization/parsing、host command 作成、JS 実行を含む。純粋な bytecode 実行時間ではなく、lifecycle 行から直接差し引けない。大 payload は、無視できないデータ変換コストを示す。
+これらの単独の呼び出しは、合成したCoreの応答を使います。ウォーム状態の往復の時間には、ネイティブのJSONのシリアライズとパース、ホストのコマンドの生成、JSの実行が含まれます。純粋なバイトコードの実行時間ではなく、ライフサイクルの行から直接引くこともできません。ペイロードが大きい場合は、データ変換のコストが無視できないことが分かります。
 
-## Cold 準備
+## コールドの準備
 
-| Mode/backend | Store open (ms) | Compile (ms) | Admit (ms) | Runtime 作成 (ms) | 初回 run (ms) |
+| モード／バックエンド | ストアのオープン（ms） | コンパイル（ms） | admission（ms） | Runtimeの作成（ms） | 最初の実行（ms） |
 | --- | --- | --- | --- | --- | --- |
 | memory-cpp-0 | 0.0054 | 0.6768 | 1.0492 | 0.1405 | 4.4991 |
 | memory-javascript-0 | 0.0054 | 1.2498 | 1.2180 | 0.1420 | 5.9273 |
 | sqlite-javascript-0 | 20.0656 | 1.3064 | 2.9385 | 0.1705 | 25.2293 |
 | postgres-javascript-0 | 169.2527 | 1.2941 | 5.9809 | 0.1714 | 98.6726 |
 
-compilation/admission はプロセスごとに一度、warm invocation の時間測定外で行う。generator open は、新しく開始する JS Program ごとに再び行う。これらの cold field は fixture setup の一部を省き、live replacement や migration は測定しない。
+コンパイルとadmissionは、プロセスごとに1回、ウォーム状態の呼び出しの時間の外で行われます。ジェネレーターのオープンは、新しく開始するJS Programごとに、あらためて行われます。これらのコールドのフィールドには、フィクスチャのセットアップの一部が含まれず、ライブな置き換えやマイグレーションの時間も含まれません。
 
-## Event marker による分割
+## イベントマーカーによる内訳
 
-この表だけは、各セルが全測定 invocation の平均である。そのため、四つの marker interval の合計は、丸めを除いて平均 total と一致する。最初と最後の Core event の間には checkpoint 作業が含まれ、純粋な Core CPU time ではない。
+この表に限り、各セルは、計測したすべての呼び出しの平均値です。そのため、4つのマーカー区間を足すと、平均の合計になります（丸めの誤差を除く）。最初と最後のCoreイベントの間の区間には、チェックポイントの処理が含まれます。純粋なCoreのCPU時間ではありません。
 
-| Backend (JavaScript, 0 bytes) | 最初の Core event より前 (ms) | Core event の区間 (ms) | 最後の Core event より後 (ms) | 終端から wait 復帰まで (ms) |
+| バックエンド（JavaScript、0バイト） | 最初のCoreイベントまで（ms） | Coreイベントの区間（ms） | 最後のCoreイベントの後（ms） | 終了から待機が戻るまで（ms） |
 | --- | --- | --- | --- | --- |
 | memory | 1.1931 | 0.4062 | 1.7080 | 0.0340 |
 | sqlite | 7.0816 | 1.2735 | 8.7646 | 0.0353 |
 | postgres | 29.8013 | 9.1486 | 41.4887 | 0.0357 |
 
-## 一つの generator 内での複数 Core call
+## 1つのジェネレーターでの、複数のCore呼び出し
 
-| Backend | 1 call/run (ms) | 4 calls/run (ms) | 16 calls/run (ms) |
+| バックエンド | 1回／実行（ms） | 4回／実行（ms） | 16回／実行（ms） |
 | --- | --- | --- | --- |
 | memory | 3.319 | 9.041 | 31.596 |
 | sqlite | 16.429 | 55.527 | 331.089 |
 | postgres | 80.125 | 244.105 | 1034.104 |
 
-実際の journal と checkpoint を伴う逐次呼び出しである。call 数で割れば run の開始・終了を償却できるが、dispatch cost を分離することにはならない。
+これらは、実際のジャーナルとチェックポイントを伴う、直列の呼び出しです。呼び出し回数で割ると、実行の開始と終了のコストは均されますが、ディスパッチのコストだけを取り出すことはできません。
 
-## 停止中 generator の memory と replay
+## 一時停止したジェネレーターのメモリとリプレイ
 
-| 停止中 generator 数 | RSS 増加の中央値 (MiB) |
+| 一時停止したジェネレーター数 | RSS増加量の中央値（MiB） |
 | --- | --- |
 | 1 | 1.285 |
 | 32 | 6.309 |
 | 128 | 21.934 |
 
-| replay した合成記録 command 数 | 新規 open + replay (ms) |
+| リプレイした、合成の記録済みコマンド数 | 新規のオープンとリプレイ（ms） |
 | --- | --- |
 | 0 | 0.1276 |
 | 10 | 0.5526 |
 | 100 | 3.4148 |
 | 1000 | 33.4788 |
 
-上の memory は、bootstrap/allocator の影響を含む、独立した停止中 QuickJS runtime のものである。完全な agent、catalog、Core engine、永続履歴は含まない。replay は ProgramRuntime scheduling と journal I/O を除き、process-loss recovery latency ではない。
+上のメモリは、独立して一時停止したQuickJSランタイムのもので、起動処理とアロケーターの影響を含みます。完全なエージェント、カタログ、Coreエンジン、永続的な履歴は含みません。リプレイには、ProgramRuntimeのスケジューリングとジャーナルのI/Oは含まれません。プロセス喪失からの復旧のレイテンシーではありません。
 
-## 補足 database API profile
+## 補足：データベースAPIのプロファイル
 
-baseline 後の追加 72 run では、全 backend の両 control mode に対し、profiling on/off、invocation 一回と 21 回、三反復を比較した。表では `(21-run process total − 1-run process total) / 20` を使い、その後に反復間の中央値を取る。call-count 差は三反復すべてで同一だった。時間差は、cold process の変動の影響を受ける推定値のままである。
+ベースラインの後で、追加の72回の実行を行い、プロファイリングのオン／オフ、呼び出し1回と21回、繰り返し3回、両方の制御モード、すべてのバックエンドを比較しました。表には、`(21-run process total − 1-run process total) / 20` を使い、繰り返しにわたる中央値を取っています。呼び出し回数の差は、3回の繰り返しすべてで同一でした。時間の差は、コールドのプロセスのばらつきの影響を受ける推定値です。
 
-| 経路 | SQLite step calls/run | SQLite exec calls/run | SQLite commits/run | 同期 libpq calls/run |
+| 経路 | SQLiteのstep呼び出し／実行 | SQLiteのexec呼び出し／実行 | SQLiteのコミット／実行 | 同期のlibpq呼び出し／実行 |
 | --- | --- | --- | --- | --- |
 | memory-cpp | 0 | 0 | 0 | 0 |
 | memory-javascript | 0 | 0 | 0 | 0 |
@@ -114,19 +114,19 @@ baseline 後の追加 72 run では、全 backend の両 control mode に対し�
 | postgres-cpp | 0 | 0 | 0 | 64 |
 | postgres-javascript | 0 | 0 | 0 | 108 |
 
-SQLite step は row ごとに繰り返す場合があり、一意な SQL statement 数ではない。`exec` は transaction control を含み、ネストした step は除外する。libpq の回数・時間は同期 `PQexec`/`PQexecParams` だけを対象とし、async checkpoint 経路と接続確立を除く。client CPU は PostgreSQL server を含まない。API wall interval と client CPU は重なり、足し合わせたり、baseline latency の完全な内訳として扱ったりしてはならない。
+SQLiteのstepは、行ごとに繰り返されることがあり、一意なSQL文の数ではありません。`exec` にはトランザクション制御が含まれ、入れ子のstepは除外されています。libpqの回数と時間が対象にするのは、同期の `PQexec` / `PQexecParams` だけで、非同期のチェックポイントの経路と接続の確立は含まれません。クライアントのCPUに、PostgreSQLサーバーは含まれません。APIの実時間の区間とクライアントのCPUは、重なっているので、足し合わせたり、ベースラインのレイテンシーの完全な内訳として扱ったりしてはいけません。
 
-memory 対照では database call がゼロと記録された。JS SQLite ケースでは、invocation ごとに commit 九回と外部 step call 117 回が発生する。時間測定した database call 外の CPU 作業も引き続き profile 対象である。JS PostgreSQL ケースは invocation ごとに同期 call 108 回を加えるため、JIT 実験の前に往復回数が具体的な対象となる。
+メモリのコントロールでは、データベース呼び出しは0回でした。JSのSQLiteのケースでは、呼び出しごとに、コミットが9回、外部のstep呼び出しが117回発生します。計測したデータベース呼び出しの外にあるCPUの処理も、引き続きプロファイリングする価値があります。JSのPostgreSQLのケースでは、呼び出しごとに同期の呼び出しが108回加わります。そのため、JITの実験の前に、往復の回数が具体的な対象になります。
 
-補足証拠は `artifacts/program-costs-20260907/profile/` にある。最初の profiler は SQLite `exec` transaction call を省いており、その暫定出力は使わなかった。修正版 profile は file copy が停止してから再実行した。ただし、その後の profile **有効・無効の両方**の run は、memory 対照を含め主 baseline より明らかに遅かった。この環境変動の原因は特定していない。そのため、ここで検証済みとして扱うのは安定した call count だけである。生の API/CPU 時間は保持するが、**主 baseline latency の帰属には使わない**。主 baseline data は copy 問題より前のものであり、七反復すべてとそのばらつきを保持している。
+補足のエビデンスは、`artifacts/program-costs-20260907/profile/` にあります。最初のプロファイラーは、SQLiteの `exec` のトランザクション呼び出しを数えていませんでした。その暫定の出力は使っていません。修正したプロファイルは、ファイルのコピーが止まった後で、実行し直しました。ところが、その後の、プロファイリングあり**と**なしの両方の実行が、メモリのコントロールを含め、主要なベースラインより大幅に遅くなりました。この環境のずれの原因は、特定できていません。そのため、ここで有効だと認めるのは、安定している呼び出し回数だけです。APIとCPUの生の時間は保存してありますが、主要なベースラインのレイテンシーの原因を特定するためには**使っていません**。主要なベースラインのデータは、このコピーの問題より前のもので、7回の繰り返しすべてと、そのばらつきを保っています。
 
-既存の `bench_program` も、新しいプロセス三つで C++ Program 経路に 2.21–2.31 ms を示した（Core: 6.41–6.65 µs）。この fixture は channel 一つで bounds も異なるため、millisecond 規模の全体時間を照合するものであり、主マトリクスの条件を合わせた代替ではない。
+既存の `bench_program` も、新しい3つのプロセスで、C++ Programの経路について2.21〜2.31 msを示しました（Coreは6.41〜6.65 µs）。このフィクスチャは、チャネルが1つで、上限も異なります。そのため、ミリ秒の桁の大きさを裏付けるための照合であり、主要なマトリクスと条件を合わせた代わりにはなりません。
 
-## 次の測定と最適化順序
+## 次の測定と、最適化の順序
 
-1. Program の開始・終了と publication serialization を profile する。小 payload のコストは in-memory store と C++ control でも無視できず、JS engine の置換だけでは全体を対処できない。
-2. 測定した SQLite/libpq call count を使い、同じ journal、owner、authority、budget、atomicity の保証を維持できる箇所の重複 read と往復を調べる。永続 commit を無効にして良い数値を得てはならない。
-3. payload sweep を使い、繰り返される canonical JSON conversion と copying を調べる。compiled-source reuse は warm generator 実行と別に benchmark する。
-4. cold-start cost と現実的な agent 数での memory を含め、実際の JS CPU 作業を分離してから JIT backend を比較する。
+1. Programの開始と終了、および公開時のシリアライズをプロファイリングします。ペイロードが小さい場合のコストは、インメモリのストアでも、C++の制御でも無視できません。そのため、JSエンジンを置き換えるだけでは、全体には対処できません。
+2. 測定したSQLiteとlibpqの呼び出し回数を使って、無駄な読み取りと往復を調べます。ジャーナル、オーナー、権限、予算、アトミック性の保証を、同じように保てる範囲に限ります。永続的なコミットを無効にして、数字を良く見せてはいけません。
+3. ペイロードを変えた測定を使って、正規化JSONの変換とコピーが繰り返されている箇所を調べます。コンパイル済みのソースの再利用は、ウォーム状態のジェネレーターの実行とは別に、ベンチマークします。
+4. JITバックエンドを比較するのは、本当にJSのCPU処理だと言える部分を切り分けた後にします。現実的なエージェント数での、コールドスタートのコストとメモリも含めます。
 
-完全な CPU 帰属、複数 tenant の同時 throughput/fairness、recursive spawn、live replacement、実際の JIT 比較は未測定である。この baseline のために本番 runtime の最適化は行っていない。
+CPUの完全な帰属、マルチテナントの並行スループットと公平性、再帰的なspawn、ライブな置き換え、実際のJITとの比較は、まだ測定していません。このベースラインのために、本番のランタイムの最適化は行っていません。
