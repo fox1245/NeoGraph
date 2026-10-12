@@ -1,0 +1,129 @@
+name: Protocol interop
+# The official A2A and ACP SDKs against NeoGraph's native implementations
+# (bindings/python/tests/interop). Each suite pins its SDKs in its own
+# requirements and package.json files; this job installs exactly those pins,
+# plus Node.js for the TypeScript SDKs, and sets NEOGRAPH_INTEROP_REQUIRE so a
+# missing prerequisite fails the job instead of skipping the suite.
+# Documentation-only changes skip this workflow.
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - 'THIRD_PARTY_LICENSES'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    branches: [master]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - 'THIRD_PARTY_LICENSES'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: protocol-interop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  official-sdks:
+    name: Official A2A and ACP SDKs
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      NEOGRAPH_INTEROP_REQUIRE: '1'
+      INTEROP: bindings/python/tests/interop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install build dependencies
+        run: |
+          bash scripts/ci_apt_install.sh cmake ninja-build build-essential libssl-dev \
+            libcurl4-openssl-dev pkg-config ccache
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-protocol-interop-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            ccache-protocol-interop-${{ runner.os }}-
+      - name: Configure ccache
+        run: |
+          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+          ccache --max-size=500M
+          ccache --zero-stats
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DNEOGRAPH_BUILD_TESTS=ON -DNEOGRAPH_BUILD_EXAMPLES=OFF \
+            -DNEOGRAPH_BUILD_PYBIND=ON -DNEOGRAPH_BUILD_A2A=ON -DNEOGRAPH_BUILD_ACP=ON \
+            -DNEOGRAPH_BUILD_MCP=ON -DNEOGRAPH_BUILD_GRPC=OFF \
+            -DNEOGRAPH_BUILD_POSTGRES=OFF -DNEOGRAPH_BUILD_SQLITE=OFF
+      - name: Build the probe agents and the Python module
+        run: |
+          cmake --build build --parallel 4 --target \
+            neograph_a2a_probe_server neograph_acp_probe_agent _neograph
+      - name: ccache stats
+        if: always()
+        run: ccache --show-stats
+      - name: Install the pinned SDKs
+        run: |
+          set -euo pipefail
+          sdk="$RUNNER_TEMP/sdk"
+          python -m venv "$sdk/a2a"
+          "$sdk/a2a/bin/python" -m pip install -q -r "$INTEROP/a2a_suite/requirements.txt"
+          python -m venv "$sdk/acp"
+          "$sdk/acp/bin/python" -m pip install -q -r "$INTEROP/acp_suite/requirements.txt"
+          python -m venv "$sdk/acp-next"
+          "$sdk/acp-next/bin/python" -m pip install -q -r "$INTEROP/acp_suite/requirements-next.txt"
+          npm_install() {  # <package.json> <dir>
+            mkdir -p "$2"
+            cp "$1" "$2/package.json"
+            (cd "$2" && npm install --ignore-scripts --no-audit --no-fund >/dev/null)
+          }
+          npm_install "$INTEROP/a2a_suite/ts/package.json" "$sdk/node-a2a"
+          npm_install "$INTEROP/a2a_suite/ts/package-v03.json" "$sdk/node-a2a-v03"
+          npm_install "$INTEROP/acp_suite/package.json" "$sdk/node-acp"
+          {
+            echo "NEOGRAPH_BUILD_DIR=$GITHUB_WORKSPACE/build"
+            echo "NEOGRAPH_INTEROP_NODE=$(command -v node)"
+            echo "A2A_JS_SDK_DIST=$sdk/node-a2a/node_modules/@a2a-js/sdk/dist"
+            echo "A2A_JS_EXPRESS=$sdk/node-a2a/node_modules/express"
+            echo "A2A_JS_SDK_V03_DIST=$sdk/node-a2a-v03/node_modules/@a2a-js/sdk/dist"
+            echo "ACP_TS_SDK_DIR=$sdk/node-acp/node_modules/@agentclientprotocol/sdk"
+            echo "A2A_TRANSCRIPTS=$RUNNER_TEMP/transcripts/a2a"
+            echo "ACP_TRANSCRIPT_DIR=$RUNNER_TEMP/transcripts/acp"
+          } >> "$GITHUB_ENV"
+      - name: A2A (a2a-sdk 1.2.2, @a2a-js/sdk 1.3.0 and 0.3.14)
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/build:$GITHUB_WORKSPACE/bindings/python" \
+            "$RUNNER_TEMP/sdk/a2a/bin/python" -m pytest -p no:cacheprovider -q -rfE \
+            "$INTEROP/a2a_suite"
+      - name: ACP (agent-client-protocol 0.12.1, @agentclientprotocol/sdk 1.8.0, raw wire)
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/build:$GITHUB_WORKSPACE/bindings/python" \
+            "$RUNNER_TEMP/sdk/acp/bin/python" -m pytest -p no:cacheprovider -q -rfE \
+            "$INTEROP/acp_suite"
+      - name: ACP (agent-client-protocol 1.0.0rc2, raw wire)
+        # The TypeScript SDK already ran above; one run of it is enough.
+        run: |
+          PYTHONPATH="$GITHUB_WORKSPACE/build:$GITHUB_WORKSPACE/bindings/python" \
+            "$RUNNER_TEMP/sdk/acp-next/bin/python" -m pytest -p no:cacheprovider -q -rfE \
+            "$INTEROP/acp_suite" --ignore="$INTEROP/acp_suite/test_acp_sdk_ts_interop.py"
+      - name: Upload transcripts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: protocol-interop-transcripts
+          path: ${{ runner.temp }}/transcripts
+          if-no-files-found: ignore

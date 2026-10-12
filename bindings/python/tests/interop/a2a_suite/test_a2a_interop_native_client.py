@@ -57,6 +57,8 @@ class Peer:
 def peer(request, tmp_path_factory):
     kind, args = SERVERS[request.param]
     if kind == "ts" and not HAVE_TS:
+        if os.environ.get("NEOGRAPH_INTEROP_REQUIRE") == "1":
+            pytest.fail("NEOGRAPH_INTEROP_NODE, A2A_JS_SDK_DIST or A2A_JS_EXPRESS is not set")
         pytest.skip("set NEOGRAPH_INTEROP_NODE, A2A_JS_SDK_DIST and A2A_JS_EXPRESS for @a2a-js")
     port = free_port()
     record = tmp_path_factory.mktemp("rec") / f"{request.param}.jsonl"

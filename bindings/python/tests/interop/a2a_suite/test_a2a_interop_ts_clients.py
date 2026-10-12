@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from a2a_harness import HERE, Transcript, native_server
-from interop_support import node_binary
+from interop_support import node_binary, unavailable
 
 # The pinned @a2a-js/sdk installs (ts/package.json, ts/package-v03.json).
 NODE = node_binary()
@@ -23,7 +23,7 @@ DISTS = {
     "ts_client_v03_native_server.cjs": os.environ.get("A2A_JS_SDK_V03_DIST", ""),
 }
 if NODE is None:
-    pytest.skip("set NEOGRAPH_INTEROP_NODE to a Node.js >= 20 binary", allow_module_level=True)
+    unavailable("set NEOGRAPH_INTEROP_NODE to a Node.js >= 20 binary")
 
 T = Transcript("ts_clients_native_server")
 
@@ -31,6 +31,8 @@ T = Transcript("ts_clients_native_server")
 @pytest.mark.parametrize("script", list(DISTS))
 def test_ts_client(script):
     if not DISTS[script] or not Path(DISTS[script]).is_dir():
+        if os.environ.get("NEOGRAPH_INTEROP_REQUIRE") == "1":
+            pytest.fail("A2A_JS_SDK_DIST / A2A_JS_SDK_V03_DIST is not set")
         pytest.skip("set A2A_JS_SDK_DIST / A2A_JS_SDK_V03_DIST to the pinned @a2a-js/sdk dist")
     with native_server() as base:
         proc = subprocess.run([NODE, str(HERE / "ts" / script), base, DISTS[script]],

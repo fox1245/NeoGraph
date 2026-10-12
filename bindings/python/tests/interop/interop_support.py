@@ -6,9 +6,12 @@ skip cleanly otherwise, so the main test job (which installs other versions)
 is unaffected; the protocol-interop CI job installs the pins.
 
 Environment:
-  NEOGRAPH_BUILD_DIR     NeoGraph build tree (default: the directory holding
-                         the imported neograph_engine package)
-  NEOGRAPH_INTEROP_NODE  Node.js >= 20 binary for the TypeScript SDK suites
+  NEOGRAPH_BUILD_DIR        NeoGraph build tree (default: the directory holding
+                            the imported neograph_engine package)
+  NEOGRAPH_INTEROP_NODE     Node.js >= 20 binary for the TypeScript SDK suites
+  NEOGRAPH_INTEROP_REQUIRE  "1" turns every missing prerequisite into a failure
+                            instead of a skip (the protocol-interop CI job sets
+                            it, so a broken install cannot pass as skipped)
 """
 
 from __future__ import annotations
@@ -18,6 +21,23 @@ import os
 import re
 import subprocess
 from pathlib import Path
+
+import pytest
+
+
+def unavailable(reason: str) -> None:
+    """Skip the calling module, or fail it when NEOGRAPH_INTEROP_REQUIRE=1."""
+    if os.environ.get("NEOGRAPH_INTEROP_REQUIRE") == "1":
+        pytest.fail(f"interop prerequisite missing: {reason}", pytrace=False)
+    pytest.skip(reason, allow_module_level=True)
+
+
+def require_module(name: str) -> None:
+    """importorskip that honours NEOGRAPH_INTEROP_REQUIRE."""
+    try:
+        __import__(name)
+    except ImportError:
+        unavailable(f"Python module {name!r} is not installed")
 
 
 def neograph_build_dir() -> Path | None:

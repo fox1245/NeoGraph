@@ -26,7 +26,8 @@ from typing import Any
 
 import pytest
 
-from interop_support import build_binary, installed_pin, neograph_build_dir
+from interop_support import (build_binary, installed_pin, neograph_build_dir, require_module,
+                              unavailable)
 
 HERE = Path(__file__).resolve().parent
 TRANSCRIPTS = Path(os.environ.get("A2A_TRANSCRIPTS",
@@ -37,15 +38,14 @@ _used: set[int] = set()
 
 def require_suite() -> Path:
     """Skip the calling test module unless the pinned SDK and the probe exist."""
-    pytest.importorskip("a2a")
+    require_module("a2a")
     if installed_pin(HERE / "requirements.txt", "a2a-sdk") is None:
-        pytest.skip("a2a-sdk is not the version pinned in a2a_suite/requirements.txt",
-                    allow_module_level=True)
+        unavailable("a2a-sdk is not the version pinned in a2a_suite/requirements.txt")
     for module in ("httpx", "jsonschema", "google.protobuf", "google.api"):
-        pytest.importorskip(module)
+        require_module(module)
     probe = build_binary("neograph_a2a_probe_server", "NEOGRAPH_A2A_PROBE_SERVER")
     if probe is None:
-        pytest.skip("neograph_a2a_probe_server is not built", allow_module_level=True)
+        unavailable("neograph_a2a_probe_server is not built")
     return probe
 
 
@@ -107,6 +107,12 @@ def native_server(*args: str):
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+            proc.wait()
+        # Close the pipes now: a ResourceWarning from their later garbage
+        # collection would land in whichever SDK check runs next.
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                pipe.close()
 
 
 @contextlib.contextmanager
@@ -135,6 +141,9 @@ def subprocess_server(cmd: list[str], url: str, ready_path: str = "/.well-known/
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+            proc.wait()
+        if proc.stdout is not None:
+            proc.stdout.close()
 
 
 def rpc(base: str, method: str, params: Any = None, *, version: str | None = None,
