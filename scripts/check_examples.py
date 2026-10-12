@@ -42,7 +42,7 @@ def cpp_sources():
     """Map each C++ example to the source that carries its annotations."""
     found = {}
     for path in sorted(EXAMPLES.iterdir()):
-        if re.match(r"\d\d_", path.name):
+        if re.match(r"\d{2,3}_", path.name):
             if path.is_file() and path.suffix == ".cpp":
                 found[path.name] = path
             elif path.is_dir() and (path / "main.cpp").is_file():
@@ -59,13 +59,13 @@ def cpp_sources():
 
 
 def python_sources():
-    return {path.name: path for path in sorted(PYTHON_EXAMPLES.glob("[0-9][0-9]_*.py"))}
+    return {path.name: path for path in sorted(PYTHON_EXAMPLES.glob("[0-9][0-9]*_*.py"))}
 
 
 def check_numbers(errors):
     cpp = defaultdict(list)
     for path in EXAMPLES.iterdir():
-        match = re.match(r"(\d\d)_", path.name)
+        match = re.match(r"(\d{2,3})_", path.name)
         if match and ((path.is_file() and path.suffix == ".cpp") or path.is_dir()):
             cpp[match.group(1)].append(path.name)
     for number, names in sorted(cpp.items()):
@@ -74,7 +74,7 @@ def check_numbers(errors):
                           "every example needs its own number")
     py = defaultdict(list)
     for name in python_sources():
-        py[name[:2]].append(name)
+        py[re.match(r"(\d+)_", name).group(1)].append(name)
     for number, names in sorted(py.items()):
         if len(names) > 1:
             errors.append(f"bindings/python/examples/: number {number} is used by {', '.join(names)}")

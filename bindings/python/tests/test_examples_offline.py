@@ -38,7 +38,7 @@ def workspace(tmp_path_factory):
     return destination
 
 
-SCRIPTS = sorted(path.name for path in EXAMPLES.glob("[0-9][0-9]_*.py")) if EXAMPLES.is_dir() else []
+SCRIPTS = sorted(path.name for path in EXAMPLES.glob("[0-9][0-9]*_*.py")) if EXAMPLES.is_dir() else []
 
 
 def test_there_are_examples():
