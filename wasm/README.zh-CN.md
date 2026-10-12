@@ -1,42 +1,66 @@
 <!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=1f49ed436cfb27bb00b666cedc90e9c3cc246bcbd3243db1f137c7142f5c9380 -->
-# NeoGraph WASM smoke 程序
+# NeoGraph WASM 冒烟程序
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-`smoke.cpp` 编译只有一个 `DoubleNode` 的图，写入 `doubled = seed * 2`，并使用 `InMemoryCheckpointStore` 运行。`seed = 21` 时，预期输出包含 `doubled = 42` 和 `trace = d`。没有网络或模型调用。同一生成目标可以在 Node.js 或下方浏览器 harness 中运行，但这不是浏览器 SDK。
+`smoke.cpp` 编译一张只有一个 `DoubleNode` 的图，写入 `doubled = seed * 2`，
+并配合 `InMemoryCheckpointStore` 运行。`seed = 21` 时，预期输出包含
+`doubled = 42` 和 `trace = d`。它不发起任何网络或模型调用。
+同一个生成的目标既可以在 Node.js 中运行，也可以在下面的浏览器测试环境中运行；
+它不是浏览器 SDK。
 
-## 当前构建边界
+## 当前的构建边界
 
-类型化 provider 切换后，即使 `NEOGRAPH_BUILD_LLM=OFF`，Core 也依赖 `SchemaProvider::runtime`。
-CMake 3.20+ 按显式 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、已安装 runtime、固定 public GitHub source archive 的顺序选择 SDK。
-`NEOGRAPH_FETCH_SCHEMAPROVIDER` 的 download fallback 默认 ON，offline package/source 构建应设为 OFF。
-Core 链接 SDK runtime，而不链接 libcurl transport。在所检查的 SDK pin 中，顶层 CMake 即使 runtime 目标不链接 CURL，仍在配置时要求 CURL；OpenSSL 不是 runtime 的直接依赖。native SDK library 不能链接到 WebAssembly。必须验证 Emscripten 目标的 runtime/archive 和 C++ 标准库支持；下方历史 smoke 不是当前构建成功的证据。
+带类型的 provider 切换，使 `SchemaProvider::runtime` 成为 Core 的依赖，
+即使设置了 `NEOGRAPH_BUILD_LLM=OFF` 也一样。CMake 3.20 及以上会按以下顺序选择：
+先是显式指定的 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`，其次是已安装的运行时，
+最后是固定版本的公开 GitHub 源码归档。下载这一兜底方式通过
+`NEOGRAPH_FETCH_SCHEMAPROVIDER` 控制，默认为 ON；离线的包构建或源码构建要把它设为 OFF。
+Core 链接的是 SDK 运行时，而不是它的 libcurl 传输层。在所检查的 SDK 固定版本上，
+SDK 顶层的 CMake 在配置阶段仍然要求 CURL，尽管运行时目标并不链接它；
+OpenSSL 不是运行时的直接依赖。
+SDK 的原生库无法链接进 WebAssembly。Emscripten 目标需要确认运行时、archive 和
+C++ 标准库的支持；下面那次历史上的冒烟测试，不能证明当前能构建成功。
 
-当前构建需要相同 target 的 SDK `0.3.0`、interface revision/shared generation 6，以及 SchemaProvider `maint/interface6` 提交 `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`。验证真实 Emscripten SDK runtime 仍是前提；本页既不删除 WASM 支持，也不保证当前构建可用。Archive v3 / `spna3` 和 portable JSON v2 不变。
+当前的构建需要 SDK `0.3.0`，接口修订版/共享库代数为 6，
+对应 SchemaProvider `maint/interface6` 提交 `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`，
+并且要针对同一个目标构建。必须先确认真正可用的 Emscripten 版 SDK
+运行时；本页既没有放弃对 WASM 的支持，也不保证当前能构建成功。
+archive v3 / `spna3` 和可移植 JSON v2 保持不变。
 
-### 支持目标的要求
+### 对受支持目标的要求
 
-Emscripten 工具链和 C++ 标准库必须支持 SDK 的 C++20 契约，包括 `std::bit_cast` 和 `std::stop_token`。native archive custody 需要目标支持的 atomic no-replace filesystem backend；不得为获得构建而禁用 custody。
+Emscripten 工具链和 C++ 标准库必须支持 SDK 的 C++20 约定，
+包括 `std::bit_cast` 和 `std::stop_token`。native archive 托管需要目标平台上受支持的、
+原子且不覆盖已有文件（no-replace）的文件系统后端；不能为了能构建成功而关闭托管。
 
-请使用新构建目录和真正的相同 target 依赖，包括 SDK 配置所需的 CURL 依赖。native library 或伪造的依赖可用性不能验证 WebAssembly 构建。当前 Node.js 和浏览器执行仍未验证。
+请使用全新的构建目录，以及真正针对同一目标的依赖，包括 SDK 配置阶段需要的
+CURL 依赖。原生库或伪造的依赖可用性，都不能让 WebAssembly 构建通过资格认证。
+目前在 Node.js 和浏览器中的执行仍未通过资格认证。
 
 ## 历史结果
 
-以下数据来自类型化 SDK 切换前的一次历史 smoke 执行。生成的 `.wasm`/`.js` 没有提交，CI 也不发布 WASM 大小 artifact。大小描述当时的构建，不是当前部署成本。
+这些数值来自较早的一次冒烟测试，当时还没有切换到带类型的 SDK。
+仓库中没有提交生成的 `.wasm` 或 `.js` 产物，CI 也不发布 WASM 体积的产物。
+这些体积只描述那次构建，不代表当前的部署成本。
 
-| 指标 | 值 |
+| 指标 | 数值 |
 |---|---|
-| WASM binary (-O3 + LTO) | 712 KB |
-| Emscripten JS runtime | 92 KB |
-| JavaScript + WASM 总计 | ~800 KB |
-| 当时引擎源码改动 | 0 lines |
-| 首次运行输出 | `doubled = 42, trace = d` |
+| WASM 二进制文件（-O3 + LTO） | 712 KB |
+| Emscripten 的 JS 运行时 | 92 KB |
+| JavaScript 与 WASM 合计 | ~800 KB |
+| 那次运行中引擎源码的改动 | 0 行 |
+| 首次运行的输出 | `doubled = 42, trace = d` |
 
-## 目标与前提条件
+## 目标与前置条件
 
-目标直接链接 `neograph_core`，使用 Core 的源码列表、C++20 coroutine、exception 和 Emscripten pthread。CMake 为 distro Emscripten 3.1.x 启用 Asio coroutine，仅在 WASM 目标中禁用不支持的 stack-protector symbol；native hardening 不变。目标设置 `PTHREAD_POOL_SIZE=4`，而图使用默认 `worker_count=1`。这里没有单线程 WASM 变体的 CMake 选项。
+这个目标直接链接 `neograph_core`。它使用 Core 的主源码列表、C++20 协程、异常和
+Emscripten 的 pthread。CMake 会为发行版自带的 Emscripten 3.1.x 启用 Asio 的协程接口，
+并且只在 WASM 目标上禁用不受支持的栈保护符号；原生构建的加固选项保持不变。
+该目标设置了 `PTHREAD_POOL_SIZE=4`，而图使用的是默认的 `worker_count=1`。
+这里没有用于构建单线程 WASM 变体的 CMake 选项。
 
-取得可工作的 Emscripten SDK runtime 构建后，目标的 configure/build/run 命令如下：
+一旦有了可用的、Emscripten 版的 SDK 运行时，这个目标的配置/构建/运行步骤如下：
 
 ```bash
 # For an emsdk install only: source /opt/emsdk/emsdk_env.sh
@@ -67,24 +91,35 @@ cmake --build build-wasm --target neograph_wasm_smoke -j
 node build-wasm/wasm/smoke.js
 ```
 
-`NEOGRAPH_USE_LIBCURL=OFF` 仅禁用 NeoGraph 可选 HTTP/2 backend，不会移除 SDK 顶层 CURL 检测。仍需真正的 Emscripten 依赖；此命令不是已验证的当前构建。
+`NEOGRAPH_USE_LIBCURL=OFF` 会关闭 NeoGraph 可选的 HTTP/2 后端，
+但不会去掉 SDK 顶层对 CURL 的查找。这套步骤仍然需要真正的 Emscripten 依赖，
+也不是经过验证的当前构建。
 
-对于生成 loader 向 `fetch` 传入 filesystem path 的 Node.js 版本，历史 workaround 如下：
+对于生成的加载器会把文件系统路径传给 `fetch` 的 Node.js 版本，
+历史上的加载器变通办法是：
 
 ```bash
 node -e 'const fs=require("fs"); WebAssembly.instantiateStreaming=undefined; global.fetch=async p=>({ok:true,arrayBuffer:async()=>fs.promises.readFile(p)}); require("./build-wasm/wasm/smoke.js");'
 ```
 
+## 浏览器冒烟测试
 
-## 浏览器 smoke
-
-真正的目标构建后，使用仅依赖标准库的 loopback 服务器提供 JS、WASM 和生成的 pthread worker asset：
+真正的目标构建成功之后，用只依赖标准库的回环服务器，
+来提供它的 JS、WASM 以及生成的 pthread worker 资源：
 
 ```sh
 python3 wasm/serve_smoke.py build-wasm/wasm --port 8765
 # Open http://127.0.0.1:8765/smoke.html in a browser.
 ```
 
-服务器发送 `Cross-Origin-Opener-Policy: same-origin` 和 `Cross-Origin-Embedder-Policy: require-corp`。harness 若无 cross-origin isolation / `SharedArrayBuffer` 就拒绝执行；加载的是实际生成的 `smoke.js`，而非替代 runtime。通过要求输出 `doubled = 42`、`trace = d` 且退出码为 0，通过 `document.body.dataset.result === "pass"` 和 `dataset.exitCode === "0"` 暴露结果。记录浏览器/版本、console 错误及观测输出。Node.js 成功本身不是浏览器证据。
+服务器会发送 `Cross-Origin-Opener-Policy: same-origin` 和
+`Cross-Origin-Embedder-Policy: require-corp`。没有跨源隔离 / `SharedArrayBuffer`
+时，测试环境拒绝执行；它加载的是真正生成的 `smoke.js`，而不是替身运行时。
+通过的条件是：输出 `doubled = 42`、`trace = d`，退出码为 0，并分别以
+`document.body.dataset.result === "pass"` 和 `dataset.exitCode === "0"` 的形式暴露出来。
+请记录浏览器及其版本、控制台错误，以及实际观察到的输出。只在 Node.js 中运行成功，
+不能算作浏览器方面的证据。
 
-此 harness 不提供 npm package、Embind API、JS graph callback 或 provider transport。hosted model access、local inference 和 NeoProtocol Executor 集成都未由此无模型 smoke 验证。
+这个测试环境不提供 npm 包、Embind API、JS 的图回调或 provider 传输层。
+托管模型的访问、本地推理，以及与 NeoProtocol Executor 的集成，
+都没有通过这个不涉及模型的冒烟测试的资格认证。
