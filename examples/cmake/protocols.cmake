@@ -9,3 +9,4 @@ neograph_add_example(a2a_dialects 77_a2a_dialects.cpp LINK neograph::core neogra
 neograph_add_example(a2a_input_required 78_a2a_input_required.cpp LINK neograph::core neograph::a2a)
 neograph_add_example(a2a_collaboration 79_a2a_collaboration.cpp LINK neograph::core neograph::a2a)
 neograph_add_example(acp_permission 80_acp_permission.cpp LINK neograph::core neograph::acp)
+neograph_add_example(acp_elicitation 81_acp_elicitation.cpp LINK neograph::core neograph::acp)

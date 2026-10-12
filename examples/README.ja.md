@@ -153,6 +153,7 @@ Program は Core グラフを、永続的な識別子、予算、admission を�
 | 37 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes | A2A クライアント。エージェントカードを取得してメッセージを送り、`A2ACallerNode` でグラフからリモートエージェントを呼び出します。 |
 | 39 | [`39_acp_server.cpp`](39_acp_server.cpp) | yes | stdio 上の ACP エージェント。エディターが駆動する形です。`--self-test` は initialize、session/new、session/prompt をプロセス内で実行します。 |
 | 80 | [`80_acp_permission.cpp`](80_acp_permission.cpp) | yes | ACP の権限確認。ノードが削除の前に `session/request_permission` でエディターに尋ねます。スクリプト化したエディターが 1 回目は許可し、次は拒否します。 |
+| 81 | [`81_acp_elicitation.cpp`](81_acp_elicitation.cpp) | yes | ACP の elicitation。クライアントがその capability を宣言していれば、ノードが `elicitation/create` でユーザーにフォームの質問をし、宣言していなければ既定値に切り替えます。 |
 | 45 | [`45_grpc_server.cpp`](45_grpc_server.cpp) | paired | gRPC。`GraphEngine` を `GraphService` で公開します。サンプル 53 がこれを補助プロセスとして起動します(`-DNEOGRAPH_BUILD_GRPC=ON` が必要)。 |
 | 53 | [`53_grpc_client.cpp`](53_grpc_client.cpp) | yes | gRPC。通常のクライアントから `GraphService`(`Health`、`RunGraph`、ストリーミング)を呼び出します(`-DNEOGRAPH_BUILD_GRPC=ON` が必要)。 |
 | 54 | [`54_grpc_checkpoint.cpp`](54_grpc_checkpoint.cpp) | yes | gRPC。リモートの `CheckpointStore` である `GrpcCheckpointStore` と、測定したレイテンシ(`-DNEOGRAPH_BUILD_GRPC=ON` が必要)。 |
