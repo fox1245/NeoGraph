@@ -1271,9 +1271,6 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_checkpoint_hitl examples/04_checkpoint_hitl.cpp)
         target_link_libraries(example_checkpoint_hitl PRIVATE neograph::core neograph::llm)
 
-        add_executable(example_parallel_fanout examples/05_parallel_fanout.cpp)
-        target_link_libraries(example_parallel_fanout PRIVATE neograph::core)
-
         add_executable(example_subgraph examples/06_subgraph.cpp)
         target_link_libraries(example_subgraph PRIVATE neograph::core neograph::llm)
 
@@ -1282,12 +1279,6 @@ if(NEOGRAPH_BUILD_EXAMPLES)
 
         add_executable(example_state_management examples/08_state_management.cpp)
         target_link_libraries(example_state_management PRIVATE neograph::core neograph::llm)
-
-        add_executable(example_all_features examples/09_all_features.cpp)
-        target_link_libraries(example_all_features PRIVATE neograph::core neograph::llm)
-
-        add_executable(example_send_command examples/10_send_command.cpp)
-        target_link_libraries(example_send_command PRIVATE neograph::core)
 
         add_executable(example_rag_agent examples/12_rag_agent.cpp)
         target_link_libraries(example_rag_agent PRIVATE neograph::core neograph::llm httplib OpenSSL::SSL OpenSSL::Crypto cppdotenv)
@@ -1723,10 +1714,6 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_resume_if_exists_chat examples/41_resume_if_exists_chat.cpp)
         target_link_libraries(example_resume_if_exists_chat PRIVATE neograph::core SchemaProvider::transport)
 
-        # Example 42: custom reducer + condition via Registry.
-        add_executable(example_custom_reducer_condition examples/42_custom_reducer_condition.cpp)
-        target_link_libraries(example_custom_reducer_condition PRIVATE neograph::core)
-
         # Example 43: cross-thread Store driving per-user node behaviour.
         add_executable(example_store_personalization examples/43_store_personalization.cpp)
         target_link_libraries(example_store_personalization PRIVATE neograph::core)
@@ -1757,20 +1744,6 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_async_tool examples/50_async_tool.cpp)
         target_link_libraries(example_async_tool PRIVATE neograph::core)
 
-        # Example 51: 가장 작은 동작하는 NeoGraph 프로그램. LLM·tool·mock
-        # provider 다 없는, 노드 1개짜리 5분 입문용. README 의 "first program"
-        # 자리에 인용되는 코드.
-        add_executable(example_minimal examples/51_minimal.cpp)
-        target_link_libraries(example_minimal PRIVATE neograph::core)
-
-        # Schema dump tool — prints NodeFactory::export_schema() as JSON.
-        # The drift-proof artifact source for external tooling (the
-        # visual block editor, issue #56): `./example_export_schema >
-        # schema.json` in CI keeps an editor's palette pinned to the
-        # exact engine version it was built against.
-        add_executable(example_export_schema examples/52_export_schema.cpp)
-        target_link_libraries(example_export_schema PRIVATE neograph::core)
-
         # Harness evolution loop (issue #80). Example 32: reproduce the
         # README evolution benchmark from a strict Core seed + task fixture.
         #   ./example_evolution seed.json task.json > lineage.json
@@ -1799,6 +1772,32 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             target_include_directories(example_clay_chatbot PRIVATE ${DEPS_DIR})
         endif()
     endif()
+
+    # The Core basics (05, 09, 10, 42, 51, 52, 61) need only neograph::core, so they build in
+    # a Core-only configuration (NEOGRAPH_BUILD_LLM=OFF) too.
+    add_executable(example_parallel_fanout examples/05_parallel_fanout.cpp)
+    target_link_libraries(example_parallel_fanout PRIVATE neograph::core)
+
+    add_executable(example_all_features examples/09_all_features.cpp)
+    target_link_libraries(example_all_features PRIVATE neograph::core)
+
+    add_executable(example_send_command examples/10_send_command.cpp)
+    target_link_libraries(example_send_command PRIVATE neograph::core)
+
+    # Example 42: custom reducer + condition via Registry.
+    add_executable(example_custom_reducer_condition examples/42_custom_reducer_condition.cpp)
+    target_link_libraries(example_custom_reducer_condition PRIVATE neograph::core)
+
+    # Example 51: channels and typed reads, the smallest program after the quickstart.
+    add_executable(example_minimal examples/51_minimal.cpp)
+    target_link_libraries(example_minimal PRIVATE neograph::core)
+
+    # Schema dump tool: prints NodeFactory::export_schema() as JSON. The drift-proof artifact
+    # source for external tooling (the visual block editor, issue #56): `./example_export_schema
+    # > schema.json` in CI keeps an editor's palette pinned to the engine version it was built
+    # against.
+    add_executable(example_export_schema examples/52_export_schema.cpp)
+    target_link_libraries(example_export_schema PRIVATE neograph::core)
 
     # Example 61: SyncGraphNode needs only neograph::core.
     add_executable(example_sync_node examples/61_sync_node.cpp)
