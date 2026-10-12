@@ -2,9 +2,186 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-NeoGraph is a C++20 runtime for stateful workflows described as graphs. A graph defines executable nodes, named state channels, rules for merging writes, and edges that determine what runs next. Nodes can perform ordinary computation, call tools, or request model output. The runtime schedules those nodes, applies their writes, and, when configured with a checkpoint store, saves progress for interruption and resumption. Python bindings expose the same C++ engine.
+[![CI](https://github.com/fox1245/NeoGraph/actions/workflows/ci.yml/badge.svg)](https://github.com/fox1245/NeoGraph/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/neograph-engine)](https://pypi.org/project/neograph-engine/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Consider a research workflow: retrieve documents, extract findings from several documents, combine the findings, and ask a reviewer whether another retrieval round is needed. The documents and findings belong in state channels; retrieval, extraction, and review are nodes; edges select the next stage or return to retrieval. A graph makes those transitions explicit instead of hiding them in a sequence of model prompts. See the [examples](examples/README.md) for research, tool use, human review, and multi-agent workflows.
+NeoGraph is a C++20 library for running workflows that you describe as graphs. Nodes do the work, named state channels hold the data, and edges decide what runs next. The runtime schedules the nodes, merges their writes into state, saves a checkpoint after each step when a checkpoint store is configured, and can pause a run for human input and resume it later.
+
+The same engine is available from C++ and from Python (`pip install neograph-engine`). Optional components add model calls through the SchemaProvider SDK, MCP, A2A, ACP and gRPC servers and clients, SQLite and PostgreSQL checkpoint stores, and a Program layer in which restricted JavaScript programs coordinate several graphs under a budget.
+
+## Who it is for
+
+- Python and C++ developers who build agent or pipeline workflows with explicit state: loops, branches, parallel fan-out, retries, checkpoints and human approval steps.
+- Teams that run such workflows inside a C++ service, or expose them to other agents and tools over MCP, A2A or ACP.
+- Readers who know LangGraph: channels with reducers, `Send`, `Command` and checkpoints are the same ideas, so the [concepts guide](docs/concepts.md) should read quickly.
+
+NeoGraph is alpha software (version 0.13.1). The C++ binary interface can change between 0.x releases; see the [ABI policy](docs/ABI_POLICY.md). It does not train models or replace a numerical library, and a model call is only one kind of node.
+
+## Quickstart
+
+Both examples run a graph with one node. They need no API key and make no network call at run time.
+
+### Python
+
+Python 3.9 or newer:
+
+```bash
+pip install neograph-engine
+```
+
+Save this as `hello.py`:
+
+```python
+import neograph_engine as ng
+
+@ng.node("greet")
+def greet(state):
+    return [ng.ChannelWrite(
+        "messages",
+        [{"role": "assistant", "content": f"Hello, {state.get('name')}!"}],
+    )]
+
+definition = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
+    "name": "demo",
+    "channels": {
+        "name": {"reducer": "overwrite"},
+        "messages": {"reducer": "append"},
+    },
+    "nodes": {"greet": {"type": "greet"}},
+    "edges": [
+        {"from": ng.START_NODE, "to": "greet"},
+        {"from": "greet", "to": ng.END_NODE},
+    ],
+}
+
+engine = ng.GraphEngine.compile(definition, ng.NodeContext())
+result = engine.run(ng.RunConfig(thread_id="t1", input={"name": "NeoGraph"}))
+print(result.output["channels"]["messages"]["value"])
+```
+
+```bash
+python hello.py
+```
+
+```text
+[{'role': 'assistant', 'content': 'Hello, NeoGraph!'}]
+```
+
+The wheel on PyPI is built from release 0.13.1. Changes listed under *Unreleased* in the [changelog](CHANGELOG.md) are not in it; build from source to use them (see [Build configuration](#build-configuration-and-further-reading)).
+
+### C++
+
+You need a C++20 compiler, CMake 3.20 or newer, git, and the libcurl development files (libcurl 7.88 or newer; `libcurl4-openssl-dev` on Debian and Ubuntu). The first configure downloads the pinned SchemaProvider SDK, which Core requires even when no model call is made; for an offline machine, see [Build and run](#build-and-run) below.
+
+NeoGraph has no tagged release that matches this documentation yet, so the project below fetches the `master` branch. Replace `master` with a commit hash to make the build reproducible.
+
+`CMakeLists.txt`:
+
+```cmake
+cmake_minimum_required(VERSION 3.20)
+project(hello_neograph CXX)
+
+include(FetchContent)
+# Build only Core: no model calls, protocols, databases, examples or tests.
+set(NEOGRAPH_BUILD_EXAMPLES OFF CACHE BOOL "")
+set(NEOGRAPH_BUILD_LLM OFF CACHE BOOL "")
+set(NEOGRAPH_BUILD_ASYNC OFF CACHE BOOL "")
+set(NEOGRAPH_BUILD_MCP OFF CACHE BOOL "")
+set(NEOGRAPH_BUILD_A2A OFF CACHE BOOL "")
+set(NEOGRAPH_BUILD_ACP OFF CACHE BOOL "")
+set(NEOGRAPH_BUILD_POSTGRES OFF CACHE BOOL "")
+set(NEOGRAPH_BUILD_SQLITE OFF CACHE BOOL "")
+FetchContent_Declare(NeoGraph
+  GIT_REPOSITORY https://github.com/fox1245/NeoGraph.git
+  GIT_TAG master)
+FetchContent_MakeAvailable(NeoGraph)
+
+add_executable(hello main.cpp)
+target_compile_features(hello PRIVATE cxx_std_20)
+target_link_libraries(hello PRIVATE neograph::core)
+```
+
+`main.cpp`:
+
+```cpp
+#include <neograph/neograph.h>
+
+#include <cctype>
+#include <iostream>
+#include <memory>
+#include <utility>
+
+using namespace neograph;
+using namespace neograph::graph;
+
+namespace {
+
+const ChannelKey<std::string> text_channel{"text"};
+
+class UpperNode final : public GraphNode {
+public:
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        auto text = input.state.get(text_channel);
+        for (auto& character : text)
+            character = static_cast<char>(std::toupper(static_cast<unsigned char>(character)));
+        co_return NodeOutput{{ChannelWrite{"text", json(std::move(text))}}};
+    }
+
+    std::string get_name() const override { return "upper"; }
+};
+
+}  // namespace
+
+int main() {
+    NodeFactory::instance().register_type(
+        "quickstart.upper", [](const std::string&, const json&, const NodeContext&) {
+            return std::make_unique<UpperNode>();
+        },
+        json::object(),
+        json{{"reads", json::array({"text"})},
+             {"writes", json::array({"text"})},
+             {"exports", json::array({"text"})}});
+
+    const json definition = {
+        {"schema_version", TOPOLOGY_SCHEMA_VERSION},
+        {"name", "hello"},
+        {"channels", {{"text", {{"reducer", "overwrite"}}}}},
+        {"nodes", {{"upper", {{"type", "quickstart.upper"}}}}},
+        {"edges",
+         {{{"from", "__start__"}, {"to", "upper"}},
+          {{"from", "upper"}, {"to", "__end__"}}}},
+    };
+
+    auto engine = GraphEngine::build_strict(definition, EngineConfig{});
+    RunConfig config;
+    config.input = {{"text", "hello"}};
+    const auto result = engine->run(config);
+    std::cout << result.channel(text_channel) << '\n';
+    return 0;
+}
+```
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+./build/hello
+```
+
+```text
+HELLO
+```
+
+The same graph is [examples/62_core_quickstart.cpp](examples/62_core_quickstart.cpp). To use a NeoGraph installed with `cmake --install` instead, call `find_package(NeoGraph CONFIG REQUIRED)` and link `neograph::core`; see [Build configuration](#build-configuration-and-further-reading).
+
+### Next steps
+
+- [Documentation index](docs/README.md): every guide, and who it is for.
+- [Concepts](docs/concepts.md): channels, nodes, edges, `Send`, `Command`, checkpoints and streaming.
+- [Python binding guide](docs/python-binding.md) and [C++ examples](examples/README.md).
+- Servers and clients: [MCP](docs/mcp.md), [A2A](docs/a2a.md), [ACP](docs/acp.md).
+- [Program guide](docs/program-guide.md): restricted JavaScript programs with fan-out, failure routing, approval and budgets.
 
 ## How a graph changes state
 
@@ -32,9 +209,9 @@ During a normal batch, ready nodes read the pre-batch channel state. Returning a
 
 Concurrent execution does not make every reducer order-independent. If two nodes append text or overwrite the same channel, write order affects the result. Use independent channels or an order-independent reducer when the workflow requires that property. Channel retention also differs from combination: an append channel can keep only a bounded suffix. See [concepts](docs/concepts.md) and [concurrency](docs/concurrency.md) for scheduling, reducers, barriers, and cancellation.
 
-## A worked Core example
+## The Core example step by step
 
-The [complete C++ quickstart](examples/62_core_quickstart.cpp) registers an uppercase node and compiles this topology:
+The [C++ quickstart](examples/62_core_quickstart.cpp) above registers an uppercase node and compiles this topology:
 
 ```text
 __start__ -> upper -> __end__
@@ -46,25 +223,7 @@ Reducer:         overwrite
 Output channel:  text = "HELLO"
 ```
 
-The node's computation is ordinary C++:
-
-```cpp
-class UpperNode final : public neograph::graph::GraphNode {
-public:
-    asio::awaitable<neograph::graph::NodeOutput> run(
-        neograph::graph::NodeInput input) override {
-        auto text = input.state.get(neograph::graph::ChannelKey<std::string>{"text"});
-        for (auto& character : text)
-            character = static_cast<char>(
-                std::toupper(static_cast<unsigned char>(character)));
-        co_return neograph::graph::NodeOutput{{
-            neograph::graph::ChannelWrite{"text", neograph::json(std::move(text))}}};
-    }
-    std::string get_name() const override { return "upper"; }
-};
-```
-
-The complete source includes the headers, node registration with declared reads/writes, topology, `GraphEngine::build_strict`, run input, and typed output access. No model call or API key is needed. The expected output is `HELLO`.
+The source declares which channels the node reads and writes, so `GraphEngine::build_strict` can check the topology before the run. No model call or API key is needed. The expected output is `HELLO`.
 
 ### Build and run
 
@@ -152,40 +311,9 @@ The typed cutover removes `CompletionParams`, `ChatCompletion`, `CompletionProvi
 pip install neograph-engine
 ```
 
-The typed-provider API described here targets NeoGraph `0.13.1`; historical wheels expose the older interface. The [Python binding guide](docs/python-binding.md) documents the source API and build prerequisites.
+The typed-provider API described here targets NeoGraph `0.13.1`; historical wheels expose the older interface. The [Python binding guide](docs/python-binding.md) documents the source API and build prerequisites. The graph in the [Quickstart](#python) needs no API key.
 
-This graph needs no API key:
-
-```python
-import neograph_engine as ng
-
-@ng.node("greet")
-def greet(state):
-    return [ng.ChannelWrite(
-        "messages",
-        [{"role": "assistant", "content": f"Hello, {state.get('name')}!"}],
-    )]
-
-definition = {
-    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
-    "name": "demo",
-    "channels": {
-        "name": {"reducer": "overwrite"},
-        "messages": {"reducer": "append"},
-    },
-    "nodes": {"greet": {"type": "greet"}},
-    "edges": [
-        {"from": ng.START_NODE, "to": "greet"},
-        {"from": "greet", "to": ng.END_NODE},
-    ],
-}
-
-engine = ng.GraphEngine.compile(definition, ng.NodeContext())
-result = engine.run(ng.RunConfig(thread_id="t1", input={"name": "NeoGraph"}))
-print(result.output["channels"]["messages"]["value"])
-```
-
-The expected message content is `Hello, NeoGraph!`. Python also exposes Program compilation and execution, Hooks, runtime-context requirements, strict profiles, SQLite durability, and exact checkpoint resume. Typed providers use `ProviderMessage` and `make_provider_request`, then `prepare`/`dispatch` or `invoke`; outcomes retain native-owned completion or failure evidence. These messages differ from graph convenience `ChatMessage` values. Blocking provider calls release the GIL; `asyncio.to_thread` can move them off an event-loop thread. See the [Python examples](bindings/python/examples/README.md) for complete provider inputs, and the [Python binding guide](docs/python-binding.md#program-and-quickjs) for a runnable Program example and its rules.
+Python also exposes Program compilation and execution, Hooks, runtime-context requirements, strict profiles, SQLite durability, and exact checkpoint resume. Typed providers use `ProviderMessage` and `make_provider_request`, then `prepare`/`dispatch` or `invoke`; outcomes retain native-owned completion or failure evidence. These messages differ from graph convenience `ChatMessage` values. Blocking provider calls release the GIL; `asyncio.to_thread` can move them off an event-loop thread. See the [Python examples](bindings/python/examples/README.md) for complete provider inputs, and the [Python binding guide](docs/python-binding.md#program-and-quickjs) for a runnable Program example and its rules.
 
 ## Workloads and limits
 
@@ -206,11 +334,27 @@ Measure a workload with its actual nodes, provider, stores, concurrency, and bui
 | `NEOGRAPH_BUILD_PYBIND` | Python extension; default off. |
 | `NEOGRAPH_BUILD_LLM` | NeoGraph model-call adapters; disabling them does not remove the SDK dependency. |
 | `NEOGRAPH_BUILD_SQLITE` / `NEOGRAPH_BUILD_POSTGRES` | Optional persistent stores; both default on. |
-| `NEOGRAPH_BUILD_MCP_CLIENT` / `NEOGRAPH_BUILD_MCP_SERVER` | MCP client and server components. |
-| `NEOGRAPH_BUILD_A2A` / `NEOGRAPH_BUILD_ACP` / `NEOGRAPH_BUILD_GRPC` | Protocol integrations; gRPC defaults off. |
+| `NEOGRAPH_BUILD_MCP_CLIENT` / `NEOGRAPH_BUILD_MCP_SERVER` | MCP client and stdio server components; both default on (`NEOGRAPH_BUILD_MCP` sets their default). |
+| `NEOGRAPH_BUILD_MCP_HTTP_SERVER` | MCP Streamable HTTP server transport; default off. |
+| `NEOGRAPH_BUILD_HARNESS_MCP_BINARY` | Build and install the `neograph-harness-mcp` executable; default off. |
+| `NEOGRAPH_BUILD_A2A` / `NEOGRAPH_BUILD_ACP` / `NEOGRAPH_BUILD_GRPC` | Protocol integrations; A2A and ACP default on, gRPC defaults off. |
+| `NEOGRAPH_BUILD_ASYNC` | HTTP, SSE and WebSocket helpers; default on. |
+| `NEOGRAPH_BUILD_EXAMPLES` / `NEOGRAPH_BUILD_TESTS` | Example programs (default on) and unit tests (default off). |
 | `NEOGRAPH_ENABLE_NATIVE_OPTIMIZATION` | Non-portable host-specific tuning for optimized configurations; default off. |
 
-Installed consumers link only the enabled components they need:
+To install Core and use it from another project instead of fetching it, build and install it once. When CMake fetched the SDK, `cmake --install` puts the SDK into the same prefix, so one `CMAKE_PREFIX_PATH` entry is enough:
+
+```bash
+git clone https://github.com/fox1245/NeoGraph.git
+cmake -S NeoGraph -B NeoGraph/build-install -DCMAKE_BUILD_TYPE=Release \
+  -DNEOGRAPH_BUILD_EXAMPLES=OFF -DNEOGRAPH_BUILD_LLM=OFF -DNEOGRAPH_BUILD_ASYNC=OFF \
+  -DNEOGRAPH_BUILD_MCP=OFF -DNEOGRAPH_BUILD_A2A=OFF -DNEOGRAPH_BUILD_ACP=OFF \
+  -DNEOGRAPH_BUILD_POSTGRES=OFF -DNEOGRAPH_BUILD_SQLITE=OFF
+cmake --build NeoGraph/build-install --parallel
+cmake --install NeoGraph/build-install --prefix "$HOME/neograph"
+```
+
+In the other project, replace the `FetchContent` lines of the Quickstart with `find_package(NeoGraph CONFIG REQUIRED)` and configure with `-DCMAKE_PREFIX_PATH="$HOME/neograph"`. Installed consumers link only the enabled components they need:
 
 ```cmake
 find_package(SchemaProvider 0.3.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
@@ -278,8 +422,10 @@ CPython 3.9–3.13 on release tags, a weekly canary and manual runs, with glibc
 gates, four native wheel/archive platforms, and protected tag/OIDC publication
 dependencies. Source review or CLI help is not execution or release proof.
 
+- [Documentation index](docs/README.md)
 - [Concepts and graph semantics](docs/concepts.md)
 - [C++ reference](docs/reference-en.md) and [Python binding guide](docs/python-binding.md)
+- [MCP](docs/mcp.md), [A2A](docs/a2a.md) and [ACP](docs/acp.md) guides, and the [Program guide](docs/program-guide.md)
 - [Async guide](docs/ASYNC_GUIDE.md) and [concurrency/cancellation](docs/concurrency.md)
 - [Runtime context and strict interposition](docs/STRICT_RUNTIME_INTERPOSITION.md)
 - [Harness MCP](docs/HARNESS_MCP.md) and [QuickJS authoring](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
