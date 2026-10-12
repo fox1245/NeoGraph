@@ -4130,6 +4130,56 @@ TEST(ProgramRuntimeTest, ProgramEnvelopePreservesDirectCoreBehavior) {
     EXPECT_EQ(completed_calls.load(), 2U);
 }
 
+// ---------------------------------------------------------------------------
+// Stores shared by the join (#380) and plan parallel/quorum (#384, #386, #387)
+// pause tests. They do not need QuickJS, so they live outside its block.
+// ---------------------------------------------------------------------------
+
+namespace {
+// The run and checkpoint stores of a join test: in memory, or SQLite files
+// that are removed afterwards.
+struct JoinTestStores {
+    explicit JoinTestStores(bool durable) {
+        if (!durable) return;
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE) && \
+    defined(NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE_CHECKPOINT)
+        static std::atomic<unsigned> sequence{0};
+        directory = std::filesystem::temp_directory_path() /
+                    ("neograph-runtime-paused-join-" +
+                     std::to_string(
+                         std::chrono::steady_clock::now().time_since_epoch().count()) +
+                     "-" + std::to_string(sequence.fetch_add(1)));
+        std::filesystem::create_directories(directory);
+        transitions =
+            std::make_shared<SQLiteProgramTransitionStore>((directory / "program.db").string());
+        checkpoints =
+            std::make_shared<SqliteCheckpointStore>((directory / "checkpoints.db").string());
+#endif
+    }
+    ~JoinTestStores() {
+        transitions.reset();
+        checkpoints.reset();
+        std::error_code ignored;
+        if (!directory.empty()) std::filesystem::remove_all(directory, ignored);
+    }
+    JoinTestStores(const JoinTestStores&)            = delete;
+    JoinTestStores& operator=(const JoinTestStores&) = delete;
+
+    std::filesystem::path                   directory;
+    std::shared_ptr<ProgramTransitionStore> transitions;
+    std::shared_ptr<CheckpointStore>        checkpoints;
+};
+
+std::vector<bool> join_test_store_kinds() {
+    std::vector<bool> durable{false};
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE) && \
+    defined(NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE_CHECKPOINT)
+    durable.push_back(true);
+#endif
+    return durable;
+}
+}  // namespace
+
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
 std::string javascript_runtime_source(std::string node_type, std::string body);
 RunBudget javascript_budget(std::uint64_t max_concurrency        = 2,
@@ -6623,49 +6673,6 @@ TEST(ProgramRuntimeTest, JavaScriptFailFastJoinReportsTheFailureThatStoppedIt) {
 // ---------------------------------------------------------------------------
 
 namespace {
-// The run and checkpoint stores of a join test: in memory, or SQLite files
-// that are removed afterwards.
-struct JoinTestStores {
-    explicit JoinTestStores(bool durable) {
-        if (!durable) return;
-#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE) && \
-    defined(NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE_CHECKPOINT)
-        static std::atomic<unsigned> sequence{0};
-        directory = std::filesystem::temp_directory_path() /
-                    ("neograph-runtime-paused-join-" +
-                     std::to_string(
-                         std::chrono::steady_clock::now().time_since_epoch().count()) +
-                     "-" + std::to_string(sequence.fetch_add(1)));
-        std::filesystem::create_directories(directory);
-        transitions =
-            std::make_shared<SQLiteProgramTransitionStore>((directory / "program.db").string());
-        checkpoints =
-            std::make_shared<SqliteCheckpointStore>((directory / "checkpoints.db").string());
-#endif
-    }
-    ~JoinTestStores() {
-        transitions.reset();
-        checkpoints.reset();
-        std::error_code ignored;
-        if (!directory.empty()) std::filesystem::remove_all(directory, ignored);
-    }
-    JoinTestStores(const JoinTestStores&)            = delete;
-    JoinTestStores& operator=(const JoinTestStores&) = delete;
-
-    std::filesystem::path                   directory;
-    std::shared_ptr<ProgramTransitionStore> transitions;
-    std::shared_ptr<CheckpointStore>        checkpoints;
-};
-
-std::vector<bool> join_test_store_kinds() {
-    std::vector<bool> durable{false};
-#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE) && \
-    defined(NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE_CHECKPOINT)
-    durable.push_back(true);
-#endif
-    return durable;
-}
-
 struct EmitCountingSink final : public ProgramEventSink {
     void on_event(const ProgramEvent& event) override {
         if (event.kind == ProgramEventKind::Emit) emits.fetch_add(1);
@@ -8191,6 +8198,8 @@ TEST(ProgramRuntimeTest, ExceptionEscapingTerminalizationFailsTheRunCleanly) {
     EXPECT_EQ(checkpoints->terminal_save_failures(), 1U);
 }
 
+// These two need QuickJS: their Programs are JavaScript main() sources.
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
 // Issue #371: each interrupted callCore of one JavaScript main() is a
 // resumable Interrupted result, on every transition store.
 void expect_two_interrupted_core_calls_resume(std::shared_ptr<ProgramTransitionStore> store) {
@@ -8333,6 +8342,7 @@ TEST(ProgramRuntimeTest, EachResumedResultListsTheNodesItRanOnSqlite) {
         std::make_shared<SQLiteProgramTransitionStore>(path.string()));
 }
 #endif
+#endif  // NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS
 
 TEST(ProgramRuntimeTest, CoreFailureIsClassifiedWithNodeAndAttempt) {
     AdmittedRuntime fixture;
@@ -10379,6 +10389,8 @@ TEST(ProgramRuntimeTest, AReplacementOrAGraphMigrationNeverContinuesAPausedPlan)
     const auto record = fixture.journal->load("tenant:runtime", paused.run_id());
     ASSERT_TRUE(record && record->settled_branches());
 
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+    // The replacement target is a JavaScript source.
     const auto target =
         fixture.admit_javascript(javascript_runtime_source("runtime-completed", "return 1;"));
     try {
@@ -10396,6 +10408,7 @@ TEST(ProgramRuntimeTest, AReplacementOrAGraphMigrationNeverContinuesAPausedPlan)
 
     EXPECT_EQ(fixture.journal->load("tenant:runtime", paused.run_id())->id(), record->id())
         << "the paused run is untouched";
+#endif
 
     // Graph migration takes a live run, and refuses any plan but one root
     // CallCore before it holds the run anywhere.
