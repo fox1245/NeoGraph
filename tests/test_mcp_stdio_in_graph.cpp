@@ -29,6 +29,8 @@
 // integration (#95) — which it is, and which is exactly why the engine has to be
 // allowed to own the io_context.
 
+#include "fixtures/test_watchdog.h"
+
 #include <gtest/gtest.h>
 
 #include <neograph/graph/cancel.h>
@@ -50,6 +52,11 @@ using namespace neograph;
 using namespace neograph::graph;
 
 namespace {
+
+// These tests talk to a real subprocess; one that hangs ends the process with
+// a message after 30 s instead of timing out CTest after 10 minutes.
+[[maybe_unused]] const bool kWatched =
+    neograph::graph::test_support::watch_tests({"MCPStdioInGraph"});
 
 std::filesystem::path fixture_path() {
     std::filesystem::path here(__FILE__);

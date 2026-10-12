@@ -36,6 +36,7 @@
 #ifdef NEOGRAPH_TESTS_HAVE_MCP_CLIENT
 #include <neograph/mcp/client.h>
 #endif
+#include "fixtures/test_watchdog.h"
 #include "fixtures/typed_provider.h"
 
 #include <asio/steady_timer.hpp>
@@ -1107,6 +1108,11 @@ TEST(ToolFailureContract, NodeRetryPolicyDoesNotRetryAHookBlock) {
 }
 
 #ifdef NEOGRAPH_TESTS_HAVE_MCP_CLIENT
+// These tests talk to a real subprocess; one that hangs ends the process with
+// a message after 30 s instead of timing out CTest after 10 minutes.
+[[maybe_unused]] const bool kWatched =
+    neograph::graph::test_support::watch_tests({"ToolFailureContract.McpErrorsAreToolResults"});
+
 // MCP-backed tools follow the same contract: a tool-level isError result and a
 // JSON-RPC error are ordinary failures the model sees, in one call or a batch.
 TEST(ToolFailureContract, McpErrorsAreToolResults) {

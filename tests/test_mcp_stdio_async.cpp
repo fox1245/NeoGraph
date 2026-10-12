@@ -4,6 +4,7 @@
 // cancellation, and shutdown. Fixtures are real stdlib-only Python
 // servers, with no third-party MCP dependency.
 
+#include "fixtures/test_watchdog.h"
 #include "fixtures/unique_temp_dir.h"
 
 #include <gtest/gtest.h>
@@ -43,6 +44,11 @@
 using namespace neograph;
 
 namespace {
+
+// These tests talk to a real subprocess; one that hangs ends the process with
+// a message after 30 s instead of timing out CTest after 10 minutes.
+[[maybe_unused]] const bool kWatched =
+    neograph::graph::test_support::watch_tests({"MCPStdioAsync"});
 
 std::filesystem::path fixture_path() {
     // Tests run from the build dir; the source tree is two levels up

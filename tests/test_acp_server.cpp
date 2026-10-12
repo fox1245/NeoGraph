@@ -16,6 +16,7 @@
 #include <neograph/graph/cancel.h>
 #include <neograph/graph/node.h>
 
+#include "fixtures/test_watchdog.h"
 #include "fixtures/typed_provider.h"
 #include <neograph/hook_outbox.h>
 #include <neograph/tool.h>
@@ -2627,6 +2628,12 @@ TEST(ACPServer, AnMcpServerThatCannotStartFailsSessionNewWithoutDetail) {
 }
 
 #ifdef NEOGRAPH_ACP_MCP_TESTS
+// These tests start a real subprocess; one that hangs ends the process with a
+// message after 30 s instead of timing out CTest after 10 minutes.
+[[maybe_unused]] const bool kWatchedMcpServers = neograph::graph::test_support::watch_tests(
+    {"ACPServer.StdioMcpServerToolsAreAvailableToTheSession",
+     "ACPServer.ClientMcpServersDoNotInheritTheAgentEnvironment"});
+
 const char* acp_test_python() {
 #ifdef _WIN32
     if (std::system("where python >nul 2>&1") == 0) return "python";

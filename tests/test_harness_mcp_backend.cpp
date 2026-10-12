@@ -1,3 +1,5 @@
+#include "fixtures/test_watchdog.h"
+
 #include <gtest/gtest.h>
 
 #include <neograph/mcp/client.h>
@@ -7,6 +9,11 @@
 #include <memory>
 
 namespace {
+
+// These tests talk to a real subprocess; one that hangs ends the process with
+// a message after 30 s instead of timing out CTest after 10 minutes.
+[[maybe_unused]] const bool kWatched =
+    neograph::graph::test_support::watch_tests({"HarnessMcpBackendTest.CallsConfiguredDownstreamServer"});
 
 const char* python_cmd() {
 #ifdef _WIN32
