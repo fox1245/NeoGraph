@@ -43,3 +43,27 @@ race:OPENSSL_init_crypto
 # though the reference-count modification order makes the delete occur only
 # after the final decrement. This is dependency code, not a NeoGraph access.
 race:asio::execution::detail::shared_target_executor
+
+# std::exception_ptr's reference count. libstdc++.so is not built with
+# ThreadSanitizer, so TSan cannot see the acquire/release atomics on an
+# exception object's reference count. A fan-out step hands each worker's
+# exception to the step driver: the driver reads it (exit_of reads a
+# NodeInterrupt's payload) and drops its reference, and the worker releases the
+# last one afterwards. The count orders the worker's release after the driver's
+# read, but TSan sees no ordering and reports the destruction (the payload's
+# yyjson pools, then the exception object, all freed inside
+# exception_ptr::_M_release) as a race with that read. The three reports of
+# one such hand-off are one event.
+#
+# Checked, not assumed. The same reports come from a NodeInterrupt handed
+# between two threads this way, and from a bare std::exception_ptr. With the
+# count made visible to TSan (a test-only stand-in for _M_addref and
+# _M_release using instrumented atomics) they are gone, and a read made after
+# the reader dropped its reference is still reported. The payload's yyjson
+# document is freed by the last std::shared_ptr release, which TSan does see,
+# so no other thread still holds it.
+#
+# Limit: the frame matches in either stack, so a race whose other access is
+# made while the last exception_ptr reference is destroyed is not reported
+# either. The frame is in libstdc++, not in NeoGraph or yyjson.
+race:std::__exception_ptr::exception_ptr::_M_release
