@@ -1024,13 +1024,26 @@ TEST(MCPStdioAsync, HardenedCancellationTellsTheServerBeforeTerminating) {
     }
 }
 
-#ifndef _WIN32
 // Without replace_environment, configured entries add to or override the
-// inherited environment.
+// inherited environment (on Windows: the block built from GetEnvironmentStringsW).
 TEST(MCPStdioAsync, ConfiguredEnvironmentEntriesOverrideTheInheritedOnes) {
     if (!python3_available()) GTEST_SKIP() << "python not available";
-    ::setenv("NG_MCP_INHERITED", "parent", 1);
-    ::setenv("NG_MCP_OVERRIDDEN", "parent", 1);
+    const auto set = [](const char* name, const char* value) {
+#ifdef _WIN32
+        _putenv_s(name, value);
+#else
+        ::setenv(name, value, 1);
+#endif
+    };
+    const auto unset = [](const char* name) {
+#ifdef _WIN32
+        _putenv_s(name, "");
+#else
+        ::unsetenv(name);
+#endif
+    };
+    set("NG_MCP_INHERITED", "parent");
+    set("NG_MCP_OVERRIDDEN", "parent");
     auto config = boundary_config("echo");
     config.environment = {{"NG_MCP_OVERRIDDEN", "child"}, {"NG_MCP_ADDED", "added"}};
     mcp::MCPClient client(std::move(config));
@@ -1040,7 +1053,10 @@ TEST(MCPStdioAsync, ConfiguredEnvironmentEntriesOverrideTheInheritedOnes) {
     EXPECT_EQ(environment.value("NG_MCP_OVERRIDDEN", ""), "child");
     EXPECT_EQ(environment.value("NG_MCP_ADDED", ""), "added");
     EXPECT_TRUE(environment.contains("PATH"));
-    ::unsetenv("NG_MCP_INHERITED");
-    ::unsetenv("NG_MCP_OVERRIDDEN");
-}
+#ifdef _WIN32
+    // The child can start only with the system variables the merge kept.
+    EXPECT_TRUE(environment.contains("SYSTEMROOT")) << environment.dump();
 #endif
+    unset("NG_MCP_INHERITED");
+    unset("NG_MCP_OVERRIDDEN");
+}
