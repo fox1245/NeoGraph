@@ -1,117 +1,90 @@
-// NeoGraph Example 22: MCP over stdio transport
+// NeoGraph Example 22: MCP over stdio
 //
-// Demonstrates spawning an MCP server as a child subprocess and exchanging
-// newline-delimited JSON-RPC messages over its stdin / stdout — no network
-// stack involved. The subprocess lives for the lifetime of the MCPClient
-// (or the last MCPTool referring back to its session); destruction sends
-// SIGTERM and reaps via waitpid.
-//
-// Scenario:
-//   - Launch examples/demo_mcp_stdio_server.py (kb_lookup / save_note / list_notes).
-//   - Discover its tools via get_tools().
-//   - Drive a ReAct loop against OpenRouter's pinned DeepSeek model, letting
-//     the LLM pick which tool to call.
+// The server is a child process: MCPClient starts it, speaks newline-delimited JSON-RPC over
+// its stdin and stdout, and ends it when the client goes away. No port, no network stack.
+// Only the way the client is constructed differs from example 03 (a command line instead of a
+// URL); the tools, the graph and the loop are the same. The server is
+// examples/mcp_demo_server.py, standard library only, and a scripted model plays the LLM.
 //
 // Usage:
-//   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
-//   ./example_mcp_stdio python3 examples/demo_mcp_stdio_server.py
-// (auto-loads .env from the cwd or any parent directory.)
+//   ./example_mcp_stdio python3 examples/mcp_demo_server.py
+//   ./example_mcp_stdio python3 examples/mcp_demo_server.py "Look up MCP." --live   # real model
+//                                      (needs OPENROUTER_API_KEY in the environment; billed)
 //
-// Equivalent to the HTTP example 03 but with transport=stdio.
-//
-// smoke-skip: needs OPENROUTER_API_KEY (live model call); starts examples/demo_mcp_stdio_server.py
+// smoke-args: @PYTHON@ @SRC@/examples/mcp_demo_server.py
+// smoke-expect: tools: get_current_time calculate get_weather kb_lookup save_note list_notes
+// smoke-expect: [kb_lookup] {"topic":"neograph"} -> NeoGraph is a C++ graph engine for agents.
+// smoke-expect: [save_note] {"content":"NeoGraph is a C++ graph engine for agents."} -> note#1 saved
+// smoke-expect: Final answer: note#1 saved
+// smoke-forbid: [neograph] lint
 
 #include <neograph/neograph.h>
-#include "provider_example_support.h"
-#include <neograph/mcp/client.h>
+#include "scripted_provider.h"
 #include <neograph/graph/react_graph.h>
-
-#include <cppdotenv/dotenv.hpp>
+#include <neograph/mcp/client.h>
 
 #include <iostream>
 #include <string>
-#include <cstdlib>
+#include <string_view>
+#include <vector>
 
 int main(int argc, char** argv) {
-    cppdotenv::auto_load_dotenv();
+    std::vector<std::string> args;  // positional arguments; flags such as --live are skipped
+    for (int i = 1; i < argc; ++i)
+        if (std::string_view(argv[i]).rfind("--", 0) != 0) args.emplace_back(argv[i]);
+    if (args.size() < 2) {
+        std::cerr << "Usage: " << argv[0] << " <python> <path/to/mcp_demo_server.py> [question] [--live]\n";
+        return 1;
+    }
+    const std::string question = args.size() > 2 ? args[2] : "Look up what NeoGraph is and save a note about it.";
 
     try {
-    if (argc < 3) {
-        std::cerr << "Usage: " << argv[0]
-                  << " <python-path> <path/to/demo_mcp_stdio_server.py> [question]\n"
-                  << "Example: " << argv[0]
-                  << " python3 examples/demo_mcp_stdio_server.py\n";
-        return 1;
-    }
+        // Two tool calls in a row: look the topic up, then save what came back as a note.
+        auto scripted = std::make_shared<examples::ScriptedProvider>(
+            [](const examples::ScriptedTurn& turn) {
+                switch (turn.tool_result_count()) {
+                    case 0: return examples::call_tool("kb_lookup", {{"topic", "neograph"}});
+                    case 1: return examples::call_tool("save_note", {{"content", turn.last_tool_result()}});
+                    default: return examples::say("Final answer: " + turn.last_tool_result());
+                }
+            });
+        auto provider = examples::choose_provider(argc, argv, scripted);
 
-    const std::string question = (argc >= 4)
-        ? std::string(argv[3])
-        : "Look up what NeoGraph is, then save a note containing the result.";
+        // The command line starts the server as a child process; it lives as long as the client
+        // (or any tool it produced) is alive.
+        neograph::mcp::MCPClient client(std::vector<std::string>{args[0], args[1]});
+        client.initialize("example-mcp-stdio");
+        auto tools = client.get_tools();
+        std::cout << "tools:";
+        for (const auto& tool : tools) std::cout << " " << tool->get_name();
+        std::cout << "\n";
 
-    const char* key_env = std::getenv("OPENROUTER_API_KEY");
-    if (!key_env) {
-        std::cerr << "OPENROUTER_API_KEY not set (env or .env file)\n";
-        return 1;
-    }
-    std::string api_key = key_env;
+        auto engine = neograph::graph::create_react_graph(
+            provider, std::move(tools),
+            "You are an assistant that uses local tools. Call a tool whenever you need information.",
+            examples::openrouter_model);
 
-    // --- Spawn the MCP server as a subprocess ---
-    std::vector<std::string> server_argv{argv[1], argv[2]};
-    std::cout << "[*] Spawning stdio MCP server: "
-              << argv[1] << " " << argv[2] << "\n";
+        neograph::graph::RunConfig run;
+        run.provider_messages = std::vector<sp::Message>{examples::message(sp::Role::User, question)};
+        run.max_steps = 20;
+        const auto result = engine->run(run);
 
-    neograph::mcp::MCPClient mcp_client(server_argv);
-    mcp_client.initialize("example-mcp-stdio");
-
-    auto tools = mcp_client.get_tools();
-    std::cout << "[*] Discovered " << tools.size() << " tools over stdio:\n";
-    for (const auto& t : tools) {
-        auto def = t->get_definition();
-        std::cout << "    - " << def.name << ": "
-                  << def.description.substr(0, 70)
-                  << (def.description.size() > 70 ? "..." : "") << "\n";
-    }
-
-    // --- LLM provider ---
-    std::shared_ptr<neograph::Provider> provider =
-        examples::make_openrouter_provider(api_key);
-
-    // --- Wire the stdio tools into a ReAct graph ---
-    auto engine = neograph::graph::create_react_graph(
-        provider, std::move(tools),
-        "You are an assistant that uses local tools to answer questions. "
-        "Always call the tools when information is needed.", examples::openrouter_model);
-
-    neograph::graph::RunConfig run_config;
-    run_config.provider_messages = std::vector<sp::Message>{examples::message(sp::Role::User, question)};
-    run_config.on_provider_event = [](const sp::Event& event) {
-        if (const auto* delta = std::get_if<sp::PartDelta>(&event);
-            delta && delta->payload.kind == sp::PartKind::Text &&
-            delta->payload.channel == sp::DeltaChannel::Content)
-            std::cout << delta->payload.bytes << std::flush;
-    };
-
-    std::cout << "\nUser: " << question << "\n\nAssistant: \n";
-
-    auto result = engine->run_stream(run_config,
-        [](const neograph::graph::GraphEvent& event) {
-            if (event.type == neograph::graph::GraphEvent::Type::NODE_START &&
-                       event.node_name == "tools") {
-                std::cout << "\n[tool call via stdio...]\n";
+        std::string last_call;
+        std::string answer = "(empty)";
+        for (const auto& message : result.native_messages)
+            for (const auto& part : message.parts) {
+                if (const auto* call = std::get_if<sp::ToolCall>(&part))
+                    last_call = call->name + " " + (call->input ? call->input->root().dump() : "{}");
+                else if (const auto* reply = std::get_if<sp::ToolResult>(&part))
+                    std::cout << "[" << last_call.substr(0, last_call.find(' ')) << "] "
+                              << last_call.substr(last_call.find(' ') + 1) << " -> " << reply->content << "\n";
+                else if (const auto* text = std::get_if<sp::Text>(&part))
+                    if (message.role == sp::Role::Assistant) answer = text->value;
             }
-        });
-
-    std::cout << "\n\n[*] Execution trace: ";
-    for (size_t i = 0; i < result.execution_trace.size(); ++i) {
-        std::cout << result.execution_trace[i];
-        if (i + 1 < result.execution_trace.size()) std::cout << " → ";
-    }
-    std::cout << " → END\n";
-
-    // MCPClient destructor reaps the subprocess.
-    return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "\nError: " << e.what() << "\n";
+        std::cout << answer << "\n";
+        return 0;  // the client's destructor ends the child process
+    } catch (const std::exception& error) {
+        std::cerr << "Error: " << error.what() << "\n";
         return 1;
     }
 }

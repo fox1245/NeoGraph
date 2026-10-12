@@ -137,7 +137,7 @@ Program은 Core 그래프를 내구성 있는 식별자, 예산, 승인(admissio
 | # | 예제 | Offline | 보여 주는 것 |
 |---|---|---|---|
 | 59 | [`59_mcp_server.cpp`](59_mcp_server.cpp) | yes | stdio 기반 MCP 서버: `echo` 도구 하나, 입력·출력 스키마, 구조화된 콘텐츠. |
-| 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | key | stdio 기반 MCP: 서버가 자식 프로세스이고 네트워크 스택 없이 ReAct 루프가 구동합니다. |
+| 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | yes | stdio 기반 MCP: 서버가 네트워크 스택 없는 자식 프로세스이고, ReAct 루프가 그 도구를 호출합니다. 스크립트 모델과 표준 라이브러리 서버를 씁니다. |
 | 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | yes | streamable HTTP 기반 MCP: 서버의 도구를 찾아 ReAct 루프에 넘깁니다. 데모 서버는 표준 라이브러리만 쓰는 Python이고 모델은 스크립트로 대신합니다. |
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | key | 사람의 승인을 받는 MCP: 모든 MCP 도구 호출 앞에서 `interrupt_before`로 멈추고 대기 중인 호출을 보여 준 뒤 재개합니다. |
 | 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | service | `Send`를 쓰는 MCP: planner 하나가 MCP 도구마다 호출을 만들고 호출들이 병렬로 실행됩니다. 모델은 없지만 MCP 서버가 실행 중이어야 합니다. |
