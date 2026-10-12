@@ -734,6 +734,26 @@ add_test(NAME QuickJS.LegacyDrainAudit
 set_tests_properties(QuickJS.LegacyDrainAudit
     PROPERTIES LABELS "quickjs;migration;metadata")
 
+# Public-text hygiene: scripts/check_public_text.py keeps internal trivia (names of earlier
+# projects, private links, home paths, addresses, secrets) out of the public text. The tree scan
+# covers code, configuration and examples only until the documents are clean; set
+# NEOGRAPH_PUBLIC_TEXT_GUARD_INCLUDE_DOCS to ON (or change its default here) to scan the whole
+# tree, Markdown, docs/, README* and CHANGELOG* included.
+option(NEOGRAPH_PUBLIC_TEXT_GUARD_INCLUDE_DOCS
+    "public_text_guard also scans Markdown, docs/, README* and CHANGELOG*" OFF)
+if(NEOGRAPH_PUBLIC_TEXT_GUARD_INCLUDE_DOCS)
+    set(NEOGRAPH_PUBLIC_TEXT_GUARD_SCOPE all)
+else()
+    set(NEOGRAPH_PUBLIC_TEXT_GUARD_SCOPE code)
+endif()
+add_test(NAME public_text_guard
+    COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/scripts/check_public_text.py
+        --tree --scope ${NEOGRAPH_PUBLIC_TEXT_GUARD_SCOPE} --root ${PROJECT_SOURCE_DIR})
+add_test(NAME public_text_guard_selftest
+    COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/test_public_text_guard.py)
+set_tests_properties(public_text_guard public_text_guard_selftest
+    PROPERTIES LABELS "hygiene" TIMEOUT 120)
+
 if(TARGET neograph_program_tests)
     if(NEOGRAPH_BUILD_POSTGRES)
         # Keep the Program PostgreSQL store integration cases off the shared

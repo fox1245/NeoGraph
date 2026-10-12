@@ -1,0 +1,39 @@
+Public-text guard (scripts/check_public_text.py)
+================================================
+
+NeoGraph is a public repository, so every tracked file is read by people who
+never saw its history. The guard keeps wording and details out of that text that
+only make sense inside the project: names of earlier projects, links to private
+repositories, wording about internal decision processes, home directories,
+public IP addresses, key-shaped strings and private project names.
+
+    python3 scripts/check_public_text.py --tree             # every tracked file
+    python3 scripts/check_public_text.py --diff [BASE]      # lines added since BASE
+    python3 scripts/check_public_text.py --list-rules
+
+--diff defaults to origin/master and covers committed, staged, unstaged and
+untracked additions, so it is the quick check to run before pushing. Each
+finding is printed as "path:line: rule: excerpt" and the exit status is 1; a
+secret-shaped excerpt is masked. Rules are listed by --list-rules and described
+in the script's header. Third-party and generated files (deps/,
+THIRD_PARTY_LICENSES*, node_modules/, lock files, the interop spec copies under
+bindings/python/tests/interop/*/spec/) and binary files are skipped.
+
+CI runs it as the ctest entry public_text_guard (label: hygiene), next to
+public_text_guard_selftest, which tests the script itself:
+
+    ctest --test-dir build -L hygiene --output-on-failure
+
+By default that entry scans code, configuration and examples only (--scope code).
+The CMake option NEOGRAPH_PUBLIC_TEXT_GUARD_INCLUDE_DOCS (tests/CMakeLists.txt)
+adds Markdown, docs/, README* and CHANGELOG*; turn it on, or change its default,
+once the documents are clean.
+
+When a finding is a justified exception (a test fixture with a deliberately fake
+key, a rule's own sample text), add a line to scripts/public_text_allowlist.txt:
+
+    path-glob<TAB>rule<TAB>reason
+
+Keep the entry as narrow as the thing it excuses and say why. Do not loosen a
+rule to let a fixture through. To run the --diff check before every commit,
+call it from .git/hooks/pre-commit.

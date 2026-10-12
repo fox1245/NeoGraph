@@ -1,0 +1,14 @@
+# Justified exceptions for scripts/check_public_text.py.
+# One per line: path-glob<TAB>rule<TAB>reason. The glob matches the repository-relative path
+# with fnmatch rules ("*" also crosses "/"); the rule is a rule name or "*"; the reason is required.
+# Keep an entry as narrow as the thing it excuses. A fixture that needs a fake key or a sample
+# address is listed here for its own path; the rule is never loosened for it.
+
+scripts/check_public_text.py	internal-process-wording	The rule definitions contain the phrases they search for.
+scripts/check_public_text.py	private-project-name	The rule definition contains the name it searches for.
+tests/test_public_text_guard.py	predecessor-name	Samples that the rule must flag, and the content of throwaway repositories in the guard self-test.
+tests/test_public_text_guard.py	private-repo-link	Samples of private and unlisted repository links that the rule must flag.
+tests/test_public_text_guard.py	internal-process-wording	Samples of the phrases that the rule must flag.
+tests/test_public_text_guard.py	home-path	Samples of personal home directories (invented names) that the rule must flag.
+tests/test_public_text_guard.py	external-ip	Samples of public addresses that the rule must flag.
+tests/test_public_text_guard.py	private-project-name	Samples of the project name that the rule must flag.
