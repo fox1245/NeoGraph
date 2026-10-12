@@ -54,7 +54,7 @@ return {generation: 2, result};
 config.recover_existing_child_commands = true; // default: false
 ```
 
-이 방식은 합성 게이트웨이 없이도 일반 정적 binding과 교체를 통해 상속된 자식에 모두 동작합니다. 부모 관계, link receipt, 소유자, 정확한 invocation, 자식 깊이, 저장된 자식 run이 모두 일치해야 합니다. 정적 명령은 기록된 명령 좌표에서 같은 자식 ID를 계산해 내야 하고, 상속된 자식은 세대를 만들 때 게시된 데이터에서 승인(admission)된 ID를 그대로 유지합니다. 과거의 Program 버전과 호스트 grant도 계속 사용할 수 있어야 합니다. 호스트에 승인(admission) resolver가 설정되어 있으면, 그 resolver가 평소처럼 자식 시도를 승인(admission)합니다.
+이 방식은 합성 게이트웨이 없이도 일반 정적 binding과 교체로 상속된 자식에 모두 동작합니다. 부모 관계, link receipt, 소유자, 정확한 invocation, 자식 깊이, 저장된 자식 run이 모두 일치해야 합니다. 정적 명령은 기록된 명령 좌표에서 같은 자식 ID를 계산해 내야 하고, 상속된 자식은 세대를 만들 때 게시된 데이터에서 승인(admission)된 ID를 그대로 유지합니다. 과거의 Program 버전과 호스트 grant도 계속 사용할 수 있어야 합니다. 호스트에 승인(admission) resolver가 설정되어 있으면, 그 resolver가 평소처럼 자식 시도를 승인(admission)합니다.
 
 복구는 전용 reconnect 경로를 사용합니다. 확인 직후 자식이 사라져도 새 자식을 만드는 경로로 빠지지 않습니다. run이 없거나 input이 바뀌었거나 binding을 쓸 수 없으면, 기존 명령은 조정(reconciliation)을 기다리는 pending 상태로 남습니다. 명령 예약과 자손 회계는 복구 후에도 유지됩니다. 이 플래그가 provider, 도구, 네이티브 등 결과를 알 수 없는 외부 효과의 재생(replay)까지 허용하는 것은 아닙니다. 별도로 부여하는 합성 복구 프로토콜은 달라지지 않습니다.
 
@@ -75,7 +75,7 @@ JSON은 직렬화하고 검증을 마친 Program 번들입니다. 다른 JSON을
 
 ## 레퍼런스 실행하기
 
-Program과 QuickJS를 빌드하고, 해당 케이스에 필요한 영속 백엔드를 둘 다 켭니다. `neograph_program_tests --gtest_filter="*Recursive*"`를 실행합니다. PostgreSQL 케이스는 기존의 일회용 `NEOGRAPH_TEST_POSTGRES_URL` 픽스처와 CTest 데이터베이스 리소스 락을 사용합니다. 이 구성에는 WSL의 네이티브 Docker를 쓸 수 있습니다.
+Program과 QuickJS를 빌드하고, 테스트 케이스에 필요한 영속 백엔드를 둘 다 켭니다. `neograph_program_tests --gtest_filter="*Recursive*"`를 실행합니다. PostgreSQL 케이스는 기존의 일회용 `NEOGRAPH_TEST_POSTGRES_URL` 픽스처와 CTest 데이터베이스 리소스 락을 사용합니다. 이 구성에는 WSL의 네이티브 Docker를 쓸 수 있습니다.
 
 토폴로지 성공 테스트를 실행할 때 `NEOGRAPH_RECURSIVE_ARTIFACT_DIR`을 지정하면 `main.json`, `child-v1.json`, `child-v2.json`, `grandchild.json`, `session.json`을 내보냅니다. 이 파일은 테스트용 레지스트리/컴파일러 식별자를 쓰므로 검토용 픽스처일 뿐, 단독으로 쓰는 프로덕션 설정이 아닙니다.
 

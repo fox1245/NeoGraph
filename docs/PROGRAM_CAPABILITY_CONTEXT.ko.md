@@ -13,7 +13,7 @@
 | 고정된 `add_core_tool_dispatch` | 없음 | 선언한 Tool 그대로 | 메타데이터 그대로 |
 | `TrustedNative` C++ 팩토리 | 선언한 Provider 그대로 | 선언한 Tool 그대로 | 메타데이터 그대로 |
 
-고정된 Core 등록 두 개는 NeoGraph 자체의 `LLMCallNode`와 `ToolDispatchNode`를 만들며, 호출자가 제공한 팩토리는 받지 않습니다. 이 둘은 정확하고 변경할 수 없는 요구 사항 resolver와 함께 등록해야 합니다. 모델이 작성한 토폴로지는 승인(admission)된 타입과 노드 설정을 고를 수는 있지만, 임의의 brokered 팩토리가 원시 Tool 포인터를 받게 만들 수는 없습니다. 표준 dispatch 노드는 바인딩된 Tool을 호출하기 전에 항상 `dispatch_tool_calls`를 거치며, 이 함수가 해당 실행의 `ToolGate`와 `ToolExecutionController`를 확인합니다.
+고정된 Core 등록 두 개는 NeoGraph 자체의 `LLMCallNode`와 `ToolDispatchNode`를 만들며, 호출자가 제공한 팩토리는 받지 않습니다. 이 둘은 정확하고 변경할 수 없는 요구 사항 resolver와 함께 등록해야 합니다. 모델이 작성한 토폴로지는 승인(admission)된 타입과 노드 설정을 고를 수는 있지만, 임의의 brokered 팩토리가 원시 Tool 포인터를 받게 만들 수는 없습니다. 표준 dispatch 노드는 바인딩된 Tool을 호출하기 전에 항상 `dispatch_tool_calls`를 거치며, 이 함수가 그 실행의 `ToolGate`와 `ToolExecutionController`를 확인합니다.
 
 `TrustedNative`는 호스트가 보증(attest)하는 별도의 경계입니다. Program 승인(admission)은 이 효과 모드에 대해 이미 `TrustedEmbedding` 모드와, 일치하는 인증된 Catalog 호스트 식별자를 요구합니다. 네이티브 C++ 코드는 `NodeContext` 밖에서 캡처한 리소스를 계속 쥐고 있거나 자체 효과를 일으킬 수 있습니다. 여기서 설명하는 규칙은 capability를 줄이는 것(attenuation)일 뿐 프로세스 샌드박스가 아니며, 임의의 네이티브 코드가 순수하다는 증명도 아닙니다. 호스트는 네이티브 팩토리를 검토해 고정(pin)하고, 그 효과를 있는 그대로 선언해야 합니다.
 
@@ -21,7 +21,7 @@ Program의 Core 연산이 중개되는 Tool dispatch를 하려면 호스트가 �
 
 grant 식별자를 영속적으로 유지해야 하는 호스트는, run ID를 명시해 run을 시작하기 전에 `SQLiteProgramCoreToolGrantStore`에 정확한 `ProgramCoreToolGrantRecord`를 승인(admission)할 수 있습니다. binding 지문은 `capability_binding_receipt_root(version.core_materialization_receipt().capability_bindings)`입니다. `make_durable_core_tool_grant_resolver(store, policy_factory)`를 `RuntimeConfig.core_tool_grant_resolver`로 설치하면, 다시 연결할 때를 포함해 연산마다 레코드를 새로 읽고, grant ID, 소유자, 버전, run, 연산, 시도, binding이 모두 같은 새 호스트 정책만 받아들입니다. 승인(admission)은 활성 레코드가 완전히 같을 때만 멱등(idempotent)이며, ID나 binding이 충돌하는 레코드로는 바꿀 수 없습니다. 재개된 Program은 시도 횟수가 올라가므로, 호스트는 재개하기 전에 그 시도에 대해 아직 유효한 grant를 명시적으로 승인(admission)해야 합니다. 같은 grant ID가 여러 시도를 포괄할 수 있는 것은 소유자/버전/run/연산/binding이 모두 같은 경우뿐이며, grant를 취소(revoke)하면 승인된 시도가 모두 비활성화됩니다. 저장된 레코드에는 자격 증명, Tool 포인터, 콜백이 들어 있지 않습니다.
 
-승인(admission)할지 여부와 Tool별 gate/controller 정책을 어떻게 다시 구성할지는 호스트만 결정합니다. 이 레코드는 권한의 증거일 뿐 effect 결과가 **아닙니다**. 호스트는 호출 단위 effect broker를 통해 Tool dispatch, 완료, 결과가 불확실한 경우를 여전히 저널에 기록해야 합니다. 이것은 외부 실행이 정확히 한 번만 일어난다는 약속이 아니며, 신뢰된 임의의 네이티브 코드가 중개되는 dispatch 밖에서 Tool을 호출하는 것을 막지도 않습니다.
+승인(admission)할지 여부와 Tool별 gate/controller 정책을 어떻게 다시 구성할지는 호스트만 결정합니다. 이 레코드는 권한의 증거일 뿐 effect 결과가 **아닙니다**. 호스트는 호출 단위 effect broker로 Tool dispatch, 완료, 결과가 불확실한 경우를 여전히 저널에 기록해야 합니다. 이는 외부 실행이 정확히 한 번만 일어난다는 약속이 아니며, 신뢰된 임의의 네이티브 코드가 중개되는 dispatch 밖에서 Tool을 호출하는 것을 막지도 않습니다.
 
 `neograph::sqlite`의 `SQLiteToolEffectBroker`는 `dispatch_tool_calls`를 위한 영속 write-ahead dispatch를 구현합니다. 영속 SQLite 경로와, 호스트가 등록한 `{Tool*, executable_id}` binding으로 생성합니다. executable ID는 모델에게 보이는 Tool 이름만이 아니라 실제 코드, 설정, 원격 대상, 자격 증명 권한까지 고정(pin)해야 합니다. 이 broker는 Program grant에 담아 전달하거나, 독립 실행 Core에서는 `RunResources::tool_effect_broker`로 전달합니다. 독립 실행 Core에서는 이에 맞는 `tool_effect_grant`도 설정해야 합니다. `make_tool_execution_context`를 쓰는 내장 노드와 호스트가 등록한 노드는 공유 엔진을 바꾸지 않고도 이 호출 범위의 리소스를 물려받습니다. 독립 실행 `llm::Agent::run`/`run_stream`은 같은 broker, 안정적인 소유자/run/스레드 식별자, 연산, 호스트 grant를 담은 run별 `ToolExecutionContext`를 받습니다. 다시 연결할 때 대기 중인 batch를 재생(replay)하려면, 호출자가 네이티브/Tool 파트를 포함한 순서 있는 `sp::Message` 전체 기록을 보관해야 합니다. 표시용 `ChatMessage` 투영만으로는 네이티브 이어가기 권한을 다시 만들 수 없습니다. 네이티브 기록을 영속적으로 보관하려면 호스트의 `sp::NativeArchive`도 필요합니다. broker를 쓰지 않는 기존 Agent/Core 경로는 명시적으로 보장 수준이 더 낮은 채로 남아 있습니다.
 
