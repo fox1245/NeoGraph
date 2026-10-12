@@ -15,9 +15,9 @@
 // on that default URL — so AgentCard discovery succeeds; otherwise the
 // example reports the connect failure and exits 1.
 //
-// smoke-companion: @TARGET:example_a2a_server@ 18087 serve
-// smoke-wait-port: 18087
-// smoke-args: http://127.0.0.1:18087
+// smoke-companion: @TARGET:example_a2a_server@ @PORT@ serve
+// smoke-wait-port: @PORT@
+// smoke-args: http://127.0.0.1:@PORT@
 // smoke-expect: agent text: [neo-agent] SAY HI FROM NEOGRAPH.
 // smoke-expect: graph reply:            "[neo-agent] SAY HI FROM NEOGRAPH. (VIA NEOGRAPH NODE)"
 
