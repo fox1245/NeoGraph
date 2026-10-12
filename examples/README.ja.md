@@ -115,12 +115,13 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 
 ### Program API
 
-Program は Core グラフを、永続的な識別子、予算、admission を備えたライフサイクルで包みます。JavaScript Program API(join、失敗ルーティング、予算、一時停止と再開、fork、クラッシュ復旧)は、[`bindings/python/tests/program_e2e/`](../bindings/python/tests/program_e2e/README.md) の Python エンドツーエンドシナリオが扱っています。
+Program は Core グラフを、永続的な識別子、予算、admission を備えたライフサイクルで包みます。JavaScript Program API(join、失敗ルーティング、予算、一時停止と再開、fork、クラッシュ復旧)は、[`bindings/python/tests/program_e2e/`](../bindings/python/tests/program_e2e/README.md) の Python エンドツーエンドシナリオが扱っています。 65〜69 番は C++ ホストから JavaScript の Program を実行するサンプルで、Python のサンプル 29〜36 番に対応します。`-DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON` も必要です。レジストリ、admission、ランタイムの共通設定は `program_support.h` にまとめてあり、63 番は C++ ビルダー JSON で書いた Program にこの設定を使います。
 
 | # | サンプル | Offline | 示すもの |
 |---|---|---|---|
 | 63 | [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | yes | `call_core` 操作を 1 つ持つ `ProgramSource` をコンパイルし、admission を通して `ProgramRuntime` で実行します。 |
 | 64 | [`64_topology_retrieval.cpp`](64_topology_retrieval.cpp) | yes | 検索で得たトポロジー候補を、永続的なセーフポイントで 1 つの実行中 lineage の検証済みマイグレーションにします。 |
+| 65 | [`65_program_javascript.cpp`](65_program_javascript.cpp) | yes | C++ ホストが `define()` と `main()` を持つ JavaScript の Program をコンパイルして実行します。`main()` が `ng.callCore` でグラフを 2 回呼び、21 は 42、さらに 84 になります。 |
 | 32 | [`32_evolution.cpp`](32_evolution.cpp) | yes | Harness 進化ループ。厳密な Core のシードをタスクに合わせて変異させ、系譜を JSON で出力します(`--smoke` は組み込みフィクスチャを使用)。 |
 | 58 | [`58_harness_bench.cpp`](58_harness_bench.cpp) | yes | 3 つのフィードバックモードに対する harness 収束ベンチマーク。`--smoke` は組み込みタスクを実行します。 |
 | 60 | [`60_harness_mcp_server.cpp`](60_harness_mcp_server.cpp) | yes | Harness MCP サーバー。6 つのツールで、範囲を限定したマルチ worker ワークフローをコンパイルして実行します。`NEOGRAPH_HARNESS_SMOKE=1` でオフラインのフィクスチャプロバイダーに切り替わります。 |

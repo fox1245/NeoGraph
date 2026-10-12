@@ -115,12 +115,13 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 
 ### Program API
 
-Program은 Core 그래프를 내구성 있는 식별자, 예산, 승인(admission)을 갖춘 수명 주기로 감쌉니다. JavaScript Program API(join, 실패 라우팅, 예산, 일시 중지와 재개, fork, 충돌 복구)는 [`bindings/python/tests/program_e2e/`](../bindings/python/tests/program_e2e/README.md)의 Python 엔드투엔드 시나리오가 다룹니다.
+Program은 Core 그래프를 내구성 있는 식별자, 예산, 승인(admission)을 갖춘 수명 주기로 감쌉니다. JavaScript Program API(join, 실패 라우팅, 예산, 일시 중지와 재개, fork, 충돌 복구)는 [`bindings/python/tests/program_e2e/`](../bindings/python/tests/program_e2e/README.md)의 Python 엔드투엔드 시나리오가 다룹니다. 65번부터 69번까지는 C++ 호스트에서 JavaScript Program을 실행하는 예제로, Python 예제 29번~36번과 짝을 이룹니다. `-DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON`도 필요합니다. 레지스트리, 승인, 런타임 설정은 `program_support.h`에 모아 두었으며, 63번은 C++ 빌더 JSON으로 쓴 Program에 이 설정을 씁니다.
 
 | # | 예제 | Offline | 보여 주는 것 |
 |---|---|---|---|
 | 63 | [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | yes | `call_core` 연산 하나를 가진 `ProgramSource`를 컴파일하고 승인(admission)한 뒤 `ProgramRuntime`으로 실행합니다. |
 | 64 | [`64_topology_retrieval.cpp`](64_topology_retrieval.cpp) | yes | 검색으로 얻은 토폴로지 후보를, 내구성 있는 안전 지점에서 실행 중인 lineage 하나의 검증된 마이그레이션으로 만듭니다. |
+| 65 | [`65_program_javascript.cpp`](65_program_javascript.cpp) | yes | C++ 호스트가 `define()`과 `main()`이 있는 JavaScript Program을 컴파일해 실행합니다. `main()`이 `ng.callCore`로 그래프를 두 번 호출해 21이 42, 다시 84가 됩니다. |
 | 32 | [`32_evolution.cpp`](32_evolution.cpp) | yes | Harness 진화 루프: 엄격한 Core 시드를 과제에 맞춰 변이시키고 계보를 JSON으로 출력합니다(`--smoke`는 내장 픽스처 사용). |
 | 58 | [`58_harness_bench.cpp`](58_harness_bench.cpp) | yes | 세 가지 피드백 모드에 대한 harness 수렴 벤치마크. `--smoke`는 내장 과제를 실행합니다. |
 | 60 | [`60_harness_mcp_server.cpp`](60_harness_mcp_server.cpp) | yes | Harness MCP 서버: 도구 여섯 개로 범위가 제한된 다중 worker 워크플로를 컴파일하고 실행합니다. `NEOGRAPH_HARNESS_SMOKE=1`은 오프라인 픽스처 공급자로 바꿉니다. |

@@ -115,12 +115,13 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 
 ### Program API
 
-Program 把 Core 图包进带有持久标识、预算和准入(admission)的生命周期。JavaScript Program API（join、失败路由、预算、暂停与恢复、fork、崩溃恢复）由 [`bindings/python/tests/program_e2e/`](../bindings/python/tests/program_e2e/README.md) 中的 Python 端到端场景覆盖。
+Program 把 Core 图包进带有持久标识、预算和准入(admission)的生命周期。JavaScript Program API（join、失败路由、预算、暂停与恢复、fork、崩溃恢复）由 [`bindings/python/tests/program_e2e/`](../bindings/python/tests/program_e2e/README.md) 中的 Python 端到端场景覆盖。 示例 65 到 69 从 C++ 主机运行 JavaScript Program，与 Python 示例 29 到 36 对应，还需要 `-DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON`。注册表、准入和运行时的共用设置放在 `program_support.h` 中，示例 63 把它用于以 C++ 构建器 JSON 写成的 Program。
 
 | # | 示例 | Offline | 演示内容 |
 |---|---|---|---|
 | 63 | [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | yes | 编译带有一个 `call_core` 操作的 `ProgramSource`，准入(admission)后通过 `ProgramRuntime` 运行。 |
 | 64 | [`64_topology_retrieval.cpp`](64_topology_retrieval.cpp) | yes | 检索得到的拓扑候选，在持久化安全点上成为对一条运行中 lineage 的已验证迁移。 |
+| 65 | [`65_program_javascript.cpp`](65_program_javascript.cpp) | yes | C++ 主机编译并运行带有 `define()` 和 `main()` 的 JavaScript Program。`main()` 用 `ng.callCore` 调用图两次，21 先变成 42，再变成 84。 |
 | 32 | [`32_evolution.cpp`](32_evolution.cpp) | yes | Harness 演化循环：针对任务变异严格 Core 种子，并以 JSON 输出谱系（`--smoke` 使用内置夹具）。 |
 | 58 | [`58_harness_bench.cpp`](58_harness_bench.cpp) | yes | 针对三种反馈模式的 harness 收敛基准；`--smoke` 运行内置任务。 |
 | 60 | [`60_harness_mcp_server.cpp`](60_harness_mcp_server.cpp) | yes | Harness MCP 服务器：六个工具编译并运行范围受限的多 worker 工作流。`NEOGRAPH_HARNESS_SMOKE=1` 会换成离线夹具 provider。 |

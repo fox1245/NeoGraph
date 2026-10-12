@@ -114,12 +114,13 @@ A model plus tools in a loop, and the published reasoning patterns built on that
 
 ### Program API
 
-Program wraps a Core graph in a lifecycle with durable identities, budgets and admission. The JavaScript Program API (joins, failure routing, budgets, pause and resume, fork, crash recovery) is exercised by the Python end-to-end scenarios in [`bindings/python/tests/program_e2e/`](../bindings/python/tests/program_e2e/README.md).
+Program wraps a Core graph in a lifecycle with durable identities, budgets and admission. The JavaScript Program API (joins, failure routing, budgets, pause and resume, fork, crash recovery) is exercised by the Python end-to-end scenarios in [`bindings/python/tests/program_e2e/`](../bindings/python/tests/program_e2e/README.md). Examples 65 to 69 run JavaScript Programs from a C++ host and mirror the Python examples 29 to 36. They also need `-DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON`. `program_support.h` holds the registry, admission and runtime setup they share; example 63 uses it with a Program written as C++ builder JSON.
 
 | # | Example | Offline | Shows |
 |---|---|---|---|
 | 63 | [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | yes | Compile a `ProgramSource` with one `call_core` operation, admit it, run it through `ProgramRuntime`. |
 | 64 | [`64_topology_retrieval.cpp`](64_topology_retrieval.cpp) | yes | A retrieved topology candidate becomes a verified migration of one running lineage at a durable safe point. |
+| 65 | [`65_program_javascript.cpp`](65_program_javascript.cpp) | yes | A C++ host compiles a JavaScript Program with `define()` and `main()` and runs it. `main()` calls the graph twice with `ng.callCore`: 21 becomes 42, then 84. |
 | 32 | [`32_evolution.cpp`](32_evolution.cpp) | yes | Harness evolution loop: mutate a strict Core seed against a task and print the lineage as JSON (`--smoke` uses a built-in fixture). |
 | 58 | [`58_harness_bench.cpp`](58_harness_bench.cpp) | yes | Harness convergence benchmark over three feedback modes; `--smoke` runs a built-in task. |
 | 60 | [`60_harness_mcp_server.cpp`](60_harness_mcp_server.cpp) | yes | The Harness MCP server: six tools compile and run a bounded multi-worker workflow. `NEOGRAPH_HARNESS_SMOKE=1` swaps in an offline fixture provider. |
