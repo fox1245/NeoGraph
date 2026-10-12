@@ -197,21 +197,52 @@ struct NEOGRAPH_API AgentInterface {
     std::string tenant;             ///< optional routing id (1.0 only)
 };
 
+/// One capability the agent advertises (1.0 `AgentSkill`). `tags` is
+/// REQUIRED and non-empty on the 1.0 wire; a card built without tags
+/// carries the skill id as its only tag.
+struct NEOGRAPH_API AgentSkill {
+    std::string              id;
+    std::string              name;
+    std::string              description;
+    std::vector<std::string> tags;
+    std::vector<std::string> examples;
+    std::vector<std::string> input_modes;
+    std::vector<std::string> output_modes;
+};
+
 /// Subset of AgentCard required to interact (spec §5.5).
 /// We deserialise only fields the client actually consumes; unknown
 /// fields are kept verbatim in `raw` for forward-compat.
+///
+/// A2AServer serves one card per protocol version (see
+/// `to_json(json&, const AgentCard&, WireDialect)`): a GET with
+/// `A2A-Version: 1.0` receives the pure 1.0 card; a GET without the header
+/// (spec §3.6.2: 0.3) receives the 0.3 card, which also lists the 1.0
+/// interface in `supportedInterfaces`.
 struct NEOGRAPH_API AgentCard {
     std::string             name;
     std::string             description;
-    std::string             url;                ///< primary endpoint
+    /// Public endpoint of the JSON-RPC binding. Empty on a server card: the
+    /// server then advertises the address the client used (the request's
+    /// Host), or its bound address.
+    std::string             url;
     std::string             version;
-    std::string             protocol_version;   ///< e.g. "0.3.0"
+    /// The 0.3 card's `protocolVersion`; A2AServer always serves "0.3.0" in
+    /// the 0.3 card and 1.0 interfaces in the 1.0 card.
+    std::string             protocol_version;
     std::string             preferred_transport = "JSONRPC";
     std::vector<std::string> default_input_modes;
     std::vector<std::string> default_output_modes;
 
-    bool                    streaming                       = false;
+    /// A2AServer supports streaming (SendStreamingMessage, SubscribeToTask)
+    /// unless this is false; then those methods answer
+    /// UnsupportedOperationError (-32004).
+    bool                    streaming                       = true;
+    /// Push notifications are not implemented by A2AServer: the server
+    /// always declares them unsupported, whatever this field says.
     bool                    push_notifications              = false;
+    /// The authenticated extended card is not implemented by A2AServer: the
+    /// server always declares it unsupported, whatever these fields say.
     bool                    extended_card                   = false;
     bool                    supports_authenticated_extended = false;
 
@@ -220,8 +251,21 @@ struct NEOGRAPH_API AgentCard {
     /// `additionalInterfaces` follow, all with the card's `protocolVersion`.
     std::vector<AgentInterface> supported_interfaces;
 
-    /// Parsed skill names — full skill objects available in `raw["skills"]`.
+    /// Parsed skill ids. A card built in code may list only ids here; the
+    /// serialised skill then uses the id as its name and only tag.
     std::vector<std::string> skill_names;
+    /// Full skill objects (parsed, or set by a server). Take precedence over
+    /// `skill_names` when serialising.
+    std::vector<AgentSkill> skills;
+
+    /// 1.0 `securitySchemes`: an object mapping a scheme name to a 1.0
+    /// SecurityScheme in ProtoJSON form, e.g.
+    /// `{"bearer": {"httpAuthSecurityScheme": {"scheme": "Bearer"}}}`.
+    /// The 0.3 card carries the equivalent 0.3 form. Null when none.
+    json security_schemes;
+    /// 1.0 `securityRequirements`: an array of
+    /// `{"schemes": {"<name>": {"list": [<scope>...]}}}`. Null when none.
+    json security_requirements;
 
     /// Full original document as received. Preserves fields we don't yet model.
     json raw;
@@ -264,7 +308,14 @@ NEOGRAPH_API void from_json(const json& j, MessageSendConfiguration& c);
 NEOGRAPH_API void to_json(json& j, const MessageSendParams& p);
 NEOGRAPH_API void from_json(const json& j, MessageSendParams& p);
 
+/// The card a 0.3 reader receives: the 0.3 fields plus the 1.0
+/// `supportedInterfaces` when the card lists them. A card with `raw` set is
+/// emitted verbatim.
 NEOGRAPH_API void to_json(json& j, const AgentCard& c);
+/// One card per protocol version. V1_0 emits a pure 1.0 AgentCard (no 0.3
+/// fields, non-empty skill tags, `capabilities.extendedAgentCard`); V0_3 is
+/// the two-argument form. A card with `raw` set is emitted verbatim.
+NEOGRAPH_API void to_json(json& j, const AgentCard& c, WireDialect dialect);
 NEOGRAPH_API void from_json(const json& j, AgentCard& c);
 
 NEOGRAPH_API void to_json(json& j, const TaskStatusUpdateEvent& e);

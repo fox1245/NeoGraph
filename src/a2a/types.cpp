@@ -397,64 +397,216 @@ void from_json(const json& j, MessageSendParams& p) {
 // ---------------------------------------------------------------------------
 // AgentCard
 // ---------------------------------------------------------------------------
+namespace {
+
+json string_array(const std::vector<std::string>& values) {
+    auto out = json::array();
+    for (const auto& v : values) out.push_back(v);
+    return out;
+}
+
+json modes_or_text(const std::vector<std::string>& modes) {
+    // Both card generations list at least one media type; an agent built
+    // without one speaks plain text.
+    return modes.empty() ? json::array({"text/plain"}) : string_array(modes);
+}
+
+/// The skills a card serialises: the full objects when set, else one per
+/// skill id, else a single default skill (1.0 requires a non-empty list).
+/// Every skill carries at least one tag (1.0 REQUIRED, spec §5.7).
+std::vector<AgentSkill> card_skills(const AgentCard& c) {
+    std::vector<AgentSkill> skills = c.skills;
+    if (skills.empty()) {
+        for (const auto& id : c.skill_names) {
+            AgentSkill s;
+            s.id = id;
+            s.name = id;
+            s.description = "Skill: " + id;
+            skills.push_back(std::move(s));
+        }
+    }
+    if (skills.empty()) {
+        AgentSkill s;
+        s.id = "default";
+        s.name = c.name.empty() ? std::string("default") : c.name;
+        s.description = c.description.empty() ? std::string("General requests")
+                                              : c.description;
+        skills.push_back(std::move(s));
+    }
+    for (auto& s : skills) {
+        if (s.name.empty()) s.name = s.id;
+        if (s.description.empty()) s.description = "Skill: " + s.id;
+        if (s.tags.empty()) s.tags.push_back(s.id.empty() ? std::string("default") : s.id);
+    }
+    return skills;
+}
+
+json skill_to_json(const AgentSkill& s) {
+    json j = json::object();
+    j["id"]          = s.id;
+    j["name"]        = s.name;
+    j["description"] = s.description;
+    j["tags"]        = string_array(s.tags);
+    if (!s.examples.empty())     j["examples"]    = string_array(s.examples);
+    if (!s.input_modes.empty())  j["inputModes"]  = string_array(s.input_modes);
+    if (!s.output_modes.empty()) j["outputModes"] = string_array(s.output_modes);
+    return j;
+}
+
+json interfaces_to_json(const std::vector<AgentInterface>& interfaces) {
+    auto arr = json::array();
+    for (const auto& i : interfaces) {
+        json ij = {{"url", i.url},
+                   {"protocolBinding", i.protocol_binding},
+                   {"protocolVersion", i.protocol_version}};
+        if (!i.tenant.empty()) ij["tenant"] = i.tenant;
+        arr.push_back(std::move(ij));
+    }
+    return arr;
+}
+
+/// 1.0 ProtoJSON SecurityScheme -> 0.3 discriminated SecurityScheme. A scheme
+/// with no 0.3 equivalent is omitted from the 0.3 card.
+std::optional<json> security_scheme_v03(const json& scheme) {
+    if (!scheme.is_object()) return std::nullopt;
+    auto copy_description = [&](const json& from, json& to) {
+        if (from.contains("description") && from["description"].is_string())
+            to["description"] = from["description"];
+    };
+    if (scheme.contains("httpAuthSecurityScheme")) {
+        const auto s = scheme["httpAuthSecurityScheme"];
+        json out = {{"type", "http"}, {"scheme", s.value("scheme", std::string("Bearer"))}};
+        if (s.contains("bearerFormat")) out["bearerFormat"] = s["bearerFormat"];
+        copy_description(s, out);
+        return out;
+    }
+    if (scheme.contains("apiKeySecurityScheme")) {
+        const auto s = scheme["apiKeySecurityScheme"];
+        json out = {{"type", "apiKey"}, {"in", s.value("location", std::string("header"))},
+                    {"name", s.value("name", std::string())}};
+        copy_description(s, out);
+        return out;
+    }
+    if (scheme.contains("oauth2SecurityScheme")) {
+        const auto s = scheme["oauth2SecurityScheme"];
+        json out = {{"type", "oauth2"}, {"flows", s.contains("flows") ? s["flows"] : json::object()}};
+        if (s.contains("oauth2MetadataUrl")) out["oauth2MetadataUrl"] = s["oauth2MetadataUrl"];
+        copy_description(s, out);
+        return out;
+    }
+    if (scheme.contains("openIdConnectSecurityScheme")) {
+        const auto s = scheme["openIdConnectSecurityScheme"];
+        json out = {{"type", "openIdConnect"},
+                    {"openIdConnectUrl", s.value("openIdConnectUrl", std::string())}};
+        copy_description(s, out);
+        return out;
+    }
+    if (scheme.contains("mtlsSecurityScheme")) {
+        json out = {{"type", "mutualTLS"}};
+        copy_description(scheme["mtlsSecurityScheme"], out);
+        return out;
+    }
+    return std::nullopt;
+}
+
+void security_to_v03(const AgentCard& c, json& j) {
+    if (c.security_schemes.is_object() && !c.security_schemes.empty()) {
+        json schemes = json::object();
+        for (auto [name, scheme] : c.security_schemes.items()) {
+            if (auto converted = security_scheme_v03(scheme)) schemes[name] = std::move(*converted);
+        }
+        if (!schemes.empty()) j["securitySchemes"] = std::move(schemes);
+    }
+    if (c.security_requirements.is_array() && !c.security_requirements.empty()) {
+        auto security = json::array();
+        for (auto requirement : c.security_requirements) {
+            if (!requirement.is_object() || !requirement.contains("schemes")) continue;
+            json entry = json::object();
+            for (auto [name, scopes] : requirement["schemes"].items()) {
+                entry[name] = scopes.is_object() && scopes.contains("list") ? scopes["list"]
+                                                                            : json::array();
+            }
+            security.push_back(std::move(entry));
+        }
+        if (!security.empty()) j["security"] = std::move(security);
+    }
+}
+
+}  // namespace
+
 void to_json(json& j, const AgentCard& c) {
     if (!c.raw.is_null()) {
         j = c.raw;
         return;
     }
+    // The 0.3 card (spec v0.3.0 AgentCard). `supportedInterfaces` is the 1.0
+    // field, listed so a 1.0 reader that sent no A2A-Version still finds the
+    // 1.0 interface; 0.3 readers ignore it.
     j = json::object();
     j["name"]                = c.name;
     j["description"]         = c.description;
     j["url"]                 = c.url;
     j["version"]             = c.version;
-    j["protocolVersion"]     = c.protocol_version;
+    j["protocolVersion"]     = c.protocol_version.empty() ? std::string("0.3.0")
+                                                          : c.protocol_version;
     j["preferredTransport"]  = c.preferred_transport;
-
-    auto in = json::array();
-    for (auto& s : c.default_input_modes) in.push_back(s);
-    j["defaultInputModes"] = std::move(in);
-
-    auto out_modes = json::array();
-    for (auto& s : c.default_output_modes) out_modes.push_back(s);
-    j["defaultOutputModes"] = std::move(out_modes);
+    j["defaultInputModes"]   = modes_or_text(c.default_input_modes);
+    j["defaultOutputModes"]  = modes_or_text(c.default_output_modes);
 
     json caps = json::object();
     caps["streaming"]         = c.streaming;
     caps["pushNotifications"] = c.push_notifications;
-    // Note: `capabilities.extendedAgentCard` is NOT in the A2A spec
-    // (was a NeoGraph fabrication). The spec signals authenticated
-    // extended-card support via the top-level
-    // `supportsAuthenticatedExtendedCard` boolean below.
     j["capabilities"] = std::move(caps);
 
     if (!c.supported_interfaces.empty()) {
-        auto arr = json::array();
-        for (auto& i : c.supported_interfaces) {
-            json ij = {{"url", i.url},
-                       {"protocolBinding", i.protocol_binding},
-                       {"protocolVersion", i.protocol_version}};
-            if (!i.tenant.empty()) ij["tenant"] = i.tenant;
-            arr.push_back(std::move(ij));
-        }
-        j["supportedInterfaces"] = std::move(arr);
+        j["supportedInterfaces"] = interfaces_to_json(c.supported_interfaces);
     }
 
+    // 0.3 signals the authenticated extended card with this top-level flag;
+    // 1.0 moved it to capabilities.extendedAgentCard.
     j["supportsAuthenticatedExtendedCard"] = c.supports_authenticated_extended;
+    security_to_v03(c, j);
 
-    // A2A AgentCard.skills entries REQUIRE description + tags per
-    // spec §5.5.4. When the caller only populated skill_names we emit a
-    // stub description and an empty tags array — strict consumers
-    // accept this; the fully-populated form should be set on c.raw or
-    // by the caller via a richer struct (future surface work).
     auto skills = json::array();
-    for (auto& name : c.skill_names) {
-        json s        = json::object();
-        s["id"]       = name;
-        s["name"]     = name;
-        s["description"] = std::string("Skill: ") + name;
-        s["tags"]     = json::array();
-        skills.push_back(std::move(s));
+    for (const auto& s : card_skills(c)) skills.push_back(skill_to_json(s));
+    j["skills"] = std::move(skills);
+}
+
+void to_json(json& j, const AgentCard& c, WireDialect dialect) {
+    if (dialect == WireDialect::V0_3 || !c.raw.is_null()) {
+        to_json(j, c);
+        return;
     }
+    // Pure 1.0 AgentCard (lf.a2a.v1.AgentCard, ProtoJSON): no `url`,
+    // `protocolVersion`, `preferredTransport` or
+    // `supportsAuthenticatedExtendedCard`.
+    j = json::object();
+    j["name"]        = c.name;
+    j["description"] = c.description;
+    auto interfaces = c.supported_interfaces;
+    if (interfaces.empty() && !c.url.empty()) {
+        interfaces.push_back(AgentInterface{c.url, "JSONRPC", "1.0", {}});
+    }
+    j["supportedInterfaces"] = interfaces_to_json(interfaces);
+    j["version"] = c.version;
+
+    json caps = json::object();
+    caps["streaming"]         = c.streaming;
+    caps["pushNotifications"] = c.push_notifications;
+    caps["extendedAgentCard"] = c.extended_card || c.supports_authenticated_extended;
+    j["capabilities"] = std::move(caps);
+
+    if (c.security_schemes.is_object() && !c.security_schemes.empty()) {
+        j["securitySchemes"] = c.security_schemes;
+    }
+    if (c.security_requirements.is_array() && !c.security_requirements.empty()) {
+        j["securityRequirements"] = c.security_requirements;
+    }
+    j["defaultInputModes"]  = modes_or_text(c.default_input_modes);
+    j["defaultOutputModes"] = modes_or_text(c.default_output_modes);
+
+    auto skills = json::array();
+    for (const auto& s : card_skills(c)) skills.push_back(skill_to_json(s));
     j["skills"] = std::move(skills);
 }
 
@@ -477,15 +629,17 @@ void from_json(const json& j, AgentCard& c) {
             for (auto v : arr) c.default_output_modes.push_back(v.get<std::string>());
     }
 
+    // A card that omits a capability does not have it.
+    c.streaming = false;
+    c.push_notifications = false;
+    c.extended_card = false;
     if (j.contains("capabilities")) {
         auto cap = j["capabilities"];
         if (cap.is_object()) {
             c.streaming          = cap.value("streaming", false);
             c.push_notifications = cap.value("pushNotifications", false);
-            // Tolerant read of legacy/non-spec field for cards produced
-            // by older NeoGraph builds that emitted `extendedAgentCard`.
-            // New cards should rely on `supportsAuthenticatedExtendedCard`
-            // at the top level.
+            // 1.0 `capabilities.extendedAgentCard`; a 0.3 card uses the
+            // top-level `supportsAuthenticatedExtendedCard` instead.
             c.extended_card      = cap.value("extendedAgentCard", false);
         }
     }
@@ -538,11 +692,33 @@ void from_json(const json& j, AgentCard& c) {
     if (j.contains("skills")) {
         auto arr = j["skills"];
         if (arr.is_array()) {
+            auto strings = [](const json& value) {
+                std::vector<std::string> out;
+                if (value.is_array())
+                    for (auto v : value)
+                        if (v.is_string()) out.push_back(v.get<std::string>());
+                return out;
+            };
             for (auto s : arr) {
-                if (s.is_object() && s.contains("id"))
-                    c.skill_names.push_back(s.value("id", std::string()));
+                if (!s.is_object() || !s.contains("id")) continue;
+                AgentSkill skill;
+                skill.id           = s.value("id", std::string());
+                skill.name         = s.value("name", std::string());
+                skill.description  = s.value("description", std::string());
+                skill.tags         = strings(s.contains("tags") ? s["tags"] : json());
+                skill.examples     = strings(s.contains("examples") ? s["examples"] : json());
+                skill.input_modes  = strings(s.contains("inputModes") ? s["inputModes"] : json());
+                skill.output_modes = strings(s.contains("outputModes") ? s["outputModes"] : json());
+                c.skill_names.push_back(skill.id);
+                c.skills.push_back(std::move(skill));
             }
         }
+    }
+    if (j.contains("securitySchemes") && j["securitySchemes"].is_object()) {
+        c.security_schemes = j["securitySchemes"];
+    }
+    if (j.contains("securityRequirements") && j["securityRequirements"].is_array()) {
+        c.security_requirements = j["securityRequirements"];
     }
 }
 
