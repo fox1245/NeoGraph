@@ -84,6 +84,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | 52 | [`52_export_schema.cpp`](52_export_schema.cpp) | yes | `NodeFactory::export_schema()` が、ビジュアルエディターがパレットを作るためのトポロジー JSON Schema を出力します。 |
 | 61 | [`61_sync_node.cpp`](61_sync_node.cpp) | yes | `SyncGraphNode`。コルーチンの定型コードが要らない短いノード 2 つ（空白の除去、大文字化）。ブロッキング I/O は引き続き `GraphNode::run()` に書きます。 |
 | 100 | [`100_stream_modes.cpp`](100_stream_modes.cpp) | yes | `StreamMode`。同じ実行を VALUES、UPDATES、EVENTS、DEBUG の各モードで観察し、モードごとに届くイベントを数えます。 |
+| 101 | [`101_retry_policy.cpp`](101_retry_policy.cpp) | yes | `RetryPolicy`。ノードが 2 回失敗すると、エンジンが指数バックオフで再試行します。回数を減らすと、再試行を使い切ったときに呼び出し側が受け取るものが分かります。 |
 
 ### エージェントパターン
 

@@ -83,6 +83,7 @@ The remaining Core features. They link only `neograph::core`, except 02, 06, 07 
 | 52 | [`52_export_schema.cpp`](52_export_schema.cpp) | yes | `NodeFactory::export_schema()` prints the topology JSON Schema that a visual editor builds its palette from. |
 | 61 | [`61_sync_node.cpp`](61_sync_node.cpp) | yes | `SyncGraphNode`: two short nodes (trim, then uppercase) without coroutine boilerplate; blocking I/O still belongs in `GraphNode::run()`. |
 | 100 | [`100_stream_modes.cpp`](100_stream_modes.cpp) | yes | `StreamMode`: the same run observed in VALUES, UPDATES, EVENTS and DEBUG mode, with the events each mode delivers counted. |
+| 101 | [`101_retry_policy.cpp`](101_retry_policy.cpp) | yes | `RetryPolicy`: a node fails twice and the engine retries it with exponential backoff; a smaller budget shows what the caller gets when the retries run out. |
 
 ### Agent patterns
 

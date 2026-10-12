@@ -84,6 +84,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | 52 | [`52_export_schema.cpp`](52_export_schema.cpp) | yes | `NodeFactory::export_schema()` 输出可视化编辑器据以生成调色板的拓扑 JSON Schema。 |
 | 61 | [`61_sync_node.cpp`](61_sync_node.cpp) | yes | `SyncGraphNode`：两个无需协程样板代码的简短节点（去空白、转大写）；阻塞 I/O 仍应写在 `GraphNode::run()` 中。 |
 | 100 | [`100_stream_modes.cpp`](100_stream_modes.cpp) | yes | `StreamMode`：用 VALUES、UPDATES、EVENTS、DEBUG 四种模式观察同一次运行，并统计每种模式送达的事件。 |
+| 101 | [`101_retry_policy.cpp`](101_retry_policy.cpp) | yes | `RetryPolicy`：节点失败两次后，引擎按指数退避重试；把重试次数调小，可以看到重试用尽时调用方得到什么。 |
 
 ### 智能体模式
 
