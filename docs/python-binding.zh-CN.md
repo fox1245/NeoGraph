@@ -194,7 +194,7 @@ next_request = ng.make_provider_request(
 )
 ```
 
-`previous_response_history` 是 `ProviderMessage` 的向量，不是单个 response，也不是 JSON 对象。它不会被发送出去。要具备真实的客户端工具所有权，可能需要完整的原始前缀，外加 ID 等于该游标的终止 assistant；纯粹由服务端保存的文本续接，可以让它留空。之后在进程内产生的游标输出，保留私有的终止所有权，但不会因此变成完整历史的 native replay，也不具备 archive 权限。失败、被编辑，或者 origin/模型/配置/路由对不上的状态，一律拒绝。完整的 native replay 和 archive 仍然需要它们原来的完整前缀。参见 [SDK 的 Responses 续接](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#responses-provider-held-continuation)。
+`previous_response_history` 是 `ProviderMessage` 的向量，不是单个 response，也不是 JSON 对象。它不会发送出去。要具备真实的客户端工具所有权，可能需要完整的原始前缀，外加 ID 等于该游标的终止 assistant；纯粹由服务端保存的文本续接，可以让它留空。之后在进程内产生的游标输出，保留私有的终止所有权，但不会因此变成完整历史的 native replay，也不具备 archive 权限。失败、被编辑，或者 origin/模型/配置/路由对不上的状态，一律拒绝。完整的 native replay 和 archive 仍然需要它们原来的完整前缀。参见 [SDK 的 Responses 续接](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#responses-provider-held-continuation)。
 
 如果历史里的 assistant `Text`/`ProviderToolCall` 是调用方自己构造的外来内容，没有 native 状态、wire 输出和签名，请显式设置 `gemini.gemini_history_mode = ng.GeminiHistoryMode.PortableForeign`；默认值是 `NativeOnly`。只有第一个外来的 function call 能绕过 Google 的签名校验器；纯文本的轮次不带签名。真实的 native 分组仍然要经过严格校验。这个模式无法修复、剥离或降级一个失败的 seal，也不能引入 reasoning 的权限，更不能让可移植数据获得 native replay。参见 [SDK 的外来 Gemini 历史](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#explicit-portable-gemini-history)。
 

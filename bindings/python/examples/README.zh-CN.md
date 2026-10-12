@@ -42,7 +42,7 @@ python 01_minimal.py
 | 14 | [`14_graph_to_json.py`](14_graph_to_json.py) | 无 | 翻倍的结果 42，以及保存下来的 `my_graph.json` 定义。 |
 | 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | 先运行 14 | 保存的定义把 5 翻倍成 10，把 100 翻倍成 200；自定义节点类型需要另外注册。 |
 | 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | Responses 对端/密钥；`gradio` | 普通聊天，或者三个问题组成的研究报告。researcher 用的是模型自身的知识，不做网络搜索。 |
-| 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | Responses 对端/密钥；`gradio`、`requests`；可选的 Crawl4AI/Postgres | `CRAWL4AI_URL` 启用真实的 `/md` 搜索；`NEOGRAPH_PG_DSN` 启用持久的引擎检查点。已配置的服务出错时，不会被悄悄替换。两者都不设置时，脚本会明确报告当前是仅用模型的研究/内存状态。Gradio 的历史不会自动恢复。 |
+| 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | Responses 对端/密钥；`gradio`、`requests`；可选的 Crawl4AI/Postgres | `CRAWL4AI_URL` 启用真实的 `/md` 搜索；`NEOGRAPH_PG_DSN` 启用持久的引擎检查点。已配置的服务出错时，不会悄悄替换。两者都不设置时，脚本会明确报告当前是仅用模型的研究/内存状态。Gradio 的历史不会自动恢复。 |
 | 18 | [`18_node_cache.py`](18_node_cache.py) | Chat 对端或托管服务的密钥 | 跨两个主题的五次运行，只会执行两次由 provider 支撑的节点；重复的输入重放缓存的写入。不承诺固定的延迟。 |
 | 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | 无 | 五个脚本化的 token 事件组成 `Octopuses have three hearts.` 以及消息流的各个块。 |
 | 20 | [`20_otel_tracing.py`](20_otel_tracing.py) | `opentelemetry-api`、`opentelemetry-sdk` | 控制台中的 span 覆盖这次运行和三个节点；最终的轨迹是 `['A', 'B', 'C']`。 |

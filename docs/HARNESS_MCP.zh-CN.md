@@ -131,7 +131,7 @@ neograph-harness-mcp --executor opencode --host-status
 neograph-harness-mcp --executor opencode --host-model openai/YOUR_MODEL
 ```
 
-使用其他 CLI 时，选择 `--executor claude` 或 `--executor codex`；省略 `--host-model`，则采用该适配器的宿主默认模型。也可以用环境变量 `NEOGRAPH_HARNESS_EXECUTOR` 和 `NEOGRAPH_HARNESS_HOST_MODEL` 代替。查询状态和正常启动时，会先做一次有时限的、不含机密的版本与登录预检；OpenCode 会通过 `opencode models` 校验显式给出的模型名。Claude 和 Codex 没有提供同样的、可移植的模型列表 API，它们的模型选择错误是从实际发出的请求中报告的。CLI 缺失、已登出、输出格式不受支持、配额、策略和模型方面的失败，都不会被悄悄转换成 provider 调用。确切的模型名（或 `host default`）、CLI 版本、executor 身份和模式，都会出现在状态和宿主元数据中，但不含任何凭据。
+使用其他 CLI 时，选择 `--executor claude` 或 `--executor codex`；省略 `--host-model`，则采用该适配器的宿主默认模型。也可以用环境变量 `NEOGRAPH_HARNESS_EXECUTOR` 和 `NEOGRAPH_HARNESS_HOST_MODEL` 代替。查询状态和正常启动时，会先做一次有时限的、不含机密的版本与登录预检；OpenCode 会通过 `opencode models` 校验显式给出的模型名。Claude 和 Codex 没有提供同样的、可移植的模型列表 API，它们的模型选择错误是从实际发出的请求中报告的。CLI 缺失、已登出、输出格式不受支持、配额、策略和模型方面的失败，都不会悄悄转换成 provider 调用。确切的模型名（或 `host default`）、CLI 版本、executor 身份和模式，都会出现在状态和宿主元数据中，但不含任何凭据。
 
 嵌入方，以及将来共享进程的 MCP 配置，可以通过 `<neograph/mcp/harness_host_agent.h>` 构造出同样的边界：先调用 `preflight_host_agent(config)`，再设置 `HarnessProgramHostConfig::worker_executor = make_host_agent_executor(config)`。`HostAgentExecutorConfig` 的工作区是一个显式给出的规范根目录；请把其中不含机密的 executor 与模型身份绑定到 `provider_host_configuration` 里，这样已保留的制品就不能换一条路由来恢复。这个边界不会修改直接使用 `Provider` 的 executor，也不要求对外的 MCP Sampling。
 
@@ -178,7 +178,7 @@ neograph-harness-mcp --executor provider
 
 单用户的本地安装，可以通过 `<neograph/mcp/adoption.h>`，显式采用 OpenCode 用户全局 `opencode.json` 中选定的、无凭据的 stdio 服务器。发现阶段只做检查：它只读取那个普通的、归当前用户所有的全局文件，绝不读取项目/工作区配置或 OAuth 存储，也绝不启动任何服务器。HTTP 条目、已禁用的条目、导入的环境变量或文件引用、不受支持的字段、shell 执行器，以及递归的 NeoGraph 条目，都会被拒绝。
 
-采用需要三样东西：对 `argv` 不含凭据的显式声明（attestation）、一份独立批准的启动记录，以及一份针对选定工具和 schema 的 capability manifest。`pinned` 记录会绑定源内容、规范的 cwd、可执行文件和解释器的身份、argv，以及能识别出的脚本或包。无法验证的启动形式，需要显式的 `trusted_mutable` 批准；它们绝不会被悄悄降级。发现阶段不会批准它刚刚检查过的那些字节。
+采用需要三样东西：对 `argv` 不含凭据的显式声明（attestation）、一份独立批准的启动记录，以及一份针对选定工具和 schema 的 capability manifest。`pinned` 记录会绑定源内容、规范的 cwd、可执行文件和解释器的身份、argv，以及能识别出的脚本或包。无法验证的启动形式，需要显式的 `trusted_mutable` 批准；它们绝不会悄悄降级。发现阶段不会批准它刚刚检查过的那些字节。
 
 每个工具的 manifest 都必须使用 `argument_policy: "exact-arguments-v1"`，并配上 `argument_predicate: {"allowed_arguments": [<complete approved argument objects>]}`。比较的对象是参数的值（包括资源），而不只是 schema 的形状。笼统的 `read-only`，或 SQL/路径之类的标签会被拒绝：它们不能证明任意输入都是安全的。Harness 的权限仍然是 worker 声明、所采用的 manifest、静态策略和进程边界这四者的交集。MCP 的 annotation 无法扩大它。
 
@@ -253,7 +253,7 @@ recorded 重放会单独认证来源原始的、不可变的调用权限，与�
 
 provider 的报告、已知的计费、不确定的预留，以及副作用的标识，会恰好一次地装入一个单独的、只用于观测的 bank。回放过程不能预留、退款、结算、增加报告，也不能分发新的副作用。丢失的重放执行由它的持久租约隔离，并保留已转移/不确定的额度；它不会通过真实分发来修复。运行快照会给出当前的谱系剩余额度，包括额度已转移给某次重放的那个来源。
 
-`ChatMessage` / `ChatTool` 和 JSON 只是可移植的投影（portable projection），并不具备 native 权限。可移植格式仍然是 [`provider-message-v2`](../schemas/provider-message-v2.schema.json) 和 [`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)。真正的 C++ 检查点 sidecar 把 native seal 保存在内存里。要持久保存 native 历史，需要由宿主持有的 `sp::NativeArchive`：封闭的 v3 / `spna3` 格式，带经过认证的、归 owner 私有的托管（custody），并使用独立的密钥。archive v2 会被拒绝，既不会升级，也不会被解释。认证绑定的内容包括：描述符里每一项语义选择（origin、路径、header、policy、请求字段映射、usage 路径和 stop 映射）、owner，以及确切的托管绑定。它既不是加密，也不是对 vendor 签发方的认证；不要公开 archive 的正文、密钥、native blob 或原始的 wire 观测数据。archive 只是证据存储，不是资金 grant，也不是消费租约（spending lease）。Program 和外部的 bank 仍由各自独立的 journal 持有；复制快照不能凭空产生额度（credit）。
+`ChatMessage` / `ChatTool` 和 JSON 只是可移植的投影（portable projection），并不具备 native 权限。可移植格式仍然是 [`provider-message-v2`](../schemas/provider-message-v2.schema.json) 和 [`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)。真正的 C++ 检查点 sidecar 把 native seal 保存在内存里。要持久保存 native 历史，需要由宿主持有的 `sp::NativeArchive`：封闭的 v3 / `spna3` 格式，带经过认证的、归 owner 私有的托管（custody），并使用独立的密钥。archive v2 会被拒绝，既不会升级，也不会解释。认证绑定的内容包括：描述符里每一项语义选择（origin、路径、header、policy、请求字段映射、usage 路径和 stop 映射）、owner，以及确切的托管绑定。它既不是加密，也不是对 vendor 签发方的认证；不要公开 archive 的正文、密钥、native blob 或原始的 wire 观测数据。archive 只是证据存储，不是资金 grant，也不是消费租约（spending lease）。Program 和外部的 bank 仍由各自独立的 journal 持有；复制快照不能凭空产生额度（credit）。
 
 **独立 bank journal 的修正：当前契约已修订，实际运行的证据见下文。** 经 owner 批准的协议要求：有一个单调的、受信存储命名空间义务（obligation），以及真实且不可变的原始 owner/thread/graph 作用域、上限（ceiling）、截止时间/时钟标识和 generation。只有对完整检查点承诺（commitment）和 revision 做精确的持久 head CAS，才能签发由宿主持有的不透明租约（lease）。精确的 pending effect 窗口必须在 provider I/O 之前持久化；结算必须使用真实的 SDK outcome 和实际计费，以及可空的 report、hold 和去重标识。检查点和下一个 head 必须在同一个 owned actor/revision 下原子发布。删除 bank 元数据、裁剪（prune）检查点、重放旧的已认证快照、覆盖同一个 ID 或丢失 actor，都不能产生额度（credit）。已有 65 的 hold 时，把上限 130 收紧到 129，不能再准入另一个 65；已证明没有副作用的失败，可以释放保持不变的 head，使真实的 130 恢复仍能进行。崩溃、未知、租约丢失的窗口一直处于 hold 状态，不退款、不重试、不降级（fallback）。普通/原始（plain/pristine）的 archive 配置不授予资金或 native 消费租约，当前的 `config.usage` 也不能替换已有的独立义务；Program 和外部 bank 的 journal 所有权不变。这是必须满足的契约；实际的币种/托管证据和测量手段的局限见下文，它不是稳定发布的 API 保证。
 
@@ -267,7 +267,7 @@ provider 的报告、已知的计费、不确定的预留，以及副作用的�
 
 **native 托管的 I/O 前闸门（pre-I/O gate）；实际演练的测试集/探针见下文。** 开始一个受管的副作用（managed effect）之前，在修改任何 pending effect、slot 或 held 窗口之前，必须有真正绑定的 NativeArchive，或者存储实际签发的本地私有 C++ 留存能力。这个私有能力不会从 JSON 导入，也不会通过 wire 传输。即使远端后端是 InMemory，gRPC 也要求客户端和服务端各有真实的 archive，因为 C++ sidecar 无法跨越这条边界。没有 archive 提供有限的来源 owner 时，原始的匿名 owner 作用域保持为空；真实的 archive 绑定必须与原始作用域一致。只有 financial head/租约的证据，并不能证明 native 托管已经就绪。
 
-`ProviderOutcomeError` 是保留 outcome 的宿主错误的公共基类；`ProviderObserverError` 和 `ProviderDispatchOutcomePersistenceError` 保留已完全排空的 SDK 结果和原始的 `cause()`。持久化错误还会在 `delivery_error()` 中保留次要的 observer 失败。`ProviderFailure::outcome()` 保留 SDK 失败本身。这些都是证据，不意味着 Node 或 Program 可以重新分发：传输层的重试完全由 SDK 负责，调用方选定的 `max_output_tokens` 也绝不会被悄悄截断。上限更大的语义调用，需要新的已准备摘要、不同的确定性调用序号，并且要从原来的资源 bank、按原来的截止时间重新通过准入；具备 native replay 的资格，并不会赋予重新续期的额度。
+`ProviderOutcomeError` 是保留 outcome 的宿主错误的公共基类；`ProviderObserverError` 和 `ProviderDispatchOutcomePersistenceError` 保留已完全排空的 SDK 结果和原始的 `cause()`。持久化错误还会在 `delivery_error()` 中保留次要的 observer 失败。`ProviderFailure::outcome()` 保留 SDK 失败本身。这些都是证据，不意味着 Node 或 Program 可以重新分发：传输层的重试完全由 SDK 负责，调用方选定的 `max_output_tokens` 也绝不会悄悄截断。上限更大的语义调用，需要新的已准备摘要、不同的确定性调用序号，并且要从原来的资源 bank、按原来的截止时间重新通过准入；具备 native replay 的资格，并不会赋予重新续期的额度。
 
 `ProgramFailure` 保留存活的 `provider_outcome` 和 `provider_cause`。它规范的、事实性的 SDK witness，把真实的 archive 托管绑定到 owner/run/version/bundle/operation/attempt；Runtime 在暴露恢复出来的失败之前，会先主动恢复配置好的托管。公开的、纯数据的 `ProgramResult::create()` 不能用预先填好的 witness 绕过这一步，未解析完成的 parsed seal 也不是可执行的结果。进程重启之后，原来的异常指针不再可用（`provider_cause == nullptr`），也不会根据文本重建。无法持久化的失败，也就无法序列化、发布或重放。
 

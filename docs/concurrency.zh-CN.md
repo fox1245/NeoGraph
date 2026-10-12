@@ -53,7 +53,7 @@ if (!accepted) reject_request();
 
 队列已满时，返回 `accepted=false` 和一个无效的 future。内部入队失败时，返回 `false`，同时给出一个带有 `std::runtime_error` 的有效 future；要去观察这个 future，不要把每次拒绝都当作普通的队列饱和。构造时至少需要一个 worker。
 
-`close()` 是幂等的。它拒绝新的提交，让已被认领的工作做完，并让尚未认领的 future 以 `std::runtime_error("RequestQueue is closed")` 结束。worker 自己调用 close 时，只发起关闭，不会等待自己。析构函数走的是同一条路径；已接受的 future 不会被悄悄丢下。
+`close()` 是幂等的。它拒绝新的提交，让已被认领的工作做完，并让尚未认领的 future 以 `std::runtime_error("RequestQueue is closed")` 结束。worker 自己调用 close 时，只发起关闭，不会等待自己。析构函数走的是同一条路径；已接受的 future 不会悄悄丢下。
 
 ## 检查点 I/O 与 Python
 
