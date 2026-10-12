@@ -4,9 +4,8 @@
 // one binding source recompiles just that TU. Linker + pybind11 fold
 // them all into a single `_neograph` shared object.
 
+#include "interpreter_exit.h"
 #include "opaque_types.h"
-
-#include <neograph/graph/executor.h>
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl_bind.h>
@@ -145,12 +144,12 @@ PYBIND11_MODULE(_neograph, m) {
     neograph::pybind::init_mcp(m);
 #endif
 
-    // A node attempt that ignored its cancellation past its stop deadline
-    // (#364) can outlive its run; when its body is Python it needs the
-    // interpreter to finish. Wait for such attempts before the interpreter
-    // shuts down, with the GIL released so they can.
+    // Stop the binding's threads before the interpreter shuts down: a thread
+    // that takes the GIL while the main thread finalizes is made to exit by
+    // force and crashes the process (interpreter_exit.h). The GIL is released
+    // while the hook waits, so the callbacks that are running can finish.
     py::module_::import("atexit").attr("register")(py::cpp_function([] {
         py::gil_scoped_release release;
-        neograph::graph::wait_for_node_attempts();
+        neograph::pybind::quiesce_before_finalization();
     }));
 }

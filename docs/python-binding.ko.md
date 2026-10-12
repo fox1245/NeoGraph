@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=e87174d256f1d79aa9a4b5abd7a0661ce0fdbf3aa7f108fb42dba62434a3dc8b -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=6054da8515ffab9b9f21d9d29f0cd3ecc2d9c708c06bc1242748ee7a001ecf5e -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -672,7 +672,7 @@ if result.interrupted:
 
 ## 비동기와 취소
 
-`run_async`, `run_stream_async`, `resume_async`는 `asyncio.Future` 객체를 반환합니다. 이 그래프 Future를 취소하면 `CancelToken`으로 취소를 요청합니다. 네이티브 I/O가 취소 경계에 도달해야 작업이 끝납니다. 그래프 스트리밍 콜백은 호출자의 asyncio 루프 스레드로 돌아와서 실행됩니다.
+`run_async`, `run_stream_async`, `resume_async`는 `asyncio.Future` 객체를 반환합니다. 이 그래프 Future를 취소하면 `CancelToken`으로 취소를 요청합니다. 네이티브 I/O가 취소 경계에 도달해야 작업이 끝납니다. 그래프 스트리밍 콜백은 호출자의 asyncio 루프 스레드로 돌아와서 실행됩니다. 인터프리터가 종료되면 모듈이 import될 때 등록한 `atexit` 훅이 종료 처리가 시작되기 전에 이 Future를 뒷받침하는 스레드와 Python 노드·도구 본문을 실행하는 풀을 멈춥니다. 실행 중인 Python 코드는 끝나기를 기다리고, 아직 기다리는 실행은 버리며, 이후의 `run_async`, `run_stream_async`, `resume_async` 호출은 `RuntimeError`를 발생시킵니다.
 
 Provider의 `invoke`와 `dispatch`는 동기 Python 메서드입니다. 바인딩은 네이티브 호출이 실행되는 동안 GIL을 놓았다가, Python provider 오버라이드와 이벤트 콜백을 실행할 때 GIL을 다시 잡습니다. 이벤트 콜백은 소유권을 가진 `ProviderEvent` 값을 받으며 네이티브 워커 스레드에서 실행될 수 있습니다. 콜백이 asyncio가 소유한 상태를 갱신해야 한다면 `loop.call_soon_threadsafe`를 사용합니다.
 

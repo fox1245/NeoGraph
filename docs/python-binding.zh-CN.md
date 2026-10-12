@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=e87174d256f1d79aa9a4b5abd7a0661ce0fdbf3aa7f108fb42dba62434a3dc8b -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=6054da8515ffab9b9f21d9d29f0cd3ecc2d9c708c06bc1242748ee7a001ecf5e -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -673,7 +673,7 @@ if result.interrupted:
 
 ## 异步与取消
 
-`run_async`、`run_stream_async` 和 `resume_async` 返回 `asyncio.Future` 对象。取消这些图的 Future，会通过 `CancelToken` 发出取消请求；原生 I/O 要到达它的取消边界，操作才会结束。图的流式回调会回到调用方的 asyncio 事件循环线程。
+`run_async`、`run_stream_async` 和 `resume_async` 返回 `asyncio.Future` 对象。取消这些图的 Future，会通过 `CancelToken` 发出取消请求；原生 I/O 要到达它的取消边界，操作才会结束。图的流式回调会回到调用方的 asyncio 事件循环线程。解释器退出时，模块在导入时注册的 `atexit` 钩子会在终结开始之前，停止支撑这些 Future 的线程，以及运行 Python 节点和工具主体的线程池。它会等正在运行的 Python 代码结束，丢弃仍在等待的运行；之后再调用 `run_async`、`run_stream_async` 或 `resume_async` 会抛出 `RuntimeError`。
 
 Provider 的 `invoke` 和 `dispatch` 是同步的 Python 方法。它们的绑定在原生调用运行期间释放 GIL，随后在执行 Python 的 provider 重写和事件回调时重新获取。事件回调收到的是持有所有权的 `ProviderEvent` 值，可能在原生 worker 线程上运行。回调需要更新属于 asyncio 的状态时，请使用 `loop.call_soon_threadsafe`。
 

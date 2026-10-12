@@ -2,6 +2,7 @@
 // Callback snapshots own their data; Python never borrows a parsed stream frame.
 #include "json_bridge.h"
 #include "opaque_types.h"
+#include "interpreter_exit.h"
 
 #include <neograph/a2a/client.h>
 #include <neograph/a2a/types.h>
@@ -21,7 +22,7 @@ PyObject* rpc_error_type = nullptr;
 
 neograph::a2a::A2AClient::EventCallback a2a_observer(py::function callback) {
     auto held = std::shared_ptr<py::function>(new py::function(std::move(callback)),
-        [](py::function* function) { py::gil_scoped_acquire gil; delete function; });
+        &neograph::pybind::delete_with_gil<py::function>);
     return [held](const neograph::a2a::StreamEvent& event) {
         py::gil_scoped_acquire gil;
         return (*held)(py::cast(event, py::return_value_policy::copy)).cast<bool>();

@@ -678,7 +678,7 @@ Use `get_state_history`, `update_state`, and `fork` for inspection and time-trav
 
 ## Async and cancellation
 
-`run_async`, `run_stream_async`, and `resume_async` return `asyncio.Future` objects. Cancelling these graph Futures requests cancellation through `CancelToken`; native I/O must reach its cancellation boundary before the operation finishes. Graph streaming callbacks return to the caller's asyncio loop thread.
+`run_async`, `run_stream_async`, and `resume_async` return `asyncio.Future` objects. Cancelling these graph Futures requests cancellation through `CancelToken`; native I/O must reach its cancellation boundary before the operation finishes. Graph streaming callbacks return to the caller's asyncio loop thread. When the interpreter exits, an `atexit` hook that the module registers on import stops the thread behind these Futures, and the pools that run Python node and tool bodies, before finalization starts: it lets the Python code that is running finish, abandons runs that are still waiting, and a later `run_async`, `run_stream_async` or `resume_async` raises `RuntimeError`.
 
 Provider `invoke` and `dispatch` are synchronous Python methods. Their bindings release the GIL while the native call runs, then acquire it for Python provider overrides and event callbacks. Event callbacks receive owned `ProviderEvent` values and may run on a native worker thread. Use `loop.call_soon_threadsafe` when a callback must update asyncio-owned state.
 

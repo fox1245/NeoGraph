@@ -4,6 +4,7 @@
 // receives a failed node's structured record and decides the free text the
 // failure record keeps. Used by GraphEngine.compile and LocalProgramHost.
 
+#include "interpreter_exit.h"
 #include <neograph/graph/types.h>
 
 #include <pybind11/pybind11.h>
@@ -20,10 +21,8 @@ namespace neograph::pybind {
 inline graph::FailureTextRedactor python_failure_text_redactor(pybind11::object callable) {
     namespace py = pybind11;
     if (callable.is_none()) return {};
-    auto held = std::shared_ptr<py::object>(new py::object(std::move(callable)), [](py::object* p) {
-        py::gil_scoped_acquire gil;
-        delete p;
-    });
+    auto held = std::shared_ptr<py::object>(new py::object(std::move(callable)),
+                                            &neograph::pybind::delete_with_gil<py::object>);
     return [held](const graph::NodeFailure& failure) -> std::string {
         py::gil_scoped_acquire gil;
         try {

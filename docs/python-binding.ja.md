@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=e87174d256f1d79aa9a4b5abd7a0661ce0fdbf3aa7f108fb42dba62434a3dc8b -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=6054da8515ffab9b9f21d9d29f0cd3ecc2d9c708c06bc1242748ee7a001ecf5e -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -683,7 +683,7 @@ if result.interrupted:
 
 ## 非同期とキャンセル
 
-`run_async`、`run_stream_async`、`resume_async` は、`asyncio.Future` オブジェクトを返します。これらのグラフのFutureをキャンセルすると、`CancelToken` を通じてキャンセルが要求されます。操作が終わるのは、ネイティブのI/Oがキャンセル可能な境界に達してからです。グラフのストリーミングのコールバックは、呼び出し側のasyncioのループスレッドに戻ってきます。
+`run_async`、`run_stream_async`、`resume_async` は、`asyncio.Future` オブジェクトを返します。これらのグラフのFutureをキャンセルすると、`CancelToken` を通じてキャンセルが要求されます。操作が終わるのは、ネイティブのI/Oがキャンセル可能な境界に達してからです。グラフのストリーミングのコールバックは、呼び出し側のasyncioのループスレッドに戻ってきます。インタープリターが終了するとき、モジュールがインポート時に登録した `atexit` フックが、ファイナライズが始まる前に、これらのFutureを支えるスレッドと、Pythonのノードやツールの本体を実行するプールを止めます。実行中のPythonコードは終わるまで待ち、まだ待機中の実行は破棄します。その後の `run_async`、`run_stream_async`、`resume_async` の呼び出しは `RuntimeError` を送出します。
 
 プロバイダーの `invoke` と `dispatch` は、同期のPythonメソッドです。バインディングは、ネイティブの呼び出しが動いている間はGILを解放し、Pythonのプロバイダーのオーバーライドやイベントコールバックを呼ぶときにGILを取得します。イベントコールバックは、所有権を持つ `ProviderEvent` の値を受け取り、ネイティブのワーカースレッド上で動くことがあります。コールバックからasyncioが管理する状態を更新する必要がある場合は、`loop.call_soon_threadsafe` を使ってください。
 

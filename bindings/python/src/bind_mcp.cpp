@@ -26,6 +26,7 @@
 // the Python-owned shared_ptr alive through every run.
 
 #include "json_bridge.h"
+#include "interpreter_exit.h"
 
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/cancel.h>
@@ -283,14 +284,10 @@ void init_mcp(py::module_& m) {
                 }
                 // The callable lives in C++ and may be released on any thread.
                 auto owned = std::shared_ptr<py::object>(
-                    new py::object(std::move(handler)), [](py::object* object) {
-                        if (Py_IsInitialized()) {
-                            py::gil_scoped_acquire gil;
-                            delete object;
-                        }
-                    });
+                    new py::object(std::move(handler)),
+                    &neograph::pybind::delete_with_gil<py::object>);
                 self.set_tool_list_changed_handler([owned] {
-                    if (!Py_IsInitialized()) return;
+                    if (!neograph::pybind::may_enter_interpreter()) return;
                     py::gil_scoped_acquire gil;
                     try {
                         (*owned)();

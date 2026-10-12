@@ -40,6 +40,7 @@
 // Python ops, including freeing the captured Future / loop refs.
 
 #include "failure_text_redactor.h"
+#include "interpreter_exit.h"
 #include "json_bridge.h"
 #include "opaque_types.h"
 #include "provider_bridge.h"
@@ -72,9 +73,11 @@
 #include <pybind11/functional.h>
 #include <pybind11/stl.h>
 
+#include <atomic>
 #include <chrono>
 #include <exception>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -161,9 +164,13 @@ public:
 // served by the engine's own thread_pool (set_worker_count), so
 // the AsyncRuntime mostly just orchestrates I/O suspension points.
 //
-// At process exit: ~AsyncRuntime resets the work-guard, joins the
-// worker thread. No Python ops in the destructor, so no shutdown
-// crash analogous to NodeFactory's was.
+// At interpreter exit the module's atexit hook closes the runtime
+// (close_async_runtime): it stops accepting runs, lets the handler that is
+// running finish and joins the worker thread, all before finalization starts.
+// A worker still alive then would take the GIL while the main thread
+// finalizes, which makes it exit by force and crashes the process
+// (interpreter_exit.h). ~AsyncRuntime does the same for a process that never
+// ran the hook, without any Python call.
 class AsyncRuntime {
 public:
     static AsyncRuntime& instance() {
@@ -171,19 +178,49 @@ public:
         return r;
     }
 
-    asio::io_context::executor_type executor() {
-        return io_.get_executor();
+    // The executor that drives the runs. Throws once the exit hook has closed
+    // the runtime, including when no run had started before.
+    static asio::io_context::executor_type executor() {
+        if (closed().load(std::memory_order_acquire))
+            throw std::runtime_error(
+                "the Python interpreter is exiting: no run can start any more");
+        return instance().io_.get_executor();
+    }
+
+    // Stops accepting runs and, if the runtime was ever started, stops the
+    // thread that drives them. The handler it is running finishes (it may need
+    // the GIL, so the caller must not hold it); handlers that have not started
+    // are dropped.
+    static void close_if_started() {
+        closed().store(true, std::memory_order_release);
+        if (auto* runtime = started().load(std::memory_order_acquire)) runtime->close();
     }
 
 private:
+    static std::atomic<AsyncRuntime*>& started() {
+        static std::atomic<AsyncRuntime*> pointer{nullptr};
+        return pointer;
+    }
+    static std::atomic<bool>& closed() {
+        static std::atomic<bool> flag{false};
+        return flag;
+    }
+
     AsyncRuntime()
         : guard_(asio::make_work_guard(io_)),
-          worker_([this]() { io_.run(); }) {}
+          worker_([this]() { io_.run(); }) {
+        started().store(this, std::memory_order_release);
+    }
 
     ~AsyncRuntime() {
+        started().store(nullptr, std::memory_order_release);
+        close();
+    }
+
+    void close() {
         guard_.reset();
         io_.stop();
-        if (worker_.joinable()) worker_.join();
+        if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id()) worker_.join();
     }
 
     AsyncRuntime(const AsyncRuntime&) = delete;
@@ -197,12 +234,8 @@ private:
 // Retain asyncio objects in shared owners. Copies on the Asio worker do not
 // touch Python reference counts; the final deleter acquires the GIL.
 std::shared_ptr<py::object> hold_py(py::object obj) {
-    return std::shared_ptr<py::object>(
-        new py::object(std::move(obj)),
-        [](py::object* p) {
-            py::gil_scoped_acquire g;
-            delete p;
-        });
+    return std::shared_ptr<py::object>(new py::object(std::move(obj)),
+                                       &delete_with_gil<py::object>);
 }
 
 // Inspect captured Python values without consuming their restore state. Native
@@ -317,6 +350,8 @@ void resolve_future_async(std::shared_ptr<py::object> future,
 }
 
 } // namespace
+
+void close_async_runtime() { AsyncRuntime::close_if_started(); }
 
 void init_graph(py::module_& m) {
     using namespace neograph::graph;
@@ -913,7 +948,9 @@ void init_graph(py::module_& m) {
                 // the GIL as it drops the last reference must not join with it.
                 auto engine = std::shared_ptr<GraphEngine>(
                     unique.release(), [](GraphEngine* released) {
-                        if (PyGILState_Check()) {
+                        // After the interpreter is gone PyGILState_Check()
+                        // answers 1 for every thread: nothing to release.
+                        if (Py_IsInitialized() && PyGILState_Check()) {
                             py::gil_scoped_release release;
                             delete released;
                         } else {
@@ -989,7 +1026,7 @@ void init_graph(py::module_& m) {
                 // signature wants.
                 auto held = std::shared_ptr<py::object>(
                     new py::object(std::move(fn)),
-                    [](py::object* p) { py::gil_scoped_acquire g; delete p; });
+                    &delete_with_gil<py::object>);
                 self.set_tool_gate([held](neograph::ToolCall call,
                                           neograph::ToolGateContext gctx)
                         -> asio::awaitable<neograph::ToolDecision> {
@@ -1103,11 +1140,7 @@ void init_graph(py::module_& m) {
                 // increments; the destructor explicitly acquires the
                 // GIL before dropping the py::function.
                 auto sp = std::shared_ptr<py::function>(
-                    new py::function(std::move(py_cb)),
-                    [](py::function* f) {
-                        py::gil_scoped_acquire g;
-                        delete f;
-                    });
+                    new py::function(std::move(py_cb)), &delete_with_gil<py::function>);
                 auto cb = [sp](const GraphEvent& ev) {
                     py::gil_scoped_acquire acquire;
                     try {
@@ -1392,7 +1425,7 @@ void init_graph(py::module_& m) {
                 future.attr("add_done_callback")(on_done);
 
                 asio::co_spawn(
-                    AsyncRuntime::instance().executor(),
+                    AsyncRuntime::executor(),
                     self->run_async(*cfg_h),
                     [self, self_h, cfg_h, fut_h, loop_h, cancel_tok]
                         (std::exception_ptr e, RunResult result) {
@@ -1503,7 +1536,7 @@ void init_graph(py::module_& m) {
                         std::move(cb_lambda));
 
                 asio::co_spawn(
-                    AsyncRuntime::instance().executor(),
+                    AsyncRuntime::executor(),
                     self->run_stream_async(*cfg_h, *engine_cb_h),
                     [self, self_h, cfg_h, engine_cb_h, fut_h, loop_h,
                           cancel_tok]
@@ -1549,7 +1582,7 @@ void init_graph(py::module_& m) {
                 RunMetadata metadata;
                 if (interrupt_id) metadata.resume_interrupt_id = std::move(*interrupt_id);
                 asio::co_spawn(
-                    AsyncRuntime::instance().executor(),
+                    AsyncRuntime::executor(),
                     self->resume_async(std::move(config), *rv_h, *engine_cb_h, std::move(metadata)),
                     [self, self_h, tid_h, rv_h, engine_cb_h, fut_h, loop_h]
                     (std::exception_ptr e, RunResult result) {
@@ -1581,8 +1614,7 @@ void init_graph(py::module_& m) {
         .def("register_reducer",
              [](GraphRegistry& self, const std::string& name, py::function fn) {
                  auto held = std::shared_ptr<py::function>(
-                     new py::function(std::move(fn)),
-                     [](py::function* p) { py::gil_scoped_acquire g; delete p; });
+                     new py::function(std::move(fn)), &delete_with_gil<py::function>);
                  self.register_reducer(name, [held](const json& current, const json& incoming) {
                      py::gil_scoped_acquire g;
                      return py_to_json((*held)(json_to_py(current), json_to_py(incoming)));
@@ -1591,8 +1623,7 @@ void init_graph(py::module_& m) {
         .def("register_condition",
              [](GraphRegistry& self, const std::string& name, py::function fn) {
                  auto held = std::shared_ptr<py::function>(
-                     new py::function(std::move(fn)),
-                     [](py::function* p) { py::gil_scoped_acquire g; delete p; });
+                     new py::function(std::move(fn)), &delete_with_gil<py::function>);
                  self.register_condition(name, [held](const GraphState& state) {
                      py::gil_scoped_acquire g;
                      return (*held)(py::cast(&state, py::return_value_policy::reference))

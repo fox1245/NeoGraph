@@ -24,6 +24,7 @@
 //   - The factory callable is wrapped in a shared_ptr with a
 //     GIL-acquiring deleter so concurrent compiles do not race Python cleanup.
 
+#include "interpreter_exit.h"
 #include "json_bridge.h"
 #include "node_failure_bridge.h"
 #include "opaque_types.h"
@@ -48,6 +49,7 @@
 #include <pybind11/stl.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -305,6 +307,25 @@ PythonToolControlSignal translate_tool_control_signal(py::error_already_set& e) 
 // `_pytools` attribute on the Python NodeContext wrapper, then retained
 // by the compiled graph's ToolSet. Pattern parallels PyGraphNodeOwner —
 // same GIL handshake, same destructor caveat.
+
+// The exit hook stops both worker pools below (close_worker_pools) so that
+// their threads do not take the GIL while the interpreter finalizes
+// (interpreter_exit.h). The pools are only stopped if they were started, and
+// after that nothing is offloaded to them: the body runs on the calling thread,
+// as it does for a tool that is not an AsyncTool.
+std::atomic<asio::thread_pool*>& async_tool_pool_started() {
+    static std::atomic<asio::thread_pool*> started{nullptr};
+    return started;
+}
+std::atomic<asio::thread_pool*>& python_node_pool_started() {
+    static std::atomic<asio::thread_pool*> started{nullptr};
+    return started;
+}
+std::atomic<bool>& worker_pools_are_closed() {
+    static std::atomic<bool> closed{false};
+    return closed;
+}
+
 // Worker pool for AsyncTool bodies (issue #96).
 //
 // Overlapping Python tools means running their bodies on separate threads —
@@ -321,6 +342,7 @@ asio::thread_pool& async_tool_pool() {
         }
         return static_cast<std::size_t>(32);
     }());
+    async_tool_pool_started().store(&pool, std::memory_order_release);
     return pool;
 }
 
@@ -338,6 +360,7 @@ asio::thread_pool& python_node_pool() {
         }
         return static_cast<std::size_t>(32);
     }());
+    python_node_pool_started().store(&pool, std::memory_order_release);
     return pool;
 }
 
@@ -404,10 +427,7 @@ public:
         }
     }
 
-    ~PyToolOwner() override {
-        py::gil_scoped_acquire g;
-        py_obj_ = py::object();
-    }
+    ~PyToolOwner() override { release_with_gil(py_obj_); }
 
     neograph::ChatTool get_definition() const override {
         py::gil_scoped_acquire g;
@@ -418,7 +438,7 @@ public:
     std::string execute(const json& arguments) override {
         PythonToolControlSignal signal;
         {
-            py::gil_scoped_acquire g;
+            EngineGil g;
             try {
                 return call_python(arguments);
             } catch (py::error_already_set& e) {
@@ -441,7 +461,7 @@ public:
     // those, and only those, we hop onto a worker thread, which is where the
     // GIL can actually be released while the tool waits on I/O.
     asio::awaitable<std::string> execute_async(const json& arguments) override {
-        if (!concurrent_) {
+        if (!concurrent_ || worker_pools_are_closed().load(std::memory_order_acquire)) {
             co_return execute(arguments);   // unchanged: serial, as before
         }
         co_return co_await asio::co_spawn(
@@ -492,9 +512,9 @@ public:
     ~PyGraphNodeOwner() override {
         // Engine destruction may run on a non-Python thread (e.g.
         // a thread_pool worker). The py::object holds a Python
-        // refcount; dropping it MUST happen with the GIL held.
-        py::gil_scoped_acquire g;
-        py_obj_ = py::object();
+        // refcount; dropping it MUST happen with the GIL held, and it is
+        // left alone when the interpreter can no longer be entered.
+        release_with_gil(py_obj_);
     }
 
     // ── Required: name lookup ────────────────────────────────────────
@@ -510,7 +530,7 @@ public:
         // On a shared host scheduler the body would hold the scheduler thread
         // for its whole duration, stalling sibling join members and await
         // timers (#367, #368). Elsewhere the body keeps running inline.
-        if (in.ctx.shared_scheduler) {
+        if (in.ctx.shared_scheduler && !worker_pools_are_closed().load(std::memory_order_acquire)) {
             co_return co_await asio::co_spawn(python_node_pool().get_executor(),
                                               run_on_worker(this, &in), asio::use_awaitable);
         }
@@ -534,7 +554,7 @@ private:
         PythonToolControlSignal signal;
         std::exception_ptr failure;
         {
-            py::gil_scoped_acquire g;
+            EngineGil g;
             py::object py_input = py::cast(&in,
                 py::return_value_policy::reference);
             try {
@@ -559,15 +579,24 @@ private:
 // engine internal hand-offs) don't touch the CPython refcount.
 template <typename PyCallable>
 std::shared_ptr<PyCallable> make_gil_safe(PyCallable&& fn) {
-    return std::shared_ptr<PyCallable>(
-        new PyCallable(std::forward<PyCallable>(fn)),
-        [](PyCallable* p) {
-            py::gil_scoped_acquire g;
-            delete p;
-        });
+    return std::shared_ptr<PyCallable>(new PyCallable(std::forward<PyCallable>(fn)),
+                                       &delete_with_gil<PyCallable>);
 }
 
 } // namespace
+
+void close_worker_pools() {
+    // Stop accepting work first, so that nothing is offloaded to a pool that
+    // is about to stop; then let the bodies that run finish (they need the GIL,
+    // which the caller has released) and join the threads.
+    worker_pools_are_closed().store(true, std::memory_order_release);
+    for (auto* started : {&async_tool_pool_started(), &python_node_pool_started()}) {
+        if (auto* pool = started->load(std::memory_order_acquire)) {
+            pool->stop();
+            pool->join();
+        }
+    }
+}
 
 void register_scoped_python_node(graph::GraphRegistry& registry, const std::string& type,
                                  py::function factory) {

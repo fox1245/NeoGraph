@@ -69,6 +69,7 @@ endif()
 # suffix (.cpython-XYZ-PLATFORM.so / .pyd) and CXX visibility flags.
 pybind11_add_module(_neograph
     src/module.cpp
+    src/interpreter_exit.cpp
     src/json_bridge.cpp
     src/bind_provider.cpp
     src/bind_provider_values.cpp

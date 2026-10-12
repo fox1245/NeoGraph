@@ -1,5 +1,6 @@
 // Adapt Python OpenTelemetry objects to the real native prepared-dispatch
 // tracer. Native OpenInference code owns projection/privacy/usage decisions.
+#include "interpreter_exit.h"
 #include <neograph/observability/openinference.h>
 #include <pybind11/pybind11.h>
 
@@ -13,10 +14,7 @@ namespace {
 
 template <typename T>
 std::shared_ptr<T> own_python(T value) {
-    return std::shared_ptr<T>(new T(std::move(value)), [](T* object) {
-        py::gil_scoped_acquire gil;
-        delete object;
-    });
+    return std::shared_ptr<T>(new T(std::move(value)), &neograph::pybind::delete_with_gil<T>);
 }
 
 struct OTelObjects {

@@ -1,4 +1,5 @@
 #include "json_bridge.h"
+#include "interpreter_exit.h"
 
 #include <neograph/hook.h>
 #include <neograph/hook_outbox.h>
@@ -81,10 +82,7 @@ std::shared_ptr<HookRuntime> make_python_hook_runtime(
 
     auto held_callbacks = std::shared_ptr<py::dict>(
         new py::dict(std::move(callbacks)),
-        [](py::dict* value) {
-            py::gil_scoped_acquire acquire;
-            delete value;
-        });
+        &neograph::pybind::delete_with_gil<py::dict>);
     HookExecutionBackend backend =
         [held_callbacks](const HookInvocation& invocation,
                          const RuntimeEvent& event,

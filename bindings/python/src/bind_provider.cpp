@@ -3,6 +3,7 @@
 #include "json_bridge.h"
 #include "opaque_types.h"
 #include "provider_bridge.h"
+#include "interpreter_exit.h"
 #include <neograph/tool.h>
 #include <neograph/graph/cancel.h>
 #include <pybind11/functional.h>
@@ -61,10 +62,7 @@ std::shared_ptr<Provider> own_python_provider(py::object provider) {
     auto* pointer = native.get();
     auto lease = std::shared_ptr<PythonProviderLease>(
         new PythonProviderLease{std::move(native), std::move(provider)},
-        [](PythonProviderLease* owner) {
-            py::gil_scoped_acquire gil;
-            delete owner;
-        });
+        &neograph::pybind::delete_with_gil<PythonProviderLease>);
     // Preserve the real provider address and virtual dispatch. Every native
     // copy retains this exact Python owner without a global or patient list.
     return std::shared_ptr<Provider>(std::move(lease), pointer);

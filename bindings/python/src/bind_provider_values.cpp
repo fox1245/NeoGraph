@@ -3,6 +3,7 @@
 #include "json_bridge.h"
 #include "node_failure_bridge.h"
 #include "provider_bridge.h"
+#include "interpreter_exit.h"
 #include <core/native.h>
 #include <core/native_archive.h>
 #include <pybind11/stl.h>
@@ -51,7 +52,7 @@ struct PythonObserver {
 std::function<void(const sp::Event&)> provider_observer(py::object callback) {
     if (callback.is_none()) return {};
     auto owned = std::shared_ptr<py::function>(new py::function(callback.cast<py::function>()),
-        [](py::function* function) { py::gil_scoped_acquire gil; delete function; });
+        &neograph::pybind::delete_with_gil<py::function>);
     return PythonObserver{std::move(owned)};
 }
 py::object provider_observer_function(const std::function<void(const sp::Event&)>& observer) {
