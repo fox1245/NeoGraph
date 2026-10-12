@@ -6,3 +6,4 @@ neograph_add_example(mcp_tool_errors 75_mcp_tool_errors.cpp LINK neograph::core 
 neograph_add_example(mcp_http_server 76_mcp_http_server.cpp
     LINK neograph::core neograph::mcp neograph::mcp_http_server)
 neograph_add_example(a2a_dialects 77_a2a_dialects.cpp LINK neograph::core neograph::a2a)
+neograph_add_example(a2a_input_required 78_a2a_input_required.cpp LINK neograph::core neograph::a2a)
