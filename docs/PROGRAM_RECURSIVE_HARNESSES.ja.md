@@ -1,29 +1,29 @@
 <!-- neograph-i18n: source=docs/PROGRAM_RECURSIVE_HARNESSES.md locale=ja source_sha256=66abaa1eb78c67c16cf2ef0e6f42ad71632806116dc0b71dd952e8433d4b4970 -->
-# 独立した Harness generation を持つ再帰エージェント
+# 独立したHarnessの世代を持つ再帰的なエージェント
 
 **Languages:** [English](PROGRAM_RECURSIVE_HARNESSES.md) | [한국어](PROGRAM_RECURSIVE_HARNESSES.ko.md) | [日本語](PROGRAM_RECURSIVE_HARNESSES.ja.md) | [简体中文](PROGRAM_RECURSIVE_HARNESSES.zh-CN.md)
 
-検証済みシナリオは、一つの owner の下で、単一の論理 session を親・子・孫のツリーとして実行する。各エージェントは独自の ProgramVersion、Core topology、state、budget、lineage を持つ。子は、主 orchestrator と同じホスト所有の合成境界を通じ、自分の子の JavaScript を提案できる。
+検証したシナリオでは、1つの論理セッションを、1人のオーナーのもとで、親・子・孫のツリーとして実行します。各エージェントは、それぞれ固有のProgramVersion、Coreトポロジー、状態、予算、系統（lineage）を持ちます。子は、メインのオーケストレーターが使うのと同じ、ホストが所有する合成の境界を通じて、自分の子のためのJavaScriptを提案できます。
 
-参照テストは四つの異なる Core plan を実行する。主 Harness は一ノード、元の子は二ノード、置換後の子は三ノード、孫は四ノードである。孫がまだ生存している間に子を置換する。主 orchestrator は既存の await を通じて、置換後の子の結果を受け取る。SQLite と PostgreSQL の process-exit テストは、ネストした置換のコミット後にツリー全体を再オープンし、完了済み作業を再実行せずに完了する。
+リファレンスのテストは、4種類の異なるCoreプランを実行します。メインのHarnessにノード1つ、元の子にノード2つ、置き換え後の子にノード3つ、孫にノード4つです。子は、その孫がまだ生きている間に置き換えられます。メインのオーケストレーターは、すでに待機していたawaitを通じて、置き換え後の子の結果を受け取ります。SQLiteとPostgreSQLのプロセス終了のテストでは、入れ子の置き換えのコミットの後でツリー全体を開き直し、完了済みの処理を再実行せずに最後まで実行します。
 
-## 識別情報とストレージ
+## IDとストレージ
 
-`ProgramRunRecord::logical_run_id()` と `ProgramHandle::logical_run_id()` は、安定したエージェント識別情報を公開する。置換のたびに、異なる physical run と不変の ProgramVersion を作成する点は変わらない。lineage が有効な generation を選択する。その generation の handle を取得するには、`reconnect(owner, logical_run_id)` を使う。
+`ProgramRunRecord::logical_run_id()` と `ProgramHandle::logical_run_id()` は、エージェントの安定したIDを公開します。置き換えのたびに、物理的な実行と、変更できないProgramVersionは、新しく作られます。系統（lineage）が、アクティブな世代を選びます。その世代のハンドルを得るには、`reconnect(owner, logical_run_id)` を使います。
 
-新しい run-record schema 4 は、logical run が physical run と異なる場合に `logical_run_id` を持つ。child relation は引き続き元の child 識別情報を参照し、最初の承認済み link と invocation を保持する。置換後の実行が終端結果を返す場合、relation は、その結果の実際の run/version 識別情報に加えて `terminal_generation` を記録する。transition backend はこれを、コミット済みの child lineage、generation、終端 run record と照合する。
+新しい実行レコードのスキーマ4は、論理IDが物理的な実行と異なる場合に、`logical_run_id` を持ちます。子の関係は、引き続き、元の子のIDを指します。最初にadmissionされたリンクと呼び出しも保持します。置き換えが最終結果を提供したときは、関係に、その結果の実際の実行／バージョンのIDとともに、`terminal_generation` が記録されます。遷移のバックエンドは、これを、コミット済みの子の系統、世代、最終的な実行レコードと照合します。
 
-既存の schema 2/3 レコードは読み取り可能であり、新しいフィールドを持たない通常のレコードは schema 3 表現を維持する。古い Program binary を新しい C++ record layout と混在させてはならない。Program consumer をまとめて再ビルドすること。
+既存のスキーマ2／3のレコードは、引き続き読み取れます。新しいフィールドを持たない通常のレコードは、スキーマ3の表現のままです。古いProgramのバイナリと、新しいC++のレコードレイアウトを混在させないでください。Programのコンシューマーは、まとめて再ビルドしてください。
 
-## 子孫を伴う置換
+## 子孫を持つエージェントの置き換え
 
-生存している family の置換には、その所有 runtime と、そのエージェントの generator 内で完了済みの、保持されたトップレベル checkpoint を使う。この checkpoint はネストしたエージェントのものでもよい。置換先はすでに承認済みでなければならない。
+ライブなfamilyの置き換えは、所有するランタイムと、そのエージェントのジェネレーターで保持された、完了済みのトップレベルのチェックポイントを使います。このチェックポイントは、入れ子のエージェントのものでもかまいません。置き換え先は、すでにadmission済みでなければなりません。
 
-同じトランザクションで新しい generation を公開し、既存の child relation とコミット済み子孫 budget をコピーする。親識別情報と絶対的な child depth は変更できない。置換先は子の能力・副作用 grant と保証下限を保持しなければならない。ネストした置換は親の結果契約を維持しなければならない。保持する子の binding 名は一意である必要がある。中断した子には、親の置換前に明示的な処置が必要である。
+同じトランザクションで、新しい世代が公開され、既存の子の関係と、コミット済みの子孫の予算がコピーされます。親のIDと、子の絶対的な深さは変えられません。置き換え先は、子のcapabilityと効果のグラント、および保証の下限を保持しなければなりません。入れ子の置き換えは、親の結果の契約を保たなければなりません。保持される子には、一意なバインディング名が必要です。割り込まれた子がある場合は、親を置き換える前に、その扱いを明示する必要があります。
 
-旧実行は、論理エージェントの terminal hook を発行せず、移管した子をキャンセルせずに退役する。論理 child-concurrency と quota の cleanup は後継へ移り、attempt 固有の cleanup は引き続き実行される。子をすでに待っている親は後継の結果を追い、その child handle を通じたキャンセルも同じ連鎖を追う。root-generation handle は既存の generation semantics を維持する。有効な root には、返された replacement handle を使うか、logical identity で再接続する。
+古い実行は、論理エージェントの終了Hookを発行せず、引き継がれた子をキャンセルすることもなく、退役します。論理的な子の同時実行数とクォータのクリーンアップは、後継に移ります。試行ごとのクリーンアップは、引き続き実行されます。すでにその子を待っている親は、後継の結果に従います。その子のハンドルを通じたキャンセルも、同じ連鎖をたどります。ルートの世代のハンドルは、従来の世代の意味を保ちます。アクティブなルートを得るには、返された置き換え後のハンドルを使うか、論理IDで再接続してください。
 
-不変な generation 作成公開に存在する子だけが、継承 binding になる。既存の子は、正確に一致する binding と input を使って再 join できる。
+引き継がれるバインディングは、変更できない世代作成の公開に含まれていた子だけです。既存の子は、正確に一致するバインディングと入力を使って、再び結び付けられます。
 
 ```javascript
 // Original child Harness:
@@ -44,48 +44,48 @@ const result = yield ng.await(
 return {generation: 2, result};
 ```
 
-置換は、その子を再作成せず、invocation を書き換えず、別の child grant を取得しない。旧 generation の未添付の合成 binding は新しい権限にならない。新しい binding は引き続き通常の合成・承認経路を使う。ソース提案は、独立にレビュー済みのホスト template instance と一致しなければならない。参照ホストは、エージェントが checkpoint に含めたというだけではソースを承認しない。
+置き換えによって、その子が作り直されることも、その呼び出しが書き換えられることも、別の子のグラントが取得されることもありません。古い世代の、結び付けられていない合成のバインディングが、新しい権限になることもありません。新しいバインディングは、通常の合成とadmissionの経路を通ります。ソースの提案は、独立してレビューされたホストのテンプレートのインスタンスと一致しなければなりません。リファレンスのホストは、エージェントがチェックポイントに入れたというだけで、ソースを承認することはしません。
 
-## プロセス喪失後の承認済みの子の復旧
+## プロセスが失われた後の、admission済みの子の復旧
 
-承認済み child binding を復元するホストは、未完了の JavaScript `spawn`/`await` コマンドが公開済みの子へ再接続することを、明示的に許可できる。
+admission済みの子のバインディングを復元するホストは、未完了のJavaScriptの `spawn` / `await` コマンドが、すでに公開済みの子に再接続することを、明示的に許可できます。
 
 ```cpp
 config.recover_existing_child_commands = true; // default: false
 ```
 
-これは合成 gateway なしで、通常の static binding と置換によって継承された子の両方に使える。parent relation、link receipt、owner、正確な invocation、child depth、永続化された child run が一致しなければならない。static command は記録された command coordinate から同じ child ID を導出しなければならない。継承された子は generation 作成公開で承認された ID を保持する。過去の Program version とホスト grant は、引き続き利用可能でなければならない。ホスト admission resolver を設定している場合、通常どおり child attempt を承認する。
+これは、合成ゲートウェイがなくても、通常の静的なバインディングと、置き換えによって引き継がれた子に対して機能します。親の関係、リンクレシート、オーナー、正確な呼び出し、子の深さ、永続化された子の実行が、すべて一致していなければなりません。静的なコマンドは、記録されたコマンド座標から、同じ子のIDを導出する必要があります。引き継がれた子は、世代作成の公開でadmissionされたIDを保持します。過去のProgramバージョンとホストのグラントも、引き続き利用できなければなりません。設定されているホストのadmissionリゾルバーは、これまでどおり、子の試行を通常どおりadmissionします。
 
-復旧は専用の reconnect 経路を使う。検査後に子が消えても、新しい子の作成へフォールスルーできない。run の欠落、input の変更、binding の利用不能がある場合、既存コマンドを照合待ちの保留状態に残す。コマンド予約と子孫会計は復旧をまたいで維持する。このフラグは、未知の provider、tool、native、その他の外部副作用の replay を認可しない。別途 grant を要する合成復旧プロトコルは変わらない。
+復旧は、専用の再接続の経路を使います。チェックの後で消えた子が、新しい子の作成に流れ込むことはありません。実行が見つからない、入力が変わっている、バインディングが利用できない、といった場合は、既存のコマンドが、照合のために保留のまま残ります。コマンドの予約と子孫の会計は、復旧後も保たれます。このフラグは、未確定のプロバイダー、ツール、ネイティブ、その他の外部への効果のリプレイを許可するものではありません。別に付与される合成の復旧プロトコルは、変わりません。
 
-このフラグとは独立に、実行中 attempt の replay は、未完了の封印済み `ng.checkpoint` を、正確な journaled value と元の command reservation から完了する。外部 dispatch は行わない。他の未知の副作用については、引き続き family を停止して照合を待つ。中断した子は dispatch 済みで再開可能な relation に留まり、親は relation をキャンセルしたり予約を二重返却したりせず、進行中 command reservation を保持する。
+このフラグとは別に、実行中の試行をリプレイすると、未完了のシール済みの `ng.checkpoint` が、ジャーナルに記録された正確な値と、元のコマンドの予約から完了します。外部へのディスパッチは行いません。それ以外の未確定の効果があると、引き続き、照合のためにfamilyが一時停止します。割り込まれた子は、ディスパッチ済みで再開可能な関係のままです。その親は、関係をキャンセルしたり、その予約を二重に返却したりせず、実行中のコマンドの予約を保持します。
 
-ストレージが利用可能なまま結果公開が失敗した場合、dispatch 済みコマンドの結果と pending effect の両方を `Ambiguous` として公開する。キャンセルでその不確実性を消すことはできない。楽観的 command-head 読み取りの競合は再試行する一方、親 head が変わらないまま恒久的に拒否されても、子の完了通知を無期限に阻止することはできない。
+ストレージが利用できる状態で、結果の公開が失敗した場合は、ディスパッチ済みのコマンドの結果と保留中の効果が、どちらも `Ambiguous` として公開されます。キャンセルしても、この不確かさは消えません。楽観的なコマンドヘッドの読み取りの衝突は、リトライされます。変わっていない親のヘッドに対する恒久的な拒否が、子の完了通知を、いつまでもブロックすることはありません。
 
-`*StaticChild*` テストは、SQLite と PostgreSQL の process exit、static と継承された再帰 child、不変の child ID と receipt、正確に 64 journal entry を生成する孫の 32 checkpoint を対象とする。opt-in の欠如、run/binding の欠落、input/receipt の改変、復旧承認と dispatch の間で run が消えるケースも実行する。
+`*StaticChild*` のテストは、SQLiteとPostgreSQLでのプロセス終了、静的な再帰の子と引き継がれた再帰の子、変わっていない子のIDとレシート、孫の32個のチェックポイントがちょうど64件のジャーナルエントリを生成すること、を対象にしています。また、オプトインがない場合、実行やバインディングが見つからない場合、入力やレシートが改ざんされた場合、復旧のadmissionとディスパッチの間に実行が消えた場合も確認します。
 
-## JSON 成果物と会計
+## JSONアーティファクトと会計
 
-JSON はシリアライズされ、検証された Program bundle である。異なる JSON の読み込みは、不変 version の候補を選択する。ファイル変更は稼働エンジンを変更しない。ホストが version を承認し、保持した checkpoint でエージェントの generation を切り替える。generator の heap/stack state は移植しない。アプリケーション state は明示的な `handoff` JSON を通じて渡し、child relation は永続ツリーに残る。
+JSONは、シリアライズされた、検証済みのProgramバンドルです。別のJSONを読み込むと、変更できない候補のバージョンが選ばれます。ファイルを書き換えても、動作中のエンジンが書き換わることはありません。ホストがそのバージョンをadmissionし、保持されたチェックポイントで、エージェントの世代を切り替えます。ジェネレーターのヒープやスタックの状態は、移植されません。アプリケーションの状態は、明示的な `handoff` のJSONを通じて引き継がれ、子との関係は、永続的なツリーに残ります。
 
-例の replacement bundle は、session 開始前にコンパイル・承認する。主エージェントと子エージェントは実行中に子孫の JavaScript を提案し、それらのコンパイルは各エージェントの grant を消費する。新たに生成した自己置換を準備することは、別のコンパイル・承認操作のままである。`replace` API 自体は、承認済みの置換先を選択する。
+サンプルの置き換え用のバンドルは、セッションの開始前に、コンパイルされ、admissionされます。メインのエージェントと子のエージェントは、実行中に、それぞれの子孫のためのJavaScriptを提案します。それらのコンパイルは、それぞれのグラントを消費します。新しく生成された自分自身の置き換えを用意するのは、これまでどおり、コンパイルとadmissionの別の操作です。`replace` API自体が選ぶのは、すでにadmission済みの置き換え先です。
 
-委譲済み compile budget は、親の別の合成要求には使えない。置換は正確な残 budget とコミット済み子孫を移管する。child recovery は初回 attempt の deadline も保持する。SQLite Catalog は現在、transition store と同様に、同時 agent publication とデータベースを共有できるよう、上限付き busy timeout を使う。
+委譲されたコンパイルの予算は、親の別の合成リクエストには使えません。置き換えでは、残りの予算と、コミット済みの子孫が、正確に引き継がれます。子の復旧も、最初の試行のデッドラインを保持します。SQLiteのCatalogは、上限付きのbusyタイムアウトを使うようになりました。これは、遷移ストアが、並行するエージェントの公開とデータベースを共有できることに合わせたものです。
 
-## 参照実装の実行
+## リファレンスの実行
 
-Program と QuickJS をビルドし、各ケースには両方の永続化 backend を有効にする。`neograph_program_tests --gtest_filter="*Recursive*"` を実行する。PostgreSQL ケースは既存の使い捨て `NEOGRAPH_TEST_POSTGRES_URL` fixture と CTest database resource lock を使う。この構成には native WSL Docker を利用できる。
+ProgramとQuickJSをビルドし、それぞれのケース用に、両方の永続化バックエンドを有効にします。`neograph_program_tests --gtest_filter="*Recursive*"` を実行します。PostgreSQLのケースは、既存の使い捨ての `NEOGRAPH_TEST_POSTGRES_URL` フィクスチャと、CTestのデータベースリソースのロックを使います。この環境の構築には、WSLのネイティブなDockerが適しています。
 
-成功する topology テストの実行時に `NEOGRAPH_RECURSIVE_ARTIFACT_DIR` を設定すると、`main.json`、`child-v1.json`、`child-v2.json`、`grandchild.json`、`session.json` を出力する。これらはテストの registry/compiler 識別情報を使うレビュー用 fixture であり、単独の本番構成ではない。
+成功するトポロジーのテストを実行するときに `NEOGRAPH_RECURSIVE_ARTIFACT_DIR` を設定すると、`main.json`、`child-v1.json`、`child-v2.json`、`grandchild.json`、`session.json` がエクスポートされます。これらはテスト用のレジストリとコンパイラーのIDを使っていて、レビュー用のフィクスチャです。単独で使える本番の設定ではありません。
 
-この検証は三階層ツリー、ネストした checkpoint 置換、生存する子孫の保持とキャンセル、generation-result の完全性、budget の縮小、SQLite/PostgreSQL での session 全体のプロセス復旧を対象とする。LLM ソース生成サービス、Python/transport facade、owner 間の session 共有ポリシー、任意の Core のインプレース変更を導入するものではない。native Core migration は既存の境界を維持する。複数ホスト間での独立した live ownership transfer と、context/hook 障害の全組み合わせは、別途検証が必要である。
+この適格性確認が対象にするのは、3階層のツリー、入れ子のチェックポイントでの置き換え、ライブな子孫の保持とキャンセル、世代ごとの結果の整合性、予算の減衰、SQLiteとPostgreSQLでのセッション全体のプロセス復旧です。LLMによるソース生成サービス、Pythonやトランスポートのファサード、オーナーをまたぐセッション共有のポリシー、Coreを任意にその場で書き換える機能は、導入しません。ネイティブCoreのマイグレーションの境界は、従来どおりです。独立した複数のホスト間でのライブなオーナーシップの移転と、コンテキストやHookの失敗の組み合わせすべてには、別の適格性確認が必要です。
 
-## 対話型 chatbot の例
+## 対話型チャットボットのサンプル
 
-[進化する Harness chatbot](../examples/cookbook/self_evolving_chatbot/README.md) は、分離した二 tenant、OpenRouter adapter、browser inspector、ターンごとのレビュー済み template proposal、runtime successor compilation、SQLite または PostgreSQL の chat/provider ledger を加えて参照実装を拡張する。assistant は置換後に reviewer を合成でき、その間も元の orchestrator は同じ logical assistant を待ち続ける。
+[進化するHarnessチャットボット](../examples/cookbook/self_evolving_chatbot/README.md)は、このリファレンスを拡張して、隔離された2つのテナント、OpenRouterアダプター、ブラウザーのインスペクター、ターンごとのレビュー済みテンプレートの提案、実行時の後継のコンパイル、SQLiteまたはPostgreSQL上のチャットとプロバイダーの台帳を備えています。そのアシスタントは、置き換えの後でレビュアーを合成できます。その間も、元のオーケストレーターは、同じ論理アシスタントを待ち続けます。
 
-`RuntimeConfig::checkpoint_handler` により、ホストは永続公開後に handle と move-only checkpoint lease をキューへ入れられる。lease を保持すると、scheduler thread をブロックせずに generator を一時停止する。コールバックは速やかに戻らなければならない。コンパイルと置換はホスト worker 上で実行する。再接続時には、最新の完了済み checkpoint の replay も通知される。明示的な `next_handoff` 要求が優先する。
+`RuntimeConfig::checkpoint_handler` を使うと、ホストは、永続的な公開の後で、ハンドルと、ムーブ専用のチェックポイントのリースを、キューに入れられます。リースを保持している間、ジェネレーターは、スケジューラーのスレッドをブロックせずに一時停止します。コールバックは、すぐに戻る必要があります。コンパイルと置き換えは、ホストのワーカーで行ってください。再接続のときは、最後に完了したチェックポイントのリプレイも、このコールバックで観測されます。明示的な `next_handoff` のリクエストが、優先されます。
 
-`ProgramRuntime::reserve_synthesis` は、想定した lineage head に対して未割当の動的コンパイル一回分を差し引き、保持中 lease の journal reference を更新する。checkpoint 識別情報とシリアライズされた handoff value は変わらない。古い head、別の owner/runtime、期限切れの wall budget、子孫へ割り当て済みの compile budget は拒否する。ホストは予約前に intent を永続化し、結果を記録しなければならない。不確実な確認応答は無料の再試行を認可できない。chatbot は通常の `ProgramSynthesisGateway` でこの予約を使い、承認済み置換先を `replace` に渡す。
+`ProgramRuntime::reserve_synthesis` は、期待する系統のヘッドに対して、割り当てられていない動的コンパイルを1単位引き落とし、保持されているリースのジャーナル参照を更新します。チェックポイントのIDと、シリアライズされたhandoffの値は、変わりません。古いヘッド、別のオーナーやランタイム、期限切れの実時間の予算、子孫に割り当て済みのコンパイル予算は、拒否されます。ホストは、予約の前に意図を永続化し、結果を記録する必要があります。曖昧な応答があっても、無償でのリトライが許可されるわけではありません。チャットボットは、この予約を、通常の `ProgramSynthesisGateway` の中で使い、admission済みの置き換え先を `replace` に渡します。
 
-chatbot の template gate は回答品質の証明ではなく、モデル呼び出しと generator control は `Unmanaged` 保証を維持する。プロセス喪失後の pending provider effect には、自動再 dispatch ではなく照合が必要である。
+チャットボットのテンプレートのゲートは、回答の品質の証明ではありません。モデル呼び出しとジェネレーターの制御は、`Unmanaged` の保証のままです。プロセスが失われた後に保留中のプロバイダーの効果があれば、自動で再ディスパッチされるのではなく、照合が必要です。
