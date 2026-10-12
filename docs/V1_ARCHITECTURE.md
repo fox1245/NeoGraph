@@ -458,6 +458,13 @@ The Program compiler lowers authoring sugar to a small orchestration plan:
   without running or charging them again, and lets every other paused child ask
   its own question again;
 - `race`: complete on a declared winner rule and cancel the remaining children;
+- `quorum`: run children in order until `min_success` of them complete, and
+  fail with `P_QUORUM_UNREACHABLE` once the rest cannot reach it. A child whose
+  Core call interrupts counts as a success it may still reach: unless the
+  children that finished already decide the quorum, it pauses there, starts no
+  further child, and the run record keeps the result of each child that
+  finished (#387). Resume continues the paused child and replays the finished
+  ones without running or charging them again;
 - `branch`: select a child from a typed condition result;
 - `loop`: repeat a child under a declared condition and hard iteration limit;
 - `spawn`: admit and start a separately compiled child Program;
@@ -476,7 +483,7 @@ do not add feature-specific branches to Core or GraphEngine.
 
 A plan that pauses resumes where it stopped. Its paused run record keeps, by
 operation id, what the attempt that resumes it replays: the result of each
-`parallel` child that finished, the question and checkpoint of each other
+`parallel` or `quorum` child that finished, the question and checkpoint of each other
 paused call, and, for each operation the run was executing, how far it got
 (the next child of a `sequence`, the iteration of a `loop`, the attempt of a
 `retry`, the item of a `map`, the winner of a `race`) with the state of that

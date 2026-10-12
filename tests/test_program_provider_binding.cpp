@@ -203,6 +203,10 @@ struct Script {
     // #386: the "check" node asks, until resumed, on this Core thread, and
     // finishes on every other one.
     std::string      ask_thread;
+    // #387: the "check" node also asks on this run of an unanswered check
+    // (1-based; 0 never), whatever its thread.
+    std::atomic<int> ask_on_check_run{0};
+    std::atomic<int> check_runs{0};
     std::atomic<int> checks_asked{0};
     std::atomic<int> checks_finished{0};
     std::atomic<int> checks_answered{0};
@@ -271,7 +275,9 @@ public:
             output.writes.push_back(graph::ChannelWrite{"value", *in.ctx.resume_value});
             co_return output;
         }
-        if (in.ctx.thread_id == script_->ask_thread) {
+        const int run = ++script_->check_runs;
+        if (in.ctx.thread_id == script_->ask_thread ||
+            (script_->ask_on_check_run.load() != 0 && run == script_->ask_on_check_run.load())) {
             ++script_->checks_asked;
             throw graph::NodeInterrupt("approve the check", json{{"request", "approve"}});
         }
@@ -317,7 +323,9 @@ enum class Shape {
     // #386: the model on the first call of a plan, a check on every later one.
     PlanRoute,
     // #390: the model and a check in one fan-out step.
-    LlmBesideCheck
+    LlmBesideCheck,
+    // #387: the model, then a check.
+    LlmThenCheck
 };
 
 struct HostOptions {
@@ -509,6 +517,11 @@ public:
                 definition["conditional_edges"] = json::array(
                     {json{{"from", "start"}, {"condition", "plan_route"},
                           {"routes", {{"llm", "llm"}, {"check", "check"}}}}});
+                break;
+            case Shape::LlmThenCheck:
+                definition["nodes"] = {{"llm", {{"type", "llm_call"}}}, {"check", {{"type", "check"}}}};
+                definition["edges"] = json::array(
+                    {edge("__start__", "llm"), edge("llm", "check"), edge("check", "__end__")});
                 break;
             case Shape::LlmBesideCheck:
                 definition["nodes"] = {{"llm", {{"type", "llm_call"}}}, {"check", {{"type", "check"}}}};
@@ -1633,6 +1646,47 @@ TEST(ProgramProviderBindingJournal, AForkOfAPausedFanOutNeverResendsOrRechargesT
         EXPECT_EQ(h.script().checks_answered.load(), 1);
         EXPECT_NE(forked.output().dump().find("answer"), std::string::npos)
             << "the fork keeps the reply of the call it replayed";
+    }
+}
+
+TEST(ProgramProviderBindingJournal, APlanQuorumResumeNeverResendsOrRechargesAFinishedBranch) {
+    // #387: a plan quorum of two branches, each calling the model and then a
+    // check. The first branch finishes; the second's check asks, which pauses
+    // the quorum. Resume answers it: the first branch replays from its record,
+    // so its request is not sent, and its tokens and money are not charged,
+    // again.
+    for (const bool durable : {false, true}) {
+        SCOPED_TRACE(durable ? "SQLite journal" : "in memory");
+        TempDir     files("plan-quorum");
+        auto        peer = std::make_shared<Peer>();
+        HostOptions options;
+        options.monetary = 100'000;
+        Host h(peer, options, durable ? &files : nullptr);
+        h.script().ask_on_check_run = 2;
+        const auto call    = json{{"op", "call_core"}};
+        const auto version = h.admit_plan(
+            json{{"op", "quorum"}, {"branches", json::array({call, call})}, {"min_success", 2}},
+            Shape::LlmThenCheck);
+
+        const auto paused = h.run_plan(version, "quorum-run");
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_text(paused);
+        ASSERT_TRUE(paused.interrupt() && paused.interrupt()->pending_input);
+        EXPECT_EQ(paused.interrupt()->pending_input->operation_id(), "root.1");
+        EXPECT_EQ(peer->transport.load(), 2);
+        EXPECT_EQ(paused.usage().model_tokens, 48U);
+        EXPECT_EQ(paused.usage().monetary_microunits, 2U * 1235U);
+
+        const auto done =
+            h.runtime().resume(kOwner, "quorum-run", resume_after(paused, "trace-quorum")).wait();
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_text(done);
+        ASSERT_TRUE(done.output().is_array());
+        EXPECT_EQ(done.output().size(), 2U);
+        EXPECT_EQ(peer->transport.load(), 2) << "the finished branch's request is never sent again";
+        EXPECT_EQ(done.usage().model_tokens, 0U);
+        EXPECT_EQ(done.usage().monetary_microunits, 0U);
+        EXPECT_TRUE(done.monetary_records().empty());
+        EXPECT_EQ(h.script().checks_finished.load(), 1) << "the finished branch is replayed";
+        EXPECT_EQ(h.script().checks_answered.load(), 1);
     }
 }
 

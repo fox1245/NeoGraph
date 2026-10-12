@@ -3459,24 +3459,80 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 PlanExecution result;
                 result.output           = json::array();
                 std::uint64_t successes = 0;
+                const auto    unreachable = [&]() {
+                    auto failed = plan_failure(ProgramTerminalStatus::Failed,
+                                               "P_QUORUM_UNREACHABLE",
+                                               "Program quorum could not reach its required successes",
+                                               operation_id);
+                    failed.execution_trace = std::move(result.execution_trace);
+                    return failed;
+                };
+                // #387: the quorum follows the join/interrupt contract of #380
+                // and #384. Its branches run in declaration order. A branch
+                // that pauses counts as a success it may still reach, so it
+                // pauses the quorum unless the branches that finished already
+                // decide it, and no further branch starts. The pause records
+                // each branch that finished by its own end ("settled", #386);
+                // the attempt that resumes the run replays them without
+                // running or charging them again, continues the paused
+                // branch's call with the resume value, and goes on from there.
+                std::vector<std::pair<std::string, PlanExecution>> finished;
                 for (std::size_t index = 0; index < branches.size(); ++index) {
                     auto branch_result = co_await execute(
                         branches[index], state, operation_thread_id(*control, branches[index]),
                         child_depth, operation_token);
-                    const bool completed = branch_result.status == ProgramTerminalStatus::Completed;
-                    if (completed) {
-                        result.output.push_back(branch_result.output);
+                    const auto remaining = branches.size() - index - 1;
+                    result.execution_trace.insert(result.execution_trace.end(),
+                                                  branch_result.execution_trace.begin(),
+                                                  branch_result.execution_trace.end());
+                    if (branch_result.status == ProgramTerminalStatus::Interrupted) {
+                        // Already met or out of reach, the quorum would have
+                        // ended before this branch; it pauses on it.
+                        if (successes + 1 + remaining < required) co_return unreachable();
+                        PlanExecution paused;
+                        paused.status               = ProgramTerminalStatus::Interrupted;
+                        paused.output               = std::move(result.output);
+                        paused.execution_trace      = std::move(result.execution_trace);
+                        paused.interrupt            = std::move(branch_result.interrupt);
+                        paused.interrupt_checkpoint = std::move(branch_result.interrupt_checkpoint);
+                        for (const auto& [key, record] : branch_result.settled_members.items())
+                            paused.settled_members[key] = record;
+                        for (auto& [branch_id, settled] : finished) {
+                            if (settled.failure && settled.failure->provider_outcome) {
+                                try {
+                                    detail::persist_provider_failure(
+                                        *settled.failure,
+                                        detail::provider_failure_custody(
+                                            control->owner_scope, control->run_id,
+                                            control->program_version_id, control->bundle_id,
+                                            settled.failure->operation_id, control->attempt),
+                                        control->native_history_archive);
+                                } catch (...) {
+                                    // Without its evidence the branch runs again on resume.
+                                    continue;
+                                }
+                            }
+                            paused.settled_members[branch_id] = settled_branch_record(settled);
+                        }
+                        co_return paused;
+                    }
+                    // Only a branch's own end is kept; one cancelled with the
+                    // run, for example, starts again on resume.
+                    if (branch_result.status == ProgramTerminalStatus::Completed ||
+                        branch_result.status == ProgramTerminalStatus::Failed ||
+                        branch_result.status == ProgramTerminalStatus::BudgetExhausted ||
+                        branch_result.status == ProgramTerminalStatus::TimedOut)
+                        finished.emplace_back(branches[index], branch_result);
+                    if (branch_result.status == ProgramTerminalStatus::Completed) {
+                        result.output.push_back(std::move(branch_result.output));
                         ++successes;
                     }
-                    if (result.status != ProgramTerminalStatus::Completed || result.returned)
-                        co_return result;
                     if (successes >= required) co_return result;
-                    const auto remaining = branches.size() - index - 1;
-                    if (successes + remaining < required) co_return result;
+                    // Out of reach: it fails, as a JavaScript quorum does, instead
+                    // of completing with fewer successes than it requires.
+                    if (successes + remaining < required) co_return unreachable();
                 }
-                co_return plan_failure(ProgramTerminalStatus::Failed, "P_QUORUM_UNREACHABLE",
-                                       "Program quorum could not reach its required successes",
-                                       operation_id);
+                co_return unreachable();
             }
 
             if (op == ProgramOperationKind::Map) {
