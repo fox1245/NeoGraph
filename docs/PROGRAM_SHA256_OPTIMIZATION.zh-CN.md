@@ -1,38 +1,38 @@
 <!-- neograph-i18n: source=docs/PROGRAM_SHA256_OPTIMIZATION.md locale=zh-CN source_sha256=7e4fa7e81f456ac2c8027d75d34ccf3f85a9cbc18acbd7cef91f1282558b981a -->
-# SHA-256 CPU 加速 — 2026-09-07
+# SHA-256 的 CPU 加速：2026-09-07
 
 **Languages:** [English](PROGRAM_SHA256_OPTIMIZATION.md) | [한국어](PROGRAM_SHA256_OPTIMIZATION.ko.md) | [日本語](PROGRAM_SHA256_OPTIMIZATION.ja.md) | [简体中文](PROGRAM_SHA256_OPTIMIZATION.zh-CN.md)
 
-运行时条件启用的 x86 SHA 指令将测得的 64 KiB identity-hash 成本降低约 **6.2 倍**。相对于先前规范 JSON 优化 (`779be451`)，大输入案例的配对 Program 延迟改善约 **内存存储 28%、SQLite 20%、PostgreSQL 8%**。小数据库案例没有确立有意义的改善。
+在运行时检测可用后才启用的 x86 SHA 指令，把实测的 64 KiB 标识哈希开销降低了约 **6.2 倍**。与前一次规范 JSON 优化（`779be451`）相比，在大输入的用例上，成对测得的 Program 延迟，在内存存储下改善了约 **28%**，SQLite 下约 **20%**，PostgreSQL 下约 **8%**。小规模的数据库用例，没有显示出实质性的改善。
 
 ## 实现与兼容性
 
-原标量 SHA-256 compression 和 padding 从 `canonical_json.cpp` 移到内部 `sha256.cpp` 模块。单独、不内联的 x86-64 函数用 SHA 指令执行 rounds 和 message schedule。其 register layout 遵循已注明出处的公有领域 [SHA-Intrinsics 参考](https://github.com/noloader/SHA-Intrinsics/blob/d03795497f3e4576083fc2cd8fe0b924f24d0bb2/sha256-x86.c)；实现使用轮转四向量 schedule。原标量实现仍可用。
+原来的标量 SHA-256 压缩函数和填充逻辑，从 `canonical_json.cpp` 移到了内部的 `sha256.cpp` 模块。一个单独的、不内联的 x86-64 函数，用 SHA 指令执行各轮运算和消息调度。它的寄存器布局，参照了注明出处的公有领域 [SHA-Intrinsics 参考实现](https://github.com/noloader/SHA-Intrinsics/blob/d03795497f3e4576083fc2cd8fe0b924f24d0bb2/sha256-x86.c)；实现使用轮转的四向量调度。原来的标量实现依然保留。
 
-自动派发在选择加速函数前检查 CPUID basic leaf 可用性，以及 SSSE3、SSE4.1、SHA 支持。GCC/Clang 指令启用局限于该函数，不使用全局 architecture flag。MSVC 在同一运行时检查后编译相同 intrinsics。其他架构和 `NEOGRAPH_ENABLE_SHA256_ACCELERATION=OFF` 构建选择 portable 路径。没有增加库依赖。
+自动分发会先检查 CPUID 基本叶是否可用，以及是否支持 SSSE3、SSE4.1 和 SHA，然后才选用加速函数。GCC/Clang 对指令的启用只限于那个函数，不使用全局的架构选项。MSVC 在同样的运行时检查之后，编译同样的 intrinsics。其他架构，以及设置了 `NEOGRAPH_ENABLE_SHA256_ACCELERATION=OFF` 的构建，选用可移植的路径。没有引入任何额外的库依赖。
 
-私有 backend selector 允许强制 portable/hardware 正确性测试，不改变全进程行为。它不是 installed SDK 的一部分。硬件不可用时显式选择 hardware 会抛异常。digest state 局限于每次调用；只缓存 CPU availability 和所选函数指针。
+私有的后端选择器，允许在不改变整个进程行为的前提下，强制选用可移植或硬件路径来做正确性测试。它不属于已安装的 SDK。显式选用硬件路径而硬件不可用时，会抛出异常。摘要状态只属于每次调用自己；缓存的只有 CPU 是否可用，以及选定的函数指针。
 
-身份 framing 不变：`preamble || NUL || domain || NUL || decimal(payload byte length) || NUL || payload`。padding、全部 256 digest bits、小写十六进制和 `sha256:` 前缀保留。现有 input-buffer construction 仍在；此变更不引入 streaming、hash caching、较弱 checksums、新存储格式或不同 authority/budget 规则。
+标识的分帧方式没有变化：`preamble || NUL || domain || NUL || decimal(payload byte length) || NUL || payload`。填充、完整的 256 位摘要、小写十六进制和 `sha256:` 前缀都保持不变。现有的输入缓冲区构造依然保留；这项变更没有引入流式处理、哈希缓存、更弱的校验和、新的存储格式，也没有引入不同的权限或预算规则。
 
-指令语义参考：[Intel SHA extensions](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sha-extensions.html)。运行机器的 Ryzen 暴露所需 x86 instruction bits；派发不限定 Intel 厂商。
+指令语义的参考：[Intel SHA 扩展](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sha-extensions.html)。运行测试的 Ryzen 提供了所需的 x86 指令位；这并不是只针对 Intel 厂商的分发。
 
 ## 验证
 
-- 标准 SHA-256 已知答案，包括空输入、`abc`、56-byte vector 和一百万个 `a` 字节。
-- 35 个独立 Python-hashlib vectors，覆盖二进制 payloads、padding boundaries、unaligned input views、identity framing 和嵌入 NUL。
-- 确定性 512-input corpus 比较 portable、automatic、hardware 输出，加上并发独立 hashing。
-- CPU-feature predicate tests 拒绝缺失 leaf 或任意必需 instruction bit。
-- Linux ASan/UBSan：六个 SHA tests 在普通和禁用 acceleration 构建中均通过，启用 leak detection，无 suppressions。
-- Windows MSVC x64：35 个独立 vectors 在硬件可用时通过，编译移除 acceleration 后再次通过。这是原生 backend 正确性覆盖，不是完整 Windows Program suite 或性能声明。
-- Focused Core suite：217 通过，包括 PostgreSQL checkpoints 和 identity consumers。
-- 完整 Program suite：680 通过；跳过两个不适用内存存储进程重启案例。仍覆盖 golden stored identities、SQLite/PostgreSQL recovery、replacement、lineage 和 budgets。
+- 标准的 SHA-256 已知答案，包括空输入、`abc`、56 字节的向量，以及一百万个 `a` 字节。
+- 35 个独立的 Python hashlib 向量，覆盖二进制 payload、填充边界、未对齐的输入视图、标识分帧和内嵌的 NUL。
+- 一个确定性的、512 个输入的语料库，对比可移植、自动和硬件三种输出，外加并发的独立哈希计算。
+- CPU 特性谓词的测试，会拒绝缺失的叶，或任何缺失的必需指令位。
+- Linux 的 ASan/UBSan：全部六个 SHA 测试，在正常构建和关闭加速的构建下都通过了，开启泄漏检测，没有使用任何抑制规则。
+- Windows MSVC x64：35 个独立的向量，在硬件可用时通过，在编译时去掉加速时再次通过。这是原生后端的正确性覆盖，并不是完整的 Windows Program 测试集，也不是性能方面的结论。
+- 重点关注的 Core 测试集：217 个通过，包括 PostgreSQL 检查点和标识的使用方。
+- 完整的 Program 测试集：680 个通过；跳过了两个不适用的内存存储进程重启用例。黄金存储标识、SQLite/PostgreSQL 恢复、替换、谱系和预算，仍然在覆盖之内。
 
-## 独立 identity-hash 比较
+## 独立的标识哈希对比
 
-每个输入大小七对新进程；20 次 warmups；每进程测量 500 次 hashes，1 MiB 时减少到 100。AB/BA 及案例顺序交替。benchmark 包括未改变的 identity framing 和 hex encoding。每个返回 digest 用 Python hashlib 独立检查。下列计时为进程中位数的中位数；降幅使用配对比值中位数。
+每种输入大小 7 对全新的进程；预热 20 次；每个进程正式测量 500 次哈希，1 MiB 时减少为 100 次。AB/BA 和用例顺序交替。基准测试包含未变的标识分帧和十六进制编码。每一个返回的摘要，都用 Python hashlib 独立校验。下面的耗时是各进程中位数的中位数；降幅使用成对比值的中位数。
 
-| Payload 字节数 | 优化前 (µs) | 优化后 (µs) | 配对降幅 |
+| 载荷字节数 | 之前 (µs) | 之后 (µs) | 成对降幅 |
 | --- | --- | --- | --- |
 | 0 | 0.391 | 0.240 | +38.62% |
 | 32 | 0.591 | 0.291 | +50.76% |
@@ -45,11 +45,11 @@
 | 65536 | 190.305 | 30.727 | +83.79% |
 | 1048576 | 3367.703 | 507.140 | +84.14% |
 
-## Program 比较
+## Program 对比
 
-相同 Ryzen 7 5800X、WSL2 Ubuntu 24.04、GCC 13.3 Release `-O3 -DNDEBUG`（含 repository hardening）、一个 Runtime scheduler thread，以及原生 WSL PostgreSQL 16.15 配置。两个二进制冻结。每案例五对进程，每进程三次 warmups、12 次测量调用，每进程新的 SQLite/PostgreSQL 数据库。配对计时期间没有 builds、profilers 或其他 tests。
+同样是 Ryzen 7 5800X、WSL2 Ubuntu 24.04、GCC 13.3 Release `-O3 -DNDEBUG`（带仓库自身的加固选项）、一个 Runtime 调度线程，以及原生 WSL 上的 PostgreSQL 16.15 配置。两个二进制文件都已冻结。每个用例 5 对进程，每个进程预热 3 次、正式测量 12 次调用，每个进程使用一个新的 SQLite/PostgreSQL 数据库。在这些计时对比期间，没有进行任何构建，也没有运行性能分析器或其他测试。
 
-| 案例 | 优化前 (ms) | 优化后 (ms) | 配对降幅 | 配对 after/before 范围 |
+| 用例 | 之前 (ms) | 之后 (ms) | 成对降幅 | 成对的之后/之前范围 |
 | --- | --- | --- | --- | --- |
 | direct-0 | 0.0081 | 0.0129 | -3.22% | 0.5786–1.6575 |
 | memory-cpp-0 | 2.0560 | 1.9606 | +4.64% | 0.8751–0.9940 |
@@ -64,26 +64,26 @@
 | postgres-javascript-0-commands-16 | 992.9859 | 991.9219 | +0.21% | 0.9310–1.0355 |
 | postgres-cpp-0 | 53.1536 | 53.1421 | +0.81% | 0.9605–1.0069 |
 
-配对百分比不必等于独立汇总中位列之比。大输入改善在全部五对中一致。比值分布于一两侧的小案例没有定论；这不是通用加速，也不是 LLM response time 比较。
+成对的百分比，不一定等于独立汇总的两列中位数之比。大输入上的改善，在全部五对中都是一致的。比值落在 1 两侧的小用例，没有结论；这不是普遍适用的加速，也不是 LLM 响应时间的对比。
 
-微小直接 Core 行噪声较大，因此更广对照使用七对进程、100 次 warmups 和 10,000 次直接测量调用。after/before 中位比为 1.0014，范围 0.9838–1.0331。它没有确立有意义的直接 Core 变化。
+极小的直接 Core 一行噪声很大，所以又做了一次范围更大的对照：七对进程，预热 100 次，正式测量 10,000 次直接调用。它的之后/之前比值中位数是 1.0014，范围是 0.9838–1.0331。这并不能说明直接 Core 有什么实质性的变化。
 
 ## 机器码与后续证据
 
-owner 本地 AgentX radare2 只读 peer 检查按内容寻址的 after ELF。符号范围反汇编确认 `compress_x86_sha` 内有 `SHA256RNDS2`、`SHA256MSG1` 和 `SHA256MSG2`，被检查的 portable compressor 中没有 SHA 指令，availability check 中有 CPUID 指令。专用函数与 baseline 路径隔离。
+owner 本地的 AgentX radare2 只读对端，检查了按内容寻址的“之后”ELF 文件。以符号为界的反汇编确认：`compress_x86_sha` 里有 `SHA256RNDS2`、`SHA256MSG1` 和 `SHA256MSG2`；被检查的可移植压缩函数里没有 SHA 指令；可用性检查里有 CPUID 指令。这个专用函数与基线路径是隔离的。
 
-变更后的 64 KiB 内存工作负载 software CPU-clock profile 收集 1,418 个样本，丢失为零。hardware compressor 占约 9.31%，unescaped-string scanning 占 17.91%。约 39% 仍位于未解析 shared-library symbols，在进一步归因前不能全部归为 allocation。这是全进程 leaf-IP profile，不是墙钟时间分区，也未用于主要计时。
+变更之后，对 64 KiB 内存工作负载做了基于软件 CPU 时钟的性能分析，采集了 1,418 个样本，没有丢失。硬件压缩函数约占样本的 9.31%，而扫描未转义字符串占 17.91%。约 39% 落在无法解析的共享库符号里，没有进一步归因之前，不能把它们全部算作内存分配。这是针对整个进程的叶子 IP 分析，不是挂钟时间的划分，也没有用于上面的主要计时。
 
-AgentX 用作直接 owner 授权 analysis peer。不声称 AgentX model WorkOrder 或 Analysis Graph provenance import。未改变其 service configuration。
+AgentX 是作为 owner 直接授权的分析对端使用的。没有声称导入了 AgentX 模型的 WorkOrder 或 Analysis Graph 的来源信息。它的服务配置没有被改动。
 
-## 复现与保留证据
+## 复现与保留的证据
 
-在 before revision (`779be451`) 和变更 revision 用相同 Release 选项构建 `bench_sha256` 与 `bench_program_cost`。新 identity benchmark 源可以针对旧 Core 库编译。例如：
+用相同的 Release 选项，在“之前”的修订版（`779be451`）和变更后的修订版上，分别构建 `bench_sha256` 和 `bench_program_cost`。新的标识基准测试源码，可以针对旧的 Core 库编译。例如：
 
 ```sh
 bench_sha256 65536 500
 ```
 
-端到端比较使用 [配对 Program runner](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md)。构建时禁用 acceleration 可设置 `-DNEOGRAPH_ENABLE_SHA256_ACCELERATION=OFF`。
+端到端的对比，使用[成对的 Program runner](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md)。构建时要关闭加速，设置 `-DNEOGRAPH_ENABLE_SHA256_ACCELERATION=OFF`。
 
-原始结果、独立 vectors、source/binary hashes、upstream source identity、AgentX RPC records、有界 assembly、CPU samples/maps、Windows smoke logs 和 test logs 本地保留在 `artifacts/program-sha256-20260907/`。数据库文件留在 WSL。不含凭据。
+原始结果、独立向量、源码/二进制哈希、上游源码的标识、AgentX 的 RPC 记录、有界的汇编、CPU 采样/映射、Windows 冒烟日志和测试日志，保留在本地的 `artifacts/program-sha256-20260907/` 中。数据库文件留在 WSL 里。不含任何凭据。

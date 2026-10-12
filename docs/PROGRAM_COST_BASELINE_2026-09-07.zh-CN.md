@@ -1,111 +1,111 @@
 <!-- neograph-i18n: source=docs/PROGRAM_COST_BASELINE_2026-09-07.md locale=zh-CN source_sha256=a0929a5678214c2e42de563f8e5eb1d0137f06092e7ca01d27aa3a727b351339 -->
-# Program 成本 baseline — 2026-09-07
+# Program 成本基线：2026-09-07
 
 **Languages:** [English](PROGRAM_COST_BASELINE_2026-09-07.md) | [한국어](PROGRAM_COST_BASELINE_2026-09-07.ko.md) | [日本語](PROGRAM_COST_BASELINE_2026-09-07.ja.md) | [简体中文](PROGRAM_COST_BASELINE_2026-09-07.zh-CN.md)
 
-小 payload baseline 指向 Program 记账及持久存储工作，作为首批优化目标。它没有确立 JavaScript 解释是主要成本，也不测量 JIT 加速。
+小载荷的基线表明，Program 的簿记工作和持久存储的工作，是首先要优化的目标。它并不能说明 JavaScript 解释执行是开销的主要来源，也没有测量 JIT 的加速。
 
 ## 环境与方法
 
-- 源基础：`319f8748c986a2f345ae6de88abb42d89eef9837`，加上 `metadata.json` 的 source/binary hashes 所记录的仅用于测量的增补。
-- AMD Ryzen 7 5800X、WSL2 Ubuntu 24.04，可用 16 logical CPUs；GCC 13.3、Release `-O3 -DNDEBUG`，启用 repository hardening。
-- 二进制和 SQLite databases 位于 WSL ext4。PostgreSQL 16.15 在原生 WSL Docker 中运行，使用本地 Docker volume，经 localhost TCP 连接。`fsync`、`synchronous_commit` 和 `full_page_writes` 开启；WAL sync method 为 `fdatasync`。
-- 每案例七个新进程，每个 lifecycle/direct 进程十次 warmup、四十次测量调用。一个 Runtime scheduler thread；无并发测试任务或 model calls。桌面/VM 不是隔离的裸机 benchmark host。
-- 308 个成功进程样本，44 个案例。每次真实调用检查 counter 和 payload 输出。案例顺序按重复轮次交替正向/反向。
-- 主要数值是七个进程中位数的中位数。下列 p95 是七个进程内部 nearest-rank p95 的中位数，不是统计独立的合并 p95。
-- 原始 metadata、cases、samples 和 summaries 本地保留在 `artifacts/program-costs-20260907/`。SQLite databases 留在 WSL 的 `/tmp/neograph-program-costs-20260907/` 下；数据库文件不提交。
+- 源码基线：`319f8748c986a2f345ae6de88abb42d89eef9837`，外加仅用于测量的新增内容，这些内容由 `metadata.json` 里记录的源码/二进制哈希标识。
+- AMD Ryzen 7 5800X、WSL2 Ubuntu 24.04、可用的逻辑 CPU 为 16 个；GCC 13.3、Release `-O3 -DNDEBUG`，启用仓库自身的加固选项。
+- 二进制文件和 SQLite 数据库位于 WSL 的 ext4 文件系统上。PostgreSQL 16.15 运行在原生的 WSL Docker 中，使用本地的 Docker 卷，通过 localhost 的 TCP 访问。`fsync`、`synchronous_commit` 和 `full_page_writes` 都是开启的；WAL 的同步方式是 `fdatasync`。
+- 每个用例 7 个全新的进程；每个生命周期/直接进程预热 10 次、正式测量 40 次调用。一个 Runtime 调度线程；没有并发的测试任务，也没有模型调用。这台桌面机/虚拟机，不是隔离的裸机基准测试主机。
+- 308 个成功的进程样本，44 个用例。每一次真实的调用，都检查了计数器和 payload 的输出。用例的顺序，按重复轮次交替地正序和倒序。
+- 标题数值是七个进程中位数的中位数。下面的 p95，是七个进程内部最近秩 p95 的中位数，而不是统计上独立的合并 p95。
+- 原始元数据、用例、样本和汇总，保留在本地的 `artifacts/program-costs-20260907/` 中。SQLite 数据库留在 WSL 的 `/tmp/neograph-program-costs-20260907/` 下；数据库文件不会提交。
 
-见 [测量定义与复现](PROGRAM_COST_MEASUREMENT.md)。此诊断矩阵不替代现有 QuickJS acceptance gate。
+[测量的定义与复现](PROGRAM_COST_MEASUREMENT.md)见另文。这份诊断矩阵不取代现有的 QuickJS 验收闸门。
 
 ## 一次 Core 调用，空 payload
 
-| 路径 | 中位数 (ms) | 进程内 p95 (ms) | 跨进程中位数的 MAD (ms) |
+| 路径 | 中位数 (ms) | 进程内 p95 (ms) | 进程间各中位数的 MAD (ms) |
 | --- | --- | --- | --- |
-| Core directly, no checkpoints | 0.0074 | 0.0076 | 0.0000 |
-| C++ Program / memory | 2.0031 | 2.2607 | 0.0355 |
-| JavaScript Program / memory | 3.3192 | 3.4898 | 0.0196 |
+| 直接调用 Core，无检查点 | 0.0074 | 0.0076 | 0.0000 |
+| C++ Program / 内存 | 2.0031 | 2.2607 | 0.0355 |
+| JavaScript Program / 内存 | 3.3192 | 3.4898 | 0.0196 |
 | C++ Program / SQLite | 8.5885 | 13.5360 | 0.1155 |
 | JavaScript Program / SQLite | 16.4288 | 20.9731 | 0.0253 |
 | C++ Program / PostgreSQL | 49.0355 | 51.2952 | 0.5896 |
 | JavaScript Program / PostgreSQL | 80.1248 | 82.8138 | 0.5005 |
 
-直接 Core 行排除 Program lifecycle 和 checkpoint 语义。它与 Program 的比值是总包络比较，不是相同持久保证的 engine 比较，也不证明回归。C++ Program 也有真实 journal/checkpoint 工作。JS–C++ 差异包含额外命令 journaling 和 conversion，不只是 interpreter。
+直接 Core 一行，不含 Program 的生命周期和检查点语义。它与 Program 的比值，是总开销范围的对比，不是持久性等价的引擎对比，也不是回归的证据。C++ Program 同样包含真实的 journal 和检查点工作。JS 与 C++ 的差值，除了解释器，还包括额外的命令 journal 和转换。
 
-## Payload 扩展
+## payload 规模的影响
 
 | 路径 | 0 字节 (ms) | 4 KiB (ms) | 64 KiB (ms) |
 | --- | --- | --- | --- |
-| Core directly | 0.0074 | 0.0079 | 0.1308 |
-| C++ Program / memory | 2.0031 | 2.8567 | 12.2975 |
-| JavaScript Program / memory | 3.3192 | 5.2922 | 30.8116 |
+| 直接调用 Core | 0.0074 | 0.0079 | 0.1308 |
+| C++ Program / 内存 | 2.0031 | 2.8567 | 12.2975 |
+| JavaScript Program / 内存 | 3.3192 | 5.2922 | 30.8116 |
 | JavaScript Program / SQLite | 16.4288 | 23.9060 | 130.6772 |
 | JavaScript Program / PostgreSQL | 80.1248 | 93.5064 | 252.1259 |
 
-payload 经真实 channel state 传递，并检查未改变。它不是 model output 或模拟 network delay。
+payload 通过真实的通道状态传递，并检查是否保持不变。它不是模型输出，也不是模拟的网络延迟。
 
-## Generator 与桥接成本
+## 生成器与桥接的开销
 
-| Payload | 打开 (µs) | 首个命令 (µs) | Warm 命令往返 (µs) | 终止 next (µs) | 关闭 (µs) |
+| payload | 打开 (µs) | 第一条命令 (µs) | 预热后的命令往返 (µs) | 终态 next (µs) | 关闭 (µs) |
 | --- | --- | --- | --- | --- | --- |
 | 0 | 330.34 | 45.65 | 26.66 | 5.73 | 35.85 |
 | 4096 | 349.72 | 171.95 | 153.32 | 30.99 | 39.99 |
 | 65536 | 811.60 | 2038.30 | 2088.19 | 423.18 | 41.01 |
 
-这些隔离调用使用合成 Core responses。warm round-trip time 包含原生 JSON serialization/parsing、宿主 command creation 和 JS execution。它不是纯 bytecode execution time，不能直接从 lifecycle 行减去。大 payload 暴露了实质数据转换成本。
+这些相互隔离的调用，使用合成的 Core 响应。预热后的往返时间，包含原生的 JSON 序列化/解析、宿主命令的创建和 JS 的执行。它不是纯粹的字节码执行时间，也不能直接从生命周期的某一行里减去。大 payload 会暴露出相当可观的数据转换开销。
 
-## 冷准备
+## 冷启动准备
 
-| 模式/后端 | Store 打开 (ms) | 编译 (ms) | 准入 (ms) | Runtime 创建 (ms) | 首次运行 (ms) |
+| 模式/后端 | 打开存储 (ms) | 编译 (ms) | 准入 (ms) | 创建 Runtime (ms) | 首次运行 (ms) |
 | --- | --- | --- | --- | --- | --- |
 | memory-cpp-0 | 0.0054 | 0.6768 | 1.0492 | 0.1405 | 4.4991 |
 | memory-javascript-0 | 0.0054 | 1.2498 | 1.2180 | 0.1420 | 5.9273 |
 | sqlite-javascript-0 | 20.0656 | 1.3064 | 2.9385 | 0.1705 | 25.2293 |
 | postgres-javascript-0 | 169.2527 | 1.2941 | 5.9809 | 0.1714 | 98.6726 |
 
-compilation/admission 每进程一次，在 warm invocation 计时之外。每个新启动 JS Program 会再次 generator open。这些 cold fields 省略部分 fixture setup，不计时 live replacement 或 migration。
+编译和准入，在每个进程里发生一次，不在预热后的调用计时之内。每启动一个新的 JS Program，都会再次打开生成器。这些冷启动字段不含部分夹具的准备工作，也不对在线替换或迁移计时。
 
-## Event-marker 分区
+## 事件标记的划分
 
-仅此表每格是所有测量调用的平均值，因此四个 marker intervals 相加得到平均总时间（除舍入误差）。首次与最后 Core event 之间包含 checkpoint 工作，不是纯 Core CPU time。
+仅这张表中，每个单元格都是所有正式测量调用的平均值，所以四个标记区间加起来等于平均总时间（四舍五入的误差除外）。第一个和最后一个 Core 事件之间的跨度，包含检查点的工作；它不是纯粹的 Core CPU 时间。
 
-| 后端 (JavaScript，0 字节) | 首次 Core event 前 (ms) | Core event 跨度 (ms) | 最后 Core event 后 (ms) | 终止到 wait 返回 (ms) |
+| 后端（JavaScript，0 字节） | 第一个 Core 事件之前 (ms) | Core 事件跨度 (ms) | 最后一个 Core 事件之后 (ms) | 从终态到 wait 返回 (ms) |
 | --- | --- | --- | --- | --- |
 | memory | 1.1931 | 0.4062 | 1.7080 | 0.0340 |
 | sqlite | 7.0816 | 1.2735 | 8.7646 | 0.0353 |
 | postgres | 29.8013 | 9.1486 | 41.4887 | 0.0357 |
 
-## 单个 generator 中多次 Core 调用
+## 同一个生成器里的多次 Core 调用
 
-| 后端 | 每 run 1 次调用 (ms) | 每 run 4 次调用 (ms) | 每 run 16 次调用 (ms) |
+| 后端 | 每次运行 1 次调用 (ms) | 每次运行 4 次调用 (ms) | 每次运行 16 次调用 (ms) |
 | --- | --- | --- | --- |
 | memory | 3.319 | 9.041 | 31.596 |
 | sqlite | 16.429 | 55.527 | 331.089 |
 | postgres | 80.125 | 244.105 | 1034.104 |
 
-这些是具有真实 journals 和 checkpoints 的顺序调用。除以调用数可摊薄 run startup/termination，但不能隔离 dispatch cost。
+这些是带有真实 journal 和检查点的顺序调用。除以调用次数，可以摊薄运行的启动和终止开销，但不能分离出分发的开销。
 
-## 暂停 generator 的内存与 replay
+## 挂起的生成器内存与重放
 
-| 暂停 generator 数 | RSS 增量中位数 (MiB) |
+| 挂起的生成器数量 | RSS 增量的中位数 (MiB) |
 | --- | --- |
 | 1 | 1.285 |
 | 32 | 6.309 |
 | 128 | 21.934 |
 
-| 重放的合成已记录命令数 | 全新打开 + replay (ms) |
+| 重放的合成已记录命令数 | 全新打开 + 重放 (ms) |
 | --- | --- |
 | 0 | 0.1276 |
 | 10 | 0.5526 |
 | 100 | 3.4148 |
 | 1000 | 33.4788 |
 
-上述内存对应独立暂停的 QuickJS runtimes，包括 bootstrap/allocator 效应，不包含完整 agents、catalogs、Core engines 和持久 histories。replay 排除 ProgramRuntime scheduling 和 journal I/O，不是进程丢失恢复延迟。
+上面的内存，针对的是相互独立的、挂起的 QuickJS 运行时，其中包含引导和分配器的影响。它不含完整的智能体、catalog、Core 引擎和持久的历史。重放不含 ProgramRuntime 的调度和 journal I/O；它不是进程丢失后恢复的延迟。
 
-## 补充数据库 API profile
+## 补充的数据库 API 分析
 
-baseline 之后，72 次额外运行比较 profiling 开/关、一次与 21 次调用、三次重复，以及所有 backends 的两种 control modes。表格使用 `(21-run process total − 1-run process total) / 20`，再取重复中位数。三次重复的 call-count differences 完全相同；timing differences 仍是受 cold-process variation 影响的估计。
+基线之后，又额外运行了 72 次，对比了：开启与关闭性能分析、1 次与 21 次调用、三次重复，以及所有后端上的两种控制模式。表中用的是 `(21-run process total − 1-run process total) / 20`（即 21 次运行的进程总数减去 1 次运行的进程总数，再除以 20），然后取各次重复的中位数。调用次数的差值在三次重复中完全相同；耗时的差值仍然只是估计，受冷启动进程差异的影响。
 
-| 路径 | 每 run SQLite step 调用数 | 每 run SQLite exec 调用数 | 每 run SQLite 提交数 | 每 run 同步 libpq 调用数 |
+| 路径 | 每次运行的 SQLite step 调用数 | 每次运行的 SQLite exec 调用数 | 每次运行的 SQLite 提交数 | 每次运行的同步 libpq 调用数 |
 | --- | --- | --- | --- | --- |
 | memory-cpp | 0 | 0 | 0 | 0 |
 | memory-javascript | 0 | 0 | 0 | 0 |
@@ -114,19 +114,19 @@ baseline 之后，72 次额外运行比较 profiling 开/关、一次与 21 次�
 | postgres-cpp | 0 | 0 | 0 | 64 |
 | postgres-javascript | 0 | 0 | 0 | 108 |
 
-SQLite steps 可因 rows 重复，不是独立 SQL statements。`exec` 包含 transaction control；排除 nested steps。libpq counts/times 只覆盖同步 `PQexec`/`PQexecParams`，不含 async checkpoint 路径和 connection establishment。client CPU 排除 PostgreSQL server。API wall intervals 和 client CPU 重叠，不得相加或视为 baseline latency 的完整分区。
+SQLite 的 step 会因逐行迭代而重复，并不对应互不相同的 SQL 语句。`exec` 包含事务控制；嵌套的 step 不计入。libpq 的次数和耗时，只涵盖同步的 `PQexec`/`PQexecParams`，不含异步的检查点路径和连接的建立。客户端 CPU 不含 PostgreSQL 服务器。API 的挂钟区间与客户端 CPU 相互重叠，不能把它们加在一起，也不能当作基线延迟的完整划分。
 
-内存 controls 记录零 database calls。JS SQLite 案例每次 invocation 有九次 commits 和 117 次外部 step calls；这些计时数据库调用外的 CPU 工作仍值得 profiling。JS PostgreSQL 案例每次 invocation 增加 108 次同步 calls，因此 round-trip count 是 JIT 实验前的具体目标。
+内存对照组记录到的数据库调用为零。在 JS 的 SQLite 用例里，每次调用有 9 次提交和 117 次外部 step 调用；这些计时数据库调用之外的 CPU 工作，仍然值得做性能分析。JS 的 PostgreSQL 用例里，每次调用增加 108 次同步调用，使往返次数在 JIT 实验之前，成为一个具体的优化目标。
 
-补充证据在 `artifacts/program-costs-20260907/profile/`。首个 profiler 遗漏 SQLite `exec` transaction calls，未使用其初步输出。停止文件复制后重新运行纠正后的 profile。然而，之后的 profiled **及 unprofiled** runs 都明显慢于主 baseline，包括 memory controls。没有隔离出环境漂移原因。因此这里只确认稳定 call counts；保留 raw API 和 CPU times，但**不用于归因主 baseline latency**。主 baseline 数据早于复制问题，保留全部七次重复及其离散程度。
+补充的证据在 `artifacts/program-costs-20260907/profile/` 中。第一版分析器漏掉了 SQLite `exec` 的事务调用，它的初步输出没有被采用。修正后的分析，是在文件拷贝停止之后重新运行的。然而，之后带性能分析**和不带性能分析**的运行，都比主要基线明显慢，包括内存对照组。这种环境漂移的原因没有被查明。因此，这里只有稳定的调用次数是可以采信的；原始的 API 耗时和 CPU 耗时虽然保留了下来，但**不用来归因主要基线的延迟**。主要的基线数据早于这个文件拷贝问题，并保留了全部七次重复及其离散程度。
 
-现有 `bench_program` 在三个新进程中也给出 C++ Program 路径 2.21–2.31 ms（Core：6.41–6.65 µs）。该 fixture 有一个 channel 和不同 bounds，因此只是毫秒包络的交叉检查，不是主矩阵的匹配替代。
+已有的 `bench_program`，在三个全新的进程里，对它的 C++ Program 路径给出的结果也是 2.21–2.31 ms（Core：6.41–6.65 µs）。那个夹具只有一个通道，上限也不同，所以它只是对毫秒量级范围的交叉验证，而不是主要矩阵的对等替代。
 
-## 后续测量与优化顺序
+## 接下来的测量与优化顺序
 
-1. Profile Program startup/termination 和 publication serialization。内存存储及 C++ control 的小 payload 成本仍实质存在，因此只替换 JS engine 无法处理完整包络。
-2. 用测得 SQLite/libpq call counts 调查冗余 reads 和 round trips，同时保留相同 journal、owner、authority、budget 和 atomicity 保证。不要靠禁用 durable commits 获得更好数字。
-3. 用 payload sweep 调查重复 canonical JSON conversion 和 copying。compiled-source reuse 应与 warm generator execution 分开 benchmark。
-4. 隔离真正 JS CPU 工作后才比较 JIT backend，包括真实 agent 数量下 cold-start cost 和 memory。
+1. 对 Program 的启动/终止，以及发布时的序列化做性能分析。即使使用内存存储和 C++ 控制，小载荷的开销依然可观，所以只替换 JS 引擎，无法解决整个开销范围的问题。
+2. 利用测得的 SQLite/libpq 调用次数，排查冗余的读取和往返，前提是仍能保持同样的 journal、owner、权限、预算和原子性保证。不要靠关闭持久提交来得到更好看的数字。
+3. 利用 payload 扫描，排查重复的规范 JSON 转换和拷贝。把已编译源码的复用，与预热后的生成器执行分开做基准测试。
+4. 只有在分离出真正的 JS CPU 工作之后，才去对比 JIT 后端，其中要包括冷启动开销，以及在符合实际的智能体数量下的内存。
 
-完整 CPU attribution、并发 multi-tenant throughput/fairness、recursive spawn、live replacement 和真实 JIT comparison 仍未测量。此 baseline 未作生产 runtime 优化。
+完整的 CPU 归因、并发的多租户吞吐量/公平性、递归 spawn、在线替换，以及真正的 JIT 对比，都还没有测量。这份基线没有对生产运行时做任何优化。

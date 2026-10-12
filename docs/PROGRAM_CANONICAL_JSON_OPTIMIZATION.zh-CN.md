@@ -1,44 +1,44 @@
 <!-- neograph-i18n: source=docs/PROGRAM_CANONICAL_JSON_OPTIMIZATION.md locale=zh-CN source_sha256=21e00a791dfa14a8b9748d723c10121eb2c8acdbd477978e058c932110f2d41d -->
-# 结合 AgentX 分析的规范 JSON 优化 — 2026-09-07
+# 规范 JSON 的优化，附 AgentX 分析：2026-09-07
 
 **Languages:** [English](PROGRAM_CANONICAL_JSON_OPTIMIZATION.md) | [한국어](PROGRAM_CANONICAL_JSON_OPTIMIZATION.ko.md) | [日本語](PROGRAM_CANONICAL_JSON_OPTIMIZATION.ja.md) | [简体中文](PROGRAM_CANONICAL_JSON_OPTIMIZATION.zh-CN.md)
 
-在测量的 64 KiB Program 工作负载上，相对于已优化的 command-head 实现 (`ef56ff89`)，批量字符串扫描/复制使延迟降低约 **内存存储 54%、SQLite 50%、PostgreSQL 26%**。改善来自原生规范 JSON 处理；此实验不评估 JIT 后端。
+在实测的 64 KiB Program 工作负载上，相对于已经优化过的 command-head 实现（`ef56ff89`），把字符串的扫描和拷贝批量处理，使延迟在内存存储下降低了约 **54%**，SQLite 下约 **50%**，PostgreSQL 下约 **26%**。这些改善来自原生的规范 JSON 处理；这次实验没有评估 JIT 后端。
 
-## 选择变更的证据
+## 促使选定这项变更的证据
 
-owner 本地 AgentX radare2 MCP peer（connector version 1.8.6）按内容身份检查精确冻结的 Release ELF。只使用产物打开、符号查找和只读反汇编。函数反汇编最初报告缺少分析元数据；只读服务不暴露 `analyze`。基于地址的 `disassemble` 成功，结论范围由 `nm` 提供的 ELF 符号地址/大小限定。
+owner 本地的 AgentX radare2 MCP 对端（连接器版本 1.8.6），按内容标识检查了确切冻结的 Release ELF 文件。只使用了打开制品、符号查找和只读反汇编。按函数反汇编时，起初提示缺少分析元数据；这个只读服务不提供 `analyze`。按地址的 `disassemble` 成功了，并且结论以 `nm` 给出的 ELF 符号地址和大小为界。
 
-随后 Linux software CPU-clock sampler 只运行新建 benchmark 进程及其线程，排除 kernel/hypervisor 样本。采样周期 1 ms，使用逐 CPU inherited buffers。这是包括 setup、调用方验证和 teardown 的全进程 leaf-IP profile，不是墙钟时间分区或 inclusive call graph。未解析 shared-library symbols 明确保留为未解析。
+随后，一个 Linux 软件 CPU 时钟采样器，只对新创建的基准测试进程及其线程采样，排除内核和 hypervisor 的样本。它使用 1 ms 的周期和按 CPU 继承的缓冲区。这是针对整个进程的叶子 IP 分析，包括初始化、调用方一侧的校验和清理；它不是挂钟时间的划分，也不是包含调用者的调用图。无法解析的共享库符号，依然明确标为无法解析。
 
-- 小内存输入：4,196 个样本，丢失为零。
-- 64 KiB 内存输入：5,155 个样本，丢失为零。`append_escaped` 占 25.68%，UTF-8 sequence validation 占 17.58%，escaped-size calculation 占 11.68%，合计约 55%。
-- AgentX 反汇编显示旧循环在 `0x66a349` 调用 UTF-8 验证，按返回 sequence length 前进；每个 ASCII 字节的长度都是一。源检查也确认独立的逐字节 escape-size 和输出循环。
+- 小的内存输入：4,196 个样本，没有丢失。
+- 64 KiB 的内存输入：5,155 个样本，没有丢失。`append_escaped` 占样本的 25.68%，UTF-8 序列校验占 17.58%，转义后大小的计算占 11.68%，合计约 55%。
+- AgentX 的反汇编显示，旧的循环在 `0x66a349` 处调用 UTF-8 校验，并按其返回的序列长度前进，而对每个 ASCII 字节，这个长度都是 1。查看源码也确认，转义大小的计算和输出，是两个分开的、逐字节的循环。
 
-这些证据使字符串处理优先于推测性 VM 变化。下列单独、未采样的比较确定实际测得改善。采样 API 参考：[Linux perf_event_open](https://man7.org/linux/man-pages/man2/perf_event_open.2.html)。
+这些证据使字符串处理排在了带有猜测成分的虚拟机改动之前被选中。下面单独做的、不带性能分析的对比，才决定实测的改善幅度。采样 API 的参考：[Linux perf_event_open](https://man7.org/linux/man-pages/man2/perf_event_open.2.html)。
 
-## 变更与不变量
+## 变更与不变式
 
-`src/core/canonical_json.cpp` 现在以完整 8-byte words 检查 ASCII 或 JSON escape bytes，再标量处理余数。非对齐 words 通过 `memcpy` 加载；重复字节 masks 不依赖字节序。UTF-8 validation 一次消费一个 ASCII run，并保留既有非 ASCII 有效性规则。验证后字符串输出一次追加完整未转义 span。
+`src/core/canonical_json.cpp` 现在按完整的 8 字节字，检查其中是否含有 ASCII 或 JSON 需要转义的字节，剩余部分再逐个标量处理。未对齐的字，通过 `memcpy` 加载；重复字节的掩码不依赖字节序。UTF-8 校验一次吃掉一段 ASCII，并保留现有的非 ASCII 合法性规则。输出字符串时，校验之后，一次操作就追加一整段无需转义的内容。
 
-大小计算从 raw-size 下界开始，再加转义扩展。它保留每个控制字节原有的保守六字节计费，包括 newline 等短转义。16 MiB 限制、无效 UTF-8 拒绝、转义字节、排序 keys、数字编码、owned-value 行为和内容身份不变。不增加依赖、架构专属编译选项、公开 API、SQL query 或持久设置。
+大小的计算，先取原始大小这个下界，再加上转义带来的膨胀。对每个控制字节（包括换行这样的短转义），仍然保留原来保守的 6 字节计费。16 MiB 的上限、对无效 UTF-8 的拒绝、转义的字节、有序的键、数字的编码、持有所有权的值的行为，以及内容标识，都保持不变。没有引入新的依赖、与架构相关的编译选项、公开 API、SQL 查询或持久化设置。
 
-after ELF 也通过同一 AgentX peer 检查。其位于 `0x668710` 的 `unescaped_prefix` 包含 `mov rax, qword [r8 + rcx]`，并将 `rcx` 前进八，确认编译代码中预期的宽加载循环。
+“之后”的 ELF 文件，也通过同一个 AgentX 对端做了检查。它在 `0x668710` 处的 `unescaped_prefix` 包含 `mov rax, qword [r8 + rcx]`，并让 `rcx` 前进 8，这证实了编译出的代码里，确实是预期的宽加载循环。
 
 ## 正确性验证
 
-- 六个新增规范 JSON 测试覆盖 word boundaries 附近所有 ASCII bytes、混合 Unicode/escaping、确定性 4,096-case Unicode corpus、ASCII prefixes 后无效 UTF-8、短/非对齐 views，以及保守物化大小边界。
-- 同六个测试当时在 AddressSanitizer 和 UndefinedBehaviorSanitizer 下通过，含 leak detection，无 suppressions。
-- 两轮共 211 个 focused Core tests 通过：最初 180 个，之后启用专用后端的全部 31 个 PostgreSQL checkpoint cases。
-- 完整 Program suite：680 通过；跳过两个不适用的内存存储进程重启案例。包括 golden canonical identities 和 SQLite/PostgreSQL recovery、lineage、replacement、budget 检查。
-- 每个 microbenchmark 输出均匹配独立标量 escape oracle；每次 Program 调用保留预期 counter 和完整 payload。
-- 验证在 WSL GCC 13.3 上进行。不声称 Windows、ARM 或全 engine sanitizer 验证。
+- 六个新的规范 JSON 测试，覆盖：字边界附近的全部 ASCII 字节、混合的 Unicode 和转义、一个确定性的 4,096 个用例的 Unicode 语料库、ASCII 前缀之后的无效 UTF-8、短的和未对齐的视图，以及保守的物化大小边界。
+- 同样这六个测试，在 AddressSanitizer 和 UndefinedBehaviorSanitizer 下也通过了，包括泄漏检测，没有使用抑制规则。
+- 重点关注的 Core 测试，两轮共通过 211 个：先是 180 个，然后是启用专用后端后的全部 31 个 PostgreSQL 检查点用例。
+- 完整的 Program 测试集：680 个通过；跳过了两个不适用的内存存储进程重启用例。其中包括黄金规范标识，以及 SQLite/PostgreSQL 的恢复、谱系、替换和预算检查。
+- 每一个微基准的输出，都与一个独立的标量转义基准结果（oracle）一致；每一次 Program 调用，都保留了它预期的计数器和完整的 payload。
+- 验证是在 WSL 的 GCC 13.3 上进行的。没有声称做过 Windows、ARM，或者整个引擎范围的 sanitizer 资格认证。
 
-## 仅字符串 benchmark
+## 仅字符串的基准测试
 
-每案例七对新进程，每进程 20 次 warmup 和 500 次测量 serialization，交替 AB/BA 及案例顺序。输入包括 ASCII、韩语/emoji、含转义混合文本，以及大量 control/quote/backslash 的案例。准备及完整输出验证在计时调用之外。微小亚微秒案例接近 timer granularity，不应作为精确回归 gate。
+每个用例 7 对全新的进程，每个进程预热 20 次、正式测量 500 次序列化，AB/BA 和用例顺序交替。输入包括 ASCII、韩文/emoji、带转义的混合文本，以及一个以控制字符/引号/反斜杠为主的用例。准备工作和对完整输出的校验，都在计时调用之外。亚微秒级的极小用例，接近计时器的粒度，不应当拿来做精确的回归闸门。
 
-| 输入 | 优化前中位数 (µs) | 优化后中位数 (µs) | 配对降幅中位数 |
+| 输入 | 之前的中位数 (µs) | 之后的中位数 (µs) | 成对的中位数降幅 |
 | --- | --- | --- | --- |
 | ascii-8 | 0.060 | 0.050 | +16.67% |
 | ascii-32 | 0.190 | 0.090 | +50.28% |
@@ -54,11 +54,11 @@ after ELF 也通过同一 AgentX peer 检查。其位于 `0x668710` 的 `unescap
 | mixed-65536 | 295.183 | 169.748 | +42.37% |
 | escaped-65536 | 492.026 | 416.920 | +14.27% |
 
-## Program 运行时比较
+## Program 运行时对比
 
-每案例五对新进程，每进程三次 warmup 和 12 次测量调用，使用 `compare_program_costs.py`。两个二进制冻结；before 是先前 command-head 优化。使用相同 Ryzen 7 5800X、WSL ext4、带 repository hardening 的 Release `-O3 -DNDEBUG`、一个 Runtime scheduler thread 和原生 WSL PostgreSQL 16.15 配置。每个数据库案例以新数据库开始。配对计时期间没有 builds、profilers 或其他测试任务。
+每个用例 5 对全新的进程，每个进程预热 3 次、正式测量 12 次调用，使用 `compare_program_costs.py`。两个二进制文件都已冻结；“之前”的二进制文件，就是前一次 command-head 优化。使用的是同样的 Ryzen 7 5800X、WSL ext4、Release `-O3 -DNDEBUG`（带仓库自身的加固选项）、一个 Runtime 调度线程，以及原生 WSL 上的 PostgreSQL 16.15 配置。每个数据库用例都从一个新的数据库开始。在这些计时对比期间，没有进行任何构建，也没有运行性能分析器或其他测试任务。
 
-| 案例 | 优化前中位数 (ms) | 优化后中位数 (ms) | 配对降幅中位数 | 配对比值范围 |
+| 用例 | 之前的中位数 (ms) | 之后的中位数 (ms) | 成对的中位数降幅 | 成对比值范围 |
 | --- | --- | --- | --- | --- |
 | direct-0 | 0.0078 | 0.0078 | +0.83% | 0.7911–1.2164 |
 | memory-cpp-0 | 2.1190 | 1.9813 | +9.03% | 0.9054–0.9640 |
@@ -73,20 +73,20 @@ after ELF 也通过同一 AgentX peer 检查。其位于 `0x668710` 的 `unescap
 | postgres-javascript-0-commands-16 | 973.4043 | 945.9677 | +2.14% | 0.9462–1.0037 |
 | postgres-cpp-0 | 51.8192 | 50.9214 | +1.73% | 0.8937–0.9983 |
 
-百分比汇总配对比值，不必等于两个独立中位列之比。微小直接 Core 计时和小数据库案例相对离散较大；大输入改善在全部五对中一致。这是合成 engine 开销，不是 chatbot/model response time，也不是所有工作负载的通用加速。
+百分比汇总的是成对的比值，所以不一定等于两个独立中位数列之比。极小的直接 Core 耗时和小规模的数据库用例，相对离散程度较大；大输入上的收益，在全部五对中都是一致的。这是合成的引擎开销，不是聊天机器人或模型的响应时间，也不是适用于所有工作负载的加速。
 
-## 剩余工作
+## 还剩下什么
 
-后续 64 KiB CPU profile 收集 2,317 个样本，丢失为零。SHA-256 identity calculation 占约 35.17%，unescaped-span scanning 占 10.96%，UTF-8 validation 占 1.90%。hash 百分比增大反映总工作减少，不证明 hashing 变慢。将全部未解析成本归因于 allocation 或 copying 之前，shared-library symbols 仍需要更好的归因。
+后续对 64 KiB 做的 CPU 性能分析，采集了 2,317 个样本，没有丢失。SHA-256 标识的计算约占样本的 35.17%，扫描无需转义的片段占 10.96%，UTF-8 校验占 1.90%。哈希所占比例变大，反映的是总工作量变小了；这并不是哈希变慢的证据。共享库符号还需要更好的归因，才能把所有无法解析的开销，都算到内存分配或拷贝头上。
 
 ## 复现与范围
 
-在 `ef56ff89` 和变更 revision 以相同 Release 选项构建 `bench_canonical_json` 和 `bench_program_cost`；新 microbenchmark 源可针对 before 库构建，无须修改该库。示例 micro 命令：
+用相同的 Release 选项，在 `ef56ff89` 和变更后的修订版上，分别构建 `bench_canonical_json` 和 `bench_program_cost`；新的微基准源码，可以针对“之前”的库构建，而不需要改动那个库。微基准的命令示例：
 
 ```sh
 bench_canonical_json unicode 65536 500
 ```
 
-端到端案例使用 [配对 Program 比较](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md)。原始 RPC 请求/响应、tool schemas、ELF/source hashes、CPU samples/maps、helper sources、micro/runtime results 和 test logs 本地保留在 `artifacts/program-canonical-agentx-20260907/`。完整只读输入 ELFs 仍在指定 AgentX artifact root 的 digest-derived directories 中；证据不含凭据。
+端到端的用例，使用[成对的 Program 对比](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md)。原始的 RPC 请求/响应、工具 schema、ELF/源码哈希、CPU 采样/映射、辅助源码、微基准/运行时结果和测试日志，保留在本地的 `artifacts/program-canonical-agentx-20260907/` 下。完整的只读输入 ELF 文件，保留在指定的 AgentX 制品根目录下、以摘要命名的目录里；证据中不含任何凭据。
 
-此次从 owner 授权宿主直接使用 AgentX analysis peer。没有启动 AgentX model WorkOrder、发布新 ToolBindingSet 或向 AgentX Analysis Graph 导入记录。不声称这些 workflow/provenance 保证。未更改 AgentX service configuration 或其他应用数据。
+这次是直接从 owner 授权的宿主上，使用 AgentX 的分析对端。它没有启动 AgentX 的模型 WorkOrder，没有发布新的 ToolBindingSet，也没有把记录导入 AgentX Analysis Graph。这些工作流和来源方面的保证，不在声明之列。AgentX 的服务配置和其他应用数据都没有被改动。

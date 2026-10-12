@@ -1,21 +1,28 @@
 <!-- neograph-i18n: source=docs/PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md locale=zh-CN source_sha256=7a6203d69da6c363bf3c4c5b6aa5b1b1fcd2f36c656c6f22bffc36cddeeb1e72 -->
-# 持久子合成
+# 持久的子 Program 合成
 
 **Languages:** [English](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md) | [한국어](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.ko.md) | [日本語](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.ja.md) | [简体中文](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.zh-CN.md)
 
-状态：N2 已在内存参考存储、SQLite 和 PostgreSQL 中实现。单子场景的 N3 恢复验证见 [恢复矩阵](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md)。宿主入口使用现有顶层 checkpoint 和 `ng.spawn` / `ng.await` 子生命周期。这是一条有界、经过审查的源路径，不实现模型 generator、模板 renderer 或新的 DSL 命令。
+状态：N2 已在内存参考存储、SQLite 和 PostgreSQL 上实现。
+单个子 Program 场景的 N3 恢复资格认证，见[恢复矩阵](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md)。
+宿主入口使用现有的顶层检查点，以及现有的 `ng.spawn` / `ng.await` 子 Program 生命周期。
+这是一条有界的、针对经过审阅的源码的路径；它不实现模型生成器、模板渲染器，也不新增 DSL 命令。
 
 ## 宿主集成
 
-配置 `RuntimeConfig::child_synthesis_gateway` 和 `child_synthesis_grant_resolver`。resolver 必须用 `(owner_scope, parent_run_id, grant_id)` 从可信宿主策略选择精确 grant。从合成记录加载 grant 不会确立其权限。
+配置 `RuntimeConfig::child_synthesis_gateway` 和 `child_synthesis_grant_resolver`。
+解析器必须使用 `(owner_scope, parent_run_id, grant_id)`，从受信的宿主策略中选出确切的授权。
+从合成记录里加载出来的授权，并不能证明它有权限。
 
-1. 在父级下一个顶层 checkpoint 安排 `ProgramHandoff`。
-2. 加载父 run、活动 lineage 和 generation，并按 [授权契约](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md) 选择经过审查的源实例与 grant。
-3. 保持 handoff，调用 `ProgramRuntime::prepare_child_synthesis(owner, parent, handoff, proposal, grant, binding_name)`。
-4. 返回记录达到 `Bound` 后释放 handoff。
-5. 父级在普通 `ng.spawn` / `ng.await` 路径使用该 binding name。
+1. 在父 Program 的下一个顶层检查点处，安排一个 `ProgramHandoff`。
+2. 加载父运行、当前生效的谱系和 generation，并按
+   [授权契约](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md)所述，选定一份经过审阅的源码实例和授权。
+3. 在持有 handoff 的同时，调用 `ProgramRuntime::prepare_child_synthesis(owner, parent, handoff,
+   proposal, grant, binding_name)`。
+4. 返回的记录到达 `Bound` 之后，释放 handoff。
+5. 父 Program 在它正常的 `ng.spawn` / `ng.await` 路径里，使用这个绑定名。
 
-例如，已获准父级可以让出：
+例如，已准入的父 Program 可以这样 yield：
 
 ```javascript
 yield ng.checkpoint({request: "reviewed-child"}, "synthesis:request");
@@ -26,44 +33,72 @@ return yield ng.await(
 );
 ```
 
-宿主决定 checkpoint 请求如何映射到经过审查的源和策略。checkpoint payload 不能给自己授予编译或执行权限。持久路径通过运行时事务管理预留，不调用 gateway 独立的 `reserve` 或 `reserve_child` 回调。
+检查点请求如何对应到经过审阅的源码和策略，由宿主决定。
+检查点的 payload 不能给自己授予编译或执行的权限。
+持久路径通过运行时事务来负责预留；它不会调用网关独立的 `reserve` 或 `reserve_child` 回调。
 
 ## 原子发布
 
-`ProgramTransitionPublication::child_synthesis_records` 在与父 run 快照、journal head 和 lineage 同一事务中追加一条不可变记录。首条 `Reserved` 记录必须绑定精确的先前父快照、源 lineage、结果 lineage 和一单位动态编译扣减。冲突请求不能复用相同预算转换来为不同 binding 提供预算。精确发布重试返回 `AlreadyPresent`。
+`ProgramTransitionPublication::child_synthesis_records` 在与父 Program 的运行快照、
+journal head 和谱系相同的事务里，追加一条不可变的记录。第一条 `Reserved` 记录，
+必须绑定确切的先前父快照、来源谱系、产生的谱系，以及一个单位的动态编译扣减。
+相互冲突的请求，不能复用一模一样的预算转换，来为另一个不同的绑定出资。
+完全相同的发布重试，返回 `AlreadyPresent`。
 
-SQLite 使用现有 `BEGIN IMMEDIATE` 事务；PostgreSQL 使用现有事务和 owner advisory lock。两者都向 synthesis log 追加，并按追加顺序重建经过验证的 request heads。写入失败时父级、lineage 和合成记录一起回滚。内存参考实现保留强异常保证。
+SQLite 使用它现有的 `BEGIN IMMEDIATE` 事务。PostgreSQL 使用它现有的事务和 owner 的 advisory lock。
+两者都追加到合成日志，并按追加顺序重建经过校验的请求 head。写入失败时，
+父 Program、谱系和合成记录一起回滚。内存参考实现保留它的强异常保证。
 
-携带 synthesis records 的发布使用存储 schema 6。普通发布继续序列化为 schema 5；reader 保留 schema 1–5。`load_child_syntheses(owner, parent_run)` 返回当前 request heads。对于不支持该历史的自定义 store，基类实现采取失败关闭策略。动态预算运行的恢复要求此读取能力。
+带有合成记录的发布，使用存储 schema 6。普通的发布仍然序列化为 schema 5；
+读取方仍支持 schema 1–5。`load_child_syntheses(owner, parent_run)` 返回当前的请求 head。
+对于不支持这种历史的自定义存储，基类实现会失败时关闭。
+带动态预算的运行要恢复，需要这个读取能力。
 
-记录限制为 8 MiB 和 16 次修订。它们保留 proposal、原始宿主 grant 和父 context、reservation，以及累计阶段输出。规范身份和阶段验证拒绝更改的先前产物、不同 generation、重命名 binding 和修改的证据。binding name 在一个父 run 内唯一。SQL log 仅追加；大型历史的保留与压缩仍是后续工作。
+记录最大为 8 MiB，最多 16 个修订。它们保留提案、原始的宿主授权和父 Program 的上下文、预留，
+以及累积的各阶段输出。规范标识和阶段校验，会拒绝被改动的先前制品、不同的 generation、
+改了名的绑定和被修改的证据。绑定名在同一个父运行内是唯一的。SQL 日志只追加；
+对大型历史的保留和压缩，是后续工作。
 
 ## 阶段与恢复
 
-| 持久状态 | 恢复后的下一步 |
+| 持久状态 | 恢复之后的下一步 |
 |---|---|
 | `Reserved` | 认领并编译一次 |
-| `Compiling` | 标记 `ReconciliationRequired`；不重放不确定编译 |
-| `Compiled` | 复用存储 bundle 并认领语义验证 |
-| `Validating` | 标记 `ReconciliationRequired`；不重新运行不确定验证器 |
-| `Validated` | 复用接受的回执与证据；选择准入策略 |
-| `Admitting` | 复用冻结的准入及幂等 Catalog 准入 |
-| `Admitted` | 使用范围化模块回执链接精确获准版本 |
-| `Bound` | 恢复父级普通 child 命令 |
-| `Dispatching` | 通过 `start_child` 复用记录的 child ID 与输入 |
-| `Spawned` | 复用 child/result，或对缺少持久 checkpoint 的 Core 派发进行对账 |
-| `Failed` / `ReconciliationRequired` | 保留结果并阻止自动父级重放 |
+| `Compiling` | 标记为 `ReconciliationRequired`；不要重放状态不确定的编译 |
+| `Compiled` | 复用已存储的 bundle，并认领语义验证 |
+| `Validating` | 标记为 `ReconciliationRequired`；不要重新运行状态不确定的验证器 |
+| `Validated` | 复用已接受的回执和证据；选定准入策略 |
+| `Admitting` | 复用冻结的准入，以及幂等的 Catalog 准入 |
+| `Admitted` | 使用带作用域的模块回执，链接确切的已准入版本 |
+| `Bound` | 继续父 Program 正常的子 Program 命令 |
+| `Dispatching` | 通过 `start_child` 复用已记录的子 ID 和输入 |
+| `Spawned` | 复用子 Program 及其结果，或者在没有持久检查点时，对账 Core 的分发 |
+| `Failed` / `ReconciliationRequired` | 保留结果，并阻止父 Program 的自动重放 |
 
-重连具有未完成合成的非活动父级前，调用 `recover_child_synthesis(owner, parent_run, proposal_id)`。活动父级要求使用持有 checkpoint 的 API。每次恢复都重新选择宿主权限并检查原始 generation。已完成语义验证及冻结准入会复用。语义拒绝保留回执和证据，绝不进入准入。
+要重新连接一个合成尚未完成的、不活跃的父 Program，先调用
+`recover_child_synthesis(owner, parent_run, proposal_id)`。运行中的父 Program 则需要使用被持有检查点的 API。
+每次恢复都会重新选定宿主权限，并检查原来的 generation。已完成的语义验证和冻结的准入会被复用。
+语义验证被拒绝时，保留它的回执和证据，并且永远不会走到准入。
 
-生成的 binding 按实际父 run 与 generation 解析，而非静态 resolver 的父版本范围。派发在 `start_child` 前记录稳定 child ID 和输入；一个 grant 不能创建第二次调用。普通子预算、发布、执行与 join 仍具有最终约束力。
+生成出来的绑定，是根据实际的父运行和 generation 来解析的，而不是静态解析器那个以父 Program 版本为范围的作用域。
+分发在 `start_child` 之前，记录稳定的子 ID 和输入；一份授权不能创建第二次调用。
+正常的子 Program 预算、发布、执行和 join，仍然具有权威性。
 
-父级在完成、重试和恢复时都保留 compile 扣减，包括提交确认丢失的情况。合成扣减已消耗墙钟时间；恢复 attempt 也保留原始合成 deadline。spawn 状态发布保留现有命令的在途预留。
+完成、重试和恢复时（包括提交确认丢失的情形），父 Program 都保持已扣减的编译额度。
+合成会扣减已过去的挂钟时间；恢复出来的尝试，同样保留原来的合成截止时间。
+spawn 状态的发布，会保持现有命令那笔正在进行中的预留。
 
-## 验证与剩余工作
+## 资格认证与剩余工作
 
-后端一致性测试覆盖成功 spawn/join、规范往返、owner/run 隔离、重复及并发请求、后端写失败回滚、已提交阶段复用、语义拒绝、撤销 grant 和不确定 compile/validation 认领。Linux 进程退出测试在冻结准入后不执行析构函数就终止，随后在 SQLite 与 PostgreSQL 上重新打开 Program store、transition store 和 checkpoint store，成功 join 子级。
+后端符合性测试覆盖：成功的 spawn/join、规范的往返、owner/运行的隔离、重复和并发的请求、
+后端写入失败时的回滚、已提交阶段的复用、语义验证被拒绝、被撤销的授权，
+以及状态含糊的编译/验证认领。Linux 的进程退出测试，在冻结的准入之后不经析构函数就终止进程，
+然后在 SQLite 和 PostgreSQL 上重新打开 Program 存储、转换存储和检查点存储，再成功 join 子 Program。
 
-[N3 恢复矩阵](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md) 将覆盖扩展到每个数据库 16 个进程退出边界、并发进程恢复、确认丢失、真实 PostgreSQL 连接终止、取消、版本保留、激活和 Program 替换。限制仍明确：没有自动对账授权器；单子场景不覆盖一般混合效果 join、断电、跨宿主故障切换，以及所有图迁移/保留组合。
+[N3 恢复矩阵](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md)把覆盖范围扩大到：每个数据库 16 个进程退出的边界、
+并发的进程恢复、丢失的确认、真实的 PostgreSQL 连接终止、取消、版本留存、激活，以及 Program 替换。
+它的局限同样是明确的：没有自动对账的授权器，并且混合了多种副作用的一般性 join、断电、
+跨主机的故障切换，以及图迁移与留存的所有组合，都不在这个单个子 Program 场景的覆盖范围之内。
 
-此变更增加公开 C++ 类型、虚方法和配置字段。重新构建全部 Program 使用方；不要将旧对象与新库混用。它不增加 Core-only 依赖，也不改变原生控制 C ABI。
+这次新增了公开的 C++ 类型、虚方法和配置字段。请重新构建所有 Program 的使用方；
+不要把旧的目标文件与新库混用。它没有给只依赖 Core 的构建增加依赖，也没有改动原生控制 C ABI。

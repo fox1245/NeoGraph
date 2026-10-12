@@ -1,15 +1,26 @@
 <!-- neograph-i18n: source=docs/PROGRAM_COST_MEASUREMENT.md locale=zh-CN source_sha256=f22d74f413d9d1665f1444d3a29a05212e4d0ff9c515be846e5439fabe2177e1 -->
-# 测量 Program 成本
+# 测量 Program 的成本
 
 **Languages:** [English](PROGRAM_COST_MEASUREMENT.md) | [한국어](PROGRAM_COST_MEASUREMENT.ko.md) | [日本語](PROGRAM_COST_MEASUREMENT.ja.md) | [简体中文](PROGRAM_COST_MEASUREMENT.zh-CN.md)
 
-`bench_program_cost` 和 `scripts/run_program_costs.py` 提供诊断 baseline，帮助决定优化哪些 Program 成本。它们不改变 runtime 语义，不替代预先登记的 QuickJS performance gate。无需 LLM、network model call 或 model credential。
+`bench_program_cost` 和 `scripts/run_program_costs.py` 提供一份诊断性的基线，
+用来决定该优化 Program 的哪些开销。它们不改变运行时的语义，
+也不取代预先登记的 QuickJS 性能闸门。
+不需要 LLM、网络上的模型调用或模型凭据。
 
-实现比较时，`scripts/compare_program_costs.py` 在新进程对中交替运行两个冻结的 `bench_program_cost` 二进制。首次比较记录于 [命令发布 head 优化](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md)。后续 [规范 JSON 优化](PROGRAM_CANONICAL_JSON_OPTIMIZATION.md) 通过 AgentX 反汇编及 CPU sampling 选择原生字符串处理变更。之后的 [SHA-256 优化](PROGRAM_SHA256_OPTIMIZATION.md) 加入运行时条件启用的 CPU acceleration，以及独立验证的 portable fallback。`bench_canonical_json CASE BYTES ITERATIONS` 单独将 ASCII、Unicode、混合及大量转义字符串与标量输出 oracle 比较。
+要对比两种实现，`scripts/compare_program_costs.py` 会以全新的进程对，
+交替运行两个冻结的 `bench_program_cost` 二进制文件。第一次这样的对比，
+记录在[命令发布 head 的优化](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md)里。
+随后的[规范 JSON 优化](PROGRAM_CANONICAL_JSON_OPTIMIZATION.md)，
+借助 AgentX 的反汇编和 CPU 采样，选定了一项原生字符串处理的改动。
+再后面的 [SHA-256 优化](PROGRAM_SHA256_OPTIMIZATION.md)，加入了在运行时检测可用后才启用的
+CPU 加速，并附带一个经过独立验证的可移植回退实现。
+`bench_canonical_json CASE BYTES ITERATIONS` 则单独针对一个标量输出基准结果（oracle），
+测试 ASCII、Unicode、混合以及大量转义的字符串。
 
 ## 构建与运行
 
-在原生 filesystem 上使用优化构建。例如 Linux：
+在原生文件系统上，使用经过优化的构建。例如在 Linux 上：
 
 ```sh
 cmake -S . -B build-cost -G Ninja \
@@ -23,44 +34,85 @@ python3 scripts/run_program_costs.py \
   --build-dir build-cost --output-dir /tmp/neograph-cost-results
 ```
 
-runner 要求**新**输出目录。默认矩阵使用 memory 和 SQLite，七次独立进程重复，十次 warmup invocations，每 lifecycle case 测量 100 次 invocations。`--iterations` 和 `--warmup` 控制 lifecycle/direct cases；generator microbenchmarks 使用 1,000 commands。案例串行执行，重复轮次交替正向/反向顺序。SQLite 文件位于输出目录并保留以便检查。
+runner 要求使用一个**新的**输出目录。它的默认矩阵使用内存和 SQLite、七次独立的进程重复、
+十次预热调用，以及每个生命周期用例 100 次正式测量的调用。`--iterations` 和 `--warmup`
+控制生命周期/直接用例；生成器的微基准使用 1,000 条命令。
+各用例串行运行，在交替的重复中，按正序和倒序轮流执行。
+SQLite 文件存放在输出目录里，保留下来可供检查。
 
-包括 PostgreSQL 时，先启动专用本地 test container，将 `NEOGRAPH_COST_POSTGRES_URL` 设为其发布的 localhost connection URL，加入 `--postgres-container <container-name>`。runner 检查 published port，为每个 sample 创建唯一命名 database，之后只删除该 database。它不启动或停止 containers，也不使用或删除 URL 中命名的 database。一次性 server 必须允许 `postgres` 经 `docker exec` 创建/删除 databases。不要指向 application server。凭据不写入 metadata 或 command records。
+要包含 PostgreSQL，先启动一个专用的本地测试容器，
+把 `NEOGRAPH_COST_POSTGRES_URL` 设为它映射出来的 localhost 连接 URL，
+再加上 `--postgres-container <container-name>`。runner 会检查映射出来的端口。
+它为每个样本创建一个名称唯一的数据库，之后只删除这个数据库。
+它不会启动或停止容器，也不会使用或删除 URL 中指明的那个数据库。
+这台一次性的服务器，必须允许 `postgres` 通过 `docker exec` 创建和删除数据库。
+不要指向应用的服务器。凭据不会写入元数据或命令记录。
 
 ## 每个范围包含什么
 
-| 案例 | 包含 | 排除 |
+| 用例 | 包含 | 不包含 |
 | --- | --- | --- |
-| `direct` | Warm `GraphEngine::run`、3 个顺序 increment nodes、2 个 state channels | Program admission、journal、checkpoint persistence、JS |
-| `lifecycle --mode cpp` | 已准入 C++ builder v1 Program、真实 Core、结果构造、journal 和 checkpoints | JavaScript control execution；compilation/admission 是独立 cold fields |
-| `lifecycle --mode javascript` | 已准入 `define()` + generator `main()`、真实 Core、JS/C++ conversion、command journal 和 checkpoints | Compilation/admission 是独立 cold fields |
-| `generator` | Generator open/compile/init、首次 `next`、重复 host-command round trips、terminal conversion、teardown | 真实 Core、scheduling、journal、database I/O；responses 是合成值 |
-| `resident` | 首个 command 后暂停的多个独立 QuickJS runtimes | 完整 Program agents、catalogs、engines 和 journal storage |
-| 现有 primitive/control cases | `bench_quickjs_primitives` 和 `bench_quickjs_control` 已记录范围 | 这些 samples 不是 enabled/disabled gate run |
+| `direct` | 预热后的 `GraphEngine::run`，3 个顺序递增的节点，2 个状态通道 | Program 准入(admission)、journal、检查点持久化、JS |
+| `lifecycle --mode cpp` | 已准入的 C++ 构建器 v1 Program、真实的 Core、结果的构造、journal 和检查点 | JavaScript 控制的执行；编译和准入是单独的冷启动字段 |
+| `lifecycle --mode javascript` | 已准入的 `define()` + 生成器 `main()`、真实的 Core、JS/C++ 转换、命令 journal 和检查点 | 编译和准入是单独的冷启动字段 |
+| `generator` | 生成器的打开/编译/初始化、第一次 `next`、重复的宿主命令往返、终态转换、清理 | 真实的 Core、调度、journal、数据库 I/O；响应是合成的 |
+| `resident` | 多个相互独立的 QuickJS 运行时，在各自的第一条命令之后挂起 | 完整的 Program 智能体、catalog、引擎和 journal 存储 |
+| 已有的 primitive/control 用例 | `bench_quickjs_primitives` 和 `bench_quickjs_control` 中已记录的范围 | 这些样本不是开关对比的闸门运行 |
 
-直接、C++ 和 JavaScript runs 使用相同三节点 topology、increment behavior 和 payload channel。每个真实 run 必须以 counter `3` 和完整未改变 payload 结束。payload sizes 为 0、4,096、65,536 bytes。JavaScript multi-command 行执行同一 Core graph 4 或 16 次，每次将 counter input 重置为零，最终 counter 为 `3`。
+直接、C++ 和 JavaScript 三种运行，使用同样的三节点拓扑、递增行为和 payload 通道。
+每次真实的运行，都必须以计数器 `3` 和完整未变的 payload 结束。
+payload 的大小为 0、4,096 和 65,536 字节。
+JavaScript 多命令的各行，把同一张 Core 图执行 4 次或 16 次，
+每次调用都把计数器的输入重置为零。它们最终的计数器是 `3`。
 
-C++ v1 准入恰好一个 Program operation。JavaScript generator 使用宿主声明的 64-operation ceiling，以支持所有 command-count 行。两者其余 resource ceilings 相同，均使用一个 scheduler thread。源形式及 command-journaling 语义不同：JavaScript 减去 C++ **不能**隔离 interpreter time。
+C++ v1 恰好准入一个 Program 操作。JavaScript 生成器使用宿主声明的 64 个操作的上限，
+以支持所有命令数量的各行。两者使用同样的其余资源上限和一个调度线程。
+它们的源码形态和命令 journal 的语义有所不同：用 JavaScript 的数据减去 C++ 的数据，
+**不能**分离出解释器的耗时。
 
-每个 lifecycle case 从选定 backend 构造 ProgramStore、CheckpointStore 和 ProgramTransitionStore。memory mode 保留真实内存 journal/checkpoint values，不绕过 persistence interfaces。SQLite 使用一个 database file 和独立 store connections。现有 CheckpointStore 设置 WAL 和 `synchronous=NORMAL`；Program store connections 保留 SQLite synchronous default。PostgreSQL 使用现有 store implementations 和四连接 checkpoint pool。比较结果时记录实际 server settings。这些是 backend defaults，不表示 power-loss guarantees 相同。
+每个生命周期用例，都用选定的后端构造 ProgramStore、CheckpointStore 和 ProgramTransitionStore。
+内存模式保留真实的内存 journal/检查点值；它不会绕过持久化接口。
+SQLite 使用一个数据库文件，各存储持有独立的连接。
+已有的 CheckpointStore 设置了 WAL 和 `synchronous=NORMAL`；
+Program 存储的连接保持 SQLite 同步的默认值。PostgreSQL 使用已有的存储实现，
+以及一个四连接的检查点连接池。对比结果时，要记录实际的服务器设置。
+这些是各后端的默认值，并不表示它们具有相同的断电保证。
 
-## 理解 timing 与 memory 字段
+## 如何解读耗时和内存字段
 
-`samples` 含每个测量 invocation；`first_run` 在 warmup 完成前单独记录。`cold` 含 store construction、Program compilation、admission 和 Runtime construction。这些字段排除部分 fixture setup，因此不是完整 process-startup 分区。
+`samples` 包含每一次正式测量的调用；`first_run` 在预热完成之前单独记录。
+`cold` 包含存储的构造、Program 的编译、准入和 Runtime 的构造。
+这些字段不含部分夹具的准备工作，因此不是对进程启动的完整划分。
 
-单次顺序 invocation 中，`before_core_us`、`core_span_us`、`after_core_us` 和 `wake_us` 用 Program event timestamps 划分 start-to-wait-return wall time。**Core event span 不是纯 Core CPU time：**它包括 checkpoint 工作，以及 multi-command 行中的 Core calls 间隔。`start_us` 和 `post_start_us` 提供第二分区。绝不可将两个分区相加；Core 工作可能在 `start()` 返回前开始。
+在一次顺序调用之内，`before_core_us`、`core_span_us`、`after_core_us` 和 `wake_us`，
+依据 Program 事件的时间戳，划分了从 start 到 wait 返回的挂钟时间。
+**Core 事件的跨度不是纯粹的 Core CPU 时间：** 它包含检查点的工作，
+在多命令的各行里，还包含 Core 调用之间的间隔。
+`start_us` 和 `post_start_us` 给出第二种划分。绝不要把这两种划分加在一起；
+Core 的工作可能在 `start()` 返回之前就已开始。
 
-event sink 记录 atomic timestamps。因此 lifecycle results 包含该 observer，而 direct/generator cases 无 event sink。这是诊断计时，不声称无 observer 的最小延迟。
+事件 sink 记录的是原子的时间戳。因此，生命周期的结果包含了这个观察者本身的开销，
+而直接/生成器用例没有事件 sink。这些是诊断性的耗时，并不是不含观察者开销的最小延迟。
 
-runner 先汇总每个进程，再汇总独立进程结果。`invocation_median.total_us.median` 是 process medians 的中位数。`invocation_p95.total_us.median` 是进程内 p95 的中位数。percentiles 用 nearest rank；七个进程样本时 process-level p95 是最大值。保留 raw samples、MAD 和 extrema。不要从中位数的小差异推断统计显著性。
+runner 先对每个进程做汇总，再对这些相互独立的进程结果做汇总。
+`invocation_median.total_us.median` 是各进程中位数的中位数。
+`invocation_p95.total_us.median` 是各进程内部 p95 的中位数。
+百分位数采用最近秩（nearest rank）；七个进程样本时，进程层面的 p95 就是其中的最大值。
+原始样本、MAD 和极值仍然可用。不要由中位数之间的微小差异，推断统计显著性。
 
-Linux RSS 是进程内存，不是 JS allocation accounting。lifecycle RSS growth 包含保留 run history 和 allocator behavior。resident-generator RSS 包含 runtime/bootstrap overhead 和 allocator granularity；用较大 generator counts 间斜率估计增量占用。两者都不是每个 recursive agent 总内存测量。其他平台 zero memory fields 表示 Linux-only probe 不可用。
+Linux 的 RSS 是进程的内存，不是 JS 的分配核算。生命周期用例里 RSS 的增长，
+包含保留下来的运行历史和分配器的行为。常驻生成器的 RSS，包含运行时/引导的开销和分配器的粒度；
+要估算增量的占用，请使用更大的生成器数量之间的斜率。
+两者都不是对每个递归智能体总内存的测量。在其他平台上，内存字段为零，
+表示仅限 Linux 的探针不可用。
 
-runner 记录 binary/source hashes、source commit、tracked diff hash、CMake options、CPU 和 process affinity。原始证据应与报告一起保留，测量期间不要重新构建二进制。
+runner 会记录二进制/源码的哈希、源码提交和已跟踪差异的哈希、CMake 选项、CPU 以及进程亲和性。
+任何报告都要附上原始证据，并且在一次测量运行期间，不要重新构建二进制文件。
 
-## Linux 可选数据库 API 诊断
+## Linux 上可选的数据库 API 诊断
 
-`benchmarks/program_store_profile.c` 可计数并计时 database-library calls，不改变 Program runtime。在主未插桩矩阵完成**之后**单独构建：
+`benchmarks/program_store_profile.c` 可以在不改动 Program 运行时的情况下，
+统计数据库库调用的次数和耗时。要在主要的、不带性能分析的矩阵**完成之后**，再单独构建它：
 
 ```sh
 cc -O2 -shared -fPIC -I/usr/include/postgresql \
@@ -71,8 +123,19 @@ LD_PRELOAD=/tmp/program_store_profile.so \
   --storage /tmp/new-cost-profile.sqlite --iterations 40 --warmup 0
 ```
 
-profiler 只记录 categories 和 aggregate counts/time，绝不记录 SQL text、parameters 或 credentials。它测量 `sqlite3_step`，或同步 `PQexec` 和 `PQexecParams`，以及 `sqlite3_exec`（包含 transaction control）。`exec` 内 nested SQLite steps 排除，以免重复计数。SQLite row iteration 可为一个 query 多次调用 `step`。async libpq calls、connection establishment、SQLite prepare time 和调用方 serialization 在这些 API intervals 外。whole-process totals 包含 constructors、schema creation、admission 和 warmup。profiling 增加 overhead，并发 API intervals 可能重叠，因此不能将这些值从 baseline wall time 中减去作为精确 CPU 分区。比较不同 invocation counts 的 fresh-database runs，以分离固定 setup call counts 和逐 run calls。
+这个分析器只记录类别以及汇总的次数和耗时，从不记录 SQL 文本、参数或凭据。
+它测量 `sqlite3_step`，或者同步的 `PQexec` 和 `PQexecParams`，以及 `sqlite3_exec`（包括事务控制）。
+为避免重复计数，`exec` 内部嵌套的 SQLite step 不计入。
+一次查询的逐行迭代，可能会多次调用 `step`。异步的 libpq 调用、连接的建立、
+SQLite 的 prepare 时间，以及调用方一侧的序列化，都不在这些 API 的区间之内。
+整个进程的总数，包含构造函数、创建 schema、准入和预热。性能分析会带来额外开销，
+并发的 API 区间也可能重叠，所以不能把这些数值，当作精确的 CPU 划分，从基线挂钟时间中减去。
+要把固定的初始化调用次数，与每次运行的调用次数区分开，
+可以用不同的调用次数，在全新的数据库上分别运行并对比。
 
-## 此 baseline 的边界
+## 这份基线的边界
 
-矩阵测量顺序合成执行及暂停 generator 占用。不验证 tenant fairness、concurrent throughput、recursive spawn、live replacement、process-loss recovery、production storage 或 JIT backend。generator replay 行重放已记录合成 command responses，不计时完整持久重连。判断 JIT 潜力需要真实比较，包含 warmup、compilation 和 memory costs。
+这个矩阵测量的是顺序的合成执行，以及挂起的生成器所占用的资源。
+它不能证明租户公平性、并发吞吐量、递归 spawn、在线替换、进程丢失后的恢复、
+生产环境的存储，或 JIT 后端合格。生成器重放的各行，重放的是记录下来的合成命令响应；
+它们不对完整的持久重连计时。要判断 JIT 的潜力，需要做一次包含预热、编译和内存开销的真实对比。
