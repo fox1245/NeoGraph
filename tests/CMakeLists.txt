@@ -961,6 +961,12 @@ if(NEOGRAPH_BUILD_SQLITE)
     target_link_libraries(neograph_interrupt_identity_tests PRIVATE
         neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
     neograph_discover_tests(neograph_interrupt_identity_tests PROPERTIES LABELS "core;interrupt")
+    # #393: a resume value reaches only the invocation the resume answers, in
+    # the step it re-enters; later steps ask again, in memory and on SQLite.
+    add_executable(neograph_resume_value_scope_tests test_resume_value_scope.cpp)
+    target_link_libraries(neograph_resume_value_scope_tests PRIVATE
+        neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
+    neograph_discover_tests(neograph_resume_value_scope_tests PROPERTIES LABELS "core;interrupt")
 endif()
 
 if(NEOGRAPH_BUILD_PROGRAM)

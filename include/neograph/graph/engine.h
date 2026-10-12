@@ -814,7 +814,11 @@ public:
      * value, and continues execution from the interrupted node.
      *
      * @param thread_id Thread ID of the interrupted session.
-     * @param resume_value Optional value to inject before resuming (e.g., human input).
+     * @param resume_value Optional value to inject before resuming (e.g.,
+     *        human input). It reaches RunContext::resume_value of the one
+     *        invocation the resume answers, in the step it re-enters: the
+     *        node or Send that raised NodeInterrupt, or the node an
+     *        interrupt_before gate held. No other node sees it (#393).
      * @param cb Optional streaming callback.
      * @return Execution result after resumption.
      */

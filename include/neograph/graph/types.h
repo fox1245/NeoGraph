@@ -173,7 +173,8 @@ inline ChannelWrite provider_messages_write(const sp::runtime::Result& outcome,
  * When a node throws NodeInterrupt, the graph engine saves a checkpoint and
  * pauses execution, allowing Human-in-the-Loop (HITL) intervention. Execution
  * continues with GraphEngine::resume(), whose @c resume_value comes back to
- * the node as RunContext::resume_value.
+ * the node as RunContext::resume_value. Only the invocation that paused
+ * receives it; a node of a later step of the resumed run sees none (#393).
  *
  * Unlike @c interrupt_before / @c interrupt_after in the graph definition,
  * which pause at a node chosen when the graph was written, this pauses on a

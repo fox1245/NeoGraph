@@ -597,7 +597,10 @@ class NodeInterrupt(Exception):
     with ``interrupted=True``, ``interrupt_node`` naming this node, and
     ``interrupt_value`` carrying ``{"reason": ..., "value": ...}``. The caller
     answers with ``engine.resume(thread_id, {"approved": True})``, and the node
-    runs again — this time with the answer on ``input.ctx.resume_value``.
+    runs again — this time with the answer on ``input.ctx.resume_value``. Only
+    this node receives the answer: a node of a later step of the resumed run
+    sees ``input.ctx.resume_value`` as ``None`` and asks its own question
+    (#393).
 
     This is the dynamic counterpart to ``interrupt_before`` / ``interrupt_after``
     in the graph definition, which pause at a node picked when the graph was

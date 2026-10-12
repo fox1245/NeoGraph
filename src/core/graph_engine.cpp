@@ -1910,11 +1910,11 @@ GraphEngine::execute_graph_async(
     ctx.cache_execution_id = next_cache_execution_id_.fetch_add(
         1, std::memory_order_relaxed);
     ctx.store = resources && resources->store ? *resources->store : store_;
-    // issue #94 — the human's answer, readable by any node. Left empty on a
-    // fresh run, which is how a node distinguishes "nobody has answered yet"
-    // from "the answer was no". Only engaged on an actual resume, so the
-    // common path pays no json allocation.
-    if (resume_value && !resume_value->is_null()) ctx.resume_value = *resume_value;
+    // issue #94, #393: the human's answer reaches the node that asked, through
+    // its invocation's ctx.resume_value, and no other node: the run's own
+    // context never carries it (see the answered invocation below). Empty on
+    // a fresh run, which is how a node distinguishes "nobody has answered
+    // yet" from "the answer was no".
     auto parent_tool_gate = resources && resources->parent_tool_gate
         ? *resources->parent_tool_gate
         : ToolGate{};
@@ -1972,9 +1972,17 @@ GraphEngine::execute_graph_async(
     runtime->step_interrupts   = step_interrupts;
     if (is_resume) {
         auto answered = answered_interrupt(*resume_context, metadata.resume_interrupt_id);
+        // #393: the gate's own Before checkpoint is answered by the node it
+        // held. Any other checkpoint answers no invocation.
+        if (answered.empty() && resume_answers_gate &&
+            resume_context->phase == CheckpointPhase::Before)
+            answered = detail::static_task_id(resume_context->start_step,
+                                              resume_context->current_node);
         if (!answered.empty()) {
             runtime->answered_interrupt = std::move(answered);
             runtime->answered_step      = resume_context->start_step;
+            // #393: only that invocation, in that step, receives the value.
+            if (resume_value && !resume_value->is_null()) runtime->resume_value = *resume_value;
         }
     } else if (!metadata.resume_interrupt_id.empty()) {
         throw std::invalid_argument(

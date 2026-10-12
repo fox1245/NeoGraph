@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=0b41baeeff757370d64af1b47a2cd6fd5a1b7ebd1c76e453ea41d6664e125df6 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=0a1d1d88fe0a97c7153a148b087c1a58f79c30d0794b13dcc68ea7e48a39eb79 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -660,7 +660,7 @@ profile.attach(engine)
 
 정적 `interrupt_before`/`interrupt_after`, 동적 `NodeInterrupt`, 동기식 `resume`, asyncio `resume_async`, 그리고 정확한 `resume_from`은 체크포인트 저장소를 필요로 합니다.
 
-`ng.Send`로 디스패치된 Python 노드가 `ng.NodeInterrupt`를 던지면 다른 노드와 마찬가지로 run이 일시 정지합니다. `run`, `run_stream`, `run_async`, `run_stream_async`는 체크포인트가 있는 중단된 `RunResult`를 반환하고, `resume`, `resume_async`, `resume_from`은 그 Send를 답과 함께 실행하며 Send를 내보낸 노드와 끝난 Send는 다시 실행되지 않고 재생됩니다. 한 스텝의 노드나 Send 여럿이 `ng.NodeInterrupt`를 일으키면 `result.interrupts`는 각각을 `{"id", "node", "value"}`로 나열하고 `result.interrupt_id`는 첫 번째를 지정합니다. `resume`, `resume_async`, `resume_from`은 `interrupt_id=`를 받아 그 인터럽트에 답하며, 없으면 첫 번째에 답합니다. 일시 정지한 다른 노드나 Send는 그 재개에서 자신의 질문을 다시 하고 다음 재개가 그것에 답합니다(#388). 대기 중이 아닌 `interrupt_id`는 `ValueError`를 일으킵니다. `RunMetadata.resume_interrupt_id`도 같은 id를 전달합니다.
+`ng.Send`로 디스패치된 Python 노드가 `ng.NodeInterrupt`를 던지면 다른 노드와 마찬가지로 run이 일시 정지합니다. `run`, `run_stream`, `run_async`, `run_stream_async`는 체크포인트가 있는 중단된 `RunResult`를 반환하고, `resume`, `resume_async`, `resume_from`은 그 Send를 답과 함께 실행하며 Send를 내보낸 노드와 끝난 Send는 다시 실행되지 않고 재생됩니다. 한 스텝의 노드나 Send 여럿이 `ng.NodeInterrupt`를 일으키면 `result.interrupts`는 각각을 `{"id", "node", "value"}`로 나열하고 `result.interrupt_id`는 첫 번째를 지정합니다. `resume`, `resume_async`, `resume_from`은 `interrupt_id=`를 받아 그 인터럽트에 답하며, 없으면 첫 번째에 답합니다. 일시 정지한 다른 노드나 Send는 그 재개에서 자신의 질문을 다시 하고 다음 재개가 그것에 답합니다(#388). 대기 중이 아닌 `interrupt_id`는 `ValueError`를 일으킵니다. `RunMetadata.resume_interrupt_id`도 같은 id를 전달합니다. 답은 재개가 다시 들어가는 스텝에서 그 답이 향하는 노드나 Send에만 전달됩니다. 재개된 run의 이후 스텝에서는 `input.ctx.resume_value`와 tool gate의 `ToolGateContext.resume_value`가 `None`이므로, 거기서 묻는 노드나 gate는 run을 다시 일시 정지합니다(#393). `interrupt_before` 일시 정지 뒤의 재개는 gate가 붙잡아 둔 노드에 값을 주고, `interrupt_after` 일시 정지 뒤의 재개는 어떤 노드에도 주지 않습니다.
 
 Python `CheckpointStore` 하위 클래스는 `requires_managed_budget(thread_id) -> bool`을 구현할 수 있습니다. 이 동기 가상 메서드는 영속화된 관리 예산 은행의 거부 의무를 읽습니다. 엔진의 네이티브 비동기 파사드가 이 메서드를 호출하며, 바인딩은 Python 재정의 메서드를 실행할 때 GIL을 획득합니다. 체크포인트 상태에서 은행 정보를 제거하거나 체크포인트를 삭제해도 실제 영속 의무를 보고해야 합니다. 재정의 메서드를 생략하면 `False`를 반환하는 대신 지원되지 않는 백엔드라는 명시적인 네이티브 오류가 유지됩니다.
 

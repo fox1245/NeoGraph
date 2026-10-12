@@ -10102,6 +10102,126 @@ TEST(ProgramRuntimeTest, TwoCoreInterruptsOfOneStepAreAnsweredOneAtATime) {
     }
 }
 
+TEST(ProgramRuntimeTest, AnAnswerToOneCoreStepDoesNotAnswerALaterOne) {
+    // #393: first asks, then second asks in the next Core super-step. The
+    // answer to first used to stay visible to second, which took it as its
+    // own and never asked. Now second asks, and gets its own answer. In
+    // memory and on SQLite.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        {
+            std::lock_guard lock(named_ask_mutex);
+            named_ask_runs.clear();
+        }
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(1, stores.checkpoints, stores.transitions, {},
+                                ExecutionGuarantee::Unmanaged, true);
+        auto document   = program_document("runtime-completed");
+        auto definition = document["root"]["definition"];
+        definition["channels"]["first_answer"]  = json{{"reducer", "runtime-overwrite"}, {"initial", ""}};
+        definition["channels"]["second_answer"] = json{{"reducer", "runtime-overwrite"}, {"initial", ""}};
+        definition["nodes"]["first"]  = json{{"type", "runtime-named-ask"}};
+        definition["nodes"]["second"] = json{{"type", "runtime-named-ask"}};
+        definition["edges"] = json::array({json{{"from", "__start__"}, {"to", "work"}},
+                                           json{{"from", "work"}, {"to", "first"}},
+                                           json{{"from", "first"}, {"to", "second"}},
+                                           json{{"from", "second"}, {"to", "__end__"}}});
+        document["root"]["definition"] = std::move(definition);
+        const auto version = fixture.admit_document(std::move(document));
+
+        const auto first = fixture.runtime->run(
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), grant(), "trace-later-core-step", {}});
+        ASSERT_EQ(first.status(), ProgramTerminalStatus::Interrupted) << failure_detail(first);
+        ASSERT_TRUE(first.interrupt() && first.interrupt()->pending_input);
+        EXPECT_EQ(first.interrupt()->core_node, "first");
+
+        const auto second = fixture.runtime
+                                ->resume("tenant:runtime", first.run_id(),
+                                         resume_for(first, json{{"decision", "F"}},
+                                                    "trace-later-core-step-first"))
+                                .wait();
+        ASSERT_EQ(second.status(), ProgramTerminalStatus::Interrupted)
+            << "second took first's answer: " << failure_detail(second);
+        ASSERT_TRUE(second.interrupt() && second.interrupt()->pending_input);
+        EXPECT_EQ(second.interrupt()->core_node, "second");
+        EXPECT_EQ(second.interrupt()->value["value"], json({{"asks", "second"}}));
+
+        const auto done = fixture.runtime
+                              ->resume("tenant:runtime", second.run_id(),
+                                       resume_for(second, json{{"decision", "S"}},
+                                                  "trace-later-core-step-second"))
+                              .wait();
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+        EXPECT_EQ(done.output()["channels"]["first_answer"]["value"], json("F"));
+        EXPECT_EQ(done.output()["channels"]["second_answer"]["value"], json("S"));
+        EXPECT_EQ(named_ask_runs_of("first"), 2U);
+        EXPECT_EQ(named_ask_runs_of("second"), 2U);
+    }
+}
+
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST(ProgramRuntimeTest, AJavaScriptCallCoreAnswerDoesNotAnswerALaterCoreStep) {
+    // #393 through a JavaScript callCore command: the resume continues the
+    // command's Core call with the answer, which reaches first only.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        {
+            std::lock_guard lock(named_ask_mutex);
+            named_ask_runs.clear();
+        }
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(1, stores.checkpoints, stores.transitions, {},
+                                ExecutionGuarantee::Unmanaged, true);
+        const auto      version = fixture.admit_javascript(R"JS(
+export function define() {
+  const graph = ng.graph("main");
+  graph.channel("first_answer", {reducer: "runtime-overwrite", initial: ""});
+  graph.channel("second_answer", {reducer: "runtime-overwrite", initial: ""});
+  graph.node("first", {type: "runtime-named-ask"});
+  graph.node("second", {type: "runtime-named-ask"});
+  graph.entry("first");
+  graph.edge("first", "second");
+  graph.exit("second");
+  return graph;
+}
+
+export function* main(input) {
+  const output = yield ng.callCore("main", {}, "resume:two-core-steps");
+  return {first: output.first_answer, second: output.second_answer};
+}
+)JS");
+
+        const auto first = fixture.runtime->run(
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), javascript_budget(1), "trace-js-later-step", {}});
+        ASSERT_EQ(first.status(), ProgramTerminalStatus::Interrupted) << failure_detail(first);
+        ASSERT_TRUE(first.interrupt() && first.interrupt()->pending_input);
+        EXPECT_EQ(first.interrupt()->core_node, "first");
+
+        const auto second = fixture.runtime
+                                ->resume("tenant:runtime", first.run_id(),
+                                         resume_for(first, json{{"decision", "F"}},
+                                                    "trace-js-later-step-first"))
+                                .wait();
+        ASSERT_EQ(second.status(), ProgramTerminalStatus::Interrupted)
+            << "second took first's answer: " << failure_detail(second);
+        ASSERT_TRUE(second.interrupt() && second.interrupt()->pending_input);
+        EXPECT_EQ(second.interrupt()->core_node, "second");
+
+        const auto done = fixture.runtime
+                              ->resume("tenant:runtime", second.run_id(),
+                                       resume_for(second, json{{"decision", "S"}},
+                                                  "trace-js-later-step-second"))
+                              .wait();
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+        EXPECT_EQ(done.output(), (json{{"first", "F"}, {"second", "S"}}));
+        EXPECT_EQ(named_ask_runs_of("first"), 2U);
+        EXPECT_EQ(named_ask_runs_of("second"), 2U);
+    }
+}
+#endif  // NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS
+
 TEST(ProgramRuntimeTest, PlanQuorumPausedByABranchAsksAndResumeAnswersIt) {
     // #387: A finishes and B asks. The quorum needs two successes and B may
     // still be one, so the quorum pauses on B instead of counting it as a

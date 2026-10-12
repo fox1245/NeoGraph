@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=6a462d45318b9dd263e136b9f6a57f025dca686254c8b417877ea3f341076e02 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=325413467b4a119a3de16a517b30b053914f884601ed3bd8410228006e76e965 -->
 # NeoGraph 核心概念——叙事指南
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -410,13 +410,13 @@ result = await engine.resume_async(thread_id="t1",
                                    new_input={...})  # optional
 ```
 
-恢复只会跳过它所回答的那个中断的闸门。恢复 `interrupt_before` 暂停会运行被拦下的节点，恢复 `NodeInterrupt` 会继续其所在的步骤。其他任何恢复，例如 `interrupt_after` 暂停之后的恢复，或进程停止后从某个步骤的检查点进行的恢复，仍会在即将运行的 `interrupt_before` 节点之前暂停。
+恢复只会跳过它所回答的那个中断的闸门。恢复 `interrupt_before` 暂停会运行被拦下的节点，恢复 `NodeInterrupt` 会继续其所在的步骤。其他任何恢复，例如 `interrupt_after` 暂停之后的恢复，或进程停止后从某个步骤的检查点进行的恢复，仍会在即将运行的 `interrupt_before` 节点之前暂停。恢复值只交给 `interrupt_before` 暂停所拦下的节点，不交给其他节点；`interrupt_after` 暂停之后的恢复或从其他任何检查点的恢复不会把它交给任何节点（#393）。
 
 ### 通过 `NodeInterrupt` 进行动态中断
 
 从节点主体内部抛出（Python：`raise ng.NodeInterrupt(reason)`，C++：`throw NodeInterrupt(...)`）。引擎捕获、持久化状态、返回一个在抛出节点处中断的 `RunResult` —— 使用相同的恢复 API。这对 ready batch 中的节点和 `Send` target 同样适用，在所有同步、异步和流式入口上都一致。暂停的步骤中已完成的兄弟节点在恢复时会被重放而不是再次运行，前面没有检查点的步骤也是如此。
 
-同一步中的多个中断会逐个回答（#388）。当一个超步中的多个节点或 Send 抛出 `NodeInterrupt` 时，run 会在所有这些中断上暂停：`RunResult.interrupts` 以 `{id, node, value}` 列出每一个，其中 id 是暂停调用的 task id（`s3:review`，Send 为 `s3:send[1]:worker:<hash>`），`interrupt_node`、`interrupt_value` 和 `interrupt_id` 报告第一个。恢复回答 `interrupt_id=`（C++ `RunMetadata::resume_interrupt_id`）指定的中断，或第一个中断；该步中其他暂停的节点或 Send 会在没有该值的情况下再次运行并再次提出自己的问题，下一次恢复回答它。指定一个不在等待中的中断会在任何内容运行之前抛出 `ValueError`（C++ `std::invalid_argument`）。在多个中断上暂停的检查点会在其元数据（`_neograph.interrupts`）中列出它们；在一个中断上暂停的检查点保持不变。该值只送达暂停步骤中被回答的调用；同一次恢复 run 中后续步骤的节点仍从 `ctx.resume_value` 读取它。JavaScript join 以及计划级 `parallel` 和 `quorum` 遵循相同规则：每次恢复回答一个暂停的成员，其余成员再次提问。
+同一步中的多个中断会逐个回答（#388）。当一个超步中的多个节点或 Send 抛出 `NodeInterrupt` 时，run 会在所有这些中断上暂停：`RunResult.interrupts` 以 `{id, node, value}` 列出每一个，其中 id 是暂停调用的 task id（`s3:review`，Send 为 `s3:send[1]:worker:<hash>`），`interrupt_node`、`interrupt_value` 和 `interrupt_id` 报告第一个。恢复回答 `interrupt_id=`（C++ `RunMetadata::resume_interrupt_id`）指定的中断，或第一个中断；该步中其他暂停的节点或 Send 会在没有该值的情况下再次运行并再次提出自己的问题，下一次恢复回答它。指定一个不在等待中的中断会在任何内容运行之前抛出 `ValueError`（C++ `std::invalid_argument`）。在多个中断上暂停的检查点会在其元数据（`_neograph.interrupts`）中列出它们；在一个中断上暂停的检查点保持不变。该值只送达暂停步骤中被回答的调用（#393）：恢复后的 run 中后续步骤的节点看不到 `ctx.resume_value`，因此在那里提问的节点或 tool gate 会再次暂停 run，而不会拿走另一个问题的答案。通过父图恢复的子图经由父图中被回答的节点收到自己的答案。带有 `messages` 通道的图仍会在其中以用户消息的形式收到该值。JavaScript join 以及计划级 `parallel` 和 `quorum` 遵循相同规则：每次恢复回答一个暂停的成员，其余成员再次提问。
 
 当暂停决策取决于中间节点输出时非常有用（例如“LLM 是否产生了值得展示给人类的东西？”）。
 

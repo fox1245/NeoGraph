@@ -527,7 +527,9 @@ void init_graph(py::module_& m) {
             "The human's answer from engine.resume(). None until someone has "
             "actually answered — which is how a gate tells \"nobody has been "
             "asked yet\" from \"the answer was no\", and therefore how it "
-            "avoids interrupting forever.")
+            "avoids interrupting forever. Only the node whose question the "
+            "resume answers carries it; a gate in a later step of the resumed "
+            "run sees None and asks again (#393).")
         .def_readonly("thread_id", &neograph::ToolGateContext::thread_id)
         .def_readonly("step",      &neograph::ToolGateContext::step);
 
@@ -1040,9 +1042,11 @@ void init_graph(py::module_& m) {
             py::arg("resume_value") = py::none(),
             py::arg("interrupt_id") = py::none(),
             "Continue an interrupted run, synchronously.\n\n"
-            "``resume_value`` is the human's answer. The resumed node reads "
-            "it from ``input.ctx.resume_value``; graphs with a ``messages`` "
-            "channel also receive it as a user turn there.\n\n"
+            "``resume_value`` is the human's answer. The node that asked reads "
+            "it from ``input.ctx.resume_value``, in the step the resume "
+            "re-enters; a node of a later step sees ``None`` and asks its own "
+            "question (#393). Graphs with a ``messages`` channel also receive "
+            "it as a user turn there.\n\n"
             "Until now only ``resume_async`` was bound, so answering an "
             "approval prompt meant standing up an asyncio loop to do it "
             "(issue #94).\n\n"

@@ -764,7 +764,9 @@ void init_node(py::module_& m) {
             "The value passed to ``engine.resume(thread_id, value)`` — the "
             "human's answer to a NodeInterrupt. ``None`` on a fresh run, so a "
             "node can tell \"nobody has answered yet\" from \"the answer was "
-            "no\" (issue #94).");
+            "no\" (issue #94). Only the node or Send the resume answers sees "
+            "it, in the step the resume re-enters; every other node, and every "
+            "node of a later step, sees ``None`` (#393).");
 
     // ── Per-call input bundle ──────────────────────────────────────────
     py::class_<NodeInput>(m, "NodeInput",

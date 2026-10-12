@@ -43,7 +43,17 @@
 
 namespace neograph::graph {
 
+namespace detail {
+struct InvocationSlot;
+}  // namespace detail
+
 namespace {
+
+// #393: gives `context`, the RunContext of the invocation `slot`, the run's
+// resume value when the resume answers that invocation, and none otherwise.
+// Defined after InvocationSlot.
+void bind_resume_value(const RunContext& parent, RunContext& context,
+                       const detail::InvocationSlot& slot);
 
 std::string safe_exception_message(const std::exception& error) {
     const std::string_view bytes(error.what());
@@ -121,12 +131,15 @@ inline std::string make_send_task_id(int                step,
 // The scope is per attempt (#364): attempt k of task "s3:act" is bound to the
 // effect namespace "s3:act#a<k>" (attempt 0 to "s3:act" itself), and records
 // the mediated Tool effects that attempt performs.
+//
+// The context carries the run's resume value only when the invocation is the
+// one the resume answers (#393): see bind_resume_value() below.
 class ScopedInvocationContext {
 public:
     ScopedInvocationContext(const RunContext& parent, std::string_view invocation_id,
-                            bool withhold_resume_value = false)
+                            const detail::InvocationSlot* slot)
         : context_(parent), runtime_scope_(parent, context_, invocation_id, true) {
-        if (withhold_resume_value) context_.resume_value.reset();
+        if (slot) bind_resume_value(parent, context_, *slot);
     }
 
     const RunContext& context() const { return context_; }
@@ -258,18 +271,29 @@ std::vector<std::string> paused_task_ids(int step, const std::vector<std::string
     return ids;
 }
 
+std::string static_task_id(int step, const std::string& node) {
+    return make_static_task_id(step, node);
+}
+
 }  // namespace detail
 
 namespace {
 
-// #388: a resume answers one interrupt of the step it re-enters. Every other
-// invocation of that step runs without the resume value, so one that paused
-// asks again with its own payload.
-bool withholds_resume_value(const RunContext& ctx, const detail::InvocationSlot& slot) {
-    if (!ctx.resume_value) return false;
-    const auto runtime = detail::runtime_for(ctx);
-    return runtime && !runtime->answered_interrupt.empty() && slot.step == runtime->answered_step &&
-           slot.task_id != runtime->answered_interrupt;
+// #388, #393: a resume answers one invocation, in the step it re-enters. Only
+// that invocation, each of its attempts included, receives the resume value.
+// Every other invocation runs without it: one of the same step that paused
+// asks again with its own payload, and a node of a later step that asks
+// pauses the run again instead of taking an answer to another question.
+void bind_resume_value(const RunContext& parent, RunContext& context,
+                       const detail::InvocationSlot& slot) {
+    const auto runtime = detail::runtime_for(parent);
+    // An executor driven without a run binding keeps what its caller set.
+    if (!runtime) return;
+    if (runtime->resume_value && !runtime->answered_interrupt.empty() &&
+        slot.step == runtime->answered_step && slot.task_id == runtime->answered_interrupt)
+        context.resume_value = runtime->resume_value;
+    else
+        context.resume_value.reset();
 }
 
 }  // namespace
@@ -979,7 +1003,7 @@ asio::awaitable<NodeResult> NodeExecutor::execute_attempts_async(
             unit->token                = run_token->fork();
             unit->execution            = unit->token->fork();
             unit->context.cancel_token = unit->token;
-            if (slot && withholds_resume_value(ctx, *slot)) unit->context.resume_value.reset();
+            if (slot) bind_resume_value(ctx, unit->context, *slot);
             if (slot) {
                 unit->scope.emplace(ctx, unit->context, effect_namespace, true);
             } else {
@@ -1034,7 +1058,7 @@ asio::awaitable<NodeResult> NodeExecutor::execute_attempts_async(
             }
         } else {
             std::optional<ScopedInvocationContext> scope;
-            if (slot) scope.emplace(ctx, effect_namespace, withholds_resume_value(ctx, *slot));
+            if (slot) scope.emplace(ctx, effect_namespace, slot);
             if (scope) effects = scope->effects();
             try {
                 // Single dispatch point. NodeInput bundles state, per-run

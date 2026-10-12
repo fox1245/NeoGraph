@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=0849d783c11fa285e33ca8a95ec6ee9178554d4ee45b0663c047ad2f335f4062 -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=c1301d128f23b62e0d1095d65f2be8d37b62e268bdc31d3ab520c21222522243 -->
 # Program API 엔드투엔드 시나리오
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -25,6 +25,7 @@
 | `test_14_await_deadline.py` | `ng.await(..., timeout_ms)`가 절대 마감 시각을 유지함(#391): 마감 안의 재개는 완료되고, 마감 뒤의 재개는 즉시 `P_AWAIT_TIMEOUT`으로 타임아웃됨(메모리, SQLite, 재시작한 호스트), 재개된 await 안에서 충돌한 뒤 `reconnect()`도 await가 시작될 때의 마감 시각을 적용함 |
 | `test_15_send_isolation.py` | `Send` payload는 자신의 `Send`에만 보임(#389): Send 하나와 셋, 워커 하나와 넷, 실시간 실행과 SQLite 재개 뒤 모두 다음 스텝이나 최종 상태에 payload를 남기지 않음 |
 | `test_16_interrupt_identity.py` | 끝난 바인딩 `llm_call` 옆에서 한 스텝의 Core 인터럽트 둘(#388): pending input이 첫 Core 인터럽트를 지정하고, 재개가 그것에 답하면 둘째는 자신의 질문을 다시 하며, 다음 재개가 그것에 답함. 끝난 호출은 다시 전송되거나 과금되지 않음(메모리와 SQLite 저널) |
+| `test_17_resume_value_scope.py` | 답은 그것이 답하는 질문에만 전달됨(#393): 바인딩 `llm_call` 뒤 `first`가 묻고 다음 Core 스텝에서 `second`가 묻는다. `first`에 답한 재개 뒤에도 `second`는 자신의 질문을 하고 다음 재개가 그것에 답함. 끝난 호출은 다시 전송되거나 과금되지 않음(메모리와 SQLite 저널) |
 
 `support.py`에는 공유하는 Python 노드, 조건, 레지스트리, 예산, JavaScript 빌더가 있습니다.
 

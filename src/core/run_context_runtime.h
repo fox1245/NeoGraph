@@ -94,12 +94,17 @@ struct RunContextRuntime {
     std::shared_ptr<StepStartState> step_start;
     /// #388: the NodeInterrupts of the current step; null outside a run.
     std::shared_ptr<StepInterrupts> step_interrupts;
-    /// #388: on a resume from a NodeInterrupt checkpoint, the task id of the
-    /// paused invocation the resume value answers, in `answered_step`. Every
-    /// other invocation of that step runs without the resume value. Empty:
-    /// every invocation sees it (a resume that is not from a NodeInterrupt).
+    /// #388, #393: the task id of the one invocation a resume answers, in
+    /// `answered_step`, the step the resume re-enters: the paused invocation
+    /// of a NodeInterrupt checkpoint, or the node an interrupt_before gate
+    /// held. Only that invocation receives `resume_value`; every other
+    /// invocation of the run, in that step or a later one, runs without it.
+    /// Empty: no invocation receives it (a resume from any other checkpoint).
     std::string answered_interrupt;
     int         answered_step = -1;
+    /// #393: the value the resume supplied, for the answered invocation only.
+    /// It is never set on the run's own RunContext.
+    std::optional<json> resume_value;
 };
 
 /// What a RunContext is bound to while a scope below is alive: the state the
@@ -165,6 +170,10 @@ std::optional<std::vector<std::string>> recorded_interrupt_ids(const json& metad
 /// invocation. Defined with the executor, which dispatches them.
 std::vector<std::string> paused_task_ids(int step, const std::vector<std::string>& ready,
                                          const std::unordered_map<std::string, NodeResult>& replay);
+
+/// #393: the task id of static node `node` in super-step `step` ("s3:review"),
+/// the id the executor dispatches it under. Defined with the executor.
+std::string static_task_id(int step, const std::string& node);
 json managed_budget_scope_metadata(const std::shared_ptr<OwnedManagedBudgetLease>& lease);
 CheckpointPhase checkpoint_resume_phase(const Checkpoint& checkpoint);
 

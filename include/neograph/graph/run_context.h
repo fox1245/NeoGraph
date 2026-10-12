@@ -111,7 +111,12 @@ struct RunContext {
     /// Mirrors RunConfig::stream_mode.
     StreamMode stream_mode = StreamMode::ALL;
 
-    /// Value supplied to GraphEngine::resume(); empty on a fresh run.
+    /// Value supplied to GraphEngine::resume(), for the one invocation the
+    /// resume answers, in the step it re-enters (#388, #393): the node or Send
+    /// whose NodeInterrupt it answers, or the node an interrupt_before gate
+    /// held. Every other invocation sees it empty, as does every invocation
+    /// of a later step and of a fresh run, so a node that asks pauses the run
+    /// again instead of taking an answer to another question.
     std::optional<json> resume_value;
 
     /// Optional cross-thread shared memory.
