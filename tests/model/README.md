@@ -63,3 +63,103 @@ up to five nodes.
 To see the invariants bite, let an implicit end suppress the stall
 (`StallImpliesFailed` fails), or fire the join on any member signal
 (`NoDoubleFirePerRound` fails).
+
+## Resume model
+
+`tests/resume_model.h` and `tests/test_resume_model.cpp` check the interrupt,
+resume and replay contract of the `GraphEngine` against a reference
+interpreter, as the join harness checks joins; `tests/test_program_resume_model.cpp`
+does the same for the Program runtime. The reference states the documented
+contract (`docs/concepts.md`): a super-step runs its ready nodes, then their
+Sends; a step whose invocations ask pauses on all of them and keeps what
+finished; a resume answers the interrupt it names, or the first, and that
+invocation alone receives the value (#388, #393); an `interrupt_before`
+approval reaches the node it held, each gate of a step is answered on its own,
+and only an answered gate is passed (#382, #396); a failure outranks an
+ordinary interrupt of its step (#392).
+
+### Core harness
+
+- **Family.** Main nodes `n0`..`n{N-1}` with forward edges (at most two
+  successors each), every node reachable. A node is `Ok`, `Ask` (raises
+  `NodeInterrupt` until answered; with two successors it may route on its
+  answer), `Fail` (with or without a failure edge, #364), `Flaky` (fails, then
+  a retry succeeds in its own attempt namespace) or `Map` (one or two Sends to
+  a worker whose items are `Ok`, `Ask` or `Fail`). Optionally the last node
+  with two static predecessors is a barrier join, and one `Ok` or `Ask` node
+  carries `interrupt_before` or `interrupt_after` (two `interrupt_before`
+  gates in the extended bound).
+- **Schedules.** Every answer order of the reference: each pending question by
+  its interrupt id and by default, with both labels of an `Ask` that routes on
+  its answer. Each schedule also runs with a crash at every durable operation
+  (each checkpoint `save` and `put_writes`; before each one and after the last,
+  or before and after each one in the extended bound, which also crashes a
+  second time during recovery) and with a fork of every pause. A crash stops
+  the process: the store refuses every further operation, and the host
+  recovers from the latest checkpoint as a real one would. It repeats the
+  resume it was executing when that checkpoint is the one it answered,
+  surfaces an `interrupt_before` or `interrupt_after` pause it has not seen,
+  resumes anything else without a value, and runs again a thread that has no
+  checkpoint. Every schedule runs on `InMemoryCheckpointStore`, and crash-free
+  (crashes too on graphs of up to two nodes, three extended) on
+  `SqliteCheckpointStore` with a coarse clock: every checkpoint saved with one
+  timestamp.
+- **Asks.** Every schedule runs twice: with asks that take only an answer
+  addressed to their own invocation id, and with asks that take any resume
+  value, as an approval node does.
+- **Properties.** P1 exactly once: no node body completes again after its
+  completion was durable (its pending write, or its step's commit); a body
+  runs again only after a crash lost its completion. P2 every question
+  asked: the pauses and their pending questions with payloads equal the
+  reference's, and each `Ask` consumed exactly the answer it was given.
+  P3 same result: status, log, failure records and routes equal the
+  reference. P4 crash transparency and P5 fork equivalence: P1-P3 hold on every
+  crash and fork schedule.
+
+### Program harness
+
+JavaScript `main()` programs (`callCore`, `ng.all`, `ng.race` and `ng.quorum`
+of two members run together or one at a time, and `ng.await`) and typed plans
+(`parallel`, a two-of-three `quorum`, `sequence`) over a one-node Core whose
+node may call a bound provider and may ask. The host is wired as
+`LocalProgramHost` wires one: in memory with the in-process priced broker, or
+with every store in one SQLite file and the SQLite provider journal. The
+provider is a real SDK client over a local transport that counts the requests
+it sends. P1 also covers "sent once, charged once": the requests, the tokens and
+the money a run is charged equal the reference's (with the in-process broker, a
+node that runs again calls and pays again, as documented). Crashes run on the
+SQLite host for programs that run one call at a time: the database is copied
+at every checkpoint save, `put_writes`, Program transition, provider dispatch
+and journaled call, and a new runtime on the copy reconnects the run.
+
+The harness reports, without failing, the schedules that follow a documented
+behaviour P4 or P5 does not cover, and the questions they raise for the
+contract: a crash inside a JavaScript command returns the run for
+reconciliation; a plan that stopped before its first Core checkpoint is not
+recovered (`P_RUN_RECOVERY_BLOCKED`); a crash while a request was out holds the
+call, which is never sent again; and a fork of a paused run sends again, and
+charges again, the provider call a paused invocation made before it asked,
+which a resume of the source replays.
+
+### Bounds and variables
+
+| | CI bound | `NEOGRAPH_RESUME_MODEL_BOUND=extended` |
+|---|---|---|
+| Main nodes, special nodes | 3, 2 | 4 (3 special up to three nodes, 2 at four) |
+| Answers, crashes per schedule | 4, 1 | 6, 2 |
+| Send items | `ok`, `ask`, `ask ok`, `ask ask`, `ask fail` | every pattern of one or two |
+| Gates | one, on `Ok` or `Ask` | one on any node, or two `interrupt_before` |
+
+At the CI bound the Core harness runs 2,196 graphs and about 6,100 answer
+schedules for each kind of ask, some 83,000 runs each; the Program harness runs
+112 JavaScript programs and 18 plans, about 750 schedules. Each test takes
+under a minute on four workers.
+
+Variables: `NEOGRAPH_RESUME_MODEL_NODES`, `_SPECIAL`, `_SPECIAL_LARGEST`,
+`_ANSWERS` and `_CRASHES` override single limits; `NEOGRAPH_RESUME_MODEL_SQLITE=0`
+leaves SQLite out; `NEOGRAPH_RESUME_MODEL_THREADS` sets the workers (default
+4). For the Program harness, `NEOGRAPH_PROGRAM_RESUME_MODEL_BOUND=extended`
+adds two-command programs, every fork and a crash after every operation;
+`_ONLY` keeps the programs whose description contains it, `_CRASHES=0` leaves
+crashes out, `_THREADS` sets the workers (default 4), and `_DEBUG` prints every
+result and durable operation.
