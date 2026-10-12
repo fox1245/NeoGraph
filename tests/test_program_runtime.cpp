@@ -33,6 +33,7 @@
 #include "registry_access.h"
 #include "run_control.h"
 #include <asio/bind_cancellation_slot.hpp>
+#include <asio/redirect_error.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
@@ -433,10 +434,17 @@ private:
 class ActiveCallGuard final {
 public:
     explicit ActiveCallGuard(std::atomic<unsigned>& active) : active_(active) {}
-    ~ActiveCallGuard() { active_.fetch_sub(1, std::memory_order_relaxed); }
+    ~ActiveCallGuard() { leave(); }
+    /// Leaves the count now, by ordinary code, instead of in the destructor.
+    void leave() noexcept {
+        if (left_) return;
+        left_ = true;
+        active_.fetch_sub(1, std::memory_order_relaxed);
+    }
 
 private:
     std::atomic<unsigned>& active_;
+    bool                   left_ = false;
 };
 
 class MapFailFirstNode final : public GraphNode {
@@ -867,8 +875,15 @@ public:
         ActiveCallGuard active_guard(blocking_active);
         auto            timer = asio::steady_timer(co_await asio::this_coro::executor);
         timer.expires_after(duration_);
-        co_await timer.async_wait(
-            asio::bind_cancellation_slot(input.ctx.cancel_token->slot(), asio::use_awaitable));
+        asio::error_code ended;
+        co_await timer.async_wait(asio::bind_cancellation_slot(
+            input.ctx.cancel_token->slot(), asio::redirect_error(asio::use_awaitable, ended)));
+        // The body leaves the active count before it ends, cancelled or not,
+        // and not in a destructor that runs while an exception leaves this
+        // coroutine: a test that checks the run waited for the body must not
+        // depend on when a compiler unwinds a coroutine frame.
+        active_guard.leave();
+        if (ended) throw asio::system_error(ended);
         co_return NodeOutput{};
     }
 
