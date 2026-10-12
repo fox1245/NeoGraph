@@ -82,7 +82,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | 42 | [`42_custom_reducer_condition.cpp`](42_custom_reducer_condition.cpp) | yes | C++에서 채널 reducer와 엣지 조건을 직접 등록합니다. |
 | 51 | [`51_minimal.cpp`](51_minimal.cpp) | yes | 채널: 노드 하나가 채널 하나를 읽고 둘을 쓰며, 호출한 쪽이 타입이 있는 `ChannelKey`로 둘을 다시 읽습니다(`result.channel(key)`, `try_channel`). |
 | 52 | [`52_export_schema.cpp`](52_export_schema.cpp) | yes | `NodeFactory::export_schema()`가 시각적 편집기가 팔레트를 만드는 데 쓰는 토폴로지 JSON Schema를 출력합니다. |
-| 61 | [`61_sync_node.cpp`](61_sync_node.cpp) | yes | `SyncGraphNode`: 코루틴 보일러플레이트 없는 짧은 노드. |
+| 61 | [`61_sync_node.cpp`](61_sync_node.cpp) | yes | `SyncGraphNode`: 코루틴 보일러플레이트 없는 짧은 노드 두 개(공백 제거, 대문자 변환). 블로킹 I/O는 여전히 `GraphNode::run()`에서 처리합니다. |
 
 ### 에이전트 패턴
 

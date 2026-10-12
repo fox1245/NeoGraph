@@ -81,7 +81,7 @@ The remaining Core features. They link only `neograph::core`, except 02, 06, 07 
 | 42 | [`42_custom_reducer_condition.cpp`](42_custom_reducer_condition.cpp) | yes | Register your own channel reducer and edge condition from C++. |
 | 51 | [`51_minimal.cpp`](51_minimal.cpp) | yes | Channels: one node reads one channel, writes two, and the caller reads both back with typed `ChannelKey`s (`result.channel(key)`, `try_channel`). |
 | 52 | [`52_export_schema.cpp`](52_export_schema.cpp) | yes | `NodeFactory::export_schema()` prints the topology JSON Schema that a visual editor builds its palette from. |
-| 61 | [`61_sync_node.cpp`](61_sync_node.cpp) | yes | `SyncGraphNode`: a short node without coroutine boilerplate. |
+| 61 | [`61_sync_node.cpp`](61_sync_node.cpp) | yes | `SyncGraphNode`: two short nodes (trim, then uppercase) without coroutine boilerplate; blocking I/O still belongs in `GraphNode::run()`. |
 
 ### Agent patterns
 

@@ -82,7 +82,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | 42 | [`42_custom_reducer_condition.cpp`](42_custom_reducer_condition.cpp) | yes | C++ から独自のチャンネル reducer とエッジ条件を登録します。 |
 | 51 | [`51_minimal.cpp`](51_minimal.cpp) | yes | チャンネル。ノード 1 つが 1 つのチャンネルを読んで 2 つに書き込み、呼び出し側は型付きの `ChannelKey` で両方を読み戻します（`result.channel(key)`、`try_channel`）。 |
 | 52 | [`52_export_schema.cpp`](52_export_schema.cpp) | yes | `NodeFactory::export_schema()` が、ビジュアルエディターがパレットを作るためのトポロジー JSON Schema を出力します。 |
-| 61 | [`61_sync_node.cpp`](61_sync_node.cpp) | yes | `SyncGraphNode`。コルーチンの定型コードが要らない短いノード。 |
+| 61 | [`61_sync_node.cpp`](61_sync_node.cpp) | yes | `SyncGraphNode`。コルーチンの定型コードが要らない短いノード 2 つ（空白の除去、大文字化）。ブロッキング I/O は引き続き `GraphNode::run()` に書きます。 |
 
 ### エージェントパターン
 
