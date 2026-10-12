@@ -1,0 +1,10 @@
+{
+  "name": "neograph-acp-interop",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Official ACP TypeScript SDK against the native NeoGraph ACPServer (pinned).",
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.8.0",
+    "zod": "4.6.6"
+  }
+}

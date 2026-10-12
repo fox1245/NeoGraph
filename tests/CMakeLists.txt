@@ -417,6 +417,12 @@ if(NEOGRAPH_BUILD_ACP)
         target_compile_definitions(neograph_acp_tests PRIVATE NEOGRAPH_ACP_MCP_TESTS)
         target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_ACP_MCP_TESTS)
     endif()
+
+    # Deterministic stdio ACP agent driven by the official ACP SDKs in
+    # bindings/python/tests/interop/acp_suite/ (no provider, no keys).
+    add_executable(neograph_acp_probe_agent fixtures/acp_probe_agent.cpp)
+    target_link_libraries(neograph_acp_probe_agent PRIVATE
+        neograph::core neograph::acp SchemaProvider::transport)
 endif()
 
 if(NEOGRAPH_BUILD_GRPC)

@@ -1,0 +1,8 @@
+# Official ACP Python SDK, current stable line (the main CI job pins the same).
+agent-client-protocol==0.12.1
+# Official MCP Python SDK (FastMCP) for the stdio MCP server the client
+# passes in session/new mcpServers.
+mcp==1.30.0
+pydantic==2.14.1
+jsonschema==4.26.0
+pytest==9.1.1

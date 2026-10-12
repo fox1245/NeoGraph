@@ -1,0 +1,6 @@
+# Next major of the official ACP Python SDK (pre-release).
+agent-client-protocol==1.0.0rc2
+mcp==1.30.0
+pydantic==2.14.1
+jsonschema==4.26.0
+pytest==9.1.1
