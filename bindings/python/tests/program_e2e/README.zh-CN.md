@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=006547cf898fc273af6a783b23b33ef4faae2d0a3da8861f2d2b0265d77183c4 -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=de091620c868e73d05f56031616a513cfb2e77ee896820b52d4a10cd0d472b3e -->
 # Program API 端到端场景
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -20,7 +20,7 @@
 | `test_09_bound_llm.py` | 通过 `node_context` 绑定的 `llm_call`（#372）：报告费用与估算费用、发送前的拒绝（预算、未知模型、router alias）、零预算、无提供商 Program 的 id、同一预算下的 `all` 与 `quorum`、调用记入 journal 后的崩溃以及只收费一次的恢复 |
 | `test_10_failure_routing.py` | 失败路由（#364）：失败的 TEST 带着记录被路由到有 `interruptBefore` 的处理节点，沿 retry 和 abort 路由恢复，作者代码，经过脱敏的错误文本，`max_visits`，`max_node_retries` 上限，节点内的 Program 诊断，以及使用 SQLite 在新进程中恢复 |
 | `test_11_attempt_timeout.py` | 尝试超时（#364）：超时后在重试中恢复的慢 Python 节点，总是超时并以 `NG.Timeout` 路由到处理器的节点（没有处理器时运行失败），从不出现在结果和轨迹中的迟到完成，超过停止截止时间仍忽略取消的节点（`NG.EffectUncertain`），以及会越过 `wall_time_ms` 的退避以 kind `deadline` 停止 |
-| `test_11_send_interrupts.py` | 抛出 `NodeInterrupt` 的 `Send` target（#385）：Program 在其上暂停，恢复时重放 map 节点和已完成的 Send，使用 SQLite 在重启后恢复，调用了已绑定 `llm_call` 并已完成的 Send 既不会重发也不会再次计费 |
+| `test_12_send_interrupts.py` | 抛出 `NodeInterrupt` 的 `Send` target（#385）：Program 在其上暂停，恢复时重放 map 节点和已完成的 Send，使用 SQLite 在重启后恢复，调用了已绑定 `llm_call` 并已完成的 Send 既不会重发也不会再次计费 |
 
 `support.py` 包含共享的 Python 节点、条件、注册表、预算和 JavaScript 构建器。
 
