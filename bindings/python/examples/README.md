@@ -107,6 +107,7 @@ The restricted JavaScript Program API runs on top of Core graphs: `ProgramRegist
 | 34 | [`34_program_pause_resume.py`](34_program_pause_resume.py) | yes | `interruptBefore` pauses a run before node b and `host.resume(run_id, value)` continues it. The paused trace is `['a']`, the resumed one `['b', 'c']`, and `main()` finishes with the operator's answer. |
 | 35 | [`35_program_fork.py`](35_program_fork.py) | yes | A run paused next to a finished model call is forked with a different answer. The finished call is replayed from the checkpoint, so the scripted model sees one request in total and the fork is charged no tokens. |
 | 36 | [`36_program_crash_recovery.py`](36_program_crash_recovery.py) | yes | Process A runs a Program to a question, is answered, makes its model call and dies. Process B opens the same `sqlite_directory` and calls `reconnect`: the run finishes, the journaled reply is replayed, and the call is charged once. Linux and macOS. |
+| 37 | [`37_program_model_node.py`](37_program_model_node.py) | yes | A Program's `llm_call` node is bound to a provider by the host through `node_context`. The scripted model reports 30 + 12 tokens, which land in `usage.model_tokens: 42`, in `remaining_budget` and in a priced monetary record. A host without the binding refuses the Program with `P_ADMIT_PROVIDER`. |
 
 ### Protocols: MCP, A2A, ACP
 

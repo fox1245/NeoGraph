@@ -108,6 +108,7 @@ python 01_minimal.py
 | 34 | [`34_program_pause_resume.py`](34_program_pause_resume.py) | yes | `interruptBefore` が b ノードの前で実行を止め、`host.resume(run_id, value)` が続きを実行します。停止時の trace は `['a']`、再開後は `['b', 'c']` で、`main()` はオペレーターの答えを返して終わります。 |
 | 35 | [`35_program_fork.py`](35_program_fork.py) | yes | 終わったモデル呼び出しの隣で止まった実行を、別の答えで fork します。終わった呼び出しはチェックポイントからリプレイされるので、スクリプト化したモデルが受け取るリクエストは合計 1 回で、fork にトークンは課金されません。 |
 | 36 | [`36_program_crash_recovery.py`](36_program_crash_recovery.py) | yes | プロセス A は Program を質問まで実行し、答えを受けてモデルを呼んだあと終了します。プロセス B が同じ `sqlite_directory` を開いて `reconnect` を呼ぶと実行が完了し、ジャーナルの応答はリプレイされ、呼び出しの課金は 1 回だけです。Linux と macOS のみ。 |
+| 37 | [`37_program_model_node.py`](37_program_model_node.py) | yes | Program の `llm_call` ノードは、ホストが `node_context` でプロバイダーにバインドします。スクリプト化したモデルが報告した 30 + 12 トークンは `usage.model_tokens: 42`、`remaining_budget`、価格付きの課金記録に反映されます。バインドのないホストは `P_ADMIT_PROVIDER` で Program を拒否します。 |
 
 ### プロトコル: MCP、A2A、ACP
 

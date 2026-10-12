@@ -219,13 +219,8 @@ def native_archive(directory: str, scripted_url: str, *, first: bool, owner: str
     return opened
 
 
-def make_model_host(scripted_url: str, nodes=(), conditions=(), *, owner=OWNER,
-                    host_ceiling=None, **options):
-    """A host whose ``llm_call`` nodes call the scripted model at ``scripted_url``.
-
-    ``options`` go to ``LocalProgramHost``; ``sqlite_directory=`` makes it durable (then pass
-    ``native_history_archive=native_archive(...)`` too).
-    """
+def model_context(scripted_url: str) -> "ng.NodeContext":
+    """The provider, model and request controls a host binds to its ``llm_call`` nodes."""
     from neograph_engine.llm import SchemaProvider
 
     routing = ng.OpenRouterRouting()
@@ -237,8 +232,17 @@ def make_model_host(scripted_url: str, nodes=(), conditions=(), *, owner=OWNER,
         ng.ProviderRuntimeOptions(api_key="local-smoke", default_timeout_ms=60_000), defaults)
     controls = ng.ProviderControls()
     controls.max_output_tokens = OUTPUT_CAP
-    context = ng.NodeContext(provider=provider, model=MODEL, provider_controls=controls)
+    return ng.NodeContext(provider=provider, model=MODEL, provider_controls=controls)
+
+
+def make_model_host(scripted_url: str, nodes=(), conditions=(), *, owner=OWNER,
+                    host_ceiling=None, **options):
+    """A host whose ``llm_call`` nodes call the scripted model at ``scripted_url``.
+
+    ``options`` go to ``LocalProgramHost``; ``sqlite_directory=`` makes it durable (then pass
+    ``native_history_archive=native_archive(...)`` too).
+    """
     return ng.LocalProgramHost(
         registry(nodes, conditions, model_provider="openrouter"), owner,
         host_ceiling or ceiling(model_tokens=10_000_000, monetary_microunits=10_000_000),
-        node_context=context, binding_label="example-scripted", **options)
+        node_context=model_context(scripted_url), binding_label="example-scripted", **options)

@@ -108,6 +108,7 @@ python 01_minimal.py
 | 34 | [`34_program_pause_resume.py`](34_program_pause_resume.py) | yes | `interruptBefore` 让运行停在节点 b 之前，`host.resume(run_id, value)` 接着运行。暂停时的 trace 是 `['a']`，恢复后是 `['b', 'c']`，`main()` 带着操作员的回答结束。 |
 | 35 | [`35_program_fork.py`](35_program_fork.py) | yes | 在已完成的模型调用旁暂停的运行，用另一个回答做 fork。已完成的调用从检查点重放，因此脚本化模型总共只收到一次请求，fork 也不会再被计入 token。 |
 | 36 | [`36_program_crash_recovery.py`](36_program_crash_recovery.py) | yes | 进程 A 把 Program 运行到一个提问，得到回答并调用模型后退出。进程 B 打开同一个 `sqlite_directory` 并调用 `reconnect`：运行完成，日志中的回复被重放，这次调用只计费一次。仅限 Linux 和 macOS。 |
+| 37 | [`37_program_model_node.py`](37_program_model_node.py) | yes | Program 的 `llm_call` 节点由主机通过 `node_context` 绑定 provider。脚本化模型报告的 30 + 12 个 token 体现在 `usage.model_tokens: 42`、`remaining_budget` 和一条按价目表计价的费用记录里。没有绑定的主机会以 `P_ADMIT_PROVIDER` 拒绝这个 Program。 |
 
 ### 协议：MCP、A2A、ACP
 
