@@ -124,6 +124,7 @@ Program は Core グラフを、永続的な識別子、予算、admission を�
 | 65 | [`65_program_javascript.cpp`](65_program_javascript.cpp) | yes | C++ ホストが `define()` と `main()` を持つ JavaScript の Program をコンパイルして実行します。`main()` が `ng.callCore` でグラフを 2 回呼び、21 は 42、さらに 84 になります。 |
 | 66 | [`66_program_failure_routing.cpp`](66_program_failure_routing.cpp) | yes | Python 32 番の C++ 版です。TEST が作成者コード付きの `NodeFailureError` を投げ、2 回再試行されたあと `interruptBefore` 付きのハンドラーへルーティングされます。`retry` で `resume` すると Program は完了し、`abort` なら `plan.user_abort` 付きの `failed` で終わります。 |
 | 67 | [`67_program_budgets.cpp`](67_program_budgets.cpp) | yes | C++ の予算の 3 つの制限です。ホストの `BudgetLimits` の上限を超える Program は admission で `P_ADMIT_POLICY` により拒否され、別の `RunBudget` での実行は開始時に `P_START_BUDGET` で拒否され、`max_core_steps` を使い切ったループは `budget_exhausted` で終わります。 |
+| 68 | [`68_program_pause_resume_fork.cpp`](68_program_pause_resume_fork.cpp) | yes | Python 34 番と 35 番の C++ 版です。`interruptBefore` が実行を止め、`resume` がオペレーターの答えで続きを実行し、`fork` は止まった実行のチェックポイントから同じ質問に別の答えを与えます。終わったノードの本体は合計で 1 回しか実行されません。 |
 | 32 | [`32_evolution.cpp`](32_evolution.cpp) | yes | Harness 進化ループ。厳密な Core のシードをタスクに合わせて変異させ、系譜を JSON で出力します(`--smoke` は組み込みフィクスチャを使用)。 |
 | 58 | [`58_harness_bench.cpp`](58_harness_bench.cpp) | yes | 3 つのフィードバックモードに対する harness 収束ベンチマーク。`--smoke` は組み込みタスクを実行します。 |
 | 60 | [`60_harness_mcp_server.cpp`](60_harness_mcp_server.cpp) | yes | Harness MCP サーバー。6 つのツールで、範囲を限定したマルチ worker ワークフローをコンパイルして実行します。`NEOGRAPH_HARNESS_SMOKE=1` でオフラインのフィクスチャプロバイダーに切り替わります。 |

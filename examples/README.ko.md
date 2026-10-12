@@ -124,6 +124,7 @@ Program은 Core 그래프를 내구성 있는 식별자, 예산, 승인(admissio
 | 65 | [`65_program_javascript.cpp`](65_program_javascript.cpp) | yes | C++ 호스트가 `define()`과 `main()`이 있는 JavaScript Program을 컴파일해 실행합니다. `main()`이 `ng.callCore`로 그래프를 두 번 호출해 21이 42, 다시 84가 됩니다. |
 | 66 | [`66_program_failure_routing.cpp`](66_program_failure_routing.cpp) | yes | Python 32번의 C++ 짝입니다. TEST가 작성자 코드가 붙은 `NodeFailureError`를 던지고, 두 번 재시도된 뒤 `interruptBefore`가 걸린 처리 노드로 라우팅됩니다. `retry`로 `resume`하면 Program이 완료되고, `abort`면 `plan.user_abort`와 함께 `failed`로 끝납니다. |
 | 67 | [`67_program_budgets.cpp`](67_program_budgets.cpp) | yes | C++의 예산 한도 세 가지입니다. 호스트의 `BudgetLimits` 상한을 넘겨 달라는 Program은 승인 단계에서 `P_ADMIT_POLICY`로 거부되고, 다른 `RunBudget`으로 시작한 실행은 시작 시 `P_START_BUDGET`으로 거부되며, `max_core_steps`를 다 쓴 루프는 `budget_exhausted`로 끝납니다. |
+| 68 | [`68_program_pause_resume_fork.cpp`](68_program_pause_resume_fork.cpp) | yes | Python 34번과 35번의 C++ 짝입니다. `interruptBefore`가 실행을 멈추고, `resume`이 운영자의 답으로 이어 가며, `fork`는 멈춘 실행의 체크포인트에서 같은 질문에 다른 답을 줍니다. 끝난 노드의 본문은 모두 합쳐 한 번만 실행됩니다. |
 | 32 | [`32_evolution.cpp`](32_evolution.cpp) | yes | Harness 진화 루프: 엄격한 Core 시드를 과제에 맞춰 변이시키고 계보를 JSON으로 출력합니다(`--smoke`는 내장 픽스처 사용). |
 | 58 | [`58_harness_bench.cpp`](58_harness_bench.cpp) | yes | 세 가지 피드백 모드에 대한 harness 수렴 벤치마크. `--smoke`는 내장 과제를 실행합니다. |
 | 60 | [`60_harness_mcp_server.cpp`](60_harness_mcp_server.cpp) | yes | Harness MCP 서버: 도구 여섯 개로 범위가 제한된 다중 worker 워크플로를 컴파일하고 실행합니다. `NEOGRAPH_HARNESS_SMOKE=1`은 오프라인 픽스처 공급자로 바꿉니다. |
