@@ -132,13 +132,13 @@ Program は Core グラフを、永続的な識別子、予算、admission を�
 
 ### プロトコル: MCP、A2A、ACP、gRPC
 
-モデルやサーバーを使う MCP サンプルには、それぞれが必要です。59 は手で操作できるサーバーです。A2A と ACP のサンプルはオフラインで動きます。gRPC のサンプルは `-DNEOGRAPH_BUILD_GRPC=ON` のときだけビルドされます。
+どのサンプルもオフラインで動きます。MCP クライアントのサンプルは標準ライブラリだけのサーバー(`mcp_demo_server.py`、インストール不要)を起動し、モデルはスクリプトで代用します。A2A と ACP のサンプルは、クライアントとサーバーを 1 つのプロセスに置くか、補助プロセスを起動します。任意の CMake オプションが必要なサンプルは、その行に `-DNEOGRAPH_BUILD_GRPC=ON` のようなオプションを書いてあります。
 
 | # | サンプル | Offline | 示すもの |
 |---|---|---|---|
 | 59 | [`59_mcp_server.cpp`](59_mcp_server.cpp) | yes | stdio 上の MCP サーバー。`echo` ツール 1 つ、入出力スキーマ、構造化コンテンツ。 |
 | 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | key | stdio 上の MCP。サーバーは子プロセスで、ネットワークスタックなしに ReAct ループが駆動します。 |
-| 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | key | streamable HTTP 上の MCP。サーバーのツールを検出して ReAct ループを駆動します。実行中の MCP サーバーが必要です。 |
+| 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | yes | streamable HTTP 上の MCP。サーバーのツールを検出して ReAct ループに渡します。デモサーバーは標準ライブラリだけの Python で、モデルはスクリプトで代用します。 |
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | key | 人の承認付き MCP。すべての MCP ツール呼び出しの前で `interrupt_before` により止め、保留中の呼び出しを表示して再開します。 |
 | 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | service | `Send` を使う MCP。1 つの planner が MCP ツールごとに呼び出しを作り、並列に実行します。モデルは不要ですが、MCP サーバーが動いている必要があります。 |
 | 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | key | 1 つのエージェントが 2 つの MCP サーバー(HTTP と stdio)を 1 つのツール一覧にまとめて使います。 |

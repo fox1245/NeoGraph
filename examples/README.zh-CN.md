@@ -132,13 +132,13 @@ Program 把 Core 图包进带有持久标识、预算和准入(admission)的生�
 
 ### 协议：MCP、A2A、ACP、gRPC
 
-使用模型或服务器的 MCP 示例需要对应的模型或服务器；59 是可以手动驱动的服务器。A2A 与 ACP 示例可离线运行。gRPC 示例仅在 `-DNEOGRAPH_BUILD_GRPC=ON` 时构建。
+所有示例都可离线运行。MCP 客户端示例会启动只依赖标准库的服务器（`mcp_demo_server.py`，无需安装），模型由脚本代替；A2A 与 ACP 示例把客户端和服务器放在同一进程里，或启动伴随进程。需要可选 CMake 选项的示例，会在对应行写明，例如 `-DNEOGRAPH_BUILD_GRPC=ON`。
 
 | # | 示例 | Offline | 演示内容 |
 |---|---|---|---|
 | 59 | [`59_mcp_server.cpp`](59_mcp_server.cpp) | yes | 基于 stdio 的 MCP 服务器：一个 `echo` 工具、输入输出 schema 和结构化内容。 |
 | 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | key | 基于 stdio 的 MCP：服务器是子进程，不经过网络栈，由 ReAct 循环驱动。 |
-| 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | key | 基于 streamable HTTP 的 MCP：发现服务器工具并驱动 ReAct 循环。需要正在运行的 MCP 服务器。 |
+| 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | yes | 基于 streamable HTTP 的 MCP：发现服务器的工具并交给 ReAct 循环。演示服务器只用 Python 标准库，模型由脚本代替。 |
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | key | 带人工批准的 MCP：在任何 MCP 工具调用前 `interrupt_before` 暂停，展示待执行调用，然后恢复。 |
 | 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | service | 结合 `Send` 的 MCP：一个 planner 为每个 MCP 工具发出一次调用，调用并行执行。不需要模型，但需要 MCP 服务器在运行。 |
 | 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | key | 一个智能体使用两个 MCP 服务器（HTTP 与 stdio），工具合并成一个列表。 |

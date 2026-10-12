@@ -1,118 +1,99 @@
-// NeoGraph Example 03: Real MCP Agent
+// NeoGraph Example 03: MCP tools over Streamable HTTP
 //
-// A graph agent that uses a real LLM API + MCP server tools.
-// Loads the API key from a .env file, discovers tools from the MCP server,
-// and runs a ReAct graph.
-//
-// Prerequisites:
-//   1. Set OPENROUTER_API_KEY in the .env file
-//   2. Run an MCP server, e.g. the demo server (time/calculate/weather tools)
-//      on port 8000: pip install fastmcp && python examples/demo_mcp_server.py
+// An MCP server publishes tools. MCPClient discovers them, and get_tools() hands each one to a
+// ReAct graph as an ordinary neograph::Tool, so the graph does not know the tools run in
+// another process. The server is examples/mcp_demo_server.py: standard library only, nothing
+// to install. A scripted model plays the LLM, so no key is needed.
 //
 // Usage:
-//   ./example_mcp_agent <MCP_SERVER_URL> "<question>"
+//   python3 examples/mcp_demo_server.py --http 8765                       # terminal 1
+//   ./example_mcp_agent http://127.0.0.1:8765/mcp                         # terminal 2
+//   ./example_mcp_agent http://127.0.0.1:8765/mcp "What is 6 * 7?" --live # real model
+//                                      (needs OPENROUTER_API_KEY in the environment; billed)
 //
-// Example:
-//   ./example_mcp_agent http://127.0.0.1:8000/mcp "Use the calculate tool to compute 15 * 28 + 7."
-//
-// smoke-skip: needs an MCP HTTP server URL and OPENROUTER_API_KEY (live model call)
+// smoke-companion: @PYTHON@ @SRC@/examples/mcp_demo_server.py --http @PORT@
+// smoke-wait-port: @PORT@
+// smoke-args: http://127.0.0.1:@PORT@/mcp
+// smoke-expect: tools: get_current_time calculate get_weather kb_lookup save_note list_notes
+// smoke-expect: [calculate] {"expression":"15 * 28 + 7"} -> 427
+// smoke-expect: Final answer: 427
+// smoke-forbid: [neograph] lint
 
 #include <neograph/neograph.h>
-#include "provider_example_support.h"
+#include "scripted_provider.h"
 #include <neograph/graph/react_graph.h>
 #include <neograph/mcp/client.h>
 
-#include <cppdotenv/dotenv.hpp>
-
 #include <iostream>
 #include <string>
-#include <cstdlib>
+#include <string_view>
+#include <vector>
 
-int main(int argc, char* argv[]) {
-    cppdotenv::auto_load_dotenv();
+// The text of the last assistant message that has any.
+static std::string final_text(const std::vector<sp::Message>& messages) {
+    for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
+        if (it->role != sp::Role::Assistant) continue;
+        std::string text;
+        for (const auto& part : it->parts)
+            if (const auto* value = std::get_if<sp::Text>(&part)) text += value->value;
+        if (!text.empty()) return text;
+    }
+    return "(empty)";
+}
+
+int main(int argc, char** argv) {
+    // Positional arguments only; flags such as --live are read by choose_provider.
+    std::vector<std::string> args;
+    for (int i = 1; i < argc; ++i)
+        if (std::string_view(argv[i]).rfind("--", 0) != 0) args.emplace_back(argv[i]);
+    const std::string url = args.size() > 0 ? args[0] : "http://127.0.0.1:8765/mcp";
+    const std::string question = args.size() > 1 ? args[1] : "What is 15 * 28 + 7?";
 
     try {
-    if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <MCP_SERVER_URL> \"<question>\"\n"
-                  << "Example: " << argv[0]
-                  << " http://127.0.0.1:8000/mcp \"Use the calculate tool to compute 15 * 28 + 7.\"\n";
-        return 1;
-    }
+        // The scripted model asks the server's calculator, then answers from its reply.
+        auto scripted = std::make_shared<examples::ScriptedProvider>(
+            [](const examples::ScriptedTurn& turn) {
+                if (!turn.has_tool_result())
+                    return examples::call_tool("calculate", {{"expression", "15 * 28 + 7"}});
+                return examples::say("Final answer: " + turn.last_tool_result());
+            });
+        auto provider = examples::choose_provider(argc, argv, scripted);
 
-    std::string mcp_url = argv[1];
-    std::string question = argv[2];
+        // Handshake, then discover the server's tools (tools/list).
+        neograph::mcp::MCPClient client(url);
+        client.initialize("example-mcp-agent");
+        auto tools = client.get_tools();
+        std::cout << "tools:";
+        for (const auto& tool : tools) std::cout << " " << tool->get_name();
+        std::cout << "\n";
 
-    const char* api_key = std::getenv("OPENROUTER_API_KEY");
-    if (!api_key) {
-        std::cerr << "Error: OPENROUTER_API_KEY not set (env or .env file)\n";
-        return 1;
-    }
+        // The MCP tools go into a ReAct graph exactly like local ones.
+        auto engine = neograph::graph::create_react_graph(
+            provider, std::move(tools),
+            "You are a helpful assistant. Use the available tools to answer the question.",
+            examples::openrouter_model);
 
-    // 2. Create LLM Provider
-    auto provider = std::shared_ptr<neograph::Provider>(
-        examples::make_openrouter_provider(api_key));
+        neograph::graph::RunConfig run;
+        run.provider_messages = std::vector<sp::Message>{examples::message(sp::Role::User, question)};
+        run.max_steps = 20;
+        const auto result = engine->run(run);
 
-    // 3. Discover tools from the MCP server
-    std::cout << "[*] Connecting to MCP server: " << mcp_url << "\n";
-
-    neograph::mcp::MCPClient mcp_client(mcp_url);
-    mcp_client.initialize("example-mcp-agent");
-    auto tools = mcp_client.get_tools();
-
-    std::cout << "[*] Discovered " << tools.size() << " tools:\n";
-    for (const auto& tool : tools) {
-        auto def = tool->get_definition();
-        std::cout << "    - " << def.name << ": " << def.description.substr(0, 60) << "...\n";
-    }
-    std::cout << "\n";
-
-    // 4. Create ReAct graph (LLM + MCP tools)
-    auto engine = neograph::graph::create_react_graph(
-        provider,
-        std::move(tools),
-        "You are a helpful assistant. Use the available tools to answer the user's question. "
-        "Always respond in the same language as the user's question.",
-        examples::openrouter_model
-    );
-
-    // 5. Execute
-    neograph::graph::RunConfig config;
-    config.provider_messages = std::vector<sp::Message>{examples::message(sp::Role::User, question)};
-    config.on_provider_event = [](const sp::Event& event) {
-        if (const auto* delta = std::get_if<sp::PartDelta>(&event);
-            delta && delta->payload.kind == sp::PartKind::Text &&
-            delta->payload.channel == sp::DeltaChannel::Content)
-            std::cout << delta->payload.bytes << std::flush;
-    };
-    config.max_steps = 20;
-
-    std::cout << "User: " << question << "\n\n";
-    std::cout << "Assistant: " << std::flush;
-
-    auto result = engine->run_stream(config,
-        [](const neograph::graph::GraphEvent& event) {
-            switch (event.type) {
-                case neograph::graph::GraphEvent::Type::NODE_START:
-                    if (event.node_name == "tools") {
-                        std::cerr << "\n[tool call in progress...]\n";
-                    }
-                    break;
-                default:
-                    break;
+        // Show what crossed the wire: each tool call and the text the server returned.
+        std::string last_call;
+        for (const auto& message : result.native_messages)
+            for (const auto& part : message.parts) {
+                if (const auto* call = std::get_if<sp::ToolCall>(&part))
+                    last_call = call->name + " " + (call->input ? call->input->root().dump() : "{}");
+                else if (const auto* reply = std::get_if<sp::ToolResult>(&part))
+                    std::cout << "[" << last_call.substr(0, last_call.find(' ')) << "] "
+                              << last_call.substr(last_call.find(' ') + 1) << " -> " << reply->content << "\n";
             }
-        });
-
-    std::cout << "\n\n";
-    std::cout << "[*] Execution trace: ";
-    for (size_t i = 0; i < result.execution_trace.size(); ++i) {
-        std::cout << result.execution_trace[i];
-        if (i + 1 < result.execution_trace.size()) std::cout << " → ";
-    }
-    std::cout << " → END\n";
-
-    return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "\nError: " << e.what() << "\n";
+        std::cout << final_text(result.native_messages) << "\n";
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "Error: " << error.what() << "\n"
+                  << "Is an MCP server listening at " << url
+                  << "?  python3 examples/mcp_demo_server.py --http 8765\n";
         return 1;
     }
 }

@@ -131,13 +131,13 @@ Program wraps a Core graph in a lifecycle with durable identities, budgets and a
 
 ### Protocols: MCP, A2A, ACP, gRPC
 
-MCP examples that use a model or a server need one; 59 is a server you can drive by hand. The A2A and ACP examples run offline. The gRPC examples are built only with `-DNEOGRAPH_BUILD_GRPC=ON`.
+These examples run offline. The MCP client examples start a standard-library server (`mcp_demo_server.py`, nothing to install) and use a scripted model; the A2A and ACP ones keep client and server in one process or start a companion. A row names the opt-in CMake option its example needs, such as `-DNEOGRAPH_BUILD_GRPC=ON`.
 
 | # | Example | Offline | Shows |
 |---|---|---|---|
 | 59 | [`59_mcp_server.cpp`](59_mcp_server.cpp) | yes | MCP server over stdio with one `echo` tool, input and output schemas, and structured content. |
 | 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | key | MCP over stdio: the server is a child process, no network stack, driven by a ReAct loop. |
-| 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | key | MCP over streamable HTTP: discover a server's tools and drive a ReAct loop. Needs a running MCP server. |
+| 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | yes | MCP over streamable HTTP: discover a server's tools and give them to a ReAct loop. The demo server is standard-library Python and the model is scripted. |
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | key | MCP with human approval: `interrupt_before` any MCP tool call, show the pending call, resume. |
 | 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | service | MCP with `Send`: one planner emits a call per MCP tool and the calls run in parallel. No model, but an MCP server must be running. |
 | 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | key | One agent, two MCP servers (HTTP and stdio) merged into one tool list. |

@@ -132,13 +132,13 @@ Program은 Core 그래프를 내구성 있는 식별자, 예산, 승인(admissio
 
 ### 프로토콜: MCP, A2A, ACP, gRPC
 
-모델이나 서버를 쓰는 MCP 예제에는 각각 그것이 필요합니다. 59는 직접 구동할 수 있는 서버입니다. A2A와 ACP 예제는 오프라인으로 실행됩니다. gRPC 예제는 `-DNEOGRAPH_BUILD_GRPC=ON`으로만 빌드됩니다.
+모든 예제가 오프라인으로 실행됩니다. MCP 클라이언트 예제는 표준 라이브러리만 쓰는 서버(`mcp_demo_server.py`, 설치할 것 없음)를 띄우고 모델은 스크립트로 대신합니다. A2A와 ACP 예제는 클라이언트와 서버를 한 프로세스에 두거나 동반 프로세스를 시작합니다. 선택 CMake 옵션이 필요한 예제는 해당 행에 `-DNEOGRAPH_BUILD_GRPC=ON` 같은 옵션을 적어 두었습니다.
 
 | # | 예제 | Offline | 보여 주는 것 |
 |---|---|---|---|
 | 59 | [`59_mcp_server.cpp`](59_mcp_server.cpp) | yes | stdio 기반 MCP 서버: `echo` 도구 하나, 입력·출력 스키마, 구조화된 콘텐츠. |
 | 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | key | stdio 기반 MCP: 서버가 자식 프로세스이고 네트워크 스택 없이 ReAct 루프가 구동합니다. |
-| 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | key | streamable HTTP 기반 MCP: 서버의 도구를 찾아 ReAct 루프를 구동합니다. 실행 중인 MCP 서버가 필요합니다. |
+| 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | yes | streamable HTTP 기반 MCP: 서버의 도구를 찾아 ReAct 루프에 넘깁니다. 데모 서버는 표준 라이브러리만 쓰는 Python이고 모델은 스크립트로 대신합니다. |
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | key | 사람의 승인을 받는 MCP: 모든 MCP 도구 호출 앞에서 `interrupt_before`로 멈추고 대기 중인 호출을 보여 준 뒤 재개합니다. |
 | 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | service | `Send`를 쓰는 MCP: planner 하나가 MCP 도구마다 호출을 만들고 호출들이 병렬로 실행됩니다. 모델은 없지만 MCP 서버가 실행 중이어야 합니다. |
 | 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | key | 에이전트 하나가 MCP 서버 두 개(HTTP와 stdio)를 하나의 도구 목록으로 합쳐 사용합니다. |
