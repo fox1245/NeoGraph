@@ -1257,7 +1257,7 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         target_link_libraries(example_topology_retrieval PRIVATE neograph::program)
 
         # Plan intake and plan repair with a scripted planner: offline, no provider.
-        add_executable(example_program_plan_intake examples/65_program_plan_intake.cpp)
+        add_executable(example_program_plan_intake examples/70_program_plan_intake.cpp)
         target_link_libraries(example_program_plan_intake PRIVATE neograph::program)
     endif()
 

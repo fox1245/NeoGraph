@@ -10,6 +10,8 @@
 //
 // Build with the installed `neograph::program` target.
 // Usage: ./example_program_plan_intake     prints what each planner turn saw and the task results.
+//
+// smoke-expect: s3 completed -> 35
 
 #include <neograph/neograph.h>
 #include <neograph/program/program.h>

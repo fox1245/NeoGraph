@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=86e03da957de57e523b2702f374cda9bfe0435be1d0acb211498c5864005f463 -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=0b8a956d13cc7cacce205278abdf54f5c981e1ff35ebbed236181c329dc7faaf -->
 # C++ API 예제
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -151,6 +151,7 @@ Program은 Core 그래프를 수명 주기로 감쌉니다. 이 수명 주기에
 | 67 | [`67_program_budgets.cpp`](67_program_budgets.cpp) | yes | C++의 예산 한도 세 가지. 승인(admission)은 호스트의 `BudgetLimits` 상한보다 큰 예산을 요구하는 Program을 거부하고(`P_ADMIT_POLICY`), 다른 `RunBudget`으로 시작한 실행은 시작할 때 거부되며(`P_START_BUDGET`), `max_core_steps`를 다 쓴 루프는 `budget_exhausted`로 끝난다. |
 | 68 | [`68_program_pause_resume_fork.cpp`](68_program_pause_resume_fork.cpp) | yes | Python 34번과 35번의 C++ 짝이다. `interruptBefore`가 실행을 멈추고, `resume`이 운영자의 답으로 이어 가며, `fork`는 멈춘 실행의 체크포인트에서 같은 질문에 다른 답을 준다. 끝난 노드의 본문은 통틀어 한 번만 실행된다. |
 | 69 | [`69_program_crash_recovery.cpp`](69_program_crash_recovery.cpp) | yes | SQLite 파일을 쓰는 Python 36번의 C++ 짝이다. 프로세스 A가 질문에 답하고 `charge`를 실행한 뒤 종료되며, 프로세스 B가 같은 디렉터리를 열어 `reconnect`를 호출한다. 실행은 두 번째 시도에서 완료된다. `charge`는 두 번 실행되므로 그 효과를 장부(ledger)로 보호한다. Linux와 macOS 전용이다. |
+| 70 | [`70_program_plan_intake.cpp`](70_program_plan_intake.cpp) | yes | 스크립트된 계획자가 평평한 `step-plan/v1`로 답합니다. 입력 노드는 첫 답을 위반 세 가지와 함께 거부하고, 계획자는 그 위반을 받아 다시 답합니다. 두 번째 답은 작업 그래프로 변환되어 합 두 개를 구하고, 둘을 더하고, 단어 하나를 대문자로 바꿉니다. |
 | 32 | [`32_evolution.cpp`](32_evolution.cpp) | yes | Harness 진화 루프: 엄격한 Core 시드를 과제에 맞춰 변이시키고 계보를 JSON으로 출력한다(`--smoke`는 내장 픽스처를 쓴다). |
 | 58 | [`58_harness_bench.cpp`](58_harness_bench.cpp) | yes | 세 가지 피드백 모드로 harness 수렴을 재는 벤치마크. `--smoke`는 내장 과제를 실행한다. |
 | 60 | [`60_harness_mcp_server.cpp`](60_harness_mcp_server.cpp) | yes | Harness MCP 서버: 도구 여섯 개로 범위가 제한된 다중 worker 워크플로를 컴파일하고 실행한다. `NEOGRAPH_HARNESS_SMOKE=1`은 오프라인 픽스처 provider로 바꾼다. |

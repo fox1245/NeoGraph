@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=86e03da957de57e523b2702f374cda9bfe0435be1d0acb211498c5864005f463 -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=0b8a956d13cc7cacce205278abdf54f5c981e1ff35ebbed236181c329dc7faaf -->
 # C++ API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -151,6 +151,7 @@ Program 为 Core 图加上一套生命周期，带有持久标识、预算和准
 | 67 | [`67_program_budgets.cpp`](67_program_budgets.cpp) | yes | C++ 中的三道预算限制：准入(admission)拒绝申请量超过宿主 `BudgetLimits` 上限的 Program（`P_ADMIT_POLICY`），启动时拒绝使用另一个 `RunBudget` 的运行（`P_START_BUDGET`），用完 `max_core_steps` 的循环以 `budget_exhausted` 结束。 |
 | 68 | [`68_program_pause_resume_fork.cpp`](68_program_pause_resume_fork.cpp) | yes | Python 示例 34 和 35 的 C++ 对应版本。`interruptBefore` 让运行暂停，`resume` 带着操作员的回答继续，`fork` 则从检查点出发，用另一个回答回应同一个暂停的运行。已完成节点的函数体总共只执行一次。 |
 | 69 | [`69_program_crash_recovery.cpp`](69_program_crash_recovery.cpp) | yes | Python 示例 36 的 C++ 对应版本，使用 SQLite 文件。进程 A 回答问题、执行 `charge` 后终止；进程 B 打开同一目录并调用 `reconnect`。运行在第二次尝试时完成；`charge` 执行了两次，所以它的副作用由账本保护。适用于 Linux 和 macOS。 |
+| 70 | [`70_program_plan_intake.cpp`](70_program_plan_intake.cpp) | yes | 脚本化的规划者用扁平的 `step-plan/v1` 作答。入口节点拒绝第一次回答并给出三项违规，规划者收到违规后重新作答。第二次回答被降级为任务图：求出两个和，把它们相加，再把一个单词转成大写。 |
 | 32 | [`32_evolution.cpp`](32_evolution.cpp) | yes | Harness 演化循环：针对任务对严格 Core 种子做变异，并以 JSON 输出谱系（`--smoke` 使用内置夹具）。 |
 | 58 | [`58_harness_bench.cpp`](58_harness_bench.cpp) | yes | 针对三种反馈模式的 harness 收敛基准；`--smoke` 运行内置任务。 |
 | 60 | [`60_harness_mcp_server.cpp`](60_harness_mcp_server.cpp) | yes | Harness MCP 服务器：六个工具编译并运行范围受限的多 worker 工作流。`NEOGRAPH_HARNESS_SMOKE=1` 会换成离线夹具 provider。 |

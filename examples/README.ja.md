@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=86e03da957de57e523b2702f374cda9bfe0435be1d0acb211498c5864005f463 -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=0b8a956d13cc7cacce205278abdf54f5c981e1ff35ebbed236181c329dc7faaf -->
 # C++ API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -151,6 +151,7 @@ Program は Core グラフを、永続的な識別子、予算、admission を�
 | 67 | [`67_program_budgets.cpp`](67_program_budgets.cpp) | yes | C++ での 3 つの予算制限。ホストの `BudgetLimits` の上限を超える要求をした Program は admission で拒否され(`P_ADMIT_POLICY`)、別の `RunBudget` での実行は開始時に拒否され(`P_START_BUDGET`)、`max_core_steps` を使い切ったループは `budget_exhausted` で終わる。 |
 | 68 | [`68_program_pause_resume_fork.cpp`](68_program_pause_resume_fork.cpp) | yes | Python 34 番と 35 番の C++ 版。`interruptBefore` が実行を止め、`resume` がオペレーターの答えで続きを実行し、`fork` は止まった同じ実行に、チェックポイントから別の答えを与える。終わったノードの本体は、合計で 1 回しか動かない。 |
 | 69 | [`69_program_crash_recovery.cpp`](69_program_crash_recovery.cpp) | yes | SQLite ファイルを使う Python 36 番の C++ 版。プロセス A が質問に答え、`charge` を実行して異常終了する。プロセス B が同じディレクトリを開いて `reconnect` を呼ぶと、実行は 2 回目の試行で完了する。`charge` は 2 回動くため、その効果は台帳で守る。対象は Linux と macOS。 |
+| 70 | [`70_program_plan_intake.cpp`](70_program_plan_intake.cpp) | yes | スクリプト化した計画役が、フラットな `step-plan/v1` で答えます。受け付けノードは最初の答えを 3 件の違反とともに拒否し、計画役は違反を受けて答え直します。2 回目の答えはタスクグラフに変換され、2 つの合計を求め、それらを足し、単語を 1 つ大文字にします。 |
 | 32 | [`32_evolution.cpp`](32_evolution.cpp) | yes | Harness の進化ループ。strict な Core のシードをタスクに対して変異させ、系統を JSON で出力する(`--smoke` は組み込みのフィクスチャを使う)。 |
 | 58 | [`58_harness_bench.cpp`](58_harness_bench.cpp) | yes | 3 つのフィードバックモードに対する harness の収束ベンチマーク。`--smoke` は組み込みのタスクを実行する。 |
 | 60 | [`60_harness_mcp_server.cpp`](60_harness_mcp_server.cpp) | yes | Harness MCP サーバー。6 つのツールで、範囲を限定したマルチ worker ワークフローをコンパイルして実行する。`NEOGRAPH_HARNESS_SMOKE=1` でオフラインのフィクスチャプロバイダーに差し替わる。 |
