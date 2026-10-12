@@ -10381,6 +10381,57 @@ TEST(ProgramRuntimeTest, AForkOfTwoCoreInterruptsAnswersTheOneItsPendingInputNam
     }
 }
 
+TEST(ProgramRuntimeTest, TwoInterruptBeforeGatesOfOneCoreStepAreAnsweredOneAtATime) {
+    // #396: a and b are ready in one Core super-step and both have
+    // interruptBefore. The run pauses before a. One resume used to pass both
+    // gates; it now answers a's, and the run pauses before b, with its own
+    // pending input, until the next resume answers it. In memory and on
+    // SQLite.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(1, stores.checkpoints, stores.transitions, {},
+                                ExecutionGuarantee::Unmanaged, true);
+        auto document   = program_document("runtime-completed");
+        auto definition = document["root"]["definition"];
+        definition["nodes"]["a"] = json{{"type", "runtime-followup"}};
+        definition["nodes"]["b"] = json{{"type", "runtime-followup"}};
+        definition["edges"] = json::array({json{{"from", "__start__"}, {"to", "work"}},
+                                           json{{"from", "work"}, {"to", "a"}},
+                                           json{{"from", "work"}, {"to", "b"}},
+                                           json{{"from", "a"}, {"to", "__end__"}},
+                                           json{{"from", "b"}, {"to", "__end__"}}});
+        definition["interrupt_before"] = json::array({"a", "b"});
+        document["root"]["definition"] = std::move(definition);
+        const auto version = fixture.admit_document(std::move(document));
+
+        const auto first = fixture.runtime->run(
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), grant(), "trace-two-gates", {}});
+        ASSERT_EQ(first.status(), ProgramTerminalStatus::Interrupted) << failure_detail(first);
+        ASSERT_TRUE(first.interrupt() && first.interrupt()->pending_input);
+        EXPECT_EQ(first.interrupt()->core_node, "a");
+
+        const auto second =
+            fixture.runtime
+                ->resume("tenant:runtime", first.run_id(),
+                         resume_for(first, json{{"approved", "a"}}, "trace-two-gates-a"))
+                .wait();
+        ASSERT_EQ(second.status(), ProgramTerminalStatus::Interrupted)
+            << "one resume passed both gates: " << failure_detail(second);
+        ASSERT_TRUE(second.interrupt() && second.interrupt()->pending_input);
+        EXPECT_EQ(second.interrupt()->core_node, "b");
+        EXPECT_NE(pending_call_id(second), pending_call_id(first));
+
+        const auto done =
+            fixture.runtime
+                ->resume("tenant:runtime", second.run_id(),
+                         resume_for(second, json{{"approved", "b"}}, "trace-two-gates-b"))
+                .wait();
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+    }
+}
+
 TEST(ProgramRuntimeTest, PlanQuorumPausedByABranchAsksAndResumeAnswersIt) {
     // #387: A finishes and B asks. The quorum needs two successes and B may
     // still be one, so the quorum pauses on B instead of counting it as a

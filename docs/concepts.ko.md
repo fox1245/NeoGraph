@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=ff19a712da59532bdb8d77b09af617e486887da1aca853662b3ac50d1eed5114 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=3563b1309ca69ae6fa2112fb8fb4f048c002e85c33567eac6be78c6380d0a4c6 -->
 # NeoGraph 핵심 개념 — 해설 가이드
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -410,7 +410,7 @@ result = await engine.resume_async(thread_id="t1",
                                    new_input={...})  # optional
 ```
 
-재개는 자신이 답하는 인터럽트의 게이트만 건너뜁니다. `interrupt_before` 일시 정지를 재개하면 붙잡아 둔 노드가 실행되고, `NodeInterrupt`를 재개하면 그 스텝이 이어집니다. 그 밖의 재개, 예를 들어 `interrupt_after` 일시 정지 뒤의 재개나 프로세스가 멈춘 뒤 스텝 체크포인트에서의 복구는 곧 실행할 `interrupt_before` 노드 앞에서 여전히 멈춥니다. 재개 값은 `interrupt_before` 일시 정지가 붙잡아 둔 노드에만 전달되고 다른 노드에는 전달되지 않습니다. `interrupt_after` 일시 정지 뒤의 재개나 그 밖의 체크포인트에서의 재개는 어떤 노드에도 값을 전달하지 않습니다(#393).
+재개는 자신이 답하는 인터럽트의 게이트만 건너뜁니다. `interrupt_before` 일시 정지를 재개하면 붙잡아 둔 노드가 실행되고, `NodeInterrupt`를 재개하면 그 스텝이 이어집니다. 그 밖의 재개, 예를 들어 `interrupt_after` 일시 정지 뒤의 재개나 프로세스가 멈춘 뒤 스텝 체크포인트에서의 복구는 곧 실행할 `interrupt_before` 노드 앞에서 여전히 멈춥니다. 재개 값은 `interrupt_before` 일시 정지가 붙잡아 둔 노드에만 전달되고 다른 노드에는 전달되지 않습니다. `interrupt_after` 일시 정지 뒤의 재개나 그 밖의 체크포인트에서의 재개는 어떤 노드에도 값을 전달하지 않습니다(#393). 한 스텝에서 함께 준비된 게이트 노드 여럿은 하나씩 답합니다(#396). 재개는 run이 멈춘 게이트에 답하고, 스텝이 실행되기 전에 그 스텝에서 게이트가 아직 답을 받지 않은 다른 게이트 노드는 자신의 `interrupt_before` 일시 정지로 run을 다시 멈춥니다. 스텝의 모든 게이트가 답을 받으면 스텝이 실행되고, 각 게이트 노드는 자신의 게이트에 대한 답을 받습니다.
 
 ### `NodeInterrupt`를 통한 동적 인터럽트
 

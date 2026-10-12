@@ -364,8 +364,9 @@ std::string static_task_id(int step, const std::string& node) {
 
 namespace {
 
-// #388, #393: a resume answers one invocation, in the step it re-enters. Only
-// that invocation, each of its attempts included, receives the resume value.
+// #388, #393: a resume answers one invocation, in the step it re-enters (and,
+// #396, each gated node the step had answered keeps its own answer). Only an
+// answered invocation, each of its attempts included, receives a value.
 // Every other invocation runs without it: one of the same step that paused
 // asks again with its own payload, and a node of a later step that asks
 // pauses the run again instead of taking an answer to another question.
@@ -374,11 +375,12 @@ void bind_resume_value(const RunContext& parent, RunContext& context,
     const auto runtime = detail::runtime_for(parent);
     // An executor driven without a run binding keeps what its caller set.
     if (!runtime) return;
-    if (runtime->resume_value && !runtime->answered_interrupt.empty() &&
-        slot.step == runtime->answered_step && slot.task_id == runtime->answered_interrupt)
-        context.resume_value = runtime->resume_value;
-    else
-        context.resume_value.reset();
+    context.resume_value.reset();
+    if (slot.step != runtime->answered_step) return;
+    // #396: each gated node whose gate the step had answered receives its own
+    // answer.
+    if (const auto answer = runtime->answers.find(slot.task_id); answer != runtime->answers.end())
+        context.resume_value = answer->second;
 }
 
 }  // namespace

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=ff19a712da59532bdb8d77b09af617e486887da1aca853662b3ac50d1eed5114 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=3563b1309ca69ae6fa2112fb8fb4f048c002e85c33567eac6be78c6380d0a4c6 -->
 # NeoGraph 核心概念——叙事指南
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -410,7 +410,7 @@ result = await engine.resume_async(thread_id="t1",
                                    new_input={...})  # optional
 ```
 
-恢复只会跳过它所回答的那个中断的闸门。恢复 `interrupt_before` 暂停会运行被拦下的节点，恢复 `NodeInterrupt` 会继续其所在的步骤。其他任何恢复，例如 `interrupt_after` 暂停之后的恢复，或进程停止后从某个步骤的检查点进行的恢复，仍会在即将运行的 `interrupt_before` 节点之前暂停。恢复值只交给 `interrupt_before` 暂停所拦下的节点，不交给其他节点；`interrupt_after` 暂停之后的恢复或从其他任何检查点的恢复不会把它交给任何节点（#393）。
+恢复只会跳过它所回答的那个中断的闸门。恢复 `interrupt_before` 暂停会运行被拦下的节点，恢复 `NodeInterrupt` 会继续其所在的步骤。其他任何恢复，例如 `interrupt_after` 暂停之后的恢复，或进程停止后从某个步骤的检查点进行的恢复，仍会在即将运行的 `interrupt_before` 节点之前暂停。恢复值只交给 `interrupt_before` 暂停所拦下的节点，不交给其他节点；`interrupt_after` 暂停之后的恢复或从其他任何检查点的恢复不会把它交给任何节点（#393）。同一步中同时就绪的多个带闸门节点会逐个回答（#396）：恢复回答 run 所停的那个闸门，在该步运行之前，该步中闸门尚未被回答的其他带闸门节点会以自己的 `interrupt_before` 暂停再次停下 run。该步的所有闸门都被回答后，该步才运行，每个带闸门节点收到对其自身闸门的回答。
 
 ### 通过 `NodeInterrupt` 进行动态中断
 

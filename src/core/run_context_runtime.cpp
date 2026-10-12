@@ -311,6 +311,39 @@ json with_pending_interrupts(json metadata, const std::vector<PendingInterrupt>&
     return metadata;
 }
 
+json with_gate_answers(json metadata, const std::vector<GateAnswer>& answers) {
+    if (answers.empty()) return metadata;
+    if (metadata.is_null()) metadata = json::object();
+    json list = json::array();
+    for (const auto& answer : answers) {
+        json entry{{"id", answer.id}};
+        if (answer.value) entry["value"] = *answer.value;
+        list.push_back(std::move(entry));
+    }
+    metadata[kMetadataNamespace]["answered_gates"] = std::move(list);
+    return metadata;
+}
+
+std::vector<GateAnswer> recorded_gate_answers(const json& metadata) {
+    std::vector<GateAnswer> answers;
+    if (!metadata.is_object() || !metadata.contains(kMetadataNamespace)) return answers;
+    const auto reserved = metadata[kMetadataNamespace];
+    if (!reserved.is_object() || !reserved.contains("answered_gates")) return answers;
+    const auto list = reserved["answered_gates"];
+    if (!list.is_array())
+        throw std::runtime_error("Before checkpoint answered gates are malformed");
+    for (std::size_t index = 0; index < list.size(); ++index) {
+        const auto entry = list[index];
+        if (!entry.is_object() || !entry.contains("id") || !entry["id"].is_string())
+            throw std::runtime_error("Before checkpoint answered gates are malformed");
+        GateAnswer answer;
+        answer.id = entry["id"].get<std::string>();
+        if (entry.contains("value")) answer.value = entry["value"];
+        answers.push_back(std::move(answer));
+    }
+    return answers;
+}
+
 std::optional<std::vector<std::string>> recorded_interrupt_ids(const json& metadata) {
     if (!metadata.is_object() || !metadata.contains(kMetadataNamespace)) return std::nullopt;
     const auto& reserved = metadata[kMetadataNamespace];

@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -94,17 +95,16 @@ struct RunContextRuntime {
     std::shared_ptr<StepStartState> step_start;
     /// #388: the NodeInterrupts of the current step; null outside a run.
     std::shared_ptr<StepInterrupts> step_interrupts;
-    /// #388, #393: the task id of the one invocation a resume answers, in
-    /// `answered_step`, the step the resume re-enters: the paused invocation
-    /// of a NodeInterrupt checkpoint, or the node an interrupt_before gate
-    /// held. Only that invocation receives `resume_value`; every other
-    /// invocation of the run, in that step or a later one, runs without it.
-    /// Empty: no invocation receives it (a resume from any other checkpoint).
-    std::string answered_interrupt;
-    int         answered_step = -1;
-    /// #393: the value the resume supplied, for the answered invocation only.
-    /// It is never set on the run's own RunContext.
-    std::optional<json> resume_value;
+    /// #388, #393, #396: the invocations of `answered_step`, the step a
+    /// resume re-enters, that have an answer, by task id, with the value each
+    /// receives (none when its answer carried none): the paused invocation of
+    /// a NodeInterrupt checkpoint, or each gated node whose interrupt_before
+    /// gate the step had answered. Every other invocation of the run, in that
+    /// step or a later one, runs without a resume value. Empty: no invocation
+    /// receives one (a resume from any other checkpoint). Values never sit on
+    /// the run's own RunContext.
+    std::map<std::string, std::optional<json>, std::less<>> answers;
+    int                                                      answered_step = -1;
 };
 
 /// What a RunContext is bound to while a scope below is alive: the state the
@@ -178,6 +178,22 @@ std::vector<std::string> paused_task_ids(int step, const std::vector<std::string
 /// #393: the task id of static node `node` in super-step `step` ("s3:review"),
 /// the id the executor dispatches it under. Defined with the executor.
 std::string static_task_id(int step, const std::string& node);
+
+/// #396: an answered interrupt_before gate of a step: the gated node's task id
+/// and the value the resume that answered it supplied, if any.
+struct GateAnswer {
+    std::string         id;
+    std::optional<json> value;
+};
+
+/// #396: `metadata` with the gates its step already had answered, under
+/// "_neograph"/"answered_gates", when there are any. The Before checkpoint of
+/// a step's next unanswered gate carries them, so that the step runs once
+/// every gate of it is answered and each gated node receives its own answer.
+json with_gate_answers(json metadata, const std::vector<GateAnswer>& answers);
+
+/// #396: the answered gates a Before checkpoint carries (with_gate_answers).
+std::vector<GateAnswer> recorded_gate_answers(const json& metadata);
 json managed_budget_scope_metadata(const std::shared_ptr<OwnedManagedBudgetLease>& lease);
 CheckpointPhase checkpoint_resume_phase(const Checkpoint& checkpoint);
 

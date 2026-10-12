@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=ff19a712da59532bdb8d77b09af617e486887da1aca853662b3ac50d1eed5114 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=3563b1309ca69ae6fa2112fb8fb4f048c002e85c33567eac6be78c6380d0a4c6 -->
 # NeoGraphのコアコンセプト— 解説ガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -410,7 +410,7 @@ result = await engine.resume_async(thread_id="t1",
                                    new_input={...})  # optional
 ```
 
-再開は、それが答える割り込みのゲートだけを飛ばします。`interrupt_before` の一時停止を再開すると止めていたノードが実行され、`NodeInterrupt` を再開するとそのステップが続きます。それ以外の再開、たとえば `interrupt_after` の一時停止後の再開や、プロセス停止後のステップのチェックポイントからの復旧は、これから実行する `interrupt_before` ノードの前で引き続き停止します。再開値は `interrupt_before` の一時停止が止めていたノードにだけ届き、他のノードには届きません。`interrupt_after` の一時停止後の再開やその他のチェックポイントからの再開は、どのノードにも値を渡しません (#393)。
+再開は、それが答える割り込みのゲートだけを飛ばします。`interrupt_before` の一時停止を再開すると止めていたノードが実行され、`NodeInterrupt` を再開するとそのステップが続きます。それ以外の再開、たとえば `interrupt_after` の一時停止後の再開や、プロセス停止後のステップのチェックポイントからの復旧は、これから実行する `interrupt_before` ノードの前で引き続き停止します。再開値は `interrupt_before` の一時停止が止めていたノードにだけ届き、他のノードには届きません。`interrupt_after` の一時停止後の再開やその他のチェックポイントからの再開は、どのノードにも値を渡しません (#393)。一つのステップで同時に ready になった複数のゲート付きノードには一つずつ答えます (#396)。再開は run が止まったゲートに答え、ステップの実行前に、そのステップでゲートがまだ答えられていない他のゲート付きノードは自身の `interrupt_before` の一時停止で run をもう一度止めます。ステップのすべてのゲートが答えられるとステップが実行され、各ゲート付きノードは自身のゲートへの答えを受け取ります。
 
 ### `NodeInterrupt`による動的割り込み
 

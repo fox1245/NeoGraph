@@ -1970,19 +1970,28 @@ GraphEngine::execute_graph_async(
     // answers.
     const auto step_interrupts = std::make_shared<detail::StepInterrupts>();
     runtime->step_interrupts   = step_interrupts;
+    // #396: on a resume of a gate's Before checkpoint, the gates of its step
+    // that are answered: the ones the checkpoint carries, and the one it held,
+    // which this resume answers. The step runs once every gate is answered.
+    std::vector<detail::GateAnswer> gate_answers;
     if (is_resume) {
+        std::optional<json> answer;
+        if (resume_value && !resume_value->is_null()) answer = *resume_value;
         auto answered = answered_interrupt(*resume_context, metadata.resume_interrupt_id);
         // #393: the gate's own Before checkpoint is answered by the node it
         // held. Any other checkpoint answers no invocation.
         if (answered.empty() && resume_answers_gate &&
-            resume_context->phase == CheckpointPhase::Before)
-            answered = detail::static_task_id(resume_context->start_step,
-                                              resume_context->current_node);
+            resume_context->phase == CheckpointPhase::Before) {
+            gate_answers = detail::recorded_gate_answers(resume_context->metadata);
+            answered     = detail::static_task_id(resume_context->start_step,
+                                                  resume_context->current_node);
+            gate_answers.push_back(detail::GateAnswer{answered, answer});
+            for (const auto& gate : gate_answers) runtime->answers[gate.id] = gate.value;
+        }
         if (!answered.empty()) {
-            runtime->answered_interrupt = std::move(answered);
-            runtime->answered_step      = resume_context->start_step;
-            // #393: only that invocation, in that step, receives the value.
-            if (resume_value && !resume_value->is_null()) runtime->resume_value = *resume_value;
+            // #393: only the answered invocations, in that step, receive a value.
+            runtime->answers[answered] = std::move(answer);
+            runtime->answered_step     = resume_context->start_step;
         }
     } else if (!metadata.resume_interrupt_id.empty()) {
         throw std::invalid_argument(
@@ -2191,14 +2200,31 @@ GraphEngine::execute_graph_async(
         if (ready.empty()) break;
 
         // --- interrupt_before check ---
-        bool is_resume_entry = (resume_answers_gate && step == start_step);
-        if (!is_resume_entry) {
+        // A resume of a NodeInterrupt re-enters a step that already passed its
+        // gates. A resume of a gate's Before checkpoint answered that gate
+        // (#396): every other gated node of the step whose gate is not
+        // answered pauses the run again, before anything runs, with its own
+        // Before checkpoint, which carries the gates already answered.
+        const bool resumed_step       = is_resume && step == start_step;
+        const bool step_passed_gates  = resumed_step && resume_answers_gate && gate_answers.empty();
+        if (!step_passed_gates) {
             for (const auto& node_name : ready) {
-                if (interrupt_before_.count(node_name) && coord.enabled()) {
+                if (!interrupt_before_.count(node_name) || !coord.enabled()) continue;
+                if (resumed_step &&
+                    std::any_of(gate_answers.begin(), gate_answers.end(),
+                                [&](const detail::GateAnswer& gate) {
+                                    return gate.id == detail::static_task_id(step, node_name);
+                                }))
+                    continue;
+                {
+                    auto gate_metadata = checkpoint_metadata();
+                    if (resumed_step)
+                        gate_metadata = detail::with_gate_answers(std::move(gate_metadata),
+                                                                  gate_answers);
                     auto cp_id = co_await coord.save_super_step_async(state,
                         node_name, ready,
                         CheckpointPhase::Before, step, last_checkpoint_id,
-                        barrier_state, checkpoint_metadata());
+                        barrier_state, gate_metadata);
 
                     RunResult result;
                     result.usage = ctx.usage->snapshot();   // #88

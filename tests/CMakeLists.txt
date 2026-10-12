@@ -973,6 +973,12 @@ if(NEOGRAPH_BUILD_SQLITE)
     target_link_libraries(neograph_step_outcome_tests PRIVATE
         neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
     neograph_discover_tests(neograph_step_outcome_tests PROPERTIES LABELS "core;interrupt")
+    # #396: each interrupt_before gate of a step is answered on its own; one
+    # resume no longer passes every gate of the step it re-enters.
+    add_executable(neograph_gate_identity_tests test_gate_identity.cpp)
+    target_link_libraries(neograph_gate_identity_tests PRIVATE
+        neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
+    neograph_discover_tests(neograph_gate_identity_tests PROPERTIES LABELS "core;interrupt")
 endif()
 
 if(NEOGRAPH_BUILD_PROGRAM)
