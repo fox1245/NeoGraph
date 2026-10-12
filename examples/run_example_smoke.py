@@ -20,6 +20,8 @@ optionally behind `//` or `#`:
     smoke-timeout: seconds before the run is killed (default 60)
     smoke-requires: Python only. Comma-separated modules; the test is skipped when one is missing
     smoke-os:      comma-separated subset of linux,darwin,windows; the test is skipped elsewhere
+    smoke-slow:    reason this run is CPU-heavy; it is skipped when a sanitizer's *_OPTIONS
+                   variable is set (the nightly sanitizer lanes), where it would not fit 60 s
     smoke-skip:    reason this example is not run offline (needs a key, network, a service,
                    a display ...). Mutually exclusive with smoke-expect.
 
@@ -52,8 +54,9 @@ ROOT = Path(__file__).resolve().parents[1]   # the source tree: examples/ lives 
 HEADER_LINES = 80
 SKIP_STATUS = 77
 KEYS = ("expect", "expect-line", "forbid", "args", "stdin", "env", "companion", "wait-port", "exit",
-        "timeout", "requires", "os", "skip")
+        "timeout", "requires", "os", "slow", "skip")
 ANNOTATION = re.compile(r"^smoke-([a-z-]+):(.*)$")
+SANITIZER_VARIABLES = ("ASAN_OPTIONS", "TSAN_OPTIONS", "UBSAN_OPTIONS", "LSAN_OPTIONS", "MSAN_OPTIONS")
 CREDENTIAL_VARIABLES = (
     "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
     "GOOGLE_API_KEY", "OPENAI_API_BASE", "NG_PROVIDER_DESCRIPTOR", "NG_EXAMPLE_LIVE",
@@ -74,6 +77,7 @@ class Annotations:
     timeout: int = 60
     requires: list[str] = field(default_factory=list)
     os: list[str] = field(default_factory=list)
+    slow: str = ""
     skip: str = ""
     errors: list[str] = field(default_factory=list)
 
@@ -114,7 +118,7 @@ def parse_annotations(path: Path) -> Annotations:
             except ValueError:
                 result.errors.append(f"{path.name}:{number}: smoke-{key} needs an integer")
         else:
-            setattr(result, key, value)
+            setattr(result, key, value)  # slow, skip
     if (result.expect or result.expect_line) and result.skip:
         result.errors.append(f"{path.name}: has both smoke-expect and smoke-skip")
     return result
@@ -136,6 +140,9 @@ def run_smoke(source: Path, command: list[str], *, build_dir: Path | None = None
     system = {"Linux": "linux", "Darwin": "darwin", "Windows": "windows"}.get(platform.system(), "")
     if notes.os and system not in notes.os:
         print(f"SKIPPED {source.name}: runs on {', '.join(notes.os)} only")
+        return SKIP_STATUS
+    if notes.slow and any(name in os.environ for name in SANITIZER_VARIABLES):
+        print(f"SKIPPED {source.name}: {notes.slow}")
         return SKIP_STATUS
     missing = [name for name in notes.requires if not _importable(name, python)]
     if missing:

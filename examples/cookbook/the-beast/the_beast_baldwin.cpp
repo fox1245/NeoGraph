@@ -51,6 +51,7 @@
 // Build:  cmake --build build --target cookbook_the_beast_baldwin
 // Run:    ./build/cookbook_the_beast_baldwin
 //
+// smoke-slow: CPU-heavy (genetic-algorithm search, about 2 s natively); skipped under sanitizers
 // smoke-expect: faithful fitness): PASS
 
 #include <neograph/neograph.h>
