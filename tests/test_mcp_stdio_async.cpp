@@ -370,6 +370,31 @@ TEST(MCPStdioAsync, ToolRetainsProcessUntilLastOwnerReleasesIt) {
 #endif
 }
 
+TEST(MCPStdioAsync, ShutdownDoesNotWaitForAServerThatStaysAlive) {
+    // After a call the session's reader stays suspended on the server's
+    // stdout. Shutdown has to cancel that read itself: on Windows closing the
+    // wrapper's handle did not, the I/O thread never ran out of work, and
+    // shutdown() waited for a server that was never going to exit, so every
+    // test with a live server timed out. This server answers initialize and
+    // then neither exits nor writes again, even after its stdin is closed.
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    const char* script =
+        "import json,sys,time\n"
+        "for line in sys.stdin:\n"
+        "  m=json.loads(line)\n"
+        "  if m.get('method')=='initialize':\n"
+        "    print(json.dumps({'jsonrpc':'2.0','id':m['id'],'result':{"
+        "'protocolVersion':'2025-11-25','capabilities':{},"
+        "'serverInfo':{'name':'idle','version':'1'}}}),flush=True)\n"
+        "time.sleep(60)\n";
+    mcp::MCPClient client({python_cmd(), "-c", script});
+    ASSERT_TRUE(client.initialize("idle-server"));
+    const auto started = std::chrono::steady_clock::now();
+    client.shutdown();
+    // The server gets about 2 s to exit before it is terminated.
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(10));
+}
+
 TEST(MCPStdioAsync, DeadSubprocessIsAConnectionFailure) {
     if (!python3_available()) GTEST_SKIP() << "python3 not available";
     mcp::MCPClient client({python_cmd(), "-c", "import sys; sys.exit(0)"});

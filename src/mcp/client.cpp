@@ -1285,9 +1285,19 @@ void StdioSession::check_open() const {
 
 void StdioSession::close_io() noexcept {
     asio::error_code ec;
-    if (async_in_) async_in_->close(ec);
-    if (async_out_) async_out_->close(ec);
-    if (async_err_) async_err_->close(ec);
+    // The reader stays suspended on the server's stdout between calls, and
+    // shutdown() waits for the I/O thread to run out of work before it stops
+    // the server. Closing a Windows handle does not cancel a read pending on
+    // it while another handle to the same pipe end is open, and the session
+    // keeps the original of each duplicate the wrappers own; so every
+    // pending operation is cancelled first (POSIX closes them either way).
+    const auto cancel_and_close = [&ec](AsyncHandle& handle) {
+        handle.cancel(ec);
+        handle.close(ec);
+    };
+    if (async_in_) cancel_and_close(*async_in_);
+    if (async_out_) cancel_and_close(*async_out_);
+    if (async_err_) cancel_and_close(*async_err_);
     if (async_lock_) {
         async_lock_->cancel();
         async_lock_->close();
