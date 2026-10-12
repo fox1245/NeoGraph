@@ -617,6 +617,27 @@ TEST(ACPServer, NewSessionReturnsId) {
     EXPECT_FALSE(sid.empty());
 }
 
+// An ACP client on Windows sends a drive or UNC path; a relative or
+// drive-relative one is still refused (ACP: cwd is an absolute path).
+TEST(ACPServer, WorkspacePathsAreAbsolutePosixOrWindowsPaths) {
+    auto server = make_server();
+    initialize_server(server);
+    int id = 100;
+    const auto session_new = [&](const std::string& cwd) {
+        return server.handle_message(make_request(
+            ++id, "session/new", {{"cwd", cwd}, {"mcpServers", neograph::json::array()}}));
+    };
+    for (const char* absolute : {"/work", "C:\\work\\project", "c:/work", "D:\\",
+                                 "\\\\host\\share\\work"}) {
+        const auto response = session_new(absolute);
+        EXPECT_TRUE(response.contains("result")) << absolute << ": " << response.dump();
+    }
+    for (const char* relative : {"work", "./work", "C:", "C:work", "1:/work", "\\work", ":/work"}) {
+        const auto response = session_new(relative);
+        EXPECT_TRUE(response.contains("error")) << relative << ": " << response.dump();
+    }
+}
+
 TEST(ACPServer, PromptRunsGraphAndEmitsUpdate) {
     CapturingSink cap;
     auto server = make_server();
