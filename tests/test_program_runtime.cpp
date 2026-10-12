@@ -11708,6 +11708,70 @@ TEST(ProgramRuntimeTest, RaceImmediateBranchesRetainTheirCompletionSignal) {
     EXPECT_EQ(result.output(), 1);
 }
 
+TEST(ProgramRuntimeTest, ImmediateParallelAndRaceJoinsWakeOnAMultiThreadedScheduler) {
+    // A plan parallel or race whose branches finish at once signals its join
+    // on the strand its branch completions run on, often while the parent is
+    // starting to wait. The asio channel that carries the signal is not
+    // thread-safe; a wait started on another scheduler thread could miss it
+    // and the run never finished (ParallelImmediateBranchesRetainTheir-
+    // CompletionSignal hung on Windows). Many runs at once on four scheduler
+    // threads; a run that misses its deadline fails the test, and the runtime
+    // is left alive so that its shutdown does not wait for that run.
+    const auto immediate = [](int value) { return json{{"op", "return"}, {"value", value}}; };
+    // A plan needs a Core call; this one is never dispatched.
+    const auto unreachable_core = [&](int value) {
+        return json{{"op", "branch"},
+                    {"condition", json{{"path", "/unused"}, {"exists", true}}},
+                    {"then", json{{"op", "call_core"}}},
+                    {"else", immediate(value)}};
+    };
+    const std::vector<std::pair<std::string, json>> joins{
+        {"parallel",
+         json{{"op", "parallel"},
+              {"branches",
+               json::array({immediate(1), immediate(2), immediate(3), unreachable_core(4)})}}},
+        {"race",
+         json{{"op", "race"}, {"branches", json::array({immediate(1), unreachable_core(2)})}}}};
+    constexpr std::size_t kRounds       = 40;
+    constexpr std::size_t kRunsPerRound = 32;
+    constexpr auto        kDeadline     = std::chrono::seconds(30);
+    for (const auto& [name, root] : joins) {
+        SCOPED_TRACE(name);
+        auto       fixture = std::make_unique<AdmittedRuntime>(4);
+        const auto version = fixture->admit_document(orchestration_document(root));
+        bool       hung    = false;
+        for (std::size_t round = 0; round < kRounds && !hung; ++round) {
+            std::vector<ProgramHandle> handles;
+            handles.reserve(kRunsPerRound);
+            for (std::size_t run = 0; run < kRunsPerRound; ++run) {
+                handles.push_back(fixture->runtime->start(
+                    "tenant:runtime", version,
+                    ProgramInvocation{json::object(),
+                                      RunBudget{10000, 1000, 1000, 4, 32, 20, 0, 0, 0},
+                                      "trace-immediate-join-" + name,
+                                      {}}));
+            }
+            const auto deadline = std::chrono::steady_clock::now() + kDeadline;
+            for (const auto& handle : handles) {
+                std::optional<ProgramResult> result;
+                while (!(result = handle.try_result()) &&
+                       std::chrono::steady_clock::now() < deadline)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                if (!result) {
+                    ADD_FAILURE() << "a " << name << " join of immediate branches lost its "
+                                  << "completion signal in round " << round;
+                    hung = true;
+                    break;
+                }
+                EXPECT_EQ(result->status(), ProgramTerminalStatus::Completed)
+                    << failure_detail(*result);
+            }
+        }
+        // A run that is still waiting would block the runtime's shutdown.
+        if (hung) (void)fixture->runtime.release();
+    }
+}
+
 TEST(ProgramRuntimeTest, RaceUsesDeclarationOrderForAReadyTie) {
     // A ready tie is a single scheduler-turn condition. Use one scheduler
     // thread so this verifies declaration-order arbitration rather than

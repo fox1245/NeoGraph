@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a6b2132017878c46013b98612a256e0b3d9b53d3dc4affafc45778f416fc9c8b -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=6a1306fac137482bc4373a81c1d83a2f80c14a46eac7207a54db009b1f2015e7 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -113,6 +113,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **Program：分支的 Core 节点失败时，计划 quorum 不再使运行失败 (#399)。** 节点抛出异常的分支曾被抛出 quorum，成为运行的失败。现在它是一个失败分支，带有运行本应报告的代码、节点、尝试次数和 provider 证据；当后续分支使 quorum 暂停时它会被记录，并在恢复时重放。取消和丢失的检查点仍会结束运行，#392/#397 的优先级保持不变。
 - **Program：恢复的 join 不再取消它所答复的成员 (#400)。** 在失败成员旁为对账而暂停的（#397）fail-fast `ng.all`、`ng.race` 或 `ng.quorum`，恢复时会立即重放该失败成员；其完成会结束 join，并在对账成员的节点仍在消费答复时取消它，导致效果从未落定。现在被答复的成员先运行到结束，然后由重放的失败结束 join。
 - **Program：暂停的 join 中普通问题不再优先于不确定效果 (#401)。** 无失败的 join（无论是否为收集式）或计划级 `parallel` 会在声明顺序中第一个暂停的成员上暂停，因此普通问题先于因不确定效果而暂停的成员被询问。现在它与 Core 步骤（#392）一样先询问对账。收集式 `ng.all` 的例外（它等待所有成员，因此在失败旁也会在暂停的成员上暂停）被保留、记录在文档中并由测试固定。
+- **Program：分支立即结束的 plan `parallel` 或 `race` 不再挂起。** plan 级 `parallel` 或 `race` 在运行它的调度线程上等待分支，而分支通过一个非线程安全的 asio channel 在 strand 上发出完成信号。当等待正在另一个调度线程上开始时，若最后一个分支恰好发出信号，该信号可能丢失，run 永远不会结束；在 Windows 上，立即返回的分支就这样挂起了。现在等待与其他 join 一样在分支发出信号的 strand 上运行，而在登记成员期间就已决定的 JavaScript join 也从该 strand 发出信号。
 - **节点重试不再与先前尝试的效果冲突 (#364)。** 过去一个调用作用域覆盖了整个重试循环，所以每次尝试都复用第一次尝试的效果任务 id 与调用序号：在 `ToolEffectBroker` 下，重试会重放第一次尝试的回执，或因参数改变而被拒绝；重试期间发生崩溃后，恢复也会落在第一次尝试的槽位上。
 - **未确认的 Program Provider 分发是结果不确定的效果 (#364)。** 当 SQLite Provider 日志提交分发标记之后传输层抛出异常时，原始异常被直接重新抛出，节点重试可能再次发送请求。现在日志在这种情况下，以及稍后再次调用尚未解决的槽位时，抛出 `ProgramProviderDispatchUncertainError`（一个不带结果的 `ProviderOutcomeError`）；它既不会被重试也不会被路由。
 - **Program：`LocalProgramHost.resume(run_id, value)` 无需 pending id 即可使用 (#359)。** 只有一个等待中的调用时恢复该调用；没有或有多个时抛出指向 `result.interrupt.pending_input.call_id` 的 `ValueError`。显式 id 仍保持精确匹配的约定。

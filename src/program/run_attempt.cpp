@@ -3320,7 +3320,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 parallel->remaining = branches.size();
                 // `try_send` retains this signal when every branch settles before
                 // the parent begins receiving it. A cancelled timer would lose that
-                // wake-up and leave the parent waiting forever.
+                // wake-up and leave the parent waiting forever. The channel is not
+                // thread-safe: it is sent and received only on its strand.
                 parallel->completion =
                     std::make_shared<asio::experimental::channel<void(asio::error_code, int)>>(
                         completion_executor, 1);
@@ -3368,11 +3369,18 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                     (void)parallel->completion->try_send(asio::error_code(), 1);
                             }));
                 }
-                const auto [completion_error, ignored] =
-                    co_await parallel->completion->async_receive(
-                        asio::as_tuple(asio::use_awaitable));
-                (void)completion_error;
-                (void)ignored;
+                // Received on the strand the branches send on, not on this
+                // coroutine's scheduler thread: a receive started there, while
+                // the last branch sends, could miss the signal for good.
+                co_await asio::co_spawn(
+                    completion_executor,
+                    [parallel]() -> asio::awaitable<void> {
+                        const auto [error, ignored] = co_await parallel->completion->async_receive(
+                            asio::as_tuple(asio::use_awaitable));
+                        (void)error;
+                        (void)ignored;
+                    },
+                    asio::use_awaitable);
 
                 std::exception_ptr                        parallel_error;
                 std::optional<std::size_t>                error_index;
@@ -3525,7 +3533,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 const auto                     completion_executor = asio::make_strand(executor);
                 auto                           race                = std::make_shared<RaceState>();
                 // A buffered completion signal remains observable if both branches
-                // settle before this parent reaches async_receive.
+                // settle before this parent reaches async_receive. The channel is
+                // not thread-safe: it is sent and received only on its strand.
                 race->completion =
                     std::make_shared<asio::experimental::channel<void(asio::error_code, int)>>(
                         completion_executor, 1);
@@ -3593,10 +3602,16 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             }
                         }));
                 }
-                const auto [completion_error, ignored] =
-                    co_await race->completion->async_receive(asio::as_tuple(asio::use_awaitable));
-                (void)completion_error;
-                (void)ignored;
+                // Received on the strand the branches send on (see parallel).
+                co_await asio::co_spawn(
+                    completion_executor,
+                    [race]() -> asio::awaitable<void> {
+                        const auto [error, ignored] = co_await race->completion->async_receive(
+                            asio::as_tuple(asio::use_awaitable));
+                        (void)error;
+                        (void)ignored;
+                    },
+                    asio::use_awaitable);
 
                 std::optional<std::size_t>                  winner;
                 std::array<std::optional<PlanExecution>, 2> results;
@@ -5154,7 +5169,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
                 for (const auto index : deferred_launches)
                     (*launch_member)(index);
-                if (signal_completion) state->completion->try_send(asio::error_code(), 1);
+                // Sent on the channel's strand, as every member's completion is:
+                // the channel is not thread-safe.
+                if (signal_completion)
+                    asio::post(completion_executor,
+                               [state] { (void)state->completion->try_send(asio::error_code(), 1); });
 
                 co_await asio::co_spawn(
                     completion_executor,
