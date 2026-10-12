@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=1e0f83e82a49c91bff491073b1052a87a0c200ea3c66776b0e8543dce75de805 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=eed4893340e91e5edf5d64c2c1e621aed50b7a9400d21dbd5278d84321224477 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -163,6 +163,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 - **Program: ブランチがすぐに終わる plan の `parallel` や `race` が止まらなくなりました。** plan レベルの `parallel` や `race` は自身を実行したスケジューラスレッドでブランチを待ち、ブランチはスレッドセーフではない asio channel を通じて strand 上で完了を通知していました。別のスケジューラスレッドで待機を始めている最中に最後のブランチが通知すると、その通知が失われることがあり、run は終わりませんでした。Windows ではすぐに戻るブランチでこのように止まりました。現在、待機は他の join と同じくブランチが通知する strand 上で実行され、メンバーを登録している間に決着した JavaScript の join もその strand から通知を送ります。
 - **Core: プロセスが途中で止まった再開をやり直せます。** 復旧するホストは、実行していた再開を同じ値と同じ割り込み id でやり直します。step が 1 つの割り込みで一時停止し、回答を受けたノードまたは `Send` がプロセスの停止前に終わっていた場合、やり直しは失敗していました。割り込みを指定すると `std::invalid_argument`（"is not pending"）になり、既定で回答すると、まだ実行されていない step の最初の `Send` が値を受け取っていましたが、その `Send` は何も尋ねていませんでした。そのようなチェックポイントの割り込みは、終わったかどうかにかかわらず一時停止したノードになり、終わった `Send` を指定するやり直しも受け付けます。終わったものは再生されます。再開モデルハーネスが見つけました。
 - **Program: 回答を受けたメンバーが既に終わった、再開された join の復旧。** メンバーを 1 つずつ実行する JavaScript の join で、回答を受けたメンバーが終わり join がそれを記録した後、次のメンバーの一時停止が公開される前にプロセスが止まることがありました。すると `reconnect()` が run を `P_TRANSITION_CONFLICT`（"Recorded join members do not match the paused join"）で失敗させていました。復旧は記録されたメンバーを再生して join を続けるようになり、次のメンバーが自分の質問を尋ねます。再開モデルハーネスが見つけました。
+- **Program: 後の Core 呼び出しの中で止まった JavaScript `main()` の復旧。** run は最後に公開した Core 呼び出しのチェックポイントを保持します。後の `callCore` が pending として記録された後、その中でプロセスが止まると、`reconnect()` は前の呼び出しのチェックポイントを pending の呼び出しのものとして扱い、run を `CheckpointIncompatible`（"Exact Core resume checkpoint does not match a pending JavaScript callCore coordinate"）で終わらせていました。最初の呼び出しの中で止まったときと同じく、pending の呼び出しの照合のために run を返すようになり、その呼び出しを再実行しません。再開モデルハーネスが見つけました。
 - **ノードのリトライが以前の試行の効果と衝突しなくなりました (#364)。** 1 つの呼び出しスコープがリトライループ全体を覆っていたため、すべての試行が最初の試行の効果タスク id と呼び出しの序数を再利用していました。そのため `ToolEffectBroker` の下では、リトライが最初の試行のレシートを再生するか、引数が変わったとして拒否され、リトライ中のクラッシュは最初の試行のスロットで再開していました。
 - **確認できない Program のプロバイダーディスパッチは不確定な結果になります (#364)。** SQLite のプロバイダージャーナルがディスパッチのマーカーをコミットした後にトランスポートが例外を送出すると、元の例外がそのまま再送出され、ノードのリトライがリクエストを再送できました。ジャーナルはこの場合と、未解決のスロットを後で再び呼び出した場合に、結果を持たない `ProviderOutcomeError` である `ProgramProviderDispatchUncertainError` を送出するようになりました。この失敗はリトライもルーティングもされません。
 - **Program: `LocalProgramHost.resume(run_id, value)` が pending id なしで動作します (#359)。** 待機中の呼び出しが 1 つならそれを再開し、ない場合や複数ある場合は `result.interrupt.pending_input.call_id` を示す `ValueError` を送出します。明示した id は完全一致の契約を維持します。

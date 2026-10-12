@@ -907,7 +907,8 @@ if(TARGET neograph_program_sqlite AND TARGET neograph_sqlite AND TARGET neograph
     # join/interrupt and once-per-run charging contract.
     # NEOGRAPH_PROGRAM_RESUME_MODEL_BOUND=extended runs the larger bound.
     add_executable(neograph_program_resume_model_tests
-        test_program_resume_model.cpp test_program_join_recovery.cpp)
+        test_program_resume_model.cpp test_program_join_recovery.cpp
+        test_program_command_recovery.cpp)
     target_include_directories(neograph_program_resume_model_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/src/program)
     target_link_libraries(neograph_program_resume_model_tests PRIVATE

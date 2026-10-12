@@ -793,6 +793,24 @@ std::optional<std::string> javascript_call_core_operation_for_thread(
     }
     return std::nullopt;
 }
+// Whether a Core thread belongs to a command that finished before
+// `ordinal`. The run keeps the checkpoint of the last Core call it published;
+// when the process stops inside a later command, that checkpoint is the
+// earlier command's and gives no authority to resume the pending one.
+bool checkpoint_of_a_completed_command(
+    const RunControl&                                        control,
+    const std::vector<ProgramJavaScriptCommandJournalEntry>& commands,
+    std::uint64_t                                            ordinal,
+    std::string_view                                         core_thread_id) {
+    for (const auto& entry : commands) {
+        if (entry.command_ordinal() >= ordinal || !entry.completed()) continue;
+        if (javascript_call_core_operation_for_thread(
+                control, entry.command(), javascript_command_operation_id(entry.command_ordinal()),
+                core_thread_id))
+            return true;
+    }
+    return false;
+}
 std::uint64_t native_invocation_id(const RunControl& control,
                                    std::string_view  operation_id,
                                    std::uint32_t     import_slot) {
@@ -5633,7 +5651,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                 validate_javascript_command(command_value, operation_id, 0))
                             co_return std::move(*failure);
                         child_resume_authorized = true;
-                    } else if (checkpoint_id && resume_checkpoint) {
+                    } else if (checkpoint_id && resume_checkpoint &&
+                               !checkpoint_of_a_completed_command(
+                                   *control, prior_commands, ordinal,
+                                   resume_checkpoint->core_thread_id)) {
                         if (auto failure =
                                 validate_javascript_command(command_value, operation_id, 0))
                             co_return std::move(*failure);

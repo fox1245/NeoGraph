@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=1e0f83e82a49c91bff491073b1052a87a0c200ea3c66776b0e8543dce75de805 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=eed4893340e91e5edf5d64c2c1e621aed50b7a9400d21dbd5278d84321224477 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -161,6 +161,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 - **Program: 브랜치가 즉시 끝나는 plan `parallel`이나 `race`가 더 이상 멈추지 않습니다.** plan 수준 `parallel`이나 `race`는 자신을 실행한 스케줄러 스레드에서 브랜치를 기다렸고, 브랜치는 스레드 안전하지 않은 asio channel을 통해 strand에서 완료를 알렸습니다. 다른 스케줄러 스레드에서 대기를 시작하는 도중에 마지막 브랜치가 알리면 그 신호를 잃을 수 있었고 run은 끝나지 않았습니다. Windows에서 즉시 반환하는 브랜치로 이렇게 멈췄습니다. 이제 다른 join과 마찬가지로 대기는 브랜치가 알리는 strand에서 실행되며, 멤버를 등록하는 동안 정해진 JavaScript join도 그 strand에서 신호를 보냅니다.
 - **Core: 프로세스가 도중에 멈춘 재개를 다시 할 수 있습니다.** 복구하는 호스트는 실행하던 재개를 같은 값과 같은 인터럽트 id로 다시 합니다. step이 인터럽트 하나로 일시 정지했고 답을 받은 노드나 `Send`가 프로세스가 멈추기 전에 끝났다면, 다시 한 재개가 실패했습니다. 인터럽트를 지정하면 `std::invalid_argument`("is not pending")가 났고, 기본값으로 답하면 아직 실행되지 않은 step의 첫 `Send`가 값을 받았는데, 그 `Send`는 묻지도 않았습니다. 이제 그런 체크포인트의 인터럽트는 끝났든 아니든 그것이 일시 정지한 노드이고, 끝난 `Send`를 지정한 재개도 받아들입니다. 끝난 것은 재생됩니다. 재개 모델 하네스가 찾았습니다.
 - **Program: 답을 받은 멤버가 이미 끝난 재개된 join의 복구.** 멤버를 하나씩 실행하는 JavaScript join에서, 답을 받은 멤버가 끝나고 join이 그것을 기록한 뒤 다음 멤버의 일시 정지가 게시되기 전에 프로세스가 멈출 수 있었습니다. 그러면 `reconnect()`가 run을 `P_TRANSITION_CONFLICT`("Recorded join members do not match the paused join")로 실패시켰습니다. 이제 복구는 기록된 멤버를 재생하고 join을 이어 가므로, 다음 멤버가 자기 질문을 합니다. 재개 모델 하네스가 찾았습니다.
+- **Program: 뒤의 Core 호출 안에서 멈춘 JavaScript `main()`의 복구.** run은 마지막으로 게시한 Core 호출의 체크포인트를 가지고 있습니다. 뒤의 `callCore`가 pending으로 기록된 뒤 그 안에서 프로세스가 멈추면, `reconnect()`가 앞 호출의 체크포인트를 pending 호출의 것으로 보고 run을 `CheckpointIncompatible`("Exact Core resume checkpoint does not match a pending JavaScript callCore coordinate")로 끝냈습니다. 이제 첫 호출 안에서 멈췄을 때처럼 pending 호출의 조정을 위해 run을 돌려주며, 그 호출을 다시 실행하지 않습니다. 재개 모델 하네스가 찾았습니다.
 - **노드 재시도가 더 이상 이전 시도의 효과와 충돌하지 않습니다 (#364).** 하나의 호출 범위가 재시도 루프 전체를 감싸고 있어서 모든 시도가 첫 시도의 효과 태스크 id와 호출 서수를 재사용했습니다. 그래서 `ToolEffectBroker` 아래에서 재시도는 첫 시도의 영수증을 재생하거나 인수가 바뀌었다는 이유로 거부되었고, 재시도 중 크래시가 나면 첫 시도의 슬롯에서 재개되었습니다.
 - **확인되지 않은 Program 제공자 디스패치는 불확실한 결과입니다 (#364).** SQLite 제공자 저널이 디스패치 마커를 커밋한 뒤 전송 계층이 예외를 던지면 원래 예외가 그대로 다시 던져졌고, 노드 재시도가 요청을 다시 보낼 수 있었습니다. 이제 저널은 이 경우와, 해결되지 않은 슬롯을 나중에 다시 호출하는 경우에 결과가 없는 `ProviderOutcomeError`인 `ProgramProviderDispatchUncertainError`를 던집니다. 이 실패는 재시도되거나 라우팅되지 않습니다.
 - **Program: `LocalProgramHost.resume(run_id, value)`가 pending id 없이 동작합니다 (#359).** 대기 중인 호출이 하나면 그 호출을 재개하고, 없거나 여러 개면 `result.interrupt.pending_input.call_id`를 안내하는 `ValueError`를 냅니다. 명시한 id는 정확히 일치해야 하는 계약을 유지합니다.

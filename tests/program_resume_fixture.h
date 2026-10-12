@@ -674,6 +674,14 @@ public:
             .wait();
     }
     ProgramResult reconnect(const std::string& run_id) { return runtime_->reconnect(kOwner, run_id).wait(); }
+    ProgramResult reconcile(const std::string& run_id, std::string pending_id, ProgramEffectReconciliation resolution,
+                            std::optional<json> result) {
+        return runtime_
+            ->reconcile(kOwner, run_id,
+                        ProgramEffectResolution{std::move(pending_id), resolution, std::move(result), "trace-reconcile",
+                                                {}})
+            .wait();
+    }
     ProgramResult fork(const ProgramVersion& version, const ProgramResult& paused, const std::string& target,
                        json value, std::string pending_id) {
         ProgramInvocation invocation{json::object(), paused.remaining_budget(), "trace-fork", {}};

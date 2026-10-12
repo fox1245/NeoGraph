@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=1e0f83e82a49c91bff491073b1052a87a0c200ea3c66776b0e8543dce75de805 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eed4893340e91e5edf5d64c2c1e621aed50b7a9400d21dbd5278d84321224477 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -163,6 +163,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **Program：分支立即结束的 plan `parallel` 或 `race` 不再挂起。** plan 级 `parallel` 或 `race` 在运行它的调度线程上等待分支，而分支通过一个非线程安全的 asio channel 在 strand 上发出完成信号。当等待正在另一个调度线程上开始时，若最后一个分支恰好发出信号，该信号可能丢失，run 永远不会结束；在 Windows 上，立即返回的分支就这样挂起了。现在等待与其他 join 一样在分支发出信号的 strand 上运行，而在登记成员期间就已决定的 JavaScript join 也从该 strand 发出信号。
 - **Core：进程中途停止的恢复可以重做。** 进行恢复的宿主会用相同的值和中断 id 重做它正在执行的恢复。当 step 只因一个中断而暂停、且被回答的节点或 `Send` 在进程停止前已完成时，重做会失败：指定该中断会抛出 `std::invalid_argument`（"is not pending"），按默认回答则会把值交给该 step 中第一个尚未运行的 `Send`，而它从未提问。现在这种检查点的中断就是它暂停的那个节点，无论是否已完成；指定已完成 `Send` 的重做也会被接受，已完成的工作会被重放。由恢复模型测试框架发现。
 - **Program：被回答的成员已完成时，恢复已继续的 join。** 在逐个运行成员的 JavaScript join 中，进程可能在被回答的成员完成、join 已记录它之后，但在下一个成员的暂停发布之前停止。随后 `reconnect()` 会以 `P_TRANSITION_CONFLICT`（"Recorded join members do not match the paused join"）使 run 失败。现在恢复会重放已记录的成员并继续 join，下一个成员会提出自己的问题。由恢复模型测试框架发现。
+- **Program：恢复在后一个 Core 调用中停止的 JavaScript `main()`。** run 保存它最后发布的 Core 调用的检查点。当后一个 `callCore` 被记录为 pending 之后进程在其中停止时，`reconnect()` 会把前一个调用的检查点当作 pending 调用的检查点，并以 `CheckpointIncompatible`（"Exact Core resume checkpoint does not match a pending JavaScript callCore coordinate"）结束 run。现在它像进程在第一个调用中停止时一样，把 run 交回以协调 pending 调用，并且不会再次运行该调用。由恢复模型测试框架发现。
 - **节点重试不再与先前尝试的效果冲突 (#364)。** 过去一个调用作用域覆盖了整个重试循环，所以每次尝试都复用第一次尝试的效果任务 id 与调用序号：在 `ToolEffectBroker` 下，重试会重放第一次尝试的回执，或因参数改变而被拒绝；重试期间发生崩溃后，恢复也会落在第一次尝试的槽位上。
 - **未确认的 Program Provider 分发是结果不确定的效果 (#364)。** 当 SQLite Provider 日志提交分发标记之后传输层抛出异常时，原始异常被直接重新抛出，节点重试可能再次发送请求。现在日志在这种情况下，以及稍后再次调用尚未解决的槽位时，抛出 `ProgramProviderDispatchUncertainError`（一个不带结果的 `ProviderOutcomeError`）；它既不会被重试也不会被路由。
 - **Program：`LocalProgramHost.resume(run_id, value)` 无需 pending id 即可使用 (#359)。** 只有一个等待中的调用时恢复该调用；没有或有多个时抛出指向 `result.interrupt.pending_input.call_id` 的 `ValueError`。显式 id 仍保持精确匹配的约定。
