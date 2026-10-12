@@ -801,5 +801,5 @@ The binding suite covers Core execution, custom callbacks, asyncio, cancellation
 
 - [Python examples](../bindings/python/examples/README.md)
 - [C++ examples](../examples/README.md)
-- [QuickJS authoring boundary](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
+- [Program guide](program-guide.md)
 - [Strict runtime interposition](STRICT_RUNTIME_INTERPOSITION.md)

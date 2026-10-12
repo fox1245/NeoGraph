@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=6e06ce3442fe26741419620daf3ddca6dff54972a45513b02028956408358dc6 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=96a159bc13ab9f8dde9030d2bbf62a09422a75ca4d984a5b37939216e30ac343 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -581,7 +581,7 @@ Token: ⟦c39661f30e9e⟧ 同じv0.3.0/v0.5.0の測定値 — **破壊的な9b�
 
 ## [0.9.0] — 2026-05-14 — v1.0 準備 (Candidate 1 Phase B + Candidate 6)
 
-ROADMAP_v1.mdの2つのv1.0単一ディスパッチ統合が1つのサイクルで収束する：
+2つのv1.0単一ディスパッチ統合が1つのサイクルで収束する：
 
   - **候補 1 フェーズ B (`9b`–`9f`)** — `GraphNode` のレガシー 8 仮想関数 (`execute` / `execute_async` / `execute_stream` / `execute_stream_async` / `execute_full` / `execute_full_async` / `execute_full_stream` / `execute_full_stream_async`) + `add_cancel_hook` + `CurrentCancelTokenScope` + `state.
     run_cancel_token_` + すべての 6 つの `PyGraphNodeOwner` レガシーオーバーライドが削除された。**破壊的** — 非推奨期間は終了。ユーザーの GraphNode サブクラス / ユーザー Python ノードは、単一メソッド `run(NodeInput)` / `def run(self, input)` に移行する必要がある。
@@ -597,7 +597,7 @@ ROADMAP_v1.mdの2つのv1.0単一ディスパッチ統合が1つのサイクル�
 
 - **エンジン内のすべての内部 LLM 呼び出しが `invoke()` 経由にルーティング** — `LLMCallNode`、`IntentClassifierNode` (PR #41/#42)、`Agent::complete` / `Agent::run_stream` (PR #43)、`SupervisorLLMNode` / `ResearcherLLMNode` / `CompressNotesNode` / `FinalReportNode` (PR #43)、`PlannerNode` / `ExecutorNode` (PR #44)。NeoGraph 内の LLM ディスパッチが単一のサーフェスに統合された。
 - **C++ 例の移行 (2 ファイル)** — `31_local_transformer.cpp`、`cookbook/ai-assembly/member_server.cpp` は新しい `invoke()` を使用するようになった。ユーザービルドで非推奨警告は発生しない。(PR #45)
-- **`GraphEngine::compile()` デフォルトワーカー数を1に戻した** (`e5ecb08`)。`b59444f` は、潜在的な18日間（2026-04-26 → 2026-05-13）の並列マイクロベンチ回帰 11.8 → 283 µs（24倍）の根本原因であり、コミットは二分探索（11のワークツリーを並列使用）で特定された。v1.0 からデフォルト=1（CPU負荷の小さい逐次/並列ディスパッチに最適）。意図的な fan-out には、`engine->set_worker_count_auto()` に1行追加して hardware_concurrency を開放する。影響を受ける5つの fan-out サンプル（10/14/21/36 + deep_research_graph ビルダー）に明示的な呼び出しを追加した。詳細は ROADMAP_v1.md の「Perf retrospective」セクションを参照。
+- **`GraphEngine::compile()` デフォルトワーカー数を1に戻した** (`e5ecb08`)。`b59444f` は、潜在的な18日間（2026-04-26 → 2026-05-13）の並列マイクロベンチ回帰 11.8 → 283 µs（24倍）の根本原因であり、コミットは二分探索（11のワークツリーを並列使用）で特定された。v1.0 からデフォルト=1（CPU負荷の小さい逐次/並列ディスパッチに最適）。意図的な fan-out には、`engine->set_worker_count_auto()` に1行追加して hardware_concurrency を開放する。影響を受ける5つの fan-out サンプル（10/14/21/36 + deep_research_graph ビルダー）に明示的な呼び出しを追加した。
 
 ### 非推奨
 
@@ -799,7 +799,7 @@ OTLP gRPCエクスポーターを`http://localhost:4317`に設定し、`http://l
 
 ## [0.4.0] — 2026-05-05 — v1.0準備: 統一された`run(NodeInput)`ディスパッチ
 
-v1.0シャープニングトラック（ROADMAP_v1.md）の最初のリリース。8つの仮想`GraphNode`クロス積（`execute` / `execute_async` / `execute_full` / … / `execute_full_stream_async`）は、単一の正規メソッド`run(NodeInput) -> awaitable<NodeOutput>`に収束します。実行ごとのキャンセルメタデータは、非チャネルセットの`GraphState`メンバーとスレッドローカルの密輸チャネルから、明示的な`RunContext`引数に移動します。`deadline`と`trace_id`は、予約済みの拡張スロットとしてのみ追加され、`RunConfig`によっては設定されません。`CancelToken`は階層的な`fork()`を獲得し、マルチSend fan-outワーカーはそれぞれ、親の`cancel()`がカスケードするプライベートシグナルを所有します。
+v1.0シャープニングトラックの最初のリリース。8つの仮想`GraphNode`クロス積（`execute` / `execute_async` / `execute_full` / … / `execute_full_stream_async`）は、単一の正規メソッド`run(NodeInput) -> awaitable<NodeOutput>`に収束します。実行ごとのキャンセルメタデータは、非チャネルセットの`GraphState`メンバーとスレッドローカルの密輸チャネルから、明示的な`RunContext`引数に移動します。`deadline`と`trace_id`は、予約済みの拡張スロットとしてのみ追加され、`RunConfig`によっては設定されません。`CancelToken`は階層的な`fork()`を獲得し、マルチSend fan-outワーカーはそれぞれ、親の`cancel()`がカスケードするプライベートシグナルを所有します。
 
 ### 追加
 
@@ -848,7 +848,6 @@ v0.3.0 の単発キャンセルが明らかにしたギャップを埋める5 �
   StateView` はフラットなドットアクセス (`view.messages` / `view.foo`) に加え、dict エスケープハッチ用の `view.raw` を返す。型付きチャンネル定義用のサブクラス: `class ChatState(ng.StateView): messages: list[dict] = []`。
 - `bindings/python/tests/test_async_cancel_live_llm_fanout.py` — 実行中のキャンセルが、ソケット層で Send が生成したすべての兄弟を本当に中止することを検証 (v0.3.1 の根本原因パッチ)。
 - `examples/22_self_evolving_graph.py` — TODO_v0.3.md #9 クックブックの折り込みとともに v0.3.2 に移動。
-- ROADMAP_v1.md — キャンセルラウンドのポストモーテムから導出された設計を精密化する候補（単一ディスパッチ、RunContext、階層的CancelToken — すべてv0.4.0で提供）。
 - Doxygen `/* */` ワイルドカード修正 — `acp/types.h` に `/**` ブロックが含まれており、パスワイルドカード（`fs/*`, `terminal/*`）がネストされたコメントを開き、後続のすべての診断を抑制していました。置き換え先： `&#42;` HTMLエンティティ。
 
 ### 修正済み

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/PROGRAM_COST_MEASUREMENT.md locale=zh-CN source_sha256=f22d74f413d9d1665f1444d3a29a05212e4d0ff9c515be846e5439fabe2177e1 -->
+<!-- neograph-i18n: source=docs/PROGRAM_COST_MEASUREMENT.md locale=zh-CN source_sha256=95fe571a9d490d4a096a313377958d64fd9c63a35f4ee437d8d8d33876a18799 -->
 # 测量 Program 的成本
 
 **Languages:** [English](PROGRAM_COST_MEASUREMENT.md) | [한국어](PROGRAM_COST_MEASUREMENT.ko.md) | [日本語](PROGRAM_COST_MEASUREMENT.ja.md) | [简体中文](PROGRAM_COST_MEASUREMENT.zh-CN.md)
@@ -9,12 +9,7 @@
 不需要 LLM、网络上的模型调用或模型凭据。
 
 要对比两种实现，`scripts/compare_program_costs.py` 会以全新的进程对，
-交替运行两个冻结的 `bench_program_cost` 二进制文件。第一次这样的对比，
-记录在[命令发布 head 的优化](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md)里。
-随后的[规范 JSON 优化](PROGRAM_CANONICAL_JSON_OPTIMIZATION.md)，
-借助 AgentX 的反汇编和 CPU 采样，选定了一项原生字符串处理的改动。
-再后面的 [SHA-256 优化](PROGRAM_SHA256_OPTIMIZATION.md)，加入了在运行时检测可用后才启用的
-CPU 加速，并附带一个经过独立验证的可移植回退实现。
+交替运行两个冻结的 `bench_program_cost` 二进制文件。
 `bench_canonical_json CASE BYTES ITERATIONS` 则单独针对一个标量输出基准结果（oracle），
 测试 ASCII、Unicode、混合以及大量转义的字符串。
 

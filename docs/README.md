@@ -2,7 +2,7 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-This page lists the documents in this directory, with the main READMEs elsewhere in the repository, and says who each one is for. If you are new, read the first table in order. If you are looking for a class or a function, go to the reference. The last two tables hold design records and measurements; they explain why the code is the way it is and are not guides.
+This page lists the documents in this directory, with the main READMEs elsewhere in the repository, and says who each one is for. If you are new, read the first table in order. If you are looking for a class or a function, go to the reference. The last two tables hold detailed Program contracts and measurements; read them when you need that depth, not to get started.
 
 ## Start here
 
@@ -38,28 +38,22 @@ This page lists the documents in this directory, with the main READMEs elsewhere
 | [Generated API reference](doxygen-mainpage.md) | Start from the Doxygen main page of the public headers in `include/neograph/`. |
 | [ABI policy](ABI_POLICY.md) | Know when a NeoGraph upgrade needs a rebuild of your code. |
 | [Schemas](../schemas) | Validate JSON that NeoGraph exchanges: Core definitions, Hooks, context artifacts and receipts. |
-| [Changelog](../CHANGELOG.md), [security policy](../SECURITY.md) and [roadmap](../ROADMAP_v1.md) | See what changed, report a vulnerability, or read the design proposals kept from earlier cycles. |
+| [Changelog](../CHANGELOG.md) and [security policy](../SECURITY.md) | See what changed, or report a vulnerability. |
 
-## Design records
+## Program contracts
 
-These documents describe the design of the Program layer and the QuickJS authoring surface. Read them when you extend the runtime or need the exact contract; you do not need them to use it.
+These documents describe parts of the Program layer in detail. Read them when you extend the runtime or need the exact contract; you do not need them to use it.
 
 | Document | Subject |
 |---|---|
-| [v1 architecture](V1_ARCHITECTURE.md) and [v1 migration plan](V1_MIGRATION_PLAN.md) | Core and Program architecture and the implementation sequence. English only. |
-| [QuickJS control architecture](QUICKJS_CONTROL_ARCHITECTURE.md), [migration](QUICKJS_CONTROL_MIGRATION.md), [execution profiles](QUICKJS_EXECUTION_PROFILES.md) and [public authoring boundary](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md) | The embedded JavaScript authoring surface and what it may do. English only. |
-| [QuickJS migration completion](QUICKJS_MIGRATION_COMPLETION.md) | A historical runbook for completing that migration. It is a planning record. |
 | [Program capability context](PROGRAM_CAPABILITY_CONTEXT.md) | How a node sees only the capabilities its admitted configuration declares. |
 | [Recursive Harnesses](PROGRAM_RECURSIVE_HARNESSES.md) | A parent, child and grandchild agent tree, each with its own Program version and budget. |
 | Child synthesis: [contract](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md), [persistence](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md), [recovery](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md) | How a Program asks the host to admit generated child source, and how that survives a restart. |
-| [Self-evolving agent controller](SELF_EVOLVING_AGENT_CONTROLLER.md) | A controller that revises its own graph under host admission. English only. |
-| [Async stage 3 design](ASYNC_STAGE3_DESIGN.md) | The design of the asio-based async executor. |
-| [DSL capability evaluation](DSL_CAPABILITY_EVAL.md) and [model Program synthesis evidence](model-program-synthesis-evidence.md) | Tests of whether a model can write valid Programs, with dated results. |
+| [DSL capability evaluation](DSL_CAPABILITY_EVAL.md) | A test that measures whether a model can write valid Programs. |
 
 ## Measurements
 
 | Document | Subject |
 |---|---|
 | [Performance deep dive](performance-deep-dive.md) and [benchmarks](../benchmarks/README.md) | Measured engine overhead and concurrency, with the configuration of each run. They are not guarantees. |
-| [Program cost measurement](PROGRAM_COST_MEASUREMENT.md) and [baseline of 2026-09-07](PROGRAM_COST_BASELINE_2026-09-07.md) | How Program bookkeeping and store costs are measured. |
-| [Command head](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md), [canonical JSON](PROGRAM_CANONICAL_JSON_OPTIMIZATION.md) and [SHA-256](PROGRAM_SHA256_OPTIMIZATION.md) optimizations | What was changed to lower those costs, and the before and after numbers. |
+| [Program cost measurement](PROGRAM_COST_MEASUREMENT.md) | How Program bookkeeping and store costs are measured. |

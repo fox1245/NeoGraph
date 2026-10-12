@@ -1108,7 +1108,7 @@ mode, plan replay, changed C++ helpers and 11 Python applications were exercised
 
 ## [0.9.0] — 2026-05-14 — v1.0 prep (Candidate 1 Phase B + Candidate 6)
 
-Two v1.0 single-dispatch unifications from ROADMAP_v1.md converge in one cycle:
+Two v1.0 single-dispatch unifications converge in one cycle:
 
   - **Candidate 1 Phase B (`9b`–`9f`)** — all of `GraphNode`'s legacy 8
     virtuals (`execute` / `execute_async` / `execute_stream` /
@@ -1163,8 +1163,7 @@ all part of this [Unreleased].
   CPU-tiny sequential/parallel dispatch); for intentional fan-out add one line
   `engine->set_worker_count_auto()` to open hardware_concurrency. Explicit
   calls added to 5 affected fan-out examples (10/14/21/36 +
-  deep_research_graph builder). See "Perf retrospective" section in
-  ROADMAP_v1.md for details.
+  deep_research_graph builder).
 
 ### Deprecated
 
@@ -1606,7 +1605,7 @@ pushes through to the live std::vector.
 
 ## [0.4.0] — 2026-05-05 — v1.0 prep: unified `run(NodeInput)` dispatch
 
-The opening release of the v1.0 sharpening track (ROADMAP_v1.md).
+The opening release of the v1.0 sharpening track.
 The 8-virtual `GraphNode` cross-product (`execute` / `execute_async` /
 `execute_full` / … / `execute_full_stream_async`) collapses to a
 single canonical method: `run(NodeInput) -> awaitable<NodeOutput>`.
@@ -1729,9 +1728,6 @@ StateView for typed state reads.
   sibling at the socket layer (was the v0.3.1 root-cause patch).
 - `examples/22_self_evolving_graph.py` — moved to v0.3.2 with the
   TODO_v0.3.md #9 cookbook fold.
-- ROADMAP_v1.md — design-sharpening candidates derived from the
-  cancel-rounds post-mortem (single dispatch, RunContext, hierarchical
-  CancelToken — all delivered in v0.4.0).
 - Doxygen `/* */` wildcard fix — `acp/types.h` had `/**` blocks
   containing path wildcards (`fs/*`, `terminal/*`) that opened a
   nested comment + suppressed all subsequent diagnostics. Replaced

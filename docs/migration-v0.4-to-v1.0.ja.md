@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ja source_sha256=37d0912e7f5f8a94f97a67c362602b9b38015ab141aa56aac51c33c118750d4c -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ja source_sha256=9cf72b62901f60584777cbb139275d7fd8c1449f797cd9b7d68b2e1b05be1e56 -->
 # マイグレーションガイド：従来の8個の仮想関数 → `run(NodeInput)`（v0.4.x → v0.9+）
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -425,8 +425,6 @@ std::shared_ptr<neograph::llm::SchemaProvider> admitted_provider(
 
 完了したchatのペアは、下流のベンダーがネイティブな継続を消費したことを証明するものではありません。
 
-過去のStage 3（2026-04）の設計と、測定されたテスト件数は、履歴として残してあります。そのプロバイダー互換性やクロスオーバーに関する判断は、以下の、型付きでロスのない切り替えに置き換えられました。この設計の台帳は、現在のプロバイダーAPIではありません。
-
 - [ABI_POLICY.md](ABI_POLICY.md)
 - [ASYNC_GUIDE.md](ASYNC_GUIDE.md)
 - [Issue #5](https://github.com/fox1245/NeoGraph/issues/5)：過去の決定。プロバイダー互換性のポリシーは、置き換えられました。
@@ -489,10 +487,6 @@ engine.set_worker_count_auto()
 auto engine = GraphEngine::compile(def, ctx);
 engine->set_worker_count_auto();   // ← add this line
 ```
-
-詳しい測定結果は、ROADMAP_v1.mdのperfセクションを参照してください（別途追加）。
-
-> 過去のStage 3（2026-04）の設計と、測定されたテスト件数は、履歴として残してあります。そのプロバイダー互換性やクロスオーバーに関する判断は、以下の、型付きでロスのない切り替えに置き換えられました。この設計の台帳は、現在のプロバイダーAPIではありません。
 
 ---
 

@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=docs/README.md locale=zh-CN source_sha256=21d29bec5271896709470458f9bf7b867b830a0685740d7846d48feba6c96c96 -->
+<!-- neograph-i18n: source=docs/README.md locale=zh-CN source_sha256=fe0e366626160489a53106532e2564d08cf01b64769c541064053306586d8196 -->
 # NeoGraph 文档
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-本页列出本目录中的文档以及仓库其他位置的主要 README，并说明每份文档适合谁阅读。初次接触的读者请按顺序阅读第一张表。要查某个类或函数，请去参考文档。最后两张表是设计记录和测量资料，用来解释代码为什么是现在的样子，不是使用指南。
+本页列出本目录中的文档以及仓库其他位置的主要 README，并说明每份文档适合谁阅读。初次接触的读者请按顺序阅读第一张表。要查某个类或函数，请去参考文档。最后两张表是 Program 契约的详细说明和测量资料，需要深入了解时再读，入门不需要。
 
 ## 从这里开始
 
@@ -39,28 +39,22 @@
 | [生成的 API 参考](doxygen-mainpage.md) | 从 Doxygen 主页开始浏览 `include/neograph/` 中的公开头文件。 |
 | [ABI 政策](ABI_POLICY.md) | 了解升级 NeoGraph 时什么情况下需要重新构建自己的代码。 |
 | [Schema](../schemas) | 校验 NeoGraph 交换的 JSON：Core 定义、Hook、上下文工件和回执。 |
-| [变更日志](../CHANGELOG.md)、[安全政策](../SECURITY.md)和[路线图](../ROADMAP_v1.md) | 查看有哪些变更、报告漏洞，或阅读早期周期保留下来的设计提案。 |
+| [变更日志](../CHANGELOG.md)和[安全政策](../SECURITY.md) | 查看有哪些变更，或报告漏洞。 |
 
-## 设计记录
+## Program 契约
 
-这些文档描述 Program 层和 QuickJS 编写接口的设计。扩展运行时或需要确切契约时再读，仅仅使用 NeoGraph 不需要读。
+这些文档详细描述 Program 层的各个部分。扩展运行时或需要确切契约时再读，仅仅使用 NeoGraph 不需要读。
 
 | 文档 | 主题 |
 |---|---|
-| [v1 架构](V1_ARCHITECTURE.md)和 [v1 迁移计划](V1_MIGRATION_PLAN.md) | Core 与 Program 的架构，以及实施顺序。仅有英文。 |
-| [QuickJS 控制架构](QUICKJS_CONTROL_ARCHITECTURE.md)、[迁移](QUICKJS_CONTROL_MIGRATION.md)、[执行配置](QUICKJS_EXECUTION_PROFILES.md)和[公开编写边界](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md) | 内嵌的 JavaScript 编写接口及其能做的事。仅有英文。 |
-| [QuickJS 迁移完成](QUICKJS_MIGRATION_COMPLETION.md) | 完成该迁移的历史运行手册，属于规划记录。 |
 | [Program 能力上下文](PROGRAM_CAPABILITY_CONTEXT.md) | 如何让节点只看到其已批准配置所声明的能力。 |
 | [递归 Harness](PROGRAM_RECURSIVE_HARNESSES.md) | 父、子、孙三层智能体树，每个智能体有自己的 Program 版本和预算。 |
 | 子程序合成：[契约](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md)、[持久化](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)、[恢复](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md) | Program 如何请求宿主批准生成的子程序源码，以及这一状态如何在重启后保留。 |
-| [自演化智能体控制器](SELF_EVOLVING_AGENT_CONTROLLER.md) | 在宿主批准下修改自身图的控制器。仅有英文。 |
-| [异步第三阶段设计](ASYNC_STAGE3_DESIGN.md) | 基于 asio 的异步执行器的设计。 |
-| [DSL 能力评估](DSL_CAPABILITY_EVAL.md)和[模型合成 Program 的证据](model-program-synthesis-evidence.md) | 测试模型能否写出有效的 Program，附日期和结果。 |
+| [DSL 能力评估](DSL_CAPABILITY_EVAL.md) | 测量模型能否写出有效 Program 的测试。 |
 
 ## 测量资料
 
 | 文档 | 主题 |
 |---|---|
 | [性能详解](performance-deep-dive.md)和[基准测试](../benchmarks/README.md) | 引擎开销与并发的测量值，以及每次运行的配置。这些数值不是保证。 |
-| [Program 成本测量](PROGRAM_COST_MEASUREMENT.md)和 [2026-09-07 基线](PROGRAM_COST_BASELINE_2026-09-07.md) | 如何测量 Program 的记账成本和存储成本。 |
-| [命令头](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md)、[规范 JSON](PROGRAM_CANONICAL_JSON_OPTIMIZATION.md)和 [SHA-256](PROGRAM_SHA256_OPTIMIZATION.md) 优化 | 为降低这些成本改了什么，以及前后的数值。 |
+| [Program 成本测量](PROGRAM_COST_MEASUREMENT.md) | 如何测量 Program 的记账成本和存储成本。 |

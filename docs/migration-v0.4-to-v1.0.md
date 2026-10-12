@@ -456,8 +456,6 @@ The observations below were recorded before this documentation reconciliation. T
 
 The completed chat pairs do not establish native-continuation consumption by a downstream vendor.
 
-Historical Stage 3 (2026-04) design and its measured test counts are preserved as history. Its provider compatibility/crossover decisions are superseded by the typed lossless cutover below; the design ledger is not the current provider API.
-
 - [ABI_POLICY.md](ABI_POLICY.md)
 - [ASYNC_GUIDE.md](ASYNC_GUIDE.md)
 - [Issue #5](https://github.com/fox1245/NeoGraph/issues/5) — historical decision; superseded provider compatibility policy.
@@ -539,10 +537,6 @@ If the same pattern exists in user code:
 auto engine = GraphEngine::compile(def, ctx);
 engine->set_worker_count_auto();   // ← add this line
 ```
-
-See ROADMAP_v1.md perf section for detailed measurements (separate addition).
-
-> Historical Stage 3 (2026-04) design and its measured test counts are preserved as history. Its provider compatibility/crossover decisions are superseded by the typed lossless cutover below; the design ledger is not the current provider API.
 
 ---
 

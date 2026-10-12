@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=docs/README.md locale=ko source_sha256=21d29bec5271896709470458f9bf7b867b830a0685740d7846d48feba6c96c96 -->
+<!-- neograph-i18n: source=docs/README.md locale=ko source_sha256=fe0e366626160489a53106532e2564d08cf01b64769c541064053306586d8196 -->
 # NeoGraph 문서
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-이 페이지는 이 디렉터리의 문서와 저장소 곳곳의 주요 README를 나열하고, 각 문서를 누가 읽으면 좋은지 알려 줍니다. 처음이라면 첫 번째 표를 순서대로 읽으세요. 클래스나 함수를 찾는다면 레퍼런스로 가세요. 마지막 두 표는 설계 기록과 측정 자료입니다. 코드가 왜 지금 모양인지 설명하는 자료이며 사용 안내서는 아닙니다.
+이 페이지는 이 디렉터리의 문서와 저장소 곳곳의 주요 README를 나열하고, 각 문서를 누가 읽으면 좋은지 알려 줍니다. 처음이라면 첫 번째 표를 순서대로 읽으세요. 클래스나 함수를 찾는다면 레퍼런스로 가세요. 마지막 두 표는 Program 계약의 상세 설명과 측정 자료입니다. 더 깊이 알아야 할 때 읽는 자료이며, 시작하는 데는 필요하지 않습니다.
 
 ## 시작하기
 
@@ -39,28 +39,22 @@
 | [생성된 API 레퍼런스](doxygen-mainpage.md) | `include/neograph/`의 공개 헤더를 Doxygen 메인 페이지에서 시작해 볼 때. |
 | [ABI 정책](ABI_POLICY.md) | NeoGraph를 업그레이드할 때 내 코드를 다시 빌드해야 하는 경우를 알고 싶을 때. |
 | [스키마](../schemas) | NeoGraph가 주고받는 JSON을 검증할 때: Core 정의, Hook, 컨텍스트 아티팩트, 영수증. |
-| [변경 이력](../CHANGELOG.md), [보안 정책](../SECURITY.md), [로드맵](../ROADMAP_v1.md) | 무엇이 바뀌었는지 보거나, 취약점을 신고하거나, 이전 주기에서 남긴 설계 제안을 읽을 때. |
+| [변경 이력](../CHANGELOG.md)과 [보안 정책](../SECURITY.md) | 무엇이 바뀌었는지 보거나 취약점을 신고할 때. |
 
-## 설계 기록
+## Program 계약
 
-Program 계층과 QuickJS 작성 인터페이스의 설계를 설명하는 문서입니다. 런타임을 확장하거나 정확한 계약이 필요할 때 읽으세요. 사용하기만 한다면 읽지 않아도 됩니다.
+Program 계층의 각 부분을 자세히 설명하는 문서입니다. 런타임을 확장하거나 정확한 계약이 필요할 때 읽으세요. 사용하기만 한다면 읽지 않아도 됩니다.
 
 | 문서 | 주제 |
 |---|---|
-| [v1 아키텍처](V1_ARCHITECTURE.md)와 [v1 마이그레이션 계획](V1_MIGRATION_PLAN.md) | Core와 Program의 아키텍처, 구현 순서. 영어로만 제공합니다. |
-| [QuickJS 제어 아키텍처](QUICKJS_CONTROL_ARCHITECTURE.md), [마이그레이션](QUICKJS_CONTROL_MIGRATION.md), [실행 프로파일](QUICKJS_EXECUTION_PROFILES.md), [공개 작성 경계](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md) | 내장 JavaScript 작성 인터페이스와 그것이 할 수 있는 일. 영어로만 제공합니다. |
-| [QuickJS 마이그레이션 완료](QUICKJS_MIGRATION_COMPLETION.md) | 해당 마이그레이션을 마무리하기 위한 과거의 실행 절차서. 계획 기록입니다. |
 | [Program 기능 컨텍스트](PROGRAM_CAPABILITY_CONTEXT.md) | 노드가 승인된 설정에 선언된 기능만 보게 하는 방법. |
 | [재귀적 Harness](PROGRAM_RECURSIVE_HARNESSES.md) | 부모, 자식, 손자 에이전트 트리. 에이전트마다 Program 버전과 예산이 따로 있습니다. |
 | 자식 합성: [계약](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md), [영속화](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md), [복구](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md) | Program이 호스트에 생성된 자식 소스의 승인을 요청하는 방법과, 재시작 후에도 그 상태가 유지되는 방식. |
-| [자기 진화 에이전트 컨트롤러](SELF_EVOLVING_AGENT_CONTROLLER.md) | 호스트의 승인 아래 자기 그래프를 고쳐 쓰는 컨트롤러. 영어로만 제공합니다. |
-| [비동기 3단계 설계](ASYNC_STAGE3_DESIGN.md) | asio 기반 비동기 실행기의 설계. |
-| [DSL 기능 평가](DSL_CAPABILITY_EVAL.md)와 [모델의 Program 합성 증거](model-program-synthesis-evidence.md) | 모델이 올바른 Program을 쓸 수 있는지 시험한 결과와 날짜. |
+| [DSL 기능 평가](DSL_CAPABILITY_EVAL.md) | 모델이 올바른 Program을 쓸 수 있는지 측정하는 시험. |
 
 ## 측정 자료
 
 | 문서 | 주제 |
 |---|---|
 | [성능 심층 분석](performance-deep-dive.md)과 [벤치마크](../benchmarks/README.md) | 엔진 오버헤드와 동시성 측정값과 각 실행의 구성. 보장하는 값은 아닙니다. |
-| [Program 비용 측정](PROGRAM_COST_MEASUREMENT.md)과 [2026-09-07 기준선](PROGRAM_COST_BASELINE_2026-09-07.md) | Program 부기 비용과 저장소 비용을 측정하는 방법. |
-| [명령 헤드](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md), [정규 JSON](PROGRAM_CANONICAL_JSON_OPTIMIZATION.md), [SHA-256](PROGRAM_SHA256_OPTIMIZATION.md) 최적화 | 이 비용을 줄이려고 무엇을 바꿨는지, 그리고 전후 수치. |
+| [Program 비용 측정](PROGRAM_COST_MEASUREMENT.md) | Program 부기 비용과 저장소 비용을 측정하는 방법. |

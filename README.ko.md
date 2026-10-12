@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ko source_sha256=b72b3046db8709cc8554b0d26cb69653095cb4ea28068219598c70cc946983ea -->
+<!-- neograph-i18n: source=README.md locale=ko source_sha256=7b098f4c6cf07b09aa0fd20aec0dc8196fd6dcb389dc25c305c9cc3352cfb1dd -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -273,7 +273,7 @@ cmake --build build-program --parallel --target example_program_quickstart
 ./build-program/example_program_quickstart
 ```
 
-[Program 빠른 시작](examples/63_program_quickstart.cpp)은 증가 그래프를 호출하는 Program을 컴파일해 승인하며, 기대 출력은 `1`입니다. 메모리 저장소와 C++ Program 빌더를 씁니다. JavaScript 작성과 영속적 실행은 [작성 경계](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md), [재귀적 Program](docs/PROGRAM_RECURSIVE_HARNESSES.md), [엄격한 런타임 계약](docs/STRICT_RUNTIME_INTERPOSITION.md)부터 보세요.
+[Program 빠른 시작](examples/63_program_quickstart.cpp)은 증가 그래프를 호출하는 Program을 컴파일해 승인하며, 기대 출력은 `1`입니다. 메모리 저장소와 C++ Program 빌더를 씁니다. JavaScript 작성과 영속적 실행은 [Program 가이드](docs/program-guide.md), [재귀적 Program](docs/PROGRAM_RECURSIVE_HARNESSES.md), [엄격한 런타임 계약](docs/STRICT_RUNTIME_INTERPOSITION.md)부터 보세요.
 
 <a id="typed-provider-calls"></a>
 ## 타입이 지정된 provider 호출
@@ -409,7 +409,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 - [MCP](docs/mcp.md), [A2A](docs/a2a.md), [ACP](docs/acp.md) 가이드와 [Program 가이드](docs/program-guide.md)
 - [비동기 가이드](docs/ASYNC_GUIDE.md)와 [동시성·취소](docs/concurrency.md)
 - [런타임 컨텍스트와 엄격한 개입 계층](docs/STRICT_RUNTIME_INTERPOSITION.md)
-- [Harness MCP](docs/HARNESS_MCP.md)와 [QuickJS 작성](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
+- [Harness MCP](docs/HARNESS_MCP.md)
 - [마이그레이션 가이드](docs/migration-v0.4-to-v1.0.md)와 [문제 해결](docs/troubleshooting.md)
 - [C++ 예제](examples/README.md), [Python 예제](bindings/python/examples/README.md), [벤치마크 방법론](benchmarks/README.md)
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=423c15a6a32be53e05ca179df671ed5243a6684be346d3e69a23e8c2b78d581b -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=b75490c4ee1f8c84e484fcbd9515de47eb62bef484adfebc5b1e4259daa0d911 -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -119,7 +119,7 @@ C++ 嵌入方在构造时，通过 `HarnessServiceResources` 传入非默认的 
 
 这是目前以 Program 为后端的 Harness 兼容适配器。被接受的 Harness 请求仍会转换成旧版 `ProgramSource`，经 `ProgramCompiler` 编译，经 `ProgramCatalog` 准入，再由 `ProgramRuntime` 执行；`GraphEngine` 仍是唯一执行节点的组件。
 
-通用编写方式已确定的替代方案，是嵌入式 QuickJS 上的标准 JavaScript。以前的 `dsl`、独立的 `core` 和 `program` 模式，在新发布时会被拒绝，并给出明确的迁移诊断；严格的 Core JSON 仍是内部/交换数据。参见 [`QUICKJS_CONTROL_ARCHITECTURE.md`](QUICKJS_CONTROL_ARCHITECTURE.md) 和 [`QUICKJS_CONTROL_MIGRATION.md`](QUICKJS_CONTROL_MIGRATION.md)。本文档描述的是保留下来的兼容行为和迁移诊断，并不授权新增任何旧版源码语义。
+Harness 工作流使用嵌入式 QuickJS 上的标准 JavaScript 编写。以前的 `dsl`、独立的 `core` 和 `program` 模式会被拒绝，并给出明确的迁移诊断；严格的 Core JSON 是内部交换数据，不是编写语言。本文档描述保留下来的兼容行为和这些诊断。
 
 ## 本地已认证的宿主 worker
 

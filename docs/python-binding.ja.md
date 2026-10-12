@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=e376356dbf8e9ae47791d3beacd6167ce86569148053f4255acd8ad0f73b17ea -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=69972a28821d3a677802735fa400a1b7a3b91bac64275756ae64f07620db9cc3 -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -806,5 +806,5 @@ LLMスパンのフィールドには、admission済みのモデル、宣言し�
 
 - [Pythonのサンプル](../bindings/python/examples/README.md)
 - [C++のサンプル](../examples/README.md)
-- [QuickJSのオーサリング境界](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
+- [Program ガイド](program-guide.md)
 - [Strictランタイムインターポジション](STRICT_RUNTIME_INTERPOSITION.md)

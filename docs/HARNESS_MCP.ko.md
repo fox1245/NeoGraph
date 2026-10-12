@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=423c15a6a32be53e05ca179df671ed5243a6684be346d3e69a23e8c2b78d581b -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=b75490c4ee1f8c84e484fcbd9515de47eb62bef484adfebc5b1e4259daa0d911 -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -119,7 +119,7 @@ C++ 임베더는 기본값이 아닌 프로파일을 생성할 때 `HarnessServi
 
 이것은 현재 Program을 바탕으로 동작하는 Harness 호환 어댑터입니다. 수락된 Harness 요청은 지금도 기존 방식의 `ProgramSource`로 변환되어 `ProgramCompiler`로 컴파일되고, `ProgramCatalog`가 승인(admission)하며, `ProgramRuntime`에서 실행됩니다. 노드를 실행하는 주체는 여전히 `GraphEngine` 하나뿐입니다.
 
-일반적인 작성 방식을 대체하기로 확정된 것은 내장 QuickJS 위의 표준 JavaScript입니다. 이전의 `dsl`, 독립형 `core`, `program` 모드는 새로 발행할 때 거부되며, 이때 마이그레이션 진단 메시지를 명시적으로 돌려줍니다. strict Core JSON은 내부/교환용 데이터로 남습니다. [`QUICKJS_CONTROL_ARCHITECTURE.md`](QUICKJS_CONTROL_ARCHITECTURE.md)와 [`QUICKJS_CONTROL_MIGRATION.md`](QUICKJS_CONTROL_MIGRATION.md)를 참고하세요. 이 문서는 유지되는 호환 동작과 마이그레이션 진단을 설명할 뿐, 레거시 소스의 새로운 의미를 허용하지 않습니다.
+Harness 워크플로는 내장 QuickJS 위의 표준 JavaScript로 작성합니다. 이전의 `dsl`, 독립형 `core`, `program` 모드는 마이그레이션 진단 메시지와 함께 거부되며, strict Core JSON은 작성 언어가 아니라 내부 교환용 데이터입니다. 이 문서는 남아 있는 호환 동작과 그 진단을 설명합니다.
 
 ## 로컬에서 인증된 호스트 워커
 

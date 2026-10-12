@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/PROGRAM_COST_MEASUREMENT.md locale=ko source_sha256=f22d74f413d9d1665f1444d3a29a05212e4d0ff9c515be846e5439fabe2177e1 -->
+<!-- neograph-i18n: source=docs/PROGRAM_COST_MEASUREMENT.md locale=ko source_sha256=95fe571a9d490d4a096a313377958d64fd9c63a35f4ee437d8d8d33876a18799 -->
 # Program 비용 측정
 
 **Languages:** [English](PROGRAM_COST_MEASUREMENT.md) | [한국어](PROGRAM_COST_MEASUREMENT.ko.md) | [日本語](PROGRAM_COST_MEASUREMENT.ja.md) | [简体中文](PROGRAM_COST_MEASUREMENT.zh-CN.md)
 
 `bench_program_cost`와 `scripts/run_program_costs.py`는 어떤 Program 비용부터 최적화할지 정할 때 쓰는 진단용 기준선(baseline)을 제공합니다. 런타임 의미는 바꾸지 않으며, 사전에 등록한 QuickJS 성능 게이트를 대신하지도 않습니다. LLM, 네트워크 모델 호출, 모델 자격 증명은 필요 없습니다.
 
-구현을 비교할 때는 `scripts/compare_program_costs.py`가 고정된 `bench_program_cost` 바이너리 두 개를 새 프로세스 쌍으로 번갈아 실행합니다. 첫 번째 비교는 [Command 게시 head 최적화](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md)에 문서화되어 있습니다. 이어서 진행한 [정규 JSON 최적화](PROGRAM_CANONICAL_JSON_OPTIMIZATION.md)는 AgentX 디스어셈블리와 CPU 샘플링으로 네이티브 문자열 처리 변경을 골랐습니다. 그다음 [SHA-256 최적화](PROGRAM_SHA256_OPTIMIZATION.md)는 런타임에 켜고 끄는 CPU 가속과, 독립적으로 검증한 이식 가능한 대체 구현을 추가합니다. `bench_canonical_json CASE BYTES ITERATIONS`는 이와 별도로 ASCII, 유니코드, 혼합, 이스케이프가 많은 문자열을 스칼라 출력 오라클과 비교하며 실행합니다.
+구현을 비교할 때는 `scripts/compare_program_costs.py`가 고정된 `bench_program_cost` 바이너리 두 개를 새 프로세스 쌍으로 번갈아 실행합니다. `bench_canonical_json CASE BYTES ITERATIONS`는 이와 별도로 ASCII, 유니코드, 혼합, 이스케이프가 많은 문자열을 스칼라 출력 오라클과 비교하며 실행합니다.
 
 ## 빌드와 실행
 

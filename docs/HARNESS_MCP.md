@@ -163,14 +163,11 @@ Accepted Harness requests still translate to the legacy `ProgramSource`,
 compile through `ProgramCompiler`, admit through `ProgramCatalog`, and execute
 through `ProgramRuntime`; `GraphEngine` remains the only node executor.
 
-The accepted replacement for general authoring is standard JavaScript on
-embedded QuickJS. The former `dsl`, standalone `core`, and `program` modes are
-rejected for new publication with explicit migration diagnostics; strict Core
-JSON remains internal/interchange data. See
-[`QUICKJS_CONTROL_ARCHITECTURE.md`](QUICKJS_CONTROL_ARCHITECTURE.md) and
-[`QUICKJS_CONTROL_MIGRATION.md`](QUICKJS_CONTROL_MIGRATION.md). This document
-describes the retained compatibility behavior and migration diagnostics; it
-does not authorize new legacy source semantics.
+Harness workflows are written as standard JavaScript on embedded QuickJS. The
+former `dsl`, standalone `core`, and `program` modes are rejected with explicit
+migration diagnostics, and strict Core JSON is internal interchange data, not
+an authoring language. This document describes the compatibility behavior that
+remains and those diagnostics.
 
 ## Local authenticated host workers
 

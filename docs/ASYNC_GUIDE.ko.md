@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=ko source_sha256=a48e529a151529d9711ee297aed8bc4b7e603c0198c596188608cb6a8565dc13 -->
+<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=ko source_sha256=d93d769dd5c563a2078f1723e8a7ac9d4a2e0e972df81e3fa66d4055899cc942 -->
 # NeoGraph 비동기 가이드
 
 **Languages:** [English](ASYNC_GUIDE.md) | [한국어](ASYNC_GUIDE.ko.md) | [日本語](ASYNC_GUIDE.ja.md) | [简体中文](ASYNC_GUIDE.zh-CN.md)
@@ -101,7 +101,3 @@ Python은 타입이 있는 `ProviderRequest`, `PreparedProviderRequest`, 변경�
 `neograph::core`는 `NEOGRAPH_BUILD_LLM=OFF`일 때도 외부 `SchemaProvider::runtime`을 필요로 합니다. 설치된 SDK의 prefix를 쓰거나 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`을 지정합니다. SDK를 빌드하려면 CMake 3.20 이상, C++20, Python, 독립형 Asio, yyjson, libcurl 7.88 이상, OpenSSL Crypto가 필요합니다. 기록으로 남은 interface 4 이전의 런타임/archive 자격 검증은 Linux/POSIX를 다루며, interface 4를 검증한 것은 아닙니다. 기존 macOS/Windows 메타데이터는 이 의존성의 자격 검증이 되지 못하고, WASM 런타임 통합은 확인되지 않았습니다.
 
 NeoGraph를 구성하려면 CMake 3.20 이상이 필요합니다. 명시적으로 지정한 SDK 소스 디렉터리를 먼저 쓰고, 없으면 설치된 패키지를, 그것도 없으면 리비전이 고정된 공개 archive를 기본 대체 경로로 씁니다. 설치된 SDK로 오프라인 구성을 하려면 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`로 설정하고 `CMAKE_PREFIX_PATH`를 그 SDK의 prefix로 지정합니다. 내려받은 SDK나 소스 SDK는 NeoGraph에 포함된 Asio와 yyjson을 쓰지만, 시스템 개발 의존성은 여전히 필요합니다.
-
-[Stage 3 설계](ASYNC_STAGE3_DESIGN.md)는 2026년 4월에 보관된 제안서입니다. 여기에 나오는 2.0/3.0 레이블, completion crossover, 테스트/벤치마크 개수는 과거의 마일스톤이며 현재의 릴리스 번호도, 지원되는 시그니처도, 새로운 통과 주장도 아닙니다. 현재 릴리스 번호는 `pyproject.toml`에서 가져오고, 과거 측정값은 [성능 심층 분석](performance-deep-dive.md)에 있습니다.
-
-원래의 Stage 3 가이드에는 동기 경로의 당시 기존 테스트 276개 이상, 엔진 오버헤드 순차 약 30 µs / 병렬 약 205 µs, HTTP async_pool 17834 ops/s(Stage 2의 비동기 8401/s, 동기 6064/s와 비교), 타이머 50000개 fan-out 541K ops/s에 RSS 67 MB가 기록되어 있습니다. 또한 50 ms짜리 에이전트 세 개가 50 ms에 끝나고, researcher 세 개가 순차 실행 370 ms 대신 150 ms에 끝난 기록도 있습니다. 이는 해당 워크로드에 대한 과거 관찰 결과이며, 현재의 provider 전환 결과가 아닙니다.

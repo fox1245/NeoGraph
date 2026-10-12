@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=423c15a6a32be53e05ca179df671ed5243a6684be346d3e69a23e8c2b78d581b -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=b75490c4ee1f8c84e484fcbd9515de47eb62bef484adfebc5b1e4259daa0d911 -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -119,7 +119,7 @@ C++の組み込み側は、デフォルト以外のプロファイルを、構�
 
 これが、現在のProgramを基盤にしたHarnessの互換アダプターです。受理されたHarnessのリクエストは、これまでどおり、従来の `ProgramSource` に変換され、`ProgramCompiler` でコンパイルされ、`ProgramCatalog` でadmissionされ、`ProgramRuntime` で実行されます。ノードを実行するのは、引き続き `GraphEngine` だけです。
 
-汎用的なオーサリングで、承認されている置き換え先は、組み込みのQuickJS上の標準的なJavaScriptです。従来の `dsl`、単独の `core`、`program` のモードは、新しい公開では拒否され、マイグレーションの診断が明示されます。strict CoreのJSONは、内部用／交換用のデータとして残ります。[`QUICKJS_CONTROL_ARCHITECTURE.md`](QUICKJS_CONTROL_ARCHITECTURE.md)と[`QUICKJS_CONTROL_MIGRATION.md`](QUICKJS_CONTROL_MIGRATION.md)を参照してください。この文書が説明するのは、残されている互換動作とマイグレーションの診断です。新しい従来形式のソースの意味を認めるものではありません。
+Harnessのワークフローは、組み込みのQuickJS上の標準的なJavaScriptで書きます。従来の `dsl`、単独の `core`、`program` のモードは、マイグレーションの診断とともに拒否されます。strict CoreのJSONは、記述用の言語ではなく、内部用の交換データです。この文書では、残されている互換動作とその診断を説明します。
 
 ## ローカルの認証済みホストワーカー
 

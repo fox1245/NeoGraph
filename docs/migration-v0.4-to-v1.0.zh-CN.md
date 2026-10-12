@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=zh-CN source_sha256=37d0912e7f5f8a94f97a67c362602b9b38015ab141aa56aac51c33c118750d4c -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=zh-CN source_sha256=9cf72b62901f60584777cbb139275d7fd8c1449f797cd9b7d68b2e1b05be1e56 -->
 # 迁移指南：旧的 8 个虚函数 → `run(NodeInput)`（v0.4.x → v0.9+）
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -424,8 +424,6 @@ std::shared_ptr<neograph::llm::SchemaProvider> admitted_provider(
 
 已完成的 chat 对话对，并不能证明下游 vendor 消费了 native 续接状态。
 
-Stage 3（2026-04）的历史设计及其测得的测试数量，作为历史保留。其中关于 provider 兼容性/交叉实现的决定，已被下文的带类型无损切换所取代；该设计记录不是当前的 provider API。
-
 - [ABI_POLICY.md](ABI_POLICY.md)
 - [ASYNC_GUIDE.md](ASYNC_GUIDE.md)
 - [Issue #5](https://github.com/fox1245/NeoGraph/issues/5)：历史决定；其中的 provider 兼容性策略已被取代。
@@ -495,10 +493,6 @@ engine.set_worker_count_auto()
 auto engine = GraphEngine::compile(def, ctx);
 engine->set_worker_count_auto();   // ← add this line
 ```
-
-详细的测量数据见 ROADMAP_v1.md 的性能部分（另行补充）。
-
-> Stage 3（2026-04）的历史设计及其测得的测试数量，作为历史保留。其中关于 provider 兼容性/交叉实现的决定，已被下文的带类型无损切换所取代；该设计记录不是当前的 provider API。
 
 ---
 

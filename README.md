@@ -271,7 +271,7 @@ cmake --build build-program --parallel --target example_program_quickstart
 ./build-program/example_program_quickstart
 ```
 
-The [Program quickstart](examples/63_program_quickstart.cpp) compiles and admits a Program that calls an increment graph; its expected output is `1`. It uses in-memory stores and the C++ Program builder. For JavaScript authoring and durable execution, start with the [authoring boundary](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md), [recursive Programs](docs/PROGRAM_RECURSIVE_HARNESSES.md), and [strict runtime contracts](docs/STRICT_RUNTIME_INTERPOSITION.md).
+The [Program quickstart](examples/63_program_quickstart.cpp) compiles and admits a Program that calls an increment graph; its expected output is `1`. It uses in-memory stores and the C++ Program builder. For JavaScript authoring and durable execution, start with the [Program guide](docs/program-guide.md), [recursive Programs](docs/PROGRAM_RECURSIVE_HARNESSES.md), and [strict runtime contracts](docs/STRICT_RUNTIME_INTERPOSITION.md).
 
 ## Typed provider calls
 
@@ -428,7 +428,7 @@ dependencies. Source review or CLI help is not execution or release proof.
 - [MCP](docs/mcp.md), [A2A](docs/a2a.md) and [ACP](docs/acp.md) guides, and the [Program guide](docs/program-guide.md)
 - [Async guide](docs/ASYNC_GUIDE.md) and [concurrency/cancellation](docs/concurrency.md)
 - [Runtime context and strict interposition](docs/STRICT_RUNTIME_INTERPOSITION.md)
-- [Harness MCP](docs/HARNESS_MCP.md) and [QuickJS authoring](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
+- [Harness MCP](docs/HARNESS_MCP.md)
 - [Migration guide](docs/migration-v0.4-to-v1.0.md) and [troubleshooting](docs/troubleshooting.md)
 - [C++ examples](examples/README.md), [Python examples](bindings/python/examples/README.md), and [benchmark methodology](benchmarks/README.md)
 

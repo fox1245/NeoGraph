@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ja source_sha256=b72b3046db8709cc8554b0d26cb69653095cb4ea28068219598c70cc946983ea -->
+<!-- neograph-i18n: source=README.md locale=ja source_sha256=7b098f4c6cf07b09aa0fd20aec0dc8196fd6dcb389dc25c305c9cc3352cfb1dd -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -273,7 +273,7 @@ cmake --build build-program --parallel --target example_program_quickstart
 ./build-program/example_program_quickstart
 ```
 
-[Program クイックスタート](examples/63_program_quickstart.cpp)は、インクリメントのグラフを呼び出す Program をコンパイルして承認します。期待される出力は `1` です。メモリ上のストアと C++ の Program ビルダーを使います。JavaScript による記述と永続的な実行については、[記述境界](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)、[再帰的な Program](docs/PROGRAM_RECURSIVE_HARNESSES.md)、[厳密なランタイム契約](docs/STRICT_RUNTIME_INTERPOSITION.md)から読み始めてください。
+[Program クイックスタート](examples/63_program_quickstart.cpp)は、インクリメントのグラフを呼び出す Program をコンパイルして承認します。期待される出力は `1` です。メモリ上のストアと C++ の Program ビルダーを使います。JavaScript による記述と永続的な実行については、[Program ガイド](docs/program-guide.md)、[再帰的な Program](docs/PROGRAM_RECURSIVE_HARNESSES.md)、[厳密なランタイム契約](docs/STRICT_RUNTIME_INTERPOSITION.md)から読み始めてください。
 
 <a id="typed-provider-calls"></a>
 ## 型付き provider 呼び出し
@@ -409,7 +409,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 - [MCP](docs/mcp.md)、[A2A](docs/a2a.md)、[ACP](docs/acp.md) のガイドと [Program ガイド](docs/program-guide.md)
 - [非同期ガイド](docs/ASYNC_GUIDE.md)と[並行実行・キャンセル](docs/concurrency.md)
 - [ランタイムコンテキストと厳密なインターポジション](docs/STRICT_RUNTIME_INTERPOSITION.md)
-- [Harness MCP](docs/HARNESS_MCP.md)と [QuickJS による記述](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
+- [Harness MCP](docs/HARNESS_MCP.md)
 - [移行ガイド](docs/migration-v0.4-to-v1.0.md)と[トラブルシューティング](docs/troubleshooting.md)
 - [C++ サンプル](examples/README.md)、[Python サンプル](bindings/python/examples/README.md)、[ベンチマークの方法](benchmarks/README.md)
 

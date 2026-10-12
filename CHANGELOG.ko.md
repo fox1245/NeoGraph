@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=6e06ce3442fe26741419620daf3ddca6dff54972a45513b02028956408358dc6 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=96a159bc13ab9f8dde9030d2bbf62a09422a75ca4d984a5b37939216e30ac343 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -577,7 +577,7 @@ NG vs LangGraph(마케팅 비교 축): 벽 **237× 더 빠름**, p99 **4134× �
 
 ## [0.9.0] — 2026-05-14 — v1.0 준비(Candidate 1 Phase B + Candidate 6)
 
-ROADMAP_v1.md의 두 v1.0 단일 디스패치 통합이 한 주기에서 수렴합니다:
+v1.0의 두 단일 디스패치 통합이 한 주기에서 수렴합니다:
 
   - **후보 1 Phase B (`9b`–`9f`)** — `GraphNode`의 레거시 8개 가상(`execute` / `execute_async` / `execute_stream` / `execute_stream_async` / `execute_full` / `execute_full_async` / `execute_full_stream` / `execute_full_stream_async`) + `add_cancel_hook` + `CurrentCancelTokenScope` + `state.
     run_cancel_token_` + 6개 `PyGraphNodeOwner` 레거시 오버라이드가 모두 제거되었습니다. **파괴적** — 지원 중단 창이 종료되었습니다. 사용자 GraphNode 하위 클래스 / 사용자 Python 노드는 단일 메서드 `run(NodeInput)` / `def run(self, input)`로 마이그레이션해야 합니다.
@@ -593,7 +593,7 @@ ROADMAP_v1.md의 두 v1.0 단일 디스패치 통합이 한 주기에서 수렴�
 
 - **엔진의 모든 내부 LLM 호출이 `invoke()`로 라우팅됨** — `LLMCallNode`, `IntentClassifierNode` (PR #41/#42), `Agent::complete` / `Agent::run_stream` (PR #43), `SupervisorLLMNode` / `ResearcherLLMNode` / `CompressNotesNode` / `FinalReportNode` (PR #43), `PlannerNode` / `ExecutorNode` (PR #44). NeoGraph 내 LLM 디스패치가 단일 표면으로 통합되었습니다.
 - **C++ 예제 마이그레이션(파일 2개)** — `31_local_transformer.cpp`, `cookbook/ai-assembly/member_server.cpp`는 이제 새 `invoke()`를 사용합니다. 사용자 빌드에서 더 이상 사용 중단 경고가 없습니다. (PR #45)
-- **`GraphEngine::compile()` 기본 작업자 수가 1로 되돌아감** (`e5ecb08`). `b59444f`는 잠복된 18일(2026-04-26 → 2026-05-13) 병렬 마이크로 벤치마크 회귀(11.8 → 283 µs, 24배)의 근본 원인이었으며, 커밋은 이분법(병렬로 11개의 작업 트리)을 통해 정확히 찾아냈습니다. v1.0부터 기본값=1(CPU-소형 순차/병렬 디스패치에 최적); 의도적인 fan-out을 위해 `engine->set_worker_count_auto()` 한 줄을 추가하여 hardware_concurrency를 엽니다. 영향을 받는 5개 fan-out 예제(10/14/21/36 + deep_research_graph 빌더)에 명시적 호출이 추가되었습니다. 자세한 내용은 ROADMAP_v1.md의 "Perf retrospective" 섹션을 참조하십시오.
+- **`GraphEngine::compile()` 기본 작업자 수가 1로 되돌아감** (`e5ecb08`). `b59444f`는 잠복된 18일(2026-04-26 → 2026-05-13) 병렬 마이크로 벤치마크 회귀(11.8 → 283 µs, 24배)의 근본 원인이었으며, 커밋은 이분법(병렬로 11개의 작업 트리)을 통해 정확히 찾아냈습니다. v1.0부터 기본값=1(CPU-소형 순차/병렬 디스패치에 최적); 의도적인 fan-out을 위해 `engine->set_worker_count_auto()` 한 줄을 추가하여 hardware_concurrency를 엽니다. 영향을 받는 5개 fan-out 예제(10/14/21/36 + deep_research_graph 빌더)에 명시적 호출이 추가되었습니다.
 
 ### 폐기 예정
 
@@ -795,7 +795,7 @@ OTLP gRPC exporter를 `http://localhost:4317`로 구성하고 `http://localhost:
 
 ## [0.4.0] — 2026-05-05 — v1.0 준비: 통합된 `run(NodeInput)` 디스패치
 
-v1.0 정밀화 트랙(ROADMAP_v1.md)의 첫 릴리스입니다. 8개의 가상 `GraphNode` 교차 곱(`execute` / `execute_async` / `execute_full` / … / `execute_full_stream_async`)이 단일 표준 메서드인 `run(NodeInput) -> awaitable<NodeOutput>`로 축소됩니다. 실행별 취소 메타데이터는 비채널 집합 `GraphState` 멤버와 스레드 로컬 밀반입 채널에서 명시적 `RunContext` 인수로 이동합니다. `deadline` 및 `trace_id`는 예약된 확장 슬롯으로만 추가되었으며 `RunConfig`에 의해 채워지지 않습니다. `CancelToken`는 계층적 `fork()`을 획득하여 다중 전송 fan-out 작업자가 각각 부모의 `cancel()`가 계단식으로 전파되는 개인 신호를 소유합니다.
+v1.0 정밀화 트랙의 첫 릴리스입니다. 8개의 가상 `GraphNode` 교차 곱(`execute` / `execute_async` / `execute_full` / … / `execute_full_stream_async`)이 단일 표준 메서드인 `run(NodeInput) -> awaitable<NodeOutput>`로 축소됩니다. 실행별 취소 메타데이터는 비채널 집합 `GraphState` 멤버와 스레드 로컬 밀반입 채널에서 명시적 `RunContext` 인수로 이동합니다. `deadline` 및 `trace_id`는 예약된 확장 슬롯으로만 추가되었으며 `RunConfig`에 의해 채워지지 않습니다. `CancelToken`는 계층적 `fork()`을 획득하여 다중 전송 fan-out 작업자가 각각 부모의 `cancel()`가 계단식으로 전파되는 개인 신호를 소유합니다.
 
 ### 추가됨
 
@@ -844,7 +844,6 @@ v0.3.0 단발 취소가 남긴 격차를 메우는 5라운드 패치 시리즈: 
   StateView`는 평면 점 접근(`view.messages` / `view.foo`)에 더해 dict 이스케이프 해치용 `view.raw`를 반환. 타입 채널 정의를 위한 서브클래스: `class ChatState(ng.StateView): messages: list[dict] = []`.
 - `bindings/python/tests/test_async_cancel_live_llm_fanout.py` — 중간 취소가 실제로 Send로 생성된 모든 형제를 소켓 계층에서 중단하는지 검증(이것이 v0.3.1 근본 원인 패치였음).
 - `examples/22_self_evolving_graph.py` — TODO_v0.3.md #9 cookbook 폴드와 함께 v0.3.2로 이동됨.
-- ROADMAP_v1.md — 취소 라운드 사후 분석에서 도출된 설계 정교화 후보(단일 dispatch, RunContext, 계층 CancelToken — 모두 v0.4.0에서 전달됨).
 - Doxygen `/* */` 와일드카드 수정 — `acp/types.h` 에는 `/**` 블록에 경로 와일드카드(`fs/*`, `terminal/*`)가 포함되어 중첩 주석이 열리고 이후의 모든 진단이 억제되었습니다. 다음으로 대체됨: `&#42;` HTML 엔티티.
 
 ### 수정됨

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ko source_sha256=37d0912e7f5f8a94f97a67c362602b9b38015ab141aa56aac51c33c118750d4c -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ko source_sha256=9cf72b62901f60584777cbb139275d7fd8c1449f797cd9b7d68b2e1b05be1e56 -->
 # 마이그레이션 가이드: 기존 가상 함수 8개 → `run(NodeInput)` (v0.4.x → v0.9+)
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -420,8 +420,6 @@ interface 4는 네이티브 재생(replay)의 설정 digest에서 출력 생성 
 
 완료된 chat 쌍만으로는 하위 벤더가 네이티브 continuation을 소비했다는 사실이 입증되지 않습니다.
 
-2026-04의 Stage 3 설계와 그때 측정한 테스트 수는 기록으로 남겨 둡니다. 이 설계의 provider 호환/교차(crossover) 결정은 아래의 타입 기반 무손실 전환(typed lossless cutover)으로 대체되었으며, 이 설계 문서는 현재의 provider API가 아닙니다.
-
 - [ABI_POLICY.md](ABI_POLICY.md)
 - [ASYNC_GUIDE.md](ASYNC_GUIDE.md)
 - [Issue #5](https://github.com/fox1245/NeoGraph/issues/5) — 과거의 결정. 대체된 provider 호환 정책.
@@ -484,10 +482,6 @@ fan-out이 없는 단순한 그래프나 가벼운 fan-out 그래프(LLM 호출�
 auto engine = GraphEngine::compile(def, ctx);
 engine->set_worker_count_auto();   // ← add this line
 ```
-
-자세한 측정값은 ROADMAP_v1.md의 성능 절을 참고하세요(별도로 추가됨).
-
-> 2026-04의 Stage 3 설계와 그때 측정한 테스트 수는 기록으로 남겨 둡니다. 이 설계의 provider 호환/교차(crossover) 결정은 아래의 타입 기반 무손실 전환(typed lossless cutover)으로 대체되었으며, 이 설계 문서는 현재의 provider API가 아닙니다.
 
 ---
 

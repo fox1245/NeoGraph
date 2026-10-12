@@ -8,12 +8,7 @@ runtime semantics and do not replace the preregistered QuickJS performance gate.
 No LLM, network model call, or model credential is needed.
 
 For an implementation comparison, `scripts/compare_program_costs.py` alternates
-two frozen `bench_program_cost` binaries in fresh process pairs. The first such
-comparison is documented in [Command publication head optimization](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md).
-The subsequent [canonical JSON optimization](PROGRAM_CANONICAL_JSON_OPTIMIZATION.md)
-uses AgentX disassembly and CPU sampling to select a native string-processing change.
-The following [SHA-256 optimization](PROGRAM_SHA256_OPTIMIZATION.md) adds runtime-gated
-CPU acceleration with an independently verified portable fallback.
+two frozen `bench_program_cost` binaries in fresh process pairs.
 `bench_canonical_json CASE BYTES ITERATIONS` separately exercises ASCII, Unicode,
 mixed, and escape-heavy strings against a scalar output oracle.
 

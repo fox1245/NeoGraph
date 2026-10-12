@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/PROGRAM_COST_MEASUREMENT.md locale=ja source_sha256=f22d74f413d9d1665f1444d3a29a05212e4d0ff9c515be846e5439fabe2177e1 -->
+<!-- neograph-i18n: source=docs/PROGRAM_COST_MEASUREMENT.md locale=ja source_sha256=95fe571a9d490d4a096a313377958d64fd9c63a35f4ee437d8d8d33876a18799 -->
 # Programのコストの測定
 
 **Languages:** [English](PROGRAM_COST_MEASUREMENT.md) | [한국어](PROGRAM_COST_MEASUREMENT.ko.md) | [日本語](PROGRAM_COST_MEASUREMENT.ja.md) | [简体中文](PROGRAM_COST_MEASUREMENT.zh-CN.md)
 
 `bench_program_cost` と `scripts/run_program_costs.py` は、Programのどのコストを最適化するかを決めるための、診断用のベースラインを提供します。ランタイムの意味は変わらず、事前に登録されたQuickJSの性能ゲートの代わりにもなりません。LLM、ネットワーク越しのモデル呼び出し、モデルの認証情報は、必要ありません。
 
-実装どうしを比較するには、`scripts/compare_program_costs.py` が、固定した2つの `bench_program_cost` のバイナリを、新しいプロセスのペアで交互に実行します。この方法による最初の比較は、[コマンド公開のヘッドの最適化](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md)に記載しています。その次の[正規化JSONの最適化](PROGRAM_CANONICAL_JSON_OPTIMIZATION.md)では、AgentXによる逆アセンブルとCPUのサンプリングで、ネイティブの文字列処理の変更を選びました。さらにその次の[SHA-256の最適化](PROGRAM_SHA256_OPTIMIZATION.md)は、実行時に有効にするCPUによる高速化を追加し、独立して検証した移植可能なフォールバックを備えています。`bench_canonical_json CASE BYTES ITERATIONS` は、ASCII、Unicode、混在、エスケープの多い文字列を、スカラーな出力のオラクルと照らして、別に確認します。
+実装どうしを比較するには、`scripts/compare_program_costs.py` が、固定した2つの `bench_program_cost` のバイナリを、新しいプロセスのペアで交互に実行します。`bench_canonical_json CASE BYTES ITERATIONS` は、ASCII、Unicode、混在、エスケープの多い文字列を、スカラーな出力のオラクルと照らして、別に確認します。
 
 ## ビルドと実行
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=6e06ce3442fe26741419620daf3ddca6dff54972a45513b02028956408358dc6 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=96a159bc13ab9f8dde9030d2bbf62a09422a75ca4d984a5b37939216e30ac343 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -568,7 +568,7 @@ NG 与 LangGraph（营销对比轴）：wall **快 237 倍**，p99 **快 4134 �
 
 ## [0.9.0] — 2026-05-14 — v1.0 准备（候选 1 阶段 B + 候选 6）
 
-来自 ROADMAP_v1.md 的两个 v1.0 单分派统一在一个周期内汇合：
+两个 v1.0 单分派统一在一个周期内汇合：
 
   - **候选 1 阶段 B (`9b`–`9f`)** — `GraphNode` 的全部 8 个旧虚拟方法（`execute` / `execute_async` / `execute_stream` / `execute_stream_async` / `execute_full` / `execute_full_async` / `execute_full_stream` / `execute_full_stream_async`）+ `add_cancel_hook` + `CurrentCancelTokenScope` + `state.
     run_cancel_token_` + 全部 6 个 `PyGraphNodeOwner` 旧覆盖已移除。**破坏性变更**——弃用窗口已关闭。用户 GraphNode 子类 / 用户 Python 节点必须迁移到单一方法 `run(NodeInput)` / `def run(self, input)`。
@@ -584,7 +584,7 @@ NG 与 LangGraph（营销对比轴）：wall **快 237 倍**，p99 **快 4134 �
 
 - **引擎中所有内部 LLM 调用均通过`invoke()`路由**——`LLMCallNode`、`IntentClassifierNode`（PR #41/#42）、`Agent::complete` / `Agent::run_stream`（PR #43）、`SupervisorLLMNode` / `ResearcherLLMNode` / `CompressNotesNode` / `FinalReportNode`（PR #43）、`PlannerNode` / `ExecutorNode`（PR #44）。NeoGraph 内的 LLM 分发统一到单一接口。
 - **C++ 示例迁移（2 个文件）**——`31_local_transformer.cpp`、`cookbook/ai-assembly/member_server.cpp` 现在使用新的`invoke()`。用户构建中无弃用警告。（PR #45）
-- **`GraphEngine::compile()` 默认工作线程数恢复为 1**（`e5ecb08`）。`b59444f` 是潜在 18 天（2026-04-26 → 2026-05-13）并行微基准回归 11.8 → 283 µs（24×）的根因——通过二分法（并行 11 个工作树）精确定位提交。从 v1.0 默认=1（对 CPU 密集型顺序/并行分发最优）；对于有意的 fan-out，添加一行`engine->set_worker_count_auto()`以打开 hardware_concurrency。向 5 个受影响的 fan-out 示例（10/14/21/36 + deep_research_graph 构建器）添加了显式调用。详见 ROADMAP_v1.md 中的“Perf retrospective”部分。
+- **`GraphEngine::compile()` 默认工作线程数恢复为 1**（`e5ecb08`）。`b59444f` 是潜在 18 天（2026-04-26 → 2026-05-13）并行微基准回归 11.8 → 283 µs（24×）的根因——通过二分法（并行 11 个工作树）精确定位提交。从 v1.0 默认=1（对 CPU 密集型顺序/并行分发最优）；对于有意的 fan-out，添加一行`engine->set_worker_count_auto()`以打开 hardware_concurrency。向 5 个受影响的 fan-out 示例（10/14/21/36 + deep_research_graph 构建器）添加了显式调用。
 
 ### 已弃用
 
@@ -786,7 +786,7 @@ engine->set_worker_count_auto();  // ← this line added (hardware_concurrency)
 
 ## [0.4.0] — 2026-05-05 — v1.0 准备：统一 `run(NodeInput)` 调度
 
-v1.0 打磨轨道（ROADMAP_v1.md）的开篇版本。8 个虚拟 `GraphNode` 交叉乘积（`execute` / `execute_async` / `execute_full` / … / `execute_full_stream_async`）折叠为单一规范方法：`run(NodeInput) -> awaitable<NodeOutput>`。每次运行的取消元数据从非通道集 `GraphState` 成员 + 线程本地走私通道移入显式 `RunContext` 参数。`deadline` 和 `trace_id` 仅作为保留扩展槽添加，不由 `RunConfig` 填充。`CancelToken` 获得分层 `fork()`，因此多 Send fan-out 工作线程各自拥有私有信号，父级的 `cancel()` 会级联到该信号。
+v1.0 打磨轨道的开篇版本。8 个虚拟 `GraphNode` 交叉乘积（`execute` / `execute_async` / `execute_full` / … / `execute_full_stream_async`）折叠为单一规范方法：`run(NodeInput) -> awaitable<NodeOutput>`。每次运行的取消元数据从非通道集 `GraphState` 成员 + 线程本地走私通道移入显式 `RunContext` 参数。`deadline` 和 `trace_id` 仅作为保留扩展槽添加，不由 `RunConfig` 填充。`CancelToken` 获得分层 `fork()`，因此多 Send fan-out 工作线程各自拥有私有信号，父级的 `cancel()` 会级联到该信号。
 
 ### 已添加
 
@@ -835,7 +835,6 @@ v1.0 打磨轨道（ROADMAP_v1.md）的开篇版本。8 个虚拟 `GraphNode` �
   StateView` 返回扁平点访问（`view.messages` / `view.foo`）以及用于字典逃生舱口的 `view.raw`。子类化以定义类型化通道：`class ChatState(ng.StateView): messages: list[dict] = []`。
 - `bindings/python/tests/test_async_cancel_live_llm_fanout.py` — 断言飞行中取消确实在套接字层中止了每个 Send 派生的兄弟节点（这是 v0.3.1 根因补丁）。
 - `examples/22_self_evolving_graph.py` — 移至 v0.3.2，并包含 TODO_v0.3.md #9 食谱折叠。
-- ROADMAP_v1.md — 从取消轮次事后分析中衍生出的设计强化候选（单一调度、RunContext、分层 CancelToken — 全部已在 v0.4.0 中交付）。
 - Doxygen `/* */` 通配符修复 — `acp/types.h` 包含带有路径通配符的 `/**` 块（`fs/*`、`terminal/*`），这些通配符打开了嵌套注释并抑制了所有后续诊断。已替换为 `&#42;` HTML 实体。
 
 ### 已修复

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=e376356dbf8e9ae47791d3beacd6167ce86569148053f4255acd8ad0f73b17ea -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=69972a28821d3a677802735fa400a1b7a3b91bac64275756ae64f07620db9cc3 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -794,5 +794,5 @@ LLM span 필드에는 승인(admission)된 모델, 선언한 temperature/출력 
 
 - [Python 예제](../bindings/python/examples/README.md)
 - [C++ 예제](../examples/README.md)
-- [QuickJS 작성 경계](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
+- [Program 가이드](program-guide.md)
 - [엄격한 런타임 인터포지션](STRICT_RUNTIME_INTERPOSITION.md)

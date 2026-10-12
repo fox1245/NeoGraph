@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=b72b3046db8709cc8554b0d26cb69653095cb4ea28068219598c70cc946983ea -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=7b098f4c6cf07b09aa0fd20aec0dc8196fd6dcb389dc25c305c9cc3352cfb1dd -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -273,7 +273,7 @@ cmake --build build-program --parallel --target example_program_quickstart
 ./build-program/example_program_quickstart
 ```
 
-[Program 快速开始](examples/63_program_quickstart.cpp)会编译并准入一个调用递增图的 Program，预期输出是 `1`。它使用内存存储和 C++ 的 Program 构建器。JavaScript 编写和持久化执行，请先读[编写边界](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)、[递归 Program](docs/PROGRAM_RECURSIVE_HARNESSES.md)和[严格运行时契约](docs/STRICT_RUNTIME_INTERPOSITION.md)。
+[Program 快速开始](examples/63_program_quickstart.cpp)会编译并准入一个调用递增图的 Program，预期输出是 `1`。它使用内存存储和 C++ 的 Program 构建器。JavaScript 编写和持久化执行，请先读[Program 指南](docs/program-guide.md)、[递归 Program](docs/PROGRAM_RECURSIVE_HARNESSES.md)和[严格运行时契约](docs/STRICT_RUNTIME_INTERPOSITION.md)。
 
 <a id="typed-provider-calls"></a>
 ## 带类型的 provider 调用
@@ -409,7 +409,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 - [MCP](docs/mcp.md)、[A2A](docs/a2a.md)、[ACP](docs/acp.md) 指南，以及 [Program 指南](docs/program-guide.md)
 - [异步指南](docs/ASYNC_GUIDE.md)和[并发与取消](docs/concurrency.md)
 - [运行时上下文与严格介入](docs/STRICT_RUNTIME_INTERPOSITION.md)
-- [Harness MCP](docs/HARNESS_MCP.md)和 [QuickJS 编写](docs/QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
+- [Harness MCP](docs/HARNESS_MCP.md)
 - [迁移指南](docs/migration-v0.4-to-v1.0.md)和[故障排除](docs/troubleshooting.md)
 - [C++ 示例](examples/README.md)、[Python 示例](bindings/python/examples/README.md)和[基准测试方法](benchmarks/README.md)
 

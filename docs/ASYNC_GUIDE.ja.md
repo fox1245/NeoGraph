@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=ja source_sha256=a48e529a151529d9711ee297aed8bc4b7e603c0198c596188608cb6a8565dc13 -->
+<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=ja source_sha256=d93d769dd5c563a2078f1723e8a7ac9d4a2e0e972df81e3fa66d4055899cc942 -->
 # NeoGraph非同期ガイド
 
 **Languages:** [English](ASYNC_GUIDE.md) | [한국어](ASYNC_GUIDE.ko.md) | [日本語](ASYNC_GUIDE.ja.md) | [简体中文](ASYNC_GUIDE.zh-CN.md)
@@ -101,7 +101,3 @@ Pythonは、`prepare`、`dispatch`、`invoke` を、型付きの `ProviderReques
 `neograph::core` は、`NEOGRAPH_BUILD_LLM=OFF` の場合でも、外部の `SchemaProvider::runtime` を必要とします。インストール済みのSDKのプレフィックスか、`NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` を使ってください。SDKのビルドには、CMake 3.20以降、C++20、Python、スタンドアロンのAsio、yyjson、libcurl 7.88以降、OpenSSL Cryptoが必要です。記録されている、interface 4より前のランタイムとarchiveの適格性確認は、Linux/POSIXを対象にしています。interface 4の適格性確認にはなりません。既存のmacOS/Windows向けメタデータは、この依存の適格性確認にはなりません。WASMでのランタイム統合は、確立されていません。
 
 NeoGraphの構成には、CMake 3.20以降が必要です。解決順は、まず明示したSDKのソースディレクトリ、なければインストール済みのパッケージ、最後にリビジョンを固定した公開archiveの既定のフォールバックです。インストール済みのSDKを使ってオフラインで構成するには、`NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` を設定し、`CMAKE_PREFIX_PATH` にそのSDKのプレフィックスを指定します。取得したSDKやソースのSDKは、リポジトリに含まれているNeoGraphのAsioとyyjsonを使いますが、システムの開発用の依存は、引き続き必要です。
-
-[Stage 3の設計](ASYNC_STAGE3_DESIGN.md)は、2026年4月の提案をアーカイブしたものです。その中の2.0/3.0というラベル、completionの相互呼び出し、テストやベンチマークの件数は、過去のマイルストーンです。現在のリリース番号でも、サポートされるシグネチャでも、新たな合格の主張でもありません。現在のリリース番号は `pyproject.toml` にあります。過去の測定結果は[性能の詳細解説](performance-deep-dive.md)にあります。
-
-元のStage 3のガイドには、次の値が記録されていました。同期パスのテストは、当時存在していた276件以上です。エンジンのオーバーヘッドは、seqが約30 µs、parが約205 µsです。HTTPのasync_poolは17834 ops/sで、これに対してStage 2のasyncは8401/s、syncは6064/sです。50000個のタイマーによるfan-outは541K ops/sで、RSSは67 MBです。ほかに、50 msのエージェント3つが50 msで完了したこと、3つのresearcherが150 msで完了したこと（逐次では370 ms）も記録されていました。これらは、それらのワークロードに対する過去の観測であり、現在のプロバイダー切り替え（typed cutover）後の結果ではありません。
