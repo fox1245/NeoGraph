@@ -83,6 +83,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | 51 | [`51_minimal.cpp`](51_minimal.cpp) | yes | 通道：一个节点读取一个通道、写入两个通道，调用方用带类型的 `ChannelKey` 读回两者（`result.channel(key)`、`try_channel`）。 |
 | 52 | [`52_export_schema.cpp`](52_export_schema.cpp) | yes | `NodeFactory::export_schema()` 输出可视化编辑器据以生成调色板的拓扑 JSON Schema。 |
 | 61 | [`61_sync_node.cpp`](61_sync_node.cpp) | yes | `SyncGraphNode`：两个无需协程样板代码的简短节点（去空白、转大写）；阻塞 I/O 仍应写在 `GraphNode::run()` 中。 |
+| 100 | [`100_stream_modes.cpp`](100_stream_modes.cpp) | yes | `StreamMode`：用 VALUES、UPDATES、EVENTS、DEBUG 四种模式观察同一次运行，并统计每种模式送达的事件。 |
 
 ### 智能体模式
 

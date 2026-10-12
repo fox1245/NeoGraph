@@ -83,6 +83,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | 51 | [`51_minimal.cpp`](51_minimal.cpp) | yes | 채널: 노드 하나가 채널 하나를 읽고 둘을 쓰며, 호출한 쪽이 타입이 있는 `ChannelKey`로 둘을 다시 읽습니다(`result.channel(key)`, `try_channel`). |
 | 52 | [`52_export_schema.cpp`](52_export_schema.cpp) | yes | `NodeFactory::export_schema()`가 시각적 편집기가 팔레트를 만드는 데 쓰는 토폴로지 JSON Schema를 출력합니다. |
 | 61 | [`61_sync_node.cpp`](61_sync_node.cpp) | yes | `SyncGraphNode`: 코루틴 보일러플레이트 없는 짧은 노드 두 개(공백 제거, 대문자 변환). 블로킹 I/O는 여전히 `GraphNode::run()`에서 처리합니다. |
+| 100 | [`100_stream_modes.cpp`](100_stream_modes.cpp) | yes | `StreamMode`: 같은 실행을 VALUES, UPDATES, EVENTS, DEBUG 모드로 관찰하고, 모드마다 전달되는 이벤트를 셉니다. |
 
 ### 에이전트 패턴
 
