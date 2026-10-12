@@ -3,11 +3,11 @@
 
 **Languages:** [English](concurrency.md) | [한국어](concurrency.ko.md) | [日本語](concurrency.ja.md) | [简体中文](concurrency.zh-CN.md)
 
-## executor の選択
+## executorの選択
 
-sync `run`、`run_stream`、`resume` は async API と同じ coroutine 実装を駆動し、呼び出し thread を占有する。host worker pool は独立 session を並行実行できる。async API は `asio::awaitable<RunResult>` を返すので、自分で所有する executor で駆動する。awaitable は任意の user code を nonblocking にしない。
+同期の `run`、`run_stream`、`resume` は、非同期版と同じコルーチンの実装を動かしている間、呼び出し元のスレッドをブロックします。ホスト側のワーカープールを使えば、互いに独立したセッションを並行して実行できます。非同期版は `asio::awaitable<RunResult>` を返すので、自分で用意したexecutorで駆動してください。awaitableにしても、任意のユーザーコードがノンブロッキングになるわけではありません。
 
-`EngineConfig::worker_count = 1` が既定値で、engine 所有の fan-out pool はない。中断する I/O 分岐は一つの thread でも重なるが、CPU 処理は直列になる。multithread caller executor または任意の engine pool で CPU 分岐を複数 core に割り当てる。engine 公開前に pool を設定する。
+`EngineConfig::worker_count = 1` がデフォルトで、エンジンが所有するfan-out用のプールは作られません。中断中のI/O分岐は、1つのスレッド上でも重なって進められます。そのスレッド上のCPU処理は、直列に実行されます。呼び出し側のexecutorがマルチスレッドの場合や、明示的に有効にしたエンジンのワーカープールを使う場合は、CPUを使う分岐を複数のコアで実行できます。プールの設定は、エンジンを公開する前に済ませてください。
 
 ```cpp
 #include <neograph/async/run_sync.h>
@@ -23,21 +23,21 @@ run.input = {{"count", 0}};
 auto result = neograph::async::run_sync(engine->run_async(run));
 ```
 
-`27_async_concurrent_runs.cpp` は一つの io_context の複数 session を、`05_parallel_fanout.cpp` は一回の run 内の分岐を示す。歴史的 throughput/memory 測定は[性能詳細](performance-deep-dive.md)にあり、安全な session 数上限を保証しない。
+サンプル `27_async_concurrent_runs.cpp` は、1つのio_contextで複数のセッションを動かす例です。`05_parallel_fanout.cpp` は、1回の実行の中で分岐を動かす例です。過去のスループットとメモリの測定結果は、[性能の詳細解説](performance-deep-dive.md)にあります。これは、安全に扱えるセッション数の上限を保証するものではありません。
 
-## shared engine の規則
+## 共有エンジンの規則
 
-- 独立 session は異なる `thread_id` を使う。同じ id の並行実行は checkpoint 順序が未規定なので、履歴順が必要なら host で直列化する。
-- execution/admin thread に公開する前に setter と tool binding を済ませる。実行中の worker pool resize はエラーである。
-- 一つの engine では管理と実行は相互排他的である。run/resume 中の state/history read、update、fork は `std::logic_error` で拒否し、管理中の実行も拒否する。cancel/drain して完了を待ってから管理を再試行する。
-- 同じ store を使う別の engine はこの admission 境界の外にある。host で調整する。
-- node instance は run 間で再利用する。run ごとの scratch state は channel に置き、custom node/provider/tool/store は stateless または同期化する。bundled in-memory store は mutex を使う。
+- 独立したセッションには、それぞれ別の `thread_id` を使います。同じIDで同時に実行すると、チェックポイントが書き込まれる順序は不定です。履歴の順序が重要な場合は、ホスト側で直列化してください。
+- 設定用のセッターの呼び出しとツールのバインドは、エンジンを実行用または管理用のスレッドに公開する前に済ませます。実行中にワーカープールのサイズを変えることはできず、エラーになります。
+- 1つのエンジンでは、管理操作と実行は同時に行えません。実行（run / resume）が動いている間は、状態や履歴の読み取り、更新、フォークが `std::logic_error` で拒否されます。管理操作が動いている間は、実行が拒否されます。管理操作をやり直す前に、キャンセルと処理のdrainを行い、完了を待ってください。
+- ストアを共有する別々のエンジンは、このadmissionの境界の外にあります。ホスト側で調整してください。
+- ノードのインスタンスは、複数の実行で使い回されます。実行ごとの一時的な状態はチャネルに置いてください。カスタムのノード、プロバイダー、ツール、ストアは、状態を持たないか、同期されている必要があります。同梱のインメモリストアは、ミューテックスを使います。
 
-Provider 呼び出しは prepared request と runtime client を所有する。C++ event view は callback 内だけ有効なので保持する data はコピーする。native replay と accounting 権限は本物の custody が必要で、portable JSON の復元では得られない。[非同期ガイド](ASYNC_GUIDE.md)を参照。
+プロバイダー呼び出しは、準備済みのリクエストとランタイムのクライアントを自分で所有します。C++のイベントビューは、コールバックの間だけ有効です。保持したいデータはコピーしてください。ネイティブリプレイの状態と会計の権限には、本物の保管が必要で、ポータブルなJSONからの再構成では代わりになりません。詳しくは[非同期ガイド](ASYNC_GUIDE.md)を参照してください。
 
-## bounded sync admission
+## 上限付きの同期admission
 
-`RequestQueue` は `neograph::util` を link して使う。`moodycamel::ConcurrentQueue` を使い、idle worker は condition variable で待機する。pending-slot 上限は queued session 数を制限し、実行中 session の memory を制限しない。
+`RequestQueue` を使うには、`neograph::util` をリンクします。内部では `moodycamel::ConcurrentQueue` を使い、空いているワーカーは条件変数で待機します。待機スロットの上限が制限するのは、キューに入っているセッションの数です。実行中のセッションが消費するメモリは、制限しません。
 
 ```cpp
 #include <neograph/util/request_queue.h>
@@ -51,20 +51,20 @@ if (future.valid()) future.get();
 if (!accepted) reject_request();
 ```
 
-queue 満杯では `accepted=false` と invalid future を返す。内部 enqueue 失敗では `false` と `std::runtime_error` を持つ valid future を返す。すべての拒否を通常の飽和とせず future を確認する。worker は最低一つ必要である。
+キューがいっぱいのときは、`accepted=false` と無効なfutureが返ります。内部でエンキューに失敗したときは、`false` と、`std::runtime_error` を保持する有効なfutureが返ります。拒否をすべて通常の飽和として扱わず、このfutureを確認してください。構築には、1つ以上のワーカーが必要です。
 
-`close()` は冪等である。新しい submit を拒否し、claimed work は完了させ、unclaimed future は `std::runtime_error("RequestQueue is closed")` で完了する。worker が close を呼ぶと、自分を待たずに shutdown を始める。destructor も同じ経路を使い、accepted future を取り残さない。
+`close()` は冪等です。新しい投入を拒否し、すでに取り出された処理は完了させ、まだ取り出されていないfutureは、`std::runtime_error("RequestQueue is closed")` で完了させます。ワーカーがcloseを呼んだ場合は、自分自身の終了を待たずにシャットダウンを開始します。デストラクターも同じ経路を使います。受理されたfutureが、黙って取り残されることはありません。
 
-## checkpoint I/O と Python
+## チェックポイントのI/OとPython
 
-in-memory checkpoint は caller で mutex を使う。SQLite と sync custom backend は blocking work を bounded worker に移す。PostgreSQL は pipeline batching なしの nonblocking libpq I/O を使う。`NEOGRAPH_BUILD_POSTGRES=ON` は libpq 開発 files を必要とする optional target を有効にし、`OFF` はその依存だけを除く。
+インメモリのチェックポイント操作は、ミューテックスの下で、呼び出し元のスレッド上で実行されます。SQLiteと、同期のカスタムバックエンドは、ブロックする処理を、上限のあるワーカーに移します。PostgreSQLは、ノンブロッキングのlibpq I/Oを使い、パイプラインのバッチ処理は行いません。`NEOGRAPH_BUILD_POSTGRES=ON` にすると、このオプションのターゲットが有効になり、libpqの開発用ファイルが必要になります。`OFF` にすると、このオプションの依存だけがなくなります。
 
-Python callback は GIL 下で実行する。CPU-bound Python node/reducer は worker_count を増やすだけでは並列にならない。native call は自分の実装が GIL を解放する場合だけ重なれる。typed provider invoke/dispatch は GIL を解放し、`asyncio.to_thread` で呼べる。native provider asyncio awaitable の公開ではない。
+Pythonのコールバックは、GILの下で実行されます。CPUを使うPythonのノードやリデューサーは、worker_countを増やしただけでは並列になりません。ネイティブの呼び出しが重なって動くのは、その実装自身がGILを解放する場合だけです。型付きプロバイダーのinvokeとdispatchはGILを解放するので、`asyncio.to_thread` 経由で呼び出せます。これは、ネイティブのプロバイダーのasyncio awaitableを公開するものではありません。
 
-## runtime 依存と platform 検証
+## ランタイム依存とプラットフォームの適格性確認
 
-Core は `NEOGRAPH_BUILD_LLM=OFF` でも外部 `SchemaProvider::runtime` を link する。PostgreSQL、LLM node、NeoGraph の optional CurlH2Pool を無効にしても SDK runtime の libcurl 要件はなくならない。対応する installed SDK または `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` を指定する。
+Coreは、`NEOGRAPH_BUILD_LLM=OFF` の場合も含め、常に外部の `SchemaProvider::runtime` をリンクします。PostgreSQL、LLMノード、NeoGraphのオプションのCurlH2Poolを無効にしても、このランタイムが必要とするlibcurlはなくなりません。対応するインストール済みのSDKか、`NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` を用意してください。
 
-source resolution は明示 SDK source directory、installed package、revision-pinned 公開 archive fallback の順（既定 `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON`）。installed SDK の offline build は flag を `OFF` とし `CMAKE_PREFIX_PATH` に prefix を指定する。NeoGraph と SDK source 設定は CMake 3.20+ を要する。
+ソースの解決順は、明示したSDKのソースディレクトリ、インストール済みのパッケージ、リビジョンを固定した公開archiveのフォールバックの順です（`NEOGRAPH_FETCH_SCHEMAPROVIDER=ON` がデフォルト）。インストール済みのSDKを使ってオフラインでビルドするには、このフラグを `OFF` にし、`CMAKE_PREFIX_PATH` にSDKのプレフィックスを指定します。NeoGraphとSDKのソースの構成には、CMake 3.20以降が必要です。
 
-現在の SDK runtime/archive の検証範囲は Linux/POSIX である。既存 Linux/macOS/Windows package metadata は新依存がすべての platform で動く証拠ではない。macOS、Windows、WASM はそれぞれ runtime/build 検証を要し、portable executor API だけでは代替できない。
+現在のSDKのランタイムとarchiveは、Linux/POSIXで適格性確認が済んでいます。NeoGraphの既存のLinux/macOS/Windows向けパッケージメタデータは、この新しい依存がそれらすべてのプラットフォームで動く証拠にはなりません。macOS、Windows、WASMには、それぞれランタイムとビルドの適格性確認が必要です。ポータブルなexecutor APIがあるだけでは、確認したことにはなりません。
