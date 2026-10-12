@@ -579,13 +579,16 @@ private:
 // A join member driven by its "value" channel (#380): "ask" interrupts until
 // it is resumed, "fail" throws, "slow" finishes after a short cancellable wait,
 // "block" holds its thread for 800 ms and ignores cancellation (#367, #368),
-// and any other value finishes at once. Every run is counted by its value.
+// and any other value finishes at once. Every run is counted by its value,
+// and join_member_active counts the bodies still running.
 std::mutex                      join_member_mutex;
 std::map<std::string, unsigned> join_member_runs;
+std::atomic<unsigned>           join_member_active{0};
 
 void reset_join_member_runs() {
     std::lock_guard lock(join_member_mutex);
     join_member_runs.clear();
+    join_member_active.store(0);
 }
 
 unsigned join_member_runs_of(const std::string& value) {
@@ -604,6 +607,8 @@ public:
             std::lock_guard lock(join_member_mutex);
             ++join_member_runs[value];
         }
+        join_member_active.fetch_add(1, std::memory_order_relaxed);
+        ActiveCallGuard active(join_member_active);
         if (value == "fail") throw std::runtime_error("join member failure sentinel");
         if ((value == "ask" || value == "ask-slow") && !input.ctx.resume_value)
             throw NodeInterrupt("join member approval", json{{"request", "approve"}});
@@ -646,6 +651,7 @@ public:
             "value", value == "ask" || value == "ask-slow" || value == "reconcile"
                          ? input.ctx.resume_value->at("decision")
                          : json("done:" + value)});
+        active.leave();
         co_return output;
     }
 
@@ -7016,7 +7022,11 @@ TEST(ProgramRuntimeTest, JavaScriptRaceIsWonByAMemberThatFinishesWhileAnotherIsP
 
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_detail(result);
     EXPECT_EQ(result.output(), (json{{"winner", "done:slow"}}));
-    EXPECT_EQ(join_member_runs_of("ask"), 1U);
+    // The paused member may be cancelled before its node starts (#367,
+    // #368); it never asks twice, and no member is running once the race ends.
+    EXPECT_LE(join_member_runs_of("ask"), 1U);
+    EXPECT_EQ(join_member_runs_of("slow"), 1U);
+    EXPECT_EQ(join_member_active.load(), 0U);
 }
 
 // #367, #368: a C++ node body never holds the Program scheduler. With one
@@ -7035,8 +7045,11 @@ TEST(ProgramRuntimeTest, JavaScriptRaceIsWonByTheFastMemberWhileACppNodeBlocksIt
 
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_detail(result);
     EXPECT_EQ(result.output(), (json{{"winner", "done:quick"}}));
-    EXPECT_EQ(join_member_runs_of("block"), 1U);
+    // The loser's node may be cancelled before it starts (#367, #368). If it
+    // started, the run waited for it: no member is running once the race ends.
+    EXPECT_LE(join_member_runs_of("block"), 1U);
     EXPECT_EQ(join_member_runs_of("quick"), 1U);
+    EXPECT_EQ(join_member_active.load(), 0U);
     EXPECT_EQ(result.output().dump().find("done:block"), std::string::npos);
 }
 
@@ -7078,8 +7091,10 @@ TEST(ProgramRuntimeTest, JavaScriptRaceIsWonByTheFastMemberWhileASubgraphNodeBlo
 
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_detail(result);
     EXPECT_EQ(result.output(), (json{{"winner", "done:quick"}}));
-    EXPECT_EQ(join_member_runs_of("block"), 1U);
+    // As above: the loser may never start, and none is running at the end.
+    EXPECT_LE(join_member_runs_of("block"), 1U);
     EXPECT_EQ(join_member_runs_of("quick"), 1U);
+    EXPECT_EQ(join_member_active.load(), 0U);
 }
 
 TEST(ProgramRuntimeTest, JavaScriptRaceOfPausedMembersResumesTheFirstDeclared) {
@@ -7123,7 +7138,9 @@ TEST(ProgramRuntimeTest, JavaScriptQuorumMetWithoutItsPausedMemberCompletes) {
 
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_detail(result);
     EXPECT_EQ(result.output(), (json{{"values", json::array({"done:done", "done:slow"})}}));
-    EXPECT_EQ(join_member_runs_of("ask"), 1U);
+    // The paused member may be cancelled before its node starts (#367, #368).
+    EXPECT_LE(join_member_runs_of("ask"), 1U);
+    EXPECT_EQ(join_member_active.load(), 0U);
 }
 
 TEST(ProgramRuntimeTest, JavaScriptQuorumThatNeedsItsPausedMemberWaitsForIt) {
@@ -7434,9 +7451,11 @@ TEST(ProgramRuntimeTest, JavaScriptRaceCancelsLoserChildrenWithoutOrphans) {
                                    result.failure()->witness.dump()
                              : "no failure detail");
     EXPECT_EQ(result.output(), (json{{"winner", true}}));
+    // The losing member may be cancelled before it spawns its child (#367,
+    // #368); a child it did spawn is cancelled, not left running.
     const auto children = parent.snapshot().children();
-    ASSERT_EQ(children.size(), 1U);
-    EXPECT_EQ(children.front().state, ProgramChildState::Cancelled);
+    EXPECT_LE(children.size(), 1U);
+    for (const auto& child : children) EXPECT_EQ(child.state, ProgramChildState::Cancelled);
 }
 
 TEST(ProgramRuntimeTest, JavaScriptInterruptedCallCoreResumesItsExactPendingCoordinate) {
