@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=11f3aa09f0f6b0efb12cd3f39c02c92721a10071428360d4f3dcaf4f9730dddc -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=6862c42a74975353d1c69570ad0be209a42dd7ff95e483fefb99b5f5a8296ea3 -->
 # Program API エンドツーエンドシナリオ
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -27,6 +27,7 @@
 | `test_16_interrupt_identity.py` | 完了したバインド済み `llm_call` の横で一つのステップに起きた二つの Core 割り込み（#388）：pending input が最初の Core 割り込みを指定し、再開がそれに答えると二つ目は自身の質問をもう一度行い、次の再開がそれに答える。完了した呼び出しは再送も再課金もされない（メモリと SQLite ジャーナル） |
 | `test_17_resume_value_scope.py` | 答えはそれが答える質問にだけ届く（#393）：バインド済み `llm_call` の後に `first` が尋ね、次の Core ステップで `second` が尋ねる。`first` に答えた再開の後も `second` は自身の質問を行い、次の再開がそれに答える。完了した呼び出しは再送も再課金もされない（メモリと SQLite ジャーナル） |
 | `test_18_step_failure_outranks_interrupt.py` | 尋ねるノードのインデックスにかかわらず失敗がステップを終わらせる（#392）：一つの Core ステップでバインド済み `llm_call` の横に尋ねるノードと失敗するノードを両方の順序で実行する。Program は失敗したノードの分類済み失敗で失敗し、保留中の質問は残らず、モデル呼び出しは一度だけ送信・課金される（メモリと SQLite ジャーナル） |
+| `test_19_fork_interrupt_identity.py` | 完了したバインド済み `llm_call` の横で Core ステップが二つの割り込みで一時停止した実行の `host.fork()`（#394）：フォークは保留中の呼び出しの `core_interrupt_id` が指す割り込みに答え、もう一方のノードはフォークでもう一度尋ね、完了した呼び出しは再送も再課金もされない（メモリと SQLite ジャーナル） |
 
 `support.py` には、共有の Python ノード、条件、レジストリ、予算、JavaScript ビルダーがあります。
 

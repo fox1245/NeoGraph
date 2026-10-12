@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=11f3aa09f0f6b0efb12cd3f39c02c92721a10071428360d4f3dcaf4f9730dddc -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=6862c42a74975353d1c69570ad0be209a42dd7ff95e483fefb99b5f5a8296ea3 -->
 # Program API 엔드투엔드 시나리오
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -27,6 +27,7 @@
 | `test_16_interrupt_identity.py` | 끝난 바인딩 `llm_call` 옆에서 한 스텝의 Core 인터럽트 둘(#388): pending input이 첫 Core 인터럽트를 지정하고, 재개가 그것에 답하면 둘째는 자신의 질문을 다시 하며, 다음 재개가 그것에 답함. 끝난 호출은 다시 전송되거나 과금되지 않음(메모리와 SQLite 저널) |
 | `test_17_resume_value_scope.py` | 답은 그것이 답하는 질문에만 전달됨(#393): 바인딩 `llm_call` 뒤 `first`가 묻고 다음 Core 스텝에서 `second`가 묻는다. `first`에 답한 재개 뒤에도 `second`는 자신의 질문을 하고 다음 재개가 그것에 답함. 끝난 호출은 다시 전송되거나 과금되지 않음(메모리와 SQLite 저널) |
 | `test_18_step_failure_outranks_interrupt.py` | 묻는 노드의 인덱스와 관계없이 실패가 스텝을 끝냄(#392): 한 Core 스텝에서 바인딩 `llm_call` 옆에 묻는 노드와 실패하는 노드가 두 순서로 실행됨. Program은 실패한 노드의 분류된 실패로 실패하고 대기 중인 질문은 남지 않으며, 모델 호출은 한 번 전송되고 한 번 과금됨(메모리와 SQLite 저널) |
+| `test_19_fork_interrupt_identity.py` | 끝난 바인딩 `llm_call` 옆에서 Core 스텝이 두 인터럽트로 일시 정지한 실행의 `host.fork()`(#394): 포크가 대기 호출의 `core_interrupt_id`가 지정한 인터럽트에 답하고 다른 노드는 포크에서 다시 물으며, 끝난 호출은 다시 전송되거나 과금되지 않음(메모리와 SQLite 저널) |
 
 `support.py`에는 공유하는 Python 노드, 조건, 레지스트리, 예산, JavaScript 빌더가 있습니다.
 

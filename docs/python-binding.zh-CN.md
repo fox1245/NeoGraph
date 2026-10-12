@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=6430f7803a016e70f6a2e2cf8d0a4eb7ea7c95fa45ad0f53e5790e5a540ee435 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=05a1ef12bf01b60f005acfaceb604f6f5db83c75f1b5f90fb260e082a01c5bff -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -580,7 +580,7 @@ Program 引擎不会向 stderr 打印 lint，也不会打印 fan-out 提示。�
 
 传入 `sqlite_directory=path` 时，宿主把 bundle、版本、运行记录和检查点保存在该目录的 SQLite 文件（`program.db`、`checkpoints.db`）中，把提供商调用保存在提供商调用 journal（`provider_calls.db`）中，因此运行能在进程之后留存：用同一目录和同一注册表打开的宿主会继续它。`resume()` 继续被中断的运行，`reconnect(run_id)` 继续停止的进程留下的仍在运行中的运行。恢复从不重新发送 journal 记录过的请求：journal 重放回复，调用只收费一次。绑定提供商的宿主还需要 `native_history_archive=`（第一次用 `ng.NativeArchive.provision`，之后用 `ng.NativeArchive.open`），因为 journal 把每个回复保存在该 archive 的 custody 之下。没有子预算的仅 `define()` Program 运行在其 wall time 内持有 execution lease：在 lease 过期前 `reconnect()` 抛出 `P_RUN_LEASE_HELD`，之后以 `TimedOut` 结束运行，并对 journal 记录的调用收费。崩溃恢复从运行最后一个持久检查点（例如中断留下的检查点）继续。
 
-`resume(run_id, value)` 返回一个句柄；调用 `.wait()` 获取结果。不传 `pending_id` 时，它会恢复该运行中唯一正在等待的调用。没有调用或有多个调用在等待时，它会抛出 `ValueError`；请把 `result.interrupt.pending_input.call_id` 作为 `pending_id` 传入，以精确指定该调用。 `fork(run_id, value, version, budget)` 从该运行的精确检查点（或 `checkpoint_id=`）启动 `version` 的新运行，并用 `value` 回答其等待中的调用；`budget` 必须在源运行的 `remaining_budget` 之内，`pending_id=` 与 `resume()` 一样指定调用。fork 与 `resume()` 一样重放暂停运行已完成的工作：在暂停步骤中已完成的节点或 Send 不会再次运行或计费，其 provider 调用也不会再次发送（#390）。 当 Core 步骤在多个中断上暂停时，`result.interrupt.pending_input.core_interrupt_id`（或 `pending_effect.core_interrupt_id`）指明此等待调用所回答的 Core 中断，`resume()` 正好回答它；该步骤的其他中断会以一次一个等待调用的方式再次提问。只有一个 Core 中断时它为 `""`（#388）。
+`resume(run_id, value)` 返回一个句柄；调用 `.wait()` 获取结果。不传 `pending_id` 时，它会恢复该运行中唯一正在等待的调用。没有调用或有多个调用在等待时，它会抛出 `ValueError`；请把 `result.interrupt.pending_input.call_id` 作为 `pending_id` 传入，以精确指定该调用。 `fork(run_id, value, version, budget)` 从该运行的精确检查点（或 `checkpoint_id=`）启动 `version` 的新运行，并用 `value` 回答其等待中的调用；`budget` 必须在源运行的 `remaining_budget` 之内，`pending_id=` 与 `resume()` 一样指定调用。fork 与 `resume()` 一样重放暂停运行已完成的工作：在暂停步骤中已完成的节点或 Send 不会再次运行或计费，其 provider 调用也不会再次发送（#390）。 当 Core 步骤在多个中断上暂停时，`result.interrupt.pending_input.core_interrupt_id`（或 `pending_effect.core_interrupt_id`）指明此等待调用所回答的 Core 中断，`resume()` 正好回答它；该步骤的其他中断会以一次一个等待调用的方式再次提问。只有一个 Core 中断时它为 `""`（#388）。`fork()` 同样正好回答该中断，fork 出的运行会再次提出该步骤的其他问题（#394）。
 
 `resume()` 返回的结果中，`execution_trace` 只列出恢复后运行的 Core 节点；中断前运行的节点出现在被中断的结果中。对于在 `b` 之前中断的 Core `a → b → c`，被中断的结果为 `["a"]`，恢复后的结果为 `["b", "c"]`。
 

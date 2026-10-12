@@ -231,6 +231,15 @@ unsigned named_ask_runs_of(const std::string& name) {
     return found == named_ask_runs.end() ? 0U : found->second;
 }
 
+// #394: called with the node's name each time a NamedAskNode runs with an
+// answer, before it writes it; a test reads durable state there.
+std::function<void(const std::string&)> named_ask_answered_hook;
+
+void set_named_ask_answered_hook(std::function<void(const std::string&)> hook) {
+    std::lock_guard lock(named_ask_mutex);
+    named_ask_answered_hook = std::move(hook);
+}
+
 class NamedAskNode final : public GraphNode {
 public:
     explicit NamedAskNode(std::string name) : name_(std::move(name)) {}
@@ -242,6 +251,12 @@ public:
         }
         if (!input.ctx.resume_value)
             throw NodeInterrupt("approve " + name_, json{{"asks", name_}});
+        std::function<void(const std::string&)> hook;
+        {
+            std::lock_guard lock(named_ask_mutex);
+            hook = named_ask_answered_hook;
+        }
+        if (hook) hook(name_);
         NodeOutput output;
         output.writes.push_back(
             ChannelWrite{name_ + "_answer", input.ctx.resume_value->at("decision")});
@@ -10261,6 +10276,108 @@ TEST(ProgramRuntimeTest, ACoreStepWithAFailureAndAnInterruptFailsWhateverTheOrde
             EXPECT_EQ(result.failure()->core_node, ask_first ? "b_second" : "a_first");
             EXPECT_FALSE(result.interrupt().has_value());
         }
+    }
+}
+
+TEST(ProgramRuntimeTest, AForkOfTwoCoreInterruptsAnswersTheOneItsPendingInputNames) {
+    // #394: left and right ask in one Core super-step and the run pauses with
+    // a pending input that names left's Core interrupt. A fork of that run
+    // answers exactly the interrupt the source's pending input names, as a
+    // resume does: left gets the fork's answer and right asks its own
+    // question again, in the fork. In memory and on SQLite.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        {
+            std::lock_guard lock(named_ask_mutex);
+            named_ask_runs.clear();
+        }
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(1, stores.checkpoints, stores.transitions, {},
+                                ExecutionGuarantee::Unmanaged, true);
+        auto document   = program_document("runtime-completed");
+        auto definition = document["root"]["definition"];
+        definition["channels"]["left_answer"]  = json{{"reducer", "runtime-overwrite"}, {"initial", ""}};
+        definition["channels"]["right_answer"] = json{{"reducer", "runtime-overwrite"}, {"initial", ""}};
+        definition["nodes"]["left"]  = json{{"type", "runtime-named-ask"}};
+        definition["nodes"]["right"] = json{{"type", "runtime-named-ask"}};
+        definition["edges"] = json::array({json{{"from", "__start__"}, {"to", "work"}},
+                                           json{{"from", "work"}, {"to", "left"}},
+                                           json{{"from", "work"}, {"to", "right"}},
+                                           json{{"from", "left"}, {"to", "__end__"}},
+                                           json{{"from", "right"}, {"to", "__end__"}}});
+        document["root"]["definition"] = std::move(definition);
+        const auto version = fixture.admit_document(std::move(document));
+
+        const auto source = fixture.runtime->run(
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), grant(), "trace-fork-two-interrupts", {}});
+        ASSERT_EQ(source.status(), ProgramTerminalStatus::Interrupted) << failure_detail(source);
+        ASSERT_TRUE(source.checkpoint() && source.interrupt() && source.interrupt()->pending_input);
+        ASSERT_EQ(source.interrupt()->pending_input->core_interrupt_id(), "s1:left");
+
+        RunInvocation invocation;
+        invocation.owner_scope        = "tenant:runtime";
+        invocation.agent_id           = "test-fork-two-interrupts";
+        invocation.program_version_id = version.id();
+        invocation.run_id             = durable ? "fork-two-interrupts-sqlite" : "fork-two-interrupts";
+        invocation.budget             = source.remaining_budget();
+        invocation.input              = json::object();
+        invocation.message_sequence   = 1;
+        invocation.idempotency_key    = "test-fork-two-interrupts:1";
+        invocation.correlation_id     = "trace-fork-two-interrupts-target";
+        invocation.validate();
+
+        // Read the fork's run record while its first attempt runs left with
+        // the answer.
+        struct AnsweredRecord {
+            std::string pending_input;
+            std::string checkpoint;
+            std::string attempt_resume;
+        };
+        std::optional<AnsweredRecord> answered_record;
+        set_named_ask_answered_hook([&](const std::string& name) {
+            if (name != "left" || answered_record) return;
+            const auto record = fixture.journal->load("tenant:runtime", invocation.run_id);
+            if (!record) return;
+            AnsweredRecord seen;
+            if (const auto pending = record->pending_input())
+                seen.pending_input = pending->core_interrupt_id();
+            if (record->exact_checkpoint()) seen.checkpoint = record->exact_checkpoint()->checkpoint_id;
+            if (record->attempt_resume()) seen.attempt_resume = record->attempt_resume()->checkpoint_id;
+            answered_record = std::move(seen);
+        });
+        const auto forked =
+            fixture.runtime
+                ->fork(ExactProgramCheckpointReference{source.run_id(),
+                                                       source.checkpoint()->checkpoint_id},
+                       invocation,
+                       ProgramResume{json{{"decision", "L"}}, "trace-fork-two-interrupts-resume",
+                                     {}, pending_call_id(source)})
+                .wait();
+        set_named_ask_answered_hook(nullptr);
+        ASSERT_EQ(forked.status(), ProgramTerminalStatus::Interrupted) << failure_detail(forked);
+        ASSERT_TRUE(forked.interrupt() && forked.interrupt()->pending_input);
+        EXPECT_EQ(forked.interrupt()->core_node, "right") << "right asks its own question again";
+
+        // What the fork's first attempt resumed with, read while it ran: the
+        // cloned checkpoint and the source's pending input, which names
+        // left's Core interrupt. The attempt answers the interrupt that
+        // pending input names, as an attempt that resumes the source does.
+        ASSERT_TRUE(answered_record.has_value()) << "left was never answered in the fork";
+        EXPECT_EQ(answered_record->pending_input, "s1:left");
+        EXPECT_FALSE(answered_record->checkpoint.empty());
+        EXPECT_NE(answered_record->checkpoint, source.checkpoint()->checkpoint_id)
+            << "the fork resumes its own copy of the checkpoint";
+        EXPECT_EQ(answered_record->attempt_resume, answered_record->checkpoint);
+
+        const auto done = fixture.runtime
+                              ->resume("tenant:runtime", forked.run_id(),
+                                       resume_for(forked, json{{"decision", "R"}},
+                                                  "trace-fork-two-interrupts-right"))
+                              .wait();
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+        EXPECT_EQ(done.output()["channels"]["left_answer"]["value"], json("L"));
+        EXPECT_EQ(done.output()["channels"]["right_answer"]["value"], json("R"));
     }
 }
 
