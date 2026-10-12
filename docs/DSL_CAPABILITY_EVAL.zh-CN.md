@@ -1,37 +1,41 @@
 <!-- neograph-i18n: source=docs/DSL_CAPABILITY_EVAL.md locale=zh-CN source_sha256=440d5d76af8cf05685dddfa06df9dee587f74851719820ff655b0a220bdb1b49 -->
-# QuickJS DSL能力与模型综合评估
+# QuickJS DSL 的能力与模型合成评测
 
 **Languages:** [English](DSL_CAPABILITY_EVAL.md) | [한국어](DSL_CAPABILITY_EVAL.ko.md) | [日本語](DSL_CAPABILITY_EVAL.ja.md) | [简体中文](DSL_CAPABILITY_EVAL.zh-CN.md)
 
-状态：已实现，受确定性一致性检查约束；实时模型评估为 opt-in。
-历史实时观测：2026-08-22；下列记录不是新的运行结果。
+状态：已实现；确定性的符合性测试是闸门；实机模型评测需要主动开启
+历史上的实机观测：2026-08-22；下面记录的结果不是新的一次运行
 
 ## 问题
 
-NeoGraph必须区分两项主张：
+NeoGraph 必须区分两个论断：
 
-1. 准入(admission)的QuickJS DSL可以表示一种能力；以及
-2. LLM能够生成实际正确使用该能力的源代码。
+1. 已准入的 QuickJS DSL 能够表达某种能力；以及
+2. LLM 能够合成出真正正确地用到该能力的源码。
 
-第二项声明并非由第一项所蕴含。只有当真实的 `ProgramCompiler` 接受该source，且特定于用例的语义验证器确认了lowered的Core IR或密封的JavaScript command tree时，该source才通过此项评估。基于源码文本关键字匹配并不足以满足要求。
+第二个论断并不能由第一个推出。只有真正的 `ProgramCompiler` 接受了某份源码，
+并且针对该用例的语义验证器确认了降级后的 Core IR，或封存的 JavaScript 命令树，
+这份源码才算通过评测。仅靠对源码文本做关键字匹配是不够的。
 
-## Capability能力清单
+## 能力 manifest
 
-[`tests/fixtures/dsl_capabilities/cases.json`](../tests/fixtures/dsl_capabilities/cases.json) 是机器可读的评估清单。它目前覆盖：
+[`tests/fixtures/dsl_capabilities/cases.json`](../tests/fixtures/dsl_capabilities/cases.json)
+是机器可读的评测清单。目前它覆盖：
 
-- graph/channel/node/entry/edge/exit以及普通 JavaScript 构造；
+- graph/channel/node/entry/edge/exit，以及普通的 JavaScript 构造；
 - 已注册的条件路由；
-- 静态 fan-out、fan-in 以及障碍；
-- 静态 HITL 中断以及图重试策略；
-- 注册表中介的动态`Send`与`NodeInterrupt`行为；
-- `callCore` 使用普通 JavaScript 分支/循环控制；
-- JavaScript 映射被降级为有界的 `ng.all`；
-- `all`、`parallel`、通用`join`、`race`和`quorum`；
-- 子 `spawn` 嵌套于 `await` 内；
-- `emit`, `checkpoint`, and `cancelScope`; and
-- 一个已准入(admission)的原生`hostCapability`导入槽位。
+- 静态的 fan-out、fan-in 和屏障；
+- 静态的 HITL 中断和图的重试策略；
+- 由注册表介导的动态 `Send` 和 `NodeInterrupt` 行为；
+- 带有普通 JavaScript 分支/循环控制的 `callCore`；
+- 降级为有界 `ng.all` 的 JavaScript map；
+- `all`、`parallel`、通用的 `join`、`race` 和 `quorum`；
+- 嵌套在 `await` 里的子 `spawn`；
+- `emit`、`checkpoint` 和 `cancelScope`；以及
+- 一个已准入的原生 `hostCapability` import 槽位。
 
-每个签入的JavaScript fixture均由`program_dsl_capability_probe`编译并执行语义验证。这些是确定性的CTest测试，无需模型或网络。
+每个已提交到仓库的 JavaScript 夹具，都由 `program_dsl_capability_probe`
+编译并做语义验证。这些是确定性的 CTest 测试，不需要模型，也不需要网络。
 
 ```powershell
 cmake --build build --config Release --target program_dsl_capability_probe
@@ -39,21 +43,22 @@ ctest --test-dir build -C Release --output-on-failure `
   -R '^Program\.DslCapability\.'
 ```
 
-聚焦的图构建器回归测试同样证明重复的可变调用能正确累积，且barrier、interrupt和retry声明在降级后仍然存活：
+针对图构建器的专项回归测试，还证明了重复调用修改方法能够正确累积，
+以及屏障、中断和重试的声明在降级之后依然保留：
 
 ```powershell
 build\tests\Release\neograph_program_tests.exe `
   --gtest_filter=ProgramCompilerTest.JavaScriptGraphBuilderLowersEveryDeclaredPrimitiveAndAccumulatesCalls
 ```
 
-## 实时模型评估
+## 实机模型评测
 
-可选runner（opt-in）使用自然语言语义和公共API签名请求源。它不会将已检入的答案提供给模型。每个响应都会发送到与确定性CTest相同的原生探针。
-Runner 将 `skills/neograph-harness-authoring/SKILL.md` 及其
-`references/quickjs-authoring.md` 放入模型 context，并在 report 中记录
-guidance digest。`--skill` 选择带同一 companion reference 的其他 entrypoint。
-宿主调用实际 compiler bridge；模型返回 source，再接收有限 repair 所用的
-diagnostic。Skill 不授予 runtime 权限。
+这个需要主动开启的 runner，用自然语言描述语义，再加上公开的 API 签名，来要求模型给出源码。
+它不会把仓库里已提交的答案给模型。每个响应都会送到确定性 CTest 所用的同一个原生探针。
+runner 会把 `skills/neograph-harness-authoring/SKILL.md` 及其
+`references/quickjs-authoring.md` 加载到模型的上下文中，并在报告里记录这份指导的摘要。
+`--skill` 可以选择另一个带有这份配套参考的入口。宿主调用真正的编译器桥；
+模型返回源码，并收到诊断信息，用于有限次的修复。这个 skill 不授予任何运行时权限。
 
 ```powershell
 bun --env-file=C:\path\to\.env run scripts/run_dsl_capability_eval.ts `
@@ -63,24 +68,25 @@ bun --env-file=C:\path\to\.env run scripts/run_dsl_capability_eval.ts `
   --output dsl-capability-evidence.json
 ```
 
-`--case` 接受逗号分隔的子集，`--attempts` 重复独立的单次试验，`--repair-attempts` 将权威探针诊断连同被拒绝的完整来源一起返回给模型。Provider/response 失败与编译或语义拒绝保持分离。
-默认模型为 `z-ai/glm-5.3-flash`。每次 generation 限制为 4,096 个
-completion token，采用 cookbook 的 ZDR provider-routing 设置。
-下面的 DeepSeek 证据是该 skill-loading 配置之前的历史记录。
+`--case` 接受以逗号分隔的子集，`--attempts` 重复进行互相独立的一次性试验，
+`--repair-attempts` 把权威的探针诊断，连同被拒绝的完整源码，一起返回给模型。
+provider 或响应层面的失败，与编译或语义层面的拒绝是分开记录的。
+默认的模型是 `z-ai/glm-5.3-flash`；每次生成最多 4,096 个 completion token，
+并使用 cookbook 里的 ZDR provider 路由设置。下面历史上的 DeepSeek 证据，
+早于这种加载 skill 的配置。
 
-## 单独评估指令
+## 单独评测这些指令
 
-Source case 通过衡量的是 skill、提供的 native API reference、case contract
-和 model 配置的组合，并不证明 skill 单独就足够。Runner 保留 system prompt、
-API reference、raw model content、usage、stop reason 及 strict-envelope
-结果。Legacy source extractor 可以恢复 fenced JSON；`strictEnvelope` 将其
-与遵守所请求的 raw JSON envelope 区分。
+一个源码用例通过，衡量的是 skill、提供的原生 API 参考、用例契约和模型配置合在一起的效果。
+它并不能证明 skill 本身就足够了。runner 会在它的证据里，保留系统提示词、API 参考、
+模型的原始内容、用量、停止原因和严格信封的结果。
+旧的源码提取器可能会从带围栏的 JSON 里把内容恢复出来；strictEnvelope 把这种情况，
+与符合所要求的纯 JSON 信封区分开。
 
-仅在明确选择独立比较 profile 时使用 `--reasoning-effort`。省略时保留
-provider default。Before/after 比较固定该值、model、sampling、output cap、
-task 和 compiler。
+只有在明确选用单独的对比 profile 时，才使用 --reasoning-effort。省略它，则沿用 provider 的默认值。
+在每一组前后对比之内，要保持该值、模型、采样、输出上限、任务和编译器都不变。
 
-Chatbot 内部 Harness selector 的 paired evaluator 为：
+对于聊天机器人内部的 Harness selector，成对的评测器是：
 
 ~~~powershell
 bun run scripts/run_harness_skill_ab.ts --before saved-skill/SKILL.md `
@@ -88,42 +94,48 @@ bun run scripts/run_harness_skill_ab.ts --before saved-skill/SKILL.md `
   --provider relace --repeats 2 --output skill-comparison.json
 ~~~
 
-两个 directory 均须有 `references/chat-template-proposals.md`。默认 fixture
-包含 greeting、正在进行的独立 review 请求和 recorded review scenario。
-Expected plan 不进入模型输入。Evaluator 固定 live chat profile，交替 AB/BA
-顺序，保留 raw response，并将 JSON shape 与 expected plan/confidence 分开评分。
-`--provider` 固定 backend 并关闭 fallback；省略时 routing policy 相同，但实际
-provider 可能不同，返回的 provider/model 名称会被记录。Case 与重复次数有限，
-不做 repair 或暗中 retry。
+两个目录都必须包含 references/chat-template-proposals.md。默认的夹具包括：一句问候、
+一个持续进行独立审阅的请求，以及一个已记录的审阅场景。期望的计划不会出现在模型的输入里。
+评测器固定实机聊天的 profile，交替使用 AB/BA 顺序，保留原始响应，
+并把 JSON 的形态与期望的计划/置信度分开评分。
+--provider 会固定一个后端并关闭回退；不指定时，路由策略是共享的，但实际的 provider 可能不同。
+返回的 provider 和模型名都会被记录。用例和重复次数都有上限；不做任何修复，也不做悄悄的重试。
 
-这是 prompt-level 评估，不是 runtime admission，也不是关于答复品质的统计
-主张。少量 targeted 重复样本是 regression 证据，不是一般 model 可靠性的估计。
+这是提示词层面的评测，不是运行时的准入，也不是关于回答质量的统计结论。
+针对某个用例做的少量重复采样，是回归证据，而不是对模型总体可靠性的估计。
 
-## 观察到DeepSeek结果
+## 观察到的 DeepSeek 结果
 
-在初次运行和精确标识符重新评估之间，模型为所有11个能力组产生了探针验证的源。静态HITL/retry需要一次诊断引导的修复。结构化并发需要两次修复：第一次恢复ES模块导出，第二次将错误的Core绑定替换为精确的准入(admission)名称。控制流在一次精确绑定修复后通过。Map在一次通过后通过，此前宿主提供了原生API清单并明确陈述了准入(admission)的Core标识符。
+在第一次运行以及后续对确切标识符的重新评测中，模型对全部 11 个能力组，都给出了通过探针验证的源码。
+静态的 HITL/重试，需要一次由诊断引导的修复。结构化并发需要两次修复：
+先是恢复 ES 模块的导出，再把错误的 Core 绑定替换成确切的已准入名称。
+控制流在一次确切绑定的修复之后通过。在宿主提供了原生 API manifest、
+并且毫不含糊地说明了已准入的 Core 标识符之后，map 一次性通过。
 
-| 能力用例 | 模型证据 | 重要观察 |
+| 能力用例 | 模型方面的证据 | 重要的观察 |
 |---|---|---|
-| `graph_basics` | 已通过 | 循环构建的节点正确降级 |
-| `graph_routing` | 在重试尝试中通过 | 早前输出使用了被禁止的CommonJS/`require` |
-| `graph_fanout_barrier` | 已通过 | fan-out边和屏障成员资格完全匹配 |
-| `graph_hitl_retry` | 经过一次修复后通过 | 初始输出使用了错误的节点名称 |
-| `registry_mediated` | 已通过 | 模型正确引用了主机准入(admission)的动态节点 |
-| `program_control_flow` | 经过一次修复后通过 | 早前的试验反复调用`core`/`Core`，而非已准入(admission)的Core`capability` |
-| `program_map` | 在精确标识符注入后通过 | 早前的试验使用了CommonJS、`yield*`和错误的Core名称 |
-| `program_structured_concurrency` | 经过两次修复后通过 | 精确的嵌套命令和Core绑定已得到验证 |
-| `program_spawn_await` | 已通过 | `Await(Spawn(...))`和超时在结构上得到验证 |
-| `program_durability` | 已通过 | Emit、检查点和取消命令完全匹配 |
-| `program_host_capability` | 已通过 | 导入槽位和规范输入匹配 |
+| `graph_basics` | 通过 | 用循环构建的节点降级正确 |
+| `graph_routing` | 在重复试验中通过 | 更早的输出用了被禁止的 CommonJS/`require` |
+| `graph_fanout_barrier` | 通过 | fan-out 的边和屏障成员都是准确的 |
+| `graph_hitl_retry` | 一次修复后通过 | 最初的输出用错了节点名 |
+| `registry_mediated` | 通过 | 模型正确引用了宿主准入的动态节点 |
+| `program_control_flow` | 一次修复后通过 | 更早的试验反复调用 `core`/`Core`，而不是已准入的 Core `capability` |
+| `program_map` | 注入确切标识符后通过 | 更早的试验用了 CommonJS、`yield*` 和错误的 Core 名称 |
+| `program_structured_concurrency` | 两次修复后通过 | 验证了确切的嵌套命令和 Core 绑定 |
+| `program_spawn_await` | 通过 | `Await(Spawn(...))` 和超时在结构上得到验证 |
+| `program_durability` | 通过 | emit、checkpoint 和取消命令都是准确的 |
+| `program_host_capability` | 通过 | import 槽位和规范的输入相匹配 |
 
-初始 validator 只检查 command kind 和 input，没有检查精确 Core 名称，因此在 `callCore` case 中产生误报。后来要求每个嵌套 `callCore` 的名称为 `capability`。之前通过的、使用 `core`、`Core` 或 node 名称 `work` 的 model source 现在被拒绝。
+最初的验证器对 `callCore` 用例产生了误报，因为它检查了命令的种类和输入，
+却没有检查确切的 Core 名称。验证器已经加强，要求每个嵌套的 `callCore` 都使用 `capability`。
+因此，之前被接受的、使用 `core`、`Core` 或节点名 `work` 的模型源码，现在会被正确地拒绝。
 
-这是能力证明，而非统计可靠性声明。逐案例的一次性成功率和修复成功率仍需通过重复试验来评估，且提供商失败须单独报告。
+这证明的是能力，不是统计意义上的可靠性。每个用例的一次性成功率和修复成功率，
+仍然需要重复试验，并把 provider 的失败单独报告。
 
-## 对生成的Program的后果
+## 对生成的 Program 的影响
 
-原始一次性源生成不是足够的产品保证。最低安全合成路径是：
+原始的一次性源码生成，不足以作为产品层面的保证。最低限度的安全合成路径是：
 
 ```text
 capability manifest + exact admitted identifiers
@@ -134,10 +146,25 @@ capability manifest + exact admitted identifiers
   -> ordinary admission and publication
 ```
 
-模型反复混淆ES模块与CommonJS、图名称与节点名称，以及请求的Core身份与诸如`core`之类的通用词。因此，NeoCode应注入精确签名和准入(admission)的标识符，在可能的情况下保留固定的模块脚手架，并且绝不应将看似合理的源视为已构建请求拓扑的证据。
+模型反复把 ES 模块与 CommonJS 混淆，把图名称与节点名称混淆，
+把所要求的 Core 标识与 `core` 这样的泛称混淆。因此，NeoCode 应当注入确切的签名和已准入的标识符，
+尽可能保留固定的模块脚手架，并且绝不能把看起来像样的源码，
+当成所要求的拓扑已经构建出来的证据。
 
-NeoGraph 现在在 `ProgramSynthesisGateway`中强制执行此边界：每个网关配置必须提供宿主拥有的语义验证器。成功的验证会在 Catalog 准入(admission)之前生成内容寻址的收据；被拒绝的决策会抛出 `ProgramSynthesisValidationError`，保留确切的证据，并且绝不调用准入(admission)解析器。已消耗的动态编译预留仍然保持已消耗状态。
+NeoGraph 现在在 `ProgramSynthesisGateway` 中强制执行这条边界：每份网关配置都必须提供一个由宿主持有的
+语义验证器。验证成功，会在 Catalog 准入之前产生一份内容寻址的回执；验证被拒绝，
+则抛出 `ProgramSynthesisValidationError`，保留确切的证据，并且绝不会调用准入解析器。
+已经消耗的动态编译预留，仍然保持已消耗的状态。
 
-`javascript_authoring_capability_manifest()` 以机器可读数据的形式暴露已安装的graph-builder和命令词汇表、精确签名、分类、限制及profile约束。一致性测试将该清单与QuickJS两个上下文中实际安装的属性进行比较，从而API漂移会使测试套件失败。
+`javascript_authoring_capability_manifest()` 以机器可读的数据，给出已安装的图构建器和命令词汇表、
+确切的签名、分类、限制和 profile 约束。符合性测试会把这份 manifest，
+与两个 QuickJS 上下文中实际安装的属性做比较，这样 API 一旦漂移，测试集就会失败。
 
-该清单还公开 `features`（每个编写功能一个布尔标志，例如 `graph.metadata`、`barrier.any_of` 或 `failure_edges`）、每个方法的 TypeScript `dts` 签名及其共享声明 `dts_prelude`，以及每个图构建器参数的 JSON Schema。两份 schema 文件为其提供支撑：[`schemas/javascript-capability-manifest-v1.schema.json`](../schemas/javascript-capability-manifest-v1.schema.json) 描述清单本身，[`schemas/core-definition-v1.schema.json`](../schemas/core-definition-v1.schema.json) 描述封存的 Core 定义，用于对生成的定义进行约束解码。测试用其 schema 校验清单，并用 Core schema 校验黄金标识语料库中的定义。
+manifest 还发布了：`features`，即每个编写功能一个布尔标志（例如 `graph.metadata`、
+`barrier.any_of` 或 `failure_edges`）；每个方法的 TypeScript `dts` 签名，其中共用的声明放在
+`dts_prelude` 里；以及每个图构建器参数的 JSON Schema。有两个 schema 文件作为支撑：
+[`schemas/javascript-capability-manifest-v1.schema.json`](../schemas/javascript-capability-manifest-v1.schema.json)
+描述 manifest 本身，
+[`schemas/core-definition-v1.schema.json`](../schemas/core-definition-v1.schema.json)
+描述封存的 Core 定义，供对生成的定义做约束解码使用。
+测试会对照它的 schema 校验 manifest，也会对照 Core schema 校验黄金身份语料库中的定义。

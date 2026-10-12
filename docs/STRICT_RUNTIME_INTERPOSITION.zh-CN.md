@@ -1,11 +1,13 @@
 <!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=eee79303f2ce57761c1bf62d99755e7589782385c4ffa411c4d5c6ad4ad55207 -->
-# 严格运行时介入
+# 严格的运行时拦截
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
 
-NeoGraph 的严格运行时路径将必需上下文、生命周期 Hook 和 provider dispatch 证据从模型自由裁量中分离。受信任的嵌入场景仍可直接调用 typed provider；`StrictRuntimeProfile` 组装严格路径所需的依赖。
+NeoGraph 的严格运行时路径，把强制的上下文、生命周期 Hook 和 provider 分发的证据，
+从模型的自由裁量中拿了出来。直接发起带类型的 provider 调用，仍然可用于受信的嵌入场景；
+`StrictRuntimeProfile` 把严格路径所需的依赖装配在一起。
 
-## 保证边界
+## 保证的边界
 
 ```text
 durable RAW history + admitted artifacts + required Skills/constraints
@@ -19,94 +21,113 @@ durable RAW history + admitted artifacts + required Skills/constraints
   -> mandatory AfterProviderResponse Hooks
 ```
 
-该保证涵盖精确上下文构建、强制性工件存在性、请求身份、准入(admission)分派，以及已知/需要对账的provider提供方结果。它并不声称LLM关注到或遵守了每个令牌。
+这项保证涵盖：上下文的精确构造、强制制品的存在、请求的标识、分发的准入(admission)，
+以及已知的和需要对账的 provider 结果。它并不声称 LLM 关注或遵从了每一个 token。
 
-宿主编写的自定义原生节点仍是受信任代码。将原始 `Provider` 交给此类节点，使 node 有意离开严格配置文件；由生成的 Topology 拓扑仅能获得已注册节点，并且无法伪造这种该 authority 权限。
+宿主自己编写的自定义原生节点，仍然是受信的代码。给这样的节点一个原始的 `Provider`，
+就有意地离开了严格 profile；生成出来的拓扑只能得到已注册的节点，无法凭空造出这种权限。
 
-## 严格配置文件
+## 严格 profile
 
-`StrictRuntimeProfileConfig` 需要具备：
+`StrictRuntimeProfileConfig` 要求具备：
 
 - 一个 provider；
-- a `DurableContextStore`;
-- 一个支持终止结果的`DurableProviderDispatchReceiptStore`；
-- a `HookRuntime`;
-- 一个内容寻址的提供者绑定身份；
-- 一个非零最大 input token；及
-- 可选的精确必需上下文和Skill工件标识。
+- 一个 `DurableContextStore`；
+- 一个支持终态 outcome 的 `DurableProviderDispatchReceiptStore`；
+- 一个 `HookRuntime`；
+- 一个内容寻址的 provider 绑定标识；
+- 一个非零的输入 token 上限；以及
+- 可选的、确切的必需上下文和 Skill 制品标识。
 
-只有 `RuntimeGuaranteeProfile::Strict` epoch 才能被激活。将配置文件附加到 `GraphEngine` 会在内置消费者上安装提供者介入（provider interposition）和生命周期 Hook。
+只有 `RuntimeGuaranteeProfile::Strict` 的 epoch 才能被激活。把这个 profile 挂到
+`GraphEngine` 上，会同时在内置的使用方上，装好 provider 拦截和生命周期 Hook。
 
-## provider 结果生命周期
+## provider outcome 的生命周期
 
-提供者边界现在记录两个独立的不可变值：
+provider 边界现在会记录两个相互独立的不可变值：
 
-1. `ProviderDispatchReceipt` 在分派之前写入。
-2. `ProviderDispatchOutcomeReceipt` 在尝试之后记录`Succeeded`、`Failed`或`ReconciliationRequired`。
+1. `ProviderDispatchReceipt` 在分发之前写入。
+2. `ProviderDispatchOutcomeReceipt` 在尝试之后，记录 `Succeeded`、`Failed` 或
+   `ReconciliationRequired`。
 
-成功结果绑定完整 SDK outcome 观测的 digest。已证明未发送的 typed Failure 记录为 `Failed`；不确定的交付记录为 `ReconciliationRequired`。dispatch 后的异常不能确定远程 provider 是否执行，因此控制器不会暗中重试。SQLite schema v3 单独存储 terminal receipt，重启后检查其精确 admitted dispatch binding。Receipt digest 是证据，不是 native continuation custody 或可执行的已存 outcome。
+成功的结果，会绑定完整的 SDK outcome 观测数据的摘要。
+已证明未发送的带类型 Failure，记录为 `Failed`；送达状态不确定的，记录为 `ReconciliationRequired`。
+分发之后发生异常，并不能说明远端 provider 是否已经执行，所以控制器不会悄悄重试。
+SQLite schema v3 把终态回执单独存储，并在重启后检查它们与已准入分发之间的确切绑定。
+回执摘要是证据，不是 native 续接的托管，也不是可以执行的、已存储的 outcome。
 
-控制器接收 `ProviderRequest`，返回不可变、拥有所有权的 `sp::runtime::Result`，保留顺序 message/part 和部分失败证据。实际结果之后若结算或 receipt 持久化失败，`ProviderDispatchOutcomePersistenceError` 保留结果与原始 cause；次要 observer 失败保留在 `delivery_error()` 中。Token charge/reservation 与 nullable provider 用量 report 分开。
+控制器接受 `ProviderRequest`，返回不可变的、持有所有权的 `sp::runtime::Result`，
+其中保留有序的消息/parts 和部分失败的证据。如果在已有真实结果之后，结算或回执的持久化失败了，
+`ProviderDispatchOutcomePersistenceError` 会保留这份结果和原始的 cause；
+次要的 observer 失败仍保留在 `delivery_error()` 里。
+token 的计费和预留，与可为空的 provider 用量报告是分开的。
 
-## Program Core provider 调用（独立于 standalone Strict Runtime）
+## Program Core 的 provider 调用（与独立的严格运行时分开）
 
-Program 使用内置 Core LLM node 时，宿主可设置
+Program 使用内置的 Core LLM 节点时，宿主可以设置
 `RuntimeConfig::core_provider_call_resolver` 和
-`require_core_provider_call_broker = true`。对每个精确的
-`ProgramCoreProviderCallContext`，返回
-`SQLiteProgramProviderCallJournal::bind(context, deployment_identity)`。
-头文件为 `<neograph/program/sqlite_provider_call_broker.h>`，链接目标为
-`neograph::program_sqlite`。Deployment identity 是宿主拥有的 SHA-256 identity，
-绑定真实 provider route、model deployment 和权限（包括 credential version）。
-Broker 不会从 `Provider` 猜测这些值。重启/reconnect 时重新绑定同一 durable database。
+`require_core_provider_call_broker = true`。对于每一个确切的
+`ProgramCoreProviderCallContext`，从
+`<neograph/program/sqlite_provider_call_broker.h>` 返回
+`SQLiteProgramProviderCallJournal::bind(context, deployment_identity)`；需要链接 `neograph::program_sqlite`。
+部署标识必须是由宿主持有的、对实际 provider 路由、模型部署和权限（包括凭据版本）求出的 SHA-256 标识；
+broker 不会从 `Provider` 对象中自行发现这些信息。重启或重新连接时，要重新绑定同一个持久数据库。
 
-Journal 以 owner、不可变 Program version、run、operation、Core
-thread/task/node 和内置 call ordinal 为键，不以 request 内容或 Program
-attempt 为键。传输前以 SQLite FULL 同步 commit marker。Marker 表示可能发生了
-传输，不证明 provider 收到请求或效果恰好执行一次。完整不可变 SDK
-Completion/Failure outcome 以 encoding version 2 存储，用于精确绑定的 replay。
-已证明未发送的 Failure 记录为 `Failed`；不确定交付、异常或结算前 crash
-需要 reconciliation，绝不暗中重新 dispatch。用
-`inspect(owner, logical_call_id(context, core_identity))` 检查状态。
-只有独立确认的 provider-side 证据和完整 Completion outcome 才可用于
-`reconcile_success`。Streaming replay 返回 captured outcome，不合成 stream event。
+journal 以 owner、不可变的 Program 版本、运行、操作、Core 的线程/任务/节点以及内置调用的序号，
+作为每次调用的键，**而不是**请求内容或 Program 的尝试。它在传输之前，用 SQLite FULL 同步提交标记。
+这个标记表示传输*可能*已经发生，并不表示 provider 收到了它，也不表示副作用恰好发生了一次。
+完整的、不可变的 SDK Completion/Failure outcome，以编码版本 2 存储，用于精确绑定的重放。
+已证明未发送的 Failure 记录为 `Failed`；送达状态不确定、发生异常，或在结算之前崩溃，
+都需要对账，并且绝不会悄悄重新分发。用
+`inspect(owner, logical_call_id(context, core_identity))` 检查状态；
+只有在拿到经独立验证的 provider 一侧证据和完整的 Completion outcome 时，
+才能使用 `reconcile_success`。重放流式调用时，返回的是已捕获的 outcome，不会合成流事件。
 
-更大的 output cap 是新的 semantic call，不是同一 journal slot 的 transport retry 或 replay。Interface 4 仅从 native replay configuration 中移除 cap；prepared-request digest 和保守 resource claim 仍包含它。每个准入 call 必须有独立确定性 ordinal，保留每次 attempt 的 outcome/accounting 和原始 deadline，并从同一 resource bank 获得 admission。既有 slot 的 digest 变化会被拒绝；native history 或 cursor 不续期 credit，也不授权在 uncertain delivery、observer 或 settlement 失败后重新发送。
+更大的输出上限，是一次新的语义调用，不是传输层的重试，也不是对同一个 journal 槽位的重放。接口 4 只把这个上限从 native replay 的配置中排除；已准备请求的摘要和保守的资源预留额度仍然包含它。给每个已准入的调用一个不同的、确定性的序号，保留每次尝试的 outcome 和核算以及原来的截止时间，并从同一个资源 bank 获得准入。已有槽位里的摘要发生变化，会被拒绝；送达状态不确定、observer 失败或结算失败之后，native 历史和游标都既不能续期额度，也不能授权再次发送。
 
-顺序 message part、raw 观测、nullable 用量、attempt metadata 和 native
-continuation 均保留在存储结果中。Native outcome 需要宿主向
-`SQLiteProgramProviderCallJournal(database_path, native_archive)` 提供
-`sp::NativeArchive`。Portable JSON projection 不能重建该权限。旧的 lossy
-receipt 会被拒绝，不会升级或暗中重新 dispatch。Journal 将保守 claim/committed
-token 数量与 provider report 分开保存。使用 durable filesystem database path；
-空路径、`:memory:` 和 `file:` URI 均被拒绝。
+有序的消息 parts、原始观测、可为空的用量、尝试元数据和 native 续接状态，
+仍然是已存储结果的一部分。native outcome 需要把宿主的 `sp::NativeArchive`
+传给 `SQLiteProgramProviderCallJournal(database_path, native_archive)`；
+可移植的 JSON 投影无法重建这种权限。旧的、有损的回执会被拒绝，而不是被升级，
+也不会被悄悄再次分发。journal 把保守的预留额度/已提交的 token 数，与 provider 的报告分开保存。
+请使用持久的文件系统数据库路径：空路径、`:memory:` 和 `file:` URI 路径都会被拒绝。
+这个 broker 作用于 Core 已有的 ReAct 消息状态，而不是装配好的 `ContextEpoch`，
+并且不能与引擎的严格运行时拦截用在同一个内置调用上。宿主自己编写的原生 Provider 调用，
+不在它的范围之内。
 
-该 broker 使用 Core 现有的 ReAct message state，而非组装的 `ContextEpoch`。
-同一内置调用不能同时使用 engine Strict Runtime interposition。
-宿主编写的 native Provider 调用不在其范围内。
+## 通过 native、stdio 或 HTTP 运行的强制 Hook
 
+`MandatoryHookRunner` 既接受现有的 native 适配器，也接受与传输方式无关的
+`HookExecutionBackend`。`RpcHookExecutionAdapter` 把 `HookRpcExecutor` 绑定到该后端。
+同一个固定的 `hooks/invoke` JSON-RPC 方法，既可以走 `StdioJsonRpcTransport`，
+也可以走 `HttpJsonRpcTransport`。两者都运行在 `MCPClient` 会话之上，
+所以 endpoint 是一个同时提供 `hooks/invoke` 的 MCP 服务器。这个方法是 NeoGraph 的扩展，
+不属于 MCP；没有实现它的 MCP 服务器会回答 `-32601`。
 
-## 对native、stdio或HTTP的强制Hook
+RPC Hook 的制品是证据，绝不是权限。`ContextStoreHookArtifactPublisher`
+只接受满足下列条件的制品：
 
-`MandatoryHookRunner`接受现有的原生适配器或传输中立的`HookExecutionBackend`。`RpcHookExecutionAdapter`将`HookRpcExecutor`绑定到该后端。同一个固定的`hooks/invoke` JSON-RPC方法可以使用`StdioJsonRpcTransport`或`HttpJsonRpcTransport`。两者都运行在`MCPClient`会话之上，因此端点是同时提供`hooks/invoke`的MCP服务器。该方法是NeoGraph扩展，不属于MCP；不提供它的MCP服务器会返回`-32601`。
+- 类型是 `HookOutput`；
+- `source_digest` 等于确切的 Hook 调用 ID；并且
+- 运行时事件与该调用一致。
 
-RPC Hook工件是证据，而非权威。`ContextStoreHookArtifactPublisher`仅接受满足以下条件的工件：
+发布以 owner 为作用域，并且是幂等的。如果外部副作用已经成功，但它的制品无法发布，
+该 Hook 就会结算为 `ReconciliationRequired`；它不会被报告为干净的成功。
 
-- 类型为`HookOutput`；
-- `source_digest`等于精确的Hook调用ID；且
-- 运行时事件与调用匹配。
+## 必需的上下文与转换
 
-发布是所有者作用域内的且幂等的。如果外部效果已成功但其工件无法发布，则Hook结算为`ReconciliationRequired`；它不会被报告为完全成功。
+`RuntimeContextRequirements` 把所有必需的制品 ID，与其中必须是 `RequiredSkill`
+制品的那一部分分开。`HardConstraint` 是专门的必需制品类型。每个必需的制品，
+都必须被当前生效的 epoch 选中，必须保持 `required=true`，并计入强制 token 的数量。
 
-## 必需的上下文与变换
+`ContextTransformReceipt` 在 v1 中有意保持保守。转换器可以替换或压缩可选的证据，
+但每个必需的输入制品 ID，都必须以字节完全相同的形式出现在输出集合里。
+改写不被接受为约束得以保留的证明。
 
-`RuntimeContextRequirements`将所有必需的工件ID与必须为`RequiredSkill`工件的子集分开。`HardConstraint`是一种专用的必需工件类型。每个必需工件都必须在活动纪元中被选中，必须保留`required=true`，并贡献给强制令牌计数。
+## 运行时的开发者指令
 
-`ContextTransformReceipt`在v1中刻意采取保守策略。变换器可以替换或压缩可选证据，但每个必需的输入工件ID必须按字节完全一致地出现在输出集中。改写不视为约束保持的证明。
-
-## 运行时开发者指令
-
-`RuntimeDeveloperInstruction` 是不可变的开发者输入，而非权威。`RuntimeInstructionController::submit_and_plan` 执行此顺序：
+`RuntimeDeveloperInstruction` 是不可变的开发者输入，不是权限。
+`RuntimeInstructionController::submit_and_plan` 按下面的顺序执行：
 
 ```text
 append Developer-trust history record
@@ -117,18 +138,19 @@ append Developer-trust history record
   -> persist the required decision artifact
 ```
 
-已关闭的决策为：
+封闭的决策集合是：
 
-- `SatisfiedInPlace`;
-- `Rejected`;
+- `SatisfiedInPlace`；
+- `Rejected`；
 - `ReplaceAtHandoff`；以及
-- `MigrateGraph`.
+- `MigrateGraph`。
 
-应用转换时，会在委托给现有`ProgramRuntime::replace`或`migrate_graph`路径之前立即重新检查谱系头部。过期的决策不能成为权威。
+应用一次转换时，在委托给现有的 `ProgramRuntime::replace` 或 `migrate_graph`
+路径之前，会立即重新检查谱系 head。过期的决策无法变成权限。
 
-## 有界Program合成
+## 有界的 Program 合成
 
-`ProgramSynthesisGateway`提供宿主拥有的生成后继路径：
+`ProgramSynthesisGateway` 提供由宿主持有的、生成后继者的路径：
 
 ```text
 immutable ProgramSynthesisProposal
@@ -140,12 +162,18 @@ immutable ProgramSynthesisProposal
   -> immutable ProgramSynthesisReceipt
 ```
 
-预留必须显示一个不可再生`max_dynamic_compiles`单元的精确递减，且不得增加任何其他预算。预留发生在编译之前，因此被拒绝的源代码不会收回其编译单元。语义验证是强制性的，在编译之后但在准入(admission)解析器之前运行。其不可变收据绑定提案、预留、编译后的捆绑包、验证器身份、语义合约身份、裁决和证据摘要。被拒绝的裁决暴露类型化证据，且不能发布`ProgramVersion`。网关永远不会激活、绑定、迁移或生成其结果。这些仍是通过现有Program API进行的独立宿主决策。
+预留必须表现为恰好扣减一个不可续期的 `max_dynamic_compiles` 单位，并且不得增加任何其他预算。
+预留发生在编译之前，所以被拒绝的源码拿不回它的编译额度。语义验证是强制的，
+在编译之后、准入解析器之前运行。它不可变的回执，绑定了提案、预留、编译好的 bundle、
+验证器标识、语义契约标识、结论和证据摘要。被拒绝的结论会给出带类型的证据，
+并且无法发布 `ProgramVersion`。网关从不激活、绑定、迁移或 spawn 它的结果。
+这些仍然是宿主通过现有 Program API 做出的独立决定。
 
-运行时指令规划器可以调用网关，然后在替换或迁移决策中返回确切的已准入版本。这保留了：
+运行时的指令规划器可以调用这个网关，然后在替换或迁移的决策里，
+返回确切的已准入版本。这样就保持了：
 
 ```text
 proposal -> reserve -> compile -> semantic validate -> admit -> decide -> migrate/spawn
 ```
 
-而不向生成的JavaScript暴露编译器、Catalog、凭据或激活权限。
+而无需把编译器、Catalog、凭据或激活权限暴露给生成出来的 JavaScript。
