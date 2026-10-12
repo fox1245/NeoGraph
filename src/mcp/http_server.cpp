@@ -231,6 +231,18 @@ struct MCPHttpServer::Impl {
         if (!is_loopback_bind(config.host) && !config.bearer_authorizer) {
             throw std::invalid_argument("remote MCP HTTP binds require a bearer authorizer");
         }
+        if (!config.protected_resource_metadata.is_null()) {
+            metadata_url = metadata_url_of(config.protected_resource_metadata);
+            const auto& metadata = config.protected_resource_metadata;
+            if (metadata.contains("scopes_supported") && metadata["scopes_supported"].is_array()) {
+                const json scopes = metadata["scopes_supported"];
+                for (std::size_t i = 0; i < scopes.size(); ++i) {
+                    if (!scopes[i].is_string()) continue;
+                    if (!challenge_scope.empty()) challenge_scope.push_back(' ');
+                    challenge_scope += scopes[i].get<std::string>();
+                }
+            }
+        }
 
         http.set_payload_max_length(config.max_payload_bytes);
         // A request holds an HTTP thread until it is answered, and a tools/call
@@ -245,6 +257,55 @@ struct MCPHttpServer::Impl {
 
     ServerFactory       factory;
     MCPHttpServerConfig config;
+    /// RFC 9728 metadata URL and the scopes a 401 challenge names; empty
+    /// without protected_resource_metadata.
+    std::string metadata_url;
+    std::string challenge_scope;
+
+    // RFC 9728 section 3.1: the metadata of resource https://host/path lives
+    // at https://host/.well-known/oauth-protected-resource/path. MCP
+    // authorization requires at least one authorization server.
+    static std::string metadata_url_of(const json& metadata) {
+        if (!metadata.is_object() || !metadata.contains("resource") ||
+            !metadata["resource"].is_string()) {
+            throw std::invalid_argument(
+                "MCP protected_resource_metadata needs a string \"resource\"");
+        }
+        if (!metadata.contains("authorization_servers") ||
+            !metadata["authorization_servers"].is_array() ||
+            metadata["authorization_servers"].size() == 0) {
+            throw std::invalid_argument(
+                "MCP protected_resource_metadata needs at least one authorization server");
+        }
+        const auto resource = metadata["resource"].get<std::string>();
+        const auto scheme   = resource.find("://");
+        if (scheme == std::string::npos ||
+            (resource.compare(0, scheme, "https") != 0 && resource.compare(0, scheme, "http") != 0) ||
+            resource.find_first_of("\r\n\" #?") != std::string::npos) {
+            throw std::invalid_argument(
+                "MCP protected_resource_metadata resource must be an http(s) URL without "
+                "query or fragment");
+        }
+        const auto path = resource.find('/', scheme + 3);
+        const auto origin = resource.substr(0, path);
+        const auto tail = path == std::string::npos ? std::string() : resource.substr(path);
+        return origin + "/.well-known/oauth-protected-resource" + (tail == "/" ? std::string() : tail);
+    }
+
+    std::string bearer_challenge(const char* error) const {
+        std::string challenge = "Bearer";
+        std::string separator = " ";
+        if (error) {
+            challenge += separator + "error=\"" + error + "\"";
+            separator = ", ";
+        }
+        if (!metadata_url.empty()) {
+            challenge += separator + "resource_metadata=\"" + metadata_url + "\"";
+            separator = ", ";
+        }
+        if (!challenge_scope.empty()) challenge += separator + "scope=\"" + challenge_scope + "\"";
+        return challenge;
+    }
     httplib::Server     http;
     std::thread         listener;
     std::atomic<bool>   running{false};
@@ -269,7 +330,7 @@ struct MCPHttpServer::Impl {
         constexpr std::string_view prefix        = "Bearer ";
         if (authorization.size() <= prefix.size() ||
             authorization.compare(0, prefix.size(), prefix) != 0) {
-            response.set_header("WWW-Authenticate", "Bearer");
+            response.set_header("WWW-Authenticate", bearer_challenge(nullptr));
             http_error(response, 401, -32001, "Bearer authentication is required");
             return std::nullopt;
         }
@@ -281,7 +342,7 @@ struct MCPHttpServer::Impl {
             return std::nullopt;
         }
         if (!scope || scope->empty()) {
-            response.set_header("WWW-Authenticate", "Bearer error=\"invalid_token\"");
+            response.set_header("WWW-Authenticate", bearer_challenge("invalid_token"));
             http_error(response, 401, -32001, "Bearer token is invalid");
             return std::nullopt;
         }
@@ -661,6 +722,19 @@ struct MCPHttpServer::Impl {
     }
 
     void register_routes() {
+        if (!config.protected_resource_metadata.is_null()) {
+            // RFC 9728 discovery: public metadata at the resource's well-known
+            // path and, for clients that try it first, at the root.
+            const auto metadata = config.protected_resource_metadata.dump();
+            const auto serve = [metadata](const httplib::Request&, httplib::Response& response) {
+                response.status = 200;
+                response.set_content(metadata, "application/json");
+            };
+            const auto path = metadata_url.substr(metadata_url.find("/.well-known/"));
+            http.Get(path, serve);
+            if (path != "/.well-known/oauth-protected-resource")
+                http.Get("/.well-known/oauth-protected-resource", serve);
+        }
         http.Post(config.endpoint,
                   [this](const auto& request, auto& response) { handle_post(request, response); });
         http.Get(config.endpoint,

@@ -66,6 +66,20 @@ struct NEOGRAPH_API MCPHttpServerConfig {
      * authorizer (allowed only on loopback binds) the scope is empty.
      */
     BearerAuthorizer bearer_authorizer;
+
+    /**
+     * OAuth 2.0 Protected Resource Metadata (RFC 9728) for deployments whose
+     * bearer tokens come from an OAuth authorization server, as MCP
+     * authorization describes. It needs `resource` (this server's http(s) URL,
+     * the endpoint included) and a non-empty `authorization_servers`. The
+     * server then publishes it at
+     * `/.well-known/oauth-protected-resource<path of resource>` and at
+     * `/.well-known/oauth-protected-resource`, and a 401 names it in
+     * `WWW-Authenticate: Bearer resource_metadata="..."`, with
+     * `scope="..."` from `scopes_supported`. Null (the default) publishes
+     * nothing: static bearer tokens need no discovery.
+     */
+    json protected_resource_metadata;
 };
 
 /**

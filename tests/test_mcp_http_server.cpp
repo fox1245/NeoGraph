@@ -689,4 +689,73 @@ TEST(MCPHttpServerTest, BindsSessionsToBearerAuthorizationScope) {
     EXPECT_EQ(correct_scope_delete->status, 204);
 }
 
+TEST(MCPHttpServerTest, PublishesProtectedResourceMetadataForOAuthDeployments) {
+    // MCP-S-09: with OAuth-issued bearer tokens, MCP authorization requires
+    // RFC 9728 discovery, from the 401 challenge or a well-known URI.
+    MCPHttpServerConfig config;
+    config.bearer_authorizer = [](std::string_view token) -> std::optional<std::string> {
+        if (token == "good") return "principal";
+        return std::nullopt;
+    };
+    config.protected_resource_metadata = {
+        {"resource", "https://mcp.example.com/mcp"},
+        {"authorization_servers", json::array({"https://auth.example.com"})},
+        {"scopes_supported", json::array({"mcp:tools", "mcp:read"})},
+        {"bearer_methods_supported", json::array({"header"})},
+    };
+    const auto metadata = config.protected_resource_metadata;
+    MCPHttpServer server(make_http_session, std::move(config));
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+
+    for (const char* path : {"/.well-known/oauth-protected-resource/mcp",
+                             "/.well-known/oauth-protected-resource"}) {
+        auto published = client.Get(path);
+        ASSERT_TRUE(published) << path;
+        EXPECT_EQ(published->status, 200) << path;
+        EXPECT_EQ(json::parse(published->body), metadata) << path;
+    }
+    const auto initialize = request(1, "initialize",
+                                    {{"protocolVersion", "2025-11-25"},
+                                     {"capabilities", json::object()},
+                                     {"clientInfo", {{"name", "oauth"}, {"version", "1"}}}})
+                                .dump();
+    auto missing = client.Post("/mcp", base_headers(), initialize, "application/json");
+    ASSERT_TRUE(missing);
+    EXPECT_EQ(missing->status, 401);
+    EXPECT_EQ(missing->get_header_value("WWW-Authenticate"),
+              "Bearer resource_metadata=\"https://mcp.example.com/.well-known/"
+              "oauth-protected-resource/mcp\", scope=\"mcp:tools mcp:read\"");
+    auto headers = base_headers();
+    headers.emplace("Authorization", "Bearer bad");
+    auto invalid = client.Post("/mcp", headers, initialize, "application/json");
+    ASSERT_TRUE(invalid);
+    EXPECT_EQ(invalid->status, 401);
+    EXPECT_EQ(invalid->get_header_value("WWW-Authenticate").rfind(
+                  "Bearer error=\"invalid_token\", resource_metadata=", 0),
+              0u);
+
+    MCPHttpServerConfig incomplete;
+    incomplete.protected_resource_metadata = {{"resource", "https://mcp.example.com/mcp"}};
+    EXPECT_THROW(MCPHttpServer(make_http_session, std::move(incomplete)), std::invalid_argument);
+}
+
+TEST(MCPHttpServerTest, StaticBearerTokensPublishNoMetadata) {
+    MCPHttpServerConfig config;
+    config.bearer_authorizer = [](std::string_view) -> std::optional<std::string> {
+        return std::nullopt;
+    };
+    MCPHttpServer server(make_http_session, std::move(config));
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+    auto published = client.Get("/.well-known/oauth-protected-resource");
+    ASSERT_TRUE(published);
+    EXPECT_EQ(published->status, 404);
+    auto missing = client.Post("/mcp", base_headers(), request(1, "ping").dump(), "application/json");
+    ASSERT_TRUE(missing);
+    EXPECT_EQ(missing->get_header_value("WWW-Authenticate"), "Bearer");
+}
+
 }  // namespace
