@@ -141,7 +141,7 @@ Program は Core グラフを、永続的な識別子、予算、admission を�
 | 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | yes | streamable HTTP 上の MCP。サーバーのツールを検出して ReAct ループに渡します。デモサーバーは標準ライブラリだけの Python で、モデルはスクリプトで代用します。 |
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | key | 人の承認付き MCP。すべての MCP ツール呼び出しの前で `interrupt_before` により止め、保留中の呼び出しを表示して再開します。 |
 | 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | service | `Send` を使う MCP。1 つの planner が MCP ツールごとに呼び出しを作り、並列に実行します。モデルは不要ですが、MCP サーバーが動いている必要があります。 |
-| 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | key | 1 つのエージェントが 2 つの MCP サーバー(HTTP と stdio)を 1 つのツール一覧にまとめて使います。 |
+| 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | yes | 1 つのエージェントが 2 つの MCP サーバー(HTTP と stdio)のツールを 1 つの一覧にまとめて使い、2 回の呼び出しは別々のサーバーに届きます。 |
 | 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | key | MCP 上のオペレーターフィードバック。スクリプト化した 2 回目のターンが下書きを批評し、次の実行がそれを取り込みます。 |
 | 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | service | リバースエンジニアリングエージェント。stdio 上の GhidraMCP でストリップされたバイナリの関数名を復元します。Ghidra とキーが必要です。 |
 | 38 | [`38_a2a_server.cpp`](38_a2a_server.cpp) | yes | A2A サーバー。グラフを SSE ストリーミング付きで A2A 0.3 と 1.0 で公開し、自前のクライアントで呼び出します。`serve` を渡すと待ち受けを続けます。 |

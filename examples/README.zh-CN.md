@@ -141,7 +141,7 @@ Program 把 Core 图包进带有持久标识、预算和准入(admission)的生�
 | 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | yes | 基于 streamable HTTP 的 MCP：发现服务器的工具并交给 ReAct 循环。演示服务器只用 Python 标准库，模型由脚本代替。 |
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | key | 带人工批准的 MCP：在任何 MCP 工具调用前 `interrupt_before` 暂停，展示待执行调用，然后恢复。 |
 | 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | service | 结合 `Send` 的 MCP：一个 planner 为每个 MCP 工具发出一次调用，调用并行执行。不需要模型，但需要 MCP 服务器在运行。 |
-| 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | key | 一个智能体使用两个 MCP 服务器（HTTP 与 stdio），工具合并成一个列表。 |
+| 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | yes | 一个智能体把两个 MCP 服务器（HTTP 与 stdio）的工具合并为一个列表，它的两次调用分别发往不同的服务器。 |
 | 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | key | MCP 上的操作员反馈：脚本化的第二轮评论草稿，下一次运行采纳该反馈。 |
 | 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | service | 逆向工程智能体：通过 stdio 上的 GhidraMCP 为被剥离符号的二进制恢复函数名。需要 Ghidra 和 key。 |
 | 38 | [`38_a2a_server.cpp`](38_a2a_server.cpp) | yes | A2A 服务器：以 SSE 流式方式通过 A2A 0.3 与 1.0 提供图，并用自带客户端调用。传入 `serve` 可持续监听。 |
