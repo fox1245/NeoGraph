@@ -3,42 +3,42 @@
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
 
-`neograph-engine`は、同じC++ランタイムのpybind11サーフェスです。ホイールによりCore、LLM、Program/QuickJS、MCP、SQLiteランタイムの永続性が有効になります。オプションのソースビルドでは、コンパイルされたコンポーネントのみが公開されます。
+`neograph-engine` は、同じC++ランタイムをpybind11で公開したパッケージです。wheelでは、Core、LLM、Program/QuickJS、MCP、SQLiteによるランタイムの永続化が有効になっています。wheelを使わずソースからビルドした場合は、コンパイルしたコンポーネントだけが公開されます。
 
-このガイドには SchemaProvider SDK `0.3.0`、インターフェース revision `6`、共有ライブラリー ABI revision `6` でビルドした wheel が必要です。バンドルされたコンポーネントをまとめてインストールします。`complete` を公開する旧ホイールは異なるプロバイダーインターフェースを使うため、以下の型付き例を実行できません。
+このガイドの内容は、SchemaProvider SDK `0.3.0`（インターフェースリビジョン `6`、共有ライブラリのABIリビジョン `6`）でビルドしたwheelが前提です。同梱されているコンポーネントは、まとめてインストールしてください。`complete` を公開している古いwheelはプロバイダーのインターフェースが異なるため、以下の型付きのサンプルは動きません。
 
 ```bash
 pip install neograph-engine
 ```
 
-## 型付きプロバイダーリクエストと結果
+## 型付きのプロバイダーリクエストと結果
 
-`Provider` はリクエストの準備とディスパッチを分離します。`SchemaProvider` は SchemaProvider SDK を通じて、ファミリー別のリクエストを検証しエンコードします。`PreparedProviderRequest` は、一度のディスパッチが消費するまで、そのネイティブの準備結果を保持します。
+`Provider` は、リクエストの準備とディスパッチを分けています。`SchemaProvider` は、SchemaProvider SDKを通じて、ファミリー固有のリクエストを検証してエンコードします。`PreparedProviderRequest` は、その準備結果（ネイティブ側のもの）を、1回のディスパッチが消費するまで保持します。
 
-| 操作 | Python シグネチャ | 結果 |
+| 操作 | Pythonのシグネチャ | 結果 |
 |---|---|---|
-| 記述子の受け入れ | `load_provider_descriptor(source: str, policy=None)` | `ValidatedDescriptor`。不正な閉じた JSON は `ValueError` |
-| プロバイダーの構築 | `SchemaProvider(descriptor, options, defaults)` | 受け入れ済みのエンドポイント/ファミリーとランタイムポリシーを持つプロバイダー |
-| リクエストの構築 | `make_provider_request(provider, model, messages, tools=[], controls=ProviderControls(), mode=ProviderMode.Collect)` | 型付き `ProviderRequest` |
+| ディスクリプターのadmission | `load_provider_descriptor(source: str, policy=None)` | `ValidatedDescriptor`。closedなJSONとして不正な場合は `ValueError` |
+| プロバイダーの構築 | `SchemaProvider(descriptor, options, defaults)` | admission済みのエンドポイント／ファミリーとランタイムポリシーを持つプロバイダー |
+| リクエストの構築 | `make_provider_request(provider, model, messages, tools=[], controls=ProviderControls(), mode=ProviderMode.Collect)` | 型付きの `ProviderRequest` |
 | 準備 | `provider.prepare(request)` | `PreparedProviderRequest` |
-| 一度のディスパッチ | `provider.dispatch(prepared)` | 所有された `ProviderOutcome` |
-| 準備とディスパッチ | `provider.invoke(request)` | 所有された `ProviderOutcome` |
+| 1回だけディスパッチ | `provider.dispatch(prepared)` | 所有権を持つ `ProviderOutcome` |
+| 準備とディスパッチ | `provider.invoke(request)` | 所有権を持つ `ProviderOutcome` |
 
-`model` は明示的に指定します。`ProviderControls` は `max_output_tokens`、`temperature`、`top_p` などの型付き制限と生成制御を提供します。ファクトリーは SDK のファミリー別ペイロードを構築し、生の辞書では置き換えられません。ストリーミングを要求するには `request.mode` を `ProviderMode.Stream` に設定します。`on_event` の設定だけではモードを選択しません。`request` は `cancel_token`、`on_event`、`observer_limits`、省略可能な `timeout_ms` も保持します。
+`model` は明示的に指定します。`ProviderControls` で、`max_output_tokens`、`temperature`、`top_p` などの上限値と生成のコントロールを、型付きで指定します。SDKのファミリー固有のペイロードは、ファクトリーが組み立てます。生の辞書で置き換えることはできません。ストリーミングを要求するには、`request.mode` を `ProviderMode.Stream` にします。`on_event` を設定しただけでは、ストリーミングにはなりません。`request` には、`cancel_token`、`on_event`、`observer_limits`、省略可能な `timeout_ms` もあります。
 
-`ProviderControls.provider` と `response_format`、`SchemaProviderDefaults.provider`、`OpenRouterRouting.max_price`、`ProviderToolResult.host` は独立した省略可能なレコードを返します。値があれば、レコードを読み、編集してからプロパティに再代入します。`controls.provider.order` だけを変更しても controls は更新されません。レコードを解除するには `None` を代入します。
+`ProviderControls.provider` と `response_format`、`SchemaProviderDefaults.provider`、`OpenRouterRouting.max_price`、`ProviderToolResult.host` は、元のオブジェクトから切り離された省略可能なレコード（独立したコピー）を返します。値がある場合は、レコードを読み出して編集し、プロパティに代入し直してください。`controls.provider.order` を書き換えるだけでは、controlsは更新されません。レコードを消すには `None` を代入します。
 
-`request.timeout_ms` に表現可能な非負の値を代入すると、その時点で絶対期限を設定します。準備の直前に設定してください。その後の読み取りは残りのミリ秒を返し、期限切れ後はゼロに制限されます。`None` のままなら、準備時にプロバイダーの既定タイムアウトを使います。準備済みハンドルを保持して待機しても、期限は更新されません。
+`request.timeout_ms` に、表現できる範囲の0以上の値を代入すると、その時点から絶対的なデッドラインが動き出します。準備の直前に設定してください。その後に読み出すと残りのミリ秒数が返り、期限が切れた後は0になります。`None` のままにすると、準備の時点でプロバイダーのデフォルトのタイムアウトが使われます。準備済みのハンドルを持ったまま待っても、デッドラインは延長されません。
 
-### 記述子とランタイムポリシー
+### ディスクリプターとランタイムポリシー
 
-記述子は `load_provider_descriptor` が受け入れる、バージョン付きの閉じた JSON です。ファミリー、`base_url`、ルート、フィールドバインディング、認証規則を受け入れます。`model` はリクエストで、資格情報はランタイムオプションで指定します。`ProviderRuntimeOptions` は `api_key`、`default_timeout_ms`、`ca_file`、`workers` と SDK のトランスポート/リソース制限を提供します。`SchemaProviderDefaults` は型付きプロバイダー既定値を提供します。資格情報はランタイムオプションに保存し、記述子ファイルやログには含めません。
+ディスクリプターは、`load_provider_descriptor` が受け付ける、バージョン付きのclosedなJSONです。ここでadmissionの対象になるのは、ファミリー、`base_url`、ルート、フィールドのバインディング、認証規則です。`model` はリクエストで、認証情報はランタイムオプションで渡します。`ProviderRuntimeOptions` には、`api_key`、`default_timeout_ms`、`ca_file`、`workers`、およびSDKのトランスポートとリソースの上限があります。`SchemaProviderDefaults` は、型付きのプロバイダーのデフォルト値を提供します。認証情報はランタイムオプションに置き、ディスクリプターのファイルやログには含めないでください。
 
-`ProviderDescriptorPolicy.identity` は SDK ポリシーの生の SHA-256 ダイジェストを含む Python `bytes` を返します。表示には `policy.identity.hex()` を使います。識別子そのものは UTF-8 テキストでも、16 進文字列の別名でもありません。
+`ProviderDescriptorPolicy.identity` は、SDKのポリシーのSHA-256ダイジェスト（生のバイト列）を、Pythonの `bytes` として返します。表示には `policy.identity.hex()` を使ってください。identity自体は、UTF-8のテキストでも、16進文字列の別名でもありません。
 
-現在のトランスポートは libcurl を使います。`prefer_libcurl` スイッチ、ランタイムのエンドポイント上書き、WebSocket トランスポートはありません。[C++ プロバイダーリファレンス](reference-en.md)は記述子の受け入れと対応リクエストファミリーを説明しています。
+現在のトランスポートはlibcurlです。`prefer_libcurl` というスイッチも、実行時にエンドポイントを上書きする手段も、WebSocketトランスポートもありません。ディスクリプターのadmissionと、対応するリクエストファミリーは、[C++プロバイダーリファレンス](reference-en.md)で説明しています。
 
-[SDK 使用ガイド](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#run-the-first-request-without-a-hosted-api)の一要求ループバックピアを起動し、別のターミナルでこのテキスト専用例を実行します。エンドポイント、モデル、出力上限はそのピアに一致し、資格情報を送信しません。HTTPS ピアには `NG_EXAMPLE_CA_FILE` で信頼する CA を指定します。ホストされたエンドポイントでは、記述子の origin とリクエストモデルを明示的に変更し、その origin 用の資格情報をランタイムオプションに指定します。ホストされた呼び出しには料金が発生する場合があります。
+まず、[SDK使用ガイド](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#run-the-first-request-without-a-hosted-api)にある、1リクエスト分だけ応答するループバックのピアを起動します。そのうえで、別のターミナルから、テキストだけを使うこのサンプルを実行します。エンドポイント、モデル、出力の上限は、このピアに合わせてあります。認証情報は送信しません。HTTPSのピアを使う場合は、信頼するCAを `NG_EXAMPLE_CA_FILE` で指定します。ホスト型のエンドポイントを使う場合は、ディスクリプターのoriginとリクエストのモデルを明示的に変更し、そのorigin用の認証情報をランタイムオプションで渡してください。ホスト型の呼び出しには、料金がかかることがあります。
 
 ```python
 import json
@@ -90,9 +90,9 @@ count = outcome.usage.output_total
 print("output tokens:", count.value if count is not None else "unknown")
 ```
 
-ハンドルが不要な場合は `provider.invoke(request)` が準備とディスパッチをまとめて実行します。`outcome.text` は可視テキストの投影であり、`outcome.messages` は完全な型付きパートを保持します。使用量カウンターが省略された場合は `unknown`、ゼロが報告された場合は `0` と表示します。
+ハンドルが不要な場合は、`provider.invoke(request)` で準備とディスパッチをまとめて行えます。`outcome.text` は、見えるテキストだけを取り出したものです。`outcome.messages` には、型付きのパートがすべて残っています。使用量のカウンターが欠けている場合は `unknown`、ゼロが報告された場合は `0` と表示されます。
 
-リンク先の合成応答ピアを使った場合の期待出力:
+リンク先の模擬ピアを使ったときの、期待される出力は次のとおりです。
 
 ```text
 consumed: True
@@ -100,11 +100,11 @@ Hello.
 output tokens: 0
 ```
 
-カウンター省略の経路を確認するには、ピアの `usage` メンバー全体を削除して再起動します。最後の行は `output tokens: unknown` になるはずです。これは実モデルのトークン計数ではなく、プロトコルのマッピングを確認する例です。
+カウンターが欠けた場合の経路を試すには、ピアの `usage` メンバーをまるごと削除して、再起動します。最後の行が `output tokens: unknown` になるはずです。これで確認できるのはプロトコルのマッピングで、実際のモデルのトークン計数ではありません。
 
-### ファミリー別制御
+### ファミリー別のコントロール
 
-パッケージ版、native archive v3、portable JSON v2 は別です。例は制御構築のみで、対応ファミリーの承認済み provider が必要です。最初のループバックは変更しません。OpenRouter 専用制御は未承認ローカル origin で I/O 前に拒否されます。
+パッケージのバージョン、ネイティブarchive v3、ポータブルJSON v2は、それぞれ別物です。以下の断片は、ディスパッチせずにコントロールを組み立てるだけです。それぞれ、対応するファミリーのadmission済みプロバイダーで使ってください。最初のループバックのリクエストは、変更しないでください。OpenRouter専用のコントロールは、admission前のoriginに対して、I/Oの前に拒否されます。
 
 ```python
 chat = ng.ProviderControls()
@@ -152,17 +152,17 @@ choice.mode = ng.GeminiToolChoiceMode.Auto
 gemini.gemini_tool_choice = choice
 ```
 
-既定構築後にフィールドを代入します。キーワードコンストラクターはありません。optional レコード/ベクトルは独立コピーなので編集後に再代入します。`OpenRouterRouting.max_price` もその一つで、`routing.max_price.prompt_nano_usd = ...` はコピーを変えるだけなので、`ng.OpenRouterMaxPrice` を作ってオブジェクト全体を代入します。金額は整数 nanoUSD で、100万トークンあたりの `prompt_nano_usd` と `completion_nano_usd`、および `image_nano_usd`、`audio_nano_usd`、`request_nano_usd` があり、正確な10進 USD で送信されます（`75_000_000` は `0.075`）。少なくとも一つが必要で、2**53 を超えられません。`SchemaProviderDefaults.provider` は `max_price` をほかの routing フィールドと同じように統合し、リクエスト自身の値が既定値を置き換えます。Chat reasoning の `effort/max_tokens/exclude/enabled`、`include_reasoning`、`usage_include`、代替 `models` は宣言された OpenRouter origin が必要です。既存の `reasoning_effort/service_tier/provider/response_format` も残ります。
+レコードはデフォルトで構築してから、フィールドを代入します。これらのレコードには、キーワード引数を受け取るコンストラクターはありません。省略可能なレコードとベクトルは、独立したコピーを返すので、編集したら代入し直してください。`OpenRouterRouting.max_price` もその1つです。`routing.max_price.prompt_nano_usd = ...` はコピーを書き換えるだけなので、`ng.OpenRouterMaxPrice` を作って、オブジェクトごと代入します。金額は整数のnanoUSDで指定します。項目は、100万トークンあたりの `prompt_nano_usd` と `completion_nano_usd`、および `image_nano_usd`、`audio_nano_usd`、`request_nano_usd` です。送信時には、正確な10進数のUSDになります（`75_000_000` は `0.075`）。少なくとも1つは必須で、どの値も2**53を超えられません。`SchemaProviderDefaults.provider` は、`max_price` を他のルーティング項目と同じように統合します。リクエスト自身の値が、デフォルト値を置き換えます。`ChatReasoningOptions` には、`max_tokens` と `exclude` もあります。入れ子のChat reasoning、`include_reasoning`、`usage_include`、`models` には、宣言済みのOpenRouterのoriginが必要です。スカラーの `reasoning_effort`、`service_tier`、型付きのルーティング、レスポンスフォーマットは、引き続き使えます。
 
-Responses verbosity は `Low/Medium/High`、truncation は `Disabled/Auto`、include は `ReasoningEncryptedContent/WebSearchSources/FileSearchResults/MessageOutputTextLogprobs/ComputerCallOutputImageUrl/CodeInterpreterCallOutputs` です。`responses_include=None` は既定 encrypted reasoning を維持し、`[]` を含む明示リストはその内容だけを選択して後続 native replay が不適格になる場合があります。store/reasoning/hosted tools/tool-call 上限も残ります。
+Responsesのverbosityは `Low/Medium/High`、truncationは `Disabled/Auto` です。includeでは、`WebSearchSources`、`FileSearchResults`、`MessageOutputTextLogprobs`、`ComputerCallOutputImageUrl`、`CodeInterpreterCallOutputs` も指定できます。`responses_include=None` なら、暗号化されたreasoningをincludeするデフォルトのまま変わりません。`[]` を含め、リストを明示すると、そのリストだけが選ばれ、後続のネイティブリプレイの対象外になることがあります。既存のstore、reasoning、ホスト型ツール、ツール呼び出しの上限も、引き続き型付きで指定します。
 
-Messages thinking は `Manual/Adaptive/Disabled`。Manual budget は承認最小値以上、output cap 未満で、mode なしの budget は manual です。Adaptive/disabled は budget を禁止します。有効な thinking は temperature を省略しますがモデル禁止は明示 temperature を拒否します。effort は `Low/Medium/High/Max`、TTL は `FiveMinutes/OneHour`、tool choice は `Auto/Any/None_/Tool`。`Tool` は宣言された client tool の `name` が必要です。routing には宣言された OpenRouter origin が必要です。
+Messagesのthinkingは `Manual/Adaptive/Disabled` です。Manualでは、`thinking_budget` を、admission済みの最小値以上、出力上限未満にする必要があります。モードを省略してbudgetだけを指定すると、Manualになります。Adaptive/Disabledでは、budgetを指定できません。thinkingを有効にすると、ベンダーの仕様によりtemperatureは省かれますが、モデルごとの禁止事項によって、temperatureを明示すると拒否されます。effortは `Low/Medium/High/Max`、キャッシュのTTLは `FiveMinutes/OneHour`、tool choiceは `Auto/Any/None_/Tool` で、`Tool` には、宣言済みのクライアントツールの `name` が必要です。Messagesでルーティングを使うには、宣言済みのOpenRouterのoriginが必要です。
 
-Gemini level は `Minimal/Low/Medium/High` で `thinking_budget` と排他的です。tool choice は `Auto/Any/None_/Validated`、`allowed_function_names` はリストで `required_tool` と排他的です。safety category は `Harassment/HateSpeech/SexuallyExplicit/DangerousContent/CivicIntegrity`、threshold は `BlockNone/BlockOnlyHigh/BlockMediumAndAbove/BlockLowAndAbove/Off`。誤ったファミリー/範囲/thinking・cap・tool 組み合わせは I/O 前に拒否します。temperature 禁止 prefix は ASCII 大小文字を無視し最後の `/` 後のモデルにも一致します。Chat/Responses: `gpt-5/gpt-6/o1/o3/o4`、Messages: `claude-opus-4-7/claude-opus-4-8/claude-opus-5/claude-sonnet-5/claude-fable-`。[SDK 制御の承認](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#reasoning-sampling-and-tool-controls)を参照してください。
+Geminiのthinking levelは `Minimal/Low/Medium/High` で、`thinking_budget` とは併用できません。tool choiceは `Auto/Any/None_/Validated` で、`allowed_function_names` にはリストを渡し、`required_tool` とは併用できません。safetyのカテゴリは `Harassment/HateSpeech/SexuallyExplicit/DangerousContent/CivicIntegrity`、しきい値は `BlockNone/BlockOnlyHigh/BlockMediumAndAbove/BlockLowAndAbove/Off` です。ファミリーの誤り、範囲外の値、組み合わせられないthinking・上限・ツールのコントロールは、I/Oの前に拒否されます。temperatureを禁止するモデルの接頭辞は、ASCIIの大文字小文字を区別せずに比較します。最後の `/` より後ろの部分も対象です。Chat/Responsesでは `gpt-5`、`gpt-6`、`o1`、`o3`、`o4`、Messagesでは `claude-opus-4-7`、`claude-opus-4-8`、`claude-opus-5`、`claude-sonnet-5`、`claude-fable-` が該当します。詳しくは[SDKのコントロールのadmission](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#reasoning-sampling-and-tool-controls)を参照してください。
 
-### 承認前のデプロイヘッダー
+### admission前のデプロイ用ヘッダー
 
-`load_provider_descriptor(source, policy=None)` は `${VAR}` をリテラルとして扱います。次の helper は実際の承認前にホスト値を処理します。`source` は Messages 記述子の JSON 文字列です。
+通常の `load_provider_descriptor(source, policy=None)` は、`${VAR}` をそのままの文字列として扱います。次のヘルパーは、実際のディスクリプターのadmissionの前に、ホスト側の値を前処理します。
 
 ```python
 environment = ng.ProviderDeploymentHeaderEnvironment()
@@ -174,11 +174,11 @@ descriptor = ng.load_provider_descriptor_with_deployment_headers(
 )
 ```
 
-`load_provider_descriptor_with_environment_headers(source, overrides=[], policy=None)` は Messages 用の optional `ANTHROPIC_WORKSPACE_ID/ANTHROPIC_BETA` を読み、未設定/空値を省略します。リテラルヘッダーが環境より優先し、明示 pair が両方を大小文字無視で上書きします。重複 override/不正・予約名/改行は承認失敗です。両 helper は optional `policy` を受け取り、承認済み記述子の変更や encoder template 評価を行いません。
+`load_provider_descriptor_with_environment_headers(source, overrides=[], policy=None)` は、Messages用に、省略可能な `ANTHROPIC_WORKSPACE_ID` と `ANTHROPIC_BETA` を環境変数から読み取ります。未設定または空の値は省かれます。優先順位は、ディスクリプターにリテラルで書いたヘッダーが環境変数より上で、明示的に渡したペアが、その両方を、大文字小文字を区別せずに上書きします。overridesの重複、不正な名前や予約された名前、改行を含む値は、admissionで失敗します。どちらのヘルパーも省略可能な `policy` を受け取ります。admission済みのディスクリプターを変更することも、エンコーダーのテンプレートを評価することもありません。
 
-### Responses カーソルと外部 Gemini 履歴
+### ResponsesカーソルとGeminiの外部履歴
 
-`previous_response_id` は provider 保管状態を選択します。全履歴ではなく新入力だけを送信し、最初の成功した Responses 呼び出しの bound controls と真正な terminal ID を維持します。
+`previous_response_id` は、プロバイダー側が保持しているResponsesの状態を指定します。送るのは新しい入力だけで、履歴全体をもう一度送ることはしません。成功したResponses呼び出しから始めて、その呼び出しに結び付いたコントロールと、本物の終端ID（terminal ID）を保持してください。
 
 ```python
 # first_request/first_outcome belong to responses_provider and response_model.
@@ -194,70 +194,70 @@ next_request = ng.make_provider_request(
 )
 ```
 
-`previous_response_history` は `ProviderMessage` ベクトルで、単一応答/JSON オブジェクトではなく送信されません。真正な client-tool 所有権には元の全 prefix と cursor ID の terminal assistant が必要な場合があります。サーバー保管テキストは空ベクトルでも可能です。後続プロセス内 cursor の private terminal 所有権は全 replay/archive 権限にはなりません。失敗/編集/origin・model・config・route 不一致は拒否します。全 native replay/archive には元の全 prefix が必要です。[SDK Responses 継続](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#responses-provider-held-continuation)を参照してください。
+`previous_response_history` は `ProviderMessage` のベクトルで、単一のレスポンスやJSONオブジェクトにはなりません。リクエストには含まれません。クライアント側ツールの所有権が本物であることを示すために、元の先頭部分（prefix）全体と、IDがカーソルと等しい終端のアシスタントメッセージが必要になる場合があります。サーバーが保持するテキストをそのまま継続するだけなら、空のままでかまいません。その後にプロセス内で得たカーソルの出力は、終端メッセージの非公開の所有権を保持しますが、履歴全体のネイティブリプレイの権限にも、archiveの権限にもなりません。失敗した状態、編集された状態、origin・モデル・設定・ルートが一致しない状態は、拒否されます。完全なネイティブリプレイとarchiveには、これまでどおり、元の先頭部分全体が必要です。詳しくは[SDKのResponsesの継続](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#responses-provider-held-continuation)を参照してください。
 
-caller 作成の外部 assistant `Text/ProviderToolCall` に native state/wire output/signature がなければ `gemini.gemini_history_mode = ng.GeminiHistoryMode.PortableForeign` を明示します。既定は `NativeOnly`。最初の外部 function call だけが Google validator bypass を受け、テキスト専用 turn に signature はありません。真正な native group は厳密に検証し、失敗 seal 修復/削除/降格、reasoning 権限取り込み、portable data への replay 付与を行いません。[SDK 外部 Gemini 履歴](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#explicit-portable-gemini-history)を参照してください。
+呼び出し側が作った外部のアシスタント履歴（`Text` / `ProviderToolCall`）に、ネイティブな状態、ワイヤー出力、署名がない場合は、`gemini.gemini_history_mode = ng.GeminiHistoryMode.PortableForeign` を明示的に設定します。デフォルトは `NativeOnly` です。Googleの署名検証を迂回する仕組み（bypass）が適用されるのは、最初の外部の関数呼び出しだけです。テキストだけのターンには、署名は付きません。本物のネイティブグループには、これまでどおり厳密な検証が行われます。この設定では、失敗したシールの修復も、除去も、格下げもできません。reasoningの権限を取り込むことも、ポータブルなデータにネイティブリプレイを許可することもできません。詳しくは[SDKの外部Gemini履歴](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#explicit-portable-gemini-history)を参照してください。
 
-PortableForeign は wire metadata も拒否します。cursor 出力は `NativeReplay.complete == False` で archive 不適格です。private owner は全履歴 replay を承認しません。
+PortableForeignでは、署名だけでなく、取り込んだワイヤーのメタデータも拒否されます。カーソルの出力は `NativeReplay.complete == False` で、archiveの対象外です。非公開の所有者に、履歴全体のリプレイを承認する効力はありません。
 
 
-### 準備済みハンドルと Python プロバイダー
+### 準備済みハンドルとPythonプロバイダー
 
-ディスパッチは失敗時も含め、準備済みハンドルを一度消費します。ディスパッチ前に `prepared.valid` と `prepared.error`、その後に `prepared.consumed` を確認します。Python オブジェクトを保持しても再利用はできません。再試行には新しいリクエストを構築し、準備します。
+ディスパッチは、失敗した場合も含めて、準備済みのハンドルを1回だけ消費します。ディスパッチの前に `prepared.valid` と `prepared.error` を、後に `prepared.consumed` を確認してください。Pythonのオブジェクトを手元に残しても、再利用はできません。もう一度試すには、新しいリクエストを組み立てて、準備し直します。
 
-Python サブクラスは `Provider(family)` を呼び、`get_name()` と `prepare(request)` を実装します。準備を `SchemaProvider` に委譲し、その真正な準備済みハンドルを返せます。成功した SDK 結果を任意に作成したり、JSON からディスパッチ権限を取り込んだりすることはできません。共通の `invoke` と `dispatch` はネイティブのライフサイクルを使い、旧 `complete` メソッドのオーバーライドでは実装できません。
+Pythonでサブクラスを作る場合は、`Provider(family)` を呼び出し、`get_name()` と `prepare(request)` を実装します。準備を `SchemaProvider` に委譲して、その本物の準備済みハンドルを返すこともできます。サブクラスが、成功したSDKの結果を勝手に作ったり、JSONからディスパッチの権限を取り込んだりすることはできません。共通の `invoke` と `dispatch` はネイティブのライフサイクルを使います。古い `complete` メソッドをオーバーライドしても、これは実装できません。
 
-ネイティブ実行が Python の `prepare` オーバーライドを呼ぶ際に `None` を返すと、ハンドルを消費する前に `TypeError` が発生します。真正な `PreparedProviderRequest` を返してください。
+ネイティブ側の実行がPythonの `prepare` のオーバーライドを呼び出したとき、`None` を返すと、ハンドルが消費される前に `TypeError` が発生します。本物の `PreparedProviderRequest` を返してください。
 
-`NodeContext(provider=provider)` と `ctx.provider` への代入は、ネイティブの共有所有権リースで元の Python プロバイダーを保持します。ネイティブコンテキスト、コンパイル済みノード、エンジンのコピーはこのリースを保持するため、`ctx.provider` を再代入したり、外部の Python 参照が回収されたりした後も、同じオブジェクトのオーバーライドを呼びます。再代入は変更可能なコンテキストのリースだけを解放し、既存のエンジンではなく以後のコンパイルに反映されます。オブジェクトの同一性と寿命を保持するもので、プロバイダーの変更可能な状態を固定するものではありません。最後のリースは GIL を取得して Python 所有者を解放します。
+`NodeContext(provider=provider)` と `ctx.provider` への代入は、元のPythonプロバイダーを、ネイティブ側の共有オーナーのリースとして保持します。ネイティブのコンテキスト、コンパイル済みノード、エンジンのコピーはこのリースを持ち続けます。そのため、`ctx.provider` を別のオブジェクトに代入し直したり、Python側の外部参照が回収されたりした後でも、同じオブジェクトのオーバーライドが呼び出されます。代入し直すと解放されるのは、変更可能なコンテキストが持つリースだけです。影響するのは以後のコンパイルで、すでにあるエンジンには影響しません。保持されるのはオブジェクトの同一性と寿命で、プロバイダーの変更可能な状態が固定されるわけではありません。最後のリースが解放されるときに、GILを取得して、Python側のオーナーを解放します。
 
-削除された `CompletionParams`、`ChatCompletion`、`OpenAIProvider`、`RateLimitedProvider` に互換エイリアスはありません。検証済み `SchemaProvider` を構築し、リクエストファクトリーを使います。`ChatMessage` と `ToolCall` はグラフ用の便宜的な値として残り、SDK の完全な `ProviderMessage`、`ProviderToolCall` とは別の型です。
+削除された `CompletionParams`、`ChatCompletion`、`OpenAIProvider`、`RateLimitedProvider` には、互換用のエイリアスがありません。検証済みの `SchemaProvider` を構築し、リクエストファクトリーを使ってください。`ChatMessage` と `ToolCall` は、グラフ向けの便宜的な値として残っています。SDKの完全な `ProviderMessage` や `ProviderToolCall` とは、別のものです。
 
 ### 結果、失敗、使用量
 
-`ProviderOutcome` は所有された不変の SDK 結果を保持します。`outcome.completion` または `outcome.failure` を確認します。該当しない分岐は `None` です。完了と失敗のビューは、順序付きの完全なメッセージ、使用量、試行の証拠、停止/エラー情報、保持されたワイヤー証拠を保存します。失敗でも部分出力が残る場合があります。部分テキストを成功として返さず、失敗を報告するときにその証拠を保持します。
+`ProviderOutcome` は、SDKの結果を、変更できない形で所有して保持します。`outcome.completion` か `outcome.failure` を調べてください。該当しないほうは `None` です。completionとfailureのどちらのビューにも、順序付きの完全なメッセージ、使用量、試行のエビデンス、停止／エラーの情報、保持されたワイヤーのエビデンスが残ります。失敗した場合も、部分的な出力が残ることがあります。失敗を報告するときは、そのエビデンスを一緒に残してください。部分的なテキストを成功として返してはいけません。
 
-`ProviderCompletion.wire_envelope` と `ProviderPartialCompletion.wire_envelope` はプロバイダーファミリーごとの証拠で、`None` の場合があります。読む前に `wire_envelope is not None` を確認してください。現在のバッファ型 Chat デコーダーはこの値を `None` のままにし、完全な応答 JSON を `raw_events` に保持します。その項目は `type == "chat.completion"` の `ProviderRawWire`（SDK の `RawWire`）で、文書は `payload` にあります。エンベロープがあると仮定せず、実際の型付き raw イベントを調べてください。raw イベントが失敗を成功に変えることはなく、エンベロープがなくても保持された応答がないとは限りません。SDK のフォールバックでエンベロープを合成しません。
+`ProviderCompletion.wire_envelope` と `ProviderPartialCompletion.wire_envelope` は、ファミリー固有のエビデンスで、nullの場合があります。読む前に `wire_envelope is not None` を確認してください。現在のバッファ型のChatデコーダーは、これを `None` のままにします。その代わり、レスポンス全体のJSONを `raw_events` に、`ProviderRawWire`（SDKの `RawWire`）として保持します。`type == "chat.completion"` で、JSONの文書は `payload` に入っています。エンベロープがあると決めつけずに、実際の型付きのraw eventを確認してください。raw eventがあっても、失敗が成功になるわけではありません。エンベロープがなくても、保持されているレスポンスがないとは限りません。SDKのフォールバックでエンベロープを合成することはありません。
 
-所有された結果または保持された型付きビューを残してください。真正なメッセージ、ネイティブ所有権、存在するワイヤー文書は、呼び出し終了後やプロバイダーオブジェクトのガベージコレクション後も有効です。raw payload はプロバイダーの非公開フィールドを保持しますが、ネイティブトレースは raw エンベロープ/イベントとネイティブ再生/推論を除外します。Python の JSON ビューはデータのコピーであり、ネイティブ再生権限や財務上の権限ではありません。
+所有権を持つ結果か、保持されている型付きのビューを手元に残してください。本物のメッセージ、ネイティブのオーナー、利用できるワイヤーの文書は、呼び出しが終わった後も、プロバイダーのコレクションが回収された後も、有効なままです。raw payloadには、プロバイダー固有の非公開フィールドが残ります。一方、ネイティブのトレースには、rawエンベロープ／イベントも、ネイティブのリプレイやreasoningも含まれません。PythonのJSONビューはデータのコピーであり、ネイティブリプレイの権限でも、金銭に関する権限でもありません。
 
-完全な型付きメッセージ/パートを使い、必要な意味が論理的なロールとテキストなら、その値を比較してください。チェックポイントや Chat リクエストのテキスト content は、テキスト文字列でも型付きテキストパート配列でも有効です。呼び出し側は偶然選ばれた一つの直列化形式を要求してはいけません。続行には、平坦なテキストや JSON の代用品ではなく、完全なパートと真正なネイティブ所有権を使ってください。
+型付きのメッセージとパートは、丸ごと扱ってください。論理的なロールとテキストの一致だけが必要な場面では、その2つを比較します。チェックポイントとChatリクエストのテキスト内容は、テキストの文字列でも、型付きのテキストパートの配列でもかまいません。たまたま出てきた特定のシリアライズ形式を前提にしてはいけません。継続には、平坦化したテキストやJSONの代用品ではなく、完全なパートと本物のネイティブ所有権を使ってください。
 
-`ProviderMessage.parts`、完了/部分結果の `messages` と `raw_events`、使用量の `extra`/`conflicts` は、内部のバインドされた値を含む独立したリストやマップを返します。元のコレクションを置き換えた後も、保持したパートを安全に参照できます。コピーを変更しても不変の結果は書き換わりません。メッセージを編集するには `parts = message.parts` で読み、`parts` を変更してから `message.parts = parts` で代入します。`message.parts.append(...)` は一時的な Python リストだけを変更します。
+`ProviderMessage.parts`、completion／partialの `messages` と `raw_events`、使用量の `extra` と `conflicts` は、結び付いた値も含めて、独立したリストまたはマップを返します。元のコレクションを置き換えた後でも、保持したパートは安全に参照できます。コピーを変更しても、変更できない結果が書き換わることはありません。メッセージを編集するには、`parts = message.parts` で取り出して `parts` を変更し、`message.parts = parts` で代入し直します。`message.parts.append(...)` では、一時的なPythonのリストが変わるだけです。
 
-SDK の失敗は戻り値のデータです。ホストのオブザーバーや予算精算の失敗は、`ProviderOutcomeError` から派生する `ProviderObserverError` または `ProviderBudgetSettlementError` を送出し、実際の結果と原因を保持します。したがって、コールバックの失敗は再ディスパッチの許可にはなりません。
+SDKの失敗は、戻り値として返るデータです。ホストのオブザーバーや予算の精算が失敗した場合は、`ProviderOutcomeError` から派生した `ProviderObserverError` か `ProviderBudgetSettlementError` が送出されます。これらは、実際の結果と原因を保持しています。したがって、コールバックが失敗したからといって、再ディスパッチしてよいことにはなりません。
 
-保存された Python のプロバイダー例外やグラフ例外の原因を繰り返し参照しても、元の例外オブジェクトと traceback を保持します。ネイティブの入れ子の例外変換を通じて参照する原因も同じ規則に従います。
+保存されたPythonのプロバイダー例外やグラフ例外の原因は、何度参照しても、元の例外オブジェクトとトレースバックが保たれます。ネイティブ側の入れ子の例外変換を経由して到達した原因も同様です。
 
-使用量カウンターは `value` と `evidence` を持つ `UsageCount`、または不明な場合は `None` です。報告されたゼロは既知の使用量であり、省略されたカウンターとは異なります。`count.value` を読む前に `count is not None` を確認します。会計処理で `count or 0` を使ったり、不明な入力/出力/合計カウンターをゼロに置き換えたりしないでください。
+使用量のカウンターは、`value` と `evidence` を持つ `UsageCount` で、不明な場合は `None` です。報告されたゼロは、使用量が分かっている状態であり、カウンターが省かれた状態とは別です。`count.value` を読む前に、`count is not None` を確認してください。会計処理で `count or 0` を使ったり、不明な入力・出力・合計のカウンターをゼロに置き換えたりしてはいけません。
 
-`outcome.usage.provider_cost`は不変の`ProviderReportedCost`ビューです。任意の`ProviderUsdAmount`フィールド`total/upstream_total/upstream_input/upstream_output`に`nano_usd/evidence/rounding`があり、`status`はこの順の4要素、`byok_status`はnullableな`is_byok`の状態です。`ProviderCostStatus/ProviderCostSource/ProviderCostRounding`は欠落、利用可能、不正、精度超過、overflow、不明通貨、競合の根拠を保持します。金額は元のdecimal字句ではなく解析済みbinary64から切り上げます。報告ゼロや`is_byok=False`は欠落ではありません。請求書やtoken予算の課金ではないため、呼び出しごとの金額は集計token bankではなく順序付き`provider_outcomes`で確認します。
+`outcome.usage.provider_cost` は、変更できない `ProviderReportedCost` のビューです。省略可能な `ProviderUsdAmount` のフィールドは `total`、`upstream_total`、`upstream_input`、`upstream_output` で、それぞれに `nano_usd`、`evidence`、`rounding` があります。`status` は、この順に並んだ4要素の配列です。`byok_status` は、null許容の `is_byok` の状態を表します。`ProviderCostStatus`、`ProviderCostSource`、`ProviderCostRounding` が保持するのは、欠落、利用可能、不正な形式、精度超過、オーバーフロー、不明な通貨、競合という各状態のエビデンスです。金額は、元の10進数の字句からではなく、パース済みのbinary64から切り上げて求めます。報告されたゼロや `is_byok=False` は、「ない」という意味ではありません。これらの観測値は、請求書でも、トークン予算の課金でもありません。呼び出しごとの金額のエビデンスは、集計したトークンバンクではなく、順序付きの `provider_outcomes` で確認してください。
 
-`UsageAccumulator`はtokenのみの集計です。単一報告は金額メタデータを保持しますが、2回目以降のsnapshotの`provider_cost`はcanonical Missing/Noneに明示的に戻します。古い最初の費用や合計金額ではありません。このsnapshotの復元は費用を再生成せず、token権限を更新しません。正確な金額の根拠は各元outcomeまたはprovider journal項目から読みます。
+`UsageAccumulator` は、トークンだけを集計します。レポートが1件だけなら、金額のメタデータもそのまま保持されます。2件目のレポートを受け取ると、スナップショットの `provider_cost` は、正規のMissing/Noneに明示的にリセットされます。古い1回目の費用でも、合計金額でもありません。このスナップショットを復元しても、費用は再現されず、トークンの権限も更新されません。正確な金額のエビデンスは、元のそれぞれの結果、またはプロバイダーのジャーナルの項目から読んでください。
 
-再開や続行時、`RunResult.provider_outcomes` は元の結果を順序どおり保持し、その後に新しい結果を追加します。`RunResult.usage` は現在の会計バンクを反映し、チェックポイントから以前の報告を復元する場合があります。再開後に新しいプロバイダー呼び出しがなくても、使用量が `None` またはゼロになる保証はありません。証拠の復元で元のプロバイダーリクエストを再ディスパッチしたり、二重に課金したりしてはいけません。保持された報告は以前の呼び出しを記述するもので、新たな支出枠を与えません。
+再開や継続のとき、`RunResult.provider_outcomes` には、元の結果が順序どおりに残り、その後ろに新しく得られた結果が並びます。`RunResult.usage` は、現在の会計バンクを反映します。このバンクは、チェックポイントから以前のレポートを復元することがあります。新しいプロバイダー呼び出しがない再開でも、使用量が `None` やゼロになるとは限りません。エビデンスの復元で、元のプロバイダーリクエストを再ディスパッチしたり、二重に課金したりしてはいけません。保持されたレポートは、過去の呼び出しを記録したものです。新しい支出枠を与えるものではありません。
 
 ### ネイティブ履歴とポータブルなエクスポート
 
-返された `ProviderMessage` は、完全な型付きパートと真正なネイティブ再生状態を持ちます。ネイティブ再生とワイヤー出力は読み取り専用です。プロバイダーを直接続行する場合は、元のリクエストの `request.messages` 全体を先行履歴として保持し、`outcome.messages` を追加します。この結果メッセージは返された出力であり、入力履歴全体ではありません。最初の呼び出し例の `request` と `outcome` から `history = request.messages + outcome.messages` を構成し、`ng.make_provider_request(provider, "example-model", history, controls=controls)` で次のリクエストを作ります。この構成だけでは何も送信しません。次のターンには新しいユーザーメッセージや必要なツール結果も含めます。
+返された `ProviderMessage` は、型付きのパートをすべて持ち、本物のネイティブリプレイの状態を保持しています。ネイティブリプレイの状態とワイヤー出力は、読み取り専用です。プロバイダーを直接継続する場合は、元のリクエストの `request.messages` 全体を先頭部分として残し、その後ろに、返された出力だけを含む `outcome.messages`（入力履歴の全体ではありません）を追加します。最初の呼び出しのサンプルの `request` と `outcome` を使うと、`history = request.messages + outcome.messages` を作り、それから `ng.make_provider_request(provider, "example-model", history, controls=controls)` で次のリクエストを組み立てます。この組み立てだけでは、何も送信されません。次のターンには、新しいユーザーメッセージや、必要なツールの結果も含めてください。
 
-真正な `NativeContext` 再生は、返された Assistant メッセージに加えて元の先行履歴も検査します。Assistant 出力だけを渡すと、ワイヤーディスパッチ前に `ReplayIneligible` で失敗します。その Assistant メッセージを `NativeArchive` から読み込んでも、保管権限と先行履歴のバインディングは維持されるため、元の先行履歴全体が必要です。
+本物の `NativeContext` のリプレイでは、返されたアシスタントメッセージだけでなく、元の先頭部分も検査されます。アシスタントの出力だけを渡すと、ワイヤーへのディスパッチの前に `ReplayIneligible` で失敗します。そのアシスタントメッセージを `NativeArchive` から読み込んでも、保管と先頭部分の結び付きは保たれます。それでも、元の先頭部分全体が必要です。
 
-グラフでは `RunConfig.provider_messages` が履歴全体を受け取り、`RunResult.native_messages` はすでにキャプチャされた履歴全体を含みます。元の入力を再び先頭に追加せず、このグラフ結果を履歴として使います。`RunResult.provider_outcomes` は保持された結果を公開します。ノード内では `RunContext.provider_outcomes` と `provider_loop_history` がプロバイダー証拠を保持します。
+グラフでは、`RunConfig.provider_messages` に履歴全体を渡せます。`RunResult.native_messages` には、取得済みの履歴全体がすでに入っています。このグラフの結果を履歴としてそのまま使い、元の入力をもう一度先頭に付け足さないでください。`RunResult.provider_outcomes` は、保持された結果を公開します。ノードの内側では、`RunContext.provider_outcomes` と `provider_loop_history` がプロバイダーのエビデンスを保持します。
 
-`RunConfig.provider_messages`、`RunResult.native_messages`、`ProviderLoopEntry.messages` も独立した履歴コピーを返します。変更可能な入力履歴を更新するには、返されたリストを編集して `config.provider_messages` に再代入します。入力を置き換えた後も保持したメッセージとパートは有効で、結果とループ履歴のプロパティは読み取り専用のままです。
+`RunConfig.provider_messages`、`RunResult.native_messages`、`ProviderLoopEntry.messages` も、独立した履歴のコピーを返します。入力として渡す履歴を更新するには、返されたリストを編集して、`config.provider_messages` に代入し直します。その入力を置き換えた後でも、保持したメッセージとパートは有効です。結果とループ履歴のプロパティは、読み取り専用のままです。
 
-カスタムノードでは `provider_messages_write(messages_or_outcome)` でチャネル書き込みにネイティブ履歴を保持します。`portable_message(ChatMessage)` はポータブルな内容を取り込み、ネイティブ推論権限の取り込みを拒否します。`project_message(ProviderMessage)` は観測専用のグラフ投影を作ります。
+カスタムノードで、チャネルへの書き込みにネイティブ履歴を残すには、`provider_messages_write(messages_or_outcome)` を使います。`portable_message(ChatMessage)` は、ポータブルな内容を取り込みます。取り込んだネイティブreasoningは拒否します。`project_message(ProviderMessage)` は、観測専用のグラフ向け射影を作ります。
 
-ネイティブ永続化用の `NativeArchive.provision/open(directory, independent_key_file, owner_scope, descriptor)` はアーカイブまたは `ProviderError` を返します。`save(messages, binding="")` は参照またはエラー、`load(reference, binding="")` は型付きメッセージまたはエラーを返します。独立したホスト鍵を使い、SDK の認証されたローカル保管を行います。ポータブルな JSON に再生権限や管理予算権限を与えるものではありません。
+ネイティブな履歴を永続化するには、`NativeArchive.provision/open(directory, independent_key_file, owner_scope, descriptor)` を使います。archiveか `ProviderError` が返ります。`save(messages, binding="")` は参照かエラーを、`load(reference, binding="")` は型付きのメッセージかエラーを返します。これは、SDKの認証付きのローカル保管を、ホスト側の別の鍵で行うものです。ポータブルなJSONが、リプレイや管理対象の予算の権限になるわけではありません。
 
-`RuntimeHistoryRecord.serialize_canonical()` は引き続きポータブルなレコードに使えます。真正なネイティブメッセージを含むレコードを永続化するには、`owner_scope` が `owner_id` と一致する実際の `NativeArchive` で `record.serialize_canonical(archive, owner_id)` を呼びます。復元には `RuntimeHistoryRecord.parse(stored_bytes, archive=None, owner_id="")` を使います。ポータブルなレコードには既定引数で十分ですが、ネイティブアーカイブ参照には同じ所有者範囲のアーカイブが必要です。引数なしの直列化や取り込んだ JSON はネイティブ権限を再作成できません。Python の parse とアーカイブ対応の直列化は、アーカイブ I/O を含むネイティブ処理中に GIL を解放します。
+ポータブルなレコードには、これまでどおり `RuntimeHistoryRecord.serialize_canonical()` を使えます。本物のネイティブメッセージを含むレコードを永続化するには、`owner_scope` が `owner_id` と一致する実際の `NativeArchive` を使って、`record.serialize_canonical(archive, owner_id)` を呼びます。復元には `RuntimeHistoryRecord.parse(stored_bytes, archive=None, owner_id="")` を使います。ポータブルなレコードならデフォルトの引数で足りますが、ネイティブarchiveへの参照を含む場合は、同じオーナースコープのarchiveが必要です。引数なしのシリアライズや、取り込んだJSONから、ネイティブの権限を再作成することはできません。Pythonのparseと、archiveを渡すシリアライズの呼び出しは、archiveのI/Oを含むネイティブ側の処理の間、GILを解放します。
 
-`RuntimeHistoryRecord.message` は、真正な共有ネイティブ所有権を保持する独立した型付きコピーを返します。このコピーを変更しても、不変の RAW レコードの識別子は変わりません。`ContextStore.hydrate_records(range)` は型付きレコードのリストを、`history_record_by_message_id(feed, message_id)` はレコードまたは `None` を返します。`InMemoryContextStore` と `SQLiteContextStore` はこれらを継承します。`SQLiteContextStore(database_path, archive=None)` にはネイティブ保管用の実際のアーカイブを渡せます。保管権限が必要なネイティブ履歴は、アーカイブなしのストアでは拒否されます。構築と型付き取得は GIL を解放します。`LocalProgramHost` は最後の任意キーワード `native_history_archive=None` を受け取り、実際の Program ランタイムに渡します。これは保管権限を供給するもので、追加の権限や永続 Program ストアのバックエンドを供給しません。
+`RuntimeHistoryRecord.message` は、本物の共有ネイティブオーナーを保持した、独立した型付きのコピーを返します。このコピーを変更しても、変更できないRAWレコードの識別情報は書き換わりません。`ContextStore.hydrate_records(range)` は型付きのレコードを返し、`history_record_by_message_id(feed, message_id)` はレコードか `None` を返します。`InMemoryContextStore` と `SQLiteContextStore` は、これらのメソッドを継承します。`SQLiteContextStore(database_path, archive=None)` には、ネイティブの保管用に、本物のarchiveを渡せます。保管が必須の場合、archiveのないストアはネイティブ履歴を拒否します。構築と型付きの取得では、GILを解放します。`LocalProgramHost` は、最後の省略可能なキーワード引数として `native_history_archive=None` を受け取り、実際のProgramランタイムに渡します。これが提供するのは保管であり、追加のグラントや、永続的なProgramストアのバックエンドではありません。
 
-ポータブルな状態辞書や JSON エクスポートはメッセージデータを記述します。ネイティブ再生状態、プロバイダーの出自、管理予算の権限を再作成することはできません。エクスポートされた JSON の `native` フラグは記述用であり、認可トークンではありません。`ChatMessage`、平坦なテキストチャネル、JSON への変換ではプロバイダー固有のパートが失われる場合があります。それらが必要なときは、元の先行履歴を含む型付き履歴全体を保持します。
+ポータブルな状態の辞書とJSONのエクスポートは、メッセージのデータを表すものです。ネイティブリプレイの状態、プロバイダーのorigin、管理対象の予算の権限は、これらからは再作成できません。エクスポートしたJSONの `native` フラグは、状態の説明にすぎず、認可のトークンではありません。`ChatMessage`、平坦なテキストチャネル、JSONのいずれかを経由して変換すると、プロバイダー固有のパートが失われることがあります。そうしたパートが必要な場合は、元の先頭部分を含む型付きの履歴全体を保持してください。
 
-## Coreグラフクイックスタート
+## Coreグラフのクイックスタート
 
 ```python
 import neograph_engine as ng
@@ -287,46 +287,42 @@ result = engine.run(ng.RunConfig(thread_id="t1", input={"name": "NeoGraph"}))
 print(result.output["channels"]["messages"]["value"])
 ```
 
-### コンパイル時のツール所有権
+### コンパイル時のツールの所有権
 
-Python `Tool`、ネイティブ C++ ツール、`MCPClient.get_tools()` の結果を
-`ng.NodeContext(tools=[...])` に渡します。コンパイル前に所有する `ToolSet` に
-スナップショットされ、エンジンが `run()` と `resume()` の間保持します。
-後からコンテキストの `tools` を再代入しても既存のエンジンは変わらず、
-次回のコンパイルにだけ反映されます。MCP ツールのネイティブ非同期処理も維持されます。
+Pythonの `Tool` インスタンス、ネイティブのC++ツール、`MCPClient.get_tools()` の結果は、まとめて `ng.NodeContext(tools=[...])` に渡します。コンパイル時には、グラフのノードを構築する**前**に、このリストがネイティブ側の `ToolSet` としてスナップショットされ、エンジンが所有します。コンパイル済みのエンジンは、コンテキストの `tools` のリストを置き換えたり、外部の参照を手放したりした後でも、`run()` と `resume()` を通じて、まったく同じツールを保持し続けます。後からリストを変更しても、影響するのはその後のコンパイルだけです。ネイティブのMCPツールは、非同期の実行経路をそのまま使います。コンパイル後に所有権を移す処理や、ディスパッチごとに所有権のための確保を行うことはありません。
 
-## Core APIパリティ
+## Core APIの同等性（parity）
 
-Pythonは、独立したPythonスケジューラではなく、C++の実行機能を公開します:
+Pythonでは、Python専用のスケジューラーを別に用意するのではなく、C++の実行機能をそのまま公開しています。
 
-- 同期およびasyncioのrun/stream/resume;
-- 正確なチェックポイント`resume_from`、フォーク、状態検査、順序付き状態書き込み;
-- グラフ割り込みと`NodeInterrupt`による静的および動的HITL;
-- `RunMetadata`のデッドライン、トレース/実行ID、モデルトークン上限;
-- グラフ全体およびノードごとの`RetryPolicy`（ジッターを含む）;
-- 実行ローカルまたは明示的に再利用可能な`CacheScope`;
-- チェックポイントおよび長期Storeバックエンド;
-- カスタムノード、リデューサー、条件、プロバイダー、ツール;
-- ツールゲート、実行ポリシー、必須ライフサイクルHook、厳格なランタイム介入。
+- 同期とasyncioの、run／stream／resume
+- チェックポイントを正確に指定する `resume_from`、フォーク、状態の確認、順序付きの状態書き込み
+- グラフの割り込みと `NodeInterrupt` による、静的・動的なHITL
+- `RunMetadata` によるデッドライン、トレース／実行のID、モデルのトークン上限
+- グラフ全体とノードごとの `RetryPolicy`（ジッターを含む）
+- 実行ごとに閉じた、または明示的に再利用できる `CacheScope`
+- チェックポイントと長期Storeのバックエンド
+- カスタムのノード、リデューサー、条件、プロバイダー、ツール
+- ツールのゲート、実行ポリシー、必須のライフサイクルHook、strictなランタイムのインターポジション
 
-### パリティ契約
+### 同等性の契約
 
-ここでいう「パリティ」とは、Pythonが同じネイティブ実行パスと安全契約を利用するという意味です。すべての内部C++ストレージ型や権限型をPythonへそのまま複製するという意味ではありません。
+ここでの「同等性」とは、Pythonが、C++と同じネイティブの実行経路と安全性の契約に到達することを指します。C++内部のストレージや権限の型が、すべてPythonにコピーされているという意味ではありません。
 
-| 機能 | ネイティブC++パス | Pythonサーフェス | 状態 |
+| 機能 | ネイティブのC++の経路 | Pythonのインターフェース | 状況 |
 |---|---|---|---|
-| Coreグラフのコンパイルと実行 | `GraphEngine` | `GraphEngine.compile`、run/stream/asyncメソッド | 同じスケジューラとランタイム |
-| ランタイムID、期限、予算 | `RunMetadata`, `RunConfig` | `RunMetadata`, `RunConfig.model_token_budget` | 実行ごとに同じ値 |
-| 再試行とノードキャッシュポリシー | `RetryPolicy`, `CacheScope` | グラフ/ノードsetterとキャッシュスコープ | 同じランタイムポリシー |
-| チェックポイント、HITL、タイムトラベル | チェックポイントStoreと再開API | 再開、厳密な`resume_from`、フォーク、状態履歴/更新 | 同じチェックポイント契約 |
-| Programのオーサリングとローカル実行 | コンパイラ、Catalog、`ProgramRuntime` | `ProgramCompiler`、`LocalProgramHost`、ハンドル/結果 | ネイティブの所有者スコープ付き簡易ホスト |
-| 必須ライフサイクルHook | レジストリ、ランナー、`HookRuntime` | 定義と`create_hook_runtime`コールバック | 同じフェイルクローズ型ライフサイクル境界 |
-| ランタイムコンテキストと厳格なディスパッチ | コンテキストStore、レシート、インターポジション | 対応する不変値、Store、`StrictRuntimeProfile` | 同じネイティブコントローラ |
-| 永続化を含むホイール既定値 | SQLite Core/コンテキスト/ディスパッチStore | `_HAVE_SQLITE`のエクスポート | PyPIホイールで有効 |
+| Coreグラフのコンパイルと実行 | `GraphEngine` | `GraphEngine.compile`、run／stream／asyncのメソッド | 同じスケジューラーとランタイム |
+| 実行ごとの識別情報、デッドライン、予算 | `RunMetadata`、`RunConfig` | `RunMetadata`、`RunConfig.model_token_budget` | 実行ごとの値は同じ |
+| リトライとノードキャッシュのポリシー | `RetryPolicy`、`CacheScope` | グラフ／ノードのセッターとキャッシュスコープ | 同じランタイムポリシー |
+| チェックポイント、HITL、タイムトラベル | チェックポイントストアと再開のAPI | resume、`resume_from` の正確な指定、フォーク、状態の履歴／更新 | 同じチェックポイントの契約 |
+| Programの作成とローカル実行 | コンパイラー、Catalog、`ProgramRuntime` | `ProgramCompiler`、`LocalProgramHost`、ハンドル／結果 | ネイティブの、オーナー単位の簡易ホスト |
+| 必須のライフサイクルHook | レジストリ、ランナー、`HookRuntime` | 定義と `create_hook_runtime` のコールバック | 同じフェイルクローズのライフサイクル境界 |
+| ランタイムコンテキストとstrictディスパッチ | コンテキストストア、レシート、インターポジション | 対応する不変の値、ストア、`StrictRuntimeProfile` | 同じネイティブのコントローラー |
+| wheelのデフォルトの永続化 | SQLiteのCore／コンテキスト／ディスパッチのストア | `_HAVE_SQLITE` のエクスポート | PyPIのwheelで有効 |
 
-生の`ProgramCatalog`、遷移Store、置換/移行コントローラ、合成ゲートウェイ、Hookジャーナル、RPCエグゼキュータはホスト合成APIのままです。権限を持つこれらの経路を部分的にだけ公開すると、必須の`proposal -> compile -> admit -> publish -> migrate/spawn`プロトコルを迂回できます。将来のPythonホストコントローラは、このプロトコルと更新不能なリネージ予算を単一の所有者スコープ単位として束ねなければなりません。`_HAVE_PROGRAM`は、生のコントロールプレーン管理までパリティがあるとは主張しません。
+生の `ProgramCatalog`、遷移ストア、置き換え／マイグレーションのコントローラー、合成ゲートウェイ、Hookのジャーナル、RPCエグゼキューターは、これまでどおり、ホストが組み立てるためのAPIです。権限を持つこれらの経路の一部だけを公開すると、必須の `proposal -> compile -> admit -> publish -> migrate/spawn` のプロトコルを迂回できてしまいます。将来、Pythonのホストコントローラーを用意する場合は、このプロトコルと、更新できない系統の予算（lineage budget）を、オーナー単位の1つのまとまりとして結び付ける必要があります。`_HAVE_PROGRAM` は、生のコントロールプレーンの管理までC++と同等であることを示すものではありません。
 
-### ランタイム再試行オーバーライド
+### 実行時のリトライの上書き
 
 ```python
 policy = ng.RetryPolicy()
@@ -340,9 +336,9 @@ engine.set_retry_policy(policy)
 engine.set_node_retry_policy("remote_call", policy)
 ```
 
-グラフ定義の`"retry_policy"`は、宣言的なデフォルトのままです。ランタイムセッターは、別個のC++/Python設定サーフェスです。
+グラフ定義の `"retry_policy"` は、これまでどおり宣言的なデフォルトです。実行時のセッターは、C++とPythonで共通の、これとは別の設定手段です。
 
-### メタデータと正確な再開状態
+### メタデータと正確な再開
 
 ```python
 config = ng.RunConfig(thread_id="job-42", input={"task": "..."})
@@ -360,9 +356,9 @@ checkpoint_id = result.checkpoint_id
 result = engine.resume_from(config, checkpoint_id, {"approved": True}, metadata)
 ```
 
-Pythonノード内では、同じ値が`input.ctx.trace_id`、`run_id`、`has_deadline`、`deadline_remaining_ms`、および`model_token_budget`を通じて利用可能です。
+Pythonのノードの内側では、同じ値を `input.ctx.trace_id`、`run_id`、`has_deadline`、`deadline_remaining_ms`、`model_token_budget` から参照できます。
 
-`RunMetadata(timeout_ms=None, trace_id="", run_id="", owner_scope="", budget_cancel_token=None)` は既定では期限なしで開始します。指定するタイムアウトと `metadata.set_timeout_ms(timeout)` は、steady clock の残りの範囲に収まる非負の整数ミリ秒を受け入れ、符号付き duration への変換や期限の加算前に範囲を検証します。負の整数や大きすぎる整数は `OverflowError` または `ValueError` になり、失敗した setter は以前の期限を保持します。ゼロは即時の期限を設定します。解除には `metadata.clear_deadline()` を使います。
+`RunMetadata(timeout_ms=None, trace_id="", run_id="", owner_scope="", budget_cancel_token=None)` は、デフォルトではデッドラインなしで始まります。渡すタイムアウトと `metadata.set_timeout_ms(timeout)` には、steady clockの残り範囲に収まる、0以上の整数のミリ秒を指定できます。符号付きのdurationへの変換や、デッドラインへの加算を行う前に、この範囲が検証されます。負の整数や大きすぎる整数を渡すと、`OverflowError` か `ValueError` が発生します。セッターが失敗しても、以前のデッドラインは変わりません。0を指定すると、即時のデッドラインになります。デッドラインを取り除くには、`metadata.clear_deadline()` を使います。
 
 ### キャッシュスコープ
 
@@ -371,11 +367,11 @@ engine.set_node_cache_enabled("pure_parser", True)  # execution-local default
 engine.set_node_cache_enabled("pure_parser", True, ng.CacheScope.Reusable)
 ```
 
-`Reusable`は、ノードがテナント、プロバイダー、Store、ツール、資格情報、時刻、およびレジューム状態から独立しているという明示的な表明です。
+`Reusable` は、そのノードが、テナント、プロバイダー、Store、ツール、認証情報、時刻、再開の状態のいずれにも依存しない、と明示的に宣言するものです。
 
 ## ProgramとQuickJS
 
-Pythonホイールは`neograph::program`と制限付きQuickJSフロントエンドを構築します。Python定義ノードは、不変のProgramレジストリに参加し、ネイティブの`ProgramRuntime`を通じて実行できます。
+Pythonのwheelには、`neograph::program` と、機能を絞ったQuickJSのフロントエンドが含まれています。Pythonで定義したノードは、変更できないProgramレジストリに登録でき、ネイティブの `ProgramRuntime` で実行できます。
 
 ```python
 import neograph_engine as ng
@@ -431,74 +427,80 @@ result = host.run(version, {}, run_budget)
 print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 1
 ```
 
-`ProgramRegistryBuilder.add_registered_node`、`add_registered_reducer`、`add_registered_condition` は、このプロセスにすでに登録された実行単位をコピーします。登録には `@ng.node` または `ng.NodeFactory.register_type`、`ng.ReducerRegistry.register_reducer`、`ng.ConditionRegistry.register_condition` を使います。登録されていない名前を渡すと、3 つのメソッドはいずれも `ng.ProgramRegistryError` を送出し、メッセージは必要な登録呼び出しを示します。このエラーの `kind` は `"node"`、`"reducer"`、`"condition"` のいずれかで、`name` は見つからなかった名前です。`ValueError` と `RuntimeError` の両方を継承するため、どちらかを捕捉する既存のハンドラーも引き続きこのエラーを捕捉します。レジストリスナップショットにないノードタイプ、リデューサー、条件を使う Program は、代わりにコンパイル時に失敗します。`ProgramCompiler.compile` と `LocalProgramHost.compile_admit` のどちらも、診断 `P_CORE_GC_REGISTRY_MISS` を持つ `ng.ProgramCompileError` を送出します。
+`ProgramRegistryBuilder.add_registered_node`、`add_registered_reducer`、`add_registered_condition` は、このプロセスにすでに登録されている実行可能なもの（`@ng.node` または `ng.NodeFactory.register_type`、`ng.ReducerRegistry.register_reducer`、`ng.ConditionRegistry.register_condition` で登録したもの）をコピーします。登録されていない名前を渡すと、いずれも `ng.ProgramRegistryError` を送出し、メッセージには、どの登録呼び出しが必要かが書かれています。このエラーの `kind` は `"node"`、`"reducer"`、`"condition"` のいずれかで、`name` は見つからなかった名前です。`ValueError` と `RuntimeError` の両方のサブクラスなので、どちらかを想定して書いたハンドラーも、引き続きこのエラーを捕捉します。レジストリのスナップショットにないノードタイプ、リデューサー、条件を使うProgramは、代わりにコンパイル時に失敗します。`ProgramCompiler.compile` でも `LocalProgramHost.compile_admit` でも同じで、`ng.ProgramCompileError` が発生し、診断コードは `P_CORE_GC_REGISTRY_MISS` になります。
 
-各診断 dict には `help` 項目があります。コンパイルが返した診断では `doc`（[診断ガイド](diagnostics.md)の該当項目）、`related`、`suggestions`、`candidates` を持つ dict で、封印された `bundle.diagnostics` では `None` です。例外には常に含まれます。`ProgramCompiler(..., echo_routes=True)` は、ルーティング済みの後続ノード表を持つ `P_CORE_ROUTES` ノートも返します。`ProgramCompiler` または `LocalProgramHost` に `soundness_check=True` を渡すと[健全性チェック](program-graphs.md#soundness-check)が実行され、witness trace を持つ `P_CORE_S1`〜`P_CORE_S5` の警告と `P_CORE_SOUNDNESS` の要約が返されます。いずれも封印されません。
+診断の辞書にはそれぞれ `help` という項目があります。コンパイルが返す診断では、`doc`（[診断ガイド](diagnostics.md)での該当項目）、`related`、`suggestions`、`candidates` を持つ辞書です。シール済みの `bundle.diagnostics` では `None` です。例外には、常にこれが付いています。`ProgramCompiler(..., echo_routes=True)` を指定すると、ルーティング後の後続ノードの表を示す `P_CORE_ROUTES` の注記も返ります。`ProgramCompiler` または `LocalProgramHost` に `soundness_check=True` を指定すると、[健全性チェック](program-graphs.md#soundness-check)が走ります。出力は、ウィットネスのトレース付きの `P_CORE_S1` から `P_CORE_S5` までの警告と、`P_CORE_SOUNDNESS` の要約です。これらはいずれも、バンドルにはシールされません。
 
-`LocalProgramHost`は、オーナースコープのインメモリ便宜ホストです。それでもC++コンパイラ、Catalog、admissionポリシー、遷移ストア、およびProgramRuntimeを使用します。生成された提案は、admission前にホストの意味検証を追加で通過する必要があります。[DSL機能評価](DSL_CAPABILITY_EVAL.md)を参照してください。
+`LocalProgramHost` は、オーナー単位で、メモリ上で動く簡易ホストです。内部では、C++のコンパイラー、Catalog、admissionポリシー、遷移ストア、ProgramRuntimeをそのまま使います。生成されたproposalは、admissionの前に、ホスト側の意味検証（semantic validator）も通すようにしてください。詳しくは[DSLの機能評価](DSL_CAPABILITY_EVAL.md)を参照してください。
 
-`LocalProgramHost` の破棄時は、実際の `ProgramRuntime` がスケジューラーの処理をキャンセルし、完了を待ち、join する間、呼び出し元の GIL を解放するため、実行中の Python ノードが終了できます。残りのホストメンバーを破棄する前に GIL を再取得し、Python コールバック/オブジェクトの所有者による GIL 安全な破棄も維持します。
+`LocalProgramHost` を破棄すると、実際の `ProgramRuntime` がスケジューラーの処理をキャンセルし、drainし、joinする間、呼び出し側のGILが解放されます。そのため、実行中のPythonノードは終了できます。残りのホストのメンバーを破棄する前には、GILを再取得します。メンバーが持つPythonのコールバックとオブジェクトのオーナーは、GILに対して安全な破棄を保ちます。
 
-ネイティブ Program の記録済み実行 API は、`start_recorded` を置き換えた `ProgramRuntime::replay_recorded` です。`LocalProgramHost` は `run`、`start`、`resume`、`fork` を公開しますが、生の記録済みバインディング制御プレーンは公開しません。Program の結果は、既存のハンドル、予算、権限フィールドに加えて、ネイティブランタイムから渡された型付きプロバイダー結果と失敗の証拠を保持します。
+ネイティブのProgramには、記録済みの実行を扱うAPIとして `ProgramRuntime::replay_recorded` があり、`start_recorded` はこれに置き換えられました。`LocalProgramHost` が公開するのは `run`、`start`、`resume`、`fork` で、生のrecorded-bindingのコントロールプレーンは公開しません。Programの結果には、従来のハンドル、予算、権限のフィールドに加えて、ネイティブランタイムが提供する、型付きのプロバイダーの結果と失敗のエビデンスが残ります。
 
-`ProgramResult.failure` は辞書ではなく、読み取り専用の `ProgramFailure` 値または `None` です。`provider_outcome` と `provider_cause` はプロバイダー失敗の証拠を保持し、`code`、`message`、`operation_id`、`core_node`、`attempts`、`witness` は失敗した操作を記述します。結果には `bundle_id`、`operation_id`、`attempt`、`checkpoint`、`interrupt`、`provider_budget_authority` も含まれます。
+`ProgramResult.failure` は、辞書ではなく、読み取り専用の `ProgramFailure` の値か `None` です。`provider_outcome` と `provider_cause` はプロバイダーの失敗のエビデンスを保持し、`code`、`message`、`operation_id`、`core_node`、`attempts`、`witness` は失敗した操作を説明します。結果には、`bundle_id`、`operation_id`、`attempt`、`checkpoint`、`interrupt`、`provider_budget_authority` のフィールドもあります。
 
-正確にインストールされたJavaScript語彙はdictとして利用可能です：
+インストールされているJavaScriptの語彙（vocabulary）は、辞書として正確に取得できます。
 
 ```python
 manifest = ng.javascript_authoring_capability_manifest()
 ```
 
-### モジュールの構成と`callCore`
+### モジュールの形と `callCore`
 
-JavaScript Programは、グラフビルダーを1つ返す`define()`をexportする必要があります。そのグラフがProgramの唯一のCoreです。`define()`がないとコンパイルは`P_JS_DEFINE_MISSING`を伴う`ProgramCompileError`を送出するため、`main()`だけをexportするモジュールは拒否されます。`main()`は任意で、ない場合は実行時にCoreが直接実行されます。
+JavaScriptのProgramは、`define()` をエクスポートする必要があります。これはグラフビルダーを1つ返す関数です。そのグラフが、そのProgramで唯一のCoreです。`define()` がないと、コンパイルは `ProgramCompileError` と `P_JS_DEFINE_MISSING` で失敗します。つまり、`main()` だけをエクスポートするモジュールは拒否されます。`main()` は省略可能で、省略した場合、実行はCoreを直接動かします。
 
-`ng.callCore(name, input, sourceSite)`は、`ng.graph(...)`に渡した名前（上の例では`"main"`）でそのCoreを指定する必要があります。ほかの名前を指定すると、実行は`P_JS_CONTROL_COMMAND`で失敗します。異なるステップを実行するには、それらをそのグラフに入れ、異なる入力で再び呼び出してください。各ノード型は、`add_registered_node`に渡す前に`@ng.node`または`ng.NodeFactory.register_type`で登録してください。このメソッドは、登録されていない型に対して`ng.ProgramRegistryError`を送出します。
+`ng.callCore(name, input, sourceSite)` には、`ng.graph(...)` に付けた名前で、そのCoreを指定する必要があります。上の例では `"main"` です。ほかの名前を指定すると、実行は `P_JS_CONTROL_COMMAND` で失敗します。別の手順を実行したい場合は、その手順をこのグラフの中に入れ、入力を変えて、もう一度呼びます。すべてのノードタイプは、`add_registered_node` に渡す前に、`@ng.node` か `ng.NodeFactory.register_type` で登録してください。登録されていないタイプを渡すと、`ng.ProgramRegistryError` が発生します。
 
-完了した`callCore`は、Coreの出力オブジェクトを`main()`に返します。上のクイックスタートはそれをそのまま`result.output`として返します：
+`callCore` が完了すると、Coreの出力オブジェクトが `main()` に返されます。上のクイックスタートでは、これをそのまま `result.output` として返しています。
 
 ```json
 {"channels": {"value": {"value": 1, "version": 1}}, "global_version": 1, "value": 1}
 ```
 
-`channels`には各チャネルの`value`と`version`が入ります。各チャネルの値は、同名のトップレベルキーが既にない限り、チャネル名のトップレベルキーにもコピーされるため、`main()`は`result.value`を読めます。`channels`または`global_version`という名前のチャネルは`channels`の下でのみ参照できます。barrierのリストはソートして保存されます。`graph.barrier("join", ["zeta", "alpha"])`は`bundle.sealed_core_definitions`に`{"wait_for": ["alpha", "zeta"]}`として現れ、順序は何の影響もありません。
+`channels` には、各チャネルの `value` と `version` が入ります。各チャネルの値は、同名のキーがまだなければ、そのチャネル名のトップレベルのキーにもコピーされます。そのため、`main()` は `result.value` を読めます。`channels` または `global_version` という名前のチャネルには、`channels` の下からしか到達できません。バリアのリストは、ソートして保存されます。`graph.barrier("join", ["zeta", "alpha"])` は、`bundle.sealed_core_definitions` では `{"wait_for": ["alpha", "zeta"]}` になります。順序は動作に影響しません。
 
-### 失敗したコマンドは実行を終了する
+### コマンドが失敗すると実行が終わる
 
-`main()`を再開するのは完了したコマンドだけです。yieldされたコマンドが完了しない場合、たとえばノードが例外を送出した、Coreのステップ予算を使い切った、もう発火できないbarrierで止まった、またはwall-time制限を超えた`callCore`では、`ProgramRuntime`はその結果を記録し、対応する`status`と`failure`を持つ実行の最終結果にします。ジェネレーターは再開されません。`yield`を囲む`try`/`catch`は実行されず、その後のJavaScriptも実行されません。失敗ポリシーに従って失敗したjoin（`ng.all`、`ng.race`、`ng.quorum`）も同じように実行を終了します。Pythonでは`result.status`と`result.failure`で失敗を処理してください。割り込まれたコマンドは異なります。実行は`Interrupted`として停止し、`resume()`がそのコマンドを続行します。割り込まれたjoinメンバーはそのjoinを一時停止します。joinはそれ以上メンバーを開始せず、すでに実行中のメンバーは終了させます。その結果でjoinが決まる場合（fail-fastの失敗、raceの勝者、達成されたか到達不能になったquorum）、joinはそのように終了します。そうでなければ実行は最初に一時停止したメンバーで`Interrupted`として停止し、`resume()`はそのメンバーを続行し、終了したメンバーはコマンドジャーナルから再生するため、再実行も再課金もしません。 `ng.await(command, timeout_ms)` の期限は絶対時刻です。コマンドジャーナルが await の開始時刻を記録し、再開や停止したプロセスの復旧には残り時間だけが与えられます。期限を過ぎて再開された await は、応答されたノードを実行せずに直ちに `P_AWAIT_TIMEOUT` で実行を `TimedOut` として終了します (#391)。プランレベルの `await` 操作も、再開をまたいで同じように期限を保ちます。 不確かな効果、つまり payload の `kind` が `tool_effect_reconciliation` である `NodeInterrupt` で一時停止したメンバーは、Core ステップと同じく (#392) メンバーの失敗より優先されます。join は失敗する代わりにそのメンバーで一時停止して失敗したメンバーを記録し、再開されるとその失敗で終わります。成功が結果を決めた join はそのとおりに終わります (#397)。再開時には、応答を受けたメンバーが最後まで実行されてから記録された失敗が join を終わらせるため、応答はそのメンバーに届き、その効果は確定します (#400)。join が一時停止するときは、宣言順にかかわらず、不確かな効果で一時停止したメンバーで先に一時停止します (#401)。収集型の `ng.all` (`collect: true`) はこの優先順位の意図的な例外です。一時停止したメンバーも含めてすべてのメンバーを待ってから報告するため、別のメンバーが通常の質問で一時停止している間は、メンバーの失敗で join は終わりません。実行はそのメンバーで `Interrupted` として止まり、失敗はすべてのメンバーが確定した後に報告されます (#401)。
+`main()` が再開されるのは、コマンドが完了したときだけです。yieldしたコマンドが完了しないことがあります。たとえば、`callCore` のノードが例外を送出した場合、Coreのステップ予算を使い切った場合、発火できなくなったバリアで止まった場合、実時間の上限を超えた場合です。このときは、`ProgramRuntime` がその結果を記録し、対応する `status` と `failure` を持つ、実行の最終結果にします。ジェネレーターは再開されません。`yield` を囲む `try`/`catch` は実行されず、それより後のJavaScriptも実行されません。failure policyに従って失敗したjoin（`ng.all`、`ng.race`、`ng.quorum`）も、同じように実行を終わらせます。失敗の処理は、Python側で `result.status` と `result.failure` を使って行ってください。
 
-### グラフのチェックとbarrierの停滞
+割り込まれたコマンドは扱いが異なります。実行は `Interrupted` で止まり、`resume()` がそのコマンドを続行します。joinのメンバーが割り込まれると、そのjoinは一時停止します。joinは、それ以上メンバーを起動せず、すでに動いているメンバーが終わるのを待ちます。それらの結果でjoinが決まる場合（fail-fastの失敗、raceの勝者、quorumの充足または到達不能）は、その結果でjoinが終わります。そうでない場合、実行は最初に一時停止したメンバーで `Interrupted` として止まります。`resume()` は、そのメンバーを続行し、終了済みのメンバーはコマンドジャーナルからリプレイします。終了済みのメンバーが再実行されることも、再課金されることもありません。
 
-コンパイルは、スケジューラーが実際にたどる経路に沿ってCoreグラフをチェックします。条件付きエッジを持つノードは、最初の条件付きエッジだけを通じてルーティングします。JavaScript Programは厳格なドキュメントであるため、次のそれぞれが`ng.ProgramCompileError`を送出します：
+`ng.await(command, timeout_ms)` のデッドラインは絶対時刻です。コマンドジャーナルにはawaitを開始した時刻が記録されるので、再開した場合も、停止したプロセスを復旧した場合も、残りの時間しか使えません。デッドラインを過ぎてから再開すると、awaitは回答されたノードを実行せずに、すぐ実行を `TimedOut`、`P_AWAIT_TIMEOUT` で終わらせます（#391）。プランレベルの `await` オペレーションも、同じように、再開をまたいでデッドラインを維持します。
 
-- `P_JS_GRAPH_ARGUMENT`：ノード名を`__start__`または`__end__`とする`.node()`呼び出しで発生;
-- `P_JS_GRAPH_ENTRY`：`define()`がノードはあるが`.entry()`のないグラフを返したときに発生;
-- `P_CORE_E13`：条件付きエッジも持つノードから出る静的エッジに対して発生（そのエッジは決して発火しないため）;
-- `P_CORE_E14`：同じノードから出る2つ目の条件付きエッジに対して発生（それによってルーティングされることは決してないため）。
+不確かな効果（payloadの `kind` が `tool_effect_reconciliation` の `NodeInterrupt`）で一時停止したメンバーは、Coreのステップと同じく、メンバーの失敗よりも優先されます（#392）。joinは、失敗せずにそのメンバーで一時停止し、失敗したメンバーを記録します。再開されると、その失敗で終わります。成功によって決まるjoinは、そのとおりに終わります（#397）。再開時には、答えが続行するメンバーが最後まで実行されてから、記録済みの失敗でjoinが終わります。これにより、答えがそのメンバーに届き、その効果が確定します（#400）。joinが一時停止するときは、宣言順にかかわらず、まず、不確かな効果で一時停止したメンバーで止まります（#401）。収集型の `ng.all`（`collect: true`）は、この優先順位の意図的な例外です。一時停止したメンバーを含め、すべてのメンバーを待ってから報告します。そのため、別のメンバーが通常の質問で一時停止している間は、メンバーが失敗してもjoinは終わりません。実行はそのメンバーで `Interrupted` として止まり、失敗は、すべてのメンバーが確定してから報告されます（#401）。
 
-`P_CORE_E15`は`bundle.compile_diagnostics`に入る警告です。barrierのメンバーにjoinや`__end__`以外の場所へ向かう経路があり、その経路を通るとjoinが停滞します。ループは有効です。すべての循環を`P_CORE_E16`で拒否するには（たとえば計画やチェックリストの場合）、`ProgramCompiler`または`LocalProgramHost`に`require_acyclic=True`を渡してください。
+### グラフのチェックとバリアの停止
 
-barrierは、`wait_for`リストのすべてのノードがそこへルーティングした時点で発火します。別の方法でjoinに到達するノード、たとえばメンバーの失敗経路上にある修正（fix-up）ノードは、そのメンバーの代わりにはなりません。実行するものが何も残っておらず、joinがまだシグナルを保持している場合、実行は完了しません。`P_CORE_BARRIER_STALLED`で`Failed`として終了し、`failure.core_node`はそのjoinを示し、`failure.witness["stalled_barriers"]`は停滞した各joinについて、その`wait_for`、`received`、`missing`ノードを列挙します。このような実行を正常に終了させるのは、最後のsuper-stepにおける`__end__`への明示的な経路だけです。つまり、`__end__`への静的エッジ（`.exit()`が書き込むもの）、`__end__`への条件付き経路、または`Command.goto("__end__")`です。後続のないノードでは正常に終了せず、それより前のsuper-stepでの明示的な終了でも同様です。同じ状態の`GraphEngine`実行は`ng.RunStatus.BarrierStalled`を返し、`result.output["_neograph"]["barrier_stalled"]`に同じ詳細が入ります。
+コンパイルでは、スケジューラーが実際にたどる経路に沿って、Coreグラフをチェックします。条件付きエッジを持つノードは、最初の条件付きエッジだけを通ってルーティングされます。JavaScriptのProgramはstrictなドキュメントなので、次のそれぞれが `ng.ProgramCompileError` を発生させます。
+
+- `P_JS_GRAPH_ARGUMENT`：ノード名に `__start__` か `__end__` を指定した `.node()` の呼び出し
+- `P_JS_GRAPH_ENTRY`：`define()` が、ノードはあるが `.entry()` のないグラフを返した場合
+- `P_CORE_E13`：条件付きエッジも持つノードから出る静的エッジ。そのエッジは発火しないため
+- `P_CORE_E14`：同じノードから出る2本目の条件付きエッジ。ルーティングに使われないため
+
+`P_CORE_E15` は `bundle.compile_diagnostics` に出る警告です。バリアのメンバーに、joinでも `__end__` でもない場所へ向かうルートがあり、そのルートを通るとjoinが止まってしまう、という内容です。ループは有効です。プランやチェックリストなど、すべてのサイクルを `P_CORE_E16` で拒否したい場合は、`ProgramCompiler` または `LocalProgramHost` に `require_acyclic=True` を渡します。
+
+バリアが発火するのは、`wait_for` のリストにあるすべてのノードが、そのバリアにルーティングし終えたときです。別の経路でjoinに到達したノード（たとえば、メンバーの失敗ルート上の後始末用ノード）は、そのメンバーの代わりにはなりません。実行する対象が残っていないのに、joinにシグナルが残っている場合、実行は完了しません。`P_CORE_BARRIER_STALLED` で `Failed` として終わります。`failure.core_node` にはそのjoinの名前が入り、`failure.witness["stalled_barriers"]` には、止まったjoinごとに `wait_for`、`received`、`missing` のノードが並びます。このような実行が正常に終わるのは、最後のスーパーステップで `__end__` への明示的なルートを通った場合だけです。`__end__` への静的エッジ（`.exit()` が書き込みます）、`__end__` への条件付きルート、`Command.goto("__end__")` が該当します。後続ノードがないだけでは終わりません。それより前のスーパーステップでの明示的な終了でも終わりません。同じ状態の `GraphEngine` の実行は `ng.RunStatus.BarrierStalled` を返し、`result.output["_neograph"]["barrier_stalled"]` に同じ詳細が入ります。
 
 ### エラーと診断
 
-Pythonで送出されるProgramのエラーは型付きで、診断を保持します：
+Pythonで発生するProgramのエラーは型付きで、診断を保持しています。
 
-| 例外 | 送出元 | 基底クラス |
+| 例外 | 発生元 | 継承元 |
 |---|---|---|
 | `ng.ProgramCompileError` | `ProgramCompiler.compile`、`LocalProgramHost.compile`、`compile_admit` | `RuntimeError` |
-| `ng.ProgramAdmissionError` | `LocalProgramHost.admit`、`compile_admit`（例：`P_ADMIT_POLICY`または`P_ADMIT_PROVIDER`） | `RuntimeError` |
-| `ng.ProgramDiagnosticError` | `run`、`start`、`start_active`、`resume`（例：`P_START_BUDGET`または`P_RUN_NOT_FOUND`） | `RuntimeError` |
+| `ng.ProgramAdmissionError` | `LocalProgramHost.admit` と `compile_admit`（例：`P_ADMIT_POLICY`、`P_ADMIT_PROVIDER`） | `RuntimeError` |
+| `ng.ProgramDiagnosticError` | `run`、`start`、`start_active`、`resume`（例：`P_START_BUDGET`、`P_RUN_NOT_FOUND`） | `RuntimeError` |
 | `ng.ProgramRegistryError` | `ProgramRegistryBuilder.add_registered_node`、`add_registered_reducer`、`add_registered_condition` | `ValueError`、`RuntimeError` |
 
-最初の3つのメッセージは`Program compilation failed`、`Program admission failed`または`Program operation failed`で始まり、その後に診断ごとに1行が続きます。各行には診断のコード、JSONポインター、メッセージがあり、ソース位置を持つ診断には`(source:line:col)`も付きます。`.diagnostics`は、`code`、`severity`、`phase`、`message`、`source_id`、`json_pointer`、`span`、`witness`を持つdictのリストです。
+最初の3つの例外のメッセージは、`Program compilation failed`、`Program admission failed`、`Program operation failed` のいずれかで始まります。その後ろに、診断1件につき1行が続きます。内容は、コード、JSON pointer、メッセージで、ソース上の位置がある場合は `(source:line:col)` も付きます。`.diagnostics` は、`code`、`severity`、`phase`、`message`、`source_id`、`json_pointer`、`span`、`witness` を持つ辞書のリストです。
 
-コンパイルに成功したバンドルは2つのリストを持ちます。`bundle.compile_diagnostics`はコンパイラが返したもので、JavaScriptの呼び出し位置を`span`に持つ現在のルールでの警告と、`P_JS_CONTROL_CHARACTER`のような作成時の警告が入ります。作成者にはこのリストを見せてください。`bundle.diagnostics`はバンドルに封印され、`bundle.id`の対象となるコピーです。バンドルが最初に封印されたときのルールと文言を保つため、新しいコンパイラでもバンドルidは変わらず、そのため内容が異なることがあります。spanを持たず、Pythonノードだけが書き込むチャネルに対する`P_CORE_E6`のように、現在のルールでは除かれた警告がまだ含まれることがあります。コンパイラも`LocalProgramHost`も、stderrにlintを出力しません。
+コンパイルに成功したバンドルは、2つのリストを持ちます。`bundle.compile_diagnostics` は、コンパイラーが返したものです。現行のルールによる警告が入り、JavaScriptの呼び出し位置は `span` に入ります。`P_JS_CONTROL_CHARACTER` のような、作成時の警告も含まれます。作成者には、こちらのリストを見せてください。`bundle.diagnostics` は、バンドルにシールされたコピーで、`bundle.id` の対象です。バンドルが最初にシールされたときのルールと文言のままなので、新しいコンパイラーでもバンドルIDは変わりません。そのため、内容が異なることがあります。spanはなく、現行のルールでは出なくなった警告が残っている場合もあります。たとえば、Pythonのノードだけが書き込むチャネルに対する `P_CORE_E6` です。コンパイラーも `LocalProgramHost` も、lintの結果を標準エラー出力には出力しません。
 
 <a id="model-calling-nodes"></a>
 ### モデルを呼び出すノード
 
-`LocalProgramHost`は、admissionするProgramの組み込み`llm_call`ノードにプロバイダーを1つバインドします。レジストリはプロバイダーの名前とそれを必要とするノードを宣言し、ホストは秘密でない`binding_label`のもとでプロバイダーオブジェクト、モデル、リクエスト制御を提供します。
+`LocalProgramHost` は、admissionしたProgramの組み込みの `llm_call` ノードに、プロバイダーを1つ結び付けます。レジストリは、プロバイダーを名前で宣言し、それを必要とするノードも宣言します。ホストは、プロバイダーのオブジェクト、モデル、リクエストのコントロールを、秘密情報を含まない `binding_label` の下で提供します。
 
 ```python
 from neograph_engine.llm import SchemaProvider
@@ -539,55 +541,57 @@ result = host.run(version, {"messages": [{"role": "user", "content": "Hi"}]}, ru
 print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_records])
 ```
 
-`add_provider(name, semantic_version, implementation_digest)`はプロバイダーのidentityを登録し、`add_registered_node("llm_call", ..., provider=name)`はそのidentityを静的な要件として持つ組み込みノードを登録します。`provider=`がバインドするのは`llm_call`だけで、それ以外のタイプや未知のプロバイダーには`ValueError`を送出します。ホストはdescriptor idにかかわらず`node_context`のプロバイダーをその名前にバインドします。`NodeContext(provider_controls=...)`はノードが送るtypedな`ProviderControls`（`max_output_tokens`など）を受け取ります。`node_context`にはプロバイダーと`binding_label`が必要で、ツールは持てません。
+`add_provider(name, semantic_version, implementation_digest)` は、プロバイダーのIDを登録します。`add_registered_node("llm_call", ..., provider=name)` は、そのIDを静的な要件として持つ組み込みノードを登録します。`provider=` で結び付けられるのは `llm_call` だけで、ほかのタイプや、未知のプロバイダーを指定すると `ValueError` になります。ホストは、`node_context` のプロバイダーを、ディスクリプターのIDにかかわらず、この名前に結び付けます。`NodeContext(provider_controls=...)` には、ノードが送る型付きの `ProviderControls`（たとえば `max_output_tokens`）を渡します。`node_context` に必要なのは、プロバイダーと `binding_label` で、ツールは不要です。
 
-バインディングのうちidentityに入るのはラベルだけです。プロバイダーを必要とするProgramバージョンは、ラベルとプロバイダーのレジストリidentityのダイジェストをidentityとするcapability receiptを持ちます。プロバイダーのキー、endpoint、モデルは含まれないため、モデルを変えてもバージョンidは変わらず、ラベルを変えると変わります。プロバイダーを必要としないProgramはreceiptを持たず、バンドルidとバージョンidを保ちます。ラベルは`a-z`、`0-9`、`.`、`_`、`-`、`:`からなる1〜64文字で、英字か数字で始まり、APIキーのように見えてはいけません。`node_context`がないと、プロバイダーを必要とするProgramはadmissionで`P_ADMIT_PROVIDER`により拒否され、`provider=`なしで登録した`llm_call`または`intent_classifier`ノードを持つProgramも同様です。
+結び付けのうち、どのIDにも含まれるのはラベルだけです。プロバイダーを必要とするProgramのバージョンには、機能のレシートが付きます。このレシートのIDは、ラベルとプロバイダーのレジストリ上のIDのダイジェストです。プロバイダーのキー、エンドポイント、モデルは含まれません。したがって、モデルを変えてもバージョンIDは変わらず、ラベルを変えると変わります。プロバイダーを必要としないProgramにはレシートが付かず、バンドルIDとバージョンIDも変わりません。ラベルは、英小文字（`a-z`）、数字（`0-9`）、`.`、`_`、`-`、`:` からなる1〜64文字で、先頭は英字か数字にします。APIキーに見える文字列にしてはいけません。`node_context` がないと、プロバイダーを必要とするProgramは、admissionで `P_ADMIT_PROVIDER` により拒否されます。`provider=` なしで登録した `llm_call` ノードや `intent_classifier` ノードを持つProgramも同様です。
 
-各呼び出しは、NeoGraphにコンパイルされた価格カタログで実行の`monetary_microunits`に対して価格が付けられます。リクエストを送る前に呼び出しの上限を予約します。OpenRouter ではリクエストがその上限を `provider.max_price` としても載せます。route ceiling の入力・出力レート、または controls や `SchemaProviderDefaults` ですでに指定したより低い `max_price` なので、OpenRouter は呼び出しをより高い endpoint にルーティングできません。価格を求めるとき、会話をユーザーメッセージ1つに置き換えたリクエストの probe を準備しますが送信はしないため、Python provider の `prepare` にはこの probe も渡ります。上限を決められない呼び出し（カタログ項目のないモデル、route ceilingのないrouter alias、出力capのないリクエスト）や、予約が残り予算に収まらない呼び出しは何も送らないうちに拒否され、実行は`P_MONEY_*`コードで失敗します。すべての`ProgramRunBudget`フィールドと同じく`monetary_microunits = 0`は何も与えないため、そのような実行はすべての呼び出しを拒否します。応答の後、`result.monetary_records`には呼び出しごとに`ng.ProgramMonetaryRecord`が1つ、`evidence`とともに入ります。`reported`（OpenRouterの`usage.cost`）、`estimated`（カタログ料金。`catalog_version`と`catalog_digest`がカタログを示す）、`held`（結果やusageが分からないため予約額を請求）のいずれかです。`result.usage.monetary_microunits`はその合計です。コード、上限、精算の規則は[価格の証拠と価格カタログ](reference-en.md#pricing-evidence-and-the-price-catalog)にあります。
+各呼び出しの料金は、NeoGraphに組み込まれた価格カタログを使って、実行の `monetary_microunits` に対して計算されます。リクエストを送る前に、その呼び出しの上限額が予約されます。OpenRouterの場合は、リクエストにもこの上限が `provider.max_price` として付きます。値は、ルートの上限の入力・出力の単価です。コントロールや `SchemaProviderDefaults` で、すでにこれより低い `max_price` を設定している場合は、そちらが使われます。これにより、OpenRouterが呼び出しを、より高価なエンドポイントに回すことはなくなります。料金の計算では、会話がユーザーメッセージ1件だけのプローブ用リクエストを準備しますが、送信はしません。そのため、Pythonのプロバイダーの `prepare` から、そのプローブが見えます。上限を決められない呼び出しや、予約額が残りの予算に収まらない呼び出しは、何も送信されないまま拒否され、実行は `P_MONEY_*` のコードで失敗します。上限を決められない呼び出しとは、カタログにないモデル、ルートの上限がないルーターのエイリアス、出力の上限がないリクエストのことです。`ProgramRunBudget` の他のフィールドと同じく、`monetary_microunits = 0` は何も許可しません。この場合、すべての呼び出しが拒否されます。応答の後、`result.monetary_records` には、呼び出しごとに1件の `ng.ProgramMonetaryRecord` が入り、`evidence` が付きます。その種類は次の3つです。`reported`（OpenRouterの `usage.cost`）、`estimated`（カタログの単価。`catalog_version` と `catalog_digest` でカタログを特定します）、`held`（結果または使用量が不明なため、予約額が課金されます）。`result.usage.monetary_microunits` は、これらの合計です。コード、上限、精算の規則は、[料金のエビデンスと価格カタログ](reference-en.md#pricing-evidence-and-the-price-catalog)にあります。
 
-モデルを呼び出すPythonノードはプロバイダーを自分で持ち、Programの予算はその呼び出しを見ません。
+モデルを呼び出すPythonノードは、プロバイダーを自分で持ちます。そのような呼び出しは、Programの予算には反映されません。
 
 ### 子Program
 
-`ng.spawn`には子バインディングリゾルバーが必要ですが、`LocalProgramHost`はそれを構成しません。そのため、Pythonからの`ng.spawn`はすべて`P_CHILD_BINDING`（"Program spawn has no configured child binding resolver"）で実行を失敗させます。子Programには、`RuntimeConfig::child_binding_resolver`を設定するC++ホストが必要です。このリゾルバーは各バインディング名を、`link_module_child`が返す`ModuleLinkReceipt`とadmission済みの子`ProgramVersion`に対応付けます。子のライフサイクルは[再帰エージェント](PROGRAM_RECURSIVE_HARNESSES.md)を参照してください。
+`ng.spawn` には、子のバインディングを解決するリゾルバー（child-binding resolver）が必要ですが、`LocalProgramHost` はこれを設定しません。そのため、Pythonからの `ng.spawn` は、すべて `P_CHILD_BINDING`（"Program spawn has no configured child binding resolver"）で実行が失敗します。子Programを使うには、`RuntimeConfig::child_binding_resolver` を設定するC++のホストが必要です。このリゾルバーは、バインディング名ごとに、`link_module_child` が返す `ModuleLinkReceipt` と、admission済みの子の `ProgramVersion` を対応付けます。子のライフサイクルについては、[再帰的なエージェント](PROGRAM_RECURSIVE_HARNESSES.md)を参照してください。
 
 ### 予算
 
-`LocalProgramHost`に渡した`budget_ceiling`はadmissionポリシーの上限になります。`max_child_depth`と`max_total_children`を除くすべてのフィールドは正である必要があり、モデルを呼び出さないProgramでも`model_tokens`、`monetary_microunits`、`max_dynamic_compiles`は正でなければなりません。そうでない場合、コンストラクターはゼロのフィールド名を示す`ValueError`を送出します。2つの子フィールドは、両方ゼロか両方正である必要があります。
+`LocalProgramHost` に渡す `budget_ceiling` が、admissionポリシーの上限になります。`max_child_depth` と `max_total_children` を除くすべてのフィールドは、正の値にする必要があります。モデルを一切呼び出さないProgramでも、`model_tokens`、`monetary_microunits`、`max_dynamic_compiles` が対象です。そうでない場合、コンストラクターは、0になっているフィールドの名前を挙げて `ValueError` を送出します。子に関する2つのフィールドは、両方とも0か、両方とも正の値にします。
 
-`compile_admit(source, budget)`と`compile(source, budget)`は、`budget`をすべてのフィールドの最小値かつ最大値としてバンドルに封印し、封印された予算が上限を超えるバンドルはadmissionで拒否されます。そのバージョンに対する各`run`、`start`、`start_active`呼び出しは、フィールドごとに同じ値を渡す必要があります。より大きい予算や小さい予算は`P_START_BUDGET`を伴う`ng.ProgramDiagnosticError`を送出し、そのメッセージは値が異なる最初のフィールドを示します。たとえば`Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`です。別の予算を使うには、再度コンパイルしてadmissionしてください。その結果は新しい`ProgramVersion`です。実行予算の`wall_time_ms`、`max_concurrency`、`max_program_operations`、`max_core_steps`は正である必要があり、`model_tokens`と`monetary_microunits`はゼロでも構いません。ゼロは何も与えません。`model_tokens = 0`でモデルトークンを使った実行は`BudgetExhausted`で終わり、`monetary_microunits = 0`では価格の付くプロバイダー呼び出しはすべて送信前に拒否されます（[モデルを呼び出すノード](#model-calling-nodes)を参照）。
+`compile_admit(source, budget)` と `compile(source, budget)` は、`budget` を、すべてのフィールドの最小値と最大値の両方としてバンドルにシールします。シールされた予算が上限を超えるバンドルは、admissionで拒否されます。そのバージョンに対する `run`、`start`、`start_active` の呼び出しでは、毎回、フィールドごとに同じ値を渡す必要があります。予算が大きくても小さくても、`ng.ProgramDiagnosticError` が `P_START_BUDGET` で発生します。メッセージには、最初に食い違ったフィールドが挙げられます。たとえば `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)` です。別の予算を使うには、コンパイルとadmissionをやり直します。結果は新しい `ProgramVersion` になります。実行時の予算では、`wall_time_ms`、`max_concurrency`、`max_program_operations`、`max_core_steps` を正の値にする必要があります。`model_tokens` と `monetary_microunits` は0でもかまいません。0は何も許可しません。`model_tokens = 0` のまま、モデルのトークンを使う実行は `BudgetExhausted` で終わり、`monetary_microunits = 0` の場合は、料金のかかるプロバイダー呼び出しがすべて、送信前に拒否されます（[モデルを呼び出すノード](#model-calling-nodes)を参照）。
 
 ### 失敗のルーティング
 
-`on_failure` を持つ `retryPolicy(node, {...})` は、ノードの最終的な失敗を、実行を失敗させる代わりにハンドラーへルーティングします。規則は [Program のグラフ機能](program-graphs.md#failure-routing)にあります。Python のノードは例外の属性で失敗を示します。文字列の `code`(`app.compile_error` のような作成者コード)、真偽値の `retryable`、文字列の `public_message` です。`str(exc)` は決してレコードに入りません。ノードが `ng.ProgramDiagnosticError`、`ng.ProgramCompileError`、`ng.ProgramAdmissionError` を送出すると構成の判定(`NG.ConfigError`)となり、リトライもルーティングもされません。ハンドラーに `interruptBefore` があると、実行は `Interrupted` で止まり、`result.interrupt.pending_input.core_interrupt_value` に `{"reason": "failure_route", "failure": record}` が入ります。`host.resume(run_id, value)` はハンドラーから続けます。failure exit は宣言されたコードで実行を `Failed` で終え、failure edge のないノードの失敗は分類されたコード(`NG.TaskFailed`、作成者コードなど)で `Failed` になります。
+`retryPolicy(node, {...})` に `on_failure` を指定すると、ノードの最終的な失敗が、実行を失敗させる代わりに、ハンドラーにルーティングされます。ルールは[Programグラフの機能](program-graphs.md#failure-routing)にあります。Pythonのノードは、例外の属性で失敗を表します。文字列の `code`（`app.compile_error` のような作成者のコード）、真偽値の `retryable`、文字列の `public_message` です。`str(exc)` が記録に入ることはありません。`ng.ProgramDiagnosticError`、`ng.ProgramCompileError`、`ng.ProgramAdmissionError` を送出したノードは、設定上の判定（`NG.ConfigError`）を報告します。これは、リトライもルーティングもされません。ハンドラーに `interruptBefore` がある場合、実行は `Interrupted` で止まり、`result.interrupt.pending_input.core_interrupt_value` に `{"reason": "failure_route", "failure": record}` が入ります。`host.resume(run_id, value)` で、ハンドラーから続行します。failure exitでは、宣言したコードで実行が `Failed` として終わります。failure edgeのないノードが失敗した場合は、分類されたコード（`NG.TaskFailed`、作成者のコードなど）で `Failed` として終わります。
 
-`ProgramRunBudget.max_node_retries`(既定値 `None`、上限なし)は実行全体のノードのリトライを制限します。`result.usage.node_retries` がその回数で、`result.remaining_budget.max_node_retries` が残りです。`compile_admit` はこれを封印しないので、再コンパイルせずに実行ごとに設定できます。`LocalProgramHost(..., failure_text_redactor=fn)` と `GraphEngine.compile(..., failure_text_redactor=fn)` は、`error_text` を設定したノードのための redactor を受け取ります。`fn` は `{"node", "code", "kind", "attempts", "retryable", "public_message"}` を受け取り、残すテキストか `None` を返します。なければテキストは書きません。`GraphEngine` では failure exit の後 `result.status` が `ng.RunStatus.FailureExit` になり、`engine.resolved_retry_policy(node)` はノードが実際に使うリトライのタイミングを返します。
+`ProgramRunBudget.max_node_retries`（デフォルトは `None` で、上限なし）は、実行全体でのノードのリトライ回数を制限します。`result.usage.node_retries` がその回数、`result.remaining_budget.max_node_retries` が残りです。`compile_admit` はこれをシールしないので、再コンパイルしなくても、実行時に設定できます。`error_text` を設定するノード向けのredactor（伏せ字処理の関数）は、`LocalProgramHost(..., failure_text_redactor=fn)` と `GraphEngine.compile(..., failure_text_redactor=fn)` で渡します。`fn` は `{"node", "code", "kind", "attempts", "retryable", "public_message"}` を受け取り、残すテキストか `None` を返します。redactorがなければ、テキストは書き込まれません。`GraphEngine` では、failure exitの後、`result.status` が `ng.RunStatus.FailureExit` になります。`engine.resolved_retry_policy(node)` は、そのノードが実際に使うリトライのタイミングを返します。
 
-`retryPolicy(node, {attempt_timeout_ms: ...})` はノードの各試行を制限します（100〜3 600 000 ms）。タイムアウトした試行では `input.ctx.cancel_token.is_cancelled()` が真になり、試行はほかの失敗と同じくリトライされルーティングできる `NG.Timeout` で失敗します。その後に試行が返すものはすべて捨てられます。Python の本体は横取りできないので、眠ったりブロックしたりするノードはトークンを確認してください。次の試行はタイムアウトした試行が戻ってから始まり、停止の期限（もう一度タイムアウト分、少なくとも 1 秒）内に戻らない試行は `NG.EffectUncertain` で実行を失敗させます。そのような本体はバックグラウンドで実行を続け、バインディングはインタープリターの終了時にそれを待ちます。実行の `wall_time_ms` を越えるバックオフは kind `deadline` でリトライをやめます。`GraphEngine` では `engine.set_node_attempt_timeout_ms(node, ms)` がホストのタイムアウトを設定し（`None` で解除し、定義自体のタイムアウトは短くすることしかできません）、`engine.resolved_attempt_timeout_ms(node)` がノードが実際に使うタイムアウトを返します。[Program のグラフ機能](program-graphs.md#attempt-timeouts-and-the-deadline)を参照してください。
+`retryPolicy(node, {attempt_timeout_ms: ...})` は、ノードの1回の試行ごとに制限をかけます（100〜3 600 000 ms）。タイムアウトした試行では、`input.ctx.cancel_token.is_cancelled()` が真になり、`NG.Timeout` で失敗します。他の失敗と同じように、リトライもルーティングもできます。タイムアウトした後に試行が返した値は、捨てられます。Pythonのノード本体は強制的に中断できません。スリープしたりブロックしたりするノードは、トークンをポーリングしてください。次の試行が始まるのは、タイムアウトした試行が戻ってからです。停止の期限（再びタイムアウトの値。ただし1秒以上）までに戻らない試行があると、実行は `NG.EffectUncertain` で失敗します。そのような本体はバックグラウンドで動き続け、インタープリターの終了時には、バインディングがその完了を待ちます。実行の `wall_time_ms` を超えてしまうバックオフがある場合、リトライは kind `deadline` で打ち切られます。`GraphEngine` では、`engine.set_node_attempt_timeout_ms(node, ms)` でホスト側のタイムアウトを設定します（`None` で解除。定義が持つタイムアウトは、短くする方向にしか変えられません）。`engine.resolved_attempt_timeout_ms(node)` は、そのノードが実際に使うタイムアウトを返します。詳しくは[Programグラフの機能](program-graphs.md#attempt-timeouts-and-the-deadline)を参照してください。
 
 ### スケジューラースレッド、ワーカー、タイムアウト
 
-`LocalProgramHost(..., scheduler_threads=1, worker_count=1)`は2つのスレッド設定を受け取ります。`scheduler_threads`は、実行を駆動する（JavaScript制御、`callCore`のディスパッチ、join、デッドライン）`ProgramRuntime`スケジューラープールのスレッド数を設定します。1以上である必要があります。`worker_count`は、1つのグラフ内のfan-outに使われる各Coreエンジンのワーカープールを設定し、admission済みProgramの`max_concurrency`を超えてはなりません。既定値の1では、fan-outの分岐はスケジューラースレッド上で実行されます。
+`LocalProgramHost(..., scheduler_threads=1, worker_count=1)` には、スレッドに関する設定が2つあります。`scheduler_threads` は、実行を進める `ProgramRuntime` のスケジューラープールのスレッド数です。このプールが、JavaScriptの制御、`callCore` のディスパッチ、join、デッドラインを担当します。1以上にする必要があります。`worker_count` は、1つのグラフ内でfan-outするための、各Coreエンジンのワーカープールのサイズです。admission済みのProgramの `max_concurrency` を超えてはいけません。デフォルトの1では、fan-outの分岐はスケジューラーのスレッド上で実行されます。
 
-Program実行中、Pythonノードの本体はスケジューラースレッドを占有しません。本体はバインディングが所有するワーカープールで実行され、既定では32スレッドです。変更するには、最初のProgram実行の前に`NEOGRAPH_PYTHON_NODE_THREADS`を1から1024までの値に設定してください。既定の1つのスケジューラースレッドでも、ホストの複数の実行、`ng.all`、`ng.race`、`ng.quorum`のメンバー、1つのCore実行のfan-out分岐は同時に進み、ノードの実行中にもデッドラインが発火します。`ng.race`は最初に終わったメンバーを返し、`ng.quorum`は必要な成功がそろった時点で返ります。それでもPythonコードはGILの下で実行されるため、CPUバウンドのノードは並列に実行されません。ノードが重なって実行されるのは、`time.sleep`、I/O、ネイティブ呼び出しなどでGILを解放している間です。通常の`GraphEngine`実行は、引き続き呼び出し元のスレッドでPythonノードの本体を実行します。
+Programの実行中、Pythonのノード本体がスケジューラーのスレッドを占有することはありません。ノード本体は、バインディングが持つワーカープールで動きます。デフォルトは32スレッドで、変更するには、最初のProgramの実行より前に、`NEOGRAPH_PYTHON_NODE_THREADS` に1〜1024の値を設定します。スケジューラーのスレッドがデフォルトの1つでも、ホストの複数の実行、`ng.all`・`ng.race`・`ng.quorum` のメンバー、1つのCoreの実行のfan-outの分岐は、同時に進みます。ノードの実行中にデッドラインが発火することもあります。`ng.race` は最初に終わったメンバーを返し、`ng.quorum` は必要な数の成功がそろった時点で返ります。ただし、PythonのコードはGILの下で動くので、CPUを使うノードが並列に動くことはありません。ノードどうしが重なって動くのは、`time.sleep`、I/O、ネイティブ呼び出しなどでGILを解放している間です。通常の `GraphEngine` の実行では、Pythonのノード本体は、これまでどおり呼び出し元のスレッドで動きます。
 
-どちらの制限も実行中のPythonノードを中断しません。キャンセルは協調的です。実行の`wall_time_ms`が尽きるとランタイムは実行をキャンセルし、結果は実行中のノードが戻った後に`status` `TimedOut`、`failure.code` `P_RUNTIME_TIMEOUT`、メッセージ`Program wall-time budget (N ms) expired`で届きます。タイムアウトが中断した操作のテキストは`failure.witness["cause_message"]`にあります。`ng.await(command, timeoutMs, sourceSite)`のデッドラインを過ぎると、実行は`P_AWAIT_TIMEOUT`で`TimedOut`として終了し、デッドライン後に届いた完了は受け付けられません。どちらの場合も子のCore実行はキャンセルされます。`input.ctx.cancel_token.is_cancelled()`を確認するノードは早めに停止し、それを無視するノードは戻るまで結果を遅らせます。`TimedOut`と`Cancelled`の結果は、完了したCoreノードを`execution_trace`に列挙します。
+どちらの制限も、実行中のPythonノードを中断させることはありません。キャンセルは協調的に行われます。実行の `wall_time_ms` が尽きると、ランタイムは実行をキャンセルします。結果が返るのは、実行中のノードが戻った後で、`status` は `TimedOut`、`failure.code` は `P_RUNTIME_TIMEOUT`、メッセージは `Program wall-time budget (N ms) expired` です。タイムアウトによって中断された操作のテキストは、`failure.witness["cause_message"]` に入っています。`ng.await(command, timeoutMs, sourceSite)` のデッドラインが過ぎると、実行は `TimedOut` と `P_AWAIT_TIMEOUT` で終わります。デッドラインの後に届いた完了は受け付けられません。どちらの場合も、子のCoreの実行はキャンセルされます。`input.ctx.cancel_token.is_cancelled()` を確認しているノードは早めに止まります。確認しないノードは、戻るまで結果が遅れます。`TimedOut` と `Cancelled` の結果では、完了したCoreノードが `execution_trace` に並びます。
 
-Programエンジンはstderrにlintもfan-outの通知も出力しません。`EngineConfig::worker_count`を勧める通知は、自分で構築した`GraphEngine`からのみ出ます。
+Programのエンジンは、lintの結果もfan-outに関する通知も、標準エラー出力に出しません。`EngineConfig::worker_count` を勧める通知が出るのは、自分で構築した `GraphEngine` の場合だけです。
 
-### インメモリ状態と再開
+### メモリ上の状態と再開
 
-既定では、`LocalProgramHost`はバンドル、バージョン、アクティベーション、実行記録、チェックポイントをホストオブジェクト内のメモリに保持し、ディスクには何も書き込みません。実行は、それを開始したホストインスタンスが存在している間に、そのインスタンスを通じて再開してください。プロセスの再起動後や別の`LocalProgramHost`からは、`resume()`が`P_RUN_NOT_FOUND`を伴う`ng.ProgramDiagnosticError`を送出します。メッセージは`run '<id>' was not found in this LocalProgramHost; runs are kept in memory by the host that started them`です。PostgreSQLのProgramストアはC++ホストのAPIです。
+デフォルトでは、`LocalProgramHost` はバンドル、バージョン、アクティベーション、実行の記録、チェックポイントを、ホストのオブジェクトの中のメモリに保持し、ディスクには何も書き込みません。実行を再開できるのは、その実行を開始したホストのインスタンスが生きている間に、同じインスタンスを通してだけです。プロセスを再起動した後や、別の `LocalProgramHost` からは、`resume()` が `ng.ProgramDiagnosticError` を `P_RUN_NOT_FOUND` で送出します。メッセージは `run '<id>' was not found in this LocalProgramHost; runs are kept in memory by the host that started them` です。PostgreSQLのProgramストアは、C++のホスト用のAPIです。
 
-`sqlite_directory=path`を渡すと、ホストはバンドル、バージョン、実行記録、チェックポイントをそのディレクトリのSQLiteファイル（`program.db`、`checkpoints.db`）に、プロバイダー呼び出しをプロバイダー呼び出しjournal（`provider_calls.db`）に保持するため、実行はプロセスを越えて残ります。同じディレクトリと同じレジストリで開いたホストが実行を続けます。`resume()`は中断された実行を続け、`reconnect(run_id)`は停止したプロセスが実行中のまま残した実行を続けます。復旧はjournalに記録されたリクエストを再送しません。journalが応答を再生し、呼び出しは1回だけ請求されます。プロバイダーをバインドするホストには`native_history_archive=`も必要です（初回は`ng.NativeArchive.provision`、以後は`ng.NativeArchive.open`）。journalがすべての応答をarchiveのcustodyのもとに保持するためです。子予算のない`define()`のみのProgram実行は、wall timeの間execution leaseを持ちます。`reconnect()`はleaseが切れるまで`P_RUN_LEASE_HELD`を送出し、その後は実行を`TimedOut`で終えてjournalに記録された呼び出しを請求します。クラッシュからの復旧は、実行の最後の永続チェックポイント（たとえば中断が残したもの）から再開します。
+`sqlite_directory=path` を指定すると、ホストはバンドル、バージョン、実行の記録、チェックポイントを、そのディレクトリ内のSQLiteファイル（`program.db`、`checkpoints.db`）に保存し、プロバイダー呼び出しは、プロバイダー呼び出しのジャーナル（`provider_calls.db`）に保存します。これにより、実行はプロセスが終わっても残ります。同じディレクトリを同じレジストリで開いたホストが、その実行を続行できます。`resume()` は、割り込まれた実行を続行します。`reconnect(run_id)` は、停止したプロセスが実行中のまま残した実行を続行します。復旧のとき、ジャーナルに記録済みのリクエストが再送されることはありません。ジャーナルが応答をリプレイし、その呼び出しは1回だけ課金されます。プロバイダーを結び付けるホストには、`native_history_archive=` も必要です（初回は `ng.NativeArchive.provision`、以後は `ng.NativeArchive.open`）。ジャーナルは、すべての応答をarchiveの保管の下に置くためです。子の予算を持たず、`define()` だけで書いたProgramの実行は、実時間の間、実行リース（execution lease）を保持します。リースが切れるまでは、`reconnect()` が `P_RUN_LEASE_HELD` を送出します。切れた後は、実行を `TimedOut` で終わらせ、ジャーナルに記録済みの呼び出しを課金します。クラッシュからの復旧は、実行の最後の永続チェックポイント（たとえば割り込みで残ったもの）から再開します。
 
-`resume(run_id, value)`はハンドルを返します。結果を得るには`.wait()`を呼び出してください。`pending_id`がなければ、実行で待機中の唯一の呼び出しを再開します。待機中の呼び出しがない、または複数ある場合は`ValueError`を送出します。呼び出しを正確に指定するには、`result.interrupt.pending_input.call_id`を`pending_id`として渡してください。 `fork(run_id, value, version, budget)` は、実行の正確なチェックポイント (または `checkpoint_id=`) から `version` の新しい実行を開始し、その待機中の呼び出しに `value` で応答します。`budget` は元の実行の `remaining_budget` の範囲内でなければならず、`pending_id=` は `resume()` と同じく呼び出しを指定します。フォークは `resume()` と同じく一時停止した実行が完了したものを再生します。一時停止したステップで完了したノードや Send は再実行も再課金もされず、その provider 呼び出しも再送されません (#390)。 Core のステップが複数の割り込みで一時停止した場合、`result.interrupt.pending_input.core_interrupt_id` (または `pending_effect.core_interrupt_id`) はこの保留中の呼び出しが答える Core 割り込みを指し、`resume()` はまさにそれに答えます。そのステップの他の割り込みは、保留中の呼び出し一つずつ、もう一度尋ねます。Core 割り込みが一つなら `""` です (#388)。`fork()` もまさにその割り込みに答え、フォークした実行はそのステップの他の質問をもう一度尋ねます (#394)。JavaScript の `main()` のフォークは、`resume()` と同じく元の実行が一時停止したコマンドを続けます。`main()` は元の実行の入力でもう一度実行され (フォークの `input` は使われません)、完了したコマンドは元のコマンドジャーナルから再生されて再実行・再送・再課金されず、一時停止した `callCore` はチェックポイントから `value` で再開されます (#395)。フォークが再生する記録された失敗はプロバイダーの証拠を保ちます。フォークはその証拠を元の実行のカストディから自身のものへ結び直すため、`result.failure.provider_outcome` は元の実行と同じくフォークでも復元されます (#398)。
+`resume(run_id, value)` はハンドルを返します。結果は `.wait()` で受け取ります。`pending_id` を指定しない場合は、その実行で待機中の呼び出しが1つだけならそれを再開します。待機中の呼び出しがない場合や、複数ある場合は、`ValueError` が発生します。その場合は、`result.interrupt.pending_input.call_id` を `pending_id` に渡して、呼び出しを正確に指定してください。`fork(run_id, value, version, budget)` は、その実行の正確なチェックポイント（または `checkpoint_id=`）から、`version` の新しい実行を開始し、保留中の呼び出しに `value` で答えます。`budget` は、コピー元の実行の `remaining_budget` の範囲内でなければなりません。`pending_id=` で呼び出しを指定する方法は、`resume()` と同じです。フォークは、`resume()` と同じように、一時停止した実行が終えていた処理をリプレイします。一時停止したステップで終了したノードや Send は、再実行も再課金もされず、そのプロバイダー呼び出しも再送されません（#390）。
 
-`resume()`が返した結果の`execution_trace`には、再開後に実行されたCoreノードだけが並びます。割り込み前に実行されたノードは、割り込まれた結果に現れます。`b`の前で割り込むCore `a → b → c`では、割り込まれた結果は`["a"]`、再開後の結果は`["b", "c"]`になります。
+Coreのステップが複数の割り込みで一時停止している場合、`result.interrupt.pending_input.core_interrupt_id`（または `pending_effect.core_interrupt_id`）が、この保留中の呼び出しが答えるCoreの割り込みを示します。`resume()` は、まさにその割り込みに答えます。ステップの他の割り込みは、保留中の呼び出しを1つずつ、あらためて質問します。Coreの割り込みが1つだけのときは、`""` になります（#388）。`fork()` も、同じ割り込みに答え、フォークした実行は、ステップの他の質問を再び出します（#394）。JavaScriptの `main()` をフォークした場合は、`resume()` と同じように、コピー元が一時停止したコマンドから続行します。`main()` は、コピー元の実行の入力でもう一度実行されます（フォーク側の `input` は使われません）。終了済みのコマンドは、コピー元のコマンドジャーナルからリプレイされ、実行も送信も課金も繰り返されません。一時停止していた `callCore` は、そのチェックポイントから `value` で再開されます（#395）。フォークがリプレイする記録済みの失敗は、プロバイダーのエビデンスを保持します。フォークは、そのエビデンスを、コピー元の実行の保管から自分の保管に結び付け直します。そのため、`result.failure.provider_outcome` は、コピー元と同じようにフォークでも復元されます（#398）。
 
-## 必須ライフサイクルHook
+`resume()` が返す結果の `execution_trace` には、再開後に実行されたCoreノードだけが並びます。割り込みの前に実行されたノードは、割り込まれた結果に出ています。たとえば、Coreが `a → b → c` で、`b` の前で割り込まれた場合、割り込まれた結果は `["a"]`、再開後の結果は `["b", "c"]` になります。
 
-Hookは、モデルがツールを呼び出すことを決定するのではなく、ホストのライフサイクルイベントによってトリガーされます。
+## 必須のライフサイクルHook
+
+Hookは、ホストのライフサイクルイベントによって起動されます。モデルがツールの呼び出しを決めて起動されるものではありません。
 
 ```python
 data = ng.HookDefinitionData()
@@ -610,15 +614,15 @@ runtime = ng.create_hook_runtime(
 engine.set_hook_runtime(runtime)
 ```
 
-`FailClosed`下でのコールバック失敗は、保護されたランタイム境界をブロックします。`Continue`は、観測上の損失が許容される場合にのみ利用可能です。
+`FailClosed` では、コールバックが失敗すると、保護されたランタイム境界がブロックされます。`Continue` を使えるのは、観測データが失われてもかまわない場合だけです。
 
-`HookBoundaryBlocked` は、ブロックした Hook の `invocation_id` と `state`(`"failed"`、`"timed_out"` など)を持ちます。Python ツールは[ツール失敗の契約](reference-en.md#tool-failure-contract)に従います。ツール内で送出された `HookBoundaryBlocked`(たとえば入れ子のエンジン実行から)は実行を停止し、`NodeInterrupt` は実行を一時停止します。それ以外の例外は、モデルが読むツール結果になります。
+`HookBoundaryBlocked` は、ブロックされたHookの `invocation_id` と `state`（`"failed"`、`"timed_out"` など）を保持します。Pythonのツールは、[ツールの失敗に関する契約](reference-en.md#tool-failure-contract)に従います。ツールの中で（たとえば入れ子のエンジン実行によって）`HookBoundaryBlocked` が送出されると、実行が止まり、`NodeInterrupt` が送出されると、実行が一時停止します。それ以外の例外は、モデルが読むツールの結果になります。
 
-## ランタイムコンテキスト、Skill、および厳格なディスパッチ
+## ランタイムコンテキスト、Skill、strictディスパッチ
 
-バインディングは、不変のRAW履歴レコード、コンテキストアーティファクト、エポック、必須のSkill/制約、変換レシート、およびプロバイダーディスパッチレシートを公開します。
+このバインディングは、変更できないRAWの履歴レコード、コンテキストのアーティファクト、エポック、必須のSkill／制約、変換レシート、プロバイダーのディスパッチレシートを公開しています。
 
-RAW `RuntimeHistoryRecord` を作成するとき、Assistant メッセージには `RuntimeHistoryRecordData.trust` を `RuntimeTrustClass.ModelOutput` に設定します。既定の `UntrustedInput` は User メッセージだけを受け入れるため、Assistant 出力に使うと拒否されます。これらのラベルはメッセージの出自を表します。ツール実行、予算、コードの権限を与えず、真正なネイティブ再生の保管権限を代替しません。
+RAWの `RuntimeHistoryRecord` を作るときは、アシスタントのメッセージなら `RuntimeHistoryRecordData.trust` に `RuntimeTrustClass.ModelOutput` を設定します。デフォルトの `UntrustedInput` が受け付けるのはユーザーのメッセージだけで、アシスタントの出力に使うと拒否されます。これらのラベルは、メッセージの由来を表すものです。ツール実行、予算、コードの権限を与えるものではなく、本物のネイティブリプレイの保管の代わりにもなりません。
 
 ```python
 requirements = ng.RuntimeContextRequirements()
@@ -632,9 +636,9 @@ assembler = ng.RuntimeTurnAssembler(
 )
 ```
 
-`ContextTransformReceipt`は任意の派生証拠を許可しますが、すべての必須アーティファクトがバイト単位で同一のままであることを要求します。
+`ContextTransformReceipt` は、任意の派生エビデンスを許しますが、必須のアーティファクトはすべてバイト単位で同一のままであることを要求します。
 
-完全な厳格パスには、永続的なSQLiteストアを使用します：
+strictの経路をすべて使うには、永続化されるSQLiteのストアを使います。
 
 ```python
 contexts = ng.SQLiteContextStore("runtime.sqlite3")
@@ -658,45 +662,47 @@ profile.attach(engine)
 
 ## HITLと状態
 
-静的`interrupt_before`/`interrupt_after`、動的`NodeInterrupt`、同期`resume`、asyncio`resume_async`、および厳密`resume_from`はチェックポイントストアを必要とします。
+静的な `interrupt_before` / `interrupt_after`、動的な `NodeInterrupt`、同期の `resume`、asyncioの `resume_async`、正確な指定の `resume_from` には、チェックポイントストアが必要です。
 
-`ng.Send`でディスパッチされたPythonノードが`ng.NodeInterrupt`を送出すると、他のノードと同じようにrunが一時停止します。`run`、`run_stream`、`run_async`、`run_stream_async`はチェックポイント付きの中断された`RunResult`を返し、`resume`、`resume_async`、`resume_from`はそのSendを回答とともに実行します。Sendを送出したノードと終了したSendは再実行されず再生されます。 一つのステップの複数のノードや Send が `ng.NodeInterrupt` を送出すると、`result.interrupts` はそれぞれを `{"id", "node", "value"}` として列挙し、`result.interrupt_id` は最初のものを指します。`resume`、`resume_async`、`resume_from` は `interrupt_id=` を受け取ってその割り込みに答え、指定がなければ最初のものに答えます。一時停止した他のノードや Send はその再開で自身の質問をもう一度行い、次の再開がそれに答えます (#388)。保留中でない `interrupt_id` は `ValueError` になります。`RunMetadata.resume_interrupt_id` も同じ id を運びます。答えは、再開が再び入るステップで、それが答えるノードや Send にだけ届きます。再開した run の後続ステップでは `input.ctx.resume_value` と tool gate の `ToolGateContext.resume_value` が `None` になるため、そこで尋ねるノードや gate は run をもう一度一時停止します (#393)。`interrupt_before` の一時停止後の再開は gate が止めていたノードに値を渡し、`interrupt_after` の一時停止後の再開はどのノードにも渡しません。一つのステップで複数のゲート付きノードが ready になると、各ゲートに個別に答えます。ステップのすべてのゲートが答えられるまで run は次のゲート付きノードの前でもう一度止まり、その後、各ゲート付きノードは自身のゲートへの答えを受け取ります (#396)。一つのステップでは、失敗したノードや Send は順序にかかわらず尋ねるノードより優先されます。run は失敗を送出し、割り込みを報告しません。不確かな効果 (payload の `kind` が `tool_effect_reconciliation` である `NodeInterrupt`) だけは、照合できるよう失敗の横でも一時停止します (#392)。
+`ng.Send` でディスパッチされたPythonノードが `ng.NodeInterrupt` を送出すると、他のノードと同じように実行が一時停止します。`run`、`run_stream`、`run_async`、`run_stream_async` は、チェックポイント付きで中断した `RunResult` を返します。`resume`、`resume_async`、`resume_from` は、答えを渡してその Send を実行します。そのとき、Send を出力したノードと、終了済みの Send は、再実行されずにリプレイされます。1つのステップで複数のノードや Send が `ng.NodeInterrupt` を送出すると、`result.interrupts` に、それぞれが `{"id", "node", "value"}` として並び、`result.interrupt_id` は最初のものを示します。`resume`、`resume_async`、`resume_from` に `interrupt_id=` を渡すと、その割り込みに答えます。渡さなければ最初の割り込みに答えます。その再開では、一時停止している他のノードや Send が、それぞれの質問をあらためて出し、次の再開でそれに答えます（#388）。保留中でない `interrupt_id` を渡すと、`ValueError` が発生します。`RunMetadata.resume_interrupt_id` も同じIDを保持します。
 
-Python の `CheckpointStore` サブクラスは `requires_managed_budget(thread_id) -> bool` を実装できます。この同期仮想メソッドは、永続化された管理予算バンクの拒否義務を読み取ります。エンジンのネイティブ非同期ファサードがこのメソッドを呼び、バインディングは Python のオーバーライドを実行するときに GIL を取得します。チェックポイント状態からバンクを除去したり、チェックポイントを削除したりした後も、実際の永続義務を報告してください。オーバーライドを省略すると、`False` を返す代わりに、未対応バックエンドを示す明示的なネイティブエラーが維持されます。
+答えが届くのは、再開が再び入ったステップの中で、その答えを受けるノードや Send だけです。再開後の実行の、これより後のステップでは、`input.ctx.resume_value` と、ツールゲートの `ToolGateContext.resume_value` が `None` になります。そこで質問するノードやゲートは、実行をもう一度一時停止させます（#393）。`interrupt_before` の一時停止の後に再開すると、ゲートが止めていたノードに値が渡されます。`interrupt_after` の一時停止の後に再開すると、どのノードにも渡されません。1つのステップでゲート付きのノードが複数実行可能になった場合は、ゲートが1つずつ答えられます。ステップのすべてのゲートに答えるまで、実行は次のゲート付きノードの前で再び一時停止し、すべてに答えた後で、各ゲート付きノードが自分のゲートへの答えを受け取ります（#396）。1つのステップの中では、失敗したノードや Send が、質問を出したものより優先されます。順序は関係ありません。実行は失敗を送出し、割り込みは報告されません。失敗と並んで一時停止するのは、不確かな効果（payloadの `kind` が `tool_effect_reconciliation` の `NodeInterrupt`）だけで、照合できるようにするためです（#392）。
 
-この読み取りは支出、復元、リースの権限を付与しません。上限付きの管理実行には、対応する真正なネイティブ管理予算リースが引き続き必要です。読み取りメソッドだけを実装しても、リースは提供できません。
+Pythonで `CheckpointStore` のサブクラスを作る場合は、`requires_managed_budget(thread_id) -> bool` を実装できます。この同期の仮想メソッドは、永続化された管理対象バンクの拒否義務（denial obligation）を読み取ります。エンジンのネイティブな非同期ファサードがこのメソッドを呼び、バインディングは、Pythonのオーバーライドを呼ぶためにGILを取得します。チェックポイントの状態が除去または削除されていても、永続化されている義務を、そのまま正直に報告してください。オーバーライドを実装しなかった場合は、`False` を返すのではなく、ネイティブ側の「バックエンド未対応」という明示的なエラーになります。
+
+このリーダーは、支出、復元、リースのいずれの権限も与えません。管理対象の上限付き実行には、これまでどおり、実際に対応しているネイティブの管理対象予算のリースが必要です。リーダーを実装しただけでは、それは得られません。
 
 ```python
 if result.interrupted:
     result = engine.resume(result_thread_id, {"approved": True})
 ```
 
-検査とタイムトラベルには`get_state_history`、`update_state`、`fork`を使用します。`get_state_view()`はフラットなPydanticベースのチャネルアクセスを提供し、`get_state()`は標準のネスト表現を保持します。
+状態の確認とタイムトラベルには、`get_state_history`、`update_state`、`fork` を使います。`get_state_view()` は、Pydanticを使ったフラットなチャネルアクセスを提供します。`get_state()` は、正規の入れ子の表現を返します。
 
 ## 非同期とキャンセル
 
-`run_async`、`run_stream_async`、`resume_async` は `asyncio.Future` を返します。これらのグラフ Future のキャンセルは `CancelToken` を通じてキャンセルを要求します。処理が終了するには、ネイティブ I/O がキャンセル境界に到達する必要があります。グラフのストリーミングコールバックは呼び出し元の asyncio ループスレッドに戻ります。
+`run_async`、`run_stream_async`、`resume_async` は、`asyncio.Future` オブジェクトを返します。これらのグラフのFutureをキャンセルすると、`CancelToken` を通じてキャンセルが要求されます。操作が終わるのは、ネイティブのI/Oがキャンセル可能な境界に達してからです。グラフのストリーミングのコールバックは、呼び出し側のasyncioのループスレッドに戻ってきます。
 
-プロバイダーの `invoke` と `dispatch` は同期 Python メソッドです。バインディングはネイティブ呼び出し中に GIL を解放し、Python のプロバイダーオーバーライドやイベントコールバックでは再取得します。イベントコールバックは所有された `ProviderEvent` 値を受け取り、ネイティブのワーカースレッドで実行される場合があります。asyncio が所有する状態を更新する場合は `loop.call_soon_threadsafe` を使います。
+プロバイダーの `invoke` と `dispatch` は、同期のPythonメソッドです。バインディングは、ネイティブの呼び出しが動いている間はGILを解放し、Pythonのプロバイダーのオーバーライドやイベントコールバックを呼ぶときにGILを取得します。イベントコールバックは、所有権を持つ `ProviderEvent` の値を受け取り、ネイティブのワーカースレッド上で動くことがあります。コールバックからasyncioが管理する状態を更新する必要がある場合は、`loop.call_soon_threadsafe` を使ってください。
 
-`request.on_event = callback` でオブザーバーを指定し、`None` で解除します。`request.on_event` の読み取りは元の Python 呼び出し可能オブジェクトの同一性を保ち、`RunConfig.on_provider_event` も同じ規則に従います。各イベントは文字列の `kind` と型付き `value` を公開し、`ProviderPartDelta` 値は自身の `bytes` を所有します。コールバック後にイベントを保持しても、借用された SDK テキストビューを保持することにはなりません。キャンセルを要求するには、`request.cancel_token` に設定したトークンで `token.cancel()` を呼びます。
+オブザーバーは `request.on_event = callback` で設定し、`None` を代入すると解除します。`request.on_event` を読むと、元のPythonのcallableと同一のオブジェクトが返ります。`RunConfig.on_provider_event` も同じ規則です。各イベントには、文字列の `kind` と、型付きの `value` があります。`ProviderPartDelta` の値は、自分の `bytes` を所有しています。コールバックが終わった後にイベントを保持しても、借用しているSDKのテキストビューを保持することにはなりません。キャンセルを要求するには、`request.cancel_token` に設定したトークンの `token.cancel()` を呼びます。
 
-同期プロバイダー呼び出しをイベントループの外で実行するには、`asyncio.to_thread(provider.invoke, request)` を使います。この await のキャンセルだけでは、プロバイダー呼び出しはキャンセルされません。`request.cancel_token` に `CancelToken` を設定して、明示的にキャンセルを要求します。
+同期のプロバイダー呼び出しをイベントループのスレッドから外すには、`asyncio.to_thread(provider.invoke, request)` を使います。そのawaitをキャンセルしただけでは、プロバイダーの呼び出しはキャンセルされません。`request.cancel_token` に `CancelToken` を設定し、キャンセルを明示的に要求してください。
 
-有効な準備済みハンドルのトークンがすでにキャンセルされている場合、プロバイダーディスパッチの事前検査は所有された SDK の `Cancelled` 失敗を返します。同期ディスパッチも同じネイティブ非同期プロバイダーパスが終了するまで実行します。グラフ、ホスト、コルーチンの入口でのキャンセルは別の境界であり、`ProviderOutcome` が返る前に例外を送出する場合があります。キャンセル要求は、すべての境界で型付きの `Cancelled` データを保証するものではありません。また、リクエストが送信されなかったこと、リモート処理が停止したこと、課金されないことも証明しません。
+有効な準備済みハンドルで、そのトークンがすでにキャンセル済みの場合、プロバイダーのディスパッチの事前チェックは、所有権を持つSDKの `Cancelled` の失敗を返します。同期のディスパッチも、同じネイティブの非同期プロバイダーの経路を最後まで実行します。グラフ、ホスト、コルーチンの入口でのキャンセルは別の境界で、`ProviderOutcome` が返る前に例外が発生することがあります。キャンセルを要求しても、すべての境界で型付きの `Cancelled` のデータが得られるとは限りません。また、キャンセルを要求したからといって、リクエストが送信されていないこと、リモートの処理が止まったこと、課金が発生しないことが保証されるわけではありません。
 
-[pybind11 の GIL 文書](https://pybind11.readthedocs.io/en/stable/advanced/misc.html#global-interpreter-lock-gil) は、GIL の解放と Python コールバックのための再取得が、別々のバインディング責務である理由を説明しています。
+GILを解放することと、Pythonのコールバックのために再取得することが、バインディングの別々の責務である理由は、[pybind11のGILに関するドキュメント](https://pybind11.readthedocs.io/en/stable/advanced/misc.html#global-interpreter-lock-gil)で説明されています。
 
 ## プロトコルと可観測性
 
-- MCPクライアントツールは、ビルド時に`neograph_engine.mcp`を通じて利用可能です。
-- A2Aクライアント型は、ビルド時に`neograph_engine.a2a`を通じて利用可能です。
-- `ProtocolHostAdapter`は公式Python A2A/ACPサーバーSDKをNeoGraphセッションセマンティクスと統合します。
-- `neograph_engine.tracing`と`neograph_engine.openinference`は、Phoenix、Langfuse、Arizeおよび互換バックエンド向けにベンダーニュートラルなOTel/OpenInferenceデータを出力します。
+- MCPクライアントのツールは、ビルドされている場合、`neograph_engine.mcp` から使えます。
+- A2Aクライアントの型は、ビルドされている場合、`neograph_engine.a2a` から使えます。
+- `ProtocolHostAdapter` は、公式のPython向けA2A／ACPサーバーSDKを、NeoGraphのセッションの意味論に統合します。
+- `neograph_engine.tracing` と `neograph_engine.openinference` は、ベンダー中立なOTel／OpenInferenceのデータを出力します。送信先は、Phoenix、Langfuse、Arizeと、それらと互換性のあるバックエンドです。
 
-### ネイティブ A2A discovery と streaming
+### ネイティブA2Aのdiscoveryとストリーミング
 
-`a2a.WireDialect` は `V1_0`(主要)または `V0_3`(互換)。`client.wire_dialect()` は構築/強制 card fetch 後、最初の card-selected RPC または成功 probe まで `None` です。`AgentCard.supported_interfaces` は `url/protocol_binding/protocol_version/tenant` を持つ独立した `AgentInterface` リスト、`card.raw` は観察 JSON です。native client は最初の呼び出しの前に card を取得して互換 JSONRPC interface を選び、正規化 base URL を優先します。その interface URL が base URL と同じ origin なら RPC はその URL に送られます。`client.set_allow_cross_origin_interfaces(True)` は card が別 origin を指定することを許可し、`client.endpoint_url()` は使用中の endpoint を返します。card を取得できない場合だけ 1.0 から probe し、`-32601`、`-32009`、HTTP 400 なら 0.3 に切り替えます。card-selected 呼び出しは fallback しません。message id はランダムな UUID です。`a2a.A2ARpcError.code` は実際の整数コードです。
+`a2a.WireDialect` は、`V1_0`（主）か `V0_3`（互換用）です。`client.wire_dialect()` は、クライアントの構築後、またはカードを強制的に取得した後、カードで選ばれたRPCか、プローブの成功があるまでは `None` を返します。`AgentCard.supported_interfaces` には、独立した `AgentInterface` レコードが入り、`url`、`protocol_binding`、`protocol_version`、`tenant` を持ちます。`card.raw` は、観測用のJSONです。ネイティブのクライアントは、最初の呼び出しの前にカードを取得し、互換性のあるJSONRPCインターフェースを選びます。このとき、正規化したベースURLのものを優先します。RPCの送信先は、そのインターフェースのURLがベースURLと同じoriginであれば、そのURLです。カードが別のoriginを指すことを許すには `client.set_allow_cross_origin_interfaces(True)` を使い、実際に使われているエンドポイントは `client.endpoint_url()` で確認できます。クライアントがプローブを行うのは、カードを取得できない場合だけです。その場合は1.0を先に試し、`-32601`、`-32009`、またはHTTP 400が返ったときに0.3へフォールバックします。カードで選ばれた呼び出しは、フォールバックしません。メッセージIDはランダムなUUIDです。`a2a.A2ARpcError` は、実際の整数の `.code` を保持します。
 
 ```python
 from neograph_engine import a2a
@@ -728,20 +734,20 @@ task = client.send_message_stream(params, on_event)
 print(client.wire_dialect(), task.id, task.state)
 ```
 
-この endpoint で実際のローカル A2A server を先に起動します。Chat ループバックとは別です。`send_message(params)` は非 streaming multipart overload で text overload も残ります。`client.set_authorization_header(authorization_header)` で認証を明示しログには残しません。`Part.media_type/file/data/metadata`、message extensions/reference IDs、task artifacts は型/データ観察で provider native 権限ではありません。
+このサンプルを実行する前に、そのエンドポイントで実際のローカルA2Aサーバーを起動してください。Chatのループバックのピアとは別のものです。`send_message(params)` は、ストリーミングしないマルチパート版のオーバーロードです。テキスト用の簡易オーバーロードも残っています。認証情報は `client.set_authorization_header(authorization_header)` で明示的に設定し、その値をログに出さないでください。`Part.media_type`、`file`、`data`、`metadata`、メッセージの拡張／参照ID、タスクのアーティファクトは、型付きのデータとして観測した内容を保持します。プロバイダーのネイティブな権限を持つことはありません。
 
-`params.message` と `Task.status` は live inline レコード、optional configuration/ベクトル/event 子は独立 snapshot です。入力変更には再代入が必要です。`StreamEvent.Type.StatusUpdate/ArtifactUpdate/Task` と `status_update/artifact_update/task/is_final()` を確認します。V1 opening task は final ではなく native SSE が status と append/replace artifact を組み立てます。blocking 呼び出しは GIL を解放し callback/所有者破棄は GIL を取得します。出力観察後に再 dispatch しません。callback thread が asyncio loop とは限らないため必要なら `loop.call_soon_threadsafe` を使います。
+`params.message` と `Task.status` は、元のオブジェクトと直接つながったインラインのレコードです。省略可能な設定、ベクトル、イベントの子要素は、切り離されたスナップショットなので、入力を更新するには代入し直す必要があります。`StreamEvent.type` には `StreamEvent.Type.StatusUpdate/ArtifactUpdate/Task` を使います。`status_update`、`artifact_update`、`task`、`is_final()` を確認してください。V1の最初のタスクは、最終ではありません。ネイティブのSSEは、ステータスと、追記または置換のアーティファクト更新を組み立てます。ブロックする呼び出しはGILを解放します。コールバックはGILを取得し、GILに対して安全なオーナーを保持します。コールバックで配信したからといって、出力を見たうえでの再ディスパッチが許されるわけではありません。コールバックのスレッドがasyncioのループであるとは限りません。必要な場合は `loop.call_soon_threadsafe` を使ってください。
 
 
-`neograph_engine.openinference` から `OpenInferenceProvider` をインポートします。コンストラクターは `OpenInferenceProvider(inner: Provider, tracer, *, span_name="llm.complete")` です。この Python クラスは、型付き `prepare(request)`、`dispatch(prepared)`、`invoke(request)` を継承するネイティブ C++ ラッパーに委譲します。デフォルトの span 名はラベルであり、`complete` メソッドを復元しません。`opentelemetry-api` と `opentelemetry-sdk` をインストールしてください。構築には OTel API が必要で、エクスポートには SDK の span processor/exporter の設定が必要です。
+`OpenInferenceProvider` は `neograph_engine.openinference` からインポートします。コンストラクターは `OpenInferenceProvider(inner: Provider, tracer, *, span_name="llm.complete")` です。このファサードは、ネイティブのC++ラッパーに処理を委譲します。ラッパーは、型付きの `prepare(request)`、`dispatch(prepared)`、`invoke(request)` を継承します。デフォルトのspan名はラベルであり、`complete` メソッドが復活したわけではありません。`opentelemetry-api` と `opentelemetry-sdk` をインストールしてください。構築にはOTelのAPIが必要で、エクスポートには、設定済みのSDKのspanプロセッサーとエクスポーターが必要です。
 
-準備、承認失敗、準備済みリクエストの破棄では LLM span を作りません。承認済みディスパッチは一つの span を開始し、完了、SDK 失敗、またはディスパッチ例外で終了します。準備済み操作は、ラッパーと外部 tracer 参照が回収された後も Python tracer アダプターを保持します。ブロッキング `invoke`/`dispatch` は GIL を解放し、OTel 呼び出しと Python 参照の破棄時には GIL を取得します。Tracer 失敗にはネイティブのベストエフォート方針を適用し、所有された結果、元のイベント、製品の例外を置き換えません。
+準備、失敗したadmission、破棄では、LLMスパンは作られません。admission済みのディスパッチは、スパンを1つ開始し、完了、SDKの失敗、ディスパッチの例外のいずれかで終了させます。準備済みのオペレーションは、ラッパーや外部のトレーサーへの参照が回収された後も、Pythonのトレーサーアダプターを保持します。ブロックする `invoke` / `dispatch` はGILを解放します。OTelの呼び出しと、Pythonの参照の破棄では、GILを取得します。トレーサーの失敗は、ネイティブ側のベストエフォートの方針に従い、所有権を持つ結果、元のイベント、プロダクト側の例外を置き換えることはありません。
 
-アダプターはディスパッチ時に Python tracer の `start_span` を呼びます。呼び出し元のコンテキストはネイティブのワーカースレッドへ自動伝播しません。ディスパッチ前に意図した OTel 親コンテキストを取得し、下のように tracer アダプターを通じて明示的に渡します。グラフ/ノードの親が必要なグラフノードのプロバイダーにも同じ方法を使います。OTel の [明示的な親コンテキスト選択の文書](https://opentelemetry-python.readthedocs.io/en/latest/api/trace.html#opentelemetry.trace.Tracer.start_span) を参照してください。
+アダプターは、ディスパッチの時点でPythonのトレーサーの `start_span` を呼び出します。呼び出し元のコンテキストが、ネイティブのワーカースレッドに自動で引き継がれることはありません。意図する親のOTelコンテキストをディスパッチの前に取得し、下のサンプルのように、トレーサーアダプターを通して明示的に渡してください。グラフ／ノードを親にしたい場合は、グラフノード内のプロバイダーでも同じようにします。OTelのドキュメントに、[親コンテキストを明示的に選ぶ方法](https://opentelemetry-python.readthedocs.io/en/latest/api/trace.html#opentelemetry.trace.Tracer.start_span)があります。
 
-例の `ParentContextTracer` は取得した一つの親コンテキストを保持します。別の論理的な親を使う場合は、新たにコンテキストを取得し、新しいアダプター/プロバイダーラッパーを構築します。以前のアダプターを再利用すると、以前の親を保持したままになります。
+サンプルの `ParentContextTracer` は、取得した親コンテキストを1つだけ保持します。論理的に別の親を使う場合は、新しくコンテキストを取得して、アダプターとプロバイダーのラッパーを作り直してください。古いアダプターを使い回すと、以前の親のままになります。
 
-上のプロバイダー例の `provider` と `controls` を使います。次の断片を実行する前に、一要求ピアを再起動してください:
+上のプロバイダーのサンプルで作った `provider` と `controls` を使います。この断片を実行する前に、1リクエスト用のピアを再起動してください。
 
 ```python
 import neograph_engine as ng
@@ -780,25 +786,25 @@ with tracer.start_as_current_span("request"):
 traces.shutdown()
 ```
 
-コンソール exporter には `openinference.span.kind="LLM"` の `llm.request` が表示され、その `parent_id` は `request` span の `span_id` と一致するはずです。リンク先のピアでは、出力結果は消費済み、失敗なしで `Hello.` を含みます。新しいリクエストには `observed.invoke(request)` で同じ準備とディスパッチをまとめて実行できます。消費済みハンドルを再ディスパッチしないでください。
+コンソールエクスポーターには、`openinference.span.kind="LLM"` を持つ `llm.request` が表示され、その `parent_id` は `request` スパンの `span_id` と一致するはずです。リンク先のピアを使うと、表示される結果は、消費済みで、失敗がなく、`Hello.` を含みます。新しいリクエストには、`observed.invoke(request)` で同じ準備とディスパッチをまとめて行えます。消費済みのハンドルを、もう一度ディスパッチしてはいけません。
 
-LLM span フィールドには承認されたモデル、宣言された temperature/出力上限、公開メッセージの役割と可視 `Text` 内容、既知の入力/出力/合計使用量カウンターが入ります。欠落したカウンターの属性は省略され、報告されたゼロはゼロのままです。ストリーミングリクエストでは可視テキスト内容のデルタだけに `llm.token` イベントを追加し、テキストを `attributes["chunk"]` に入れます。SDK 失敗は安全なメッセージで ERROR 状態を設定し、部分的な公開出力を保持します。正常完了は OK を設定します。`request.on_event` は引き続き元の型付きイベントを受け取ります。
+LLMスパンのフィールドには、admission済みのモデル、宣言したtemperatureと出力の上限、公開されているメッセージのロールと、見えるテキスト（`Text`）の内容、既知の入力・出力・合計の使用量が入ります。カウントが欠けている場合は、対応する属性を省きます。報告されたゼロは、ゼロのままです。ストリーミングのリクエストでは、見えるテキストのデルタに対してだけ `llm.token` イベントが追加され、テキストは `attributes["chunk"]` に入ります。SDKの失敗では、安全なメッセージを使ってERRORステータスを設定し、公開できる部分的な出力を保持します。正常に完了したときはOKを設定します。`request.on_event` は、これまでどおり元の型付きイベントを受け取ります。
 
-ネイティブ再生、推論 part、生のエンベロープと生のイベントは、これらの LLM span フィールドに入りません。結果はネイティブメッセージと証拠を保持したままです。トレースのエクスポートは再生の custody や会計上の権限を与えません。公開テキストにも機微なアプリケーションデータが含まれるため、プロンプトと exporter をそれに応じて選びます。`openinference_tracer(tracer, *, root_name="graph.run", node_span_prefix="node.", on_event=None)` は別のグラフイベント用コンテキストマネージャーとして残り、プロバイダー LLM span を置き換えません。
+ネイティブリプレイ、reasoningのパート、rawエンベロープ、rawイベントは、これらのLLMスパンのフィールドには入りません。結果は、これまでどおりネイティブのメッセージとエビデンスを保持します。トレースのエクスポートが、リプレイの保管権限や会計の権限を与えることはありません。公開されるテキストには、アプリケーションの機微なデータが含まれることがあります。プロンプトとエクスポーターは、それを踏まえて選んでください。`openinference_tracer(tracer, *, root_name="graph.run", node_span_prefix="node.", on_event=None)` は、グラフイベント用の別のコンテキストマネージャーとして、引き続き使えます。プロバイダーのLLMスパンの代わりにはなりません。
 
-## オプションコンポーネント
+## オプションのコンポーネント
 
-公開パッケージはオプションのC++コンポーネントを正直に示します：
+公開パッケージは、オプションのC++コンポーネントがあるかどうかを、正直に示します。
 
-- `_HAVE_PROGRAM`, `_HAVE_SQLITE`, `_HAVE_POSTGRES`, `_HAVE_MCP`, `_HAVE_A2A`;
-- 欠落コンポーネントはPythonでエミュレートされるのではなく、存在しないものとして扱われます；
-- PyPIホイールはProgram/QuickJS、LLM、MCP、SQLiteを有効にします。ソースビルドはCMakeオプションに従います。
+- `_HAVE_PROGRAM`、`_HAVE_SQLITE`、`_HAVE_POSTGRES`、`_HAVE_MCP`、`_HAVE_A2A`
+- 存在しないコンポーネントは、Pythonでエミュレートされず、単に存在しません
+- PyPIのwheelでは、Program/QuickJS、LLM、MCP、SQLiteが有効です。ソースビルドでは、CMakeのオプションに従います
 
-## テストと例
+## テストとサンプル
 
-バインディングスイートは、Core実行、カスタムコールバック、asyncio、キャンセル、Programコンパイル/ランタイム、必須Hook、厳密コンテキスト、SQLite永続化、プロトコル、READMEの例をカバーします。
+バインディングのテストスイートは、Coreの実行、カスタムコールバック、asyncio、キャンセル、Programのコンパイル／ランタイム、必須のHook、strictなコンテキスト、SQLiteの永続化、プロトコル、READMEのサンプルを対象にしています。
 
-- [Python の例](../bindings/python/examples/README.md)
-- [C++ の例](../examples/README.md)
-- [QuickJS オーサリング境界](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
-- [厳密なランタイムインターポジション](STRICT_RUNTIME_INTERPOSITION.md)
+- [Pythonのサンプル](../bindings/python/examples/README.md)
+- [C++のサンプル](../examples/README.md)
+- [QuickJSのオーサリング境界](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
+- [Strictランタイムインターポジション](STRICT_RUNTIME_INTERPOSITION.md)
