@@ -115,16 +115,18 @@ def test_a_server_that_never_listens_times_out_with_its_output():
 
 def test_the_launcher_starts_a_server_for_a_caller_that_is_not_python():
     # The TypeScript interop test starts its servers through this command.
+    # Closing the launcher's standard input is the stop signal that works on every
+    # platform: a hard kill of the launcher on Windows would leave the server running.
     launcher = subprocess.Popen(
-        [sys.executable, "-I", server_ports.__file__,
+        [sys.executable, "-I", server_ports.__file__, "--stop-on-stdin-eof",
          "--", sys.executable, "-I", STUB, "--port", "{port}"],
-        stdout=subprocess.PIPE, text=True)
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     try:
         line = launcher.stdout.readline().split()
         assert line[0] == "READY"
         assert identity(int(line[1])) == "real"
     finally:
-        launcher.terminate()
+        launcher.stdin.close()
         assert launcher.wait(timeout=10) is not None
         launcher.stdout.close()
     with pytest.raises(OSError):

@@ -83,11 +83,14 @@ if len(sys.argv) > 1:
     sys.exit(0)
 
 with ScriptedModel([say("The Seine.").with_usage(20, 10), say("never asked for")]) as model, \
-        tempfile.TemporaryDirectory() as directory:
+        tempfile.TemporaryDirectory() as temp:
+    directory = os.path.realpath(temp)     # the native archive wants the canonical path (macOS: /var -> /private/var)
     def spawn(*args):
         return subprocess.run([sys.executable, __file__, *args], capture_output=True, text=True)
 
     a = spawn("first", model_url(model), directory)
+    if not a.stdout.strip():
+        sys.exit(f"process A printed nothing (exit {a.returncode}):\n{a.stderr}")
     paused = json.loads(a.stdout.splitlines()[0])
     print(f"process A: paused, answered, then crashed (exit {a.returncode})")
     print("model calls after the crash:", model.call_count)

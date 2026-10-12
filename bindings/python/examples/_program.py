@@ -209,7 +209,7 @@ def native_archive(directory: str, scripted_url: str, *, first: bool, owner: str
 
     ``first=True`` provisions it; a later process opens the same files with ``first=False``.
     """
-    custody = os.path.join(directory, "custody")
+    custody = os.path.join(os.path.realpath(directory), "custody")   # canonical: macOS temp dirs are symlinks
     os.makedirs(custody, mode=0o700, exist_ok=True)
     opened = (ng.NativeArchive.provision if first else ng.NativeArchive.open)(
         os.path.join(custody, "records"), os.path.join(custody, "archive-key"), owner,

@@ -466,6 +466,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--port-env", metavar="NAME",
                         help="also pass the number in this environment variable")
     parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--stop-on-stdin-eof", action="store_true",
+                        help="stop the server when the launcher's standard input closes; the "
+                             "portable way to end it, since a hard kill of the launcher "
+                             "(Windows TerminateProcess) cannot reach the server")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -479,6 +483,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     stopping = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stopping.set())
     signal.signal(signal.SIGINT, lambda *_: stopping.set())
+    if args.stop_on_stdin_eof:
+        def watch_stdin() -> None:
+            try:
+                sys.stdin.buffer.read()
+            finally:
+                stopping.set()
+        threading.Thread(target=watch_stdin, daemon=True).start()
     try:
         server = start_server(launch, reports_port=args.reports_port, timeout=args.timeout)
     except ServerStartError as error:
