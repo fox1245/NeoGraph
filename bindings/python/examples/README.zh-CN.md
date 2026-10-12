@@ -101,6 +101,7 @@ python 01_minimal.py
 | # | 示例 | Offline | 演示内容 |
 |---|---|---|---|
 | 29 | [`29_program_hello.py`](29_program_hello.py) | yes | 一段 JavaScript Program 定义带有 Python 节点的图并在 `LocalProgramHost` 上运行，输出 `status: Completed`、`value: 1`、`trace: ['work']`。 |
+| 30 | [`30_program_barrier_join.py`](30_program_barrier_join.py) | yes | 三个审阅者并行运行，`barrier` 等待全部到齐。有一个审阅者改道后，Program 以 `Failed` 结束，给出 `P_CORE_BARRIER_STALLED` 和指明缺失节点的 witness。 |
 
 ### 协议：MCP、A2A、ACP
 

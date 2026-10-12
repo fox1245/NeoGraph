@@ -100,6 +100,7 @@ The restricted JavaScript Program API runs on top of Core graphs: `ProgramRegist
 | # | Example | Offline | Shows |
 |---|---|---|---|
 | 29 | [`29_program_hello.py`](29_program_hello.py) | yes | A JavaScript Program defines one graph with a Python node and runs it on `LocalProgramHost`; prints `status: Completed`, `value: 1`, `trace: ['work']`. |
+| 30 | [`30_program_barrier_join.py`](30_program_barrier_join.py) | yes | Three reviewers run in parallel and a `barrier` waits for all of them. When one reviewer routes elsewhere, the Program ends `Failed` with `P_CORE_BARRIER_STALLED` and a witness naming the missing node. |
 
 ### Protocols: MCP, A2A, ACP
 

@@ -101,6 +101,7 @@ python 01_minimal.py
 | # | 예제 | Offline | 보여 주는 것 |
 |---|---|---|---|
 | 29 | [`29_program_hello.py`](29_program_hello.py) | yes | JavaScript Program이 Python 노드가 있는 그래프 하나를 정의하고 `LocalProgramHost`에서 실행합니다. `status: Completed`, `value: 1`, `trace: ['work']`를 출력합니다. |
+| 30 | [`30_program_barrier_join.py`](30_program_barrier_join.py) | yes | 검토자 세 명이 병렬로 실행되고 `barrier`가 모두를 기다립니다. 한 명이 다른 곳으로 라우팅하면 Program은 `Failed`로 끝나며, `P_CORE_BARRIER_STALLED`와 빠진 노드를 알려 주는 witness가 남습니다. |
 
 ### 프로토콜: MCP, A2A, ACP
 
