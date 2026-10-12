@@ -1,55 +1,40 @@
 <!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ja source_sha256=37d0912e7f5f8a94f97a67c362602b9b38015ab141aa56aac51c33c118750d4c -->
-# 移行ガイド: レガシー 8 仮想メソッド → `run(NodeInput)` (v0.4.x → v0.9+)
+# マイグレーションガイド：従来の8個の仮想関数 → `run(NodeInput)`（v0.4.x → v0.9+）
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
 
-NeoGraph v0.4 はノードエントリポイントを単一の `run(NodeInput) ->
-awaitable<NodeOutput>` に集約しました。レガシーな 8 つの仮想メソッド (`execute` /
-`execute_async` / `execute_stream` / `execute_stream_async` とそれらの `_full`
-対応版) は v0.4.x で非推奨となり、v1 準備リリースである v0.9.0 で削除されました。
-本書はレガシーノードを現在の API に移行する手順を概説します。
+NeoGraph v0.4で、ノードのエントリポイントが、`run(NodeInput) ->
+awaitable<NodeOutput>` の1つに統合されました。従来の8個の仮想関数（`execute` / `execute_async` /
+`execute_stream` / `execute_stream_async` と、それぞれの `_full` 版）は、v0.4.xで非推奨になり、v1への準備リリースであるv0.9.0で削除されました。この文書では、従来のノードを現在のAPIへ移行する手順を説明します。
 
-> v0.9.0 以降、`run(NodeInput)` を実装していない C++ サブクラスは抽象クラスとして
-> コンパイルエラーになります。Python サブクラスも `run(self, input)` を実装する
-> 必要があります。
+> v0.9.0以降では、`run(NodeInput)` を実装していないC++のサブクラスは、抽象クラスとしてコンパイルに失敗します。Pythonのサブクラスも、`run(self, input)` を実装する必要があります。
 
-イベント駆動Provider dispatchは別のpre-v1必須再ビルド境界です。`CancelToken`は`std::stop_source`を使い、executor非依存native subscription向け`stop_token()`を提供します。既存`cancel()`、`is_cancelled()`、`fork()`、`bind_executor()`、`slot()` callsiteはsource互換ですが旧inline実装はbinary互換ではありません。全C++ consumer/extensionを一致NeoGraph header/libraryで再コンパイルし、shared libraryのみを交換しないでください。通知はSDK `join()`、FIFO所有outcome、絶対deadline、admission/権限budgetを保持します。[ABI policy](ABI_POLICY.md)と[同条件実測](../benchmarks/provider-notification-summary.json)を参照してください。
+イベント駆動のProviderディスパッチにより、v1より前の再ビルド必須の境界が、もう1つ加わりました。`CancelToken` は `std::stop_source` を使うようになり、executorに依存しないネイティブの購読のために、`stop_token()` を公開します。既存の `cancel()`、`is_cancelled()`、`fork()`、`bind_executor()`、`slot()` の呼び出し箇所は、ソースの互換性を保ちます。ただし、古いインライン実装とは、バイナリ互換ではありません。すべてのC++コンシューマーと拡張を、対応するNeoGraphのヘッダーとライブラリで再コンパイルしてください。共有ライブラリだけを置き換えても足りません。プロバイダーの通知は、SDKの `join()`、FIFOで所有される結果、絶対的なデッドライン、admissionと権限の予算を保ちます。[ABIポリシー](ABI_POLICY.md)と[対応する測定結果](../benchmarks/provider-notification-summary.json)を参照してください。
 
 ## 移行する理由
 
-旧パターン — `(sync/async) × (writes/full) × (stream/non-stream)` = 8 仮想
-直積。いずれか 1 つをオーバーライドすると、他の 7 つがデフォルトチェーンに
-フォールバックします。一部の組み合わせは安全ですが、実行時の落とし穴があります
-(例: 同期 `execute_full` + 非同期ディスパッチ → ネストされた `run_sync` 競合)。
-これにより、ユーザーがどの関数をオーバーライドすべきか不明瞭でした。
+従来のパターンでは、`(sync/async) × (writes/full) × (stream/non-stream)` の直積で、仮想関数が8個ありました。どれか1つをオーバーライドすると、残りの7個はデフォルトの連鎖にフォールバックします。安全な組み合わせもありますが、実行時の落とし穴があります（たとえば、同期の `execute_full` と非同期ディスパッチの組み合わせでは、入れ子の `run_sync` で競合が起きます）。そのため、利用者がどの関数をオーバーライドすべきか、分かりにくくなっていました。
 
-新パターン — 単一の `run(NodeInput) -> awaitable<NodeOutput>`。
-1 つだけオーバーライド。同期 vs 非同期の区別は呼出元の関心事です
-(ユーザーはコルーチン内で `co_await` を使用するか、プレーンな同期コードを
-自由に使用可能)。Command / Send は `NodeOutput` に含まれるため、追加の
-仮想メソッドは不要。ストリーミングコールバックは
-`NodeInput::stream_cb` (nullable ポインタ) 経由で到着。
+新しいパターンでは、`run(NodeInput) -> awaitable<NodeOutput>` が1つあるだけで、オーバーライドするのもそれだけです。同期か非同期かは、呼び出し側が考えることです（コルーチンの中では `co_await` を、通常の同期コードでは普通のコードを、自由に使えます）。Command と Send は `NodeOutput` に含まれるので、仮想関数を増やす必要はありません。ストリーミングのコールバックは、`NodeInput::stream_cb`（nullになりうるポインター）経由で渡されます。
 
-## 8 仮想メソッド → 新 `run()` マッピング
+## 8個の仮想関数から新しい `run()` への対応
 
-| レガシー仮想メソッド | 移行後の形式 |
+| 従来の仮想関数 | 移行後の形 |
 |---|---|
-| `execute(state)` | `NodeOutput out; out.writes = {...}; co_return out;` (同期本体) |
-| `execute_async(state)` | ネイティブ非同期: `co_await provider->invoke_async(std::move(request));` |
+| `execute(state)` | `NodeOutput out; out.writes = {...}; co_return out;`（同期の本体） |
+| `execute_async(state)` | `co_await provider->invoke_async(std::move(request));` のような、ネイティブの非同期 |
 | `execute_stream(state, cb)` | `if (in.stream_cb) (*in.stream_cb)(event); co_return NodeOutput{...};` |
-| `execute_stream_async(state, cb)` | 上記 + ネイティブ非同期 (`co_await ...`) |
+| `execute_stream_async(state, cb)` | 上と同じ形に、ネイティブの非同期（`co_await ...`）を加えたもの |
 | `execute_full(state)` | `NodeOutput out; out.writes=...; out.command=...; co_return out;` |
-| `execute_full_async(state)` | 上記 + ネイティブ非同期 |
-| `execute_full_stream(state, cb)` | `execute_full` + `in.stream_cb` 使用 |
-| `execute_full_stream_async(state, cb)` | 上記 + ネイティブ非同期 |
+| `execute_full_async(state)` | 上と同じ形に、ネイティブの非同期を加えたもの |
+| `execute_full_stream(state, cb)` | `execute_full` の形に、`in.stream_cb` の利用を加えたもの |
+| `execute_full_stream_async(state, cb)` | 上と同じ形に、ネイティブの非同期を加えたもの |
 
-キーポイント: **8 つのバリアントは、どの `NodeOutput` フィールドが設定されるか +
-`in.stream_cb` が使用されるか + `co_await` が使用されるかの組み合わせとして
-表現可能**。残る仮想メソッドは 1 つだけ。
+要点：**8つの種類は、`NodeOutput` のどのフィールドを設定するか、`in.stream_cb` を使うか、`co_await` を使うか、の組み合わせで表せます**。仮想関数は1つだけが残ります。
 
-### 最も一般的な Python 移行
+### Pythonで最も多い移行
 
-**旧コード:**
+**従来のコード：**
 
 ```python
 class CounterNode(ng.GraphNode):
@@ -58,7 +43,7 @@ class CounterNode(ng.GraphNode):
         return [ng.ChannelWrite("count", current + 1)]
 ```
 
-**現在のコード:**
+**現在のコード：**
 
 ```python
 class CounterNode(ng.GraphNode):
@@ -67,15 +52,13 @@ class CounterNode(ng.GraphNode):
         return [ng.ChannelWrite("count", current + 1)]
 ```
 
-Python の `run` は通常の `def` であり、`async def` ではありません。
-ストリーミング実行では `input.stream_cb` がイベントを受け取る関数になり、
-通常実行では `None` になります。
+Pythonの `run` は、`async def` ではなく、通常の `def` です。ストリーミング実行では、`input.stream_cb` はイベントを受け取る関数です。通常の実行では `None` になります。
 
-## ケースバイケース変換例
+## ケース別の変換例
 
-### ケース 1 — 最も単純な同期ノード
+### ケース1 — 最も単純な同期ノード
 
-**旧:**
+**従来：**
 ```cpp
 class MyNode : public GraphNode {
 public:
@@ -87,7 +70,7 @@ public:
 };
 ```
 
-**新:**
+**新しい形：**
 ```cpp
 class MyNode : public GraphNode {
 public:
@@ -101,12 +84,12 @@ public:
 };
 ```
 
-違い:
+違いは次のとおりです。
 - `state` → `in.state`
-- 戻り値が `NodeOutput` にラップされる (`writes` フィールド)
-- 関数が `asio::awaitable<NodeOutput>` で `co_return` で終了
+- 戻り値を `NodeOutput`（`writes` フィールド）に包む
+- 関数は `asio::awaitable<NodeOutput>` を返し、`co_return` で終わる
 
-### ケース 2 — 非同期 LLM ノード (`execute_async` の移行)
+### ケース2 — 非同期のLLMノード（`execute_async` の移行）
 
 ```cpp
 #include <neograph/graph/node.h>
@@ -141,9 +124,9 @@ public:
 };
 ```
 
-### ケース 3 — ストリーミングノード (`execute_stream` の移行)
+### ケース3 — ストリーミングノード（`execute_stream` の移行）
 
-公開契約は所有 typed 準備/dispatch であり、同期・非同期の virtual completion 対ではありません。`ProviderRequest.payload` は Chat、Messages、Responses、Gemini、Interactions の SDK リクエスト variant です。`ProviderMode::Collect` / `Stream` は観測者の有無と独立に転送を選択します。`on_event` は借用 typed `sp::Event` view を受け取ります。コールバック後に必要なデータだけコピーします。raw JSON override や portable projection による native 権限のインポートは認めません。
+公開されている契約は、所有権を持つ型付きの準備とディスパッチであり、対になったcompletion用の仮想メソッドではありません。`ProviderRequest.payload` は、Chat、Messages、Responses、Gemini、Interactionsのリクエストを表す、SDKのvariantです。`ProviderMode::Collect` / `Stream` は、オブザーバーとは独立に、トランスポートを選びます。`on_event` が受け取るのは、借用された、型付きの `sp::Event` のビューです。コールバックの後に必要なデータだけを、コピーしてください。生のJSONによる上書きや、ポータブルな射影を通じたネイティブ状態の取り込みは、受け付けられません。
 
 ```cpp
 #include <neograph/graph/node.h>
@@ -187,9 +170,9 @@ public:
 };
 ```
 
-### ケース 4 — Command / Send を使用するノード (`execute_full` の移行)
+### ケース4 — CommandまたはSendを使うノード（`execute_full` の移行）
 
-**旧:**
+**従来：**
 ```cpp
 NodeResult execute_full(const GraphState& state) override {
     NodeResult r;
@@ -201,7 +184,7 @@ NodeResult execute_full(const GraphState& state) override {
 }
 ```
 
-**新:**
+**新しい形：**
 ```cpp
 asio::awaitable<NodeOutput> run(NodeInput in) override {
     NodeOutput out;   // NodeOutput == NodeResult — alias of the same type
@@ -213,12 +196,11 @@ asio::awaitable<NodeOutput> run(NodeInput in) override {
 }
 ```
 
-`NodeOutput` は `NodeResult` のエイリアスです — レガシーな `NodeResult` コードも
-そのままコンパイルされます。
+`NodeOutput` は `NodeResult` の別名なので、従来の `NodeResult` のコードも、そのままコンパイルできます。
 
 ## よくある間違い
 
-### `NodeInput in` は値渡し
+### `NodeInput in` は値渡しにする
 
 ```cpp
 // ❌ Wrong — coroutine ref-param UAF, SEGV in pybind async path
@@ -228,15 +210,11 @@ asio::awaitable<NodeOutput> run(const NodeInput& in) override { ... }
 asio::awaitable<NodeOutput> run(NodeInput in) override { ... }
 ```
 
-理由: コルーチンフレームは安全性のため引数のコピーを取らなければならない。
-参照で受け取ると、呼出元のスタックフレームが消えた後に `in.state` が
-ダングリングになる。PR 2 作業中に実際に発生したバグ。
+理由：安全のため、コルーチンフレームは引数のコピーを持つ必要があります。参照で受け取ると、呼び出し元のスタックフレームが消えた後で、`in.state` がぶら下がった参照になります。PR 2の作業中に、実際に起きたバグです。
 
-### cancel / store / stream_cb はすべて `in.ctx` から取得
+### cancel / store / stream_cb は、すべて `in.ctx` から取得する
 
-レガシーノードは `state.run_cancel_token_` のような密輸チャネル経由で
-キャンセルトークンを受け取っていましたが、v0.4 で `RunContext` が正式な配管として
-導入されました:
+従来のノードは、`state.run_cancel_token_` のような裏口の経路でキャンセルトークンを受け取っていましたが、v0.4で、正式な受け渡しの仕組みとして `RunContext` が導入されました。
 
 ```cpp
 asio::awaitable<NodeOutput> run(NodeInput in) override {
@@ -260,42 +238,29 @@ asio::awaitable<NodeOutput> run(NodeInput in) override {
 }
 ```
 
-ノードが利用可能な `in.ctx` のフィールド: `cancel_token`、`usage`、
-`thread_id`、`step`、`stream_mode`、`store`、`resume_value`、`deadline`、
-`trace_id`。最後の 2 つは `RunMetadata` で設定し、エンジンはネストした
-subgraph まで保持します。チェックポイントの経路はエンジン内部であり、公開
-`RunContext` フィールドではありません。Python は `trace_id`、`run_id`、
-`model_token_budget`、`has_deadline`、`deadline_remaining_ms` を公開します。
-生のC++ steady-clockデッドラインは意図的に非公開のままです。
+C++のノードが使える `in.ctx` のフィールドは、`cancel_token`、`usage`、`thread_id`、`step`、`stream_mode`、`store`、`resume_value`、`deadline`、`trace_id` です。最後の2つは `RunMetadata` に設定します。エンジンは、ネストしたサブグラフにもこれらを引き継ぎます。チェックポイントのルーティングは、エンジンの内部にとどまり、`RunContext` の公開フィールドではありません。Pythonが公開するのは、`trace_id`、`run_id`、`model_token_budget`、`has_deadline`、`deadline_remaining_ms` です。C++のsteady clockの生のデッドラインは、意図的に公開されていません。
 
-### `_full` 仮想メソッドの移行 — 1 行で `co_return out;` で終了
+### `_full` の仮想関数の移行 — 最後は `co_return out;` の1行で終える
 
-レガシー `execute_full` ユーザーの最も一般的な混乱:
-「`NodeResult` は古い型だが、`NodeOutput` を返さなければならないのか？」
-→ これらは同じ型のエイリアスです。単に `NodeOutput out;
-out.writes=...; out.command=...; out.sends=...; co_return out;` とするだけ。
+従来の `execute_full` の利用者が最も混乱するのは、「`NodeResult` は古い型なのに、`NodeOutput` を返さなければならないのか」という点です。
+→ この2つは、同じ型の別名です。`NodeOutput out;
+out.writes=...; out.command=...; out.sends=...; co_return out;` とするだけです。
 
-## 移行しないとどうなるか
+## 移行しなかった場合
 
-v0.9.0 以降、レガシー 8 仮想メソッドは存在しません。
+v0.9.0以降では、従来の8個の仮想関数は、存在しません。
 
-- C++ レガシー `override` は `'execute' marked override but does not override`
-  のようなコンパイルエラーを生成。
-- `execute()` のみを実装する Python ノードは `run(input)` を要求する
-  `NotImplementedError` を発生。
+- 従来のC++の `override` は、`'execute' marked
+  override but does not override` のようなコンパイルエラーになります。
+- `execute()` だけを実装したPythonのノードは、`run(input)` を要求する `NotImplementedError` を送出します。
 
-古いメソッド名を残したままの移行パターンを使用しないでください。エンジンは
-`run(NodeInput)` のみを呼び出すため、古い本体は決して実行されません。
+古いメソッド名を残したままにする、移行用のパターンは使わないでください。エンジンが呼び出すのは `run(NodeInput)` だけなので、古い本体が実行されることはありません。
 
-## 一括移行スクリプトはあるか？
+## 一括で移行するスクリプトはありますか
 
-いいえ — 仮想メソッドのシグネチャが 8 形式にわたって変化するため、正規表現ベースの
-変換は非実用的です。ユーザーはケースバイケースの例 (上記 4 例) を読み、
-手動で移行する必要があります。
+ありません。仮想関数のシグネチャが8つの形に分かれているため、正規表現による変換は現実的ではありません。上のケース別の例（4つ）を読んで、手作業で移行してください。
 
-最も一般的なパターン (`execute(state)` のみのオーバーライド) については、以下の
-sed/awk ワンライナーが初回パスの補助になる可能性があります — 人間による
-レビューが必要です:
+最も多いパターン（`execute(state)` だけをオーバーライドしている場合）では、次のsed/awkのワンライナーが、最初の変換の助けになるかもしれません。ただし、人間によるレビューが必要です。
 
 ```bash
 # Very rough initial pass — nodes with single-line execute override only.
@@ -304,24 +269,23 @@ grep -lE 'execute\(const GraphState' src/**/*.cpp
 # Manually edit each resulting file to the new pattern.
 ```
 
-複雑なノード (`execute_full`、`execute_stream_async` など) は手動で
-編集する必要があります。ショートカットはありません。
+複雑なノード（`execute_full`、`execute_stream_async` など）は、手作業で編集する必要があります。近道はありません。
 
 ---
 
-# 移行 2: typed lossless Provider 切り替え (再コンパイル必須)
+# マイグレーション2：型付きでロスのないProviderへの切り替え（再コンパイル必須）
 
-ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを新しい一致したヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。SDK は alpha `0.1.1`、interface revision 4 / shared ABI 4、out-of-line capability check を使用し、安定リリースの宣言ではありません。記録された interface-3 SDK runtime/archive 検証は Linux/POSIX の範囲で、interface 4 の資格検証ではありません。Windows NTFS と macOS の実装はありますが、新 platform の検証には runtime 証拠が必要です。WASM provider runtime の検証は確立していません。
+これは、ソースとバイナリの両方の互換性を壊す変更です。すべてのC++コンシューマーとカスタムプロバイダーを、新しい対応するヘッダーとライブラリで再コンパイルしてください。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、ディスクリプターのインタープリター、ResponsesのWebSocket経路は削除されました。エイリアスも互換用のブリッジもありません。SDKはalphaの `0.1.1` で、インターフェースリビジョン4／共有ABI 4、capabilityのチェックはアウトオブラインです。これは、安定版リリースだという主張ではありません。記録されている、インターフェース3でのSDKランタイムとarchiveの適格性確認は、Linux/POSIXを対象としていて、インターフェース4の適格性確認にはなりません。Windows NTFSとmacOSの実装はありますが、新しいプラットフォームでの適格性確認には、ランタイムでのエビデンスが必要です。WASMでのプロバイダーランタイムは、適格性確認されていません。
 
-削除済み `Provider::complete`、`complete_async`、`complete_stream`、`complete_stream_async` 呼び出しは明示 mode request と `invoke` / `dispatch`（または C++ async peer）へ移行します。`Agent::complete` は所有結果を返す別の one-turn API として残ります。
+削除された `Provider::complete`、`complete_async`、`complete_stream`、`complete_stream_async` の呼び出し箇所は、モードを明示したリクエストと、`invoke` / `dispatch`（またはC++の非同期版）に置き換えてください。`Agent::complete` は、所有権を持つ結果を返す、1ターン用の別のAPIとして残ります。
 
-CMake 3.20 以上が必要です。Core は所有 typed provider 契約を公開するため `NEOGRAPH_BUILD_LLM=OFF` でも SchemaProvider runtime は必須です。明示的な `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` が優先され、それがなければ設置済み `SchemaProvider` runtime package を探します。なければ `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON`（既定）の時に `cmake/NeoGraphSchemaProvider.cmake` が固定した不変 GitHub archive を取得します。Offline build は SDK を設置し、`CMAKE_PREFIX_PATH` に prefix を設定して `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` を渡します。Sibling checkout は推測せず、削除済み bundled interpreter も選択しません。NeoGraph の任意 HTTP module を無効にしても SDK runtime の transport 依存は必要です。記録された SDK runtime/archive 検証は Linux/POSIX の範囲です。Windows NTFS と macOS の実装はありますが、新 platform の検証には runtime 証拠が必要です。WASM provider runtime の検証は確立していません。
+CMake 3.20以降が必要です。`NEOGRAPH_BUILD_LLM=OFF` の場合も、Coreが所有権を持つ型付きのプロバイダー契約をエクスポートするため、SchemaProviderランタイムは必須です。明示した `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` が最優先されます。なければ、CMakeはインストール済みの `SchemaProvider` ランタイムパッケージを優先し、それもなければ（`NEOGRAPH_FETCH_SCHEMAPROVIDER=ON` がデフォルト）`cmake/NeoGraphSchemaProvider.cmake` で固定された、変更されないGitHubのarchiveをダウンロードします。オフラインでビルドする場合は、SDKをインストールし、`CMAKE_PREFIX_PATH` にそのプレフィックスを設定して、`-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` を渡します。CMakeが、隣のチェックアウトを推測したり、削除された同梱のインタープリターを選んだりすることはありません。NeoGraphのオプションのHTTPモジュールを無効にしても、SDKランタイムはトランスポートの依存を必要とします。記録されているSDKのランタイムとarchiveの適格性確認は、Linux/POSIXを対象としています。Windows NTFSとmacOSの実装はありますが、新しいプラットフォームでの適格性確認には、ランタイムでのエビデンスが必要です。WASMでのプロバイダーランタイムは、適格性確認されていません。
 
-Python も C++ と同じ所有 request/outcome 境界を公開します: `make_provider_request`、`Provider.prepare`、`dispatch`、`invoke`。Provider 履歴には typed part を持つ `ProviderMessage` を使い、`ChatMessage` はグラフ用の便宜的 projection として残ります。SDK 失敗は `ProviderOutcome.failure` で読み、host observer/settlement 例外は `outcome` と `cause` を保持します。コンストラクターと GIL/コールバック動作は [Python binding ガイド](python-binding.md)を参照してください。
+Pythonも、C++と同じ、所有権を持つリクエストと結果の境界を公開しています。`make_provider_request`、`Provider.prepare`、`dispatch`、`invoke` です。プロバイダーの履歴には、型付きのパートを持つ `ProviderMessage` を使います。`ChatMessage` は、グラフ向けの簡易的な射影として残っています。SDKが返した失敗は、`ProviderOutcome.failure` から参照できます。ホストのオブザーバーや精算（settlement）で起きた例外は、`outcome` と `cause` を保持します。コンストラクターや、GILとコールバックの動作は、[Pythonバインディングガイド](python-binding.md)を参照してください。
 
-Interface 4 より前の installed find_package Program C++/C ABI/dualQuickJS consumer と NeoGraph/SchemaProvider typed2-request lifetime/native/raw/mismatch consumer は pass しました。これは過去の package 結果で、interface-4 pass の主張ではありません。より広い platform や安定 release は主張しません。
+インターフェース4より前に、インストール済みの find_package による Program C++／C ABI／dualQuickJS のコンシューマーと、NeoGraph／SchemaProviderの型付きのコンシューマー（2リクエストでの寿命、ネイティブ、raw、不一致の確認）が通りました。これらは過去のパッケージの結果であり、インターフェース4の合格の主張ではありません。より広いプラットフォームや、安定版リリースも主張していません。
 
-公開契約は所有 typed 準備/dispatch であり、同期・非同期の virtual completion 対ではありません。`ProviderRequest.payload` は Chat、Messages、Responses、Gemini、Interactions の SDK リクエスト variant です。`ProviderMode::Collect` / `Stream` は観測者の有無と独立に転送を選択します。`on_event` は借用 typed `sp::Event` view を受け取ります。コールバック後に必要なデータだけコピーします。raw JSON override や portable projection による native 権限のインポートは認めません。
+公開されている契約は、所有権を持つ型付きの準備とディスパッチであり、対になったcompletion用の仮想メソッドではありません。`ProviderRequest.payload` は、Chat、Messages、Responses、Gemini、Interactionsのリクエストを表す、SDKのvariantです。`ProviderMode::Collect` / `Stream` は、オブザーバーとは独立に、トランスポートを選びます。`on_event` が受け取るのは、借用された、型付きの `sp::Event` のビューです。コールバックの後に必要なデータだけを、コピーしてください。生のJSONによる上書きや、ポータブルな射影を通じたネイティブ状態の取り込みは、受け付けられません。
 
 ```cpp
 #include <neograph/provider.h>
@@ -366,33 +330,34 @@ sp::runtime::Result call_provider(
 }
 ```
 
-Interface 4 は retained per-call control を `extra_fields` dictionary ではなく typed field で保持します:
+インターフェース4は、残されている呼び出しごとのコントロールを、`extra_fields` の辞書ではなく、型付きのフィールドで保持します。
 
-| Family | 追加の `ProviderControls` |
+| ファミリー | 追加される `ProviderControls` |
 |---|---|
-| Chat | `chat_reasoning`、`include_reasoning`、`usage_include`、`models`。宣言済み OpenRouter origin が必要です。Scalar `reasoning_effort` は別です。 |
+| Chat | `chat_reasoning`、`include_reasoning`、`usage_include`、`models`。これらには、宣言済みのOpenRouterのoriginが必要です。スカラーの `reasoning_effort` は別です。 |
 | Responses | `previous_response_id`、`previous_response_history`、`parallel_tool_calls`、`verbosity`、`truncation`、`responses_include`。 |
-| Messages | `thinking_mode`、`output_effort`、`cache_control`、`messages_tool_choice`、宣言済み origin の OpenRouter `provider` routing。 |
+| Messages | `thinking_mode`、`output_effort`、`cache_control`、`messages_tool_choice`、宣言済みのoriginのOpenRouterの `provider` ルーティング。 |
 | Gemini Generate | `gemini_history_mode`、`gemini_thinking_level`、`temperature`、`safety_settings`、`gemini_tool_choice`。 |
 
-Messages manual thinking は policy が認める output cap 未満の budget を要求します。Adaptive/disabled mode は thinking budget を禁止します。Manual/adaptive thinking は有効な temperature を省略しますが、不正な値と model が禁止する temperature は省略前に拒否します。Disabled thinking は承認済み temperature を出力します。Model-prefix 制限は承認済み policy の事実で、全 model または最後の `/` 以後の suffix を ASCII 大小文字を区別せず照合します。Gemini thinking level と thinking budget、および typed tool choice と `required_tool` はそれぞれ同時に指定できません。非対応 family/origin/value の組合せは I/O 前に拒否します。
+Messagesの手動のthinkingには、ポリシーでadmissionされた、出力上限を下回るbudgetが必要です。adaptiveとdisabledのモードでは、thinkingのbudgetを指定できません。手動またはadaptiveのthinkingでは、有効なtemperatureが省かれます。ただし、不正な値や、モデルで禁止されているtemperatureは、省かれる前に拒否されます。disabledのthinkingでは、admissionされたtemperatureが送出されます。モデルの接頭辞による制限は、ポリシーとしてadmissionされた事実で、モデル名全体、または最後の `/` より後ろの部分に対して、ASCIIの大文字小文字を区別せずに照合されます。Geminiのthinking levelとthinking budgetは、同時に指定できません。型付きのtool choiceと `required_tool` も、同時に指定できません。サポートされていないファミリー、origin、値の組み合わせは、I/Oの前に拒否されます。
 
 ### PreparedProviderRequest / ProviderBudgetClaim
-`prepare()` は検証とエンコードを正確に一度行い、元の deadline とキャンセル状態を持つ移動専用 `PreparedProviderRequest` を生成します。永続呼び出し元は `Provider::request_digest()` を assembly に結び付け、承認された budget claim を予約し、dispatch receipt を記録してから、同じハンドルを `ControlledProvider::dispatch_prepared(_async)` で消費します。gate 後の再生成はありません。重複 receipt は再送しません。カスタム実装は `get_name()`、`family()`、`prepare()` を実装し `prepare_runtime()` または `prepare_local()` を使います。local callback は `this` ではなく所有 shared 状態をキャプチャします。
+`prepare()` は、検証とエンコードをちょうど1回だけ行い、元のデッドラインとキャンセルの状態を持つ、ムーブ専用の `PreparedProviderRequest` を作ります。永続的な処理を行う呼び出し側は、その `Provider::request_digest()` を、組み立てた内容に結び付け、admission済みの予算の請求枠を予約し、ディスパッチのレシートを書き込んでから、同じハンドルを `ControlledProvider::dispatch_prepared(_async)` で消費します。ゲートを通った後で、リクエストを組み立て直してはいけません。重複したレシートがあっても、再ディスパッチされることはありません。カスタムプロバイダーは、`prepare_runtime()` または `prepare_local()` を使って、`get_name()`、`family()`、`prepare()` を実装します。ローカルのコールバックは、`this` ではなく、所有する共有状態をキャプチャしてください。
 
-任意の `ProviderControls` は呼び出し元の選択であり、強制デフォルトや黙った cap clamp ではありません。非対応 family 制御は dispatch 前に拒否します。有界呼び出しには承認された実際のモデル input/output 上限が必要で、欠落は `LimitUnknown` です。予約は保守的な支出権限であり、報告使用量・予測・請求書ではありません。不明/部分/delivery-unknown の結果は hold を維持し、実際の最終報告で精算し、超過報告も全量を計上します。retry は明示的な単一層で、既定 off、有界 window と unknown-prior hold を使います。隠れた再送はありません。
+省略可能な `ProviderControls` は、呼び出し側の選択であり、必須のデフォルト値でも、黙って切り詰められる上限でもありません。ファミリーがサポートしていないコントロールは、ディスパッチの前に失敗します。上限付きの呼び出しには、admission済みの、本物のモデルの入力と出力に関する事実が必要です。事実が欠けている場合は `LimitUnknown` で失敗します。予約は、保守的に見積もった支出の権限です。報告された使用量でも、予測でも、請求書でもありません。不明、部分的、配送不明の結果は、ホールドを保持します。本物の最終レポートがあれば、上限を超えた使用量も含めて、そのホールドを精算します。リトライは、明示的な1つの層で、デフォルトではオフです。時間枠に上限があり、以前の結果が不明な場合はホールドを保持します。隠れた再送はありません。
 
 
-プロバイダー呼び出しは `sp::runtime::Result`、すなわち `sp::Completion` または `sp::Failure` を保持する不変の所有 `std::shared_ptr<const sp::Outcome>` を返します。表示テキストだけでなく結果全体を保持してください。順序付きメッセージ/パート、保持された native continuation と family が提供する wire 証拠、順序付き raw 観測、停止の根拠と実際の試行メタデータは呼び出しとクライアント破棄後も残ります。`input_total`、`output_total`、`total` などの使用量カウンターは `std::optional<sp::Count>` で、存在する count は `uint64_t value` と `Evidence` を持ちます。`Usage` は stage、quality、conflict も記録します。欠落は不明であり、ゼロを作りません。失敗も元の部分結果を保持します。`ProviderFailure::outcome()` と `ProviderObserverError::outcome()` は実際の結果を保持し、後者の `cause()` は観測者の例外を保持します。
+プロバイダー呼び出しが返すのは `sp::runtime::Result` です。これは、変更できない、所有権付きの `std::shared_ptr<const sp::Outcome>` で、`sp::Completion` または `sp::Failure` を含みます。表示用のテキストだけでなく、結果の全体を保持してください。順序付きのメッセージとパート、保持されているネイティブな継続とファミリーが提供するワイヤーのエビデンス、順序付きのrawの観測、停止のエビデンス、本物の試行メタデータは、呼び出しが終わった後も、クライアントが破棄された後も残ります。`input_total`、`output_total`、`total` などの使用量カウンターは、`std::optional<sp::Count>` です。値がある場合は、`uint64_t value` と `Evidence` を持ちます。`Usage` には、ステージ、品質、競合（conflict）も記録されます。値がないのは「不明」を意味し、ゼロとして補うことはありません。失敗は、元の部分的な結果を保持します。`ProviderFailure::outcome()` と `ProviderObserverError::outcome()` は、その結果を保持します。後者は、オブザーバーの例外も `cause()` に保持します。
 
-Wire 証拠は family が提供する任意の情報です。`sp::Completion::wire_envelope` は null の場合があります（Python の `ProviderCompletion.wire_envelope` は `None`）。現在の buffered Chat は応答 JSON 全体を `raw_events` 内の `RawWire` に保持します。`type == "chat.completion"` で、文書は `payload` にあり、`wire_envelope` は null のままです。Family が実際に保持する場所から証拠を読み、fallback envelope は捏造しません。Native continuation と raw buffer は保護された証拠として保持され、trace payload から除外されます。
+ワイヤーのエビデンスは、ファミリーが提供する省略可能なものです。`sp::Completion::wire_envelope` はnullになることがあります（Pythonでは `ProviderCompletion.wire_envelope` が `None`）。バッファ型のChatは、現在、レスポンス全体のJSONを `raw_events` に `RawWire` として保持します。`type == "chat.completion"` で、文書は `payload` にあります。`wire_envelope` はnullのままです。エビデンスは、ファミリーが保持している場所から読んでください。代わりのエンベロープが捏造されることはありません。ネイティブな継続とrawバッファは、保護されたエビデンスのままで、トレースのペイロードには含まれません。
 
-`UsageAccumulator::snapshot()` は累積報告を返します。`total_tokens_wide()` は計上済みトークンと未解決予約の合計で、報告使用量として表示してはいけません。精算には input/output count のある final・consistent 報告が必要で、根拠のある最大 total を計上し、超過使用量も clamp しません。累積対象の一つでも counter が欠落すれば集計も不明です。予約、ローカル計上、vendor 請求書は別の記録です。
+`UsageAccumulator::snapshot()` は、累積したレポートを返します。`total_tokens_wide()` が返すのは、計上済みのトークン数と、未解決の予約の合計です。報告された使用量として表示してはいけません。精算には、入力と出力の件数を含む、最終的で整合したレポートが必要です。精算では、裏付けのある最大の合計を計上し、上限を超えた使用量でも切り詰めません。累積したレポートのどれか1つでもカウンターが欠けていれば、集計結果でもそのカウンターは不明のままです。予約、ローカルでの計上、ベンダーの請求書は、それぞれ別の記録です。
 
-実結果の後に post-effect 精算や terminal receipt 永続化が失敗すると、`ProviderDispatchOutcomePersistenceError::outcome()` は元の不変結果、`cause()` は元の永続例外を保持します。delivery も失敗した場合は `delivery_error()` が元の観測者例外を保持します。永続化成功後の観測者失敗は元の例外を変更せず再送出し、不明/結果なし transport 失敗では outcome を捏造しません。
+本物の結果が存在するのに、効果の後の会計処理や、最終レシートの永続化が失敗した場合、`ProviderDispatchOutcomePersistenceError` は、元の変更できない結果を `outcome()` に、元の永続化の例外を `cause()` に保持します。配送にも失敗していた場合は、`delivery_error()` が元のオブザーバーの例外を保持します。永続化に成功した後でオブザーバーが失敗した場合は、その元のオブザーバーの例外が、そのまま再送出されます。不明な、または結果のないトランスポートの失敗では、結果が捏造されることはありません。
+
 ### SchemaProvider
 
-`SchemaProvider` は承認済み `sp::descriptor::ValidatedDescriptor`、`sp::runtime::Options`、任意の `SchemaProvider::Defaults` を受け取ります。descriptor は closed/versioned データ admission であり、要求/応答 interpreter や任意 primitive registry ではありません。credential は公開 descriptor でなく runtime options に置きます。Defaults は typed OpenRouter routing と Responses 保持 (`responses_store`) のみで、後者は Responses 専用です。Hosted OpenRouter routing・retention・JSON 形式は宣言済み typed 制御です。Images、Veo、Decisions は別の NeoGraph typed client と別の承認を使い SDK chat grant を継承しません。
+`SchemaProvider` は、admission済みの `sp::descriptor::ValidatedDescriptor`、`sp::runtime::Options`、省略可能な `SchemaProvider::Defaults` を受け取ります。ディスクリプターの読み込みは、closedでバージョン付きのデータのadmissionです。リクエストとレスポンスのインタープリターでも、任意のプリミティブのレジストリでもありません。認証情報は、公開されるディスクリプターのファイルではなく、ランタイムオプションに置きます。Defaultsに含まれるのは、型付きのOpenRouterルーティングと、Responsesの保持（`responses_store`）だけです。後者が有効なのは、Responsesに対してだけです。ホスト型のOpenRouterのルーティング、保持、JSONフォーマットは、引き続き、宣言する型付きのコントロールです。Images、Veo、Decisionsは、NeoGraphの別の型付きクライアントと、別の認可を使います。SDKのchatのグラントを引き継ぐことはありません。
 
 ```cpp
 #include <neograph/llm/schema_provider.h>
@@ -414,89 +379,79 @@ std::shared_ptr<neograph::llm::SchemaProvider> admitted_provider(
 }
 ```
 
-通常の `sp::descriptor::load` は header を literal として扱い、`${VAR}` を展開しません。Admission 前の明示的 host preprocessing には `sp::descriptor::load_with_environment_headers(source, overrides, policy)`、または `DeploymentHeaderEnvironment` を受け取る決定的 `load_with_deployment_headers(source, overrides, environment, policy)` を使います。Environment helper は Messages の任意 `ANTHROPIC_WORKSPACE_ID` / `ANTHROPIC_BETA` を読み、未設定または空の値は省略します。Literal descriptor header が environment に優先し、explicit override が両方に優先します。名前は大小文字を区別しません。重複 override、不正・reserved header は最終 admission で拒否します。Encoder は template を評価せず、承認済み descriptor も変更しません。
+通常の `sp::descriptor::load` は、ヘッダーをリテラルとして扱います。`${VAR}` は展開されません。admissionの前に、ホスト側で明示的に前処理したい場合は、`sp::descriptor::load_with_environment_headers(source, overrides, policy)` を使うか、決定的な `load_with_deployment_headers(source, overrides, environment, policy)` を `DeploymentHeaderEnvironment` とともに使います。環境変数を読むヘルパーは、Messages用に、省略可能な `ANTHROPIC_WORKSPACE_ID` / `ANTHROPIC_BETA` を読みます。未設定または空の値は省かれます。ディスクリプターにリテラルで書いたヘッダーは環境変数の値より優先され、明示的なoverridesはその両方に優先します。いずれも大文字小文字を区別しません。overridesの重複、不正なヘッダー、予約されたヘッダーは、最終的なadmissionで失敗します。エンコーダーがテンプレートを評価することも、admission済みのディスクリプターを変更することもありません。
 
-### Native 履歴 / 予算
+### ネイティブ履歴と予算
 
-`ChatMessage` / `ChatTool` と JSON は portable projection であり native 権限ではありません。Portable 形式は [`provider-message-v2`](../schemas/provider-message-v2.schema.json)、[`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json) のままです。真正な C++ checkpoint sidecar はメモリ内の native seal を保持します。永続 native 履歴には host-owned `sp::NativeArchive` が必要です。closed v3 / `spna3` は独立キーによる認証済み owner-private custody で、archive v2 は更新・解釈せず拒否します。認証は全 semantic descriptor 選択（origin/path/header、policy、要求 field mapping、usage path、stop mapping）、owner と正確な custody binding を結び付けます。暗号化や vendor-issuer 認証ではありません。archive 本文・キー・native blob・raw wire 観測は公開しません。Archive は証拠保存であり、金銭 grant や spending lease ではありません。Program/external bank は独立 journal が所有し、snapshot コピーで credit は作れません。
+`ChatMessage` / `ChatTool` とJSONは、持ち運び用の射影（portable projection）であり、ネイティブな権限（native authority）を持ちません。持ち運び用のフォーマットは、これまでどおり[`provider-message-v2`](../schemas/provider-message-v2.schema.json)と[`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)です。本物のC++のチェックポイントのサイドカーは、メモリ上でネイティブシール（native seal）を保持します。ネイティブな履歴を永続化するには、ホストが所有する `sp::NativeArchive` が必要です。これは閉じたv3形式（`spna3`）で、認証付きのオーナー専用の保管（custody）と、独立した鍵を使います。archive v2は拒否します。アップグレードも解釈もしません。認証が結び付けるのは、セマンティックなディスクリプターの選択内容すべて（origin、パス、ヘッダー、ポリシー、リクエストのフィールドマッピング、usageのパス、stopのマッピング）と、オーナー、正確な保管の対応付けです。暗号化ではなく、ベンダー（発行元）の認証でもありません。archiveの本体、鍵、ネイティブなblob、生のワイヤー観測データは、公開しないでください。archiveはエビデンスの保管場所であり、金銭の付与（grant）でも、支出のリース（spending lease）でもありません。Programと外部のバンクは、これまでどおり独立したジャーナルが所有します。スナップショットをコピーしても、クレジットは作れません。
 
-Interface 4 は native replay の configuration digest から output-generation cap だけを除きます。Content、origin、route、policy identity、prefix、tool、reasoning control は引き続き結び付けられます。実際の cap は encoded request と prepared-request digest に残ります。Cap を増やす semantic call ごとに新しい resource-bank admission、固有の決定的 call ordinal/effect identity、元の deadline が必要です。精算済み call slot の再利用、credit 更新、seal 修復、不確実な effect の再送はできません。Archive v3 と portable JSON v2 は変更されません。Old-policy native archive はその policy に結び付いたままで、異なる policy では拒否し、migration しません。
+インターフェース4で、ネイティブリプレイの設定ダイジェストから外れるのは、出力生成の上限だけです。コンテンツ、origin、ルート、ポリシーのID、先頭部分、ツール、reasoningのコントロールは、引き続き結び付けられています。実際の上限は、エンコードされたリクエストと、準備済みリクエストのダイジェストに、引き続き入ります。上限を引き上げたセマンティックな呼び出しには、そのたびに、新しいリソースバンクのadmission、固有の決定的な呼び出し序数と効果のID、元のデッドラインが必要です。精算済みの呼び出しスロットを再利用することも、クレジットを更新することも、シールを修復することも、不確かな効果を再送することもできません。archive v3とポータブルJSON v2は変わりません。古いポリシーのネイティブarchiveは、そのポリシーに結び付いたままで、ポリシーが一致しないと、移行されずに拒否されます。
 
-Same-route native continuation と明示的 foreign projection は異なる契約です。Gemini の既定は `sp::gemini::HistoryMode::NativeOnly`。`PortableForeign` は native seal、wire output、signature のない caller-created assistant Text/ToolCall history を認めます。各 foreign assistant turn の最初の function call だけに `skip_thought_signature_validator` を付け、text-only history に signature は作りません。真正な native group は厳密に検証し、失敗・不一致 seal を除去して portable history に降格させません。Responses `previous_response_id` は provider-held state を選ぶため、`messages` には新 input だけを送ります。`previous_response_history` は送信しない local ownership 証拠です。Client-tool ownership に必要なら全 original prefix と、ID が cursor と一致する真正な terminal assistant を渡します。以後の in-process cursor 結果は private completed ownership を保持し、full `NativeReplay` や archive authority にはなりません。Cursor は native archive や portable import grant ではありません。
+同じルートでのネイティブな継続と、明示的な外部への射影は、契約が異なります。Geminiのデフォルトは `sp::gemini::HistoryMode::NativeOnly` です。`PortableForeign` は、呼び出し側が作成したアシスタントのText / ToolCallの履歴を、ネイティブシール、ワイヤー出力、署名なしで受け付けます。`skip_thought_signature_validator` が付くのは、外部のアシスタントのターンごとの、最初の関数呼び出しだけです。テキストだけの履歴には、署名が付きません。本物のネイティブグループは、引き続き厳密に検証され、失敗したシールや不一致のシールが、取り除かれたり、ポータブルな履歴に格下げされたりすることはありません。Responsesの `previous_response_id` は、プロバイダー側が保持する状態を指定します。`messages` には新しい入力だけを送ります。`previous_response_history` は、ローカルの所有権のエビデンスで、送信されることはありません。クライアント側ツールの所有権のためにこれが必要な場合は、元の先頭部分全体と、IDがカーソルと等しい本物の終端アシスタントを渡します。その後にプロセス内で得たカーソルの結果は、非公開の完了済みの所有権を保持しますが、完全な `NativeReplay` やarchiveの権限は持ちません。カーソルは、ネイティブarchiveでも、ポータブルな取り込みの許可でもありません。
 
-**Standalone bank journal 修正 — 現在の契約を改訂；実際の runtime 証拠は下記。** Owner-approved protocol は単調 trusted-store namespace obligation と、実際の不変 original owner/thread/graph scope、ceiling、deadline/clock identity、generation を要求します。全 checkpoint commitment/revision に対する正確な durable head CAS だけが host-owned opaque lease を発行できます。正確な pending effect window を provider I/O 前に永続化し、真正な SDK outcome と実際の charge、nullable report、hold、dedup identity で精算しなければなりません。Checkpoint/next head は同じ owned actor/revision 下で原子的に publish します。Bank metadata 削除、checkpoint pruning、old authenticated snapshot replay、同一 ID overwrite、actor 喪失で credit を与えてはなりません。既存 65 hold がある ceiling 130 を 129 に下げると別の 65 は許可できません。証明済み no-effect 失敗は unchanged head を release し authentic 130 復旧を可能にできます。Crash/unknown/lost-lease window は refund/retry/fallback なしで hold を保持します。Plain/pristine archive 設定は money/native spending lease を与えず、現在の `config.usage` は既存 standalone obligation を置換できません。Program/external-bank journal 所有は不変です。これは要求契約です。実際の currency/custody 証拠と instrumentation 制約は下記であり、安定 released API 保証ではありません。
+**単独バンクのジャーナルの訂正：現在の契約を改訂しました。実際に動かして得た実行時のエビデンスは後述します。** オーナーが承認したプロトコルでは、次の2点が必要です。1つは、単調増加する、信頼されたストアの名前空間に対する義務（namespace obligation）です。もう1つは、実在する不変の元のオーナー／スレッド／グラフのスコープ、上限（ceiling）、デッドライン／クロックの識別子、世代（generation）です。ホストが所有する不透明なリース（opaque lease）を発行できるのは、チェックポイント全体のコミットメントとリビジョンに対する、永続的なヘッドの正確なCASだけです。保留中のエフェクトのウィンドウは、プロバイダーI/Oの前に、正確に永続化しなければなりません。精算には、本物のSDKの結果と、実際の課金額、nullを許すレポート、ホールド、重複排除用のIDを使います。チェックポイントと次のヘッドは、同じ所有アクター／リビジョンのもとでアトミックに公開します。バンクのメタデータを削除する、チェックポイントを間引く、認証済みの古いスナップショットをリプレイする、同じIDを上書きする、アクターを失う、といった操作でクレジットが付与されてはいけません。上限を130から129に絞ったとき、すでに65のホールドがあると、さらに65を受け入れることはできません。エフェクトがなかったと証明された失敗であれば、変更のないヘッドを解放できるため、本物の130での復旧は引き続き可能です。クラッシュ、不明、リース喪失のウィンドウは、返金も再試行もフォールバックもせず、ホールドしたままにします。plain／pristineなarchive設定は、金銭もネイティブな支出リースも与えません。現在の `config.usage` で、既存の単独の義務を置き換えることもできません。Programや外部バンクのジャーナルの所有関係は変わりません。以上は要求される契約です。実際の通貨と保管のエビデンス、および計測上の制約は後述します。安定版として公開済みのAPIを保証するものではありません。
 
-**現在の宣言；統合 runtime 証拠は下記:** `<neograph/graph/checkpoint.h>` は `owner_scope`、logical `thread_id`、private backend `storage_thread_id`、`graph_identity`、`original_ceiling`、`original_deadline_ticks`、`deadline_clock_identity` を持つ `ManagedBudgetLeaseScope` を宣言します。`OwnedManagedBudgetLease` は read-only `scope()`、`actor_id()`、不変 `bank_generation()`、`revision()`、`head_checkpoint_id()`、`head_commitment()` を公開し、公開 authority-import constructor はありません。`ManagedBudgetEffectReceipt` は `active()`、`effect_id()`、`claim_amount()`、`request_digest()` を公開し、default receipt は権限を与えません。`CheckpointStore` は `acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment)`、`begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest)`、`settle_managed_budget_effect(lease, effect, genuine_outcome, authority)`、`publish_managed_budget_checkpoint(lease, checkpoint)`、`release_managed_budget_lease(lease)` と `_async` counterpart を宣言します。Sync `CheckpointStoreCore` と `AsyncCheckpointStore` はそれぞれの variant を公開します。`managed_budget_checkpoint_commitment(checkpoint)` は bank JSON だけでなく全永続 checkpoint を結び付けます。これらの宣言は backend CAS、currency 安全性、installed ABI 互換性、実際に成功した runtime 経路を証明しません。
+**現在の宣言。統合した実行時のエビデンスは後述します。** `<neograph/graph/checkpoint.h>` は、`owner_scope`、論理的な `thread_id`、バックエンド内部用の `storage_thread_id`、`graph_identity`、`original_ceiling`、`original_deadline_ticks`、`deadline_clock_identity` を持つ `ManagedBudgetLeaseScope` を宣言しています。`OwnedManagedBudgetLease` が公開するのは、読み取り専用の `scope()`、`actor_id()`、不変の `bank_generation()`、`revision()`、`head_checkpoint_id()`、`head_commitment()` です。権限をインポートする公開コンストラクターはありません。`ManagedBudgetEffectReceipt` は `active()`、`effect_id()`、`claim_amount()`、`request_digest()` を公開し、デフォルトのレシートは何の権限も与えません。`CheckpointStore` は、`acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment)`、`begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest)`、`settle_managed_budget_effect(lease, effect, genuine_outcome, authority)`、`publish_managed_budget_checkpoint(lease, checkpoint)`、`release_managed_budget_lease(lease)` と、それぞれの `_async` 版を宣言しています。同期版の `CheckpointStoreCore` と `AsyncCheckpointStore` は、それぞれの版を公開します。`managed_budget_checkpoint_commitment(checkpoint)` が対象とするのは、バンクのJSONだけでなく、永続化されるチェックポイント全体です。これらの宣言だけでは、バックエンドのCAS、通貨の安全性、インストール済みABIの互換性、実行時の経路が実際に成功することは、いずれも確認できません。
 
-**真正な InMemory shared-bank fork は保持・実証済み。** 元の真正な C++ fork は ONE original financial journal と trusted current branch head を使い、grant を複製しません。`publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)`（および `_async`）は authentic current source/full commitment と実際の same-bank native C++ pointer を要求し、durable standalone fork は明示的に unsupported のままです。`OwnedManagedBudgetLease::scope()` と original owner/thread/graph、ceiling、deadline/clock、generation は不変です。Read-only store-issued `execution_thread_id()` / `execution_storage_thread_id()` は execution branch を別に選び、`GraphState::budget_original_thread_id()` は元の financial bank を示します。正確な selected-branch head CAS と global actor/revision は canonical current counter、pending effect、burned identity に対して全 branch を直列化します。Original/fork branch は補充なしで使用可能なままです。Stale snapshot、checkpoint copy、imported JSON は alias を発行したり head を巻き戻したりできません。元の root30 → charge3 → original continuation6 → fork lower20 → continuation9 の same-bank 証明は未変更 test_graph_engine.cpp:810–913 で PASSED です。Saved original ceiling30 は effective fork ceiling20 と別です。Widening31 と JSON-only restore は拒否必須です。Unbounded reported observation は factual data で finite grant ではありません。証明済み zero-effect lease だけが unchanged head を release でき、unknown/pending effect は obligation を保持します。
+**本物のInMemoryの共有バンクフォーク：維持しており、動作も確認済みです。** 元からある本物のC++のフォークは、元の1つの会計ジャーナルと、信頼された現在のブランチヘッドを使います。グラントを複製することはありません。`publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)`（と `_async` 版）には、本物の現在のコピー元とそのコミットメント全体、および同じバンクのネイティブC++ポインターの実体が必要です。永続的な単独フォークは、引き続き明示的に未対応です。`OwnedManagedBudgetLease::scope()` と、元のオーナー／スレッド／グラフ、上限、デッドライン／クロック、世代は不変のままです。ストアが発行する読み取り専用の `execution_thread_id()` / `execution_storage_thread_id()` は、実行するブランチを別に選びます。`GraphState::budget_original_thread_id()` は、元の会計バンクを示します。選択したブランチのヘッドに対する正確なCASと、グローバルなアクター／リビジョンにより、標準の現在のカウンター、保留中のエフェクト、使用済み（burned）のIDに対して、すべてのブランチが直列化されます。元のブランチもフォークしたブランチも、補充なしで使い続けられます。古いスナップショット、チェックポイントのコピー、インポートしたJSONは、エイリアスを作ることも、ヘッドを巻き戻すこともできません。元のroot30 → charge3 → original continuation6 → fork lower20 → continuation9という同一バンクの証明は、変更していない test_graph_engine.cpp:810–913 でPASSしました。保存された元の上限30は、フォーク側の有効な上限20とは別です。31への拡大と、JSONだけでの復元は、拒否されなければなりません。上限のない報告済みの観測値は事実を示すデータであり、有限のグラントではありません。変更のないヘッドを解放できるのは、エフェクトがゼロだと証明されたリースだけです。不明または保留中のエフェクトがあると、義務は保持されます。
 
-**現在の release-error 契約；実際の suite/probe は下記。** `<neograph/graph/engine.h>` の `graph::ManagedBudgetLeaseReleaseError` は `ProviderOutcomeError` を継承します。`cause()` は元の execution exception を保持し、`release_error()` は二次 durable lease-disposition 失敗を公開します。`outcome()` は真正な SDK 証拠があれば保持し、SDK outcome がなければ null です。Release 失敗は結果を捏造せず再 dispatch も許可しません。Closed `_neograph_managed_budget_scope` metadata は元の logical scope/cap/deadline clock/generation を記述しますが、backend CAS 権限ではなく data です。
+**現在のrelease-errorの契約：実際に動かしたスイートとプローブは後述します。** `<neograph/graph/engine.h>` の `graph::ManagedBudgetLeaseReleaseError` は、`ProviderOutcomeError` から派生します。`cause()` は元の実行時例外を保持し、`release_error()` は二次的な、永続的なリース処理の失敗を返します。`outcome()` は、本物のSDKのエビデンスがあれば保持し、SDKの結果がなければnullです。releaseに失敗しても、結果を作り上げたり、再dispatchを許可したりすることはありません。閉じたメタデータ `_neograph_managed_budget_scope` には、元の論理スコープ／上限／デッドラインのクロック／世代が書かれていますが、これはデータであり、バックエンドのCASによる権限ではありません。
 
-**Archive-owner/retention 契約；実際の suite/probe は下記。** Finite standalone root または authenticated finite source だけが、実際に設定された `sp::NativeArchive::owner_scope()` から省略された original owner を継承します。Unbounded/plain owner metadata の意味は不変です。明示的に矛盾する archive owner は lease acquire 前に拒否します。`CheckpointStore::retains_native_checkpoint() const noexcept` と対応する Core/Async storage capability は既定 false で、実際の InMemory backend は true に override し、wrapper は実際の retention を委譲します。この read-only 記述は正当な unleased/plain/unbounded C++ native checkpoint custody を許しますが、spending credit や native replay authority は与えません。Leased custody は JSON flag や推測した store type ではなく実際の store-issued receipt を使います。
+**archiveのオーナーと保持（retention）の契約：実際に動かしたスイートとプローブは後述します。** 省略された元のオーナーを、実際に設定されている `sp::NativeArchive::owner_scope()` から引き継ぐのは、有限の単独ルート、または認証済みの有限のコピー元だけです。上限のない場合とplainな場合のオーナーメタデータの意味は変わりません。archiveのオーナーが明示的に食い違っている場合は、リースを取得する前に拒否します。`CheckpointStore::retains_native_checkpoint() const noexcept` と、それに対応するCore／Asyncのストレージ機能は、デフォルトでfalseです。実際のInMemoryバックエンドはtrueにオーバーライドし、ラッパーは実際の保持状況を委譲しなければなりません。この読み取り専用の記述により、正当な、リースなし／plain／上限なしのC++のネイティブチェックポイントの保管が許されます。ただし、支出クレジットもネイティブリプレイの権限も与えません。リース付きの保管には、JSONのフラグや推測したストア型ではなく、ストアが実際に発行したレシートを使います。
 
-**Native-custody pre-I/O gate；実際の suite/probe は下記。** Managed effect begin は pending-effect/slot/held-window 変更前に、真正に結び付けた NativeArchive または実際の local store-issued private C++ retention capability を要求します。Private capability は JSON から import せず wire にも転送しません。C++ sidecar は境界を越えられないため、remote backend が InMemory でも gRPC は実際の client/server archive を要求します。Archive が finite source owner を提供しなければ元の anonymous owner scope は空のままで、実際の archive binding は original scope に一致しなければなりません。Financial head/lease 証拠だけでは native-custody readiness を証明しません。
+**ネイティブ保管のI/O前ゲート：実際に動かしたスイートとプローブは後述します。** 管理対象のエフェクトを開始するには、保留中のエフェクト、スロット、ホールドしたウィンドウを変更する前に、本物の結び付けを持つNativeArchive、または実際のローカルでストアが発行したプライベートなC++の保持機能（capability）が必要です。このプライベートな機能は、JSONからインポートされることも、ワイヤー上で転送されることもありません。C++のサイドカーは境界を越えられないため、リモートのバックエンドがInMemoryであっても、gRPCにはクライアントとサーバー双方の実際のarchiveが必要です。archiveが有限のコピー元オーナーを提供しない場合、元の匿名のオーナースコープは空のままです。実際のarchiveの結び付けは、元のスコープと一致しなければなりません。財務上のヘッドとリースのエビデンスだけでは、ネイティブ保管の準備ができているとは証明できません。
 
-診断 JSON は構文上有効な duplicate-key 文書も含め元の raw byte を保持しますが、実行可能な要求/config admission は重複を拒否します。元の non-2xx 応答 JSON は二度目の損失 parse なしで `http.error` 証拠に残ります。named SSE error は後続の正常 stream close より優先します。診断/provider metadata の上限は承認済み source extent であり、無関係な小さい error-text cap ではありません。
+診断用のJSONは、構文上は有効な、キーが重複した文書も含めて、元のrawバイト列を保ちます。実行可能なリクエストと設定のadmissionでは、引き続き重複が拒否されます。元の2xx以外のレスポンスのJSONは、2回目の、情報が失われるパースをせずに、`http.error` のエビデンスに残ります。名前付きのSSEエラーは、その後の通常のストリームの終了よりも優先されます。診断用やプロバイダーのメタデータは、admission済みの元の範囲で制限され、無関係な小さなエラーテキストの上限では制限されません。
 
-`ProviderRequest::observer_limits` は host-only です。明示した `max_events`・`max_bytes` は正数で、承認済み SDK 配信上限を下げることしかできません。`provider-request/v3` digest は実効 limit、mode、encoded body、retry policy と全 semantic descriptor binding を結び付けます。Bridge は queued/draining batch を通じて実際の PMR vector/map capacity と所有 event/document byte を計上し、queue mutex 外で cancellation を要求します。`messages` という名の Generic channel を chat に強制変換しません。native `history` channel を `messages` に mapping すると C++ sidecar が保持され、JSON から native 権限を作りません。
+`ProviderRequest::observer_limits` は、ホスト専用です。明示的に指定する `max_events` と `max_bytes` は正の値でなければならず、admission済みのSDKの配送上限を、下げる方向にしか変えられません。`provider-request/v3` は、有効な上限、モード、エンコードされた本体、リトライのポリシー、セマンティックなディスクリプターのバインディングのすべてを、ダイジェストの対象にします。ブリッジは、キューに入っているバッチとdrain中のバッチの両方について、PMRのvectorやmapの実際の容量に、所有するイベントや文書のバイト数を加えて計上します。キャンセルは、キューのミューテックスの外で要求されます。`messages` という名前の汎用チャネルが、chatとして扱われることはありません。ネイティブな `history` チャネルを `messages` にマッピングすると、そのC++サイドカーが保持されます。JSONからネイティブの権限が作り出されることはありません。
 
-`ProviderOutcomeError` は結果を保持する共通 host-error base です。`ProviderObserverError` と `ProviderDispatchOutcomePersistenceError` は完全に drain した SDK 結果と元の `cause()` を保持し、後者は二次 observer 失敗も `delivery_error()` に保持します。`ProviderFailure::outcome()` は SDK 失敗自体を保持します。これは Node/Program の再 dispatch 権限ではありません。Transport retry の唯一の所有者は SDK で、caller が選んだ `max_output_tokens` を黙って clamp しません。
+`ProviderOutcomeError` は、結果を保持するホストエラーの共通の基底です。`ProviderObserverError` と `ProviderDispatchOutcomePersistenceError` は、drain済みのSDKの結果の全体と、元の `cause()` を保持します。永続化のエラーは、二次的なオブザーバーの失敗も `delivery_error()` に保持します。`ProviderFailure::outcome()` は、SDKの失敗そのものを保持します。これらはエビデンスであり、NodeやProgramが再ディスパッチしてよいという許可ではありません。トランスポートのリトライは、SDKだけが担当します。呼び出し側が選んだ `max_output_tokens` が、黙って切り詰められることもありません。
 
-`ProgramFailure` は live `provider_outcome`・`provider_cause` を保持します。Canonical factual SDK witness は真正な archive custody を owner/run/version/bundle/operation/attempt に結び付け、Runtime は復旧失敗を公開する前に設定済み custody を eager に復元します。公開 data-only `ProgramResult::create()` は事前入力 witness で迂回できず、未解決の parsed seal は実行結果ではありません。プロセス再起動後は元の exception pointer がなく `provider_cause == nullptr` であり、text から再作成しません。永続化できない失敗は serialize/publish/replay できません。
+`ProgramFailure` は、生きている `provider_outcome` と `provider_cause` を保持します。正規の事実としてのSDKwitness（canonical factual SDK witness）は、本物のarchiveの保管を、オーナー／run／バージョン／バンドル／オペレーション／試行に結び付けます。Runtimeは、復旧した失敗を公開する前に、設定済みの保管を先に復元します。公開されているデータのみの `ProgramResult::create()` は、あらかじめ入力したwitnessでこれを迂回することはできません。未解決のパース済みシールは、実行可能な結果ではありません。プロセスの再起動後は、元の例外ポインターが存在せず（`provider_cause == nullptr`）、テキストから再作成することもありません。永続化できない失敗は、シリアライズも公開もリプレイもできません。
 
-`RecordedBindingSet` は source-bound の move-only data で、caller 提供 dispatcher ではありません。信頼された Catalog の `recorded_capability_binder` は実際の永続 source event を独立に読み、captured-only capability を materialize します。`ProgramRuntime::replay_recorded()` は元の selected-source permission を検証し、実際の残存 bank を durable CAS で移します。inherited spend は新しい model grant ではありません。旧 `start_recorded` 更新 API は削除されました。InMemory/File/SQLite/PostgreSQL Program store は実行全体で正確で不変の owned lease を保持し、expiry による更新をしません。Controlled JavaScript も underlying capability manifest を検証し、正確な completed command 結果を消費して external effect を再 dispatch しません。
+`RecordedBindingSet` は、ソースに結び付けられた、ムーブ専用のデータです。呼び出し側が渡すdispatcherではありません。信頼されたCatalogの `recorded_capability_binder` が、実際に永続化されたソースイベントから、取得済み（captured）の機能だけを独立して実体化します。`ProgramRuntime::replay_recorded()` は、元の選択済みソースの権限を確認したうえで、実際に残っているバンクを永続的なCASで移します。引き継いだ支出は、新しいモデルのグラントではありません。以前の `start_recorded` による更新APIは削除しました。InMemory、File、SQLite、PostgreSQLの各Programストアは、実行の間じゅう、正確で不変な、所有されたリースを保持します。期限が切れても更新されません。制御されたJavaScriptも、基になる機能マニフェストを検証し、正確な完了済みコマンドの結果を消費します。外部のエフェクトを再dispatchすることはありません。
 
-**Recorded-control causal fix は full suite で実証済み。** Captured command replay は実行前に新しい CPU wall-time/Core work だけを durable に reserve し、測定済み work と新しく生成した Core checkpoint を result CAS で publish します。新しい model、money、Program-operation allowance を消費せず、captured external effect を再 dispatch しません。未精算 reservation は debit を保持します。Reservation により、最初の新しい Core checkpoint を拒否した通常の Running→Running transition ではなく認証済み settlement transition を選びます。Await channel receive、timer wait/cancel、handoff wait の開始/release は owning executor/strand 上で直列化します。既存 Recorded CPU/Memory await/handoff scenario は full suite で pass しました。Remote TSan coverage 制約は下記に明記します。
+**Recorded-controlの因果的な修正：フルスイートで動作確認済み。** capturedしたコマンドのリプレイは、実行前に、新しいCPUの実時間（wall-time）とCoreの処理だけを、永続的に予約します。そして、測定した処理量と、新しく生成されたCoreチェックポイントを、結果のCASで公開します。新しいモデル、金銭、Programオペレーションの許容量は消費せず、capturedした外部エフェクトを再dispatchすることもありません。精算されていない予約は、引き落とされたままです。予約により、通常のRunning→Runningの遷移ではなく、認証済みの精算遷移が選ばれます。通常の遷移では、最初の新しいCoreチェックポイントが拒否されていました。awaitのチャネル受信、タイマーの待機／キャンセル、ハンドオフ待機の開始と解放は、それぞれを所有するexecutorとstrand上で直列化されます。既存のRecorded CPU／Memoryのawait／handoffシナリオは、フルスイートで通りました。リモートのTSanの対象範囲の限界は、後述のとおり明記します。
 
-以下の観測はこの文書整備より前に記録されたものです。歴史的証拠であり、新 test 実行や全 platform・transport・security 性質の保証ではありません。
+以下の観測結果は、このドキュメントを整理する前に記録したものです。過去のエビデンスであり、新たに実行したテストの結果でも、すべてのプラットフォーム・トランスポート・セキュリティ特性についての保証でもありません。
 
-**有料観測は完了；普遍的な qualification ではありません。** 元の `SPQUAL1` base630/1000000 microUSD は不変です。同じ元 ledger の ONE hash-chained `A` が承認済み extension480/3000000 を受け入れ、aggregate1110/4000000 になります。Calls/spent/hold/settlement は累積で新 grant ID/header/reset はありません。正確な declaration byte/file identity と original authorization/baseline/catalog/activation/ledger-prefix の hash/totals は固定され、削除・置換・変更は fail closed です。最終 canonical ledger は calls1110/spent437958/held1287828 microUSD、eventA1、limits1110/4000000；spent+held US$1.725786 は LOCAL catalogue meter で invoice ではありません。記録済み five-family60-pair baseline は600 request 完了：Chat60/60、Responses60/60、Messages60/60、Generate56/60（incorrect-vision SSE4件）、Interactions57/60（incorrect-vision buffered1件/SSE2件）；合計293/300 pair で300/300ではありません。他の old600 financial record は保持しますが完全な behavioral proof ではありません。以前の M5/media one-shot cohort は不変です。以前の Google3-round prerequisite は invalid-tool2件/unreadable-positive1件の失敗状態を保持します。追加有料呼出しは承認されません。最終 SDK 証拠と native-axis 制約は baseline 成功とは別です。 以前の activation/reopen smoke は2回 reopen 後 calls610/spent219159/held751233、SDK meter/canary/vision4-test19.38秒 pass として保持します。これは限定された以前の checkpoint で最終 ledger totals ではありません。以前の検証済み Chat60-pair cohort は実際の attempt120、UpperBound charge120、UnknownHold なしを保持します。
+**有料の観測は完了しています。これは、あらゆる条件での適格性確認（qualification）ではありません。** 元の `SPQUAL1` の基本枠630/1000000 microUSDは変わりません。ハッシュで連結された1つの `A` が、承認済みの拡張枠480/3000000を、同じ元の台帳の中に受け入れています。合計は1110/4000000で、呼び出し回数、支出、ホールド、精算は累積されており、新しいグラントID、ヘッダー、リセットはありません。宣言の正確なバイト列とファイルの同一性、および元の認可、ベースライン、カタログ、アクティベーション、台帳プレフィックスのハッシュと合計値は、固定されたままです。削除、置換、変更を行うと、フェイルクローズになります。最終的な正規の台帳は、呼び出し1110回、支出437958、ホールド1287828（いずれもmicroUSD）、イベントA1、上限1110/4000000です。支出とホールドの合計US$1.725786は、ローカルのカタログ上のメーターの値であり、請求書の金額ではありません。文書化済みの5ファミリー×60ペアのベースラインは、600リクエストを完了しました。内訳は、Chat 60/60、Responses 60/60、Messages 60/60、Generate 56/60（不正解のvision SSEが4件）、Interactions 57/60（不正解のvisionが、バッファ型で1件、SSEで2件）です。合計は293/300ペアで、300/300ではありません。ほかの旧600件の会計記録は保存してありますが、挙動を完全に証明するものではありません。以前のM5／メディアのワンショットのコホートは変わりません。以前の3ラウンドのGoogleの前提条件には、無効なツール2件と、読み取れないpositive 1件の失敗が残っています。これ以上の有料呼び出しは承認されていません。最終的なSDKのエビデンスとネイティブ軸の制約は、ベースラインの成功とは別のものです。以前のアクティベーションと再オープンのスモークテストは、2回再オープンした後の呼び出し610回、支出219159、ホールド751233として記録されています。SDKのメーター／カナリア／visionの4テストは、19.38秒で通過しました。これらは範囲を限定した以前のチェックポイントであり、最終的な台帳の合計ではありません。以前に検証したChat 60ペアのコホートは、実際の試行120件、UpperBoundの課金120件を保持しており、UnknownHoldはありません。
 
-**Native-axis 観測は cryptographic 検証・native consumption/equivalence ではありません。** Generate は mutation/omission/duplication を受け入れました。Interactions は isolated genuine source/positive control、one-owner signature mutation、thought-carrier omission、call-carrier omission、duplication を受け入れました。全 thought/signature 削除は generic400、THOUGHT item を保持して全 signature field を削除した場合も generic400 でした。最後の capture は local encoded-original retention control で、same-capture server positive ではありません。以前の positive cohort は真正です。観測は aggregate-carrier-absence boundary のみを示し、issuer/signature 検証や vendor consumption を証明しません。実際の report：SDK `config/qualification-extension-results.json`、`qualification-final-summary.json`、`qualification-native-axis-results.json`、`qualification-combined-omission-results.json`、`qualification-signature-presence-results.json`。Prerequisite-failed/not-run/negative-inconclusive の状態は事実のままです。 Thought-only/carrier-only omission は別 carrier が残る状態で受け入れられました。Issuer-validation/native-consumption の主張を強めません。
+**ネイティブ軸の観測は、暗号学的な検証でも、ネイティブでの消費や同等性の確認でもありません。** Generateは、改変、欠落、重複を受け入れました。Interactionsは、隔離した本物のコピー元／positive control、1つのオーナーの署名の改変、thoughtキャリアの欠落、callキャリアの欠落、重複を受け入れました。thoughtと署名をすべて削除すると、汎用の400が返りました。THOUGHT項目を残したまま署名フィールドをすべて削除した場合も、汎用の400でした。最後のキャプチャには、ローカルでエンコードした元データを保持するコントロールがありましたが、同じキャプチャでのサーバー側のpositiveではありません。以前のpositiveのコホートは、本物のままです。これらの観測が確立するのは、キャリアがまとめて欠けた場合の境界だけです。発行元や署名の検証、ベンダー側での消費は確立しません。実際のレポートは、SDKの `config/qualification-extension-results.json`、`qualification-final-summary.json`、`qualification-native-axis-results.json`、`qualification-combined-omission-results.json`、`qualification-signature-presence-results.json` です。前提条件の失敗、未実行、ネガティブで結論が出ない、といった状態は、事実のまま残しています。thoughtだけ、またはキャリアだけを欠落させた場合は、別のキャリアが残っている限り受け入れられました。これは、発行元の検証やネイティブでの消費についての主張を強めるものではありません。
 
-**実際の統合証明と残る制約。** 最新 Core full run は2242 test、失敗0、skip16（RAM process-loss 非適用14件/live-credential gate2件）、130.17秒です。`PgNestedJsonRoundTrips` は duplicate key/order/null metadata、blob、residual を正確に保持し0.18秒で pass。未変更の元 shared-bank fork と既存 Recorded CPU/Memory await/handoff scenario も pass。実際の wrappedMemory/SQLite/PostgreSQL/gRPC finite130/hold65/lower129/strip/old-head/pruning/no-archive/import probe は plain と ASan+UBSan で pass。LOCAL Memory/SQLite/PostgreSQL TSan scope は7件 pass、warning0。System Abseil/Protobuf を含む full mixed gRPC TSan は exit66、dependency/generated-RPC stack に race warning402件。これは instrumentation/coverage 制約で proven false positive ではありません。Remote TSan/race-free は主張せず warning を suppress しません。Installed find_package Program C++/C ABI/dualQuickJS の3 consumer は pass。Fresh installed NeoGraph/SchemaProvider typed consumer は実際の HTTP request2件、coroutine 開始前の provider 破棄、native/tool replay、refusal、known-zero/raw 保持、実際の LinkedMismatch 拒否で pass。Browser Alice/Bob isolation と generation2 replacement を目視検証し、PostgreSQL Program Chat black-box6件は18.989秒で pass。最新 SDK26/26 は失敗0、74.07秒で pass。最終 ReleaseGraph16設定 ×fresh process3回/48記録は38.29秒、失敗0、全 actual protocol/owned-outcome check pass で完了しました。NeoGraph `benchmarks/provider-cutover-final-results.json` と `benchmarks/provider-cutover-final-summary.json` は独立した最終 cohort を保持します。測定中 compiler/有料 model は実行せず、歴史 cohort は不変で semantic/resource equivalence は主張しません。Unstable SDK/ABI3 は安定 release や広い platform qualification ではありません。
+**実際の統合的な検証結果と、残る制約。** 直近のCoreのフル実行は、2242テスト、失敗0件、スキップ16件（RAMでのプロセス喪失のケース14件は対象外、実際の認証情報が必要なゲート2件）で、130.17秒でした。`PgNestedJsonRoundTrips` は、重複キー、順序、nullのメタデータ、blob、残余（residual）を正確に保ったまま、0.18秒で通りました。変更のない元の共有バンクフォークと、既存のRecorded CPU／Memoryのawait／handoffシナリオも通りました。ラップした実際のMemory／SQLite／PostgreSQL／gRPCに対する、finite130／hold65／lower129／strip／old-head／pruning／no-archive／importのプローブは、通常ビルドとASan+UBSanの両方で通りました。ローカルのMemory／SQLite／PostgreSQLに対するTSanの範囲は、7件が通り、警告は0件でした。システムのAbseil／Protobufを含む、gRPC混在のフルTSanは、終了コード66で終わり、依存ライブラリと生成されたRPCのスタックに、レース警告が402件出ました。これは計装とカバレッジの限界であり、誤検知だと証明されたわけではありません。リモートのTSanによる検証や、レースがないことは主張せず、警告の抑制もしていません。インストール済みのfind_packageを使う、Program C++／C ABI／dualQuickJSの3つのコンシューマーは通りました。新たにインストールしたNeoGraph／SchemaProviderの型付きコンシューマーは、次の項目を通りました。実際のHTTPリクエスト2件、コルーチン開始前のプロバイダー破棄、ネイティブ／ツールのリプレイ、拒否（refusal）、known-zeroと生データの保持、実際のLinkedMismatchの拒否です。ブラウザーでのAlice/Bobの分離と、世代2への置き換えは、目視で確認しました。PostgreSQLのProgram Chatのブラックボックステスト6件は、18.989秒で通りました。直近のSDKは26/26が通り、失敗0件、74.07秒でした。最終的なReleaseGraphは、16構成×新規プロセス3回の繰り返し（48レコード）を38.29秒で完了し、失敗0件、実際のプロトコルとowned-outcomeのチェックがすべて通りました。NeoGraphの `benchmarks/provider-cutover-final-results.json` と `benchmarks/provider-cutover-final-summary.json` に、この最終コホートを個別に保存しています。測定中にコンパイラーや有料モデルは実行していません。過去のコホートは変更しておらず、セマンティクスやリソース使用量が同等だとは主張しません。不安定なSDK／ABI3は、安定版リリースでも、より広いプラットフォームでの適格性確認でもありません。
 
-**最小有料証拠（2026-10-03）は広範な qualification ではありません。** 個別承認の one-shot 3 呼出しの結果：Images—JPEG 1 個、1024×1024、360685 byte、input/output/total token 19/1408/1427、実際に目視確認；Veo—MP4 1 個、1280×720、4 秒、437737 byte、generation 1 回と status GET 3 回、usage nullable、Chromium で decode・目視確認；Decisions—`typesafe/jev-1.13`、probability 0.93、input/output token 283/21、total 不明、API 報告費用 USD 0.000011886。Image USD 0.0336 base + text/thinking、Veo USD 0.20 は catalog 予測で invoice ではなく、最小 image smoke は価格帯内訳を取得していません。結果は one-shot 権限を更新せず再実行も許可しません。
+**最小限の有料エビデンス（2026-10-03）。広範な適格性確認ではありません。** 個別に承認された、1回限りの呼び出し3件の結果は、次のとおりです。Images：JPEG 1枚、1024×1024、360685バイト、入力／出力／合計のトークンは19/1408/1427で、目視で確認しました。Veo：MP4 1本、1280×720、4秒、437737バイト、生成1回とステータスのGET 3回、使用量はnull許容で、デコードしてChromiumで目視確認しました。Decisions：`typesafe/jev-1.13`、確率0.93、入力／出力のトークンは283/21、合計は不明、APIが報告したコストはUSD 0.000011886です。Imagesの基本料金USD 0.0336にテキストとthinkingを加えた額と、VeoのUSD 0.20は、カタログ上の想定であり、請求書ではありません。最小限のImagesのスモークテストでは、価格帯ごとの内訳は取得していません。どの結果も、1回限りの権限を更新せず、再実行を認めるものでもありません。
 
-完了した chat pair は downstream vendor の native-continuation 消費を証明しません。
+完了したchatのペアは、下流のベンダーがネイティブな継続を消費したことを証明するものではありません。
 
-Stage 3 (2026-04) の設計と当時の測定テスト数は歴史として保持します。provider 互換/crossover の決定は以下の typed lossless 移行に置き換わり、旧設計台帳は現在の provider API ではありません。
+過去のStage 3（2026-04）の設計と、測定されたテスト件数は、履歴として残してあります。そのプロバイダー互換性やクロスオーバーに関する判断は、以下の、型付きでロスのない切り替えに置き換えられました。この設計の台帳は、現在のプロバイダーAPIではありません。
 
 - [ABI_POLICY.md](ABI_POLICY.md)
 - [ASYNC_GUIDE.md](ASYNC_GUIDE.md)
-- [Issue #5](https://github.com/fox1245/NeoGraph/issues/5) — historical decision; superseded provider compatibility policy.
+- [Issue #5](https://github.com/fox1245/NeoGraph/issues/5)：過去の決定。プロバイダー互換性のポリシーは、置き換えられました。
 
 ---
 
-# 移行 3: `compile()` ワーカープールデフォルトが 1 (v0.1.4 回帰復元)
+# マイグレーション3：`compile()` のワーカープールのデフォルトが1に（v0.1.4のリグレッションの修正）
 
-## 変更点
+## 変更内容
 
-`GraphEngine::compile(def, ctx)` のデフォルトワーカー数は
-v0.1.4 (`b59444f`) から `std::thread::hardware_concurrency()` でしたが、
-現在の pre-v1 API で **`1` (= エンジン所有 thread_pool なし)** に復元されました。
+`GraphEngine::compile(def, ctx)` のデフォルトのワーカー数は、v0.1.4（`b59444f`）から `std::thread::hardware_concurrency()` でしたが、現在のv1より前のAPIでは、**`1`（エンジンが所有するthread_poolなし）**に戻されました。
 
 ## 理由
 
-`hardware_concurrency` デフォルトはすべてのファンアウトノードに
-スレッド間サブミットオーバーヘッド (~6-7 µs/task) を課します —
-bench par 測定 (5 ワーカー + サマライザ) が 11.6 µs から 44 µs に回帰 (4× 減速)。
-測定環境を bisect した結果、v0.1.4 の `b59444f` が原因と特定。
+`hardware_concurrency` をデフォルトにすると、すべてのfan-outノードに、スレッド間のsubmitのオーバーヘッド（1タスクあたり約6〜7 µs）が加わります。benchのparの測定（5ワーカーとsummarizer）は、11.6 µsから44 µsへ、4倍遅くなりました。測定環境でbisectした結果、原因はv0.1.4の `b59444f` だと特定できました。
 
-実運用ワークロード (LLM 呼出が ms~s 範囲) ではサブミットオーバーヘッドを
-無視できますが:
-- **単純なグラフ (ファンアウトなし)** もプールオーバーヘッドを支払う — 無意味
-- **スレッドセーフでないノード状態** がデフォルトでマルチワーカーに露出 —
-  実際の危険
+実際の本番のワークロード（ミリ秒から秒の範囲のLLM呼び出し）では、submitのオーバーヘッドは無視できます。しかし、次の問題があります。
+- **単純なグラフ（fan-outなし）**でも、プールのオーバーヘッドを払うことになり、無意味です
+- **スレッドセーフでないノードの状態**が、デフォルトでマルチワーカーにさらされます。実際に踏みやすい落とし穴です
 
-したがって、デフォルトは安全に 1 に設定され、ユーザーは実際のファンアウト
-並列化を明示的にオプトインする必要があります。
+そのため、デフォルトは安全側の1にし、fan-outを実際に並列化したい場合は、利用者が明示的にオプトインする方式にしました。
 
 ## 移行
 
-ファンアウト並列化を必要とするグラフ (例: 複数の `Send` ディスパッチ、
-`parallel_group`、deep_research の 5 研究者ファンアウト) は
-`compile()` の後に明示的に呼び出す必要があります:
+fan-outの並列化が必要なグラフ（たとえば、複数の `Send` のディスパッチ、`parallel_group`、deep_researchの5 researcherのfan-out）では、`compile()` の後に、明示的に次を呼ぶ必要があります。
 
 ```cpp
 auto engine = GraphEngine::compile(def, ctx);
@@ -510,55 +465,41 @@ engine = ng.GraphEngine.compile(def, ctx)
 engine.set_worker_count_auto()
 ```
 
-単純なグラフ (ファンアウトなし) または軽量ファンアウトグラフ (LLM 呼出が支配的)
-はデフォルトのまま — プールオーバーヘッド 0。
+単純なグラフ（fan-outなし）や、軽いfan-outのグラフ（LLM呼び出しが支配的）は、デフォルトのままにします。プールのオーバーヘッドはゼロです。
 
-## 移行しないとどうなるか
+## 移行しなかった場合
 
-Worker pool を選ばなければ CPU-bound fan-out は呼び出し元 executor 上で動き、非同期 I/O は重なる場合があります。別の実行 thread が必要なら `set_worker_count_auto()` または明示 worker count を使います。Worker count だけで一貫性や高速化は保証しません。
+ワーカープールをオプトインしない場合、CPUを使うfan-outは、呼び出し側のexecutorで実行されます。非同期I/Oは、それでも重なって進められます。別々の実行スレッドが必要な場合は、`set_worker_count_auto()` か、明示的なワーカー数を使ってください。ワーカー数だけでは、一貫性も高速化も保証されません。
 
-## 影響を受ける NeoGraph 内部サンプル
+## 影響を受けたNeoGraph内部のサンプル
 
-この変更と共に追加されたファンアウト可視化パッチ — 意図を保持するために明示的呼出を
-追加。ユーザーコードが一致する場合、同じパターンを適用:
+この変更とあわせて、fan-outを分かりやすくするパッチを入れました。意図を保つために、明示的な呼び出しを追加しています。利用者のコードが同じパターンに当てはまる場合は、同じ対応をしてください。
 
-- `examples/10_send_command.cpp` — 同期 `sleep_for` ResearcherNode が Send 経由で
-  ファンアウト、`engine->set_worker_count_auto()` 追加
-- `examples/14_plan_executor.cpp` — 5 サブトピック Send ファンアウト (同期 sleep_for)、
-  同追加
-- `examples/21_mcp_fanout.cpp` — 3 MCP ツール呼出を同時発行、同追加
-- `examples/36_classifier_fanout.cpp` — 既に `set_worker_count(5)` が明示的。
-  偽のデフォルト (現在の既定は 1、engine-owned pool なし) を述べていたコメント修正
-- `src/core/deep_research_graph.cpp` `create_deep_research_graph()` ビルダー —
-  `compile()` 直後に `set_worker_count_auto()` を呼出し、スーパーバイザの
-  N 研究者が真に同時実行されるように
+- `examples/10_send_command.cpp`：同期の `sleep_for` を使うResearcherNodeが、Sendでfan-outします。`engine->set_worker_count_auto()` を追加しました
+- `examples/14_plan_executor.cpp`：5つのサブトピックへのSendによるfan-out（同期のsleep_for）。同じ追加をしました
+- `examples/21_mcp_fanout.cpp`：3つのMCPツール呼び出しを同時に発行します。同じ追加をしました
+- `examples/36_classifier_fanout.cpp`：すでに `set_worker_count(5)` を明示していました。誤ったデフォルトを書いていたコメントを修正しました（現在のデフォルトは1で、エンジンが所有するプールはありません）
+- `src/core/deep_research_graph.cpp` の `create_deep_research_graph()` ビルダー：`compile()` の直後に `set_worker_count_auto()` を呼び、supervisorのN個のresearcherが、実際に並行して動くようにしました
 
-`examples/05_parallel_fanout.cpp` は `io_context` 上でコルーチンタイマーオーバーラップ
-を使用 (同期 sleep なし) のため、ワーカープールは効果なし — 変更不要。
+`examples/05_parallel_fanout.cpp` は、`io_context` 上のコルーチンのタイマーの重なりを使っていて（同期のスリープはありません）、ワーカープールの効果がないため、変更していません。
 
-ユーザーコードに同じパターンが存在する場合:
+利用者のコードに同じパターンがある場合は、次のようにします。
 
 ```cpp
 auto engine = GraphEngine::compile(def, ctx);
 engine->set_worker_count_auto();   // ← add this line
 ```
 
-詳細な測定については ROADMAP_v1.md の perf セクションを参照 (別途追加)。
+詳しい測定結果は、ROADMAP_v1.mdのperfセクションを参照してください（別途追加）。
 
-> Stage 3 (2026-04) の設計と当時の測定テスト数は歴史として保持します。provider 互換/crossover の決定は以下の typed lossless 移行に置き換わり、旧設計台帳は現在の provider API ではありません。
+> 過去のStage 3（2026-04）の設計と、測定されたテスト件数は、履歴として残してあります。そのプロバイダー互換性やクロスオーバーに関する判断は、以下の、型付きでロスのない切り替えに置き換えられました。この設計の台帳は、現在のプロバイダーAPIではありません。
 
 ---
 
-# 移行 4: C++ ABI と必須再ビルド
+# マイグレーション4：C++のABIと、必須の再ビルド
 
-NeoGraph は全ての公開バイナリライブラリにプロジェクト `VERSION` と
-メジャー `SOVERSION` を設定します。v1 前は ABI 世代 0 ですが、`0.x`
-間のバイナリ互換性は保証されません。changelog が境界を告知した場合は
-全ての C++ コンシューマーを再ビルドしてください。特に `0.11.1` 以下から
-bounded `NodeCache` を含むリリースへの更新では、`NodeCache` と
-`EngineConfig` のオブジェクトレイアウト変更により再ビルドが必須です。
+NeoGraphは、コンパイルされるすべての公開ライブラリに、プロジェクトの `VERSION` と、メジャー番号の `SOVERSION` を割り当てるようになりました。v1より前のリリースは、すべてABIジェネレーション0を使いますが、`0.x` のバイナリ互換性は保証されません。変更履歴（changelog）が境界を告知したときは、すべてのC++コンシューマーを再ビルドしてください。特に、`0.11.1` 以前から、上限付きの `NodeCache` を含むリリースへ移行する場合は、`NodeCache` と `EngineConfig` のオブジェクトレイアウトが変わったため、再ビルドが必要です。
 
-Typed Provider 移行は virtual 契約を `get_name`、`family`、`prepare` に変え、旧 completion virtual を削除します。既存 Provider binary は互換でなく、カスタム provider と全依存 C++ 利用者を一致する header/library で再ビルドします。Core も SchemaProvider 型を公開するため LLM 無効 build にも SDK runtime が必要です。将来の安定 interface は安定 layout の変更より別の capability interface と adapter を優先すべきであり、現在の pre-v1 interface は binary 互換を約束しません。
+型付きのProviderへの移行で、仮想関数の契約は `get_name`、`family`、`prepare` に変わり、古いcompletion用の仮想関数は削除されました。既存のProviderのバイナリには互換性がありません。カスタムプロバイダーと、それに依存するすべてのC++コンシューマーを、対応するヘッダーとライブラリで再ビルドしてください。CoreもSchemaProviderの型を公開するため、LLMを無効にしたビルドでも、SDKランタイムが必要です。将来の安定したインターフェースでは、安定したレイアウトを変更するのではなく、別々のcapabilityインターフェースとアダプターを使うほうが望ましいです。現在のv1より前のインターフェースは、バイナリ互換性を約束しません。
 
-プラットフォーム別の名前、既知の境界、CI 検証については
-[バイナリ互換性ポリシー](ABI_POLICY.md)を参照してください。
+プラットフォームごとのライブラリ名、既知の再ビルドの境界すべて、CIでの検証については、[バイナリ互換性ポリシー](ABI_POLICY.md)を参照してください。
