@@ -451,7 +451,8 @@ The Program compiler lowers authoring sugar to a small orchestration plan:
 - `call_core`: invoke one immutable Core graph generation;
 - `sequence`: run children in order;
 - `parallel`: run bounded children concurrently and join all. A child whose
-  Core call interrupts pauses it: a failing child still ends it, otherwise the
+  Core call interrupts pauses it: a failing child still ends it (unless another
+  child paused on an effect whose outcome is unknown, #397); otherwise the
   run stops `Interrupted` on the first paused child, and the run record keeps
   the result of each child that finished and the question of each other paused
   child. Resume continues the child it answers, replays the finished ones
@@ -464,7 +465,10 @@ The Program compiler lowers authoring sugar to a small orchestration plan:
   children that finished already decide the quorum, it pauses there, starts no
   further child, and the run record keeps the result of each child that
   finished (#387). Resume continues the paused child and replays the finished
-  ones without running or charging them again;
+  ones without running or charging them again. As in a Core step (#392), a
+  child paused on an effect whose outcome is unknown pauses `parallel` and
+  `quorum` even beside a failed child, which is recorded and ends them on
+  resume (#397);
 - `branch`: select a child from a typed condition result;
 - `loop`: repeat a child under a declared condition and hard iteration limit;
 - `spawn`: admit and start a separately compiled child Program;

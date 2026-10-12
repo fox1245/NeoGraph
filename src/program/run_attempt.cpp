@@ -578,6 +578,19 @@ struct PlanExecution {
     std::optional<json> reentry;
 };
 
+// #397: a join member or plan branch that paused on an effect whose outcome is
+// unknown: its Core call raised the reconciliation interrupt (#392). Like a
+// Core step, a join ranks that pause above a sibling's failure: it pauses for
+// reconciliation instead of failing, which would abandon the effect.
+bool reconciliation_pause(const PlanExecution& paused) {
+    if (paused.status != ProgramTerminalStatus::Interrupted || !paused.interrupt) return false;
+    const auto& value = paused.interrupt->value;
+    if (!value.is_object() || !value.contains("value")) return false;
+    const auto payload = value.at("value");
+    return payload.is_object() &&
+           payload.value("kind", std::string()) == "tool_effect_reconciliation";
+}
+
 // A join member that settled before its join paused, replayed from its
 // recorded result by the attempt that resumes the join (#380).
 asio::awaitable<PlanExecution> replay_settled_member(PlanExecution settled) {
@@ -3245,6 +3258,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     std::vector<std::optional<PlanExecution>>        results;
                     std::vector<std::shared_ptr<graph::CancelToken>> branch_tokens;
                     std::exception_ptr                               error;
+                    std::optional<std::size_t>                       error_index;
                     std::size_t                                      remaining = 0;
                     std::shared_ptr<asio::experimental::channel<void(asio::error_code, int)>>
                         completion;
@@ -3286,7 +3300,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                         // The first error stops the join; a
                                         // sibling's cancellation never
                                         // replaces it (#379).
-                                        if (!parallel->error) parallel->error = error;
+                                        if (!parallel->error) {
+                                            parallel->error       = error;
+                                            parallel->error_index = index;
+                                        }
                                         cancel_siblings = true;
                                     } else {
                                         parallel->results[index] = std::move(result);
@@ -3308,19 +3325,68 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 (void)ignored;
 
                 std::exception_ptr                        parallel_error;
+                std::optional<std::size_t>                error_index;
                 std::vector<std::optional<PlanExecution>> parallel_results;
                 {
                     std::lock_guard lock(parallel->mutex);
                     parallel_error   = parallel->error;
+                    error_index      = parallel->error_index;
                     parallel_results = std::move(parallel->results);
                 }
-                if (parallel_error) std::rethrow_exception(parallel_error);
+                // #397: a branch whose Core node fails throws, which stops the
+                // parallel at once and cancels the other branches. When a
+                // branch had already paused on an effect whose outcome is
+                // unknown, the parallel pauses on it instead: the failure is
+                // recorded, and ends the run once the parallel is resumed, and
+                // a branch the failure cancelled runs again.
+                std::vector<bool> rerun(parallel_results.size(), false);
+                if (parallel_error) {
+                    const auto reconciling_branch = std::find_if(
+                        parallel_results.begin(), parallel_results.end(),
+                        [](const std::optional<PlanExecution>& branch) {
+                            return branch && reconciliation_pause(*branch);
+                        });
+                    std::optional<PlanExecution> failed_branch;
+                    if (reconciling_branch != parallel_results.end() && error_index &&
+                        !operation_token->is_cancelled()) {
+                        try {
+                            std::rethrow_exception(parallel_error);
+                        } catch (const NestedOperationFailure& error) {
+                            if (!error.checkpoint_incompatible) {
+                                failed_branch = plan_failure(ProgramTerminalStatus::Failed,
+                                                             "P_RUNTIME_CORE_FAILURE", error.what(),
+                                                             error.operation_id);
+                                failed_branch->failure->core_node = error.core_node;
+                                failed_branch->failure->attempts  = error.attempts;
+                                retain_provider_failure(*failed_branch->failure, error.cause);
+                                apply_node_failure(*failed_branch->failure, parallel_error);
+                            }
+                        } catch (...) {
+                        }
+                    }
+                    if (!failed_branch) std::rethrow_exception(parallel_error);
+                    parallel_results[*error_index] = std::move(*failed_branch);
+                    for (std::size_t index = 0; index < parallel_results.size(); ++index) {
+                        if (parallel_results[index]) continue;
+                        rerun[index] = true;
+                        PlanExecution cancelled_branch;
+                        cancelled_branch.status = ProgramTerminalStatus::Cancelled;
+                        parallel_results[index] = std::move(cancelled_branch);
+                    }
+                }
 
-                // A branch that fails ends the parallel, paused branches or
-                // not. Otherwise a paused branch pauses it, on the first paused
-                // branch in declaration order, and records the others (#384).
+                // The parallel ends by the rule of a Core step (#392, #397),
+                // whatever the branches' order: a cancelled branch ends it;
+                // otherwise a branch paused on an effect whose outcome is
+                // unknown pauses it, even beside a failed branch, on the first
+                // such branch; otherwise a branch that fails ends it, paused
+                // branches or not; otherwise a paused branch pauses it, on the
+                // first paused branch in declaration order, and records the
+                // others (#384).
+                std::optional<std::size_t> cancelled;
                 std::optional<std::size_t> failed;
                 std::optional<std::size_t> paused;
+                std::optional<std::size_t> reconciling;
                 for (std::size_t index = 0; index < parallel_results.size(); ++index) {
                     const auto& branch = parallel_results[index];
                     if (!branch)
@@ -3328,11 +3394,16 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                                  "Parallel branch completed without a result");
                     if (branch->status == ProgramTerminalStatus::Interrupted) {
                         if (!paused) paused = index;
+                        if (!reconciling && reconciliation_pause(*branch)) reconciling = index;
+                    } else if (branch->status == ProgramTerminalStatus::Cancelled) {
+                        if (!cancelled && !rerun[index]) cancelled = index;
                     } else if (branch->status != ProgramTerminalStatus::Completed && !failed) {
                         failed = index;
                     }
                 }
-                const bool    pause = paused && !failed;
+                if (cancelled) failed = cancelled;
+                const bool pause = !cancelled && paused && (!failed || reconciling);
+                if (pause && failed) paused = reconciling;
                 PlanExecution result;
                 result.output = json::array();
                 for (std::size_t index = 0; index < parallel_results.size(); ++index) {
@@ -3348,7 +3419,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     if (branch.returned) result.returned = true;
                     if (!pause) continue;
                     if (branch.status != ProgramTerminalStatus::Interrupted) {
-                        result.settled_members[branches[index]] = settled_branch_record(branch);
+                        if (!rerun[index])
+                            result.settled_members[branches[index]] = settled_branch_record(branch);
                         continue;
                     }
                     for (const auto& [key, record] : branch.settled_members.items())
@@ -3541,7 +3613,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     if (branch_result.status == ProgramTerminalStatus::Interrupted) {
                         // Already met or out of reach, the quorum would have
                         // ended before this branch; it pauses on it.
-                        if (successes + 1 + remaining < required) co_return unreachable();
+                        // #397: an effect whose outcome is unknown pauses
+                        // the quorum even when it is out of reach.
+                        if (successes + 1 + remaining < required &&
+                            !reconciliation_pause(branch_result))
+                            co_return unreachable();
                         PlanExecution paused;
                         paused.status               = ProgramTerminalStatus::Interrupted;
                         paused.output               = std::move(result.output);
@@ -5028,13 +5104,46 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     decided        = state->terminal;
                     paused         = state->paused;
                 }
-                if (paused && !decided) {
-                    // The join is Interrupted on its first paused member. Its
-                    // output holds the results so far in declaration order.
+                // #397: the join ends by the rule of a Core step (#392). A
+                // cancelled join ends cancelled. Otherwise a member paused on
+                // an effect whose outcome is unknown pauses the join, on the
+                // first such member, when a member's failure would end it or
+                // has ended it; a failed member is recorded and replays on
+                // resume. A join decided by a success (a race winner, a quorum
+                // met) ends that way, as with any paused member (#380).
+                std::optional<std::size_t> reconciling;
+                bool                       member_failed = false;
+                for (std::size_t i = 0; i < results.size(); ++i) {
+                    if (errors[i]) {
+                        member_failed = true;
+                        continue;
+                    }
+                    if (!results[i]) continue;
+                    if (reconciliation_pause(*results[i])) {
+                        if (!reconciling) reconciling = i;
+                    } else if (results[i]->status != ProgramTerminalStatus::Completed &&
+                               results[i]->status != ProgramTerminalStatus::Interrupted &&
+                               results[i]->status != ProgramTerminalStatus::Cancelled) {
+                        member_failed = true;
+                    }
+                }
+                const bool decided_by_success =
+                    (mode == "race" && winner && !errors[*winner] && results[*winner] &&
+                     results[*winner]->status == ProgramTerminalStatus::Completed) ||
+                    (mode == "quorum" && !quorum_members.empty());
+                const bool hold_for_reconciliation =
+                    reconciling && !operation_token->is_cancelled() && !decided_by_success &&
+                    (decided || member_failed);
+                if (paused && (!decided || hold_for_reconciliation)) {
+                    // The join is Interrupted on its first paused member, or
+                    // beside a failure on its first member paused on an
+                    // uncertain effect. Its output holds the results so far
+                    // in declaration order.
                     PlanExecution paused_join;
                     paused_join.status = ProgramTerminalStatus::Interrupted;
                     paused_join.output = json::array();
-                    std::optional<std::size_t> resumed_member;
+                    std::optional<std::size_t> resumed_member =
+                        hold_for_reconciliation ? reconciling : std::nullopt;
                     for (std::size_t i = 0; i < results.size(); ++i) {
                         const auto& member = results[i];
                         paused_join.output.push_back(

@@ -598,6 +598,22 @@ public:
         if (value == "fail") throw std::runtime_error("join member failure sentinel");
         if ((value == "ask" || value == "ask-slow") && !input.ctx.resume_value)
             throw NodeInterrupt("join member approval", json{{"request", "approve"}});
+        // #397: the interrupt the Core raises for an effect whose outcome is
+        // unknown, until the member is resumed.
+        if (value == "reconcile" && !input.ctx.resume_value)
+            throw NodeInterrupt("Mediated Tool effect requires reconciliation",
+                                json{{"kind", "tool_effect_reconciliation"},
+                                     {"thread_id", input.ctx.thread_id},
+                                     {"task_id", "join-member"}});
+        // #397: fails after a short cancellable wait, so that a member that
+        // pauses at once has paused first.
+        if (value == "fail-slow") {
+            auto timer = asio::steady_timer(co_await asio::this_coro::executor);
+            timer.expires_after(std::chrono::milliseconds(300));
+            co_await timer.async_wait(
+                asio::bind_cancellation_slot(input.ctx.cancel_token->slot(), asio::use_awaitable));
+            throw std::runtime_error("join member failure sentinel");
+        }
         // #391: an answered "ask-slow" takes 1.2 s before it finishes.
         if (value == "slow" || value == "ask-slow") {
             auto timer = asio::steady_timer(co_await asio::this_coro::executor);
@@ -608,8 +624,9 @@ public:
         if (value == "block") std::this_thread::sleep_for(std::chrono::milliseconds(800));
         NodeOutput output;
         output.writes.push_back(ChannelWrite{
-            "value", value == "ask" || value == "ask-slow" ? input.ctx.resume_value->at("decision")
-                                                           : json("done:" + value)});
+            "value", value == "ask" || value == "ask-slow" || value == "reconcile"
+                         ? input.ctx.resume_value->at("decision")
+                         : json("done:" + value)});
         co_return output;
     }
 
@@ -775,8 +792,22 @@ public:
             co_return output;
         }
         const auto action = script ? script(ordinal, input) : json{{"write", "done"}};
+        // #397: waits first (cancellably), so that a sibling that pauses at
+        // once has paused before this step acts.
+        if (action.contains("delay_ms")) {
+            auto timer = asio::steady_timer(co_await asio::this_coro::executor);
+            timer.expires_after(std::chrono::milliseconds(action.at("delay_ms").get<int>()));
+            co_await timer.async_wait(
+                asio::bind_cancellation_slot(input.ctx.cancel_token->slot(), asio::use_awaitable));
+        }
         if (action.contains("ask"))
             throw NodeInterrupt("plan step approval", json{{"ordinal", ordinal}});
+        // #397: an effect whose outcome is unknown.
+        if (action.contains("reconcile"))
+            throw NodeInterrupt("Mediated Tool effect requires reconciliation",
+                                json{{"kind", "tool_effect_reconciliation"},
+                                     {"thread_id", input.ctx.thread_id},
+                                     {"task_id", "plan-step"}});
         if (action.contains("fail"))
             throw std::runtime_error(action.at("fail").get<std::string>());
         if (action.contains("effect"))
@@ -10431,6 +10462,157 @@ TEST(ProgramRuntimeTest, TwoInterruptBeforeGatesOfOneCoreStepAreAnsweredOneAtATi
         ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
     }
 }
+
+// ---------------------------------------------------------------------------
+// #397: a Program join ranks a reconciliation pause above a member's failure
+// ---------------------------------------------------------------------------
+
+namespace {
+bool asks_to_reconcile(const ProgramResult& result) {
+    return result.interrupt() && result.interrupt()->value.is_object() &&
+           result.interrupt()->value.contains("value") &&
+           result.interrupt()->value["value"].value("kind", std::string()) ==
+               "tool_effect_reconciliation";
+}
+}  // namespace
+
+TEST(ProgramRuntimeTest, PlanParallelPausesForReconciliationBesideAFailedBranch) {
+    // #397: one branch's Core call leaves an effect uncertain and the other
+    // fails. The parallel used to fail, abandoning the effect; it now pauses
+    // for reconciliation, as a Core step does (#392), whichever branch comes
+    // first, and records the failed branch, which fails the run on resume
+    // without running again. In memory and on SQLite.
+    for (const bool durable : join_test_store_kinds()) {
+        for (const bool reconcile_first : {true, false}) {
+            SCOPED_TRACE(std::string(durable ? "SQLite stores" : "in-memory stores") +
+                         (reconcile_first ? ", reconciling branch first" : ", failing branch first"));
+            JoinTestStores  stores(durable);
+            AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                                    ExecutionGuarantee::Unmanaged, true);
+            const auto version = admit_plan(fixture, plan_parallel(json::array({plan_call(), plan_call()})));
+            const std::string run_id = std::string("plan-parallel-reconcile-") +
+                                       (durable ? "sqlite-" : "memory-") +
+                                       (reconcile_first ? "first" : "second");
+            // Branch 0 runs on the parallel's own Core thread, the root's.
+            const auto root_thread = plan_root_thread(version, run_id);
+            reset_plan_steps([root_thread, reconcile_first](std::size_t, const NodeInput& input) -> json {
+                const bool first = input.ctx.thread_id == root_thread;
+                return first == reconcile_first
+                           ? json{{"reconcile", true}}
+                           : json{{"fail", "branch failure sentinel"}, {"delay_ms", 300}};
+            });
+
+            const auto paused = run_plan(fixture, version, run_id);
+            ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted)
+                << "the failure abandoned the uncertain effect: " << failure_detail(paused);
+            EXPECT_TRUE(asks_to_reconcile(paused));
+            EXPECT_EQ(paused_operation(paused), reconcile_first ? "root.0" : "root.1");
+
+            const auto done = decide(fixture, paused, "reconciled");
+            ASSERT_EQ(done.status(), ProgramTerminalStatus::Failed) << failure_detail(done);
+            EXPECT_NE(done.failure()->message.find("branch failure sentinel"), std::string::npos)
+                << failure_detail(done);
+            EXPECT_EQ(plan_steps_counted(false), 2U) << "the failed branch ran once";
+            EXPECT_EQ(plan_steps_counted(true), 1U) << "the reconciled branch ran on resume";
+        }
+    }
+}
+
+TEST(ProgramRuntimeTest, PlanQuorumPausesForReconciliationAfterAFailedBranch) {
+    // #397: the quorum's branches run in order; A fails without failing the
+    // run (its await times out) and B leaves an effect uncertain. B pauses
+    // the quorum, which still can reach two successes, and resume replays A's
+    // failure, answers B and runs C.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                                ExecutionGuarantee::Unmanaged, true);
+        reset_plan_steps([](std::size_t ordinal, const NodeInput&) -> json {
+            if (ordinal == 1) return json{{"block", true}};
+            if (ordinal == 2) return json{{"reconcile", true}};
+            return json{{"write", "C"}};
+        });
+        const auto version = admit_plan(
+            fixture,
+            plan_quorum(json::array({plan_timed_out_call(), plan_call(), plan_call()}), 2));
+        const auto paused = run_plan(fixture, version, durable ? "plan-quorum-reconcile-sqlite"
+                                                               : "plan-quorum-reconcile-memory");
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+        EXPECT_TRUE(asks_to_reconcile(paused));
+        EXPECT_EQ(paused_operation(paused), "root.1");
+
+        const auto done = decide(fixture, paused, "B");
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+        EXPECT_EQ(plan_steps_counted(false), 3U) << "A's failure replays";
+    }
+}
+
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST(ProgramRuntimeTest, JavaScriptJoinsPauseForReconciliationBesideAFailedMember) {
+    // #397: in ng.all (fail-fast), ng.race and ng.quorum a member's Core call
+    // leaves an effect uncertain while another member fails. Each join used to
+    // end with the failure, abandoning the effect; each now pauses for
+    // reconciliation, and records the failed member, which ends the join on
+    // resume without running again.
+    struct Case {
+        const char* label;
+        const char* body;
+        const char* failure;
+        unsigned    failed_runs;
+    };
+    const Case cases[] = {
+        {"all, reconciling member first", R"JS(
+    yield ng.all([
+        ng.callCore("main", {value: "reconcile"}, "all:reconcile"),
+        ng.callCore("main", {value: "fail-slow"}, "all:fail")
+    ], {max_in_flight: 2}, "reconcile:all");
+    return {unreachable: true};
+)JS",
+         "join member failure sentinel", 1},
+        {"all, failing member first", R"JS(
+    yield ng.all([
+        ng.callCore("main", {value: "fail-slow"}, "all:fail"),
+        ng.callCore("main", {value: "reconcile"}, "all:reconcile")
+    ], {max_in_flight: 2}, "reconcile:all");
+    return {unreachable: true};
+)JS",
+         "join member failure sentinel", 1},
+        {"race", R"JS(
+    yield ng.race([
+        ng.callCore("main", {value: "reconcile"}, "race:reconcile"),
+        ng.callCore("main", {value: "fail-slow"}, "race:fail")
+    ], {max_in_flight: 2}, "reconcile:race");
+    return {unreachable: true};
+)JS",
+         "join member failure sentinel", 1},
+        {"quorum", R"JS(
+    yield ng.quorum([
+        ng.callCore("main", {value: "reconcile"}, "quorum:reconcile"),
+        ng.callCore("main", {value: "fail-slow"}, "quorum:fail-a"),
+        ng.callCore("main", {value: "fail-slow"}, "quorum:fail-b")
+    ], {required_successes: 2, max_in_flight: 3}, "reconcile:quorum");
+    return {unreachable: true};
+)JS",
+         "quorum", 2},
+    };
+    for (const auto& item : cases) {
+        SCOPED_TRACE(item.label);
+        reset_join_member_runs();
+        AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+        const auto      paused = run_join(fixture, item.body);
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted)
+            << "the failure abandoned the uncertain effect: " << failure_detail(paused);
+        EXPECT_TRUE(asks_to_reconcile(paused));
+
+        const auto done = approve(fixture, paused);
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Failed) << failure_detail(done);
+        EXPECT_NE(failure_detail(done).find(item.failure), std::string::npos) << failure_detail(done);
+        EXPECT_EQ(join_member_runs_of("fail-slow"), item.failed_runs)
+            << "a failed member replays from its record";
+    }
+}
+#endif  // NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS
 
 TEST(ProgramRuntimeTest, PlanQuorumPausedByABranchAsksAndResumeAnswersIt) {
     // #387: A finishes and B asks. The quorum needs two successes and B may

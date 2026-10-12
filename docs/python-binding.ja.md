@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=430a43459a0a5946743243b3efb6f6347c6fb4def343115da59f1c76105dab2a -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=269e9e433933e198c9e5317ed92c0eefcfd2c7f8da1bf1ace61f774d09e63d55 -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -465,7 +465,7 @@ JavaScript Programは、グラフビルダーを1つ返す`define()`をexportす
 
 ### 失敗したコマンドは実行を終了する
 
-`main()`を再開するのは完了したコマンドだけです。yieldされたコマンドが完了しない場合、たとえばノードが例外を送出した、Coreのステップ予算を使い切った、もう発火できないbarrierで止まった、またはwall-time制限を超えた`callCore`では、`ProgramRuntime`はその結果を記録し、対応する`status`と`failure`を持つ実行の最終結果にします。ジェネレーターは再開されません。`yield`を囲む`try`/`catch`は実行されず、その後のJavaScriptも実行されません。失敗ポリシーに従って失敗したjoin（`ng.all`、`ng.race`、`ng.quorum`）も同じように実行を終了します。Pythonでは`result.status`と`result.failure`で失敗を処理してください。割り込まれたコマンドは異なります。実行は`Interrupted`として停止し、`resume()`がそのコマンドを続行します。割り込まれたjoinメンバーはそのjoinを一時停止します。joinはそれ以上メンバーを開始せず、すでに実行中のメンバーは終了させます。その結果でjoinが決まる場合（fail-fastの失敗、raceの勝者、達成されたか到達不能になったquorum）、joinはそのように終了します。そうでなければ実行は最初に一時停止したメンバーで`Interrupted`として停止し、`resume()`はそのメンバーを続行し、終了したメンバーはコマンドジャーナルから再生するため、再実行も再課金もしません。 `ng.await(command, timeout_ms)` の期限は絶対時刻です。コマンドジャーナルが await の開始時刻を記録し、再開や停止したプロセスの復旧には残り時間だけが与えられます。期限を過ぎて再開された await は、応答されたノードを実行せずに直ちに `P_AWAIT_TIMEOUT` で実行を `TimedOut` として終了します (#391)。プランレベルの `await` 操作も、再開をまたいで同じように期限を保ちます。
+`main()`を再開するのは完了したコマンドだけです。yieldされたコマンドが完了しない場合、たとえばノードが例外を送出した、Coreのステップ予算を使い切った、もう発火できないbarrierで止まった、またはwall-time制限を超えた`callCore`では、`ProgramRuntime`はその結果を記録し、対応する`status`と`failure`を持つ実行の最終結果にします。ジェネレーターは再開されません。`yield`を囲む`try`/`catch`は実行されず、その後のJavaScriptも実行されません。失敗ポリシーに従って失敗したjoin（`ng.all`、`ng.race`、`ng.quorum`）も同じように実行を終了します。Pythonでは`result.status`と`result.failure`で失敗を処理してください。割り込まれたコマンドは異なります。実行は`Interrupted`として停止し、`resume()`がそのコマンドを続行します。割り込まれたjoinメンバーはそのjoinを一時停止します。joinはそれ以上メンバーを開始せず、すでに実行中のメンバーは終了させます。その結果でjoinが決まる場合（fail-fastの失敗、raceの勝者、達成されたか到達不能になったquorum）、joinはそのように終了します。そうでなければ実行は最初に一時停止したメンバーで`Interrupted`として停止し、`resume()`はそのメンバーを続行し、終了したメンバーはコマンドジャーナルから再生するため、再実行も再課金もしません。 `ng.await(command, timeout_ms)` の期限は絶対時刻です。コマンドジャーナルが await の開始時刻を記録し、再開や停止したプロセスの復旧には残り時間だけが与えられます。期限を過ぎて再開された await は、応答されたノードを実行せずに直ちに `P_AWAIT_TIMEOUT` で実行を `TimedOut` として終了します (#391)。プランレベルの `await` 操作も、再開をまたいで同じように期限を保ちます。 不確かな効果、つまり payload の `kind` が `tool_effect_reconciliation` である `NodeInterrupt` で一時停止したメンバーは、Core ステップと同じく (#392) メンバーの失敗より優先されます。join は失敗する代わりにそのメンバーで一時停止して失敗したメンバーを記録し、再開されるとその失敗で終わります。成功が結果を決めた join はそのとおりに終わります (#397)。
 
 ### グラフのチェックとbarrierの停滞
 
