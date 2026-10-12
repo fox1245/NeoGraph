@@ -19,7 +19,7 @@ Program 层需要包含 Program 和 QuickJS 控制的构建：`pip install neogr
 
 ## 完整示例：发布检查
 
-一个发布作业并行检查三个服务。`payments` 的检查失败了。作业没有整体失败，而是把失败送到评审步骤，作业在那里等待人工处理。人批准发布后，其他服务不会被重新检查，作业随即完成。同一个作业在预算之内运行。
+一个发布作业并行检查三个服务。`payments` 的检查失败了。作业没有整体失败，而是把失败送到评审步骤，作业在那里等待人工处理。人批准发布后，其他服务不用重新检查，作业随即完成。同一个作业在预算之内运行。
 
 示例由三个 Python 文件组成。`release_program.py` 放每次运行都不变的全部内容，`run_release.py` 和 `restart.py` 使用它。
 
@@ -107,7 +107,7 @@ def build_registry():
 
 ### 3. Program
 
-`define()` 描述图。`check` 会尝试两次（`max_retries: 1`）。如果仍然失败，不终止运行，而是把失败送到 `review`，并在 `failures` 通道追加一条失败记录。`review` 被 `interruptBefore` 拦住，所以运行停在那里等待回答。回答到来后，条件 `release.decision` 把运行引向 `ship` 或 `hold`。`hold` 是失败退出节点：它以错误码 `release.held` 让运行以 `Failed` 结束。
+`define()` 描述图。`check` 会尝试两次（`max_retries: 1`）。如果仍然失败，不终止运行，而是把失败送到 `review`，并在 `failures` 通道追加一条失败记录。`interruptBefore` 拦住了 `review`，所以运行停在那里等待回答。回答到来后，条件 `release.decision` 把运行引向 `ship` 或 `hold`。`hold` 是失败退出节点：它以错误码 `release.held` 让运行以 `Failed` 结束。
 
 `main()` 用 `ng.all` 对每个服务运行一次这张图，同时最多三个，并按服务的顺序返回报告。
 
@@ -146,11 +146,11 @@ export function* main(input) {
 '''
 ```
 
-有两条规则要记住。`ng.callCore` 只能指定 `define()` 返回的那张图，名称就是传给 `ng.graph()` 的名称。另外，失败的命令会终止运行：生成器不会被恢复，所以包在 `yield` 外面的 `try`/`catch` 永远不会执行。请像这里的 `retryPolicy` 一样在图里处理失败，或者在宿主中读取 `result.status` 和 `result.failure`。
+有两条规则要记住。`ng.callCore` 只能指定 `define()` 返回的那张图，名称就是传给 `ng.graph()` 的名称。另外，失败的命令会终止运行：生成器不会恢复执行，所以包在 `yield` 外面的 `try`/`catch` 永远不会执行。请像这里的 `retryPolicy` 一样在图里处理失败，或者在宿主中读取 `result.status` 和 `result.failure`。
 
 ### 4. 预算与宿主
 
-宿主为它准入的每个 Program 设置上限。Program 与一份运行预算一同被准入，该版本的每次运行都必须使用完全相同的预算。上限的各字段，除两个子程序限制外，即使 Program 从不调用模型也必须为正数。
+宿主为它准入的每个 Program 设置上限。Program 与一份运行预算一同准入，该版本的每次运行都必须使用完全相同的预算。上限的各字段，除两个子程序限制外，即使 Program 从不调用模型也必须为正数。
 
 ```python
 # 4. The budgets. The host ceiling bounds every Program; the run budget bounds one run.
@@ -205,7 +205,7 @@ ProgramTerminalStatus.Interrupted
 review release.checks_failed
 ```
 
-`api` 和 `web` 完成了检查。`payments` 失败了两次，所以它的失败被路由到 `review`，运行以状态 `Interrupted` 停下。`result.interrupt.core_node` 指出在等待的节点，`result.interrupt.value` 中是 `{"reason": "failure_route", "failure": {...}}`，其中失败记录包含 `node`、`kind`（这里是 `exhausted`）、`code`、`attempts`、`retryable`、`step`、`routed_to` 和 `effects`。`api` 和 `web` 的报告已经在这次运行里了。
+`api` 和 `web` 完成了检查。`payments` 失败了两次，所以它的失败路由到了 `review`，运行以状态 `Interrupted` 停下。`result.interrupt.core_node` 指出在等待的节点，`result.interrupt.value` 中是 `{"reason": "failure_route", "failure": {...}}`，其中失败记录包含 `node`、`kind`（这里是 `exhausted`）、`code`、`attempts`、`retryable`、`step`、`routed_to` 和 `effects`。`api` 和 `web` 的报告已经在这次运行里了。
 
 ### 6. 分叉出去试另一个回答
 
@@ -261,7 +261,7 @@ print(refused.status, refused.failure.code)
 ProgramTerminalStatus.BudgetExhausted P_PROGRAM_OPERATION_BUDGET
 ```
 
-汇合需要的 Program 操作次数超过了这份预算（`max_program_operations=2`）允许的数量。运行时在启动任何成员之前就拒绝整个汇合，所以没有任何服务被检查。换预算就要重新 `compile_admit`，得到新的版本；用与已准入预算不同的预算调用 `host.run` 会抛出 `P_START_BUDGET`。
+汇合需要的 Program 操作次数超过了这份预算（`max_program_operations=2`）允许的数量。运行时在启动任何成员之前就拒绝整个汇合，所以没有任何服务得到检查。换预算就要重新 `compile_admit`，得到新的版本；用与已准入预算不同的预算调用 `host.run` 会抛出 `P_START_BUDGET`。
 
 ### 9. 经受住重启
 

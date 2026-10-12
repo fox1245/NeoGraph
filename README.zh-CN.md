@@ -186,7 +186,7 @@ HELLO
 
 ## 图如何改变状态
 
-假设通道 `count` 的值是 `2`。一个递增节点读到 `2`，返回一个提议写入 `3` 的写入。待调度的这批节点运行结束后，运行时通过该通道的归约器应用这次写入。下一批中的后续节点读到的是 `3`。
+假设通道 `count` 的值是 `2`。一个递增节点读到 `2`，返回一个提议把值设为 `3` 的写入。待调度的这批节点运行结束后，运行时通过该通道的归约器应用这次写入。下一批中的后续节点读到的是 `3`。
 
 ```text
 Committed state       Node computation          Reduced state
@@ -258,7 +258,7 @@ cmake --build build-core --parallel --target example_core_quickstart
 
 `ProgramRuntime` 协调已准入（admission）的 Program。Program 可以调用 Core 图并管理子 Program。它加入了不可变的 Program 版本、目录与策略快照、命令日志、子程序谱系、预算、重放，以及已准入的替换和迁移。宿主注册可执行的能力，编译并准入 Program，然后启动一次调用。运行图节点的仍然是 Core。
 
-对前面的研究工作流来说，一张 Core 图可以完成检索与评审。Program 可以调用这张图，为不同的任务启动子 Program，等待它们的结果，并记录生命周期的转换。持久化恢复需要配置好的存储以及相应的托管（custody）契约；内存存储在进程退出后就没有了，而只有日志也不能让外部工具产生的副作用恰好发生一次。
+对前面的研究工作流来说，一张 Core 图可以完成检索与评审。Program 可以调用这张图，为不同的任务启动子 Program，等待它们的结果，并记录生命周期的转换。持久化恢复需要配置好的存储以及相应的保管（custody）契约；内存存储在进程退出后就没有了，而只有日志也不能让外部工具产生的副作用恰好发生一次。
 
 QuickJS 是可选的 Program 编写接口。Program 使用有界的 JavaScript 计算，以及 `callCore`、`spawn`、`await`、`all`、`parallel`、`race`、`quorum`、`emit`、`checkpoint` 和 `cancelScope` 这样的生成器命令。宿主批准各项能力，并在发布之前校验生成的源码。模型生成的提案无法访问编译器、凭据、目录或授予权限的机制。
 
@@ -298,13 +298,13 @@ sp::runtime::Result first_call(
 }
 ```
 
-准备好的请求只能被消费一次。`sp::runtime::Result` 拥有一个不可变的 `sp::Outcome`，其中是 `Completion` 或 `Failure`。需要有序的消息与片段、原生延续信息、原始观测值、停止依据、尝试元数据或失败时的部分结果时，请保留这个结果。用量计数器可以为空：缺失表示未知，观测到的 0 就是 0。用量报告与预算扣减是两种不同的记录；可移植的报告不能授予支出权限。
+准备好的请求只能消费一次。`sp::runtime::Result` 拥有一个不可变的 `sp::Outcome`，其中是 `Completion` 或 `Failure`。需要有序的消息与片段、原生延续信息、原始观测值、停止依据、尝试元数据或失败时的部分结果时，请保留这个结果。用量计数器可以为空：缺失表示未知，观测到的 0 就是 0。用量报告与预算扣减是两种不同的记录；可移植的报告不能授予支出权限。
 
-`usage.provider_cost` 保留 provider 报告的 nanoUSD 金额、各字段的状态、来源、质量、BYOK 依据，以及对解析出的 binary64 值向上取整的结果。它不是发票、令牌数、估算值，也不是支出权限。缺失的金额元数据在规范化的 v2 JSON 中仍然缺失；报告的 0 或 `is_byok=false` 依然是依据。未知的币种以及互相冲突或格式错误的报告会被原样保留，不会换算成 USD 或令牌。阻塞式 provider 调用同样驱动唯一的异步 SDK 管线，并拒绝从 SDK 事件循环或回调工作线程重入。
+`usage.provider_cost` 保留 provider 报告的 nanoUSD 金额、各字段的状态、来源、质量、BYOK 依据，以及对解析出的 binary64 值向上取整的结果。它不是发票、令牌数、估算值，也不是支出权限。缺失的金额元数据在规范化的 v2 JSON 中仍然缺失；报告的 0 或 `is_byok=false` 依然是依据。未知的币种以及互相冲突或格式错误的报告会原样保留，不会换算成 USD 或令牌。阻塞式 provider 调用同样驱动唯一的异步 SDK 管线，并拒绝从 SDK 事件循环或回调工作线程重入。
 
 `first_call` 返回之后，用 `std::get_if<sp::Completion>(result.get())` 查看完成结果的 `messages`、`stop` 和 `usage`。否则，`std::get<sp::Failure>(*result)` 会给出 `error.kind`、`error.safe_message`、重试依据，以及 `partial` 中的部分消息和用量。例如，没有 `completion.usage.output_total` 表示输出令牌数未知；有这个计数器且 `value` 为 `0`，则表示报告的是 0。展示用的文本只是保留结果的一种视图。
 
-`ChatMessage`、`ChatTool` 和 JSON 是可移植的投影。真正的原生历史可以连同原生检查点旁路数据留在内存中；持久化的原生历史则需要真正的 `sp::NativeArchive` 和受保护的、仅限所有者的托管。可移植的 JSON 无法重建这种权限。归档用独立的密钥认证托管状态，它既不是加密，也不是对厂商签发者的认证。不要公开归档正文、密钥、原生 blob 或原始的线路观测值。关于持久化失败、观察者、受管预算库和重放边界，见 [provider 参考](docs/reference-en.md)和[迁移指南](docs/migration-v0.4-to-v1.0.md)。
+`ChatMessage`、`ChatTool` 和 JSON 是可移植的投影。真正的原生历史可以连同原生检查点旁路数据留在内存中；持久化的原生历史则需要真正的 `sp::NativeArchive` 和受保护的、仅限所有者的保管。可移植的 JSON 无法重建这种权限。归档用独立的密钥认证保管状态，它既不是加密，也不是对厂商签发者的认证。不要公开归档正文、密钥、原生 blob 或原始的线路观测值。关于持久化失败、观察者、受管预算库和重放边界，见 [provider 参考](docs/reference-en.md)和[迁移指南](docs/migration-v0.4-to-v1.0.md)。
 
 这次带类型的切换移除了 `CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器以及 Responses 的 WebSocket 路径。请重新编译 C++ 使用方并迁移自定义 provider；没有兼容别名。SDK 包是 `0.3.0` alpha，固定在公开提交 `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`（`maint/interface6` 分支），接口修订版为 6，共享 ABI 为 6。金额用量元数据改变了公开布局：请把使用 SDK 的代码、NeoGraph 和 Python 扩展一起重新构建。原生归档 v3 和可移植 JSON v2 保持不变；这一代不声明稳定的 SDK 接口。
 
@@ -382,7 +382,7 @@ python scripts/verify_ci.py native-linux --work-dir build/local-linux-01 --jobs 
 python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-01 --jobs 4
 ```
 
-`--work-dir` 必须是你自己拥有的、全新的、不存在的输出路径，不能是源码根目录或它的上级目录；`--jobs` 必须是正数或 `auto`（CPU 数）。已有的输出会被拒绝并保留，不会被自动清理。运行器不会安装依赖，也不会更改宿主策略；固定依赖的下载，以及 cibuildwheel 声明的引导和修复，仍然照常进行。
+`--work-dir` 必须是你自己拥有的、全新的、不存在的输出路径，不能是源码根目录或它的上级目录；`--jobs` 必须是正数或 `auto`（CPU 数）。遇到已有的输出时会拒绝使用并原样保留，不会自动清理。运行器不会安装依赖，也不会更改宿主策略；固定依赖的下载，以及 cibuildwheel 声明的引导和修复，仍然照常进行。
 
 | 配置 | 保留的目的 / 前提条件 |
 |---|---|

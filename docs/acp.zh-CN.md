@@ -175,10 +175,10 @@ stop reason: end_turn
 
 ## 取消、会话和错误
 
-- **取消。** `session/cancel` 取消正在运行的那一轮，这一轮以 `stopReason: "cancelled"` 结束；没有运行中的轮次时，取消会被忽略。stdin 到达文件末尾时，`run()` 会等运行中的轮次 `set_eof_grace`（1 秒）让它们结束，然后取消。
-- **一轮如何结束。** 运行完成是 `end_turn`，被取消是 `cancelled`，运行达到 `RunConfig::max_steps` 是 `max_turn_requests`，超出模型令牌预算是 `max_tokens`，provider 拒绝是 `refusal`。其他失败是 JSON-RPC 错误 `-32603`，其 `data` 为 `{code, retryable}`；消息是失败的公开消息，不是异常文本。完整的对照表在参考文档的 [ACP](reference-en.md#neographacp--agent-client-protocol) 和[协议失败映射](reference-en.md#protocol-failure-mapping)中。
+- **取消。** `session/cancel` 取消正在运行的那一轮，这一轮以 `stopReason: "cancelled"` 结束；没有运行中的轮次时，取消请求不起作用。stdin 到达文件末尾时，`run()` 会等运行中的轮次 `set_eof_grace`（1 秒）让它们结束，然后取消。
+- **一轮如何结束。** 运行完成是 `end_turn`，取消则是 `cancelled`，运行达到 `RunConfig::max_steps` 是 `max_turn_requests`，超出模型令牌预算是 `max_tokens`，provider 拒绝是 `refusal`。其他失败是 JSON-RPC 错误 `-32603`，其 `data` 为 `{code, retryable}`；消息是失败的公开消息，不是异常文本。完整的对照表在参考文档的 [ACP](reference-en.md#neographacp--agent-client-protocol) 和[协议失败映射](reference-en.md#protocol-failure-mapping)中。
 - **会话。** `session/new` 创建会话，`session/resume` 继续智能体已知的会话。引擎配置了检查点存储时，停在权限请求上的会话可以在智能体重启后用 `session/resume` 恢复；这时下一条提示词的文本就是对待答问题的回答。在 `initialize` 之前调用是 `-32600`，未知的会话是 `-32002`。
-- **MCP 服务器。** 客户端可以在 `session/new` 中传入 stdio MCP 服务器。智能体用 NeoGraph 的 MCP 客户端，在会话的 `cwd` 中以最小环境（`PATH` 和客户端的 `env` 条目）启动它们，所以智能体环境中的 provider 密钥不会传给它们。节点通过 `ACPClient::session_tools(session_id)` 使用这些工具。HTTP 和 SSE 的 MCP 服务器会被以 `-32602` 拒绝。见 [MCP 指南](mcp.md)。
+- **MCP 服务器。** 客户端可以在 `session/new` 中传入 stdio MCP 服务器。智能体用 NeoGraph 的 MCP 客户端，在会话的 `cwd` 中以最小环境（`PATH` 和客户端的 `env` 条目）启动它们，所以智能体环境中的 provider 密钥不会传给它们。节点通过 `ACPClient::session_tools(session_id)` 使用这些工具。HTTP 和 SSE 的 MCP 服务器会以 `-32602` 拒绝。见 [MCP 指南](mcp.md)。
 - **能力。** `ACPServer::capabilities()` 就是 `initialize` 所公布的内容。提示词接受文本和 `resource_link` 块；图像、音频和嵌入资源只有在 `capabilities().prompt` 中开启后才接受。
 
 ## 测试与互操作

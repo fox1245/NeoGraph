@@ -113,7 +113,7 @@ int main() {
 
 - 工具由名称、参数的 JSON Schema（`input_schema` 必须写明 `"type": "object"`）和处理函数组成。服务器在运行处理函数之前，先按 Schema 检查每次调用的参数。参数无效时，返回的结果带有 `isError: true` 和校验信息。
 - 处理函数在固定大小的工作线程池中运行：`MCPServerConfig::max_concurrent_calls`（4）个同时运行，`max_pending_calls`（64）个排队等待；超出的调用会收到 JSON-RPC 错误 `-32000`（"MCP tool queue is full"）。引擎由这些线程共享。节点会在多次运行中复用，所以每次运行的数据要放在通道里，不要放在节点对象里。如果引擎配置了检查点存储，请为每次调用指定不同的 `RunConfig::thread_id`。
-- 客户端发送 `notifications/cancelled` 后，该调用的 `CancelToken` 会被取消。把它作为 `run.cancel_token` 传入，图的运行也会随之停止。
+- 客户端发送 `notifications/cancelled` 后，该调用的 `CancelToken` 随之取消。把它作为 `run.cancel_token` 传入，图的运行也会随之停止。
 - `run()` 从 stdin 每行读取一条 JSON-RPC 消息，并写到 stdout。程序在 stdout 上输出任何其他内容都会破坏协议，日志请写到 stderr。
 
 链接 `neograph::core` 和 `neograph::mcp_server`：
@@ -191,7 +191,7 @@ False 5
 
 ## 在图节点中调用工具
 
-节点可以持有一个客户端并调用工具。运行的截止时间和取消令牌会限制这次调用；如果运行被取消，客户端会向服务器发送 `notifications/cancelled`，并丢弃迟到的应答。
+节点可以持有一个客户端并调用工具。运行的截止时间和取消令牌会限制这次调用；如果运行取消，客户端会向服务器发送 `notifications/cancelled`，并丢弃迟到的应答。
 
 ```cpp
 #include <neograph/mcp/client.h>
@@ -299,7 +299,7 @@ int main(int argc, char** argv) {
 ```
 
 - 一个 HTTP 会话对应一个 `MCPServer`。工厂函数每个会话运行一次，必须在新服务器上注册工具。它的参数是 `bearer_authorizer` 返回的作用域，因此程序可以把不同主体的会话隔离开。
-- `MCPHttpServerConfig::host` 默认为 `127.0.0.1`。绑定到其他地址时，除非设置了 `bearer_authorizer`，否则会抛出 `std::invalid_argument`。授权函数接收 Bearer 令牌并返回调用者的作用域；返回 `std::nullopt` 或空字符串，则令牌被以 `401` 拒绝。会话与作用域绑定，所以其他主体无法复用泄露的 `Mcp-Session-Id`。
+- `MCPHttpServerConfig::host` 默认为 `127.0.0.1`。绑定到其他地址时，除非设置了 `bearer_authorizer`，否则会抛出 `std::invalid_argument`。授权函数接收 Bearer 令牌并返回调用者的作用域；返回 `std::nullopt` 或空字符串，则以 `401` 拒绝该令牌。会话与作用域绑定，所以其他主体无法复用泄露的 `Mcp-Session-Id`。
 - 带有 `Origin` 头的请求，如果该来源不在 `allowed_origins` 中，会被以 `403` 拒绝。
 - 设置 `protected_resource_metadata` 后，服务器会发布 RFC 9728 元数据，并在每个 `401` 质询中指出其位置，适用于令牌来自 OAuth 授权服务器的部署。不设置时，静态 Bearer 令牌不需要发现机制。
 - 限制：`max_sessions`（64；最久未使用的空闲会话会被淘汰）、`session_idle_timeout`（30 分钟）、`max_payload_bytes`（1 MiB）、`response_timeout`（10 分钟；运行更久的请求会收到 `504`，对应的调用被取消）。
