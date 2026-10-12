@@ -27,7 +27,6 @@ the default policy is keyed-exclusive, so this module explicitly marks
 
 import json
 import os
-import socket
 import sys
 import threading
 import time
@@ -153,16 +152,11 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def _free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
 @pytest.fixture(scope="module")
 def http_url():
-    port = _free_port()
-    server = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
+    # The server binds port 0 itself: no number is chosen before it holds the socket.
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{port}"

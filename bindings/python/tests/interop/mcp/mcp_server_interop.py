@@ -10,23 +10,25 @@ Environment:
   NEOGRAPH_BUILD_DIR    the build that holds those binaries (required)
   NG_MCP_PROBE_SERVER   the probe binary, if not <build>/tests/neograph_mcp_interop_probe
   NG_MCP_TRANSCRIPTS    where wire transcripts are written (default: a temporary directory)
-  MCP_PORT_RANGE        "lo-hi" loopback ports for these tests (default: the OS picks)
+
+Every server is started under the port contract of bindings/python/tests/server_ports.py.
 """
 
 import contextlib
 import json
 import os
-import socket
-import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 HELPERS = HERE / "helpers"
 if str(HELPERS) not in sys.path:
     sys.path.insert(0, str(HELPERS))
+TESTS = HERE.parents[1]  # bindings/python/tests
+if str(TESTS) not in sys.path:
+    sys.path.insert(0, str(TESTS))
+import server_ports  # noqa: E402
 
 _build = os.environ.get("NEOGRAPH_BUILD_DIR")
 BUILD = Path(_build) if _build else None
@@ -37,32 +39,10 @@ EXAMPLE59 = BUILD / "example_mcp_server" if BUILD else Path("example_mcp_server"
 TRANSCRIPTS = Path(os.environ.get("NG_MCP_TRANSCRIPTS") or
                    tempfile.mkdtemp(prefix="neograph-mcp-interop-"))
 TEE = HELPERS / "stdio_tee.py"
-# Ports come from the OS unless MCP_PORT_RANGE pins a range: a fixed range
-# collides when two test processes run this suite on one machine at once.
-_PORT_RANGE = os.environ.get("MCP_PORT_RANGE")
-_lo, _hi = (int(x) for x in (_PORT_RANGE or "0-0").split("-"))
-_next_port = [_lo]
 
 
 def missing_binaries() -> list[str]:
     return [str(p) for p in (PROBE, HARNESS, EXAMPLE59) if not p.exists()]
-
-
-def free_port() -> int:
-    if not _PORT_RANGE:
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
-    while _next_port[0] <= _hi:
-        port = _next_port[0]
-        _next_port[0] += 1
-        with socket.socket() as s:
-            try:
-                s.bind(("127.0.0.1", port))
-                return port
-            except OSError:
-                continue
-    raise RuntimeError("no free port in MCP_PORT_RANGE")
 
 
 def transcript_path(name: str) -> Path:
@@ -91,28 +71,20 @@ def stdio_command(log: Path, argv: list[str]) -> tuple[str, list[str]]:
     return sys.executable, ["-I", "-B", str(TEE), str(log), "--", *argv]
 
 
-def wait_port(port: int, timeout: float = 60.0) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        with contextlib.suppress(OSError), socket.create_connection(("127.0.0.1", port), 0.2):
-            return
-        time.sleep(0.05)
-    raise RuntimeError(f"server on {port} did not start")
-
-
 @contextlib.contextmanager
-def http_server(argv: list[str], port: int, env: dict | None = None, cwd: str | None = None):
-    proc = subprocess.Popen(argv, env={**os.environ, **(env or {})}, cwd=cwd,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        wait_port(port)
-        yield proc
-    finally:
-        proc.terminate()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(5)
-        if proc.poll() is None:
-            proc.kill()
+def http_server(launch_for_port, *, reports_port: bool = True):
+    """Start an HTTP server under the port contract (server_ports) and yield it.
+
+    The probe binds port 0 and reports its port (reports_port=True); a server that
+    has to be told a number (the Harness example) says so with reports_port=False.
+    `launch_for_port(n)` gives its `server_ports.Launch`."""
+    with server_ports.start_server(launch_for_port, reports_port=reports_port) as server:
+        yield server
+
+
+def probe_launch(env: dict | None = None):
+    """The probe on Streamable HTTP, for http_server."""
+    return lambda port: server_ports.Launch([str(PROBE), "http", str(port)], env or {})
 
 
 def wire(log: Path, direction: str | None = None) -> list[dict]:

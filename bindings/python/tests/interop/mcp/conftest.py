@@ -24,20 +24,21 @@ import mcp_server_interop as server_side  # noqa: E402
 @pytest.fixture(scope="module")
 def probe_http():
     """Probe server on Streamable HTTP; yields its port."""
-    port = server_side.free_port()
-    with server_side.http_server([str(server_side.PROBE), "http", str(port)], port,
-                                 env={"NG_PROBE_ALLOWED_ORIGINS": "http://allowed.example"}):
-        yield port
+    with server_side.http_server(server_side.probe_launch(
+            {"NG_PROBE_ALLOWED_ORIGINS": "http://allowed.example"})) as server:
+        yield server.port
 
 
 @pytest.fixture(scope="module")
 def harness_http(tmp_path_factory):
-    port = server_side.free_port()
-    env = {"NEOGRAPH_HARNESS_SMOKE": "1", "NEOGRAPH_HARNESS_TRANSPORT": "http",
-           "NEOGRAPH_HARNESS_HTTP_PORT": str(port)}
     cwd = tmp_path_factory.mktemp("harness")
-    with server_side.http_server([str(server_side.HARNESS)], port, env=env, cwd=str(cwd)):
-        yield port
+    # The example takes its port from the environment and does not report it.
+    launch = lambda port: server_side.server_ports.Launch(  # noqa: E731
+        [str(server_side.HARNESS)],
+        {"NEOGRAPH_HARNESS_SMOKE": "1", "NEOGRAPH_HARNESS_TRANSPORT": "http",
+         "NEOGRAPH_HARNESS_HTTP_PORT": str(port)}, str(cwd))
+    with server_side.http_server(launch, reports_port=False) as server:
+        yield server.port
 
 
 @pytest.fixture
@@ -49,7 +50,7 @@ def recorded(request):
 
     def make(upstream_port: int, suffix: str = "") -> tuple[str, Path]:
         log = server_side.transcript_path(f"py-{request.node.name}{suffix}")
-        proxy = HttpRecordProxy(upstream_port, str(log), server_side.free_port()).start()
+        proxy = HttpRecordProxy(upstream_port, str(log)).start()
         proxies.append(proxy)
         return f"http://127.0.0.1:{proxy.port}/mcp", log
 

@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from a2a_harness import HERE, Transcript, free_port, import_neograph, subprocess_server
+from a2a_harness import HERE, Transcript, import_neograph, subprocess_server
 from a2a_oracle import V03_REQUEST_DEF, v1_method_set, v1_request_type, validate_v03, validate_v1
 
 from interop_support import neograph_build_dir, node_binary  # noqa: E402
@@ -60,16 +60,15 @@ def peer(request, tmp_path_factory):
         if os.environ.get("NEOGRAPH_INTEROP_REQUIRE") == "1":
             pytest.fail("NEOGRAPH_INTEROP_NODE, A2A_JS_SDK_DIST or A2A_JS_EXPRESS is not set")
         pytest.skip("set NEOGRAPH_INTEROP_NODE, A2A_JS_SDK_DIST and A2A_JS_EXPRESS for @a2a-js")
-    port = free_port()
     record = tmp_path_factory.mktemp("rec") / f"{request.param}.jsonl"
-    url = f"http://127.0.0.1:{port}"
     if kind == "py":
-        cmd = [sys.executable, "-I", str(HERE / "sdk_py_server.py"), str(port), *args, "--record", str(record)]
+        command = lambda port: [sys.executable, "-I", str(HERE / "sdk_py_server.py"), str(port),  # noqa: E731
+                                *args, "--record", str(record)]
     else:
-        cmd = [NODE, str(HERE / "ts" / "ts_server.cjs"), str(port), JS_DIST, JS_EXPRESS, *args,
-               "--record", str(record)]
-    with subprocess_server(cmd, url):
-        p = Peer(url, record)
+        command = lambda port: [NODE, str(HERE / "ts" / "ts_server.cjs"), str(port),  # noqa: E731
+                                JS_DIST, JS_EXPRESS, *args, "--record", str(record)]
+    with subprocess_server(command) as server:
+        p = Peer(server.url(), record)
         p.name = request.param
         yield p
         T.add(test=f"[{request.param}] recorded_requests", requests=p.requests())
@@ -221,10 +220,10 @@ def test_message_ids_unique_across_processes(peer):
 def test_interface_url_on_a_sub_path(tmp_path):
     # spec 8.3.2: clients MUST use the URL of the selected interface. The card is at
     # the well-known root; the JSON-RPC endpoint is /a2a/v1.
-    port = free_port()
-    url = f"http://127.0.0.1:{port}"
-    cmd = [sys.executable, "-I", str(HERE / "sdk_py_server.py"), str(port), "--rpc-path", "/a2a/v1"]
-    with subprocess_server(cmd, url):
+    command = lambda port: [sys.executable, "-I", str(HERE / "sdk_py_server.py"), str(port),  # noqa: E731
+                            "--rpc-path", "/a2a/v1"]
+    with subprocess_server(command) as server:
+        url = server.url()
         c = a2a.A2AClient(url)
         c.set_timeout(15)
         card = c.fetch_agent_card()

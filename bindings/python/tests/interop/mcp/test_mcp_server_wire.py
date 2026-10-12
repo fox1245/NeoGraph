@@ -19,7 +19,7 @@ from mcp_sdk_requirement import require_official_python_sdk
 httpx = pytest.importorskip("httpx")
 require_official_python_sdk()  # the suite's pinned environment
 
-from mcp_server_interop import (PROBE, free_port, http_server, missing_binaries,  # noqa: E402
+from mcp_server_interop import (PROBE, http_server, missing_binaries, probe_launch,  # noqa: E402
                                 transcript_path)
 
 if missing_binaries():
@@ -406,9 +406,9 @@ def test_http_modern_2026_request_falls_back_cleanly(http):
 
 
 def test_http_bearer_auth_challenge_and_metadata(request):
-    port = free_port()
     log = transcript_path(f"raw-{request.node.name}")
-    with http_server([str(PROBE), "http", str(port)], port, env={"NG_PROBE_BEARER": "s3cret"}):
+    with http_server(probe_launch({"NG_PROBE_BEARER": "s3cret"})) as server:
+        port = server.port
         h = Http(port, log)
         r = h.req("POST", INIT)
         assert r.status_code == 401

@@ -8,7 +8,6 @@ import asyncio
 import contextlib
 import os
 import runpy
-import socket
 import sys
 from pathlib import Path
 from uuid import uuid4
@@ -21,7 +20,6 @@ pytest.importorskip("acp")
 
 import httpx
 from a2a.client import A2ACardResolver, ClientConfig, create_client
-from a2a.client.errors import AgentCardResolutionError
 from a2a.helpers import new_text_message
 from a2a.types import Role, SendMessageRequest
 from acp import (
@@ -37,6 +35,7 @@ from acp.schema import (
 )
 
 import neograph_engine as ng
+import server_ports
 
 
 # agent-client-protocol 1.0 removed the text_block / image_block helpers of
@@ -52,12 +51,6 @@ def image_block(data, mime_type):
 ROOT = Path(__file__).resolve().parents[3]
 EXAMPLES = ROOT / "bindings" / "python" / "examples"
 sys.path.insert(0, str(EXAMPLES))
-
-
-def _free_port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def _subprocess_env(**updates):
@@ -81,51 +74,35 @@ async def _stop_process(process, connection=None):
 
 
 def test_a2a_streaming_round_trip():
-    async def exercise():
-        port = _free_port()
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            str(EXAMPLES / "27_a2a_server.py"),
-            env=_subprocess_env(NEOGRAPH_A2A_PORT=str(port)),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+    async def exercise(base_url):
+        async with httpx.AsyncClient() as http:
+            card = await A2ACardResolver(http, base_url).get_agent_card()
+
+        assert card.capabilities.streaming is True
+        client = await create_client(
+            agent=card, client_config=ClientConfig(streaming=True)
         )
-        assert process.stderr is not None
-        try:
-            base_url = f"http://127.0.0.1:{port}"
-            async with httpx.AsyncClient() as http:
-                resolver = A2ACardResolver(http, base_url)
-                for _ in range(50):
-                    try:
-                        card = await resolver.get_agent_card()
-                        break
-                    except AgentCardResolutionError:
-                        if process.returncode is not None:
-                            stderr = await process.stderr.read()
-                            raise AssertionError(stderr.decode())
-                        await asyncio.sleep(0.1)
-                else:
-                    raise AssertionError("A2A server did not start")
+        request = SendMessageRequest(
+            message=new_text_message("probe", role=Role.ROLE_USER)
+        )
+        chunks = [chunk async for chunk in client.send_message(request)]
+        await client.close()
+        rendered = repr(chunks)
+        assert "NeoGraph " in rendered
+        assert "received: " in rendered
+        assert "probe" in rendered
+        assert " (turn 1)" in rendered
+        assert len(chunks) >= 4
 
-            assert card.capabilities.streaming is True
-            client = await create_client(
-                agent=card, client_config=ClientConfig(streaming=True)
-            )
-            request = SendMessageRequest(
-                message=new_text_message("probe", role=Role.ROLE_USER)
-            )
-            chunks = [chunk async for chunk in client.send_message(request)]
-            await client.close()
-            rendered = repr(chunks)
-            assert "NeoGraph " in rendered
-            assert "received: " in rendered
-            assert "probe" in rendered
-            assert " (turn 1)" in rendered
-            assert len(chunks) >= 4
-        finally:
-            await _stop_process(process)
-
-    asyncio.run(exercise())
+    # The example takes its port from the environment and does not report it, so the
+    # port contract applies (server_ports.py): a taken number starts the server again on
+    # a fresh one, and the test only talks to the port once this process listens on it.
+    launch = lambda port: server_ports.Launch(  # noqa: E731
+        [sys.executable, str(EXAMPLES / "27_a2a_server.py")],
+        _subprocess_env(NEOGRAPH_A2A_PORT=str(port)),
+    )
+    with server_ports.start_server(launch, reports_port=False) as server:
+        asyncio.run(exercise(server.url()))
 
 
 class _ACPClient:

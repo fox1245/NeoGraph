@@ -8,11 +8,11 @@ Environment:
                          (mcp 1.30.0, FastMCP); FastMCP v1 peers are skipped when unset
   * NG_MCP_SCHEMA_DIR    directory with <revision>/schema.json (pinned commit);
                          schema checks are skipped when unset
-  * NG_MCP_PORT_BASE     first of 100 loopback ports to use (default: the OS picks)
   * NG_MCP_TRANSCRIPTS   where wire transcripts are written (default: a temporary
                          directory); this side writes into its "client" subdirectory
 
-The official servers are started as subprocesses.  Every client->server message
+The official servers are started as subprocesses under the port contract of
+bindings/python/tests/server_ports.py.  Every client->server message
 is captured (stdio tap or HTTP recorder) so assertions can show the exact wire
 message NeoGraph sent next to the official SDK's reaction.
 """
@@ -21,12 +21,9 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
-import itertools
 import json
 import os
 import shutil
-import socket
-import subprocess
 import sys
 import tempfile
 import time
@@ -36,6 +33,8 @@ from typing import Any, Iterator
 HERE = Path(__file__).resolve().parent
 SERVERS = HERE / "servers"
 TOOLS = HERE / "helpers"
+sys.path.insert(0, str(HERE.parents[1]))  # bindings/python/tests
+import server_ports  # noqa: E402
 
 import neograph_engine as ng  # noqa: E402
 
@@ -48,38 +47,6 @@ SCHEMA_PATH = (str(Path(os.environ["NG_MCP_SCHEMA_DIR"]) / "2025-11-25" / "schem
 TRANSCRIPTS = Path(os.environ.get("NG_MCP_TRANSCRIPTS") or
                    tempfile.mkdtemp(prefix="neograph-mcp-client-interop-")) / "client"
 TRANSCRIPTS.mkdir(parents=True, exist_ok=True)
-# Ports come from the OS unless NG_MCP_PORT_BASE pins a range: a fixed range
-# collides when two test processes run this suite on one machine at once.
-_PORT_BASE = os.environ.get("NG_MCP_PORT_BASE")
-_ports = itertools.cycle(range(int(_PORT_BASE), int(_PORT_BASE) + 100)) if _PORT_BASE else None
-
-
-def free_port() -> int:
-    if _ports is None:
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            return s.getsockname()[1]
-    for _ in range(100):
-        port = next(_ports)
-        with socket.socket() as s:
-            try:
-                s.bind(("127.0.0.1", port))
-                return port
-            except OSError:
-                continue
-    raise RuntimeError("no free port in the configured range")
-
-
-def wait_port(port: int, proc: subprocess.Popen, timeout: float = 60.0) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            raise RuntimeError(f"server exited early with {proc.returncode}")
-        with socket.socket() as s:
-            if s.connect_ex(("127.0.0.1", port)) == 0:
-                return
-        time.sleep(0.05)
-    raise RuntimeError("server did not start listening")
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -155,12 +122,12 @@ class Run:
         self.extra = list(extra or [])
         self.path = path
         self.tap_args = list(tap_args or [])
-        self.proc: subprocess.Popen | None = None
+        self.server: server_ports.ServerProcess | None = None
         self.port: int | None = None
         self.stderr = self.dir / "server.stderr"
 
     # -- server command ------------------------------------------------------
-    def server_argv(self) -> list[str]:
+    def server_argv(self, port: int = 0) -> list[str]:
         p = self.peer
         if p.sdk == "py":
             argv = [PY, "-I", str(SERVERS / "py_official_server.py"), "--flavor", p.flavor,
@@ -179,45 +146,36 @@ class Run:
         else:
             raise ValueError(p.sdk)
         if p.transport == "http":
-            argv += ["--port", str(self.port), "--path", self.path, "--record", str(self.wire)]
+            argv += ["--port", str(port), "--path", self.path, "--record", str(self.wire)]
             if p.stateless and p.sdk != "ts2":
                 argv.append("--stateless")
             if p.json_response:
                 argv.append("--json-response")
         return argv + self.extra
 
-    def env(self) -> dict[str, str]:
-        env = dict(os.environ)
-        if NODE_DEPS:
-            env["NG_MCP_NODE_DEPS"] = NODE_DEPS
-        return env
+    def launch(self, port: int) -> "server_ports.Launch":
+        """The HTTP server on `port` (0: it binds a port itself and reports it)."""
+        return server_ports.Launch(self.server_argv(port),
+                                   {"NG_MCP_NODE_DEPS": NODE_DEPS} if NODE_DEPS else {})
 
     def start(self) -> "Run":
         if self.peer.transport == "http":
-            self.port = free_port()
-            self.proc = subprocess.Popen(self.server_argv(), env=self.env(),
-                                         stdout=subprocess.DEVNULL,
-                                         stderr=open(self.stderr, "wb"))
-            wait_port(self.port, self.proc)
+            self.server = server_ports.start_server(self.launch, reports_port=True,
+                                                    stderr_path=str(self.stderr))
+            self.port = self.server.port
         return self
 
     def restart(self) -> None:
         """Restart an HTTP server on the same port (all sessions are lost)."""
         assert self.peer.transport == "http"
         self.stop()
-        self.proc = subprocess.Popen(self.server_argv(), env=self.env(),
-                                     stdout=subprocess.DEVNULL, stderr=open(self.stderr, "ab"))
-        wait_port(self.port, self.proc)
+        self.server = server_ports.start_server(self.launch, reports_port=True, port=self.port,
+                                                stderr_path=str(self.stderr))
 
     def stop(self) -> None:
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait()
-        self.proc = None
+        if self.server:
+            self.server.stop()
+        self.server = None
 
     # -- client --------------------------------------------------------------
     @property

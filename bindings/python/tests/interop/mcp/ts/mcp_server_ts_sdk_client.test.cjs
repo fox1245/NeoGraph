@@ -16,7 +16,6 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
-const net = require('node:net');
 const { spawn } = require('node:child_process');
 
 const N = process.env.SDK_NODE_MODULES;
@@ -32,6 +31,8 @@ const PY = process.env.NG_PYTHON || 'python3';
 const HERE = __dirname;
 const TEE = path.join(HERE, '..', 'helpers', 'stdio_tee.py');
 const PROXY = path.join(HERE, '..', 'helpers', 'http_record_proxy.py');
+// Every HTTP server is started under the port contract of bindings/python/tests/server_ports.py.
+const PORTS = path.join(HERE, '..', '..', '..', 'server_ports.py');
 const TMP = os.tmpdir();
 const TRANSCRIPTS = process.env.NG_MCP_TRANSCRIPTS || fs.mkdtempSync(path.join(TMP, 'neograph-mcp-ts-'));
 fs.mkdirSync(TRANSCRIPTS, { recursive: true });
@@ -51,26 +52,28 @@ const SDKS = {
     call: (c, p, o) => c.callTool(p, o) },
 };
 
-// The OS picks the port: a fixed range collides when two test processes run
-// these suites on one machine at once.
-async function freePort() {
-  return new Promise((res, rej) => { const s = net.createServer(); s.once('error', rej);
-    s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => res(port)); }); });
-}
-async function waitPort(port) {
-  for (let i = 0; i < 200; i++) {
-    const ok = await new Promise((res) => { const s = net.connect(port, '127.0.0.1');
-      s.once('connect', () => { s.destroy(); res(true); }); s.once('error', () => res(false)); });
-    if (ok) return;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  throw new Error(`port ${port} not ready`);
-}
 const children = [];
 function start(cmd, args, env) {
   const ch = spawn(cmd, args, { env: { ...process.env, ...(env || {}) }, cwd: TMP, stdio: 'ignore' });
   children.push(ch);
   return ch;
+}
+// Start a server that says `READY <port>` once it listens, and resolve with that port. The
+// server bound the port itself (port 0), or server_ports.py did and checked that the
+// listener is the process it started; a port that merely accepts connections proves nothing.
+function startReporting(cmd, args, env) {
+  return new Promise((resolve, reject) => {
+    const ch = spawn(cmd, args, { env: { ...process.env, ...(env || {}) }, cwd: TMP,
+      stdio: ['ignore', 'pipe', 'inherit'] });
+    children.push(ch);
+    let seen = '';
+    ch.stdout.on('data', (d) => {
+      seen += d;
+      const m = /^READY (\d+)$/m.exec(seen);
+      if (m) { ch.stdout.removeAllListeners('data'); ch.stdout.resume(); resolve(Number(m[1])); }
+    });
+    ch.once('exit', (code) => reject(new Error(`${cmd} exited with ${code} before it listened`)));
+  });
 }
 test.after(() => { for (const c of children) c.kill('SIGTERM'); });
 
@@ -80,16 +83,15 @@ function wire(p) { return fs.readFileSync(p, 'utf8').split('\n').filter(Boolean)
   const r = JSON.parse(l); try { r.msg = r.raw ? JSON.parse(r.raw) : null; } catch { r.msg = null; } return r; }); }
 
 async function httpUpstream(argv, env) {
-  const port = await freePort();
-  start(argv[0], [...argv.slice(1), ...(argv[0] === PROBE ? ['http', String(port)] : [])],
-    { ...(env || {}), NEOGRAPH_HARNESS_HTTP_PORT: String(port) });
-  await waitPort(port);
-  return port;
+  if (argv[0] === PROBE) {
+    return startReporting(PY, ['-I', '-B', PORTS, '--reports-port', '--', PROBE, 'http', '{port}'], env);
+  }
+  // The Harness example takes its port from the environment and does not report it: it is
+  // started again on a fresh number when this one was taken.
+  return startReporting(PY, ['-I', '-B', PORTS, '--port-env', 'NEOGRAPH_HARNESS_HTTP_PORT', '--', ...argv], env);
 }
 async function recordingProxy(upstream, log) {
-  const port = await freePort();
-  start(PY, ['-I', '-B', PROXY, String(port), String(upstream), log]);
-  await waitPort(port);
+  const port = await startReporting(PY, ['-I', '-B', PROXY, '0', String(upstream), log]);
   return `http://127.0.0.1:${port}/mcp`;
 }
 

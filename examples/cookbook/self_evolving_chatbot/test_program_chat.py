@@ -11,7 +11,6 @@ import http.server
 import json
 import os
 from pathlib import Path
-import socket
 import subprocess
 import sys
 import tempfile
@@ -26,11 +25,9 @@ import uuid
 EXECUTABLE = str(Path(sys.argv.pop(1)).resolve())
 POLICY_GENERATOR = str(Path(sys.argv.pop(1)).resolve())
 
-
-def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+# The servers are started under the port contract of bindings/python/tests/server_ports.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "bindings" / "python" / "tests"))
+import server_ports  # noqa: E402
 
 
 def message_text(message):
@@ -44,7 +41,7 @@ def message_text(message):
 class Server:
     def __init__(self, directory, extra=(), env=None):
         self.directory = Path(directory)
-        self.port = free_port()
+        self.port = None  # chosen by the first start, kept by the restarts that follow
         self.session = "test-" + uuid.uuid4().hex
         self.extra = list(extra)
         if "--env-file" not in self.extra:
@@ -63,17 +60,26 @@ class Server:
             policy_file.write_text(generated.stdout, encoding="utf-8")
             self.extra += ["--descriptor-policy", str(policy_file)]
         self.process = None
-        self.log = (self.directory / (self.session + ".log")).open("w+")
+        self.running = None
+        self.log_path = self.directory / (self.session + ".log")
+        self.log = self.log_path.open("w+")
 
     def start(self):
-        self.process = subprocess.Popen(
+        launch = lambda port: server_ports.Launch(  # noqa: E731
             [EXECUTABLE, "--db", str(self.directory / (self.session + ".sqlite")),
-             "--session", self.session, "--port", str(self.port), *self.extra],
-            stdout=self.log, stderr=self.log, env=self.env)
+             "--session", self.session, "--port", str(port), *self.extra],
+            self.env, inherit_env=False)
+        # The first start is given a number, and is started again on a fresh one if that
+        # number was taken meanwhile; a restart keeps it, as the durable state expects.
+        try:
+            self.running = server_ports.start_server(
+                launch, reports_port=False, port=self.port, stderr_path=str(self.log_path),
+                timeout=45)
+        except server_ports.ServerStartError as error:
+            raise RuntimeError(str(error)) from None
+        self.port = self.running.port
+        self.process = self.running.proc
         for _ in range(450):
-            if self.process.poll() is not None:
-                self.log.seek(0)
-                raise RuntimeError(self.log.read())
             try:
                 self.state("alice")
                 return self
@@ -85,7 +91,9 @@ class Server:
         if self.process and self.process.poll() is None:
             self.process.kill()  # Deliberate process loss, preserves durable Running checkpoints.
             self.process.wait(timeout=10)
-        self.process = None
+        if self.running:
+            self.running.stop()
+        self.process = self.running = None
 
     def request(self, path, body=None, tenant="alice", token=None):
         req = urllib.request.Request(
