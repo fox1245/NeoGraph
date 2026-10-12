@@ -13,8 +13,6 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ## [未发布]
 
-## [Unreleased]
-
 ### 变更
 
 - **需要重新构建 C++ 使用方：工具、Hook、MCP、gRPC 与图类型新增了成员。** `RunResources` 新增 `hook_runtime`，`InvocationResult` 新增 `failure`，`MCPTool` 新增基类 `ContextualAsyncTool` 与 `execute_result_async(arguments, context)`，`MCPClient` 新增受约束的 `call_tool_result_async`，`MandatoryHookRunner` 新增 `blocks` 与一个 private 成员函数，`GrpcRemoteTool` 新增基类 `ContextualAsyncTool` 与 `set_call_timeout`，`GrpcCheckpointStore` 新增 `set_rpc_timeout`；`graph::FailureVerdict`、`graph::classify_failure`、`ToolExecutionError`、`grpc::make_tool_service` 与 `grpc::make_checkpoint_service` 为新增。`proto/neograph.proto` 以新的字段编号新增了 `ToolCallResponse.error_code`，因此传输保持兼容。请一起重新构建 NeoGraph、C++ 使用方与 Python 扩展（参见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。

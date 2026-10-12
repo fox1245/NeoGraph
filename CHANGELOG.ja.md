@@ -13,8 +13,6 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ## [未リリース]
 
-## [Unreleased]
-
 ### 変更
 
 - **C++ の利用側を再ビルドしてください。ツール、Hook、MCP、gRPC、グラフの型に member が追加されました。** `RunResources` に `hook_runtime`、`InvocationResult` に `failure`、`MCPTool` に base `ContextualAsyncTool` と `execute_result_async(arguments, context)`、`MCPClient` に制限付きの `call_tool_result_async`、`MandatoryHookRunner` に `blocks` と private member function、`GrpcRemoteTool` に base `ContextualAsyncTool` と `set_call_timeout`、`GrpcCheckpointStore` に `set_rpc_timeout` が追加され、`graph::FailureVerdict`、`graph::classify_failure`、`ToolExecutionError`、`grpc::make_tool_service`、`grpc::make_checkpoint_service` が新設されました。`proto/neograph.proto` には新しい field 番号で `ToolCallResponse.error_code` が追加され、wire の互換性は保たれます。NeoGraph、C++ の利用側、Python extension をまとめて再ビルドしてください([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) を参照)。
