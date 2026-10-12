@@ -1,42 +1,41 @@
 <!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=1f49ed436cfb27bb00b666cedc90e9c3cc246bcbd3243db1f137c7142f5c9380 -->
-# NeoGraph WASM smoke プログラム
+# NeoGraphのWASMスモークプログラム
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-`smoke.cpp` は `DoubleNode` 一つのグラフをコンパイルし、`doubled = seed * 2` を書き込み、`InMemoryCheckpointStore` で実行します。`seed = 21` の期待出力には `doubled = 42` と `trace = d` が含まれます。ネットワークやモデル呼び出しはありません。同じ生成ターゲットを Node.js または以下のブラウザー harness で実行できますが、ブラウザー SDK ではありません。
+`smoke.cpp` は、`DoubleNode` が1つだけのグラフをコンパイルし、`InMemoryCheckpointStore` を使って実行します。ノードは `doubled = seed * 2` を書き込みます。`seed = 21` のときの期待される出力には、`doubled = 42` と `trace = d` が含まれます。ネットワークやモデルの呼び出しは行いません。生成されるターゲットは同じで、Node.jsでも、下のブラウザー用ハーネスでも実行できます。ブラウザー向けのSDKではありません。
 
-## 現在のビルド境界
+## 現在のビルドの前提と限界
 
-型付き provider 移行後は `NEOGRAPH_BUILD_LLM=OFF` でも Core が `SchemaProvider::runtime` に依存します。
-CMake 3.20+ は明示 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、インストール済み runtime、固定 public GitHub source archive の順に SDK を選びます。
-`NEOGRAPH_FETCH_SCHEMAPROVIDER` の download fallback は既定 ON で、offline package/source ビルドでは OFF にしてください。
-Core は SDK runtime にリンクし、libcurl transport にはリンクしません。調査した SDK pin の最上位 CMake は runtime ターゲットが CURL にリンクしなくても構成時に CURL を要求します。OpenSSL は runtime の直接依存ではありません。native SDK library を WebAssembly にリンクすることはできません。Emscripten 向け runtime/archive と C++ 標準ライブラリーの対応を検証する必要があり、以下の過去の smoke は現在のビルド成功の証拠ではありません。
+型付きプロバイダーへの切り替え後は、`NEOGRAPH_BUILD_LLM=OFF` にしても、Coreは `SchemaProvider::runtime` に依存します。CMake 3.20以降は、明示した `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、インストール済みのランタイム、リビジョンを固定した公開GitHubのソースアーカイブの順に選びます。ダウンロードへのフォールバックは、`NEOGRAPH_FETCH_SCHEMAPROVIDER` によってデフォルトでONです。パッケージやソースを使ってオフラインでビルドするときは、OFFにしてください。
+CoreがリンクするのはSDKのランタイムで、そのlibcurlトランスポートはリンクしません。確認したSDKの固定リビジョンでは、ランタイムのターゲットがCURLをリンクしないにもかかわらず、SDKのトップレベルのCMakeが、構成時にCURLを要求します。OpenSSLは、ランタイムが直接依存するものではありません。
+ネイティブのSDKライブラリーを、WebAssemblyにリンクすることはできません。Emscriptenのターゲットでは、ランタイムとアーカイブ、およびC++標準ライブラリーのサポートについて、適格性確認が必要です。下の過去のスモークテストは、現在のビルドが成功することを示すものではありません。
 
-現在のビルドには同じ target 向け SDK `0.3.0`、interface revision/shared generation 6、SchemaProvider `maint/interface6` のコミット `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2` が必要です。真正な Emscripten SDK runtime の検証は依然として前提条件です。本書は WASM 対応の削除も現在のビルドの保証もしません。Archive v3 / `spna3` と portable JSON v2 は不変です。
+現在のビルドには、同じターゲット向けにビルドした、SDK `0.3.0`（インターフェースのリビジョンと共有世代は6、SchemaProviderの `maint/interface6` のコミット `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`）が必要です。本物のEmscripten向けのSDKランタイムの適格性確認は、引き続き前提条件です。このページは、WASMのサポートを打ち切るものではなく、現在のビルドが成功することを保証するものでもありません。アーカイブv3／`spna3` とポータブルJSON v2は、変わりません。
 
-### 対応ターゲットの要件
+### サポート対象のターゲットの要件
 
-Emscripten ツールチェーンと C++ 標準ライブラリーは、`std::bit_cast` と `std::stop_token` を含む SDK の C++20 契約をサポートする必要があります。native archive custody にはターゲットで対応する atomic no-replace filesystem backend が必要で、ビルドのために custody を無効化してはいけません。
+Emscriptenのツールチェーンと、C++標準ライブラリーが、SDKのC++20の契約（`std::bit_cast` と `std::stop_token` を含む）をサポートしている必要があります。ネイティブアーカイブの保管（custody）には、ターゲットでサポートされている、上書きしないアトミックなファイルシステムのバックエンドが必要です。ビルドを通すために、保管を無効にしてはいけません。
 
-新しいビルドディレクトリーと真正な同一 target の依存を使用してください。SDK 構成で必要な CURL 依存も含みます。native library や偽装した依存の可用性では WebAssembly ビルドを検証できません。現在の Node.js とブラウザー実行は未検証です。
+ビルドディレクトリーは新しく作り、同じターゲット向けの本物の依存を使ってください。SDKの構成時に必要になるCURLの依存も同様です。ネイティブのライブラリーや、依存があるかのように見せかけたものでは、WebAssemblyのビルドの適格性確認はできません。Node.jsとブラウザーでの現在の実行も、適格性確認が済んでいません。
 
 ## 過去の結果
 
-値は型付き SDK 移行前の過去の smoke 実行によるものです。生成された `.wasm`/`.js` はコミットせず、CI も WASM サイズ artifact を公開していません。サイズは当時のビルドの値であり、現在の配布コストではありません。
+以下の値は、型付きSDKへの切り替え前に行った、以前のスモークテストで得たものです。生成された `.wasm` や `.js` はコミットしておらず、CIもWASMのサイズの成果物を公開していません。サイズは当時のビルドのものです。現在のデプロイに必要なコストではありません。
 
 | 指標 | 値 |
 |---|---|
-| WASM binary (-O3 + LTO) | 712 KB |
-| Emscripten JS runtime | 92 KB |
-| JavaScript + WASM 合計 | ~800 KB |
-| 当時のエンジンソース変更 | 0 lines |
-| 初回出力 | `doubled = 42, trace = d` |
+| WASMバイナリー（-O3＋LTO） | 712 KB |
+| EmscriptenのJSランタイム | 92 KB |
+| JavaScript＋WASMの合計 | 約800 KB |
+| この実行でのエンジンのソースの差分 | 0行 |
+| 初回の出力 | `doubled = 42, trace = d` |
 
 ## ターゲットと前提条件
 
-ターゲットは `neograph_core` に直接リンクし、Core のソース一覧、C++20 coroutine、exception、Emscripten pthread を使います。CMake は distro Emscripten 3.1.x の Asio coroutine を有効にし、WASM ターゲットだけで未対応の stack-protector symbol を無効にします。native hardening は変わりません。ターゲットは `PTHREAD_POOL_SIZE=4`、グラフは既定の `worker_count=1` を使用します。単一スレッド WASM 用の CMake オプションはありません。
+このターゲットは、`neograph_core` に直接リンクします。Coreの主要なソースリスト、C++20のコルーチン、例外、Emscriptenのpthreadsを使います。CMakeは、ディストリビューション版のEmscripten 3.1.xに対して、Asioのコルーチン機能を有効にします。また、サポートされていないスタックプロテクターのシンボルを無効にするのは、WASMのターゲットだけで、ネイティブのハードニングは変わりません。ターゲットは `PTHREAD_POOL_SIZE=4` を設定していますが、グラフはデフォルトの `worker_count=1` で動きます。ここには、シングルスレッド版のWASMを作るためのCMakeオプションはありません。
 
-動作する Emscripten SDK runtime ビルドが用意できた後の configure/build/run 手順は次のとおりです。
+Emscripten向けのSDKランタイムのビルドが用意できたら、このターゲットの構成、ビルド、実行の手順は、次のとおりです。
 
 ```bash
 # For an emsdk install only: source /opt/emsdk/emsdk_env.sh
@@ -67,24 +66,23 @@ cmake --build build-wasm --target neograph_wasm_smoke -j
 node build-wasm/wasm/smoke.js
 ```
 
-`NEOGRAPH_USE_LIBCURL=OFF` は NeoGraph のオプション HTTP/2 backend を無効にするだけです。SDK 最上位の CURL 検出は除去しません。真正な Emscripten 依存が必要で、現在検証済みのビルド手順ではありません。
+`NEOGRAPH_USE_LIBCURL=OFF` で無効になるのは、NeoGraphのオプションのHTTP/2バックエンドだけです。SDKのトップレベルで行うCURLの検出は、なくなりません。この手順にも、本物のEmscripten向けの依存が必要です。現在のビルドを検証した手順ではありません。
 
-生成 loader が filesystem path を `fetch` に渡す Node.js で使った過去の回避手順は次のとおりです。
+生成されたローダーがファイルシステムのパスを `fetch` に渡すバージョンのNode.jsでは、過去に次の回避策を使いました。
 
 ```bash
 node -e 'const fs=require("fs"); WebAssembly.instantiateStreaming=undefined; global.fetch=async p=>({ok:true,arrayBuffer:async()=>fs.promises.readFile(p)}); require("./build-wasm/wasm/smoke.js");'
 ```
 
+## ブラウザーでのスモークテスト
 
-## ブラウザー smoke
-
-真正なターゲットのビルド後、標準ライブラリーのみの loopback サーバーで JS、WASM、生成 pthread worker asset を配信します。
+本物のターゲットがビルドできたら、標準ライブラリーだけで動くループバックのサーバーで、JS、WASM、生成されたpthreadのワーカー用アセットを配信します。
 
 ```sh
 python3 wasm/serve_smoke.py build-wasm/wasm --port 8765
 # Open http://127.0.0.1:8765/smoke.html in a browser.
 ```
 
-サーバーは `Cross-Origin-Opener-Policy: same-origin` と `Cross-Origin-Embedder-Policy: require-corp` を送信します。harness は cross-origin isolation / `SharedArrayBuffer` がなければ実行を拒否し、代替 runtime ではなく実際に生成された `smoke.js` を読み込みます。合格には出力 `doubled = 42`、`trace = d`、終了コード 0 が必要です。`document.body.dataset.result === "pass"` と `dataset.exitCode === "0"` に結果を公開します。ブラウザー/バージョン、console エラー、観測した出力を記録してください。Node.js の成功だけではブラウザーの証拠になりません。
+サーバーは `Cross-Origin-Opener-Policy: same-origin` と `Cross-Origin-Embedder-Policy: require-corp` を送ります。ハーネスは、クロスオリジン分離と `SharedArrayBuffer` が使えないと、実行を拒否します。読み込むのは、実際に生成された `smoke.js` で、代わりのランタイムではありません。合格の条件は、出力が `doubled = 42` と `trace = d` で、終了コードが0であることです。これは、`document.body.dataset.result === "pass"` と `dataset.exitCode === "0"` として公開されます。ブラウザーの種類とバージョン、コンソールのエラー、実際の出力を記録してください。Node.jsでの実行が成功しただけでは、ブラウザーでの動作のエビデンスにはなりません。
 
-この harness は npm package、Embind API、JS graph callback、provider transport を提供しません。hosted model access、local inference、NeoProtocol Executor 統合は、このモデルなし smoke では検証されません。
+このハーネスは、npmパッケージ、Embind API、JSによるグラフのコールバック、プロバイダーのトランスポートを提供しません。ホスト型モデルへのアクセス、ローカル推論、NeoProtocol Executorとの統合については、モデルを使わないこのスモークテストでは、適格性確認ができません。
