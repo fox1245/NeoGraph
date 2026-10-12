@@ -9,8 +9,8 @@ Not useful for: streaming runs (cached hits cannot replay tokens, so
 the cache is bypassed automatically there).
 
 Run:
-    pip install neograph-engine python-dotenv
-    echo 'OPENAI_API_KEY=sk-...' > .env
+    pip install neograph-engine
+    export OPENAI_API_KEY=...  # read from the environment only
     python 18_node_cache.py
 """
 

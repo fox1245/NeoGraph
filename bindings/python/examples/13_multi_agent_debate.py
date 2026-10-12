@@ -8,8 +8,8 @@ Real LLM via typed SchemaProvider. Three custom Python nodes: debater_a,
 debater_b, judge — each with its own system prompt.
 
 Run:
-    pip install neograph-engine python-dotenv
-    cp .env.example .env  # fill in OPENAI_API_KEY
+    pip install neograph-engine
+    export OPENAI_API_KEY=...  # read from the environment only
     python 13_multi_agent_debate.py
 """
 

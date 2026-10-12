@@ -10,8 +10,8 @@ a prompt that asks it to either (a) emit a follow-up question or
 (b) emit the final answer. The graph loops on `state["next_step"]`.
 
 Run:
-    pip install neograph-engine python-dotenv
-    cp .env.example .env  # fill in OPENAI_API_KEY
+    pip install neograph-engine
+    export OPENAI_API_KEY=...  # read from the environment only
     python 12_self_ask.py
 """
 

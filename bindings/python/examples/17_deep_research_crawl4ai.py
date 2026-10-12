@@ -27,7 +27,7 @@ Mirrors the C++ example 25_deep_research.cpp's web-search path
     #    -DNEOGRAPH_BUILD_POSTGRES=ON for durable checkpoints.
     pip install neograph-engine
 
-    # 4. Env (drop into examples/.env or export):
+    # 4. Environment variables (export them; no file is read):
     export OPENAI_API_KEY=sk-...
     export CRAWL4AI_URL=http://localhost:11235   # plus CRAWL4AI_API_TOKEN from step 1
     export NEOGRAPH_PG_DSN=postgresql://postgres:test@localhost:5432/neograph

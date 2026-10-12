@@ -9,8 +9,8 @@ Real LLM via typed SchemaProvider. The actor and critic are two custom
 Python nodes, each calling the provider with its own system prompt.
 
 Run:
-    pip install neograph-engine python-dotenv
-    cp .env.example .env  # fill in OPENAI_API_KEY
+    pip install neograph-engine
+    export OPENAI_API_KEY=...  # read from the environment only
     python 11_reflexion.py
 """
 
