@@ -37,6 +37,10 @@ on:
     - cron: '30 18 * * *'
   workflow_dispatch:
 
+# Least privilege: the job only reads the repository.
+permissions:
+  contents: read
+
 concurrency:
   group: mcp-interop-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
