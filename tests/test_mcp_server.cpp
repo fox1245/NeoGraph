@@ -580,6 +580,60 @@ TEST(MCPServerTest, RejectsInvalidDefinitionsAndLateRegistration) {
         std::logic_error);
 }
 
+TEST(MCPServerTest, ToolsWithoutASchemaAreListedWithAnObjectSchema) {
+    // MCP-S-01: `inputSchema: {}` made the official clients reject the whole
+    // tools/list (pydantic: "inputSchema.type Field required"; zod: expected
+    // "object"). The default and an explicit empty object both list as
+    // {"type": "object"}.
+    MCPServer server(config());
+    ToolDefinition untyped;
+    untyped.name = "untyped";
+    server.register_tool(untyped, [](const json&, const auto&) { return CallToolResult{}; });
+    ToolDefinition empty;
+    empty.name = "empty_schema";
+    empty.input_schema = json::object();
+    server.register_tool(empty, [](const json&, const auto&) { return CallToolResult{}; });
+    initialize(server);
+
+    auto response = server.handle_message(request("list", "tools/list"));
+    const auto tools = response["result"]["tools"];
+    ASSERT_EQ(tools.size(), 2u);
+    for (std::size_t i = 0; i < tools.size(); ++i) {
+        EXPECT_EQ(tools[i]["inputSchema"], json({{"type", "object"}})) << tools[i].dump();
+    }
+}
+
+TEST(MCPServerTest, RefusesSchemasAndNamesOfficialClientsReject) {
+    MCPServer server(config());
+    auto with = [](std::string name, json input, json output = nullptr) {
+        ToolDefinition definition;
+        definition.name = std::move(name);
+        definition.input_schema = std::move(input);
+        definition.output_schema = std::move(output);
+        return definition;
+    };
+    const auto handler = [](const json&, const auto&) { return CallToolResult{}; };
+    EXPECT_THROW(server.register_tool(with("a", {{"type", "string"}}), handler),
+                 std::invalid_argument);
+    EXPECT_THROW(server.register_tool(with("b", {{"properties", json::object()}}), handler),
+                 std::invalid_argument);
+    EXPECT_THROW(server.register_tool(with("c", {{"type", "object"}}, {{"type", "array"}}), handler),
+                 std::invalid_argument);
+    EXPECT_THROW(server.register_tool(with("d", json::parse(
+                     R"({"type":"object","$schema":"http://json-schema.org/draft-07/schema#"})")),
+                     handler),
+                 std::invalid_argument);
+    // SEP-986 tool names: 1-128 of [A-Za-z0-9_.-].
+    EXPECT_THROW(server.register_tool(with("has space", {{"type", "object"}}), handler),
+                 std::invalid_argument);
+    EXPECT_THROW(server.register_tool(with("", {{"type", "object"}}), handler),
+                 std::invalid_argument);
+    EXPECT_THROW(server.register_tool(with(std::string(129, 'x'), {{"type", "object"}}), handler),
+                 std::invalid_argument);
+    EXPECT_NO_THROW(server.register_tool(with("ok.name-1_x", {{"type", "object"}}), handler));
+    EXPECT_NO_THROW(server.register_tool(with(std::string(128, 'y'), {{"type", "object"}}), handler));
+}
+
 TEST(MCPServerTest, StdioWritesOnlyJsonRpcFramesAndLogsToStderr) {
     MCPServer server(config());
     server.register_tool(echo_definition(),

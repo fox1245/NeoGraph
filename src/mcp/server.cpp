@@ -5,7 +5,9 @@
 
 #include "../core/tool_failure.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <condition_variable>
 #include <deque>
 #include <iostream>
@@ -105,12 +107,43 @@ std::string request_key(const json& id) {
     return "n:" + id.dump();
 }
 
-void validate_definition(const ToolDefinition& definition) {
+// MCP 2025-11-25 server/tools: a tool name SHOULD be 1 to 128 characters of
+// A-Z, a-z, 0-9, '_', '-' and '.' (SEP-986).
+bool valid_tool_name(const std::string& name) {
+    if (name.empty() || name.size() > 128) return false;
+    return std::all_of(name.begin(), name.end(), [](unsigned char ch) {
+        return std::isalnum(ch) || ch == '_' || ch == '-' || ch == '.';
+    });
+}
+
+void require_object_schema(const json& schema, const char* field) {
+    if (!schema.is_object() || !schema.contains("type") || schema["type"] != json("object")) {
+        throw std::invalid_argument(std::string("MCP tool ") + field +
+                                    " must be a JSON Schema with \"type\": \"object\"");
+    }
+}
+
+// Every listed tool must survive the official clients' result schemas: one
+// tool with `inputSchema: {}` made pydantic and zod reject the whole
+// tools/list (MCP-S-01). An empty object, the old ToolDefinition default, is
+// read as {"type": "object"}; any other schema must say "type": "object"
+// itself, and so must an outputSchema.
+ToolDefinition validated_definition(ToolDefinition definition) {
+    if (!valid_tool_name(definition.name)) {
+        throw std::invalid_argument(
+            "MCP tool name must be 1 to 128 characters of A-Z, a-z, 0-9, '_', '-' and '.': " +
+            json(definition.name).dump());
+    }
+    if (definition.input_schema.is_object() && definition.input_schema.empty())
+        definition.input_schema = json{{"type", "object"}};
     ToolDefinition::from_json(definition.to_json());
+    require_object_schema(definition.input_schema, "inputSchema");
     validate_json_schema(definition.input_schema, "inputSchema");
     if (!definition.output_schema.is_null()) {
+        require_object_schema(definition.output_schema, "outputSchema");
         validate_json_schema(definition.output_schema, "outputSchema");
     }
+    return definition;
 }
 
 } // namespace
@@ -401,7 +434,7 @@ void MCPServer::register_tool(ToolDefinition definition, ToolHandler handler) {
     if (impl_->initialize_seen.load(std::memory_order_acquire)) {
         throw std::logic_error("MCP tools must be registered before initialize");
     }
-    validate_definition(definition);
+    definition = validated_definition(std::move(definition));
     const auto name = definition.name;
     std::lock_guard lk(impl_->tools_mu);
     auto [it, inserted] = impl_->tools.emplace(
@@ -416,7 +449,7 @@ void MCPServer::register_raw_tool(ToolDefinition definition, RawToolHandler hand
     if (impl_->initialize_seen.load(std::memory_order_acquire)) {
         throw std::logic_error("MCP tools must be registered before initialize");
     }
-    validate_definition(definition);
+    definition = validated_definition(std::move(definition));
     const auto      name = definition.name;
     std::lock_guard lk(impl_->tools_mu);
     auto [it, inserted] = impl_->tools.emplace(

@@ -95,7 +95,10 @@ struct NEOGRAPH_API ToolDefinition {
     std::string title;
     std::string description;
     json        icons = json::array();
-    json        input_schema = json::object();
+    /// MCP requires an object schema with `"type": "object"`; a tool that takes
+    /// no arguments keeps this default. MCPServer reads an empty object as the
+    /// default too.
+    json        input_schema = json{{"type", "object"}};
     json        output_schema;
     json        annotations = json::object();
     json        execution = json::object();
