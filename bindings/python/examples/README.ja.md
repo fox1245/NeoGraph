@@ -105,6 +105,7 @@ python 01_minimal.py
 | 31 | [`31_program_any_of_join.py`](31_program_any_of_join.py) | yes | 通常のメンバー 2 つを待つ join は、片方を肩代わりする修正ノードが入ると止まります。コンパイラ自身の提案である `{any_of: [...]}` スロットをソースに適用すると、直した Program は完了します。 |
 | 32 | [`32_program_failure_routing.py`](32_program_failure_routing.py) | yes | TEST が失敗して 2 回再試行され、最後の失敗は `interruptBefore` 付きのハンドラーへルーティングされます。オペレーターが `retry` で再開すると Program は完了し、`abort` で再開すると失敗終了ノードが `plan.user_abort` を付けて `Failed` で終わらせます。 |
 | 33 | [`33_program_budgets.py`](33_program_budgets.py) | yes | バインドされた `llm_call` ノード 2 つが各 600 トークンを報告し、予算は 1,000 トークンなので、実行は `BudgetExhausted` で終わります。承認された予算と異なる予算での実行は `P_START_BUDGET` で拒否されます。 |
+| 34 | [`34_program_pause_resume.py`](34_program_pause_resume.py) | yes | `interruptBefore` が b ノードの前で実行を止め、`host.resume(run_id, value)` が続きを実行します。停止時の trace は `['a']`、再開後は `['b', 'c']` で、`main()` はオペレーターの答えを返して終わります。 |
 
 ### プロトコル: MCP、A2A、ACP
 

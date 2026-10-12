@@ -105,6 +105,7 @@ python 01_minimal.py
 | 31 | [`31_program_any_of_join.py`](31_program_any_of_join.py) | yes | 일반 멤버 둘을 기다리는 join은 한쪽을 대신하는 보정 노드가 끼어들면 멈춥니다. 컴파일러가 알려 준 제안인 `{any_of: [...]}` 슬롯을 소스에 적용하면 고친 Program이 완료됩니다. |
 | 32 | [`32_program_failure_routing.py`](32_program_failure_routing.py) | yes | TEST가 실패해 두 번 재시도된 뒤, 마지막 실패가 `interruptBefore`가 걸린 처리 노드로 라우팅됩니다. 운영자가 `retry`로 재개하면 Program이 완료되고, `abort`로 재개하면 실패 종료 노드가 `plan.user_abort` 코드와 함께 `Failed`로 끝냅니다. |
 | 33 | [`33_program_budgets.py`](33_program_budgets.py) | yes | 바인딩된 `llm_call` 노드 둘이 각각 600토큰을 보고하고 예산은 1,000토큰이라 실행은 `BudgetExhausted`로 끝납니다. 승인된 예산과 다른 예산으로 시작한 실행은 `P_START_BUDGET`으로 거부됩니다. |
+| 34 | [`34_program_pause_resume.py`](34_program_pause_resume.py) | yes | `interruptBefore`가 b 노드 앞에서 실행을 멈추고 `host.resume(run_id, value)`가 이어 갑니다. 멈춘 시점의 trace는 `['a']`, 재개한 결과는 `['b', 'c']`이며 `main()`은 운영자의 답으로 끝납니다. |
 
 ### 프로토콜: MCP, A2A, ACP
 
