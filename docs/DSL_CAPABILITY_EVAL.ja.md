@@ -1,37 +1,37 @@
 <!-- neograph-i18n: source=docs/DSL_CAPABILITY_EVAL.md locale=ja source_sha256=440d5d76af8cf05685dddfa06df9dee587f74851719820ff655b0a220bdb1b49 -->
-# QuickJS DSL 能力とモデル合成評価
+# QuickJS DSLのcapabilityとモデルによる合成の評価
 
 **Languages:** [English](DSL_CAPABILITY_EVAL.md) | [한국어](DSL_CAPABILITY_EVAL.ko.md) | [日本語](DSL_CAPABILITY_EVAL.ja.md) | [简体中文](DSL_CAPABILITY_EVAL.zh-CN.md)
 
-状態: 実装済み、決定的適合性検査の対象。ライブモデル評価は opt-in。
-過去のライブ観測: 2026-08-22。以下の記録は新しい実行結果ではありません。
+状況：実装済み。決定的な適合性テストをゲートにしています。実モデルでの評価はオプトインです。
+過去の実モデルでの観測：2026-08-22。以下に記録された結果は、新たに実行したものではありません。
 
-## 質問
+## 問い
 
-NeoGraph は2つの主張を区別しなければならない:
+NeoGraphは、次の2つの主張を区別する必要があります。
 
-1. 承認された QuickJS DSL が能力を表現できること、および
-2. LLM がその能力を正しく実際に使用するソースを合成できること。
+1. admission済みのQuickJS DSLが、あるcapabilityを表現できること。
+2. LLMが、そのcapabilityを実際に正しく使うソースを合成できること。
 
-2番目の主張は最初の主張からは含意されない。ソースは、実際の `ProgramCompiler` がそれを受け入れ、ケース固有の意味検証が低レベル化された Core IR または封印された JavaScript コマンドツリーを確認した場合にのみ、この評価を通過する。ソーステキストのキーワード一致では不十分である。
+2つ目の主張は、1つ目から導かれるものではありません。ソースがこの評価に合格するのは、本物の `ProgramCompiler` が受理し、さらに、ケースごとの意味検証が、ローワリングされたCore IR、またはシール済みのJavaScriptコマンドツリーを確認した場合だけです。ソーステキストのキーワードを照合するだけでは、十分ではありません。
 
-## 能力マニフェスト
+## Capabilityマニフェスト
 
-[`tests/fixtures/dsl_capabilities/cases.json`](../tests/fixtures/dsl_capabilities/cases.json) は機械可読な評価インベントリである。現在、以下をカバーしている:
+[`tests/fixtures/dsl_capabilities/cases.json`](../tests/fixtures/dsl_capabilities/cases.json)は、機械可読な評価対象の一覧です。現在、次のものを対象にしています。
 
-- グラフ/チャネル/ノード/エントリ/エッジ/エグジットおよび通常の JavaScript 構築;
-- 登録済み条件付きルーティング;
-- 静的 fan-out、fan-in、およびバリア;
-- 静的 HITL 割り込みおよびグラフ再試行ポリシー;
-- レジストリ仲介による動的 `Send` および `NodeInterrupt` 動作;
-- `callCore` と通常の JavaScript 分岐/ループ制御;
-- 境界付き `ng.all` に低レベル化された JavaScript マップ;
-- `all`、`parallel`、汎用の`join`、`race`、および`quorum`;
-- `spawn`の子が`await`の内部にネストされている;
-- `emit`、`checkpoint`、および`cancelScope`; そして
-- 承認されたネイティブ`hostCapability`インポートスロット。
+- graph / channel / node / entry / edge / exit と、通常のJavaScriptによる構築
+- 登録済みの条件付きルーティング
+- 静的なfan-out、fan-in、バリア
+- 静的なHITLの割り込みと、グラフのリトライポリシー
+- レジストリを介した動的な `Send` と `NodeInterrupt` の挙動
+- 通常のJavaScriptの分岐とループの制御を伴う `callCore`
+- 上限付きの `ng.all` にローワリングされるJavaScriptのmap
+- `all`、`parallel`、汎用の `join`、`race`、`quorum`
+- `await` の中に入れ子にした、子の `spawn`
+- `emit`、`checkpoint`、`cancelScope`
+- admission済みのネイティブな `hostCapability` のimportスロット
 
-チェックインされた各JavaScriptフィクスチャは、`program_dsl_capability_probe`によってコンパイルされ意味検証されます。これらは決定的なCTestテストであり、モデルやネットワークを必要としません。
+リポジトリに含まれるJavaScriptのフィクスチャは、それぞれ `program_dsl_capability_probe` でコンパイルされ、意味検証されます。これらは決定的なCTestのテストで、モデルもネットワークも必要としません。
 
 ```powershell
 cmake --build build --config Release --target program_dsl_capability_probe
@@ -39,22 +39,16 @@ ctest --test-dir build -C Release --output-on-failure `
   -R '^Program\.DslCapability\.'
 ```
 
-焦点を絞ったグラフビルダー回帰テストは、ミューテーターの繰り返し呼び出しが正しく蓄積されること、およびバリア、割り込み、リトライの宣言がloweringを生き延びることも証明しています:
+グラフビルダーに絞ったリグレッションテストでは、ミューテーターを繰り返し呼び出しても、正しく積み上がることと、バリア、割り込み、リトライの宣言がローワリングの後も残ることも確認します。
 
 ```powershell
 build\tests\Release\neograph_program_tests.exe `
   --gtest_filter=ProgramCompilerTest.JavaScriptGraphBuilderLowersEveryDeclaredPrimitiveAndAccumulatesCalls
 ```
 
-## ライブモデル評価
+## 実モデルでの評価
 
-オプトインランナーは、自然言語セマンティクスに加えて公開APIシグネチャを使用してソースを要求します。モデルにはチェックイン済みの回答は渡されません。各応答は、決定的CTestで使用される同じネイティブプローブに送信されます。
-Runner は `skills/neograph-harness-authoring/SKILL.md` とその
-`references/quickjs-authoring.md` をモデルの context に入れ、guidance digest
-を report に記録します。`--skill` は同じ companion reference を持つ別の
-entrypoint を選びます。ホストは実際の compiler bridge を呼び、モデルは source
-を返して、有限の repair 用 diagnostic を受け取ります。Skill は runtime 権限を
-与えません。
+オプトインのランナーは、自然言語での意味の説明と、公開APIのシグネチャを使って、ソースを求めます。リポジトリに含まれる正解は、モデルに渡しません。すべての応答は、決定的なCTestと同じネイティブのプローブに送られます。ランナーは、`skills/neograph-harness-authoring/SKILL.md` と、その `references/quickjs-authoring.md` を、モデルのコンテキストに読み込み、ガイダンスのダイジェストをレポートに記録します。`--skill` で、その付随するリファレンスを持つ別のエントリポイントを選べます。ホストが実際のコンパイラーブリッジを呼び出します。モデルはソースを返し、診断を受け取って、回数に上限のある修正を行います。skillが、ランタイムの権限を与えることはありません。
 
 ```powershell
 bun --env-file=C:\path\to\.env run scripts/run_dsl_capability_eval.ts `
@@ -64,25 +58,15 @@ bun --env-file=C:\path\to\.env run scripts/run_dsl_capability_eval.ts `
   --output dsl-capability-evidence.json
 ```
 
-`--case`はコンマ区切りのサブセットを受け入れ、`--attempts`は独立したワンショット試行を繰り返し、`--repair-attempts`は拒否された完全なソースをモデルに権威あるプローブ診断を返します。プロバイダー/応答の失敗は、コンパイルまたは意味拒否とは別に保持されます。
-既定モデルは `z-ai/glm-5.3-flash` です。Generation は completion token
-4,096 個に制限し、cookbook の ZDR provider-routing 設定を使います。
-以下の DeepSeek 証拠は、この skill-loading 設定より前の過去の記録です。
+`--case` は、カンマ区切りのサブセットを受け付けます。`--attempts` は、独立した1回限りの試行を繰り返します。`--repair-attempts` は、却下された完全なソースとともに、プローブが出した確定的な診断をモデルに返します。プロバイダーやレスポンスの失敗は、コンパイルや意味検証による却下とは別に扱われます。デフォルトのモデルは `z-ai/glm-5.3-flash` です。1回の生成は、補完トークン4,096個までに制限され、cookbookのZDRのプロバイダールーティング設定を使います。以下の過去のDeepSeekのエビデンスは、このskillを読み込む構成より前のものです。
 
 ## 指示を別に評価する
 
-Source case の合格は、skill、提供した native API reference、case contract、
-model 設定の組み合わせを測ります。Skill だけで十分だとは証明しません。
-Runner は system prompt、API reference、raw model content、usage、
-stop reason、strict-envelope 結果を保持します。Legacy source extractor は
-fenced JSON を復元できます。`strictEnvelope` はそれと要求された raw JSON
-envelope への準拠を区別します。
+ソースのケースが合格したときに測れるのは、skill、与えたネイティブAPIのリファレンス、ケースの契約、モデルの構成を、組み合わせた結果です。skill単独で十分であることの証明にはなりません。ランナーは、システムプロンプト、APIリファレンス、モデルが返した生の内容、使用量、停止理由、strictエンベロープの結果を、エビデンスとして保持します。従来のソース抽出は、コードフェンスで囲まれたJSONを復元することがあります。strictEnvelopeは、それと、求めた生のJSONエンベロープに従っていることを区別します。
 
-`--reasoning-effort` は別の比較 profile を明示的に選ぶ場合のみ使います。
-省略すると provider default を保持します。Before/after 比較ではその値、
-model、sampling、output cap、task、compiler を固定します。
+--reasoning-effortを使うのは、別の比較用プロファイルを明示的に選ぶ場合だけです。省略すると、プロバイダーのデフォルトが保たれます。変更前後の比較ごとに、この値、モデル、サンプリング、出力の上限、タスク、コンパイラーを固定してください。
 
-Chatbot の内部 Harness selector 用 paired evaluator は次のとおりです:
+チャットボットの内部のHarnessセレクターには、対になる評価ツールがあります。
 
 ~~~powershell
 bun run scripts/run_harness_skill_ab.ts --before saved-skill/SKILL.md `
@@ -90,44 +74,35 @@ bun run scripts/run_harness_skill_ab.ts --before saved-skill/SKILL.md `
   --provider relace --repeats 2 --output skill-comparison.json
 ~~~
 
-両 directory に `references/chat-template-proposals.md` が必要です。既定
-fixture は greeting、独立 review の継続中の依頼、recorded review scenario
-を含みます。Expected plan はモデル入力に含めません。Evaluator は live chat
-profile を固定し、AB/BA 順を交互に使い、raw response を保持します。JSON shape
-と expected plan/confidence は別々に採点します。`--provider` は fallback を
-無効にして backend を固定します。省略時は routing policy が同じでも実際の
-provider は異なる可能性があり、返された provider/model 名を記録します。
-Case と繰り返し回数は有限で、repair や暗黙の retry はしません。
+どちらのディレクトリにも、references/chat-template-proposals.md が必要です。デフォルトのフィクスチャには、挨拶、独立したレビューを求める継続中のリクエスト、記録済みのレビューのシナリオが含まれます。期待されるプランは、モデルの入力には含まれません。評価ツールは、実際のチャットのプロファイルを固定し、AB/BAの順序を交互にし、生の応答を保持して、JSONの形と、期待されるプランおよび確信度とを、別々に採点します。--providerは、フォールバックを無効にして、バックエンドを固定します。指定しない場合、ルーティングのポリシーは共通ですが、実際のプロバイダーは異なることがあります。返されたプロバイダー名とモデル名は記録されます。ケース数と繰り返し回数には上限があり、修正や黙ってのリトライは行いません。
 
-これは prompt-level 評価であり、runtime admission や答えの品質の統計的
-主張ではありません。少数の targeted 反復標本は regression 証拠であり、
-一般的な model 信頼度の推定ではありません。
+これはプロンプトのレベルの評価です。ランタイムのadmissionでも、回答の品質についての統計的な主張でもありません。対象を絞ったケースを少数回繰り返したサンプルは、リグレッションのエビデンスであり、モデル一般の信頼性の推定値ではありません。
 
-## 観察されたDeepSeek結果
+## DeepSeekで観測した結果
 
-初期の実行と完全一致識別子の再評価を通じて、モデルは全11の能力グループに対してプローブ検証済みのソースを生成した。静的HITL/再試行には、診断に基づく1回の修復が必要だった。構造化並行処理には2回の修復が必要だった。1回目はESモジュールのエクスポートを復元するため、2回目は誤ったCoreバインディングを完全一致の admission名に置き換えるためである。制御フローは1回の完全一致バインディング修復後に合格した。Mapは、ホストがネイティブAPIマニフェストを提供し、admissionされたCore識別子を曖昧さなく明示した後、一発で合格した。
+最初の実行と、識別子を正確に指定した再評価を通じて、モデルは、11のcapabilityグループすべてについて、プローブで検証されたソースを生成しました。静的なHITLとリトライでは、診断に導かれた修正が1回必要でした。構造化された並行性では、修正が2回必要でした。最初はESモジュールのexportを復元するため、次に誤ったCoreのバインディングを、admission済みの正確な名前に置き換えるためです。制御フローは、正確なバインディングへの修正を1回行って合格しました。mapは、ホストがネイティブAPIのマニフェストを与え、admission済みのCoreの識別子を曖昧さなく明示した後で、1回で合格しました。
 
-| 能力ケース | モデルの証拠 | 重要な観察 |
+| Capabilityケース | モデルのエビデンス | 重要な観測 |
 |---|---|---|
-| `graph_basics` | 合格 | ループ構築ノードが正しくlowered |
-| `graph_routing` | 繰り返し試行で合格した | 以前の出力は禁止されたCommonJS/`require`を使用した |
-| `graph_fanout_barrier` | 合格 | fan-outエッジとバリアメンバーシップは正確であった |
-| `graph_hitl_retry` | 1回の修復後に合格 | 初期出力は誤ったノード名を使用した |
-| `registry_mediated` | 合格 | モデルはホストが許可した動的ノードを正しく参照する |
-| `program_control_flow` | 1回の修復後に合格 | 以前の試行は`core`/`Core`を繰り返し呼び出したものであり、許可されたCore `capability`ではなかった |
-| `program_map` | 正確な識別子注入後に合格 | 以前の試行はCommonJS、`yield*`、および誤ったCore名を使用した |
-| `program_structured_concurrency` | 2回の修復後に合格 | 正確なネストされたコマンドとCoreバインディングを検証した |
-| `program_spawn_await` | 合格 | `Await(Spawn(...))`とタイムアウトは構造的に検証された |
-| `program_durability` | 合格 | emit、チェックポイント、キャンセルコマンドは正確でした |
-| `program_host_capability` | 合格 | インポートスロットと正規入力が一致しました |
+| `graph_basics` | 合格 | ループで組み立てたノードが、正しくローワリングされました |
+| `graph_routing` | 繰り返しの試行で合格 | 以前の出力は、禁止されているCommonJSと `require` を使っていました |
+| `graph_fanout_barrier` | 合格 | fan-outのエッジとバリアのメンバーが正確でした |
+| `graph_hitl_retry` | 修正1回で合格 | 最初の出力は、誤ったノード名を使っていました |
+| `registry_mediated` | 合格 | モデルは、ホストがadmissionした動的ノードを、正しく参照しました |
+| `program_control_flow` | 修正1回で合格 | 以前の試行では、admission済みのCore `capability` ではなく、`core` や `Core` を繰り返し呼び出していました |
+| `program_map` | 識別子を正確に与えた後で合格 | 以前の試行では、CommonJS、`yield*`、誤ったCore名を使っていました |
+| `program_structured_concurrency` | 修正2回で合格 | 入れ子のコマンドとCoreのバインディングが、正確であることを確認しました |
+| `program_spawn_await` | 合格 | `Await(Spawn(...))` とタイムアウトの構造を確認しました |
+| `program_durability` | 合格 | emit、checkpoint、キャンセルのコマンドが正確でした |
+| `program_host_capability` | 合格 | importスロットと正規の入力が一致しました |
 
-初期 validator は command kind と input だけを検査し、正確な Core 名を検査しなかったため、`callCore` case で誤検知しました。その後、すべての入れ子 `callCore` の名前が `capability` であることを要求しました。以前合格した `core`、`Core`、node 名 `work` を使う model source は拒否されます。
+最初のバリデーターは、コマンドの種類と入力は確認していましたが、Coreの正確な名前を確認していなかったため、`callCore` のケースで偽陽性を出していました。バリデーターを強化し、入れ子のすべての `callCore` に `capability` を要求するようにしました。そのため、以前に受理された、`core`、`Core`、ノード名 `work` を使うモデルのソースは、現在は正しく却下されます。
 
-これは能力の証明であり、統計的信頼性の主張ではありません。ケースごとのワンショットおよび修復成功率には、プロバイダーの障害を個別に報告した反復試行が依然として必要です。
+これは、できることの証明であり、信頼性についての統計的な主張ではありません。ケースごとの、1回で成功する割合と、修正して成功する割合には、引き続き、繰り返しの試行が必要です。その際、プロバイダーの失敗は別に報告します。
 
 ## 生成されたProgramへの影響
 
-生のワンショットソース生成は、十分な製品保証ではありません。最小限の安全な合成パスは次のとおりです:
+生のソースを1回で生成するだけでは、プロダクトとしての保証には十分ではありません。最低限の安全な合成の経路は、次のとおりです。
 
 ```text
 capability manifest + exact admitted identifiers
@@ -138,10 +113,10 @@ capability manifest + exact admitted identifiers
   -> ordinary admission and publication
 ```
 
-モデルは、ESモジュールとCommonJS、グラフ名とノード名、要求されたCoreの同一性と`core`などの一般的な単語を繰り返し混同しました。NeoCodeはしたがって、正確なシグネチャとadmissionされた識別子を注入し、可能な場合は固定モジュールスキャフォールドを保持し、もっともらしいソースを要求されたトポロジーが構築された証拠として決して扱わないべきです。
+モデルは、ESモジュールとCommonJS、グラフ名とノード名、要求されたCoreのIDと `core` のような一般的な語を、繰り返し取り違えました。そのため、NeoCodeは、正確なシグネチャと、admission済みの識別子を注入し、可能な限り、モジュールの骨組みを固定のまま保ち、それらしく見えるソースを、要求したトポロジーが構築されたことのエビデンスとして扱ってはいけません。
 
-NeoGraphは現在、`ProgramSynthesisGateway`でこの境界を強制します: すべてのゲートウェイ設定は、ホスト所有の意味検証ボリッドを提供しなければなりません。検証が成功すると、Catalog admissionの前にコンテンツアドレス指定のレシートが生成されます。拒否された決定は`ProgramSynthesisValidationError`をスローし、正確な証拠を保持し、admissionリゾルバを決して呼び出しません。すでに消費された動的コンパイル予約は消費されたままです。
+NeoGraphは、この境界を `ProgramSynthesisGateway` で強制するようになりました。すべてのゲートウェイの構成は、ホストが所有する意味検証を提供しなければなりません。検証に成功すると、Catalogのadmissionの前に、内容でアドレス指定されたレシートが生成されます。却下の判定では、`ProgramSynthesisValidationError` が送出され、正確なエビデンスが保持され、admissionのリゾルバーが呼び出されることはありません。すでに消費された動的コンパイルの予約は、消費されたままです。
 
-`javascript_authoring_capability_manifest()`は、インストールされたグラフビルダーとコマンド語彙、正確なシグネチャ、分類、制限、プロファイル制約を機械可読データとして公開します。適合性テストは、そのマニフェストを両方のQuickJSコンテキストに実際にインストールされたプロパティと比較するため、APIドリフトはテストスイートを失敗させます。
+`javascript_authoring_capability_manifest()` は、インストールされているグラフビルダーとコマンドの語彙、正確なシグネチャ、分類、上限、プロファイルの制約を、機械可読なデータとして公開します。適合性テストは、このマニフェストを、2つのQuickJSコンテキストに実際にインストールされているプロパティと比較します。そのため、APIがずれるとテストスイートが失敗します。
 
-マニフェストは、作成機能ごとに 1 つのブール値フラグを持つ `features`（例: `graph.metadata`、`barrier.any_of`、`failure_edges`）、すべてのメソッドの TypeScript `dts` シグネチャと共通宣言をまとめた `dts_prelude`、そしてグラフビルダーの引数ごとの JSON Schema も公開します。これを支えるスキーマファイルは 2 つあります。[`schemas/javascript-capability-manifest-v1.schema.json`](../schemas/javascript-capability-manifest-v1.schema.json) はマニフェスト自体を、[`schemas/core-definition-v1.schema.json`](../schemas/core-definition-v1.schema.json) は生成された定義を制約付きデコードできるよう封印済みの Core 定義を記述します。テストは、マニフェストをそのスキーマで、ゴールデン識別子コーパスの定義を Core スキーマで検証します。
+マニフェストは、さらに、次のものも公開します。オーサリングの機能ごとに1つの真偽値フラグを持つ `features`（たとえば `graph.metadata`、`barrier.any_of`、`failure_edges`）。すべてのメソッドのTypeScript用の `dts` シグネチャ（共有する宣言は `dts_prelude` にあります）。グラフビルダーのすべての引数のJSON Schema。これらを支えるスキーマファイルは2つあります。[`schemas/javascript-capability-manifest-v1.schema.json`](../schemas/javascript-capability-manifest-v1.schema.json)はマニフェスト自体を、[`schemas/core-definition-v1.schema.json`](../schemas/core-definition-v1.schema.json)はシール済みのCore定義を記述します。後者は、生成された定義を制約付きでデコードするためのものです。テストでは、マニフェストをそのスキーマに対して、ゴールデンなIDコーパスの定義をCoreのスキーマに対して、それぞれ検証します。
