@@ -18,9 +18,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# MSVC: treat source files as UTF-8
+# MSVC: treat source files as UTF-8, and lift COFF's default object section
+# limit (C1128) for every target. src/program/runtime.cpp and
+# tests/test_program_runtime.cpp exceed it, other template-heavy units come
+# near it, and /fsanitize=address /Zi adds sections. Set for the directory,
+# so the library, tests, Python wheels and installed-package builds take it.
 if(MSVC)
-    add_compile_options(/utf-8)
+    add_compile_options(/utf-8 /bigobj)
 endif()
 
 # Hardening complements release optimization; sanitizer builds provide their own

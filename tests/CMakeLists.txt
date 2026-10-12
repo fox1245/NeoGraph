@@ -132,12 +132,8 @@ if(NEOGRAPH_BUILD_PROGRAM)
         # Fixtures construct sp::runtime::Client, whose constructor neograph::llm normally brings in.
         target_link_libraries(neograph_program_tests PRIVATE SchemaProvider::transport)
     endif()
-    if(MSVC)
-        # test_program_runtime.cpp intentionally exercises the complete durable
-        # state machine and exceeds COFF's default section count in optimized
-        # multi-config builds.
-        target_compile_options(neograph_program_tests PRIVATE /bigobj)
-    endif()
+    # test_program_runtime.cpp exceeds COFF's default section count; the
+    # top-level CMakeLists.txt passes /bigobj to every MSVC target.
     if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
         target_compile_definitions(neograph_program_tests PRIVATE
             NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS
