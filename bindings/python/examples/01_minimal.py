@@ -6,6 +6,8 @@ a channel, multiplies, writes the result back. No API key needed.
 Run:
     pip install neograph-engine
     python 01_minimal.py
+
+smoke-expect: doubled = 42
 """
 
 import neograph_engine as ng

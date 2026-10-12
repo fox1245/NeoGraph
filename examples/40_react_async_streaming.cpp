@@ -11,6 +11,8 @@
 // Usage:
 //   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_react_async_streaming
+//
+// smoke-skip: needs OPENROUTER_API_KEY (live model call)
 
 #include <neograph/neograph.h>
 #include "provider_example_support.h"

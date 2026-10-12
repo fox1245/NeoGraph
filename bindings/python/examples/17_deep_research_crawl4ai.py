@@ -39,6 +39,8 @@ Mirrors the C++ example 25_deep_research.cpp's web-search path
 If `CRAWL4AI_URL` is unset, researchers fall back to LLM-only
 answers (same as example 16). If `NEOGRAPH_PG_DSN` is unset, the
 example falls back to InMemoryCheckpointStore.
+
+smoke-skip: needs OPENAI_API_KEY, gradio and a Crawl4AI server (CRAWL4AI_URL); serves a local web UI until stopped
 """
 
 from __future__ import annotations

@@ -21,6 +21,9 @@
 // No API key required (uses custom nodes).
 //
 // Usage: ./example_parallel_fanout
+//
+// smoke-expect: Execution trace: researcher_a → researcher_b → researcher_c → summarizer → END
+// smoke-expect: Total 3 research findings collected.
 
 #include <neograph/neograph.h>
 

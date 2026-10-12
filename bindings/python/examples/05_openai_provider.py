@@ -14,6 +14,9 @@ Run:
 --live uses OPENAI_API_BASE / OPENAI_MODEL when set. The endpoint must implement
 the admitted OpenAI Chat protocol; matching an endpoint name alone does not
 establish protocol compatibility.
+
+smoke-expect: provider: scripted
+smoke-expect: assistant: hello world
 """
 
 from _common import example_model, example_provider, ng

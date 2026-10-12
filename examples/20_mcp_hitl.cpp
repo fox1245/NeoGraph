@@ -10,6 +10,8 @@
 //   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_mcp_hitl
 // (auto-loads .env from the cwd or any parent directory.)
+//
+// smoke-skip: needs OPENROUTER_API_KEY and a running MCP HTTP server
 
 #include <neograph/neograph.h>
 #include "provider_example_support.h"

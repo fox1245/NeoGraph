@@ -7,6 +7,8 @@
 // envelope and durable identities.
 //
 // Usage: ./example_program_quickstart     prints: 1
+//
+// smoke-expect-line: 1
 
 #include <neograph/neograph.h>
 #include <neograph/program/program.h>

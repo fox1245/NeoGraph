@@ -12,6 +12,9 @@
 // Offline: a MockProvider returns a canned summary — no API key.
 //
 //   ./example_history_compaction
+//
+// smoke-expect: status   : Compacted (compacted: yes)
+// smoke-expect: status   : UnusableSummary (compacted: no)
 
 #include <neograph/history.h>
 #include <neograph/async/run_sync.h>

@@ -25,6 +25,8 @@
 //
 // Build:  cmake --build build --target cookbook_the_beast_gate_eval
 // Run:    ./build/cookbook_the_beast_gate_eval
+//
+// smoke-expect: runtime cross-check: 4/4 cases where the validator's verdict matched execution
 
 #include <neograph/neograph.h>
 #include <neograph/graph/validator.h>

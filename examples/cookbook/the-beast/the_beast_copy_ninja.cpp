@@ -8,6 +8,8 @@
 // Setup: put OPENROUTER_API_KEY=sk-or-... in .env in the working directory or a parent
 // Build: cmake --build build --target cookbook_the_beast_copy_ninja
 // Run:   ./build/cookbook_the_beast_copy_ninja "Grace"
+//
+// smoke-skip: needs OPENROUTER_API_KEY and a local A2A source card
 
 #include <neograph/a2a/agent_card_candidate.h>
 #include <neograph/graph/checkpoint.h>

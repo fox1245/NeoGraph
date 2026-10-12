@@ -14,6 +14,8 @@
 // Start an A2A server first — `./build/example_a2a_server serve` listens
 // on that default URL — so AgentCard discovery succeeds; otherwise the
 // example reports the connect failure and exits 1.
+//
+// smoke-skip: needs the A2A server of example 38 running; 38 already round-trips through its own client
 
 #include <neograph/neograph.h>
 #include <neograph/a2a/client.h>

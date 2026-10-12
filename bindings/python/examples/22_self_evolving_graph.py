@@ -34,6 +34,8 @@ Caveats / honest limits of this PoC:
   - Prompts can reference declared state channels with {channel_name}
     placeholders. Added stages need distinct output channels and matching
     input templates; edges alone do not pass an earlier node's reply.
+
+smoke-skip: needs OPENAI_API_KEY (hosted model call); to be rewritten on the scripted model
 """
 
 from __future__ import annotations

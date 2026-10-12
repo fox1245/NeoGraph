@@ -20,6 +20,8 @@
 //         retains data.
 // Build:  cmake --build build --target cookbook_the_beast_live
 // Run:    ./build/cookbook_the_beast_live
+//
+// smoke-skip: needs OPENROUTER_API_KEY (live model call)
 
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/node.h>

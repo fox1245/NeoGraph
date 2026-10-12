@@ -39,6 +39,9 @@ marks its threaded ``fetch`` server re-entrant before measuring overlap.
 
 The test suite measures both stdio server policies instead of attributing either
 behavior to the transport itself.
+
+smoke-os: linux
+smoke-expect: discovered: ['fetch']
 """
 
 import json

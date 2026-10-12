@@ -2172,6 +2172,12 @@ if(NEOGRAPH_BUILD_TESTS)
 
 endif()
 
+# Example smoke tests (label examples-offline), the example index check, and the
+# per-area example targets in examples/cmake/*.cmake.
+if(NEOGRAPH_BUILD_EXAMPLES OR NEOGRAPH_BUILD_TESTS)
+    add_subdirectory(examples)
+endif()
+
 # Fuzz targets — libFuzzer-driven, Clang only. Separate flag so
 # Debug/Release builds aren't impacted by the libFuzzer link
 # requirement.

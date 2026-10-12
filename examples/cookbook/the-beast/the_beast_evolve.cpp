@@ -23,6 +23,8 @@
 //
 // Build:  cmake --build build --target cookbook_the_beast_evolve
 // Run:    ./build/cookbook_the_beast_evolve   [--darwin-only]
+//
+// smoke-expect: Solved — the pipeline computes 20.
 
 #include <neograph/neograph.h>
 #include <neograph/graph/validator.h>

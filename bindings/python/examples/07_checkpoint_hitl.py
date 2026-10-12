@@ -8,6 +8,9 @@ No API key, payment processor, or real charge is involved.
 
 Run:
     python 07_checkpoint_hitl.py
+
+smoke-expect: Charged 2500000 KRW for MacBook Pro.
+smoke-expect: pay_tool invocations: [{'item': 'MacBook Pro', 'quantity': 1, 'amount_krw': 2500000}]
 """
 
 import json

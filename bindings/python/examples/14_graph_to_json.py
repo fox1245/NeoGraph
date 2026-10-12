@@ -23,6 +23,9 @@ Run:
     pip install neograph-engine
     python 14_graph_to_json.py
     # produces: my_graph.json
+
+smoke-expect: from-dict:    doubled = 42
+smoke-expect: wrote my_graph.json
 """
 
 import json

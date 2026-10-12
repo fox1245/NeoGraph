@@ -1,3 +1,22 @@
+// NeoGraph Example 60: the Harness MCP server.
+//
+// Serves six MCP tools over stdio (neograph_schema, neograph_compile, neograph_start,
+// neograph_get, neograph_resume, neograph_cancel) that compile and run a bounded
+// multi-worker workflow. See docs/HARNESS_MCP.md for the request contract.
+//
+// Usage: ./example_harness_mcp_server [--executor provider|opencode|claude|codex]
+//                                     [--host-model MODEL] [--host-status]
+//   provider executor: needs NEOGRAPH_HARNESS_API_KEY or OPENROUTER_API_KEY in the environment
+//   NEOGRAPH_HARNESS_SMOKE=1 swaps in a private offline fixture provider (no key, no network);
+//   the annotations below use it.
+//
+// smoke-env: NEOGRAPH_HARNESS_SMOKE=1
+// smoke-stdin: {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}
+// smoke-stdin: {"jsonrpc":"2.0","method":"notifications/initialized"}
+// smoke-stdin: {"jsonrpc":"2.0","id":2,"method":"tools/list"}
+// smoke-expect: "serverInfo":{"name":"neograph-harness"
+// smoke-expect: "name":"neograph_compile"
+
 #include "provider_example_support.h"
 #include <sp/config_defaults.h>
 #include <neograph/mcp/adoption.h>

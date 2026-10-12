@@ -21,6 +21,8 @@
 // Defaults: 1,000 requests on 32 workers (about 2,330 model calls). The two
 // variables lower them (requests 1..1000, workers 1..256).
 // Runtime requires OPENROUTER_API_KEY in the repository-root .env (or environment).
+//
+// smoke-skip: needs OPENROUTER_API_KEY (live model call)
 
 #include <neograph/neograph.h>
 #include "../../provider_example_support.h"

@@ -7,6 +7,8 @@ ACP clients launch this script as a subprocess. Protocol messages use stdout,
 so application diagnostics must go to stderr or a logging handler. Set
 NEOGRAPH_ACP_POSTGRES_URL for durable session/load support. Source builds with
 SQLite enabled may use NEOGRAPH_ACP_SQLITE_PATH instead.
+
+smoke-skip: serves over stdio until stopped and needs neograph-engine[acp]; exercised by bindings/python/tests/test_protocol_sdk_e2e.py
 """
 
 import asyncio

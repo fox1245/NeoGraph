@@ -41,6 +41,8 @@
 // re_agent_common.h so the upcoming parallel fan-out variant reuses them
 // verbatim. That fan-out work (`36_re_agent_fanout.cpp`) lives in the
 // standalone re-agent repo.
+//
+// smoke-skip: needs Ghidra with the GhidraMCP backend (GHIDRA_MCP_BRIDGE) and OPENROUTER_API_KEY
 
 #include "re_agent_common.h"
 

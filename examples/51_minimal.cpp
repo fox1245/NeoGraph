@@ -10,6 +10,8 @@
 //   3) build → run → 결과를 result.channel<T>(name) 으로 꺼냄
 //
 // 실행: ./example_minimal     출력: "HELLO"
+//
+// smoke-expect-line: HELLO
 
 #include <neograph/neograph.h>
 

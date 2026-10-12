@@ -10,6 +10,9 @@
 // No API key required (uses Mock Provider)
 //
 // Usage: ./example_subgraph
+//
+// smoke-expect: Execution trace (outer graph): inner_agent → END
+// smoke-expect: Final response: NeoGraph is a graph agent engine written in C++.
 
 #include <neograph/neograph.h>
 #include "provider_example_support.h"

@@ -21,6 +21,9 @@
 // No API key required.
 //
 // Usage: ./example_custom_reducer_condition
+//
+// smoke-expect: Final score: 7
+// smoke-expect: All assertions passed.
 
 #include <neograph/neograph.h>
 #include <neograph/graph/loader.h>

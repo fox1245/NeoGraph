@@ -35,6 +35,8 @@ Run:
     python 16_deep_research_chat.py
 
 UI opens at http://localhost:7860.
+
+smoke-skip: needs OPENAI_API_KEY and gradio; serves a local web UI until stopped
 """
 
 import os

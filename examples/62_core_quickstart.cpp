@@ -5,6 +5,8 @@
 // no LLM, MCP, Program, or transport component.
 //
 // Usage: ./example_core_quickstart     prints: HELLO
+//
+// smoke-expect-line: HELLO
 
 #include <neograph/neograph.h>
 

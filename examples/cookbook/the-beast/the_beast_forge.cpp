@@ -19,6 +19,8 @@
 // Setup:  OPENROUTER_API_KEY in .env ; python3 on PATH.
 // Build:  cmake --build build --target cookbook_the_beast_forge
 // Run:    ./build/cookbook_the_beast_forge ["task"]
+//
+// smoke-skip: needs OPENROUTER_API_KEY and python3 (the forged MCP server)
 
 #include <neograph/neograph.h>
 #include <neograph/graph/validator.h>

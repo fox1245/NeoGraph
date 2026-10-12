@@ -14,6 +14,10 @@
 //       -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON
 //   cmake --build build-cookbook --target cookbook_multi_tenant_mock -j4
 //   ./build-cookbook/cookbook_multi_tenant_mock
+//
+// smoke-expect: OK:               1000
+// smoke-expect: Errors:           0
+// smoke-expect: Distinct engines: 3  (expected: 3)
 
 #include <neograph/neograph.h>
 

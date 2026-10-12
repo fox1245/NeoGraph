@@ -15,6 +15,9 @@
 // awaitable nature is observable in the timing.
 //
 // Usage: ./example_async_tool
+//
+// smoke-expect: async  result="fetched: https://other.example"
+// smoke-expect: PASS
 
 #include <neograph/neograph.h>
 #include <neograph/tool.h>

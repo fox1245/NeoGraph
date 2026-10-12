@@ -12,6 +12,10 @@
 //   ./cookbook_minimal_mcp python3 examples/cookbook/minimal-mcp/min_stdio_server.py
 //
 // Any executable that speaks MCP over stdio works in place of that server.
+//
+// smoke-args: @PYTHON@ @SRC@/examples/cookbook/minimal-mcp/min_stdio_server.py
+// smoke-expect: 3/3 MCP tool calls succeeded
+// smoke-expect: calculate({"expression":"2 ** 16 + 1"}) -> 65537
 
 #include <neograph/neograph.h>
 #include <neograph/mcp/client.h>

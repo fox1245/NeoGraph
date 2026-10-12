@@ -15,6 +15,8 @@
 // No remote LLM required: planner hand-picks three MCP tool calls (time /
 // weather / calculator) so the demo is deterministic and stays offline
 // for the LLM axis.
+//
+// smoke-skip: needs a running MCP HTTP server (python examples/demo_mcp_server.py)
 
 #include <neograph/mcp/client.h>
 #include <neograph/neograph.h>

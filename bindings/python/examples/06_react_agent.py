@@ -15,6 +15,11 @@ Run:
     python 06_react_agent.py           # scripted model, no key, no network
     export OPENAI_API_KEY=...          # then, to call a hosted model (billed):
     python 06_react_agent.py --live
+
+smoke-expect: provider: scripted
+smoke-expect: tool_call calc({"expression":"(123 + 456) * 7"})
+smoke-expect: [assistant] 4053
+smoke-expect: execution trace: ['llm', 'dispatch', 'llm']
 """
 
 import json

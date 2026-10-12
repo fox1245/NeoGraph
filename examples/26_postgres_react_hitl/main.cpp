@@ -39,6 +39,8 @@
 // Optional environment:
 //   CRAWL4AI_URL        defaults to http://localhost:11235
 //   CRAWL4AI_API_TOKEN  bearer token the Crawl4AI server was started with
+//
+// smoke-skip: needs PostgreSQL, Crawl4AI and OPENROUTER_API_KEY (Docker Compose)
 
 #include <neograph/neograph.h>
 #include "../provider_example_support.h"

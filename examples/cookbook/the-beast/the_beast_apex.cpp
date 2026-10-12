@@ -17,6 +17,8 @@
 // Setup:  OPENROUTER_API_KEY=sk-or-... in .env  (model deepseek/deepseek-v4-flash)
 // Build:  cmake --build build --target cookbook_the_beast_apex
 // Run:    ./build/cookbook_the_beast_apex ["your task"]
+//
+// smoke-skip: needs OPENROUTER_API_KEY (live model call)
 
 #include <neograph/neograph.h>
 #include <neograph/graph/validator.h>

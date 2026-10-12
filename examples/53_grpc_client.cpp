@@ -9,6 +9,8 @@
 // Demonstrates the polyglot story: this client speaks the same proto
 // any Go/Rust/TS/Java client would — the C++ engine runs the graph,
 // the caller never links NeoGraph itself.
+//
+// smoke-skip: needs the gRPC server of example 45 running (needs -DNEOGRAPH_BUILD_GRPC=ON)
 
 #include <cstdio>
 #include <cstdlib>

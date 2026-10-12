@@ -9,6 +9,10 @@
 // span tree so the example stays dep-free.
 //
 // Usage: ./example_openinference
+//
+// smoke-expect: total spans=3
+// smoke-expect: llm.model_name = gpt-mock
+// smoke-expect: PASS
 
 #include <neograph/neograph.h>
 #include <neograph/observability/openinference.h>

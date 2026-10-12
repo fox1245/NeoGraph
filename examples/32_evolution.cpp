@@ -13,6 +13,10 @@
 // Any other custom node type must be registered with NodeFactory by the host
 // program before evolve() runs; otherwise the compile gate rejects every
 // candidate with "Unknown node type" and the run exits 1 (compile_passed 0).
+//
+// smoke-args: --smoke
+// smoke-expect: "seed_name": "smoke_seed"
+// smoke-expect: "task": "trivial"
 #include <neograph/graph/evolution.h>
 #include <neograph/graph/node.h>
 

@@ -10,6 +10,10 @@ No LLM — illustrates the engine semantics with custom Python nodes.
 Run:
     pip install neograph-engine
     python 10_command_routing.py
+
+smoke-expect: status:  auto-approved (>=100)
+smoke-expect: status:  needs human review
+smoke-expect: status:  rejected (negative)
 """
 
 import neograph_engine as ng

@@ -2,6 +2,8 @@
 //
 // SyncGraphNode removes coroutine boilerplate for short, non-blocking work.
 // Blocking I/O should still use GraphNode::run() and co_await.
+//
+// smoke-expect-line: HELLO
 
 #include <neograph/neograph.h>
 

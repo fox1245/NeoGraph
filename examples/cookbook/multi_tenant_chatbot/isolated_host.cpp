@@ -4,6 +4,9 @@
 // policy identities. A real ingress authenticates the request first, then
 // selects one immutable TenantHost record; it never lets request JSON choose
 // a scope, provider credential, registry, or store.
+//
+// smoke-expect: "tenant":"tenant-a"
+// smoke-expect: "accepted":true
 #include <neograph/neograph.h>
 
 #include <iostream>

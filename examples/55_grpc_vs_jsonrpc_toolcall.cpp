@@ -21,6 +21,10 @@
 // The point: isolate *transport* cost. Both sides carry args/result
 // as JSON strings (graph-as-data), so this measures HTTP/2+protobuf
 // framing vs HTTP/1.1+JSON-RPC envelope — nothing else.
+//
+// smoke-expect: [tiny args]
+// smoke-expect: [1536-float args]
+// smoke-expect: Serialization only, 12 KB payload
 
 #include <cstdio>
 

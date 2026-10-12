@@ -1,3 +1,17 @@
+// NeoGraph Example 59: a minimal MCP server over stdio.
+//
+// One tool, `echo`, with an input schema, an output schema and structured content.
+// It has no LLM and no MCP client dependency, and it is the same stdio binary the MCP
+// interoperability tests drive. Point any MCP host at it, or pipe JSON-RPC to it:
+//   printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"demo","version":"1"}}}' | ./example_mcp_server
+// The server stops when stdin closes.
+//
+// smoke-stdin: {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}
+// smoke-stdin: {"jsonrpc":"2.0","method":"notifications/initialized"}
+// smoke-stdin: {"jsonrpc":"2.0","id":2,"method":"tools/list"}
+// smoke-expect: "serverInfo":{"name":"neograph-example"
+// smoke-expect: "name":"echo"
+
 #include <neograph/mcp/server.h>
 
 #include <utility>

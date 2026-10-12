@@ -29,6 +29,8 @@
 //
 // Build:  cmake --build build --target cookbook_the_beast_baldwin_adv
 // Run:    ./build/cookbook_the_beast_baldwin_adv
+//
+// smoke-expect: faithful substrate): PASS
 
 #include <neograph/neograph.h>
 #include <neograph/graph/loader.h>

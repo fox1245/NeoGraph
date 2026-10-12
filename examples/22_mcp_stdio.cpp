@@ -18,6 +18,8 @@
 // (auto-loads .env from the cwd or any parent directory.)
 //
 // Equivalent to the HTTP example 03 but with transport=stdio.
+//
+// smoke-skip: needs OPENROUTER_API_KEY (live model call); starts examples/demo_mcp_stdio_server.py
 
 #include <neograph/neograph.h>
 #include "provider_example_support.h"

@@ -18,6 +18,8 @@
 // 빌드/실행:
 //   cmake --build build --target cookbook_self_evolving_chatbot
 //   ./build/cookbook_self_evolving_chatbot
+//
+// smoke-skip: needs OPENROUTER_API_KEY (live model call)
 
 #include <neograph/neograph.h>
 #include "../../provider_example_support.h"

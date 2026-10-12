@@ -13,6 +13,8 @@ both h2 and http/1.1, and set NG_EXAMPLE_CA_FILE to its trusted CA file.
 Each protocol sends 20 Chat requests by default: one warmup and three
 measured bursts of five. NG_TRANSPORT_PARALLEL and NG_TRANSPORT_ITERS change
 those counts. Every request must return a real Chat protocol text completion.
+
+smoke-skip: needs a TLS Chat endpoint that negotiates HTTP/2 (hosted key or your own peer with NG_EXAMPLE_CA_FILE)
 """
 
 from __future__ import annotations

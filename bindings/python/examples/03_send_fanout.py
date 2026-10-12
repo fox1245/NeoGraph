@@ -12,6 +12,8 @@ pure-Python square calculation does not demonstrate CPU-core parallelism.
 Run:
     pip install neograph-engine
     python 03_send_fanout.py
+
+smoke-expect: squares: [0, 1, 4, 9, 16, 25, 36, 49]
 """
 
 import neograph_engine as ng

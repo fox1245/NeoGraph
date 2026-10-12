@@ -23,6 +23,9 @@
 // running conversation length.
 //
 // Usage: ./example_resume_if_exists_chat
+//
+// smoke-expect: assistant saw both turns: true
+// smoke-expect: assistant saw turn 1 history: false (expected false)
 
 #include <neograph/neograph.h>
 #include "provider_example_support.h"

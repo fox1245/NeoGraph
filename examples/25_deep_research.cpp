@@ -18,6 +18,8 @@
 //   OPENROUTER_API_KEY        — required
 //   CRAWL4AI_URL              — optional, defaults to http://localhost:11235
 //   CRAWL4AI_API_TOKEN        — optional for legacy servers; required by the current secure Docker server
+//
+// smoke-skip: needs OPENROUTER_API_KEY and a Crawl4AI server (CRAWL4AI_URL, CRAWL4AI_API_TOKEN)
 
 #include <neograph/neograph.h>
 #include "provider_example_support.h"

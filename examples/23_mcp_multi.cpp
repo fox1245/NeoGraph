@@ -14,6 +14,8 @@
 //   ./example_mcp_multi http://localhost:8000/mcp \
 //       python3 examples/demo_mcp_stdio_server.py
 // (auto-loads .env from the cwd or any parent directory.)
+//
+// smoke-skip: needs OPENROUTER_API_KEY and an MCP HTTP server plus the stdio demo server
 
 #include <neograph/neograph.h>
 #include "provider_example_support.h"

@@ -2,6 +2,8 @@
 // Usage: ./example_responses_envelope ["What's the weather in Tokyo?"]
 // SchemaProvider owns HTTP admission/decoding. JSON below is only the function's
 // declared parameter schema, never an untyped request-body override.
+//
+// smoke-skip: needs OPENROUTER_API_KEY (live model call)
 
 #include "provider_example_support.h"
 

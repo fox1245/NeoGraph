@@ -36,6 +36,8 @@
 // Build:  cmake --build build --target cookbook_the_beast_baldwin_llm
 // Run:    ./build/cookbook_the_beast_baldwin_llm            # oracle learner
 //         OPENROUTER_API_KEY=... ./build/cookbook_the_beast_baldwin_llm --llm
+//
+// smoke-expect: THE BEAST (baldwin-llm
 
 #include <neograph/neograph.h>
 #include <neograph/graph/loader.h>

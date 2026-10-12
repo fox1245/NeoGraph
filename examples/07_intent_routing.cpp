@@ -9,6 +9,10 @@
 // No API key required (uses Mock Provider)
 //
 // Usage: ./example_intent_routing
+//
+// smoke-expect: Trace: classifier → math_expert → END
+// smoke-expect: Trace: classifier → translate_expert → END
+// smoke-expect: Trace: classifier → general_expert → END
 
 #include <neograph/neograph.h>
 #include "provider_example_support.h"

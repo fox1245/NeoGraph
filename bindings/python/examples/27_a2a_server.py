@@ -6,6 +6,8 @@ Install the optional server dependency first:
 Then run this file and send A2A 1.0 JSON-RPC requests to
 http://127.0.0.1:9999/. The agent card is served from the SDK's standard
 well-known route.
+
+smoke-skip: serves until stopped and needs neograph-engine[a2a]; exercised by bindings/python/tests/test_protocol_sdk_e2e.py
 """
 
 import os

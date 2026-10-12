@@ -12,6 +12,8 @@ Run:
     pip install neograph-engine
     export OPENAI_API_KEY=...  # read from the environment only
     python 18_node_cache.py
+
+smoke-skip: needs OPENAI_API_KEY (hosted model call); to be rewritten on the scripted model
 """
 
 import time

@@ -16,6 +16,9 @@
 // design (chosen for schema robustness) does NOT get protobuf's
 // field-level wire compression. The gRPC win here is transport
 // (HTTP/2 framing + connection reuse), not payload shrink.
+//
+// smoke-expect: Round-trip correctness (rich fields preserved): PASS
+// smoke-expect: RESULT: PASS
 
 #include <cstdio>
 

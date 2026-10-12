@@ -50,6 +50,8 @@
 //
 // Build:  cmake --build build --target cookbook_the_beast_baldwin
 // Run:    ./build/cookbook_the_beast_baldwin
+//
+// smoke-expect: faithful fitness): PASS
 
 #include <neograph/neograph.h>
 #include <neograph/graph/loader.h>

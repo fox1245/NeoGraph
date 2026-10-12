@@ -13,6 +13,8 @@
 //
 // .env (or env vars) must set OPENROUTER_API_KEY. The model is hard-coded to
 // ~deepseek/deepseek-v4-flash-latest.
+//
+// smoke-skip: serves A2A until stopped; run scripts/run_session.sh --mock for the four-member session
 
 #include <neograph/neograph.h>
 #include <neograph/a2a/server.h>

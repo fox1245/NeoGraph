@@ -30,6 +30,8 @@
 // Build:  cmake --build build --target cookbook_the_beast_novelist
 // Run:    ./build/cookbook_the_beast_novelist "your premise here"   [chapters]
 //         OPENROUTER_API_KEY=... ./build/cookbook_the_beast_novelist "..." 12
+//
+// smoke-expect: done — 1554 characters across 12 chapters.
 
 #include <neograph/neograph.h>
 #include <neograph/graph/validator.h>

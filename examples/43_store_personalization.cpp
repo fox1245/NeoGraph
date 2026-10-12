@@ -28,6 +28,9 @@
 // No API key required.
 //
 // Usage: ./example_store_personalization
+//
+// smoke-expect: [carol] Hello, stranger!
+// smoke-expect: Unknown-user fallback: true
 
 #include <neograph/neograph.h>
 #include <neograph/graph/loader.h>

@@ -12,6 +12,10 @@
 // No API key required (uses custom nodes)
 //
 // Usage: ./example_all_features
+//
+// smoke-expect: Result: "External API response success (attempt 3)"
+// smoke-expect: Reason: High-value payment detected
+// smoke-expect: (tier: PREMIUM)
 
 #include <neograph/neograph.h>
 #include <neograph/graph/react_graph.h>

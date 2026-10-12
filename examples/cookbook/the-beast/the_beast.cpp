@@ -32,6 +32,9 @@
 //
 // Build:  cmake --build build --target cookbook_the_beast
 // Run:    ./build/cookbook_the_beast
+//
+// smoke-expect: Generated. Evolved. Rewound. The Beast remains.
+// smoke-expect: restored trail = ["s1_n","s2_n"]
 
 #include <neograph/neograph.h>
 #include <neograph/graph/validator.h>

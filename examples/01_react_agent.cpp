@@ -16,6 +16,11 @@
 //   ./example_react_agent           scripted model, no key, no network
 //   ./example_react_agent --live    real model through OpenRouter
 //                                   (needs OPENROUTER_API_KEY in the environment; billed)
+//
+// smoke-expect: provider: scripted
+// smoke-expect: Thought: I need 15 * 28 first
+// smoke-expect: [tool] calculator({"expression":"15 * 28 + 7"})
+// smoke-expect: Final answer: 427
 
 #include <neograph/neograph.h>
 #include "scripted_provider.h"

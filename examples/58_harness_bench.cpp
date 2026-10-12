@@ -4,6 +4,10 @@
 //
 //   ./example_harness_bench --smoke
 //   ./example_harness_bench task1.json [task2.json ...]
+//
+// smoke-args: --smoke
+// smoke-expect: "total_runs": 3
+// smoke-expect: "converged": 3
 
 #include <neograph/graph/harness_bench.h>
 #include <neograph/graph/node.h>

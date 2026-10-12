@@ -25,6 +25,10 @@
 // Setup:  OPENROUTER_API_KEY in .env ; python3 + timeout on PATH.
 // Build:  cmake --build build --target cookbook_the_beast_script
 // Run:    ./build/cookbook_the_beast_script
+//
+// smoke-args: --selftest
+// smoke-expect: final counter = 3
+// smoke-expect: trace: tick -> tick -> tick -> END
 
 #include <neograph/neograph.h>
 #include <neograph/graph/validator.h>

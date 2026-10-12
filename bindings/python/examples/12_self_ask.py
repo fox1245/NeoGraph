@@ -13,6 +13,8 @@ Run:
     pip install neograph-engine
     export OPENAI_API_KEY=...  # read from the environment only
     python 12_self_ask.py
+
+smoke-skip: needs OPENAI_API_KEY (hosted model call); to be rewritten on the scripted model
 """
 
 from _common import ask_text, ng, schema_provider

@@ -2,6 +2,8 @@
 // Usage: ./example_reasoning_effort ["your custom prompt"]
 // Provider reports are evidence, not a promise of monotonic latency or accuracy.
 // Every trial retains its entire immutable Outcome, including failure partials.
+//
+// smoke-skip: needs OPENROUTER_API_KEY (live model call)
 
 #include "provider_example_support.h"
 

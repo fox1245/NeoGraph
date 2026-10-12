@@ -5,6 +5,9 @@
 //
 // Usage:
 //   ./example_custom_graph
+//
+// smoke-expect: Final response: "The answer is 5."
+// smoke-expect: Execution trace: llm -> tools -> llm -> END
 
 #include <neograph/neograph.h>
 #include <neograph/graph/react_graph.h>

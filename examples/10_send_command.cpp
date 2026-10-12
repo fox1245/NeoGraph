@@ -13,6 +13,9 @@
 // No API key required (custom nodes)
 //
 // Usage: ./example_send_command
+//
+// smoke-expect: Status: sufficient: 5 findings
+// smoke-expect: Total findings: 5
 
 #include <neograph/neograph.h>
 

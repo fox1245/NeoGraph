@@ -14,6 +14,8 @@
 //
 // Example:
 //   ./example_mcp_agent http://127.0.0.1:8000/mcp "Use the calculate tool to compute 15 * 28 + 7."
+//
+// smoke-skip: needs an MCP HTTP server URL and OPENROUTER_API_KEY (live model call)
 
 #include <neograph/neograph.h>
 #include "provider_example_support.h"

@@ -23,6 +23,8 @@
 // this but no example exercised the rejection path.
 //
 // Usage: ./example_request_queue_backpressure
+//
+// smoke-expect: submitted    : 50
 
 #include <neograph/neograph.h>
 #include <neograph/util/request_queue.h>

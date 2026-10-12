@@ -10,6 +10,8 @@
 //
 // Then call RunGraph with a JSON graph_def + input from any gRPC
 // client in any language — the C++ engine runs it, no Python anywhere.
+//
+// smoke-skip: serves until stopped; pair it with example 53 (needs -DNEOGRAPH_BUILD_GRPC=ON)
 
 #include <neograph/grpc/graph_service.h>
 

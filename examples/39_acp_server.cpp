@@ -17,6 +17,10 @@
 //
 //   2) Self-test (loops a request through the in-process server):
 //        ./example_acp_server --self-test
+//
+// smoke-args: --self-test
+// smoke-expect: [neo-acp] HELLO ACP
+// smoke-expect: OK — 1 update(s) emitted
 
 #include <neograph/neograph.h>
 #include <neograph/acp/server.h>

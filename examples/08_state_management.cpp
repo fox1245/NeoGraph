@@ -11,6 +11,10 @@
 // No API key required (uses Mock Provider)
 //
 // Usage: ./example_state_management
+//
+// smoke-expect: interrupted: true
+// smoke-expect: Fork complete: thread-001 -> thread-001-tokyo
+// smoke-expect: Forked thread execution trace: reviewer → END
 
 #include <neograph/neograph.h>
 #include <neograph/graph/react_graph.h>

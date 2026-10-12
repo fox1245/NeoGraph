@@ -10,6 +10,9 @@
 // Opt-in (-DNEOGRAPH_BUILD_GRPC=ON). Self-contained: spins the gRPC
 // ToolService in a background thread, then drives a GrpcRemoteTool
 // through the plain neograph::Tool interface.
+//
+// smoke-expect: → {"sum":8.0,"echo":"demo"}
+// smoke-expect: threw as expected
 
 #include <cstdio>
 

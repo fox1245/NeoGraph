@@ -7,6 +7,8 @@
 //
 // Member URLs come from CLI args:
 //   speaker <bill_file> <member_url> [<member_url> ...]
+//
+// smoke-skip: needs the four member servers running; run scripts/run_session.sh --mock
 
 #include <neograph/a2a/client.h>
 

@@ -17,6 +17,12 @@ Run:
     python 08_intent_routing.py           # scripted model, no key, no network
     export OPENAI_API_KEY=...             # then, to call a hosted model (billed):
     python 08_intent_routing.py --live
+
+smoke-expect: provider: scripted
+smoke-expect: routed to: math
+smoke-expect: routed to: translate
+smoke-expect: routed to: general
+smoke-expect: answer:    17 * 23 = 391
 """
 
 from _common import ask_text, example_provider, ng

@@ -37,6 +37,8 @@ Run::
 
 Both the chat node and the evolver make provider requests. Hosted calls incur
 provider charges; OPENAI_API_BASE can instead route to a local Chat protocol peer.
+
+smoke-skip: needs OPENAI_API_KEY (hosted model call); to be rewritten on the scripted model
 """
 
 from __future__ import annotations

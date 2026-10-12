@@ -12,6 +12,9 @@
 // Exit status: 0 migrated and verified; 1 migration not verified; 2 error or a
 // key outside the retrieval catalog; 3 a catalog candidate whose migration
 // class cannot continue an in-flight run (reported, not attempted).
+//
+// smoke-expect: "verified":true
+// smoke-expect: "active_generation":2
 
 #include <neograph/neograph.h>
 #include <neograph/program/program.h>

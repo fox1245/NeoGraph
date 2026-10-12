@@ -11,6 +11,10 @@
 // No API key required (uses Mock Provider)
 //
 // Usage: ./example_checkpoint_hitl
+//
+// smoke-expect: Interrupted! Node: tools
+// smoke-expect: Execution trace: tools → llm → END
+// smoke-expect: Payment has been completed.
 
 #include <neograph/neograph.h>
 #include <neograph/graph/react_graph.h>
