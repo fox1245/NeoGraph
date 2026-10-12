@@ -2662,6 +2662,47 @@ TEST(ACPServer, StdioMcpServerToolsAreAvailableToTheSession) {
     EXPECT_NE(result.find("\"msg\": \"hi\""), std::string::npos) << result;
     EXPECT_TRUE(server.session_tools("unknown").empty());
 }
+
+// The agent's environment may hold provider API keys: a client-specified MCP
+// server gets PATH and the client's `env` entries, nothing else.
+TEST(ACPServer, ClientMcpServersDoNotInheritTheAgentEnvironment) {
+    const char* python = acp_test_python();
+    if (!python) GTEST_SKIP() << "python3 not available";
+    constexpr const char* kSecret = "NEOGRAPH_ACP_TEST_PROVIDER_KEY";
+#ifdef _WIN32
+    ASSERT_EQ(_putenv_s(kSecret, "sk-test-fake-0000"), 0);
+#else
+    ASSERT_EQ(setenv(kSecret, "sk-test-fake-0000", 1), 0);
+#endif
+    const auto fixture = std::filesystem::path(__FILE__).parent_path() / "fixtures"
+                         / "mcp_stdio_env_probe.py";
+    auto server = make_server();
+    initialize_server(server);
+    auto created = server.handle_message(make_request(1, "session/new",
+        {{"cwd", std::filesystem::temp_directory_path().string()},
+         {"mcpServers", neograph::json::array({neograph::json{
+             {"name", "env-probe"}, {"command", python},
+             {"args", neograph::json::array({fixture.string()})},
+             {"env", neograph::json::array({neograph::json{
+                 {"name", "NEOGRAPH_ACP_CLIENT_VALUE"}, {"value", "from-client"}}})}}})}}));
+#ifdef _WIN32
+    _putenv_s(kSecret, "");
+#else
+    unsetenv(kSecret);
+#endif
+    ASSERT_TRUE(created.contains("result")) << created.dump();
+    const auto sid = created["result"].value("sessionId", std::string());
+    auto tools = server.client()->session_tools(sid);
+    ASSERT_EQ(tools.size(), 1u);
+    const auto seen = neograph::json::parse(tools[0]->execute(
+        {{"names", {kSecret, "NEOGRAPH_ACP_CLIENT_VALUE", "PATH", "HOME"}}}));
+    EXPECT_TRUE(seen[kSecret].is_null()) << seen.dump();
+    EXPECT_EQ(seen["NEOGRAPH_ACP_CLIENT_VALUE"], "from-client") << seen.dump();
+    EXPECT_TRUE(seen["PATH"].is_string()) << seen.dump();
+#ifndef _WIN32
+    EXPECT_TRUE(seen["HOME"].is_null()) << seen.dump();
+#endif
+}
 #endif
 
 // ---------------------------------------------------------------------------

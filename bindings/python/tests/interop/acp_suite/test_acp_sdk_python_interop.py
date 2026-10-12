@@ -604,8 +604,11 @@ def mcp_stdio_server(**env):
     )
 
 
-def test_client_stdio_mcp_server_tools_reach_the_graph():
+def test_client_stdio_mcp_server_tools_reach_the_graph(monkeypatch):
     require_module("mcp")
+    # The agent's environment may hold provider keys; the MCP server the
+    # client names gets PATH and the client's env only.
+    monkeypatch.setenv("ACP_INTEROP_AGENT_SECRET", "sk-interop-fake-0000")
 
     async def body():
         client = RecordingClient()
@@ -614,11 +617,13 @@ def test_client_stdio_mcp_server_tools_reach_the_graph():
             r1 = await prompt(s, sid, [text_block("mcp-list")])
             r2 = await prompt(s, sid, [text_block('mcp-call add {"a": 2, "b": 3}')])
             r3 = await prompt(s, sid, [text_block("mcp-call env_probe {}")])
-            assert (r1.stop_reason, r2.stop_reason, r3.stop_reason) == ("end_turn",) * 3, s.wire()
-            listed, added, env = client.agent_text()
+            r4 = await prompt(s, sid, [text_block('mcp-call env_probe {"name": "ACP_INTEROP_AGENT_SECRET"}')])
+            assert (r1.stop_reason, r2.stop_reason, r3.stop_reason, r4.stop_reason) == ("end_turn",) * 4, s.wire()
+            listed, added, env, secret = client.agent_text()
             assert set(listed.removeprefix("mcp-tools:").split(",")) == {"add", "env_probe"}, s.wire()
             assert added.startswith("mcp-result:") and "5" in added, s.wire()
             assert "from-client" in env, s.wire()
+            assert "<unset>" in secret and "sk-interop" not in secret, s.wire()
             assert_no_sdk_complaints(s)
     run(body())
 

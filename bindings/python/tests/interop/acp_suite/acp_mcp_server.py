@@ -18,9 +18,9 @@ def add(a: int, b: int) -> int:
 
 
 @server.tool()
-def env_probe() -> str:
-    """Report ACP_INTEROP_ENV, which the ACP client sets through `env`."""
-    return os.environ.get("ACP_INTEROP_ENV", "<unset>")
+def env_probe(name: str = "ACP_INTEROP_ENV") -> str:
+    """Report an environment variable; the ACP client sets ACP_INTEROP_ENV through `env`."""
+    return os.environ.get(name, "<unset>")
 
 
 if __name__ == "__main__":

@@ -33,7 +33,10 @@
  * Client-supplied stdio MCP servers (session/new `mcpServers`) are started
  * with NeoGraph's MCP client when the library is built with
  * NEOGRAPH_BUILD_MCP_CLIENT; their tools are available to nodes through
- * ACPClient::session_tools().
+ * ACPClient::session_tools(). A server gets the agent's PATH (and on Windows
+ * SystemRoot) plus the client's `env` entries, never the rest of the agent's
+ * environment, which may hold provider API keys. One that does not start
+ * fails the request with a clear error.
  *
  * Adapter pattern mirrors neograph::a2a — by default the inbound prompt
  * text is dropped into the `prompt` channel and the `response` channel

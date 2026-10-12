@@ -412,9 +412,20 @@ bool same_env_name(const std::string& a, const std::string& b) {
 #endif
 }
 
-/// The agent's own environment with the client's `env` entries applied on top.
+/// The environment of a client-specified MCP server: the agent's PATH, so
+/// the client's `command` resolves as it would in a shell, plus the client's
+/// `env` entries. Nothing else of the agent's environment is passed on: it
+/// may hold provider API keys, and the client names the server's command.
+/// Windows also needs SystemRoot, without which a process cannot load its
+/// system libraries; it holds a directory, never a secret.
 std::vector<std::pair<std::string, std::string>>
 mcp_server_environment(const std::vector<std::pair<std::string, std::string>>& overrides) {
+    static const char* const kInherited[] = {
+        "PATH",
+#if defined(_WIN32)
+        "SystemRoot",
+#endif
+    };
     std::vector<std::pair<std::string, std::string>> result;
 #if defined(__APPLE__)
     char** entries = *_NSGetEnviron();
@@ -429,11 +440,9 @@ mcp_server_environment(const std::vector<std::pair<std::string, std::string>>& o
         // Skip malformed entries and Windows' hidden "=C:" drive entries.
         if (eq == std::string_view::npos || eq == 0) continue;
         std::string key(text.substr(0, eq));
-        bool overridden = false;
-        for (const auto& [name, _] : overrides) {
-            if (same_env_name(name, key)) { overridden = true; break; }
-        }
-        if (overridden) continue;
+        const bool inherited = std::any_of(std::begin(kInherited), std::end(kInherited),
+                                           [&](const char* name) { return same_env_name(name, key); });
+        if (!inherited) continue;
         bool duplicate = false;
         for (const auto& [name, _] : result) {
             if (same_env_name(name, key)) { duplicate = true; break; }
@@ -444,7 +453,7 @@ mcp_server_environment(const std::vector<std::pair<std::string, std::string>>& o
         bool duplicate = false;
         for (auto& [name, value] : result) {
             if (same_env_name(name, item.first)) {
-                value = item.second;  // a later client entry wins
+                value = item.second;  // a client entry wins, a later one last
                 duplicate = true;
                 break;
             }
