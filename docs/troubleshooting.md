@@ -132,6 +132,20 @@ Historical fixes include v0.1.8 acceptance of top-level conditional_edges, remov
 
 Opaque convenience-vector properties may not be Python lists. Use iteration or `list(value)` for inspection, and build-then-assign for copied sequence fields such as ChatMessage.image_urls. Do not assume mutating a returned copy changes a C++ request; the new typed request/outcome contract is separate from old CompletionParams examples.
 
+## Tool calls, Hooks and protocol errors
+
+A graph run whose tool call, node or subgraph hits a mandatory Hook block now throws `HookBoundaryBlocked` itself, as `llm::Agent` always did, instead of a `NodeExecutionError` wrapping it, and emits no `ERROR` event for it. Catch `HookBoundaryBlocked` (Python: `ng.HookBoundaryBlocked`) and read `invocation_id` and `state`. A Python node that raises one, for example from a nested engine run, is no longer retried. See the [tool failure contract](reference-en.md#tool-failure-contract).
+
+An engine's `HookRuntime` now also runs the `BeforeToolExecution` and `AfterToolExecution` Hooks of its tool calls, and a Program host's Hook runtime those of its Cores' tool calls. If a graph run now stops with `HookBoundaryBlocked` state `failed` and the message `lifecycle hook could not run`, give the run an owner scope (`RunMetadata::owner_scope`): a Hook boundary without one fails closed, for checkpoint Hooks as for tool Hooks.
+
+`state == "timed_out"` now means that a Hook's deadline elapsed or its target timed out. A Hook whose last attempt failed reports `failed`; before, it reported `timed_out`.
+
+A tool result with status `expired` and error `run deadline elapsed before the tool started` means the run's deadline had passed before the call could start: the tool and its Hooks did not run. Raise `RunMetadata::deadline` (Python `timeout_ms`, Program `wall_time_ms`) rather than retrying the call. An MCP call that the run's deadline or the client's request timeout stops is `timed_out`, and cancelling the run stops an MCP call in flight at once.
+
+`MCPServer` answers a cancelled `tools/call` with JSON-RPC error `-32800`, a Hook block with `-32010` and an interrupt with `-32011`; every other failure is an `isError` result whose `_meta["io.neograph/failure"].code` names it. gRPC responses carry the same code in `error_code`. See [Protocol failure mapping](reference-en.md#protocol-failure-mapping).
+
+Tool output or an exception message that is not valid UTF-8 used to arrive as an empty tool message, an empty MCP or gRPC payload, or a `UnicodeDecodeError` in Python. It now arrives with U+FFFD in place of each ill-formed sequence.
+
 ## Reporting a bug safely
 
 Provide the version/platform, minimal topology and call, execution_trace/status, and redacted typed failure/stop/usage evidence. State whether the failure came from an installed wheel or a rebuilt checkout. Never include credentials, private prompts, encoded native request bodies or unsanitized packet captures. Report at <https://github.com/fox1245/NeoGraph/issues>.

@@ -554,15 +554,38 @@ Every path that runs a model's tool calls applies the same rules: `dispatch_tool
 
 | Failure | Outcome |
 |---------|---------|
-| `HookBoundaryBlocked`: a mandatory Hook failed, timed out or could not run, or tool code raised one | The run stops with that exception, its invocation id and state intact. A node retry policy does not retry it. |
-| The run's `CancelToken` is cancelled | The run stops with `graph::CancelledException`. |
+| `HookBoundaryBlocked`: a mandatory Hook failed, timed out or could not run, or tool code raised one | The run stops with that exception, its invocation id and state intact: a graph run throws it as `llm::Agent` does, not wrapped in a `NodeExecutionError`. A node retry policy does not retry it. |
+| The run's `CancelToken` is cancelled (a node attempt's token included) | The run stops with `graph::CancelledException`. An MCP call or a `GrpcRemoteTool` RPC in flight stops at once; its late response is dropped. |
 | `NodeInterrupt` from a `ToolGate` or from tool code | The run pauses; `llm::Agent` throws it to its caller. |
 | Unknown tool, or a gate's `Deny` | A tool result with status `rejected`. |
+| The call would start at or after the run's deadline (`RunContext::deadline`, `ToolExecutionContext::deadline`) | A tool result with status `expired` and error `run deadline elapsed before the tool started`. Neither the tool nor its Hooks run. |
 | An exception from tool code or its lookup (C++, Python, an MCP `isError` result or JSON-RPC error), or unparseable arguments | A tool result with status `failed`, or `reconciliation_required` when the call had started and its execution policy does not rule out an effect. |
-| A typed controller status such as `timed_out`, `expired`, `killed` or `input_required` | A tool result with that status. |
+| A typed controller status such as `timed_out`, `expired`, `killed` or `input_required` | A tool result with that status. An MCP call or `GrpcRemoteTool` RPC stopped by the run's deadline or by its request timeout is `timed_out`. |
 | A tool result with an uncertain effect, under a `ToolEffectBroker` | The run pauses with a `NodeInterrupt` whose payload `kind` is `tool_effect_reconciliation`. |
 
-The first three rows never reach the model. A tool result sets `tool_status`, and a failed one carries `{"error", "status", "retryable", "effect_uncertain"}`, in one call or a batch. In a batch the other calls finish first; when several calls stop the run, cancellation wins over a Hook block and a Hook block over an interrupt. A `NodeInterrupt` raised by a tool lets its siblings run, and resume runs the whole batch again; to ask before anything runs, use a `ToolGate`. The run deadline (`RunMetadata::deadline`) bounds Hooks and provider calls; a tool's own limits are its policy's `execution_timeout` and `queue_timeout`. Tool Hooks run where the `ToolExecutionContext` carries a `HookRuntime` (`dispatch_tool_calls`, `llm::Agent::set_hook_runtime`); a graph engine's `HookRuntime` publishes checkpoint Hooks only.
+The first three rows never reach the model. A tool result sets `tool_status`, and a failed one carries `{"error", "status", "retryable", "effect_uncertain"}`, in one call or a batch. In a batch the other calls finish first; when several calls stop the run, cancellation wins over a Hook block and a Hook block over an interrupt. A `NodeInterrupt` raised by tool code lets its siblings run, and resume runs the whole batch again; to ask before anything runs, use a `ToolGate`. The run deadline (`RunMetadata::deadline`) bounds Hooks, provider calls and the start of every tool call, including its wait in the admission queue; a tool's own limits are its policy's `execution_timeout` and `queue_timeout`. A system error that tool code raises after it started is the tool's failure (`failed` or `reconciliation_required`), not an admission verdict; host admission refuses with `rejected` (a full queue, no capacity) or `expired` (its queue wait ran out), like the resource arbiter.
+
+**Tool Hooks.** Every path emits one `BeforeToolExecution` event before a call starts and one `AfterToolExecution` event after it settles, with the same data (`tool_call_id`, `tool_name`, `thread_id`, `request_id`, and `arguments` before or `status` and `result` after), under the run's owner scope and run id. The `HookRuntime` is the `ToolExecutionContext`'s for direct dispatch; `llm::Agent::set_hook_runtime`, or the context passed to `run`, for the Agent; and for a graph run the engine's (`EngineConfig::hook_runtime`, `GraphEngine::set_hook_runtime`) unless `RunResources::hook_runtime` replaces it for that run. A subgraph's tool calls use its parent run's `HookRuntime` when the parent has one, and a Program Core's tool calls use the Program host's (`RuntimeConfig::hook_runtime`). A denied, unknown or expired call starts nothing and emits no Hook. A mandatory Hook whose last attempt failed reports `failed`; it reports `timed_out` only when its deadline elapsed or its target timed out. A Hook boundary that cannot run at all (no owner scope to attribute the event to, an unusable journal) fails closed with state `failed`, for tool, checkpoint, provider and Program events alike. When the run is cancelled while a Hook runs, the run stops as cancelled.
+
+**Text.** Text that crosses a boundary is well-formed UTF-8: each maximal ill-formed subsequence becomes U+FFFD, the Unicode and WHATWG substitution practice. The rule covers tool results and failure messages, Hook receipts, `json::dump` (a document holding an ill-formed string used to serialize as an empty string), MCP and gRPC responses, and the Python binding. There, text read from C++ decodes the same way, and a `str` turns into UTF-8 with its surrogate-escaped bytes (U+DC80 to U+DCFF, as `errors="surrogateescape"` produces) turned back into the bytes they stand for, and any other lone surrogate turned into U+FFFD.
+
+**The throwing facade.** `ToolExecutionController::execute_async` returns the output on success, throws `graph::CancelledException` for `cancelled_before_start` and `cancellation_requested`, and throws `ToolExecutionError`, which carries the whole `ToolExecutionResult`, for every other status. The node failure classifier reads it: an uncertain effect is `NG.EffectUncertain`, a call that timed out or expired is `NG.Timeout`, anything else is ordinary.
+
+### Protocol failure mapping
+
+When NeoGraph serves tools or graphs over MCP or gRPC, every failure class keeps a distinct, documented form on the wire, named by the stable code the node failure classifier gives (`graph::classify_failure`). Run control signals never become a tool result a model could read.
+
+| Class (code) | MCP `tools/call` (`MCPServer`) | gRPC `GraphService` | gRPC `ToolService.CallTool` |
+|------|------|------|------|
+| Cancelled (`NG.Cancelled`): `notifications/cancelled`, `stop()`, a client cancel, or a handler that raised `CancelledException` | JSON-RPC error `-32800`, `data.code` | status `CANCELLED`, `error_code` | status `CANCELLED` |
+| Hook blocked (`NG.HookBlocked`) | JSON-RPC error `-32010`, `data` `{code, invocation_id, state}` | status `OK`, `error`, `error_code`, `error_detail_json` `{invocation_id, state}` | status `OK`, `error`, `error_code`, `error_detail_json` `{invocation_id, state}` |
+| Interrupted (`NG.Interrupted`) | JSON-RPC error `-32011`, `data` `{code, reason, value}` | a paused run: `interrupted`, `interrupt_node`, `interrupt_value_json` | status `OK`, `error`, `error_code`, `error_detail_json` `{reason, value}` |
+| Ordinary tool error (`NG.TaskFailed`, an author code) | `result` with `isError: true` and `_meta["io.neograph/failure"]` `{code, retryable}` | status `OK`, `error`, `error_code` | status `OK`, `error`, `error_code` |
+| Timeout (`NG.Timeout`), provider failure (`NG.ProviderFailed`), budget (`NG.BudgetExhausted`) and every other class (`NG.ConfigError`, `NG.LogicError`, `NG.SafetyBlocked`, `NG.EffectCommitted`, `NG.EffectUncertain`, `NG.UnknownFailure`) | as an ordinary tool error, with its own code | as an ordinary failure, with its own code | as an ordinary failure, with its own code |
+| A run that ended without reaching `__end__` | none | `error_code`: the failure exit's code, or `NG.BarrierStalled` | none |
+| Unknown tool | `result` with `isError: true`, no failure code | none | `error_code` `NG.ToolNotFound` |
+
+`RunGraphStream` reports a failure as an event whose payload is `{error, code, detail}`. A cancelled request gets a response too, so an HTTP transport never waits for one; a client that sent `notifications/cancelled` drops it. NeoGraph's own clients do not turn these codes back into local control signals: an MCP JSON-RPC error or a gRPC `error` from a remote server is an ordinary tool failure for the caller.
 
 ### Node failure contract
 
@@ -571,16 +594,18 @@ When a node throws, one classifier decides whether its retry policy may run it a
 | Class (least to most severe) | Code | Raised by | Retried | Routable |
 |------|------|------|------|------|
 | Ordinary | `NG.TaskFailed`, `NG.SubgraphFailed` or an author code | `std::runtime_error` and its subclasses, `NodeFailureError`, a Python exception, a subgraph failure whose root is ordinary | yes, unless the author marked it not retryable | yes |
-| Timeout | `NG.Timeout` | an attempt that ran past its `attempt_timeout_ms`, was cancelled and stopped (`NodeAttemptTimeout`) | yes | yes |
+| Timeout | `NG.Timeout` | an attempt that ran past its `attempt_timeout_ms`, was cancelled and stopped (`NodeAttemptTimeout`); an operation that timed out (an asio or `std::system_error` with `timed_out`); a tool call that timed out or expired (`ToolExecutionError`) | yes | yes |
 | ProviderFailed | `NG.ProviderFailed` | a transient `ProviderFailure`: transport, truncated response, deadline, overloaded, rate limited, or a remote failure with an HTTP 5xx status | no: the provider runtime owns provider retries | yes |
 | EffectCommitted | `NG.EffectCommitted` | the attempt committed a non-idempotent Tool effect | never | yes, so a handler can compensate |
 | LogicError | `NG.LogicError` | `std::logic_error`, including integrity checks | no | no |
 | ConfigError | `NG.ConfigError` | provider configuration, request, authentication, permission, not-found or misuse failures; an exception that mixes in `ConfigurationFailure`, such as a Program diagnostic (`ProgramDiagnosticError`, a compile or admission error, in C++ or Python) | no | no |
 | SafetyBlocked | `NG.SafetyBlocked` | a provider failure that stopped on a content filter or a refusal | no | no |
 | BudgetExhausted | `NG.BudgetExhausted` | budget or quota exhaustion | no | no |
-| EffectUncertain | `NG.EffectUncertain` | `ProviderOutcomeError`, including a provider dispatch whose outcome is unknown, a Tool effect whose outcome is unknown, or a timed-out attempt that did not stop by its stop deadline | no | no |
+| EffectUncertain | `NG.EffectUncertain` | `ProviderOutcomeError`, including a provider dispatch whose outcome is unknown, a Tool effect whose outcome is unknown (a `ToolExecutionError` included), or a timed-out attempt that did not stop by its stop deadline | no | no |
 | UnknownFailure | `NG.UnknownFailure` | `std::bad_alloc` or any other exception type | no | no |
-| Run control | none | `NodeInterrupt`, `HookBoundaryBlocked`, cancellation | no | no: the run pauses or stops as before |
+| Run control | `NG.Interrupted`, `NG.HookBlocked`, `NG.Cancelled` | `NodeInterrupt`, `HookBoundaryBlocked`, cancellation | no | no: the run pauses or stops. A Hook block or a cancellation anywhere in the cause chain leaves the graph run as the `HookBoundaryBlocked` or `CancelledException` itself, with no `ERROR` event, as on every tool path |
+
+`graph::classify_failure(error, run_token)` returns this verdict for any exception (for a `NodeExecutionError` that carries a `NodeFailure` record, the record's): its class, its code, `public_message`, whether it may be retried or routed, and for a run control class the signal itself (`FailureVerdict::signal`). Protocol hosts report the code on the wire ([Protocol failure mapping](#protocol-failure-mapping)).
 
 The `NG.` prefix is reserved. An author code matches `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`. A C++ node throws `NodeFailureError(code, public_message, retryable)`. A Python node raises any exception with a string `code` attribute, and optionally a boolean `retryable` and a string `public_message`; the caller still receives the original exception. When the executor gives up on a node, the `NodeExecutionError` it throws carries a `NodeFailure` record, which `node_failure_of()` returns. The record holds the code, the class, why retrying stopped (`exhausted`, `non_retryable`, `effect_committed`, `ceiling` when the run's retry ceiling was reached, `deadline` when the backoff before the next attempt would have crossed the run's deadline, or `visit_limit` when the node was activated past its `max_visits`), the number of attempts, the retryable and routable flags, `public_message`, and the effects of the final attempt as `{tool, ordinal, status}`. It never copies `what()`. A code listed in the node's `non_retryable` is not retried.
 
@@ -2978,7 +3003,7 @@ Wraps a single MCP server tool as a local `Tool` implementation. Discovered
 tools retain their originating protocol session, regardless of transport.
 
 ```cpp
-class MCPTool : public AsyncTool {
+class MCPTool : public AsyncTool, public ContextualAsyncTool {
 public:
     // Legacy direct-construction mode. Discovered tools reuse their client session.
     MCPTool(const std::string& server_url,
@@ -2989,8 +3014,12 @@ public:
     const ToolDefinition& get_mcp_definition() const noexcept;
     CallToolResult execute_result(const json& arguments);
     asio::awaitable<CallToolResult> execute_result_async(const json& arguments);
+    asio::awaitable<CallToolResult> execute_result_async(const json& arguments,
+                                                         ToolExecutionContext context);
     ChatTool get_definition() const override;
     asio::awaitable<std::string> execute_async(const json& arguments) override;
+    asio::awaitable<std::string> execute_async(const json& arguments,
+                                               ToolExecutionContext context) override;
     std::string get_name() const override;
 };
 ```
@@ -2998,14 +3027,25 @@ public:
 Usually you do not construct `MCPTool` directly — `MCPClient::get_tools()`
 discovers and wraps them.
 
+Every dispatcher calls the context-aware `execute_async`, so the run's cancel
+token (a node attempt's token under an attempt timeout) and deadline bound the
+call on both transports. Cancelling stops waiting at once and throws
+`graph::CancelledException`, which the tool failure contract treats as
+cancellation; the deadline or the request timeout throws
+`asio::system_error(asio::error::timed_out)`, a `timed_out` call. The response
+that arrives after either is dropped: stdio routes responses by JSON-RPC id and
+the call's id is no longer awaited, and HTTP abandons the request. An `isError`
+result throws `std::runtime_error`, an ordinary tool failure. In Python,
+`mcp.MCPError` keeps the JSON-RPC error's `code` and `data`.
+
 ### MCPClient
 
 Client that connects to an MCP server, performs the initialization handshake, and
 provides methods to discover and invoke tools.
 
 > `MCPClient` is not designed to be subclassed — you use it as-is.
-> `rpc_call_async()` is the real implementation and `rpc_call()` is
-> a thin sync facade. See [`ASYNC_GUIDE.md` §9.5](ASYNC_GUIDE.md#95-mcpclient).
+> `rpc_call_async()` is the one transport-level call; the synchronous methods
+> drive the same session. See [`ASYNC_GUIDE.md` §9.5](ASYNC_GUIDE.md#95-mcpclient).
 
 ```cpp
 class MCPClient {
@@ -3026,6 +3066,10 @@ public:
     json call_tool(const std::string& name, const json& arguments);
     CallToolResult call_tool_result(const std::string& name,
                                     const json& arguments);
+    asio::awaitable<CallToolResult> call_tool_result_async(
+        const std::string& name, const json& arguments,
+        std::chrono::steady_clock::time_point deadline,
+        std::shared_ptr<graph::CancelToken> cancel_token);
 
     // Low-level async dispatch retained for source compatibility.
     asio::awaitable<json>
@@ -3073,7 +3117,12 @@ and `data()`. Neither class identifies a tool-level `isError` result; use
 | `get_tools()` | Discover all pages and return session-preserving `MCPTool` instances |
 | `call_tool(name, arguments)` | Invokes a tool by name with the given arguments. Returns the raw JSON response |
 | `call_tool_result(name, arguments)` | Typed result preserving content, structured content, `isError`, and `_meta` |
-| `rpc_call_async(method, params)` | Coroutine version. The "real" implementation — `rpc_call` is a thin sync wrapper. |
+| `call_tool_result_async(name, arguments, deadline, cancel_token)` | The typed call, bounded by an absolute steady-clock deadline and a cancel token as `rpc_call_async` is |
+| `rpc_call_async(method, params)` | The transport-level JSON-RPC call every other method uses |
+
+**Serving tools.** `MCPServer` (`<neograph/mcp/server.h>`) answers `tools/call`
+from registered handlers; how a handler's failure reaches the client is in
+[Protocol failure mapping](#protocol-failure-mapping).
 
 **HTTP usage:**
 

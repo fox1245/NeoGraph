@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=148e6f43f5fc83e1ed4fb51cd904caebac7583a6e23bb50857ebf9af1e34bbe3 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=9bd2aaf3ddfc71fd73dc9aae89227290ea5f3799f64165758a0924a233e45fe0 -->
 # 문제 해결
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -132,6 +132,20 @@ Tracer adapter는 session close로 파괴되는 Span wrapper의 raw pointer가 �
 역사적 수정에는 v0.1.8 top-level conditional_edges 수용, node 이중 실행 fallback 제거, 전환 전 httplib macro layout 불일치(issue #16)가 있다. 삭제된 provider signature를 복구하지 않는다. 여러 translation unit에서 header-only httplib를 쓰면 CPPHTTPLIB_OPENSSL_SUPPORT를 일관되게 정의해야 한다. 현재 typed-provider HTTP는 SDK libcurl이다.
 
 opaque convenience vector property는 Python list가 아닐 수 있다. iteration/`list(value)`로 확인하고 ChatMessage.image_urls처럼 복사되는 sequence는 만들어서 할당한다. 반환된 copy 변경이 C++ request를 수정한다고 가정하지 않는다. 새 typed request/outcome은 옛 CompletionParams 예제와 별개다.
+
+## 도구 호출, Hook, 프로토콜 오류
+
+도구 호출, 노드 또는 서브그래프가 필수 Hook 차단을 만난 그래프 실행은 이제 `llm::Agent`가 늘 그랬듯이 그것을 감싼 `NodeExecutionError` 대신 `HookBoundaryBlocked` 그 자체를 던지며, 이에 대한 `ERROR` 이벤트는 내보내지 않습니다. `HookBoundaryBlocked`(Python: `ng.HookBoundaryBlocked`)를 잡고 `invocation_id`와 `state`를 읽으세요. 예를 들어 중첩된 엔진 실행에서 이를 발생시킨 Python 노드는 더 이상 재시도되지 않습니다. [도구 실패 계약](reference-en.md#tool-failure-contract)을 참고하세요.
+
+엔진의 `HookRuntime`은 이제 그 도구 호출의 `BeforeToolExecution`과 `AfterToolExecution` Hook도 실행하며, Program 호스트의 Hook 런타임은 그 Core의 도구 호출의 Hook을 실행합니다. 그래프 실행이 이제 state `failed`와 메시지 `lifecycle hook could not run`을 가진 `HookBoundaryBlocked`로 멈춘다면, 실행에 owner scope(`RunMetadata::owner_scope`)를 주세요. owner scope가 없는 Hook 경계는 도구 Hook에서와 마찬가지로 체크포인트 Hook에서도 닫힌 채 실패합니다.
+
+`state == "timed_out"`은 이제 Hook의 마감 시각이 지났거나 대상이 시간을 초과했다는 뜻입니다. 마지막 시도가 실패한 Hook은 `failed`를 보고합니다. 예전에는 `timed_out`을 보고했습니다.
+
+상태가 `expired`이고 오류가 `run deadline elapsed before the tool started`인 도구 결과는 호출이 시작되기 전에 실행의 마감 시각이 지났다는 뜻이며, 도구와 그 Hook은 실행되지 않았습니다. 호출을 다시 시도하기보다 `RunMetadata::deadline`(Python `timeout_ms`, Program `wall_time_ms`)을 늘리세요. 실행의 마감 시각이나 클라이언트의 요청 타임아웃으로 멈춘 MCP 호출은 `timed_out`이며, 실행을 취소하면 진행 중인 MCP 호출이 즉시 멈춥니다.
+
+`MCPServer`는 취소된 `tools/call`에 JSON-RPC 오류 `-32800`, Hook 차단에 `-32010`, 인터럽트에 `-32011`로 응답하며, 그 밖의 모든 실패는 `_meta["io.neograph/failure"].code`가 이름을 알려 주는 `isError` 결과입니다. gRPC 응답은 같은 코드를 `error_code`에 담습니다. [프로토콜 실패 매핑](reference-en.md#protocol-failure-mapping)을 참고하세요.
+
+올바른 UTF-8이 아닌 도구 출력이나 예외 메시지는 예전에는 빈 도구 메시지, 빈 MCP나 gRPC 페이로드, 또는 Python의 `UnicodeDecodeError`로 도착했습니다. 이제는 잘못된 형식의 시퀀스마다 U+FFFD로 바뀌어 도착합니다.
 
 ## 안전한 버그 보고
 

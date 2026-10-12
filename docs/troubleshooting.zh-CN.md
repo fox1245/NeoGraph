@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=148e6f43f5fc83e1ed4fb51cd904caebac7583a6e23bb50857ebf9af1e34bbe3 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=9bd2aaf3ddfc71fd73dc9aae89227290ea5f3799f64165758a0924a233e45fe0 -->
 # 故障排除
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -132,6 +132,20 @@ Tracer adapter 须拥有记录 data，不保留 session close 销毁的 Span wra
 历史修复包括 v0.1.8 接受 top-level conditional_edges、删除 node 双执行 fallback、切换前 httplib macro layout 不一致（issue #16）。这些不恢复删除的 provider signature。跨 translation unit 实例化 header-only httplib 的 consumer 仍需一致定义 CPPHTTPLIB_OPENSSL_SUPPORT；当前 typed-provider HTTP 为 SDK libcurl。
 
 opaque convenience vector property 可能不是 Python list。用 iteration/`list(value)` 检查；ChatMessage.image_urls 等复制 sequence 须 build-then-assign。不要假设修改返回 copy 会改变 C++ request；新 typed request/outcome 与旧 CompletionParams 示例分离。
+
+## 工具调用、Hook 与协议错误
+
+工具调用、节点或子图遇到强制 Hook 阻断的图运行，现在会像 `llm::Agent` 一直以来那样抛出 `HookBoundaryBlocked` 本身，而不是包装它的 `NodeExecutionError`，并且不会为此发出 `ERROR` 事件。请捕获 `HookBoundaryBlocked`（Python：`ng.HookBoundaryBlocked`）并读取 `invocation_id` 与 `state`。例如在嵌套引擎运行中抛出它的 Python 节点不再被重试。参见[工具失败契约](reference-en.md#tool-failure-contract)。
+
+引擎的 `HookRuntime` 现在也会运行其工具调用的 `BeforeToolExecution` 与 `AfterToolExecution` Hook，Program 主机的 Hook 运行时会运行其 Core 工具调用的 Hook。如果图运行现在以 state 为 `failed`、消息为 `lifecycle hook could not run` 的 `HookBoundaryBlocked` 停止，请为运行提供 owner scope（`RunMetadata::owner_scope`）：没有 owner scope 的 Hook 边界无论是检查点 Hook 还是工具 Hook 都会关闭式失败。
+
+`state == "timed_out"` 现在表示 Hook 的截止时间已过或其目标超时。最后一次尝试失败的 Hook 报告 `failed`；以前它报告 `timed_out`。
+
+状态为 `expired`、错误为 `run deadline elapsed before the tool started` 的工具结果表示运行截止时间在调用能够开始之前就已经过去：工具及其 Hook 都没有运行。请延长 `RunMetadata::deadline`（Python 的 `timeout_ms`、Program 的 `wall_time_ms`），而不是重试该调用。被运行截止时间或客户端请求超时停止的 MCP 调用为 `timed_out`，取消运行会立即停止进行中的 MCP 调用。
+
+`MCPServer` 对被取消的 `tools/call` 以 JSON-RPC 错误 `-32800` 应答，对 Hook 阻断以 `-32010`、对中断以 `-32011` 应答；其他所有失败都是 `isError` 结果，由 `_meta["io.neograph/failure"].code` 指明其类别。gRPC 响应在 `error_code` 中携带相同的代码。参见[协议失败映射](reference-en.md#protocol-failure-mapping)。
+
+不是有效 UTF-8 的工具输出或异常消息，过去会变成空的工具消息、空的 MCP 或 gRPC payload，或在 Python 中引发 `UnicodeDecodeError`。现在每个格式错误的序列都会被替换为 U+FFFD 后到达。
 
 ## 安全报告 bug
 

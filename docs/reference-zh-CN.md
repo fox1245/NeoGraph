@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=3090741b7d96360bfdb6f2a93bb5b215f7c08d9a96c35ca801c043a6873ea199 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=d5712d45d63de13a7bbb77204b995f0b83f02ac0a536a4009de888dec5c59764 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -555,15 +555,39 @@ public:
 
 | 失败 | 结果 |
 |------|------|
-| `HookBoundaryBlocked`：强制 Hook 失败、超时或无法运行，或工具代码抛出了它 | 运行以该异常停止，其 invocation id 与 state 保持不变。节点重试策略不会重试它。 |
-| 运行的 `CancelToken` 被取消 | 运行以 `graph::CancelledException` 停止。 |
+| `HookBoundaryBlocked`：强制 Hook 失败、超时或无法运行，或工具代码抛出了它 | 运行以该异常停止，其 invocation id 与 state 保持不变；图运行也像 `llm::Agent` 一样直接抛出它，而不包装为 `NodeExecutionError`。节点重试策略不会重试它。 |
+| 运行的 `CancelToken` 被取消（包括节点尝试的 token） | 运行以 `graph::CancelledException` 停止。进行中的 MCP 调用或 `GrpcRemoteTool` RPC 会立即停止，迟到的响应会被丢弃。 |
 | 来自 `ToolGate` 或工具代码的 `NodeInterrupt` | 运行暂停；`llm::Agent` 将其抛给调用方。 |
 | 未知工具，或 gate 的 `Deny` | 状态为 `rejected` 的工具结果。 |
+| 调用将在运行截止时间（`RunContext::deadline`、`ToolExecutionContext::deadline`）当时或之后开始 | 状态为 `expired`、错误为 `run deadline elapsed before the tool started` 的工具结果。工具及其 Hook 都不会运行。 |
 | 工具代码或其查找抛出的异常（C++、Python、MCP 的 `isError` 结果或 JSON-RPC 错误），或无法解析的参数 | 状态为 `failed` 的工具结果；若调用已开始且其执行策略不能排除已产生效果，则为 `reconciliation_required`。 |
-| 带类型的控制器状态，如 `timed_out`、`expired`、`killed` 或 `input_required` | 带有该状态的工具结果。 |
+| 带类型的控制器状态，如 `timed_out`、`expired`、`killed` 或 `input_required` | 带有该状态的工具结果。因运行截止时间或请求超时而停止的 MCP 调用或 `GrpcRemoteTool` RPC 为 `timed_out`。 |
 | 在 `ToolEffectBroker` 下效果不确定的工具结果 | 运行以 payload `kind` 为 `tool_effect_reconciliation` 的 `NodeInterrupt` 暂停。 |
 
-前三行永远不会到达模型。工具结果会设置 `tool_status`，失败的结果无论是单个调用还是 batch 都带有 `{"error", "status", "retryable", "effect_uncertain"}`。在 batch 中，其他调用会先执行完毕；当多个调用都使运行停止时，取消优先于 Hook 阻断，Hook 阻断优先于中断。工具抛出的 `NodeInterrupt` 不会阻止其兄弟调用运行，恢复时整个 batch 会再次运行；若要在任何调用运行之前询问，请使用 `ToolGate`。运行截止时间（`RunMetadata::deadline`）约束 Hook 与 Provider 调用；工具自身的限制是其策略的 `execution_timeout` 与 `queue_timeout`。工具 Hook 在 `ToolExecutionContext` 携带 `HookRuntime` 的地方运行（`dispatch_tool_calls`、`llm::Agent::set_hook_runtime`）；图引擎的 `HookRuntime` 只发布检查点 Hook。
+前三行永远不会到达模型。工具结果会设置 `tool_status`，失败的结果无论是单个调用还是 batch 都带有 `{"error", "status", "retryable", "effect_uncertain"}`。在 batch 中，其他调用会先执行完毕；当多个调用都使运行停止时，取消优先于 Hook 阻断，Hook 阻断优先于中断。工具代码抛出的 `NodeInterrupt` 不会阻止其兄弟调用运行，恢复时整个 batch 会再次运行；若要在任何调用运行之前询问，请使用 `ToolGate`。运行截止时间（`RunMetadata::deadline`）约束 Hook、Provider 调用以及每个工具调用的开始，包括其在准入队列中的等待；工具自身的限制是其策略的 `execution_timeout` 与 `queue_timeout`。工具代码在开始之后抛出的系统错误是工具自身的失败（`failed` 或 `reconciliation_required`），而不是准入判定；主机准入与资源仲裁器一样，以 `rejected`（队列已满、没有容量）或 `expired`（队列等待耗尽）拒绝。
+
+**工具 Hook。** 每条路径都在调用开始前发出一个 `BeforeToolExecution` 事件，在调用落定后发出一个 `AfterToolExecution` 事件，数据相同（`tool_call_id`、`tool_name`、`thread_id`、`request_id`，之前为 `arguments`，之后为 `status` 与 `result`），归属于运行的 owner scope 与 run id。`HookRuntime` 在直接分发时是 `ToolExecutionContext` 的；在 Agent 中是 `llm::Agent::set_hook_runtime` 或传给 `run` 的上下文的；在图运行中是引擎的（`EngineConfig::hook_runtime`、`GraphEngine::set_hook_runtime`），除非 `RunResources::hook_runtime` 为该次运行替换了它。子图的工具调用在父运行有 `HookRuntime` 时使用父运行的，Program Core 的工具调用使用 Program 主机的（`RuntimeConfig::hook_runtime`）。被拒绝、未知或已过期的调用不启动任何东西，也不发出 Hook。最后一次尝试失败的强制 Hook 报告 `failed`；只有在截止时间已过或其目标超时时才报告 `timed_out`。完全无法运行的 Hook 边界（没有可归属事件的 owner scope、无法使用的日志）对工具、检查点、Provider 与 Program 事件一律以 state `failed` 关闭式失败。Hook 运行期间若运行被取消，运行以取消停止。
+
+**文本。** 跨越边界的文本都是格式正确的 UTF-8：每个格式错误的最大子序列都变为 U+FFFD，这是 Unicode 与 WHATWG 的替换做法。该规则适用于工具结果与失败消息、Hook 回执、`json::dump`（含有错误字符串的文档过去会被序列化为空字符串）、MCP 与 gRPC 响应，以及 Python 绑定。在 Python 中，从 C++ 读取的文本也以同样方式解码；`str` 转为 UTF-8 时，其中经过 surrogate-escape 的字节（U+DC80 到 U+DCFF，即 `errors="surrogateescape"` 产生的）还原为它们所代表的字节，其他孤立代理项变为 U+FFFD。
+
+**抛出异常的门面。** `ToolExecutionController::execute_async` 成功时返回输出，对 `cancelled_before_start` 与 `cancellation_requested` 抛出 `graph::CancelledException`，对其他所有状态抛出携带完整 `ToolExecutionResult` 的 `ToolExecutionError`。节点失败分类器会读取它：效果不确定为 `NG.EffectUncertain`，超时或过期的调用为 `NG.Timeout`，其余为 Ordinary。
+
+<a id="protocol-failure-mapping"></a>
+### 协议失败映射
+
+当 NeoGraph 通过 MCP 或 gRPC 提供工具或图时，每个失败类别在传输上都保持各自不同且有文档说明的形式，并以节点失败分类器给出的稳定代码（`graph::classify_failure`）命名。运行控制信号永远不会成为模型可读的工具结果。
+
+| 类别（代码） | MCP `tools/call`（`MCPServer`） | gRPC `GraphService` | gRPC `ToolService.CallTool` |
+|------|------|------|------|
+| 取消（`NG.Cancelled`）：`notifications/cancelled`、`stop()`、客户端取消，或抛出 `CancelledException` 的处理器 | JSON-RPC 错误 `-32800`，`data.code` | 状态 `CANCELLED`，`error_code` | 状态 `CANCELLED` |
+| Hook 阻断（`NG.HookBlocked`） | JSON-RPC 错误 `-32010`，`data` `{code, invocation_id, state}` | 状态 `OK`，`error`、`error_code`、`error_detail_json` `{invocation_id, state}` | 状态 `OK`，`error`、`error_code`、`error_detail_json` `{invocation_id, state}` |
+| 中断（`NG.Interrupted`） | JSON-RPC 错误 `-32011`，`data` `{code, reason, value}` | 已暂停的运行：`interrupted`、`interrupt_node`、`interrupt_value_json` | 状态 `OK`，`error`、`error_code`、`error_detail_json` `{reason, value}` |
+| 普通工具错误（`NG.TaskFailed`、作者代码） | 带有 `isError: true` 与 `_meta["io.neograph/failure"]` `{code, retryable}` 的 `result` | 状态 `OK`，`error`、`error_code` | 状态 `OK`，`error`、`error_code` |
+| 超时（`NG.Timeout`）、Provider 失败（`NG.ProviderFailed`）、预算（`NG.BudgetExhausted`）以及其他所有类别（`NG.ConfigError`、`NG.LogicError`、`NG.SafetyBlocked`、`NG.EffectCommitted`、`NG.EffectUncertain`、`NG.UnknownFailure`） | 与普通工具错误相同，带有各自的代码 | 与普通失败相同，带有各自的代码 | 与普通失败相同，带有各自的代码 |
+| 未到达 `__end__` 就结束的运行 | 无 | `error_code`：失败出口的代码，或 `NG.BarrierStalled` | 无 |
+| 未知工具 | 不带失败代码、`isError: true` 的 `result` | 无 | `error_code` `NG.ToolNotFound` |
+
+`RunGraphStream` 以 payload 为 `{error, code, detail}` 的事件报告失败。被取消的请求同样会得到响应，因此 HTTP 传输不会一直等待；发送了 `notifications/cancelled` 的客户端会丢弃该响应。NeoGraph 自己的客户端不会把这些代码还原为本地控制信号：来自远程服务器的 MCP JSON-RPC 错误或 gRPC `error` 对调用方而言是普通工具失败。
 
 <a id="node-failure-contract"></a>
 ### 节点失败契约
@@ -573,16 +597,18 @@ public:
 | 分类（由轻到重） | 代码 | 来源 | 重试 | 可路由 |
 |------|------|------|------|------|
 | Ordinary | `NG.TaskFailed`、`NG.SubgraphFailed` 或作者代码 | `std::runtime_error` 及其子类、`NodeFailureError`、Python 异常、根因为 Ordinary 的子图失败 | 是，作者标记为不可重试时除外 | 是 |
-| Timeout | `NG.Timeout` | 超过 `attempt_timeout_ms`、被取消并已停止的尝试（`NodeAttemptTimeout`） | 是 | 是 |
+| Timeout | `NG.Timeout` | 超过 `attempt_timeout_ms`、被取消并已停止的尝试（`NodeAttemptTimeout`）；超时的操作（`timed_out` 的 asio 或 `std::system_error`）；超时或过期的工具调用（`ToolExecutionError`） | 是 | 是 |
 | ProviderFailed | `NG.ProviderFailed` | 暂时性的 `ProviderFailure`：传输、响应被截断、截止时间、过载、限流，或 HTTP 5xx 状态的远程失败 | 否，Provider 重试由 Provider 运行时负责 | 是 |
 | EffectCommitted | `NG.EffectCommitted` | 该尝试提交了非幂等的 Tool 效果 | 从不 | 是，处理节点可以进行补偿 |
 | LogicError | `NG.LogicError` | `std::logic_error`，包括完整性检查 | 否 | 否 |
 | ConfigError | `NG.ConfigError` | Provider 的配置、请求、认证、权限、not-found 或误用失败；同时继承 `ConfigurationFailure` 的异常，例如 Program 诊断（C++ 或 Python 的 `ProgramDiagnosticError`、编译或准入错误） | 否 | 否 |
 | SafetyBlocked | `NG.SafetyBlocked` | 因内容过滤或拒绝而停止的 Provider 失败 | 否 | 否 |
 | BudgetExhausted | `NG.BudgetExhausted` | 预算或配额耗尽 | 否 | 否 |
-| EffectUncertain | `NG.EffectUncertain` | `ProviderOutcomeError`（包括结果未知的 Provider 分发）、结果未知的 Tool 效果，或在停止截止时间前未停止的超时尝试 | 否 | 否 |
+| EffectUncertain | `NG.EffectUncertain` | `ProviderOutcomeError`（包括结果未知的 Provider 分发）、结果未知的 Tool 效果（包括 `ToolExecutionError`），或在停止截止时间前未停止的超时尝试 | 否 | 否 |
 | UnknownFailure | `NG.UnknownFailure` | `std::bad_alloc` 或其他任何异常类型 | 否 | 否 |
-| 运行控制 | 无 | `NodeInterrupt`、`HookBoundaryBlocked`、取消 | 否 | 否，运行照旧暂停或停止 |
+| 运行控制 | `NG.Interrupted`、`NG.HookBlocked`、`NG.Cancelled` | `NodeInterrupt`、`HookBoundaryBlocked`、取消 | 否 | 否，运行暂停或停止。无论位于原因链何处，Hook 阻断或取消都会像在每条工具路径上一样，不产生 `ERROR` 事件，以 `HookBoundaryBlocked` 或 `CancelledException` 本身离开图运行 |
+
+`graph::classify_failure(error, run_token)` 对任意异常返回这一判定（对带有 `NodeFailure` 记录的 `NodeExecutionError` 则返回该记录的判定）：其类别、代码、`public_message`、能否重试或路由，以及对运行控制类别而言的信号本身（`FailureVerdict::signal`）。协议主机会在传输上报告该代码（[协议失败映射](#protocol-failure-mapping)）。
 
 `NG.` 前缀为保留前缀。作者代码须匹配 `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`。C++ 节点抛出 `NodeFailureError(code, public_message, retryable)`。Python 节点抛出任意带有字符串 `code` 属性的异常，并可附带布尔值 `retryable` 与字符串 `public_message`；调用方收到的仍是原始异常。执行器放弃一个节点时，它抛出的 `NodeExecutionError` 带有一条 `NodeFailure` 记录，可通过 `node_failure_of()` 取得。记录包含代码、分类、停止重试的原因（`exhausted`、`non_retryable`、`effect_committed`，达到运行重试上限时为 `ceiling`，下一次尝试之前的退避会越过运行截止时间时为 `deadline`，节点激活超过 `max_visits` 时为 `visit_limit`）、尝试次数、可重试与可路由标志、`public_message`，以及最后一次尝试的效果（形如 `{tool, ordinal, status}`）。它从不复制 `what()`。节点 `non_retryable` 中列出的代码不会重试。
 
@@ -2866,7 +2892,7 @@ Model Context Protocol（MCP）客户端实现。它连接 MCP 服务器、发�
 协议会话，与传输方式无关。
 
 ```cpp
-class MCPTool : public AsyncTool {
+class MCPTool : public AsyncTool, public ContextualAsyncTool {
 public:
     // Legacy direct-construction mode. Discovered tools reuse their client session.
     MCPTool(const std::string& server_url,
@@ -2877,8 +2903,12 @@ public:
     const ToolDefinition& get_mcp_definition() const noexcept;
     CallToolResult execute_result(const json& arguments);
     asio::awaitable<CallToolResult> execute_result_async(const json& arguments);
+    asio::awaitable<CallToolResult> execute_result_async(const json& arguments,
+                                                         ToolExecutionContext context);
     ChatTool get_definition() const override;
     asio::awaitable<std::string> execute_async(const json& arguments) override;
+    asio::awaitable<std::string> execute_async(const json& arguments,
+                                               ToolExecutionContext context) override;
     std::string get_name() const override;
 };
 ```
@@ -2886,14 +2916,16 @@ public:
 通常不需要直接构造 `MCPTool`；`MCPClient::get_tools()`
 会发现并完成包装。
 
+所有分发器都调用接收上下文的 `execute_async`，因此在两种传输上，运行的 cancel token（在尝试超时下为节点尝试的 token）与截止时间都会约束该调用。取消会立即停止等待并抛出 `graph::CancelledException`，工具失败契约将其视为取消；截止时间或请求超时会抛出 `asio::system_error(asio::error::timed_out)`，即 `timed_out` 调用。在此之后到达的响应会被丢弃：stdio 按 JSON-RPC id 投递响应，而该调用的 id 已不再被等待；HTTP 则放弃该请求。`isError` 结果会抛出 `std::runtime_error`，即普通工具失败。在 Python 中，`mcp.MCPError` 保留 JSON-RPC 错误的 `code` 与 `data`。
+
 ### MCPClient
 
 连接 MCP 服务器、执行初始化握手并
 提供发现和调用工具的方法。
 
  > `MCPClient` 不应被继承，请直接使用。
-> `rpc_call_async()` 是实际实现，`rpc_call()` 只是
-> 薄同步门面。参见 [`ASYNC_GUIDE.md` §9.5](ASYNC_GUIDE.md#95-mcpclient).
+> 传输层调用只有 `rpc_call_async()` 一个，
+> 同步方法驱动的是同一个会话。参见 [`ASYNC_GUIDE.md` §9.5](ASYNC_GUIDE.md#95-mcpclient).
 
 ```cpp
 class MCPClient {
@@ -2914,6 +2946,10 @@ public:
     json call_tool(const std::string& name, const json& arguments);
     CallToolResult call_tool_result(const std::string& name,
                                     const json& arguments);
+    asio::awaitable<CallToolResult> call_tool_result_async(
+        const std::string& name, const json& arguments,
+        std::chrono::steady_clock::time_point deadline,
+        std::shared_ptr<graph::CancelToken> cancel_token);
 
     // Low-level async dispatch retained for source compatibility.
     asio::awaitable<json>
@@ -2938,7 +2974,10 @@ public:
 | `get_tools()` | 发现所有页面并返回保留会话的 `MCPTool` 实例 |
 | `call_tool(name, arguments)` | 按名称和参数调用工具，返回原始 JSON 响应 |
 | `call_tool_result(name, arguments)` | 保留 content、structured content、`isError` 和 `_meta` 的类型化结果 |
-| `rpc_call_async(method, params)` | 协程版本。它是“实际”实现；`rpc_call` 是薄同步包装。 |
+| `call_tool_result_async(name, arguments, deadline, cancel_token)` | 与 `rpc_call_async` 一样受绝对 steady-clock 截止时间和 cancel token 约束的类型化调用 |
+| `rpc_call_async(method, params)` | 其他所有方法所用的传输层 JSON-RPC 调用 |
+
+**提供工具。** `MCPServer`（`<neograph/mcp/server.h>`）用已注册的处理器响应 `tools/call`；处理器的失败如何到达客户端，见[协议失败映射](#protocol-failure-mapping)。
 
 **HTTP 用法：**
 

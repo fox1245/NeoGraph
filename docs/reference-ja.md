@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=3090741b7d96360bfdb6f2a93bb5b215f7c08d9a96c35ca801c043a6873ea199 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=d5712d45d63de13a7bbb77204b995f0b83f02ac0a536a4009de888dec5c59764 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -519,15 +519,39 @@ public:
 
 | 失敗 | 結果 |
 |------|------|
-| `HookBoundaryBlocked`: 必須 Hook が失敗した、タイムアウトした、実行できなかった、またはツールコードがそれを送出した | その例外で実行が停止し、invocation id と state はそのまま保たれます。ノードのリトライポリシーはこれをリトライしません。 |
-| 実行の `CancelToken` がキャンセルされた | `graph::CancelledException` で実行が停止します。 |
+| `HookBoundaryBlocked`: 必須 Hook が失敗した、タイムアウトした、実行できなかった、またはツールコードがそれを送出した | その例外で実行が停止し、invocation id と state はそのまま保たれます。グラフ実行も `llm::Agent` と同じく、それを `NodeExecutionError` で包まずにそのまま送出します。ノードのリトライポリシーはこれをリトライしません。 |
+| 実行の `CancelToken` がキャンセルされた(ノード試行のトークンを含む) | `graph::CancelledException` で実行が停止します。実行中の MCP 呼び出しや `GrpcRemoteTool` の RPC はすぐに止まり、遅れて届いた応答は破棄されます。 |
 | `ToolGate` またはツールコードからの `NodeInterrupt` | 実行が一時停止します。`llm::Agent` はそれを呼び出し元に送出します。 |
 | 未知のツール、またはゲートの `Deny` | ステータス `rejected` のツール結果。 |
+| 呼び出しが実行の期限(`RunContext::deadline`、`ToolExecutionContext::deadline`)以降に開始されることになる | ステータス `expired`、エラー `run deadline elapsed before the tool started` のツール結果。ツールもその Hook も実行されません。 |
 | ツールコードまたはその検索から送出された例外(C++、Python、MCP の `isError` 結果または JSON-RPC エラー)、または解析できない引数 | ステータス `failed` のツール結果。呼び出しが開始済みで、実行ポリシーが効果の発生を否定しない場合は `reconciliation_required`。 |
-| `timed_out`、`expired`、`killed`、`input_required` などの型付きコントローラーステータス | そのステータスのツール結果。 |
+| `timed_out`、`expired`、`killed`、`input_required` などの型付きコントローラーステータス | そのステータスのツール結果。実行の期限またはリクエストタイムアウトで止まった MCP 呼び出しや `GrpcRemoteTool` の RPC は `timed_out` です。 |
 | `ToolEffectBroker` の下で効果が不確定なツール結果 | ペイロードの `kind` が `tool_effect_reconciliation` である `NodeInterrupt` で実行が一時停止します。 |
 
-最初の 3 行がモデルに届くことはありません。ツール結果は `tool_status` を設定し、失敗した結果は 1 回の呼び出しでも batch でも `{"error", "status", "retryable", "effect_uncertain"}` を持ちます。batch では他の呼び出しが先に最後まで実行され、複数の呼び出しが実行を停止させる場合は、キャンセルが Hook のブロックより、Hook のブロックが割り込みより優先されます。ツールが送出した `NodeInterrupt` があっても兄弟の呼び出しは実行され、再開すると batch 全体が再び実行されます。何かが実行される前に確認するには `ToolGate` を使ってください。実行の期限(`RunMetadata::deadline`)は Hook とプロバイダー呼び出しを制限し、ツール自体の上限はポリシーの `execution_timeout` と `queue_timeout` です。ツールの Hook は `ToolExecutionContext` が `HookRuntime` を持つ場所(`dispatch_tool_calls`、`llm::Agent::set_hook_runtime`)で実行され、グラフエンジンの `HookRuntime` はチェックポイント Hook だけを発行します。
+最初の 3 行がモデルに届くことはありません。ツール結果は `tool_status` を設定し、失敗した結果は 1 回の呼び出しでも batch でも `{"error", "status", "retryable", "effect_uncertain"}` を持ちます。batch では他の呼び出しが先に最後まで実行され、複数の呼び出しが実行を停止させる場合は、キャンセルが Hook のブロックより、Hook のブロックが割り込みより優先されます。ツールコードが送出した `NodeInterrupt` があっても兄弟の呼び出しは実行され、再開すると batch 全体が再び実行されます。何かが実行される前に確認するには `ToolGate` を使ってください。実行の期限(`RunMetadata::deadline`)は Hook とプロバイダー呼び出し、そして受け入れキューでの待機を含むすべてのツール呼び出しの開始を制限し、ツール自体の上限はポリシーの `execution_timeout` と `queue_timeout` です。ツールコードが開始後に送出したシステムエラーは受け入れの判定ではなくツールの失敗(`failed` または `reconciliation_required`)です。ホストの受け入れはリソースアービターと同じく、`rejected`(キューが満杯、容量なし)または `expired`(キューの待機時間切れ)で拒否します。
+
+**ツールの Hook。** すべての経路が、呼び出しの開始前に `BeforeToolExecution` イベントを 1 つ、確定後に `AfterToolExecution` イベントを 1 つ、同じデータ(`tool_call_id`、`tool_name`、`thread_id`、`request_id`、そして前では `arguments`、後では `status` と `result`)で、実行の owner scope と run id の下で発行します。`HookRuntime` は、直接のディスパッチでは `ToolExecutionContext` のもの、Agent では `llm::Agent::set_hook_runtime` または `run` に渡したコンテキストのもの、グラフ実行ではエンジンのもの(`EngineConfig::hook_runtime`、`GraphEngine::set_hook_runtime`)です。ただし `RunResources::hook_runtime` があれば、その実行ではそれに置き換わります。サブグラフのツール呼び出しは、親の実行に `HookRuntime` があればそれを使い、Program Core のツール呼び出しは Program ホストのもの(`RuntimeConfig::hook_runtime`)を使います。拒否された、未知の、または期限切れの呼び出しは何も開始せず、Hook も発行しません。最後の試行が失敗した必須 Hook は `failed` を報告し、期限が過ぎたかターゲットがタイムアウトしたときだけ `timed_out` を報告します。まったく実行できない Hook 境界(イベントを帰属させる owner scope がない、ジャーナルが使えない)は、ツール、チェックポイント、プロバイダー、Program のイベントのいずれでも state `failed` で閉じた側に失敗します。Hook の実行中に実行がキャンセルされると、実行はキャンセルとして停止します。
+
+**テキスト。** 境界を越えるテキストは正しい UTF-8 です。不正な形式の最大部分列 1 つごとに U+FFFD になり、これは Unicode と WHATWG の置換方法です。この規則はツール結果と失敗メッセージ、Hook のレシート、`json::dump`(不正な文字列を含むドキュメントは以前は空文字列にシリアライズされていました)、MCP と gRPC の応答、そして Python バインディングに適用されます。Python では C++ から読んだテキストも同じ方法でデコードされ、`str` が UTF-8 になるときは、surrogate-escape されたバイト(U+DC80 から U+DCFF、`errors="surrogateescape"` が作るもの)は元のバイトに戻り、それ以外の単独サロゲートは U+FFFD になります。
+
+**例外を送出するファサード。** `ToolExecutionController::execute_async` は成功すると出力を返し、`cancelled_before_start` と `cancellation_requested` には `graph::CancelledException` を、それ以外のすべてのステータスには `ToolExecutionResult` 全体を持つ `ToolExecutionError` を送出します。ノード失敗の分類器はこれを読み、効果が不確定なら `NG.EffectUncertain`、タイムアウトまたは期限切れの呼び出しなら `NG.Timeout`、それ以外は Ordinary とします。
+
+<a id="protocol-failure-mapping"></a>
+### プロトコル失敗のマッピング
+
+NeoGraph が MCP や gRPC でツールやグラフを提供するとき、すべての失敗分類は、ノード失敗の分類器が与える安定したコード(`graph::classify_failure`)で名付けられた、互いに区別され文書化された形をワイヤー上でも保ちます。実行制御シグナルが、モデルの読めるツール結果になることはありません。
+
+| 分類(コード) | MCP `tools/call` (`MCPServer`) | gRPC `GraphService` | gRPC `ToolService.CallTool` |
+|------|------|------|------|
+| キャンセル(`NG.Cancelled`): `notifications/cancelled`、`stop()`、クライアントのキャンセル、または `CancelledException` を送出したハンドラー | JSON-RPC エラー `-32800`、`data.code` | ステータス `CANCELLED`、`error_code` | ステータス `CANCELLED` |
+| Hook のブロック(`NG.HookBlocked`) | JSON-RPC エラー `-32010`、`data` `{code, invocation_id, state}` | ステータス `OK`、`error`、`error_code`、`error_detail_json` `{invocation_id, state}` | ステータス `OK`、`error`、`error_code`、`error_detail_json` `{invocation_id, state}` |
+| 割り込み(`NG.Interrupted`) | JSON-RPC エラー `-32011`、`data` `{code, reason, value}` | 一時停止した実行: `interrupted`、`interrupt_node`、`interrupt_value_json` | ステータス `OK`、`error`、`error_code`、`error_detail_json` `{reason, value}` |
+| 通常のツールエラー(`NG.TaskFailed`、作成者コード) | `isError: true` と `_meta["io.neograph/failure"]` `{code, retryable}` を持つ `result` | ステータス `OK`、`error`、`error_code` | ステータス `OK`、`error`、`error_code` |
+| タイムアウト(`NG.Timeout`)、プロバイダー失敗(`NG.ProviderFailed`)、予算(`NG.BudgetExhausted`)、その他すべての分類(`NG.ConfigError`、`NG.LogicError`、`NG.SafetyBlocked`、`NG.EffectCommitted`、`NG.EffectUncertain`、`NG.UnknownFailure`) | 通常のツールエラーと同じで、それぞれのコードを持つ | 通常の失敗と同じで、それぞれのコードを持つ | 通常の失敗と同じで、それぞれのコードを持つ |
+| `__end__` に到達せずに終わった実行 | なし | `error_code`: 失敗出口のコード、または `NG.BarrierStalled` | なし |
+| 未知のツール | 失敗コードなしの `isError: true` の `result` | なし | `error_code` `NG.ToolNotFound` |
+
+`RunGraphStream` は失敗を、ペイロードが `{error, code, detail}` のイベントで報告します。キャンセルされたリクエストにも応答が返るので HTTP トランスポートが応答を待って止まることはなく、`notifications/cancelled` を送ったクライアントはその応答を破棄します。NeoGraph 自身のクライアントは、これらのコードをローカルの制御シグナルに戻しません。リモートサーバーからの MCP JSON-RPC エラーや gRPC の `error` は、呼び出し元にとって通常のツール失敗です。
 
 <a id="node-failure-contract"></a>
 ### ノード失敗の契約
@@ -537,16 +561,18 @@ public:
 | 分類(深刻度の低い順) | コード | 発生元 | リトライ | ルーティング |
 |------|------|------|------|------|
 | Ordinary | `NG.TaskFailed`、`NG.SubgraphFailed` または作成者コード | `std::runtime_error` とそのサブクラス、`NodeFailureError`、Python の例外、根本原因が Ordinary のサブグラフの失敗 | する。作成者がリトライ不可とした場合を除く | 可 |
-| Timeout | `NG.Timeout` | `attempt_timeout_ms` を超えてキャンセルされ、止まった試行（`NodeAttemptTimeout`） | する | 可 |
+| Timeout | `NG.Timeout` | `attempt_timeout_ms` を超えてキャンセルされ、止まった試行（`NodeAttemptTimeout`）、タイムアウトした操作（`timed_out` の asio または `std::system_error`）、タイムアウトまたは期限切れのツール呼び出し（`ToolExecutionError`） | する | 可 |
 | ProviderFailed | `NG.ProviderFailed` | 一時的な `ProviderFailure`: トランスポート、途切れた応答、期限、過負荷、レート制限、または HTTP 5xx ステータスのリモート失敗 | しない。プロバイダーのリトライはプロバイダーランタイムが担当します | 可 |
 | EffectCommitted | `NG.EffectCommitted` | 試行が冪等でない Tool の効果をコミットした | 決してしない | 可。ハンドラーが補償できます |
 | LogicError | `NG.LogicError` | 整合性チェックを含む `std::logic_error` | しない | 不可 |
 | ConfigError | `NG.ConfigError` | プロバイダーの構成、リクエスト、認証、権限、not-found、または誤用による失敗。Program の診断(C++ または Python の `ProgramDiagnosticError`、コンパイルや承認のエラー)のように `ConfigurationFailure` を併せて継承した例外 | しない | 不可 |
 | SafetyBlocked | `NG.SafetyBlocked` | コンテンツフィルターまたは拒否で止まったプロバイダーの失敗 | しない | 不可 |
 | BudgetExhausted | `NG.BudgetExhausted` | 予算またはクォータの枯渇 | しない | 不可 |
-| EffectUncertain | `NG.EffectUncertain` | 結果が不明なプロバイダーディスパッチを含む `ProviderOutcomeError`、結果が不明な Tool の効果、または停止の期限までに止まらなかったタイムアウトした試行 | しない | 不可 |
+| EffectUncertain | `NG.EffectUncertain` | 結果が不明なプロバイダーディスパッチを含む `ProviderOutcomeError`、結果が不明な Tool の効果（`ToolExecutionError` を含む）、または停止の期限までに止まらなかったタイムアウトした試行 | しない | 不可 |
 | UnknownFailure | `NG.UnknownFailure` | `std::bad_alloc` またはその他すべての例外型 | しない | 不可 |
-| 実行制御 | なし | `NodeInterrupt`、`HookBoundaryBlocked`、キャンセル | しない | 不可。実行はこれまでどおり一時停止または停止します |
+| 実行制御 | `NG.Interrupted`、`NG.HookBlocked`、`NG.Cancelled` | `NodeInterrupt`、`HookBoundaryBlocked`、キャンセル | しない | 不可。実行は一時停止または停止します。原因の連鎖のどこにあっても、Hook のブロックやキャンセルは、すべてのツール経路と同じく `ERROR` イベントなしで `HookBoundaryBlocked` や `CancelledException` そのものとしてグラフ実行を抜けます |
+
+`graph::classify_failure(error, run_token)` は任意の例外についてこの判定を返します(`NodeFailure` レコードを持つ `NodeExecutionError` ならそのレコードの判定)。分類、コード、`public_message`、リトライやルーティングの可否、そして実行制御の分類ならシグナルそのもの(`FailureVerdict::signal`)です。プロトコルのホストはこのコードをワイヤー上で報告します([プロトコル失敗のマッピング](#protocol-failure-mapping))。
 
 `NG.` 接頭辞は予約されています。作成者コードは `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+` に一致します。C++ のノードは `NodeFailureError(code, public_message, retryable)` を送出します。Python のノードは文字列の `code` 属性と、任意で真偽値の `retryable` と文字列の `public_message` を持つ任意の例外を送出し、呼び出し元はそれでも元の例外を受け取ります。エグゼキューターがノードをあきらめると、送出する `NodeExecutionError` に `NodeFailure` レコードが付き、`node_failure_of()` がそれを返します。レコードにはコード、分類、リトライをやめた理由(`exhausted`、`non_retryable`、`effect_committed`、実行のリトライ上限に達したときの `ceiling`、次の試行の前のバックオフが実行の期限を越えるところだったときの `deadline`、ノードが `max_visits` を超えて活性化されたときの `visit_limit`)、試行回数、リトライ可否とルーティング可否のフラグ、`public_message`、そして最後の試行の効果が `{tool, ordinal, status}` として入ります。`what()` は決してコピーしません。ノードの `non_retryable` に書かれたコードはリトライしません。
 
@@ -2572,7 +2598,7 @@ Model Context Protocol (MCP) クライアント実装です。MCP サーバー�
 単一の MCP サーバーツールをローカル `Tool` 実装としてラップします。検出されたツールは
 トランスポートによらず、元のプロトコルセッションを保持します。
 ```cpp
-class MCPTool : public AsyncTool {
+class MCPTool : public AsyncTool, public ContextualAsyncTool {
 public:
     // Legacy direct-construction mode. Discovered tools reuse their client session.
     MCPTool(const std::string& server_url,
@@ -2583,17 +2609,23 @@ public:
     const ToolDefinition& get_mcp_definition() const noexcept;
     CallToolResult execute_result(const json& arguments);
     asio::awaitable<CallToolResult> execute_result_async(const json& arguments);
+    asio::awaitable<CallToolResult> execute_result_async(const json& arguments,
+                                                         ToolExecutionContext context);
     ChatTool get_definition() const override;
     asio::awaitable<std::string> execute_async(const json& arguments) override;
+    asio::awaitable<std::string> execute_async(const json& arguments,
+                                               ToolExecutionContext context) override;
     std::string get_name() const override;
 };
 ```
 
 通常、`MCPTool` を直接構築することはありません。`MCPClient::get_tools()` が検出してラップします。
+
+すべてのディスパッチャーはコンテキストを受け取る `execute_async` を呼ぶため、どちらのトランスポートでも、実行の cancel token(試行タイムアウトの下ではノード試行のトークン)と期限が呼び出しを制限します。キャンセルするとすぐに待機をやめて `graph::CancelledException` を送出し、ツール失敗の契約はこれをキャンセルとして扱います。期限またはリクエストタイムアウトは `asio::system_error(asio::error::timed_out)`、つまり `timed_out` の呼び出しです。その後に届いた応答は破棄されます。stdio は JSON-RPC id で応答を配送しますがその呼び出しの id はもう待たれておらず、HTTP はリクエストを放棄します。`isError` の結果は通常のツール失敗である `std::runtime_error` を送出します。Python では `mcp.MCPError` が JSON-RPC エラーの `code` と `data` を保持します。
 ### MCPClient
 MCP サーバーに接続し、初期化ハンドシェイクを行い、ツールの検出と呼び出しのメソッドを提供するクライアントです。
 > `MCPClient` はサブクラス化を想定していません。そのまま使用してください。
-> `rpc_call_async()` が実装本体で、`rpc_call()` は薄い同期ファサードです。
+> トランスポートレベルの呼び出しは `rpc_call_async()` だけで、同期メソッドも同じセッションを駆動します。
 > [`ASYNC_GUIDE.md` §9.5](ASYNC_GUIDE.md#95-mcpclient) を参照してください。
 ```cpp
 class MCPClient {
@@ -2614,6 +2646,10 @@ public:
     json call_tool(const std::string& name, const json& arguments);
     CallToolResult call_tool_result(const std::string& name,
                                     const json& arguments);
+    asio::awaitable<CallToolResult> call_tool_result_async(
+        const std::string& name, const json& arguments,
+        std::chrono::steady_clock::time_point deadline,
+        std::shared_ptr<graph::CancelToken> cancel_token);
 
     // Low-level async dispatch retained for source compatibility.
     asio::awaitable<json>
@@ -2637,7 +2673,10 @@ Round 3 の仕様に整合)、stdio トランスポートは同じバージョ�
 | `get_tools()` | 全ページを検出し、セッションを保持する `MCPTool` インスタンスを返す |
 | `call_tool(name, arguments)` | 指定された引数で名前付きツールを呼び出し、未加工の JSON 応答を返す |
 | `call_tool_result(name, arguments)` | content、structured content、`isError`、`_meta` を保持する型付き結果 |
-| `rpc_call_async(method, params)` | コルーチン版。実装本体で、`rpc_call` は薄い同期ラッパー |
+| `call_tool_result_async(name, arguments, deadline, cancel_token)` | `rpc_call_async` と同じく絶対 steady-clock 期限と cancel token で制限される型付き呼び出し |
+| `rpc_call_async(method, params)` | 他のすべてのメソッドが使うトランスポートレベルの JSON-RPC 呼び出し |
+**ツールの提供。** `MCPServer`(`<neograph/mcp/server.h>`)は登録されたハンドラーで `tools/call` に応答します。ハンドラーの失敗がクライアントにどう届くかは[プロトコル失敗のマッピング](#protocol-failure-mapping)にあります。
+
 **HTTP の使用方法:**
 ```cpp
 neograph::mcp::MCPClient client("http://localhost:8000");
