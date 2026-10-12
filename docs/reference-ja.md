@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=f8bfe8568eee9c7f3c95490bb005e472614caa09c7472d8724b68e1c6ad60432 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=1ca9f4ddd1a059b77adaa7d44ecb6000374b0406f3d7cf2387fb3673dcd1cd19 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
