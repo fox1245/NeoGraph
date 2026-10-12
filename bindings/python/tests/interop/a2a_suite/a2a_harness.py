@@ -7,7 +7,7 @@ Environment:
   NEOGRAPH_A2A_PROBE_SERVER  the neograph_a2a_probe_server binary (default: the
                              build tree's tests/neograph_a2a_probe_server)
   NEOGRAPH_BUILD_DIR         NeoGraph build tree (see interop_support)
-  A2A_PORT_RANGE             "lo-hi" ports the probes may bind (default 18300-18399)
+  A2A_PORT_RANGE             "lo-hi" ports the probes may bind (default: the OS picks)
   A2A_TRANSCRIPTS            transcript directory (default: a temporary directory)
 """
 
@@ -32,7 +32,10 @@ from interop_support import (build_binary, installed_pin, neograph_build_dir, re
 HERE = Path(__file__).resolve().parent
 TRANSCRIPTS = Path(os.environ.get("A2A_TRANSCRIPTS",
                                   Path(tempfile.gettempdir()) / "neograph-a2a-interop"))
-_lo, _hi = (int(x) for x in os.environ.get("A2A_PORT_RANGE", "18300-18399").split("-"))
+# Ports come from the OS unless A2A_PORT_RANGE pins a range: a fixed range
+# collides when two test processes run this suite on one machine at once.
+_PORT_RANGE = os.environ.get("A2A_PORT_RANGE")
+_lo, _hi = (int(x) for x in (_PORT_RANGE or "0-0").split("-"))
 _used: set[int] = set()
 
 
@@ -55,6 +58,10 @@ import httpx  # noqa: E402  (after the skip gate)
 
 
 def free_port() -> int:
+    if not _PORT_RANGE:
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
     for port in range(_lo, _hi + 1):
         if port in _used:
             continue
