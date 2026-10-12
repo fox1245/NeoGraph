@@ -12,6 +12,7 @@
 
 #include <neograph/graph/types.h>
 #include <neograph/hook_outbox.h>
+#include <neograph/tool_execution.h>
 
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/server_builder.h>
@@ -153,7 +154,13 @@ std::string response_or_throw(const ::grpc::Status& status, const pb::ToolCallRe
                               std::to_string(static_cast<int>(status.error_code()));
         if (!remote_code.empty()) message += " (" + remote_code + ")";
         else if (info) message += " (" + info->reason + ")";
-        throw std::runtime_error(message + ": " + status.error_message());
+        message += ": " + status.error_message();
+        // The service answers these before it runs the tool (an unknown tool,
+        // arguments that are not an object): a known outcome, nothing ran.
+        if (status.error_code() == ::grpc::StatusCode::NOT_FOUND ||
+            status.error_code() == ::grpc::StatusCode::INVALID_ARGUMENT)
+            throw neograph::ToolRequestRejected(message, false);
+        throw std::runtime_error(message);
     }
     if (!resp.error().empty()) {
         // The tool failed remotely. A run control signal the remote tool

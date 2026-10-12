@@ -1111,7 +1111,8 @@ TEST(ToolFailureContract, NodeRetryPolicyDoesNotRetryAHookBlock) {
 // These tests talk to a real subprocess; one that hangs ends the process with
 // a message after 30 s instead of timing out CTest after 10 minutes.
 [[maybe_unused]] const bool kWatched =
-    neograph::graph::test_support::watch_tests({"ToolFailureContract.McpErrorsAreToolResults"});
+    neograph::graph::test_support::watch_tests({"ToolFailureContract.McpErrorsAreToolResults",
+                                                "ToolFailureContract.McpRefusedRequestsAreFailures"});
 
 // MCP-backed tools follow the same contract: a tool-level isError result and a
 // JSON-RPC error are ordinary failures the model sees, in one call or a batch.
@@ -1147,6 +1148,75 @@ TEST(ToolFailureContract, McpErrorsAreToolResults) {
                       std::string::npos) << messages[1].content;
             EXPECT_EQ(messages[2].tool_status, "succeeded");
             EXPECT_EQ(messages[2].content, "fine");
+        }
+    }
+}
+
+// A request the server refused before running it has a known outcome: nothing
+// happened, so the model reads a plain failure with the server's message and
+// is not told to reconcile an effect, whatever the tool's policy. A failure
+// after the call may have started stays uncertain without a policy that rules
+// an effect out: an isError result, and a JSON-RPC error that is not a refusal
+// of the request (-32603, a server error).
+TEST(ToolFailureContract, McpRefusedRequestsAreFailures) {
+    const auto fixture = std::filesystem::path(__FILE__).parent_path() / "fixtures" / "mcp_stdio_failures.py";
+#ifdef _WIN32
+    const std::string python = "python";
+#else
+    const std::string python = "python3";
+#endif
+    mcp::MCPClient client({python, fixture.string()});
+    client.initialize();
+    auto owned = client.get_tools();
+    std::vector<Tool*> tools;
+    for (const auto& tool : owned) tools.push_back(tool.get());
+
+    struct Case {
+        const char* tool;
+        const char* status;
+        bool uncertain;
+        const char* text;
+    };
+    const std::vector<Case> cases{
+        {"invalid_params", "failed", false, "Invalid params: value is required"},
+        {"unknown_method", "failed", false, "Method not found"},
+        {"marked_invalid", "failed", false, "missing required property value"},
+        {"internal_error", "reconciliation_required", true, "the handler crashed"},
+        {"rpc_error", "reconciliation_required", true, "server exploded"},
+        {"is_error", "reconciliation_required", true, "remote tool refused"},
+    };
+    std::vector<ToolCall> calls;
+    for (const auto& item : cases) calls.push_back({std::string("call-") + item.tool, item.tool, "{}"});
+
+    // No effect policy, and a policy that declares a write: neither changes
+    // what a refused request is.
+    auto declared = std::make_shared<ToolExecutionPolicyRegistry>();
+    ToolExecutionPolicy write;
+    write.effect = ToolEffectClass::WorkspaceWrite;
+    for (const auto& item : cases) declared->upsert(item.tool, write);
+    const std::vector<std::pair<const char*, std::shared_ptr<ToolExecutionController>>> controllers{
+        {"default policy", std::make_shared<ToolExecutionController>()},
+        {"declared write", std::make_shared<ToolExecutionController>(
+                               ToolExecutionControllerConfig{.policies = declared})},
+    };
+    for (const auto& [label, controller] : controllers) {
+        SCOPED_TRACE(label);
+        ToolExecutionContext context;
+        context.controller = controller;
+        const auto messages =
+            neograph::async::run_sync(dispatch_tool_calls(calls, tools, {}, {}, context));
+        ASSERT_EQ(messages.size(), cases.size());
+        for (std::size_t i = 0; i < cases.size(); ++i) {
+            SCOPED_TRACE(cases[i].tool);
+            const auto content = json::parse(messages[i].content);
+            EXPECT_EQ(messages[i].tool_status, cases[i].status) << messages[i].content;
+            EXPECT_EQ(content.value("status", ""), cases[i].status);
+            EXPECT_EQ(content.value("effect_uncertain", !cases[i].uncertain), cases[i].uncertain);
+            EXPECT_EQ(messages[i].tool_effect_uncertain, cases[i].uncertain);
+            EXPECT_FALSE(content.value("retryable", true))
+                << "the same refused request is refused again: " << messages[i].content;
+            EXPECT_NE(content.value("error", "").find(cases[i].text), std::string::npos)
+                << "the model reads the server's message: " << messages[i].content;
         }
     }
 }

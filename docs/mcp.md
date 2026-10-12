@@ -110,7 +110,7 @@ int main() {
 
 How it works:
 
-- A tool is a name, a JSON Schema for its arguments (`input_schema` must say `"type": "object"`) and a handler. The server checks every call's arguments against the schema before the handler runs. Invalid arguments come back as a result with `isError: true` and the validation message.
+- A tool is a name, a JSON Schema for its arguments (`input_schema` must say `"type": "object"`) and a handler. The server checks every call's arguments against the schema before the handler runs. Invalid arguments come back as a result with `isError: true`, the validation message and `_meta["io.neograph/failure"]` with the code `NG.InvalidRequest`, which tells a NeoGraph client that the handler never ran.
 - Handlers run on a fixed worker pool: `MCPServerConfig::max_concurrent_calls` (4) run at once and `max_pending_calls` (64) wait; a call beyond that gets JSON-RPC error `-32000` ("MCP tool queue is full"). The engine is shared by those threads. Nodes are reused across runs, so keep per-run data in channels, not in the node object. If the engine has a checkpoint store, give each call its own `RunConfig::thread_id`.
 - When the client sends `notifications/cancelled`, the call's `CancelToken` is cancelled. Passing it as `run.cancel_token` makes the graph run stop.
 - `run()` reads one JSON-RPC message per line from stdin and writes to stdout. Anything else the program prints on stdout corrupts the protocol; log to stderr.
@@ -309,6 +309,7 @@ int main(int argc, char** argv) {
 - An MCP tool call cannot pause and resume. If your handler runs a graph that pauses (`RunResult::interrupted`), the handler decides what the client sees. A handler that throws `NodeInterrupt` tells the client that the call needs input: the client gets JSON-RPC error `-32011` with `data` `{code: "NG.Interrupted", reason, value}`.
 - A handler that throws any other exception gives a result with `isError: true` and `_meta["io.neograph/failure"]` holding the stable code. Only the failure's public message reaches the client, never the exception text. Throw `NodeFailureError` to choose the code and message.
 - A call the client cancels gets no response, on every transport. An unknown tool is `-32602`.
+- What a model reads when an `MCPTool` (from `client.get_tools()`) fails in an agent depends on whether the server ran the tool. A request the server refused before running it, a JSON-RPC error `-32700`, `-32600`, `-32601` or `-32602` or an `isError` result marked `NG.InvalidRequest` (as `MCPServer` marks arguments that fail the input schema), is a plain `failed` result with the server's message, `retryable` false and `effect_uncertain` false: nothing ran, so the model can correct its arguments. Any other failure may have come after the tool started (an `isError` result from the handler, `-32603`, a server error), so without a `ToolExecutionPolicy` that rules out an effect it is `reconciliation_required` with `effect_uncertain` true. Declare a read-only or idempotent tool in a policy to get a plain `failed`. See the [tool failure contract](reference-en.md#tool-failure-contract).
 - The full table of failure classes across MCP, gRPC, A2A and ACP is in the [protocol failure mapping](reference-en.md#protocol-failure-mapping) of the reference. It is not repeated here.
 
 ## Tests and interoperability

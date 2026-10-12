@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/mcp.md locale=zh-CN source_sha256=a15f153b3a6f238098a942ab3557e4e8bf8b6744e69db01a1067c0e19fd38c6d -->
+<!-- neograph-i18n: source=docs/mcp.md locale=zh-CN source_sha256=78e85bc6b43f65b50274da68f73191ca895f31f32e72d6a7654fb60b856fb3a3 -->
 # MCP：把图公开为工具，以及使用工具的图
 
 **Languages:** [English](mcp.md) | [한국어](mcp.ko.md) | [日本語](mcp.ja.md) | [简体中文](mcp.zh-CN.md)
@@ -111,7 +111,7 @@ int main() {
 
 工作方式如下：
 
-- 工具由名称、参数的 JSON Schema（`input_schema` 必须写明 `"type": "object"`）和处理函数组成。服务器在运行处理函数之前，先按 Schema 检查每次调用的参数。参数无效时，返回的结果带有 `isError: true` 和校验信息。
+- 工具由名称、参数的 JSON Schema（`input_schema` 必须写明 `"type": "object"`）和处理函数组成。服务器在运行处理函数之前，先按 Schema 检查每次调用的参数。参数无效时，返回的结果带有 `isError: true`、校验信息，以及代码为 `NG.InvalidRequest` 的 `_meta["io.neograph/failure"]`，NeoGraph 客户端据此得知处理函数没有运行。
 - 处理函数在固定大小的工作线程池中运行：`MCPServerConfig::max_concurrent_calls`（4）个同时运行，`max_pending_calls`（64）个排队等待；超出的调用会收到 JSON-RPC 错误 `-32000`（"MCP tool queue is full"）。引擎由这些线程共享。节点会在多次运行中复用，所以每次运行的数据要放在通道里，不要放在节点对象里。如果引擎配置了检查点存储，请为每次调用指定不同的 `RunConfig::thread_id`。
 - 客户端发送 `notifications/cancelled` 后，该调用的 `CancelToken` 随之取消。把它作为 `run.cancel_token` 传入，图的运行也会随之停止。
 - `run()` 从 stdin 每行读取一条 JSON-RPC 消息，并写到 stdout。程序在 stdout 上输出任何其他内容都会破坏协议，日志请写到 stderr。
@@ -310,6 +310,7 @@ int main(int argc, char** argv) {
 - MCP 工具调用无法暂停后再恢复。如果处理函数运行的图暂停了（`RunResult::interrupted`），客户端看到什么由处理函数决定。处理函数抛出 `NodeInterrupt`，表示这次调用需要输入：客户端会收到 JSON-RPC 错误 `-32011`，其 `data` 为 `{code: "NG.Interrupted", reason, value}`。
 - 处理函数抛出其他异常时，返回 `isError: true` 的结果，稳定的错误码放在 `_meta["io.neograph/failure"]` 中。到达客户端的只有失败的公开消息，不包含异常文本。想自己指定错误码和消息，请抛出 `NodeFailureError`。
 - 被客户端取消的调用，在任何传输上都不会收到应答。未知工具返回 `-32602`。
+- 在智能体中，`MCPTool`（由 `client.get_tools()` 得到）失败时模型读到什么，取决于服务器有没有运行过这个工具。服务器在运行前拒绝的请求，是带有服务器消息、`retryable` 与 `effect_uncertain` 均为 false 的普通 `failed` 结果。这包括 JSON-RPC 错误 `-32700`、`-32600`、`-32601`、`-32602`，以及标记为 `NG.InvalidRequest` 的 `isError` 结果，`MCPServer` 用它标记不符合输入 schema 的参数。什么都没有运行，模型可以修正参数。其他失败可能发生在工具开始之后（处理函数返回的 `isError` 结果、`-32603`、服务器错误），因此没有能排除效果的 `ToolExecutionPolicy` 时，结果为 `reconciliation_required`，`effect_uncertain` 为 true。想得到普通的 `failed`，请在策略中声明只读或幂等的工具。参见[工具失败契约](reference-en.md#tool-failure-contract)。
 - MCP、gRPC、A2A、ACP 各类失败的完整对照表在参考文档的[协议失败映射](reference-en.md#protocol-failure-mapping)中，这里不再重复。
 
 ## 测试与互操作

@@ -111,6 +111,41 @@ private:
     ToolExecutionResult result_;
 };
 
+/**
+ * What an exception says when the call it ended is known not to have run: the
+ * service that hosts the tool refused the request before executing it, such as
+ * an MCP JSON-RPC protocol error for invalid params or a gRPC
+ * `INVALID_ARGUMENT`. The outcome is known, so the ToolExecutionController
+ * reports a plain `failed` result that is not effect-uncertain whatever the
+ * tool's execution policy says, where any other exception from a started call
+ * is `reconciliation_required` unless the policy rules out an effect. The
+ * exception's message is the text the model reads.
+ *
+ * ToolRequestRejected is the ready-made exception. An exception type that has
+ * a base of its own to keep, such as mcp::MCPError, adds this interface
+ * instead. The node failure classifier reads such an exception as an ordinary
+ * failure that is retried only when `retryable()` is true.
+ */
+class NEOGRAPH_API ToolRequestRefusal {
+public:
+    virtual ~ToolRequestRefusal();
+
+    /// Whether sending the same request again may succeed. A request refused
+    /// for its content does not: the model has to change it.
+    [[nodiscard]] virtual bool retryable() const noexcept = 0;
+};
+
+/** Thrown by a Tool that knows its call did not run (see ToolRequestRefusal). */
+class NEOGRAPH_API ToolRequestRejected : public std::runtime_error, public ToolRequestRefusal {
+public:
+    explicit ToolRequestRejected(const std::string& message, bool retryable = false);
+    ~ToolRequestRejected() override;
+    [[nodiscard]] bool retryable() const noexcept override { return retryable_; }
+
+private:
+    bool retryable_;
+};
+
 /** Explicit effect classification used to decide retry and recovery behavior. */
 enum class ToolEffectClass : std::uint8_t {
     Unknown,

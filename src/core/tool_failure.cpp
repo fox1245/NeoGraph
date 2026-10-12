@@ -320,6 +320,11 @@ private:
             return {{}, nested_of(failure)};
         } catch (const std::runtime_error& failure) {
             found(NodeFailureClass::Ordinary);
+            // A request the tool's service refused (ToolRequestRefusal) is
+            // refused again unless the exception says otherwise.
+            if (const auto* refusal = dynamic_cast<const ToolRequestRefusal*>(&failure);
+                refusal && !refusal->retryable())
+                not_retryable_ = true;
             return {{}, nested_of(failure)};
         } catch (const std::exception& failure) {
             found(NodeFailureClass::Unknown);

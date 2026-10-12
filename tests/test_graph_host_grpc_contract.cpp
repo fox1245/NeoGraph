@@ -549,3 +549,49 @@ TEST(GraphHostGRPCContract, RemoteRunControlSignalsAreOrdinaryTypedFailures) {
     server->Shutdown(std::chrono::system_clock::now() + 2s);
     server->Wait();
 }
+
+// A request the ToolService refused before running anything (an unknown tool:
+// NOT_FOUND; arguments that are not a JSON object: INVALID_ARGUMENT) has a
+// known outcome, so it reaches the model as a plain failure, where a tool that
+// ran and failed is reconciliation_required unless its policy rules out an
+// effect (reference, "Tool failure contract"). The default policy is in force
+// here: no tool declares an effect.
+TEST(GraphHostGRPCContract, RefusedRemoteRequestsAreFailuresNotReconciliations) {
+    std::unordered_map<std::string, neograph::grpc::ToolFn> tools{
+        {"explode", [](const std::string&) -> std::string {
+             throw std::runtime_error("remote tool exploded");
+         }},
+    };
+    auto service = neograph::grpc::make_tool_service(std::move(tools));
+    ::grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(service.get());
+    auto server = builder.BuildAndStart();
+    const auto target = "127.0.0.1:" + std::to_string(port);
+    neograph::grpc::GrpcRemoteTool missing(target, "missing", "not served", json::object());
+    neograph::grpc::GrpcRemoteTool explode(target, "explode", "fails", json::object());
+    ToolExecutionContext context;
+    context.controller = std::make_shared<ToolExecutionController>();
+
+    const auto messages = neograph::async::run_sync(dispatch_tool_calls(
+        {{"c-missing", "missing", "{}"}, {"c-explode", "explode", "{}"}}, {&missing, &explode}, {},
+        {}, context));
+    ASSERT_EQ(messages.size(), 2u);
+    EXPECT_EQ(messages[0].tool_status, "failed") << messages[0].content;
+    EXPECT_FALSE(messages[0].tool_effect_uncertain) << messages[0].content;
+    EXPECT_FALSE(messages[0].tool_retryable) << messages[0].content;
+    EXPECT_NE(messages[0].content.find("NG.ToolNotFound"), std::string::npos)
+        << "the model reads why: " << messages[0].content;
+    EXPECT_EQ(messages[1].tool_status, "reconciliation_required") << messages[1].content;
+    EXPECT_TRUE(messages[1].tool_effect_uncertain) << messages[1].content;
+
+    // Arguments the service refuses as not being an object: the same.
+    const auto refused = neograph::async::run_sync(
+        context.controller->execute_result_async(explode, json::array({1, 2}), context));
+    EXPECT_EQ(refused.status, ToolTerminalStatus::Failed) << refused.error;
+    EXPECT_FALSE(refused.effect_uncertain) << refused.error;
+    EXPECT_NE(refused.error.find("NG.InvalidRequest"), std::string::npos) << refused.error;
+    server->Shutdown(std::chrono::system_clock::now() + 2s);
+    server->Wait();
+}

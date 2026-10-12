@@ -652,7 +652,12 @@ struct MCPServer::Impl {
         try {
             validate_json_value(arguments, tool.definition.input_schema, "MCP tool arguments", "$");
         } catch (const std::exception& e) {
-            return rpc_result(tool_error(e.what()).to_json(), id);
+            // The handler never ran, and the same arguments are refused
+            // again: the marker tells a NeoGraph client that nothing happened.
+            auto refused = tool_error(e.what());
+            refused.meta = json{{"io.neograph/failure",
+                                 {{"code", "NG.InvalidRequest"}, {"retryable", false}}}};
+            return rpc_result(refused.to_json(), id);
         }
 
         auto task = std::make_shared<CallTask>();

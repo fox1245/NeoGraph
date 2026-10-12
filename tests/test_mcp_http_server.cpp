@@ -8,6 +8,7 @@
 #include <neograph/graph/types.h>
 #include <neograph/hook_outbox.h>
 #include <neograph/mcp/client.h>
+#include <neograph/tool_dispatch.h>
 #endif
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
@@ -837,6 +838,46 @@ TEST(MCPHttpServerTest, RemoteRunControlSignalsAreOrdinaryTypedToolFailures) {
             EXPECT_FALSE(verdict.retryable);
         }
     }
+}
+
+// NeoGraph's own client and server agree on what a model is told. Arguments
+// the server refuses against the tool's input schema never reached the
+// handler: a plain failure with the validation message. A handler that threw
+// ran, so without an execution policy its effect is unknown.
+TEST(MCPHttpServerTest, RefusedArgumentsReachTheModelAsPlainFailures) {
+    MCPHttpServer server([](std::string_view) {
+        auto mcp = make_server();
+        ToolDefinition explode;
+        explode.name = "explode";
+        mcp->register_tool(std::move(explode), [](const json&, const auto&) -> CallToolResult {
+            throw std::runtime_error("handler exploded");
+        });
+        return MCPHttpServerSession{std::move(mcp), {}};
+    });
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    MCPClient client("http://127.0.0.1:" + std::to_string(server.port()) + "/mcp");
+    ASSERT_TRUE(client.initialize("neograph-refused-arguments"));
+    auto owned = client.get_tools();
+    std::vector<neograph::Tool*> tools;
+    for (const auto& tool : owned) tools.push_back(tool.get());
+
+    const auto messages = neograph::async::run_sync(neograph::dispatch_tool_calls(
+        {{"call-refused", "echo", R"({"value": 3})"},
+         {"call-missing", "echo", "{}"},
+         {"call-threw", "explode", "{}"}},
+        tools));
+    ASSERT_EQ(messages.size(), 3u);
+    for (std::size_t i = 0; i < 2; ++i) {
+        SCOPED_TRACE(messages[i].tool_call_id);
+        EXPECT_EQ(messages[i].tool_status, "failed") << messages[i].content;
+        EXPECT_FALSE(messages[i].tool_effect_uncertain) << messages[i].content;
+        EXPECT_FALSE(messages[i].tool_retryable) << messages[i].content;
+    }
+    EXPECT_NE(messages[1].content.find("value"), std::string::npos)
+        << "the model reads which property is missing: " << messages[1].content;
+    EXPECT_EQ(messages[2].tool_status, "reconciliation_required") << messages[2].content;
+    EXPECT_TRUE(messages[2].tool_effect_uncertain) << messages[2].content;
 }
 #endif
 

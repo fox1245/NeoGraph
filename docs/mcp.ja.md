@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/mcp.md locale=ja source_sha256=a15f153b3a6f238098a942ab3557e4e8bf8b6744e69db01a1067c0e19fd38c6d -->
+<!-- neograph-i18n: source=docs/mcp.md locale=ja source_sha256=78e85bc6b43f65b50274da68f73191ca895f31f32e72d6a7654fb60b856fb3a3 -->
 # MCP: グラフをツールとして公開する、ツールを使うグラフを作る
 
 **Languages:** [English](mcp.md) | [한국어](mcp.ko.md) | [日本語](mcp.ja.md) | [简体中文](mcp.zh-CN.md)
@@ -111,7 +111,7 @@ int main() {
 
 仕組みは次のとおりです。
 
-- ツールは、名前、引数の JSON Schema(`input_schema` には `"type": "object"` が必要)、ハンドラーでできています。サーバーは、ハンドラーを実行する前に、すべての呼び出しの引数をスキーマで検査します。引数が不正な場合は、`isError: true` と検証メッセージを持つ結果が返ります。
+- ツールは、名前、引数の JSON Schema(`input_schema` には `"type": "object"` が必要)、ハンドラーでできています。サーバーは、ハンドラーを実行する前に、すべての呼び出しの引数をスキーマで検査します。引数が不正な場合は、`isError: true`、検証メッセージ、コードが `NG.InvalidRequest` の `_meta["io.neograph/failure"]` を持つ結果が返ります。NeoGraph のクライアントは、これをハンドラーが実行されなかった印として読みます。
 - ハンドラーは固定サイズのワーカープールで実行されます。`MCPServerConfig::max_concurrent_calls`(4)件が同時に実行され、`max_pending_calls`(64)件が待機します。それを超える呼び出しには JSON-RPC エラー `-32000`("MCP tool queue is full")が返ります。エンジンはそれらのスレッドが共有します。ノードは複数の実行で再利用されるので、実行ごとのデータはノードオブジェクトではなくチャネルに置いてください。エンジンにチェックポイントストアがある場合は、呼び出しごとに別の `RunConfig::thread_id` を指定してください。
 - クライアントが `notifications/cancelled` を送ると、その呼び出しの `CancelToken` がキャンセルされます。このトークンを `run.cancel_token` に渡せば、グラフの実行も止まります。
 - `run()` は stdin から1行に1つの JSON-RPC メッセージを読み、stdout に書きます。プログラムが stdout にそれ以外を出力するとプロトコルが壊れるので、ログは stderr に出してください。
@@ -310,6 +310,7 @@ int main(int argc, char** argv) {
 - MCP のツール呼び出しは、一時停止して再開することができません。ハンドラーが実行したグラフが停止した場合(`RunResult::interrupted`)、クライアントに何を見せるかはハンドラーが決めます。ハンドラーが `NodeInterrupt` を投げると、その呼び出しに入力が必要だと伝わり、クライアントは JSON-RPC エラー `-32011` と `data` `{code: "NG.Interrupted", reason, value}` を受け取ります。
 - ハンドラーがそれ以外の例外を投げると、`isError: true` の結果が返り、`_meta["io.neograph/failure"]` に安定したコードが入ります。クライアントに届くのは失敗の公開メッセージだけで、例外のテキストは届きません。コードとメッセージを自分で決めるには、`NodeFailureError` を投げてください。
 - クライアントがキャンセルした呼び出しには、どのトランスポートでも応答が返りません。未知のツールは `-32602` です。
+- エージェントで `MCPTool`(`client.get_tools()` で得たツール)が失敗したとき、モデルが読む内容は、サーバーがツールを実行したかどうかで変わります。サーバーが実行前に拒否したリクエストは、サーバーのメッセージを持ち、`retryable` と `effect_uncertain` がどちらも false の通常の `failed` 結果です。対象は、JSON-RPC エラー `-32700`、`-32600`、`-32601`、`-32602` と、`NG.InvalidRequest` の目印が付いた `isError` 結果で、`MCPServer` は入力スキーマに合わない引数にこの目印を付けます。何も実行されていないので、モデルは引数を直せます。それ以外の失敗は、ツールが開始した後に起きた可能性があるため(ハンドラーが返した `isError` 結果、`-32603`、サーバーエラー)、効果を除外する `ToolExecutionPolicy` がなければ、`effect_uncertain` が true の `reconciliation_required` になります。通常の `failed` にするには、読み取り専用または冪等なツールをポリシーに宣言してください。[ツール失敗の契約](reference-en.md#tool-failure-contract)を参照してください。
 - MCP、gRPC、A2A、ACP 全体の失敗クラスの表は、リファレンスの[プロトコル失敗マッピング](reference-en.md#protocol-failure-mapping)にあります。ここには再掲しません。
 
 ## テストと相互運用性

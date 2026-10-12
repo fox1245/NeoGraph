@@ -7,6 +7,7 @@
 #include <neograph/async/sse_parser.h>
 #include <neograph/graph/cancel.h>
 #include <neograph/graph/types.h>
+#include <neograph/tool_execution.h>
 
 #include <asio/co_spawn.hpp>
 #include <asio/error.hpp>
@@ -1841,6 +1842,44 @@ void validate_tool_result(const CallToolResult& result,
     }
 }
 
+// An MCPError of a request the server refused before running anything: still
+// an MCPError, so callers keep its code and data, and for the tool failure
+// contract a known outcome (reference, "Tool failure contract"). The JSON-RPC
+// errors that refuse a request are parse error, invalid request, method not
+// found and invalid params; the others (-32603 internal error, the
+// server-defined range) can come after the tool started.
+class MCPRequestRefused final : public MCPError, public ToolRequestRefusal {
+public:
+    explicit MCPRequestRefused(const MCPError& error) : MCPError(error) {}
+    bool retryable() const noexcept override { return false; }
+};
+
+bool request_refused_before_running(int code) {
+    return code == -32700 || code == -32600 || code == -32601 || code == -32602;
+}
+
+// Whether an isError result carries the marker that says the server refused the
+// request (NeoGraph's MCPServer marks arguments that fail the input schema),
+// and the marker's retryable flag.
+struct RefusalMarker {
+    bool found     = false;
+    bool retryable = false;
+};
+
+RefusalMarker refusal_marker(const CallToolResult& result) {
+    if (!result.meta.is_object() || !result.meta.contains("io.neograph/failure")) return {};
+    const json marker = result.meta["io.neograph/failure"];
+    if (!marker.is_object() || !marker.contains("code")) return {};
+    const json code = marker["code"];
+    if (!code.is_string() || code.get<std::string>() != "NG.InvalidRequest") return {};
+    bool retryable = false;
+    if (marker.contains("retryable")) {
+        const json flag = marker["retryable"];
+        retryable       = flag.is_boolean() && flag.get<bool>();
+    }
+    return {true, retryable};
+}
+
 std::string format_tool_result(const CallToolResult& result) {
     if (result.content.is_array()) {
         std::string output;
@@ -1972,10 +2011,19 @@ asio::awaitable<std::string> MCPTool::execute_async(const json& arguments) {
 
 asio::awaitable<std::string> MCPTool::execute_async(const json& arguments,
                                                     ToolExecutionContext context) {
-    auto result = co_await execute_result_async(arguments, std::move(context));
+    CallToolResult result;
+    try {
+        result = co_await execute_result_async(arguments, std::move(context));
+    } catch (const MCPError& error) {
+        if (!request_refused_before_running(error.code())) throw;
+        throw MCPRequestRefused(error);
+    }
     std::string text = format_tool_result(result);
     if (result.is_error) {
-        throw std::runtime_error("MCP tool execution error: " + text);
+        auto message = "MCP tool execution error: " + text;
+        if (const auto marker = refusal_marker(result); marker.found)
+            throw ToolRequestRejected(message, marker.retryable);
+        throw std::runtime_error(std::move(message));
     }
     co_return text;
 }

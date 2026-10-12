@@ -69,8 +69,10 @@ int main(int argc, char** argv) {
             "Use the calculate tool. If it returns an error, read the message and try again.",
             examples::openrouter_model);
 
-        // A tool with no declared effect may have changed something, so a failed call of it is
-        // reported to the model as "effect_uncertain". The calculator only reads; say so.
+        // A tool with no declared effect may have changed something, so a call that ran and
+        // failed (the division by zero) is reported to the model as "reconciliation_required"
+        // with "effect_uncertain". The calculator only reads; say so. A request the server
+        // refuses before running it (the missing argument) is a plain failure whatever the policy.
         auto policies = std::make_shared<neograph::ToolExecutionPolicyRegistry>();
         neograph::ToolExecutionPolicy read_only;
         read_only.effect = neograph::ToolEffectClass::ReadOnly;

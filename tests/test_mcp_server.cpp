@@ -271,6 +271,11 @@ TEST(MCPServerTest, ArgumentsAreValidatedAsJsonSchema2020_12) {
     EXPECT_TRUE(negative["result"]["isError"].get<bool>());
     EXPECT_NE(negative["result"]["content"][0]["text"].get<std::string>().find("minimum"),
               std::string::npos);
+    // The server says it refused the request: nothing ran, and the same
+    // arguments are refused again. A client reads this as a call that did not
+    // start.
+    EXPECT_EQ(negative["result"]["_meta"]["io.neograph/failure"],
+              (json{{"code", "NG.InvalidRequest"}, {"retryable", false}}));
 
     auto wrong_branch = server.handle_message(request(51, "tools/call", {
         {"name", "count"}, {"arguments", {{"n", 1}, {"tag", 3}}}}));

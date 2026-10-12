@@ -1374,6 +1374,13 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
             (void)publish_singleflight(std::move(result));
             throw;
         }
+        if (const auto* refusal = dynamic_cast<const ToolRequestRefusal*>(&error)) {
+            // The tool's service refused the request before running it: the
+            // outcome is known, whatever the policy says about the tool's
+            // effects.
+            result = ToolExecutionResult{ToolTerminalStatus::Failed, {}, error.what(),
+                                         refusal->retryable(), false};
+        }
         co_return publish_singleflight(std::move(result));
     } catch (...) {
         co_return publish_singleflight(ToolExecutionResult{
@@ -1382,6 +1389,13 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
             {}, "tool execution failed with an unknown exception", false, started});
     }
 }
+
+ToolRequestRefusal::~ToolRequestRefusal() = default;
+
+ToolRequestRejected::ToolRequestRejected(const std::string& message, bool retryable)
+    : std::runtime_error(message), retryable_(retryable) {}
+
+ToolRequestRejected::~ToolRequestRejected() = default;
 
 ToolExecutionError::ToolExecutionError(ToolExecutionResult result)
     : std::runtime_error(result.error.empty()
