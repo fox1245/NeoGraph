@@ -53,7 +53,7 @@ Pick the goal, read the example.
 | host my agent over A2A | [`27_a2a_server.py`](27_a2a_server.py) | service |
 | host my agent over ACP | [`28_acp_agent.py`](28_acp_agent.py) | service |
 | try Reflexion, Self-Ask or a debate | [`11_reflexion.py`](11_reflexion.py) | key |
-| let an agent rewrite its own graph | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | key |
+| let an agent rewrite its own graph | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | yes |
 
 ## Index by tier
 
@@ -90,7 +90,7 @@ A model, with or without tools, inside a graph. The `key` rows call a hosted mod
 | 13 | [`13_multi_agent_debate.py`](13_multi_agent_debate.py) | key | Two `Send` branches argue opposite sides; one judge reads the merged arguments. |
 | 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | key | A Gradio chat with a research mode: a three-question report from parallel researchers that use model knowledge, not web search. Needs `gradio`. |
 | 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | key | The same research graph with real web search through Crawl4AI and optional PostgreSQL checkpoints. Needs `gradio`, `requests` and a Crawl4AI server. |
-| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | key | A graph scores its own output, asks a model for a revised definition after a failure, recompiles and retries. Only registered node types are admitted. |
+| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | yes | A graph scores its own output and asks a model for a revised definition after a failure. A rewrite with an unregistered node type is rejected with its reason; the admitted one is compiled and the goal is met on the second iteration. `--live` calls a hosted model. |
 | 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | key | Conversation checkpoints survive an admitted rewrite of the graph; version and hash go into `__graph_meta__` (application-level metadata, not replay evidence). |
 
 ### Program API

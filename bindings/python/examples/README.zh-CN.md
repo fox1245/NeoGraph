@@ -54,7 +54,7 @@ python 01_minimal.py
 | 通过 A2A 托管我的智能体 | [`27_a2a_server.py`](27_a2a_server.py) | service |
 | 通过 ACP 托管我的智能体 | [`28_acp_agent.py`](28_acp_agent.py) | service |
 | 尝试 Reflexion、Self-Ask 或辩论 | [`11_reflexion.py`](11_reflexion.py) | key |
-| 让智能体改写自己的图 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | key |
+| 让智能体改写自己的图 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | yes |
 
 ## 按层级索引
 
@@ -91,7 +91,7 @@ python 01_minimal.py
 | 13 | [`13_multi_agent_debate.py`](13_multi_agent_debate.py) | key | 两个 `Send` 分支各执一方，一个裁判读取合并后的论据。 |
 | 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | key | 带研究模式的 Gradio 聊天：并行 researcher 使用模型知识而非网络搜索，生成三个问题的报告。需要 `gradio`。 |
 | 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | key | 同一个研究图，加上通过 Crawl4AI 的真实网络搜索和可选的 PostgreSQL 检查点。需要 `gradio`、`requests` 和 Crawl4AI 服务器。 |
-| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | key | 图给自己的输出打分，失败后向模型请求修订后的定义，重新编译并重试。只允许已注册的节点类型。 |
+| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | yes | 图给自己的输出打分，失败后请模型给出修订后的定义。使用未注册节点类型的改写会连同原因一起被拒绝；获准的改写被编译，第二次迭代达成目标。`--live` 调用托管模型。 |
 | 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | key | 对话检查点在获准的图改写之后仍然保留；版本和哈希记录在 `__graph_meta__` 中（应用层元数据，不是重放证据）。 |
 
 ### Program API

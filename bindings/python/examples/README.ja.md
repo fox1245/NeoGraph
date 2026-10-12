@@ -54,7 +54,7 @@ python 01_minimal.py
 | エージェントを A2A で公開する | [`27_a2a_server.py`](27_a2a_server.py) | service |
 | エージェントを ACP で公開する | [`28_acp_agent.py`](28_acp_agent.py) | service |
 | Reflexion、Self-Ask、ディベートを試す | [`11_reflexion.py`](11_reflexion.py) | key |
-| エージェントに自分のグラフを書き換えさせる | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | key |
+| エージェントに自分のグラフを書き換えさせる | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | yes |
 
 ## 段階別の索引
 
@@ -91,7 +91,7 @@ python 01_minimal.py
 | 13 | [`13_multi_agent_debate.py`](13_multi_agent_debate.py) | key | 2 つの `Send` 分岐が反対の立場で主張し、1 人の審判が統合された議論を読みます。 |
 | 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | key | 調査モード付きの Gradio チャット。Web 検索ではなくモデルの知識を使う並列 researcher が、3 つの質問からなるレポートを作ります。`gradio` が必要です。 |
 | 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | key | 同じ調査グラフに、Crawl4AI による実際の Web 検索と、任意の PostgreSQL チェックポイントを加えたものです。`gradio`、`requests`、Crawl4AI サーバーが必要です。 |
-| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | key | グラフが自分の出力を採点し、失敗したらモデルに修正版の定義を求め、再コンパイルして再試行します。登録済みのノード型だけが許可されます。 |
+| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | yes | グラフが自分の出力を採点し、失敗すると改訂版の定義をモデルに求めます。未登録のノードタイプを使った書き換えは理由付きで拒否され、承認された書き換えがコンパイルされて 2 回目の反復で目標を達成します。`--live` はホスト型モデルを呼びます。 |
 | 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | key | 許可されたグラフの書き換え後も会話のチェックポイントが残ります。バージョンとハッシュは `__graph_meta__` に記録されます(アプリケーションレベルのメタデータであり、リプレイの証拠ではありません)。 |
 
 ### Program API

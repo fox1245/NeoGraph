@@ -54,7 +54,7 @@ python 01_minimal.py
 | 내 에이전트를 A2A로 제공하기 | [`27_a2a_server.py`](27_a2a_server.py) | service |
 | 내 에이전트를 ACP로 제공하기 | [`28_acp_agent.py`](28_acp_agent.py) | service |
 | Reflexion, Self-Ask, 토론 시험하기 | [`11_reflexion.py`](11_reflexion.py) | key |
-| 에이전트가 자기 그래프를 고쳐 쓰게 하기 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | key |
+| 에이전트가 자기 그래프를 고쳐 쓰게 하기 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | yes |
 
 ## 단계별 색인
 
@@ -91,7 +91,7 @@ python 01_minimal.py
 | 13 | [`13_multi_agent_debate.py`](13_multi_agent_debate.py) | key | `Send` 분기 두 개가 반대 입장을 주장하고, 심판 하나가 합쳐진 논거를 읽습니다. |
 | 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | key | 연구 모드가 있는 Gradio 채팅: 웹 검색이 아니라 모델 지식을 쓰는 병렬 researcher가 질문 세 개짜리 보고서를 만듭니다. `gradio`가 필요합니다. |
 | 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | key | 같은 연구 그래프에 Crawl4AI를 통한 실제 웹 검색과 선택적 PostgreSQL 체크포인트를 더했습니다. `gradio`, `requests`, Crawl4AI 서버가 필요합니다. |
-| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | key | 그래프가 자기 출력을 채점하고, 실패하면 모델에게 수정된 정의를 요청해 다시 컴파일하고 재시도합니다. 등록된 노드 타입만 허용됩니다. |
+| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | yes | 그래프가 자기 출력을 점수화하고, 실패하면 모델에게 고친 정의를 요청합니다. 등록되지 않은 노드 타입을 쓴 재작성은 이유와 함께 거부되고, 승인된 재작성은 컴파일되어 두 번째 반복에서 목표를 이룹니다. `--live`는 호스팅된 모델을 호출합니다. |
 | 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | key | 허용된 그래프 재작성 뒤에도 대화 체크포인트가 유지됩니다. 버전과 해시는 `__graph_meta__`에 기록됩니다(애플리케이션 수준 메타데이터이며 replay 증거가 아닙니다). |
 
 ### Program API
