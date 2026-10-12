@@ -11,7 +11,7 @@ import pytest
 
 import neograph_engine as ng
 
-from .support import (JOURNAL, admit, budget, ceiling, define_graph, describe,
+from .support import (JOURNAL, assert_started_bodies_saw_cancel, admit, budget, ceiling, define_graph, describe,
                       make_host, slow, source, with_main)
 
 WORKER = define_graph("""
@@ -231,7 +231,7 @@ def _assert_member_failure(result, elapsed):
     assert result.failure.code == "NG.TaskFailed"  # the classified node failure (#364), describe(result)
     assert "boom from worker" in result.failure.message, describe(result)
     assert JOURNAL.names("raised") == ["worker"]
-    assert JOURNAL.names("cancelled") == ["worker"], "the slow sibling was cancelled"
+    assert_started_bodies_saw_cancel("worker", ended_on_their_own=1)  # the slow sibling, if it started
     assert elapsed < 2.5, f"the join waited {elapsed:.2f}s for its cancelled sibling"
 
 
@@ -266,5 +266,5 @@ def test_unreachable_quorum_reports_its_own_failure_not_a_cancelled_member():
     assert result.status == ng.ProgramTerminalStatus.Failed, describe(result)
     assert result.failure.code == "P_QUORUM_UNREACHABLE", describe(result)
     assert JOURNAL.names("raised") == ["worker"]
-    assert JOURNAL.names("cancelled") == ["worker"]
+    assert_started_bodies_saw_cancel("worker", ended_on_their_own=1)
     assert elapsed < 2.5, f"the quorum waited {elapsed:.2f}s for its cancelled member"

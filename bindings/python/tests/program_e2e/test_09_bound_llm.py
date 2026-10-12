@@ -495,7 +495,7 @@ def test_a_refused_member_is_the_join_failure_not_the_sibling_it_cancelled(peer)
     assert result.status == ng.ProgramTerminalStatus.BudgetExhausted, describe(result)
     assert result.failure.code == "P_MONEY_BUDGET", describe(result)
     assert peer.request_count() == 0
-    assert support.JOURNAL.names("cancelled") == ["wait"]
+    support.assert_started_bodies_saw_cancel("wait")
 
 
 # ---------------------------------------------------------------------------

@@ -151,6 +151,19 @@ class Journal:
 JOURNAL = Journal()
 
 
+def assert_started_bodies_saw_cancel(name: str, *, ended_on_their_own: int = 0) -> None:
+    """Every body of `name` that started, and did not end on its own, saw its token cancelled.
+
+    A sibling the runtime cancels before a worker starts it never runs, so it leaves no
+    "cancelled" entry (#367, #368); the contract is that a body which did start is told,
+    not that every cancelled member starts."""
+    started = JOURNAL.names("started").count(name)
+    cancelled = JOURNAL.names("cancelled").count(name)
+    assert cancelled == started - ended_on_their_own, (
+        f"{started} bodies of {name!r} started, {ended_on_their_own} ended on their own, "
+        f"{cancelled} saw the cancellation")
+
+
 class Step(ng.GraphNode):
     """One configurable Python node type, driven by its JavaScript config.
 
