@@ -96,7 +96,7 @@ python 01_minimal.py
 
 ### Program API
 
-制限付きの JavaScript Program API は Core グラフの上で動きます: `ProgramRegistryBuilder`、`ProgramCompiler`、`LocalProgramHost`。[Program and QuickJS](../../../docs/python-binding.md#program-and-quickjs) に説明があり、[`bindings/python/tests/program_e2e/`](../tests/program_e2e/README.md) のエンドツーエンドシナリオが join、失敗ルーティング、予算、一時停止と再開、fork、クラッシュ復旧を扱っています。 以下のサンプルは、それぞれこの中の 1 つを `LocalProgramHost` で示します。すべてオフラインで動き、ノードがモデルを呼ぶ場面ではスクリプト済みモデルが答えます。共通の設定は `_program.py` にあり、29 番のサンプルがその設定を 1 回だけ展開して見せます。
+制限付きの JavaScript Program API は Core グラフの上で動きます: `ProgramRegistryBuilder`、`ProgramCompiler`、`LocalProgramHost`。[Program and QuickJS](../../../docs/python-binding.md#program-and-quickjs) に説明があり、[`bindings/python/tests/program_e2e/`](../tests/program_e2e/README.md) のエンドツーエンドシナリオが join、失敗ルーティング、予算、一時停止と再開、fork、クラッシュ復旧を扱っています。 以下のサンプルは、それぞれこの中の 1 つを `LocalProgramHost` で示します。すべてオフラインで動き、ノードがモデルを呼ぶ場面ではスクリプト化したモデルが答えます。共通の設定は `_program.py` にあり、29 番のサンプルがその設定を 1 回だけ展開して見せます。
 
 | # | サンプル | Offline | 示すもの |
 |---|---|---|---|
@@ -106,7 +106,7 @@ python 01_minimal.py
 | 32 | [`32_program_failure_routing.py`](32_program_failure_routing.py) | yes | TEST が失敗して 2 回再試行され、最後の失敗は `interruptBefore` 付きのハンドラーへルーティングされます。オペレーターが `retry` で再開すると Program は完了し、`abort` で再開すると失敗終了ノードが `plan.user_abort` を付けて `Failed` で終わらせます。 |
 | 33 | [`33_program_budgets.py`](33_program_budgets.py) | yes | バインドされた `llm_call` ノード 2 つが各 600 トークンを報告し、予算は 1,000 トークンなので、実行は `BudgetExhausted` で終わります。承認された予算と異なる予算での実行は `P_START_BUDGET` で拒否されます。 |
 | 34 | [`34_program_pause_resume.py`](34_program_pause_resume.py) | yes | `interruptBefore` が b ノードの前で実行を止め、`host.resume(run_id, value)` が続きを実行します。停止時の trace は `['a']`、再開後は `['b', 'c']` で、`main()` はオペレーターの答えを返して終わります。 |
-| 35 | [`35_program_fork.py`](35_program_fork.py) | yes | 終わったモデル呼び出しの隣で止まった実行を、別の答えで fork します。終わった呼び出しはチェックポイントからリプレイされるので、スクリプト済みモデルが受け取るリクエストは合計 1 回で、fork にトークンは課金されません。 |
+| 35 | [`35_program_fork.py`](35_program_fork.py) | yes | 終わったモデル呼び出しの隣で止まった実行を、別の答えで fork します。終わった呼び出しはチェックポイントからリプレイされるので、スクリプト化したモデルが受け取るリクエストは合計 1 回で、fork にトークンは課金されません。 |
 | 36 | [`36_program_crash_recovery.py`](36_program_crash_recovery.py) | yes | プロセス A は Program を質問まで実行し、答えを受けてモデルを呼んだあと終了します。プロセス B が同じ `sqlite_directory` を開いて `reconnect` を呼ぶと実行が完了し、ジャーナルの応答はリプレイされ、呼び出しの課金は 1 回だけです。Linux と macOS のみ。 |
 
 ### プロトコル: MCP、A2A、ACP
