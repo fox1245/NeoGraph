@@ -234,8 +234,10 @@ public:
      * Atomically append one JavaScript yielded-command journal entry while
      * the attempt remains Running.  A terminal result may complete an
      * existing pending coordinate, and a paused join may record its settled
-     * members against its pending coordinate; the store rejects every other
-     * duplicate.
+     * members against its pending coordinate, and an await its start (#391);
+     * the store rejects every other duplicate. The pending entries of one
+     * coordinate are cumulative: each carries the settled members and await
+     * starts of the entries before it.
      */
     ProgramTransitionPublishResult publish_javascript_command(
         std::uint64_t              command_ordinal,
@@ -244,7 +246,8 @@ public:
         std::optional<json>        terminal_result,
         std::optional<RunBudget>   remaining_budget     = std::nullopt,
         std::optional<RunBudget>   inflight_reservation = std::nullopt,
-        std::optional<json>        settled_members      = std::nullopt);
+        std::optional<json>        settled_members      = std::nullopt,
+        std::optional<json>        await_started_at     = std::nullopt);
     /** Durably consumes one nonrenewable dynamic-compilation unit before dispatch. */
     bool consume_dynamic_compile();
     std::atomic<std::uint64_t> dynamic_compile_ceiling{UINT64_MAX};

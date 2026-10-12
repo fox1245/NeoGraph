@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=9b75d917e14c9501760d00f2cdbf43edda322b6ca7764762f7c2e08289824d7d -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=e3cd9b20b80e2e140c91a6402e215663280dea07a3e992e4363eea4532e55b71 -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -459,7 +459,7 @@ JavaScript Programは、グラフビルダーを1つ返す`define()`をexportす
 
 ### 失敗したコマンドは実行を終了する
 
-`main()`を再開するのは完了したコマンドだけです。yieldされたコマンドが完了しない場合、たとえばノードが例外を送出した、Coreのステップ予算を使い切った、もう発火できないbarrierで止まった、またはwall-time制限を超えた`callCore`では、`ProgramRuntime`はその結果を記録し、対応する`status`と`failure`を持つ実行の最終結果にします。ジェネレーターは再開されません。`yield`を囲む`try`/`catch`は実行されず、その後のJavaScriptも実行されません。失敗ポリシーに従って失敗したjoin（`ng.all`、`ng.race`、`ng.quorum`）も同じように実行を終了します。Pythonでは`result.status`と`result.failure`で失敗を処理してください。割り込まれたコマンドは異なります。実行は`Interrupted`として停止し、`resume()`がそのコマンドを続行します。割り込まれたjoinメンバーはそのjoinを一時停止します。joinはそれ以上メンバーを開始せず、すでに実行中のメンバーは終了させます。その結果でjoinが決まる場合（fail-fastの失敗、raceの勝者、達成されたか到達不能になったquorum）、joinはそのように終了します。そうでなければ実行は最初に一時停止したメンバーで`Interrupted`として停止し、`resume()`はそのメンバーを続行し、終了したメンバーはコマンドジャーナルから再生するため、再実行も再課金もしません。
+`main()`を再開するのは完了したコマンドだけです。yieldされたコマンドが完了しない場合、たとえばノードが例外を送出した、Coreのステップ予算を使い切った、もう発火できないbarrierで止まった、またはwall-time制限を超えた`callCore`では、`ProgramRuntime`はその結果を記録し、対応する`status`と`failure`を持つ実行の最終結果にします。ジェネレーターは再開されません。`yield`を囲む`try`/`catch`は実行されず、その後のJavaScriptも実行されません。失敗ポリシーに従って失敗したjoin（`ng.all`、`ng.race`、`ng.quorum`）も同じように実行を終了します。Pythonでは`result.status`と`result.failure`で失敗を処理してください。割り込まれたコマンドは異なります。実行は`Interrupted`として停止し、`resume()`がそのコマンドを続行します。割り込まれたjoinメンバーはそのjoinを一時停止します。joinはそれ以上メンバーを開始せず、すでに実行中のメンバーは終了させます。その結果でjoinが決まる場合（fail-fastの失敗、raceの勝者、達成されたか到達不能になったquorum）、joinはそのように終了します。そうでなければ実行は最初に一時停止したメンバーで`Interrupted`として停止し、`resume()`はそのメンバーを続行し、終了したメンバーはコマンドジャーナルから再生するため、再実行も再課金もしません。 `ng.await(command, timeout_ms)` の期限は絶対時刻です。コマンドジャーナルが await の開始時刻を記録し、再開や停止したプロセスの復旧には残り時間だけが与えられます。期限を過ぎて再開された await は、応答されたノードを実行せずに直ちに `P_AWAIT_TIMEOUT` で実行を `TimedOut` として終了します (#391)。プランレベルの `await` 操作も、再開をまたいで同じように期限を保ちます。
 
 ### グラフのチェックとbarrierの停滞
 

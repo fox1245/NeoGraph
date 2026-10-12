@@ -3892,7 +3892,8 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
     std::optional<json>        terminal_result,
     std::optional<RunBudget>   remaining_budget,
     std::optional<RunBudget>   inflight_reservation,
-    std::optional<json>        settled_members) {
+    std::optional<json>        settled_members,
+    std::optional<json>        await_started_at) {
     if (remaining_budget)
         remaining_budget->max_dynamic_compiles = std::min<std::uint64_t>(
             remaining_budget->max_dynamic_compiles, dynamic_compile_ceiling.load());
@@ -3937,19 +3938,40 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
                            ? ProgramTransitionPublishResult::AlreadyPresent
                            : ProgramTransitionPublishResult::Conflict;
             }
-            if (!terminal_result && found->settled_members() == settled_members)
-                return ProgramTransitionPublishResult::AlreadyPresent;
-            if (!terminal_result && !settled_members)
-                return ProgramTransitionPublishResult::AlreadyPresent;
+            if (!terminal_result) {
+                // The pending entries of a coordinate are cumulative: a new
+                // one carries the settled members (#380) and the await starts
+                // (#391) of the latest one, so the attempt that resumes or
+                // recovers the command reads both from it.
+                auto members = settled_members ? settled_members : found->settled_members();
+                auto starts  = found->await_started_at();
+                if (await_started_at) {
+                    json merged = starts ? *starts : json::object();
+                    for (const auto& [operation_id, started_at] : await_started_at->items()) {
+                        // A recorded start never moves.
+                        if (merged.contains(operation_id) && merged[operation_id] != started_at)
+                            return ProgramTransitionPublishResult::Conflict;
+                        merged[operation_id] = started_at;
+                    }
+                    starts = std::move(merged);
+                }
+                if (members == found->settled_members() && starts == found->await_started_at())
+                    return ProgramTransitionPublishResult::AlreadyPresent;
+                settled_members  = std::move(members);
+                await_started_at = std::move(starts);
+            }
         }
-        // Settled members belong to an existing pending coordinate.
-        if (settled_members && (terminal_result || !found))
+        // Settled members and await starts belong to an existing pending
+        // coordinate.
+        if ((settled_members || await_started_at) && (terminal_result || !found))
             return ProgramTransitionPublishResult::Conflict;
 
         const auto sequence = head->latest_command ? head->latest_command->sequence() + 1 : 1;
-        ProgramJavaScriptCommandJournalEntry entry(ProgramJavaScriptCommandJournalEntryData{
+        ProgramJavaScriptCommandJournalEntryData entry_data{
             sequence, bundle_id, command_ordinal, command, effect_identity, terminal_result,
-            settled_members});
+            settled_members};
+        entry_data.await_started_at = await_started_at;
+        ProgramJavaScriptCommandJournalEntry entry(std::move(entry_data));
         // A completed command becomes replayable as soon as its terminal
         // journal entry is durable. Publish every event staged by that command
         // and its newest checkpoint in the same CAS so crash recovery cannot

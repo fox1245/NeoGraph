@@ -367,7 +367,8 @@ bool valid_command_history_append(
             });
         if (found == prior.rend()) {
             if (entry.command_ordinal() != highest_ordinal + 1 || !entry.pending() ||
-                entry.settled_members() || (!prior.empty() && prior.back().pending()))
+                entry.settled_members() || entry.await_started_at() ||
+                (!prior.empty() && prior.back().pending()))
                 return false;
             highest_ordinal = entry.command_ordinal();
             prior.push_back(entry);
@@ -376,11 +377,12 @@ bool valid_command_history_append(
 
         // A command coordinate can only move once, from a durable pending
         // head to one authoritative terminal result. Before that, a paused
-        // join may record its settled members as further pending entries of
-        // the same coordinate. Conflicting command payloads or a second
+        // join may record its settled members, and an await its start (#391),
+        // as further pending entries of the same coordinate. Conflicting
+        // command payloads or a second
         // completion are rejected fail-closed.
         if (!found->pending() || !same_command_coordinate(*found, entry) ||
-            (!entry.completed() && !entry.settled_members())) {
+            (!entry.completed() && !entry.settled_members() && !entry.await_started_at())) {
             return false;
         }
         prior.push_back(entry);

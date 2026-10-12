@@ -1555,6 +1555,108 @@ TEST(ProgramTransitionStoreTest, ContextPublicationFaultLeavesNoPartialSnapshotA
     EXPECT_EQ(store.load_context_publications("owner-a", "run-1").size(), 1U);
 }
 
+// #391: when each await of a command started, in a pending entry of its
+// coordinate. Other entries keep schema 1 and their ids.
+ProgramJavaScriptCommandJournalEntry await_start_entry(std::uint64_t       sequence,
+                                                       std::optional<json> terminal,
+                                                       std::optional<json> starts) {
+    auto data = ProgramJavaScriptCommandJournalEntryData{
+        sequence, digest('2'), 1,
+        JavaScriptCommand::call_core("journal:store", "main", json{{"input", 1}}), digest('8'),
+        std::move(terminal)};
+    data.await_started_at = std::move(starts);
+    return ProgramJavaScriptCommandJournalEntry(std::move(data));
+}
+
+std::uint64_t stored_schema(const ProgramJavaScriptCommandJournalEntry& entry) {
+    return detail::parse_json_strict(entry.serialize_canonical())
+        .at("storage_schema_version")
+        .get<std::uint64_t>();
+}
+
+void exercise_await_start_history(ProgramTransitionStore& store) {
+    const auto start = start_publication();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, start),
+              ProgramTransitionPublishResult::Published);
+    // A head never carries await starts.
+    const auto head_with_starts = javascript_command_publication(
+        start, await_start_entry(1, std::nullopt, json{{"root.javascript.1", 7}}), 20);
+    EXPECT_EQ(store.compare_publish("owner-a", start.journal_record.id, head_with_starts),
+              ProgramTransitionPublishResult::Conflict);
+    const auto head =
+        javascript_command_publication(start, javascript_command_entry(1, false), 20);
+    ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, head),
+              ProgramTransitionPublishResult::Published);
+    const auto started = javascript_command_publication(
+        head, await_start_entry(2, std::nullopt, json{{"root.javascript.1", 1'700'000'000'000ULL}}),
+        25);
+    ASSERT_EQ(store.compare_publish("owner-a", head.journal_record.id, started),
+              ProgramTransitionPublishResult::Published);
+    const auto completed =
+        javascript_command_publication(started, javascript_command_entry(3, true), 30);
+    ASSERT_EQ(store.compare_publish("owner-a", started.journal_record.id, completed),
+              ProgramTransitionPublishResult::Published);
+    const auto commands = store.load_javascript_commands("owner-a", "run-1", 0);
+    ASSERT_EQ(commands.size(), 3U);
+    ASSERT_TRUE(commands[1].await_started_at());
+    EXPECT_EQ(*commands[1].await_started_at(), (json{{"root.javascript.1", 1'700'000'000'000ULL}}));
+    EXPECT_FALSE(commands[0].await_started_at());
+    EXPECT_EQ(commands[0].coordinate_id(), commands[1].coordinate_id());
+}
+
+TEST(ProgramTransitionStoreTest, CommandJournalAwaitStartsUseSchemaThreeAndRoundTrip) {
+    const auto plain = javascript_command_entry(1, false);
+    EXPECT_EQ(stored_schema(plain), 1U) << "an entry without await starts keeps its bytes and id";
+    EXPECT_EQ(ProgramJavaScriptCommandJournalEntry::parse(plain.serialize_canonical()).id(),
+              plain.id());
+
+    const auto starts  = json{{"root.javascript.1", 1'700'000'000'000ULL},
+                              {"root.javascript.1/member/0", 1'700'000'000'250ULL}};
+    const auto started = await_start_entry(2, std::nullopt, starts);
+    EXPECT_EQ(stored_schema(started), 3U);
+    const auto parsed = ProgramJavaScriptCommandJournalEntry::parse(started.serialize_canonical());
+    EXPECT_EQ(parsed.id(), started.id());
+    ASSERT_TRUE(parsed.await_started_at());
+    EXPECT_EQ(*parsed.await_started_at(), starts);
+    EXPECT_EQ(parsed.coordinate_id(), plain.coordinate_id()) << "the coordinate is unchanged";
+
+    EXPECT_THROW((void)await_start_entry(4, json{{"status", "completed"}}, starts),
+                 std::invalid_argument)
+        << "a terminal result carries no await starts";
+    EXPECT_THROW((void)await_start_entry(4, std::nullopt, json::object()), std::invalid_argument);
+    EXPECT_THROW((void)await_start_entry(4, std::nullopt, json::array({1})), std::invalid_argument);
+    EXPECT_THROW((void)await_start_entry(4, std::nullopt, json{{"root.javascript.1", -1}}),
+                 std::invalid_argument);
+    EXPECT_THROW((void)await_start_entry(4, std::nullopt, json{{"root.javascript.1", "now"}}),
+                 std::invalid_argument);
+
+    // The version and the field agree.
+    auto tampered = detail::parse_json_strict(started.serialize_canonical());
+    tampered["storage_schema_version"] = 2;
+    EXPECT_THROW((void)ProgramJavaScriptCommandJournalEntry::parse(
+                     detail::canonical_json_bytes(tampered)),
+                 std::invalid_argument);
+    const auto full    = detail::parse_json_strict(started.serialize_canonical());
+    auto       missing = json::object();
+    for (const auto& [key, value] : full.items())
+        if (key != "await_started_at") missing[key] = value;
+    EXPECT_THROW((void)ProgramJavaScriptCommandJournalEntry::parse(
+                     detail::canonical_json_bytes(missing)),
+                 std::invalid_argument);
+}
+
+TEST(ProgramTransitionStoreTest, InMemoryAcceptsAnAwaitStartBeforeTheCommandResult) {
+    InMemoryProgramTransitionStore store;
+    exercise_await_start_history(store);
+}
+
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+TEST(ProgramTransitionStoreTest, SQLiteAcceptsAnAwaitStartBeforeTheCommandResult) {
+    SQLiteProgramTransitionStore store(":memory:");
+    exercise_await_start_history(store);
+}
+#endif
+
 TEST(ProgramTransitionStoreTest, InMemoryJavaScriptCommandHistoryIsAppendOnly) {
     InMemoryProgramTransitionStore store;
     exercise_javascript_command_history(store);

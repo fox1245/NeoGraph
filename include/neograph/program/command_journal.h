@@ -38,6 +38,15 @@ struct ProgramJavaScriptCommandJournalEntryData {
      * the attempt that resumes the join replays these members from it.
      */
     std::optional<json>        settled_members;
+    /**
+     * Pending entries only (#391): when each `ng.await` with a timeout in this
+     * command started, as an object from the await's operation id to Unix
+     * epoch milliseconds. An await that starts appends it after the pending
+     * head, every later pending entry of the coordinate carries it forward,
+     * and the attempt that resumes or recovers the command enforces each
+     * await's remaining time from its recorded start.
+     */
+    std::optional<json>        await_started_at;
 };
 
 /**
@@ -50,8 +59,10 @@ struct ProgramJavaScriptCommandJournalEntryData {
  */
 class NEOGRAPH_PROGRAM_API ProgramJavaScriptCommandJournalEntry final {
 public:
-    /// Version 2 adds settled_members; entries without it keep version 1.
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
+    /// Version 2 adds settled_members and version 3 await_started_at; an
+    /// entry uses the lowest version that holds its fields, so entries without
+    /// them keep version 1 and their bytes and ids.
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 3;
 
     explicit ProgramJavaScriptCommandJournalEntry(
         ProgramJavaScriptCommandJournalEntryData data);
@@ -64,6 +75,7 @@ public:
     std::optional<std::string> effect_identity() const;
     std::optional<json>        terminal_result() const;
     std::optional<json>        settled_members() const;
+    std::optional<json>        await_started_at() const;
     bool                       pending() const noexcept;
     bool                       completed() const noexcept;
     /** Stable identity for the command coordinate, excluding the result. */

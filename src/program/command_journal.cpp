@@ -55,11 +55,15 @@ std::string coordinate_id_for(const ProgramJavaScriptCommandJournalEntryData& da
                                    detail::canonical_json_bytes(coordinate_body(data)));
 }
 
-// Only an entry that carries settled members uses version 2, so the ids of
-// all other entries stay unchanged.
+constexpr std::uint32_t SETTLED_MEMBERS_SCHEMA_VERSION = 2;
+constexpr std::uint32_t AWAIT_STARTS_SCHEMA_VERSION    = 3;
+
+// An entry uses the lowest version that holds its fields: one that carries
+// await starts uses version 3 (#391), one that carries only settled members
+// version 2 (#380), and every other entry keeps version 1, its bytes and id.
 std::uint32_t storage_schema_version(const ProgramJavaScriptCommandJournalEntryData& data) {
-    return data.settled_members ? ProgramJavaScriptCommandJournalEntry::STORAGE_SCHEMA_VERSION
-                                : 1U;
+    if (data.await_started_at) return AWAIT_STARTS_SCHEMA_VERSION;
+    return data.settled_members ? SETTLED_MEMBERS_SCHEMA_VERSION : 1U;
 }
 
 json entry_body(const ProgramJavaScriptCommandJournalEntryData& data) {
@@ -76,6 +80,8 @@ json entry_body(const ProgramJavaScriptCommandJournalEntryData& data) {
                                            : json(nullptr)}};
     if (data.settled_members)
         body["settled_members"] = detail::owned_json_copy(*data.settled_members);
+    if (data.await_started_at)
+        body["await_started_at"] = detail::owned_json_copy(*data.await_started_at);
     return body;
 }
 
@@ -112,6 +118,22 @@ void validate_data(const ProgramJavaScriptCommandJournalEntryData& data) {
         }
         (void)detail::canonical_json_bytes(*data.settled_members);
     }
+    if (data.await_started_at) {
+        const auto& starts = *data.await_started_at;
+        if (data.terminal_result || !starts.is_object() || starts.empty()) {
+            throw std::invalid_argument(
+                "JavaScript command journal await starts belong to a pending command");
+        }
+        for (const auto& [operation_id, started_at] : starts.items()) {
+            const bool milliseconds =
+                started_at.is_number_unsigned() ||
+                (started_at.is_number_integer() && started_at.get<std::int64_t>() >= 0);
+            if (operation_id.empty() || !milliseconds) {
+                throw std::invalid_argument(
+                    "JavaScript command journal await start must be unsigned milliseconds");
+            }
+        }
+    }
 }
 
 }  // namespace
@@ -140,6 +162,9 @@ ProgramJavaScriptCommandJournalEntry::ProgramJavaScriptCommandJournalEntry(
     data.settled_members = data.settled_members
                                ? std::optional<json>(detail::owned_json_copy(*data.settled_members))
                                : std::nullopt;
+    data.await_started_at = data.await_started_at
+                                ? std::optional<json>(detail::owned_json_copy(*data.await_started_at))
+                                : std::nullopt;
     impl_ = std::make_shared<const Impl>(std::move(data));
 }
 
@@ -157,14 +182,18 @@ ProgramJavaScriptCommandJournalEntry ProgramJavaScriptCommandJournalEntry::parse
         value, "Stored JavaScript command journal entry",
         {"format", "storage_schema_version", "id", "sequence", "bundle_id",
          "command_ordinal", "command", "effect_identity", "terminal_result",
-         "settled_members"});
+         "settled_members", "await_started_at"});
     const auto schema_version = require_uint32(value, "storage_schema_version");
     if (schema_version == 0 || schema_version > STORAGE_SCHEMA_VERSION) {
         throw std::invalid_argument("Stored JavaScript command journal schema unsupported");
     }
-    if ((schema_version == STORAGE_SCHEMA_VERSION) != value.contains("settled_members")) {
+    // Each version holds exactly the fields that select it.
+    if ((schema_version == AWAIT_STARTS_SCHEMA_VERSION) != value.contains("await_started_at") ||
+        (schema_version == SETTLED_MEMBERS_SCHEMA_VERSION && !value.contains("settled_members")) ||
+        (schema_version == 1 && value.contains("settled_members"))) {
         throw std::invalid_argument(
-            "Stored JavaScript command journal settled members disagree with its schema");
+            "Stored JavaScript command journal settled members or await starts disagree with its "
+            "schema");
     }
     const auto& effect = value.at("effect_identity");
     std::optional<std::string> effect_identity;
@@ -183,6 +212,9 @@ ProgramJavaScriptCommandJournalEntry ProgramJavaScriptCommandJournalEntry::parse
             std::move(terminal_result),
             value.contains("settled_members")
                 ? std::optional<json>(detail::owned_json_copy(value.at("settled_members")))
+                : std::nullopt,
+            value.contains("await_started_at")
+                ? std::optional<json>(detail::owned_json_copy(value.at("await_started_at")))
                 : std::nullopt});
     if (parsed.id() != require_string(value, "id")) {
         throw std::invalid_argument("Stored JavaScript command journal entry id mismatch");
@@ -219,6 +251,12 @@ std::optional<json> ProgramJavaScriptCommandJournalEntry::terminal_result() cons
 std::optional<json> ProgramJavaScriptCommandJournalEntry::settled_members() const {
     return impl_->data.settled_members
                ? std::optional<json>(detail::owned_json_copy(*impl_->data.settled_members))
+               : std::nullopt;
+}
+
+std::optional<json> ProgramJavaScriptCommandJournalEntry::await_started_at() const {
+    return impl_->data.await_started_at
+               ? std::optional<json>(detail::owned_json_copy(*impl_->data.await_started_at))
                : std::nullopt;
 }
 

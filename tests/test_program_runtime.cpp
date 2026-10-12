@@ -547,19 +547,20 @@ public:
             ++join_member_runs[value];
         }
         if (value == "fail") throw std::runtime_error("join member failure sentinel");
-        if (value == "ask" && !input.ctx.resume_value)
+        if ((value == "ask" || value == "ask-slow") && !input.ctx.resume_value)
             throw NodeInterrupt("join member approval", json{{"request", "approve"}});
-        if (value == "slow") {
+        // #391: an answered "ask-slow" takes 1.2 s before it finishes.
+        if (value == "slow" || value == "ask-slow") {
             auto timer = asio::steady_timer(co_await asio::this_coro::executor);
-            timer.expires_after(std::chrono::milliseconds(300));
+            timer.expires_after(std::chrono::milliseconds(value == "slow" ? 300 : 1200));
             co_await timer.async_wait(
                 asio::bind_cancellation_slot(input.ctx.cancel_token->slot(), asio::use_awaitable));
         }
         if (value == "block") std::this_thread::sleep_for(std::chrono::milliseconds(800));
         NodeOutput output;
         output.writes.push_back(ChannelWrite{
-            "value", value == "ask" ? input.ctx.resume_value->at("decision")
-                                    : json("done:" + value)});
+            "value", value == "ask" || value == "ask-slow" ? input.ctx.resume_value->at("decision")
+                                                           : json("done:" + value)});
         co_return output;
     }
 
@@ -7049,6 +7050,125 @@ TEST(ProgramRuntimeTest, JavaScriptQuorumOutOfReachFailsWhileAMemberIsPaused) {
     EXPECT_EQ(result.failure()->code, "P_QUORUM_UNREACHABLE");
 }
 
+// ---------------------------------------------------------------------------
+// An await keeps its deadline across a resume (#391)
+// ---------------------------------------------------------------------------
+
+namespace {
+// The start of each await of the run's latest command, as its command journal
+// recorded it.
+json recorded_await_starts(AdmittedRuntime& fixture, const ProgramResult& run) {
+    const auto commands = fixture.journal->load_javascript_commands("tenant:runtime", run.run_id());
+    for (auto entry = commands.rbegin(); entry != commands.rend(); ++entry)
+        if (entry->await_started_at()) return *entry->await_started_at();
+    return json::object();
+}
+}  // namespace
+
+TEST(ProgramRuntimeTest, JavaScriptAwaitThatPausedPastItsDeadlineTimesOutOnResume) {
+    // #391: the awaited call asks, and is answered after the await's 800 ms
+    // have passed. The deadline was recorded when the await started, so the
+    // resumed await times out at once instead of starting a new 800 ms; the
+    // answered node does not run again.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        reset_join_member_runs();
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                                ExecutionGuarantee::Unmanaged, true);
+        const auto paused = run_join(fixture, R"JS(
+    const reply = yield ng.await(ng.callCore("main", {value: "ask"}, "await:ask"), 800, "await");
+    return {value: reply.value};
+)JS");
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        const auto resumed = approve(fixture, paused);
+        ASSERT_EQ(resumed.status(), ProgramTerminalStatus::TimedOut) << failure_detail(resumed);
+        EXPECT_EQ(resumed.failure()->code, "P_AWAIT_TIMEOUT");
+        EXPECT_EQ(join_member_runs_of("ask"), 1U) << "a timed-out await dispatches nothing";
+        EXPECT_TRUE(recorded_await_starts(fixture, paused).contains("root.javascript.1"))
+            << "the await's start is in the command journal";
+    }
+}
+
+TEST(ProgramRuntimeTest, JavaScriptAwaitResumedBeforeItsDeadlineHasOnlyTheRemainingTime) {
+    // #391: 600 ms pass before the answer, and the answered node then takes
+    // 1.2 s. Of the await's 1.5 s only 0.9 s remained, so it times out; a timer
+    // that restarted on resume would have let the node finish.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        reset_join_member_runs();
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                                ExecutionGuarantee::Unmanaged, true);
+        const auto paused = run_join(fixture, R"JS(
+    const reply = yield ng.await(ng.callCore("main", {value: "ask-slow"}, "await:slow"), 1500, "await");
+    return {value: reply.value};
+)JS");
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));
+        const auto started = std::chrono::steady_clock::now();
+        const auto resumed = approve(fixture, paused);
+        const auto waited  = std::chrono::steady_clock::now() - started;
+        ASSERT_EQ(resumed.status(), ProgramTerminalStatus::TimedOut) << failure_detail(resumed);
+        EXPECT_EQ(resumed.failure()->code, "P_AWAIT_TIMEOUT");
+        EXPECT_LT(waited, std::chrono::milliseconds(1150)) << "only the remaining time was waited";
+    }
+}
+
+TEST(ProgramRuntimeTest, JavaScriptAwaitResumedWithinItsDeadlineCompletes) {
+    // #391: a resume well inside the deadline completes normally, with the
+    // start recorded once, and a later await of the run gets its own start.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        reset_join_member_runs();
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                                ExecutionGuarantee::Unmanaged, true);
+        const auto paused = run_join(fixture, R"JS(
+    const first = yield ng.await(ng.callCore("main", {value: "ask"}, "await:first"), 10000, "first");
+    const second = yield ng.await(ng.callCore("main", {value: "ask"}, "await:second"), 10000, "second");
+    return {values: [first.value, second.value]};
+)JS");
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+        EXPECT_TRUE(recorded_await_starts(fixture, paused).contains("root.javascript.1"));
+
+        const auto again = approve(fixture, paused);
+        ASSERT_EQ(again.status(), ProgramTerminalStatus::Interrupted) << failure_detail(again);
+        const auto second_start = recorded_await_starts(fixture, again);
+        EXPECT_TRUE(second_start.contains("root.javascript.2")) << second_start.dump();
+        EXPECT_FALSE(second_start.contains("root.javascript.1"))
+            << "each command records the awaits it started";
+
+        const auto done = approve(fixture, again);
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+        EXPECT_EQ(done.output(), (json{{"values", json::array({"approved", "approved"})}}));
+    }
+}
+
+TEST(ProgramRuntimeTest, JavaScriptJoinMemberAwaitKeepsItsDeadlineAcrossAResume) {
+    // #391: an await inside a join member records its own start too.
+    reset_join_member_runs();
+    AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      paused = run_join(fixture, R"JS(
+    const replies = yield ng.all([
+        ng.await(ng.callCore("main", {value: "ask"}, "member:ask"), 800, "member:await"),
+        ng.callCore("main", {value: "done"}, "member:done")
+    ], {max_in_flight: 2}, "join");
+    return {values: replies.map((reply) => reply.value)};
+)JS");
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    const auto resumed = approve(fixture, paused);
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::TimedOut) << failure_detail(resumed);
+    EXPECT_EQ(resumed.failure()->code, "P_AWAIT_TIMEOUT");
+    EXPECT_EQ(join_member_runs_of("done"), 1U) << "the settled member replays";
+    EXPECT_TRUE(recorded_await_starts(fixture, paused).contains("root.javascript.1/member/0"));
+}
+
 TEST(ProgramRuntimeTest, ProgramPathKeepsLintAndFanOutNoticesOffStderr) {
     // Program admission reports lint through diagnostics, and Program hosts
     // cannot change EngineConfig::worker_count, so neither belongs on stderr.
@@ -9850,6 +9970,48 @@ std::string plan_root_thread(const ProgramVersion& version, const std::string& r
 
 json channel_value(const json& output) { return output["channels"]["value"]["value"]; }
 }  // namespace
+
+TEST(ProgramRuntimeTest, PlanAwaitThatPausedPastItsDeadlineTimesOutOnResume) {
+    // #391: a plan-level await keeps its deadline across a resume. The call it
+    // awaits asks and is answered after the 800 ms passed: the resumed await
+    // times out without dispatching the answered call. In memory and SQLite.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                                ExecutionGuarantee::Unmanaged, true);
+        reset_plan_steps([](std::size_t, const NodeInput&) { return json{{"ask", true}}; });
+        const auto version = admit_plan(
+            fixture, json{{"op", "await"}, {"timeout_ms", 800}, {"body", plan_call()}});
+        const auto paused = run_plan(fixture, version, "plan-await-late");
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+        const auto record = fixture.journal->load("tenant:runtime", paused.run_id());
+        ASSERT_TRUE(record && record->settled_branches());
+        EXPECT_TRUE((*record->settled_branches())["root"].contains("started_at_unix_ms"))
+            << "the paused await records its start: " << record->settled_branches()->dump();
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        const auto resumed = decide(fixture, paused, "approved");
+        ASSERT_EQ(resumed.status(), ProgramTerminalStatus::TimedOut) << failure_detail(resumed);
+        EXPECT_EQ(resumed.failure()->code, "P_AWAIT_TIMEOUT");
+        EXPECT_EQ(plan_steps_counted(true), 0U) << "the answered call is not dispatched";
+    }
+}
+
+TEST(ProgramRuntimeTest, PlanAwaitResumedWithinItsDeadlineCompletes) {
+    // #391: a resume inside the deadline continues the awaited call.
+    JoinTestStores  stores(false);
+    AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                            ExecutionGuarantee::Unmanaged, true);
+    reset_plan_steps([](std::size_t, const NodeInput&) { return json{{"ask", true}}; });
+    const auto version = admit_plan(
+        fixture, json{{"op", "await"}, {"timeout_ms", 10000}, {"body", plan_call()}});
+    const auto paused = run_plan(fixture, version, "plan-await-in-time");
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+    const auto done = decide(fixture, paused, "approved");
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+    EXPECT_EQ(channel_value(done.output()), json("approved"));
+}
 
 TEST(ProgramRuntimeTest, PlanResumeReplaysTheOperationsBeforeThePausedCallAndKeepsTheBranchArm) {
     // #386: A finishes, a branch on A's output selects a sequence, and B in it

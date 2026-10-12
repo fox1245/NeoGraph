@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=7b7c2d31c9130445d402371c02e5f533e14937b4c8cb0455bc5a0679df21122c -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=5573def7d0ee809c79d38af71919f9eaf0f66c25b6f1d6712b080c3eb77f76ea -->
 # Program API 端到端场景
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -22,6 +22,7 @@
 | `test_11_attempt_timeout.py` | 尝试超时（#364）：超时后在重试中恢复的慢 Python 节点，总是超时并以 `NG.Timeout` 路由到处理器的节点（没有处理器时运行失败），从不出现在结果和轨迹中的迟到完成，超过停止截止时间仍忽略取消的节点（`NG.EffectUncertain`），以及会越过 `wall_time_ms` 的退避以 kind `deadline` 停止 |
 | `test_12_send_interrupts.py` | 抛出 `NodeInterrupt` 的 `Send` target（#385）：Program 在其上暂停，恢复时重放 map 节点和已完成的 Send，使用 SQLite 在重启后恢复，调用了已绑定 `llm_call` 并已完成的 Send 既不会重发也不会再次计费 |
 | `test_13_fork_replays_the_paused_step.py` | 在已完成的绑定 `llm_call` 旁暂停的运行的 `host.fork()`（#390）：fork 回答问题并从该步的 pending write 重放已完成的调用，因此请求不会再次发送，令牌和费用也不会再次计费；覆盖 fan-out 步骤与 Send、内存与 SQLite 日志 |
+| `test_14_await_deadline.py` | `ng.await(..., timeout_ms)` 保持其绝对截止时间（#391）：截止时间内的恢复会完成，截止时间之后的恢复立即以 `P_AWAIT_TIMEOUT` 超时（内存、SQLite 以及重启后的宿主），在恢复的 await 中崩溃后的 `reconnect()` 也会执行 await 开始时的截止时间 |
 
 `support.py` 包含共享的 Python 节点、条件、注册表、预算和 JavaScript 构建器。
 

@@ -462,6 +462,9 @@ The Program compiler lowers authoring sugar to a small orchestration plan:
 - `loop`: repeat a child under a declared condition and hard iteration limit;
 - `spawn`: admit and start a separately compiled child Program;
 - `await`: wait for a declared handle/event with timeout and cancellation;
+  the deadline is absolute (#391): a plan's paused `await` records when it
+  started, a JavaScript `ng.await` records it in the command journal when it
+  starts, and a resume or recovery has only the time that remains;
 - `checkpoint`: request a durable safe point;
 - `emit`: publish a typed Program event;
 - `cancel`: cancel a declared scope;

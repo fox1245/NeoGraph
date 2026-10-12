@@ -672,6 +672,30 @@ void append_trace(PlanExecution& target, PlanExecution&& source) {
     }
 }
 
+// #391: an await's deadline is absolute, so its start is wall-clock time that
+// survives the process: Unix epoch milliseconds.
+std::uint64_t unix_time_ms() {
+    const auto since_epoch = std::chrono::system_clock::now().time_since_epoch();
+    const auto value = std::chrono::duration_cast<std::chrono::milliseconds>(since_epoch).count();
+    return value > 0 ? static_cast<std::uint64_t>(value) : 0U;
+}
+
+// A recorded await start, as unsigned milliseconds.
+std::uint64_t recorded_start_ms(const json& value) {
+    if (value.is_number_unsigned()) return value.get<std::uint64_t>();
+    if (value.is_number_integer() && value.get<std::int64_t>() >= 0)
+        return static_cast<std::uint64_t>(value.get<std::int64_t>());
+    throw_runtime_diagnostic("P_JS_COMMAND_JOURNAL", "Recorded await start is malformed");
+}
+
+// The time an await that started at `started_at` (Unix milliseconds) with
+// `timeout_ms` has left at `now`; zero once its deadline has passed.
+std::uint64_t await_remaining_ms(std::uint64_t started_at, std::uint64_t timeout_ms,
+                                 std::uint64_t now) {
+    const auto elapsed = now > started_at ? now - started_at : 0U;
+    return elapsed >= timeout_ms ? 0U : timeout_ms - elapsed;
+}
+
 PlanExecution plan_failure(ProgramTerminalStatus status,
                            std::string           code,
                            std::string           message,
@@ -3966,9 +3990,22 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     co_return co_await execute(child_id, std::move(state), std::move(thread_id),
                                                child_depth, operation_token);
                 }
+                // #391: the deadline is absolute. An await the paused run was
+                // executing keeps the start its record holds, and has only the
+                // time that remains; none left is a timeout, before anything
+                // is dispatched.
+                const auto now_unix = unix_time_ms();
+                const auto started_at = entered && entered->contains("started_at_unix_ms")
+                                            ? recorded_start_ms(entered->at("started_at_unix_ms"))
+                                            : now_unix;
+                const auto remaining =
+                    await_remaining_ms(started_at, *operation.timeout_ms(), now_unix);
+                if (remaining == 0)
+                    co_return plan_failure(ProgramTerminalStatus::TimedOut, "P_AWAIT_TIMEOUT",
+                                           "Program await operation timed out", operation_id);
                 const auto executor = co_await asio::this_coro::executor;
                 auto timeout        = std::make_shared<asio::steady_timer>(executor);
-                timeout->expires_after(std::chrono::milliseconds(*operation.timeout_ms()));
+                timeout->expires_after(std::chrono::milliseconds(remaining));
                 auto child_token       = operation_token->fork();
                 auto timeout_expired   = std::make_shared<std::atomic<bool>>(false);
                 auto timeout_operation = cancel_after_timer(timeout, child_token, timeout_expired);
@@ -3992,6 +4029,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         .async_wait(asio::experimental::wait_for_one(), asio::use_awaitable);
                 if (order[0] == 1 && !timeout_expired->load(std::memory_order_acquire)) {
                     if (child_error) std::rethrow_exception(child_error);
+                    // A paused await records when it started (#391).
+                    if (child_result.status == ProgramTerminalStatus::Interrupted)
+                        child_result.reentry = json{{"started_at_unix_ms", started_at}};
                     co_return std::move(child_result);
                 }
                 (void)timeout_error;
@@ -4086,6 +4126,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             std::optional<std::pair<std::string, std::string>> exact_core_resume;
             // The settled members of the paused join this attempt resumes (#380).
             json resumed_join_members = json::object();
+            // #391: when each await of the current command started, in Unix
+            // milliseconds by operation id: recorded in its command journal by
+            // an earlier attempt, or by this one when the await starts.
+            std::mutex await_starts_mutex;
+            json       await_starts = json::object();
             bool supplied_core_resume_required = false;
             bool supplied_core_resume_consumed = false;
 
@@ -4377,6 +4422,36 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     };
                     if (!timeout) co_return co_await run_awaited(operation_token);
 
+                    // #391: the deadline is absolute. The await's start is
+                    // recorded in the command journal when it first starts,
+                    // and an attempt that resumes or recovers the command has
+                    // only the time that remains; none left is a timeout,
+                    // before anything is dispatched.
+                    const auto now_unix = unix_time_ms();
+                    std::uint64_t started_at = now_unix;
+                    {
+                        std::lock_guard lock(await_starts_mutex);
+                        if (await_starts.contains(operation_id)) {
+                            started_at = recorded_start_ms(await_starts[operation_id]);
+                        } else if (!control->recorded_replay && active_javascript_command) {
+                            const auto& active    = *active_javascript_command;
+                            const auto  published = control->publish_javascript_command(
+                                active.ordinal, active.command, active.effect_identity,
+                                std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                                json{{operation_id, started_at}});
+                            if (published != ProgramTransitionPublishResult::Published &&
+                                published != ProgramTransitionPublishResult::AlreadyPresent)
+                                co_return fail(ProgramTerminalStatus::Failed, "P_JS_COMMAND_JOURNAL",
+                                               "Could not durably record the start of a "
+                                               "JavaScript await");
+                            await_starts[operation_id] = started_at;
+                        }
+                    }
+                    const auto remaining = await_remaining_ms(started_at, *timeout, now_unix);
+                    if (remaining == 0)
+                        co_return fail(ProgramTerminalStatus::TimedOut, "P_AWAIT_TIMEOUT",
+                                       "JavaScript await operation timed out");
+
                     struct AwaitState {
                         std::mutex                          mutex;
                         std::optional<PlanExecution>        result;
@@ -4393,7 +4468,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     await_state->timer =
                         std::make_shared<asio::steady_timer>(completion_executor);
                     await_state->deadline =
-                        std::chrono::steady_clock::now() + std::chrono::milliseconds(*timeout);
+                        std::chrono::steady_clock::now() + std::chrono::milliseconds(remaining);
                     await_state->timer->expires_at(await_state->deadline);
                     await_state->completion =
                         std::make_shared<asio::experimental::channel<void(asio::error_code, int)>>(
@@ -5219,6 +5294,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         continue;
                     }
 
+                    // #391: an await of this command that started in an
+                    // earlier attempt keeps its recorded start.
+                    if (const auto starts = prior->await_started_at()) {
+                        std::lock_guard lock(await_starts_mutex);
+                        await_starts = *starts;
+                    }
                     child_recovery_mode = can_resume_child();
                     if (command_value.kind() == JavaScriptCommandKind::Checkpoint) {
                         if (auto failure =
@@ -5394,6 +5475,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                      "Unknown JavaScript command failure", operation_id);
                 }
                 resumed_join_members = json::object();
+                {
+                    std::lock_guard lock(await_starts_mutex);
+                    await_starts = json::object();
+                }
                 javascript_trace.insert(javascript_trace.end(),
                                         command_result.execution_trace.begin(),
                                         command_result.execution_trace.end());
