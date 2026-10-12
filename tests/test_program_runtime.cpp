@@ -9731,20 +9731,24 @@ TEST(ProgramRuntimeTest, RaceImmediateBranchesRetainTheirCompletionSignal) {
 TEST(ProgramRuntimeTest, RaceUsesDeclarationOrderForAReadyTie) {
     // A ready tie is a single scheduler-turn condition. Use one scheduler
     // thread so this verifies declaration-order arbitration rather than
-    // treating cross-worker completion timing as a logical tie.
+    // treating cross-worker completion timing as a logical tie. The branches
+    // emit instead of calling Core: a Core node body runs on a worker, off the
+    // scheduler (#367, #368), so two Core calls finish in worker order. The
+    // plan's Core call runs before the race.
     AdmittedRuntime fixture(1);
-    const auto      result = run_orchestration(
+    const auto      branch = [](int value) {
+        return json{{"op", "sequence"},
+                    {"children", json::array({json{{"op", "emit"}, {"value", json{{"branch", value}}}},
+                                              json{{"op", "return"}, {"value", value}}})}};
+    };
+    const auto result = run_orchestration(
         fixture,
         orchestration_document(
-            json{{"op", "race"},
-                      {"branches",
-                       json::array(
-                      {json{{"op", "sequence"},
-                                 {"children", json::array({json{{"op", "call_core"}},
-                                                           json{{"op", "return"}, {"value", 1}}})}},
-                            json{{"op", "sequence"},
-                                 {"children", json::array({json{{"op", "call_core"}},
-                                                           json{{"op", "return"}, {"value", 2}}})}}})}}),
+            json{{"op", "sequence"},
+                 {"children",
+                  json::array({json{{"op", "call_core"}},
+                               json{{"op", "race"},
+                                    {"branches", json::array({branch(1), branch(2)})}}})}}),
         json::object(), "trace-race-tie");
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
