@@ -141,7 +141,7 @@ These examples run offline. The MCP client examples start a standard-library ser
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | yes | MCP with human approval: `interrupt_before` stops the graph ahead of an MCP tool call, the pending call is shown, and `resume()` continues without repeating the model call. |
 | 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | service | MCP with `Send`: one planner emits a call per MCP tool and the calls run in parallel. No model, but an MCP server must be running. |
 | 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | yes | One agent, two MCP servers (HTTP and stdio) merged into one tool list; its two calls go to different servers. |
-| 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | key | Operator feedback over MCP: a scripted second turn critiques the draft and the next run uses it. |
+| 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | yes | Operator feedback over MCP: the first answer is a guess, the operator's reply joins the history, and the second round calls the tool. |
 | 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | service | Reverse-engineering agent: GhidraMCP over stdio names the functions of a stripped binary. Needs Ghidra and a key. |
 | 38 | [`38_a2a_server.cpp`](38_a2a_server.cpp) | yes | A2A server: serve a graph over A2A 0.3 and 1.0 with SSE streaming, then call it with its own client. Pass `serve` to keep listening. |
 | 37 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes | A2A client: fetch the agent card, send a message, and call a remote agent from a graph with `A2ACallerNode`. |
