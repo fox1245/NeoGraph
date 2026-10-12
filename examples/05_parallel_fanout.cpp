@@ -8,8 +8,9 @@
 // three are in flight at once; the example counts them to prove it. Two settings make the
 // graph correct and quiet:
 //   * a `barrier` on the summarizer, so it runs once, after all three researchers;
-//   * `worker_count = 3`, so the engine owns a pool as wide as the fan-out (the default,
-//     1, runs a wide fan-out one branch after the other and prints a warning).
+//   * `worker_count = 3`, so the engine owns a pool as wide as the fan-out. With the default,
+//     1, branches that block or compute run one after the other, and the engine prints a
+//     warning about it.
 // The run is driven with run_async on one io_context.
 //
 // No API key required.
