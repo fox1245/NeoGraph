@@ -9,13 +9,16 @@ optionally behind `//` or `#`:
     smoke-expect-line: a whole output line (compared after stripping) that must appear
     smoke-forbid:  text that must not appear (literal, repeatable)
     smoke-args:    command-line arguments (split like a shell); tokens @SRC@ (repository
-                   root), @BIN@ (build directory), @PYTHON@ (interpreter), @TMP@ (scratch dir)
+                   root), @BIN@ (build directory), @PYTHON@ (interpreter), @TMP@ (scratch dir),
+                   @PORT@ / @PORT2@ ... @PORT8@ (distinct free TCP ports on 127.0.0.1, chosen
+                   for this run; the same token has the same value everywhere in one run)
     smoke-stdin:   one line written to stdin, newline added (repeatable); stdin is then closed
     smoke-env:     NAME=VALUE added to the environment (repeatable)
     smoke-companion: a helper process started first (repeatable), for a client that needs a
                    server. Tokens as in smoke-args, plus @TARGET:<cmake target>@ for a built
                    example binary. It is stopped when the run ends.
-    smoke-wait-port: TCP port on 127.0.0.1 to wait for (up to 20 s) after starting companions
+    smoke-wait-port: TCP port on 127.0.0.1 to wait for (up to 20 s) after starting companions;
+                   a number or a @PORT@ token, repeatable (each port is awaited)
     smoke-exit:    expected exit status (default 0)
     smoke-timeout: seconds before the run is killed (default 60)
     smoke-requires: Python only. Comma-separated modules; the test is skipped when one is missing
@@ -72,7 +75,7 @@ class Annotations:
     stdin: list[str] = field(default_factory=list)
     env: list[str] = field(default_factory=list)
     companion: list[str] = field(default_factory=list)
-    wait_port: int = 0
+    wait_port: list[str] = field(default_factory=list)
     exit: int = 0
     timeout: int = 60
     requires: list[str] = field(default_factory=list)
@@ -112,7 +115,12 @@ def parse_annotations(path: Path) -> Annotations:
             getattr(result, key).extend(item.strip() for item in value.split(",") if item.strip())
         elif key == "companion":
             result.companion.append(value)
-        elif key in ("exit", "timeout", "wait-port"):
+        elif key == "wait-port":
+            if re.fullmatch(r"\d+|@PORT[2-8]?@", value):
+                result.wait_port.append(value)
+            else:
+                result.errors.append(f"{path.name}:{number}: smoke-wait-port needs a number or a @PORT@ token")
+        elif key in ("exit", "timeout"):
             try:
                 setattr(result, key.replace("-", "_"), int(value))
             except ValueError:
@@ -153,6 +161,7 @@ def run_smoke(source: Path, command: list[str], *, build_dir: Path | None = None
     try:
         tokens = {"@SRC@": str(ROOT), "@BIN@": str(build_dir or ""),
                   "@PYTHON@": python or sys.executable, "@TMP@": str(scratch)}
+        tokens.update(_free_ports())
 
         def substitute(text: str) -> str:
             for token, value in tokens.items():
@@ -173,9 +182,11 @@ def run_smoke(source: Path, command: list[str], *, build_dir: Path | None = None
                 companions.append(subprocess.Popen(
                     shlex.split(substitute(line), posix=os.name != "nt"), cwd=scratch, env=env,
                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT))
-            if notes.wait_port and not _wait_for_port(notes.wait_port, companions):
-                return _fail(source, f"nothing listened on 127.0.0.1:{notes.wait_port} within 20 s",
-                             _stop_companions(companions))
+            for waited in notes.wait_port:
+                port = int(substitute(waited))
+                if not _wait_for_port(port, companions):
+                    return _fail(source, f"nothing listened on 127.0.0.1:{port} within 20 s",
+                                 _stop_companions(companions))
             done = subprocess.run(
                 argv, cwd=cwd or scratch, env=env, input=stdin, timeout=notes.timeout,
                 stdin=None if stdin is not None else subprocess.DEVNULL,
@@ -218,6 +229,23 @@ def _find_binary(build_dir: Path | None, name: str) -> Path:
         if candidate.is_file():
             return candidate
     raise FileNotFoundError(f"built example {name} not found under {build_dir}")
+
+
+def _free_ports(count: int = 8) -> dict[str, str]:
+    """Distinct free TCP ports, as the tokens @PORT@ (= @PORT1@), @PORT2@ ... @PORT<count>@."""
+    held = []
+    try:
+        for _ in range(count):
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.bind(("127.0.0.1", 0))
+            held.append(probe)
+        ports = [str(probe.getsockname()[1]) for probe in held]
+    finally:
+        for probe in held:
+            probe.close()
+    tokens = {f"@PORT{index}@": port for index, port in enumerate(ports, start=1) if index > 1}
+    tokens["@PORT@"] = ports[0]
+    return tokens
 
 
 def _wait_for_port(port: int, processes: list, seconds: float = 20.0) -> bool:
