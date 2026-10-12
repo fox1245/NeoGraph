@@ -68,7 +68,11 @@ endif()
 get_property(_root_targets DIRECTORY "${PROJECT_SOURCE_DIR}" PROPERTY BUILDSYSTEM_TARGETS)
 get_property(_here_targets DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY BUILDSYSTEM_TARGETS)
 # The Jarvis cookbook is its own CMake project, added only with NEOGRAPH_BUILD_COOKBOOK_JARVIS.
-get_property(_jarvis_targets DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/cookbook/jarvis" PROPERTY BUILDSYSTEM_TARGETS)
+# get_property(DIRECTORY ...) is an error for a directory that was never added.
+set(_jarvis_targets "")
+if(NEOGRAPH_BUILD_COOKBOOK_JARVIS)
+    get_property(_jarvis_targets DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/cookbook/jarvis" PROPERTY BUILDSYSTEM_TARGETS)
+endif()
 foreach(_target IN LISTS _root_targets _here_targets _jarvis_targets)
     get_target_property(_type ${_target} TYPE)
     if(NOT _type STREQUAL "EXECUTABLE")
