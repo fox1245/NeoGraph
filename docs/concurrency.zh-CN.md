@@ -5,9 +5,9 @@
 
 ## 选择 executor
 
-sync `run`、`run_stream`、`resume` 驱动与 async API 相同的协程实现，并阻塞调用线程。host worker pool 可并发执行独立 session。async API 返回 `asio::awaitable<RunResult>`，在自行拥有的 executor 上驱动。awaitable 不会把任意 user code 变为 nonblocking。
+同步的 `run`、`run_stream` 和 `resume` 会阻塞调用线程，底层驱动的是与异步版本相同的协程实现。宿主的 worker 线程池可以并发运行互相独立的会话。异步版本返回 `asio::awaitable<RunResult>`，需要在自己持有的 executor 上驱动它们。awaitable 并不会让任意的用户代码变成非阻塞。
 
-`EngineConfig::worker_count = 1` 是默认值，不创建 engine 自有 fan-out pool。挂起的 I/O 分支可在单线程重叠推进，CPU 工作则串行执行。多线程 caller executor 或可选 engine pool 可在多核执行 CPU 分支。公开 engine 前配置 pool。
+`EngineConfig::worker_count = 1` 是默认值，此时不会创建引擎自己的 fan-out 线程池。挂起的 I/O 分支可以在同一个线程上重叠；该线程上的 CPU 计算则是串行的。调用方使用多线程的 executor，或者选择启用引擎的 worker 线程池，CPU 分支才能在多个核上运行。线程池要在发布引擎之前配置好。
 
 ```cpp
 #include <neograph/async/run_sync.h>
@@ -23,21 +23,21 @@ run.input = {{"count", 0}};
 auto result = neograph::async::run_sync(engine->run_async(run));
 ```
 
-`27_async_concurrent_runs.cpp` 展示一个 io_context 的多个 session；`05_parallel_fanout.cpp` 展示一次 run 内的分支。历史吞吐量与内存测量见[性能详解](performance-deep-dive.md)，不保证安全的 session 数上限。
+示例 `27_async_concurrent_runs.cpp` 展示了在一个 io_context 上运行多个会话；`05_parallel_fanout.cpp` 展示了同一次运行内的各个分支。历史上的吞吐量和内存测量值见[性能深度剖析](performance-deep-dive.md)，它们不是对安全会话数上限的保证。
 
-## shared engine 规则
+## 共享引擎的规则
 
-- 独立 session 使用不同 `thread_id`。同 id 并发执行的 checkpoint 交错顺序未规定；需要有序 history 时在 host 串行化。
-- 向 execution/admin 线程公开前完成 setter 和 tool binding。运行中 resize worker pool 是错误。
-- 一个 engine 上管理与执行互斥。run/resume 期间 state/history read、update、fork 以 `std::logic_error` 拒绝；管理期间也拒绝执行。cancel/drain 并等待完成后再重试管理。
-- 共享 store 的不同 engine 在此 admission 边界之外；由 host 协调。
-- node instance 在各 run 重用。run 级 scratch state 放在 channel 中；custom node/provider/tool/store 须无状态或同步。内置 in-memory store 使用 mutex。
+- 不同的会话使用不同的 `thread_id`。相同 id 的并发执行，其检查点的交错顺序没有规定；历史顺序重要时，由宿主来串行化。
+- 在把引擎暴露给执行线程或管理线程之前，先调用配置类的 setter 并绑定工具。执行期间调整 worker 线程池的大小属于硬错误。
+- 同一个引擎上，管理操作和执行操作互斥。只要有任何 run/resume 正在进行，状态/历史的读取、update 和 fork 就会以 `std::logic_error` 拒绝；管理操作进行期间，执行也会被拒绝。重试管理操作之前，先取消或排空，并等待完成。
+- 共用同一个存储的不同引擎，不在这条准入(admission)边界之内；需要由宿主来协调。
+- 节点实例会在多次运行之间复用。每次运行的临时状态放在通道里；自定义节点、provider、工具和存储必须是无状态的，或者做好同步。内置的内存存储使用互斥锁。
 
-Provider 调用拥有 prepared request 和 runtime client。C++ event view 仅在 callback 中有效，需保留的 data 须复制。native replay 和 accounting 权限需要真实 custody，不能通过 portable JSON 重建获得。参见[异步指南](ASYNC_GUIDE.md)。
+Provider 调用自己持有准备好的请求和运行时客户端。它们的 C++ 事件视图只在回调期间有效；需要保留的数据要复制出来。native replay 状态和核算权限需要真实的托管，不能靠可移植 JSON 重建。参见[异步指南](ASYNC_GUIDE.md)。
 
-## 有界同步 admission
+## 有界的同步准入
 
-链接 `neograph::util` 使用 `RequestQueue`。它采用 `moodycamel::ConcurrentQueue`，idle worker 在 condition variable 等待。pending-slot 上限限制排队 session 数，不限制运行中 session 的 memory。
+使用 `RequestQueue` 需要链接 `neograph::util`。它基于 `moodycamel::ConcurrentQueue`，空闲的 worker 在条件变量上等待。待处理槽位的上限限制的是排队的会话数，而不是正在运行的会话所占用的内存。
 
 ```cpp
 #include <neograph/util/request_queue.h>
@@ -51,20 +51,20 @@ if (future.valid()) future.get();
 if (!accepted) reject_request();
 ```
 
-queue 满时返回 `accepted=false` 和 invalid future。内部 enqueue 失败返回 `false` 和含 `std::runtime_error` 的 valid future；须观察 future，不要把所有拒绝当作普通饱和。构造至少需要一个 worker。
+队列已满时，返回 `accepted=false` 和一个无效的 future。内部入队失败时，返回 `false`，同时给出一个带有 `std::runtime_error` 的有效 future；要去观察这个 future，不要把每次拒绝都当作普通的队列饱和。构造时至少需要一个 worker。
 
-`close()` 幂等：拒绝新 submit，允许 claimed work 完成，将 unclaimed future 以 `std::runtime_error("RequestQueue is closed")` 完成。worker 调用 close 会启动 shutdown，不等待自身。destructor 走同一路径，不会默默遗留 accepted future。
+`close()` 是幂等的。它拒绝新的提交，让已被认领的工作做完，并让尚未认领的 future 以 `std::runtime_error("RequestQueue is closed")` 结束。worker 自己调用 close 时，只发起关闭，不会等待自己。析构函数走的是同一条路径；已接受的 future 不会被悄悄丢下。
 
-## checkpoint I/O 和 Python
+## 检查点 I/O 与 Python
 
-in-memory checkpoint 在 caller 下使用 mutex；SQLite 与 sync custom backend 将 blocking work 移交 bounded worker。PostgreSQL 使用无 pipeline batching 的 nonblocking libpq I/O。`NEOGRAPH_BUILD_POSTGRES=ON` 启用需要 libpq 开发文件的可选 target；`OFF` 仅移除此可选依赖。
+内存中的检查点操作在调用方线程上、持互斥锁运行；SQLite 和同步的自定义后端，会把阻塞的工作交给数量有限的 worker 去做。PostgreSQL 使用非阻塞的 libpq I/O，不做 pipeline 批处理。`NEOGRAPH_BUILD_POSTGRES=ON` 会启用这个可选目标，并需要 libpq 的开发文件；`OFF` 只会去掉这个可选依赖。
 
-Python callback 在 GIL 下执行。CPU-bound Python node/reducer 不能仅靠增加 worker_count 获得并行；native call 仅在自身实现释放 GIL 时可重叠。typed provider invoke/dispatch 释放 GIL，可通过 `asyncio.to_thread` 调用。这不公开 native provider asyncio awaitable。
+Python 回调在 GIL 下执行。CPU 密集的 Python 节点和 reducer，光靠调大 worker_count 得不到并行；原生调用只有在自身实现释放了 GIL 时才能重叠。带类型的 provider invoke/dispatch 会释放 GIL，可以通过 `asyncio.to_thread` 调用。这并没有提供原生的 provider asyncio awaitable。
 
-## runtime 依赖和平台验证
+## 运行时依赖与平台资格认证
 
-Core 始终链接外部 `SchemaProvider::runtime`，包括 `NEOGRAPH_BUILD_LLM=OFF`。禁用 PostgreSQL、LLM node 或 NeoGraph 可选 CurlH2Pool 不会移除 SDK runtime 的 libcurl 要求。提供匹配的 installed SDK 或 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`。
+Core 始终会链接外部的 `SchemaProvider::runtime`，`NEOGRAPH_BUILD_LLM=OFF` 时也是如此。关闭 PostgreSQL、LLM 节点或 NeoGraph 可选的 CurlH2Pool，都不会去掉该运行时对 libcurl 的需求。请提供匹配的已安装 SDK，或设置 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`。
 
-source resolution 依次采用显式 SDK source directory、installed package、revision-pinned 公开 archive fallback（默认 `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON`）。installed SDK 离线构建时将 flag 设为 `OFF`，在 `CMAKE_PREFIX_PATH` 提供 prefix。NeoGraph 与 SDK source 配置要求 CMake 3.20+。
+查找 SDK 源码的顺序是：优先使用显式指定的 SDK 源码目录，其次是已安装的包，最后是固定了修订版本的公开归档（默认 `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON`）。离线构建时，使用已安装的 SDK，把该开关设为 `OFF`，并在 `CMAKE_PREFIX_PATH` 中给出它的前缀。配置 NeoGraph 和 SDK 源码都需要 CMake 3.20 及以上。
 
-当前 SDK runtime/archive 验证范围是 Linux/POSIX。已有 Linux/macOS/Windows package metadata 不证明新依赖在所有平台可用。macOS、Windows、WASM 各自需要 runtime/build 验证；portable executor API 不能代替该验证。
+当前 SDK 的运行时和 archive 在 Linux/POSIX 上通过了资格认证。NeoGraph 现有的 Linux/macOS/Windows 包元数据，并不能证明这个新依赖在所有这些平台上都能工作。macOS、Windows 和 WASM 需要各自的运行时和构建资格认证；仅有可移植的 executor API，不足以确立这一点。

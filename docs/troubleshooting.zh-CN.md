@@ -107,7 +107,7 @@ worker_count 默认是 `1`，因此不会创建引擎自己的线程池。I/O �
 | `P_CORE_E13` 或 `P_CORE_E14` | 节点在第一条条件边之外，还有一条静态边或第二条条件边；两者都永远不会触发 | 把所有目标都放进第一条条件边的 routes 里 |
 | `P_JS_CONTROL_COMMAND`：JavaScript command references a Core outside the admitted root | `ng.callCore` 指定的图不是 `define()` 返回的那张 | 使用传给 `ng.graph(...)` 的名称 |
 | `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | 列出的某个上限字段为零 | 改成正数，即使 Program 从不调用模型 |
-| `ng.ProgramAdmissionError` 中的 `P_ADMIT_PROVIDER` | 某个 `llm_call` 节点需要的 provider 宿主没有绑定，或者 `llm_call`、`intent_classifier` 节点注册时没带 `provider=` | 注册 `add_provider(...)` 和 `add_registered_node("llm_call", ..., provider=...)`，并给 `LocalProgramHost` 传入 `node_context=` 和 `binding_label=` |
+| `ng.ProgramAdmissionError` 中的 `P_ADMIT_PROVIDER` | 某个 `llm_call` 节点需要的 provider 没有在宿主中绑定，或者 `llm_call`、`intent_classifier` 节点注册时没带 `provider=` | 注册 `add_provider(...)` 和 `add_registered_node("llm_call", ..., provider=...)`，并给 `LocalProgramHost` 传入 `node_context=` 和 `binding_label=` |
 | `P_MONEY_BUDGET`（`BudgetExhausted`），或其他 `P_MONEY_*` 错误码（`Failed`），且 provider 没有收到任何请求 | 该次调用的预留额度超出了 `monetary_microunits`（0 表示什么都不授予），或者调用无法确定上限：模型或 origin 未知、路由别名没有路由上限、没有输出上限、不知道输入上限，或者用到了价格目录没有建模的功能 | 调高 `monetary_microunits`，设置 `provider_controls.max_output_tokens`，或者改用价格目录中有条目的模型；参见[定价证据与价格目录](reference-en.md#pricing-evidence-and-the-price-catalog) |
 | `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | 运行预算与传给 `compile_admit` 的预算不一致 | 传入相同的预算，或者重新编译并准入 |
 | `ng.spawn` 抛出 `P_CHILD_BINDING` | `LocalProgramHost` 没有子绑定解析器 | 在 C++ 宿主里运行子 Program |
