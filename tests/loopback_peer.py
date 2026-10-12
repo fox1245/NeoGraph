@@ -26,6 +26,9 @@ class LoopbackPeer:
             self._servers.append(_IPv6Loopback(("::1", self.port), handler))
         except OSError:
             pass  # No IPv6 loopback, or the port is taken there: localhost cannot resolve to it first.
+        # Loopback test peers still never accept a protocol older than TLS 1.2.
+        if context.minimum_version < ssl.TLSVersion.TLSv1_2:
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
         for server in self._servers:
             server.socket = context.wrap_socket(server.socket, server_side=True)
         self._threads = [threading.Thread(target=server.serve_forever, daemon=True)

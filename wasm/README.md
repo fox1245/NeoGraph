@@ -23,7 +23,7 @@ C++ standard-library support must be qualified for the Emscripten target;
 the historical smoke below does not establish a current successful build.
 
 Current builds require SDK `0.3.0`, interface revision/shared generation 6,
-at SchemaProvider `maint/interface6` commit `88e22bc4801858ba29b049821fc1d9651ddd04b0`,
+at SchemaProvider `maint/interface6` commit `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`,
 built for the same target. Qualifying a genuine Emscripten SDK
 runtime remains a prerequisite; this page neither drops WASM support nor
 guarantees a current build. Archive v3 / `spna3` and portable JSON v2 are unchanged.

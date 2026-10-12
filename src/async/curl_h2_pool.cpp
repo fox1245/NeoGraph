@@ -447,6 +447,10 @@ struct CurlH2Pool::Impl {
         curl_easy_setopt(p->easy, CURLOPT_XFERINFOFUNCTION, xferinfo_cb);
         curl_easy_setopt(p->easy, CURLOPT_XFERINFODATA,    p.get());
         curl_easy_setopt(p->easy, CURLOPT_HTTP_VERSION,   CURL_HTTP_VERSION_2TLS);
+        // Never negotiate anything older than TLS 1.2, whatever the libcurl
+        // build or TLS backend would allow by default, and only speak HTTP(S).
+        curl_easy_setopt(p->easy, CURLOPT_SSLVERSION,     CURL_SSLVERSION_TLSv1_2);
+        curl_easy_setopt(p->easy, CURLOPT_PROTOCOLS_STR,  "http,https");
         if (!p->current_target->tls &&
             is_loopback_host(p->current_target->host)) {
             // The explicit plaintext exception is direct-loopback only. Do not

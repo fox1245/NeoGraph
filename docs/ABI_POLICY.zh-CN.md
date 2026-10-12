@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=4053105f2c14f5e5b5e1025cc160350708a8ba4ddb703415604ee6dd847337b9 -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=5ecfa5a3968c2ebfb4344b913e7b9be42f04485f90940d647b0d693b1f9d129a -->
 # 二进制兼容政策
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -33,7 +33,7 @@ CheckpointStore 为显式 adapter 迁移保留 legacy layout。sync 默认实现
 
 ## SDK 与 Python 边界
 
-即使禁用 LLM node，Core 也要求外部 `SchemaProvider::runtime`。选定 SDK release 为 `0.3.0` alpha，`maint/interface6` 上的公开提交 `88e22bc4801858ba29b049821fc1d9651ddd04b0`，interface revision `6`、shared-library ABI revision `6`，有 out-of-line capability check；不表示 stable interface。一并安装匹配 component。`libsp_*.so.6` 代际与 NeoGraph loader 代际、Python `abi3` wheel tag 都不同。
+即使禁用 LLM node，Core 也要求外部 `SchemaProvider::runtime`。选定 SDK release 为 `0.3.0` alpha，`maint/interface6` 上的公开提交 `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`，interface revision `6`、shared-library ABI revision `6`，有 out-of-line capability check；不表示 stable interface。一并安装匹配 component。`libsp_*.so.6` 代际与 NeoGraph loader 代际、Python `abi3` wheel tag 都不同。
 
 Interface 6 将固定大小的服务商报告金额元数据加入公开 usage layout，并对 blocking/async SDK 调用使用单一 async pipeline。选定的提交还在 revision 6 内扩大了新增 `max_price` 的 `sp::OpenRouterRouting` 以及 Chat、Messages、Responses 请求 layout；`RequiredProvider` 包含、NeoGraph handshake 要求的 capability bit `OpenRouterRoutingMaxPrice` 会拒绝早期的 interface-6 library。须一起 rebuild SDK consumer、NeoGraph 和 Python extension；旧 header/library 不能与 interface 6 混用。blocking wrapper 继续拒绝 SDK event-loop/callback worker 重入。Native archive v3 / `spna3` 和 portable JSON v2 是独立格式，保持不变。canonical outcome v2 usage 仅在金额元数据存在时添加可选 `provider_cost`；历史缺失金额记录保留原 bytes，不捏造费用。历史 interface-3/4/5 测量保留原有范围，不验证 interface 6。
 

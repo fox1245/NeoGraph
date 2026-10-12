@@ -9,6 +9,12 @@ on:
         required: true
         type: string
 
+
+# Least privilege: jobs only read the repository; artifacts and caches use the
+# runner's own token.
+permissions:
+  contents: read
+
 jobs:
   install-consumable:
     name: install-consumable (${{ matrix.name }})

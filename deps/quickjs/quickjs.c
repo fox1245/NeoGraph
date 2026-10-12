@@ -1911,9 +1911,20 @@ static no_inline int js_realloc_array(JSContext *ctx, void **parray,
     int new_size;
     size_t slack;
     void *new_array;
-    /* XXX: potential arithmetic overflow */
-    new_size = max_int(req_size, *psize * 3 / 2);
-    new_array = js_realloc2(ctx, *parray, new_size * elem_size, &slack);
+    int64_t grown;
+    /* NeoGraph: compute the growth and the byte size in 64 bits and reject a
+       size that does not fit, instead of letting int arithmetic overflow and
+       allocate a buffer smaller than the size recorded in *psize. */
+    grown = (int64_t)*psize * 3 / 2;
+    if (grown < req_size)
+        grown = req_size;
+    if (grown > INT32_MAX || elem_size <= 0 ||
+        (uint64_t)grown > SIZE_MAX / (uint64_t)elem_size) {
+        JS_ThrowOutOfMemory(ctx);
+        return -1;
+    }
+    new_size = (int)grown;
+    new_array = js_realloc2(ctx, *parray, (size_t)new_size * (size_t)elem_size, &slack);
     if (!new_array)
         return -1;
     new_size += slack / elem_size;

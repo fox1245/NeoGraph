@@ -24,6 +24,12 @@ on:
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
+
+# Least privilege: jobs only read the repository; artifacts and caches use the
+# runner's own token.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true

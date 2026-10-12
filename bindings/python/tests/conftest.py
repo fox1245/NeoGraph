@@ -207,6 +207,7 @@ def provider_peer(tmp_path):
                 pass  # A cancelled client closes the socket before the peer replies.
 
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(cert, key)
     server = _TLSHTTPServer(("127.0.0.1", 0), Handler, context)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -293,6 +294,7 @@ def typed_peer(tmp_path):
                 pass  # The request's explicit cancellation may close the peer socket.
 
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(cert, key)
     server = _TLSHTTPServer(("127.0.0.1", 0), Handler, context)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

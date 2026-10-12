@@ -9,7 +9,7 @@ The runners implement router → plan → researcher Send branches → synthesis
 `dr_neograph.py`, `dr_langgraph.py`, `bench.py`, `bench_mock.py`, `mem_probe.py`, `mem_prod_stack.py`, `sweep.sh`, `_run_single.py` cover real calls, plain-text mock workloads, memory probes, sweeps, and one-shot diagnosis. Install a wheel matching the current source via the [Python binding guide](../../docs/python-binding.md); an old wheel with `CompletionParams`/`OpenAIProvider` is not the current API. Source builds require the external SchemaProvider SDK even for Core.
 Current builds require a wheel/native build matching SDK `0.3.0`, interface
 revision/shared generation 6, at SchemaProvider `maint/interface6` commit
-`88e22bc4801858ba29b049821fc1d9651ddd04b0`. Current integrated validation is pending.
+`f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`. Current integrated validation is pending.
 This comparison runner is separate from the built-in Deep Research recovery path.
 
 The workflow imports requests, LangGraph, and langchain-openai; memory probes use psutil. PostgreSQL mode also needs the appropriate checkpoint packages and a running database. `mem_prod_stack.py` imports additional web/database/observability packages for its named stacks; it is not a bare-engine-only RSS probe.

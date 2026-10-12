@@ -18,3 +18,12 @@ nor supplies a dynamic native-module loader.
 QuickJS bytecode is never a durable NeoGraph artifact. Durable JavaScript
 identity is source plus the pinned release, archive digest, and NeoGraph build
 configuration.
+
+Local patches (keep when updating the vendored release)
+
+- quickjs.c js_realloc_array: the growth (*psize * 3 / 2) and the byte size
+  (new_size * elem_size) are computed in 64 bits, and a size that does not fit
+  an int element count or size_t bytes throws OutOfMemory. Upstream marks this
+  spot "XXX: potential arithmetic overflow"; the int multiplication could wrap
+  and allocate less than the size recorded in *psize. Found by CodeQL
+  (cpp/integer-multiplication-cast-to-long).
