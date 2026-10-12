@@ -115,12 +115,12 @@ python 01_minimal.py
 
 ### プロトコル: MCP、A2A、ACP
 
-ここでの MCP はクライアント(`ng.mcp`)です。A2A と ACP は公式の Python SDK と `ProtocolHostAdapter` でホストします。停止するまで動き続けるため、スモーク検証は `bindings/python/tests/test_protocol_sdk_e2e.py` が受け持ちます。
+ここでの MCP と A2A はクライアント(`ng.mcp`、`ng.a2a`)です。A2A と ACP のエージェントは公式の Python SDK と `ProtocolHostAdapter` でホストします。この階層のサンプルはすべてオフラインで動きます。空きポートに自前のサーバーを起動するか、エージェントを子プロセスとして実行します。SDK を使うサンプルには `neograph-engine[a2a]` または `neograph-engine[acp]` が必要で、無ければスキップされます。サーバーは `bindings/python/tests/test_protocol_sdk_e2e.py` がさらに詳しく検証します。
 
 | # | サンプル | Offline | 示すもの |
 |---|---|---|---|
 | 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | yes | ローカルの MCP サーバーを起動して `fetch` を検出し、明示的な再入ポリシーで 3 回呼び出します。MCP を有効にしたビルドが必要で、スモークテストは Linux で行います。 |
-| 27 | [`27_a2a_server.py`](27_a2a_server.py) | service | 公式の A2A SDK でエージェントをホストします。`127.0.0.1:9999` のエージェントカードと JSON-RPC、ストリーミングされるアーティファクト。`neograph-engine[a2a]` が必要です。 |
+| 27 | [`27_a2a_server.py`](27_a2a_server.py) | yes | 公式の A2A SDK でエージェントをホストします。`127.0.0.1:9999` のエージェントカードと JSON-RPC、ストリーミングされるアーティファクト。`--self-check` は空きポートでサーバーを起動し、SDK のクライアントで 2 ターン実行します。`neograph-engine[a2a]` が必要です。 |
 | 28 | [`28_acp_agent.py`](28_acp_agent.py) | service | 公式の ACP SDK で stdio 上にエージェントをホストします。initialize、セッション作成、prompt、トークン更新、`end_turn`。`neograph-engine[acp]` が必要です。 |
 
 ### 永続化と運用

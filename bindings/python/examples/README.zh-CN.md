@@ -115,12 +115,12 @@ python 01_minimal.py
 
 ### 协议：MCP、A2A、ACP
 
-这里的 MCP 是客户端（`ng.mcp`）。A2A 和 ACP 用官方 Python SDK 与 `ProtocolHostAdapter` 托管，会一直运行到被停止，因此它们的冒烟覆盖由 `bindings/python/tests/test_protocol_sdk_e2e.py` 负责。
+这里的 MCP 和 A2A 是客户端（`ng.mcp`、`ng.a2a`）。A2A 和 ACP 智能体用官方 Python SDK 与 `ProtocolHostAdapter` 托管。这一层的示例都可离线运行：在空闲端口上启动自己的服务器，或把智能体作为子进程运行。使用 SDK 的示例需要 `neograph-engine[a2a]` 或 `neograph-engine[acp]`，缺少时会跳过；服务器由 `bindings/python/tests/test_protocol_sdk_e2e.py` 做更深入的测试。
 
 | # | 示例 | Offline | 演示内容 |
 |---|---|---|---|
 | 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | yes | 启动本地 MCP 服务器，发现 `fetch`，并用显式可重入策略执行三次调用。需要启用 MCP 的构建，冒烟测试在 Linux 上进行。 |
-| 27 | [`27_a2a_server.py`](27_a2a_server.py) | service | 通过官方 A2A SDK 托管智能体：`127.0.0.1:9999` 上的 agent card 与 JSON-RPC，以及流式 artifact。需要 `neograph-engine[a2a]`。 |
+| 27 | [`27_a2a_server.py`](27_a2a_server.py) | yes | 通过官方 A2A SDK 托管智能体：`127.0.0.1:9999` 上的 agent card 与 JSON-RPC，以及流式 artifact。`--self-check` 在空闲端口上启动服务器，并用 SDK 自带的客户端进行两轮对话。需要 `neograph-engine[a2a]`。 |
 | 28 | [`28_acp_agent.py`](28_acp_agent.py) | service | 通过官方 ACP SDK 在 stdio 上托管智能体：initialize、创建会话、prompt、token 更新、`end_turn`。需要 `neograph-engine[acp]`。 |
 
 ### 持久化与运维

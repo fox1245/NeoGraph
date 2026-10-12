@@ -114,12 +114,12 @@ The restricted JavaScript Program API runs on top of Core graphs: `ProgramRegist
 
 ### Protocols: MCP, A2A, ACP
 
-MCP is a client here (`ng.mcp`). A2A and ACP are hosted with the official Python SDKs and `ProtocolHostAdapter`; they run until stopped, so their smoke coverage is `bindings/python/tests/test_protocol_sdk_e2e.py`.
+MCP and A2A are clients here (`ng.mcp`, `ng.a2a`). A2A and ACP agents are hosted with the official Python SDKs and `ProtocolHostAdapter`. Each example in this tier runs offline: it starts its own server on a free port or runs the agent as a child process. The SDK ones need `neograph-engine[a2a]` or `neograph-engine[acp]` and are skipped when it is missing; `bindings/python/tests/test_protocol_sdk_e2e.py` tests the servers in more depth.
 
 | # | Example | Offline | Shows |
 |---|---|---|---|
 | 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | yes | Starts a local MCP server, discovers `fetch` and runs three calls with an explicit re-entrant policy; needs an MCP-enabled build and is smoke-tested on Linux. |
-| 27 | [`27_a2a_server.py`](27_a2a_server.py) | service | Hosts an agent through the official A2A SDK: an agent card and JSON-RPC on `127.0.0.1:9999`, streamed artifacts. Needs `neograph-engine[a2a]`. |
+| 27 | [`27_a2a_server.py`](27_a2a_server.py) | yes | Hosts an agent through the official A2A SDK: an agent card and JSON-RPC on `127.0.0.1:9999`, streamed artifacts. `--self-check` serves on a free port and has two turns with the SDK's own client. Needs `neograph-engine[a2a]`. |
 | 28 | [`28_acp_agent.py`](28_acp_agent.py) | service | Hosts an agent through the official ACP SDK over stdio: initialize, create a session, prompt, token updates, `end_turn`. Needs `neograph-engine[acp]`. |
 
 ### Persistence and operations

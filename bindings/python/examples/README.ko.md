@@ -115,12 +115,12 @@ python 01_minimal.py
 
 ### 프로토콜: MCP, A2A, ACP
 
-여기서 MCP는 클라이언트(`ng.mcp`)입니다. A2A와 ACP는 공식 Python SDK와 `ProtocolHostAdapter`로 호스팅하며, 중단할 때까지 실행되므로 스모크 검증은 `bindings/python/tests/test_protocol_sdk_e2e.py`가 맡습니다.
+여기서 MCP와 A2A는 클라이언트(`ng.mcp`, `ng.a2a`)입니다. A2A와 ACP 에이전트는 공식 Python SDK와 `ProtocolHostAdapter`로 호스팅합니다. 이 계층의 예제는 모두 오프라인으로 실행됩니다. 빈 포트에 자체 서버를 띄우거나 에이전트를 자식 프로세스로 실행합니다. SDK를 쓰는 예제는 `neograph-engine[a2a]` 또는 `neograph-engine[acp]`가 필요하며 없으면 건너뜁니다. 서버는 `bindings/python/tests/test_protocol_sdk_e2e.py`가 더 깊이 검증합니다.
 
 | # | 예제 | Offline | 보여 주는 것 |
 |---|---|---|---|
 | 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | yes | 로컬 MCP 서버를 띄워 `fetch`를 찾고 명시적 재진입 정책으로 호출 세 번을 실행합니다. MCP가 켜진 빌드가 필요하며 스모크 테스트는 Linux에서 합니다. |
-| 27 | [`27_a2a_server.py`](27_a2a_server.py) | service | 공식 A2A SDK로 에이전트를 호스팅합니다. `127.0.0.1:9999`의 에이전트 카드와 JSON-RPC, 스트리밍 아티팩트. `neograph-engine[a2a]`가 필요합니다. |
+| 27 | [`27_a2a_server.py`](27_a2a_server.py) | yes | 공식 A2A SDK로 에이전트를 호스팅합니다. `127.0.0.1:9999`의 에이전트 카드와 JSON-RPC, 스트리밍 아티팩트. `--self-check`는 빈 포트에서 서버를 띄우고 SDK의 클라이언트로 두 턴을 진행합니다. `neograph-engine[a2a]`가 필요합니다. |
 | 28 | [`28_acp_agent.py`](28_acp_agent.py) | service | 공식 ACP SDK로 stdio 위에서 에이전트를 호스팅합니다. initialize, 세션 생성, prompt, 토큰 업데이트, `end_turn`. `neograph-engine[acp]`가 필요합니다. |
 
 ### 영속성과 운영
