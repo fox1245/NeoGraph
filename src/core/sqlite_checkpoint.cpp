@@ -18,12 +18,15 @@
 
 #include <neograph/graph/sqlite_checkpoint.h>
 #include "managed_budget_journal.h"
+#include "sqlite_wal.h"
 
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <chrono>
 #include <limits>
 #include <stdexcept>
+#include <thread>
 
 namespace neograph::graph {
 
@@ -31,12 +34,24 @@ namespace {
 
 // ── Error helpers ─────────────────────────────────────────────────────
 
+// SQLITE_BUSY that outlasted the busy handler, or that SQLite returned
+// without calling it. Opening a store retries it within the busy timeout.
+class SqliteBusy final : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+[[noreturn]] void throw_sqlite_status(int status, std::string msg) {
+    if ((status & 0xff) == SQLITE_BUSY) throw SqliteBusy(std::move(msg));
+    throw std::runtime_error(std::move(msg));
+}
+
 [[noreturn]] void throw_sqlite_error(sqlite3* db, const char* what) {
     std::string msg = "SqliteCheckpointStore: ";
     msg += what;
     msg += ": ";
     msg += sqlite3_errmsg(db);
-    throw std::runtime_error(std::move(msg));
+    throw_sqlite_status(sqlite3_errcode(db), std::move(msg));
 }
 
 // Owns a writer transaction so every exceptional exit rolls it back.
@@ -419,15 +434,36 @@ SqliteCheckpointStore::SqliteCheckpointStore(
         if (sqlite3_busy_timeout(db_, static_cast<int>(busy_timeout.count())) != SQLITE_OK) {
             throw_sqlite_error(db_, "cannot configure busy timeout");
         }
+        // Two stores or processes may open one database at once, as a
+        // restarted host does; each step below waits for the other within
+        // the busy timeout instead of failing.
+        const auto deadline = std::chrono::steady_clock::now() + busy_timeout;
         // WAL gives us non-blocking readers and durable writes via fsync at
-        // checkpoint time. Foreign keys aren't used (we manage references in
-        // app code), but enabling them now would future-proof the schema.
-        exec_ddl("PRAGMA journal_mode=WAL;");
+        // checkpoint time. The switch retries a concurrent first open, which
+        // SQLite reports as SQLITE_BUSY without waiting (see sqlite_wal.h).
+        if (const int status = neograph::detail::sqlite_enable_wal(db_, busy_timeout); status != SQLITE_OK)
+            throw_sqlite_error(db_, "cannot enable WAL journaling");
+        // Foreign keys aren't used (we manage references in app code), but
+        // enabling them now would future-proof the schema.
         exec_ddl("PRAGMA foreign_keys=ON;");
         // A committed write-ahead claim must survive a host crash before IO:
         // NORMAL can lose the latest WAL transactions and reissue currency.
         exec_ddl("PRAGMA synchronous=FULL;");
-        ensure_schema();
+        // The schema and its migrations commit in one BEGIN IMMEDIATE
+        // transaction; one that ends in SQLITE_BUSY rolls back and runs again.
+        auto pause = std::chrono::milliseconds(1);
+        while (true) {
+            try {
+                ensure_schema();
+                break;
+            } catch (const SqliteBusy&) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= deadline) throw;
+                std::this_thread::sleep_for(
+                    std::min<std::chrono::steady_clock::duration>(pause, deadline - now));
+                pause = std::min(pause * 2, std::chrono::milliseconds(50));
+            }
+        }
     } catch (...) {
         sqlite3_close(db_);
         db_ = nullptr;
@@ -441,13 +477,13 @@ SqliteCheckpointStore::~SqliteCheckpointStore() {
 
 void SqliteCheckpointStore::exec_ddl(const char* sql) {
     char* err = nullptr;
-    if (sqlite3_exec(db_, sql, nullptr, nullptr, &err) != SQLITE_OK) {
+    if (const int status = sqlite3_exec(db_, sql, nullptr, nullptr, &err); status != SQLITE_OK) {
         std::string msg = "SqliteCheckpointStore: exec failed: ";
         if (err) {
             msg += err;
             sqlite3_free(err);
         }
-        throw std::runtime_error(std::move(msg));
+        throw_sqlite_status(status, std::move(msg));
     }
 }
 

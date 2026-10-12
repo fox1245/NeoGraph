@@ -16,6 +16,7 @@
 // receives its answer through the parent's answered invocation.
 
 #include "fixtures/checkpoint_backends.h"
+#include "fixtures/unique_temp_dir.h"
 
 #include <neograph/graph/engine.h>
 #include <neograph/graph/loader.h>
@@ -282,26 +283,6 @@ std::string asks(const RunResult& result) {
                                                            : std::string{};
 }
 
-class TempDir {
-public:
-    TempDir() {
-        static std::atomic<int> next{0};
-        path_ = std::filesystem::temp_directory_path() /
-                ("ng-resume-scope-" +
-                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" +
-                 std::to_string(++next));
-        std::filesystem::create_directories(path_);
-    }
-    ~TempDir() {
-        std::error_code ignored;
-        std::filesystem::remove_all(path_, ignored);
-    }
-    std::string file(const char* name) const { return (path_ / name).string(); }
-
-private:
-    std::filesystem::path path_;
-};
-
 using test_support::Backend;
 
 class ResumeValueScope : public ::testing::TestWithParam<Backend> {
@@ -321,7 +302,7 @@ protected:
     }
 
 private:
-    TempDir                          dir_;
+    test_support::UniqueTempDir      dir_{"ng-resume-scope-"};
     std::shared_ptr<CheckpointStore> store_;
 };
 

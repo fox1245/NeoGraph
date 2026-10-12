@@ -75,7 +75,9 @@ public:
     /// @param db_path Filesystem path or ":memory:". Anything sqlite3_open accepts.
     /// @throws std::runtime_error on open or DDL failure.
     explicit SqliteCheckpointStore(const std::string& db_path);
-    /// Configure how long writes wait for a competing SQLite writer.
+    /// Configure how long writes wait for a competing SQLite writer, and how
+    /// long opening waits for another store or process opening or migrating
+    /// the same database at the same moment.
     SqliteCheckpointStore(const std::string& db_path,
                           std::chrono::milliseconds busy_timeout);
     SqliteCheckpointStore(const std::string& db_path,

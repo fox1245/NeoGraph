@@ -5,6 +5,7 @@
 #include <neograph/hook_outbox.h>
 
 #include "../core/canonical_json.h"
+#include "../core/sqlite_wal.h"
 #include "monetary.h"
 
 #include <sqlite3.h>
@@ -109,9 +110,12 @@ struct SQLiteProgramProviderCallJournal::Impl {
             throw std::runtime_error(error);
         }
         try {
-            execute(db, "PRAGMA journal_mode=WAL");
-            execute(db, "PRAGMA synchronous=FULL");
+            // The busy timeout comes first, and the WAL switch retries a
+            // concurrent first open of the same file (see sqlite_wal.h).
             execute(db, "PRAGMA busy_timeout=5000");
+            if (neograph::detail::sqlite_enable_wal(db, std::chrono::milliseconds(5000)) != SQLITE_OK)
+                sql_error(db);
+            execute(db, "PRAGMA synchronous=FULL");
             execute(db, "CREATE TABLE IF NOT EXISTS ng_program_provider_calls("
                         "owner_scope TEXT NOT NULL, dispatch_id TEXT NOT NULL,"
                         "slot TEXT NOT NULL, request_digest TEXT NOT NULL,"

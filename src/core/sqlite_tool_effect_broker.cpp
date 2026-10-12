@@ -1,5 +1,6 @@
 #include <neograph/sqlite_runtime_stores.h>
 #include "canonical_json.h"
+#include "sqlite_wal.h"
 
 #include <sqlite3.h>
 
@@ -144,7 +145,9 @@ SQLiteToolEffectBroker::SQLiteToolEffectBroker(
                         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
                         nullptr) != SQLITE_OK) db_error(impl_->db, "open");
     if (sqlite3_busy_timeout(impl_->db, 5000) != SQLITE_OK) db_error(impl_->db, "busy timeout");
-    sql(impl_->db, "PRAGMA journal_mode=WAL");
+    // Retries a concurrent first open of the same file (see sqlite_wal.h).
+    if (neograph::detail::sqlite_enable_wal(impl_->db, std::chrono::milliseconds(5000)) != SQLITE_OK)
+        db_error(impl_->db, "journal mode");
     sql(impl_->db, "PRAGMA synchronous=FULL");
     sql(impl_->db, R"(
         CREATE TABLE IF NOT EXISTS neograph_tool_effects (

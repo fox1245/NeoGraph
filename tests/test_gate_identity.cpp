@@ -14,6 +14,7 @@
 // gated node receives the value of the resume that answered its own gate.
 
 #include "fixtures/checkpoint_backends.h"
+#include "fixtures/unique_temp_dir.h"
 
 #include <neograph/graph/engine.h>
 #include <neograph/graph/loader.h>
@@ -135,26 +136,6 @@ std::multiset<std::string> results_of(const RunResult& result) {
     return out;
 }
 
-class TempDir {
-public:
-    TempDir() {
-        static std::atomic<int> next{0};
-        path_ = std::filesystem::temp_directory_path() /
-                ("ng-gate-identity-" +
-                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" +
-                 std::to_string(++next));
-        std::filesystem::create_directories(path_);
-    }
-    ~TempDir() {
-        std::error_code ignored;
-        std::filesystem::remove_all(path_, ignored);
-    }
-    std::string file(const char* name) const { return (path_ / name).string(); }
-
-private:
-    std::filesystem::path path_;
-};
-
 using test_support::Backend;
 
 class GateIdentity : public ::testing::TestWithParam<Backend> {
@@ -183,7 +164,7 @@ private:
     std::shared_ptr<CheckpointStore> make_store() {
         return test_support::open_backend(GetParam(), dir_.file("gates.sqlite"));
     }
-    TempDir                          dir_;
+    test_support::UniqueTempDir      dir_{"ng-gate-identity-"};
     std::shared_ptr<CheckpointStore> store_;
 };
 

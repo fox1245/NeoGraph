@@ -10,6 +10,7 @@
 #include <neograph/provider_outcome_codec.h>
 #include "fixtures/coarse_clock_store.h"
 #include "fixtures/typed_provider.h"
+#include "fixtures/unique_temp_dir.h"
 #include <codecs/messages.h>
 #include <codecs/responses.h>
 #include <core/native.h>
@@ -29,6 +30,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 #ifdef _WIN32
 #include <process.h>
@@ -1230,63 +1232,79 @@ TEST(SqliteCheckpointCoarseClock, ThreadsKeepSeparateSaveOrders) {
     EXPECT_EQ(ids_of(store.list("a")), (std::vector<std::string>{a3.id, a2.id}));
 }
 
+namespace {
+
+// neograph_checkpoints as the release before save_seq created it, with its
+// index and rows that release wrote: in thread "t" its order was old-3, old-2,
+// old-1. A file it left is in WAL mode; a file from another tool may not be.
+constexpr const char* kPreviousSqliteSchema = R"SQL(
+    CREATE TABLE neograph_checkpoints (
+        thread_id TEXT NOT NULL, checkpoint_id TEXT NOT NULL,
+        parent_id TEXT NOT NULL DEFAULT '', current_node TEXT NOT NULL DEFAULT '',
+        next_nodes TEXT NOT NULL DEFAULT '[]',
+        interrupt_phase TEXT NOT NULL DEFAULT 'completed',
+        barrier_state TEXT NOT NULL DEFAULT '{}', channel_versions TEXT NOT NULL DEFAULT '{}',
+        global_version INTEGER NOT NULL DEFAULT 0, metadata TEXT NOT NULL DEFAULT '{}',
+        step INTEGER NOT NULL DEFAULT 0, timestamp_ms INTEGER NOT NULL DEFAULT 0,
+        schema_version INTEGER NOT NULL DEFAULT 2, checkpoint_shape TEXT,
+        PRIMARY KEY (thread_id, checkpoint_id));
+    CREATE INDEX neograph_checkpoints_recent
+        ON neograph_checkpoints (thread_id, timestamp_ms DESC, step DESC);
+    INSERT INTO neograph_checkpoints (thread_id, checkpoint_id, step, timestamp_ms) VALUES
+        ('t', 'old-1', 0, 1000), ('t', 'old-3', 0, 2000), ('t', 'old-2', 1, 1000),
+        ('other', 'other-1', 9, 5);
+)SQL";
+
+using RawSqlite = std::unique_ptr<sqlite3, decltype(&sqlite3_close)>;
+
+// A separate connection, as another process or an older release has it.
+RawSqlite open_raw(const std::filesystem::path& path) {
+    sqlite3* raw = nullptr;
+    const int opened = sqlite3_open(path.string().c_str(), &raw);
+    RawSqlite db(raw, &sqlite3_close);
+    if (opened != SQLITE_OK) throw std::runtime_error("cannot open " + path.string());
+    return db;
+}
+
+// "" on success, else SQLite's message.
+std::string exec_raw(sqlite3* db, const std::string& sql) {
+    char* error = nullptr;
+    const int status = sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &error);
+    const std::string message = error ? error : "";
+    sqlite3_free(error);
+    return status == SQLITE_OK ? std::string() : message.empty() ? "error" : message;
+}
+
+std::string exec_on(const std::filesystem::path& path, const std::string& sql) {
+    auto db = open_raw(path);
+    return exec_raw(db.get(), sql);
+}
+
+std::string query_text(const std::filesystem::path& path, const std::string& sql) {
+    auto db = open_raw(path);
+    sqlite3_stmt* statement = nullptr;
+    if (sqlite3_prepare_v2(db.get(), sql.c_str(), -1, &statement, nullptr) != SQLITE_OK)
+        return "<prepare failed>";
+    std::string value = "<no row>";
+    if (sqlite3_step(statement) == SQLITE_ROW)
+        value = sqlite3_column_type(statement, 0) == SQLITE_NULL
+                    ? "<null>"
+                    : reinterpret_cast<const char*>(sqlite3_column_text(statement, 0));
+    sqlite3_finalize(statement);
+    return value;
+}
+
+}  // namespace
+
 // A database written before save_seq existed: its rows keep their
 // (timestamp_ms, step) order, behind every row saved since. The migration adds
 // a nullable column, rewrites no row, and runs again without effect.
 TEST(SqliteCheckpointSaveOrderMigration, LegacyRowsKeepTheirOrderBehindNewSaves) {
-    const auto path = std::filesystem::temp_directory_path() /
-                      ("neograph-save-order-" + Checkpoint::generate_id() + ".sqlite");
-    struct Cleanup {
-        std::filesystem::path path;
-        ~Cleanup() {
-            std::error_code ignored;
-            for (const auto& suffix : {"", "-wal", "-shm"})
-                std::filesystem::remove(path.string() + suffix, ignored);
-        }
-    } cleanup{path};
-
-    // A separate connection, as another process or an older release has it.
-    const auto exec = [&](const std::string& sql) {
-        sqlite3* raw = nullptr;
-        const int opened = sqlite3_open(path.string().c_str(), &raw);
-        std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, &sqlite3_close);
-        if (opened != SQLITE_OK) return std::string("open failed");
-        char* error = nullptr;
-        const int status = sqlite3_exec(db.get(), sql.c_str(), nullptr, nullptr, &error);
-        const std::string message = error ? error : "";
-        sqlite3_free(error);
-        return status == SQLITE_OK ? std::string() : message.empty() ? "error" : message;
-    };
-    const auto query_int = [&](const std::string& sql) {
-        sqlite3* raw = nullptr;
-        const int opened = sqlite3_open(path.string().c_str(), &raw);
-        std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, &sqlite3_close);
-        EXPECT_EQ(opened, SQLITE_OK);
-        sqlite3_stmt* statement = nullptr;
-        EXPECT_EQ(sqlite3_prepare_v2(db.get(), sql.c_str(), -1, &statement, nullptr), SQLITE_OK);
-        std::int64_t value = -1;
-        if (sqlite3_step(statement) == SQLITE_ROW) value = sqlite3_column_int64(statement, 0);
-        sqlite3_finalize(statement);
-        return value;
-    };
-    // The previous schema, with its index, and rows written by that release.
-    ASSERT_EQ(exec(R"SQL(
-        CREATE TABLE neograph_checkpoints (
-            thread_id TEXT NOT NULL, checkpoint_id TEXT NOT NULL,
-            parent_id TEXT NOT NULL DEFAULT '', current_node TEXT NOT NULL DEFAULT '',
-            next_nodes TEXT NOT NULL DEFAULT '[]',
-            interrupt_phase TEXT NOT NULL DEFAULT 'completed',
-            barrier_state TEXT NOT NULL DEFAULT '{}', channel_versions TEXT NOT NULL DEFAULT '{}',
-            global_version INTEGER NOT NULL DEFAULT 0, metadata TEXT NOT NULL DEFAULT '{}',
-            step INTEGER NOT NULL DEFAULT 0, timestamp_ms INTEGER NOT NULL DEFAULT 0,
-            schema_version INTEGER NOT NULL DEFAULT 2, checkpoint_shape TEXT,
-            PRIMARY KEY (thread_id, checkpoint_id));
-        CREATE INDEX neograph_checkpoints_recent
-            ON neograph_checkpoints (thread_id, timestamp_ms DESC, step DESC);
-        INSERT INTO neograph_checkpoints (thread_id, checkpoint_id, step, timestamp_ms) VALUES
-            ('t', 'old-1', 0, 1000), ('t', 'old-3', 0, 2000), ('t', 'old-2', 1, 1000),
-            ('other', 'other-1', 9, 5);
-    )SQL"), "");
+    const test_support::UniqueTempDir dir("neograph-save-order-");
+    const auto path = dir.path() / "checkpoints.sqlite";
+    const auto exec = [&](const std::string& sql) { return exec_on(path, sql); };
+    const auto query_int = [&](const std::string& sql) { return std::stoll(query_text(path, sql)); };
+    ASSERT_EQ(exec(kPreviousSqliteSchema), "");
 
     std::vector<std::string> legacy_order{"old-3", "old-2", "old-1"};
     {
@@ -1360,4 +1378,152 @@ TEST(SqliteCheckpointSaveOrderMigration, TheSaveOrderNeedsNoSort) {
     sqlite3_finalize(statement);
     EXPECT_NE(plan.find("neograph_checkpoints_save_order"), std::string::npos) << plan;
     EXPECT_EQ(plan.find("TEMP B-TREE"), std::string::npos) << plan;
+}
+
+// ── Concurrent opens of one database ──────────────────────────────────
+//
+// Two stores, or two processes, may open one database at the same moment, as
+// a restarted host does. A store that is not first to switch a new file to
+// WAL got SQLITE_BUSY from PRAGMA journal_mode=WAL at once, whatever its busy
+// timeout ("exec failed: database is locked", in about one round in eight of
+// four stores on Linux); each open now waits for the others within the busy
+// timeout, and the schema and its migrations commit once.
+
+namespace {
+
+// Opens `stores` stores on `path` together and saves one checkpoint from each
+// into thread "shared"; returns each open's error, "" when it succeeded.
+std::vector<std::string> open_together(const std::filesystem::path& path, int stores) {
+    std::barrier                          start(stores);
+    std::vector<std::future<std::string>> opened;
+    for (int i = 0; i < stores; ++i) {
+        opened.push_back(std::async(std::launch::async, [&, i] {
+            start.arrive_and_wait();
+            try {
+                SqliteCheckpointStore store(path.string());
+                store.save(make_state_cp("shared", i, {{"x", {i, static_cast<uint64_t>(i + 1)}}}));
+                return std::string();
+            } catch (const std::exception& error) {
+                return std::string(error.what());
+            }
+        }));
+    }
+    std::vector<std::string> errors;
+    for (auto& open : opened) errors.push_back(open.get());
+    return errors;
+}
+
+}  // namespace
+
+TEST(SqliteCheckpointConcurrentOpen, StoresOpeningOneNewFileTogetherAllOpen) {
+    constexpr int kStores = 6;
+    const test_support::UniqueTempDir dir("neograph-concurrent-open-");
+    for (int round = 0; round < 40; ++round) {
+        const auto path = dir.path() / ("round-" + std::to_string(round) + ".sqlite");
+        EXPECT_EQ(open_together(path, kStores), std::vector<std::string>(kStores)) << "round " << round;
+        SqliteCheckpointStore check(path.string());
+        EXPECT_EQ(check.list("shared").size(), static_cast<size_t>(kStores)) << "round " << round;
+        EXPECT_EQ(query_text(path, "PRAGMA journal_mode"), "wal");
+    }
+}
+
+TEST(SqliteCheckpointConcurrentOpen, AnOpenWaitsForAReaderOfARollbackJournalFile) {
+    // Another connection reads a file that is not yet in WAL mode: the switch
+    // waits until it finishes, within the busy timeout.
+    const test_support::UniqueTempDir dir("neograph-open-reader-");
+    const auto path = dir.path() / "shared.sqlite";
+    auto reader = open_raw(path);
+    ASSERT_EQ(exec_raw(reader.get(), "CREATE TABLE other(x INTEGER); INSERT INTO other VALUES (1);"), "");
+    ASSERT_EQ(exec_raw(reader.get(), "BEGIN; SELECT x FROM other;"), "");
+    std::thread finish([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        (void)exec_raw(reader.get(), "COMMIT;");
+    });
+    const auto started = std::chrono::steady_clock::now();
+    std::string error;
+    try {
+        SqliteCheckpointStore store(path.string(), std::chrono::seconds(10));
+        store.save(make_state_cp("t", 0, {{"x", {1, 1}}}));
+    } catch (const std::exception& failure) {
+        error = failure.what();
+    }
+    const auto waited = std::chrono::steady_clock::now() - started;
+    finish.join();
+    EXPECT_EQ(error, "");
+    EXPECT_GE(waited, std::chrono::milliseconds(200)) << "the open waited for the reader";
+    EXPECT_EQ(query_text(path, "PRAGMA journal_mode"), "wal");
+    EXPECT_EQ(query_text(path, "SELECT COUNT(*) FROM neograph_checkpoints"), "1");
+}
+
+TEST(SqliteCheckpointConcurrentOpen, AnOpenGivesUpWhenAReaderOutlastsTheBusyTimeout) {
+    const test_support::UniqueTempDir dir("neograph-open-timeout-");
+    const auto path = dir.path() / "shared.sqlite";
+    auto reader = open_raw(path);
+    ASSERT_EQ(exec_raw(reader.get(), "CREATE TABLE other(x INTEGER); INSERT INTO other VALUES (1);"), "");
+    ASSERT_EQ(exec_raw(reader.get(), "BEGIN; SELECT x FROM other;"), "");
+    const auto started = std::chrono::steady_clock::now();
+    std::string error;
+    try {
+        SqliteCheckpointStore store(path.string(), std::chrono::milliseconds(150));
+    } catch (const std::exception& failure) {
+        error = failure.what();
+    }
+    const auto waited = std::chrono::steady_clock::now() - started;
+    (void)exec_raw(reader.get(), "COMMIT;");
+    EXPECT_NE(error.find("database is locked"), std::string::npos) << error;
+    EXPECT_GE(waited, std::chrono::milliseconds(140)) << "the open used its busy timeout";
+    EXPECT_LT(waited, std::chrono::seconds(5));
+}
+
+TEST(SqliteCheckpointSaveOrderMigration, StoresOpeningAnOldSchemaFileTogetherMigrateItOnce) {
+    // The previous release's file, in WAL mode as it leaves one, or in
+    // rollback mode as another tool may: stores opening it together each wait
+    // for the migration, and it runs once.
+    constexpr int kStores = 4;
+    const test_support::UniqueTempDir dir("neograph-concurrent-migration-");
+    for (int round = 0; round < 30; ++round) {
+        const bool wal  = round % 2 == 0;
+        const auto path = dir.path() / ("round-" + std::to_string(round) + ".sqlite");
+        ASSERT_EQ(exec_on(path, std::string(wal ? "PRAGMA journal_mode=WAL;" : "") + kPreviousSqliteSchema),
+                  "");
+        std::barrier                                         start(kStores);
+        std::vector<std::future<std::vector<std::string>>> opened;
+        for (int i = 0; i < kStores; ++i) {
+            opened.push_back(std::async(std::launch::async, [&, i] {
+                start.arrive_and_wait();
+                try {
+                    SqliteCheckpointStore store(path.string());
+                    auto ids = ids_of(store.list("t"));
+                    auto cp  = make_state_cp("t", 0, {{"x", {i, static_cast<uint64_t>(i + 1)}}});
+                    cp.timestamp = 1;
+                    store.save(cp);
+                    return ids;
+                } catch (const std::exception& error) {
+                    return std::vector<std::string>{std::string("error: ") + error.what()};
+                }
+            }));
+        }
+        for (auto& open : opened) {
+            const auto seen = open.get();
+            // Before every save, a store saw the legacy rows in their order;
+            // after another store's save, that save comes first.
+            ASSERT_GE(seen.size(), 3u) << "round " << round << ": " << (seen.empty() ? "" : seen[0]);
+            EXPECT_EQ(std::vector<std::string>(seen.end() - 3, seen.end()),
+                      (std::vector<std::string>{"old-3", "old-2", "old-1"}))
+                << "round " << round;
+        }
+        EXPECT_EQ(query_text(path, "SELECT COUNT(*) FROM pragma_table_info('neograph_checkpoints') "
+                                   "WHERE name = 'save_seq'"),
+                  "1");
+        EXPECT_EQ(query_text(path, "SELECT COUNT(*) FROM neograph_checkpoints WHERE save_seq IS NULL"), "4");
+        EXPECT_EQ(query_text(path, "SELECT COUNT(DISTINCT save_seq) FROM neograph_checkpoints "
+                                   "WHERE thread_id = 't' AND save_seq IS NOT NULL"),
+                  std::to_string(kStores));
+        EXPECT_EQ(query_text(path, "PRAGMA journal_mode"), "wal");
+        SqliteCheckpointStore check(path.string());
+        const auto order = ids_of(check.list("t"));
+        ASSERT_EQ(order.size(), static_cast<size_t>(kStores + 3));
+        EXPECT_EQ(std::vector<std::string>(order.end() - 3, order.end()),
+                  (std::vector<std::string>{"old-3", "old-2", "old-1"}));
+    }
 }

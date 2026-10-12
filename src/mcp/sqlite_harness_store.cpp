@@ -2,6 +2,7 @@
 
 #include "harness_journal_internal.h"
 #include "../program/canonical_json.h"
+#include "../core/sqlite_wal.h"
 #include <sqlite3.h>
 
 #include <algorithm>
@@ -543,7 +544,9 @@ struct SqliteHarnessRecordStore::Impl {
             if (sqlite3_busy_timeout(db, static_cast<int>(busy_timeout.count())) != SQLITE_OK) {
                 throw_sqlite_error(db, "cannot configure busy timeout");
             }
-            exec("PRAGMA journal_mode=WAL;");
+            // Retries a concurrent first open of the same file (see sqlite_wal.h).
+            if (neograph::detail::sqlite_enable_wal(db, busy_timeout) != SQLITE_OK)
+                throw_sqlite_error(db, "cannot enable WAL journaling");
             exec("PRAGMA foreign_keys=ON;");
             exec("PRAGMA synchronous=NORMAL;");
             ensure_schema();

@@ -1,5 +1,6 @@
 #include <neograph/sqlite_runtime_stores.h>
 #include "canonical_json.h"
+#include "sqlite_wal.h"
 #include <sqlite3.h>
 #include <algorithm>
 #include <limits>
@@ -22,10 +23,13 @@ void open(sqlite3*& db, const std::string& path) {
         fail(db, "open");
     }
     try {
-        exec(db, "PRAGMA journal_mode=WAL");
+        // The busy timeout comes first, and the WAL switch retries a
+        // concurrent first open of the same file (see sqlite_wal.h).
+        exec(db, "PRAGMA busy_timeout=5000");
+        if (neograph::detail::sqlite_enable_wal(db, std::chrono::milliseconds(5000)) != SQLITE_OK)
+            fail(db, "journal mode");
         exec(db, "PRAGMA synchronous=FULL");
         exec(db, "PRAGMA foreign_keys=ON");
-        exec(db, "PRAGMA busy_timeout=5000");
         Tx tx(db);
         exec(db, "CREATE TABLE IF NOT EXISTS ng_runtime_store_schema(version INTEGER NOT NULL)");
         Stmt v(db, "SELECT version FROM ng_runtime_store_schema");
