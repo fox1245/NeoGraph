@@ -4,7 +4,7 @@
 
 A graph has a fixed shape: its nodes, edges and channels are decided when it is compiled. A Program is a small JavaScript module that the host compiles, admits and runs, and that sits one level above the graph. It exports `define()`, which returns the one graph the Program owns, and optionally `main()`, a generator that decides how that graph is run: how many copies at once, how their results are joined, what happens when the budget runs out. The runtime records every step of `main()` in a journal, so a run can pause for a person, stop, and continue.
 
-This page explains the model and walks through one complete Program. The rules are in the [Python binding guide](python-binding.md#program-and-quickjs), the graph features in [Program graph features](program-graphs.md) and the error codes in the [diagnostics guide](diagnostics.md).
+This page explains the model and walks through one complete Program. The rules are in the [Python binding guide](python-binding.md#program-and-quickjs), what a module may and may not contain in the [authoring rules](program-graphs.md#authoring-rules), the graph features in [Program graph features](program-graphs.md) and the error codes in the [diagnostics guide](diagnostics.md).
 
 ## When to use a Program
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=ko source_sha256=d826f6691e4419255724c79828e57e5bc1d349a20ee0a5c24d67512366199812 -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=ko source_sha256=ca511a2202153d10cd6eae7d3747c97d14de5984171708d264fa048b1ed2dc1b -->
 # Program 그래프 기능
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -6,6 +6,17 @@
 이 문서는 `define()` 프로그램이 노드, 엣지, barrier, 그래프 수준 재시도 정책 외에 쓸 수 있는 그래프 기능을 설명합니다. 각 기능은 strict Core 정의(`schema_version` 1)의 키이며, `javascript_authoring_capability_manifest()["features"]`에 대응하는 플래그가 있습니다. 어떤 기능을 쓰지 않는 정의는 그 기능이 생기기 전과 바이트, `definition_hash`, bundle id가 완전히 같습니다.
 
 이 키 중 하나라도 쓰는 정의는 검증기 경고를 bundle에 봉인하지 않습니다. 경고는 컴파일 결과로 계속 반환됩니다. [진단 가이드](diagnostics.md)를 참고하세요.
+
+<a id="authoring-rules"></a>
+## 작성 규칙
+
+Program은 호스트가 컴파일하는 JavaScript 모듈 하나입니다. 아래 규칙은 모듈을 컴파일하거나 실행할 때 검사하며, 어기면 각 항목에 적은 진단 코드로 보고합니다([진단 가이드](diagnostics.md) 참고).
+
+- **모듈 형태.** 모듈은 그래프 빌더를 정확히 하나 반환하는 동기 `define()`을 내보냅니다(`P_JS_DEFINE_MISSING`, `P_JS_DEFINE_ASYNC`, `P_JS_DEFINE_VALUE`). `main()`만 내보내는 모듈은 거부됩니다. `main()`은 선택 사항이며, 내보낸다면 동기 제너레이터여야 합니다(`P_JS_CONTROL_MAIN`, `P_JS_CONTROL_ASYNC`). `main()`이 없으면 실행은 그래프를 곧바로 실행합니다. 최상위 `await`가 있는 모듈도 거부됩니다.
+- **`define()` 안.** 반복문, 보조 함수, 템플릿 문자열 같은 평범하고 결정적인 JavaScript로 `ng.graph()`를 통해 그래프를 만듭니다. 명령을 `yield`할 수 없고 노드도 실행되지 않습니다. 빌더 인자는 정규 JSON 데이터여야 하고(`P_JS_GRAPH_VALUE`), `define()`이 반환한 뒤에는 빌더를 쓸 수 없습니다(`P_JS_GRAPH_SEALED`).
+- **`main()` 안.** 반복, 재귀, 클로저, 예외, 지역 상태는 평소처럼 쓸 수 있습니다. 다만 `main()`은 `ng`로 만든 명령(`ng.callCore`, `ng.all` 등)을 `yield`하는 방식으로만 동작합니다. 런타임이 명령마다 검사하고 저널에 기록한 뒤 실행하고, 그 결과로 제너레이터를 재개합니다. 소스 코드는 동작을 요청할 뿐 스스로 권한을 얻지 못합니다. 모든 노드 타입, 조건, 리듀서는 호스트의 레지스트리에 있어야 하고, 호스트의 예산이 실행을 제한합니다.
+- **거부되는 것.** `Date`, `eval`, `Function` 생성자는 `P_JS_AMBIENT_DENIED`로 실패합니다. `Math.random()`은 항상 0을 반환하므로 Program에는 난수가 없습니다. 전역 `std`, `os`, `process`, `require`, `fetch`, `crypto`, `performance`, 타이머 함수, `Worker`, `SharedArrayBuffer`, `Atomics`, `WebAssembly`, `WeakRef`, `FinalizationRegistry`는 정의되어 있지 않습니다. 동적 `import()`와 `require()`는 `P_JS_IMPORT_DYNAMIC`으로 실패하고, 정적 `import`는 소스와 함께 봉인된 모듈을 가리켜야 합니다(`P_JS_IMPORT_UNAVAILABLE`).
+- **소스 언어가 아닌 것.** Program을 쓰는 언어는 JavaScript뿐입니다. `define()`이 만드는 strict Core JSON, bundle, 저널, 기록은 저장된 산출물이며 NeoGraph는 이를 Program 소스로 받지 않습니다. 이전의 Core DSL과 Program JSON 연산 트리는 제거되었습니다.
 
 ## 그래프 메타데이터
 

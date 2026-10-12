@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=eda399fbc46527485879373a38545986516ebdb384fbbae10cd395ddb2705d71 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=51c4b4ad6cac765e2629982d260600386568149c97b34cad0d1f779d395f4c6b -->
 # Program ガイド: グラフを取りまとめる JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
 
 グラフの形は固定されています。ノード、エッジ、チャネルは、コンパイルするときに決まります。Program は、ホストがコンパイルし、承認(admission)して実行する小さな JavaScript モジュールで、グラフの1段上に位置します。Program は、自分が持つグラフを1つ返す `define()` をエクスポートし、必要に応じて `main()` もエクスポートします。`main()` は、そのグラフをどう実行するかを決めるジェネレーターです。同時にいくつ動かすか、結果をどうまとめるか、予算が尽きたらどうするかを決めます。ランタイムは `main()` の各ステップをジャーナルに記録するので、実行は人を待って止まり、そのあと続きから再開できます。
 
-このページでは、モデルを説明し、Program を1つ最初から最後まで追います。ルールは [Python バインディングガイド](python-binding.md#program-and-quickjs)に、グラフの機能は [Program グラフ機能](program-graphs.md)に、エラーコードは[診断ガイド](diagnostics.md)にあります。
+このページでは、モデルを説明し、Program を1つ最初から最後まで追います。ルールは [Python バインディングガイド](python-binding.md#program-and-quickjs)に、モジュールに書けるものと書けないものは[記述ルール](program-graphs.md#authoring-rules)に、グラフの機能は [Program グラフ機能](program-graphs.md)に、エラーコードは[診断ガイド](diagnostics.md)にあります。
 
 ## Program を使う場面
 

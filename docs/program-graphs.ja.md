@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=ja source_sha256=d826f6691e4419255724c79828e57e5bc1d349a20ee0a5c24d67512366199812 -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=ja source_sha256=ca511a2202153d10cd6eae7d3747c97d14de5984171708d264fa048b1ed2dc1b -->
 # Programのグラフ機能
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -6,6 +6,17 @@
 このページでは、`define()` を使うProgramが、ノード、エッジ、バリア、グラフ単位のリトライポリシーのほかに使えるグラフ機能を説明します。各機能は、strictなCore定義（`schema_version` 1）のキーで、`javascript_authoring_capability_manifest()["features"]` にフラグがあります。ある機能を使わない定義は、その機能が追加される前とまったく同じバイト列、`definition_hash`、バンドルIDのままです。
 
 これらのキーを1つでも使う定義は、バリデーターの警告をバンドルにシールしません。警告は、これまでどおりコンパイルの結果として返されます。詳しくは[診断ガイド](diagnostics.md)を参照してください。
+
+<a id="authoring-rules"></a>
+## 記述ルール
+
+Program は、ホストがコンパイルする JavaScript モジュール1つです。以下のルールはモジュールのコンパイル時または実行時に検査され、違反すると各項目に示した診断コードで報告されます（[診断ガイド](diagnostics.md)を参照）。
+
+- **モジュールの形。** モジュールは、グラフビルダーをちょうど1つ返す同期の `define()` をエクスポートします（`P_JS_DEFINE_MISSING`、`P_JS_DEFINE_ASYNC`、`P_JS_DEFINE_VALUE`）。`main()` だけをエクスポートするモジュールは拒否されます。`main()` は省略でき、エクスポートする場合は同期ジェネレーターでなければなりません（`P_JS_CONTROL_MAIN`、`P_JS_CONTROL_ASYNC`）。`main()` がなければ、実行はグラフをそのまま実行します。トップレベルの `await` があるモジュールも拒否されます。
+- **`define()` の中。** ループ、補助関数、テンプレート文字列など、ふつうの決定的な JavaScript で、`ng.graph()` を通じてグラフを組み立てます。コマンドを `yield` することはできず、ノードも実行されません。ビルダーの引数は正規の JSON データでなければならず（`P_JS_GRAPH_VALUE`）、`define()` が戻った後はビルダーを使えません（`P_JS_GRAPH_SEALED`）。
+- **`main()` の中。** ループ、再帰、クロージャ、例外、ローカルの状態は通常どおり使えます。ただし `main()` が動作できるのは、`ng` で作ったコマンド（`ng.callCore`、`ng.all` など）を `yield` するときだけです。ランタイムがコマンドごとに検査してジャーナルに記録し、実行して、結果を渡してジェネレーターを再開します。ソースコードは動作を要求するだけで、自分に権限を与えることはできません。すべてのノードタイプ、条件、リデューサーはホストのレジストリにある必要があり、ホストの予算が実行を制限します。
+- **拒否されるもの。** `Date`、`eval`、`Function` コンストラクターは `P_JS_AMBIENT_DENIED` で失敗します。`Math.random()` は常に0を返すので、Program に乱数はありません。グローバルの `std`、`os`、`process`、`require`、`fetch`、`crypto`、`performance`、タイマー関数、`Worker`、`SharedArrayBuffer`、`Atomics`、`WebAssembly`、`WeakRef`、`FinalizationRegistry` は未定義です。動的な `import()` と `require()` は `P_JS_IMPORT_DYNAMIC` で失敗し、静的な `import` は、ソースと一緒に封印されたモジュールを指さなければなりません（`P_JS_IMPORT_UNAVAILABLE`）。
+- **ソース言語ではないもの。** Program を書く言語は JavaScript だけです。`define()` が作る strict Core JSON、バンドル、ジャーナル、レコードは保存された成果物であり、NeoGraph はそれらを Program のソースとして受け付けません。従来の Core DSL と Program の JSON 操作ツリーは削除されました。
 
 ## グラフのメタデータ
 

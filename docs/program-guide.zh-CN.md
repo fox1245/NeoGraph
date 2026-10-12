@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=eda399fbc46527485879373a38545986516ebdb384fbbae10cd395ddb2705d71 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=51c4b4ad6cac765e2629982d260600386568149c97b34cad0d1f779d395f4c6b -->
 # Program 指南：协调图的 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
 
 图的形状是固定的：节点、边和通道在编译时就确定了。Program 是一个小型 JavaScript 模块，由宿主编译、准入(admission)并运行，位于图的上一层。它导出 `define()`，返回它所拥有的那张图；还可以导出 `main()`，这是一个生成器，决定如何运行这张图：同时跑几份、如何合并它们的结果、预算耗尽时怎么办。运行时会把 `main()` 的每一步记入日志，所以一次运行可以暂停等人，也可以停下来再继续。
 
-本页说明这一模型，并完整演示一个 Program。规则在 [Python 绑定指南](python-binding.md#program-and-quickjs)中，图的功能在 [Program 图功能](program-graphs.md)中，错误码在[诊断指南](diagnostics.md)中。
+本页说明这一模型，并完整演示一个 Program。规则在 [Python 绑定指南](python-binding.md#program-and-quickjs)中，模块可以写什么、不能写什么在[编写规则](program-graphs.md#authoring-rules)中，图的功能在 [Program 图功能](program-graphs.md)中，错误码在[诊断指南](diagnostics.md)中。
 
 ## 什么时候用 Program
 

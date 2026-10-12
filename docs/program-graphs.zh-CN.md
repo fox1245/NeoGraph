@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=zh-CN source_sha256=d826f6691e4419255724c79828e57e5bc1d349a20ee0a5c24d67512366199812 -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=zh-CN source_sha256=ca511a2202153d10cd6eae7d3747c97d14de5984171708d264fa048b1ed2dc1b -->
 # Program 图功能
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -6,6 +6,17 @@
 本页介绍 `define()` 程序除了节点、边、屏障和图级别的重试策略之外，还能使用的图功能。每个功能都是严格 Core 定义（`schema_version` 1）中的一个键，并在 `javascript_authoring_capability_manifest()["features"]` 里有一个对应的标志。没有使用某个功能的定义，其字节、`definition_hash` 和 bundle id 都和该功能出现之前完全一样。
 
 只要定义用到这些键中的任何一个，bundle 就不会封存验证器的警告。编译仍然会返回这些警告；参见[诊断指南](diagnostics.md)。
+
+<a id="authoring-rules"></a>
+## 编写规则
+
+Program 是由宿主编译的一个 JavaScript 模块。下面的规则在编译或运行模块时检查，违反时会用各项中列出的诊断码报告（参见[诊断指南](diagnostics.md)）。
+
+- **模块形态。** 模块导出一个同步的 `define()`，它恰好返回一个图构建器（`P_JS_DEFINE_MISSING`、`P_JS_DEFINE_ASYNC`、`P_JS_DEFINE_VALUE`）。只导出 `main()` 的模块会被拒绝。`main()` 可选；若导出，它必须是同步生成器（`P_JS_CONTROL_MAIN`、`P_JS_CONTROL_ASYNC`）。没有 `main()` 时，运行直接执行这张图。含有顶层 `await` 的模块同样会被拒绝。
+- **`define()` 内部。** 用循环、辅助函数、模板字符串等普通的确定性 JavaScript，通过 `ng.graph()` 构建图。不能 `yield` 命令，也不会运行任何节点。构建器的参数必须是规范 JSON 数据（`P_JS_GRAPH_VALUE`），`define()` 返回之后不能再使用构建器（`P_JS_GRAPH_SEALED`）。
+- **`main()` 内部。** 循环、递归、闭包、异常和局部状态都可以照常使用，但 `main()` 只能通过 `yield` 由 `ng` 构造的命令（`ng.callCore`、`ng.all` 等）来行动。运行时逐条检查命令，记入日志，执行，再用结果恢复生成器。源码只能请求动作，不能给自己授权：每个节点类型、条件和归约器都必须在宿主的注册表中，宿主的预算限制整个运行。
+- **被拒绝的内容。** `Date`、`eval` 和 `Function` 构造函数会以 `P_JS_AMBIENT_DENIED` 失败。`Math.random()` 始终返回 0，所以 Program 中没有随机数。全局的 `std`、`os`、`process`、`require`、`fetch`、`crypto`、`performance`、定时器函数、`Worker`、`SharedArrayBuffer`、`Atomics`、`WebAssembly`、`WeakRef` 和 `FinalizationRegistry` 均未定义。动态 `import()` 和 `require()` 会以 `P_JS_IMPORT_DYNAMIC` 失败，静态 `import` 必须指向与源码一起封存的模块（`P_JS_IMPORT_UNAVAILABLE`）。
+- **不是源语言的内容。** 编写 Program 的语言只有 JavaScript。`define()` 生成的 strict Core JSON，以及 bundle、日志和记录都是已存储的产物，NeoGraph 不会把它们当作 Program 源码接收。早先的 Core DSL 和 Program JSON 操作树已被移除。
 
 ## 图元数据
 

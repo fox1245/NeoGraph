@@ -6,6 +6,16 @@ This page describes graph features a `define()` program can use beyond nodes, ed
 
 A definition that uses any of these keys seals no validator warnings into its bundle. Warnings are still returned from compilation; see the [diagnostics guide](diagnostics.md).
 
+## Authoring rules
+
+A Program is one JavaScript module that the host compiles. The rules below are checked when the module is compiled or run, and a violation is reported with the diagnostic named in each item (see the [diagnostics guide](diagnostics.md)).
+
+- **Module shape.** The module exports a synchronous `define()` that returns exactly one graph builder (`P_JS_DEFINE_MISSING`, `P_JS_DEFINE_ASYNC`, `P_JS_DEFINE_VALUE`). A module that exports only `main()` is rejected. `main()` is optional; when exported it must be a synchronous generator (`P_JS_CONTROL_MAIN`, `P_JS_CONTROL_ASYNC`). Without it, a run executes the graph directly. A module with a top-level `await` is rejected.
+- **Inside `define()`.** Ordinary deterministic JavaScript (loops, helper functions, template strings) builds the graph through `ng.graph()`. No command can be yielded and no node runs. Builder arguments must be canonical JSON data (`P_JS_GRAPH_VALUE`), and the builder cannot be used after `define()` returns (`P_JS_GRAPH_SEALED`).
+- **Inside `main()`.** Loops, recursion, closures, exceptions and local state work as usual, but `main()` acts only by yielding commands built with `ng` (`ng.callCore`, `ng.all` and the others). The runtime checks each command, records it in the journal, runs it and resumes the generator with the result. Source code requests an action and never grants itself one: every node type, condition and reducer must be in the host's registry, and the host's budgets bound the run.
+- **Rejected.** `Date`, `eval` and the `Function` constructors fail with `P_JS_AMBIENT_DENIED`. `Math.random()` always returns 0, so a Program has no randomness. The globals `std`, `os`, `process`, `require`, `fetch`, `crypto`, `performance`, the timer functions, `Worker`, `SharedArrayBuffer`, `Atomics`, `WebAssembly`, `WeakRef` and `FinalizationRegistry` are undefined. Dynamic `import()` and `require()` fail with `P_JS_IMPORT_DYNAMIC`, and a static `import` must name a module that was sealed together with the source (`P_JS_IMPORT_UNAVAILABLE`).
+- **Not source languages.** JavaScript is the only language a Program is written in. The strict Core JSON that `define()` produces, bundles, journals and records are stored artifacts, and NeoGraph never accepts them as Program source. The older Core DSL and Program JSON operation trees have been removed.
+
 ## Graph metadata
 
 Flag: `graph.metadata`.

@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=eda399fbc46527485879373a38545986516ebdb384fbbae10cd395ddb2705d71 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=51c4b4ad6cac765e2629982d260600386568149c97b34cad0d1f779d395f4c6b -->
 # Program 가이드: 그래프를 조율하는 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
 
 그래프의 모양은 고정되어 있습니다. 노드, 엣지, 채널은 컴파일할 때 정해집니다. Program은 호스트가 컴파일하고, 승인(admission)하고, 실행하는 작은 JavaScript 모듈로, 그래프 한 단계 위에 놓입니다. Program은 자신이 소유한 그래프 하나를 돌려주는 `define()`을 내보내고, 선택적으로 `main()`을 내보냅니다. `main()`은 그 그래프를 어떻게 실행할지 정하는 제너레이터입니다. 한 번에 몇 개를 돌릴지, 결과를 어떻게 합칠지, 예산이 바닥나면 어떻게 할지를 `main()`이 결정합니다. 런타임은 `main()`의 모든 단계를 저널에 기록하므로, 실행은 사람을 기다리며 멈췄다가 이어질 수 있습니다.
 
-이 페이지는 모델을 설명하고 Program 하나를 처음부터 끝까지 따라가 봅니다. 규칙은 [Python 바인딩 가이드](python-binding.md#program-and-quickjs)에, 그래프 기능은 [Program 그래프 기능](program-graphs.md)에, 오류 코드는 [진단 가이드](diagnostics.md)에 있습니다.
+이 페이지는 모델을 설명하고 Program 하나를 처음부터 끝까지 따라가 봅니다. 규칙은 [Python 바인딩 가이드](python-binding.md#program-and-quickjs)에, 모듈에 쓸 수 있는 것과 쓸 수 없는 것은 [작성 규칙](program-graphs.md#authoring-rules)에, 그래프 기능은 [Program 그래프 기능](program-graphs.md)에, 오류 코드는 [진단 가이드](diagnostics.md)에 있습니다.
 
 ## Program을 쓸 때
 
