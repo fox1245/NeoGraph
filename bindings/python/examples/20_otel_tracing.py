@@ -13,6 +13,9 @@ the exporter for OTLPSpanExporter to send spans to a backend.
 Run:
     pip install neograph-engine opentelemetry-api opentelemetry-sdk
     python 20_otel_tracing.py
+
+smoke-requires: opentelemetry.sdk
+smoke-expect: Final trail: ['A', 'B', 'C']
 """
 
 import sys

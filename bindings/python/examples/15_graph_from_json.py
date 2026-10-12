@@ -15,6 +15,9 @@ Pattern:
     definition = json.loads(Path("my_graph.json").read_text())
     engine     = ng.GraphEngine.compile(definition, ng.NodeContext())
     result     = engine.run(ng.RunConfig(...))
+
+smoke-expect: loaded my_graph.json: name='doubler_graph'
+smoke-expect: seed=100 → doubled=200
 """
 
 import json

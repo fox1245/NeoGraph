@@ -7,6 +7,21 @@
 //
 // Member URLs come from CLI args:
 //   speaker <bill_file> <member_url> [<member_url> ...]
+//
+// The smoke test starts four members in their offline fixture mode (--mock) on free ports, and
+// every fixture member abstains, so the tally must read "기권: 4".
+//
+// smoke-companion: @TARGET:cookbook_ai_assembly_member@ @PORT@ 김진보 진보당 @SRC@/examples/cookbook/ai-assembly/prompts/jinbo.txt --mock
+// smoke-companion: @TARGET:cookbook_ai_assembly_member@ @PORT2@ 박보수 보수당 @SRC@/examples/cookbook/ai-assembly/prompts/bosu.txt --mock
+// smoke-companion: @TARGET:cookbook_ai_assembly_member@ @PORT3@ 정중도 중도당 @SRC@/examples/cookbook/ai-assembly/prompts/jungdo.txt --mock
+// smoke-companion: @TARGET:cookbook_ai_assembly_member@ @PORT4@ 나녹색 녹색당 @SRC@/examples/cookbook/ai-assembly/prompts/nokdang.txt --mock
+// smoke-wait-port: @PORT@
+// smoke-wait-port: @PORT2@
+// smoke-wait-port: @PORT3@
+// smoke-wait-port: @PORT4@
+// smoke-args: @SRC@/examples/cookbook/ai-assembly/bills/basic_income.txt http://127.0.0.1:@PORT@ http://127.0.0.1:@PORT2@ http://127.0.0.1:@PORT3@ http://127.0.0.1:@PORT4@
+// smoke-expect: 기권: 4
+// smoke-expect: 찬성: 0
 
 #include <neograph/a2a/client.h>
 

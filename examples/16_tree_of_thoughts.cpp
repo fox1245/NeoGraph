@@ -19,6 +19,8 @@
 //
 // Wired through SchemaProvider ("openai_responses") to OpenRouter's
 // /api/v1/responses endpoint. DeepSeek evaluates the arithmetic states.
+//
+// smoke-skip: needs OPENROUTER_API_KEY (live model call)
 #include <neograph/neograph.h>
 #include "provider_example_support.h"
 

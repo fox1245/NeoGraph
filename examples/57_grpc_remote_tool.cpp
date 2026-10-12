@@ -10,6 +10,9 @@
 // Opt-in (-DNEOGRAPH_BUILD_GRPC=ON). Self-contained: spins the gRPC
 // ToolService in a background thread, then drives a GrpcRemoteTool
 // through the plain neograph::Tool interface.
+//
+// smoke-expect: → {"sum":8.0,"echo":"demo"}
+// smoke-expect: threw as expected
 
 #include <cstdio>
 
@@ -19,6 +22,10 @@
 #include <neograph/json.h>
 #include <neograph/tool.h>
 
+#include "neograph.grpc.pb.h"  // generated; also completes grpc::Service
+
+#include <grpcpp/grpcpp.h>
+
 #include <chrono>
 #include <memory>
 #include <stdexcept>
@@ -27,28 +34,31 @@
 #include <vector>
 
 int main() {
-    const std::string addr = "127.0.0.1:50097";
-
     // ── Server: one tool, "compute" = sum a vector, echo a tag. The
-    //    "fail" arg makes it throw, to show error propagation. ────────
-    std::thread srv([&] {
-        std::unordered_map<std::string, neograph::grpc::ToolFn> tools;
-        tools["compute"] = [](const std::string& args_json) {
-            auto a = neograph::json::parse(
-                args_json.empty() ? "{}" : args_json);
-            if (a.value("fail", false))
-                throw std::runtime_error("compute: forced failure");
-            double sum = 0;
-            if (a.contains("vec") && a["vec"].is_array())
-                for (const auto& v : a["vec"]) sum += v.get<double>();
-            neograph::json r = {{"sum", sum},
-                                {"echo", a.value("tag", std::string{})}};
-            return r.dump();
-        };
-        neograph::grpc::run_tool_server(addr, std::move(tools));
-    });
-    srv.detach();
-    std::this_thread::sleep_for(std::chrono::milliseconds(600));
+    //    "fail" arg makes it throw, to show error propagation. It listens
+    //    on a port the OS picks. ────────────────────────────────────────
+    std::unordered_map<std::string, neograph::grpc::ToolFn> tools;
+    tools["compute"] = [](const std::string& args_json) {
+        auto a = neograph::json::parse(args_json.empty() ? "{}" : args_json);
+        if (a.value("fail", false))
+            throw std::runtime_error("compute: forced failure");
+        double sum = 0;
+        if (a.contains("vec") && a["vec"].is_array())
+            for (const auto& v : a["vec"]) sum += v.get<double>();
+        neograph::json r = {{"sum", sum}, {"echo", a.value("tag", std::string{})}};
+        return r.dump();
+    };
+    auto service = neograph::grpc::make_tool_service(std::move(tools));
+    ::grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(service.get());
+    auto server = builder.BuildAndStart();
+    if (!server || port == 0) {
+        std::printf("could not start the ToolService\n");
+        return 1;
+    }
+    const std::string addr = "127.0.0.1:" + std::to_string(port);
 
     // ── Client: wrap the remote method as a neograph::Tool ───────────
     auto tool = std::make_unique<neograph::grpc::GrpcRemoteTool>(
@@ -86,6 +96,7 @@ int main() {
                     "  %s\n", e.what());
     }
 
+    server->Shutdown();
     std::printf("\nTakeaway: a process-boundary tool is indistinguishable "
                 "from a local\none at the Agent's call site — polyglot "
                 "tools, zero agent-side change.\n");

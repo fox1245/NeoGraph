@@ -8,6 +8,9 @@
 // Uses ":memory:" backing so the example is self-contained.
 //
 // Usage: ./example_sqlite_checkpoint
+//
+// smoke-expect: alice has 2 checkpoint(s) after run 1
+// smoke-expect: PASS
 
 #include <neograph/neograph.h>
 #include <neograph/graph/sqlite_checkpoint.h>

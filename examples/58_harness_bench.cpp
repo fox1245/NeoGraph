@@ -4,6 +4,16 @@
 //
 //   ./example_harness_bench --smoke
 //   ./example_harness_bench task1.json [task2.json ...]
+//
+// --smoke runs one built-in task with a fixture seed, so the token counts are zero; what it
+// checks is that every feedback mode converges in one turn and meets the task's spec.
+//
+// smoke-args: --smoke
+// smoke-expect: A_full_diagnostic: turns=1 converged=yes errors=0
+// smoke-expect: B_fail_only: turns=1 converged=yes errors=0
+// smoke-expect: C_runtime_symptoms: turns=1 converged=yes errors=0
+// smoke-expect: "total_runs": 3
+// smoke-expect: "converged": 3
 
 #include <neograph/graph/harness_bench.h>
 #include <neograph/graph/node.h>

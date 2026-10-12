@@ -40,6 +40,10 @@
 // Usage:
 //   ./example_classifier_fanout
 //   ./example_classifier_fanout "Your message here to classify"
+//
+// smoke-expect: ── Classifier verdicts ──
+// smoke-expect: sentiment:
+// smoke-expect: intent:
 
 #include <neograph/neograph.h>
 

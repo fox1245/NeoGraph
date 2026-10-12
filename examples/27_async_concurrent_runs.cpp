@@ -18,6 +18,9 @@
 // interleave on one thread during the wait.
 //
 // Usage: ./example_async_concurrent_runs
+//
+// smoke-expect: [agent 2] done — result=done by worker
+// smoke-expect: 3/3 agents completed in
 
 #include <neograph/neograph.h>
 

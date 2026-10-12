@@ -2,6 +2,8 @@
 // Usage: ./example_openrouter_responses_sse (OPENROUTER_API_KEY in env/.env)
 // Typed semantic events drive the live text display. Complete wire events,
 // including unknown types, and the immutable terminal Outcome remain owned.
+//
+// smoke-skip: needs OPENROUTER_API_KEY (live model call)
 
 #include "provider_example_support.h"
 

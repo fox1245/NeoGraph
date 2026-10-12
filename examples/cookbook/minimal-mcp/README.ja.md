@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=examples/cookbook/minimal-mcp/README.md locale=ja source_sha256=a7376fb45ce9458c71f7360172bb26947a1694fa341962f3490ecc028390d1a4 -->
+<!-- neograph-i18n: source=examples/cookbook/minimal-mcp/README.md locale=ja source_sha256=ad305d0ff700addd7966a8ce6dc03cdceaa6dd0790dd0cdcdb650b98944a5004 -->
 # Minimal MCP — fastmcp と API key なし
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-このリポジトリの他のMCPの例（03 / 20 / 21 / 22）はすべて、固定のOpenRouter DeepSeekモデルを使用するReActループ内にMCPクライアントをラップするものであり、また、ほとんどのMCPチュートリアルは、`pip install fastmcp`（約60パッケージをpullする）をサーバー側に導入することを前提としています。これによって、便利な事実が隠されています:
+このリポジトリの他の MCP サンプル(03、20〜24)は、MCP クライアントをスクリプト化したモデルで動く ReAct ループに渡します。また、ほとんどの MCP チュートリアルは、サーバー側で `pip install fastmcp`(約 60 パッケージ)を入れることを前提にしています。このレシピはループを外してクライアントだけを示すので、次の事実がよく見えます:
 
 > peer は stdio MCP protocol を実装すれば十分です。C++ client は
 > `libneograph_mcp` と推移的な native 依存をリンクします。peer に Python MCP

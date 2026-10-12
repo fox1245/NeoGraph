@@ -30,11 +30,13 @@ Researchers use the model's knowledge, not web search. Example 17 adds
 an actual Crawl4AI search client. Neither example guarantees factual accuracy.
 
 Run:
-    pip install neograph-engine python-dotenv gradio
-    cp .env.example .env   # fill in OPENAI_API_KEY
+    pip install neograph-engine gradio
+    export OPENAI_API_KEY=...   # read from the environment only
     python 16_deep_research_chat.py
 
 UI opens at http://localhost:7860.
+
+smoke-skip: needs OPENAI_API_KEY and gradio; serves a local web UI until stopped
 """
 
 import os

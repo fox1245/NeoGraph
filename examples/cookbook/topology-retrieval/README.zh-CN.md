@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/topology-retrieval/README.md locale=zh-CN source_sha256=4bf80dfe9ee4f9b5ecc5600f0e9cccb2827274126f79069003e43d9ff4ad1451 -->
+<!-- neograph-i18n: source=examples/cookbook/topology-retrieval/README.md locale=zh-CN source_sha256=9c4975ac3807fe0420332eb8ad1e3f0857870bb99dc0ef74d24b00cce91e0f80 -->
 # 本地拓扑检索
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -14,7 +14,7 @@ OpenRouter baai/bge-m3 (dense, max length 8192)
   -> NeoGraph compatibility and admission planner
 ```
 
-本地稠密索引是一个持久化的 Faiss `IndexIDMap2(IndexHNSWFlat)`，存储为 `topologies.faiss`。配套的受信本地 `topologies.manifest.pkl` 记录向量-ID 映射、BGE 模型 slug、8192 token 策略、描述符指纹以及索引哈希。请勿从不受信任的来源加载 pickle。
+本地稠密索引是一个持久化的 Faiss `IndexIDMap2(IndexHNSWFlat)`，存储为 `topologies.faiss`。配套的受信本地 `topologies.manifest.pkl` 记录向量-ID 映射、BGE 模型 slug、8192 token 策略、描述符指纹以及索引哈希。请勿从不受信任的来源加载 pickle。 默认情况下索引放在临时目录中，程序退出时删除。要在多次运行之间保留，请指定 `--index-dir`。
 
 安装并运行：
 

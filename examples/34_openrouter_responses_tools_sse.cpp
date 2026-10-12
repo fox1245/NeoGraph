@@ -8,6 +8,8 @@
 // Completion: a model can answer without ever calling the tool.
 // The gateway feeds a generated image back to the model, so image_generation
 // needs a model that accepts image input; the default chat model is text-only.
+//
+// smoke-skip: needs OPENROUTER_API_KEY (live model call)
 
 #include "provider_example_support.h"
 

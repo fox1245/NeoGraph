@@ -2,10 +2,10 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-Every other MCP example in this repo (03 / 20 / 21 / 22) wraps the MCP
-client inside a ReAct loop that uses the pinned OpenRouter DeepSeek model,
-and most MCP tutorials assume you `pip install fastmcp` (which pulls ~60 packages)
-on the server side. That hides a useful fact:
+The other MCP examples in this repo (03, 20 to 24) give the MCP client to a
+ReAct loop with a scripted model, and most MCP tutorials assume you
+`pip install fastmcp` (about 60 packages) on the server side. This recipe drops
+the loop and shows the client alone, which makes one fact easy to see:
 
 > The peer only needs to speak MCP over stdio. The C++ client links
 > `libneograph_mcp` and its transitive native dependencies; no Python MCP package

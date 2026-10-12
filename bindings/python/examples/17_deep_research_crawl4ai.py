@@ -27,7 +27,7 @@ Mirrors the C++ example 25_deep_research.cpp's web-search path
     #    -DNEOGRAPH_BUILD_POSTGRES=ON for durable checkpoints.
     pip install neograph-engine
 
-    # 4. Env (drop into examples/.env or export):
+    # 4. Environment variables (export them; no file is read):
     export OPENAI_API_KEY=sk-...
     export CRAWL4AI_URL=http://localhost:11235   # plus CRAWL4AI_API_TOKEN from step 1
     export NEOGRAPH_PG_DSN=postgresql://postgres:test@localhost:5432/neograph
@@ -39,6 +39,8 @@ Mirrors the C++ example 25_deep_research.cpp's web-search path
 If `CRAWL4AI_URL` is unset, researchers fall back to LLM-only
 answers (same as example 16). If `NEOGRAPH_PG_DSN` is unset, the
 example falls back to InMemoryCheckpointStore.
+
+smoke-skip: needs OPENAI_API_KEY, gradio and a Crawl4AI server (CRAWL4AI_URL); serves a local web UI until stopped
 """
 
 from __future__ import annotations

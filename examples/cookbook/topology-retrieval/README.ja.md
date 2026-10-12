@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/topology-retrieval/README.md locale=ja source_sha256=4bf80dfe9ee4f9b5ecc5600f0e9cccb2827274126f79069003e43d9ff4ad1451 -->
+<!-- neograph-i18n: source=examples/cookbook/topology-retrieval/README.md locale=ja source_sha256=9c4975ac3807fe0420332eb8ad1e3f0857870bb99dc0ef74d24b00cce91e0f80 -->
 # ローカルトポロジー取得
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -14,7 +14,7 @@ OpenRouter baai/bge-m3 (dense, max length 8192)
   -> NeoGraph compatibility and admission planner
 ```
 
-ローカル密インデックスは永続的なFaiss `IndexIDMap2(IndexHNSWFlat)`として格納され、`topologies.faiss` として保存されています。信頼されるローカルな companion `topologies.manifest.pkl` には、vector-IDマッピング、BGEモデルスラッグ、8192トークンポリシー、記述子フィンガープリント、およびインデックスハッシュが記録されています。信頼できないソースからpickleをロードしないでください。
+ローカル密インデックスは永続的なFaiss `IndexIDMap2(IndexHNSWFlat)`として格納され、`topologies.faiss` として保存されています。信頼されるローカルな companion `topologies.manifest.pkl` には、vector-IDマッピング、BGEモデルスラッグ、8192トークンポリシー、記述子フィンガープリント、およびインデックスハッシュが記録されています。信頼できないソースからpickleをロードしないでください。 インデックスは既定では一時ディレクトリに作られ、プログラムの終了時に削除されます。実行をまたいで残すには `--index-dir` を指定してください。
 
 インストールと実行:
 

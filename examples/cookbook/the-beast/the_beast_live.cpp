@@ -13,13 +13,15 @@
 // NEVER get an incoherent harness past the compiler. Generation is
 // creative; coherence is proven.
 //
-// Setup:  put OPENROUTER_API_KEY=sk-or-... in .env in the working directory
+// Setup:  export OPENROUTER_API_KEY=sk-or-... (read from the process environment only)
 //         or a parent (or export it). Routes DeepSeek V4 Flash only to
 //         OpenRouter's zero data retention (ZDR) endpoints; with no eligible
 //         endpoint the request fails rather than reaching a provider that
 //         retains data.
 // Build:  cmake --build build --target cookbook_the_beast_live
 // Run:    ./build/cookbook_the_beast_live
+//
+// smoke-skip: needs OPENROUTER_API_KEY (live model call)
 
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/node.h>
@@ -28,7 +30,6 @@
 
 #include "beast_common.h"
 #include "../../provider_example_support.h"
-#include <cppdotenv/dotenv.hpp>
 
 #include <cstdlib>
 #include <iostream>
@@ -76,10 +77,9 @@ json channel_of(const json& serialized, const std::string& name) {
 }
 
 int main(int argc, char** argv) try {
-    cppdotenv::auto_load_dotenv();
     const char* key = std::getenv("OPENROUTER_API_KEY");
     if (!key || !*key) {
-        std::cerr << "OPENROUTER_API_KEY not set (env, or .env in the working directory or a parent)\n";
+        std::cerr << "OPENROUTER_API_KEY not set in the environment\n";
         return 2;
     }
     register_beast_node();

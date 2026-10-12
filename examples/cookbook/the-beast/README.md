@@ -12,7 +12,7 @@ invalid client tool call permits at most one additional call at twice the curren
 3,000/4,000-token cap. Every outcome and usage report is retained. Failure,
 observer/settlement errors and nonempty partial replies do not trigger another
 call; this budget recovery is separate from compiler/initialization repair.
-These are interface-4 source contracts, not a new live-provider pass.
+These are source contracts, not a new live-provider pass.
 
 Keep the private OpenRouter route `~deepseek/deepseek-v4-flash-latest` with `zdr: true` (the shared example provider factory): no eligible zero-data-retention endpoint means failure, not disclosure to a provider that retains data. ZDR endpoint listings are not a residency guarantee or proof of current availability. Live execution requires an authorized key, network/provider availability and paid capacity; prompts, exported schemas, diagnostics and native history are sent to that route. Generated Python server execution has its own local code-execution trust boundary, separate from NeoGraph's Python provider bindings. Never publish keys or private prompts. Nullable token counters are not a dollar cost; pricing and actual billable usage are prerequisites.
 
@@ -134,7 +134,7 @@ are fed straight back into the conversation and the model rewrites — a
 genuine self-repair loop.
 
 ```console
-$ echo 'OPENROUTER_API_KEY=sk-or-...' >> .env      # DeepSeek V4 Flash 0731 via OpenRouter
+$ export OPENROUTER_API_KEY=sk-or-...              # DeepSeek V4 Flash 0731 via OpenRouter
 $ cmake --build build --target cookbook_the_beast_live
 $ ./build/cookbook_the_beast_live                  # optional: pass a task string as argv[1]
 ```

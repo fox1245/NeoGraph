@@ -1277,9 +1277,6 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_checkpoint_hitl examples/04_checkpoint_hitl.cpp)
         target_link_libraries(example_checkpoint_hitl PRIVATE neograph::core neograph::llm)
 
-        add_executable(example_parallel_fanout examples/05_parallel_fanout.cpp)
-        target_link_libraries(example_parallel_fanout PRIVATE neograph::core)
-
         add_executable(example_subgraph examples/06_subgraph.cpp)
         target_link_libraries(example_subgraph PRIVATE neograph::core neograph::llm)
 
@@ -1288,12 +1285,6 @@ if(NEOGRAPH_BUILD_EXAMPLES)
 
         add_executable(example_state_management examples/08_state_management.cpp)
         target_link_libraries(example_state_management PRIVATE neograph::core neograph::llm)
-
-        add_executable(example_all_features examples/09_all_features.cpp)
-        target_link_libraries(example_all_features PRIVATE neograph::core neograph::llm)
-
-        add_executable(example_send_command examples/10_send_command.cpp)
-        target_link_libraries(example_send_command PRIVATE neograph::core)
 
         add_executable(example_rag_agent examples/12_rag_agent.cpp)
         target_link_libraries(example_rag_agent PRIVATE neograph::core neograph::llm httplib OpenSSL::SSL OpenSSL::Crypto cppdotenv)
@@ -1391,7 +1382,7 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         endif()
 
         if(NEOGRAPH_BUILD_GRPC)
-            add_executable(example_grpc_server examples/52_grpc_server.cpp)
+            add_executable(example_grpc_server examples/45_grpc_server.cpp)
             target_link_libraries(example_grpc_server PRIVATE
                 neograph::core neograph::grpc)
 
@@ -1674,16 +1665,16 @@ if(NEOGRAPH_BUILD_EXAMPLES)
 
         if(NEOGRAPH_BUILD_MCP_CLIENT)
             add_executable(example_mcp_agent examples/03_mcp_agent.cpp)
-            target_link_libraries(example_mcp_agent PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
+            target_link_libraries(example_mcp_agent PRIVATE neograph::core neograph::llm neograph::mcp)
 
             add_executable(example_mcp_hitl examples/20_mcp_hitl.cpp)
-            target_link_libraries(example_mcp_hitl PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
+            target_link_libraries(example_mcp_hitl PRIVATE neograph::core neograph::llm neograph::mcp)
 
             add_executable(example_mcp_fanout examples/21_mcp_fanout.cpp)
             target_link_libraries(example_mcp_fanout PRIVATE neograph::core neograph::mcp)
 
             add_executable(example_mcp_stdio examples/22_mcp_stdio.cpp)
-            target_link_libraries(example_mcp_stdio PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
+            target_link_libraries(example_mcp_stdio PRIVATE neograph::core neograph::llm neograph::mcp)
 
             # minimal-mcp cookbook — MCP client round-trip with NO LLM and
             # NO fastmcp: a ~60-line stdlib stdio server (min_stdio_server.py)
@@ -1702,13 +1693,13 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                 neograph::core neograph::llm neograph::mcp cppdotenv)
 
             add_executable(example_mcp_multi examples/23_mcp_multi.cpp)
-            target_link_libraries(example_mcp_multi PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
+            target_link_libraries(example_mcp_multi PRIVATE neograph::core neograph::llm neograph::mcp)
 
             add_executable(example_mcp_feedback examples/24_mcp_feedback.cpp)
-            target_link_libraries(example_mcp_feedback PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
+            target_link_libraries(example_mcp_feedback PRIVATE neograph::core neograph::llm neograph::mcp)
 
             add_executable(example_re_agent examples/35_re_agent.cpp)
-            target_link_libraries(example_re_agent PRIVATE neograph::core neograph::llm neograph::mcp cppdotenv)
+            target_link_libraries(example_re_agent PRIVATE neograph::core neograph::llm neograph::mcp)
         endif()
 
         # Example 36: small-model classifier fan-out — pure orchestration
@@ -1728,10 +1719,6 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         # Example 41: multi-turn chatbot via RunConfig::resume_if_exists.
         add_executable(example_resume_if_exists_chat examples/41_resume_if_exists_chat.cpp)
         target_link_libraries(example_resume_if_exists_chat PRIVATE neograph::core SchemaProvider::transport)
-
-        # Example 42: custom reducer + condition via Registry.
-        add_executable(example_custom_reducer_condition examples/42_custom_reducer_condition.cpp)
-        target_link_libraries(example_custom_reducer_condition PRIVATE neograph::core)
 
         # Example 43: cross-thread Store driving per-user node behaviour.
         add_executable(example_store_personalization examples/43_store_personalization.cpp)
@@ -1763,24 +1750,10 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_async_tool examples/50_async_tool.cpp)
         target_link_libraries(example_async_tool PRIVATE neograph::core)
 
-        # Example 51: 가장 작은 동작하는 NeoGraph 프로그램. LLM·tool·mock
-        # provider 다 없는, 노드 1개짜리 5분 입문용. README 의 "first program"
-        # 자리에 인용되는 코드.
-        add_executable(example_minimal examples/51_minimal.cpp)
-        target_link_libraries(example_minimal PRIVATE neograph::core)
-
-        # Schema dump tool — prints NodeFactory::export_schema() as JSON.
-        # The drift-proof artifact source for external tooling (the
-        # visual block editor, issue #56): `./example_export_schema >
-        # schema.json` in CI keeps an editor's palette pinned to the
-        # exact engine version it was built against.
-        add_executable(example_export_schema examples/52_export_schema.cpp)
-        target_link_libraries(example_export_schema PRIVATE neograph::core)
-
-        # Harness evolution loop (issue #80). Example 54: reproduce the
+        # Harness evolution loop (issue #80). Example 32: reproduce the
         # README evolution benchmark from a strict Core seed + task fixture.
         #   ./example_evolution seed.json task.json > lineage.json
-        add_executable(example_evolution examples/54_evolution.cpp)
+        add_executable(example_evolution examples/32_evolution.cpp)
         target_link_libraries(example_evolution PRIVATE neograph::core)
 
         # Harness convergence benchmark (issue #81). Example 58:
@@ -1805,6 +1778,32 @@ if(NEOGRAPH_BUILD_EXAMPLES)
             target_include_directories(example_clay_chatbot PRIVATE ${DEPS_DIR})
         endif()
     endif()
+
+    # The Core basics (05, 09, 10, 42, 51, 52, 61) need only neograph::core, so they build in
+    # a Core-only configuration (NEOGRAPH_BUILD_LLM=OFF) too.
+    add_executable(example_parallel_fanout examples/05_parallel_fanout.cpp)
+    target_link_libraries(example_parallel_fanout PRIVATE neograph::core)
+
+    add_executable(example_all_features examples/09_all_features.cpp)
+    target_link_libraries(example_all_features PRIVATE neograph::core)
+
+    add_executable(example_send_command examples/10_send_command.cpp)
+    target_link_libraries(example_send_command PRIVATE neograph::core)
+
+    # Example 42: custom reducer + condition via Registry.
+    add_executable(example_custom_reducer_condition examples/42_custom_reducer_condition.cpp)
+    target_link_libraries(example_custom_reducer_condition PRIVATE neograph::core)
+
+    # Example 51: channels and typed reads, the smallest program after the quickstart.
+    add_executable(example_minimal examples/51_minimal.cpp)
+    target_link_libraries(example_minimal PRIVATE neograph::core)
+
+    # Schema dump tool: prints NodeFactory::export_schema() as JSON. The drift-proof artifact
+    # source for external tooling (the visual block editor, issue #56): `./example_export_schema
+    # > schema.json` in CI keeps an editor's palette pinned to the engine version it was built
+    # against.
+    add_executable(example_export_schema examples/52_export_schema.cpp)
+    target_link_libraries(example_export_schema PRIVATE neograph::core)
 
     # Example 61: SyncGraphNode needs only neograph::core.
     add_executable(example_sync_node examples/61_sync_node.cpp)
@@ -2176,6 +2175,12 @@ if(NEOGRAPH_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 
+endif()
+
+# Example smoke tests (label examples-offline), the example index check, and the
+# per-area example targets in examples/cmake/*.cmake.
+if(NEOGRAPH_BUILD_EXAMPLES OR NEOGRAPH_BUILD_TESTS)
+    add_subdirectory(examples)
 endif()
 
 # Fuzz targets — libFuzzer-driven, Clang only. Separate flag so

@@ -1,14 +1,20 @@
-// NeoGraph Example 53: call a NeoGraph gRPC GraphService from C++.
+// NeoGraph Example 53: call a NeoGraph gRPC GraphService from C++
 //
-// Pairs with example_grpc_server (52). Opt-in — build only with
-// -DNEOGRAPH_BUILD_GRPC=ON.
+// The cross-process client for example 45. Opt-in: build with -DNEOGRAPH_BUILD_GRPC=ON.
 //
-//   Terminal 1:  ./example_grpc_server                 # 0.0.0.0:50051
-//   Terminal 2:  ./example_grpc_client localhost:50051
+//   Terminal 1:  ./example_grpc_server 127.0.0.1:50051
+//   Terminal 2:  ./example_grpc_client 127.0.0.1:50051
 //
-// Demonstrates the polyglot story: this client speaks the same proto
-// any Go/Rust/TS/Java client would — the C++ engine runs the graph,
-// the caller never links NeoGraph itself.
+// It speaks the same proto a Go, Rust, TypeScript or Java client would: the C++ engine runs the
+// graph, and the caller never links NeoGraph itself. Health, RunGraph on the server's default
+// graph, and RunGraphStream ending in a FINAL event are checked.
+//
+// smoke-companion: @TARGET:example_grpc_server@ 127.0.0.1:@PORT@
+// smoke-wait-port: @PORT@
+// smoke-args: 127.0.0.1:@PORT@
+// smoke-expect: [RunGraph] output_json={"channels":{"text":{"value":"HELLO FROM GRPC"
+// smoke-expect: RESULT: PASS (failures=0)
+// smoke-forbid: [neograph] lint
 
 #include <cstdio>
 #include <cstdlib>

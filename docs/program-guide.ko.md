@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=6f69f4c493387ec533fd315d4e5a294d10e695e59765446ee310d4add2d1b624 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=f7f84669d25b4da0ad592f00baa07f77ad731cc06e1a4411070dd04832769be7 -->
 # Program 가이드: 그래프를 조율하는 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -15,13 +15,15 @@
 
 Program 계층에는 Program과 QuickJS 제어가 포함된 빌드가 필요합니다. `pip install neograph-engine`에 이미 들어 있고, 소스 빌드에는 `-DNEOGRAPH_BUILD_PYBIND=ON -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON`이 필요합니다(그다음 `pip install pydantic certifi`를 실행하고 빌드 디렉터리를 `PYTHONPATH`에 추가).
 
-아래 예제는 실패 라우팅, `fork`, SQLite 상태 디렉터리를 씁니다. PyPI의 0.13.1 휠에는 이 기능들이 없으므로, 현재 소스로 빌드한 것으로 실행하세요. C++에서는 `examples/63_program_quickstart.cpp`에서 시작하세요.
+아래 예제는 실패 라우팅, `fork`, SQLite 상태 디렉터리를 씁니다. PyPI의 0.13.1 휠에는 이 기능들이 없으므로, 현재 소스로 빌드한 것으로 실행하세요. 이 기능을 쓰는 예제(Python 32, 35, 36)도 마찬가지입니다. 더 작은 것부터 시작하려면 [`29_program_hello.py`](../bindings/python/examples/29_program_hello.py)를 실행하세요. Program 하나를 100줄 안에 컴파일하고, 승인(admission)하고, 실행합니다. C++에서는 [`65_program_javascript.cpp`](../examples/65_program_javascript.cpp)에서 시작하세요.
 
 ## 실전 예제: 릴리스 점검
 
 릴리스 작업이 서비스 세 개를 병렬로 점검합니다. `payments`의 점검이 실패합니다. 작업 전체를 실패시키는 대신, 실패는 검토 단계로 가고 작업은 사람을 기다립니다. 사람이 릴리스를 승인하면 나머지 서비스는 다시 점검하지 않고 작업이 끝납니다. 같은 작업이 예산 안에서 실행됩니다.
 
 예제는 Python 파일 세 개입니다. `release_program.py`는 실행마다 바뀌지 않는 모든 것을 담고, `run_release.py`와 `restart.py`가 이를 가져다 씁니다.
+
+아래 코드는 실패 라우팅, 검토를 위한 일시 중지, 예산, 재시작을 하나의 이야기로 묶었습니다. 저장소에는 이 부분을 하나씩 따로 보여 주는 실행 가능한 예제가 있습니다. [`32_program_failure_routing.py`](../bindings/python/examples/32_program_failure_routing.py)(실패 경로와 운영자의 `retry`/`abort`), [`34_program_pause_resume.py`](../bindings/python/examples/34_program_pause_resume.py)(`interruptBefore`와 `host.resume`), [`33_program_budgets.py`](../bindings/python/examples/33_program_budgets.py), [`35_program_fork.py`](../bindings/python/examples/35_program_fork.py), [`36_program_crash_recovery.py`](../bindings/python/examples/36_program_crash_recovery.py)입니다. C++로 짝을 이루는 예제는 [66](../examples/66_program_failure_routing.cpp)번부터 [69](../examples/69_program_crash_recovery.cpp)번까지입니다.
 
 ### 1. 노드 코드
 

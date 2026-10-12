@@ -14,13 +14,15 @@ Use a plain graph when one graph and its checkpoints are enough. A Program is fo
 
 The Program layer needs a build with Program and QuickJS control: `pip install neograph-engine` includes them, and a source build needs `-DNEOGRAPH_BUILD_PYBIND=ON -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON` (then `pip install pydantic certifi` and put the build directory on `PYTHONPATH`).
 
-The example below uses failure routing, `fork` and the SQLite state directory. The 0.13.1 wheel on PyPI does not have them, so run it against a build of the current source. In C++, start from `examples/63_program_quickstart.cpp`.
+The example below uses failure routing, `fork` and the SQLite state directory. The 0.13.1 wheel on PyPI does not have them, so run it against a build of the current source; so do the examples that use them (Python 32, 35 and 36). To start smaller, run [`29_program_hello.py`](../bindings/python/examples/29_program_hello.py), which compiles, admits and runs one Program in under a hundred lines. In C++, start from [`65_program_javascript.cpp`](../examples/65_program_javascript.cpp).
 
 ## A worked example: a release check
 
 A release job checks three services in parallel. The checks of `payments` fail. Instead of failing the whole job, the failure goes to a review step, where the job waits for a person. The person approves the release, the other services are not checked again, and the job finishes. The same job runs under a budget.
 
 The example is three Python files. `release_program.py` holds everything that does not change between runs; `run_release.py` and `restart.py` use it.
+
+The listings combine failure routing, a review pause, a budget and a restart in one story. The repository has a runnable example for each of those parts alone: [`32_program_failure_routing.py`](../bindings/python/examples/32_program_failure_routing.py) (the failure route and the operator's `retry` or `abort`), [`34_program_pause_resume.py`](../bindings/python/examples/34_program_pause_resume.py) (`interruptBefore` and `host.resume`), [`33_program_budgets.py`](../bindings/python/examples/33_program_budgets.py), [`35_program_fork.py`](../bindings/python/examples/35_program_fork.py) and [`36_program_crash_recovery.py`](../bindings/python/examples/36_program_crash_recovery.py). The C++ twins are examples [66](../examples/66_program_failure_routing.cpp) to [69](../examples/69_program_crash_recovery.cpp).
 
 ### 1. The node code
 

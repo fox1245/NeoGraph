@@ -1,305 +1,129 @@
-"""22 — Self-evolving graph: the agent rewrites its own JSON.
+"""22 - Self-evolving graph: the agent rewrites its own JSON, and only admitted rewrites run.
 
-Premise: NeoGraph definitions are JSON. A node's prompt can live in
-``node.config`` and be read during ``run(input)``. So an agent can:
+NeoGraph definitions are JSON, and a node's prompt can live in `node.config`. So an agent can
+run its graph, score the output against a goal, and when the score falls short hand the
+current definition and the failure to a rewriter model and ask for a revised one. The driver
+admits a proposal only if it keeps the graph's name and schema version and uses nothing but the
+registered `prompted_llm` node type; then it compiles a fresh engine and tries again. The
+goal is a JSON object with exactly the keys name (string), age (integer) and city (string).
 
-  1. Run its current graph on a task.
-  2. Score the output against a goal.
-  3. If the score is below threshold, hand the *current graph JSON* +
-     the failure to a "self-modifier" LLM call and ask for a revised
-     JSON.
-  4. Apply the proposed JSON, recompile a fresh engine, retry.
-
-The goal is a JSON object with exactly {"name", "age", "city"}, with
-string/integer/string values. The initial graph has one vaguely prompted
-writer. A separate model call proposes new graph JSON after a failed score;
-the driver admits only registered prompted_llm nodes before compiling it.
-JSON validation is not a security sandbox: admitted nodes can still spend
-provider resources. Each graph run also has a bounded superstep count.
+The scripted model plays both roles. The vague writer answers in prose and scores 0. The
+rewriter first proposes a node of an unregistered type (rejected, with the reason fed back),
+then a revised prompt that the writer follows. A model decides what to propose; this driver
+decides what may run. Admission is not a sandbox: an admitted node can still spend provider
+resources, so every graph run also has a bounded superstep count.
 
 Run:
-    OPENAI_API_KEY=sk-... python 22_self_evolving_graph.py
+    python 22_self_evolving_graph.py            # scripted model, no key
+    python 22_self_evolving_graph.py --live     # hosted model; OPENAI_API_KEY in the environment
 
-Caveats / honest limits of this PoC:
-
-  - No persistence. Each iteration's JSON is in-memory; production
-    would version it (JSON in a checkpoint store + diff log).
-  - Single-shot self-modifier. A real evolver would also be a graph
-    (planner → critic → mutator), and the meta-graph could itself be
-    self-modified.
-  - No safety budget: stops after `max_iters`. A production loop also
-    needs cost/latency budgets and rejection of out-of-distribution
-    graphs (e.g., reject definitions that introduce un-registered
-    node types or unbounded loops).
-  - Prompts can reference declared state channels with {channel_name}
-    placeholders. Added stages need distinct output channels and matching
-    input templates; edges alone do not pass an earlier node's reply.
+smoke-expect: iteration 0: score 0.00
+smoke-expect: rejected: node 'shell' has unregistered type 'shell_exec'
+smoke-expect: iteration 1: score 1.00
+smoke-expect: goal reached at iteration 1
+smoke-expect: model calls: 4
+smoke-forbid: [neograph] lint
 """
 
-from __future__ import annotations
-
 import json
-import os
-import sys
-from pathlib import Path
 from typing import Any
 
 import neograph_engine as ng
-
-# Reuse the example helper for env loading + Provider construction.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import ask_text, schema_provider  # noqa: E402
+from _common import ask_text, example_provider
+from _scripted import say
 
 
-# ── A generic LLM node whose prompts come from the graph JSON ───────
-#
-# The whole point: the prompts live in ``node.config``, so the
-# self-modifier can edit them via plain JSON without touching Python.
-
+# A generic LLM node whose prompts come from the graph JSON, so a rewrite needs no new code.
 class PromptedLLMNode(ng.GraphNode):
-    """LLM node that reads ``system_prompt`` and ``user_template`` from
-    its JSON ``config`` block and writes the reply to ``output_channel``.
-
-    Example node JSON::
-
-        "writer": {
-            "type": "prompted_llm",
-            "config": {
-                "system_prompt": "You output strict JSON only.",
-                "user_template": "Write a profile for: {seed}",
-                "output_channel": "raw_reply"
-            }
-        }
-    """
-
-    def __init__(self, name: str, node_def: dict, ctx):
+    def __init__(self, name, config, ctx):
         super().__init__()
-        self._name = name
-        # The engine passes the whole node spec (including "type" and
-        # "config" keys) to the factory, so config lives at node_def["config"].
-        cfg = node_def.get("config", {}) or {}
-        self._system_prompt = cfg.get("system_prompt", "")
-        self._user_template = cfg.get("user_template", "{seed}")
-        self._output_channel = cfg.get("output_channel", "reply")
-        self._ctx = ctx
+        self._name, self._ctx = name, ctx
+        self._config = (config or {}).get("config", {})      # the factory receives the whole node spec
 
     def get_name(self):
         return self._name
 
     def run(self, input):
-        values = {channel: input.state.get(channel)
-                  for channel in input.state.channel_names()}
+        values = {channel: input.state.get(channel) for channel in input.state.channel_names()}
         text = ask_text(self._ctx.provider, messages=[
-            ng.ChatMessage(role="system", content=self._system_prompt),
-            ng.ChatMessage(role="user", content=self._user_template.format_map(values)),
-        ], temperature=0.4, max_output_tokens=1200)
-        return [ng.ChannelWrite(self._output_channel, text)]
+            ng.ChatMessage(role="system", content=self._config["system_prompt"]),
+            ng.ChatMessage(role="user", content=self._config["user_template"].format_map(values)),
+        ], temperature=0.4, max_output_tokens=400)
+        return [ng.ChannelWrite(self._config["output_channel"], text)]
 
 
-def _node_factory(name, config, ctx):
-    # Pybind passes config as a Python dict already (json_to_py).
-    return PromptedLLMNode(name, config, ctx)
+ng.NodeFactory.register_type("prompted_llm", lambda name, config, ctx: PromptedLLMNode(name, config, ctx))
 
 
-ng.NodeFactory.register_type("prompted_llm", _node_factory)
+def graph_with(system_prompt: str, extra_nodes: dict | None = None) -> dict[str, Any]:
+    return {
+        "schema_version": ng.TOPOLOGY_SCHEMA_VERSION, "name": "person_profile",
+        "channels": {"seed": {"reducer": "overwrite"}, "raw_reply": {"reducer": "overwrite"}},
+        "nodes": {"writer": {"type": "prompted_llm", "config": {
+            "system_prompt": system_prompt, "user_template": "Tell me about a person named {seed}.",
+            "output_channel": "raw_reply"}}, **(extra_nodes or {})},
+        "edges": [{"from": ng.START_NODE, "to": "writer"}, {"from": "writer", "to": ng.END_NODE}],
+    }
 
 
-# ── Goal: parse-able JSON with exactly the right shape ──────────────
-
-def evaluate(reply_text: str) -> tuple[float, str]:
-    """Score the LLM reply against the goal.
-
-    Returns (score 0..1, feedback string for the self-modifier).
-    """
+def evaluate(reply: str) -> tuple[float, str]:
+    """Score 0..1 against the goal, with feedback for the rewriter."""
     try:
-        data = json.loads(reply_text)
-    except json.JSONDecodeError as e:
-        return 0.0, f"reply is not valid JSON ({e}). raw: {reply_text[:200]!r}"
-
-    expected = {"name", "age", "city"}
-    have = set(data.keys()) if isinstance(data, dict) else set()
-    missing = expected - have
-    extra = have - expected
-
-    if missing or extra:
-        return 0.4, (
-            f"keys mismatch — missing={sorted(missing)} extra={sorted(extra)} "
-            f"got={sorted(have)}")
-
-    if not isinstance(data.get("name"), str):
-        return 0.6, f"'name' must be a string, got {type(data['name']).__name__}"
-    if type(data.get("age")) is not int:
-        return 0.7, f"'age' must be an int, got {type(data['age']).__name__}"
-    if not isinstance(data.get("city"), str):
-        return 0.8, f"'city' must be a string, got {type(data['city']).__name__}"
-
-    return 1.0, "perfect"
+        data = json.loads(reply)
+    except json.JSONDecodeError:
+        return 0.0, f"the reply is not valid JSON: {reply[:60]!r}"
+    if not isinstance(data, dict) or set(data) != {"name", "age", "city"}:
+        return 0.4, "the keys must be exactly name, age and city"
+    ok = isinstance(data["name"], str) and type(data["age"]) is int and isinstance(data["city"], str)
+    return (1.0, "perfect") if ok else (0.7, "name and city are strings, age is an integer")
 
 
-# ── The self-modifier: prompt the LLM with current graph + failure ──
-
-def propose_new_graph(current_graph: dict, last_reply: str,
-                      score: float, feedback: str, provider) -> dict:
-    """Ask the LLM to emit a revised graph JSON.
-
-    Constraints baked into the prompt:
-      - must keep the same ``name`` + at least the START → end path
-      - may modify any ``config`` block (esp. ``system_prompt`` /
-        ``user_template``)
-      - may NOT introduce node types other than ``prompted_llm``
-      - returns strict JSON only
-    """
-    current_schema = current_graph.get("schema_version")
-    instructions = f"""You are a graph-rewriter. Given a NeoGraph
-definition (JSON) and the failure mode of its last run, output a
-REVISED graph that fixes the failure.
-
-Hard rules:
-  - Output ONLY a JSON object — no prose, no markdown fences.
-  - Keep the same top-level "name" field.
-  - Keep top-level "schema_version" exactly {current_schema!r}.
-  - Only "prompted_llm" node type is registered. Do not invent others.
-  - The graph must reach END_NODE from START_NODE.
-  - You may modify any node's "config.system_prompt" or
-    "config.user_template", change channel reducers, add/remove
-    nodes/edges, or add a critic node — anything within the rules above.
-
-The goal is for the final reply (read from the "raw_reply" channel)
-to be a JSON object with EXACTLY these keys:
-  - "name" (string)
-  - "age"  (integer)
-  - "city" (string)
-
-Last run scored {score:.2f}/1.0.
-Last reply was:
-{last_reply!r}
-
-Feedback on what went wrong:
-{feedback}
-
-Current graph:
-{json.dumps(current_graph, indent=2)}
-
-Return the revised graph JSON now."""
-
-    raw = ask_text(provider, messages=[
-        ng.ChatMessage(role="system", content="You output strict JSON only, no prose."),
-        ng.ChatMessage(role="user", content=instructions),
-    ], temperature=0.2, max_output_tokens=4096)
-
-    # Strip code fences if the LLM ignored the instruction.
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-        if raw.endswith("```"):
-            raw = raw[:-3]
-        raw = raw.strip()
-
-    try:
-        proposed = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(
-            f"self-modifier returned non-JSON: {e}. raw: {raw[:400]!r}")
-    if not isinstance(proposed, dict):
-        raise RuntimeError("self-modifier graph must be an object")
-    if proposed.get("name") != current_graph.get("name"):
-        raise RuntimeError("self-modifier must preserve the graph name")
-    nodes = proposed.get("nodes")
-    if not isinstance(nodes, dict) or not nodes or any(
-        not isinstance(node, dict) or node.get("type") != "prompted_llm"
-        for node in nodes.values()
-    ):
-        raise RuntimeError("self-modifier may only use prompted_llm nodes")
-    if proposed.get("schema_version") != current_schema:
-        raise RuntimeError(
-            "self-modifier changed or omitted schema_version: "
-            f"expected {current_schema!r}, got {proposed.get('schema_version')!r}")
-    return proposed
+def admit(proposal: Any, current: dict) -> dict:
+    """The boundary between a model's proposal and the engine: raise unless it may run."""
+    if not isinstance(proposal, dict) or proposal.get("name") != current["name"]:
+        raise ValueError("the graph name must stay the same")
+    if proposal.get("schema_version") != current["schema_version"]:
+        raise ValueError("the schema_version must stay the same")
+    for name, node in (proposal.get("nodes") or {}).items():
+        if node.get("type") != "prompted_llm":
+            raise ValueError(f"node {name!r} has unregistered type {node.get('type')!r}")
+    return proposal
 
 
-# ── Driver ──────────────────────────────────────────────────────────
-
-INITIAL_GRAPH: dict[str, Any] = {
-    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
-    "name": "person_profile",
-    "channels": {
-        "seed":      {"reducer": "overwrite"},
-        "raw_reply": {"reducer": "overwrite"},
-    },
-    "nodes": {
-        "writer": {
-            "type": "prompted_llm",
-            "config": {
-                # Deliberately vague — the agent should learn it needs
-                # to enforce JSON-only output, then field types.
-                "system_prompt": "You answer the user's question.",
-                "user_template": "Tell me about a person named {seed}.",
-                "output_channel": "raw_reply",
-            },
-        },
-    },
-    "edges": [
-        {"from": ng.START_NODE, "to": "writer"},
-        {"from": "writer",      "to": ng.END_NODE},
-    ],
-}
+# What the scripted model answers. The rewriter's user message starts with "Rewrite".
+REJECTED = graph_with("You answer.", {"shell": {"type": "shell_exec", "config": {}}})
+REVISED = graph_with('Reply with one JSON object {"name": string, "age": integer, "city": string}, nothing else.')
 
 
-def run_one(graph: dict, seed: str, ctx) -> str:
-    engine = ng.GraphEngine.compile(graph, ctx)
-    result = engine.run(ng.RunConfig(thread_id="evolve", input={"seed": seed}, max_steps=20))
-    return result.output["channels"]["raw_reply"]["value"]
+def script(turn):
+    if turn.last_user_text.startswith("Rewrite"):
+        return say(json.dumps(REVISED if "rejected" in turn.last_user_text else REJECTED))
+    if "JSON" in turn.system_text:
+        return say('{"name": "Alice", "age": 31, "city": "Lyon"}')
+    return say("Alice is a 31-year-old engineer who lives in Lyon.")
 
 
-def main(max_iters: int = 5):
-    provider = schema_provider()
-    ctx = ng.NodeContext(provider=provider)
-
-    graph = INITIAL_GRAPH
-    history: list[dict] = []
-
-    for i in range(max_iters):
-        print(f"\n──────── iteration {i} ────────")
-        print(f"graph nodes: {list(graph.get('nodes', {}).keys())}")
-
-        try:
-            reply = run_one(graph, seed="Alice", ctx=ctx)
-        except Exception as e:
-            print(f"compile/run failed: {e}")
-            score, feedback = 0.0, f"graph failed to run: {e}"
-            reply = ""
-        else:
-            score, feedback = evaluate(reply)
-            print(f"score:    {score:.2f}")
-            print(f"feedback: {feedback}")
-            print(f"reply:    {reply[:200]}")
-
-        history.append({
-            "iter": i,
-            "score": score,
-            "feedback": feedback,
-            "reply_preview": reply[:200],
-            "graph_node_count": len(graph.get("nodes", {})),
-        })
-
-        if score >= 1.0:
-            print(f"\n✅ goal reached at iteration {i}")
+with example_provider(script) as chosen:
+    ctx = ng.NodeContext(provider=chosen.provider)
+    graph = graph_with("You answer the user's question.")
+    feedback = ""
+    for iteration in range(4):
+        engine = ng.GraphEngine.compile(graph, ctx)
+        run = engine.run(ng.RunConfig(thread_id=f"evolve-{iteration}", input={"seed": "Alice"}, max_steps=20))
+        score, feedback = evaluate(run.output["channels"]["raw_reply"]["value"])
+        print(f"iteration {iteration}: score {score:.2f}, {feedback}")
+        if score == 1.0:
+            print(f"goal reached at iteration {iteration}")
             break
-
-        try:
-            graph = propose_new_graph(graph, reply, score, feedback, provider)
-        except Exception as e:
-            print(f"self-modifier failed: {e}")
-            break
-
-    print("\n──────── evolution history ────────")
-    for h in history:
-        print(f"  iter={h['iter']} score={h['score']:.2f} "
-              f"nodes={h['graph_node_count']} — {h['feedback'][:80]}")
-
-    print("\n──────── final graph ────────")
-    print(json.dumps(graph, indent=2))
-
-
-if __name__ == "__main__":
-    main(max_iters=int(os.getenv("MAX_ITERS", "5")))
+        for _attempt in range(2):                      # ask again once if the proposal is rejected
+            request = f"Rewrite this graph so the goal is met. Feedback: {feedback}\n{json.dumps(graph)}"
+            raw = ask_text(chosen.provider, [{"role": "user", "content": request}], max_output_tokens=1500)
+            try:
+                graph = admit(json.loads(raw), graph)
+                break
+            except ValueError as error:
+                print(f"rejected: {error.args[0]}")
+                feedback += f" (previous proposal rejected: {error.args[0]})"
+    if chosen.scripted:
+        print("model calls:", chosen.scripted.call_count)
+        assert score == 1.0 and chosen.scripted.call_count == 4

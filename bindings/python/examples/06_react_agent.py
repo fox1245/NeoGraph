@@ -1,22 +1,31 @@
 """06 — ReAct agent (LLM ↔ tools loop).
 
-Real OpenAI Responses API call + a Python `Tool` subclass. The LLM decides whether
-to call the tool, the engine dispatches, the result is fed back, the
-LLM reads the result and produces the final answer.
+A Responses-protocol model plus a Python `Tool` subclass. The model decides
+whether to call the tool, the engine dispatches, the result is fed back, the
+model reads the result and produces the final answer.
 
 The graph is a 2-node loop with a conditional edge: `llm → dispatch
 → llm → ... → __end__` once no more tool_calls appear in the latest
 assistant message.
 
+Offline by default: a scripted model asks for `calc` once, then answers with the
+tool's result, so "4053" can only appear if the tool computed it.
+
 Run:
-    pip install neograph-engine python-dotenv
-    cp .env.example .env  # fill in OPENAI_API_KEY
-    python 06_react_agent.py
+    python 06_react_agent.py           # scripted model, no key, no network
+    export OPENAI_API_KEY=...          # then, to call a hosted model (billed):
+    python 06_react_agent.py --live
+
+smoke-expect: provider: scripted
+smoke-expect: tool_call calc({"expression":"(123 + 456) * 7"})
+smoke-expect: [assistant] 4053
+smoke-expect: execution trace: ['llm', 'dispatch', 'llm']
 """
 
 import json
 
-from _common import example_model, ng, schema_provider
+from _common import example_model, example_provider, ng
+from _scripted import call_tool, say
 
 
 class CalculatorTool(ng.Tool):
@@ -68,70 +77,81 @@ def has_tool_calls(messages):
     return False
 
 
+# The script is what the "model" says: ask for `calc`, then answer from the tool result.
+def script(turn):
+    if not turn.has_tool_result():
+        return call_tool("calc", expression="(123 + 456) * 7")
+    return say(turn.last_tool_result)
+
+
 # Use the Responses family for this tool-call loop. It runs over SDK HTTP;
 # model names alone do not imply a required protocol or tool capability.
-provider = schema_provider(schema="openai_responses")
+with example_provider(script, schema="openai_responses") as chosen:
+    provider = chosen.provider
 
-# Built-in `llm_call` and `tool_dispatch` nodes plus the
-# `has_tool_calls` conditional condition (registered in the C++ side
-# as a built-in). The conditional edge from `llm` routes back into
-# `dispatch` when the LLM emitted a tool call, otherwise it ends.
-definition = {
-    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
-    "name": "react_agent",
-    "channels": {"messages": {"reducer": "append"}},
-    "nodes": {
-        "llm":      {"type": "llm_call"},
-        "dispatch": {"type": "tool_dispatch"},
-    },
-    "edges": [
-        {"from": ng.START_NODE, "to": "llm"},
-        {"from": "dispatch",    "to": "llm"},
-    ],
-    "conditional_edges": [
-        {
-            "from":      "llm",
-            "condition": "has_tool_calls",
-            "routes": {
-                "true":  "dispatch",
-                "false": ng.END_NODE,
-            },
+    # Built-in `llm_call` and `tool_dispatch` nodes plus the
+    # `has_tool_calls` conditional condition (registered in the C++ side
+    # as a built-in). The conditional edge from `llm` routes back into
+    # `dispatch` when the LLM emitted a tool call, otherwise it ends.
+    definition = {
+        "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
+        "name": "react_agent",
+        "channels": {"messages": {"reducer": "append"}},
+        "nodes": {
+            "llm":      {"type": "llm_call"},
+            "dispatch": {"type": "tool_dispatch"},
         },
-    ],
-}
+        "edges": [
+            {"from": ng.START_NODE, "to": "llm"},
+            {"from": "dispatch",    "to": "llm"},
+        ],
+        "conditional_edges": [
+            {
+                "from":      "llm",
+                "condition": "has_tool_calls",
+                "routes": {
+                    "true":  "dispatch",
+                    "false": ng.END_NODE,
+                },
+            },
+        ],
+    }
 
-ctx = ng.NodeContext(
-    provider=provider,
-    model=example_model(),
-    tools=[CalculatorTool()],
-    instructions=(
-        "You are a calculator-using assistant. When the user asks for "
-        "an arithmetic answer, call the `calc` tool. Once you have a "
-        "numeric result, reply with just the number — no extra "
-        "commentary."
-    ),
-)
+    ctx = ng.NodeContext(
+        provider=provider,
+        model=example_model(),
+        tools=[CalculatorTool()],
+        instructions=(
+            "You are a calculator-using assistant. When the user asks for "
+            "an arithmetic answer, call the `calc` tool. Once you have a "
+            "numeric result, reply with just the number — no extra "
+            "commentary."
+        ),
+    )
 
-engine = ng.GraphEngine.compile(definition, ctx)
+    engine = ng.GraphEngine.compile(definition, ctx)
 
-result = engine.run(ng.RunConfig(
-    thread_id="t1",
-    input={"messages": [
-        {"role": "user", "content": "What is (123 + 456) * 7?"},
-    ]},
-    max_steps=10,
-))
+    result = engine.run(ng.RunConfig(
+        thread_id="t1",
+        input={"messages": [
+            {"role": "user", "content": "What is (123 + 456) * 7?"},
+        ]},
+        max_steps=10,
+    ))
 
-# Final answer is the last assistant message without tool_calls.
-msgs = result.output["channels"]["messages"]["value"]
-print("\n=== conversation ===")
-for m in msgs:
-    role = m.get("role", "?")
-    content = m.get("content", "")
-    tcs = m.get("tool_calls", [])
-    if tcs:
-        for tc in tcs:
-            print(f"  [{role}] tool_call {tc['name']}({tc['arguments']})")
-    elif content:
-        print(f"  [{role}] {content}")
-print("\nexecution trace:", result.execution_trace)
+    # Final answer is the last assistant message without tool_calls.
+    msgs = result.output["channels"]["messages"]["value"]
+    print("\n=== conversation ===")
+    for m in msgs:
+        role = m.get("role", "?")
+        content = m.get("content", "")
+        tcs = m.get("tool_calls", [])
+        if tcs:
+            for tc in tcs:
+                print(f"  [{role}] tool_call {tc['name']}({tc['arguments']})")
+        elif content:
+            print(f"  [{role}] {content}")
+    print("\nexecution trace:", result.execution_trace)
+
+    if chosen.scripted:
+        assert chosen.scripted.call_count == 2, "one tool call, one final answer"

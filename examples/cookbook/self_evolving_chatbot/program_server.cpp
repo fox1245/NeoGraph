@@ -1,3 +1,5 @@
+// smoke-skip: serves HTTP until stopped; its --mock mode is covered by test_program_chat.py
+
 #include <neograph/program/program.h>
 
 #include "program_chat.h"

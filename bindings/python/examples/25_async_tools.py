@@ -31,6 +31,10 @@ is *not* holding it — that is, while it is blocked on I/O, which is when CPyth
 lets go. HTTP calls, socket reads, database queries, `time.sleep`: all release
 it. Pure-Python CPU work does not, and no number of threads will change that.
 The last section measures exactly that, so the promise stays honest.
+
+smoke-os: linux
+smoke-expect: ng.AsyncTool
+smoke-expect: cpu-bound
 """
 
 import sys

@@ -55,9 +55,9 @@ echo "[run_session] researcher specialist → 127.0.0.1:8211"
 PIDS+=($!)
 
 # --- 2. MCP 데모 서버 ---
-if [[ -f "$ROOT/examples/demo_mcp_server.py" ]]; then
+if [[ -f "$ROOT/examples/mcp_demo_server.py" ]]; then
     echo "[run_session] MCP HTTP demo → 127.0.0.1:8000"
-    python3 "$ROOT/examples/demo_mcp_server.py" &
+    python3 "$ROOT/examples/mcp_demo_server.py" --http 8000 --tools get_current_time,calculate,get_weather &
     PIDS+=($!)
 fi
 

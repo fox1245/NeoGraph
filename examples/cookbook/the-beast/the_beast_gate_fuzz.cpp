@@ -32,6 +32,9 @@
 //
 // Build:  cmake --build build --target cookbook_the_beast_gate_fuzz
 // Run:    ./build/cookbook_the_beast_gate_fuzz 2>/dev/null
+//
+// smoke-slow: CPU-heavy (2000-graph fuzz, about 1-3 s natively); skipped under sanitizers
+// smoke-expect: Layer 2: runtime backstops 100%): PASS
 
 #include <neograph/neograph.h>
 #include <neograph/graph/validator.h>

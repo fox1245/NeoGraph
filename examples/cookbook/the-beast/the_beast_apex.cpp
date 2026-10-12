@@ -14,9 +14,11 @@
 // the agent it builds. Generation is creative; tool-use is autonomous;
 // coherence is proven.
 //
-// Setup:  OPENROUTER_API_KEY=sk-or-... in .env  (model deepseek/deepseek-v4-flash)
+// Setup:  export OPENROUTER_API_KEY=sk-or-...  (model deepseek/deepseek-v4-flash)
 // Build:  cmake --build build --target cookbook_the_beast_apex
 // Run:    ./build/cookbook_the_beast_apex ["your task"]
+//
+// smoke-skip: needs OPENROUTER_API_KEY (live model call)
 
 #include <neograph/neograph.h>
 #include <neograph/graph/validator.h>
@@ -25,7 +27,6 @@
 #include "../../provider_example_support.h"
 #include "beast_common.h"
 
-#include <cppdotenv/dotenv.hpp>
 
 #include <cstdlib>
 #include <iostream>
@@ -110,7 +111,6 @@ json extract_json(const std::string& text) {
 }
 
 int main(int argc, char** argv) try {
-    cppdotenv::auto_load_dotenv();
     const char* key = std::getenv("OPENROUTER_API_KEY");
     if (!key || !*key) { std::cerr << "OPENROUTER_API_KEY not set\n"; return 2; }
 

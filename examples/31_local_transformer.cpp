@@ -25,6 +25,8 @@
 // The measurement loop reports first-content latency, total wall time and
 // callback chunks/s, then summarizes p50/p95. Callback chunks are not billed
 // model tokens; nullable reported usage is printed separately.
+//
+// smoke-skip: needs a local OpenAI-compatible inference server on 127.0.0.1:8090
 
 #include "provider_example_support.h"
 #include <neograph/async/run_sync.h>

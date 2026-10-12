@@ -7,11 +7,21 @@ ACP clients launch this script as a subprocess. Protocol messages use stdout,
 so application diagnostics must go to stderr or a logging handler. Set
 NEOGRAPH_ACP_POSTGRES_URL for durable session/load support. Source builds with
 SQLite enabled may use NEOGRAPH_ACP_SQLITE_PATH instead.
+
+    python 28_acp_agent.py                  serve over stdio until the client closes it
+    python 28_acp_agent.py --self-check     start this agent as a child process the way an editor
+                                            does, have two turns with the SDK's client, and exit
+
+smoke-requires: acp
+smoke-args: --self-check
+smoke-expect: NeoGraph received: hello (turn 1)
+smoke-expect: NeoGraph received: hello again (turn 2)
 """
 
 import asyncio
 import os
 import re
+import sys
 from typing import Any
 from uuid import uuid4
 
@@ -236,5 +246,58 @@ async def main():
     await run_agent(NeoGraphACPAgent())
 
 
+class PrintingClient:
+    """The editor side of --self-check: it only collects the text the agent streams."""
+
+    def __init__(self):
+        self.chunks = []
+
+    async def session_update(self, session_id, update, **kwargs):
+        self.chunks.append(getattr(update.content, "text", ""))
+
+    async def ext_method(self, method, params):
+        raise RuntimeError(method)
+
+    async def ext_notification(self, method, params):
+        raise RuntimeError(method)
+
+
+async def self_check():
+    """Run this agent as a child process and have two turns with it."""
+    from acp import connect_to_agent
+
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, os.path.abspath(__file__),
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    client = PrintingClient()
+    connection = connect_to_agent(client, process.stdin, process.stdout)
+    try:
+        await connection.initialize(
+            protocol_version=PROTOCOL_VERSION,
+            client_capabilities=ClientCapabilities(),
+            client_info=Implementation(name="self-check", version="1.0"),
+        )
+        session = await connection.new_session(cwd=os.getcwd(), mcp_servers=[])
+        for turn, text in enumerate(("hello", "hello again"), start=1):
+            client.chunks.clear()
+            reply = await connection.prompt(
+                session_id=session.session_id,
+                prompt=[TextContentBlock(type="text", text=text)],
+            )
+            expected = f"(turn {turn})"
+            for _ in range(200):  # the last chunks can arrive just after the response
+                if "".join(client.chunks).endswith(expected):
+                    break
+                await asyncio.sleep(0.02)
+            print("".join(client.chunks), f"[{reply.stop_reason}]")
+    finally:
+        await connection.close()
+        if process.returncode is None:
+            process.terminate()
+        await process.wait()
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(self_check() if "--self-check" in sys.argv else main())

@@ -34,12 +34,9 @@ if [ ! -x "$BUILD/cookbook_ai_assembly_member" ] || [ ! -x "$BUILD/cookbook_ai_a
 fi
 
 if [ "${#MEMBER_ARGS[@]}" -eq 0 ]; then
-    # Load OPENROUTER_API_KEY only for explicitly live sessions.
-    for envf in "$ROOT/.env" "$NG_ROOT/.env"; do
-        if [ -n "$envf" ] && [ -f "$envf" ]; then set -a; . "$envf"; set +a; break; fi
-    done
+    # A live session reads the key from the environment only; no file is sourced.
     if [ -z "${OPENROUTER_API_KEY:-}" ]; then
-        echo "OPENROUTER_API_KEY not set"; exit 2
+        echo "OPENROUTER_API_KEY not set (export it in the environment, or use --mock)"; exit 2
     fi
 fi
 

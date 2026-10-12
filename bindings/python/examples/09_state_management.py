@@ -20,6 +20,9 @@ what runs predictably.)
 Run:
     pip install neograph-engine
     python 09_state_management.py
+
+smoke-expect: beta inherits: count=11
+smoke-expect: unknown thread: None
 """
 
 import neograph_engine as ng

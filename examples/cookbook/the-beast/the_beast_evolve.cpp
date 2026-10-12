@@ -23,6 +23,8 @@
 //
 // Build:  cmake --build build --target cookbook_the_beast_evolve
 // Run:    ./build/cookbook_the_beast_evolve   [--darwin-only]
+//
+// smoke-expect: Solved — the pipeline computes 20.
 
 #include <neograph/neograph.h>
 #include <neograph/graph/validator.h>
@@ -31,7 +33,6 @@
 #include <neograph/graph/node.h>
 #include "../../provider_example_support.h"
 
-#include <cppdotenv/dotenv.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -167,7 +168,6 @@ static std::optional<json> llm_refine(std::shared_ptr<neograph::Provider> prov, 
 int main(int argc, char** argv) {
     register_op_node();
     const bool darwin_only = (argc > 1 && std::string(argv[1]) == "--darwin-only");
-    cppdotenv::auto_load_dotenv();
     const char* key = std::getenv("OPENROUTER_API_KEY");
     std::shared_ptr<neograph::Provider> provider;
     neograph::UsageAccumulator usage;

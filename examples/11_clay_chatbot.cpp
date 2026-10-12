@@ -15,6 +15,8 @@
 //
 // Keys: Enter send · Esc clear · Ctrl+Backspace delete word · Ctrl+V paste ·
 //       Ctrl+Q quit · mouse wheel scroll. While a reply streams, Send becomes Stop.
+//
+// smoke-skip: opens a Raylib window (build with -DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON); needs a display
 
 #include <neograph/neograph.h>
 #include "provider_example_support.h"

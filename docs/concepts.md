@@ -684,9 +684,9 @@ closed condition always throws if it returns outside its declared labels.
 
 ## Where to next
 
-- [Python examples](../bindings/python/examples/) — 21 self-contained
-  scripts covering every concept above.
-- [C++ examples](../examples/) — 36 programs with the same structure.
+- [Python examples](../bindings/python/examples/) — self-contained scripts that
+  show the concepts above one at a time; most run offline.
+- [C++ examples](../examples/) — programs with the same structure.
 - [`reference-en.md`](reference-en.md) — exhaustive class-by-class API.
 - [`ASYNC_GUIDE.md`](ASYNC_GUIDE.md) — deep dive on the async / coroutine
   layer.

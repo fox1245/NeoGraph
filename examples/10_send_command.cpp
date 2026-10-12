@@ -1,184 +1,117 @@
-// NeoGraph Example 10: Send & Command Engine Integration
+// NeoGraph Example 10: Send and Command
 //
-// Demonstrates Send (dynamic fan-out) and Command (routing override)
-// working in the engine.
+// Send creates work at run time: a node returns one Send per item and the engine runs the
+// target node once per Send, in parallel, each on its own copy of the state.
+// Command routes at run time: a node returns the next node together with state updates, and
+// that overrides the node's ordinary edges.
 //
-// Scenario: Research agent
-//   1. planner node analyzes the user's question and uses Send for dynamic fan-out
-//   2. researcher node investigates each topic in parallel
-//   3. evaluator node assesses results and branches via Command
-//      - sufficient → summarizer → END
-//      - insufficient → back to planner for additional research
+// Scenario: a research loop.
+//   planner     picks topics (3 in round 1, 2 in round 2) and Sends one `researcher` per topic
+//   researcher  records one finding per Send
+//   evaluator   Commands back to `planner` until 5 findings exist, then on to `summarizer`
 //
-// No API key required (custom nodes)
+//   __start__ -> planner -> evaluator -> (Command) planner | summarizer -> __end__
+//
+// No API key required.
 //
 // Usage: ./example_send_command
+//
+// smoke-expect: Status: sufficient: 5 findings
+// smoke-expect: Total findings: 5
+// smoke-expect: [command] evaluator -> summarizer
+// smoke-expect: Execution trace: planner → researcher[send] → researcher[send] → researcher[send] → evaluator → planner
+// smoke-forbid: [neograph] lint
+// smoke-forbid: [neograph] warning
 
 #include <neograph/neograph.h>
 
 #include <iostream>
-#include <thread>
-#include <chrono>
 
 using namespace neograph;
 using namespace neograph::graph;
 
-// =========================================================================
-// PlannerNode: extracts topics from user question and uses Send for dynamic fan-out
-// =========================================================================
-class PlannerNode : public GraphNode {
-    static int round_;
+// Picks the topics for this round and starts one researcher per topic.
+class PlannerNode : public SyncGraphNode {
 public:
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        round_++;
-        auto query = in.state.get("query");
-        std::string q = query.is_string() ? query.get<std::string>() : "general research";
-
-        // Round 1: 3 topics, Round 2: 2 additional topics
-        std::vector<std::string> topics = (round_ == 1)
-            ? std::vector<std::string>{"market_size", "key_players", "technology_trends"}
-            : std::vector<std::string>{"risk_factors", "future_outlook"};
+    PlannerNode() : SyncGraphNode("planner") {}
+protected:
+    NodeOutput run_sync(NodeInput in) override {
+        const auto previous = in.state.get("round");
+        const int  round    = (previous.is_number() ? previous.get<int>() : 0) + 1;
+        const std::vector<std::string> topics =
+            round == 1 ? std::vector<std::string>{"market_size", "key_players", "technology_trends"}
+                       : std::vector<std::string>{"risk_factors", "future_outlook"};
 
         NodeOutput out;
-        out.writes.push_back(ChannelWrite{"plan", json({
-            {"round", round_},
-            {"query", q},
-            {"topics", topics}
-        })});
-
-        // Send: dynamically execute researcher node once per topic.
-        // Send.input is a channel-name→value mapping applied to the
-        // worker's isolated state.
-        for (const auto& topic : topics) {
-            out.sends.push_back(Send{"researcher", json({{"topic", topic}})});
-        }
-        co_return out;
+        out.writes.push_back(ChannelWrite{"round", json(round)});
+        for (const auto& topic : topics)
+            out.sends.push_back(Send{"researcher", json({{"topic", topic}})});   // one run per Send
+        return out;
     }
-
-    std::string get_name() const override { return "planner"; }
-};
-int PlannerNode::round_ = 0;
-
-// =========================================================================
-// ResearcherNode: investigates a single topic (invoked via Send)
-// =========================================================================
-class ResearcherNode : public GraphNode {
-public:
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto topic_json = in.state.get("topic");
-        std::string topic = topic_json.is_string()
-            ? topic_json.get<std::string>() : "unknown";
-
-        // Simulation: research takes 50-100ms.
-        int delay = 50 + (std::hash<std::string>{}(topic) % 50);
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-
-        json finding = {
-            {"topic", topic},
-            {"result", "Analysis of " + topic + " completed."},
-            {"confidence", 0.7 + (std::hash<std::string>{}(topic) % 30) / 100.0},
-            {"elapsed_ms", delay}
-        };
-
-        NodeOutput out;
-        out.writes.push_back(ChannelWrite{"findings", json::array({finding})});
-        co_return out;
-    }
-
-    std::string get_name() const override { return "researcher"; }
 };
 
-// =========================================================================
-// EvaluatorNode: evaluates results and decides branching via Command
-// =========================================================================
-class EvaluatorNode : public GraphNode {
-    static int eval_count_;
+// Runs once per Send. The Send payload (`topic`) is visible only to that run.
+class ResearcherNode : public SyncGraphNode {
 public:
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        eval_count_++;
-        auto findings = in.state.get("findings");
-        int count = findings.is_array() ? (int)findings.size() : 0;
+    ResearcherNode() : SyncGraphNode("researcher") {}
+protected:
+    NodeOutput run_sync(NodeInput in) override {
+        const std::string topic = in.state.get("topic").get<std::string>();
+        json finding = {{"topic", topic}, {"result", "Analysis of " + topic + " completed."}};
+        return NodeOutput{{ChannelWrite{"findings", json::array({finding})}}};
+    }
+};
 
+// Decides where to go next and records why, in one return value.
+class EvaluatorNode : public SyncGraphNode {
+public:
+    EvaluatorNode() : SyncGraphNode("evaluator") {}
+protected:
+    NodeOutput run_sync(NodeInput in) override {
+        const int count = static_cast<int>(in.state.get("findings").size());
         NodeOutput out;
-        if (count >= 5 || eval_count_ >= 2) {
-            // Sufficient data → go to summarizer.
+        if (count >= 5)
             out.command = Command{"summarizer",
-                {ChannelWrite{"eval_status", json("sufficient: "
-                    + std::to_string(count) + " findings")}}};
-        } else {
-            // Insufficient → go back to planner for more research.
+                {ChannelWrite{"eval_status", json("sufficient: " + std::to_string(count) + " findings")}}};
+        else
             out.command = Command{"planner",
-                {ChannelWrite{"eval_status", json("insufficient: need more research (have "
-                    + std::to_string(count) + ")")}}};
-        }
-        co_return out;
+                {ChannelWrite{"eval_status", json("insufficient: have " + std::to_string(count))}}};
+        return out;
     }
-
-    std::string get_name() const override { return "evaluator"; }
 };
-int EvaluatorNode::eval_count_ = 0;
 
-// =========================================================================
-// SummarizerNode: aggregates all results
-// =========================================================================
-class SummarizerNode : public GraphNode {
+class SummarizerNode : public SyncGraphNode {
 public:
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto findings = in.state.get("findings");
-        auto eval = in.state.get("eval_status");
-
-        std::string summary = "=== Research Summary ===\n";
-        summary += "Status: " + (eval.is_string() ? eval.get<std::string>() : "n/a") + "\n\n";
-
-        if (findings.is_array()) {
-            for (const auto& f : findings) {
-                summary += "- [" + f.value("topic", "?") + "] "
-                        + f.value("result", "") + " (confidence: "
-                        + std::to_string(f.value("confidence", 0.0)).substr(0, 4) + ")\n";
-            }
-            summary += "\nTotal findings: " + std::to_string(findings.size());
-        }
-
-        NodeOutput out;
-        out.writes.push_back(ChannelWrite{"summary", json(summary)});
-        co_return out;
+    SummarizerNode() : SyncGraphNode("summarizer") {}
+protected:
+    NodeOutput run_sync(NodeInput in) override {
+        const auto  findings = in.state.get("findings");
+        std::string summary  = "=== Research Summary ===\nStatus: " +
+                               in.state.get("eval_status").get<std::string>() + "\n\n";
+        for (const auto& f : findings)
+            summary += "- [" + f.value("topic", "?") + "] " + f.value("result", "") + "\n";
+        summary += "\nTotal findings: " + std::to_string(findings.size());
+        return NodeOutput{{ChannelWrite{"summary", json(summary)}}};
     }
-
-    std::string get_name() const override { return "summarizer"; }
 };
 
-// =========================================================================
-// Main
-// =========================================================================
 int main() {
-    // Register custom nodes
     auto& factory = NodeFactory::instance();
+    factory.register_type("planner", [](const std::string&, const json&, const NodeContext&) {
+        return std::make_unique<PlannerNode>(); });
+    factory.register_type("researcher", [](const std::string&, const json&, const NodeContext&) {
+        return std::make_unique<ResearcherNode>(); });
+    factory.register_type("evaluator", [](const std::string&, const json&, const NodeContext&) {
+        return std::make_unique<EvaluatorNode>(); });
+    factory.register_type("summarizer", [](const std::string&, const json&, const NodeContext&) {
+        return std::make_unique<SummarizerNode>(); });
 
-    factory.register_type("planner",
-        [](const std::string&, const json&, const NodeContext&) {
-            return std::make_unique<PlannerNode>(); });
-
-    factory.register_type("researcher",
-        [](const std::string&, const json&, const NodeContext&) {
-            return std::make_unique<ResearcherNode>(); });
-
-    factory.register_type("evaluator",
-        [](const std::string&, const json&, const NodeContext&) {
-            return std::make_unique<EvaluatorNode>(); });
-
-    factory.register_type("summarizer_node",
-        [](const std::string&, const json&, const NodeContext&) {
-            return std::make_unique<SummarizerNode>(); });
-
-    // Graph definition
-    // planner → (dynamic researcher execution via Send) → evaluator → branching via Command
-    json definition = {
+    const json definition = {
         {"schema_version", TOPOLOGY_SCHEMA_VERSION},
         {"name", "research_agent"},
         {"channels", {
-            {"query",       {{"reducer", "overwrite"}}},
-            {"plan",        {{"reducer", "overwrite"}}},
-            {"topic",       {{"reducer", "overwrite"}}},  // Channel injected by Send
+            {"round",       {{"reducer", "overwrite"}}},
+            {"topic",       {{"reducer", "overwrite"}}},   // filled by each Send
             {"findings",    {{"reducer", "append"}}},
             {"eval_status", {{"reducer", "overwrite"}}},
             {"summary",     {{"reducer", "overwrite"}}}
@@ -187,91 +120,40 @@ int main() {
             {"planner",    {{"type", "planner"}}},
             {"researcher", {{"type", "researcher"}}},
             {"evaluator",  {{"type", "evaluator"}}},
-            {"summarizer", {{"type", "summarizer_node"}}}
+            {"summarizer", {{"type", "summarizer"}}}
         }},
         {"edges", json::array({
             {{"from", "__start__"}, {"to", "planner"}},
-            {{"from", "planner"},   {"to", "evaluator"}},
-            // No edge needed here since evaluator routes via Command
-            // (Command.goto directly specifies "summarizer" or "planner")
+            {{"from", "planner"}, {"to", "evaluator"}},    // runs after the Sends have finished
+            {{"from", "evaluator"}, {"to", "summarizer"}}, // the default; a Command can choose "planner" instead
             {{"from", "summarizer"}, {"to", "__end__"}}
+            // No edge leads to `researcher`: only Send starts it.
         })}
     };
 
-    NodeContext ctx;
-    // ResearcherNode 가 sync `std::this_thread::sleep_for` 를 사용하기 때문에
-    // 코루틴이 yield 하지 않는다. 워커 풀이 없으면 (v1.0 기본값 = 1) 모든
-    // 호출이 io_context 스레드 한 개를 차지해 사실상 순차 실행된다. fan-out
-    // 의도를 살리려면 hardware_concurrency 만큼 워커를 풀어줘야 한다.
-    auto         workers = std::thread::hardware_concurrency();
-    EngineConfig engine_config;
-    engine_config.node_context = ctx;
-    engine_config.worker_count = workers > 0 ? workers : 4u;
-    auto engine                = GraphEngine::build(definition, std::move(engine_config));
+    EngineConfig config;
+    config.worker_count   = 3;      // as wide as the widest Send batch, so the three run in parallel
+    config.stderr_notices = false;  // `researcher` is reached only by Send, which the static
+                                    // reachability lint (E7) cannot see; the notice is expected
+    auto engine = GraphEngine::build(definition, std::move(config));
 
-    // Execute
-    std::cout << "=== Send & Command Integration Demo ===\n\n";
+    RunConfig run;
+    run.input       = {{"round", 0}};
+    run.max_steps   = 20;
+    run.stream_mode = StreamMode::EVENTS;
+    auto result = engine->run_stream(run, [](const GraphEvent& event) {
+        if (event.type != GraphEvent::Type::NODE_END) return;
+        if (event.data.contains("sends"))
+            std::cout << "[send]    " << event.node_name << " started "
+                      << event.data["sends"].get<int>() << " researchers\n";
+        if (event.data.contains("command_goto"))
+            std::cout << "[command] " << event.node_name << " -> "
+                      << event.data["command_goto"].get<std::string>() << "\n";
+    });
 
-    auto start = std::chrono::steady_clock::now();
-
-    RunConfig config;
-    config.input = {{"query", "AI semiconductor market analysis"}};
-    config.max_steps = 20;
-    config.stream_mode = StreamMode::EVENTS | StreamMode::DEBUG;
-
-    auto result = engine->run_stream(config,
-        [](const GraphEvent& event) {
-            switch (event.type) {
-                case GraphEvent::Type::NODE_START:
-                    if (event.node_name == "__send__") {
-                        auto sends = event.data["sends"];
-                        std::cout << "  [send] Dynamic fan-out: " << sends.size() << " tasks\n";
-                        for (const auto& s : sends)
-                            std::cout << "         → " << s["target"] << "(" << s["input"]["topic"] << ")\n";
-                    } else if (event.node_name == "__routing__") {
-                        if (event.data.contains("command_goto"))
-                            std::cout << "  [cmd]  Command goto → " << event.data["command_goto"] << "\n";
-                        else if (event.data.contains("next_nodes"))
-                            std::cout << "  [route] → " << event.data["next_nodes"].dump() << "\n";
-                    } else {
-                        std::cout << "  [start] " << event.node_name << "\n";
-                    }
-                    break;
-                case GraphEvent::Type::NODE_END: {
-                    std::string extra;
-                    if (event.data.contains("command_goto"))
-                        extra = " (cmd→" + event.data["command_goto"].get<std::string>() + ")";
-                    if (event.data.contains("sends"))
-                        extra = " (sends=" + std::to_string(event.data["sends"].get<int>()) + ")";
-                    std::cout << "  [done]  " << event.node_name << extra << "\n";
-                    break;
-                }
-                default: break;
-            }
-        });
-
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - start).count();
-
-    // Print results
-    std::cout << "\n";
-    std::cout << "Execution trace: ";
-    for (size_t i = 0; i < result.execution_trace.size(); ++i) {
-        std::cout << result.execution_trace[i];
-        if (i + 1 < result.execution_trace.size()) std::cout << " → ";
-    }
-    std::cout << " → END\n\n";
-
-    if (result.output.contains("channels") &&
-        result.output["channels"].contains("summary") &&
-        result.output["channels"]["summary"]["value"].is_string()) {
-        std::cout << result.output["channels"]["summary"]["value"].get<std::string>() << "\n";
-    } else {
-        std::cout << "(No summary generated — check execution trace)\n";
-    }
-
-    std::cout << "\nTotal time: " << elapsed << "ms\n";
-    std::cout << "(Researchers ran in parallel via Send + asio::experimental::make_parallel_group)\n";
-
+    std::cout << "\nExecution trace: ";
+    for (size_t i = 0; i < result.execution_trace.size(); ++i)
+        std::cout << (i ? " → " : "") << result.execution_trace[i];
+    std::cout << "\n\n" << result.channel<std::string>("summary") << "\n";
     return 0;
 }

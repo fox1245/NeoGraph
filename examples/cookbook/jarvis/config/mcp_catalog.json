@@ -19,7 +19,7 @@
     {
       "name": "personal_memo",
       "transport": "stdio",
-      "command": ["python3", "examples/demo_mcp_stdio_server.py"],
+      "command": ["python3", "examples/mcp_demo_server.py", "--tools", "kb_lookup,save_note,list_notes"],
       "description": "토니의 개인 메모 저장 / 검색 / 목록. save_note / list_notes / kb_lookup.",
       "tags": ["memory"],
       "skip_synthesis_hint": false,

@@ -2,9 +2,8 @@
 //
 // Spawns an MCP stdio server (subprocess), discovers its tools, then calls
 // each tool directly and prints the result. This isolates the MCP protocol
-// round-trip from any LLM dependency: the other bundled MCP examples
-// (03 / 20 / 22) wrap the client in a ReAct loop using the pinned
-// OpenRouter DeepSeek model, which hides the fact that the protocol layer
+// round-trip from any model: the other MCP examples (03, 20 to 24) hand the
+// client to a ReAct loop, which hides the fact that the protocol layer is
 // peer-agnostic.
 //
 // Pair it with min_stdio_server.py (a ~60-line stdlib server, no fastmcp):
@@ -12,6 +11,10 @@
 //   ./cookbook_minimal_mcp python3 examples/cookbook/minimal-mcp/min_stdio_server.py
 //
 // Any executable that speaks MCP over stdio works in place of that server.
+//
+// smoke-args: @PYTHON@ @SRC@/examples/cookbook/minimal-mcp/min_stdio_server.py
+// smoke-expect: 3/3 MCP tool calls succeeded
+// smoke-expect: calculate({"expression":"2 ** 16 + 1"}) -> 65537
 
 #include <neograph/neograph.h>
 #include <neograph/mcp/client.h>

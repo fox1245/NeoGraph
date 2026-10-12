@@ -1,58 +1,53 @@
 """Shared configuration and text-only calls for the Python examples.
 
-SchemaProvider loads a closed descriptor before constructing a runtime. Set
-OPENAI_API_BASE to a faithful local protocol peer to exercise these examples
-without a hosted key; HTTPS peers also need NG_EXAMPLE_CA_FILE when their CA
-is not in the system trust store. Hosted endpoints require OPENAI_API_KEY.
+Offline by default. An example that calls a model builds its provider with
+``example_provider(script)``: unless ``--live`` is given (or NG_EXAMPLE_LIVE=1, or
+OPENAI_API_BASE / NG_PROVIDER_DESCRIPTOR names an endpoint), the replies come from
+``script`` through ``_scripted.ScriptedModel``, a local server that speaks the real
+protocol, so no key and no network are involved.
+
+``--live`` uses ``schema_provider()``: SchemaProvider loads a closed descriptor before
+constructing a runtime. Set OPENAI_API_BASE to a faithful local protocol peer to
+exercise an example against your own endpoint; HTTPS peers also need
+NG_EXAMPLE_CA_FILE when their CA is not in the system trust store. Hosted endpoints
+require OPENAI_API_KEY, which is read from the process environment only.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
 import urllib.parse
+from collections import namedtuple
 from pathlib import Path
 
 import neograph_engine as ng
 from neograph_engine.llm import SchemaProvider
 
 
-def _load_env() -> None:
-    """Optionally load the nearest example/repository .env without overriding exports."""
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        return
-    here = Path(__file__).resolve().parent
-    for parent in (here, *here.parents):
-        candidate = parent / ".env"
-        if candidate.is_file():
-            load_dotenv(candidate, override=False)
-            return
-
-
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
-_load_env()
 
 
-def schema_provider(schema: str = "openai", *, http_version=None):
+def schema_provider(schema: str = "openai", *, http_version=None, base_url=None):
     """Construct the Chat or Responses runtime from an admitted descriptor.
 
     OPENAI_API_BASE is an origin (or gateway prefix), not a complete route.
     NG_PROVIDER_DESCRIPTOR can name a complete descriptor instead, including
     provider-specific admitted headers. No arbitrary request fields are added.
+    ``base_url`` (used by the scripted offline model) takes precedence over both.
     """
-    descriptor_file = os.getenv("NG_PROVIDER_DESCRIPTOR")
+    descriptor_file = None if base_url else os.getenv("NG_PROVIDER_DESCRIPTOR")
     if descriptor_file:
         source = Path(descriptor_file).read_text(encoding="utf-8")
         document = json.loads(source)
     else:
         family = {"openai": "openai.chat", "openai_responses": "openai.responses"}[schema]
         responses = family == "openai.responses"
-        endpoint = urllib.parse.urlsplit(os.getenv("OPENAI_API_BASE", "https://api.openai.com"))
+        endpoint = urllib.parse.urlsplit(base_url or os.getenv("OPENAI_API_BASE", "https://api.openai.com"))
         origin = urllib.parse.urlunsplit((endpoint.scheme, endpoint.netloc, "", "", ""))
         prefix = endpoint.path.rstrip("/")
         route = "/v1/responses" if responses else "/v1/chat/completions"
@@ -94,6 +89,41 @@ def schema_provider(schema: str = "openai", *, http_version=None):
     if http_version is not None:
         options.http_version = http_version
     return SchemaProvider(ng.load_provider_descriptor(source), options=options)
+
+
+def live_requested(argv=None) -> bool:
+    """True when the run should use a configured endpoint instead of the scripted model.
+
+    ``--live`` or NG_EXAMPLE_LIVE=1 selects the hosted endpoint (OPENAI_API_KEY). An explicit
+    OPENAI_API_BASE or NG_PROVIDER_DESCRIPTOR also selects the configured endpoint, so the
+    protocol-peer workflow in the README keeps working.
+    """
+    argv = sys.argv if argv is None else argv
+    return ("--live" in argv or os.getenv("NG_EXAMPLE_LIVE") in ("1", "true")
+            or bool(os.getenv("OPENAI_API_BASE")) or bool(os.getenv("NG_PROVIDER_DESCRIPTOR")))
+
+
+ChosenProvider = namedtuple("ChosenProvider", "provider scripted live")
+
+
+@contextlib.contextmanager
+def example_provider(script, schema: str = "openai"):
+    """Yield ``ChosenProvider(provider, scripted, live)``.
+
+    ``script`` is a list of ``_scripted`` replies (``say``, ``call_tool``, ``fail``) or a function
+    ``(turn) -> Reply``. Offline, ``scripted`` is the running ``ScriptedModel`` (read
+    ``scripted.call_count`` / ``scripted.turns`` for assertions); with ``--live`` it is None.
+    ``schema`` is "openai" (Chat) or "openai_responses".
+    """
+    if live_requested():
+        print("provider: live (OPENAI_API_KEY from the environment; the endpoint bills per request)")
+        yield ChosenProvider(schema_provider(schema), None, True)
+        return
+    from _scripted import ScriptedModel
+    print("provider: scripted (offline; pass --live to call a real model)")
+    family = "responses" if schema == "openai_responses" else "chat"
+    with ScriptedModel(script, family=family) as model:
+        yield ChosenProvider(model.provider(), model, False)
 
 
 def example_model() -> str:

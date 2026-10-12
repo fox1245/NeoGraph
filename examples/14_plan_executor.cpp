@@ -16,6 +16,9 @@
 // No API key required. All "LLM calls" are simulated with sleeps.
 //
 // Usage: ./example_plan_executor
+//
+// smoke-expect: executor invocations during phase 2 = 1
+// smoke-expect: 4 expensive calls saved
 
 #include <neograph/neograph.h>
 

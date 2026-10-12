@@ -11,6 +11,9 @@ because we skip the LLM and hand-craft the tool_call.
 Run:
     pip install neograph-engine
     python 02_tool_dispatch.py
+
+smoke-expect: tool result: 42
+smoke-expect: full trace: ['llm', 'dispatch']
 """
 
 import json

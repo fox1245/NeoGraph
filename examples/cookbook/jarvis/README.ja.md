@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=ja source_sha256=f54a315d6278705e37ff35dfc675090e85b00c7efc53c88fe7c93d31a420be61 -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=ja source_sha256=a02202d9106c06303699bf2e4f4def793c54adf84521a08926964317cabffa6c -->
 # JARVIS — 音声駆動型メタ・オーケストレーター
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -24,7 +24,7 @@ JSON router は解析前に text-only の `EndTurn` / `StopSequence` 完了だ�
 `[jarvis:ttft]` は最初の非空 `sp::PartDelta` の `PartKind::Text`・`DeltaChannel::Content` で発生し、使用量・推論・ヘッダーイベントでは発生しない。最初の合成テキストであり、実際のTTS音声開始ではない。Python REPL driver は protocol client です。pybind benchmark は移行済み型付き binding を使い、別の実行証拠が必要です。現在の実行証拠は実際のCLI挨拶、永続化した合成メモリturn、正常なEOF終了に限定される。マイク入力・ASR・TTS・pybindベンチやvendor推論の検証ではない。以下の時間・音声/live実行主張は過去の記録であり、現在の移行qualificationではない。
 
 上の CLI 証拠は interface 3 で記録し、再実行していません。
-[現在の interface-4 local 証拠](../../README.md#typed-c-cutover-status)は SDK 制御と
+[後続の interface-4 local 証拠](../../README.md#typed-c-cutover-status)は SDK 制御と
 A2A 0.3/1.0 peer を別途扱い、Jarvis の音声、benchmark、新たな full CLI session を検証しません。
 
 > ローカル/mockはクラウド提供者不要。任意の音声にはローカル資産・機器が必要。
@@ -97,7 +97,7 @@ JARVISが直接呼び出せる関数型ツールのリスト。各エントリ�
     {
       "name": "personal_memo",
       "transport": "stdio",
-      "command": ["python3", "examples/demo_mcp_stdio_server.py"],
+      "command": ["python3", "examples/mcp_demo_server.py", "--tools", "kb_lookup,save_note,list_notes"],
       "description": "Tony's personal memo storage/retrieval",
       "enabled": true
     }

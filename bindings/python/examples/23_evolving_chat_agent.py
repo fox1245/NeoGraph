@@ -1,387 +1,137 @@
-"""23 — Evolving chat agent: per-thread agent that rewrites its own JSON.
+"""23 - Evolving chat agent: the conversation survives an admitted rewrite of the agent.
 
-Difference from example 22:
-  - 22 is goal-driven: one task, evolve until output passes a JSON
-    schema check.
-  - 23 is conversation-driven: multi-turn chat with persistent thread
-    state, evolve between turns based on accumulated history. Prior
-    messages survive the evolution because the new engine shares the
-    checkpoint store with the old one.
+Example 22 evolves a graph toward one goal. This one evolves between the turns of a chat.
+Each thread has an agent definition (JSON). After a few turns an evolver model reads the
+conversation and proposes a revised definition. `validate_agent` is the boundary: it admits
+a proposal only if it keeps the schema version, the channels and a path from start to end,
+and uses only registered node types. An admitted definition compiles into a fresh engine
+that shares the checkpoint store with the old one, so with `resume_if_exists=True` the earlier
+messages are still there. An `__graph_meta__` channel records each accepted version and hash;
+that is application metadata, not replay evidence.
 
-Per-thread evolution:
+Run:
+    python 23_evolving_chat_agent.py            # scripted model, no key
+    python 23_evolving_chat_agent.py --live     # hosted model; OPENAI_API_KEY in the environment
 
-  1. Each thread has its own agent definition (JSON).
-  2. Conversation runs through the current definition.
-  3. ``propose_new_agent()`` asks a model to inspect the conversation and
-     propose a revised JSON.
-  4. ``validate_agent()`` rejects unsafe proposals (whitelist node
-     types, required channels, edge connectivity, node count cap).
-     This is the safety boundary between LLM-proposed JSON and the
-     running engine.
-  5. New definition compiles into a fresh engine that *shares* the
-     checkpoint store with the old one. With ``resume_if_exists=True``
-     prior messages survive because their channel + reducer is
-     compatible across the two graph versions.
-  6. An ``__graph_meta__`` channel records the accepted graph version/hash
-     after the preceding turn. This is application metadata, not authoritative
-     engine replay evidence.
-
-The ``__graph_meta__`` convention is purely application-level — the
-engine has no special handling. It is a regular append-reduced channel
-that the application updates via ``engine.update_state(thread_id,
-{"__graph_meta__": [meta]})`` on each evolution.
-
-Run::
-
-    OPENAI_API_KEY=sk-... python 23_evolving_chat_agent.py
-
-Both the chat node and the evolver make provider requests. Hosted calls incur
-provider charges; OPENAI_API_BASE can instead route to a local Chat protocol peer.
+smoke-expect: evolver proposed v2, admitted: ok
+smoke-expect: changes: system_prompt, max_output_tokens 400 -> 60
+smoke-expect: messages kept across the rewrite: 4 of 4
+smoke-expect: __graph_meta__: v2
+smoke-expect: model calls: 4
+smoke-forbid: [neograph] lint
 """
-
-from __future__ import annotations
 
 import hashlib
 import json
-import os
-import sys
 import time
-from pathlib import Path
-from typing import Any
 
 import neograph_engine as ng
+from _common import ask_text, example_provider
+from _scripted import say
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import ask_text, schema_provider  # noqa: E402
-
-
-# ── Generic config-driven chat node ─────────────────────────────────
-#
-# All persona / token-cap knobs live in node.config so the evolver
-# can tweak them via plain JSON.
 
 class PromptedChatNode(ng.GraphNode):
-    def __init__(self, name: str, node_def: dict, ctx):
+    """A chat node whose persona and length cap live in its JSON config, so the evolver can tune them."""
+
+    def __init__(self, name, spec, ctx):
         super().__init__()
-        self._name = name
-        cfg = (node_def or {}).get("config", {}) or {}
-        self._system_prompt = cfg.get("system_prompt", "You are a helpful assistant.")
-        self._max_tokens = int(cfg.get("max_output_tokens", 200))
-        self._ctx = ctx
+        self._name, self._ctx = name, ctx
+        self._config = (spec or {}).get("config", {})
 
     def get_name(self):
         return self._name
 
     def run(self, input):
-        msgs = input.state.get("messages") or []
-        messages = [ng.ChatMessage(role="system", content=self._system_prompt)]
-        for m in msgs:
-            role = m.get("role", "")
-            content = m.get("content", "")
-            if role in ("user", "assistant", "system") and content:
-                messages.append(ng.ChatMessage(role=role, content=content))
-
-        text = ask_text(self._ctx.provider, messages=messages, temperature=0.4,
-                        max_output_tokens=self._max_tokens)
-        return [ng.ChannelWrite("messages", [{
-            "role": "assistant",
-            "content": text,
-            "node": self._name,
-            "created_at": time.time(),
-        }])]
+        history = [ng.ChatMessage(role=m["role"], content=m["content"])
+                   for m in input.state.get("messages") or []]
+        text = ask_text(self._ctx.provider,
+                        [ng.ChatMessage(role="system", content=self._config["system_prompt"]), *history],
+                        max_output_tokens=int(self._config["max_output_tokens"]))
+        return [ng.ChannelWrite("messages", [{"role": "assistant", "content": text, "node": self._name}])]
 
 
-ng.NodeFactory.register_type(
-    "prompted_chat",
-    lambda name, cfg, ctx: PromptedChatNode(name, cfg, ctx),
-)
+ng.NodeFactory.register_type("prompted_chat", lambda name, spec, ctx: PromptedChatNode(name, spec, ctx))
 
 
-# ── Initial agent definition ────────────────────────────────────────
-
-INITIAL_AGENT: dict[str, Any] = {
-    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
-    "name": "evolving_chat_v1",
-    "_version": 1,
-    "channels": {
-        "messages":       {"reducer": "append"},
-        "__graph_meta__": {"reducer": "append"},
-    },
-    "nodes": {
-        "chat": {
-            "type": "prompted_chat",
-            "config": {
-                "system_prompt": "You are a friendly assistant. Reply with helpful context and one practical suggestion.",
-                "max_output_tokens": 400,
-            },
-        },
-    },
-    "edges": [
-        {"from": ng.START_NODE, "to": "chat"},
-        {"from": "chat",        "to": ng.END_NODE},
-    ],
-}
+def agent(version: int, system_prompt: str, max_tokens: int) -> dict:
+    return {
+        "schema_version": ng.TOPOLOGY_SCHEMA_VERSION, "name": "evolving_chat", "_version": version,
+        "channels": {"messages": {"reducer": "append"}, "__graph_meta__": {"reducer": "append"}},
+        "nodes": {"chat": {"type": "prompted_chat", "config": {
+            "system_prompt": system_prompt, "max_output_tokens": max_tokens}}},
+        "edges": [{"from": ng.START_NODE, "to": "chat"}, {"from": "chat", "to": ng.END_NODE}],
+    }
 
 
-# ── Validator: reject unsafe proposals before compile ───────────────
-
-ALLOWED_NODE_TYPES = {"prompted_chat"}
-
-
-def validate_agent(defn: dict) -> tuple[bool, str]:
-    if not isinstance(defn, dict):
-        return False, "not an object"
-    if "name" not in defn:
-        return False, "missing 'name'"
-    if defn.get("schema_version") != ng.TOPOLOGY_SCHEMA_VERSION:
-        return False, "must keep current 'schema_version'"
-
-    nodes = defn.get("nodes") or {}
-    if not isinstance(nodes, dict) or not nodes:
-        return False, "missing or empty 'nodes'"
-    if len(nodes) > 6:
-        return False, f"node count cap exceeded ({len(nodes)} > 6)"
-    for k, v in nodes.items():
-        ntype = v.get("type") if isinstance(v, dict) else None
-        if ntype not in ALLOWED_NODE_TYPES:
-            return False, f"node '{k}' has unsupported type {ntype!r}"
-
-    chans = defn.get("channels") or {}
-    if "messages" not in chans:
-        return False, "must keep 'messages' channel"
-    if (chans["messages"] or {}).get("reducer") != "append":
-        return False, "'messages' reducer must remain 'append'"
-    if "__graph_meta__" not in chans:
-        return False, "must keep '__graph_meta__' audit channel"
-    if (chans["__graph_meta__"] or {}).get("reducer") != "append":
-        return False, "'__graph_meta__' reducer must remain 'append'"
-
-    edges = defn.get("edges") or []
-    if not isinstance(edges, list) or any(not isinstance(edge, dict) for edge in edges):
-        return False, "edges must be a list of objects"
-    valid_targets = set(nodes.keys()) | {ng.START_NODE, ng.END_NODE}
-    adjacency = {name: [] for name in valid_targets}
-    for edge in edges:
-        source, target = edge.get("from"), edge.get("to")
-        if source not in valid_targets or target not in valid_targets:
-            return False, f"edge {edge} references unknown node"
-        adjacency[source].append(target)
-    reached, pending = set(), [ng.START_NODE]
-    while pending:
-        name = pending.pop()
-        if name not in reached:
-            reached.add(name)
-            pending.extend(adjacency[name])
-    if ng.END_NODE not in reached:
-        return False, "END must be reachable from START"
-
+def validate_agent(current: dict, proposed) -> tuple[bool, str]:
+    """The safety boundary between a model's JSON and the running engine."""
+    if not isinstance(proposed, dict) or proposed.get("schema_version") != current["schema_version"]:
+        return False, "must be an object that keeps the schema_version"
+    if proposed.get("_version") != current["_version"] + 1:
+        return False, "must bump _version by one"
+    nodes = proposed.get("nodes") or {}
+    if not nodes or len(nodes) > 6 or any(n.get("type") != "prompted_chat" for n in nodes.values()):
+        return False, "one to six prompted_chat nodes only"
+    channels = proposed.get("channels") or {}
+    if any((channels.get(c) or {}).get("reducer") != "append" for c in ("messages", "__graph_meta__")):
+        return False, "must keep the append channels messages and __graph_meta__"
+    if not any(e.get("from") == ng.START_NODE for e in proposed.get("edges", [])) or \
+            not any(e.get("to") == ng.END_NODE for e in proposed.get("edges", [])):
+        return False, "must connect __start__ to __end__"
     return True, "ok"
 
 
-# ── LLM-driven evolver ──────────────────────────────────────────────
-#
-# A separate LLM call whose only job is to emit a revised graph JSON
-# based on the current agent + the conversation. The validator above
-# is the safety boundary — anything LLM proposes that fails validation
-# is rejected before compile.
-
-def propose_new_agent(current: dict, conversation: list[dict], provider) -> tuple[dict, str]:
-    current_schema = current.get("schema_version")
-    convo = "\n".join(
-        f"[{m.get('role','?')}] {m.get('content','')[:200]}"
-        for m in conversation[-20:]
-    ) or "(no conversation yet)"
-
-    instructions = f"""You are an agent-evolver. Given a NeoGraph agent
-definition (JSON) and the recent conversation that ran through it,
-propose a REVISED graph JSON that better fits the user's communication
-style.
-
-Hard rules — violating any rejects your output:
-  - Output ONLY a JSON object — no prose, no markdown fences.
-  - Keep top-level "schema_version" exactly {current_schema!r}.
-  - Only "prompted_chat" node type is registered.
-  - Keep the "messages" channel with reducer "append".
-  - Keep the "__graph_meta__" channel with reducer "append".
-  - Edges must connect "__start__" → ... → "__end__".
-  - Max 6 nodes.
-  - Make ONE specific, minimal change — focused improvement, not rewrite.
-  - Bump "_version" by 1.
-
-Soft guidance:
-  - User asks for shorter answers → lower max_output_tokens + add brevity instruction in system_prompt.
-  - User wants more technical depth → adjust system_prompt to allow technical detail.
-  - User's tone is casual → relax persona; formal → match formal register.
-
-Recent conversation:
-{convo}
-
-Current graph:
-{json.dumps(current, indent=2, ensure_ascii=False)}
-
-Return the revised graph JSON."""
-
-    raw = ask_text(provider, messages=[
-        ng.ChatMessage(role="system", content="You output strict JSON only, no prose or fences."),
-        ng.ChatMessage(role="user", content=instructions),
-    ], temperature=0.2, max_output_tokens=1500).strip()
-
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-        if raw.endswith("```"):
-            raw = raw[:-3]
-        raw = raw.strip()
-
-    try:
-        proposed = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"evolver returned non-JSON: {e}; raw[:300]: {raw[:300]!r}")
-    if not isinstance(proposed, dict):
-        raise RuntimeError("evolver graph must be an object")
-    if type(proposed.get("_version")) is not int or proposed["_version"] != current["_version"] + 1:
-        raise RuntimeError("evolver must increment the graph version by one")
-    if proposed.get("schema_version") != current_schema:
-        raise RuntimeError(
-            "evolver changed or omitted schema_version: "
-            f"expected {current_schema!r}, got {proposed.get('schema_version')!r}")
-
-    reason = proposed.pop("_reason", None) or "evolved from conversation"
-    return proposed, reason
+V1 = agent(1, "You are a friendly assistant. Give helpful context and one practical suggestion.", 400)
+V2 = agent(2, "You are a friendly assistant. Answer in one short sentence.", 60)
 
 
-# ── Audit logger: record evolution event in __graph_meta__ channel ──
-
-def log_evolution(engine, thread_id: str, new_def: dict, reason: str) -> dict:
-    state = engine.get_state(thread_id) or {}
-    gv_before = state.get("global_version", 0)
-
-    canonical = json.dumps(new_def, sort_keys=True, ensure_ascii=False).encode()
-    meta = {
-        "version": new_def.get("_version"),
-        "hash": hashlib.sha256(canonical).hexdigest()[:12],
-        "applied_after_global_version": gv_before,
-        "reason": reason,
-        "applied_at": time.time(),
-    }
-    engine.update_state(
-        thread_id,
-        {"__graph_meta__": [meta]},
-        as_node="__evolve__",
-    )
-    return meta
+def script(turn):
+    if "evolver" in turn.last_user_text:                       # the evolver call
+        return say(json.dumps(V2))
+    if "one short sentence" in turn.system_text:
+        return say("Wind is strongest on exposed ridges, so turn back early.")
+    return say("Winter trips need layers, a charged phone, a paper map and a plan for early dark. "
+               "Check the avalanche report the night before and tell someone your route.")
 
 
-# ── Driver ──────────────────────────────────────────────────────────
-
-def _last_assistant(state) -> str:
-    msgs = (state.get("channels", {}).get("messages") or {}).get("value") or []
-    for m in reversed(msgs):
-        if m.get("role") == "assistant":
-            return m.get("content", "")
-    return ""
+def messages_of(engine, thread):
+    return (engine.get_state(thread)["channels"]["messages"] or {}).get("value") or []
 
 
-def main():
-    provider = schema_provider()
-    ctx = ng.NodeContext(provider=provider)
-    store = ng.InMemoryCheckpointStore()
-    TID = "customer_alice"
+with example_provider(script) as chosen:
+    ctx, store, thread = ng.NodeContext(provider=chosen.provider), ng.InMemoryCheckpointStore(), "alice"
 
-    agent = INITIAL_AGENT
-    engine = ng.GraphEngine.compile(agent, ctx, store)
+    def chat(engine, text):
+        engine.run(ng.RunConfig(thread_id=thread, resume_if_exists=True,
+                                input={"messages": [{"role": "user", "content": text}]}))
+        return messages_of(engine, thread)[-1]["content"]
 
-    pre_evolve_turns = [
-        "Hi! I'm planning a winter weekend trip to the mountains. What should I think about?",
-        "Way too much, can you keep it shorter? Just the essentials.",
-        "Also I'd prefer concrete numbers — temperatures, gear weights, that kind of detail.",
-    ]
-    for i, user_msg in enumerate(pre_evolve_turns, 1):
-        print(f"\n=== turn {i} (graph v{agent['_version']}) ===")
-        print(f"  user:      {user_msg}")
-        engine.run(ng.RunConfig(
-            thread_id=TID,
-            input={"messages": [{"role": "user", "content": user_msg}]},
-            resume_if_exists=True,
-        ))
-        state = engine.get_state(TID)
-        reply = _last_assistant(state)
-        print(f"  assistant: {reply[:200]}{'...' if len(reply) > 200 else ''}")
+    engine = ng.GraphEngine.compile(V1, ctx, store)
+    print("v1 reply:", chat(engine, "I'm planning a winter weekend in the mountains.")[:50] + "...")
+    print("v1 reply:", chat(engine, "Too long, keep it shorter please.")[:50] + "...")
 
-    print("\n=== evolving agent ===")
-    state = engine.get_state(TID)
-    conv = (state.get("channels", {}).get("messages") or {}).get("value") or []
-    proposed, reason = propose_new_agent(agent, conv, provider)
+    # The evolver reads the conversation and proposes a revised definition.
+    conversation = "\n".join(f"[{m['role']}] {m['content'][:100]}" for m in messages_of(engine, thread))
+    request = f"You are an agent evolver. Propose a revised graph.\n{conversation}\n{json.dumps(V1)}"
+    proposed = json.loads(ask_text(chosen.provider, [{"role": "user", "content": request}],
+                                   max_output_tokens=1500))
+    admitted, why = validate_agent(V1, proposed)
+    print(f"evolver proposed v{proposed['_version']}, admitted: {why}")
+    assert admitted
+    old, new = V1["nodes"]["chat"]["config"], proposed["nodes"]["chat"]["config"]
+    print(f"changes: system_prompt, max_output_tokens {old['max_output_tokens']} -> {new['max_output_tokens']}")
 
-    ok, why = validate_agent(proposed)
-    if not ok:
-        print(f"  REJECTED: {why}")
-        return
-    try:
-        ng.GraphEngine.compile(proposed, ctx, store)
-    except Exception as e:
-        print(f"  COMPILE FAILED: {e}")
-        return
-    print(f"  accepted: {reason}")
-    print(f"  v{agent['_version']} → v{proposed['_version']}")
-    cfg_diff = _summarise_change(agent, proposed)
-    if cfg_diff:
-        print(f"  changes: {cfg_diff}")
-
-    meta = log_evolution(engine, TID, proposed, reason)
-    print(f"  __graph_meta__: hash={meta['hash']} applied_after_gv={meta['applied_after_global_version']}")
-
-    agent = proposed
-    engine = ng.GraphEngine.compile(agent, ctx, store)
-
-    post_evolve_turns = [
-        "OK now what about wind exposure on exposed ridges?",
-    ]
-    for user_msg in post_evolve_turns:
-        print(f"\n=== post-evolve turn (graph v{agent['_version']}) ===")
-        print(f"  user:      {user_msg}")
-        engine.run(ng.RunConfig(
-            thread_id=TID,
-            input={"messages": [{"role": "user", "content": user_msg}]},
-            resume_if_exists=True,
-        ))
-        state = engine.get_state(TID)
-        reply = _last_assistant(state)
-        print(f"  assistant: {reply[:200]}{'...' if len(reply) > 200 else ''}")
-
-    print("\n=== audit chain ===")
-    state = engine.get_state(TID)
-    msgs = (state.get("channels", {}).get("messages") or {}).get("value") or []
-    metas = (state.get("channels", {}).get("__graph_meta__") or {}).get("value") or []
-    print(f"  total messages:    {len(msgs)}")
-    print(f"  total evolutions:  {len(metas)}")
-    for m in metas:
-        print(f"    v{m['version']} hash={m['hash']} applied_after_gv={m['applied_after_global_version']} — {m['reason']}")
-    print(f"  final global_version: {state.get('global_version')}")
-
-
-def _summarise_change(old: dict, new: dict) -> str:
-    """Best-effort diff summary for the console output."""
-    parts = []
-    old_nodes = set((old.get("nodes") or {}).keys())
-    new_nodes = set((new.get("nodes") or {}).keys())
-    if old_nodes != new_nodes:
-        added = new_nodes - old_nodes
-        removed = old_nodes - new_nodes
-        if added: parts.append(f"+nodes={sorted(added)}")
-        if removed: parts.append(f"-nodes={sorted(removed)}")
-    for nname in old_nodes & new_nodes:
-        old_cfg = (old["nodes"][nname] or {}).get("config") or {}
-        new_cfg = (new["nodes"][nname] or {}).get("config") or {}
-        old_max = old_cfg.get("max_output_tokens")
-        new_max = new_cfg.get("max_output_tokens")
-        if old_max != new_max:
-            parts.append(f"{nname}.max_tokens {old_max}→{new_max}")
-        old_sp = old_cfg.get("system_prompt", "")
-        new_sp = new_cfg.get("system_prompt", "")
-        if old_sp != new_sp:
-            parts.append(f"{nname}.system_prompt changed ({len(old_sp)}→{len(new_sp)} chars)")
-    return ", ".join(parts)
-
-
-if __name__ == "__main__":
-    main()
+    # Compile the admitted definition on the same store and record the rewrite.
+    kept = len(messages_of(engine, thread))
+    meta = {"version": proposed["_version"], "applied_at": time.time(), "reason": "shorter answers",
+            "hash": hashlib.sha256(json.dumps(proposed, sort_keys=True).encode()).hexdigest()[:12]}
+    engine.update_state(thread, {"__graph_meta__": [meta]}, as_node="__evolve__")
+    engine = ng.GraphEngine.compile(proposed, ctx, store)
+    survived = len(messages_of(engine, thread))
+    print(f"messages kept across the rewrite: {survived} of {kept}")
+    print("v2 reply:", chat(engine, "What about wind on exposed ridges?"))
+    recorded = engine.get_state(thread)["channels"]["__graph_meta__"]["value"]
+    print(f"__graph_meta__: v{recorded[0]['version']} hash {recorded[0]['hash']}")
+    if chosen.scripted:
+        print("model calls:", chosen.scripted.call_count)
+        assert chosen.scripted.call_count == 4 and survived == kept == 4

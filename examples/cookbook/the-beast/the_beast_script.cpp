@@ -22,16 +22,19 @@
 //   node's surface; only the script's inner logic is (unavoidably)
 //   unproven — bounded by `timeout` + `max_steps`.
 //
-// Setup:  OPENROUTER_API_KEY in .env ; python3 + timeout on PATH.
+// Setup:  export OPENROUTER_API_KEY=sk-or-... ; python3 + timeout on PATH.
 // Build:  cmake --build build --target cookbook_the_beast_script
 // Run:    ./build/cookbook_the_beast_script
+//
+// smoke-args: --selftest
+// smoke-expect: final counter = 3
+// smoke-expect: trace: tick -> tick -> tick -> END
 
 #include <neograph/neograph.h>
 #include <neograph/graph/validator.h>
 #include <neograph/graph/loader.h>
 #include "../../provider_example_support.h"
 
-#include <cppdotenv/dotenv.hpp>
 
 #include <atomic>
 #include <cstdio>
@@ -348,7 +351,6 @@ int main(int argc, char** argv) {
         core = v.core;
     }
 
-    cppdotenv::auto_load_dotenv();
     const char* key = std::getenv("OPENROUTER_API_KEY");
     if (!selftest) {
         if (!key || !*key) { std::cerr << "OPENROUTER_API_KEY not set (or use --selftest)\n"; return 2; }

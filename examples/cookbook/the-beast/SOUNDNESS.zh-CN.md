@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=zh-CN source_sha256=e7b1391ddc95470be622551937b4ac833623fd97280f71e2d09cc07865360b8b -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=zh-CN source_sha256=18f1e186e8a90c276c3c13b2b8bc42aae5336f5a2c3e6b040838d071bf3a685d -->
 # 一致性闸门的健全性：一份形式化的配套文档
 
 **Languages:** [English](SOUNDNESS.md) | [한국어](SOUNDNESS.ko.md) | [日本語](SOUNDNESS.ja.md) | [简体中文](SOUNDNESS.zh-CN.md)
@@ -7,7 +7,7 @@
 
 迁移后的 C++ 编写与修复路径，会构造带类型的 `ProviderRequest` 和 `sp::Message` 历史，并消费完整、不可变的 `sp::Outcome` 结果，其中包括返回的每一条原生消息和每个 part。提取文本只是为了解析候选的 JSON/Python，不会用它替换原生的对话历史。编译、解析、初始化的反馈，会追加在这些消息之后。语义修复受每个程序自身的尝试次数限制（实时编写：三次；Forge 服务器生成：两次）；它既不是传输层重试，也不是不受限制的演化。
 
-interface-4 的 [Forge 源码契约](README.md)另外规定：遇到空的
+[Forge 源码契约](README.md)另外规定：遇到空的
 `MaxTokens` 时，最多只做一次把上限加倍的恢复调用，截止时间固定为 300 秒，并保留 outcome 和用量；
 对失败以及 observer/settlement 错误，它从不重试。
 

@@ -269,7 +269,7 @@ int main(int argc, char** argv) {
 
 Run it with the path of the server from the previous section: `./remote_word_count ./word_count_server`. It prints `count: 8`.
 
-For model-driven tool use, `MCPClient::get_tools()` returns the server's tools as NeoGraph `Tool` objects. Put them in `NodeContext::tools` (Python: `ng.NodeContext(tools=client.get_tools())`) and a `tool_dispatch` node runs the calls a model requests. The [C++ examples](../examples/README.md) and [Python examples](../bindings/python/examples/README.md) have MCP agents; they need a model and therefore an API key.
+For model-driven tool use, `MCPClient::get_tools()` returns the server's tools as NeoGraph `Tool` objects. Put them in `NodeContext::tools` (Python: `ng.NodeContext(tools=client.get_tools())`) and a `tool_dispatch` node runs the calls a model requests. The [C++ examples](../examples/README.md) include MCP agents (03, 20 and 22 to 24). They need no API key: a standard-library demo server, `examples/mcp_demo_server.py`, provides the tools and a scripted model plays the LLM. Add `--live` to use a real model, which needs `OPENROUTER_API_KEY`. The [Python example 26](../bindings/python/examples/README.md) starts its own local MCP server and needs no key either.
 
 ## Serve over Streamable HTTP
 

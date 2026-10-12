@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=examples/cookbook/minimal-mcp/README.md locale=ko source_sha256=a7376fb45ce9458c71f7360172bb26947a1694fa341962f3490ecc028390d1a4 -->
+<!-- neograph-i18n: source=examples/cookbook/minimal-mcp/README.md locale=ko source_sha256=ad305d0ff700addd7966a8ce6dc03cdceaa6dd0790dd0cdcdb650b98944a5004 -->
 # 최소 MCP — fastmcp나 API key 없이
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-이 저장소의 다른 모든 MCP 예제(03/20/21/22)는 고정된 OpenRouter DeepSeek 모델을 사용하는 ReAct 루프 안에 MCP 클라이언트를 감싸며, 대부분의 MCP 튜토리얼은 서버 측에서 `pip install fastmcp` (~60개 패키지를 가져옴)을 가정합니다. 이는 유용한 사실을 숨깁니다:
+이 저장소의 다른 MCP 예제(03, 20~24)는 MCP 클라이언트를 스크립트 모델이 도는 ReAct 루프에 넘기며, 대부분의 MCP 튜토리얼은 서버 쪽에서 `pip install fastmcp`(패키지 약 60개)를 가정합니다. 이 쿡북은 루프를 걷어 내고 클라이언트만 보여 주므로 다음 사실이 잘 드러납니다:
 
 > 피어는 stdio MCP 프로토콜을 구현하면 됩니다. C++ 클라이언트는
 > `libneograph_mcp`와 전이 native 의존성을 링크합니다. 피어에는 Python MCP

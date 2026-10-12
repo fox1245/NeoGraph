@@ -6,7 +6,7 @@
 
 The migrated C++ author/repair paths build typed `ProviderRequest` and `sp::Message` histories and consume full immutable `sp::Outcome` results, including every returned native message/part. Text extraction is only for parsing the candidate JSON/Python; it is not used to replace native conversation history. Compiler/parse/initialization feedback is appended after those messages. Semantic repair is bounded by each program's attempt limit (live author: three; Forge server generation: two); it is not transport retry or unlimited evolution.
 
-The interface-4 [Forge source contract](README.md) separately bounds empty
+The [Forge source contract](README.md) separately bounds empty
 `MaxTokens` recovery to one doubled-cap call with a pinned 300-second deadline
 and retained outcomes/usage; it never retries failures or observer/settlement errors.
 

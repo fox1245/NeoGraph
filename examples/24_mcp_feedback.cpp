@@ -1,31 +1,38 @@
-// NeoGraph Example 24: Human Feedback Loop over MCP
+// NeoGraph Example 24: operator feedback as new conversation content
 //
-// The agent produces a draft answer without using tools; the operator
-// reads it, decides it's insufficient, and adds a follow-up turn telling
-// the agent to actually call an MCP tool. The second run feeds the agent
-// the complete conversation — prior draft + feedback — so the LLM sees
-// the feedback in context and revises with a real tool call.
+// Round 1: the agent answers from its own knowledge and does not call a tool. The operator
+// reads the draft, finds it too vague, and appends a message that asks for the real reading.
+// Round 2 runs on the full history, draft plus feedback, so the model sees the feedback in
+// context and calls the MCP weather tool. Compare example 20, where the operator only approves
+// or stops a call: here the feedback itself is content the model must take into account.
+// The scripted model branches on what it was sent, so the second round can only call the
+// tool if the feedback really reached it. The server is examples/mcp_demo_server.py.
 //
-// Compared to example 20 (binary approve/reject before a tool fires),
-// this shows feedback as new conversational content that the agent must
-// *accept and incorporate*.
+// Usage:
+//   python3 examples/mcp_demo_server.py --http 8765          # terminal 1
+//   ./example_mcp_feedback http://127.0.0.1:8765/mcp         # terminal 2
+//   (add --live for a real model; OPENROUTER_API_KEY in the environment, billed)
 //
-// Usage (after starting examples/demo_mcp_server.py):
-//   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
-//   ./example_mcp_feedback
-// (auto-loads .env from the cwd or any parent directory.)
+// smoke-companion: @PYTHON@ @SRC@/examples/mcp_demo_server.py --http @PORT@
+// smoke-wait-port: @PORT@
+// smoke-args: http://127.0.0.1:@PORT@/mcp
+// smoke-expect: round 1 used tools: no
+// smoke-expect: round 2 used tools: yes
+// smoke-expect: revised: Seoul: 18C, cloudy
+// smoke-forbid: [neograph] lint
 
 #include <neograph/neograph.h>
-#include "provider_example_support.h"
+#include "scripted_provider.h"
+#include <neograph/graph/react_graph.h>
 #include <neograph/mcp/client.h>
 
-#include <cppdotenv/dotenv.hpp>
-
+#include <algorithm>
 #include <iostream>
-#include <cstdlib>
+#include <string>
+#include <string_view>
 
-// Explicit display projection; messages remain the full trusted history.
-static std::string last_assistant(const std::vector<sp::Message>& messages) {
+// The text of the last assistant message that has any.
+static std::string final_text(const std::vector<sp::Message>& messages) {
     for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
         if (it->role != sp::Role::Assistant) continue;
         std::string text;
@@ -36,115 +43,53 @@ static std::string last_assistant(const std::vector<sp::Message>& messages) {
     return "(empty)";
 }
 
-static bool trace_used_tools(const std::vector<std::string>& trace) {
-    for (const auto& n : trace) if (n == "tools") return true;
-    return false;
+static bool used_tools(const std::vector<std::string>& trace) {
+    return std::find(trace.begin(), trace.end(), "tools") != trace.end();
 }
 
 int main(int argc, char** argv) {
-    cppdotenv::auto_load_dotenv();
+    std::string url = "http://127.0.0.1:8765/mcp";
+    for (int i = 1; i < argc; ++i)
+        if (std::string_view(argv[i]).rfind("--", 0) != 0) url = argv[i];
 
     try {
-    const std::string mcp_url  = (argc >= 2) ? argv[1] : "http://localhost:8000/mcp";
-    const std::string question = (argc >= 3) ? argv[2]
-        : "What's the weather in Seoul right now?";
+        const std::string feedback = "That is a guess. Please call the weather tool and give me the real reading.";
+        auto scripted = std::make_shared<examples::ScriptedProvider>(
+            [feedback](const examples::ScriptedTurn& turn) {
+                if (turn.last_user_text() != feedback)  // round 1: no feedback yet
+                    return examples::say("draft: it is probably mild and clear in Seoul.");
+                if (!turn.has_tool_result()) return examples::call_tool("get_weather", {{"city", "Seoul"}});
+                return examples::say("revised: " + turn.last_tool_result());
+            });
+        auto provider = examples::choose_provider(argc, argv, scripted);
 
-    const char* key_env = std::getenv("OPENROUTER_API_KEY");
-    if (!key_env) {
-        std::cerr << "OPENROUTER_API_KEY missing (set it or put it in .env)\n";
-        return 1;
-    }
-    std::string api_key = key_env;
+        neograph::mcp::MCPClient client(url);
+        client.initialize("example-mcp-feedback");
+        auto engine = neograph::graph::create_react_graph(
+            provider, client.get_tools(),
+            "Answer from your own knowledge. Use a tool only when the user asks for real data.",
+            examples::openrouter_model);
 
-    neograph::mcp::MCPClient mcp_client(mcp_url);
-    mcp_client.initialize("example-mcp-feedback");
-    auto tools = mcp_client.get_tools();
-    std::cout << "[*] " << tools.size()
-              << " MCP tools available (agent may or may not call them)\n\n";
+        // Round 1.
+        neograph::graph::RunConfig first;
+        first.provider_messages = std::vector<sp::Message>{
+            examples::message(sp::Role::User, "What is the weather in Seoul right now?")};
+        const auto draft = engine->run(first);
+        std::cout << final_text(draft.native_messages) << "\n";
+        std::cout << "round 1 used tools: " << (used_tools(draft.execution_trace) ? "yes" : "no") << "\n";
 
-    std::shared_ptr<neograph::Provider> provider =
-        examples::make_openrouter_provider(api_key);
-
-    neograph::json definition = {
-        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
-        {"name", "feedback_loop"},
-        {"channels", {{"messages", {{"reducer", "append"}}}}},
-        {"nodes", {
-            {"llm",   {{"type", "llm_call"}}},
-            {"tools", {{"type", "tool_dispatch"}}}
-        }},
-        {"edges", neograph::json::array({
-            {{"from", "__start__"}, {"to", "llm"}},
-            {{"from", "llm"}, {"condition", "has_tool_calls"},
-             {"routes", {{"true", "tools"}, {"false", "__end__"}}}},
-            {{"from", "tools"}, {"to", "llm"}}
-        })}
-    };
-
-    neograph::graph::NodeContext ctx;
-    ctx.provider = provider;
-    ctx.model = examples::openrouter_model;
-    ctx.instructions =
-        "You are an assistant. Answer from your own knowledge first. "
-        "Use the provided tools only if the user explicitly asks for "
-        "real-time or external data.";
-
-    auto store  = std::make_shared<neograph::graph::InMemoryCheckpointStore>();
-    neograph::graph::EngineResources resources;
-    resources.tools = neograph::ToolSet(std::move(tools));
-    auto engine     = neograph::graph::GraphEngine::build(
-        definition, neograph::graph::EngineConfig{.node_context = ctx, .checkpoint_store = store},
-        std::move(resources));
-
-    // ---------- Round 1 ----------
-    std::cout << "User: " << question << "\n\n";
-    std::cout << "=== Round 1 — draft (agent tends to guess) ===\n";
-
-    neograph::graph::RunConfig run1;
-    run1.thread_id = "fb-001";
-    run1.provider_messages = std::vector<sp::Message>{examples::message(sp::Role::User, question)};
-    auto r1 = engine->run(run1);
-
-    std::cout << "Assistant draft:\n  "
-              << last_assistant(r1.native_messages) << "\n\n";
-
-    // ---------- Human feedback ----------
-    const std::string feedback =
-        "That's not good enough. Please actually call the MCP weather tool "
-        "and give me the real current reading.";
-    std::cout << ">>> Operator feedback:\n    \"" << feedback << "\"\n\n";
-
-    // ---------- Round 2 — feed full history + feedback to a new run ----------
-    std::cout << "=== Round 2 — agent incorporates the feedback ===\n";
-
-    neograph::graph::RunConfig run2;
-    run2.thread_id = "fb-002";
-    // Retain the engine-owned checkpoint context and native seals by value.
-    // No JSON projection is interpreted as replay authority.
-    run2.provider_messages = r1.native_messages;
-    run2.provider_messages->push_back(examples::message(sp::Role::User, feedback));
-    auto r2 = engine->run(run2);
-
-    std::cout << "Assistant (revised):\n  "
-              << last_assistant(r2.native_messages) << "\n\n";
-
-    std::cout << "Round-2 trace: ";
-    for (size_t i = 0; i < r2.execution_trace.size(); ++i) {
-        std::cout << r2.execution_trace[i];
-        if (i + 1 < r2.execution_trace.size()) std::cout << " → ";
-    }
-    std::cout << " → END\n";
-
-    std::cout << "\nResult: round-1 used tools? "
-              << (trace_used_tools(r1.execution_trace) ? "yes" : "no")
-              << "    |    round-2 used tools? "
-              << (trace_used_tools(r2.execution_trace)
-                      ? "yes — feedback accepted"
-                      : "no — feedback was ignored")
-              << "\n";
-    return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "\nError: " << e.what() << "\n";
+        // The operator's feedback joins the conversation: the whole first round, then one more
+        // user message. native_messages is the trusted history, so it is passed on unchanged.
+        std::cout << "operator: " << feedback << "\n";
+        neograph::graph::RunConfig second;
+        second.provider_messages = draft.native_messages;
+        second.provider_messages->push_back(examples::message(sp::Role::User, feedback));
+        const auto revised = engine->run(second);
+        std::cout << final_text(revised.native_messages) << "\n";
+        std::cout << "round 2 used tools: " << (used_tools(revised.execution_trace) ? "yes" : "no") << "\n";
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "Error: " << error.what() << "\n";
         return 1;
     }
 }

@@ -1,7 +1,7 @@
 // NeoGraph RE Agent — shared building blocks (header-only).
 //
-// Shared provider setup, GhidraMCP discovery and backend check, tool selection,
-// and final-text extraction for the sequential and parallel RE examples.
+// GhidraMCP discovery and backend check, tool selection, the system prompt and
+// final-text extraction for the RE examples.
 #pragma once
 
 #include <neograph/neograph.h>
@@ -93,31 +93,15 @@ Workflow — follow it exactly:
 Be decisive. Do not over-explore. The binary is small (under 10 user functions).
 )";
 
-/// Build the OpenRouter Responses provider for the RE agent.
-///
-/// OpenRouter exposes the OpenAI-compatible Responses endpoint over HTTPS/SSE.
-/// The provider-routing object opts every request into Zero Data Retention.
-///
-/// @param api_key  OpenRouter API key; the environment value wins when set.
-/// @return Shared provider; caller stores it in `std::shared_ptr<Provider>`.
-inline std::shared_ptr<neograph::Provider>
-make_provider(const char* api_key) {
-    const char* env_key = std::getenv("OPENROUTER_API_KEY");
-    return examples::make_openrouter_provider(
-        (env_key && *env_key) ? env_key : (api_key ? api_key : ""),
-        "responses", std::chrono::seconds(600));
-}
-
 /// Result of `spawn_ghidra_bridge` — keeps the MCP client (which owns
 /// the spawned subprocess) alongside the discovered tool list. Caller
 /// must move both out (or hold the MCPClient at least as long as any
 /// MCPTool that still holds a session reference internally).
 ///
 /// `client` is held via unique_ptr because MCPClient owns a std::mutex
-/// (Round 3 audit, NeoGraph 7457a09) and is therefore neither copyable
-/// nor movable — but `GhidraBridge` itself needs to be returned by
-/// value from `spawn_ghidra_bridge`, so the heap indirection restores
-/// move semantics without touching the upstream class.
+/// and is therefore neither copyable nor movable. `GhidraBridge` itself is returned by value
+/// from `spawn_ghidra_bridge`, so the heap indirection restores move semantics without
+/// changing MCPClient.
 struct GhidraBridge {
     std::unique_ptr<neograph::mcp::MCPClient> client;
     std::vector<std::unique_ptr<neograph::Tool>> tools;
@@ -125,9 +109,10 @@ struct GhidraBridge {
 
 /// Spawn the GhidraMCP stdio server subprocess and discover its tools.
 ///
+/// `bridge_script` (the --bridge option of example 35) wins over the environment.
 /// Env overrides:
-///   * GHIDRA_MCP_BRIDGE  — required path to the GhidraMCP server script
-///                          (bridge_mcp_ghidra.py).
+///   * GHIDRA_MCP_BRIDGE  — path to the GhidraMCP server script
+///                          (bridge_mcp_ghidra.py) when no script is passed.
 ///   * GHIDRA_MCP_PYTHON  — Python executable (default: python3).
 ///   * GHIDRA_SERVER_URL  — http://host:port/ of the GhidraMCP backend
 ///                          (default: http://127.0.0.1:18080/).
@@ -142,13 +127,16 @@ struct GhidraBridge {
 /// MCPClient). Tool discovery does not prove the backend is reachable:
 /// some GhidraMCP releases list every tool while their backend is down.
 /// Call `check_ghidra_backend` before starting the model loop.
-inline GhidraBridge spawn_ghidra_bridge() {
-    const char* bridge_path = std::getenv("GHIDRA_MCP_BRIDGE");
+inline GhidraBridge spawn_ghidra_bridge(const std::string& bridge_script = {}) {
+    const char* env_path = std::getenv("GHIDRA_MCP_BRIDGE");
     const char* python = std::getenv("GHIDRA_MCP_PYTHON");
     const char* server_url = std::getenv("GHIDRA_SERVER_URL");
-    if (!bridge_path || !*bridge_path)
+    const std::string bridge_path = !bridge_script.empty() ? bridge_script
+                                    : (env_path ? env_path : "");
+    if (bridge_path.empty())
         throw std::invalid_argument(
-            "Set GHIDRA_MCP_BRIDGE to the Ghidra MCP bridge script");
+            "Pass --bridge <script> or set GHIDRA_MCP_BRIDGE to the Ghidra MCP bridge script "
+            "(examples/ghidra_stand_in.py is an offline stand-in)");
     std::vector<std::string> bridge_argv = {
         python && *python ? python : "python3",
         bridge_path,

@@ -36,13 +36,14 @@
 // Build:  cmake --build build --target cookbook_the_beast_baldwin_llm
 // Run:    ./build/cookbook_the_beast_baldwin_llm            # oracle learner
 //         OPENROUTER_API_KEY=... ./build/cookbook_the_beast_baldwin_llm --llm
+//
+// smoke-expect: THE BEAST (baldwin-llm
 
 #include <neograph/neograph.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
 #include "../../provider_example_support.h"
 
-#include <cppdotenv/dotenv.hpp>
 
 #include <array>
 #include <cmath>
@@ -307,7 +308,7 @@ int main(int argc, char** argv) try {
     register_arith();
     ng::NodeContext ctx;
     const bool want_llm = (argc > 1 && std::string(argv[1]) == "--llm");
-    const char* key = want_llm ? (cppdotenv::auto_load_dotenv(), std::getenv("OPENROUTER_API_KEY"))
+    const char* key = want_llm ? std::getenv("OPENROUTER_API_KEY")
                                : nullptr;
     const bool live = want_llm && key && *key;
     if (want_llm && !live) {

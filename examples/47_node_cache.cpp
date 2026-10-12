@@ -9,6 +9,9 @@
 // must be 1 and miss_count must be 2.
 //
 // Usage: ./example_node_cache
+//
+// smoke-expect: exec_count=1 cache_size=1 hits=1 misses=1
+// smoke-expect: PASS
 
 #include <neograph/neograph.h>
 

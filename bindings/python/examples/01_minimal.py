@@ -1,56 +1,44 @@
-"""01 — Minimal Python custom node, no LLM.
+"""01 — Your first graph: one node, two channels, no model.
 
-Smallest possible NeoGraph graph: one custom Python node that reads
-a channel, multiplies, writes the result back. No API key needed.
+A node is a function from state to channel writes. This one reads the `seed` channel, doubles
+it and writes the result to the `doubled` channel. The graph is `__start__ -> double -> __end__`
+and the definition is a plain dict. No API key is needed.
 
 Run:
     pip install neograph-engine
     python 01_minimal.py
+
+smoke-expect: doubled = 42
+smoke-expect: trace:   ['double']
+smoke-forbid: [neograph] lint
 """
 
 import neograph_engine as ng
 
 
-class DoublerNode(ng.GraphNode):
-    """Reads `seed`, writes `doubled = seed * 2`."""
-
-    def __init__(self, name):
-        super().__init__()
-        self._name = name
-
-    def get_name(self):
-        return self._name
-
-    def run(self, input):
-        seed = input.state.get("seed") or 0
-        return [ng.ChannelWrite("doubled", seed * 2)]
+# `@ng.node("double")` registers this function as the node type "double".
+@ng.node("double")
+def double(state):
+    return [ng.ChannelWrite("doubled", state.get("seed") * 2)]
 
 
-# Register the node type so the JSON definition can reference it.
-ng.NodeFactory.register_type(
-    "doubler",
-    lambda name, config, ctx: DoublerNode(name),
-)
-
-# Compile a 1-node graph: __start__ → doubler → __end__
 definition = {
     "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
     "name": "minimal",
+    # A channel is a named slot of state; "overwrite" means a write replaces the value.
     "channels": {
-        "seed":    {"reducer": "overwrite"},
+        "seed": {"reducer": "overwrite"},
         "doubled": {"reducer": "overwrite"},
     },
-    "nodes": {"d": {"type": "doubler"}},
+    "nodes": {"double": {"type": "double"}},
     "edges": [
-        {"from": ng.START_NODE, "to": "d"},
-        {"from": "d",           "to": ng.END_NODE},
+        {"from": ng.START_NODE, "to": "double"},
+        {"from": "double", "to": ng.END_NODE},
     ],
 }
 
 engine = ng.GraphEngine.compile(definition, ng.NodeContext())
-
-cfg = ng.RunConfig(thread_id="t1", input={"seed": 21})
-result = engine.run(cfg)
+result = engine.run(ng.RunConfig(thread_id="t1", input={"seed": 21}))
 
 print("doubled =", result.output["channels"]["doubled"]["value"])
 print("trace:  ", result.execution_trace)

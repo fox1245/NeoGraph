@@ -25,6 +25,8 @@
 //   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_rag_agent
 // (auto-loads .env from the cwd or any parent directory.)
+//
+// smoke-skip: needs OPENROUTER_API_KEY (live embeddings and model call)
 
 #include <neograph/neograph.h>
 #include "provider_example_support.h"

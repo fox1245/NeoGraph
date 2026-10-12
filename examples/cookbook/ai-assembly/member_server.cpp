@@ -6,13 +6,15 @@
 // over the standard /.well-known/agent-card.json discovery path.
 //
 // Usage:
-//   member_server <port> <name> <party> <system_prompt_file>
+//   member_server <port> <name> <party> <system_prompt_file> [--mock]
 //
 // Example:
 //   member_server 8101 의원_김진보 진보당 prompts/jinbo.txt
 //
-// .env (or env vars) must set OPENROUTER_API_KEY. The model is hard-coded to
-// ~deepseek/deepseek-v4-flash-latest.
+// Live use needs OPENROUTER_API_KEY in the environment; --mock needs nothing. The model is
+// hard-coded to ~deepseek/deepseek-v4-flash-latest.
+//
+// smoke-skip: serves A2A until stopped; speaker.cpp starts four of these with --mock as companions of its smoke test
 
 #include <neograph/neograph.h>
 #include <neograph/a2a/server.h>

@@ -5,9 +5,11 @@
 // discovery data: no card-provided endpoint, text, credential, or source code
 // can reach the graph. The generated graph may invoke only CopyNinjaNode.
 //
-// Setup: put OPENROUTER_API_KEY=sk-or-... in .env in the working directory or a parent
+// Setup: export OPENROUTER_API_KEY=sk-or-... (read from the process environment only)
 // Build: cmake --build build --target cookbook_the_beast_copy_ninja
 // Run:   ./build/cookbook_the_beast_copy_ninja "Grace"
+//
+// smoke-skip: needs OPENROUTER_API_KEY and a local A2A source card
 
 #include <neograph/a2a/agent_card_candidate.h>
 #include <neograph/graph/checkpoint.h>
@@ -18,7 +20,6 @@
 
 #include "beast_common.h"
 #include "../../provider_example_support.h"
-#include <cppdotenv/dotenv.hpp>
 #include <httplib.h>
 
 #include <atomic>
@@ -202,10 +203,9 @@ std::string local_binding_error(const json& core) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    cppdotenv::auto_load_dotenv();
     const char* key = std::getenv("OPENROUTER_API_KEY");
     if (!key || !*key) {
-        std::cerr << "OPENROUTER_API_KEY not set (env, or .env in the working directory or a parent)\n";
+        std::cerr << "OPENROUTER_API_KEY not set in the environment\n";
         return 2;
     }
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/26_postgres_react_hitl/README.md locale=ko source_sha256=fb347c51a8ebcb9bd157da6854903e0e2a348f5f3672207040849b70a60e57cb -->
+<!-- neograph-i18n: source=examples/26_postgres_react_hitl/README.md locale=ko source_sha256=d730666d7dc2da92103ec602b763743c21ff797faf2ab3fd2a8dcbe217299b46 -->
 # 예제 26 — HITL을 사용한 Postgres 기반 Deep Research
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -210,7 +210,7 @@ Failure, observer/settlement 오류, 전달된 streaming part는 재시도하지
 human review 전에 오류가 됩니다. 내용이 있는 `MaxTokens` 보고서는 public 투영에서 `Incomplete`를
 표시하고 불변 outcome을 수정하거나 부분 텍스트를 재시도하지 않습니다. 빈 compression이 ladder를
 소진하면 diagnostic을 생성하며 성공한 provider result를 꾸며내지 않습니다.
-이것은 보존된 interface-4 소스 계약이지 새 live 실행이나 durability 증명이 아닙니다.
+이것은 보존된 소스 계약이지 새 live 실행이나 durability 증명이 아닙니다.
 
 ## 왜 프론트엔드가 없나요?
 

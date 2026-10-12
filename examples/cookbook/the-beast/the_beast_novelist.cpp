@@ -30,6 +30,8 @@
 // Build:  cmake --build build --target cookbook_the_beast_novelist
 // Run:    ./build/cookbook_the_beast_novelist "your premise here"   [chapters]
 //         OPENROUTER_API_KEY=... ./build/cookbook_the_beast_novelist "..." 12
+//
+// smoke-expect: done — 1554 characters across 12 chapters.
 
 #include <neograph/neograph.h>
 #include <neograph/graph/validator.h>
@@ -37,7 +39,6 @@
 #include <neograph/graph/node.h>
 #include "../../provider_example_support.h"
 
-#include <cppdotenv/dotenv.hpp>
 
 #include <algorithm>
 #include <array>
@@ -292,7 +293,6 @@ int main(int argc, char** argv) {
           "whoever borrows them next — and one prophecy is her own death in a week.";
     int total = argc > 2 ? std::max(2, std::atoi(argv[2])) : 12;
 
-    cppdotenv::auto_load_dotenv();
     const char* key = std::getenv("OPENROUTER_API_KEY");
     if (key && *key)
         g_prov = examples::make_openrouter_provider(key, "chat");

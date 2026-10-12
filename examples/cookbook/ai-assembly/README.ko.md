@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ko source_sha256=0bc9a674677c52e4a62ad11530f1770b7024e4395ff8d74cc0dafc2aa84ac720 -->
+<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ko source_sha256=007a2adec84766f6cb74dcb01efbf6ad1396be759e81052ef3d3695c1d6badde -->
 # AI 국회
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -73,7 +73,7 @@ cmake --build build-cookbook --target \
 # Offline fixture: no .env loading, credentials or provider transport.
 NEOGRAPH_BUILD_DIR="$PWD/build-cookbook" \
   bash examples/cookbook/ai-assembly/scripts/run_session.sh --mock
-# Live: privately configure OPENROUTER_API_KEY in the environment or .env.
+# Live: export OPENROUTER_API_KEY in the environment first.
 NEOGRAPH_BUILD_DIR="$PWD/build-cookbook" \
   bash examples/cookbook/ai-assembly/scripts/run_session.sh
 ```

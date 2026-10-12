@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=2962897559c898e519f7e7e74330d36d24a93196ced03cf208c8dbaa6a1fb8c5 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=ab1f701c13b8ad5b2fc85625d9afb884f19753f7eed6c13e5ab2fc7bf8ce34bd -->
 # NeoGraph 核心概念导读
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -604,7 +604,7 @@ LLM span 包含公开的 role/文本投影、声明过的标量，以及已知�
 
 ## 接下来读什么
 
-- [Python 示例](../bindings/python/examples/)：21 个可独立运行的脚本，覆盖以上每个概念。
-- [C++ 示例](../examples/)：36 个程序，结构相同。
+- [Python 示例](../bindings/python/examples/)：可独立运行的脚本，逐个演示以上概念，多数可离线运行。
+- [C++ 示例](../examples/)：结构相同的程序。
 - [`reference-en.md`](reference-en.md)：逐个类列出的完整 API。
 - [`ASYNC_GUIDE.md`](ASYNC_GUIDE.md)：深入讲解异步/协程层。

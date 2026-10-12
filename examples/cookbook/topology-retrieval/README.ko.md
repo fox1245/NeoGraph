@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/topology-retrieval/README.md locale=ko source_sha256=4bf80dfe9ee4f9b5ecc5600f0e9cccb2827274126f79069003e43d9ff4ad1451 -->
+<!-- neograph-i18n: source=examples/cookbook/topology-retrieval/README.md locale=ko source_sha256=9c4975ac3807fe0420332eb8ad1e3f0857870bb99dc0ef74d24b00cce91e0f80 -->
 # 로컬 토폴로지 검색
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -14,7 +14,7 @@ OpenRouter baai/bge-m3 (dense, max length 8192)
   -> NeoGraph compatibility and admission planner
 ```
 
-로컬 밀집 인덱스는 `IndexIDMap2(IndexHNSWFlat)`로 저장된 영구적인 Faiss `topologies.faiss`입니다. 함께 제공되는 신뢰할 수 있는 로컬 `topologies.manifest.pkl`는 벡터-ID 매핑, BGE 모델 slug, 8192-token 정책, descriptor 지문, 그리고 인덱스 해시를 기록합니다. 신뢰할 수 없는 소스에서 pickle을 로드하지 마십시오.
+로컬 밀집 인덱스는 `IndexIDMap2(IndexHNSWFlat)`로 저장된 영구적인 Faiss `topologies.faiss`입니다. 함께 제공되는 신뢰할 수 있는 로컬 `topologies.manifest.pkl`는 벡터-ID 매핑, BGE 모델 slug, 8192-token 정책, descriptor 지문, 그리고 인덱스 해시를 기록합니다. 신뢰할 수 없는 소스에서 pickle을 로드하지 마십시오. 인덱스는 기본적으로 프로그램이 끝날 때 지워지는 임시 디렉터리에 만들어집니다. 실행 사이에 유지하려면 `--index-dir`을 지정하십시오.
 
 설치 및 실행:
 

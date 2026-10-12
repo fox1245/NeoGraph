@@ -8,6 +8,9 @@
 // observably truncates the run mid-flight.
 //
 // Usage:  ./example_cancel_token
+//
+// smoke-expect: token_state=cancelled
+// smoke-expect: PASS
 
 #include <neograph/neograph.h>
 #include <neograph/graph/cancel.h>

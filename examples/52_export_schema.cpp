@@ -23,6 +23,9 @@
 // A separate editor repo's CI runs this against the pinned NeoGraph
 // version and ships the resulting schema.json as the palette source —
 // the editor and the engine cannot fall out of sync.
+//
+// smoke-expect: "$schema": "https://json-schema.org/draft/2020-12/schema"
+// smoke-expect: "compiler_validation_keywords"
 
 #include <neograph/graph/loader.h>
 

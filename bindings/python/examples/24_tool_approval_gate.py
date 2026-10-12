@@ -12,6 +12,10 @@ batch, neither sibling tool runs before the pause. On refusal, allowed siblings
 can run but the denied shell call does not; approval executes each tool once.
 This avoids double-applying allowed effects when dispatch resumes from the
 interrupted node.
+
+smoke-expect: list_files runs: 1
+smoke-expect: shell      runs: 1
+smoke-expect: OK
 """
 
 import sys

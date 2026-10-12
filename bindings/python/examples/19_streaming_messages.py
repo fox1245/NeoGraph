@@ -13,6 +13,8 @@ into a node that forwards tokens to `cb(LLM_TOKEN_event)`.
 Run:
     pip install neograph-engine
     python 19_streaming_messages.py
+
+smoke-expect: Octopuses have three hearts.
 """
 
 import neograph_engine as ng

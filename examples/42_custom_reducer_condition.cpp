@@ -1,188 +1,122 @@
-// NeoGraph Example 42: Custom reducers and conditions from C++
+// NeoGraph Example 42: your own reducer and your own condition
 //
-// The README mentions custom reducers and conditions (and the Python
-// binding shows them), but no existing C++ example actually registers
-// one via `ReducerRegistry::instance().register_reducer(...)` or
-// `ConditionRegistry::instance().register_condition(...)`. The two
-// built-in reducers are `overwrite` and `append`; the two built-in
-// conditions are `has_tool_calls` and `route_channel`.
+// The built-in reducers are `overwrite` and `append`; the built-in conditions are
+// `has_tool_calls` and `route_channel`. Anything else you register by name and then use in the
+// graph definition:
 //
-// This example demonstrates both:
+//   * ReducerRegistry::register_reducer("sum", fn)
+//       a reducer that adds each incoming number to the running total of a channel
+//       (token counters, rolling cost, score sums);
+//   * ConditionRegistry::register_condition("score_above_5", fn)
+//       a condition that reads the total and picks a branch, like a feature flag driven by a
+//       channel value instead of a tool call.
 //
-//   * A custom "sum" reducer that adds incoming numeric values to the
-//     running channel total — useful for accumulator-style channels
-//     (token counters, rolling cost, score sums).
-//
-//   * A custom "running_total_above_threshold" condition that reads
-//     the accumulator and routes to either a "warn" or "continue"
-//     branch — i.e. a feature flag triggered by a channel value
-//     rather than a tool call.
+// Three steps add 2, 3 and 2. The total, 7, is above the threshold, so the condition routes
+// to `warn`. An unregistered name fails build(): change "sum" to "summ" below to see it.
 //
 // No API key required.
 //
 // Usage: ./example_custom_reducer_condition
+//
+// smoke-expect: Final score: 7
+// smoke-expect: All assertions passed.
+// smoke-forbid: [neograph] lint
 
 #include <neograph/neograph.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/state.h>
 
+#include <algorithm>
 #include <iostream>
 
 using namespace neograph;
 using namespace neograph::graph;
 
-// Custom node: writes a fixed numeric delta to the "score" channel.
-// Demonstrates the "sum" reducer accumulating across super-steps.
-class IncrementNode : public GraphNode {
-    std::string name_;
-    int         delta_;
+// Writes a fixed number to the `score` channel; the `sum` reducer adds it to the total.
+class IncrementNode : public SyncGraphNode {
 public:
-    IncrementNode(std::string n, int d) : name_(std::move(n)), delta_(d) {}
-    asio::awaitable<NodeOutput> run(NodeInput) override {
-        NodeOutput out;
-        out.writes.push_back(ChannelWrite{"score", json(delta_)});
-        co_return out;
+    IncrementNode(std::string name, int delta) : SyncGraphNode(std::move(name)), delta_(delta) {}
+protected:
+    NodeOutput run_sync(NodeInput) override {
+        return NodeOutput{{ChannelWrite{"score", json(delta_)}}};
     }
-    std::string get_name() const override { return name_; }
+private:
+    int delta_;
 };
 
-// Custom terminal nodes — one for each route the condition can take.
-class WarnNode : public GraphNode {
+// One terminal node per route; it records which route was taken and the total it saw.
+class VerdictNode : public SyncGraphNode {
 public:
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        int s = in.state.get("score").is_number()
-                    ? in.state.get("score").get<int>() : 0;
-        NodeOutput out;
-        out.writes.push_back(ChannelWrite{"verdict",
-            json("WARN: running total " + std::to_string(s) + " exceeded threshold")});
-        co_return out;
+    VerdictNode(std::string name, std::string label)
+        : SyncGraphNode(std::move(name)), label_(std::move(label)) {}
+protected:
+    NodeOutput run_sync(NodeInput in) override {
+        const std::string text = label_ + ": running total " + std::to_string(in.state.get("score").get<int>());
+        return NodeOutput{{ChannelWrite{"verdict", json(text)}}};
     }
-    std::string get_name() const override { return "warn"; }
-};
-
-class ContinueNode : public GraphNode {
-public:
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        int s = in.state.get("score").is_number()
-                    ? in.state.get("score").get<int>() : 0;
-        NodeOutput out;
-        out.writes.push_back(ChannelWrite{"verdict",
-            json("OK: running total " + std::to_string(s) + " under threshold")});
-        co_return out;
-    }
-    std::string get_name() const override { return "continue"; }
+private:
+    std::string label_;
 };
 
 int main() {
-    // ── Register custom reducer ──────────────────────────────────────
-    //
-    // The `sum` reducer treats `current` as the running total and
-    // adds `incoming` (numeric) to it. Initial value is 0 the first
-    // time anything writes (the engine seeds channels via reducer with
-    // a null `current`, so we explicitly normalise to 0).
-    ReducerRegistry::instance().register_reducer("sum",
-        [](const json& current, const json& incoming) -> json {
-            int cur = current.is_number() ? current.get<int>() : 0;
-            int inc = incoming.is_number() ? incoming.get<int>() : 0;
-            return json(cur + inc);
-        });
+    // The reducer receives the channel's current value (null before the first write) and the
+    // incoming write, and returns the new value.
+    ReducerRegistry::instance().register_reducer("sum", [](const json& current, const json& incoming) {
+        return json((current.is_number() ? current.get<int>() : 0) + incoming.get<int>());
+    });
 
-    // ── Register custom condition ────────────────────────────────────
-    //
-    // The condition returns a route key matched against the
-    // `routes` map in the JSON edge definition.
-    ConditionRegistry::instance().register_condition(
-        "score_above_5",
-        [](const GraphState& state) -> std::string {
-            int s = state.get("score").is_number()
-                        ? state.get("score").get<int>() : 0;
-            return s > 5 ? "above" : "below";
-        });
+    // The condition returns a label; the edge's `routes` map turns the label into a node.
+    ConditionRegistry::instance().register_condition("score_above_5", [](const GraphState& state) {
+        return state.get("score").get<int>() > 5 ? "above" : "below";
+    });
 
-    // ── Register custom node types ──────────────────────────────────
-    NodeFactory::instance().register_type("increment",
-        [](const std::string& name, const json& cfg, const NodeContext&) {
-            int delta = cfg.value("delta", 1);
-            return std::make_unique<IncrementNode>(name, delta);
-        });
-    NodeFactory::instance().register_type("warn",
-        [](const std::string&, const json&, const NodeContext&) {
-            return std::make_unique<WarnNode>();
-        });
-    NodeFactory::instance().register_type("continue_node",
-        [](const std::string&, const json&, const NodeContext&) {
-            return std::make_unique<ContinueNode>();
-        });
+    auto& factory = NodeFactory::instance();
+    factory.register_type("increment", [](const std::string& name, const json& config, const NodeContext&) {
+        return std::make_unique<IncrementNode>(name, config.value("delta", 1));
+    });
+    factory.register_type("verdict", [](const std::string& name, const json& config, const NodeContext&) {
+        return std::make_unique<VerdictNode>(name, config.value("label", "done"));
+    });
 
-    // ── Graph: __start__ -> step1 -> step2 -> step3 -> router -> {warn|continue}
-    //   Each step adds to `score` via the `sum` reducer. After three
-    //   steps the running total is 2+3+2 = 7, which crosses the 5
-    //   threshold, so the condition routes to `warn`.
-    //
-    // Channel definition uses `"reducer": "sum"` — the literal string
-    // is what gets passed through to ReducerRegistry::get("sum"). If
-    // the registry name is misspelled, build() throws — try changing
-    // "sum" to "summ" below to see the failure mode.
-    json def = {
-        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
+    const json definition = {
+        {"schema_version", TOPOLOGY_SCHEMA_VERSION},
         {"name", "custom_reducer_demo"},
         {"channels", {
-            {"score",   {{"reducer", "sum"}}},
-            {"verdict", {{"reducer", "overwrite"}}},
+            {"score",   {{"reducer", "sum"}}},          // the custom reducer, by name
+            {"verdict", {{"reducer", "overwrite"}}}
         }},
         {"nodes", {
-            {"step1",  {{"type", "increment"}, {"delta", 2}}},
-            {"step2",  {{"type", "increment"}, {"delta", 3}}},
-            {"step3",  {{"type", "increment"}, {"delta", 2}}},
-            {"warn",   {{"type", "warn"}}},
-            {"cont",   {{"type", "continue_node"}}},
+            {"step1", {{"type", "increment"}, {"delta", 2}}},
+            {"step2", {{"type", "increment"}, {"delta", 3}}},
+            {"step3", {{"type", "increment"}, {"delta", 2}}},
+            {"warn",  {{"type", "verdict"}, {"label", "WARN"}}},
+            {"cont",  {{"type", "verdict"}, {"label", "OK"}}}
         }},
         {"edges", json::array({
             {{"from", "__start__"}, {"to", "step1"}},
-            {{"from", "step1"},     {"to", "step2"}},
-            {{"from", "step2"},     {"to", "step3"}},
-            // After step3 — branch via the custom condition.
-            {{"from", "step3"},
-             {"condition", "score_above_5"},
+            {{"from", "step1"}, {"to", "step2"}},
+            {{"from", "step2"}, {"to", "step3"}},
+            {{"from", "step3"}, {"condition", "score_above_5"},      // the custom condition, by name
              {"routes", {{"above", "warn"}, {"below", "cont"}}}},
             {{"from", "warn"}, {"to", "__end__"}},
-            {{"from", "cont"}, {"to", "__end__"}},
+            {{"from", "cont"}, {"to", "__end__"}}
         })}
     };
+    auto engine = GraphEngine::build(definition, EngineConfig{});
+    auto result = engine->run(RunConfig{});
 
-    NodeContext ctx;
-    auto        engine = GraphEngine::build(def, EngineConfig{.node_context = ctx});
-
-    RunConfig cfg;
-    cfg.thread_id = "t1";
-    cfg.input     = {};   // score starts at 0 (sum reducer normalises null)
-
-    auto r = engine->run(cfg);
-
+    const int score = result.channel<int>("score");
     std::cout << "Execution trace: ";
-    for (const auto& n : r.execution_trace) std::cout << n << " -> ";
+    for (const auto& node : result.execution_trace) std::cout << node << " -> ";
     std::cout << "END\n";
+    std::cout << "Final score: " << score << "  (2+3+2 via the custom `sum` reducer)\n";
+    std::cout << "Final verdict: " << result.channel<std::string>("verdict") << "\n";
 
-    std::cout << "Final score: " << r.output["channels"]["score"]["value"]
-              << "  (2+3+2 = 7 via custom `sum` reducer)\n";
-    std::cout << "Final verdict: "
-              << r.output["channels"]["verdict"]["value"].get<std::string>()
-              << "\n";
-
-    // Sanity assertions:
-    int score = r.output["channels"]["score"]["value"].get<int>();
-    if (score != 7) {
-        std::cerr << "FAIL: expected score=7 but got " << score << "\n";
+    const auto& trace = result.execution_trace;
+    if (score != 7 || std::find(trace.begin(), trace.end(), "warn") == trace.end()) {
+        std::cerr << "FAIL: expected score 7 and the route through `warn`\n";
         return 1;
     }
-    auto trace = r.execution_trace;
-    bool went_warn = false;
-    for (const auto& n : trace) if (n == "warn") went_warn = true;
-    if (!went_warn) {
-        std::cerr << "FAIL: expected route via `warn` (score>5)\n";
-        return 1;
-    }
-
     std::cout << "\nAll assertions passed.\n";
     return 0;
 }

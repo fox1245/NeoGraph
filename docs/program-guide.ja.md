@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=6f69f4c493387ec533fd315d4e5a294d10e695e59765446ee310d4add2d1b624 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=f7f84669d25b4da0ad592f00baa07f77ad731cc06e1a4411070dd04832769be7 -->
 # Program ガイド: グラフを取りまとめる JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -15,13 +15,15 @@
 
 Program 層には、Program と QuickJS 制御を含むビルドが必要です。`pip install neograph-engine` に含まれており、ソースからのビルドでは `-DNEOGRAPH_BUILD_PYBIND=ON -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON` が必要です(そのあと `pip install pydantic certifi` を実行し、ビルドディレクトリを `PYTHONPATH` に加えます)。
 
-以下の例は、失敗ルーティング、`fork`、SQLite の状態ディレクトリを使います。PyPI の 0.13.1 ホイールにはこれらがないので、現在のソースからビルドしたもので実行してください。C++ では `examples/63_program_quickstart.cpp` から始めてください。
+以下の例は、失敗ルーティング、`fork`、SQLite の状態ディレクトリを使います。PyPI の 0.13.1 ホイールにはこれらがないので、現在のソースからビルドしたもので実行してください。これらを使う例(Python の 32、35、36)も同じです。もっと小さな例から始めるなら、[`29_program_hello.py`](../bindings/python/examples/29_program_hello.py) を実行してください。Program 1つのコンパイル、admission、実行を100行足らずで示します。C++ では [`65_program_javascript.cpp`](../examples/65_program_javascript.cpp) から始めてください。
 
 ## 実践例: リリースのチェック
 
 リリースのジョブが、3つのサービスを並列にチェックします。`payments` のチェックは失敗します。ジョブ全体を失敗させる代わりに、失敗はレビューのステップに回り、ジョブは人を待ちます。人がリリースを承認すると、ほかのサービスは再チェックされずにジョブが終わります。同じジョブが予算の範囲内で動きます。
 
 例は Python のファイル3つです。`release_program.py` には実行ごとに変わらないものをすべて入れ、`run_release.py` と `restart.py` がそれを使います。
+
+以下のコードは、失敗ルーティング、レビューのための一時停止、予算、再起動を1つの流れにまとめています。リポジトリには、これらを1つずつ単独で示す実行可能な例があります。[`32_program_failure_routing.py`](../bindings/python/examples/32_program_failure_routing.py)(失敗ルートと、オペレーターの `retry` または `abort`)、[`34_program_pause_resume.py`](../bindings/python/examples/34_program_pause_resume.py)(`interruptBefore` と `host.resume`)、[`33_program_budgets.py`](../bindings/python/examples/33_program_budgets.py)、[`35_program_fork.py`](../bindings/python/examples/35_program_fork.py)、[`36_program_crash_recovery.py`](../bindings/python/examples/36_program_crash_recovery.py) です。C++ で対になる例は、[66](../examples/66_program_failure_routing.cpp) から [69](../examples/69_program_crash_recovery.cpp) までです。
 
 ### 1. ノードのコード
 

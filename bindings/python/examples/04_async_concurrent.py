@@ -8,6 +8,9 @@ LLM-bound agents on a single engine instance.
 Run:
     pip install neograph-engine
     python 04_async_concurrent.py
+
+smoke-expect: doubled: [0, 2, 4, 6, 8, 10, 12, 14]
+smoke-expect: event count: 4
 """
 
 import asyncio
