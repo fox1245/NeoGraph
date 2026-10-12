@@ -445,37 +445,19 @@ private:
             throw std::invalid_argument("Program provider capability identity is empty");
         // Admission and encoding happen before any durable dispatched marker.
         // Dropping this handle cannot dispatch transport.
-        const auto unmodeled = program::detail::unmodeled_feature(request);
-        std::optional<ProviderRequest> pinnable;
-        if (monetary) pinnable = request;
-        auto prepared = provider->prepare(std::move(request));
-        if (!prepared.valid()) {
-            sp::Failure failure;
-            if (prepared.error()) failure.error = *prepared.error();
-            else {
-                failure.error.kind = sp::ErrorKind::InvalidRequest;
-                failure.error.safe_message = "Program provider preparation is invalid";
-                failure.error.retry_safety = sp::RetrySafety::NotSent;
-            }
-            co_return std::make_shared<const sp::Outcome>(std::move(failure));
-        }
-        const ProgramCoreProviderCallContext context{owner, version, run, operation, attempt};
-        const auto id = dispatch_id(context, identity);
         // Price the call first: pinning the route ceiling changes the request,
         // and everything below must see the request that is actually sent.
+        auto priced = program::detail::prepare_priced_call(
+            pricing::PriceCatalog::builtin(), *provider, std::move(request), monetary != nullptr);
+        auto prepared = std::move(priced.prepared);
+        if (!prepared.valid()) co_return program::detail::preparation_failure_outcome(prepared);
+        const ProgramCoreProviderCallContext context{owner, version, run, operation, attempt};
+        const auto id = dispatch_id(context, identity);
         program::detail::MonetaryHold hold;
-        if (monetary) {
-            auto quote = program::detail::assess_monetary_call(
-                pricing::PriceCatalog::builtin(), unmodeled, prepared);
-            if (quote.pin && program::detail::pin_route_max_price(*pinnable, *quote.pin)) {
-                prepared = provider->prepare(std::move(*pinnable));
-                if (!prepared.valid())
-                    throw std::logic_error("A pinned route ceiling made the request invalid");
-            }
+        if (priced.quote)
             hold = program::detail::MonetaryHold(
-                monetary, std::move(quote),
+                monetary, std::move(*priced.quote),
                 program::detail::MonetaryCallSite{id, operation, identity.node_name});
-        }
         if (prepared.requires_native_custody() && !impl->archive)
             throw std::invalid_argument("Program provider requires configured trusted native custody");
         if (impl->archive) {

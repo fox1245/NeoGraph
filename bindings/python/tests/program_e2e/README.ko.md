@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=5573def7d0ee809c79d38af71919f9eaf0f66c25b6f1d6712b080c3eb77f76ea -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=d5e51863d61a1d3f549763670ecbc5f1efb5e8c4f88c1fcce1c032faa398705b -->
 # Program API 엔드투엔드 시나리오
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -17,7 +17,7 @@
 | `test_06_graph_shapes.py` | 배리어 조인, 조건부 라우팅, `Send` 맵-리듀스, 서브그래프, 잘못된 그래프 형태 |
 | `test_07_main_programs.py` | `callCore`, `all`, `race`, `quorum`, `await` 시간 초과, `cancelScope`, 외부 취소, `spawn` |
 | `test_08_live_llm.py` | 노드가 모델을 호출하는 Program: 기본은 로컬 피어, 활성화하면 OpenRouter. Python 노드와 바인딩된 `llm_call` |
-| `test_09_bound_llm.py` | `node_context`로 바인딩한 `llm_call`(#372): 보고 비용과 추정 비용, 보내기 전 거부(예산, 알 수 없는 모델, router alias), 0 예산, 공급자 없는 Program의 id, 한 예산에 대한 `all`과 `quorum`, 호출이 journal에 기록된 뒤의 크래시와 한 번만 청구하는 복구 |
+| `test_09_bound_llm.py` | `node_context`로 바인딩한 `llm_call`(#372): 보고 비용과 추정 비용, `provider.max_price`로 고정한 route ceiling, 보내기 전 거부(예산, 알 수 없는 모델, router alias), 0 예산, 공급자 없는 Program의 id, 한 예산에 대한 `all`과 `quorum`, 호출이 journal에 기록된 뒤의 크래시와 한 번만 청구하는 복구 |
 | `test_10_failure_routing.py` | 실패 라우팅(#364): 실패한 TEST가 레코드와 함께 `interruptBefore` 핸들러로 라우팅됨, retry와 abort 라우트로 재개, 작성자 코드, 가린 오류 텍스트, `max_visits`, `max_node_retries` 상한, 노드 안의 Program 진단, SQLite를 쓰는 새 프로세스에서의 재개 |
 | `test_11_attempt_timeout.py` | 시도 타임아웃(#364): 타임아웃된 뒤 재시도에서 회복하는 느린 Python 노드, 항상 타임아웃되어 `NG.Timeout`으로 핸들러에 라우팅되는 노드(핸들러가 없으면 실행 실패), 결과와 트레이스에 나타나지 않는 늦은 완료, 정지 마감 시각을 넘겨 취소를 무시하는 노드(`NG.EffectUncertain`), `wall_time_ms`를 넘게 될 백오프가 kind `deadline`으로 멈추는 경우 |
 | `test_12_send_interrupts.py` | `NodeInterrupt`를 던지는 `Send` target(#385): Program이 그 target에서 일시 정지함, 재개 시 map 노드와 끝난 Send가 재생됨, SQLite를 쓰는 재시작 뒤의 재개, 바인딩된 `llm_call`을 호출하고 끝난 Send는 다시 보내지도 다시 과금되지도 않음 |
@@ -41,7 +41,7 @@ PYTHONPATH=build:bindings/python python -m pytest -q bindings/python/tests/progr
 
 ## 라이브 모델 테스트
 
-`test_live_openrouter_model_call_inside_a_program`과 `test_live_openrouter_bound_llm_call_is_priced`는 각각 유료 OpenRouter 요청을 한 번 보냅니다(`max_output_tokens=64`, 데이터 무보존 라우팅). 두 번째 테스트는 `LocalProgramHost(node_context=...)`로 바인딩한 내장 `llm_call`을 1,000,000 microunit(1 USD) 금액 예산으로 실행하고 정산된 기록을 확인합니다. 두 변수가 모두 설정되지 않으면 건너뛰며, CI는 이 변수들을 설정하지 않습니다.
+`test_live_openrouter_model_call_inside_a_program`과 `test_live_openrouter_bound_llm_call_is_priced`는 각각 유료 OpenRouter 요청을 한 번 보냅니다(`max_output_tokens=64`, 데이터 무보존 라우팅). 두 번째 테스트는 `LocalProgramHost(node_context=...)`로 바인딩한 내장 `llm_call`을 1,000,000 microunit(1 USD) 금액 예산으로 실행하고 정산된 기록을 확인합니다. 이 요청은 카탈로그의 route ceiling을 `provider.max_price`로 싣기 때문에, OpenRouter는 ceiling보다 비싸게 등록된 endpoint로 라우팅하는 대신 요청을 실패시킵니다. 두 변수가 모두 설정되지 않으면 건너뛰며, CI는 이 변수들을 설정하지 않습니다.
 
 ```bash
 NEOGRAPH_E2E_LIVE=1 OPENROUTER_API_KEY=... PYTHONPATH=build:bindings/python \

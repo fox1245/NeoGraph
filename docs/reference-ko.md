@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=038ae0e0a997a58b081eeae4cd61991721382199a0731eb7a9471b0eac06ca5a -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=6b67d721625e5d82f0da1344b605765dc856f8bac748a2431c04b23be96b56db -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -462,7 +462,7 @@ dispatch 전에 broker는 준비된 요청에 가격을 매긴다. origin은 des
 | `P_MONEY_UNMODELED` | `Failed` | 요청이 카탈로그가 반영하지 않는 것을 쓴다: 표준이 아닌 service tier, OpenRouter 모델 fallback(`models`), Responses hosted tool, Anthropic 서버 도구 |
 | `P_MONEY_NO_OUTPUT_CAP` | `Failed` | 요청에 출력 토큰 cap이 없다 |
 | `P_MONEY_NO_INPUT_BOUND` | `Failed` | 그 모델의 입력 한도를 알 수 없다 |
-| `P_MONEY_NO_UPPER_BOUND` | `Failed` | router alias처럼 aggregator 항목에 route ceiling이 없다 |
+| `P_MONEY_NO_UPPER_BOUND` | `Failed` | router alias처럼 aggregator 항목에 route ceiling이 없거나, 그 ceiling을 `provider.max_price`로 고정할 수 없다 |
 | `P_MONEY_BUDGET` | `BudgetExhausted` | hold가 남은 `monetary_microunits`에 들어가지 않는다 |
 
 결과가 나오면 hold는 정확히 한 번 정산되고, attempt의 `ProgramResult::monetary_records()`(Python `result.monetary_records`)에 호출마다 `ProgramMonetaryRecord` 하나가 생긴다. 필드는 `call_id`(journal의 논리 호출 slot), `operation_id`, `node`, `origin`, `model`, `evidence`, `microunits`, `reserved_microunits`, `basis`, `catalog_version`, `catalog_digest`, `conservative`, `may_undercount`, `replayed`, `reason`이다. `ProgramUsage::monetary_microunits`는 attempt의 청구액과 아직 열린 hold의 합이다.
@@ -473,11 +473,11 @@ dispatch 전에 broker는 준비된 요청에 가격을 매긴다. origin은 des
 | `estimated` | 보고 비용이 없는 최종·일관 usage. | 카탈로그 요율 × 보고된 토큰 구간, 호출당 한 번 올림. 기록에 카탈로그 version과 digest가 남는다. |
 | `held` | 결과를 모른다(transport 예외, 취소, timeout), 요청이 실패 전에 보내졌을 수 있다, SDK가 transport 시도를 다시 보냈다, 또는 usage가 부분적이거나 일관되지 않다. | hold. |
 
-아무것도 보내지 않았음을 증명하는 실패는 hold를 풀고 기록을 남기지 않는다. hold보다 큰 청구액(OpenRouter 요청이 ceiling에 고정되지 않은 동안 가능)은 보고된 대로 청구되며, 청구액이 예산을 넘은 실행은 `BudgetExhausted`로 끝난다. 동시 호출(`ng.all`, `ng.race`, `ng.quorum`, 병렬 노드)은 한 계정에 예약하므로 들어가지 않는 member는 거부된다. 노드 재시도는 자기 effect namespace(`task#a<k>`)로 호출하므로 attempt마다의 호출은 새 호출이며 다시 청구된다.
+아무것도 보내지 않았음을 증명하는 실패는 hold를 풀고 기록을 남기지 않는다. hold보다 큰 청구액(BYOK upstream 비용처럼 고정값이 제한하지 않는 비용이 보고 비용에 포함될 때 가능)은 보고된 대로 청구되며, 청구액이 예산을 넘은 실행은 `BudgetExhausted`로 끝난다. 동시 호출(`ng.all`, `ng.race`, `ng.quorum`, 병렬 노드)은 한 계정에 예약하므로 들어가지 않는 member는 거부된다. 노드 재시도는 자기 effect namespace(`task#a<k>`)로 호출하므로 attempt마다의 호출은 새 호출이며 다시 청구된다.
 
 `bind_priced`는 호출의 기록을 journal 행에 쓴다. dispatched marker와 함께 held 기록을, 결과와 함께 정산된 기록을 쓴다. 같은 Program attempt가 프로세스가 멈추기 전에 기록한 호출은, 복구된 attempt가 그 operation을 바인딩할 때 Core가 다시 호출하든 아니든 한 번 청구되고 `replayed`로 표시된다. execution lease 만료로 복구되는 define() 전용 실행도 포함된다. 이전 attempt가 기록한 호출은 그 attempt의 결과가 남은 예산에 이미 정산했으므로, 이후 attempt가 결과를 재생해도 다시 청구되지 않는다. recorded replay는 금액을 쓰지 않는다.
 
-바인딩은 아직 요청에 아무것도 고정하지 않는다. OpenRouter의 `provider.max_price`에는 `OpenRouterRouting::max_price`가 필요한데, 고정된 SchemaProvider SDK에는 아직 없다. 그때까지 예약은 이미 route ceiling을 쓰며, 더 비싼 endpoint의 보고 비용은 보고된 대로 청구된다.
+OpenRouter origin에서 broker는 요청을 전송용으로 준비하기 전에 route ceiling을 요청에 고정한다. OpenRouter의 `provider.max_price`에는 ceiling의 가장 비싼 입력 요율이 `prompt`로, 가장 비싼 출력 요율이 `completion`으로, 백만 토큰당 정확한 십진 USD로 들어간다. `deepseek/deepseek-v4-flash-0731`이면 본문에 `"provider":{"max_price":{"prompt":0.44,"completion":1.32}}`가 실린다. OpenRouter는 그 가격 이하로 등록된 endpoint로만 라우팅하고 그런 endpoint가 없으면 요청을 실패시키므로, 예약이 endpoint의 토큰 가격을 제한한다. 호스트가 `ProviderControls::provider`나 `SchemaProvider::Defaults::provider`로 이미 보내는 `max_price`(요청 자체의 값이 기본값을 대체한다)는 더 낮은 필드에서 유지되고, 카탈로그가 가격을 매기지 않는 금액(`image`, `audio`, `request`)은 호스트의 값 그대로다. Chat Completions, Responses, Messages 요청이 고정되며 다른 origin에는 `max_price`가 붙지 않는다. 가격은 대화를 사용자 메시지 하나로 바꾼 요청의 probe로 매기고 probe는 보내지 않는다. 요청은 고정된 상태로 한 번만 준비되므로 provider journal은 실제로 보낸 요청의 digest를 기록하고 재생은 그것과 일치한다. 고정값 아래에서 캡처된 native history를 가진 다음 턴도 같은 고정값을 싣는다. SDK policy가 그 base URL에서 OpenRouter routing을 허용하지 않거나 요율이 `max_price`가 허용하는 2^53 nanoUSD를 넘어 route ceiling을 고정할 수 없으면 호출은 `P_MONEY_NO_UPPER_BOUND`로 거부된다.
 
 카탈로그 [`data/pricing/catalog.json`](../data/pricing/catalog.json)은 빌드할 때 `neograph::program`에 컴파일되며, 런타임은 그 바이트로만 가격을 매긴다. 키는 origin과 model이다. Google AI Studio를 거친 Gemini와 Vertex AI global endpoint를 거친 Gemini는 별개 항목이며 OpenAI, Anthropic, OpenRouter도 마찬가지다. 항목마다 `source_url`(공식 가격 페이지 또는 OpenRouter models API)과 `retrieved` 날짜를 기록한다. 요율은 백만 토큰당 USD를 나타내는 10진 문자열이며 입력, 출력, 캐시 읽기, 캐시 쓰기(Anthropic의 5분·1시간 TTL), 이미지 출력 구간과 선택적 프롬프트 길이 tier를 담는다. 항목은 표준 service tier 가격이며 batch·flex·priority tier, Anthropic의 US 전용 inference_geo와 fast mode, 서버 도구 요금, 요청당 요금은 반영하지 않는다. OpenRouter는 한 모델을 가격이 다른 여러 endpoint로 라우팅하므로 해당 항목에는 작성 시점에 가장 비싼 endpoint인 `route_ceiling`이 있고 예약은 이것을 쓴다. `~deepseek/deepseek-v4-flash-latest` 같은 router alias는 endpoint를 나열하지 않으므로 ceiling이 없고 예약할 수 없다. 항목이 없는 모델에는 가격이 없으며, 그 모델에 대한 가격 호출은 거부된다.
 

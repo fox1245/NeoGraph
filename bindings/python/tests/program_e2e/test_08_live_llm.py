@@ -156,6 +156,7 @@ def test_program_model_call_wiring_against_a_loopback_peer(chat_peer):
     body = sent["body"]
     assert body["model"] == MODEL
     assert body.get("provider", {}).get("zdr") is True, body
+    assert "max_price" not in body["provider"], "a call the host owns is not priced or pinned"
     caps = [body[key] for key in ("max_tokens", "max_completion_tokens", "max_output_tokens") if key in body]
     assert caps == [MAX_OUTPUT_TOKENS], body
     assert [m["role"] for m in body["messages"]] == ["system", "user"]
@@ -178,6 +179,8 @@ def test_bound_llm_call_wiring_against_a_loopback_peer(chat_peer):
     assert sent["auth"] == "Bearer local-smoke"
     assert sent["body"]["model"] == support.PRICED_MODEL
     assert sent["body"]["usage"] == {"include": True}, sent["body"]
+    # The priced call carries the catalog route ceiling as OpenRouter's max_price.
+    assert sent["body"]["provider"]["max_price"] == {"prompt": 0.44, "completion": 1.32}, sent["body"]
 
 
 @needs_llm

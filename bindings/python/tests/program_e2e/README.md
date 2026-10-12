@@ -16,7 +16,7 @@ These tests drive the sealed-v1 JavaScript Program API through the Python bindin
 | `test_06_graph_shapes.py` | barrier joins, conditional routing, `Send` map-reduce, subgraphs, invalid graph shapes |
 | `test_07_main_programs.py` | `callCore`, `all`, `race`, `quorum`, `await` timeouts, `cancelScope`, external cancel, `spawn` |
 | `test_08_live_llm.py` | a Program whose node calls a model: a local peer by default, OpenRouter when enabled; a Python node and a bound `llm_call` |
-| `test_09_bound_llm.py` | `llm_call` bound through `node_context` (#372): reported and estimated costs, refusals before sending (budget, unknown model, router alias), zero budget, ids without a provider, `all` and `quorum` against one budget, a crash after the call is journaled and recovery that charges it once |
+| `test_09_bound_llm.py` | `llm_call` bound through `node_context` (#372): reported and estimated costs, the route ceiling pinned as `provider.max_price`, refusals before sending (budget, unknown model, router alias), zero budget, ids without a provider, `all` and `quorum` against one budget, a crash after the call is journaled and recovery that charges it once |
 | `test_10_failure_routing.py` | failure routing (#364): a failing TEST routed to an `interruptBefore` handler with its record, resume along the retry and abort routes, author codes, redacted error text, `max_visits`, the `max_node_retries` ceiling, a Program diagnostic inside a node, and a resume in a new process with SQLite |
 | `test_11_attempt_timeout.py` | attempt timeouts (#364): a slow Python node that times out and recovers on retry, a node that always times out routed to its handler as `NG.Timeout` (and failing the run without a handler), a late completion that never reaches the result or the trace, a node that ignores cancellation past its stop deadline (`NG.EffectUncertain`), and a backoff that would cross `wall_time_ms` stopping with kind `deadline` |
 | `test_12_send_interrupts.py` | a `Send` target that raises `NodeInterrupt` (#385): the Program pauses on it, resume replays the map node and the finished Sends, a resume after a restart with SQLite, and a finished Send that called a bound `llm_call` is neither resent nor charged again |
@@ -40,7 +40,7 @@ The offline scenarios take about 20 seconds; `-m "not slow"` skips the ones that
 
 ## Live model test
 
-`test_live_openrouter_model_call_inside_a_program` and `test_live_openrouter_bound_llm_call_is_priced` each make one paid OpenRouter request (`max_output_tokens=64`, zero data retention routing). The second runs the built-in `llm_call` bound through `LocalProgramHost(node_context=...)` under a 1,000,000-microunit (1 USD) monetary budget and checks the settled record. They are skipped unless both variables are set, and CI never sets them:
+`test_live_openrouter_model_call_inside_a_program` and `test_live_openrouter_bound_llm_call_is_priced` each make one paid OpenRouter request (`max_output_tokens=64`, zero data retention routing). The second runs the built-in `llm_call` bound through `LocalProgramHost(node_context=...)` under a 1,000,000-microunit (1 USD) monetary budget and checks the settled record. Its request carries the catalog route ceiling as `provider.max_price`, so OpenRouter fails it rather than route it to an endpoint listed above the ceiling. They are skipped unless both variables are set, and CI never sets them:
 
 ```bash
 NEOGRAPH_E2E_LIVE=1 OPENROUTER_API_KEY=... PYTHONPATH=build:bindings/python \

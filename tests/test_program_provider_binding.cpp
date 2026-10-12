@@ -156,6 +156,9 @@ struct Peer {
     std::atomic<int> transport{0};
     std::mutex       mutex;
     std::vector<std::string> models;
+    // The encoded body each request sent, and its Provider::request_digest.
+    std::vector<std::string> bodies;
+    std::vector<std::string> digests;
     // Answers request number `ordinal` (1-based).
     std::function<sp::runtime::Result(int ordinal, const ProviderRequest&)> reply =
         [](int, const ProviderRequest&) {
@@ -169,12 +172,14 @@ std::shared_ptr<Provider> make_provider(std::shared_ptr<Peer>                pee
                                         std::shared_ptr<sp::runtime::Client> client) {
     // The SDK descriptor id differs from the registry's provider name on purpose.
     return std::make_shared<neograph::test::LocalProvider>(
-        [peer](ProviderRequest request, const auto&, const auto&)
+        [peer](ProviderRequest request, const PreparedProviderRequest& prepared, const auto&)
             -> asio::awaitable<sp::runtime::Result> {
             const int ordinal = ++peer->transport;
             {
                 std::lock_guard lock(peer->mutex);
                 peer->models.push_back(std::get<sp::chat::Request>(request.payload).model);
+                peer->bodies.emplace_back(prepared.encoded_body());
+                peer->digests.push_back(Provider::request_digest(prepared));
             }
             if (peer->on_transport) peer->on_transport(ordinal, request);
             co_return peer->reply(ordinal, request);
@@ -887,8 +892,8 @@ TEST(ProgramProviderBinding, AModelWithoutAKnownInputLimitCannotBeBounded) {
     EXPECT_EQ(quote.blocker, "P_MONEY_NO_INPUT_BOUND");
     EXPECT_EQ(quote.hold, 0U);
     ASSERT_TRUE(quote.pin);
-    EXPECT_EQ(quote.pin->prompt, "3");
-    EXPECT_EQ(quote.pin->completion, "4");
+    EXPECT_EQ(quote.pin->prompt_nano_usd, 3'000'000'000U);
+    EXPECT_EQ(quote.pin->completion_nano_usd, 4'000'000'000U);
 }
 
 TEST(ProgramProviderBinding, TheRouteCeilingIsTheReservationAndThePinnedPrice) {
@@ -896,13 +901,270 @@ TEST(ProgramProviderBinding, TheRouteCeilingIsTheReservationAndThePinnedPrice) {
     ASSERT_TRUE(entry && entry->route_ceiling);
     const auto price = program::detail::route_max_price(*entry);
     ASSERT_TRUE(price);
-    EXPECT_EQ(price->prompt, "0.44");
-    EXPECT_EQ(price->completion, "1.32");
+    // The catalog's 0.44 and 1.32 USD per million tokens, in nanoUSD.
+    EXPECT_EQ(price->prompt_nano_usd, 440'000'000U);
+    EXPECT_EQ(price->completion_nano_usd, 1'320'000'000U);
+    EXPECT_FALSE(price->image_nano_usd || price->audio_nano_usd || price->request_nano_usd);
     const auto reserved = PriceCatalog::builtin().reserve("openrouter", kModel, kInputLimit, kOutputCap);
     EXPECT_EQ(std::get<pricing::Reservation>(reserved).basis, pricing::Basis::RouteCeiling);
-    // Until the pinned SDK carries provider.max_price the pin cannot be sent.
-    auto request = neograph::test::request(std::string(kModel));
-    EXPECT_FALSE(program::detail::pin_route_max_price(request, *price));
+
+    auto peer     = std::make_shared<Peer>();
+    auto provider = make_provider(peer, client_for(std::string(kOpenRouter), std::string(kModel), kInputLimit));
+    auto request  = make_provider_request(*provider, std::string(kModel),
+                                          {neograph::test::message("probe", sp::Role::User)});
+    std::get<sp::chat::Request>(request.payload).max_output_tokens = kOutputCap;
+    const auto quote = program::detail::assess_monetary_call(PriceCatalog::builtin(), std::nullopt,
+                                                             provider->prepare(request));
+    EXPECT_TRUE(quote.blocker.empty()) << quote.blocker_message;
+    ASSERT_TRUE(quote.pin);
+    EXPECT_EQ(quote.pin->prompt_nano_usd, price->prompt_nano_usd);
+    EXPECT_EQ(quote.pin->completion_nano_usd, price->completion_nano_usd);
+    EXPECT_TRUE(program::detail::pin_route_max_price(request, *quote.pin));
+    EXPECT_FALSE(program::detail::pin_route_max_price(request, *quote.pin))
+        << "a request that already carries the pin is unchanged";
+    const auto pinned = provider->prepare(std::move(request));
+    ASSERT_TRUE(pinned.valid());
+    EXPECT_EQ(std::string(pinned.encoded_body()),
+              R"({"model":"deepseek/deepseek-v4-flash-0731",)"
+              R"("messages":[{"role":"user","content":[{"type":"text","text":"probe"}]}],)"
+              R"("stream":false,"max_tokens":64,)"
+              R"("provider":{"max_price":{"prompt":0.44,"completion":1.32}}})");
+}
+
+namespace {
+
+constexpr std::string_view kPinnedCeiling =
+    R"("provider":{"max_price":{"prompt":0.44,"completion":1.32}})";
+
+sp::OpenRouterMaxPrice max_price(std::optional<std::uint64_t> prompt,
+                                 std::optional<std::uint64_t> completion,
+                                 std::optional<std::uint64_t> image   = std::nullopt,
+                                 std::optional<std::uint64_t> request = std::nullopt) {
+    sp::OpenRouterMaxPrice price;
+    price.prompt_nano_usd     = prompt;
+    price.completion_nano_usd = completion;
+    price.image_nano_usd      = image;
+    price.request_nano_usd    = request;
+    return price;
+}
+
+// A SchemaProvider at OpenRouter for `family`; nothing is dispatched.
+std::shared_ptr<Provider> openrouter_schema_provider(const std::string&                      family,
+                                                     std::optional<sp::OpenRouterRouting> defaults = {}) {
+    llm::SchemaProvider::Defaults provider_defaults;
+    provider_defaults.provider = std::move(defaults);
+    return llm::SchemaProvider::create(neograph::test::descriptor(family, std::string(kOpenRouter)),
+                                       {}, std::move(provider_defaults));
+}
+
+ProviderRequest capped_request(const Provider& provider, ProviderControls controls = {}) {
+    controls.max_output_tokens = kOutputCap;
+    return make_provider_request(provider, std::string(kModel),
+                                 {neograph::test::message("probe", sp::Role::User)}, {},
+                                 std::move(controls));
+}
+
+// The body a pricing broker sends for `request`.
+std::string pinned_body(Provider& provider, ProviderRequest request) {
+    const auto priced = program::detail::prepare_priced_call(PriceCatalog::builtin(), provider,
+                                                             std::move(request), true);
+    if (!priced.quote || !priced.quote->pin) throw std::logic_error("no pin quoted");
+    if (!priced.prepared.valid()) throw std::logic_error("the pinned request is invalid");
+    return std::string(priced.prepared.encoded_body());
+}
+
+}  // namespace
+
+TEST(ProgramProviderBinding, ThePinReachesEveryFamilyOpenRouterServes) {
+    for (const auto* family : {"openai.chat", "openai.responses", "anthropic.messages"}) {
+        SCOPED_TRACE(family);
+        auto provider = openrouter_schema_provider(family);
+        EXPECT_NE(pinned_body(*provider, capped_request(*provider)).find(kPinnedCeiling), std::string::npos);
+    }
+    // Messages takes no routing defaults, so a pin always rides on the request.
+    auto messages = capped_request(*openrouter_schema_provider("anthropic.messages"));
+    EXPECT_TRUE(program::detail::pin_route_max_price(messages, max_price(1, 2)));
+    const auto& routing = std::get<sp::messages::Request>(messages.payload).provider;
+    ASSERT_TRUE(routing && routing->max_price);
+    EXPECT_EQ(routing->max_price->completion_nano_usd, 2U);
+    // A family OpenRouter does not serve cannot carry the pin.
+    ProviderRequest gemini;
+    gemini.payload = sp::gemini::Request{};
+    EXPECT_THROW((void)program::detail::pin_route_max_price(gemini, max_price(1, 2)), std::logic_error);
+}
+
+TEST(ProgramProviderBinding, AHostMaxPriceKeepsTheLowerAmountPerField) {
+    // A host cap in the provider defaults: 0.30 for prompts is below the 0.44
+    // ceiling and is kept, completion takes the ceiling, and the per-request
+    // fee the catalog does not cap stays the host's. The other defaults stay.
+    sp::OpenRouterRouting defaults;
+    defaults.zdr       = true;
+    defaults.max_price = max_price(300'000'000, std::nullopt, std::nullopt, 100'000);
+    for (const auto* family : {"openai.chat", "openai.responses"}) {
+        SCOPED_TRACE(family);
+        auto provider = openrouter_schema_provider(family, defaults);
+        EXPECT_NE(pinned_body(*provider, capped_request(*provider))
+                      .find(R"("provider":{"zdr":true,"max_price":{"prompt":0.3,"completion":1.32,"request":0.0001}})"),
+                  std::string::npos);
+
+        // A cap in the request controls replaces the defaults' cap, as every
+        // routing field does, and is lowered to the ceiling where it is dearer.
+        ProviderControls controls;
+        controls.provider.emplace();
+        controls.provider->max_price = max_price(500'000'000, 1'000'000'000, 2'000'000);
+        EXPECT_NE(pinned_body(*provider, capped_request(*provider, controls))
+                      .find(R"("provider":{"zdr":true,"max_price":{"prompt":0.44,"completion":1,"image":0.002}})"),
+                  std::string::npos);
+    }
+    // Messages has no routing defaults: the host's cap is its request controls'.
+    auto             messages = openrouter_schema_provider("anthropic.messages");
+    ProviderControls controls;
+    controls.provider.emplace();
+    controls.provider->max_price = max_price(2'000'000'000, 600'000'000);
+    EXPECT_NE(pinned_body(*messages, capped_request(*messages, controls))
+                  .find(R"("provider":{"max_price":{"prompt":0.44,"completion":0.6}})"),
+              std::string::npos);
+    // A host cap at or below the ceiling everywhere is the pin already.
+    controls.provider->max_price = max_price(100'000'000, 1'320'000'000);
+    auto       own   = capped_request(*messages, controls);
+    const auto quote = program::detail::assess_monetary_call(PriceCatalog::builtin(), std::nullopt,
+                                                             messages->prepare(own));
+    ASSERT_TRUE(quote.pin);
+    EXPECT_FALSE(program::detail::pin_route_max_price(own, *quote.pin));
+    EXPECT_NE(pinned_body(*messages, std::move(own))
+                  .find(R"("provider":{"max_price":{"prompt":0.1,"completion":1.32}})"),
+              std::string::npos);
+}
+
+TEST(ProgramProviderBinding, OnlyAnOpenRouterOriginIsPinned) {
+    // A direct origin routes nowhere else: it is priced but gets no max_price.
+    auto peer   = std::make_shared<Peer>();
+    auto direct = make_provider(peer, client_for("https://api.openai.com", "gpt-4.1-nano", kInputLimit));
+    auto request = make_provider_request(*direct, "gpt-4.1-nano",
+                                         {neograph::test::message("probe", sp::Role::User)});
+    std::get<sp::chat::Request>(request.payload).max_output_tokens = kOutputCap;
+    const auto prepared = direct->prepare(std::move(request));
+    const auto quote = program::detail::assess_monetary_call(PriceCatalog::builtin(), std::nullopt, prepared);
+    EXPECT_TRUE(quote.blocker.empty()) << quote.blocker_message;
+    EXPECT_EQ(quote.origin, "openai");
+    EXPECT_FALSE(quote.pin);
+    EXPECT_EQ(prepared.encoded_body().find("max_price"), std::string_view::npos);
+
+    // An OpenRouter URL whose SDK policy admits no OpenRouter routing cannot
+    // be pinned, so its route ceiling bounds nothing and the call is refused.
+    auto source = json::parse(sp::config_defaults::descriptor_policy_json);
+    for (std::size_t i = 0; i < source.at("families").size(); ++i)
+        source["families"][i]["openrouter_origins"] = json::array();
+    auto admitted = sp::descriptor::load_policy(source.dump(), sp::config_defaults::codec_defaults_json);
+    auto unrouted = make_provider(peer, std::make_shared<sp::runtime::Client>(neograph::test::descriptor(
+        "openai.chat", std::string(kOpenRouter),
+        std::get<sp::descriptor::PolicySnapshot>(std::move(admitted)))));
+    auto routed_request = make_provider_request(*unrouted, std::string(kModel),
+                                                {neograph::test::message("probe", sp::Role::User)});
+    std::get<sp::chat::Request>(routed_request.payload).max_output_tokens = kOutputCap;
+    const auto refused = program::detail::assess_monetary_call(
+        PriceCatalog::builtin(), std::nullopt, unrouted->prepare(std::move(routed_request)));
+    EXPECT_EQ(refused.blocker, "P_MONEY_NO_UPPER_BOUND");
+    EXPECT_FALSE(refused.pin);
+}
+
+// Refuses a one-message conversation, as a provider that checks history might.
+class ProbeRefusingProvider final : public Provider {
+public:
+    explicit ProbeRefusingProvider(std::shared_ptr<Provider> inner) : inner_(std::move(inner)) {}
+    std::string      get_name() const override { return inner_->get_name(); }
+    std::string_view family() const noexcept override { return inner_->family(); }
+    PreparedProviderRequest prepare(ProviderRequest request) override {
+        ++prepared;
+        if (provider_request_messages(request).size() < 2) {
+            sp::Error error;
+            error.kind         = sp::ErrorKind::InvalidRequest;
+            error.safe_message = "a conversation needs history";
+            return reject_preparation(std::move(error));
+        }
+        return inner_->prepare(std::move(request));
+    }
+    int prepared = 0;
+
+private:
+    std::shared_ptr<Provider> inner_;
+};
+
+TEST(ProgramProviderBinding, APricedCallIsPinnedBeforeItIsPreparedToBeSent) {
+    auto peer     = std::make_shared<Peer>();
+    auto provider = make_provider(peer, client_for(std::string(kOpenRouter), std::string(kModel), kInputLimit));
+    const auto conversation = [&] {
+        auto request = make_provider_request(
+            *provider, std::string(kModel),
+            {neograph::test::message("q", sp::Role::User), neograph::test::message("a"),
+             neograph::test::message("q again", sp::Role::User)});
+        std::get<sp::chat::Request>(request.payload).max_output_tokens = kOutputCap;
+        return request;
+    };
+    // Priced from a one-message probe, then pinned and prepared once.
+    auto priced = program::detail::prepare_priced_call(PriceCatalog::builtin(), *provider,
+                                                       conversation(), true);
+    ASSERT_TRUE(priced.prepared.valid());
+    ASSERT_TRUE(priced.quote && priced.quote->pin);
+    EXPECT_TRUE(priced.quote->blocker.empty()) << priced.quote->blocker_message;
+    EXPECT_EQ(priced.quote->hold, expected_hold());
+    const std::string body(priced.prepared.encoded_body());
+    EXPECT_NE(body.find(kPinnedCeiling), std::string::npos) << body;
+    EXPECT_NE(body.find("q again"), std::string::npos) << "the sent request keeps its conversation";
+
+    // A provider that refuses the probe is priced from the request's own
+    // preparation, which is then pinned and prepared again.
+    ProbeRefusingProvider picky(provider);
+    auto fallback = program::detail::prepare_priced_call(PriceCatalog::builtin(), picky, conversation(), true);
+    ASSERT_TRUE(fallback.prepared.valid());
+    ASSERT_TRUE(fallback.quote && fallback.quote->pin);
+    EXPECT_EQ(fallback.quote->hold, priced.quote->hold);
+    EXPECT_EQ(std::string(fallback.prepared.encoded_body()), body);
+    EXPECT_EQ(Provider::request_digest(fallback.prepared), Provider::request_digest(priced.prepared));
+    EXPECT_EQ(picky.prepared, 3);
+
+    // A request the provider refuses has no quote, and an unpriced one no pin.
+    auto refused = program::detail::prepare_priced_call(
+        PriceCatalog::builtin(), picky,
+        make_provider_request(*provider, std::string(kModel), {neograph::test::message("q", sp::Role::User)}),
+        true);
+    EXPECT_FALSE(refused.prepared.valid());
+    EXPECT_FALSE(refused.quote);
+    auto unpriced = program::detail::prepare_priced_call(PriceCatalog::builtin(), *provider,
+                                                         conversation(), false);
+    ASSERT_TRUE(unpriced.prepared.valid());
+    EXPECT_FALSE(unpriced.quote);
+    EXPECT_EQ(unpriced.prepared.encoded_body().find("max_price"), std::string_view::npos);
+}
+
+TEST_P(Priced, TheSentRequestCarriesThePinnedCeilingAndTheJournalItsDigest) {
+    auto       peer   = std::make_shared<Peer>();
+    auto       h      = host(peer);
+    const auto result = h->run(Shape::Llm);
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+    ASSERT_EQ(peer->bodies.size(), 1U);
+    EXPECT_NE(peer->bodies[0].find(kPinnedCeiling), std::string::npos) << peer->bodies[0];
+    if (durable()) {
+        ASSERT_EQ(result.monetary_records().size(), 1U);
+        const auto row = h->journal().inspect(kOwner, result.monetary_records().front().call_id);
+        ASSERT_TRUE(row);
+        EXPECT_EQ(row->request_digest, peer->digests[0])
+            << "the journal records the pinned request that was sent, so a replay matches it";
+    }
+
+    // A direct origin is priced without max_price.
+    auto        direct = std::make_shared<Peer>();
+    HostOptions options;
+    options.origin = "https://api.openai.com";
+    options.model  = "gpt-4.1-nano";
+    TempDir    files("direct-origin");
+    Host       other(direct, options, durable() ? &files : nullptr);
+    const auto priced = other.run(Shape::Llm);
+    ASSERT_EQ(priced.status(), ProgramTerminalStatus::Completed) << failure_text(priced);
+    ASSERT_EQ(priced.monetary_records().size(), 1U);
+    EXPECT_EQ(priced.monetary_records().front().origin, "openai");
+    ASSERT_EQ(direct->bodies.size(), 1U);
+    EXPECT_EQ(direct->bodies[0].find("max_price"), std::string::npos) << direct->bodies[0];
 }
 
 // ---------------------------------------------------------------------------
@@ -938,7 +1200,9 @@ TEST_P(Priced, AReportedCostAboveTheCeilingExhaustsTheRun) {
     auto peer   = std::make_shared<Peer>();
     const auto ceiling = expected_hold();
     peer->reply = [ceiling](int, const ProviderRequest&) {
-        // A dearer endpoint than the catalog's ceiling (possible until max_price is pinned).
+        // A reported cost above the hold. max_price caps the endpoint's listed
+        // token prices; a BYOK upstream charge or a fee it does not cap can
+        // still make a reported cost exceed the reservation.
         return neograph::test::success("answer", with_cost(final_usage(21, 3), (ceiling + 10) * 1000));
     };
     HostOptions options;

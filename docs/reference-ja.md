@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=038ae0e0a997a58b081eeae4cd61991721382199a0731eb7a9471b0eac06ca5a -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=6b67d721625e5d82f0da1344b605765dc856f8bac748a2431c04b23be96b56db -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -433,7 +433,7 @@ dispatch の前に broker は準備済みリクエストに価格を付けます
 | `P_MONEY_UNMODELED` | `Failed` | リクエストがカタログの反映しないものを使う：標準以外の service tier、OpenRouter のモデル fallback（`models`）、Responses の hosted tool、Anthropic のサーバーツール |
 | `P_MONEY_NO_OUTPUT_CAP` | `Failed` | リクエストに出力トークン cap がない |
 | `P_MONEY_NO_INPUT_BOUND` | `Failed` | そのモデルの入力上限が分からない |
-| `P_MONEY_NO_UPPER_BOUND` | `Failed` | router alias のように aggregator の項目に route ceiling がない |
+| `P_MONEY_NO_UPPER_BOUND` | `Failed` | router alias のように aggregator の項目に route ceiling がない、またはその ceiling を `provider.max_price` として固定できない |
 | `P_MONEY_BUDGET` | `BudgetExhausted` | hold が残りの `monetary_microunits` に収まらない |
 
 結果が出ると hold はちょうど 1 回精算され、attempt の `ProgramResult::monetary_records()`（Python では `result.monetary_records`）に呼び出しごとに `ProgramMonetaryRecord` が 1 つ追加されます。フィールドは `call_id`（journal の論理呼び出し slot）、`operation_id`、`node`、`origin`、`model`、`evidence`、`microunits`、`reserved_microunits`、`basis`、`catalog_version`、`catalog_digest`、`conservative`、`may_undercount`、`replayed`、`reason` です。`ProgramUsage::monetary_microunits` は attempt の請求額とまだ開いている hold の合計です。
@@ -444,11 +444,11 @@ dispatch の前に broker は準備済みリクエストに価格を付けます
 | `estimated` | 報告費用のない最終で一貫した usage。 | カタログ料金 × 報告されたトークン帯、呼び出しごとに 1 回切り上げ。記録にカタログの version と digest が残ります。 |
 | `held` | 結果が分からない（transport 例外、キャンセル、タイムアウト）、失敗前にリクエストが送られた可能性がある、SDK が transport 試行を再送した、または usage が部分的か一貫しない。 | hold。 |
 
-何も送らなかったことを証明する失敗は hold を解放し、記録を残しません。hold を超える請求額（OpenRouter のリクエストが ceiling に固定されていない間は起こりえます）は報告どおりに請求され、請求額が予算を超えた実行は `BudgetExhausted` で終わります。並行呼び出し（`ng.all`、`ng.race`、`ng.quorum`、並列ノード）は 1 つのアカウントに予約するので、収まらない member は拒否されます。ノードの再試行は自分の effect namespace（`task#a<k>`）で呼び出すため、attempt ごとの呼び出しは新しい呼び出しで、再び請求されます。
+何も送らなかったことを証明する失敗は hold を解放し、記録を残しません。hold を超える請求額（BYOK の upstream 費用のように、固定した上限が抑えない費用が報告費用に含まれるときに起こりえます）は報告どおりに請求され、請求額が予算を超えた実行は `BudgetExhausted` で終わります。並行呼び出し（`ng.all`、`ng.race`、`ng.quorum`、並列ノード）は 1 つのアカウントに予約するので、収まらない member は拒否されます。ノードの再試行は自分の effect namespace（`task#a<k>`）で呼び出すため、attempt ごとの呼び出しは新しい呼び出しで、再び請求されます。
 
 `bind_priced` は呼び出しの記録を journal 行に書きます。dispatched marker と一緒に held 記録を、結果と一緒に精算済み記録を書きます。同じ Program attempt がプロセス停止前に記録した呼び出しは、復旧した attempt がその operation をバインドしたときに、Core が再び呼び出すかどうかにかかわらず 1 回だけ請求され、`replayed` と記されます。execution lease の期限切れで復旧する define() のみの実行も含みます。以前の attempt が記録した呼び出しは、その attempt の結果が残り予算にすでに精算しているので、後の attempt が結果を再生しても再び請求されません。recorded replay は金額を使いません。
 
-バインディングはまだリクエストに何も固定しません。OpenRouter の `provider.max_price` には `OpenRouterRouting::max_price` が必要ですが、固定している SchemaProvider SDK にはまだありません。それまでも予約はすでに route ceiling を使い、より高い endpoint の報告費用は報告どおりに請求されます。
+OpenRouter の origin では、broker はリクエストを送信用に準備する前に route ceiling をリクエストに固定します。OpenRouter の `provider.max_price` には、ceiling の最も高い入力レートが `prompt` に、最も高い出力レートが `completion` に、100万トークンあたりの正確な10進 USD で入ります。`deepseek/deepseek-v4-flash-0731` なら本文は `"provider":{"max_price":{"prompt":0.44,"completion":1.32}}` を含みます。OpenRouter はその価格以下で掲載された endpoint にだけルーティングし、該当がなければリクエストを失敗させるので、予約が endpoint のトークン価格を抑えます。ホストが `ProviderControls::provider` または `SchemaProvider::Defaults::provider` ですでに送る `max_price`（リクエスト自身の値が既定値を置き換えます）は、より低いフィールドで保たれ、カタログが価格を付けない金額（`image`、`audio`、`request`）はホストの値のままです。固定されるのは Chat Completions、Responses、Messages のリクエストで、ほかの origin には `max_price` は付きません。価格は会話をユーザーメッセージ1つに置き換えたリクエストの probe から求め、probe は送信しません。リクエストは固定した状態で一度だけ準備されるので、provider journal は実際に送ったリクエストの digest を記録し、再生はそれと一致します。固定値のもとでキャプチャされた native history を持つ次のターンも同じ固定値を載せます。SDK policy がその base URL で OpenRouter routing を認めない、またはレートが `max_price` の認める 2^53 nanoUSD を超えるために route ceiling を固定できない呼び出しは `P_MONEY_NO_UPPER_BOUND` で拒否されます。
 
 カタログ [`data/pricing/catalog.json`](../data/pricing/catalog.json) はビルド時に `neograph::program` にコンパイルされ、ランタイムはそのバイトだけで価格を付けます。キーは origin と model です。Google AI Studio 経由の Gemini と Vertex AI global endpoint 経由の Gemini は別の項目で、OpenAI、Anthropic、OpenRouter も同様です。各項目は `source_url`（公式の価格ページ、または OpenRouter models API）と `retrieved` の日付を記録します。料金は 100 万トークンあたりの USD を表す 10 進文字列で、入力、出力、キャッシュ読み取り、キャッシュ書き込み（Anthropic の 5 分・1 時間 TTL）、画像出力の帯と、任意のプロンプト長 tier を持ちます。項目は標準の service tier の価格で、batch・flex・priority tier、Anthropic の US 限定 inference_geo と fast mode、サーバーツール料金、リクエスト単位の料金は反映しません。OpenRouter は一つのモデルを価格の異なる複数の endpoint にルーティングするため、その項目には作成時点で最も高い endpoint である `route_ceiling` があり、予約はこれを使います。`~deepseek/deepseek-v4-flash-latest` のような router alias は endpoint を列挙しないため ceiling がなく、予約できません。項目のないモデルには価格がなく、そのモデルへの価格付き呼び出しは拒否されます。
 

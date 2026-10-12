@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=b31296118acbc982c1eac11eeaaeaa7f32b2d05006c4133846863feb7bce7331 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=d479ffdcc8e7c021c4c1e62b9e02e90e4cd98854dd49b01a486c271d373ebb2c -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -543,7 +543,7 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 
 バインディングのうちidentityに入るのはラベルだけです。プロバイダーを必要とするProgramバージョンは、ラベルとプロバイダーのレジストリidentityのダイジェストをidentityとするcapability receiptを持ちます。プロバイダーのキー、endpoint、モデルは含まれないため、モデルを変えてもバージョンidは変わらず、ラベルを変えると変わります。プロバイダーを必要としないProgramはreceiptを持たず、バンドルidとバージョンidを保ちます。ラベルは`a-z`、`0-9`、`.`、`_`、`-`、`:`からなる1〜64文字で、英字か数字で始まり、APIキーのように見えてはいけません。`node_context`がないと、プロバイダーを必要とするProgramはadmissionで`P_ADMIT_PROVIDER`により拒否され、`provider=`なしで登録した`llm_call`または`intent_classifier`ノードを持つProgramも同様です。
 
-各呼び出しは、NeoGraphにコンパイルされた価格カタログで実行の`monetary_microunits`に対して価格が付けられます。リクエストを送る前に呼び出しの上限を予約します。上限を決められない呼び出し（カタログ項目のないモデル、route ceilingのないrouter alias、出力capのないリクエスト）や、予約が残り予算に収まらない呼び出しは何も送らないうちに拒否され、実行は`P_MONEY_*`コードで失敗します。すべての`ProgramRunBudget`フィールドと同じく`monetary_microunits = 0`は何も与えないため、そのような実行はすべての呼び出しを拒否します。応答の後、`result.monetary_records`には呼び出しごとに`ng.ProgramMonetaryRecord`が1つ、`evidence`とともに入ります。`reported`（OpenRouterの`usage.cost`）、`estimated`（カタログ料金。`catalog_version`と`catalog_digest`がカタログを示す）、`held`（結果やusageが分からないため予約額を請求）のいずれかです。`result.usage.monetary_microunits`はその合計です。コード、上限、精算の規則は[価格の証拠と価格カタログ](reference-en.md#pricing-evidence-and-the-price-catalog)にあります。
+各呼び出しは、NeoGraphにコンパイルされた価格カタログで実行の`monetary_microunits`に対して価格が付けられます。リクエストを送る前に呼び出しの上限を予約します。OpenRouter ではリクエストがその上限を `provider.max_price` としても載せます。route ceiling の入力・出力レート、または controls や `SchemaProviderDefaults` ですでに指定したより低い `max_price` なので、OpenRouter は呼び出しをより高い endpoint にルーティングできません。価格を求めるとき、会話をユーザーメッセージ1つに置き換えたリクエストの probe を準備しますが送信はしないため、Python provider の `prepare` にはこの probe も渡ります。上限を決められない呼び出し（カタログ項目のないモデル、route ceilingのないrouter alias、出力capのないリクエスト）や、予約が残り予算に収まらない呼び出しは何も送らないうちに拒否され、実行は`P_MONEY_*`コードで失敗します。すべての`ProgramRunBudget`フィールドと同じく`monetary_microunits = 0`は何も与えないため、そのような実行はすべての呼び出しを拒否します。応答の後、`result.monetary_records`には呼び出しごとに`ng.ProgramMonetaryRecord`が1つ、`evidence`とともに入ります。`reported`（OpenRouterの`usage.cost`）、`estimated`（カタログ料金。`catalog_version`と`catalog_digest`がカタログを示す）、`held`（結果やusageが分からないため予約額を請求）のいずれかです。`result.usage.monetary_microunits`はその合計です。コード、上限、精算の規則は[価格の証拠と価格カタログ](reference-en.md#pricing-evidence-and-the-price-catalog)にあります。
 
 モデルを呼び出すPythonノードはプロバイダーを自分で持ち、Programの予算はその呼び出しを見ません。
 

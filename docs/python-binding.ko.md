@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=b31296118acbc982c1eac11eeaaeaa7f32b2d05006c4133846863feb7bce7331 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=d479ffdcc8e7c021c4c1e62b9e02e90e4cd98854dd49b01a486c271d373ebb2c -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -543,7 +543,7 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 
 바인딩 가운데 identity에 들어가는 것은 레이블뿐입니다. 제공자를 요구하는 Program 버전은 레이블과 제공자의 레지스트리 identity를 다이제스트한 capability receipt를 가집니다. 제공자의 키, endpoint, 모델은 여기에 들어가지 않으므로 모델을 바꿔도 버전 id는 그대로이고 레이블을 바꾸면 달라집니다. 제공자를 요구하지 않는 Program은 receipt가 없으며 번들 id와 버전 id를 그대로 유지합니다. 레이블은 `a-z`, `0-9`, `.`, `_`, `-`, `:`로 된 1~64자이고 영문자나 숫자로 시작해야 하며 API 키처럼 보이면 안 됩니다. `node_context` 없이 제공자를 요구하는 Program은 승인(admission)에서 `P_ADMIT_PROVIDER`로 거부되며, `provider=` 없이 등록한 `llm_call` 또는 `intent_classifier` 노드를 가진 Program도 마찬가지입니다.
 
-각 호출은 NeoGraph에 컴파일된 가격 카탈로그로 실행의 `monetary_microunits`에 대해 가격이 매겨집니다. 요청을 보내기 전에 호출의 상한을 예약합니다. 상한을 정할 수 없는 호출(카탈로그 항목이 없는 모델, route ceiling이 없는 router alias, 출력 cap이 없는 요청)이나 예약이 남은 예산에 들어가지 않는 호출은 아무것도 보내기 전에 거부되며, 실행은 `P_MONEY_*` 코드로 실패합니다. 모든 `ProgramRunBudget` 필드와 마찬가지로 `monetary_microunits = 0`은 아무것도 부여하지 않으므로 그런 실행은 모든 호출을 거부합니다. 응답 뒤에는 `result.monetary_records`에 호출마다 `ng.ProgramMonetaryRecord` 하나가 `evidence`와 함께 들어갑니다. `reported`(OpenRouter `usage.cost`), `estimated`(카탈로그 요율이며 `catalog_version`과 `catalog_digest`가 카탈로그를 가리킴), `held`(결과나 usage를 알 수 없어 예약액을 청구) 중 하나입니다. `result.usage.monetary_microunits`는 그 합입니다. 코드, 상한, 정산 규칙은 [가격 증거와 가격 카탈로그](reference-en.md#pricing-evidence-and-the-price-catalog)에 있습니다.
+각 호출은 NeoGraph에 컴파일된 가격 카탈로그로 실행의 `monetary_microunits`에 대해 가격이 매겨집니다. 요청을 보내기 전에 호출의 상한을 예약합니다. OpenRouter에서는 요청이 그 상한을 `provider.max_price`로도 싣습니다. route ceiling의 입력·출력 요율이거나, controls나 `SchemaProviderDefaults`에 이미 지정한 더 낮은 `max_price`이므로 OpenRouter는 호출을 더 비싼 endpoint로 라우팅할 수 없습니다. 가격을 매길 때 대화를 사용자 메시지 하나로 바꾼 요청의 probe를 준비하되 보내지는 않으므로, Python provider의 `prepare`에는 이 probe도 전달됩니다. 상한을 정할 수 없는 호출(카탈로그 항목이 없는 모델, route ceiling이 없는 router alias, 출력 cap이 없는 요청)이나 예약이 남은 예산에 들어가지 않는 호출은 아무것도 보내기 전에 거부되며, 실행은 `P_MONEY_*` 코드로 실패합니다. 모든 `ProgramRunBudget` 필드와 마찬가지로 `monetary_microunits = 0`은 아무것도 부여하지 않으므로 그런 실행은 모든 호출을 거부합니다. 응답 뒤에는 `result.monetary_records`에 호출마다 `ng.ProgramMonetaryRecord` 하나가 `evidence`와 함께 들어갑니다. `reported`(OpenRouter `usage.cost`), `estimated`(카탈로그 요율이며 `catalog_version`과 `catalog_digest`가 카탈로그를 가리킴), `held`(결과나 usage를 알 수 없어 예약액을 청구) 중 하나입니다. `result.usage.monetary_microunits`는 그 합입니다. 코드, 상한, 정산 규칙은 [가격 증거와 가격 카탈로그](reference-en.md#pricing-evidence-and-the-price-catalog)에 있습니다.
 
 모델을 호출하는 Python 노드는 제공자를 직접 소유하며, Program 예산은 그런 호출을 보지 못합니다.
 

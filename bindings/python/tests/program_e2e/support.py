@@ -567,7 +567,8 @@ def openrouter_provider(base_url, api_key, *, input_limits=None, timeout_ms=120_
 
 
 class ChatPeer:
-    """Loopback Chat Completions peer. It records every request it receives.
+    """Loopback Chat Completions peer. It records every request it receives,
+    parsed ("body") and as the bytes it arrived as ("raw_body").
 
     usage is the reply's usage object; add "cost" for OpenRouter's reported
     cost in USD. A streaming request (the built-in llm_call node streams inside
@@ -587,9 +588,10 @@ class ChatPeer:
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
-                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+                raw_body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                body = json.loads(raw_body)
                 with peer._lock:
-                    peer.requests.append({"path": self.path, "body": body,
+                    peer.requests.append({"path": self.path, "body": body, "raw_body": raw_body,
                                           "auth": self.headers.get("Authorization")})
                 last = (body.get("messages") or [{}])[-1].get("content") or ""
                 if "slow" in str(last):

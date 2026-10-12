@@ -20,7 +20,11 @@
  *     and output cap (route ceiling on an aggregator), times the invocations
  *     one dispatch can bill. The input bound is the smallest input limit
  *     known for the model: the SDK policy's, the catalog's max input or its
- *     context window.
+ *     context window. On an aggregator the request is pinned before it is
+ *     prepared to be sent: its OpenRouter provider.max_price becomes the route
+ *     ceiling, or the host's own cap where that is lower, so the request that
+ *     is digested, journaled and sent is the pinned one
+ *     (prepare_priced_call()).
  *  2. Preflight. A call that cannot be bounded is refused before any request
  *     is sent, with a P_MONEY_* code; so is a call whose hold does not fit the
  *     remaining budget (P_MONEY_BUDGET).
@@ -119,12 +123,6 @@ struct MonetaryCallSite {
     std::string node;
 };
 
-/** The price OpenRouter is told not to exceed, in USD per million tokens. */
-struct RouteMaxPrice {
-    std::string prompt;
-    std::string completion;
-};
-
 /** What the catalog says about one prepared call. */
 struct MonetaryQuote {
     std::string   origin;
@@ -137,8 +135,9 @@ struct MonetaryQuote {
     /// Why the call cannot be bounded (a P_MONEY_* code); empty when it can.
     std::string   blocker;
     std::string   blocker_message;
-    /// The route ceiling to pin on an aggregator request.
-    std::optional<RouteMaxPrice> pin;
+    /// OpenRouter's provider.max_price for an aggregator request: the route
+    /// ceiling, lowered field by field to any cap the host already sends.
+    std::optional<sp::OpenRouterMaxPrice> pin;
     json          witness = json::object();
 };
 
@@ -154,20 +153,59 @@ NEOGRAPH_PROGRAM_API MonetaryQuote assess_monetary_call(
     const std::optional<std::string>& unmodeled,
     const PreparedProviderRequest&    prepared);
 
-/** The route ceiling as OpenRouter's provider.max_price, or none without a ceiling. */
-NEOGRAPH_PROGRAM_API std::optional<RouteMaxPrice> route_max_price(const pricing::Entry& entry);
+/**
+ * The entry's route ceiling as OpenRouter's provider.max_price: prompt and
+ * completion in nanoUSD per million tokens, the dearest input and output rate
+ * of the ceiling (catalog micro-USD times 1000). None when the entry has no
+ * route ceiling or a rate exceeds the 2^53 nanoUSD that max_price admits.
+ */
+NEOGRAPH_PROGRAM_API std::optional<sp::OpenRouterMaxPrice> route_max_price(const pricing::Entry& entry);
 
 /**
- * Pin provider.max_price on an OpenRouter request so the router cannot pick
- * an endpoint dearer than the ceiling the call was reserved at. Returns true
- * when the request changed and must be prepared again.
- *
- * TODO(SchemaProvider maint/interface6): sp::OpenRouterRouting has no
- * max_price field yet. Once the pinned SDK has it, set
- * `payload.provider->max_price` from `price` on Chat Completions and Responses
- * payloads and return true. Never write the field as raw JSON.
+ * Pin provider.max_price on an OpenRouter request (Chat Completions, Responses
+ * or Messages) so the router cannot pick an endpoint dearer than the ceiling
+ * the call was reserved at. `price` is MonetaryQuote::pin, which already keeps
+ * the lower of the host's own cap and the ceiling. Returns true when the
+ * request changed. Throws std::logic_error for a family that cannot carry
+ * OpenRouter routing; assess_monetary_call() never quotes a pin for one.
  */
-NEOGRAPH_PROGRAM_API bool pin_route_max_price(ProviderRequest& request, const RouteMaxPrice& price);
+NEOGRAPH_PROGRAM_API bool pin_route_max_price(ProviderRequest&               request,
+                                              const sp::OpenRouterMaxPrice& price);
+
+/** A call prepared by a pricing broker, with its quote when it is priced. */
+struct PricedPreparation {
+    PreparedProviderRequest      prepared;
+    std::optional<MonetaryQuote> quote;
+};
+
+/**
+ * Prepare one call the way both pricing brokers do. Unpriced, `request` is
+ * prepared as it is. Priced, it is assessed first and, on an aggregator,
+ * pinned before it is prepared to be sent, once. Pinning first matters:
+ * captured native history binds the routing its turn was sent with, the pin
+ * included, so a later turn prepared without the pin would be refused as
+ * ReplayIneligible.
+ *
+ * The assessment reads the provider, the model, the request's caps and its
+ * routing, never its conversation, so it prices a probe of the request whose
+ * conversation is one user message; the probe is released unsent. A request
+ * whose probe the provider does not admit is priced from its own preparation
+ * and prepared again when that has to be pinned.
+ *
+ * `prepared` may be invalid: the broker returns preparation_failure_outcome().
+ * `quote` is empty when the call is not priced or could not be prepared.
+ */
+NEOGRAPH_PROGRAM_API PricedPreparation prepare_priced_call(const pricing::PriceCatalog& catalog,
+                                                           Provider&                    provider,
+                                                           ProviderRequest              request,
+                                                           bool                         priced);
+
+/**
+ * The not-sent failure a pricing broker returns for a preparation that is not
+ * valid: the preparation's own error, else InvalidRequest.
+ */
+NEOGRAPH_PROGRAM_API sp::runtime::Result preparation_failure_outcome(
+    const PreparedProviderRequest& prepared);
 
 /** The synthetic not-sent failure a refused call returns instead of dispatching. */
 NEOGRAPH_PROGRAM_API sp::runtime::Result monetary_refusal_outcome(const MonetaryRefusal& refusal);

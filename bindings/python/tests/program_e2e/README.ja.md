@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=5573def7d0ee809c79d38af71919f9eaf0f66c25b6f1d6712b080c3eb77f76ea -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=d5e51863d61a1d3f549763670ecbc5f1efb5e8c4f88c1fcce1c032faa398705b -->
 # Program API エンドツーエンドシナリオ
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -17,7 +17,7 @@
 | `test_06_graph_shapes.py` | バリア結合、条件付きルーティング、`Send` によるマップリデュース、サブグラフ、不正なグラフ形状 |
 | `test_07_main_programs.py` | `callCore`、`all`、`race`、`quorum`、`await` のタイムアウト、`cancelScope`、外部キャンセル、`spawn` |
 | `test_08_live_llm.py` | ノードがモデルを呼び出す Program：既定はローカルピア、有効にすると OpenRouter。Python ノードとバインドされた `llm_call` |
-| `test_09_bound_llm.py` | `node_context` でバインドした `llm_call`（#372）：報告費用と推定費用、送信前の拒否（予算、未知のモデル、router alias）、ゼロ予算、プロバイダーのない Program の id、1 つの予算に対する `all` と `quorum`、呼び出しが journal に記録された後のクラッシュと 1 回だけ請求する復旧 |
+| `test_09_bound_llm.py` | `node_context` でバインドした `llm_call`（#372）：報告費用と推定費用、`provider.max_price` として固定した route ceiling、送信前の拒否（予算、未知のモデル、router alias）、ゼロ予算、プロバイダーのない Program の id、1 つの予算に対する `all` と `quorum`、呼び出しが journal に記録された後のクラッシュと 1 回だけ請求する復旧 |
 | `test_10_failure_routing.py` | 失敗のルーティング（#364）：失敗した TEST がレコードとともに `interruptBefore` のハンドラーへルーティングされる、retry と abort のルートでの再開、作成者コード、伏せたエラーテキスト、`max_visits`、`max_node_retries` の上限、ノード内の Program 診断、SQLite を使う新しいプロセスでの再開 |
 | `test_11_attempt_timeout.py` | 試行タイムアウト（#364）：タイムアウトしてリトライで回復する遅い Python ノード、常にタイムアウトして `NG.Timeout` としてハンドラーにルーティングされるノード（ハンドラーがなければ実行が失敗）、結果にもトレースにも現れない遅れた完了、停止の期限を過ぎてもキャンセルを無視するノード（`NG.EffectUncertain`）、`wall_time_ms` を越えるバックオフが kind `deadline` で止まる場合 |
 | `test_12_send_interrupts.py` | `NodeInterrupt` を送出する `Send` target（#385）：Program がそこで一時停止する、再開時に map ノードと終了した Send が再生される、SQLite を使う再起動後の再開、バインドされた `llm_call` を呼んで終了した Send は再送も再課金もされない |
@@ -41,7 +41,7 @@ PYTHONPATH=build:bindings/python python -m pytest -q bindings/python/tests/progr
 
 ## ライブモデルテスト
 
-`test_live_openrouter_model_call_inside_a_program` と `test_live_openrouter_bound_llm_call_is_priced` は、それぞれ有料の OpenRouter リクエストを 1 回送ります（`max_output_tokens=64`、データ非保持のルーティング）。2 つ目は `LocalProgramHost(node_context=...)` でバインドした組み込み `llm_call` を 1,000,000 microunit（1 USD）の金額予算で実行し、精算済みの記録を確認します。両方の変数が設定されていない限りスキップされ、CI はこれらを設定しません。
+`test_live_openrouter_model_call_inside_a_program` と `test_live_openrouter_bound_llm_call_is_priced` は、それぞれ有料の OpenRouter リクエストを 1 回送ります（`max_output_tokens=64`、データ非保持のルーティング）。2 つ目は `LocalProgramHost(node_context=...)` でバインドした組み込み `llm_call` を 1,000,000 microunit（1 USD）の金額予算で実行し、精算済みの記録を確認します。このリクエストはカタログの route ceiling を `provider.max_price` として載せるので、OpenRouter は ceiling より高く掲載された endpoint にルーティングせず、リクエストを失敗させます。両方の変数が設定されていない限りスキップされ、CI はこれらを設定しません。
 
 ```bash
 NEOGRAPH_E2E_LIVE=1 OPENROUTER_API_KEY=... PYTHONPATH=build:bindings/python \

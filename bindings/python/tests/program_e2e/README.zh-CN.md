@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=5573def7d0ee809c79d38af71919f9eaf0f66c25b6f1d6712b080c3eb77f76ea -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=d5e51863d61a1d3f549763670ecbc5f1efb5e8c4f88c1fcce1c032faa398705b -->
 # Program API 端到端场景
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -17,7 +17,7 @@
 | `test_06_graph_shapes.py` | 屏障汇合、条件路由、`Send` 映射归约、子图、无效的图形状 |
 | `test_07_main_programs.py` | `callCore`、`all`、`race`、`quorum`、`await` 超时、`cancelScope`、外部取消、`spawn` |
 | `test_08_live_llm.py` | 节点调用模型的 Program：默认使用本地对端，启用后使用 OpenRouter；Python 节点与绑定的 `llm_call` |
-| `test_09_bound_llm.py` | 通过 `node_context` 绑定的 `llm_call`（#372）：报告费用与估算费用、发送前的拒绝（预算、未知模型、router alias）、零预算、无提供商 Program 的 id、同一预算下的 `all` 与 `quorum`、调用记入 journal 后的崩溃以及只收费一次的恢复 |
+| `test_09_bound_llm.py` | 通过 `node_context` 绑定的 `llm_call`（#372）：报告费用与估算费用、作为 `provider.max_price` 固定的 route ceiling、发送前的拒绝（预算、未知模型、router alias）、零预算、无提供商 Program 的 id、同一预算下的 `all` 与 `quorum`、调用记入 journal 后的崩溃以及只收费一次的恢复 |
 | `test_10_failure_routing.py` | 失败路由（#364）：失败的 TEST 带着记录被路由到有 `interruptBefore` 的处理节点，沿 retry 和 abort 路由恢复，作者代码，经过脱敏的错误文本，`max_visits`，`max_node_retries` 上限，节点内的 Program 诊断，以及使用 SQLite 在新进程中恢复 |
 | `test_11_attempt_timeout.py` | 尝试超时（#364）：超时后在重试中恢复的慢 Python 节点，总是超时并以 `NG.Timeout` 路由到处理器的节点（没有处理器时运行失败），从不出现在结果和轨迹中的迟到完成，超过停止截止时间仍忽略取消的节点（`NG.EffectUncertain`），以及会越过 `wall_time_ms` 的退避以 kind `deadline` 停止 |
 | `test_12_send_interrupts.py` | 抛出 `NodeInterrupt` 的 `Send` target（#385）：Program 在其上暂停，恢复时重放 map 节点和已完成的 Send，使用 SQLite 在重启后恢复，调用了已绑定 `llm_call` 并已完成的 Send 既不会重发也不会再次计费 |
@@ -41,7 +41,7 @@ PYTHONPATH=build:bindings/python python -m pytest -q bindings/python/tests/progr
 
 ## 在线模型测试
 
-`test_live_openrouter_model_call_inside_a_program` 与 `test_live_openrouter_bound_llm_call_is_priced` 各发送一次付费的 OpenRouter 请求（`max_output_tokens=64`，零数据保留路由）。第二个测试在 1,000,000 microunit（1 USD）的金额预算下运行通过 `LocalProgramHost(node_context=...)` 绑定的内置 `llm_call`，并检查结算后的记录。除非两个变量都已设置，否则会被跳过，CI 从不设置它们：
+`test_live_openrouter_model_call_inside_a_program` 与 `test_live_openrouter_bound_llm_call_is_priced` 各发送一次付费的 OpenRouter 请求（`max_output_tokens=64`，零数据保留路由）。第二个测试在 1,000,000 microunit（1 USD）的金额预算下运行通过 `LocalProgramHost(node_context=...)` 绑定的内置 `llm_call`，并检查结算后的记录。它的请求以 `provider.max_price` 携带目录的 route ceiling，因此 OpenRouter 不会路由到标价高于 ceiling 的 endpoint，而是让请求失败。除非两个变量都已设置，否则会被跳过，CI 从不设置它们：
 
 ```bash
 NEOGRAPH_E2E_LIVE=1 OPENROUTER_API_KEY=... PYTHONPATH=build:bindings/python \

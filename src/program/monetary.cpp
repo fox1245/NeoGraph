@@ -8,8 +8,11 @@
 #include <descriptor/descriptor.h>
 #include <descriptor/policy.h>
 
+#include <yyjson.h>
+
 #include <algorithm>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <type_traits>
 #include <variant>
@@ -120,15 +123,96 @@ bool standard_service_tier(std::string_view tier) {
     return tier == "default" || tier == "standard";
 }
 
-// USD per million tokens, from exact micro-USD per million tokens.
-std::string usd_per_million(std::uint64_t micro) {
-    auto text = std::to_string(micro / 1'000'000);
-    auto fraction = micro % 1'000'000;
-    if (fraction == 0) return text;
-    auto digits = std::to_string(fraction);
-    digits.insert(0, 6 - digits.size(), '0');
-    while (!digits.empty() && digits.back() == '0') digits.pop_back();
-    return text + "." + digits;
+// The largest amount OpenRouter's provider.max_price admits, in nanoUSD.
+constexpr std::uint64_t kMaxPriceNanoUsd = std::uint64_t{1} << 53;
+
+// nanoUSD from the exact decimal USD number the SDK writes for max_price:
+// whole dollars, then at most nine fractional digits, no sign or exponent.
+std::optional<std::uint64_t> exact_nano_usd(std::string_view text) {
+    const auto dot      = text.find('.');
+    const auto whole    = text.substr(0, dot);
+    const auto fraction = dot == std::string_view::npos ? std::string_view{} : text.substr(dot + 1);
+    if (whole.empty() || whole.size() > 10 || fraction.size() > 9 ||
+        (dot != std::string_view::npos && fraction.empty()))
+        return std::nullopt;
+    std::uint64_t value = 0;
+    for (const char c : whole) {
+        if (c < '0' || c > '9') return std::nullopt;
+        value = value * 10 + static_cast<std::uint64_t>(c - '0');
+    }
+    for (std::size_t i = 0; i < 9; ++i) {
+        const char c = i < fraction.size() ? fraction[i] : '0';
+        if (c < '0' || c > '9') return std::nullopt;
+        value = value * 10 + static_cast<std::uint64_t>(c - '0');
+    }
+    if (value > kMaxPriceNanoUsd) return std::nullopt;
+    return value;
+}
+
+// The provider.max_price a prepared request already sends: the host's own cap
+// from its request controls or its provider defaults, as the provider merged
+// them. Read from the encoded body because the defaults live in the provider.
+struct SentMaxPrice {
+    std::optional<sp::OpenRouterMaxPrice> price;
+    bool                                  malformed = false;
+};
+
+SentMaxPrice sent_max_price(std::string_view body) {
+    if (body.find("\"max_price\"") == std::string_view::npos) return {};
+    std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> document(
+        yyjson_read_opts(const_cast<char*>(body.data()), body.size(), YYJSON_READ_NUMBER_AS_RAW,
+                         nullptr, nullptr),
+        &yyjson_doc_free);
+    if (!document) return {std::nullopt, true};
+    auto* price = yyjson_obj_get(yyjson_obj_get(yyjson_doc_get_root(document.get()), "provider"),
+                                 "max_price");
+    if (!price) return {};
+    if (!yyjson_is_obj(price)) return {std::nullopt, true};
+    SentMaxPrice sent{sp::OpenRouterMaxPrice{}, false};
+    const std::pair<const char*, std::optional<std::uint64_t> sp::OpenRouterMaxPrice::*> fields[] = {
+        {"prompt", &sp::OpenRouterMaxPrice::prompt_nano_usd},
+        {"completion", &sp::OpenRouterMaxPrice::completion_nano_usd},
+        {"image", &sp::OpenRouterMaxPrice::image_nano_usd},
+        {"audio", &sp::OpenRouterMaxPrice::audio_nano_usd},
+        {"request", &sp::OpenRouterMaxPrice::request_nano_usd}};
+    std::size_t known = 0;
+    for (const auto& [key, member] : fields) {
+        auto* amount = yyjson_obj_get(price, key);
+        if (!amount) continue;
+        ++known;
+        const auto nano = yyjson_is_raw(amount)
+                              ? exact_nano_usd(std::string_view(yyjson_get_raw(amount),
+                                                                yyjson_get_len(amount)))
+                              : std::nullopt;
+        if (!nano) return {std::nullopt, true};
+        (*sent.price).*member = nano;
+    }
+    if (known == 0 || known != yyjson_obj_size(price)) return {std::nullopt, true};
+    return sent;
+}
+
+constexpr std::optional<std::uint64_t> sp::OpenRouterMaxPrice::* kMaxPriceFields[] = {
+    &sp::OpenRouterMaxPrice::prompt_nano_usd, &sp::OpenRouterMaxPrice::completion_nano_usd,
+    &sp::OpenRouterMaxPrice::image_nano_usd, &sp::OpenRouterMaxPrice::audio_nano_usd,
+    &sp::OpenRouterMaxPrice::request_nano_usd};
+
+// Field by field, the lower of the route ceiling and the host's own cap. A
+// field only the host caps keeps the host's amount.
+sp::OpenRouterMaxPrice lower_max_price(sp::OpenRouterMaxPrice                       ceiling,
+                                       const std::optional<sp::OpenRouterMaxPrice>& own) {
+    if (!own) return ceiling;
+    for (const auto member : kMaxPriceFields) {
+        const auto& host   = (*own).*member;
+        auto&       pinned = ceiling.*member;
+        if (host && (!pinned || *host < *pinned)) pinned = host;
+    }
+    return ceiling;
+}
+
+bool same_max_price(const sp::OpenRouterMaxPrice& left, const sp::OpenRouterMaxPrice& right) {
+    for (const auto member : kMaxPriceFields)
+        if (left.*member != right.*member) return false;
+    return true;
 }
 
 std::optional<std::uint64_t> min_known(std::initializer_list<std::optional<std::uint64_t>> values) {
@@ -295,7 +379,32 @@ MonetaryQuote assess_monetary_call(const pricing::PriceCatalog&      catalog,
               "the request uses " + *feature + ", which the price catalog does not model");
         return quote;
     }
-    if (origin->aggregator) quote.pin = route_max_price(*entry);
+    if (origin->aggregator && entry->route_ceiling) {
+        // The reservation below is an upper bound only if the router cannot
+        // pick an endpoint dearer than the route ceiling, so the ceiling is
+        // pinned on the request as OpenRouter's provider.max_price.
+        if (!sp::descriptor::routed_gateway(*descriptor)) {
+            block(quote, "P_MONEY_NO_UPPER_BOUND",
+                  "the SDK policy does not admit OpenRouter routing at " +
+                      std::string(descriptor->base_url()) + ", so the route ceiling of model '" +
+                      quote.model + "' cannot be pinned as provider.max_price");
+            return quote;
+        }
+        const auto ceiling = route_max_price(*entry);
+        if (!ceiling) {
+            block(quote, "P_MONEY_NO_UPPER_BOUND",
+                  "the route ceiling of model '" + quote.model +
+                      "' exceeds the largest provider.max_price amount");
+            return quote;
+        }
+        const auto own = sent_max_price(prepared.encoded_body());
+        if (own.malformed) {
+            block(quote, "P_MONEY_NO_UPPER_BOUND",
+                  "the request's provider.max_price is not an exact USD amount");
+            return quote;
+        }
+        quote.pin = lower_max_price(*ceiling, own.price);
+    }
 
     const auto output = prepared.max_output_tokens();
     if (!output) {
@@ -346,21 +455,95 @@ MonetaryQuote assess_monetary_call(const pricing::PriceCatalog&      catalog,
     return quote;
 }
 
-std::optional<RouteMaxPrice> route_max_price(const pricing::Entry& entry) {
+std::optional<sp::OpenRouterMaxPrice> route_max_price(const pricing::Entry& entry) {
     if (!entry.route_ceiling) return std::nullopt;
-    return RouteMaxPrice{usd_per_million(entry.route_ceiling->rates.max_input()),
-                         usd_per_million(entry.route_ceiling->rates.max_output())};
+    // Catalog rates are micro-USD per million tokens; max_price takes nanoUSD.
+    const auto nano = [](std::uint64_t micro) -> std::optional<std::uint64_t> {
+        if (micro > kMaxPriceNanoUsd / 1000) return std::nullopt;
+        return micro * 1000;
+    };
+    sp::OpenRouterMaxPrice price;
+    price.prompt_nano_usd     = nano(entry.route_ceiling->rates.max_input());
+    price.completion_nano_usd = nano(entry.route_ceiling->rates.max_output());
+    if (!price.prompt_nano_usd || !price.completion_nano_usd) return std::nullopt;
+    return price;
 }
 
-bool pin_route_max_price(ProviderRequest& request, const RouteMaxPrice& price) {
-    // TODO(SchemaProvider maint/interface6): set sp::OpenRouterRouting::max_price
-    // (prompt and completion, USD per million tokens) on Chat Completions and
-    // Responses payloads once the pinned SDK has the field, and return true.
-    // The reservation already uses the route ceiling; until the pin exists a
-    // dearer endpoint's reported cost can exceed it and is charged as reported.
-    (void)request;
-    (void)price;
-    return false;
+bool pin_route_max_price(ProviderRequest& request, const sp::OpenRouterMaxPrice& price) {
+    return std::visit(
+        [&](auto& payload) -> bool {
+            if constexpr (requires {
+                              requires std::is_same_v<std::decay_t<decltype(payload.provider)>,
+                                                      std::optional<sp::OpenRouterRouting>>;
+                          }) {
+                // Chat Completions, Responses and Messages: the families the
+                // SDK admits OpenRouter routing for. The other routing fields
+                // stay as the host set them; provider defaults still fill the
+                // ones it left unset.
+                auto& routing = payload.provider;
+                if (routing && routing->max_price && same_max_price(*routing->max_price, price))
+                    return false;
+                if (!routing) routing.emplace();
+                routing->max_price = price;
+                return true;
+            } else {
+                throw std::logic_error("This provider family cannot carry OpenRouter provider.max_price");
+            }
+        },
+        request.payload);
+}
+
+PricedPreparation prepare_priced_call(const pricing::PriceCatalog& catalog, Provider& provider,
+                                      ProviderRequest request, bool priced) {
+    if (!priced) return {provider.prepare(std::move(request)), std::nullopt};
+    const auto unmodeled = unmodeled_feature(request);
+    std::optional<MonetaryQuote> quote;
+    {
+        // The quote never reads the conversation, so a probe with a one-message
+        // conversation prices the call. It carries no native history, whose
+        // routing binding would refuse an unpinned turn after a pinned one.
+        sp::Message question;
+        question.role = sp::Role::User;
+        question.parts.emplace_back(sp::Text{"."});
+        auto probe = request;
+        set_provider_request_messages(probe, {std::move(question)});
+        std::visit(
+            [](auto& payload) {
+                if constexpr (std::is_same_v<std::decay_t<decltype(payload)>, sp::responses::Request>) {
+                    payload.previous_response_id.reset();
+                    payload.previous_response_history.clear();
+                }
+            },
+            probe.payload);
+        const auto probed = provider.prepare(std::move(probe));
+        if (probed.valid()) quote = assess_monetary_call(catalog, unmodeled, probed);
+    }  // The probe's operation slot is released here, unsent.
+    if (quote) {
+        if (quote->pin) (void)pin_route_max_price(request, *quote->pin);
+        return {provider.prepare(std::move(request)), std::move(quote)};
+    }
+    // The provider does not admit the probe: price the request's own preparation.
+    auto pinnable = request;
+    auto prepared = provider.prepare(std::move(request));
+    if (!prepared.valid()) return {std::move(prepared), std::nullopt};
+    quote = assess_monetary_call(catalog, unmodeled, prepared);
+    if (quote->pin && pin_route_max_price(pinnable, *quote->pin)) {
+        prepared = PreparedProviderRequest{};  // release its operation slot first
+        prepared = provider.prepare(std::move(pinnable));
+    }
+    return {std::move(prepared), std::move(quote)};
+}
+
+sp::runtime::Result preparation_failure_outcome(const PreparedProviderRequest& prepared) {
+    sp::Failure failure;
+    if (prepared.error()) {
+        failure.error = *prepared.error();
+    } else {
+        failure.error.kind         = sp::ErrorKind::InvalidRequest;
+        failure.error.safe_message = "Program provider preparation is invalid";
+        failure.error.retry_safety = sp::RetrySafety::NotSent;
+    }
+    return std::make_shared<const sp::Outcome>(std::move(failure));
 }
 
 sp::runtime::Result monetary_refusal_outcome(const MonetaryRefusal& refusal) {
@@ -624,33 +807,15 @@ private:
         if (!provider || identity.owner_scope != owner || identity.run_id != run ||
             identity.thread_id.empty() || identity.task_id.empty() || identity.node_name.empty())
             throw std::invalid_argument("Program provider call scope is invalid");
-        const auto unmodeled = detail::unmodeled_feature(request);
-        std::optional<ProviderRequest> pinnable;
-        if (account) pinnable = request;
-        auto prepared = provider->prepare(std::move(request));
-        if (!prepared.valid()) {
-            sp::Failure failure;
-            if (prepared.error()) {
-                failure.error = *prepared.error();
-            } else {
-                failure.error.kind         = sp::ErrorKind::InvalidRequest;
-                failure.error.safe_message = "Program provider preparation is invalid";
-                failure.error.retry_safety = sp::RetrySafety::NotSent;
-            }
-            co_return std::make_shared<const sp::Outcome>(std::move(failure));
-        }
+        auto priced = detail::prepare_priced_call(pricing::PriceCatalog::builtin(), *provider,
+                                                  std::move(request), account != nullptr);
+        auto prepared = std::move(priced.prepared);
+        if (!prepared.valid()) co_return detail::preparation_failure_outcome(prepared);
         detail::MonetaryHold hold;
-        if (account) {
-            auto quote = detail::assess_monetary_call(pricing::PriceCatalog::builtin(), unmodeled,
-                                                      prepared);
-            if (quote.pin && detail::pin_route_max_price(*pinnable, *quote.pin)) {
-                prepared = provider->prepare(std::move(*pinnable));
-                if (!prepared.valid())
-                    throw std::logic_error("A pinned route ceiling made the request invalid");
-            }
+        if (priced.quote) {
             const ProgramCoreProviderCallContext context{owner, version, run, operation, attempt};
             hold = detail::MonetaryHold(
-                account, std::move(quote),
+                account, std::move(*priced.quote),
                 detail::MonetaryCallSite{detail::provider_call_slot_id(context, identity),
                                          operation, identity.node_name});
             if (auto refused = hold.preflight()) co_return refused;

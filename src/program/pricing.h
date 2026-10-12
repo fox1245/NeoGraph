@@ -50,9 +50,9 @@
  * price over the model's endpoints when the catalog was written. An
  * aggregator entry without a route ceiling (a router alias such as
  * `~vendor/model-latest`, whose endpoints are not listed) has no upper bound:
- * reserve() returns PricingError::NoUpperBound. The binding is expected to pin
- * the ceiling on the request (`provider.max_price`) so that the router cannot
- * pick a dearer endpoint.
+ * reserve() returns PricingError::NoUpperBound. The `llm_call` binding pins
+ * the ceiling on the request as OpenRouter's `provider.max_price`, so the
+ * router cannot pick an endpoint whose listed price is dearer (monetary.h).
  *
  * Not modeled: service tiers other than standard (batch, flex, priority),
  * Anthropic's US-only inference_geo multiplier and fast mode, server-tool fees

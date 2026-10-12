@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=b31296118acbc982c1eac11eeaaeaa7f32b2d05006c4133846863feb7bce7331 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=d479ffdcc8e7c021c4c1e62b9e02e90e4cd98854dd49b01a486c271d373ebb2c -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -542,7 +542,7 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 
 绑定中只有标签进入 identity。需要该提供商的 Program 版本带有一个 capability receipt，其 identity 是标签与提供商注册表 identity 的摘要；提供商的密钥、endpoint 和模型不在其中，因此更换模型不改变版本 id，更换标签会改变它。不需要提供商的 Program 没有 receipt，bundle id 与版本 id 保持不变。标签必须是由 `a-z`、`0-9`、`.`、`_`、`-` 和 `:` 组成的 1 到 64 个字符，以字母或数字开头，且不能看起来像 API 密钥。没有 `node_context` 时，需要该提供商的 Program 在准入时以 `P_ADMIT_PROVIDER` 被拒绝；含有未带 `provider=` 注册的 `llm_call` 或 `intent_classifier` 节点的 Program 也一样。
 
-每次调用都依据编译进 NeoGraph 的价格目录，针对运行的 `monetary_microunits` 计价。发送请求之前会预留调用的上限。无法确定上限的调用（没有目录条目的模型、没有 route ceiling 的 router alias、没有输出上限的请求）或预留超出剩余预算的调用，会在发送任何内容之前被拒绝，运行以 `P_MONEY_*` 代码失败。与所有 `ProgramRunBudget` 字段一样，`monetary_microunits = 0` 不授予任何额度，因此这样的运行会拒绝所有调用。收到回复后，`result.monetary_records` 为每次调用保存一条 `ng.ProgramMonetaryRecord` 及其 `evidence`：`reported`（OpenRouter 的 `usage.cost`）、`estimated`（目录费率；`catalog_version` 与 `catalog_digest` 指明目录）或 `held`（结果或 usage 未知，因此收取预留额）。`result.usage.monetary_microunits` 是它们的总和。代码、上限与结算规则见[计价证据与价格目录](reference-en.md#pricing-evidence-and-the-price-catalog)。
+每次调用都依据编译进 NeoGraph 的价格目录，针对运行的 `monetary_microunits` 计价。发送请求之前会预留调用的上限。在 OpenRouter 上，请求还会以 `provider.max_price` 携带该上限：即 route ceiling 的输入、输出费率，或 controls 或 `SchemaProviderDefaults` 已设置的更低 `max_price`，因此 OpenRouter 不能把调用路由到更贵的 endpoint。计价时会准备但不发送一个把对话替换为一条用户消息的请求 probe，所以 Python provider 的 `prepare` 也会收到它。无法确定上限的调用（没有目录条目的模型、没有 route ceiling 的 router alias、没有输出上限的请求）或预留超出剩余预算的调用，会在发送任何内容之前被拒绝，运行以 `P_MONEY_*` 代码失败。与所有 `ProgramRunBudget` 字段一样，`monetary_microunits = 0` 不授予任何额度，因此这样的运行会拒绝所有调用。收到回复后，`result.monetary_records` 为每次调用保存一条 `ng.ProgramMonetaryRecord` 及其 `evidence`：`reported`（OpenRouter 的 `usage.cost`）、`estimated`（目录费率；`catalog_version` 与 `catalog_digest` 指明目录）或 `held`（结果或 usage 未知，因此收取预留额）。`result.usage.monetary_microunits` 是它们的总和。代码、上限与结算规则见[计价证据与价格目录](reference-en.md#pricing-evidence-and-the-price-catalog)。
 
 调用模型的 Python 节点自己持有提供商，Program 预算看不到这类调用。
 

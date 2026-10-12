@@ -15,6 +15,7 @@ settles as `reported`; without it the catalog `estimated` amount applies.
 import json
 import os
 import sys
+from decimal import Decimal
 
 import pytest
 
@@ -22,7 +23,7 @@ import neograph_engine as ng
 
 from . import support
 from .support import (ChatPeer, CATALOG_PATH, PRICED_MODEL, admit, budget, ceiling,
-                      define_graph, describe, digest, known_issue, last_json_line,
+                      define_graph, describe, digest, last_json_line,
                       make_bound_host, make_host, priced_budget, route_ceiling_hold,
                       run_python, slow, with_main)
 
@@ -230,16 +231,43 @@ def test_quorum_charges_the_cancelled_member_its_hold(peer):
     assert evidence in (["reported", "reported"], ["held", "reported", "reported"]), evidence
 
 
-@known_issue("#372", "the pinned SchemaProvider's OpenRouterRouting has no max_price, so the "
-                     "binding cannot pin the route ceiling on the request yet")
 def test_the_request_pins_the_route_ceiling_as_max_price(peer):
     _host, _version, result = run_bound(peer)
     assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
     [sent] = peer.requests
-    max_price = sent["body"].get("provider", {}).get("max_price")
-    assert max_price, sent["body"]
-    assert float(max_price["prompt"]) == 0.44
-    assert float(max_price["completion"]) == 1.32
+    # OpenRouter may route only to endpoints priced at or below the ceiling the
+    # call was reserved at: the dearest input and output rate of the entry's
+    # route ceiling, in USD per million tokens, sent as exact decimals.
+    entry = next(e for e in catalog()["entries"]
+                 if e["origin"] == "openrouter" and e["model"] == PRICED_MODEL)
+    rates = {key: Decimal(value) for key, value in entry["route_ceiling"].items()
+             if key not in ("source_url", "retrieved")}
+    prompt = max(rates[key] for key in ("input", "cache_read", "cache_write", "cache_write_1h")
+                 if key in rates)
+    completion = max(rates[key] for key in ("output", "output_image") if key in rates)
+    provider = json.loads(sent["raw_body"], parse_float=Decimal)["provider"]
+    assert provider["max_price"] == {"prompt": prompt, "completion": completion}, provider
+    assert (prompt, completion) == (Decimal("0.44"), Decimal("1.32"))
+    assert b'"max_price":{"prompt":0.44,"completion":1.32}' in sent["raw_body"]
+    assert provider["zdr"] is True  # the provider's routing defaults still apply
+    [record] = result.monetary_records
+    assert record.reserved_microunits == HOLD
+
+
+def test_a_host_max_price_below_the_ceiling_is_kept(peer):
+    routing = ng.OpenRouterRouting()
+    price = ng.OpenRouterMaxPrice()
+    price.prompt_nano_usd = 300_000_000        # $0.30, below the $0.44 ceiling
+    price.completion_nano_usd = 2_000_000_000  # $2, above the $1.32 ceiling
+    routing.max_price = price
+    controls = support.chat_controls()
+    controls.provider = routing
+    _host, _version, result = run_bound(peer, controls=controls)
+    assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
+    [sent] = peer.requests
+    provider = json.loads(sent["raw_body"], parse_float=Decimal)["provider"]
+    assert provider["max_price"] == {"prompt": Decimal("0.3"), "completion": Decimal("1.32")}
+    assert provider["zdr"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +457,10 @@ def test_interrupt_and_resume_charge_each_call_once(peer, tmp_path, durable):
     assert done.remaining_budget.model_tokens == 1_000_000 - 2 * 24
     assert done.usage.monetary_microunits == 1235
     assert done.remaining_budget.monetary_microunits == 1_000_000 - 2 * 1235
+    # The resumed turn resends the first turn's native history, which binds the
+    # routing it was sent with, so it carries the same max_price pin.
+    first, second = (request["body"]["provider"] for request in peer.requests)
+    assert first["max_price"] == second["max_price"] == {"prompt": 0.44, "completion": 1.32}
 
 
 # ---------------------------------------------------------------------------
