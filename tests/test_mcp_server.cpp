@@ -222,6 +222,50 @@ TEST(MCPServerTest, InputSchemaFailureIsToolErrorWithoutInvocation) {
     EXPECT_FALSE(invoked);
 }
 
+TEST(MCPServerTest, ArgumentsAreValidatedAsJsonSchema2020_12) {
+    // MCP-S-03: `minimum` is enforced and 1.0 is an integer, as the official
+    // SDKs' 2020-12 validators decide.
+    CapturingSink captured;
+    MCPServer server(config());
+    server.set_response_sink(captured.sink());
+    std::atomic<int> invoked{0};
+    ToolDefinition definition;
+    definition.name = "count";
+    definition.input_schema = json::parse(R"({
+        "type": "object",
+        "$defs": {"N": {"type": "integer", "minimum": 0}},
+        "properties": {"n": {"$ref": "#/$defs/N"},
+                       "tag": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+        "required": ["n"]})");
+    server.register_tool(definition, [&invoked](const json&, const auto&) {
+        ++invoked;
+        CallToolResult result;
+        result.content = json::array({{{"type", "text"}, {"text", "ok"}}});
+        return result;
+    });
+    initialize(server);
+
+    auto negative = server.handle_message(request(50, "tools/call", {
+        {"name", "count"}, {"arguments", {{"n", -1}}}}));
+    ASSERT_TRUE(negative.contains("result"));
+    EXPECT_TRUE(negative["result"]["isError"].get<bool>());
+    EXPECT_NE(negative["result"]["content"][0]["text"].get<std::string>().find("minimum"),
+              std::string::npos);
+
+    auto wrong_branch = server.handle_message(request(51, "tools/call", {
+        {"name", "count"}, {"arguments", {{"n", 1}, {"tag", 3}}}}));
+    ASSERT_TRUE(wrong_branch.contains("result"));
+    EXPECT_TRUE(wrong_branch["result"]["isError"].get<bool>());
+    EXPECT_EQ(invoked.load(), 0);
+
+    EXPECT_TRUE(server.handle_message(request(52, "tools/call", {
+        {"name", "count"}, {"arguments", json::parse(R"({"n": 1.0, "tag": null})")}})).is_null());
+    auto accepted = captured.wait_for(52);
+    ASSERT_TRUE(accepted.contains("result"));
+    EXPECT_FALSE(accepted["result"].value("isError", false));
+    EXPECT_EQ(invoked.load(), 1);
+}
+
 TEST(MCPServerTest, ProtocolAndToolExecutionErrorsRemainDistinct) {
     CapturingSink captured;
     MCPServer server(config());

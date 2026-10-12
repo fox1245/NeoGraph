@@ -279,7 +279,7 @@ if(NEOGRAPH_BUILD_MCP_CLIENT)
 endif()
 
 if(NEOGRAPH_BUILD_MCP_SERVER)
-    target_sources(neograph_tests PRIVATE test_mcp_server.cpp)
+    target_sources(neograph_tests PRIVATE test_mcp_server.cpp test_mcp_json_schema.cpp)
 endif()
 
 if(TARGET neograph_harness)

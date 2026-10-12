@@ -1,4 +1,5 @@
 #include <neograph/mcp/client.h>
+#include <neograph/mcp/json_schema.h>
 
 #include <neograph/async/endpoint.h>
 #include <neograph/async/http_client.h>
@@ -1439,103 +1440,32 @@ asio::awaitable<void> StdioSession::do_notify(json notification) {
 // Shared helper — shape an MCP tools/call result into a string for the LLM.
 // ===========================================================================
 namespace {
-bool schema_type_matches(const json& value, const std::string& type) {
-    if (type == "null") return value.is_null();
-    if (type == "boolean") return value.is_boolean();
-    if (type == "object") return value.is_object();
-    if (type == "array") return value.is_array();
-    if (type == "number") return value.is_number();
-    if (type == "integer") return value.is_number_integer();
-    if (type == "string") return value.is_string();
-    throw std::invalid_argument("unsupported JSON Schema type: " + type);
-}
-
-void validate_schema_value(const json& value, const json& schema,
-                           const std::string& path) {
-    if (!schema.is_object()) {
-        throw std::runtime_error("MCP outputSchema at " + path
-                                 + " must be an object");
-    }
-    if (schema.contains("const") && value != schema["const"]) {
-        throw std::runtime_error("MCP structuredContent at " + path
-                                 + " does not match const");
-    }
-    if (schema.contains("enum") && schema["enum"].is_array()) {
-        bool matched = false;
-        for (const auto& candidate : schema["enum"]) {
-            if (value == candidate) { matched = true; break; }
-        }
-        if (!matched) {
-            throw std::runtime_error("MCP structuredContent at " + path
-                                     + " is not in enum");
-        }
-    }
-    if (schema.contains("type")) {
-        bool matched = false;
-        if (schema["type"].is_string()) {
-            matched = schema_type_matches(value, schema["type"].get<std::string>());
-        } else if (schema["type"].is_array()) {
-            for (const auto& type : schema["type"]) {
-                if (type.is_string()
-                    && schema_type_matches(value, type.get<std::string>())) {
-                    matched = true;
-                    break;
-                }
-            }
-        }
-        if (!matched) {
-            throw std::runtime_error("MCP structuredContent at " + path
-                                     + " has the wrong JSON type");
-        }
-    }
-    if (value.is_object()) {
-        if (schema.contains("required") && schema["required"].is_array()) {
-            for (const auto& name : schema["required"]) {
-                if (name.is_string() && !value.contains(name.get<std::string>())) {
-                    throw std::runtime_error("MCP structuredContent at " + path
-                                             + " is missing required property "
-                                             + name.get<std::string>());
-                }
-            }
-        }
-        const json properties = schema.value("properties", json::object());
-        if (properties.is_object()) {
-            for (auto it = properties.begin(); it != properties.end(); ++it) {
-                if (value.contains(it.key())) {
-                    validate_schema_value(value[it.key()], it.value(),
-                                          path + "/" + it.key());
-                }
-            }
-        }
-        if (schema.value("additionalProperties", true) == false
-            && properties.is_object()) {
-            for (auto it = value.begin(); it != value.end(); ++it) {
-                if (!properties.contains(it.key())) {
-                    throw std::runtime_error("MCP structuredContent at " + path
-                                             + " has unexpected property " + it.key());
-                }
-            }
-        }
-    }
-    if (value.is_array() && schema.contains("items")
-        && schema["items"].is_object()) {
-        for (std::size_t i = 0; i < value.size(); ++i) {
-            validate_schema_value(value[i], schema["items"],
-                                  path + "/" + std::to_string(i));
-        }
-    }
-}
-
+// structuredContent is checked with the JSON Schema 2020-12 validator the
+// server uses (MCP-C-16). A schema this client cannot check, such as another
+// dialect, is no reason to fail a successful call: MCP asks implementations to
+// handle unsupported dialects gracefully, and the check is a SHOULD.
 void validate_tool_result(const CallToolResult& result,
                           const json& output_schema) {
     // outputSchema describes successful results. An error result may omit
     // structuredContent, and its content carries the tool's error message.
     if (output_schema.is_null() || result.is_error) return;
+    try {
+        validate_json_schema(output_schema, "outputSchema");
+    } catch (const std::invalid_argument&) {
+        return;
+    }
     if (result.structured_content.is_null()) {
         throw std::runtime_error(
             "MCP tool advertised outputSchema but returned no structuredContent");
     }
-    validate_schema_value(result.structured_content, output_schema, "$ ");
+    try {
+        validate_json_value(result.structured_content, output_schema,
+                            "MCP structuredContent", "$");
+    } catch (const std::invalid_argument& error) {
+        // The server's result is wrong, not this program: an ordinary tool
+        // failure rather than a logic error.
+        throw std::runtime_error(error.what());
+    }
 }
 
 std::string format_tool_result(const CallToolResult& result) {

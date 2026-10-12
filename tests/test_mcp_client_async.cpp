@@ -1040,3 +1040,63 @@ TEST(MCPClientAsync, DispatchBoundsAnInFlightHttpToolCall) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     EXPECT_EQ(cancellations.load(), 3);
 }
+
+// MCP-C-16: structuredContent is checked with the JSON Schema 2020-12 validator
+// the server uses. A pydantic-style schema ($defs, $ref) with an integral 1.0
+// passes; a dialect the validator does not support is not a reason to fail.
+TEST(MCPClientAsync, StructuredContentIsCheckedAsJsonSchema2020_12) {
+    httplib::Server svr;
+    svr.Post("/mcp", [](const httplib::Request& req, httplib::Response& res) {
+        const auto request = json::parse(req.body);
+        if (!request.contains("id")) {
+            res.status = 202;
+            return;
+        }
+        const auto method = request.value("method", std::string{});
+        json result;
+        if (method == "initialize") {
+            result = {{"protocolVersion", "2025-11-25"},
+                      {"capabilities", json::object()},
+                      {"serverInfo", {{"name", "schema-mock"}, {"version", "1"}}}};
+        } else if (method == "tools/list") {
+            result = {{"tools", json::array({
+                {{"name", "pydantic"},
+                 {"inputSchema", {{"type", "object"}}},
+                 {"outputSchema", json::parse(R"({"type":"object",
+                     "$defs":{"Answer":{"type":"integer","minimum":0}},
+                     "properties":{"answer":{"$ref":"#/$defs/Answer"}},
+                     "required":["answer"]})")}},
+                {{"name", "draft7"},
+                 {"inputSchema", {{"type", "object"}}},
+                 {"outputSchema", json::parse(R"({"$schema":"http://json-schema.org/draft-07/schema#",
+                     "type":"object","required":["x"]})")}},
+            })}};
+        } else {
+            const auto params = request["params"];
+            const auto name = params.value("name", std::string{});
+            const bool ok = params["arguments"].value("ok", true);
+            json structured = name == "draft7" ? json::object()
+                              : ok             ? json::parse(R"({"answer": 1.0})")
+                                               : json::parse(R"({"answer": -1})");
+            result = {{"content", json::array()}, {"structuredContent", structured}};
+        }
+        res.set_content(json{{"jsonrpc", "2.0"}, {"id", request["id"]}, {"result", result}}.dump(),
+                        "application/json");
+    });
+    ServerGuard server(svr);
+    ASSERT_TRUE(svr.is_running());
+
+    mcp::MCPClient client("http://127.0.0.1:" + std::to_string(server.port) + "/mcp");
+    client.get_tool_definitions();
+    auto result = client.call_tool_result("pydantic", {{"ok", true}});
+    EXPECT_EQ(result.structured_content["answer"].get<double>(), 1.0);
+    try {
+        client.call_tool_result("pydantic", {{"ok", false}});
+        FAIL() << "a result below the schema's minimum was accepted";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("MCP structuredContent at $/answer"),
+                  std::string::npos)
+            << error.what();
+    }
+    EXPECT_NO_THROW(client.call_tool_result("draft7", json::object()));
+}
