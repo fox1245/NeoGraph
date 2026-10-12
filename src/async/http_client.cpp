@@ -30,7 +30,10 @@
 #include <asio/steady_timer.hpp>
 #include <asio/use_awaitable.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <functional>
 #include <exception>
 #include <stdexcept>
 #include <string>
@@ -146,12 +149,14 @@ asio::awaitable<detail::StreamExchangeResult> async_post_stream_once(
     std::vector<std::pair<std::string, std::string>> headers,
     bool tls,
     std::function<void(std::string_view chunk)> on_chunk,
-    RequestOptions opts) {
+    RequestOptions opts,
+    std::string method = "POST",
+    detail::StreamHeadCallback on_head = {}) {
 
     detail::validate_request_options(opts);
     std::string req = detail::build_request(
         host, port, path, body, headers, tls,
-        detail::ConnDirective::close);
+        detail::ConnDirective::close, method);
     asio::ip::tcp::resolver resolver{ex};
     auto endpoints = co_await resolver.async_resolve(
         host, port, asio::use_awaitable);
@@ -160,7 +165,7 @@ asio::awaitable<detail::StreamExchangeResult> async_post_stream_once(
     co_await asio::async_connect(sock, endpoints, asio::use_awaitable);
 
     if (!tls) {
-        auto r = co_await detail::run_exchange_stream(sock, req, on_chunk, opts);
+        auto r = co_await detail::run_exchange_stream(sock, req, on_chunk, opts, on_head);
         asio::error_code ec;
         sock.set_option(asio::socket_base::linger(true, 0), ec);
         sock.close(ec);
@@ -184,7 +189,7 @@ asio::awaitable<detail::StreamExchangeResult> async_post_stream_once(
     co_await tls_stream.async_handshake(
         asio::ssl::stream_base::client, asio::use_awaitable);
 
-    auto r = co_await detail::run_exchange_stream(tls_stream, req, on_chunk, opts);
+    auto r = co_await detail::run_exchange_stream(tls_stream, req, on_chunk, opts, on_head);
 
     try {
         co_await tls_stream.async_shutdown(asio::use_awaitable);
@@ -248,11 +253,14 @@ asio::awaitable<detail::StreamExchangeResult> async_post_stream_once_timed(
     std::vector<std::pair<std::string, std::string>> headers,
     bool tls,
     std::function<void(std::string_view chunk)> on_chunk,
-    RequestOptions opts) {
+    RequestOptions opts,
+    std::string method = "POST",
+    detail::StreamHeadCallback on_head = {}) {
     if (opts.timeout.count() <= 0) {
         co_return co_await async_post_stream_once(
             ex, std::move(host), std::move(port), std::move(path),
-            std::move(body), std::move(headers), tls, std::move(on_chunk), opts);
+            std::move(body), std::move(headers), tls, std::move(on_chunk), opts,
+            std::move(method), std::move(on_head));
     }
     using asio::experimental::awaitable_operators::operator||;
     asio::steady_timer timer(ex);
@@ -262,7 +270,7 @@ asio::awaitable<detail::StreamExchangeResult> async_post_stream_once_timed(
             detail::capture_awaitable(async_post_stream_once(
                 ex, std::move(host), std::move(port), std::move(path),
                 std::move(body), std::move(headers), tls,
-                std::move(on_chunk), opts))
+                std::move(on_chunk), opts, std::move(method), std::move(on_head)))
             || timer.async_wait(asio::use_awaitable));
         if (res.index() == 1) {
             throw asio::system_error(asio::error::timed_out,
@@ -521,6 +529,69 @@ asio::awaitable<HttpStreamResponse> async_post_stream(
         std::move(ex), std::string(host), std::string(port),
         std::string(path), std::string(body), std::move(headers), tls,
         std::move(on_chunk), opts);
+}
+
+std::string_view HttpResponseHead::get_header(std::string_view name) const noexcept {
+    auto ieq = [](char a, char b) {
+        return std::tolower(static_cast<unsigned char>(a))
+            == std::tolower(static_cast<unsigned char>(b));
+    };
+    for (const auto& [k, v] : headers) {
+        if (k.size() == name.size() &&
+            std::equal(k.begin(), k.end(), name.begin(), ieq)) {
+            return v;
+        }
+    }
+    return {};
+}
+
+static asio::awaitable<HttpStreamResponse> async_request_stream_owned(
+    asio::any_io_executor ex,
+    std::string method,
+    std::string host,
+    std::string port,
+    std::string target,
+    std::string body,
+    std::vector<std::pair<std::string, std::string>> headers,
+    bool tls,
+    std::function<void(const HttpResponseHead&)> on_head,
+    std::function<void(std::string_view chunk)> on_chunk,
+    RequestOptions opts) {
+    detail::validate_request_options(opts);
+    if (method.empty()) throw std::invalid_argument("async HTTP: empty request method");
+    detail::StreamHeadCallback head;
+    if (on_head) {
+        head = [&on_head](int status,
+                          const std::vector<std::pair<std::string, std::string>>& fields) {
+            HttpResponseHead value;
+            value.status = status;
+            value.headers = fields;
+            on_head(value);
+        };
+    }
+    auto resp = co_await async_post_stream_once_timed(
+        ex, std::move(host), std::move(port), std::move(target), std::move(body),
+        std::move(headers), tls, on_chunk ? std::move(on_chunk) : [](std::string_view) {},
+        opts, std::move(method), std::move(head));
+    co_return HttpStreamResponse{resp.status};
+}
+
+asio::awaitable<HttpStreamResponse> async_request_stream(
+    asio::any_io_executor ex,
+    std::string_view method,
+    std::string_view host,
+    std::string_view port,
+    std::string_view target,
+    std::string_view body,
+    std::vector<std::pair<std::string, std::string>> headers,
+    bool tls,
+    std::function<void(const HttpResponseHead&)> on_head,
+    std::function<void(std::string_view chunk)> on_chunk,
+    RequestOptions opts) {
+    return async_request_stream_owned(
+        std::move(ex), std::string(method), std::string(host), std::string(port),
+        std::string(target), std::string(body), std::move(headers), tls,
+        std::move(on_head), std::move(on_chunk), opts);
 }
 
 } // namespace neograph::async

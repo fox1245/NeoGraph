@@ -1,25 +1,30 @@
-// Incremental SSE parser — see header for scope + field coverage.
+// Incremental SSE parser following the WHATWG event stream interpretation
+// rules (https://html.spec.whatwg.org/multipage/server-sent-events.html,
+// "Parsing an event stream" and "Interpreting an event stream").
 //
 // State machine:
 //
-//   bytes → raw_ buffer.
-//   For each fully-terminated line in raw_ (LF or CRLF):
-//     - empty line → end-of-event boundary.
+//   bytes → raw_ buffer, one leading UTF-8 BOM skipped.
+//   For each line terminated by CRLF, LF or CR (a CR at the end of one feed
+//   and an LF at the start of the next are one CRLF):
+//     - empty line → dispatch the event.
 //     - ":prefix"  → comment, ignored.
-//     - "name:val" → dispatch name to accumulator.
-//     - (name alone, no colon) → treat as field name with empty value.
+//     - "name:val" → process the field; one space after the colon is
+//                    dropped. A line without a colon is a field with an
+//                    empty value.
 //
-//   When a boundary fires and any of {data, event, id} accumulated
-//   since the last boundary were non-default, push an SseEvent into
-//   pending_ and clear the accumulators.
+//   Fields: `data` appends to the data buffer (lines joined with LF),
+//   `event` sets the event type, `id` sets the last event ID unless the value
+//   contains NUL, `retry` with only ASCII digits sets the reconnection time.
 //
-// The "accumulated something" test includes an empty-string data
-// case (`data:\n\n`) since SSE spec §9.2.5 says the event fires
-// whenever a field line appeared between boundaries. We track that
-// with `cur_in_progress_`.
+//   Dispatch: an event with no data line is not dispatched (its event type is
+//   dropped); every dispatched event carries the last event ID, which
+//   persists across events.
 
 #include <neograph/async/sse_parser.h>
 
+#include <algorithm>
+#include <charconv>
 #include <cstddef>
 #include <stdexcept>
 #include <string>
@@ -30,10 +35,8 @@ namespace neograph::async {
 
 namespace {
 
-// Split "name: value" → (name, value). Value has its single leading
-// space stripped (SSE §9.2.5: "If that character is a space, it is
-// ignored"). Lines with no colon report the whole string as name and
-// empty value.
+constexpr std::string_view kByteOrderMark = "\xEF\xBB\xBF";
+
 std::pair<std::string_view, std::string_view>
 split_field(std::string_view line) {
     auto colon = line.find(':');
@@ -63,17 +66,42 @@ void SseEventParser::feed(std::string_view bytes) {
         throw std::length_error(
             "SSE parser is in a failed state; call reset() before reuse");
     }
+    if (at_start_) {
+        // Decoding strips one leading byte order mark. Bytes that may still
+        // become one wait in raw_, which is empty before the first line.
+        while (!bytes.empty() && raw_.size() < kByteOrderMark.size() &&
+               bytes.front() == kByteOrderMark[raw_.size()]) {
+            raw_.push_back(bytes.front());
+            bytes.remove_prefix(1);
+        }
+        if (raw_.size() == kByteOrderMark.size()) {
+            raw_.clear();
+            at_start_ = false;
+        } else if (!bytes.empty()) {
+            // Not a byte order mark: what was held is ordinary input.
+            at_start_ = false;
+            std::string held;
+            held.swap(raw_);
+            if (!held.empty()) feed(held);
+        } else {
+            return;
+        }
+    }
+    if (skip_lf_ && !bytes.empty()) {
+        skip_lf_ = false;
+        if (bytes.front() == '\n') bytes.remove_prefix(1);
+    }
 
     // Scan the input before copying it so a chunk containing many bounded
     // lines does not require an equally large temporary raw_ allocation.
     while (!bytes.empty()) {
-        const auto nl = bytes.find('\n');
-        const auto fragment = bytes.substr(0, nl);
+        const auto end = bytes.find_first_of("\r\n");
+        const auto fragment = bytes.substr(0, end);
         ensure_can_add(raw_.size(), fragment.size(),
                        options_.max_partial_line_bytes,
                        "SSE partial line exceeds configured byte limit");
 
-        if (nl == std::string_view::npos) {
+        if (end == std::string_view::npos) {
             raw_.append(fragment.data(), fragment.size());
             return;
         }
@@ -85,10 +113,20 @@ void SseEventParser::feed(std::string_view bytes) {
             raw_.append(fragment.data(), fragment.size());
             line = raw_;
         }
-        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
         consume_line(line);
         raw_.clear();
-        bytes.remove_prefix(nl + 1);
+
+        std::size_t terminator = 1;
+        if (bytes[end] == '\r') {
+            if (end + 1 < bytes.size()) {
+                if (bytes[end + 1] == '\n') terminator = 2;
+            } else {
+                // A CR ends this feed: an LF that starts the next one belongs
+                // to the same line terminator.
+                skip_lf_ = true;
+            }
+        }
+        bytes.remove_prefix(end + terminator);
     }
 }
 
@@ -102,50 +140,61 @@ void SseEventParser::consume_line(std::string_view line) {
         return;
     }
     auto [name, value] = split_field(line);
+    // The event in progress counts its data, its type and the last event ID
+    // it will carry.
     if (name == "data") {
         const std::size_t separator_bytes = cur_has_data_ ? 1u : 0u;
-        ensure_can_add(cur_event_bytes_, separator_bytes,
+        ensure_can_add(cur_event_bytes_ + last_id_.size(), separator_bytes,
                        options_.max_event_bytes,
                        "SSE event exceeds configured byte limit");
         const std::size_t bytes_with_separator =
             cur_event_bytes_ + separator_bytes;
-        ensure_can_add(bytes_with_separator, value.size(),
+        ensure_can_add(bytes_with_separator + last_id_.size(), value.size(),
                        options_.max_event_bytes,
                        "SSE event exceeds configured byte limit");
 
         if (cur_has_data_) cur_data_.push_back('\n');
         cur_data_.append(value);
         cur_event_bytes_ = bytes_with_separator + value.size();
-        cur_in_progress_ = true;
         cur_has_data_ = true;
     } else if (name == "event") {
         const std::size_t retained_bytes =
             cur_event_bytes_ - cur_event_.size();
-        ensure_can_add(retained_bytes, value.size(),
+        ensure_can_add(retained_bytes + last_id_.size(), value.size(),
                        options_.max_event_bytes,
                        "SSE event exceeds configured byte limit");
         std::string replacement(value);
         cur_event_.swap(replacement);
         cur_event_bytes_ = retained_bytes + value.size();
-        cur_in_progress_ = true;
     } else if (name == "id") {
-        const std::size_t retained_bytes = cur_event_bytes_ - cur_id_.size();
-        ensure_can_add(retained_bytes, value.size(),
-                       options_.max_event_bytes,
-                       "SSE event exceeds configured byte limit");
-        std::string replacement(value);
-        cur_id_.swap(replacement);
-        cur_event_bytes_ = retained_bytes + value.size();
-        cur_in_progress_ = true;
+        if (value.find('\0') == std::string_view::npos) {
+            ensure_can_add(cur_event_bytes_, value.size(), options_.max_event_bytes,
+                           "SSE event exceeds configured byte limit");
+            last_id_.assign(value);
+        }
+    } else if (name == "retry") {
+        if (!value.empty() &&
+            value.find_first_not_of("0123456789") == std::string_view::npos) {
+            std::uint64_t milliseconds = 0;
+            const auto* last = value.data() + value.size();
+            const auto [end, error] = std::from_chars(value.data(), last, milliseconds);
+            if (error == std::errc{} && end == last) retry_ms_ = milliseconds;
+        }
     }
-    // Other fields (retry etc.) intentionally ignored.
+    // Other fields are ignored.
 }
 
 void SseEventParser::finish_event() {
-    if (!cur_in_progress_) return;
+    if (!cur_has_data_) {
+        // No data line: nothing is dispatched, and the event type is dropped.
+        cur_event_.clear();
+        cur_event_bytes_ = 0;
+        return;
+    }
+    const std::size_t event_bytes = cur_event_bytes_ + last_id_.size();
     ensure_can_add(pending_.size(), 1u, options_.max_pending_events,
                    "SSE pending event count exceeds configured limit");
-    ensure_can_add(pending_bytes_, cur_event_bytes_,
+    ensure_can_add(pending_bytes_, event_bytes,
                    options_.max_pending_bytes,
                    "SSE pending event bytes exceed configured limit");
 
@@ -155,13 +204,11 @@ void SseEventParser::finish_event() {
     auto& event = pending_.back();
     event.event = std::move(cur_event_);
     event.data  = std::move(cur_data_);
-    event.id    = std::move(cur_id_);
-    pending_bytes_ += cur_event_bytes_;
+    event.id    = last_id_;
+    pending_bytes_ += event_bytes;
     cur_event_.clear();
     cur_data_.clear();
-    cur_id_.clear();
     cur_event_bytes_ = 0;
-    cur_in_progress_ = false;
     cur_has_data_ = false;
 }
 
@@ -180,10 +227,12 @@ void SseEventParser::reset() noexcept {
     raw_.clear();
     cur_data_.clear();
     cur_event_.clear();
-    cur_id_.clear();
+    last_id_.clear();
+    retry_ms_.reset();
     cur_event_bytes_ = 0;
-    cur_in_progress_ = false;
     cur_has_data_ = false;
+    skip_lf_ = false;
+    at_start_ = true;
     pending_.clear();
     pending_bytes_ = 0;
     failed_ = false;
@@ -203,11 +252,9 @@ void SseEventParser::ensure_can_add(std::size_t current,
     std::string{}.swap(raw_);
     std::string{}.swap(cur_data_);
     std::string{}.swap(cur_event_);
-    std::string{}.swap(cur_id_);
     std::vector<SseEvent>{}.swap(pending_);
     cur_event_bytes_ = 0;
     pending_bytes_ = 0;
-    cur_in_progress_ = false;
     cur_has_data_ = false;
     throw std::length_error(message);
 }

@@ -730,7 +730,13 @@ struct StreamExchangeResult {
     int           status = 0;
     ConnDirective server_directive = ConnDirective::keep_alive;
     std::string   location;
+    /// Every response header, in wire order.
+    std::vector<std::pair<std::string, std::string>> headers;
 };
+
+/// Called once with the final status and headers, before any body byte.
+using StreamHeadCallback =
+    std::function<void(int, const std::vector<std::pair<std::string, std::string>>&)>;
 
 template <typename Stream>
 asio::awaitable<void> read_close_delimited_stream(
@@ -865,7 +871,8 @@ asio::awaitable<StreamExchangeResult> run_exchange_stream(
     Stream& stream,
     const std::string& req,
     const std::function<void(std::string_view)>& on_chunk,
-    const RequestOptions& opts) {
+    const RequestOptions& opts,
+    const StreamHeadCallback& on_head = {}) {
     co_await asio::async_write(stream, asio::buffer(req), asio::use_awaitable);
 
     asio::streambuf buf;
@@ -909,8 +916,10 @@ asio::awaitable<StreamExchangeResult> run_exchange_stream(
             continue;
         }
         r.location = std::move(extra.location);
+        r.headers = std::move(extra.all);
         break;
     }
+    if (on_head) on_head(r.status, r.headers);
     const bool response_can_have_body =
         !(r.status >= 100 && r.status < 200) &&
         r.status != 204 && r.status != 205 && r.status != 304;

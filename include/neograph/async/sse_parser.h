@@ -1,29 +1,32 @@
 /**
  * @file sse_parser.h
- * @brief Incremental Server-Sent Events parser.
+ * @brief Incremental Server-Sent Events parser (WHATWG HTML, "Server-sent
+ *        events", event stream interpretation).
  *
- * Stage 3 / Semester 1.4 — decodes the SSE wire format that
- * OpenAI's /v1/chat/completions and Anthropic's /v1/messages stream
- * over HTTP/1.1 chunked transport.
+ * Pure state machine: bytes in (`feed`), complete events out (`drain`). The
+ * caller pairs this with a transport that delivers byte chunks (typically
+ * `async_post_stream`), since one HTTP chunk may contain partial, whole, or
+ * multiple SSE events.
  *
- * Pure state machine: bytes in (`feed`), complete events out
- * (`drain`). The caller pairs this with a transport that delivers
- * byte chunks (typically `async_post_stream`), since one HTTP chunk
- * may contain partial, whole, or multiple SSE events.
- *
- * Not supported on purpose (per SSE spec §9 we skip the bits LLM
- * providers don't emit):
- *   - retry field → we don't auto-reconnect.
- *   - BOM detection on first byte.
- *   - Unicode line separator U+2028/U+2029.
- *
- * What's included is exactly what the two provider streams use.
+ * It follows the WHATWG processing rules, which MCP's Streamable HTTP
+ * transport and the official MCP SDKs rely on:
+ *   - lines end with CRLF, LF or CR, also when a CRLF is split across feeds;
+ *   - one leading UTF-8 byte order mark is skipped;
+ *   - `data` lines join with LF, and an event with no `data` line is not
+ *     dispatched;
+ *   - `id` sets the last event ID (ignored when it contains NUL), which every
+ *     later event carries until another `id` changes it;
+ *   - `retry` with only ASCII digits sets the reconnection time;
+ *   - lines starting with ':' are comments, unknown fields are ignored;
+ *   - an event the stream ends in the middle of is never dispatched.
  */
 #pragma once
 
 #include <neograph/api.h>
 
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -33,7 +36,7 @@ namespace neograph::async {
 struct SseEvent {
     std::string event;   ///< "event:" field. Empty ⇒ default ("message").
     std::string data;    ///< "data:" field, lines joined with '\n'.
-    std::string id;      ///< "id:" field.
+    std::string id;      ///< The last event ID when the event was dispatched.
 };
 
 struct SseParserOptions {
@@ -58,9 +61,13 @@ public:
     /// After this call, in-progress (partial) event state is retained.
     std::vector<SseEvent> drain();
 
-    /// Discard any partial event state. Call when the underlying
-    /// stream ends mid-event and the partial should not bleed into
-    /// a future reused session.
+    /// The last event ID seen so far (the `id` field), empty when none.
+    const std::string& last_event_id() const noexcept { return last_id_; }
+
+    /// The reconnection time the stream asked for with `retry`, if any.
+    std::optional<std::uint64_t> retry_ms() const noexcept { return retry_ms_; }
+
+    /// Discard all state, as for a new stream.
     void reset() noexcept;
 
 private:
@@ -70,17 +77,19 @@ private:
                           std::size_t limit, const char* message);
     [[noreturn]] void fail_limit(const char* message);
 
-    SseParserOptions         options_;
-    std::string              raw_;              ///< bytes awaiting line split
-    std::string              cur_data_;         ///< accumulated data: lines
-    std::string              cur_event_;        ///< last event: value
-    std::string              cur_id_;           ///< last id: value
-    std::size_t              cur_event_bytes_ = 0;
-    bool                     cur_in_progress_ = false;
-    bool                     cur_has_data_ = false;
-    std::vector<SseEvent>    pending_;
-    std::size_t              pending_bytes_ = 0;
-    bool                     failed_ = false;
+    SseParserOptions             options_;
+    std::string                  raw_;              ///< bytes awaiting line split
+    std::string                  cur_data_;         ///< accumulated data: lines
+    std::string                  cur_event_;        ///< last event: value
+    std::string                  last_id_;          ///< last event ID buffer
+    std::optional<std::uint64_t> retry_ms_;
+    std::size_t                  cur_event_bytes_ = 0;
+    bool                         cur_has_data_ = false;
+    bool                         skip_lf_ = false;  ///< the last feed ended in CR
+    bool                         at_start_ = true;  ///< before the first byte (BOM)
+    std::vector<SseEvent>        pending_;
+    std::size_t                  pending_bytes_ = 0;
+    bool                         failed_ = false;
 };
 
 }  // namespace neograph::async

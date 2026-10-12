@@ -255,3 +255,95 @@ TEST(SseEventParser, ZeroLimitsAreInvalid) {
     options.max_pending_bytes = 0;
     EXPECT_THROW((void)async::SseEventParser{options}, std::invalid_argument);
 }
+
+// ── WHATWG event stream rules (MCP-C-01) ─────────────────────────────
+// MCP's Streamable HTTP responses are Server-Sent Events; the official Python
+// servers write CRLF, and an event stream may also end lines with a bare CR.
+
+TEST(SseEventParser, CrlfStreamOfSeveralEventsAsTheOfficialPythonServersWriteIt) {
+    async::SseEventParser p;
+    p.feed("event: message\r\ndata: {\"method\":\"notifications/message\"}\r\n\r\n"
+           "event: message\r\ndata: {\"id\":8,\"result\":{}}\r\n\r\n");
+    auto events = p.drain();
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_EQ(events[0].data, "{\"method\":\"notifications/message\"}");
+    EXPECT_EQ(events[1].data, "{\"id\":8,\"result\":{}}");
+    EXPECT_EQ(events[1].event, "message");
+}
+
+TEST(SseEventParser, BareCarriageReturnEndsALine) {
+    async::SseEventParser p;
+    p.feed("data: one\rdata: two\r\rdata: three\r\r");
+    auto events = p.drain();
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_EQ(events[0].data, "one\ntwo");
+    EXPECT_EQ(events[1].data, "three");
+}
+
+TEST(SseEventParser, CrlfSplitAcrossFeedsIsOneTerminator) {
+    async::SseEventParser p;
+    p.feed("data: a\r");
+    p.feed("\ndata: b\r");
+    p.feed("\n\r");
+    p.feed("\n");
+    auto events = p.drain();
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_EQ(events[0].data, "a\nb");
+}
+
+TEST(SseEventParser, LeadingByteOrderMarkIsSkippedEvenWhenSplit) {
+    async::SseEventParser p;
+    p.feed("\xEF\xBB");
+    p.feed("\xBF" "data: x\n\n");
+    auto events = p.drain();
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_EQ(events[0].data, "x");
+
+    // Only a leading mark is skipped; bytes that only start like one are kept.
+    async::SseEventParser q;
+    q.feed("\xEF");
+    q.feed("data: y\n\n");
+    EXPECT_TRUE(q.drain().empty());  // the line is "\xEF" "data: y", an unknown field
+}
+
+TEST(SseEventParser, LastEventIdPersistsAndAnEventWithoutDataIsNotDispatched) {
+    async::SseEventParser p;
+    // A priming event: id and an empty data line, as MCP servers with an
+    // event store send first. It is dispatched with empty data.
+    p.feed("id: 1\nretry: 300\ndata:\n\n");
+    // No data line: nothing is dispatched, but the id still moves on.
+    p.feed("id: 2\nevent: ignored\n\n");
+    p.feed("data: after\n\n");
+    auto events = p.drain();
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_EQ(events[0].id, "1");
+    EXPECT_EQ(events[0].data, "");
+    EXPECT_EQ(events[1].id, "2");
+    EXPECT_EQ(events[1].event, "");  // the dropped event's type did not leak
+    EXPECT_EQ(events[1].data, "after");
+    EXPECT_EQ(p.last_event_id(), "2");
+    ASSERT_TRUE(p.retry_ms().has_value());
+    EXPECT_EQ(*p.retry_ms(), 300u);
+}
+
+TEST(SseEventParser, IdWithNulAndNonNumericRetryAreIgnored) {
+    async::SseEventParser p;
+    p.feed("id: good\nretry: 50\n\n");
+    p.feed(std::string("id: b\0d\n", 8));
+    p.feed("retry: 5s\ndata: x\n\n");
+    auto events = p.drain();
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_EQ(events[0].id, "good");
+    EXPECT_EQ(*p.retry_ms(), 50u);
+}
+
+TEST(SseEventParser, AnEventTheStreamEndsInIsNotDispatched) {
+    async::SseEventParser p;
+    p.feed("data: complete\n\ndata: partial\n");
+    auto events = p.drain();
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_EQ(events[0].data, "complete");
+    p.reset();
+    EXPECT_TRUE(p.last_event_id().empty());
+    EXPECT_FALSE(p.retry_ms().has_value());
+}

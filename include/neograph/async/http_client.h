@@ -181,4 +181,36 @@ NEOGRAPH_API asio::awaitable<HttpStreamResponse> async_post_stream(
     std::function<void(std::string_view chunk)> on_chunk,
     RequestOptions opts = {});
 
+/// Status and headers of a streamed response, reported before its body.
+struct NEOGRAPH_API HttpResponseHead {
+    int status = 0;
+    /// Every response header, in wire order.
+    std::vector<std::pair<std::string, std::string>> headers;
+
+    /// Case-insensitive header lookup; empty when the header is absent.
+    std::string_view get_header(std::string_view name) const noexcept;
+};
+
+/// Async HTTP(S) request of any method (POST, GET, DELETE, ...) with a
+/// streamed response. `on_head` runs once with the final status and headers
+/// before any body byte, so a caller can choose how to read the body (for
+/// example as Server-Sent Events); `on_chunk` then receives the body as for
+/// async_post_stream. A GET sends no body and no Content-Type; other methods
+/// send `body` with its Content-Length. `target` is the request target, path
+/// and query. Redirects are not followed. Transport failures and an expired
+/// `opts.timeout` throw asio::system_error; an HTTP error status is returned
+/// with its body delivered.
+NEOGRAPH_API asio::awaitable<HttpStreamResponse> async_request_stream(
+    asio::any_io_executor ex,
+    std::string_view method,
+    std::string_view host,
+    std::string_view port,
+    std::string_view target,
+    std::string_view body,
+    std::vector<std::pair<std::string, std::string>> headers,
+    bool tls,
+    std::function<void(const HttpResponseHead&)> on_head,
+    std::function<void(std::string_view chunk)> on_chunk,
+    RequestOptions opts = {});
+
 } // namespace neograph::async
