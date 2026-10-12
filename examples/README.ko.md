@@ -154,7 +154,7 @@ Program은 Core 그래프를 내구성 있는 식별자, 예산, 승인(admissio
 | 39 | [`39_acp_server.cpp`](39_acp_server.cpp) | yes | stdio 기반 ACP 에이전트로, 편집기가 구동하는 형태입니다. `--self-test`는 initialize, session/new, session/prompt를 프로세스 안에서 실행합니다. |
 | 80 | [`80_acp_permission.cpp`](80_acp_permission.cpp) | yes | ACP 권한 요청: 노드가 삭제 전에 `session/request_permission`으로 편집기에 묻습니다. 스크립트 편집기가 한 호출은 허용하고 다음 호출은 거부합니다. |
 | 81 | [`81_acp_elicitation.cpp`](81_acp_elicitation.cpp) | yes | ACP elicitation: 클라이언트가 해당 capability를 선언하면 노드가 `elicitation/create`로 사용자에게 폼 질문을 하고, 선언하지 않았으면 기본값으로 대체합니다. |
-| 45 | [`45_grpc_server.cpp`](45_grpc_server.cpp) | paired | gRPC: `GraphEngine`을 `GraphService`로 제공합니다. 예제 53이 이를 동반 프로세스로 시작합니다(`-DNEOGRAPH_BUILD_GRPC=ON` 필요). |
+| 45 | [`45_grpc_server.cpp`](45_grpc_server.cpp) | yes | gRPC: `GraphEngine`을 `GraphService`로 제공합니다. `--self-test`는 서버와 클라이언트를 한 프로세스에서 빈 포트로 실행하며, 예제 53이 프로세스 간 클라이언트입니다(`-DNEOGRAPH_BUILD_GRPC=ON` 필요). |
 | 53 | [`53_grpc_client.cpp`](53_grpc_client.cpp) | yes | gRPC: 일반 클라이언트에서 `GraphService`(`Health`, `RunGraph`, 스트리밍)를 호출합니다(`-DNEOGRAPH_BUILD_GRPC=ON` 필요). |
 | 54 | [`54_grpc_checkpoint.cpp`](54_grpc_checkpoint.cpp) | yes | gRPC: 원격 `CheckpointStore`인 `GrpcCheckpointStore`와 측정한 지연 시간(`-DNEOGRAPH_BUILD_GRPC=ON` 필요). |
 | 55 | [`55_grpc_vs_jsonrpc_toolcall.cpp`](55_grpc_vs_jsonrpc_toolcall.cpp) | yes | 도구 호출에서 gRPC와 JSON-RPC를 루프백에서 측정해 비교합니다. 합격/불합격 검사가 아니라 측정입니다(`-DNEOGRAPH_BUILD_GRPC=ON` 필요). |

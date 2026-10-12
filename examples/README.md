@@ -153,7 +153,7 @@ These examples run offline. The MCP client examples start a standard-library ser
 | 39 | [`39_acp_server.cpp`](39_acp_server.cpp) | yes | ACP agent over stdio, the shape an editor drives; `--self-test` runs initialize, session/new and session/prompt in process. |
 | 80 | [`80_acp_permission.cpp`](80_acp_permission.cpp) | yes | ACP permission: a node asks the editor with `session/request_permission` before a deletion; a scripted editor allows one call and rejects the next. |
 | 81 | [`81_acp_elicitation.cpp`](81_acp_elicitation.cpp) | yes | ACP elicitation: a node asks the user a form question with `elicitation/create` when the client declared the capability, and falls back to a default when it did not. |
-| 45 | [`45_grpc_server.cpp`](45_grpc_server.cpp) | paired | gRPC: serve a `GraphEngine` over `GraphService`. Example 53 starts it as its companion (needs `-DNEOGRAPH_BUILD_GRPC=ON`). |
+| 45 | [`45_grpc_server.cpp`](45_grpc_server.cpp) | yes | gRPC: serve a `GraphEngine` over `GraphService`. `--self-test` runs server and client in one process on a free port; example 53 is the cross-process client (needs `-DNEOGRAPH_BUILD_GRPC=ON`). |
 | 53 | [`53_grpc_client.cpp`](53_grpc_client.cpp) | yes | gRPC: call `GraphService` (`Health`, `RunGraph`, streaming) from a plain client (needs `-DNEOGRAPH_BUILD_GRPC=ON`). |
 | 54 | [`54_grpc_checkpoint.cpp`](54_grpc_checkpoint.cpp) | yes | gRPC: `GrpcCheckpointStore`, a remote `CheckpointStore`, with a measured latency (needs `-DNEOGRAPH_BUILD_GRPC=ON`). |
 | 55 | [`55_grpc_vs_jsonrpc_toolcall.cpp`](55_grpc_vs_jsonrpc_toolcall.cpp) | yes | gRPC against JSON-RPC for tool calling, measured on loopback; a measurement, not a pass/fail check (needs `-DNEOGRAPH_BUILD_GRPC=ON`). |
