@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=d51f941ee43cf4aa7a4d5561b6e23c63b2966d8693573cd32e28e5e4eea019d6 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=0e0b9739cfd77729693c2c85649410cd93ea10aa2157242d00ef3c09fe880331 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3381,12 +3381,28 @@ Python 的 `neograph_engine.a2a` 导出 `WireDialect`、`AgentInterface`、`Agen
 ### `neograph::acp` — Agent 客户端协议
 
 **头文件：** `<neograph/acp/{server,types}.h>`
-编辑器↔agent 通过 stdio 上的换行分隔 JSON 进行 JSON-RPC 通信（Zed、
-Gemini CLI、Neovim CodeCompanion）。双向通信包括：client→agent
-（`initialize`、`session/{new,prompt,cancel}`）以及通过延迟绑定的 `ACPClient`
-实现的 agent→client（`fs/{read,write}_text_file`、`session/request_permission`）。
-`ACPServer::handle_message` 在工作线程上异步分发提示，`max_inflight_prompts=32`
-为上限，并按会话执行单飞控制 + `-32000` 背压。
+编辑器↔agent 通过 stdio 上的换行分隔 JSON 进行 JSON-RPC 2.0 通信（Zed、Gemini CLI、Neovim CodeCompanion）。协议为 ACP 版本 1，已用官方 schema v1.25.0 以及官方 Python（0.12、1.0）和 TypeScript SDK 验证。client→agent：`initialize`、`session/{new,resume,prompt,cancel}`。agent→client：`session/update`、`session/request_permission`；`fs/*`、`terminal/*` 和 `elicitation/*` 只在客户端声明了相应能力时，才通过延迟绑定的 `ACPClient` 发送。`ACPServer::handle_message` 在工作线程上运行每个提示轮次，同时最多 `max_inflight_prompts`（32）个，每个会话一个。被拒绝的轮次返回 JSON-RPC `-32603`，`data.reason` 为 `"overloaded"` 或 `"session_busy"`；`-32000` 是 ACP 的 "Authentication required"，因此不使用。`initialize` 之前的调用返回 `-32600`，未知会话返回 `-32002`；对 agent 已知但没有检查点的会话执行 `session/resume` 会成功。
+
+提示接受 text 和 `resource_link` 块（基础内容；默认适配器把链接以 `[name](uri)` 形式写入输入），image、audio 和嵌入资源只在 `capabilities().prompt` 声明后才接受。格式错误或未声明的块返回 `-32602`。默认适配器会写入 `_acp_session_id`、`_acp_cwd`、`_acp_additional_directories` 和 `_acp_mcp_tools`；如需修改，重写 `build_session_state`（或旧的 `build_initial_state`）。`agentInfo` 始终是 ACP `Implementation`，缺少的 name 或 version 会被补齐。
+
+轮次的结束方式：
+
+| NeoGraph 结果 | ACP 结果 |
+|---|---|
+| 完成 | 一条 `agent_message_chunk`（文本为空时不发送）之后返回 `stopReason: "end_turn"` |
+| 被 `session/cancel` 取消 | `stopReason: "cancelled"` |
+| 步数上限（`RunConfig::max_steps`） | `stopReason: "max_turn_requests"` |
+| 超出模型 token 预算 | `stopReason: "max_tokens"` |
+| provider 拒绝或内容过滤（`NG.SafetyBlocked`） | `stopReason: "refusal"` |
+| `NodeInterrupt` | 同一轮次内的 `session/request_permission`；回答后恢复运行 |
+| Hook 阻止（`NG.HookBlocked`）、节点或工具失败（`NG.TaskFailed`、作者代码）、超时（`NG.Timeout`）、provider 失败（`NG.ProviderFailed`）、金额或配额预算（`NG.BudgetExhausted`）、配置、逻辑或未知失败 | JSON-RPC 错误 `-32603`，message = 公开消息，`data: {code, retryable}` |
+| 并非由客户端引起的取消（节点中止、关闭） | JSON-RPC 错误 `-32800` |
+
+异常文本（`what()`）不会发送给客户端：message 是带类型的公开消息（`NodeFailureError::public_message`）或该失败类别的通用文本，细节只保留在宿主日志中。中断会变成一个工具调用：标题为中断原因，`rawInput` 为载荷，带有 `_meta["neograph/interrupt"]` 以及选项 "approve"（`allow_once`）和 "reject"（`reject_once`）；被选中的 option id 就是恢复值。如需修改，重写 `interrupt_permission` 和 `interrupt_resume_value`。回答 `cancelled` 会以取消结束轮次；适配器返回 `std::nullopt` 或客户端无法回答时，轮次以 `data.code: "NG.Interrupted"` 失败，会话不会停留在暂停状态。由 `session/resume` 从检查点恢复的暂停（例如 agent 重启之后）由下一个提示的文本回答。
+
+`session/cancel` 只取消正在进行的轮次；没有轮次运行时收到的取消会被忽略（会重排消息的传输可以用 `set_pre_armed_cancel(true)` 保留以前的预先取消）。取消后，等待中的 agent→client 请求有 500 ms 的回答时间，之后服务器发送 `$/cancel_request` 并结束轮次。权限请求默认没有超时，除非用 `ACPClient::set_permission_timeout` 设置。stdin 到达 EOF 时，`run()` 会让进行中的轮次在 `set_eof_grace`（1 秒）内完成，然后取消它们。
+
+`session/new` 和 `session/resume` 中的 stdio `mcpServers` 通过 NeoGraph 的 MCP 客户端（以 `NEOGRAPH_BUILD_MCP_CLIENT` 构建）在会话的 `cwd` 中启动，环境为 agent 的环境加上客户端的 `env` 项；节点通过 `ACPClient::session_tools(session_id)` 使用这些工具。HTTP 和 SSE MCP 服务器不会被声明，并以 `-32602` 拒绝。无法启动的服务器会使请求以 `-32603` 和 `data.reason: "mcp_server_unavailable"` 失败。
 
 **公共头文件：** [`include/neograph/acp/`](../include/neograph/acp/)。
 

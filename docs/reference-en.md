@@ -3518,13 +3518,28 @@ Python's `neograph_engine.a2a` exports `WireDialect`, `AgentInterface`, `AgentCa
 ### `neograph::acp` — Agent Client Protocol
 
 **Header:** `<neograph/acp/{server,types}.h>`
-Editor↔agent JSON-RPC over newline-delimited JSON on stdio (Zed,
-Gemini CLI, Neovim CodeCompanion). Bidirectional: client→agent
-(`initialize`, `session/{new,prompt,cancel}`) and agent→client
-(`fs/{read,write}_text_file`, `session/request_permission`) via
-late-bound `ACPClient`. `ACPServer::handle_message` async-dispatches
-prompts on a worker thread, capped at `max_inflight_prompts=32`
-with per-session single-flight + `-32000` backpressure.
+Editor↔agent JSON-RPC 2.0 over newline-delimited JSON on stdio (Zed, Gemini CLI, Neovim CodeCompanion), ACP protocol version 1, checked against the official schema v1.25.0 and the official Python (0.12, 1.0) and TypeScript SDKs. Client→agent: `initialize`, `session/{new,resume,prompt,cancel}`. Agent→client: `session/update`, `session/request_permission`, and `fs/*`, `terminal/*` or `elicitation/*` only when the client advertised the capability, through the late-bound `ACPClient`. `ACPServer::handle_message` runs each prompt turn on a worker thread, at most `max_inflight_prompts` (32) turns and one per session. A refused turn is JSON-RPC `-32603` with `data.reason` `"overloaded"` or `"session_busy"`; `-32000` is ACP's "Authentication required" and is not used. A call before `initialize` is `-32600`, an unknown session `-32002`, and `session/resume` of a session the agent knows but never checkpointed succeeds.
+
+Prompts accept text and `resource_link` blocks (baseline content; the default adapter renders a link as `[name](uri)` in the input) and image, audio and embedded resources only when `capabilities().prompt` advertises them. A malformed or unadvertised block is `-32602`. The default adapter seeds `_acp_session_id`, `_acp_cwd`, `_acp_additional_directories` and `_acp_mcp_tools`; override `build_session_state` (or the older `build_initial_state`). `agentInfo` is always an ACP `Implementation`: a missing name or version is filled in.
+
+How a turn ends:
+
+| NeoGraph outcome | ACP result |
+|---|---|
+| Completed | `stopReason: "end_turn"` after one `agent_message_chunk` (none for empty text) |
+| Cancelled by `session/cancel` | `stopReason: "cancelled"` |
+| Step limit (`RunConfig::max_steps`) | `stopReason: "max_turn_requests"` |
+| Model-token budget crossed | `stopReason: "max_tokens"` |
+| Provider refusal or content filter (`NG.SafetyBlocked`) | `stopReason: "refusal"` |
+| `NodeInterrupt` | `session/request_permission` in the same turn; the answer resumes the run |
+| Hook block (`NG.HookBlocked`), node or tool failure (`NG.TaskFailed`, an author code), timeout (`NG.Timeout`), provider failure (`NG.ProviderFailed`), money or quota budget (`NG.BudgetExhausted`), configuration, logic or unknown failure | JSON-RPC error `-32603`, message = the public message, `data: {code, retryable}` |
+| Cancelled by something other than the client (a node aborted, shutdown) | JSON-RPC error `-32800` |
+
+Exception text (`what()`) never reaches the client: the message is a typed public message (`NodeFailureError::public_message`) or a generic text for the failure class, and the detail stays in the host's logs. An interrupt becomes a tool call titled with its reason, with the payload as `rawInput`, `_meta["neograph/interrupt"]` and the options "approve" (`allow_once`) and "reject" (`reject_once`); the selected option id is the resume value. Override `interrupt_permission` and `interrupt_resume_value` to change that. A `cancelled` answer ends the turn cancelled; an adapter that returns `std::nullopt`, or a client that cannot answer, fails the turn with `data.code: "NG.Interrupted"` and leaves the session unpaused. A pause restored by `session/resume` from a checkpoint, for example after an agent restart, is answered by the next prompt's text.
+
+`session/cancel` cancels the ongoing turn only; a cancel with no turn running is ignored (`set_pre_armed_cancel(true)` keeps the earlier pre-cancel for transports that reorder messages). A pending agent→client request gets 500 ms to be answered after a cancel; then the server sends `$/cancel_request` and the turn ends. Permission requests have no timeout unless `ACPClient::set_permission_timeout` sets one. When stdin reaches EOF, `run()` lets in-flight turns finish for `set_eof_grace` (one second) and then cancels them.
+
+Stdio `mcpServers` from `session/new` and `session/resume` are started with NeoGraph's MCP client (built with `NEOGRAPH_BUILD_MCP_CLIENT`) in the session's `cwd`, with the agent's environment plus the client's `env` entries; nodes reach their tools through `ACPClient::session_tools(session_id)`. HTTP and SSE MCP servers are not advertised and are rejected with `-32602`. A server that does not start fails the request with `-32603` and `data.reason: "mcp_server_unavailable"`.
 
 **Public headers:** [`include/neograph/acp/`](../include/neograph/acp/).
 

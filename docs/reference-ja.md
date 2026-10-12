@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=d51f941ee43cf4aa7a4d5561b6e23c63b2966d8693573cd32e28e5e4eea019d6 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=0e0b9739cfd77729693c2c85649410cd93ea10aa2157242d00ef3c09fe880331 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -3050,12 +3050,28 @@ Python の `neograph_engine.a2a` は `WireDialect`、`AgentInterface`、`AgentCa
 
 ### `neograph::acp` — Agent Client Protocol
 **ヘッダー:** `<neograph/acp/{server,types}.h>`
-stdio 上の改行区切り JSON によるエディター↔エージェント JSON-RPC です (Zed、
-Gemini CLI、Neovim CodeCompanion)。双方向で、client→agent
-(`initialize`、`session/{new,prompt,cancel}`) と agent→client
-(`fs/{read,write}_text_file`、`session/request_permission`) を遅延バインドされた `ACPClient` 経由で扱います。
-`ACPServer::handle_message` はワーカースレッド上でプロンプトを非同期ディスパッチし、
-`max_inflight_prompts=32`、セッションごとの single-flight、`-32000` のバックプレッシャーで上限を設けます。
+stdio 上の改行区切り JSON によるエディター↔エージェント JSON-RPC 2.0 です (Zed、Gemini CLI、Neovim CodeCompanion)。ACP プロトコルバージョン 1 で、公式スキーマ v1.25.0 と公式 Python (0.12、1.0)・TypeScript SDK で検証しています。client→agent は `initialize`、`session/{new,resume,prompt,cancel}` です。agent→client は `session/update`、`session/request_permission` で、`fs/*`、`terminal/*`、`elicitation/*` はクライアントが capability を通知したときだけ、遅延バインドされた `ACPClient` から送ります。`ACPServer::handle_message` は各プロンプトターンをワーカースレッドで実行し、同時に最大 `max_inflight_prompts` (32) 件、セッションごとに 1 件に制限します。拒否したターンは JSON-RPC `-32603` で、`data.reason` は `"overloaded"` または `"session_busy"` です。`-32000` は ACP の "Authentication required" なので使いません。`initialize` 前の呼び出しは `-32600`、不明なセッションは `-32002` で、エージェントが知っていてもチェックポイントのないセッションの `session/resume` は成功します。
+
+プロンプトは text と `resource_link` ブロック (基本コンテンツで、既定アダプターはリンクを入力に `[name](uri)` として入れます) を受け付け、image・audio・埋め込みリソースは `capabilities().prompt` で通知したときだけ受け付けます。不正な、または通知していないブロックは `-32602` です。既定アダプターは `_acp_session_id`、`_acp_cwd`、`_acp_additional_directories`、`_acp_mcp_tools` を設定します。変えるには `build_session_state` (または従来の `build_initial_state`) をオーバーライドします。`agentInfo` は常に ACP `Implementation` で、欠けた name や version は補います。
+
+ターンの終わり方:
+
+| NeoGraph の結果 | ACP の結果 |
+|---|---|
+| 完了 | `agent_message_chunk` 1 件 (空テキストならなし) の後に `stopReason: "end_turn"` |
+| `session/cancel` による取り消し | `stopReason: "cancelled"` |
+| ステップ上限 (`RunConfig::max_steps`) | `stopReason: "max_turn_requests"` |
+| モデルトークン予算の超過 | `stopReason: "max_tokens"` |
+| プロバイダーの拒否またはコンテンツフィルター (`NG.SafetyBlocked`) | `stopReason: "refusal"` |
+| `NodeInterrupt` | 同じターン内の `session/request_permission`。回答で実行を再開します |
+| Hook によるブロック (`NG.HookBlocked`)、ノード・ツールの失敗 (`NG.TaskFailed`、作成者コード)、タイムアウト (`NG.Timeout`)、プロバイダーの失敗 (`NG.ProviderFailed`)、金額・クォータ予算 (`NG.BudgetExhausted`)、設定・ロジック・不明な失敗 | JSON-RPC エラー `-32603`、message = 公開メッセージ、`data: {code, retryable}` |
+| クライアント以外による取り消し (ノードの中断、シャットダウン) | JSON-RPC エラー `-32800` |
+
+例外テキスト (`what()`) はクライアントに届きません。message は型付きの公開メッセージ (`NodeFailureError::public_message`) か失敗クラスごとの汎用文で、詳細はホストのログにだけ残ります。割り込みは、理由をタイトル、ペイロードを `rawInput` とし、`_meta["neograph/interrupt"]` と選択肢 "approve" (`allow_once`)・"reject" (`reject_once`) を持つツール呼び出しになります。選ばれた option id が再開値です。変えるには `interrupt_permission` と `interrupt_resume_value` をオーバーライドします。`cancelled` の回答はターンを取り消しで終えます。アダプターが `std::nullopt` を返すか、クライアントが回答できない場合、ターンは `data.code: "NG.Interrupted"` で失敗し、セッションは一時停止のまま残りません。エージェントの再起動後のように `session/resume` がチェックポイントから復元した一時停止には、次のプロンプトのテキストが回答します。
+
+`session/cancel` は進行中のターンだけを取り消し、ターンが実行中でないときの取り消しは無視します (メッセージの順序を入れ替えるトランスポートは `set_pre_armed_cancel(true)` で従来の事前取り消しを維持できます)。取り消し後、保留中の agent→client 要求には回答のために 500 ms が与えられ、その後サーバーは `$/cancel_request` を送ってターンを終えます。権限要求は `ACPClient::set_permission_timeout` で設定しない限りタイムアウトしません。stdin が EOF に達すると、`run()` は実行中のターンが `set_eof_grace` (1 秒) の間に終わるのを待ってから取り消します。
+
+`session/new` と `session/resume` の stdio `mcpServers` は NeoGraph の MCP クライアント (`NEOGRAPH_BUILD_MCP_CLIENT` でビルド) でセッションの `cwd` から起動し、環境はエージェントの環境にクライアントの `env` を加えたものです。ノードは `ACPClient::session_tools(session_id)` でそのツールを使います。HTTP と SSE の MCP サーバーは通知せず、`-32602` で拒否します。起動できないサーバーは要求を `-32603`、`data.reason: "mcp_server_unavailable"` で失敗させます。
 
 **公開ヘッダー:** [`include/neograph/acp/`](../include/neograph/acp/)。
 ### `neograph::async` — HTTP/SSE/WS ヘルパー
