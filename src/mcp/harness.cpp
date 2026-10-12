@@ -600,9 +600,13 @@ ToolDefinition tool_definition(std::string name,
     definition.annotations   = {{"readOnlyHint", read_only}};
     return definition;
 }
+// MCP 2025-11-25 tools, "Structured Content": a tool that returns structured
+// content SHOULD also return it serialized in a text block, for clients that
+// do not read structuredContent (MCP-S-11).
 CallToolResult mcp_result(json value, std::string message) {
     CallToolResult result;
-    result.content            = json::array({{{"type", "text"}, {"text", std::move(message)}}});
+    result.content            = json::array({{{"type", "text"}, {"text", std::move(message)}},
+                                             {{"type", "text"}, {"text", value.dump()}}});
     result.structured_content = std::move(value);
     return result;
 }

@@ -34,10 +34,13 @@ int main() {
             cancel->throw_if_cancelled("before echo");
             const auto message = arguments.at("message").get<std::string>();
             neograph::mcp::CallToolResult result;
-            result.content = neograph::json::array({
-                {{"type", "text"}, {"text", message}},
-            });
             result.structured_content = {{"message", message}};
+            // Structured results also carry their JSON as text, for clients
+            // that do not read structuredContent (MCP tools, "Structured
+            // Content").
+            result.content = neograph::json::array({
+                {{"type", "text"}, {"text", result.structured_content.dump()}},
+            });
             return result;
         });
     server.run();
