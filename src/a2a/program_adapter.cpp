@@ -90,7 +90,10 @@ Message result_message(const program::ProgramResult& result,
         text = result.output().is_string() ? result.output().get<std::string>()
                                            : result.output().dump();
     } else if (const auto failure = result.failure()) {
-        text = failure->message;
+        // A Program failure message can carry exception text (a Core node's
+        // what(), a provider diagnostic), so a peer gets only the stable code
+        // here and in metadata["neograph/failure"].
+        text = "The Program run failed (" + failure->code + ").";
     } else {
         text = std::string(program::to_string(result.status()));
     }
@@ -460,6 +463,9 @@ Task ProgramAgentAdapter::task_snapshot(const program::ProgramHandle& handle,
         }
         task.metadata["program_result_id"] = result->id();
         task.metadata["program_status"] = std::string(program::to_string(result->status()));
+        if (const auto failure = result->failure()) {
+            task.metadata["neograph/failure"] = json{{"code", failure->code}, {"retryable", false}};
+        }
         return task;
     }
     task.status.state = continuation_state(record.continuation().state);

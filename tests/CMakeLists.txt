@@ -338,6 +338,9 @@ if(NEOGRAPH_BUILD_A2A)
         NEOGRAPH_A2A_TESTING)
     target_link_libraries(neograph_a2a_collaboration_tests PRIVATE
         neograph::a2a
+        httplib
+        OpenSSL::SSL
+        OpenSSL::Crypto
         GTest::gtest_main
     )
     add_test(NAME neograph.a2a_collaboration

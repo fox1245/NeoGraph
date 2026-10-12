@@ -11,6 +11,9 @@
 
 #include <gtest/gtest.h>
 
+#define CPPHTTPLIB_OPENSSL_SUPPORT
+#include <httplib.h>
+
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -104,6 +107,9 @@ neograph::program::ProgramVersion make_program_version() {
         CoreMaterializationReceipt{"a2a-tests", registry.fingerprint(),
                                    {CorePlanIdentity{"main", digest('3')}}, {}}});
 }
+/// Makes the adapter test node throw an exception carrying a fake secret.
+std::atomic<bool> g_adapter_node_fails{false};
+
 class AdapterCompletedNode final : public neograph::graph::GraphNode {
 public:
     AdapterCompletedNode(std::string name, std::shared_ptr<std::atomic<unsigned>> starts)
@@ -112,6 +118,9 @@ public:
     asio::awaitable<neograph::graph::NodeOutput>
     run(neograph::graph::NodeInput) override {
         starts_->fetch_add(1, std::memory_order_relaxed);
+        if (g_adapter_node_fails.load(std::memory_order_acquire)) {
+            throw std::runtime_error("adapter node failed: db password=hunter2 at /srv/secret");
+        }
         neograph::graph::NodeOutput output;
         output.writes.push_back(neograph::graph::ChannelWrite{"value", "completed"});
         co_return output;
@@ -793,6 +802,37 @@ TEST(A2ACollaboration, AuthenticatedPeerGatesProgramRequestAndTaskAccess) {
     }
     EXPECT_EQ(client.get_task("run-b").status.state, TaskState::Completed);
     server.stop();
+}
+
+TEST(A2ACollaboration, FailedProgramRunNeverSendsExceptionText) {
+    // A Program failure message can carry a Core node's what(); an A2A peer
+    // gets the stable code and a generic text (A2A-15).
+    ProgramAdapterFixture fixture;
+    auto adapter = std::make_shared<ProgramAgentAdapter>(
+        fixture.runtime, fixture.admitted_version(), "owner-b");
+    AgentCard card;
+    card.name = "failing-program";
+    card.description = "Program failure projection test";
+    card.version = "1.0.0";
+    card.default_input_modes = {"text/plain"};
+    card.default_output_modes = {"text/plain"};
+    A2AServer server(adapter, card);
+    ASSERT_TRUE(server.start_async("127.0.0.1", 0));
+    g_adapter_node_fails.store(true, std::memory_order_release);
+    httplib::Client peer("127.0.0.1", server.port());
+    const json request = {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "SendMessage"},
+        {"params", {{"message", {{"messageId", "m-fail"}, {"role", "ROLE_USER"},
+                                 {"parts", json::array({json{{"text", "fail"}}})}}}}}};
+    auto response = peer.Post("/", httplib::Headers{{"A2A-Version", "1.0"}},
+                              request.dump(), "application/json");
+    g_adapter_node_fails.store(false, std::memory_order_release);
+    server.stop();
+    ASSERT_TRUE(response);
+    EXPECT_EQ(response->body.find("hunter2"), std::string::npos) << response->body;
+    EXPECT_EQ(response->body.find("/srv/secret"), std::string::npos) << response->body;
+    const auto task = json::parse(response->body)["result"]["task"];
+    EXPECT_EQ(task["status"]["state"], "TASK_STATE_FAILED") << response->body;
+    EXPECT_TRUE(task["metadata"]["neograph/failure"]["code"].is_string()) << response->body;
 }
 
 TEST(A2ACollaboration, StrictAuthenticationAlsoGatesOrdinaryProgramTasks) {
