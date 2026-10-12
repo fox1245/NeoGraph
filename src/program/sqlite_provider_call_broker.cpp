@@ -10,6 +10,7 @@
 
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <charconv>
 #include <exception>
 #include <map>
@@ -415,6 +416,74 @@ void save_outcome(sqlite3* db, std::string_view owner, std::string_view id,
     update.done();
     if (sqlite3_changes(db) != 1) throw std::runtime_error("Program provider journal settlement conflict");
 }
+// #405: a fork repeats the provider calls its source's paused invocation made
+// before the fork. When the source journaled the same request at the same
+// slot (its own run and Core thread), the fork adopts that record: the
+// outcome is re-encoded under the fork's dispatch id, the monetary record
+// names the fork's call, and the row keeps the source's attempt, so neither
+// this attempt nor a restart of it charges the call again. Returns the
+// replayed outcome, or nothing when the source has no such record.
+std::optional<sp::runtime::Result> adopt_source_call(
+    SQLiteProgramProviderCallJournal::Impl& impl, std::string_view owner, std::string_view id,
+    const Stored& admitted, std::string_view operation, const graph::ProviderCallIdentity& identity,
+    const ProgramCoreProviderCallReplaySource& source) {
+    // The source's thread of the same derivation as this call's.
+    std::string           source_id;
+    std::optional<Stored> row;
+    for (const auto& [target_thread, source_thread] : source.threads) {
+        if (target_thread != identity.thread_id) continue;
+        auto source_call      = identity;
+        source_call.thread_id = source_thread;
+        const ProgramCoreProviderCallContext source_context{
+            owner, source.program_version_id, source.run_id, operation, 1};
+        source_id = dispatch_id(source_context, source_call);
+        row       = load(impl.db, owner, source_id, impl.archive);
+        if (row) break;
+    }
+    if (!row || row_attempt(*row) > source.max_attempt) return std::nullopt;
+    if (row->request != admitted.request || row->provider != admitted.provider ||
+        row->model != admitted.model || row->provider_name != admitted.provider_name ||
+        row->family != admitted.family || row->mode != admitted.mode)
+        return std::nullopt;
+    if (row->state == "dispatched" || row->state == "reconciliation_required")
+        throw ProgramProviderDispatchUncertainError(
+            "Program provider journal dispatch outcome of the forked call is uncertain; "
+            "reconciliation required");
+    if (row->state != "succeeded") return std::nullopt;
+    auto       result  = restore_outcome(*row, owner, source_id, impl.archive);
+    Stored     adopted = admitted;
+    adopted.attempt    = row->attempt;
+    adopted.claim      = row->claim;
+    adopted.committed  = row->committed;
+    adopted.deadline   = row->deadline;
+    const auto canonical = neograph::detail::canonical_json_bytes(
+        provider_codec::encode_outcome(*result, impl.archive, archive_binding(owner, id, adopted)));
+    const auto outcome = neograph::detail::sha256_identity(outcome_domain, "outcome", canonical);
+    std::string monetary;
+    if (!row->monetary.empty()) {
+        auto record = program::detail::decode_monetary_record(
+            neograph::detail::parse_json_strict(row->monetary));
+        record.call_id = std::string(id);
+        monetary       = encode_monetary(record);
+    }
+    Statement insert(impl.db, "INSERT INTO ng_program_provider_calls "
+                     "(owner_scope,dispatch_id,slot,request_digest,provider_binding_identity,"
+                     "model,original_attempt,state,completion,outcome_digest,evidence_identity,"
+                     "encoding_version,provider_name,family,mode,original_deadline,"
+                     "logical_scope,claim_amount,committed_amount,monetary_record)"
+                     " VALUES(?1,?2,?3,?4,?5,?6,?7,'succeeded',?8,?9,?10,'2',?11,?12,?13,?14,?15,?16,?17,?18)");
+    insert.bind(1, owner); insert.bind(2, id); insert.bind(3, adopted.slot);
+    insert.bind(4, adopted.request); insert.bind(5, adopted.provider);
+    insert.bind(6, adopted.model); insert.bind(7, adopted.attempt);
+    insert.bind(8, canonical); insert.bind(9, outcome); insert.bind(10, row->evidence);
+    insert.bind(11, adopted.provider_name); insert.bind(12, adopted.family);
+    insert.bind(13, adopted.mode); insert.bind(14, adopted.deadline);
+    insert.bind(15, adopted.scope); insert.bind(16, std::to_string(adopted.claim));
+    insert.bind(17, std::to_string(adopted.committed)); insert.bind(18, monetary);
+    insert.done();
+    return result;
+}
+
 class BoundBroker final : public graph::ProviderCallBroker {
 public:
     BoundBroker(std::shared_ptr<SQLiteProgramProviderCallJournal::Impl> impl,
@@ -422,13 +491,14 @@ public:
         : impl_(std::move(impl)), owner_(context.owner_scope), version_(context.program_version_id),
           run_(context.run_id), operation_(context.operation_id), attempt_(context.attempt),
           provider_identity_(std::move(provider_identity)),
-          monetary_(std::move(context.monetary_account)) {}
+          monetary_(std::move(context.monetary_account)),
+          replay_(std::move(context.replay_source)) {}
 
     asio::awaitable<sp::runtime::Result> invoke(graph::ProviderCallIdentity identity,
                                                std::shared_ptr<Provider> provider,
                                                ProviderRequest request) override {
         return invoke_owned(impl_, owner_, version_, run_, operation_, attempt_,
-                            provider_identity_, monetary_, std::move(identity),
+                            provider_identity_, monetary_, replay_, std::move(identity),
                             std::move(provider), std::move(request));
     }
 private:
@@ -437,6 +507,7 @@ private:
         std::string owner, std::string version, std::string run, std::string operation,
         std::uint64_t attempt, std::string provider_identity,
         std::shared_ptr<ProgramMonetaryAccount> monetary,
+        std::optional<ProgramCoreProviderCallReplaySource> replay,
         graph::ProviderCallIdentity identity, std::shared_ptr<Provider> provider,
         ProviderRequest request) {
         if (!provider || identity.owner_scope != owner || identity.run_id != run ||
@@ -511,6 +582,13 @@ private:
                 }
                 throw ProgramProviderDispatchUncertainError(
                     "Program provider journal dispatch outcome uncertain; reconciliation required");
+            }
+            if (replay) {
+                if (auto adopted = adopt_source_call(*impl, owner, id, admitted, operation,
+                                                     identity, *replay)) {
+                    tx.commit();
+                    co_return std::move(*adopted);
+                }
             }
             // Monetary preflight: a call that cannot be bounded, or whose hold
             // does not fit, is refused here, before any marker or transport.
@@ -633,6 +711,7 @@ private:
     std::uint64_t attempt_;
     std::string provider_identity_;
     std::shared_ptr<ProgramMonetaryAccount> monetary_;
+    std::optional<ProgramCoreProviderCallReplaySource> replay_;
 };
 }  // namespace
 

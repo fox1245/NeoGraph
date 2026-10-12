@@ -907,7 +907,19 @@ void init_graph(py::module_& m) {
                     // GIL held: compile is fast (just walks the JSON).
                     unique = GraphEngine::compile(j, ctx, std::move(store));
                 }
-                auto engine = std::shared_ptr<GraphEngine>(unique.release());
+                // Destroying an engine joins its fan-out workers, and a worker
+                // still unwinding a failed branch may need the GIL to release
+                // the Python exception the branch holds. A thread that holds
+                // the GIL as it drops the last reference must not join with it.
+                auto engine = std::shared_ptr<GraphEngine>(
+                    unique.release(), [](GraphEngine* released) {
+                        if (PyGILState_Check()) {
+                            py::gil_scoped_release release;
+                            delete released;
+                        } else {
+                            delete released;
+                        }
+                    });
                 py::object result = py::cast(engine);
                 result.attr("_pycontext") = ctx_obj;
                 result.attr("_pycheckpointstore") = store_obj;

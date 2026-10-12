@@ -494,6 +494,180 @@ TEST(MCPClientConformance, BatchesFromTheServerAreHandledMessageByMessage) {
     EXPECT_TRUE(answered);
 }
 
+// A request that runs out of time while its response is still arriving fails
+// as a timeout, and the server is told with notifications/cancelled, as on
+// every other timeout path. It never fails as a malformed response built from
+// the part that arrived. The mock server writes the first half of the
+// response and then holds the rest back, in a JSON body and in an event
+// stream, with and without a session, under the client's request timeout and
+// under the call's own deadline.
+namespace {
+
+// The second half of a response waits here until the test lets it go.
+struct HeldBack {
+    std::atomic<bool> release{false};
+    std::atomic<bool> first_half_sent{false};
+    void wait() const {
+        for (int i = 0; i < 600 && !release.load(); ++i) std::this_thread::sleep_for(5ms);
+    }
+};
+
+// Answers with `full`, cut in the middle: a JSON body of the right length or
+// a chunked event stream, as the mock for the stalled call.
+void respond_in_halves(httplib::Response& res, std::string full, bool event_stream,
+                       const std::shared_ptr<HeldBack>& held) {
+    const std::size_t half = full.size() / 2;
+    if (event_stream) {
+        res.set_chunked_content_provider(
+            "text/event-stream",
+            [full = std::move(full), half, held, step = 0](std::size_t,
+                                                           httplib::DataSink& sink) mutable {
+                if (step++ == 0) {
+                    sink.write(full.data(), half);
+                    held->first_half_sent = true;
+                    return true;
+                }
+                held->wait();
+                sink.write(full.data() + half, full.size() - half);
+                sink.done();
+                return true;
+            });
+        return;
+    }
+    const std::size_t size = full.size();
+    res.set_content_provider(
+        size, "application/json",
+        [full = std::move(full), half, held](std::size_t offset, std::size_t,
+                                             httplib::DataSink& sink) {
+            if (offset == 0) {
+                sink.write(full.data(), half);
+                held->first_half_sent = true;
+                return true;
+            }
+            held->wait();
+            sink.write(full.data() + half, full.size() - half);
+            return true;
+        });
+}
+
+}  // namespace
+
+TEST(MCPClientConformance, ATimeoutWhileTheResponseArrivesIsATimeout) {
+    struct Mode {
+        const char* name;
+        bool event_stream;
+        bool stateful;
+        bool call_deadline;  ///< the call's own deadline, not request_timeout
+    };
+    for (const Mode mode : {Mode{"json", false, true, false}, Mode{"sse", true, true, false},
+                            Mode{"stateless-sse", true, false, false},
+                            Mode{"stateless-json", false, false, false},
+                            Mode{"json-deadline", false, true, true},
+                            Mode{"sse-deadline", true, true, true}}) {
+        SCOPED_TRACE(mode.name);
+        Recorder recorder;
+        auto held = std::make_shared<HeldBack>();
+        httplib::Server svr;
+        svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+            recorder.add(req);
+            const auto request = json::parse(req.body);
+            if (common(request, res, mode.stateful ? "t1" : "")) return;
+            const json id = request["id"];
+            const std::string text =
+                request["params"]["arguments"].value("mode", "") == "stall" ? "late" : "fine";
+            if (text == "fine") {
+                res.set_content(envelope(id, text_result(text)), "application/json");
+                return;
+            }
+            const auto body = envelope(id, text_result(text));
+            respond_in_halves(res, mode.event_stream ? "data: " + body + "\n\n" : body,
+                              mode.event_stream, held);
+        });
+        svr.Get("/mcp", [](const httplib::Request&, httplib::Response& res) { res.status = 405; });
+        svr.Delete("/mcp",
+                   [](const httplib::Request&, httplib::Response& res) { res.status = 204; });
+        Guard server(svr);
+        mcp::MCPClientConfig config;
+        config.request_timeout = mode.call_deadline ? 30s : 300ms;
+        mcp::MCPClient client(server.url(), config);
+        ASSERT_TRUE(client.initialize("timeout"));
+        const auto started = std::chrono::steady_clock::now();
+        try {
+            if (mode.call_deadline) {
+                async::run_sync(client.call_tool_result_async(
+                    "slow", {{"mode", "stall"}}, std::chrono::steady_clock::now() + 300ms,
+                    nullptr));
+            } else {
+                client.call_tool_result("slow", {{"mode", "stall"}});
+            }
+            ADD_FAILURE() << "the stalled call returned";
+        } catch (const mcp::MCPTransportError& error) {
+            EXPECT_EQ(error.failure(), mcp::MCPFailure::timeout) << error.what();
+        } catch (const std::exception& error) {
+            ADD_FAILURE() << "not a transport timeout: " << error.what();
+        }
+        // It gave up at its own bound, long before the held-back half could arrive.
+        EXPECT_LT(std::chrono::steady_clock::now() - started, 2500ms);
+        // The server did start the response, so the client stopped waiting in
+        // the middle of it, not before it.
+        EXPECT_TRUE(held->first_half_sent.load());
+        held->release = true;
+        // The server is told, and the session goes on.
+        int stalled_id = -1;
+        for (const auto& call : recorder.with_method("tools/call"))
+            if (call.body["params"]["arguments"].value("mode", "") == "stall")
+                stalled_id = call.body["id"].get<int>();
+        {
+            std::unique_lock lock(recorder.mu);
+            EXPECT_TRUE(recorder.changed.wait_for(lock, 10s, [&] {
+                for (const auto& item : recorder.seen)
+                    if (item.body.is_object() &&
+                        item.body.value("method", "") == "notifications/cancelled" &&
+                        item.body["params"]["requestId"] == stalled_id)
+                        return true;
+                return false;
+            })) << "no notifications/cancelled for request " << stalled_id;
+        }
+        EXPECT_EQ(client.call_tool_result("echo", json::object()).content[0]["text"], "fine");
+    }
+}
+
+TEST(MCPClientConformance, InitializeThatTimesOutInTheMiddleOfItsResponseIsATimeout) {
+    // initialize itself, cut off in the middle of its response, fails as a
+    // timeout; MCP never cancels initialize, so nothing is sent.
+    for (const bool event_stream : {false, true}) {
+        SCOPED_TRACE(event_stream ? "sse" : "json");
+        Recorder recorder;
+        auto held = std::make_shared<HeldBack>();
+        httplib::Server svr;
+        svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+            recorder.add(req);
+            const auto request = json::parse(req.body);
+            if (!request.contains("id")) {
+                res.status = 202;
+                return;
+            }
+            const auto body = envelope(request["id"], initialize_result());
+            respond_in_halves(res, event_stream ? "data: " + body + "\n\n" : body,
+                              event_stream, held);
+        });
+        Guard server(svr);
+        mcp::MCPClientConfig config;
+        config.request_timeout = 300ms;
+        mcp::MCPClient client(server.url(), config);
+        try {
+            client.initialize("timeout");
+            ADD_FAILURE() << "initialize returned";
+        } catch (const mcp::MCPTransportError& error) {
+            EXPECT_EQ(error.failure(), mcp::MCPFailure::timeout) << error.what();
+        }
+        EXPECT_TRUE(held->first_half_sent.load());
+        held->release = true;
+        EXPECT_TRUE(recorder.with_method("notifications/cancelled").empty());
+        EXPECT_FALSE(client.is_initialized());
+    }
+}
+
 // MCP-C-08: the URL tool constructor keeps one session for all its calls and
 // ends it with the tool.
 TEST(MCPClientConformance, TheUrlToolKeepsOneSession) {

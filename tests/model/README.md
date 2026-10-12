@@ -134,14 +134,17 @@ SQLite host for programs that run one call at a time: the database is copied
 at every checkpoint save, `put_writes`, Program transition, provider dispatch
 and journaled call, and a new runtime on the copy reconnects the run.
 
-The harness reports, without failing, the schedules that follow a documented
-behaviour P4 or P5 does not cover, and the questions they raise for the
-contract: a crash inside a JavaScript command returns the run for
-reconciliation; a plan that stopped before its first Core checkpoint is not
-recovered (`P_RUN_RECOVERY_BLOCKED`); a crash while a request was out holds the
-call, which is never sent again; and a fork of a paused run sends again, and
-charges again, the provider call a paused invocation made before it asked,
-which a resume of the source replays.
+A call that saved a Core checkpoint continues from it after a crash (#402),
+and a fork replays the provider calls its paused invocation made (#405); a
+schedule that does otherwise fails. The harness reports, without failing, the
+schedules that follow one of two documented behaviours P4 does not cover: a
+call that stopped before its first Core checkpoint, in a JavaScript program or
+a plan, is returned to the host to reconcile (#402, #404), which the harness
+accepts only when the crash left the call without one; and a crash while a
+request was out holds that call, which is never sent again (#364). A call the
+host can reconcile as completed (a call, an awaited call or a pair that neither
+asks nor fails, with no priced call after it) it reconciles with the reference
+result, and the run must then end as the reference does (#403).
 
 ### Bounds and variables
 

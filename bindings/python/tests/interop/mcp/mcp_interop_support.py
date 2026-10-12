@@ -70,7 +70,7 @@ def free_port() -> int:
     raise RuntimeError("no free port in the configured range")
 
 
-def wait_port(port: int, proc: subprocess.Popen, timeout: float = 20.0) -> None:
+def wait_port(port: int, proc: subprocess.Popen, timeout: float = 60.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if proc.poll() is not None:
@@ -254,7 +254,14 @@ class Run:
 
     def wire_entries(self) -> list[dict]:
         self.settle()
-        return read_jsonl(self.wire)
+        entries = read_jsonl(self.wire)
+        if self.peer.transport == "http":
+            # An HTTP recorder appends an exchange when its response ends, so a
+            # response that streams on (an event stream) lands after the requests
+            # that followed it, more often on a loaded machine. Every entry carries
+            # the time its request arrived: that is the order the client sent them.
+            entries.sort(key=lambda entry: entry.get("t", 0.0))
+        return entries
 
     def server_events(self) -> list[dict]:
         return read_jsonl(self.events)

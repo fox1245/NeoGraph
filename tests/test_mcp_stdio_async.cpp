@@ -4,6 +4,7 @@
 // cancellation, and shutdown. Fixtures are real stdlib-only Python
 // servers, with no third-party MCP dependency.
 
+#include "fixtures/test_watchdog.h"
 #include "fixtures/unique_temp_dir.h"
 
 #include <gtest/gtest.h>
@@ -43,6 +44,11 @@
 using namespace neograph;
 
 namespace {
+
+// These tests talk to a real subprocess; one that hangs ends the process with
+// a message after 30 s instead of timing out CTest after 10 minutes.
+[[maybe_unused]] const bool kWatched =
+    neograph::graph::test_support::watch_tests({"MCPStdioAsync"});
 
 std::filesystem::path fixture_path() {
     // Tests run from the build dir; the source tree is two levels up
@@ -364,6 +370,90 @@ TEST(MCPStdioAsync, ToolRetainsProcessUntilLastOwnerReleasesIt) {
 #endif
 }
 
+TEST(MCPStdioAsync, ShutdownDoesNotWaitForAServerThatStaysAlive) {
+    // After a call the session's reader stays suspended on the server's
+    // stdout. Shutdown has to cancel that read itself: on Windows closing the
+    // wrapper's handle did not, the I/O thread never ran out of work, and
+    // shutdown() waited for a server that was never going to exit, so every
+    // test with a live server timed out. This server answers initialize and
+    // then neither exits nor writes again, even after its stdin is closed.
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    const char* script =
+        "import json,sys,time\n"
+        "for line in sys.stdin:\n"
+        "  m=json.loads(line)\n"
+        "  if m.get('method')=='initialize':\n"
+        "    print(json.dumps({'jsonrpc':'2.0','id':m['id'],'result':{"
+        "'protocolVersion':'2025-11-25','capabilities':{},"
+        "'serverInfo':{'name':'idle','version':'1'}}}),flush=True)\n"
+        "time.sleep(60)\n";
+    mcp::MCPClient client({python_cmd(), "-c", script});
+    ASSERT_TRUE(client.initialize("idle-server"));
+    const auto started = std::chrono::steady_clock::now();
+    client.shutdown();
+    // The server gets about 2 s to exit before it is terminated.
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(10));
+}
+
+TEST(MCPStdioAsync, AReplyIsDeliveredWhenTheServerExitsRightAfterIt) {
+    // A hardened session ends when the server's stdout closes. The reader sees
+    // that as soon as it has routed the reply, and the caller's coroutine may
+    // not have resumed yet (here its thread is busy while the reply comes):
+    // the reply still belongs to the call. It used to fail with "shut down".
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    const char* script =
+        "import json,sys,time\n"
+        "def send(o): print(json.dumps(o),flush=True)\n"
+        "for line in sys.stdin:\n"
+        "  m=json.loads(line)\n"
+        "  if 'id' not in m: continue\n"
+        "  if m['method']=='initialize':\n"
+        "    send({'jsonrpc':'2.0','id':m['id'],'result':{"
+        "'protocolVersion':'2025-11-25','capabilities':{'tools':{}},"
+        "'serverInfo':{'name':'once','version':'1'}}})\n"
+        "  else:\n"
+        "    time.sleep(0.3)\n"
+        "    send({'jsonrpc':'2.0','id':m['id'],'result':{"
+        "'content':[{'type':'text','text':'done'}]}})\n"
+        "    sys.exit(0)\n";
+    mcp::StdioClientConfig config;
+    config.argv = {python_cmd(), "-c", script};
+    mcp::MCPClient client(std::move(config));
+    ASSERT_TRUE(client.initialize("exits-after-reply"));
+
+    json call;
+    call["name"] = "probe";
+    call["arguments"] = json::object();
+    asio::io_context io;
+    json reply;
+    std::string failure;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            asio::co_spawn(
+                io,
+                [&]() -> asio::awaitable<void> {
+                    try {
+                        reply = co_await client.rpc_call_async("tools/call", call);
+                    } catch (const std::exception& error) {
+                        failure = error.what();
+                    }
+                },
+                asio::detached);
+            // Let the request go out; then keep this thread busy while the
+            // server (which waits 0.3 s) replies and exits.
+            asio::steady_timer pause(io, std::chrono::milliseconds(100));
+            co_await pause.async_wait(asio::use_awaitable);
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_EQ(failure, "");
+    ASSERT_TRUE(reply.is_object()) << "no reply";
+    EXPECT_EQ(reply.at("content").at(0).at("text"), "done");
+}
+
 TEST(MCPStdioAsync, DeadSubprocessIsAConnectionFailure) {
     if (!python3_available()) GTEST_SKIP() << "python3 not available";
     mcp::MCPClient client({python_cmd(), "-c", "import sys; sys.exit(0)"});
@@ -513,6 +603,54 @@ TEST(MCPStdioAsync, ABatchFromTheServerIsHandledMessageByMessage) {
     for (int i = 0; i < 400 && changes.load() == 0; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     EXPECT_GE(changes.load(), 1);
+}
+
+TEST(MCPStdioAsync, ATimeoutWhileTheResponseArrivesIsATimeout) {
+    // A call that runs out of time while its response line is still being
+    // written fails as a timeout and tells the server; the line that ends
+    // later is a late response and is dropped, and the session goes on.
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    const char* script =
+        "import json,sys\n"
+        "cancelled=[]\n"
+        "def send(o): print(json.dumps(o),flush=True)\n"
+        "for line in sys.stdin:\n"
+        "  m=json.loads(line)\n"
+        "  if 'id' not in m or 'method' not in m: continue\n"
+        "  if m['method']=='initialize':\n"
+        "    send({'jsonrpc':'2.0','id':m['id'],'result':{'protocolVersion':'2025-11-25',"
+        "'capabilities':{'tools':{}},'serverInfo':{'name':'stall','version':'1'}}})\n"
+        "  elif m['params']['name']=='slow':\n"
+        "    full=json.dumps({'jsonrpc':'2.0','id':m['id'],'result':{'content':[{'type':'text','text':'late'}]}})\n"
+        "    sys.stdout.write(full[:len(full)//2]); sys.stdout.flush()\n"
+        // The rest of the line follows the client's next message, which a
+        // client that gave up sends first: notifications/cancelled.
+        "    note=json.loads(sys.stdin.readline())\n"
+        "    if note.get('method')=='notifications/cancelled': cancelled.append(note['params']['requestId'])\n"
+        "    sys.stdout.write(full[len(full)//2:]+'\\n'); sys.stdout.flush()\n"
+        "  else:\n"
+        "    send({'jsonrpc':'2.0','id':m['id'],'result':{'content':[{'type':'text','text':json.dumps(cancelled)}]}})\n";
+    mcp::MCPClient client({python_cmd(), "-c", script});
+    ASSERT_TRUE(client.initialize("stall"));
+    const auto started = std::chrono::steady_clock::now();
+    try {
+        async::run_sync(client.call_tool_result_async(
+            "slow", json::object(), std::chrono::steady_clock::now() + std::chrono::milliseconds(300),
+            nullptr));
+        ADD_FAILURE() << "the stalled call returned";
+    } catch (const mcp::MCPTransportError& error) {
+        EXPECT_EQ(error.failure(), mcp::MCPFailure::timeout) << error.what();
+    } catch (const std::exception& error) {
+        ADD_FAILURE() << "not a transport timeout: " << error.what();
+    }
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(2500));
+    // The late rest of the line did not disturb the session, and the server
+    // heard of the abandoned request.
+    const auto after = async::run_sync(client.call_tool_result_async(
+        "echo", json::object(), std::chrono::steady_clock::now() + std::chrono::seconds(10),
+        nullptr));
+    const auto cancelled = json::parse(after.content[0]["text"].get<std::string>());
+    ASSERT_EQ(cancelled.size(), 1u) << cancelled.dump();
 }
 
 TEST(MCPStdioAsync, HardenedStartupUsesStartupRatherThanRequestTimeout) {
@@ -865,6 +1003,47 @@ TEST(MCPStdioAsync, ShutdownClosesStdinBeforeAnySignal) {
     EXPECT_EQ(read_record(record).find("sigterm"), std::string::npos) << read_record(record);
 }
 
+// The same for a hardened session, whose bound is its configured
+// request_timeout: the server is told, then stopped.
+TEST(MCPStdioAsync, HardenedTimeoutWhileTheResponseArrivesIsATimeout) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    BoundaryDirectory directory;
+    const auto record = directory.path / "record";
+    const char* script =
+        "import json,sys\n"
+        "def send(o): print(json.dumps(o),flush=True)\n"
+        "for line in sys.stdin:\n"
+        "  m=json.loads(line)\n"
+        "  if 'id' not in m or 'method' not in m: continue\n"
+        "  if m['method']=='initialize':\n"
+        "    send({'jsonrpc':'2.0','id':m['id'],'result':{'protocolVersion':'2025-11-25',"
+        "'capabilities':{'tools':{}},'serverInfo':{'name':'stall','version':'1'}}})\n"
+        "  else:\n"
+        "    full=json.dumps({'jsonrpc':'2.0','id':m['id'],'result':{'content':[{'type':'text','text':'late'}]}})\n"
+        "    sys.stdout.write(full[:len(full)//2]); sys.stdout.flush()\n"
+        "    note=sys.stdin.readline()\n"
+        "    open(sys.argv[1],'a').write('cancelled\\n' if 'notifications/cancelled' in note else 'eof\\n')\n"
+        "    sys.stdout.write(full[len(full)//2:]+'\\n'); sys.stdout.flush()\n";
+    mcp::StdioClientConfig config;
+    config.argv = {python_cmd(), "-c", script, record.string()};
+    config.request_timeout = std::chrono::milliseconds(300);
+    config.cancel_grace = std::chrono::milliseconds(300);
+    mcp::MCPClient client(std::move(config));
+    ASSERT_TRUE(client.initialize("stall"));
+    const auto started = std::chrono::steady_clock::now();
+    try {
+        client.call_tool_result("slow", json::object());
+        ADD_FAILURE() << "the stalled call returned";
+    } catch (const mcp::MCPTransportError& error) {
+        EXPECT_EQ(error.failure(), mcp::MCPFailure::timeout) << error.what();
+    } catch (const std::exception& error) {
+        ADD_FAILURE() << "not a transport timeout: " << error.what();
+    }
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(2500));
+    EXPECT_TRUE(wait_for_record(record, "cancelled", std::chrono::milliseconds(5000)))
+        << read_record(record);
+}
+
 // Owner decision for hardened stdio: a cancelled call sends
 // notifications/cancelled first, waits a short grace period, then terminates
 // the server; the session takes no more requests.
@@ -904,13 +1083,26 @@ TEST(MCPStdioAsync, HardenedCancellationTellsTheServerBeforeTerminating) {
     }
 }
 
-#ifndef _WIN32
 // Without replace_environment, configured entries add to or override the
-// inherited environment.
+// inherited environment (on Windows: the block built from GetEnvironmentStringsW).
 TEST(MCPStdioAsync, ConfiguredEnvironmentEntriesOverrideTheInheritedOnes) {
     if (!python3_available()) GTEST_SKIP() << "python not available";
-    ::setenv("NG_MCP_INHERITED", "parent", 1);
-    ::setenv("NG_MCP_OVERRIDDEN", "parent", 1);
+    const auto set = [](const char* name, const char* value) {
+#ifdef _WIN32
+        _putenv_s(name, value);
+#else
+        ::setenv(name, value, 1);
+#endif
+    };
+    const auto unset = [](const char* name) {
+#ifdef _WIN32
+        _putenv_s(name, "");
+#else
+        ::unsetenv(name);
+#endif
+    };
+    set("NG_MCP_INHERITED", "parent");
+    set("NG_MCP_OVERRIDDEN", "parent");
     auto config = boundary_config("echo");
     config.environment = {{"NG_MCP_OVERRIDDEN", "child"}, {"NG_MCP_ADDED", "added"}};
     mcp::MCPClient client(std::move(config));
@@ -920,7 +1112,10 @@ TEST(MCPStdioAsync, ConfiguredEnvironmentEntriesOverrideTheInheritedOnes) {
     EXPECT_EQ(environment.value("NG_MCP_OVERRIDDEN", ""), "child");
     EXPECT_EQ(environment.value("NG_MCP_ADDED", ""), "added");
     EXPECT_TRUE(environment.contains("PATH"));
-    ::unsetenv("NG_MCP_INHERITED");
-    ::unsetenv("NG_MCP_OVERRIDDEN");
-}
+#ifdef _WIN32
+    // The child can start only with the system variables the merge kept.
+    EXPECT_TRUE(environment.contains("SYSTEMROOT")) << environment.dump();
 #endif
+    unset("NG_MCP_INHERITED");
+    unset("NG_MCP_OVERRIDDEN");
+}

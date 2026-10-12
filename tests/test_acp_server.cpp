@@ -16,6 +16,7 @@
 #include <neograph/graph/cancel.h>
 #include <neograph/graph/node.h>
 
+#include "fixtures/test_watchdog.h"
 #include "fixtures/typed_provider.h"
 #include <neograph/hook_outbox.h>
 #include <neograph/tool.h>
@@ -614,6 +615,27 @@ TEST(ACPServer, NewSessionReturnsId) {
     ASSERT_TRUE(resp.contains("result"));
     auto sid = resp["result"].value("sessionId", std::string());
     EXPECT_FALSE(sid.empty());
+}
+
+// An ACP client on Windows sends a drive or UNC path; a relative or
+// drive-relative one is still refused (ACP: cwd is an absolute path).
+TEST(ACPServer, WorkspacePathsAreAbsolutePosixOrWindowsPaths) {
+    auto server = make_server();
+    initialize_server(server);
+    int id = 100;
+    const auto session_new = [&](const std::string& cwd) {
+        return server.handle_message(make_request(
+            ++id, "session/new", {{"cwd", cwd}, {"mcpServers", neograph::json::array()}}));
+    };
+    for (const char* absolute : {"/work", "C:\\work\\project", "c:/work", "D:\\",
+                                 "\\\\host\\share\\work"}) {
+        const auto response = session_new(absolute);
+        EXPECT_TRUE(response.contains("result")) << absolute << ": " << response.dump();
+    }
+    for (const char* relative : {"work", "./work", "C:", "C:work", "1:/work", "\\work", ":/work"}) {
+        const auto response = session_new(relative);
+        EXPECT_TRUE(response.contains("error")) << relative << ": " << response.dump();
+    }
 }
 
 TEST(ACPServer, PromptRunsGraphAndEmitsUpdate) {
@@ -2627,6 +2649,12 @@ TEST(ACPServer, AnMcpServerThatCannotStartFailsSessionNewWithoutDetail) {
 }
 
 #ifdef NEOGRAPH_ACP_MCP_TESTS
+// These tests start a real subprocess; one that hangs ends the process with a
+// message after 30 s instead of timing out CTest after 10 minutes.
+[[maybe_unused]] const bool kWatchedMcpServers = neograph::graph::test_support::watch_tests(
+    {"ACPServer.StdioMcpServerToolsAreAvailableToTheSession",
+     "ACPServer.ClientMcpServersDoNotInheritTheAgentEnvironment"});
+
 const char* acp_test_python() {
 #ifdef _WIN32
     if (std::system("where python >nul 2>&1") == 0) return "python";

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=39e6eb468894ddbf6852ef7d57b9b1d0a4c87e432e2fb0ef577113a9376bd72f -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=2962897559c898e519f7e7e74330d36d24a93196ced03cf208c8dbaa6a1fb8c5 -->
 # NeoGraph 핵심 개념 — 처음부터 읽는 안내서
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -423,6 +423,28 @@ result = await engine.resume_async(thread_id="t1",
 노드 본문 안에서 예외를 던집니다(Python은 `raise ng.NodeInterrupt(reason)`, C++는 `throw NodeInterrupt(...)`). 엔진이 이를 잡아 상태를 저장하고, 예외를 던진 노드에서 중단된 `RunResult`를 반환합니다. 재개 API는 같습니다. ready batch의 노드와 `Send` 대상 노드 모두 이렇게 동작하며, 동기·비동기·스트리밍 진입점에서도 마찬가지입니다. 중단된 스텝에서 이미 끝난 형제 노드는 재개할 때 다시 실행하지 않고 재생(replay)합니다. 그 스텝 앞에 체크포인트가 없어도 같습니다.
 
 한 스텝에서 발생한 여러 인터럽트는 한 번에 하나씩 응답합니다(#388). 한 슈퍼스텝의 노드나 Send 여럿이 `NodeInterrupt`를 발생시키면 실행은 그 모두에서 일시 중지됩니다. `RunResult.interrupts`에는 각 인터럽트가 `{id, node, value}` 형태로 나열됩니다. id는 일시 중지된 호출의 task id이며 `s3:review`, Send라면 `s3:send[1]:worker:<hash>` 같은 형태입니다. `interrupt_node`, `interrupt_value`, `interrupt_id`는 그중 첫 번째 인터럽트를 가리킵니다. 재개하면 `interrupt_id=`로 지정한 인터럽트(C++에서는 `RunMetadata::resume_interrupt_id`)에 응답하고, 지정하지 않으면 첫 번째에 응답합니다. 그 스텝에서 멈춘 나머지 노드와 Send는 값 없이 다시 실행되어 각자 같은 질문을 다시 던지고, 그다음 재개가 그 질문에 응답합니다. 대기 중이 아닌 인터럽트를 지정하면 아무것도 실행하기 전에 `ValueError`(C++는 `std::invalid_argument`)가 발생합니다. 인터럽트 여러 개로 멈춘 체크포인트는 메타데이터(`_neograph.interrupts`)에 그 목록을 담고, 하나로 멈춘 체크포인트는 달라지지 않습니다. 재개 값은 멈춘 스텝에서 응답받은 호출에만 전달됩니다(#393). 재개된 실행의 이후 스텝에 있는 노드는 `ctx.resume_value`를 받지 못하므로, 거기서 질문하는 노드나 도구 게이트는 다른 질문에 대한 응답을 가져다 쓰지 않고 실행을 다시 멈춥니다. 부모를 통해 재개한 서브그래프는 부모에서 응답받은 노드를 통해 응답을 받습니다. `messages` 채널이 있는 그래프에서는 그 값을 사용자 메시지로도 여전히 받습니다. JavaScript의 join과 plan 수준의 `parallel`, `quorum`도 같은 규칙을 따릅니다. 재개할 때마다 멈춘 멤버 하나가 응답을 받고 나머지는 다시 질문합니다.
+
+노드는 재개가 어느 인터럽트에 응답하는지 알 수 있습니다(#406). `ctx.resume_interrupt_id`(Python `input.ctx.resume_interrupt_id`)는 `ctx.resume_value`가 노드 자신의 `NodeInterrupt`에 응답하는 값일 때 그 인터럽트의 id입니다. 재개가 그 id를 지정했든 첫 번째 인터럽트에 응답했든, `RunResult::interrupt_id`와 `RunResult::interrupts`가 보고하는 id와 같습니다. 값이 노드를 붙잡은 `interrupt_before` 게이트의 승인일 때와 값이 없을 때는 비어 있습니다(Python `None`). 전달 규칙은 그대로여서, 게이트의 승인은 여전히 게이트가 붙잡은 노드에 전달됩니다(#393). 게이트 뒤에 있으면서 자기 질문도 하는 노드는 이 id를 확인해, 실행 승인을 자기 질문에 대한 응답으로 받아들이지 않습니다. 예는 다음과 같습니다.
+
+```cpp
+asio::awaitable<NodeOutput> run(NodeInput in) override {
+    const auto& answer = in.ctx.resume_value;
+    // Nothing yet, or the approval of the gate that held this node.
+    if (!answer || in.ctx.resume_interrupt_id.empty())
+        throw NodeInterrupt("deploy needs a target", json{{"ask", "target"}});
+    NodeOutput out;
+    out.writes.push_back(ChannelWrite{"target", *answer});
+    co_return out;
+}
+```
+
+```python
+def run(self, input):
+    answer = input.ctx.resume_value
+    if answer is None or input.ctx.resume_interrupt_id is None:
+        raise ng.NodeInterrupt({"ask": "target"}, reason="deploy needs a target")
+    return [ng.ChannelWrite("target", answer)]
+```
 
 형제 노드의 결과가 서로 다르게 끝나는 스텝은 인덱스나 완료 순서와 상관없이 하나의 규칙으로 끝납니다(#392). 이 규칙은 fan-out의 분기와 한 스텝의 Send 모두에 적용되며, 워커가 하나든 여럿이든 같습니다. 우선 실행이 취소되면 스텝이 중단됩니다. 취소가 아니라면 불확실한 효과, 즉 payload의 `kind`가 `tool_effect_reconciliation`인 `NodeInterrupt`가 있으면 형제 노드가 실패했더라도 조정(reconciliation)을 위해 스텝을 일시 중지합니다. 실행을 끝내 버리면 결과를 아무도 모르는 효과를 방치하게 되기 때문입니다. 이때 일시 중지 결과에는 그런 인터럽트만 보고하며, 결과를 기록하지 못한 실패 노드는 스텝을 재개할 때 다시 실행됩니다. 불확실한 효과가 없고 실패가 있으면 디스패치 순서(ready 순서, 그다음 Send 순서)에서 가장 먼저 발생한 실패로 실행이 실패합니다. 이때 그 스텝의 일반 인터럽트는 보고되지 않고 체크포인트도 저장되지 않습니다. 실패도 없으면 위에서 설명한 대로 스텝이 모든 인터럽트에서 일시 중지됩니다. 실패 엣지를 따라 라우팅되는 실패는 완료와 마찬가지로 해당 노드의 결과입니다. 이 경우에도 형제 노드의 인터럽트는 스텝을 일시 중지시키고, 라우팅은 스텝이 완료될 때 적용됩니다. JavaScript의 join과 plan 수준의 `parallel`, `quorum`도 멤버의 순위를 같은 방식으로 정합니다(#397). 불확실한 효과로 멈춘 멤버가 있으면 실패한 멤버가 있어도 join이 그 멤버(여럿이면 첫 번째)에서 일시 중지됩니다. 다만 race의 승자가 나왔거나 quorum이 충족되는 등 성공이 이미 결과를 정했다면 그렇지 않습니다. 실패한 멤버는 기록해 두었다가 재개할 때 join을 끝냅니다. 재개에서 응답받은 멤버가 끝까지 실행되어 그 효과가 확정된 다음입니다(#400). join이 일시 중지될 때는 선언 순서와 상관없이, 불확실한 효과로 멈춘 멤버에게 일반 질문으로 멈춘 멤버보다 먼저 응답합니다(#401). 결과를 모으는 `ng.all`(`collect: true`)은 위 규칙의 의도된 예외입니다. 이 노드는 일시 중지된 멤버를 포함한 모든 멤버를 기다린 뒤에 결과를 보고합니다. 그래서 다른 멤버가 일반 질문으로 멈춰 있는 동안에는 한 멤버의 실패로 끝나지 않고 그 자리에서 일시 중지되며, 모든 멤버가 정리되고 나서 실패를 보고합니다(#401).
 

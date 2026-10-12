@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=9af155e2baa72a7ac434c08d895ab71c09873b66e5bc3b317ab538ea332a14da -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=0ce1c2edd1c432684b315a629a0cfe1256e46e8fcdbb3f69a7531f0f1c65fc55 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3495,7 +3495,7 @@ pointer to that canonical source-level reference.
 
 #### Task와 method
 
-모든 run은 자체 worker thread에서 실행된다. stream이나 blocking send는 이를 관찰할 뿐이므로 task는 끊긴 연결보다 오래 산다. `SendMessage`는 task가 terminal 또는 interrupted 상태가 될 때까지 block하지만, `returnImmediately`(0.3 `blocking: false`)를 주면 SUBMITTED task를 즉시 반환한다. `SendStreamingMessage`와 `SubscribeToTask`(0.3 `tasks/resubscribe`)는 Task를 먼저 보내고 status·artifact update를 이어 보내며 terminal 또는 interrupted 상태에서 닫힌다. 0.3 stream은 `final: true`로 끝난다. `GetTask`와 `ListTasks`는 `historyLength`를 따른다(0이면 history 생략). `ListTasks`는 `contextId`, `status`, `statusTimestampAfter`로 거르고 `pageSize`(1~100, 기본 50)와 `pageToken`으로 최신순 paging하며, `includeArtifacts`가 없으면 artifact를 생략한다. 모든 status에는 timestamp가 붙는다.
+모든 run은 자체 worker thread에서 실행된다. stream이나 blocking send는 이를 관찰할 뿐이므로 task는 끊긴 연결보다 오래 산다. `SendMessage`는 task가 terminal 또는 interrupted 상태가 될 때까지 block하지만, `returnImmediately`(0.3 `blocking: false`)를 주면 SUBMITTED task를 즉시 반환한다. `SendStreamingMessage`와 `SubscribeToTask`(0.3 `tasks/resubscribe`)는 Task를 먼저 보내고 status·artifact update를 이어 보내며 terminal 또는 interrupted 상태에서 닫힌다. 0.3 stream은 `final: true`로 끝난다. 5초 동안 조용한 stream은 SSE 주석 `: keep-alive`를 쓴다. 유휴 연결에 타임아웃을 거는 클라이언트나 프록시가 아직 작업 중인 run을 끊지 않게 하려는 것이다. `GetTask`와 `ListTasks`는 `historyLength`를 따른다(0이면 history 생략). `ListTasks`는 `contextId`, `status`, `statusTimestampAfter`로 거르고 `pageSize`(1~100, 기본 50)와 `pageToken`으로 최신순 paging하며, `includeArtifacts`가 없으면 artifact를 생략한다. 모든 status에는 timestamp가 붙는다.
 
 task id는 server가 생성한다. 모르는 `taskId`를 가진 message는 `-32001`, terminal task는 `-32004`, task와 다른 `contextId`는 `-32602`, 아직 실행 중인 task는 `-32603`(ErrorInfo reason `TASK_BUSY`)으로 실패한다. INPUT_REQUIRED task에 보낸 message는 interrupt가 저장한 checkpoint에서 run을 재개한다. `GraphAgentAdapter::build_resume_value`가 message를 resume value로 바꾸며, checkpoint store가 없는 engine은 그 message를 input으로 graph를 다시 실행한다. Program 기반 task는 아직 A2A로 그 답을 받을 수 없다. message는 `-32004`를 받고 task는 계속 기다린다. NeoGraph collaboration envelope는 발신자가 정한 idempotent task id를 유지한다([A2A collaboration 확장](#a2a-collaboration-extension)). 요청은 dialect별로 검증하며 위반은 `google.rpc.BadRequest` field violation과 함께 `-32602`를 받고, 모든 error는 `google.rpc.ErrorInfo` detail을 담는다. `CollaborationAuthenticator`가 있으면 card는 Bearer security scheme을 선언하고, 요청 인증이 필수면 전역 requirement도 선언한다. credential이 없으면 `WWW-Authenticate`와 함께 HTTP 401, 인증됐지만 collaboration link를 쓸 수 없는 peer는 HTTP 403을 받는다.
 

@@ -1285,9 +1285,19 @@ void StdioSession::check_open() const {
 
 void StdioSession::close_io() noexcept {
     asio::error_code ec;
-    if (async_in_) async_in_->close(ec);
-    if (async_out_) async_out_->close(ec);
-    if (async_err_) async_err_->close(ec);
+    // The reader stays suspended on the server's stdout between calls, and
+    // shutdown() waits for the I/O thread to run out of work before it stops
+    // the server. Closing a Windows handle does not cancel a read pending on
+    // it while another handle to the same pipe end is open, and the session
+    // keeps the original of each duplicate the wrappers own; so every
+    // pending operation is cancelled first (POSIX closes them either way).
+    const auto cancel_and_close = [&ec](AsyncHandle& handle) {
+        handle.cancel(ec);
+        handle.close(ec);
+    };
+    if (async_in_) cancel_and_close(*async_in_);
+    if (async_out_) cancel_and_close(*async_out_);
+    if (async_err_) cancel_and_close(*async_err_);
     if (async_lock_) {
         async_lock_->cancel();
         async_lock_->close();
@@ -1534,7 +1544,11 @@ asio::awaitable<json> StdioSession::exchange(
         if (result.index() == 1) throw_rpc_bound(deadline, cancel_token);
         auto captured = std::get<0>(std::move(result));
         if (captured.error) std::rethrow_exception(captured.error);
-        check_open();
+        // The reply arrived, so it is this call's result even if the session
+        // has ended since: the reader keeps reading after it routes a reply,
+        // and a hardened session ends at the server's EOF, which comes at once
+        // from a server that exits after replying, before this coroutine
+        // resumes. The next call finds the session ended.
         co_return std::move(*captured.value);
     } catch (const std::system_error& e) {
         const bool stopped = worker_.stopped.load() || closing_.load();

@@ -284,8 +284,16 @@ bool has_array(const neograph::json& object, const char* key) {
     return object.contains(key) && object[key].is_array();
 }
 
+// ACP workspace paths are absolute: POSIX (/work), or Windows with a drive
+// letter and a separator (C:\work, C:/work) or a UNC share (\\host\share).
 bool is_absolute_path(const std::string& path) {
-    return !path.empty() && path.front() == '/';
+    if (path.empty()) return false;
+    if (path.front() == '/') return true;
+    const auto letter = static_cast<unsigned char>(path.front());
+    if (path.size() >= 3 && path[1] == ':' && (path[2] == '\\' || path[2] == '/') &&
+        ((letter >= 'A' && letter <= 'Z') || (letter >= 'a' && letter <= 'z')))
+        return true;
+    return path.size() >= 3 && path[0] == '\\' && path[1] == '\\';
 }
 
 /// agentInfo must be an ACP Implementation: string name and version, optional

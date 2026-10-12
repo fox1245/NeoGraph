@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/model/README.md locale=zh-CN source_sha256=9ae04f9a7dd7b94dfc86c07b96527f52f9292fe7bac7b78b878d0c2b6a30e293 -->
+<!-- neograph-i18n: source=tests/model/README.md locale=zh-CN source_sha256=ff8e590d7785c7ce1b9c737b233df1d9367d921ad10e276d55d2565169d2c88d -->
 # Join 模型（#363）
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -73,7 +73,7 @@ java -XX:+UseParallelGC -cp /path/to/tla2tools.jar tlc2.TLC \
 
 测试对象有：JavaScript 的 `main()` 程序（`callCore`；两个成员的 `ng.all`、`ng.race` 和 `ng.quorum`，成员一起运行或逐个运行；`ng.await`；以及 Core 步骤里的两个节点都可能提问的 `callCore`，#388 和 #394），以及带类型的计划（`parallel`、三选二的 `quorum`、`sequence`），它们作用在只有一个节点的 Core 上，这个节点可能调用绑定的 provider，也可能提问。宿主的接线方式与 `LocalProgramHost` 相同：要么在内存中配合进程内的计价 broker，要么把所有存储放进同一个 SQLite 文件，检查点用同样的粗粒度时钟保存，再加上 SQLite 的 provider journal。provider 是一个真正的 SDK 客户端，运行在本地传输层之上，这个传输层会统计它发出的请求数。P1 还涵盖“只发送一次、只计费一次”：一次运行所发出的请求、所计费的 token 和金额，与参考解释器一致（使用进程内 broker 时，重新运行的节点会再次调用、再次付费，这与文档所述一致）。对于一次只运行一个调用的程序，崩溃测试在 SQLite 宿主上进行：每次检查点 save、`put_writes`、Program 转换、provider 分发和已写入 journal 的调用时，都会复制一份数据库，然后在这份副本上用一个新的运行时重新连接这次运行。
 
-对于那些遵循了文档所述行为、而 P4 或 P5 没有覆盖的调度，测试框架只做报告而不判失败，并指出它们对契约提出的问题：JavaScript 命令内部发生崩溃，会把这次运行交还给对账；在第一个 Core 检查点之前就停止的计划，不会被恢复（`P_RUN_RECOVERY_BLOCKED`）；请求已发出时发生崩溃，会冻结这次调用，它永远不会再次发送；对一个已暂停的运行做 fork，会重新发送、并再次计费那次暂停的调用在提问之前发出的 provider 调用，而对来源的恢复则是重放它。
+保存过 Core 检查点的调用，崩溃后会从该检查点继续（#402）；fork 会重放被暂停的调用已经发出的 provider 调用（#405）。做不到这两点的调度判为失败。另有两种文档所述的行为不在 P4 的覆盖范围内，遵循它们的调度，测试框架只做报告而不判失败。一种是：无论在 JavaScript 程序还是计划里，在第一个 Core 检查点之前停止的调用，都会交回宿主去协调（#402、#404），测试框架只在崩溃没有给该调用留下检查点时才接受这种情况。另一种是：请求发出期间的崩溃会冻结该调用，它永远不会再次发送（#364）。宿主能以“已完成”来协调的调用（既不提问也不失败的调用、被 await 的调用，或调用对，且其后没有计费的调用），测试框架用参照结果去协调，之后运行必须和参照一样结束（#403）。
 
 ### 上限与变量
 

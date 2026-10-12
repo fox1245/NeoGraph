@@ -9,6 +9,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace neograph::program {
 
@@ -19,6 +21,23 @@ namespace neograph::program {
  * pricing brokers read it from the call context.
  */
 class ProgramMonetaryAccount;
+
+/**
+ * #405: where the calls of a forked run's operation were made before the
+ * fork. A fork of a paused run re-runs the paused invocation, which repeats
+ * the provider calls it made before it asked. A journaling broker replays such
+ * a call from the source run's record of the same slot, re-bound to the fork,
+ * instead of sending and charging it again.
+ */
+struct ProgramCoreProviderCallReplaySource {
+    std::string run_id;
+    std::string program_version_id;
+    /// This run's Core threads of the operation, each with the source run's
+    /// thread of the same derivation.
+    std::vector<std::pair<std::string, std::string>> threads;
+    /// Only calls the source journaled up to this attempt, before the fork.
+    std::uint64_t max_attempt = 0;
+};
 
 /** Exact Program operation requesting a host-owned Core provider broker. */
 struct ProgramCoreProviderCallContext {
@@ -35,6 +54,9 @@ struct ProgramCoreProviderCallContext {
     /// charge it, when they are bound, the tokens of the calls this attempt
     /// journaled in the operation, as they charge its monetary account.
     std::shared_ptr<UsageAccumulator> journaled_usage;
+    /// #405: set on a fork for the calls it repeats; see
+    /// ProgramCoreProviderCallReplaySource. Brokers that do not journal ignore it.
+    std::optional<ProgramCoreProviderCallReplaySource> replay_source;
 };
 
 /** Host binding for one Program operation. No credential is stored here. */

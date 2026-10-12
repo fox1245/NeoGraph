@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=67ff100e8a30e5e7cf14f34a7780ea3157f24fd7a4af7cb92dc603247b641c8d -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=cce0cda42e14de09db2cbb1d72da2c46ebadbfcbb19b7e615cdae6e0f64bdaa1 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -77,6 +77,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 新增
 
+- **Core：节点可以知道一次恢复回答的是哪个中断（#406）。** 当 `resume_value` 回答的是节点自身的 `NodeInterrupt` 时，`RunContext::resume_interrupt_id`（Python 中为 `input.ctx.resume_interrupt_id`）就是该中断的 id。无论恢复是指名回答，还是回答了第一个中断，它都与 `RunResult::interrupt_id` 和 `RunResult::interrupts` 报告的 id 相同。当该值是拦住此节点的 `interrupt_before` 闸门的批准时，它为空（Python 中为 `None`）。位于闸门之后、同时也会提出自己问题的节点，不必再把放行的批准当作自己问题的回答：id 为空时，它就提问。哪个调用收到恢复值保持不变（#393）。`RunContext` 新增了成员，原生使用方需用匹配的头文件重新构建。
 - **A2A：native server 支持 `ListTasks`、`SubscribeToTask` 和非阻塞发送。** `ListTasks` 按 `contextId`、`status` 和 `statusTimestampAfter` 过滤，并按最新优先分页；`SubscribeToTask`（0.3 为 `tasks/resubscribe`）流式发送当前 task 及其实时 event；`returnImmediately`（0.3 为 `blocking: false`）立即返回已提交的 task。每个 run 都在自己的 worker 上执行，因此 task 的生命周期长于断开的连接，每个 status 都带有 timestamp。不声明 push notification、extended card 以及 HTTP+JSON/gRPC binding，其 method 以 `-32003` / `-32004` 应答。
 - **ACP：client 提供的 stdio MCP server** 通过 NeoGraph 的 MCP client 启动，node 通过 `ACPClient::session_tools()` 访问其 tool。server 只得到最小的环境，即 agent 的 `PATH`（Windows 上还有 `SystemRoot`）加上 client 的 `env`，不会得到可能含有 provider API 密钥的其余 agent 环境。
 - **A2A：card 将 collaboration envelope 声明为 extension。** 带有 `CollaborationMailbox` 的 Program agent 在 `capabilities.extensions`（`AgentCard::extensions`）中列出 `a2a::COLLABORATION_EXTENSION_URI`，因此 collaboration message 中由发送方指定的幂等 task id 成为已声明的 extension（A2A spec 4.6）。
@@ -106,6 +107,12 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 
+- **Program：fork 会重放它所继续的调用在提问前发出的 provider 调用（#405）。** 已暂停 run 的 fork 会在 fork 的 run 下再次运行被暂停的调用。按 run 记录调用的 SQLite provider journal 会把该调用在提问前发出的 provider 调用再次发送并再次计费，而恢复源 run 时这些调用是重放的。现在 fork 的每次尝试都会把源 run（`ProgramCoreProviderCallContext::replay_source`）告知 broker，journal 则接管源 run 对同一调用的记录，即 fork 之前记录在源 Core 线程同一槽位上的同一请求。结果会以 fork 的 dispatch id 重新编码，该行保留源的尝试编号，因此该调用既不会再次发送，也不会再次计费；结果未知的源调用在 fork 中仍是不确定的。没有 journal 的进程内 broker 仍会再次发送，与节点重试相同。
+- **Program：在发布检查点之前停止的 typed plan 会被恢复，不再被阻止（#404）。** 对于不是 replay-safe 且尚未发布检查点的 plan，`reconnect()` 会抛出 `P_RUN_RECOVERY_BLOCKED`。现在它遵循 JavaScript `callCore` 的规则（#402）：plan 的每个调用按 plan 顺序，从自己启动的 Core 运行的最新检查点继续；第一个没有保存任何检查点的调用，会连同指明该操作的 `pending_effect`（`core_node` 为 `"plan"`）把 run 以 `Interrupted` 交回。以 `Completed` 调用 `reconcile()` 会把结果记录为该操作的结果，plan 从那里继续；`Unknown` 则让 run 保持 `AmbiguousEffect`。
+- **Program：停止的 JavaScript `callCore` 从自己的 Core 检查点继续（#402）。** 进程在 `callCore` 中停止的 run，即使调用的 Core 已保存检查点，`reconnect()` 也会把它交回协调。因此已经完成的调用，或在 run 尚未发布的问题上暂停的调用，都必须手动协调。现在恢复会让待处理命令的每个调用，从该调用自己 Core 线程的最新检查点继续，并且不提供任何回答：已完成的调用重放其结果，已暂停的调用再次提问，join 的成员也以同样方式继续。未保存检查点的调用可能已经开始却没有留下痕迹，因此仍会交回协调，除非可以确定它从未开始（命令日志没有记录其开始的、带超时的 `ng.await`）。最新检查点是 `interrupt_before` 或 `interrupt_after` 暂停的调用同样交回：恢复绝不会越过未回答的闸门。重新启动的尝试现在在绑定操作时，会像计金额一样，对重启前记入日志的调用计 token，因此从检查点重放的调用只计费一次。
+- **Program：以 Completed 协调 JavaScript 命令后，`main()` 会继续（#403）。** 命令会预留 run 剩余的全部 wall time 和 Core 步数，而被协调的命令一直占着这些预留，因此 `main()` 在协调后立即以 `TimedOut`（"Program wall-time budget (0 ms) expired"）结束。当 run 带有前一个命令的检查点时，用于协调的暂停还会释放协调本应结算的预留。现在协调一个命令会把它的 wall time 和 Core 步数还给 run，暂停也会保留预留，直到协调完成。命令预留的 token 和金额仍视为已花费，因为无法知道它用了多少。
+- **A2A 任务流在运行安静时发送 SSE 注释。** `SendStreamingMessage`、`message/stream`、`SubscribeToTask` 和 `tasks/resubscribe` 的流，在 Task 与下一个状态之间什么也不发送。因此在单个节点中停留时间超过客户端读取超时（httplib 和 httpx 默认 5 秒）的运行，会在仍在工作时被断开，订阅者看到的是“无响应”，而不是最终状态。现在静默 5 秒的流会写出 SSE 解析器会忽略的注释 `: keep-alive`。**行为变化：** 流的 `data:` 事件之间可能出现注释行，不使用 SSE 解析器、直接读取原始行的客户端必须跳过它们。订阅者加入运行中任务的路径没有缺陷：Task、游标和通道在同一把锁内取得，运行的最终状态、通道关闭和运行的移除也在同一把锁内完成。
+- **ACP 接受 Windows 工作区路径。** `session/new` 和 `session/resume` 过去会拒绝所有不以 `/` 开头的 `cwd` 与 `additionalDirectories` 条目，因此 Windows 上的 ACP 客户端无法打开会话。现在与 POSIX 路径一样，带盘符的路径（`C:\work`、`C:/work`）和 UNC 共享（`\\host\share`）也算绝对路径；相对路径和盘符相对路径（`C:work`）仍返回 `-32602`。
 - **gRPC 检查点失败不再表现为“没有检查点”。** `CheckpointService` 过去在加载时对后端故障回答“未找到”、对列表回答空列表，因此恢复的运行会悄悄从头开始，`GrpcCheckpointStore::delete_thread` 也会把失败的删除报告为成功。现在后端失败为 `UNAVAILABLE`，客户端会抛出异常；失败的删除会抛出异常；格式错误的 `SaveCheckpoint` 为 `INVALID_ARGUMENT`。`GrpcCheckpointStore` 为每个 RPC（`set_rpc_timeout`，默认 30 秒）、`GrpcRemoteTool` 为每次调用（`set_call_timeout`，默认 60 秒）设置截止时间。
 - **NeoGraph 的 MCP 客户端在停止等待时会告知服务器。** 客户端放弃的请求，无论是取消还是超时，随后都会发送 `notifications/cancelled`（`initialize` 除外），使服务器可以停止工作；过去服务器会把被放弃的工具运行到底。
 - **运行被取消时，进行中的 MCP 调用会停止。** `MCPTool` 过去忽略分发器的 cancel token 与截止时间，因此取消运行或发生尝试超时时仍会等待服务器的应答（于是尝试会越过停止截止时间并以 `NG.EffectUncertain` 失败）。现在它在 stdio 与 HTTP 上都遵守二者：取消为 `CancelledException`（`cancellation_requested`），截止时间或请求超时为 `timed_out` 调用，迟到的响应会被丢弃。`grpc::GrpcRemoteTool` 遵循同一规则：运行的 cancel token 会取消其 RPC，运行截止时间即为 RPC 截止时间。
@@ -207,6 +214,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **启用 HTTP 的 `neograph-harness-mcp` 和 `example_harness_mcp_server` 现在会链接 `OpenSSL::Crypto`。** 这两个可执行文件直接调用 OpenSSL（`SHA256`、`CRYPTO_memcmp`），却从未自行链接它；SchemaProvider 0.2.0 不再链接 libcrypto 后，`NEOGRAPH_BUILD_MCP_HTTP_SERVER=ON` 的共享库构建会因 `SHA256` 的未定义引用而链接失败。
 - **同步图执行现在等待 scheduler 的 post 调用完全结束后才销毁 private `io_context`。** 完成处理函数即使已运行，线程池中的线程仍可能处于唤醒调用中，使 `pthread_cond_signal` 与 `pthread_cond_destroy` 发生竞态(#346)。同步 bridge 会等待外部线程的 post 与 tracked-work 释放，关闭取消通知的接收，再处理迟到的排队通知，最后销毁 context。调用线程执行、嵌套调用和父级取消权限均保留；post 处理函数抛出异常也不会丢弃仍由 bridge 所有的 coroutine frame。
 - **SDK 固定提交前移到 SchemaProvider `8f32af7`，SDK 仍为 0.2.0，interface/shared-library 代际仍为 5。** SDK 现在会在 provisioning 失败的所有路径上清零 archive 激活密钥（SDK #10）；不再把 libcurl 8.21 合成的完成计时当作“请求已发送”的证据（连接被拒绝和不受信任的 TLS 保持 `NotSent`，因此其安全重试可用）；把字面地址写入 libcurl 的 DNS 缓存，使未启用 c-ares 的 libcurl（macOS 上的 Homebrew）不再创建超出配置工作线程数的解析线程；并把 qualification meter 的固定表移出线程栈。SDK 自身的测试现在可在 native Windows 和真实的 macOS 运行器上执行。这是源码固定，不是新的 SDK 发布或版本。
+- **引擎在自己的 fan-out 工作线程上释放时，进程不再崩溃；持有 Python GIL 释放引擎时也不再死锁。** 失败的 fan-out 分支会保留它的异常，直到运行返回之后其协程帧在工作线程上展开。如果该异常拥有那个拥有引擎的宿主对象（例如 traceback 持有 `GraphEngine` 的 Python 异常），工作线程就会放下最后一个引用，`~GraphEngine` 便在该线程池自己的线程上销毁引擎的线程池。从线程池自己的线程 join 会跳过该线程，于是线程池在工作线程脚下被释放，而该线程离开处理函数时还会继续使用它：这就是负载下的 Python 测试套件中偶发的 segmentation fault。现在这样的线程池会立即停止，并在工作线程离开后由池外的线程销毁。在 Python 绑定中，放下 `GraphEngine` 最后一个引用的线程，会在析构函数 join 工作线程期间释放 GIL；释放失败分支的 Python 异常的工作线程需要 GIL，因此此前 join 可能永远等下去。
 
 ## [0.13.1] - 2026-10-07
 NeoGraph `0.13.1` 面向 alpha SDK `0.1.1`。interface revision 与 shared-library generation 仍为 4，因此使用者只需选择 SDK `0.1.1`（已安装的 package config 要求精确版本）并重新构建。Native archive 仍为 v3 / `spna3`，portable JSON 仍为 v2。功能性变更是下面的 Windows transport 修复：作为 0.13.0 发布的 Windows wheel 存在该缺陷，应替换为 0.13.1。修复提交的 hosted CI 与 Windows wheel gate 已通过（GitHub Actions run 37576205702、37576205395，仅 CPython 3.12）；完整的 CPython 3.9–3.13 矩阵在发布 tag 上运行。

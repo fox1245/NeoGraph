@@ -141,6 +141,32 @@ private:
     json        config_;
 };
 
+// #406: asks its own question until a resume answers that question. A value
+// that approves the interrupt_before gate holding it carries no interrupt id,
+// so the node counts the approval and still asks; an answer to its question
+// names it in ctx.resume_interrupt_id.
+class QuestionNode final : public GraphNode {
+public:
+    QuestionNode(std::string name, json config) : name_(std::move(name)), config_(std::move(config)) {}
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        const auto  probe  = probe_of(config_);
+        const auto& answer = in.ctx.resume_value;
+        if (answer && in.ctx.resume_interrupt_id.empty())
+            count_run(probe + "/" + name_ + ":approved=" + text_of(*answer));
+        if (!answer || in.ctx.resume_interrupt_id.empty())
+            throw NodeInterrupt("question of " + name_, json{{"asks", name_}});
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{
+            "results", json::array({name_ + "=" + text_of(*answer) + "@" + in.ctx.resume_interrupt_id})});
+        co_return out;
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+    json        config_;
+};
+
 // Asks; once answered, its first attempt fails with a retryable error, so the
 // answer must reach the retry too.
 class FlakyAskNode final : public GraphNode {
@@ -224,6 +250,7 @@ void register_types() {
         register_type<MapNode>("resume_scope.map");
         register_type<WorkerNode>("resume_scope.worker");
         register_type<FlakyAskNode>("resume_scope.flaky_ask");
+        register_type<QuestionNode>("resume_scope.question");
         register_type<ToolCallingNode>("resume_scope.tool_llm");
         return true;
     }();
@@ -428,6 +455,59 @@ TEST_P(ResumeValueScope, AGateAnswerReachesOnlyTheGatedNode) {
     ASSERT_EQ(done.status(), RunStatus::Completed);
     EXPECT_EQ(results_of(done), (std::multiset<std::string>{"gated=G", "sibling=S", "later=T"}));
     EXPECT_EQ(runs(probe, "gated"), 1) << "the gated node replays after it ran with its answer";
+}
+
+TEST_P(ResumeValueScope, AGatedNodeTellsTheGateApprovalFromTheAnswerToItsQuestion) {
+    // #406: the gate's approval reaches the node it held (#393) without an
+    // interrupt id, so the node still asks its own question; the answer to
+    // that question names the node's interrupt.
+    const auto probe      = unique_probe("gated-question");
+    auto       definition = define("resume_scope_gated_question",
+                                  json{{"review", typed(probe, "resume_scope.question")}},
+                                  json::array({edge("__start__", "review"), edge("review", "__end__")}));
+    definition["interrupt_before"] = json::array({"review"});
+    auto       engine              = build(definition, store());
+    const auto gate                = engine->run(thread("gated-question"));
+    ASSERT_EQ(gate.status(), RunStatus::Interrupted);
+    EXPECT_EQ(gate.interrupt_node, "review");
+    EXPECT_TRUE(gate.interrupt_id.empty());
+
+    const auto question = engine->resume("gated-question", json("run it"));
+    ASSERT_EQ(question.status(), RunStatus::Interrupted) << "the approval of the gate is not the answer";
+    EXPECT_EQ(question.interrupt_id, "s0:review");
+    EXPECT_EQ(asks(question), "review");
+    EXPECT_EQ(runs(probe, "review:approved=run it"), 1);
+
+    const auto done = engine->resume("gated-question", json("yes"));
+    ASSERT_EQ(done.status(), RunStatus::Completed);
+    EXPECT_EQ(results_of(done), (std::multiset<std::string>{"review=yes@s0:review"}));
+}
+
+TEST_P(ResumeValueScope, AnAnswerNamesTheInterruptItAnswers) {
+    // #406: every answered invocation reads the id of the interrupt it
+    // answers, whether the resume named it or answered the first one, and a
+    // Send reads its own task id.
+    const auto probe  = unique_probe("answer-id");
+    auto       engine = build(define("resume_scope_answer_id",
+                                    json{{"a", typed(probe, "resume_scope.question")},
+                                         {"b", typed(probe, "resume_scope.question")}},
+                                    json::array({edge("__start__", "a"), edge("__start__", "b"),
+                                                 edge("a", "__end__"), edge("b", "__end__")})),
+                              store());
+    const auto paused = engine->run(thread("answer-id"));
+    ASSERT_EQ(paused.status(), RunStatus::Interrupted);
+    ASSERT_EQ(paused.interrupts.size(), 2U);
+
+    RunMetadata second;
+    second.resume_interrupt_id = "s0:b";
+    const auto one             = engine->resume(thread("answer-id"), json("B"), nullptr, second);
+    ASSERT_EQ(one.status(), RunStatus::Interrupted);
+    EXPECT_EQ(one.interrupt_id, "s0:a");
+
+    const auto done = engine->resume("answer-id", json("A"));
+    ASSERT_EQ(done.status(), RunStatus::Completed);
+    EXPECT_EQ(results_of(done), (std::multiset<std::string>{"a=A@s0:a", "b=B@s0:b"}));
+    EXPECT_EQ(runs(probe, "a:approved=A"), 0);
 }
 
 TEST_P(ResumeValueScope, AnInterruptAfterAnswerReachesNoNode) {

@@ -91,7 +91,7 @@ def stdio_command(log: Path, argv: list[str]) -> tuple[str, list[str]]:
     return sys.executable, ["-I", "-B", str(TEE), str(log), "--", *argv]
 
 
-def wait_port(port: int, timeout: float = 10.0) -> None:
+def wait_port(port: int, timeout: float = 60.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         with contextlib.suppress(OSError), socket.create_connection(("127.0.0.1", port), 0.2):

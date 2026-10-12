@@ -210,6 +210,11 @@ struct CrashPoints {
     /// Arms by a predicate over the operations seen so far instead of an index.
     std::function<bool(const std::vector<std::string>& seen)> armed_when;
     std::vector<std::string>                                  seen;
+    /// For each operation seen that saved a checkpoint, its Core thread, and
+    /// "first" when it is the first checkpoint of a Core run (no parent);
+    /// for each publication that appends to the JavaScript command journal,
+    /// "pending" or "failed" or "result"; empty otherwise.
+    std::vector<std::string> threads, firsts;
     std::string                                               taken_at;  // the operation the copy was taken at
 
     void reset(std::filesystem::path from, std::filesystem::path to, int at, bool after_op) {
@@ -222,15 +227,21 @@ struct CrashPoints {
         image = std::move(to);
         armed_when = nullptr;
         seen.clear();
+        threads.clear();
+        firsts.clear();
         taken_at.clear();
     }
     template <class Fn>
-    auto durable(const char* what, Fn&& apply) {
+    auto durable(const char* what, Fn&& apply, std::string thread = {}, std::string note = {}) {
         std::unique_lock lock(mutex);
         const int  op    = ops++;
         if (std::getenv("NEOGRAPH_PROGRAM_RESUME_MODEL_DEBUG") && alive)
             std::cout << "    [op " << op << "] " << what << "\n";
-        if (alive) seen.emplace_back(what);
+        if (alive) {
+            seen.emplace_back(what);
+            threads.push_back(std::move(thread));
+            firsts.push_back(std::move(note));
+        }
         const bool here  = !taken && (armed_when ? armed_when(seen) : op == armed);
         if (here) taken_at = what;
         if (here && !after) {
@@ -420,7 +431,8 @@ public:
     CountingCheckpointStore(std::shared_ptr<graph::CheckpointStore> inner, CrashPoints& crash)
         : inner_(std::move(inner)), crash_(crash) {}
     void save(const graph::Checkpoint& checkpoint) override {
-        crash_.durable(to_string(checkpoint.interrupt_phase), [&] { inner_->save(checkpoint); });
+        crash_.durable(to_string(checkpoint.interrupt_phase), [&] { inner_->save(checkpoint); },
+                       checkpoint.thread_id, checkpoint.parent_id.empty() ? "first" : "");
     }
     void put_writes(const std::string& thread, const std::string& parent, const graph::PendingWrite& write) override {
         crash_.durable("put_writes", [&] { inner_->put_writes(thread, parent, write); });
@@ -520,8 +532,20 @@ public:
     ProgramTransitionPublishResult compare_publish(std::string_view owner, std::string_view head,
                                                    ProgramTransitionPublication publication) override {
         const auto what = std::string("publish ") + std::string(to_string(publication.run_record.continuation().state));
+        std::string note;
+        for (const auto& entry : publication.commands) {
+            if (entry.pending()) {
+                if (note.empty()) note = "pending";
+            } else if (const auto result = entry.terminal_result();
+                       result && result->value("status", std::string()) != "completed") {
+                note = "failed";
+            } else if (note != "failed") {
+                note = "result";
+            }
+        }
         return crash_.durable(
-            what.c_str(), [&] { return inner_->compare_publish(owner, head, std::move(publication)); });
+            what.c_str(), [&] { return inner_->compare_publish(owner, head, std::move(publication)); }, {},
+            std::move(note));
     }
     ProgramTransitionPublishResult compare_publish_execution(std::string_view owner, std::string_view head,
                                                              ProgramTransitionPublication publication,
@@ -705,6 +729,42 @@ private:
 }  // namespace
 
 namespace {
+
+/// The Core of a typed plan: the "work" node over the channels a
+/// JavaScript program declares.
+json core_definition() {
+    return json{{"schema_version", 1},
+                {"name", "main"},
+                {"channels", json{{"value", json{{"reducer", "overwrite"}, {"initial", ""}}},
+                                  {"k", json{{"reducer", "overwrite"}, {"initial", 0}}},
+                                  {"out", json{{"reducer", "overwrite"}, {"initial", ""}}},
+                                  {"side", json{{"reducer", "overwrite"}, {"initial", ""}}},
+                                  {"side_out", json{{"reducer", "overwrite"}, {"initial", ""}}}}},
+                {"nodes", json{{"work", json{{"type", "rm.step"}}}}},
+                {"edges", json::array({json{{"from", "__start__"}, {"to", "work"}},
+                                       json{{"from", "work"}, {"to", "__end__"}}})},
+                {"conditional_edges", json::array()}};
+}
+
+/// A typed plan document whose root is `root` (call_core operations need no
+/// fields), over core_definition(), within Host::budget().
+json plan_program(json root) {
+    root["name"]       = "main";
+    root["definition"] = core_definition();
+    const auto bound   = [](const char* resource, std::uint64_t minimum, std::uint64_t maximum) {
+        return json{{"resource", resource}, {"minimum", minimum}, {"maximum", maximum}};
+    };
+    return json{{"program_schema_version", 2U},
+                {"input_contract", {{"schema_version", 1}, {"schema", json::object()}}},
+                {"output_contract", {{"schema_version", 1}, {"schema", json::object()}}},
+                {"root", std::move(root)},
+                {"declared_budget_requirements",
+                 json::array({bound("wall_time_ms", 1, 100000), bound("model_tokens", 0, 10000000),
+                              bound("monetary_microunits", 0, 1000000000), bound("max_concurrency", 1, 4),
+                              bound("max_program_operations", 1, 32), bound("max_core_steps", 1, 64),
+                              bound("max_dynamic_compiles", 0, 0), bound("max_child_depth", 0, 1),
+                              bound("max_total_children", 0, 1)})}};
+}
 
 std::string javascript_program(const std::string& body) {
     return "export function define() {\n"

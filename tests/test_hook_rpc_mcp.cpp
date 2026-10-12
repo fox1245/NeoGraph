@@ -1,3 +1,5 @@
+#include "fixtures/test_watchdog.h"
+
 #include <gtest/gtest.h>
 
 #include <neograph/async/run_sync.h>
@@ -10,6 +12,11 @@
 using namespace neograph;
 
 namespace {
+
+// These tests talk to a real subprocess; one that hangs ends the process with
+// a message after 30 s instead of timing out CTest after 10 minutes.
+[[maybe_unused]] const bool kWatched =
+    neograph::graph::test_support::watch_tests({"McpHookRpcTransport"});
 std::filesystem::path fixture_path() {
     return std::filesystem::path(__FILE__).parent_path() / "fixtures" / "mcp_stdio_slow.py";
 }

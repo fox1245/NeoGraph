@@ -208,6 +208,25 @@ public:
     std::shared_ptr<RecordedRunReplay> recorded_replay;
     /// Runtime-owned custody installed before any Core execution starts.
     std::shared_ptr<sp::NativeArchive> native_history_archive;
+    /// #404: set by reconnect on a typed plan that stopped before its first
+    /// Core checkpoint. The attempt dispatches nothing: it returns the run for
+    /// reconciliation of the plan operation that may have started, as a
+    /// JavaScript callCore without a checkpoint is.
+    bool recover_plan_without_checkpoint = false;
+    /// #405: on the attempt a fork starts with, the source run whose provider
+    /// calls the fork's operations repeat, so that a journaling broker replays
+    /// them (ProgramCoreProviderCallContext::replay_source).
+    struct ForkProviderReplay {
+        std::string   run_id;
+        std::string   program_version_id;
+        std::string   generation_id;   ///< The source's compiled plan identity.
+        std::string   root_thread_id;  ///< The source's root Core thread.
+        /// The source's Core thread of the checkpoint the fork continues; a
+        /// plan fork continues it on its own root thread.
+        std::string   forked_thread_id;
+        std::uint64_t max_attempt = 0; ///< The source's attempt at the fork.
+    };
+    std::optional<ForkProviderReplay> fork_provider_replay;
 
     bool              cancel(CancellationCause cause) noexcept;
     CancellationCause cancellation_cause() const noexcept;

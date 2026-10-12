@@ -109,6 +109,10 @@ struct RunContextRuntime {
     /// the run's own RunContext.
     std::map<std::string, std::optional<json>, std::less<>> answers;
     int                                                      answered_step = -1;
+    /// #406: the task id of the NodeInterrupt the resume answers; empty when
+    /// it approves an interrupt_before gate or answers nothing. Its answered
+    /// invocation reads it on RunContext::resume_interrupt_id.
+    std::string answered_interrupt;
 };
 
 /// What a RunContext is bound to while a scope below is alive: the state the

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=39e6eb468894ddbf6852ef7d57b9b1d0a4c87e432e2fb0ef577113a9376bd72f -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=2962897559c898e519f7e7e74330d36d24a93196ced03cf208c8dbaa6a1fb8c5 -->
 # NeoGraphのコアコンセプト — 解説ガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -421,6 +421,28 @@ result = await engine.resume_async(thread_id="t1",
 再開すると、`interrupt_id=` で指定した割り込み（C++では `RunMetadata::resume_interrupt_id`）に答えます。指定がなければ、最初の割り込みに答えます。そのステップで一時停止していた他のノードや Send は、値なしでもう一度実行され、あらためて自分の質問を出します。それには次の再開で答えます。保留中でない割り込みを指定すると、何かが実行される前に `ValueError`（C++では `std::invalid_argument`）が発生します。複数の割り込みで一時停止したチェックポイントは、メタデータ（`_neograph.interrupts`）にその一覧を持ちます。割り込みが1つだけのチェックポイントは、従来と変わりません。
 
 値が届くのは、一時停止したステップの中で答えを受けた呼び出しだけです（#393）。再開した実行の後のステップにあるノードには、`ctx.resume_value` が渡されません。そこで質問を出すノードやツールのゲートは、別の質問への答えを受け取るのではなく、実行をもう一度一時停止させます。親を通して再開したサブグラフは、親側で答えを受けたノードを通して、自分の答えを受け取ります。`messages` チャネルを持つグラフは、これまでどおり、その値をユーザーメッセージとして受け取ります。JavaScriptのjoinと、プランレベルの `parallel`・`quorum` も同じ規則です。再開のたびに、一時停止しているメンバーの1つに答え、残りはもう一度質問を出します。
+
+ノードは、再開がどの割り込みに答えているかを判別できます（#406）。`ctx.resume_interrupt_id`（Python では `input.ctx.resume_interrupt_id`）は、`ctx.resume_value` がノード自身の `NodeInterrupt` への答えであるとき、その割り込みの id です。再開がその id を指定した場合も、最初の割り込みに答えた場合も、`RunResult::interrupt_id` と `RunResult::interrupts` が報告する id と同じです。値がノードを止めた `interrupt_before` ゲートの承認であるときと、値がないときは空です（Python では `None`）。配信の規則は変わらず、ゲートの承認は引き続きゲートが止めたノードに届きます（#393）。ゲートの後ろにあって自分の質問も出すノードは、この id を確かめることで、実行の承認を自分の質問への答えとして受け取らずに済みます。例は次のとおりです。
+
+```cpp
+asio::awaitable<NodeOutput> run(NodeInput in) override {
+    const auto& answer = in.ctx.resume_value;
+    // Nothing yet, or the approval of the gate that held this node.
+    if (!answer || in.ctx.resume_interrupt_id.empty())
+        throw NodeInterrupt("deploy needs a target", json{{"ask", "target"}});
+    NodeOutput out;
+    out.writes.push_back(ChannelWrite{"target", *answer});
+    co_return out;
+}
+```
+
+```python
+def run(self, input):
+    answer = input.ctx.resume_value
+    if answer is None or input.ctx.resume_interrupt_id is None:
+        raise ng.NodeInterrupt({"ask": "target"}, reason="deploy needs a target")
+    return [ng.ChannelWrite("target", answer)]
+```
 
 並列ノードが異なる終わり方をしたステップは、並列ノードの順番や完了順にかかわらず、1つの規則で結末が決まります（#392）。この規則は、fan-outの分岐にも、ステップ内の Send にも、ワーカーが1つでも複数でも、同じように適用されます。まず、実行がキャンセルされた場合は、そこで止まります。キャンセルされていなければ、不確かな効果（payloadの `kind` が `tool_effect_reconciliation` である `NodeInterrupt`）があるかを見ます。ある場合は、並列ノードが失敗していても、照合（reconciliation）のためにステップを一時停止します。ここで実行を終えると、結果を誰も知らない効果を放棄することになるからです。この一時停止で報告されるのは、該当する割り込みだけです。結果を記録していない失敗した並列ノードは、ステップを再開したときに、もう一度実行されます。
 

@@ -414,20 +414,6 @@ struct PlanSpec {
     std::vector<Beh> steps;  // one per call position
 };
 
-json core_definition() {
-    return json{{"schema_version", 1},
-                {"name", "main"},
-                {"channels", json{{"value", json{{"reducer", "overwrite"}, {"initial", ""}}},
-                                  {"k", json{{"reducer", "overwrite"}, {"initial", 0}}},
-                                  {"out", json{{"reducer", "overwrite"}, {"initial", ""}}},
-                                  {"side", json{{"reducer", "overwrite"}, {"initial", ""}}},
-                                  {"side_out", json{{"reducer", "overwrite"}, {"initial", ""}}}}},
-                {"nodes", json{{"work", json{{"type", "rm.step"}}}}},
-                {"edges", json::array({json{{"from", "__start__"}, {"to", "work"}},
-                                       json{{"from", "work"}, {"to", "__end__"}}})},
-                {"conditional_edges", json::array()}};
-}
-
 json plan_document(const PlanSpec& plan) {
     const json call{{"op", "call_core"}};
     json       root;
@@ -443,21 +429,7 @@ json plan_document(const PlanSpec& plan) {
                                                              {"branches", json::array({call, call})}}})}};
             break;
     }
-    root["name"]       = "main";
-    root["definition"] = core_definition();
-    const auto bound   = [](const char* resource, std::uint64_t minimum, std::uint64_t maximum) {
-        return json{{"resource", resource}, {"minimum", minimum}, {"maximum", maximum}};
-    };
-    return json{{"program_schema_version", 2U},
-                {"input_contract", {{"schema_version", 1}, {"schema", json::object()}}},
-                {"output_contract", {{"schema_version", 1}, {"schema", json::object()}}},
-                {"root", std::move(root)},
-                {"declared_budget_requirements",
-                 json::array({bound("wall_time_ms", 1, 100000), bound("model_tokens", 0, 10000000),
-                              bound("monetary_microunits", 0, 1000000000), bound("max_concurrency", 1, 4),
-                              bound("max_program_operations", 1, 32), bound("max_core_steps", 1, 64),
-                              bound("max_dynamic_compiles", 0, 0), bound("max_child_depth", 0, 1),
-                              bound("max_total_children", 0, 1)})}};
+    return plan_program(std::move(root));
 }
 
 std::string plan_steps(const PlanSpec& plan) { return std::string(to_string(plan.steps[0])) + ":a"; }
@@ -623,6 +595,13 @@ std::vector<PlanSpec> plan_family() {
 
 /// What the harness runs: a JavaScript main() or a plan, its input, and what
 /// the reference expects of it.
+/// How the host reconciles a command a crash left to it (#403): the result
+/// the command has in the reference, and the tags of the calls it makes.
+struct Reconciliation {
+    json                  response;
+    std::set<std::string> tags;
+};
+
 struct ProgramCase {
     std::string description;
     bool        plan = false;
@@ -632,6 +611,11 @@ struct ProgramCase {
     bool        sequential = true;  // crash images are deterministic
     bool        crash_candidate = true;
     Expected    expected;
+    /// By operation id, the commands the host can reconcile as completed with
+    /// their reference result: a call, an awaited call or a pair whose nodes
+    /// neither ask nor fail, with no priced call after it (the reconciled
+    /// command keeps the tokens and money it reserved).
+    std::map<std::string, Reconciliation> reconcilable;
 };
 
 /// A plan's output, projected to the "out" channel of every Core result in it.
@@ -662,11 +646,18 @@ struct Observed {
     int                                ops    = 0;
     bool                               crashed = false;
     std::string                        error;  // an exception the host got
-    /// The run a crash left in a JavaScript command came back asking the
-    /// host to reconcile that command (a pending effect, no pending input).
+    /// The run a crash left in a call came back asking the host to reconcile
+    /// it (a pending effect, no pending input).
     bool reconciliation = false;
+    /// The host reconciled it as completed and the run went on (#403); the
+    /// calls of the reconciled commands, which may or may not have been sent.
+    bool                  reconciled = false;
+    std::set<std::string> reconciled_tags;
     /// The durable operation the crash copy was taken at.
     std::string crash_at;
+    /// Every durable operation of the run, and the Core thread of each one
+    /// that saved a checkpoint.
+    std::vector<std::string> op_labels, op_threads, op_firsts;
 };
 
 Pause pause_of(const ProgramResult& result) {
@@ -793,8 +784,31 @@ Observed run_schedule(const ProgramCase& program, bool durable, const Schedule& 
             break;
         }
         if (result->status() == ProgramTerminalStatus::Interrupted && result->interrupt() &&
-            result->interrupt()->pending_effect && !result->interrupt()->pending_input)
+            result->interrupt()->pending_effect && !result->interrupt()->pending_input) {
             observed.reconciliation = true;
+            // #403: the host reconciles a command whose result it knows; the
+            // run must go on as the reference does.
+            const auto effect = *result->interrupt()->pending_effect;
+            const auto found  = program.reconcilable.find(effect.operation_id());
+            if (found != program.reconcilable.end()) {
+                observed.reconciled = true;
+                observed.reconciled_tags.insert(found->second.tags.begin(), found->second.tags.end());
+                attempt([&] {
+                    return host->reconcile(current, effect.call_id(), ProgramEffectReconciliation::Unknown,
+                                           std::nullopt);
+                });
+                if (!result || result->status() != ProgramTerminalStatus::AmbiguousEffect) {
+                    observed.error = "an unknown outcome did not leave the call ambiguous: " +
+                                     (result ? describe(*result) : error);
+                    break;
+                }
+                attempt([&] {
+                    return host->reconcile(current, effect.call_id(), ProgramEffectReconciliation::Completed,
+                                           found->second.response);
+                });
+                continue;
+            }
+        }
         if (result->status() != ProgramTerminalStatus::Interrupted || !result->interrupt() ||
             !result->interrupt()->pending_input) {
             finish(observed, *result, program.plan);
@@ -835,6 +849,12 @@ Observed run_schedule(const ProgramCase& program, bool durable, const Schedule& 
     }
     observed.ops      = world.crash.ops;
     observed.crash_at = world.crash.taken_at;
+    {
+        std::lock_guard lock(world.crash.mutex);
+        observed.op_labels  = world.crash.seen;
+        observed.op_threads = world.crash.threads;
+        observed.op_firsts  = world.crash.firsts;
+    }
     const auto t3 = std::chrono::steady_clock::now();
     host.reset();
     if (std::getenv("NEOGRAPH_PROGRAM_RESUME_MODEL_TIMING"))
@@ -894,14 +914,16 @@ std::vector<std::string> compare(const ProgramCase& program, const Observed& obs
         expected_sends += want;
         const auto found = observed.sent.find(tag);
         const int  got   = found == observed.sent.end() ? 0 : found->second;
-        if (got != want)
+        // A reconciled command's calls were sent before the crash, or not.
+        if (observed.reconciled_tags.count(tag) ? got > want : got != want)
             problems.push_back("P1: the call of " + tag + " was sent " + std::to_string(got) + " time(s), reference " +
                                std::to_string(want));
     }
     for (const auto& [tag, count] : observed.sent)
         if (!expected.runs_to_call.count(tag))
             problems.push_back("P1: " + tag + " sent a call the reference never makes");
-    if (observed.error.empty() && expected.status == observed.status &&
+    // A reconciled command keeps the tokens and money it reserved (#403).
+    if (observed.error.empty() && expected.status == observed.status && !observed.reconciled &&
         (observed.tokens != kCallTokens * expected_sends || observed.money != kCallMoney * expected_sends))
         problems.push_back("P1: charged " + std::to_string(observed.tokens) + " tokens and " +
                            std::to_string(observed.money) + " microunits, reference " +
@@ -940,27 +962,45 @@ struct ProgramTotals {
     }
 };
 
+/// Whether the durable state a crash at `op` (before it, or after it) leaves
+/// is one a call left before its first checkpoint (#402, #404): scanning on
+/// from it, the first checkpoint or Program publication is the first
+/// checkpoint of a new Core run, the publication of a JavaScript command that
+/// failed (a failing call saves no checkpoint), or the run's failure. A
+/// publication that records a command as pending means none was in flight.
+bool before_first_checkpoint(const Observed& base, int op, bool after) {
+    const std::size_t prefix = static_cast<std::size_t>(op) + (after ? 1 : 0);
+    for (std::size_t index = prefix; index < base.op_labels.size(); ++index) {
+        const auto& label = base.op_labels[index];
+        const auto& note  = base.op_firsts[index];
+        if (label.rfind("publish", 0) == 0) {
+            if (label == "publish failed" || note == "failed") return true;
+            if (label == "publish running" && note.empty()) continue;
+            return false;
+        }
+        if (base.op_threads[index].empty()) continue;
+        return note == "first";
+    }
+    return false;
+}
+
 void judge(ProgramTotals& totals, const ProgramCase& program, bool durable, const Schedule& schedule,
-           const Observed& observed) {
+           const Observed& observed, const Observed* base = nullptr) {
     ++totals.schedules;
     const auto problems = compare(program, observed, durable);
     if (problems.empty()) return;
-    // Behaviours this harness reports as questions for the contract instead of
-    // failing (tests/model/README.md): a crash in a JavaScript command leaves
-    // it to the host to reconcile, a plan that stopped before its first Core
-    // checkpoint cannot be recovered, a fork sends again the call of a paused
-    // invocation, and a crash while a request was out holds that call.
+    // Behaviours this harness reports instead of failing (tests/model/README.md):
+    // a call that stopped before its first checkpoint is left to the host to
+    // reconcile (#402, #404), and a crash while a request was out holds that
+    // call (#364).
     const auto known = [&](const std::string& issue, const std::string& example) {
         ++totals.known[issue];
         ProgramTotals::keep(totals.known_example, issue,
                             {totals.program_index, program.description + " | " + describe(schedule) + " | " + example});
     };
-    if (observed.reconciliation && schedule.crash_op >= 0) {
-        known("JavaScript command reconciliation after a crash", problems.front());
-        return;
-    }
-    if (schedule.crash_op >= 0 && observed.error.find("not replay-safe") != std::string::npos) {
-        known("plan recovery blocked before the first Core checkpoint", problems.front());
+    if (observed.reconciliation && !observed.reconciled && schedule.crash_op >= 0 && base &&
+        before_first_checkpoint(*base, schedule.crash_op, schedule.crash_after)) {
+        known("reconciliation of a call stopped before its first checkpoint", problems.front());
         return;
     }
     // A crash while a request was out leaves its dispatch unresolved: the
@@ -971,16 +1011,6 @@ void judge(ProgramTotals& totals, const ProgramCase& program, bool durable, cons
             return problem.rfind("P1: the call of", 0) == 0 && problem.find("sent 2") != std::string::npos;
         })) {
         known("uncertain dispatch after a crash (held, never sent again)", problems.front());
-        return;
-    }
-    // A fork is a new run: the SQLite journal keys a call by its run, so the
-    // call a paused invocation made before it asked is sent and charged again
-    // in the fork, where a resume of the source replays it.
-    const bool only_sends = std::all_of(problems.begin(), problems.end(), [](const std::string& problem) {
-        return problem.rfind("P1: the call of", 0) == 0 || problem.rfind("P1: charged", 0) == 0;
-    });
-    if (schedule.fork_at >= 0 && durable && only_sends) {
-        known("a fork sends again the call of a paused invocation", problems.front());
         return;
     }
     std::string kind = problems.front().substr(0, problems.front().find(':')) + " " +
@@ -1043,6 +1073,29 @@ ProgramCase javascript_case(const Spec& spec, std::size_t max_answers) {
     program.sequential      = spec.sequential();
     program.crash_candidate = crash_candidate(spec);
     program.expected        = reference(spec, max_answers);
+    const auto value_of     = [](const Member& member) -> std::optional<std::string> {
+        if (member.beh == Beh::Ok) return "done:" + member.tag;
+        if (member.beh == Beh::Llm) return "reply-" + member.tag;
+        return std::nullopt;
+    };
+    for (std::size_t index = 0; index < spec.commands.size(); ++index) {
+        const auto& command = spec.commands[index];
+        if (command.op != Op::Call && command.op != Op::Await && command.op != Op::Pair) continue;
+        bool priced_later = false;
+        for (std::size_t later = index + 1; later < spec.commands.size(); ++later)
+            for (const auto& member : spec.commands[later].members) priced_later |= calls(member.beh);
+        if (priced_later) continue;
+        Reconciliation reconciliation;
+        bool           known = true;
+        for (const auto& member : command.members) {
+            known &= value_of(member).has_value();
+            if (calls(member.beh)) reconciliation.tags.insert(member.tag);
+        }
+        if (!known) continue;
+        reconciliation.response = json{{"out", *value_of(command.members[0])}};
+        if (command.op == Op::Pair) reconciliation.response["side_out"] = *value_of(command.members[1]);
+        program.reconcilable["root.javascript." + std::to_string(index + 1)] = std::move(reconciliation);
+    }
     return program;
 }
 
@@ -1087,7 +1140,7 @@ void explore_program(ProgramTotals& totals, const ProgramCase& program, const Pr
                 if (after && !bound.crash_after_every_op && op + 1 != base.ops) continue;
                 Schedule crash{bound.max_answers, -1, op, after};
                 ++totals.crash_runs;
-                judge(totals, program, durable, crash, run_schedule(program, durable, crash, bundle));
+                judge(totals, program, durable, crash, run_schedule(program, durable, crash, bundle), &base);
             }
         }
     }
@@ -1099,7 +1152,7 @@ void report(const char* title, const ProgramTotals& totals, double seconds) {
               << "), pauses " << totals.pauses << "\n  mismatches " << totals.mismatches << ", " << seconds << " s\n";
     for (const auto& [kind, count] : totals.signatures) std::cout << "    " << kind << ": " << count << "\n";
     for (const auto& [issue, count] : totals.known) {
-        std::cout << "  contract question: " << issue << ": " << count << " schedules\n";
+        std::cout << "  documented: " << issue << ": " << count << " schedules\n";
         const auto example = totals.known_example.find(issue);
         if (example != totals.known_example.end()) std::cout << "    first: " << example->second.second << "\n";
     }
