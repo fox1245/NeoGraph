@@ -15,7 +15,6 @@
 #include <neograph/graph/react_graph.h>
 #include "scripted_provider.h"
 
-#include <cstdio>
 #include <iostream>
 #include <string>
 
@@ -29,9 +28,11 @@ public:
                                {"required", neograph::json::array({"expression"})}}};
     }
     std::string execute(const neograph::json& args) override {
-        int a = 0, b = 0;
-        std::sscanf(args.value("expression", "").c_str(), "%d + %d", &a, &b);
-        return neograph::json{{"result", std::to_string(a + b)}}.dump();
+        const std::string expression = args.value("expression", "");
+        const auto        plus       = expression.find('+');
+        if (plus == std::string::npos) return neograph::json{{"error", "expected 'a + b'"}}.dump();
+        const int sum = std::stoi(expression.substr(0, plus)) + std::stoi(expression.substr(plus + 1));
+        return neograph::json{{"result", std::to_string(sum)}}.dump();
     }
     std::string get_name() const override { return "calculator"; }
 };
