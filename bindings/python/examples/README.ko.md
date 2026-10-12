@@ -111,6 +111,7 @@ python 01_minimal.py
 | 37 | [`37_program_model_node.py`](37_program_model_node.py) | yes | Program의 `llm_call` 노드는 호스트가 `node_context`로 공급자에 바인딩합니다. 스크립트된 모델이 보고한 30 + 12토큰이 `usage.model_tokens: 42`, `remaining_budget`, 가격이 매겨진 비용 기록에 반영됩니다. 바인딩이 없는 호스트는 `P_ADMIT_PROVIDER`로 Program을 거부합니다. |
 | 38 | [`38_program_diagnostics.py`](38_program_diagnostics.py) | yes | 스크립트된 모델이 엣지에서 노드 이름을 잘못 적습니다. 컴파일은 `P_CORE_E3`, 수정 제안, 후보 목록과 함께 실패합니다. 수정 루프가 제안을 적용하고 `soundness_check=True`로 다시 컴파일한 뒤 Program을 승인하며, 모델 호출은 한 번뿐입니다. |
 | 39 | [`39_program_main_race.py`](39_program_main_race.py) | yes | `main()`이 `ng.race`, `ng.quorum`, `ng.await`로 Core 실행 여러 개를 시작합니다. 먼저 끝난 실행이 이기고, 느린 실행은 취소 토큰이 바뀌는 것을 보며, 기한을 넘긴 `ng.await`는 Program을 `P_AWAIT_TIMEOUT`과 함께 `TimedOut`으로 끝냅니다. |
+| 40 | [`40_program_attempt_timeout.py`](40_program_attempt_timeout.py) | yes | 5초 걸리는 노드가 `attempt_timeout_ms`에 막혀 `NG.Timeout`으로 실패하고 재시도에서 성공하며, `usage.node_retries`는 1입니다. 늘 느린 노드는 Program을 `NG.Timeout`과 함께 `Failed`로 끝냅니다. |
 
 ### 프로토콜: MCP, A2A, ACP
 

@@ -110,6 +110,7 @@ The restricted JavaScript Program API runs on top of Core graphs: `ProgramRegist
 | 37 | [`37_program_model_node.py`](37_program_model_node.py) | yes | A Program's `llm_call` node is bound to a provider by the host through `node_context`. The scripted model reports 30 + 12 tokens, which land in `usage.model_tokens: 42`, in `remaining_budget` and in a priced monetary record. A host without the binding refuses the Program with `P_ADMIT_PROVIDER`. |
 | 38 | [`38_program_diagnostics.py`](38_program_diagnostics.py) | yes | A scripted model misspells a node in an edge. Compilation fails with `P_CORE_E3`, a suggestion and candidates. A repair loop applies the suggestion, recompiles with `soundness_check=True` and admits the Program; the model is called once. |
 | 39 | [`39_program_main_race.py`](39_program_main_race.py) | yes | `main()` starts Core runs under `ng.race`, `ng.quorum` and `ng.await`. The first run to finish wins, the slow one sees its cancel token flip, and an `ng.await` that passes its deadline ends the Program `TimedOut` with `P_AWAIT_TIMEOUT`. |
+| 40 | [`40_program_attempt_timeout.py`](40_program_attempt_timeout.py) | yes | A node that takes five seconds is stopped by `attempt_timeout_ms`, fails with `NG.Timeout` and succeeds on the retry; `usage.node_retries` is 1. A node that is always slow ends the Program `Failed` with `NG.Timeout`. |
 
 ### Protocols: MCP, A2A, ACP
 

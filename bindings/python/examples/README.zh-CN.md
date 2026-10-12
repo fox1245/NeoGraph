@@ -111,6 +111,7 @@ python 01_minimal.py
 | 37 | [`37_program_model_node.py`](37_program_model_node.py) | yes | Program 的 `llm_call` 节点由主机通过 `node_context` 绑定 provider。脚本化模型报告的 30 + 12 个 token 体现在 `usage.model_tokens: 42`、`remaining_budget` 和一条按价目表计价的费用记录里。没有绑定的主机会以 `P_ADMIT_PROVIDER` 拒绝这个 Program。 |
 | 38 | [`38_program_diagnostics.py`](38_program_diagnostics.py) | yes | 脚本化模型在边里写错了一个节点名。编译以 `P_CORE_E3`、修复建议和候选名失败。修复循环应用建议，用 `soundness_check=True` 重新编译并准入该 Program，模型只被调用一次。 |
 | 39 | [`39_program_main_race.py`](39_program_main_race.py) | yes | `main()` 在 `ng.race`、`ng.quorum` 和 `ng.await` 下同时启动多个 Core 运行。最先完成的获胜，慢的那个会看到取消令牌翻转，超过期限的 `ng.await` 让 Program 以 `TimedOut` 和 `P_AWAIT_TIMEOUT` 结束。 |
+| 40 | [`40_program_attempt_timeout.py`](40_program_attempt_timeout.py) | yes | 耗时五秒的节点被 `attempt_timeout_ms` 终止，以 `NG.Timeout` 失败，重试后成功，`usage.node_retries` 为 1。始终很慢的节点会让 Program 以 `NG.Timeout` 和 `Failed` 结束。 |
 
 ### 协议：MCP、A2A、ACP
 

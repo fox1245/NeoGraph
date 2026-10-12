@@ -111,6 +111,7 @@ python 01_minimal.py
 | 37 | [`37_program_model_node.py`](37_program_model_node.py) | yes | Program の `llm_call` ノードは、ホストが `node_context` でプロバイダーにバインドします。スクリプト化したモデルが報告した 30 + 12 トークンは `usage.model_tokens: 42`、`remaining_budget`、価格付きの課金記録に反映されます。バインドのないホストは `P_ADMIT_PROVIDER` で Program を拒否します。 |
 | 38 | [`38_program_diagnostics.py`](38_program_diagnostics.py) | yes | スクリプト化したモデルがエッジのノード名を書き間違えます。コンパイルは `P_CORE_E3`、修正案、候補とともに失敗します。修復ループが修正案を適用し、`soundness_check=True` で再コンパイルして Program を承認します。モデルの呼び出しは 1 回だけです。 |
 | 39 | [`39_program_main_race.py`](39_program_main_race.py) | yes | `main()` が `ng.race`、`ng.quorum`、`ng.await` の下で Core の実行を複数開始します。先に終わった実行が勝ち、遅い実行はキャンセルトークンの変化を検知し、期限を過ぎた `ng.await` は Program を `P_AWAIT_TIMEOUT` 付きの `TimedOut` で終わらせます。 |
+| 40 | [`40_program_attempt_timeout.py`](40_program_attempt_timeout.py) | yes | 5 秒かかるノードは `attempt_timeout_ms` で止められて `NG.Timeout` で失敗し、再試行で成功します。`usage.node_retries` は 1 です。常に遅いノードは Program を `NG.Timeout` 付きの `Failed` で終わらせます。 |
 
 ### プロトコル: MCP、A2A、ACP
 
