@@ -3,19 +3,19 @@
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
 
-## installed artifact の確認
+## インストールしたパッケージの確認
 
-`neograph_engine.__version__`、Python version、OS/architecture、install 方法、最初の error を記録する。checkout と旧 wheel が同じ API を持つと仮定せず、その release の wheel file を確認する。typed 移行は legacy provider 名を削除する。旧 wheel の import は新 binding の検査ではない。
+`neograph_engine.__version__`、Pythonのバージョン、OSとアーキテクチャ、インストール方法、最初に出たエラーを控えておきます。ソースのチェックアウトと古いwheelが同じAPIを公開しているとは思い込まず、そのリリースで入手できるwheelのファイルを確認してください。型付きインターフェースへの切り替え（typed cutover）で、旧来のプロバイダー名は削除されました。古いwheelでimportできても、新しいバインディングを試したことにはなりません。
 
-公開 NeoGraph platform metadata は Linux/macOS/Windows を含む。現在の SchemaProvider runtime/archive 検証は Linux/POSIX。macOS/Windows port は新 wheel を使用可能と主張する前に別検証が必要。wheel tag/compiler だけでは runtime 統合を証明しない。WASM provider runtime は確立していない。
+NeoGraphが公開しているプラットフォームのメタデータには、Linux、macOS、Windowsが含まれます。現時点でSchemaProviderのランタイムとarchiveの適格性確認が済んでいるのは、Linux/POSIXです。macOSとWindowsへの移植は、新しいwheelをそこで使えると主張する前に、それぞれ適格性確認が必要です。互換性のあるwheelタグやコンパイラーがあるだけでは、ランタイムの統合が動くことの証明にはなりません。WASMでのプロバイダーランタイムのサポートは、確立されていません。
 
-GLIBC symbol 不足では wheel の manylinux tag と host glibc を比較する。`manylinux_2_34` artifact は glibc 2.34 以降を要する。Windows DLL error では x64 Python と不足 dependency DLL を確認する。architecture だけが原因ではない。bundled library を個別交換しない。
+GLIBCのシンボルが見つからないというエラーが出た場合は、wheelのmanylinuxタグとホストのglibcを比べます。`manylinux_2_34` のwheelには、glibc 2.34以降が必要です。WindowsでDLLのエラーが出た場合は、Pythonがx64であることを確認し、見つからない依存DLLを調べます。原因がアーキテクチャだけとは限りません。同梱されているライブラリを、1つだけ差し替えてはいけません。
 
-## source 設定と不足依存
+## ソースビルドの設定と、見つからない依存ライブラリ
 
-Core は `NEOGRAPH_BUILD_LLM=OFF` でも `SchemaProvider::runtime` を要する。NeoGraph 設定は CMake 3.20+。明示 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、installed package、既定 revision-pinned 公開 archive fallback の順に解決する。offline 設定は対応 SDK を install し、`CMAKE_PREFIX_PATH` に prefix、`NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` を指定する。SDK source build は C++20、Python、standalone Asio、yyjson、libcurl 7.88+、OpenSSL Crypto が必要で、fetched/source 統合には NeoGraph 同梱 Asio/yyjson を使う。
+Coreは、`NEOGRAPH_BUILD_LLM=OFF` にしても、`SchemaProvider::runtime` を必要とします。NeoGraphの構成にはCMake 3.20以降が必要です。SchemaProviderの解決順は、明示した `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、インストール済みのパッケージ、リビジョンを固定した公開archiveの既定のフォールバック、の順です。オフラインで構成するには、対応するSDKをインストールし、`CMAKE_PREFIX_PATH` でそのプレフィックスを指定して、`NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` を設定します。SDKをソースからビルドするには、C++20、Python、スタンドアロンのAsio、yyjson、libcurl 7.88以降、OpenSSL Cryptoが必要です。NeoGraphは、リポジトリに含めているAsioとyyjsonを、取得したSDKやソースのSDKとの統合に提供します。
 
-SDK 単体は OpenSSL Crypto の最小 version を宣言しない。NeoGraph の full HTTPS 設定と wheel/sdist 経路は async/MCP HTTP 依存で OpenSSL 3 を要する。その build に Crypto header だけでは足りない。
+SDK単体は、OpenSSL Cryptoの最低バージョンを宣言していません。NeoGraphのHTTPSをフルに有効にした構成と、wheelやsdistのビルドでは、非同期／MCPのHTTP依存を通じて、OpenSSL 3が必要です。Cryptoのヘッダーだけをインストールしても、これらのビルドには足りません。
 
 ```bash
 cmake -S . -B build -DCMAKE_PREFIX_PATH="$SDK_PREFIX" \
@@ -23,25 +23,25 @@ cmake -S . -B build -DCMAKE_PREFIX_PATH="$SDK_PREFIX" \
 cmake --build build -j
 ```
 
-ビルドツリーはインストール済みパッケージではない。`PYTHONPATH=build python -c "import neograph_engine"` の前に `pip install 'pydantic>=2' certifi` で wheel の Python 依存関係を入れる。pydantic がなければ import は失敗し、certifi がなければ TLS はホストのトラストストアを使う。
+ビルドツリーは、インストール済みのパッケージではありません。`PYTHONPATH=build python -c "import neograph_engine"` を実行する前に、`pip install 'pydantic>=2' certifi` でwheelのPython依存をインストールしてください。pydanticがないとimportに失敗し、certifiがない場合のTLSは、ホストの信頼ストアを使います。
 
-`Could NOT find CURL` は `NEOGRAPH_USE_LIBCURL` 無効化では直らない。flag は NeoGraph の任意 CurlH2Pool を制御し、SDK 必須 transport ではない。libcurl 開発 file（Debian/Ubuntu は `libcurl4-openssl-dev`、Fedora は `libcurl-devel`）と一貫した toolchain/prefix を用意する。
+`Could NOT find CURL` は、`NEOGRAPH_USE_LIBCURL` を無効にしても解消しません。このフラグが制御するのは、NeoGraphのオプションのCurlH2Poolで、SDKに必須のトランスポートではないためです。libcurlの開発用ファイルをインストールし（Debian/Ubuntuでは `libcurl4-openssl-dev`、Fedoraでは `libcurl-devel`）、ツールチェーンとプレフィックスは一貫したものを使ってください。
 
-SQLite/PostgreSQL は NeoGraph の optional component。開発 package を用意するか `NEOGRAPH_BUILD_SQLITE`/`NEOGRAPH_BUILD_POSTGRES` を明示的に無効にする。SDK runtime は除かれない。header/API 変更後に binding symbol が未解決なら fresh build directory で CMake を再設定し、対応 header/library で全 consumer を rebuild する。
+SQLiteとPostgreSQLは、NeoGraphのオプションのコンポーネントです。それぞれの開発用パッケージを用意するか、`NEOGRAPH_BUILD_SQLITE` / `NEOGRAPH_BUILD_POSTGRES` を明示的に無効にしてください。無効にしても、SDKのランタイムはなくなりません。ヘッダーやAPIを変更した後にバインディングのシンボルが解決できない場合は、新しいビルドディレクトリで、対応するヘッダーとライブラリを使って、すべてのコンシューマーを再構成して再ビルドします。
 
-GCC 13 coroutine ICE は Stage 3 で報告された。適切な compiler に更新するか対象式を変更する。旧 workaround は全 SDK/platform の検証ではない。catch handler 内で `co_await` しない。C++ 自体が禁止する。error を保存し handler の外で recovery を await する。
+Stage 3の間に、GCC 13でコルーチンに関するコンパイラー内部エラーが報告されました。適切なコンパイラーにアップグレードするか、報告された式の書き方を変えてください。過去の回避策があるからといって、SDKやプラットフォーム全体のビルドが適格性確認済みだということにはなりません。catchハンドラーの中で `co_await` してはいけません。C++自体が、そこでのawait式を禁止しています。エラーを捕捉しておき、ハンドラーの外で復旧処理をawaitしてください。
 
-## 削除 provider API と typed failure
+## 削除されたプロバイダーAPIと、型付きの失敗
 
-`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor-interpreter 設定、`prefer_libcurl`、Responses WebSocket 選択はなくなった。`SchemaProvider(load_provider_descriptor(descriptor_json), ProviderRuntimeOptions(...), SchemaProviderDefaults(...))` と `make_provider_request` を使う。constructor は [Python binding](python-binding.md)、C++ は[移行](migration-v0.4-to-v1.0.md)を参照。
+`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、ディスクリプターのインタープリターの設定、`prefer_libcurl`、ResponsesのWebSocket選択は、削除されました。代わりに `SchemaProvider(load_provider_descriptor(descriptor_json), ProviderRuntimeOptions(...), SchemaProviderDefaults(...))` と `make_provider_request` を使ってください。コンストラクターの正確な仕様は[Pythonバインディング](python-binding.md)を、C++については[マイグレーション](migration-v0.4-to-v1.0.md)を参照してください。
 
-`prepare` は single-use `PreparedProviderRequest` を返し `dispatch` が消費する。`invoke` は両段階をまとめる。dispatch receipt 保存後に admitted request を再構成したり consumed handle を再試行したりしない。failure outcome は本物の error/partial 根拠を持つ data。成功 completion として読まず `outcome.failure` を確認する。
+`prepare` は、1回しか使えない `PreparedProviderRequest` を返し、`dispatch` がそれを消費します。`invoke` は、その両方をまとめて行います。ディスパッチのレシートを永続化した後で、admission済みのリクエストを組み立て直したり、消費済みのハンドルを再試行したりしてはいけません。失敗した結果はデータであり、本物のエラーや部分的なエビデンスを含みます。成功に見える形のcompletionとして読まずに、`outcome.failure` を確認してください。
 
-observer exception は `ProviderObserverError` に typed outcome/cause を残す。budget settlement と terminal receipt persistence error も本物の outcome を保持するが、追加 send の権限にはならない。配送不明は blind retry でなく reconciliation が必要。
+オブザーバーの例外では、型付きの結果と原因が `ProviderObserverError` に保持されます。予算の精算と、最終レシートの永続化で起きたエラーも、本物の結果を保持します。そのエビデンスがあっても、もう一度送信してよいことにはなりません。配送が不明な場合に必要なのは照合であり、闇雲な再試行ではありません。
 
-## streaming と Python async 境界
+## ストリーミングとPythonの非同期の境界
 
-`ProviderMode.Stream` を明示する。observer は streaming を選ばない。token display は空でない content-text delta を選ぶ。usage、reasoning、tool、raw-wire、envelope は token ではない。C++ event view は callback 中の借用で、Python ProviderEvent は借用 data をコピーして所有する。遅い observer は host delivery capacity を消費する。
+`ProviderMode.Stream` は、明示的に設定します。オブザーバーを設定しただけでは、ストリーミングは選択されません。トークンを表示する用途では、空でないコンテンツテキストのデルタだけを選び出してください。使用量、reasoning、ツール、rawワイヤー、エンベロープの各イベントは、トークンではありません。C++のイベントビューはコールバックの間だけ借用されるもので、PythonのProviderEventは、借用したデータのコピーを所有します。遅いオブザーバーは、ホストの配信容量を消費するので、避けてください。
 
 ```python
 import asyncio
@@ -61,19 +61,19 @@ else:
     handle_completion(outcome.completion)
 ```
 
-Provider invoke/dispatch は GIL を解放する sync Python method。`asyncio.to_thread` を使い、native asyncio awaitable ではない。callback の呼び出し・copy・破棄は GIL を取得する。cancel は graph CancelToken で SDK に stop を渡す。timeout/cancel waiter は remote effect 不存在を証明しない。
+プロバイダーの invoke / dispatch は、GILを解放する同期のPythonメソッドです。asyncioのネイティブなawaitableではないので、`asyncio.to_thread` を使ってください。コールバックの呼び出し、コピー、破棄では、GILを取得します。キャンセルにはグラフのCancelTokenを使い、停止の要求はSDKに転送されます。タイムアウトしたことや、待機側がキャンセルされたことは、リモートでの効果が起きなかったことの証明にはなりません。
 
-continuation は tool/refusal/reasoning part を含む完全な `ProviderMessage` を保つ。`ChatMessage`/`ToolCall` は graph の便宜値で完全な provider history の alias ではない。usage 欠落は `None` で zero ではない。known-zero counter は根拠付き UsageCount。portable projection は native replay/financial authority を import できない。native continuation は admitted NativeArchive custody だけで保存する。
+継続には、ツール、refusal、reasoningのパートを含む、完全な `ProviderMessage` を保持してください。`ChatMessage` と `ToolCall` は、グラフ向けの便宜的な値で、完全なプロバイダー履歴の別名ではありません。使用量が欠けている場合は、ゼロではなく `None` です。ゼロと判明しているカウンターは、エビデンス付きのUsageCountの値のままです。ポータブルな結果の射影から、ネイティブリプレイの権限や金銭に関する権限を取り込むことはできません。ネイティブな継続を永続化するのは、admission済みのNativeArchiveの保管下に置く場合だけにしてください。
 
-## TLS と local endpoint
+## TLSとローカルエンドポイント
 
-明示 trust bundle は `ProviderRuntimeOptions.ca_file` に指定する。Python import は既存 `SSL_CERT_FILE` を保持し、なければ certifi があるとき選ぶ。runtime option は選んだ CA file を SDK libcurl に渡す。`NEOGRAPH_SKIP_CERT_AUTOFIX=1` は host 設定を変えない。endpoint/trust-store error を隠すため certificate verification を無効にしない。
+信頼するバンドルを明示するには、`ProviderRuntimeOptions.ca_file` を設定します。Pythonのimport時には、既存の `SSL_CERT_FILE` があればそれを保持し、なければ、使える場合にcertifiを選びます。選ばれたCAファイルは、ランタイムオプションを通じてSDKのlibcurlに渡されます。`NEOGRAPH_SKIP_CERT_AUTOFIX=1` を設定すると、ホスト側の選択には手を加えません。エンドポイントや信頼ストアのエラーを隠すために、証明書の検証を無効にしてはいけません。
 
-v0.1.0–v0.1.6 wheel CA path の ConnPool timeout は歴史的問題で、v0.1.7 に CA 自動選択が追加された。現在の provider は旧経路でなく SDK libcurl を使う。local HTTP は raw URL override でなく validated descriptor の admitted data。[例 31](../examples/31_local_transformer.cpp)に従う。Responses WebSocket close=1000 手順は削除した旧 transport だけに適用する。
+v0.1.0〜v0.1.6で、wheelのCAパスが原因でConnPoolがタイムアウトした問題は、過去のものです。v0.1.7でCAの自動選択が追加されました。現在のプロバイダーは、その古い経路ではなく、SDKのlibcurlを使います。ローカルのHTTPエンドポイントのadmissionは、生のURLの上書きではなく、検証済みのディスクリプターで行います。[サンプル31](../examples/31_local_transformer.cpp)に従ってください。ResponsesのWebSocketのclose=1000に関する手順は、削除された過去のトランスポートにだけ当てはまります。
 
-## graph 定義と登録
+## グラフ定義と登録
 
-unknown reducer/condition/node-type は compile に使う registry に名前がないことを示す。built-in reducer は `overwrite`/`append`。custom reducer/condition/node factory は compile 前に登録する。`has_tool_calls`/`route_channel` は built-in condition。Python callback は GIL 下で実行する。
+未知のリデューサー、条件、ノードタイプという診断は、コンパイルに使ったレジストリにその名前がないことを意味します。組み込みのリデューサーは `overwrite` と `append` です。カスタムのリデューサー、条件、ノードファクトリーは、コンパイルの前に登録してください。`has_tool_calls` と `route_channel` は、組み込みの条件です。登録したPythonのコールバックは、GILの下で実行されます。
 
 ```python
 import neograph_engine as ng
@@ -84,69 +84,69 @@ ng.ConditionRegistry.register_condition("is_long",
     lambda state: "long" if len(state.get("messages") or []) > 10 else "short")
 ```
 
-write の channel 名は正確に存在する必要がある。condition は route label を返す。open condition は明示 `default` を使えるが、なければ unmatched label は throw し、closed condition は宣言外 label を拒否する。`__start__` edge と loop escape を確認する。`RunConfig.max_steps` 既定値は `50`。打ち切りを通常完了とせず step-limit status を確認する。
+書き込みでは、既存のチャネルの名前を正確に指定する必要があります。条件が返すのはルートのラベルです。openな条件では、`default` を明示できます。それがなければ、一致しないラベルで例外が発生します。closedな条件では、宣言した集合にないラベルは拒否されます。`__start__` から出るエッジと、ループの抜け道となるルートを用意してください。`RunConfig.max_steps` のデフォルトは `50` です。打ち切られた場合は、通常の完了として扱わず、ステップ上限のステータスを確認してください。
 
-`schema_version: 1` の strict parsing は unknown/unconsumed key と round-trip loss を拒否する。metadata は `_`/`x-` annotation、barrier は非空 `wait_for`、conditional edge は `routes` を使う。custom 登録後 `ng.export_schema()` で live schema を出し、独自 editor palette を保守しない。absent/zero version は `0.x` で lenient、`ng.upgrade_topology()` は無視 data を衝突しない annotation に残す。
+`schema_version: 1` では、strictなトポロジーのパースが、未知のキー、使われないキー、ラウンドトリップで失われる内容を拒否します。メタデータには `_` や `x-` で始まるアノテーションを使い、バリアには空でない `wait_for` を、条件付きエッジには `routes` を指定してください。カスタムの登録を済ませた後で、`ng.export_schema()` を使って現在のスキーマをエクスポートしてください。エディター用のパレットを別に管理してはいけません。バージョンがない、または0の旧来の定義は、`0.x` の経路では緩やかに扱われます。`ng.upgrade_topology()` は、無視されたデータを、衝突しないアノテーションとして保持します。
 
-## fan-out と管理
+## fan-outと管理操作
 
-既定 worker_count `1` は engine pool を作らない。I/O branch は suspend 時に重なり、単一 caller thread の CPU body は直列。pool が有効なら並行実行前に `set_worker_count(N)`/`set_worker_count_auto()` を設定する。native operation が GIL を解放しなければ Python CPU callback は直列のまま。
+worker_countのデフォルトは `1` で、エンジンが所有するプールは作られません。I/Oを行う分岐は、中断している間は重なって進みます。CPUを使う処理は、呼び出し側のスレッドが1つだけだと、直列に実行されます。CPUを使う処理がプールで速くなる場合は、並行実行の前に、`set_worker_count(N)` か `set_worker_count_auto()` を設定してください。CPUを使うPythonのコールバックは、ネイティブの処理がGILを解放しない限り、GILの下で直列に実行されます。
 
-同じ engine の run/resume 中に admin state/history/update/fork を呼ぶと `std::logic_error`。cancel/drain して完了を待ち、例外を隠さない。同じ thread_id の並行実行は checkpoint 順序が未規定で、store を共有する別 engine は host 調整が必要。[並行実行](concurrency.md)を参照。
+同じエンジンで実行（run / resume）中に、状態の取得、履歴、更新、フォークといった管理系の呼び出しを行うと、`std::logic_error` で失敗します。先にキャンセルして処理をdrainし、完了を待ってください。例外を握りつぶしてはいけません。同じスレッドIDで同時に実行した場合、チェックポイントが書き込まれる順序は不定です。ストアを共有する別々のエンジンの間では、ホスト側での調整が必要です。詳しくは[並行性](concurrency.md)を参照してください。
 
-## Python Program のエラー
+## PythonのProgramエラー
 
-`LocalProgramHost` と QuickJS Program compiler から出るエラー。背景の規則は [Program と QuickJS](python-binding.md#program-and-quickjs) を参照。
+これらのエラーは、`LocalProgramHost` とQuickJSのProgramコンパイラーから出るものです。背景にある規則は、[ProgramとQuickJS](python-binding.md#program-and-quickjs)にあります。
 
 | エラー | 原因 | 対処 |
 |---|---|---|
-| node から出る `TypeError: get(): incompatible function arguments` | `GraphState.get` は channel 名だけを受け取る | `state.get("value") or 0` を使う |
-| `add_registered_node`、`add_registered_reducer` または `add_registered_condition` から出る `ng.ProgramRegistryError` | node type、reducer または condition がこの process に登録されていない | 先に `@ng.node`、`ng.NodeFactory.register_type`、`ng.ReducerRegistry.register_reducer` または `ng.ConditionRegistry.register_condition` で登録する |
-| `P_JS_DEFINE_MISSING` | module が `define()` を export していない | `define()` を export し、Program の graph を 1 つ返す |
-| `P_JS_GRAPH_ENTRY`、または `__start__` か `__end__` という名前の node に対する `P_JS_GRAPH_ARGUMENT` | graph に `.entry()` がない、または node が予約名を使っている | `.entry()` を呼び、node 名を変える。`.entry()` と `.exit()` が sentinel を接続する |
-| `P_CORE_E13` または `P_CORE_E14` | node の最初の conditional edge と並んで static edge か 2 つ目の conditional edge があり、どちらも決して発火しない | すべての target を最初の conditional edge の route に入れる |
-| `P_JS_CONTROL_COMMAND`: JavaScript command references a Core outside the admitted root | `ng.callCore` が `define()` の返す graph 以外を指定している | `ng.graph(...)` に渡した名前を使う |
-| `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | 列挙された ceiling field がゼロ | Program が model を呼ばなくても正の値にする |
-| `ng.ProgramAdmissionError` の `P_ADMIT_PROVIDER` | `llm_call` node がホストのバインドしない provider を必要とする、または `llm_call` か `intent_classifier` node が `provider=` なしで登録された | `add_provider(...)` と `add_registered_node("llm_call", ..., provider=...)` で登録し、`LocalProgramHost` に `node_context=` と `binding_label=` を渡す |
-| `P_MONEY_BUDGET`（`BudgetExhausted`）または他の `P_MONEY_*` コード（`Failed`）で、provider はリクエストを受けていない | バインドされた呼び出しの予約が `monetary_microunits` に収まらない（0 は何も与えない）、または上限を決められない：未知の model や origin、route ceiling のない router alias、出力 cap がない、入力上限が分からない、価格カタログが反映しない機能 | `monetary_microunits` を増やす、`provider_controls.max_output_tokens` を設定する、またはカタログ項目のある model を使う。[価格の証拠と価格カタログ](reference-en.md#pricing-evidence-and-the-price-catalog) を参照 |
-| `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | run budget が `compile_admit` に渡した budget と異なる | 同じ budget を渡すか、再度 compile して admission する |
-| `ng.spawn` から出る `P_CHILD_BINDING` | `LocalProgramHost` には child binding resolver がない | child Program は C++ host で実行する |
-| `resume()` から出る `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost` | run が別の、または破棄済みの `LocalProgramHost` に属する | run を開始した host を通じて再開する |
-| `P_CORE_BARRIER_STALLED` | barrier member が join につながらない route を通ったため、join がもう発火できない | すべての member を join か `__end__` へルーティングする。`P_CORE_E15` は compile 時にそのような route を警告する |
-| `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | run が `wall_time_ms` を使い切った。中断された operation のテキストは `failure.witness["cause_message"]` にある | より大きい `wall_time_ms` で再度 compile して admission する |
+| ノードから出る `TypeError: get(): incompatible function arguments` | `GraphState.get` が受け取るのは、チャネル名だけです | `state.get("value") or 0` を使います |
+| `add_registered_node`、`add_registered_reducer`、`add_registered_condition` が出す `ng.ProgramRegistryError` | ノードタイプ、リデューサー、条件が、このプロセスに登録されていません | 先に `@ng.node`、`ng.NodeFactory.register_type`、`ng.ReducerRegistry.register_reducer`、`ng.ConditionRegistry.register_condition` のいずれかで登録します |
+| `P_JS_DEFINE_MISSING` | モジュールが `define()` をエクスポートしていません | `define()` をエクスポートし、そのProgramのグラフを1つ返します |
+| `P_JS_GRAPH_ENTRY`、または `__start__` / `__end__` という名前のノードに対する `P_JS_GRAPH_ARGUMENT` | グラフに `.entry()` がないか、ノードが予約済みの名前を使っています | `.entry()` を呼び、ノードの名前を変えます。`.entry()` と `.exit()` が、開始と終了の番兵ノードに接続します |
+| `P_CORE_E13` または `P_CORE_E14` | ノードに、最初の条件付きエッジのほかに、静的エッジか2本目の条件付きエッジがあります。どちらも発火しません | すべての行き先を、最初の条件付きエッジのroutesに入れます |
+| `P_JS_CONTROL_COMMAND`: JavaScript command references a Core outside the admitted root | `ng.callCore` が、`define()` が返すグラフ以外の名前を指定しています | `ng.graph(...)` に渡した名前を使います |
+| `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | 挙げられた上限のフィールドが0です | 正の値にします。Programがモデルを一切呼び出さない場合も同じです |
+| `ng.ProgramAdmissionError` の中の `P_ADMIT_PROVIDER` | `llm_call` ノードが、ホストが結び付けていないプロバイダーを必要としています。または、`llm_call` か `intent_classifier` のノードが、`provider=` なしで登録されています | `add_provider(...)` と `add_registered_node("llm_call", ..., provider=...)` を登録し、`LocalProgramHost` に `node_context=` と `binding_label=` を渡します |
+| `P_MONEY_BUDGET`（`BudgetExhausted`）、または別の `P_MONEY_*` コード（`Failed`）が出て、プロバイダーにリクエストが届いていない | 上限を決めた呼び出しの予約額が `monetary_microunits` に収まりません（0は何も許可しません）。または、呼び出しの上限を決められません。原因は、未知のモデルやorigin、ルートの上限がないルーターのエイリアス、出力の上限がないこと、入力の上限が分からないこと、価格カタログが扱っていない機能の使用のいずれかです | `monetary_microunits` を増やすか、`provider_controls.max_output_tokens` を設定するか、カタログに載っているモデルを使います。詳しくは[料金のエビデンスと価格カタログ](reference-en.md#pricing-evidence-and-the-price-catalog)を参照してください |
+| `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | 実行時の予算が、`compile_admit` に渡した予算と異なります | 同じ予算を渡すか、コンパイルとadmissionをやり直します |
+| `ng.spawn` が出す `P_CHILD_BINDING` | `LocalProgramHost` に、子のバインディングを解決するリゾルバーがありません | 子Programは、C++のホストで実行します |
+| `resume()` が出す `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost` | その実行は、別の、または破棄済みの `LocalProgramHost` のものです | その実行を開始したホストを通して再開します |
+| `P_CORE_BARRIER_STALLED` | バリアのメンバーが、joinにつながらないルートを取ったため、joinはもう発火できません | すべてのメンバーを、joinか `__end__` にルーティングします。そうしたルートは、コンパイル時に `P_CORE_E15` が警告します |
+| `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | 実行が `wall_time_ms` を使い切りました。中断された操作のテキストは、`failure.witness["cause_message"]` にあります | `wall_time_ms` を大きくして、コンパイルとadmissionをやり直します |
 
-失敗した `callCore` はその失敗で run を終了し、`main()` は `try`/`catch` で捕捉できない。Python で `result.status` と `result.failure` を確認する。
+`callCore` が失敗すると、実行はその失敗で終わります。`main()` で `try`/`catch` を使っても捕捉できません。Python側で `result.status` と `result.failure` を確認してください。
 
-## checkpoint と PostgreSQL failure
+## チェックポイントとPostgreSQLの障害
 
-PostgresCheckpointStore export 不足は wheel/source build が component を無効にした可能性がある。旧 wheel feature 一覧でなくその artifact 設定を見る。optional target build に対応 libpq を install する。URI password の特殊文字は percent-encode または libpq key=value 形式を使い、本物の credential を公開しない。
+PostgresCheckpointStoreがエクスポートされていない場合は、そのwheelやソースビルドでコンポーネントが無効になっている可能性があります。古いwheelの機能一覧ではなく、そのパッケージの構成を確認してください。オプションのターゲットをビルドするときは、対応するlibpqをインストールします。接続URIでは、パスワードの特殊文字をパーセントエンコードするか、libpqのkey=value形式を使ってください。実際の認証情報は、決して公開しないでください。
 
-async connect/reconnect は全 host/IP で一 deadline。明示的な正 `connect_timeout=N` は秒で、`1` は二秒に切り上げる。absent/zero/negative、および PGCONNECT_TIMEOUT/service file だけの値は async 既定 30 秒。sync libpq の host ごとの timeout と異なる。
+非同期の接続と再接続では、すべてのホストとIPを通じて、デッドラインは1つです。`connect_timeout=N` に正の値を明示した場合は、秒数として扱われます。ただし `1` は2に切り上げられます。指定がない場合、0または負の値の場合、そしてPGCONNECT_TIMEOUTやサービスファイルでしかタイムアウトが指定されていない場合は、非同期のデフォルトである30秒が使われます。これは、同期のlibpqがホストごとにタイムアウトを適用するのとは異なります。
 
-権限があれば store は table を作る。CREATE 権限がなければ [PostgreSQL header](../include/neograph/graph/postgres_checkpoint.h) の schema を適用する。pending-write capability 不足は super-step 全体の replay で、外部効果 exactly-once ではない。async-only backend は AsyncCheckpointStore と `adapt_async_checkpoint_store` を使い、旧相互 sync/async crossover は使わない。
+ストアは、権限があればテーブルを自分で作成します。CREATE権限がない場合は、[PostgreSQLのヘッダー](../include/neograph/graph/postgres_checkpoint.h)にあるスキーマを、自分で適用する必要があります。保留中の書き込みの機能がない場合は、スーパーステップ全体がリプレイされます。外部への効果が1回だけ実行される（exactly-once）ことにはなりません。非同期専用のカスタムバックエンドでは、AsyncCheckpointStoreと `adapt_async_checkpoint_store` を使います。以前のような、同期と非同期の既定実装が互いに呼び合う仕組みは使いません。
 
-## tracing adapter と歴史的修正
+## トレーシングのアダプターと過去の修正
 
-Tracer adapter は session close で壊れる Span wrapper への raw pointer でなく記録 data を所有する。[C++ tracing 例](../examples/49_openinference.cpp)を参照。Python contextvars は C++ callback 境界を自動で越えない。parent context を明示的に渡す/attach し、engine compile 前に wrapper を設置する。
+トレーサーのアダプターは、記録したデータを自分で所有する必要があります。セッションを閉じたときに破棄されるSpanラッパーへの生のポインターを持ってはいけません。[C++のトレーシングのサンプル](../examples/49_openinference.cpp)を参照してください。Pythonのcontextvarsは、C++のコールバックの境界を自動では越えません。親のコンテキストを明示的に渡すかアタッチし、ラッパーはエンジンのコンパイル前に組み込んでください。
 
-歴史的修正は v0.1.8 の top-level conditional_edges 受理、node 二重実行 fallback 削除、移行前 httplib macro layout 不一致（issue #16）を含む。削除 provider signature を復活させない。複数 translation unit で header-only httplib を使う consumer は CPPHTTPLIB_OPENSSL_SUPPORT を一貫して定義する。現在の typed-provider HTTP は SDK libcurl。
+過去の修正には、v0.1.8でトップレベルのconditional_edgesを受け付けるようになったこと、ノードを二重に実行するフォールバックを削除したこと、型付きインターフェースへの切り替え前にあったhttplibのマクロのレイアウトの不一致（issue #16）があります。これらの修正で、削除されたプロバイダーのシグネチャが復活するわけではありません。ヘッダーオンリーのhttplibを複数の翻訳単位でインスタンス化するコンシューマーは、これまでどおり、CPPHTTPLIB_OPENSSL_SUPPORTの定義をそろえる必要があります。現在の型付きプロバイダーのHTTPディスパッチは、SDKのlibcurlです。
 
-opaque convenience vector property は Python list とは限らない。iteration/`list(value)` で確認し、ChatMessage.image_urls のような copy sequence は構築後に代入する。返された copy の変更が C++ request を変えると仮定しない。新 typed request/outcome は旧 CompletionParams 例と別。
+便宜的なvectorを返すプロパティは、Pythonのlistではないことがあります。中身を確認するには、イテレーションか `list(value)` を使ってください。ChatMessage.image_urlsのような、コピーとして返されるシーケンスのフィールドは、組み立ててから代入します。返されたコピーを変更すれば、C++のリクエストも変わると思わないでください。新しい型付きのリクエストと結果の契約は、古いCompletionParamsのサンプルとは別のものです。
 
 ## ツール呼び出し、Hook、プロトコルエラー
 
-ツール呼び出し、ノード、またはサブグラフが必須 Hook のブロックに当たったグラフ実行は、`llm::Agent` が常にそうしてきたように、それを包んだ `NodeExecutionError` ではなく `HookBoundaryBlocked` そのものを送出するようになり、それについての `ERROR` イベントは発行しません。`HookBoundaryBlocked`(Python: `ng.HookBoundaryBlocked`)を捕捉して `invocation_id` と `state` を読んでください。たとえば入れ子のエンジン実行からそれを送出した Python のノードは、もうリトライされません。[ツール失敗の契約](reference-en.md#tool-failure-contract)を参照してください。
+グラフの実行中に、ツール呼び出し、ノード、サブグラフが必須のHookによるブロックに遭遇した場合、`NodeExecutionError` で包むのではなく、`HookBoundaryBlocked` そのものが送出されるようになりました。`llm::Agent` は以前からそうしています。このブロックに対する `ERROR` イベントは発行されません。`HookBoundaryBlocked`（Pythonでは `ng.HookBoundaryBlocked`）を捕捉し、`invocation_id` と `state` を読んでください。たとえば入れ子のエンジン実行から、これを送出したPythonノードは、リトライされなくなりました。[ツールの失敗に関する契約](reference-en.md#tool-failure-contract)を参照してください。
 
-エンジンの `HookRuntime` は、そのツール呼び出しの `BeforeToolExecution` と `AfterToolExecution` の Hook も実行するようになり、Program ホストの Hook ランタイムはその Core のツール呼び出しの Hook を実行します。グラフ実行が state `failed` とメッセージ `lifecycle hook could not run` の `HookBoundaryBlocked` で止まるようになったら、実行に owner scope(`RunMetadata::owner_scope`)を与えてください。owner scope のない Hook 境界は、ツールの Hook と同様にチェックポイントの Hook でも閉じた側に失敗します。
+エンジンの `HookRuntime` は、そのエンジンのツール呼び出しについて、`BeforeToolExecution` と `AfterToolExecution` のHookも実行するようになりました。ProgramホストのHookランタイムも、そのCoreのツール呼び出しについて同様です。グラフの実行が、状態 `failed`、メッセージ `lifecycle hook could not run` の `HookBoundaryBlocked` で止まるようになった場合は、実行にオーナースコープ（`RunMetadata::owner_scope`）を与えてください。オーナースコープがないHook境界は、チェックポイントのHookでもツールのHookでも、フェイルクローズになります。
 
-`state == "timed_out"` は、Hook の期限が過ぎたかターゲットがタイムアウトしたことを意味するようになりました。最後の試行が失敗した Hook は `failed` を報告します。以前は `timed_out` を報告していました。
+`state == "timed_out"` は、Hookのデッドラインが過ぎたか、その対象がタイムアウトしたことを意味するようになりました。最後の試行が失敗したHookは `failed` を報告します。以前は `timed_out` を報告していました。
 
-ステータスが `expired` でエラーが `run deadline elapsed before the tool started` のツール結果は、呼び出しが開始される前に実行の期限が過ぎていたことを意味し、ツールとその Hook は実行されていません。呼び出しをリトライするのではなく、`RunMetadata::deadline`(Python では `timeout_ms`、Program では `wall_time_ms`)を延ばしてください。実行の期限またはクライアントのリクエストタイムアウトで止まった MCP 呼び出しは `timed_out` で、実行をキャンセルすると実行中の MCP 呼び出しはすぐに止まります。
+ステータスが `expired` で、エラーが `run deadline elapsed before the tool started` のツール結果は、呼び出しを始められる前に、実行のデッドラインが過ぎていたことを意味します。ツールもそのHookも実行されていません。呼び出しをリトライするのではなく、`RunMetadata::deadline`（Pythonでは `timeout_ms`、Programでは `wall_time_ms`）を延ばしてください。実行のデッドライン、またはクライアントのリクエストタイムアウトによって止められたMCP呼び出しは、`timed_out` になります。実行をキャンセルすると、実行中のMCP呼び出しはただちに止まります。
 
-`MCPServer` はクライアントがキャンセルした `tools/call` にはどのトランスポートでも応答せず、Hook のブロックには `-32010`、割り込みには `-32011` で応答します。その他のすべての失敗は `_meta["io.neograph/failure"].code` が名前を示す `isError` の結果で、そのテキストは例外テキストではなく公開メッセージです(テキストを選ぶには `public_message` を持つ `NodeFailureError` を送出してください)。`OK` の応答から `RunGraphResponse.error` を読んでいた gRPC クライアントは、今はステータスを読む必要があります。失敗した実行は、`google.rpc.ErrorInfo` の `metadata["code"]` にコードを持つ OK でないステータスです。[プロトコル失敗のマッピング](reference-en.md#protocol-failure-mapping)を参照してください。
+`MCPServer` は、クライアントがキャンセルした `tools/call` に対しては、どのトランスポートでも応答を返しません。Hookによるブロックには `-32010`、割り込みには `-32011` で応答します。それ以外の失敗は、すべて `isError` の結果になり、その `_meta["io.neograph/failure"].code` が失敗の種類を示します。テキストは公開用のメッセージで、例外のテキストが使われることはありません（テキストを指定するには、`public_message` を付けて `NodeFailureError` を送出します）。`OK` のレスポンスから `RunGraphResponse.error` を読んでいたgRPCクライアントは、今後はステータスを読む必要があります。失敗した実行は、OKではないステータスになり、`google.rpc.ErrorInfo` の `metadata["code"]` にコードが入ります。詳しくは[プロトコルの失敗のマッピング](reference-en.md#protocol-failure-mapping)を参照してください。
 
-正しい UTF-8 でないツール出力や例外メッセージは、以前は空のツールメッセージ、空の MCP や gRPC のペイロード、または Python の `UnicodeDecodeError` として届いていました。今は不正な形式のシーケンスごとに U+FFFD に置き換わって届きます。
+有効なUTF-8でないツール出力や例外メッセージは、以前は、空のツールメッセージ、空のMCPやgRPCのペイロード、またはPythonの `UnicodeDecodeError` になっていました。現在は、不正なバイト列の部分がU+FFFDに置き換えられて届きます。
 
-## 安全な bug report
+## バグを安全に報告するには
 
-version/platform、最小 topology/call、execution_trace/status、機密を除いた typed failure/stop/usage 根拠を提供する。installed wheel か rebuilt checkout かを記す。credential、private prompt、encoded native request body、未除去 packet capture を含めない。<https://github.com/fox1245/NeoGraph/issues>へ報告する。
+バージョンとプラットフォーム、最小限のトポロジーと呼び出し、execution_traceとステータス、機微な情報を伏せた型付きの失敗／停止／使用量のエビデンスを添えてください。失敗が、インストールしたwheelで起きたのか、ビルドし直したチェックアウトで起きたのかも書いてください。認証情報、非公開のプロンプト、エンコードされたネイティブのリクエスト本体、サニタイズしていないパケットキャプチャは、含めないでください。報告先は <https://github.com/fox1245/NeoGraph/issues> です。
