@@ -333,6 +333,10 @@ TEST(NodeFailureClassifier, ClassTableIsConsistent) {
                   failure_class == Class::Ordinary || failure_class == Class::Timeout);
     }
     EXPECT_STREQ(node_failure_code(Class::EffectCommitted), "NG.EffectCommitted");
+    // The code of a Program that its model-token budget stopped (#420), whether a
+    // reply took it over the budget or the next call was refused before sending:
+    // the protocol hosts report this class, not a second one for the overshoot.
+    EXPECT_STREQ(node_failure_code(Class::BudgetExhausted), "NG.BudgetExhausted");
     EXPECT_STREQ(to_string(NodeFailureKind::EffectCommitted), "effect_committed");
     EXPECT_STREQ(to_string(NodeFailureKind::Exhausted), "exhausted");
     EXPECT_STREQ(to_string(NodeFailureKind::NonRetryable), "non_retryable");

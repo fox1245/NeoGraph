@@ -335,7 +335,7 @@ The last argument of each command is a label for the call site. A paused member 
 | `Completed` | `main()` returned, or the graph reached its exit. `result.output` holds the value. |
 | `Interrupted` | The run waits for an answer; `result.interrupt` says where. `resume` or `fork` continues it. |
 | `Failed` | A failure the graph did not route, a failure exit, or `main()` threw. `result.failure.code` names it. |
-| `BudgetExhausted` | A budgeted resource ran out, for example `P_PROGRAM_OPERATION_BUDGET`, `P_CORE_STEP_BUDGET` or `P_CONCURRENCY_BUDGET`. |
+| `BudgetExhausted` | A budgeted resource ran out, for example `P_PROGRAM_OPERATION_BUDGET`, `P_CORE_STEP_BUDGET` or `P_CONCURRENCY_BUDGET`. Model tokens end the run with `NG.BudgetExhausted`, whether a reply took the run over the budget or the next call was refused before it was sent. |
 | `TimedOut` | The run's `wall_time_ms` or an `ng.await` deadline passed. |
 | `Cancelled` | `ng.cancelScope` or the handle's `cancel()` stopped the run. |
 

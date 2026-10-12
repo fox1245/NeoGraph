@@ -656,3 +656,92 @@ def test_an_expired_lease_charges_the_journaled_calls_tokens_with_its_money(peer
     assert outcome["remaining_monetary"] == 1_000_000 - 1235
     assert outcome["tokens"] == 24, outcome
     assert outcome["remaining_tokens"] == 1_000_000 - 24, outcome
+
+
+# ---------------------------------------------------------------------------
+# Exhausting the model-token budget ends a Program in one shape (#420)
+#
+# Either the reply of a call takes the run over its budget, or the next call
+# cannot be reserved and is refused before it is sent. Both end the run
+# BudgetExhausted, with a failure record that carries NG.BudgetExhausted.
+# ---------------------------------------------------------------------------
+
+TOKEN_BUDGET = 1_000
+# A call reserves the model's input limit and the output cap against the token
+# budget: 300 here, so a call is sent while 300 tokens are free.
+TOKEN_INPUT_LIMIT = 100
+TOKEN_OUTPUT_CAP = 200
+
+
+def token_peer_usage(peer, total):
+    peer.usage = {"prompt_tokens": total - 100, "completion_tokens": 100, "total_tokens": total,
+                  "cost": 0.001}
+
+
+def token_controls():
+    controls = ng.ProviderControls()
+    controls.max_output_tokens = TOKEN_OUTPUT_CAP
+    return controls
+
+
+def run_with_token_budget(peer, text):
+    run_budget = priced_budget(model_tokens=TOKEN_BUDGET)
+    return run_bound(peer, text, run_budget, controls=token_controls(),
+                     input_limits={PRICED_MODEL: TOKEN_INPUT_LIMIT})
+
+
+def llm_chain(count):
+    """A define() graph that calls the model `count` times in a row."""
+    names = [f"n{index}" for index in range(count)]
+    nodes = "\n".join(f'g.node("{name}", {{type: "llm_call"}});' for name in names)
+    edges = "\n".join(f'g.edge("{a}", "{b}");' for a, b in zip(names, names[1:]))
+    return define_graph(f"""
+        g.channel("messages", {{reducer: "append",
+                                initial: [{{role: "user", content: "Name a river."}}]}});
+        {nodes}
+        g.entry("{names[0]}");
+        {edges}
+        g.exit("{names[-1]}");
+    """, name="chain")
+
+
+def llm_calls_from_main(count):
+    """A main() that calls a one-node chat graph `count` times in a row."""
+    calls = "\n".join(f'yield ng.callCore("chat", ask, "call{index}");' for index in range(count))
+    return with_main(CHAT, f"""
+        const ask = {{messages: [{{role: "user", content: "Name a river."}}]}};
+        {calls}
+        return "done";
+    """)
+
+
+TOKEN_SHAPES = {"define": llm_chain, "main": llm_calls_from_main}
+
+
+@pytest.mark.parametrize("shape", sorted(TOKEN_SHAPES))
+@pytest.mark.parametrize("replies, tokens, sent, used", [
+    pytest.param(2, 600, 2, 1_200, id="the-last-reply-crosses-the-budget"),
+    pytest.param(3, 400, 2, 800, id="the-next-call-is-refused-before-sending"),
+])
+def test_exhausting_the_model_token_budget_is_one_terminal_shape(peer, shape, replies, tokens,
+                                                                 sent, used):
+    token_peer_usage(peer, tokens)
+    _host, _version, result = run_with_token_budget(peer, TOKEN_SHAPES[shape](replies))
+
+    assert result.status == ng.ProgramTerminalStatus.BudgetExhausted, describe(result)
+    assert result.failure is not None, "a budget stop carries its failure record"
+    assert result.failure.code == "NG.BudgetExhausted", describe(result)
+    assert result.failure.operation_id == "root" or result.failure.operation_id.startswith("root.")
+    assert peer.request_count() == sent
+    assert result.usage.model_tokens == used
+    assert result.remaining_budget.model_tokens == max(TOKEN_BUDGET - used, 0)
+
+
+def test_the_overshoot_record_says_how_far_the_last_reply_went_over(peer):
+    token_peer_usage(peer, 600)
+    _host, _version, result = run_with_token_budget(peer, llm_chain(2))
+
+    assert result.status == ng.ProgramTerminalStatus.BudgetExhausted, describe(result)
+    assert result.failure.witness["model_tokens"] == {
+        "granted": TOKEN_BUDGET, "used": 1_200, "over_by": 200}
+    assert "1200" in result.failure.message and str(TOKEN_BUDGET) in result.failure.message

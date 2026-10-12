@@ -10,6 +10,7 @@
 #include "fixtures/unique_temp_dir.h"
 
 #include <neograph/graph/node.h>
+#include <neograph/graph/types.h>
 #include <neograph/graph/sqlite_checkpoint.h>
 #include <neograph/program/program.h>
 #include <neograph/program/sqlite_provider_call_broker.h>
@@ -316,7 +317,9 @@ enum class Shape {
     // #390: the model and a check in one fan-out step.
     LlmBesideCheck,
     // #387: the model, then a check.
-    LlmThenCheck
+    LlmThenCheck,
+    // #420: three model calls in a row.
+    ThreeLlmsInARow
 };
 
 struct HostOptions {
@@ -518,6 +521,14 @@ public:
                 definition["nodes"] = {{"llm", {{"type", "llm_call"}}}, {"check", {{"type", "check"}}}};
                 definition["edges"] = json::array({edge("__start__", "llm"), edge("__start__", "check"),
                                                    edge("llm", "__end__"), edge("check", "__end__")});
+                break;
+            case Shape::ThreeLlmsInARow:
+                definition["nodes"] = {{"first", {{"type", "llm_call"}}},
+                                       {"second", {{"type", "llm_call"}}},
+                                       {"third", {{"type", "llm_call"}}}};
+                definition["edges"] = json::array(
+                    {edge("__start__", "first"), edge("first", "second"), edge("second", "third"),
+                     edge("third", "__end__")});
                 break;
             case Shape::SendsToBrokered:
                 definition["nodes"] = {{"fan", {{"type", "send_fan"}}}, {"work", {{"type", "brokered_call"}}}};
@@ -1198,6 +1209,68 @@ TEST(ProgramProviderBinding, ModelTokensZeroAlreadyMeantNoneForACompletedRun) {
     const auto result = h.run(Shape::Llm);
     EXPECT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted) << failure_text(result);
     EXPECT_EQ(result.usage().model_tokens, 24U);
+}
+
+// ---------------------------------------------------------------------------
+// #420: the model-token budget ends a run in one shape
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Either the last reply takes the run over its model-token budget, or the next
+// call cannot be reserved and is refused before it is sent. A call reserves the
+// model's input limit and the output cap: 300 tokens here, of a budget of 1,000.
+struct TokenBudgetCase {
+    const char*   name;
+    std::uint64_t reply_tokens;
+    int           sent;
+    std::uint64_t used;
+};
+
+HostOptions token_budget_options() {
+    HostOptions options;
+    options.model_tokens = 1'000;
+    options.input_limit  = 100;
+    options.output_cap   = 200;
+    return options;
+}
+
+}  // namespace
+
+TEST(ProgramProviderBinding, ExhaustingTheModelTokenBudgetIsOneTerminalShape) {
+    for (const auto& c : {TokenBudgetCase{"the last reply crosses the budget", 600, 2, 1'200},
+                          TokenBudgetCase{"the next call is refused before sending", 400, 2, 800}}) {
+        SCOPED_TRACE(c.name);
+        auto peer   = std::make_shared<Peer>();
+        peer->reply = [tokens = c.reply_tokens](int, const ProviderRequest&) {
+            return neograph::test::success("answer", with_cost(final_usage(tokens - 100, 100), 1'000'000));
+        };
+        Host       h(peer, token_budget_options());
+        const auto result = h.run(Shape::ThreeLlmsInARow);
+        EXPECT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted) << failure_text(result);
+        ASSERT_TRUE(result.failure());
+        EXPECT_EQ(result.failure()->code,
+                  neograph::graph::node_failure_code(neograph::graph::NodeFailureClass::BudgetExhausted));
+        EXPECT_EQ(result.failure()->code, "NG.BudgetExhausted");
+        EXPECT_EQ(peer->transport.load(), c.sent);
+        EXPECT_EQ(result.usage().model_tokens, c.used);
+    }
+}
+
+TEST(ProgramProviderBinding, TheOvershootRecordSaysHowFarTheLastReplyWentOver) {
+    auto peer   = std::make_shared<Peer>();
+    peer->reply = [](int, const ProviderRequest&) {
+        return neograph::test::success("answer", with_cost(final_usage(500, 100), 1'000'000));
+    };
+    Host       h(peer, token_budget_options());
+    const auto result = h.run(Shape::ThreeLlmsInARow);
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted) << failure_text(result);
+    ASSERT_TRUE(result.failure());
+    EXPECT_EQ(result.failure()->witness["model_tokens"],
+              (json{{"granted", 1'000}, {"used", 1'200}, {"over_by", 200}}));
+    EXPECT_NE(result.failure()->message.find("1200"), std::string::npos) << failure_text(result);
+    EXPECT_NE(result.failure()->message.find("1000"), std::string::npos) << failure_text(result);
+    EXPECT_EQ(peer->transport.load(), 2) << "the run stops at the step boundary after the overshoot";
 }
 
 TEST_P(Priced, AReportedCostAboveTheCeilingExhaustsTheRun) {

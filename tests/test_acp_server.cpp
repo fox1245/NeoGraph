@@ -2236,6 +2236,13 @@ class FailureNode : public GraphNode {
             out.command = neograph::graph::Command{name_, {}};
             co_return out;
         }
+        if (verb == "token-refused") {
+            // What the provider dispatcher does when the next call's reservation does
+            // not fit the run's model-token budget (#420): it raises the run's flag and
+            // refuses the call before it is sent.
+            if (in.ctx.budget_exhausted) in.ctx.budget_exhausted->store(true);
+            throw ProviderFailure(failed_outcome(sp::ErrorKind::QuotaExhausted, false));
+        }
         out.writes.push_back(ChannelWrite{"response", neograph::json("ok:" + verb)});
         co_return out;
     }
@@ -2353,6 +2360,27 @@ TEST(ACPServer, ModelTokenBudgetIsMaxTokens) {
     auto resp = prompt_turn(server, cap, sid, 1, "token-budget");
     ASSERT_TRUE(resp.contains("result")) << resp.dump();
     EXPECT_EQ(resp["result"].value("stopReason", std::string()), "max_tokens");
+}
+
+// #420: a run that a reply took over its model-token budget and a run whose next
+// call was refused before it was sent are one class of failure, NG.BudgetExhausted,
+// and end the turn the same way. A budget failure without the run's flag, such as
+// a quota the provider reports, is an ordinary failure with its code.
+TEST(ACPServer, ModelTokenBudgetRefusalAndOvershootEndTheTurnTheSameWay) {
+    CapturingSink cap;
+    ACPServer server(build_failure_engine(), {{"name", "test-acp"}, {"version", "0.0.1"}});
+    initialize_server(server);
+    server.set_notification_sink(cap.as_sink());
+    const auto sid = new_session(server);
+    int id = 0;
+    for (const char* verb : {"token-budget", "token-refused"}) {
+        auto resp = prompt_turn(server, cap, sid, ++id, verb);
+        ASSERT_TRUE(resp.contains("result")) << verb << ": " << resp.dump();
+        EXPECT_EQ(resp["result"].value("stopReason", std::string()), "max_tokens") << verb;
+    }
+    auto provider_quota = prompt_turn(server, cap, sid, ++id, "budget");
+    ASSERT_TRUE(provider_quota.contains("error")) << provider_quota.dump();
+    EXPECT_EQ(provider_quota["error"]["data"].value("code", std::string()), "NG.BudgetExhausted");
 }
 
 // ---------------------------------------------------------------------------

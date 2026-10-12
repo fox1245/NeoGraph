@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=8a1079e5cbb3655d72025f478cb861128df4f72f10aaea21cff99c4242d41ba5 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=8cafae30bf3a608fdbe9b5ba02694471353592b757f4b7171d266333d7ba364a -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -111,6 +111,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 
+- **Program：模型 token 预算耗尽时，运行以同一种形态结束（#420）。** 模型的一次响应使运行超出 `model_tokens` 时，运行以没有 `failure` 的 `BudgetExhausted` 结束；而预留放不下、在发送前被拒绝的调用，则以带有 `NG.BudgetExhausted` 的 `Failed` 结束，调用方只能一种情况看 `status`，另一种情况看 `failure.code`。现在两者都以 `BudgetExhausted` 结束，`failure.code` 为 `NG.BudgetExhausted`。这个代码是 `graph::classify_failure` 给预算耗尽的代码，MCP、gRPC、A2A 和 ACP 主机也以它报告。`failure.witness["model_tokens"]` 含有 `granted`、`used` 和 `over_by`，`over_by` 是最后一次响应超出的量（被拒绝的调用为 0，其 failure 仍保留 provider 证据）。没有获得 `model_tokens` 却调用了模型的运行也会得到这条记录。**行为变更：** 因模型响应而超出预算的运行现在有 `failure`；下一次调用在发送前被拒绝的运行以 `BudgetExhausted` 结束，而不再是 `Failed`。
 - **Program：有 `main()` 时，`remaining_budget.max_node_retries` 也是上限减去已用的重试次数（#419）。** 带有 JavaScript `main()` 的 Program 报告的仍是开始时的上限，就像没有发生过重试（`usage.node_retries` 为 1 时报告 5）。原因是结算命令的剩余预算时没有扣除该次尝试的重试；只有 `define()` 的 Program 本来就报告 4。现在两者都报告上限减去该次尝试的重试次数，恢复后的尝试从这个剩余值开始。
 - **Program：fork 会重放它所继续的调用在提问前发出的 provider 调用（#405）。** 已暂停 run 的 fork 会在 fork 的 run 下再次运行被暂停的调用。按 run 记录调用的 SQLite provider journal 会把该调用在提问前发出的 provider 调用再次发送并再次计费，而恢复源 run 时这些调用是重放的。现在 fork 的每次尝试都会把源 run（`ProgramCoreProviderCallContext::replay_source`）告知 broker，journal 则接管源 run 对同一调用的记录，即 fork 之前记录在源 Core 线程同一槽位上的同一请求。结果会以 fork 的 dispatch id 重新编码，该行保留源的尝试编号，因此该调用既不会再次发送，也不会再次计费；结果未知的源调用在 fork 中仍是不确定的。没有 journal 的进程内 broker 仍会再次发送，与节点重试相同。
 - **Program：在发布检查点之前停止的 typed plan 会被恢复，不再被阻止（#404）。** 对于不是 replay-safe 且尚未发布检查点的 plan，`reconnect()` 会抛出 `P_RUN_RECOVERY_BLOCKED`。现在它遵循 JavaScript `callCore` 的规则（#402）：plan 的每个调用按 plan 顺序，从自己启动的 Core 运行的最新检查点继续；第一个没有保存任何检查点的调用，会连同指明该操作的 `pending_effect`（`core_node` 为 `"plan"`）把 run 以 `Interrupted` 交回。以 `Completed` 调用 `reconcile()` 会把结果记录为该操作的结果，plan 从那里继续；`Unknown` 则让 run 保持 `AmbiguousEffect`。

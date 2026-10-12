@@ -1472,6 +1472,31 @@ RunOutcome failed_outcome(const std::shared_ptr<RunControl>& control,
                                      "root", std::move(core_node), attempts, json::object()};
     return outcome;
 }
+// #420: how a run that the model-token budget stopped stands against it.
+// `over_by` is how far the last reply took the run over the budget, and 0
+// when the next call was refused before it was sent.
+json model_token_budget_witness(std::uint64_t granted, std::uint64_t used) {
+    return json{{"granted", granted},
+                {"used", used},
+                {"over_by", used > granted ? used - granted : std::uint64_t{0}}};
+}
+
+// #420: the failure record of a run that the model-token budget stopped and
+// that no node reported, because the last reply took it over the budget.
+// Its code is the one the failure classifier gives budget exhaustion, which
+// is what a call refused before it was sent already ends with, so a caller
+// reads one shape (and the protocol hosts report one class) for both.
+ProgramFailure model_token_budget_failure(std::uint64_t granted, std::uint64_t used) {
+    auto message = used > granted
+        ? "Model-token budget exceeded by the last reply: " + std::to_string(used) +
+              " tokens used of " + std::to_string(granted)
+        : "Model-token budget exhausted: " + std::to_string(used) + " tokens used of " +
+              std::to_string(granted) + ", and the next call does not fit";
+    return ProgramFailure{graph::node_failure_code(graph::NodeFailureClass::BudgetExhausted),
+                          std::move(message), "root", "", 0,
+                          json{{"model_tokens", model_token_budget_witness(granted, used)}}};
+}
+
 std::uint64_t model_tokens(const std::shared_ptr<UsageAccumulator>& usage) noexcept {
     const auto total = usage->total_tokens_wide();
     return total <= 0 ? 0 : static_cast<std::uint64_t>(total);
@@ -6396,16 +6421,23 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 ? plan_result.failure->message
                 : std::string("Program attempt was cancelled");
         outcome.failure = std::move(plan_result.failure);
+        const bool model_tokens_over =
+            !control->recorded_replay &&
+            outcome.usage.model_tokens > control->granted_budget.model_tokens;
         if (apply_terminal_cause(control, outcome, terminal_cause, cancellation_message)) {
         } else if (plan_result.status != ProgramTerminalStatus::Completed) {
             outcome.status    = plan_result.status;
             outcome.interrupt = std::move(plan_result.interrupt);
         } else if (outcome.usage.core_steps > control->granted_budget.max_core_steps ||
-                   (!control->recorded_replay &&
-                    outcome.usage.model_tokens > control->granted_budget.model_tokens) ||
-                   (monetary && monetary->exceeded()) ||
+                   model_tokens_over || (monetary && monetary->exceeded()) ||
                    outcome.usage.wall_time_ms > control->granted_budget.wall_time_ms) {
             outcome.status = ProgramTerminalStatus::BudgetExhausted;
+            // #420: a run completed against a model-token grant it exceeded
+            // (a grant of 0 allows nothing) has the same failure record as a
+            // run that a reply took over its budget.
+            if (model_tokens_over)
+                outcome.failure = model_token_budget_failure(control->granted_budget.model_tokens,
+                                                             outcome.usage.model_tokens);
         } else {
             try {
                 validate_contract_value(outcome.output,
@@ -6572,11 +6604,25 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         control->dynamic_compile_ceiling.load(),
         subtract_saturated(control->granted_budget.max_dynamic_compiles, dynamic_compile_count));
 
+    // #420: the model-token budget ends a run in one shape. A reply that took
+    // the run over the budget stops it at the next step boundary with no failure
+    // of its own, and a call whose reservation does not fit is refused before it
+    // is sent with a failure that carries the provider's evidence. Both end the
+    // run BudgetExhausted with the code of the failure classifier's budget class.
     if (control->budget_exhausted->load(std::memory_order_acquire) &&
-        control->cancellation_cause() == CancellationCause::None &&
-        !(outcome.failure && outcome.failure->provider_outcome)) {
-        outcome.status = ProgramTerminalStatus::BudgetExhausted;
-        outcome.failure.reset();
+        control->cancellation_cause() == CancellationCause::None) {
+        const auto granted = control->granted_budget.model_tokens;
+        const auto used    = outcome.usage.model_tokens;
+        if (!(outcome.failure && outcome.failure->provider_outcome)) {
+            outcome.status  = ProgramTerminalStatus::BudgetExhausted;
+            outcome.failure = model_token_budget_failure(granted, used);
+        } else if (outcome.failure->code ==
+                   graph::node_failure_code(graph::NodeFailureClass::BudgetExhausted)) {
+            outcome.status = ProgramTerminalStatus::BudgetExhausted;
+            auto& witness  = outcome.failure->witness;
+            if (!witness.is_object()) witness = json::object();
+            witness["model_tokens"] = model_token_budget_witness(granted, used);
+        }
     }
     if (!outcome.checkpoint && checkpoint_id) {
         if (resume_checkpoint && resume_checkpoint->checkpoint_id == *checkpoint_id &&

@@ -4,13 +4,15 @@ A Program is admitted together with the budget it will run under, and `host.run`
 exactly that budget. Here two `llm_call` nodes run in a row. The scripted model reports 600
 tokens for each reply and the run is allowed 1,000. The second call is sent, because its
 worst-case reservation fits the 400 tokens left; its reply then takes the run over, so the
-Program ends BudgetExhausted. A run started with a different budget never starts: it raises
-P_START_BUDGET and names the field that differs.
+Program ends BudgetExhausted, with `failure.code` NG.BudgetExhausted: the same status and code as a
+run whose next call is refused before it is sent. A run started with a different budget never
+starts: it raises P_START_BUDGET and names the field that differs.
 
 Run:
     python 33_program_budgets.py
 
 smoke-expect: status: BudgetExhausted
+smoke-expect: failure: NG.BudgetExhausted
 smoke-expect: model tokens: 1200 used of 1000
 smoke-expect: model calls: 2
 smoke-expect: refused: P_START_BUDGET
@@ -41,6 +43,7 @@ with ScriptedModel(script) as model:
 
     result = host.run(version, {}, run_budget)
     print("status:", result.status.name)
+    print("failure:", result.failure.code)
     print(f"model tokens: {result.usage.model_tokens} used of {run_budget.model_tokens}")
     print("model calls:", model.call_count)
     print("trace:", result.execution_trace)
@@ -57,5 +60,6 @@ with ScriptedModel(script) as model:
     assert model.call_count == 2
 
 assert result.status == ng.ProgramTerminalStatus.BudgetExhausted
+assert result.failure.code == "NG.BudgetExhausted"
 assert result.usage.model_tokens == 1_200 and result.remaining_budget.model_tokens == 0
 assert refused["code"] == "P_START_BUDGET"

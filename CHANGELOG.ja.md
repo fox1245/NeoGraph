@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=8a1079e5cbb3655d72025f478cb861128df4f72f10aaea21cff99c4242d41ba5 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=8cafae30bf3a608fdbe9b5ba02694471353592b757f4b7171d266333d7ba364a -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -112,6 +112,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ### 修正
 
+- **Program: モデルトークン予算が尽きた実行は、1つの形で終わります (#420)。** 応答が実行を `model_tokens` の上限より先へ進めた場合、実行は `failure` のない `BudgetExhausted` で終わりました。一方、予約が収まらず送信前に拒否された呼び出しは、`NG.BudgetExhausted` を持つ `Failed` で終わったため、呼び出し側は一方では `status` を、もう一方では `failure.code` を読む必要がありました。今は両方とも、`failure.code` が `NG.BudgetExhausted` の `BudgetExhausted` で終わります。このコードは `graph::classify_failure` が予算の枯渇に与えるコードで、MCP、gRPC、A2A、ACP のホストもこのコードで報告します。`failure.witness["model_tokens"]` には `granted`、`used`、`over_by` が入り、`over_by` は最後の応答が超えた量です（拒否された呼び出しでは 0 で、その failure は provider の証拠を保ちます）。`model_tokens` を与えられていないのにモデルを呼んだ実行にも、この記録が付きます。**動作の変更:** 応答が予算を超えさせた実行には `failure` が付くようになり、次の呼び出しが送信前に拒否された実行は `Failed` ではなく `BudgetExhausted` で終わります。
 - **Program: `main()` があっても `remaining_budget.max_node_retries` は上限から実施済みのリトライを引いた値です (#419)。** JavaScript の `main()` を持つ Program は、リトライをまだしていないかのように、開始時の上限をそのまま報告していました（`usage.node_retries` が 1 のとき 5）。コマンドの残りを精算するときに、その試行のリトライを引いていなかったためです。`define()` だけの Program はすでに 4 を報告していました。今は両方とも、上限からその試行のリトライを引いた値を報告し、再開した試行はその残りから始まります。
 - **Program: フォークは、続ける呼び出しの provider 呼び出しを再生します (#405)。** 一時停止した run のフォークは、一時停止した呼び出しをフォークの run で再実行していました。呼び出しを run ごとに記録する SQLite provider ジャーナルは、その呼び出しが質問する前に行った provider 呼び出しを再送し、再課金していました。元の run を再開すれば、この呼び出しは再生されます。フォークのすべての試行がブローカーに元の run（`ProgramCoreProviderCallContext::replay_source`）を渡すようになり、ジャーナルは同じ呼び出しについての元の記録、つまりフォークより前に元の Core スレッドの同じスロットに記録された同じリクエストを引き継ぎます。結果はフォークの dispatch id で再エンコードされ、行は元の試行番号を保つため、その呼び出しは再送も再課金もされません。結果が分からない元の呼び出しは、フォークでも不確かなままです。ジャーナルを持たないプロセス内ブローカーは、ノードの再試行と同じく引き続き再送します。
 - **Program: チェックポイントを公開する前に止まった typed plan は、ブロックされずに復旧します (#404)。** replay-safe ではなく、チェックポイントも公開していない plan に対して、`reconnect()` は `P_RUN_RECOVERY_BLOCKED` を送出していました。今は JavaScript の `callCore` の規則 (#402) に従います。plan の各呼び出しは、plan の順に、自分が開始した Core 実行をその最新チェックポイントから続けます。チェックポイントを 1 つも保存していない最初の呼び出しは、その操作を指す `pending_effect`（`core_node` は `"plan"`）とともに、run を `Interrupted` で返します。`Completed` で `reconcile()` すると結果をその操作の結果として記録し、plan はそこから続きます。`Unknown` は run を `AmbiguousEffect` のままにします。

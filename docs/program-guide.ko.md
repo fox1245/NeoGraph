@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=f7f84669d25b4da0ad592f00baa07f77ad731cc06e1a4411070dd04832769be7 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=508b1fb2ee262e224e6c3e820847b62384042e2f7857f5855b64f021ce7f7fe7 -->
 # Program 가이드: 그래프를 조율하는 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -336,7 +336,7 @@ python restart.py state resume run-...
 | `Completed` | `main()`이 값을 반환했거나 그래프가 종료 노드에 도달했습니다. `result.output`에 그 값이 있습니다. |
 | `Interrupted` | 실행이 답을 기다립니다. `result.interrupt`가 위치를 알려 줍니다. `resume`이나 `fork`로 이어 갑니다. |
 | `Failed` | 그래프가 라우팅하지 않은 실패, 실패 종료, 또는 `main()`이 던진 예외. `result.failure.code`가 이를 알려 줍니다. |
-| `BudgetExhausted` | 예산이 걸린 자원이 바닥났습니다. 예: `P_PROGRAM_OPERATION_BUDGET`, `P_CORE_STEP_BUDGET`, `P_CONCURRENCY_BUDGET`. |
+| `BudgetExhausted` | 예산이 걸린 자원이 바닥났습니다. 예: `P_PROGRAM_OPERATION_BUDGET`, `P_CORE_STEP_BUDGET`, `P_CONCURRENCY_BUDGET`. 모델 토큰은 응답이 예산을 넘겼을 때도, 다음 호출이 전송 전에 거부되었을 때도 `NG.BudgetExhausted`로 끝납니다. |
 | `TimedOut` | 실행의 `wall_time_ms`나 `ng.await` 마감이 지났습니다. |
 | `Cancelled` | `ng.cancelScope`나 핸들의 `cancel()`이 실행을 멈췄습니다. |
 

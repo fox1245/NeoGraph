@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=f7f84669d25b4da0ad592f00baa07f77ad731cc06e1a4411070dd04832769be7 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=508b1fb2ee262e224e6c3e820847b62384042e2f7857f5855b64f021ce7f7fe7 -->
 # Program 指南：协调图的 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -336,7 +336,7 @@ python restart.py state resume run-...
 | `Completed` | `main()` 返回了值，或图到达了出口。`result.output` 中是该值。 |
 | `Interrupted` | 运行在等待回答；`result.interrupt` 指出位置。用 `resume` 或 `fork` 继续。 |
 | `Failed` | 图没有路由的失败、失败退出，或 `main()` 抛出了异常。`result.failure.code` 给出具体原因。 |
-| `BudgetExhausted` | 某项有预算的资源耗尽，例如 `P_PROGRAM_OPERATION_BUDGET`、`P_CORE_STEP_BUDGET` 或 `P_CONCURRENCY_BUDGET`。 |
+| `BudgetExhausted` | 某项有预算的资源耗尽，例如 `P_PROGRAM_OPERATION_BUDGET`、`P_CORE_STEP_BUDGET` 或 `P_CONCURRENCY_BUDGET`。模型 token 无论是因某次响应使运行超出预算，还是因下一次调用在发送前被拒绝，都以 `NG.BudgetExhausted` 结束。 |
 | `TimedOut` | 运行的 `wall_time_ms` 或某个 `ng.await` 的截止时间已过。 |
 | `Cancelled` | `ng.cancelScope` 或句柄的 `cancel()` 停止了运行。 |
 

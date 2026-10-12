@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=9189e3b949b41050f0693c2ca374efc70f1bab65952a8e227b634cca81aef006 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=d0102c64c7e327b8c84d8ba2257f622ce16ea040f360c4379888dd871b4ae9d2 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -550,7 +550,7 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 
 `LocalProgramHost`에 넘기는 `budget_ceiling`은 승인(admission) 정책의 상한이 됩니다. `max_child_depth`와 `max_total_children`을 제외한 모든 필드는 양수여야 합니다. 모델을 전혀 호출하지 않는 Program이라도 `model_tokens`, `monetary_microunits`, `max_dynamic_compiles`는 양수여야 합니다. 그렇지 않으면 생성자가 0인 필드를 이름으로 알려 주는 `ValueError`를 발생시킵니다. 자식 관련 두 필드는 둘 다 0이거나 둘 다 양수여야 합니다.
 
-`compile_admit(source, budget)`와 `compile(source, budget)`는 `budget`을 모든 필드의 최솟값이자 최댓값으로 bundle에 봉인하며, 봉인된 예산이 상한을 넘는 bundle은 승인(admission)에서 거부됩니다. 그 버전을 실행하는 `run`, `start`, `start_active` 호출은 필드 하나하나가 같은 값을 넘겨야 합니다. 예산이 더 크거나 작으면 `ng.ProgramDiagnosticError`와 `P_START_BUDGET`이 발생하고, 메시지에는 처음으로 다른 필드가 적혀 있습니다. 예: `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`. 다른 예산을 쓰려면 다시 컴파일하고 승인(admission)해야 하며, 그 결과는 새 `ProgramVersion`입니다. 실행 예산에서는 `wall_time_ms`, `max_concurrency`, `max_program_operations`, `max_core_steps`가 양수여야 하고, `model_tokens`와 `monetary_microunits`는 0이어도 됩니다. 0은 아무것도 허용하지 않는다는 뜻입니다. `model_tokens = 0`인데 모델 토큰을 쓰는 실행은 `BudgetExhausted`로 끝나고, `monetary_microunits = 0`이면 가격이 매겨지는 provider 호출은 전부 전송 전에 거부됩니다([모델을 호출하는 노드](#model-calling-nodes) 참고).
+`compile_admit(source, budget)`와 `compile(source, budget)`는 `budget`을 모든 필드의 최솟값이자 최댓값으로 bundle에 봉인하며, 봉인된 예산이 상한을 넘는 bundle은 승인(admission)에서 거부됩니다. 그 버전을 실행하는 `run`, `start`, `start_active` 호출은 필드 하나하나가 같은 값을 넘겨야 합니다. 예산이 더 크거나 작으면 `ng.ProgramDiagnosticError`와 `P_START_BUDGET`이 발생하고, 메시지에는 처음으로 다른 필드가 적혀 있습니다. 예: `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`. 다른 예산을 쓰려면 다시 컴파일하고 승인(admission)해야 하며, 그 결과는 새 `ProgramVersion`입니다. 실행 예산에서는 `wall_time_ms`, `max_concurrency`, `max_program_operations`, `max_core_steps`가 양수여야 하고, `model_tokens`와 `monetary_microunits`는 0이어도 됩니다. 0은 아무것도 허용하지 않는다는 뜻입니다. `model_tokens = 0`인데 모델 토큰을 쓰는 실행은 `BudgetExhausted`로 끝나고, `monetary_microunits = 0`이면 가격이 매겨지는 provider 호출은 전부 전송 전에 거부됩니다([모델을 호출하는 노드](#model-calling-nodes) 참고). 모델 토큰 예산이 실행을 멈추게 하면, 응답이 예산을 넘겼든 다음 호출이 전송 전에 거부되었든 `status`는 `BudgetExhausted`이고 `failure.code`는 `NG.BudgetExhausted`입니다. `failure.witness["model_tokens"]`에는 `granted`, `used`, `over_by`가 들어 있습니다.
 
 ### 실패 라우팅
 

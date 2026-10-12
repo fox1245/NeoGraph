@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=f7f84669d25b4da0ad592f00baa07f77ad731cc06e1a4411070dd04832769be7 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=508b1fb2ee262e224e6c3e820847b62384042e2f7857f5855b64f021ce7f7fe7 -->
 # Program ガイド: グラフを取りまとめる JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -336,7 +336,7 @@ python restart.py state resume run-...
 | `Completed` | `main()` が値を返したか、グラフが終了ノードに達しました。`result.output` にその値が入ります。 |
 | `Interrupted` | 実行が答えを待っています。`result.interrupt` が場所を示します。`resume` か `fork` で続けます。 |
 | `Failed` | グラフがルーティングしなかった失敗、失敗終了、または `main()` が投げた例外。`result.failure.code` が内容を示します。 |
-| `BudgetExhausted` | 予算のかかった資源が尽きました。例: `P_PROGRAM_OPERATION_BUDGET`、`P_CORE_STEP_BUDGET`、`P_CONCURRENCY_BUDGET`。 |
+| `BudgetExhausted` | 予算のかかった資源が尽きました。例: `P_PROGRAM_OPERATION_BUDGET`、`P_CORE_STEP_BUDGET`、`P_CONCURRENCY_BUDGET`。モデルトークンは、応答が予算を超えた場合も、次の呼び出しが送信前に拒否された場合も、`NG.BudgetExhausted` で終わります。 |
 | `TimedOut` | 実行の `wall_time_ms` か `ng.await` の期限を過ぎました。 |
 | `Cancelled` | `ng.cancelScope` かハンドルの `cancel()` が実行を止めました。 |
 

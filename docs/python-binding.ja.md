@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=9189e3b949b41050f0693c2ca374efc70f1bab65952a8e227b634cca81aef006 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=d0102c64c7e327b8c84d8ba2257f622ce16ea040f360c4379888dd871b4ae9d2 -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -557,7 +557,7 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 
 `LocalProgramHost` に渡す `budget_ceiling` が、admissionポリシーの上限になります。`max_child_depth` と `max_total_children` を除くすべてのフィールドは、正の値にする必要があります。モデルを一切呼び出さないProgramでも、`model_tokens`、`monetary_microunits`、`max_dynamic_compiles` が対象です。そうでない場合、コンストラクターは、0になっているフィールドの名前を挙げて `ValueError` を送出します。子に関する2つのフィールドは、両方とも0か、両方とも正の値にします。
 
-`compile_admit(source, budget)` と `compile(source, budget)` は、`budget` を、すべてのフィールドの最小値と最大値の両方としてバンドルにシールします。シールされた予算が上限を超えるバンドルは、admissionで拒否されます。そのバージョンに対する `run`、`start`、`start_active` の呼び出しでは、毎回、フィールドごとに同じ値を渡す必要があります。予算が大きくても小さくても、`ng.ProgramDiagnosticError` が `P_START_BUDGET` で発生します。メッセージには、最初に食い違ったフィールドが挙げられます。たとえば `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)` です。別の予算を使うには、コンパイルとadmissionをやり直します。結果は新しい `ProgramVersion` になります。実行時の予算では、`wall_time_ms`、`max_concurrency`、`max_program_operations`、`max_core_steps` を正の値にする必要があります。`model_tokens` と `monetary_microunits` は0でもかまいません。0は何も許可しません。`model_tokens = 0` のまま、モデルのトークンを使う実行は `BudgetExhausted` で終わり、`monetary_microunits = 0` の場合は、料金のかかるプロバイダー呼び出しがすべて、送信前に拒否されます（[モデルを呼び出すノード](#model-calling-nodes)を参照）。
+`compile_admit(source, budget)` と `compile(source, budget)` は、`budget` を、すべてのフィールドの最小値と最大値の両方としてバンドルにシールします。シールされた予算が上限を超えるバンドルは、admissionで拒否されます。そのバージョンに対する `run`、`start`、`start_active` の呼び出しでは、毎回、フィールドごとに同じ値を渡す必要があります。予算が大きくても小さくても、`ng.ProgramDiagnosticError` が `P_START_BUDGET` で発生します。メッセージには、最初に食い違ったフィールドが挙げられます。たとえば `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)` です。別の予算を使うには、コンパイルとadmissionをやり直します。結果は新しい `ProgramVersion` になります。実行時の予算では、`wall_time_ms`、`max_concurrency`、`max_program_operations`、`max_core_steps` を正の値にする必要があります。`model_tokens` と `monetary_microunits` は0でもかまいません。0は何も許可しません。`model_tokens = 0` のまま、モデルのトークンを使う実行は `BudgetExhausted` で終わり、`monetary_microunits = 0` の場合は、料金のかかるプロバイダー呼び出しがすべて、送信前に拒否されます（[モデルを呼び出すノード](#model-calling-nodes)を参照）。モデルトークン予算が実行を止めたときは、応答が予算を超えた場合も、次の呼び出しが送信前に拒否された場合も、`status` は `BudgetExhausted`、`failure.code` は `NG.BudgetExhausted` です。`failure.witness["model_tokens"]` には `granted`、`used`、`over_by` が入ります。
 
 ### 失敗のルーティング
 

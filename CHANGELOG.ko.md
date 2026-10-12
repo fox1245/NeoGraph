@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=8a1079e5cbb3655d72025f478cb861128df4f72f10aaea21cff99c4242d41ba5 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=8cafae30bf3a608fdbe9b5ba02694471353592b757f4b7171d266333d7ba364a -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -112,6 +112,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 수정됨
 
+- **Program: 모델 토큰 예산이 소진되면 실행은 하나의 모양으로 끝납니다 (#420).** 응답 하나가 실행을 `model_tokens` 너머로 끌고 가면 실행은 `failure`가 없는 `BudgetExhausted`로 끝났습니다. 반면 예약이 들어가지 않아 전송 전에 거부된 호출은 `NG.BudgetExhausted`가 담긴 `Failed`로 끝났기 때문에, 호출자는 한쪽에서는 `status`를, 다른 쪽에서는 `failure.code`를 읽어야 했습니다. 이제 둘 다 `failure.code`가 `NG.BudgetExhausted`인 `BudgetExhausted`로 끝납니다. 이 코드는 `graph::classify_failure`가 예산 소진에 주는 코드이고, MCP·gRPC·A2A·ACP 호스트도 이 코드로 보고합니다. `failure.witness["model_tokens"]`에는 `granted`, `used`, `over_by`가 들어 있으며 `over_by`는 마지막 응답이 넘긴 양입니다(거부된 호출은 0이고, 그 failure는 provider 증거를 그대로 유지합니다). `model_tokens`를 받지 못했는데 모델을 호출한 실행에도 이 기록이 붙습니다. **동작 변경:** 응답이 예산을 넘긴 실행에는 이제 `failure`가 있고, 다음 호출이 전송 전에 거부된 실행은 `Failed`가 아니라 `BudgetExhausted`로 끝납니다.
 - **Program: `main()`이 있어도 `remaining_budget.max_node_retries`는 상한에서 이미 쓴 재시도를 뺀 값입니다 (#419).** JavaScript `main()`이 있는 Program은 재시도를 하나도 하지 않은 것처럼 시작할 때의 상한을 그대로 보고했습니다(`usage.node_retries`가 1인데 5). 명령의 남은 예산을 정산할 때 그 시도의 재시도를 빼지 않았기 때문입니다. `define()`만 있는 Program은 이미 4를 보고했습니다. 이제 둘 다 상한에서 그 시도의 재시도를 뺀 값을 보고하고, 재개한 시도는 그 남은 값에서 시작합니다.
 - **ACP가 Windows 작업 경로를 받아들입니다.** `session/new`와 `session/resume`은 `/`로 시작하지 않는 `cwd`와 `additionalDirectories` 항목을 모두 거부했기 때문에 Windows의 ACP 클라이언트는 세션을 열 수 없었습니다. 이제 POSIX 경로와 마찬가지로 드라이브 경로(`C:\work`, `C:/work`)와 UNC 공유(`\\host\share`)도 절대 경로로 인정합니다. 상대 경로와 드라이브 상대 경로(`C:work`)는 계속 `-32602`입니다.
 - **Program: 예산 차원을 비워 둔 task graph task도 실제로 받는 만큼으로 집계됩니다 (#412).** `TaskGraphProposal` task의 `budget`이 어떤 차원을 0으로 두면 proposal과 fragment의 상한은 그 차원을 0으로 셌지만, 자식은 그 차원에 대해 link 상한 전체를 받고 시작했고, 비워 둔 `output_bytes`는 어떤 출력이든 허용했습니다. 그래서 planner는 검사받은 집계 상한보다 더 많이 쓰는 expansion을 만들 수 있었습니다. proposal 스키마 2가 이 틈을 막습니다. task는 템플릿 상한이 0이 아닌 모든 차원에 0이 아닌 값을 명시해야 하고(`P_PROPOSAL_BUDGET_ZERO`), 스키마 2 fragment는 각 task를 예약한 값 그대로 시작합니다. `RunBudget`처럼 0인 차원은 아무것도 허용하지 않으며, 출력은 명시한 바이트로 제한됩니다. 스키마 1 proposal과 fragment는 canonical 바이트, identity, 시작 동작이 그대로이므로 저장된 데이터와 기존 호스트는 달라지지 않습니다. planner의 proposal을 받는 호스트는 `TaskGraphProposalLimits::min_schema_version`을 2로 두어 스키마 1을 거부합니다. 거부된 expansion proposal은 이제 처음 몇 개 diagnostic의 코드와 포인터를 `failure.witness.diagnostics`에 담아 보고합니다.
