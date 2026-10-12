@@ -87,6 +87,7 @@ The remaining Core features. They link only `neograph::core`, except 02, 06, 07 
 | 102 | [`102_node_interrupt.cpp`](102_node_interrupt.cpp) | yes | `NodeInterrupt`: a node pauses the run itself, the payload tells the caller what to ask, and `resume` hands the answer back to the node (approve or refuse). |
 | 103 | [`103_max_steps.cpp`](103_max_steps.cpp) | yes | `max_steps`: a loop is stopped by the step limit and the result says so (`max_steps_exhausted()`, `RunStatus::StepLimit`); a run that ends on the last step is not flagged. |
 | 104 | [`104_channels_reducers.cpp`](104_channels_reducers.cpp) | yes | Channels and reducers: `overwrite` against `append`, `initial` values, and channel versions as one shared write counter. |
+| 105 | [`105_conditional_edges.cpp`](105_conditional_edges.cpp) | yes | Conditional edges: `route_channel` picks the next node from a label, and the `default` route catches every label the map does not list. |
 
 ### Agent patterns
 

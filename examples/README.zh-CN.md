@@ -88,6 +88,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | 102 | [`102_node_interrupt.cpp`](102_node_interrupt.cpp) | yes | `NodeInterrupt`：节点自己暂停运行，载荷告诉调用方要问什么，`resume` 把答复（批准或拒绝）交还给节点。 |
 | 103 | [`103_max_steps.cpp`](103_max_steps.cpp) | yes | `max_steps`：循环被步数上限截停，结果会明确告知（`max_steps_exhausted()`、`RunStatus::StepLimit`）；恰好在最后一步自行结束的运行不会被标记。 |
 | 104 | [`104_channels_reducers.cpp`](104_channels_reducers.cpp) | yes | 通道与 reducer：`overwrite` 与 `append` 的区别、`initial` 初始值，以及由所有通道共用同一个写入计数器的通道版本。 |
+| 105 | [`105_conditional_edges.cpp`](105_conditional_edges.cpp) | yes | 条件边：`route_channel` 根据标签选出下一个节点，`default` 路由接住映射里没有列出的所有标签。 |
 
 ### 智能体模式
 
