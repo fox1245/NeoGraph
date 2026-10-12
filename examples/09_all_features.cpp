@@ -16,6 +16,7 @@
 // smoke-expect: Result: "External API response success (attempt 3)"
 // smoke-expect: Reason: High-value payment detected
 // smoke-expect: (tier: PREMIUM)
+// smoke-forbid: [neograph] lint
 
 #include <neograph/neograph.h>
 #include <neograph/graph/react_graph.h>
@@ -381,7 +382,8 @@ int main() {
             {"edges", json::array({
                 {{"from", "__start__"}, {"to", "score_router"}},
                 {{"from", "score_router"}, {"condition", "route_channel"},
-                 {"routes", {{"premium", "premium"}, {"standard", "standard"}, {"basic", "basic"}}}},
+                 {"routes", {{"premium", "premium"}, {"standard", "standard"}, {"basic", "basic"},
+                             {"default", "basic"}}}},
                 {{"from", "premium"}, {"to", "__end__"}},
                 {{"from", "standard"}, {"to", "__end__"}},
                 {{"from", "basic"}, {"to", "__end__"}}
