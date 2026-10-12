@@ -96,6 +96,9 @@ class DemoServer:
         return result_response(request_id, {"content": [{"type": "text", "text": text}], "isError": failed})
 
     def run_stdio(self):
+        # The wire format is UTF-8 lines ending in LF, whatever the platform default is.
+        sys.stdout.reconfigure(encoding="utf-8", newline="\n")
+        sys.stdin.reconfigure(encoding="utf-8")
         for line in sys.stdin:
             line = line.strip()
             if not line:
