@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <map>
 #include <condition_variable>
 #include <future>
 #include <memory>
@@ -1228,7 +1229,13 @@ TEST(ACPServer, CancelReachesToolDispatchAndEmitsOneTerminalResponse) {
     ASSERT_TRUE(response.contains("result")) << response.dump();
     EXPECT_EQ(response["result"].value("stopReason", std::string()), "cancelled");
     EXPECT_TRUE(probe->cancelled.load(std::memory_order_acquire));
-    EXPECT_TRUE(cap.notifications_for("session/update").empty());
+    // The tool call was announced while it ran; it never completed and the
+    // cancelled turn sends no agent text.
+    for (const auto& n : cap.notifications_for("session/update")) {
+        const auto update = n["params"]["update"];
+        EXPECT_EQ(update.value("sessionUpdate", std::string()), "tool_call") << n.dump();
+        EXPECT_EQ(update.value("status", std::string()), "in_progress") << n.dump();
+    }
 
     int responses = 0;
     {
@@ -2582,6 +2589,142 @@ TEST(ACPServer, InputEofCancelsInflightPromptsAfterTheGrace) {
     server.run(in, out);
     EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(3));
     EXPECT_NE(out.str().find("\"cancelled\""), std::string::npos) << out.str();
+}
+
+// ---------------------------------------------------------------------------
+// Incremental updates (ACP-12): model tokens and tool calls
+// ---------------------------------------------------------------------------
+
+class TokenNode : public GraphNode {
+  public:
+    explicit TokenNode(std::string n) : name_(std::move(n)) {}
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        if (in.stream_cb) {
+            for (const char* token : {"Hel", "lo"}) {
+                (*in.stream_cb)(neograph::graph::GraphEvent{
+                    neograph::graph::GraphEvent::Type::LLM_TOKEN, name_, neograph::json(token)});
+            }
+        }
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"response", neograph::json("Hello")});
+        co_return out;
+    }
+    std::string get_name() const override { return name_; }
+  private:
+    std::string name_;
+};
+
+TEST(ACPServer, ModelTokensStreamAsMessageChunksWithoutARepeat) {
+    NodeFactory::instance().register_type("acp_tokens",
+        [](const std::string& n, const neograph::json&, const NodeContext&) {
+            return std::make_unique<TokenNode>(n);
+        });
+    neograph::json def = {
+        {"name", "acp-tokens"},
+        {"channels", {{"prompt", {{"reducer", "overwrite"}}},
+                      {"response", {{"reducer", "overwrite"}}}}},
+        {"nodes", {{"model", {{"type", "acp_tokens"}}}}},
+        {"edges", neograph::json::array({
+            neograph::json{{"from", "__start__"}, {"to", "model"}},
+            neograph::json{{"from", "model"}, {"to", "__end__"}},
+        })},
+    };
+    CapturingSink cap;
+    ACPServer server(std::shared_ptr<GraphEngine>(GraphEngine::compile(def, NodeContext{})),
+                     {{"name", "test-acp"}, {"version", "0.0.1"}});
+    initialize_server(server);
+    server.set_notification_sink(cap.as_sink());
+    const auto sid = new_session(server);
+    auto resp = prompt_turn(server, cap, sid, 1, "hi");
+    ASSERT_TRUE(resp.contains("result")) << resp.dump();
+    std::vector<std::string> chunks;
+    for (const auto& n : cap.notifications_for("session/update")) {
+        chunks.push_back(n["params"]["update"]["content"].value("text", std::string()));
+    }
+    EXPECT_EQ(chunks, (std::vector<std::string>{"Hel", "lo"}));
+}
+
+class ScriptedTool final : public neograph::AsyncTool {
+  public:
+    ScriptedTool(std::string name, bool fail) : name_(std::move(name)), fail_(fail) {}
+    neograph::ChatTool get_definition() const override {
+        return {name_, "scripted", neograph::json{{"type", "object"}}};
+    }
+    std::string get_name() const override { return name_; }
+    asio::awaitable<std::string> execute_async(const neograph::json&) override {
+        if (fail_) throw std::runtime_error(std::string("tool crashed: ") + kFakeSecret);
+        co_return std::string("ok-output");
+    }
+  private:
+    std::string name_;
+    bool fail_;
+};
+
+class TwoToolCallsNode final : public GraphNode {
+  public:
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        neograph::json assistant = {
+            {"role", "assistant"}, {"content", ""},
+            {"tool_calls", neograph::json::array({
+                {{"id", "call-ok"}, {"name", "ok_tool"}, {"arguments", "{\"q\":1}"}},
+                {{"id", "call-bad"}, {"name", "bad_tool"}, {"arguments", "{}"}},
+            })},
+        };
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"messages", neograph::json::array({assistant})});
+        co_return out;
+    }
+    std::string get_name() const override { return "plan"; }
+};
+
+TEST(ACPServer, ToolCallsAreReportedWithoutToolErrorText) {
+    NodeFactory::instance().register_type("acp_two_tool_calls",
+        [](const std::string&, const neograph::json&, const NodeContext&) {
+            return std::make_unique<TwoToolCallsNode>();
+        });
+    neograph::json def = {
+        {"name", "acp-tool-updates"},
+        {"channels", {{"messages", {{"reducer", "append"}}}}},
+        {"nodes", {{"plan", {{"type", "acp_two_tool_calls"}}},
+                   {"tools", {{"type", "tool_dispatch"}}}}},
+        {"edges", neograph::json::array({
+            neograph::json{{"from", "__start__"}, {"to", "plan"}},
+            neograph::json{{"from", "plan"}, {"to", "tools"}},
+            neograph::json{{"from", "tools"}, {"to", "__end__"}},
+        })},
+    };
+    NodeContext ctx;
+    ctx.tools = neograph::ToolSet(std::vector<std::shared_ptr<Tool>>{
+        std::make_shared<ScriptedTool>("ok_tool", false),
+        std::make_shared<ScriptedTool>("bad_tool", true)});
+    CapturingSink cap;
+    ACPServer server(std::shared_ptr<GraphEngine>(GraphEngine::compile(def, ctx)),
+                     {{"name", "test-acp"}, {"version", "0.0.1"}});
+    initialize_server(server);
+    server.set_notification_sink(cap.as_sink());
+    const auto sid = new_session(server);
+    auto resp = prompt_turn(server, cap, sid, 1, "use tools");
+    ASSERT_TRUE(resp.contains("result")) << resp.dump();
+    EXPECT_EQ(resp["result"].value("stopReason", std::string()), "end_turn");
+
+    std::map<std::string, std::vector<neograph::json>> by_call;
+    for (const auto& n : cap.notifications_for("session/update")) {
+        const auto update = n["params"]["update"];
+        const auto kind = update.value("sessionUpdate", std::string());
+        ASSERT_TRUE(kind == "tool_call" || kind == "tool_call_update") << n.dump();
+        by_call[update.value("toolCallId", std::string())].push_back(update);
+    }
+    ASSERT_EQ(by_call["call-ok"].size(), 2u) << cap.wire();
+    EXPECT_EQ(by_call["call-ok"][0].value("sessionUpdate", std::string()), "tool_call");
+    EXPECT_EQ(by_call["call-ok"][0].value("title", std::string()), "ok_tool");
+    EXPECT_EQ(by_call["call-ok"][0]["rawInput"].value("q", 0), 1);
+    EXPECT_EQ(by_call["call-ok"][1].value("status", std::string()), "completed");
+    EXPECT_EQ(by_call["call-ok"][1]["content"][0]["content"].value("text", std::string()),
+              "ok-output");
+    ASSERT_EQ(by_call["call-bad"].size(), 2u) << cap.wire();
+    EXPECT_EQ(by_call["call-bad"][1].value("status", std::string()), "failed");
+    EXPECT_FALSE(by_call["call-bad"][1].contains("content"));
+    EXPECT_EQ(cap.wire().find("hunter2"), std::string::npos) << cap.wire();
 }
 
 }  // namespace

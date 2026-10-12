@@ -583,8 +583,25 @@ struct ACPServer::Impl {
         bool        internal_cancel = false;
         std::string agent_text;
         std::string boundary_status = "completed";
+        /// Model tokens already reached the client as agent_message_chunk
+        /// updates, so the final text is not sent again.
+        bool        streamed_text = false;
     };
 
+    /// session/update notifications for one turn's graph events: model tokens
+    /// as agent_message_chunk, tool calls as tool_call / tool_call_update.
+    /// Runs inline on the engine's execution path, so it only formats and
+    /// hands each update to the sink.
+    struct TurnUpdates {
+        Impl*                 owner;
+        std::string           session_id;
+        std::mutex            mutex;
+        bool                  saw_token = false;
+        std::set<std::string> announced_calls;
+
+        void on_event(const neograph::graph::GraphEvent& event);
+        void send(neograph::json update);
+    };
 
     neograph::json handle_initialize(const neograph::json& params,
                                      const neograph::json& id);
@@ -874,6 +891,9 @@ ACPServer::Impl::run_turn(const PromptRequest& req,
     TurnResult turn;
     auto& a = *adapter;
     auto budget_exhausted = std::make_shared<std::atomic_bool>(false);
+    auto updates = std::make_shared<TurnUpdates>();
+    updates->owner = this;
+    updates->session_id = req.session_id;
 
     auto request_for = [&](neograph::json input, bool with_input) {
         graph::RunInvocationRequest request;
@@ -882,6 +902,9 @@ ACPServer::Impl::run_turn(const PromptRequest& req,
         request.config.budget_exhausted = budget_exhausted;
         if (with_input) request.config.input = std::move(input);
         request.metadata.run_id = req.session_id;
+        request.on_event = [updates](const graph::GraphEvent& event) {
+            updates->on_event(event);
+        };
         return request;
     };
     auto fail = [&](graph::FailureVerdict failure) {
@@ -1004,6 +1027,10 @@ ACPServer::Impl::run_turn(const PromptRequest& req,
         }
     }
 
+    {
+        std::lock_guard lock(updates->mutex);
+        turn.streamed_text = updates->saw_token;
+    }
     if (turn.failure) {
         using graph::NodeFailureClass;
         switch (turn.failure->failure_class) {
@@ -1027,6 +1054,93 @@ ACPServer::Impl::run_turn(const PromptRequest& req,
         }
     }
     return turn;
+}
+
+void ACPServer::Impl::TurnUpdates::send(neograph::json update) {
+    neograph::json params{{"sessionId", session_id}, {"update", std::move(update)}};
+    owner->emit(jsonrpc_notify("session/update", std::move(params)));
+}
+
+void ACPServer::Impl::TurnUpdates::on_event(const neograph::graph::GraphEvent& event) {
+    using Type = neograph::graph::GraphEvent::Type;
+    try {
+        if (event.type == Type::LLM_TOKEN) {
+            if (!event.data.is_string()) return;
+            auto token = event.data.get<std::string>();
+            if (token.empty()) return;
+            std::lock_guard lock(mutex);
+            saw_token = true;
+            send(neograph::json{{"sessionUpdate", "agent_message_chunk"},
+                                {"content", {{"type", "text"}, {"text", std::move(token)}}}});
+            return;
+        }
+        if (event.type != Type::CHANNEL_WRITE || event.node_name == "__state__") return;
+        if (!event.data.is_object() || event.data.value("channel", std::string()) != "messages")
+            return;
+        auto value = event.data["value"];
+        auto messages = neograph::json::array();
+        if (value.is_array()) messages = value;
+        else if (value.is_object()) messages.push_back(value);
+        std::lock_guard lock(mutex);
+        for (const auto message : messages) {
+            if (!message.is_object()) continue;
+            const auto role = message.value("role", std::string());
+            if (role == "assistant" && message.contains("tool_calls")
+                && message["tool_calls"].is_array()) {
+                for (const auto call : message["tool_calls"]) {
+                    if (!call.is_object()) continue;
+                    const auto id = call.value("id", std::string());
+                    if (id.empty() || !announced_calls.insert(id).second) continue;
+                    neograph::json update{{"sessionUpdate", "tool_call"},
+                                          {"toolCallId", id},
+                                          {"title", call.value("name", std::string("tool"))},
+                                          {"kind", "other"},
+                                          {"status", "in_progress"}};
+                    const auto arguments = call["arguments"];
+                    if (arguments.is_string()) {
+                        try {
+                            update["rawInput"] =
+                                neograph::json::parse(arguments.get<std::string>());
+                        } catch (...) {
+                            update["rawInput"] = arguments;
+                        }
+                    } else if (!arguments.is_null()) {
+                        update["rawInput"] = arguments;
+                    }
+                    send(std::move(update));
+                }
+            } else if (role == "tool") {
+                const auto id = message.value("tool_call_id", std::string());
+                if (id.empty()) continue;
+                const auto status = message.value("tool_status", std::string("succeeded"));
+                const bool succeeded = status == "succeeded";
+                neograph::json update{{"toolCallId", id},
+                                      {"status", succeeded ? "completed" : "failed"}};
+                if (announced_calls.insert(id).second) {
+                    update["sessionUpdate"] = "tool_call";
+                    update["title"] = message.value("tool_name", std::string("tool"));
+                    update["kind"] = "other";
+                } else {
+                    update["sessionUpdate"] = "tool_call_update";
+                }
+                // Only a successful result is shown: a failed tool message
+                // carries the tool's error text, which stays local.
+                if (succeeded && message.contains("content")) {
+                    const auto content = message["content"];
+                    update["content"] = neograph::json::array({neograph::json{
+                        {"type", "content"},
+                        {"content", {{"type", "text"},
+                                     {"text", content.is_string()
+                                                  ? content.get<std::string>()
+                                                  : content.dump()}}}}});
+                }
+                send(std::move(update));
+            }
+        }
+    } catch (...) {
+        // Progress updates are best effort; the terminal response reports
+        // the outcome of the turn.
+    }
 }
 
 void
@@ -1208,7 +1322,7 @@ ACPServer::Impl::handle_session_prompt(const neograph::json& params,
                     }
 
                     if (!turn.failure && turn.stop == StopReason::EndTurn
-                        && !turn.agent_text.empty()) {
+                        && !turn.agent_text.empty() && !turn.streamed_text) {
                         SessionNotification n;
                         n.session_id = req.session_id;
                         n.update.session_update = "agent_message_chunk";
