@@ -97,7 +97,7 @@ class ConformanceNode : public GraphNode {
     std::string name_;
 };
 
-std::shared_ptr<GraphEngine> build_engine(bool with_checkpoints) {
+std::shared_ptr<GraphEngine> build_engine(bool with_checkpoints, json extra = json::object()) {
     NodeFactory::instance().register_type(
         "a2a_conformance", [](const std::string& n, const json&, const NodeContext&) {
             return std::make_unique<ConformanceNode>(n);
@@ -110,6 +110,7 @@ std::shared_ptr<GraphEngine> build_engine(bool with_checkpoints) {
         {"edges", json::array({json{{"from", "__start__"}, {"to", "probe"}},
                                json{{"from", "probe"}, {"to", "__end__"}}})},
     };
+    for (auto [key, value] : extra.items()) def[key] = value;
     if (with_checkpoints) {
         auto store = std::make_shared<graph::InMemoryCheckpointStore>();
         return std::shared_ptr<GraphEngine>(GraphEngine::compile(def, NodeContext{}, store));
@@ -131,8 +132,9 @@ AgentCard conformance_card(bool streaming = true) {
 
 struct Server {
     std::unique_ptr<A2AServer> server;
-    explicit Server(bool streaming = true, bool checkpoints = true) {
-        server = std::make_unique<A2AServer>(build_engine(checkpoints), conformance_card(streaming));
+    explicit Server(bool streaming = true, bool checkpoints = true, json extra = json::object()) {
+        server = std::make_unique<A2AServer>(build_engine(checkpoints, std::move(extra)),
+                                             conformance_card(streaming));
         if (!server->start_async("127.0.0.1", 0)) throw std::runtime_error("bind failed");
     }
     ~Server() { server->stop(); }
@@ -550,4 +552,17 @@ TEST(A2AConformance, CallerNodeContinuesByContextAndResumesOnlyOpenTasks) {
     EXPECT_FALSE(open_task.empty());
     EXPECT_EQ(call("granted"), "resumed:granted");
     EXPECT_EQ(state.get("response_task_id"), json(""));
+}
+
+TEST(A2AConformance, AttemptTimeoutIsAFailedTaskThatMayBeRetried) {
+    // NG.Timeout: the attempt ran past attempt_timeout_ms and stopped.
+    // Failure-routing keys are read under schema_version >= 1 only.
+    Server srv(true, true, json{{"schema_version", 1}, {"node_retry_policies",
+        json{{"probe", json{{"attempt_timeout_ms", 100}, {"max_retries", 0}}}}}});
+    const auto r = rpc(srv, "SendMessage", {{"message", v1_message("slow timeout")}});
+    const auto task = r.envelope["result"]["task"];
+    EXPECT_EQ(task["status"]["state"], "TASK_STATE_FAILED") << r.body;
+    EXPECT_EQ(task["metadata"]["neograph/failure"]["code"], "NG.Timeout") << r.body;
+    EXPECT_EQ(task["metadata"]["neograph/failure"]["retryable"], true) << r.body;
+    EXPECT_EQ(r.body.find("timed out after"), std::string::npos) << "what() text on the wire";
 }
