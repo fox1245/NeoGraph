@@ -77,6 +77,56 @@ TEST(ProgramPendingInputTest, CanonicalRoundTripRetainsSchemaPayloadAndCoreProje
     EXPECT_THROW(ProgramPendingInput::parse(transport_tainted.dump()), std::invalid_argument);
 }
 
+TEST(ProgramPendingInputTest, CoreInterruptIdUsesSchemaTwoAndOthersKeepTheirBytes) {
+    // #388: only a pending value that names a Core interrupt changes shape.
+    const auto plain = make_input();
+    EXPECT_EQ(json::parse(plain.serialize_canonical())["storage_schema_version"], 1);
+    EXPECT_EQ(plain.core_interrupt_id(), "");
+    EXPECT_EQ(json::parse(plain.serialize_canonical())["core_interrupt"].contains("id"), false);
+
+    ProgramPendingInputData data;
+    data.operation_id         = "root";
+    data.call_id              = "call:19";
+    data.result_schema        = json::object();
+    data.payload              = json::object();
+    data.core_node            = "left";
+    data.core_interrupt_value = json{{"type", "NodeInterrupt"}};
+    data.core_interrupt_id    = "s1:left";
+    const ProgramPendingInput named(data);
+    const auto bytes  = named.serialize_canonical();
+    const auto stored = json::parse(bytes);
+    EXPECT_EQ(stored["storage_schema_version"], 2);
+    EXPECT_EQ(stored["core_interrupt"]["id"], json("s1:left"));
+    const auto parsed = ProgramPendingInput::parse(bytes);
+    EXPECT_EQ(parsed.core_interrupt_id(), "s1:left");
+    EXPECT_EQ(parsed.serialize_canonical(), bytes);
+    // The id survives a transition.
+    const auto consumed = parsed.submit("call:19", json::object(), 1).value;
+    EXPECT_EQ(consumed.core_interrupt_id(), "s1:left");
+
+    // The version and the id agree.
+    auto downgraded = stored;
+    downgraded["storage_schema_version"] = 1;
+    EXPECT_THROW(ProgramPendingInput::parse(downgraded.dump()), std::invalid_argument);
+    auto upgraded = json::parse(plain.serialize_canonical());
+    upgraded["storage_schema_version"] = 2;
+    EXPECT_THROW(ProgramPendingInput::parse(upgraded.dump()), std::invalid_argument);
+
+    ProgramPendingEffectData effect;
+    effect.operation_id         = "root";
+    effect.call_id              = "call:20";
+    effect.effect_id            = "effect:20";
+    effect.result_schema        = json::object();
+    effect.payload              = json::object();
+    effect.core_node            = "right";
+    effect.core_interrupt_value = json{{"type", "NodeInterrupt"}};
+    effect.core_interrupt_id    = "s1:right";
+    const ProgramPendingEffect named_effect(effect);
+    EXPECT_EQ(ProgramPendingEffect::parse(named_effect.serialize_canonical()).core_interrupt_id(),
+              "s1:right");
+    EXPECT_EQ(json::parse(make_effect().serialize_canonical())["storage_schema_version"], 1);
+}
+
 TEST(ProgramPendingInputTest, ExactIdSchemaAndDuplicateRulesPreserveFirstResult) {
     auto       pending = make_input();
     const json first{{"answer", "first"}};

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=6574c128e61202faa5cd337176f0bc721d5e7c3b8c288756be82a2d41845c65c -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=6a462d45318b9dd263e136b9f6a57f025dca686254c8b417877ea3f341076e02 -->
 # NeoGraphのコアコンセプト— 解説ガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -415,6 +415,8 @@ result = await engine.resume_async(thread_id="t1",
 ### `NodeInterrupt`による動的割り込み
 
 ノード本体の内部からスローします（Python: `raise ng.NodeInterrupt(reason)`、C++: `throw NodeInterrupt(...)`）。エンジンはキャッチし、状態を永続化し、スローしたノードで中断された`RunResult`を返します — 同じ再開APIです。これは ready batch のノードにも `Send` target にも、同期・非同期・ストリーミングのすべての入口で同じように当てはまります。一時停止したステップで終了した兄弟は、再開時に再実行されず再生されます。前にチェックポイントのないステップでも同じです。
+
+一つのステップの複数の割り込みには一つずつ答えます (#388)。一つのスーパーステップの複数のノードや Send が `NodeInterrupt` を送出すると、run はそのすべてで一時停止します。`RunResult.interrupts` はそれぞれを `{id, node, value}` として列挙し、id は一時停止した呼び出しの task id (`s3:review`、Send なら `s3:send[1]:worker:<hash>`) です。`interrupt_node`、`interrupt_value`、`interrupt_id` は最初のものを報告します。再開は `interrupt_id=` (C++ `RunMetadata::resume_interrupt_id`) が指定した割り込み、または最初の割り込みに答えます。そのステップで一時停止した他のノードや Send は値なしで再実行されて自身の質問をもう一度行い、次の再開がそれに答えます。保留中でない割り込みを指定すると、何も実行される前に `ValueError` (C++ `std::invalid_argument`) が発生します。複数の割り込みで一時停止したチェックポイントはメタデータ (`_neograph.interrupts`) にそれらを列挙し、一つで一時停止したチェックポイントは変わりません。値は一時停止したステップの答えを受けた呼び出しにだけ届き、同じ再開 run の後続ステップのノードは引き続き `ctx.resume_value` から読みます。JavaScript の join とプランレベルの `parallel`、`quorum` も同じ規則に従い、再開ごとに一時停止したメンバー一つに答え、残りはもう一度尋ねます。
 
 一時停止の決定が中間ノード出力に依存する場合に便利です（例:「LLM が人間に見せる価値のあるものを生成したか?」）。
 

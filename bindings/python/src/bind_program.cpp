@@ -933,6 +933,9 @@ void init_program(py::module_& m) {
         .def_property_readonly("core_interrupt_value", [](const ProgramPendingInput& value) {
             return json_to_py(value.core_interrupt_value());
         })
+        .def_property_readonly("core_interrupt_id", &ProgramPendingInput::core_interrupt_id,
+            "Id of the Core interrupt this answers when its Core step paused on several "
+            "(#388), else ''. Resuming the run answers exactly that interrupt.")
         .def("serialize_canonical", &ProgramPendingInput::serialize_canonical);
     py::class_<ProgramPendingEffect>(m, "ProgramPendingEffect")
         .def_property_readonly("operation_id", &ProgramPendingEffect::operation_id)
@@ -942,6 +945,9 @@ void init_program(py::module_& m) {
         .def_property_readonly("payload", [](const ProgramPendingEffect& value) { return json_to_py(value.payload()); })
         .def_property_readonly("result_schema", [](const ProgramPendingEffect& value) { return json_to_py(value.result_schema()); })
         .def_property_readonly("expires_at_unix_ms", &ProgramPendingEffect::expires_at_unix_ms)
+        .def_property_readonly("core_interrupt_id", &ProgramPendingEffect::core_interrupt_id,
+            "Id of the Core interrupt this answers when its Core step paused on several "
+            "(#388), else ''.")
         .def("serialize_canonical", &ProgramPendingEffect::serialize_canonical);
     py::class_<ProgramInterrupt>(m, "ProgramInterrupt")
         .def_readonly("core_node", &ProgramInterrupt::core_node)

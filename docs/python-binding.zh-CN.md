@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=d479ffdcc8e7c021c4c1e62b9e02e90e4cd98854dd49b01a486c271d373ebb2c -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=0b41baeeff757370d64af1b47a2cd6fd5a1b7ebd1c76e453ea41d6664e125df6 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -580,7 +580,7 @@ Program 引擎不会向 stderr 打印 lint，也不会打印 fan-out 提示。�
 
 传入 `sqlite_directory=path` 时，宿主把 bundle、版本、运行记录和检查点保存在该目录的 SQLite 文件（`program.db`、`checkpoints.db`）中，把提供商调用保存在提供商调用 journal（`provider_calls.db`）中，因此运行能在进程之后留存：用同一目录和同一注册表打开的宿主会继续它。`resume()` 继续被中断的运行，`reconnect(run_id)` 继续停止的进程留下的仍在运行中的运行。恢复从不重新发送 journal 记录过的请求：journal 重放回复，调用只收费一次。绑定提供商的宿主还需要 `native_history_archive=`（第一次用 `ng.NativeArchive.provision`，之后用 `ng.NativeArchive.open`），因为 journal 把每个回复保存在该 archive 的 custody 之下。没有子预算的仅 `define()` Program 运行在其 wall time 内持有 execution lease：在 lease 过期前 `reconnect()` 抛出 `P_RUN_LEASE_HELD`，之后以 `TimedOut` 结束运行，并对 journal 记录的调用收费。崩溃恢复从运行最后一个持久检查点（例如中断留下的检查点）继续。
 
-`resume(run_id, value)` 返回一个句柄；调用 `.wait()` 获取结果。不传 `pending_id` 时，它会恢复该运行中唯一正在等待的调用。没有调用或有多个调用在等待时，它会抛出 `ValueError`；请把 `result.interrupt.pending_input.call_id` 作为 `pending_id` 传入，以精确指定该调用。 `fork(run_id, value, version, budget)` 从该运行的精确检查点（或 `checkpoint_id=`）启动 `version` 的新运行，并用 `value` 回答其等待中的调用；`budget` 必须在源运行的 `remaining_budget` 之内，`pending_id=` 与 `resume()` 一样指定调用。fork 与 `resume()` 一样重放暂停运行已完成的工作：在暂停步骤中已完成的节点或 Send 不会再次运行或计费，其 provider 调用也不会再次发送（#390）。
+`resume(run_id, value)` 返回一个句柄；调用 `.wait()` 获取结果。不传 `pending_id` 时，它会恢复该运行中唯一正在等待的调用。没有调用或有多个调用在等待时，它会抛出 `ValueError`；请把 `result.interrupt.pending_input.call_id` 作为 `pending_id` 传入，以精确指定该调用。 `fork(run_id, value, version, budget)` 从该运行的精确检查点（或 `checkpoint_id=`）启动 `version` 的新运行，并用 `value` 回答其等待中的调用；`budget` 必须在源运行的 `remaining_budget` 之内，`pending_id=` 与 `resume()` 一样指定调用。fork 与 `resume()` 一样重放暂停运行已完成的工作：在暂停步骤中已完成的节点或 Send 不会再次运行或计费，其 provider 调用也不会再次发送（#390）。 当 Core 步骤在多个中断上暂停时，`result.interrupt.pending_input.core_interrupt_id`（或 `pending_effect.core_interrupt_id`）指明此等待调用所回答的 Core 中断，`resume()` 正好回答它；该步骤的其他中断会以一次一个等待调用的方式再次提问。只有一个 Core 中断时它为 `""`（#388）。
 
 `resume()` 返回的结果中，`execution_trace` 只列出恢复后运行的 Core 节点；中断前运行的节点出现在被中断的结果中。对于在 `b` 之前中断的 Core `a → b → c`，被中断的结果为 `["a"]`，恢复后的结果为 `["b", "c"]`。
 
@@ -659,7 +659,7 @@ profile.attach(engine)
 
 静态 `interrupt_before`/`interrupt_after`、动态 `NodeInterrupt`、同步 `resume`、asyncio `resume_async` 以及精确 `resume_from` 都需要检查点存储。
 
-由 `ng.Send` 分派的 Python 节点抛出 `ng.NodeInterrupt` 时，会像其他节点一样暂停 run：`run`、`run_stream`、`run_async` 和 `run_stream_async` 返回带检查点的中断 `RunResult`，`resume`、`resume_async` 和 `resume_from` 则带着答案运行该 Send，而发出 Send 的节点和已完成的 Send 会被重放，不会再次运行。
+由 `ng.Send` 分派的 Python 节点抛出 `ng.NodeInterrupt` 时，会像其他节点一样暂停 run：`run`、`run_stream`、`run_async` 和 `run_stream_async` 返回带检查点的中断 `RunResult`，`resume`、`resume_async` 和 `resume_from` 则带着答案运行该 Send，而发出 Send 的节点和已完成的 Send 会被重放，不会再次运行。 当同一步中的多个节点或 Send 抛出 `ng.NodeInterrupt` 时，`result.interrupts` 以 `{"id", "node", "value"}` 列出每一个，`result.interrupt_id` 指明第一个。`resume`、`resume_async` 和 `resume_from` 接受 `interrupt_id=` 并回答该中断，未指定时回答第一个；其他暂停的节点或 Send 会在该次恢复中再次提出自己的问题，下一次恢复回答它（#388）。不在等待中的 `interrupt_id` 会抛出 `ValueError`。`RunMetadata.resume_interrupt_id` 携带同一个 id。
 
 Python `CheckpointStore` 子类可以实现 `requires_managed_budget(thread_id) -> bool`。此同步虚方法读取已持久化的受管理预算银行拒绝义务；引擎的原生异步门面调用该方法，绑定在执行 Python 重写方法时获取 GIL。即使检查点状态中的银行信息被剥离，或检查点被删除，也须报告真实的持久义务。省略重写方法会保留原生明确的后端不支持错误，而不是返回 `False`。
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=6574c128e61202faa5cd337176f0bc721d5e7c3b8c288756be82a2d41845c65c -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=6a462d45318b9dd263e136b9f6a57f025dca686254c8b417877ea3f341076e02 -->
 # NeoGraph 핵심 개념 — 해설 가이드
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -415,6 +415,8 @@ result = await engine.resume_async(thread_id="t1",
 ### `NodeInterrupt`를 통한 동적 인터럽트
 
 노드 본문 내부에서 던지기(Python: `raise ng.NodeInterrupt(reason)`, C++: `throw NodeInterrupt(...)`). 엔진이 포착하고, 상태를 유지하며, 던지는 노드에서 중단된 `RunResult`를 반환합니다 — 동일한 재개 API입니다. 이는 ready batch의 노드와 `Send` target 모두에, 모든 동기·비동기·스트리밍 진입점에서 똑같이 적용됩니다. 일시 정지한 스텝에서 끝난 형제는 재개 시 다시 실행되지 않고 재생되며, 앞에 체크포인트가 없는 스텝에서도 마찬가지입니다.
+
+한 스텝의 여러 인터럽트는 하나씩 답한다(#388). 한 슈퍼스텝의 노드나 Send 여럿이 `NodeInterrupt`를 던지면 run은 그 모두에서 일시 정지한다. `RunResult.interrupts`는 각각을 `{id, node, value}`로 나열하며, id는 일시 정지한 호출의 task id(`s3:review`, Send는 `s3:send[1]:worker:<hash>`)이고, `interrupt_node`, `interrupt_value`, `interrupt_id`는 첫 번째를 보고한다. 재개는 `interrupt_id=`(C++ `RunMetadata::resume_interrupt_id`)가 지정한 인터럽트, 또는 첫 번째 인터럽트에 답한다. 그 스텝에서 일시 정지한 다른 노드나 Send는 값 없이 다시 실행되어 자신의 질문을 다시 하고, 다음 재개가 그것에 답한다. 대기 중이 아닌 인터럽트를 지정하면 아무것도 실행되기 전에 `ValueError`(C++ `std::invalid_argument`)가 발생한다. 여러 인터럽트에서 일시 정지한 체크포인트는 metadata(`_neograph.interrupts`)에 그것들을 나열하며, 하나에서 일시 정지한 체크포인트는 바뀌지 않는다. 값은 일시 정지한 스텝의 답을 받은 호출에만 전달되며, 같은 재개 run의 이후 스텝 노드는 여전히 `ctx.resume_value`에서 그것을 읽는다. JavaScript join과 플랜 수준 `parallel`, `quorum`도 같은 규칙을 따른다. 재개마다 일시 정지한 멤버 하나에 답하고 나머지는 다시 묻는다.
 
 중간 노드 출력에 따라 일시 중지 여부를 결정해야 할 때 유용합니다(예: "LLM이 인간에게 보여줄 만한 것을 생성했는가?").
 

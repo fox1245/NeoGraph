@@ -1379,7 +1379,9 @@ TEST(ProgramProviderBindingJournal, AnOutcomeReplayedByALaterAttemptIsNotCharged
 TEST(ProgramProviderBindingJournal, AResumedSendReplaysItsJournaledCall) {
     // #385: two Send targets call the model and then ask. The run pauses on
     // the first; resume runs both again under the same task ids, so their
-    // journaled calls replay instead of being sent and charged again.
+    // journaled calls replay instead of being sent and charged again. #388:
+    // the first resume answers the first Send only, and the second asks its
+    // own question again; the next resume answers it.
     TempDir     files("send-replay");
     auto        peer = std::make_shared<Peer>();
     HostOptions options;
@@ -1389,20 +1391,32 @@ TEST(ProgramProviderBindingJournal, AResumedSendReplaysItsJournaledCall) {
     h.script().interrupt_after_call = true;
     const auto first = h.run(Shape::SendsToBrokered, "send-run");
     ASSERT_EQ(first.status(), ProgramTerminalStatus::Interrupted) << failure_text(first);
-    ASSERT_TRUE(first.interrupt().has_value());
+    ASSERT_TRUE(first.interrupt().has_value() && first.interrupt()->pending_input);
     EXPECT_EQ(first.interrupt()->core_node, "work");
+    const auto first_send = first.interrupt()->pending_input->core_interrupt_id();
+    EXPECT_NE(first_send.find(":send[0]:work:"), std::string::npos) << first_send;
     EXPECT_EQ(peer->transport.load(), 2);
     EXPECT_EQ(first.monetary_records().size(), 2U);
     EXPECT_EQ(first.usage().monetary_microunits, 2U * 1235U);
 
     const auto second =
         h.runtime().resume(kOwner, "send-run", resume_after(first, "trace-send-resume")).wait();
-    ASSERT_EQ(second.status(), ProgramTerminalStatus::Completed) << failure_text(second);
+    ASSERT_EQ(second.status(), ProgramTerminalStatus::Interrupted) << failure_text(second);
+    ASSERT_TRUE(second.interrupt().has_value() && second.interrupt()->pending_input);
+    EXPECT_EQ(second.interrupt()->pending_input->core_interrupt_id(), "")
+        << "the second Send asks again, now the only pending interrupt";
     EXPECT_EQ(peer->transport.load(), 2) << "each Send's journaled call replays; nothing is resent";
     EXPECT_TRUE(second.monetary_records().empty()) << "attempt 1 already charged both calls";
-    EXPECT_EQ(second.usage().monetary_microunits, 0U);
-    EXPECT_EQ(second.remaining_budget().monetary_microunits, 100'000U - 2U * 1235U);
-    EXPECT_EQ(h.script().node_runs.load(), 4) << "both Sends ran once more, with the answer";
+    EXPECT_EQ(h.script().node_runs.load(), 4) << "both Sends ran once more";
+
+    const auto third =
+        h.runtime().resume(kOwner, "send-run", resume_after(second, "trace-send-resume-2")).wait();
+    ASSERT_EQ(third.status(), ProgramTerminalStatus::Completed) << failure_text(third);
+    EXPECT_EQ(peer->transport.load(), 2) << "the second Send's journaled call replays again";
+    EXPECT_TRUE(third.monetary_records().empty());
+    EXPECT_EQ(third.usage().monetary_microunits, 0U);
+    EXPECT_EQ(third.remaining_budget().monetary_microunits, 100'000U - 2U * 1235U);
+    EXPECT_EQ(h.script().node_runs.load(), 5) << "the answered second Send ran once more";
     EXPECT_EQ(journal_states(files.provider_db()),
               (std::vector<std::string>{"succeeded", "succeeded"}));
 }

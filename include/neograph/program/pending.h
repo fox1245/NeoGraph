@@ -64,6 +64,12 @@ struct ProgramPendingInputData {
     json                              core_interrupt_value;
     ProgramPendingState               state = ProgramPendingState::Awaiting;
     std::optional<json>                consumed_result;
+    /**
+     * #388: the id of the Core interrupt this answers (graph
+     * PendingInterrupt::id), when the Core step paused on several; empty
+     * when it paused on one. Resuming the run answers exactly that interrupt.
+     */
+    std::string                       core_interrupt_id;
 
     bool operator==(const ProgramPendingInputData&) const = default;
 };
@@ -82,6 +88,8 @@ struct ProgramPendingEffectData {
     ProgramPendingState               state = ProgramPendingState::Awaiting;
     ProgramEffectReconciliation       reconciliation = ProgramEffectReconciliation::None;
     std::optional<json>                reconciled_result;
+    /** #388: as ProgramPendingInputData::core_interrupt_id. */
+    std::string                       core_interrupt_id;
 
     bool operator==(const ProgramPendingEffectData&) const = default;
 };
@@ -99,7 +107,9 @@ struct ProgramPendingEffectUpdate;
  */
 class NEOGRAPH_PROGRAM_API ProgramPendingInput {
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+    /// Version 2 adds the Core interrupt id (#388); a value without one keeps
+    /// version 1, its bytes and its id.
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
 
     explicit ProgramPendingInput(ProgramPendingInputData data);
     static ProgramPendingInput parse(std::string_view stored_bytes);
@@ -112,6 +122,7 @@ public:
     std::optional<std::uint64_t>        expires_at_unix_ms() const noexcept;
     const std::string&                  core_node() const noexcept;
     json                                core_interrupt_value() const;
+    const std::string&                  core_interrupt_id() const noexcept;
     ProgramPendingState                 state() const noexcept;
     std::optional<json>                 consumed_result() const;
 
@@ -148,7 +159,8 @@ struct ProgramPendingInputUpdate {
  */
 class NEOGRAPH_PROGRAM_API ProgramPendingEffect {
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+    /// Version 2 adds the Core interrupt id (#388), as for ProgramPendingInput.
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
 
     explicit ProgramPendingEffect(ProgramPendingEffectData data);
     static ProgramPendingEffect parse(std::string_view stored_bytes);
@@ -163,6 +175,7 @@ public:
     ProgramEffectIdempotency            idempotency() const noexcept;
     const std::string&                  core_node() const noexcept;
     json                                core_interrupt_value() const;
+    const std::string&                  core_interrupt_id() const noexcept;
     ProgramPendingState                 state() const noexcept;
     ProgramEffectReconciliation         reconciliation() const noexcept;
     std::optional<json>                 reconciled_result() const;

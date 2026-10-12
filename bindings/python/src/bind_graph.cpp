@@ -414,6 +414,10 @@ void init_graph(py::module_& m) {
         .def_readwrite("run_id", &RunMetadata::run_id)
         .def_readwrite("owner_scope", &RunMetadata::owner_scope)
         .def_readwrite("budget_cancel_token", &RunMetadata::budget_cancel_token)
+        .def_readwrite("resume_interrupt_id", &RunMetadata::resume_interrupt_id,
+            "On a resume from a NodeInterrupt checkpoint, the interrupt the resume "
+            "answers: an id from RunResult.interrupts (#388). Empty answers the "
+            "single pending interrupt, or the first of several.")
         .def_property_readonly("has_deadline",
             [](const RunMetadata& value) { return value.deadline.has_value(); })
         .def("set_timeout_ms", [](RunMetadata& value, py::object timeout) {
@@ -589,6 +593,24 @@ void init_graph(py::module_& m) {
         .def_property_readonly("interrupt_value",
             [](const RunResult& r) { return json_to_py(r.interrupt_value); })
         .def_readonly("checkpoint_id",   &RunResult::checkpoint_id)
+        .def_readonly("interrupt_id",    &RunResult::interrupt_id,
+            "Id of the NodeInterrupt this result reports (#388): the first pending "
+            "interrupt of the paused step. Empty for interrupt_before/after pauses.")
+        .def_property_readonly("interrupts",
+            [](const RunResult& r) {
+                py::list out;
+                for (const auto& pending : r.interrupts) {
+                    py::dict entry;
+                    entry["id"]    = pending.id;
+                    entry["node"]  = pending.node;
+                    entry["value"] = json_to_py(pending.value);
+                    out.append(std::move(entry));
+                }
+                return out;
+            },
+            "Every NodeInterrupt of the paused step as {'id', 'node', 'value'} dicts, "
+            "the reported one first (#388). resume(..., interrupt_id=...) answers one; "
+            "every other one asks again with its own payload.")
         .def_readonly("execution_trace", &RunResult::execution_trace)
         .def_property_readonly("native_messages", [](const RunResult& r) { return r.native_messages; })
         .def_readonly("provider_outcomes", &RunResult::provider_outcomes)
@@ -1000,33 +1022,46 @@ void init_graph(py::module_& m) {
         .def("resume",
             [](GraphEngine& self,
                const std::string& thread_id,
-               py::object resume_value) {
+               py::object resume_value,
+               std::optional<std::string> interrupt_id) {
                 // Convert while we still hold the GIL, then drop it for the
                 // run — same shape as the resume_async binding below.
                 json rv = resume_value.is_none() ? json()
                                                  : py_to_json(resume_value);
                 py::gil_scoped_release release;
-                return self.resume(thread_id, rv);
+                if (!interrupt_id) return self.resume(thread_id, rv);
+                RunConfig config;
+                config.thread_id = thread_id;
+                RunMetadata metadata;
+                metadata.resume_interrupt_id = std::move(*interrupt_id);
+                return self.resume(config, rv, nullptr, metadata);
             },
             py::arg("thread_id"),
             py::arg("resume_value") = py::none(),
+            py::arg("interrupt_id") = py::none(),
             "Continue an interrupted run, synchronously.\n\n"
             "``resume_value`` is the human's answer. The resumed node reads "
             "it from ``input.ctx.resume_value``; graphs with a ``messages`` "
             "channel also receive it as a user turn there.\n\n"
             "Until now only ``resume_async`` was bound, so answering an "
             "approval prompt meant standing up an asyncio loop to do it "
-            "(issue #94).")
+            "(issue #94).\n\n"
+            "``interrupt_id`` names the interrupt this answers, from "
+            "``RunResult.interrupts`` (#388). Without it the step's first pending "
+            "interrupt is answered; every other interrupt of that step asks again "
+            "with its own payload.")
 
         .def("resume_from",
             [](GraphEngine& self,
                RunConfig config,
                std::string checkpoint_id,
                py::object resume_value,
-               py::object metadata) {
+               py::object metadata,
+               std::optional<std::string> interrupt_id) {
                 json value = resume_value.is_none() ? json() : py_to_json(resume_value);
                 RunMetadata owned_metadata;
                 if (!metadata.is_none()) owned_metadata = metadata.cast<RunMetadata>();
+                if (interrupt_id) owned_metadata.resume_interrupt_id = std::move(*interrupt_id);
                 py::gil_scoped_release release;
                 return self.resume_from(std::move(config), std::move(checkpoint_id),
                                         std::move(value), {}, std::move(owned_metadata), {});
@@ -1035,7 +1070,9 @@ void init_graph(py::module_& m) {
             py::arg("checkpoint_id"),
             py::arg("resume_value") = py::none(),
             py::arg("metadata") = py::none(),
-            "Resume from exactly checkpoint_id. Never substitutes a newer checkpoint.")
+            py::arg("interrupt_id") = py::none(),
+            "Resume from exactly checkpoint_id. Never substitutes a newer checkpoint. "
+            "interrupt_id names the interrupt this answers (#388).")
 
         .def("run_stream",
             [](GraphEngine& self,
@@ -1474,7 +1511,8 @@ void init_graph(py::module_& m) {
         .def("resume_async",
             [](py::object self_obj,
                std::string thread_id,
-               py::object resume_value) {
+               py::object resume_value,
+               std::optional<std::string> interrupt_id) {
                 auto self = self_obj.cast<std::shared_ptr<GraphEngine>>();
                 auto self_h = hold_py(std::move(self_obj));
                 py::object asyncio = py::module_::import("asyncio");
@@ -1490,9 +1528,13 @@ void init_graph(py::module_& m) {
                 auto rv_h  = std::make_shared<json>(py_to_json(resume_value));
                 auto engine_cb_h = std::make_shared<GraphStreamCallback>();
 
+                RunConfig config;
+                config.thread_id = *tid_h;
+                RunMetadata metadata;
+                if (interrupt_id) metadata.resume_interrupt_id = std::move(*interrupt_id);
                 asio::co_spawn(
                     AsyncRuntime::instance().executor(),
-                    self->resume_async(*tid_h, *rv_h, *engine_cb_h),
+                    self->resume_async(std::move(config), *rv_h, *engine_cb_h, std::move(metadata)),
                     [self, self_h, tid_h, rv_h, engine_cb_h, fut_h, loop_h]
                     (std::exception_ptr e, RunResult result) {
                         resolve_future_async(fut_h, loop_h, e,
@@ -1503,6 +1545,7 @@ void init_graph(py::module_& m) {
             },
             py::arg("thread_id"),
             py::arg("resume_value") = py::none(),
+            py::arg("interrupt_id") = py::none(),
             "Awaitable peer of resume(). Restart an interrupted run "
             "from the most recent checkpoint, optionally injecting a "
             "value (typically the human's response in HITL flows).")

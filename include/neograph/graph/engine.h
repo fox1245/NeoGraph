@@ -342,6 +342,17 @@ struct RunMetadata {
     /// #364: the run-level retry ceiling; null means none. Subgraphs share
     /// their parent's.
     std::shared_ptr<NodeRetryCeiling> node_retry_ceiling;
+    /// #388: on a resume from a NodeInterrupt checkpoint, the interrupt this
+    /// resume answers: a PendingInterrupt::id of the paused step
+    /// (RunResult::interrupt_id or one of RunResult::interrupts). Only that
+    /// invocation receives the resume value; every other invocation of the
+    /// step that paused runs without it and asks again with its own payload.
+    /// Empty answers the step's single pending interrupt, or its first one
+    /// when several are pending. A resume that names an interrupt that is not
+    /// pending, or names one on a checkpoint that is not a NodeInterrupt
+    /// pause, throws std::invalid_argument before anything runs. Subgraphs do
+    /// not inherit it.
+    std::string resume_interrupt_id;
 };
 
 /// @brief Normal, paused, or step-limited outcome of a successful run call.
@@ -407,6 +418,16 @@ struct RunResult {
     sp::Usage usage;
     std::vector<sp::Message> native_messages;
     std::vector<sp::runtime::Result> provider_outcomes;
+
+    /// #388: the id of the NodeInterrupt this result reports (interrupt_node,
+    /// interrupt_value): the first pending interrupt of the paused step, and
+    /// the one a resume answers unless it names another. Empty for an
+    /// interrupt_before or interrupt_after pause.
+    std::string interrupt_id;
+    /// #388: every NodeInterrupt of the paused step, in ready order and then
+    /// Send order; the first is the one this result reports. Empty unless
+    /// the run paused on a NodeInterrupt.
+    std::vector<PendingInterrupt> interrupts;
 
     /// True only when execution stopped at RunConfig::max_steps while work
     /// remained ready. The status is stored in output rather than as a data

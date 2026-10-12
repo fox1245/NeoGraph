@@ -449,6 +449,34 @@ void require_graph_node(const std::map<std::string, std::unique_ptr<GraphNode>>&
                                 (known.empty() ? "none" : known) + ")");
 }
 
+// #388: the task id of the paused invocation that a resume from `checkpoint`
+// answers: `requested` when it names a pending interrupt of the checkpoint,
+// otherwise its first pending interrupt. The pending interrupts are the list
+// a checkpoint of several recorded, or else the invocations its resume runs
+// instead of replaying. Empty for a checkpoint that is not a NodeInterrupt
+// pause.
+std::string answered_interrupt(const ResumeContext& checkpoint, const std::string& requested) {
+    if (checkpoint.phase != CheckpointPhase::NodeInterrupt) {
+        if (!requested.empty())
+            throw std::invalid_argument("Cannot answer interrupt '" + requested + "': checkpoint " +
+                                        checkpoint.checkpoint_id + " is not a NodeInterrupt pause");
+        return {};
+    }
+    auto pending = detail::recorded_interrupt_ids(checkpoint.metadata);
+    if (!pending)
+        pending = detail::paused_task_ids(checkpoint.start_step, checkpoint.next_nodes,
+                                          checkpoint.replay_results);
+    if (requested.empty()) return pending->empty() ? std::string{} : pending->front();
+    if (std::find(pending->begin(), pending->end(), requested) == pending->end()) {
+        std::string listed;
+        for (const auto& id : *pending) listed += (listed.empty() ? "'" : ", '") + id + "'";
+        throw std::invalid_argument("Interrupt '" + requested + "' is not pending at checkpoint " +
+                                    checkpoint.checkpoint_id + " (pending: " +
+                                    (listed.empty() ? "none" : listed) + ")");
+    }
+    return requested;
+}
+
 }  // namespace
 
 std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
@@ -1598,6 +1626,10 @@ asio::awaitable<RunResult> GraphEngine::resume_execute_async(
 
     if (resume_context.next_nodes.size() == 1 &&
         resume_context.next_nodes[0] == std::string(END_NODE)) {
+        if (!metadata.resume_interrupt_id.empty())
+            throw std::invalid_argument("Cannot answer interrupt '" + metadata.resume_interrupt_id +
+                                        "': checkpoint " + resume_context.checkpoint_id +
+                                        " is not a NodeInterrupt pause");
         if (!checkpoint_has_managed_bank(resume_context.channel_values) &&
             co_await checkpoint_store->requires_managed_budget_async(config.thread_id))
             reject_missing_original_managed_bank();
@@ -1934,6 +1966,20 @@ GraphEngine::execute_graph_async(
     const auto step_start = std::make_shared<detail::StepStartState>();
     step_start->enabled   = coord.enabled();
     runtime->step_start   = step_start;
+    // #388: the NodeInterrupts of the step that pauses, and the one a resume
+    // answers.
+    const auto step_interrupts = std::make_shared<detail::StepInterrupts>();
+    runtime->step_interrupts   = step_interrupts;
+    if (is_resume) {
+        auto answered = answered_interrupt(*resume_context, metadata.resume_interrupt_id);
+        if (!answered.empty()) {
+            runtime->answered_interrupt = std::move(answered);
+            runtime->answered_step      = resume_context->start_step;
+        }
+    } else if (!metadata.resume_interrupt_id.empty()) {
+        throw std::invalid_argument(
+            "resume_interrupt_id names an interrupt, but no NodeInterrupt checkpoint is resumed");
+    }
     detail::ScopedRunContextRuntime runtime_scope(ctx, std::move(runtime));
 
     std::string last_checkpoint_id;
@@ -2183,6 +2229,7 @@ GraphEngine::execute_graph_async(
         if (failure_state) failure_state->mark_step_start();
         failure_arrivals.clear();
         step_start->state.reset();
+        step_interrupts->list.clear();
         const auto step_trace_size = trace.size();
 
         // Capture NodeInterrupt outside the catch (GCC-13-safe) so the
@@ -2259,13 +2306,11 @@ GraphEngine::execute_graph_async(
             result.interrupt_node  = interrupt->node().empty()
                                        ? interrupt->reason()
                                        : interrupt->node();
-            json iv;
-            iv["reason"] = interrupt->reason();
-            iv["type"]   = "NodeInterrupt";
-            // Absent — not null — when the node attached no payload, so
-            // `contains("value")` answers "did the node hand me something".
-            if (!interrupt->value().is_null()) iv["value"] = interrupt->value();
-            result.interrupt_value = iv;
+            result.interrupt_value = detail::interrupt_value_of(*interrupt);
+            // #388: every interrupt of the step, the reported one first.
+            result.interrupts = std::move(step_interrupts->list);
+            step_interrupts->list.clear();
+            if (!result.interrupts.empty()) result.interrupt_id = result.interrupts.front().id;
             result.execution_trace = std::move(trace);
 
             if (coord.enabled()) {

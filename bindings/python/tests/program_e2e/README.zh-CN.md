@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=23b27e4aff6b4bfdd5e048182e93540e81e57e5b53aa091005a03a3d45c564a3 -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=0849d783c11fa285e33ca8a95ec6ee9178554d4ee45b0663c047ad2f335f4062 -->
 # Program API 端到端场景
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -24,6 +24,7 @@
 | `test_13_fork_replays_the_paused_step.py` | 在已完成的绑定 `llm_call` 旁暂停的运行的 `host.fork()`（#390）：fork 回答问题并从该步的 pending write 重放已完成的调用，因此请求不会再次发送，令牌和费用也不会再次计费；覆盖 fan-out 步骤与 Send、内存与 SQLite 日志 |
 | `test_14_await_deadline.py` | `ng.await(..., timeout_ms)` 保持其绝对截止时间（#391）：截止时间内的恢复会完成，截止时间之后的恢复立即以 `P_AWAIT_TIMEOUT` 超时（内存、SQLite 以及重启后的宿主），在恢复的 await 中崩溃后的 `reconnect()` 也会执行 await 开始时的截止时间 |
 | `test_15_send_isolation.py` | `Send` payload 只对其自身的 `Send` 可见（#389）：一个和三个 Send、一个和四个 worker，在运行时和 SQLite 恢复之后，都不会把 payload 留给下一步或最终状态 |
+| `test_16_interrupt_identity.py` | 在已完成的绑定 `llm_call` 旁同一步中的两个 Core 中断（#388）：pending input 指定第一个 Core 中断，恢复回答它后第二个再次提出自己的问题，下一次恢复回答它；已完成的调用不会再次发送或计费（内存与 SQLite 日志） |
 
 `support.py` 包含共享的 Python 节点、条件、注册表、预算和 JavaScript 构建器。
 

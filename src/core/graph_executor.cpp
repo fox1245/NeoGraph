@@ -123,8 +123,11 @@ inline std::string make_send_task_id(int                step,
 // the mediated Tool effects that attempt performs.
 class ScopedInvocationContext {
 public:
-    ScopedInvocationContext(const RunContext& parent, std::string_view invocation_id)
-        : context_(parent), runtime_scope_(parent, context_, invocation_id, true) {}
+    ScopedInvocationContext(const RunContext& parent, std::string_view invocation_id,
+                            bool withhold_resume_value = false)
+        : context_(parent), runtime_scope_(parent, context_, invocation_id, true) {
+        if (withhold_resume_value) context_.resume_value.reset();
+    }
 
     const RunContext& context() const { return context_; }
     const std::shared_ptr<detail::AttemptEffectLog>& effects() const {
@@ -188,6 +191,21 @@ void capture_step_start(const RunContext& ctx, const GraphState& state, bool has
     runtime->step_start->state = state.serialize_runtime();
 }
 
+// #388: one PendingInterrupt for a paused invocation.
+PendingInterrupt pending_interrupt(std::string task_id, const std::string& node,
+                                   const NodeInterrupt& interrupt) {
+    return PendingInterrupt{std::move(task_id), node, detail::interrupt_value_of(interrupt)};
+}
+
+// #388: the step's NodeInterrupts, for the engine to report; and the metadata
+// of its NodeInterrupt checkpoint, which lists them when there are several.
+json record_step_interrupts(const RunContext& ctx, std::vector<PendingInterrupt> interrupts) {
+    const auto runtime = detail::runtime_for(ctx);
+    if (runtime && runtime->step_interrupts) runtime->step_interrupts->list = interrupts;
+    return detail::with_pending_interrupts(
+        detail::checkpoint_metadata_for(ctx, detail::CheckpointTiming::DuringStep), interrupts);
+}
+
 }  // namespace
 
 namespace detail {
@@ -208,7 +226,43 @@ struct InvocationSlot {
     bool visit_limited = false;
 };
 
+std::vector<std::string> paused_task_ids(int step, const std::vector<std::string>& ready,
+                                         const std::unordered_map<std::string, NodeResult>& replay) {
+    std::vector<std::string> ids;
+    for (const auto& node : ready) {
+        auto id = make_static_task_id(step, node);
+        if (!replay.count(id)) ids.push_back(std::move(id));
+    }
+    if (!ids.empty()) return ids;
+    // Every ready node replays: the step paused in its Sends, which follow
+    // in ready order and then in the order each node emitted them.
+    std::size_t index = 0;
+    for (const auto& node : ready) {
+        const auto found = replay.find(make_static_task_id(step, node));
+        if (found == replay.end()) continue;
+        for (const auto& send : found->second.sends) {
+            auto id = make_send_task_id(step, index++, send.target_node, send.input);
+            if (!replay.count(id)) ids.push_back(std::move(id));
+        }
+    }
+    return ids;
+}
+
 }  // namespace detail
+
+namespace {
+
+// #388: a resume answers one interrupt of the step it re-enters. Every other
+// invocation of that step runs without the resume value, so one that paused
+// asks again with its own payload.
+bool withholds_resume_value(const RunContext& ctx, const detail::InvocationSlot& slot) {
+    if (!ctx.resume_value) return false;
+    const auto runtime = detail::runtime_for(ctx);
+    return runtime && !runtime->answered_interrupt.empty() && slot.step == runtime->answered_step &&
+           slot.task_id != runtime->answered_interrupt;
+}
+
+}  // namespace
 
 namespace {
 
@@ -243,13 +297,12 @@ asio::awaitable<void> save_send_interrupt(const CheckpointCoordinator&          
                                           const std::vector<int>& interrupted_attempts,
                                           std::size_t interrupted, int step,
                                           const std::string& parent_cp_id,
-                                          const RunContext&  ctx) {
+                                          const json&        metadata) {
     // GCC-13: build the vector outside the co_await argument list.
     std::vector<std::string> next_nodes = send_step.ready;
     const auto interrupt_cp_id = co_await coord.save_super_step_async(
         step_state, sends[interrupted].target_node, next_nodes, CheckpointPhase::NodeInterrupt,
-        step, parent_cp_id, send_step.barrier_state,
-        detail::checkpoint_metadata_for(ctx, detail::CheckpointTiming::DuringStep));
+        step, parent_cp_id, send_step.barrier_state, metadata);
     if (!parent_cp_id.empty()) co_return;
     for (std::size_t i = 0; i < send_step.ready.size() && i < send_step.results.size(); ++i) {
         const auto task_id = make_static_task_id(step, send_step.ready[i]);
@@ -915,6 +968,7 @@ asio::awaitable<NodeResult> NodeExecutor::execute_attempts_async(
             unit->token                = run_token->fork();
             unit->execution            = unit->token->fork();
             unit->context.cancel_token = unit->token;
+            if (slot && withholds_resume_value(ctx, *slot)) unit->context.resume_value.reset();
             if (slot) {
                 unit->scope.emplace(ctx, unit->context, effect_namespace, true);
             } else {
@@ -969,7 +1023,7 @@ asio::awaitable<NodeResult> NodeExecutor::execute_attempts_async(
             }
         } else {
             std::optional<ScopedInvocationContext> scope;
-            if (slot) scope.emplace(ctx, effect_namespace);
+            if (slot) scope.emplace(ctx, effect_namespace, withholds_resume_value(ctx, *slot));
             if (scope) effects = scope->effects();
             try {
                 // Single dispatch point. NodeInput bundles state, per-run
@@ -1182,10 +1236,12 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
         // body trips build_special_member_call).
         std::vector<std::string> next_nodes;
         next_nodes.push_back(node_name);
+        std::vector<PendingInterrupt> pending;
+        pending.push_back(pending_interrupt(task_id, node_name, *interrupt));
+        const auto metadata        = record_step_interrupts(ctx, std::move(pending));
         const auto interrupt_cp_id = co_await coord.save_super_step_async(
             state, node_name, next_nodes, CheckpointPhase::NodeInterrupt, step, parent_cp_id,
-            barrier_state,
-            detail::checkpoint_metadata_for(ctx, detail::CheckpointTiming::DuringStep));
+            barrier_state, metadata);
         // Without a parent checkpoint the attempt's start was not recorded;
         // record it under the interrupt's own checkpoint so resume continues it.
         if (parent_cp_id.empty())
@@ -1264,10 +1320,12 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
             if (interrupt) {
                 std::vector<std::string> next_nodes;
                 next_nodes.push_back(node_name);
+                std::vector<PendingInterrupt> pending;
+                pending.push_back(pending_interrupt(task_id, node_name, *interrupt));
+                const auto metadata        = record_step_interrupts(ctx, std::move(pending));
                 const auto interrupt_cp_id = co_await coord.save_super_step_async(
                     state, node_name, next_nodes, CheckpointPhase::NodeInterrupt, step,
-                    parent_cp_id, barrier_state,
-                    detail::checkpoint_metadata_for(ctx, detail::CheckpointTiming::DuringStep));
+                    parent_cp_id, barrier_state, metadata);
                 if (parent_cp_id.empty())
                     co_await record_attempt_start(coord, interrupt_cp_id, task_id, node_name,
                                                   interrupted_attempt, step);
@@ -1398,17 +1456,22 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
     // strings and json are deep-copied out while we still hold the eptr, so
     // what we throw later is wholly owned by this thread.
     std::optional<NodeInterrupt> interrupt;
+    // #388: every branch that paused, not just the first; copied out of its
+    // exception_ptr here, for the same reason as the first one.
+    std::vector<PendingInterrupt> pending;
     for (std::size_t i = 0; i < ready.size(); ++i) {
-        if (excs[i] && !first_exception) {
+        if (!excs[i]) continue;
+        try {
+            std::rethrow_exception(excs[i]);
+        } catch (const NodeInterrupt& ni) {
+            if (!first_exception) interrupt = ni;
+            pending.push_back(pending_interrupt(make_static_task_id(step, ready[i]), ready[i], ni));
+        } catch (...) {
+            // non-interrupt
+        }
+        if (!first_exception) {
             first_exception      = excs[i];
             first_exception_node = ready[i];
-            try {
-                std::rethrow_exception(first_exception);
-            } catch (const NodeInterrupt& ni) {
-                interrupt = ni;
-            } catch (...) {
-                // non-interrupt; leave `interrupt` empty
-            }
         }
     }
 
@@ -1418,10 +1481,10 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
             // the co_await arg list (nested brace-init trips the ICE).
             std::vector<std::string> next_nodes;
             next_nodes = ready;
+            const auto metadata        = record_step_interrupts(ctx, std::move(pending));
             const auto interrupt_cp_id = co_await coord.save_super_step_async(
                 state, first_exception_node, next_nodes, CheckpointPhase::NodeInterrupt, step,
-                parent_cp_id, barrier_state,
-                detail::checkpoint_metadata_for(ctx, detail::CheckpointTiming::DuringStep));
+                parent_cp_id, barrier_state, metadata);
             if (parent_cp_id.empty()) {
                 // No checkpoint precedes the step: record under the interrupt
                 // checkpoint what a parent would hold, so that resume replays
@@ -1540,8 +1603,10 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
     // NodeInterrupt checkpoint that re-enters the step, then the interrupt.
     // The attempt each Send was in when it paused is written by that Send only.
     std::vector<int> interrupted_attempts(sends.size(), 0);
-    auto pause = [&](std::size_t interrupted,
-                     const std::vector<const NodeResult*>& finished) -> asio::awaitable<void> {
+    // `pending` (#388) lists every Send that paused, the first one first.
+    auto pause = [&](std::size_t interrupted, const std::vector<const NodeResult*>& finished,
+                     std::vector<PendingInterrupt> pending) -> asio::awaitable<void> {
+        const auto metadata = record_step_interrupts(ctx, std::move(pending));
         if (!send_step || !coord.enabled()) co_return;
         const auto runtime = detail::runtime_for(ctx);
         if (!runtime || !runtime->step_start || !runtime->step_start->state)
@@ -1551,7 +1616,8 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
         step_state.copy_provider_history_from(state);
         step_state.restore_runtime(*runtime->step_start->state);
         co_await save_send_interrupt(coord, step_state, *send_step, sends, finished,
-                                     interrupted_attempts, interrupted, step, parent_cp_id, ctx);
+                                     interrupted_attempts, interrupted, step, parent_cp_id,
+                                     metadata);
     };
 
     // #389: every Send runs on a state of its own, one Send or many: the state
@@ -1613,7 +1679,10 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
         }
         if (interrupt) {
             const std::vector<const NodeResult*> finished(sends.size(), nullptr);
-            co_await pause(0, finished);
+            std::vector<PendingInterrupt>        pending;
+            pending.push_back(
+                pending_interrupt(send_task_ids[0], sends[0].target_node, *interrupt));
+            co_await pause(0, finished, std::move(pending));
             interrupt->set_node(sends[0].target_node);
             throw *interrupt;
         }
@@ -1657,16 +1726,20 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
         std::exception_ptr           first_exception;
         std::size_t                  first_index = 0;
         std::optional<NodeInterrupt> interrupt;
+        // #388: every Send that paused, not just the first.
+        std::vector<PendingInterrupt> pending;
         for (std::size_t i = 0; i < sends.size(); ++i) {
-            if (excs[i] && !first_exception) {
+            if (!excs[i]) continue;
+            try {
+                std::rethrow_exception(excs[i]);
+            } catch (const NodeInterrupt& ni) {
+                if (!first_exception) interrupt = ni;
+                pending.push_back(pending_interrupt(send_task_ids[i], sends[i].target_node, ni));
+            } catch (...) {
+            }
+            if (!first_exception) {
                 first_exception = excs[i];
                 first_index     = i;
-                try {
-                    std::rethrow_exception(first_exception);
-                } catch (const NodeInterrupt& ni) {
-                    interrupt = ni;
-                } catch (...) {
-                }
             }
         }
         if (first_exception) {
@@ -1675,7 +1748,7 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
                 std::vector<const NodeResult*> finished(sends.size(), nullptr);
                 for (std::size_t i = 0; i < sends.size(); ++i)
                     if (!excs[i]) finished[i] = &results[i];
-                co_await pause(first_index, finished);
+                co_await pause(first_index, finished, std::move(pending));
                 interrupt->set_node(sends[first_index].target_node);
                 throw *interrupt;
             }

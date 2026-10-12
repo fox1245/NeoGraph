@@ -392,18 +392,38 @@ std::optional<std::uint64_t> parse_expiry(const json& value) {
     return value.get<unsigned long long>();
 }
 
-json encode_core_projection(std::string_view node, const json& value) {
-    return json{{"node", node}, {"value", value}};
+// The Core interrupt id is written only when present (#388), under storage
+// schema 2; a projection without one keeps schema 1 and its bytes.
+json encode_core_projection(std::string_view node, const json& value, std::string_view id) {
+    auto projection = json{{"node", node}, {"value", value}};
+    if (!id.empty()) projection["id"] = id;
+    return projection;
 }
 
-std::pair<std::string, json> parse_core_projection(const json& value) {
+std::uint32_t pending_storage_schema(std::string_view core_interrupt_id) {
+    return core_interrupt_id.empty() ? 1U : 2U;
+}
+
+struct CoreProjection {
+    std::string node;
+    json        value;
+    std::string id;
+};
+
+CoreProjection parse_core_projection(const json& value, std::uint64_t schema) {
     require_object(value, "Program pending Core projection");
-    detail::reject_unknown_fields(value, "Program pending Core projection", {"node", "value"});
-    return {require_string(value, "node"), detail::owned_json_copy(require_value(value, "value"))};
+    detail::reject_unknown_fields(value, "Program pending Core projection", {"node", "value", "id"});
+    CoreProjection projection{require_string(value, "node"),
+                              detail::owned_json_copy(require_value(value, "value")), {}};
+    if (value.contains("id")) projection.id = require_string(value, "id");
+    if ((schema == 2) != !projection.id.empty())
+        throw std::invalid_argument("Program pending Core interrupt id disagrees with its schema");
+    return projection;
 }
 
 ProgramPendingInputData input_data_from_json(const json& value) {
-    const auto projection = parse_core_projection(require_value(value, "core_interrupt"));
+    const auto projection = parse_core_projection(require_value(value, "core_interrupt"),
+                                                  require_u64(value, "storage_schema_version"));
     ProgramPendingInputData data;
     data.operation_id         = require_string(value, "operation_id");
     data.call_id              = require_string(value, "call_id");
@@ -411,8 +431,9 @@ ProgramPendingInputData input_data_from_json(const json& value) {
     data.result_schema        = detail::owned_json_copy(require_value(value, "result_schema"));
     data.payload              = detail::owned_json_copy(require_value(value, "payload"));
     data.expires_at_unix_ms   = parse_expiry(require_value(value, "expires_at_unix_ms"));
-    data.core_node            = projection.first;
-    data.core_interrupt_value = projection.second;
+    data.core_node            = projection.node;
+    data.core_interrupt_value = projection.value;
+    data.core_interrupt_id    = projection.id;
     data.state                = pending_state_from_string(require_string(value, "state"));
     data.consumed_result      = parse_optional_result(require_value(value, "consumed_result"),
                                                       "Program pending consumed_result");
@@ -420,7 +441,8 @@ ProgramPendingInputData input_data_from_json(const json& value) {
 }
 
 ProgramPendingEffectData effect_data_from_json(const json& value) {
-    const auto projection = parse_core_projection(require_value(value, "core_interrupt"));
+    const auto projection = parse_core_projection(require_value(value, "core_interrupt"),
+                                                  require_u64(value, "storage_schema_version"));
     ProgramPendingEffectData data;
     data.operation_id         = require_string(value, "operation_id");
     data.call_id              = require_string(value, "call_id");
@@ -430,8 +452,9 @@ ProgramPendingEffectData effect_data_from_json(const json& value) {
     data.expires_at_unix_ms   = parse_expiry(require_value(value, "expires_at_unix_ms"));
     data.effect_mode          = effect_mode_from_string(require_string(value, "effect_mode"));
     data.idempotency          = idempotency_from_string(require_string(value, "idempotency"));
-    data.core_node            = projection.first;
-    data.core_interrupt_value = projection.second;
+    data.core_node            = projection.node;
+    data.core_interrupt_value = projection.value;
+    data.core_interrupt_id    = projection.id;
     data.state                = pending_state_from_string(require_string(value, "state"));
     data.reconciliation       = reconciliation_from_string(require_string(value, "reconciliation"));
     data.reconciled_result    = parse_optional_result(require_value(value, "reconciled_result"),
@@ -441,26 +464,28 @@ ProgramPendingEffectData effect_data_from_json(const json& value) {
 
 json input_envelope(const ProgramPendingInputData& data) {
     return json{{"format", std::string(INPUT_FORMAT)},
-                {"storage_schema_version", ProgramPendingInput::STORAGE_SCHEMA_VERSION},
+                {"storage_schema_version", pending_storage_schema(data.core_interrupt_id)},
                 {"operation_id", data.operation_id}, {"call_id", data.call_id},
                 {"kind", std::string(to_string(data.kind))}, {"result_schema", data.result_schema},
                 {"payload", data.payload},
                 {"expires_at_unix_ms", encode_expiry(data.expires_at_unix_ms)},
-                {"core_interrupt", encode_core_projection(data.core_node, data.core_interrupt_value)},
+                {"core_interrupt", encode_core_projection(data.core_node, data.core_interrupt_value,
+                                                          data.core_interrupt_id)},
                 {"state", std::string(to_string(data.state))},
                 {"consumed_result", encode_optional_result(data.consumed_result)}};
 }
 
 json effect_envelope(const ProgramPendingEffectData& data) {
     return json{{"format", std::string(EFFECT_FORMAT)},
-                {"storage_schema_version", ProgramPendingEffect::STORAGE_SCHEMA_VERSION},
+                {"storage_schema_version", pending_storage_schema(data.core_interrupt_id)},
                 {"operation_id", data.operation_id}, {"call_id", data.call_id},
                 {"effect_id", data.effect_id}, {"result_schema", data.result_schema},
                 {"payload", data.payload},
                 {"expires_at_unix_ms", encode_expiry(data.expires_at_unix_ms)},
                 {"effect_mode", std::string(to_string(data.effect_mode))},
                 {"idempotency", std::string(to_string(data.idempotency))},
-                {"core_interrupt", encode_core_projection(data.core_node, data.core_interrupt_value)},
+                {"core_interrupt", encode_core_projection(data.core_node, data.core_interrupt_value,
+                                                          data.core_interrupt_id)},
                 {"state", std::string(to_string(data.state))},
                 {"reconciliation", std::string(to_string(data.reconciliation))},
                 {"reconciled_result", encode_optional_result(data.reconciled_result)}};
@@ -519,7 +544,8 @@ ProgramPendingInput ProgramPendingInput::parse(std::string_view stored_bytes) {
          "payload", "expires_at_unix_ms", "core_interrupt", "state", "consumed_result"});
     if (require_string(value, "format") != INPUT_FORMAT)
         throw std::invalid_argument("Stored ProgramPendingInput has unknown format");
-    if (require_u64(value, "storage_schema_version") != STORAGE_SCHEMA_VERSION)
+    const auto input_schema = require_u64(value, "storage_schema_version");
+    if (input_schema == 0 || input_schema > STORAGE_SCHEMA_VERSION)
         throw std::invalid_argument("Stored ProgramPendingInput schema version is unsupported");
     return ProgramPendingInput(input_data_from_json(value));
 }
@@ -531,6 +557,7 @@ json ProgramPendingInput::payload() const { return impl_->data.payload; }
 std::optional<std::uint64_t> ProgramPendingInput::expires_at_unix_ms() const noexcept { return impl_->data.expires_at_unix_ms; }
 const std::string& ProgramPendingInput::core_node() const noexcept { return impl_->data.core_node; }
 json ProgramPendingInput::core_interrupt_value() const { return impl_->data.core_interrupt_value; }
+const std::string& ProgramPendingInput::core_interrupt_id() const noexcept { return impl_->data.core_interrupt_id; }
 ProgramPendingState ProgramPendingInput::state() const noexcept { return impl_->data.state; }
 std::optional<json> ProgramPendingInput::consumed_result() const { return impl_->data.consumed_result; }
 
@@ -604,7 +631,8 @@ ProgramPendingEffect ProgramPendingEffect::parse(std::string_view stored_bytes) 
          "reconciliation", "reconciled_result"});
     if (require_string(value, "format") != EFFECT_FORMAT)
         throw std::invalid_argument("Stored ProgramPendingEffect has unknown format");
-    if (require_u64(value, "storage_schema_version") != STORAGE_SCHEMA_VERSION)
+    const auto effect_schema = require_u64(value, "storage_schema_version");
+    if (effect_schema == 0 || effect_schema > STORAGE_SCHEMA_VERSION)
         throw std::invalid_argument("Stored ProgramPendingEffect schema version is unsupported");
     return ProgramPendingEffect(effect_data_from_json(value));
 }
@@ -618,6 +646,7 @@ EffectMode ProgramPendingEffect::effect_mode() const noexcept { return impl_->da
 ProgramEffectIdempotency ProgramPendingEffect::idempotency() const noexcept { return impl_->data.idempotency; }
 const std::string& ProgramPendingEffect::core_node() const noexcept { return impl_->data.core_node; }
 json ProgramPendingEffect::core_interrupt_value() const { return impl_->data.core_interrupt_value; }
+const std::string& ProgramPendingEffect::core_interrupt_id() const noexcept { return impl_->data.core_interrupt_id; }
 ProgramPendingState ProgramPendingEffect::state() const noexcept { return impl_->data.state; }
 ProgramEffectReconciliation ProgramPendingEffect::reconciliation() const noexcept { return impl_->data.reconciliation; }
 std::optional<json> ProgramPendingEffect::reconciled_result() const { return impl_->data.reconciled_result; }

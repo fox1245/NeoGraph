@@ -220,6 +220,40 @@ private:
     std::string name_;
 };
 
+// #388: asks until it is answered, and writes its decision to its own
+// "<name>_answer" channel. Every run is counted by node name.
+std::mutex                      named_ask_mutex;
+std::map<std::string, unsigned> named_ask_runs;
+
+unsigned named_ask_runs_of(const std::string& name) {
+    std::lock_guard lock(named_ask_mutex);
+    const auto      found = named_ask_runs.find(name);
+    return found == named_ask_runs.end() ? 0U : found->second;
+}
+
+class NamedAskNode final : public GraphNode {
+public:
+    explicit NamedAskNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        {
+            std::lock_guard lock(named_ask_mutex);
+            ++named_ask_runs[name_];
+        }
+        if (!input.ctx.resume_value)
+            throw NodeInterrupt("approve " + name_, json{{"asks", name_}});
+        NodeOutput output;
+        output.writes.push_back(
+            ChannelWrite{name_ + "_answer", input.ctx.resume_value->at("decision")});
+        co_return output;
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
 // Runs a hook (set by a test) and then pauses: the hook can arm a store fault
 // so that the interrupted run's terminal publication fails.
 std::function<void()> before_fault_interrupt;
@@ -1107,6 +1141,12 @@ RegistrySnapshot runtime_registry(
         manifest(ExecutableKind::Node, "runtime-scheduler-blocking", '8'),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<SchedulerBlockingNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-named-ask", 'b'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<NamedAskNode>(name);
         },
         json{{"type", "object"}}, json::object());
     builder.add_node(
@@ -9988,6 +10028,74 @@ std::string plan_root_thread(const ProgramVersion& version, const std::string& r
 
 json channel_value(const json& output) { return output["channels"]["value"]["value"]; }
 }  // namespace
+
+TEST(ProgramRuntimeTest, TwoCoreInterruptsOfOneStepAreAnsweredOneAtATime) {
+    // #388: left and right ask in the same Core super-step. The run pauses on
+    // left, and its pending input names left's Core interrupt, because the
+    // step paused on two. Resume answers left only: right asks its own
+    // question again, with a pending input that names no Core interrupt, as
+    // a step that paused on one keeps its bytes. In memory and on SQLite.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        {
+            std::lock_guard lock(named_ask_mutex);
+            named_ask_runs.clear();
+        }
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(1, stores.checkpoints, stores.transitions, {},
+                                ExecutionGuarantee::Unmanaged, true);
+        auto document   = program_document("runtime-completed");
+        auto definition = document["root"]["definition"];
+        definition["channels"]["left_answer"]  = json{{"reducer", "runtime-overwrite"}, {"initial", ""}};
+        definition["channels"]["right_answer"] = json{{"reducer", "runtime-overwrite"}, {"initial", ""}};
+        definition["nodes"]["left"]  = json{{"type", "runtime-named-ask"}};
+        definition["nodes"]["right"] = json{{"type", "runtime-named-ask"}};
+        definition["edges"] = json::array({json{{"from", "__start__"}, {"to", "work"}},
+                                           json{{"from", "work"}, {"to", "left"}},
+                                           json{{"from", "work"}, {"to", "right"}},
+                                           json{{"from", "left"}, {"to", "__end__"}},
+                                           json{{"from", "right"}, {"to", "__end__"}}});
+        document["root"]["definition"] = std::move(definition);
+        const auto version = fixture.admit_document(std::move(document));
+
+        const auto first = fixture.runtime->run(
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), grant(), "trace-two-core-interrupts", {}});
+        ASSERT_EQ(first.status(), ProgramTerminalStatus::Interrupted) << failure_detail(first);
+        ASSERT_TRUE(first.interrupt() && first.interrupt()->pending_input);
+        EXPECT_EQ(first.interrupt()->core_node, "left");
+        EXPECT_EQ(first.interrupt()->pending_input->core_interrupt_id(), "s1:left");
+        EXPECT_NE(first.interrupt()->pending_input->serialize_canonical().find(
+                      "\"storage_schema_version\":2"),
+                  std::string::npos);
+
+        const auto second = fixture.runtime
+                                ->resume("tenant:runtime", first.run_id(),
+                                         resume_for(first, json{{"decision", "L"}},
+                                                    "trace-two-core-interrupts-left"))
+                                .wait();
+        ASSERT_EQ(second.status(), ProgramTerminalStatus::Interrupted) << failure_detail(second);
+        ASSERT_TRUE(second.interrupt() && second.interrupt()->pending_input);
+        EXPECT_EQ(second.interrupt()->core_node, "right") << "right asks its own question again";
+        EXPECT_EQ(second.interrupt()->pending_input->core_interrupt_id(), "");
+        EXPECT_NE(second.interrupt()->pending_input->serialize_canonical().find(
+                      "\"storage_schema_version\":1"),
+                  std::string::npos)
+            << "one pending Core interrupt keeps the pending value's bytes";
+
+        const auto done = fixture.runtime
+                              ->resume("tenant:runtime", second.run_id(),
+                                       resume_for(second, json{{"decision", "R"}},
+                                                  "trace-two-core-interrupts-right"))
+                              .wait();
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+        EXPECT_EQ(done.output()["channels"]["left_answer"]["value"], json("L"));
+        EXPECT_EQ(done.output()["channels"]["right_answer"]["value"], json("R"))
+            << "right gets its own answer, not left's";
+        EXPECT_EQ(named_ask_runs_of("left"), 2U);
+        EXPECT_EQ(named_ask_runs_of("right"), 3U);
+    }
+}
 
 TEST(ProgramRuntimeTest, PlanQuorumPausedByABranchAsksAndResumeAnswersIt) {
     // #387: A finishes and B asks. The quorum needs two successes and B may

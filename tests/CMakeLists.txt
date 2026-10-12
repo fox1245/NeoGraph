@@ -955,6 +955,12 @@ if(NEOGRAPH_BUILD_SQLITE)
     target_link_libraries(neograph_send_isolation_tests PRIVATE
         neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
     neograph_discover_tests(neograph_send_isolation_tests PROPERTIES LABELS "core;send")
+    # #388: several NodeInterrupts of one super-step are answered one at a
+    # time, by the interrupt a resume names.
+    add_executable(neograph_interrupt_identity_tests test_interrupt_identity.cpp)
+    target_link_libraries(neograph_interrupt_identity_tests PRIVATE
+        neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
+    neograph_discover_tests(neograph_interrupt_identity_tests PROPERTIES LABELS "core;interrupt")
 endif()
 
 if(NEOGRAPH_BUILD_PROGRAM)

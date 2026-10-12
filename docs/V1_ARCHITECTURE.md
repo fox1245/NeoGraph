@@ -502,6 +502,19 @@ source does, so they are neither run nor charged again and their provider calls
 are not sent again. Replacement never continues a paused plan: it continues a
 quiescent JavaScript source.
 
+Each interrupt is answered on its own, at every level (#388). When several
+nodes or Sends of one Core super-step raise `NodeInterrupt`, the Core run
+pauses on all of them and identifies each by its paused invocation's task id;
+a resume answers the interrupt that `RunMetadata::resume_interrupt_id` names,
+or the first, and every other invocation that paused asks its own question
+again. The Program's pending input or effect for such a step names its Core
+interrupt in `core_interrupt_id` (pending value storage schema 2; a step that
+paused on one interrupt keeps schema 1 and its bytes), and the attempt that
+resumes it passes that id to the Core resume, so the answer reaches exactly
+the question the host saw. A paused-call record of a plan (#384, #386)
+carries the id too. JavaScript joins and plan-level `parallel` and `quorum`
+already answer one paused member per resume, and the others ask again.
+
 Concurrent calls never share a Core thread. The first child of a `parallel` or
 `race` continues on the operation's own Core thread and every other child runs
 on a thread of its own, so a child of a nested `parallel` never shares the root

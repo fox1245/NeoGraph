@@ -288,6 +288,45 @@ json checkpoint_metadata_for(const RunContext& context, CheckpointTiming timing)
     return metadata;
 }
 
+json interrupt_value_of(const NodeInterrupt& interrupt) {
+    json value;
+    value["reason"] = interrupt.reason();
+    value["type"]   = "NodeInterrupt";
+    // Absent — not null — when the node attached no payload, so
+    // `contains("value")` answers "did the node hand me something".
+    if (!interrupt.value().is_null()) value["value"] = interrupt.value();
+    return value;
+}
+
+json with_pending_interrupts(json metadata, const std::vector<PendingInterrupt>& interrupts) {
+    if (interrupts.size() < 2) return metadata;
+    if (metadata.is_null()) metadata = json::object();
+    json list = json::array();
+    for (const auto& interrupt : interrupts)
+        list.push_back(json{{"id", interrupt.id},
+                            {"node", interrupt.node},
+                            {"interrupt_value", interrupt.value}});
+    metadata[kMetadataNamespace]["interrupts"] = std::move(list);
+    return metadata;
+}
+
+std::optional<std::vector<std::string>> recorded_interrupt_ids(const json& metadata) {
+    if (!metadata.is_object() || !metadata.contains(kMetadataNamespace)) return std::nullopt;
+    const auto& reserved = metadata[kMetadataNamespace];
+    if (!reserved.is_object() || !reserved.contains("interrupts")) return std::nullopt;
+    const auto& list = reserved["interrupts"];
+    if (!list.is_array())
+        throw std::runtime_error("NodeInterrupt checkpoint pending interrupts are malformed");
+    std::vector<std::string> ids;
+    for (std::size_t index = 0; index < list.size(); ++index) {
+        const auto entry = list[index];
+        if (!entry.is_object() || !entry.contains("id") || !entry["id"].is_string())
+            throw std::runtime_error("NodeInterrupt checkpoint pending interrupts are malformed");
+        ids.push_back(entry["id"].get<std::string>());
+    }
+    return ids;
+}
+
 void restore_subgraph_write_journal(
     const Checkpoint& checkpoint,
     const std::shared_ptr<SubgraphWriteJournal>& journal,

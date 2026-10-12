@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace neograph::graph {
@@ -55,6 +56,14 @@ struct SendStep {
     const BarrierState&             barrier_state;
 };
 
+/// #388: the NodeInterrupts of the current super-step, recorded by the
+/// executor, in ready order and then Send order, right before it saves the
+/// step's NodeInterrupt checkpoint and rethrows the first one; the engine
+/// reports them. Only the run's own coroutine reads and writes it.
+struct StepInterrupts {
+    std::vector<PendingInterrupt> list;
+};
+
 struct SubgraphWriteJournal {
     std::vector<ChannelWrite> writes;
     std::string parent_call_id;
@@ -79,6 +88,14 @@ struct RunContextRuntime {
     std::shared_ptr<RunStatusMarks> status_marks;
     /// #385: the state the current step started from; null outside a run.
     std::shared_ptr<StepStartState> step_start;
+    /// #388: the NodeInterrupts of the current step; null outside a run.
+    std::shared_ptr<StepInterrupts> step_interrupts;
+    /// #388: on a resume from a NodeInterrupt checkpoint, the task id of the
+    /// paused invocation the resume value answers, in `answered_step`. Every
+    /// other invocation of that step runs without the resume value. Empty:
+    /// every invocation sees it (a resume that is not from a NodeInterrupt).
+    std::string answered_interrupt;
+    int         answered_step = -1;
 };
 
 /// What a RunContext is bound to while a scope below is alive: the state the
@@ -123,6 +140,27 @@ enum class CheckpointTiming { DuringStep, BetweenSteps };
 /// the max_visits counters a resume continues from (from the start of the
 /// step during a step, as they are between steps).
 json checkpoint_metadata_for(const RunContext& context, CheckpointTiming timing);
+
+/// #388: RunResult::interrupt_value of a NodeInterrupt: its reason, its type
+/// and, when it carries one, its payload.
+json interrupt_value_of(const NodeInterrupt& interrupt);
+
+/// #388: `metadata` with the pending interrupts of a NodeInterrupt checkpoint
+/// under "_neograph"/"interrupts", when there are several. A checkpoint with
+/// one keeps its bytes: its single interrupt is the one paused invocation.
+json with_pending_interrupts(json metadata, const std::vector<PendingInterrupt>& interrupts);
+
+/// #388: the ids of the pending interrupts a NodeInterrupt checkpoint
+/// recorded (with_pending_interrupts), or nothing when it recorded none.
+std::optional<std::vector<std::string>> recorded_interrupt_ids(const json& metadata);
+
+/// #388: the task ids of the invocations that a resume of a NodeInterrupt
+/// checkpoint at `step` runs instead of replaying, in dispatch order: the
+/// ready nodes without a pending write, or, once every ready node replays,
+/// the Sends they emitted without one. Its first is the step's first paused
+/// invocation. Defined with the executor, which dispatches them.
+std::vector<std::string> paused_task_ids(int step, const std::vector<std::string>& ready,
+                                         const std::unordered_map<std::string, NodeResult>& replay);
 json managed_budget_scope_metadata(const std::shared_ptr<OwnedManagedBudgetLease>& lease);
 CheckpointPhase checkpoint_resume_phase(const Checkpoint& checkpoint);
 

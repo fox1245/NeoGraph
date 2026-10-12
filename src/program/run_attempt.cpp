@@ -1381,9 +1381,21 @@ asio::awaitable<void> cancel_after_timer(std::shared_ptr<asio::steady_timer> tim
 
 constexpr std::string_view PROGRAM_PENDING_KIND_FIELD = "__neograph_program_pending_kind";
 
-ProgramInterrupt decode_core_interrupt(const RunControl&       control,
-                                       std::string_view        operation_id,
-                                       const graph::RunResult& result) {
+// #388: the pending value carries the Core interrupt's id when the Core step
+// paused on several, so that resuming the run answers exactly that interrupt;
+// with one, it carries none and keeps its bytes. A replayed question
+// (replay_branch_record) passes the id it recorded.
+std::string core_interrupt_id_of(const graph::RunResult& result) {
+    return result.interrupts.size() > 1 ? result.interrupt_id : std::string{};
+}
+
+ProgramInterrupt decode_core_interrupt(const RunControl&          control,
+                                       std::string_view           operation_id,
+                                       const graph::RunResult&    result,
+                                       std::optional<std::string> recorded_interrupt_id =
+                                           std::nullopt) {
+    const auto core_interrupt_id =
+        recorded_interrupt_id ? *recorded_interrupt_id : core_interrupt_id_of(result);
     const auto generic = [&] {
         ProgramPendingInputData pending;
         pending.operation_id = std::string(operation_id);
@@ -1394,6 +1406,7 @@ ProgramInterrupt decode_core_interrupt(const RunControl&       control,
         pending.payload              = result.interrupt_value;
         pending.core_node            = result.interrupt_node;
         pending.core_interrupt_value = result.interrupt_value;
+        pending.core_interrupt_id    = core_interrupt_id;
         return ProgramInterrupt{result.interrupt_node, result.interrupt_value,
                                 ProgramPendingInput(std::move(pending)), std::nullopt};
     };
@@ -1441,6 +1454,7 @@ ProgramInterrupt decode_core_interrupt(const RunControl&       control,
                                            : ProgramEffectIdempotency::NonIdempotent;
         pending.core_node            = result.interrupt_node;
         pending.core_interrupt_value = result.interrupt_value;
+        pending.core_interrupt_id    = core_interrupt_id;
         return ProgramInterrupt{result.interrupt_node, result.interrupt_value, std::nullopt,
                                 ProgramPendingEffect(std::move(pending))};
     }
@@ -1457,6 +1471,7 @@ ProgramInterrupt decode_core_interrupt(const RunControl&       control,
     pending.expires_at_unix_ms   = expiry;
     pending.core_node            = result.interrupt_node;
     pending.core_interrupt_value = result.interrupt_value;
+    pending.core_interrupt_id    = core_interrupt_id;
     return ProgramInterrupt{result.interrupt_node, result.interrupt_value,
                             ProgramPendingInput(std::move(pending)), std::nullopt};
 }
@@ -1498,11 +1513,17 @@ std::optional<json> paused_branch_record(const PlanExecution& branch) {
     if (!branch.interrupt || !branch.interrupt_checkpoint) return std::nullopt;
     const auto& interrupt = *branch.interrupt;
     std::string operation_id;
-    if (interrupt.pending_input) operation_id = interrupt.pending_input->operation_id();
-    else if (interrupt.pending_effect) operation_id = interrupt.pending_effect->operation_id();
+    std::string core_interrupt_id;
+    if (interrupt.pending_input) {
+        operation_id      = interrupt.pending_input->operation_id();
+        core_interrupt_id = interrupt.pending_input->core_interrupt_id();
+    } else if (interrupt.pending_effect) {
+        operation_id      = interrupt.pending_effect->operation_id();
+        core_interrupt_id = interrupt.pending_effect->core_interrupt_id();
+    }
     if (operation_id.empty()) return std::nullopt;
     const auto& checkpoint = *branch.interrupt_checkpoint;
-    return json{{"kind", "paused"},
+    auto record = json{{"kind", "paused"},
                 {"operation_id", operation_id},
                 {"core_node", interrupt.core_node},
                 {"value", interrupt.value},
@@ -1512,6 +1533,9 @@ std::optional<json> paused_branch_record(const PlanExecution& branch) {
                                     {"checkpoint_id", checkpoint.checkpoint_id},
                                     {"checkpoint_schema_version",
                                      checkpoint.checkpoint_schema_version}}}};
+    // #388: only when its Core step paused on several interrupts.
+    if (!core_interrupt_id.empty()) record["core_interrupt_id"] = core_interrupt_id;
+    return record;
 }
 
 // A settled or paused record as its operation sees it again: one that
@@ -1542,7 +1566,10 @@ PlanExecution replay_branch_record(const json& record, const RunControl& control
     }
     if (kind != "paused") malformed();
     detail::reject_unknown_fields(record, "Recorded plan operation",
-                                  {"kind", "operation_id", "core_node", "value", "checkpoint"});
+                                  {"kind", "operation_id", "core_node", "value", "checkpoint",
+                                   "core_interrupt_id"});
+    if (record.contains("core_interrupt_id") && !record.at("core_interrupt_id").is_string())
+        malformed();
     for (const auto* field : {"operation_id", "core_node"})
         if (!record.contains(field) || !record.at(field).is_string()) malformed();
     if (!record.contains("value") || !record.contains("checkpoint") ||
@@ -1571,8 +1598,11 @@ PlanExecution replay_branch_record(const json& record, const RunControl& control
     question.interrupt_value = detail::owned_json_copy(record.at("value"));
     PlanExecution paused;
     paused.status = ProgramTerminalStatus::Interrupted;
-    paused.interrupt =
-        decode_core_interrupt(control, record.at("operation_id").get<std::string>(), question);
+    paused.interrupt = decode_core_interrupt(
+        control, record.at("operation_id").get<std::string>(), question,
+        record.contains("core_interrupt_id")
+            ? std::optional<std::string>(record.at("core_interrupt_id").get<std::string>())
+            : std::optional<std::string>(std::string{}));
     paused.interrupt_checkpoint = std::move(checkpoint);
     return paused;
 }
@@ -1751,6 +1781,22 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 if (resume_operation && !typed_plan.find(*resume_operation))
                     resume_operation.reset();
                 if (const auto settled = durable->settled_branches()) replay_records = *settled;
+            }
+        }
+        // #388: the Core interrupt that the resumed question names, when its
+        // Core step paused on several: the resume of that checkpoint answers
+        // exactly it. Taken once (plan_mutex).
+        std::optional<std::pair<std::string, std::string>> resume_core_interrupt;
+        if (checkpoint_id && !control->recorded_replay) {
+            const auto durable = control->transitions->load(control->owner_scope, control->run_id);
+            if (durable && durable->exact_checkpoint() &&
+                durable->exact_checkpoint()->checkpoint_id == *checkpoint_id) {
+                std::string id;
+                if (const auto pending = durable->pending_input())
+                    id = pending->core_interrupt_id();
+                else if (const auto effect = durable->pending_effect())
+                    id = effect->core_interrupt_id();
+                if (!id.empty()) resume_core_interrupt = std::pair{*checkpoint_id, std::move(id)};
             }
         }
         auto take_replay_record = [&](const std::string& operation_id) -> std::optional<json> {
@@ -1957,6 +2003,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 // Join members and await timers share this scheduler.
                 metadata.shared_scheduler = true;
                 metadata.node_retry_ceiling = node_retry_ceiling;
+                if (next_resume) {
+                    std::lock_guard lock(plan_mutex);
+                    if (resume_core_interrupt && resume_core_interrupt->first == *next_resume) {
+                        metadata.resume_interrupt_id = std::move(resume_core_interrupt->second);
+                        resume_core_interrupt.reset();
+                    }
+                }
                 auto operation_checkpoints = control->checkpoints;
                 if (next_resume && resume_checkpoint_content_id) {
                     operation_checkpoints =

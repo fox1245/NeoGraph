@@ -233,6 +233,28 @@ private:
 };
 
 /**
+ * @brief One NodeInterrupt of a paused super-step (#388).
+ *
+ * When several nodes or Sends of one super-step raise NodeInterrupt, the run
+ * pauses on all of them. Each is answered individually: a resume answers the
+ * interrupt that RunMetadata::resume_interrupt_id names, or the first one,
+ * and every other invocation that paused runs again without the resume value
+ * and asks again with its own payload.
+ */
+struct PendingInterrupt {
+    /// The paused invocation's stable task id, unique in its super-step:
+    /// "s<step>:<node>" for a node of the ready batch,
+    /// "s<step>:send[<index>]:<node>:<hash>" for a Send.
+    std::string id;
+    std::string node;  ///< The node that raised it.
+    /// {"type": "NodeInterrupt", "reason": ..., "value": ...}, the shape of
+    /// RunResult::interrupt_value ("value" only when the node attached one).
+    json value;
+
+    bool operator==(const PendingInterrupt&) const = default;
+};
+
+/**
  * @brief A node failure annotated by the executor with dispatch context.
  *
  * The original exception remains available through @c cause() and can be

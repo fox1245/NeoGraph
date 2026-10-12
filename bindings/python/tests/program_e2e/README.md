@@ -23,6 +23,7 @@ These tests drive the sealed-v1 JavaScript Program API through the Python bindin
 | `test_13_fork_replays_the_paused_step.py` | `host.fork()` of a run paused next to a bound `llm_call` that finished (#390): the fork answers the question and replays the finished call from the step's pending writes, so its request is not sent and its tokens and money are not charged again, for a fan-out step and for Sends, in memory and with the SQLite journal |
 | `test_14_await_deadline.py` | an `ng.await(..., timeout_ms)` keeps its absolute deadline (#391): a resume inside the deadline completes, a resume after it times out at once with `P_AWAIT_TIMEOUT` (in memory, on SQLite, and from a restarted host), and `reconnect()` after a crash inside the resumed await enforces the deadline the await started with |
 | `test_15_send_isolation.py` | a `Send` payload is visible only to its own `Send` (#389): one Send and three Sends, with one and four workers, live and after a resume on SQLite, leave no payload for the next step or the final state |
+| `test_16_interrupt_identity.py` | two Core interrupts of one step, next to a bound `llm_call` that finished (#388): the pending input names the first Core interrupt, a resume answers it and the second asks its own question again, the next resume answers that one, and the finished call is never resent or charged again, in memory and with the SQLite journal |
 
 `support.py` holds the shared Python nodes, conditions, registry, budgets and JavaScript builders.
 

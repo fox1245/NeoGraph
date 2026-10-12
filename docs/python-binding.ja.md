@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=d479ffdcc8e7c021c4c1e62b9e02e90e4cd98854dd49b01a486c271d373ebb2c -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=0b41baeeff757370d64af1b47a2cd6fd5a1b7ebd1c76e453ea41d6664e125df6 -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -581,7 +581,7 @@ Programエンジンはstderrにlintもfan-outの通知も出力しません。`E
 
 `sqlite_directory=path`を渡すと、ホストはバンドル、バージョン、実行記録、チェックポイントをそのディレクトリのSQLiteファイル（`program.db`、`checkpoints.db`）に、プロバイダー呼び出しをプロバイダー呼び出しjournal（`provider_calls.db`）に保持するため、実行はプロセスを越えて残ります。同じディレクトリと同じレジストリで開いたホストが実行を続けます。`resume()`は中断された実行を続け、`reconnect(run_id)`は停止したプロセスが実行中のまま残した実行を続けます。復旧はjournalに記録されたリクエストを再送しません。journalが応答を再生し、呼び出しは1回だけ請求されます。プロバイダーをバインドするホストには`native_history_archive=`も必要です（初回は`ng.NativeArchive.provision`、以後は`ng.NativeArchive.open`）。journalがすべての応答をarchiveのcustodyのもとに保持するためです。子予算のない`define()`のみのProgram実行は、wall timeの間execution leaseを持ちます。`reconnect()`はleaseが切れるまで`P_RUN_LEASE_HELD`を送出し、その後は実行を`TimedOut`で終えてjournalに記録された呼び出しを請求します。クラッシュからの復旧は、実行の最後の永続チェックポイント（たとえば中断が残したもの）から再開します。
 
-`resume(run_id, value)`はハンドルを返します。結果を得るには`.wait()`を呼び出してください。`pending_id`がなければ、実行で待機中の唯一の呼び出しを再開します。待機中の呼び出しがない、または複数ある場合は`ValueError`を送出します。呼び出しを正確に指定するには、`result.interrupt.pending_input.call_id`を`pending_id`として渡してください。 `fork(run_id, value, version, budget)` は、実行の正確なチェックポイント (または `checkpoint_id=`) から `version` の新しい実行を開始し、その待機中の呼び出しに `value` で応答します。`budget` は元の実行の `remaining_budget` の範囲内でなければならず、`pending_id=` は `resume()` と同じく呼び出しを指定します。フォークは `resume()` と同じく一時停止した実行が完了したものを再生します。一時停止したステップで完了したノードや Send は再実行も再課金もされず、その provider 呼び出しも再送されません (#390)。
+`resume(run_id, value)`はハンドルを返します。結果を得るには`.wait()`を呼び出してください。`pending_id`がなければ、実行で待機中の唯一の呼び出しを再開します。待機中の呼び出しがない、または複数ある場合は`ValueError`を送出します。呼び出しを正確に指定するには、`result.interrupt.pending_input.call_id`を`pending_id`として渡してください。 `fork(run_id, value, version, budget)` は、実行の正確なチェックポイント (または `checkpoint_id=`) から `version` の新しい実行を開始し、その待機中の呼び出しに `value` で応答します。`budget` は元の実行の `remaining_budget` の範囲内でなければならず、`pending_id=` は `resume()` と同じく呼び出しを指定します。フォークは `resume()` と同じく一時停止した実行が完了したものを再生します。一時停止したステップで完了したノードや Send は再実行も再課金もされず、その provider 呼び出しも再送されません (#390)。 Core のステップが複数の割り込みで一時停止した場合、`result.interrupt.pending_input.core_interrupt_id` (または `pending_effect.core_interrupt_id`) はこの保留中の呼び出しが答える Core 割り込みを指し、`resume()` はまさにそれに答えます。そのステップの他の割り込みは、保留中の呼び出し一つずつ、もう一度尋ねます。Core 割り込みが一つなら `""` です (#388)。
 
 `resume()`が返した結果の`execution_trace`には、再開後に実行されたCoreノードだけが並びます。割り込み前に実行されたノードは、割り込まれた結果に現れます。`b`の前で割り込むCore `a → b → c`では、割り込まれた結果は`["a"]`、再開後の結果は`["b", "c"]`になります。
 
@@ -660,7 +660,7 @@ profile.attach(engine)
 
 静的`interrupt_before`/`interrupt_after`、動的`NodeInterrupt`、同期`resume`、asyncio`resume_async`、および厳密`resume_from`はチェックポイントストアを必要とします。
 
-`ng.Send`でディスパッチされたPythonノードが`ng.NodeInterrupt`を送出すると、他のノードと同じようにrunが一時停止します。`run`、`run_stream`、`run_async`、`run_stream_async`はチェックポイント付きの中断された`RunResult`を返し、`resume`、`resume_async`、`resume_from`はそのSendを回答とともに実行します。Sendを送出したノードと終了したSendは再実行されず再生されます。
+`ng.Send`でディスパッチされたPythonノードが`ng.NodeInterrupt`を送出すると、他のノードと同じようにrunが一時停止します。`run`、`run_stream`、`run_async`、`run_stream_async`はチェックポイント付きの中断された`RunResult`を返し、`resume`、`resume_async`、`resume_from`はそのSendを回答とともに実行します。Sendを送出したノードと終了したSendは再実行されず再生されます。 一つのステップの複数のノードや Send が `ng.NodeInterrupt` を送出すると、`result.interrupts` はそれぞれを `{"id", "node", "value"}` として列挙し、`result.interrupt_id` は最初のものを指します。`resume`、`resume_async`、`resume_from` は `interrupt_id=` を受け取ってその割り込みに答え、指定がなければ最初のものに答えます。一時停止した他のノードや Send はその再開で自身の質問をもう一度行い、次の再開がそれに答えます (#388)。保留中でない `interrupt_id` は `ValueError` になります。`RunMetadata.resume_interrupt_id` も同じ id を運びます。
 
 Python の `CheckpointStore` サブクラスは `requires_managed_budget(thread_id) -> bool` を実装できます。この同期仮想メソッドは、永続化された管理予算バンクの拒否義務を読み取ります。エンジンのネイティブ非同期ファサードがこのメソッドを呼び、バインディングは Python のオーバーライドを実行するときに GIL を取得します。チェックポイント状態からバンクを除去したり、チェックポイントを削除したりした後も、実際の永続義務を報告してください。オーバーライドを省略すると、`False` を返す代わりに、未対応バックエンドを示す明示的なネイティブエラーが維持されます。
 

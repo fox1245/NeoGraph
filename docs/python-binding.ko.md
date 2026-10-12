@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=d479ffdcc8e7c021c4c1e62b9e02e90e4cd98854dd49b01a486c271d373ebb2c -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=0b41baeeff757370d64af1b47a2cd6fd5a1b7ebd1c76e453ea41d6664e125df6 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -581,7 +581,7 @@ Program 엔진은 stderr에 lint도 fan-out 안내도 출력하지 않습니다.
 
 `sqlite_directory=path`를 주면 호스트는 번들, 버전, 실행 기록, 체크포인트를 그 디렉터리의 SQLite 파일(`program.db`, `checkpoints.db`)에, 제공자 호출을 제공자 호출 journal(`provider_calls.db`)에 보관하므로 실행이 프로세스보다 오래 남습니다. 같은 디렉터리와 같은 레지스트리로 연 호스트가 실행을 이어 갑니다. `resume()`은 중단된 실행을 이어 가고, `reconnect(run_id)`는 멈춘 프로세스가 실행 중인 채로 남긴 실행을 이어 갑니다. 복구는 journal에 기록된 요청을 다시 보내지 않습니다. journal이 응답을 재생하고 호출은 한 번만 청구됩니다. 제공자를 바인딩하는 호스트에는 `native_history_archive=`도 필요합니다(처음에는 `ng.NativeArchive.provision`, 이후에는 `ng.NativeArchive.open`). journal이 모든 응답을 archive의 custody 아래에 보관하기 때문입니다. 자식 예산이 없는 `define()` 전용 Program 실행은 wall time 동안 execution lease를 가집니다. `reconnect()`는 lease가 만료될 때까지 `P_RUN_LEASE_HELD`를 발생시키고, 그 뒤에는 실행을 `TimedOut`으로 끝내며 journal에 기록된 호출을 청구합니다. 크래시 복구는 실행의 마지막 내구 체크포인트(예: 중단이 남긴 체크포인트)에서 재개합니다.
 
-`resume(run_id, value)`는 핸들을 반환합니다. 결과를 받으려면 `.wait()`를 호출하십시오. `pending_id`가 없으면 실행에서 대기 중인 유일한 호출을 재개합니다. 대기 중인 호출이 없거나 여러 개이면 `ValueError`를 발생시킵니다. 호출을 정확히 지정하려면 `result.interrupt.pending_input.call_id`를 `pending_id`로 전달하십시오. `fork(run_id, value, version, budget)`은 실행의 정확한 체크포인트(또는 `checkpoint_id=`)에서 `version`의 새 실행을 시작하고 그 대기 중인 호출에 `value`로 응답합니다. `budget`은 원본 실행의 `remaining_budget` 안에 있어야 하며, `pending_id=`는 `resume()`과 같이 호출을 지정합니다. 포크는 `resume()`과 같이 일시 정지된 실행이 끝낸 작업을 재생합니다. 일시 정지된 스텝에서 끝난 노드나 Send는 다시 실행되거나 과금되지 않으며 그 provider 호출도 다시 전송되지 않습니다(#390).
+`resume(run_id, value)`는 핸들을 반환합니다. 결과를 받으려면 `.wait()`를 호출하십시오. `pending_id`가 없으면 실행에서 대기 중인 유일한 호출을 재개합니다. 대기 중인 호출이 없거나 여러 개이면 `ValueError`를 발생시킵니다. 호출을 정확히 지정하려면 `result.interrupt.pending_input.call_id`를 `pending_id`로 전달하십시오. `fork(run_id, value, version, budget)`은 실행의 정확한 체크포인트(또는 `checkpoint_id=`)에서 `version`의 새 실행을 시작하고 그 대기 중인 호출에 `value`로 응답합니다. `budget`은 원본 실행의 `remaining_budget` 안에 있어야 하며, `pending_id=`는 `resume()`과 같이 호출을 지정합니다. 포크는 `resume()`과 같이 일시 정지된 실행이 끝낸 작업을 재생합니다. 일시 정지된 스텝에서 끝난 노드나 Send는 다시 실행되거나 과금되지 않으며 그 provider 호출도 다시 전송되지 않습니다(#390). Core 스텝이 여러 인터럽트에서 일시 정지하면 `result.interrupt.pending_input.core_interrupt_id`(또는 `pending_effect.core_interrupt_id`)가 이 대기 호출이 답하는 Core 인터럽트를 지정하며, `resume()`은 정확히 그것에 답합니다. 그 스텝의 다른 인터럽트는 대기 호출 하나씩 다시 묻습니다. Core 인터럽트가 하나이면 `""`입니다(#388).
 
 `resume()`이 반환한 결과의 `execution_trace`에는 재개 이후에 실행된 Core 노드만 나열됩니다. 중단 전에 실행된 노드는 중단된 결과에 나타납니다. `b` 앞에서 중단되는 Core `a → b → c`라면 중단된 결과는 `["a"]`, 재개된 결과는 `["b", "c"]`를 가집니다.
 
@@ -660,7 +660,7 @@ profile.attach(engine)
 
 정적 `interrupt_before`/`interrupt_after`, 동적 `NodeInterrupt`, 동기식 `resume`, asyncio `resume_async`, 그리고 정확한 `resume_from`은 체크포인트 저장소를 필요로 합니다.
 
-`ng.Send`로 디스패치된 Python 노드가 `ng.NodeInterrupt`를 던지면 다른 노드와 마찬가지로 run이 일시 정지합니다. `run`, `run_stream`, `run_async`, `run_stream_async`는 체크포인트가 있는 중단된 `RunResult`를 반환하고, `resume`, `resume_async`, `resume_from`은 그 Send를 답과 함께 실행하며 Send를 내보낸 노드와 끝난 Send는 다시 실행되지 않고 재생됩니다.
+`ng.Send`로 디스패치된 Python 노드가 `ng.NodeInterrupt`를 던지면 다른 노드와 마찬가지로 run이 일시 정지합니다. `run`, `run_stream`, `run_async`, `run_stream_async`는 체크포인트가 있는 중단된 `RunResult`를 반환하고, `resume`, `resume_async`, `resume_from`은 그 Send를 답과 함께 실행하며 Send를 내보낸 노드와 끝난 Send는 다시 실행되지 않고 재생됩니다. 한 스텝의 노드나 Send 여럿이 `ng.NodeInterrupt`를 일으키면 `result.interrupts`는 각각을 `{"id", "node", "value"}`로 나열하고 `result.interrupt_id`는 첫 번째를 지정합니다. `resume`, `resume_async`, `resume_from`은 `interrupt_id=`를 받아 그 인터럽트에 답하며, 없으면 첫 번째에 답합니다. 일시 정지한 다른 노드나 Send는 그 재개에서 자신의 질문을 다시 하고 다음 재개가 그것에 답합니다(#388). 대기 중이 아닌 `interrupt_id`는 `ValueError`를 일으킵니다. `RunMetadata.resume_interrupt_id`도 같은 id를 전달합니다.
 
 Python `CheckpointStore` 하위 클래스는 `requires_managed_budget(thread_id) -> bool`을 구현할 수 있습니다. 이 동기 가상 메서드는 영속화된 관리 예산 은행의 거부 의무를 읽습니다. 엔진의 네이티브 비동기 파사드가 이 메서드를 호출하며, 바인딩은 Python 재정의 메서드를 실행할 때 GIL을 획득합니다. 체크포인트 상태에서 은행 정보를 제거하거나 체크포인트를 삭제해도 실제 영속 의무를 보고해야 합니다. 재정의 메서드를 생략하면 `False`를 반환하는 대신 지원되지 않는 백엔드라는 명시적인 네이티브 오류가 유지됩니다.
 
