@@ -1,0 +1,18 @@
+# Official MCP Python SDK (current line: serves the 2025-11-25 handshake and
+# 2026-07-28) and the test tooling of NeoGraph's MCP interop suites, pinned.
+# Resolved set on CPython 3.12.
+mcp==2.3.0
+mcp-types==2.3.0
+pydantic==2.14.1
+pydantic-core==2.50.1
+anyio==4.15.1
+httpx==0.28.1
+httpx2==2.13.1
+httpcore2==2.13.1
+uvicorn==0.54.0
+starlette==1.7.0
+sse-starlette==3.5.0
+jsonschema==4.26.0
+referencing==0.37.0
+certifi==2026.7.22
+pytest==9.1.1

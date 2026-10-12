@@ -1,0 +1,116 @@
+name: MCP interop
+# NeoGraph's MCP server and client against the official MCP SDKs, pinned:
+#   - Python: mcp 2.3.0 (client and server) and mcp 1.30.0 (FastMCP, as a server);
+#   - TypeScript: @modelcontextprotocol/sdk 1.32.1, @modelcontextprotocol/client and
+#     @modelcontextprotocol/server 2.3.1, on Node 24 LTS.
+# Every message NeoGraph's server emits, and every message the official clients
+# send it, is also validated against the MCP 2025-11-25 schema.json at a pinned
+# commit. The suites live in bindings/python/tests/interop/mcp.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'src/mcp/**'
+      - 'include/neograph/mcp/**'
+      - 'src/async/**'
+      - 'include/neograph/async/**'
+      - 'bindings/python/src/bind_mcp.cpp'
+      - 'bindings/python/tests/interop/mcp/**'
+      - 'tests/fixtures/mcp_interop_probe_server.cpp'
+      - 'examples/59_mcp_server.cpp'
+      - 'examples/60_harness_mcp_server.cpp'
+      - '.github/workflows/mcp-interop.yml'
+  pull_request:
+    paths:
+      - 'src/mcp/**'
+      - 'include/neograph/mcp/**'
+      - 'src/async/**'
+      - 'include/neograph/async/**'
+      - 'bindings/python/src/bind_mcp.cpp'
+      - 'bindings/python/tests/interop/mcp/**'
+      - 'tests/fixtures/mcp_interop_probe_server.cpp'
+      - 'examples/59_mcp_server.cpp'
+      - 'examples/60_harness_mcp_server.cpp'
+      - '.github/workflows/mcp-interop.yml'
+  schedule:
+    - cron: '30 18 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: mcp-interop-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+jobs:
+  mcp-interop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SUITE: bindings/python/tests/interop/mcp
+      # modelcontextprotocol/modelcontextprotocol main on 2026-10-12; the last
+      # schema change is 271ecc9a (2026-07-28).
+      MCP_SCHEMA_COMMIT: 1f520964b295d58494d944f2aea8a5ab51c79f77
+      MCP_SCHEMA_SHA256: 268a5f82ba70fd7e4b6dc4aa1e64f116f74b4d0edcb69dc046829c79dd4e97e7
+      BUILD: build-mcp-interop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+      - name: Install build dependencies
+        run: |
+          bash scripts/ci_apt_install.sh cmake ninja-build build-essential pkg-config \
+            libssl-dev libcurl4-openssl-dev libsqlite3-dev
+      - name: Install the pinned SDKs
+        run: |
+          python -m venv "$RUNNER_TEMP/venv-mcp"
+          "$RUNNER_TEMP/venv-mcp/bin/pip" install -q -r "$SUITE/requirements-mcp-interop.txt"
+          python -m venv "$RUNNER_TEMP/venv-mcp1"
+          "$RUNNER_TEMP/venv-mcp1/bin/pip" install -q -r "$SUITE/requirements-mcp1-interop.txt"
+          mkdir -p "$RUNNER_TEMP/mcp-node"
+          cp "$SUITE/package.json" "$SUITE/package-lock.json" "$RUNNER_TEMP/mcp-node/"
+          (cd "$RUNNER_TEMP/mcp-node" && npm ci --ignore-scripts --no-audit --no-fund)
+      - name: Fetch the MCP 2025-11-25 schema
+        run: |
+          mkdir -p "$RUNNER_TEMP/mcp-schema/2025-11-25"
+          curl -fsSL -o "$RUNNER_TEMP/mcp-schema/2025-11-25/schema.json" \
+            "https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/$MCP_SCHEMA_COMMIT/schema/2025-11-25/schema.json"
+          echo "$MCP_SCHEMA_SHA256  $RUNNER_TEMP/mcp-schema/2025-11-25/schema.json" | sha256sum -c -
+      - name: Build NeoGraph's MCP server, client and Python binding
+        run: |
+          cmake -S . -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DNEOGRAPH_BUILD_MCP=ON -DNEOGRAPH_BUILD_MCP_CLIENT=ON -DNEOGRAPH_BUILD_MCP_SERVER=ON \
+            -DNEOGRAPH_BUILD_MCP_HTTP_SERVER=ON -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_PROGRAM=ON \
+            -DNEOGRAPH_BUILD_SQLITE=ON -DNEOGRAPH_BUILD_POSTGRES=OFF -DNEOGRAPH_BUILD_PYBIND=ON \
+            -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_TESTS=ON \
+            -DPython3_EXECUTABLE="$RUNNER_TEMP/venv-mcp/bin/python"
+          cmake --build "$BUILD" --parallel --target _neograph neograph_mcp_interop_probe \
+            example_mcp_server example_harness_mcp_server
+      - name: Official TypeScript clients against NeoGraph's server
+        env:
+          SDK_NODE_MODULES: ${{ runner.temp }}/mcp-node
+          NG_PYTHON: ${{ runner.temp }}/venv-mcp/bin/python
+          NG_MCP_TRANSCRIPTS: ${{ runner.temp }}/mcp-transcripts
+        run: |
+          mkdir -p "$NG_MCP_TRANSCRIPTS"
+          export NEOGRAPH_BUILD_DIR="$PWD/$BUILD"
+          cd "$SUITE/ts" && node --test --test-reporter=spec mcp_server_ts_sdk_client.test.cjs
+      - name: Official Python clients and servers, NeoGraph's client, schema check
+        env:
+          NG_MCP_NODE_DEPS: ${{ runner.temp }}/mcp-node
+          NG_MCP1_PYTHON: ${{ runner.temp }}/venv-mcp1/bin/python
+          NG_MCP_SCHEMA_DIR: ${{ runner.temp }}/mcp-schema
+          NG_MCP_TRANSCRIPTS: ${{ runner.temp }}/mcp-transcripts
+        run: |
+          export NEOGRAPH_BUILD_DIR="$PWD/$BUILD" PYTHONPATH="$PWD/$BUILD:$PWD/bindings/python"
+          "$RUNNER_TEMP/venv-mcp/bin/python" -m pytest -p no:cacheprovider -rfE "$SUITE"
+      - name: Upload wire transcripts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-interop-transcripts
+          path: ${{ runner.temp }}/mcp-transcripts
+          if-no-files-found: ignore

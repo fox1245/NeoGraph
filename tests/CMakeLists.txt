@@ -316,6 +316,11 @@ endif()
 
 if(NEOGRAPH_BUILD_MCP_HTTP_SERVER)
     target_sources(neograph_tests PRIVATE test_mcp_http_server.cpp)
+
+    # The NeoGraph MCP server the official-SDK interop suites
+    # (bindings/python/tests/interop/mcp) talk to over stdio and HTTP.
+    add_executable(neograph_mcp_interop_probe fixtures/mcp_interop_probe_server.cpp)
+    target_link_libraries(neograph_mcp_interop_probe PRIVATE neograph::mcp_http_server)
 endif()
 
 if(NEOGRAPH_BUILD_MCP_CLIENT AND TARGET neograph_harness)

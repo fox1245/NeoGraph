@@ -1,0 +1,3 @@
+# The MCP Python SDK v1 line (FastMCP), which most deployed servers still run;
+# installed in its own environment (NG_MCP1_PYTHON).
+mcp==1.30.0
