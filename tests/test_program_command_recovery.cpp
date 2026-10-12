@@ -16,6 +16,8 @@
 // #403: reconciling a stopped call as Completed continues main().
 // #404: a plan that stopped before its first Core checkpoint is reconciled,
 // as a JavaScript call in that state is, instead of P_RUN_RECOVERY_BLOCKED.
+// #405: a fork of a paused call replays the provider call the paused
+// invocation made before it asked, instead of sending and charging it again.
 
 #include "program_resume_fixture.h"
 
@@ -245,7 +247,53 @@ TEST(ProgramCommandRecovery, AStopInsideAJoinContinuesItsMembers) {
     EXPECT_EQ(finished_runs(stopped.world, "ok:a"), 1) << "the first member is not run again";
 }
 
+TEST(ProgramCommandRecovery, AForkReplaysTheCallThePausedInvocationMade) {
+    // #405: the call asks after it called the provider. A fork of the pause
+    // replays that provider call, as a resume of the source does: it is
+    // neither sent nor charged again.
+    TempDir live("fork-live");
+    World   world(next_world_id());
+    auto    peer = std::make_shared<Peer>(&world.crash.alive);
+    Host    host(world, peer, live.path);
+    const auto version = host.admit(ProgramSource::from_javascript(
+        "fork.js", javascript_program(R"JS(
+  const reply = yield ng.callCore("main", {value: "llm-ask:a"}, "only");
+  return {out: [reply.out]};)JS")));
+    const auto paused = host.run(version, world.run_id(), json::object());
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << describe(paused);
+    ASSERT_EQ(sent_to(*peer, "a"), 1);
+    const auto forked = host.fork(version, paused, world.run_id("run-fork"), json{{"decision", "d1"}},
+                                  paused.interrupt()->pending_input->call_id());
+    ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed) << describe(forked);
+    EXPECT_EQ(forked.output(), (json{{"out", json::array({"reply-a/d1"})}}));
+    EXPECT_EQ(sent_to(*peer, "a"), 1) << "the fork sent the paused invocation's call again";
+    EXPECT_EQ(forked.remaining_budget().model_tokens, paused.remaining_budget().model_tokens)
+        << "the fork charged the call's tokens again";
+    EXPECT_EQ(forked.remaining_budget().monetary_microunits, paused.remaining_budget().monetary_microunits)
+        << "the fork charged the call's money again";
+}
+
 #endif
+
+TEST(ProgramCommandRecovery, AForkOfAPausedPlanCallReplaysItsProviderCall) {
+    // #405, in a typed plan: the plan's one call asks after it called the
+    // provider, and a fork of the pause replays the call.
+    TempDir live("plan-fork-live");
+    World   world(next_world_id());
+    auto    peer = std::make_shared<Peer>(&world.crash.alive);
+    Host    host(world, peer, live.path);
+    const auto version = host.admit(ProgramSource::from_cpp_builder(
+        "fork-plan", 2, plan_program(json{{"op", "call_core"}})));
+    const auto paused = host.run(version, world.run_id(), json{{"value", "llm-ask:a"}});
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << describe(paused);
+    ASSERT_EQ(sent_to(*peer, "a"), 1);
+    const auto forked = host.fork(version, paused, world.run_id("run-fork"), json{{"decision", "d1"}},
+                                  paused.interrupt()->pending_input->call_id());
+    ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed) << describe(forked);
+    EXPECT_EQ(sent_to(*peer, "a"), 1) << "the fork sent the paused invocation's call again";
+    EXPECT_EQ(forked.remaining_budget().model_tokens, paused.remaining_budget().model_tokens);
+    EXPECT_EQ(forked.remaining_budget().monetary_microunits, paused.remaining_budget().monetary_microunits);
+}
 
 TEST(ProgramCommandRecovery, APlanStoppedBeforeItsFirstCheckpointAsksToReconcile) {
     // #404: a plan sequence stops after it started, before its first call

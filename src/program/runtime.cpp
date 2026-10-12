@@ -394,6 +394,28 @@ std::string core_thread_identity(std::string_view run_id,
     return detail::sha256_identity("program-core-thread/v1", identity);
 }
 
+// #405: for a run that is a fork, the source whose provider calls the fork
+// repeats, as the fork's attempts replay them from the source's journal: the
+// source's attempt at the fork is the one before the fork's first.
+std::optional<detail::RunControl::ForkProviderReplay> fork_provider_replay_of(
+    const ProgramTransitionStore& transitions, graph::CheckpointStore& checkpoints,
+    std::string_view owner_scope, const ProgramRunRecord& record) {
+    const auto source_run_id = record.fork_source_run_id();
+    const auto source_checkpoint_id = record.fork_source_checkpoint_id();
+    if (!source_run_id || !source_checkpoint_id) return std::nullopt;
+    const auto forked = checkpoints.load_by_id(*source_checkpoint_id);
+    if (!forked) return std::nullopt;
+    const auto source = transitions.load(owner_scope, *source_run_id);
+    if (!source || !source->exact_checkpoint()) return std::nullopt;
+    const auto events = transitions.load_events(owner_scope, record.run_id());
+    if (events.empty() || events.front().attempt == 0) return std::nullopt;
+    const auto generation = source->exact_checkpoint()->core_generation_id;
+    return detail::RunControl::ForkProviderReplay{
+        source->run_id(), source->program_version_id(), generation,
+        core_thread_identity(source->run_id(), generation), forked->thread_id,
+        events.front().attempt - 1};
+}
+
 // #398: the run a recorded result was written by, which its provider
 // evidence is bound to (owner scope aside).
 struct RecordCustody {
@@ -2242,9 +2264,38 @@ std::shared_ptr<graph::ProviderCallBroker> RunControl::resolve_core_provider_cal
             throw std::runtime_error("Program Core provider broker resolver is required");
         return {};
     }
-    const auto binding = resolver(ProgramCoreProviderCallContext{
-        owner_scope, program_version_id, run_id, operation_id, attempt, std::move(monetary),
-        std::move(journaled_usage)});
+    ProgramCoreProviderCallContext context{owner_scope,      program_version_id, run_id,
+                                           operation_id,     attempt,            std::move(monetary),
+                                           std::move(journaled_usage)};
+    if (fork_provider_replay) {
+        // #405: the Core threads the operation may run on (the root's, its
+        // own and every enclosing operation's), each with the source's thread
+        // of the same derivation.
+        const auto& fork = *fork_provider_replay;
+        ProgramCoreProviderCallReplaySource source;
+        source.run_id             = fork.run_id;
+        source.program_version_id = fork.program_version_id;
+        source.max_attempt        = fork.max_attempt;
+        // A call the fork continues from a checkpoint its source recorded
+        // (a paused plan branch, #386) runs on the source's own thread.
+        const auto add = [&source](std::string target, std::string origin) {
+            source.threads.emplace_back(origin, origin);
+            source.threads.emplace_back(std::move(target), std::move(origin));
+        };
+        const auto generation = materialized->root->compiled_plan_identity;
+        add(core_thread_identity(run_id, generation), fork.root_thread_id);
+        add(core_thread_identity(run_id, generation), fork.forked_thread_id);
+        for (std::size_t end = 0; end <= operation_id.size(); ++end) {
+            if (end < operation_id.size() && operation_id[end] != '.' && operation_id[end] != '/')
+                continue;
+            const auto enclosing = operation_id.substr(0, end);
+            if (enclosing.empty() || enclosing == "root") continue;
+            add(core_thread_identity(run_id, generation, enclosing),
+                core_thread_identity(fork.run_id, fork.generation_id, enclosing));
+        }
+        context.replay_source = std::move(source);
+    }
+    const auto binding = resolver(context);
     if (!binding || binding->owner_scope != owner_scope ||
         binding->program_version_id != program_version_id ||
         binding->run_id != run_id || binding->operation_id != operation_id ||
@@ -6426,6 +6477,13 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
         std::move(target_pinned), binding_fingerprint, std::move(persisted), canonical,
         target_thread_id, 0, std::move(invocation.events), impl_->deadline_pool.get_executor(),
          impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions);
+    // #405: the fork's first attempt repeats the provider calls the paused
+    // invocation made; a journaling broker replays them from the source.
+    control->fork_provider_replay = detail::RunControl::ForkProviderReplay{
+        source_record->run_id(), source_record->program_version_id(),
+        checkpoint_identity.core_generation_id,
+        core_thread_identity(source_record->run_id(), checkpoint_identity.core_generation_id),
+        checkpoint_identity.core_thread_id, source_record->continuation().attempt};
     control->set_hook_runtime(impl_->config.hook_runtime);
     control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
     control->set_core_provider_call_resolver(
@@ -8317,6 +8375,8 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions,
             std::nullopt, record->logical_run_id());
         control->recover_plan_without_checkpoint = recover_plan_without_checkpoint;
+        control->fork_provider_replay =
+            fork_provider_replay_of(*impl_->config.transitions, *impl_->config.checkpoints, owner_scope, *record);
         impl_->commit_active_child(control, global_quota);
         if (!record->invocation().parent_run_id.empty())
             impl_->bind_budgeted_child_completion(
@@ -8641,6 +8701,8 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         std::move(resume_value.events), impl_->deadline_pool.get_executor(),
         impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions,
         std::nullopt, previous->logical_run_id());
+    control->fork_provider_replay =
+        fork_provider_replay_of(*impl_->config.transitions, *impl_->config.checkpoints, owner_scope, *previous);
     impl_->commit_active_child(control, global_quota);
     if (!previous->invocation().parent_run_id.empty())
         impl_->bind_budgeted_child_completion(control, owner_scope,
@@ -8979,6 +9041,8 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
             impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
             impl_->config.state_store, impl_->config.transitions, std::nullopt,
             previous->logical_run_id());
+        live_control->fork_provider_replay =
+            fork_provider_replay_of(*impl_->config.transitions, *impl_->config.checkpoints, owner_scope, *previous);
         impl_->commit_active_child(live_control, global_quota);
         if (!previous->invocation().parent_run_id.empty())
             impl_->bind_budgeted_child_completion(live_control, owner_scope,

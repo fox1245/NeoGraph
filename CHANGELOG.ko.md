@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=7961091fdd462d316ae7f1ce4dc3689a53aec7e7acab98ad10a8b8496b0347b1 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=248daa70d8d20c9da1789e97bfa71f498930ec80f1442b9d0aff07140367f790 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -107,6 +107,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 수정됨
 
+- **Program: 포크가 이어 가는 호출의 provider 호출을 재생합니다 (#405).** 일시 정지한 run의 포크는 일시 정지한 호출을 포크의 run으로 다시 실행했고, 호출을 run 기준으로 저장하는 SQLite provider 저널은 그 호출이 질문하기 전에 한 provider 호출을 다시 보내고 다시 청구했습니다. 원본의 재개는 이를 재생합니다. 이제 포크의 모든 시도는 브로커에 원본 run(`ProgramCoreProviderCallContext::replay_source`)을 알려 주고, 저널은 같은 호출에 대한 원본의 기록, 곧 포크 전에 원본의 Core 스레드의 같은 슬롯에 기록된 같은 요청을 넘겨받습니다. 결과는 포크의 dispatch id로 다시 인코딩되고 행은 원본의 시도 번호를 유지하므로, 그 호출은 다시 보내지지도 청구되지도 않습니다. 결과를 알 수 없는 원본 호출은 포크에서도 불확실한 상태로 남습니다. 저널이 없는 프로세스 내 브로커는 노드 재시도와 마찬가지로 여전히 다시 보냅니다.
 - **Program: 체크포인트를 게시하기 전에 멈춘 typed plan이 막히지 않고 복구됩니다 (#404).** replay-safe가 아니고 체크포인트를 게시하지 않은 plan에 대해 `reconnect()`는 `P_RUN_RECOVERY_BLOCKED`를 발생시켰습니다. 이제 JavaScript `callCore`의 규칙(#402)을 따릅니다. 각 plan 호출은 plan 순서대로 자신이 시작한 Core 실행을 그 실행의 최신 체크포인트에서 이어 가고, 아무것도 저장하지 않은 첫 호출은 그 연산을 가리키는 `pending_effect`(`core_node` `"plan"`)와 함께 run을 `Interrupted`로 돌려줍니다. `Completed`로 `reconcile()`하면 결과를 그 연산의 결과로 기록하고 plan은 거기서부터 이어지며, `Unknown`은 run을 `AmbiguousEffect`로 남깁니다.
 - **Program: 멈춘 JavaScript `callCore`가 자신의 Core 체크포인트에서 이어집니다 (#402).** 프로세스가 `callCore` 안에서 멈춘 run을 `reconnect()`는 호출의 Core가 체크포인트를 저장했어도 조정을 위해 돌려주었으므로, 끝났거나 run이 아직 게시하지 않은 질문에서 일시 정지한 호출도 손으로 조정해야 했습니다. 이제 복구는 대기 중인 명령의 각 호출을 그 호출 자신의 Core 스레드의 최신 체크포인트에서 아무 답도 주지 않고 이어 갑니다. 끝난 호출은 결과를 재생하고, 일시 정지한 호출은 다시 질문하며, join의 멤버도 같은 방식으로 이어집니다. 체크포인트를 저장하지 않은 호출은 흔적 없이 시작했을 수 있으므로, 시작하지 않았음이 확실한 경우(명령 저널이 시작을 기록하지 않은 타임아웃 있는 `ng.await`)가 아니면 여전히 조정을 위해 돌아옵니다. 최신 체크포인트가 `interrupt_before`나 `interrupt_after` 일시 정지인 호출도 그렇습니다. 복구는 답하지 않은 게이트를 결코 통과하지 않습니다. 재시작한 시도는 이제 연산을 바인딩할 때 재시작 전에 저널에 기록한 호출의 토큰을 금액과 마찬가지로 청구받으므로, 체크포인트에서 재생되는 호출은 한 번만 청구됩니다.
 - **Program: JavaScript 명령을 Completed로 조정하면 `main()`이 이어집니다 (#403).** 명령은 run의 남은 wall time과 Core 스텝 전부를 예약하는데 조정된 명령이 이를 그대로 가지고 있었으므로, `main()`은 조정 직후 `TimedOut`("Program wall-time budget (0 ms) expired")으로 끝났습니다. run이 앞선 명령의 체크포인트를 가지고 있을 때는 조정을 위한 일시 정지가 조정이 정산할 예약까지 풀어 버렸습니다. 이제 명령을 조정하면 그 wall time과 Core 스텝이 run에 돌아오고, 일시 정지는 조정 때까지 예약을 유지합니다. 명령이 예약한 토큰과 금액은 무엇을 썼는지 알 수 없으므로 소비된 것으로 남습니다.
