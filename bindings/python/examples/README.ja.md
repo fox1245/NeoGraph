@@ -51,8 +51,8 @@ python 01_minimal.py
 | OpenTelemetry で実行をトレースする | [`20_otel_tracing.py`](20_otel_tracing.py) | yes |
 | I/O 中心のツールを並行して実行する | [`25_async_tools.py`](25_async_tools.py) | yes |
 | MCP サーバーのツールを使う | [`26_mcp_tools.py`](26_mcp_tools.py) | yes |
-| エージェントを A2A で公開する | [`27_a2a_server.py`](27_a2a_server.py) | service |
-| エージェントを ACP で公開する | [`28_acp_agent.py`](28_acp_agent.py) | service |
+| エージェントを A2A で公開する | [`27_a2a_server.py`](27_a2a_server.py) | yes |
+| エージェントを ACP で公開する | [`28_acp_agent.py`](28_acp_agent.py) | yes |
 | Reflexion、Self-Ask、ディベートを試す | [`11_reflexion.py`](11_reflexion.py) | key |
 | エージェントに自分のグラフを書き換えさせる | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | yes |
 

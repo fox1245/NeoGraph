@@ -51,8 +51,8 @@ python 01_minimal.py
 | 用 OpenTelemetry 追踪运行 | [`20_otel_tracing.py`](20_otel_tracing.py) | yes |
 | 并发运行 I/O 密集型工具 | [`25_async_tools.py`](25_async_tools.py) | yes |
 | 使用 MCP 服务器的工具 | [`26_mcp_tools.py`](26_mcp_tools.py) | yes |
-| 通过 A2A 托管我的智能体 | [`27_a2a_server.py`](27_a2a_server.py) | service |
-| 通过 ACP 托管我的智能体 | [`28_acp_agent.py`](28_acp_agent.py) | service |
+| 通过 A2A 托管我的智能体 | [`27_a2a_server.py`](27_a2a_server.py) | yes |
+| 通过 ACP 托管我的智能体 | [`28_acp_agent.py`](28_acp_agent.py) | yes |
 | 尝试 Reflexion、Self-Ask 或辩论 | [`11_reflexion.py`](11_reflexion.py) | key |
 | 让智能体改写自己的图 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | yes |
 

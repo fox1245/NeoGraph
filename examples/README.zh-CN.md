@@ -60,7 +60,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | 调用远程 A2A 智能体 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes |
 | 通过 ACP 向编辑器提供我的图 | [`39_acp_server.cpp`](39_acp_server.cpp) | yes |
 | 以 MCP 服务器的形式提供工具 | [`59_mcp_server.cpp`](59_mcp_server.cpp) | yes |
-| 在 ReAct 循环中使用 MCP 工具 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | key |
+| 在 ReAct 循环中使用 MCP 工具 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | yes |
 | 通过 gRPC 调用另一个进程中的工具 | [`57_grpc_remote_tool.cpp`](57_grpc_remote_tool.cpp) | yes |
 | 尝试 Reflexion 之类的推理模式 | [`15_reflexion.cpp`](15_reflexion.cpp) | key |
 | 对接本地模型服务器运行 | [`31_local_transformer.cpp`](31_local_transformer.cpp) | service |

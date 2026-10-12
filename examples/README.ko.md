@@ -60,7 +60,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | 원격 A2A 에이전트 호출하기 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes |
 | ACP로 내 그래프를 편집기에 제공하기 | [`39_acp_server.cpp`](39_acp_server.cpp) | yes |
 | MCP 서버로 도구 제공하기 | [`59_mcp_server.cpp`](59_mcp_server.cpp) | yes |
-| ReAct 루프에서 MCP 도구 사용하기 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | key |
+| ReAct 루프에서 MCP 도구 사용하기 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | yes |
 | gRPC로 다른 프로세스의 도구 호출하기 | [`57_grpc_remote_tool.cpp`](57_grpc_remote_tool.cpp) | yes |
 | Reflexion 같은 추론 패턴 시험하기 | [`15_reflexion.cpp`](15_reflexion.cpp) | key |
 | 로컬 모델 서버에 연결해 실행하기 | [`31_local_transformer.cpp`](31_local_transformer.cpp) | service |

@@ -51,8 +51,8 @@ python 01_minimal.py
 | OpenTelemetry로 실행 추적하기 | [`20_otel_tracing.py`](20_otel_tracing.py) | yes |
 | I/O 중심 도구를 동시에 실행하기 | [`25_async_tools.py`](25_async_tools.py) | yes |
 | MCP 서버의 도구 사용하기 | [`26_mcp_tools.py`](26_mcp_tools.py) | yes |
-| 내 에이전트를 A2A로 제공하기 | [`27_a2a_server.py`](27_a2a_server.py) | service |
-| 내 에이전트를 ACP로 제공하기 | [`28_acp_agent.py`](28_acp_agent.py) | service |
+| 내 에이전트를 A2A로 제공하기 | [`27_a2a_server.py`](27_a2a_server.py) | yes |
+| 내 에이전트를 ACP로 제공하기 | [`28_acp_agent.py`](28_acp_agent.py) | yes |
 | Reflexion, Self-Ask, 토론 시험하기 | [`11_reflexion.py`](11_reflexion.py) | key |
 | 에이전트가 자기 그래프를 고쳐 쓰게 하기 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | yes |
 

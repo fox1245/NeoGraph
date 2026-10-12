@@ -50,8 +50,8 @@ Pick the goal, read the example.
 | trace a run with OpenTelemetry | [`20_otel_tracing.py`](20_otel_tracing.py) | yes |
 | run I/O-bound tools concurrently | [`25_async_tools.py`](25_async_tools.py) | yes |
 | use tools from an MCP server | [`26_mcp_tools.py`](26_mcp_tools.py) | yes |
-| host my agent over A2A | [`27_a2a_server.py`](27_a2a_server.py) | service |
-| host my agent over ACP | [`28_acp_agent.py`](28_acp_agent.py) | service |
+| host my agent over A2A | [`27_a2a_server.py`](27_a2a_server.py) | yes |
+| host my agent over ACP | [`28_acp_agent.py`](28_acp_agent.py) | yes |
 | try Reflexion, Self-Ask or a debate | [`11_reflexion.py`](11_reflexion.py) | key |
 | let an agent rewrite its own graph | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | yes |
 
