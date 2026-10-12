@@ -22,6 +22,7 @@
 #include <iomanip>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -179,7 +180,10 @@ struct MCPHttpServer::Impl {
         std::unique_ptr<MCPServer>                                           server;
         std::mutex                                                           dispatch_mutex;
         std::mutex                                                           pending_mutex;
-        std::unordered_map<std::string, std::shared_ptr<std::promise<json>>> pending;
+        /// Open POSTs by request id: a response, or nullopt when the call
+        /// ended without one (the client cancelled it).
+        std::unordered_map<std::string, std::shared_ptr<std::promise<std::optional<json>>>>
+            pending;
         /// When a request for this session last started or ended.
         std::atomic<Clock::rep> last_used{Clock::now().time_since_epoch().count()};
         /// Requests being handled now. A busy session never expires.
@@ -477,19 +481,24 @@ struct MCPHttpServer::Impl {
             }
 
             std::weak_ptr<Session> weak = session;
-            session->server->set_response_sink([weak](const json& envelope) {
+            const auto settle = [weak](const json& id, std::optional<json> outcome) {
                 auto current = weak.lock();
-                if (!current || !envelope.contains("id")) return;
-                std::shared_ptr<std::promise<json>> promise;
+                if (!current) return;
+                std::shared_ptr<std::promise<std::optional<json>>> promise;
                 {
                     std::lock_guard lock(current->pending_mutex);
-                    auto            it = current->pending.find(request_key(envelope["id"]));
+                    auto            it = current->pending.find(request_key(id));
                     if (it == current->pending.end()) return;
                     promise = std::move(it->second);
                     current->pending.erase(it);
                 }
-                promise->set_value(envelope);
-            });
+                promise->set_value(std::move(outcome));
+            };
+            session->server->set_response_sink(
+                [settle](const json& envelope) {
+                    if (envelope.contains("id")) settle(envelope["id"], envelope);
+                },
+                [settle](const json& id) { settle(id, std::nullopt); });
 
             std::lock_guard lock(sessions_mutex);
             std::string     id;
@@ -615,13 +624,13 @@ struct MCPHttpServer::Impl {
         }
 
         const bool                          has_id = envelope.contains("id");
-        std::shared_ptr<std::promise<json>> promise;
-        std::future<json>                   future;
+        std::shared_ptr<std::promise<std::optional<json>>> promise;
+        std::future<std::optional<json>>                   future;
         std::string                         key;
         bool                                owns_waiter = false;
         if (has_id) {
             key     = request_key(envelope["id"]);
-            promise = std::make_shared<std::promise<json>>();
+            promise = std::make_shared<std::promise<std::optional<json>>>();
             future  = promise->get_future();
             std::lock_guard lock(session->pending_mutex);
             owns_waiter = session->pending.emplace(key, promise).second;
@@ -677,19 +686,17 @@ struct MCPHttpServer::Impl {
             http_error(response, 504, -32001, "MCP tool response timed out", envelope["id"]);
             return;
         }
-        const json answer = future.get();
-        if (answer.contains("error") && answer["error"].is_object() &&
-            answer["error"].value("code", 0) == -32800) {
-            // The client cancelled this call: MCP asks for no response to it,
-            // and the official clients report one for an id they gave up as
-            // an error. The POST still needs an answer, so it gets an event
-            // stream that ends without one.
+        const auto answer = future.get();
+        if (!answer) {
+            // The client cancelled this call, so it has no response (MCP
+            // cancellation). The POST still needs an answer: an event stream
+            // that ends without one.
             response.status = 200;
             response.set_content(std::string(), "text/event-stream");
             return;
         }
         response.status = 200;
-        response.set_content(answer.dump(), "application/json");
+        response.set_content(answer->dump(), "application/json");
     }
 
     void handle_get(const httplib::Request& request, httplib::Response& response) const {

@@ -41,10 +41,13 @@ struct NEOGRAPH_API MCPServerConfig {
  * propagating that token into their own async work.
  *
  * A handler's failure keeps its class on the wire (reference, "Protocol
- * failure mapping"): cancellation is JSON-RPC error -32800, a
- * HookBoundaryBlocked -32010, a NodeInterrupt -32011, and every other failure
- * an isError result whose `_meta["io.neograph/failure"]` holds its stable code
- * (graph::classify_failure).
+ * failure mapping"): a HookBoundaryBlocked is JSON-RPC error -32010, a
+ * NodeInterrupt -32011, a call stop() cancelled -32000, and every other
+ * failure an isError result whose `_meta["io.neograph/failure"]` holds its
+ * stable code (graph::classify_failure). A call the client cancelled with
+ * `notifications/cancelled` gets no response at all, on every transport (MCP:
+ * the receiver SHOULD NOT respond); a transport that holds the request open
+ * learns that it ended through the NoResponseSink.
  */
 class NEOGRAPH_API MCPServer {
   public:
@@ -60,6 +63,12 @@ class NEOGRAPH_API MCPServer {
 
     /// Receives complete JSON-RPC response envelopes produced asynchronously.
     using ResponseSink = std::function<void(const json&)>;
+
+    /// Receives the id of a request that ended without a response: the client
+    /// cancelled it, so no response is sent. A transport that keeps the
+    /// request open (an HTTP POST) closes it here; nothing must reach the
+    /// client as a response to that id.
+    using NoResponseSink = std::function<void(const json& id)>;
 
     explicit MCPServer(MCPServerConfig config);
     ~MCPServer();
@@ -87,7 +96,12 @@ class NEOGRAPH_API MCPServer {
     void run();
 
     /// Set the destination for asynchronously completed tool-call responses.
+    /// A call the client cancelled produces no response.
     void set_response_sink(ResponseSink sink);
+
+    /// As above; @p no_response receives the id of each call that ends
+    /// without a response. Both sinks are replaced together.
+    void set_response_sink(ResponseSink sink, NoResponseSink no_response);
 
     /// Cooperatively cancel outstanding calls and drain the worker pool.
     void stop();

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=489ca2ce11e7f8849245f35f0f79fb10480c4ef9ebb6d01fe29661c0eb33d97e -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=b7f0383501f9615dcf697aef35ce5c67c6d3ff08733be6d475b5d042daa8f499 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -579,7 +579,7 @@ public:
 
 | 类别（代码） | MCP `tools/call`（`MCPServer`） | gRPC `GraphService` | gRPC `ToolService.CallTool` | A2A 任务（`A2AServer`） | ACP `session/prompt`（`ACPServer`） |
 |------|------|------|------|------|------|
-| 客户端取消（`NG.Cancelled`）：`notifications/cancelled`、gRPC 取消 | stdio（`run`）：不应答；HTTP（`MCPHttpServer`）：同样不应答，POST 以空的 `text/event-stream` 结束；读取应答 sink 的其他传输：JSON-RPC 错误 `-32800`，`data.code` | `CANCELLED` | `CANCELLED` | `CancelTask`：`CANCELED`；stream 也以此状态关闭 | `session/cancel`：`stopReason: "cancelled"` |
+| 客户端取消（`NG.Cancelled`）：`notifications/cancelled`、gRPC 取消 | 任何传输上都不应答：stdio（`run`）不发送任何内容；HTTP（`MCPHttpServer`）以空的 `text/event-stream` 结束 POST；读取应答 sink 的传输改为通过其 `NoResponseSink` 收到该 id | `CANCELLED` | `CANCELLED` | `CancelTask`：`CANCELED`；stream 也以此状态关闭 | `session/cancel`：`stopReason: "cancelled"` |
 | 服务器取消（`NG.Cancelled`）：`stop()`，或处理器自身的工作 | JSON-RPC 错误 `-32000`（`stop()`）或 `-32603`，`data.code` | `CANCELLED` | `CANCELLED` | `CANCELED` | JSON-RPC 错误 `-32800`，`data` `{code, retryable}` |
 | Hook 阻断（`NG.HookBlocked`） | JSON-RPC 错误 `-32010`，`data` `{code, invocation_id, state}` | `FAILED_PRECONDITION`，Hook 超时则为 `DEADLINE_EXCEEDED`；ErrorInfo metadata `invocation_id`、`state` | 与 `GraphService` 相同 | 没有 node 完成时为 `REJECTED`，否则为 `FAILED`；`metadata["neograph/failure"]` `{code, retryable}` | JSON-RPC 错误 `-32603`，`data` `{code, retryable}` |
 | 中断（`NG.Interrupted`） | JSON-RPC 错误 `-32011`，`data` `{code, reason, value}` | 已暂停的运行：`OK`、`interrupted`、`interrupt_node`、`interrupt_value_json`（流的 FINAL payload：`interrupt_value`） | `FAILED_PRECONDITION`，ErrorInfo metadata `reason`、`value` | `INPUT_REQUIRED`：原因作为 text，payload 作为 data part，`metadata["neograph/interrupt"]` `{node, checkpointId}`；后续 message 恢复运行 | 同一轮次内的 `session/request_permission`，其回答恢复运行；适配器或客户端无法回答时为带 `NG.Interrupted` 的 JSON-RPC 错误 `-32603` |

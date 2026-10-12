@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=44721ce0c61105b48ef97804504e90f95838e8412f062dd1296149ec1c803099 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=cc7841c6b839b6ffd7e5f54c32ac76a95b214a2d621969c731a72de7b54379e7 -->
 # 문제 해결
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -143,7 +143,7 @@ opaque convenience vector property는 Python list가 아닐 수 있다. iteratio
 
 상태가 `expired`이고 오류가 `run deadline elapsed before the tool started`인 도구 결과는 호출이 시작되기 전에 실행의 마감 시각이 지났다는 뜻이며, 도구와 그 Hook은 실행되지 않았습니다. 호출을 다시 시도하기보다 `RunMetadata::deadline`(Python `timeout_ms`, Program `wall_time_ms`)을 늘리세요. 실행의 마감 시각이나 클라이언트의 요청 타임아웃으로 멈춘 MCP 호출은 `timed_out`이며, 실행을 취소하면 진행 중인 MCP 호출이 즉시 멈춥니다.
 
-`MCPServer`는 클라이언트가 취소한 `tools/call`에 stdio에서는 응답하지 않고 HTTP에서는 `-32800`으로 응답하며, Hook 차단에는 `-32010`, 인터럽트에는 `-32011`로 응답합니다. 그 밖의 모든 실패는 `_meta["io.neograph/failure"].code`가 이름을 알려 주는 `isError` 결과이고, 그 텍스트는 예외 텍스트가 아니라 공개 메시지입니다(텍스트를 고르려면 `public_message`를 가진 `NodeFailureError`를 발생시키세요). `OK` 응답에서 `RunGraphResponse.error`를 읽던 gRPC 클라이언트는 이제 상태를 읽어야 합니다. 실패한 실행은 `google.rpc.ErrorInfo.reason`이 코드인, OK가 아닌 상태입니다. [프로토콜 실패 매핑](reference-en.md#protocol-failure-mapping)을 참고하세요.
+`MCPServer`는 클라이언트가 취소한 `tools/call`에 어떤 전송에서도 응답하지 않으며, Hook 차단에는 `-32010`, 인터럽트에는 `-32011`로 응답합니다. 그 밖의 모든 실패는 `_meta["io.neograph/failure"].code`가 이름을 알려 주는 `isError` 결과이고, 그 텍스트는 예외 텍스트가 아니라 공개 메시지입니다(텍스트를 고르려면 `public_message`를 가진 `NodeFailureError`를 발생시키세요). `OK` 응답에서 `RunGraphResponse.error`를 읽던 gRPC 클라이언트는 이제 상태를 읽어야 합니다. 실패한 실행은 `google.rpc.ErrorInfo`의 `metadata["code"]`에 코드가 담긴, OK가 아닌 상태입니다. [프로토콜 실패 매핑](reference-en.md#protocol-failure-mapping)을 참고하세요.
 
 올바른 UTF-8이 아닌 도구 출력이나 예외 메시지는 예전에는 빈 도구 메시지, 빈 MCP나 gRPC 페이로드, 또는 Python의 `UnicodeDecodeError`로 도착했습니다. 이제는 잘못된 형식의 시퀀스마다 U+FFFD로 바뀌어 도착합니다.
 

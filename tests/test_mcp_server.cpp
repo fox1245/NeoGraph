@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include <neograph/mcp/server.h>
 #include <neograph/graph/types.h>
 #include <neograph/hook_outbox.h>
@@ -106,6 +108,7 @@ struct CapturingSink {
     std::mutex mutex;
     std::condition_variable cv;
     std::vector<json> responses;
+    std::vector<json> unanswered;  ///< ids that ended without a response
 
     MCPServer::ResponseSink sink() {
         return [this](const json& response) {
@@ -113,6 +116,21 @@ struct CapturingSink {
             responses.push_back(response);
             cv.notify_all();
         };
+    }
+
+    MCPServer::NoResponseSink no_response() {
+        return [this](const json& id) {
+            std::lock_guard lock(mutex);
+            unanswered.push_back(id);
+            cv.notify_all();
+        };
+    }
+
+    bool wait_for_no_response(const json& id, std::chrono::milliseconds timeout = 5s) {
+        std::unique_lock lock(mutex);
+        return cv.wait_for(lock, timeout, [&] {
+            return std::find(unanswered.begin(), unanswered.end(), id) != unanswered.end();
+        });
     }
 
     json wait_for(const json& id, std::chrono::milliseconds timeout = 5s) {
@@ -333,7 +351,7 @@ TEST(MCPServerTest, CancellationReachesRequestScopedToken) {
     std::promise<void> entered;
     auto entered_future = entered.get_future();
     MCPServer server(config(1, 1));
-    server.set_response_sink(captured.sink());
+    server.set_response_sink(captured.sink(), captured.no_response());
     server.register_tool(echo_definition(),
         [&entered](const json&, const auto& cancel) {
             entered.set_value();
@@ -351,12 +369,45 @@ TEST(MCPServerTest, CancellationReachesRequestScopedToken) {
         {"requestId", "cancel-me"}, {"reason", "test"},
     })).is_null());
 
-    // A cancelled call is a JSON-RPC error with the cancellation code, never
-    // a tool result (reference, "Protocol failure mapping").
-    auto response = captured.wait_for("cancel-me");
-    ASSERT_TRUE(response.contains("error")) << response.dump();
-    EXPECT_EQ(response["error"]["code"], -32800);
-    EXPECT_EQ(response["error"]["data"]["code"], "NG.Cancelled");
+    // A call the client cancelled gets no response on any transport (MCP:
+    // the receiver SHOULD NOT respond; reference, "Protocol failure
+    // mapping"). The sink's owner learns that the call ended without one.
+    EXPECT_TRUE(captured.wait_for_no_response("cancel-me"));
+    EXPECT_TRUE(captured.wait_for("cancel-me", 200ms).is_null())
+        << captured.wait_for("cancel-me").dump();
+}
+
+TEST(MCPServerTest, AResponseSinkAloneGetsNothingForAClientCancelledCall) {
+    CapturingSink captured;
+    std::promise<void> entered;
+    auto entered_future = entered.get_future();
+    std::promise<void> finished;
+    auto finished_future = finished.get_future();
+    MCPServer server(config(1, 1));
+    server.set_response_sink(captured.sink());
+    server.register_tool(echo_definition(),
+        [&](const json& arguments, const auto& cancel) {
+            if (arguments["value"] == "after") return echo_result(arguments);
+            entered.set_value();
+            while (!cancel->is_cancelled()) std::this_thread::sleep_for(1ms);
+            finished.set_value();
+            cancel->throw_if_cancelled("inside test tool");
+            return CallToolResult{};
+        });
+    initialize(server);
+    EXPECT_TRUE(server.handle_message(request("gone", "tools/call", {
+        {"name", "echo"}, {"arguments", {{"value", "x"}}},
+    })).is_null());
+    ASSERT_EQ(entered_future.wait_for(2s), std::future_status::ready);
+    server.handle_message(notification("notifications/cancelled", {{"requestId", "gone"}}));
+    ASSERT_EQ(finished_future.wait_for(2s), std::future_status::ready);
+    // The worker is free again; the next call is answered, the cancelled one
+    // never is.
+    EXPECT_TRUE(server.handle_message(request("after", "tools/call", {
+        {"name", "echo"}, {"arguments", {{"value", "after"}}},
+    })).is_null());
+    EXPECT_TRUE(captured.wait_for("after").contains("result"));
+    EXPECT_TRUE(captured.wait_for("gone", 100ms).is_null());
 }
 
 TEST(MCPServerTest, BoundedQueueRejectsExcessAndDuplicateRequestIds) {
@@ -430,9 +481,8 @@ TEST(MCPServerTest, StopCancelsRunningAndPendingCalls) {
 }
 
 // MCP: the receiver of notifications/cancelled SHOULD NOT answer the request.
-// The stdio loop sends nothing for it (official clients report a response to
-// a cancelled id as an error), while a sink-driven transport such as HTTP
-// still ends the open request with -32800 (above).
+// The stdio loop sends nothing for it either (official clients report a
+// response to a cancelled id as an error).
 TEST(MCPServerTest, StdioSendsNoResponseForAClientCancelledCall) {
     MCPServer server(config(1, 1));
     std::atomic<bool> entered{false};

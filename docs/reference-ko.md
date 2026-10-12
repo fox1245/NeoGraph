@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=489ca2ce11e7f8849245f35f0f79fb10480c4ef9ebb6d01fe29661c0eb33d97e -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=b7f0383501f9615dcf697aef35ce5c67c6d3ff08733be6d475b5d042daa8f499 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -579,7 +579,7 @@ NeoGraph가 MCP, gRPC, A2A, ACP로 도구나 그래프나 에이전트를 제공
 
 | 분류(코드) | MCP `tools/call` (`MCPServer`) | gRPC `GraphService` | gRPC `ToolService.CallTool` | A2A task(`A2AServer`) | ACP `session/prompt`(`ACPServer`) |
 |------|------|------|------|------|------|
-| 클라이언트의 취소(`NG.Cancelled`): `notifications/cancelled`, gRPC 취소 | stdio(`run`): 응답 없음. HTTP(`MCPHttpServer`): 역시 응답 없음, POST는 빈 `text/event-stream`으로 끝남. 응답 sink를 읽는 그 밖의 전송: JSON-RPC 오류 `-32800`, `data.code` | `CANCELLED` | `CANCELLED` | `CancelTask`: `CANCELED`. stream도 이 상태로 닫힘 | `session/cancel`: `stopReason: "cancelled"` |
+| 클라이언트의 취소(`NG.Cancelled`): `notifications/cancelled`, gRPC 취소 | 어떤 전송에서도 응답 없음: stdio(`run`)는 아무것도 보내지 않음. HTTP(`MCPHttpServer`)는 POST를 빈 `text/event-stream`으로 끝냄. 응답 sink를 읽는 전송은 대신 `NoResponseSink`로 id를 받음 | `CANCELLED` | `CANCELLED` | `CancelTask`: `CANCELED`. stream도 이 상태로 닫힘 | `session/cancel`: `stopReason: "cancelled"` |
 | 서버의 취소(`NG.Cancelled`): `stop()`, 또는 핸들러 자신의 작업 | JSON-RPC 오류 `-32000`(`stop()`) 또는 `-32603`, `data.code` | `CANCELLED` | `CANCELLED` | `CANCELED` | JSON-RPC 오류 `-32800`, `data` `{code, retryable}` |
 | Hook 차단(`NG.HookBlocked`) | JSON-RPC 오류 `-32010`, `data` `{code, invocation_id, state}` | `FAILED_PRECONDITION`, Hook이 시간을 초과했으면 `DEADLINE_EXCEEDED`. ErrorInfo metadata `invocation_id`, `state` | `GraphService`와 같음 | 끝난 노드가 없으면 `REJECTED`, 그 외에는 `FAILED`. `metadata["neograph/failure"]` `{code, retryable}` | JSON-RPC 오류 `-32603`, `data` `{code, retryable}` |
 | 인터럽트(`NG.Interrupted`) | JSON-RPC 오류 `-32011`, `data` `{code, reason, value}` | 일시 정지한 실행: `OK`, `interrupted`, `interrupt_node`, `interrupt_value_json`(스트림의 FINAL 페이로드: `interrupt_value`) | `FAILED_PRECONDITION`, ErrorInfo metadata `reason`, `value` | `INPUT_REQUIRED`: 사유는 text, 페이로드는 data part, `metadata["neograph/interrupt"]` `{node, checkpointId}`. 후속 message가 실행을 재개 | 같은 턴 안의 `session/request_permission`, 그 응답이 실행을 재개. 어댑터나 클라이언트가 응답하지 못하면 `NG.Interrupted`를 담은 JSON-RPC 오류 `-32603` |

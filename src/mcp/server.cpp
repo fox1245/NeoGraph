@@ -49,7 +49,6 @@ CallToolResult tool_error(std::string message) {
 
 // JSON-RPC error codes of the run control signals (reference, "Protocol
 // failure mapping"). They never become a tool result a model could read.
-constexpr int kRequestCancelled = -32800;  // the LSP and MCP SDK RequestCancelled code
 constexpr int kServerError      = -32000;
 constexpr int kInternalError    = -32603;
 constexpr int kHookBlocked      = -32010;
@@ -61,11 +60,8 @@ constexpr int kInterrupted      = -32011;
 // public message crosses the wire, never what(): exception text can carry
 // paths, payloads or secrets.
 json failure_response(const std::exception_ptr& error, const graph::CancelToken& cancel,
-                      bool client_cancelled, bool stopping, const json& id) {
+                      bool stopping, const json& id) {
     auto verdict = graph::classify_failure(error, &cancel);
-    if (client_cancelled)
-        return rpc_error(kRequestCancelled, "Request cancelled", id,
-                         {{"code", "NG.Cancelled"}});
     if (stopping && cancel.is_cancelled())
         return rpc_error(kServerError, "MCP server is stopping", id, {{"code", "NG.Cancelled"}});
     const auto message = ::neograph::detail::public_failure_message(verdict);
@@ -227,10 +223,6 @@ struct MCPServer::Impl {
     std::atomic<bool> operational{false};
     std::atomic<bool> running{false};
     std::atomic<bool> stopping{false};
-    /// The stdio run loop answers nothing for a request the client cancelled
-    /// (MCP: the receiver SHOULD NOT respond). A sink-driven transport (HTTP)
-    /// still gets -32800, so the open request ends.
-    std::atomic<bool> silent_client_cancellation{false};
 
     std::mutex tools_mu;
     std::map<std::string, RegisteredTool> tools;
@@ -238,7 +230,13 @@ struct MCPServer::Impl {
     json                                  extensions        = json::object();
     json                                  client_extensions = json::object();
 
-    std::shared_ptr<ResponseSink> sink;
+    /// Where asynchronous outcomes go: a response, or the id of a call that
+    /// ends without one. Replaced together, read without a lock.
+    struct Sinks {
+        ResponseSink   response;
+        NoResponseSink no_response;
+    };
+    std::shared_ptr<const Sinks> sinks;
 
     std::mutex calls_mu;
     std::condition_variable calls_cv;
@@ -253,10 +251,22 @@ struct MCPServer::Impl {
 
     void emit(const json& envelope) noexcept {
         try {
-            auto current = std::atomic_load_explicit(&sink, std::memory_order_acquire);
-            if (current && *current) (*current)(envelope);
+            auto current = std::atomic_load_explicit(&sinks, std::memory_order_acquire);
+            if (current && current->response) current->response(envelope);
         } catch (...) {
             // A transport failure cannot safely be reported through itself.
+        }
+    }
+
+    // A call the client cancelled: MCP asks the receiver of
+    // notifications/cancelled not to respond, and the official clients
+    // report a response to an id they gave up as an error. No transport
+    // answers it; one that holds the request open is told it ended.
+    void end_without_response(const json& id) noexcept {
+        try {
+            auto current = std::atomic_load_explicit(&sinks, std::memory_order_acquire);
+            if (current && current->no_response) current->no_response(id);
+        } catch (...) {
         }
     }
 
@@ -337,11 +347,11 @@ struct MCPServer::Impl {
                 std::lock_guard lk(calls_mu);
                 active.erase(task->key);
             }
-            const bool client_cancelled = task->client_cancelled.load(std::memory_order_acquire);
-            if (failure && client_cancelled &&
-                silent_client_cancellation.load(std::memory_order_acquire))
+            if (failure && task->client_cancelled.load(std::memory_order_acquire)) {
+                end_without_response(task->id);
                 continue;
-            emit(failure ? failure_response(failure, *task->cancel, client_cancelled,
+            }
+            emit(failure ? failure_response(failure, *task->cancel,
                                             stopping.load(std::memory_order_acquire), task->id)
                          : rpc_result(shaped_call_result(result_json, protocol_version()),
                                       task->id));
@@ -630,7 +640,6 @@ void MCPServer::run(std::istream& in, std::ostream& out) {
         throw std::logic_error("MCP server run loop is already active");
     }
     std::mutex output_mu;
-    impl_->silent_client_cancellation.store(true, std::memory_order_release);
     set_response_sink([&out, &output_mu](const json& response) {
         std::lock_guard lk(output_mu);
         out << response.dump() << '\n';
@@ -665,8 +674,15 @@ void MCPServer::run() {
 }
 
 void MCPServer::set_response_sink(ResponseSink sink) {
-    std::atomic_store_explicit(&impl_->sink, std::make_shared<ResponseSink>(std::move(sink)),
-                               std::memory_order_release);
+    set_response_sink(std::move(sink), NoResponseSink{});
+}
+
+void MCPServer::set_response_sink(ResponseSink sink, NoResponseSink no_response) {
+    std::atomic_store_explicit(
+        &impl_->sinks,
+        std::shared_ptr<const Impl::Sinks>(
+            std::make_shared<Impl::Sinks>(Impl::Sinks{std::move(sink), std::move(no_response)})),
+        std::memory_order_release);
 }
 
 void MCPServer::stop() {

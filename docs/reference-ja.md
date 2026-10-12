@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=489ca2ce11e7f8849245f35f0f79fb10480c4ef9ebb6d01fe29661c0eb33d97e -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=b7f0383501f9615dcf697aef35ce5c67c6d3ff08733be6d475b5d042daa8f499 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -543,7 +543,7 @@ NeoGraph が MCP、gRPC、A2A、ACP でツール、グラフ、エージェン�
 
 | 分類(コード) | MCP `tools/call` (`MCPServer`) | gRPC `GraphService` | gRPC `ToolService.CallTool` | A2A タスク(`A2AServer`) | ACP `session/prompt` (`ACPServer`) |
 |------|------|------|------|------|------|
-| クライアントによるキャンセル(`NG.Cancelled`): `notifications/cancelled`、gRPC のキャンセル | stdio(`run`): 応答なし。HTTP(`MCPHttpServer`): こちらも応答なし、POST は空の `text/event-stream` で終わる。応答 sink を読むその他のトランスポート: JSON-RPC エラー `-32800`、`data.code` | `CANCELLED` | `CANCELLED` | `CancelTask`: `CANCELED`。stream もこの状態で閉じる | `session/cancel`: `stopReason: "cancelled"` |
+| クライアントによるキャンセル(`NG.Cancelled`): `notifications/cancelled`、gRPC のキャンセル | どのトランスポートでも応答なし: stdio(`run`) は何も送らない。HTTP(`MCPHttpServer`) は POST を空の `text/event-stream` で終える。応答 sink を読むトランスポートは代わりに `NoResponseSink` で id を受け取る | `CANCELLED` | `CANCELLED` | `CancelTask`: `CANCELED`。stream もこの状態で閉じる | `session/cancel`: `stopReason: "cancelled"` |
 | サーバーによるキャンセル(`NG.Cancelled`): `stop()`、またはハンドラー自身の処理 | JSON-RPC エラー `-32000`(`stop()`)または `-32603`、`data.code` | `CANCELLED` | `CANCELLED` | `CANCELED` | JSON-RPC エラー `-32800`、`data` `{code, retryable}` |
 | Hook のブロック(`NG.HookBlocked`) | JSON-RPC エラー `-32010`、`data` `{code, invocation_id, state}` | `FAILED_PRECONDITION`、Hook がタイムアウトしたときは `DEADLINE_EXCEEDED`。ErrorInfo metadata `invocation_id`、`state` | `GraphService` と同じ | 完了した node がなければ `REJECTED`、それ以外は `FAILED`。`metadata["neograph/failure"]` `{code, retryable}` | JSON-RPC エラー `-32603`、`data` `{code, retryable}` |
 | 割り込み(`NG.Interrupted`) | JSON-RPC エラー `-32011`、`data` `{code, reason, value}` | 一時停止した実行: `OK`、`interrupted`、`interrupt_node`、`interrupt_value_json`(ストリームの FINAL ペイロード: `interrupt_value`) | `FAILED_PRECONDITION`、ErrorInfo metadata `reason`、`value` | `INPUT_REQUIRED`: 理由を text、ペイロードを data part、`metadata["neograph/interrupt"]` `{node, checkpointId}`。後続の message が実行を再開 | 同じターン内の `session/request_permission`。その回答で実行を再開。アダプターやクライアントが回答できないときは `NG.Interrupted` を持つ JSON-RPC エラー `-32603` |
