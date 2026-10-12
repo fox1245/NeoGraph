@@ -484,7 +484,7 @@ TEST(A2AConformance, FailureClassesMapToStatesWithoutExceptionText) {
     EXPECT_EQ(coded["status"]["message"]["parts"][0]["text"], "the tool failed");
     EXPECT_EQ(coded["metadata"]["neograph/failure"]["retryable"], false);
     const auto provider = send_v1(srv, "provider");
-    EXPECT_EQ(provider["metadata"]["neograph/failure"]["retryable"], false);
+    EXPECT_EQ(provider["metadata"]["neograph/failure"]["retryable"], true);
 }
 
 TEST(A2AConformance, InterruptIsInputRequiredAndAFollowUpResumes) {

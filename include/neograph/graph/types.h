@@ -366,6 +366,9 @@ struct FailureVerdict {
     std::string code;
     /// Text from typed safe sources only (NodeFailureError::public_message).
     std::string public_message;
+    /// Sending the same request again may succeed: the node's retry verdict,
+    /// and also for NG.ProviderFailed, which the node retry loop leaves to the
+    /// provider runtime. Protocol hosts put it on the wire.
     bool retryable = false;
     bool routable = false;
     /// For the run control classes, the signal itself as found in the cause

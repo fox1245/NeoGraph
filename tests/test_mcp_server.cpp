@@ -477,6 +477,11 @@ TEST(MCPServerTest, TypedFailuresMapToDistinctResponses) {
             ASSERT_TRUE(response.contains("result")) << response.dump();
             EXPECT_TRUE(response["result"]["isError"].get<bool>());
             EXPECT_EQ(response["result"]["_meta"]["io.neograph/failure"]["code"], code);
+            // A transient provider failure may succeed when sent again, as on
+            // every protocol (graph::FailureVerdict::retryable).
+            EXPECT_EQ(response["result"]["_meta"]["io.neograph/failure"]["retryable"].get<bool>(),
+                      kind == "provider" || kind == "ordinary" || kind == "timeout")
+                << kind;
         } else {
             ASSERT_TRUE(response.contains("error")) << response.dump();
             EXPECT_EQ(response["error"]["code"], rpc);
