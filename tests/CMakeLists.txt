@@ -118,6 +118,8 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_program_runtime_instruction.cpp
         test_program_invocation.cpp
         test_program_task_graph_proposal.cpp
+        test_program_task_graph_scheduler.cpp
+        test_program_task_graph_expansion.cpp
     )
     target_include_directories(neograph_program_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/src/program

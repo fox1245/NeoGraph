@@ -11,6 +11,7 @@
 #include "run_control.h"
 #include "provider_failure.h"
 #include "strand_join_signal.h"
+#include "task_graph_scheduler.h"
 #include "../core/tool_failure.h"
 #include <asio/as_tuple.hpp>
 #include <asio/bind_executor.hpp>
@@ -2862,23 +2863,14 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
 
                 std::vector<const CompiledTaskGraphTask*> ready;
-                for (const auto& task : fragment.tasks()) {
-                    if (states[task.task_id] != TaskGraphTaskState::Pending &&
-                        states[task.task_id] != TaskGraphTaskState::Active)
-                        continue;
-                    bool dependency_failed  = false;
-                    bool dependency_waiting = false;
-                    for (const auto& dependency : task.depends_on) {
-                        const auto dependency_state = states[dependency];
-                        if (dependency_state == TaskGraphTaskState::Failed ||
-                            dependency_state == TaskGraphTaskState::Cancelled) {
-                            dependency_failed = true;
-                            break;
-                        }
-                        if (dependency_state != TaskGraphTaskState::Completed)
-                            dependency_waiting = true;
-                    }
-                    if (dependency_failed) {
+                {
+                    std::vector<detail::SchedulerTask> view;
+                    view.reserve(fragment.tasks().size());
+                    for (const auto& task : fragment.tasks())
+                        view.push_back({task.task_id, &task.depends_on, states[task.task_id]});
+                    const auto ready_set = detail::compute_ready(view);
+                    for (const auto index : ready_set.cascade_failed) {
+                        const auto& task = fragment.tasks()[index];
                         states[task.task_id] = TaskGraphTaskState::Failed;
                         const auto failure =
                             json{{"code", "P_TASK_DEPENDENCY"},
@@ -2891,9 +2883,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                         ? std::optional<std::string>{child_run_ids[task.task_id]}
                                         : std::nullopt);
                         failures[task.task_id] = failure;
-                        continue;
                     }
-                    if (!dependency_waiting) ready.push_back(&task);
+                    for (const auto index : ready_set.ready)
+                        ready.push_back(&fragment.tasks()[index]);
                 }
                 if (ready.empty()) {
                     const auto resolved = std::all_of(

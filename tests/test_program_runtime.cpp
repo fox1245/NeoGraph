@@ -28,6 +28,7 @@
 #include <sqlite3.h>
 #endif
 
+#include "program_expansion_fixture.h"
 #include "fixtures/unique_temp_dir.h"
 #include "fixtures/coarse_clock_store.h"
 #include "javascript.h"
@@ -89,6 +90,7 @@ using neograph::ToolEffectClass;
 using neograph::ToolExecutionController;
 using namespace neograph::graph;
 using namespace neograph::program;
+using namespace neograph::program_test;
 
 std::atomic<unsigned>               completed_calls{0};
 std::atomic<unsigned>               mediated_tool_calls{0};
@@ -112,18 +114,7 @@ std::atomic<unsigned>               window_completed{0};
 std::atomic<unsigned>               window_second_started_before_completion{0};
 std::shared_ptr<std::barrier<>>     window_first_barrier;
 
-std::string digest(char value) {
-    return "sha256:" + std::string(64, value);
-}
 
-ExecutableManifest manifest(ExecutableKind kind, std::string name, char implementation) {
-    return ExecutableManifest{{kind, std::move(name), "1.0.0", digest(implementation)},
-                              EffectMode::Brokered,
-                              "attestation:test",
-                              {},
-                              {},
-                              {}};
-}
 
 class CompletedNode final : public GraphNode {
 public:
@@ -1254,126 +1245,6 @@ RegistrySnapshot runtime_registry(
     return std::move(builder).build();
 }
 
-json budget_requirements() {
-    return json::array({
-        json{{"resource", "wall_time_ms"}, {"minimum", 1}, {"maximum", 10000}},
-        json{{"resource", "model_tokens"}, {"minimum", 0}, {"maximum", 1000}},
-        json{{"resource", "monetary_microunits"}, {"minimum", 0}, {"maximum", 1000}},
-        json{{"resource", "max_concurrency"}, {"minimum", 1}, {"maximum", 1}},
-        json{{"resource", "max_program_operations"}, {"minimum", 1}, {"maximum", 1}},
-        json{{"resource", "max_core_steps"}, {"minimum", 1}, {"maximum", 20}},
-        json{{"resource", "max_dynamic_compiles"}, {"minimum", 0}, {"maximum", 0}},
-        json{{"resource", "max_child_depth"}, {"minimum", 0}, {"maximum", 0}},
-        json{{"resource", "max_total_children"}, {"minimum", 0}, {"maximum", 0}},
-    });
-}
-json                      program_document(std::string node_type);
-TaskGraphTemplateContract expansion_template_contract() {
-    TaskGraphTemplateContract contract;
-    contract.template_id      = "runtime-map/v1";
-    contract.content_identity = digest('a');
-    contract.input_fields     = {"/item"};
-    contract.output_artifacts = {TaskGraphArtifactContract{"result", {"/channels/value/value"}}};
-    contract.budget_ceiling   = TaskGraphBudget{1000, 100, 100, 4096};
-    contract.child_binding    = "child";
-    contract.kind             = "program";
-    return contract;
-}
-
-TaskGraphExpansionPolicy expansion_policy() {
-    TaskGraphExpansionPolicy policy;
-    policy.limits.max_tasks               = 4;
-    policy.limits.max_edges               = 8;
-    policy.limits.max_depth               = 4;
-    policy.limits.per_task_budget_ceiling = TaskGraphBudget{1000, 100, 100, 4096};
-    policy.limits.total_budget_ceiling    = TaskGraphBudget{4000, 400, 400, 8192};
-    policy.template_allowlist             = {expansion_template_contract()};
-    return policy;
-}
-
-json expansion_proposal() {
-    return json{
-        {"schema_version", 1},
-        {"tasks", json::array({
-                      json{{"id", "dependent"},
-                           {"template", "runtime-map/v1"},
-                           {"input_bindings",
-                            json::array({json{{"from", json{{"task", "seed"},
-                                                            {"artifact", "result"},
-                                                            {"field", "/channels/value/value"}}},
-                                              {"to", json{{"field", "/item"}}}}})},
-                           {"depends_on", json::array({"seed"})},
-                           {"budget", json{{"wall_time_ms", 100}, {"model_tokens", 1}}}},
-                      json{{"id", "seed"},
-                           {"template", "runtime-map/v1"},
-                           {"input_bindings", json::array()},
-                           {"depends_on", json::array()},
-                           {"budget", json{{"wall_time_ms", 100}, {"model_tokens", 1}}}},
-                  })},
-        {"join", json{{"kind", "all"}}},
-    };
-}
-
-json expand_task_graph_document(json          proposal,
-                                std::uint64_t max_tasks       = 2,
-                                std::uint64_t max_edges       = 4,
-                                std::uint64_t max_depth       = 2,
-                                std::uint64_t max_concurrency = 1) {
-    auto document                                          = program_document("runtime-completed");
-    document["program_schema_version"]                     = PROGRAM_SCHEMA_VERSION_V4;
-    document["declared_budget_requirements"][3]["maximum"] = max_concurrency;
-    document["declared_budget_requirements"][4]["maximum"] = max_tasks;
-    document["declared_budget_requirements"][6]["minimum"] = 1;
-    document["declared_budget_requirements"][6]["maximum"] = 1;
-    document["declared_budget_requirements"][7]["minimum"] = max_depth;
-    document["declared_budget_requirements"][7]["maximum"] = max_depth;
-    document["declared_budget_requirements"][8]["minimum"] = max_tasks;
-    document["declared_budget_requirements"][8]["maximum"] = max_tasks;
-    const auto definition                                  = document["root"]["definition"];
-    document["root"]                                       = json{{"op", "expand_task_graph"},
-                                                                  {"name", "main"},
-                                                                  {"definition", definition},
-                                                                  {"proposal_source", json{{"inline", std::move(proposal)}}},
-                                                                  {"max_tasks", max_tasks},
-                                                                  {"max_edges", max_edges},
-                                                                  {"max_depth", max_depth},
-                                                                  {"max_dynamic_compiles", 1},
-                                                                  {"max_total_children", max_tasks},
-                                                                  {"max_concurrency", max_concurrency},
-                                                                  {"failure_policy", "collect"}};
-    return document;
-}
-
-json program_document(std::string node_type) {
-    json nodes{{"work", json{{"type", node_type}}}};
-    json edges = json::array({
-        json{{"from", "__start__"}, {"to", "work"}},
-        json{{"from", "work"}, {"to", "__end__"}},
-    });
-    if (node_type == "runtime-blocking" || node_type == "runtime-short-blocking" ||
-        node_type == "runtime-scheduler-blocking") {
-        nodes["followup"] = json{{"type", "runtime-followup"}};
-        edges             = json::array({
-            json{{"from", "__start__"}, {"to", "work"}},
-            json{{"from", "work"}, {"to", "followup"}},
-            json{{"from", "followup"}, {"to", "__end__"}},
-        });
-    }
-    json definition{
-        {"schema_version", 1},
-        {"name", "main"},
-        {"channels", json{{"value", json{{"reducer", "runtime-overwrite"}, {"initial", ""}}}}},
-        {"nodes", std::move(nodes)},
-        {"edges", std::move(edges)},
-        {"conditional_edges", json::array()}};
-    return json{
-        {"program_schema_version", 1},
-        {"input_contract", json{{"schema_version", 1}, {"schema", json::object()}}},
-        {"output_contract", json{{"schema_version", 1}, {"schema", json::object()}}},
-        {"root",
-         json{{"op", "call_core"}, {"name", "main"}, {"definition", std::move(definition)}}},
-        {"declared_budget_requirements", budget_requirements()}};
-}
 
 json two_interrupt_program_document() {
     auto document                  = program_document("runtime-interrupt");
@@ -1444,38 +1315,6 @@ json step_limited_program_document() {
         {"declared_budget_requirements", budget_requirements()}};
 }
 
-struct ChildBindingRegistry {
-    using Key = std::pair<std::string, std::string>;
-
-    void bind(std::string                parent_version_id,
-              std::string                binding_name,
-              ProgramRuntimeChildBinding binding) {
-        std::lock_guard lock(mutex);
-        bindings.insert_or_assign(Key{std::move(parent_version_id), std::move(binding_name)},
-                                  std::move(binding));
-    }
-
-    std::optional<ProgramRuntimeChildBinding> resolve(std::string_view owner_scope,
-                                                      std::string_view parent_version_id,
-                                                      std::string_view binding_name) const {
-        if (owner_scope != "tenant:runtime") return std::nullopt;
-        std::lock_guard lock(mutex);
-        const auto      found =
-            bindings.find(Key{std::string(parent_version_id), std::string(binding_name)});
-        return found == bindings.end() ? std::nullopt
-                                       : std::optional<ProgramRuntimeChildBinding>{found->second};
-    }
-
-    void clear() {
-        std::lock_guard lock(mutex);
-        bindings.clear();
-    }
-
-private:
-    mutable std::mutex                        mutex;
-    std::map<Key, ProgramRuntimeChildBinding> bindings;
-};
-
 class LifecycleHookTool final : public Tool {
 public:
     explicit LifecycleHookTool(std::string value, bool block = false)
@@ -1522,189 +1361,7 @@ std::shared_ptr<HookRuntime> lifecycle_hooks(LifecycleHookTool& admitted,
         std::make_shared<InMemoryHookJournal>(), std::move(registry), std::move(adapter)));
 }
 
-struct AdmittedRuntime {
-    RegistrySnapshot                                registry;
-    AdmissionProfile                                profile;
-    PolicySnapshot                                  policy;
-    std::shared_ptr<InMemoryProgramStore>           store;
-    std::shared_ptr<EngineGenerationCache>          engines;
-    std::shared_ptr<ProgramCatalog>                 catalog;
-    std::shared_ptr<CheckpointStore>                checkpoints;
-    std::shared_ptr<ProgramTransitionStore>         journal;
-    std::shared_ptr<ChildBindingRegistry>           child_bindings;
-    std::shared_ptr<InMemoryTaskGraphFragmentStore> task_graph_fragments;
-    ProgramChildQuotaConfig                         child_quota;
-    std::size_t                                     scheduler_thread_count;
-    std::shared_ptr<HookRuntime>                    hook_runtime;
-    ProgramCoreToolGrantResolver                    core_tool_grant_resolver;
-    ProgramCoreProviderCallResolver                 core_provider_call_resolver;
-    bool                                            require_core_provider_call_broker = false;
-    std::unique_ptr<ProgramRuntime>                 runtime;
-
-    explicit AdmittedRuntime(std::size_t                             scheduler_threads  = 1,
-                             std::shared_ptr<CheckpointStore>        checkpoint_backend = {},
-                             std::shared_ptr<ProgramTransitionStore> journal_backend    = {},
-                              ProgramChildQuotaConfig                 quota              = {},
-                              ExecutionGuarantee minimum_guarantee = ExecutionGuarantee::Strict,
-                              bool               allow_javascript  = false,
-                              std::shared_ptr<HookRuntime> hooks = {})
-        : registry(runtime_registry(minimum_guarantee)),
-          profile(make_profile(registry, minimum_guarantee, allow_javascript)),
-          policy(make_policy(profile, minimum_guarantee, allow_javascript)),
-          store(std::make_shared<InMemoryProgramStore>()),
-          engines(std::make_shared<EngineGenerationCache>()),
-          catalog(std::make_shared<ProgramCatalog>(
-              CatalogConfig{store, registry, engines, "program-runtime-test/v1"})),
-          checkpoints(checkpoint_backend ? std::move(checkpoint_backend)
-                                         : std::make_shared<InMemoryCheckpointStore>()),
-          journal(journal_backend ? std::move(journal_backend)
-                                  : std::make_shared<InMemoryProgramTransitionStore>()),
-          child_bindings(std::make_shared<ChildBindingRegistry>()),
-          task_graph_fragments(std::make_shared<InMemoryTaskGraphFragmentStore>()),
-          child_quota(quota),
-           scheduler_thread_count(scheduler_threads),
-           hook_runtime(std::move(hooks)),
-           runtime(make_runtime()) {}
-
-    static AdmissionProfile make_profile(
-        const RegistrySnapshot& registry,
-        ExecutionGuarantee      minimum_guarantee = ExecutionGuarantee::Strict,
-        bool                    allow_javascript  = false) {
-        AdmissionProfileBuilder builder;
-        builder.id("runtime-profile")
-            .semantic_version("1.0.0")
-            .registry(registry)
-            .mode(AdmissionMode::MultiTenant)
-            .max_program_schema_version(PROGRAM_SCHEMA_VERSION_V4)
-            .minimum_execution_guarantee(minimum_guarantee)
-            .allow_source_kind(SourceKind::CppBuilder)
-            .allow_effect_mode(EffectMode::Brokered);
-        if (allow_javascript) builder.allow_source_kind(SourceKind::JavaScript);
-        for (const auto& identity : registry.identities())
-            builder.allow_executable(identity);
-        return std::move(builder).build();
-    }
-
-    static PolicySnapshot make_policy(
-        const AdmissionProfile& profile,
-        ExecutionGuarantee      minimum_guarantee = ExecutionGuarantee::Strict,
-        bool                    allow_javascript  = false) {
-        const auto            budget_ceiling = allow_javascript
-                                                   ? BudgetLimits{60000, 10000, 1000000, 4, 32, 100, 4, 4, 32}
-                                                   : BudgetLimits{10000, 1000, 1000, 4, 32, 20, 4, 4, 32};
-        PolicySnapshotBuilder builder;
-        builder.id("runtime-policy")
-            .semantic_version("1.0.0")
-            .owner_scope("tenant:runtime")
-            .admission_profile(profile)
-            .budget_ceiling(budget_ceiling)
-            .minimum_execution_guarantee(minimum_guarantee);
-        return std::move(builder).build();
-    }
-    std::unique_ptr<ProgramRuntime> make_runtime_with_transitions(
-        std::shared_ptr<ProgramTransitionStore> transitions,
-        ProgramRuntimeRecoveryHandler recovery_handler = {}) const {
-        RuntimeConfig config{catalog,
-                              checkpoints,
-                              {},
-                              std::move(transitions),
-                             scheduler_thread_count,
-                             [bindings = child_bindings](std::string_view owner_scope,
-                                                         std::string_view parent_version_id,
-                                                         std::string_view binding_name) {
-                                 return bindings->resolve(owner_scope, parent_version_id,
-                                                          binding_name);
-                             }};
-        config.task_graph_fragments = task_graph_fragments;
-        config.task_graph_policy_resolver =
-            [](std::string_view owner_scope, std::string_view,
-               std::string_view) -> std::optional<TaskGraphExpansionPolicy> {
-            if (owner_scope != "tenant:runtime") return std::nullopt;
-            return expansion_policy();
-        };
-        config.child_quota = child_quota;
-        config.hook_runtime = hook_runtime;
-        config.core_tool_grant_resolver = core_tool_grant_resolver;
-        config.core_provider_call_resolver = core_provider_call_resolver;
-        config.require_core_provider_call_broker = require_core_provider_call_broker;
-        config.runtime_recovery_handler = std::move(recovery_handler);
-        return std::make_unique<ProgramRuntime>(std::move(config));
-    }
-    std::unique_ptr<ProgramRuntime> make_runtime() const {
-        return make_runtime_with_transitions(journal);
-    }
-
-    ProgramVersion admit(std::string node_type) {
-        return admit_document(program_document(std::move(node_type)));
-    }
-
-    ProgramVersion admit_document(json document) {
-        const auto schema_version = document.contains("program_schema_version") &&
-                                            document["program_schema_version"].is_number_unsigned()
-                                        ? document["program_schema_version"].get<std::uint32_t>()
-                                        : PROGRAM_SCHEMA_VERSION_V1;
-        return admit_source(
-            ProgramSource::from_cpp_builder("test:runtime", schema_version, std::move(document)));
-    }
-
-#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
-    ProgramVersion admit_javascript(std::string                   source,
-                                    std::optional<ContractRecord> output_contract = std::nullopt) {
-        return admit_source(
-            ProgramSource::from_javascript("test:runtime-control.js", std::move(source)),
-            std::move(output_contract));
-    }
-#endif
-
-    ProgramVersion admit_source(ProgramSource                 source,
-                                std::optional<ContractRecord> output_contract = std::nullopt) {
-        ProgramCompiler              compiler(registry, {"program-runtime-test/v1"});
-        std::optional<ProgramBundle> bundle;
-        try {
-            if (output_contract) {
-                bundle = compiler.compile(source, RunBudget{10000, 1000, 1000, 1, 32, 20, 0, 0, 0},
-                                          ContractRecord{}, *output_contract);
-            } else {
-                bundle = compiler.compile(source);
-            }
-        } catch (const ProgramCompileError& error) {
-            std::string message = error.what();
-            for (const auto& diagnostic : error.diagnostics()) {
-                message += "\n" + diagnostic.code + " " + diagnostic.primary.json_pointer + ": " +
-                           diagnostic.message + " " + diagnostic.witness.dump();
-            }
-            throw std::runtime_error(message);
-        }
-        try {
-            return catalog->admit(*bundle, ProgramAdmission{"tenant:runtime", profile, policy, {}});
-        } catch (const ProgramAdmissionError& error) {
-            std::string message = error.what();
-            for (const auto& diagnostic : error.diagnostics()) {
-                message += "\n" + diagnostic.code + " " + diagnostic.primary.json_pointer + ": " +
-                           diagnostic.message + " " + diagnostic.witness.dump();
-            }
-            throw std::runtime_error(message);
-        }
-    }
-
-    void bind_child(const ProgramVersion&      parent,
-                    std::string                binding_name,
-                    ProgramRuntimeChildBinding binding) {
-        child_bindings->bind(parent.id(), std::move(binding_name), std::move(binding));
-    }
-
-    void clear_child_bindings() { child_bindings->clear(); }
-
-    void recreate_catalog_and_runtime() {
-        runtime.reset();
-        catalog.reset();
-        engines = std::make_shared<EngineGenerationCache>();
-        catalog = std::make_shared<ProgramCatalog>(
-            CatalogConfig{store, registry, engines, "program-runtime-test/v1"});
-        runtime = make_runtime();
-    }
-};
-
+using AdmittedRuntime = BasicAdmittedRuntime<runtime_registry>;
 class DurableInstructionContextStore final : public neograph::DurableContextStore {
 public:
     neograph::ContextStoreAppendResult append_history(
@@ -1738,47 +1395,6 @@ public:
 private:
     neograph::InMemoryContextStore inner;
 };
-
-struct LinkedChildAdmission {
-    ProgramVersion    parent_version;
-    ProgramVersion    child_version;
-    ModuleLinkReceipt receipt;
-};
-
-LinkedChildAdmission link_child_versions(
-    AdmittedRuntime&   fixture,
-    ProgramVersion     parent_version,
-    ProgramVersion     child_version,
-    BudgetLimits       child_budget       = BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 1, 1},
-    ExecutionGuarantee accepted_guarantee = ExecutionGuarantee::Strict) {
-    const auto child_bundle = fixture.store->get_bundle(child_version.bundle_id());
-    if (!child_bundle) throw std::runtime_error("child bundle was not admitted");
-
-    ProgramModuleData module_data;
-    module_data.owner_scope    = "tenant:runtime";
-    module_data.coordinate     = ModuleCoordinate{"runtime", "parent", "1.0.0", ""};
-    module_data.attestation_id = "attestation:test";
-    module_data.children.push_back(
-        ChildProgramDescriptor{"child",
-                               child_version.id(),
-                               {ModulePort{"input", child_bundle->input_contract()}},
-                               {ModulePort{"output", child_bundle->output_contract()}},
-                               child_bundle->capability_effect_closure().capabilities,
-                               child_bundle->capability_effect_closure().effects,
-                               std::move(child_budget),
-                               accepted_guarantee});
-    module_data.allowed_capabilities = child_bundle->capability_effect_closure().capabilities;
-    module_data.declared_effects     = child_bundle->capability_effect_closure().effects;
-    const auto       parent_module   = ProgramModule::create(std::move(module_data));
-    ModuleResolution resolution;
-    resolution.root = parent_module.coordinate();
-    resolution.modules.push_back(parent_module);
-    auto receipt =
-        link_module_child(resolution, parent_module, "child", *child_bundle, child_version);
-    fixture.bind_child(parent_version, "child", ProgramRuntimeChildBinding{receipt, child_version});
-    return LinkedChildAdmission{std::move(parent_version), std::move(child_version),
-                                std::move(receipt)};
-}
 
 LinkedChildAdmission make_linked_child(AdmittedRuntime& fixture,
                                        std::string      parent_node_type = "runtime-blocking",
@@ -12055,28 +11671,6 @@ json two_task_expansion_proposal(std::uint32_t schema_version, json seed_budget,
                 {"join", json{{"kind", "all"}}}};
 }
 
-std::unique_ptr<ProgramRuntime> expansion_runtime_with_policy(
-    AdmittedRuntime& fixture, std::function<void(TaskGraphExpansionPolicy&)> adjust) {
-    RuntimeConfig config{
-        fixture.catalog, fixture.checkpoints, {}, fixture.journal, fixture.scheduler_thread_count,
-        [bindings = fixture.child_bindings](std::string_view owner, std::string_view version,
-                                            std::string_view binding) {
-            return bindings->resolve(owner, version, binding);
-        }};
-    config.task_graph_fragments       = fixture.task_graph_fragments;
-    config.task_graph_policy_resolver = [adjust = std::move(adjust)](
-                                            std::string_view owner, std::string_view,
-                                            std::string_view)
-        -> std::optional<TaskGraphExpansionPolicy> {
-        if (owner != "tenant:runtime") return std::nullopt;
-        auto policy = expansion_policy();
-        if (adjust) adjust(policy);
-        return policy;
-    };
-    config.child_quota = fixture.child_quota;
-    return std::make_unique<ProgramRuntime>(std::move(config));
-}
-
 struct ExpansionBudgetRun {
     ProgramHandle                 parent;
     ProgramResult                 result;
@@ -12196,11 +11790,9 @@ TEST(ProgramRuntimeTest, ExpandTaskGraphSchemaTwoZeroGrantsNothingWhereTheTempla
     // A template whose monetary ceiling is 0 is stated as 0 and the child is launched with 0,
     // not with the link's 333 (schema 1 would launch it with 333).
     AdmittedRuntime fixture(2);
-    fixture.runtime = expansion_runtime_with_policy(fixture, [](TaskGraphExpansionPolicy& policy) {
-        policy.template_allowlist.front().budget_ceiling.monetary_microunits = 0;
-        policy.limits.per_task_budget_ceiling.monetary_microunits = 0;
-        policy.limits.total_budget_ceiling.monetary_microunits = 0;
-    });
+    fixture.expansion->template_allowlist.front().budget_ceiling.monetary_microunits = 0;
+    fixture.expansion->limits.per_task_budget_ceiling.monetary_microunits = 0;
+    fixture.expansion->limits.total_budget_ceiling.monetary_microunits = 0;
     const auto run = run_budgeted_expansion(
         fixture, two_task_expansion_proposal(
                      2, json{{"wall_time_ms", 700}, {"model_tokens", 7}, {"output_bytes", 2048}},
@@ -12217,12 +11809,9 @@ TEST(ProgramRuntimeTest, ExpandTaskGraphSchemaTwoHoldsAnOutputToItsReservedBytes
     for (const std::uint32_t schema : {1U, 2U}) {
         SCOPED_TRACE(schema);
         AdmittedRuntime fixture(2);
-        fixture.runtime = expansion_runtime_with_policy(
-            fixture, [](TaskGraphExpansionPolicy& policy) {
-                policy.template_allowlist.front().budget_ceiling.output_bytes = 0;
-                policy.limits.per_task_budget_ceiling.output_bytes = 0;
-                policy.limits.total_budget_ceiling.output_bytes = 0;
-            });
+        fixture.expansion->template_allowlist.front().budget_ceiling.output_bytes = 0;
+        fixture.expansion->limits.per_task_budget_ceiling.output_bytes = 0;
+        fixture.expansion->limits.total_budget_ceiling.output_bytes = 0;
         json budget{{"wall_time_ms", 700}, {"model_tokens", 7}, {"monetary_microunits", 9}};
         const auto run = run_budgeted_expansion(
             fixture, two_task_expansion_proposal(schema, budget, budget));
