@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=23f5ffbed4096c0012ded1ba2f1c3499459406744ea0fc8222d1016c0aa32a88 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=7a7c35be4bc331c0cadc5dc96a1c289a1be8340722a9c105450eafa9df1310f6 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -216,6 +216,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 - **HTTP を有効にした `neograph-harness-mcp` と `example_harness_mcp_server` が `OpenSSL::Crypto` をリンクするようになりました。** どちらも OpenSSL(`SHA256`、`CRYPTO_memcmp`)を直接呼びながら、自身ではリンクしていませんでした。SchemaProvider 0.2.0 が libcrypto をリンクしなくなったため、`NEOGRAPH_BUILD_MCP_HTTP_SERVER=ON` の共有ライブラリビルドで `SHA256` の未定義参照によりリンクに失敗していました。
 - **同期グラフ実行は scheduler の post 呼び出しが完全に終わってから private `io_context` を破棄します。** 完了ハンドラが実行済みでも pool thread が wake-up 中に残り、`pthread_cond_signal` と `pthread_cond_destroy` が競合することがありました(#346)。同期 bridge は外部スレッドの post と tracked-work の解放を待ち、キャンセル通知の受付を閉じ、遅れてキューに入った通知も処理してから context を破棄します。呼出元スレッドでの実行、入れ子呼出し、親キャンセルの権限は維持し、post されたハンドラの例外でも所有中の coroutine frame を放棄しません。
 - **SDK のピンを SchemaProvider `8f32af7` に進めます。SDK 0.2.0、interface/shared-library 世代 5 は変わりません。** SDK は archive 有効化キーを provisioning 失敗のあらゆる経路でゼロ化し(SDK #10)、libcurl 8.21 が合成した完了タイミングを「リクエストが送信された」証拠として読まず(接続拒否と信頼できない TLS は `NotSent` のままで、安全な再試行が働きます)、リテラルアドレスを libcurl の DNS キャッシュに登録して c-ares なしでビルドされた libcurl(macOS の Homebrew)が設定したワーカー数を超えるリゾルバースレッドを作らないようにし、qualification meter の固定 table をスレッドスタックの外に置きます。SDK 自身のテストが native Windows と実際の macOS ランナーで実行されるようになりました。新しい SDK リリースやバージョンではなくソースのピンです。
+- **エンジンが自身の fan-out ワーカーで解放されてもプロセスがクラッシュしなくなり、Python の GIL を保持したまま解放してもデッドロックしなくなりました。** 失敗した fan-out ブランチは、実行が戻った後にコルーチンフレームがワーカー上で巻き戻されるまで、自身の例外を保持します。その例外がエンジンを所有するホストオブジェクトを所有していると(traceback が `GraphEngine` を保持する Python 例外など)、ワーカーが最後の参照を手放し、`~GraphEngine` はエンジンのスレッドプールをそのプール自身のスレッドで破棄していました。プールを自身のスレッドから join するとそのスレッドは飛ばされるため、ワーカーの足元でプールが解放され、ワーカーはハンドラを抜ける際にそのプールを使い続けました。負荷のかかった Python テストスイートで断続的に発生した segmentation fault です。このようなプールは直ちに停止され、ワーカーが去った後にプール外のスレッドが破棄します。Python バインディングでは、`GraphEngine` の最後の参照を手放すスレッドが、デストラクタがワーカーを join する間 GIL を解放します。失敗したブランチの Python 例外を解放するワーカーは GIL を必要とするため、以前は join が永久に待つことがありました。
 
 ## [0.13.1] - 2026-10-07
 NeoGraph `0.13.1` は alpha SDK `0.1.1` を対象にします。interface revision と shared-library generation は 4 のままなので、consumer は SDK `0.1.1` を選択して（インストールされた package config は厳密なバージョンを要求します）再ビルドするだけです。Native archive は v3 / `spna3`、portable JSON は v2 のままです。機能上の変更は下記の Windows transport 修正で、0.13.0 として公開された Windows wheel にはこの欠陥があるため 0.13.1 に置き換えてください。修正コミットの hosted CI と Windows wheel gate は通過しました（GitHub Actions run 37576205702、37576205395、CPython 3.12 のみ）。CPython 3.9–3.13 の全 matrix はリリースタグで実行します。

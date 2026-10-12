@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=23f5ffbed4096c0012ded1ba2f1c3499459406744ea0fc8222d1016c0aa32a88 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=7a7c35be4bc331c0cadc5dc96a1c289a1be8340722a9c105450eafa9df1310f6 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -214,6 +214,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 - **HTTP를 켠 `neograph-harness-mcp`와 `example_harness_mcp_server`가 이제 `OpenSSL::Crypto`를 링크합니다.** 두 실행 파일은 OpenSSL(`SHA256`, `CRYPTO_memcmp`)을 직접 호출하면서도 스스로는 링크하지 않았습니다. SchemaProvider 0.2.0이 libcrypto를 링크하지 않게 되면서, `NEOGRAPH_BUILD_MCP_HTTP_SERVER=ON`인 공유 라이브러리 빌드에서 `SHA256`의 정의되지 않은 참조로 링크가 실패했습니다.
 - **동기 그래프 실행은 이제 scheduler의 post 호출이 완전히 끝난 뒤 private `io_context`를 파괴합니다.** 완료 핸들러가 이미 실행됐더라도 풀 스레드는 wake-up 호출 안에 남아 있을 수 있어 `pthread_cond_signal`과 `pthread_cond_destroy`가 경합했습니다(#346). 동기 bridge는 외부 스레드의 post 및 tracked-work 해제가 끝날 때까지 기다리고, 취소 전달을 닫은 뒤 늦게 큐에 들어온 알림도 처리하고 context를 파괴합니다. 호출 스레드 실행·중첩 호출·부모 취소 권한은 유지하며, post된 핸들러가 예외를 던져도 아직 소유한 코루틴 frame을 버리지 않습니다.
 - **SDK 핀을 SchemaProvider `8f32af7`로 올립니다. SDK 0.2.0, interface/shared-library 세대 5는 그대로입니다.** SDK가 archive 활성화 키를 실패한 provisioning의 모든 경로에서 0으로 지우고(SDK #10), libcurl 8.21이 합성한 완료 타이밍을 "요청이 전송됨"의 증거로 읽지 않으며(연결 거부와 신뢰할 수 없는 TLS는 `NotSent`로 남아 안전한 재시도가 동작합니다), 리터럴 주소를 libcurl DNS 캐시에 넣어 c-ares 없이 빌드된 libcurl(macOS Homebrew)이 설정한 워커 수를 넘는 리졸버 스레드를 만들지 않게 하고, qualification meter의 고정 table을 스레드 스택 밖에 둡니다. SDK 자체 테스트가 이제 native Windows와 실제 macOS 러너에서 실행됩니다. 새 SDK 릴리스나 버전이 아니라 소스 핀입니다.
+- **엔진이 자신의 fan-out 워커에서 해제되어도 프로세스가 더 이상 중단되지 않으며, Python GIL을 쥔 채 해제해도 교착되지 않습니다.** 실패한 fan-out 브랜치는 실행이 반환된 뒤 코루틴 프레임이 워커에서 풀릴 때까지 자신의 예외를 보관합니다. 그 예외가 엔진을 소유한 호스트 객체를 소유하고 있으면(traceback이 `GraphEngine`을 쥔 Python 예외 등) 워커가 마지막 참조를 놓았고, `~GraphEngine`은 엔진의 스레드 풀을 그 풀의 스레드에서 파괴했습니다. 풀을 자기 스레드에서 join하면 그 스레드를 건너뛰므로 워커 아래에서 풀이 해제되었고, 워커는 핸들러를 떠나며 그 풀을 계속 사용했습니다. 부하 상태의 Python 테스트 스위트에서 간헐적으로 나타난 segmentation fault입니다. 이제 이런 풀은 즉시 중지되고, 워커가 떠난 뒤 풀 바깥의 스레드가 파괴합니다. Python 바인딩에서는 `GraphEngine`의 마지막 참조를 놓는 스레드가, 소멸자가 워커를 join하는 동안 GIL을 놓습니다. 실패한 브랜치의 Python 예외를 해제하는 워커는 GIL이 필요하므로, 이전에는 join이 영원히 기다릴 수 있었습니다.
 
 ## [0.13.1] - 2026-10-07
 NeoGraph `0.13.1`은 alpha SDK `0.1.1`을 대상으로 합니다. interface revision과 shared-library generation은 4 그대로이므로 소비자는 SDK `0.1.1`을 선택하고(설치된 package config가 정확한 버전을 요구합니다) 다시 빌드하기만 하면 됩니다. Native archive는 v3 / `spna3`, portable JSON은 v2 그대로입니다. 기능상 변경은 아래 Windows 전송 수정이며, 0.13.0으로 배포된 Windows wheel에는 이 결함이 있으므로 0.13.1로 교체해야 합니다. 수정 커밋의 hosted CI와 Windows wheel gate가 통과했습니다(GitHub Actions run 37576205702, 37576205395, CPython 3.12만). CPython 3.9–3.13 전체 matrix는 릴리스 태그에서 실행합니다.

@@ -665,7 +665,36 @@ void GraphEngine::set_node_retry_policy(const std::string& node_name, const Retr
     node_retry_policies_[node_name] = policy;
 }
 
+namespace {
+
+// Destroys an engine's fan-out pool. A pool is destroyed by joining its
+// threads, and a thread of the pool cannot join itself. The last reference to
+// an engine can be dropped by code running on one of the engine's own workers:
+// a failed branch's exception, which the branch's frame still holds as it
+// unwinds after the run has returned, can own the host object that owned the
+// engine. Destroying the pool there would skip that thread, free the pool and
+// let the thread go on to use it as it leaves its handler. Such a pool is
+// stopped at once, as its destruction would, and destroyed by a thread outside
+// it once the worker has left.
+void destroy_pool(std::unique_ptr<asio::thread_pool> pool) {
+    if (!pool) return;
+    if (!pool->get_executor().running_in_this_thread()) return;  // joins here
+    pool->stop();
+    auto retired = std::make_shared<std::unique_ptr<asio::thread_pool>>(std::move(pool));
+    try {
+        std::thread([retired] { retired->reset(); }).detach();
+    } catch (...) {
+        // No thread to hand the pool to. The stopped workers still end; the
+        // pool stays allocated rather than being freed under this worker.
+        static_cast<void>(retired->release());
+    }
+}
+
+}  // namespace
+
 GraphEngine::~GraphEngine() {
+    // The workers go first: nothing of the engine may be released under them.
+    destroy_pool(std::move(pool_));
     // A dispatched attempt that ignored its cancellation past its stop
     // deadline outlives its run (#364) and still runs one of nodes_. Hand the
     // nodes, and the tools they may use, to the last such attempt instead of
@@ -735,7 +764,7 @@ void GraphEngine::set_worker_count(std::size_t n) {
         return self->get_retry_policy(node_name);
     };
     if (n == 1) {
-        pool_.reset();
+        destroy_pool(std::move(pool_));
         executor_ = std::make_unique<NodeExecutor>(nodes_, channel_defs_, std::move(retry_lookup),
                                                    std::move(registry), nullptr, &node_cache_);
         executor_->failure_routing_ = failure_routing_.get();
@@ -747,6 +776,7 @@ void GraphEngine::set_worker_count(std::size_t n) {
         if (!stderr_notices_) executor_->warned_serial_fanout_.store(true);
         return;
     }
+    destroy_pool(std::move(pool_));
     pool_ = std::make_unique<asio::thread_pool>(n);
     executor_ = std::make_unique<NodeExecutor>(nodes_, channel_defs_, std::move(retry_lookup),
                                                std::move(registry), pool_.get(), &node_cache_);

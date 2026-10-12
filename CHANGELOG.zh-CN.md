@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=23f5ffbed4096c0012ded1ba2f1c3499459406744ea0fc8222d1016c0aa32a88 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=7a7c35be4bc331c0cadc5dc96a1c289a1be8340722a9c105450eafa9df1310f6 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -216,6 +216,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **启用 HTTP 的 `neograph-harness-mcp` 和 `example_harness_mcp_server` 现在会链接 `OpenSSL::Crypto`。** 这两个可执行文件直接调用 OpenSSL（`SHA256`、`CRYPTO_memcmp`），却从未自行链接它；SchemaProvider 0.2.0 不再链接 libcrypto 后，`NEOGRAPH_BUILD_MCP_HTTP_SERVER=ON` 的共享库构建会因 `SHA256` 的未定义引用而链接失败。
 - **同步图执行现在等待 scheduler 的 post 调用完全结束后才销毁 private `io_context`。** 完成处理函数即使已运行，线程池中的线程仍可能处于唤醒调用中，使 `pthread_cond_signal` 与 `pthread_cond_destroy` 发生竞态(#346)。同步 bridge 会等待外部线程的 post 与 tracked-work 释放，关闭取消通知的接收，再处理迟到的排队通知，最后销毁 context。调用线程执行、嵌套调用和父级取消权限均保留；post 处理函数抛出异常也不会丢弃仍由 bridge 所有的 coroutine frame。
 - **SDK 固定提交前移到 SchemaProvider `8f32af7`，SDK 仍为 0.2.0，interface/shared-library 代际仍为 5。** SDK 现在会在 provisioning 失败的所有路径上清零 archive 激活密钥（SDK #10）；不再把 libcurl 8.21 合成的完成计时当作“请求已发送”的证据（连接被拒绝和不受信任的 TLS 保持 `NotSent`，因此其安全重试可用）；把字面地址写入 libcurl 的 DNS 缓存，使未启用 c-ares 的 libcurl（macOS 上的 Homebrew）不再创建超出配置工作线程数的解析线程；并把 qualification meter 的固定表移出线程栈。SDK 自身的测试现在可在 native Windows 和真实的 macOS 运行器上执行。这是源码固定，不是新的 SDK 发布或版本。
+- **引擎在自己的 fan-out 工作线程上被释放时，进程不再崩溃；持有 Python GIL 释放引擎时也不再死锁。** 失败的 fan-out 分支会保留它的异常，直到运行返回之后其协程帧在工作线程上展开。当该异常拥有那个拥有引擎的宿主对象时（例如 traceback 持有 `GraphEngine` 的 Python 异常），工作线程会放下最后一个引用，`~GraphEngine` 便在该线程池自己的线程上销毁引擎的线程池。从线程池自己的线程去 join 会跳过该线程，于是线程池在工作线程脚下被释放，而该线程离开处理函数时还会继续使用它：这就是在负载下的 Python 测试套件中偶发的 segmentation fault。现在这样的线程池会立即停止，并在工作线程离开后由池外的线程销毁。在 Python 绑定中，放下 `GraphEngine` 最后一个引用的线程会在析构函数 join 工作线程期间释放 GIL；释放失败分支的 Python 异常的工作线程需要 GIL，因此此前 join 可能永远等下去。
 
 ## [0.13.1] - 2026-10-07
 NeoGraph `0.13.1` 面向 alpha SDK `0.1.1`。interface revision 与 shared-library generation 仍为 4，因此使用者只需选择 SDK `0.1.1`（已安装的 package config 要求精确版本）并重新构建。Native archive 仍为 v3 / `spna3`，portable JSON 仍为 v2。功能性变更是下面的 Windows transport 修复：作为 0.13.0 发布的 Windows wheel 存在该缺陷，应替换为 0.13.1。修复提交的 hosted CI 与 Windows wheel gate 已通过（GitHub Actions run 37576205702、37576205395，仅 CPython 3.12）；完整的 CPython 3.9–3.13 矩阵在发布 tag 上运行。
