@@ -152,6 +152,7 @@ Program은 Core 그래프를 내구성 있는 식별자, 예산, 승인(admissio
 | 79 | [`79_a2a_collaboration.cpp`](79_a2a_collaboration.cpp) | yes | A2A 협업: 두 에이전트가 링크를 맺고(제안 후 수락) 메일박스로 순번이 붙은 봉투를 주고받습니다. 재전달된 봉투는 한 번만 적용됩니다. |
 | 37 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes | A2A 클라이언트: 에이전트 카드를 가져오고 메시지를 보내며, `A2ACallerNode`로 그래프에서 원격 에이전트를 호출합니다. |
 | 39 | [`39_acp_server.cpp`](39_acp_server.cpp) | yes | stdio 기반 ACP 에이전트로, 편집기가 구동하는 형태입니다. `--self-test`는 initialize, session/new, session/prompt를 프로세스 안에서 실행합니다. |
+| 80 | [`80_acp_permission.cpp`](80_acp_permission.cpp) | yes | ACP 권한 요청: 노드가 삭제 전에 `session/request_permission`으로 편집기에 묻습니다. 스크립트 편집기가 한 호출은 허용하고 다음 호출은 거부합니다. |
 | 45 | [`45_grpc_server.cpp`](45_grpc_server.cpp) | paired | gRPC: `GraphEngine`을 `GraphService`로 제공합니다. 예제 53이 이를 동반 프로세스로 시작합니다(`-DNEOGRAPH_BUILD_GRPC=ON` 필요). |
 | 53 | [`53_grpc_client.cpp`](53_grpc_client.cpp) | yes | gRPC: 일반 클라이언트에서 `GraphService`(`Health`, `RunGraph`, 스트리밍)를 호출합니다(`-DNEOGRAPH_BUILD_GRPC=ON` 필요). |
 | 54 | [`54_grpc_checkpoint.cpp`](54_grpc_checkpoint.cpp) | yes | gRPC: 원격 `CheckpointStore`인 `GrpcCheckpointStore`와 측정한 지연 시간(`-DNEOGRAPH_BUILD_GRPC=ON` 필요). |

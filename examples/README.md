@@ -151,6 +151,7 @@ These examples run offline. The MCP client examples start a standard-library ser
 | 79 | [`79_a2a_collaboration.cpp`](79_a2a_collaboration.cpp) | yes | A2A collaboration: two agents link (proposed, then accepted) and exchange sequenced envelopes through a mailbox; a redelivery is applied once. |
 | 37 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes | A2A client: fetch the agent card, send a message, and call a remote agent from a graph with `A2ACallerNode`. |
 | 39 | [`39_acp_server.cpp`](39_acp_server.cpp) | yes | ACP agent over stdio, the shape an editor drives; `--self-test` runs initialize, session/new and session/prompt in process. |
+| 80 | [`80_acp_permission.cpp`](80_acp_permission.cpp) | yes | ACP permission: a node asks the editor with `session/request_permission` before a deletion; a scripted editor allows one call and rejects the next. |
 | 45 | [`45_grpc_server.cpp`](45_grpc_server.cpp) | paired | gRPC: serve a `GraphEngine` over `GraphService`. Example 53 starts it as its companion (needs `-DNEOGRAPH_BUILD_GRPC=ON`). |
 | 53 | [`53_grpc_client.cpp`](53_grpc_client.cpp) | yes | gRPC: call `GraphService` (`Health`, `RunGraph`, streaming) from a plain client (needs `-DNEOGRAPH_BUILD_GRPC=ON`). |
 | 54 | [`54_grpc_checkpoint.cpp`](54_grpc_checkpoint.cpp) | yes | gRPC: `GrpcCheckpointStore`, a remote `CheckpointStore`, with a measured latency (needs `-DNEOGRAPH_BUILD_GRPC=ON`). |

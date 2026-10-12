@@ -152,6 +152,7 @@ Program 把 Core 图包进带有持久标识、预算和准入(admission)的生�
 | 79 | [`79_a2a_collaboration.cpp`](79_a2a_collaboration.cpp) | yes | A2A 协作：两个智能体建立链接（先提议，再接受），通过邮箱交换带序号的信封；重复投递只生效一次。 |
 | 37 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes | A2A 客户端：获取 agent card、发送消息，并用 `A2ACallerNode` 在图中调用远程智能体。 |
 | 39 | [`39_acp_server.cpp`](39_acp_server.cpp) | yes | 基于 stdio 的 ACP 智能体，即编辑器驱动的形态；`--self-test` 在进程内运行 initialize、session/new 和 session/prompt。 |
+| 80 | [`80_acp_permission.cpp`](80_acp_permission.cpp) | yes | ACP 权限请求：节点在删除前通过 `session/request_permission` 询问编辑器；脚本化的编辑器允许一次调用，拒绝下一次。 |
 | 45 | [`45_grpc_server.cpp`](45_grpc_server.cpp) | paired | gRPC：通过 `GraphService` 提供 `GraphEngine`。示例 53 会把它作为伴随进程启动（需要 `-DNEOGRAPH_BUILD_GRPC=ON`）。 |
 | 53 | [`53_grpc_client.cpp`](53_grpc_client.cpp) | yes | gRPC：从普通客户端调用 `GraphService`（`Health`、`RunGraph`、流式）（需要 `-DNEOGRAPH_BUILD_GRPC=ON`）。 |
 | 54 | [`54_grpc_checkpoint.cpp`](54_grpc_checkpoint.cpp) | yes | gRPC：远程 `CheckpointStore` 即 `GrpcCheckpointStore`，并给出实测延迟（需要 `-DNEOGRAPH_BUILD_GRPC=ON`）。 |
