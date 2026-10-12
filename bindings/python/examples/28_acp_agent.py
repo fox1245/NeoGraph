@@ -24,15 +24,11 @@ from acp import (
     PromptResponse,
     RequestError,
     run_agent,
-    text_block,
-    update_agent_message,
-    update_agent_message_text,
-    update_user_message,
-    update_user_message_text,
 )
 from acp.interfaces import Client
 from acp.schema import (
     AgentCapabilities,
+    AgentMessageChunk,
     AudioContentBlock,
     ClientCapabilities,
     EmbeddedResourceContentBlock,
@@ -40,6 +36,7 @@ from acp.schema import (
     Implementation,
     ResourceContentBlock,
     TextContentBlock,
+    UserMessageChunk,
 )
 import neograph_engine as ng
 from pydantic import TypeAdapter
@@ -55,6 +52,28 @@ CONTENT_BLOCK = TypeAdapter(
     | EmbeddedResourceContentBlock
 )
 SESSION_ID = re.compile(r"[0-9a-f]{32}")
+
+
+# agent-client-protocol 1.0 removed the text_block / update_* helpers that
+# 0.12 exported; the schema models are the same in both lines.
+def text_block(text: str) -> TextContentBlock:
+    return TextContentBlock(type="text", text=text)
+
+
+def update_agent_message(block) -> AgentMessageChunk:
+    return AgentMessageChunk(session_update="agent_message_chunk", content=block)
+
+
+def update_agent_message_text(text: str) -> AgentMessageChunk:
+    return update_agent_message(text_block(text))
+
+
+def update_user_message(block) -> UserMessageChunk:
+    return UserMessageChunk(session_update="user_message_chunk", content=block)
+
+
+def update_user_message_text(text: str) -> UserMessageChunk:
+    return update_user_message(text_block(text))
 
 
 def checkpoint_thread_id(session_id: str) -> str:

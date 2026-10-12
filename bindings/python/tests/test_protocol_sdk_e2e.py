@@ -28,12 +28,25 @@ from acp import (
     PROTOCOL_VERSION,
     RequestError,
     connect_to_agent,
-    image_block,
-    text_block,
 )
-from acp.schema import ClientCapabilities, Implementation
+from acp.schema import (
+    ClientCapabilities,
+    ImageContentBlock,
+    Implementation,
+    TextContentBlock,
+)
 
 import neograph_engine as ng
+
+
+# agent-client-protocol 1.0 removed the text_block / image_block helpers of
+# 0.12; the schema models work with both lines.
+def text_block(text):
+    return TextContentBlock(type="text", text=text)
+
+
+def image_block(data, mime_type):
+    return ImageContentBlock(type="image", data=data, mime_type=mime_type)
 
 
 ROOT = Path(__file__).resolve().parents[3]
