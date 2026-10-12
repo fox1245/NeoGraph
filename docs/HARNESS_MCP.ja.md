@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=28a9a662c3ef7d8d9cb07fd906175bab8441ae5661e102ae500057418c3db496 -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=8b02d2953799e2f9a6be080ce3d62df51b08491dcd73e3b7644264042711c296 -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -333,7 +333,7 @@ export NEOGRAPH_HARNESS_HTTP_PORT=8080
 "$HOME/.local/bin/neograph-harness-mcp"
 ```
 
-エンドポイントは`http://127.0.0.1:8080/mcp`です。これは公開されたMCP 2025-11-25 Streamable HTTP POST契約を、セッションごとのMCPライフサイクルとJSON応答で実装します。通知はHTTP 202を返します。DELETEはセッションを終了します。オプションのスタンドアロンGET/SSEチャネルは意図的に実装されておらず、HTTP 405を返します。これはトランスポート仕様で明示的に許可されています。
+エンドポイントは`http://127.0.0.1:8080/mcp`です。これは公開されたMCP 2025-11-25 Streamable HTTP POST契約を、セッションごとのMCPライフサイクルとJSON応答で実装します。通知はHTTP 202を返します。クライアントがキャンセルした呼び出しは空のイベントストリームで終わるため、クライアントに応答は届きません。セッションは、DELETEで、リクエストのないまま30分たったとき(`session_idle_timeout`)、または`max_sessions`(64)で新しいクライアントに空きが必要で、そのセッションが処理中のリクエストのない最も長く使われていないセッションであるときに終わります。その後そのidには404が返り、クライアントに再度initializeするよう伝えます。オプションのスタンドアロンGET/SSEチャネルは意図的に実装されておらず、HTTP 405を返します。これはトランスポート仕様で明示的に許可されています。
 
 セキュリティデフォルトはトランスポートレベルであり、認証を`GraphEngine`または`HarnessService`に結合しません。
 
@@ -342,7 +342,8 @@ export NEOGRAPH_HARNESS_HTTP_PORT=8080
 - `NEOGRAPH_HARNESS_BEARER_TOKEN`は、実行可能ファイルの単一プリンシパルベアラー境界を有効にします。ライブラリ埋め込みでは`MCPHttpServerConfig::bearer_authorizer`をOAuth/JWT検証に使用し、安定したプリンシパル/スコープを返すことができます。
 - セッションは返された認可スコープにバインドされます。別の有効なプリンシパルは、漏洩した`Mcp-Session-Id`を再利用できません。
 - `MCPHttpServer`ファクトリは検証済みスコープを受け取り、`MCPHttpServerSession`オーナーを返します。マルチテナント埋め込みは、分離されたHarnessレコード/チェックポイントストアを選択するためにスコープを使用する必要があります。認証状態はグラフランタイム自体には入りません。オーソライザーがない場合（ループバックへのバインドでのみ許可）スコープは空で、実行ファイルは単一のローカルオーナースコープを維持します。
-- リクエストペイロード、HTTPワーカー、キュー、セッション、レスポンス待機の制限は`MCPHttpServerConfig`によって境界付けられる。
+- リクエストペイロード、HTTPワーカー、キュー、セッション、レスポンス待機の制限は`MCPHttpServerConfig`によって境界付けられる。ツール呼び出しは戻るまでHTTPスレッドを1つ占有するため、スレッドは必要に応じて`max_http_threads`(64)まで追加で起動する。
+- OAuth認可サーバーがベアラートークンを発行する埋め込みは`MCPHttpServerConfig::protected_resource_metadata`を設定する。するとサーバーはRFC 9728メタデータを公開し、すべての401チャレンジでその場所を示す。
 
 `neograph::mcp::ScopedHarnessStore` は、公開 ID とスキーマで定義されたレコード・ジャーナル参照を、可逆なテナント名前空間に対応付けます。不透明なリクエスト、結果、イベントのペイロードは書き換えません。File・SQLite ストアはこの非公開 ID を受け入れます。長すぎる File キーには固定長のハッシュファイル名を使い、短いキーのパスは変更しません。SQLite の保持処理は、単一トランザクション内で件数と削除候補を選択した名前空間に限定し、他のテナントや保護されたソース参照を維持します。このストレージ境界は、認証済みスコープや、アプリケーションのプロバイダー・ツール・クォータポリシーを置き換えません。
 
@@ -562,28 +563,7 @@ MCPホストがワーカープロセスではなく機能を所有する場合�
 
 ## 実験的タスクプロファイル
 
-MCPタスクはコアMCP 2025-11-25の一部ではなく、上流エクステンションはまだ自身を実験的と表示しています。したがって、NeoGraphはそれをデフォルトで無効にし、安定した`run_id`および`neograph_get`ポーリング契約から分離したままにします。
-
-オプトインするには、example サーバー上で永続状態(durable state)も有効化する必要があります:
-
-```bash
-export NEOGRAPH_HARNESS_STATE_DIR="$PWD/.neograph-harness-state"
-export NEOGRAPH_HARNESS_EXPERIMENTAL_TASKS=1
-```
-
-その後、サーバーは `io.modelcontextprotocol/tasks`をアドバタイズし、 `neograph_start` にオプションのタスクサポートをマークし、さらに `tasks/get`, `tasks/update`と `tasks/cancel`を提供します。また、 `CreateTaskResult` は、個々の `tools/call` リクエストに以下が含まれる場合にのみ返されます:
-
-```json
-{
-  "_meta": {
-    "io.modelcontextprotocol/clientCapabilities": {
-      "extensions": {"io.modelcontextprotocol/tasks": {}}
-    }
-  }
-}
-```
-
-リクエストで明示的に有効化していないクライアントは、通常の `CallToolResult` を受け取り、`neograph_get` のポーリングを続けます。プロファイルを有効にしても、安定したフォールバックは変わりません。タスク状態は `working`、`input_required`、`completed`、`failed`、`cancelled` です。`tasks/update.inputResponses` は保留中の `call_id` をキーとします。ポーリングするクライアントは `pollIntervalMs` と `ttlMs` に従ってください。
+実装されていません。このガイドの以前の版はオプトインのMCPタスクプロファイルを説明していましたが、そのようなプロファイルは存在しません。Harnessサーバーはtasksケイパビリティをアドバタイズせず、`HarnessServiceConfig::enable_experimental_tasks`と`NEOGRAPH_HARNESS_EXPERIMENTAL_TASKS`は効果がなく、`tasks/get`、`tasks/update`、`tasks/cancel`は`-32601`を返します。長い実行には安定した`run_id`および`neograph_get`ポーリング契約を使います。
 
 ## 機能バックエンド
 
@@ -599,4 +579,4 @@ export NEOGRAPH_HARNESS_EXPERIMENTAL_TASKS=1
 
 サポートされるローカル配布パスは、上記のインストール可能な`neograph-harness-mcp`バイナリです。ソースビルドは引き続きサンプルターゲットを使用でき、Pythonホイールはリモートデーモンを暗黙的にインストールするのではなく、ライブラリ/ランタイムパッケージのままです。MCPBおよび公式レジストリへの公開は、リリース/ディスカバリのパッケージングオプションのままです。これらはワイヤプロトコルに必須ではなく、署名付きリリースアーティファクトと明示的なリモート認証デプロイメントマニフェストを使用した場合にのみ追加されるべきです。
 
-NeoGraphは現在、日付付きのMCP `2025-11-25`プロファイルのみを公開しています。将来のステートレスプロトコルを説明する最終SEPは、新しいワイヤバージョンを作成しません。MCPプロジェクトが新しい日付付き仕様を公開するまで、後継プロファイルはアドバタイズされません。
+NeoGraphは日付付きのMCP `2025-11-25`プロファイルを公開し、`2025-06-18`または`2025-03-26`を求めるクライアントにも、その版が定義するフィールドで応答します。現在のMCP版である`2026-07-28`はステートレス(`initialize`もセッションもなく、バージョンはすべてのリクエストの`_meta`に入る)で、まだ提供していません。公式のデュアル世代クライアントは`2025-11-25`にフォールバックし、`2026-07-28`に固定されたクライアントは接続できません。`2025-11-25`と並ぶ第二のモードとして提供する予定です。

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=6f43420ccceaedb9d72e1fbf1c43ceeb32be5e733a9c09ddacc8a744463c2fe6 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=09bef4cf7abb7279b4dcbfce5b8013c150cc8e2ec17aa762d919137c55689c47 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -579,7 +579,7 @@ NeoGraph가 MCP, gRPC, A2A, ACP로 도구나 그래프나 에이전트를 제공
 
 | 분류(코드) | MCP `tools/call` (`MCPServer`) | gRPC `GraphService` | gRPC `ToolService.CallTool` | A2A task(`A2AServer`) | ACP `session/prompt`(`ACPServer`) |
 |------|------|------|------|------|------|
-| 클라이언트의 취소(`NG.Cancelled`): `notifications/cancelled`, gRPC 취소 | stdio(`run`): 응답 없음. HTTP처럼 응답 sink를 읽는 전송: JSON-RPC 오류 `-32800`, `data.code` | `CANCELLED` | `CANCELLED` | `CancelTask`: `CANCELED`. stream도 이 상태로 닫힘 | `session/cancel`: `stopReason: "cancelled"` |
+| 클라이언트의 취소(`NG.Cancelled`): `notifications/cancelled`, gRPC 취소 | stdio(`run`): 응답 없음. HTTP(`MCPHttpServer`): 역시 응답 없음, POST는 빈 `text/event-stream`으로 끝남. 응답 sink를 읽는 그 밖의 전송: JSON-RPC 오류 `-32800`, `data.code` | `CANCELLED` | `CANCELLED` | `CancelTask`: `CANCELED`. stream도 이 상태로 닫힘 | `session/cancel`: `stopReason: "cancelled"` |
 | 서버의 취소(`NG.Cancelled`): `stop()`, 또는 핸들러 자신의 작업 | JSON-RPC 오류 `-32000`(`stop()`) 또는 `-32603`, `data.code` | `CANCELLED` | `CANCELLED` | `CANCELED` | JSON-RPC 오류 `-32800`, `data` `{code, retryable}` |
 | Hook 차단(`NG.HookBlocked`) | JSON-RPC 오류 `-32010`, `data` `{code, invocation_id, state}` | `FAILED_PRECONDITION`, Hook이 시간을 초과했으면 `DEADLINE_EXCEEDED`. ErrorInfo metadata `invocation_id`, `state` | `GraphService`와 같음 | 끝난 노드가 없으면 `REJECTED`, 그 외에는 `FAILED`. `metadata["neograph/failure"]` `{code, retryable}` | JSON-RPC 오류 `-32603`, `data` `{code, retryable}` |
 | 인터럽트(`NG.Interrupted`) | JSON-RPC 오류 `-32011`, `data` `{code, reason, value}` | 일시 정지한 실행: `OK`, `interrupted`, `interrupt_node`, `interrupt_value_json`(스트림의 FINAL 페이로드: `interrupt_value`) | `FAILED_PRECONDITION`, ErrorInfo metadata `reason`, `value` | `INPUT_REQUIRED`: 사유는 text, 페이로드는 data part, `metadata["neograph/interrupt"]` `{node, checkpointId}`. 후속 message가 실행을 재개 | 같은 턴 안의 `session/request_permission`, 그 응답이 실행을 재개. 어댑터나 클라이언트가 응답하지 못하면 `NG.Interrupted`를 담은 JSON-RPC 오류 `-32603` |
@@ -593,7 +593,7 @@ NeoGraph가 MCP, gRPC, A2A, ACP로 도구나 그래프나 에이전트를 제공
 | 불확실한 효과, 알 수 없음, 실패 출구(`NG.EffectUncertain`, `NG.UnknownFailure`, 출구의 코드) | 일반과 같되 자기 코드를 가짐 | `UNKNOWN` | 일반과 같되 자기 코드를 가짐 | 일반과 같되 자기 코드를 가짐 | 일반과 같되 자기 코드를 가짐 |
 | 단계 한도(`NG.StepLimit`): `RunConfig::max_steps` | 없음 | `OK`, `max_steps_exhausted` | 없음 | `FAILED`, 코드 `NG.StepLimit` | `stopReason: "max_turn_requests"` |
 | 잘못된 요청(`NG.InvalidRequest`) | JSON-RPC 오류 `-32602` | `INVALID_ARGUMENT`. 실행할 그래프가 없으면 `FAILED_PRECONDITION`(`NG.NoGraph`) | `INVALID_ARGUMENT` | `google.rpc.BadRequest` field violation을 담은 JSON-RPC 오류 `-32602`. 형식이 잘못된 envelope나 batch는 `-32600` | JSON-RPC 오류 `-32602` |
-| 알 수 없는 도구(`NG.ToolNotFound`) | 실패 코드 없이 `isError: true`인 `result` | 없음 | `NOT_FOUND` | 없음 | 없음 |
+| 알 수 없는 도구(`NG.ToolNotFound`) | JSON-RPC 오류 `-32602`, `data.code` | 없음 | `NOT_FOUND` | 없음 | 없음 |
 | 용량 초과(`NG.Capacity`) | JSON-RPC 오류 `-32000`, `data.capacity` | `RESOURCE_EXHAUSTED` | 없음 | JSON-RPC 오류 `-32603`, ErrorInfo reason `RESOURCE_EXHAUSTED`, domain `neograph` | JSON-RPC 오류 `-32603`, `data.reason` `overloaded` |
 
 `retryable`은 모든 프로토콜에서 `FailureVerdict::retryable`이며, 같은 요청을 다시 보내면 성공할 수 있는지를 뜻합니다. 노드의 재시도 판정([노드 실패 계약](#node-failure-contract))이고, 제공자 실패(`NG.ProviderFailed`)에서도 `true`입니다. 노드 재시도 루프는 이를 제공자 런타임에 맡기지만 새 요청은 통과할 수 있기 때문입니다. A2A는 코드와 `retryable`을 두 버전 모두 task의 `metadata["neograph/failure"]`에, ACP는 오류의 `data`에 담습니다. A2A에만 있는 요청 오류는 [A2A error 매핑](#a2a-error-mapping)에 있습니다.
@@ -2938,29 +2938,32 @@ sp::runtime::Result run_agent(
 **Header:** `<neograph/mcp/client.h>`
 **Namespace:** `neograph::mcp`
 
-Model Context Protocol (MCP) client implementation. Connects to MCP servers, discovers
-available tools, and wraps them as NeoGraph `Tool` instances.
+Model Context Protocol(MCP) 클라이언트 구현입니다. MCP 서버에 연결하고, 사용 가능한
+도구를 발견하며, 이를 NeoGraph `Tool` 인스턴스로 감쌉니다.
 
-Two transports are available:
+두 가지 전송을 사용할 수 있습니다:
 
-- **HTTP** — `MCPClient("http://host:port")`. Discovered tools retain the
-  originating Streamable HTTP session, including `Mcp-Session-Id`, negotiated
-  protocol version, timeout, and custom headers.
-- **stdio** — `MCPClient({"python", "server.py"})`. The client resolves `PATH`
-  before `fork`, executes with `execve`, wires bidirectional pipes, and exchanges newline-delimited JSON-RPC
-  over the child's stdin/stdout. The subprocess lives as long as the
-  `MCPClient` *or any `MCPTool`* it produced; destruction sends SIGTERM and
-  reaps via `waitpid` (SIGKILL fallback after ~500 ms).
+- **HTTP** — `MCPClient("http://host:port/mcp")`. URL은 서버의 MCP 엔드포인트이며
+  경로와 쿼리를 포함해 주어진 그대로 사용되고, 아무것도 덧붙이지 않습니다(이전
+  클라이언트는 `/mcp`를 덧붙였습니다). 발견된 도구는 원래의 Streamable HTTP 세션을
+  유지하며, 여기에는 `Mcp-Session-Id`, 협상된 프로토콜 버전, 타임아웃, 사용자 정의
+  헤더가 포함됩니다.
+- **stdio** — `MCPClient({"python", "server.py"})`. 클라이언트는 `fork` 전에 `PATH`를
+  해석하고, `execve`로 하위 프로세스를 실행하며, 양방향 파이프를 연결해 자식의
+  stdin/stdout으로 줄 단위 JSON-RPC를 주고받습니다. 하위 프로세스는 그것을 만든
+  `MCPClient` *또는 어떤 `MCPTool`*이 살아 있는 동안 유지됩니다. 종료할 때는 먼저
+  stdin을 닫고 최대 1초 동안 종료를 기다린 뒤, 프로세스 그룹에 SIGTERM을 보내 최대
+  1초를 더 기다리고, 그다음 SIGKILL을 보냅니다.
 
 ### MCPTool
 
-Wraps a single MCP server tool as a local `Tool` implementation. Discovered
-tools retain their originating protocol session, regardless of transport.
+단일 MCP 서버 도구를 로컬 `Tool` 구현으로 감쌉니다. 발견된 도구는 전송과 관계없이
+원래의 프로토콜 세션을 유지합니다.
 
 ```cpp
 class MCPTool : public AsyncTool, public ContextualAsyncTool {
 public:
-    // Legacy direct-construction mode. Discovered tools reuse their client session.
+    // One known tool at an HTTP endpoint. Discovered tools reuse their client session.
     MCPTool(const std::string& server_url,
             const std::string& name,
             const std::string& description,
@@ -2979,31 +2982,47 @@ public:
 };
 ```
 
-Usually you do not construct `MCPTool` directly — `MCPClient::get_tools()`
-discovers and wraps them.
 
-모든 디스패처는 컨텍스트를 받는 `execute_async`를 호출하므로, 두 전송 모두에서 실행의 cancel token(시도 타임아웃 아래에서는 노드 시도의 토큰)과 마감 시각이 호출을 제한합니다. 취소하면 즉시 기다림을 멈추고 `graph::CancelledException`을 던지며, 도구 실패 계약은 이를 취소로 다룹니다. 마감 시각이나 요청 타임아웃은 `asio::system_error(asio::error::timed_out)`, 곧 `timed_out` 호출입니다. 그 뒤에 도착한 응답은 버려집니다. stdio는 JSON-RPC id로 응답을 배달하는데 그 호출의 id는 더 이상 기다리지 않으며, HTTP는 요청을 포기합니다. `isError` 결과는 일반 도구 실패인 `std::runtime_error`를 던집니다. Python에서 `mcp.MCPError`는 JSON-RPC 오류의 `code`와 `data`를 유지합니다.
+보통 `MCPTool`을 직접 만들지 않습니다 — `MCPClient::get_tools()`가 도구를 발견하고
+감쌉니다. URL 생성자로 만든 도구는 첫 호출에서 MCP 세션 하나를 열고, 이후의 모든
+호출에서 재사용하며, 도구가 소멸될 때 `DELETE`로 세션을 끝냅니다.
+
+모든 디스패처는 컨텍스트를 받는 `execute_async`를 호출하므로, 실행의 cancel token(attempt
+timeout 아래에서는 노드 attempt의 token)과 deadline이 두 전송 모두에서 호출을 제한합니다.
+취소하면 즉시 기다림을 멈추고 `graph::CancelledException`을 던지며, 도구 실패 계약은 이를
+취소로 다룹니다. deadline이나 요청 타임아웃은 `asio::system_error(asio::error::timed_out)`,
+즉 `timed_out` 호출을 던집니다. 어느 경우든 서버에는 `notifications/cancelled`로 알리며,
+실행이 호출을 기다리는 코루틴을 취소한 경우에도 마찬가지입니다. 그 뒤에 도착한 응답은
+버려집니다. stdio는 JSON-RPC id로 응답을 라우팅하는데 그 호출의 id는 더 이상 기다리지
+않으며, HTTP는 요청을 포기합니다. `isError` 결과는 일반 도구 실패인 `std::runtime_error`를
+던집니다. Python에서 `mcp.MCPError`는 JSON-RPC 오류의 `code`, `data`, `http_status`를
+유지합니다.
 
 ### MCPClient
 
-Client that connects to an MCP server, performs the initialization handshake, and
-provides methods to discover and invoke tools.
+MCP 서버에 연결하고, 초기화 핸드셰이크를 수행하며, 도구를 발견하고 호출하는 메서드를
+제공하는 클라이언트입니다.
 
-> `MCPClient` is not designed to be subclassed — you use it as-is.
-> 전송 수준의 호출은 `rpc_call_async()` 하나이며, 동기 메서드도 같은 세션을 구동합니다.
+> `MCPClient`는 하위 클래스로 만들도록 설계되지 않았습니다 — 그대로 사용합니다.
+> `rpc_call_async()`가 유일한 전송 수준 호출이며, 동기 메서드도 같은 세션을 구동합니다.
 > [`ASYNC_GUIDE.md` §9.5](ASYNC_GUIDE.md#95-mcpclient)를 참고하세요.
 
 ```cpp
 class MCPClient {
 public:
-    // HTTP transport.
+    // HTTP transport: the server's MCP endpoint URL, used as given.
     explicit MCPClient(const std::string& server_url);
     MCPClient(const std::string& server_url, MCPClientConfig config);
 
     // stdio transport — fork+exec the subprocess.
     explicit MCPClient(std::vector<std::string> argv);
+    // Hardened stdio: explicit environment, cwd, bounds, cancellation grace.
+    explicit MCPClient(StdioClientConfig config);
 
     bool initialize(const std::string& client_name = "neograph");
+    bool initialize(const std::string& client_name,
+                    std::chrono::steady_clock::time_point deadline,
+                    std::shared_ptr<graph::CancelToken> cancel_token);
     bool is_initialized() const noexcept;
     InitializeResult get_initialize_result() const;
     std::vector<std::unique_ptr<Tool>> get_tools();
@@ -3016,45 +3035,131 @@ public:
         const std::string& name, const json& arguments,
         std::chrono::steady_clock::time_point deadline,
         std::shared_ptr<graph::CancelToken> cancel_token);
+    void set_tool_list_changed_handler(std::function<void()> handler);
+    void shutdown() noexcept;
 
-    // Low-level async dispatch retained for source compatibility.
-    asio::awaitable<json>
-    rpc_call_async(const std::string& method, const json& params);
+    // The transport-level JSON-RPC call every other method uses.
+    asio::awaitable<json> rpc_call_async(
+        const std::string& method, const json& params = json::object(),
+        std::chrono::steady_clock::time_point deadline =
+            std::chrono::steady_clock::time_point::max(),
+        std::shared_ptr<graph::CancelToken> cancel_token = {});
 };
 ```
 
-**Wire protocol:** NeoGraph's MCP client speaks
-`protocolVersion = "2025-11-25"`. HTTP transport sends the
-`MCP-Protocol-Version` header on every JSON-RPC request (Round 1 +
-Round 3 spec alignment); stdio transport carries the same version
-in the `initialize` payload. Servers running older protocol
-versions may reject these requests — pin server-side or upgrade.
 
-| Method | Description |
+**와이어 프로토콜:** NeoGraph의 MCP 클라이언트는 `protocolVersion = "2025-11-25"`를 제안하고,
+서버가 `2025-11-25`, `2025-06-18` 또는 `2025-03-26`으로 응답하면 받아들입니다
+(`MCP_SUPPORTED_PROTOCOL_VERSIONS`). 그 밖의 응답이면 두 버전을 모두 밝히는 프로토콜 오류로
+`initialize`가 실패하고, MCP의 버전 협상이 요구하는 대로 클라이언트는 연결을 끊습니다.
+HTTP는 이후의 모든 요청의 `MCP-Protocol-Version` 헤더에 협상된 버전을 보냅니다. MCP
+`2026-07-28`(`initialize`도 세션도 없음)은 아직 지원하지 않습니다. 그 개정판만 제공하는
+서버는 `-32022`로 핸드셰이크를 거부하며, 호출자에게는 `MCPError`로 전달됩니다.
+
+**세션과 전송의 소유:** 두 생성자는 같은 프로토콜 세션을 만듭니다. 세션은 JSON-RPC id,
+응답 검증, 초기화(initialized 알림 포함), 페이지 처리, 도구 결과 변환을 소유합니다. 아직
+핸드셰이크하지 않은 클라이언트에서 `rpc_call_async()`로 보낸 요청은 먼저 핸드셰이크를
+수행합니다. 엔드포인트 URL, 헤더, 협상된 `Mcp-Session-Id`, 요청 타임아웃은 HTTP 전송만이
+소유하고, 하위 프로세스, 파이프, 리더, 응답 id 역다중화기는 stdio 전송만이 소유합니다.
+발견된 도구는 자신의 프로토콜 세션을 유지하므로 `MCPClient`가 소멸된 뒤에도 사용할 수
+있으며, 세션은 클라이언트나 도구에 대한 마지막 참조가 해제될 때 끝납니다.
+
+**전송 규칙 준수:** 두 전송 모두 서버의 요청에 응답합니다. `ping`에는 빈 결과를, 그 밖의
+모든 요청에는 `-32601`을 보냅니다. 클라이언트는 어떤 client capability(roots, sampling,
+elicitation)도 선언하지 않기 때문입니다. 메시지는 `method`가 없을 때만 응답으로 간주되므로,
+대기 중인 호출의 id를 재사용한 서버 요청이 그 호출을 끝내는 일은 없습니다. HTTP에서
+클라이언트는 JSON 응답과 Server-Sent Event 응답을 읽고(WHATWG 규칙에 따라: CRLF, LF, CR
+줄 끝, 여러 줄 `data`, `id`, `retry`), 호출의 이벤트 스트림으로 도착한 서버 요청에는 그
+스트림을 열어 둔 채 별도의 POST로 응답하며, 응답이 도착하면 스트림 읽기를 멈춥니다.
+서버가 응답 전에 닫은 스트림은 스트림의 `retry` 간격이 지난 뒤 `GET`과 `Last-Event-ID`로
+이어 받습니다. `initialize` 후 클라이언트는 공식 클라이언트들처럼, 어떤 호출에도 속하지
+않는 메시지를 위해 세션의 선택적 `GET` 이벤트 스트림을 엽니다. 그런 스트림이 없는 서버는
+405로 응답합니다. 세션 id를 실은 요청에 서버가 404로 응답하면 세션이 끝난 것입니다.
+클라이언트는 새 세션을 초기화하고 요청을 한 번 다시 보냅니다. `shutdown()`과 마지막
+참조의 해제는 최대 2초로 제한된 `DELETE`로 세션을 끝냅니다.
+
+**알림:** 서버가 `notifications/tools/list_changed`를 보내면
+`set_tool_list_changed_handler()`로 등록한 핸들러가 호출됩니다. 그때 `get_tools()`나
+`get_tool_definitions()`를 다시 읽으세요. 그때까지는 캐시된 스키마가 오래되었을 수 있으므로
+`outputSchema` 검사를 건너뜁니다. 핸들러는 클라이언트의 전송 스레드에서 실행되므로 빨리
+반환해야 하며 클라이언트를 호출해서는 안 됩니다.
+
+**강화된 stdio(`StdioClientConfig`):** `argv`, `cwd`, `environment`를 명시합니다.
+`replace_environment`를 쓰면 설정한 항목이 서버 환경의 전부가 되고, 쓰지 않으면 서버는 이
+프로세스의 환경을 물려받으며 설정한 항목이 그것에 추가되거나 그것을 덮어씁니다(`PATH`
+항목은 `argv[0]`을 찾을 위치도 결정합니다). 세션은 서버의 stderr를 계속 비우며 마지막
+`max_stderr_bytes`(64 KiB)를 보관합니다. stderr 출력은 세션을 끝내지 않습니다.
+`startup_timeout`은 실행부터 initialized 알림까지를, `request_timeout`은 각 요청을
+제한합니다. 취소되거나 타임아웃된 요청은 강화된 세션을 끝냅니다. 클라이언트는
+`notifications/cancelled`를 보내고, 서버가 멈추도록 `cancel_grace`(500 ms)를 기다린 뒤
+프로세스 트리를 종료하며, 이후의 요청은 `MCPFailure::shutdown`으로 실패합니다.
+
+**제한과 실패:** `rpc_call_async(method, params, deadline, cancel_token)`과
+`call_tool_result_async()`는 절대 steady-clock deadline과 `graph::CancelToken`을 받습니다.
+취소와 deadline은 그 호출에 대한 기다림을 멈추고, 서버에 `notifications/cancelled`로
+알리며(`initialize`에는 보내지 않음), 공유 stdio 프로세스와 다른 응답에는 영향을 주지
+않습니다. `initialize(name, deadline, cancel_token)`도 같은 방식으로 핸드셰이크를
+제한하지만, MCP는 `initialize`를 취소하지 않으므로 서버에 알리지 않습니다. 이때 stdio
+서버는 두 번째 핸드셰이크를 거부할 수 있습니다. HTTP는 요청마다
+`MCPClientConfig::request_timeout`도 적용합니다. 전송과 와이어 실패는 `MCPTransportError`를
+던집니다. 이는 `failure()`(`connection`, `timeout`, `cancelled`, `shutdown`, `http_status`,
+`protocol`)와 `http_status()`(HTTP가 아닌 실패에서는 0)를 제공하는 `std::runtime_error`
+하위 클래스입니다. JSON-RPC 오류 응답은 서버의 `code()`와 `data()`를 가진 `MCPError`이며,
+HTTP 오류 상태가 그것을 실어 온 경우에도 그렇습니다(이때 `http_status()`가 그 상태를
+알려 줍니다). 두 클래스 모두 도구 수준의 `isError` 결과를 나타내지 않습니다. 그 결과는
+`call_tool_result()`로 확인하세요.
+
+| 메서드 | 설명 |
 |--------|-------------|
-| `MCPClient(url)` | Construct an HTTP-mode client |
-| `MCPClient(argv)` | Spawn a subprocess and construct a stdio-mode client. `argv[0]` is resolved through `PATH` before fork; failed exec surfaces as a connection error on first RPC. Refuses Windows `.bat`/`.cmd` for safety (Round 3 hardening) |
-| `initialize(client_name)` | Perform the MCP initialization handshake once. Repeated calls are idempotent; protocol/transport failures throw |
-| `get_initialize_result()` | Return negotiated protocol, capabilities, server info, instructions, and raw result |
-| `list_tools(cursor)` | Fetch one page while treating the cursor as opaque |
-| `get_tool_definitions()` | Follow all pages and preserve complete tool metadata |
-| `get_tools()` | Discover all pages and return session-preserving `MCPTool` instances |
-| `call_tool(name, arguments)` | Invokes a tool by name with the given arguments. Returns the raw JSON response |
-| `call_tool_result(name, arguments)` | Typed result preserving content, structured content, `isError`, and `_meta` |
-| `call_tool_result_async(name, arguments, deadline, cancel_token)` | `rpc_call_async`처럼 절대 steady-clock 마감 시각과 cancel token으로 제한되는 타입 지정 호출 |
-| `rpc_call_async(method, params)` | 다른 모든 메서드가 사용하는 전송 수준의 JSON-RPC 호출 |
+| `MCPClient(url)` | MCP 엔드포인트 `url`을 주어진 그대로 쓰는 HTTP 모드 클라이언트를 만듭니다 |
+| `MCPClient(argv)` | 하위 프로세스를 실행하고 stdio 모드 클라이언트를 만듭니다. `argv[0]`은 fork 전에 `PATH`로 해석되며, exec 실패는 첫 RPC에서 연결 오류로 나타납니다. 안전을 위해 Windows `.bat`/`.cmd`를 거부합니다(Round 3 hardening) |
+| `MCPClient(StdioClientConfig)` | 명시적 환경, 제한된 stderr 캡처, deadline, 취소 유예 시간을 갖춘 강화된 stdio 실행 |
+| `initialize(client_name)` | MCP 초기화 핸드셰이크를 한 번 수행합니다. 반복 호출은 멱등적이며, 프로토콜/전송 실패는 예외를 던집니다 |
+| `initialize(client_name, deadline, cancel_token)` | deadline과 cancel token으로 제한된 핸드셰이크 |
+| `get_initialize_result()` | 협상된 프로토콜, capability, 서버 정보, instructions, 원본 결과를 반환합니다 |
+| `list_tools(cursor)` | cursor를 불투명하게 다루며 한 페이지를 가져옵니다 |
+| `get_tool_definitions()` | 모든 페이지를 따라가며 완전한 도구 메타데이터를 보존합니다 |
+| `get_tools()` | 모든 페이지를 발견하고 세션을 보존하는 `MCPTool` 인스턴스를 반환합니다 |
+| `call_tool(name, arguments)` | 주어진 인수로 이름에 해당하는 도구를 호출합니다. 원본 JSON 응답을 반환합니다 |
+| `call_tool_result(name, arguments)` | content, structured content, `isError`, `_meta`를 보존하는 타입화된 결과 |
+| `call_tool_result_async(name, arguments, deadline, cancel_token)` | `rpc_call_async`처럼 절대 steady-clock deadline과 cancel token으로 제한되는 타입화된 호출 |
+| `set_tool_list_changed_handler(handler)` | `notifications/tools/list_changed`에서 `handler`를 호출합니다. 빈 핸들러는 호출을 멈춥니다 |
+| `shutdown()` | 클라이언트와 그것이 만든 모든 도구를 영구히 끝냅니다. HTTP 세션에는 `DELETE`, stdio 서버에는 순서 있는 종료 |
+| `rpc_call_async(method, params, deadline, cancel_token)` | 다른 모든 메서드가 사용하는 전송 수준 JSON-RPC 호출 |
 
-**도구 제공.** `MCPServer`(`<neograph/mcp/server.h>`)는 등록된 핸들러로 `tools/call`에 응답합니다. 핸들러의 실패가 클라이언트에 어떻게 전달되는지는 [프로토콜 실패 매핑](#protocol-failure-mapping)에 있습니다.
+**도구 제공.** `MCPServer`(`<neograph/mcp/server.h>`)는 등록된 핸들러로 `tools/call`에
+응답합니다. 핸들러의 실패가 클라이언트에 어떻게 전달되는지는
+[Protocol failure mapping](#protocol-failure-mapping)에 있습니다. `2025-11-25`,
+`2025-06-18` 또는 `2025-03-26`을 요청하는 클라이언트에는 그 개정판과 그것이 정의하는
+필드로 응답하고(`2025-06-18`에는 `icons`와 `execution`이 없고, `2025-03-26`에는 `title`,
+`outputSchema`, `_meta`, `structuredContent`도 없으며, 구조화된 데이터만 있는 결과는 그것을
+텍스트로 싣습니다), 그 밖의 요청에는 `2025-11-25`로 응답합니다. `protocol_version()`이 그
+결과를 알려 줍니다. 등록은 `inputSchema`나 `outputSchema`가 `"type": "object"`라고 말하지
+않는 도구(예전 기본값인 빈 객체는 `{"type": "object"}`로 읽음), 검증기가 지원하는 JSON
+Schema 2020-12가 아닌 스키마, SEP-986의 `A-Za-z0-9_.-` 1~128자를 벗어나는 이름을
+거부합니다. 인수는 JSON Schema 2020-12 검증기(`$ref`, `anyOf`, `minimum`, 정수로서의
+정수값 `1.0`, 그리고 core, applicator, validation 어휘의 나머지)로 검증됩니다. 알 수 없는
+도구는 JSON-RPC 오류 `-32602`이며, 오류 응답은 읽을 수 있었던 요청 id를 싣고 그렇지
+않으면 id를 싣지 않습니다. `null`은 절대 쓰지 않습니다. `MCPHttpServer`
+(`<neograph/mcp/http_server.h>`)는 같은 것을 Streamable HTTP로 제공합니다. 세션은
+`DELETE`로, 요청 없이 `session_idle_timeout`(30분)이 지나면, 또는 `max_sessions`(64)에서
+새 클라이언트에게 자리가 필요하고 그것이 진행 중인 요청이 없는 가장 오래 쓰이지 않은
+세션일 때 끝나며, 그 id에는 이후 404가 응답됩니다. 도구 호출은 반환될 때까지 HTTP 스레드
+하나를 점유하므로 스레드는 필요할 때 `max_http_threads`(64)까지 시작됩니다.
+`response_timeout`을 넘긴 요청은 504를 받고 그 도구 호출은 취소됩니다. `DELETE`는 그
+연결을 닫습니다. `protected_resource_metadata`가 있으면 서버는 RFC 9728 메타데이터를
+게시하고 모든 401 challenge에서 그 위치를 알립니다.
 
-**HTTP usage:**
+**HTTP 사용법:**
 
 ```cpp
-neograph::mcp::MCPClient client("http://localhost:8000");
+neograph::mcp::MCPClient client("http://localhost:8000/mcp");
 client.initialize();
 auto tools = client.get_tools();
 ```
 
-**stdio usage:**
+
+**stdio 사용법:**
 
 ```cpp
 // argv[0] is resolved through PATH before fork; inherited fds close before execve.
@@ -3062,6 +3167,7 @@ neograph::mcp::MCPClient client({"python", "/path/to/server.py"});
 client.initialize();
 auto tools = client.get_tools();   // Tools retain the protocol session/process.
 ```
+
 
 ---
 

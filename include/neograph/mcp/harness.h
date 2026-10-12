@@ -227,6 +227,8 @@ struct HarnessServiceConfig {
     std::size_t                         max_runs = 128;
     std::chrono::milliseconds           poll_interval{1000};
     std::chrono::milliseconds           run_ttl{std::chrono::hours(24)};
+    /// No effect: NeoGraph implements no MCP Tasks profile. Kept for source
+    /// compatibility.
     bool                                enable_experimental_tasks = false;
 };
 

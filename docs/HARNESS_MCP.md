@@ -576,9 +576,14 @@ export NEOGRAPH_HARNESS_HTTP_PORT=8080
 
 The endpoint is `http://127.0.0.1:8080/mcp`. It implements the published MCP
 2025-11-25 Streamable HTTP POST contract with per-session MCP lifecycles and
-JSON responses. Notifications return HTTP 202. DELETE terminates a session.
-The optional standalone GET/SSE channel is deliberately not implemented and
-returns HTTP 405, which the transport specification explicitly permits.
+JSON responses. Notifications return HTTP 202. A call the client cancelled ends
+with an empty event stream, so no response reaches it. A session ends with
+DELETE, after 30 minutes without a request (`session_idle_timeout`), or when a
+new client needs room at `max_sessions` (64) and it is the least recently used
+session with no request in flight; its id then answers 404, which tells the
+client to initialize again. The optional standalone GET/SSE channel is
+deliberately not implemented and returns HTTP 405, which the transport
+specification explicitly permits.
 
 Security defaults are transport-level and do not couple authentication to
 `GraphEngine` or `HarnessService`:
@@ -599,7 +604,11 @@ Security defaults are transport-level and do not couple authentication to
   graph runtime itself. Without an authorizer (loopback binds only) the scope
   is empty, and the executable keeps its single local owner scope.
 - Request payload, HTTP worker, queue, session, and response-wait limits are
-  bounded by `MCPHttpServerConfig`.
+  bounded by `MCPHttpServerConfig`. HTTP threads start on demand up to
+  `max_http_threads` (64), because a tool call holds one until it returns.
+- Embeddings whose bearer tokens come from an OAuth authorization server set
+  `MCPHttpServerConfig::protected_resource_metadata`; the server then publishes
+  RFC 9728 metadata and names it in every 401 challenge.
 
 `neograph::mcp::ScopedHarnessStore` maps public IDs and schema-owned record/journal
 references into a reversible tenant namespace; opaque request, result, and event
@@ -887,37 +896,12 @@ one second; embeddings can override both through `HarnessServiceConfig`.
 
 ## Experimental Tasks Profile
 
-MCP Tasks is not part of core MCP 2025-11-25 and the upstream extension still
-labels itself experimental. NeoGraph therefore keeps it disabled by default and
-separate from the stable `run_id` plus `neograph_get` polling contract.
-
-To opt in on the example server, durable state must also be enabled:
-
-```bash
-export NEOGRAPH_HARNESS_STATE_DIR="$PWD/.neograph-harness-state"
-export NEOGRAPH_HARNESS_EXPERIMENTAL_TASKS=1
-```
-
-The server then advertises `io.modelcontextprotocol/tasks`, marks
-`neograph_start` with optional task support, and serves `tasks/get`,
-`tasks/update`, and `tasks/cancel`. It returns a `CreateTaskResult` only when the
-individual `tools/call` request includes:
-
-```json
-{
-  "_meta": {
-    "io.modelcontextprotocol/clientCapabilities": {
-      "extensions": {"io.modelcontextprotocol/tasks": {}}
-    }
-  }
-}
-```
-
-Clients without that request opt-in receive the ordinary `CallToolResult` and
-continue polling `neograph_get`; enabling the profile does not alter the stable
-fallback. Task statuses are `working`, `input_required`, `completed`, `failed`,
-and `cancelled`. `tasks/update.inputResponses` is keyed by the pending
-`call_id`, and polling clients should honor `pollIntervalMs` and `ttlMs`.
+Not implemented. Earlier versions of this guide described an opt-in MCP Tasks
+profile; no such profile exists. The Harness server advertises no tasks
+capability, `HarnessServiceConfig::enable_experimental_tasks` and
+`NEOGRAPH_HARNESS_EXPERIMENTAL_TASKS` have no effect, and `tasks/get`,
+`tasks/update` and `tasks/cancel` answer `-32601`. Long runs use the stable
+`run_id` plus `neograph_get` polling contract.
 
 ## Capability Backends
 
@@ -959,7 +943,10 @@ remain release/discovery packaging options; they are not required for the wire
 protocol and should be added only with signed release artifacts and an explicit
 remote-auth deployment manifest.
 
-NeoGraph currently publishes only the dated MCP `2025-11-25` profile. Final
-SEPs describing a future stateless protocol do not create a new wire version;
-no successor profile will be advertised until the MCP project publishes a new
-dated specification.
+NeoGraph publishes the dated MCP `2025-11-25` profile, and also answers a
+client that asks for `2025-06-18` or `2025-03-26` with the fields that revision
+defines. The current MCP revision, `2026-07-28`, is stateless (no `initialize`,
+no sessions, the version in every request's `_meta`) and is not served yet: the
+official dual-era clients fall back to `2025-11-25`, and a client pinned to
+`2026-07-28` cannot connect. Serving it as a second mode beside `2025-11-25` is
+planned.

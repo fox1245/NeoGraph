@@ -115,7 +115,10 @@ on the same built-in call. Host-authored native Provider calls are outside it.
 `MandatoryHookRunner` accepts either the existing native adapter or a
 transport-neutral `HookExecutionBackend`. `RpcHookExecutionAdapter` binds
 `HookRpcExecutor` to that backend. The same fixed `hooks/invoke` JSON-RPC method
-can use `StdioJsonRpcTransport` or `HttpJsonRpcTransport`.
+can use `StdioJsonRpcTransport` or `HttpJsonRpcTransport`. Both run over an
+`MCPClient` session, so the endpoint is an MCP server that also serves
+`hooks/invoke`. The method is a NeoGraph extension, not part of MCP; an MCP
+server without it answers `-32601`.
 
 RPC Hook artifacts are evidence, never authority. A
 `ContextStoreHookArtifactPublisher` accepts only artifacts whose:

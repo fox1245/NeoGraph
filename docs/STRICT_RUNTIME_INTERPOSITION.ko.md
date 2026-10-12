@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ko source_sha256=9b872c2d049d049aa2c5e7393b485bc79c3b89a5268878b1fff5a263c347208f -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ko source_sha256=eee79303f2ce57761c1bf62d99755e7589782385c4ffa411c4d5c6ad4ad55207 -->
 # 엄격한 런타임 컨텍스트
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -92,7 +92,7 @@ state를 사용한다. 같은 내장 호출에서 engine Strict Runtime interpos
 
 ## 네이티브, stdio 또는 HTTP에 대한 필수 Hook
 
-`MandatoryHookRunner`는 기존 네이티브 어댑터 또는 전송 중립 `HookExecutionBackend`를 수용한다. `RpcHookExecutionAdapter`는 `HookRpcExecutor`를 해당 백엔드에 바인딩한다. 동일한 고정된 `hooks/invoke` JSON-RPC 메서드는 `StdioJsonRpcTransport` 또는 `HttpJsonRpcTransport`를 사용할 수 있다.
+`MandatoryHookRunner`는 기존 네이티브 어댑터 또는 전송 중립 `HookExecutionBackend`를 수용한다. `RpcHookExecutionAdapter`는 `HookRpcExecutor`를 해당 백엔드에 바인딩한다. 동일한 고정된 `hooks/invoke` JSON-RPC 메서드는 `StdioJsonRpcTransport` 또는 `HttpJsonRpcTransport`를 사용할 수 있다. 두 전송은 `MCPClient` 세션 위에서 동작하므로 엔드포인트는 `hooks/invoke`도 제공하는 MCP 서버다. 이 메서드는 MCP의 일부가 아니라 NeoGraph 확장이며, 이를 제공하지 않는 MCP 서버는 `-32601`로 응답한다.
 
 RPC Hook 아티팩트는 증거이지 권위가 아닙니다. `ContextStoreHookArtifactPublisher`는 다음과 같은 아티팩트만 허용합니다:
 

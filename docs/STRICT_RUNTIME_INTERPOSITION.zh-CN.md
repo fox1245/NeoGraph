@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=9b872c2d049d049aa2c5e7393b485bc79c3b89a5268878b1fff5a263c347208f -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=eee79303f2ce57761c1bf62d99755e7589782385c4ffa411c4d5c6ad4ad55207 -->
 # 严格运行时介入
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -88,7 +88,7 @@ token 数量与 provider report 分开保存。使用 durable filesystem databas
 
 ## 对native、stdio或HTTP的强制Hook
 
-`MandatoryHookRunner`接受现有的原生适配器或传输中立的`HookExecutionBackend`。`RpcHookExecutionAdapter`将`HookRpcExecutor`绑定到该后端。同一个固定的`hooks/invoke` JSON-RPC方法可以使用`StdioJsonRpcTransport`或`HttpJsonRpcTransport`。
+`MandatoryHookRunner`接受现有的原生适配器或传输中立的`HookExecutionBackend`。`RpcHookExecutionAdapter`将`HookRpcExecutor`绑定到该后端。同一个固定的`hooks/invoke` JSON-RPC方法可以使用`StdioJsonRpcTransport`或`HttpJsonRpcTransport`。两者都运行在`MCPClient`会话之上，因此端点是同时提供`hooks/invoke`的MCP服务器。该方法是NeoGraph扩展，不属于MCP；不提供它的MCP服务器会返回`-32601`。
 
 RPC Hook工件是证据，而非权威。`ContextStoreHookArtifactPublisher`仅接受满足以下条件的工件：
 

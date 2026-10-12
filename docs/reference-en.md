@@ -577,7 +577,7 @@ When NeoGraph serves tools, graphs or agents over MCP, gRPC, A2A or ACP, every f
 
 | Class (code) | MCP `tools/call` (`MCPServer`) | gRPC `GraphService` | gRPC `ToolService.CallTool` | A2A task (`A2AServer`) | ACP `session/prompt` (`ACPServer`) |
 |------|------|------|------|------|------|
-| Cancelled by the client (`NG.Cancelled`): `notifications/cancelled`, a gRPC cancel | stdio (`run`): no response; a transport that reads the response sink, such as HTTP: JSON-RPC error `-32800`, `data.code` | `CANCELLED` | `CANCELLED` | `CancelTask`: `CANCELED`; the stream closes on it | `session/cancel`: `stopReason: "cancelled"` |
+| Cancelled by the client (`NG.Cancelled`): `notifications/cancelled`, a gRPC cancel | stdio (`run`): no response; HTTP (`MCPHttpServer`): no response either, the POST ends with an empty `text/event-stream`; another transport that reads the response sink: JSON-RPC error `-32800`, `data.code` | `CANCELLED` | `CANCELLED` | `CancelTask`: `CANCELED`; the stream closes on it | `session/cancel`: `stopReason: "cancelled"` |
 | Cancelled by the server (`NG.Cancelled`): `stop()`, or the handler's own work | JSON-RPC error `-32000` (`stop()`) or `-32603`, `data.code` | `CANCELLED` | `CANCELLED` | `CANCELED` | JSON-RPC error `-32800`, `data` `{code, retryable}` |
 | Hook blocked (`NG.HookBlocked`) | JSON-RPC error `-32010`, `data` `{code, invocation_id, state}` | `FAILED_PRECONDITION`, or `DEADLINE_EXCEEDED` when the Hook timed out; ErrorInfo metadata `invocation_id`, `state` | as `GraphService` | `REJECTED` when no node had finished, otherwise `FAILED`; `metadata["neograph/failure"]` `{code, retryable}` | JSON-RPC error `-32603`, `data` `{code, retryable}` |
 | Interrupted (`NG.Interrupted`) | JSON-RPC error `-32011`, `data` `{code, reason, value}` | a paused run: `OK`, `interrupted`, `interrupt_node`, `interrupt_value_json` (the stream's FINAL payload: `interrupt_value`) | `FAILED_PRECONDITION`, ErrorInfo metadata `reason`, `value` | `INPUT_REQUIRED`: the reason as text, the payload as a data part, `metadata["neograph/interrupt"]` `{node, checkpointId}`; a follow-up message resumes the run | `session/request_permission` in the same turn, whose answer resumes the run; JSON-RPC error `-32603` with `NG.Interrupted` when the adapter or the client cannot answer |
@@ -591,7 +591,7 @@ When NeoGraph serves tools, graphs or agents over MCP, gRPC, A2A or ACP, every f
 | Effect uncertain, unknown, a failure exit (`NG.EffectUncertain`, `NG.UnknownFailure`, the exit's code) | as ordinary, with its code | `UNKNOWN` | as ordinary, with its code | as ordinary, with its code | as ordinary, with its code |
 | Step limit (`NG.StepLimit`): `RunConfig::max_steps` | none | `OK`, `max_steps_exhausted` | none | `FAILED`, code `NG.StepLimit` | `stopReason: "max_turn_requests"` |
 | Invalid request (`NG.InvalidRequest`) | JSON-RPC error `-32602` | `INVALID_ARGUMENT`; `FAILED_PRECONDITION` (`NG.NoGraph`) when there is no graph to run | `INVALID_ARGUMENT` | JSON-RPC error `-32602` with `google.rpc.BadRequest` field violations; a malformed envelope or a batch: `-32600` | JSON-RPC error `-32602` |
-| Unknown tool (`NG.ToolNotFound`) | `result` with `isError: true`, no failure code | none | `NOT_FOUND` | none | none |
+| Unknown tool (`NG.ToolNotFound`) | JSON-RPC error `-32602`, `data.code` | none | `NOT_FOUND` | none | none |
 | At capacity (`NG.Capacity`) | JSON-RPC error `-32000`, `data.capacity` | `RESOURCE_EXHAUSTED` | none | JSON-RPC error `-32603`, ErrorInfo reason `RESOURCE_EXHAUSTED`, domain `neograph` | JSON-RPC error `-32603`, `data.reason` `overloaded` |
 
 `retryable` is `FailureVerdict::retryable` on every protocol: whether sending the same request again may succeed. It is the node's retry verdict ([Node failure contract](#node-failure-contract)), and also `true` for a provider failure (`NG.ProviderFailed`), which the node retry loop leaves to the provider runtime but a new request may get past. A2A carries the code and `retryable` in the task's `metadata["neograph/failure"]` in both versions, and ACP in the error's `data`; the request errors only A2A has are under [A2A error mapping](#a2a-error-mapping).
@@ -3000,15 +3000,18 @@ available tools, and wraps them as NeoGraph `Tool` instances.
 
 Two transports are available:
 
-- **HTTP** — `MCPClient("http://host:port")`. Discovered tools retain the
-  originating Streamable HTTP session, including `Mcp-Session-Id`, negotiated
-  protocol version, timeout, and custom headers.
+- **HTTP** — `MCPClient("http://host:port/mcp")`. The URL is the server's MCP
+  endpoint and is used as given, path and query included; nothing is appended
+  (an older client appended `/mcp`). Discovered tools retain the originating
+  Streamable HTTP session, including `Mcp-Session-Id`, negotiated protocol
+  version, timeout, and custom headers.
 - **stdio** — `MCPClient({"python", "server.py"})`. The client resolves `PATH`
   before `fork`, executes the subprocess with `execve`, wires bidirectional
   pipes, and exchanges newline-delimited JSON-RPC
   over the child's stdin/stdout. The subprocess lives as long as the
-  `MCPClient` *or any `MCPTool`* it produced; destruction sends SIGTERM and
-  reaps via `waitpid` (SIGKILL fallback after ~500 ms).
+  `MCPClient` *or any `MCPTool`* it produced. Shutting it down closes its stdin
+  first and waits up to one second for it to exit, then sends SIGTERM to its
+  process group, waits up to another second, and then sends SIGKILL.
 
 ### MCPTool
 
@@ -3018,7 +3021,7 @@ tools retain their originating protocol session, regardless of transport.
 ```cpp
 class MCPTool : public AsyncTool, public ContextualAsyncTool {
 public:
-    // Legacy direct-construction mode. Discovered tools reuse their client session.
+    // One known tool at an HTTP endpoint. Discovered tools reuse their client session.
     MCPTool(const std::string& server_url,
             const std::string& name,
             const std::string& description,
@@ -3038,18 +3041,22 @@ public:
 ```
 
 Usually you do not construct `MCPTool` directly — `MCPClient::get_tools()`
-discovers and wraps them.
+discovers and wraps them. A tool built with the URL constructor opens one MCP
+session on its first call, reuses it for every later call, and ends it with
+`DELETE` when the tool is destroyed.
 
 Every dispatcher calls the context-aware `execute_async`, so the run's cancel
 token (a node attempt's token under an attempt timeout) and deadline bound the
 call on both transports. Cancelling stops waiting at once and throws
 `graph::CancelledException`, which the tool failure contract treats as
 cancellation; the deadline or the request timeout throws
-`asio::system_error(asio::error::timed_out)`, a `timed_out` call. The response
-that arrives after either is dropped: stdio routes responses by JSON-RPC id and
-the call's id is no longer awaited, and HTTP abandons the request. An `isError`
-result throws `std::runtime_error`, an ordinary tool failure. In Python,
-`mcp.MCPError` keeps the JSON-RPC error's `code` and `data`.
+`asio::system_error(asio::error::timed_out)`, a `timed_out` call. Either way the
+server is told with `notifications/cancelled`, also when the run cancels the
+coroutine that awaits the call. The response that arrives later is dropped:
+stdio routes responses by JSON-RPC id and the call's id is no longer awaited,
+and HTTP abandons the request. An `isError` result throws `std::runtime_error`,
+an ordinary tool failure. In Python, `mcp.MCPError` keeps the JSON-RPC error's
+`code`, `data` and `http_status`.
 
 ### MCPClient
 
@@ -3063,14 +3070,19 @@ provides methods to discover and invoke tools.
 ```cpp
 class MCPClient {
 public:
-    // HTTP transport.
+    // HTTP transport: the server's MCP endpoint URL, used as given.
     explicit MCPClient(const std::string& server_url);
     MCPClient(const std::string& server_url, MCPClientConfig config);
 
     // stdio transport — fork+exec the subprocess.
     explicit MCPClient(std::vector<std::string> argv);
+    // Hardened stdio: explicit environment, cwd, bounds, cancellation grace.
+    explicit MCPClient(StdioClientConfig config);
 
     bool initialize(const std::string& client_name = "neograph");
+    bool initialize(const std::string& client_name,
+                    std::chrono::steady_clock::time_point deadline,
+                    std::shared_ptr<graph::CancelToken> cancel_token);
     bool is_initialized() const noexcept;
     InitializeResult get_initialize_result() const;
     std::vector<std::unique_ptr<Tool>> get_tools();
@@ -3083,47 +3095,99 @@ public:
         const std::string& name, const json& arguments,
         std::chrono::steady_clock::time_point deadline,
         std::shared_ptr<graph::CancelToken> cancel_token);
+    void set_tool_list_changed_handler(std::function<void()> handler);
+    void shutdown() noexcept;
 
-    // Low-level async dispatch retained for source compatibility.
-    asio::awaitable<json>
-    rpc_call_async(const std::string& method, const json& params);
+    // The transport-level JSON-RPC call every other method uses.
+    asio::awaitable<json> rpc_call_async(
+        const std::string& method, const json& params = json::object(),
+        std::chrono::steady_clock::time_point deadline =
+            std::chrono::steady_clock::time_point::max(),
+        std::shared_ptr<graph::CancelToken> cancel_token = {});
 };
 ```
 
-**Wire protocol:** NeoGraph's MCP client speaks
-`protocolVersion = "2025-11-25"`. HTTP transport sends the
-`MCP-Protocol-Version` header on every JSON-RPC request (Round 1 +
-Round 3 spec alignment); stdio transport carries the same version
-in the `initialize` payload. Servers running older protocol
-versions may reject these requests — pin server-side or upgrade.
+**Wire protocol:** NeoGraph's MCP client offers `protocolVersion =
+"2025-11-25"` and accepts a server that answers `2025-11-25`, `2025-06-18` or
+`2025-03-26` (`MCP_SUPPORTED_PROTOCOL_VERSIONS`). Any other answer fails
+`initialize` with a protocol error naming both and the client disconnects, as
+MCP's version negotiation asks. HTTP sends the negotiated version in the
+`MCP-Protocol-Version` header of every later request. MCP `2026-07-28` (no
+`initialize`, no sessions) is not spoken yet: a server that serves only that
+revision refuses the handshake with `-32022`, which reaches the caller as
+`MCPError`.
 
 **Session and transport ownership:** Both constructors create the same protocol
 session. It owns JSON-RPC ids, response validation, initialization (including
-the initialized notification), pagination, and tool-result adaptation. The HTTP
-transport alone owns endpoint URLs, headers, negotiated `Mcp-Session-Id`, and
-request timeout; the stdio transport alone owns the subprocess, pipes, reader,
-and response-id demultiplexer. Both advertise concurrent requests, cancellation,
-and deadlines to the session. A discovered tool retains its protocol session,
-so it remains usable after the `MCPClient` is destroyed; the subprocess is
-terminated and reaped when the last client/tool reference is released.
+the initialized notification), pagination, and tool-result adaptation. A
+request sent with `rpc_call_async()` on a client that has not shaken hands yet
+performs the handshake first. The HTTP transport alone owns the endpoint URL,
+headers, the negotiated `Mcp-Session-Id`, and the request timeout; the stdio
+transport alone owns the subprocess, pipes, reader, and response-id
+demultiplexer. A discovered tool retains its protocol session, so it remains
+usable after the `MCPClient` is destroyed; the session ends when the last
+client or tool reference is released.
 
-`rpc_call_async(method, params, deadline, cancel_token)` supports an optional
-absolute steady-clock deadline and `graph::CancelToken`. Cancellation and
-deadlines stop waiting for that call without closing the shared stdio process or
-interfering with sibling responses. HTTP additionally applies
-`MCPClientConfig::request_timeout` per request. Non-HTTP transport or wire
-failures throw `MCPTransportError`, a `std::runtime_error` subclass exposing
-`failure()` (`connection`, `timeout`, `cancelled`, `shutdown`, `http_status`, or
-`protocol`). HTTP status failures expose `http_status()` (zero otherwise).
-Valid JSON-RPC error responses remain `MCPError` with the server's `code()`
-and `data()`. Neither class identifies a tool-level `isError` result; use
-`call_tool_result()` to inspect that outcome.
+**Following the transports:** Both transports answer a server's requests: a
+`ping` gets an empty result, and every other request gets `-32601`, because the
+client declares no client capability (no roots, sampling or elicitation). A
+message counts as a response only when it has no `method`, so a server request
+that reuses the id of a pending call never completes that call. Over HTTP the
+client reads JSON and Server-Sent Event responses (by the WHATWG rules: CRLF,
+LF or CR line ends, multi-line `data`, `id`, `retry`), answers a server request
+that arrives on a call's event stream in its own POST while that stream stays
+open, and stops reading a stream once its response arrived. A stream the server
+closes before the response is resumed with `GET` and `Last-Event-ID` after the
+stream's `retry` interval. After `initialize` the client opens the optional
+`GET` event stream of its session for messages that belong to no call, as the
+official clients do; a server without one answers 405. When the server answers
+404 for a request that carried the session id, the session has ended: the
+client initializes a new one and sends the request again, once. `shutdown()`
+and the release of the last reference end the session with `DELETE`, bounded
+to two seconds.
+
+**Notifications:** `set_tool_list_changed_handler()` is called when the server
+sends `notifications/tools/list_changed`; read `get_tools()` or
+`get_tool_definitions()` again then. Until that, `outputSchema` checks are
+skipped, as the cached schemas may be stale. The handler runs on the client's
+transport thread: it must return promptly and must not call the client.
+
+**Hardened stdio (`StdioClientConfig`):** `argv`, `cwd` and `environment` are
+explicit. With `replace_environment` the configured entries are the server's
+whole environment; without it, the server inherits this process's environment
+and the configured entries add to or override it (a `PATH` entry also decides
+where `argv[0]` is looked up). The session drains the server's stderr and keeps
+its last `max_stderr_bytes` (64 KiB); stderr output never ends the session.
+`startup_timeout` bounds the launch through the initialized notification and
+`request_timeout` every request. A request that is cancelled or times out ends
+a hardened session: the client sends `notifications/cancelled`, waits
+`cancel_grace` (500 ms) for the server to stop, and then terminates the process
+tree; later requests fail with `MCPFailure::shutdown`.
+
+**Bounds and failures:** `rpc_call_async(method, params, deadline,
+cancel_token)` and `call_tool_result_async()` take an absolute steady-clock
+deadline and a `graph::CancelToken`. Cancellation and deadlines stop waiting
+for that call, tell the server with `notifications/cancelled` (never for
+`initialize`), and leave the shared stdio process and sibling responses alone.
+`initialize(name, deadline, cancel_token)` bounds the handshake the same way
+without telling the server, since MCP never cancels `initialize`; a stdio server
+may then refuse a second handshake. HTTP additionally applies
+`MCPClientConfig::request_timeout` per request. Transport and wire failures
+throw `MCPTransportError`, a `std::runtime_error` subclass exposing `failure()`
+(`connection`, `timeout`, `cancelled`, `shutdown`, `http_status`, or
+`protocol`) and `http_status()` (zero for non-HTTP failures). JSON-RPC error
+responses are `MCPError` with the server's `code()` and `data()`, also when an
+HTTP error status carried them (`http_status()` then names it). Neither class
+identifies a tool-level `isError` result; use `call_tool_result()` to inspect
+that outcome.
 
 | Method | Description |
 |--------|-------------|
-| `MCPClient(url)` | Construct an HTTP-mode client |
+| `MCPClient(url)` | Construct an HTTP-mode client for the MCP endpoint `url`, used as given |
 | `MCPClient(argv)` | Spawn a subprocess and construct a stdio-mode client. `argv[0]` is resolved through `PATH` before fork; failed exec surfaces as a connection error on first RPC. Refuses Windows `.bat`/`.cmd` for safety (Round 3 hardening) |
+| `MCPClient(StdioClientConfig)` | Hardened stdio launch with an explicit environment, bounded stderr capture, deadlines and the cancellation grace |
 | `initialize(client_name)` | Perform the MCP initialization handshake once. Repeated calls are idempotent; protocol/transport failures throw |
+| `initialize(client_name, deadline, cancel_token)` | The handshake, bounded by a deadline and a cancel token |
 | `get_initialize_result()` | Return negotiated protocol, capabilities, server info, instructions, and raw result |
 | `list_tools(cursor)` | Fetch one page while treating the cursor as opaque |
 | `get_tool_definitions()` | Follow all pages and preserve complete tool metadata |
@@ -3131,16 +3195,40 @@ and `data()`. Neither class identifies a tool-level `isError` result; use
 | `call_tool(name, arguments)` | Invokes a tool by name with the given arguments. Returns the raw JSON response |
 | `call_tool_result(name, arguments)` | Typed result preserving content, structured content, `isError`, and `_meta` |
 | `call_tool_result_async(name, arguments, deadline, cancel_token)` | The typed call, bounded by an absolute steady-clock deadline and a cancel token as `rpc_call_async` is |
-| `rpc_call_async(method, params)` | The transport-level JSON-RPC call every other method uses |
+| `set_tool_list_changed_handler(handler)` | Call `handler` on `notifications/tools/list_changed`; an empty handler stops the calls |
+| `shutdown()` | End the client and every tool it produced for good: `DELETE` for an HTTP session, an orderly stop for a stdio server |
+| `rpc_call_async(method, params, deadline, cancel_token)` | The transport-level JSON-RPC call every other method uses |
 
 **Serving tools.** `MCPServer` (`<neograph/mcp/server.h>`) answers `tools/call`
 from registered handlers; how a handler's failure reaches the client is in
-[Protocol failure mapping](#protocol-failure-mapping).
+[Protocol failure mapping](#protocol-failure-mapping). It answers a client that
+asks for `2025-11-25`, `2025-06-18` or `2025-03-26` with that revision and the
+fields it defines (no `icons` or `execution` for `2025-06-18`; also no `title`,
+`outputSchema`, `_meta` or `structuredContent` for `2025-03-26`, where a result
+with only structured data carries it as text), and any other request with
+`2025-11-25`; `protocol_version()` reports the result. Registration refuses a
+tool whose `inputSchema` or `outputSchema` does not say `"type": "object"` (an
+empty object, the old default, is read as `{"type": "object"}`), a schema that
+is not JSON Schema 2020-12 the validator supports, and a name outside SEP-986's
+1 to 128 characters of `A-Za-z0-9_.-`. Arguments are validated with a JSON
+Schema 2020-12 validator (`$ref`, `anyOf`, `minimum`, an integral `1.0` as an
+integer, and the rest of the core, applicator and validation vocabularies).
+An unknown tool is JSON-RPC error `-32602`, and an error response carries the
+request's id when it could be read and no id otherwise, never `null`.
+`MCPHttpServer` (`<neograph/mcp/http_server.h>`) serves the same over
+Streamable HTTP: a session ends with `DELETE`, after `session_idle_timeout` (30
+minutes) without a request, or when a new client needs room at `max_sessions`
+(64) and it is the least recently used session with no request in flight; its
+id then answers 404. HTTP threads start on demand up to `max_http_threads` (64),
+since a tool call holds one until it returns; a request that outlives
+`response_timeout` gets 504 and its tool call is cancelled; a `DELETE` closes
+its connection; and with `protected_resource_metadata` the server publishes
+RFC 9728 metadata and names it in every 401 challenge.
 
 **HTTP usage:**
 
 ```cpp
-neograph::mcp::MCPClient client("http://localhost:8000");
+neograph::mcp::MCPClient client("http://localhost:8000/mcp");
 client.initialize();
 auto tools = client.get_tools();
 ```

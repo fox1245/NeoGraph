@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=6f43420ccceaedb9d72e1fbf1c43ceeb32be5e733a9c09ddacc8a744463c2fe6 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=09bef4cf7abb7279b4dcbfce5b8013c150cc8e2ec17aa762d919137c55689c47 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -579,7 +579,7 @@ public:
 
 | 类别（代码） | MCP `tools/call`（`MCPServer`） | gRPC `GraphService` | gRPC `ToolService.CallTool` | A2A 任务（`A2AServer`） | ACP `session/prompt`（`ACPServer`） |
 |------|------|------|------|------|------|
-| 客户端取消（`NG.Cancelled`）：`notifications/cancelled`、gRPC 取消 | stdio（`run`）：不应答；读取应答 sink 的传输（如 HTTP）：JSON-RPC 错误 `-32800`，`data.code` | `CANCELLED` | `CANCELLED` | `CancelTask`：`CANCELED`；stream 也以此状态关闭 | `session/cancel`：`stopReason: "cancelled"` |
+| 客户端取消（`NG.Cancelled`）：`notifications/cancelled`、gRPC 取消 | stdio（`run`）：不应答；HTTP（`MCPHttpServer`）：同样不应答，POST 以空的 `text/event-stream` 结束；读取应答 sink 的其他传输：JSON-RPC 错误 `-32800`，`data.code` | `CANCELLED` | `CANCELLED` | `CancelTask`：`CANCELED`；stream 也以此状态关闭 | `session/cancel`：`stopReason: "cancelled"` |
 | 服务器取消（`NG.Cancelled`）：`stop()`，或处理器自身的工作 | JSON-RPC 错误 `-32000`（`stop()`）或 `-32603`，`data.code` | `CANCELLED` | `CANCELLED` | `CANCELED` | JSON-RPC 错误 `-32800`，`data` `{code, retryable}` |
 | Hook 阻断（`NG.HookBlocked`） | JSON-RPC 错误 `-32010`，`data` `{code, invocation_id, state}` | `FAILED_PRECONDITION`，Hook 超时则为 `DEADLINE_EXCEEDED`；ErrorInfo metadata `invocation_id`、`state` | 与 `GraphService` 相同 | 没有 node 完成时为 `REJECTED`，否则为 `FAILED`；`metadata["neograph/failure"]` `{code, retryable}` | JSON-RPC 错误 `-32603`，`data` `{code, retryable}` |
 | 中断（`NG.Interrupted`） | JSON-RPC 错误 `-32011`，`data` `{code, reason, value}` | 已暂停的运行：`OK`、`interrupted`、`interrupt_node`、`interrupt_value_json`（流的 FINAL payload：`interrupt_value`） | `FAILED_PRECONDITION`，ErrorInfo metadata `reason`、`value` | `INPUT_REQUIRED`：原因作为 text，payload 作为 data part，`metadata["neograph/interrupt"]` `{node, checkpointId}`；后续 message 恢复运行 | 同一轮次内的 `session/request_permission`，其回答恢复运行；适配器或客户端无法回答时为带 `NG.Interrupted` 的 JSON-RPC 错误 `-32603` |
@@ -593,7 +593,7 @@ public:
 | 不确定的效果、未知、失败出口（`NG.EffectUncertain`、`NG.UnknownFailure`、出口的代码） | 与普通相同，带有各自的代码 | `UNKNOWN` | 与普通相同，带有各自的代码 | 与普通相同，带有各自的代码 | 与普通相同，带有各自的代码 |
 | 步数上限（`NG.StepLimit`）：`RunConfig::max_steps` | 无 | `OK`，`max_steps_exhausted` | 无 | `FAILED`，代码 `NG.StepLimit` | `stopReason: "max_turn_requests"` |
 | 无效请求（`NG.InvalidRequest`） | JSON-RPC 错误 `-32602` | `INVALID_ARGUMENT`；没有可运行的图时为 `FAILED_PRECONDITION`（`NG.NoGraph`） | `INVALID_ARGUMENT` | 带 `google.rpc.BadRequest` field violation 的 JSON-RPC 错误 `-32602`；格式错误的 envelope 或 batch 为 `-32600` | JSON-RPC 错误 `-32602` |
-| 未知工具（`NG.ToolNotFound`） | 不带失败代码、`isError: true` 的 `result` | 无 | `NOT_FOUND` | 无 | 无 |
+| 未知工具（`NG.ToolNotFound`） | JSON-RPC 错误 `-32602`，`data.code` | 无 | `NOT_FOUND` | 无 | 无 |
 | 容量已满（`NG.Capacity`） | JSON-RPC 错误 `-32000`，`data.capacity` | `RESOURCE_EXHAUSTED` | 无 | JSON-RPC 错误 `-32603`，ErrorInfo reason `RESOURCE_EXHAUSTED`，domain `neograph` | JSON-RPC 错误 `-32603`，`data.reason` `overloaded` |
 
 `retryable` 在每个协议上都是 `FailureVerdict::retryable`：再次发送同一请求是否可能成功。它是节点的重试判定（[节点失败契约](#node-failure-contract)），对 provider 失败（`NG.ProviderFailed`）也为 `true`：节点重试循环把它交给 provider runtime，但新的请求可能会成功。A2A 在两个版本中都把代码和 `retryable` 放在 task 的 `metadata["neograph/failure"]` 中，ACP 放在错误的 `data` 中；只有 A2A 才有的请求错误见 [A2A 错误映射](#a2a-error-mapping)。
@@ -2892,22 +2892,23 @@ Model Context Protocol（MCP）客户端实现。它连接 MCP 服务器、发�
 
 提供两种传输方式：
 
-- **HTTP** — `MCPClient("http://host:port")`. 已发现的工具会保留其来源 Streamable HTTP 会话，包括 `Mcp-Session-Id`、协商的
-  协议版本、超时设置和自定义头。
-- **stdio** — `MCPClient({"python", "server.py"})`。客户端在 `fork` 前解析 `PATH`，
-  子进程通过 `execve` 启动，并连接双向管道以通过 stdin/stdout 交换换行分隔的
-  JSON-RPC。只要 `MCPClient` 或其生成的任意 `MCPTool` 存在，子进程就会持续运行；
-  析构时发送 SIGTERM，并通过 `waitpid` 回收（约 500 ms 后回退到 SIGKILL）。
+- **HTTP** — `MCPClient("http://host:port/mcp")`。URL 是服务器的 MCP 端点，按原样使用，
+  包括路径和查询，不附加任何内容（旧版客户端会附加 `/mcp`）。已发现的工具会保留其来源
+  Streamable HTTP 会话，包括 `Mcp-Session-Id`、协商的协议版本、超时设置和自定义头。
+- **stdio** — `MCPClient({"python", "server.py"})`。客户端在 `fork` 前解析 `PATH`，用
+  `execve` 执行子进程，连接双向管道，并在子进程的 stdin/stdout 上交换按行分隔的 JSON-RPC。
+  子进程在创建它的 `MCPClient` *或任何 `MCPTool`* 存活期间一直存在。关闭时先关闭其 stdin，
+  最多等待一秒让它退出，然后向其进程组发送 SIGTERM，再最多等待一秒，之后发送 SIGKILL。
 
 ### MCPTool
 
-将单个 MCP 服务器工具包装为本地 `Tool` 实现。已发现的工具会保留其来源
-协议会话，与传输方式无关。
+将单个 MCP 服务器工具包装为本地 `Tool` 实现。已发现的工具无论使用何种传输，
+都保留其来源协议会话。
 
 ```cpp
 class MCPTool : public AsyncTool, public ContextualAsyncTool {
 public:
-    // Legacy direct-construction mode. Discovered tools reuse their client session.
+    // One known tool at an HTTP endpoint. Discovered tools reuse their client session.
     MCPTool(const std::string& server_url,
             const std::string& name,
             const std::string& description,
@@ -2926,31 +2927,44 @@ public:
 };
 ```
 
-通常不需要直接构造 `MCPTool`；`MCPClient::get_tools()`
-会发现并完成包装。
 
-所有分发器都调用接收上下文的 `execute_async`，因此在两种传输上，运行的 cancel token（在尝试超时下为节点尝试的 token）与截止时间都会约束该调用。取消会立即停止等待并抛出 `graph::CancelledException`，工具失败契约将其视为取消；截止时间或请求超时会抛出 `asio::system_error(asio::error::timed_out)`，即 `timed_out` 调用。在此之后到达的响应会被丢弃：stdio 按 JSON-RPC id 投递响应，而该调用的 id 已不再被等待；HTTP 则放弃该请求。`isError` 结果会抛出 `std::runtime_error`，即普通工具失败。在 Python 中，`mcp.MCPError` 保留 JSON-RPC 错误的 `code` 与 `data`。
+通常不直接构造 `MCPTool` —— `MCPClient::get_tools()` 会发现并包装工具。用 URL 构造函数
+创建的工具在第一次调用时打开一个 MCP 会话，之后的每次调用都复用它，并在工具销毁时用
+`DELETE` 结束该会话。
+
+所有调度器都调用带上下文的 `execute_async`，因此运行的取消令牌（在 attempt 超时下为节点
+attempt 的令牌）和截止时间会在两种传输上约束调用。取消会立即停止等待并抛出
+`graph::CancelledException`，工具失败契约将其视为取消；截止时间或请求超时抛出
+`asio::system_error(asio::error::timed_out)`，即 `timed_out` 调用。无论哪种情况，都会用
+`notifications/cancelled` 通知服务器，运行取消等待该调用的协程时也是如此。之后到达的应答被
+丢弃：stdio 按 JSON-RPC id 路由应答，而该调用的 id 已不再等待；HTTP 则放弃该请求。
+`isError` 结果抛出普通工具失败 `std::runtime_error`。在 Python 中，`mcp.MCPError` 保留
+JSON-RPC 错误的 `code`、`data` 和 `http_status`。
 
 ### MCPClient
 
-连接 MCP 服务器、执行初始化握手并
-提供发现和调用工具的方法。
+连接 MCP 服务器、执行初始化握手，并提供发现和调用工具的方法的客户端。
 
- > `MCPClient` 不应被继承，请直接使用。
-> 传输层调用只有 `rpc_call_async()` 一个，
-> 同步方法驱动的是同一个会话。参见 [`ASYNC_GUIDE.md` §9.5](ASYNC_GUIDE.md#95-mcpclient).
+> `MCPClient` 不是为子类化设计的 —— 直接使用即可。
+> `rpc_call_async()` 是唯一的传输层调用；同步方法驱动同一个会话。参见
+> [`ASYNC_GUIDE.md` §9.5](ASYNC_GUIDE.md#95-mcpclient)。
 
 ```cpp
 class MCPClient {
 public:
-    // HTTP transport.
+    // HTTP transport: the server's MCP endpoint URL, used as given.
     explicit MCPClient(const std::string& server_url);
     MCPClient(const std::string& server_url, MCPClientConfig config);
 
     // stdio transport — fork+exec the subprocess.
     explicit MCPClient(std::vector<std::string> argv);
+    // Hardened stdio: explicit environment, cwd, bounds, cancellation grace.
+    explicit MCPClient(StdioClientConfig config);
 
     bool initialize(const std::string& client_name = "neograph");
+    bool initialize(const std::string& client_name,
+                    std::chrono::steady_clock::time_point deadline,
+                    std::shared_ptr<graph::CancelToken> cancel_token);
     bool is_initialized() const noexcept;
     InitializeResult get_initialize_result() const;
     std::vector<std::unique_ptr<Tool>> get_tools();
@@ -2963,42 +2977,114 @@ public:
         const std::string& name, const json& arguments,
         std::chrono::steady_clock::time_point deadline,
         std::shared_ptr<graph::CancelToken> cancel_token);
+    void set_tool_list_changed_handler(std::function<void()> handler);
+    void shutdown() noexcept;
 
-    // Low-level async dispatch retained for source compatibility.
-    asio::awaitable<json>
-    rpc_call_async(const std::string& method, const json& params);
+    // The transport-level JSON-RPC call every other method uses.
+    asio::awaitable<json> rpc_call_async(
+        const std::string& method, const json& params = json::object(),
+        std::chrono::steady_clock::time_point deadline =
+            std::chrono::steady_clock::time_point::max(),
+        std::shared_ptr<graph::CancelToken> cancel_token = {});
 };
 ```
 
-**线路协议：** NeoGraph 的 MCP 客户端使用
-`protocolVersion = "2025-11-25"`。HTTP 传输在每个 JSON-RPC 请求上发送
-`MCP-Protocol-Version` 头（与 Round 1 和 Round 3 规范对齐）；stdio 传输在
-`initialize` 负载中携带相同版本。运行旧协议版本的服务器可能
-拒绝这些请求，请固定服务器版本或升级。
 
-| 方法 | 描述 |
+**线路协议：** NeoGraph 的 MCP 客户端提出 `protocolVersion = "2025-11-25"`，并接受答复
+`2025-11-25`、`2025-06-18` 或 `2025-03-26` 的服务器（`MCP_SUPPORTED_PROTOCOL_VERSIONS`）。
+其他答复会使 `initialize` 以同时指明两个版本的协议错误失败，并按 MCP 版本协商的要求断开
+连接。HTTP 在之后每个请求的 `MCP-Protocol-Version` 头中发送协商的版本。尚不支持 MCP
+`2026-07-28`（没有 `initialize`，也没有会话）：只提供该修订版的服务器以 `-32022` 拒绝握手，
+调用方收到的是 `MCPError`。
+
+**会话与传输的归属：** 两个构造函数创建同一种协议会话。会话拥有 JSON-RPC id、应答校验、
+初始化（含 initialized 通知）、分页和工具结果的转换。在尚未握手的客户端上通过
+`rpc_call_async()` 发送的请求会先执行握手。端点 URL、头、协商的 `Mcp-Session-Id` 和请求超时
+只归 HTTP 传输所有；子进程、管道、读取器和应答 id 多路分解器只归 stdio 传输所有。已发现的
+工具保留其协议会话，因此在 `MCPClient` 销毁后仍可使用；会话在对客户端或工具的最后一个引用
+释放时结束。
+
+**遵循传输规则：** 两种传输都会应答服务器的请求：`ping` 得到空结果，其他所有请求得到
+`-32601`，因为客户端不声明任何客户端能力（roots、sampling、elicitation）。只有没有
+`method` 的消息才算应答，因此复用待处理调用 id 的服务器请求不会完成该调用。在 HTTP 上，
+客户端读取 JSON 和 Server-Sent Event 应答（按 WHATWG 规则：CRLF、LF 或 CR 行尾，多行
+`data`、`id`、`retry`），对在调用的事件流上到达的服务器请求，在保持该流打开的同时用单独的
+POST 应答，并在应答到达后停止读取该流。服务器在应答之前关闭的流，会在流的 `retry` 间隔之后
+用 `GET` 和 `Last-Event-ID` 续接。`initialize` 之后，客户端像官方客户端一样，为不属于任何
+调用的消息打开会话的可选 `GET` 事件流；没有该流的服务器返回 405。如果服务器对携带会话 id
+的请求返回 404，说明会话已结束：客户端初始化一个新会话，并重新发送该请求一次。
+`shutdown()` 和最后一个引用的释放会用最多两秒的 `DELETE` 结束会话。
+
+**通知：** 服务器发送 `notifications/tools/list_changed` 时，会调用通过
+`set_tool_list_changed_handler()` 注册的处理函数；此时请重新读取 `get_tools()` 或
+`get_tool_definitions()`。在那之前，缓存的模式可能已过时，因此跳过 `outputSchema` 检查。
+处理函数在客户端的传输线程上运行：必须尽快返回，且不得调用该客户端。
+
+**加固的 stdio（`StdioClientConfig`）：** `argv`、`cwd` 和 `environment` 是显式的。使用
+`replace_environment` 时，配置的条目就是服务器的全部环境；不使用时，服务器继承本进程的
+环境，配置的条目添加到其中或覆盖同名条目（`PATH` 条目也决定在哪里查找 `argv[0]`）。会话
+持续读取服务器的 stderr，并保留最后 `max_stderr_bytes`（64 KiB）；stderr 输出不会结束会话。
+`startup_timeout` 约束从启动到 initialized 通知的过程，`request_timeout` 约束每个请求。被取消
+或超时的请求会结束加固会话：客户端发送 `notifications/cancelled`，等待 `cancel_grace`
+（500 ms）让服务器停止，然后终止进程树；之后的请求以 `MCPFailure::shutdown` 失败。
+
+**约束与失败：** `rpc_call_async(method, params, deadline, cancel_token)` 和
+`call_tool_result_async()` 接受绝对的 steady-clock 截止时间和 `graph::CancelToken`。取消和
+截止时间会停止对该调用的等待，用 `notifications/cancelled` 通知服务器（对 `initialize` 不
+发送），且不影响共享的 stdio 进程和其他应答。`initialize(name, deadline, cancel_token)` 以同样
+方式约束握手，但不通知服务器，因为 MCP 从不取消 `initialize`；此时 stdio 服务器可能拒绝第二次
+握手。HTTP 还会对每个请求应用 `MCPClientConfig::request_timeout`。传输和线路失败抛出
+`MCPTransportError`，这是公开 `failure()`（`connection`、`timeout`、`cancelled`、`shutdown`、
+`http_status` 或 `protocol`）和 `http_status()`（非 HTTP 失败时为 0）的 `std::runtime_error`
+子类。JSON-RPC 错误应答是带有服务器 `code()` 和 `data()` 的 `MCPError`，由 HTTP 错误状态携带
+时也是如此（此时 `http_status()` 指明该状态）。两个类都不表示工具层面的 `isError` 结果；
+请用 `call_tool_result()` 检查该结果。
+
+| 方法 | 说明 |
 |--------|-------------|
-| `MCPClient(url)` | 构造 HTTP 模式客户端 |
-| `MCPClient(argv)` | 生成子进程并构造 stdio 模式客户端。`argv[0]` 在 fork 前通过 `PATH` 解析；exec 失败将在首次 RPC 中表现为连接错误。为安全起见拒绝 Windows `.bat`/`.cmd` |
-| `initialize(client_name)` | 执行一次 MCP 初始化握手。重复调用幂等；协议或传输失败会抛出异常 |
-| `get_initialize_result()` | 返回协商后的协议、能力、服务器信息、说明和原始结果 |
-| `list_tools(cursor)` | 获取一页结果，并将游标视为不透明值 |
-| `get_tool_definitions()` | 遍历所有页面并保留完整工具元数据 |
-| `get_tools()` | 发现所有页面并返回保留会话的 `MCPTool` 实例 |
-| `call_tool(name, arguments)` | 按名称和参数调用工具，返回原始 JSON 响应 |
+| `MCPClient(url)` | 构造按原样使用 MCP 端点 `url` 的 HTTP 模式客户端 |
+| `MCPClient(argv)` | 启动子进程并构造 stdio 模式客户端。`argv[0]` 在 fork 前通过 `PATH` 解析；exec 失败会在第一次 RPC 时表现为连接错误。出于安全考虑拒绝 Windows `.bat`/`.cmd`（Round 3 hardening） |
+| `MCPClient(StdioClientConfig)` | 带显式环境、有界 stderr 捕获、截止时间和取消宽限期的加固 stdio 启动 |
+| `initialize(client_name)` | 执行一次 MCP 初始化握手。重复调用是幂等的；协议/传输失败会抛出 |
+| `initialize(client_name, deadline, cancel_token)` | 由截止时间和取消令牌约束的握手 |
+| `get_initialize_result()` | 返回协商的协议、能力、服务器信息、instructions 和原始结果 |
+| `list_tools(cursor)` | 将游标视为不透明值，获取一页 |
+| `get_tool_definitions()` | 遍历所有页面并保留完整的工具元数据 |
+| `get_tools()` | 发现所有页面，返回保留会话的 `MCPTool` 实例 |
+| `call_tool(name, arguments)` | 以给定参数按名称调用工具。返回原始 JSON 应答 |
 | `call_tool_result(name, arguments)` | 保留 content、structured content、`isError` 和 `_meta` 的类型化结果 |
-| `call_tool_result_async(name, arguments, deadline, cancel_token)` | 与 `rpc_call_async` 一样受绝对 steady-clock 截止时间和 cancel token 约束的类型化调用 |
-| `rpc_call_async(method, params)` | 其他所有方法所用的传输层 JSON-RPC 调用 |
+| `call_tool_result_async(name, arguments, deadline, cancel_token)` | 与 `rpc_call_async` 一样，由绝对 steady-clock 截止时间和取消令牌约束的类型化调用 |
+| `set_tool_list_changed_handler(handler)` | 在 `notifications/tools/list_changed` 时调用 `handler`；空处理函数停止调用 |
+| `shutdown()` | 永久结束客户端及其创建的所有工具：HTTP 会话用 `DELETE`，stdio 服务器有序停止 |
+| `rpc_call_async(method, params, deadline, cancel_token)` | 其他所有方法使用的传输层 JSON-RPC 调用 |
 
-**提供工具。** `MCPServer`（`<neograph/mcp/server.h>`）用已注册的处理器响应 `tools/call`；处理器的失败如何到达客户端，见[协议失败映射](#protocol-failure-mapping)。
+**提供工具。** `MCPServer`（`<neograph/mcp/server.h>`）用注册的处理函数应答 `tools/call`；
+处理函数的失败如何到达客户端见 [Protocol failure mapping](#protocol-failure-mapping)。对请求
+`2025-11-25`、`2025-06-18` 或 `2025-03-26` 的客户端，它用该修订版及其定义的字段应答
+（`2025-06-18` 没有 `icons` 和 `execution`；`2025-03-26` 还没有 `title`、`outputSchema`、
+`_meta` 和 `structuredContent`，只有结构化数据的结果以文本携带这些数据），对其他请求用
+`2025-11-25` 应答；`protocol_version()` 报告协商结果。注册时会拒绝 `inputSchema` 或
+`outputSchema` 未声明 `"type": "object"` 的工具（旧默认值空对象按 `{"type": "object"}` 读取）、
+不是验证器支持的 JSON Schema 2020-12 的模式，以及超出 SEP-986 的 1 到 128 个
+`A-Za-z0-9_.-` 字符的名称。参数用 JSON Schema 2020-12 验证器校验（`$ref`、`anyOf`、
+`minimum`、作为整数的整值 `1.0`，以及 core、applicator 和 validation 词汇的其余部分）。
+未知工具是 JSON-RPC 错误 `-32602`；错误应答在能读取请求 id 时携带它，否则不带 id，绝不使用
+`null`。`MCPHttpServer`（`<neograph/mcp/http_server.h>`）通过 Streamable HTTP 提供同样的
+功能：会话在以下情况下结束：收到 `DELETE`；`session_idle_timeout`（30 分钟）内没有请求；或
+在 `max_sessions`（64）时有新客户端需要空位，而它是没有进行中请求、最久未使用的会话；之后
+该 id 返回 404。工具调用在返回前占用一个 HTTP 线程，因此线程按需启动，最多到
+`max_http_threads`（64）；超过 `response_timeout` 的请求得到 504，其工具调用被取消；`DELETE`
+会关闭其连接；设置 `protected_resource_metadata` 时，服务器发布 RFC 9728 元数据，并在每个
+401 质询中指明其位置。
 
 **HTTP 用法：**
 
 ```cpp
-neograph::mcp::MCPClient client("http://localhost:8000");
+neograph::mcp::MCPClient client("http://localhost:8000/mcp");
 client.initialize();
 auto tools = client.get_tools();
 ```
+
 
 **stdio 用法：**
 
@@ -3008,6 +3094,7 @@ neograph::mcp::MCPClient client({"python", "/path/to/server.py"});
 client.initialize();
 auto tools = client.get_tools();   // Tools retain the protocol session/process.
 ```
+
 
 ---
 

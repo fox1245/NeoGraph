@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=28a9a662c3ef7d8d9cb07fd906175bab8441ae5661e102ae500057418c3db496 -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=8b02d2953799e2f9a6be080ce3d62df51b08491dcd73e3b7644264042711c296 -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -325,7 +325,7 @@ export NEOGRAPH_HARNESS_HTTP_PORT=8080
 "$HOME/.local/bin/neograph-harness-mcp"
 ```
 
-端点是`http://127.0.0.1:8080/mcp`。它实现已发布的MCP 2025-11-25 Streamable HTTP POST契约，采用每会话MCP生命周期和JSON响应。通知返回HTTP 202。DELETE终止会话。可选的独立GET/SSE通道有意不实现并返回HTTP 405，而传输规范明确允许这一点。
+端点是`http://127.0.0.1:8080/mcp`。它实现已发布的MCP 2025-11-25 Streamable HTTP POST契约，采用每会话MCP生命周期和JSON响应。通知返回HTTP 202。客户端已取消的调用以空的事件流结束，因此客户端收不到响应。会话在以下情况下结束：收到DELETE；30分钟内没有请求（`session_idle_timeout`）；或在`max_sessions`（64）时有新客户端需要空位，而该会话是没有进行中请求、最久未使用的会话。之后该id返回404，告诉客户端重新initialize。可选的独立GET/SSE通道有意不实现并返回HTTP 405，而传输规范明确允许这一点。
 
 安全默认值位于传输层，且不会将身份验证与 `GraphEngine` 或 `HarnessService` 耦合：
 
@@ -334,7 +334,8 @@ export NEOGRAPH_HARNESS_HTTP_PORT=8080
 - `NEOGRAPH_HARNESS_BEARER_TOKEN` 启用可执行文件的单主体 bearer 边界。库嵌入可使用 `MCPHttpServerConfig::bearer_authorizer` 进行 OAuth/JWT 验证，并返回稳定的主体/作用域。
 - 会话与返回的授权作用域绑定。不同的有效主体无法重用泄露的 `Mcp-Session-Id`。
 - `MCPHttpServer` 工厂接收该已验证作用域，并返回 `MCPHttpServerSession` 所有者。多租户嵌入必须使用该作用域选择隔离的 Harness 记录/检查点存储；无任何身份验证状态进入图运行时本身。未配置授权器时（仅允许回环绑定），作用域为空，可执行文件保留其单一本地所有者作用域。
-- 请求有效负载、HTTP 工作线程、队列、会话以及响应等待限制均受 `MCPHttpServerConfig` 约束。
+- 请求有效负载、HTTP 工作线程、队列、会话以及响应等待限制均受 `MCPHttpServerConfig` 约束。工具调用在返回之前占用一个 HTTP 线程，因此线程按需启动，最多到 `max_http_threads`（64）。
+- bearer 令牌由 OAuth 授权服务器签发的嵌入设置 `MCPHttpServerConfig::protected_resource_metadata`；服务器随后发布 RFC 9728 元数据，并在每个 401 质询中指明其位置。
 
 `neograph::mcp::ScopedHarnessStore` 将公开 ID 和由模式定义的记录及日志引用映射到可逆的租户命名空间；不改写不透明的请求、结果或事件负载。File 和 SQLite 存储接受这些私有 ID。过长的 File 键使用定长哈希文件名，不改变短键路径。SQLite 保留机制在一个事务中将计数和删除候选项限定到所选命名空间，保护其他租户及受保护的源引用。这项存储边界不能代替已认证作用域或应用的提供者、工具及配额策略。
 
@@ -554,28 +555,7 @@ OpenCode，在项目 `opencode.json` 或用户配置中：
 
 ## 实验性 Tasks 配置档
 
-MCP Tasks 不属于核心 MCP 2025-11-25 的一部分，且上游扩展仍将其标记为实验性。因此，NeoGraph 默认将其禁用，并将其与稳定的 `run_id` 及 `neograph_get` 轮询契约分开。
-
-要在示例服务器上显式启用，还必须启用持久状态：
-
-```bash
-export NEOGRAPH_HARNESS_STATE_DIR="$PWD/.neograph-harness-state"
-export NEOGRAPH_HARNESS_EXPERIMENTAL_TASKS=1
-```
-
-服务器随后通告 `io.modelcontextprotocol/tasks`，为 `neograph_start` 标记可选任务支持，并提供 `tasks/get`、`tasks/update` 和 `tasks/cancel`。只有单个 `tools/call` 请求包含以下内容时，才返回 `CreateTaskResult`：
-
-```json
-{
-  "_meta": {
-    "io.modelcontextprotocol/clientCapabilities": {
-      "extensions": {"io.modelcontextprotocol/tasks": {}}
-    }
-  }
-}
-```
-
-未通过请求显式启用的客户端收到普通 `CallToolResult`，继续轮询 `neograph_get`；启用此配置档不会改变稳定的回退行为。任务状态为 `working`、`input_required`、`completed`、`failed` 和 `cancelled`。`tasks/update.inputResponses` 以待处理的 `call_id` 为键，轮询客户端应遵守 `pollIntervalMs` 和 `ttlMs`。
+未实现。本指南的早期版本描述过一个可选启用的 MCP Tasks 配置档；这样的配置档并不存在。Harness 服务器不通告 tasks 能力，`HarnessServiceConfig::enable_experimental_tasks` 和 `NEOGRAPH_HARNESS_EXPERIMENTAL_TASKS` 不起作用，`tasks/get`、`tasks/update` 和 `tasks/cancel` 返回 `-32601`。长时间运行使用稳定的 `run_id` 及 `neograph_get` 轮询契约。
 
 ## 能力后端
 
@@ -591,4 +571,4 @@ export NEOGRAPH_HARNESS_EXPERIMENTAL_TASKS=1
 
 支持的本地分发路径是上述可安装的 `neograph-harness-mcp` 二进制文件。源码构建可以继续使用示例目标，Python wheel 仍然是库/运行时包，而不是隐式安装远程守护进程。MCPB 和官方注册表发布仍然是发布/发现打包选项；它们不是线路协议所必需的，只应在带有签名发布工件和显式远程认证部署清单的情况下添加。
 
-NeoGraph 目前仅发布带日期的 MCP `2025-11-25` 配置档。描述未来无状态协议的最终 SEP 不会创建新的线路版本；MCP 项目发布新的带日期规范之前，不会通告后继配置档。
+NeoGraph 发布带日期的 MCP `2025-11-25` 配置档，并以对应修订版定义的字段答复请求 `2025-06-18` 或 `2025-03-26` 的客户端。当前的 MCP 修订版 `2026-07-28` 是无状态的（没有 `initialize` 和会话，版本放在每个请求的 `_meta` 中），尚未提供：官方的双代客户端回退到 `2025-11-25`，固定使用 `2026-07-28` 的客户端无法连接。计划将其作为与 `2025-11-25` 并列的第二种模式提供。
