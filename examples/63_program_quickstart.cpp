@@ -1,76 +1,27 @@
 // NeoGraph Program quickstart.
 //
-// Build with the installed `neograph::program` target.  The example creates
-// one immutable RegistrySnapshot, compiles a ProgramSource containing one
-// `call_core` operation, admits it, and runs it through ProgramRuntime.  The
-// same GraphEngine remains the only node executor; Program owns the lifecycle
-// envelope and durable identities.
+// A Program wraps a Core graph in a lifecycle with durable identities, a budget and
+// admission. This example compiles a ProgramSource with one `call_core` operation, admits it
+// and runs it through ProgramRuntime. The same GraphEngine remains the only node executor;
+// Program owns the envelope around it. The registry, admission profile, policy, catalog and
+// runtime are built by examples/program_support.h; this file keeps only the Program itself.
+//
+// The Program is written as C++ builder JSON. Example 65 writes the same thing in JavaScript.
 //
 // Usage: ./example_program_quickstart     prints: 1
 //
 // smoke-expect-line: 1
 
-#include <neograph/neograph.h>
-#include <neograph/program/program.h>
-#include <neograph/program/store.h>
-
-#include <asio/awaitable.hpp>
+#include "program_support.h"
 
 #include <iostream>
-#include <memory>
 #include <stdexcept>
-#include <string>
-#include <utility>
 
 namespace {
 
-using neograph::json;
-using namespace neograph::graph;
-using namespace neograph::program;
+using namespace examples::program;
 
-std::string digest(char value) { return "sha256:" + std::string(64, value); }
-
-ExecutableManifest manifest(ExecutableKind kind, std::string name, char implementation) {
-    return ExecutableManifest{{kind, std::move(name), "1.0.0", digest(implementation)},
-                              EffectMode::Brokered,
-                              "attestation:program-quickstart",
-                              {},
-                              {},
-                              {}};
-}
-
-class IncrementNode final : public GraphNode {
-public:
-    explicit IncrementNode(std::string name) : name_(std::move(name)) {}
-
-    asio::awaitable<NodeOutput> run(NodeInput input) override {
-        const auto current = input.state.get("counter");
-        const auto value = current.is_number_integer() ? current.get<int>() : 0;
-        co_return NodeOutput{{ChannelWrite{"counter", value + 1}}};
-    }
-
-    std::string get_name() const override { return name_; }
-
-private:
-    std::string name_;
-};
-
-RegistrySnapshot registry_snapshot() {
-    RegistrySnapshotBuilder builder;
-    builder.add_node(
-        manifest(ExecutableKind::Node, "quickstart.increment", '1'),
-        [](const std::string& name, const json&, const NodeContext&) {
-            return std::make_unique<IncrementNode>(name);
-        },
-        json{{"type", "object"}, {"additionalProperties", false}},
-        json{{"reads", json::array({"counter"})},
-             {"writes", json::array({"counter"})},
-             {"exports", json::array({"counter"})}});
-    builder.add_reducer(manifest(ExecutableKind::Reducer, "overwrite", '2'),
-                        [](const json&, const json& incoming) { return incoming; });
-    return std::move(builder).build();
-}
-
+// One Core graph: a single node that adds one to the `counter` channel.
 json core_definition() {
     return {
         {"schema_version", 1},
@@ -84,6 +35,7 @@ json core_definition() {
     };
 }
 
+// The Program: one `call_core` operation plus the budget it declares it needs.
 json program_document() {
     return {
         {"program_schema_version", 1},
@@ -107,56 +59,27 @@ json program_document() {
     };
 }
 
-AdmissionProfile admission_profile(const RegistrySnapshot& registry) {
-    AdmissionProfileBuilder builder;
-    builder.id("program-quickstart-profile")
-        .semantic_version("1.0.0")
-        .registry(registry)
-        .mode(AdmissionMode::MultiTenant)
-        .max_program_schema_version(1)
-        .allow_source_kind(SourceKind::CppBuilder)
-        .allow_effect_mode(EffectMode::Brokered);
-    for (const auto& identity : registry.identities()) builder.allow_executable(identity);
-    return std::move(builder).build();
-}
-
-PolicySnapshot policy_snapshot(const AdmissionProfile& profile) {
-    PolicySnapshotBuilder builder;
-    builder.id("program-quickstart-policy")
-        .semantic_version("1.0.0")
-        .owner_scope("quickstart")
-        .admission_profile(profile)
-        .budget_ceiling(BudgetLimits{10000, 1, 1, 1, 1, 20, 1, 1, 1});
-    return std::move(builder).build();
-}
-
 }  // namespace
 
 int main() {
-    const auto registry = registry_snapshot();
-    const auto profile = admission_profile(registry);
-    const auto policy = policy_snapshot(profile);
+    // 1. The executables a Program may name. A node declares the channels it reads and writes.
+    Registry registry;
+    registry.node(
+        "quickstart.increment",
+        [](const std::string&, const json&, const NodeInput& in) {
+            const auto current = in.state.get("counter");
+            const auto value = current.is_number_integer() ? current.get<int>() : 0;
+            return NodeOutput{{ChannelWrite{"counter", value + 1}}};
+        },
+        json{{"reads", json::array({"counter"})},
+             {"writes", json::array({"counter"})},
+             {"exports", json::array({"counter"})}});
+    Host host(std::move(registry).build());
 
-    ProgramCompiler compiler(registry, {"program-quickstart/v1"});
-    const auto source = ProgramSource::from_cpp_builder(
-        "example:program-quickstart", 1, program_document());
-    const auto bundle = compiler.compile(source);
-
-    auto store = std::make_shared<InMemoryProgramStore>();
-    auto catalog = std::make_shared<ProgramCatalog>(CatalogConfig{
-        store, registry, std::make_shared<EngineGenerationCache>(), "program-quickstart/v1"});
-    const auto version =
-        catalog->admit(bundle, ProgramAdmission{"quickstart", profile, policy, {}});
-
-    ProgramRuntime runtime(RuntimeConfig{
-        catalog,
-        std::make_shared<InMemoryCheckpointStore>(),
-        {},
-        std::make_shared<InMemoryProgramTransitionStore>(),
-        1,
-    });
-    const auto result = runtime.run(
-        "quickstart", version, ProgramInvocation{json::object(), RunBudget{10000, 0, 0, 1, 1, 20, 0, 0, 0}});
+    // 2. Compile and admit the Program, then run it with a budget inside the declared bounds.
+    const auto version = host.compile_admit(
+        ProgramSource::from_cpp_builder("example:program-quickstart", 1, program_document()));
+    const auto result = host.run(version, json::object(), RunBudget{10000, 0, 0, 1, 1, 20, 0, 0, 0});
     if (result.status() != ProgramTerminalStatus::Completed)
         throw std::runtime_error("Program quickstart did not complete");
 
