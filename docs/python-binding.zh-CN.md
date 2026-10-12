@@ -3,42 +3,42 @@
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
 
-`neograph-engine` 是同一 C++ 运行时的 pybind11 接口。该 wheel 支持 Core、LLM、Program/QuickJS、MCP 和 SQLite 运行时持久化；可选源码构建仅暴露其编译的组件。
+`neograph-engine` 是同一套 C++ 运行时的 pybind11 接口。wheel 启用了 Core、LLM、Program/QuickJS、MCP 和 SQLite 运行时持久化；从源码构建时，可选组件只有编译进去的才会暴露。
 
-本指南要求针对 SchemaProvider SDK `0.3.0`、接口修订版 `6` 和共享库 ABI 修订版 `6` 构建的 wheel；一起安装其捆绑组件。暴露 `complete` 的旧 wheel 使用不同的提供商接口，无法运行以下类型化示例。
+本指南要求使用针对 SchemaProvider SDK `0.3.0`、接口修订版 `6` 和共享库 ABI 修订版 `6` 构建的 wheel，并且要连同其捆绑的组件一起安装。仍然暴露 `complete` 的旧版 wheel 使用的是另一套 provider 接口，无法运行下面带类型的示例。
 
 ```bash
 pip install neograph-engine
 ```
 
-## 类型化提供商请求与结果
+## 带类型的 provider 请求与 outcome
 
-`Provider` 将请求准备与分发分开。`SchemaProvider` 通过 SchemaProvider SDK 验证并编码特定请求族的请求。`PreparedProviderRequest` 持有该原生准备结果，直到一次分发将其消耗。
+`Provider` 把请求的准备和分发分成两步。`SchemaProvider` 通过 SchemaProvider SDK 校验并编码某个请求族（family）专属的请求。`PreparedProviderRequest` 持有这份原生的准备结果，直到某次分发把它消耗掉。
 
 | 操作 | Python 签名 | 结果 |
 |---|---|---|
-| 准入描述符 | `load_provider_descriptor(source: str, policy=None)` | `ValidatedDescriptor`；无效的封闭 JSON 引发 `ValueError` |
-| 构造提供商 | `SchemaProvider(descriptor, options, defaults)` | 具有已准入端点/请求族和运行时策略的提供商 |
-| 构造请求 | `make_provider_request(provider, model, messages, tools=[], controls=ProviderControls(), mode=ProviderMode.Collect)` | 类型化 `ProviderRequest` |
+| 准入(admission)描述符 | `load_provider_descriptor(source: str, policy=None)` | `ValidatedDescriptor`；无效的封闭 JSON 会抛出 `ValueError` |
+| 构造 provider | `SchemaProvider(descriptor, options, defaults)` | 已准入 endpoint 和请求族、带运行时策略的 provider |
+| 构造请求 | `make_provider_request(provider, model, messages, tools=[], controls=ProviderControls(), mode=ProviderMode.Collect)` | 带类型的 `ProviderRequest` |
 | 准备 | `provider.prepare(request)` | `PreparedProviderRequest` |
-| 分发一次 | `provider.dispatch(prepared)` | 拥有所有权的 `ProviderOutcome` |
-| 准备并分发 | `provider.invoke(request)` | 拥有所有权的 `ProviderOutcome` |
+| 分发一次 | `provider.dispatch(prepared)` | 持有所有权的 `ProviderOutcome` |
+| 准备并分发 | `provider.invoke(request)` | 持有所有权的 `ProviderOutcome` |
 
-`model` 需要显式指定。`ProviderControls` 提供类型化限制和生成控制，包括 `max_output_tokens`、`temperature` 和 `top_p`。工厂构造 SDK 特定请求族的载荷，不能用原始字典替换。将 `request.mode` 设为 `ProviderMode.Stream` 以请求流式输出；仅设置 `on_event` 不会选择该模式。`request` 还包含 `cancel_token`、`on_event`、`observer_limits` 和可选的 `timeout_ms`。
+`model` 必须显式指定。`ProviderControls` 提供带类型的限制和生成控制项，包括 `max_output_tokens`、`temperature` 和 `top_p`。工厂函数会构造 SDK 中各请求族专属的 payload，不能用原始字典代替。要请求流式输出，把 `request.mode` 设为 `ProviderMode.Stream`；只设置 `on_event` 不会选择流式。`request` 上还有 `cancel_token`、`on_event`、`observer_limits`，以及可选的 `timeout_ms`。
 
-`ProviderControls.provider` 和 `response_format`、`SchemaProviderDefaults.provider`、`OpenRouterRouting.max_price`、`ProviderToolResult.host` 返回独立的可选记录。有值时，读取记录，修改后再赋回属性；只修改 `controls.provider.order` 不会更新 controls。赋值 `None` 可清除记录。
+`ProviderControls.provider` 和 `response_format`、`SchemaProviderDefaults.provider`、`OpenRouterRouting.max_price`，以及 `ProviderToolResult.host`，返回的都是与原对象分离的可选记录（副本）。记录存在时，先读出来，改完再赋回属性；只改 `controls.provider.order`，controls 本身不会更新。赋值 `None` 可清除记录。
 
-将可表示的非负值赋给 `request.timeout_ms` 会立即建立绝对截止时间。请在准备之前设置；之后读取返回剩余毫秒数，过期后限制为零。保持 `None` 时，会在准备阶段使用提供商默认超时。持有准备句柄并等待不会续延其截止时间。
+给 `request.timeout_ms` 赋一个可表示的非负值，会立即启动一个绝对截止时间。请在准备之前才设置它；之后再读取，得到的是剩余的毫秒数，过期后固定为 0。保持为 `None` 时，准备阶段使用 provider 的默认超时。拿着已准备好的句柄等待，不会续期它的截止时间。
 
 ### 描述符与运行时策略
 
-描述符是 `load_provider_descriptor` 接受的带版本的封闭 JSON，准入请求族、`base_url`、路由、字段绑定及认证规则。请求指定 `model`，运行时选项提供凭据。`ProviderRuntimeOptions` 提供 `api_key`、`default_timeout_ms`、`ca_file`、`workers` 和 SDK 的传输/资源限制。`SchemaProviderDefaults` 提供类型化的提供商默认值。请将凭据保存在运行时选项中，不写入描述符文件或日志。
+描述符是 `load_provider_descriptor` 接受的、封闭且带版本的 JSON。它准入的内容有：请求族、`base_url`、路由、字段绑定和认证规则。`model` 由请求提供；凭据由运行时选项提供。`ProviderRuntimeOptions` 提供 `api_key`、`default_timeout_ms`、`ca_file`、`workers`，以及 SDK 的传输和资源限制。`SchemaProviderDefaults` 提供带类型的 provider 默认值。凭据只放在运行时选项里，不要写进描述符文件和日志。
 
-`ProviderDescriptorPolicy.identity` 返回 Python `bytes`，包含 SDK 策略的原始 SHA-256 摘要。显示时使用 `policy.identity.hex()`；标识本身既不是 UTF-8 文本，也不是十六进制字符串别名。
+`ProviderDescriptorPolicy.identity` 返回 Python `bytes`，内容是 SDK policy 的原始 SHA-256 摘要。要显示它，用 `policy.identity.hex()`；identity 本身既不是 UTF-8 文本，也不是十六进制字符串的别名。
 
-当前传输使用 libcurl。没有 `prefer_libcurl` 开关、运行时端点覆盖或 WebSocket 传输。[C++ 提供商参考](reference-en.md)说明描述符准入及支持的请求族。
+当前的传输层使用 libcurl，没有 `prefer_libcurl` 开关，不能在运行时覆盖 endpoint，也没有 WebSocket 传输。描述符的准入规则和支持的请求族，见 [C++ provider 参考](reference-en.md)。
 
-启动 [SDK 使用指南](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#run-the-first-request-without-a-hosted-api)中的单请求回环协议端，然后在另一个终端运行这个纯文本示例。端点、模型和输出上限与该协议端匹配，不发送凭据。HTTPS 协议端可通过 `NG_EXAMPLE_CA_FILE` 指定受信任的 CA。使用托管端点时，显式更改描述符 origin 和请求模型，并在运行时选项中提供该 origin 的凭据；托管调用可能产生费用。
+先按 [SDK 使用指南](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#run-the-first-request-without-a-hosted-api)启动只处理一次请求的回环（loopback）对端，再在另一个终端运行下面这个纯文本示例。示例中的 endpoint、模型和输出上限都与该对端一致，也不会发送任何凭据。如果对端是 HTTPS，通过 `NG_EXAMPLE_CA_FILE` 设置它所信任的 CA。要改用托管的 endpoint，需要显式修改描述符的 origin 和请求中的模型，并在运行时选项里提供该 origin 的凭据；调用托管服务可能产生费用。
 
 ```python
 import json
@@ -90,9 +90,9 @@ count = outcome.usage.output_total
 print("output tokens:", count.value if count is not None else "unknown")
 ```
 
-不需要句柄时，`provider.invoke(request)` 会合并准备和分发。`outcome.text` 是可见文本的投影，`outcome.messages` 保留完整的类型化部分。省略的使用量计数器显示为 `unknown`；报告的零显示为 `0`。
+不需要句柄时，`provider.invoke(request)` 把准备和分发合在一起完成。`outcome.text` 是可见文本的投影；`outcome.messages` 保留完整的带类型 parts。缺失的用量计数器打印 `unknown`，上报为零的打印 `0`。
 
-使用链接中的合成响应协议端时，预期输出为:
+使用上面链接中的模拟对端，预期输出如下：
 
 ```text
 consumed: True
@@ -100,11 +100,11 @@ Hello.
 output tokens: 0
 ```
 
-删除协议端整个 `usage` 成员并重新启动，以验证缺失计数器路径；最后一行应变为 `output tokens: unknown`。这验证协议映射，不验证真实模型的 token 计数。
+把对端的整个 `usage` 成员删掉并重启，就能走到计数器缺失的路径；最后一行应变成 `output tokens: unknown`。这检查的是协议映射，而不是真实模型的 token 计数。
 
-### 请求族控制
+### 各请求族的控制项
 
-包版本、native archive v3 和 portable JSON v2 独立。示例只构造控制，需要对应请求族的已准入 provider。保持首次回环不变；OpenRouter 专用控制在未准入本地 origin 上于 I/O 前拒绝。
+包版本、native archive v3 和可移植 JSON v2 是各自独立的。下面的片段只构造控制项，不分发。使用时，要搭配对应请求族中已准入的 provider。第一个回环请求保持不变：仅限 OpenRouter 的控制项，会在 I/O 之前拒绝那个未准入的 origin。
 
 ```python
 chat = ng.ProviderControls()
@@ -152,17 +152,17 @@ choice.mode = ng.GeminiToolChoiceMode.Auto
 gemini.gemini_tool_choice = choice
 ```
 
-先默认构造再赋字段，没有关键字构造函数。optional 记录/向量返回独立副本，修改后须重新赋值。`OpenRouterRouting.max_price` 也是如此：`routing.max_price.prompt_nano_usd = ...` 只修改副本，因此要构造 `ng.OpenRouterMaxPrice` 并整体赋值。金额是整数 nanoUSD：每百万 token 的 `prompt_nano_usd` 和 `completion_nano_usd`，以及 `image_nano_usd`、`audio_nano_usd`、`request_nano_usd`，以精确的十进制 USD 发送（`75_000_000` 即 `0.075`）；至少需要一项，且都不能超过 2**53。`SchemaProviderDefaults.provider` 像其他 routing 字段一样合并 `max_price`：请求自身的值取代默认值。Chat reasoning 的 `effort/max_tokens/exclude/enabled`、`include_reasoning`、`usage_include`、候选 `models` 需要声明的 OpenRouter origin。现有 `reasoning_effort/service_tier/provider/response_format` 仍保留。
+先用默认构造创建记录，再逐个字段赋值；这些记录没有带关键字参数的构造函数。可选记录和向量返回的都是分离的副本：改完要赋回去。`OpenRouterRouting.max_price` 就是其中之一：`routing.max_price.prompt_nano_usd = ...` 改的是副本，所以应该构造一个 `ng.OpenRouterMaxPrice`，再把整个对象赋回去。它的金额都是整数 nanoUSD：`prompt_nano_usd` 和 `completion_nano_usd` 是每百万 token 的价格，另外还有 `image_nano_usd`、`audio_nano_usd` 和 `request_nano_usd`；发送时转成精确的十进制美元（`75_000_000` 即 `0.075`）。至少要设置一项，且每一项都不能超过 2**53。`SchemaProviderDefaults.provider` 对 `max_price` 的合并方式与其他路由字段相同：请求自己的值会替换默认值。`ChatReasoningOptions` 还有 `max_tokens` 和 `exclude`。嵌套的 Chat reasoning、`include_reasoning`、`usage_include` 和 `models` 要求描述符声明了 OpenRouter origin；标量的 `reasoning_effort`、`service_tier`、带类型的路由和响应格式则不受此限。
 
-Responses verbosity 为 `Low/Medium/High`，truncation 为 `Disabled/Auto`，include 为 `ReasoningEncryptedContent/WebSearchSources/FileSearchResults/MessageOutputTextLogprobs/ComputerCallOutputImageUrl/CodeInterpreterCallOutputs`。`responses_include=None` 保留默认 encrypted reasoning；包括 `[]` 的显式列表只选择该列表，可能使后续 native replay 不合格。store/reasoning/hosted tools/tool-call 上限仍保留。
+Responses 的 verbosity 取 `Low/Medium/High`，truncation 取 `Disabled/Auto`；include 还支持 `WebSearchSources`、`FileSearchResults`、`MessageOutputTextLogprobs`、`ComputerCallOutputImageUrl`、`CodeInterpreterCallOutputs`。`responses_include=None` 保留默认的加密 reasoning include；显式给出列表（包括 `[]`）则以该列表为准，并且可能导致之后无法使用 native replay。已有的 store、reasoning、托管工具和工具调用上限，仍然是带类型的。
 
-Messages thinking 为 `Manual/Adaptive/Disabled`。Manual budget 至少为准入最小值且小于 output cap；未指定 mode 的 budget 选择 manual。Adaptive/disabled 禁止 budget。启用 thinking 省略 temperature，但模型禁令仍拒绝显式 temperature。effort 为 `Low/Medium/High/Max`，TTL 为 `FiveMinutes/OneHour`，tool choice 为 `Auto/Any/None_/Tool`，其中 `Tool` 需要声明的 client tool `name`。routing 需要声明的 OpenRouter origin。
+Messages 的 thinking 取 `Manual/Adaptive/Disabled`。Manual 要求 `thinking_budget` 不小于准入的最小值，并且小于输出上限；没有指定模式但给了 budget 时，选用 manual。Adaptive 和 disabled 不允许设置 budget。按 vendor 的语义，启用 thinking 时会省略 temperature；而模型层面的禁止规则会拒绝显式指定的 temperature。effort 取 `Low/Medium/High/Max`，缓存 TTL 取 `FiveMinutes/OneHour`；工具选择取 `Auto/Any/None_/Tool`，其中 `Tool` 要求 `name` 是一个已声明的客户端工具。Messages 的路由要求描述符声明了 OpenRouter origin。
 
-Gemini level 为 `Minimal/Low/Medium/High`，与 `thinking_budget` 互斥。tool choice 为 `Auto/Any/None_/Validated`，`allowed_function_names` 为列表，与 `required_tool` 互斥。safety category 为 `Harassment/HateSpeech/SexuallyExplicit/DangerousContent/CivicIntegrity`，threshold 为 `BlockNone/BlockOnlyHigh/BlockMediumAndAbove/BlockLowAndAbove/Off`。错误请求族/范围/thinking·cap·tool 组合于 I/O 前拒绝。temperature 禁止前缀按 ASCII 忽略大小写，也匹配最后 `/` 后的模型。Chat/Responses: `gpt-5/gpt-6/o1/o3/o4`；Messages: `claude-opus-4-7/claude-opus-4-8/claude-opus-5/claude-sonnet-5/claude-fable-`。参阅 [SDK 控制准入](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#reasoning-sampling-and-tool-controls)。
+Gemini 的 thinking level 取 `Minimal/Low/Medium/High`，与 `thinking_budget` 互斥。工具选择取 `Auto/Any/None_/Validated`，并带有列表 `allowed_function_names`，与 `required_tool` 互斥。安全类别取 `Harassment/HateSpeech/SexuallyExplicit/DangerousContent/CivicIntegrity`，阈值取 `BlockNone/BlockOnlyHigh/BlockMediumAndAbove/BlockLowAndAbove/Off`。请求族不对、取值越界，以及互相冲突的 thinking、上限、工具控制项，都会在 I/O 之前被拒绝。按模型名前缀禁止 temperature 的规则，按 ASCII 不区分大小写来比较，最后一个 `/` 之后的部分同样参与比较：Chat/Responses 用 `gpt-5`、`gpt-6`、`o1`、`o3`、`o4`；Messages 用 `claude-opus-4-7`、`claude-opus-4-8`、`claude-opus-5`、`claude-sonnet-5`、`claude-fable-`。参见 [SDK 的控制项准入](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#reasoning-sampling-and-tool-controls)。
 
-### 准入前部署标头
+### 准入之前的部署 header
 
-`load_provider_descriptor(source, policy=None)` 按字面处理 `${VAR}`。以下 helper 在实际准入前处理宿主值；`source` 为 Messages 描述符 JSON 文本。
+直接调用 `load_provider_descriptor(source, policy=None)` 时，`${VAR}` 会按字面处理。下面这些辅助函数会在描述符真正准入之前，先处理来自宿主的值：
 
 ```python
 environment = ng.ProviderDeploymentHeaderEnvironment()
@@ -174,11 +174,11 @@ descriptor = ng.load_provider_descriptor_with_deployment_headers(
 )
 ```
 
-`load_provider_descriptor_with_environment_headers(source, overrides=[], policy=None)` 读取 Messages 的可选 `ANTHROPIC_WORKSPACE_ID/ANTHROPIC_BETA`，省略未设置/空值。字面标头优先于环境，显式 pair 忽略大小写覆盖两者。重复 override/无效或保留名称/换行导致准入失败。两个 helper 接受可选 `policy`，不修改已准入描述符或求值 encoder template。
+`load_provider_descriptor_with_environment_headers(source, overrides=[], policy=None)` 会为 Messages 读取可选的 `ANTHROPIC_WORKSPACE_ID`/`ANTHROPIC_BETA`。未设置或为空的值会被省略。描述符里写死的 header 优先于环境变量；显式传入的键值对又优先于前两者，且名称不区分大小写。重复的覆盖项、无效或保留的名称，以及换行符，都会使准入失败。两个辅助函数都接受可选的 `policy`；它们既不会修改已准入的描述符，也不会求值编码器模板。
 
-### Responses 游标与外来 Gemini 历史
+### Responses 游标与外来的 Gemini 历史
 
-`previous_response_id` 选择 provider 保存的状态。只发送新输入，不重发完整历史，并保留首次成功 Responses 调用的绑定控制和真实 terminal ID。
+`previous_response_id` 用来选定由 provider 保存的 Responses 状态。此时只发送新的输入，不要再重复发送完整历史。从一次成功的 Responses 调用开始，保留它绑定的控制项和真实的终止 ID：
 
 ```python
 # first_request/first_outcome belong to responses_provider and response_model.
@@ -194,70 +194,70 @@ next_request = ng.make_provider_request(
 )
 ```
 
-`previous_response_history` 是 `ProviderMessage` 向量，不是单个响应/JSON 对象，不会发送。真实 client-tool 所有权可能需要原始完整前缀和 ID 等于 cursor 的 terminal assistant。服务器保存文本可以使用空向量。后续进程内 cursor 的 private terminal 所有权不会成为完整 replay/archive 权限。失败/修改/origin·model·config·route 不匹配均拒绝。完整 native replay/archive 仍需要原始完整前缀。参阅 [SDK Responses 续接](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#responses-provider-held-continuation)。
+`previous_response_history` 是 `ProviderMessage` 的向量，不是单个 response，也不是 JSON 对象。它不会被发送出去。要具备真实的客户端工具所有权，可能需要完整的原始前缀，外加 ID 等于该游标的终止 assistant；纯粹由服务端保存的文本续接，可以让它留空。之后在进程内产生的游标输出，保留私有的终止所有权，但不会因此变成完整历史的 native replay，也不具备 archive 权限。失败、被编辑，或者 origin/模型/配置/路由对不上的状态，一律拒绝。完整的 native replay 和 archive 仍然需要它们原来的完整前缀。参见 [SDK 的 Responses 续接](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#responses-provider-held-continuation)。
 
-调用者创建的外来 assistant `Text/ProviderToolCall` 没有 native state/wire output/signature 时，显式设置 `gemini.gemini_history_mode = ng.GeminiHistoryMode.PortableForeign`；默认 `NativeOnly`。只有首个外来 function call 获得 Google validator bypass，纯文本 turn 不生成 signature。真实 native group 仍严格验证，不修复/剥离/降级失败 seal，不导入 reasoning 权限，不向 portable data 授予 replay。参阅 [SDK 外来 Gemini 历史](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#explicit-portable-gemini-history)。
+如果历史里的 assistant `Text`/`ProviderToolCall` 是调用方自己构造的外来内容，没有 native 状态、wire 输出和签名，请显式设置 `gemini.gemini_history_mode = ng.GeminiHistoryMode.PortableForeign`；默认值是 `NativeOnly`。只有第一个外来的 function call 能绕过 Google 的签名校验器；纯文本的轮次不带签名。真实的 native 分组仍然要经过严格校验。这个模式无法修复、剥离或降级一个失败的 seal，也不能引入 reasoning 的权限，更不能让可移植数据获得 native replay。参见 [SDK 的外来 Gemini 历史](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#explicit-portable-gemini-history)。
 
-PortableForeign 也拒绝 wire metadata。cursor 输出的 `NativeReplay.complete == False`，不具备 archive 资格；private owner 不授权完整历史 replay。
+PortableForeign 既拒绝签名，也拒绝导入的 wire 元数据。游标输出的 `NativeReplay.complete == False`，不能进入 archive；它的私有所有者也不授权完整历史的重放。
 
 
-### 准备句柄与 Python 提供商
+### 已准备的句柄与 Python provider
 
-分发会消耗准备句柄一次，包括分发失败的情况。分发前检查 `prepared.valid` 和 `prepared.error`，之后检查 `prepared.consumed`。保留 Python 对象不会使其可重用。再次尝试时应构造并准备新的请求。
+分发会消耗已准备的句柄，只能用一次，分发失败也算用掉。分发之前检查 `prepared.valid` 和 `prepared.error`，分发之后检查 `prepared.consumed`。继续持有这个 Python 对象并不能让它重新可用。要再试一次，请重新构造并准备一个新请求。
 
-Python 子类调用 `Provider(family)`，实现 `get_name()` 和 `prepare(request)`。子类可以委托 `SchemaProvider` 准备请求，并返回其真实的准备句柄。不能任意创建成功的 SDK 结果，也不能从 JSON 导入分发权限。公共 `invoke` 与 `dispatch` 使用原生生命周期，重写旧 `complete` 方法不能实现该契约。
+Python 子类调用 `Provider(family)`，并实现 `get_name()` 和 `prepare(request)`。子类可以把准备工作委托给某个 `SchemaProvider`，并返回它产生的真实的已准备句柄。子类无法凭空构造一个成功的 SDK outcome，也不能从 JSON 导入分发权限。通用的 `invoke` 和 `dispatch` 走原生的生命周期；重写旧的 `complete` 方法并不能实现这套生命周期。
 
-原生执行调用 Python 重写的 `prepare` 时，返回 `None` 会在消耗句柄之前引发 `TypeError`。请返回真实的 `PreparedProviderRequest`。
+原生执行调用 Python 重写的 `prepare` 时，如果返回 `None`，会在句柄被消耗之前抛出 `TypeError`。请返回真实的 `PreparedProviderRequest`。
 
-`NodeContext(provider=provider)` 及对 `ctx.provider` 的赋值通过原生共享所有权租约保留原始 Python 提供商。原生上下文、已编译节点及引擎的副本保留此租约，因此即使重新赋值 `ctx.provider` 或回收外部 Python 引用，仍会调用同一对象的重写方法。重新赋值只释放可修改上下文的租约，影响后续编译，不会改变现有引擎。这保留对象身份及生命周期，不会冻结提供商的可变状态。最后一个租约在持有 GIL 时释放 Python 所有者。
+`NodeContext(provider=provider)` 以及对 `ctx.provider` 的赋值，会把原来的 Python provider 保存在原生的共享所有者租约（shared owner lease）中。原生 context、已编译节点和引擎的各个副本都持有这份租约，即使之后 `ctx.provider` 被重新赋值，或者外部的 Python 引用都被回收了，它们调用的仍然是同一个对象重写的方法。重新赋值只会释放这个可变 context 自己的租约，影响的是之后的编译，已有的引擎不受影响。这保留的是对象的身份和生命周期，并不会冻结 provider 的可变状态。最后一份租约会在持有 GIL 时释放 Python 所有者。
 
-已删除的 `CompletionParams`、`ChatCompletion`、`OpenAIProvider` 和 `RateLimitedProvider` 没有兼容别名。请构造经过验证的 `SchemaProvider`，使用请求工厂。`ChatMessage` 与 `ToolCall` 仍是图的便捷值，与完整 SDK 类型 `ProviderMessage` 和 `ProviderToolCall` 不同。
+已移除的 `CompletionParams`、`ChatCompletion`、`OpenAIProvider` 和 `RateLimitedProvider` 没有保留兼容别名。请构造经过校验的 `SchemaProvider`，并使用请求工厂。`ChatMessage` 和 `ToolCall` 仍是方便图使用的值，与 SDK 完整的 `ProviderMessage` 和 `ProviderToolCall` 是两回事。
 
-### 结果、失败与使用量
+### 结果、失败与用量
 
-`ProviderOutcome` 保留拥有所有权的不可变 SDK 结果。检查 `outcome.completion` 或 `outcome.failure`；不存在的分支为 `None`。完成与失败视图保留完整的有序消息、使用量、尝试证据、停止/错误信息和留存的线协议证据。失败也可能保留部分输出。报告失败时应保留这些证据，不应把部分文本作为成功结果返回。
+`ProviderOutcome` 保存的是一份不可变的、持有所有权的 SDK 结果。检查 `outcome.completion` 或 `outcome.failure` 即可，不存在的那个分支为 `None`。completion 视图和 failure 视图都保留完整的有序消息、用量、尝试（attempt）证据、停止/错误信息，以及保留下来的 wire 证据。失败时可能保留部分输出。报告失败时要保留这些证据，不要把部分文本当成成功结果返回。
 
-`ProviderCompletion.wire_envelope` 和 `ProviderPartialCompletion.wire_envelope` 是随提供商家族而异的证据，可以为 `None`。读取前请检查 `wire_envelope is not None`。当前缓冲式 Chat 解码器将其保持为 `None`，并将完整响应 JSON 保留在 `raw_events` 中。该项是 `type == "chat.completion"` 的 `ProviderRawWire`（SDK 的 `RawWire`），文档位于 `payload`。应检查实际的类型化 raw 事件，不应假定一定存在封装。raw 事件不会把失败变为成功；没有封装也不表示没有保留响应。SDK 不会通过回退合成封装。
+`ProviderCompletion.wire_envelope` 和 `ProviderPartialCompletion.wire_envelope` 是可为空的、各请求族专属的证据。读取之前先检查 `wire_envelope is not None`。当前带缓冲的 Chat 解码器会让它保持 `None`，并把完整的响应 JSON 作为 `ProviderRawWire`（SDK 中的 `RawWire`）保存在 `raw_events` 里，其 `type == "chat.completion"`，文档内容在 `payload` 中。请检查实际的带类型 raw event，不要假定一定有 envelope。raw event 不会把失败变成成功；envelope 缺失也不代表保留的响应丢了。SDK 不会兜底去合成 envelope。
 
-请保留拥有所有权的结果或其留存的类型化视图：真实消息、原生所有权及存在的线协议文档在调用结束和提供商对象被垃圾回收后仍然有效。raw payload 保留提供商的私有字段，但原生追踪排除 raw 封装/事件及原生重放/推理。Python JSON 视图是数据副本，不是原生重放权限或财务权限。
+请保留持有所有权的 outcome，或它保留下来的带类型视图：其中真实的消息、native 所有者和可用的 wire 文档，在调用结束、provider 被回收之后仍然有效。原始 payload 保留了 provider 私有的字段，而 native tracing 不包含原始 envelope/事件，也不包含 native replay 和 reasoning。Python 的 JSON 视图是数据副本，不具备 native replay 或资金方面的权限。
 
-请使用完整的类型化消息/部分；需要逻辑角色和文本语义时，应比较这些值。检查点与 Chat 请求的文本 content 可以合法地表示为文本字符串或类型化文本部分数组；调用方不应要求某一种偶然采用的序列化形状。继续执行时，请使用完整部分和真实原生所有权，不要以扁平文本或 JSON 代替。
+要使用完整的带类型 messages/parts；需要比较的语义是逻辑上的 role 和文本时，就比较这些。检查点和 Chat 请求中的文本内容，合法的形式既可以是文本字符串，也可以是带类型的文本 part 数组；调用方不应硬性要求其中某一种碰巧出现的序列化形状。续接时，要使用完整的 parts 和真实的 native 所有权，不要用压平的文本或 JSON 去替代。
 
-`ProviderMessage.parts`、完成/部分结果的 `messages` 和 `raw_events`、使用量的 `extra`/`conflicts` 返回独立的列表或映射，包括其中的绑定值。替换原集合后，保留的部分仍可安全读取；修改副本不会改写不可变结果。编辑消息时，用 `parts = message.parts` 读取，修改 `parts`，再以 `message.parts = parts` 赋回。`message.parts.append(...)` 仅改变临时 Python 列表。
+`ProviderMessage.parts`、completion 与 partial 的 `messages` 和 `raw_events`，以及 usage 的 `extra`/`conflicts`，返回的都是分离的列表或映射，连同其中绑定的值。保留下来的 parts，在原来的集合被替换之后仍可放心检查；修改副本不会改写不可变的 outcome。要编辑一条消息，先 `parts = message.parts`，修改 `parts`，再赋回 `message.parts = parts`。`message.parts.append(...)` 只会改动那个临时的 Python 列表。
 
-SDK 失败以数据返回。宿主观察器或预算结算失败会引发派生自 `ProviderOutcomeError` 的 `ProviderObserverError` 或 `ProviderBudgetSettlementError`，保留真实结果和原因。因此，回调失败并不授予再次分发的权限。
+SDK 的失败是作为数据返回的。宿主的 observer 或预算结算失败时，会抛出 `ProviderObserverError` 或 `ProviderBudgetSettlementError`（均派生自 `ProviderOutcomeError`），它们保留真实的 outcome 和 cause。因此，回调失败并不意味着可以重新分发。
 
-反复读取已保存的 Python 提供商或图异常原因，会保留原始异常对象和 traceback；通过原生嵌套异常转换访问的原因也遵循同一规则。
+对已保存的 Python provider 或图异常的 cause 反复检查，得到的始终是原来的异常对象和 traceback，经由原生嵌套异常转换才拿到的 cause 也是如此。
 
-使用量计数器是带有 `value` 与 `evidence` 的 `UsageCount`，未知时为 `None`。报告的零是已知使用量，与省略的计数器不同。读取 `count.value` 前请检查 `count is not None`。计费时不要用 `count or 0`，也不要将未知的输入/输出/总计数器替换为零。
+用量计数器是带 `value` 和 `evidence` 的 `UsageCount`，未知时为 `None`。上报为零是已知的用量，与没有上报计数器不同。读取 `count.value` 之前，先检查 `count is not None`。核算时不要写 `count or 0`，也不要把未知的 input/output/total 计数器替换成 0。
 
-`outcome.usage.provider_cost` 是不可变的 `ProviderReportedCost` 视图。可选 `ProviderUsdAmount` 字段 `total/upstream_total/upstream_input/upstream_output` 包含 `nano_usd/evidence/rounding`，`status` 是依此顺序的四元素数组，`byok_status` 描述可空 `is_byok`。`ProviderCostStatus/ProviderCostSource/ProviderCostRounding` 保留缺失、可用、格式错误、精度超限、overflow、未知货币与冲突证据。金额从解析后的 binary64 向上舍入，不是从原始 decimal 字面量舍入。报告零或 `is_byok=False` 不等于缺失。它们不是发票或 token 预算扣账；逐次调用金额证据应查看有序 `provider_outcomes`，而非聚合 token bank。
+`outcome.usage.provider_cost` 是不可变的 `ProviderReportedCost` 视图。它的可选 `ProviderUsdAmount` 字段有 `total`、`upstream_total`、`upstream_input` 和 `upstream_output`，每个字段带 `nano_usd`、`evidence` 和 `rounding`。`status` 是按这个顺序排列的四项数组；`byok_status` 描述可为空的 `is_byok`。`ProviderCostStatus`、`ProviderCostSource` 和 `ProviderCostRounding` 保留了缺失、可用、格式错误、精度超限、溢出、币种未知和冲突这几类证据。金额是对解析后的 binary64 向上取整得到的，而不是依据原始的十进制字面量。上报为零或 `is_byok=False`，都不等于缺失。这些观测既不是发票，也不是 token 预算的计费；要查看每次调用的金额证据，请检查有序的 `provider_outcomes`，而不是聚合的 token bank。
 
-`UsageAccumulator` 仅聚合 token。单次报告保留金额元数据；第二次报告后 snapshot 的 `provider_cost` 明确重置为 canonical Missing/None，既不保留过时的首次费用，也不进行金额求和。恢复该 snapshot 不重建费用或更新 token 权限。精确金额证据须从每个原始 outcome 或 provider journal 项目读取。
+`UsageAccumulator` 是只统计 token 的聚合。只有一份报告时，它保留这份报告的金额元数据；收到第二份报告后，快照的 `provider_cost` 会被明确重置为规范的 Missing/None，既不是过期的首次调用成本，也不是两者之和。恢复这份快照，不会重建成本，也不会续期 token 权限。要读取确切的金额证据，请到每个原始 outcome 或 provider 的 journal 条目里去找。
 
-恢复或继续运行时，`RunResult.provider_outcomes` 按顺序保留原有结果，再追加新产生的结果。`RunResult.usage` 反映当前计费账库，其中可能包含从检查点恢复的先前报告；恢复后没有新提供商调用，也不保证使用量为 `None` 或零。恢复证据不得重新分发原始提供商请求，也不得重复计费。保留的报告描述先前调用，不授予新的支出额度。
+恢复运行或续接时，`RunResult.provider_outcomes` 先按顺序保留原来的 outcome，后面接着新产生的 outcome。`RunResult.usage` 反映的是当前生效的核算 bank，它可以从检查点恢复之前的报告；所以，没有新的 provider 调用的恢复，也不保证 usage 为 `None` 或零。恢复证据时，既不能重新分发原来的 provider 请求，也不能重复计费。保留下来的报告描述的是之前的调用，不会授予新的消费额度。
 
-### 原生历史与可移植导出
+### Native 历史与可移植导出
 
-返回的 `ProviderMessage` 包含完整的类型化部分及真实的原生重放状态。原生重放及线协议输出为只读。直接继续调用提供商时，须保留原请求的完整 `request.messages` 前缀，再追加 `outcome.messages`；后者是返回的输出，不是完整输入历史。使用首次调用示例中的 `request` 和 `outcome`，构造 `history = request.messages + outcome.messages`，再用 `ng.make_provider_request(provider, "example-model", history, controls=controls)` 创建下一请求。此构造本身不发送任何内容；下一轮还须包含新的用户消息或所需的工具结果。
+返回的 `ProviderMessage` 带有完整的带类型 parts 和真实的 native replay 状态。它们的 native replay 和 wire 输出是只读的。要直接续接 provider 的对话，需要保留原请求完整的 `request.messages` 前缀，再追加 `outcome.messages`；后者包含的是返回的输出，而不是完整的输入历史。用第一次调用示例中的 `request` 和 `outcome`，构造 `history = request.messages + outcome.messages`，再用 `ng.make_provider_request(provider, "example-model", history, controls=controls)` 构造下一个请求。这一步构造本身不会发送任何东西；任何下一轮请求还必须带上新的用户消息，或者所需的工具结果。
 
-真实的 `NativeContext` 重放会检查原始前缀及返回的 Assistant 消息。只传入 Assistant 输出会在线协议分发前以 `ReplayIneligible` 失败。通过 `NativeArchive` 加载该 Assistant 消息会保留其保管权限和前缀绑定，仍须提供原始完整前缀。
+真实的 `NativeContext` replay 除了检查返回的 assistant 消息，还会检查原始前缀。只传 assistant 输出，会在 wire 分发之前以 `ReplayIneligible` 失败。从 `NativeArchive` 加载这条 assistant 消息，会保留它的托管和前缀绑定；但仍然需要原始的完整前缀。
 
-对于图，`RunConfig.provider_messages` 接受完整历史，`RunResult.native_messages` 已包含捕获的完整历史。直接将该图结果作为历史使用，不要再次在前面添加原始输入。`RunResult.provider_outcomes` 暴露保留的结果；在节点内，`RunContext.provider_outcomes` 和 `provider_loop_history` 保留提供商证据。
+在图里，`RunConfig.provider_messages` 接受完整的历史，`RunResult.native_messages` 已经包含捕获到的完整历史。直接把这份图的结果当作历史使用，不要再在前面拼接原始输入。`RunResult.provider_outcomes` 给出保留下来的 outcome；在节点内部，`RunContext.provider_outcomes` 和 `provider_loop_history` 保留 provider 的证据。
 
-`RunConfig.provider_messages`、`RunResult.native_messages` 和 `ProviderLoopEntry.messages` 也返回独立的历史副本。要更新可修改的输入历史，编辑返回的列表后再赋给 `config.provider_messages`。替换输入后，保留的消息和部分仍然有效；结果及循环历史属性保持只读。
+`RunConfig.provider_messages`、`RunResult.native_messages` 和 `ProviderLoopEntry.messages` 返回的同样是分离的历史副本。要更新可变的输入历史，先改返回的列表，再赋回 `config.provider_messages`。保留下来的消息和 parts，在输入被替换之后仍然有效；结果和 loop-history 的属性依旧是只读的。
 
-在自定义节点中，用 `provider_messages_write(messages_or_outcome)` 为通道写入保留原生历史。`portable_message(ChatMessage)` 导入可移植内容，拒绝导入原生推理权限；`project_message(ProviderMessage)` 生成仅供观察的图投影。
+在自定义节点里，用 `provider_messages_write(messages_or_outcome)`，可以让 native 历史保留在该节点的通道写入中。`portable_message(ChatMessage)` 导入可移植的内容，并拒绝导入 native reasoning；`project_message(ProviderMessage)` 生成仅供观察的图投影。
 
-原生持久化使用 `NativeArchive.provision/open(directory, independent_key_file, owner_scope, descriptor)`，返回存档或 `ProviderError`。`save(messages, binding="")` 返回引用或错误；`load(reference, binding="")` 返回类型化消息或错误。它使用独立的宿主密钥执行 SDK 已认证的本地保管，不会将可移植 JSON 转换为重放权限或受管理预算权限。
+要持久化 native 历史，用 `NativeArchive.provision/open(directory, independent_key_file, owner_scope, descriptor)`，它返回一个 archive 或 `ProviderError`。它的 `save(messages, binding="")` 返回引用或错误；`load(reference, binding="")` 返回带类型的消息或错误。这用的是 SDK 经过认证的本地托管，以及一份独立的宿主密钥。它不会让可移植的 JSON 变成 replay 或受管预算（managed-budget）的权限。
 
-`RuntimeHistoryRecord.serialize_canonical()` 仍可用于可移植记录。持久化含有真实原生消息的记录时，须使用 `owner_scope` 与 `owner_id` 一致的真实 `NativeArchive`，调用 `record.serialize_canonical(archive, owner_id)`。恢复时使用 `RuntimeHistoryRecord.parse(stored_bytes, archive=None, owner_id="")`。默认参数足以处理可移植记录，但原生存档引用必须使用同一所有者范围的存档。无参数序列化或导入 JSON 不能重建原生权限。Python 的 parse 和存档感知序列化调用会在原生工作期间释放 GIL，包括存档 I/O。
+可移植的记录仍然可以用 `RuntimeHistoryRecord.serialize_canonical()`。要持久化含有真实 native 消息的记录，用 `record.serialize_canonical(archive, owner_id)`，并传入一个真实的 `NativeArchive`，它的 `owner_scope` 要与 `owner_id` 一致。用 `RuntimeHistoryRecord.parse(stored_bytes, archive=None, owner_id="")` 恢复；可移植记录用默认参数即可，但 native 的 archive 引用必须配上同一个 owner 作用域下的 archive。无参数的序列化，或者导入的 JSON，都无法重建 native 权限。Python 的 parse 和支持 archive 的序列化调用，在执行原生工作（包括 archive I/O）期间会释放 GIL。
 
-`RuntimeHistoryRecord.message` 返回独立的类型化副本，保留真实的共享原生所有权；修改副本不会改写不可变 RAW 记录的标识。`ContextStore.hydrate_records(range)` 返回类型化记录列表，`history_record_by_message_id(feed, message_id)` 返回记录或 `None`。`InMemoryContextStore` 与 `SQLiteContextStore` 继承这些方法。`SQLiteContextStore(database_path, archive=None)` 接受真实存档以提供原生保管权限；在必须提供此权限时，无存档存储会拒绝原生历史。构造与类型化检索会释放 GIL。`LocalProgramHost` 接受最后一个可选关键字 `native_history_archive=None`，并将其传给真实 Program 运行时；它提供保管权限，不提供额外授权或持久 Program 存储后端。
+`RuntimeHistoryRecord.message` 返回分离的、带类型的副本，其中保留着真实的共享 native 所有者；修改这个副本，不会改写不可变的 RAW 记录的身份。`ContextStore.hydrate_records(range)` 返回带类型的记录，`history_record_by_message_id(feed, message_id)` 返回一条记录或 `None`。`InMemoryContextStore` 和 `SQLiteContextStore` 继承了这些方法。`SQLiteContextStore(database_path, archive=None)` 接受一个真实的 archive 来做 native 托管；没有 archive 的存储，在需要托管时会拒绝 native 历史。构造和带类型的检索都会释放 GIL。`LocalProgramHost` 接受最后一个可选关键字参数 `native_history_archive=None`，并把它转发给真正的 Program 运行时；它提供的是托管，不是额外的 grant，也不是持久的 Program 存储后端。
 
-可移植状态字典和 JSON 导出描述消息数据，不能重建原生重放状态、提供商来源或受管理预算权限。导出 JSON 中的 `native` 标志用于描述，不是授权令牌。转换为 `ChatMessage`、扁平文本通道或 JSON 可能丢弃提供商特有的部分；需要这些部分时，请保留包含原始前缀的完整类型化历史。
+可移植的状态字典和 JSON 导出描述的是消息数据。它们无法重建 native replay 状态、provider 的 origin 或受管预算的权限。导出的 JSON 中的 `native` 标志只是描述性的，不是授权令牌。经由 `ChatMessage`、扁平的文本通道或 JSON 转换，可能丢掉 provider 专属的 parts；如果需要这些 parts，就保留带原始前缀的完整带类型历史。
 
-## Core 图快速入门
+## Core 图快速上手
 
 ```python
 import neograph_engine as ng
@@ -287,45 +287,42 @@ result = engine.run(ng.RunConfig(thread_id="t1", input={"name": "NeoGraph"}))
 print(result.output["channels"]["messages"]["value"])
 ```
 
-### 编译期工具所有权
+### 编译时的工具所有权
 
-将 Python `Tool`、原生 C++ 工具以及 `MCPClient.get_tools()` 的结果统一传入
-`ng.NodeContext(tools=[...])`。编译前会快照至持有工具的 `ToolSet`；
-引擎在 `run()` 和 `resume()` 期间持续持有。之后重新赋值上下文的 `tools`
-只影响下一次编译，不会改变已有引擎；MCP 工具保留原生异步执行路径。
+把 Python 的 `Tool` 实例、原生 C++ 工具和 `MCPClient.get_tools()` 的结果，一起作为 `ng.NodeContext(tools=[...])` 传入。编译时会在**构造图节点之前**，把这个列表快照成一个持有所有权的原生 `ToolSet`。编译好的引擎在 `run()` 和 `resume()` 中始终使用这批确切的工具，即使之后替换了 context 的 `tools` 列表，或者放掉了外部引用，也不受影响。之后再改这个列表，只会影响下一次编译。原生 MCP 工具保留异步执行路径；编译之后没有所有权转移，每次分发也不会再分配所有权。
 
 ## Core API 对等性
 
-Python 暴露的是 C++ 执行能力，而非独立的 Python 调度器：
+Python 暴露的是 C++ 的执行能力，而不是另外一套 Python 调度器：
 
-- 同步与 asyncio 的 run/stream/resume；
-- 精确检查点 `resume_from`、fork、状态检查与有序状态写入；
-- 通过图中断和 `NodeInterrupt` 实现静态与动态 HITL；
-- `RunMetadata` 截止时间、trace/run 标识与模型 token 上限；
-- 图级与节点级 `RetryPolicy`，包括抖动；
-- 执行局部或可显式复用的 `CacheScope`；
-- 检查点与长期 Store 后端；
-- 自定义节点、reducer、条件、provider 与工具；
-- 工具门控、执行策略、强制生命周期 Hook 与严格运行时介入。
+- 同步和 asyncio 的 run/stream/resume；
+- 精确检查点的 `resume_from`、fork、状态检查和有序的状态写入；
+- 通过图的 interrupt 和 `NodeInterrupt` 实现静态和动态的 HITL；
+- `RunMetadata` 的截止时间、trace/run 标识和模型 token 上限；
+- 图级别和单个节点的 `RetryPolicy`，包括 jitter；
+- 仅在单次执行内有效，或显式声明可复用的 `CacheScope`；
+- 检查点和长期 Store 后端；
+- 自定义节点、reducer、条件、provider 和工具；
+- 工具闸门、执行策略、强制的生命周期 Hook，以及严格的运行时拦截（interposition）。
 
 ### 对等性契约
 
-这里的“对等性”是指Python使用相同的原生执行路径和安全契约，而不是把每个内部C++存储类型或权限类型原样复制到Python中。
+“对等”的意思是：Python 走的是同一条原生执行路径，遵守同样的安全契约；并不是说 C++ 内部的每个存储类型或权限类型都被复制到了 Python。
 
-| 功能 | 原生C++路径 | Python接口 | 状态 |
+| 能力 | 原生 C++ 路径 | Python 接口 | 状态 |
 |---|---|---|---|
-| 编译并执行Core图 | `GraphEngine` | `GraphEngine.compile`、run/stream/async方法 | 相同的调度器和运行时 |
-| 运行时标识、截止时间与预算 | `RunMetadata`, `RunConfig` | `RunMetadata`, `RunConfig.model_token_budget` | 每次运行使用相同的值 |
-| 重试与节点缓存策略 | `RetryPolicy`, `CacheScope` | 图/节点setter与缓存作用域 | 相同的运行时策略 |
-| 检查点、HITL与时间旅行 | 检查点Store与恢复API | 恢复、精确`resume_from`、分叉、状态历史/更新 | 相同的检查点契约 |
-| Program编写与本地执行 | 编译器、Catalog与`ProgramRuntime` | `ProgramCompiler`、`LocalProgramHost`、句柄/结果 | 原生、限定所有者作用域的便捷主机 |
-| 强制生命周期Hook | 注册表、运行器与`HookRuntime` | 定义及`create_hook_runtime`回调 | 相同的失败关闭生命周期边界 |
-| 运行时上下文与严格分发 | 上下文Store、收据与介入 | 对应的不可变值、Store与`StrictRuntimeProfile` | 相同的原生控制器 |
-| 带持久化能力的wheel默认配置 | SQLite Core/上下文/分发Store | `_HAVE_SQLITE`导出 | 在PyPI wheel中启用 |
+| 编译并执行 Core 图 | `GraphEngine` | `GraphEngine.compile`、run/stream/async 方法 | 调度器和运行时相同 |
+| 运行时标识、截止时间和预算 | `RunMetadata`、`RunConfig` | `RunMetadata`、`RunConfig.model_token_budget` | 每次运行的取值相同 |
+| 重试与节点缓存策略 | `RetryPolicy`、`CacheScope` | 图/节点的 setter 和缓存作用域 | 运行时策略相同 |
+| 检查点、HITL 与时间旅行 | 检查点存储和 resume API | resume、精确的 `resume_from`、fork、状态历史/更新 | 检查点契约相同 |
+| Program 的编写与本地执行 | 编译器、Catalog 和 `ProgramRuntime` | `ProgramCompiler`、`LocalProgramHost`、句柄/结果 | 原生的、按 owner 划分作用域的便捷宿主 |
+| 强制的生命周期 Hook | 注册表、runner 和 `HookRuntime` | 定义，加上 `create_hook_runtime` 回调 | 生命周期边界相同，均为失败时关闭 |
+| 运行时上下文与严格分发 | 上下文存储、回执（receipt）和拦截 | 对应的不可变值、存储和 `StrictRuntimeProfile` | 同一个原生控制器 |
+| wheel 默认的持久化 | SQLite 的 Core/上下文/分发存储 | `_HAVE_SQLITE` 导出项 | PyPI wheel 中已启用 |
 
-原始`ProgramCatalog`、转换Store、替换/迁移控制器、合成网关、Hook日志和RPC执行器仍属于主机组合API。若只暴露这些权限路径的一部分，就可能绕过必需的`proposal -> compile -> admit -> publish -> migrate/spawn`协议。未来的Python主机控制器必须把该协议及其不可续增的谱系预算绑定为一个限定所有者作用域的整体。`_HAVE_PROGRAM`并不声称原始控制平面管理也已实现对等。
+原始的 `ProgramCatalog`、转换存储（transition store）、替换/迁移控制器、synthesis 网关、Hook journal 和 RPC 执行器，仍然是供宿主自行组合的 API。只暴露这些带权限路径的片段，会绕过必需的 `proposal -> compile -> admit -> publish -> migrate/spawn` 协议。将来的 Python 宿主控制器必须把这套协议和不可续期的谱系预算（lineage budget）绑成一个按 owner 划分作用域的整体；`_HAVE_PROGRAM` 并不声称与原始控制面的管理能力对等。
 
-### 运行时重试覆盖
+### 运行时覆盖重试策略
 
 ```python
 policy = ng.RetryPolicy()
@@ -339,7 +336,7 @@ engine.set_retry_policy(policy)
 engine.set_node_retry_policy("remote_call", policy)
 ```
 
-图定义的 `"retry_policy"` 仍是声明式默认。运行时 setter 是独立的 C++/Python 配置接口。
+图定义中的 `"retry_policy"` 仍是声明式的默认值。运行时的 setter 是另一套 C++/Python 配置接口。
 
 ### 元数据与精确恢复
 
@@ -359,9 +356,9 @@ checkpoint_id = result.checkpoint_id
 result = engine.resume_from(config, checkpoint_id, {"approved": True}, metadata)
 ```
 
-在 Python 节点内部，相同的值可通过 `input.ctx.trace_id`、`run_id`、`has_deadline`、`deadline_remaining_ms` 和 `model_token_budget` 获取。
+在 Python 节点内，通过 `input.ctx.trace_id`、`run_id`、`has_deadline`、`deadline_remaining_ms` 和 `model_token_budget` 可以拿到同样的值。
 
-`RunMetadata(timeout_ms=None, trace_id="", run_id="", owner_scope="", budget_cancel_token=None)` 默认不设截止时间。构造时指定的超时及 `metadata.set_timeout_ms(timeout)` 接受处于 steady clock 剩余范围内的非负整数毫秒，在转换为有符号 duration 或相加生成截止时间前验证范围。负数或过大的整数会引发 `OverflowError` 或 `ValueError`；setter 失败会保留先前的截止时间。零会设置立即到期的截止时间。调用 `metadata.clear_deadline()` 可将其清除。
+`RunMetadata(timeout_ms=None, trace_id="", run_id="", owner_scope="", budget_cancel_token=None)` 默认没有截止时间。传入的超时值和 `metadata.set_timeout_ms(timeout)` 接受非负整数毫秒，且不能超出 steady clock 剩余的范围；校验发生在转换为有符号时长、以及加上截止时间之前。负数或过大的整数会抛出 `OverflowError` 或 `ValueError`；setter 失败时，原来的截止时间保持不变。设为 0 表示截止时间立即到达。要去掉截止时间，用 `metadata.clear_deadline()`。
 
 ### 缓存作用域
 
@@ -370,11 +367,11 @@ engine.set_node_cache_enabled("pure_parser", True)  # execution-local default
 engine.set_node_cache_enabled("pure_parser", True, ng.CacheScope.Reusable)
 ```
 
-`Reusable` 是一个显式断言，表明该节点独立于租户、提供商、Store、工具、凭据、时间和恢复状态。
+`Reusable` 是一个显式的声明，表明该节点与租户、provider、Store、工具、凭据、时间和恢复状态都无关。
 
 ## Program 与 QuickJS
 
-Python wheels 构建 `neograph::program` 以及受限的 QuickJS 前端。Python 定义的节点可以参与不可变的 Program 注册表，并通过原生 `ProgramRuntime` 执行。
+Python wheel 构建了 `neograph::program` 和受限的 QuickJS 前端。用 Python 定义的节点可以加入不可变的 Program 注册表，并通过原生的 `ProgramRuntime` 执行。
 
 ```python
 import neograph_engine as ng
@@ -430,19 +427,19 @@ result = host.run(version, {}, run_budget)
 print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 1
 ```
 
-`ProgramRegistryBuilder.add_registered_node`、`add_registered_reducer` 和 `add_registered_condition` 复制本进程中已经注册的可执行单元。注册方式为 `@ng.node` 或 `ng.NodeFactory.register_type`、`ng.ReducerRegistry.register_reducer`、`ng.ConditionRegistry.register_condition`。传入未注册的名称时，这三个方法都会抛出 `ng.ProgramRegistryError`，消息会指出所需的注册调用。该错误的 `kind` 为 `"node"`、`"reducer"` 或 `"condition"`，`name` 为缺失的名称。它同时继承 `ValueError` 和 `RuntimeError`，因此捕获其中任一类型的现有处理代码仍能捕获它。使用注册表快照中不存在的节点类型、reducer 或条件的 Program 会改为在编译时失败：`ProgramCompiler.compile` 和 `LocalProgramHost.compile_admit` 都会抛出带有诊断 `P_CORE_GC_REGISTRY_MISS` 的 `ng.ProgramCompileError`。
+`ProgramRegistryBuilder.add_registered_node`、`add_registered_reducer` 和 `add_registered_condition`，会复制一个已经在本进程中注册过的可执行对象，注册方式是 `@ng.node` 或 `ng.NodeFactory.register_type`、`ng.ReducerRegistry.register_reducer`、`ng.ConditionRegistry.register_condition`。传入未注册的名称时，它们都会抛出 `ng.ProgramRegistryError`，错误信息里会指明应该调用哪个注册函数。该错误的 `kind` 是 `"node"`、`"reducer"` 或 `"condition"`，`name` 是缺失的名称。它同时继承 `ValueError` 和 `RuntimeError`，所以针对其中任一个编写的处理代码，仍然能捕获它。如果 Program 用到的节点类型、reducer 或条件不在注册表快照里，则改为在编译时失败：`ProgramCompiler.compile` 和 `LocalProgramHost.compile_admit` 都是如此，抛出 `ng.ProgramCompileError`，诊断码为 `P_CORE_GC_REGISTRY_MISS`。
 
-每个诊断 dict 都有 `help` 项：对编译返回的诊断，它是包含 `doc`（[诊断指南](diagnostics.md)中的对应条目）、`related`、`suggestions` 和 `candidates` 的 dict；对封存的 `bundle.diagnostics`，它为 `None`。异常中总是带有它。`ProgramCompiler(..., echo_routes=True)` 还会返回一个包含路由后继表的 `P_CORE_ROUTES` 注记。在 `ProgramCompiler` 或 `LocalProgramHost` 上传入 `soundness_check=True` 会运行[健全性检查](program-graphs.md#soundness-check)，返回带 witness trace 的 `P_CORE_S1` 至 `P_CORE_S5` 警告以及 `P_CORE_SOUNDNESS` 摘要。它们都不会被封存。
+每个诊断字典都有一个 `help` 条目：对于编译返回的诊断，它是一个字典，包含 `doc`（它在[诊断指南](diagnostics.md)中的条目）、`related`、`suggestions` 和 `candidates`；对于已封存的 `bundle.diagnostics`，它是 `None`。异常则始终带有它。`ProgramCompiler(..., echo_routes=True)` 还会返回一条 `P_CORE_ROUTES` 提示，附带路由后继表。在 `ProgramCompiler` 或 `LocalProgramHost` 上设置 `soundness_check=True`，会运行[健全性检查](program-graphs.md#soundness-check)：产生 `P_CORE_S1` 到 `P_CORE_S5` 的警告（带有 witness trace），以及一条 `P_CORE_SOUNDNESS` 汇总。这些内容都不会被封存。
 
-`LocalProgramHost` 是一个所有者作用域的内存便捷宿主。它仍然使用 C++ 编译器、Catalog、准入(admission)策略、转换存储和 ProgramRuntime。生成的提案在准入(admission)前还应通过宿主语义验证器；参见 [DSL 能力评估](DSL_CAPABILITY_EVAL.md)。
+`LocalProgramHost` 是按 owner 划分作用域的内存便捷宿主，用的仍然是 C++ 的编译器、Catalog、准入策略、转换存储和 ProgramRuntime。生成出来的 proposal，在准入之前还应通过宿主的语义验证器；参见 [DSL 能力评测](DSL_CAPABILITY_EVAL.md)。
 
-销毁 `LocalProgramHost` 时，会在真实 `ProgramRuntime` 取消、排空并 join 调度器工作期间释放调用方的 GIL，使运行中的 Python 节点可以结束。销毁剩余宿主成员前会重新获取 GIL；Python 回调/对象所有者仍按 GIL 安全方式销毁。
+销毁 `LocalProgramHost` 时，调用方持有的 GIL 会被释放，同时它内部真正的 `ProgramRuntime` 会取消、排空并 join 调度器的工作，这样正在运行的 Python 节点可以执行完。之后它重新获取 GIL，再销毁宿主的其余成员；这些成员中的 Python 回调和对象所有者，仍能保证在持有 GIL 的情况下安全销毁。
 
-原生 Program 的记录执行 API 是取代 `start_recorded` 的 `ProgramRuntime::replay_recorded`。`LocalProgramHost` 暴露 `run`、`start`、`resume` 和 `fork`，不暴露原始记录绑定的控制平面。Program 结果在现有句柄、预算和权限字段之外，还保留原生运行时提供的类型化提供商结果及失败证据。
+原生的 Program 录制执行 API 是 `ProgramRuntime::replay_recorded`，它取代了 `start_recorded`。`LocalProgramHost` 提供 `run`、`start`、`resume` 和 `fork`，不暴露原始的 recorded-binding 控制面。Program 的结果除了原有的句柄、预算和权限字段，还保留原生运行时给出的带类型的 provider outcome 和失败证据。
 
-`ProgramResult.failure` 是只读的 `ProgramFailure` 值或 `None`，不是字典。其 `provider_outcome` 与 `provider_cause` 保留提供商失败证据；`code`、`message`、`operation_id`、`core_node`、`attempts` 和 `witness` 描述失败的操作。结果字段还包括 `bundle_id`、`operation_id`、`attempt`、`checkpoint`、`interrupt` 和 `provider_budget_authority`。
+`ProgramResult.failure` 是只读的 `ProgramFailure` 值或 `None`，不是字典。它的 `provider_outcome` 和 `provider_cause` 保留 provider 的失败证据；`code`、`message`、`operation_id`、`core_node`、`attempts` 和 `witness` 描述失败的那个操作。结果字段还包括 `bundle_id`、`operation_id`、`attempt`、`checkpoint`、`interrupt` 和 `provider_budget_authority`。
 
-精确安装的 JavaScript 词汇表以字典形式提供：
+已安装的 JavaScript 词汇表的确切内容，可以作为字典取得：
 
 ```python
 manifest = ng.javascript_authoring_capability_manifest()
@@ -450,54 +447,54 @@ manifest = ng.javascript_authoring_capability_manifest()
 
 ### 模块结构与 `callCore`
 
-JavaScript Program 必须导出 `define()`，它返回一个图构建器。该图是 Program 唯一的 Core。缺少 `define()` 时，编译会抛出带 `P_JS_DEFINE_MISSING` 的 `ProgramCompileError`，因此只导出 `main()` 的模块会被拒绝。`main()` 是可选的；没有它时，运行会直接执行 Core。
+JavaScript Program 必须导出 `define()`，它返回一个图构建器。这张图就是该 Program 唯一的 Core。没有 `define()` 时，编译会抛出带 `P_JS_DEFINE_MISSING` 的 `ProgramCompileError`，所以只导出 `main()` 的模块会被拒绝。`main()` 是可选的；没有它时，运行会直接执行这个 Core。
 
-`ng.callCore(name, input, sourceSite)` 必须用传给 `ng.graph(...)` 的名称（上例中为 `"main"`）指定该 Core。使用其他名称会使运行以 `P_JS_CONTROL_COMMAND` 失败。要运行不同的步骤，请把它们放进该图，并用不同的输入再次调用。每种节点类型在传给 `add_registered_node` 之前，都要先用 `@ng.node` 或 `ng.NodeFactory.register_type` 注册；对于未注册的类型，该方法会抛出 `ng.ProgramRegistryError`。
+`ng.callCore(name, input, sourceSite)` 必须用传给 `ng.graph(...)` 的名称来指定这个 Core，上面的例子里是 `"main"`。用其他任何名称，运行都会以 `P_JS_CONTROL_COMMAND` 失败。要执行不同的步骤，把它们放进这张图里，再用不同的输入调用它。每个节点类型都要先用 `@ng.node` 或 `ng.NodeFactory.register_type` 注册，然后才能传给 `add_registered_node`；对未注册的类型，它会抛出 `ng.ProgramRegistryError`。
 
-完成的 `callCore` 会把 Core 的输出对象返回给 `main()`。上面的快速入门把它原样作为 `result.output` 返回：
+`callCore` 完成后，会把 Core 的输出对象返回给 `main()`。上面的快速上手示例原样把它作为 `result.output` 返回：
 
 ```json
 {"channels": {"value": {"value": 1, "version": 1}}, "global_version": 1, "value": 1}
 ```
 
-`channels` 保存每个通道的 `value` 和 `version`。除非同名的顶层键已存在，每个通道的值还会复制到以通道名命名的顶层键，因此 `main()` 可以读取 `result.value`；名为 `channels` 或 `global_version` 的通道只能在 `channels` 下访问。barrier 列表按排序后存储：`graph.barrier("join", ["zeta", "alpha"])` 在 `bundle.sealed_core_definitions` 中显示为 `{"wait_for": ["alpha", "zeta"]}`，顺序没有任何影响。
+`channels` 保存每个通道的 `value` 和 `version`。每个通道的值还会复制到一个以通道名命名的顶层键下，除非这个键已经存在，所以 `main()` 可以直接读 `result.value`；名为 `channels` 或 `global_version` 的通道，只能通过 `channels` 访问。屏障列表是排好序保存的：`graph.barrier("join", ["zeta", "alpha"])` 在 `bundle.sealed_core_definitions` 中显示为 `{"wait_for": ["alpha", "zeta"]}`，传入的顺序没有影响。
 
-### 失败的命令会结束运行
+### 命令失败会结束运行
 
-只有完成的命令才会恢复 `main()`。当 yield 出的命令未能完成时，例如 `callCore` 的节点抛出异常、耗尽 Core 步数预算、停在再也无法触发的 barrier 上或超过 wall-time 限制，`ProgramRuntime` 会记录该结果，并把它作为运行的最终结果，带有相应的 `status` 和 `failure`。生成器不会被恢复：包住 `yield` 的 `try`/`catch` 不会执行，之后的 JavaScript 也不会执行。按其失败策略失败的 join（`ng.all`、`ng.race`、`ng.quorum`）也会以同样方式结束运行。在 Python 中通过 `result.status` 和 `result.failure` 处理失败。被中断的命令则不同：运行以 `Interrupted` 停止，`resume()` 会继续该命令。被中断的 join 成员会暂停其 join：join 不再启动新成员，并让已在运行的成员运行结束。如果它们的结果决定了 join（fail-fast 失败、race 的胜者、已满足或已无法达到的 quorum），join 就以此结束。否则运行在第一个被暂停的成员上以 `Interrupted` 停止，`resume()` 会继续该成员，并从命令日志重放已结束的成员，不会再次运行或再次计费。 `ng.await(command, timeout_ms)` 的截止时间是绝对的：命令日志记录 await 开始的时间，恢复或已停止进程的恢复只拥有剩余的时间。在截止时间之后恢复时，await 会立即以 `P_AWAIT_TIMEOUT` 将运行结束为 `TimedOut`，而不运行被回答的节点（#391）。计划级 `await` 操作也以同样方式在恢复之间保持其截止时间。 因不确定效果而暂停的成员，即 payload `kind` 为 `tool_effect_reconciliation` 的 `NodeInterrupt`，与 Core 步骤中一样（#392）优先于成员的失败：join 不会失败，而是在该成员上暂停并记录失败的成员，恢复时以该失败结束；由成功决定的 join 按此结束（#397）。恢复时，收到答复的成员先运行到结束，记录的失败才结束 join，因此答复会送达该成员，其效果得以落定（#400）。join 暂停时，无论声明顺序如何，都会先在因不确定效果而暂停的成员上暂停（#401）。收集式 `ng.all`（`collect: true`）是这一优先级的有意例外：它会等待所有成员（包括暂停的成员）结束后才报告，因此当另一个成员因普通问题而暂停时，成员的失败不会结束它；运行在该成员上以 `Interrupted` 停止，失败在所有成员都落定后报告（#401）。
+只有已完成的命令才会让 `main()` 继续执行。如果 yield 出去的命令没有完成，运行就会终止，例如：`callCore` 中的节点抛出异常、用完了 Core 的步数预算、停在一个再也无法触发的屏障上，或者超出了挂钟时间限制。此时 `ProgramRuntime` 会记录这一结果，把它作为运行的最终结果，并带上对应的 `status` 和 `failure`。生成器不会被恢复：包在 `yield` 外面的 `try`/`catch` 永远不会执行，之后的 JavaScript 也不会再运行。join（`ng.all`、`ng.race`、`ng.quorum`）如果按其失败策略判定为失败，运行同样以这种方式结束。请在 Python 中通过 `result.status` 和 `result.failure` 处理失败。被中断的命令则不同：运行以 `Interrupted` 状态停止，`resume()` 会继续那条命令。join 的某个成员发生中断，会让整个 join 暂停：join 不再启动新的成员，已经在运行的成员则让它们跑完。如果这些成员的结果已经能决定 join 的结局（fail-fast 的失败、race 的胜出者、已满足或已不可能满足的 quorum），join 就按该结局结束。否则运行以 `Interrupted` 停在第一个暂停的成员上，`resume()` 会继续这个成员，并从命令 journal 重放已经完成的成员，不会再次运行它们，也不会再次计费。`ng.await(command, timeout_ms)` 的截止时间是绝对的：命令 journal 记录了 await 的起始时间，所以 resume 或者进程停止后的恢复，只剩下尚未用完的那部分时间。如果恢复时已经过了截止时间，await 会立刻以 `TimedOut` 和 `P_AWAIT_TIMEOUT` 结束运行，不会运行被回应的节点（#391）。计划级的 `await` 操作，同样在 resume 前后保持它的截止时间。因不确定的副作用而暂停的成员（即 payload 的 `kind` 为 `tool_effect_reconciliation` 的 `NodeInterrupt`），优先级高于成员的失败，这与 Core 的步骤一致（#392）：join 会停在这个成员上，而不是直接失败；失败的成员被记录下来，等到恢复后，join 再以这个失败结束；如果已有成功的结果决定了 join，则按那个结局结束（#397）。恢复时，被回应所继续的那个成员先运行到结束，已记录的失败才结束 join，这样回应能送达该成员，它的副作用也能有定论（#400）。无论 join 因何暂停，它总是先停在因不确定副作用而暂停的成员上，与声明顺序无关（#401）。收集式的 `ng.all`（`collect: true`）是这条优先级规则有意设置的例外：它要等所有成员（包括暂停的成员）结束之后才报告，所以只要另一个成员因普通问题而暂停，某个成员的失败就不会让它结束；运行以 `Interrupted` 停在那个成员上，等所有成员都有了结果，再报告这个失败（#401）。
 
-### 图检查与 barrier 停滞
+### 图检查与屏障停滞
 
-编译会沿调度器实际采用的路由检查 Core 图：带条件边的节点只通过其第一条条件边路由。JavaScript Program 是严格文档，因此以下每一项都会抛出 `ng.ProgramCompileError`：
+编译时会沿着调度器实际会走的路由来检查 Core 图：带条件边的节点，只会走它的第一条条件边。JavaScript Program 是严格的文档，所以下面每一种情况都会抛出 `ng.ProgramCompileError`：
 
-- `P_JS_GRAPH_ARGUMENT`：出现在把节点命名为 `__start__` 或 `__end__` 的 `.node()` 调用处；
-- `P_JS_GRAPH_ENTRY`：`define()` 返回的图有节点但没有 `.entry()` 时；
-- `P_CORE_E13`：针对同时带有条件边的节点发出的静态边，因为该边永远不会触发；
-- `P_CORE_E14`：针对同一节点的第二条条件边，因为它永远不会路由。
+- `P_JS_GRAPH_ARGUMENT`：`.node()` 调用中把节点命名为 `__start__` 或 `__end__`；
+- `P_JS_GRAPH_ENTRY`：`define()` 返回的图有节点，却没有 `.entry()`；
+- `P_CORE_E13`：某个节点既有条件边，又有静态出边；这条静态边永远不会触发；
+- `P_CORE_E14`：同一个节点有第二条条件边；它永远不会参与路由。
 
-`P_CORE_E15` 是 `bundle.compile_diagnostics` 中的警告：某个 barrier 成员有一条通往 join 或 `__end__` 以外位置的路由，走这条路由会使 join 停滞。循环是有效的；要以 `P_CORE_E16` 拒绝所有循环（例如用于计划和检查清单），请向 `ProgramCompiler` 或 `LocalProgramHost` 传入 `require_acyclic=True`。
+`P_CORE_E15` 是 `bundle.compile_diagnostics` 中的一条警告：屏障的某个成员有一条路由，通向的既不是 join 也不是 `__end__`，走这条路由会让 join 停滞。循环是合法的；如果要拒绝所有循环（例如计划和检查清单），给 `ProgramCompiler` 或 `LocalProgramHost` 传 `require_acyclic=True`，循环会以 `P_CORE_E16` 被拒绝。
 
-barrier 在其 `wait_for` 列表中的每个节点都路由到它之后才会触发。以其他方式到达 join 的节点（例如成员失败路由上的修复(fix-up)节点）不能代替该成员。当运行已没有可运行的内容而 join 仍持有信号时，运行不会完成：它以 `P_CORE_BARRIER_STALLED` 结束为 `Failed`，`failure.core_node` 指明该 join，`failure.witness["stalled_barriers"]` 列出每个停滞的 join 及其 `wait_for`、`received` 和 `missing` 节点。只有最后一个 super-step 中通往 `__end__` 的显式路由才能让这样的运行正常结束：通往 `__end__` 的静态边（由 `.exit()` 写入）、通往 `__end__` 的条件路由，或 `Command.goto("__end__")`。没有后继的节点不行，更早 super-step 中的显式结束也不行。处于相同状态的 `GraphEngine` 运行返回 `ng.RunStatus.BarrierStalled`，`result.output["_neograph"]["barrier_stalled"]` 包含相同的详细信息。
+屏障在它的 `wait_for` 列表中的每个节点都路由到它之后才会触发。通过别的途径到达 join 的节点（例如挂在某个成员失败路由上的修复节点），不能代替那个成员。运行已经无事可做、join 手里却仍有信号时，运行不会算作完成：它以 `Failed` 结束，错误码为 `P_CORE_BARRIER_STALLED`，`failure.core_node` 给出该 join 的名称，`failure.witness["stalled_barriers"]` 列出每个停滞的 join，以及它的 `wait_for`、`received` 和 `missing` 节点。只有在最后一个超步里显式路由到 `__end__`，这样的运行才会正常结束：指向 `__end__` 的静态边（`.exit()` 写出的就是这种）、指向 `__end__` 的条件路由，或者 `Command.goto("__end__")`。没有后继的节点不算，在更早的超步里显式结束也不算。`GraphEngine` 在同样的状态下返回 `ng.RunStatus.BarrierStalled`，`result.output["_neograph"]["barrier_stalled"]` 里有同样的详细信息。
 
 ### 错误与诊断
 
-在 Python 中抛出的 Program 错误是类型化的，并保留其诊断：
+在 Python 中抛出的 Program 错误是带类型的，并保留各自的诊断：
 
-| 异常 | 抛出方 | 基类 |
+| 异常 | 抛出位置 | 父类 |
 |---|---|---|
 | `ng.ProgramCompileError` | `ProgramCompiler.compile`、`LocalProgramHost.compile` 和 `compile_admit` | `RuntimeError` |
 | `ng.ProgramAdmissionError` | `LocalProgramHost.admit` 和 `compile_admit`，例如 `P_ADMIT_POLICY` 或 `P_ADMIT_PROVIDER` | `RuntimeError` |
 | `ng.ProgramDiagnosticError` | `run`、`start`、`start_active` 和 `resume`，例如 `P_START_BUDGET` 或 `P_RUN_NOT_FOUND` | `RuntimeError` |
 | `ng.ProgramRegistryError` | `ProgramRegistryBuilder.add_registered_node`、`add_registered_reducer` 和 `add_registered_condition` | `ValueError`、`RuntimeError` |
 
-前三种错误的消息以 `Program compilation failed`、`Program admission failed` 或 `Program operation failed` 开头，后面每个诊断占一行：其代码、JSON 指针和消息，有源位置时还有 `(source:line:col)`。`.diagnostics` 是字典列表，每个字典包含 `code`、`severity`、`phase`、`message`、`source_id`、`json_pointer`、`span` 和 `witness`。
+前三个异常的消息分别以 `Program compilation failed`、`Program admission failed` 或 `Program operation failed` 开头，后面每条诊断占一行：包含它的错误码、JSON pointer 和消息；有源码位置时，还带上 `(source:line:col)`。`.diagnostics` 是字典的列表，每个字典有 `code`、`severity`、`phase`、`message`、`source_id`、`json_pointer`、`span` 和 `witness`。
 
-编译成功的 bundle 带有两个列表。`bundle.compile_diagnostics` 是编译器返回的内容：当前规则下的警告（JavaScript 调用位置在 `span` 中），以及 `P_JS_CONTROL_CHARACTER` 等编写警告。请向作者展示此列表。`bundle.diagnostics` 是封存进 bundle 并由 `bundle.id` 覆盖的副本。它保留 bundle 最初封存时的规则和措辞，因此更新的编译器不会改变 bundle id，也正因如此它可能与前者不同：它没有 span，并且可能仍列出当前规则已删除的警告，例如针对只有 Python 节点写入的通道的 `P_CORE_E6`。编译器和 `LocalProgramHost` 都不会向 stderr 打印 lint。
+编译成功的 bundle 带有两个列表。`bundle.compile_diagnostics` 是编译器返回的内容：按当前规则产生的警告（JavaScript 调用位置在 `span` 里），以及 `P_JS_CONTROL_CHARACTER` 之类的编写警告。应该把这个列表展示给作者。`bundle.diagnostics` 是封存进 bundle 的那一份副本，并由 `bundle.id` 覆盖。它保留的是 bundle 最初封存时的规则和措辞，这样更新的编译器就不会改变 bundle id；因此它可能与前者不同：它没有 span，而且可能仍然列出当前规则已经去掉的警告，比如只有 Python 节点写入的通道所对应的 `P_CORE_E6`。编译器和 `LocalProgramHost` 都不会向 stderr 打印 lint 信息。
 
 <a id="model-calling-nodes"></a>
 ### 调用模型的节点
 
-`LocalProgramHost` 为它准入(admission)的 Program 中的内置 `llm_call` 节点绑定一个提供商。注册表按名称声明提供商以及需要它的节点；宿主在一个非机密的 `binding_label` 下提供提供商对象、模型和请求控制：
+`LocalProgramHost` 会给它所准入的 Program 中内置的 `llm_call` 节点绑定一个 provider。注册表按名称声明 provider，以及需要它的节点；宿主则提供 provider 对象、模型和请求控制项，并带上一个不含机密的 `binding_label`：
 
 ```python
 from neograph_engine.llm import SchemaProvider
@@ -538,55 +535,55 @@ result = host.run(version, {"messages": [{"role": "user", "content": "Hi"}]}, ru
 print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_records])
 ```
 
-`add_provider(name, semantic_version, implementation_digest)` 注册提供商的 identity，`add_registered_node("llm_call", ..., provider=name)` 把以该 identity 为静态需求的内置节点注册进去。`provider=` 只绑定 `llm_call`，对其他类型或未知提供商抛出 `ValueError`。无论 descriptor id 是什么，宿主都把 `node_context` 的提供商绑定到该名称。`NodeContext(provider_controls=...)` 接受节点发送的 typed `ProviderControls`，例如 `max_output_tokens`。`node_context` 需要提供商和 `binding_label`，且不能带工具。
+`add_provider(name, semantic_version, implementation_digest)` 注册 provider 的身份；`add_registered_node("llm_call", ..., provider=name)` 注册内置节点，并把该身份作为静态要求。`provider=` 只能绑定 `llm_call`，用于其他类型或未知的 provider 时抛出 `ValueError`。无论描述符的 id 是什么，宿主都会把它的 `node_context` provider 绑定到这个名称上。`NodeContext(provider_controls=...)` 接受节点要发送的带类型 `ProviderControls`，例如 `max_output_tokens`。`node_context` 需要一个 provider 和 `binding_label`，不需要工具。
 
-绑定中只有标签进入 identity。需要该提供商的 Program 版本带有一个 capability receipt，其 identity 是标签与提供商注册表 identity 的摘要；提供商的密钥、endpoint 和模型不在其中，因此更换模型不改变版本 id，更换标签会改变它。不需要提供商的 Program 没有 receipt，bundle id 与版本 id 保持不变。标签必须是由 `a-z`、`0-9`、`.`、`_`、`-` 和 `:` 组成的 1 到 64 个字符，以字母或数字开头，且不能看起来像 API 密钥。没有 `node_context` 时，需要该提供商的 Program 在准入时以 `P_ADMIT_PROVIDER` 被拒绝；含有未带 `provider=` 注册的 `llm_call` 或 `intent_classifier` 节点的 Program 也一样。
+在这个绑定里，只有 label 会进入任何身份标识。需要该 provider 的 Program 版本，带有一份 capability receipt，其身份是 label 与 provider 的注册表身份合起来的摘要；provider 的密钥、endpoint 和模型都不在其中，所以换模型不会改变版本 id，换 label 才会。不需要 provider 的 Program 没有 receipt，bundle id 和版本 id 都不变。label 必须由 1 到 64 个字符组成，字符取自 `a-z`、`0-9`、`.`、`_`、`-` 和 `:`，以字母或数字开头，并且看起来不能像 API key。没有 `node_context` 时，需要该 provider 的 Program 会在准入时以 `P_ADMIT_PROVIDER` 被拒绝；含有未带 `provider=` 注册的 `llm_call` 或 `intent_classifier` 节点的 Program 也一样。
 
-每次调用都依据编译进 NeoGraph 的价格目录，针对运行的 `monetary_microunits` 计价。发送请求之前会预留调用的上限。在 OpenRouter 上，请求还会以 `provider.max_price` 携带该上限：即 route ceiling 的输入、输出费率，或 controls 或 `SchemaProviderDefaults` 已设置的更低 `max_price`，因此 OpenRouter 不能把调用路由到更贵的 endpoint。计价时会准备但不发送一个把对话替换为一条用户消息的请求 probe，所以 Python provider 的 `prepare` 也会收到它。无法确定上限的调用（没有目录条目的模型、没有 route ceiling 的 router alias、没有输出上限的请求）或预留超出剩余预算的调用，会在发送任何内容之前被拒绝，运行以 `P_MONEY_*` 代码失败。与所有 `ProgramRunBudget` 字段一样，`monetary_microunits = 0` 不授予任何额度，因此这样的运行会拒绝所有调用。收到回复后，`result.monetary_records` 为每次调用保存一条 `ng.ProgramMonetaryRecord` 及其 `evidence`：`reported`（OpenRouter 的 `usage.cost`）、`estimated`（目录费率；`catalog_version` 与 `catalog_digest` 指明目录）或 `held`（结果或 usage 未知，因此收取预留额）。`result.usage.monetary_microunits` 是它们的总和。代码、上限与结算规则见[计价证据与价格目录](reference-en.md#pricing-evidence-and-the-price-catalog)。
+每次调用都按编译进 NeoGraph 的价格目录计价，并计入运行的 `monetary_microunits`。请求发出之前，会先预留这次调用的上限。在 OpenRouter 上，请求还会把这个上限作为 `provider.max_price` 带上：取路由上限（route ceiling）的输入和输出费率，或者控制项或 `SchemaProviderDefaults` 中已设置的、更低的 `max_price`，这样 OpenRouter 就不能把调用路由到更贵的 endpoint。计价时会准备（但绝不发送）一个探测请求，其对话只有一条用户消息，所以 Python provider 的 `prepare` 能看到它。无法确定上限的调用（目录里没有该模型、路由别名没有路由上限、请求没有输出上限），或者预留额度超出剩余预算的调用，会在发出任何东西之前被拒绝，运行以 `P_MONEY_*` 错误码失败。与 `ProgramRunBudget` 的每个字段一样，`monetary_microunits = 0` 表示什么都不授予，所以这样的运行会拒绝每一次调用。收到回复后，`result.monetary_records` 为每次调用保存一条 `ng.ProgramMonetaryRecord`，带有它的 `evidence`：`reported`（OpenRouter 的 `usage.cost`）、`estimated`（按目录费率估算；`catalog_version` 和 `catalog_digest` 指明是哪个目录）或 `held`（outcome 或用量未知，因此按预留额度计费）。`result.usage.monetary_microunits` 是它们的总和。错误码、上限和结算规则见[定价证据与价格目录](reference-en.md#pricing-evidence-and-the-price-catalog)。
 
-调用模型的 Python 节点自己持有提供商，Program 预算看不到这类调用。
+调用模型的 Python 节点自己持有 provider；Program 的预算看不到这样的调用。
 
 ### 子 Program
 
-`ng.spawn` 需要子绑定解析器，而 `LocalProgramHost` 不配置它。因此，从 Python 发起的每个 `ng.spawn` 都会使运行以 `P_CHILD_BINDING`（"Program spawn has no configured child binding resolver"）失败。子 Program 需要一个设置了 `RuntimeConfig::child_binding_resolver` 的 C++ 宿主；该解析器把每个绑定名映射到 `link_module_child` 返回的 `ModuleLinkReceipt` 以及已准入(admission)的子 `ProgramVersion`。子 Program 的生命周期参见[递归智能体](PROGRAM_RECURSIVE_HARNESSES.md)。
+`ng.spawn` 需要子绑定解析器（child-binding resolver），而 `LocalProgramHost` 没有配置。因此从 Python 调用的每个 `ng.spawn` 都会让运行以 `P_CHILD_BINDING`（“Program spawn has no configured child binding resolver”）失败。使用子 Program，需要一个设置了 `RuntimeConfig::child_binding_resolver` 的 C++ 宿主，它把每个绑定名映射到 `link_module_child` 产生的 `ModuleLinkReceipt`，以及已准入的子 `ProgramVersion`。子 Program 的生命周期见[递归智能体](PROGRAM_RECURSIVE_HARNESSES.md)。
 
 ### 预算
 
-传给 `LocalProgramHost` 的 `budget_ceiling` 会成为准入(admission)策略的上限。除 `max_child_depth` 和 `max_total_children` 外，每个字段都必须为正数；即使 Program 从不调用模型，`model_tokens`、`monetary_microunits` 和 `max_dynamic_compiles` 也必须为正数。否则构造函数会抛出列出零值字段的 `ValueError`。两个子字段必须同时为零或同时为正数。
+传给 `LocalProgramHost` 的 `budget_ceiling` 会成为准入策略的上限。除了 `max_child_depth` 和 `max_total_children`，其余每个字段都必须为正数，包括 `model_tokens`、`monetary_microunits` 和 `max_dynamic_compiles`，即使 Program 从不调用模型也是如此。否则构造函数会抛出 `ValueError`，并指出为零的字段。这两个与子 Program 相关的字段必须同为零，或同为正数。
 
-`compile_admit(source, budget)` 和 `compile(source, budget)` 会把 `budget` 作为每个字段的最小值和最大值封存进 bundle；封存预算超过上限的 bundle 会在准入(admission)时被拒绝。针对该版本的每次 `run`、`start` 和 `start_active` 调用都必须逐字段传入相同的值。更大或更小的预算会抛出带 `P_START_BUDGET` 的 `ng.ProgramDiagnosticError`，其消息会指出第一个不同的字段，例如 `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`。要使用不同的预算，请重新编译并准入(admission)；结果是一个新的 `ProgramVersion`。运行预算的 `wall_time_ms`、`max_concurrency`、`max_program_operations` 和 `max_core_steps` 必须为正数；`model_tokens` 和 `monetary_microunits` 可以为零。零表示不授予任何额度：以 `model_tokens = 0` 使用了模型 token 的运行以 `BudgetExhausted` 结束；`monetary_microunits = 0` 时，每个被计价的提供商调用都会在发送前被拒绝（见[调用模型的节点](#model-calling-nodes)）。
+`compile_admit(source, budget)` 和 `compile(source, budget)` 会把 `budget` 封存进 bundle，作为每个字段的最小值，同时也是最大值；封存的预算超过上限的 bundle，准入时会被拒绝。针对该版本的每次 `run`、`start` 和 `start_active` 调用，都必须逐个字段传入相同的值。预算比封存值大或小，都会抛出带 `P_START_BUDGET` 的 `ng.ProgramDiagnosticError`，消息会指出第一个不一致的字段，例如 `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`。想用不同的预算，需要重新编译并准入，得到的是一个新的 `ProgramVersion`。运行预算要求 `wall_time_ms`、`max_concurrency`、`max_program_operations` 和 `max_core_steps` 为正数；`model_tokens` 和 `monetary_microunits` 可以为零。零表示什么都不授予：`model_tokens = 0` 时，用到模型 token 的运行会以 `BudgetExhausted` 结束；`monetary_microunits = 0` 时，每一次需要计价的 provider 调用都会在发出之前被拒绝（参见[调用模型的节点](#model-calling-nodes)）。
 
 ### 失败路由
 
-带 `on_failure` 的 `retryPolicy(node, {...})` 会把节点的最终失败路由到处理节点，而不是使运行失败；规则见 [Program 图功能](program-graphs.md#failure-routing)。Python 节点用异常属性标明失败：字符串 `code`（如 `app.compile_error` 这样的作者代码）、布尔值 `retryable` 和字符串 `public_message`。`str(exc)` 永远不会进入记录。节点抛出 `ng.ProgramDiagnosticError`、`ng.ProgramCompileError` 或 `ng.ProgramAdmissionError` 时，属于配置判定（`NG.ConfigError`），从不重试也从不路由。处理节点有 `interruptBefore` 时，运行以 `Interrupted` 停止，`result.interrupt.pending_input.core_interrupt_value` 中是 `{"reason": "failure_route", "failure": record}`；`host.resume(run_id, value)` 会从处理节点继续。failure exit 以声明的代码使运行以 `Failed` 结束，没有 failure edge 的节点失败则以分类后的代码（`NG.TaskFailed`、作者代码等）结束为 `Failed`。
+带有 `on_failure` 的 `retryPolicy(node, {...})`，会把节点最终的失败路由给一个处理器，而不是让运行失败；规则见 [Program 图功能](program-graphs.md#failure-routing)。Python 节点用异常的属性来说明它的失败：字符串 `code`（作者自定义的错误码，例如 `app.compile_error`）、布尔值 `retryable` 和字符串 `public_message`。`str(exc)` 永远不会进入记录。节点抛出 `ng.ProgramDiagnosticError`、`ng.ProgramCompileError` 或 `ng.ProgramAdmissionError` 时，报告的是配置类的结论（`NG.ConfigError`），这类结论既不会重试，也不会被路由。处理器带有 `interruptBefore` 时，运行以 `Interrupted` 停止，`result.interrupt.pending_input.core_interrupt_value` 里是 `{"reason": "failure_route", "failure": record}`；`host.resume(run_id, value)` 会在该处理器处继续。失败出口（failure exit）让运行以其声明的错误码 `Failed` 结束；没有失败边的节点失败时，运行以归类后的错误码（`NG.TaskFailed`、作者自定义的错误码等）`Failed` 结束。
 
-`ProgramRunBudget.max_node_retries`（默认 `None`，即没有上限）限制整个运行中的节点重试；`result.usage.node_retries` 为已用次数，`result.remaining_budget.max_node_retries` 为剩余量。`compile_admit` 不会封存它，因此每次运行都可以设置而无需重新编译。`LocalProgramHost(..., failure_text_redactor=fn)` 和 `GraphEngine.compile(..., failure_text_redactor=fn)` 接受给设置了 `error_text` 的节点使用的 redactor：`fn` 接收 `{"node", "code", "kind", "attempts", "retryable", "public_message"}`，返回要保留的文本或 `None`。没有它时不写入文本。在 `GraphEngine` 上，failure exit 之后 `result.status` 为 `ng.RunStatus.FailureExit`，`engine.resolved_retry_policy(node)` 返回节点实际使用的重试时间。
+`ProgramRunBudget.max_node_retries`（默认 `None`，即没有上限）限制整个运行中节点重试的总次数；`result.usage.node_retries` 统计已重试的次数，`result.remaining_budget.max_node_retries` 是剩余次数。`compile_admit` 不会封存它，所以运行时可以直接设置，不必重新编译。`LocalProgramHost(..., failure_text_redactor=fn)` 和 `GraphEngine.compile(..., failure_text_redactor=fn)` 接收一个脱敏函数，用于设置了 `error_text` 的节点：`fn` 收到 `{"node", "code", "kind", "attempts", "retryable", "public_message"}`，返回要保留的文本，或 `None`。没有这个函数时，不会写入任何文本。在 `GraphEngine` 上，失败出口之后 `result.status` 是 `ng.RunStatus.FailureExit`，`engine.resolved_retry_policy(node)` 返回节点实际使用的重试时间参数。
 
-`retryPolicy(node, {attempt_timeout_ms: ...})` 限制节点的每次尝试（100 到 3 600 000 ms）。超时的尝试会看到 `input.ctx.cancel_token.is_cancelled()` 变为真，并以 `NG.Timeout` 失败，它像其他失败一样会被重试、可被路由；之后它返回的任何内容都会被丢弃。Python 主体无法被抢占，所以会休眠或阻塞的节点应检查令牌：下一次尝试只在超时的尝试返回之后才开始，在停止截止时间（再一个超时时长，至少一秒）内未返回的尝试会以 `NG.EffectUncertain` 使运行失败。这样的主体会在后台继续运行，绑定会在解释器退出时等待它。会越过运行 `wall_time_ms` 的退避以 kind `deadline` 停止重试。在 `GraphEngine` 上，`engine.set_node_attempt_timeout_ms(node, ms)` 设置宿主超时（`None` 表示清除；定义自身的超时只能缩短），`engine.resolved_attempt_timeout_ms(node)` 返回节点实际使用的超时。参见 [Program 图功能](program-graphs.md#attempt-timeouts-and-the-deadline)。
+`retryPolicy(node, {attempt_timeout_ms: ...})` 限制节点每次尝试的时长（100 到 3 600 000 ms）。尝试超时后，`input.ctx.cancel_token.is_cancelled()` 会变成 true，该次尝试以 `NG.Timeout` 失败，可以和其他失败一样被重试和路由；它之后返回的内容一律丢弃。Python 函数体无法被抢占，所以会 sleep 或阻塞的节点应当轮询这个 token：只有超时的那次尝试返回之后，下一次尝试才会开始；如果某次尝试在它的停止期限（同样是这个超时，但至少 1 秒）内仍未返回，运行就以 `NG.EffectUncertain` 失败。这样的函数体会继续在后台运行，解释器退出时，binding 会等它结束。如果退避等待会越过运行的 `wall_time_ms`，则停止重试，原因类别（kind）为 `deadline`。在 `GraphEngine` 上，`engine.set_node_attempt_timeout_ms(node, ms)` 设置宿主一侧的超时（`None` 表示清除；定义自带的超时只能被缩短），`engine.resolved_attempt_timeout_ms(node)` 返回节点实际使用的超时。参见 [Program 图功能](program-graphs.md#attempt-timeouts-and-the-deadline)。
 
 ### 调度线程、worker 与超时
 
-`LocalProgramHost(..., scheduler_threads=1, worker_count=1)` 接受两个线程设置。`scheduler_threads` 设置驱动运行（JavaScript 控制、`callCore` 分派、join 和截止时间）的 `ProgramRuntime` 调度池的线程数。它必须至少为 1。`worker_count` 设置每个 Core 引擎用于单个图内 fan-out 的 worker 池，且不得超过已准入(admission) Program 的 `max_concurrency`；默认值为 1 时，fan-out 分支在调度线程上运行。
+`LocalProgramHost(..., scheduler_threads=1, worker_count=1)` 有两个线程设置。`scheduler_threads` 设定 `ProgramRuntime` 调度线程池中的线程数，这个线程池驱动运行：JavaScript 控制、`callCore` 分发、join 和截止时间；它至少为 1。`worker_count` 设定每个 Core 引擎的 worker 线程池，用于同一张图内部的 fan-out，且不能超过已准入 Program 的 `max_concurrency`；取默认值 1 时，fan-out 的各分支在调度线程上运行。
 
-在 Program 运行期间，Python 节点主体不会占用调度线程。它在由绑定持有的 worker 池上运行，默认 32 个线程；要更改，请在首次 Program 运行之前把 `NEOGRAPH_PYTHON_NODE_THREADS` 设为 1 到 1024 之间的值。即使使用默认的单个调度线程，宿主的多个运行、`ng.all`、`ng.race` 和 `ng.quorum` 的成员，以及一次 Core 运行的 fan-out 分支也会同时推进，并且截止时间会在节点运行期间触发。`ng.race` 返回第一个完成的成员，`ng.quorum` 在所需的成功数到齐后返回。Python 代码仍在 GIL 下运行，因此 CPU 密集型节点不会并行；节点在释放 GIL 时（例如在 `time.sleep`、I/O 或原生调用中）才会重叠执行。普通的 `GraphEngine` 运行仍在调用线程上运行 Python 节点主体。
+在 Program 运行期间，Python 节点的函数体不占用调度线程。它运行在 binding 自己持有的 worker 线程池上，默认 32 个线程；要修改，在第一次运行 Program 之前，把 `NEOGRAPH_PYTHON_NODE_THREADS` 设为 1 到 1024 之间的值。即使调度线程保持默认的 1 个，宿主的多个运行、`ng.all`、`ng.race` 和 `ng.quorum` 的各成员，以及同一个 Core 运行的 fan-out 分支，也会同时推进，而且节点运行期间截止时间照样会触发。`ng.race` 返回最先完成的成员，`ng.quorum` 在凑够所需的成功数后返回。Python 代码仍然在 GIL 下运行，所以 CPU 密集的节点不会并行；只有节点释放 GIL 时（例如在 `time.sleep`、I/O 或原生调用中），它们才会重叠。普通的 `GraphEngine` 运行仍然在调用线程上执行 Python 节点函数体。
 
-两种限制都不会中断正在运行的 Python 节点；取消是协作式的。运行的 `wall_time_ms` 用尽时，运行时会取消该运行，结果在正在运行的节点返回后才到达，`status` 为 `TimedOut`，`failure.code` 为 `P_RUNTIME_TIMEOUT`，消息为 `Program wall-time budget (N ms) expired`。被超时中断的操作的文本位于 `failure.witness["cause_message"]`。`ng.await(command, timeoutMs, sourceSite)` 的截止时间过后，运行以 `P_AWAIT_TIMEOUT` 结束为 `TimedOut`，截止时间之后到达的完成不会被接受。在这两种情况下，子 Core 运行都会被取消；检查 `input.ctx.cancel_token.is_cancelled()` 的节点会提前停止，忽略它的节点会把结果推迟到它返回为止。`TimedOut` 和 `Cancelled` 结果会在 `execution_trace` 中列出已完成的 Core 节点。
+这两个限制都不会打断正在运行的 Python 节点；取消是协作式的。运行的 `wall_time_ms` 用完时，运行时会取消该运行，等正在运行的节点返回后才给出结果，其中 `status` 为 `TimedOut`，`failure.code` 为 `P_RUNTIME_TIMEOUT`，消息为 `Program wall-time budget (N ms) expired`。被超时打断的那个操作的文本，在 `failure.witness["cause_message"]` 里。`ng.await(command, timeoutMs, sourceSite)` 的截止时间一过，运行就以 `TimedOut` 和 `P_AWAIT_TIMEOUT` 结束，截止时间之后才到达的完成结果不会被接受。两种情况下，子 Core 运行都会被取消；检查 `input.ctx.cancel_token.is_cancelled()` 的节点会提前停止，忽略它的节点则会让结果推迟到它返回为止。`TimedOut` 和 `Cancelled` 的结果会在 `execution_trace` 里列出已完成的 Core 节点。
 
-Program 引擎不会向 stderr 打印 lint，也不会打印 fan-out 提示。建议设置 `EngineConfig::worker_count` 的提示只来自你自己构建的 `GraphEngine`。
+Program 的引擎不会向 stderr 输出 lint 信息，也不会输出 fan-out 提示。推荐设置 `EngineConfig::worker_count` 的那条提示，只会出现在自行构建的 `GraphEngine` 上。
 
 ### 内存状态与恢复
 
-默认情况下，`LocalProgramHost` 把 bundle、版本、激活、运行记录和检查点保存在宿主对象内部的内存中，不向磁盘写入任何内容。请在启动该运行的宿主实例仍然存在时，通过该实例恢复运行。进程重启后，或从另一个 `LocalProgramHost` 调用时，`resume()` 会抛出带 `P_RUN_NOT_FOUND` 的 `ng.ProgramDiagnosticError`：`run '<id>' was not found in this LocalProgramHost; runs are kept in memory by the host that started them`。PostgreSQL Program 存储是 C++ 宿主 API。
+默认情况下，`LocalProgramHost` 把 bundle、版本、激活记录、运行记录和检查点都保存在宿主对象的内存里，不向磁盘写任何东西。要恢复一个运行，必须通过启动它的那个宿主实例，且该对象还活着。进程重启之后，或者换另一个 `LocalProgramHost`，`resume()` 会抛出带 `P_RUN_NOT_FOUND` 的 `ng.ProgramDiagnosticError`：`run '<id>' was not found in this LocalProgramHost; runs are kept in memory by the host that started them`。PostgreSQL 的 Program 存储是 C++ 宿主的 API。
 
-传入 `sqlite_directory=path` 时，宿主把 bundle、版本、运行记录和检查点保存在该目录的 SQLite 文件（`program.db`、`checkpoints.db`）中，把提供商调用保存在提供商调用 journal（`provider_calls.db`）中，因此运行能在进程之后留存：用同一目录和同一注册表打开的宿主会继续它。`resume()` 继续被中断的运行，`reconnect(run_id)` 继续停止的进程留下的仍在运行中的运行。恢复从不重新发送 journal 记录过的请求：journal 重放回复，调用只收费一次。绑定提供商的宿主还需要 `native_history_archive=`（第一次用 `ng.NativeArchive.provision`，之后用 `ng.NativeArchive.open`），因为 journal 把每个回复保存在该 archive 的 custody 之下。没有子预算的仅 `define()` Program 运行在其 wall time 内持有 execution lease：在 lease 过期前 `reconnect()` 抛出 `P_RUN_LEASE_HELD`，之后以 `TimedOut` 结束运行，并对 journal 记录的调用收费。崩溃恢复从运行最后一个持久检查点（例如中断留下的检查点）继续。
+设置 `sqlite_directory=path` 后，宿主会把 bundle、版本、运行记录和检查点保存在该目录下的 SQLite 文件里（`program.db`、`checkpoints.db`），把 provider 调用保存在 provider 调用 journal 里（`provider_calls.db`），这样运行就能在进程结束后继续存在：用同一个目录和同一个注册表打开的宿主，可以接着运行。`resume()` 继续被中断的运行，`reconnect(run_id)` 继续一个在进程停止时仍处于运行状态的运行。恢复过程从不重新发送 journal 中记录过的请求：journal 会重放当时的回复，这次调用只计一次费。绑定了 provider 的宿主还需要 `native_history_archive=`（第一次用 `ng.NativeArchive.provision`，之后用 `ng.NativeArchive.open`），因为 journal 把每条回复都放在这个 archive 的托管之下。只含 `define()`、且没有子预算的 Program 运行，在其挂钟时间内持有一个执行租约：在租约到期之前，`reconnect()` 会抛出 `P_RUN_LEASE_HELD`；到期后，运行以 `TimedOut` 结束，并为已记入 journal 的调用计费。崩溃恢复从运行最近一个持久的检查点继续，例如中断时留下的那个。
 
-`resume(run_id, value)` 返回一个句柄；调用 `.wait()` 获取结果。不传 `pending_id` 时，它会恢复该运行中唯一正在等待的调用。没有调用或有多个调用在等待时，它会抛出 `ValueError`；请把 `result.interrupt.pending_input.call_id` 作为 `pending_id` 传入，以精确指定该调用。 `fork(run_id, value, version, budget)` 从该运行的精确检查点（或 `checkpoint_id=`）启动 `version` 的新运行，并用 `value` 回答其等待中的调用；`budget` 必须在源运行的 `remaining_budget` 之内，`pending_id=` 与 `resume()` 一样指定调用。fork 与 `resume()` 一样重放暂停运行已完成的工作：在暂停步骤中已完成的节点或 Send 不会再次运行或计费，其 provider 调用也不会再次发送（#390）。 当 Core 步骤在多个中断上暂停时，`result.interrupt.pending_input.core_interrupt_id`（或 `pending_effect.core_interrupt_id`）指明此等待调用所回答的 Core 中断，`resume()` 正好回答它；该步骤的其他中断会以一次一个等待调用的方式再次提问。只有一个 Core 中断时它为 `""`（#388）。`fork()` 同样正好回答该中断，fork 出的运行会再次提出该步骤的其他问题（#394）。JavaScript `main()` 的 fork 与 `resume()` 一样继续源运行暂停所在的命令：`main()` 以源运行的输入再次运行（不使用 fork 的 `input`），已完成的命令从源的命令日志重放，不会再次运行、发送或计费，暂停的 `callCore` 从其检查点以 `value` 恢复（#395）。fork 重放的已记录失败会保留其 provider 证据：fork 把该证据从源运行的保管（custody）重新绑定到自身，因此 `result.failure.provider_outcome` 在 fork 中与在源运行中一样被恢复（#398）。
+`resume(run_id, value)` 返回一个句柄，调用 `.wait()` 取得结果。不带 `pending_id` 时，它恢复该运行中唯一在等待的调用。没有等待中的调用，或者有多个时，它抛出 `ValueError`；这时把 `result.interrupt.pending_input.call_id` 作为 `pending_id` 传入，即可精确指定要恢复的调用。`fork(run_id, value, version, budget)` 从该运行确切的检查点（或 `checkpoint_id=` 指定的检查点）出发，启动 `version` 的一个新运行，并用 `value` 回应它待处理的调用；`budget` 必须在源运行的 `remaining_budget` 范围内，`pending_id=` 与 `resume()` 一样用来指定调用。fork 会像 `resume()` 一样重放暂停的运行已经完成的内容：暂停那一步中已完成的节点或 Send，既不会再运行，也不会再计费，它们的 provider 调用也不会再次发送（#390）。如果某个 Core 步骤在多个中断上暂停，`result.interrupt.pending_input.core_interrupt_id`（或 `pending_effect.core_interrupt_id`）会指明这个待处理调用所回应的是哪个 Core 中断，`resume()` 就恰好回应那一个；该步的其他中断会再次提问，每次处理一个待处理调用。只有一个 Core 中断时，它是 `""`（#388）。`fork()` 同样恰好回应那个中断，fork 出来的运行会重新提出该步的其他问题（#394）。fork 一个 JavaScript `main()`，会像 `resume()` 一样，从源运行暂停时所在的命令继续：`main()` 用源运行的输入重新运行（fork 自己的 `input` 不使用），已完成的命令从源运行的命令 journal 重放，不再运行、发送或计费，暂停的 `callCore` 则带着 `value` 从它的检查点恢复（#395）。fork 重放的、已记录的失败会保留它的 provider 证据：fork 会把这份证据从源运行的托管重新绑定到自己的托管，因此 `result.failure.provider_outcome` 在 fork 中与在源运行中一样得以恢复（#398）。
 
-`resume()` 返回的结果中，`execution_trace` 只列出恢复后运行的 Core 节点；中断前运行的节点出现在被中断的结果中。对于在 `b` 之前中断的 Core `a → b → c`，被中断的结果为 `["a"]`，恢复后的结果为 `["b", "c"]`。
+`resume()` 返回的结果中，`execution_trace` 只列出恢复之后运行的 Core 节点；中断之前运行的节点出现在被中断的那份结果里。对于在 `b` 之前中断的 Core `a → b → c`，被中断的结果是 `["a"]`，恢复后的结果是 `["b", "c"]`。
 
-## 强制生命周期 Hooks
+## 强制的生命周期 Hook
 
-Hooks 由宿主生命周期事件触发，而非由模型决定调用工具。
+Hook 由宿主的生命周期事件触发，而不是由模型决定调用某个工具而触发。
 
 ```python
 data = ng.HookDefinitionData()
@@ -609,15 +606,15 @@ runtime = ng.create_hook_runtime(
 engine.set_hook_runtime(runtime)
 ```
 
-在 `FailClosed` 下的回调失败会阻塞受保护的运行时边界。仅当可接受观测性损失时，`Continue` 才可用。
+在 `FailClosed` 下，回调失败会阻塞受保护的运行时边界。只有在可以接受观测数据丢失的情况下，才能使用 `Continue`。
 
-`HookBoundaryBlocked` 携带发生阻断的 Hook 的 `invocation_id` 及其 `state`（`"failed"`、`"timed_out"` 等）。Python 工具遵循[工具失败契约](reference-en.md#tool-failure-contract)：在工具内抛出的 `HookBoundaryBlocked`（例如来自嵌套的引擎运行）会停止运行，`NodeInterrupt` 会暂停运行，其他任何异常都会成为模型读取的工具结果。
+`HookBoundaryBlocked` 带有被阻塞的 Hook 的 `invocation_id` 和它的 `state`（`"failed"`、`"timed_out"` 等）。Python 工具遵循[工具失败契约](reference-en.md#tool-failure-contract)：在工具内部抛出的 `HookBoundaryBlocked`（例如由嵌套的引擎运行抛出）会终止运行，`NodeInterrupt` 会让运行暂停，其他任何异常都会变成模型能读到的工具结果。
 
-## 运行时上下文、Skills 与严格分发
+## 运行时上下文、Skill 与严格分发
 
-该绑定暴露不可变的 RAW 历史记录、上下文工件、epochs、必需的 Skills/约束、转换收据和提供商分发收据。
+Python 绑定暴露了不可变的 RAW 历史记录、上下文制品（artifact）、纪元（epoch）、必需的 Skill 与约束、转换回执（transformation receipt），以及 provider 分发回执。
 
-创建 RAW `RuntimeHistoryRecord` 时，Assistant 消息须将 `RuntimeHistoryRecordData.trust` 设为 `RuntimeTrustClass.ModelOutput`。默认值 `UntrustedInput` 仅接受 User 消息，用于 Assistant 输出会被拒绝。这些标签描述消息来源，不授予工具执行、预算或代码权限，也不能替代真实的原生重放保管权限。
+创建 RAW `RuntimeHistoryRecord` 时，如果是 Assistant 消息，要把 `RuntimeHistoryRecordData.trust` 设为 `RuntimeTrustClass.ModelOutput`。默认的 `UntrustedInput` 只接受 User 消息，用于 Assistant 输出会被拒绝。这些标签描述的是消息的来源，不授予执行工具、预算或代码方面的任何权限，也不能替代真实的 native replay 托管。
 
 ```python
 requirements = ng.RuntimeContextRequirements()
@@ -631,9 +628,9 @@ assembler = ng.RuntimeTurnAssembler(
 )
 ```
 
-`ContextTransformReceipt` 允许任意派生的证据，但要求每个必需工件保持字节一致。
+`ContextTransformReceipt` 允许任意的派生证据，但要求每个必需的制品保持字节级完全一致。
 
-对于完整的严格路径，请使用持久化 SQLite 存储：
+完整的严格路径需要使用持久的 SQLite 存储：
 
 ```python
 contexts = ng.SQLiteContextStore("runtime.sqlite3")
@@ -657,45 +654,45 @@ profile.attach(engine)
 
 ## HITL 与状态
 
-静态 `interrupt_before`/`interrupt_after`、动态 `NodeInterrupt`、同步 `resume`、asyncio `resume_async` 以及精确 `resume_from` 都需要检查点存储。
+静态的 `interrupt_before`/`interrupt_after`、动态的 `NodeInterrupt`、同步的 `resume`、asyncio 的 `resume_async`，以及精确的 `resume_from`，都需要检查点存储。
 
-由 `ng.Send` 分派的 Python 节点抛出 `ng.NodeInterrupt` 时，会像其他节点一样暂停 run：`run`、`run_stream`、`run_async` 和 `run_stream_async` 返回带检查点的中断 `RunResult`，`resume`、`resume_async` 和 `resume_from` 则带着答案运行该 Send，而发出 Send 的节点和已完成的 Send 会被重放，不会再次运行。 当同一步中的多个节点或 Send 抛出 `ng.NodeInterrupt` 时，`result.interrupts` 以 `{"id", "node", "value"}` 列出每一个，`result.interrupt_id` 指明第一个。`resume`、`resume_async` 和 `resume_from` 接受 `interrupt_id=` 并回答该中断，未指定时回答第一个；其他暂停的节点或 Send 会在该次恢复中再次提出自己的问题，下一次恢复回答它（#388）。不在等待中的 `interrupt_id` 会抛出 `ValueError`。`RunMetadata.resume_interrupt_id` 携带同一个 id。答案只送达它所回答的节点或 Send，并且只在恢复重新进入的那一步：在恢复后的 run 的后续步骤中，`input.ctx.resume_value` 以及 tool gate 的 `ToolGateContext.resume_value` 都是 `None`，因此在那里提问的节点或 gate 会再次暂停 run（#393）。`interrupt_before` 暂停之后的恢复把值交给闸门拦下的节点；`interrupt_after` 暂停之后的恢复不把它交给任何节点。当同一步中有多个带闸门节点就绪时，每个闸门单独回答：在该步所有闸门都被回答之前，run 会在下一个带闸门节点之前再次暂停，之后每个带闸门节点收到对其自身闸门的回答（#396）。在同一步中，失败的节点或 Send 无论顺序如何都优先于提问的节点：run 抛出该失败，不报告任何中断；只有不确定的效果（payload `kind` 为 `tool_effect_reconciliation` 的 `NodeInterrupt`）仍会在失败旁暂停，以便对账（#392）。
+由 `ng.Send` 分发的 Python 节点如果抛出 `ng.NodeInterrupt`，会像其他节点一样让运行暂停：`run`、`run_stream`、`run_async` 和 `run_stream_async` 返回带检查点的、已中断的 `RunResult`；`resume`、`resume_async` 和 `resume_from` 带着回应运行这个 Send，而发出这些 Send 的节点和已经完成的 Send 则直接重放，不会再运行。同一步里有多个节点或 Send 抛出 `ng.NodeInterrupt` 时，`result.interrupts` 把每一个都列为 `{"id", "node", "value"}`，`result.interrupt_id` 指的是第一个。`resume`、`resume_async` 和 `resume_from` 接受 `interrupt_id=`，回应它指定的那个中断，不带时回应第一个；本次恢复中，其余暂停的节点或 Send 会再次提出各自的问题，由下一次恢复来回应（#388）。`interrupt_id` 如果不是待处理的中断，会抛出 `ValueError`。`RunMetadata.resume_interrupt_id` 携带的是同一个 id。回应只送达它所回应的那个节点或 Send，而且只在恢复重新进入的那一步里有效：恢复后的运行在之后每一步中，`input.ctx.resume_value` 以及工具闸门的 `ToolGateContext.resume_value` 都是 `None`，所以在那里提问的节点或闸门会让运行再次暂停（#393）。`interrupt_before` 暂停之后的恢复，会把这个值交给被该闸门拦住的节点；`interrupt_after` 暂停之后的恢复，则不把它交给任何节点。同一步里有多个带闸门的节点同时就绪时，每个闸门单独回应：在下一个带闸门的节点之前，运行会再次暂停，直到这一步的每个闸门都得到回应，然后每个带闸门的节点收到的是对它自己那个闸门的回应（#396）。在同一步里，失败的节点或 Send 比提问的节点或 Send 优先，与它们的顺序无关：运行会抛出该失败，且不报告任何中断；只有不确定的副作用（payload 的 `kind` 为 `tool_effect_reconciliation` 的 `NodeInterrupt`）在出现失败时仍会暂停，以便对账（#392）。
 
-Python `CheckpointStore` 子类可以实现 `requires_managed_budget(thread_id) -> bool`。此同步虚方法读取已持久化的受管理预算银行拒绝义务；引擎的原生异步门面调用该方法，绑定在执行 Python 重写方法时获取 GIL。即使检查点状态中的银行信息被剥离，或检查点被删除，也须报告真实的持久义务。省略重写方法会保留原生明确的后端不支持错误，而不是返回 `False`。
+Python 的 `CheckpointStore` 子类可以实现 `requires_managed_budget(thread_id) -> bool`。这个同步的虚方法读取已持久化的受管 bank 拒绝义务（denial obligation）；引擎原生的异步门面会调用它，binding 会为这个 Python 重写获取 GIL。即使检查点状态已被剥离或删除，也要如实报告已持久化的义务。不重写这个方法，则保留原生明确的“后端不支持”错误，而不是返回 `False`。
 
-此读取方法不授予支出、恢复或租约权限。有界的受管理执行仍需受支持的真实原生受管理预算租约；仅实现此读取方法不能提供这些租约。
+这个读取接口不授予消费、恢复或租约方面的任何权限。受管的有界执行仍然需要实际受支持的原生受管预算租约；只实现这个读取接口，无法提供租约。
 
 ```python
 if result.interrupted:
     result = engine.resume(result_thread_id, {"approved": True})
 ```
 
-使用 `get_state_history`、`update_state` 和 `fork` 进行检视和时间旅行。`get_state_view()` 提供基于 Pydantic 的扁平通道访问，而 `get_state()` 保留规范的嵌套表示。
+检查状态和时间旅行，用 `get_state_history`、`update_state` 和 `fork`。`get_state_view()` 提供基于 Pydantic 的扁平通道访问，`get_state()` 则保留规范的嵌套表示。
 
 ## 异步与取消
 
-`run_async`、`run_stream_async` 和 `resume_async` 返回 `asyncio.Future`。取消这些图 Future 会通过 `CancelToken` 请求取消；原生 I/O 必须到达取消边界，操作才能结束。图的流式回调会返回调用方的 asyncio 事件循环线程。
+`run_async`、`run_stream_async` 和 `resume_async` 返回 `asyncio.Future` 对象。取消这些图的 Future，会通过 `CancelToken` 发出取消请求；原生 I/O 要到达它的取消边界，操作才会结束。图的流式回调会回到调用方的 asyncio 事件循环线程。
 
-提供商的 `invoke` 和 `dispatch` 是同步 Python 方法。绑定在原生调用运行时释放 GIL，在执行 Python 提供商重写方法及事件回调时重新获取 GIL。事件回调接收拥有所有权的 `ProviderEvent` 值，可能在原生工作线程上执行。回调需要更新 asyncio 管理的状态时，请使用 `loop.call_soon_threadsafe`。
+Provider 的 `invoke` 和 `dispatch` 是同步的 Python 方法。它们的绑定在原生调用运行期间释放 GIL，随后在执行 Python 的 provider 重写和事件回调时重新获取。事件回调收到的是持有所有权的 `ProviderEvent` 值，可能在原生 worker 线程上运行。回调需要更新属于 asyncio 的状态时，请使用 `loop.call_soon_threadsafe`。
 
-通过 `request.on_event = callback` 设置观察器，或用 `None` 清除。读取 `request.on_event` 会保留原始 Python 回调对象的身份；`RunConfig.on_provider_event` 也遵循此规则。每个事件暴露字符串 `kind` 和类型化 `value`；`ProviderPartDelta` 值拥有自己的 `bytes`。回调后保留事件不会保留借用的 SDK 文本视图。要请求取消，请对赋给 `request.cancel_token` 的令牌调用 `token.cancel()`。
+用 `request.on_event = callback` 指定 observer，赋值 `None` 则清除。读取 `request.on_event` 得到的是原来那个 Python 可调用对象本身（对象身份不变）；`RunConfig.on_provider_event` 遵循同样的规则。每个事件提供字符串 `kind` 和带类型的 `value`；`ProviderPartDelta` 的值自己持有其 `bytes`。回调结束后继续保留事件，并不会保留借用的 SDK 文本视图。要请求取消，对赋给 `request.cancel_token` 的 token 调用 `token.cancel()`。
 
-用 `asyncio.to_thread(provider.invoke, request)` 在事件循环线程之外执行同步提供商调用。仅取消该 await 不会取消提供商调用；需要将 `CancelToken` 赋给 `request.cancel_token`，并显式请求取消。
+用 `asyncio.to_thread(provider.invoke, request)` 可以让同步的 provider 调用不占用事件循环线程。仅取消这个 await，并不会取消 provider 调用：需要把一个 `CancelToken` 赋给 `request.cancel_token`，并显式请求取消。
 
-对于令牌已取消的有效准备句柄，提供商分发的预检会返回拥有所有权的 SDK `Cancelled` 失败。同步分发也会运行同一原生异步提供商路径直至结束。图、宿主或协程入口处的取消属于另一边界，可能在返回 `ProviderOutcome` 之前引发异常；请求取消不保证在每个边界都返回类型化的 `Cancelled` 数据。取消请求也不能证明请求没有发出、远程工作已经停止或不会产生费用。
+对于有效的已准备句柄，如果它的 token 已经被取消，provider 分发的预检会返回一个持有所有权的 SDK `Cancelled` 失败。同步分发走的是同一条原生异步 provider 路径，并等它跑完。在图、宿主或协程入口处的取消是另一个边界，可能在 `ProviderOutcome` 返回之前就抛出异常；请求取消，并不保证在每个边界上都得到带类型的 `Cancelled` 数据。取消请求同样不能证明没有请求发出、远端的工作已经停止，或者不会产生费用。
 
-[pybind11 GIL 文档](https://pybind11.readthedocs.io/en/stable/advanced/misc.html#global-interpreter-lock-gil) 解释了为何释放 GIL 与为 Python 回调重新获取 GIL 是绑定的两项独立职责。
+[pybind11 的 GIL 文档](https://pybind11.readthedocs.io/en/stable/advanced/misc.html#global-interpreter-lock-gil)解释了为什么释放 GIL 和为 Python 回调重新获取 GIL，是绑定层中两项各自独立的职责。
 
 ## 协议与可观测性
 
-- MCP 客户端工具在构建后可通过 `neograph_engine.mcp` 使用。
-- A2A 客户端类型在构建后可通过 `neograph_engine.a2a` 使用。
-- `ProtocolHostAdapter` 将官方 Python A2A/ACP 服务器 SDK 与 NeoGraph 会话语义集成。
-- `neograph_engine.tracing` 和 `neograph_engine.openinference` 为 Phoenix、Langfuse、Arize 及兼容后端发出供应商中立的 OTel/OpenInference 数据。
+- 构建时包含 MCP 的话，MCP 客户端工具可通过 `neograph_engine.mcp` 使用。
+- 构建时包含 A2A 的话，A2A 客户端类型可通过 `neograph_engine.a2a` 使用。
+- `ProtocolHostAdapter` 把官方的 Python A2A/ACP 服务端 SDK 与 NeoGraph 的会话语义对接起来。
+- `neograph_engine.tracing` 和 `neograph_engine.openinference` 输出与厂商无关的 OTel/OpenInference 数据，可用于 Phoenix、Langfuse、Arize 及兼容的后端。
 
-### 原生 A2A 发现与流式调用
+### 原生 A2A 的发现与流式调用
 
-`a2a.WireDialect` 为 `V1_0`（主版本）或 `V0_3`（兼容）。`client.wire_dialect()` 在构造/强制 card fetch 后到首次 card-selected RPC 或成功 probe 前为 `None`。`AgentCard.supported_interfaces` 为含 `url/protocol_binding/protocol_version/tenant` 的独立 `AgentInterface` 列表；`card.raw` 为观察 JSON。native client 在首次调用前获取 card 并选择兼容的 JSONRPC interface，优先匹配规范化 base URL。该 interface URL 与 base URL 同源时，RPC 发往该 URL；`client.set_allow_cross_origin_interfaces(True)` 允许 card 指定其他源，`client.endpoint_url()` 返回正在使用的 endpoint。只有无法获取 card 时才从 1.0 开始 probe，遇到 `-32601`、`-32009` 或 HTTP 400 时改用 0.3；card-selected 调用不 fallback。message id 为随机 UUID。`a2a.A2ARpcError.code` 是实际整数代码。
+`a2a.WireDialect` 取 `V1_0`（主要）或 `V0_3`（兼容）。构造之后，或强制获取 card 之后，`client.wire_dialect()` 返回 `None`，直到发生由 card 选定的 RPC 或探测成功为止。`AgentCard.supported_interfaces` 包含分离的 `AgentInterface` 记录，字段有 `url`、`protocol_binding`、`protocol_version`、`tenant`；`card.raw` 是仅供观察的 JSON。原生客户端在第一次调用之前会获取 card，并选择一个兼容的 JSONRPC 接口，优先选用其规范化后的基础 URL。接口的 URL 与基础 URL 同源时，RPC 发往该 URL；`client.set_allow_cross_origin_interfaces(True)` 允许 card 指定另一个 origin，`client.endpoint_url()` 报告正在使用的 endpoint。只有在无法获取 card 时，客户端才会探测：先试 1.0，遇到 `-32601`、`-32009` 或 HTTP 400 时回退到 0.3；由 card 选定的调用不回退。消息 id 是随机 UUID。`a2a.A2ARpcError` 保留实际的整数 `.code`。
 
 ```python
 from neograph_engine import a2a
@@ -727,20 +724,20 @@ task = client.send_message_stream(params, on_event)
 print(client.wire_dialect(), task.id, task.state)
 ```
 
-先在该 endpoint 启动真实本地 A2A server，与 Chat 回环独立。`send_message(params)` 是非流式 multipart overload，仍保留 text overload。显式用 `client.set_authorization_header(authorization_header)` 设置认证，不记录该值。`Part.media_type/file/data/metadata`、message extensions/reference IDs、task artifacts 保留类型/数据观察，不是 provider native 权限。
+运行这个示例之前，先在该 endpoint 上启动一个真正的本地 A2A 服务；它与 Chat 的回环对端是两回事。`send_message(params)` 是非流式的多 part 重载；文本的便捷重载仍然保留。凭据要用 `client.set_authorization_header(authorization_header)` 显式设置，并且不要让该值进入日志。`Part.media_type`、`file`、`data`、`metadata`、消息的扩展/引用 ID 和任务制品，保留的是带类型的/数据层面的观测，绝不具备 provider 的 native 权限。
 
-`params.message` 和 `Task.status` 是 live inline 记录；optional configuration/向量/event 子记录为独立 snapshot，修改输入须重新赋值。检查 `StreamEvent.Type.StatusUpdate/ArtifactUpdate/Task` 和 `status_update/artifact_update/task/is_final()`。V1 opening task 不代表 final；原生 SSE 组装 status 和 append/replace artifact。blocking 调用释放 GIL，callback/所有者销毁获取 GIL。观察输出后不重新 dispatch。callback thread 不保证是 asyncio loop，需要时使用 `loop.call_soon_threadsafe`。
+`params.message` 和 `Task.status` 是活的内联记录；可选的配置、向量和事件的子对象是分离的快照，要更新可变的输入，需要重新赋值。`StreamEvent.type` 取 `StreamEvent.Type.StatusUpdate/ArtifactUpdate/Task`；可检查 `status_update`、`artifact_update`、`task` 和 `is_final()`。V1 的起始任务不是终态；原生 SSE 会把状态更新以及追加/替换的制品更新组装起来。阻塞调用会释放 GIL；回调会获取 GIL，并持有保证在 GIL 下安全销毁的所有者。回调交付不意味着可以根据已观察到的输出重新分发。回调线程不保证是 asyncio 事件循环线程；需要时请使用 `loop.call_soon_threadsafe`。
 
 
-从 `neograph_engine.openinference` 导入 `OpenInferenceProvider`。构造签名为 `OpenInferenceProvider(inner: Provider, tracer, *, span_name="llm.complete")`；此 Python 类委托给原生 C++ 包装器，继承类型化的 `prepare(request)`、`dispatch(prepared)` 和 `invoke(request)`。默认 span 名只是标签，不会恢复 `complete` 方法。安装 `opentelemetry-api` 与 `opentelemetry-sdk`；构造时需要 OTel API，导出时需要配置 SDK span processor/exporter。
+从 `neograph_engine.openinference` 导入 `OpenInferenceProvider`。它的构造函数是 `OpenInferenceProvider(inner: Provider, tracer, *, span_name="llm.complete")`；这个门面把调用委托给原生的 C++ 包装器，包装器继承了带类型的 `prepare(request)`、`dispatch(prepared)` 和 `invoke(request)`。默认的 span 名只是一个标签，并不是恢复了 `complete` 方法。需要安装 `opentelemetry-api` 和 `opentelemetry-sdk`；构造时需要 OTel API，导出时需要配置好的 SDK span processor/exporter。
 
-准备、准入失败和放弃准备请求都不会创建 LLM span。已准入的分发会启动一个 span，并在完成、SDK 失败或分发异常时结束。即使包装器及外部 tracer 引用已被回收，准备操作仍保留 Python tracer 适配器。阻塞的 `invoke`/`dispatch` 释放 GIL；OTel 调用和 Python 引用销毁时获取 GIL。Tracer 失败遵循原生尽力而为策略，不替换拥有所有权的结果、原始事件或产品异常。
+准备、准入失败和放弃，都不会创建 LLM span。通过准入的 dispatch 会启动一个 span，并在完成、SDK 失败或 dispatch 抛出异常时结束它。即使包装器和外部对 tracer 的引用都已被回收，已准备的操作仍然保留 Python 的 tracer 适配器。阻塞的 `invoke`/`dispatch` 会释放 GIL；OTel 调用和 Python 引用的销毁会获取 GIL。tracer 的失败遵循原生的尽力而为（best-effort）策略，不会替换持有所有权的 outcome、原始事件或产品本身的异常。
 
-适配器在分发时调用 Python tracer 的 `start_span`。调用方的上下文不会自动传入原生工作线程。分发前捕获所需的 OTel 父上下文，并按下例通过 tracer 适配器显式传入；图节点提供商需要图/节点父 span 时也应如此。参见 OTel 的[显式父上下文选择文档](https://opentelemetry-python.readthedocs.io/en/latest/api/trace.html#opentelemetry.trace.Tracer.start_span)。
+适配器在 dispatch 时调用 Python tracer 的 `start_span`。调用方的 context 不会自动带入原生 worker 线程。请在 dispatch 之前捕获想要的 OTel 父 context，并像下面这样通过 tracer 适配器显式传入；图节点中的 provider 如果需要图或节点作为父 span，做法相同。OTel 文档中介绍了[如何显式选择父 context](https://opentelemetry-python.readthedocs.io/en/latest/api/trace.html#opentelemetry.trace.Tracer.start_span)。
 
-示例中的 `ParentContextTracer` 保留一个已捕获的父上下文。使用不同的逻辑父级时，请重新捕获上下文，并构造新的适配器/提供商包装器；重用旧适配器会继续使用先前的父级。
+示例中的 `ParentContextTracer` 只保存一个已捕获的父 context。要换一个逻辑上的父 span，需要重新捕获 context，并构造新的适配器/provider 包装器；沿用旧适配器，父 span 仍是原来的那个。
 
-使用上方提供商示例的 `provider` 和 `controls`。运行以下片段前，请重新启动单请求协议端:
+沿用上面 provider 示例中的 `provider` 和 `controls`，运行这个片段之前，先重启那个只处理一次请求的对端：
 
 ```python
 import neograph_engine as ng
@@ -779,25 +776,25 @@ with tracer.start_as_current_span("request"):
 traces.shutdown()
 ```
 
-控制台 exporter 应显示 `openinference.span.kind="LLM"` 的 `llm.request`，其 `parent_id` 应与 `request` span 的 `span_id` 一致。使用链接中的协议端时，打印结果应为已消费、无失败，并含 `Hello.`。对于新请求，`observed.invoke(request)` 合并相同的准备与分发流程；不要再次分发已消费的句柄。
+控制台 exporter 应该显示 `llm.request`，其中 `openinference.span.kind="LLM"`，并且它的 `parent_id` 与 `request` span 的 `span_id` 一致。使用上面链接的对端时，打印出的结果是句柄已被消耗、没有失败，并且包含 `Hello.`。对于新的请求，`observed.invoke(request)` 把同样的准备和分发合在一起；不要再次分发已被消耗的句柄。
 
-LLM span 字段包含已准入的模型、声明的 temperature/输出上限、公开消息角色与可见 `Text` 内容，以及已知的输入/输出/总使用量计数器。缺失的计数器不会产生对应属性；报告的零仍为零。流式请求仅为可见文本内容增量添加 `llm.token` 事件，文本位于 `attributes["chunk"]`。SDK 失败以安全消息设置 ERROR 状态，并保留部分公开输出；成功完成设置 OK。`request.on_event` 仍接收原始类型化事件。
+LLM span 的字段包括：已准入的模型、声明过的 temperature 和输出上限、公开的消息 role 与可见的 `Text` 内容，以及已知的 input/output/total 用量计数。缺失的计数会省略对应的属性；上报为零的仍然是零。流式请求只会为可见文本内容的增量添加 `llm.token` 事件，文本在 `attributes["chunk"]` 中。SDK 失败时，使用安全的消息把状态设为 ERROR，并保留部分公开输出；成功完成时设为 OK。`request.on_event` 仍然收到原始的带类型事件。
 
-原生重放、推理 part、原始信封和原始事件不会进入这些 LLM span 字段。结果仍保留其原生消息和证据；追踪导出不会赋予重放保管或记账权限。公开文本可能包含敏感应用数据，请据此选择提示词和 exporter。`openinference_tracer(tracer, *, root_name="graph.run", node_span_prefix="node.", on_event=None)` 仍是独立的图事件上下文管理器，不替代提供商 LLM span。
+native replay、reasoning parts、原始 envelope 和原始事件都不会进入这些 LLM span 字段。outcome 仍然保留它的 native 消息和证据；tracing 导出既不赋予 replay 托管，也不赋予核算方面的权限。公开文本可能含有敏感的应用数据，请据此选择提示词和 exporter。`openinference_tracer(tracer, *, root_name="graph.run", node_span_prefix="node.", on_event=None)` 仍然是独立的图事件上下文管理器，它不能代替 provider 的 LLM span。
 
 ## 可选组件
 
-公共包如实标记可选的 C++ 组件：
+公开的包会如实标明可选的 C++ 组件：
 
-- `_HAVE_PROGRAM`, `_HAVE_SQLITE`, `_HAVE_POSTGRES`, `_HAVE_MCP`, `_HAVE_A2A`;
-- 缺失的组件是缺失的，而不是在 Python 中模拟的；
-- PyPI wheel 启用 Program/QuickJS、LLM、MCP 和 SQLite；源码构建遵循其 CMake 选项。
+- `_HAVE_PROGRAM`、`_HAVE_SQLITE`、`_HAVE_POSTGRES`、`_HAVE_MCP`、`_HAVE_A2A`；
+- 缺失的组件就是不存在，不会在 Python 里模拟；
+- PyPI wheel 启用了 Program/QuickJS、LLM、MCP 和 SQLite；从源码构建则取决于 CMake 选项。
 
 ## 测试与示例
 
-绑定测试套件涵盖 Core 执行、自定义回调、asyncio、取消、Program 编译/运行时、强制 Hook、严格上下文、SQLite 持久化、协议以及 README 示例。
+绑定的测试集覆盖了 Core 执行、自定义回调、asyncio、取消、Program 的编译与运行时、强制 Hook、严格的上下文、SQLite 持久化、协议，以及 README 中的示例。
 
 - [Python 示例](../bindings/python/examples/README.md)
 - [C++ 示例](../examples/README.md)
-- [QuickJS 创作边界](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
-- [严格运行时插桩](STRICT_RUNTIME_INTERPOSITION.md)
+- [QuickJS 编写边界](QUICKJS_PUBLIC_AUTHORING_BOUNDARY.md)
+- [严格的运行时拦截](STRICT_RUNTIME_INTERPOSITION.md)
