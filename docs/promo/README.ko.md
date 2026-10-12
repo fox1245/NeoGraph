@@ -3,26 +3,33 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-리포지토리 README 상단에 표시되는 15초 프로모션의 소스입니다(`docs/videos/neograph-promo-v3.mp4` + `docs/images/neograph-promo-v3.gif`).
+저장소 README 맨 위에 보이는 15초짜리 프로모 영상의 소스입니다
+(`docs/videos/neograph-promo-v3.mp4` + `docs/images/neograph-promo-v3.gif`).
 
-장면을 다시 편집하고 렌더링할 수 있도록 소스를 커밋했습니다.
-생성 video는 Program pipeline을 설명하며 API reference, benchmark, qualification 기록이 아닙니다.
-미디어 파일명의 `v3`는 asset 이름이지 SDK interface revision이 아닙니다. NeoGraph `0.13.1`은 alpha SDK `0.1.1`, interface/shared generation 4를 사용합니다. 기존 render는 해당 runtime이나 대기 중인 검증을 입증하지 않습니다.
+장면을 수정하고 다시 렌더링할 수 있도록 소스를 커밋해 두었습니다.
+생성된 영상은 Program 파이프라인을 보여 주는 그림일 뿐이며 API 레퍼런스, 벤치마크,
+검증(qualification) 기록이 아닙니다.
+미디어 파일명의 `v3`는 에셋 이름표이지 SDK 인터페이스 리비전이 아닙니다.
+NeoGraph `0.13.1`은 알파 SDK `0.1.1`, 인터페이스/공유 라이브러리 세대 4를 씁니다.
+기존에 렌더링한 영상은 이 런타임이나 아직 끝나지 않은 검증을 보여 주지 않습니다.
 
 ## 장면 (`src/scenes/`)
 
-1. `Intro` — 워드마크 + 금색 선 그리기
-2. 그리드 공개(지속적인 `GridBackground`가 빈 비트 위에 페이드 인)
-3. `ReactGraph` — 제안 → 컴파일 → 의미 검증 → 승인(admission) 파이프라인. 커넥터는 박스 가장자리(오른쪽 중간 → 왼쪽 중간)에 고정되고 ReAct 루프백 호는 `llm_call`의 상단 가장자리에 닿습니다. `NODES`를 `ReactGraph.tsx`에서 편집해 레이아웃을 구성하십시오. 너비와 간격이 명시적이고 중앙 정렬되므로 아무것도 겹치지 않습니다.
-4. `CodeEditor` — QuickJS `define()` + 생성기 `main()`이 스스로 입력되어 나타납니다
-5. `FeatureOutro` — 현재 Program, Hook, 런타임 컨텍스트, 프로토콜 기능 그리드 → 아웃트로 패널
+1. `Intro` — 워드마크와 금색 선 그리기
+2. 그리드 공개 (고정 배경인 `GridBackground`가 아무것도 없는 구간 위로 서서히 나타남)
+3. `ReactGraph` — 제안 → 컴파일 → 의미 검증 게이트 → 승인(admission)으로 이어지는 파이프라인.
+   연결선은 박스 가장자리(오른쪽 가운데 → 왼쪽 가운데)에 붙고, ReAct 루프백 호는 `llm_call`
+   윗변에 닿습니다. 레이아웃은 `ReactGraph.tsx`의 `NODES`를 고쳐서 바꿉니다. 너비와 간격이
+   명시되어 있고 가운데 정렬되므로 겹치는 요소가 없습니다.
+4. `CodeEditor` — QuickJS `define()`과 제너레이터 `main()`이 저절로 타이핑되듯 나타납니다
+5. `FeatureOutro` — 현재 Program, Hook, 런타임 컨텍스트, 프로토콜 기능을 보여 주는 격자 → 아웃트로 패널
 
-타이밍은 `src/theme.ts`(`SCENES`, `VIDEO`)에 있습니다.
+타이밍은 `src/theme.ts`의 `SCENES`와 `VIDEO`에서 정합니다.
 
-## 재빌드
+## 다시 빌드하기
 
-Node.js/npm과 FFmpeg를 설치하세요. `package-lock.json`이 Remotion/React 의존성 트리를 고정하고
-`npm ci`는 기록된 의존성을 설치합니다.
+Node.js/npm과 FFmpeg를 설치합니다. `package-lock.json`이 Remotion/React 의존성 트리를
+고정하며, `npm ci`는 여기 기록된 의존성을 그대로 설치합니다.
 
 ```bash
 cd docs/promo
@@ -38,8 +45,12 @@ ffmpeg -i out/promo.mp4 -i /tmp/pal.png \
   -y ../images/neograph-promo-v3.gif
 ```
 
-`node render.mjs stills 30,175,290,445`는 전체 인코딩 없이 빠른 시각적 diff를 위해 개별 검증 프레임을 `out/`로 렌더링합니다.
+`node render.mjs stills 30,175,290,445`는 전체 인코딩 없이 눈으로 빠르게 비교할 수 있도록,
+검증용 프레임을 하나씩 `out/`에 렌더링합니다.
 
-헤드리스/샌드박스 환경에서 렌더러는 로컬 HTTP 서버를 바인딩합니다. 기본 포트 검색이 차단될 수 있어 `render.mjs`는 `REMOTION_PORT`(기본 45678)를 사용합니다. Chrome Headless Shell이 설치되지 않았다면 Remotion이 다운로드하며 크기는 달라질 수 있습니다.
+헤드리스 환경이나 샌드박스 환경에서는 다음을 참고하세요. 렌더러는 로컬 HTTP 서버를 띄웁니다.
+기본 포트 탐색이 막힐 수 있으므로 `render.mjs`는 서버를 `REMOTION_PORT`(기본값 45678)에
+고정합니다. Chrome Headless Shell이 설치되어 있지 않으면 Remotion이 직접 내려받으며,
+다운로드 크기는 일정하지 않습니다.
 
-`node_modules/`와 `out/`는 gitignore에 포함됩니다.
+`node_modules/`와 `out/`는 gitignore에 등록되어 있습니다.
