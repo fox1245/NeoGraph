@@ -1,26 +1,26 @@
 <!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=ko source_sha256=e7253d2aacfe88e0cb5c6ef9f02834b805e0ddcfb739e7c9882235f90eba9b52 -->
-# NeoGraph C++ API 참조 {#mainpage}
+# NeoGraph C++ API 레퍼런스 {#mainpage}
 
 **Languages:** [English](doxygen-mainpage.md) | [한국어](doxygen-mainpage.ko.md) | [日本語](doxygen-mainpage.ja.md) | [简体中文](doxygen-mainpage.zh-CN.md)
 
-C++20 그래프 에이전트 엔진 라이브러리 — C++용 LangGraph로, 선택적 Python 바인딩이 포함됩니다. 이 사이트는 `include/neograph/`의 공개 C++ 헤더에 대한 **생성된 참조**입니다.
+C++20 그래프 에이전트 엔진 라이브러리입니다. C++용 LangGraph에 해당하며, Python 바인딩은 선택 사항입니다. 이 사이트는 `include/neograph/`의 공개 C++ 헤더를 바탕으로 **자동 생성한 레퍼런스**입니다.
 
-## 시작 위치
+## 시작하기
 
-NeoGraph를 처음 접하는 경우, **먼저 서술형 문서를 읽으십시오** — 이 생성된 참조는 찾고 있는 클래스 시그니처를 알게 된 후 조회용으로 사용됩니다.
+NeoGraph를 처음 쓴다면 **설명 위주의 문서를 먼저 읽으세요**. 이 자동 생성 레퍼런스는 찾는 대상이 무엇인지 알고 있을 때 클래스 시그니처를 조회하는 용도입니다.
 
-| 용 | 이동 |
+| 목적 | 이동할 곳 |
 |---|---|
-| NeoGraph가 무엇인지, 이유, 벤치마크 | [README](https://github.com/fox1245/NeoGraph#readme) |
-| 개념 모델 — 채널, 노드, 엣지, Send, Command | [Core Concepts](https://github.com/fox1245/NeoGraph/blob/master/docs/concepts.md) |
-| 일반적인 문제에 대한 증상 우선 해결 방법 | [Troubleshooting](https://github.com/fox1245/NeoGraph/blob/master/docs/troubleshooting.md) |
-| C++ 예제 (검증은 별도 보고) | [examples/](https://github.com/fox1245/NeoGraph/tree/master/examples) |
-| Python typed provider 및 그래프 예제 | [bindings/python/examples/](https://github.com/fox1245/NeoGraph/tree/master/bindings/python/examples) |
-| Async / 코루틴 내부 구조 | [ASYNC_GUIDE](https://github.com/fox1245/NeoGraph/blob/master/docs/ASYNC_GUIDE.md) |
+| NeoGraph가 무엇이고 왜 만들었는지, 벤치마크 | [README](https://github.com/fox1245/NeoGraph#readme) |
+| 기본 개념 — 채널, 노드, 엣지, Send, Command | [핵심 개념](https://github.com/fox1245/NeoGraph/blob/master/docs/concepts.md) |
+| 자주 겪는 문제를 증상부터 찾아 해결 | [문제 해결](https://github.com/fox1245/NeoGraph/blob/master/docs/troubleshooting.md) |
+| C++ 예제 (검증 결과는 별도로 보고) | [examples/](https://github.com/fox1245/NeoGraph/tree/master/examples) |
+| Python의 타입 기반 provider 및 그래프 예제 | [bindings/python/examples/](https://github.com/fox1245/NeoGraph/tree/master/bindings/python/examples) |
+| 비동기 / 코루틴 내부 구조 | [ASYNC_GUIDE](https://github.com/fox1245/NeoGraph/blob/master/docs/ASYNC_GUIDE.md) |
 
 ## 최상위 헤더
 
-편의 헤더는 전체 Core + GraphEngine API를 포함합니다:
+편의 헤더 하나로 core 전체와 그래프 엔진 API를 모두 가져옵니다.
 
 ```cpp
 #include <neograph/neograph.h>
@@ -29,16 +29,16 @@ using namespace neograph;
 using namespace neograph::graph;
 ```
 
-하위 네임스페이스:
+하위 네임스페이스는 다음과 같습니다.
 
-- `neograph`           — 기반 타입(`Provider`, `Tool`, `ChatMessage`)
-- `neograph::graph`    — 엔진, 노드, 상태, 체크포인트
-- `neograph::llm` — `SchemaProvider`, `Agent`; typed SDK runtime
-- `neograph::mcp`      — Model Context Protocol 클라이언트
-- `neograph::async`    — 코루틴 + io_context 인프라
-- `neograph::util`     — 동시성 기본 요소
+- `neograph` — 기본 타입(`Provider`, `Tool`, `ChatMessage`)
+- `neograph::graph` — 엔진, 노드, 상태, 체크포인트 저장
+- `neograph::llm` — `SchemaProvider`, `Agent`, 타입 기반 SDK 런타임
+- `neograph::mcp` — Model Context Protocol 클라이언트
+- `neograph::async` — 코루틴과 io_context 기반 구조
+- `neograph::util` — 동시성 기본 요소
 
-## 첫 번째 프로그램
+## 첫 프로그램
 
 ```cpp
 #include <neograph/llm/schema_provider.h>
@@ -58,29 +58,21 @@ sp::runtime::Result first_call(
 }
 ```
 
-`SchemaProvider`는 승인된 `sp::descriptor::ValidatedDescriptor`, `sp::runtime::Options`, 선택적 `SchemaProvider::Defaults`를 받는다. descriptor는 closed/versioned 데이터 admission이지 요청/응답 interpreter나 임의 primitive registry가 아니다. credential은 공개 descriptor가 아니라 runtime options에 둔다. Defaults는 typed OpenRouter routing과 Responses 보관(`responses_store`)만 포함하고 후자는 Responses에만 유효하다. Hosted OpenRouter routing·retention·JSON 형식은 선언된 typed 제어다. Images, Veo, Decisions는 별도 NeoGraph typed client와 별도 승인을 쓰며 SDK chat grant를 물려받지 않는다.
+`SchemaProvider`는 승인(admission)된 `sp::descriptor::ValidatedDescriptor`, `sp::runtime::Options`, 선택 사항인 `SchemaProvider::Defaults`를 받습니다. descriptor를 불러오는 일은 닫힌 형식의 버전이 있는 데이터를 승인(admission)하는 과정이며, 요청/응답 인터프리터나 임의 primitive 레지스트리가 아닙니다. 자격 증명은 공개 descriptor 파일이 아니라 런타임 옵션에 넣어야 합니다. Defaults에는 타입이 있는 OpenRouter 라우팅과 Responses 보존(`responses_store`)만 들어가며, 후자는 Responses에서만 유효합니다. 호스팅되는 OpenRouter의 라우팅, 보존, JSON 형식은 계속 선언된 타입 제어 항목입니다. Images, Veo, Decisions는 NeoGraph의 별도 타입 클라이언트와 별도 권한을 사용하며, SDK chat grant를 물려받지 않습니다.
 
-공급자 호출은 `sp::runtime::Result`, 즉 `sp::Completion` 또는 `sp::Failure`를 담은 불변 소유 `std::shared_ptr<const sp::Outcome>`를 반환한다. 표시 텍스트만이 아니라 전체 결과를 보존한다. 순서 있는 메시지/파트, 보존된 native continuation과 family가 제공한 wire 증거, 순서 있는 raw 관측, 중단 근거와 실제 시도 메타데이터는 호출 및 클라이언트 소멸 후에도 남는다. 사용량은 근거·단계·품질을 갖는 nullable `uint64_t`이며 누락은 0이 아니라 미상이다. 실패도 원래의 부분 결과를 보존한다. `ProviderFailure::outcome()`과 `ProviderObserverError::outcome()`은 실제 결과를 보존하며 후자의 `cause()`에는 관측자 예외가 남는다.
+provider 호출은 `sp::runtime::Result`를 반환합니다. 이는 `sp::Completion` 또는 `sp::Failure`를 담은, 바뀌지 않고 소유권이 있는 `std::shared_ptr<const sp::Outcome>`입니다. 화면에 표시할 텍스트만 챙기지 말고 결과 전체를 보관해야 합니다. 순서가 있는 메시지/파트, 유지되는 네이티브 continuation과 계열이 제공한 wire 증거, 순서가 있는 원시 관찰값, stop 증거, 실제 시도 메타데이터는 호출이 끝나고 클라이언트가 소멸한 뒤에도 남습니다. 사용량 카운터는 증거, 단계, 품질을 가진 null 가능한 `uint64_t` 값입니다. 값이 없으면 알 수 없다는 뜻이며 0이 아닙니다. 실패한 경우에도 원래의 부분 결과가 보존됩니다. `ProviderFailure::outcome()`과 `ProviderObserverError::outcome()`이 그 결과를 돌려주고, 후자는 observer 예외도 `cause()`에 보존합니다.
 
-Wire 증거는 family가 제공하며 선택적이다. `sp::Completion::wire_envelope`는 null일 수 있다(Python의 `ProviderCompletion.wire_envelope`는 `None`). 현재 buffered Chat은 전체 응답 JSON을 `raw_events`의 `RawWire`에 보존한다. 이 관측은 `type == "chat.completion"`이고 문서는 `payload`에 있으며 `wire_envelope`는 null로 남는다. Family가 실제 보존한 위치에서 증거를 읽으며 fallback envelope를 만들어 넣지 않는다. Native continuation과 raw buffer는 보호된 증거로 유지되고 trace payload에서 제외된다.
+wire 증거는 계열이 제공하는 선택 사항입니다. `sp::Completion::wire_envelope`는 null일 수 있습니다(Python에서는 `ProviderCompletion.wire_envelope`가 `None`입니다). 버퍼링 방식 Chat은 현재 전체 응답 JSON을 `raw_events`에 `type == "chat.completion"`인 `RawWire`로 보관하며, 문서는 `payload`에 들어 있고 `wire_envelope`는 null로 둡니다. 증거는 계열이 보관하는 위치에서 읽어야 하며, 대체 envelope를 만들어 내지 않습니다. 네이티브 continuation과 raw 버퍼는 보호되는 증거로 남으며 트레이스 payload에서는 제외됩니다.
 
-소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. 릴리스 목표는 SDK `0.1.1` alpha, interface revision 4 / shared ABI 4이며 out-of-line capability check를 사용한다. Alpha는 안정 API 약속이 아니다. 기록된 interface-3 runtime/archive 검증은 Linux/POSIX 범위이며 interface 4나 Windows·macOS·WASM runtime 검증을 뜻하지 않는다.
+이 변경은 소스 호환과 바이너리 호환을 모두 깨뜨립니다. 모든 C++ 소비자와 사용자 정의 provider를 새 헤더·라이브러리에 맞춰 다시 컴파일해야 합니다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor 인터프리터, Responses WebSocket 경로는 제거되었고 별칭이나 호환용 브리지도 없습니다. 릴리스 대상은 SDK `0.1.1` 알파, 인터페이스 리비전 4 / 공유 ABI 4이며 기능 검사는 out-of-line으로 합니다. 알파는 안정 API를 약속하지 않습니다. 기록된 interface 3의 런타임/archive 자격 검증은 Linux/POSIX를 대상으로 했으며, interface 4나 Windows, macOS, WASM의 런타임 검증은 포함하지 않습니다.
 
-Python은 `SchemaProvider(ValidatedDescriptor, ProviderRuntimeOptions,
-SchemaProviderDefaults)`와 typed `ProviderMessage` part를 받는
-`make_provider_request`를 사용한다. `prepare`는 `PreparedProviderRequest`를
-반환하고 `dispatch`는 이를 한 번 소비한다. `invoke`는 요청을 준비하고
-dispatch한다. `ProviderOutcome`은 불변 completion/failure/partial view를
-보존하며 미상 사용량은 `None`이다. 그래프의 `ChatMessage`는 별도 편의 타입이지
-provider message alias가 아니다. Blocking provider 호출은 GIL을 해제하며
-Python async 호출자는 `asyncio.to_thread`를 사용할 수 있다.
-생성자, 오류, 제한은 [`Python binding guide`](python-binding.md)를 참고한다.
+Python에서는 `SchemaProvider(ValidatedDescriptor, ProviderRuntimeOptions, SchemaProviderDefaults)`와 `make_provider_request`를 쓰고, 메시지는 타입이 있는 `ProviderMessage` 파트로 만듭니다. `prepare`는 `PreparedProviderRequest`를 반환하고, `dispatch`는 이를 한 번만 소비합니다. `invoke`는 요청을 준비하고 dispatch까지 합니다. `ProviderOutcome`은 변경할 수 없는 completion/failure/partial 뷰를 보존하며, 알 수 없는 사용량은 `None`입니다. 그래프의 `ChatMessage`는 별도의 편의 타입이며 provider 메시지의 별칭이 아닙니다. 블로킹 provider 호출은 GIL을 놓습니다. Python 비동기 호출자는 `asyncio.to_thread`를 쓸 수 있습니다. 생성자, 오류, 제한 사항은 [Python 바인딩 가이드](python-binding.md)를 참고하세요.
 
+실제 결과가 나온 뒤 효과 후 회계(post-effect accounting)나 최종 receipt 저장에 실패하면, `ProviderDispatchOutcomePersistenceError`가 원래의 변경 불가능한 결과를 `outcome()`에, 원래의 저장 예외를 `cause()`에 보존합니다. 전달(delivery)도 실패했다면 `delivery_error()`가 원래의 observer 예외를 보존합니다. 저장은 성공했지만 그 뒤 observer가 실패하면 원래의 observer 예외를 그대로 다시 던집니다. 결과가 없거나 알 수 없는 전송 실패에서는 결과를 만들어 내지 않습니다.
 
-실제 결과 이후 post-effect 정산이나 terminal receipt 영속화가 실패하면 `ProviderDispatchOutcomePersistenceError`의 `outcome()`은 원래 불변 결과를, `cause()`는 원래 영속 예외를 보존한다. 전달도 실패했으면 `delivery_error()`가 원래 관측자 예외를 보존한다. 영속화 성공 뒤 관측자 실패는 원래 예외를 그대로 다시 던진다. 미상/결과 없는 transport 실패는 결과를 조작하지 않는다.
 ## 참조 색인
 
-사이드바의 클래스 목록, 파일 목록, 네임스페이스 목록은 `include/neograph/` 아래의 헤더에서 생성됩니다. [클래스 목록](annotated.html)이 가장 유용한 진입점입니다.
+사이드바의 클래스 목록, 파일 목록, 네임스페이스 목록은 `include/neograph/` 아래의 헤더에서 생성됩니다. [클래스 목록](annotated.html)이 가장 쓸모 있는 진입점입니다.
 
 ## 소스
 
