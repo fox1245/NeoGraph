@@ -16,6 +16,7 @@
 
 #ifdef NEOGRAPH_HAVE_GRPC
 
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
@@ -30,11 +31,14 @@ namespace grpc { class Service; }
 
 namespace neograph::grpc {
 
-/// name → fn(arguments_json) → result_json. Throwing from the fn
-/// surfaces in ToolCallResponse.error with its stable code in
-/// ToolCallResponse.error_code ("NG.TaskFailed", "NG.HookBlocked",
-/// "NG.Timeout", ...), not as a gRPC transport error; a cancellation is the
-/// CANCELLED status. See the reference, "Protocol failure mapping".
+/// name → fn(arguments_json) → result_json. A failure the fn throws is a
+/// tool error in the payload, like MCP's isError: ToolCallResponse.error holds
+/// its public message (never what()) and error_code its stable code
+/// ("NG.TaskFailed", "NG.Timeout", an author code, ...). A run control signal
+/// is a status instead: CANCELLED, or FAILED_PRECONDITION (DEADLINE_EXCEEDED
+/// for a timed-out Hook) with ErrorInfo NG.HookBlocked or NG.Interrupted. An
+/// unknown tool is NOT_FOUND, arguments that are not a JSON object
+/// INVALID_ARGUMENT. See the reference, "Protocol failure mapping".
 using ToolFn = std::function<std::string(const std::string&)>;
 
 /// Build the ToolService as a generated service base, so embedders can
@@ -57,9 +61,10 @@ NEOGRAPH_API void run_tool_server(
 /// The simple ToolService proto has no "list tools" RPC, so the
 /// definition (name / description / parameter schema the LLM sees) is
 /// supplied at construction. A non-empty ToolCallResponse.error from
-/// the server is rethrown as std::runtime_error (a tool error, not a
-/// transport error — same contract as run_tool_server's ToolFn); its
-/// error_code is not mapped back to a local control signal.
+/// the server, or a non-OK status, is rethrown as std::runtime_error naming
+/// the remote code (an ordinary tool failure; a remote run control code is
+/// not mapped back to a local control signal), and DEADLINE_EXCEEDED as a
+/// timed-out call.
 ///
 /// pimpl so this public header stays grpc++/protobuf-free for
 /// consumers (same posture as GrpcCheckpointStore).
@@ -81,6 +86,11 @@ public:
     asio::awaitable<std::string> execute_async(
         const neograph::json& arguments, neograph::ToolExecutionContext context) override;
     std::string get_name() const override;
+
+    /// Every call's deadline: this long from the call (60 s by default), and
+    /// no later than the run's deadline. The run's cancel token cancels the
+    /// RPC in flight. Throws std::invalid_argument for a non-positive value.
+    void set_call_timeout(std::chrono::milliseconds timeout);
 
 private:
     struct Impl;

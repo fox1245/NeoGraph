@@ -108,6 +108,12 @@ struct NodeFailureVerdict {
 NEOGRAPH_API NodeFailureVerdict classify_node_failure(const std::exception_ptr& error,
                                                       const graph::CancelToken* run_token) noexcept;
 
+/// The text a protocol peer may read for a failure: the verdict's
+/// public_message (typed safe sources only), or a fixed description of its
+/// class. Never what(): exception text can carry paths, payloads or secrets.
+/// Exported for the MCP and gRPC servers; no compatibility promise.
+NEOGRAPH_API std::string public_failure_message(const graph::FailureVerdict& verdict);
+
 /// The NodeExecutionError the node retry loop throws: it carries the
 /// NodeFailure record that graph::node_failure_of() returns. Not final, so
 /// std::throw_with_nested can still nest a secondary failure under it.

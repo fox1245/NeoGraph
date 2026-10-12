@@ -15,6 +15,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <atomic>
 #include <tuple>
 #include <vector>
 
@@ -247,9 +248,12 @@ TEST(MCPServerTest, ProtocolAndToolExecutionErrorsRemainDistinct) {
     auto thrown = captured.wait_for(32);
     ASSERT_TRUE(thrown.contains("result"));
     EXPECT_TRUE(thrown["result"]["isError"].get<bool>());
-    EXPECT_NE(thrown["result"]["content"][0]["text"]
+    // The public message and the stable code reach the client, never the
+    // exception text.
+    EXPECT_EQ(thrown["result"]["content"][0]["text"]
                   .get<std::string>().find("handler exploded"),
               std::string::npos);
+    EXPECT_EQ(thrown["result"]["_meta"]["io.neograph/failure"]["code"], "NG.TaskFailed");
 }
 
 TEST(MCPServerTest, OutputSchemaFailureBecomesToolError) {
@@ -367,12 +371,50 @@ TEST(MCPServerTest, StopCancelsRunningAndPendingCalls) {
     })).is_null());
 
     server.stop();
+    // A server-side cancellation is a server error, not a tool result.
     auto running = captured.wait_for(60);
     auto pending = captured.wait_for(61);
     ASSERT_TRUE(running.contains("error")) << running.dump();
     ASSERT_TRUE(pending.contains("error")) << pending.dump();
-    EXPECT_EQ(running["error"]["code"], -32800);
-    EXPECT_EQ(pending["error"]["code"], -32800);
+    EXPECT_EQ(running["error"]["code"], -32000);
+    EXPECT_EQ(pending["error"]["code"], -32000);
+    EXPECT_EQ(running["error"]["data"]["code"], "NG.Cancelled");
+}
+
+// MCP: the receiver of notifications/cancelled SHOULD NOT answer the request.
+// The stdio loop sends nothing for it (official clients report a response to
+// a cancelled id as an error), while a sink-driven transport such as HTTP
+// still ends the open request with -32800 (above).
+TEST(MCPServerTest, StdioSendsNoResponseForAClientCancelledCall) {
+    MCPServer server(config(1, 1));
+    std::atomic<bool> entered{false};
+    server.register_tool(echo_definition(),
+        [&entered](const json&, const auto& cancel) -> CallToolResult {
+            entered = true;
+            while (!cancel->is_cancelled()) std::this_thread::sleep_for(1ms);
+            cancel->throw_if_cancelled("inside test tool");
+            return CallToolResult{};
+        });
+    std::stringstream in;
+    in << request(1, "initialize", {{"protocolVersion", "2025-11-25"},
+                                    {"capabilities", json::object()},
+                                    {"clientInfo", {{"name", "c"}, {"version", "1"}}}}).dump()
+       << "\n" << notification("notifications/initialized").dump() << "\n"
+       << request("cancel-me", "tools/call",
+                  {{"name", "echo"}, {"arguments", {{"value", "x"}}}}).dump()
+       << "\n" << notification("notifications/cancelled", {{"requestId", "cancel-me"}}).dump()
+       << "\n";
+    std::stringstream out;
+    server.run(in, out);
+    std::string line;
+    int responses = 0;
+    while (std::getline(out, line)) {
+        if (line.empty()) continue;
+        const auto envelope = json::parse(line);
+        EXPECT_NE(envelope.value("id", json(nullptr)), json("cancel-me")) << line;
+        ++responses;
+    }
+    EXPECT_EQ(responses, 1) << "only initialize is answered";
 }
 
 // Each typed failure class a handler raises maps to a distinct, documented
@@ -420,7 +462,8 @@ TEST(MCPServerTest, TypedFailuresMapToDistinctResponses) {
         {"budget", "NG.BudgetExhausted", 0},
         {"hook", "NG.HookBlocked", -32010},
         {"interrupt", "NG.Interrupted", -32011},
-        {"cancelled", "NG.Cancelled", -32800},
+        // The handler's own cancellation is a server-side condition.
+        {"cancelled", "NG.Cancelled", -32603},
     };
     int id = 100;
     for (const auto& [kind, code, rpc] : table) {
@@ -457,7 +500,9 @@ TEST(MCPServerTest, IllFormedUtf8NeverEmptiesAResponse) {
     MCPServer server(config());
     server.set_response_sink(captured.sink());
     server.register_tool(echo_definition(), [](const json&, const auto&) -> CallToolResult {
-        throw std::runtime_error("bad \xff byte");
+        // The public message is the text a peer may read; even it crosses as
+        // well-formed UTF-8.
+        throw neograph::graph::NodeFailureError("app.bad_text", "bad \xff byte");
     });
     initialize(server);
     EXPECT_TRUE(server.handle_message(request(7, "tools/call", {

@@ -10,7 +10,7 @@
 #include <neograph/neograph.h>
 
 #include "neograph.grpc.pb.h"   // generated into ${build}/grpc_gen
-#include "../core/text_safety.h"
+#include "error_details.h"
 
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/server_builder.h>
@@ -48,41 +48,35 @@ public:
     ::grpc::Status RunGraph(::grpc::ServerContext* sctx,
                             const pb::RunGraphRequest* req,
                             pb::RunGraphResponse* resp) override {
+        // A malformed request is refused before admission and before any
+        // graph runs (INVALID_ARGUMENT, or FAILED_PRECONDITION without a
+        // graph to run).
+        Prepared prepared;
+        if (auto refused = prepare(*req, prepared)) {
+            resp->set_error(refused->message);
+            return refused->status();
+        }
         Admission admission(*this);
-        if (!admission.accepted())
-            return ::grpc::Status(::grpc::StatusCode::RESOURCE_EXHAUSTED,
-                                  "graph host in-flight limit reached");
+        if (!admission.accepted()) return at_capacity().status();
         std::shared_ptr<CancelToken> token;
         std::optional<CancelWatcher> watcher;
         try {
-            auto engine = get_engine(req->graph_def_json());
-            RunConfig cfg = build_config(*req);
             token = std::make_shared<CancelToken>();
-            cfg.cancel_token = token;
+            prepared.config.cancel_token = token;
             watcher.emplace(sctx, token);
 
             RunInvocationRequest request;
-            request.config = std::move(cfg);
-            RunInvocation invocation(engine, std::move(request));
+            request.config = std::move(prepared.config);
+            RunInvocation invocation(*prepared.engine, std::move(request));
             auto outcome = invocation.run();
             watcher->stop();
-            if (outcome.cancelled()) {
-                resp->set_error("cancelled");
-                resp->set_error_code("NG.Cancelled");
-                return ::grpc::Status(::grpc::StatusCode::CANCELLED,
-                                      "graph invocation cancelled");
-            }
             if (!outcome.succeeded() || !outcome.run_result) {
-                // The failure stays in the payload (the graph failed, gRPC
-                // did not), with its stable code (reference, "Protocol
-                // failure mapping").
-                resp->set_error(::neograph::detail::valid_utf8(outcome.error.empty()
-                                                       ? "graph invocation failed"
-                                                       : outcome.error));
-                resp->set_error_code(outcome.error_code.empty() ? "NG.UnknownFailure"
-                                                                : outcome.error_code);
-                resp->set_error_detail_json(outcome.error_detail.dump());
-                return ::grpc::Status::OK;
+                // A failure is a canonical status with ErrorInfo
+                // (reference, "Protocol failure mapping"). `error` is kept,
+                // with the public message only, for one release.
+                const auto failure = detail::wire_failure(failure_of(outcome));
+                resp->set_error(failure.message);
+                return failure.status();
             }
 
             const auto& r = *outcome.run_result;
@@ -94,15 +88,11 @@ public:
             resp->set_max_steps_exhausted(r.max_steps_exhausted());
             for (const auto& n : r.execution_trace)
                 resp->add_execution_trace(n);
-        } catch (const std::exception& e) {
+        } catch (...) {
             if (watcher) watcher->stop();
-            // Engine-side failure surfaces in the payload, not as a
-            // transport error — caller distinguishes "graph threw"
-            // from "gRPC broke".
-            const auto verdict = classify_failure(std::current_exception());
-            resp->set_error(::neograph::detail::valid_utf8(e.what()));
-            resp->set_error_code(verdict.code);
-            resp->set_error_detail_json("{}");
+            const auto failure = detail::wire_failure(classify_failure(std::current_exception()));
+            resp->set_error(failure.message);
+            return failure.status();
         }
         return ::grpc::Status::OK;
     }
@@ -111,20 +101,28 @@ public:
             ::grpc::ServerContext* sctx,
             const pb::RunGraphRequest* req,
             ::grpc::ServerWriter<pb::GraphEvent>* writer) override {
+        Prepared prepared;
+        if (auto refused = prepare(*req, prepared)) return refused->status();
         Admission admission(*this);
-        if (!admission.accepted())
-            return ::grpc::Status(::grpc::StatusCode::RESOURCE_EXHAUSTED,
-                                  "graph host in-flight limit reached");
+        if (!admission.accepted()) return at_capacity().status();
         std::shared_ptr<CancelToken> token;
         std::optional<CancelWatcher> watcher;
+        // A failed stream reports the failure as a DEBUG event (kept for one
+        // release) and then ends with the same status as a unary call.
+        const auto fail = [writer](const detail::WireFailure& failure) {
+            pb::GraphEvent err;
+            err.set_kind(pb::GraphEvent::DEBUG);
+            err.set_payload_json(neograph::json{{"error", failure.message},
+                                                {"code", failure.info.reason}}.dump());
+            writer->Write(err);
+            return failure.status();
+        };
         try {
-            auto engine = get_engine(req->graph_def_json());
-            RunConfig cfg = build_config(*req);
             token = std::make_shared<CancelToken>();
-            cfg.cancel_token = token;
+            prepared.config.cancel_token = token;
 
             RunInvocationRequest request;
-            request.config = std::move(cfg);
+            request.config = std::move(prepared.config);
             request.on_event = [writer, token](const GraphEvent& ev) {
                 pb::GraphEvent out;
                 out.set_node(ev.node_name);
@@ -148,26 +146,12 @@ public:
 
             watcher.emplace(sctx, token);
 
-            RunInvocation invocation(engine, std::move(request));
+            RunInvocation invocation(*prepared.engine, std::move(request));
             auto outcome = invocation.run();
             watcher->stop();
-            if (outcome.cancelled()) {
-                return ::grpc::Status(::grpc::StatusCode::CANCELLED,
-                                      "graph invocation cancelled");
-            }
-            if (!outcome.succeeded() || !outcome.run_result) {
-                pb::GraphEvent err;
-                err.set_kind(pb::GraphEvent::DEBUG);
-                err.set_payload_json(neograph::json{
-                    {"error", outcome.error.empty()
-                                  ? "graph invocation failed"
-                                  : outcome.error},
-                    {"code", outcome.error_code.empty() ? "NG.UnknownFailure"
-                                                        : outcome.error_code},
-                    {"detail", outcome.error_detail}}.dump());
-                writer->Write(err);
-                return ::grpc::Status::OK;
-            }
+            if (outcome.cancelled()) return detail::wire_failure(failure_of(outcome)).status();
+            if (!outcome.succeeded() || !outcome.run_result)
+                return fail(detail::wire_failure(failure_of(outcome)));
 
             const auto& r = *outcome.run_result;
             pb::GraphEvent fin;
@@ -176,6 +160,7 @@ public:
                 {"output",              r.output},
                 {"interrupted",         r.interrupted},
                 {"interrupt_node",      r.interrupt_node},
+                {"interrupt_value",     r.interrupt_value},
                 {"checkpoint_id",       r.checkpoint_id},
                 {"execution_trace",     r.execution_trace},
                 {"max_steps_exhausted", r.max_steps_exhausted()},
@@ -184,16 +169,9 @@ public:
             if (!writer->Write(fin))
                 return ::grpc::Status(::grpc::StatusCode::CANCELLED,
                                       "gRPC stream closed by client");
-        } catch (const std::exception& e) {
+        } catch (...) {
             if (watcher) watcher->stop();
-            const auto verdict = classify_failure(std::current_exception());
-            pb::GraphEvent err;
-            err.set_kind(pb::GraphEvent::DEBUG);
-            err.set_payload_json(
-                neograph::json{{"error", e.what()},
-                               {"code", verdict.code},
-                               {"detail", neograph::json::object()}}.dump());
-            writer->Write(err);
+            return fail(detail::wire_failure(classify_failure(std::current_exception())));
         }
         return ::grpc::Status::OK;
     }
@@ -246,15 +224,57 @@ private:
         GraphServiceImpl& owner_;
         bool accepted_ = false;
     };
-    RunConfig build_config(const pb::RunGraphRequest& req) {
+    struct Prepared {
+        std::optional<GraphExecution> engine;
+        RunConfig config;
+    };
+
+    static FailureVerdict failure_of(const InvocationResult& outcome) {
+        if (outcome.failure) return *outcome.failure;
+        FailureVerdict verdict;
+        verdict.failure_class = outcome.cancelled() ? NodeFailureClass::Cancelled
+                                                    : NodeFailureClass::Unknown;
+        verdict.code = node_failure_code(verdict.failure_class);
+        return verdict;
+    }
+
+    static detail::WireFailure at_capacity() {
+        return detail::request_failure(::grpc::StatusCode::RESOURCE_EXHAUSTED, "NG.Capacity",
+                                       "graph host in-flight limit reached");
+    }
+
+    // Validates the request and resolves its graph; a refusal on failure.
+    std::optional<detail::WireFailure> prepare(const pb::RunGraphRequest& req,
+                                               Prepared& prepared) {
+        const auto invalid = [](std::string message) {
+            return detail::request_failure(::grpc::StatusCode::INVALID_ARGUMENT,
+                                           "NG.InvalidRequest", std::move(message));
+        };
+        if (req.thread_id().empty()) return invalid("thread_id is required");
         RunConfig cfg;
         cfg.thread_id = req.thread_id();
-        if (!req.input_json().empty())
-            cfg.input = neograph::json::parse(req.input_json());
+        if (!req.input_json().empty()) {
+            try {
+                cfg.input = neograph::json::parse(req.input_json());
+            } catch (const std::exception&) {
+                return invalid("input_json is not valid JSON");
+            }
+            if (!cfg.input.is_object()) return invalid("input_json must be a JSON object");
+        }
         if (req.max_steps() > 0)
             cfg.max_steps = static_cast<int>(req.max_steps());
         cfg.resume_if_exists = req.resume_if_exists();
-        return cfg;
+        if (req.graph_def_json().empty() && default_def_.empty())
+            return detail::request_failure(::grpc::StatusCode::FAILED_PRECONDITION, "NG.NoGraph",
+                                           "graph_def_json is empty and no default graph is "
+                                           "configured on this service");
+        try {
+            prepared.engine.emplace(get_engine(req.graph_def_json()));
+        } catch (const std::exception&) {
+            return invalid("graph_def_json does not compile");
+        }
+        prepared.config = std::move(cfg);
+        return std::nullopt;
     }
 
     // Hash-keyed compile cache — the same multi-tenant pattern as the

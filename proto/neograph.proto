@@ -74,23 +74,16 @@ message RunGraphResponse {
   // Node names in execution order (debug aid for routing).
   repeated string execution_trace = 6;
 
-  // Set on engine-side failure instead of a transport error, so the
-  // caller distinguishes "graph threw" from "gRPC broke".
+  // Deprecated; kept for one release. A failed run is now a non-OK status
+  // (the class's canonical code, with a google.rpc.Status carrying an
+  // ErrorInfo whose reason is the stable NeoGraph code, such as
+  // "NG.HookBlocked"; see the reference, "Protocol failure mapping"). It holds
+  // the public message only, never exception text.
   string error = 7;
 
   // True when max_steps stopped execution while runnable work remained.
   // Added at a new field number to preserve protobuf wire compatibility.
   bool max_steps_exhausted = 8;
-
-  // Set with `error`: the failure's stable code ("NG.TaskFailed",
-  // "NG.HookBlocked", "NG.Timeout", "NG.ProviderFailed",
-  // "NG.BudgetExhausted", an author code, ...; "NG.Cancelled" with status
-  // CANCELLED). See the reference, "Protocol failure mapping".
-  string error_code = 9;
-
-  // Set with `error` for a Hook block ({"invocation_id", "state"}); "{}"
-  // otherwise.
-  string error_detail_json = 10;
 }
 
 message GraphEvent {
@@ -138,15 +131,14 @@ message ToolCallRequest {
 
 message ToolCallResponse {
   string result_json = 1;      // JSON result (== MCP result.content)
-  string error       = 2;      // non-empty → tool threw (not a transport error)
+  // Non-empty → the tool failed (like MCP isError): its public message,
+  // never exception text. A run control signal (cancellation, a Hook block,
+  // an interrupt), an unknown tool and malformed arguments are non-OK
+  // statuses instead; see the reference, "Protocol failure mapping".
+  string error       = 2;
   // Set with `error`: the failure's stable code ("NG.TaskFailed",
-  // "NG.HookBlocked", "NG.Interrupted", "NG.Timeout", "NG.ToolNotFound", ...).
-  // A cancelled call is status CANCELLED instead. See the reference,
-  // "Protocol failure mapping".
+  // "NG.Timeout", "NG.ProviderFailed", an author code, ...).
   string error_code  = 3;
-  // Set with `error` for a Hook block ({"invocation_id", "state"}) or an
-  // interrupt ({"reason", "value"}); "{}" otherwise.
-  string error_detail_json = 4;
 }
 
 // ── CheckpointService ────────────────────────────────────────────────

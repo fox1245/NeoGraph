@@ -713,4 +713,11 @@ TEST(MCPStdioAsync, DispatchBoundsAnInFlightToolCall) {
     ASSERT_EQ(later.size(), 1u);
     ASSERT_EQ(later[0].tool_status, "succeeded") << later[0].content;
     EXPECT_EQ(json::parse(later[0].content).at("args").at("marker"), "next");
+
+    // Every call the client abandoned after sending it was announced with
+    // notifications/cancelled: the controller's, one per dispatch (the
+    // batch's second call never left its queue) and the timed-out one.
+    const auto cancellations = client.call_tool_result("cancellations", json::object());
+    const auto ids = json::parse(cancellations.content.at(0).at("text").get<std::string>());
+    EXPECT_EQ(ids.size(), 4u) << ids.dump();
 }

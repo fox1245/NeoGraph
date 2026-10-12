@@ -111,6 +111,27 @@ ToolExecutionResult ordinary_tool_failure(const ToolExecutionPolicy& policy, boo
         {}, std::move(error), false, uncertain};
 }
 
+std::string public_failure_message(const graph::FailureVerdict& verdict) {
+    if (!verdict.public_message.empty()) return valid_utf8(verdict.public_message);
+    switch (verdict.failure_class) {
+    case graph::NodeFailureClass::Ordinary: return "the operation failed";
+    case graph::NodeFailureClass::Timeout: return "the operation timed out";
+    case graph::NodeFailureClass::ProviderFailed: return "a model provider call failed";
+    case graph::NodeFailureClass::EffectCommitted:
+        return "the operation failed after committing an effect";
+    case graph::NodeFailureClass::LogicError: return "internal error";
+    case graph::NodeFailureClass::ConfigError: return "the request or configuration is invalid";
+    case graph::NodeFailureClass::SafetyBlocked: return "a provider safety filter stopped the run";
+    case graph::NodeFailureClass::BudgetExhausted: return "a budget was exhausted";
+    case graph::NodeFailureClass::EffectUncertain: return "the outcome of an effect is unknown";
+    case graph::NodeFailureClass::Unknown: return "unknown failure";
+    case graph::NodeFailureClass::Interrupted: return "the run needs input";
+    case graph::NodeFailureClass::HookBlocked: return "a lifecycle Hook blocked the operation";
+    case graph::NodeFailureClass::Cancelled: return "cancelled";
+    }
+    return "unknown failure";
+}
+
 namespace {
 
 using graph::NodeFailureClass;

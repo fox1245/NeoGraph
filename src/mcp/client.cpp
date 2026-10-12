@@ -184,6 +184,20 @@ asio::awaitable<json> notification_result(asio::awaitable<void> operation) {
     co_await std::move(operation);
     co_return json();
 }
+
+// A notification nobody waits for: its failure changes nothing.
+asio::awaitable<void> best_effort(asio::awaitable<void> operation) {
+    try {
+        co_await std::move(operation);
+    } catch (...) {
+    }
+}
+
+json cancelled_notification(int request_id, std::string reason) {
+    return json{{"jsonrpc", "2.0"},
+                {"method", "notifications/cancelled"},
+                {"params", {{"requestId", request_id}, {"reason", std::move(reason)}}}};
+}
 } // namespace
 
 // HTTP and subprocess transports implement the same frame exchange contract.
@@ -286,6 +300,10 @@ public:
         json request, std::chrono::steady_clock::time_point deadline,
         std::shared_ptr<graph::CancelToken> cancel_token) = 0;
     virtual asio::awaitable<void> notify(json notification) = 0;
+    /// Tell the server that request `id` is abandoned (MCP
+    /// notifications/cancelled), without making the caller wait: the
+    /// notification goes out on the transport's own worker, best effort.
+    virtual void cancel_request(int /*id*/, std::string /*reason*/) noexcept {}
     virtual void negotiated_version(const std::string&) {}
     virtual void reset() {}
     virtual void shutdown() noexcept = 0;
@@ -327,6 +345,17 @@ public:
     ~HttpSession() override { shutdown(); }
     void shutdown() noexcept override {
         worker.shutdown([this] { shutdown_token->cancel(); });
+    }
+    void cancel_request(int id, std::string reason) noexcept override {
+        try {
+            worker.start([this, notification = cancelled_notification(id, std::move(reason))]()
+                             mutable {
+                asio::co_spawn(worker.io, best_effort(do_notify(std::move(notification))),
+                               asio::detached);
+            });
+        } catch (...) {
+            // A shut-down client has nobody left to tell.
+        }
     }
     TransportWorker worker;
     std::shared_ptr<graph::CancelToken> shutdown_token =
@@ -419,6 +448,7 @@ public:
         json request, std::chrono::steady_clock::time_point deadline,
         std::shared_ptr<graph::CancelToken> cancel_token) override;
     asio::awaitable<void> notify(json notification) override;
+    void cancel_request(int id, std::string reason) noexcept override;
 
     void shutdown() noexcept override;
     void reset() override { if (hardened_) shutdown(); }
@@ -1376,6 +1406,21 @@ asio::awaitable<void> StdioSession::notify(json notification) {
     }
 }
 
+void StdioSession::cancel_request(int id, std::string reason) noexcept {
+    try {
+        worker_.start([this, notification = cancelled_notification(id, std::move(reason))]()
+                          mutable {
+            // The handles and the write lock exist once a request was sent.
+            if (!async_lock_ || !async_in_) return;
+            asio::co_spawn(worker_.io, best_effort(do_notify(std::move(notification))),
+                           asio::detached);
+        });
+    } catch (...) {
+        // A shut-down session (a hardened one ends at cancellation) has
+        // nobody left to tell.
+    }
+}
+
 asio::awaitable<void> StdioSession::do_notify(json notification) {
     check_open();
     // initialize's request created the handles and write semaphore. Notifications
@@ -1671,8 +1716,21 @@ asio::awaitable<json> detail::ProtocolSession::rpc_call_async(
     json request{{"jsonrpc", "2.0"}, {"id", id},
                  {"method", method}, {"params", params}};
     auto transport = transport_;
-    auto response = co_await transport->exchange(
-        std::move(request), deadline, std::move(cancel_token));
+    json response;
+    try {
+        response = co_await transport->exchange(
+            std::move(request), deadline, std::move(cancel_token));
+    } catch (const MCPTransportError& error) {
+        // A request this client stops waiting for is abandoned: MCP asks the
+        // client to tell the server (never for initialize), and its late
+        // response is dropped.
+        if (method != "initialize" && (error.failure() == MCPFailure::cancelled ||
+                                       error.failure() == MCPFailure::timeout))
+            transport->cancel_request(id, error.failure() == MCPFailure::cancelled
+                                              ? "cancelled by the caller"
+                                              : "request timed out");
+        throw;
+    }
     if (stopped_.load()) throw_shutdown();
     try {
         co_return extract_rpc_result(response, id);

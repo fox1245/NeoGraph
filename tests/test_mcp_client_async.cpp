@@ -955,9 +955,11 @@ TEST(MCPClientAsync, ShutdownFromTransportCallbackDoesNotSelfJoinOrSend) {
 // answers a later call.
 TEST(MCPClientAsync, DispatchBoundsAnInFlightHttpToolCall) {
     httplib::Server svr;
+    std::atomic<int> cancellations{0};
     svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
         auto request = json::parse(req.body);
         auto method = request.value("method", "");
+        if (method == "notifications/cancelled") ++cancellations;
         if (method == "notifications/initialized" || method == "notifications/cancelled") {
             res.status = 202;
             return;
@@ -1033,4 +1035,8 @@ TEST(MCPClientAsync, DispatchBoundsAnInFlightHttpToolCall) {
         dispatch_tool_calls({{"c3", "echo", R"({"marker":"next"})"}}, {&echo}, {}, {}, plain));
     ASSERT_EQ(later.size(), 1u);
     EXPECT_EQ(later[0].content, "next");
+    // Each abandoned call (cancelled twice, timed out once) told the server.
+    for (int i = 0; i < 200 && cancellations.load() < 3; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_EQ(cancellations.load(), 3);
 }

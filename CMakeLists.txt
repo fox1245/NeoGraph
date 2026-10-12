@@ -1111,6 +1111,7 @@ if(NEOGRAPH_BUILD_GRPC)
     add_library(neograph_grpc
         "${_ng_grpc_gen}/neograph.pb.cc"
         "${_ng_grpc_gen}/neograph.grpc.pb.cc"
+        src/grpc/error_details.cpp
         src/grpc/graph_service.cpp
         src/grpc/grpc_checkpoint.cpp
         src/grpc/tool_service.cpp

@@ -14,6 +14,7 @@
 #include <neograph/json.h>
 
 #include "neograph.grpc.pb.h"
+#include "error_details.h"
 #include "../core/canonical_json.h"
 #include "../core/managed_budget_journal.h"
 
@@ -209,11 +210,22 @@ template<class Operation>
         return ::grpc::Status::OK;
     } catch (const std::invalid_argument& error) {
         return ::grpc::Status(::grpc::StatusCode::FAILED_PRECONDITION, error.what());
-    } catch (const std::exception& error) {
-        return ::grpc::Status(::grpc::StatusCode::INTERNAL, error.what());
     } catch (...) {
+        // Backend exception text never crosses the wire.
         return ::grpc::Status(::grpc::StatusCode::INTERNAL, "Managed-budget backend failure");
     }
+}
+
+::grpc::Status invalid_request(std::string message) {
+    return detail::request_failure(::grpc::StatusCode::INVALID_ARGUMENT, "NG.InvalidRequest",
+                                   std::move(message))
+        .status();
+}
+
+::grpc::Status backend_failure() {
+    return detail::request_failure(::grpc::StatusCode::UNAVAILABLE, "NG.BackendUnavailable",
+                                   "checkpoint backend failed")
+        .status();
 }
 
 }  // namespace
@@ -224,6 +236,14 @@ struct GrpcCheckpointStore::Impl {
     std::shared_ptr<::grpc::Channel> channel;
     std::unique_ptr<pb::CheckpointService::Stub> stub;
     std::shared_ptr<sp::NativeArchive> native_archive;
+    std::chrono::milliseconds rpc_timeout{std::chrono::seconds(30)};
+
+    // Every RPC has a deadline, so a stalled server cannot hold a run.
+    void bound(::grpc::ClientContext& context) const {
+        context.set_deadline(std::chrono::system_clock::now() +
+                             std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                                 rpc_timeout));
+    }
 };
 
 GrpcCheckpointStore::GrpcCheckpointStore(const std::string& target)
@@ -245,6 +265,7 @@ void GrpcCheckpointStore::save(const Checkpoint& cp) {
     to_blob(cp, req.mutable_checkpoint());
     pb::StatusResponse resp;
     ::grpc::ClientContext ctx;
+    impl_->bound(ctx);
     auto st = impl_->stub->SaveCheckpoint(&ctx, req, &resp);
     if (!st.ok())
         throw std::runtime_error("SaveCheckpoint RPC failed: "
@@ -260,6 +281,7 @@ GrpcCheckpointStore::load_latest(const std::string& thread_id) {
     req.set_thread_id(thread_id);
     pb::CheckpointResponse resp;
     ::grpc::ClientContext ctx;
+    impl_->bound(ctx);
     auto st = impl_->stub->LoadLatestCheckpoint(&ctx, req, &resp);
     if (!st.ok())
         throw std::runtime_error("LoadLatestCheckpoint RPC failed: "
@@ -274,6 +296,7 @@ GrpcCheckpointStore::load_by_id(const std::string& id) {
     req.set_id(id);
     pb::CheckpointResponse resp;
     ::grpc::ClientContext ctx;
+    impl_->bound(ctx);
     auto st = impl_->stub->LoadCheckpointById(&ctx, req, &resp);
     if (!st.ok())
         throw std::runtime_error("LoadCheckpointById RPC failed: "
@@ -289,6 +312,7 @@ GrpcCheckpointStore::list(const std::string& thread_id, int limit) {
     req.set_limit(limit);
     pb::ListCheckpointsResponse resp;
     ::grpc::ClientContext ctx;
+    impl_->bound(ctx);
     auto st = impl_->stub->ListCheckpoints(&ctx, req, &resp);
     if (!st.ok())
         throw std::runtime_error("ListCheckpoints RPC failed: "
@@ -304,10 +328,20 @@ void GrpcCheckpointStore::delete_thread(const std::string& thread_id) {
     req.set_thread_id(thread_id);
     pb::StatusResponse resp;
     ::grpc::ClientContext ctx;
+    impl_->bound(ctx);
     auto st = impl_->stub->DeleteThreadCheckpoints(&ctx, req, &resp);
     if (!st.ok())
         throw std::runtime_error("DeleteThreadCheckpoints RPC failed: "
                                  + st.error_message());
+    // A server that reports the failure in the payload has not deleted.
+    if (!resp.ok())
+        throw std::runtime_error("DeleteThreadCheckpoints engine error: " + resp.error());
+}
+
+void GrpcCheckpointStore::set_rpc_timeout(std::chrono::milliseconds timeout) {
+    if (timeout <= std::chrono::milliseconds::zero())
+        throw std::invalid_argument("GrpcCheckpointStore RPC timeout must be positive");
+    impl_->rpc_timeout = timeout;
 }
 
 bool GrpcCheckpointStore::requires_managed_budget(const std::string& thread_id) {
@@ -315,6 +349,7 @@ bool GrpcCheckpointStore::requires_managed_budget(const std::string& thread_id) 
     req.set_thread_id(thread_id);
     pb::RequiresManagedBudgetResponse resp;
     ::grpc::ClientContext ctx;
+    impl_->bound(ctx);
     auto st = impl_->stub->RequiresManagedBudget(&ctx, req, &resp);
     if (!st.ok())
         throw std::runtime_error("RequiresManagedBudget RPC failed: "
@@ -333,6 +368,7 @@ std::shared_ptr<OwnedManagedBudgetLease> GrpcCheckpointStore::acquire_managed_bu
     request.set_expected_checkpoint_commitment(expected_checkpoint_commitment);
     pb::ManagedBudgetLeaseResponse response;
     ::grpc::ClientContext context;
+    impl_->bound(context);
     require_rpc_success(impl_->stub->AcquireManagedBudgetLease(&context, request, &response),
                         "AcquireManagedBudgetLease");
     auto lease = ManagedBudgetJournalAccess::lease_from_transport(
@@ -369,6 +405,7 @@ ManagedBudgetEffectReceipt GrpcCheckpointStore::begin_managed_budget_effect(
     request.set_prepared_request_digest(prepared_request_digest);
     pb::ManagedBudgetEffectResponse response;
     ::grpc::ClientContext context;
+    impl_->bound(context);
     require_rpc_success(impl_->stub->BeginManagedBudgetEffect(&context, request, &response),
                         "BeginManagedBudgetEffect");
     auto effect = ManagedBudgetJournalAccess::effect_from_transport(
@@ -400,6 +437,7 @@ void GrpcCheckpointStore::settle_managed_budget_effect(
         *genuine_outcome, impl_->native_archive, binding).dump());
     pb::ManagedBudgetLeaseResponse response;
     ::grpc::ClientContext context;
+    impl_->bound(context);
     require_rpc_success(impl_->stub->SettleManagedBudgetEffect(&context, request, &response),
                         "SettleManagedBudgetEffect");
     ManagedBudgetJournalAccess::refresh_transport(
@@ -414,6 +452,7 @@ void GrpcCheckpointStore::publish_managed_budget_checkpoint(
     to_blob(checkpoint, request.mutable_checkpoint());
     pb::ManagedBudgetLeaseResponse response;
     ::grpc::ClientContext context;
+    impl_->bound(context);
     require_rpc_success(impl_->stub->PublishManagedBudgetCheckpoint(&context, request, &response),
                         "PublishManagedBudgetCheckpoint");
     ManagedBudgetJournalAccess::refresh_transport(
@@ -426,6 +465,7 @@ void GrpcCheckpointStore::release_managed_budget_lease(
     request.set_lease_json(ManagedBudgetJournalAccess::lease_transport(lease).dump());
     pb::ManagedBudgetLeaseResponse response;
     ::grpc::ClientContext context;
+    impl_->bound(context);
     require_rpc_success(impl_->stub->ReleaseManagedBudgetLease(&context, request, &response),
                         "ReleaseManagedBudgetLease");
     ManagedBudgetJournalAccess::refresh_transport(
@@ -449,27 +489,43 @@ public:
             ::grpc::ServerContext*,
             const pb::SaveCheckpointRequest* req,
             pb::StatusResponse* resp) override {
+        // A malformed record is INVALID_ARGUMENT; a backend failure is a
+        // status too, never an OK response (reference, "Protocol failure
+        // mapping"). No backend exception text crosses the wire.
+        if (!req->has_checkpoint())
+            return invalid_request("SaveCheckpoint requires a checkpoint");
+        Checkpoint checkpoint;
         try {
-            backend_->save(checkpoint_from_json(
-                req->checkpoint().checkpoint_json()));
-            resp->set_ok(true);
-        } catch (const std::exception& e) {
-            resp->set_ok(false);
-            resp->set_error(e.what());
+            checkpoint = checkpoint_from_json(req->checkpoint().checkpoint_json());
+        } catch (const std::exception&) {
+            return invalid_request("checkpoint_json is not a valid checkpoint");
         }
-        return ::grpc::Status::OK;
+        if (checkpoint.id.empty() || checkpoint.thread_id.empty())
+            return invalid_request("checkpoint requires an id and a thread_id");
+        if (req->checkpoint().id() != checkpoint.id ||
+            req->checkpoint().thread_id() != checkpoint.thread_id)
+            return invalid_request("indexed id and thread_id must equal the checkpoint's");
+        try {
+            backend_->save(checkpoint);
+            resp->set_ok(true);
+            return ::grpc::Status::OK;
+        } catch (...) {
+            return backend_failure();
+        }
     }
 
     ::grpc::Status LoadLatestCheckpoint(
             ::grpc::ServerContext*,
             const pb::LoadLatestRequest* req,
             pb::CheckpointResponse* resp) override {
+        // A backend outage is a status, not "no checkpoint": a resumed run
+        // must not silently start over.
         try {
             auto cp = backend_->load_latest(req->thread_id());
             if (cp) { resp->set_found(true);
                       to_blob(*cp, resp->mutable_checkpoint()); }
             else      resp->set_found(false);
-        } catch (const std::exception&) { resp->set_found(false); }
+        } catch (...) { return backend_failure(); }
         return ::grpc::Status::OK;
     }
 
@@ -482,7 +538,7 @@ public:
             if (cp) { resp->set_found(true);
                       to_blob(*cp, resp->mutable_checkpoint()); }
             else      resp->set_found(false);
-        } catch (const std::exception&) { resp->set_found(false); }
+        } catch (...) { return backend_failure(); }
         return ::grpc::Status::OK;
     }
 
@@ -494,7 +550,7 @@ public:
             int limit = req->limit() > 0 ? req->limit() : 100;
             for (const auto& cp : backend_->list(req->thread_id(), limit))
                 to_blob(cp, resp->add_checkpoints());
-        } catch (const std::exception&) { /* empty list on error */ }
+        } catch (...) { return backend_failure(); }
         return ::grpc::Status::OK;
     }
 
@@ -505,9 +561,8 @@ public:
         try {
             backend_->delete_thread(req->thread_id());
             resp->set_ok(true);
-        } catch (const std::exception& e) {
-            resp->set_ok(false);
-            resp->set_error(e.what());
+        } catch (...) {
+            return backend_failure();
         }
         return ::grpc::Status::OK;
     }
@@ -519,11 +574,8 @@ public:
         try {
             resp->set_required(backend_->requires_managed_budget(req->thread_id()));
             return ::grpc::Status::OK;
-        } catch (const std::exception& e) {
-            return ::grpc::Status(::grpc::StatusCode::INTERNAL, e.what());
         } catch (...) {
-            return ::grpc::Status(::grpc::StatusCode::INTERNAL,
-                                  "RequiresManagedBudget backend failure");
+            return backend_failure();
         }
     }
 
@@ -618,6 +670,11 @@ private:
 };
 
 }  // namespace
+
+std::unique_ptr<::grpc::Service> make_checkpoint_service(
+    std::shared_ptr<CheckpointStore> backend, std::shared_ptr<sp::NativeArchive> native_archive) {
+    return std::make_unique<CheckpointServiceImpl>(std::move(backend), std::move(native_archive));
+}
 
 void run_checkpoint_server(const std::string& address,
                            std::shared_ptr<CheckpointStore> backend) {

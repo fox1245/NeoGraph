@@ -3,6 +3,8 @@
 #include <neograph/graph/types.h>
 #include <neograph/hook_outbox.h>
 
+#include "../core/tool_failure.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -38,62 +40,55 @@ CallToolResult tool_error(std::string message) {
 
 // JSON-RPC error codes of the run control signals (reference, "Protocol
 // failure mapping"). They never become a tool result a model could read.
-constexpr int kRequestCancelled = -32800;  // the LSP RequestCancelled code
+constexpr int kRequestCancelled = -32800;  // the LSP and MCP SDK RequestCancelled code
+constexpr int kServerError      = -32000;
+constexpr int kInternalError    = -32603;
 constexpr int kHookBlocked      = -32010;
 constexpr int kInterrupted      = -32011;
 
-std::string what_of(const std::exception_ptr& error) {
-    try {
-        std::rethrow_exception(error);
-    } catch (const std::exception& failure) {
-        return failure.what();
-    } catch (...) {
-        return "unknown exception";
-    }
-}
-
-// The response to a tools/call whose handler failed: run control signals are
-// JSON-RPC errors with distinct codes, and every other failure is a tool
-// result with isError and its stable code in
-// `_meta["io.neograph/failure"]`.
+// The response to a tools/call whose handler failed. Run control signals are
+// JSON-RPC errors with distinct codes; every other failure is a tool result
+// with isError and its stable code in `_meta["io.neograph/failure"]`. Only the
+// public message crosses the wire, never what(): exception text can carry
+// paths, payloads or secrets.
 json failure_response(const std::exception_ptr& error, const graph::CancelToken& cancel,
-                      const json& id) {
+                      bool client_cancelled, bool stopping, const json& id) {
     auto verdict = graph::classify_failure(error, &cancel);
-    // A call cancelled by notifications/cancelled or stop() is cancelled,
-    // whatever its handler raised on the way out.
-    if (cancel.is_cancelled()) verdict.failure_class = graph::NodeFailureClass::Cancelled;
-    switch (verdict.failure_class) {
-    case graph::NodeFailureClass::Cancelled:
+    if (client_cancelled)
         return rpc_error(kRequestCancelled, "Request cancelled", id,
                          {{"code", "NG.Cancelled"}});
+    if (stopping && cancel.is_cancelled())
+        return rpc_error(kServerError, "MCP server is stopping", id, {{"code", "NG.Cancelled"}});
+    const auto message = ::neograph::detail::public_failure_message(verdict);
+    switch (verdict.failure_class) {
+    case graph::NodeFailureClass::Cancelled:
+        // The handler's own work was cancelled: a server-side condition.
+        return rpc_error(kInternalError, message, id, {{"code", verdict.code}});
     case graph::NodeFailureClass::HookBlocked: {
-        json data{{"code", "NG.HookBlocked"}};
-        std::string message = "lifecycle hook blocked the tool call";
+        json data{{"code", verdict.code}};
         try {
             if (verdict.signal) std::rethrow_exception(verdict.signal);
         } catch (const HookBoundaryBlocked& blocked) {
             data["invocation_id"] = blocked.invocation_id();
             data["state"] = std::string(to_string(blocked.state()));
-            message = blocked.what();
         } catch (...) {
         }
-        return rpc_error(kHookBlocked, std::move(message), id, std::move(data));
+        return rpc_error(kHookBlocked, message, id, std::move(data));
     }
     case graph::NodeFailureClass::Interrupted: {
-        json data{{"code", "NG.Interrupted"}};
-        std::string message = "the tool call needs a human";
+        json data{{"code", verdict.code}};
         try {
             if (verdict.signal) std::rethrow_exception(verdict.signal);
         } catch (const graph::NodeInterrupt& interrupt) {
+            // What the interrupt's author meant a human to read.
             data["reason"] = interrupt.reason();
             data["value"] = interrupt.value();
-            message = interrupt.reason();
         } catch (...) {
         }
-        return rpc_error(kInterrupted, std::move(message), id, std::move(data));
+        return rpc_error(kInterrupted, message, id, std::move(data));
     }
     default: {
-        auto result = tool_error("Tool execution failed: " + what_of(error));
+        auto result = tool_error(message);
         result.meta = json{{"io.neograph/failure",
                             {{"code", verdict.code}, {"retryable", verdict.retryable}}}};
         return rpc_result(result.to_json(), id);
@@ -134,6 +129,8 @@ struct MCPServer::Impl {
         json                                meta;
         RegisteredTool tool;
         std::shared_ptr<graph::CancelToken> cancel;
+        /// Set by notifications/cancelled before the token is cancelled.
+        std::atomic<bool> client_cancelled{false};
     };
 
     explicit Impl(MCPServerConfig value) : config(std::move(value)) {}
@@ -143,6 +140,10 @@ struct MCPServer::Impl {
     std::atomic<bool> operational{false};
     std::atomic<bool> running{false};
     std::atomic<bool> stopping{false};
+    /// The stdio run loop answers nothing for a request the client cancelled
+    /// (MCP: the receiver SHOULD NOT respond). A sink-driven transport (HTTP)
+    /// still gets -32800, so the open request ends.
+    std::atomic<bool> silent_client_cancellation{false};
 
     std::mutex tools_mu;
     std::map<std::string, RegisteredTool> tools;
@@ -210,13 +211,28 @@ struct MCPServer::Impl {
                     auto result = task->tool.handler(task->arguments, task->cancel);
                     result      = CallToolResult::from_json(result.to_json());
                     if (!result.is_error && !task->tool.definition.output_schema.is_null()) {
+                        // A result that breaks the tool's own outputSchema is
+                        // a tool error the client may read: the validator's
+                        // diagnostic names the schema path, not handler text.
+                        std::string problem;
                         if (result.structured_content.is_null()) {
-                            throw std::invalid_argument(
-                                "tool advertised outputSchema but returned no structuredContent");
+                            problem = "tool advertised outputSchema but returned no "
+                                      "structuredContent";
+                        } else {
+                            try {
+                                validate_json_value(result.structured_content,
+                                                    task->tool.definition.output_schema,
+                                                    "MCP tool structuredContent", "$");
+                            } catch (const std::invalid_argument& error) {
+                                problem = error.what();
+                            }
                         }
-                        validate_json_value(result.structured_content,
-                                            task->tool.definition.output_schema,
-                                            "MCP tool structuredContent", "$");
+                        if (!problem.empty()) {
+                            result = tool_error("Tool result does not match its outputSchema: " +
+                                                problem);
+                            result.meta = json{{"io.neograph/failure",
+                                                {{"code", "NG.LogicError"}, {"retryable", false}}}};
+                        }
                     }
                     result_json = result.to_json();
                 }
@@ -229,7 +245,12 @@ struct MCPServer::Impl {
                 std::lock_guard lk(calls_mu);
                 active.erase(task->key);
             }
-            emit(failure ? failure_response(failure, *task->cancel, task->id)
+            const bool client_cancelled = task->client_cancelled.load(std::memory_order_acquire);
+            if (failure && client_cancelled &&
+                silent_client_cancellation.load(std::memory_order_acquire))
+                continue;
+            emit(failure ? failure_response(failure, *task->cancel, client_cancelled,
+                                            stopping.load(std::memory_order_acquire), task->id)
                          : rpc_result(std::move(result_json), task->id));
         }
     }
@@ -351,7 +372,10 @@ struct MCPServer::Impl {
             auto it = active.find(request_key(params["requestId"]));
             if (it != active.end()) task = it->second;
         }
-        if (task) task->cancel->cancel();
+        if (task) {
+            task->client_cancelled.store(true, std::memory_order_release);
+            task->cancel->cancel();
+        }
     }
 };
 
@@ -485,8 +509,9 @@ json MCPServer::handle_message(const json& envelope) {
             return rpc_result(extension_handler(params, context), id);
         } catch (const std::invalid_argument& error) {
             return rpc_error(-32602, error.what(), id);
-        } catch (const std::exception& error) {
-            return rpc_error(-32603, error.what(), id);
+        } catch (...) {
+            // Exception text never crosses the wire (MCP-S-20).
+            return rpc_error(-32603, "Internal error", id);
         }
     }
     return rpc_error(-32601, "Method not found: " + method, id);
@@ -497,6 +522,7 @@ void MCPServer::run(std::istream& in, std::ostream& out) {
         throw std::logic_error("MCP server run loop is already active");
     }
     std::mutex output_mu;
+    impl_->silent_client_cancellation.store(true, std::memory_order_release);
     set_response_sink([&out, &output_mu](const json& response) {
         std::lock_guard lk(output_mu);
         out << response.dump() << '\n';

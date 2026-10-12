@@ -1,7 +1,6 @@
 #include <neograph/graph/invocation.h>
 
 #include <neograph/async/run_sync.h>
-#include <neograph/hook_outbox.h>
 
 #include <exception>
 #include <stdexcept>
@@ -61,8 +60,11 @@ InvocationResult RunInvocation::failure(std::string message) const {
         ? InvocationStatus::Cancelled
         : InvocationStatus::Error;
     result.error = std::move(message);
-    result.error_code = result.status == InvocationStatus::Cancelled ? "NG.Cancelled"
-                                                                      : "NG.LogicError";
+    FailureVerdict verdict;
+    verdict.failure_class = result.status == InvocationStatus::Cancelled
+        ? NodeFailureClass::Cancelled : NodeFailureClass::LogicError;
+    verdict.code = node_failure_code(verdict.failure_class);
+    result.failure = std::move(verdict);
     return result;
 }
 
@@ -82,12 +84,17 @@ InvocationResult RunInvocation::classify(RunResult result) {
         case RunStatus::SafePoint:
             outcome.status = InvocationStatus::SafePoint;
             break;
-        case RunStatus::BarrierStalled:
+        case RunStatus::BarrierStalled: {
             outcome.status = InvocationStatus::Error;
             outcome.error  = "graph stopped at a barrier that can no longer fire, "
                              "without reaching __end__";
-            outcome.error_code = "NG.BarrierStalled";
+            FailureVerdict verdict;
+            verdict.failure_class = NodeFailureClass::LogicError;
+            verdict.code = "NG.BarrierStalled";
+            verdict.public_message = "the graph stopped at a barrier that can no longer fire";
+            outcome.failure = std::move(verdict);
             break;
+        }
         case RunStatus::FailureExit: {
             // #364: a failure-exit node completed; the run ended as failed.
             const json& output = outcome.run_result->output;
@@ -95,7 +102,12 @@ InvocationResult RunInvocation::classify(RunResult result) {
             outcome.status = InvocationStatus::Error;
             outcome.error  = "graph ended at failure exit '" + exit.value("node", std::string()) +
                              "' with code " + exit.value("code", std::string());
-            outcome.error_code = exit.value("code", std::string());
+            // A declared failure exit: an ordinary failure under its code.
+            FailureVerdict verdict;
+            verdict.failure_class = NodeFailureClass::Ordinary;
+            verdict.code = exit.value("code", std::string());
+            verdict.public_message = "the graph ended at a failure exit";
+            outcome.failure = std::move(verdict);
             break;
         }
     }
@@ -107,7 +119,10 @@ InvocationResult RunInvocation::classify_exception(std::exception_ptr error,
     if (cancelled) {
         InvocationResult result;
         result.status = InvocationStatus::Cancelled;
-        result.error_code = "NG.Cancelled";
+        FailureVerdict verdict;
+        verdict.failure_class = NodeFailureClass::Cancelled;
+        verdict.code = node_failure_code(NodeFailureClass::Cancelled);
+        result.failure = std::move(verdict);
         try {
             if (error) std::rethrow_exception(error);
         } catch (const std::exception& e) {
@@ -127,20 +142,10 @@ InvocationResult RunInvocation::classify_exception(std::exception_ptr error,
     } catch (...) {
         result.error = "unknown graph invocation failure";
     }
-    // The stable code every protocol host reports (classify_failure).
-    const auto verdict = classify_failure(error);
-    result.error_code = verdict.code;
-    if (verdict.failure_class == NodeFailureClass::Cancelled) {
+    // The classified failure every protocol host reports (classify_failure).
+    result.failure = classify_failure(error);
+    if (result.failure->failure_class == NodeFailureClass::Cancelled)
         result.status = InvocationStatus::Cancelled;
-    } else if (verdict.signal && verdict.failure_class == NodeFailureClass::HookBlocked) {
-        try {
-            std::rethrow_exception(verdict.signal);
-        } catch (const HookBoundaryBlocked& blocked) {
-            result.error_detail = json{{"invocation_id", blocked.invocation_id()},
-                                       {"state", std::string(to_string(blocked.state()))}};
-        } catch (...) {
-        }
-    }
     return result;
 }
 

@@ -54,15 +54,14 @@ struct RunInvocationRequest {
 struct InvocationResult {
     InvocationStatus status = InvocationStatus::Error;
     std::optional<RunResult> run_result;
+    /// what() of the failure: for logs in this process, never for a peer.
     std::string error;
-    /// Error and Cancelled only: the failure's stable code, the one
-    /// classify_failure() gives ("NG.TaskFailed", "NG.HookBlocked",
-    /// "NG.Cancelled", an author code, ...), a failure exit's code, or
-    /// "NG.BarrierStalled". Protocol hosts report it on the wire.
-    std::string error_code;
-    /// Error only, for a Hook block: {"invocation_id", "state"}; otherwise an
-    /// empty object.
-    json error_detail = json::object();
+    /// Error and Cancelled only: the classified failure (classify_failure()),
+    /// with its stable code ("NG.TaskFailed", "NG.HookBlocked",
+    /// "NG.Cancelled", an author code, a failure exit's code, or
+    /// "NG.BarrierStalled") and the control signal for a run control class.
+    /// Protocol hosts put this, never `error`, on the wire.
+    std::optional<FailureVerdict> failure;
 
     bool succeeded() const noexcept {
         return status == InvocationStatus::Completed ||

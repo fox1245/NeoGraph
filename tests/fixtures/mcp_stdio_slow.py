@@ -50,8 +50,16 @@ def handle_call(rid, params):
     })
 
 
+_cancelled = []
+_cancelled_lock = threading.Lock()
+
+
 def handle(req):
     if "id" not in req:
+        # notifications/cancelled: remember which requests the client gave up.
+        if req.get("method") == "notifications/cancelled":
+            with _cancelled_lock:
+                _cancelled.append((req.get("params") or {}).get("requestId"))
         return  # notification
     rid = req["id"]
     method = req.get("method", "")
@@ -77,6 +85,12 @@ def handle(req):
                 "inputSchema": {"type": "object"},
             }]},
         })
+        return
+    if method == "tools/call" and params.get("name") == "cancellations":
+        with _cancelled_lock:
+            seen = list(_cancelled)
+        reply({"jsonrpc": "2.0", "id": rid,
+               "result": {"content": [{"type": "text", "text": json.dumps(seen)}]}})
         return
     if method == "tools/call":
         # Off-thread so sibling calls overlap their sleeps.

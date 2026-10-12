@@ -18,12 +18,15 @@
 
 #ifdef NEOGRAPH_HAVE_GRPC
 
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include <neograph/graph/checkpoint.h>
+
+namespace grpc { class Service; }
 
 namespace neograph::grpc {
 
@@ -49,6 +52,10 @@ public:
     GrpcCheckpointStore(const std::string& target,
                         std::shared_ptr<sp::NativeArchive> native_archive);
     ~GrpcCheckpointStore() override;
+
+    /// Every RPC's deadline (30 s by default), so a stalled server cannot hold
+    /// a run. Throws std::invalid_argument for a non-positive value.
+    void set_rpc_timeout(std::chrono::milliseconds timeout);
 
     void save(const neograph::graph::Checkpoint& cp) override;
     std::optional<neograph::graph::Checkpoint>
@@ -92,6 +99,14 @@ private:
 NEOGRAPH_API void run_checkpoint_server(
     const std::string& address,
     std::shared_ptr<neograph::graph::CheckpointStore> backend);
+/// The CheckpointService as a generated service base, for an embedder's own
+/// grpc::ServerBuilder (TLS, auth, ports). A backend failure is a non-OK
+/// status (UNAVAILABLE), never "no checkpoint" or an empty list; a malformed
+/// SaveCheckpoint is INVALID_ARGUMENT. No backend exception text crosses the
+/// wire.
+NEOGRAPH_API std::unique_ptr<::grpc::Service> make_checkpoint_service(
+    std::shared_ptr<neograph::graph::CheckpointStore> backend,
+    std::shared_ptr<sp::NativeArchive> native_archive = {});
 /// This overload resolves settlement references using real trusted native
 /// custody shared with clients. Missing/unverifiable custody fails closed.
 NEOGRAPH_API void run_checkpoint_server(
