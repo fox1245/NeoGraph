@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=110a2516c9d60c99aff8e6bf20d7944bf34ffdda37017c93d9eabc53b6ae5959 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=f1567394568b14085c4bf84a8774fa55e73abd15c1f178e0eb2393dd487b27b0 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3445,7 +3445,7 @@ sp::runtime::Result run_mcp_agent(
 
 #### Task 与 method
 
-每个 run 都在自己的 worker thread 上执行；stream 或 blocking send 只是观察它，因此 task 的生命周期长于断开的连接。`SendMessage` 会阻塞到 task 进入 terminal 或 interrupted 状态，除非 `returnImmediately`（0.3 为 `blocking: false`）要求立即返回 SUBMITTED 的 task。`SendStreamingMessage` 和 `SubscribeToTask`（0.3 为 `tasks/resubscribe`）先发送 Task，再发送 status 和 artifact update，并在 terminal 或 interrupted 状态时关闭；0.3 stream 以 `final: true` 结束。`GetTask` 和 `ListTasks` 遵循 `historyLength`（0 表示省略 history）。`ListTasks` 按 `contextId`、`status` 和 `statusTimestampAfter` 过滤，用 `pageSize`（1 到 100，默认 50）和 `pageToken` 按最新优先分页，未设置 `includeArtifacts` 时省略 artifact。每个 status 都带有 timestamp。
+每个 run 都在自己的 worker thread 上执行；stream 或 blocking send 只是观察它，因此 task 的生命周期长于断开的连接。`SendMessage` 会阻塞到 task 进入 terminal 或 interrupted 状态，除非 `returnImmediately`（0.3 为 `blocking: false`）要求立即返回 SUBMITTED 的 task。`SendStreamingMessage` 和 `SubscribeToTask`（0.3 为 `tasks/resubscribe`）先发送 Task，再发送 status 和 artifact update，并在 terminal 或 interrupted 状态时关闭；0.3 stream 以 `final: true` 结束。静默 5 秒的 stream 会写出 SSE 注释 `: keep-alive`，使对空闲连接设置超时的客户端或代理不会切断仍在工作的运行。`GetTask` 和 `ListTasks` 遵循 `historyLength`（0 表示省略 history）。`ListTasks` 按 `contextId`、`status` 和 `statusTimestampAfter` 过滤，用 `pageSize`（1 到 100，默认 50）和 `pageToken` 按最新优先分页，未设置 `includeArtifacts` 时省略 artifact。每个 status 都带有 timestamp。
 
 task id 由 server 生成。`taskId` 未知的 message 以 `-32001` 失败，terminal task 以 `-32004` 失败，与 task 不同的 `contextId` 以 `-32602` 失败，仍在运行的 task 以 `-32603`（ErrorInfo reason `TASK_BUSY`）失败。发给 INPUT_REQUIRED task 的 message 会从 interrupt 保存的 checkpoint 恢复其 run；`GraphAgentAdapter::build_resume_value` 将 message 转为 resume value，没有 checkpoint store 的 engine 则以该 message 为 input 重新运行 graph。基于 Program 的 task 目前还不能通过 A2A 接收该回答：message 得到 `-32004`，task 继续等待。NeoGraph collaboration envelope 保留发送方指定的幂等 task id（[A2A collaboration 扩展](#a2a-collaboration-extension)）。请求按 dialect 校验，违规得到带 `google.rpc.BadRequest` field violation 的 `-32602`，每个 error 都带有 `google.rpc.ErrorInfo` detail。配置 `CollaborationAuthenticator` 时，card 声明 Bearer security scheme，若请求必须认证还会声明全局 requirement；缺少 credential 得到带 `WWW-Authenticate` 的 HTTP 401，已认证但无权使用 collaboration link 的 peer 得到 HTTP 403。
 

@@ -114,6 +114,11 @@ constexpr const char* kBadRequestType  = "type.googleapis.com/google.rpc.BadRequ
 constexpr const char* kSupportedVersions = "1.0, 0.3";
 constexpr int kDefaultPageSize = 50;
 constexpr int kMaxPageSize     = 100;
+/// How long a task stream stays silent before it sends an SSE comment. A run
+/// can sit in one node far longer than a client or proxy waits for bytes
+/// (httplib and httpx default to 5 s), and the stream otherwise says nothing
+/// between the Task and the next status.
+constexpr auto kStreamKeepAlive = 5s;
 
 /// A JSON-RPC error with its A2A typed details (spec 9.5: `error.data` is a
 /// list of google.rpc details, the first one an ErrorInfo).
@@ -650,6 +655,8 @@ struct A2AServer::Impl {
                                                               task_lru_pos;
     std::size_t max_tasks = 1024;
     std::size_t max_inflight_runs = 32;
+    /// Guarded by tasks_mu (read by streams while they wait on it).
+    std::chrono::milliseconds stream_keepalive = kStreamKeepAlive;
 
     /// Run workers. Every run executes on its own thread, so a request can
     /// return before its run ends (returnImmediately, streams, cancellation).
@@ -916,6 +923,12 @@ void test::A2AServerTestAccess::set_max_inflight_runs(
     A2AServer& server, std::size_t cap) {
     std::lock_guard lk(server.impl_->tasks_mu);
     server.impl_->max_inflight_runs = cap;
+}
+
+void test::A2AServerTestAccess::set_stream_keepalive(
+    A2AServer& server, std::chrono::milliseconds interval) {
+    std::lock_guard lk(server.impl_->tasks_mu);
+    server.impl_->stream_keepalive = std::max(interval, 1ms);
 }
 #endif
 
@@ -1791,9 +1804,13 @@ void A2AServer::Impl::stream_task(Call& call, Task snapshot,
         "text/event-stream",
         [self, rpc_id, dialect, snapshot = std::move(snapshot), channel, cursor](
             size_t /*offset*/, httplib::DataSink& sink) mutable {
+            using Clock = std::chrono::steady_clock;
+            auto last_sent = Clock::now();
             auto write = [&](json result) {
                 const auto frame = sse_frame(jsonrpc_result(std::move(result), rpc_id));
-                return sink.write(frame.data(), frame.size());
+                const bool sent = sink.write(frame.data(), frame.size());
+                last_sent = Clock::now();
+                return sent;
             };
             // Spec 3.1.2: a task lifecycle stream opens with the Task. The 0.3
             // stream does the same (A2A-14) and ends on `final: true`.
@@ -1823,12 +1840,29 @@ void A2AServer::Impl::stream_task(Call& call, Task snapshot,
                         lk.lock();
                     }
                     if (channel->closed || self->stopping.load(std::memory_order_acquire)) break;
-                    channel->cv.wait_for(lk, 250ms);
+                    // Wake for the next keep-alive too, not only every 250 ms.
+                    const auto keepalive = self->stream_keepalive;
+                    const auto until_due = std::max(
+                        0ms, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 last_sent + keepalive - Clock::now()));
+                    channel->cv.wait_for(lk, std::min<std::chrono::milliseconds>(250ms, until_due));
                     if (cursor >= channel->items.size() && !channel->closed) {
+                        const bool due = Clock::now() - last_sent >= keepalive;
                         lk.unlock();
-                        const bool writable = !sink.is_writable || sink.is_writable();
+                        // A quiet stream sends an SSE comment now and then, so
+                        // a client or proxy that times out an idle connection
+                        // does not cut a run that is still working. The write
+                        // also finds a client that went away.
+                        static constexpr std::string_view kComment = ": keep-alive\n\n";
+                        bool alive = true;
+                        if (due) {
+                            alive = sink.write(kComment.data(), kComment.size());
+                            last_sent = Clock::now();
+                        } else {
+                            alive = !sink.is_writable || sink.is_writable();
+                        }
                         lk.lock();
-                        if (!writable) return false;  // the client went away
+                        if (!alive) return false;  // the client went away
                     }
                 }
             }

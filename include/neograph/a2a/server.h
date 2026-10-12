@@ -21,7 +21,8 @@
  *     (0.3 `blocking: false`) returns the SUBMITTED task at once
  *   - SendStreamingMessage / message/stream — SSE task lifecycle stream: the
  *     Task, status and artifact updates, closed on a terminal or
- *     interrupted state
+ *     interrupted state; a stream silent for 5 s writes the SSE comment
+ *     `: keep-alive`
  *   - GetTask / tasks/get, CancelTask / tasks/cancel (a terminal task answers
  *     TaskNotCancelableError), ListTasks, SubscribeToTask / tasks/resubscribe
  *   - push-notification config methods answer
@@ -47,6 +48,7 @@
 #include <neograph/a2a/program_adapter.h>
 #endif
 
+#include <chrono>
 #include <functional>
 #include <cstddef>
 #include <memory>
@@ -235,6 +237,8 @@ namespace neograph::a2a::test {
 class A2AServerTestAccess {
   public:
     static void set_max_inflight_runs(A2AServer& server, std::size_t cap);
+    /// How long a task stream may be silent before it sends an SSE comment.
+    static void set_stream_keepalive(A2AServer& server, std::chrono::milliseconds interval);
 };
 
 }  // namespace neograph::a2a::test

@@ -23,7 +23,10 @@
 #include <httplib.h>
 
 #include <chrono>
+#include <condition_variable>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <regex>
 #include <string>
 #include <thread>
@@ -55,6 +58,45 @@ std::shared_ptr<const sp::Outcome> provider_failure(sp::ErrorKind kind, bool ref
     return std::make_shared<const sp::Outcome>(std::move(failure));
 }
 
+/// Holds the runs of the `gate` prompt until a test opens it, so a test that
+/// needs a run to be in flight does not depend on how long a sleep takes.
+class RunGate {
+  public:
+    void open() {
+        { std::lock_guard lk(mu_); open_ = true; }
+        cv_.notify_all();
+    }
+    void close() {
+        std::lock_guard lk(mu_);
+        open_ = false;
+    }
+    bool wait_for(std::chrono::milliseconds limit) {
+        std::unique_lock lk(mu_);
+        return cv_.wait_for(lk, limit, [&] { return open_; });
+    }
+
+  private:
+    std::mutex mu_;
+    std::condition_variable cv_;
+    bool open_ = false;
+};
+
+RunGate& run_gate() {
+    static RunGate gate;
+    return gate;
+}
+
+/// Closes the gate for one test and opens it again on the way out, so a test
+/// that fails early never leaves a run blocked behind the server it owns.
+/// Declare it after the Server: it is destroyed first.
+struct GateScope {
+    GateScope() { run_gate().close(); }
+    ~GateScope() { run_gate().open(); }
+    GateScope(const GateScope&) = delete;
+    GateScope& operator=(const GateScope&) = delete;
+    void open() { run_gate().open(); }
+};
+
 /// One node whose behaviour is chosen by the first word of the prompt.
 class ConformanceNode : public GraphNode {
   public:
@@ -81,6 +123,16 @@ class ConformanceNode : public GraphNode {
                 co_return out;
             }
             throw graph::NodeInterrupt("approve the probe?", json{{"tool", "probe"}});
+        }
+        if (verb == "gate") {
+            // Waits for the test; a cancel or a lost test ends it too.
+            for (int i = 0; i < 3000 && !run_gate().wait_for(10ms); ++i) {
+                if (in.ctx.cancel_token && in.ctx.cancel_token->is_cancelled()) break;
+            }
+        }
+        if (verb == "nap") {
+            // "nap <microseconds>": a run that ends about when a subscriber joins.
+            std::this_thread::sleep_for(std::chrono::microseconds(std::stoi(text.substr(text.find(' ') + 1))));
         }
         if (verb == "slow") {
             for (int i = 0; i < 300; ++i) {
@@ -169,6 +221,31 @@ Reply rpc(const Server& srv, const std::string& method, const json& params,
           const std::string& version = "1.0") {
     json body = {{"jsonrpc", "2.0"}, {"id", 7}, {"method", method}, {"params", params}};
     return post(srv, body.dump(), version);
+}
+
+/// POST a streaming method and hand each piece of the body to @p on_chunk as
+/// it arrives (with everything received so far), so a test can act while the
+/// stream is still open. Returns the whole body.
+Reply stream_rpc(const Server& srv, const std::string& method, const json& params,
+                 const std::function<void(const std::string&)>& on_chunk,
+                 int read_timeout_s = 10) {
+    httplib::Client c("127.0.0.1", srv.port());
+    c.set_read_timeout(read_timeout_s, 0);
+    const json body = {{"jsonrpc", "2.0"}, {"id", 7}, {"method", method}, {"params", params}};
+    std::string received;
+    auto res = c.Post("/", httplib::Headers{{"A2A-Version", "1.0"}}, body.dump(),
+                      "application/json", [&](const char* data, size_t size) {
+                          received.append(data, size);
+                          on_chunk(received);
+                          return true;
+                      });
+    if (!res) throw std::runtime_error("no response");
+    Reply r{res->status, received, res->headers, json()};
+    try {
+        r.envelope = json::parse(received);
+    } catch (...) {
+    }
+    return r;
 }
 
 /// The data payloads of an SSE body.
@@ -353,10 +430,15 @@ TEST(A2AConformance, ListTasksPagesNewestFirstWithFilters) {
 
 TEST(A2AConformance, SubscribeToTaskStreamsTheRunningTaskAndRefusesTerminalOnes) {
     Server srv;
-    auto started = rpc(srv, "SendMessage", {{"message", v1_message("slow subscribe")},
+    GateScope gate;
+    auto started = rpc(srv, "SendMessage", {{"message", v1_message("gate subscribe")},
                                             {"configuration", {{"returnImmediately", true}}}});
     const auto id = started.envelope["result"]["task"]["id"].get<std::string>();
-    const auto r = rpc(srv, "SubscribeToTask", {{"id", id}});
+    // The run waits at the gate, so the task is running when the subscription
+    // is made; the gate opens once the subscriber holds the current Task.
+    const auto r = stream_rpc(srv, "SubscribeToTask", {{"id", id}}, [&](const std::string& so_far) {
+        if (so_far.find("\n\n") != std::string::npos) gate.open();
+    });
     const auto events = sse_events(r.body);
     ASSERT_GE(events.size(), 2u) << r.body;
     EXPECT_EQ(events.front()["result"]["task"]["id"], id);  // the current Task first
@@ -369,6 +451,58 @@ TEST(A2AConformance, SubscribeToTaskStreamsTheRunningTaskAndRefusesTerminalOnes)
     // 0.3 clients read tasks/resubscribe only as an event stream.
     const auto legacy = rpc(srv, "tasks/resubscribe", {{"id", "nope"}}, "");
     EXPECT_EQ(error_code(sse_events(legacy.body).at(0)), -32001);
+}
+
+TEST(A2AConformance, ASubscriberJoiningAsTheRunFinishesGetsTheFinalStatusOrTheTerminalError) {
+    Server srv;
+    // Runs of 0 to 3 ms, so the subscription lands before, during and after
+    // the final publication.
+    for (int i = 0; i < 200; ++i) {
+        auto started = rpc(srv, "SendMessage",
+                           {{"message", v1_message("nap " + std::to_string((i % 30) * 100))},
+                            {"configuration", {{"returnImmediately", true}}}});
+        const auto id = started.envelope["result"]["task"]["id"].get<std::string>();
+        const auto r = rpc(srv, "SubscribeToTask", {{"id", id}});
+        if (r.envelope.is_object() && r.envelope.contains("error")) {
+            ASSERT_EQ(error_code(r.envelope), -32004) << r.body;
+            continue;
+        }
+        const auto events = sse_events(r.body);
+        ASSERT_GE(events.size(), 2u) << r.body;
+        EXPECT_EQ(events.front()["result"]["task"]["id"], id);
+        EXPECT_EQ(events.back()["result"]["statusUpdate"]["status"]["state"], "TASK_STATE_COMPLETED")
+            << r.body;
+    }
+}
+
+TEST(A2AConformance, AQuietStreamIsKeptAliveWhileTheRunWorks) {
+    Server srv;
+    // A run can sit in one node longer than a client waits for bytes; the
+    // stream says so with SSE comments instead of staying silent.
+    neograph::a2a::test::A2AServerTestAccess::set_stream_keepalive(*srv.server, 40ms);
+    GateScope gate;
+    auto started = rpc(srv, "SendMessage", {{"message", v1_message("gate quiet")},
+                                            {"configuration", {{"returnImmediately", true}}}});
+    const auto id = started.envelope["result"]["task"]["id"].get<std::string>();
+    const auto count_comments = [](const std::string& body) {
+        std::size_t n = 0;
+        for (auto at = body.find(": keep-alive"); at != std::string::npos;
+             at = body.find(": keep-alive", at + 1)) {
+            ++n;
+        }
+        return n;
+    };
+    // The gate stays shut until three comments have arrived, so the stream was
+    // quiet for as long as it took to send them. Without them the read times out.
+    const auto r = stream_rpc(srv, "SubscribeToTask", {{"id", id}},
+                              [&](const std::string& so_far) {
+                                  if (count_comments(so_far) >= 3) gate.open();
+                              }, /*read_timeout_s=*/3);
+    EXPECT_GE(count_comments(r.body), 3u);
+    const auto events = sse_events(r.body);  // comments are not events
+    ASSERT_GE(events.size(), 2u) << r.body;
+    EXPECT_EQ(events.front()["result"]["task"]["id"], id);
+    EXPECT_EQ(events.back()["result"]["statusUpdate"]["status"]["state"], "TASK_STATE_COMPLETED");
 }
 
 // --- task rules (A2A-05, A2A-06, A2A-07, A2A-09, A2A-20) -----------------------------

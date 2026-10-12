@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=110a2516c9d60c99aff8e6bf20d7944bf34ffdda37017c93d9eabc53b6ae5959 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=f1567394568b14085c4bf84a8774fa55e73abd15c1f178e0eb2393dd487b27b0 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -3055,7 +3055,7 @@ sp::runtime::Result run_mcp_agent(
 
 #### Task と method
 
-すべての run は専用の worker thread で実行されます。stream や blocking send はそれを観測するだけなので、task は切断された接続より長く存続します。`SendMessage` は task が terminal または interrupted になるまで block しますが、`returnImmediately`(0.3 では `blocking: false`)を指定すると SUBMITTED の task を即座に返します。`SendStreamingMessage` と `SubscribeToTask`(0.3 では `tasks/resubscribe`)は Task を最初に送り、続けて status・artifact update を送り、terminal または interrupted の状態で閉じます。0.3 の stream は `final: true` で終わります。`GetTask` と `ListTasks` は `historyLength` に従います(0 なら history を省略)。`ListTasks` は `contextId`、`status`、`statusTimestampAfter` で絞り込み、`pageSize`(1〜100、既定 50)と `pageToken` で新しい順にページングし、`includeArtifacts` がなければ artifact を省略します。すべての status に timestamp が付きます。
+すべての run は専用の worker thread で実行されます。stream や blocking send はそれを観測するだけなので、task は切断された接続より長く存続します。`SendMessage` は task が terminal または interrupted になるまで block しますが、`returnImmediately`(0.3 では `blocking: false`)を指定すると SUBMITTED の task を即座に返します。`SendStreamingMessage` と `SubscribeToTask`(0.3 では `tasks/resubscribe`)は Task を最初に送り、続けて status・artifact update を送り、terminal または interrupted の状態で閉じます。0.3 の stream は `final: true` で終わります。5 秒間静かだった stream は SSE コメント `: keep-alive` を書くため、アイドル接続にタイムアウトを掛けるクライアントやプロキシが、まだ作業中の実行を切断しません。`GetTask` と `ListTasks` は `historyLength` に従います(0 なら history を省略)。`ListTasks` は `contextId`、`status`、`statusTimestampAfter` で絞り込み、`pageSize`(1〜100、既定 50)と `pageToken` で新しい順にページングし、`includeArtifacts` がなければ artifact を省略します。すべての status に timestamp が付きます。
 
 task id は server が生成します。未知の `taskId` を持つ message は `-32001`、terminal な task は `-32004`、task と異なる `contextId` は `-32602`、まだ実行中の task は `-32603`(ErrorInfo reason `TASK_BUSY`)で失敗します。INPUT_REQUIRED の task に送った message は、interrupt が保存した checkpoint から run を再開します。`GraphAgentAdapter::build_resume_value` が message を resume value に変換し、checkpoint store を持たない engine はその message を input として graph を再実行します。Program を基にした task は、まだ A2A でその回答を受け取れません。message は `-32004` になり、task は待ち続けます。NeoGraph の collaboration envelope は送信者が決めた冪等な task id を保ちます([A2A collaboration 拡張](#a2a-collaboration-extension))。リクエストは dialect ごとに検証し、違反は `google.rpc.BadRequest` の field violation 付きで `-32602` になり、すべての error は `google.rpc.ErrorInfo` detail を持ちます。`CollaborationAuthenticator` がある場合、card は Bearer security scheme を宣言し、リクエストの認証が必須なら全体の requirement も宣言します。credential がなければ `WWW-Authenticate` 付きの HTTP 401、認証済みでも collaboration link を使えない peer は HTTP 403 になります。
 
