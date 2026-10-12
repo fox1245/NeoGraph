@@ -85,6 +85,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | 61 | [`61_sync_node.cpp`](61_sync_node.cpp) | yes | `SyncGraphNode`: 코루틴 보일러플레이트 없는 짧은 노드 두 개(공백 제거, 대문자 변환). 블로킹 I/O는 여전히 `GraphNode::run()`에서 처리합니다. |
 | 100 | [`100_stream_modes.cpp`](100_stream_modes.cpp) | yes | `StreamMode`: 같은 실행을 VALUES, UPDATES, EVENTS, DEBUG 모드로 관찰하고, 모드마다 전달되는 이벤트를 셉니다. |
 | 101 | [`101_retry_policy.cpp`](101_retry_policy.cpp) | yes | `RetryPolicy`: 노드가 두 번 실패하면 엔진이 지수 백오프로 다시 시도합니다. 재시도 횟수를 줄이면 재시도가 바닥났을 때 호출한 쪽이 받는 결과를 볼 수 있습니다. |
+| 102 | [`102_node_interrupt.cpp`](102_node_interrupt.cpp) | yes | `NodeInterrupt`: 노드가 스스로 실행을 멈추고, 페이로드가 호출한 쪽에 물어볼 내용을 알려 주며, `resume`이 답(승인 또는 거절)을 노드에 돌려줍니다. |
 
 ### 에이전트 패턴
 
