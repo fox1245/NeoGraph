@@ -110,6 +110,7 @@ python 01_minimal.py
 | 36 | [`36_program_crash_recovery.py`](36_program_crash_recovery.py) | yes | プロセス A は Program を質問まで実行し、答えを受けてモデルを呼んだあと終了します。プロセス B が同じ `sqlite_directory` を開いて `reconnect` を呼ぶと実行が完了し、ジャーナルの応答はリプレイされ、呼び出しの課金は 1 回だけです。Linux と macOS のみ。 |
 | 37 | [`37_program_model_node.py`](37_program_model_node.py) | yes | Program の `llm_call` ノードは、ホストが `node_context` でプロバイダーにバインドします。スクリプト化したモデルが報告した 30 + 12 トークンは `usage.model_tokens: 42`、`remaining_budget`、価格付きの課金記録に反映されます。バインドのないホストは `P_ADMIT_PROVIDER` で Program を拒否します。 |
 | 38 | [`38_program_diagnostics.py`](38_program_diagnostics.py) | yes | スクリプト化したモデルがエッジのノード名を書き間違えます。コンパイルは `P_CORE_E3`、修正案、候補とともに失敗します。修復ループが修正案を適用し、`soundness_check=True` で再コンパイルして Program を承認します。モデルの呼び出しは 1 回だけです。 |
+| 39 | [`39_program_main_race.py`](39_program_main_race.py) | yes | `main()` が `ng.race`、`ng.quorum`、`ng.await` の下で Core の実行を複数開始します。先に終わった実行が勝ち、遅い実行はキャンセルトークンの変化を検知し、期限を過ぎた `ng.await` は Program を `P_AWAIT_TIMEOUT` 付きの `TimedOut` で終わらせます。 |
 
 ### プロトコル: MCP、A2A、ACP
 
