@@ -3416,7 +3416,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 // such branch; otherwise a branch that fails ends it, paused
                 // branches or not; otherwise a paused branch pauses it, on the
                 // first paused branch in declaration order, and records the
-                // others (#384).
+                // others (#384). Whenever it pauses, a branch paused on an
+                // uncertain effect is asked before an ordinary question (#401).
                 std::optional<std::size_t> cancelled;
                 std::optional<std::size_t> failed;
                 std::optional<std::size_t> paused;
@@ -3437,7 +3438,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
                 if (cancelled) failed = cancelled;
                 const bool pause = !cancelled && paused && (!failed || reconciling);
-                if (pause && failed) paused = reconciling;
+                if (pause && reconciling) paused = reconciling;
                 PlanExecution result;
                 result.output = json::array();
                 for (std::size_t index = 0; index < parallel_results.size(); ++index) {
@@ -5187,6 +5188,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 // has ended it; a failed member is recorded and replays on
                 // resume. A join decided by a success (a race winner, a quorum
                 // met) ends that way, as with any paused member (#380).
+                // #401: a collecting ng.all decides nothing before every
+                // member settled, so it pauses on a paused member beside a
+                // failure; in every join that pauses, a member paused on an
+                // uncertain effect is asked before an ordinary question.
                 std::optional<std::size_t> reconciling;
                 bool                       member_failed = false;
                 for (std::size_t i = 0; i < results.size(); ++i) {
@@ -5211,15 +5216,14 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     reconciling && !operation_token->is_cancelled() && !decided_by_success &&
                     (decided || member_failed);
                 if (paused && (!decided || hold_for_reconciliation)) {
-                    // The join is Interrupted on its first paused member, or
-                    // beside a failure on its first member paused on an
-                    // uncertain effect. Its output holds the results so far
-                    // in declaration order.
+                    // The join is Interrupted on its first member paused on
+                    // an uncertain effect, else on its first paused member
+                    // (#401). Its output holds the results so far in
+                    // declaration order.
                     PlanExecution paused_join;
                     paused_join.status = ProgramTerminalStatus::Interrupted;
                     paused_join.output = json::array();
-                    std::optional<std::size_t> resumed_member =
-                        hold_for_reconciliation ? reconciling : std::nullopt;
+                    std::optional<std::size_t> resumed_member = reconciling;
                     for (std::size_t i = 0; i < results.size(); ++i) {
                         const auto& member = results[i];
                         paused_join.output.push_back(

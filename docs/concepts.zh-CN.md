@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=b5a36cd38b95884939b2af8419d74396c35916663dc4a756966c2cd81a05def3 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=3ddbf9b3903df0b61f2694ecfbb12af0682b96f25f81d50b4efc4865c4c576a1 -->
 # NeoGraph 核心概念——叙事指南
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -418,7 +418,7 @@ result = await engine.resume_async(thread_id="t1",
 
 同一步中的多个中断会逐个回答（#388）。当一个超步中的多个节点或 Send 抛出 `NodeInterrupt` 时，run 会在所有这些中断上暂停：`RunResult.interrupts` 以 `{id, node, value}` 列出每一个，其中 id 是暂停调用的 task id（`s3:review`，Send 为 `s3:send[1]:worker:<hash>`），`interrupt_node`、`interrupt_value` 和 `interrupt_id` 报告第一个。恢复回答 `interrupt_id=`（C++ `RunMetadata::resume_interrupt_id`）指定的中断，或第一个中断；该步中其他暂停的节点或 Send 会在没有该值的情况下再次运行并再次提出自己的问题，下一次恢复回答它。指定一个不在等待中的中断会在任何内容运行之前抛出 `ValueError`（C++ `std::invalid_argument`）。在多个中断上暂停的检查点会在其元数据（`_neograph.interrupts`）中列出它们；在一个中断上暂停的检查点保持不变。该值只送达暂停步骤中被回答的调用（#393）：恢复后的 run 中后续步骤的节点看不到 `ctx.resume_value`，因此在那里提问的节点或 tool gate 会再次暂停 run，而不会拿走另一个问题的答案。通过父图恢复的子图经由父图中被回答的节点收到自己的答案。带有 `messages` 通道的图仍会在其中以用户消息的形式收到该值。JavaScript join 以及计划级 `parallel` 和 `quorum` 遵循相同规则：每次恢复回答一个暂停的成员，其余成员再次提问。
 
-兄弟节点以不同方式结束的步骤，无论它们的索引或完成顺序如何，都按同一条规则结束（#392）。该规则适用于 fan-out 的分支和同一步的 Send，无论一个 worker 还是多个。run 被取消时 run 停止。否则，不确定的效果，即 payload `kind` 为 `tool_effect_reconciliation` 的 `NodeInterrupt`，即使有兄弟节点失败也会让该步为对账（reconciliation）而暂停，因为结束 run 会丢弃一个无人知道结果的效果；此暂停只报告这些中断，而没有记录结果的失败兄弟节点会在该步恢复时再次运行。否则，失败会以派发顺序（ready 顺序，然后是 Send 顺序）中的第一个失败使 run 失败：该步的普通中断不会被报告，也不会为它们保存检查点。否则，该步如上所述在所有中断上暂停。沿 failure edge 路由的失败是节点的结果，与完成相同：兄弟节点的中断仍会使该步暂停，路由在该步完成时进行。JavaScript join 以及计划级 `parallel` 和 `quorum` 以同样的方式对成员排序（#397）：因不确定效果而暂停的成员，除非成功已决定结果（race 胜者、已满足的 quorum），即使在失败成员旁也会让 join 在第一个这样的成员上暂停；失败的成员会被记录，并在 join 恢复时、待恢复所答复的成员运行到结束并落定其效果之后结束 join（#400）。
+兄弟节点以不同方式结束的步骤，无论它们的索引或完成顺序如何，都按同一条规则结束（#392）。该规则适用于 fan-out 的分支和同一步的 Send，无论一个 worker 还是多个。run 被取消时 run 停止。否则，不确定的效果，即 payload `kind` 为 `tool_effect_reconciliation` 的 `NodeInterrupt`，即使有兄弟节点失败也会让该步为对账（reconciliation）而暂停，因为结束 run 会丢弃一个无人知道结果的效果；此暂停只报告这些中断，而没有记录结果的失败兄弟节点会在该步恢复时再次运行。否则，失败会以派发顺序（ready 顺序，然后是 Send 顺序）中的第一个失败使 run 失败：该步的普通中断不会被报告，也不会为它们保存检查点。否则，该步如上所述在所有中断上暂停。沿 failure edge 路由的失败是节点的结果，与完成相同：兄弟节点的中断仍会使该步暂停，路由在该步完成时进行。JavaScript join 以及计划级 `parallel` 和 `quorum` 以同样的方式对成员排序（#397）：因不确定效果而暂停的成员，除非成功已决定结果（race 胜者、已满足的 quorum），即使在失败成员旁也会让 join 在第一个这样的成员上暂停；失败的成员会被记录，并在 join 恢复时、待恢复所答复的成员运行到结束并落定其效果之后结束 join（#400）。join 暂停时，无论声明顺序如何，因不确定效果而暂停的成员都先于因普通问题而暂停的成员被询问（#401）。收集式 `ng.all`（`collect: true`）是上述规则的有意例外：它会等待所有成员（包括暂停的成员）结束后才报告，因此当另一个成员因普通问题而暂停时，成员的失败不会结束它。它会在该成员处暂停，并在所有成员都落定后报告该失败（#401）。
 
 当暂停决策取决于中间节点输出时非常有用（例如“LLM 是否产生了值得展示给人类的东西？”）。
 

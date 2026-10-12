@@ -10528,6 +10528,42 @@ TEST(ProgramRuntimeTest, PlanParallelPausesForReconciliationBesideAFailedBranch)
     }
 }
 
+TEST(ProgramRuntimeTest, PlanParallelPausesForReconciliationBeforeAnOrdinaryQuestion) {
+    // #401: with no failure, a parallel whose branches pause on an ordinary
+    // question and on an uncertain effect asks for reconciliation first,
+    // whatever the branches' order, as a Core step (#392) and a JavaScript
+    // join do; the ordinary question is asked again once it is answered.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                                ExecutionGuarantee::Unmanaged, true);
+        const auto version =
+            admit_plan(fixture, plan_parallel(json::array({plan_call(), plan_call()})));
+        const std::string run_id =
+            std::string("plan-parallel-reconcile-ordinary-") + (durable ? "sqlite" : "memory");
+        const auto root_thread = plan_root_thread(version, run_id);
+        reset_plan_steps([root_thread](std::size_t, const NodeInput& input) -> json {
+            if (input.ctx.thread_id == root_thread) return json{{"ask", true}};
+            return json{{"reconcile", true}, {"delay_ms", 100}};
+        });
+
+        const auto paused = run_plan(fixture, version, run_id);
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+        EXPECT_TRUE(asks_to_reconcile(paused))
+            << "the ordinary question outranked the uncertain effect";
+        EXPECT_EQ(paused_operation(paused), "root.1");
+
+        const auto asked = decide(fixture, paused, "reconciled");
+        ASSERT_EQ(asked.status(), ProgramTerminalStatus::Interrupted) << failure_detail(asked);
+        EXPECT_FALSE(asks_to_reconcile(asked));
+        EXPECT_EQ(paused_operation(asked), "root.0");
+
+        const auto done = decide(fixture, asked, "approved");
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+    }
+}
+
 TEST(ProgramRuntimeTest, PlanQuorumPausesForReconciliationAfterAFailedBranch) {
     // #397: the quorum's branches run in order; A fails without failing the
     // run (its await times out) and B leaves an effect uncertain. B pauses
@@ -10827,6 +10863,110 @@ TEST(ProgramRuntimeTest, PlanQuorumCountsABranchNodeFailureAsAFailedBranch) {
         }
     }
 }
+
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST(ProgramRuntimeTest, ACollectingAllWaitsForItsPausedMembersAndPausesForReconciliationFirst) {
+    // #401: a collecting ng.all is the deliberate exception to the rule of a
+    // Core step (#392, #397): it waits for every member, paused ones
+    // included, before it reports, so a member's failure does not end it
+    // while another member is paused on an ordinary question. Within it, as
+    // in every join, a member paused on an uncertain effect outranks a member
+    // paused on an ordinary question: the join pauses on it first, whatever
+    // the declaration order.
+    {
+        SCOPED_TRACE("an ordinary pause beside a failure");
+        reset_join_member_runs();
+        AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+        const auto      paused = run_join(fixture, R"JS(
+    return yield ng.all([
+        ng.callCore("main", {value: "ask"}, "collect:ask"),
+        ng.callCore("main", {value: "fail"}, "collect:fail")
+    ], {max_in_flight: 2, collect: true}, "collect:all");
+)JS");
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted)
+            << "the collecting join reported before its paused member settled: "
+            << failure_detail(paused);
+        EXPECT_FALSE(asks_to_reconcile(paused));
+
+        const auto done = approve(fixture, paused);
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Failed) << failure_detail(done);
+        EXPECT_NE(failure_detail(done).find("join member failure sentinel"), std::string::npos)
+            << failure_detail(done);
+        EXPECT_EQ(join_member_runs_of("ask"), 2U);
+        EXPECT_EQ(join_member_runs_of("fail"), 1U) << "the failed member replays";
+    }
+    for (const bool with_failure : {false, true}) {
+        SCOPED_TRACE(with_failure ? "an ordinary and an uncertain pause beside a failure"
+                                  : "an ordinary and an uncertain pause");
+        reset_join_member_runs();
+        AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+        const auto      paused = run_join(fixture, with_failure ? R"JS(
+    return yield ng.all([
+        ng.callCore("main", {value: "ask"}, "collect:ask"),
+        ng.callCore("main", {value: "reconcile"}, "collect:reconcile"),
+        ng.callCore("main", {value: "fail"}, "collect:fail")
+    ], {max_in_flight: 3, collect: true}, "collect:all");
+)JS"
+                                                                : R"JS(
+    return yield ng.all([
+        ng.callCore("main", {value: "ask"}, "collect:ask"),
+        ng.callCore("main", {value: "reconcile"}, "collect:reconcile")
+    ], {max_in_flight: 2, collect: true}, "collect:all");
+)JS");
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+        EXPECT_TRUE(asks_to_reconcile(paused))
+            << "the ordinary question outranked the uncertain effect";
+
+        // The reconciled member settles; the ordinary question is asked again.
+        const auto asked = approve(fixture, paused);
+        ASSERT_EQ(asked.status(), ProgramTerminalStatus::Interrupted) << failure_detail(asked);
+        EXPECT_FALSE(asks_to_reconcile(asked));
+        EXPECT_EQ(join_member_runs_of("reconcile:settled"), 1U);
+
+        const auto done = approve(fixture, asked);
+        if (with_failure) {
+            ASSERT_EQ(done.status(), ProgramTerminalStatus::Failed) << failure_detail(done);
+            EXPECT_NE(failure_detail(done).find("join member failure sentinel"),
+                      std::string::npos)
+                << failure_detail(done);
+            EXPECT_EQ(join_member_runs_of("fail"), 1U) << "the failed member replays";
+        } else {
+            ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+            ASSERT_TRUE(done.output().is_array());
+            ASSERT_EQ(done.output().size(), 2U);
+            EXPECT_EQ(done.output()[0]["value"], "approved");
+            EXPECT_EQ(done.output()[1]["value"], "approved");
+        }
+        EXPECT_EQ(join_member_runs_of("ask"), 3U);
+        EXPECT_EQ(join_member_runs_of("reconcile"), 2U) << "the settled member replays";
+        EXPECT_EQ(join_member_runs_of("reconcile:settled"), 1U);
+    }
+}
+
+TEST(ProgramRuntimeTest, AFailFastJoinPausesForReconciliationBeforeAnOrdinaryQuestion) {
+    // #401: the precedence of a Core step (#392) holds in every join: with no
+    // failure, a member paused on an uncertain effect is asked before one
+    // paused on an ordinary question, whatever the declaration order.
+    reset_join_member_runs();
+    AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      paused = run_join(fixture, R"JS(
+    return yield ng.all([
+        ng.callCore("main", {value: "ask"}, "all:ask"),
+        ng.callCore("main", {value: "reconcile"}, "all:reconcile")
+    ], {max_in_flight: 2}, "reconcile:all");
+)JS");
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+    EXPECT_TRUE(asks_to_reconcile(paused))
+        << "the ordinary question outranked the uncertain effect";
+
+    const auto asked = approve(fixture, paused);
+    ASSERT_EQ(asked.status(), ProgramTerminalStatus::Interrupted) << failure_detail(asked);
+    EXPECT_FALSE(asks_to_reconcile(asked));
+    const auto done = approve(fixture, asked);
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+    EXPECT_EQ(join_member_runs_of("reconcile:settled"), 1U);
+}
+#endif  // NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS
 
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
 TEST(ProgramRuntimeTest, AResumedJoinSettlesTheReconciledMemberBeforeTheReplayedFailureEndsIt) {

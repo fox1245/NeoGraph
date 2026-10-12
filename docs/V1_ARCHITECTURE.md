@@ -453,7 +453,8 @@ The Program compiler lowers authoring sugar to a small orchestration plan:
 - `parallel`: run bounded children concurrently and join all. A child whose
   Core call interrupts pauses it: a failing child still ends it (unless another
   child paused on an effect whose outcome is unknown, #397); otherwise the
-  run stops `Interrupted` on the first paused child, and the run record keeps
+  run stops `Interrupted` on the first paused child (one paused on an effect
+  whose outcome is unknown first, #401), and the run record keeps
   the result of each child that finished and the question of each other paused
   child. Resume continues the child it answers, replays the finished ones
   without running or charging them again, and lets every other paused child ask

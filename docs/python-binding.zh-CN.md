@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=36585ed93edbdb12c9364d0ebe71d942f8cdf6184aab9f1b5d7922479f3041ca -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=d76ac3cb28c29f272c496b3ea03ef57ff5591ed0a1c50bf6b3f9888633c3a5bd -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -464,7 +464,7 @@ JavaScript Program 必须导出 `define()`，它返回一个图构建器。该�
 
 ### 失败的命令会结束运行
 
-只有完成的命令才会恢复 `main()`。当 yield 出的命令未能完成时，例如 `callCore` 的节点抛出异常、耗尽 Core 步数预算、停在再也无法触发的 barrier 上或超过 wall-time 限制，`ProgramRuntime` 会记录该结果，并把它作为运行的最终结果，带有相应的 `status` 和 `failure`。生成器不会被恢复：包住 `yield` 的 `try`/`catch` 不会执行，之后的 JavaScript 也不会执行。按其失败策略失败的 join（`ng.all`、`ng.race`、`ng.quorum`）也会以同样方式结束运行。在 Python 中通过 `result.status` 和 `result.failure` 处理失败。被中断的命令则不同：运行以 `Interrupted` 停止，`resume()` 会继续该命令。被中断的 join 成员会暂停其 join：join 不再启动新成员，并让已在运行的成员运行结束。如果它们的结果决定了 join（fail-fast 失败、race 的胜者、已满足或已无法达到的 quorum），join 就以此结束。否则运行在第一个被暂停的成员上以 `Interrupted` 停止，`resume()` 会继续该成员，并从命令日志重放已结束的成员，不会再次运行或再次计费。 `ng.await(command, timeout_ms)` 的截止时间是绝对的：命令日志记录 await 开始的时间，恢复或已停止进程的恢复只拥有剩余的时间。在截止时间之后恢复时，await 会立即以 `P_AWAIT_TIMEOUT` 将运行结束为 `TimedOut`，而不运行被回答的节点（#391）。计划级 `await` 操作也以同样方式在恢复之间保持其截止时间。 因不确定效果而暂停的成员，即 payload `kind` 为 `tool_effect_reconciliation` 的 `NodeInterrupt`，与 Core 步骤中一样（#392）优先于成员的失败：join 不会失败，而是在该成员上暂停并记录失败的成员，恢复时以该失败结束；由成功决定的 join 按此结束（#397）。恢复时，收到答复的成员先运行到结束，记录的失败才结束 join，因此答复会送达该成员，其效果得以落定（#400）。
+只有完成的命令才会恢复 `main()`。当 yield 出的命令未能完成时，例如 `callCore` 的节点抛出异常、耗尽 Core 步数预算、停在再也无法触发的 barrier 上或超过 wall-time 限制，`ProgramRuntime` 会记录该结果，并把它作为运行的最终结果，带有相应的 `status` 和 `failure`。生成器不会被恢复：包住 `yield` 的 `try`/`catch` 不会执行，之后的 JavaScript 也不会执行。按其失败策略失败的 join（`ng.all`、`ng.race`、`ng.quorum`）也会以同样方式结束运行。在 Python 中通过 `result.status` 和 `result.failure` 处理失败。被中断的命令则不同：运行以 `Interrupted` 停止，`resume()` 会继续该命令。被中断的 join 成员会暂停其 join：join 不再启动新成员，并让已在运行的成员运行结束。如果它们的结果决定了 join（fail-fast 失败、race 的胜者、已满足或已无法达到的 quorum），join 就以此结束。否则运行在第一个被暂停的成员上以 `Interrupted` 停止，`resume()` 会继续该成员，并从命令日志重放已结束的成员，不会再次运行或再次计费。 `ng.await(command, timeout_ms)` 的截止时间是绝对的：命令日志记录 await 开始的时间，恢复或已停止进程的恢复只拥有剩余的时间。在截止时间之后恢复时，await 会立即以 `P_AWAIT_TIMEOUT` 将运行结束为 `TimedOut`，而不运行被回答的节点（#391）。计划级 `await` 操作也以同样方式在恢复之间保持其截止时间。 因不确定效果而暂停的成员，即 payload `kind` 为 `tool_effect_reconciliation` 的 `NodeInterrupt`，与 Core 步骤中一样（#392）优先于成员的失败：join 不会失败，而是在该成员上暂停并记录失败的成员，恢复时以该失败结束；由成功决定的 join 按此结束（#397）。恢复时，收到答复的成员先运行到结束，记录的失败才结束 join，因此答复会送达该成员，其效果得以落定（#400）。join 暂停时，无论声明顺序如何，都会先在因不确定效果而暂停的成员上暂停（#401）。收集式 `ng.all`（`collect: true`）是这一优先级的有意例外：它会等待所有成员（包括暂停的成员）结束后才报告，因此当另一个成员因普通问题而暂停时，成员的失败不会结束它；运行在该成员上以 `Interrupted` 停止，失败在所有成员都落定后报告（#401）。
 
 ### 图检查与 barrier 停滞
 
