@@ -11402,11 +11402,24 @@ TEST(ProgramRuntimeTest, PlanResumeContinuesTheRaceBranchThatWon) {
     const auto paused = run_plan(fixture, version, "plan-race");
     ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
     EXPECT_EQ(paused_operation(paused), "root.0");
+    // The loser's node body runs on a worker (#367, #368). It blocks until the
+    // question wins and cancels it, or, when that happens before a worker
+    // starts it, it never starts.
+    const auto loser_runs = [&root_thread] {
+        const auto runs = plan_steps();
+        return static_cast<std::size_t>(
+            std::count_if(runs.begin(), runs.end(), [&](const PlanStepRun& run) {
+                return !run.resumed && run.thread_id != root_thread;
+            }));
+    };
+    const auto loser_runs_before = loser_runs();
+    EXPECT_LE(loser_runs_before, 1U);
 
     const auto done = decide(fixture, paused, "won");
     ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
     EXPECT_EQ(channel_value(done.output()), json("won"));
-    EXPECT_EQ(plan_steps_counted(false), 2U) << "the cancelled loser is not run again";
+    EXPECT_EQ(loser_runs(), loser_runs_before) << "the cancelled loser is not run again";
+    EXPECT_EQ(plan_steps_counted(false), 1U + loser_runs_before);
     EXPECT_EQ(plan_steps_counted(true), 1U);
 }
 
