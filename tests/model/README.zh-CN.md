@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/model/README.md locale=zh-CN source_sha256=9ae04f9a7dd7b94dfc86c07b96527f52f9292fe7bac7b78b878d0c2b6a30e293 -->
+<!-- neograph-i18n: source=tests/model/README.md locale=zh-CN source_sha256=ff8e590d7785c7ce1b9c737b233df1d9367d921ad10e276d55d2565169d2c88d -->
 # Join 模型 (#363)
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -101,10 +101,12 @@ provider 日志的宿主。provider 是
 再次付费）。崩溃在 SQLite 宿主上针对一次只运行一个调用的程序进行：在每次检查点保存、`put_writes`、
 Program 转换、provider 分发和已记入日志的调用处复制数据库，并由副本上的新运行时重新连接该 run。
 
-对于遵循 P4 或 P5 未覆盖的文档化行为的调度，测试框架不将其判为失败，而是计数并报告它们对契约提出的
-问题：JavaScript 命令中的崩溃会把 run 交回以便协调；在第一个 Core 检查点之前停止的 plan 不会被恢复
-（`P_RUN_RECOVERY_BLOCKED`）；请求发出期间的崩溃会挂起该调用，且该调用不会再次发送；对已暂停 run 的
-fork 会再次发送、再次计费被暂停的调用在提问前发出的 provider 调用，而源 run 的恢复会重放该调用。
+保存过 Core 检查点的调用在崩溃后从该检查点继续（#402），fork 会重放被暂停的调用发出的 provider 调用
+（#405）；不这样做的调度判为失败。对于遵循 P4 未覆盖的两种文档化行为的调度，测试框架不判为失败而是报告：
+无论是 JavaScript 程序还是 plan，在第一个 Core 检查点之前停止的调用会交回宿主协调（#402、#404），测试框架
+只在崩溃没有给该调用留下检查点时才接受；请求发出期间的崩溃会挂起该调用，且该调用不会再次发送（#364）。
+宿主能够以完成来协调的调用（既不提问也不失败、其后没有计价调用的调用、被 await 的调用或调用对），测试框架
+用参照结果协调，之后 run 必须像参照那样结束（#403）。
 
 ### 范围与变量
 
