@@ -501,5 +501,147 @@ TEST(InterruptIdentitySqlite, AFreshEngineAnswersTheNamedInterruptAfterARestart)
     EXPECT_EQ(runs(probe, "calm"), 1);
 }
 
+// ---------------------------------------------------------------------------
+// A resume that the process stopped during, repeated (found by the resume
+// model harness)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The process stops at the `nth` save of a checkpoint in `phase`: that
+// checkpoint is not saved, and what was saved before stays.
+class StopsAtASave final : public CheckpointStore {
+public:
+    StopsAtASave(std::shared_ptr<CheckpointStore> inner, CheckpointPhase phase, int nth)
+        : inner_(std::move(inner)), phase_(phase), nth_(nth) {}
+
+    void save(const Checkpoint& checkpoint) override {
+        if (checkpoint.interrupt_phase == phase_ && --nth_ == 0)
+            throw std::runtime_error("process lost before the save");
+        inner_->save(checkpoint);
+    }
+    std::optional<Checkpoint> load_latest(const std::string& thread) override {
+        return inner_->load_latest(thread);
+    }
+    std::optional<Checkpoint> load_by_id(const std::string& id) override { return inner_->load_by_id(id); }
+    std::vector<Checkpoint> list(const std::string& thread, int limit) override {
+        return inner_->list(thread, limit);
+    }
+    void delete_thread(const std::string& thread) override { inner_->delete_thread(thread); }
+    void put_writes(const std::string& thread, const std::string& parent, const PendingWrite& write) override {
+        inner_->put_writes(thread, parent, write);
+    }
+    std::vector<PendingWrite> get_writes(const std::string& thread, const std::string& parent) override {
+        return inner_->get_writes(thread, parent);
+    }
+    void clear_writes(const std::string& thread, const std::string& parent) override {
+        inner_->clear_writes(thread, parent);
+    }
+    bool requires_managed_budget(const std::string& thread) override {
+        return inner_->requires_managed_budget(thread);
+    }
+
+private:
+    std::shared_ptr<CheckpointStore> inner_;
+    CheckpointPhase                  phase_;
+    int                              nth_;
+};
+
+// approve asks and map sends to worker, in one step at the entry; the
+// worker's item "x" asks too.
+json ask_beside_sends(const std::string& probe) {
+    return json{{"name", "interrupt_identity_ask_beside_sends"},
+                {"channels", channels()},
+                {"nodes", json{{"approve", typed(probe, "interrupt_identity.ask")},
+                               {"map", typed(probe, "interrupt_identity.map")},
+                               {"worker", typed(probe, "interrupt_identity.worker")}}},
+                {"edges", json::array({json{{"from", "__start__"}, {"to", "approve"}},
+                                       json{{"from", "__start__"}, {"to", "map"}},
+                                       json{{"from", "approve"}, {"to", "__end__"}},
+                                       json{{"from", "map"}, {"to", "__end__"}},
+                                       json{{"from", "worker"}, {"to", "__end__"}}})}};
+}
+
+}  // namespace
+
+// The resume answers left, which finishes; the process stops before the step
+// commits. The host repeats the resume, naming the interrupt it answers. That
+// interrupt is the one the checkpoint paused on: left replays, and the run
+// completes. It used to be rejected as not pending, since left had finished.
+TEST_P(InterruptIdentity, ARepeatedResumeNamesTheInterruptItAnswered) {
+    const auto probe = unique_probe("repeat-named");
+    {
+        auto engine = build(one_asker(probe),
+                            std::make_shared<StopsAtASave>(store(), CheckpointPhase::Completed, 1));
+        RunConfig config;
+        config.thread_id  = "repeat-named";
+        const auto paused = engine->run(config);
+        ASSERT_EQ(paused.status(), RunStatus::Interrupted);
+        EXPECT_THROW((void)resume(*engine, "repeat-named", "yes", paused.interrupt_id), std::runtime_error);
+        EXPECT_EQ(runs(probe, "left"), 2);
+    }
+    auto       engine = build(one_asker(probe), store());
+    const auto done   = resume(*engine, "repeat-named", "yes", "s0:left");
+    ASSERT_EQ(done.status(), RunStatus::Completed);
+    EXPECT_EQ(results_of(done), (std::multiset<std::string>{"left=yes"}));
+    EXPECT_EQ(runs(probe, "left"), 2) << "left finished before the stop and replays";
+}
+
+// The same for a Send: the resume names the Send that asked, which finishes
+// before the stop. Nothing of the step is pending any more, and the repeated
+// resume is accepted; the Send replays.
+TEST_P(InterruptIdentity, ARepeatedResumeNamesTheSendItAnswered) {
+    const auto probe = unique_probe("repeat-send");
+    RunConfig  config;
+    config.thread_id = "repeat-send";
+    config.input     = json{{"items", json::array({"a"})}, {"ask", json::array({"a"})}};
+    std::string send_id;
+    {
+        auto engine = build(sends(probe),
+                            std::make_shared<StopsAtASave>(store(), CheckpointPhase::Completed, 2));
+        const auto paused = engine->run(config);
+        ASSERT_EQ(paused.status(), RunStatus::Interrupted);
+        send_id = paused.interrupt_id;
+        EXPECT_NE(send_id.find(":send[0]:worker:"), std::string::npos) << send_id;
+        EXPECT_THROW((void)resume(*engine, "repeat-send", "yes", send_id), std::runtime_error);
+        EXPECT_EQ(runs(probe, "worker:a"), 2);
+    }
+    auto       engine = build(sends(probe), store());
+    const auto done   = resume(*engine, "repeat-send", "yes", send_id);
+    ASSERT_EQ(done.status(), RunStatus::Completed);
+    EXPECT_EQ(results_of(done), (std::multiset<std::string>{"anchor", "a=yes"}));
+    EXPECT_EQ(runs(probe, "worker:a"), 2) << "the Send finished before the stop and replays";
+}
+
+// approve asks and map finishes in one step; the resume answers approve by
+// default, approve finishes, and the worker map sent asks. The process stops
+// before that pause is saved. The repeated resume still answers approve, the
+// step's question, and the worker asks its own. The answer used to go to the
+// worker, the first Send that had not run, which never asked for it.
+TEST_P(InterruptIdentity, ARepeatedDefaultResumeAnswersTheSameQuestion) {
+    const auto probe = unique_probe("repeat-default");
+    RunConfig  config;
+    config.thread_id = "repeat-default";
+    config.input     = json{{"items", json::array({"x"})}, {"ask", json::array({"x"})}};
+    {
+        auto engine = build(ask_beside_sends(probe),
+                            std::make_shared<StopsAtASave>(store(), CheckpointPhase::NodeInterrupt, 2));
+        const auto paused = engine->run(config);
+        ASSERT_EQ(paused.status(), RunStatus::Interrupted);
+        ASSERT_EQ(paused.interrupt_node, "approve");
+        EXPECT_THROW((void)resume(*engine, "repeat-default", "yes"), std::runtime_error);
+        EXPECT_EQ(runs(probe, "approve"), 2);
+        EXPECT_EQ(runs(probe, "worker:x"), 1);
+    }
+    auto       engine = build(ask_beside_sends(probe), store());
+    const auto asked  = resume(*engine, "repeat-default", "yes");
+    ASSERT_EQ(asked.status(), RunStatus::Interrupted);
+    EXPECT_EQ(asked.interrupt_node, "worker") << "the worker asks its own question";
+    EXPECT_EQ(runs(probe, "approve"), 2) << "approve finished before the stop and replays";
+    const auto done = resume(*engine, "repeat-default", "x-ok");
+    ASSERT_EQ(done.status(), RunStatus::Completed);
+    EXPECT_EQ(results_of(done), (std::multiset<std::string>{"approve=yes", "x=x-ok"}));
+}
+
 INSTANTIATE_TEST_SUITE_P(Stores, InterruptIdentity, ::testing::Values(false, true),
                          [](const auto& info) { return info.param ? "Sqlite" : "InMemory"; });

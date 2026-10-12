@@ -175,8 +175,11 @@ std::optional<std::vector<std::string>> recorded_interrupt_ids(const json& metad
 /// checkpoint at `step` runs instead of replaying, in dispatch order: the
 /// ready nodes without a pending write, or, once every ready node replays,
 /// the Sends they emitted without one. Its first is the step's first paused
-/// invocation. Defined with the executor, which dispatches them.
-std::vector<std::string> paused_task_ids(int step, const std::vector<std::string>& ready,
+/// invocation. A step that paused on one ready node, `paused_node` (the
+/// checkpoint's current node), paused on it even after a resume answered it
+/// and it finished. Defined with the executor, which dispatches them.
+std::vector<std::string> paused_task_ids(int step, const std::string& paused_node,
+                                         const std::vector<std::string>& ready,
                                          const std::unordered_map<std::string, NodeResult>& replay);
 
 /// #393: the task id of static node `node` in super-step `step` ("s3:review"),

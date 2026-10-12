@@ -334,7 +334,8 @@ struct InvocationSlot {
     bool visit_limited = false;
 };
 
-std::vector<std::string> paused_task_ids(int step, const std::vector<std::string>& ready,
+std::vector<std::string> paused_task_ids(int step, const std::string& paused_node,
+                                         const std::vector<std::string>& ready,
                                          const std::unordered_map<std::string, NodeResult>& replay) {
     std::vector<std::string> ids;
     for (const auto& node : ready) {
@@ -342,6 +343,11 @@ std::vector<std::string> paused_task_ids(int step, const std::vector<std::string
         if (!replay.count(id)) ids.push_back(std::move(id));
     }
     if (!ids.empty()) return ids;
+    // Every ready node replays. When the step paused on one of them, a resume
+    // answered it and it finished before the process stopped: that is still
+    // the step's interrupt, not the Sends that have not run yet.
+    if (std::find(ready.begin(), ready.end(), paused_node) != ready.end())
+        return {make_static_task_id(step, paused_node)};
     // Every ready node replays: the step paused in its Sends, which follow
     // in ready order and then in the order each node emitted them.
     std::size_t index = 0;

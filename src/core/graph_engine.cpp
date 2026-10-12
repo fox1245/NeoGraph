@@ -464,9 +464,12 @@ std::string answered_interrupt(const ResumeContext& checkpoint, const std::strin
     }
     auto pending = detail::recorded_interrupt_ids(checkpoint.metadata);
     if (!pending)
-        pending = detail::paused_task_ids(checkpoint.start_step, checkpoint.next_nodes,
-                                          checkpoint.replay_results);
+        pending = detail::paused_task_ids(checkpoint.start_step, checkpoint.current_node,
+                                          checkpoint.next_nodes, checkpoint.replay_results);
     if (requested.empty()) return pending->empty() ? std::string{} : pending->front();
+    // A resume that the process stopped during, repeated: the Send it answered
+    // finished and replays, and nothing of the step is pending any more.
+    if (pending->empty() && checkpoint.replay_results.count(requested)) return requested;
     if (std::find(pending->begin(), pending->end(), requested) == pending->end()) {
         std::string listed;
         for (const auto& id : *pending) listed += (listed.empty() ? "'" : ", '") + id + "'";
