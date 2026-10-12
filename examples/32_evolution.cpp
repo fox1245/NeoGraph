@@ -14,9 +14,14 @@
 // program before evolve() runs; otherwise the compile gate rejects every
 // candidate with "Unknown node type" and the run exits 1 (compile_passed 0).
 //
+// The lineage JSON goes to stdout. A one-line summary of the best individual goes to stderr, so
+// `> lineage.json` stays valid JSON: `compiled` passed the compile gate, `validated` passed the
+// validator, `executed` ran to a comparable output, `correct` matched the task's expected output.
+//
 // smoke-args: --smoke
 // smoke-expect: "seed_name": "smoke_seed"
 // smoke-expect: "task": "trivial"
+// smoke-expect: best: compiled=true validated=true executed=true correct=true
 #include <neograph/graph/evolution.h>
 #include <neograph/graph/node.h>
 
@@ -116,5 +121,10 @@ int main(int argc, char** argv) {
     output["seed_name"] = seed_doc.value("name", "");
 
     std::cout << output.dump(2) << "\n";
+    const auto& best = result.best.score;
+    const auto flag = [](bool value) { return value ? "true" : "false"; };
+    std::cerr << "best: compiled=" << flag(best.compiled) << " validated=" << flag(best.validated)
+              << " executed=" << flag(best.executed) << " correct=" << flag(best.correct) << " ("
+              << best.summary << ")\n";
     return result.compile_passed > 0 && result.best.score.correct ? 0 : 1;
 }
