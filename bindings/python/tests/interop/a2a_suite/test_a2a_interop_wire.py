@@ -68,8 +68,8 @@ def test_card_served_at_well_known_path(srv):
 
 
 def test_card_validates_as_v1_agent_card(srv):
-    # One card per version (owner decision D5, as @a2a-js legacyCompat):
-    # A2A-Version 1.0 receives the pure 1.0 card.
+    # One card per version (as @a2a-js legacyCompat does): A2A-Version 1.0
+    # receives the pure 1.0 card.
     card = httpx.get(srv + "/.well-known/agent-card.json", headers={"A2A-Version": "1.0"}).json()
     _v1_ok("card.v1_schema", "AgentCard", card)
 
@@ -390,9 +390,9 @@ def test_v03_method_set(srv, method, code):
 
 # --------------------------------------------------------------------------- failure classes
 
-# The audit's section 3 mapping (owner decision D3): hook block -> REJECTED
-# before any node finished (FAILED after); interrupt -> INPUT_REQUIRED; every
-# other failure -> FAILED with the typed code in metadata and no exception text.
+# Failure mapping: hook block -> REJECTED before any node finished (FAILED
+# after); interrupt -> INPUT_REQUIRED; every other failure -> FAILED with the
+# typed code in metadata and no exception text.
 @pytest.mark.parametrize("prompt,expected_state,code", [
     ("fail", "TASK_STATE_FAILED", "NG.TaskFailed"),
     ("coded", "TASK_STATE_FAILED", "app.tool_error"),

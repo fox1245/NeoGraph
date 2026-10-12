@@ -282,8 +282,8 @@ asio::awaitable<std::optional<A2AClient::Selection>> A2AClient::select_async() {
         need_card = !card_loaded_ && !card_unavailable_;
     }
     if (need_card) {
-        // Fetch the card before the first call (owner decision D5): the
-        // interface it selects names both the dialect and the endpoint.
+        // Fetch the card before the first call: the interface it selects
+        // names both the dialect and the endpoint.
         bool failed = false;
         try {
             (void)co_await fetch_agent_card_async(false);

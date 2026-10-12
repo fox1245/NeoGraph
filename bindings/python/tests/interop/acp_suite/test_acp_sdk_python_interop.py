@@ -451,7 +451,7 @@ def test_capability_gated_methods_are_not_called_without_the_capability(verb, re
 
 
 # ---------------------------------------------------------------------------
-# failure classes -> stop reasons / errors (owner decisions D3/D6)
+# failure classes -> stop reasons / errors
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("verb,code,retryable", [

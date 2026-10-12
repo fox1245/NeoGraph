@@ -1044,9 +1044,9 @@ TEST(MCPStdioAsync, HardenedTimeoutWhileTheResponseArrivesIsATimeout) {
         << read_record(record);
 }
 
-// Owner decision for hardened stdio: a cancelled call sends
-// notifications/cancelled first, waits a short grace period, then terminates
-// the server; the session takes no more requests.
+// Hardened stdio: a cancelled call sends notifications/cancelled first, waits
+// a short grace period, then terminates the server; the session takes no more
+// requests.
 TEST(MCPStdioAsync, HardenedCancellationTellsTheServerBeforeTerminating) {
     if (!python3_available()) GTEST_SKIP() << "python not available";
     BoundaryDirectory directory;

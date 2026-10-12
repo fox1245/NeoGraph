@@ -1565,9 +1565,9 @@ asio::awaitable<json> StdioSession::exchange(
     } catch (const MCPTransportError& e) {
         if (hardened_ && (e.failure() == MCPFailure::cancelled ||
                           e.failure() == MCPFailure::timeout)) {
-            // The owner's decision for hardened sessions: notifications/
-            // cancelled first, a short grace period, then termination (it
-            // used to kill the server at once and tell it nothing).
+            // Hardened sessions: notifications/cancelled first, a short
+            // grace period, then termination, so the server is told why the
+            // request ended.
             terminate_after_cancel(initialize ? -1 : id,
                                    e.failure() == MCPFailure::cancelled ? "cancelled by the caller"
                                                                         : "request timed out");

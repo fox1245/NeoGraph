@@ -1026,8 +1026,8 @@ AgentCard A2AServer::Impl::served_card(const httplib::Request& req) const {
 void A2AServer::Impl::register_routes() {
     svr.Get("/.well-known/agent-card.json",
             [this](const httplib::Request& req, httplib::Response& res) {
-                // One card per protocol version (owner decision, as @a2a-js
-                // legacyCompat does): A2A-Version 1.x receives the pure 1.0
+                // One card per protocol version (as @a2a-js legacyCompat
+                // does): A2A-Version 1.x receives the pure 1.0
                 // card; no header (spec 3.6.2: 0.3) receives the 0.3 card,
                 // which also lists the 1.0 interface.
                 const auto version = requested_version(req);

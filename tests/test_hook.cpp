@@ -652,8 +652,8 @@ TEST(HookExecutionStates, ATargetThatTimedOutIsTimedOut) {
 }
 
 TEST(HookExecutionStates, AControllerRetryNeverRunsATimedOutTargetAgain) {
-    // The owner's decision: a Hook target that timed out is final, because
-    // it may still be running. A policy that lets the tool execution
+    // A Hook target that timed out is final, because it may still be
+    // running. A policy that lets the tool execution
     // controller retry the target (an idempotent, read-only target with
     // retry_max_attempts > 1) must not start it again after a timeout.
     class Counting final : public Tool, public ContextualAsyncTool {

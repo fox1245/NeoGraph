@@ -1,10 +1,10 @@
-// A mediated Tool call that ends without starting performed no effect (the
-// owner's decision on the normalization review). The run's deadline had
-// passed (`expired`), admission refused it (`rejected`), or the run was
-// cancelled first (`cancelled_before_start`). Every ToolEffectBroker records
-// such a call the same way: it keeps its status, it is not effect-uncertain,
-// it committed nothing, and its slot is free again, so the same call can run
-// later. These tests drive the durable SQLiteToolEffectBroker and the
+// A mediated Tool call that ends without starting performed no effect.
+// The run's deadline had passed (`expired`), admission refused it
+// (`rejected`), or the run was cancelled first
+// (`cancelled_before_start`). Every ToolEffectBroker records such a call
+// the same way: it keeps its status, it is not effect-uncertain, it
+// committed nothing, and its slot is free again, so the same call can
+// run later. These tests drive the durable SQLiteToolEffectBroker and the
 // in-memory broker a node attempt sees (the run's broker behind its
 // AttemptEffectLog) with the same cases.
 #include "../src/core/run_context_runtime.h"

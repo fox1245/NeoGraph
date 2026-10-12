@@ -96,8 +96,8 @@ def _check(test, fn):
 
 def test_probe_without_card(peer):
     # The caller never fetched the card: the client fetches it before its first
-    # call (owner decision D5) instead of probing 0.3 first, which a 1.0-only
-    # agent answers with VersionNotSupportedError (-32009, spec 3.6.2).
+    # call instead of probing 0.3 first, which a 1.0-only agent answers with
+    # VersionNotSupportedError (-32009, spec 3.6.2).
     c = _client(peer, card=False)
     task = _check(f"[{peer.name}] send.no_card_probe", lambda: c.send_message("echo probe"))
     assert task.status.state == a2a.TaskState.Completed

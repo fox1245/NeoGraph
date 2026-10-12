@@ -1181,8 +1181,8 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
                     throw;
                 } catch (const asio::system_error& error) {
                     if (error.code() == asio::error::operation_aborted) throw;
-                    // A Hook target that timed out is final (the owner's
-                    // decision): it may still be running.
+                    // A Hook target that timed out is final: it may still be
+                    // running.
                     if (!retry_after_timeout && error.code() == asio::error::timed_out) throw;
                     last_error = std::current_exception();
                 } catch (const detail::ProcessBridgeError& error) {

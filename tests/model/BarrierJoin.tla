@@ -216,8 +216,8 @@ FailedOnlyOnStall ==
 LeftoverAlternativeStalls ==
     (phase = "done" /\ ready = {} /\ leftover /\ ~explicitEnd) => outcome = "failed"
 
-\* The owner's examples: FIX's leftover signal arriving with D's exit
-\* completes; arriving one super-step after it fails.
+\* Named outcomes: FIX's leftover signal arriving with D's exit completes;
+\* arriving one super-step after it fails.
 NamedOutcomes ==
     phase = "done" =>
         /\ (g.n = 5 /\ g.route = NonExclusiveRoute) => outcome = "completed"
