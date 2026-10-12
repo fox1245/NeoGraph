@@ -409,3 +409,78 @@ def test_http_tool_calls_overlap(http_url):
     assert elapsed < 2 * delay, (
         f"3 HTTP MCP calls took {elapsed:.2f}s; serial is {3 * delay:.1f}s — "
         "the reentrant policy or native MCP async path regressed")
+
+
+# ── Cancellation and typed errors (normalization follow-ups) ────────────────
+
+def test_cancelling_the_run_stops_an_in_flight_mcp_call(stdio_client):
+    """The run's cancel token reaches the MCP call: the run stops at once as
+    cancelled instead of waiting for the server's reply."""
+    definition = _graph_calling("slow_echo", 1, '{"text": "x", "delay": 5}')
+    engine = ng.GraphEngine.compile(definition,
+                                    ng.NodeContext(tools=stdio_client.get_tools()))
+    token = ng.CancelToken()
+    cfg = ng.RunConfig()
+    cfg.thread_id = "mcp-cancel"
+    cfg.cancel_token = token
+    timer = threading.Timer(0.3, token.cancel)
+    timer.start()
+    started = time.perf_counter()
+    try:
+        with pytest.raises(RuntimeError, match="cancel"):
+            engine.run(cfg)
+    finally:
+        timer.cancel()
+    assert time.perf_counter() - started < 3.0
+
+
+def test_an_attempt_timeout_stops_an_in_flight_mcp_call(stdio_client):
+    """An attempt timeout cancels the attempt's own token, which reaches the
+    MCP call: the attempt stops in time and fails as NG.Timeout, a routable
+    failure, instead of outliving its stop deadline (NG.EffectUncertain)."""
+    class Caller(ng.GraphNode):
+        def run(self, _input):
+            return [ng.ChannelWrite("messages", [{
+                "role": "assistant", "content": "",
+                "tool_calls": [{"id": "slow", "name": "slow_echo",
+                                "arguments": '{"text": "x", "delay": 5}'}],
+            }])]
+
+        def get_name(self):
+            return "llm"
+
+    class Handler(ng.GraphNode):
+        def run(self, _input):
+            return []
+
+        def get_name(self):
+            return "handler"
+
+    ng.NodeFactory.register_type("mcp_timeout_llm", lambda _n, _c, _x: Caller())
+    ng.NodeFactory.register_type("mcp_timeout_handler", lambda _n, _c, _x: Handler())
+    definition = {
+        "schema_version": 1,
+        "name": "mcp_attempt_timeout",
+        "channels": {"messages": {"reducer": "append"},
+                     "failures": {"reducer": "append", "initial": []}},
+        "nodes": {"llm": {"type": "mcp_timeout_llm"}, "tools": {"type": "tool_dispatch"},
+                  "handler": {"type": "mcp_timeout_handler"}},
+        "edges": [{"from": "__start__", "to": "llm"}, {"from": "llm", "to": "tools"},
+                  {"from": "tools", "to": "__end__"}, {"from": "handler", "to": "__end__"}],
+        "node_retry_policies": {"tools": {"attempt_timeout_ms": 200}},
+        "failure_edges": [{"from": "tools", "to": "handler", "error_channel": "failures"}],
+    }
+    engine = ng.GraphEngine.compile(definition, ng.NodeContext(tools=stdio_client.get_tools()))
+    started = time.perf_counter()
+    result = engine.run(ng.RunConfig(thread_id="mcp-attempt-timeout"))
+    assert time.perf_counter() - started < 3.0
+    failures = result.output["channels"]["failures"]["value"]
+    assert [failure["code"] for failure in failures] == ["NG.Timeout"]
+
+
+def test_mcp_error_keeps_its_code_and_data(stdio_client):
+    with pytest.raises(mcp.MCPError) as raised:
+        stdio_client.call_tool_result("rpc_error", {})
+    assert raised.value.code == -32099
+    assert raised.value.data == {"why": "test"}
+    assert "refused by policy" in str(raised.value)

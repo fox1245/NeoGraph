@@ -93,6 +93,12 @@ def handle(request):
 
 
 def handle_request(request):
+    params = request.get("params") or {}
+    if request.get("method") == "tools/call" and params.get("name") == "rpc_error":
+        write_response({"jsonrpc": "2.0", "id": request["id"],
+                        "error": {"code": -32099, "message": "refused by policy",
+                                  "data": {"why": "test"}}})
+        return
     result = handle(request)
     if result is None:
         response = {"jsonrpc": "2.0", "id": request["id"],

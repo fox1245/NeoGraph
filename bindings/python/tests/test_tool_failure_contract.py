@@ -10,6 +10,7 @@ for both ``Tool`` (serial) and ``AsyncTool`` (offloaded) subclasses.
 """
 
 import json
+import time
 
 import neograph_engine as ng
 import pytest
@@ -25,15 +26,18 @@ def _next_type(prefix):
 
 
 class _EmitCalls(ng.GraphNode):
-    def __init__(self, name, calls):
+    def __init__(self, name, calls, delay=0.0):
         super().__init__()
         self._name = name
         self._calls = calls
+        self._delay = delay
 
     def get_name(self):
         return self._name
 
     def run(self, _input):
+        if self._delay:
+            time.sleep(self._delay)
         return [ng.ChannelWrite("messages", [{
             "role": "assistant",
             "content": "",
@@ -56,12 +60,12 @@ def _tool(base, name, body):
     return _Probe()
 
 
-def _run(tools, batch, call="target", token=None):
+def _run(tools, batch, call="target", token=None, hooks=None, metadata=None, delay=0.0):
     emit = _next_type("contract_emit")
     calls = [{"id": "call-target", "name": call, "arguments": "{}"}]
     if batch:
         calls.append({"id": "call-sibling", "name": "sibling", "arguments": "{}"})
-    ng.NodeFactory.register_type(emit, lambda name, _config, _ctx: _EmitCalls(name, calls))
+    ng.NodeFactory.register_type(emit, lambda name, _config, _ctx: _EmitCalls(name, calls, delay))
     definition = {
         "name": "python_tool_contract",
         "channels": {"messages": {"reducer": "append"}},
@@ -74,10 +78,14 @@ def _run(tools, batch, call="target", token=None):
     }
     engine = ng.GraphEngine.compile(definition, ng.NodeContext(tools=tools))
     engine.set_checkpoint_store(ng.InMemoryCheckpointStore())
+    if hooks is not None:
+        engine.set_hook_runtime(hooks)
     config = ng.RunConfig(thread_id=_next_type("contract_thread"), input={"messages": []})
     if token is not None:
         config.cancel_token = token
-    return engine.run(config)
+    if metadata is None:
+        metadata = ng.RunMetadata(run_id="contract-run", owner_scope="contract-owner")
+    return engine.run(config, metadata)
 
 
 def _seen(result, call_id="call-target"):
@@ -185,8 +193,9 @@ def test_hook_boundary_blocked_carries_invocation_id_and_state():
         inner.run(ng.RunConfig(thread_id=_next_type("inner")),
                   ng.RunMetadata(run_id="inner-run", owner_scope="owner"))
     assert raised.value.invocation_id.startswith("sha256:")
-    # A failed attempt with none left is recorded as timed_out.
-    assert raised.value.state == "timed_out"
+    # A failed attempt with none left is failed; only an elapsed deadline is
+    # timed_out.
+    assert raised.value.state == "failed"
 
 
 @pytest.mark.parametrize("batch", BATCH)
@@ -203,8 +212,9 @@ def test_hook_block_from_a_tool_stops_the_run(base, batch):
     with pytest.raises(ng.HookBoundaryBlocked) as raised:
         _run([_tool(base, "target", sub_agent), _sibling()], batch)
     assert raised.value.invocation_id.startswith("sha256:")
-    # A failed attempt with none left is recorded as timed_out.
-    assert raised.value.state == "timed_out"
+    # A failed attempt with none left is failed; only an elapsed deadline is
+    # timed_out.
+    assert raised.value.state == "failed"
 
 
 @pytest.mark.parametrize("batch", BATCH)
@@ -218,3 +228,123 @@ def test_cancelling_the_run_from_a_tool_cancels_the_run(base, batch):
 
     with pytest.raises(RuntimeError, match="run cancelled"):
         _run([_tool(base, "target", cancel), _sibling()], batch, token=token)
+
+
+# ── The engine's tool Hooks reach every graph tool call ─────────────────────
+
+def _tool_hook(phase, target):
+    data = ng.HookDefinitionData()
+    data.phase = phase
+    data.target_id = target
+    data.delivery = ng.HookDelivery.BlockingMandatory
+    data.failure_mode = ng.HookFailureMode.FailClosed
+    data.idempotency = ng.HookIdempotency.Idempotent
+    data.effect = ng.ToolEffectClass.ReadOnly
+    mapper = ng.HookInputMapper()
+    mapper.kind = ng.HookInputMapperKind.Template
+    mapper.value_template = {"tool": {"$event": "/tool_name"},
+                             "call": {"$event": "/tool_call_id"}}
+    data.input_mapper = mapper
+    return ng.HookDefinition.create(data)
+
+
+@pytest.mark.parametrize("batch", BATCH)
+@pytest.mark.parametrize("base", BASES)
+def test_engine_tool_hooks_run_for_graph_tool_calls(base, batch):
+    seen = []
+
+    def audit(arguments, event_type, _event_data):
+        seen.append((event_type, arguments["tool"], arguments["call"]))
+
+    hooks = ng.create_hook_runtime(
+        [_tool_hook(ng.HookPhase.BeforeToolExecution, "audit"),
+         _tool_hook(ng.HookPhase.AfterToolExecution, "audit")], {"audit": audit})
+    result = _run([_tool(base, "target", lambda _a: "target ok"), _sibling()], batch,
+                  hooks=hooks)
+    assert _seen(result)["content"] == "target ok"
+    calls = ["call-target"] + (["call-sibling"] if batch else [])
+    for call in calls:
+        assert sum(1 for item in seen if item[2] == call) == 2, seen
+    assert ("tool_execution", "target", "call-target") in seen
+
+
+@pytest.mark.parametrize("batch", BATCH)
+def test_a_failing_tool_hook_blocks_the_graph_call_before_it_runs(batch):
+    ran = []
+
+    def refuse(*_args):
+        raise RuntimeError("audit sink unavailable")
+
+    hooks = ng.create_hook_runtime(
+        [_tool_hook(ng.HookPhase.BeforeToolExecution, "audit")], {"audit": refuse})
+    with pytest.raises(ng.HookBoundaryBlocked) as raised:
+        _run([_tool(ng.Tool, "target", lambda _a: ran.append(1) or "ran"), _sibling()],
+             batch, hooks=hooks)
+    assert raised.value.state == "failed"
+    assert raised.value.invocation_id.startswith("sha256:")
+    assert not ran
+
+
+@pytest.mark.parametrize("batch", BATCH)
+def test_no_tool_starts_after_the_run_deadline(batch):
+    ran = []
+    result = _run([_tool(ng.Tool, "target", lambda _a: ran.append(1) or "ran"), _sibling()],
+                  batch, metadata=ng.RunMetadata(timeout_ms=50, run_id="late",
+                                                 owner_scope="contract-owner"),
+                  delay=0.2)
+    seen = _seen(result)
+    assert seen["tool_status"] == "expired"
+    assert json.loads(seen["content"])["error"] == \
+        "run deadline elapsed before the tool started"
+    assert not ran
+
+
+def test_a_hook_block_from_a_python_node_stops_the_run_unretried():
+    inner = _nested_engine_with_blocking_hook()
+    attempts = []
+
+    class _Nested(ng.GraphNode):
+        def get_name(self):
+            return "nested"
+
+        def run(self, _input):
+            attempts.append(1)
+            inner.run(ng.RunConfig(thread_id=_next_type("inner")),
+                      ng.RunMetadata(run_id="inner-run", owner_scope="owner"))
+            return []
+
+    node_type = _next_type("contract_nested_node")
+    ng.NodeFactory.register_type(node_type, lambda _n, _c, _x: _Nested())
+    engine = ng.GraphEngine.compile({
+        "name": "nested_hook_block",
+        "channels": {"value": {"reducer": "overwrite"}},
+        "nodes": {"nested": {"type": node_type}},
+        "edges": [{"from": ng.START_NODE, "to": "nested"},
+                  {"from": "nested", "to": ng.END_NODE}],
+    }, ng.NodeContext())
+    policy = ng.RetryPolicy()
+    policy.max_retries = 2
+    policy.initial_delay_ms = 1
+    engine.set_node_retry_policy("nested", policy)
+    with pytest.raises(ng.HookBoundaryBlocked) as raised:
+        engine.run(ng.RunConfig(thread_id=_next_type("outer")))
+    assert raised.value.state == "failed"
+    assert len(attempts) == 1, "a Hook block from a Python node was retried"
+
+
+# ── Text crosses the Python boundary as UTF-8, U+FFFD for ill-formed bytes ──
+
+@pytest.mark.parametrize("result, expected", [
+    pytest.param("ok \udcff end", "ok \ufffd end", id="lone-surrogate-str"),
+    pytest.param(b"ok \xff end", "ok \ufffd end", id="ill-formed-bytes"),
+])
+def test_ill_formed_tool_text_becomes_replacement_characters(result, expected):
+    seen = _seen(_run([_tool(ng.Tool, "target", lambda _a: result)], False))
+    assert seen["tool_status"] == "succeeded"
+    assert seen["content"] == expected
+
+
+def test_ill_formed_message_text_reads_back_with_replacement_characters():
+    message = ng.ChatMessage()
+    message.content = b"caf\xc3 \xff"
+    assert message.content == "caf\ufffd \ufffd"

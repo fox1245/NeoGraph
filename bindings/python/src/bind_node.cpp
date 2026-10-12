@@ -249,8 +249,8 @@ std::exception_ptr translate_node_failure(py::error_already_set& e) {
                                                      std::current_exception()));
 }
 
-// The run control signals a Python *tool* can raise, as the C++ exceptions the
-// tool failure contract recognises: a NodeInterrupt pauses the run and a
+// The run control signals a Python tool or node can raise, as the C++
+// exceptions the tool failure contract recognises: a NodeInterrupt pauses the run and a
 // HookBoundaryBlocked (typically escaping a nested engine run inside the tool)
 // stops it, exactly as they would from a C++ tool. Everything else stays the
 // Python error, which the dispatcher turns into a tool message. Same
@@ -459,7 +459,12 @@ private:
     /// GIL must be held.
     std::string call_python(const json& arguments) {
         py::object args_py = json_to_py(arguments);
-        return py_obj_.attr("execute")(args_py).cast<std::string>();
+        py::object result = py_obj_.attr("execute")(args_py);
+        // A str result crosses as UTF-8; lone surrogates become U+FFFD, the
+        // rule every tool result follows. bytes pass through, and the
+        // execution boundary repairs any ill-formed UTF-8 in them.
+        if (py::isinstance<py::str>(result)) return py_to_utf8(result);
+        return result.cast<std::string>();
     }
 
     // `arguments` is a coroutine PARAMETER, taken by value, and not a lambda
@@ -522,7 +527,11 @@ private:
         NodeResult result;
         // Captured under the GIL, thrown after releasing it — see
         // translate_node_interrupt.
-        std::optional<neograph::graph::NodeInterrupt> interrupt;
+        // The run control signals a node can raise are the ones a tool can:
+        // a NodeInterrupt pauses the run and a HookBoundaryBlocked (from a
+        // nested engine run) stops it, never retried or routed, exactly as
+        // from a C++ node.
+        PythonToolControlSignal signal;
         std::exception_ptr failure;
         {
             py::gil_scoped_acquire g;
@@ -532,12 +541,12 @@ private:
                 py::object res = py_obj_.attr("run")(py_input);
                 result = coerce_to_node_result(res);
             } catch (py::error_already_set& e) {
-                interrupt = translate_node_interrupt(e);
+                signal = translate_tool_control_signal(e);
                 // A real error, not a pause: a typed node failure.
-                if (!interrupt) failure = translate_node_failure(e);
+                if (!signal) failure = translate_node_failure(e);
             }
         }
-        if (interrupt) throw *interrupt;
+        if (signal) signal.raise();
         if (failure) std::rethrow_exception(failure);
         return result;
     }

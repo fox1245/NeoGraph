@@ -47,8 +47,29 @@ void init_mcp(py::module_& m) {
         "MCP (Model Context Protocol) client — connect to a remote tool server, "
         "discover its catalogue, and hand the tools straight to a graph node.");
 
-    py::register_exception<neograph::mcp::MCPError>(mcp, "MCPError",
-                                                     PyExc_RuntimeError);
+    auto mcp_error = py::register_exception<neograph::mcp::MCPError>(mcp, "MCPError",
+                                                                      PyExc_RuntimeError);
+    // Registered after the plain translator, so pybind11 tries it first: the
+    // Python exception keeps the JSON-RPC error's `code` and `data`, as
+    // A2ARpcError and HookBoundaryBlocked keep their typed fields.
+    py::register_exception_translator([](std::exception_ptr pointer) {
+        if (!pointer) return;
+        try {
+            std::rethrow_exception(pointer);
+        } catch (const neograph::mcp::MCPError& error) {
+            try {
+                py::object type = py::module_::import("neograph_engine._neograph")
+                                      .attr("mcp").attr("MCPError");
+                py::object instance = type(utf8_to_py(error.what()));
+                instance.attr("code") = py::int_(error.code());
+                instance.attr("data") = json_to_py(error.data());
+                PyErr_SetObject(type.ptr(), instance.ptr());
+            } catch (py::error_already_set& failure) {
+                failure.restore();
+            }
+        }
+    });
+    (void)mcp_error;
 
     py::class_<neograph::mcp::MCPClientConfig>(mcp, "MCPClientConfig")
         .def(py::init<>())

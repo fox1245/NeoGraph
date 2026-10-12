@@ -79,12 +79,14 @@ void init_provider(py::module_& m) {
         .def(py::init([](std::string role, std::string content, std::vector<ToolCall> calls, std::string call_id, std::string tool_name, std::vector<std::string> images) {
             ChatMessage value; value.role=std::move(role); value.content=std::move(content); value.tool_calls=std::move(calls); value.tool_call_id=std::move(call_id); value.tool_name=std::move(tool_name); value.image_urls=std::move(images); return value;
         }), py::arg("role") = "", py::arg("content") = "", py::arg("tool_calls") = std::vector<ToolCall>{}, py::arg("tool_call_id") = "", py::arg("tool_name") = "", py::arg("image_urls") = std::vector<std::string>{})
-        .def_readwrite("role", &ChatMessage::role).def_readwrite("content", &ChatMessage::content)
+        .def_readwrite("role", &ChatMessage::role)
+        // Text crosses the boundary as UTF-8 with U+FFFD for ill-formed bytes.
+        .def_property("content", [](const ChatMessage& v) { return utf8_to_py(v.content); }, [](ChatMessage& v, py::handle x) { v.content = py::isinstance<py::bytes>(x) ? x.cast<std::string>() : py_to_utf8(x); })
         .def_readwrite("tool_calls", &ChatMessage::tool_calls).def_readwrite("tool_call_id", &ChatMessage::tool_call_id)
         .def_readwrite("tool_name", &ChatMessage::tool_name).def_readwrite("image_urls", &ChatMessage::image_urls)
         .def_readwrite("tool_status", &ChatMessage::tool_status).def_readwrite("tool_retryable", &ChatMessage::tool_retryable)
         .def_readwrite("tool_effect_uncertain", &ChatMessage::tool_effect_uncertain)
-        .def_readwrite("reasoning", &ChatMessage::reasoning)
+        .def_property("reasoning", [](const ChatMessage& v) { return utf8_to_py(v.reasoning); }, [](ChatMessage& v, py::handle x) { v.reasoning = py::isinstance<py::bytes>(x) ? x.cast<std::string>() : py_to_utf8(x); })
         .def_property("reasoning_details", [](const ChatMessage& v) { return json_to_py(v.reasoning_details); }, [](ChatMessage& v, py::object x) { v.reasoning_details = py_to_json(x); });
     py::class_<ChatTool>(m, "ChatTool")
         .def(py::init<>())

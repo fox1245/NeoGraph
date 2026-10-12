@@ -22,6 +22,16 @@ namespace neograph::pybind {
 
 namespace py = ::pybind11;
 
+/// Python text to UTF-8 under the one boundary rule for text (reference,
+/// "Tool failure contract"): a `str` holding lone surrogates (say, from
+/// `surrogateescape` decoding) becomes U+FFFD for each maximal ill-formed
+/// subpart instead of failing the conversion. Other objects go through str().
+std::string py_to_utf8(py::handle text);
+
+/// UTF-8 to a Python `str`; each maximal ill-formed subpart becomes U+FFFD
+/// instead of raising UnicodeDecodeError.
+py::str utf8_to_py(const std::string& text);
+
 /// Convert a Python object (dict / list / tuple / str / bool / int /
 /// float / None) into a neograph::json value. Tuples and lists both
 /// map to JSON arrays. Anything else falls through to ``str()``.
