@@ -140,7 +140,7 @@ Program 把 Core 图包进带有持久标识、预算和准入(admission)的生�
 | 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | yes | 基于 stdio 的 MCP：服务器是不经过网络栈的子进程，由 ReAct 循环调用它的工具。使用脚本化模型和只依赖标准库的服务器。 |
 | 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | yes | 基于 streamable HTTP 的 MCP：发现服务器的工具并交给 ReAct 循环。演示服务器只用 Python 标准库，模型由脚本代替。 |
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | yes | 带人工批准的 MCP：`interrupt_before` 在 MCP 工具调用前暂停图，展示待执行的调用，再用 `resume()` 继续，不会重复模型调用。 |
-| 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | service | 结合 `Send` 的 MCP：一个 planner 为每个 MCP 工具发出一次调用，调用并行执行。不需要模型，但需要 MCP 服务器在运行。 |
+| 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | yes | 结合 `Send` 的 MCP：planner 为每个工具发出一次调用，三次调用在同一个 super-step 内重叠执行。不使用模型。 |
 | 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | yes | 一个智能体把两个 MCP 服务器（HTTP 与 stdio）的工具合并为一个列表，它的两次调用分别发往不同的服务器。 |
 | 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | yes | MCP 上的操作员反馈：第一个回答只是猜测，操作员的回复进入历史记录，第二轮调用工具。 |
 | 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | service | 逆向工程智能体：通过 stdio 上的 GhidraMCP 为被剥离符号的二进制恢复函数名。需要 Ghidra 和 key。 |

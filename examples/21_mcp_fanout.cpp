@@ -1,224 +1,123 @@
-// NeoGraph Example 21: MCP + Send Fan-out
+// NeoGraph Example 21: MCP tool calls fanned out with Send
 //
-// Pattern: one planner emits a Send per MCP tool call;
-// asio::experimental::make_parallel_group runs them concurrently;
-// each fan-out branch hits the MCP server independently; a
-// summarizer aggregates the results.
+// One planner node emits a Send per tool call. Each Send runs a node that calls the MCP
+// server, and the three calls overlap inside one super-step instead of running one after
+// another. No model is involved: the planner picks the calls itself, so the output is
+// deterministic. The server is examples/mcp_demo_server.py (standard library only).
 //
-// Compared to a plain ReAct loop, this collapses N sequential tool calls
-// into a single super-step — useful when the model needs several
-// independent lookups to answer one question.
+// Usage:
+//   python3 examples/mcp_demo_server.py --http 8765          # terminal 1
+//   ./example_mcp_fanout http://127.0.0.1:8765/mcp           # terminal 2
 //
-// Usage (after starting examples/demo_mcp_server.py):
-//   ./example_mcp_fanout
-//
-// No remote LLM required: planner hand-picks three MCP tool calls (time /
-// weather / calculator) so the demo is deterministic and stays offline
-// for the LLM axis.
-//
-// smoke-skip: needs a running MCP HTTP server (python examples/demo_mcp_server.py)
+// smoke-companion: @PYTHON@ @SRC@/examples/mcp_demo_server.py --http @PORT@
+// smoke-wait-port: @PORT@
+// smoke-args: http://127.0.0.1:@PORT@/mcp
+// smoke-expect: [calculate] 65537
+// smoke-expect: [get_weather] Tokyo: 22C, clear
+// smoke-expect: findings: 3
+// smoke-forbid: [neograph] lint
 
 #include <neograph/mcp/client.h>
 #include <neograph/neograph.h>
 
-#include <chrono>
+#include <algorithm>
 #include <iostream>
 #include <memory>
 #include <string>
-#include <thread>
 
 using namespace neograph;
 using namespace neograph::graph;
 
-// =========================================================================
-// PlannerNode — emits one Send per MCP tool we want to run in parallel.
-// =========================================================================
+namespace {
+
+// Emits one Send per MCP call. Each Send's payload is written on its own branch,
+// so the caller node reads tool_name and tool_args from its state.
 class PlannerNode : public GraphNode {
 public:
     asio::awaitable<NodeOutput> run(NodeInput) override {
-        // Each Send's `input` is injected as channel writes on the
-        // spawned branch, so the mcp_caller can read tool_name /
-        // tool_args.
-        struct Task { std::string tool; json args; };
-        std::vector<Task> tasks = {
-            {"get_current_time", json{{"timezone", "UTC"}}},
-            {"get_weather",      json{{"city", "Tokyo"}}},
-            {"calculate",        json{{"expression", "2 ** 16 + 1"}}},
+        const std::pair<const char*, json> calls[] = {
+            {"get_current_time", {{"timezone", "UTC"}}},
+            {"get_weather", {{"city", "Tokyo"}}},
+            {"calculate", {{"expression", "2 ** 16 + 1"}}},
         };
-
         NodeOutput out;
-        out.writes.push_back(ChannelWrite{"plan", json(tasks.size())});
-        for (const auto& t : tasks) {
-            out.sends.push_back(Send{"mcp_caller", json{
-                {"tool_name", t.tool},
-                {"tool_args", t.args}
-            }});
-        }
+        for (const auto& [tool, args] : calls)
+            out.sends.push_back(Send{"mcp_caller", json{{"tool_name", tool}, {"tool_args", args}}});
         co_return out;
     }
     std::string get_name() const override { return "planner"; }
 };
 
-// =========================================================================
-// MCPCallerNode — one branch of the fan-out. Reads tool_name / tool_args
-// from its Send-injected state, invokes the shared MCP client, appends to
-// `findings`.
-// =========================================================================
-class MCPCallerNode : public GraphNode {
-    std::shared_ptr<neograph::mcp::MCPClient> client_;
+// One branch of the fan-out: call the tool, append what it returned to "findings".
+class CallerNode : public GraphNode {
 public:
-    explicit MCPCallerNode(std::shared_ptr<neograph::mcp::MCPClient> c)
-      : client_(std::move(c)) {}
+    explicit CallerNode(std::shared_ptr<mcp::MCPClient> client) : client_(std::move(client)) {}
 
     asio::awaitable<NodeOutput> run(NodeInput in) override {
-        std::string tool = in.state.get("tool_name").get<std::string>();
-        json        args = in.state.get("tool_args");
-
-        auto t0 = std::chrono::steady_clock::now();
-        std::string content;
-        try {
-            json result = client_->call_tool(tool, args);
-            if (result.contains("content") && result["content"].is_array()) {
-                for (const auto& item : result["content"]) {
-                    if (item.value("type", "") == "text") {
-                        if (!content.empty()) content += "\n";
-                        content += item.value("text", "");
-                    }
-                }
-            } else {
-                content = result.dump();
-            }
-        } catch (const std::exception& e) {
-            content = std::string("(error: ") + e.what() + ")";
-        }
-        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - t0).count();
-
+        const std::string tool = in.state.get("tool_name").get<std::string>();
+        const auto reply = co_await client_->call_tool_result_async(tool, in.state.get("tool_args"));
         NodeOutput out;
-        out.writes.push_back(ChannelWrite{"findings", json::array({json{
-            {"tool", tool},
-            {"args", args},
-            {"result", content},
-            {"elapsed_ms", elapsed_ms}
-        }})});
+        out.writes.push_back(ChannelWrite{
+            "findings", json::array({json{{"tool", tool}, {"text", reply.content[0]["text"]}}})});
         co_return out;
     }
     std::string get_name() const override { return "mcp_caller"; }
+
+private:
+    std::shared_ptr<mcp::MCPClient> client_;
 };
 
-// =========================================================================
-// SummarizerNode — prints each finding; also writes a final string.
-// =========================================================================
-class SummarizerNode : public GraphNode {
-public:
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto findings = in.state.get("findings");
-        std::string summary = "=== MCP fan-out summary ===\n";
-        if (findings.is_array()) {
-            for (const auto& f : findings) {
-                summary += "  [" + f.value("tool", "?") + "] "
-                        +  f.value("result", "")
-                        +  "   (" + std::to_string(f.value("elapsed_ms", 0)) + " ms)\n";
-            }
-        }
-        NodeOutput out;
-        out.writes.push_back(ChannelWrite{"summary", json(summary)});
-        co_return out;
-    }
-    std::string get_name() const override { return "summarizer"; }
-};
+}  // namespace
 
 int main(int argc, char** argv) {
-    const std::string mcp_url = (argc >= 2) ? argv[1] : "http://localhost:8000/mcp";
-
+    const std::string url = argc > 1 ? argv[1] : "http://127.0.0.1:8765/mcp";
     try {
-    // One shared MCPClient — all fan-out branches reuse it. HTTP client is
-    // session-per-rpc under the hood; for stdio the shared session would be
-    // reused across tasks too (see example 22).
-    //
-    // initialize() makes a live HTTP round-trip and throws (e.g. on a 404
-    // from a wrong URL or a server that's down). It used to sit outside any
-    // try/catch, so a one-character URL typo escaped main and aborted the
-    // process with std::terminate (issue #65). Wrapping the whole body keeps
-    // that a friendly error + non-zero exit instead.
-    auto client = std::make_shared<neograph::mcp::MCPClient>(mcp_url);
-    client->initialize();
+        // One client is shared by every branch.
+        auto client = std::make_shared<mcp::MCPClient>(url);
+        client->initialize("example-mcp-fanout");
 
-    // Register custom node types so the JSON graph can reference them.
-    auto& factory = NodeFactory::instance();
-    factory.register_type("planner",
-        [](const std::string&, const json&, const NodeContext&) {
+        auto& factory = NodeFactory::instance();
+        factory.register_type("planner", [](const std::string&, const json&, const NodeContext&) {
             return std::make_unique<PlannerNode>();
         });
-    factory.register_type("mcp_caller",
-        [client](const std::string&, const json&, const NodeContext&) {
-            return std::make_unique<MCPCallerNode>(client);
-        });
-    factory.register_type("summarizer",
-        [](const std::string&, const json&, const NodeContext&) {
-            return std::make_unique<SummarizerNode>();
+        factory.register_type("mcp_caller", [client](const std::string&, const json&, const NodeContext&) {
+            return std::make_unique<CallerNode>(client);
         });
 
-    json definition = {
-        {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
-        {"name", "mcp_fanout"},
-        {"channels", {
-            {"plan",       {{"reducer", "overwrite"}}},
-            {"tool_name",  {{"reducer", "overwrite"}}},
-            {"tool_args",  {{"reducer", "overwrite"}}},
-            {"findings",   {{"reducer", "append"}}},
-            {"summary",    {{"reducer", "overwrite"}}}
-        }},
-        {"nodes", {
-            {"planner",    {{"type", "planner"}}},
-            {"mcp_caller", {{"type", "mcp_caller"}}},
-            {"summarizer", {{"type", "summarizer"}}}
-        }},
-        {"edges", json::array({
-            {{"from", "__start__"},  {"to", "planner"}},
-            // Send-spawned mcp_caller runs in parallel in the same super-step;
-            // after the barrier, control flows from planner to summarizer.
-            {{"from", "planner"},    {"to", "summarizer"}},
-            {{"from", "summarizer"}, {"to", "__end__"}}
-        })}
-    };
+        const json definition = {
+            {"schema_version", TOPOLOGY_SCHEMA_VERSION},
+            {"name", "mcp_fanout"},
+            {"channels", {{"tool_name", {{"reducer", "overwrite"}}},
+                          {"tool_args", {{"reducer", "overwrite"}}},
+                          {"findings", {{"reducer", "append"}}}}},
+            {"nodes", {{"planner", {{"type", "planner"}}}, {"mcp_caller", {{"type", "mcp_caller"}}}}},
+            {"edges", {{{"from", "__start__"}, {"to", "planner"}},
+                       {{"from", "planner"}, {"to", "__end__"}}}},
+        };
 
-    NodeContext ctx;
-    // 3 MCP 호출을 같은 super-step 에서 동시에 보내려면 워커 수를 늘려야 함.
-    // v1.0 부터 기본 워커 수가 1 이라 명시 안 하면 세 호출이 순차로 깎여서
-    // wall-time 이 합산된다.
-    auto         workers = std::thread::hardware_concurrency();
-    EngineConfig engine_config;
-    engine_config.node_context = ctx;
-    engine_config.worker_count = workers > 0 ? workers : 4u;
-    auto engine                = GraphEngine::build(definition, std::move(engine_config));
+        // The branches overlap only with more than one worker. mcp_caller is reached only
+        // through Send, which the linter cannot see, so its "unreachable" notice is switched off.
+        EngineConfig config;
+        config.worker_count = 3;
+        config.stderr_notices = false;
+        auto engine = GraphEngine::build(definition, std::move(config));
 
-    std::cout << "[*] Fanning out 3 MCP tool calls in parallel...\n\n";
+        const auto result = engine->run(RunConfig{});
 
-    auto t0 = std::chrono::steady_clock::now();
-    RunConfig cfg;
-    auto r = engine->run(cfg);
-    auto wall = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - t0).count();
-
-    std::cout << "Trace: ";
-    for (size_t i = 0; i < r.execution_trace.size(); ++i) {
-        std::cout << r.execution_trace[i];
-        if (i + 1 < r.execution_trace.size()) std::cout << " → ";
-    }
-    std::cout << " → END\n\n";
-
-    // State JSON nests each channel under channels.<name>.value.
-    auto channels  = r.output.value("channels", neograph::json::object());
-    auto summary_v = channels.value("summary", neograph::json::object())
-                            .value("value", std::string("(missing)"));
-    std::cout << summary_v << "\n";
-    std::cout << "Wall clock: " << wall << " ms (all 3 MCP calls concurrent)\n";
-    return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "\nError: " << e.what() << "\n";
-        std::cerr << "Is the MCP server running at " << mcp_url
-                  << "? Start it with: python examples/demo_mcp_server.py\n";
+        // Branches finish in any order: sort by tool name before printing.
+        std::vector<json> sorted;
+        for (const auto& finding : result.channel<json>("findings")) sorted.push_back(finding);
+        std::sort(sorted.begin(), sorted.end(), [](const json& a, const json& b) {
+            return a["tool"].get<std::string>() < b["tool"].get<std::string>();
+        });
+        for (const auto& finding : sorted)
+            std::cout << "[" << finding["tool"].get<std::string>() << "] "
+                      << finding["text"].get<std::string>() << "\n";
+        std::cout << "findings: " << sorted.size() << "\n";
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "Error: " << error.what() << "\n"
+                  << "Is an MCP server listening at " << url << "?  python3 examples/mcp_demo_server.py --http 8765\n";
         return 1;
     }
 }

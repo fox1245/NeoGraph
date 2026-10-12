@@ -140,7 +140,7 @@ Program은 Core 그래프를 내구성 있는 식별자, 예산, 승인(admissio
 | 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | yes | stdio 기반 MCP: 서버가 네트워크 스택 없는 자식 프로세스이고, ReAct 루프가 그 도구를 호출합니다. 스크립트 모델과 표준 라이브러리 서버를 씁니다. |
 | 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | yes | streamable HTTP 기반 MCP: 서버의 도구를 찾아 ReAct 루프에 넘깁니다. 데모 서버는 표준 라이브러리만 쓰는 Python이고 모델은 스크립트로 대신합니다. |
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | yes | 사람의 승인을 받는 MCP: `interrupt_before`가 MCP 도구 호출 앞에서 그래프를 멈추고, 대기 중인 호출을 보여 준 뒤 `resume()`으로 모델 호출을 되풀이하지 않고 이어 갑니다. |
-| 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | service | `Send`를 쓰는 MCP: planner 하나가 MCP 도구마다 호출을 만들고 호출들이 병렬로 실행됩니다. 모델은 없지만 MCP 서버가 실행 중이어야 합니다. |
+| 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | yes | `Send`를 쓰는 MCP: planner가 도구마다 호출 하나를 만들고, 세 호출이 한 super-step 안에서 겹쳐 실행됩니다. 모델은 쓰지 않습니다. |
 | 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | yes | 에이전트 하나가 MCP 서버 두 개(HTTP와 stdio)의 도구를 하나의 목록으로 합쳐 쓰고, 두 호출이 서로 다른 서버로 갑니다. |
 | 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | yes | MCP 위의 운영자 피드백: 첫 답은 추측이고, 운영자의 답장이 대화 기록에 들어가며, 두 번째 라운드에서 도구를 호출합니다. |
 | 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | service | 리버스 엔지니어링 에이전트: stdio의 GhidraMCP로 스트립된 바이너리의 함수 이름을 복원합니다. Ghidra와 키가 필요합니다. |
