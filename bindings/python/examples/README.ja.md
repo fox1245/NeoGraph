@@ -1,9 +1,9 @@
 <!-- neograph-i18n: source=bindings/python/examples/README.md locale=ja source_sha256=5ec25b467bef853ac9df52be725f8c16b6c63aef9ab5f6f5b64c974749579bee -->
-# Python API の例
+# Python APIのサンプル
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-この28個のスクリプトは、グラフの状態、ルーティング、ツール、プロバイダーへのリクエスト、プロトコルのホスティングを示します。まずオフラインの例から始めてください。ホスト型モデルへの呼び出しには認証情報の明示的な設定が必要で、プロバイダーの利用料金が発生します。
+この28本のスクリプトで、グラフのステート、ルーティング、ツール、プロバイダーへのリクエスト、プロトコルのホスティングを確認できます。まずはオフラインで動くサンプルから始めてください。ホスト型のモデルを呼び出すサンプルには、認証情報の明示的な設定が必要で、プロバイダーの料金がかかります。
 
 ## セットアップ
 
@@ -12,62 +12,62 @@ pip install neograph-engine
 python 01_minimal.py
 ```
 
-コマンドはこのディレクトリで実行してください。`python-dotenv` は任意です。`_common.py` で例またはリポジトリ内の最も近い `.env` を読み込む場合にインストールしてください。エクスポート済みの環境変数が優先されます。ホスト型サービスの認証情報が欠けている場合はエラーであり、検証の成功にはなりません。
+コマンドは、このディレクトリで実行します。`python-dotenv` は必須ではありません。`_common.py` に、最も近いサンプルまたはリポジトリの `.env` を読み込ませたい場合にインストールしてください。エクスポート済みの環境変数が優先されます。ホスト型の認証情報が不足している場合はエラーになります。検証が成功したことにはなりません。
 
-wheel の代わりにソースビルドで実行するには、`-DNEOGRAPH_BUILD_PYBIND=ON` で構成し、`PYTHONPATH` にビルドディレクトリを設定してください。ビルドツリーはパッケージの Python 依存関係をインストールしないため、先に `pip install 'pydantic>=2' certifi` を実行してください。`import neograph_engine` には pydantic が必要です。certifi がない場合、TLS はホストのトラストストアを使います。
+ソースからビルドしたものを使う場合は、`-DNEOGRAPH_BUILD_PYBIND=ON` を指定して構成し、`PYTHONPATH` にビルドディレクトリーを設定します。ビルドツリーでは、パッケージのPython依存関係はインストールされません。先に `pip install 'pydantic>=2' certifi` を実行してください。`import neograph_engine` にはpydanticが必要です。certifiがない場合、TLSにはホストの信頼ストアが使われます。
 
-ホスト型サービスを使う例では、`OPENAI_API_KEY` を設定し、必要に応じて `OPENAI_MODEL`（既定値は `gpt-4.1-mini`）も設定してください。`_common.py` は閉じた形式の OpenAI Chat または Responses 記述子を受け入れ、`SchemaProvider` を構築します。型付き SDK は libcurl HTTP を使います。削除されたプロバイダークラス、完了パラメーター、WebSocket 経路、トランスポートバックエンドの選択機能は利用できません。
+ホスト型のサンプルでは、`OPENAI_API_KEY` を設定します。`OPENAI_MODEL` は任意です（デフォルトは `gpt-4.1-mini`）。`_common.py` は、クローズドなOpenAIのChatまたはResponsesのディスクリプターをadmissionに通してから、`SchemaProvider` を作ります。型付きSDKはlibcurlのHTTPを使います。削除済みのプロバイダークラス、completionパラメーター、WebSocketの経路、トランスポートバックエンドのセレクターは、使えません。
 
-キーを使わずにプロトコルを検証するには、`OPENAI_API_BASE` を Chat/Responses プロトコルを忠実に実装したループバックの接続先に設定してください。その接続先は、Python のモックを返すのではなく、例が使うルートとレスポンス形式を実装する必要があります。ローカル TLS CA には `NG_EXAMPLE_CA_FILE` を使ってください。代わりに `NG_PROVIDER_DESCRIPTOR` で、ゲートウェイのプレフィックス、ルート、許可するヘッダーを含む、完全な受け入れ済み記述子の JSON ファイルを指定できます。ベース URL は完全な `/v1/chat/completions` ルートではありません。型付きリクエストと outcome の契約については、[Python バインディングガイド](../../../docs/python-binding.md)を参照してください。
+キーなしでプロトコルの適格性確認を行う場合は、`OPENAI_API_BASE` に、実物に忠実なループバックのChat／Responses peerを指定します。このpeerは、サンプルが使うルートとレスポンスの形を実装している必要があります。Pythonのモックを返すものではいけません。ローカルのTLS CAには、`NG_EXAMPLE_CA_FILE` を使います。別の方法として、`NG_PROVIDER_DESCRIPTOR` に、admission済みの完全なディスクリプターのJSONファイルを指定することもできます。ゲートウェイのプレフィックス、ルート、許可するヘッダーも、そこに含めます。ベースURLは、`/v1/chat/completions` までを含む完全なルートではありません。型付きのリクエストと結果の契約については、[Pythonバインディングガイド](../../../docs/python-binding.md)を参照してください。
 
-## 索引と期待される動作
+## 一覧と期待される動作
 
-各項目は `python <file>` で実行してください。Linux x86_64 のスモーク実行では、両方の調査アプリを含む一部の型付き provider アプリケーションを、認証情報不要の localhost ピアで実行しました。すべてのスクリプト、ホスト型サービス、リリース対象プラットフォームの検証ではなく、リモート CI と公開はまだ完了していません。範囲は[現在のリリースの実行記録](../../../CHANGELOG.md#unreleased)を参照してください。表は期待される動作を示し、モデルの文言は決定的ではありません。
+各サンプルは、`python <file>` で実行します。Linux x86_64でのスモークテストでは、認証情報が不要なlocalhostのpeerに対して、2つのリサーチアプリを含む、型付きプロバイダーを使ういくつかのアプリケーションを動かしました。すべてのスクリプト、ホスト型のベンダー、リリース対象のプラットフォームの適格性確認が済んだわけではありません。リモートのCIと公開も、まだ済んでいません。対象の範囲は、[現在のリリースのエビデンス](../../../CHANGELOG.md#unreleased)を参照してください。表に示すのは期待される動作で、モデルの出力する文言が決まっているわけではありません。
 
 | # | ファイル | 前提条件 | 期待される動作 |
 |---|------|---------------|-------------------|
-| 01 | [`01_minimal.py`](01_minimal.py) | なし | カスタムノードが21を2倍して42にします。 |
-| 02 | [`02_tool_dispatch.py`](02_tool_dispatch.py) | なし | スクリプトで指定したツール呼び出しが `tool_dispatch` を通り、計算機が `42` を返します。 |
-| 03 | [`03_send_fanout.py`](03_send_fanout.py) | なし | 8本の `Send` 分岐が平方数 `[0, 1, 4, 9, 16, 25, 36, 49]` をマージします。追加順序は仮定しません。 |
-| 04 | [`04_async_concurrent.py`](04_async_concurrent.py) | なし | 8回の非同期実行が `[0, 2, 4, 6, 8, 10, 12, 14]` を生成し、ストリーミング実行がノードイベントを出力します。 |
-| 05 | [`05_openai_provider.py`](05_openai_provider.py) | Chat 接続先またはホスト型サービスのキー | `llm_call` が `hello world` と述べるアシスタントメッセージを書き込みます。 |
-| 06 | [`06_react_agent.py`](06_react_agent.py) | Responses 接続先またはホスト型サービスのキー | モデルが発行する `calc` 呼び出しが `4053` を返し、その後モデルが最終回答を示します。 |
-| 07 | [`07_checkpoint_hitl.py`](07_checkpoint_hitl.py) | なし | チェックポイントが支払いのディスパッチ前に一時停止し、承認すると模擬支払いをちょうど1回再開します。金銭は請求されません。 |
-| 08 | [`08_intent_routing.py`](08_intent_routing.py) | Chat 接続先またはホスト型サービスのキー | 3つの質問を数学、翻訳、一般の専門家へ振り分け、各専門家が回答を書き込みます。 |
-| 09 | [`09_state_management.py`](09_state_management.py) | なし | Alpha のカウントが11に達し、beta がその値から分岐します。未知のスレッドにはチェックポイントがありません。 |
-| 10 | [`10_command_routing.py`](10_command_routing.py) | なし | 入力200、50、-10が `Command` を通じて accept、manual、reject ノードを選びます。 |
-| 11 | [`11_reflexion.py`](11_reflexion.py) | Chat 接続先またはホスト型サービスのキー | Actor/critic の呼び出しが振り返りを次の試行へ引き継ぎ、`ok` またはスーパーステップの上限で停止します。これは回数を制限した学習用の実装です。 |
-| 12 | [`12_self_ask.py`](12_self_ask.py) | Chat 接続先またはホスト型サービスのキー | 最終回答の前に、中間の質問と回答をスクラッチパッドへ蓄積します。検索サービスは接続していません。 |
-| 13 | [`13_multi_agent_debate.py`](13_multi_agent_debate.py) | Chat 接続先またはホスト型サービスのキー | 2本の `Send` 分岐が対立する議論を生成し、1人の判定役がマージされた議論を読みます。 |
-| 14 | [`14_graph_to_json.py`](14_graph_to_json.py) | なし | 2倍した結果42と、保存された `my_graph.json` 定義を得ます。 |
-| 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | 先に14を実行 | 保存した定義が5を10に、100を200にします。カスタムノード型は別途登録します。 |
-| 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | Responses 接続先/キー、`gradio` | 通常のチャット、または3つの質問に基づく調査レポートを生成します。調査役はウェブ検索ではなくモデルの知識を使います。 |
-| 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | Responses 接続先/キー、`gradio`、`requests`、任意で Crawl4AI/Postgres | `CRAWL4AI_URL` で実際の `/md` 検索を、`NEOGRAPH_PG_DSN` で永続的なエンジンチェックポイントを有効にします。設定済みサービスの失敗を黙って別の処理に置き換えることはありません。両方とも未設定の場合は、モデルのみの調査とインメモリ状態であることを明示します。Gradio の履歴は自動復元されません。 |
-| 18 | [`18_node_cache.py`](18_node_cache.py) | Chat 接続先またはホスト型サービスのキー | 2つのトピックに対する5回の実行で、プロバイダーを使うノードは2回実行されます。同じ入力ではキャッシュ済みの書き込みを再生します。固定の遅延時間は保証しません。 |
-| 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | なし | スクリプトで指定した5つのトークンイベントが `Octopuses have three hearts.` とメッセージストリームのチャンクを構成します。 |
-| 20 | [`20_otel_tracing.py`](20_otel_tracing.py) | `opentelemetry-api`、`opentelemetry-sdk` | コンソールのスパンが実行全体と3つのノードを記録し、最終的な経路は `['A', 'B', 'C']` になります。 |
-| 21 | [`21_http2_transport.py`](21_http2_transport.py) | TLS Chat 接続先/キー、libcurl の HTTP/2 対応 | 同じ SDK を通じて HTTP/1.1 と HTTP/2 のリクエストを比較します。ネゴシエートされたプロトコルは別途確認してください。所要時間はエンドポイントに依存します。 |
-| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | Chat 接続先またはホスト型サービスのキー | プロファイル JSON を採点し、失敗後に修正したグラフを要求し、再コンパイルして再試行します。登録済みノード型だけを受け入れます。モデルが成功しないまま反復回数の上限に達する場合があります。 |
-| 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | Chat 接続先またはホスト型サービスのキー | 受け入れたグラフの書き換えをまたいで会話のチェックポイントを保持し、バージョンとハッシュを `__graph_meta__` に記録します。このメタデータはアプリケーションレベルのもので、権威あるリプレイの証拠ではありません。 |
-| 24 | [`24_tool_approval_gate.py`](24_tool_approval_gate.py) | なし | 兄弟関係にあるいずれかのツールが実行される前に停止します。拒否では `list_files` だけを、承認では両方を1回ずつ実行します。シェル操作は模擬処理です。 |
-| 25 | [`25_async_tools.py`](25_async_tools.py) | なし | 直列の `Tool` と I/O 待ちを重ねて実行する `AsyncTool` を比較し、CPython GIL の境界を示します。時間比は観測値であり、合格基準ではありません。 |
-| 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | MCP を有効にしたビルド | 実際のローカル JSON-RPC MCP 接続先を起動し、`fetch` を検出し、明示的な再入可能ポリシーで3回の呼び出しを実行します。外部ネットワークもキーも使いません。 |
-| 27 | [`27_a2a_server.py`](27_a2a_server.py) | Python 3.10+、`neograph-engine[a2a]` | `127.0.0.1:9999` でエージェントカードと A2A JSON-RPC を提供します。ストリーミングされるアーティファクトは `NeoGraph received: hello (turn 1)` を構成します。 |
-| 28 | [`28_acp_agent.py`](28_acp_agent.py) | Python 3.10+、`neograph-engine[acp]` | stdio で ACP を提供します。初期化、セッション作成、プロンプト送信を行い、トークン更新と `end_turn` を受け取ります。永続的な `session/load` には設定済みの Postgres または SQLite バックエンドが必要です。 |
+| 01 | [`01_minimal.py`](01_minimal.py) | なし | カスタムノードが21を2倍にして42にする。 |
+| 02 | [`02_tool_dispatch.py`](02_tool_dispatch.py) | なし | スクリプト化されたツール呼び出しが `tool_dispatch` を通り、calculatorが `42` を返す。 |
+| 03 | [`03_send_fanout.py`](03_send_fanout.py) | なし | 8つの `Send` の分岐が、平方数 `[0, 1, 4, 9, 16, 25, 36, 49]` をマージする。追加される順序は前提にしない。 |
+| 04 | [`04_async_concurrent.py`](04_async_concurrent.py) | なし | 非同期の実行8回が `[0, 2, 4, 6, 8, 10, 12, 14]` を出力し、ストリーミング実行ではノードのイベントが出る。 |
+| 05 | [`05_openai_provider.py`](05_openai_provider.py) | Chatのpeerまたはホスト型のキー | `llm_call` が、`hello world` というアシスタントのメッセージを書き込む。 |
+| 06 | [`06_react_agent.py`](06_react_agent.py) | Responsesのpeerまたはホスト型のキー | モデルが発行した `calc` の呼び出しが `4053` を返し、そのあとモデルが最終的な回答を出す。 |
+| 07 | [`07_checkpoint_hitl.py`](07_checkpoint_hitl.py) | なし | 支払いのディスパッチの前でチェックポイントが一時停止し、承認すると、模擬の支払いがちょうど1回だけ再開される。実際の課金はない。 |
+| 08 | [`08_intent_routing.py`](08_intent_routing.py) | Chatのpeerまたはホスト型のキー | 3つの質問が、数学、翻訳、一般の各エキスパートにルーティングされ、それぞれが回答を書き込む。 |
+| 09 | [`09_state_management.py`](09_state_management.py) | なし | alphaがカウント11に達し、betaがその値をフォークする。未知のスレッドにはチェックポイントがない。 |
+| 10 | [`10_command_routing.py`](10_command_routing.py) | なし | 入力200、50、-10が、`Command` によって、それぞれaccept、manual、rejectのノードに振り分けられる。 |
+| 11 | [`11_reflexion.py`](11_reflexion.py) | Chatのpeerまたはホスト型のキー | ActorとCriticの呼び出しで、振り返りを次の試行に引き継ぎ、`ok` かスーパーステップの上限で止まる。上限付きの学習用の簡易版。 |
+| 12 | [`12_self_ask.py`](12_self_ask.py) | Chatのpeerまたはホスト型のキー | 途中の質問と回答がスクラッチパッドにたまり、最後に最終回答を出す。検索サービスは接続していない。 |
+| 13 | [`13_multi_agent_debate.py`](13_multi_agent_debate.py) | Chatのpeerまたはホスト型のキー | 2つの `Send` の分岐が反対の議論を作り、1人の審判がマージされた議論を読む。 |
+| 14 | [`14_graph_to_json.py`](14_graph_to_json.py) | なし | 2倍にした結果の42と、保存された `my_graph.json` の定義。 |
+| 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | 先に14を実行 | 保存した定義が、5を10に、100を200にする。カスタムのノードタイプは別に登録する。 |
+| 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | Responsesのpeerまたはキー、`gradio` | 通常のチャットか、3つの質問によるリサーチレポート。リサーチャーは、Web検索ではなく、モデルの知識を使う。 |
+| 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | Responsesのpeerまたはキー、`gradio`、`requests`、任意でCrawl4AIとPostgres | `CRAWL4AI_URL` を設定すると、実際の `/md` 検索が有効になり、`NEOGRAPH_PG_DSN` を設定すると、エンジンのチェックポイントが永続化される。設定したサービスが失敗した場合に、黙って代替されることはない。どちらも設定しない場合、スクリプトは、モデルだけのリサーチとインメモリのステートであることを明示する。Gradioの履歴は、自動では復元されない。 |
+| 18 | [`18_node_cache.py`](18_node_cache.py) | Chatのpeerまたはホスト型のキー | 2つのトピックにまたがる5回の実行で、プロバイダーを使うノードが2回実行され、同じ入力の実行ではキャッシュした書き込みがリプレイされる。レイテンシーの固定値は保証しない。 |
+| 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | なし | スクリプト化した5つのトークンイベントが、`Octopuses have three hearts.` と、メッセージストリームのチャンクになる。 |
+| 20 | [`20_otel_tracing.py`](20_otel_tracing.py) | `opentelemetry-api`、`opentelemetry-sdk` | コンソールに出力されるスパンが、実行全体と3つのノードを表し、最終的な履歴は `['A', 'B', 'C']` になる。 |
+| 21 | [`21_http2_transport.py`](21_http2_transport.py) | TLSのChatのpeerまたはキー、libcurlのHTTP/2サポート | 同じSDKで、HTTP/1.1とHTTP/2のリクエストを比べる。ネゴシエーションされたプロトコルは、別に確認すること。所要時間はエンドポイントによって変わる。 |
+| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | Chatのpeerまたはホスト型のキー | プロファイルのJSONを採点し、失敗したら修正版のグラフを要求し、再コンパイルして再試行する。受け付けるのは、登録済みのノードタイプだけ。モデルによっては、成功しないまま反復の上限に達することがある。 |
+| 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | Chatのpeerまたはホスト型のキー | admission済みのグラフの書き換えをまたいで、会話のチェックポイントを保持し、バージョンとハッシュを `__graph_meta__` に記録する。このメタデータはアプリケーションレベルのもので、リプレイの正式なエビデンスではない。 |
+| 24 | [`24_tool_approval_gate.py`](24_tool_approval_gate.py) | なし | 並列の2つのツールのどちらも実行する前に一時停止する。拒否すると `list_files` だけが実行され、承認すると両方が1回ずつ実行される。シェル操作は模擬。 |
+| 25 | [`25_async_tools.py`](25_async_tools.py) | なし | 直列の `Tool` と、I/O待ちが重なる `AsyncTool` を比べ、そのあとCPythonのGILの境界を示す。所要時間の比は観測値であり、合否の基準ではない。 |
+| 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | MCPを有効にしたビルド | 実際のローカルのJSON-RPCのMCP peerを起動し、`fetch` を見つけて、再入可能であることを明示したポリシーで3回呼び出す。外部のネットワークもキーも不要。 |
+| 27 | [`27_a2a_server.py`](27_a2a_server.py) | Python 3.10以上、`neograph-engine[a2a]` | `127.0.0.1:9999` で、エージェントカードとA2AのJSON-RPCを提供する。ストリーミングされるアーティファクトが `NeoGraph received: hello (turn 1)` になる。 |
+| 28 | [`28_acp_agent.py`](28_acp_agent.py) | Python 3.10以上、`neograph-engine[acp]` | stdioでACPを提供する。初期化し、セッションを作成してプロンプトを送ると、トークンの更新と `end_turn` を受け取る。永続的な `session/load` には、設定済みのPostgresかSQLiteのバックエンドが必要。 |
 
-## 状態とスケジューリング
+## ステートとスケジューリング
 
-ノードは現在のスーパーステップの状態を読み、チャネルへの書き込みを返します。エンジンは、次のスーパーステップの前に、宣言されたリデューサーを通じてそれらの書き込みをマージします。`Send` は分岐ごとの入力を渡し、`Command` は状態を更新して次のノードを選びます。ワーカープールを使っても、CPython GIL の下では CPU 負荷の高い Python コールバックが並列に実行されるわけではありません。
+ノードは、現在のスーパーステップのステートを読み、チャネルへの書き込みを返します。エンジンは、次のスーパーステップに進む前に、宣言されたリデューサーでその書き込みをマージします。`Send` は分岐ごとの入力を渡し、`Command` はステートを更新して次のノードを選びます。ワーカープールを使っても、CPUを使うPythonのコールバックが、CPythonのGILのもとで並列に動くようにはなりません。
 
-`GraphEngine.compile()` は、Python で記述した辞書に加え、JSON から読み込んだ辞書も受け入れます。定義が保存するのは接続関係であり、実行可能な Python クラスではありません。保存した定義をコンパイルする前に、カスタムノードのファクトリーを登録してください。例14と15はスクリプトと同じ場所にある `my_graph.json` を書き込み/読み込みします。この組み合わせを検証する際は、使い捨てのチェックアウトまたはこのディレクトリのコピーを使ってください。
+`GraphEngine.compile()` は、Pythonで書いた辞書だけでなく、JSONから読み込んだ辞書も受け付けます。定義に保存されるのは配線で、実行可能なPythonのクラスではありません。保存した定義をコンパイルする前に、カスタムのノードファクトリーを登録してください。サンプルの14と15は、スクリプトと同じ場所の `my_graph.json` に書き込み、そこから読み込みます。この2本の適格性確認を行うときは、使い捨てのチェックアウトか、このディレクトリのコピーを使ってください。
 
-## 対話とプロトコルのシナリオ
+## 対話型とプロトコルのシナリオ
 
-16/17では `gradio` をインストールしてスクリプトを起動し、表示されたローカル URL を開いてください。`hello` を送信し、続いて `research apples` を送信します。17では、実際の Crawl4AI `/md` サービスまたは忠実なローカル接続先が `{"success": true, "markdown": "..."}` を返す必要があります。実行中のビルドが Postgres に対応し、データベースへ接続できる場合だけ Postgres を設定してください。エンジンの状態と UI の履歴は別々に確認してください。
+16と17では、`gradio` をインストールし、スクリプトを起動して、表示されたローカルのURLを開きます。`hello` を送信し、続いて `research apples` を送信してください。17では、実際のCrawl4AIの `/md` サービスか、実物に忠実なローカルのpeerが、`{"success": true, "markdown": "..."}` を返す必要があります。Postgresを設定するのは、実行中のビルドがそれをサポートしていて、データベースに接続できる場合だけにしてください。エンジンのステートとUIの履歴は、別々に確認してください。
 
-例27/28は、ワイヤー処理に公式 Python SDK を、チェックポイントを考慮したエンジン実行に `ProtocolHostAdapter` を使います。A2A の検証には、エージェントカードを取得し、メッセージを送信し、ストリームを受信する SDK クライアントが必要です。ACP の検証には、`initialize`、`session/new`、`session/prompt` のためのクライアントからサブプロセスへの接続が必要です。stdout はプロトコルメッセージ専用です。同じコンテキスト/セッションで2つ目のプロンプトを送信し、`(turn 2)` を期待してください。キャンセルは、成功したように見える代替結果を作るのではなく、実行中のリクエストを停止する必要があります。
+27と28は、ワイヤーの処理に公式のPython SDKを使い、チェックポイントを考慮したエンジンの実行に `ProtocolHostAdapter` を使います。A2Aを検証するには、SDKのクライアントで、エージェントカードの取得、メッセージの送信、ストリームの受信を行います。ACPを検証するには、クライアントのサブプロセスから接続して、`initialize`、`session/new`、`session/prompt` を呼び出します。標準出力は、プロトコルのメッセージ専用です。同じコンテキストまたはセッションで2回目のプロンプトを送ると、`(turn 2)` が返るはずです。キャンセルすると、実行中のリクエストが止まるはずです。成功したように見えるフォールバックを作ってはいけません。
 
-永続的な ACP セッションには、`NEOGRAPH_ACP_POSTGRES_URL` または `NEOGRAPH_ACP_SQLITE_PATH` のどちらか一方だけを設定してください。最初のプロンプトが完了すると、`session/load` に必要なチェックポイントが作成されます。セッションごとにアクティブなエージェントプロセスを1つにしてください。チェックポイントストアは、プロセス間の並行書き込みを直列化しません。この例はリッチコンテンツブロックをエコーしますが、画像/音声の内容を解釈せず、エディターのファイルシステム/ターミナルコールバックも提供しません。
+ACPのセッションを永続化するには、`NEOGRAPH_ACP_POSTGRES_URL` と `NEOGRAPH_ACP_SQLITE_PATH` のどちらか一方だけを設定します。`session/load` に必要なチェックポイントは、最初のプロンプトが完了した時点で作られます。1つのセッションにつき、アクティブなエージェントのプロセスは1つだけにしてください。チェックポイントストアは、複数のプロセスからの同時書き込みを直列化しません。このサンプルは、リッチなコンテンツブロックをそのまま返しますが、画像や音声のコンテンツは解釈せず、エディターのファイルシステムやターミナルのコールバックも提供しません。
 
 ## ディストリビューション名とインポート名
 
@@ -76,4 +76,4 @@ import neograph_engine as ng
 from neograph_engine.llm import SchemaProvider
 ```
 
-ディストリビューション名は `neograph-engine` です。PyPI の `neograph` は無関係のプロジェクトです。
+ディストリビューション名は `neograph-engine` です。PyPIにある `neograph` は、無関係なプロジェクトです。
