@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=ab1f701c13b8ad5b2fc85625d9afb884f19753f7eed6c13e5ab2fc7bf8ce34bd -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=d04e2bb5b3178026e6d389f15b7265e1b10ad28a59895232f992f08a992b6982 -->
 # NeoGraph 核心概念导读
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -342,7 +342,7 @@ engine.set_worker_count(5)           # match a 5-way Send
 engine.set_worker_count_auto()       # hardware_concurrency()
 ```
 
-多 Send（或多条出边）的 fan-out 在没有选用线程池的情况下运行时，NeoGraph 会向 stderr 输出一次警告，免得默默串行执行的情况没人注意。如果确实要串行 fan-out（例如测试 worker=1 快速路径的基准），可以设置 `NEOGRAPH_SUPPRESS_FANOUT_WARNING=1` 关闭警告。
+在没有选用线程池的情况下运行多 Send（或多条出边）的 fan-out，如果各分支是一个接一个执行的，NeoGraph 会在 fan-out 结束后向 stderr 输出一次警告，免得默默串行执行的情况没人注意。等待 I/O 的协程分支会在同一个线程上交错执行，不会触发警告。如果确实要串行 fan-out（例如测试 worker=1 快速路径的基准），可以设置 `NEOGRAPH_SUPPRESS_FANOUT_WARNING=1` 关闭警告。
 
 ---
 

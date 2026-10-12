@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=ab1f701c13b8ad5b2fc85625d9afb884f19753f7eed6c13e5ab2fc7bf8ce34bd -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=d04e2bb5b3178026e6d389f15b7265e1b10ad28a59895232f992f08a992b6982 -->
 # NeoGraphのコアコンセプト — 解説ガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -340,7 +340,7 @@ engine.set_worker_count(5)           # match a 5-way Send
 engine.set_worker_count_auto()       # hardware_concurrency()
 ```
 
-プールを有効にしないまま、複数の Send（または複数の出力エッジ）によるfan-outを実行すると、NeoGraphは標準エラー出力に警告を1回だけ出します。気づかないうちに直列で動いている状態を、見逃さないためです。意図的に直列のfan-outを動かす場合（たとえばworker=1の高速パスのベンチマーク）は、`NEOGRAPH_SUPPRESS_FANOUT_WARNING=1` で警告を止められます。
+プールを有効にしないまま、複数の Send（または複数の出力エッジ）によるfan-outを実行し、分岐が順に実行された場合、NeoGraphはfan-outの終了後に標準エラー出力へ警告を1回だけ出します。気づかないうちに直列で動いている状態を、見逃さないためです。I/Oを待つコルーチンの分岐は1つのスレッド上で重なって進むため、警告の対象にはなりません。意図的に直列のfan-outを動かす場合（たとえばworker=1の高速パスのベンチマーク）は、`NEOGRAPH_SUPPRESS_FANOUT_WARNING=1` で警告を止められます。
 
 ---
 

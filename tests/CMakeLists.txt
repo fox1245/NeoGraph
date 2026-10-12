@@ -9,6 +9,7 @@ add_executable(neograph_tests
     test_tenant.cpp
     test_node.cpp
     test_node_header.cpp
+    test_fanout_serial_notice.cpp
     test_tool_request_refusal.cpp
     test_loader.cpp
     test_schema_export.cpp

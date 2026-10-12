@@ -377,9 +377,11 @@ engine.set_worker_count(5)           # match a 5-way Send
 engine.set_worker_count_auto()       # hardware_concurrency()
 ```
 
-When a multi-Send (or multi-outgoing-edge) fan-out runs without an
-opted-in pool, NeoGraph emits a one-shot stderr warning so the
-silent-serial case doesn't fly under the radar. Suppress with
+When the branches of a multi-Send (or multi-outgoing-edge) fan-out have
+run one after another because no pool is opted in, NeoGraph emits a
+one-shot stderr warning once the fan-out has finished, so the
+silent-serial case doesn't fly under the radar. Coroutine branches that
+wait on I/O overlap on the one thread and are not reported. Suppress with
 `NEOGRAPH_SUPPRESS_FANOUT_WARNING=1` if you intentionally drive
 serial fan-out (e.g. a benchmark of the worker=1 fast path).
 

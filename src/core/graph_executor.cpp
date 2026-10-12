@@ -771,11 +771,60 @@ void NodeExecutor::init_state(GraphState& state) const {
     }
 }
 
+namespace {
+
+// When one branch of a fan-out ran: from the start of its node body (retries
+// included) to the end of it.
+struct BranchSpan {
+    bool                                  ran = false;
+    std::chrono::steady_clock::time_point begin;
+    std::chrono::steady_clock::time_point end;
+};
+
+// Records a branch's span around its node body, whichever way the body ends.
+class BranchTimer {
+public:
+    explicit BranchTimer(BranchSpan& span) : span_(span) {
+        span_.begin = std::chrono::steady_clock::now();
+        span_.ran   = true;
+    }
+    ~BranchTimer() { span_.end = std::chrono::steady_clock::now(); }
+    BranchTimer(const BranchTimer&)            = delete;
+    BranchTimer& operator=(const BranchTimer&) = delete;
+
+private:
+    BranchSpan& span_;
+};
+
+// True when at least two branches ran and each started only after the one
+// before it had ended: they ran one after another. A branch that suspends (a
+// coroutine waiting on I/O or a timer) lets the next one start before it ends,
+// so the spans overlap, and so they do when a pool or an attempt timeout puts
+// branches on other threads. What the node bodies are made of is not what
+// matters; whether they overlapped is.
+bool branches_ran_serially(const std::vector<BranchSpan>& spans) {
+    std::vector<const BranchSpan*> ran;
+    for (const auto& span : spans)
+        if (span.ran) ran.push_back(&span);
+    if (ran.size() < 2) return false;
+    std::sort(ran.begin(), ran.end(),
+              [](const BranchSpan* a, const BranchSpan* b) { return a->begin < b->begin; });
+    auto latest_end = ran.front()->end;
+    for (std::size_t i = 1; i < ran.size(); ++i) {
+        if (ran[i]->begin < latest_end) return false;
+        latest_end = std::max(latest_end, ran[i]->end);
+    }
+    return true;
+}
+
+}  // namespace
+
 void NodeExecutor::maybe_warn_serial_fanout(std::size_t width) const {
-    // Only relevant when the engine has no owned pool — that's the
-    // build() default (EngineConfig::worker_count == 1) and the case where a
-    // fan-out of width >= 2 silently runs sequentially. With a pool
-    // installed, real parallelism is in effect and nothing to warn
+    // Called once a fan-out of width >= 2 has run on branches that did not
+    // overlap (branches_ran_serially). Only relevant when the engine has no
+    // owned pool — that's the build() default (EngineConfig::worker_count == 1)
+    // and the case where a fan-out of synchronous branches runs sequentially.
+    // With a pool installed, real parallelism is in effect and nothing to warn
     // about.
     if (fan_out_pool_ != nullptr || width < 2) return;
     // One-shot: first call that finds the flag clear wins the CAS,
@@ -1490,7 +1539,6 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
         co_return result;
     }
 
-    maybe_warn_serial_fanout(ready.size());
     auto outer_ex = co_await asio::this_coro::executor;
     // Branches dispatch to the engine's owned pool when available so
     // CPU-bound fan-out actually parallelizes even if the outer
@@ -1524,6 +1572,8 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
     std::vector<char> visit_limited(ready.size(), 0);
     for (std::size_t index = 0; index < ready.size(); ++index)
         visit_limited[index] = !take_activation(failure_routing_, ctx, ready[index]);
+    // When each branch's node body ran, to tell whether they overlapped.
+    std::vector<BranchSpan> spans(fan_out_pool_ ? 0 : ready.size());
     auto worker = [&, this](std::size_t index) -> asio::awaitable<NodeResult> {
         const std::string& node_name = ready[index];
         const std::string task_id   = make_static_task_id(step, node_name);
@@ -1534,7 +1584,12 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
         detail::InvocationSlot slot{task_id,       step, &replay, &coord, &parent_cp_id,
                                     &interrupted_attempts[index]};
         slot.visit_limited = visit_limited[index] != 0;
-        auto nr = co_await execute_attempts_async(node_name, state, cb, stream_mode, ctx, &slot);
+        NodeResult nr;
+        {
+            std::optional<BranchTimer> timer;
+            if (!spans.empty()) timer.emplace(spans[index]);
+            nr = co_await execute_attempts_async(node_name, state, cb, stream_mode, ctx, &slot);
+        }
         if (coord.records_pending_writes(parent_cp_id))
             co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, node_name, nr,
                                                        step);
@@ -1580,6 +1635,7 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
         co_await asio::experimental::make_parallel_group(std::move(ops))
             .async_wait(asio::experimental::wait_for_all(), asio::use_awaitable);
     (void)order;  // we apply in ready-order regardless of completion-order
+    if (branches_ran_serially(spans)) maybe_warn_serial_fanout(ready.size());
 
     // #392: the step's outcome does not depend on which branch has the lower
     // index (step_outcome). A failure fails the run; an interrupt pauses it,
@@ -1785,6 +1841,8 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
     }
     const auto state_snapshot = any_runs ? state.serialize_runtime() : json();
 
+    // When each Send's node body ran, to tell whether they overlapped.
+    std::vector<BranchSpan> spans(fan_out_pool_ || sends.size() < 2 ? 0 : sends.size());
     auto run_send = [&, this](std::size_t si) -> asio::awaitable<NodeResult> {
         const auto&        s       = sends[si];
         const std::string& task_id = send_task_ids[si];
@@ -1807,8 +1865,13 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
         detail::InvocationSlot slot{task_id, step, &replay, &coord, &parent_cp_id,
                                     &interrupted_attempts[si]};
         slot.visit_limited = visit_limited[si] != 0;
-        auto nr = co_await execute_attempts_async(s.target_node, send_state, cb, stream_mode, ctx,
-                                                  &slot);
+        NodeResult nr;
+        {
+            std::optional<BranchTimer> timer;
+            if (!spans.empty()) timer.emplace(spans[si]);
+            nr = co_await execute_attempts_async(s.target_node, send_state, cb, stream_mode, ctx,
+                                                 &slot);
+        }
         if (coord.records_pending_writes(parent_cp_id))
             co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, s.target_node, nr,
                                                       step);
@@ -1835,7 +1898,6 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
             throw *interrupt;
         }
     } else {
-        maybe_warn_serial_fanout(sends.size());
         auto                  outer_ex = co_await asio::this_coro::executor;
         asio::any_io_executor ex       = fan_out_pool_
                                              ? asio::any_io_executor(fan_out_pool_->get_executor())
@@ -1865,6 +1927,7 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
             co_await asio::experimental::make_parallel_group(std::move(ops))
                 .async_wait(asio::experimental::wait_for_all(), asio::use_awaitable);
         (void)order;
+        if (branches_ran_serially(spans)) maybe_warn_serial_fanout(sends.size());
 
         // The step's outcome, by the same rule as run_parallel_async's
         // (#392): a failure fails the run whatever its Send index, and an

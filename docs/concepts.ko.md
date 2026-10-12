@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=ab1f701c13b8ad5b2fc85625d9afb884f19753f7eed6c13e5ab2fc7bf8ce34bd -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=d04e2bb5b3178026e6d389f15b7265e1b10ad28a59895232f992f08a992b6982 -->
 # NeoGraph 핵심 개념 — 처음부터 읽는 안내서
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -348,7 +348,7 @@ engine.set_worker_count(5)           # match a 5-way Send
 engine.set_worker_count_auto()       # hardware_concurrency()
 ```
 
-Send를 여러 개 보내거나 나가는 엣지가 여러 개인 fan-out이 스레드 풀을 켜지 않은 채 실행되면, NeoGraph는 stderr에 경고를 한 번 출력합니다. 아무 표시 없이 직렬로 실행되는 상황을 놓치지 않게 하기 위해서입니다. 직렬 fan-out을 일부러 쓰는 경우(예: worker=1 빠른 경로의 벤치마크)에는 `NEOGRAPH_SUPPRESS_FANOUT_WARNING=1`로 경고를 끌 수 있습니다.
+스레드 풀을 켜지 않은 채 Send를 여러 개 보내거나 나가는 엣지가 여러 개인 fan-out을 실행해서 분기가 차례로 실행되면, NeoGraph는 fan-out이 끝난 뒤 stderr에 경고를 한 번 출력합니다. 아무 표시 없이 직렬로 실행되는 상황을 놓치지 않게 하기 위해서입니다. I/O를 기다리느라 한 스레드에서 서로 겹쳐 실행되는 코루틴 분기는 경고하지 않습니다. 직렬 fan-out을 일부러 쓰는 경우(예: worker=1 빠른 경로의 벤치마크)에는 `NEOGRAPH_SUPPRESS_FANOUT_WARNING=1`로 경고를 끌 수 있습니다.
 
 ---
 

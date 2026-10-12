@@ -281,11 +281,15 @@ private:
     void apply_input(GraphState& state, const json& input) const;
 
     /// Emit a one-shot stderr warning the first time a fan-out of
-    /// width >= 2 is dispatched while no engine-owned worker pool is
-    /// installed. `compile()` defaults to `set_worker_count(1)` for
-    /// safety + sequential-path performance (see engine.h docs), so
-    /// users who built a multi-Send / multi-edge graph and forgot to
-    /// opt into a pool would silently see serial execution. The flag
+    /// width >= 2 has run its branches one after another while no
+    /// engine-owned worker pool is installed. `compile()` defaults to
+    /// `set_worker_count(1)` for safety + sequential-path performance (see
+    /// engine.h docs), so users who built a multi-Send / multi-edge graph of
+    /// synchronous nodes and forgot to opt into a pool would silently see
+    /// serial execution. Branches that suspend, such as coroutine nodes
+    /// waiting on I/O, overlap on the one thread and are not reported: the
+    /// caller asks only after the branches have run and found that their node
+    /// bodies did not overlap. The flag
     /// is per-NodeExecutor — `set_worker_count(N>=2)` rebuilds the
     /// executor and resets the flag along with it. Suppress via env
     /// `NEOGRAPH_SUPPRESS_FANOUT_WARNING=1`.
