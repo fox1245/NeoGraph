@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=0e0b9739cfd77729693c2c85649410cd93ea10aa2157242d00ef3c09fe880331 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=4e1d1838ffbffb18894ab21762cba6415222eec558f4818b52b6e015de6fe9d7 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -575,25 +575,28 @@ public:
 <a id="protocol-failure-mapping"></a>
 ### 프로토콜 실패 매핑
 
-NeoGraph가 MCP나 gRPC로 도구나 그래프를 제공할 때, 모든 실패 분류는 노드 실패 분류기가 주는 안정된 코드(`graph::classify_failure`)로 이름 붙은, 서로 구별되고 문서화된 형태를 와이어에서도 유지합니다. 실행 제어 신호는 결코 모델이 읽을 수 있는 도구 결과가 되지 않습니다. 와이어를 넘는 것은 공개 메시지뿐입니다. 실패의 `public_message`(`NodeFailureError`에서 온 것) 또는 분류에 대한 고정된 설명이며, 경로나 페이로드나 비밀을 담을 수 있는 예외 텍스트는 결코 넘지 않습니다.
+NeoGraph가 MCP, gRPC, A2A, ACP로 도구나 그래프나 에이전트를 제공할 때, 모든 실패 분류는 노드 실패 분류기가 주는 안정된 코드(`graph::classify_failure`)로 이름 붙은, 서로 구별되고 문서화된 형태를 와이어에서도 유지합니다. 실행 제어 신호는 결코 모델이 읽을 수 있는 도구 결과가 되지 않습니다. 와이어를 넘는 것은 공개 메시지뿐입니다. 실패의 `public_message`(`NodeFailureError`에서 온 것) 또는 분류에 대한 고정된 설명이며, 경로나 페이로드나 비밀을 담을 수 있는 예외 텍스트는 결코 넘지 않습니다.
 
-| 분류(코드) | MCP `tools/call` (`MCPServer`) | gRPC `GraphService` | gRPC `ToolService.CallTool` |
-|------|------|------|------|
-| 클라이언트의 취소(`NG.Cancelled`): `notifications/cancelled`, gRPC 취소 | stdio(`run`): 응답 없음. HTTP처럼 응답 sink를 읽는 전송: JSON-RPC 오류 `-32800`, `data.code` | `CANCELLED` | `CANCELLED` |
-| 서버의 취소(`NG.Cancelled`): `stop()`, 또는 핸들러 자신의 작업 | JSON-RPC 오류 `-32000`(`stop()`) 또는 `-32603`, `data.code` | `CANCELLED` | `CANCELLED` |
-| Hook 차단(`NG.HookBlocked`) | JSON-RPC 오류 `-32010`, `data` `{code, invocation_id, state}` | `FAILED_PRECONDITION`, Hook이 시간을 초과했으면 `DEADLINE_EXCEEDED`. ErrorInfo metadata `invocation_id`, `state` | `GraphService`와 같음 |
-| 인터럽트(`NG.Interrupted`) | JSON-RPC 오류 `-32011`, `data` `{code, reason, value}` | 일시 정지한 실행: `OK`, `interrupted`, `interrupt_node`, `interrupt_value_json`(스트림의 FINAL 페이로드: `interrupt_value`) | `FAILED_PRECONDITION`, ErrorInfo metadata `reason`, `value` |
-| 일반(`NG.TaskFailed`, 작성자 코드) | `isError: true`와 `_meta["io.neograph/failure"]` `{code, retryable}`를 가진 `result` | `UNKNOWN` | `error`와 `error_code`를 가진 `OK` |
-| 타임아웃(`NG.Timeout`) | 일반과 같되 자기 코드를 가짐 | `DEADLINE_EXCEEDED` | 일반과 같되 자기 코드를 가짐 |
-| 제공자 실패(`NG.ProviderFailed`) | 일반과 같되 자기 코드를 가짐 | `UNAVAILABLE` | 일반과 같되 자기 코드를 가짐 |
-| 예산(`NG.BudgetExhausted`) | 일반과 같되 자기 코드를 가짐 | `RESOURCE_EXHAUSTED` | 일반과 같되 자기 코드를 가짐 |
-| 안전 또는 구성(`NG.SafetyBlocked`, `NG.ConfigError`) | 일반과 같되 자기 코드를 가짐 | `FAILED_PRECONDITION` | 일반과 같되 자기 코드를 가짐 |
-| 논리(`NG.LogicError`, `NG.BarrierStalled`) | 일반과 같되 자기 코드를 가짐 | `INTERNAL` | 일반과 같되 자기 코드를 가짐 |
-| 커밋된 효과(`NG.EffectCommitted`) | 일반과 같되 자기 코드를 가짐 | `ABORTED` | 일반과 같되 자기 코드를 가짐 |
-| 불확실한 효과, 알 수 없음, 실패 출구(`NG.EffectUncertain`, `NG.UnknownFailure`, 출구의 코드) | 일반과 같되 자기 코드를 가짐 | `UNKNOWN` | 일반과 같되 자기 코드를 가짐 |
-| 잘못된 요청(`NG.InvalidRequest`) | JSON-RPC 오류 `-32602` | `INVALID_ARGUMENT`. 실행할 그래프가 없으면 `FAILED_PRECONDITION`(`NG.NoGraph`) | `INVALID_ARGUMENT` |
-| 알 수 없는 도구(`NG.ToolNotFound`) | 실패 코드 없이 `isError: true`인 `result` | 없음 | `NOT_FOUND` |
-| 용량 초과(`NG.Capacity`) | JSON-RPC 오류 `-32000`, `data.capacity` | `RESOURCE_EXHAUSTED` | 없음 |
+| 분류(코드) | MCP `tools/call` (`MCPServer`) | gRPC `GraphService` | gRPC `ToolService.CallTool` | A2A task(`A2AServer`) | ACP `session/prompt`(`ACPServer`) |
+|------|------|------|------|------|------|
+| 클라이언트의 취소(`NG.Cancelled`): `notifications/cancelled`, gRPC 취소 | stdio(`run`): 응답 없음. HTTP처럼 응답 sink를 읽는 전송: JSON-RPC 오류 `-32800`, `data.code` | `CANCELLED` | `CANCELLED` | `CancelTask`: `CANCELED`. stream도 이 상태로 닫힘 | `session/cancel`: `stopReason: "cancelled"` |
+| 서버의 취소(`NG.Cancelled`): `stop()`, 또는 핸들러 자신의 작업 | JSON-RPC 오류 `-32000`(`stop()`) 또는 `-32603`, `data.code` | `CANCELLED` | `CANCELLED` | `CANCELED` | JSON-RPC 오류 `-32800`, `data` `{code, retryable}` |
+| Hook 차단(`NG.HookBlocked`) | JSON-RPC 오류 `-32010`, `data` `{code, invocation_id, state}` | `FAILED_PRECONDITION`, Hook이 시간을 초과했으면 `DEADLINE_EXCEEDED`. ErrorInfo metadata `invocation_id`, `state` | `GraphService`와 같음 | 끝난 노드가 없으면 `REJECTED`, 그 외에는 `FAILED`. `metadata["neograph/failure"]` `{code, retryable}` | JSON-RPC 오류 `-32603`, `data` `{code, retryable}` |
+| 인터럽트(`NG.Interrupted`) | JSON-RPC 오류 `-32011`, `data` `{code, reason, value}` | 일시 정지한 실행: `OK`, `interrupted`, `interrupt_node`, `interrupt_value_json`(스트림의 FINAL 페이로드: `interrupt_value`) | `FAILED_PRECONDITION`, ErrorInfo metadata `reason`, `value` | `INPUT_REQUIRED`: 사유는 text, 페이로드는 data part, `metadata["neograph/interrupt"]` `{node, checkpointId}`. 후속 message가 실행을 재개 | 같은 턴 안의 `session/request_permission`, 그 응답이 실행을 재개. 어댑터나 클라이언트가 응답하지 못하면 `NG.Interrupted`를 담은 JSON-RPC 오류 `-32603` |
+| 일반(`NG.TaskFailed`, 작성자 코드) | `isError: true`와 `_meta["io.neograph/failure"]` `{code, retryable}`를 가진 `result` | `UNKNOWN` | `error`와 `error_code`를 가진 `OK` | `FAILED`, 공개 메시지를 status message로, `metadata["neograph/failure"]` `{code, retryable}` | JSON-RPC 오류 `-32603`, 공개 메시지를 message로, `data` `{code, retryable}` |
+| 타임아웃(`NG.Timeout`) | 일반과 같되 자기 코드를 가짐 | `DEADLINE_EXCEEDED` | 일반과 같되 자기 코드를 가짐 | 일반과 같되 자기 코드를 가짐 | 일반과 같되 자기 코드를 가짐 |
+| 제공자 실패(`NG.ProviderFailed`) | 일반과 같되 자기 코드를 가짐 | `UNAVAILABLE` | 일반과 같되 자기 코드를 가짐 | 일반과 같되 자기 코드를 가짐 | 일반과 같되 자기 코드를 가짐 |
+| 예산(`NG.BudgetExhausted`) | 일반과 같되 자기 코드를 가짐 | `RESOURCE_EXHAUSTED` | 일반과 같되 자기 코드를 가짐 | 일반과 같되 자기 코드를 가짐 | 실행의 모델 토큰 예산을 넘었으면 `stopReason: "max_tokens"`, 아니면 일반과 같음 |
+| 안전 또는 구성(`NG.SafetyBlocked`, `NG.ConfigError`) | 일반과 같되 자기 코드를 가짐 | `FAILED_PRECONDITION` | 일반과 같되 자기 코드를 가짐 | 일반과 같되 자기 코드를 가짐 | `NG.SafetyBlocked`는 `stopReason: "refusal"`, `NG.ConfigError`는 일반과 같음 |
+| 논리(`NG.LogicError`, `NG.BarrierStalled`) | 일반과 같되 자기 코드를 가짐 | `INTERNAL` | 일반과 같되 자기 코드를 가짐 | 일반과 같되 자기 코드를 가짐 | 일반과 같되 자기 코드를 가짐 |
+| 커밋된 효과(`NG.EffectCommitted`) | 일반과 같되 자기 코드를 가짐 | `ABORTED` | 일반과 같되 자기 코드를 가짐 | 일반과 같되 자기 코드를 가짐 | 일반과 같되 자기 코드를 가짐 |
+| 불확실한 효과, 알 수 없음, 실패 출구(`NG.EffectUncertain`, `NG.UnknownFailure`, 출구의 코드) | 일반과 같되 자기 코드를 가짐 | `UNKNOWN` | 일반과 같되 자기 코드를 가짐 | 일반과 같되 자기 코드를 가짐 | 일반과 같되 자기 코드를 가짐 |
+| 단계 한도(`NG.StepLimit`): `RunConfig::max_steps` | 없음 | `OK`, `max_steps_exhausted` | 없음 | `FAILED`, 코드 `NG.StepLimit` | `stopReason: "max_turn_requests"` |
+| 잘못된 요청(`NG.InvalidRequest`) | JSON-RPC 오류 `-32602` | `INVALID_ARGUMENT`. 실행할 그래프가 없으면 `FAILED_PRECONDITION`(`NG.NoGraph`) | `INVALID_ARGUMENT` | `google.rpc.BadRequest` field violation을 담은 JSON-RPC 오류 `-32602`. 형식이 잘못된 envelope나 batch는 `-32600` | JSON-RPC 오류 `-32602` |
+| 알 수 없는 도구(`NG.ToolNotFound`) | 실패 코드 없이 `isError: true`인 `result` | 없음 | `NOT_FOUND` | 없음 | 없음 |
+| 용량 초과(`NG.Capacity`) | JSON-RPC 오류 `-32000`, `data.capacity` | `RESOURCE_EXHAUSTED` | 없음 | JSON-RPC 오류 `-32603`, ErrorInfo reason `RESOURCE_EXHAUSTED`, domain `neograph` | JSON-RPC 오류 `-32603`, `data.reason` `overloaded` |
+
+`retryable`은 모든 프로토콜에서 `FailureVerdict::retryable`이며, 같은 요청을 다시 보내면 성공할 수 있는지를 뜻합니다. 노드의 재시도 판정([노드 실패 계약](#node-failure-contract))이고, 제공자 실패(`NG.ProviderFailed`)에서도 `true`입니다. 노드 재시도 루프는 이를 제공자 런타임에 맡기지만 새 요청은 통과할 수 있기 때문입니다. A2A는 코드와 `retryable`을 두 버전 모두 task의 `metadata["neograph/failure"]`에, ACP는 오류의 `data`에 담습니다. A2A에만 있는 요청 오류는 [A2A error 매핑](#a2a-error-mapping)에 있습니다.
 
 OK가 아닌 모든 gRPC 상태는 `grpc-status-details-bin` trailer에 `google.rpc.ErrorInfo` 하나를 담은 `google.rpc.Status`를 실어 보냅니다. `reason`은 코드, `domain`은 `neograph`이며, `metadata`에는 `retryable`과 위의 필드가 들어 있습니다. `RunGraphResponse.error`는 폐기 예정이며 공개 메시지만 담은 채 한 릴리스 동안 유지됩니다. OK가 아닌 단항 상태에는 응답 본문이 실리지 않습니다. `RunGraphStream`은 실패를 페이로드가 `{error, code}`인 `DEBUG` 이벤트로 알린 뒤 단항 호출과 같은 상태로 끝납니다. `CheckpointService`는 백엔드 실패에 "체크포인트 없음", 빈 목록, 성공한 삭제 대신 `UNAVAILABLE`(`NG.BackendUnavailable`)로, 형식이 잘못된 `SaveCheckpoint`에는 `INVALID_ARGUMENT`로 응답합니다.
 
@@ -3388,33 +3391,40 @@ pointer to that canonical source-level reference.
 
 - **요청.** server는 각 요청을 header 또는 `A2A-Version` query parameter의 `A2A-Version`이 지정한 dialect로 응답한다. 버전이 없으면 0.3이다(spec §3.6.2). Major.Minor `1.0`과 `0.3`만 지원하며 patch는 무시한다. `0.2`, `1.5`, `2.0` 같은 다른 값은 지원 버전을 명시한 VersionNotSupportedError(`-32009`)를 받는다. 두 method 표기(`SendMessage`, `message/send`)는 어느 버전에서도 받는다.
 - **Card.** card는 버전별로 제공한다. `A2A-Version: 1.0`은 순수 1.0 `AgentCard`를 받고, 버전 없는 요청은 0.3 card를 받는다. 0.3 card도 `supportedInterfaces` 첫 항목으로 1.0 interface를 나열한다. 응답에는 `ETag`, `Cache-Control: public, max-age=300`, `Vary: A2A-Version`이 붙고 `If-None-Match`에는 304로 답한다. `AgentCard::url`을 설정하지 않으면 card는 client가 사용한 주소를 광고한다. 모든 skill은 tag를 하나 이상 갖는다. card는 구현하지 않은 push notification, extended card, HTTP+JSON·gRPC binding을 주장하지 않는다.
-- **Client.** client는 첫 호출 전에 card를 가져와 `1.x` 또는 `0.x` 버전의 첫 JSONRPC interface를 선택하며, URL이 client의 `base_url`과 같은 interface를 우선한다. card를 가져올 수 없을 때만 probe한다. 1.0을 먼저 보내고 `-32601`, `-32009`, HTTP 400이면 0.3으로 바꾸며 결과를 기억한다. RPC는 선택한 interface URL이 `base_url`과 같은 origin이면 그 URL로 가므로 endpoint가 `/a2a/v1`인 agent도 동작한다. `set_allow_cross_origin_interfaces(true)`로 허용하지 않으면 card는 client를 다른 origin으로 보낼 수 없고, 이때 RPC는 `base_url`로 간다. `endpoint_url()`은 사용 중인 endpoint를 알려 주며 message id는 random UUID다.
+- **Client.** client는 첫 호출 전에 card를 가져와 `1.x` 또는 `0.x` 버전의 첫 JSONRPC interface를 선택하며, URL이 client의 `base_url`과 같은 interface를 우선한다. card를 가져올 수 없을 때만 probe한다. 1.0을 먼저 보내고 `-32601`, `-32009`, HTTP 400이면 0.3으로 바꾸며 결과를 기억한다. RPC는 선택한 interface URL이 `base_url`과 같은 origin이면 그 URL로 가므로 endpoint가 `/a2a/v1`인 agent도 동작한다. `set_allow_cross_origin_interfaces(true)`로 허용하지 않으면 card는 client를 다른 origin으로 보낼 수 없고, 이때 RPC는 `base_url`로 가며, client는 따르지 않은 origin을 밝히는 경고를 stderr에 쓴다. `endpoint_url()`은 사용 중인 endpoint를 알려 주며 message id는 random UUID다.
 - **0.3.** 0.3은 같은 의미를 가진 호환 dialect로 남는다. 새 기능은 1.0을 대상으로 한다.
 
 #### Task와 method
 
 모든 run은 자체 worker thread에서 실행된다. stream이나 blocking send는 이를 관찰할 뿐이므로 task는 끊긴 연결보다 오래 산다. `SendMessage`는 task가 terminal 또는 interrupted 상태가 될 때까지 block하지만, `returnImmediately`(0.3 `blocking: false`)를 주면 SUBMITTED task를 즉시 반환한다. `SendStreamingMessage`와 `SubscribeToTask`(0.3 `tasks/resubscribe`)는 Task를 먼저 보내고 status·artifact update를 이어 보내며 terminal 또는 interrupted 상태에서 닫힌다. 0.3 stream은 `final: true`로 끝난다. `GetTask`와 `ListTasks`는 `historyLength`를 따른다(0이면 history 생략). `ListTasks`는 `contextId`, `status`, `statusTimestampAfter`로 거르고 `pageSize`(1~100, 기본 50)와 `pageToken`으로 최신순 paging하며, `includeArtifacts`가 없으면 artifact를 생략한다. 모든 status에는 timestamp가 붙는다.
 
-task id는 server가 생성한다. 모르는 `taskId`를 가진 message는 `-32001`, terminal task는 `-32004`, task와 다른 `contextId`는 `-32602`, 아직 실행 중인 task는 `-32603`으로 실패한다. INPUT_REQUIRED task에 보낸 message는 interrupt가 저장한 checkpoint에서 run을 재개한다. `GraphAgentAdapter::build_resume_value`가 message를 resume value로 바꾸며, checkpoint store가 없는 engine은 그 message를 input으로 graph를 다시 실행한다. NeoGraph collaboration envelope는 발신자가 정한 idempotent task id를 유지한다. 요청은 dialect별로 검증하며 위반은 `google.rpc.BadRequest` field violation과 함께 `-32602`를 받고, 모든 error는 `google.rpc.ErrorInfo` detail을 담는다. `CollaborationAuthenticator`가 있으면 card는 Bearer security scheme을 선언하고, 요청 인증이 필수면 전역 requirement도 선언한다. credential이 없으면 `WWW-Authenticate`와 함께 HTTP 401, 인증됐지만 collaboration link를 쓸 수 없는 peer는 HTTP 403을 받는다.
+task id는 server가 생성한다. 모르는 `taskId`를 가진 message는 `-32001`, terminal task는 `-32004`, task와 다른 `contextId`는 `-32602`, 아직 실행 중인 task는 `-32603`(ErrorInfo reason `TASK_BUSY`)으로 실패한다. INPUT_REQUIRED task에 보낸 message는 interrupt가 저장한 checkpoint에서 run을 재개한다. `GraphAgentAdapter::build_resume_value`가 message를 resume value로 바꾸며, checkpoint store가 없는 engine은 그 message를 input으로 graph를 다시 실행한다. Program 기반 task는 아직 A2A로 그 답을 받을 수 없다. message는 `-32004`를 받고 task는 계속 기다린다. NeoGraph collaboration envelope는 발신자가 정한 idempotent task id를 유지한다([A2A collaboration 확장](#a2a-collaboration-extension)). 요청은 dialect별로 검증하며 위반은 `google.rpc.BadRequest` field violation과 함께 `-32602`를 받고, 모든 error는 `google.rpc.ErrorInfo` detail을 담는다. `CollaborationAuthenticator`가 있으면 card는 Bearer security scheme을 선언하고, 요청 인증이 필수면 전역 requirement도 선언한다. credential이 없으면 `WWW-Authenticate`와 함께 HTTP 401, 인증됐지만 collaboration link를 쓸 수 없는 peer는 HTTP 403을 받는다.
 
+<a id="a2a-error-mapping"></a>
 #### A2A error 매핑
 
-peer에는 typed field만 전달된다. 실패의 public message(`NodeFailureError::public_message` 또는 class의 일반 문구)와 `metadata["neograph/failure"] = {code, retryable}`이다. exception text는 절대 전달되지 않는다.
+run의 실패 class는 [프로토콜 실패 매핑](#protocol-failure-mapping)대로 peer에 전달된다. task 상태, status message인 public message, `metadata["neograph/failure"] = {code, retryable}`이며 exception text는 절대 전달되지 않는다. 완료한 run은 agent 답을 status message로 하고 adapter artifact를 담은 `COMPLETED`, step limit은 code `NG.StepLimit`의 `FAILED`, failure exit는 exit가 선언한 code의 `FAILED`다. server가 거절하는 요청:
 
-| NeoGraph 결과 | A2A 결과 |
+| 요청 | A2A 결과 |
 |---|---|
-| Completed | `COMPLETED`; agent 답을 status message로, adapter artifact |
-| Cancelled (`CancelTask`) | `CANCELED`; stream도 이 상태로 닫힘 |
-| Hook blocked (`NG.HookBlocked`) | 끝난 node가 없으면 `REJECTED`, 그 외 `FAILED` |
-| Interrupted (`NodeInterrupt`) | `INPUT_REQUIRED`; reason은 text, payload는 data part; `metadata["neograph/interrupt"] = {node, checkpointId}`; 후속 message가 run을 재개 |
-| run을 끝낸 node 또는 tool 실패 (`NG.TaskFailed`, author code) | `FAILED`, author의 public message가 있으면 그 문구 |
-| Timeout (`NG.Timeout`), provider 실패 (`NG.ProviderFailed`) | `FAILED`, `retryable: true` |
-| Budget (`NG.BudgetExhausted`), safety (`NG.SafetyBlocked`), configuration, logic, uncertain effect, unknown | class code와 함께 `FAILED` |
-| Step limit | `FAILED`, code `NG.StepLimit` |
-| Failure exit | exit가 선언한 code와 함께 `FAILED` |
-| in-flight 한도 도달 | JSON-RPC `-32603`, ErrorInfo reason `RESOURCE_EXHAUSTED` |
-| terminal task의 cancel | `-32002` TaskNotCancelableError; task는 변하지 않음 |
-| push notification 설정; extended card; streaming 비활성 | `-32003`; `-32004`; `-32004` |
+| 모르는 task를 가리키는 message | `-32001` TaskNotFoundError |
+| terminal task에 보낸 message | `-32004` UnsupportedOperationError. collaboration 재전달은 그 task를 반환 |
+| `contextId`가 task와 다른 message | field violation과 함께 `-32602` |
+| 아직 실행 중인 task에 보낸 message | `-32603`, ErrorInfo reason `TASK_BUSY`, domain `neograph` |
+| input을 기다리는 Program task에 보낸 message | `-32004`. task는 계속 기다림(Program의 input 요청에 A2A로 답하는 기능은 아직 없음) |
+| in-flight 한도 도달 | `-32603`, ErrorInfo reason `RESOURCE_EXHAUSTED`, domain `neograph`, metadata `retryAfterSeconds` |
+| agent가 요구하는 credential이 없거나 틀림(collaboration message, 또는 strict 인증에서 모든 요청) | `WWW-Authenticate`와 함께 HTTP 401. body는 ErrorInfo reason `UNAUTHENTICATED`, domain `neograph`인 JSON-RPC `-32600` |
+| collaboration link가 허용하지 않는 인증된 peer | HTTP 403. body는 ErrorInfo reason `PERMISSION_DENIED`, domain `neograph`인 JSON-RPC `-32600` |
+| terminal task의 cancel | `-32002` TaskNotCancelableError. task는 변하지 않음 |
+| push notification 설정; extended card; card가 `streaming = false`일 때의 streaming method | `-32003`; `-32004`; `-32004` |
+| 1.0도 0.3도 아닌 `A2A-Version` | `-32009` VersionNotSupportedError |
+
+모든 error는 `google.rpc.ErrorInfo`를 하나 담으며, 행에 `neograph`라고 적혀 있지 않으면 domain은 `a2a-protocol.org`다.
+
+<a id="a2a-collaboration-extension"></a>
+#### A2A collaboration 확장
+
+`CollaborationMailbox`를 가진 Program agent는 NeoGraph collaboration envelope를 받으며, 두 버전의 card 모두 `capabilities.extensions`에 이를 선언한다. `uri`는 `a2a::COLLABORATION_EXTENSION_URI`(이 절), `required`는 false, `params`는 `{"format": "neograph-a2a-collaboration-v1", "metadataKey": "neograph_collaboration"}`이다. 그런 message는 data part `{format, envelope}`와 `metadata.neograph_collaboration`을 담으며, 연결된 collaboration의 인증된 peer만 보낼 수 있다. 발신자가 receiver task id를 미리 정하므로 첫 전달은 그 id로 task를 만들고, 재전달은 run을 새로 시작하지 않고 기존 task를 반환한다. 일반 A2A client에는 필요 없다.
 
 #### Client stream과 Python
 
@@ -3441,14 +3451,14 @@ stdio 위 줄 단위 JSON으로 주고받는 에디터↔에이전트 JSON-RPC 2
 | 모델 토큰 예산 초과 | `stopReason: "max_tokens"` |
 | 프로바이더 거부 또는 콘텐츠 필터(`NG.SafetyBlocked`) | `stopReason: "refusal"` |
 | `NodeInterrupt` | 같은 턴 안의 `session/request_permission`. 응답으로 실행을 재개한다 |
-| Hook 차단(`NG.HookBlocked`), 노드·도구 실패(`NG.TaskFailed`, 작성자 코드), 시간 초과(`NG.Timeout`), 프로바이더 실패(`NG.ProviderFailed`), 금액·할당량 예산(`NG.BudgetExhausted`), 설정·논리·알 수 없는 실패 | JSON-RPC 오류 `-32603`, message = 공개 메시지, `data: {code, retryable}` |
+| Hook 차단(`NG.HookBlocked`), 노드·도구 실패(`NG.TaskFailed`, 작성자 코드), 시간 초과(`NG.Timeout`), 프로바이더 실패(`NG.ProviderFailed`), 금액·할당량 예산(`NG.BudgetExhausted`), 설정·논리·알 수 없는 실패 | JSON-RPC 오류 `-32603`, message = 공개 메시지, `data: {code, retryable}`([프로토콜 실패 매핑](#protocol-failure-mapping)) |
 | 클라이언트가 아닌 원인으로 취소(노드 중단, 종료) | JSON-RPC 오류 `-32800` |
 
 예외 텍스트(`what()`)는 클라이언트로 가지 않는다. message는 타입이 정해진 공개 메시지(`NodeFailureError::public_message`)나 실패 클래스별 일반 문구이며, 세부 내용은 호스트 로그에만 남는다. 인터럽트는 사유를 제목으로, 페이로드를 `rawInput`으로 하고 `_meta["neograph/interrupt"]`와 선택지 "approve"(`allow_once`), "reject"(`reject_once`)를 가진 도구 호출이 된다. 선택된 option id가 재개 값이다. 바꾸려면 `interrupt_permission`과 `interrupt_resume_value`를 재정의한다. `cancelled` 응답은 턴을 취소로 끝낸다. 어댑터가 `std::nullopt`를 반환하거나 클라이언트가 응답하지 못하면 턴은 `data.code: "NG.Interrupted"`로 실패하고 세션은 일시 정지 상태로 남지 않는다. 에이전트 재시작 뒤처럼 `session/resume`이 체크포인트에서 복원한 일시 정지는 다음 프롬프트의 텍스트가 응답한다.
 
 `session/cancel`은 진행 중인 턴만 취소한다. 실행 중인 턴이 없을 때 온 취소는 무시한다(메시지 순서를 바꾸는 전송은 `set_pre_armed_cancel(true)`로 이전의 사전 취소를 유지할 수 있다). 취소 뒤 대기 중인 agent→client 요청은 응답할 시간 500 ms를 받고, 그 뒤 서버는 `$/cancel_request`를 보내고 턴을 끝낸다. 권한 요청은 `ACPClient::set_permission_timeout`으로 정하지 않으면 시간 제한이 없다. stdin이 EOF에 닿으면 `run()`은 진행 중인 턴이 `set_eof_grace`(1초) 동안 끝나기를 기다린 뒤 취소한다.
 
-`session/new`와 `session/resume`의 stdio `mcpServers`는 NeoGraph의 MCP 클라이언트(`NEOGRAPH_BUILD_MCP_CLIENT`로 빌드)로 세션의 `cwd`에서 시작하며, 환경은 에이전트 환경에 클라이언트의 `env` 항목을 더한 것이다. 노드는 `ACPClient::session_tools(session_id)`로 그 도구를 쓴다. HTTP와 SSE MCP 서버는 알리지 않으며 `-32602`로 거절한다. 시작하지 못한 서버는 요청을 `-32603`, `data.reason: "mcp_server_unavailable"`로 실패시킨다.
+`session/new`와 `session/resume`의 stdio `mcpServers`는 NeoGraph의 MCP 클라이언트(`NEOGRAPH_BUILD_MCP_CLIENT`로 빌드)로 세션의 `cwd`에서 시작하며, 환경은 최소한으로, 에이전트의 `PATH`(Windows에서는 `SystemRoot`도)에 클라이언트의 `env` 항목을 더한 것이다. provider API 키가 있을 수 있는 나머지 에이전트 환경은 넘기지 않는다. 노드는 `ACPClient::session_tools(session_id)`로 그 도구를 쓴다. HTTP와 SSE MCP 서버는 알리지 않으며 `-32602`로 거절한다. 시작하지 못한 서버는 요청을 `-32603`, `data.reason: "mcp_server_unavailable"`로 실패시킨다.
 
 **공개 헤더:** [`include/neograph/acp/`](../include/neograph/acp/).
 

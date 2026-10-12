@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=0e0b9739cfd77729693c2c85649410cd93ea10aa2157242d00ef3c09fe880331 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=4e1d1838ffbffb18894ab21762cba6415222eec558f4818b52b6e015de6fe9d7 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -539,25 +539,28 @@ public:
 <a id="protocol-failure-mapping"></a>
 ### プロトコル失敗のマッピング
 
-NeoGraph が MCP や gRPC でツールやグラフを提供するとき、すべての失敗分類は、ノード失敗の分類器が与える安定したコード(`graph::classify_failure`)で名付けられた、互いに区別され文書化された形をワイヤー上でも保ちます。実行制御シグナルが、モデルの読めるツール結果になることはありません。ワイヤーを越えるのは公開メッセージだけです。失敗の `public_message`(`NodeFailureError` 由来)、または分類の固定の説明であり、パスやペイロードや秘密を含みうる例外テキストは決して越えません。
+NeoGraph が MCP、gRPC、A2A、ACP でツール、グラフ、エージェントを提供するとき、すべての失敗分類は、ノード失敗の分類器が与える安定したコード(`graph::classify_failure`)で名付けられた、互いに区別され文書化された形をワイヤー上でも保ちます。実行制御シグナルが、モデルの読めるツール結果になることはありません。ワイヤーを越えるのは公開メッセージだけです。失敗の `public_message`(`NodeFailureError` 由来)、または分類の固定の説明であり、パスやペイロードや秘密を含みうる例外テキストは決して越えません。
 
-| 分類(コード) | MCP `tools/call` (`MCPServer`) | gRPC `GraphService` | gRPC `ToolService.CallTool` |
-|------|------|------|------|
-| クライアントによるキャンセル(`NG.Cancelled`): `notifications/cancelled`、gRPC のキャンセル | stdio(`run`): 応答なし。HTTP のように応答 sink を読むトランスポート: JSON-RPC エラー `-32800`、`data.code` | `CANCELLED` | `CANCELLED` |
-| サーバーによるキャンセル(`NG.Cancelled`): `stop()`、またはハンドラー自身の処理 | JSON-RPC エラー `-32000`(`stop()`)または `-32603`、`data.code` | `CANCELLED` | `CANCELLED` |
-| Hook のブロック(`NG.HookBlocked`) | JSON-RPC エラー `-32010`、`data` `{code, invocation_id, state}` | `FAILED_PRECONDITION`、Hook がタイムアウトしたときは `DEADLINE_EXCEEDED`。ErrorInfo metadata `invocation_id`、`state` | `GraphService` と同じ |
-| 割り込み(`NG.Interrupted`) | JSON-RPC エラー `-32011`、`data` `{code, reason, value}` | 一時停止した実行: `OK`、`interrupted`、`interrupt_node`、`interrupt_value_json`(ストリームの FINAL ペイロード: `interrupt_value`) | `FAILED_PRECONDITION`、ErrorInfo metadata `reason`、`value` |
-| 通常(`NG.TaskFailed`、作成者コード) | `isError: true` と `_meta["io.neograph/failure"]` `{code, retryable}` を持つ `result` | `UNKNOWN` | `error` と `error_code` を持つ `OK` |
-| タイムアウト(`NG.Timeout`) | 通常と同じで、それぞれのコードを持つ | `DEADLINE_EXCEEDED` | 通常と同じで、それぞれのコードを持つ |
-| プロバイダー失敗(`NG.ProviderFailed`) | 通常と同じで、それぞれのコードを持つ | `UNAVAILABLE` | 通常と同じで、それぞれのコードを持つ |
-| 予算(`NG.BudgetExhausted`) | 通常と同じで、それぞれのコードを持つ | `RESOURCE_EXHAUSTED` | 通常と同じで、それぞれのコードを持つ |
-| 安全または構成(`NG.SafetyBlocked`、`NG.ConfigError`) | 通常と同じで、それぞれのコードを持つ | `FAILED_PRECONDITION` | 通常と同じで、それぞれのコードを持つ |
-| 論理(`NG.LogicError`、`NG.BarrierStalled`) | 通常と同じで、それぞれのコードを持つ | `INTERNAL` | 通常と同じで、それぞれのコードを持つ |
-| コミット済みの効果(`NG.EffectCommitted`) | 通常と同じで、それぞれのコードを持つ | `ABORTED` | 通常と同じで、それぞれのコードを持つ |
-| 不確定な効果、不明、失敗出口(`NG.EffectUncertain`、`NG.UnknownFailure`、出口のコード) | 通常と同じで、それぞれのコードを持つ | `UNKNOWN` | 通常と同じで、それぞれのコードを持つ |
-| 不正なリクエスト(`NG.InvalidRequest`) | JSON-RPC エラー `-32602` | `INVALID_ARGUMENT`。実行するグラフがないときは `FAILED_PRECONDITION`(`NG.NoGraph`) | `INVALID_ARGUMENT` |
-| 未知のツール(`NG.ToolNotFound`) | 失敗コードなしの `isError: true` の `result` | なし | `NOT_FOUND` |
-| 容量超過(`NG.Capacity`) | JSON-RPC エラー `-32000`、`data.capacity` | `RESOURCE_EXHAUSTED` | なし |
+| 分類(コード) | MCP `tools/call` (`MCPServer`) | gRPC `GraphService` | gRPC `ToolService.CallTool` | A2A タスク(`A2AServer`) | ACP `session/prompt` (`ACPServer`) |
+|------|------|------|------|------|------|
+| クライアントによるキャンセル(`NG.Cancelled`): `notifications/cancelled`、gRPC のキャンセル | stdio(`run`): 応答なし。HTTP のように応答 sink を読むトランスポート: JSON-RPC エラー `-32800`、`data.code` | `CANCELLED` | `CANCELLED` | `CancelTask`: `CANCELED`。stream もこの状態で閉じる | `session/cancel`: `stopReason: "cancelled"` |
+| サーバーによるキャンセル(`NG.Cancelled`): `stop()`、またはハンドラー自身の処理 | JSON-RPC エラー `-32000`(`stop()`)または `-32603`、`data.code` | `CANCELLED` | `CANCELLED` | `CANCELED` | JSON-RPC エラー `-32800`、`data` `{code, retryable}` |
+| Hook のブロック(`NG.HookBlocked`) | JSON-RPC エラー `-32010`、`data` `{code, invocation_id, state}` | `FAILED_PRECONDITION`、Hook がタイムアウトしたときは `DEADLINE_EXCEEDED`。ErrorInfo metadata `invocation_id`、`state` | `GraphService` と同じ | 完了した node がなければ `REJECTED`、それ以外は `FAILED`。`metadata["neograph/failure"]` `{code, retryable}` | JSON-RPC エラー `-32603`、`data` `{code, retryable}` |
+| 割り込み(`NG.Interrupted`) | JSON-RPC エラー `-32011`、`data` `{code, reason, value}` | 一時停止した実行: `OK`、`interrupted`、`interrupt_node`、`interrupt_value_json`(ストリームの FINAL ペイロード: `interrupt_value`) | `FAILED_PRECONDITION`、ErrorInfo metadata `reason`、`value` | `INPUT_REQUIRED`: 理由を text、ペイロードを data part、`metadata["neograph/interrupt"]` `{node, checkpointId}`。後続の message が実行を再開 | 同じターン内の `session/request_permission`。その回答で実行を再開。アダプターやクライアントが回答できないときは `NG.Interrupted` を持つ JSON-RPC エラー `-32603` |
+| 通常(`NG.TaskFailed`、作成者コード) | `isError: true` と `_meta["io.neograph/failure"]` `{code, retryable}` を持つ `result` | `UNKNOWN` | `error` と `error_code` を持つ `OK` | `FAILED`。公開メッセージを status message に、`metadata["neograph/failure"]` `{code, retryable}` | JSON-RPC エラー `-32603`。公開メッセージを message に、`data` `{code, retryable}` |
+| タイムアウト(`NG.Timeout`) | 通常と同じで、それぞれのコードを持つ | `DEADLINE_EXCEEDED` | 通常と同じで、それぞれのコードを持つ | 通常と同じで、それぞれのコードを持つ | 通常と同じで、それぞれのコードを持つ |
+| プロバイダー失敗(`NG.ProviderFailed`) | 通常と同じで、それぞれのコードを持つ | `UNAVAILABLE` | 通常と同じで、それぞれのコードを持つ | 通常と同じで、それぞれのコードを持つ | 通常と同じで、それぞれのコードを持つ |
+| 予算(`NG.BudgetExhausted`) | 通常と同じで、それぞれのコードを持つ | `RESOURCE_EXHAUSTED` | 通常と同じで、それぞれのコードを持つ | 通常と同じで、それぞれのコードを持つ | 実行のモデルトークン予算を超えたときは `stopReason: "max_tokens"`、それ以外は通常と同じ |
+| 安全または構成(`NG.SafetyBlocked`、`NG.ConfigError`) | 通常と同じで、それぞれのコードを持つ | `FAILED_PRECONDITION` | 通常と同じで、それぞれのコードを持つ | 通常と同じで、それぞれのコードを持つ | `NG.SafetyBlocked` は `stopReason: "refusal"`、`NG.ConfigError` は通常と同じ |
+| 論理(`NG.LogicError`、`NG.BarrierStalled`) | 通常と同じで、それぞれのコードを持つ | `INTERNAL` | 通常と同じで、それぞれのコードを持つ | 通常と同じで、それぞれのコードを持つ | 通常と同じで、それぞれのコードを持つ |
+| コミット済みの効果(`NG.EffectCommitted`) | 通常と同じで、それぞれのコードを持つ | `ABORTED` | 通常と同じで、それぞれのコードを持つ | 通常と同じで、それぞれのコードを持つ | 通常と同じで、それぞれのコードを持つ |
+| 不確定な効果、不明、失敗出口(`NG.EffectUncertain`、`NG.UnknownFailure`、出口のコード) | 通常と同じで、それぞれのコードを持つ | `UNKNOWN` | 通常と同じで、それぞれのコードを持つ | 通常と同じで、それぞれのコードを持つ | 通常と同じで、それぞれのコードを持つ |
+| ステップ上限(`NG.StepLimit`): `RunConfig::max_steps` | なし | `OK`、`max_steps_exhausted` | なし | `FAILED`、コード `NG.StepLimit` | `stopReason: "max_turn_requests"` |
+| 不正なリクエスト(`NG.InvalidRequest`) | JSON-RPC エラー `-32602` | `INVALID_ARGUMENT`。実行するグラフがないときは `FAILED_PRECONDITION`(`NG.NoGraph`) | `INVALID_ARGUMENT` | `google.rpc.BadRequest` の field violation 付きの JSON-RPC エラー `-32602`。不正な envelope や batch は `-32600` | JSON-RPC エラー `-32602` |
+| 未知のツール(`NG.ToolNotFound`) | 失敗コードなしの `isError: true` の `result` | なし | `NOT_FOUND` | なし | なし |
+| 容量超過(`NG.Capacity`) | JSON-RPC エラー `-32000`、`data.capacity` | `RESOURCE_EXHAUSTED` | なし | JSON-RPC エラー `-32603`、ErrorInfo reason `RESOURCE_EXHAUSTED`、domain `neograph` | JSON-RPC エラー `-32603`、`data.reason` `overloaded` |
+
+`retryable` はすべてのプロトコルで `FailureVerdict::retryable` で、同じリクエストをもう一度送れば成功しうるかを表します。ノードの再試行判定([ノード失敗の契約](#node-failure-contract))であり、プロバイダー失敗(`NG.ProviderFailed`)でも `true` です。ノードの再試行ループはこれをプロバイダーランタイムに任せますが、新しいリクエストは通りうるからです。A2A はコードと `retryable` を両バージョンとも task の `metadata["neograph/failure"]` に、ACP はエラーの `data` に載せます。A2A だけにあるリクエストエラーは [A2A エラーマッピング](#a2a-error-mapping) にあります。
 
 OK でないすべての gRPC ステータスは、`grpc-status-details-bin` trailer に `google.rpc.ErrorInfo` を 1 つ持つ `google.rpc.Status` を載せます。`reason` はコード、`domain` は `neograph` で、`metadata` には `retryable` と上のフィールドが入ります。`RunGraphResponse.error` は非推奨で、公開メッセージだけを持って 1 リリースの間残ります。OK でない単項ステータスには応答本体が載りません。`RunGraphStream` は失敗をペイロードが `{error, code}` の `DEBUG` イベントで報告し、その後、単項呼び出しと同じステータスで終わります。`CheckpointService` はバックエンドの失敗に「チェックポイントなし」、空のリスト、成功した削除ではなく `UNAVAILABLE`(`NG.BackendUnavailable`)で、形式の不正な `SaveCheckpoint` には `INVALID_ARGUMENT` で応答します。
 
@@ -3012,33 +3015,40 @@ sp::runtime::Result run_mcp_agent(
 
 - **リクエスト.** server は各リクエストに、header または `A2A-Version` query parameter の `A2A-Version` が示す dialect で応答します。バージョンがなければ 0.3 です(spec §3.6.2)。Major.Minor の `1.0` と `0.3` だけを扱い、patch は無視します。`0.2`、`1.5`、`2.0` などそれ以外は、対応バージョンを示す VersionNotSupportedError(`-32009`)になります。両方の method 表記(`SendMessage`、`message/send`)をどちらのバージョンでも受け付けます。
 - **Card.** card はバージョンごとに提供します。`A2A-Version: 1.0` には純粋な 1.0 `AgentCard` を返し、バージョンのないリクエストには 0.3 card を返します。0.3 card も `supportedInterfaces` の先頭に 1.0 interface を載せます。応答には `ETag`、`Cache-Control: public, max-age=300`、`Vary: A2A-Version` が付き、`If-None-Match` には 304 で応えます。`AgentCard::url` を設定しない場合、card は client が使ったアドレスを広告します。すべての skill は少なくとも 1 つの tag を持ちます。card は実装していない push notification、extended card、HTTP+JSON・gRPC binding を主張しません。
-- **Client.** client は最初の呼び出しの前に card を取得し、`1.x` または `0.x` バージョンの最初の JSONRPC interface を選びます。URL が client の `base_url` と一致する interface を優先します。card を取得できない場合だけ probe します。まず 1.0 を送り、`-32601`、`-32009`、HTTP 400 なら 0.3 に切り替えて結果を記憶します。選んだ interface URL が `base_url` と同じ origin なら RPC はその URL に送られるので、endpoint が `/a2a/v1` の agent も動作します。`set_allow_cross_origin_interfaces(true)` で許可しない限り card は client を別 origin に向けられず、その場合 RPC は `base_url` に送られます。`endpoint_url()` は使用中の endpoint を返し、message id はランダムな UUID です。
+- **Client.** client は最初の呼び出しの前に card を取得し、`1.x` または `0.x` バージョンの最初の JSONRPC interface を選びます。URL が client の `base_url` と一致する interface を優先します。card を取得できない場合だけ probe します。まず 1.0 を送り、`-32601`、`-32009`、HTTP 400 なら 0.3 に切り替えて結果を記憶します。選んだ interface URL が `base_url` と同じ origin なら RPC はその URL に送られるので、endpoint が `/a2a/v1` の agent も動作します。`set_allow_cross_origin_interfaces(true)` で許可しない限り card は client を別 origin に向けられず、その場合 RPC は `base_url` に送られ、client は従わなかった origin を示す警告を stderr に書きます。`endpoint_url()` は使用中の endpoint を返し、message id はランダムな UUID です。
 - **0.3.** 0.3 は同じ意味を持つ互換 dialect として残ります。新機能は 1.0 を対象にします。
 
 #### Task と method
 
 すべての run は専用の worker thread で実行されます。stream や blocking send はそれを観測するだけなので、task は切断された接続より長く存続します。`SendMessage` は task が terminal または interrupted になるまで block しますが、`returnImmediately`(0.3 では `blocking: false`)を指定すると SUBMITTED の task を即座に返します。`SendStreamingMessage` と `SubscribeToTask`(0.3 では `tasks/resubscribe`)は Task を最初に送り、続けて status・artifact update を送り、terminal または interrupted の状態で閉じます。0.3 の stream は `final: true` で終わります。`GetTask` と `ListTasks` は `historyLength` に従います(0 なら history を省略)。`ListTasks` は `contextId`、`status`、`statusTimestampAfter` で絞り込み、`pageSize`(1〜100、既定 50)と `pageToken` で新しい順にページングし、`includeArtifacts` がなければ artifact を省略します。すべての status に timestamp が付きます。
 
-task id は server が生成します。未知の `taskId` を持つ message は `-32001`、terminal な task は `-32004`、task と異なる `contextId` は `-32602`、まだ実行中の task は `-32603` で失敗します。INPUT_REQUIRED の task に送った message は、interrupt が保存した checkpoint から run を再開します。`GraphAgentAdapter::build_resume_value` が message を resume value に変換し、checkpoint store を持たない engine はその message を input として graph を再実行します。NeoGraph の collaboration envelope は送信者が決めた冪等な task id を保ちます。リクエストは dialect ごとに検証し、違反は `google.rpc.BadRequest` の field violation 付きで `-32602` になり、すべての error は `google.rpc.ErrorInfo` detail を持ちます。`CollaborationAuthenticator` がある場合、card は Bearer security scheme を宣言し、リクエストの認証が必須なら全体の requirement も宣言します。credential がなければ `WWW-Authenticate` 付きの HTTP 401、認証済みでも collaboration link を使えない peer は HTTP 403 になります。
+task id は server が生成します。未知の `taskId` を持つ message は `-32001`、terminal な task は `-32004`、task と異なる `contextId` は `-32602`、まだ実行中の task は `-32603`(ErrorInfo reason `TASK_BUSY`)で失敗します。INPUT_REQUIRED の task に送った message は、interrupt が保存した checkpoint から run を再開します。`GraphAgentAdapter::build_resume_value` が message を resume value に変換し、checkpoint store を持たない engine はその message を input として graph を再実行します。Program を基にした task は、まだ A2A でその回答を受け取れません。message は `-32004` になり、task は待ち続けます。NeoGraph の collaboration envelope は送信者が決めた冪等な task id を保ちます([A2A collaboration 拡張](#a2a-collaboration-extension))。リクエストは dialect ごとに検証し、違反は `google.rpc.BadRequest` の field violation 付きで `-32602` になり、すべての error は `google.rpc.ErrorInfo` detail を持ちます。`CollaborationAuthenticator` がある場合、card は Bearer security scheme を宣言し、リクエストの認証が必須なら全体の requirement も宣言します。credential がなければ `WWW-Authenticate` 付きの HTTP 401、認証済みでも collaboration link を使えない peer は HTTP 403 になります。
 
+<a id="a2a-error-mapping"></a>
 #### A2A エラーマッピング
 
-peer に届くのは型付きの項目だけです。失敗の public message(`NodeFailureError::public_message` または class の汎用文言)と `metadata["neograph/failure"] = {code, retryable}` です。例外テキストは決して届きません。
+run の失敗 class は [プロトコル失敗のマッピング](#protocol-failure-mapping) のとおり peer に届きます。task の状態、status message としての public message、`metadata["neograph/failure"] = {code, retryable}` で、例外テキストは決して届きません。完了した run は agent の回答を status message とし adapter の artifact を伴う `COMPLETED`、step limit は code `NG.StepLimit` の `FAILED`、failure exit は exit が宣言した code の `FAILED` です。server が拒否するリクエスト:
 
-| NeoGraph の結果 | A2A の結果 |
+| リクエスト | A2A の結果 |
 |---|---|
-| Completed | `COMPLETED`; agent の回答を status message に、adapter の artifact |
-| Cancelled (`CancelTask`) | `CANCELED`; stream もこの状態で閉じる |
-| Hook blocked (`NG.HookBlocked`) | 完了した node がなければ `REJECTED`、それ以外は `FAILED` |
-| Interrupted (`NodeInterrupt`) | `INPUT_REQUIRED`; reason を text、payload を data part に; `metadata["neograph/interrupt"] = {node, checkpointId}`; 後続の message が run を再開 |
-| run を終わらせた node または tool の失敗 (`NG.TaskFailed`、author code) | `FAILED`、author の public message があればその文言 |
-| Timeout (`NG.Timeout`)、provider の失敗 (`NG.ProviderFailed`) | `FAILED`、`retryable: true` |
-| Budget (`NG.BudgetExhausted`)、safety (`NG.SafetyBlocked`)、configuration、logic、uncertain effect、unknown | class code 付きの `FAILED` |
-| Step limit | `FAILED`、code `NG.StepLimit` |
-| Failure exit | exit が宣言した code 付きの `FAILED` |
-| in-flight 上限に到達 | JSON-RPC `-32603`、ErrorInfo reason `RESOURCE_EXHAUSTED` |
-| terminal な task の cancel | `-32002` TaskNotCancelableError; task は変わらない |
-| push notification 設定; extended card; streaming 無効 | `-32003`; `-32004`; `-32004` |
+| 未知の task を指す message | `-32001` TaskNotFoundError |
+| terminal な task への message | `-32004` UnsupportedOperationError。collaboration の再配送はその task を返す |
+| `contextId` が task と異なる message | field violation 付きの `-32602` |
+| まだ実行中の task への message | `-32603`、ErrorInfo reason `TASK_BUSY`、domain `neograph` |
+| input を待つ Program task への message | `-32004`。task は待ち続ける(Program の input 要求に A2A で答える機能はまだない) |
+| in-flight 上限に到達 | `-32603`、ErrorInfo reason `RESOURCE_EXHAUSTED`、domain `neograph`、metadata `retryAfterSeconds` |
+| agent が求める credential がない、または不正(collaboration message、または strict 認証でのすべてのリクエスト) | `WWW-Authenticate` 付きの HTTP 401。body は ErrorInfo reason `UNAUTHENTICATED`、domain `neograph` の JSON-RPC `-32600` |
+| collaboration link が許可しない認証済み peer | HTTP 403。body は ErrorInfo reason `PERMISSION_DENIED`、domain `neograph` の JSON-RPC `-32600` |
+| terminal な task の cancel | `-32002` TaskNotCancelableError。task は変わらない |
+| push notification 設定; extended card; card が `streaming = false` のときの streaming method | `-32003`; `-32004`; `-32004` |
+| 1.0 でも 0.3 でもない `A2A-Version` | `-32009` VersionNotSupportedError |
+
+すべての error は `google.rpc.ErrorInfo` を 1 つ持ち、行に `neograph` とない限り domain は `a2a-protocol.org` です。
+
+<a id="a2a-collaboration-extension"></a>
+#### A2A collaboration 拡張
+
+`CollaborationMailbox` を持つ Program agent は NeoGraph の collaboration envelope を受け付け、両バージョンの card の `capabilities.extensions` でそれを宣言します。`uri` は `a2a::COLLABORATION_EXTENSION_URI`(この節)、`required` は false、`params` は `{"format": "neograph-a2a-collaboration-v1", "metadataKey": "neograph_collaboration"}` です。そのような message は data part `{format, envelope}` と `metadata.neograph_collaboration` を持ち、リンクされた collaboration の認証済み peer だけが送れます。送信者が受信側の task id を先に決めるので、最初の配送はその id で task を作り、再配送は新しい run を始めずに既存の task を返します。通常の A2A client には不要です。
 
 #### Client の stream と Python
 
@@ -3064,14 +3074,14 @@ stdio 上の改行区切り JSON によるエディター↔エージェント J
 | モデルトークン予算の超過 | `stopReason: "max_tokens"` |
 | プロバイダーの拒否またはコンテンツフィルター (`NG.SafetyBlocked`) | `stopReason: "refusal"` |
 | `NodeInterrupt` | 同じターン内の `session/request_permission`。回答で実行を再開します |
-| Hook によるブロック (`NG.HookBlocked`)、ノード・ツールの失敗 (`NG.TaskFailed`、作成者コード)、タイムアウト (`NG.Timeout`)、プロバイダーの失敗 (`NG.ProviderFailed`)、金額・クォータ予算 (`NG.BudgetExhausted`)、設定・ロジック・不明な失敗 | JSON-RPC エラー `-32603`、message = 公開メッセージ、`data: {code, retryable}` |
+| Hook によるブロック (`NG.HookBlocked`)、ノード・ツールの失敗 (`NG.TaskFailed`、作成者コード)、タイムアウト (`NG.Timeout`)、プロバイダーの失敗 (`NG.ProviderFailed`)、金額・クォータ予算 (`NG.BudgetExhausted`)、設定・ロジック・不明な失敗 | JSON-RPC エラー `-32603`、message = 公開メッセージ、`data: {code, retryable}`([プロトコル失敗のマッピング](#protocol-failure-mapping)) |
 | クライアント以外による取り消し (ノードの中断、シャットダウン) | JSON-RPC エラー `-32800` |
 
 例外テキスト (`what()`) はクライアントに届きません。message は型付きの公開メッセージ (`NodeFailureError::public_message`) か失敗クラスごとの汎用文で、詳細はホストのログにだけ残ります。割り込みは、理由をタイトル、ペイロードを `rawInput` とし、`_meta["neograph/interrupt"]` と選択肢 "approve" (`allow_once`)・"reject" (`reject_once`) を持つツール呼び出しになります。選ばれた option id が再開値です。変えるには `interrupt_permission` と `interrupt_resume_value` をオーバーライドします。`cancelled` の回答はターンを取り消しで終えます。アダプターが `std::nullopt` を返すか、クライアントが回答できない場合、ターンは `data.code: "NG.Interrupted"` で失敗し、セッションは一時停止のまま残りません。エージェントの再起動後のように `session/resume` がチェックポイントから復元した一時停止には、次のプロンプトのテキストが回答します。
 
 `session/cancel` は進行中のターンだけを取り消し、ターンが実行中でないときの取り消しは無視します (メッセージの順序を入れ替えるトランスポートは `set_pre_armed_cancel(true)` で従来の事前取り消しを維持できます)。取り消し後、保留中の agent→client 要求には回答のために 500 ms が与えられ、その後サーバーは `$/cancel_request` を送ってターンを終えます。権限要求は `ACPClient::set_permission_timeout` で設定しない限りタイムアウトしません。stdin が EOF に達すると、`run()` は実行中のターンが `set_eof_grace` (1 秒) の間に終わるのを待ってから取り消します。
 
-`session/new` と `session/resume` の stdio `mcpServers` は NeoGraph の MCP クライアント (`NEOGRAPH_BUILD_MCP_CLIENT` でビルド) でセッションの `cwd` から起動し、環境はエージェントの環境にクライアントの `env` を加えたものです。ノードは `ACPClient::session_tools(session_id)` でそのツールを使います。HTTP と SSE の MCP サーバーは通知せず、`-32602` で拒否します。起動できないサーバーは要求を `-32603`、`data.reason: "mcp_server_unavailable"` で失敗させます。
+`session/new` と `session/resume` の stdio `mcpServers` は NeoGraph の MCP クライアント (`NEOGRAPH_BUILD_MCP_CLIENT` でビルド) でセッションの `cwd` から起動し、環境は最小限で、エージェントの `PATH`(Windows では `SystemRoot` も)にクライアントの `env` を加えたものです。プロバイダーの API キーを含みうるエージェントのその他の環境は渡しません。ノードは `ACPClient::session_tools(session_id)` でそのツールを使います。HTTP と SSE の MCP サーバーは通知せず、`-32602` で拒否します。起動できないサーバーは要求を `-32603`、`data.reason: "mcp_server_unavailable"` で失敗させます。
 
 **公開ヘッダー:** [`include/neograph/acp/`](../include/neograph/acp/)。
 ### `neograph::async` — HTTP/SSE/WS ヘルパー

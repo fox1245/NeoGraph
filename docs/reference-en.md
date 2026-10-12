@@ -573,25 +573,28 @@ The first three rows never reach the model. A tool result sets `tool_status`, an
 
 ### Protocol failure mapping
 
-When NeoGraph serves tools or graphs over MCP or gRPC, every failure class keeps a distinct, documented form on the wire, named by the stable code the node failure classifier gives (`graph::classify_failure`). Run control signals never become a tool result a model could read. Only the public message crosses the wire: the failure's `public_message` (from `NodeFailureError`), or a fixed description of its class, never the exception text, which can carry paths, payloads or secrets.
+When NeoGraph serves tools, graphs or agents over MCP, gRPC, A2A or ACP, every failure class keeps a distinct, documented form on the wire, named by the stable code the node failure classifier gives (`graph::classify_failure`). Run control signals never become a tool result a model could read. Only the public message crosses the wire: the failure's `public_message` (from `NodeFailureError`), or a fixed description of its class, never the exception text, which can carry paths, payloads or secrets.
 
-| Class (code) | MCP `tools/call` (`MCPServer`) | gRPC `GraphService` | gRPC `ToolService.CallTool` |
-|------|------|------|------|
-| Cancelled by the client (`NG.Cancelled`): `notifications/cancelled`, a gRPC cancel | stdio (`run`): no response; a transport that reads the response sink, such as HTTP: JSON-RPC error `-32800`, `data.code` | `CANCELLED` | `CANCELLED` |
-| Cancelled by the server (`NG.Cancelled`): `stop()`, or the handler's own work | JSON-RPC error `-32000` (`stop()`) or `-32603`, `data.code` | `CANCELLED` | `CANCELLED` |
-| Hook blocked (`NG.HookBlocked`) | JSON-RPC error `-32010`, `data` `{code, invocation_id, state}` | `FAILED_PRECONDITION`, or `DEADLINE_EXCEEDED` when the Hook timed out; ErrorInfo metadata `invocation_id`, `state` | as `GraphService` |
-| Interrupted (`NG.Interrupted`) | JSON-RPC error `-32011`, `data` `{code, reason, value}` | a paused run: `OK`, `interrupted`, `interrupt_node`, `interrupt_value_json` (the stream's FINAL payload: `interrupt_value`) | `FAILED_PRECONDITION`, ErrorInfo metadata `reason`, `value` |
-| Ordinary (`NG.TaskFailed`, an author code) | `result` with `isError: true` and `_meta["io.neograph/failure"]` `{code, retryable}` | `UNKNOWN` | `OK` with `error` and `error_code` |
-| Timeout (`NG.Timeout`) | as ordinary, with its code | `DEADLINE_EXCEEDED` | as ordinary, with its code |
-| Provider failure (`NG.ProviderFailed`) | as ordinary, with its code | `UNAVAILABLE` | as ordinary, with its code |
-| Budget (`NG.BudgetExhausted`) | as ordinary, with its code | `RESOURCE_EXHAUSTED` | as ordinary, with its code |
-| Safety or configuration (`NG.SafetyBlocked`, `NG.ConfigError`) | as ordinary, with its code | `FAILED_PRECONDITION` | as ordinary, with its code |
-| Logic (`NG.LogicError`, `NG.BarrierStalled`) | as ordinary, with its code | `INTERNAL` | as ordinary, with its code |
-| Effect committed (`NG.EffectCommitted`) | as ordinary, with its code | `ABORTED` | as ordinary, with its code |
-| Effect uncertain, unknown, a failure exit (`NG.EffectUncertain`, `NG.UnknownFailure`, the exit's code) | as ordinary, with its code | `UNKNOWN` | as ordinary, with its code |
-| Invalid request (`NG.InvalidRequest`) | JSON-RPC error `-32602` | `INVALID_ARGUMENT`; `FAILED_PRECONDITION` (`NG.NoGraph`) when there is no graph to run | `INVALID_ARGUMENT` |
-| Unknown tool (`NG.ToolNotFound`) | `result` with `isError: true`, no failure code | none | `NOT_FOUND` |
-| At capacity (`NG.Capacity`) | JSON-RPC error `-32000`, `data.capacity` | `RESOURCE_EXHAUSTED` | none |
+| Class (code) | MCP `tools/call` (`MCPServer`) | gRPC `GraphService` | gRPC `ToolService.CallTool` | A2A task (`A2AServer`) | ACP `session/prompt` (`ACPServer`) |
+|------|------|------|------|------|------|
+| Cancelled by the client (`NG.Cancelled`): `notifications/cancelled`, a gRPC cancel | stdio (`run`): no response; a transport that reads the response sink, such as HTTP: JSON-RPC error `-32800`, `data.code` | `CANCELLED` | `CANCELLED` | `CancelTask`: `CANCELED`; the stream closes on it | `session/cancel`: `stopReason: "cancelled"` |
+| Cancelled by the server (`NG.Cancelled`): `stop()`, or the handler's own work | JSON-RPC error `-32000` (`stop()`) or `-32603`, `data.code` | `CANCELLED` | `CANCELLED` | `CANCELED` | JSON-RPC error `-32800`, `data` `{code, retryable}` |
+| Hook blocked (`NG.HookBlocked`) | JSON-RPC error `-32010`, `data` `{code, invocation_id, state}` | `FAILED_PRECONDITION`, or `DEADLINE_EXCEEDED` when the Hook timed out; ErrorInfo metadata `invocation_id`, `state` | as `GraphService` | `REJECTED` when no node had finished, otherwise `FAILED`; `metadata["neograph/failure"]` `{code, retryable}` | JSON-RPC error `-32603`, `data` `{code, retryable}` |
+| Interrupted (`NG.Interrupted`) | JSON-RPC error `-32011`, `data` `{code, reason, value}` | a paused run: `OK`, `interrupted`, `interrupt_node`, `interrupt_value_json` (the stream's FINAL payload: `interrupt_value`) | `FAILED_PRECONDITION`, ErrorInfo metadata `reason`, `value` | `INPUT_REQUIRED`: the reason as text, the payload as a data part, `metadata["neograph/interrupt"]` `{node, checkpointId}`; a follow-up message resumes the run | `session/request_permission` in the same turn, whose answer resumes the run; JSON-RPC error `-32603` with `NG.Interrupted` when the adapter or the client cannot answer |
+| Ordinary (`NG.TaskFailed`, an author code) | `result` with `isError: true` and `_meta["io.neograph/failure"]` `{code, retryable}` | `UNKNOWN` | `OK` with `error` and `error_code` | `FAILED`, the public message as status message, `metadata["neograph/failure"]` `{code, retryable}` | JSON-RPC error `-32603`, the public message as message, `data` `{code, retryable}` |
+| Timeout (`NG.Timeout`) | as ordinary, with its code | `DEADLINE_EXCEEDED` | as ordinary, with its code | as ordinary, with its code | as ordinary, with its code |
+| Provider failure (`NG.ProviderFailed`) | as ordinary, with its code | `UNAVAILABLE` | as ordinary, with its code | as ordinary, with its code | as ordinary, with its code |
+| Budget (`NG.BudgetExhausted`) | as ordinary, with its code | `RESOURCE_EXHAUSTED` | as ordinary, with its code | as ordinary, with its code | `stopReason: "max_tokens"` when the run's model-token budget was crossed, otherwise as ordinary |
+| Safety or configuration (`NG.SafetyBlocked`, `NG.ConfigError`) | as ordinary, with its code | `FAILED_PRECONDITION` | as ordinary, with its code | as ordinary, with its code | `stopReason: "refusal"` for `NG.SafetyBlocked`; `NG.ConfigError` as ordinary |
+| Logic (`NG.LogicError`, `NG.BarrierStalled`) | as ordinary, with its code | `INTERNAL` | as ordinary, with its code | as ordinary, with its code | as ordinary, with its code |
+| Effect committed (`NG.EffectCommitted`) | as ordinary, with its code | `ABORTED` | as ordinary, with its code | as ordinary, with its code | as ordinary, with its code |
+| Effect uncertain, unknown, a failure exit (`NG.EffectUncertain`, `NG.UnknownFailure`, the exit's code) | as ordinary, with its code | `UNKNOWN` | as ordinary, with its code | as ordinary, with its code | as ordinary, with its code |
+| Step limit (`NG.StepLimit`): `RunConfig::max_steps` | none | `OK`, `max_steps_exhausted` | none | `FAILED`, code `NG.StepLimit` | `stopReason: "max_turn_requests"` |
+| Invalid request (`NG.InvalidRequest`) | JSON-RPC error `-32602` | `INVALID_ARGUMENT`; `FAILED_PRECONDITION` (`NG.NoGraph`) when there is no graph to run | `INVALID_ARGUMENT` | JSON-RPC error `-32602` with `google.rpc.BadRequest` field violations; a malformed envelope or a batch: `-32600` | JSON-RPC error `-32602` |
+| Unknown tool (`NG.ToolNotFound`) | `result` with `isError: true`, no failure code | none | `NOT_FOUND` | none | none |
+| At capacity (`NG.Capacity`) | JSON-RPC error `-32000`, `data.capacity` | `RESOURCE_EXHAUSTED` | none | JSON-RPC error `-32603`, ErrorInfo reason `RESOURCE_EXHAUSTED`, domain `neograph` | JSON-RPC error `-32603`, `data.reason` `overloaded` |
+
+`retryable` is `FailureVerdict::retryable` on every protocol: whether sending the same request again may succeed. It is the node's retry verdict ([Node failure contract](#node-failure-contract)), and also `true` for a provider failure (`NG.ProviderFailed`), which the node retry loop leaves to the provider runtime but a new request may get past. A2A carries the code and `retryable` in the task's `metadata["neograph/failure"]` in both versions, and ACP in the error's `data`; the request errors only A2A has are under [A2A error mapping](#a2a-error-mapping).
 
 Every non-OK gRPC status carries a `google.rpc.Status` in the `grpc-status-details-bin` trailer with one `google.rpc.ErrorInfo`: `reason` is the code, `domain` is `neograph`, and `metadata` holds `retryable` and the fields above. `RunGraphResponse.error` is deprecated and kept for one release with the public message only; a non-OK unary status carries no response body. `RunGraphStream` reports a failure as a `DEBUG` event whose payload is `{error, code}` and then ends with the same status as a unary call. The `CheckpointService` answers a backend failure with `UNAVAILABLE` (`NG.BackendUnavailable`) instead of "no checkpoint", an empty list or a successful delete, and a malformed `SaveCheckpoint` with `INVALID_ARGUMENT`.
 
@@ -3479,33 +3482,38 @@ pointer to that canonical source-level reference.
 
 - **Requests.** The server answers each request in the dialect its `A2A-Version` names, from the header or the `A2A-Version` query parameter. No version means 0.3 (spec §3.6.2). Only Major.Minor `1.0` and `0.3` are spoken and a patch component is ignored; anything else, such as `0.2`, `1.5` or `2.0`, gets VersionNotSupportedError (`-32009`) naming the supported versions. Both method spellings (`SendMessage`, `message/send`) are accepted with either version.
 - **Card.** The card is served per version. `A2A-Version: 1.0` receives a pure 1.0 `AgentCard`; a request without a version receives the 0.3 card, which still lists the 1.0 interface first in `supportedInterfaces`. Responses carry `ETag`, `Cache-Control: public, max-age=300` and `Vary: A2A-Version`, and `If-None-Match` gets 304. Without a configured `AgentCard::url` the card advertises the address the client used. Every skill has at least one tag. The card never claims push notifications, the extended card or the HTTP+JSON and gRPC bindings, none of which are implemented.
-- **Client.** Before its first call the client fetches the card and selects the first JSONRPC interface with a `1.x` or `0.x` version, preferring the one whose URL is the client's `base_url`. Only when no card can be fetched does it probe: 1.0 first, then 0.3 after `-32601`, `-32009` or HTTP 400, remembering the outcome. RPCs go to the selected interface URL when it has `base_url`'s origin, so an agent whose endpoint is `/a2a/v1` works. A card cannot send the client to another origin unless `set_allow_cross_origin_interfaces(true)` opts in; otherwise the RPC goes to `base_url`. `endpoint_url()` reports the endpoint in use, and message ids are random UUIDs.
+- **Client.** Before its first call the client fetches the card and selects the first JSONRPC interface with a `1.x` or `0.x` version, preferring the one whose URL is the client's `base_url`. Only when no card can be fetched does it probe: 1.0 first, then 0.3 after `-32601`, `-32009` or HTTP 400, remembering the outcome. RPCs go to the selected interface URL when it has `base_url`'s origin, so an agent whose endpoint is `/a2a/v1` works. A card cannot send the client to another origin unless `set_allow_cross_origin_interfaces(true)` opts in; otherwise the RPC goes to `base_url`, and the client writes a warning naming the origin it did not follow to stderr. `endpoint_url()` reports the endpoint in use, and message ids are random UUIDs.
 - **0.3.** 0.3 stays as a compatibility dialect with the same semantics. New features target 1.0.
 
 #### Tasks and methods
 
 Every run executes on its own worker thread; a stream or a blocking send only observes it, so a task outlives a dropped connection. `SendMessage` blocks until the task is terminal or interrupted unless `returnImmediately` (0.3 `blocking: false`) asks for the SUBMITTED task at once. `SendStreamingMessage` and `SubscribeToTask` (0.3 `tasks/resubscribe`) stream the Task first, then status and artifact updates, and close on a terminal or interrupted state; the 0.3 stream ends on `final: true`. `GetTask` and `ListTasks` honour `historyLength` (0 omits the history). `ListTasks` filters by `contextId`, `status` and `statusTimestampAfter`, pages newest first with `pageSize` (1 to 100, default 50) and `pageToken`, and omits artifacts unless `includeArtifacts` is set. Every status carries a timestamp.
 
-Task ids are generated by the server. A message whose `taskId` is unknown fails with `-32001`; a terminal task with `-32004`; a `contextId` that differs from the task's with `-32602`; a task that is still running with `-32603`. A message to an INPUT_REQUIRED task resumes its run from the checkpoint the interrupt saved; `GraphAgentAdapter::build_resume_value` turns the message into the resume value, and an engine without a checkpoint store runs the graph again with the message as input. NeoGraph collaboration envelopes keep their sender-named, idempotent task ids. Requests are validated per dialect; violations get `-32602` with `google.rpc.BadRequest` field violations, and every error carries a `google.rpc.ErrorInfo` detail. With a `CollaborationAuthenticator` the card declares a Bearer security scheme, plus a global requirement when requests must be authenticated; missing credentials get HTTP 401 with `WWW-Authenticate`, and an authenticated peer that may not use a collaboration link gets HTTP 403.
+Task ids are generated by the server. A message whose `taskId` is unknown fails with `-32001`; a terminal task with `-32004`; a `contextId` that differs from the task's with `-32602`; a task that is still running with `-32603` (ErrorInfo reason `TASK_BUSY`). A message to an INPUT_REQUIRED task resumes its run from the checkpoint the interrupt saved; `GraphAgentAdapter::build_resume_value` turns the message into the resume value, and an engine without a checkpoint store runs the graph again with the message as input. A Program-backed task cannot take that answer over A2A yet: the message gets `-32004` and the task keeps waiting. NeoGraph collaboration envelopes keep their sender-named, idempotent task ids ([A2A collaboration extension](#a2a-collaboration-extension)). Requests are validated per dialect; violations get `-32602` with `google.rpc.BadRequest` field violations, and every error carries a `google.rpc.ErrorInfo` detail. With a `CollaborationAuthenticator` the card declares a Bearer security scheme, plus a global requirement when requests must be authenticated; missing credentials get HTTP 401 with `WWW-Authenticate`, and an authenticated peer that may not use a collaboration link gets HTTP 403.
 
 #### A2A error mapping
 
-Only typed fields reach the peer: a failure's public message (`NodeFailureError::public_message` or the class's generic text) and `metadata["neograph/failure"] = {code, retryable}`. Exception text never does.
+A run's failure classes reach the peer as [Protocol failure mapping](#protocol-failure-mapping) shows: the task state, the public message as status message and `metadata["neograph/failure"] = {code, retryable}`, never exception text. A completed run is `COMPLETED` with the agent's reply as status message and the adapter's artifacts; a step limit is `FAILED` with code `NG.StepLimit`, and a failure exit `FAILED` with the exit's declared code. The requests the server refuses:
 
-| NeoGraph outcome | A2A result |
+| Request | A2A result |
 |---|---|
-| Completed | `COMPLETED`; the agent reply as status message, adapter artifacts |
-| Cancelled (`CancelTask`) | `CANCELED`; the stream closes on it |
-| Hook blocked (`NG.HookBlocked`) | `REJECTED` when no node had finished, otherwise `FAILED` |
-| Interrupted (`NodeInterrupt`) | `INPUT_REQUIRED`; the reason as text and the payload as a data part; `metadata["neograph/interrupt"] = {node, checkpointId}`; a follow-up message resumes the run |
-| Node or tool failure that ends the run (`NG.TaskFailed`, an author code) | `FAILED` with the author's public message when there is one |
-| Timeout (`NG.Timeout`), provider failure (`NG.ProviderFailed`) | `FAILED`, `retryable: true` |
-| Budget (`NG.BudgetExhausted`), safety (`NG.SafetyBlocked`), configuration, logic, uncertain effect, unknown | `FAILED` with the class code |
-| Step limit | `FAILED`, code `NG.StepLimit` |
-| Failure exit | `FAILED` with the exit's declared code |
-| In-flight limit reached | JSON-RPC `-32603`, ErrorInfo reason `RESOURCE_EXHAUSTED` |
+| A message naming an unknown task | `-32001` TaskNotFoundError |
+| A message to a terminal task | `-32004` UnsupportedOperationError; a collaboration redelivery returns the task |
+| A message whose `contextId` differs from the task's | `-32602` with a field violation |
+| A message to a task that is still running | `-32603`, ErrorInfo reason `TASK_BUSY`, domain `neograph` |
+| A message to a Program task waiting for input | `-32004`; the task keeps waiting (answering a Program's input request over A2A is not supported yet) |
+| The in-flight limit is reached | `-32603`, ErrorInfo reason `RESOURCE_EXHAUSTED`, domain `neograph`, metadata `retryAfterSeconds` |
+| Credentials the agent requires are missing or invalid (a collaboration message, or every request under strict authentication) | HTTP 401 with `WWW-Authenticate`; the body is JSON-RPC `-32600` with ErrorInfo reason `UNAUTHENTICATED`, domain `neograph` |
+| An authenticated peer the collaboration link does not permit | HTTP 403; the body is JSON-RPC `-32600` with ErrorInfo reason `PERMISSION_DENIED`, domain `neograph` |
 | Cancel of a terminal task | `-32002` TaskNotCancelableError; the task is unchanged |
-| Push-notification configuration; extended card; streaming disabled | `-32003`; `-32004`; `-32004` |
+| Push-notification configuration; extended card; a streaming method when the card has `streaming = false` | `-32003`; `-32004`; `-32004` |
+| An `A2A-Version` other than 1.0 or 0.3 | `-32009` VersionNotSupportedError |
+
+Every error carries one `google.rpc.ErrorInfo`; its domain is `a2a-protocol.org` unless the row says `neograph`.
+
+#### A2A collaboration extension
+
+A Program agent with a `CollaborationMailbox` accepts NeoGraph collaboration envelopes and declares them in its card's `capabilities.extensions`, in both versions: `uri` is `a2a::COLLABORATION_EXTENSION_URI` (this section), `required` is false, and `params` is `{"format": "neograph-a2a-collaboration-v1", "metadataKey": "neograph_collaboration"}`. Such a message carries a data part `{format, envelope}` and `metadata.neograph_collaboration`, and only an authenticated peer of a linked collaboration may send one. Its sender names the receiver task id up front: the first delivery creates the task under that id, and a redelivery returns the existing task instead of starting another run. Ordinary A2A clients never need it.
 
 #### Client streams and Python
 
@@ -3532,14 +3540,14 @@ How a turn ends:
 | Model-token budget crossed | `stopReason: "max_tokens"` |
 | Provider refusal or content filter (`NG.SafetyBlocked`) | `stopReason: "refusal"` |
 | `NodeInterrupt` | `session/request_permission` in the same turn; the answer resumes the run |
-| Hook block (`NG.HookBlocked`), node or tool failure (`NG.TaskFailed`, an author code), timeout (`NG.Timeout`), provider failure (`NG.ProviderFailed`), money or quota budget (`NG.BudgetExhausted`), configuration, logic or unknown failure | JSON-RPC error `-32603`, message = the public message, `data: {code, retryable}` |
+| Hook block (`NG.HookBlocked`), node or tool failure (`NG.TaskFailed`, an author code), timeout (`NG.Timeout`), provider failure (`NG.ProviderFailed`), money or quota budget (`NG.BudgetExhausted`), configuration, logic or unknown failure | JSON-RPC error `-32603`, message = the public message, `data: {code, retryable}` ([Protocol failure mapping](#protocol-failure-mapping)) |
 | Cancelled by something other than the client (a node aborted, shutdown) | JSON-RPC error `-32800` |
 
 Exception text (`what()`) never reaches the client: the message is a typed public message (`NodeFailureError::public_message`) or a generic text for the failure class, and the detail stays in the host's logs. An interrupt becomes a tool call titled with its reason, with the payload as `rawInput`, `_meta["neograph/interrupt"]` and the options "approve" (`allow_once`) and "reject" (`reject_once`); the selected option id is the resume value. Override `interrupt_permission` and `interrupt_resume_value` to change that. A `cancelled` answer ends the turn cancelled; an adapter that returns `std::nullopt`, or a client that cannot answer, fails the turn with `data.code: "NG.Interrupted"` and leaves the session unpaused. A pause restored by `session/resume` from a checkpoint, for example after an agent restart, is answered by the next prompt's text.
 
 `session/cancel` cancels the ongoing turn only; a cancel with no turn running is ignored (`set_pre_armed_cancel(true)` keeps the earlier pre-cancel for transports that reorder messages). A pending agent→client request gets 500 ms to be answered after a cancel; then the server sends `$/cancel_request` and the turn ends. Permission requests have no timeout unless `ACPClient::set_permission_timeout` sets one. When stdin reaches EOF, `run()` lets in-flight turns finish for `set_eof_grace` (one second) and then cancels them.
 
-Stdio `mcpServers` from `session/new` and `session/resume` are started with NeoGraph's MCP client (built with `NEOGRAPH_BUILD_MCP_CLIENT`) in the session's `cwd`, with the agent's environment plus the client's `env` entries; nodes reach their tools through `ACPClient::session_tools(session_id)`. HTTP and SSE MCP servers are not advertised and are rejected with `-32602`. A server that does not start fails the request with `-32603` and `data.reason: "mcp_server_unavailable"`.
+Stdio `mcpServers` from `session/new` and `session/resume` are started with NeoGraph's MCP client (built with `NEOGRAPH_BUILD_MCP_CLIENT`) in the session's `cwd`, with a minimal environment: the agent's `PATH` (on Windows also `SystemRoot`) plus the client's `env` entries. The rest of the agent's environment, which may hold provider API keys, is not passed on; nodes reach their tools through `ACPClient::session_tools(session_id)`. HTTP and SSE MCP servers are not advertised and are rejected with `-32602`. A server that does not start fails the request with `-32603` and `data.reason: "mcp_server_unavailable"`.
 
 **Public headers:** [`include/neograph/acp/`](../include/neograph/acp/).
 
