@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -739,14 +740,33 @@ TEST(A2ACollaboration, AuthenticatedPeerGatesProgramRequestAndTaskAccess) {
     MessageSendParams request;
     request.message = collaboration_to_message(envelope);
 
-    const auto unauthenticated = client.send_message_sync(request);
-    EXPECT_EQ(unauthenticated.status.state, TaskState::AuthRequired);
+    // The card declares the scheme the authenticator accepts (A2A-12).
+    const auto card_json = client.fetch_agent_card().raw;
+    EXPECT_EQ(card_json["securitySchemes"]["bearer"]["type"], "http");
+
+    // Spec 7.4: missing credentials are the binding's auth error (HTTP 401
+    // with a challenge), not an AUTH_REQUIRED task.
+    EXPECT_THROW({
+        try {
+            (void)client.send_message_sync(request);
+        } catch (const std::runtime_error& e) {
+            EXPECT_NE(std::string(e.what()).find("HTTP 401"), std::string::npos) << e.what();
+            throw;
+        }
+    }, std::runtime_error);
     EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 0U);
 
     client.set_authorization_header("Bearer executor-b");
 
-    const auto wrong_peer = client.send_message_sync(request);
-    EXPECT_EQ(wrong_peer.status.state, TaskState::AuthRequired);
+    // An authenticated peer that may not use the link is forbidden.
+    EXPECT_THROW({
+        try {
+            (void)client.send_message_sync(request);
+        } catch (const std::runtime_error& e) {
+            EXPECT_NE(std::string(e.what()).find("HTTP 403"), std::string::npos) << e.what();
+            throw;
+        }
+    }, std::runtime_error);
     EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 0U);
 
     client.set_authorization_header("Bearer coordinator-a");
@@ -764,7 +784,14 @@ TEST(A2ACollaboration, AuthenticatedPeerGatesProgramRequestAndTaskAccess) {
     client.set_authorization_header("Bearer executor-b");
     EXPECT_EQ(client.get_task("run-b").status.state, TaskState::Completed);
     client.set_authorization_header("Bearer coordinator-a");
-    EXPECT_EQ(client.cancel_task("run-b").status.state, TaskState::Completed);
+    // Spec 3.1.5: a completed task is not cancelable; its state stays.
+    try {
+        (void)client.cancel_task("run-b");
+        ADD_FAILURE() << "a completed task was canceled";
+    } catch (const A2ARpcError& e) {
+        EXPECT_EQ(e.code(), -32002);
+    }
+    EXPECT_EQ(client.get_task("run-b").status.state, TaskState::Completed);
     server.stop();
 }
 
@@ -815,12 +842,22 @@ TEST(A2ACollaboration, StrictAuthenticationAlsoGatesOrdinaryProgramTasks) {
     ASSERT_TRUE(server.start_async("127.0.0.1", 0));
     A2AClient client("http://127.0.0.1:" + std::to_string(server.port()));
 
-    const auto unauthenticated = client.send_message_sync("ordinary");
-    EXPECT_EQ(unauthenticated.status.state, TaskState::AuthRequired);
+    // Strict authentication is a global security requirement in the card.
+    const auto card_json = client.fetch_agent_card().raw;
+    EXPECT_EQ(card_json["security"][0]["bearer"], json::array());
+
+    auto expect_unauthenticated = [&](const std::function<void()>& call) {
+        try {
+            call();
+            ADD_FAILURE() << "an unauthenticated request was served";
+        } catch (const std::runtime_error& e) {
+            EXPECT_NE(std::string(e.what()).find("HTTP 401"), std::string::npos) << e.what();
+        }
+    };
+    expect_unauthenticated([&] { (void)client.send_message_sync("ordinary"); });
     EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 0U);
     client.set_authorization_header("Bearer wrong");
-    EXPECT_EQ(client.send_message_sync("ordinary").status.state,
-              TaskState::AuthRequired);
+    expect_unauthenticated([&] { (void)client.send_message_sync("ordinary"); });
     EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 0U);
 
     client.set_authorization_header("Bearer supervisor");

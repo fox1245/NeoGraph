@@ -2,6 +2,10 @@
 #include <neograph/a2a/client.h>
 #include <neograph/a2a/server.h>
 
+#include <condition_variable>
+#include <map>
+#include <mutex>
+
 namespace {
 using namespace graph_host_contract;
 namespace a2a = neograph::a2a;
@@ -19,25 +23,38 @@ public:
 
     std::future<Result> start(const std::string& identity,
                                const std::string& prompt, int) override {
-        return std::async(std::launch::async, [url = url_, identity, prompt] {
+        return std::async(std::launch::async, [this, url = url_, identity, prompt] {
+            // A2A task ids are server-generated (spec 3.4.2): the contract
+            // identity maps to the id the opening Task of the stream names.
             a2a::MessageSendParams request;
             request.message.message_id = "contract-request-" + identity;
             request.message.role = a2a::Role::User;
             request.message.parts.push_back(a2a::Part::text_part(prompt));
-            request.message.task_id = identity;
             request.message.context_id = "contract-context";
             Result result;
             a2a::A2AClient client(url);
             client.set_timeout(std::chrono::seconds(3));
-            auto task = client.send_message_stream(request,
-                [&result](const a2a::StreamEvent& event) {
-                    if (event.type == a2a::StreamEvent::Type::StatusUpdate &&
-                        event.status_update) {
-                        result.events.push_back(event.status_update->final
-                                                ? "terminal" : "working");
-                    }
-                    return true;
-                });
+            a2a::Task task;
+            try {
+                task = client.send_message_stream(request,
+                    [&](const a2a::StreamEvent& event) {
+                        if (event.type == a2a::StreamEvent::Type::Task && event.task) {
+                            remember(identity, event.task->id);
+                        }
+                        if (event.type == a2a::StreamEvent::Type::StatusUpdate &&
+                            event.status_update) {
+                            result.events.push_back(event.status_update->final
+                                                    ? "terminal" : "working");
+                        }
+                        return true;
+                    });
+            } catch (const a2a::A2ARpcError& error) {
+                // Admission refusals are a system error with retry guidance
+                // (A2A-22), the A2A form of a rejected request.
+                if (error.code() != -32603) throw;
+                result.terminal = Terminal::rejected;
+                return result;
+            }
             switch (task.status.state) {
                 case a2a::TaskState::Completed: result.terminal = Terminal::completed; break;
                 case a2a::TaskState::InputRequired: result.terminal = Terminal::interrupted; break;
@@ -57,10 +74,25 @@ public:
     }
     void cancel(const std::string& identity) override {
         a2a::A2AClient client(url_);
-        (void)client.cancel_task(identity);
+        (void)client.cancel_task(task_id(identity));
+    }
+    std::string effective_identity(const std::string& identity) const override {
+        return task_id(identity);
     }
     void shutdown() override { server_.stop(); }
 private:
+    void remember(const std::string& identity, const std::string& id) {
+        std::lock_guard lock(ids_mu_);
+        ids_.emplace(identity, id);
+        ids_cv_.notify_all();
+    }
+    std::string task_id(const std::string& identity) const {
+        std::unique_lock lock(ids_mu_);
+        ids_cv_.wait_for(lock, std::chrono::seconds(2), [&] { return ids_.contains(identity); });
+        const auto it = ids_.find(identity);
+        return it == ids_.end() ? identity : it->second;
+    }
+
     static a2a::AgentCard card() {
         a2a::AgentCard result;
         result.name = "contract";
@@ -75,6 +107,9 @@ private:
     }
     a2a::A2AServer server_;
     std::string url_;
+    mutable std::mutex ids_mu_;
+    mutable std::condition_variable ids_cv_;
+    std::map<std::string, std::string> ids_;
 };
 
 TEST(GraphHostA2AContract, SharedBoundary) {

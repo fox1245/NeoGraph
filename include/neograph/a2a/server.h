@@ -2,24 +2,39 @@
  * @file a2a/server.h
  * @brief A2A server — exposes a NeoGraph as an Agent-to-Agent endpoint.
  *
- * Speaks the JSON-RPC v0.3 dialect (slash-form method names, `kind`
- * discriminator) so clients written against either the a2a-js spec or
- * a2a-sdk Python in v0.3 compat mode can connect.
+ * Speaks the JSON-RPC binding of A2A 1.0 (v1.0.1, the primary version:
+ * PascalCase methods, ProtoJSON bodies, `A2A-Version: 1.0`) and keeps A2A 0.3
+ * as a compatibility dialect (slash-form methods, `kind` discriminators, no
+ * `A2A-Version` header). Each request is answered in the dialect its
+ * `A2A-Version` names (header or query parameter); any other version gets
+ * VersionNotSupportedError (-32009).
  *
  * Endpoints:
- *   - GET  /.well-known/agent-card.json   — AgentCard discovery
+ *   - GET  /.well-known/agent-card.json   — one card per version: the pure
+ *                                            1.0 card for `A2A-Version: 1.0`,
+ *                                            the 0.3 card (also listing the
+ *                                            1.0 interface) otherwise
  *   - POST /                                — JSON-RPC dispatcher
  *
- * Methods:
- *   - message/send    — sync round-trip (GraphEngine or ProgramRuntime,
- *                        response wrapped as Task)
- *   - message/stream  — SSE-framed status updates while a run executes
- *   - tasks/get       — recall a Task, reconnecting Program-backed runs when
- *                        their durable transition record is available
- *   - tasks/cancel    — request cancellation (stops further super-steps)
+ * Methods (1.0 / 0.3 spelling):
+ *   - SendMessage / message/send — blocking, or `returnImmediately`
+ *     (0.3 `blocking: false`) returns the SUBMITTED task at once
+ *   - SendStreamingMessage / message/stream — SSE task lifecycle stream: the
+ *     Task, status and artifact updates, closed on a terminal or
+ *     interrupted state
+ *   - GetTask / tasks/get, CancelTask / tasks/cancel (a terminal task answers
+ *     TaskNotCancelableError), ListTasks, SubscribeToTask / tasks/resubscribe
+ *   - push-notification config methods answer
+ *     PushNotificationNotSupportedError; GetExtendedAgentCard answers
+ *     UnsupportedOperationError. Neither feature is claimed in the card.
  *
- * Built on httplib (already a dep) — one OS thread per connection,
- * fine for agent-style traffic where LLM call time dominates.
+ * Every run executes on its own worker thread; a stream or a blocking send
+ * only observes it, so the task outlives a dropped connection. A failed run
+ * reports only typed public fields (the failure's public message and
+ * `metadata["neograph/failure"] = {code, retryable}`), never exception
+ * text. A NodeInterrupt ends in INPUT_REQUIRED with the interrupt reason and
+ * payload; a follow-up message to that task resumes the run from its
+ * checkpoint (or reruns it when the engine has no checkpoint store).
  */
 #pragma once
 
@@ -82,6 +97,12 @@ class NEOGRAPH_API GraphAgentAdapter {
     virtual std::optional<Artifact> build_output_artifact(
         const neograph::json& output,
         const std::string& task_id) const;
+
+    /// The value a follow-up message to an INPUT_REQUIRED task resumes the
+    /// interrupted run with (spec 3.4.3). Default: the message's text parts
+    /// joined with spaces; without text, the first data part's value;
+    /// otherwise null.
+    virtual neograph::json build_resume_value(const Message& message) const;
 };
 
 /// Adapt one JSON-valued graph output channel into a versioned A2A DataPart.
@@ -141,8 +162,16 @@ class NEOGRAPH_API A2AServer {
      * has authenticated. The server never retains the header or credentials.
      * Collaboration envelopes require a non-empty, matching result. Setting
      * require_authenticated_requests additionally fail-closes ordinary
-     * message/send, message/stream, tasks/get, and tasks/cancel calls; its
-     * default is false for source-compatible legacy behavior.
+     * SendMessage, SendStreamingMessage, GetTask, CancelTask, ListTasks and
+     * SubscribeToTask calls; its default is false for source-compatible
+     * legacy behavior.
+     *
+     * With an authenticator the card declares an HTTP `Bearer` security
+     * scheme (unless AgentCard::security_schemes names one), and a global
+     * security requirement when requests must be authenticated. A request
+     * without valid credentials where they are required fails with HTTP 401
+     * and a `WWW-Authenticate` challenge (spec 7.4); an authenticated peer
+     * that may not use a collaboration link gets HTTP 403.
      */
     using CollaborationAuthenticator = std::function<std::optional<CollaborationPeerIdentity>(
         std::string_view authorization_header)>;

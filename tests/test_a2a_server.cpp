@@ -22,6 +22,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <future>
 #include <memory>
 #include <string>
@@ -420,6 +421,47 @@ struct LiveServer {
     }
 };
 
+/// Start a task without waiting for it (spec 3.2.2 returnImmediately): the
+/// server generates the id, so tests that race a run learn it this way.
+Task start_task(const std::string& url, const std::string& text) {
+    MessageSendParams params;
+    params.message.message_id = "start-" + text;
+    params.message.role = Role::User;
+    params.message.parts.push_back(Part::text_part(text));
+    MessageSendConfiguration configuration;
+    configuration.blocking = false;
+    params.configuration = configuration;
+    return A2AClient(url).send_message_sync(params);
+}
+
+bool settled(TaskState state) {
+    return state == TaskState::Completed || state == TaskState::Canceled
+        || state == TaskState::Failed || state == TaskState::Rejected
+        || state == TaskState::InputRequired || state == TaskState::AuthRequired;
+}
+
+/// Poll GetTask until the task settles or @p limit passes.
+Task wait_task(const std::string& url, const std::string& id,
+               std::chrono::milliseconds limit = std::chrono::milliseconds(2000)) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    A2AClient client(url);
+    Task task = client.get_task(id);
+    while (!settled(task.status.state) && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        task = client.get_task(id);
+    }
+    return task;
+}
+
+int rpc_code_of(const std::function<void()>& call) {
+    try {
+        call();
+    } catch (const A2ARpcError& e) {
+        return e.code();
+    }
+    return 0;
+}
+
 TEST(A2AServer, DiscoveryEndpointTracksBindingAcrossRestart) {
     auto card = build_card(0);
     card.url.clear();
@@ -565,23 +607,12 @@ TEST(A2AServer, StaysUpAcrossIndependentClients) {
     EXPECT_TRUE(srv.server->is_running());
 }
 
-TEST(A2AServer, CancelTaskAbortsInflightGraphAndIsIdempotent) {
+TEST(A2AServer, CancelTaskAbortsInflightGraphAndThenIsNotCancelable) {
     auto probe = std::make_shared<CancelProbe>();
     A2AServer server(build_cancel_aware_engine(probe), build_card(0));
     ASSERT_TRUE(server.start_async("127.0.0.1", 0));
     const std::string url = "http://127.0.0.1:" + std::to_string(server.port());
-    const std::string task_id = "a2a-cancel-inflight";
-
-    std::promise<Task> completion;
-    auto done = completion.get_future();
-    std::thread runner([&] {
-        try {
-            A2AClient client(url);
-            completion.set_value(client.send_message_sync("cancel me", task_id));
-        } catch (...) {
-            completion.set_exception(std::current_exception());
-        }
-    });
+    const auto task_id = start_task(url, "cancel me").id;
 
     for (int i = 0; i < 200 && !probe->entered.load(std::memory_order_acquire); ++i) {
         std::this_thread::sleep_for(5ms);
@@ -591,10 +622,9 @@ TEST(A2AServer, CancelTaskAbortsInflightGraphAndIsIdempotent) {
     A2AClient canceller(url);
     const auto start = std::chrono::steady_clock::now();
     EXPECT_EQ(canceller.cancel_task(task_id).status.state, TaskState::Canceled);
-    EXPECT_EQ(canceller.cancel_task(task_id).status.state, TaskState::Canceled);
-    ASSERT_EQ(done.wait_for(500ms), std::future_status::ready);
-    const auto task = done.get();
-    runner.join();
+    // Spec 3.1.5: a canceled task is terminal, so a second cancel fails.
+    EXPECT_EQ(rpc_code_of([&] { (void)canceller.cancel_task(task_id); }), -32002);
+    const auto task = wait_task(url, task_id, 500ms);
     server.stop();
 
     EXPECT_EQ(task.status.state, TaskState::Canceled);
@@ -616,23 +646,12 @@ TEST(A2AServer, CancelUnknownBeforeStartIsDeterministic) {
     }, std::runtime_error);
 }
 
-TEST(A2AServer, DuplicateTaskIdIsRejectedWithoutReplacingOwner) {
+TEST(A2AServer, MessageToRunningTaskIsRefusedWithoutReplacingOwner) {
     auto probe = std::make_shared<CancelProbe>();
     A2AServer server(build_cancel_aware_engine(probe), build_card(0));
     ASSERT_TRUE(server.start_async("127.0.0.1", 0));
     const std::string url = "http://127.0.0.1:" + std::to_string(server.port());
-    const std::string task_id = "a2a-duplicate";
-
-    std::promise<Task> completion;
-    auto done = completion.get_future();
-    std::thread runner([&] {
-        try {
-            A2AClient client(url);
-            completion.set_value(client.send_message_sync("owner", task_id));
-        } catch (...) {
-            completion.set_exception(std::current_exception());
-        }
-    });
+    const auto task_id = start_task(url, "owner").id;
 
     for (int i = 0; i < 200 && !probe->entered.load(std::memory_order_acquire); ++i) {
         std::this_thread::sleep_for(5ms);
@@ -640,18 +659,13 @@ TEST(A2AServer, DuplicateTaskIdIsRejectedWithoutReplacingOwner) {
     ASSERT_TRUE(probe->entered.load(std::memory_order_acquire));
 
     A2AClient duplicate(url);
-    auto rejected = duplicate.send_message_sync("duplicate", task_id);
-    EXPECT_EQ(rejected.status.state, TaskState::Rejected);
-    ASSERT_FALSE(rejected.history.empty());
-    EXPECT_EQ(rejected.history.back().parts[0].text,
-              "task_id is already running");
+    EXPECT_EQ(rpc_code_of([&] { (void)duplicate.send_message_sync("duplicate", task_id); }),
+              -32603);
     EXPECT_EQ(probe->starts.load(std::memory_order_relaxed), 1);
 
     A2AClient canceller(url);
     EXPECT_EQ(canceller.cancel_task(task_id).status.state, TaskState::Canceled);
-    ASSERT_EQ(done.wait_for(500ms), std::future_status::ready);
-    EXPECT_EQ(done.get().status.state, TaskState::Canceled);
-    runner.join();
+    EXPECT_EQ(wait_task(url, task_id, 500ms).status.state, TaskState::Canceled);
     server.stop();
 }
 
@@ -663,29 +677,16 @@ TEST(A2AServer, CancelBeforeGraphStartStopsBeforeNodeRuns) {
     A2AServer server(build_cancel_aware_engine(probe), build_card(0), adapter);
     ASSERT_TRUE(server.start_async("127.0.0.1", 0));
     const std::string url = "http://127.0.0.1:" + std::to_string(server.port());
-    const std::string task_id = "a2a-cancel-before-start";
-
-    std::promise<Task> completion;
-    auto done = completion.get_future();
-    std::thread runner([&] {
-        try {
-            A2AClient client(url);
-            completion.set_value(client.send_message_sync("blocked", task_id));
-        } catch (...) {
-            completion.set_exception(std::current_exception());
-        }
-    });
+    const auto task_id = start_task(url, "blocked").id;
     auto entered = adapter->entered.get_future();
     ASSERT_EQ(entered.wait_for(500ms), std::future_status::ready);
 
     A2AClient canceller(url);
     EXPECT_EQ(canceller.cancel_task(task_id).status.state, TaskState::Canceled);
     release.set_value();
-    ASSERT_EQ(done.wait_for(500ms), std::future_status::ready);
-    EXPECT_EQ(done.get().status.state, TaskState::Canceled);
-    EXPECT_EQ(probe->starts.load(std::memory_order_relaxed), 0);
-    runner.join();
+    EXPECT_EQ(wait_task(url, task_id, 500ms).status.state, TaskState::Canceled);
     server.stop();
+    EXPECT_EQ(probe->starts.load(std::memory_order_relaxed), 0);
 }
 
 TEST(A2AServer, CancelWinsIfCompletionHasNotPublishedTerminalState) {
@@ -695,22 +696,11 @@ TEST(A2AServer, CancelWinsIfCompletionHasNotPublishedTerminalState) {
     A2AServer server(build_echo_engine(), build_card(0), adapter);
     ASSERT_TRUE(server.start_async("127.0.0.1", 0));
     const std::string url = "http://127.0.0.1:" + std::to_string(server.port());
-    const std::string task_id = "a2a-cancel-before-commit";
-
-    std::promise<Task> completion;
-    auto done = completion.get_future();
-    std::thread runner([&] {
-        try {
-            completion.set_value(A2AClient(url).send_message_sync("complete", task_id));
-        } catch (...) {
-            completion.set_exception(std::current_exception());
-        }
-    });
+    const auto task_id = start_task(url, "complete").id;
 
     auto output_ready = adapter->output_ready.get_future();
     if (output_ready.wait_for(500ms) != std::future_status::ready) {
         release.set_value();
-        runner.join();
         server.stop();
         FAIL() << "completion did not reach its pre-commit barrier";
         return;
@@ -719,26 +709,18 @@ TEST(A2AServer, CancelWinsIfCompletionHasNotPublishedTerminalState) {
     A2AClient canceller(url);
     EXPECT_EQ(canceller.cancel_task(task_id).status.state, TaskState::Canceled);
     release.set_value();
-    const auto completion_status = done.wait_for(500ms);
-    EXPECT_EQ(completion_status, std::future_status::ready);
-    if (completion_status != std::future_status::ready) {
-        runner.join();
-        server.stop();
-        return;
-    }
-    EXPECT_EQ(done.get().status.state, TaskState::Canceled);
+    EXPECT_EQ(wait_task(url, task_id, 500ms).status.state, TaskState::Canceled);
+    std::this_thread::sleep_for(50ms);  // the completion has committed by now
     EXPECT_EQ(A2AClient(url).get_task(task_id).status.state, TaskState::Canceled);
-    runner.join();
     server.stop();
 }
 
-TEST(A2AServer, CancelAfterCompletionDoesNotChangeTask) {
+TEST(A2AServer, CancelAfterCompletionIsNotCancelableAndDoesNotChangeTask) {
     LiveServer srv;
     A2AClient client(srv.url());
-    auto task = client.send_message_sync("complete", "a2a-after-complete");
+    auto task = client.send_message_sync("complete");
     ASSERT_EQ(task.status.state, TaskState::Completed);
-    auto canceled = client.cancel_task(task.id);
-    EXPECT_EQ(canceled.status.state, TaskState::Completed);
+    EXPECT_EQ(rpc_code_of([&] { (void)client.cancel_task(task.id); }), -32002);
     EXPECT_EQ(client.get_task(task.id).status.state, TaskState::Completed);
 }
 
@@ -747,7 +729,7 @@ TEST(A2AServer, CancelledStreamEmitsOneTerminalStatusSequence) {
     A2AServer server(build_cancel_aware_engine(probe), build_card(0));
     ASSERT_TRUE(server.start_async("127.0.0.1", 0));
     const std::string url = "http://127.0.0.1:" + std::to_string(server.port());
-    const std::string task_id = "a2a-stream-cancel";
+    std::string task_id;
     std::atomic<int> terminal_statuses{0};
     std::atomic<int> task_events{0};
     std::atomic<int> cancel_ack{0};
@@ -759,6 +741,9 @@ TEST(A2AServer, CancelledStreamEmitsOneTerminalStatusSequence) {
             auto task = client.send_message_stream(
                 "stream cancel",
                 [&](const StreamEvent& ev) {
+                    if (ev.type == StreamEvent::Type::Task && ev.task && task_id.empty()) {
+                        task_id = ev.task->id;  // the opening Task names the task
+                    }
                     if (ev.type == StreamEvent::Type::StatusUpdate &&
                         ev.status_update) {
                         if (ev.status_update->status.state == TaskState::Working) {
@@ -773,7 +758,7 @@ TEST(A2AServer, CancelledStreamEmitsOneTerminalStatusSequence) {
                     }
                     if (ev.type == StreamEvent::Type::Task) task_events.fetch_add(1);
                     return true;
-                }, task_id);
+                });
             completion.set_value(std::move(task));
         } catch (...) {
             completion.set_exception(std::current_exception());
@@ -794,32 +779,19 @@ TEST(A2AServer, DifferentTaskRunsOverlapAndReconnectCanLookup) {
     A2AServer server(build_overlap_engine(probe), build_card(0));
     ASSERT_TRUE(server.start_async("127.0.0.1", 0));
     const std::string url = "http://127.0.0.1:" + std::to_string(server.port());
-    std::promise<Task> first_done, second_done;
-    auto first = first_done.get_future();
-    auto second = second_done.get_future();
-    std::thread one([&] {
-        try { first_done.set_value(A2AClient(url).send_message_sync("one", "a2a-one")); }
-        catch (...) { first_done.set_exception(std::current_exception()); }
-    });
-    std::thread two([&] {
-        try { second_done.set_value(A2AClient(url).send_message_sync("two", "a2a-two")); }
-        catch (...) { second_done.set_exception(std::current_exception()); }
-    });
+    const auto one = start_task(url, "one").id;
+    const auto two = start_task(url, "two").id;
     for (int i = 0; i < 200 && probe->active.load() < 2; ++i) {
         std::this_thread::sleep_for(5ms);
     }
     ASSERT_EQ(probe->active.load(), 2);
     EXPECT_GE(probe->max_active.load(), 2);
     probe->release.store(true, std::memory_order_release);
-    ASSERT_EQ(first.wait_for(500ms), std::future_status::ready);
-    ASSERT_EQ(second.wait_for(500ms), std::future_status::ready);
-    EXPECT_EQ(first.get().status.state, TaskState::Completed);
-    EXPECT_EQ(second.get().status.state, TaskState::Completed);
-    one.join();
-    two.join();
+    EXPECT_EQ(wait_task(url, one, 500ms).status.state, TaskState::Completed);
+    EXPECT_EQ(wait_task(url, two, 500ms).status.state, TaskState::Completed);
 
     A2AClient reconnect(url);
-    EXPECT_EQ(reconnect.get_task("a2a-one").status.state, TaskState::Completed);
+    EXPECT_EQ(reconnect.get_task(one).status.state, TaskState::Completed);
     server.stop();
 }
 
@@ -829,34 +801,20 @@ TEST(A2AServer, GlobalAdmissionRejectsDistinctTaskAtCap) {
     neograph::a2a::test::A2AServerTestAccess::set_max_inflight_runs(server, 1);
     ASSERT_TRUE(server.start_async("127.0.0.1", 0));
     const std::string url = "http://127.0.0.1:" + std::to_string(server.port());
-    std::promise<Task> owner_done;
-    auto owner_future = owner_done.get_future();
-    std::thread owner([&] {
-        try {
-            owner_done.set_value(
-                A2AClient(url).send_message_sync("owner", "a2a-admission-owner"));
-        } catch (...) {
-            owner_done.set_exception(std::current_exception());
-        }
-    });
+    const auto owner = start_task(url, "owner").id;
 
     for (int i = 0; i < 200 && probe->active.load() < 1; ++i) {
         std::this_thread::sleep_for(5ms);
     }
     ASSERT_EQ(probe->active.load(), 1);
 
-    auto rejected = A2AClient(url).send_message_sync(
-        "second", "a2a-admission-second");
-    EXPECT_EQ(rejected.status.state, TaskState::Rejected);
-    EXPECT_EQ(rejected.status.message->parts.front().text,
-              "A2A server is at its in-flight task limit");
-    EXPECT_EQ(A2AClient(url).get_task("a2a-admission-owner").status.state,
-              TaskState::Working);
+    // A2A-22: capacity is a system error with retry guidance, not a task.
+    EXPECT_EQ(rpc_code_of([&] { (void)A2AClient(url).send_message_sync("second"); }),
+              -32603);
+    EXPECT_EQ(A2AClient(url).get_task(owner).status.state, TaskState::Working);
 
     probe->release.store(true, std::memory_order_release);
-    ASSERT_EQ(owner_future.wait_for(500ms), std::future_status::ready);
-    EXPECT_EQ(owner_future.get().status.state, TaskState::Completed);
-    owner.join();
+    EXPECT_EQ(wait_task(url, owner, 500ms).status.state, TaskState::Completed);
     server.stop();
 }
 
@@ -866,26 +824,15 @@ TEST(A2AServer, CancelReachesCooperativeProviderFixture) {
     A2AServer server(build_provider_engine(provider, probe), build_card(0));
     ASSERT_TRUE(server.start_async("127.0.0.1", 0));
     const std::string url = "http://127.0.0.1:" + std::to_string(server.port());
-    const std::string task_id = "a2a-provider-cancel";
-    std::promise<Task> completion;
-    auto done = completion.get_future();
-    std::thread runner([&] {
-        try {
-            completion.set_value(A2AClient(url).send_message_sync("provider", task_id));
-        } catch (...) {
-            completion.set_exception(std::current_exception());
-        }
-    });
+    const auto task_id = start_task(url, "provider").id;
     for (int i = 0; i < 200 && !probe->provider_started.load(); ++i) {
         std::this_thread::sleep_for(5ms);
     }
     ASSERT_TRUE(probe->provider_started.load());
     EXPECT_EQ(A2AClient(url).cancel_task(task_id).status.state, TaskState::Canceled);
-    ASSERT_EQ(done.wait_for(500ms), std::future_status::ready);
-    EXPECT_EQ(done.get().status.state, TaskState::Canceled);
-    EXPECT_TRUE(probe->provider_cancelled.load());
-    runner.join();
+    EXPECT_EQ(wait_task(url, task_id, 500ms).status.state, TaskState::Canceled);
     server.stop();
+    EXPECT_TRUE(probe->provider_cancelled.load());
 }
 
 TEST(A2AServer, CancelReachesToolDispatchTool) {
@@ -894,27 +841,16 @@ TEST(A2AServer, CancelReachesToolDispatchTool) {
     A2AServer server(build_tool_dispatch_engine(tool), build_card(0));
     ASSERT_TRUE(server.start_async("127.0.0.1", 0));
     const std::string url = "http://127.0.0.1:" + std::to_string(server.port());
-    const std::string task_id = "a2a-tool-dispatch-cancel";
-    std::promise<Task> completion;
-    auto done = completion.get_future();
-    std::thread runner([&] {
-        try {
-            completion.set_value(A2AClient(url).send_message_sync("tool", task_id));
-        } catch (...) {
-            completion.set_exception(std::current_exception());
-        }
-    });
+    const auto task_id = start_task(url, "tool").id;
 
     for (int i = 0; i < 200 && !probe->entered.load(std::memory_order_acquire); ++i) {
         std::this_thread::sleep_for(5ms);
     }
     ASSERT_TRUE(probe->entered.load(std::memory_order_acquire));
     EXPECT_EQ(A2AClient(url).cancel_task(task_id).status.state, TaskState::Canceled);
-    ASSERT_EQ(done.wait_for(500ms), std::future_status::ready);
-    EXPECT_EQ(done.get().status.state, TaskState::Canceled);
-    EXPECT_TRUE(probe->cancelled.load(std::memory_order_acquire));
-    runner.join();
+    EXPECT_EQ(wait_task(url, task_id, 500ms).status.state, TaskState::Canceled);
     server.stop();
+    EXPECT_TRUE(probe->cancelled.load(std::memory_order_acquire));
 }
 
 TEST(A2AServer, MethodNotFoundReturnsCorrectCode) {
@@ -978,8 +914,11 @@ TEST(A2AServerV1, V1RequestGetsProtoJsonResponse) {
     const auto& task = rpc["result"]["task"];
     EXPECT_EQ(task["status"]["state"], "TASK_STATE_COMPLETED");
     EXPECT_FALSE(task.contains("kind"));
-    EXPECT_EQ(task["history"][0]["role"], "ROLE_AGENT");
-    EXPECT_EQ(task["history"][0]["parts"][0], neograph::json({{"text", "echo:hello v1"}}));
+    // History: the user's message, then the agent's reply.
+    ASSERT_EQ(task["history"].size(), 2u);
+    EXPECT_EQ(task["history"][0]["role"], "ROLE_USER");
+    EXPECT_EQ(task["history"][1]["role"], "ROLE_AGENT");
+    EXPECT_EQ(task["history"][1]["parts"][0], neograph::json({{"text", "echo:hello v1"}}));
 
     auto got = raw_rpc(srv, "GetTask", {{"id", task["id"]}}, "1.0");
     EXPECT_EQ(got["result"]["status"]["state"], "TASK_STATE_COMPLETED");

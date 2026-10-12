@@ -328,6 +328,7 @@ if(NEOGRAPH_BUILD_A2A)
         test_a2a_collaboration.cpp
         test_a2a_client.cpp
         test_a2a_server.cpp
+        test_a2a_conformance.cpp
     )
 
     add_executable(neograph_a2a_collaboration_tests
@@ -349,6 +350,11 @@ if(NEOGRAPH_BUILD_A2A)
         neograph::a2a SchemaProvider::transport GTest::gtest_main)
     add_test(NAME neograph.a2a_graph_contract
              COMMAND neograph_a2a_graph_contract_tests)
+
+    # Deterministic native A2A agent driven by the official A2A SDKs in
+    # bindings/python/tests/interop/a2a_suite (no provider, no keys).
+    add_executable(neograph_a2a_probe_server fixtures/a2a_probe_server.cpp)
+    target_link_libraries(neograph_a2a_probe_server PRIVATE neograph::a2a)
 endif()
 
 # The Agent Card Copy Ninja PoC intentionally has no LLM, Harness, or remote
