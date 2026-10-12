@@ -600,6 +600,41 @@ public:
         }
     }
 
+    // Fork a paused run into a new run of `version` that answers its pending
+    // call with `value` (#390). Without checkpoint_id, the source run's exact
+    // checkpoint is forked; without pending_id, its single awaiting call.
+    ProgramHandle fork(std::string run_id,
+                       py::object value,
+                       const ProgramVersion& version,
+                       const RunBudget& budget,
+                       py::object input,
+                       std::optional<std::string> checkpoint_id,
+                       std::optional<std::string> pending_id,
+                       std::optional<std::string> fork_run_id,
+                       std::string trace_id) {
+        auto owned_value = py_to_json(value);
+        auto owned_input = input.is_none() ? json::object() : py_to_json(input);
+        auto exact_id    = pending_id ? std::move(*pending_id) : awaiting_pending_id(run_id);
+        std::string source_checkpoint;
+        if (checkpoint_id) {
+            source_checkpoint = std::move(*checkpoint_id);
+        } else {
+            const auto record = stores_.transitions->load(owner_scope_, run_id);
+            if (!record || !record->exact_checkpoint())
+                throw py::value_error("fork() needs checkpoint_id: run '" + run_id +
+                                      "' has no exact checkpoint in this host");
+            source_checkpoint = record->exact_checkpoint()->checkpoint_id;
+        }
+        ProgramInvocation invocation{std::move(owned_input), budget, trace_id, {}};
+        if (fork_run_id) invocation.requested_run_id = std::move(*fork_run_id);
+        py::gil_scoped_release release;
+        return runtime_->fork(owner_scope_,
+                              ExactProgramCheckpointReference{run_id, std::move(source_checkpoint)},
+                              version, std::move(invocation),
+                              ProgramResume{std::move(owned_value), trace_id + "-resume", {},
+                                            std::move(exact_id)});
+    }
+
     const std::string& owner_scope() const noexcept { return owner_scope_; }
 
 private:
@@ -1015,7 +1050,18 @@ void init_program(py::module_& m) {
              py::arg("trace_id") = "python-program-resume",
              "Resume an interrupted run. Without pending_id, the run's single awaiting "
              "pending call is addressed; pass result.interrupt.pending_input.call_id "
-             "to name it exactly.");
+             "to name it exactly.")
+        .def("fork", &LocalProgramHost::fork,
+             py::arg("run_id"), py::arg("value"), py::arg("version"), py::arg("budget"),
+             py::arg("input") = py::none(), py::arg("checkpoint_id") = py::none(),
+             py::arg("pending_id") = py::none(), py::arg("fork_run_id") = py::none(),
+             py::arg("trace_id") = "python-program-fork",
+             "Fork an interrupted run into a new run of `version` that answers its pending "
+             "call with `value`, and return the new run's handle. budget is the fork's own "
+             "budget and must lie within the source run's remaining_budget. checkpoint_id defaults to "
+             "the run's exact checkpoint and pending_id to its single awaiting call. The fork "
+             "replays what the paused run finished, as resume does: a finished node or Send "
+             "is neither run nor charged again (#390).");
 }
 
 }  // namespace neograph::pybind

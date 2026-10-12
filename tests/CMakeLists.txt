@@ -943,6 +943,12 @@ if(NEOGRAPH_BUILD_SQLITE)
     target_link_libraries(neograph_send_interrupt_tests PRIVATE
         neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
     neograph_discover_tests(neograph_send_interrupt_tests PROPERTIES LABELS "core;interrupt")
+    # #390: a fork of a NodeInterrupt checkpoint carries its pending writes, so
+    # the forked run replays the finished siblings as a resume does.
+    add_executable(neograph_fork_pending_writes_tests test_fork_pending_writes.cpp)
+    target_link_libraries(neograph_fork_pending_writes_tests PRIVATE
+        neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
+    neograph_discover_tests(neograph_fork_pending_writes_tests PROPERTIES LABELS "core;interrupt")
 endif()
 
 if(NEOGRAPH_BUILD_PROGRAM)

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=de091620c868e73d05f56031616a513cfb2e77ee896820b52d4a10cd0d472b3e -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=7b7c2d31c9130445d402371c02e5f533e14937b4c8cb0455bc5a0679df21122c -->
 # Program API エンドツーエンドシナリオ
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -21,6 +21,7 @@
 | `test_10_failure_routing.py` | 失敗のルーティング（#364）：失敗した TEST がレコードとともに `interruptBefore` のハンドラーへルーティングされる、retry と abort のルートでの再開、作成者コード、伏せたエラーテキスト、`max_visits`、`max_node_retries` の上限、ノード内の Program 診断、SQLite を使う新しいプロセスでの再開 |
 | `test_11_attempt_timeout.py` | 試行タイムアウト（#364）：タイムアウトしてリトライで回復する遅い Python ノード、常にタイムアウトして `NG.Timeout` としてハンドラーにルーティングされるノード（ハンドラーがなければ実行が失敗）、結果にもトレースにも現れない遅れた完了、停止の期限を過ぎてもキャンセルを無視するノード（`NG.EffectUncertain`）、`wall_time_ms` を越えるバックオフが kind `deadline` で止まる場合 |
 | `test_12_send_interrupts.py` | `NodeInterrupt` を送出する `Send` target（#385）：Program がそこで一時停止する、再開時に map ノードと終了した Send が再生される、SQLite を使う再起動後の再開、バインドされた `llm_call` を呼んで終了した Send は再送も再課金もされない |
+| `test_13_fork_replays_the_paused_step.py` | 完了したバインド済み `llm_call` の横で一時停止した実行の `host.fork()`（#390）：フォークが質問に答え、完了した呼び出しをステップの pending write から再生するため、リクエストは再送されず、トークンと費用も再課金されない。fan-out ステップと Send、メモリと SQLite ジャーナルの両方 |
 
 `support.py` には、共有の Python ノード、条件、レジストリ、予算、JavaScript ビルダーがあります。
 

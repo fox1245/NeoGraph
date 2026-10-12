@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=9ba5883f1606544761d327968d6929dd5a799d30a3b2e6becd28ebe22f762769 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=9b75d917e14c9501760d00f2cdbf43edda322b6ca7764762f7c2e08289824d7d -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -433,7 +433,7 @@ print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 
 
 `LocalProgramHost` の破棄時は、実際の `ProgramRuntime` がスケジューラーの処理をキャンセルし、完了を待ち、join する間、呼び出し元の GIL を解放するため、実行中の Python ノードが終了できます。残りのホストメンバーを破棄する前に GIL を再取得し、Python コールバック/オブジェクトの所有者による GIL 安全な破棄も維持します。
 
-ネイティブ Program の記録済み実行 API は、`start_recorded` を置き換えた `ProgramRuntime::replay_recorded` です。`LocalProgramHost` は `run`、`start`、`resume` を公開しますが、生の記録済みバインディング制御プレーンは公開しません。Program の結果は、既存のハンドル、予算、権限フィールドに加えて、ネイティブランタイムから渡された型付きプロバイダー結果と失敗の証拠を保持します。
+ネイティブ Program の記録済み実行 API は、`start_recorded` を置き換えた `ProgramRuntime::replay_recorded` です。`LocalProgramHost` は `run`、`start`、`resume`、`fork` を公開しますが、生の記録済みバインディング制御プレーンは公開しません。Program の結果は、既存のハンドル、予算、権限フィールドに加えて、ネイティブランタイムから渡された型付きプロバイダー結果と失敗の証拠を保持します。
 
 `ProgramResult.failure` は辞書ではなく、読み取り専用の `ProgramFailure` 値または `None` です。`provider_outcome` と `provider_cause` はプロバイダー失敗の証拠を保持し、`code`、`message`、`operation_id`、`core_node`、`attempts`、`witness` は失敗した操作を記述します。結果には `bundle_id`、`operation_id`、`attempt`、`checkpoint`、`interrupt`、`provider_budget_authority` も含まれます。
 
@@ -575,7 +575,7 @@ Programエンジンはstderrにlintもfan-outの通知も出力しません。`E
 
 `sqlite_directory=path`を渡すと、ホストはバンドル、バージョン、実行記録、チェックポイントをそのディレクトリのSQLiteファイル（`program.db`、`checkpoints.db`）に、プロバイダー呼び出しをプロバイダー呼び出しjournal（`provider_calls.db`）に保持するため、実行はプロセスを越えて残ります。同じディレクトリと同じレジストリで開いたホストが実行を続けます。`resume()`は中断された実行を続け、`reconnect(run_id)`は停止したプロセスが実行中のまま残した実行を続けます。復旧はjournalに記録されたリクエストを再送しません。journalが応答を再生し、呼び出しは1回だけ請求されます。プロバイダーをバインドするホストには`native_history_archive=`も必要です（初回は`ng.NativeArchive.provision`、以後は`ng.NativeArchive.open`）。journalがすべての応答をarchiveのcustodyのもとに保持するためです。子予算のない`define()`のみのProgram実行は、wall timeの間execution leaseを持ちます。`reconnect()`はleaseが切れるまで`P_RUN_LEASE_HELD`を送出し、その後は実行を`TimedOut`で終えてjournalに記録された呼び出しを請求します。クラッシュからの復旧は、実行の最後の永続チェックポイント（たとえば中断が残したもの）から再開します。
 
-`resume(run_id, value)`はハンドルを返します。結果を得るには`.wait()`を呼び出してください。`pending_id`がなければ、実行で待機中の唯一の呼び出しを再開します。待機中の呼び出しがない、または複数ある場合は`ValueError`を送出します。呼び出しを正確に指定するには、`result.interrupt.pending_input.call_id`を`pending_id`として渡してください。
+`resume(run_id, value)`はハンドルを返します。結果を得るには`.wait()`を呼び出してください。`pending_id`がなければ、実行で待機中の唯一の呼び出しを再開します。待機中の呼び出しがない、または複数ある場合は`ValueError`を送出します。呼び出しを正確に指定するには、`result.interrupt.pending_input.call_id`を`pending_id`として渡してください。 `fork(run_id, value, version, budget)` は、実行の正確なチェックポイント (または `checkpoint_id=`) から `version` の新しい実行を開始し、その待機中の呼び出しに `value` で応答します。`budget` は元の実行の `remaining_budget` の範囲内でなければならず、`pending_id=` は `resume()` と同じく呼び出しを指定します。フォークは `resume()` と同じく一時停止した実行が完了したものを再生します。一時停止したステップで完了したノードや Send は再実行も再課金もされず、その provider 呼び出しも再送されません (#390)。
 
 `resume()`が返した結果の`execution_trace`には、再開後に実行されたCoreノードだけが並びます。割り込み前に実行されたノードは、割り込まれた結果に現れます。`b`の前で割り込むCore `a → b → c`では、割り込まれた結果は`["a"]`、再開後の結果は`["b", "c"]`になります。
 

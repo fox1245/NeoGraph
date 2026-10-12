@@ -87,6 +87,31 @@ struct ResumeContext {
 };
 
 /**
+ * @brief The pending writes that resuming `checkpoint` replays (#390).
+ *
+ * The writes recorded under the checkpoint and, for a NodeInterrupt
+ * checkpoint, the writes of its super-step recorded under its ancestors (the
+ * step's parent checkpoint, an earlier interrupt of the same step), stopping
+ * at a fork or migration boundary. One per task id, the nearest first: what
+ * CheckpointCoordinator::load_for_resume() replays.
+ */
+NEOGRAPH_API std::vector<PendingWrite> resume_pending_writes(CheckpointStore& store,
+                                                             const Checkpoint& checkpoint);
+
+/**
+ * @brief Record under `target` the pending writes that resuming `source`
+ * replays (#390).
+ *
+ * `target` is a saved copy of `source` on another thread, such as a fork: it
+ * has the same super-step and does not reach `source`'s ancestry. Resuming it
+ * then replays the nodes and Sends that finished in the paused step, exactly
+ * as resuming `source` does, instead of running them again. `source` keeps
+ * its own writes.
+ */
+NEOGRAPH_API void copy_resume_pending_writes(CheckpointStore& store, const Checkpoint& source,
+                                             const Checkpoint& target);
+
+/**
  * @brief Per-run coordinator for checkpoint lifecycle operations.
  *
  * Value type; construct one at the top of execute_graph and let it go

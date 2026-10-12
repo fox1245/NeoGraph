@@ -151,10 +151,14 @@ bool is_external_resume_boundary(const Checkpoint& checkpoint,
            !checkpoint.metadata.at("migrated_from").get<std::string>().empty();
 }
 
-std::unordered_map<std::string, NodeResult> load_resume_writes(
-    CheckpointStore& store, const std::string& thread_id, const Checkpoint& checkpoint,
-    const std::shared_ptr<sp::NativeArchive>& archive) {
-    std::unordered_map<std::string, NodeResult> results;
+// The pending writes a resume of `checkpoint` replays, nearest first and one
+// per task id: the rows under it, and for a NodeInterrupt checkpoint the rows
+// of its super-step under its ancestors (an earlier interrupt of the same step,
+// the step's parent checkpoint).
+std::vector<PendingWrite> collect_resume_writes(CheckpointStore& store, const std::string& thread_id,
+                                                const Checkpoint& checkpoint) {
+    std::vector<PendingWrite> results;
+    std::unordered_set<std::string> task_ids;
     Checkpoint current = checkpoint;
     const bool node_interrupt_resume =
         detail::checkpoint_resume_phase(checkpoint) == CheckpointPhase::NodeInterrupt;
@@ -171,9 +175,9 @@ std::unordered_map<std::string, NodeResult> load_resume_writes(
              current.schema_version != CHECKPOINT_SCHEMA_VERSION)) {
             throw std::runtime_error("Incompatible checkpoint in NodeInterrupt ancestry");
         }
-        for (const auto& pw : store.get_writes(thread_id, current.id)) {
+        for (auto& pw : store.get_writes(thread_id, current.id)) {
             if (node_interrupt_resume && pw.step != checkpoint.step) continue;
-            results.emplace(pw.task_id, pending_to_node_result(pw, archive));
+            if (task_ids.insert(pw.task_id).second) results.push_back(std::move(pw));
         }
         if (detail::checkpoint_resume_phase(current) != CheckpointPhase::NodeInterrupt ||
             current.parent_id.empty()) break;
@@ -192,6 +196,15 @@ std::unordered_map<std::string, NodeResult> load_resume_writes(
         }
         current = std::move(*parent);
     }
+    return results;
+}
+
+std::unordered_map<std::string, NodeResult> load_resume_writes(
+    CheckpointStore& store, const std::string& thread_id, const Checkpoint& checkpoint,
+    const std::shared_ptr<sp::NativeArchive>& archive) {
+    std::unordered_map<std::string, NodeResult> results;
+    for (const auto& pw : collect_resume_writes(store, thread_id, checkpoint))
+        results.emplace(pw.task_id, pending_to_node_result(pw, archive));
     return results;
 }
 
@@ -241,6 +254,20 @@ asio::awaitable<std::unordered_map<std::string, NodeResult>> load_resume_writes_
 }
 
 }  // namespace
+
+std::vector<PendingWrite> resume_pending_writes(CheckpointStore& store, const Checkpoint& checkpoint) {
+    return collect_resume_writes(store, checkpoint.thread_id, checkpoint);
+}
+
+void copy_resume_pending_writes(CheckpointStore& store, const Checkpoint& source,
+                                const Checkpoint& target) {
+    if (target.id.empty() || target.thread_id.empty())
+        throw std::invalid_argument("Pending writes need a target checkpoint with an id and a thread");
+    if (target.step != source.step)
+        throw std::invalid_argument("Pending writes belong to the source checkpoint's super-step");
+    for (const auto& write : resume_pending_writes(store, source))
+        store.put_writes(target.thread_id, target.id, write);
+}
 
 // =========================================================================
 // CheckpointCoordinator

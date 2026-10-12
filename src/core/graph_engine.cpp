@@ -1098,6 +1098,10 @@ std::string GraphEngine::fork(const std::string& source_thread_id,
     if (fork_state.budget_managed() && fork_state.budget_original_ceiling() != 0)
         checkpoint_store_->publish_managed_budget_fork(*cp_opt, forked);
     else checkpoint_store_->save(forked);
+    // #390: the fork replays what a resume of its source replays. The writes
+    // of the paused step live under the source's thread, which the forked
+    // checkpoint's ancestry no longer reaches, so they are copied under it.
+    copy_resume_pending_writes(*checkpoint_store_, *cp_opt, forked);
     return forked.id;
 }
 

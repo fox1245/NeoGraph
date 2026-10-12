@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=9ba5883f1606544761d327968d6929dd5a799d30a3b2e6becd28ebe22f762769 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=9b75d917e14c9501760d00f2cdbf43edda322b6ca7764762f7c2e08289824d7d -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -432,7 +432,7 @@ print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 
 
 销毁 `LocalProgramHost` 时，会在真实 `ProgramRuntime` 取消、排空并 join 调度器工作期间释放调用方的 GIL，使运行中的 Python 节点可以结束。销毁剩余宿主成员前会重新获取 GIL；Python 回调/对象所有者仍按 GIL 安全方式销毁。
 
-原生 Program 的记录执行 API 是取代 `start_recorded` 的 `ProgramRuntime::replay_recorded`。`LocalProgramHost` 暴露 `run`、`start` 和 `resume`，不暴露原始记录绑定的控制平面。Program 结果在现有句柄、预算和权限字段之外，还保留原生运行时提供的类型化提供商结果及失败证据。
+原生 Program 的记录执行 API 是取代 `start_recorded` 的 `ProgramRuntime::replay_recorded`。`LocalProgramHost` 暴露 `run`、`start`、`resume` 和 `fork`，不暴露原始记录绑定的控制平面。Program 结果在现有句柄、预算和权限字段之外，还保留原生运行时提供的类型化提供商结果及失败证据。
 
 `ProgramResult.failure` 是只读的 `ProgramFailure` 值或 `None`，不是字典。其 `provider_outcome` 与 `provider_cause` 保留提供商失败证据；`code`、`message`、`operation_id`、`core_node`、`attempts` 和 `witness` 描述失败的操作。结果字段还包括 `bundle_id`、`operation_id`、`attempt`、`checkpoint`、`interrupt` 和 `provider_budget_authority`。
 
@@ -574,7 +574,7 @@ Program 引擎不会向 stderr 打印 lint，也不会打印 fan-out 提示。�
 
 传入 `sqlite_directory=path` 时，宿主把 bundle、版本、运行记录和检查点保存在该目录的 SQLite 文件（`program.db`、`checkpoints.db`）中，把提供商调用保存在提供商调用 journal（`provider_calls.db`）中，因此运行能在进程之后留存：用同一目录和同一注册表打开的宿主会继续它。`resume()` 继续被中断的运行，`reconnect(run_id)` 继续停止的进程留下的仍在运行中的运行。恢复从不重新发送 journal 记录过的请求：journal 重放回复，调用只收费一次。绑定提供商的宿主还需要 `native_history_archive=`（第一次用 `ng.NativeArchive.provision`，之后用 `ng.NativeArchive.open`），因为 journal 把每个回复保存在该 archive 的 custody 之下。没有子预算的仅 `define()` Program 运行在其 wall time 内持有 execution lease：在 lease 过期前 `reconnect()` 抛出 `P_RUN_LEASE_HELD`，之后以 `TimedOut` 结束运行，并对 journal 记录的调用收费。崩溃恢复从运行最后一个持久检查点（例如中断留下的检查点）继续。
 
-`resume(run_id, value)` 返回一个句柄；调用 `.wait()` 获取结果。不传 `pending_id` 时，它会恢复该运行中唯一正在等待的调用。没有调用或有多个调用在等待时，它会抛出 `ValueError`；请把 `result.interrupt.pending_input.call_id` 作为 `pending_id` 传入，以精确指定该调用。
+`resume(run_id, value)` 返回一个句柄；调用 `.wait()` 获取结果。不传 `pending_id` 时，它会恢复该运行中唯一正在等待的调用。没有调用或有多个调用在等待时，它会抛出 `ValueError`；请把 `result.interrupt.pending_input.call_id` 作为 `pending_id` 传入，以精确指定该调用。 `fork(run_id, value, version, budget)` 从该运行的精确检查点（或 `checkpoint_id=`）启动 `version` 的新运行，并用 `value` 回答其等待中的调用；`budget` 必须在源运行的 `remaining_budget` 之内，`pending_id=` 与 `resume()` 一样指定调用。fork 与 `resume()` 一样重放暂停运行已完成的工作：在暂停步骤中已完成的节点或 Send 不会再次运行或计费，其 provider 调用也不会再次发送（#390）。
 
 `resume()` 返回的结果中，`execution_trace` 只列出恢复后运行的 Core 节点；中断前运行的节点出现在被中断的结果中。对于在 `b` 之前中断的 Core `a → b → c`，被中断的结果为 `["a"]`，恢复后的结果为 `["b", "c"]`。
 

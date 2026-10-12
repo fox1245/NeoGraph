@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=9ba5883f1606544761d327968d6929dd5a799d30a3b2e6becd28ebe22f762769 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=9b75d917e14c9501760d00f2cdbf43edda322b6ca7764762f7c2e08289824d7d -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -433,7 +433,7 @@ print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 
 
 `LocalProgramHost`를 소멸할 때 실제 `ProgramRuntime`이 스케줄러 작업을 취소하고 마무리하며 join하는 동안 호출자의 GIL을 해제하므로 실행 중인 Python 노드가 끝날 수 있습니다. 나머지 호스트 멤버를 소멸하기 전에 GIL을 다시 획득하며, Python 콜백/객체 소유자의 GIL 안전 소멸도 유지합니다.
 
-네이티브 Program의 기록 실행 API는 `start_recorded`를 대체한 `ProgramRuntime::replay_recorded`입니다. `LocalProgramHost`는 `run`, `start`, `resume`을 노출하며 원시 기록 바인딩 제어 평면은 노출하지 않습니다. Program 결과는 기존 핸들, 예산, 권한 필드와 함께 네이티브 런타임이 제공한 타입 기반 제공자 결과 및 실패 증거를 보존합니다.
+네이티브 Program의 기록 실행 API는 `start_recorded`를 대체한 `ProgramRuntime::replay_recorded`입니다. `LocalProgramHost`는 `run`, `start`, `resume`, `fork`를 노출하며 원시 기록 바인딩 제어 평면은 노출하지 않습니다. Program 결과는 기존 핸들, 예산, 권한 필드와 함께 네이티브 런타임이 제공한 타입 기반 제공자 결과 및 실패 증거를 보존합니다.
 
 `ProgramResult.failure`는 딕셔너리가 아닌 읽기 전용 `ProgramFailure` 값 또는 `None`입니다. `provider_outcome`과 `provider_cause`는 제공자 실패 증거를 보존하며, `code`, `message`, `operation_id`, `core_node`, `attempts`, `witness`는 실패한 작업을 설명합니다. 결과 필드에는 `bundle_id`, `operation_id`, `attempt`, `checkpoint`, `interrupt`, `provider_budget_authority`도 포함됩니다.
 
@@ -575,7 +575,7 @@ Program 엔진은 stderr에 lint도 fan-out 안내도 출력하지 않습니다.
 
 `sqlite_directory=path`를 주면 호스트는 번들, 버전, 실행 기록, 체크포인트를 그 디렉터리의 SQLite 파일(`program.db`, `checkpoints.db`)에, 제공자 호출을 제공자 호출 journal(`provider_calls.db`)에 보관하므로 실행이 프로세스보다 오래 남습니다. 같은 디렉터리와 같은 레지스트리로 연 호스트가 실행을 이어 갑니다. `resume()`은 중단된 실행을 이어 가고, `reconnect(run_id)`는 멈춘 프로세스가 실행 중인 채로 남긴 실행을 이어 갑니다. 복구는 journal에 기록된 요청을 다시 보내지 않습니다. journal이 응답을 재생하고 호출은 한 번만 청구됩니다. 제공자를 바인딩하는 호스트에는 `native_history_archive=`도 필요합니다(처음에는 `ng.NativeArchive.provision`, 이후에는 `ng.NativeArchive.open`). journal이 모든 응답을 archive의 custody 아래에 보관하기 때문입니다. 자식 예산이 없는 `define()` 전용 Program 실행은 wall time 동안 execution lease를 가집니다. `reconnect()`는 lease가 만료될 때까지 `P_RUN_LEASE_HELD`를 발생시키고, 그 뒤에는 실행을 `TimedOut`으로 끝내며 journal에 기록된 호출을 청구합니다. 크래시 복구는 실행의 마지막 내구 체크포인트(예: 중단이 남긴 체크포인트)에서 재개합니다.
 
-`resume(run_id, value)`는 핸들을 반환합니다. 결과를 받으려면 `.wait()`를 호출하십시오. `pending_id`가 없으면 실행에서 대기 중인 유일한 호출을 재개합니다. 대기 중인 호출이 없거나 여러 개이면 `ValueError`를 발생시킵니다. 호출을 정확히 지정하려면 `result.interrupt.pending_input.call_id`를 `pending_id`로 전달하십시오.
+`resume(run_id, value)`는 핸들을 반환합니다. 결과를 받으려면 `.wait()`를 호출하십시오. `pending_id`가 없으면 실행에서 대기 중인 유일한 호출을 재개합니다. 대기 중인 호출이 없거나 여러 개이면 `ValueError`를 발생시킵니다. 호출을 정확히 지정하려면 `result.interrupt.pending_input.call_id`를 `pending_id`로 전달하십시오. `fork(run_id, value, version, budget)`은 실행의 정확한 체크포인트(또는 `checkpoint_id=`)에서 `version`의 새 실행을 시작하고 그 대기 중인 호출에 `value`로 응답합니다. `budget`은 원본 실행의 `remaining_budget` 안에 있어야 하며, `pending_id=`는 `resume()`과 같이 호출을 지정합니다. 포크는 `resume()`과 같이 일시 정지된 실행이 끝낸 작업을 재생합니다. 일시 정지된 스텝에서 끝난 노드나 Send는 다시 실행되거나 과금되지 않으며 그 provider 호출도 다시 전송되지 않습니다(#390).
 
 `resume()`이 반환한 결과의 `execution_trace`에는 재개 이후에 실행된 Core 노드만 나열됩니다. 중단 전에 실행된 노드는 중단된 결과에 나타납니다. `b` 앞에서 중단되는 Core `a → b → c`라면 중단된 결과는 `["a"]`, 재개된 결과는 `["b", "c"]`를 가집니다.
 

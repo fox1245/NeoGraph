@@ -474,7 +474,7 @@ Useful when the decision to pause depends on intermediate node output
 
 ### Time travel
 
-`engine.fork(source_thread_id, new_thread_id, checkpoint_id="")` copies a checkpoint into the caller-named destination thread and returns the new checkpoint ID. An omitted checkpoint ID selects the source's latest checkpoint. The copy retains its pending continuation; editing state does not schedule new work.
+`engine.fork(source_thread_id, new_thread_id, checkpoint_id="")` copies a checkpoint into the caller-named destination thread and returns the new checkpoint ID. An omitted checkpoint ID selects the source's latest checkpoint. The copy retains its pending continuation; editing state does not schedule new work. A fork of a `NodeInterrupt` checkpoint also carries the pending writes of the paused super-step, so resuming the fork replays the nodes and Sends that finished in that step, as resuming the source does, instead of running them and their provider calls again (#390). The source keeps its own writes.
 
 Resuming a completed continuation with `next_nodes == ["__end__"]` restores the stored result without executing nodes. To continue paused work on edited state, select an exact earlier checkpoint from `get_state_history()` that still has pending nodes, fork that ID, edit the fork and resume it. A historical empty `next_nodes` vector is different: latest resume without an exact ID retains the fresh-run behavior, while exact-ID resume stays pinned to that snapshot.
 

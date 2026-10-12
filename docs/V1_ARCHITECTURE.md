@@ -485,7 +485,11 @@ was, a `branch` evaluates its condition on the state it saw the first time,
 and only the call the resume answers receives the resume value. Resume,
 reconcile, fork and graph migration carry these records, and so does the
 recovery of each; a fork gives every recorded paused call its own copy of its
-checkpoint. Replacement never continues a paused plan: it continues a
+checkpoint. Every checkpoint a fork copies, of the run or of a recorded paused
+call, carries the pending writes of the Core super-step it paused in (#390): the
+copy replays the nodes and Sends that finished in that step, as a resume of the
+source does, so they are neither run nor charged again and their provider calls
+are not sent again. Replacement never continues a paused plan: it continues a
 quiescent JavaScript source.
 
 Concurrent calls never share a Core thread. The first child of a `parallel` or

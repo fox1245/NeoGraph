@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=6b4210742298df054f3561080a86ae38f8e11dc34a19717a7cec3dc07890e8be -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=1ca107c7a355f07e80201b7fe13423f9d3c930a61122e458055727681390cbda -->
 # NeoGraphのコアコンセプト— 解説ガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -420,7 +420,7 @@ result = await engine.resume_async(thread_id="t1",
 
 ### タイムトラベル
 
-`engine.fork(source_thread_id, new_thread_id, checkpoint_id="")` はチェックポイントを呼び出し側が指定した宛先スレッドへコピーし、新しいチェックポイント ID を返します。チェックポイント ID を省略すると元スレッドの最新チェックポイントを選びます。コピーは保留中の continuation を保持し、状態の編集だけでは新しい処理を予約しません。
+`engine.fork(source_thread_id, new_thread_id, checkpoint_id="")` はチェックポイントを呼び出し側が指定した宛先スレッドへコピーし、新しいチェックポイント ID を返します。チェックポイント ID を省略すると元スレッドの最新チェックポイントを選びます。コピーは保留中の continuation を保持し、状態の編集だけでは新しい処理を予約しません。 `NodeInterrupt` チェックポイントのフォークは一時停止したスーパーステップの pending write も引き継ぐため、フォークを再開すると、元を再開したときと同じように、そのステップで完了したノードと Send を再実行せずに再生し、その provider 呼び出しも繰り返さない (#390)。元は自身の write を保持する。
 
 `next_nodes == ["__end__"]` の完了済み continuation を resume すると、ノードを実行せず保存済み結果を復元します。編集した状態で停止中の処理を続けるには、`get_state_history()` から保留ノードが残る正確な過去のチェックポイント ID を選んで fork し、コピーを編集して resume します。過去の空の `next_nodes` ベクトルは別です。正確な ID を指定しない最新状態の resume は新しい実行を開始する従来の動作を保持し、exact-ID resume は指定したスナップショットに固定されます。
 

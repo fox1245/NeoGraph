@@ -310,7 +310,9 @@ enum class Shape {
     BrokeredThenAfter,
     SendsToBrokered,
     // #386: the model on the first call of a plan, a check on every later one.
-    PlanRoute
+    PlanRoute,
+    // #390: the model and a check in one fan-out step.
+    LlmBesideCheck
 };
 
 struct HostOptions {
@@ -502,6 +504,11 @@ public:
                 definition["conditional_edges"] = json::array(
                     {json{{"from", "start"}, {"condition", "plan_route"},
                           {"routes", {{"llm", "llm"}, {"check", "check"}}}}});
+                break;
+            case Shape::LlmBesideCheck:
+                definition["nodes"] = {{"llm", {{"type", "llm_call"}}}, {"check", {{"type", "check"}}}};
+                definition["edges"] = json::array({edge("__start__", "llm"), edge("__start__", "check"),
+                                                   edge("llm", "__end__"), edge("check", "__end__")});
                 break;
             case Shape::SendsToBrokered:
                 definition["nodes"] = {{"fan", {{"type", "send_fan"}}}, {"work", {{"type", "brokered_call"}}}};
@@ -1316,6 +1323,53 @@ TEST(ProgramProviderBindingJournal, AnUncertainDispatchIsHeldAcrossARestart) {
         EXPECT_EQ(row->monetary_record->microunits, expected_hold());
     }
     EXPECT_EQ(peer->transport.load(), 1);
+}
+
+TEST(ProgramProviderBindingJournal, AForkOfAPausedFanOutNeverResendsOrRechargesTheFinishedCall) {
+    // #390: the Core runs llm and check in one step; llm calls the model and
+    // finishes, check asks. A fork of the paused run answers check. The fork
+    // carries the step's pending writes, so llm replays from them: its request
+    // is not sent, and its tokens and money are not charged, again.
+    for (const bool durable : {false, true}) {
+        SCOPED_TRACE(durable ? "SQLite journal" : "in memory");
+        TempDir     files("fork-fan-out");
+        auto        peer = std::make_shared<Peer>();
+        HostOptions options;
+        options.monetary = 100'000;
+        options.workers  = 2;
+        Host       h(peer, options, durable ? &files : nullptr);
+        const auto version = h.admit(Shape::LlmBesideCheck);
+        h.script().ask_thread = program_root_core_thread_id(
+            "fork-source",
+            version.core_materialization_receipt().plans.front().compiled_plan_identity);
+
+        const auto paused = h.runtime().run(kOwner, version, h.invocation("fork-source"));
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_text(paused);
+        ASSERT_TRUE(paused.interrupt() && paused.checkpoint());
+        EXPECT_EQ(paused.interrupt()->core_node, "check");
+        EXPECT_EQ(peer->transport.load(), 1);
+        EXPECT_EQ(paused.usage().model_tokens, 24U);
+        EXPECT_EQ(paused.usage().monetary_microunits, 1235U);
+
+        auto invocation   = h.invocation("fork-target");
+        invocation.budget = paused.remaining_budget();
+        const auto forked =
+            h.runtime()
+                .fork(kOwner,
+                      ExactProgramCheckpointReference{paused.run_id(),
+                                                      paused.checkpoint()->checkpoint_id},
+                      version, std::move(invocation), resume_after(paused, "trace-fork-resume"))
+                .wait();
+        ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed) << failure_text(forked);
+        EXPECT_EQ(peer->transport.load(), 1) << "the finished call replays in the fork";
+        EXPECT_EQ(forked.usage().model_tokens, 0U);
+        EXPECT_EQ(forked.usage().monetary_microunits, 0U);
+        EXPECT_TRUE(forked.monetary_records().empty());
+        EXPECT_EQ(h.script().checks_asked.load(), 1);
+        EXPECT_EQ(h.script().checks_answered.load(), 1);
+        EXPECT_NE(forked.output().dump().find("answer"), std::string::npos)
+            << "the fork keeps the reply of the call it replayed";
+    }
 }
 
 }  // namespace

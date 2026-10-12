@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=6b4210742298df054f3561080a86ae38f8e11dc34a19717a7cec3dc07890e8be -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=1ca107c7a355f07e80201b7fe13423f9d3c930a61122e458055727681390cbda -->
 # NeoGraph 핵심 개념 — 해설 가이드
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -420,7 +420,7 @@ result = await engine.resume_async(thread_id="t1",
 
 ### 시간 여행
 
-`engine.fork(source_thread_id, new_thread_id, checkpoint_id="")`는 체크포인트를 호출자가 지정한 대상 스레드에 복사하고 새 체크포인트 ID를 반환한다. 체크포인트 ID를 생략하면 원본의 최신 체크포인트를 선택한다. 복사본은 대기 중인 continuation을 유지하며 상태를 편집해도 새 작업이 예약되지는 않는다.
+`engine.fork(source_thread_id, new_thread_id, checkpoint_id="")`는 체크포인트를 호출자가 지정한 대상 스레드에 복사하고 새 체크포인트 ID를 반환한다. 체크포인트 ID를 생략하면 원본의 최신 체크포인트를 선택한다. 복사본은 대기 중인 continuation을 유지하며 상태를 편집해도 새 작업이 예약되지는 않는다. `NodeInterrupt` 체크포인트를 포크하면 일시 정지된 슈퍼스텝의 pending write도 함께 복사되므로, 포크를 재개하면 원본을 재개할 때와 같이 그 스텝에서 끝난 노드와 Send를 다시 실행하지 않고 재생하며 그 provider 호출도 다시 하지 않는다(#390). 원본은 자신의 write를 그대로 유지한다.
 
 `next_nodes == ["__end__"]`인 완료된 continuation을 resume하면 노드를 실행하지 않고 저장된 결과를 복원한다. 편집한 상태로 중단된 작업을 계속하려면 `get_state_history()`에서 대기 노드가 남은 정확한 이전 체크포인트 ID를 선택해 fork한 뒤 복사본을 편집하고 resume한다. 과거의 빈 `next_nodes` 벡터는 다르다. 정확한 ID 없이 최신 상태를 resume하면 새 실행을 시작하는 기존 동작을 유지하지만 exact-ID resume은 해당 스냅샷에 고정된다.
 

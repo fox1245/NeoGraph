@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=de091620c868e73d05f56031616a513cfb2e77ee896820b52d4a10cd0d472b3e -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=7b7c2d31c9130445d402371c02e5f533e14937b4c8cb0455bc5a0679df21122c -->
 # Program API 端到端场景
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -21,6 +21,7 @@
 | `test_10_failure_routing.py` | 失败路由（#364）：失败的 TEST 带着记录被路由到有 `interruptBefore` 的处理节点，沿 retry 和 abort 路由恢复，作者代码，经过脱敏的错误文本，`max_visits`，`max_node_retries` 上限，节点内的 Program 诊断，以及使用 SQLite 在新进程中恢复 |
 | `test_11_attempt_timeout.py` | 尝试超时（#364）：超时后在重试中恢复的慢 Python 节点，总是超时并以 `NG.Timeout` 路由到处理器的节点（没有处理器时运行失败），从不出现在结果和轨迹中的迟到完成，超过停止截止时间仍忽略取消的节点（`NG.EffectUncertain`），以及会越过 `wall_time_ms` 的退避以 kind `deadline` 停止 |
 | `test_12_send_interrupts.py` | 抛出 `NodeInterrupt` 的 `Send` target（#385）：Program 在其上暂停，恢复时重放 map 节点和已完成的 Send，使用 SQLite 在重启后恢复，调用了已绑定 `llm_call` 并已完成的 Send 既不会重发也不会再次计费 |
+| `test_13_fork_replays_the_paused_step.py` | 在已完成的绑定 `llm_call` 旁暂停的运行的 `host.fork()`（#390）：fork 回答问题并从该步的 pending write 重放已完成的调用，因此请求不会再次发送，令牌和费用也不会再次计费；覆盖 fan-out 步骤与 Send、内存与 SQLite 日志 |
 
 `support.py` 包含共享的 Python 节点、条件、注册表、预算和 JavaScript 构建器。
 

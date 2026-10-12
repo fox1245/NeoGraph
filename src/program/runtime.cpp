@@ -422,6 +422,8 @@ std::optional<json> continued_replay_records(const ProgramRunRecord&         sou
                 json{{"thread_id", loaded->thread_id}, {"checkpoint_id", loaded->id}};
             copy.timestamp = std::max<std::int64_t>(now_ms(), loaded->timestamp + 1);
             checkpoints.save(copy);
+            // #390: the copy replays what the call's paused step finished.
+            graph::copy_resume_pending_writes(checkpoints, *loaded, copy);
             record["checkpoint"] = json{{"core_name", target.root->core_name},
                                         {"core_generation_id", target.root->compiled_plan_identity},
                                         {"core_thread_id", copy.thread_id},
@@ -6164,6 +6166,10 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     cloned_checkpoint.timestamp =
         std::max<std::int64_t>(now_ms(), loaded_checkpoint->timestamp + 1);
     impl_->config.checkpoints->save(cloned_checkpoint);
+    // #390: the fork replays the work the paused step finished, as a resume
+    // of the source would, instead of running and charging it again.
+    graph::copy_resume_pending_writes(*impl_->config.checkpoints, *loaded_checkpoint,
+                                      cloned_checkpoint);
     const auto                   cloned_checkpoint_id = cloned_checkpoint.id;
     const CoreCheckpointIdentity target_checkpoint{
         target_pinned->root->core_name, target_pinned->root->compiled_plan_identity,

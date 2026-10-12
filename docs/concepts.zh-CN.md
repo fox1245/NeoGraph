@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=6b4210742298df054f3561080a86ae38f8e11dc34a19717a7cec3dc07890e8be -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=1ca107c7a355f07e80201b7fe13423f9d3c930a61122e458055727681390cbda -->
 # NeoGraph 核心概念——叙事指南
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -420,7 +420,7 @@ result = await engine.resume_async(thread_id="t1",
 
 ### 时间旅行
 
-`engine.fork(source_thread_id, new_thread_id, checkpoint_id="")` 将检查点复制到调用方指定的目标线程，并返回新检查点 ID。省略检查点 ID 时选择源线程的最新检查点。副本保留待执行的 continuation；编辑状态本身不会安排新工作。
+`engine.fork(source_thread_id, new_thread_id, checkpoint_id="")` 将检查点复制到调用方指定的目标线程，并返回新检查点 ID。省略检查点 ID 时选择源线程的最新检查点。副本保留待执行的 continuation；编辑状态本身不会安排新工作。 `NodeInterrupt` 检查点的 fork 还会携带暂停超步的 pending write，因此恢复 fork 时会像恢复源检查点一样重放该步中已完成的节点和 Send，而不是再次运行它们及其 provider 调用（#390）。源检查点保留自己的 write。
 
 Resume 已完成且 `next_nodes == ["__end__"]` 的 continuation 时，只恢复保存的结果，不执行节点。要在编辑后的状态上继续暂停的工作，应从 `get_state_history()` 选择仍有待执行节点的精确早期检查点 ID，fork 该 ID，编辑副本后再 resume。历史上的空 `next_nodes` 向量有所不同：未指定精确 ID 的 latest resume 保留开始新执行的旧行为，而 exact-ID resume 仍固定于指定快照。
 
