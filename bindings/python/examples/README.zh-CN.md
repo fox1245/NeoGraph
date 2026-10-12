@@ -74,6 +74,7 @@ python 01_minimal.py
 | 76 | [`76_retry_policy.py`](76_retry_policy.py) | yes | `RetryPolicy`：节点失败两次后，引擎按指数退避重试；把重试次数调小，可以看到重试用尽时调用方得到什么。 |
 | 77 | [`77_dynamic_interrupt.py`](77_dynamic_interrupt.py) | yes | `NodeInterrupt`：节点抛出它，载荷告诉调用方要问什么，`resume` 把答复（批准或拒绝）交还给节点。 |
 | 78 | [`78_max_steps.py`](78_max_steps.py) | yes | `max_steps`：循环被步数上限截停，结果会明确告知（`max_steps_exhausted`、`RunStatus.StepLimit`）；恰好在最后一步自行结束的运行不会被标记。 |
+| 79 | [`79_channels.py`](79_channels.py) | yes | 通道与 reducer：`overwrite` 与 `append` 的区别、`initial` 初始值，以及由所有通道共用同一个写入计数器的通道版本。 |
 
 ### 智能体模式
 
