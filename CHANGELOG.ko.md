@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=06c19dfd1e0afbdf8dc5f56996cdde50decf8b00d112021dd33dc9fbe2b1f386 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=835219076805ec6078dc1e82a1db0dcbb13190fb968718544c5ab0b861d656fd -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -107,6 +107,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 수정됨
 
+- **Program: 멈춘 JavaScript `callCore`가 자신의 Core 체크포인트에서 이어집니다 (#402).** 프로세스가 `callCore` 안에서 멈춘 run을 `reconnect()`는 호출의 Core가 체크포인트를 저장했어도 조정을 위해 돌려주었으므로, 끝났거나 run이 아직 게시하지 않은 질문에서 일시 정지한 호출도 손으로 조정해야 했습니다. 이제 복구는 대기 중인 명령의 각 호출을 그 호출 자신의 Core 스레드의 최신 체크포인트에서 아무 답도 주지 않고 이어 갑니다. 끝난 호출은 결과를 재생하고, 일시 정지한 호출은 다시 질문하며, join의 멤버도 같은 방식으로 이어집니다. 체크포인트를 저장하지 않은 호출은 흔적 없이 시작했을 수 있으므로, 시작하지 않았음이 확실한 경우(명령 저널이 시작을 기록하지 않은 타임아웃 있는 `ng.await`)가 아니면 여전히 조정을 위해 돌아옵니다. 최신 체크포인트가 `interrupt_before`나 `interrupt_after` 일시 정지인 호출도 그렇습니다. 복구는 답하지 않은 게이트를 결코 통과하지 않습니다. 재시작한 시도는 이제 연산을 바인딩할 때 재시작 전에 저널에 기록한 호출의 토큰을 금액과 마찬가지로 청구받으므로, 체크포인트에서 재생되는 호출은 한 번만 청구됩니다.
 - **Program: JavaScript 명령을 Completed로 조정하면 `main()`이 이어집니다 (#403).** 명령은 run의 남은 wall time과 Core 스텝 전부를 예약하는데 조정된 명령이 이를 그대로 가지고 있었으므로, `main()`은 조정 직후 `TimedOut`("Program wall-time budget (0 ms) expired")으로 끝났습니다. run이 앞선 명령의 체크포인트를 가지고 있을 때는 조정을 위한 일시 정지가 조정이 정산할 예약까지 풀어 버렸습니다. 이제 명령을 조정하면 그 wall time과 Core 스텝이 run에 돌아오고, 일시 정지는 조정 때까지 예약을 유지합니다. 명령이 예약한 토큰과 금액은 무엇을 썼는지 알 수 없으므로 소비된 것으로 남습니다.
 - **gRPC 체크포인트 실패가 더 이상 "체크포인트 없음"이 아닙니다.** `CheckpointService`는 로드할 때의 백엔드 장애에 "찾을 수 없음"으로, 목록에는 빈 목록으로 응답했기 때문에 재개된 실행이 조용히 처음부터 다시 시작했고, `GrpcCheckpointStore::delete_thread`는 실패한 삭제를 성공으로 보고했습니다. 이제 백엔드 실패는 클라이언트가 던지는 `UNAVAILABLE`이고, 실패한 삭제는 예외를 던지며, 형식이 잘못된 `SaveCheckpoint`는 `INVALID_ARGUMENT`입니다. `GrpcCheckpointStore`는 모든 RPC에(`set_rpc_timeout`, 기본 30초), `GrpcRemoteTool`은 모든 호출에(`set_call_timeout`, 기본 60초) 마감 시각을 둡니다.
 - **NeoGraph의 MCP 클라이언트는 기다림을 멈추면 서버에 알립니다.** 클라이언트가 포기한 요청은, 취소되었든 시간을 초과했든, 뒤이어 `notifications/cancelled`가 전송되므로(`initialize`는 제외) 서버가 작업을 멈출 수 있습니다. 예전에는 서버가 포기된 도구를 끝까지 실행했습니다.

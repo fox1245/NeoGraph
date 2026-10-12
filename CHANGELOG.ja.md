@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=06c19dfd1e0afbdf8dc5f56996cdde50decf8b00d112021dd33dc9fbe2b1f386 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=835219076805ec6078dc1e82a1db0dcbb13190fb968718544c5ab0b861d656fd -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -109,6 +109,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ### 修正
 
+- **Program: 止まった JavaScript の `callCore` は自身の Core チェックポイントから続きます (#402)。** プロセスが `callCore` の中で止まった run を、`reconnect()` は呼び出しの Core がチェックポイントを保存していても照合のために返していたため、完了していた呼び出しや、run がまだ公開していない質問で一時停止していた呼び出しも手で照合する必要がありました。復旧は、保留中のコマンドの各呼び出しを、その呼び出し自身の Core スレッドの最新チェックポイントから何も答えずに続けるようになりました。完了していた呼び出しは結果を再生し、一時停止していた呼び出しはもう一度質問し、join のメンバーも同じように続きます。チェックポイントを保存しなかった呼び出しは痕跡を残さず開始していた可能性があるため、開始していないことが確かな場合（コマンドジャーナルが開始を記録していないタイムアウト付きの `ng.await`）を除き、引き続き照合のために返されます。最新のチェックポイントが `interrupt_before` や `interrupt_after` の一時停止である呼び出しも同様で、復旧が答えのないゲートを通過することはありません。再開した試行は、操作をバインドするときに、再開前にジャーナルに記録した呼び出しのトークンも金額と同じく請求されるようになったため、チェックポイントから再生される呼び出しは一度だけ請求されます。
 - **Program: JavaScript コマンドを Completed で照合すると `main()` が続きます (#403)。** コマンドは run の残りの wall time と Core ステップをすべて予約し、照合されたコマンドがそれを保持したままだったため、`main()` は照合の直後に `TimedOut`（"Program wall-time budget (0 ms) expired"）で終わっていました。run が前のコマンドのチェックポイントを持っているときは、照合のための一時停止が、照合が精算するはずの予約まで解放していました。コマンドを照合すると、その wall time と Core ステップが run に戻り、一時停止は照合まで予約を保持するようになりました。コマンドが予約したトークンと金額は、何を使ったか分からないため消費されたままです。
 - **gRPC のチェックポイントの失敗が「チェックポイントなし」にならなくなりました。** `CheckpointService` はロード時のバックエンド障害に「見つからない」で、一覧には空のリストで応答していたため、再開した実行が黙って最初からやり直し、`GrpcCheckpointStore::delete_thread` は失敗した削除を成功として報告していました。今はバックエンドの失敗はクライアントが送出する `UNAVAILABLE`、失敗した削除は例外を送出し、形式の不正な `SaveCheckpoint` は `INVALID_ARGUMENT` です。`GrpcCheckpointStore` はすべての RPC に(`set_rpc_timeout`、既定 30 秒)、`GrpcRemoteTool` はすべての呼び出しに(`set_call_timeout`、既定 60 秒)期限を設けます。
 - **NeoGraph の MCP クライアントは待つのをやめるとサーバーに伝えます。** クライアントが放棄したリクエストには、キャンセルでもタイムアウトでも、続けて `notifications/cancelled` が送られる(`initialize` を除く)ので、サーバーは処理を止められます。以前はサーバーが放棄されたツールを最後まで実行していました。

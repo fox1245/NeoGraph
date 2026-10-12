@@ -32,6 +32,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -812,6 +813,80 @@ bool checkpoint_of_a_completed_command(
             return true;
     }
     return false;
+}
+// #402: the callCore operations of a command, through ng.await and the
+// members of a join, each with whether it provably never started: it sits in
+// an ng.await with a timeout whose start the command journal does not record
+// (#391 records it before the await dispatches anything). False when the
+// command holds work of another kind (a native call, a child, an emit),
+// which a checkpoint cannot recover.
+bool collect_call_core_operations(const JavaScriptCommand& command, std::string operation_id,
+                                  const json& await_starts, bool unstarted,
+                                  std::vector<std::pair<std::string, bool>>& out,
+                                  std::size_t depth = 0) {
+    if (depth > kMaxJavaScriptStructuredScopeDepth) return false;
+    if (command.kind() == JavaScriptCommandKind::CallCore) {
+        out.emplace_back(std::move(operation_id), unstarted);
+        return true;
+    }
+    const auto arguments = command.arguments();
+    if (command.kind() == JavaScriptCommandKind::Await) {
+        const bool timed = arguments.contains("timeout_ms") && !arguments.at("timeout_ms").is_null();
+        const bool recorded = await_starts.is_object() && await_starts.contains(operation_id);
+        return collect_call_core_operations(JavaScriptCommand::from_json(arguments.at("command")),
+                                            operation_id + "/await", await_starts,
+                                            unstarted || (timed && !recorded), out, depth + 1);
+    }
+    if (command.kind() == JavaScriptCommandKind::Join) {
+        const auto& members = arguments.at("members");
+        for (std::size_t index = 0; index < members.size(); ++index)
+            if (!collect_call_core_operations(JavaScriptCommand::from_json(members.at(index)),
+                                              operation_id + "/member/" + std::to_string(index),
+                                              await_starts, unstarted, out, depth + 1))
+                return false;
+        return true;
+    }
+    return false;
+}
+
+// #402: how the callCore operations of a pending command continue when the
+// process that dispatched it stopped. Each one with a Core checkpoint
+// continues from the latest checkpoint of its own Core thread (`saved`, by
+// operation id), unless that checkpoint is an interrupt_before or
+// interrupt_after pause: resuming it would pass the gate without its answer.
+// One that provably never started runs as new work (`unstarted`). Nullopt
+// when some call may have started but none can continue from a checkpoint,
+// or when the command holds work other than callCore: the command is
+// reconciled.
+struct JavaScriptRecovery {
+    std::map<std::string, std::string> saved;
+    std::set<std::string>              unstarted;
+};
+std::optional<JavaScriptRecovery> javascript_recovery_checkpoints(const RunControl&         control,
+                                                                  const JavaScriptCommand& command,
+                                                                  const std::string& operation_id,
+                                                                  const json& await_starts) {
+    if (!control.checkpoints) return std::nullopt;
+    std::vector<std::pair<std::string, bool>> calls;
+    if (!collect_call_core_operations(command, operation_id, await_starts, false, calls) ||
+        calls.empty())
+        return std::nullopt;
+    JavaScriptRecovery recovery;
+    bool               may_have_started = false;
+    for (const auto& [call, unstarted] : calls) {
+        if (unstarted) {
+            recovery.unstarted.insert(call);
+            continue;
+        }
+        may_have_started = true;
+        const auto latest = control.checkpoints->load_latest(operation_thread_id(control, call));
+        if (!latest || latest->interrupt_phase == graph::CheckpointPhase::Before ||
+            latest->interrupt_phase == graph::CheckpointPhase::After)
+            continue;
+        recovery.saved.emplace(call, latest->id);
+    }
+    if (may_have_started && recovery.saved.empty()) return std::nullopt;
+    return recovery;
 }
 std::uint64_t native_invocation_id(const RunControl& control,
                                    std::string_view  operation_id,
@@ -1723,6 +1798,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         : std::make_shared<ProgramMonetaryAccount>(control->granted_budget.monetary_microunits,
                                                    control->attempt);
     control->set_monetary_account(monetary);
+    // #402: a journaling broker charges this attempt, when it binds an
+    // operation, the tokens of the calls the attempt journaled before a
+    // restart, as it charges their money: a recovered call that replays from
+    // its checkpoint never invokes the broker again.
+    if (!control->recorded_replay) control->set_journaled_usage(usage);
     const auto monetary_used = [&monetary]() -> std::uint64_t {
         return monetary ? monetary->used() : 0;
     };
@@ -2058,6 +2138,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             return std::nullopt;
         };
 
+        // #402: the checkpoints a recovered command's calls continue from;
+        // their content is not the run's exact checkpoint.
+        std::set<std::string> recovery_checkpoint_ids;
         auto run_core = [&](std::string operation_id, json core_input,
                              std::optional<std::string> resume, std::string thread_id,
                              std::shared_ptr<graph::CancelToken> operation_token)
@@ -2096,7 +2179,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     }
                 }
                 auto operation_checkpoints = control->checkpoints;
-                if (next_resume && resume_checkpoint_content_id) {
+                if (next_resume && resume_checkpoint_content_id &&
+                    !recovery_checkpoint_ids.count(*next_resume)) {
                     operation_checkpoints =
                         std::make_shared<ExactCheckpointContentStore>(
                             control->checkpoints, *next_resume,
@@ -4398,6 +4482,15 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             json       await_starts = json::object();
             bool supplied_core_resume_required = false;
             bool supplied_core_resume_consumed = false;
+            // #402: the command a reconnect recovers continues each of its calls
+            // from that call's own latest Core checkpoint. A call it reaches
+            // without one may have started before the process stopped: the
+            // command is returned for reconciliation instead.
+            std::map<std::string, std::string> recovery_core_resumes;
+            std::set<std::string>              recovery_unstarted_calls;
+            bool                               recovery_active               = false;
+            bool                               recovery_reached_unsaved_call = false;
+            std::optional<ProgramInterrupt>    recovery_reconciliation;
 
             using JsCommandExecutor = std::function<asio::awaitable<PlanExecution>(
                 const JavaScriptCommand&, std::string, std::shared_ptr<graph::CancelToken>,
@@ -4558,6 +4651,30 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         co_return fail(
                             ProgramTerminalStatus::Failed, "P_JS_CONTROL_COMMAND",
                             "JavaScript command references a Core outside the admitted root");
+                    std::optional<std::string> recovered_resume;
+                    if (recovery_active &&
+                        !(exact_core_resume && exact_core_resume->first == operation_id)) {
+                        bool unsaved = false;
+                        {
+                            std::lock_guard lock(plan_mutex);
+                            const auto found = recovery_core_resumes.find(operation_id);
+                            if (found != recovery_core_resumes.end()) {
+                                recovered_resume = found->second;
+                                recovery_core_resumes.erase(found);
+                            } else if (recovery_unstarted_calls.count(operation_id)) {
+                                // It never started: it runs as new work.
+                            } else {
+                                recovery_reached_unsaved_call = true;
+                                unsaved                       = true;
+                            }
+                        }
+                        if (unsaved) {
+                            PlanExecution held;
+                            held.status    = ProgramTerminalStatus::Interrupted;
+                            held.interrupt = recovery_reconciliation;
+                            co_return held;
+                        }
+                    }
                     auto active = active_concurrency.load(std::memory_order_relaxed);
                     while (active < control->granted_budget.max_concurrency &&
                            !active_concurrency.compare_exchange_weak(active, active + 1,
@@ -4576,7 +4693,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         supplied_core_resume_consumed = true;
                     }
                     auto core_input = std::move(parsed.input);
-                    if (command_resume && javascript_core_resume_value) {
+                    if (recovered_resume) {
+                        // #402: continue the call where it stopped, answering nothing.
+                        command_resume = std::move(recovered_resume);
+                        core_input     = json();
+                    } else if (command_resume && javascript_core_resume_value) {
                         core_input = std::move(*javascript_core_resume_value);
                         javascript_core_resume_value.reset();
                     }
@@ -5542,6 +5663,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
                 bool      exact_resume_authorized = false;
                 bool      checkpoint_resume_authorized = false;
+                bool      recovery_resume_authorized = false;
                 RunBudget resource_reservation;
 
                 if (prior != prior_commands.rend()) {
@@ -5722,6 +5844,28 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             }
                             resumed_join_members = *settled;
                         }
+                    } else if (auto saved = javascript_recovery_checkpoints(
+                                   *control, command_value, operation_id,
+                                   prior->await_started_at().value_or(json::object()))) {
+                        // #402: the command's calls that saved a Core checkpoint
+                        // continue from it; one that saved none is reconciled.
+                        if (auto failure =
+                                validate_javascript_command(command_value, operation_id, 0))
+                            co_return std::move(*failure);
+                        {
+                            std::lock_guard lock(plan_mutex);
+                            for (const auto& [call, checkpoint] : saved->saved)
+                                recovery_checkpoint_ids.insert(checkpoint);
+                            recovery_core_resumes    = std::move(saved->saved);
+                            recovery_unstarted_calls = std::move(saved->unstarted);
+                        }
+                        recovery_active               = true;
+                        recovery_reached_unsaved_call = false;
+                        recovery_reconciliation       = ProgramInterrupt{
+                            "javascript", command_value.to_json(), std::nullopt,
+                            javascript_command_pending_effect(*control, ordinal, command_value,
+                                                              effect_id)};
+                        recovery_resume_authorized = true;
                     } else {
                         // Already-published non-Core work is never dispatch
                         // authority. It must be explicitly reconciled.
@@ -5738,7 +5882,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     }
                 }
                 if (exact_resume_authorized || child_resume_authorized ||
-                    checkpoint_resume_authorized) {
+                    checkpoint_resume_authorized || recovery_resume_authorized) {
                     auto durable_resumed =
                         control->transitions->latest(control->owner_scope, control->run_id);
                     // #395: the first attempt of a fork resumes the command its
@@ -5779,7 +5923,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
                 std::size_t command_count = 0;
                 if (!exact_resume_authorized && !child_resume_authorized &&
-                    !checkpoint_resume_authorized) {
+                    !checkpoint_resume_authorized && !recovery_resume_authorized) {
                     try {
                         command_count = javascript_command_tree_size(command_value);
                     } catch (const ProgramDiagnosticError& error) {
@@ -5876,6 +6020,32 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 {
                     std::lock_guard lock(await_starts_mutex);
                     await_starts = json::object();
+                }
+                if (recovery_active) {
+                    const bool reconcile = recovery_reached_unsaved_call;
+                    {
+                        std::lock_guard lock(plan_mutex);
+                        recovery_core_resumes.clear();
+                        recovery_unstarted_calls.clear();
+                    }
+                    recovery_active               = false;
+                    recovery_reached_unsaved_call = false;
+                    if (reconcile) {
+                        // #402: a call of the recovered command had no checkpoint
+                        // to continue from. What the command's other calls did
+                        // again stays in their checkpoints; the command is
+                        // reconciled as a whole.
+                        if (const auto durable_pending =
+                                control->transitions->load(control->owner_scope, control->run_id))
+                            unreconciled_javascript_remaining = durable_pending->remaining_budget();
+                        active_javascript_command.reset();
+                        javascript_trace.insert(javascript_trace.end(),
+                                                command_result.execution_trace.begin(),
+                                                command_result.execution_trace.end());
+                        result.status    = ProgramTerminalStatus::Interrupted;
+                        result.interrupt = std::move(recovery_reconciliation);
+                        co_return result;
+                    }
                 }
                 javascript_trace.insert(javascript_trace.end(),
                                         command_result.execution_trace.begin(),

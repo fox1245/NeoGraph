@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=06c19dfd1e0afbdf8dc5f56996cdde50decf8b00d112021dd33dc9fbe2b1f386 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=835219076805ec6078dc1e82a1db0dcbb13190fb968718544c5ab0b861d656fd -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -109,6 +109,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 
+- **Program：停止的 JavaScript `callCore` 从其自身的 Core 检查点继续（#402）。** 进程在 `callCore` 中停止的 run，即使调用的 Core 已保存检查点，`reconnect()` 也会把它交回协调，因此已完成的调用、或在 run 尚未发布的问题上暂停的调用都必须手动协调。现在恢复会让待处理命令的每个调用从该调用自身 Core 线程的最新检查点继续，且不提供任何回答：已完成的调用重放其结果，已暂停的调用再次提问，join 的成员也以同样方式继续。未保存检查点的调用可能已经开始却未留下痕迹，因此仍会交回协调，除非可以确定它从未开始（命令日志未记录其开始的带超时的 `ng.await`）。最新检查点是 `interrupt_before` 或 `interrupt_after` 暂停的调用也同样交回：恢复绝不会越过未回答的门。重新启动的尝试现在在绑定操作时，会像对金额一样对重启前记入日志的调用的 token 计费，因此从检查点重放的调用只计费一次。
 - **Program：以 Completed 协调 JavaScript 命令后 `main()` 会继续（#403）。** 命令会预留 run 剩余的全部 wall time 和 Core 步数，而被协调的命令一直保留着它们，因此 `main()` 在协调后立即以 `TimedOut`（"Program wall-time budget (0 ms) expired"）结束；当 run 带有前一个命令的检查点时，用于协调的暂停还会释放协调本应结算的预留。现在协调一个命令会把其 wall time 和 Core 步数还给 run，暂停也会一直保留预留直到协调。命令预留的 token 和金额仍视为已花费，因为无法知道它用了多少。
 - **gRPC 检查点失败不再表现为“没有检查点”。** `CheckpointService` 过去在加载时对后端故障回答“未找到”、对列表回答空列表，因此恢复的运行会悄悄从头开始，`GrpcCheckpointStore::delete_thread` 也会把失败的删除报告为成功。现在后端失败为 `UNAVAILABLE`，客户端会抛出异常；失败的删除会抛出异常；格式错误的 `SaveCheckpoint` 为 `INVALID_ARGUMENT`。`GrpcCheckpointStore` 为每个 RPC（`set_rpc_timeout`，默认 30 秒）、`GrpcRemoteTool` 为每次调用（`set_call_timeout`，默认 60 秒）设置截止时间。
 - **NeoGraph 的 MCP 客户端在停止等待时会告知服务器。** 客户端放弃的请求，无论是取消还是超时，随后都会发送 `notifications/cancelled`（`initialize` 除外），使服务器可以停止工作；过去服务器会把被放弃的工具运行到底。

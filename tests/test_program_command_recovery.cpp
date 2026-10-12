@@ -11,6 +11,8 @@
 // call, as it does when the process stops inside the first. Found by the
 // resume model harness (tests/test_program_resume_model.cpp).
 //
+// #402: a call that saved a Core checkpoint before the process stopped
+// continues from it on reconnect; only a call without one is reconciled.
 // #403: reconciling a stopped call as Completed continues main().
 
 #include "program_resume_fixture.h"
@@ -176,6 +178,69 @@ TEST(ProgramCommandRecovery, ReconcilingALaterStoppedCallContinuesMain) {
                                                    json{{"out", "reconciled"}});
     ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << describe(done);
     EXPECT_EQ(done.output(), (json{{"out", json::array({"done:a", "reconciled", "done:c"})}}));
+}
+
+TEST(ProgramCommandRecovery, AStopAfterTheCallPausedAsksItsQuestion) {
+    // #402: the second call's Core paused and saved its checkpoint; the
+    // process stopped before the run published the pause. Reconnect continues
+    // the call from that checkpoint, which asks the question again.
+    StoppedRun stopped(javascript(R"JS(
+  const first = yield ng.callCore("main", {value: "ok:a"}, "first");
+  const second = yield ng.callCore("main", {value: "ask:b"}, "second");
+  return {out: [first.out, second.out]};)JS"),
+                       json::object(), after_nth("node_interrupt", 1));
+    ASSERT_FALSE(stopped.world.crash.taken_at.empty());
+    const auto run_id = stopped.world.run_id();
+    const auto asked  = stopped.recovered->reconnect(run_id);
+    ASSERT_EQ(asked.status(), ProgramTerminalStatus::Interrupted) << describe(asked);
+    ASSERT_TRUE(asked.interrupt()->pending_input) << describe(asked);
+    EXPECT_EQ(asked.interrupt()->pending_input->operation_id(), "root.javascript.2");
+    const auto done =
+        stopped.recovered->resume(run_id, json{{"decision", "d1"}}, asked.interrupt()->pending_input->call_id());
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << describe(done);
+    EXPECT_EQ(done.output(), (json{{"out", json::array({"done:a", "d1"})}}));
+    EXPECT_EQ(finished_runs(stopped.world, "ok:a"), 1) << "the first call replays";
+}
+
+TEST(ProgramCommandRecovery, AStopAfterTheCallFinishedReplaysIt) {
+    // #402: the second call finished and saved its last checkpoint; the
+    // process stopped before the run published its result. Reconnect takes
+    // the result from that checkpoint without running the call again.
+    StoppedRun stopped(javascript(R"JS(
+  const first = yield ng.callCore("main", {value: "ok:a"}, "first");
+  const second = yield ng.callCore("main", {value: "ok:b"}, "second");
+  return {out: [first.out, second.out]};)JS"),
+                       json::object(), after_nth("completed", 2));
+    ASSERT_FALSE(stopped.world.crash.taken_at.empty());
+    const auto done = stopped.recovered->reconnect(stopped.world.run_id());
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << describe(done);
+    EXPECT_EQ(done.output(), (json{{"out", json::array({"done:a", "done:b"})}}));
+    EXPECT_EQ(finished_runs(stopped.world, "ok:b"), 1) << "the second call is not run again";
+}
+
+TEST(ProgramCommandRecovery, AStopInsideAJoinContinuesItsMembers) {
+    // #402: a join runs its members one at a time; the first finished, the
+    // second paused and saved its checkpoint, and the process stopped before
+    // the pause was published. Reconnect continues the join: the first member
+    // replays from its checkpoint and the second asks again.
+    StoppedRun stopped(javascript(R"JS(
+  const replies = yield ng.all([
+    ng.callCore("main", {value: "ok:a"}, "first"),
+    ng.callCore("main", {value: "ask:b"}, "second")
+  ], {max_in_flight: 1}, "sequential");
+  return {out: replies.map((reply) => reply.out)};)JS"),
+                       json::object(), after_nth("node_interrupt", 1));
+    ASSERT_FALSE(stopped.world.crash.taken_at.empty());
+    const auto run_id = stopped.world.run_id();
+    const auto asked  = stopped.recovered->reconnect(run_id);
+    ASSERT_EQ(asked.status(), ProgramTerminalStatus::Interrupted) << describe(asked);
+    ASSERT_TRUE(asked.interrupt()->pending_input) << describe(asked);
+    EXPECT_EQ(asked.interrupt()->pending_input->operation_id(), "root.javascript.1/member/1");
+    const auto done =
+        stopped.recovered->resume(run_id, json{{"decision", "d1"}}, asked.interrupt()->pending_input->call_id());
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << describe(done);
+    EXPECT_EQ(done.output(), (json{{"out", json::array({"done:a", "d1"})}}));
+    EXPECT_EQ(finished_runs(stopped.world, "ok:a"), 1) << "the first member is not run again";
 }
 
 #endif
