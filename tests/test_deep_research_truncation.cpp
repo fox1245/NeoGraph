@@ -1,3 +1,5 @@
+#include "fixtures/unique_temp_dir.h"
+
 #include <gtest/gtest.h>
 #include <neograph/graph/deep_research_graph.h>
 #include <neograph/graph/engine.h>
@@ -236,8 +238,7 @@ TEST(DeepResearchTruncation, CancellationBetweenBudgetAttemptsDoesNotDispatchAga
 TEST(DeepResearchTruncation, DurableBrokerReplaysEachDistinctBudgetSlotWithoutRedispatch) {
     Scenario scenario;
     scenario.script->set(Role::FinalReport, {reply("", sp::StopKind::MaxTokens), reply("## durable report")});
-    const auto path = std::filesystem::temp_directory_path() / ("neograph-research-slots-" +
-        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".sqlite");
+    const auto path = neograph::graph::test_support::unique_temp_path("neograph-research-slots-", ".sqlite");
     struct Cleanup {
         std::filesystem::path path;
         ~Cleanup() {

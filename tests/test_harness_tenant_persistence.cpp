@@ -1,3 +1,5 @@
+#include "fixtures/unique_temp_dir.h"
+
 #include <neograph/mcp/tenant.h>
 #include <neograph/mcp/sqlite_harness_store.h>
 
@@ -17,9 +19,7 @@ using neograph::json;
 namespace {
 
 std::filesystem::path unique_temp_path(const std::string& stem) {
-    return std::filesystem::temp_directory_path() /
-           (stem + "-" +
-            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    return neograph::graph::test_support::unique_temp_path(stem + "-");
 }
 
 class TempDirectoryCleanup {

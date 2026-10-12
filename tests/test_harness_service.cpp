@@ -1,3 +1,5 @@
+#include "fixtures/unique_temp_dir.h"
+
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/compiler.h>
 #include <neograph/graph/node.h>
@@ -198,9 +200,7 @@ json non_idempotent_host_effect_request() {
 }
 
 std::filesystem::path unique_temp_path(const std::string& stem) {
-    return std::filesystem::temp_directory_path() /
-           (stem + "-" +
-            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    return neograph::graph::test_support::unique_temp_path(stem + "-");
 }
 
 class TempDirectoryCleanup {
@@ -1367,9 +1367,7 @@ TEST(HarnessServiceTest, ProviderExecutorRejectsSymlinkWorkspaceEscape) {
 #ifdef _WIN32
     GTEST_SKIP() << "directory symlink creation requires host privileges on Windows";
 #else
-    const auto base = std::filesystem::temp_directory_path() /
-                      ("neograph-harness-path-" +
-                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    const auto base = neograph::graph::test_support::unique_temp_path("neograph-harness-path-");
     const auto workspace = base / "workspace";
     const auto outside = base / "outside";
     std::filesystem::create_directories(workspace);

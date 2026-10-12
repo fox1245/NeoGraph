@@ -9,6 +9,8 @@
 // counted independently of the broker's receipts, and every "restart" rebuilds
 // the Tool instance, the broker connection and the engine/Agent.
 
+#include "fixtures/unique_temp_dir.h"
+
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/engine.h>
 #include <neograph/graph/node.h>
@@ -45,25 +47,11 @@ namespace fs = std::filesystem;
 
 class TestFiles {
 public:
-    TestFiles() {
-        static std::atomic<std::uint64_t> next{0};
-        path_ = fs::canonical(fs::temp_directory_path()) /
-                ("ng-standalone-tool-effects-" +
-                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-                 "-" + std::to_string(++next));
-        if (!fs::create_directory(path_)) throw std::runtime_error("cannot reserve test directory");
-    }
-    ~TestFiles() {
-        std::error_code ignored;
-        fs::remove_all(path_, ignored);
-    }
-    TestFiles(const TestFiles&) = delete;
-    TestFiles& operator=(const TestFiles&) = delete;
-    std::string journal() const { return (path_ / "journal.sqlite").string(); }
-    std::string ledger() const { return (path_ / "ledger.sqlite").string(); }
+    std::string journal() const { return dir_.file("journal.sqlite"); }
+    std::string ledger() const { return dir_.file("ledger.sqlite"); }
 
 private:
-    fs::path path_;
+    neograph::graph::test_support::UniqueTempDir dir_{"ng-standalone-tool-effects-"};
 };
 
 std::shared_ptr<ToolExecutionController> widened_controller() {

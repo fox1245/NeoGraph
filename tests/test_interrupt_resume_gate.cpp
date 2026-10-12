@@ -7,6 +7,8 @@
 // stopped before the next step's interrupt was saved, a resume after
 // interrupt_after, and a resume after an update made as a node.
 
+#include "fixtures/unique_temp_dir.h"
+
 #include <neograph/graph/engine.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
@@ -110,24 +112,9 @@ std::unique_ptr<GraphEngine> build(const json& definition, std::shared_ptr<Check
     return GraphEngine::build(definition, std::move(config));
 }
 
-class TempDir {
+class TempDir : public neograph::graph::test_support::UniqueTempDir {
 public:
-    TempDir() {
-        static std::atomic<int> next{0};
-        path_ = std::filesystem::temp_directory_path() /
-                ("ng-interrupt-gate-" +
-                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" +
-                 std::to_string(++next));
-        std::filesystem::create_directories(path_);
-    }
-    ~TempDir() {
-        std::error_code ignored;
-        std::filesystem::remove_all(path_, ignored);
-    }
-    std::string file(const char* name) const { return (path_ / name).string(); }
-
-private:
-    std::filesystem::path path_;
+    TempDir() : UniqueTempDir("ng-interrupt-gate-") {}
 };
 
 // The process stops right before it would save an interrupt_before checkpoint:

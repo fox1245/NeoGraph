@@ -12,6 +12,8 @@
 // including every retry attempt of it; what the step leaves behind is the
 // writes the targets return.
 
+#include "fixtures/unique_temp_dir.h"
+
 #include <neograph/graph/engine.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
@@ -237,24 +239,9 @@ json as_json(const std::vector<std::string>& items) {
     return out;
 }
 
-class TempDir {
+class TempDir : public neograph::graph::test_support::UniqueTempDir {
 public:
-    TempDir() {
-        static std::atomic<int> next{0};
-        path_ = std::filesystem::temp_directory_path() /
-                ("ng-send-isolation-" +
-                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" +
-                 std::to_string(++next));
-        std::filesystem::create_directories(path_);
-    }
-    ~TempDir() {
-        std::error_code ignored;
-        std::filesystem::remove_all(path_, ignored);
-    }
-    std::string file(const char* name) const { return (path_ / name).string(); }
-
-private:
-    std::filesystem::path path_;
+    TempDir() : UniqueTempDir("ng-send-isolation-") {}
 };
 
 }  // namespace

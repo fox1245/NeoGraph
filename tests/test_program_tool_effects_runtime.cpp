@@ -8,6 +8,8 @@
 // external ledger that the broker never touches, so "no re-execution" is
 // observed independently of the broker's own receipts.
 
+#include "fixtures/unique_temp_dir.h"
+
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/engine.h>
 #include <neograph/graph/node.h>
@@ -169,11 +171,7 @@ public:
     explicit EffectHost(std::shared_ptr<Rendezvous> rendezvous = {})
         : rendezvous_(std::move(rendezvous)), registry_(make_registry()),
           profile_(make_profile(registry_)), policy_(make_policy(profile_)) {
-        static std::atomic<std::uint64_t> next{0};
-        root_ = fs::canonical(fs::temp_directory_path()) /
-                ("ng-program-tool-effects-" +
-                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-                 "-" + std::to_string(++next));
+        root_ = neograph::graph::test_support::unique_temp_path("ng-program-tool-effects-");
         if (!fs::create_directory(root_)) throw std::runtime_error("cannot reserve test directory");
         ToolExecutionPolicy widened;
         widened.concurrency = ToolConcurrency::Capacity;

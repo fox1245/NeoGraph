@@ -1,3 +1,5 @@
+#include "fixtures/unique_temp_dir.h"
+
 #include <neograph/mcp/adoption.h>
 
 #include <neograph/mcp/client.h>
@@ -18,8 +20,7 @@ namespace {
 using namespace neograph::mcp;
 
 struct TempSource {
-    std::filesystem::path dir = std::filesystem::temp_directory_path() /
-        ("neograph-mcp-adoption-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::path dir = neograph::graph::test_support::unique_temp_path("neograph-mcp-adoption-");
     std::filesystem::path file = dir / "opencode" / "opencode.json";
     std::string previous_xdg = std::getenv("XDG_CONFIG_HOME") ? std::getenv("XDG_CONFIG_HOME") : "";
     TempSource() {

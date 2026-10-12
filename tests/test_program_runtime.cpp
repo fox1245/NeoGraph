@@ -28,6 +28,7 @@
 #include <sqlite3.h>
 #endif
 
+#include "fixtures/unique_temp_dir.h"
 #include "fixtures/coarse_clock_store.h"
 #include "javascript.h"
 #include "registry_access.h"
@@ -4261,13 +4262,9 @@ struct JoinTestStores {
         if (!durable) return;
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE) && \
     defined(NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE_CHECKPOINT)
-        static std::atomic<unsigned> sequence{0};
-        directory = std::filesystem::temp_directory_path() /
-                    ("neograph-runtime-paused-join-" +
-                     std::to_string(
-                         std::chrono::steady_clock::now().time_since_epoch().count()) +
-                     "-" + std::to_string(sequence.fetch_add(1)));
-        std::filesystem::create_directories(directory);
+        directory = neograph::graph::test_support::unique_temp_path("neograph-runtime-paused-join-");
+        if (!std::filesystem::create_directory(directory))
+            throw std::runtime_error("cannot reserve test directory");
         transitions =
             std::make_shared<SQLiteProgramTransitionStore>((directory / "program.db").string());
         checkpoints =

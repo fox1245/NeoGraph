@@ -5,6 +5,8 @@
 // Recovery is real: runtime, catalog, engine cache, journal, transition/program
 // store and checkpoint store are destroyed and reopened from their SQLite files
 // (or from a byte-consistent crash image of them) before the run is continued.
+#include "fixtures/unique_temp_dir.h"
+
 #include <neograph/program/program.h>
 #include <neograph/program/sqlite_provider_call_broker.h>
 #include <neograph/program/sqlite_store.h>
@@ -48,23 +50,12 @@ std::string digest(char c) { return "sha256:" + std::string(64, c); }
 // ---------------------------------------------------------------------------
 
 struct TempDir {
-    explicit TempDir(const std::string& name) {
-        static std::atomic<unsigned> sequence{0};
-        path = std::filesystem::canonical(std::filesystem::temp_directory_path()) /
-               ("neograph-provider-journal-runtime-" + name + "-" +
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" +
-                std::to_string(sequence++));
-        std::filesystem::create_directories(path);
-    }
-    ~TempDir() {
-        std::error_code error;
-        std::filesystem::remove_all(path, error);
-    }
-    TempDir(const TempDir&) = delete;
-    TempDir& operator=(const TempDir&) = delete;
+    explicit TempDir(const std::string& name)
+        : dir("neograph-provider-journal-runtime-" + name + "-"), path(dir.path()) {}
     std::string provider_db() const { return (path / "provider.sqlite").string(); }
     std::string program_db() const { return (path / "program.sqlite").string(); }
     std::string checkpoint_db() const { return (path / "checkpoint.sqlite").string(); }
+    neograph::graph::test_support::UniqueTempDir dir;
     std::filesystem::path path;
 };
 

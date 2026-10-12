@@ -7,6 +7,8 @@
 // provider journal for durable ones. The provider is a local double speaking
 // through a real SDK client, so origin, model, output cap and input limits come
 // from an admitted descriptor exactly as they do for a hosted model.
+#include "fixtures/unique_temp_dir.h"
+
 #include <neograph/graph/node.h>
 #include <neograph/graph/sqlite_checkpoint.h>
 #include <neograph/program/program.h>
@@ -52,23 +54,12 @@ std::string digest(char c) { return "sha256:" + std::string(64, c); }
 // ---------------------------------------------------------------------------
 
 struct TempDir {
-    explicit TempDir(const std::string& name) {
-        static std::atomic<unsigned> sequence{0};
-        path = std::filesystem::canonical(std::filesystem::temp_directory_path()) /
-               ("neograph-provider-binding-" + name + "-" +
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-                "-" + std::to_string(sequence++));
-        std::filesystem::create_directories(path);
-    }
-    ~TempDir() {
-        std::error_code error;
-        std::filesystem::remove_all(path, error);
-    }
-    TempDir(const TempDir&)            = delete;
-    TempDir& operator=(const TempDir&) = delete;
+    explicit TempDir(const std::string& name)
+        : dir("neograph-provider-binding-" + name + "-"), path(dir.path()) {}
     std::string provider_db() const { return (path / "provider.sqlite").string(); }
     std::string program_db() const { return (path / "program.sqlite").string(); }
     std::string checkpoint_db() const { return (path / "checkpoint.sqlite").string(); }
+    neograph::graph::test_support::UniqueTempDir dir;
     std::filesystem::path path;
 };
 

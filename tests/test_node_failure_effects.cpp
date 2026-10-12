@@ -15,6 +15,8 @@
 // as NG.EffectCommitted), and an uncertain effect pauses the run for
 // reconciliation instead of being retried.
 
+#include "fixtures/unique_temp_dir.h"
+
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/engine.h>
 #include <neograph/graph/node.h>
@@ -45,26 +47,12 @@ namespace fs = std::filesystem;
 
 class TestFiles {
 public:
-    TestFiles() {
-        static std::atomic<std::uint64_t> next{0};
-        path_ = fs::canonical(fs::temp_directory_path()) /
-                ("ng-node-failure-effects-" +
-                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-                 "-" + std::to_string(++next));
-        if (!fs::create_directory(path_)) throw std::runtime_error("cannot reserve test directory");
-    }
-    ~TestFiles() {
-        std::error_code ignored;
-        fs::remove_all(path_, ignored);
-    }
-    TestFiles(const TestFiles&) = delete;
-    TestFiles& operator=(const TestFiles&) = delete;
-    std::string journal() const { return (path_ / "journal.sqlite").string(); }
-    std::string ledger() const { return (path_ / "ledger.sqlite").string(); }
-    std::string checkpoints() const { return (path_ / "checkpoints.sqlite").string(); }
+    std::string journal() const { return dir_.file("journal.sqlite"); }
+    std::string ledger() const { return dir_.file("ledger.sqlite"); }
+    std::string checkpoints() const { return dir_.file("checkpoints.sqlite"); }
 
 private:
-    fs::path path_;
+    neograph::graph::test_support::UniqueTempDir dir_{"ng-node-failure-effects-"};
 };
 
 // What the node saw, kept across "process restarts" of one test.

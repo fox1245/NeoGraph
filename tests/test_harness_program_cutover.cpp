@@ -1,3 +1,5 @@
+#include "fixtures/unique_temp_dir.h"
+
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/store.h>
 #include <neograph/harness/contract.h>
@@ -1549,9 +1551,7 @@ TEST(HarnessProgramCutover, SixCallbacksOwnAdapterPastServiceLifetime) {
 
 TEST(HarnessProgramCutover, HostToolConfigurationChangesBindingAndArtifactIdentity) {
     HarnessFixture fixture;
-    const auto     root = std::filesystem::temp_directory_path() /
-                      ("neograph-harness-binding-" +
-                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    const auto     root = neograph::graph::test_support::unique_temp_path("neograph-harness-binding-");
     std::filesystem::create_directories(root);
     auto records = std::make_shared<neograph::mcp::FileHarnessRecordStore>(root.string());
     fixture.config.record_store = records;
@@ -1600,9 +1600,7 @@ TEST(HarnessProgramCutover, HostToolConfigurationChangesBindingAndArtifactIdenti
 #ifdef NEOGRAPH_TESTS_HAVE_SQLITE
 TEST(HarnessProgramCutover, FrozenContractSurvivesSqliteServiceRestart) {
     const auto path =
-        std::filesystem::temp_directory_path() /
-        ("neograph-harness-contract-restart-" +
-         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".db");
+        neograph::graph::test_support::unique_temp_path("neograph-harness-contract-restart-", ".db");
     auto contract_spec         = neograph::program::ContractManifestSpec{};
     contract_spec.manifest_id  = "harness-restart-contract";
     contract_spec.owner_scope  = "harness-cutover-test";
@@ -1674,9 +1672,7 @@ TEST(HarnessProgramCutover, FrozenContractSurvivesSqliteServiceRestart) {
 
 TEST(HarnessProgramCutover, TamperedPersistedContractStateFailsClosed) {
     const auto path =
-        std::filesystem::temp_directory_path() /
-        ("neograph-harness-contract-tamper-" +
-         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".db");
+        neograph::graph::test_support::unique_temp_path("neograph-harness-contract-tamper-", ".db");
     neograph::program::ContractManifestSpec contract_spec;
     contract_spec.manifest_id  = "harness-tamper-contract";
     contract_spec.owner_scope  = "harness-cutover-test";
@@ -1735,9 +1731,7 @@ TEST(HarnessProgramCutover, TamperedPersistedContractStateFailsClosed) {
 TEST(HarnessProgramCutover, ReconnectsExactSqliteProgramRunAfterServiceDestruction) {
     HarnessFixture fixture;
     const auto     path =
-        std::filesystem::temp_directory_path() /
-        ("neograph-harness-cutover-" +
-         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".db");
+        neograph::graph::test_support::unique_temp_path("neograph-harness-cutover-", ".db");
     fixture.config.record_store =
         std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(path.string());
     std::string run_id;
@@ -1772,9 +1766,7 @@ TEST(HarnessProgramCutover, ReconnectsInterruptedSqliteRunAndContinuesExactCheck
     });
     fixture_ptr = &fixture;
     const auto path =
-        std::filesystem::temp_directory_path() /
-        ("neograph-harness-interrupted-" +
-         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".db");
+        neograph::graph::test_support::unique_temp_path("neograph-harness-interrupted-", ".db");
     fixture.config.record_store =
         std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(path.string());
 
@@ -1884,9 +1876,7 @@ TEST(HarnessProgramCutover, ConcurrentSqliteReconnectResumeHasOneWinnerAndOneDis
     });
     fixture_ptr = &fixture;
     const auto path =
-        std::filesystem::temp_directory_path() /
-        ("neograph-harness-resume-race-" +
-         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".db");
+        neograph::graph::test_support::unique_temp_path("neograph-harness-resume-race-", ".db");
     fixture.config.record_store =
         std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(path.string());
     auto second_config = fixture.config;
@@ -1949,9 +1939,7 @@ TEST(HarnessProgramCutover, CrossArtifactForkReadsSourceTransitionsAndForwardsPe
     });
     fixture_ptr = &fixture;
     const auto path =
-        std::filesystem::temp_directory_path() /
-        ("neograph-harness-fork-" +
-         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".db");
+        neograph::graph::test_support::unique_temp_path("neograph-harness-fork-", ".db");
     fixture.config.record_store =
         std::make_shared<neograph::mcp::SqliteHarnessRecordStore>(path.string());
     {
@@ -2085,9 +2073,7 @@ TEST(HarnessProgramCutover, TypedFailurePartialUsageRetainsReservationWithoutRed
 
 TEST(HarnessProgramCutover, UncertainProviderFailureNeverConsumesAvailableRepairRetries) {
 #ifdef NEOGRAPH_TESTS_HAVE_SQLITE
-    const auto directory = std::filesystem::temp_directory_path() /
-        ("neograph-uncertain-budget-" +
-         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    const auto directory = neograph::graph::test_support::unique_temp_path("neograph-uncertain-budget-");
     struct DatabaseCleanup {
         std::filesystem::path path;
         ~DatabaseCleanup() { std::error_code error; std::filesystem::remove_all(path, error); }

@@ -1,3 +1,5 @@
+#include "fixtures/unique_temp_dir.h"
+
 #include <gtest/gtest.h>
 #include "fixtures/typed_wire_peer.h"
 #include <neograph/provider_outcome_codec.h>
@@ -131,16 +133,12 @@ struct PrivateSecurity {
 class ArchiveDirectory {
 public:
     ArchiveDirectory() {
-        static std::atomic<unsigned> sequence{0};
-        const auto parent = std::filesystem::canonical(std::filesystem::temp_directory_path());
 #ifdef _WIN32
         PrivateSecurity security;
         SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), &security.descriptor, FALSE};
 #endif
         for (unsigned attempt = 0; attempt != 100; ++attempt) {
-            root_ = parent / ("ng-interface6-" + std::to_string(
-                std::chrono::steady_clock::now().time_since_epoch().count()) + "-" +
-                std::to_string(sequence.fetch_add(1)));
+            root_ = neograph::graph::test_support::unique_temp_path("ng-interface6-");
 #ifdef _WIN32
             if (::CreateDirectoryW(root_.c_str(), &attributes)) return;
             const auto error = ::GetLastError();

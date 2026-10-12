@@ -1,3 +1,5 @@
+#include "fixtures/unique_temp_dir.h"
+
 #include <neograph/sqlite_runtime_stores.h>
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/types.h>
@@ -231,27 +233,18 @@ TEST(SQLiteRuntimeStores, HistoryHeadAndSnapshotRejectSqlMetadataCorruption) {
 namespace {
 class ToolEffectTestFiles {
 public:
+    // The directory sits under the resolved OS temp parent: its paths are
+    // subject to no-symlink custody.
     ToolEffectTestFiles() {
-        static std::atomic<std::uint64_t> next{0};
-        const auto token = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())
-                         + "-" + std::to_string(++next);
-        // Resolve the OS temp parent before creating paths subject to no-symlink custody.
-        path_ = std::filesystem::canonical(std::filesystem::temp_directory_path()) /
-                ("ng-tool-effect-" + token);
-        if (!std::filesystem::create_directory(path_))
-            throw std::runtime_error("cannot reserve Tool effect test directory");
-        std::filesystem::permissions(path_, std::filesystem::perms::owner_all,
+        std::filesystem::permissions(dir_.path(), std::filesystem::perms::owner_all,
                                      std::filesystem::perm_options::replace);
     }
-    ~ToolEffectTestFiles() { std::error_code ignored; std::filesystem::remove_all(path_, ignored); }
-    ToolEffectTestFiles(const ToolEffectTestFiles&) = delete;
-    ToolEffectTestFiles& operator=(const ToolEffectTestFiles&) = delete;
-    std::string journal() const { return (path_ / "journal.sqlite").string(); }
-    std::string ledger() const { return (path_ / "sdk.sqlite").string(); }
-    std::string archive() const { return (path_ / "native-archive").string(); }
-    std::string key() const { return (path_ / "archive.key").string(); }
+    std::string journal() const { return dir_.file("journal.sqlite"); }
+    std::string ledger() const { return dir_.file("sdk.sqlite"); }
+    std::string archive() const { return dir_.file("native-archive"); }
+    std::string key() const { return dir_.file("archive.key"); }
 private:
-    std::filesystem::path path_;
+    neograph::graph::test_support::UniqueTempDir dir_{"ng-tool-effect-"};
 };
 
 using FixtureDb = std::unique_ptr<sqlite3, decltype(&sqlite3_close)>;

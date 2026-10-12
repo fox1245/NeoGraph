@@ -1,3 +1,5 @@
+#include "fixtures/unique_temp_dir.h"
+
 #include <neograph/program/sqlite_provider_call_broker.h>
 #include <neograph/program/program.h>
 #include <neograph/program/sqlite_store.h>
@@ -36,17 +38,12 @@ struct SqlConnection {
     ~SqlConnection() { if (db) sqlite3_close_v2(db); }
 };
 struct Database {
-    explicit Database(std::string name) {
-        // Native custody roots derived from this path must not inherit OS temp symlinks.
-        path = (std::filesystem::canonical(std::filesystem::temp_directory_path()) /
-                ("neograph-program-provider-" + name + "-" +
-                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
-                 ".sqlite")).string();
-        std::error_code error;
-        std::filesystem::remove(path, error);
-        std::filesystem::remove(path + "-wal", error);
-        std::filesystem::remove(path + "-shm", error);
-    }
+    // Native custody roots derived from this path must not inherit OS temp
+    // symlinks; unique_temp_path resolves them.
+    explicit Database(const std::string& name)
+        : path(neograph::graph::test_support::unique_temp_path(
+                   "neograph-program-provider-" + name + "-", ".sqlite")
+                   .string()) {}
     ~Database() {
         std::error_code error;
         std::filesystem::remove(path, error);

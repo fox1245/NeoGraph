@@ -14,6 +14,8 @@
 // interrupt payload, the ERROR event's handled/routed_to, and the opt-in,
 // redacted free text.
 
+#include "fixtures/unique_temp_dir.h"
+
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/engine.h>
 #include <neograph/graph/invocation.h>
@@ -186,24 +188,9 @@ json fast_retries(int max_retries) {
                 {"max_delay_ms", 10}};
 }
 
-class TempDir {
+class TempDir : public neograph::graph::test_support::UniqueTempDir {
 public:
-    TempDir() {
-        static std::atomic<int> next{0};
-        path_ = std::filesystem::temp_directory_path() /
-                ("ng-failure-routing-" +
-                 std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "-" +
-                 std::to_string(++next));
-        std::filesystem::create_directories(path_);
-    }
-    ~TempDir() {
-        std::error_code ignored;
-        std::filesystem::remove_all(path_, ignored);
-    }
-    std::string file(const char* name) const { return (path_ / name).string(); }
-
-private:
-    std::filesystem::path path_;
+    TempDir() : UniqueTempDir("ng-failure-routing-") {}
 };
 
 }  // namespace

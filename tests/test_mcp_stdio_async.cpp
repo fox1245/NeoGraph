@@ -4,6 +4,8 @@
 // cancellation, and shutdown. Fixtures are real stdlib-only Python
 // servers, with no third-party MCP dependency.
 
+#include "fixtures/unique_temp_dir.h"
+
 #include <gtest/gtest.h>
 #include <neograph/mcp/client.h>
 #include <neograph/async/run_sync.h>
@@ -68,9 +70,7 @@ const char* python_cmd() {
 bool python3_available() { return python_cmd() != nullptr; }
 
 struct BoundaryDirectory {
-    std::filesystem::path path = std::filesystem::temp_directory_path()
-        / ("neograph-mcp-boundary-" + std::to_string(
-            std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::path path = neograph::graph::test_support::unique_temp_path("neograph-mcp-boundary-");
     BoundaryDirectory() { std::filesystem::create_directory(path); }
     ~BoundaryDirectory() {
         std::error_code ec;
