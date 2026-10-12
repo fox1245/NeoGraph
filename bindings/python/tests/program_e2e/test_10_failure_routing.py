@@ -292,6 +292,111 @@ def test_retries_after_a_resume_come_off_the_ceiling_the_pause_left(shape):
 
 
 # ---------------------------------------------------------------------------
+# The retry ceiling and main(): a retried failure still pauses at its handler
+# (#418)
+# ---------------------------------------------------------------------------
+
+MAIN_FIX_LOOP_CALL = """
+    const fixed = yield ng.callCore("fix", {}, "fix");
+    return {trace: fixed.trace, failures: fixed.failures};
+"""
+
+
+def fix_program(use_main, max_retries):
+    """The design's fix loop, with or without a JavaScript main() around it."""
+    text = fix_loop(policy=f"max_retries: {max_retries}")
+    return with_main(text, MAIN_FIX_LOOP_CALL) if use_main else text
+
+
+def ceiling_budget(ceiling):
+    run_budget = budget()
+    if ceiling is not None:
+        run_budget.max_node_retries = ceiling
+    return run_budget
+
+
+@pytest.mark.parametrize("use_main,max_retries,ceiling", [
+    pytest.param(False, 2, 5, id="no-main-retries-ceiling"),
+    pytest.param(True, 2, None, id="main-retries-no-ceiling"),
+    pytest.param(True, 0, 5, id="main-no-retries-ceiling"),
+    pytest.param(True, 2, 5, id="main-retries-ceiling"),
+])
+def test_a_retry_ceiling_and_main_do_not_change_how_a_failure_pauses_at_its_handler(
+        use_main, max_retries, ceiling):
+    host, result = start(fix_program(use_main, max_retries), ceiling_budget(ceiling))
+
+    record = failure_record(result)
+    assert result.status == ng.ProgramTerminalStatus.Interrupted, describe(result)
+    assert record["kind"] == "exhausted" and record["attempts"] == max_retries + 1
+    assert started("TEST") == max_retries + 1
+    # The retries are counted against the ceiling and the rest is what is left.
+    counted = max_retries if ceiling is not None else 0
+    assert result.usage.node_retries == counted
+    assert result.remaining_budget.max_node_retries == (
+        None if ceiling is None else ceiling - counted)
+    # The pause is published: the run can be reconnected and answered later.
+    again = host.reconnect(result.run_id).wait()
+    assert again.status == ng.ProgramTerminalStatus.Interrupted, describe(again)
+    assert again.id == result.id
+
+    resumed = host.resume(result.run_id, {"decision": "retry", "fix": True}).wait()
+
+    assert resumed.status == ng.ProgramTerminalStatus.Completed, describe(resumed)
+    assert resumed.remaining_budget.max_node_retries == (
+        None if ceiling is None else ceiling - counted)
+    expected_trace = ["IMPLEMENT", "ASK_USER", "IMPLEMENT", "TEST"]
+    assert (resumed.output["trace"] if use_main else channel(resumed, "trace")) == expected_trace
+
+
+def test_the_abort_route_after_a_retried_failure_still_fails_with_its_code_under_main():
+    host, result = start(fix_program(True, 2), ceiling_budget(5))
+    failure_record(result)
+
+    resumed = host.resume(result.run_id, {"decision": "abort"}).wait()
+
+    assert resumed.status == ng.ProgramTerminalStatus.Failed, describe(resumed)
+    assert resumed.failure.code == "plan.user_abort"
+    assert resumed.remaining_budget.max_node_retries == 3
+
+
+def test_a_retried_failure_pauses_on_a_durable_host_and_resumes_after_a_restart(tmp_path):
+    directory = str(tmp_path / "runs")
+    host = failure_host(sqlite_directory=directory)
+    _host, result = start(fix_program(True, 2), ceiling_budget(5), host=host)
+    failure_record(result)
+    assert result.remaining_budget.max_node_retries == 3
+
+    restarted = failure_host(sqlite_directory=directory)
+    version = restarted.compile_admit(source(fix_program(True, 2)), ceiling_budget(5))
+    assert version.id == result.program_version_id
+    again = restarted.reconnect(result.run_id).wait()
+    assert again.status == ng.ProgramTerminalStatus.Interrupted, describe(again)
+    resumed = restarted.resume(result.run_id, {"decision": "retry", "fix": True}).wait()
+
+    assert resumed.status == ng.ProgramTerminalStatus.Completed, describe(resumed)
+    assert resumed.output["trace"] == ["IMPLEMENT", "ASK_USER", "IMPLEMENT", "TEST"]
+
+
+def test_a_node_that_succeeds_on_a_retry_under_main_and_a_ceiling_completes():
+    flaky = define_graph(_FAILURE_CHANNELS + f"""
+    g.node("work", {{type: "e2e.step", boom_first: true}});
+    g.entry("work");
+    g.exit("work");
+    g.retryPolicy("work", {{max_retries: 2, {_FAST}}});
+""", name="flaky")
+    text = with_main(flaky, """
+        const done = yield ng.callCore("flaky", {}, "flaky");
+        return {trace: done.trace};
+    """)
+    _host, result = start(text, ceiling_budget(5))
+
+    assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
+    assert result.output == {"trace": ["work"]}
+    assert started("work") == 2
+    assert result.usage.node_retries == 1
+
+
+# ---------------------------------------------------------------------------
 # Unrouted failures
 # ---------------------------------------------------------------------------
 

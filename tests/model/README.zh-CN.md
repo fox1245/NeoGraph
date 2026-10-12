@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/model/README.md locale=zh-CN source_sha256=ff8e590d7785c7ce1b9c737b233df1d9367d921ad10e276d55d2565169d2c88d -->
+<!-- neograph-i18n: source=tests/model/README.md locale=zh-CN source_sha256=fce8bbe8820b221df14af8afbf931bd239bf19a334f5f3993a7a36a5c34365c6 -->
 # Join 模型（#363）
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -73,7 +73,9 @@ java -XX:+UseParallelGC -cp /path/to/tla2tools.jar tlc2.TLC \
 
 测试对象有：JavaScript 的 `main()` 程序（`callCore`；两个成员的 `ng.all`、`ng.race` 和 `ng.quorum`，成员一起运行或逐个运行；`ng.await`；以及 Core 步骤里的两个节点都可能提问的 `callCore`，#388 和 #394），以及带类型的计划（`parallel`、三选二的 `quorum`、`sequence`），它们作用在只有一个节点的 Core 上，这个节点可能调用绑定的 provider，也可能提问。宿主的接线方式与 `LocalProgramHost` 相同：要么在内存中配合进程内的计价 broker，要么把所有存储放进同一个 SQLite 文件，检查点用同样的粗粒度时钟保存，再加上 SQLite 的 provider journal。provider 是一个真正的 SDK 客户端，运行在本地传输层之上，这个传输层会统计它发出的请求数。P1 还涵盖“只发送一次、只计费一次”：一次运行所发出的请求、所计费的 token 和金额，与参考解释器一致（使用进程内 broker 时，重新运行的节点会再次调用、再次付费，这与文档所述一致）。对于一次只运行一个调用的程序，崩溃测试在 SQLite 宿主上进行：每次检查点 save、`put_writes`、Program 转换、provider 分发和已写入 journal 的调用时，都会复制一份数据库，然后在这份副本上用一个新的运行时重新连接这次运行。
 
-保存过 Core 检查点的调用，崩溃后会从该检查点继续（#402）；fork 会重放被暂停的调用已经发出的 provider 调用（#405）。做不到这两点的调度判为失败。另有两种文档所述的行为不在 P4 的覆盖范围内，遵循它们的调度，测试框架只做报告而不判失败。一种是：无论在 JavaScript 程序还是计划里，在第一个 Core 检查点之前停止的调用，都会交回宿主去协调（#402、#404），测试框架只在崩溃没有给该调用留下检查点时才接受这种情况。另一种是：请求发出期间的崩溃会冻结该调用，它永远不会再次发送（#364）。宿主能以“已完成”来协调的调用（既不提问也不失败的调用、被 await 的调用，或调用对，且其后没有计费的调用），测试框架用参照结果去协调，之后运行必须和参照一样结束（#403）。
+另有四个 JavaScript 程序运行失败路由（#364、#418）：节点失败，重试 0 次或 2 次，然后被路由到 `interruptBefore` 处理器，这些都发生在 `callCore` 运行的 Core 里，并分别在 run 带有重试上限（`max_node_retries`）和不带的情况下运行。参考解释器规定：重试和上限不会改变暂停——出现一个问题，之后处理器运行，`main()` 结束。
+
+保存过 Core 检查点的调用，崩溃后会从该检查点继续（#402）；fork 会重放被暂停的调用已经发出的 provider 调用（#405）。做不到这两点的调度判为失败。另有三种文档所述的行为不在 P4 的覆盖范围内，遵循它们的调度，测试框架只做报告而不判失败。一种是：无论在 JavaScript 程序还是计划里，在第一个 Core 检查点之前停止的调用，都会交回宿主去协调（#402、#404），测试框架只在崩溃没有给该调用留下检查点时才接受这种情况。一种是：停在 `interrupt_before` 闸门（失败路由程序）的调用同样会交回，因为恢复不会越过尚未回答的闸门（#402）。还有一种是：请求发出期间的崩溃会冻结该调用，它永远不会再次发送（#364）。宿主能以“已完成”来协调的调用（既不提问也不失败的调用、被 await 的调用，或调用对，且其后没有计费的调用），测试框架用参照结果去协调，之后运行必须和参照一样结束（#403）。
 
 ### 上限与变量
 
@@ -84,6 +86,6 @@ java -XX:+UseParallelGC -cp /path/to/tla2tools.jar tlc2.TLC \
 | Send 条目 | `ok`、`ask`、`ask ok`、`ask ask`、`ask fail` | 一个或两个条目的每一种组合 |
 | 闸门 | 一个，放在 `Ok` 或 `Ask` 上 | 任意节点上一个，或者两个 `interrupt_before` |
 
-在 CI 的上限下，Core 测试框架对每一种提问方式，运行 2,196 张图和约 6,100 个回答调度，各约 83,000 次运行；Program 测试框架运行 124 个 JavaScript 程序和 18 个计划，约 950 个调度。每个测试在 4 个 worker 上用时不到一分钟。
+在 CI 的上限下，Core 测试框架对每一种提问方式，运行 2,196 张图和约 6,100 个回答调度，各约 83,000 次运行；Program 测试框架运行 128 个 JavaScript 程序和 18 个计划，约 1,010 个调度。每个测试在 4 个 worker 上用时不到一分钟。
 
 变量：`NEOGRAPH_RESUME_MODEL_NODES`、`_SPECIAL`、`_SPECIAL_LARGEST`、`_ANSWERS` 和 `_CRASHES` 用来覆盖单项上限；`NEOGRAPH_RESUME_MODEL_SQLITE=0` 会去掉 SQLite；`NEOGRAPH_RESUME_MODEL_THREADS` 设置 worker 数量（默认 4）。对于 Program 测试框架，`NEOGRAPH_PROGRAM_RESUME_MODEL_BOUND=extended` 会加入两条命令的程序、每一种 fork，以及每个操作之后的崩溃；`_ONLY` 只保留描述中包含该字符串的程序，`_CRASHES=0` 去掉崩溃，`_THREADS` 设置 worker 数量（默认 4），`_DEBUG` 打印每个结果和每个持久化操作。

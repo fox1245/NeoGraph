@@ -610,6 +610,11 @@ struct ProgramCase {
     json        input = json::object();
     bool        sequential = true;  // crash images are deterministic
     bool        crash_candidate = true;
+    /// RunBudget::max_node_retries of the run, when it has a ceiling (#364).
+    std::optional<std::uint64_t> node_retry_ceiling;
+    /// The call pauses at an `interrupt_before` gate, the only checkpoint it
+    /// saves before the pause is published (#402).
+    bool gated = false;
     Expected    expected;
     /// By operation id, the commands the host can reconcile as completed with
     /// their reference result: a call, an awaited call or a pair whose nodes
@@ -732,7 +737,7 @@ Observed run_schedule(const ProgramCase& program, bool durable, const Schedule& 
             error = e.what();
         }
     };
-    attempt([&] { return host->run(version, run_id, program.input); });
+    attempt([&] { return host->run(version, run_id, program.input, program.node_retry_ceiling); });
     bool recovering = false;
     std::shared_ptr<Peer> recovered_peer;
     while (true) {
@@ -772,7 +777,7 @@ Observed run_schedule(const ProgramCase& program, bool durable, const Schedule& 
             if (!result && (error.find("P_RUN_NOT_FOUND") != std::string::npos ||
                             error.find("run was not found") != std::string::npos)) {
                 error.clear();
-                attempt([&] { return host->run(version, run_id, program.input); });
+                attempt([&] { return host->run(version, run_id, program.input, program.node_retry_ceiling); });
             }
             recovering = true;
             continue;
@@ -1003,6 +1008,14 @@ void judge(ProgramTotals& totals, const ProgramCase& program, bool durable, cons
         known("reconciliation of a call stopped before its first checkpoint", problems.front());
         return;
     }
+    // A call whose latest checkpoint is an `interrupt_before` gate is returned
+    // to the host to reconcile: recovery never passes a gate unanswered (#402).
+    // The pause of a gated program is that checkpoint, saved before the
+    // Program publishes the pause.
+    if (observed.reconciliation && !observed.reconciled && schedule.crash_op >= 0 && program.gated) {
+        known("reconciliation of a call stopped at a gate", problems.front());
+        return;
+    }
     // A crash while a request was out leaves its dispatch unresolved: the
     // journal never sends it again and holds it (#364), so the run cannot end
     // as the reference does. Only a second send is a mismatch then.
@@ -1063,7 +1076,15 @@ bool crash_candidate(const Spec& spec) {
 ProgramBundle compile_program(const ProgramCase& program) {
     ProgramCompiler compiler(model_registry(), {"resume-model/v1"});
     if (program.plan) return compiler.compile(ProgramSource::from_cpp_builder("resume-model-plan", 2, program.document));
-    return compiler.compile(ProgramSource::from_javascript("resume-model.js", program.source), Host::budget());
+    try {
+        return compiler.compile(ProgramSource::from_javascript("resume-model.js", program.source), Host::budget());
+    } catch (const ProgramCompileError& error) {
+        std::string message = std::string(error.what()) + " for " + program.description;
+        for (const auto& diagnostic : error.diagnostics())
+            message += "\n" + diagnostic.code + " " + diagnostic.primary.json_pointer + ": " + diagnostic.message +
+                       " " + diagnostic.witness.dump();
+        throw std::runtime_error(message);
+    }
 }
 
 ProgramCase javascript_case(const Spec& spec, std::size_t max_answers) {
@@ -1096,6 +1117,49 @@ ProgramCase javascript_case(const Spec& spec, std::size_t max_answers) {
         if (command.op == Op::Pair) reconciliation.response["side_out"] = *value_of(command.members[1]);
         program.reconcilable["root.javascript." + std::to_string(index + 1)] = std::move(reconciliation);
     }
+    return program;
+}
+
+/// A failure routed to an `interruptBefore` handler (#364, #418): the node
+/// "work" fails, is retried `retries` times and is routed to "route", which
+/// pauses before it runs, in a Core that main() calls. The run has a retry
+/// ceiling or has none. The reference states what the contract says: the
+/// retries and the ceiling do not change the pause, one question is asked, and
+/// the answer lets the handler run and the program finish.
+ProgramCase failure_route_case(int retries, std::optional<std::uint64_t> ceiling) {
+    ProgramCase program;
+    program.description = "failure route, retries " + std::to_string(retries) + ", ceiling " +
+                          (ceiling ? std::to_string(*ceiling) : std::string("none")) + ", main()";
+    program.node_retry_ceiling = ceiling;
+    program.gated              = true;
+    program.source =
+        "export function define() {\n"
+        "  const graph = ng.graph(\"main\");\n"
+        "  graph.channel(\"value\", {reducer: \"overwrite\", initial: \"\"});\n"
+        "  graph.channel(\"k\", {reducer: \"overwrite\", initial: 0});\n"
+        "  graph.channel(\"out\", {reducer: \"overwrite\", initial: \"\"});\n"
+        "  graph.channel(\"side\", {reducer: \"overwrite\", initial: \"\"});\n"
+        "  graph.channel(\"side_out\", {reducer: \"overwrite\", initial: \"\"});\n"
+        "  graph.channel(\"failures\", {reducer: \"append\", initial: []});\n"
+        "  graph.node(\"work\", {type: \"rm.step\"});\n"
+        "  graph.node(\"route\", {type: \"rm.step\", side: true});\n"
+        "  graph.entry(\"work\");\n"
+        "  graph.exit(\"work\");\n"
+        "  graph.exit(\"route\");\n"
+        "  graph.retryPolicy(\"work\", {max_retries: " + std::to_string(retries) +
+        ", initial_delay_ms: 10, backoff_multiplier: 1, max_delay_ms: 10,"
+        " on_failure: \"route\", error_channel: \"failures\"});\n"
+        "  graph.interruptBefore(\"route\");\n"
+        "  return graph;\n"
+        "}\n\n"
+        "export function* main(input) {\n"
+        "  const reply = yield ng.callCore(\"main\", {value: \"fail:boom\"}, \"c1\");\n"
+        "  return {out: reply.out};\n"
+        "}\n";
+    // The one question is the handler's gate; the answer is not read by it.
+    program.expected.status = ProgramTerminalStatus::Completed;
+    program.expected.pauses = {Pause{"root.javascript.1", ""}};
+    program.expected.out    = "";
     return program;
 }
 
@@ -1225,6 +1289,19 @@ TEST(ProgramResumeModel, JavaScriptRunsMatchTheReference) {
     for (const auto& spec : program_family(bound.extended ? 2 : 1))
         if (selected(describe(spec))) cases.push_back(javascript_case(spec, bound.max_answers));
     check_cases(cases, bound, "JavaScript main()");
+}
+#endif
+
+#if defined(NEOGRAPH_PROGRAM_RESUME_MODEL_HAVE_QUICKJS)
+TEST(ProgramResumeModel, FailureRoutesUnderMainAndARetryCeilingMatchTheReference) {
+    const auto               bound = selected_bound();
+    std::vector<ProgramCase> cases;
+    for (const int retries : {0, 2})
+        for (const auto ceiling : {std::optional<std::uint64_t>{}, std::optional<std::uint64_t>{5}}) {
+            auto program = failure_route_case(retries, ceiling);
+            if (selected(program.description)) cases.push_back(std::move(program));
+        }
+    check_cases(cases, bound, "failure routes under main()");
 }
 #endif
 

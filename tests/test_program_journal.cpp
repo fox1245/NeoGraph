@@ -4,6 +4,7 @@
 
 #include <barrier>
 #include <future>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -295,6 +296,73 @@ TEST(ProgramJournalTest, InterruptedReservationReleaseIsBoundedByAttemptUsage) {
     EXPECT_FALSE(is_valid_program_journal_reservation_release(pending, released(8499), attempt));
     // Resources without usage must come back exactly.
     EXPECT_FALSE(is_valid_program_journal_reservation_release(pending, released(9500, 1), attempt));
+}
+// Issue #418: the retry ceiling is never reserved, but the retries an attempt
+// took lower it. A CallCore that pauses after node retries releases its
+// reservation with the ceiling reduced by those retries, no more and no less.
+TEST(ProgramJournalTest, InterruptedReservationReleaseLowersTheRetryCeilingByTheRetriesUsed) {
+    constexpr std::uint64_t kCeiling = 5;
+    auto available                 = remaining_budget();
+    available.wall_time_ms         = 9000;
+    available.max_node_retries     = kCeiling;
+    RunBudget reservation;
+    reservation.wall_time_ms = 1000;
+    const auto pending       = ProgramJournalRecord::create(
+        ProgramJournalRecordData{{},
+                                 "run-1",
+                                 digest('1'),
+                                 digest('2'),
+                                 1,
+                                 ProgramContinuation{"root", ContinuationState::Running, 1},
+                                 available,
+                                 reservation,
+                                 checkpoint(),
+                                 20});
+    const auto released = [&](std::optional<std::uint64_t> ceiling) {
+        auto budget             = remaining_budget();
+        budget.wall_time_ms     = 9500;
+        budget.max_node_retries = ceiling;
+        auto next_checkpoint          = checkpoint();
+        next_checkpoint.checkpoint_id = "checkpoint-2";
+        return ProgramJournalRecord::create(ProgramJournalRecordData{
+            pending.id, pending.run_id, pending.program_version_id, pending.bundle_id, 2,
+            ProgramContinuation{"root", ContinuationState::Interrupted, 1}, budget,
+            empty_budget(), next_checkpoint, 30});
+    };
+    ProgramUsage attempt{500, 0, 0, 0, 0, 0};
+    attempt.node_retries = 2;
+    // Two retries: three left. Unused retries and the ones a hold-back would
+    // keep (an earlier command of the attempt counted them) stay possible.
+    EXPECT_TRUE(is_valid_program_journal_reservation_release(pending, released(3), attempt));
+    EXPECT_TRUE(is_valid_program_journal_reservation_release(pending, released(5), attempt));
+    EXPECT_TRUE(is_valid_program_journal_reservation_release(pending, released(4), attempt));
+    // Never more than the ceiling it had, never fewer than the retries used take.
+    EXPECT_FALSE(is_valid_program_journal_reservation_release(pending, released(6), attempt));
+    EXPECT_FALSE(is_valid_program_journal_reservation_release(pending, released(2), attempt));
+    // A run without a ceiling still has none, and a ceiling does not vanish.
+    EXPECT_FALSE(is_valid_program_journal_reservation_release(pending, released(std::nullopt),
+                                                              attempt));
+    auto unbounded_available = available;
+    unbounded_available.max_node_retries.reset();
+    const auto unbounded = ProgramJournalRecord::create(ProgramJournalRecordData{
+        {}, "run-2", digest('1'), digest('2'), 1,
+        ProgramContinuation{"root", ContinuationState::Running, 1}, unbounded_available,
+        reservation, checkpoint(), 20});
+    auto release_unbounded = [&](std::optional<std::uint64_t> ceiling) {
+        auto budget             = remaining_budget();
+        budget.wall_time_ms     = 9500;
+        budget.max_node_retries = ceiling;
+        auto next_checkpoint          = checkpoint();
+        next_checkpoint.checkpoint_id = "checkpoint-2";
+        return ProgramJournalRecord::create(ProgramJournalRecordData{
+            unbounded.id, unbounded.run_id, unbounded.program_version_id, unbounded.bundle_id, 2,
+            ProgramContinuation{"root", ContinuationState::Interrupted, 1}, budget,
+            empty_budget(), next_checkpoint, 30});
+    };
+    EXPECT_TRUE(is_valid_program_journal_reservation_release(
+        unbounded, release_unbounded(std::nullopt), ProgramUsage{500, 0, 0, 0, 0, 0}));
+    EXPECT_FALSE(is_valid_program_journal_reservation_release(
+        unbounded, release_unbounded(3), ProgramUsage{500, 0, 0, 0, 0, 0}));
 }
 TEST(ProgramJournalTest, UnresolvedExternalWorkRetainsDurableReservation) {
     const auto start     = start_record();

@@ -531,7 +531,15 @@ bool is_valid_program_journal_reservation_release(const ProgramJournalRecord& pr
         const auto floor = whole_value > used ? whole_value - used : 0;
         return floor <= value && value <= whole_value;
     };
-    return within(got.wall_time_ms, whole.wall_time_ms, usage.wall_time_ms) &&
+    // The retry ceiling is not part of a reservation, but the retries the
+    // attempt took lower it (#418): a run without a ceiling still has none,
+    // and a ceiling stays within what those retries left.
+    const bool ceiling_ok =
+        !whole.max_node_retries || !got.max_node_retries
+            ? !whole.max_node_retries && !got.max_node_retries
+            : within(*got.max_node_retries, *whole.max_node_retries, usage.node_retries);
+    return ceiling_ok &&
+           within(got.wall_time_ms, whole.wall_time_ms, usage.wall_time_ms) &&
            within(got.model_tokens, whole.model_tokens, usage.model_tokens) &&
            within(got.monetary_microunits, whole.monetary_microunits,
                   usage.monetary_microunits) &&
@@ -541,8 +549,7 @@ bool is_valid_program_journal_reservation_release(const ProgramJournalRecord& pr
            got.max_concurrency == whole.max_concurrency &&
            got.max_dynamic_compiles == whole.max_dynamic_compiles &&
            got.max_child_depth == whole.max_child_depth &&
-           got.max_total_children == whole.max_total_children &&
-           got.max_node_retries == whole.max_node_retries;
+           got.max_total_children == whole.max_total_children;
 }
 
 ProgramJournalRecord ProgramJournalRecord::create(ProgramJournalRecordData data) {

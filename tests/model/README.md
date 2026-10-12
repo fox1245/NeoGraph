@@ -134,13 +134,22 @@ SQLite host for programs that run one call at a time: the database is copied
 at every checkpoint save, `put_writes`, Program transition, provider dispatch
 and journaled call, and a new runtime on the copy reconnects the run.
 
+Four more JavaScript programs run a failure route (#364, #418): a node that
+fails, is retried 0 or 2 times and is routed to an `interruptBefore` handler, in
+a Core that `callCore` runs, with and without a run retry ceiling
+(`max_node_retries`). The reference says that the retries and the ceiling do
+not change the pause: one question, then the handler runs and `main()`
+finishes.
+
 A call that saved a Core checkpoint continues from it after a crash (#402),
 and a fork replays the provider calls its paused invocation made (#405); a
 schedule that does otherwise fails. The harness reports, without failing, the
-schedules that follow one of two documented behaviours P4 does not cover: a
+schedules that follow one of three documented behaviours P4 does not cover: a
 call that stopped before its first Core checkpoint, in a JavaScript program or
 a plan, is returned to the host to reconcile (#402, #404), which the harness
-accepts only when the crash left the call without one; and a crash while a
+accepts only when the crash left the call without one; a call that stopped at
+an `interrupt_before` gate (the failure routes) is returned the same way,
+because recovery never passes a gate unanswered (#402); and a crash while a
 request was out holds that call, which is never sent again (#364). A call the
 host can reconcile as completed (a call, an awaited call or a pair that neither
 asks nor fails, with no priced call after it) it reconciles with the reference
@@ -157,7 +166,7 @@ result, and the run must then end as the reference does (#403).
 
 At the CI bound the Core harness runs 2,196 graphs and about 6,100 answer
 schedules for each kind of ask, some 83,000 runs each; the Program harness runs
-124 JavaScript programs and 18 plans, about 950 schedules. Each test takes
+128 JavaScript programs and 18 plans, about 1,010 schedules. Each test takes
 under a minute on four workers.
 
 Variables: `NEOGRAPH_RESUME_MODEL_NODES`, `_SPECIAL`, `_SPECIAL_LARGEST`,

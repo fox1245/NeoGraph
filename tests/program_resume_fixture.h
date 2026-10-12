@@ -594,6 +594,16 @@ RegistrySnapshot model_registry() {
         json{{"writes", json::array({"out", "k", "side_out"})}, {"exports", json::array({"out", "k", "side_out"})}});
     builder.add_reducer(manifest({ExecutableKind::Reducer, "overwrite", "1.0.0", digest('3')}),
                         [](const json&, const json& incoming) { return incoming; });
+    // The channel a failure route records its failure on must append (#364).
+    builder.add_reducer(manifest({ExecutableKind::Reducer, "append", "1.0.0", digest('4')}),
+                        [](const json& current, const json& incoming) {
+                            auto merged = current.is_array() ? current : json::array();
+                            if (incoming.is_array())
+                                for (const auto& item : incoming) merged.push_back(item);
+                            else
+                                merged.push_back(incoming);
+                            return merged;
+                        });
     return std::move(builder).build();
 }
 
@@ -687,10 +697,15 @@ public:
         }
     }
 
-    static RunBudget budget() { return RunBudget{60000, 1'000'000, 1'000'000, 4, 32, 64, 0, 1, 1}; }
+    static RunBudget budget(std::optional<std::uint64_t> node_retries = std::nullopt) {
+        RunBudget granted{60000, 1'000'000, 1'000'000, 4, 32, 64, 0, 1, 1};
+        granted.max_node_retries = node_retries;
+        return granted;
+    }
 
-    ProgramResult run(const ProgramVersion& version, const std::string& run_id, json input) {
-        ProgramInvocation invocation{std::move(input), budget(), "trace-" + run_id, {}};
+    ProgramResult run(const ProgramVersion& version, const std::string& run_id, json input,
+                      std::optional<std::uint64_t> node_retries = std::nullopt) {
+        ProgramInvocation invocation{std::move(input), budget(node_retries), "trace-" + run_id, {}};
         invocation.requested_run_id = run_id;
         return runtime_->run(kOwner, version, std::move(invocation));
     }
