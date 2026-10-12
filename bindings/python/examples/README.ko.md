@@ -96,7 +96,11 @@ python 01_minimal.py
 
 ### Program API
 
-제한된 JavaScript Program API는 Core 그래프 위에서 동작합니다: `ProgramRegistryBuilder`, `ProgramCompiler`, `LocalProgramHost`. [Program and QuickJS](../../../docs/python-binding.md#program-and-quickjs)에 설명되어 있고, [`bindings/python/tests/program_e2e/`](../tests/program_e2e/README.md)의 엔드투엔드 시나리오가 join, 실패 라우팅, 예산, 일시 중지와 재개, fork, 충돌 복구를 다룹니다.
+제한된 JavaScript Program API는 Core 그래프 위에서 동작합니다: `ProgramRegistryBuilder`, `ProgramCompiler`, `LocalProgramHost`. [Program and QuickJS](../../../docs/python-binding.md#program-and-quickjs)에 설명되어 있고, [`bindings/python/tests/program_e2e/`](../tests/program_e2e/README.md)의 엔드투엔드 시나리오가 join, 실패 라우팅, 예산, 일시 중지와 재개, fork, 충돌 복구를 다룹니다. 아래 예제는 이 중 한 가지씩을 `LocalProgramHost`에서 보여 줍니다. 모두 오프라인으로 실행되며, 노드가 모델을 호출하는 곳은 스크립트된 모델이 답합니다. 공통 설정은 `_program.py`에 있고, 29번 예제가 그 설정을 한 번 풀어서 보여 줍니다.
+
+| # | 예제 | Offline | 보여 주는 것 |
+|---|---|---|---|
+| 29 | [`29_program_hello.py`](29_program_hello.py) | yes | JavaScript Program이 Python 노드가 있는 그래프 하나를 정의하고 `LocalProgramHost`에서 실행합니다. `status: Completed`, `value: 1`, `trace: ['work']`를 출력합니다. |
 
 ### 프로토콜: MCP, A2A, ACP
 

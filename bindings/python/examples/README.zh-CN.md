@@ -96,7 +96,11 @@ python 01_minimal.py
 
 ### Program API
 
-受限的 JavaScript Program API 运行在 Core 图之上：`ProgramRegistryBuilder`、`ProgramCompiler`、`LocalProgramHost`。它在 [Program and QuickJS](../../../docs/python-binding.md#program-and-quickjs) 中有说明，[`bindings/python/tests/program_e2e/`](../tests/program_e2e/README.md) 里的端到端场景覆盖了 join、失败路由、预算、暂停与恢复、fork 和崩溃恢复。
+受限的 JavaScript Program API 运行在 Core 图之上：`ProgramRegistryBuilder`、`ProgramCompiler`、`LocalProgramHost`。它在 [Program and QuickJS](../../../docs/python-binding.md#program-and-quickjs) 中有说明，[`bindings/python/tests/program_e2e/`](../tests/program_e2e/README.md) 里的端到端场景覆盖了 join、失败路由、预算、暂停与恢复、fork 和崩溃恢复。 下面的示例各演示其中一项，运行在 `LocalProgramHost` 上。它们都能离线运行，节点调用模型的地方由脚本化模型作答。共用的设置放在 `_program.py` 里，示例 29 把这些设置完整写出一次。
+
+| # | 示例 | Offline | 演示内容 |
+|---|---|---|---|
+| 29 | [`29_program_hello.py`](29_program_hello.py) | yes | 一段 JavaScript Program 定义带有 Python 节点的图并在 `LocalProgramHost` 上运行，输出 `status: Completed`、`value: 1`、`trace: ['work']`。 |
 
 ### 协议：MCP、A2A、ACP
 

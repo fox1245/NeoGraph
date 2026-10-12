@@ -96,7 +96,11 @@ python 01_minimal.py
 
 ### Program API
 
-制限付きの JavaScript Program API は Core グラフの上で動きます: `ProgramRegistryBuilder`、`ProgramCompiler`、`LocalProgramHost`。[Program and QuickJS](../../../docs/python-binding.md#program-and-quickjs) に説明があり、[`bindings/python/tests/program_e2e/`](../tests/program_e2e/README.md) のエンドツーエンドシナリオが join、失敗ルーティング、予算、一時停止と再開、fork、クラッシュ復旧を扱っています。
+制限付きの JavaScript Program API は Core グラフの上で動きます: `ProgramRegistryBuilder`、`ProgramCompiler`、`LocalProgramHost`。[Program and QuickJS](../../../docs/python-binding.md#program-and-quickjs) に説明があり、[`bindings/python/tests/program_e2e/`](../tests/program_e2e/README.md) のエンドツーエンドシナリオが join、失敗ルーティング、予算、一時停止と再開、fork、クラッシュ復旧を扱っています。 以下のサンプルは、それぞれこの中の 1 つを `LocalProgramHost` で示します。すべてオフラインで動き、ノードがモデルを呼ぶ場面ではスクリプト済みモデルが答えます。共通の設定は `_program.py` にあり、29 番のサンプルがその設定を 1 回だけ展開して見せます。
+
+| # | サンプル | Offline | 示すもの |
+|---|---|---|---|
+| 29 | [`29_program_hello.py`](29_program_hello.py) | yes | JavaScript の Program が Python ノードを持つグラフを 1 つ定義し、`LocalProgramHost` で実行します。`status: Completed`、`value: 1`、`trace: ['work']` を出力します。 |
 
 ### プロトコル: MCP、A2A、ACP
 

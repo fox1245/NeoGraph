@@ -95,7 +95,11 @@ A model, with or without tools, inside a graph. The `key` rows call a hosted mod
 
 ### Program API
 
-The restricted JavaScript Program API runs on top of Core graphs: `ProgramRegistryBuilder`, `ProgramCompiler`, `LocalProgramHost`. It is described in [Program and QuickJS](../../../docs/python-binding.md#program-and-quickjs) and exercised by the end-to-end scenarios in [`bindings/python/tests/program_e2e/`](../tests/program_e2e/README.md): joins, failure routing, budgets, pause and resume, fork and crash recovery.
+The restricted JavaScript Program API runs on top of Core graphs: `ProgramRegistryBuilder`, `ProgramCompiler`, `LocalProgramHost`. It is described in [Program and QuickJS](../../../docs/python-binding.md#program-and-quickjs) and exercised by the end-to-end scenarios in [`bindings/python/tests/program_e2e/`](../tests/program_e2e/README.md): joins, failure routing, budgets, pause and resume, fork and crash recovery. The examples below each show one of those on `LocalProgramHost`. They run offline, and a scripted model answers where a node calls one. `_program.py` holds the setup they share; example 29 spells it out once.
+
+| # | Example | Offline | Shows |
+|---|---|---|---|
+| 29 | [`29_program_hello.py`](29_program_hello.py) | yes | A JavaScript Program defines one graph with a Python node and runs it on `LocalProgramHost`; prints `status: Completed`, `value: 1`, `trace: ['work']`. |
 
 ### Protocols: MCP, A2A, ACP
 
