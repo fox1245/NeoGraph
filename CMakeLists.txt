@@ -1414,7 +1414,7 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                 neograph::core neograph::grpc httplib)
 
             # Example 57: consume a remote gRPC tool as a neograph::Tool
-            # (mirror of 55's serve side). Ported from NexaGraph GrpcTool.
+            # (mirror of 55's serve side).
             add_executable(example_grpc_remote_tool
                 examples/57_grpc_remote_tool.cpp)
             target_link_libraries(example_grpc_remote_tool PRIVATE

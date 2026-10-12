@@ -27,10 +27,7 @@ NEXT_SESSION.md
 /cmake_install.cmake
 /compile_commands.json
 
-# RE analysis pipeline now lives in https://github.com/fox1245/re-agent
-# (private). examples/35_re_agent.cpp stays here as the engine showcase.
-
-# CTest output dir (re-agent's stale pre-split artifact, plus future test runs)
+# CTest output dir
 Testing/
 
 

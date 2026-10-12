@@ -5,7 +5,7 @@
 // ToolService.CallTool method as an ordinary neograph::Tool, so an
 // Agent/ReAct loop calls it exactly like a local tool — the tool's
 // real work runs in another process (or language) with no change on
-// the agent side. Ported from NexaGraph's GrpcTool adapter.
+// the agent side.
 //
 // Opt-in (-DNEOGRAPH_BUILD_GRPC=ON). Self-contained: spins the gRPC
 // ToolService in a background thread, then drives a GrpcRemoteTool

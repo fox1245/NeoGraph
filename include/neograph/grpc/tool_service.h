@@ -7,7 +7,7 @@
 //   * GrpcRemoteTool    — CONSUME a remote ToolService method as an
 //     ordinary neograph::Tool, so an Agent/ReAct loop can call a tool
 //     that lives in another process/language with no code change on
-//     the agent side (example 57). Ported from NexaGraph's GrpcTool.
+//     the agent side (example 57).
 //
 // Opt-in (NEOGRAPH_BUILD_GRPC). Whole header behind NEOGRAPH_HAVE_GRPC
 // so the umbrella include never pulls grpc++.

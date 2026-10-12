@@ -4,19 +4,18 @@
 // backend in Ghidra) into a NeoGraph ReAct loop and recovers meaningful
 // names + summaries for every user-defined function in a stripped binary.
 // Verified end-to-end against the pinned DeepSeek model through OpenRouter.
-// This example is the "engine showcase" cut: the cpp + re_agent_common.h
-// are everything you need to drive GhidraMCP from NeoGraph. The full RE
-// pipeline (Docker compose for Ghidra + GhidraMCPPlugin, target binaries,
-// ground-truth oracle, scorer.py LLM judge, Phase 3 parallel fan-out, etc.)
-// lives in the standalone repo:
 //
-//     https://github.com/fox1245/re-agent  (private)
+// This example is the engine showcase: the cpp + re_agent_common.h are
+// everything you need to drive GhidraMCP from NeoGraph. A full RE pipeline
+// (a container setup for Ghidra + the GhidraMCP plugin, target binaries, a
+// ground-truth oracle, an LLM-judge scorer, parallel fan-out) is built on
+// the same pieces and is not part of this repository.
 //
 // Prerequisites (run once):
 //   1. Load a stripped binary into a GhidraMCP backend and auto-analyze it:
-//      the GhidraMCP plugin in a running Ghidra (native or via the re-agent
-//      docker/compose.yaml), or a headless Ghidra in GhidraMCP releases that
-//      support one. The tool set and its size depend on the GhidraMCP release.
+//      the GhidraMCP plugin in a running Ghidra (native or in a container),
+//      or a headless Ghidra in GhidraMCP releases that support one. The
+//      tool set and its size depend on the GhidraMCP release.
 //   2. Point GHIDRA_MCP_BRIDGE at the GhidraMCP server script and
 //      GHIDRA_SERVER_URL at the backend (default http://127.0.0.1:18080/;
 //      see re_agent_common.h::spawn_ghidra_bridge).
@@ -38,9 +37,8 @@
 // goes to stderr.
 //
 // NOTE: prompt + provider/MCP setup + final-response extraction live in
-// re_agent_common.h so the upcoming parallel fan-out variant reuses them
-// verbatim. That fan-out work (`36_re_agent_fanout.cpp`) lives in the
-// standalone re-agent repo.
+// re_agent_common.h so another driver (for example a parallel fan-out
+// variant) can reuse them verbatim.
 
 #include "re_agent_common.h"
 

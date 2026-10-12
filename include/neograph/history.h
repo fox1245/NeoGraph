@@ -13,8 +13,8 @@
  * `sanitize_tool_calls` validates a list without changing it; broken
  * pairing is rejected rather than repaired by discarding typed messages.
  *
- * Ported from NexaGraph's CAF `compress_history` actor, with the actor
- * machinery dropped — the core is a single coroutine over Provider.
+ * The core is a single coroutine over Provider; it has no actor or
+ * scheduler machinery of its own.
  */
 #pragma once
 

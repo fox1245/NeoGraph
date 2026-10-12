@@ -1,10 +1,9 @@
 // neograph::grpc CheckpointStore implementation (client + server).
 //
-// Ported from NexaGraph src/nexagraph/grpc_checkpoint.cpp. NexaGraph
-// flat-mapped a few fields (channel_values_json etc.); NeoGraph's
-// Checkpoint is richer (next_nodes vector, CheckpointPhase enum,
-// barrier_state nested map, schema_version) so the whole record is one
-// JSON blob — generalizing NexaGraph's per-field-json approach.
+// A flat field-per-column mapping (channel_values_json etc.) cannot carry
+// the whole Checkpoint: it also holds a next_nodes vector, a CheckpointPhase
+// enum, a barrier_state nested map and schema_version. The whole record
+// therefore travels as one JSON blob.
 //
 // Built only with -DNEOGRAPH_BUILD_GRPC=ON.
 

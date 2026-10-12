@@ -1,8 +1,6 @@
 // neograph::grpc — remote CheckpointStore over gRPC.
 //
-// Ported from the predecessor NexaGraph (src/nexagraph/grpc_checkpoint
-// .{h,cpp}), which already inherited neograph::graph::CheckpointStore.
-// Two halves:
+// Two halves, both built on neograph::graph::CheckpointStore:
 //
 //   * GrpcCheckpointStore  — a CheckpointStore the engine SETS; every
 //     save/load round-trips to a remote gRPC CheckpointService instead
@@ -116,8 +114,8 @@ NEOGRAPH_API void run_checkpoint_server(
 
 // ── Serialization (exposed for tests / payload-size measurement) ─────
 //
-// Full Checkpoint ⇄ JSON. Handles the fields NexaGraph's flat mapping
-// didn't: next_nodes (vector), interrupt_phase (enum via to_string /
+// Full Checkpoint ⇄ JSON. Handles the fields a flat field-per-column
+// mapping cannot: next_nodes (vector), interrupt_phase (enum via to_string /
 // parse_checkpoint_phase), barrier_state (nested map), schema_version.
 NEOGRAPH_API std::string checkpoint_to_json(
     const neograph::graph::Checkpoint& cp);

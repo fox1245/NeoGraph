@@ -143,11 +143,10 @@ message ToolCallResponse {
 
 // ── CheckpointService ────────────────────────────────────────────────
 //
-// Remote checkpoint persistence over gRPC. Ported from the predecessor
-// NexaGraph (proto/rag_service.proto, src/nexagraph/grpc_checkpoint.*),
-// which already inherited neograph::graph::CheckpointStore. Mirrors the
-// sync checkpoint operations, managed-budget denial obligation, and owned
-// currency journal CAS operations. Existing checkpoint payloads are unchanged.
+// Remote checkpoint persistence over gRPC, backing a
+// neograph::graph::CheckpointStore. Mirrors the sync checkpoint operations,
+// managed-budget denial obligation, and owned currency journal CAS
+// operations. Existing checkpoint payloads are unchanged.
 //
 // Wire shape: a single `checkpoint_json` string, NOT a field-per-member
 // message. NeoGraph's Checkpoint has next_nodes (repeated), an enum
@@ -155,10 +154,8 @@ message ToolCallResponse {
 // modeling each as a proto field would couple the wire to the struct
 // and break on every checkpoint-format bump. The JSON-string approach
 // keeps the graph-as-data property (same reasoning as GraphService's
-// payloads) and is the exact pattern NexaGraph used (channel_values_
-// json etc.), generalized to the whole record. The gRPC win is the
-// HTTP/2 binary transport + multiplexing, measured against JSON-RPC
-// envelope overhead — not proto schema rigidity.
+// payloads). The gRPC win is the HTTP/2 binary transport + multiplexing,
+// measured against JSON-RPC envelope overhead — not proto schema rigidity.
 
 service CheckpointService {
   rpc SaveCheckpoint(SaveCheckpointRequest) returns (StatusResponse);

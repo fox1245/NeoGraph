@@ -25,8 +25,6 @@
 //   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
 //   ./example_rag_agent
 // (auto-loads .env from the cwd or any parent directory.)
-//
-// For production RAG with PGVector + gRPC, see NexaGraph.
 
 #include <neograph/neograph.h>
 #include "provider_example_support.h"
