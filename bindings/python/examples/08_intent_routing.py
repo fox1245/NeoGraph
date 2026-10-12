@@ -5,18 +5,22 @@ user's message, decides math / translate / general, and the
 conditional edge dispatches to the matching expert. Each expert
 adds its own answer to the messages channel.
 
-Real LLM via typed SchemaProvider. The classifier itself is a custom
-Python node that calls the provider once with a classification
-prompt — no special node type needed beyond what the binding
-already exposes.
+The classifier itself is a custom Python node that calls the provider once
+with a classification prompt — no special node type needed beyond what the
+binding already exposes.
+
+Offline by default: a scripted model answers the classifier with a label and
+each expert with a fixed sentence (see `_scripted.py`), so the routing is the
+engine's real conditional edge on a real provider call.
 
 Run:
-    pip install neograph-engine python-dotenv
-    cp .env.example .env  # fill in OPENAI_API_KEY
-    python 08_intent_routing.py
+    python 08_intent_routing.py           # scripted model, no key, no network
+    export OPENAI_API_KEY=...             # then, to call a hosted model (billed):
+    python 08_intent_routing.py --live
 """
 
-from _common import ask_text, ng, schema_provider
+from _common import ask_text, example_provider, ng
+from _scripted import say
 
 
 CLASSIFIER_PROMPT = (
@@ -81,84 +85,103 @@ class ExpertNode(ng.GraphNode):
         }])]
 
 
-provider = schema_provider()
-
-ng.NodeFactory.register_type(
-    "classifier",
-    lambda name, config, ctx: ClassifierNode(name, provider),
-)
-ng.NodeFactory.register_type(
-    "math_expert",
-    lambda name, config, ctx: ExpertNode(name, provider,
-        "You are a math expert. Solve the user's problem step by step "
-        "and end with the final numeric answer."),
-)
-ng.NodeFactory.register_type(
-    "translate_expert",
-    lambda name, config, ctx: ExpertNode(name, provider,
-        "You are a professional translator. Translate the user's text "
-        "into the requested target language. Output the translation only."),
-)
-ng.NodeFactory.register_type(
-    "general_expert",
-    lambda name, config, ctx: ExpertNode(name, provider,
-        "You are a friendly, concise assistant. Answer the user's "
-        "question in 1-2 sentences."),
-)
+def script(turn):
+    """What the scripted model says. The classifier call is recognised by its system prompt."""
+    user = turn.last_user_text
+    if turn.system_text.startswith("Classify"):
+        if "*" in user:
+            return say("math")
+        return say("translate" if user.lower().startswith("translate") else "general")
+    if "math expert" in turn.system_text:
+        return say("17 * 23 = 391")
+    if "translator" in turn.system_text:
+        return say("Bonjour (good morning)")
+    return say("Homer wrote the Iliad.")
 
 
-definition = {
-    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
-    "name": "intent_router",
-    "channels": {
-        "messages": {"reducer": "append"},
-        "__route__": {"reducer": "overwrite"},
-    },
-    "nodes": {
-        "classifier":  {"type": "classifier"},
-        "math":        {"type": "math_expert"},
-        "translate":   {"type": "translate_expert"},
-        "general":     {"type": "general_expert"},
-    },
-    "edges": [
-        {"from": ng.START_NODE, "to": "classifier"},
-        {"from": "math",        "to": ng.END_NODE},
-        {"from": "translate",   "to": ng.END_NODE},
-        {"from": "general",     "to": ng.END_NODE},
-    ],
-    "conditional_edges": [
-        {
-            "from":      "classifier",
-            "condition": "route_channel",
-            "routes": {
-                "math":      "math",
-                "translate": "translate",
-                "general":   "general",
-                # route_channel returns "default" if the route is absent/non-string;
-                # unknown labels also take this explicit general-expert policy.
-                "default":   "general",
-            },
+with example_provider(script) as chosen:
+    provider = chosen.provider
+
+    ng.NodeFactory.register_type(
+        "classifier",
+        lambda name, config, ctx: ClassifierNode(name, provider),
+    )
+    ng.NodeFactory.register_type(
+        "math_expert",
+        lambda name, config, ctx: ExpertNode(name, provider,
+            "You are a math expert. Solve the user's problem step by step "
+            "and end with the final numeric answer."),
+    )
+    ng.NodeFactory.register_type(
+        "translate_expert",
+        lambda name, config, ctx: ExpertNode(name, provider,
+            "You are a professional translator. Translate the user's text "
+            "into the requested target language. Output the translation only."),
+    )
+    ng.NodeFactory.register_type(
+        "general_expert",
+        lambda name, config, ctx: ExpertNode(name, provider,
+            "You are a friendly, concise assistant. Answer the user's "
+            "question in 1-2 sentences."),
+    )
+
+
+    definition = {
+        "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
+        "name": "intent_router",
+        "channels": {
+            "messages": {"reducer": "append"},
+            "__route__": {"reducer": "overwrite"},
         },
-    ],
-}
+        "nodes": {
+            "classifier":  {"type": "classifier"},
+            "math":        {"type": "math_expert"},
+            "translate":   {"type": "translate_expert"},
+            "general":     {"type": "general_expert"},
+        },
+        "edges": [
+            {"from": ng.START_NODE, "to": "classifier"},
+            {"from": "math",        "to": ng.END_NODE},
+            {"from": "translate",   "to": ng.END_NODE},
+            {"from": "general",     "to": ng.END_NODE},
+        ],
+        "conditional_edges": [
+            {
+                "from":      "classifier",
+                "condition": "route_channel",
+                "routes": {
+                    "math":      "math",
+                    "translate": "translate",
+                    "general":   "general",
+                    # route_channel returns "default" if the route is absent/non-string;
+                    # unknown labels also take this explicit general-expert policy.
+                    "default":   "general",
+                },
+            },
+        ],
+    }
 
-engine = ng.GraphEngine.compile(definition, ng.NodeContext())
+    engine = ng.GraphEngine.compile(definition, ng.NodeContext())
 
-USER_INPUTS = [
-    "What is 17 * 23?",
-    "Translate 'good morning' into French.",
-    "Who wrote the Iliad?",
-]
+    USER_INPUTS = [
+        "What is 17 * 23?",
+        "Translate 'good morning' into French.",
+        "Who wrote the Iliad?",
+    ]
 
-for index, user_msg in enumerate(USER_INPUTS):
-    print(f"\n=== USER: {user_msg}")
-    result = engine.run(ng.RunConfig(
-        thread_id=f"q-{index}",
-        input={"messages": [{"role": "user", "content": user_msg}]},
-    ))
-    msgs = result.output["channels"]["messages"]["value"]
-    answer = next((m["content"] for m in msgs
-                   if m.get("role") == "assistant"), "(no answer)")
-    route = result.output["channels"]["__route__"]["value"]
-    print(f"    routed to: {route}")
-    print(f"    answer:    {answer}")
+    for index, user_msg in enumerate(USER_INPUTS):
+        print(f"\n=== USER: {user_msg}")
+        result = engine.run(ng.RunConfig(
+            thread_id=f"q-{index}",
+            input={"messages": [{"role": "user", "content": user_msg}]},
+        ))
+        msgs = result.output["channels"]["messages"]["value"]
+        answer = next((m["content"] for m in msgs
+                       if m.get("role") == "assistant"), "(no answer)")
+        route = result.output["channels"]["__route__"]["value"]
+        print(f"    routed to: {route}")
+        print(f"    answer:    {answer}")
+
+    if chosen.scripted:
+        # Per question: one classification call and one expert call.
+        assert chosen.scripted.call_count == 2 * len(USER_INPUTS)
