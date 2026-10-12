@@ -622,6 +622,16 @@ public:
                 asio::bind_cancellation_slot(input.ctx.cancel_token->slot(), asio::use_awaitable));
         }
         if (value == "block") std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        // #400: an answered "reconcile" settles its effect after a short
+        // cancellable wait, and counts that it did.
+        if (value == "reconcile") {
+            auto timer = asio::steady_timer(co_await asio::this_coro::executor);
+            timer.expires_after(std::chrono::milliseconds(200));
+            co_await timer.async_wait(
+                asio::bind_cancellation_slot(input.ctx.cancel_token->slot(), asio::use_awaitable));
+            std::lock_guard lock(join_member_mutex);
+            ++join_member_runs["reconcile:settled"];
+        }
         NodeOutput output;
         output.writes.push_back(ChannelWrite{
             "value", value == "ask" || value == "ask-slow" || value == "reconcile"
@@ -10817,6 +10827,58 @@ TEST(ProgramRuntimeTest, PlanQuorumCountsABranchNodeFailureAsAFailedBranch) {
         }
     }
 }
+
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST(ProgramRuntimeTest, AResumedJoinSettlesTheReconciledMemberBeforeTheReplayedFailureEndsIt) {
+    // #400: a fail-fast ng.all, an ng.race and an ng.quorum pause for
+    // reconciliation beside a failed member (#397). On resume the failed
+    // member's record replays at once; it used to end the join then and
+    // cancel the reconciled member before its node consumed the answer. The
+    // answered member now settles its effect first, and only then does the
+    // replayed failure end the join.
+    struct Case {
+        const char* label;
+        const char* body;
+    };
+    const Case cases[] = {
+        {"all", R"JS(
+    yield ng.all([
+        ng.callCore("main", {value: "reconcile"}, "all:reconcile"),
+        ng.callCore("main", {value: "fail-slow"}, "all:fail")
+    ], {max_in_flight: 2}, "settle:all");
+    return {unreachable: true};
+)JS"},
+        {"race", R"JS(
+    yield ng.race([
+        ng.callCore("main", {value: "reconcile"}, "race:reconcile"),
+        ng.callCore("main", {value: "fail-slow"}, "race:fail")
+    ], {max_in_flight: 2}, "settle:race");
+    return {unreachable: true};
+)JS"},
+        {"quorum", R"JS(
+    yield ng.quorum([
+        ng.callCore("main", {value: "reconcile"}, "quorum:reconcile"),
+        ng.callCore("main", {value: "fail-slow"}, "quorum:fail-a"),
+        ng.callCore("main", {value: "fail-slow"}, "quorum:fail-b")
+    ], {required_successes: 2, max_in_flight: 3}, "settle:quorum");
+    return {unreachable: true};
+)JS"},
+    };
+    for (const auto& item : cases) {
+        SCOPED_TRACE(item.label);
+        reset_join_member_runs();
+        AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+        const auto      paused = run_join(fixture, item.body);
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+
+        const auto done = approve(fixture, paused);
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Failed) << failure_detail(done);
+        EXPECT_EQ(join_member_runs_of("reconcile:settled"), 1U)
+            << "the reconciled member was cancelled before it consumed the answer";
+        EXPECT_EQ(join_member_runs_of("reconcile"), 2U);
+    }
+}
+#endif  // NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS
 
 TEST(ProgramRuntimeTest, PlanQuorumPausedByABranchAsksAndResumeAnswersIt) {
     // #387: A finishes and B asks. The quorum needs two successes and B may

@@ -4896,6 +4896,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     std::optional<std::size_t> winner;
                     std::vector<std::size_t>   finish_order;
                     std::vector<std::size_t>   quorum_members;  // successes that met it
+                    // #400: the member this attempt answers, and the members it
+                    // replays. A decision is held while the answered member runs.
+                    std::vector<bool>          replayed;
+                    std::optional<std::size_t> answered;
+                    bool                       held = false;
                     std::shared_ptr<asio::experimental::channel<void(asio::error_code, int)>>
                         completion;
                 };
@@ -4906,6 +4911,16 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 state->finished.resize(members.size(), false);
                 state->tokens.resize(members.size());
                 state->scopes.resize(members.size());
+                state->replayed.resize(members.size(), false);
+                for (std::size_t index = 0; index < members.size(); ++index) {
+                    state->replayed[index] = replayed[index].has_value();
+                    if (!exact_core_resume) continue;
+                    const auto member_operation =
+                        operation_id + "/member/" + std::to_string(index);
+                    if (exact_core_resume->first == member_operation ||
+                        exact_core_resume->first.starts_with(member_operation + "/"))
+                        state->answered = index;
+                }
                 const auto completion_executor = asio::make_strand(executor);
                 state->completion =
                     std::make_shared<asio::experimental::channel<void(asio::error_code, int)>>(
@@ -4968,17 +4983,35 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                         !paused && (error || state->results[index]->status !=
                                                                  ProgramTerminalStatus::Completed);
                                     if (paused) state->paused = true;
+                                    // #400: a replayed member settles at once. While the
+                                    // member this attempt answers runs, the decision it
+                                    // would take is held, so that member consumes the
+                                    // answer and settles its effect first. It is taken
+                                    // when the answered member finishes.
+                                    const bool answering =
+                                        state->answered && *state->answered < state->next &&
+                                        !state->finished[*state->answered];
+                                    const bool hold =
+                                        answering && (state->replayed[index] || state->held);
+                                    const bool release = state->held && state->answered &&
+                                                         index == *state->answered;
+                                    if (release) state->held = false;
                                     if (operation_token->is_cancelled() && !state->terminal) {
                                         state->terminal = true;
                                         cancel_all      = true;
-                                    } else if (mode == "race" && !paused && !state->terminal) {
-                                        if (!state->selection_scheduled) {
+                                    } else if (mode == "race" && (!paused || release) &&
+                                               !state->terminal) {
+                                        if (hold) {
+                                            state->held = true;
+                                        } else if (!state->selection_scheduled) {
                                             state->selection_scheduled = true;
                                             post_selection             = true;
                                         }
-                                    } else if (mode == "all" && !collect && member_failed &&
-                                               !state->terminal) {
-                                        if (!state->selection_scheduled) {
+                                    } else if (mode == "all" && !collect &&
+                                               (member_failed || release) && !state->terminal) {
+                                        if (hold) {
+                                            state->held = true;
+                                        } else if (!state->selection_scheduled) {
                                             state->selection_scheduled = true;
                                             post_selection             = true;
                                         }
@@ -4994,19 +5027,23 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                                          ProgramTerminalStatus::Completed)
                                                 ++successes;
                                         }
-                                        if (successes >= required) {
-                                            for (std::size_t i = 0; i < state->results.size();
-                                                 ++i)
-                                                if (state->finished[i] && state->results[i] &&
-                                                    state->results[i]->status ==
-                                                        ProgramTerminalStatus::Completed)
-                                                    state->quorum_members.push_back(i);
-                                        }
                                         // A paused member may still succeed once it resumes.
-                                        if (successes >= required ||
+                                        const bool decided =
+                                            successes >= required ||
                                             successes + waiting +
                                                     (members.size() - state->completed) <
-                                                required) {
+                                                required;
+                                        if (decided && hold) {
+                                            state->held = true;
+                                        } else if (decided) {
+                                            if (successes >= required) {
+                                                for (std::size_t i = 0;
+                                                     i < state->results.size(); ++i)
+                                                    if (state->finished[i] && state->results[i] &&
+                                                        state->results[i]->status ==
+                                                            ProgramTerminalStatus::Completed)
+                                                        state->quorum_members.push_back(i);
+                                            }
                                             state->terminal = true;
                                             cancel_all      = true;
                                         }
@@ -5014,6 +5051,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
 
                                     if (state->initial_launches_registered && !state->terminal &&
                                         !state->paused && !state->selection_scheduled &&
+                                        !state->held &&
                                         !post_selection && state->next < members.size()) {
                                         while (state->next < members.size() && state->active < cap)
                                             to_launch.push_back(state->next++);
@@ -5104,7 +5142,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     // siblings. Do not permit that completion to close the join early.
                     state->initial_launches_registered = true;
                     if (!state->terminal && !state->paused && !state->selection_scheduled &&
-                        state->next < members.size()) {
+                        !state->held && state->next < members.size()) {
                         while (state->next < members.size() && state->active < cap)
                             deferred_launches.push_back(state->next++);
                     }
