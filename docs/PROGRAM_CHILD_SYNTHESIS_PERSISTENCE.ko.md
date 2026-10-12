@@ -1,10 +1,10 @@
-<!-- neograph-i18n: source=docs/PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md locale=ko source_sha256=7a6203d69da6c363bf3c4c5b6aa5b1b1fcd2f36c656c6f22bffc36cddeeb1e72 -->
+<!-- neograph-i18n: source=docs/PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md locale=ko source_sha256=14283f61af8f5c3ec52011a184bc863369346836057023301f372ff29340a1ab -->
 # 영속 자식 합성
 
 **Languages:** [English](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md) | [한국어](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.ko.md) | [日本語](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.ja.md) | [简体中文](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.zh-CN.md)
 
-상태: 인메모리 레퍼런스 저장소, SQLite, PostgreSQL에서 N2를 구현했습니다.
-단일 자식 시나리오에 대한 N3 복구 검증은 [복구 매트릭스](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md)에 설명되어 있습니다.
+자식 합성의 영속화는 인메모리 레퍼런스 저장소, SQLite, PostgreSQL에서 사용할 수 있습니다.
+[복구 매트릭스](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md)에는 단일 자식 시나리오에서 테스트한 복구 동작이 나와 있습니다.
 호스트 진입점은 기존의 최상위 체크포인트와 기존 `ng.spawn` / `ng.await` 자식 생명주기를 사용합니다. 이 경로는 검토를 마친 소스만 다루는 제한된 경로이며, 모델 생성기, 템플릿 렌더러, 새 DSL 명령은 구현하지 않습니다.
 
 ## 호스트 통합
@@ -39,7 +39,7 @@ SQLite는 기존의 `BEGIN IMMEDIATE` 트랜잭션을, PostgreSQL은 기존 트�
 
 합성 레코드를 담은 게시는 저장소 스키마 6을 씁니다. 일반 게시는 계속 스키마 5로 직렬화되며, 읽는 쪽은 스키마 1–5를 계속 지원합니다. `load_child_syntheses(owner, parent_run)`는 현재의 요청 head를 반환합니다. 이 이력을 지원하지 않는 커스텀 저장소에서는 기본 구현이 실패 시 차단으로 동작합니다. 동적 예산이 있는 run을 복구하려면 이 읽기 기능이 필요합니다.
 
-레코드는 8 MiB, 리비전 16개로 제한됩니다. 레코드에는 제안, 원래의 호스트 grant와 부모 컨텍스트, 예약, 누적된 단계별 출력이 남습니다. 정규 식별자와 단계 검증은 앞선 산출물이 바뀌었거나, 세대가 다르거나, binding 이름이 바뀌었거나, 증거가 수정된 경우를 거부합니다. binding 이름은 부모 run 하나 안에서 고유해야 합니다. SQL 로그는 추가만 가능(append-only)하며, 큰 이력의 보존과 압축(compaction)은 후속 작업입니다.
+레코드는 8 MiB, 리비전 16개로 제한됩니다. 레코드에는 제안, 원래의 호스트 grant와 부모 컨텍스트, 예약, 누적된 단계별 출력이 남습니다. 정규 식별자와 단계 검증은 앞선 산출물이 바뀌었거나, 세대가 다르거나, binding 이름이 바뀌었거나, 증거가 수정된 경우를 거부합니다. binding 이름은 부모 run 하나 안에서 고유해야 합니다. SQL 로그는 추가만 가능(append-only)하며, 큰 이력을 보존하거나 압축(compaction)하는 기능은 없습니다.
 
 ## 단계와 복구
 
@@ -63,10 +63,8 @@ SQLite는 기존의 `BEGIN IMMEDIATE` 트랜잭션을, PostgreSQL은 기존 트�
 
 완료, 재시도, 복구 시에도, 커밋 확인 응답을 잃은 경우까지 포함해 부모는 컴파일 차감분을 그대로 유지합니다. 합성은 경과한 벽시계 시간을 차감하며, 복구된 시도도 원래 합성의 데드라인을 유지합니다. spawn 상태를 게시할 때는 기존 명령의 진행 중인 예약이 보존됩니다.
 
-## 검증 범위와 남은 작업
+## 테스트 범위와 한계
 
 백엔드 적합성 테스트는 spawn/join 성공, 정규 직렬화 왕복, 소유자/run 격리, 중복 요청과 동시 요청, 백엔드 쓰기 실패 시 롤백, 커밋된 단계의 재사용, 의미 검증 거부, 취소(revoke)된 grant, 결과가 모호한 컴파일/검증 claim을 다룹니다. Linux 프로세스 종료 테스트는 고정된 승인(admission) 직후 소멸자를 실행하지 않고 프로세스를 종료한 다음, SQLite와 PostgreSQL 양쪽에서 Program 저장소, 전이 저장소, 체크포인트 저장소를 다시 열고 자식을 정상적으로 join합니다.
 
-[N3 복구 매트릭스](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md)는 검증 범위를 데이터베이스마다 16개의 프로세스 종료 지점, 동시 프로세스 복구, 확인 응답 유실, 실제 PostgreSQL 연결 종료, 취소, 버전 보존, 활성화, Program 교체까지 넓힙니다. 한계도 분명합니다. 자동 조정(reconciliation) 인가기는 없고, 여러 종류의 효과가 섞인 일반적인 join, 정전(power loss), 호스트 간 장애 조치(failover), 그래프 마이그레이션/보존의 모든 조합은 단일 자식 시나리오가 다루지 않습니다.
-
-이 변경은 공개 C++ 타입, 가상 메서드, 설정 필드를 추가합니다. Program을 사용하는 쪽은 모두 다시 빌드해야 하며, 예전 오브젝트를 새 라이브러리와 섞어 쓰면 안 됩니다. Core 전용 의존성이나 네이티브 제어 C ABI 변경은 없습니다.
+[복구 매트릭스](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md)는 검증 범위를 데이터베이스마다 16개의 프로세스 종료 지점, 동시 프로세스 복구, 확인 응답 유실, 실제 PostgreSQL 연결 종료, 취소, 버전 보존, 활성화, Program 교체까지 넓힙니다. 한계도 분명합니다. 자동 조정(reconciliation) 인가기는 없고, 여러 종류의 효과가 섞인 일반적인 join, 정전(power loss), 호스트 간 장애 조치(failover), 그래프 마이그레이션/보존의 모든 조합은 단일 자식 시나리오가 다루지 않습니다.

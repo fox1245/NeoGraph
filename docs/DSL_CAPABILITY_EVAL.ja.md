@@ -1,10 +1,7 @@
-<!-- neograph-i18n: source=docs/DSL_CAPABILITY_EVAL.md locale=ja source_sha256=440d5d76af8cf05685dddfa06df9dee587f74851719820ff655b0a220bdb1b49 -->
+<!-- neograph-i18n: source=docs/DSL_CAPABILITY_EVAL.md locale=ja source_sha256=8918e3e19d555bc582f3c36b4a9bfa63dd9b80ea655074a7214a5c5b233a5c27 -->
 # QuickJS DSLのcapabilityとモデルによる合成の評価
 
 **Languages:** [English](DSL_CAPABILITY_EVAL.md) | [한국어](DSL_CAPABILITY_EVAL.ko.md) | [日本語](DSL_CAPABILITY_EVAL.ja.md) | [简体中文](DSL_CAPABILITY_EVAL.zh-CN.md)
-
-状況：実装済み。決定的な適合性テストをゲートにしています。実モデルでの評価はオプトインです。
-過去の実モデルでの観測：2026-08-22。以下に記録された結果は、新たに実行したものではありません。
 
 ## 問い
 
@@ -58,7 +55,7 @@ bun --env-file=C:\path\to\.env run scripts/run_dsl_capability_eval.ts `
   --output dsl-capability-evidence.json
 ```
 
-`--case` は、カンマ区切りのサブセットを受け付けます。`--attempts` は、独立した1回限りの試行を繰り返します。`--repair-attempts` は、却下された完全なソースとともに、プローブが出した確定的な診断をモデルに返します。プロバイダーやレスポンスの失敗は、コンパイルや意味検証による却下とは別に扱われます。デフォルトのモデルは `z-ai/glm-5.3-flash` です。1回の生成は、補完トークン4,096個までに制限され、cookbookのZDRのプロバイダールーティング設定を使います。以下の過去のDeepSeekのエビデンスは、このskillを読み込む構成より前のものです。
+`--case` は、カンマ区切りのサブセットを受け付けます。`--attempts` は、独立した1回限りの試行を繰り返します。`--repair-attempts` は、却下された完全なソースとともに、プローブが出した確定的な診断をモデルに返します。プロバイダーやレスポンスの失敗は、コンパイルや意味検証による却下とは別に扱われます。デフォルトのモデルは `z-ai/glm-5.3-flash` です。1回の生成は、補完トークン4,096個までに制限され、cookbookのZDRのプロバイダールーティング設定を使います。以下のDeepSeekの結果は、ランナーがskillを読み込む前に記録したものです。
 
 ## 指示を別に評価する
 
@@ -80,7 +77,7 @@ bun run scripts/run_harness_skill_ab.ts --before saved-skill/SKILL.md `
 
 ## DeepSeekで観測した結果
 
-最初の実行と、識別子を正確に指定した再評価を通じて、モデルは、11のcapabilityグループすべてについて、プローブで検証されたソースを生成しました。静的なHITLとリトライでは、診断に導かれた修正が1回必要でした。構造化された並行性では、修正が2回必要でした。最初はESモジュールのexportを復元するため、次に誤ったCoreのバインディングを、admission済みの正確な名前に置き換えるためです。制御フローは、正確なバインディングへの修正を1回行って合格しました。mapは、ホストがネイティブAPIのマニフェストを与え、admission済みのCoreの識別子を曖昧さなく明示した後で、1回で合格しました。
+実モデルでの実行で、モデルは、11のcapabilityグループすべてについて、プローブで検証されたソースを生成しました。静的なHITLとリトライでは、診断に導かれた修正が1回必要でした。構造化された並行性では、修正が2回必要でした。最初はESモジュールのexportを復元するため、次に誤ったCoreのバインディングを、admission済みの正確な名前に置き換えるためです。制御フローは、正確なバインディングへの修正を1回行って合格しました。mapは、ホストがネイティブAPIのマニフェストを与え、admission済みのCoreの識別子を曖昧さなく明示した後で、1回で合格しました。
 
 | Capabilityケース | モデルのエビデンス | 重要な観測 |
 |---|---|---|
@@ -96,7 +93,7 @@ bun run scripts/run_harness_skill_ab.ts --before saved-skill/SKILL.md `
 | `program_durability` | 合格 | emit、checkpoint、キャンセルのコマンドが正確でした |
 | `program_host_capability` | 合格 | importスロットと正規の入力が一致しました |
 
-最初のバリデーターは、コマンドの種類と入力は確認していましたが、Coreの正確な名前を確認していなかったため、`callCore` のケースで偽陽性を出していました。バリデーターを強化し、入れ子のすべての `callCore` に `capability` を要求するようにしました。そのため、以前に受理された、`core`、`Core`、ノード名 `work` を使うモデルのソースは、現在は正しく却下されます。
+バリデーターは、コマンドの種類と入力に加えて、Coreの正確な名前も確認し、入れ子のすべての `callCore` に `capability` を要求します。`core`、`Core`、ノード名 `work` を使うモデルのソースは却下されます。
 
 これは、できることの証明であり、信頼性についての統計的な主張ではありません。ケースごとの、1回で成功する割合と、修正して成功する割合には、引き続き、繰り返しの試行が必要です。その際、プロバイダーの失敗は別に報告します。
 
@@ -113,9 +110,9 @@ capability manifest + exact admitted identifiers
   -> ordinary admission and publication
 ```
 
-モデルは、ESモジュールとCommonJS、グラフ名とノード名、要求されたCoreのIDと `core` のような一般的な語を、繰り返し取り違えました。そのため、NeoCodeは、正確なシグネチャと、admission済みの識別子を注入し、可能な限り、モジュールの骨組みを固定のまま保ち、それらしく見えるソースを、要求したトポロジーが構築されたことのエビデンスとして扱ってはいけません。
+モデルは、ESモジュールとCommonJS、グラフ名とノード名、要求されたCoreのIDと `core` のような一般的な語を、繰り返し取り違えました。そのため、ホストは、正確なシグネチャと、admission済みの識別子を注入し、可能な限り、モジュールの骨組みを固定のまま保ち、それらしく見えるソースを、要求したトポロジーが構築されたことのエビデンスとして扱ってはいけません。
 
-NeoGraphは、この境界を `ProgramSynthesisGateway` で強制するようになりました。すべてのゲートウェイの構成は、ホストが所有する意味検証を提供しなければなりません。検証に成功すると、Catalogのadmissionの前に、内容でアドレス指定されたレシートが生成されます。却下の判定では、`ProgramSynthesisValidationError` が送出され、正確なエビデンスが保持され、admissionのリゾルバーが呼び出されることはありません。すでに消費された動的コンパイルの予約は、消費されたままです。
+NeoGraphは、この境界を `ProgramSynthesisGateway` で強制します。すべてのゲートウェイの構成は、ホストが所有する意味検証を提供しなければなりません。検証に成功すると、Catalogのadmissionの前に、内容でアドレス指定されたレシートが生成されます。却下の判定では、`ProgramSynthesisValidationError` が送出され、正確なエビデンスが保持され、admissionのリゾルバーが呼び出されることはありません。すでに消費された動的コンパイルの予約は、消費されたままです。
 
 `javascript_authoring_capability_manifest()` は、インストールされているグラフビルダーとコマンドの語彙、正確なシグネチャ、分類、上限、プロファイルの制約を、機械可読なデータとして公開します。適合性テストは、このマニフェストを、2つのQuickJSコンテキストに実際にインストールされているプロパティと比較します。そのため、APIがずれるとテストスイートが失敗します。
 

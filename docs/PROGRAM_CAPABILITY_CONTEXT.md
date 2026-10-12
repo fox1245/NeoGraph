@@ -77,7 +77,7 @@ outside mediated dispatch.
  on reconnect; a display-only `ChatMessage` projection cannot recreate native
  continuation authority. Durable native custody additionally requires the
  host's `sp::NativeArchive`.
- The legacy unbrokered Agent/Core paths remain explicitly lower-guarantee.
+ The unbrokered Agent and Core paths have a lower guarantee.
 
 For each Core task and batch ordinal, the broker commits a SQLite FULL-sync
 marker before calling the controller; marker failure executes no Tool. The receipt
@@ -91,15 +91,15 @@ as provenance, not a new call slot. Do not claim exactly-once external outcomes:
 even a durable marker cannot determine whether an external service committed
 before a crash.
 
-Existing brokered custom factories that used `NodeContext.provider` or
-`NodeContext.tools` must move execution to a fixed Core node, use a separately
-reviewed host broker, or be admitted as `TrustedNative` under the host's trusted
-embedding policy. `add_host_brokered_node` is the explicit native host-broker
+A brokered custom factory cannot use `NodeContext.provider` or
+`NodeContext.tools`. Move execution to a fixed Core node, use a separately
+reviewed host broker, or admit the factory as `TrustedNative` under the host's
+trusted embedding policy. `add_host_brokered_node` is the explicit native host-broker
 registration path used by Harness workers. It does not make a caller-supplied
 factory safe: the host must review and pin its effects and keep each operation
 inside the admitted provider/tool closure. Ordinary `add_node` retains the
-metadata-only boundary. Direct Core graphs outside Program retain their existing
-`NodeContext` behavior. See [#291](https://github.com/fox1245/NeoGraph/issues/291),
+metadata-only boundary. Direct Core graphs outside Program are not narrowed and receive
+the whole `NodeContext`. See [#291](https://github.com/fox1245/NeoGraph/issues/291),
 [#292](https://github.com/fox1245/NeoGraph/issues/292), and
-[#293](https://github.com/fox1245/NeoGraph/issues/293) for the remaining
+[#293](https://github.com/fox1245/NeoGraph/issues/293) for the
 durability and native-code boundaries.

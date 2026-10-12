@@ -2,7 +2,7 @@
 
 **Languages:** [English](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md) | [한국어](PROGRAM_CHILD_SYNTHESIS_CONTRACT.ko.md) | [日本語](PROGRAM_CHILD_SYNTHESIS_CONTRACT.ja.md) | [简体中文](PROGRAM_CHILD_SYNTHESIS_CONTRACT.zh-CN.md)
 
-Status: N1 host boundary and N2 durable runtime integration implemented. See [SQLite/PostgreSQL persistence and recovery](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md). Dedicated Program-side submission and model generation remain follow-up work.
+This page covers the host's authorization boundary. [SQLite/PostgreSQL persistence and recovery](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md) describes the durable runtime path. A Program cannot submit source on its own, and NeoGraph does not generate the source with a model: the host selects a reviewed source.
 
 ## Entry and ownership
 
@@ -12,7 +12,7 @@ loads the parent version, run record, lineage head, and generation into
 `ProgramChildSynthesisParent`. These snapshots and the grant must come from the
 host's own stores and reviewed template policy, never from a requesting Program.
 
-The first boundary admits an exact reviewed template **instantiation**. Its grant
+This boundary admits an exact reviewed template **instantiation**. Its grant
 binds `template_identity` and `program_synthesis_source_identity(source)`, which
 covers the complete canonical source envelope, including import identities,
 sealed module bodies, source coordinates, and runtime/profile identity. The host
@@ -20,7 +20,7 @@ renders and reviews the instantiation before issuing this grant. Template
 rendering and its parameter schema are not implemented by this API.
 The grant also pins the semantic validator and task-contract identities. Child
 compilation must use the parent's sealed registry fingerprint; equal source text
-cannot select different registered implementations during this first delivery.
+cannot select different registered implementations.
 
 A stored grant's hash proves integrity, not who issued it. Parsing a caller's
 self-authored grant is not permission to use it. The gateway does not accept a
@@ -82,19 +82,19 @@ Neither entry falls back to the other.
 
 ## JavaScript budget and guarantee boundaries
 
-Generator Programs can now receive a nonzero dynamic-compile ceiling through
+Generator Programs can receive a nonzero dynamic-compile ceiling through
 host-owned `ProgramBudgetBounds` and Catalog policy. Default compilation still
 grants zero dynamic compiles. A caller cannot increase that limit at `start`.
 Declaration-only JavaScript and ordinary C++ plans without `expand_task_graph`
 retain their zero-dynamic-compile structural rule.
 
-This budget change adds no JavaScript command or ambient compiler access.
-`ng.hostCapability` remains its existing trusted-native interface; N1 does not
-install a synthesis plugin there or change the native C ABI.
+Dynamic compilation adds no JavaScript command or ambient compiler access.
+`ng.hostCapability` remains its existing trusted-native interface; synthesis
+installs no plugin there and changes no native C ABI.
 
 The current compiler conservatively labels generator control `Unmanaged`.
 The restricted generator language profile must not be presented as an automatic
-`Strict` execution-guarantee label. N1 preserves that classification. A reviewed
+`Strict` execution-guarantee label. This API preserves that classification. A reviewed
 declaration-only child can meet a Strict grant when its Core closure is Strict;
 a generator child cannot pass that floor merely because its proposal requests it.
 Admitting a weaker child requires an explicit compatible host grant and parent
@@ -119,16 +119,12 @@ Compile errors retain the existing compiler diagnostics. Stored budget decoders
 reject negative, fractional, and out-of-range integers before canonical identity
 verification; invalid numbers cannot wrap into an otherwise valid stored ID.
 
-## Durable integration and remaining qualification
+## Durable integration
 
-The standalone `synthesize_child` API ends at admission. The N2 runtime API adds
+The standalone `synthesize_child` API ends at admission. The runtime API adds
 atomic reservation, durable stage outcomes, a parent-run/generation-scoped
 binding, and dispatch through the existing child lifecycle on SQLite and
 PostgreSQL. See [the persistence contract](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)
-for configuration, recovery behavior, the N3 failure matrix, and its stated limits.
+for configuration, recovery behavior, the recovery matrix, and its stated limits.
 The authorization value remains evidence, with no public stored-value
 constructor that could be mistaken for fresh authorization.
-
-The C++ API addition requires rebuilding Program consumers. The existing
-successor synthesis result format, JavaScript command protocol, native control C
-ABI, and Core-only dependency boundary are unchanged.

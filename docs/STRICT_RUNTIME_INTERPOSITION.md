@@ -47,7 +47,7 @@ Hooks on built-in consumers.
 
 ## Provider outcome lifecycle
 
-The provider boundary now records two separate immutable values:
+The provider boundary records two separate immutable values:
 
 1. `ProviderDispatchReceipt` is written before dispatch.
 2. `ProviderDispatchOutcomeReceipt` records `Succeeded`, `Failed`, or

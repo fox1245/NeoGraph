@@ -2,9 +2,6 @@
 
 **Languages:** [English](DSL_CAPABILITY_EVAL.md) | [한국어](DSL_CAPABILITY_EVAL.ko.md) | [日本語](DSL_CAPABILITY_EVAL.ja.md) | [简体中文](DSL_CAPABILITY_EVAL.zh-CN.md)
 
-Status: implemented, deterministic conformance gated; live model evaluation opt-in
-Historical live observation: 2026-08-22; the recorded results below are not a new run
-
 ## Question
 
 NeoGraph must distinguish two claims:
@@ -78,7 +75,7 @@ diagnostic to the model with the rejected full source. Provider/response
 failure is kept separate from compile or semantic rejection.
 The default model is `z-ai/glm-5.3-flash`; each generation is capped at 4,096
 completion tokens and uses the cookbook's ZDR provider-routing setting. The
-historical DeepSeek evidence below predates this skill-loading configuration.
+DeepSeek result below was recorded before the runner loaded the skill.
 
 ## Evaluate the instructions separately
 
@@ -116,8 +113,8 @@ evidence, not an estimate of general model reliability.
 
 ## Observed DeepSeek result
 
-Across the initial run and exact-identifier re-evaluations, the model produced
-probe-verified source for all 11 capability groups. Static HITL/retry required
+In live runs, the model produced probe-verified source for all 11 capability
+groups. Static HITL/retry required
 one diagnostic-guided repair. Structured concurrency required two repairs:
 first to restore ES-module exports, then to replace the wrong Core binding with
 the exact admitted name. Control flow passed after one exact-binding repair.
@@ -138,11 +135,9 @@ the admitted Core identifier unambiguously.
 | `program_durability` | Passed | Emit, checkpoint, and cancellation commands were exact |
 | `program_host_capability` | Passed | Import slot and canonical input matched |
 
-The initial validator produced false positives for `callCore` cases because it
-checked command kind and inputs but not the exact Core name. The validator was
-strengthened to require `capability` for every nested `callCore`. Previously
-accepted model sources using `core`, `Core`, or node name `work` are therefore
-correctly rejected now.
+The validator checks the exact Core name as well as the command kind and inputs,
+and requires `capability` for every nested `callCore`. Model sources that use
+`core`, `Core`, or the node name `work` are rejected.
 
 This is proof of capability, not a statistical reliability claim. Per-case
 one-shot and repair success rates still require repeated trials with provider
@@ -163,12 +158,12 @@ capability manifest + exact admitted identifiers
 ```
 
 The model repeatedly confused ES modules with CommonJS, graph names with node
-names, and requested Core identity with generic words such as `core`. NeoCode
+names, and requested Core identity with generic words such as `core`. A host
 should therefore inject exact signatures and admitted identifiers, retain a
 fixed module scaffold where possible, and never treat plausible-looking source
 as evidence that the requested topology was built.
 
-NeoGraph now enforces this boundary in `ProgramSynthesisGateway`: every gateway
+NeoGraph enforces this boundary in `ProgramSynthesisGateway`: every gateway
 configuration must provide a host-owned semantic validator. A successful
 validation produces a content-addressed receipt before Catalog admission; a
 rejected decision throws `ProgramSynthesisValidationError`, retains the exact

@@ -1,11 +1,11 @@
-# Child synthesis recovery qualification
+# Child synthesis recovery
 
 **Languages:** [English](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md) | [한국어](PROGRAM_CHILD_SYNTHESIS_RECOVERY.ko.md) | [日本語](PROGRAM_CHILD_SYNTHESIS_RECOVERY.ja.md) | [简体中文](PROGRAM_CHILD_SYNTHESIS_RECOVERY.zh-CN.md)
 
-N3 qualifies the reviewed-source, single-child checkpoint scenario on SQLite and
-PostgreSQL. Recovery now distinguishes a recorded child operation from an
-unclassified external effect, while retaining explicit reconciliation when a
-Core dispatch has no durable checkpoint or result.
+This page lists the recovery behavior that is tested for the reviewed-source,
+single-child checkpoint scenario on SQLite and PostgreSQL. Recovery distinguishes
+a recorded child operation from an unclassified external effect, and requires
+explicit reconciliation when a Core dispatch has no durable checkpoint or result.
 
 ## Recovery rules
 
@@ -73,7 +73,7 @@ parent as a lost execution. Live reconnect returns the existing attempt.
 The uncertainty disposition applies even when the synthesis record already says `Spawned`. The record
 can append that reconciliation disposition without changing earlier artifacts.
 It does not mint a replacement child or fabricate a successful result. No
-automatic reconciliation approval API is supplied by this change.
+automatic reconciliation approval API is supplied.
 
 ## Additional checks
 
@@ -91,22 +91,22 @@ automatic reconciliation approval API is supplied by this change.
   retention roots from all synthesis histories remains a host responsibility.
 - Program replacement retains the compile debit and does not transfer the old
   run's unattached generated binding into the successor generation. Attached
-  descendants can now be retained through the
+  descendants can be retained through the
   [recursive Harness contract](PROGRAM_RECURSIVE_HARNESSES.md).
 - PostgreSQL tests share the existing CTest database resource lock, including
   the process-exit matrix and connection-termination case.
 
-## Limits of this qualification
+## Limits
 
-This is process and connection failure qualification for the stated vertical
-scenario. It is not a claim of universal exactly-once external effects, power-loss
-qualification, database failover across hosts, or automatic resolution of
-uncertain Core/provider outcomes. General structured joins containing mixed host
+The tests cover process and connection failures in the stated vertical scenario.
+They do not show exactly-once external effects in general, survival of power
+loss, database failover across hosts, or automatic resolution of uncertain
+Core/provider outcomes. General structured joins containing mixed host
 effects retain their existing reconciliation behavior. Multiple generated child
 trees, cancellation during arbitrary external validators, full graph-migration
-combinations, automatic retention-root discovery, and synthesis performance or
-storage-growth qualification require separate coverage.
+combinations, automatic retention-root discovery, and synthesis performance and
+storage growth require separate coverage.
 
 See [the persistence contract](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md) for host
 integration and [the authorization contract](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md)
-for the unchanged reviewed-source and authority boundary.
+for the reviewed-source and authority boundary.

@@ -1,15 +1,15 @@
-<!-- neograph-i18n: source=docs/PROGRAM_CHILD_SYNTHESIS_CONTRACT.md locale=ko source_sha256=b4350a0091100913423075c5ccded5a70741490d738e4bfaabaa0e42158b2c9e -->
+<!-- neograph-i18n: source=docs/PROGRAM_CHILD_SYNTHESIS_CONTRACT.md locale=ko source_sha256=e66e1f93b44c7f5cce024d3d7e18a48a5ef87df5b7d356b2266ef0903d5184a9 -->
 # 자식 Program 합성: 호스트 인가 계약
 
 **Languages:** [English](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md) | [한국어](PROGRAM_CHILD_SYNTHESIS_CONTRACT.ko.md) | [日本語](PROGRAM_CHILD_SYNTHESIS_CONTRACT.ja.md) | [简体中文](PROGRAM_CHILD_SYNTHESIS_CONTRACT.zh-CN.md)
 
-상태: N1 호스트 경계와 N2 영속 런타임 통합을 구현했습니다. [SQLite/PostgreSQL 영속화와 복구](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)를 참고하세요. Program 쪽의 전용 제출 경로와 모델 생성은 후속 작업으로 남아 있습니다.
+이 문서는 호스트의 인가 경계를 다룹니다. 영속 런타임 경로는 [SQLite/PostgreSQL 영속화와 복구](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)에서 설명합니다. Program이 스스로 소스를 제출할 수는 없고, NeoGraph도 모델로 소스를 생성하지 않습니다. 호스트가 검토를 마친 소스를 고릅니다.
 
 ## 진입점과 소유권
 
 `ProgramSynthesisGateway::synthesize_child(proposal, grant, parent)`는 따로 선택한 `ProgramChildSynthesisGrant`가 있을 때만 제안을 받습니다. 호스트는 부모의 버전, run 레코드, 계보 head, 세대를 `ProgramChildSynthesisParent`에 적재합니다. 이 스냅샷과 grant는 호스트 자신의 저장소와 검토를 마친 템플릿 정책에서 와야 하며, 요청하는 Program이 넘겨준 값이어서는 안 됩니다.
 
-첫 번째 경계는 검토를 마친 템플릿 **인스턴스**(instantiation)를 정확히 일치하는 경우에만 승인(admission)합니다. grant는 `template_identity`와 `program_synthesis_source_identity(source)`에 묶이며, 후자는 import 식별자, 봉인된 모듈 본문, 소스 좌표, 런타임/프로파일 식별자를 포함한 정규 소스 봉투(envelope) 전체를 포함합니다. 호스트는 이 grant를 발급하기 전에 인스턴스를 렌더링하고 검토합니다. 템플릿 렌더링과 그 파라미터 스키마는 이 API가 구현하지 않습니다. grant는 의미 검증기(semantic validator)와 작업 계약(task-contract) 식별자도 고정합니다. 자식 컴파일은 부모의 봉인된 레지스트리 지문(fingerprint)을 써야 합니다. 이번 첫 구현에서는 소스 텍스트가 같아도 서로 다른 등록 구현을 선택할 수 없습니다.
+이 경계는 검토를 마친 템플릿 **인스턴스**(instantiation)를 정확히 일치하는 경우에만 승인(admission)합니다. grant는 `template_identity`와 `program_synthesis_source_identity(source)`에 묶이며, 후자는 import 식별자, 봉인된 모듈 본문, 소스 좌표, 런타임/프로파일 식별자를 포함한 정규 소스 봉투(envelope) 전체를 포함합니다. 호스트는 이 grant를 발급하기 전에 인스턴스를 렌더링하고 검토합니다. 템플릿 렌더링과 그 파라미터 스키마는 이 API가 구현하지 않습니다. grant는 의미 검증기(semantic validator)와 작업 계약(task-contract) 식별자도 고정합니다. 자식 컴파일은 부모의 봉인된 레지스트리 지문(fingerprint)을 써야 합니다. 소스 텍스트가 같아도 서로 다른 등록 구현을 선택할 수 없습니다.
 
 저장된 grant의 해시는 무결성만 증명하며 누가 발급했는지는 증명하지 않습니다. 호출자가 스스로 만든 grant를 파싱할 수 있다고 해서 그 grant를 쓸 권한이 생기는 것은 아닙니다. 게이트웨이는 호스트의 grant와 부모 스냅샷을 대신하는 직렬화된 인가 영수증(authorization receipt)을 받지 않습니다.
 
@@ -39,11 +39,11 @@
 
 ## JavaScript 예산과 보장의 경계
 
-이제 제너레이터 Program은 호스트가 소유한 `ProgramBudgetBounds`와 Catalog 정책으로 0이 아닌 동적 컴파일 상한을 받을 수 있습니다. 기본 컴파일은 여전히 동적 컴파일을 0건으로 허용합니다. 호출자는 `start` 시점에 이 한도를 늘릴 수 없습니다. 선언만 담은 JavaScript와 `expand_task_graph`가 없는 일반 C++ 플랜은 동적 컴파일 0건이라는 구조 규칙을 그대로 유지합니다.
+제너레이터 Program은 호스트가 소유한 `ProgramBudgetBounds`와 Catalog 정책으로 0이 아닌 동적 컴파일 상한을 받을 수 있습니다. 기본 컴파일은 여전히 동적 컴파일을 0건으로 허용합니다. 호출자는 `start` 시점에 이 한도를 늘릴 수 없습니다. 선언만 담은 JavaScript와 `expand_task_graph`가 없는 일반 C++ 플랜은 동적 컴파일 0건이라는 구조 규칙을 그대로 유지합니다.
 
-이 예산 변경으로 JavaScript 명령이나 암묵적인 컴파일러 접근이 추가되지는 않습니다. `ng.hostCapability`는 기존의 신뢰된 네이티브 인터페이스 그대로이며, N1은 거기에 합성 플러그인을 설치하거나 네이티브 C ABI를 바꾸지 않습니다.
+동적 컴파일로 JavaScript 명령이나 암묵적인 컴파일러 접근이 추가되지는 않습니다. `ng.hostCapability`는 기존의 신뢰된 네이티브 인터페이스 그대로이며, 합성은 거기에 플러그인을 설치하거나 네이티브 C ABI를 바꾸지 않습니다.
 
-현재 컴파일러는 보수적으로 제너레이터 제어를 `Unmanaged`로 표시합니다. 제한된 제너레이터 언어 프로파일이라고 해서 자동으로 `Strict` 실행 보장 라벨을 붙여서는 안 됩니다. N1은 이 분류를 그대로 유지합니다. 검토를 마친 선언 전용 자식은 Core closure가 Strict이면 Strict grant를 충족할 수 있지만, 제너레이터 자식은 제안서가 요청했다는 이유만으로 그 하한을 통과할 수 없습니다. 더 약한 자식을 승인(admission)하려면 호환되는 호스트 grant와 부모의 보장이 명시적으로 있어야 하며, 컴파일 중에 하한을 슬쩍 낮추어서는 안 됩니다.
+현재 컴파일러는 보수적으로 제너레이터 제어를 `Unmanaged`로 표시합니다. 제한된 제너레이터 언어 프로파일이라고 해서 자동으로 `Strict` 실행 보장 라벨을 붙여서는 안 됩니다. 이 API는 이 분류를 그대로 유지합니다. 검토를 마친 선언 전용 자식은 Core closure가 Strict이면 Strict grant를 충족할 수 있지만, 제너레이터 자식은 제안서가 요청했다는 이유만으로 그 하한을 통과할 수 없습니다. 더 약한 자식을 승인(admission)하려면 호환되는 호스트 grant와 부모의 보장이 명시적으로 있어야 하며, 컴파일 중에 하한을 슬쩍 낮추어서는 안 됩니다.
 
 ## 진단
 
@@ -61,8 +61,6 @@
 
 의미 검증 거부의 증거는 계속 `ProgramSynthesisValidationError`가 담습니다. 컴파일 오류는 기존 컴파일러 진단을 그대로 유지합니다. 저장된 예산을 읽는 디코더는 정규 식별자를 검증하기 전에 음수, 소수, 범위를 벗어난 정수를 거부하므로, 잘못된 숫자가 오버플로로 되감겨 유효한 저장 ID가 되는 일은 없습니다.
 
-## 영속 통합과 남은 검증
+## 영속 통합
 
-독립 실행형 `synthesize_child` API는 승인(admission)에서 끝납니다. N2 런타임 API는 여기에 원자적 예약, 영속적인 단계별 결과, 부모 run/세대 범위의 binding, 그리고 SQLite와 PostgreSQL 위에서 기존 자식 생명주기를 통한 dispatch를 더합니다. 설정, 복구 동작, N3 실패 매트릭스와 그 한계는 [영속화 계약](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)을 참고하세요. 인가 값은 계속 증거로만 쓰이며, 저장된 값으로 새 인가를 흉내 낼 수 있는 공개 생성자는 없습니다.
-
-C++ API가 추가되었으므로 Program을 사용하는 쪽은 다시 빌드해야 합니다. 기존 후임 합성 결과 형식, JavaScript 명령 프로토콜, 네이티브 제어 C ABI, Core 전용 의존성 경계는 달라지지 않았습니다.
+독립 실행형 `synthesize_child` API는 승인(admission)에서 끝납니다. 런타임 API는 여기에 원자적 예약, 영속적인 단계별 결과, 부모 run/세대 범위의 binding, 그리고 SQLite와 PostgreSQL 위에서 기존 자식 생명주기를 통한 dispatch를 더합니다. 설정, 복구 동작, 복구 매트릭스와 그 한계는 [영속화 계약](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)을 참고하세요. 인가 값은 계속 증거로만 쓰이며, 저장된 값으로 새 인가를 흉내 낼 수 있는 공개 생성자는 없습니다.

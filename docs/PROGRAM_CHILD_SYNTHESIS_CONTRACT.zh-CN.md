@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=docs/PROGRAM_CHILD_SYNTHESIS_CONTRACT.md locale=zh-CN source_sha256=b4350a0091100913423075c5ccded5a70741490d738e4bfaabaa0e42158b2c9e -->
+<!-- neograph-i18n: source=docs/PROGRAM_CHILD_SYNTHESIS_CONTRACT.md locale=zh-CN source_sha256=e66e1f93b44c7f5cce024d3d7e18a48a5ef87df5b7d356b2266ef0903d5184a9 -->
 # 子 Program 的合成：宿主授权契约
 
 **Languages:** [English](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md) | [한국어](PROGRAM_CHILD_SYNTHESIS_CONTRACT.ko.md) | [日本語](PROGRAM_CHILD_SYNTHESIS_CONTRACT.ja.md) | [简体中文](PROGRAM_CHILD_SYNTHESIS_CONTRACT.zh-CN.md)
 
-状态：N1 宿主边界和 N2 持久运行时集成已实现。参见 [SQLite/PostgreSQL 的持久化与恢复](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)。Program 一侧专门的提交，以及模型生成，仍是后续工作。
+本页说明宿主的授权边界。持久化的运行时路径见 [SQLite/PostgreSQL 的持久化与恢复](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)。Program 不能自行提交源码，NeoGraph 也不会用模型生成源码，而是由宿主选定经过审阅的源码。
 
 ## 入口与所有权
 
@@ -12,12 +12,12 @@
 谱系 head 和 generation，加载进 `ProgramChildSynthesisParent`。这些快照和授权，
 必须来自宿主自己的存储和经过审阅的模板策略，绝不能来自提出请求的 Program。
 
-第一道边界，准入的是一份确切的、经过审阅的模板**实例**。它的授权绑定了 `template_identity`
+这道边界准入的是一份确切的、经过审阅的模板**实例**。它的授权绑定了 `template_identity`
 和 `program_synthesis_source_identity(source)`，后者覆盖完整的规范源码信封，
 包括 import 标识、封存的模块体、源码坐标，以及运行时和 profile 的标识。
 宿主在签发这份授权之前，先渲染并审阅这份实例。模板的渲染及其参数 schema，
 不由这个 API 实现。授权还固定了语义验证器和任务契约的标识。
-子 Program 的编译，必须使用父 Program 封存的注册表指纹；在第一次交付中，
+子 Program 的编译，必须使用父 Program 封存的注册表指纹；
 相同的源码文本不能选到不同的已注册实现。
 
 已存储授权的哈希只能证明完整性，不能证明它是谁签发的。解析了调用方自己写的授权，
@@ -70,17 +70,17 @@
 
 ## JavaScript 的预算与保证边界
 
-生成器 Program 现在可以通过宿主持有的 `ProgramBudgetBounds` 和 Catalog 策略，
+生成器 Program 可以通过宿主持有的 `ProgramBudgetBounds` 和 Catalog 策略，
 得到非零的动态编译上限。默认的编译仍然授予零次动态编译。调用方不能在 `start` 时提高这个上限。
 只有声明的 JavaScript，以及不带 `expand_task_graph` 的普通 C++ 计划，
 仍然遵守动态编译次数为零的结构性规则。
 
-这项预算变更没有增加任何 JavaScript 命令，也没有增加对编译器的环境访问。
-`ng.hostCapability` 仍是它原有的受信原生接口；N1 没有在那里安装合成插件，
+动态编译没有增加任何 JavaScript 命令，也没有增加对编译器的环境访问。
+`ng.hostCapability` 仍是它原有的受信原生接口；合成没有在那里安装插件，
 也没有改动原生 C ABI。
 
 当前的编译器，保守地把生成器控制标为 `Unmanaged`。受限的生成器语言 profile，
-不能被说成会自动获得 `Strict` 的执行保证标签。N1 保留了这一分类。
+不能被说成会自动获得 `Strict` 的执行保证标签。这个 API 保留了这一分类。
 经过审阅的、只有声明的子 Program，在它的 Core 闭包是 Strict 时，可以满足 Strict 的授权；
 生成器形式的子 Program，不能仅仅因为它的提案提出了要求，就通过这条下限。
 要准入保证更弱的子 Program，需要显式的、相互兼容的宿主授权和父 Program 的保证，
@@ -104,13 +104,10 @@
 编译错误保留现有的编译器诊断。已存储预算的解码器，在规范标识校验之前，
 就会拒绝负数、小数和超出范围的整数；无效的数字不会回绕成一个本来有效的已存储 ID。
 
-## 持久化集成与尚待完成的资格认证
+## 持久化集成
 
-独立的 `synthesize_child` API 到准入为止。N2 运行时 API 增加了：原子的预留、
+独立的 `synthesize_child` API 到准入为止。运行时 API 增加了：原子的预留、
 持久的阶段结果、以父运行/generation 为作用域的绑定，以及在 SQLite 和 PostgreSQL 上，
-通过现有子 Program 生命周期做分发。配置、恢复行为、N3 失败矩阵及其声明的限制，
+通过现有子 Program 生命周期做分发。配置、恢复行为、恢复矩阵及其声明的限制，
 参见[持久化契约](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)。
 授权值仍然只是证据，没有会被误当作新鲜授权的、公开的已存储值构造函数。
-
-这次 C++ API 的新增，要求重新构建 Program 的使用方。现有的后继者合成结果格式、
-JavaScript 命令协议、原生控制 C ABI，以及只依赖 Core 的依赖边界，都没有变化。

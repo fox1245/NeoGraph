@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ja source_sha256=eee79303f2ce57761c1bf62d99755e7589782385c4ffa411c4d5c6ad4ad55207 -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ja source_sha256=e3291ec69efbff7f588c57393be530d7d20277c9a5cbfecd0e9883a6827a6626 -->
 # Strictランタイムインターポジション
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -39,7 +39,7 @@ durable RAW history + admitted artifacts + required Skills/constraints
 
 ## プロバイダーの結果のライフサイクル
 
-プロバイダーの境界では、変更できない2つの値を、別々に記録するようになりました。
+プロバイダーの境界では、変更できない2つの値を、別々に記録します。
 
 1. `ProviderDispatchReceipt` は、ディスパッチの前に書き込まれます。
 2. `ProviderDispatchOutcomeReceipt` は、試行の後に、`Succeeded`、`Failed`、`ReconciliationRequired` のいずれかを記録します。

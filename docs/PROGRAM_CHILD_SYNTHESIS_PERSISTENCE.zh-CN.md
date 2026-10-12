@@ -1,10 +1,10 @@
-<!-- neograph-i18n: source=docs/PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md locale=zh-CN source_sha256=7a6203d69da6c363bf3c4c5b6aa5b1b1fcd2f36c656c6f22bffc36cddeeb1e72 -->
+<!-- neograph-i18n: source=docs/PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md locale=zh-CN source_sha256=14283f61af8f5c3ec52011a184bc863369346836057023301f372ff29340a1ab -->
 # 持久的子 Program 合成
 
 **Languages:** [English](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md) | [한국어](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.ko.md) | [日本語](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.ja.md) | [简体中文](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.zh-CN.md)
 
-状态：N2 已在内存参考存储、SQLite 和 PostgreSQL 上实现。
-单个子 Program 场景的 N3 恢复资格认证，见[恢复矩阵](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md)。
+子 Program 合成的持久化可用于内存参考存储、SQLite 和 PostgreSQL。
+[恢复矩阵](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md)列出了针对单个子 Program 场景所测试的恢复行为。
 宿主入口使用现有的顶层检查点，以及现有的 `ng.spawn` / `ng.await` 子 Program 生命周期。
 这是一条有界的、针对经过审阅的源码的路径；它不实现模型生成器、模板渲染器，也不新增 DSL 命令。
 
@@ -56,8 +56,8 @@ SQLite 使用它现有的 `BEGIN IMMEDIATE` 事务。PostgreSQL 使用它现有�
 
 记录最大为 8 MiB，最多 16 个修订。它们保留提案、原始的宿主授权和父 Program 的上下文、预留，
 以及累积的各阶段输出。规范标识和阶段校验，会拒绝被改动的先前制品、不同的 generation、
-改了名的绑定和被修改的证据。绑定名在同一个父运行内是唯一的。SQL 日志只追加；
-对大型历史的保留和压缩，是后续工作。
+改了名的绑定和被修改的证据。绑定名在同一个父运行内是唯一的。SQL 日志只追加，
+没有对大型历史的保留和压缩。
 
 ## 阶段与恢复
 
@@ -88,17 +88,14 @@ SQLite 使用它现有的 `BEGIN IMMEDIATE` 事务。PostgreSQL 使用它现有�
 合成会扣减已过去的挂钟时间；恢复出来的尝试，同样保留原来的合成截止时间。
 spawn 状态的发布，会保持现有命令那笔正在进行中的预留。
 
-## 资格认证与剩余工作
+## 测试覆盖与局限
 
 后端符合性测试覆盖：成功的 spawn/join、规范的往返、owner/运行的隔离、重复和并发的请求、
 后端写入失败时的回滚、已提交阶段的复用、语义验证被拒绝、被撤销的授权，
 以及状态含糊的编译/验证认领。Linux 的进程退出测试，在冻结的准入之后不经析构函数就终止进程，
 然后在 SQLite 和 PostgreSQL 上重新打开 Program 存储、转换存储和检查点存储，再成功 join 子 Program。
 
-[N3 恢复矩阵](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md)把覆盖范围扩大到：每个数据库 16 个进程退出的边界、
+[恢复矩阵](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md)把覆盖范围扩大到：每个数据库 16 个进程退出的边界、
 并发的进程恢复、丢失的确认、真实的 PostgreSQL 连接终止、取消、版本留存、激活，以及 Program 替换。
 它的局限同样是明确的：没有自动对账的授权器，并且混合了多种副作用的一般性 join、断电、
 跨主机的故障切换，以及图迁移与留存的所有组合，都不在这个单个子 Program 场景的覆盖范围之内。
-
-这次新增了公开的 C++ 类型、虚方法和配置字段。请重新构建所有 Program 的使用方；
-不要把旧的目标文件与新库混用。它没有给只依赖 Core 的构建增加依赖，也没有改动原生控制 C ABI。

@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=docs/PROGRAM_CHILD_SYNTHESIS_RECOVERY.md locale=ko source_sha256=6ed07e73d44459a4ff1885cb7f07064be6994987113c36f0c7bae8c9c79d76ed -->
-# 자식 합성 복구 검증
+<!-- neograph-i18n: source=docs/PROGRAM_CHILD_SYNTHESIS_RECOVERY.md locale=ko source_sha256=36fc7174e47297f0a9b32ef41b1d1fa5a5db5224b4e9512465bfee950d51c568 -->
+# 자식 합성 복구
 
 **Languages:** [English](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md) | [한국어](PROGRAM_CHILD_SYNTHESIS_RECOVERY.ko.md) | [日本語](PROGRAM_CHILD_SYNTHESIS_RECOVERY.ja.md) | [简体中文](PROGRAM_CHILD_SYNTHESIS_RECOVERY.zh-CN.md)
 
-N3는 SQLite와 PostgreSQL에서 검토된 소스를 쓰는 단일 자식 체크포인트 시나리오를 검증합니다. 복구는 이제 기록된 자식 연산과 분류되지 않은 외부 효과를 구분합니다. Core dispatch에 영속 체크포인트나 결과가 없을 때는 명시적인 조정(reconciliation)을 그대로 요구합니다.
+이 문서는 SQLite와 PostgreSQL에서 검토된 소스를 쓰는 단일 자식 체크포인트 시나리오에 대해 테스트한 복구 동작을 정리합니다. 복구는 기록된 자식 연산과 분류되지 않은 외부 효과를 구분하며, Core dispatch에 영속 체크포인트나 결과가 없을 때는 명시적인 조정(reconciliation)을 요구합니다.
 
 ## 복구 규칙
 
@@ -44,7 +44,7 @@ N3는 SQLite와 PostgreSQL에서 검토된 소스를 쓰는 단일 자식 체크
 
 비활성 부모에 대한 이 복구 검사는 실행 중인 부모에 다시 연결하는 것을 실행 유실로 잘못 분류하지 않습니다. 실행 중인 부모에 다시 연결하면 기존 시도를 반환합니다.
 
-불확실성 처리는 합성 레코드가 이미 `Spawned`라고 되어 있어도 적용됩니다. 레코드는 앞선 산출물을 바꾸지 않고 이 조정 처리 방침을 추가할 수 있습니다. 대체 자식을 새로 만들거나 성공 결과를 꾸며내지는 않습니다. 이 변경은 자동 조정 승인 API를 제공하지 않습니다.
+불확실성 처리는 합성 레코드가 이미 `Spawned`라고 되어 있어도 적용됩니다. 레코드는 앞선 산출물을 바꾸지 않고 이 조정 처리 방침을 추가할 수 있습니다. 대체 자식을 새로 만들거나 성공 결과를 꾸며내지는 않습니다. 자동 조정 승인 API는 제공하지 않습니다.
 
 ## 추가 검사
 
@@ -53,11 +53,11 @@ N3는 SQLite와 PostgreSQL에서 검토된 소스를 쓰는 단일 자식 체크
 - 의미 검증 중에 취소하면 승인(admission)이나 자식 dispatch에는 도달하지 않습니다.
 - Catalog 활성화로 생성된 binding을 다른 버전으로 돌릴 수 없습니다.
 - 보존 핀(retention pin)이 필요한 버전을 지킵니다. 호스트가 자식 버전을 제거하면 캐시된 합성 증거로는 그 버전을 실행할 수 없습니다. 모든 합성 이력에서 보존 루트를 자동으로 수집하는 일은 계속 호스트의 책임입니다.
-- Program을 교체해도 컴파일 차감은 유지되며, 이전 run에서 연결되지 않은 생성된 binding이 후임 세대로 넘어가지는 않습니다. 연결된 자손은 이제 [재귀 Harness 계약](PROGRAM_RECURSIVE_HARNESSES.md)을 통해 유지할 수 있습니다.
+- Program을 교체해도 컴파일 차감은 유지되며, 이전 run에서 연결되지 않은 생성된 binding이 후임 세대로 넘어가지는 않습니다. 연결된 자손은 [재귀 Harness 계약](PROGRAM_RECURSIVE_HARNESSES.md)을 통해 유지할 수 있습니다.
 - PostgreSQL 테스트는 프로세스 종료 매트릭스와 연결 종료 케이스를 포함해 기존 CTest 데이터베이스 리소스 락을 공유합니다.
 
-## 이 검증의 한계
+## 한계
 
-이것은 명시한 세로형(vertical) 시나리오에 대한 프로세스 및 연결 장애 검증입니다. 외부 효과가 어디서나 정확히 한 번만 일어난다거나, 정전 상황까지 검증했다거나, 호스트 간 데이터베이스 장애 조치(failover)를 다룬다거나, 불확실한 Core/provider 결과를 자동으로 해소한다는 주장이 아닙니다. 여러 종류의 호스트 효과가 섞인 일반 구조화 join은 기존의 조정(reconciliation) 동작을 그대로 따릅니다. 생성된 자식 트리가 여럿인 경우, 임의의 외부 검증기가 실행되는 중의 취소, 그래프 마이그레이션의 모든 조합, 보존 루트의 자동 탐색, 합성의 성능과 저장 공간 증가는 별도로 검증해야 합니다.
+테스트는 명시한 세로형(vertical) 시나리오의 프로세스 및 연결 장애를 다룹니다. 외부 효과가 어디서나 정확히 한 번만 일어난다는 것, 정전을 견딘다는 것, 호스트 간 데이터베이스 장애 조치(failover)가 된다는 것, 불확실한 Core/provider 결과가 자동으로 해소된다는 것은 보여 주지 않습니다. 여러 종류의 호스트 효과가 섞인 일반 구조화 join은 기존의 조정(reconciliation) 동작을 그대로 따릅니다. 생성된 자식 트리가 여럿인 경우, 임의의 외부 검증기가 실행되는 중의 취소, 그래프 마이그레이션의 모든 조합, 보존 루트의 자동 탐색, 합성의 성능과 저장 공간 증가는 별도로 검증해야 합니다.
 
-호스트 통합은 [영속화 계약](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)을, 달라지지 않은 검토된 소스와 권한의 경계는 [인가 계약](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md)을 참고하세요.
+호스트 통합은 [영속화 계약](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)을, 검토된 소스와 권한의 경계는 [인가 계약](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md)을 참고하세요.

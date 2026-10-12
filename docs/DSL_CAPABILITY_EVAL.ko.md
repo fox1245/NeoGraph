@@ -1,10 +1,7 @@
-<!-- neograph-i18n: source=docs/DSL_CAPABILITY_EVAL.md locale=ko source_sha256=440d5d76af8cf05685dddfa06df9dee587f74851719820ff655b0a220bdb1b49 -->
+<!-- neograph-i18n: source=docs/DSL_CAPABILITY_EVAL.md locale=ko source_sha256=8918e3e19d555bc582f3c36b4a9bfa63dd9b80ea655074a7214a5c5b233a5c27 -->
 # QuickJS DSL 기능 범위와 모델 합성 평가
 
 **Languages:** [English](DSL_CAPABILITY_EVAL.md) | [한국어](DSL_CAPABILITY_EVAL.ko.md) | [日本語](DSL_CAPABILITY_EVAL.ja.md) | [简体中文](DSL_CAPABILITY_EVAL.zh-CN.md)
-
-상태: 구현됨. 결정적(deterministic) 적합성 테스트가 게이트 역할을 하며, 실제 모델 평가는 opt-in입니다.
-과거에 실제 모델로 관찰한 날짜: 2026-08-22. 아래에 기록된 결과는 새로 실행한 것이 아닙니다.
 
 ## 평가 질문
 
@@ -58,7 +55,7 @@ bun --env-file=C:\path\to\.env run scripts/run_dsl_capability_eval.ts `
   --output dsl-capability-evidence.json
 ```
 
-`--case`에는 쉼표로 구분한 일부 케이스를 지정할 수 있고, `--attempts`는 독립적인 one-shot 시도를 반복하며, `--repair-attempts`는 거부된 소스 전체와 함께 프로브가 낸 공식 진단 메시지를 모델에 돌려줍니다. provider나 응답 자체의 실패는 컴파일 거부나 의미 검증 거부와 구분해서 기록합니다. 기본 모델은 `z-ai/glm-5.3-flash`이며, 생성할 때마다 완성 토큰을 4,096개로 제한하고 cookbook의 ZDR provider 라우팅 설정을 사용합니다. 아래의 과거 DeepSeek 증거는 이 Skill 로딩 구성보다 앞선 것입니다.
+`--case`에는 쉼표로 구분한 일부 케이스를 지정할 수 있고, `--attempts`는 독립적인 one-shot 시도를 반복하며, `--repair-attempts`는 거부된 소스 전체와 함께 프로브가 낸 공식 진단 메시지를 모델에 돌려줍니다. provider나 응답 자체의 실패는 컴파일 거부나 의미 검증 거부와 구분해서 기록합니다. 기본 모델은 `z-ai/glm-5.3-flash`이며, 생성할 때마다 완성 토큰을 4,096개로 제한하고 cookbook의 ZDR provider 라우팅 설정을 사용합니다. 아래의 DeepSeek 결과는 러너가 Skill을 로딩하기 전에 기록한 것입니다.
 
 ## 지침은 따로 평가하기
 
@@ -80,7 +77,7 @@ bun run scripts/run_harness_skill_ab.ts --before saved-skill/SKILL.md `
 
 ## DeepSeek 관찰 결과
 
-처음 실행한 결과와 정확한 식별자를 넣어 다시 평가한 결과를 합쳐 보면, 모델은 11개 기능 그룹 모두에서 프로브로 검증된 소스를 만들었습니다. 정적 HITL/재시도는 진단 메시지에 따라 한 번 수정해야 했습니다. 구조적 동시성은 두 번 수정해야 했는데, 먼저 ES 모듈 export를 되살리고 그다음 잘못된 Core 바인딩을 승인(admission)된 정확한 이름으로 바꿨습니다. 제어 흐름은 정확한 바인딩으로 한 번 고친 뒤 통과했습니다. Map은 호스트가 네이티브 API 매니페스트를 제공하고 승인(admission)된 Core 식별자를 모호하지 않게 명시한 뒤에는 one-shot으로 통과했습니다.
+실제 모델 실행에서 모델은 11개 기능 그룹 모두에서 프로브로 검증된 소스를 만들었습니다. 정적 HITL/재시도는 진단 메시지에 따라 한 번 수정해야 했습니다. 구조적 동시성은 두 번 수정해야 했는데, 먼저 ES 모듈 export를 되살리고 그다음 잘못된 Core 바인딩을 승인(admission)된 정확한 이름으로 바꿨습니다. 제어 흐름은 정확한 바인딩으로 한 번 고친 뒤 통과했습니다. Map은 호스트가 네이티브 API 매니페스트를 제공하고 승인(admission)된 Core 식별자를 모호하지 않게 명시한 뒤에는 one-shot으로 통과했습니다.
 
 | 기능 케이스 | 모델 결과 | 주요 관찰 |
 |---|---|---|
@@ -96,7 +93,7 @@ bun run scripts/run_harness_skill_ab.ts --before saved-skill/SKILL.md `
 | `program_durability` | 통과 | emit, 체크포인트, 취소 command가 정확했음 |
 | `program_host_capability` | 통과 | import 슬롯과 정규 입력이 일치함 |
 
-처음의 검증기는 `callCore` 케이스에서 오탐(false positive)을 냈습니다. command 종류와 입력은 확인했지만 정확한 Core 이름은 확인하지 않았기 때문입니다. 그래서 중첩된 `callCore`마다 `capability`를 요구하도록 검증기를 강화했습니다. 이전에는 통과했던 `core`, `Core`, 노드 이름 `work`를 쓴 모델 소스가 이제는 올바르게 거부됩니다.
+검증기는 command 종류와 입력뿐 아니라 정확한 Core 이름도 확인하며, 중첩된 `callCore`마다 `capability`를 요구합니다. `core`, `Core`, 노드 이름 `work`를 쓴 모델 소스는 거부됩니다.
 
 이 결과는 모델에 그런 능력이 있다는 증명이며, 통계적인 신뢰도에 대한 주장이 아닙니다. 케이스별 one-shot 성공률과 수정 후 성공률을 알려면 반복 시도가 더 필요하고, provider 실패는 따로 보고해야 합니다.
 
@@ -113,9 +110,9 @@ capability manifest + exact admitted identifiers
   -> ordinary admission and publication
 ```
 
-모델은 ES 모듈과 CommonJS, 그래프 이름과 노드 이름, 요청한 Core 식별자와 `core` 같은 일반 단어를 반복해서 혼동했습니다. 따라서 NeoCode는 정확한 시그니처와 승인(admission)된 식별자를 주입하고, 가능하면 고정된 모듈 골격(scaffold)을 유지해야 합니다. 그럴듯해 보이는 소스를 요청한 토폴로지가 만들어졌다는 증거로 취급해서는 안 됩니다.
+모델은 ES 모듈과 CommonJS, 그래프 이름과 노드 이름, 요청한 Core 식별자와 `core` 같은 일반 단어를 반복해서 혼동했습니다. 따라서 호스트는 정확한 시그니처와 승인(admission)된 식별자를 주입하고, 가능하면 고정된 모듈 골격(scaffold)을 유지해야 합니다. 그럴듯해 보이는 소스를 요청한 토폴로지가 만들어졌다는 증거로 취급해서는 안 됩니다.
 
-NeoGraph는 이제 `ProgramSynthesisGateway`에서 이 경계를 강제합니다. 모든 게이트웨이 구성은 호스트가 소유하는 의미 검증기를 제공해야 합니다. 의미 검증에 성공하면 Catalog 승인(admission) 전에 콘텐츠 주소 방식(content-addressed)의 영수증이 만들어집니다. 거부 판정이 나오면 `ProgramSynthesisValidationError`를 던지고 정확한 증거를 보관하며, 승인(admission) resolver는 호출하지 않습니다. 이미 소비한 동적 컴파일 예약은 소비된 채로 남습니다.
+NeoGraph는 `ProgramSynthesisGateway`에서 이 경계를 강제합니다. 모든 게이트웨이 구성은 호스트가 소유하는 의미 검증기를 제공해야 합니다. 의미 검증에 성공하면 Catalog 승인(admission) 전에 콘텐츠 주소 방식(content-addressed)의 영수증이 만들어집니다. 거부 판정이 나오면 `ProgramSynthesisValidationError`를 던지고 정확한 증거를 보관하며, 승인(admission) resolver는 호출하지 않습니다. 이미 소비한 동적 컴파일 예약은 소비된 채로 남습니다.
 
 `javascript_authoring_capability_manifest()`는 설치된 graph-builder와 command 어휘, 정확한 시그니처, 분류, 한도, 프로파일 제약을 기계가 읽을 수 있는 데이터로 제공합니다. 적합성 테스트는 이 매니페스트를 두 QuickJS 컨텍스트에 실제로 설치된 프로퍼티와 비교하므로, API가 어긋나면 테스트 스위트가 실패합니다.
 

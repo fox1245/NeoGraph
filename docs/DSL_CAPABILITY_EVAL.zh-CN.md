@@ -1,10 +1,7 @@
-<!-- neograph-i18n: source=docs/DSL_CAPABILITY_EVAL.md locale=zh-CN source_sha256=440d5d76af8cf05685dddfa06df9dee587f74851719820ff655b0a220bdb1b49 -->
+<!-- neograph-i18n: source=docs/DSL_CAPABILITY_EVAL.md locale=zh-CN source_sha256=8918e3e19d555bc582f3c36b4a9bfa63dd9b80ea655074a7214a5c5b233a5c27 -->
 # QuickJS DSL 的能力与模型合成评测
 
 **Languages:** [English](DSL_CAPABILITY_EVAL.md) | [한국어](DSL_CAPABILITY_EVAL.ko.md) | [日本語](DSL_CAPABILITY_EVAL.ja.md) | [简体中文](DSL_CAPABILITY_EVAL.zh-CN.md)
-
-状态：已实现；确定性的符合性测试是闸门；实机模型评测需要主动开启
-历史上的实机观测：2026-08-22；下面记录的结果不是新的一次运行
 
 ## 问题
 
@@ -72,8 +69,8 @@ bun --env-file=C:\path\to\.env run scripts/run_dsl_capability_eval.ts `
 `--repair-attempts` 把权威的探针诊断，连同被拒绝的完整源码，一起返回给模型。
 provider 或响应层面的失败，与编译或语义层面的拒绝是分开记录的。
 默认的模型是 `z-ai/glm-5.3-flash`；每次生成最多 4,096 个 completion token，
-并使用 cookbook 里的 ZDR provider 路由设置。下面历史上的 DeepSeek 证据，
-早于这种加载 skill 的配置。
+并使用 cookbook 里的 ZDR provider 路由设置。下面的 DeepSeek 结果，
+是在运行器加载 skill 之前记录的。
 
 ## 单独评测这些指令
 
@@ -106,7 +103,7 @@ bun run scripts/run_harness_skill_ab.ts --before saved-skill/SKILL.md `
 
 ## 观察到的 DeepSeek 结果
 
-在第一次运行以及后续对确切标识符的重新评测中，模型对全部 11 个能力组，都给出了通过探针验证的源码。
+在实机运行中，模型对全部 11 个能力组，都给出了通过探针验证的源码。
 静态的 HITL/重试，需要一次由诊断引导的修复。结构化并发需要两次修复：
 先是恢复 ES 模块的导出，再把错误的 Core 绑定替换成确切的已准入名称。
 控制流在一次确切绑定的修复之后通过。在宿主提供了原生 API manifest、
@@ -126,9 +123,8 @@ bun run scripts/run_harness_skill_ab.ts --before saved-skill/SKILL.md `
 | `program_durability` | 通过 | emit、checkpoint 和取消命令都是准确的 |
 | `program_host_capability` | 通过 | import 槽位和规范的输入相匹配 |
 
-最初的验证器对 `callCore` 用例产生了误报，因为它检查了命令的种类和输入，
-却没有检查确切的 Core 名称。验证器已经加强，要求每个嵌套的 `callCore` 都使用 `capability`。
-因此，之前被接受的、使用 `core`、`Core` 或节点名 `work` 的模型源码，现在会被正确地拒绝。
+验证器除了检查命令的种类和输入，还检查确切的 Core 名称，要求每个嵌套的 `callCore` 都使用 `capability`。
+因此，使用 `core`、`Core` 或节点名 `work` 的模型源码会被拒绝。
 
 这证明的是能力，不是统计意义上的可靠性。每个用例的一次性成功率和修复成功率，
 仍然需要重复试验，并把 provider 的失败单独报告。
@@ -147,11 +143,11 @@ capability manifest + exact admitted identifiers
 ```
 
 模型反复把 ES 模块与 CommonJS 混淆，把图名称与节点名称混淆，
-把所要求的 Core 标识与 `core` 这样的泛称混淆。因此，NeoCode 应当注入确切的签名和已准入的标识符，
+把所要求的 Core 标识与 `core` 这样的泛称混淆。因此，宿主应当注入确切的签名和已准入的标识符，
 尽可能保留固定的模块脚手架，并且绝不能把看起来像样的源码，
 当成所要求的拓扑已经构建出来的证据。
 
-NeoGraph 现在在 `ProgramSynthesisGateway` 中强制执行这条边界：每份网关配置都必须提供一个由宿主持有的
+NeoGraph 在 `ProgramSynthesisGateway` 中强制执行这条边界：每份网关配置都必须提供一个由宿主持有的
 语义验证器。验证成功，会在 Catalog 准入之前产生一份内容寻址的回执；验证被拒绝，
 则抛出 `ProgramSynthesisValidationError`，保留确切的证据，并且绝不会调用准入解析器。
 已经消耗的动态编译预留，仍然保持已消耗的状态。

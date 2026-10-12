@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=eee79303f2ce57761c1bf62d99755e7589782385c4ffa411c4d5c6ad4ad55207 -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=e3291ec69efbff7f588c57393be530d7d20277c9a5cbfecd0e9883a6827a6626 -->
 # 严格的运行时拦截
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -44,7 +44,7 @@ durable RAW history + admitted artifacts + required Skills/constraints
 
 ## provider outcome 的生命周期
 
-provider 边界现在会记录两个相互独立的不可变值：
+provider 边界会记录两个相互独立的不可变值：
 
 1. `ProviderDispatchReceipt` 在分发之前写入。
 2. `ProviderDispatchOutcomeReceipt` 在尝试之后，记录 `Succeeded`、`Failed` 或

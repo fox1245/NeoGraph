@@ -2,7 +2,7 @@
 
 **Languages:** [English](PROGRAM_RECURSIVE_HARNESSES.md) | [한국어](PROGRAM_RECURSIVE_HARNESSES.ko.md) | [日本語](PROGRAM_RECURSIVE_HARNESSES.ja.md) | [简体中文](PROGRAM_RECURSIVE_HARNESSES.zh-CN.md)
 
-The verified scenario runs one logical session as a parent/child/grandchild tree
+The reference scenario runs one logical session as a parent/child/grandchild tree
 under one owner. Each agent has its own ProgramVersion, Core topology, state,
 budget, and lineage. A child can propose JavaScript for its own child through the
 same host-owned synthesis boundary used by the main orchestrator.
@@ -21,16 +21,15 @@ the stable agent identity. Each replacement still creates a distinct physical
 run and immutable ProgramVersion. The lineage selects the active generation.
 Use `reconnect(owner, logical_run_id)` to obtain a handle for that generation.
 
-New run-record schema 4 carries `logical_run_id` when it differs from the
+Run-record schema 4 carries `logical_run_id` when it differs from the
 physical run. Child relations continue to address their original child identity;
 they retain the first admitted link and invocation. When a replacement supplies
 the terminal result, the relation records `terminal_generation` alongside that
 result's actual run/version identity. The transition backend checks this against
 the committed child lineage, generation, and terminal run record.
 
-Existing schema 2/3 records remain readable and ordinary records without the new
-fields retain their schema 3 representation. Do not mix old Program binaries
-with the new C++ record layout; rebuild Program consumers together.
+Schema 2 and 3 records remain readable, and ordinary records without the new
+fields keep their schema 3 representation.
 
 ## Replacement with descendants
 
@@ -106,7 +105,7 @@ check cannot fall through to new child creation. Missing runs, changed inputs,
 or unavailable bindings leave the existing command pending for reconciliation.
 The command reservation and descendant accounting survive recovery. The flag
 does not authorize replay of unknown provider, tool, native, or other external
-effects. The separately granted synthesis recovery protocol is unchanged.
+effects.
 
 Independently of this flag, replay of a running attempt completes an unfinished
 sealed `ng.checkpoint` from its exact journaled value and original command
@@ -122,12 +121,6 @@ cancellation cannot erase that uncertainty. Optimistic command-head read
 collisions are retried, while a permanent rejection against an unchanged parent
 head cannot block child
 completion notifications indefinitely.
-
-The `*StaticChild*` tests cover SQLite and PostgreSQL process exit, static and
-inherited recursive children, unchanged child identities and receipts, and a
-grandchild's 32 checkpoints producing exactly 64 journal entries. They also
-exercise absent opt-in, missing runs/bindings, altered input/receipts, and a run
-disappearing between recovery admission and dispatch.
 
 ## JSON artifacts and accounting
 
@@ -146,30 +139,29 @@ the `replace` API itself selects an already-admitted target.
 
 Delegated compile budget is unavailable for another parent synthesis request.
 Replacement transfers the exact remaining budget and committed descendants.
-Child recovery also retains its first-attempt deadline. The SQLite Catalog now
-uses a bounded busy timeout, matching the transition store's ability to share a
-database with concurrent agent publications.
+Child recovery also retains its first-attempt deadline. The SQLite Catalog uses
+a bounded busy timeout, so it can share a database with concurrent agent
+publications, as the transition store does.
 
 ## Running the reference
 
 Build Program and QuickJS; enable both persistence backends for their cases.
 Run `neograph_program_tests --gtest_filter="*Recursive*"`.
 PostgreSQL cases use the existing disposable `NEOGRAPH_TEST_POSTGRES_URL` fixture
-and CTest database resource lock. Native WSL Docker is suitable for this setup.
+and CTest database resource lock.
 
 Set `NEOGRAPH_RECURSIVE_ARTIFACT_DIR` when running the successful topology test to
 export `main.json`, `child-v1.json`, `child-v2.json`, `grandchild.json`, and
 `session.json`. These use the test registry/compiler identities and are review
 fixtures, not standalone production configuration.
 
-This qualification covers the three-level tree, a nested checkpoint replacement,
+The reference covers the three-level tree, a nested checkpoint replacement,
 live descendant retention and cancellation, generation-result integrity, budget
 attenuation, and whole-session process recovery on SQLite/PostgreSQL. It does
-not introduce an LLM source-generation service, a Python/transport facade, a
+not include an LLM source-generation service, a Python/transport facade, a
 cross-owner session sharing policy, or arbitrary in-place Core mutation. Native
-Core migration retains its existing boundary. Independent multi-host live
-ownership transfer and every context/hook failure combination require separate
-qualification.
+Core migration keeps its existing boundary. Independent multi-host live
+ownership transfer and every context/hook failure combination are not covered.
 
 ## Interactive chatbot example
 

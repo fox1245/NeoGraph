@@ -2,9 +2,9 @@
 
 **Languages:** [English](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md) | [한국어](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.ko.md) | [日本語](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.ja.md) | [简体中文](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.zh-CN.md)
 
-Status: N2 implemented for the in-memory reference store, SQLite, and PostgreSQL.
-N3 recovery qualification for the single-child scenario is described in
-[the recovery matrix](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md).
+Durable child synthesis is available for the in-memory reference store, SQLite and PostgreSQL.
+[The recovery matrix](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md) lists the recovery behavior that is
+tested for the single-child scenario.
 The host entry point uses an existing top-level checkpoint and the existing
 `ng.spawn` / `ng.await` child lifecycle. This is a bounded reviewed-source path;
 it does not implement a model generator, template renderer, or a new DSL command.
@@ -66,8 +66,8 @@ Records are limited to 8 MiB and 16 revisions. They retain the proposal, origina
 host grant and parent context, reservation, and cumulative stage outputs.
 Canonical identities and stage validation reject changed prior artifacts,
 different generations, renamed bindings, and modified evidence. A binding name
-is unique within one parent run. The SQL log is append-only; retention and
-compaction of large histories are follow-up work.
+is unique within one parent run. The SQL log is append-only and has no retention or
+compaction of large histories.
 
 ## Stages and recovery
 
@@ -101,7 +101,7 @@ including a lost commit acknowledgement. Synthesis debits elapsed wall time;
 recovered attempts also retain the original synthesis deadline. Spawn state
 publication preserves the existing command's in-flight reservation.
 
-## Qualification and remaining work
+## Test coverage and limits
 
 The backend conformance tests cover successful spawn/join, canonical round trips,
 owner/run isolation, duplicate and concurrent requests, rollback at a backend
@@ -111,14 +111,10 @@ destructors after frozen admission and reopen the Program store, transition
 store, and checkpoint store on both SQLite and PostgreSQL before joining the
 child successfully.
 
-The [N3 recovery matrix](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md) extends coverage to
+The [recovery matrix](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md) extends coverage to
 16 process-exit boundaries per database, concurrent process recovery, lost
 acknowledgements, actual PostgreSQL connection termination, cancellation, version
 retention, activation, and Program replacement. Its limits remain explicit:
 there is no automatic reconciliation authorizer, and general mixed-effect joins,
 power loss, cross-host failover, and all graph-migration/retention combinations
 are not covered by the single-child scenario.
-
-This adds public C++ types, virtual methods, and configuration fields. Rebuild
-all Program consumers; do not mix old objects with the new library. It adds no
-Core-only dependency or native control C ABI change.

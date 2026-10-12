@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/PROGRAM_CHILD_SYNTHESIS_RECOVERY.md locale=zh-CN source_sha256=6ed07e73d44459a4ff1885cb7f07064be6994987113c36f0c7bae8c9c79d76ed -->
-# 子 Program 合成的恢复资格认证
+<!-- neograph-i18n: source=docs/PROGRAM_CHILD_SYNTHESIS_RECOVERY.md locale=zh-CN source_sha256=36fc7174e47297f0a9b32ef41b1d1fa5a5db5224b4e9512465bfee950d51c568 -->
+# 子 Program 合成的恢复
 
 **Languages:** [English](PROGRAM_CHILD_SYNTHESIS_RECOVERY.md) | [한국어](PROGRAM_CHILD_SYNTHESIS_RECOVERY.ko.md) | [日本語](PROGRAM_CHILD_SYNTHESIS_RECOVERY.ja.md) | [简体中文](PROGRAM_CHILD_SYNTHESIS_RECOVERY.zh-CN.md)
 
-N3 在 SQLite 和 PostgreSQL 上，对“经过审阅的源码、单个子 Program、检查点”这一场景做了资格认证。
-恢复现在把已记录的子 Program 操作，与未分类的外部副作用区分开；
-而当 Core 的分发既没有持久的检查点、也没有结果时，仍然保留显式的对账。
+本页列出在 SQLite 和 PostgreSQL 上，针对“经过审阅的源码、单个子 Program、检查点”这一场景所测试的恢复行为。
+恢复会把已记录的子 Program 操作，与未分类的外部副作用区分开；
+而当 Core 的分发既没有持久的检查点、也没有结果时，要求显式的对账。
 
 ## 恢复规则
 
@@ -62,7 +62,7 @@ payload 和副作用标识一致。只有 `spawn`，或者以合成出来的 `sp
 
 即使合成记录已经显示 `Spawned`，这种“不确定”的处置同样适用。该记录可以追加这一对账处置，
 而不改动更早的制品。它不会凭空造出替代的子 Program，也不会伪造成功的结果。
-这次变更没有提供自动批准对账的 API。
+没有提供自动批准对账的 API。
 
 ## 其他检查
 
@@ -75,16 +75,16 @@ payload 和副作用标识一致。只有 `spawn`，或者以合成出来的 `sp
 - 留存固定（pin）会保留所需的版本。如果宿主删除了子 Program 的版本，缓存的合成证据也无法执行它。
   从所有合成历史中自动收集留存根，仍是宿主的责任。
 - Program 替换会保持已扣减的编译额度，并且不会把旧运行中尚未挂接的生成绑定，转移到后继 generation。
-  已挂接的后代，现在可以通过[递归 Harness 契约](PROGRAM_RECURSIVE_HARNESSES.md)保留下来。
+  已挂接的后代，可以通过[递归 Harness 契约](PROGRAM_RECURSIVE_HARNESSES.md)保留下来。
 - PostgreSQL 测试共用现有的 CTest 数据库资源锁，包括进程退出矩阵和连接终止的用例。
 
-## 这次资格认证的局限
+## 局限
 
-这是针对所述纵向场景的进程故障和连接故障的资格认证。它并不声称外部副作用普遍恰好执行一次，
-不是断电资格认证，不是跨主机的数据库故障切换，也不是对状态不确定的 Core/provider 结果的自动解决。
+测试针对所述纵向场景中的进程故障和连接故障。它们没有证明外部副作用普遍恰好执行一次，
+也没有证明能经受断电、能做跨主机的数据库故障切换，或能自动解决状态不确定的 Core/provider 结果。
 包含多种宿主副作用的一般结构化 join，保持它现有的对账行为。多棵生成出来的子 Program 树、
 任意外部验证器期间发生的取消、完整的图迁移组合、自动发现留存根，
-以及合成的性能或存储增长的资格认证，都需要另行覆盖。
+以及合成的性能和存储增长，都需要另行覆盖。
 
 宿主集成见[持久化契约](PROGRAM_CHILD_SYNTHESIS_PERSISTENCE.md)；
-经过审阅的源码和权限边界（未变化）见[授权契约](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md)。
+经过审阅的源码和权限边界见[授权契约](PROGRAM_CHILD_SYNTHESIS_CONTRACT.md)。

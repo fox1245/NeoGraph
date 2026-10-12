@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/PROGRAM_CAPABILITY_CONTEXT.md locale=zh-CN source_sha256=19977a5adc5fc8fac5dafb2f604519c6974ccafa509aa01ccafd393cf0c7c962 -->
+<!-- neograph-i18n: source=docs/PROGRAM_CAPABILITY_CONTEXT.md locale=zh-CN source_sha256=cf231c5dd783ef2dc2e5ad572dd4bdcacd935c4da10414e7c5f754d6234143c6 -->
 # Program 节点的能力与受中介的副作用
 
 **Languages:** [English](PROGRAM_CAPABILITY_CONTEXT.md) | [한국어](PROGRAM_CAPABILITY_CONTEXT.ko.md) | [日本語](PROGRAM_CAPABILITY_CONTEXT.ja.md) | [简体中文](PROGRAM_CAPABILITY_CONTEXT.zh-CN.md)
@@ -61,7 +61,7 @@ Program Core 的操作，要使用受中介的 Tool 分发，需要一份由宿�
 调用方必须保留完整的、有序的 `sp::Message` 历史（包括 native 和 Tool 的 parts），
 才能在重新连接时重放待处理的批次；仅供显示的 `ChatMessage` 投影，无法重建 native 续接的权限。
 持久的 native 托管，另外还需要宿主的 `sp::NativeArchive`。
-旧的、没有 broker 的 Agent/Core 路径，仍然明确属于较低保证级别。
+没有 broker 的 Agent/Core 路径属于较低保证级别。
 
 对于每个 Core 任务和批次序号，broker 在调用控制器之前，先用 SQLite FULL 同步提交一个标记；
 标记失败，就不会执行任何 Tool。回执绑定 owner/运行/线程/任务/序号、Program 版本/绑定、
@@ -72,13 +72,13 @@ Program Core 的操作，要使用受中介的 Tool 分发，需要一份由宿�
 尝试的变化，只作为来源信息记录，不构成新的调用槽位。不要声称外部结果恰好一次：
 即使有持久的标记，也无法判断外部服务在崩溃之前是否已经提交。
 
-原先使用 `NodeContext.provider` 或 `NodeContext.tools` 的、brokered 的自定义工厂，
-必须把执行迁移到固定的 Core 节点上，或者使用单独审阅过的宿主 broker，
-或者按宿主的受信嵌入策略，作为 `TrustedNative` 准入。
+brokered 的自定义工厂不能使用 `NodeContext.provider` 或 `NodeContext.tools`。
+请把执行迁移到固定的 Core 节点上，或者使用单独审阅过的宿主 broker，
+或者按宿主的受信嵌入策略，把它作为 `TrustedNative` 准入。
 `add_host_brokered_node` 是 Harness worker 所用的、显式的原生宿主 broker 注册路径。
 它并不会让调用方提供的工厂变得安全：宿主必须审阅并固定它的副作用，
 并让每个操作都留在已准入的 provider/tool 闭包之内。普通的 `add_node` 仍然只允许元数据这一道边界。
-Program 之外的直接 Core 图，保持它们原有的 `NodeContext` 行为。
-剩余的持久化和原生代码方面的边界，见 [#291](https://github.com/fox1245/NeoGraph/issues/291)、
+Program 之外的直接 Core 图不会被收窄，会拿到完整的 `NodeContext`。
+持久化和原生代码方面的边界，见 [#291](https://github.com/fox1245/NeoGraph/issues/291)、
 [#292](https://github.com/fox1245/NeoGraph/issues/292) 和
 [#293](https://github.com/fox1245/NeoGraph/issues/293)。
