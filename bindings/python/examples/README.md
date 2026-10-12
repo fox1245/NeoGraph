@@ -69,6 +69,7 @@ The remaining Core features, with no model involved. Example 14 writes `my_graph
 | 14 | [`14_graph_to_json.py`](14_graph_to_json.py) | yes | A graph definition is plain JSON: it runs from a dict and is saved as `my_graph.json`. |
 | 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | yes | Loads `my_graph.json` from example 14 and doubles 5 to 10 and 100 to 200. Run 14 first; custom node types are registered in code. |
 | 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | yes | `message_stream` turns token events into LangChain-style chunks; five scripted tokens form `Octopuses have three hearts.` |
+| 75 | [`75_stream_modes.py`](75_stream_modes.py) | yes | Stream modes: the same run observed in VALUES, UPDATES, EVENTS and DEBUG mode, with the events each mode delivers counted. |
 
 ### Agent patterns
 

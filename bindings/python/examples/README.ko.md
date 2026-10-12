@@ -70,6 +70,7 @@ python 01_minimal.py
 | 14 | [`14_graph_to_json.py`](14_graph_to_json.py) | yes | 그래프 정의는 평범한 JSON입니다. dict로 실행한 뒤 `my_graph.json`으로 저장합니다. |
 | 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | yes | 예제 14의 `my_graph.json`을 불러와 5를 10으로, 100을 200으로 두 배로 만듭니다. 14를 먼저 실행하세요. 사용자 정의 노드 타입은 코드에서 등록합니다. |
 | 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | yes | `message_stream`이 토큰 이벤트를 LangChain 형태의 청크로 바꿉니다. 스크립트로 정한 토큰 다섯 개가 `Octopuses have three hearts.`가 됩니다. |
+| 75 | [`75_stream_modes.py`](75_stream_modes.py) | yes | 스트림 모드: 같은 실행을 VALUES, UPDATES, EVENTS, DEBUG 모드로 관찰하고, 모드마다 전달되는 이벤트를 셉니다. |
 
 ### 에이전트 패턴
 

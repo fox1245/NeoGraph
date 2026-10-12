@@ -70,6 +70,7 @@ python 01_minimal.py
 | 14 | [`14_graph_to_json.py`](14_graph_to_json.py) | yes | グラフ定義は素の JSON です。dict から実行し、`my_graph.json` として保存します。 |
 | 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | yes | サンプル 14 の `my_graph.json` を読み込み、5 を 10、100 を 200 に 2 倍にします。先に 14 を実行してください。カスタムノード型はコードで登録します。 |
 | 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | yes | `message_stream` がトークンイベントを LangChain 形式のチャンクに変換します。スクリプト化した 5 つのトークンが `Octopuses have three hearts.` になります。 |
+| 75 | [`75_stream_modes.py`](75_stream_modes.py) | yes | ストリームモード。同じ実行を VALUES、UPDATES、EVENTS、DEBUG の各モードで観察し、モードごとに届くイベントを数えます。 |
 
 ### エージェントパターン
 

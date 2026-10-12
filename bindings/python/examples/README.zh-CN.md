@@ -70,6 +70,7 @@ python 01_minimal.py
 | 14 | [`14_graph_to_json.py`](14_graph_to_json.py) | yes | 图定义就是普通 JSON：先从 dict 运行，再保存为 `my_graph.json`。 |
 | 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | yes | 加载示例 14 生成的 `my_graph.json`，把 5 翻倍为 10、100 翻倍为 200。请先运行 14；自定义节点类型在代码中注册。 |
 | 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | yes | `message_stream` 把 token 事件转成 LangChain 风格的块；五个脚本化 token 组成 `Octopuses have three hearts.` |
+| 75 | [`75_stream_modes.py`](75_stream_modes.py) | yes | 流模式：用 VALUES、UPDATES、EVENTS、DEBUG 四种模式观察同一次运行，并统计每种模式送达的事件。 |
 
 ### 智能体模式
 
