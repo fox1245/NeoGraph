@@ -147,6 +147,7 @@ Program은 Core 그래프를 내구성 있는 식별자, 예산, 승인(admissio
 | 75 | [`75_mcp_tool_errors.cpp`](75_mcp_tool_errors.cpp) | yes | MCP 실패: `isError` 결과와 JSON-RPC 오류는 프로토콜에서 서로 다른 응답입니다. 에이전트가 두 메시지를 읽고 스스로 바로잡습니다. |
 | 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | service | 리버스 엔지니어링 에이전트: stdio의 GhidraMCP로 스트립된 바이너리의 함수 이름을 복원합니다. Ghidra와 키가 필요합니다. |
 | 38 | [`38_a2a_server.cpp`](38_a2a_server.cpp) | yes | A2A 서버: 그래프를 SSE 스트리밍과 함께 A2A 0.3, 1.0으로 제공하고 자체 클라이언트로 호출합니다. `serve`를 주면 계속 대기합니다. |
+| 77 | [`77_a2a_dialects.cpp`](77_a2a_dialects.cpp) | yes | A2A 방언: 에이전트 카드가 JSON-RPC 1.0과 0.3을 나열합니다. 한 클라이언트는 카드에서 1.0을 고르고, 0.3만 적힌 카드를 받은 다른 클라이언트는 0.3을 고릅니다. |
 | 37 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes | A2A 클라이언트: 에이전트 카드를 가져오고 메시지를 보내며, `A2ACallerNode`로 그래프에서 원격 에이전트를 호출합니다. |
 | 39 | [`39_acp_server.cpp`](39_acp_server.cpp) | yes | stdio 기반 ACP 에이전트로, 편집기가 구동하는 형태입니다. `--self-test`는 initialize, session/new, session/prompt를 프로세스 안에서 실행합니다. |
 | 45 | [`45_grpc_server.cpp`](45_grpc_server.cpp) | paired | gRPC: `GraphEngine`을 `GraphService`로 제공합니다. 예제 53이 이를 동반 프로세스로 시작합니다(`-DNEOGRAPH_BUILD_GRPC=ON` 필요). |
