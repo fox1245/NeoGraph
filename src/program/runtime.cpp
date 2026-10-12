@@ -1829,8 +1829,15 @@ TerminalPublicationResult publish_terminal_record(const detail::RunControl& cont
                     stored_checkpoint && stored_checkpoint->metadata.is_object() &&
                     stored_checkpoint->metadata.value("neograph_program", std::string{}) ==
                         "terminal";
+                // A JavaScript command returned for reconciliation keeps the
+                // resources it reserved until the reconciliation settles them
+                // (#402, #403), whichever checkpoint the run carries.
+                const bool javascript_reconciliation =
+                    result.interrupt() && result.interrupt()->pending_effect &&
+                    !result.interrupt()->pending_input &&
+                    result.interrupt()->pending_effect->core_node() == "javascript";
                 if (result.status() == ProgramTerminalStatus::Interrupted && stored_checkpoint &&
-                    !synthetic_terminal_checkpoint) {
+                    !synthetic_terminal_checkpoint && !javascript_reconciliation) {
                     terminal_reservation = RunBudget{};
                 }
             }
@@ -8924,11 +8931,24 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
         completed && javascript_pending && javascript_pending->core_resume_operation_id;
     const bool reconcile_javascript_command =
         completed && javascript_pending && !javascript_pending->core_resume_operation_id;
+    // #403: a reconciled JavaScript command keeps the provider currency it
+    // reserved (tokens and money): what it spent is unknown. Its wall time and
+    // Core steps bound how long the run still executes, not what it may spend,
+    // and the command no longer runs, so they return to the run and a
+    // Completed reconcile continues main().
+    RunBudget released_execution;
+    if (reconcile_javascript_command) {
+        released_execution.wall_time_ms   = previous_journal->inflight_reservation.wall_time_ms;
+        released_execution.max_core_steps = previous_journal->inflight_reservation.max_core_steps;
+    }
+    RunBudget spent_reservation          = previous_journal->inflight_reservation;
+    spent_reservation.wall_time_ms       = 0;
+    spent_reservation.max_core_steps     = 0;
     const auto attempt_budget =
         completed && !reconcile_javascript_command
             ? restore_reserved_resources(available_budget,
                                          previous_journal->inflight_reservation)
-            : available_budget;
+            : restore_reserved_resources(available_budget, released_execution);
     const auto resumed_remaining =
         resume_javascript_core ? available_budget : attempt_budget;
     const auto resumed_reservation = (ambiguous || resume_javascript_core)
@@ -9042,8 +9062,7 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
             impl_->config.transitions->load_javascript_commands(owner_scope, run_id);
         command_entries.push_back(javascript_completion_entry(
             entries, *javascript_pending,
-            javascript_resume_terminal_result(*resolution.result,
-                                              previous_journal->inflight_reservation)));
+            javascript_resume_terminal_result(*resolution.result, spent_reservation)));
     }
     auto publication = attach_run_lineage(
         *impl_->config.transitions,

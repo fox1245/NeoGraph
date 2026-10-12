@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=93ce83e49b4277a01aaa5591748c2831f77556ba403e34be659fed7f56891e3b -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=06c19dfd1e0afbdf8dc5f56996cdde50decf8b00d112021dd33dc9fbe2b1f386 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -107,6 +107,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 수정됨
 
+- **Program: JavaScript 명령을 Completed로 조정하면 `main()`이 이어집니다 (#403).** 명령은 run의 남은 wall time과 Core 스텝 전부를 예약하는데 조정된 명령이 이를 그대로 가지고 있었으므로, `main()`은 조정 직후 `TimedOut`("Program wall-time budget (0 ms) expired")으로 끝났습니다. run이 앞선 명령의 체크포인트를 가지고 있을 때는 조정을 위한 일시 정지가 조정이 정산할 예약까지 풀어 버렸습니다. 이제 명령을 조정하면 그 wall time과 Core 스텝이 run에 돌아오고, 일시 정지는 조정 때까지 예약을 유지합니다. 명령이 예약한 토큰과 금액은 무엇을 썼는지 알 수 없으므로 소비된 것으로 남습니다.
 - **gRPC 체크포인트 실패가 더 이상 "체크포인트 없음"이 아닙니다.** `CheckpointService`는 로드할 때의 백엔드 장애에 "찾을 수 없음"으로, 목록에는 빈 목록으로 응답했기 때문에 재개된 실행이 조용히 처음부터 다시 시작했고, `GrpcCheckpointStore::delete_thread`는 실패한 삭제를 성공으로 보고했습니다. 이제 백엔드 실패는 클라이언트가 던지는 `UNAVAILABLE`이고, 실패한 삭제는 예외를 던지며, 형식이 잘못된 `SaveCheckpoint`는 `INVALID_ARGUMENT`입니다. `GrpcCheckpointStore`는 모든 RPC에(`set_rpc_timeout`, 기본 30초), `GrpcRemoteTool`은 모든 호출에(`set_call_timeout`, 기본 60초) 마감 시각을 둡니다.
 - **NeoGraph의 MCP 클라이언트는 기다림을 멈추면 서버에 알립니다.** 클라이언트가 포기한 요청은, 취소되었든 시간을 초과했든, 뒤이어 `notifications/cancelled`가 전송되므로(`initialize`는 제외) 서버가 작업을 멈출 수 있습니다. 예전에는 서버가 포기된 도구를 끝까지 실행했습니다.
 - **실행이 취소되면 진행 중인 MCP 호출이 멈춥니다.** `MCPTool`은 디스패처의 cancel token과 마감 시각을 무시했기 때문에, 실행을 취소하거나 시도 타임아웃이 나도 서버의 응답을 기다렸습니다(그러면 시도가 정지 마감 시각을 넘겨 `NG.EffectUncertain`으로 실패했습니다). 이제 stdio와 HTTP 모두에서 둘 다 지킵니다. 취소는 `CancelledException`(`cancellation_requested`), 마감 시각이나 요청 타임아웃은 `timed_out` 호출이며, 늦은 응답은 버려집니다. `grpc::GrpcRemoteTool`도 같은 규칙을 따릅니다. 실행의 cancel token이 그 RPC를 취소하고, 실행의 마감 시각이 RPC 마감 시각이 됩니다.

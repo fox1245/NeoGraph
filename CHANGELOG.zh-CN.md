@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=93ce83e49b4277a01aaa5591748c2831f77556ba403e34be659fed7f56891e3b -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=06c19dfd1e0afbdf8dc5f56996cdde50decf8b00d112021dd33dc9fbe2b1f386 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -109,6 +109,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 
+- **Program：以 Completed 协调 JavaScript 命令后 `main()` 会继续（#403）。** 命令会预留 run 剩余的全部 wall time 和 Core 步数，而被协调的命令一直保留着它们，因此 `main()` 在协调后立即以 `TimedOut`（"Program wall-time budget (0 ms) expired"）结束；当 run 带有前一个命令的检查点时，用于协调的暂停还会释放协调本应结算的预留。现在协调一个命令会把其 wall time 和 Core 步数还给 run，暂停也会一直保留预留直到协调。命令预留的 token 和金额仍视为已花费，因为无法知道它用了多少。
 - **gRPC 检查点失败不再表现为“没有检查点”。** `CheckpointService` 过去在加载时对后端故障回答“未找到”、对列表回答空列表，因此恢复的运行会悄悄从头开始，`GrpcCheckpointStore::delete_thread` 也会把失败的删除报告为成功。现在后端失败为 `UNAVAILABLE`，客户端会抛出异常；失败的删除会抛出异常；格式错误的 `SaveCheckpoint` 为 `INVALID_ARGUMENT`。`GrpcCheckpointStore` 为每个 RPC（`set_rpc_timeout`，默认 30 秒）、`GrpcRemoteTool` 为每次调用（`set_call_timeout`，默认 60 秒）设置截止时间。
 - **NeoGraph 的 MCP 客户端在停止等待时会告知服务器。** 客户端放弃的请求，无论是取消还是超时，随后都会发送 `notifications/cancelled`（`initialize` 除外），使服务器可以停止工作；过去服务器会把被放弃的工具运行到底。
 - **运行被取消时，进行中的 MCP 调用会停止。** `MCPTool` 过去忽略分发器的 cancel token 与截止时间，因此取消运行或发生尝试超时时仍会等待服务器的应答（于是尝试会越过停止截止时间并以 `NG.EffectUncertain` 失败）。现在它在 stdio 与 HTTP 上都遵守二者：取消为 `CancelledException`（`cancellation_requested`），截止时间或请求超时为 `timed_out` 调用，迟到的响应会被丢弃。`grpc::GrpcRemoteTool` 遵循同一规则：运行的 cancel token 会取消其 RPC，运行截止时间即为 RPC 截止时间。
