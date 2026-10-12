@@ -21,11 +21,11 @@ NeoGraph는 1.0 이전 단계입니다. 보안 수정은 먼저 `master`에 반�
 저장소의 **Security** 탭에서 **Report a vulnerability**를 선택하면 됩니다
 (<https://github.com/fox1245/NeoGraph/security/advisories/new>).
 
-가능하면 다음을 포함해 주십시오.
+가능하면 다음 내용을 포함해 주십시오.
 
 - 영향을 받는 버전이나 커밋
-- 구성 요소: 코어 엔진, Program 런타임, Python 바인딩, MCP·A2A·ACP·gRPC 서버나
-  클라이언트, 체크포인트 저장소, SchemaProvider 연동
+- 해당 구성 요소: Core 엔진, Program 런타임, Python 바인딩, MCP·A2A·ACP·gRPC 서버나
+  클라이언트, 체크포인트 저장소, SchemaProvider 연동 중 어디인지
 - 최소 재현 방법과 관찰한 영향
 
 신고에 실제 API 키, 자격 증명, 개인정보를 넣지 마십시오.
@@ -36,22 +36,21 @@ Advisory로 공개하며, 해당하면 CVE도 발급합니다.
 
 ## 범위
 
-대상: 이 저장소의 NeoGraph 소스, 배포된 wheel, 그리고 NeoGraph가 배포하는
-형태의 vendored 서드파티 코드(예: QuickJS, cpp-httplib) 중 NeoGraph를 통해
-도달할 수 있는 문제.
+대상: 이 저장소의 NeoGraph 소스, 배포된 wheel, 그리고 NeoGraph가 포함해서 배포하는
+서드파티 코드(예: QuickJS, cpp-httplib) 중 NeoGraph를 통해 도달할 수 있는 문제.
 
 대상 아님: NeoGraph가 노출하지 않는 서드파티 의존성의 문제(해당 업스트림에
-신고해 주십시오), `docs/promo` 아래의 홍보 영상 도구, 그리고 사용법을 보여 주는
-용도인 예제(강화된 배포 구성이 아님).
+신고해 주십시오), `docs/promo` 아래의 홍보 영상 도구, 그리고 예제입니다. 예제는
+사용법을 보여 주기 위한 것이며 보안을 강화한 배포 구성이 아닙니다.
 
 ## 보안 모델 요약
 
 - Program 소스와 그래프 정의는 코드처럼 다뤄야 합니다. 신뢰할 수 있는
-  작성자에게서 받거나 admission 정책을 거쳐 승인하고, 실행 예산으로 비용을
-  제한하십시오.
+  작성자에게서 받거나 승인(admission) 정책을 거친 것만 받아들이고, 실행 예산으로
+  비용을 제한하십시오.
 - 도구 결과와 모델 출력은 신뢰할 수 없는 데이터입니다. 모델이 주입된 지시를
-  거부하리라 기대하지 말고, 효과가 있는 도구는 ToolGate와 Hook으로 통제하십시오.
+  거부해 주리라 기대하지 말고, 부작용이 있는 도구는 ToolGate와 Hook으로 통제하십시오.
 - API 키는 환경 변수나 호스트 콜백으로 전달하고, Program이나 그래프 JSON 안에
-  넣지 마십시오. NeoGraph는 키를 로그, 이벤트, 와이어 오류에 쓰지 않습니다.
-- NeoGraph와 SchemaProvider transport의 외부 HTTPS 연결은 TLS 1.2 이상을
-  요구합니다.
+  넣지 마십시오. NeoGraph는 키를 로그, 이벤트, 와이어 오류에 기록하지 않습니다.
+- NeoGraph와 SchemaProvider 전송 계층이 외부로 나가는 HTTPS 연결에는 TLS 1.2 이상이
+  필요합니다.
