@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=f524f73607b8b4204a69d14712b12d8ff8a99fc570aa28fefc718128596ace28 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=6e06ce3442fe26741419620daf3ddca6dff54972a45513b02028956408358dc6 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -162,6 +162,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **Program：fork 在正确的保管下重放已记录的 provider 失败 (#398)。** 一个在带有 provider 证据的失败旁暂停的运行，无论该失败记录在命令日志中的收集式 `ng.all`（#395）里，还是在计划的 `settled_branches`（#386）里，其 fork 都会在与记录不匹配的 fork 保管下恢复该证据，因而以保管不匹配失败。现在 fork 和图迁移在携带此类记录时，都会把它从源运行的保管重新绑定到新运行的保管，因此重放会恢复证据（`result.failure.provider_outcome`），且不再发送任何内容。计划 `parallel` 会像 quorum 一样存储已结束分支的 provider 证据。
 - **Program：分支的 Core 节点失败时，计划 quorum 不再使运行失败 (#399)。** 节点抛出异常的分支曾被抛出 quorum，成为运行的失败。现在它是一个失败分支，带有运行本应报告的代码、节点、尝试次数和 provider 证据；当后续分支使 quorum 暂停时它会被记录，并在恢复时重放。取消和丢失的检查点仍会结束运行，#392/#397 的优先级保持不变。
 - **Program：恢复的 join 不再取消它所答复的成员 (#400)。** 在失败成员旁为对账而暂停的（#397）fail-fast `ng.all`、`ng.race` 或 `ng.quorum`，恢复时会立即重放该失败成员；其完成会结束 join，并在对账成员的节点仍在消费答复时取消它，导致效果从未落定。现在被答复的成员先运行到结束，然后由重放的失败结束 join。
+- **Program：恢复的 join 先确定它重放的成员 (#400)。** 恢复时 JavaScript join 按声明顺序启动成员，因此重放暂停前所记录结果的成员，可能在恢复所答复的成员已经结束之后才被登记。结果因此取决于时序：在失败成员旁为对账而暂停的 `ng.race`，可能以被答复成员的值完成，而不是以重放的失败结束。现在恢复的 join 先启动它重放的成员，然后是恢复所答复的成员，然后是其余成员。重放的成员总在任何运行的成员之前确定，因此 race 的胜者和 fail-fast join 的失败在每次运行中都相同。
 - **Program：暂停的 join 中普通问题不再优先于不确定效果 (#401)。** 无失败的 join（无论是否为收集式）或计划级 `parallel` 会在声明顺序中第一个暂停的成员上暂停，因此普通问题先于因不确定效果而暂停的成员被询问。现在它与 Core 步骤（#392）一样先询问对账。收集式 `ng.all` 的例外（它等待所有成员，因此在失败旁也会在暂停的成员上暂停）被保留、记录在文档中并由测试固定。
 - **Program：分支立即结束的 plan `parallel` 或 `race` 不再挂起。** plan 级 `parallel` 或 `race` 在运行它的调度线程上等待分支，而分支通过一个非线程安全的 asio channel 在 strand 上发出完成信号。当等待正在另一个调度线程上开始时，若最后一个分支恰好发出信号，该信号可能丢失，run 永远不会结束；在 Windows 上，立即返回的分支就这样挂起了。现在等待与其他 join 一样在分支发出信号的 strand 上运行，而在登记成员期间就已决定的 JavaScript join 也从该 strand 发出信号。
 - **Core：进程中途停止的恢复可以重做。** 进行恢复的宿主会用相同的值和中断 id 重做它正在执行的恢复。当 step 只因一个中断而暂停、且被回答的节点或 `Send` 在进程停止前已完成时，重做会失败：指定该中断会抛出 `std::invalid_argument`（"is not pending"），按默认回答则会把值交给该 step 中第一个尚未运行的 `Send`，而它从未提问。现在这种检查点的中断就是它暂停的那个节点，无论是否已完成；指定已完成 `Send` 的重做也会被接受，已完成的工作会被重放。由恢复模型测试框架发现。

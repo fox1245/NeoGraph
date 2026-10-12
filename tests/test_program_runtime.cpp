@@ -10696,6 +10696,95 @@ TEST(ProgramRuntimeTest, JavaScriptJoinsPauseForReconciliationBesideAFailedMembe
 #endif  // NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS
 
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+namespace {
+std::atomic<bool> answered_member_launched{false};
+
+// Holds the launch of a replayed member that comes after the member the resume
+// answers until that member has settled its effect and its completion has
+// been handled: the launch order in which the replayed failure is registered
+// last. A replayed member launched first is not held.
+void hold_replay_until_the_answered_member_settles(std::size_t, bool replayed) {
+    if (!replayed) {
+        answered_member_launched.store(true);
+        return;
+    }
+    if (!answered_member_launched.load()) return;
+    for (int waited = 0; waited < 5000 && join_member_runs_of("reconcile:settled") == 0; ++waited)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+}
+}  // namespace
+
+TEST(ProgramRuntimeTest, AResumedJavaScriptJoinEndsWithItsReplayedFailureInEveryLaunchOrder) {
+    // A join paused for reconciliation beside a member that failed (#397).
+    // On resume the failure replays and the answered member settles its
+    // effect first (#400); the failure finished before the pause, so it ends
+    // the join, and wins a race. That must not depend on whether the replayed
+    // member is registered before or after the answered member finishes: the
+    // launch of a replay that comes after the answered member is held here
+    // until that member has finished.
+    struct Case {
+        const char* label;
+        const char* body;
+        const char* failure;
+        unsigned    failed_runs;
+    };
+    const Case cases[] = {
+        {"race", R"JS(
+    yield ng.race([
+        ng.callCore("main", {value: "reconcile"}, "race:reconcile"),
+        ng.callCore("main", {value: "fail-slow"}, "race:fail")
+    ], {max_in_flight: 2}, "reconcile:race");
+    return {unreachable: true};
+)JS",
+         "join member failure sentinel", 1},
+        {"all", R"JS(
+    yield ng.all([
+        ng.callCore("main", {value: "reconcile"}, "all:reconcile"),
+        ng.callCore("main", {value: "fail-slow"}, "all:fail")
+    ], {max_in_flight: 2}, "reconcile:all");
+    return {unreachable: true};
+)JS",
+         "join member failure sentinel", 1},
+        {"quorum", R"JS(
+    yield ng.quorum([
+        ng.callCore("main", {value: "reconcile"}, "quorum:reconcile"),
+        ng.callCore("main", {value: "fail-slow"}, "quorum:fail-a"),
+        ng.callCore("main", {value: "fail-slow"}, "quorum:fail-b")
+    ], {required_successes: 2, max_in_flight: 3}, "reconcile:quorum");
+    return {unreachable: true};
+)JS",
+         "quorum", 2},
+    };
+    for (const auto& item : cases) {
+        SCOPED_TRACE(item.label);
+        reset_join_member_runs();
+        answered_member_launched.store(false);
+        AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+        const auto      paused = run_join(fixture, item.body);
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+        ASSERT_TRUE(asks_to_reconcile(paused));
+
+        neograph::program::detail::set_join_member_launch_observer_for_testing(
+            &hold_replay_until_the_answered_member_settles);
+        struct ResetObserver {
+            ~ResetObserver() {
+                neograph::program::detail::set_join_member_launch_observer_for_testing(nullptr);
+            }
+        } reset_observer;
+        const auto done = approve(fixture, paused);
+
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Failed) << failure_detail(done);
+        EXPECT_NE(failure_detail(done).find(item.failure), std::string::npos)
+            << failure_detail(done);
+        EXPECT_EQ(join_member_runs_of("fail-slow"), item.failed_runs) << "the failures replay";
+        EXPECT_EQ(join_member_runs_of("reconcile:settled"), 1U)
+            << "the answered member settles once";
+    }
+}
+#endif  // NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS
+
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
 TEST(ProgramRuntimeTest, AForkOfAJavaScriptMainContinuesItsPausedCallCore) {
     // #395: a fork of a JavaScript main() paused in a callCore used to start
     // main() over: the commands that finished ran again, the paused call

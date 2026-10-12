@@ -591,6 +591,8 @@ bool reconciliation_pause(const PlanExecution& paused) {
            payload.value("kind", std::string()) == "tool_effect_reconciliation";
 }
 
+std::atomic<JoinMemberLaunchObserver> join_member_launch_observer{nullptr};
+
 // A join member that settled before its join paused, replayed from its
 // recorded result by the attempt that resumes the join (#380).
 asio::awaitable<PlanExecution> replay_settled_member(PlanExecution settled) {
@@ -1698,6 +1700,10 @@ CommandBudgetReservation reserve_command_resources(RunBudget available) noexcept
     available.monetary_microunits   = 0;
     available.max_core_steps        = 0;
     return CommandBudgetReservation{std::move(available), std::move(reservation)};
+}
+
+void set_join_member_launch_observer_for_testing(JoinMemberLaunchObserver observer) noexcept {
+    join_member_launch_observer.store(observer, std::memory_order_release);
 }
 
 asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
@@ -4922,6 +4928,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     std::vector<bool>                                  finished;
                     std::vector<std::shared_ptr<graph::CancelToken>>   tokens;
                     std::vector<std::shared_ptr<JavaScriptScopeState>> scopes;
+                    // #400: the members in launch order (the members this attempt
+                    // replays, then the member it answers, then the others, each
+                    // in declaration order), and the position of the next one.
+                    std::vector<std::size_t>                           order;
                     std::size_t                                        next                = 0;
                     std::size_t                                        active              = 0;
                     std::size_t                                        completed           = 0;
@@ -4957,6 +4967,25 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         exact_core_resume->first.starts_with(member_operation + "/"))
                         state->answered = index;
                 }
+                // #400: a member this attempt replays finished before the pause,
+                // so it settles before any member that runs now. The replayed
+                // members launch first, then the member the resume answers,
+                // then the others. The replays reach the completion strand
+                // first and complete without leaving it, so the order in which
+                // members settle (a race's winner, a fail-fast join's failure)
+                // does not depend on how fast the members that run are. The
+                // first launches are every replay, which runs nothing, and up
+                // to max_in_flight others, the answered member among them.
+                std::size_t replay_count = 0;
+                for (std::size_t index = 0; index < members.size(); ++index)
+                    if (state->replayed[index]) state->order.push_back(index), ++replay_count;
+                if (state->answered && !state->replayed[*state->answered])
+                    state->order.push_back(*state->answered);
+                for (std::size_t index = 0; index < members.size(); ++index)
+                    if (!state->replayed[index] && index != state->answered)
+                        state->order.push_back(index);
+                const auto first_launches =
+                    replay_count + std::min<std::size_t>(cap, members.size() - replay_count);
                 const auto completion_executor = asio::make_strand(executor);
                 state->completion =
                     std::make_shared<asio::experimental::channel<void(asio::error_code, int)>>(
@@ -4980,6 +5009,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 // stack-local std::function.
                 auto launch_member = std::make_shared<std::function<void(std::size_t)>>();
                 *launch_member     = [&](std::size_t index) {
+                    if (const auto observer =
+                            join_member_launch_observer.load(std::memory_order_acquire))
+                        observer(index, replayed[index].has_value());
                     {
                         std::lock_guard lock(state->mutex);
                         state->started[index] = true;
@@ -5025,8 +5057,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                     // answer and settles its effect first. It is taken
                                     // when the answered member finishes.
                                     const bool answering =
-                                        state->answered && *state->answered < state->next &&
-                                        !state->finished[*state->answered];
+                                        state->answered && !state->finished[*state->answered];
                                     const bool hold =
                                         answering && (state->replayed[index] || state->held);
                                     const bool release = state->held && state->answered &&
@@ -5088,9 +5119,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                     if (state->initial_launches_registered && !state->terminal &&
                                         !state->paused && !state->selection_scheduled &&
                                         !state->held &&
-                                        !post_selection && state->next < members.size()) {
-                                        while (state->next < members.size() && state->active < cap)
-                                            to_launch.push_back(state->next++);
+                                        !post_selection && state->next < state->order.size()) {
+                                        while (state->next < state->order.size() &&
+                                               state->active < cap)
+                                            to_launch.push_back(state->order[state->next++]);
                                     }
                                     signal_completion =
                                         to_launch.empty() && settled(*state, members.size());
@@ -5167,9 +5199,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                     state->completion->try_send(asio::error_code(), 1);
                             }));
                 };
-                state->next = cap;
-                for (std::size_t index = 0; index < cap; ++index)
-                    (*launch_member)(index);
+                state->next = first_launches;
+                for (std::size_t position = 0; position < first_launches; ++position)
+                    (*launch_member)(state->order[position]);
                 std::vector<std::size_t> deferred_launches;
                 bool                     signal_completion = false;
                 {
@@ -5178,9 +5210,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     // siblings. Do not permit that completion to close the join early.
                     state->initial_launches_registered = true;
                     if (!state->terminal && !state->paused && !state->selection_scheduled &&
-                        !state->held && state->next < members.size()) {
-                        while (state->next < members.size() && state->active < cap)
-                            deferred_launches.push_back(state->next++);
+                        !state->held && state->next < state->order.size()) {
+                        while (state->next < state->order.size() && state->active < cap)
+                            deferred_launches.push_back(state->order[state->next++]);
                     }
                     signal_completion =
                         deferred_launches.empty() && settled(*state, members.size());

@@ -382,6 +382,13 @@ std::string javascript_command_effect_identity(std::string_view         bundle_i
                                                std::uint64_t            command_ordinal,
                                                const JavaScriptCommand& command);
 
+/// Test seam: when set, called on the thread that launches each member of a
+/// JavaScript join, right before the launch, with the member's index and
+/// whether it replays a recorded result. A test may hold a launch to force the
+/// order in which members settle. Null outside tests.
+using JoinMemberLaunchObserver = void (*)(std::size_t member_index, bool replayed);
+void set_join_member_launch_observer_for_testing(JoinMemberLaunchObserver observer) noexcept;
+
 asio::awaitable<void> execute_run_attempt(
     std::shared_ptr<RunControl> control,
     json                        input,
