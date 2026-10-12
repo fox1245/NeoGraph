@@ -395,6 +395,65 @@ TEST(MCPStdioAsync, ShutdownDoesNotWaitForAServerThatStaysAlive) {
     EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(10));
 }
 
+TEST(MCPStdioAsync, AReplyIsDeliveredWhenTheServerExitsRightAfterIt) {
+    // A hardened session ends when the server's stdout closes. The reader sees
+    // that as soon as it has routed the reply, and the caller's coroutine may
+    // not have resumed yet (here its thread is busy while the reply comes):
+    // the reply still belongs to the call. It used to fail with "shut down".
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    const char* script =
+        "import json,sys,time\n"
+        "def send(o): print(json.dumps(o),flush=True)\n"
+        "for line in sys.stdin:\n"
+        "  m=json.loads(line)\n"
+        "  if 'id' not in m: continue\n"
+        "  if m['method']=='initialize':\n"
+        "    send({'jsonrpc':'2.0','id':m['id'],'result':{"
+        "'protocolVersion':'2025-11-25','capabilities':{'tools':{}},"
+        "'serverInfo':{'name':'once','version':'1'}}})\n"
+        "  else:\n"
+        "    time.sleep(0.3)\n"
+        "    send({'jsonrpc':'2.0','id':m['id'],'result':{"
+        "'content':[{'type':'text','text':'done'}]}})\n"
+        "    sys.exit(0)\n";
+    mcp::StdioClientConfig config;
+    config.argv = {python_cmd(), "-c", script};
+    mcp::MCPClient client(std::move(config));
+    ASSERT_TRUE(client.initialize("exits-after-reply"));
+
+    json call;
+    call["name"] = "probe";
+    call["arguments"] = json::object();
+    asio::io_context io;
+    json reply;
+    std::string failure;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            asio::co_spawn(
+                io,
+                [&]() -> asio::awaitable<void> {
+                    try {
+                        reply = co_await client.rpc_call_async("tools/call", call);
+                    } catch (const std::exception& error) {
+                        failure = error.what();
+                    }
+                },
+                asio::detached);
+            // Let the request go out; then keep this thread busy while the
+            // server (which waits 0.3 s) replies and exits.
+            asio::steady_timer pause(io, std::chrono::milliseconds(100));
+            co_await pause.async_wait(asio::use_awaitable);
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        },
+        asio::detached);
+    io.run();
+
+    EXPECT_EQ(failure, "");
+    ASSERT_TRUE(reply.is_object()) << "no reply";
+    EXPECT_EQ(reply.at("content").at(0).at("text"), "done");
+}
+
 TEST(MCPStdioAsync, DeadSubprocessIsAConnectionFailure) {
     if (!python3_available()) GTEST_SKIP() << "python3 not available";
     mcp::MCPClient client({python_cmd(), "-c", "import sys; sys.exit(0)"});

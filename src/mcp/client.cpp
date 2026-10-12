@@ -1544,7 +1544,11 @@ asio::awaitable<json> StdioSession::exchange(
         if (result.index() == 1) throw_rpc_bound(deadline, cancel_token);
         auto captured = std::get<0>(std::move(result));
         if (captured.error) std::rethrow_exception(captured.error);
-        check_open();
+        // The reply arrived, so it is this call's result even if the session
+        // has ended since: the reader keeps reading after it routes a reply,
+        // and a hardened session ends at the server's EOF, which comes at once
+        // from a server that exits after replying, before this coroutine
+        // resumes. The next call finds the session ended.
         co_return std::move(*captured.value);
     } catch (const std::system_error& e) {
         const bool stopped = worker_.stopped.load() || closing_.load();
