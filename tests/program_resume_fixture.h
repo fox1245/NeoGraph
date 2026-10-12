@@ -706,6 +706,42 @@ private:
 
 namespace {
 
+/// The Core of a typed plan: the "work" node over the channels a
+/// JavaScript program declares.
+json core_definition() {
+    return json{{"schema_version", 1},
+                {"name", "main"},
+                {"channels", json{{"value", json{{"reducer", "overwrite"}, {"initial", ""}}},
+                                  {"k", json{{"reducer", "overwrite"}, {"initial", 0}}},
+                                  {"out", json{{"reducer", "overwrite"}, {"initial", ""}}},
+                                  {"side", json{{"reducer", "overwrite"}, {"initial", ""}}},
+                                  {"side_out", json{{"reducer", "overwrite"}, {"initial", ""}}}}},
+                {"nodes", json{{"work", json{{"type", "rm.step"}}}}},
+                {"edges", json::array({json{{"from", "__start__"}, {"to", "work"}},
+                                       json{{"from", "work"}, {"to", "__end__"}}})},
+                {"conditional_edges", json::array()}};
+}
+
+/// A typed plan document whose root is `root` (call_core operations need no
+/// fields), over core_definition(), within Host::budget().
+json plan_program(json root) {
+    root["name"]       = "main";
+    root["definition"] = core_definition();
+    const auto bound   = [](const char* resource, std::uint64_t minimum, std::uint64_t maximum) {
+        return json{{"resource", resource}, {"minimum", minimum}, {"maximum", maximum}};
+    };
+    return json{{"program_schema_version", 2U},
+                {"input_contract", {{"schema_version", 1}, {"schema", json::object()}}},
+                {"output_contract", {{"schema_version", 1}, {"schema", json::object()}}},
+                {"root", std::move(root)},
+                {"declared_budget_requirements",
+                 json::array({bound("wall_time_ms", 1, 100000), bound("model_tokens", 0, 10000000),
+                              bound("monetary_microunits", 0, 1000000000), bound("max_concurrency", 1, 4),
+                              bound("max_program_operations", 1, 32), bound("max_core_steps", 1, 64),
+                              bound("max_dynamic_compiles", 0, 0), bound("max_child_depth", 0, 1),
+                              bound("max_total_children", 0, 1)})}};
+}
+
 std::string javascript_program(const std::string& body) {
     return "export function define() {\n"
            "  const graph = ng.graph(\"main\");\n"

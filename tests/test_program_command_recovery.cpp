@@ -14,6 +14,8 @@
 // #402: a call that saved a Core checkpoint before the process stopped
 // continues from it on reconnect; only a call without one is reconciled.
 // #403: reconciling a stopped call as Completed continues main().
+// #404: a plan that stopped before its first Core checkpoint is reconciled,
+// as a JavaScript call in that state is, instead of P_RUN_RECOVERY_BLOCKED.
 
 #include "program_resume_fixture.h"
 
@@ -245,3 +247,34 @@ TEST(ProgramCommandRecovery, AStopInsideAJoinContinuesItsMembers) {
 
 #endif
 
+TEST(ProgramCommandRecovery, APlanStoppedBeforeItsFirstCheckpointAsksToReconcile) {
+    // #404: a plan sequence stops after it started, before its first call
+    // saved a checkpoint. Reconnect returns the run for reconciliation of that
+    // call instead of P_RUN_RECOVERY_BLOCKED; a Completed reconcile goes on to
+    // the next call.
+    StoppedRun stopped([] {
+        return ProgramSource::from_cpp_builder(
+            "stopped-plan", 2,
+            plan_program(json{{"op", "sequence"},
+                              {"children", json::array({json{{"op", "call_core"}}, json{{"op", "call_core"}}})}}));
+    },
+                       json{{"value", "ok:a"}}, after_nth("publish running", 1));
+    ASSERT_FALSE(stopped.world.crash.taken_at.empty());
+    const auto run_id = stopped.world.run_id();
+    const auto paused = stopped.recovered->reconnect(run_id);
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << describe(paused);
+    ASSERT_TRUE(paused.interrupt()->pending_effect) << describe(paused);
+    EXPECT_EQ(paused.interrupt()->pending_effect->operation_id(), "root.0");
+    const auto call_id = paused.interrupt()->pending_effect->call_id();
+    const auto unknown =
+        stopped.recovered->reconcile(run_id, call_id, ProgramEffectReconciliation::Unknown, std::nullopt);
+    ASSERT_EQ(unknown.status(), ProgramTerminalStatus::AmbiguousEffect) << describe(unknown);
+    const auto next = stopped.recovered->reconcile(run_id, call_id, ProgramEffectReconciliation::Completed,
+                                                   json{{"out", "reconciled"}});
+    // The next call of the sequence takes the reconciled result as its input,
+    // which sets no channel: it asks (StepNode).
+    ASSERT_EQ(next.status(), ProgramTerminalStatus::Interrupted) << describe(next);
+    ASSERT_TRUE(next.interrupt()->pending_input) << describe(next);
+    EXPECT_EQ(next.interrupt()->pending_input->operation_id(), "root.1");
+    EXPECT_EQ(body_runs(stopped.world, "ok:a"), 0) << "recovery does not run the stopped call";
+}

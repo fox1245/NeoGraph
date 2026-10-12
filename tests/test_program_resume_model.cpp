@@ -414,20 +414,6 @@ struct PlanSpec {
     std::vector<Beh> steps;  // one per call position
 };
 
-json core_definition() {
-    return json{{"schema_version", 1},
-                {"name", "main"},
-                {"channels", json{{"value", json{{"reducer", "overwrite"}, {"initial", ""}}},
-                                  {"k", json{{"reducer", "overwrite"}, {"initial", 0}}},
-                                  {"out", json{{"reducer", "overwrite"}, {"initial", ""}}},
-                                  {"side", json{{"reducer", "overwrite"}, {"initial", ""}}},
-                                  {"side_out", json{{"reducer", "overwrite"}, {"initial", ""}}}}},
-                {"nodes", json{{"work", json{{"type", "rm.step"}}}}},
-                {"edges", json::array({json{{"from", "__start__"}, {"to", "work"}},
-                                       json{{"from", "work"}, {"to", "__end__"}}})},
-                {"conditional_edges", json::array()}};
-}
-
 json plan_document(const PlanSpec& plan) {
     const json call{{"op", "call_core"}};
     json       root;
@@ -443,21 +429,7 @@ json plan_document(const PlanSpec& plan) {
                                                              {"branches", json::array({call, call})}}})}};
             break;
     }
-    root["name"]       = "main";
-    root["definition"] = core_definition();
-    const auto bound   = [](const char* resource, std::uint64_t minimum, std::uint64_t maximum) {
-        return json{{"resource", resource}, {"minimum", minimum}, {"maximum", maximum}};
-    };
-    return json{{"program_schema_version", 2U},
-                {"input_contract", {{"schema_version", 1}, {"schema", json::object()}}},
-                {"output_contract", {{"schema_version", 1}, {"schema", json::object()}}},
-                {"root", std::move(root)},
-                {"declared_budget_requirements",
-                 json::array({bound("wall_time_ms", 1, 100000), bound("model_tokens", 0, 10000000),
-                              bound("monetary_microunits", 0, 1000000000), bound("max_concurrency", 1, 4),
-                              bound("max_program_operations", 1, 32), bound("max_core_steps", 1, 64),
-                              bound("max_dynamic_compiles", 0, 0), bound("max_child_depth", 0, 1),
-                              bound("max_total_children", 0, 1)})}};
+    return plan_program(std::move(root));
 }
 
 std::string plan_steps(const PlanSpec& plan) { return std::string(to_string(plan.steps[0])) + ":a"; }

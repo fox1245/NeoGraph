@@ -928,6 +928,28 @@ ProgramPendingEffect javascript_command_pending_effect(const RunControl&        
     return ProgramPendingEffect(std::move(pending));
 }
 
+// #404: the reconciliation a plan operation that may have started before the
+// process stopped asks for. Its result is the operation's output.
+ProgramPendingEffect plan_operation_pending_effect(const RunControl&  control,
+                                                   const std::string& operation_id) {
+    const auto               effect_identity = detail::sha256_identity(
+        "program-plan-operation-effect/v1",
+        detail::canonical_json_bytes(json{{"bundle_id", control.bundle_id},
+                                          {"run_id", control.run_id},
+                                          {"operation_id", operation_id}}));
+    ProgramPendingEffectData pending;
+    pending.operation_id         = operation_id;
+    pending.call_id              = effect_identity;
+    pending.effect_id            = effect_identity;
+    pending.result_schema        = json::object();
+    pending.payload              = json{{"operation_id", operation_id}};
+    pending.effect_mode          = EffectMode::Brokered;
+    pending.idempotency          = ProgramEffectIdempotency::NonIdempotent;
+    pending.core_node            = "plan";
+    pending.core_interrupt_value = json{{"operation_id", operation_id}};
+    return ProgramPendingEffect(std::move(pending));
+}
+
 json javascript_command_terminal_result(const PlanExecution& result,
                                         std::string_view     status,
                                         const ProgramUsage&  usage) {
@@ -1935,6 +1957,14 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         std::optional<json>        resume_answer;
         json                       replay_records = json::object();
         std::set<std::string>      replayed_records;
+        if (!checkpoint_id && !control_source && !control->recorded_replay) {
+            // #404: a plan operation reconciled as completed replays its result.
+            const auto durable = control->transitions->load(control->owner_scope, control->run_id);
+            if (durable && durable->pending_effect() &&
+                durable->pending_effect()->core_node() == "plan") {
+                if (const auto settled = durable->settled_branches()) replay_records = *settled;
+            }
+        }
         if (checkpoint_id && !control_source && !control->recorded_replay) {
             const auto durable = control->transitions->load(control->owner_scope, control->run_id);
             if (durable && durable->exact_checkpoint() &&
@@ -2141,6 +2171,38 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         // #402: the checkpoints a recovered command's calls continue from;
         // their content is not the run's exact checkpoint.
         std::set<std::string> recovery_checkpoint_ids;
+        // #404: a plan that stopped before it published any checkpoint. Its
+        // calls run again in plan order; the n-th call on a Core thread
+        // continues the n-th Core run that thread holds (each run's
+        // checkpoints chain from its first, which has no parent) from its
+        // latest checkpoint. A call whose run saved nothing may have started:
+        // the host reconciles it. So does one whose latest checkpoint is an
+        // interrupt_before or interrupt_after pause, which a resume would pass.
+        std::map<std::string, std::size_t> recovery_calls_on_thread;
+        const auto plan_recovery_checkpoint =
+            [&](const std::string& thread) -> std::optional<std::string> {
+            std::size_t index = 0;
+            {
+                std::lock_guard lock(plan_mutex);
+                index = recovery_calls_on_thread[thread]++;
+            }
+            const auto history = control->checkpoints->list(thread, 100000);
+            std::vector<const graph::Checkpoint*> runs;
+            for (auto stored = history.rbegin(); stored != history.rend(); ++stored) {
+                if (stored->parent_id.empty() || runs.empty()) runs.push_back(&*stored);
+                else runs.back() = &*stored;
+            }
+            if (index >= runs.size()) return std::nullopt;
+            const auto* latest = runs[index];
+            if (latest->interrupt_phase == graph::CheckpointPhase::Before ||
+                latest->interrupt_phase == graph::CheckpointPhase::After)
+                return std::nullopt;
+            {
+                std::lock_guard lock(plan_mutex);
+                recovery_checkpoint_ids.insert(latest->id);
+            }
+            return latest->id;
+        };
         auto run_core = [&](std::string operation_id, json core_input,
                              std::optional<std::string> resume, std::string thread_id,
                              std::shared_ptr<graph::CancelToken> operation_token)
@@ -3136,9 +3198,27 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             }
             if (op == ProgramOperationKind::CallCore) {
                 std::optional<std::string> resume;
+                bool                       recovered_call = false;
+                if (control->recover_plan_without_checkpoint && !control->recorded_replay) {
+                    // #404: continue the call's own Core run, answering nothing,
+                    // or have the host reconcile a call that saved nothing.
+                    auto continued = plan_recovery_checkpoint(thread_id);
+                    if (!continued) {
+                        PlanExecution held;
+                        held.status    = ProgramTerminalStatus::Interrupted;
+                        held.interrupt = ProgramInterrupt{
+                            "plan", json{{"operation_id", operation_id}}, std::nullopt,
+                            plan_operation_pending_effect(*control, operation_id)};
+                        co_return held;
+                    }
+                    resume         = std::move(continued);
+                    recovered_call = true;
+                    state          = json();
+                }
                 {
                     std::lock_guard lock(plan_mutex);
-                    if (resume_id && (!resume_operation || *resume_operation == operation_id)) {
+                    if (!recovered_call && resume_id &&
+                        (!resume_operation || *resume_operation == operation_id)) {
                         resume = std::move(resume_id);
                         resume_id.reset();
                         // #386: the answered call continues its checkpoint, on

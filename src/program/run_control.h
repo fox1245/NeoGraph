@@ -208,6 +208,11 @@ public:
     std::shared_ptr<RecordedRunReplay> recorded_replay;
     /// Runtime-owned custody installed before any Core execution starts.
     std::shared_ptr<sp::NativeArchive> native_history_archive;
+    /// #404: set by reconnect on a typed plan that stopped before its first
+    /// Core checkpoint. The attempt dispatches nothing: it returns the run for
+    /// reconciliation of the plan operation that may have started, as a
+    /// JavaScript callCore without a checkpoint is.
+    bool recover_plan_without_checkpoint = false;
 
     bool              cancel(CancellationCause cause) noexcept;
     CancellationCause cancellation_cause() const noexcept;

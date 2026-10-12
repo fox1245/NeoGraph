@@ -8218,6 +8218,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         const auto                 checkpoint = record->exact_checkpoint();
         std::string                recovered_thread_id;
         std::optional<std::string> resume_checkpoint_id;
+        bool                       recover_plan_without_checkpoint = false;
         if (checkpoint) {
             if (pinned->root->compiled_plan_identity != checkpoint->core_generation_id ||
                 pinned->root->core_name != checkpoint->core_name) {
@@ -8245,13 +8246,13 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             // Core checkpoint: every prior command result is fed back into a
             // fresh generator, and a pending head is surfaced as an external
             // effect instead of being redispatched.
-            if (!pinned->bundle.control_source() &&
-                !checkpointless_replay_safe(pinned->bundle.typed_orchestration_plan())) {
-                throw_runtime_diagnostic("P_RUN_RECOVERY_BLOCKED",
-                                         "Running Program has no checkpoint and is not replay-safe "
-                                         "without Core dispatch",
-                                         json{{"run_id", std::string(run_id)}});
-            }
+            // #404: a typed plan that is not replay-safe stopped before its
+            // first Core checkpoint. Like a JavaScript callCore in that state,
+            // the operation it may have started is reconciled, not dispatched
+            // again.
+            recover_plan_without_checkpoint =
+                !pinned->bundle.control_source() &&
+                !checkpointless_replay_safe(pinned->bundle.typed_orchestration_plan());
             recovered_thread_id =
                 core_thread_identity(run_id, pinned->root->compiled_plan_identity);
         }
@@ -8315,6 +8316,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             std::shared_ptr<ProgramEventSink>{}, impl_->deadline_pool.get_executor(),
             impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions,
             std::nullopt, record->logical_run_id());
+        control->recover_plan_without_checkpoint = recover_plan_without_checkpoint;
         impl_->commit_active_child(control, global_quota);
         if (!record->invocation().parent_run_id.empty())
             impl_->bind_budgeted_child_completion(
@@ -8927,6 +8929,9 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
     const auto next_state = completed   ? ContinuationState::Running
                             : ambiguous ? ContinuationState::AmbiguousEffect
                                         : ContinuationState::Failed;
+    // #404: a plan operation that stopped before its first checkpoint, reconciled
+    // as completed, replays the result it was given; the plan runs on.
+    const bool reconcile_plan_operation = completed && pending->core_node() == "plan";
     const bool resume_javascript_core =
         completed && javascript_pending && javascript_pending->core_resume_operation_id;
     const bool reconcile_javascript_command =
@@ -9038,12 +9043,21 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
     }
     data.pending_input                    = previous->pending_input();
     data.pending_effect                   = update.value;
-    if (completed && (javascript_commands.empty() || resume_javascript_core))
+    if (completed && !reconcile_plan_operation &&
+        (javascript_commands.empty() || resume_javascript_core))
         data.attempt_resume = ProgramAttemptResume{checkpoint.checkpoint_id, *resolution.result};
     // The attempt that continues a paused plan replays what it recorded
     // (#384, #386); an effect left ambiguous keeps the records for the
     // reconciliation that completes it.
     if (completed || ambiguous) data.settled_branches = previous->settled_branches();
+    if (reconcile_plan_operation) {
+        json settled = data.settled_branches ? *data.settled_branches : json::object();
+        settled[pending->operation_id()] =
+            json{{"kind", "settled"},
+                 {"returned", false},
+                 {"result", javascript_resume_terminal_result(*resolution.result, RunBudget{})}};
+        data.settled_branches = std::move(settled);
+    }
     data.terminal_result                  = terminal;
     data.fork_receipt                     = previous->fork_receipt();
     data.fork_source_run_id               = previous->fork_source_run_id();
@@ -9143,12 +9157,16 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
         live_control->complete(std::move(failure));
         return ProgramHandle(std::move(live_control));
     }
-    auto attempt_input =
-        !javascript_commands.empty() ? previous->invocation().input : *resolution.result;
+    auto attempt_input = !javascript_commands.empty() || reconcile_plan_operation
+                             ? previous->invocation().input
+                             : *resolution.result;
     auto core_resume_value = javascript_pending && javascript_pending->core_resume_operation_id
                                  ? std::optional<json>{*resolution.result}
                                  : std::nullopt;
-    spawn_run_attempt(impl_->pool, live_control, std::move(attempt_input), checkpoint.checkpoint_id,
+    // #404: the plan runs again from its root, without a Core resume.
+    spawn_run_attempt(impl_->pool, live_control, std::move(attempt_input),
+                      reconcile_plan_operation ? std::optional<std::string>{}
+                                               : std::optional<std::string>{checkpoint.checkpoint_id},
                       impl_->config.host_admission, impl_->config.host_admission_resolver,
                       std::move(core_resume_value));
     return ProgramHandle(std::move(live_control));
