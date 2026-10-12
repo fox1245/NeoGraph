@@ -245,3 +245,39 @@ for (const sdk of ['sdk-1.32.1', 'client-2.3.1-legacy']) {
     }
   });
 }
+
+// A client that asks for 2024-11-05 gets that revision, as from the official SDK
+// servers, and only what it defines: no tool title, icons, annotations, execution,
+// _meta or outputSchema, no structuredContent, content blocks it lacks as text. The
+// v1 SDK offers its LATEST_PROTOCOL_VERSION, set to 2024-11-05 for the handshake.
+for (const transport of ['stdio', 'http']) {
+  test(`sdk-1.32.1 ${transport}: a client that asks for 2024-11-05`, async () => {
+    const types = req('mcp-sdk-v1/types.js');
+    const latest = types.LATEST_PROTOCOL_VERSION;
+    const log = logPath(`sdk-1.32.1-${transport}-2024-11-05`);
+    let url;
+    if (transport === 'http') url = await recordingProxy(await httpUpstream([PROBE]), log);
+    let conn;
+    types.LATEST_PROTOCOL_VERSION = '2024-11-05';
+    try { conn = await connect('sdk-1.32.1', transport, log, { url }); }
+    finally { types.LATEST_PROTOCOL_VERSION = latest; }
+    const { client, errors, S } = conn;
+    try {
+      const init = wire(log).find((r) => r.dir === 's2c' && r.msg && r.msg.result &&
+        r.msg.result.protocolVersion);
+      assert.equal(init.msg.result.protocolVersion, '2024-11-05');
+      const { tools } = await client.listTools();
+      const d = tools.find((x) => x.name === 'decorated');
+      for (const field of ['title', 'icons', 'annotations', 'execution', '_meta'])
+        assert.equal(d[field], undefined, field);
+      assert.equal(tools.find((x) => x.name === 'echo').outputSchema, undefined);
+      const r = await S.call(client, { name: 'echo', arguments: { message: 'old' } });
+      assert.equal(r.isError, false);
+      assert.equal(r.structuredContent, undefined);
+      assert.deepEqual(JSON.parse(r.content[0].text), { message: 'old' });
+      const rich = await S.call(client, { name: 'decorated', arguments: {} });
+      assert.deepEqual(rich.content.map((c) => c.type), ['text', 'image', 'text']);
+      assert.deepEqual(errors, []);
+    } finally { await client.close(); }
+  });
+}

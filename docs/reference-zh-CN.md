@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=8fe4f054f24c4c06bec5128afc3875d098dacc2ec4a1940bfef47ed1b57458e6 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=693aa578a329a83f89ba734e3210dce7b12fea7cf70c904a9c03ca23af247e9f -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2992,7 +2992,7 @@ public:
 
 **线路协议：** NeoGraph 的 MCP 客户端提出 `protocolVersion = "2025-11-25"`，并像官方 SDK
 客户端一样接受答复 `2025-11-25`、`2025-06-18`、`2025-03-26` 或 `2024-11-05` 的服务器
-（`MCP_CLIENT_PROTOCOL_VERSIONS`）。连接 `2024-11-05` 服务器使用 stdio 或 Streamable HTTP，
+（`MCP_SUPPORTED_PROTOCOL_VERSIONS`）。连接 `2024-11-05` 服务器使用 stdio 或 Streamable HTTP，
 不支持更早的 HTTP+SSE 传输。其他答复会使 `initialize` 以同时指明两个版本的协议错误失败，并按 MCP 版本协商的要求断开
 连接。HTTP 在之后每个请求的 `MCP-Protocol-Version` 头中发送协商的版本。尚不支持 MCP
 `2026-07-28`（没有 `initialize`，也没有会话）：只提供该修订版的服务器以 `-32022` 拒绝握手，
@@ -3062,10 +3062,11 @@ POST 应答，并在应答到达后停止读取该流。服务器在应答之前
 
 **提供工具。** `MCPServer`（`<neograph/mcp/server.h>`）用注册的处理函数应答 `tools/call`；
 处理函数的失败如何到达客户端见 [Protocol failure mapping](#protocol-failure-mapping)。对请求
-`2025-11-25`、`2025-06-18` 或 `2025-03-26` 的客户端，它用该修订版及其定义的字段应答
-（`2025-06-18` 没有 `icons` 和 `execution`；`2025-03-26` 还没有 `title`、`outputSchema`、
-`_meta` 和 `structuredContent`，只有结构化数据的结果以文本携带这些数据），对其他请求用
-`2025-11-25` 应答；`protocol_version()` 报告协商结果。注册时会拒绝 `inputSchema` 或
+`2025-11-25`、`2025-06-18`、`2025-03-26` 或 `2024-11-05` 的客户端，它用该修订版及其定义的
+字段应答（`2025-06-18` 没有 `icons` 和 `execution`；`2025-03-26` 还没有 `title`、`outputSchema`、
+`_meta`、`structuredContent` 和 `resource_link` 内容，只有结构化数据的结果以文本携带这些数据；
+`2024-11-05` 还没有 `annotations` 和音频内容；该修订版没有的内容块以携带其 JSON 的文本块发送），
+对其他请求用 `2025-11-25` 应答；`protocol_version()` 报告协商结果。注册时会拒绝 `inputSchema` 或
 `outputSchema` 未声明 `"type": "object"` 的工具（旧默认值空对象按 `{"type": "object"}` 读取）、
 不是验证器支持的 JSON Schema 2020-12 的模式，以及超出 SEP-986 的 1 到 128 个
 `A-Za-z0-9_.-` 字符的名称。参数用 JSON Schema 2020-12 验证器校验（`$ref`、`anyOf`、

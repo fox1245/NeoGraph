@@ -117,6 +117,43 @@ def test_connect_negotiates_2025_11_25(transport, mode, request, recorded, probe
     assert init, "no InitializeResult on the wire"
 
 
+@pytest.fixture
+def asks_for_2024_11_05(monkeypatch):
+    """The official client, made to offer 2024-11-05 in its initialize request."""
+    import mcp.client.session as client_session
+
+    monkeypatch.setattr(client_session, "LATEST_HANDSHAKE_VERSION", "2024-11-05")
+
+
+def test_a_2024_11_05_client_gets_that_revision(transport, request, recorded, probe_http,
+                                                asks_for_2024_11_05):
+    """lifecycle: the server answers 2024-11-05, as the official SDK servers do, and sends
+    only what that revision defines: no tool title, icons, annotations, execution, _meta or
+    outputSchema, no structuredContent, and content blocks it lacks as text."""
+    server, log = _target(transport, request, recorded, probe_http)
+
+    async def go():
+        async with client_for(server, "legacy") as (c, diag):
+            assert c.protocol_version == "2024-11-05"
+            listed = await c.list_tools()
+            by = {t.name: t for t in listed.tools}
+            d = by["decorated"]
+            assert (d.title, d.icons, d.annotations, d.execution, d.meta) == (None,) * 5
+            assert by["echo"].output_schema is None
+            r = await c.call_tool("echo", {"message": "old"})
+            assert r.is_error is False and r.structured_content is None
+            assert json.loads(r.content[0].text) == {"message": "old"}
+            r = await c.call_tool("decorated", {})
+            assert [b.type for b in r.content] == ["text", "image", "text"]
+            assert diag.records == [], diag.records
+    run(go())
+    sent = [r["msg"] for r in wire(log, "s2c") if isinstance(r.get("msg"), dict)]
+    for msg in sent:
+        for tool in (msg.get("result") or {}).get("tools", []):
+            assert not {"title", "icons", "annotations", "execution", "_meta",
+                        "outputSchema"} & set(tool), tool
+
+
 # --- tools/list --------------------------------------------------------------
 
 def test_list_tools_preserves_2025_11_25_tool_fields(transport, mode, request, recorded, probe_http):

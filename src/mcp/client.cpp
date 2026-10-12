@@ -2514,7 +2514,7 @@ T decode_protocol_result(const json& raw) {
 
 json initialize_params(const std::string& client_name) {
     json params;
-    params["protocolVersion"] = MCP_CLIENT_PROTOCOL_VERSIONS.front();
+    params["protocolVersion"] = MCP_SUPPORTED_PROTOCOL_VERSIONS.front();
     params["capabilities"]    = json::object();
     // The library's version, not a placeholder (MCP-C-20).
     params["clientInfo"]      = {{"name", client_name}, {"version", NEOGRAPH_VERSION_STR}};
@@ -2641,11 +2641,11 @@ asio::awaitable<bool> detail::ProtocolSession::initialize_async(
         auto raw = co_await rpc_call_async(
             "initialize", initialize_params(client_name), deadline, cancel_token);
         auto result = decode_protocol_result<InitializeResult>(raw);
-        if (!is_client_protocol_version(result.protocol_version)) {
+        if (!is_supported_protocol_version(result.protocol_version)) {
             // MCP lifecycle, "Version Negotiation": a client that does not
             // support the server's revision SHOULD disconnect (MCP-C-11, D2).
             std::string supported;
-            for (const auto version : MCP_CLIENT_PROTOCOL_VERSIONS) {
+            for (const auto version : MCP_SUPPORTED_PROTOCOL_VERSIONS) {
                 if (!supported.empty()) supported += ", ";
                 supported += version;
             }

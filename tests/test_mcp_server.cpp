@@ -161,7 +161,7 @@ TEST(MCPServerTest, RequiresInitializedNotificationBeforeTools) {
         {"clientInfo", {{"name", "client"}, {"version", "1"}}},
     }));
     ASSERT_TRUE(init.contains("result"));
-    EXPECT_EQ(init["result"]["protocolVersion"], "2025-11-25");
+    EXPECT_EQ(init["result"]["protocolVersion"], "2024-11-05");
     EXPECT_EQ(init["result"]["serverInfo"]["name"], "test-server");
     EXPECT_EQ(init["result"]["instructions"], "Use test tools carefully.");
     EXPECT_FALSE(server.initialized());
@@ -689,9 +689,9 @@ TEST(MCPServerTest, RefusesSchemasAndNamesOfficialClientsReject) {
 }
 
 TEST(MCPServerTest, NegotiatesTheOlderRevisionsItSupports) {
-    // D2: the server answers 2025-06-18 and 2025-03-26 when a client asks for
-    // them, with the fields those revisions define, and the newest revision
-    // for any other request.
+    // D2: the server answers 2025-06-18, 2025-03-26 and 2024-11-05 when a
+    // client asks for them, as the official SDK servers do, with the fields
+    // those revisions define, and the newest revision for any other request.
     auto serve = [](const std::string& requested, std::string& negotiated, json& tools,
                     json& structured_call, json& plain_call) {
         CapturingSink captured;
@@ -750,9 +750,73 @@ TEST(MCPServerTest, NegotiatesTheOlderRevisionsItSupports) {
     EXPECT_EQ(json::parse(only["content"][0]["text"].get<std::string>()), json({{"echoed", "b"}}));
 
     serve("2024-11-05", negotiated, tools, echo, only);
+    EXPECT_EQ(negotiated, "2024-11-05");
+    // 2024-11-05 also has no tool annotations.
+    for (const char* field : {"icons", "execution", "title", "outputSchema", "_meta", "annotations"})
+        EXPECT_FALSE(tools[0].contains(field)) << field;
+    EXPECT_EQ(tools[0]["name"], "echo");
+    EXPECT_TRUE(tools[0].contains("inputSchema"));
+    EXPECT_FALSE(echo.contains("structuredContent"));
+    EXPECT_EQ(echo["content"][0]["text"], "a");
+    EXPECT_FALSE(only.contains("structuredContent"));
+    EXPECT_EQ(json::parse(only["content"][0]["text"].get<std::string>()), json({{"echoed", "b"}}));
+
+    serve("2024-10-07", negotiated, tools, echo, only);
     EXPECT_EQ(negotiated, "2025-11-25");
     serve("1999-01-01", negotiated, tools, echo, only);
     EXPECT_EQ(negotiated, "2025-11-25");
+}
+
+TEST(MCPServerTest, ContentBlocksARevisionLacksAreSentAsText) {
+    // A content block whose type the negotiated revision does not define
+    // would fail that revision's schema: audio came with 2025-03-26 and
+    // resource_link with 2025-06-18. Such a block is sent as a text block
+    // holding its JSON, so nothing is lost.
+    const json audio = {{"type", "audio"}, {"data", "AA=="}, {"mimeType", "audio/wav"}};
+    const json link = {{"type", "resource_link"}, {"uri", "file:///report.txt"}, {"name", "report"}};
+    auto call = [&](const std::string& revision) {
+        CapturingSink captured;
+        MCPServer server(config());
+        server.set_response_sink(captured.sink());
+        ToolDefinition media;
+        media.name = "media";
+        server.register_tool(media, [&](const json&, const auto&) {
+            CallToolResult result;
+            result.content = json::array({{{"type", "text"}, {"text", "first"}}, audio, link});
+            return result;
+        });
+        server.handle_message(request(1, "initialize", {
+            {"protocolVersion", revision},
+            {"capabilities", json::object()},
+            {"clientInfo", {{"name", "old-client"}, {"version", "1"}}},
+        }));
+        server.handle_message(notification("notifications/initialized"));
+        server.handle_message(request(2, "tools/call", {{"name", "media"},
+                                                        {"arguments", json::object()}}));
+        return captured.wait_for(2)["result"]["content"];
+    };
+    const auto newest = call("2025-11-25");
+    ASSERT_EQ(newest.size(), 3u);
+    EXPECT_EQ(newest[1], audio);
+    EXPECT_EQ(newest[2], link);
+
+    const auto june = call("2025-06-18");
+    EXPECT_EQ(june[1], audio);
+    EXPECT_EQ(june[2], link);
+
+    const auto march = call("2025-03-26");
+    ASSERT_EQ(march.size(), 3u);
+    EXPECT_EQ(march[0]["text"], "first");
+    EXPECT_EQ(march[1], audio);
+    EXPECT_EQ(march[2]["type"], "text");
+    EXPECT_EQ(json::parse(march[2]["text"].get<std::string>()), link);
+
+    const auto november = call("2024-11-05");
+    ASSERT_EQ(november.size(), 3u);
+    EXPECT_EQ(november[1]["type"], "text");
+    EXPECT_EQ(json::parse(november[1]["text"].get<std::string>()), audio);
+    EXPECT_EQ(november[2]["type"], "text");
+    EXPECT_EQ(json::parse(november[2]["text"].get<std::string>()), link);
 }
 
 TEST(MCPServerTest, StdioWritesOnlyJsonRpcFramesAndLogsToStderr) {

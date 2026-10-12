@@ -3110,7 +3110,7 @@ public:
 **Wire protocol:** NeoGraph's MCP client offers `protocolVersion =
 "2025-11-25"` and, as the official SDK clients do, accepts a server that
 answers `2025-11-25`, `2025-06-18`, `2025-03-26` or `2024-11-05`
-(`MCP_CLIENT_PROTOCOL_VERSIONS`). A `2024-11-05` server is reached over stdio or
+(`MCP_SUPPORTED_PROTOCOL_VERSIONS`). A `2024-11-05` server is reached over stdio or
 Streamable HTTP; the older HTTP+SSE transport is not spoken. Any other answer fails
 `initialize` with a protocol error naming both and the client disconnects, as
 MCP's version negotiation asks. HTTP sends the negotiated version in the
@@ -3206,11 +3206,14 @@ that outcome.
 **Serving tools.** `MCPServer` (`<neograph/mcp/server.h>`) answers `tools/call`
 from registered handlers; how a handler's failure reaches the client is in
 [Protocol failure mapping](#protocol-failure-mapping). It answers a client that
-asks for `2025-11-25`, `2025-06-18` or `2025-03-26` with that revision and the
-fields it defines (no `icons` or `execution` for `2025-06-18`; also no `title`,
-`outputSchema`, `_meta` or `structuredContent` for `2025-03-26`, where a result
-with only structured data carries it as text), and any other request with
-`2025-11-25`; `protocol_version()` reports the result. Registration refuses a
+asks for `2025-11-25`, `2025-06-18`, `2025-03-26` or `2024-11-05` with that
+revision and the fields it defines (no `icons` or `execution` for `2025-06-18`;
+also no `title`, `outputSchema`, `_meta`, `structuredContent` or
+`resource_link` content for `2025-03-26`, where a result with only structured
+data carries it as text; also no `annotations` or audio content for
+`2024-11-05`; a content block the revision lacks is sent as a text block holding
+its JSON), and any other request with `2025-11-25`; `protocol_version()` reports
+the result. Registration refuses a
 tool whose `inputSchema` or `outputSchema` does not say `"type": "object"` (an
 empty object, the old default, is read as `{"type": "object"}`), a schema that
 is not JSON Schema 2020-12 the validator supports, and a name outside SEP-986's

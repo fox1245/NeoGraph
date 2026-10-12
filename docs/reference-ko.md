@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=8fe4f054f24c4c06bec5128afc3875d098dacc2ec4a1940bfef47ed1b57458e6 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=693aa578a329a83f89ba734e3210dce7b12fea7cf70c904a9c03ca23af247e9f -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3050,7 +3050,7 @@ public:
 
 **와이어 프로토콜:** NeoGraph의 MCP 클라이언트는 `protocolVersion = "2025-11-25"`를 제안하고,
 공식 SDK 클라이언트처럼 서버가 `2025-11-25`, `2025-06-18`, `2025-03-26` 또는 `2024-11-05`로
-응답하면 받아들입니다(`MCP_CLIENT_PROTOCOL_VERSIONS`). `2024-11-05` 서버에는 stdio나
+응답하면 받아들입니다(`MCP_SUPPORTED_PROTOCOL_VERSIONS`). `2024-11-05` 서버에는 stdio나
 Streamable HTTP로 연결하며, 이전의 HTTP+SSE 전송은 지원하지 않습니다. 그 밖의 응답이면 두 버전을 모두 밝히는 프로토콜 오류로
 `initialize`가 실패하고, MCP의 버전 협상이 요구하는 대로 클라이언트는 연결을 끊습니다.
 HTTP는 이후의 모든 요청의 `MCP-Protocol-Version` 헤더에 협상된 버전을 보냅니다. MCP
@@ -3132,10 +3132,11 @@ HTTP 오류 상태가 그것을 실어 온 경우에도 그렇습니다(이때 `
 **도구 제공.** `MCPServer`(`<neograph/mcp/server.h>`)는 등록된 핸들러로 `tools/call`에
 응답합니다. 핸들러의 실패가 클라이언트에 어떻게 전달되는지는
 [Protocol failure mapping](#protocol-failure-mapping)에 있습니다. `2025-11-25`,
-`2025-06-18` 또는 `2025-03-26`을 요청하는 클라이언트에는 그 개정판과 그것이 정의하는
-필드로 응답하고(`2025-06-18`에는 `icons`와 `execution`이 없고, `2025-03-26`에는 `title`,
-`outputSchema`, `_meta`, `structuredContent`도 없으며, 구조화된 데이터만 있는 결과는 그것을
-텍스트로 싣습니다), 그 밖의 요청에는 `2025-11-25`로 응답합니다. `protocol_version()`이 그
+`2025-06-18`, `2025-03-26` 또는 `2024-11-05`를 요청하는 클라이언트에는 그 개정판과 그것이
+정의하는 필드로 응답하고(`2025-06-18`에는 `icons`와 `execution`이 없고, `2025-03-26`에는
+`title`, `outputSchema`, `_meta`, `structuredContent`, `resource_link` 콘텐츠도 없으며, 구조화된
+데이터만 있는 결과는 그것을 텍스트로 싣습니다. `2024-11-05`에는 `annotations`와 오디오 콘텐츠도
+없습니다. 그 개정판에 없는 콘텐츠 블록은 그 JSON을 담은 텍스트 블록으로 보냅니다), 그 밖의 요청에는 `2025-11-25`로 응답합니다. `protocol_version()`이 그
 결과를 알려 줍니다. 등록은 `inputSchema`나 `outputSchema`가 `"type": "object"`라고 말하지
 않는 도구(예전 기본값인 빈 객체는 `{"type": "object"}`로 읽음), 검증기가 지원하는 JSON
 Schema 2020-12가 아닌 스키마, SEP-986의 `A-Za-z0-9_.-` 1~128자를 벗어나는 이름을

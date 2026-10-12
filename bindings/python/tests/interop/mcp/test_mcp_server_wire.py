@@ -83,10 +83,10 @@ def stdio(request):
 
 # --- lifecycle / JSON-RPC over stdio -------------------------------------------
 
-@pytest.mark.parametrize("revision", ["2025-06-18", "2025-03-26"])
+@pytest.mark.parametrize("revision", ["2025-06-18", "2025-03-26", "2024-11-05"])
 def test_initialize_older_revision_is_answered_with_that_revision(stdio, revision):
     """lifecycle: the server answers the requested version when it supports it (it also
-    answers 2025-06-18 and 2025-03-26), with the fields that revision has."""
+    answers 2025-06-18, 2025-03-26 and 2024-11-05), with the fields that revision has."""
     stdio.send({**INIT, "params": {**INIT["params"], "protocolVersion": revision}})
     r = stdio.recv()
     assert r["result"]["protocolVersion"] == revision
@@ -94,13 +94,20 @@ def test_initialize_older_revision_is_answered_with_that_revision(stdio, revisio
     stdio.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     tools = {t["name"]: t for t in stdio.recv()["result"]["tools"]}
     assert "icons" not in tools["decorated"] and "execution" not in tools["decorated"]
-    if revision == "2025-03-26":
+    if revision in ("2025-03-26", "2024-11-05"):
         assert "outputSchema" not in tools["echo"] and "title" not in tools["decorated"]
+        assert ("annotations" in tools["decorated"]) == (revision == "2025-03-26")
         stdio.send({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                     "params": {"name": "echo", "arguments": {"message": "old"}}})
         result = stdio.recv()["result"]
         assert "structuredContent" not in result
         assert json.loads(result["content"][0]["text"]) == {"message": "old"}
+        # resource_link came with 2025-06-18: it is sent as text holding its JSON.
+        stdio.send({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                    "params": {"name": "decorated", "arguments": {}}})
+        content = stdio.recv()["result"]["content"]
+        assert [b["type"] for b in content] == ["text", "image", "text"]
+        assert json.loads(content[2]["text"])["type"] == "resource_link"
 
 
 def test_initialize_unknown_revision_counter_offers(stdio):

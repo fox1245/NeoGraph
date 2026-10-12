@@ -112,19 +112,47 @@ json without(const json& object, std::initializer_list<std::string_view> names) 
 }
 
 // A client that negotiated an older revision gets the fields that revision
-// defines (D2): 2025-06-18 has no Tool.icons or Tool.execution, and 2025-03-26
-// also no Tool.title, Tool.outputSchema, Tool._meta or
-// CallToolResult.structuredContent.
+// defines (D2): 2025-06-18 has no Tool.icons or Tool.execution; 2025-03-26 also
+// no Tool.title, Tool.outputSchema, Tool._meta, CallToolResult.structuredContent
+// or resource_link content; 2024-11-05 also no Tool.annotations or audio
+// content. Other members a revision lacks are allowed by its schema and kept.
+bool before_2025_06_18(const std::string& version) {
+    return version == "2025-03-26" || version == "2024-11-05";
+}
+
 json shaped_tool(const json& tool, const std::string& version) {
     if (version.empty() || version == MCP_PROTOCOL_VERSION) return tool;
     if (version == "2025-06-18") return without(tool, {"icons", "execution"});
-    return without(tool, {"icons", "execution", "title", "outputSchema", "_meta"});
+    if (version == "2025-03-26")
+        return without(tool, {"icons", "execution", "title", "outputSchema", "_meta"});
+    return without(tool, {"icons", "execution", "title", "outputSchema", "_meta", "annotations"});
+}
+
+// Whether @p version defines content blocks of @p type.
+bool has_content_type(const std::string& version, const std::string& type) {
+    if (type == "resource_link") return !before_2025_06_18(version);
+    if (type == "audio") return version != "2024-11-05";
+    return true;
 }
 
 json shaped_call_result(const json& result, const std::string& version) {
-    if (version != "2025-03-26" || !result.is_object() || !result.contains("structuredContent"))
-        return result;
-    json shaped = without(result, {"structuredContent"});
+    if (!before_2025_06_18(version) || !result.is_object()) return result;
+    json shaped = result;
+    // A content block whose type the revision lacks would fail its schema: it
+    // is sent as a text block holding its JSON, so nothing is lost.
+    if (result.contains("content") && result["content"].is_array()) {
+        json content = json::array();
+        const json blocks = result["content"];
+        for (std::size_t i = 0; i < blocks.size(); ++i) {
+            json block = blocks[i];
+            if (block.is_object() && !has_content_type(version, block.value("type", "")))
+                block = json{{"type", "text"}, {"text", block.dump()}};
+            content.push_back(std::move(block));
+        }
+        shaped["content"] = std::move(content);
+    }
+    if (!result.contains("structuredContent")) return shaped;
+    shaped = without(shaped, {"structuredContent"});
     // Keep the data: a result without a text block carries it as text, as
     // MCP asks of structured results for clients that cannot read them.
     json content = shaped.contains("content") && shaped["content"].is_array() ? shaped["content"]

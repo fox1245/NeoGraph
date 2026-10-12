@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=8b02d2953799e2f9a6be080ce3d62df51b08491dcd73e3b7644264042711c296 -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=a62171ca81e657c91834cf9f5c9f09d2cc47b666372e5a885a0b2294e2dffda8 -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -571,4 +571,4 @@ OpenCode，在项目 `opencode.json` 或用户配置中：
 
 支持的本地分发路径是上述可安装的 `neograph-harness-mcp` 二进制文件。源码构建可以继续使用示例目标，Python wheel 仍然是库/运行时包，而不是隐式安装远程守护进程。MCPB 和官方注册表发布仍然是发布/发现打包选项；它们不是线路协议所必需的，只应在带有签名发布工件和显式远程认证部署清单的情况下添加。
 
-NeoGraph 发布带日期的 MCP `2025-11-25` 配置档，并以对应修订版定义的字段答复请求 `2025-06-18` 或 `2025-03-26` 的客户端。当前的 MCP 修订版 `2026-07-28` 是无状态的（没有 `initialize` 和会话，版本放在每个请求的 `_meta` 中），尚未提供：官方的双代客户端回退到 `2025-11-25`，固定使用 `2026-07-28` 的客户端无法连接。计划将其作为与 `2025-11-25` 并列的第二种模式提供。
+NeoGraph 发布带日期的 MCP `2025-11-25` 配置档，并以对应修订版定义的字段答复请求 `2025-06-18`、`2025-03-26` 或 `2024-11-05` 的客户端。当前的 MCP 修订版 `2026-07-28` 是无状态的（没有 `initialize` 和会话，版本放在每个请求的 `_meta` 中），尚未提供：官方的双代客户端回退到 `2025-11-25`，固定使用 `2026-07-28` 的客户端无法连接。计划将其作为与 `2025-11-25` 并列的第二种模式提供。
