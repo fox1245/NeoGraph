@@ -1,0 +1,14 @@
+# Pinned official A2A SDK for the interop suite (resolved 2026-10-12). The
+# protocol-interop CI job installs exactly these; the tests skip unless the
+# installed a2a-sdk matches the pin.
+a2a-sdk[http-server]==1.2.2
+protobuf==7.36.2
+googleapis-common-protos==1.75.5
+pydantic==2.14.1
+json-rpc==1.15.0
+jsonschema==4.26.0
+httpx==0.28.1
+starlette==1.7.0
+sse-starlette==3.5.0
+uvicorn==0.54.0
+pytest==9.1.1

@@ -1,0 +1,18 @@
+Machine-readable A2A specification files used as the wire oracle (fetched 2026-10-12).
+
+a2a-v1.schema.json     https://a2a-protocol.org/latest/spec/a2a.json
+                       (JSON Schema 2020-12 bundle generated from specification/a2a.proto;
+                        "version": "v1"; identical generator output to the /dev/ site, proto at
+                        a2aproject/A2A main 12e9d2fbb9badfe98f8ab4f660697870eeb1940b, which differs
+                        from tag v1.0.1 only by one AgentInterface.url comment)
+a2a-v1.0.1.proto       https://raw.githubusercontent.com/a2aproject/A2A/v1.0.1/specification/a2a.proto
+                       (tag v1.0.1 -> commit 3303592588e388e62e0f69f701af531d2f4e3991, released 2026-05-28)
+a2a-v0.3.0.schema.json https://raw.githubusercontent.com/a2aproject/A2A/v0.3.0/specification/json/a2a.json
+                       (JSON Schema draft-07, normative for the 0.3 JSON-RPC dialect)
+
+The ProtoJSON oracle is the generated lf.a2a.v1 descriptor shipped in a2a-sdk==1.2.2
+(a2a.types.a2a_pb2), including google.api.field_behavior REQUIRED annotations.
+
+License: the A2A specification files are Apache-2.0
+(https://github.com/a2aproject/A2A/blob/main/LICENSE). They are vendored unchanged
+as test oracles and are not part of any NeoGraph distribution artifact.

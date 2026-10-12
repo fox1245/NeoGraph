@@ -1,0 +1,9 @@
+{
+  "name": "neograph-a2a-interop-ts",
+  "private": true,
+  "description": "Pinned official A2A TypeScript SDK for NeoGraph interop probes. Install into a separate directory; scripts load it by absolute path.",
+  "dependencies": {
+    "@a2a-js/sdk": "1.3.0",
+    "express": "5.1.0"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "neograph-a2a-interop-ts-v03",
+  "private": true,
+  "description": "Pinned @a2a-js/sdk 0.3.x (pure A2A 0.3 client) for the 0.3-dialect probe.",
+  "dependencies": {
+    "@a2a-js/sdk": "0.3.14",
+    "express": "5.1.0"
+  }
+}
