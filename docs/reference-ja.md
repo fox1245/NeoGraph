@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=d537d10f0fb01dbdb8441bd38d53ec4469ce213c5de1831048f608611eb5b9ff -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=038ae0e0a997a58b081eeae4cd61991721382199a0731eb7a9471b0eac06ca5a -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -411,7 +411,7 @@ sp::runtime::Result dispatch_admitted(
 
 Python も C++ と同じ所有 request/outcome 境界を公開します: `make_provider_request`、`Provider.prepare`、`dispatch`、`invoke`。Provider 履歴には typed part を持つ `ProviderMessage` を使い、`ChatMessage` はグラフ用の便宜的 projection として残ります。SDK 失敗は `ProviderOutcome.failure` で読み、host observer/settlement 例外は `outcome` と `cause` を保持します。コンストラクターと GIL/コールバック動作は [Python binding ガイド](python-binding.md)を参照してください。
 
-Python SDK の vector/map getter は独立した値を返します: `ProviderMessage.parts`、`ProviderRequest.messages`、`RunConfig.provider_messages`、completion/partial の `messages` と `raw_events`、`RunResult.native_messages`、`ProviderLoopEntry.messages`、usage の `extra`/`conflicts`。スナップショットを変更し、setter があるプロパティには再代入してください。getter の結果への append は所有オブジェクトを更新しません。任意の `ProviderControls.provider`/`response_format`、`SchemaProviderDefaults.provider`、`ProviderToolResult.host` も同じ読み取り・変更・再代入の規則に従います。読み取り専用の outcome 証拠は変わりません。これは Python バインディングの規則であり、すべての C++ getter がコピーを返すという保証ではありません。
+Python SDK の vector/map getter は独立した値を返します: `ProviderMessage.parts`、`ProviderRequest.messages`、`RunConfig.provider_messages`、completion/partial の `messages` と `raw_events`、`RunResult.native_messages`、`ProviderLoopEntry.messages`、usage の `extra`/`conflicts`。スナップショットを変更し、setter があるプロパティには再代入してください。getter の結果への append は所有オブジェクトを更新しません。任意の `ProviderControls.provider`/`response_format`、`SchemaProviderDefaults.provider`、`OpenRouterRouting.max_price`、`ProviderToolResult.host` も同じ読み取り・変更・再代入の規則に従います。読み取り専用の outcome 証拠は変わりません。これは Python バインディングの規則であり、すべての C++ getter がコピーを返すという保証ではありません。
 
 ネイティブコードが Python provider の `prepare` オーバーライドを呼ぶ際に `None` を返すと、handle を消費する前に `TypeError` が発生します。`ProviderDescriptorPolicy.identity` は raw SHA-256 digest を格納する `bytes` で、`.hex()` は表示用の変換です。保存された Python provider/graph の cause を繰り返し調べても、元の例外値と traceback を保持し、保存された例外の restore 状態を消費しません。ネイティブの入れ子になった例外変換にも適用されます。
 

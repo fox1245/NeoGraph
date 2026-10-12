@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=e3cd9b20b80e2e140c91a6402e215663280dea07a3e992e4363eea4532e55b71 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=b31296118acbc982c1eac11eeaaeaa7f32b2d05006c4133846863feb7bce7331 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -26,7 +26,7 @@ pip install neograph-engine
 
 `model` 需要显式指定。`ProviderControls` 提供类型化限制和生成控制，包括 `max_output_tokens`、`temperature` 和 `top_p`。工厂构造 SDK 特定请求族的载荷，不能用原始字典替换。将 `request.mode` 设为 `ProviderMode.Stream` 以请求流式输出；仅设置 `on_event` 不会选择该模式。`request` 还包含 `cancel_token`、`on_event`、`observer_limits` 和可选的 `timeout_ms`。
 
-`ProviderControls.provider` 和 `response_format`、`SchemaProviderDefaults.provider`、`ProviderToolResult.host` 返回独立的可选记录。有值时，读取记录，修改后再赋回属性；只修改 `controls.provider.order` 不会更新 controls。赋值 `None` 可清除记录。
+`ProviderControls.provider` 和 `response_format`、`SchemaProviderDefaults.provider`、`OpenRouterRouting.max_price`、`ProviderToolResult.host` 返回独立的可选记录。有值时，读取记录，修改后再赋回属性；只修改 `controls.provider.order` 不会更新 controls。赋值 `None` 可清除记录。
 
 将可表示的非负值赋给 `request.timeout_ms` 会立即建立绝对截止时间。请在准备之前设置；之后读取返回剩余毫秒数，过期后限制为零。保持 `None` 时，会在准备阶段使用提供商默认超时。持有准备句柄并等待不会续延其截止时间。
 
@@ -115,6 +115,12 @@ chat.chat_reasoning = reasoning
 chat.include_reasoning = True
 chat.usage_include = True
 chat.models = ["openai/gpt-4.1", "openai/gpt-4.1-mini"]
+routing = ng.OpenRouterRouting()
+price = ng.OpenRouterMaxPrice()
+price.prompt_nano_usd = 75_000_000       # 0.075 USD per million prompt tokens
+price.completion_nano_usd = 300_000_000  # 0.30 USD per million completion tokens
+routing.max_price = price
+chat.provider = routing
 
 responses = ng.ProviderControls()
 responses.parallel_tool_calls = False
@@ -146,7 +152,7 @@ choice.mode = ng.GeminiToolChoiceMode.Auto
 gemini.gemini_tool_choice = choice
 ```
 
-先默认构造再赋字段，没有关键字构造函数。optional 记录/向量返回独立副本，修改后须重新赋值。Chat reasoning 的 `effort/max_tokens/exclude/enabled`、`include_reasoning`、`usage_include`、候选 `models` 需要声明的 OpenRouter origin。现有 `reasoning_effort/service_tier/provider/response_format` 仍保留。
+先默认构造再赋字段，没有关键字构造函数。optional 记录/向量返回独立副本，修改后须重新赋值。`OpenRouterRouting.max_price` 也是如此：`routing.max_price.prompt_nano_usd = ...` 只修改副本，因此要构造 `ng.OpenRouterMaxPrice` 并整体赋值。金额是整数 nanoUSD：每百万 token 的 `prompt_nano_usd` 和 `completion_nano_usd`，以及 `image_nano_usd`、`audio_nano_usd`、`request_nano_usd`，以精确的十进制 USD 发送（`75_000_000` 即 `0.075`）；至少需要一项，且都不能超过 2**53。`SchemaProviderDefaults.provider` 像其他 routing 字段一样合并 `max_price`：请求自身的值取代默认值。Chat reasoning 的 `effort/max_tokens/exclude/enabled`、`include_reasoning`、`usage_include`、候选 `models` 需要声明的 OpenRouter origin。现有 `reasoning_effort/service_tier/provider/response_format` 仍保留。
 
 Responses verbosity 为 `Low/Medium/High`，truncation 为 `Disabled/Auto`，include 为 `ReasoningEncryptedContent/WebSearchSources/FileSearchResults/MessageOutputTextLogprobs/ComputerCallOutputImageUrl/CodeInterpreterCallOutputs`。`responses_include=None` 保留默认 encrypted reasoning；包括 `[]` 的显式列表只选择该列表，可能使后续 native replay 不合格。store/reasoning/hosted tools/tool-call 上限仍保留。
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=d537d10f0fb01dbdb8441bd38d53ec4469ce213c5de1831048f608611eb5b9ff -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=038ae0e0a997a58b081eeae4cd61991721382199a0731eb7a9471b0eac06ca5a -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -440,7 +440,7 @@ sp::runtime::Result dispatch_admitted(
 
 Python도 C++과 같은 소유 request/outcome 경계를 제공한다: `make_provider_request`, `Provider.prepare`, `dispatch`, `invoke`. Provider 기록에는 typed part를 가진 `ProviderMessage`를 사용하며 `ChatMessage`는 그래프 편의 projection으로 남는다. SDK 실패는 `ProviderOutcome.failure`로 읽고 host observer/settlement 예외는 `outcome`과 `cause`를 보존한다. 생성자와 GIL/콜백 동작은 [Python binding 안내](python-binding.md)를 참조한다.
 
-Python SDK의 vector/map getter는 분리된 값을 반환한다: `ProviderMessage.parts`, `ProviderRequest.messages`, `RunConfig.provider_messages`, completion/partial의 `messages`와 `raw_events`, `RunResult.native_messages`, `ProviderLoopEntry.messages`, usage의 `extra`/`conflicts`. 스냅샷을 수정한 뒤 setter가 있는 속성에 다시 대입한다. getter 결과에 append해도 소유 객체는 바뀌지 않는다. 선택적 `ProviderControls.provider`/`response_format`, `SchemaProviderDefaults.provider`, `ProviderToolResult.host`도 같은 읽기·수정·대입 규칙을 따른다. 읽기 전용 outcome 증거는 바뀌지 않는다. 이는 Python 바인딩의 규칙이며 모든 C++ getter가 복사본을 반환한다는 보장이 아니다.
+Python SDK의 vector/map getter는 분리된 값을 반환한다: `ProviderMessage.parts`, `ProviderRequest.messages`, `RunConfig.provider_messages`, completion/partial의 `messages`와 `raw_events`, `RunResult.native_messages`, `ProviderLoopEntry.messages`, usage의 `extra`/`conflicts`. 스냅샷을 수정한 뒤 setter가 있는 속성에 다시 대입한다. getter 결과에 append해도 소유 객체는 바뀌지 않는다. 선택적 `ProviderControls.provider`/`response_format`, `SchemaProviderDefaults.provider`, `OpenRouterRouting.max_price`, `ProviderToolResult.host`도 같은 읽기·수정·대입 규칙을 따른다. 읽기 전용 outcome 증거는 바뀌지 않는다. 이는 Python 바인딩의 규칙이며 모든 C++ getter가 복사본을 반환한다는 보장이 아니다.
 
 네이티브 코드가 Python provider의 `prepare` override를 호출할 때 `None`을 반환하면 handle을 소비하기 전에 `TypeError`가 발생한다. `ProviderDescriptorPolicy.identity`는 raw SHA-256 digest를 담은 `bytes`이며 `.hex()`는 표시용 변환이다. 저장된 Python provider/graph cause를 반복해서 읽어도 원래 예외 값과 traceback을 유지하고 저장된 예외의 restore 상태를 소비하지 않는다. 중첩된 네이티브 예외 변환에도 같은 규칙이 적용된다.
 

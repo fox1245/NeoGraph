@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=379d66802f16f29424e815b87c244412546e67acb5990acbe35e940cd8ca1d7a -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=44fc4269015efc0296f5c86b3776f3a5793b083ccd763f84b2619e5a934a385e -->
 # NeoGraph WASM smoke プログラム
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -12,7 +12,7 @@ CMake 3.20+ は明示 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、インストール�
 `NEOGRAPH_FETCH_SCHEMAPROVIDER` の download fallback は既定 ON で、offline package/source ビルドでは OFF にしてください。
 Core は SDK runtime にリンクし、libcurl transport にはリンクしません。調査した SDK pin の最上位 CMake は runtime ターゲットが CURL にリンクしなくても構成時に CURL を要求します。OpenSSL は runtime の直接依存ではありません。native SDK library を WebAssembly にリンクすることはできません。Emscripten 向け runtime/archive と C++ 標準ライブラリーの対応を検証する必要があり、以下の過去の smoke は現在のビルド成功の証拠ではありません。
 
-現在のビルドには同じ target 向け SDK `0.3.0`、interface revision/shared generation 6、SchemaProvider `maint/interface6` のコミット `0d536be66017dfb8c4c91d21f4f62bd8ce698d55` が必要です。真正な Emscripten SDK runtime の検証は依然として前提条件です。本書は WASM 対応の削除も現在のビルドの保証もしません。Archive v3 / `spna3` と portable JSON v2 は不変です。
+現在のビルドには同じ target 向け SDK `0.3.0`、interface revision/shared generation 6、SchemaProvider `maint/interface6` のコミット `88e22bc4801858ba29b049821fc1d9651ddd04b0` が必要です。真正な Emscripten SDK runtime の検証は依然として前提条件です。本書は WASM 対応の削除も現在のビルドの保証もしません。Archive v3 / `spna3` と portable JSON v2 は不変です。
 
 ### 対応ターゲットの要件
 

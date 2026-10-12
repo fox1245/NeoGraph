@@ -1,6 +1,7 @@
 """Retained Chat/Messages controls through admitted localhost TLS providers."""
 
 import json
+from decimal import Decimal
 
 import pytest
 
@@ -52,6 +53,18 @@ def _routing():
     value.require_parameters = True
     value.data_collection = "deny"
     return value
+
+
+def _max_price(**amounts):
+    value = ng.OpenRouterMaxPrice()
+    for name, amount in amounts.items():
+        setattr(value, name + "_nano_usd", amount)
+    return value
+
+
+def _sent_max_price(request):
+    """provider.max_price as the peer received it, its decimals read exactly."""
+    return json.loads(request["raw_body"], parse_float=Decimal)["provider"]["max_price"]
 
 
 def _tools():
@@ -182,6 +195,67 @@ def test_chat_omitted_and_explicit_false_are_distinct_native_configurations(type
     assert (emitted["include_reasoning"] is False if field == "include_reasoning"
             else emitted["usage"] == {"include": False})
     assert len(typed_peer.requests) == 3
+
+
+def test_openrouter_max_price_is_a_detached_record_assigned_whole():
+    routing = ng.OpenRouterRouting()
+    assert routing.max_price is None
+    price = _max_price(prompt=75_000_000)
+    routing.max_price = price
+    routing.max_price.completion_nano_usd = 1  # edits a detached copy
+    assert routing.max_price.completion_nano_usd is None
+    price.completion_nano_usd = 300_000_000  # so does editing the assigned object
+    assert routing.max_price.completion_nano_usd is None
+    routing.max_price = price
+    assert (routing.max_price.prompt_nano_usd, routing.max_price.completion_nano_usd) == (
+        75_000_000, 300_000_000)
+    assert _controls(provider=routing).provider.max_price.completion_nano_usd == 300_000_000
+    routing.max_price = None
+    assert routing.max_price is None
+    with pytest.raises(TypeError):
+        price.prompt_nano_usd = -1
+
+
+@pytest.mark.parametrize("family,responder", [("openai.chat", _chat_response),
+                                              ("anthropic.messages", _messages_response)])
+def test_openrouter_max_price_is_sent_as_exact_decimal_usd(typed_peer, family, responder):
+    typed_peer.responder = responder
+    provider = typed_peer.provider(family, policy=_policy(typed_peer))
+    routing = ng.OpenRouterRouting()
+    routing.max_price = _max_price(prompt=75_000_000, completion=300_000_000,
+                                   image=15_000_000_000, request=100_000)
+    _success(provider, _request(provider, _controls(max_output_tokens=512, provider=routing)))
+    [sent] = typed_peer.requests
+    assert (b'"provider":{"max_price":{"prompt":0.075,"completion":0.3,"image":15,"request":0.0001}}'
+            in sent["raw_body"])
+    assert _sent_max_price(sent) == {"prompt": Decimal("0.075"), "completion": Decimal("0.3"),
+                                     "image": 15, "request": Decimal("0.0001")}
+
+
+def test_openrouter_max_price_defaults_merge_and_request_controls_replace_them(typed_peer):
+    typed_peer.responder = _chat_response
+    routing = ng.OpenRouterRouting()
+    routing.zdr = True
+    routing.max_price = _max_price(prompt=440_000_000, completion=1_320_000_000)
+    defaults = ng.SchemaProviderDefaults()
+    defaults.provider = routing
+    provider = typed_peer.provider("openai.chat", policy=_policy(typed_peer), defaults=defaults)
+    _success(provider, _request(provider, _controls(max_output_tokens=512)))
+    assert typed_peer.requests[0]["body"]["provider"]["zdr"] is True
+    assert _sent_max_price(typed_peer.requests[0]) == {"prompt": Decimal("0.44"),
+                                                       "completion": Decimal("1.32")}
+    own = ng.OpenRouterRouting()
+    own.max_price = _max_price(request=0)  # zero admits only free endpoints
+    _success(provider, _request(provider, _controls(max_output_tokens=512, provider=own)))
+    assert typed_peer.requests[1]["body"]["provider"] == {"zdr": True, "max_price": {"request": 0}}
+
+
+@pytest.mark.parametrize("amounts", [{}, {"audio": (1 << 53) + 1}])
+def test_openrouter_max_price_without_amounts_or_above_2_53_rejects_before_io(typed_peer, amounts):
+    provider = typed_peer.provider("openai.chat", policy=_policy(typed_peer))
+    routing = ng.OpenRouterRouting()
+    routing.max_price = _max_price(**amounts)
+    _rejected(typed_peer, provider, _controls(max_output_tokens=512, provider=routing))
 
 
 @pytest.mark.parametrize("fields", [

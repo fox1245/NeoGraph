@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=e3cd9b20b80e2e140c91a6402e215663280dea07a3e992e4363eea4532e55b71 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=b31296118acbc982c1eac11eeaaeaa7f32b2d05006c4133846863feb7bce7331 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -26,7 +26,7 @@ pip install neograph-engine
 
 `model`은 명시적으로 지정합니다. `ProviderControls`는 `max_output_tokens`, `temperature`, `top_p` 등의 타입 기반 제한과 생성 제어를 제공합니다. 팩터리는 SDK의 계열별 페이로드를 생성하며 원시 딕셔너리로 대체할 수 없습니다. 스트리밍을 요청하려면 `request.mode`를 `ProviderMode.Stream`으로 설정합니다. `on_event` 지정만으로는 스트리밍 모드를 선택하지 않습니다. `request`는 `cancel_token`, `on_event`, `observer_limits`, 선택적 `timeout_ms`도 보유합니다.
 
-`ProviderControls.provider`와 `response_format`, `SchemaProviderDefaults.provider`, `ProviderToolResult.host`는 분리된 선택적 레코드를 반환합니다. 값이 있으면 레코드를 읽고 수정한 뒤 속성에 다시 대입합니다. `controls.provider.order`만 바꾸면 controls에는 반영되지 않습니다. 레코드를 비우려면 `None`을 대입합니다.
+`ProviderControls.provider`와 `response_format`, `SchemaProviderDefaults.provider`, `OpenRouterRouting.max_price`, `ProviderToolResult.host`는 분리된 선택적 레코드를 반환합니다. 값이 있으면 레코드를 읽고 수정한 뒤 속성에 다시 대입합니다. `controls.provider.order`만 바꾸면 controls에는 반영되지 않습니다. 레코드를 비우려면 `None`을 대입합니다.
 
 `request.timeout_ms`에 표현 가능한 음이 아닌 값을 지정하면 즉시 절대 마감 시간이 시작됩니다. 준비 직전에 설정합니다. 이후 읽은 값은 남은 밀리초이며 만료되면 0으로 제한됩니다. `None`으로 두면 준비 시 제공자의 기본 제한 시간을 사용합니다. 준비된 핸들을 보관하며 기다려도 마감 시간은 갱신되지 않습니다.
 
@@ -115,6 +115,12 @@ chat.chat_reasoning = reasoning
 chat.include_reasoning = True
 chat.usage_include = True
 chat.models = ["openai/gpt-4.1", "openai/gpt-4.1-mini"]
+routing = ng.OpenRouterRouting()
+price = ng.OpenRouterMaxPrice()
+price.prompt_nano_usd = 75_000_000       # 0.075 USD per million prompt tokens
+price.completion_nano_usd = 300_000_000  # 0.30 USD per million completion tokens
+routing.max_price = price
+chat.provider = routing
 
 responses = ng.ProviderControls()
 responses.parallel_tool_calls = False
@@ -146,7 +152,7 @@ choice.mode = ng.GeminiToolChoiceMode.Auto
 gemini.gemini_tool_choice = choice
 ```
 
-기본 생성 후 필드를 대입합니다. 키워드 생성자는 없습니다. 선택적 레코드/벡터는 분리된 복사본이므로 수정 후 다시 대입합니다. Chat reasoning의 `effort/max_tokens/exclude/enabled`, `include_reasoning`, `usage_include`, 대체 `models`는 선언된 OpenRouter origin이 필요합니다. 기존 `reasoning_effort/service_tier/provider/response_format`도 유지됩니다.
+기본 생성 후 필드를 대입합니다. 키워드 생성자는 없습니다. 선택적 레코드/벡터는 분리된 복사본이므로 수정 후 다시 대입합니다. `OpenRouterRouting.max_price`도 그렇습니다. `routing.max_price.prompt_nano_usd = ...`는 복사본을 고치므로 `ng.OpenRouterMaxPrice`를 만들어 객체 전체를 대입합니다. 금액은 정수 nanoUSD로, 백만 토큰당 `prompt_nano_usd`와 `completion_nano_usd`, 그리고 `image_nano_usd`, `audio_nano_usd`, `request_nano_usd`가 있으며 정확한 십진 USD로 전송됩니다(`75_000_000`은 `0.075`). 하나 이상 필요하며 2**53을 넘을 수 없습니다. `SchemaProviderDefaults.provider`는 `max_price`를 다른 routing 필드와 같은 방식으로 병합합니다. 요청 자체의 값이 기본값을 대체합니다. Chat reasoning의 `effort/max_tokens/exclude/enabled`, `include_reasoning`, `usage_include`, 대체 `models`는 선언된 OpenRouter origin이 필요합니다. 기존 `reasoning_effort/service_tier/provider/response_format`도 유지됩니다.
 
 Responses verbosity는 `Low/Medium/High`, truncation은 `Disabled/Auto`, include는 `ReasoningEncryptedContent/WebSearchSources/FileSearchResults/MessageOutputTextLogprobs/ComputerCallOutputImageUrl/CodeInterpreterCallOutputs`입니다. `responses_include=None`은 기본 encrypted reasoning을 유지하고 `[]`를 포함한 명시적 목록은 그 목록만 선택하여 이후 native replay가 불가능할 수 있습니다. store/reasoning/hosted tools/tool-call 상한도 유지됩니다.
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=d537d10f0fb01dbdb8441bd38d53ec4469ce213c5de1831048f608611eb5b9ff -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=038ae0e0a997a58b081eeae4cd61991721382199a0731eb7a9471b0eac06ca5a -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -441,7 +441,7 @@ sp::runtime::Result dispatch_admitted(
 
 Python 公开与 C++ 相同的所有权 request/outcome 边界：`make_provider_request`、`Provider.prepare`、`dispatch` 和 `invoke`。Provider 历史使用带 typed part 的 `ProviderMessage`；`ChatMessage` 仍是图的便利 projection。SDK 失败可通过 `ProviderOutcome.failure` 读取，host observer/settlement 异常保留 `outcome` 和 `cause`。构造器及 GIL/回调行为参见 [Python binding 指南](python-binding.md)。
 
-Python SDK 的 vector/map getter 返回独立值：`ProviderMessage.parts`、`ProviderRequest.messages`、`RunConfig.provider_messages`、completion/partial 的 `messages` 和 `raw_events`、`RunResult.native_messages`、`ProviderLoopEntry.messages`、usage 的 `extra`/`conflicts`。修改快照后，将它重新赋给具有 setter 的属性；向 getter 结果 append 不会更新所属对象。可选的 `ProviderControls.provider`/`response_format`、`SchemaProviderDefaults.provider` 和 `ProviderToolResult.host` 也遵循读取、修改、重新赋值的规则。只读 outcome 证据保持不变。这些是 Python 绑定规则，不是所有 C++ getter 都返回副本的保证。
+Python SDK 的 vector/map getter 返回独立值：`ProviderMessage.parts`、`ProviderRequest.messages`、`RunConfig.provider_messages`、completion/partial 的 `messages` 和 `raw_events`、`RunResult.native_messages`、`ProviderLoopEntry.messages`、usage 的 `extra`/`conflicts`。修改快照后，将它重新赋给具有 setter 的属性；向 getter 结果 append 不会更新所属对象。可选的 `ProviderControls.provider`/`response_format`、`SchemaProviderDefaults.provider`、`OpenRouterRouting.max_price` 和 `ProviderToolResult.host` 也遵循读取、修改、重新赋值的规则。只读 outcome 证据保持不变。这些是 Python 绑定规则，不是所有 C++ getter 都返回副本的保证。
 
 原生代码调用 Python provider 的 `prepare` 重写时，返回 `None` 会在消费 handle 前引发 `TypeError`。`ProviderDescriptorPolicy.identity` 是包含 raw SHA-256 digest 的 `bytes`；`.hex()` 仅用于显示转换。反复检查已保存的 Python provider/graph cause 会保留原始异常值与 traceback，不消费已保存异常的 restore 状态；此规则也适用于嵌套原生异常转换。
 

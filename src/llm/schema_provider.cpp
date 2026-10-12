@@ -15,6 +15,7 @@ void merge_routing(std::optional<sp::OpenRouterRouting>& target,
     if (target->only.empty()) target->only = defaults->only;
     if (target->order.empty()) target->order = defaults->order;
     if (target->ignore.empty()) target->ignore = defaults->ignore;
+    if (!target->max_price) target->max_price = defaults->max_price;
 }
 }
 SchemaProvider::SchemaProvider(sp::descriptor::ValidatedDescriptor descriptor,

@@ -110,12 +110,25 @@ void init_provider(py::module_& m) {
         catch (const ProviderOutcomeError& e) { set_outcome_error(outcome_error_type, e); }
     });
     py::enum_<ProviderMode>(m, "ProviderMode").value("Collect", ProviderMode::Collect).value("Stream", ProviderMode::Stream);
+    py::class_<sp::OpenRouterMaxPrice>(m, "OpenRouterMaxPrice",
+        "OpenRouter provider.max_price: the dearest endpoint price the router may choose. Integer nanoUSD "
+        "(1e-9 USD), sent as exact decimal USD: prompt and completion per million tokens, image per image, "
+        "audio per audio unit, request per request. At least one amount; none above 2**53.")
+        .def(py::init<>())
+        .def_readwrite("prompt_nano_usd", &sp::OpenRouterMaxPrice::prompt_nano_usd)
+        .def_readwrite("completion_nano_usd", &sp::OpenRouterMaxPrice::completion_nano_usd)
+        .def_readwrite("image_nano_usd", &sp::OpenRouterMaxPrice::image_nano_usd)
+        .def_readwrite("audio_nano_usd", &sp::OpenRouterMaxPrice::audio_nano_usd)
+        .def_readwrite("request_nano_usd", &sp::OpenRouterMaxPrice::request_nano_usd);
     py::class_<sp::OpenRouterRouting>(m, "OpenRouterRouting")
         .def(py::init<>())
         .def_readwrite("zdr", &sp::OpenRouterRouting::zdr).def_readwrite("allow_fallbacks", &sp::OpenRouterRouting::allow_fallbacks)
         .def_readwrite("require_parameters", &sp::OpenRouterRouting::require_parameters)
         .def_readwrite("only", &sp::OpenRouterRouting::only).def_readwrite("order", &sp::OpenRouterRouting::order)
-        .def_readwrite("ignore", &sp::OpenRouterRouting::ignore).def_readwrite("data_collection", &sp::OpenRouterRouting::data_collection);
+        .def_readwrite("ignore", &sp::OpenRouterRouting::ignore).def_readwrite("data_collection", &sp::OpenRouterRouting::data_collection)
+        .def_property("max_price", [](const sp::OpenRouterRouting& v) { return v.max_price; },
+            [](sp::OpenRouterRouting& v, std::optional<sp::OpenRouterMaxPrice> price) { v.max_price = std::move(price); },
+            "Detached OpenRouterMaxPrice or None: edit a copy, then assign the whole object back.");
     auto format = py::class_<sp::ResponseFormat>(m, "ProviderResponseFormat").def(py::init<>())
         .def_readwrite("kind", &sp::ResponseFormat::kind).def_readwrite("name", &sp::ResponseFormat::name)
         .def_readwrite("description", &sp::ResponseFormat::description).def_readwrite("strict", &sp::ResponseFormat::strict)

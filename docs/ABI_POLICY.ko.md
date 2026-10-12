@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=d98b32bf8ca01f96e911543560990005713ba597ee01d1b10f841fa54986d88e -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=4053105f2c14f5e5b5e1025cc160350708a8ba4ddb703415604ee6dd847337b9 -->
 # 바이너리 호환 정책
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -33,9 +33,9 @@ CheckpointStore는 명시적 adapter 이전을 위해 레거시 layout을 유지
 
 ## SDK와 Python 경계
 
-LLM node를 꺼도 Core는 외부 `SchemaProvider::runtime`을 요구한다. 선택된 SDK 릴리스는 `0.3.0` alpha, 공개 `maint/interface6` 커밋 `0d536be66017dfb8c4c91d21f4f62bd8ce698d55`, interface revision `6`, shared-library ABI revision `6`이며 out-of-line capability check를 쓴다. stable interface 선언은 아니다. 일치하는 SDK component를 함께 설치한다. `libsp_*.so.6` 세대는 NeoGraph loader 세대 및 Python `abi3` wheel tag와 별개다.
+LLM node를 꺼도 Core는 외부 `SchemaProvider::runtime`을 요구한다. 선택된 SDK 릴리스는 `0.3.0` alpha, 공개 `maint/interface6` 커밋 `88e22bc4801858ba29b049821fc1d9651ddd04b0`, interface revision `6`, shared-library ABI revision `6`이며 out-of-line capability check를 쓴다. stable interface 선언은 아니다. 일치하는 SDK component를 함께 설치한다. `libsp_*.so.6` 세대는 NeoGraph loader 세대 및 Python `abi3` wheel tag와 별개다.
 
-Interface 6는 고정 크기의 공급자 보고 금액 메타데이터를 공개 usage layout에 추가하고 blocking/async SDK 호출에 단일 async pipeline을 사용한다. SDK consumer, NeoGraph, Python extension을 함께 재빌드한다. 이전 header/library를 interface 6와 혼용할 수 없다. blocking wrapper는 SDK event-loop/callback worker 재진입을 계속 거부한다. Native archive v3 / `spna3`와 portable JSON v2는 독립적이며 형식은 바뀌지 않는다. canonical outcome v2 usage는 금액 메타데이터가 있을 때만 선택적 `provider_cost`를 추가하며, 과거의 금액 부재 기록은 원래 bytes를 유지하고 비용을 만들어내지 않는다. 과거 interface-3/4/5 측정은 원래 범위를 유지하며 interface 6를 검증하지 않는다.
+Interface 6는 고정 크기의 공급자 보고 금액 메타데이터를 공개 usage layout에 추가하고 blocking/async SDK 호출에 단일 async pipeline을 사용한다. 선택된 커밋은 revision 6 안에서 `max_price`가 추가된 `sp::OpenRouterRouting`과 Chat, Messages, Responses 요청 layout도 키운다. `RequiredProvider`에 포함되고 NeoGraph handshake가 요구하는 capability bit `OpenRouterRoutingMaxPrice`가 이전 interface-6 library를 거부한다. SDK consumer, NeoGraph, Python extension을 함께 재빌드한다. 이전 header/library를 interface 6와 혼용할 수 없다. blocking wrapper는 SDK event-loop/callback worker 재진입을 계속 거부한다. Native archive v3 / `spna3`와 portable JSON v2는 독립적이며 형식은 바뀌지 않는다. canonical outcome v2 usage는 금액 메타데이터가 있을 때만 선택적 `provider_cost`를 추가하며, 과거의 금액 부재 기록은 원래 bytes를 유지하고 비용을 만들어내지 않는다. 과거 interface-3/4/5 측정은 원래 범위를 유지하며 interface 6를 검증하지 않는다.
 
 Python은 prepared handle과 불변 outcome을 포함한 typed provider 계약을 공개하며 레거시 completion shim은 없다. extension과 일치하는 라이브러리를 한 wheel로 설치한다. bundled NeoGraph/SDK 라이브러리를 개별 교체하지 않는다. 그래프의 ChatMessage 편의 값이 native ProviderMessage custody를 대신하지 않는다. [Python binding](python-binding.md)을 참고한다.
 

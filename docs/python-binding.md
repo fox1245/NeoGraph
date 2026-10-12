@@ -25,7 +25,7 @@ pip install neograph-engine
 
 `model` is explicit. `ProviderControls` supplies typed limits and generation controls, including `max_output_tokens`, `temperature` and `top_p`. The factory constructs the SDK's family-specific payload; a raw dictionary cannot replace that payload. Set `request.mode` to `ProviderMode.Stream` to request streaming; setting `on_event` alone does not select it. `request` also carries `cancel_token`, `on_event`, `observer_limits` and optional `timeout_ms`.
 
-`ProviderControls.provider` and `response_format`, `SchemaProviderDefaults.provider`, and `ProviderToolResult.host` return detached optional records. If present, read the record, edit it, then assign it back to the property; changing `controls.provider.order` alone does not update the controls. Assign `None` to clear a record.
+`ProviderControls.provider` and `response_format`, `SchemaProviderDefaults.provider`, `OpenRouterRouting.max_price`, and `ProviderToolResult.host` return detached optional records. If present, read the record, edit it, then assign it back to the property; changing `controls.provider.order` alone does not update the controls. Assign `None` to clear a record.
 
 Assigning a representable nonnegative `request.timeout_ms` starts an absolute deadline immediately. Set it just before preparation; later reads report milliseconds remaining, clamped to zero once expired. Leaving it `None` uses the provider's default timeout at preparation. Waiting with a prepared handle does not renew its deadline.
 
@@ -114,6 +114,12 @@ chat.chat_reasoning = reasoning
 chat.include_reasoning = True
 chat.usage_include = True
 chat.models = ["openai/gpt-4.1", "openai/gpt-4.1-mini"]
+routing = ng.OpenRouterRouting()
+price = ng.OpenRouterMaxPrice()
+price.prompt_nano_usd = 75_000_000       # 0.075 USD per million prompt tokens
+price.completion_nano_usd = 300_000_000  # 0.30 USD per million completion tokens
+routing.max_price = price
+chat.provider = routing
 
 responses = ng.ProviderControls()
 responses.parallel_tool_calls = False
@@ -145,7 +151,7 @@ choice.mode = ng.GeminiToolChoiceMode.Auto
 gemini.gemini_tool_choice = choice
 ```
 
-Default-construct records, then assign fields; these records have no keyword constructors. Optional records and vectors return detached copies: edit and assign back. `ChatReasoningOptions` also has `max_tokens` and `exclude`. Nested Chat reasoning, `include_reasoning`, `usage_include` and `models` require a declared OpenRouter origin; scalar `reasoning_effort`, `service_tier`, typed routing and response formats remain available.
+Default-construct records, then assign fields; these records have no keyword constructors. Optional records and vectors return detached copies: edit and assign back. `OpenRouterRouting.max_price` is one: `routing.max_price.prompt_nano_usd = ...` edits a copy, so build an `ng.OpenRouterMaxPrice` and assign the whole object. Its amounts are integer nanoUSD, `prompt_nano_usd` and `completion_nano_usd` per million tokens, `image_nano_usd`, `audio_nano_usd` and `request_nano_usd`, sent as exact decimal USD (`75_000_000` is `0.075`); at least one is required and none may exceed 2**53. `SchemaProviderDefaults.provider` merges `max_price` like the other routing fields: a request's own replaces the default. `ChatReasoningOptions` also has `max_tokens` and `exclude`. Nested Chat reasoning, `include_reasoning`, `usage_include` and `models` require a declared OpenRouter origin; scalar `reasoning_effort`, `service_tier`, typed routing and response formats remain available.
 
 Responses verbosity is `Low/Medium/High`, truncation `Disabled/Auto`; include also supports `WebSearchSources`, `FileSearchResults`, `MessageOutputTextLogprobs`, `ComputerCallOutputImageUrl`, `CodeInterpreterCallOutputs`. `responses_include=None` preserves the default encrypted-reasoning include; an explicit list, including `[]`, selects that list and may make later native replay ineligible. Existing store, reasoning, hosted tools and tool-call caps remain typed.
 

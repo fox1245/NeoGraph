@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=e3cd9b20b80e2e140c91a6402e215663280dea07a3e992e4363eea4532e55b71 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=b31296118acbc982c1eac11eeaaeaa7f32b2d05006c4133846863feb7bce7331 -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -26,7 +26,7 @@ pip install neograph-engine
 
 `model` は明示的に指定します。`ProviderControls` は `max_output_tokens`、`temperature`、`top_p` などの型付き制限と生成制御を提供します。ファクトリーは SDK のファミリー別ペイロードを構築し、生の辞書では置き換えられません。ストリーミングを要求するには `request.mode` を `ProviderMode.Stream` に設定します。`on_event` の設定だけではモードを選択しません。`request` は `cancel_token`、`on_event`、`observer_limits`、省略可能な `timeout_ms` も保持します。
 
-`ProviderControls.provider` と `response_format`、`SchemaProviderDefaults.provider`、`ProviderToolResult.host` は独立した省略可能なレコードを返します。値があれば、レコードを読み、編集してからプロパティに再代入します。`controls.provider.order` だけを変更しても controls は更新されません。レコードを解除するには `None` を代入します。
+`ProviderControls.provider` と `response_format`、`SchemaProviderDefaults.provider`、`OpenRouterRouting.max_price`、`ProviderToolResult.host` は独立した省略可能なレコードを返します。値があれば、レコードを読み、編集してからプロパティに再代入します。`controls.provider.order` だけを変更しても controls は更新されません。レコードを解除するには `None` を代入します。
 
 `request.timeout_ms` に表現可能な非負の値を代入すると、その時点で絶対期限を設定します。準備の直前に設定してください。その後の読み取りは残りのミリ秒を返し、期限切れ後はゼロに制限されます。`None` のままなら、準備時にプロバイダーの既定タイムアウトを使います。準備済みハンドルを保持して待機しても、期限は更新されません。
 
@@ -115,6 +115,12 @@ chat.chat_reasoning = reasoning
 chat.include_reasoning = True
 chat.usage_include = True
 chat.models = ["openai/gpt-4.1", "openai/gpt-4.1-mini"]
+routing = ng.OpenRouterRouting()
+price = ng.OpenRouterMaxPrice()
+price.prompt_nano_usd = 75_000_000       # 0.075 USD per million prompt tokens
+price.completion_nano_usd = 300_000_000  # 0.30 USD per million completion tokens
+routing.max_price = price
+chat.provider = routing
 
 responses = ng.ProviderControls()
 responses.parallel_tool_calls = False
@@ -146,7 +152,7 @@ choice.mode = ng.GeminiToolChoiceMode.Auto
 gemini.gemini_tool_choice = choice
 ```
 
-既定構築後にフィールドを代入します。キーワードコンストラクターはありません。optional レコード/ベクトルは独立コピーなので編集後に再代入します。Chat reasoning の `effort/max_tokens/exclude/enabled`、`include_reasoning`、`usage_include`、代替 `models` は宣言された OpenRouter origin が必要です。既存の `reasoning_effort/service_tier/provider/response_format` も残ります。
+既定構築後にフィールドを代入します。キーワードコンストラクターはありません。optional レコード/ベクトルは独立コピーなので編集後に再代入します。`OpenRouterRouting.max_price` もその一つで、`routing.max_price.prompt_nano_usd = ...` はコピーを変えるだけなので、`ng.OpenRouterMaxPrice` を作ってオブジェクト全体を代入します。金額は整数 nanoUSD で、100万トークンあたりの `prompt_nano_usd` と `completion_nano_usd`、および `image_nano_usd`、`audio_nano_usd`、`request_nano_usd` があり、正確な10進 USD で送信されます（`75_000_000` は `0.075`）。少なくとも一つが必要で、2**53 を超えられません。`SchemaProviderDefaults.provider` は `max_price` をほかの routing フィールドと同じように統合し、リクエスト自身の値が既定値を置き換えます。Chat reasoning の `effort/max_tokens/exclude/enabled`、`include_reasoning`、`usage_include`、代替 `models` は宣言された OpenRouter origin が必要です。既存の `reasoning_effort/service_tier/provider/response_format` も残ります。
 
 Responses verbosity は `Low/Medium/High`、truncation は `Disabled/Auto`、include は `ReasoningEncryptedContent/WebSearchSources/FileSearchResults/MessageOutputTextLogprobs/ComputerCallOutputImageUrl/CodeInterpreterCallOutputs` です。`responses_include=None` は既定 encrypted reasoning を維持し、`[]` を含む明示リストはその内容だけを選択して後続 native replay が不適格になる場合があります。store/reasoning/hosted tools/tool-call 上限も残ります。
 

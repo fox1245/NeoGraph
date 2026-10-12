@@ -267,11 +267,13 @@ def typed_peer(tmp_path):
             pass
 
         def do_POST(self):
+            raw_body = self.rfile.read(int(self.headers["Content-Length"]))
             request = {
                 "method": "POST", "path": self.path,
                 "headers": dict(self.headers),
                 "raw_headers": list(self.headers.raw_items()),
-                "body": json.loads(self.rfile.read(int(self.headers["Content-Length"]))),
+                "body": json.loads(raw_body),
+                "raw_body": raw_body,
             }
             with peer.changed:
                 peer.requests.append(request)

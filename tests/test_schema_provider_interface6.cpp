@@ -217,6 +217,10 @@ TEST(SchemaProviderInterface6, LinkedAbiGateAdmitsRealPreparedDispatch) {
     EXPECT_NO_THROW(sp::runtime::require_interface_contract(6, sp::capability::RequiredProvider));
     EXPECT_THROW(sp::runtime::require_interface_contract(5, sp::capability::RequiredProvider),
                  sp::runtime::InterfaceContractError);
+    // The linked library sends OpenRouterRouting::max_price, which the Program
+    // monetary binding pins (#372); NeoGraph's handshakes require the bit.
+    EXPECT_NE(sp::runtime::interface_contract().capabilities & sp::capability::OpenRouterRoutingMaxPrice, 0U);
+    EXPECT_NE(sp::capability::RequiredProvider & sp::capability::OpenRouterRoutingMaxPrice, 0U);
     wire::Peer peer(wire::chat_response());
     auto provider = wire::provider("openai.chat", peer.origin());
     const auto result = prepared_run(*provider, "openai.chat");
