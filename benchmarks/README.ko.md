@@ -1,222 +1,215 @@
 <!-- neograph-i18n: source=benchmarks/README.md locale=ko source_sha256=6ee5c1de3180f83f2256f69f39c08ae0d963a5f6408e99deebdcff999f47b633 -->
+# NeoGraph와 Python 그래프/파이프라인 프레임워크 비교 — 엔진 오버헤드 벤치마크
+
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-# NeoGraph 대 Python graph/pipeline 프레임워크 — 엔진 오버헤드 벤치마크
+I/O, sleep, 모델 호출이 없는 동일한 소규모 워크로드로 NeoGraph와 Python 오케스트레이션 프레임워크의
+호출당 엔진 오버헤드를 비교 측정합니다.
+측정 범위에는 노드 디스패치, 상태 채널 쓰기, 리듀서 호출이 들어갑니다.
+날짜가 붙은 표에는 당시의 엔진 이름과 의존성 버전이 그대로 남아 있습니다.
+이 표는 현재 패키지 버전을 나타내지도, 타입이 있는 provider 런타임을 검증하지도 않습니다.
+현재 NeoGraph `0.13.1` 레시피는 alpha SDK `0.1.1`과, 인터페이스 리비전·공유 세대(generation) 4에 맞는
+헤더와 라이브러리를 요구합니다. 현재 버전의 통합 검증은 아직 끝나지 않았으며,
+아래의 SDK3 전환(cutover)과 알림(notification) 코호트는 과거 기록입니다.
 
+Program 승인(admission), JavaScript 제어, SQLite/PostgreSQL 런타임 비용은
+[Program 비용 측정](../docs/PROGRAM_COST_MEASUREMENT.md)을 참고하세요. 그 문서의 측정 매트릭스는
+저널과 체크포인트 작업을 포함하므로, 아래의 체크포인트 없는 Core 비교 결과로 제시해서는 안 됩니다.
 
-I/O, sleep, 모델 호출이 없는 작은 대응 workload에서 NeoGraph와 Python 프레임워크의
-호출별 엔진 오버헤드를 측정합니다. node dispatch, state-channel write, reducer 호출을 포함합니다.
-날짜가 있는 표의 엔진 이름과 의존성 버전은 과거 기록이며 현재 package 버전이나 타입 runtime 검증이 아닙니다.
-현재 NeoGraph `0.13.1` recipe에는 alpha SDK `0.1.1`, interface revision/shared generation 4의 일치하는 header/library가 필요합니다. 현재 통합 검증은 대기 중이며 아래 SDK3 cutover·notification cohort는 과거 기록입니다.
+비교한 프레임워크는 다음과 같습니다.
 
-Program admission, JavaScript control, SQLite/PostgreSQL 비용은
-[Measuring Program costs](../docs/PROGRAM_COST_MEASUREMENT.md)를 보세요.
-그 별도 matrix는 journal/checkpoint 비용을 포함하며 아래 checkpoint 없는 Core 비교와 다릅니다.
-
-비교된 프레임워크:
-
-|뼈대|버전|추출|
+| 프레임워크 | 버전 | 추상화 방식 |
 |-----------|---------|-------------|
-|네오그래프|3.0 (`feat/taskflow-removal`)|상태 채널 그래프, C++20 코루틴 + asio|
-|랭그래프| 1.1.9 |상태-채널 그래프(Python)|
-|커다란 건초 더미| 2.27 |유형이 지정된 소켓이 있는 구성요소의 파이프라인|
-|피단틱 그래프| 1.84 |단일 다음 노드 상태 머신|
-|LlamaIndex 작업 흐름| 0.14 |이벤트 기반 비동기 워크플로|
-|AutoGen 그래프 흐름| 0.7.5 |메시지 전달 다중 에이전트 그래프|
+| NeoGraph | 3.0 (`feat/taskflow-removal`) | 상태 채널 그래프, C++20 코루틴 + asio |
+| LangGraph | 1.1.9 | 상태 채널 그래프 (Python) |
+| Haystack | 2.27 | 타입이 지정된 소켓을 가진 컴포넌트 파이프라인 |
+| pydantic-graph | 1.84 | 다음 노드가 하나뿐인 상태 머신 |
+| LlamaIndex Workflow | 0.14 | 이벤트 기반 비동기 워크플로 |
+| AutoGen GraphFlow | 0.7.5 | 메시지 전달 방식의 멀티 에이전트 그래프 |
 
 ## 워크로드
 
-여섯 구현은 같은 두 workload를 이식하고 가능한 경우 한 번 컴파일한 뒤 hot loop에서 호출합니다.
-state와 topology의 차이는 아래에 명시합니다.
+여섯 구현체는 같은 워크로드 두 가지를 각자 포팅한 것이며, 컴파일이 필요한 경우 한 번만 컴파일한 뒤
+반복 루프에서 호출합니다. 상태와 토폴로지를 바꾼 부분은 아래에 적었습니다.
 
-|ID|모양|상태|
+| Id | 형태 | 상태 |
 |----|-------|-------|
-|`seq`|3노드 체인 `a → b → c`|단일 `counter` 채널, 각 노드는 `counter+1`를 씁니다(감소기 덮어쓰기).|
-|`par`|5명의 작업자를 팬아웃한 후 `summarizer`에 합류합니다.|`results: list`(리듀서 추가) + `count: int`; 각 작업자는 인덱스를 추가하고 요약자는 `len(results)`를 작성합니다.|
+| `seq` | 노드 3개짜리 체인 `a → b → c` | `counter` 채널 하나를 쓰며, 각 노드가 `counter+1`을 쓴다(overwrite 리듀서). |
+| `par` | worker 5개로 fan-out한 뒤 `summarizer`에서 합류 | `results: list`(append 리듀서)와 `count: int`를 쓴다. worker는 각자 자기 인덱스를 append하고, summarizer는 `len(results)`를 쓴다. |
 
-체크포인트는 모든 프레임워크에서 비활성화됩니다.
+모든 프레임워크에서 체크포인트는 꺼 두었습니다.
 
-세 구현은 프레임워크별 workload 변환이 필요했습니다.
+세 구현체는 프레임워크에 맞게 워크로드를 조정해야 했습니다.
 
-* **Haystack**에는 추가 감소기가 없습니다. 각 작업자는 자체적으로 방출합니다.
-소켓을 입력하면 요약자가 목록 길이를 합산합니다. 같은 수
-실행당 구성요소가 발송됩니다.
-* **pydantic-graph**는 단일 다음 node state machine으로 fan-out을 지원하지 않습니다.
-  `par`는 6-node 직렬 체인(`w1 → w2 → w3 → w4 → w5 → summ`)으로 모사합니다.
-  실제 병렬 fan-out과 동등한 측정이 아닙니다.
-* **AutoGen**은 상태 채널이 아닌 메시지 전달입니다. 카운터는
-문자 메시지 콘텐츠로 인코딩됩니다. 요약자는 수신 횟수를 계산합니다.
-작업자 메시지. 동일한 그래프 모양, 다른 상태 모델.
+* **Haystack**에는 append 리듀서가 없습니다. 그래서 worker가 각자 타입이 지정된 소켓으로 출력하고,
+  summarizer가 리스트 길이를 합산합니다. 실행 한 번에 디스패치되는 컴포넌트 수는 같습니다.
+* **pydantic-graph**는 다음 노드가 하나뿐인 상태 머신이라 fan-out을 할 수 없습니다.
+  `par` 워크로드는 노드 6개를 직렬로 이은 체인(`w1 → w2 → w3 → w4 → w5 → summ`)으로 흉내 냈습니다.
+  결과 표에 이를 표시했으며, 병렬 fan-out을 동일 조건에서 비교한 측정이 아닙니다.
+* **AutoGen**은 상태 채널이 아니라 메시지 전달 방식입니다. 카운터는 텍스트 메시지 내용으로 인코딩하고,
+  summarizer는 들어온 worker 메시지의 수를 셉니다. 그래프 모양은 같지만 상태 모델은 다릅니다.
 
 ## 결과
 
-아래 **참조 실행**은 2026년 4월 22일에 측정되었습니다.
-x86_64 Linux의 NeoGraph v3.0.0, g++ 13 릴리스 `-O3 -DNDEBUG`,
-CPython3.12.3. NeoGraph: `bench_neograph`의 10회 중앙값.
-Python 필드: 프레임워크당 3회 실행 중앙값. 버전: neograph v3.0.0,
-langgraph 1.1.9, haystack-ai 2.28.0, pydantic-graph 1.85.1,
-라마-인덱스-코어 0.14.21, 자동 생성-에이전트 채팅 0.7.5.
+아래 **기준 측정(reference run)**은 2026-04-22에 x86_64 Linux에서 NeoGraph v3.0.0을
+g++ 13 Release(`-O3 -DNDEBUG`)로 빌드하고 CPython 3.12.3으로 측정한 결과입니다.
+NeoGraph는 `bench_neograph` 10회 실행의 중앙값이고, Python 프레임워크는 프레임워크마다 3회 실행의 중앙값입니다.
+버전은 neograph v3.0.0, langgraph 1.1.9, haystack-ai 2.28.0, pydantic-graph 1.85.1,
+llama-index-core 0.14.21, autogen-agentchat 0.7.5입니다.
 
-당시 마스터(2026-04-29)에 대한 재측정 내용은 아래와 같습니다.
-참조 실행. `par` 행은 지원되는 실행을 모두 보고합니다.
-명시적으로 정권: 현재 `worker_count=1` 기본값과
-`set_worker_count_auto()`에 의해 활성화된 엔진 소유 풀. *참고* 참조
-no-I/O 마이크로벤치마크가 이를 유지해야 하는 이유에 대한 표 뒤에
-숫자는 따로.
+기준 측정 아래에는 당시 master(2026-04-29)를 다시 측정한 결과도 함께 실었습니다.
+`par` 행에는 지원하는 두 실행 방식을 각각 적었습니다. 하나는 현재 기본값인 `worker_count=1`이고,
+다른 하나는 `set_worker_count_auto()`로 켠 엔진 소유 풀입니다.
+I/O가 없는 마이크로벤치마크에서 두 수치를 따로 보아야 하는 이유는 표 뒤의 *참고*에 있습니다.
 
-![Engine-overhead benchmark: per-iteration latency and peak RSS](../docs/images/bench-engine-overhead.png)
+![엔진 오버헤드 벤치마크: 반복당 지연 시간과 최대 RSS](../docs/images/bench-engine-overhead.png)
 
-### 반복당 오버헤드(μs, 낮을수록 좋음)
+### 반복당 오버헤드 (µs, 낮을수록 좋음)
 
-|뼈대|`seq`(3노드 체인)|`par`(팬아웃 5 + 조인)|`seq` 대 NeoGraph|`par` 대 NeoGraph|
+| 프레임워크 | `seq` (노드 3개 체인) | `par` (fan-out 5 + join) | `seq` NeoGraph 대비 | `par` NeoGraph 대비 |
 |-----------|---------------------:|-------------------------:|-------------------:|-------------------:|
-|**NeoGraph v3.0.0** *(참고, 2026-04-22)*| **5.0** | **11.8** | 1× | 1× |
-|**NeoGraph 마스터** *(2026-04-29, 기본 `worker_count=1`)*| **5.25** | **14.4** | 1× | 1× |
-|**네오그래프 마스터** *(2026-04-29, `set_worker_count_auto()`)*| **5.25** | **278** | 1× | 1× |
-|헤이스택 2.28.0| 139.85 | 278.48 | 28.0× / 26.6× / 26.6× | 23.6× / 19.3× / 1.0× |
-|피단틱 그래프 1.87.0| 227.14 | 280.26¹ | 45.4× / 43.3× / 43.3× | 23.7×¹ / 19.5×¹ / 1.0×¹ |
-|랭그래프 1.1.10| 642.62 | 2,261.55 | 128.5× / 122.4× / 122.4× | 191.7× / 157.1× / 8.1× |
-|LlamaIndex 워크플로 0.14.21| 1,564.54 | 4,373.76 | 312.9× / 298.0× / 298.0× | 370.7× / 303.7× / 15.7× |
-|AutoGen GraphFlow 0.7.5| 3,126.86 | 7,281.08 | 625.4× / 595.6× / 595.6× | 617.0× / 505.6× / 26.2× |
+| **NeoGraph v3.0.0** *(기준, 2026-04-22)* | **5.0** | **11.8** | 1× | 1× |
+| **NeoGraph master** *(2026-04-29, 기본값 `worker_count=1`)* | **5.25** | **14.4** | 1× | 1× |
+| **NeoGraph master** *(2026-04-29, `set_worker_count_auto()`)* | **5.25** | **278** | 1× | 1× |
+| Haystack 2.28.0 | 139.85 | 278.48 | 28.0× / 26.6× / 26.6× | 23.6× / 19.3× / 1.0× |
+| pydantic-graph 1.87.0 | 227.14 | 280.26¹ | 45.4× / 43.3× / 43.3× | 23.7×¹ / 19.5×¹ / 1.0×¹ |
+| LangGraph 1.1.10 | 642.62 | 2,261.55 | 128.5× / 122.4× / 122.4× | 191.7× / 157.1× / 8.1× |
+| LlamaIndex Workflow 0.14.21 | 1,564.54 | 4,373.76 | 312.9× / 298.0× / 298.0× | 370.7× / 303.7× / 15.7× |
+| AutoGen GraphFlow 0.7.5 | 3,126.86 | 7,281.08 | 625.4× / 595.6× / 595.6× | 617.0× / 505.6× / 26.2× |
 
-가장 오른쪽 두 열에는 v3.0.0 참조/마스터 대비 세 가지 비율이 표시됩니다.
-작업자=1 기본값 / 마스터 자동 작업자 모드 비교.
+오른쪽 두 열에는 비율이 세 개씩 있습니다. 순서대로 v3.0.0 기준 측정 대비 / master worker=1 기본값 대비 /
+master 자동 worker 모드 대비입니다.
 
-날짜가 있는 `seq` 측정은 5.0에서 5.25 µs로 가까운 값입니다. `par`는 실행 모드에 따라
-11.8, 14.4, 278 µs로 달라집니다. 모든 기준 행이 ±10% 내에서 재현되거나 현재 HEAD를 측정한 것은 아닙니다.
+날짜가 다른 `seq` 측정값은 비슷합니다. NeoGraph는 5.0µs에서 5.25µs로 바뀌었습니다.
+`par` 측정값은 실행 방식에 따라 11.8µs, 14.4µs, 278µs로 달라집니다.
+이 측정들은 기준 측정의 모든 행을 ±10% 안에서 재현하지 못하며, 현재 HEAD를 측정한 것도 아닙니다.
 
-¹ pydantic-graph `par`는 직렬 6-node 모사이며 fan-out을 지원하지 않습니다.
-병렬 workload가 아니며 비교 범위를 보여주기 위해 포함했습니다.
+¹ pydantic-graph의 `par`는 노드 6개를 직렬로 이은 흉내이며 fan-out을 지원하지 않습니다.
+병렬 워크로드가 아니고, 빠짐없이 싣기 위해 포함했습니다.
 
-### `par` 행에 대한 참고 사항(`seq`는 변경되지 않음)
+### `par` 행에 대한 참고 (`seq`는 그대로)
 
-`par` 14.4 → 278 µs 격차는
-실제 작업을 수행하지 않는 5개 노드에 대한 엔진 소유 스레드 풀:
+`par`가 14.4µs에서 278µs로 늘어난 차이는, 실제 일을 하지 않는 노드 다섯 개에 엔진 소유 스레드 풀을 켰을 때
+측정된 비용입니다.
 
-* **현재 `build()` / `compile()` 기본값: `worker_count=1`.** 아니요
-엔진 소유 풀이 설치되었으므로 팬아웃이 호출자에게 디스패치됩니다.
-집행자. 이것은 14.4 µs 행이며 다음에 대한 올바른 회귀 신호입니다.
-노드가 스레드로부터 안전하지 않은 상태를 유지하는 CPU-작은 노드 또는 그래프입니다.
-* **병렬 팬아웃은 명시적입니다.** `set_worker_count_auto()`는
-풀을 `hardware_concurrency`로; `set_worker_count(N)`는 고정을 선택합니다.
-천장. 이것은 278 µs 행입니다. 조정 비용은 여기에 표시됩니다.
-각 작업자는 하나의 정수만 추가하지만 옆에는 무시할 수 있기 때문입니다.
-100ms LLM 호출을 수행하고 독립 노드가 중첩되도록 허용합니다.
+* **현재 `build()` / `compile()`의 기본값은 `worker_count=1`입니다.** 엔진 소유 풀을 만들지 않으므로
+  fan-out은 호출자의 executor에서 디스패치됩니다. 14.4µs 행이 이 경우입니다. CPU 부담이 작은 노드나
+  스레드 안전하지 않은 상태를 가진 노드로 이루어진 그래프에서는 이 행이 회귀를 판단하는 올바른 기준입니다.
+* **병렬 fan-out은 명시적으로 켭니다.** `set_worker_count_auto()`는 풀 크기를 `hardware_concurrency`에 맞추고,
+  `set_worker_count(N)`은 고정된 상한을 정합니다. 278µs 행이 이 경우입니다. 여기서는 worker가 정수 하나를
+  append할 뿐이라 조율 비용이 그대로 드러납니다. 하지만 100ms짜리 LLM 호출에 비하면 무시할 수 있고,
+  서로 독립인 노드가 겹쳐 실행될 수 있습니다.
 
-벤치마크 소스를 변경하지 않고 두 체제를 모두 실행합니다.
+벤치마크 소스를 바꾸지 않고 두 방식을 모두 실행할 수 있습니다.
 
 ```bash
 ./build/bench_neograph 10000 5000 1
 ./build/bench_neograph 10000 5000 auto
 ```
 
-세 번째 인수는 `par` 엔진에 적용되며 `1`(기본값)를 허용합니다.
-`auto` 또는 양수 작업자 수. 출력에는 다음이 포함됩니다.
-`config\tpar_workers\t...` 행은 저장된 결과가 실행 모드를 유지하도록 합니다.
+세 번째 인자는 `par` 엔진에 적용되며 `1`(기본값), `auto`, 양의 정수인 worker 수를 받습니다.
+출력에 `config\tpar_workers\t...` 행이 포함되므로 저장한 결과에도 실행 방식이 남습니다.
 
-기록된 worker=1 `par`에서 LangGraph 2,261.55 µs는 NeoGraph 14.4 µs의 157.1배입니다.
-엔진 소유 pool에서는 8.1배입니다. Haystack과 pydantic-graph는 NeoGraph의
-278 µs auto-worker 행과 거의 같습니다. 이 비율은 해당 workload/configuration에 한정됩니다.
+날짜가 있는 worker=1 `par` 비교에서 LangGraph의 2,261.55µs는 NeoGraph의 14.4µs의 157.1배입니다.
+엔진 소유 풀을 쓰면 이 비율은 8.1배입니다. Haystack과 pydantic-graph는 NeoGraph의 278µs 자동 worker 행과
+거의 같습니다. 이 비율은 이 워크로드와 설정에만 해당합니다.
 
-### 엔드투엔드 프로세스 지표
+### 프로세스 전체 지표
 
-워밍업 + 두 워크로드를 포함한 전체 binary/script 런타임.
-`seq` = 10,000 반복, `par` = 5,000 반복. 측정
-`/usr/bin/time -f "%e s, %M KB"`.
+워밍업과 두 워크로드를 모두 포함한 바이너리/스크립트 전체 실행 시간입니다.
+`seq`는 10,000회, `par`는 5,000회 반복했고, `/usr/bin/time -f "%e s, %M KB"`로 측정했습니다.
 
-|뼈대|총 경과 시간|피크 RSS|집행자|
+| 프레임워크 | 전체 소요 시간 | 최대 RSS | Executor |
 |-----------|--------------:|---------:|---------:|
-|**네오그래프 3.0**|**0.11초**|**4.5MB**|기본적으로 단일 스레드 io_context|
-|피단틱 그래프|3.98초|35.1MB|단일 스레드 비동기(GIL)|
-|커다란 건초 더미|3.85초|80.3MB|단일 스레드 비동기(GIL)|
-|랭그래프|18.95초|60.1MB|단일 스레드 비동기(GIL)|
-|LlamaIndex 작업 흐름|39.49초|101.4MB|단일 스레드 비동기(GIL)|
-|AutoGen 그래프 흐름|63.29초|52.3MB|단일 스레드 비동기(GIL)|
+| **NeoGraph 3.0** | **0.11 s** | **4.5 MB** | 기본값은 단일 스레드 io_context |
+| pydantic-graph | 3.98 s | 35.1 MB | 단일 스레드 asyncio (GIL) |
+| Haystack | 3.85 s | 80.3 MB | 단일 스레드 asyncio (GIL) |
+| LangGraph | 18.95 s | 60.1 MB | 단일 스레드 asyncio (GIL) |
+| LlamaIndex Workflow | 39.49 s | 101.4 MB | 단일 스레드 asyncio (GIL) |
+| AutoGen GraphFlow | 63.29 s | 52.3 MB | 단일 스레드 asyncio (GIL) |
 
-NeoGraph 3.0의 기본 슈퍼스텝 루프는 코루틴을 실행합니다.
-`run_sync`를 통한 단일 스레드 io_context; CPU 병렬 팬아웃은
-`engine->set_worker_count(N)`를 통해 선택하세요. I/O-bound 노드의 경우
-co_await 정지를 통해 단일 스레드가 여전히 중복되는 작업 부하.
+NeoGraph 3.0의 기본 슈퍼스텝 루프는 `run_sync`로 단일 스레드 io_context에서 코루틴을 실행합니다.
+CPU 병렬 fan-out은 `engine->set_worker_count(N)`으로 직접 켜야 합니다.
+I/O 위주의 노드라면 스레드가 하나여도 co_await로 중단되는 동안 다른 작업이 겹쳐 실행됩니다.
 
-## Linux ARM64 기준: Neoverse-N1
+## Linux ARM64 기준 측정: Neoverse-N1
 
-이는 별도의 기본 ARM64 플랫폼 기준선입니다.
-회귀가 아닌 [#165](https://github.com/fox1245/NeoGraph/issues/165)
-위의 x86_64 테이블과 비교합니다. 버전 `d7a6477`에 고정되어 있습니다.
-자체 종속성이 설정되어 이후 측정이 계속 귀속될 수 있습니다.
+이 측정은 [#165](https://github.com/fox1245/NeoGraph/issues/165)에서 나온 별도의 네이티브 ARM64 플랫폼 기준 측정이며,
+위 x86_64 표와 비교하는 회귀 측정이 아닙니다. 이후 측정의 출처를 추적할 수 있도록
+리비전 `d7a6477`과 이 측정 전용 의존성 집합에 고정했습니다.
 
-|목|값|
+| 항목 | 값 |
 |---|---|
-|날짜| 2026-07-22 |
-|운영체제|우분투 24.04, 리눅스 `6.17.0-1018-oracle`|
-|건축학|`aarch64`|
-|CPU|vCPU 4개, ARM Neoverse-N1|
-|메모리|23GiB, 스왑 없음|
-|컴파일러/CMake|GCC 13.3.0 / CMake 3.28.3|
-|파이썬|CPython 3.12.3|
-|네오그래프 개정판|`d7a6477`|
+| 날짜 | 2026-07-22 |
+| OS | Ubuntu 24.04, Linux `6.17.0-1018-oracle` |
+| 아키텍처 | `aarch64` |
+| CPU | vCPU 4개, ARM Neoverse-N1 |
+| 메모리 | 23 GiB, 스왑 없음 |
+| 컴파일러 / CMake | GCC 13.3.0 / CMake 3.28.3 |
+| Python | CPython 3.12.3 |
+| NeoGraph 리비전 | `d7a6477` |
 
-작업량 및 반복 횟수는 기본 벤치마크와 일치합니다: 10,000
-각 그래프를 컴파일한 후 `seq` 반복 및 5,000번의 `par` 반복
-한 번. NeoGraph는 10번 측정되었으며 각 Python 구현은 3번 측정되었습니다.
-타임스; 표는 중앙값을 보고합니다. 체크포인트, 네트워크 I/O, 모델 호출,
-수면이 비활성화되었습니다. 전체 프로세스 피크 RSS는 다음에서 유래되었습니다.
-`/usr/bin/time -f "%e s, %M KB"`.
+워크로드와 반복 횟수는 주 벤치마크와 같습니다. 그래프를 한 번 컴파일한 뒤 `seq`를 10,000회,
+`par`를 5,000회 반복했습니다. NeoGraph는 10회, Python 구현은 각각 3회 측정했고 표에는 중앙값을 실었습니다.
+체크포인트, 네트워크 I/O, 모델 호출, sleep은 모두 껐습니다. 프로세스 전체의 최대 RSS는
+`/usr/bin/time -f "%e s, %M KB"`로 얻었습니다.
 
-|뼈대|`seq` (µs/iter)|`par` (µs/iter)|`seq` 대 NeoGraph|`par` 대 NeoGraph|피크 RSS|
+| 프레임워크 | `seq` (µs/회) | `par` (µs/회) | `seq` NeoGraph 대비 | `par` NeoGraph 대비 | 최대 RSS |
 |---|---:|---:|---:|---:|---:|
-|**네오그래프**| **9.50** | **21.80** | 1× | 1× |**4.35MB**|
-|헤이스택 3.0.0| 153.44 | 329.67 | 16.2× | 15.1× |73.6MB|
-|피단틱 그래프 1.87.0| 342.60 | 405.87¹ | 36.1× | 18.6×¹ |32.1MB|
-|랭그래프 1.2.9| 1,037.55 | 3,289.22 | 109.2× | 150.9× |63.7MB|
-|라마인덱스 0.14.23| 2,765.04 | 7,824.85 | 291.1× | 358.9× |96.9MB|
-|자동 생성 0.7.5| 4,166.39 | 9,571.11 | 438.6× | 439.0× |47.8MB|
+| **NeoGraph** | **9.50** | **21.80** | 1× | 1× | **4.35 MB** |
+| Haystack 3.0.0 | 153.44 | 329.67 | 16.2× | 15.1× | 73.6 MB |
+| pydantic-graph 1.87.0 | 342.60 | 405.87¹ | 36.1× | 18.6×¹ | 32.1 MB |
+| LangGraph 1.2.9 | 1,037.55 | 3,289.22 | 109.2× | 150.9× | 63.7 MB |
+| LlamaIndex 0.14.23 | 2,765.04 | 7,824.85 | 291.1× | 358.9× | 96.9 MB |
+| AutoGen 0.7.5 | 4,166.39 | 9,571.11 | 438.6× | 439.0× | 47.8 MB |
 
-NeoGraph는 작업자=1 기본값을 사용했으므로 `par` 행은 토폴로지를 측정합니다.
-엔진 소유 스레드 풀이 아닌 감속기 및 직렬 디스패치 오버헤드
-실행. 별도의 병렬 실행을 위해 명시적인 `auto` 벤치마크 모드를 사용하세요.
-팬아웃 측정; 두 가지 모드를 하나의 헤드라인으로 결합하지 마세요.
+NeoGraph는 worker=1 기본값을 썼으므로, `par` 행은 엔진 소유 스레드 풀의 실행이 아니라 토폴로지, 리듀서,
+직렬 디스패치의 오버헤드를 측정한 것입니다. 병렬 fan-out은 `auto` 벤치마크 모드로 따로 측정해야 하며,
+두 모드를 하나의 대표 수치로 합쳐서는 안 됩니다.
 
-¹ pydantic-graph는 이 팬아웃 토폴로지를 모델링할 수 없습니다. `par` 행은
-위에서 설명한 것과 동일한 직렬 6노드 에뮬레이션입니다. 버전 1.87.0이 고정되었습니다.
-당시 2.15.0 API는 더 이상 벤치마크를 지원하지 않기 때문입니다.
-`Graph(...)` 생성자. 프로세스는 CPU 고정 또는 cgroup 제한이 아닙니다.
+¹ pydantic-graph는 이 fan-out 토폴로지를 표현할 수 없어서, `par` 행은 위에서 설명한 것과 같은
+6노드 직렬 흉내입니다. 당시 최신이던 2.15.0의 API는 벤치마크가 쓰는 `Graph(...)` 생성자를 더 이상
+지원하지 않아 1.87.0 버전에 고정했습니다. 프로세스는 CPU에 고정하지 않았고 cgroup으로 제한하지도 않았습니다.
 
-## 숫자의 의미
+## 수치가 말해 주는 것
 
-1. x86_64 reference `seq`에서 Python 엔진 오버헤드는 NeoGraph 대비 Haystack 28.0배부터
-   AutoGen 625.4배입니다. framework/workload 측정이지 비용 원인의 개별 분석은 아닙니다.
-2. reference 전체 process peak RSS는 NeoGraph 4.5 MB, Python 구현 35.1–101.4 MB입니다.
-   각 runtime과 import를 포함하며 배포 application의 메모리가 아닙니다.
-3. worker=1 dispatch와 engine-owned thread pool은 다른 실행 모드입니다. 목적 workload에서 둘 다 측정하세요.
-   무작업 fan-out은 coordination 비용을 보여주지만 모델/I/O latency를 예측하지 않습니다.
+1. x86_64 기준 측정의 `seq` 행에서 호출당 오버헤드는 Haystack이 NeoGraph의 28.0배, AutoGen이 625.4배입니다.
+   이는 프레임워크와 워크로드를 함께 측정한 값이며, 각 비용의 원인을 따로 설명하지는 않습니다.
+2. 기준 측정에서 프로세스 전체의 최대 RSS는 NeoGraph가 4.5MB, Python 구현이 35.1–101.4MB입니다.
+   이 값에는 각 프로세스의 런타임과 import가 포함되어 있으며, 실제로 배포한 애플리케이션의 메모리 사용량이 아닙니다.
+3. worker=1 디스패치와 엔진 소유 스레드 풀은 서로 다른 실행 방식입니다. 대상 워크로드에서 두 가지를 모두
+   측정해야 합니다. 일을 하지 않는 노드로 fan-out하는 벤치마크는 조율 비용을 드러내지만,
+   모델이나 I/O 지연을 예측해 주지는 않습니다.
 
-## 주의 사항 — 이 벤치가 NOT에서 측정하는 내용
+## 주의 사항 — 이 벤치마크가 측정하지 않는 것
 
-* **실제 agent workload.** framework 비교는 모델 추론, network 요청, tool I/O를 하지 않습니다.
-  이런 비용이 application을 지배할 수 있으므로 표가 end-to-end agent speedup을 입증하지 않습니다.
-* **프레임워크에 적합한 워크로드.** AutoGen, LlamaIndex 및
-pydantic-graph는 각각 패러다임에 맞게 최적화됩니다(다중 에이전트 채팅,
-이벤트 기반 장기 실행 워크플로, 상태 머신 제어 흐름)
-이 벤치는 운동을 하지 않는다고요. NeoGraph에서 측정합니다.
-집 잔디.
-* **체크포인트 처리량.** 각 프레임워크에서 지속성 활성화
-직렬화 비용이 지배적이게 됩니다. 그것은 다른 벤치 마크입니다.
-* **콜드 스타트.** 각 구현에는 10리터의 예열 루프가 포함됩니다.
-측정 전. 전체 프로세스 번호에는 Python 인터프리터가 포함됩니다.
-부팅(~200ms) 및 프레임워크 가져오기 시간은 매우 다양합니다(LlamaIndex
-AutoGen은 상당한 나무를 가져옵니다).
-* **공정성.** NeoGraph는 CMake `-DCMAKE_BUILD_TYPE=Release`로 빌드했으며 GCC에서는 `-O3 -DNDEBUG`입니다.
-  Python은 stock CPython 3.12와 각 cohort에 기록된 의존성을 사용하며 별도 tuning을 하지 않았습니다.
-  과거 3.0 이전 README의 `-O2`는 standalone 명령의 옵션이고 CMake Release는 `-O3`였습니다.
+* **실제 에이전트 워크로드.** 프레임워크 비교에는 모델 추론, 네트워크 요청, 도구 I/O가 없습니다.
+  실제 애플리케이션에서는 이 비용이 지배적일 수 있으므로, 이 표로 에이전트의 엔드투엔드 속도 향상을
+  입증할 수는 없습니다.
+* **프레임워크에 맞는 워크로드.** AutoGen, LlamaIndex, pydantic-graph는 각각 멀티 에이전트 채팅,
+  이벤트 기반의 장시간 워크플로, 상태 머신 제어 흐름이라는 서로 다른 패러다임에 맞춰 최적화되어 있고,
+  이 벤치마크는 그 영역을 다루지 않습니다. 말하자면 NeoGraph에 가장 유리한 조건에서 이들을 측정합니다.
+* **체크포인트 처리량.** 각 프레임워크에서 영속화를 켜면 직렬화 비용이 결과를 지배하게 됩니다.
+  체크포인트 처리량은 별도의 벤치마크가 필요한 주제입니다.
+* **콜드 스타트.** 각 구현은 측정 전에 10회 반복하는 워밍업 루프를 포함합니다. 프로세스 전체 수치에는
+  Python 인터프리터 부팅(약 200ms)과 프레임워크 import 시간이 들어가며, 이 시간은 프레임워크마다 크게 다릅니다
+  (LlamaIndex와 AutoGen은 import하는 모듈 트리가 큽니다).
+* **공정성.** NeoGraph는 CMake `-DCMAKE_BUILD_TYPE=Release`로 빌드했고, GCC에서는 `-O3 -DNDEBUG`로 해석됩니다.
+  Python 프레임워크는 모두 기본 CPython 3.12에 각 코호트에 기록한 의존성 버전을 쓰며 별도 튜닝을 하지 않았습니다.
+  과거 이력: 3.0 이전 버전의 이 README는 단독 벤치마크 명령이 쓰던 플래그 때문에 `-O2`라고 적었습니다.
+  CMake 빌드에서는 `Release`가 항상 `-O3`로 해석되었습니다.
 
-## Reproduce
+## 재현 방법
 
-현재 source build는 Core-only benchmark도 외부 `SchemaProvider::runtime` package가 필요합니다.
-CMake 3.20+는 명시적 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`, 설치 runtime, 고정 public GitHub source archive 순으로 선택합니다.
-`NEOGRAPH_FETCH_SCHEMAPROVIDER`는 기본 ON입니다. 설치 package/명시 source를 쓰는 offline 빌드에는 OFF로 설정하세요.
-재현 명령은 유지되는 현재 타깃을 빌드하며 과거 binary를 재생성하거나 표의 Python 버전을 자동 고정하지 않습니다.
-명시 checkout이나 설치 package는 interface/shared generation 4를 제공해야 합니다. 새 출력은 별도로 저장하세요. 과거 표와 JSON은 SDK4 결과가 아닙니다.
+현재 소스를 빌드하려면 Core 전용 벤치마크도 외부 `SchemaProvider::runtime` 패키지가 필요합니다.
+CMake 3.20 이상에서는 명시한 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`을 먼저 쓰고, 없으면 설치된 런타임을,
+그것도 없으면 고정된 공개 GitHub 소스 아카이브를 선택합니다.
+`NEOGRAPH_FETCH_SCHEMAPROVIDER`의 기본값은 ON입니다. 설치된 패키지나 명시한 소스로 오프라인 빌드하려면
+OFF로 설정합니다.
+아래 재현 명령은 현재 유지보수하는 타깃을 빌드하며, 과거의 바이너리를 다시 만들지도, 표에 나온 Python 버전을
+자동으로 고정하지도 않습니다.
+직접 지정한 체크아웃이나 설치된 패키지는 인터페이스·공유 세대가 4여야 합니다.
+새 결과는 따로 저장해야 합니다. 과거의 표와 JSON 파일은 SDK4 결과가 아닙니다.
 
 ```bash
 # Build native Core + v1 Program benchmarks (Release is required for
@@ -251,25 +244,27 @@ cmake --build build-program-codec-poc --target bench_program_codec_poc -j
 taskset -c 0 ./build-program-codec-poc/bench_program_codec_poc 25 100
 ```
 
-Each native benchmark prints `config`, `runtime`, `header`, and `result`
-records. Report the median of the measured samples after the explicit warmup;
-do not compare a single short run. `bench_program` uses in-memory stores and
-no provider/network calls. `bench_program_dispatch` measures only immutable
-`ProgramPlan` lookup and descriptor traversal, not Core execution.
+네이티브 벤치마크는 각각 `config`, `runtime`, `header`, `result` 레코드를 출력합니다.
+명시한 워밍업 이후에 측정한 샘플의 중앙값을 보고하고, 짧은 실행 한 번만으로 비교해서는 안 됩니다.
+`bench_program`은 인메모리 저장소를 쓰며 provider나 네트워크 호출이 없습니다.
+`bench_program_dispatch`는 변경할 수 없는 `ProgramPlan` 조회와 descriptor 순회만 측정하며, Core 실행은 측정하지 않습니다.
 
-직렬화 POC는 offline/in-memory 측정입니다. 완료된 Program의 불변 publication을 사용합니다.
-serialization POC는 canonical byte 재사용을, binary POC는 canonical JSON envelope와
-중첩 record의 canonical byte를 유지하는 length-prefixed envelope를 비교합니다.
-binary 값은 lower-bound 실험이며 persistence 계약을 대체하지 않습니다.
+직렬화 POC는 오프라인 인메모리 측정입니다. 완료된 Program 실행에서 변경할 수 없는 publication을 가져와 사용합니다.
+serialization POC는 정규(canonical) 바이트를 재사용하는 비용을 측정하고, binary POC는 현재의 정규 JSON 봉투(envelope)와
+중첩된 레코드마다 정규 바이트를 보존하는 길이 접두 봉투를 비교합니다.
+binary 결과는 하한(lower bound)을 확인하는 실험이며, 영속화 계약을 대체하려는 것이 아닙니다.
 
-별도 opt-in `bench_program_codec_poc`는 같은 중첩 canonical byte의 protobuf/Cap’n Proto transport envelope를 비교합니다.
-`*_envelope_only_*`는 byte가 준비된 뒤 envelope 생성만 측정합니다.
-`*_transport_total_lower_bound_*`는 중첩 canonical byte 생성도 포함하지만 `ProgramTransitionPublication`의 outer cross-record 검증을 생략합니다.
-persistence/identity format benchmark가 아닙니다. recovery metric만 owning Program record로 복원하는 수신 소비자를 모델링합니다.
-어떤 POC도 SQLite/Postgres transaction 또는 end-to-end ProgramRuntime latency를 측정하지 않습니다.
+`bench_program_codec_poc`는 별도로 켜야 하는 항목이며, 같은 중첩 정규 바이트를 두고 protobuf와 Cap'n Proto의
+**전송 봉투(transport envelope)**를 비교합니다.
+`*_envelope_only_*`는 정규 바이트가 이미 준비된 상태에서 봉투를 만드는 비용만 측정합니다.
+`*_transport_total_lower_bound_*`는 중첩 정규 바이트를 만드는 비용까지 포함하지만,
+`ProgramTransitionPublication`의 바깥쪽 레코드 간 검증은 일부러 건너뜁니다.
+영속화나 식별자 형식을 평가하는 벤치마크가 아닙니다.
+복구(recovery) 지표는 파싱해서 소유권을 가진 Program 레코드로 되돌리는 시간까지 포함하며,
+수신 측 소비자 전체를 모델링하는 유일한 코덱 수치입니다.
+이 POC들은 SQLite/Postgres 트랜잭션 지연이나 `ProgramRuntime`의 엔드투엔드 지연을 측정하지 않습니다.
 
-The Python framework comparison remains optional and requires third-party
-packages:
+Python 프레임워크 비교는 선택 사항이며, 서드파티 패키지가 필요합니다.
 
 ```bash
 # Shared Python venv for every Python framework:
@@ -292,16 +287,14 @@ python3 -m venv /tmp/bench_venv
 /usr/bin/time -f "%e s, %M KB" ./build-program-bench/bench_neograph
 ```
 
-The service-backed checkpoint, HTTP, and concurrent Docker benchmarks are
-separate experiments; they are not required for the deterministic native
-Core/Program run above.
+서비스를 쓰는 체크포인트, HTTP, 동시성 Docker 벤치마크는 별도의 실험입니다.
+위에서 설명한 결정적(deterministic) 네이티브 Core/Program 실행에는 필요하지 않습니다.
 
-Output format is tab-separated `config`, `runtime`, `header`, `result`, or
-`metric` records. The native result rows contain median total time and
-per-iteration time; Python scripts retain their historical
-`workload<TAB>iters<TAB>total_ms<TAB>per_iter_us` rows.
+출력 형식은 탭으로 구분한 `config`, `runtime`, `header`, `result`, `metric` 레코드입니다.
+네이티브 result 행에는 전체 시간의 중앙값과 반복당 시간이 들어 있습니다.
+Python 스크립트는 예전 형식 그대로 `workload<TAB>iters<TAB>total_ms<TAB>per_iter_us` 행을 출력합니다.
 
-## Environment used for the 2026-04-19 numbers
+## 2026-04-19 수치를 측정한 환경
 
 ```
 OS:        Linux 6.6.87.2-microsoft-standard-WSL2 (Ubuntu 24.04 userland)
@@ -312,29 +305,46 @@ Versions:  langgraph 1.1.7, haystack-ai 2.27.0, pydantic-graph 1.84.1,
            llama-index-core 0.14.20, autogen-agentchat 0.7.5
 ```
 
-하드웨어, runtime 버전, workload, worker mode는 latency와 비율을 모두 바꿀 수 있습니다.
-이 문서는 플랫폼 간 허용 오차를 정하지 않습니다.
+하드웨어, 런타임 버전, 워크로드 형태, worker 모드에 따라 지연 시간과 비율이 모두 달라질 수 있습니다.
+이 문서는 플랫폼 사이에 허용되는 오차 범위를 정하지 않습니다.
 
-## Typed provider 전환: 실제 GraphEngine 전후 측정
+## Typed provider 전환: 실제 GraphEngine의 전후 비교
 
-아래 cutover·최종 검증·handoff cohort는 retained-feature 통합 전에 SDK interface/shared generation 3으로 측정했습니다. 기록 속 “current”와 “final”은 당시 cohort를 가리키며 현재 SDK4 release를 뜻하지 않습니다. 수치, 개수, 연결된 dataset은 그대로 보존합니다.
+아래의 전환(cutover), 최종 검증, handoff 코호트는 retained-feature 통합 이전에
+SDK 인터페이스·공유 세대 3으로 기록했습니다. 이 기록 안의 “current”와 “final”은 각 코호트가 만들어진 시점을
+가리키며, 현재의 SDK4 릴리스를 뜻하지 않습니다. 측정 항목, 횟수, 연결된 데이터셋은 바뀌지 않았습니다.
 
-위 Python 프레임워크 비교와 별개인 **로컬 TLS HTTP/SSE** 측정이다. 모델 생성시간이 아니다. 현재 static Release/GCC13.3/Linux x64에서 실제 `GraphEngine.llm_call/tool_dispatch`를 거친 **16개 설정 × 독립 프로세스 3회 = 48개 기록**이 통과했다. 3개 공통 H1 부하, 5개 family의 buffered/SSE native continuation, 실제 H2 3개 부하를 포함한다. 측정 중 컴파일이나 유료 호출은 없었다.
+이 절의 내용은 **로컬 TLS HTTP/SSE** 측정으로, 위의 체크포인트 없는 Python 프레임워크 벤치마크와는 별개이며
+모델 추론도 아닙니다. 정적 Release/GCC13.3/Linux x64 환경의 이번 실행에서는 운영(production)용
+`GraphEngine.llm_call/tool_dispatch`를 거쳐 **16개 구성 × 새 프로세스 3회 = 48개 기록**이 검증을 통과했습니다.
+공통 H1 워크로드 3개, 다섯 계열 전체의 버퍼링/SSE 네이티브 이어가기(continuation), 실제 H2 사례 3개를 포함합니다.
+측정 중에는 컴파일러를 실행하지 않았고 유료 API도 호출하지 않았습니다.
 
-[원본9회](provider-cutover-legacy-results.json)는 변경하지 않은 `7b47ad43`에서 나왔습니다.
-[현재 raw 기록](provider-cutover-current-results.json)과 [scalar 비교](provider-cutover-summary.json)는
-실제 control, distribution, RSS/thread, peer counter와 owned outcome을 보존합니다.
+[원본 9개 기록](provider-cutover-legacy-results.json)은 수정하지 않은 `7b47ad43`에서 얻었습니다.
+[현재 원시 기록](provider-cutover-current-results.json)과 [스칼라 비교](provider-cutover-summary.json)에는
+실제 적용된 제어값, 분포, RSS와 스레드 수, 실제 peer 카운터, 소유 결과(owned outcome)가 남아 있습니다.
 
-| 공통 그래프 부하 | 전 p50 ms | 후 p50 ms | 전 그래프/s | 후 그래프/s | 전 peak RSS MiB | 후 peak RSS MiB |
+| 공통 그래프 워크로드 | 전 p50 ms | 후 p50 ms | 전 그래프 실행/s | 후 그래프 실행/s | 전 최대 RSS MiB | 후 최대 RSS MiB |
 |---|---:|---:|---:|---:|---:|---:|
-| H1 buffered text | 0.707 | 1.320 | 1,375.58 | 733.65 | 12.617 | 15.465 |
-| H1 buffered tool loop | 29.337 | 30.510 | 800.30 | 702.64 | 17.832 | 20.219 |
-| H1 SSE tool loop | 600.540 | 37.593 | 51.43 | 615.38 | 14.414 | 20.367 |
+| H1 버퍼링 텍스트 | 0.707 | 1.320 | 1,375.58 | 733.65 | 12.617 | 15.465 |
+| H1 버퍼링 도구 루프 | 29.337 | 30.510 | 800.30 | 702.64 | 17.832 | 20.219 |
+| H1 SSE 도구 루프 | 600.540 | 37.593 | 51.43 | 615.38 | 14.414 | 20.367 |
 
-독립 3회 통계의 중앙값이며 HTTP 요청이 아닌 **그래프 실행 단위**다. text는 동시성1/지연0, tool은 동시성32/요청별 지연5ms/그래프당 요청2회다. warmup10·측정100회; tool/native는 반복별 취소8회다. 현재 전체에서 측정실패0, 실제 취소336/취소실패0, 정확한 synthetic native replay3,300, Provider 파괴 후 보존 결과검증5,280, 잘못된 peer 요청0·초과 재시도0을 관찰했다.
+값은 3회 반복의 중앙값이며, HTTP 요청이 아니라 **그래프 실행 한 번당** 값입니다.
+텍스트는 동시성 1에 peer 지연이 없고, 도구 루프는 동시성 32에 요청당 5ms 지연을 두며 그래프 실행 한 번에
+생성 요청이 두 번 들어갑니다. 모든 코호트는 10회 워밍업 후 100회를 측정하고,
+도구/네이티브 코호트는 반복마다 취소도 8회 요청합니다.
 
-완전한 owned raw/native/nullable 데이터와 권한 검증으로 text 비용·메모리는 증가하고 buffered tool p50은 소폭 증가한다. SSE는 legacy buffered 경로 지연을 제거했다. legacy가 native/nullable 권한과 일부 worker 설정을 지원하지 않았으므로 의미/리소스 동등성이나 모델 속도향상으로 주장하지 않는다.
+현재 코호트 전체에서 **측정 중 실패는 0건**, **실제 취소 336건 / 취소 실패 0건**,
+**정확한 합성 네이티브 재생(replay) 3,300건**, **Provider를 소멸시킨 뒤 다시 검증한 보관 그래프 결과 5,280건**이었고,
+잘못된 peer 요청과 초과 재시도 디스패치는 없었습니다.
+취소 여부는 예외 메시지의 문구가 아니라 SDK가 소유한 실제 `Cancelled` 결과로 분류합니다.
 
+절충점(tradeoff)이 있습니다. 소유하는 원시/네이티브/nullable 결과 전체와 authority 게이트가 추가되어 텍스트 지연과
+메모리가 늘고, 버퍼링 도구 루프의 p50도 약간 늘어납니다. 반면 SSE는 더 이상 예전 버퍼링 경로의 지연을 겪지 않습니다.
+예전 구현은 네이티브/nullable authority와 일부 worker 설정을 지원하지 않았으므로, 이 수치는 같은 워크로드에서 측정한
+값일 뿐 의미나 자원 사용이 동등하다는 뜻도, 모델이 빨라진다는 약속도 아닙니다.
+현재 p95/p99, 첫 의미 이벤트, 취소 정착(settle) 시간, 확장 계열 행은 JSON 요약에 있습니다.
 
 ```sh
 cmake -S . -B build-provider-bench -DCMAKE_BUILD_TYPE=Release \
@@ -349,66 +359,102 @@ for config in benchmarks/provider_cutover_h1_*.json benchmarks/provider_cutover_
 done
 ```
 
-NeoGraph root에서 Node.js/OpenSSL CLI와 SDK의 일반 의존성을 준비하고 실행하세요.
-peer는 임시 private CA를 쓰며 system trust나 dependency library를 교체하지 않습니다.
-원본 raw evidence는 유지하며 현재 구현으로 다시 계산하지 않습니다.
+NeoGraph 루트에서 Node.js, OpenSSL CLI, SDK의 일반 의존성이 있는 환경에서 실행합니다.
+peer는 임시 사설 CA를 쓰며, 시스템 신뢰 저장소나 의존성 라이브러리는 바꾸지 않습니다.
+원본 원시 증거는 그대로 보존했으며 현재 구현으로 다시 계산하지 않았습니다.
 
 
+## 최종 검증 코호트: 새 typed provider GraphEngine 측정
 
-## 최종 검증 cohort: fresh typed provider GraphEngine 측정
+최종 Release GraphEngine/로컬 TLS HTTP/SSE 코호트는 **16개 구성 × 새 프로세스 3회 반복 = 48개 기록을 실패 없이
+38.29초에 마쳤습니다.** 실제 프로토콜 검사와 소유 결과 검사를 모두 통과했습니다.
+측정 중에는 컴파일러를 실행하지 않았고 유료 모델도 호출하지 않았습니다.
+이 코호트는 최종 워크트리에서 새로 측정한 것이며, 위의 과거 표를 대체하지 않습니다.
+[최종 스칼라 요약](provider-cutover-final-summary.json)과 [최종 원시 소유 합성 객체](provider-cutover-final-results.json)는
+수정하지 않은 [레거시 9개 기록 코호트](provider-cutover-legacy-results.json),
+[이전의 현재 48개 기록 코호트](provider-cutover-current-results.json), [이전 비교](provider-cutover-summary.json)와
+별개의 파일입니다. 약 60MB인 원시 파일에는 실제 합성 결과 객체가 들어 있으며 provider 비밀 값은 없습니다.
 
-최종 Release GraphEngine/local TLS HTTP/SSE cohort는 **16설정 × fresh process3회 = 48기록,실패0,38.29초**로 완료했다. 모든 actual protocol/owned-outcome check가 pass했다. 측정 중 compiler 실행이나 유료 model call은 없었다. 이는 fresh final-worktree cohort이며 위 historical table을 대체하지 않는다. [최종 scalar summary](provider-cutover-final-summary.json)와 [최종 raw owned synthetic object](provider-cutover-final-results.json)는 변경하지 않은 [legacy9기록](provider-cutover-legacy-results.json),[이전 current48기록](provider-cutover-current-results.json),[이전 comparison](provider-cutover-summary.json)과 별개다. 약60MB raw file은 실제 synthetic outcome object이며 provider secret을 포함하지 않는다.
+아래 값은 요약에 실린, 독립 프로세스 3회 반복의 중앙값이며 모델 토큰이나 HTTP 요청이 아니라
+**그래프 실행 한 번당** 값입니다. 모든 구성이 협상된 프로토콜을 검증했고, provider를 소멸시킨 뒤에도
+소유 그래프 결과를 보관했습니다. 자원·제어 방식과 네이티브/nullable authority의 차이는 그대로 남아 있습니다.
+즉 **의미와 자원 사용이 동등하다는 주장은 성립하지 않습니다.**
+이 값은 로컬에서 측정한 절충점일 뿐 모델이 빨라진다는 뜻도, 벤더 검증도 아닙니다.
 
-아래 값은 summary의 독립 process3회 중앙값이며 **graph run 단위**이지 model token/HTTP request 단위가 아니다. 모든 설정에서 negotiated protocol과 provider 소멸 후 retained owned graph outcome을 검증했다. Resource/control 및 native/nullable authority 차이는 남는다. **Semantic/resource equivalence는 false**이며 local 측정 tradeoff이지 model 속도향상이나 vendor qualification이 아니다.
+### 최종 16개 구성 측정값
 
-### 최종16설정 측정
-
-| Family | HTTP | 부하 | p50 ms | p95 ms | p99 ms | Graph runs/s | Peak RSS MiB | Peak thread |
+| 계열 | HTTP | 워크로드 | p50 ms | p95 ms | p99 ms | 그래프 실행/s | 최대 RSS MiB | 최대 스레드 |
 |---|---|---|---:|---:|---:|---:|---:|---:|
-| `openai.chat` | H1 | text buffered | 1.296943 | 1.349401 | 1.397812 | 769.975584 | 15.898438 | 3 |
-| `openai.chat` | H1 | tool buffered | 30.672507 | 100.492667 | 112.663949 | 678.507993 | 20.585938 | 19 |
-| `openai.chat` | H1 | tool SSE | 35.800113 | 105.431034 | 117.559931 | 627.047345 | 21.042969 | 19 |
-| `openai.chat` | H1 | native buffered | 32.546693 | 102.680190 | 115.244483 | 683.637830 | 20.925781 | 19 |
-| `openai.chat` | H1 | native SSE | 38.135188 | 115.463732 | 126.668501 | 615.357297 | 21.902344 | 19 |
-| `anthropic.messages` | H1 | native buffered | 30.612805 | 103.979300 | 123.110448 | 678.785191 | 20.324219 | 19 |
-| `anthropic.messages` | H1 | native SSE | 44.021986 | 71.548005 | 93.941146 | 604.744184 | 22.125000 | 19 |
-| `openai.responses` | H1 | native buffered | 35.070430 | 100.615954 | 114.597387 | 647.751880 | 22.179688 | 19 |
-| `openai.responses` | H1 | native SSE | 46.670934 | 77.636952 | 89.664406 | 571.458359 | 25.511719 | 19 |
-| `google.generate` | H1 | native buffered | 31.449930 | 99.319459 | 112.385528 | 698.783682 | 21.726562 | 19 |
-| `google.generate` | H1 | native SSE | 37.774704 | 105.703383 | 120.826886 | 627.040287 | 22.500000 | 19 |
-| `google.interactions` | H1 | native buffered | 32.588486 | 101.365734 | 109.841457 | 690.967042 | 21.664062 | 19 |
-| `google.interactions` | H1 | native SSE | 46.786625 | 76.036675 | 92.590316 | 573.469300 | 23.058594 | 19 |
-| `openai.chat` | H2 | text buffered | 1.311873 | 2.443117 | 2.604176 | 701.785481 | 16.148438 | 3 |
-| `openai.chat` | H2 | tool SSE | 40.349311 | 54.813608 | 59.912728 | 714.064349 | 20.386719 | 19 |
-| `google.interactions` | H2 | native SSE | 44.561127 | 56.692743 | 64.665852 | 663.966743 | 22.750000 | 19 |
+| `openai.chat` | H1 | 텍스트 버퍼링 | 1.296943 | 1.349401 | 1.397812 | 769.975584 | 15.898438 | 3 |
+| `openai.chat` | H1 | 도구 버퍼링 | 30.672507 | 100.492667 | 112.663949 | 678.507993 | 20.585938 | 19 |
+| `openai.chat` | H1 | 도구 SSE | 35.800113 | 105.431034 | 117.559931 | 627.047345 | 21.042969 | 19 |
+| `openai.chat` | H1 | 네이티브 버퍼링 | 32.546693 | 102.680190 | 115.244483 | 683.637830 | 20.925781 | 19 |
+| `openai.chat` | H1 | 네이티브 SSE | 38.135188 | 115.463732 | 126.668501 | 615.357297 | 21.902344 | 19 |
+| `anthropic.messages` | H1 | 네이티브 버퍼링 | 30.612805 | 103.979300 | 123.110448 | 678.785191 | 20.324219 | 19 |
+| `anthropic.messages` | H1 | 네이티브 SSE | 44.021986 | 71.548005 | 93.941146 | 604.744184 | 22.125000 | 19 |
+| `openai.responses` | H1 | 네이티브 버퍼링 | 35.070430 | 100.615954 | 114.597387 | 647.751880 | 22.179688 | 19 |
+| `openai.responses` | H1 | 네이티브 SSE | 46.670934 | 77.636952 | 89.664406 | 571.458359 | 25.511719 | 19 |
+| `google.generate` | H1 | 네이티브 버퍼링 | 31.449930 | 99.319459 | 112.385528 | 698.783682 | 21.726562 | 19 |
+| `google.generate` | H1 | 네이티브 SSE | 37.774704 | 105.703383 | 120.826886 | 627.040287 | 22.500000 | 19 |
+| `google.interactions` | H1 | 네이티브 버퍼링 | 32.588486 | 101.365734 | 109.841457 | 690.967042 | 21.664062 | 19 |
+| `google.interactions` | H1 | 네이티브 SSE | 46.786625 | 76.036675 | 92.590316 | 573.469300 | 23.058594 | 19 |
+| `openai.chat` | H2 | 텍스트 버퍼링 | 1.311873 | 2.443117 | 2.604176 | 701.785481 | 16.148438 | 3 |
+| `openai.chat` | H2 | 도구 SSE | 40.349311 | 54.813608 | 59.912728 | 714.064349 | 20.386719 | 19 |
+| `google.interactions` | H2 | 네이티브 SSE | 44.561127 | 56.692743 | 64.665852 | 663.966743 | 22.750000 | 19 |
 
-### 공통 H1 3부하: 변경하지 않은 legacy 대 최종 cohort
+### 공통 H1 워크로드 3개: 수정하지 않은 레거시와 최종 코호트 비교
 
-| H1 graph 부하 | 전 p50 ms | 최종 p50 ms | 전 graph runs/s | 최종 graph runs/s |
+| H1 그래프 워크로드 | 전 p50 ms | 최종 p50 ms | 전 그래프 실행/s | 최종 그래프 실행/s |
 |---|---:|---:|---:|---:|
-| text buffered | 0.706631 | 1.296943 | 1375.578826 | 769.975584 |
-| tool buffered | 29.336983 | 30.672507 | 800.301406 | 678.507993 |
-| tool SSE | 600.539987 | 35.800113 | 51.429767 | 627.047345 |
+| 텍스트 버퍼링 | 0.706631 | 1.296943 | 1375.578826 | 769.975584 |
+| 도구 버퍼링 | 29.336983 | 30.672507 | 800.301406 | 678.507993 |
+| 도구 SSE | 600.539987 | 35.800113 | 51.429767 | 627.047345 |
 
-전 값은 원래7b47ad43 cohort 그대로다. Text latency는 증가하고 throughput은 감소했다. Buffered-tool 변화는 작고 SSE는 이전 buffered-path delay를 제거한다. Historical 값은 재계산하거나 덮어쓰지 않는다. 확장 family/protocol,first-semantic,cancellation,native replay,retained-outcome 사실은 최종 summary/raw record에 보존한다. Benchmark 증거가 유료 native-consumption/cryptographic-validation 주장을 강화하지 않는다.
+전(Before) 값은 원래의 7b47ad43 코호트 그대로입니다. 텍스트는 지연 시간이 늘고 처리량이 줄었으며,
+버퍼링 도구 루프의 변화는 크지 않고, SSE는 예전 버퍼링 경로의 지연을 없앴습니다.
+과거 값은 다시 계산하거나 덮어쓰지 않았습니다. 확장 계열/프로토콜, 첫 의미 이벤트, 취소, 네이티브 재생(replay),
+보관된 결과에 관한 사실은 최종 요약과 원시 기록에 남아 있습니다.
+이 벤치마크 증거는 유료 네이티브 소비나 암호학적 검증에 관한 주장을 강화하지 않습니다.
 
-## 이벤트 기반 Provider handoff: 동일 조건 polling 대 coalesced channel
+## 이벤트 기반 Provider handoff: 동일 조건의 폴링과 병합(coalesced) 채널 비교
 
-[실측 summary](provider-notification-summary.json):cohort별8설정 ×3 fresh process =48 record,4800 measured graph run,실패0;warmup/measured outcome5280개가 provider 파괴 뒤에도 유효했다. GCC13.3 Release static/hardened,native optimization OFF,동일 local TLS oracle/admitted control,process별10warmup/100measured,동시 compiler·유료/모델 추론 없음. Process 통계의 중앙값이며 confidence interval이나 모델 token rate가 아니다. Payload는 fixture text padding이고0도253B 응답 envelope를 만든다.
+[측정 요약](provider-notification-summary.json): 코호트당 8개 구성 × 새 프로세스 3회 = 48개 기록,
+측정한 그래프 실행 4800회, 실패 0건. 워밍업과 측정을 합친 결과 5280건은 provider를 소멸시킨 뒤에도 유효했습니다.
+GCC13.3 Release 정적/하드닝 빌드에 네이티브 최적화는 끈 상태이고, 같은 로컬 TLS 오라클과 승인(admission)된 제어값을 썼으며,
+프로세스마다 10회 워밍업 후 100회를 측정했습니다. 컴파일러를 동시에 돌리거나 유료 모델 추론을 하지 않았습니다.
+값은 프로세스별 통계의 중앙값이며 신뢰구간이나 모델 토큰 속도가 아닙니다.
+아래 payload 크기는 픽스처 텍스트의 패딩이고, 0이어도 응답 봉투는 253B입니다.
 
-| H1 부하 | 전 p50 ms | 후 p50 ms | 전 graph runs/s | 후 graph runs/s |
+| H1 워크로드 | 전 p50 ms | 후 p50 ms | 전 그래프 실행/s | 후 그래프 실행/s |
 |---|---:|---:|---:|---:|
-| text256, concurrency1 | 1.302474 | 0.952992 | 738.901074 | 1022.958838 |
-| text0, concurrency1 | 1.286646 | 0.912571 | 761.940993 | 1070.657541 |
-| text4KiB, concurrency1 | 1.387636 | 1.128831 | 709.024147 | 870.631703 |
-| text64KiB, concurrency1 | 4.873767 | 4.144619 | 196.243991 | 240.268946 |
-| text256, peer delay5ms | 6.601920 | 6.425313 | 146.906115 | 155.052016 |
-| text256, concurrency32 | 7.641085 | 6.939675 | 1645.559595 | 1803.087419 |
-| tool buffered, concurrency32 | 30.548201 | 31.348443 | 710.487696 | 692.440963 |
-| tool SSE, concurrency32 | 33.597342 | 38.607118 | 655.586834 | 611.740359 |
+| text256, 동시성 1 | 1.302474 | 0.952992 | 738.901074 | 1022.958838 |
+| text0, 동시성 1 | 1.286646 | 0.912571 | 761.940993 | 1070.657541 |
+| text4KiB, 동시성 1 | 1.387636 | 1.128831 | 709.024147 | 870.631703 |
+| text64KiB, 동시성 1 | 4.873767 | 4.144619 | 196.243991 | 240.268946 |
+| text256, peer 지연 5ms | 6.601920 | 6.425313 | 146.906115 | 155.052016 |
+| text256, 동시성 32 | 7.641085 | 6.939675 | 1645.559595 | 1803.087419 |
+| 도구 버퍼링, 동시성 32 | 30.548201 | 31.348443 | 710.487696 | 692.440963 |
+| 도구 SSE, 동시성 32 | 33.597342 | 38.607118 | 655.586834 | 611.740359 |
 
-작은 text p50은26.83% 감소하고 처리량은38.44% 증가했으며 tool/SSE 처리량은2.54%/6.69% 감소했다. 요청별 native handle/reuse 변형은 동시성 비용이 더 커 채택하지 않았다. 최종 구현은 기존 capacity-one concurrent-channel 관례,할당 없는 intrusive shutdown guard,active-drain coalescing과 기존 SDK `join()`/소유권/권한 fence를 사용한다. 별도 계측180-operation cohort에서 SDK publication→drain p50은383.7125→36.4165µs,timer wait298→0,최종 notification wait180이었다. 계측값을 production latency 표에 섞지 않았고 임시 probe 코드는 제거했다.
+작은 텍스트의 p50은 26.83% 줄고 처리량은 38.44% 늘었으며, 도구/SSE의 처리량은 각각 2.54%/6.69% 줄었습니다.
+요청마다 네이티브 핸들을 만들거나 재사용하는 이전 변형들은 동시성 비용이 더 커서 채택하지 않았습니다.
+채택한 구현은 기존의 용량 1짜리 동시성 채널 관용구에, 할당이 없는 intrusive 종료 가드, 활성 drain 병합(coalescing),
+그대로인 SDK `join()`/소유권/authority 펜스를 조합한 것입니다.
+계측을 넣은 180회 연산 코호트를 따로 측정한 결과, SDK publication에서 drain까지의 p50은 383.7125µs에서 36.4165µs로 줄었고,
+타이머 대기는 298회에서 0회가 되었으며, 알림 대기는 마지막에 180회였습니다.
+이 프로브 수치는 운영 지연 시간 표에 섞지 않았습니다. 임시 프로브 코드는 제거했습니다.
 
-Targeted regression43개와 ASan/UBSan concurrent publisher/context-teardown200회가 pass했다. Installed SDK public header/archive만 사용한 consumer는 measured SSE tool-loop graph300회/HTTP600회와 파괴 뒤 retained outcome330개를 검증했다. TSan은 실행 불가(PIE mapping 오류/non-PIE exit139)여서 race-free 주장을 하지 않는다. 자원 peak는1ms sample이다. Runtime qualification은 Linux/POSIX이며 Windows/macOS/Python/유료 vendor 호환이 아니다.
+대상을 좁힌 회귀 테스트 43건과, publisher와 컨텍스트 해제를 동시에 수행하는 ASan/UBSan 200라운드를 통과했습니다.
+설치된 SDK의 공개 헤더와 아카이브만으로 빌드한 소비자는 측정 대상 SSE 도구 루프 그래프 실행 300회(HTTP 요청 600회)를 마쳤고,
+소멸 후에도 결과 330개를 보관했습니다.
+이 환경에서는 TSan을 실행하지 못했으며(PIE 매핑 실패, non-PIE는 종료 코드 139) race가 없다는 주장은 하지 않습니다.
+자원 최고치는 1ms 간격 샘플링 값입니다.
+런타임 검증은 Linux/POSIX에 한하며, Windows·macOS·Python이나 유료 벤더와의 호환성은 검증하지 않았습니다.
 
-SIMD 조사:yyjson0.12.0은 scalar/unrolled scan과 packed-word UTF-8 검증을 의도적으로 사용하며 선택적 AVX parser가 아니다. [Upstream SSE2 PR294 거부 근거](https://github.com/ibireme/yyjson/pull/294#issuecomment-5159789685). 최종 parser symbol은 scalar SSE/copy 명령을 쓰지만 AVX scanning은 없다. 별도 SDK `-O3` number helper에는 packed SIMD가 있으나 archive 순서가 NeoGraph의 마지막 `-O2` object를 선택한다. 전후 object SHA256은 summary에서 동일하다. Host CPUID/OSXSAVE/XCR0=7은 AVX2 실행 가능만 입증하며 parser 활용을 뜻하지 않는다. ISA/parser tuning은 A/B에 섞지 않았고 전체 검증은 Ω(B)이다.
+SIMD 점검: 고정한 yyjson 0.12.0은 선택적인 AVX 파서가 아니라 스칼라/언롤 스캔과 packed-word UTF-8 검사를 의도적으로 사용합니다.
+[업스트림의 SSE2 PR294는 거절되었습니다](https://github.com/ibireme/yyjson/pull/294#issuecomment-5159789685).
+최종 벤치마크의 파서 심볼에는 스칼라 SSE/복사 명령은 있지만 AVX 스캔은 없습니다.
+따로 빌드한 SDK의 `-O3` 숫자 헬퍼에는 packed SIMD가 있으나, 아카이브 순서상 NeoGraph의 뒤쪽 `-O2` 오브젝트가 선택됩니다.
+이 오브젝트의 전후 SHA256은 요약에서 동일합니다.
+호스트의 CPUID/OSXSAVE/XCR0=7은 AVX2를 쓸 수 있음을 확인했을 뿐 파서가 AVX2를 썼다는 뜻은 아닙니다.
+이 A/B 비교에는 ISA나 파서 튜닝을 섞지 않았습니다. 전체 검증은 여전히 Ω(B)입니다.
