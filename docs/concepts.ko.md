@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=1ca107c7a355f07e80201b7fe13423f9d3c930a61122e458055727681390cbda -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=6574c128e61202faa5cd337176f0bc721d5e7c3b8c288756be82a2d41845c65c -->
 # NeoGraph 핵심 개념 — 해설 가이드
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -51,7 +51,7 @@ NeoGraph **그래프**는 네 가지로 구성됩니다:
 
 일반 ready batch는 해당 batch의 update 이전 채널 상태를 읽는다. 형제 노드가 실행 중 다른 형제의 반환 쓰기를 읽을 수는 없다. 엔진은 쓰기를 buffer에 모아 batch 이후 리듀서로 결합하고 갱신된 상태로 라우팅을 평가한다. 이는 그래프 스케줄링이며 모델 내부 계산을 동기화하지 않는다.
 
-예를 들어 `counter`가 0이고 두 ready 노드가 각각 `counter + 1`을 반환하면 둘 다 0을 읽는다. overwrite 리듀서 결과는 2가 아닌 1이다. 사용자 sum 리듀서에 증가량 1을 각각 쓰면 2로 결합할 수 있다. 다중 분기 `Send`는 각 payload를 적용한 격리 상태 복사본을 쓰고 단일 `Send`는 공유 상태에 payload를 적용한다. 리듀서 순서만으로 모델 응답이나 외부 효과가 재현되지는 않는다.
+예를 들어 `counter`가 0이고 두 ready 노드가 각각 `counter + 1`을 반환하면 둘 다 0을 읽는다. overwrite 리듀서 결과는 2가 아닌 1이다. 사용자 sum 리듀서에 증가량 1을 각각 쓰면 2로 결합할 수 있다. 하나든 여럿이든 모든 `Send`는 자신의 payload를 적용한 격리 상태 복사본에서 실행되므로 payload가 공유 상태에 닿지 않는다(#389). 리듀서 순서만으로 모델 응답이나 외부 효과가 재현되지는 않는다.
 
 ---
 
@@ -314,7 +314,7 @@ class Planner(ng.GraphNode):
 
 ### 정신적 모델
 
-엔진은 `Send`마다 compiled target을 호출하며 새 node 객체를 보장하지 않는다. 동시 호출에서 target의 member state를 안전하게 다뤄야 한다. Payload는 target의 채널 읽기 전에 적용한다. 단일 Send는 공유 상태, 다중 Send는 ready batch 이후 상태의 격리 복사본을 사용하며 모든 분기 완료 뒤 반환 쓰기를 호출 순서로 결합한다. 다음 ready batch 라우팅은 일반 node와 Send target의 신호를 함께 사용한다.
+엔진은 `Send`마다 compiled target을 호출하며 새 node 객체를 보장하지 않는다. 동시 호출에서 target의 member state를 안전하게 다뤄야 한다. Payload는 target의 채널 읽기 전에 적용한다. 스텝이 Send를 하나 보내든 여럿 보내든 모든 Send는 ready batch 이후 상태의 격리 복사본에 자신의 payload를 적용해 실행하므로, payload는 재시도 시도를 포함해 그 Send 실행에만 보이고 다음 스텝이나 최종 상태에는 보이지 않는다(#389). 반환 쓰기는 모든 Send 완료 뒤 호출 순서로 결합한다. 다음 ready batch 라우팅은 일반 node와 Send target의 신호를 함께 사용한다.
 
 `NodeInterrupt`를 던지는 Send target은 ready batch의 node처럼 run을 일시 정지한다. 그 `NodeInterrupt` 체크포인트는 superstep 전체로 다시 들어간다. step이 시작할 때의 상태를 담고 step의 ready node를 next node로 기록하며, 일시 정지한 결과도 그 상태를 보고한다. Resume은 step을 다시 실행한다. 끝난 ready node와 Send는 기록된 결과를 재생하며 다시 실행되거나 다시 과금되지 않는다. 일시 정지한 Send와 끝나지 않은 다른 Send는 같은 task id로 resume 값을 받아 실행되므로, 이전 attempt가 journal에 기록한 provider 호출은 재생된다. 진입점의 map node처럼 step 앞에 체크포인트가 없으면 끝난 결과는 interrupt 체크포인트 자체에 기록한다.
 

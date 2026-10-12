@@ -949,6 +949,12 @@ if(NEOGRAPH_BUILD_SQLITE)
     target_link_libraries(neograph_fork_pending_writes_tests PRIVATE
         neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
     neograph_discover_tests(neograph_fork_pending_writes_tests PROPERTIES LABELS "core;interrupt")
+    # #389: one Send and many Sends follow one contract: a payload is visible
+    # only to its own Send, live, retried and replayed.
+    add_executable(neograph_send_isolation_tests test_send_isolation.cpp)
+    target_link_libraries(neograph_send_isolation_tests PRIVATE
+        neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
+    neograph_discover_tests(neograph_send_isolation_tests PROPERTIES LABELS "core;send")
 endif()
 
 if(NEOGRAPH_BUILD_PROGRAM)

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=d5e51863d61a1d3f549763670ecbc5f1efb5e8c4f88c1fcce1c032faa398705b -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=23b27e4aff6b4bfdd5e048182e93540e81e57e5b53aa091005a03a3d45c564a3 -->
 # Program API 엔드투엔드 시나리오
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -23,6 +23,7 @@
 | `test_12_send_interrupts.py` | `NodeInterrupt`를 던지는 `Send` target(#385): Program이 그 target에서 일시 정지함, 재개 시 map 노드와 끝난 Send가 재생됨, SQLite를 쓰는 재시작 뒤의 재개, 바인딩된 `llm_call`을 호출하고 끝난 Send는 다시 보내지도 다시 과금되지도 않음 |
 | `test_13_fork_replays_the_paused_step.py` | 끝난 바인딩 `llm_call` 옆에서 일시 정지한 실행의 `host.fork()`(#390): 포크가 질문에 답하고 끝난 호출을 스텝의 pending write에서 재생하므로 요청이 다시 전송되지 않고 토큰과 비용도 다시 과금되지 않음, fan-out 스텝과 Send, 메모리와 SQLite 저널 모두 |
 | `test_14_await_deadline.py` | `ng.await(..., timeout_ms)`가 절대 마감 시각을 유지함(#391): 마감 안의 재개는 완료되고, 마감 뒤의 재개는 즉시 `P_AWAIT_TIMEOUT`으로 타임아웃됨(메모리, SQLite, 재시작한 호스트), 재개된 await 안에서 충돌한 뒤 `reconnect()`도 await가 시작될 때의 마감 시각을 적용함 |
+| `test_15_send_isolation.py` | `Send` payload는 자신의 `Send`에만 보임(#389): Send 하나와 셋, 워커 하나와 넷, 실시간 실행과 SQLite 재개 뒤 모두 다음 스텝이나 최종 상태에 payload를 남기지 않음 |
 
 `support.py`에는 공유하는 Python 노드, 조건, 레지스트리, 예산, JavaScript 빌더가 있습니다.
 

@@ -16,10 +16,10 @@
  *     rethrows after every branch has finished. After the barrier,
  *     applies each result's writes + Command.updates to the shared
  *     state.
- *   * run_sends_async — dynamic fan-out. Single-send path runs on the
- *     shared state with retry; multi-send path gives each target an
- *     isolated state copy (fresh init + restore + input apply) and no
- *     retry, preserving the pre-3.0 behavior exactly.
+ *   * run_sends_async — dynamic fan-out. Every Send, one or many, runs
+ *     on an isolated state copy (fresh init + restore + input apply) with
+ *     retry, so a payload is visible only to its own Send (#389); several
+ *     Sends run as a parallel group.
  *
  * The executor owns `execute_node_with_retry_async` — the innermost
  * retry loop with exponential backoff + NodeInterrupt pass-through.
@@ -106,7 +106,7 @@ public:
     /// @param nodes Map of node_name → GraphNode owned by the engine.
     ///              Must outlive this executor (engine owns both).
     /// @param channel_defs Channel layout used to initialize isolated
-    ///                     states for multi-Send execution.
+    ///                     states for Send execution.
     /// @param retry_policy_for Lookup called for each retry run; the
     ///                         executor has no opinion about fallback
     ///                         behavior — the callback is free to
@@ -211,13 +211,15 @@ public:
     /**
      * @brief Execute a list of Send requests accumulated this step.
      *
-     * Single-send path: the target runs on the shared state with
-     * retry and the Send.input is applied to that state. Multi-send
-     * path: each target runs on an isolated state copy (fresh init +
-     * restore + apply_input) via
-     * `asio::experimental::make_parallel_group` on deferred workers,
-     * without retry, and the writes are fanned back into the shared
-     * state after wait_for_all.
+     * Every Send, whether the step dispatched one or several, runs its
+     * target on an isolated state copy (fresh init + restore +
+     * apply_input of its Send.input), with the target's retry policy:
+     * each attempt has its own effect namespace (#364), and the payload
+     * is visible only to that Send's attempts (#389). One Send runs
+     * inline; several run via `asio::experimental::make_parallel_group`
+     * on deferred workers. The returned writes are fanned back into the
+     * shared state in Send order once every Send has finished; the
+     * payloads themselves never reach it.
      *
      * Returns one StepRouting per Send-spawned task, in send order.
      * The caller merges these with the original ready-set's routings
@@ -271,7 +273,7 @@ private:
         detail::InvocationSlot* slot);
 
     /// Initialize a clean GraphState using the engine's channel defs.
-    /// Used by the multi-send path to build each target's isolated copy.
+    /// Used by the Send path to build each target's isolated copy.
     void init_state(GraphState& state) const;
 
     /// Apply a JSON object of channel writes (by key) to an existing

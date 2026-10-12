@@ -51,7 +51,7 @@ Execution is a **super-step loop**:
 
 A normal ready batch reads the channel state from before that batch's updates. A sibling cannot read another sibling's returned writes during execution. The engine buffers those writes, folds them through reducers after the batch, then evaluates routing on the updated state. This is graph scheduling; the engine does not synchronize a model's internal computation.
 
-For example, if `counter` starts at 0 and two ready nodes both return `counter + 1`, both read 0. An overwrite reducer produces 1, not 2. A custom sum reducer can instead combine two increment writes of 1 into 2. Multi-branch `Send` uses isolated state copies with each payload applied; the single-`Send` path applies its payload to shared state. Reducer order does not make model responses or external effects reproducible.
+For example, if `counter` starts at 0 and two ready nodes both return `counter + 1`, both read 0. An overwrite reducer produces 1, not 2. A custom sum reducer can instead combine two increment writes of 1 into 2. Every `Send`, one or many, runs on an isolated state copy with its own payload applied, so a payload never reaches the shared state (#389). Reducer order does not make model responses or external effects reproducible.
 
 ---
 
@@ -348,7 +348,7 @@ class Planner(ng.GraphNode):
 
 ### Mental model
 
-The engine invokes the compiled target once per `Send`; it does not promise a fresh node object. Send targets therefore need safe member-state handling under concurrent invocations. Each payload is applied before its target reads channels. A single Send uses shared state; multiple Sends use isolated copies of the post-ready-batch state and fold returned writes in invocation order after all branches finish. Routing then combines ordinary-node and Send-target signals for the next ready batch.
+The engine invokes the compiled target once per `Send`; it does not promise a fresh node object. Send targets therefore need safe member-state handling under concurrent invocations. Each payload is applied before its target reads channels. Every Send, whether the step dispatched one or several, runs on an isolated copy of the post-ready-batch state with its own payload applied, so a payload is visible only to its own Send execution, each retry attempt included, and never to the next step or the final state (#389). The returned writes are folded in invocation order after all Sends finish. Routing then combines ordinary-node and Send-target signals for the next ready batch.
 
 A Send target that raises `NodeInterrupt` pauses the run like a node of the ready batch. Its `NodeInterrupt` checkpoint re-enters the whole superstep: it holds the state the step started from and lists the step's ready nodes as next nodes, and the paused result reports that state. Resume runs the step again. Each ready node and each Send that finished replays its recorded result and is not run, or charged, again; the Send that paused, and any other Send that did not finish, runs with the resume value under the same task id, so a provider call its earlier attempt journaled replays. When no checkpoint precedes the step, for example for a map node at the entry, the finished results are recorded under the interrupt checkpoint itself.
 

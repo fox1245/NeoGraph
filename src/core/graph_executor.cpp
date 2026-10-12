@@ -1462,14 +1462,13 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
 }
 
 // =========================================================================
-// run_sends_async: single-send + multi-send dynamic fan-out
+// run_sends_async: dynamic fan-out
 // =========================================================================
 //
-// Two-branch shape:
-//   * single Send — sequential on the shared state, with retry.
-//   * multi Send — make_parallel_group on deferred workers, each
-//     with its own isolated GraphState copy. Results fan back to
-//     the shared state after wait_for_all.
+// Every Send runs on its own GraphState copy: the step's state with its
+// payload applied (#389), with retry. One Send runs inline; several run as a
+// make_parallel_group of deferred workers. Either way the results fan back
+// to the shared state in Send order once every Send has finished.
 //
 // GCC-13-safe: no co_await inside a catch. The multi-send worker
 // captures exceptions into the parallel_group's excs array; the
@@ -1555,79 +1554,26 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
                                      interrupted_attempts, interrupted, step, parent_cp_id, ctx);
     };
 
-    // --- Single Send: sequential on shared state, with retry. ---
-    if (sends.size() == 1) {
-        const auto& s = sends[0];
-
-        const std::string task_id = make_send_task_id(step, 0, s.target_node, s.input);
-        NodeResult        nr;
-
-        auto replay_it = replay.find(task_id);
-        if (replay_it != replay.end()) {
-            nr = replay_it->second;
-        } else {
-            apply_input(state, s.input);
-            detail::InvocationSlot slot{task_id, step, &replay, &coord, &parent_cp_id,
-                                        &interrupted_attempts[0]};
-            slot.visit_limited = visit_limited[0] != 0;
-            // GCC-13: no co_await inside a catch handler; save outside it.
-            std::optional<NodeInterrupt> interrupt;
-            try {
-                nr = co_await execute_attempts_async(s.target_node, state, cb, stream_mode, ctx,
-                                                     &slot);
-            } catch (const NodeInterrupt& ni) {
-                interrupt = ni;
-            }
-            if (interrupt) {
-                const std::vector<const NodeResult*> finished(sends.size(), nullptr);
-                co_await pause(0, finished);
-                interrupt->set_node(s.target_node);
-                throw *interrupt;
-            }
-            if (coord.records_pending_writes(parent_cp_id))
-                co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, s.target_node,
-                                                          nr, step);
-        }
-        apply_node_result(state, nr, ctx, failure_routes);
-        trace.push_back(s.target_node + "[send]");
-        if (failure_records && failure_routes)
-            if (const auto* record = detail::failure_route_record(nr)) (*failure_records)[0] = *record;
-
-        StepRouting r;
-        r.node_name = s.target_node;
-        if (nr.command && !nr.command->goto_node.empty()) {
-            r.command_goto = nr.command->goto_node;
-        }
-        routings.push_back(std::move(r));
-        co_return routings;
+    // #389: every Send runs on a state of its own, one Send or many: the state
+    // the Sends start from (after the step's ready nodes applied their
+    // writes), with its own payload applied. A payload is visible only to its
+    // own Send execution, each retry attempt of it included, and never to the
+    // shared run state; what a Send leaves behind is the writes it returns,
+    // folded in in Send order once every Send has finished. The step's state
+    // is serialized once and every Send restores from that snapshot; a step
+    // whose Sends all replay serializes nothing.
+    std::vector<std::string> send_task_ids;
+    send_task_ids.reserve(sends.size());
+    bool any_runs = false;
+    for (std::size_t si = 0; si < sends.size(); ++si) {
+        send_task_ids.push_back(make_send_task_id(step, si, sends[si].target_node, sends[si].input));
+        if (!replay.count(send_task_ids.back())) any_runs = true;
     }
+    const auto state_snapshot = any_runs ? state.serialize_runtime() : json();
 
-    // --- Multi Send: isolated per-target state + parallel_group. ---
-    //
-    // Each worker coroutine builds its own GraphState from a
-    // serialize/restore round-trip, applies the Send's input, then
-    // drives execute_node_with_retry_async. Isolated state can't be
-    // shared across concurrent Sends — each gets its own copy.
-    maybe_warn_serial_fanout(sends.size());
-    //
-    // PERF: serialize the source state once and have every worker
-    // restore from the same snapshot. Pre-fix every worker called
-    // state.serialize() inside its lambda — N workers paid N full
-    // serializations of the entire channel set, which dominated the
-    // par micro-bench (callgrind: yyjson_mut_doc_new + val_pool_grow
-    // + mut_val_mut_copy = ~9% of total instructions). The state is
-    // logically immutable across the worker batch (state mutations
-    // happen post-join, line ~568 below) so a single snapshot is
-    // safe to share.
-    auto state_snapshot      = state.serialize_runtime();
-    auto outer_ex            = co_await asio::this_coro::executor;
-    asio::any_io_executor ex = fan_out_pool_ ? asio::any_io_executor(fan_out_pool_->get_executor())
-                                             : asio::any_io_executor(outer_ex);
-
-    auto worker = [&, this](std::size_t si) -> asio::awaitable<NodeResult> {
-        const auto& s = sends[si];
-
-        const std::string task_id = make_send_task_id(step, si, s.target_node, s.input);
+    auto run_send = [&, this](std::size_t si) -> asio::awaitable<NodeResult> {
+        const auto&        s       = sends[si];
+        const std::string& task_id = send_task_ids[si];
 
         auto replay_it = replay.find(task_id);
         if (replay_it != replay.end()) {
@@ -1641,8 +1587,8 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
         apply_input(send_state, s.input);
         // v1.0 (9d): the old `run_cancel_token` smuggling channel is
         // gone. Cancel flows through `ctx.cancel_token` instead, which
-        // is captured by value into this worker lambda — no
-        // serialize/restore hop, no manual forward.
+        // is captured by reference into this worker — no serialize/restore
+        // hop, no manual forward.
 
         detail::InvocationSlot slot{task_id, step, &replay, &coord, &parent_cp_id,
                                     &interrupted_attempts[si]};
@@ -1655,61 +1601,87 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
         co_return nr;
     };
 
-    // With an engine fan-out pool a branch can resume on any pool thread, and the
-    // parallel group forwards a cancellation by dispatching it on the branch's
-    // executor. On the bare pool executor that emit can run on one thread while the
-    // branch (installing and clearing the cancellation handlers of its awaited
-    // operations) runs on another, and Asio's cancellation slots are not thread-safe.
-    // A strand per branch keeps each coroutine's cancellation state on one serial
-    // executor, as 654bcd0 did for static fan-out (#344). Without a pool the branches
-    // share the outer executor, which is already serial, so they stay on it.
-    auto branch_executor = [&]() -> asio::any_io_executor {
-        return fan_out_pool_ ? asio::any_io_executor(asio::make_strand(ex)) : ex;
-    };
-    using DeferredOp = decltype(asio::co_spawn(std::declval<asio::any_io_executor>(),
-                                               worker(std::size_t{0}), asio::deferred));
-    std::vector<DeferredOp> ops;
-    ops.reserve(sends.size());
-    for (std::size_t si = 0; si < sends.size(); ++si) {
-        ops.push_back(asio::co_spawn(branch_executor(), worker(si), asio::deferred));
-    }
-
-    auto [order, excs, values] =
-        co_await asio::experimental::make_parallel_group(std::move(ops))
-            .async_wait(asio::experimental::wait_for_all(), asio::use_awaitable);
-    (void)order;
-
-    // First-exception pass, the same as run_parallel_async's. A first
-    // exception that is a NodeInterrupt pauses the run (#385): the Sends that
-    // finished replay on resume and the ones that did not run again. As there,
-    // the interrupt is copied out of the worker's exception_ptr before the
-    // checkpoint I/O and thrown afresh from this thread.
-    std::exception_ptr           first_exception;
-    std::size_t                  first_index = 0;
-    std::optional<NodeInterrupt> interrupt;
-    for (std::size_t i = 0; i < sends.size(); ++i) {
-        if (excs[i] && !first_exception) {
-            first_exception = excs[i];
-            first_index     = i;
-            try {
-                std::rethrow_exception(first_exception);
-            } catch (const NodeInterrupt& ni) {
-                interrupt = ni;
-            } catch (...) {
-            }
+    std::vector<NodeResult> values(sends.size());
+    if (sends.size() == 1) {
+        // One Send runs inline, without a parallel group, on the same state
+        // contract as many. GCC-13: no co_await inside a catch handler.
+        std::optional<NodeInterrupt> interrupt;
+        try {
+            values[0] = co_await run_send(0);
+        } catch (const NodeInterrupt& ni) {
+            interrupt = ni;
         }
-    }
-    if (first_exception) {
         if (interrupt) {
-            first_exception = nullptr;
-            std::vector<const NodeResult*> finished(sends.size(), nullptr);
-            for (std::size_t i = 0; i < sends.size(); ++i)
-                if (!excs[i]) finished[i] = &values[i];
-            co_await pause(first_index, finished);
-            interrupt->set_node(sends[first_index].target_node);
+            const std::vector<const NodeResult*> finished(sends.size(), nullptr);
+            co_await pause(0, finished);
+            interrupt->set_node(sends[0].target_node);
             throw *interrupt;
         }
-        std::rethrow_exception(first_exception);
+    } else {
+        maybe_warn_serial_fanout(sends.size());
+        auto                  outer_ex = co_await asio::this_coro::executor;
+        asio::any_io_executor ex       = fan_out_pool_
+                                             ? asio::any_io_executor(fan_out_pool_->get_executor())
+                                             : asio::any_io_executor(outer_ex);
+
+        // With an engine fan-out pool a branch can resume on any pool thread, and
+        // the parallel group forwards a cancellation by dispatching it on the
+        // branch's executor. On the bare pool executor that emit can run on one
+        // thread while the branch (installing and clearing the cancellation
+        // handlers of its awaited operations) runs on another, and Asio's
+        // cancellation slots are not thread-safe. A strand per branch keeps each
+        // coroutine's cancellation state on one serial executor, as 654bcd0 did
+        // for static fan-out (#344). Without a pool the branches share the outer
+        // executor, which is already serial, so they stay on it.
+        auto branch_executor = [&]() -> asio::any_io_executor {
+            return fan_out_pool_ ? asio::any_io_executor(asio::make_strand(ex)) : ex;
+        };
+        using DeferredOp = decltype(asio::co_spawn(std::declval<asio::any_io_executor>(),
+                                                   run_send(std::size_t{0}), asio::deferred));
+        std::vector<DeferredOp> ops;
+        ops.reserve(sends.size());
+        for (std::size_t si = 0; si < sends.size(); ++si) {
+            ops.push_back(asio::co_spawn(branch_executor(), run_send(si), asio::deferred));
+        }
+
+        auto [order, excs, results] =
+            co_await asio::experimental::make_parallel_group(std::move(ops))
+                .async_wait(asio::experimental::wait_for_all(), asio::use_awaitable);
+        (void)order;
+
+        // First-exception pass, the same as run_parallel_async's. A first
+        // exception that is a NodeInterrupt pauses the run (#385): the Sends
+        // that finished replay on resume and the ones that did not run again.
+        // As there, the interrupt is copied out of the worker's exception_ptr
+        // before the checkpoint I/O and thrown afresh from this thread.
+        std::exception_ptr           first_exception;
+        std::size_t                  first_index = 0;
+        std::optional<NodeInterrupt> interrupt;
+        for (std::size_t i = 0; i < sends.size(); ++i) {
+            if (excs[i] && !first_exception) {
+                first_exception = excs[i];
+                first_index     = i;
+                try {
+                    std::rethrow_exception(first_exception);
+                } catch (const NodeInterrupt& ni) {
+                    interrupt = ni;
+                } catch (...) {
+                }
+            }
+        }
+        if (first_exception) {
+            if (interrupt) {
+                first_exception = nullptr;
+                std::vector<const NodeResult*> finished(sends.size(), nullptr);
+                for (std::size_t i = 0; i < sends.size(); ++i)
+                    if (!excs[i]) finished[i] = &results[i];
+                co_await pause(first_index, finished);
+                interrupt->set_node(sends[first_index].target_node);
+                throw *interrupt;
+            }
+            std::rethrow_exception(first_exception);
+        }
+        values = std::move(results);
     }
 
     // Fan back in send order. Each Send-spawned task contributes one

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=6b67d721625e5d82f0da1344b605765dc856f8bac748a2431c04b23be96b56db -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=3090741b7d96360bfdb6f2a93bb5b215f7c08d9a96c35ca801c043a6873ea199 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2129,9 +2129,9 @@ public:
   重新进入该节点（兄弟写入已在 `pending_writes` 中，并通过映射重放）。
 - `run_parallel_async` 以 `ready` 顺序应用写入 + `Command.updates`，因此
   `ready[i] ↔ results[i]` 配对对后续 Scheduler 调用成立。
-- `run_sends_async`：单个 Send 在共享状态上运行并重试；多 Send 为每个目标
-  提供隔离的状态副本（init + restore + apply input）不重试 — 保留 3.0 前
-  语义。
+- `run_sends_async`：无论一个还是多个 Send，都为每个目标提供隔离的状态副本
+  （init + restore + apply input）并带重试运行，因此 payload 只对其自身的
+  Send 可见（#389）。
 - `fan_out_pool`（可选）确定并行分支分发的目标。为 null 时，分支在
   `co_await asio::this_coro::executor` 上运行 — 对单线程异步调用者没问题，
   但 CPU 绑定的扇出串行执行。非 null 时，`run_parallel_async` 和多 Send

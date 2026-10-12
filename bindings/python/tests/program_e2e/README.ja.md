@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=d5e51863d61a1d3f549763670ecbc5f1efb5e8c4f88c1fcce1c032faa398705b -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=23b27e4aff6b4bfdd5e048182e93540e81e57e5b53aa091005a03a3d45c564a3 -->
 # Program API エンドツーエンドシナリオ
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -23,6 +23,7 @@
 | `test_12_send_interrupts.py` | `NodeInterrupt` を送出する `Send` target（#385）：Program がそこで一時停止する、再開時に map ノードと終了した Send が再生される、SQLite を使う再起動後の再開、バインドされた `llm_call` を呼んで終了した Send は再送も再課金もされない |
 | `test_13_fork_replays_the_paused_step.py` | 完了したバインド済み `llm_call` の横で一時停止した実行の `host.fork()`（#390）：フォークが質問に答え、完了した呼び出しをステップの pending write から再生するため、リクエストは再送されず、トークンと費用も再課金されない。fan-out ステップと Send、メモリと SQLite ジャーナルの両方 |
 | `test_14_await_deadline.py` | `ng.await(..., timeout_ms)` が絶対期限を保つ（#391）：期限内の再開は完了し、期限後の再開は直ちに `P_AWAIT_TIMEOUT` でタイムアウトする（メモリ、SQLite、再起動したホスト）。再開した await の中でクラッシュした後の `reconnect()` も、await が開始したときの期限を適用する |
+| `test_15_send_isolation.py` | `Send` の payload は自身の `Send` にだけ見える（#389）：Send 一つと三つ、ワーカー一つと四つ、実行時と SQLite での再開後のどちらでも、次のステップや最終状態に payload を残さない |
 
 `support.py` には、共有の Python ノード、条件、レジストリ、予算、JavaScript ビルダーがあります。
 

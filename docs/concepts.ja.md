@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=1ca107c7a355f07e80201b7fe13423f9d3c930a61122e458055727681390cbda -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=6574c128e61202faa5cd337176f0bc721d5e7c3b8c288756be82a2d41845c65c -->
 # NeoGraphのコアコンセプト— 解説ガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -51,7 +51,7 @@ NeoGraph **グラフ**は以下の4つの要素です:
 
 通常の ready batch はその batch の update 前のチャネル状態を読みます。実行中の兄弟ノードは、他の兄弟が返した書き込みを読めません。エンジンは書き込みを buffer に集め、batch 後に reducer で結合し、更新済み状態で経路を評価します。これはグラフのスケジューリングであり、モデル内部の計算を同期するものではありません。
 
-例えば `counter` が 0 で二つの ready ノードがそれぞれ `counter + 1` を返すと、両方が 0 を読みます。overwrite reducer の結果は 2 ではなく 1 です。カスタム sum reducer に増分 1 をそれぞれ書けば 2 に結合できます。複数分岐の `Send` は各 payload を適用した隔離状態コピーを使い、単一 `Send` は共有状態に payload を適用します。Reducer の順序だけではモデル応答や外部効果の再現性は得られません。
+例えば `counter` が 0 で二つの ready ノードがそれぞれ `counter + 1` を返すと、両方が 0 を読みます。overwrite reducer の結果は 2 ではなく 1 です。カスタム sum reducer に増分 1 をそれぞれ書けば 2 に結合できます。一つでも複数でも、すべての `Send` は自身の payload を適用した隔離状態コピーで実行されるため、payload が共有状態に届くことはありません (#389)。Reducer の順序だけではモデル応答や外部効果の再現性は得られません。
 
 ---
 
@@ -314,7 +314,7 @@ class Planner(ng.GraphNode):
 
 ### メンタルモデル
 
-エンジンは `Send` ごとに compiled target を呼び、新しい node object は保証しません。同時呼び出しでは target の member state を安全に扱う必要があります。Payload は target がチャネルを読む前に適用します。単一 Send は共有状態、複数 Send は ready batch 後状態の隔離コピーを使い、全分岐の終了後に返却書き込みを呼び出し順で結合します。次の ready batch の経路は通常 node と Send target の信号を組み合わせます。
+エンジンは `Send` ごとに compiled target を呼び、新しい node object は保証しません。同時呼び出しでは target の member state を安全に扱う必要があります。Payload は target がチャネルを読む前に適用します。ステップが Send を一つ送っても複数送っても、すべての Send は ready batch 後状態の隔離コピーに自身の payload を適用して実行されるため、payload は再試行の試行を含めてその Send の実行にだけ見え、次のステップや最終状態には見えません (#389)。返却書き込みはすべての Send の終了後に呼び出し順で結合します。次の ready batch の経路は通常 node と Send target の信号を組み合わせます。
 
 `NodeInterrupt` を送出する Send target は、ready batch の node と同じように run を一時停止します。その `NodeInterrupt` チェックポイントは superstep 全体に再突入します。step 開始時の状態を保持し、step の ready node を next node として記録し、一時停止した結果もその状態を報告します。再開は step を再実行します。終了した ready node と Send は記録済みの結果を再生し、再実行も再課金もされません。一時停止した Send と終了していない他の Send は同じ task id で再開値を受けて実行されるため、以前の attempt がジャーナルに記録した provider 呼び出しは再生されます。入口の map node のように step の前にチェックポイントがない場合、終了した結果は interrupt チェックポイント自体に記録します。
 

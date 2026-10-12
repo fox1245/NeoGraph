@@ -2215,9 +2215,9 @@ public:
 - `run_parallel_async` applies writes + `Command.updates` in `ready`
   order so `ready[i] ↔ results[i]` pairing holds for the subsequent
   Scheduler call.
-- `run_sends_async`: single Send runs on the shared state with retry;
-  multi Send gives each target an isolated state copy (init + restore
-  + apply input) without retry — preserves pre-3.0 semantics.
+- `run_sends_async`: every Send, one or many, gives its target an
+  isolated state copy (init + restore + apply input) and runs it with
+  retry, so a payload is visible only to its own Send (#389).
 - `fan_out_pool` (optional) determines where parallel branches
   dispatch. When null, branches run on `co_await asio::this_coro::
   executor` — fine for single-thread async callers, but CPU-bound

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=1ca107c7a355f07e80201b7fe13423f9d3c930a61122e458055727681390cbda -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=6574c128e61202faa5cd337176f0bc721d5e7c3b8c288756be82a2d41845c65c -->
 # NeoGraph 核心概念——叙事指南
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -51,7 +51,7 @@
 
 普通 ready batch 读取该 batch 更新前的 channel 状态。执行中的兄弟 node 不能读取另一兄弟返回的写入。引擎缓冲这些写入，在 batch 结束后通过 reducer 合并，再以更新后的状态评估路由。这是图调度，不会同步模型内部计算。
 
-例如 `counter` 从 0 开始，两个 ready node 都返回 `counter + 1`，两者读取的都是 0。overwrite reducer 的结果是 1，而不是 2。向自定义 sum reducer 分别写入增量 1，才可合并为 2。多分支 `Send` 使用应用各自 payload 的隔离状态副本；单个 `Send` 路径把 payload 应用到共享状态。Reducer 顺序本身不能保证模型响应或外部效果可复现。
+例如 `counter` 从 0 开始，两个 ready node 都返回 `counter + 1`，两者读取的都是 0。overwrite reducer 的结果是 1，而不是 2。向自定义 sum reducer 分别写入增量 1，才可合并为 2。无论一个还是多个，每个 `Send` 都在应用了自身 payload 的隔离状态副本上运行，因此 payload 不会进入共享状态（#389）。Reducer 顺序本身不能保证模型响应或外部效果可复现。
 
 ---
 
@@ -314,7 +314,7 @@ class Planner(ng.GraphNode):
 
 ### 心智模型
 
-引擎每个 `Send` 调用一次 compiled target，不保证新建 node object。因此 target 必须安全处理并发调用的 member state。Payload 在 target 读取 channel 前应用。单个 Send 使用共享状态；多个 Send 使用 ready batch 后状态的隔离副本，并在全部分支完成后按调用顺序合并返回写入。随后合并普通 node 和 Send target 的信号，规划下一 ready batch 的路由。
+引擎每个 `Send` 调用一次 compiled target，不保证新建 node object。因此 target 必须安全处理并发调用的 member state。Payload 在 target 读取 channel 前应用。无论该步发出一个还是多个 Send，每个 Send 都在 ready batch 后状态的隔离副本上应用自身 payload 运行，因此 payload 只对该 Send 的执行（包括每次重试尝试）可见，下一步和最终状态都看不到它（#389）。全部 Send 完成后，按调用顺序合并返回写入。随后合并普通 node 和 Send target 的信号，规划下一 ready batch 的路由。
 
 抛出 `NodeInterrupt` 的 Send target 会像 ready batch 中的 node 一样暂停 run。它的 `NodeInterrupt` 检查点会重新进入整个 superstep：保存该 step 开始时的状态，并把该 step 的 ready node 记为 next node，暂停的结果也报告该状态。恢复会重新执行该 step。已完成的 ready node 和 Send 重放其记录的结果，不会再次执行或再次计费；暂停的 Send 以及其他未完成的 Send 会以相同的 task id 带着恢复值运行，因此其先前 attempt 记入日志的 provider 调用会被重放。若 step 之前没有检查点（例如位于入口的 map node），已完成的结果会记录在该中断检查点本身之下。
 

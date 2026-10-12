@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=6b67d721625e5d82f0da1344b605765dc856f8bac748a2431c04b23be96b56db -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=3090741b7d96360bfdb6f2a93bb5b215f7c08d9a96c35ca801c043a6873ea199 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -1911,9 +1911,8 @@ public:
   兄弟ノードの書き込みはすでに `pending_writes` にあり、マップ経由でリプレイされます。
 - `run_parallel_async` は `ready` の順に書き込みと `Command.updates` を適用するため、
   後続の Scheduler 呼び出しでも `ready[i] ↔ results[i]` の対応が保たれます。
-- `run_sends_async`: 単一 Send は共有状態で再試行付きで実行します。
-  複数 Send では対象ごとに分離状態コピー (初期化 + 復元 + 入力適用) を作り、再試行なしで実行します。
-  これは 3.0 より前の意味論を保ちます。
+- `run_sends_async`: 一つでも複数でも、すべての Send は対象ごとに分離状態コピー (初期化 + 復元 + 入力適用) を作り、
+  再試行付きで実行します。payload はその Send にだけ見えます (#389)。
 - 任意の `fan_out_pool` が並列分岐のディスパッチ先を決めます。null の場合、分岐は
   `co_await asio::this_coro::executor` 上で実行されます。単一スレッドの非同期呼び出し側には十分ですが、
   CPU バウンドのファンアウトは直列化されます。null でなければ `run_parallel_async` と

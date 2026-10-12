@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=6b67d721625e5d82f0da1344b605765dc856f8bac748a2431c04b23be96b56db -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=3090741b7d96360bfdb6f2a93bb5b215f7c08d9a96c35ca801c043a6873ea199 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2169,9 +2169,9 @@ public:
 - `run_parallel_async` applies writes + `Command.updates` in `ready`
   order so `ready[i] ↔ results[i]` pairing holds for the subsequent
   Scheduler call.
-- `run_sends_async`: single Send runs on the shared state with retry;
-  multi Send gives each target an isolated state copy (init + restore
-  + apply input) without retry — preserves pre-3.0 semantics.
+- `run_sends_async`: every Send, one or many, gives its target an
+  isolated state copy (init + restore + apply input) and runs it with
+  retry, so a payload is visible only to its own Send (#389).
 - `fan_out_pool` (optional) determines where parallel branches
   dispatch. When null, branches run on `co_await asio::this_coro::
   executor` — fine for single-thread async callers, but CPU-bound
