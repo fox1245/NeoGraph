@@ -7,6 +7,7 @@
 // Usage: ./example_core_quickstart     prints: HELLO
 //
 // smoke-expect-line: HELLO
+// smoke-forbid: [neograph]
 
 #include <neograph/neograph.h>
 
