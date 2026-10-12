@@ -565,10 +565,21 @@ TEST(NodeFailureRetry, AuditUnchangedNonRetryableFamilies) {
         EXPECT_FALSE(record->retryable);
     }
     {
+        // A Hook block is not retried and leaves the run as the
+        // HookBoundaryBlocked itself, as it leaves llm::Agent and every tool
+        // path, with its invocation id and state.
         Harness h(throws(HookBoundaryBlocked("hook", HookExecutionState::Failed, "no")));
         const auto error = h.run();
         EXPECT_EQ(h.node->calls.load(), 1);
-        EXPECT_THROW(std::rethrow_exception(error), NodeExecutionError);
+        try {
+            std::rethrow_exception(error);
+            ADD_FAILURE() << "the Hook block did not stop the run";
+        } catch (const HookBoundaryBlocked& blocked) {
+            EXPECT_EQ(blocked.invocation_id(), "hook");
+            EXPECT_EQ(blocked.state(), HookExecutionState::Failed);
+        } catch (...) {
+            ADD_FAILURE() << "the Hook block left the run wrapped";
+        }
     }
     {
         // Control flow still escapes unwrapped.

@@ -1,5 +1,7 @@
 #include "tool_failure.h"
 
+#include "text_safety.h"
+
 #include <neograph/graph/cancel.h>
 #include <neograph/graph/types.h>
 #include <neograph/hook_outbox.h>
@@ -27,15 +29,62 @@ ToolFailureClass classify_tool_failure(const std::exception_ptr& error,
     }
 }
 
-void rethrow_run_stop(const std::exception_ptr& error, ToolFailureClass kind) {
-    if (kind == ToolFailureClass::Cancelled) {
-        try {
-            std::rethrow_exception(error);
-        } catch (const graph::CancelledException&) {
-            throw;
-        } catch (...) {
-            throw graph::CancelledException("tool operation aborted");
+namespace {
+std::exception_ptr nested_of(const std::exception& error) noexcept;
+}  // namespace
+
+// The first exception of the signal's own type in @p error's cause chain
+// (NodeExecutionError causes and std::nested_exception, depth first, outermost
+// first), or null.
+template <typename Signal>
+std::exception_ptr find_signal(const std::exception_ptr& error) noexcept {
+    std::vector<std::pair<std::exception_ptr, int>> pending;
+    try {
+        pending.emplace_back(error, 0);
+        while (!pending.empty()) {
+            auto [current, depth] = std::move(pending.back());
+            pending.pop_back();
+            if (!current || depth > 64) continue;
+            std::exception_ptr cause;
+            std::exception_ptr nested;
+            try {
+                std::rethrow_exception(current);
+            } catch (const Signal&) {
+                return current;
+            } catch (const graph::NodeExecutionError& failure) {
+                cause = failure.cause();
+                nested = nested_of(failure);
+            } catch (const std::exception& failure) {
+                nested = nested_of(failure);
+            } catch (...) {
+            }
+            if (nested) pending.emplace_back(std::move(nested), depth + 1);
+            if (cause) pending.emplace_back(std::move(cause), depth + 1);
         }
+    } catch (...) {
+    }
+    return {};
+}
+
+void rethrow_run_stop(const std::exception_ptr& error, ToolFailureClass kind) {
+    // The run stops with the control signal itself, whatever wrapped it on
+    // the way out (a subgraph's NodeExecutionError, a nested exception): one
+    // type, with its fields, on every path (reference, "Tool failure
+    // contract").
+    switch (kind) {
+    case ToolFailureClass::Cancelled:
+        if (auto signal = find_signal<graph::CancelledException>(error))
+            std::rethrow_exception(signal);
+        // An aborted asio operation of a cancelled run.
+        throw graph::CancelledException("tool operation aborted");
+    case ToolFailureClass::HookBlocked:
+        if (auto signal = find_signal<HookBoundaryBlocked>(error)) std::rethrow_exception(signal);
+        break;
+    case ToolFailureClass::Interrupted:
+        if (auto signal = find_signal<graph::NodeInterrupt>(error)) std::rethrow_exception(signal);
+        break;
+    case ToolFailureClass::ToolError:
+        break;
     }
     std::rethrow_exception(error);
 }
@@ -45,7 +94,7 @@ std::string tool_failure_message(const std::exception_ptr& error) {
     try {
         std::rethrow_exception(error);
     } catch (const std::exception& failure) {
-        return failure.what();
+        return valid_utf8(failure.what());
     } catch (...) {
         return "unknown tool failure";
     }
@@ -217,14 +266,31 @@ private:
             // The provider effect drained, but its outcome was not settled.
             found(NodeFailureClass::EffectUncertain);
             return {failure.cause(), nested_of(failure)};
+        } catch (const ToolExecutionError& failure) {
+            // The typed result of the throwing controller facade. A call whose
+            // effect may have happened is never retried; one that ran out of
+            // time is a timeout.
+            const auto& result = failure.result();
+            if (result.effect_uncertain || result.status == ToolTerminalStatus::ReconciliationRequired)
+                found(NodeFailureClass::EffectUncertain);
+            else if (result.status == ToolTerminalStatus::TimedOut ||
+                     result.status == ToolTerminalStatus::Expired)
+                found(NodeFailureClass::Timeout);
+            else
+                found(NodeFailureClass::Ordinary);
+            return {{}, nested_of(failure)};
         } catch (const ProviderFailure& failure) {
             found(provider_failure_class(failure, run_token_));
         } catch (const asio::system_error& failure) {
             // Socket and timer cancellation reach node and tool code as
             // operation_aborted. Only the run's own token makes that
             // cancellation of the run.
+            // A timed-out operation is a timeout, whoever's limit it was (a
+            // socket, an MCP request, a tool's execution policy).
             found(cancelled(run_token_) && failure.code() == asio::error::operation_aborted
-                      ? NodeFailureClass::Cancelled : NodeFailureClass::Ordinary);
+                      ? NodeFailureClass::Cancelled
+                  : failure.code() == asio::error::timed_out ? NodeFailureClass::Timeout
+                                                             : NodeFailureClass::Ordinary);
             return {{}, nested_of(failure)};
         } catch (const std::bad_alloc&) {
             found(NodeFailureClass::Unknown);
@@ -325,6 +391,51 @@ bool is_author_failure_code(std::string_view code) noexcept {
         }
     }
     return segments >= 2 && length > 0;
+}
+
+FailureVerdict classify_failure(const std::exception_ptr& error,
+                                const CancelToken* run_token) noexcept {
+    // A run's failure is usually the NodeExecutionError the retry loop threw,
+    // which already holds the node's own verdict. (Inside a node, the same
+    // exception is a subgraph's failure, hence the classifier's
+    // NG.SubgraphFailed.) One without a record is classified by its cause.
+    std::exception_ptr classified = error;
+    try {
+        if (error) std::rethrow_exception(error);
+    } catch (const NodeExecutionError& failure) {
+        if (const auto* record = node_failure_of(failure)) {
+            FailureVerdict out;
+            out.failure_class = record->failure_class;
+            out.code = record->code;
+            out.public_message = record->public_message;
+            out.retryable = record->retryable;
+            out.routable = record->routable;
+            return out;
+        }
+        if (failure.cause()) classified = failure.cause();
+    } catch (...) {
+    }
+    auto verdict = ::neograph::detail::classify_node_failure(classified, run_token);
+    FailureVerdict out;
+    out.failure_class = verdict.failure_class;
+    out.code = std::move(verdict.code);
+    out.public_message = std::move(verdict.public_message);
+    out.retryable = verdict.retryable;
+    out.routable = verdict.routable;
+    switch (out.failure_class) {
+    case NodeFailureClass::Cancelled:
+        out.signal = ::neograph::detail::find_signal<CancelledException>(classified);
+        break;
+    case NodeFailureClass::HookBlocked:
+        out.signal = ::neograph::detail::find_signal<HookBoundaryBlocked>(classified);
+        break;
+    case NodeFailureClass::Interrupted:
+        out.signal = ::neograph::detail::find_signal<NodeInterrupt>(classified);
+        break;
+    default:
+        break;
+    }
+    return out;
 }
 
 const NodeFailure* node_failure_of(const NodeExecutionError& error) noexcept {

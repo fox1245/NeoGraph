@@ -160,7 +160,8 @@ asio::awaitable<NodeOutput> ToolDispatchNode::run(NodeInput in) {
     // one at a time — and every future capability at this boundary would have
     // drifted the same way.
     // The gate (issue #89) rides along on the RunContext, so it reaches both
-    // dispatch paths through the one function they share.
+    // dispatch paths through the one function they share; so do the run's
+    // deadline and lifecycle Hooks, through make_tool_execution_context.
     ToolGateContext gctx;
     gctx.resume_value = in.ctx.resume_value;
     gctx.thread_id    = in.ctx.thread_id;

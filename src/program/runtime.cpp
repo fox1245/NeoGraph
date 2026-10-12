@@ -2176,6 +2176,12 @@ void RunControl::set_hook_runtime(std::shared_ptr<HookRuntime> runtime) noexcept
     hook_runtime_enabled_.store(static_cast<bool>(hook_runtime_), std::memory_order_release);
 }
 
+std::shared_ptr<HookRuntime> RunControl::hook_runtime() const {
+    if (!hook_runtime_enabled_.load(std::memory_order_acquire)) return {};
+    std::lock_guard lock(mutex_);
+    return hook_runtime_;
+}
+
 void RunControl::set_core_tool_grant_resolver(ProgramCoreToolGrantResolver resolver) {
     std::lock_guard lock(mutex_);
     core_tool_grant_resolver_ = std::move(resolver);

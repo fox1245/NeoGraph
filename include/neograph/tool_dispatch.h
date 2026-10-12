@@ -170,6 +170,15 @@ using ToolGate =
  *   earliest call.
  * - With an effect broker, a call whose effect is uncertain pauses the run
  *   with a `NodeInterrupt` whose payload kind is `tool_effect_reconciliation`.
+ * - A call that would start at or after `execution.deadline` does not start:
+ *   it yields a tool message with status `expired` and error
+ *   `run deadline elapsed before the tool started`, and none of its Hooks run.
+ * - With `execution.hook_runtime`, every call that starts crosses one
+ *   BeforeToolExecution and one AfterToolExecution lifecycle event. Every
+ *   caller supplies the same runtime here: llm::Agent its own, a graph node
+ *   the run's (make_tool_execution_context).
+ * - Tool output and failure text reach the model as well-formed UTF-8 (each
+ *   ill-formed subsequence becomes U+FFFD).
  *
  * @param calls Tool calls from the assistant message. Taken **by value**: this
  *        is a coroutine, and a reference parameter would dangle across the first
@@ -180,8 +189,10 @@ using ToolGate =
  *        call before **any** tool runs — see below. Default-constructed (empty)
  *        means no gating, and the behaviour is bit-for-bit what it was before.
  * @param gctx What the gate is told about the run.
- * @param execution Per-invocation context. The graph path supplies its
- *        cancellation token; standalone Agent calls retain the empty default.
+ * @param execution Per-invocation context: cancel token, deadline, controller,
+ *        identity, effect broker and lifecycle HookRuntime. Graph nodes build
+ *        it with make_tool_execution_context(); llm::Agent fills it from its
+ *        own configuration.
  *
  * @throws NodeInterrupt when the gate returns Interrupt for any call, or tool
  *         code raises one. On the graph path the engine catches it,

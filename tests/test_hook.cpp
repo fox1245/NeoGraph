@@ -6,6 +6,12 @@
 #include <neograph/async/run_sync.h>
 #include <neograph/tool_dispatch.h>
 
+#include <neograph/graph/cancel.h>
+
+#include <asio/steady_timer.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
+
 #include <atomic>
 #include <thread>
 
@@ -520,4 +526,218 @@ TEST(HookRuntime, ToolEventsUseHostExecutionIdentityRatherThanModelCallIdentity)
     EXPECT_NE(journal->events[0].sequence(), 0u);
     EXPECT_EQ(journal->events[0].data().at("tool_call_id"), "model-call-a");
     EXPECT_EQ(journal->events[0].data().at("request_id"), "host-request-a");
+}
+
+// ── Hook execution states (#6 of the normalization follow-ups) ─────────────
+//
+// A Hook that did not time out never reports timed_out, and a Hook that timed
+// out always does: in the journal, in HookBoundaryBlocked, for the native and
+// the RPC execution paths alike.
+
+namespace {
+
+class FailingTool final : public Tool {
+public:
+    ChatTool get_definition() const override { return {"audit", "", json::object()}; }
+    std::string get_name() const override { return "audit"; }
+    std::string execute(const json&) override { throw std::runtime_error("audit sink unavailable"); }
+};
+
+class SlowTool final : public Tool {
+public:
+    explicit SlowTool(std::chrono::milliseconds delay) : delay_(delay) {}
+    ChatTool get_definition() const override { return {"audit", "", json::object()}; }
+    std::string get_name() const override { return "audit"; }
+    std::string execute(const json&) override {
+        std::this_thread::sleep_for(delay_);
+        return "late";
+    }
+
+private:
+    std::chrono::milliseconds delay_;
+};
+
+struct HookFixture {
+    std::shared_ptr<HookRegistry> registry;
+    std::shared_ptr<NativeHookExecutionAdapter> adapter;
+    HookInvocation invocation;
+};
+
+HookFixture hook_fixture(Tool& tool, std::shared_ptr<ToolExecutionController> controller =
+                                         std::make_shared<ToolExecutionController>()) {
+    HookTargetResolver resolver = [&tool](std::string_view id) -> std::optional<HookTargetContract> {
+        if (id != "audit") return std::nullopt;
+        return HookTargetContract{&tool, {"audit"}, ToolEffectClass::ReadOnly};
+    };
+    auto registry = std::make_shared<HookRegistry>(resolver);
+    registry->admit(definition(1));
+    auto adapter = std::make_shared<NativeHookExecutionAdapter>(resolver, std::move(controller));
+    auto invocation = registry->plan(event()).front();
+    return {std::move(registry), std::move(adapter), std::move(invocation)};
+}
+
+HookExecutionState blocked_state(MandatoryHookRunner& runner,
+                                 std::chrono::system_clock::time_point deadline,
+                                 std::uint32_t attempts = 1) {
+    try {
+        async::run_sync(runner.run_async(event(), deadline, attempts));
+    } catch (const HookBoundaryBlocked& blocked) {
+        return blocked.state();
+    }
+    ADD_FAILURE() << "the mandatory Hook did not block";
+    return HookExecutionState::Succeeded;
+}
+
+}  // namespace
+
+TEST(HookExecutionStates, AFailedLastAttemptIsFailedNotTimedOut) {
+    FailingTool tool;
+    for (const std::uint32_t attempts : {1u, 2u}) {
+        auto fixture = hook_fixture(tool);
+        auto journal = std::make_shared<InMemoryHookJournal>();
+        MandatoryHookRunner runner(journal, fixture.registry, fixture.adapter);
+        const auto deadline = std::chrono::system_clock::now() + std::chrono::minutes(1);
+        EXPECT_EQ(blocked_state(runner, deadline, attempts), HookExecutionState::Failed);
+        const auto entry = journal->get(fixture.invocation.id());
+        ASSERT_TRUE(entry);
+        EXPECT_EQ(entry->data().state, HookExecutionState::Failed);
+        EXPECT_EQ(entry->data().attempt_count, attempts);
+        // Exhausted: no longer pending, and not re-labelled after the deadline.
+        EXPECT_TRUE(journal->pending().empty());
+        EXPECT_FALSE(journal->claim(fixture.invocation.id(), "late-worker",
+                                    deadline + std::chrono::minutes(1), std::chrono::seconds(1)));
+        EXPECT_EQ(journal->get(fixture.invocation.id())->data().state, HookExecutionState::Failed);
+    }
+}
+
+TEST(HookExecutionStates, AHookThatRanPastItsDeadlineIsTimedOut) {
+    SlowTool tool(std::chrono::milliseconds(300));
+    auto fixture = hook_fixture(tool);
+    auto journal = std::make_shared<InMemoryHookJournal>();
+    MandatoryHookRunner runner(journal, fixture.registry, fixture.adapter);
+    EXPECT_EQ(blocked_state(runner, std::chrono::system_clock::now() + std::chrono::milliseconds(100)),
+              HookExecutionState::TimedOut);
+    EXPECT_EQ(journal->get(fixture.invocation.id())->data().state, HookExecutionState::TimedOut);
+}
+
+TEST(HookExecutionStates, ATargetThatTimedOutIsTimedOut) {
+    // The native target's own execution timeout, like an RPC Hook whose
+    // deadline elapsed (hook_rpc.cpp), reports timed_out.
+    class Waiting final : public Tool, public ContextualAsyncTool {
+    public:
+        ChatTool get_definition() const override { return {"audit", "", json::object()}; }
+        std::string get_name() const override { return "audit"; }
+        std::string execute(const json&) override { return "unused"; }
+        asio::awaitable<std::string> execute_async(const json&, ToolExecutionContext) override {
+            asio::steady_timer timer(co_await asio::this_coro::executor);
+            timer.expires_after(std::chrono::seconds(2));
+            co_await timer.async_wait(asio::use_awaitable);
+            co_return "late";
+        }
+    } tool;
+    auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
+    ToolExecutionPolicy policy;
+    policy.execution_timeout = std::chrono::milliseconds(50);
+    policy.effect = ToolEffectClass::ReadOnly;
+    policies->upsert("audit", policy);
+    auto fixture = hook_fixture(tool, std::make_shared<ToolExecutionController>(
+                                          ToolExecutionControllerConfig{policies, nullptr}));
+    auto journal = std::make_shared<InMemoryHookJournal>();
+    MandatoryHookRunner runner(journal, fixture.registry, fixture.adapter);
+    EXPECT_EQ(blocked_state(runner, std::chrono::system_clock::now() + std::chrono::minutes(1), 3),
+              HookExecutionState::TimedOut);
+    const auto entry = journal->get(fixture.invocation.id());
+    EXPECT_EQ(entry->data().state, HookExecutionState::TimedOut);
+    EXPECT_EQ(entry->data().attempt_count, 1u) << "a timed-out target is final";
+}
+
+TEST(HookExecutionStates, ALongNonUtf8FailureIsStillRecorded) {
+    // A failure message longer than a receipt holds, ending mid-sequence, is
+    // truncated on a code point boundary and repaired, not lost.
+    class Noisy final : public Tool {
+    public:
+        ChatTool get_definition() const override { return {"audit", "", json::object()}; }
+        std::string get_name() const override { return "audit"; }
+        std::string execute(const json&) override {
+            throw std::runtime_error(std::string(5000, 'x') + "\xff\xc3");
+        }
+    } tool;
+    auto fixture = hook_fixture(tool);
+    auto journal = std::make_shared<InMemoryHookJournal>();
+    MandatoryHookRunner runner(journal, fixture.registry, fixture.adapter);
+    EXPECT_EQ(blocked_state(runner, std::chrono::system_clock::now() + std::chrono::minutes(1)),
+              HookExecutionState::Failed);
+    const auto entry = journal->get(fixture.invocation.id());
+    ASSERT_TRUE(entry && entry->data().receipt);
+    EXPECT_LE(entry->data().receipt->data().error.size(), 4096u);
+}
+
+TEST(HookExecutionStates, CancellationWinsOverAHookBlock) {
+    FailingTool tool;
+    auto fixture = hook_fixture(tool);
+    auto runner = std::make_shared<MandatoryHookRunner>(
+        std::make_shared<InMemoryHookJournal>(), fixture.registry, fixture.adapter);
+    HookRuntime runtime(runner);
+    class CancelOnCall final : public Tool {
+    public:
+        explicit CancelOnCall(std::shared_ptr<graph::CancelToken> token) : token_(std::move(token)) {}
+        ChatTool get_definition() const override { return {"audit", "", json::object()}; }
+        std::string get_name() const override { return "audit"; }
+        std::string execute(const json&) override {
+            token_->cancel();
+            throw std::runtime_error("audit sink unavailable");
+        }
+
+    private:
+        std::shared_ptr<graph::CancelToken> token_;
+    };
+    auto token = std::make_shared<graph::CancelToken>();
+    CancelOnCall cancelling(token);
+    auto cancelling_fixture = hook_fixture(cancelling);
+    HookRuntime cancelling_runtime(std::make_shared<MandatoryHookRunner>(
+        std::make_shared<InMemoryHookJournal>(), cancelling_fixture.registry,
+        cancelling_fixture.adapter));
+    EXPECT_THROW(async::run_sync(cancelling_runtime.emit_async(
+                     HookPhase::BeforeToolExecution, "tool_requested", "owner", "run",
+                     json{{"subject", "report"}, {"allowed", true}}, token)),
+                 graph::CancelledException);
+    // Without the cancellation the same failure is a Hook block.
+    EXPECT_THROW(async::run_sync(runtime.emit_async(
+                     HookPhase::BeforeToolExecution, "tool_requested", "owner", "run",
+                     json{{"subject", "report"}, {"allowed", true}})),
+                 HookBoundaryBlocked);
+}
+
+TEST(HookExecutionStates, AHookThatCannotRunFailsClosedForEveryEmitter) {
+    RecordingTool tool;
+    auto runtime = runtime_for(tool, HookPhase::CheckpointPublished,
+                               std::make_shared<InMemoryHookJournal>());
+    try {
+        async::run_sync(runtime->emit_async(HookPhase::CheckpointPublished, "checkpoint_published",
+                                            "", "run", json::object()));
+        FAIL() << "a Hook boundary without an owner scope must block";
+    } catch (const HookBoundaryBlocked& blocked) {
+        EXPECT_EQ(blocked.state(), HookExecutionState::Failed);
+        EXPECT_NE(std::string(blocked.what()).find("could not run"), std::string::npos);
+    }
+}
+
+TEST(HookExecutionStates, AnElapsedDeadlineBlocksOnlyWhenAHookIsDue) {
+    RecordingTool tool;
+    auto runtime = runtime_for(tool, HookPhase::BeforeToolExecution,
+                               std::make_shared<InMemoryHookJournal>());
+    const auto past = std::chrono::system_clock::now() - std::chrono::seconds(1);
+    // No mandatory Hook applies to a checkpoint event: nothing timed out.
+    EXPECT_NO_THROW(async::run_sync(runtime->emit_async(
+        HookPhase::CheckpointPublished, "checkpoint_published", "owner", "run",
+        json::object(), {}, past)));
+    try {
+        async::run_sync(runtime->emit_async(HookPhase::BeforeToolExecution, "tool_execution",
+                                            "owner", "run", json{{"arguments", json::object()}},
+                                            {}, past));
+        FAIL() << "a due mandatory Hook past its deadline must block";
+    } catch (const HookBoundaryBlocked& blocked) {
+        EXPECT_EQ(blocked.state(), HookExecutionState::TimedOut);
+    }
+    EXPECT_EQ(tool.calls, 0u);
 }

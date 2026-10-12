@@ -13,6 +13,9 @@
 #include <neograph/graph/node.h>
 #include <neograph/graph/run_context.h>
 #include <neograph/graph/sqlite_checkpoint.h>
+#include <neograph/hook.h>
+#include <neograph/hook_outbox.h>
+#include <neograph/hook_runtime.h>
 #include <neograph/program/core_tool_grant_store.h>
 #include <neograph/program/program.h>
 #include <neograph/program/sqlite_core_tool_grant_store.h>
@@ -142,6 +145,8 @@ struct OpenOptions {
     // Bind the broker to a Tool instance the engine's node does not use.
     bool bind_foreign_tool = false;
     std::function<void()> after_effect;
+    // The host's lifecycle runtime (ProgramRuntimeConfig::hook_runtime).
+    std::shared_ptr<HookRuntime> hook_runtime;
 };
 
 class EffectHost;
@@ -223,6 +228,7 @@ public:
         catalog_ = std::make_shared<ProgramCatalog>(
             CatalogConfig{program_store_, registry_, engines_, "program-tool-effects/v1"});
         RuntimeConfig config{catalog_, checkpoints_, {}, transitions_, 8, {}};
+        config.hook_runtime = options.hook_runtime;
         config.core_tool_grant_resolver = make_durable_core_tool_grant_resolver(
             grant_store_, [this](const ProgramCoreToolGrantRecord& record)
                               -> std::optional<ProgramCoreToolGrant> {
@@ -1132,4 +1138,99 @@ TEST(ProgramToolEffects, RunDeadlineAfterExternalCommitRetainsExactMarkerAndReje
         EXPECT_GE(fence->stopped_at, *fence->deadline);
     }
     expect_terminal_marker_retained(host, run, terminal, rows, ledger);
+}
+
+// ── Tool Hooks on Core tool calls ─────────────────────────────────────────
+
+namespace {
+
+// Mandatory FailClosed tool Hooks; the target records what it saw or fails.
+class AuditTarget final : public Tool {
+public:
+    explicit AuditTarget(bool fail) : fail_(fail) {}
+    ChatTool get_definition() const override { return {"audit", "", json::object()}; }
+    std::string get_name() const override { return "audit"; }
+    std::string execute(const json& arguments) override {
+        if (fail_) throw std::runtime_error("audit sink unavailable");
+        std::lock_guard lock(mutex_);
+        seen_.push_back(arguments);
+        return "audited";
+    }
+    std::vector<json> seen() const {
+        std::lock_guard lock(mutex_);
+        return seen_;
+    }
+
+private:
+    bool fail_;
+    mutable std::mutex mutex_;
+    std::vector<json> seen_;
+};
+
+std::shared_ptr<HookRuntime> tool_hooks(std::shared_ptr<AuditTarget> target) {
+    HookTargetResolver resolver = [target](std::string_view id) -> std::optional<HookTargetContract> {
+        if (id != "audit") return std::nullopt;
+        return HookTargetContract{target.get(), {"audit"}, ToolEffectClass::ReadOnly};
+    };
+    auto registry = std::make_shared<HookRegistry>(resolver);
+    for (const auto phase : {HookPhase::BeforeToolExecution, HookPhase::AfterToolExecution}) {
+        HookDefinitionData data;
+        data.priority = 1;
+        data.phase = phase;
+        data.target_id = "audit";
+        data.required_capabilities = {"audit"};
+        data.effect = ToolEffectClass::ReadOnly;
+        data.input_mapper = {HookInputMapperKind::Template, {},
+                             json{{"phase", std::string(to_string(phase))},
+                                  {"tool_name", json{{"$event", "/tool_name"}}}},
+                             {}};
+        registry->admit(HookDefinition::create(std::move(data)));
+    }
+    auto adapter = std::make_shared<NativeHookExecutionAdapter>(
+        resolver, std::make_shared<ToolExecutionController>());
+    auto runner = std::make_shared<MandatoryHookRunner>(
+        std::make_shared<InMemoryHookJournal>(), std::move(registry), std::move(adapter));
+    return std::make_shared<HookRuntime>(std::move(runner));
+}
+
+}  // namespace
+
+// The host's tool Hooks bound a Program Core's mediated tool calls exactly as
+// they bound llm::Agent's and a plain graph's: one BeforeToolExecution and one
+// AfterToolExecution event per call.
+TEST(ProgramToolEffects, CoreToolCallsCrossTheHostToolHooks) {
+    auto target = std::make_shared<AuditTarget>(false);
+    EffectHost host;
+    OpenOptions options;
+    options.hook_runtime = tool_hooks(target);
+    host.open(std::move(options));
+    const std::string run = "run-tool-hooks";
+    host.set_plan(run, RunPlan{batch(run, 2), false});
+    const auto result = host.start(run).wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(host.tool().executions.load(), 2);
+    int before = 0;
+    int after = 0;
+    for (const auto& event : target->seen()) {
+        EXPECT_EQ(event.value("tool_name", ""), "ledger");
+        if (event.value("phase", "") == "before_tool_execution") ++before;
+        if (event.value("phase", "") == "after_tool_execution") ++after;
+    }
+    EXPECT_EQ(before, 2);
+    EXPECT_EQ(after, 2);
+}
+
+// A FailClosed tool Hook that fails blocks the Core before any effect.
+TEST(ProgramToolEffects, FailingToolHookBlocksTheCoreBeforeAnyEffect) {
+    EffectHost host;
+    OpenOptions options;
+    options.hook_runtime = tool_hooks(std::make_shared<AuditTarget>(true));
+    host.open(std::move(options));
+    const std::string run = "run-tool-hook-blocked";
+    host.set_plan(run, RunPlan{batch(run, 2), false});
+    const auto result = host.start(run).wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    EXPECT_EQ(host.tool().executions.load(), 0);
+    EXPECT_EQ(LedgerTool::count(host.ledger_path()), 0U);
+    EXPECT_TRUE(host.observations(run).empty()) << "a blocked batch reached the node";
 }

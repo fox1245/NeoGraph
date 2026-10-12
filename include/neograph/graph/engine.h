@@ -109,7 +109,9 @@ struct EngineConfig {
     /// Empty uses the conservative process-default controller.
     std::shared_ptr<ToolExecutionController> tool_execution_controller;
 
-    /// Optional host-owned lifecycle runtime retained across every run and resume.
+    /// Optional host-owned lifecycle runtime retained across every run and
+    /// resume: checkpoint Hooks, and the tool Hooks of every tool call its
+    /// nodes dispatch (see GraphEngine::set_hook_runtime).
     std::shared_ptr<::neograph::HookRuntime> hook_runtime;
 
     /// Fan-out worker count. One preserves the historical no-pool fast path.
@@ -192,6 +194,11 @@ struct RunResources {
     std::shared_ptr<ToolEffectBroker> tool_effect_broker;
     /// Exact grant identity attached to this invocation's mediated Tool calls.
     ToolEffectGrantIdentity tool_effect_grant;
+    /// Optional lifecycle runtime for the tool Hooks of this invocation and
+    /// its subgraphs. Replaces the engine's HookRuntime for tool calls, as a
+    /// ToolExecutionContext::hook_runtime replaces llm::Agent's; checkpoint
+    /// Hooks keep the engine's.
+    std::shared_ptr<::neograph::HookRuntime> hook_runtime;
 };
 
 /// One edge in a nested checkpoint lookup. Task IDs are the engine's stable
@@ -1039,8 +1046,13 @@ public:
         tool_execution_controller_ = std::move(controller);
     }
 
-    /// Set the host-owned lifecycle runtime used by checkpoint publication.
-    /// Configure before concurrent run() or resume() calls.
+    /// Set the host-owned lifecycle runtime: checkpoint publication, and the
+    /// BeforeToolExecution/AfterToolExecution Hooks of every tool call a node
+    /// makes through dispatch_tool_calls (tool_dispatch, the plan-and-execute
+    /// executor, the deep-research researcher, host nodes using
+    /// make_tool_execution_context). RunResources::hook_runtime replaces it for
+    /// the tool calls of one run. Configure before concurrent run() or resume()
+    /// calls.
     void set_hook_runtime(std::shared_ptr<::neograph::HookRuntime> runtime) {
         hook_runtime_ = std::move(runtime);
     }
@@ -1221,6 +1233,7 @@ private:
         std::shared_ptr<ProviderCallBroker> provider_call_broker;
         std::shared_ptr<ToolEffectBroker> tool_effect_broker;
         ToolEffectGrantIdentity tool_effect_grant;
+        std::shared_ptr<::neograph::HookRuntime> hook_runtime;
         std::shared_ptr<detail::SubgraphWriteJournal> subgraph_write_journal;
         std::shared_ptr<GraphSafePointRequest> safe_point_request;
     };

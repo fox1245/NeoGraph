@@ -3,6 +3,7 @@
 #include <neograph/graph/cancel.h>
 #include <neograph/tool.h>
 
+#include "text_safety.h"
 #include "tool_failure.h"
 
 #include <asio/experimental/awaitable_operators.hpp>
@@ -302,6 +303,11 @@ void ToolExecutionPolicy::validate() const {
             "automatic retries require idempotent or read-only tool effects");
     }
 }
+
+namespace {
+// A call that would start after the run's deadline (detail::kRunDeadlineElapsed).
+struct RunDeadlineElapsed {};
+}  // namespace
 
 namespace detail {
 
@@ -1012,7 +1018,19 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
     std::shared_ptr<SingleFlightState> singleflight_state;
     std::string singleflight_key;
     bool singleflight_leader = false;
+    // A run deadline that has passed: no call starts after it.
+    const auto deadline_passed = [&context]() {
+        return context.deadline && std::chrono::steady_clock::now() >= *context.deadline;
+    };
+    // The run's deadline comes before the policy's queue timeout, so every
+    // queue wait below ends at the deadline: a queue that times out has run
+    // into the deadline.
+    const bool deadline_bounds_queue = context.deadline &&
+        *context.deadline <= std::chrono::steady_clock::now() + policy.queue_timeout;
     auto publish_singleflight = [&, this](ToolExecutionResult result) {
+        // Text leaves the boundary as well-formed UTF-8 (text_safety.h).
+        result.output = detail::valid_utf8(std::move(result.output));
+        result.error = detail::valid_utf8(std::move(result.error));
         if (!singleflight_leader) return result;
         std::lock_guard<std::mutex> map_lock(impl_->singleflight_mutex);
         const auto found = impl_->singleflight.find(singleflight_key);
@@ -1052,8 +1070,9 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
             if (!singleflight_leader) {
                 const auto executor = co_await asio::this_coro::executor;
                 asio::steady_timer poll(executor);
-                const auto deadline =
+                auto deadline =
                     std::chrono::steady_clock::now() + policy.queue_timeout;
+                if (context.deadline) deadline = std::min(deadline, *context.deadline);
                 for (;;) {
                     {
                         std::lock_guard<std::mutex> lock(singleflight_state->mutex);
@@ -1139,6 +1158,12 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
             const auto max_attempts = std::max<std::uint32_t>(1, policy.retry_max_attempts);
             std::exception_ptr last_error;
             for (std::uint32_t attempt = 0; attempt < max_attempts; ++attempt) {
+                // No attempt starts after the run's deadline; a retry that
+                // would reports the failure it would have retried.
+                if (deadline_passed()) {
+                    if (last_error) std::rethrow_exception(last_error);
+                    throw RunDeadlineElapsed();
+                }
                 std::optional<std::string> output;
                 try {
                     output.emplace(co_await invoke_with_timeout());
@@ -1169,7 +1194,8 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
             throw std::logic_error("tool retry loop exhausted without a result");
         };
 
-        const auto queue_deadline = std::chrono::steady_clock::now() + policy.queue_timeout;
+        auto queue_deadline = std::chrono::steady_clock::now() + policy.queue_timeout;
+        if (context.deadline) queue_deadline = std::min(queue_deadline, *context.deadline);
         const auto host_admission = impl_->host_admission;
         auto reserve_host = [host_admission, &policy, &tool, &identity, &context,
                              queue_deadline]() -> asio::awaitable<HostResourceLease> {
@@ -1218,6 +1244,14 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
         request.capacity = keyed ? 1 : policy.capacity;
         request.max_pending = policy.max_pending;
         request.queue_timeout = policy.queue_timeout;
+        if (context.deadline) {
+            if (deadline_passed()) throw RunDeadlineElapsed();
+            request.queue_timeout = std::min(
+                request.queue_timeout,
+                std::max(std::chrono::milliseconds{1},
+                         std::chrono::duration_cast<std::chrono::milliseconds>(
+                             *context.deadline - std::chrono::steady_clock::now())));
+        }
         request.priority = std::min(
             policy.priority_ceiling,
             std::max(policy.host_priority,
@@ -1242,13 +1276,49 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
             result.exit_code = 0;
         }
         co_return publish_singleflight(std::move(result));
+    } catch (const RunDeadlineElapsed&) {
+        co_return publish_singleflight(ToolExecutionResult{
+            ToolTerminalStatus::Expired, {}, std::string(detail::kRunDeadlineElapsed), false,
+            false});
     } catch (const graph::CancelledException& error) {
         co_return publish_singleflight(ToolExecutionResult{
             started ? ToolTerminalStatus::CancellationRequested
                     : ToolTerminalStatus::CancelledBeforeStart,
             {}, error.what(), false, started && policy.effect != ToolEffectClass::ReadOnly});
+    } catch (const HostAdmissionError& error) {
+        // Host admission refuses before the tool starts, like the resource
+        // arbiter: a full queue or missing capacity rejects the call, a queue
+        // wait that ran out expires it.
+        const auto failure = error.failure();
+        if (failure == HostAdmissionFailure::QueueTimeout) {
+            co_return publish_singleflight(ToolExecutionResult{
+                ToolTerminalStatus::Expired, {},
+                deadline_passed() || deadline_bounds_queue ? std::string(detail::kRunDeadlineElapsed)
+                                                           : error.what(),
+                policy.idempotency == ToolIdempotency::Idempotent, false});
+        }
+        co_return publish_singleflight(ToolExecutionResult{
+            failure == HostAdmissionFailure::InvalidRequest ? ToolTerminalStatus::Failed
+                                                            : ToolTerminalStatus::Rejected,
+            {}, error.what(),
+            failure == HostAdmissionFailure::QueueFull &&
+                policy.idempotency == ToolIdempotency::Idempotent,
+            false});
     } catch (const asio::system_error& error) {
         const auto code = error.code();
+        if (started && code != asio::error::timed_out && code != asio::error::operation_aborted) {
+            // Any other system error after the tool started is the tool's own
+            // failure (a filesystem or socket error), not an admission
+            // verdict: an ordinary failure, as for every other exception.
+            co_return publish_singleflight(
+                detail::ordinary_tool_failure(policy, started, error.what()));
+        }
+        if (!started && code == asio::error::timed_out &&
+            (deadline_passed() || deadline_bounds_queue)) {
+            co_return publish_singleflight(ToolExecutionResult{
+                ToolTerminalStatus::Expired, {}, std::string(detail::kRunDeadlineElapsed),
+                false, false});
+        }
         const auto queue_failure = code == asio::error::timed_out
                                 || code == asio::error::no_buffer_space;
         const auto status = code == asio::error::timed_out
@@ -1293,24 +1363,25 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
     }
 }
 
+ToolExecutionError::ToolExecutionError(ToolExecutionResult result)
+    : std::runtime_error(result.error.empty()
+                             ? "tool execution " + std::string(to_string(result.status))
+                             : result.error),
+      result_(std::move(result)) {}
+
 asio::awaitable<std::string> ToolExecutionController::execute_async(
     Tool& tool, json arguments, ToolExecutionContext context) {
-    const auto result = co_await execute_result_async(tool, std::move(arguments),
-                                                       std::move(context));
-    if (result.succeeded()) co_return result.output;
+    auto result = co_await execute_result_async(tool, std::move(arguments),
+                                                 std::move(context));
+    if (result.succeeded()) co_return std::move(result.output);
     switch (result.status) {
         case ToolTerminalStatus::CancelledBeforeStart:
         case ToolTerminalStatus::CancellationRequested:
             throw graph::CancelledException(result.error);
-        case ToolTerminalStatus::Expired:
-        case ToolTerminalStatus::TimedOut:
-            throw asio::system_error(asio::error::timed_out);
-        case ToolTerminalStatus::Rejected:
-            throw asio::system_error(asio::error::no_buffer_space);
         default:
-            throw std::runtime_error(result.error.empty()
-                                         ? "tool execution failed"
-                                         : result.error);
+            // The whole typed result: status, error, output, exit status and
+            // whether the effect is uncertain.
+            throw ToolExecutionError(std::move(result));
     }
 }
 

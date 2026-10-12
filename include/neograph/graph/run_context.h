@@ -136,10 +136,13 @@ struct RunContext {
 };
 
 /**
- * Populate the mediated Tool execution context for a node invocation.
- * Host-registered nodes that call dispatch_tool_calls must use this helper to
- * inherit the invocation's gate-adjacent effect broker and stable task slot.
- * Direct Tool::execute remains outside this boundary.
+ * Populate the mediated Tool execution context for a node invocation: the
+ * run's (or attempt's) cancel token and deadline, the execution controller and
+ * identity, the effect broker and stable task slot, and the run's lifecycle
+ * HookRuntime, whose tool Hooks every call then crosses. Host-registered nodes
+ * that call dispatch_tool_calls must use this helper so their calls follow the
+ * same contract as tool_dispatch. Direct Tool::execute remains outside this
+ * boundary.
  */
 NEOGRAPH_API ToolExecutionContext make_tool_execution_context(const RunContext& ctx);
 NEOGRAPH_API std::shared_ptr<ProviderCallBroker> provider_call_broker(const RunContext& ctx);

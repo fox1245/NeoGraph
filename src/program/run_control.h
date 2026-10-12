@@ -159,6 +159,9 @@ public:
                            const json&      input,
                            std::string_view operation) const;
     void set_hook_runtime(std::shared_ptr<HookRuntime> runtime) noexcept;
+    /// The host's lifecycle runtime, which also emits the tool Hooks of the
+    /// run's Core tool calls; null when the host configured none.
+    std::shared_ptr<HookRuntime> hook_runtime() const;
     void set_core_tool_grant_resolver(ProgramCoreToolGrantResolver resolver);
     std::optional<ProgramCoreToolGrant> resolve_core_tool_grant(
         std::string_view operation_id) const;

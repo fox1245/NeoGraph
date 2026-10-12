@@ -182,10 +182,21 @@ public:
                         HookExecutionBackend backend,
                         HookArtifactPublisher artifact_publisher = {},
                         std::string worker_id = "hook-backend-runner");
+    /// Runs every Hook the registry plans for @p event. A BlockingMandatory
+    /// Hook that does not succeed throws HookBoundaryBlocked with the state it
+    /// ended in: `failed` when its last attempt failed, `timed_out` only when
+    /// the deadline elapsed (or its target timed out), `cancelled`,
+    /// `reconciliation_required`. Cancellation raised by a target settles the
+    /// attempt as `cancelled` and propagates.
     asio::awaitable<void> run_async(const RuntimeEvent& event,
                                     std::chrono::system_clock::time_point deadline,
                                     std::uint32_t max_attempts = 1);
+    /// Whether the registry plans a BlockingMandatory Hook for @p event.
+    [[nodiscard]] bool blocks(const RuntimeEvent& event) const;
 private:
+    void lost_settlement(const HookInvocation& invocation,
+                         std::chrono::system_clock::time_point deadline, HookOutboxEntry& entry,
+                         const HookOutboxEntry& leased) const;
     std::shared_ptr<HookJournal> journal_;
     std::shared_ptr<const HookRegistry> registry_;
     std::shared_ptr<const NativeHookExecutionAdapter> adapter_;

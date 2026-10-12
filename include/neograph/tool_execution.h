@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -81,6 +82,24 @@ struct NEOGRAPH_API ToolExecutionResult {
     [[nodiscard]] bool succeeded() const noexcept {
         return status == ToolTerminalStatus::Succeeded;
     }
+};
+
+/**
+ * Thrown by the throwing facade ToolExecutionController::execute_async for
+ * every terminal status except Succeeded and the two cancellation statuses
+ * (which throw graph::CancelledException): it carries the whole typed result.
+ * The node failure classifier reads it: an uncertain effect is
+ * NG.EffectUncertain, a timed-out or expired call NG.Timeout, anything else
+ * an ordinary failure.
+ */
+class NEOGRAPH_API ToolExecutionError : public std::runtime_error {
+public:
+    explicit ToolExecutionError(ToolExecutionResult result);
+    [[nodiscard]] const ToolExecutionResult& result() const noexcept { return result_; }
+    [[nodiscard]] ToolTerminalStatus status() const noexcept { return result_.status; }
+
+private:
+    ToolExecutionResult result_;
 };
 
 /** Explicit effect classification used to decide retry and recovery behavior. */
@@ -298,13 +317,23 @@ public:
      * (CancelledBeforeStart / CancellationRequested), except the run control
      * signals that tool code can raise: HookBoundaryBlocked and
      * graph::NodeInterrupt propagate unchanged, so no caller can turn them
-     * into a result a model reads. See "Tool failure contract" in the
-     * reference.
+     * into a result a model reads. A call that would start at or after
+     * `context.deadline` is Expired; the deadline also bounds the queue wait.
+     * A system error from tool code after it started is an ordinary failure.
+     * Output and error text are well-formed UTF-8. See "Tool failure
+     * contract" in the reference.
      */
     asio::awaitable<ToolExecutionResult> execute_result_async(
         Tool& tool, json arguments, ToolExecutionContext context);
 
-    /** Legacy throwing facade over execute_result_async. */
+    /**
+     * Throwing facade over execute_result_async: the output on success,
+     * graph::CancelledException for CancelledBeforeStart and
+     * CancellationRequested, and ToolExecutionError, which carries the whole
+     * ToolExecutionResult, for every other status. HookBoundaryBlocked and
+     * graph::NodeInterrupt from tool code propagate unchanged, as from
+     * execute_result_async.
+     */
     asio::awaitable<std::string> execute_async(Tool& tool,
                                                json arguments,
                                                ToolExecutionContext context);

@@ -1201,6 +1201,17 @@ asio::awaitable<NodeResult> NodeExecutor::execute_attempts_async(
             }
         } catch (...) {}
 
+        // A Hook block stops the run with the HookBoundaryBlocked itself, and
+        // a cancellation with the CancelledException, wherever they sit in the
+        // failure's cause chain: the same type, invocation id and state as the
+        // tool paths and llm::Agent give (tool_failure.h). They win over an
+        // uncertain effect, as they do in a tool batch.
+        if (const auto control = ::neograph::detail::classify_tool_failure(
+                failure, ctx.cancel_token.get());
+            control == ::neograph::detail::ToolFailureClass::HookBlocked ||
+            control == ::neograph::detail::ToolFailureClass::Cancelled)
+            ::neograph::detail::rethrow_run_stop(failure, control);
+
         // An effect of this attempt whose outcome is unknown is never retried
         // or routed: the run pauses for reconciliation, as mediated dispatch
         // does when it sees one, even if the node turned that into an error.

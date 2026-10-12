@@ -195,6 +195,11 @@ std::string replace_invalid_utf8(std::string_view text) {
     return out;
 }
 
+std::string valid_utf8(std::string text) {
+    if (is_valid_utf8(text)) return text;
+    return replace_invalid_utf8(text);
+}
+
 std::string strip_unsafe_code_points(std::string_view text, InvalidUtf8Policy policy) {
     const auto  input = well_formed(text, policy);
     std::string out;

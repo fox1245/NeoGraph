@@ -358,6 +358,34 @@ enum class NodeFailureKind : std::uint8_t {
     VisitLimit,
 };
 
+/// The node failure classifier's verdict on any failure (see
+/// classify_failure).
+struct FailureVerdict {
+    NodeFailureClass failure_class = NodeFailureClass::Unknown;
+    /// "NG.TaskFailed", "NG.HookBlocked", "NG.Cancelled", an author code, ...
+    std::string code;
+    /// Text from typed safe sources only (NodeFailureError::public_message).
+    std::string public_message;
+    bool retryable = false;
+    bool routable = false;
+    /// For the run control classes, the signal itself as found in the cause
+    /// chain: the HookBoundaryBlocked, the NodeInterrupt or the
+    /// CancelledException (null for an aborted asio operation of a cancelled
+    /// run). Null for every other class.
+    std::exception_ptr signal;
+};
+
+class CancelToken;
+
+/// Classify any failure the way the node retry loop and every tool path do:
+/// the most severe class found anywhere in its cause chain, with its stable
+/// code. A run control signal is NG.Cancelled, NG.HookBlocked or
+/// NG.Interrupted. `run_token` only decides whether an aborted asio operation
+/// is cancellation. Protocol hosts report the code on the wire (reference,
+/// "Protocol failure mapping").
+NEOGRAPH_API FailureVerdict classify_failure(const std::exception_ptr& error,
+                                             const CancelToken* run_token = nullptr) noexcept;
+
 /// The stable code of a class: "NG.TaskFailed", "NG.LogicError", ...
 NEOGRAPH_API const char* node_failure_code(NodeFailureClass failure_class) noexcept;
 /// Whether a failure of this class may be retried at all.

@@ -5,6 +5,7 @@
 #include <neograph/graph/cancel.h>
 #include <neograph/graph/types.h>   // NodeInterrupt — the gate's Interrupt verdict
 
+#include "text_safety.h"
 #include "tool_failure.h"
 
 #include <asio/co_spawn.hpp>
@@ -32,7 +33,7 @@ ChatMessage failure_message(const ToolCall& call, ToolTerminalStatus status, std
     message.tool_status = std::string(to_string(status));
     message.tool_retryable = retryable;
     message.tool_effect_uncertain = uncertain;
-    message.content = json{{"error", std::move(error)},
+    message.content = json{{"error", detail::valid_utf8(std::move(error))},
                            {"status", message.tool_status},
                            {"retryable", retryable},
                            {"effect_uncertain", uncertain}}
@@ -129,6 +130,14 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
             if (execution.cancel_token) {
                 execution.cancel_token->throw_if_cancelled("before tool execution");
             }
+            // A call that would start after the run's deadline does not
+            // start, and none of its Hooks run: it expired, like a call whose
+            // queue wait ran out (the controller applies the same rule to
+            // every caller). Cancellation, checked first, wins.
+            if (execution.deadline && std::chrono::steady_clock::now() >= *execution.deadline) {
+                co_return failure_message(tc, ToolTerminalStatus::Expired,
+                                          std::string(detail::kRunDeadlineElapsed));
+            }
             // Resolving the name runs tool code (get_name), so it is handled
             // like the call itself, not as a failure of the whole batch.
             Tool* tool = nullptr;
@@ -191,6 +200,10 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
                 result = co_await controller->execute_result_async(
                     *tool, std::move(args), call_execution);
             }
+            // What the model reads is well-formed UTF-8 whoever produced it
+            // (a broker's replayed receipt, a controller result).
+            result.output = detail::valid_utf8(std::move(result.output));
+            result.error = detail::valid_utf8(std::move(result.error));
             tool_msg.tool_status = std::string(to_string(result.status));
             tool_msg.tool_retryable = result.retryable;
             tool_msg.tool_effect_uncertain = result.effect_uncertain ||

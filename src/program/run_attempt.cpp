@@ -2081,6 +2081,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 graph::RunResources resources{operation_checkpoints, control->state_store};
                 resources.provider_call_broker =
                     control->resolve_core_provider_call_broker(operation_id);
+                // Core tool calls cross the host's tool Hooks like any other.
+                resources.hook_runtime = control->hook_runtime();
                 const auto grant = control->resolve_core_tool_grant(operation_id);
                 if (grant && grant->owner_scope == control->owner_scope &&
                     grant->program_version_id == control->program_version_id &&

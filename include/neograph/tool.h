@@ -45,8 +45,11 @@ struct ToolExecutionContext {
     /// Stable Core node invocation slot, populated by GraphEngine.
     std::string effect_task_id;
     ToolEffectGrantIdentity effect_grant;
+    /// The run's deadline. No call starts at or after it (status `expired`);
+    /// a ContextualAsyncTool such as MCPTool also stops waiting at it.
     std::optional<std::chrono::steady_clock::time_point> deadline;
-    /// Optional host-owned lifecycle boundary shared by all tool consumers.
+    /// Optional host-owned lifecycle boundary: dispatch_tool_calls emits the
+    /// BeforeToolExecution and AfterToolExecution events of every call here.
     std::shared_ptr<HookRuntime> hook_runtime;
     /// Policy-derived priority request; depth never supplies this value.
     std::uint8_t requested_priority = 0;

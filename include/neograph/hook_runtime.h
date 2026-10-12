@@ -18,6 +18,13 @@ namespace neograph {
  * Hook targets execute through NativeHookExecutionAdapter, never through this
  * facade's tool boundary, so hook-target execution cannot recursively trigger
  * tool hooks.
+ *
+ * emit_async() is the one boundary every emitter shares (tool calls on every
+ * path, checkpoints, providers, Program lifecycle events): a mandatory Hook
+ * that does not succeed throws HookBoundaryBlocked; one that cannot even run
+ * (an invalid event such as one without an owner scope, an unusable journal)
+ * throws HookBoundaryBlocked with state `failed`; and when `cancellation` was
+ * cancelled while the Hooks ran, graph::CancelledException wins.
  */
 class NEOGRAPH_API HookRuntime final {
 public:

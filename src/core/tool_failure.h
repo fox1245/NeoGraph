@@ -36,6 +36,7 @@
 #include <exception>
 #include <memory>
 #include <string>
+#include <string_view>
 
 namespace neograph::graph {
 class CancelToken;
@@ -68,11 +69,19 @@ inline bool stops_run(ToolFailureClass kind) noexcept {
     return kind != ToolFailureClass::ToolError;
 }
 
-/// Rethrow a run-stopping failure. The original exception object is rethrown,
-/// so its type and fields (invocation id, state, interrupt payload) survive;
-/// an aborted asio operation under a cancelled run becomes
+/// Rethrow a run-stopping failure as the control signal itself: the
+/// HookBoundaryBlocked, NodeInterrupt or CancelledException found in its cause
+/// chain, so its type and fields (invocation id, state, interrupt payload)
+/// survive whatever wrapped it, such as a subgraph's NodeExecutionError. An
+/// aborted asio operation under a cancelled run becomes
 /// graph::CancelledException.
 [[noreturn]] void rethrow_run_stop(const std::exception_ptr& error, ToolFailureClass kind);
+
+/// The error of a tool call that would have started after the run's deadline
+/// (RunContext::deadline, ToolExecutionContext::deadline). Such a call does not
+/// start: its result has status `expired`, on every dispatch path.
+inline constexpr std::string_view kRunDeadlineElapsed =
+    "run deadline elapsed before the tool started";
 
 /// The text a tool message carries for an ordinary failure.
 std::string tool_failure_message(const std::exception_ptr& error);

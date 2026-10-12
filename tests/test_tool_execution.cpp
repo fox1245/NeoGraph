@@ -3,13 +3,16 @@
 #include <neograph/async/run_sync.h>
 #include <neograph/tool_dispatch.h>
 #include <neograph/tool_execution.h>
+#include <neograph/graph/types.h>
 
 #include <asio/steady_timer.hpp>
 #include <asio/use_awaitable.hpp>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <future>
+#include <system_error>
 #include <memory>
 #include <stdexcept>
 #include <thread>
@@ -662,4 +665,160 @@ TEST(ToolExecutionController, CancellationBeforeAdmissionIsTyped) {
     EXPECT_EQ(result.status, ToolTerminalStatus::CancelledBeforeStart);
     EXPECT_FALSE(result.retryable);
     EXPECT_FALSE(result.effect_uncertain);
+}
+
+// ── One contract at the execution boundary (normalization follow-ups) ─────
+
+namespace {
+
+class ScriptedTool final : public Tool {
+public:
+    explicit ScriptedTool(std::function<std::string()> body, std::string name = "scripted")
+        : body_(std::move(body)), name_(std::move(name)) {}
+    ChatTool get_definition() const override { return {name_, "", json::object()}; }
+    std::string get_name() const override { return name_; }
+    std::string execute(const json&) override {
+        ++runs;
+        return body_();
+    }
+    std::atomic<int> runs{0};
+
+private:
+    std::function<std::string()> body_;
+    std::string name_;
+};
+
+}  // namespace
+
+// A call that would start after the run's deadline does not start, on every
+// entry: the controller and dispatch (one call or a batch) report the same
+// `expired` outcome, and no Hook or tool runs.
+TEST(ToolExecutionContract, NoCallStartsAfterTheRunDeadline) {
+    ScriptedTool tool([] { return std::string("ran"); });
+    auto controller = std::make_shared<ToolExecutionController>();
+    ToolExecutionContext context;
+    context.controller = controller;
+    context.deadline = std::chrono::steady_clock::now() - 1ms;
+    const auto result = neograph::async::run_sync(
+        controller->execute_result_async(tool, json::object(), context));
+    EXPECT_EQ(result.status, ToolTerminalStatus::Expired);
+    EXPECT_EQ(result.error, "run deadline elapsed before the tool started");
+    EXPECT_FALSE(result.effect_uncertain);
+    for (const bool batch : {false, true}) {
+        std::vector<ToolCall> calls{{"a", "scripted", "{}"}};
+        if (batch) calls.push_back({"b", "scripted", "{}"});
+        const auto messages = neograph::async::run_sync(
+            dispatch_tool_calls(calls, {&tool}, {}, {}, context));
+        ASSERT_EQ(messages.size(), calls.size());
+        for (const auto& message : messages) {
+            EXPECT_EQ(message.tool_status, "expired");
+            EXPECT_EQ(json::parse(message.content).value("error", ""),
+                      "run deadline elapsed before the tool started");
+        }
+    }
+    EXPECT_EQ(tool.runs.load(), 0);
+}
+
+// The deadline also bounds a queue wait: a call waiting for its resource when
+// the deadline passes expires with the same outcome.
+TEST(ToolExecutionContract, TheRunDeadlineBoundsTheQueueWait) {
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    std::promise<void> entered;
+    ScriptedTool holder([&] {
+        entered.set_value();
+        released.wait();
+        return std::string("held");
+    }, "shared");
+    auto controller = std::make_shared<ToolExecutionController>();
+    std::thread first([&] {
+        ToolExecutionContext context;
+        context.controller = controller;
+        (void)neograph::async::run_sync(
+            controller->execute_result_async(holder, json::object(), context));
+    });
+    entered.get_future().wait();
+    ToolExecutionContext waiting;
+    waiting.controller = controller;
+    waiting.deadline = std::chrono::steady_clock::now() + 100ms;
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = neograph::async::run_sync(
+        controller->execute_result_async(holder, json::object(), waiting));
+    EXPECT_LT(std::chrono::steady_clock::now() - started, 5s);
+    EXPECT_EQ(result.status, ToolTerminalStatus::Expired);
+    EXPECT_EQ(result.error, "run deadline elapsed before the tool started");
+    release.set_value();
+    first.join();
+}
+
+// A system error raised by tool code after it started is the tool's own
+// failure, like any other exception, not an admission verdict (`rejected`).
+TEST(ToolExecutionContract, ASystemErrorFromToolCodeIsAnOrdinaryFailure) {
+    ScriptedTool tool([]() -> std::string {
+        throw std::system_error(std::make_error_code(std::errc::no_such_file_or_directory),
+                                "open report.csv");
+    });
+    auto controller = std::make_shared<ToolExecutionController>();
+    const auto result = neograph::async::run_sync(
+        controller->execute_result_async(tool, json::object(), {}));
+    // Started under a policy that does not rule out an effect.
+    EXPECT_EQ(result.status, ToolTerminalStatus::ReconciliationRequired);
+    EXPECT_NE(result.error.find("report.csv"), std::string::npos);
+}
+
+// Tool text leaves the boundary as well-formed UTF-8: each maximal ill-formed
+// subpart becomes U+FFFD, in a result and in a failure, instead of the message
+// turning into an empty string.
+TEST(ToolExecutionContract, IllFormedUtf8IsReplacedNotEmptied) {
+    ScriptedTool output_tool([] { return std::string("ok \xff end"); }, "output");
+    ScriptedTool failing_tool([]() -> std::string {
+        throw std::runtime_error("bad \xc3 byte");
+    }, "failing");
+    const auto messages = neograph::async::run_sync(dispatch_tool_calls(
+        {{"a", "output", "{}"}, {"b", "failing", "{}"}}, {&output_tool, &failing_tool}));
+    ASSERT_EQ(messages.size(), 2u);
+    EXPECT_EQ(messages[0].content, "ok \xEF\xBF\xBD end");
+    ASSERT_FALSE(messages[1].content.empty()) << "a failure with ill-formed text became empty";
+    EXPECT_EQ(json::parse(messages[1].content).value("error", ""), "bad \xEF\xBF\xBD byte");
+}
+
+// json::dump of a string that is not UTF-8 writes U+FFFD instead of
+// returning an empty document; a well-formed document's bytes do not change.
+TEST(ToolExecutionContract, JsonDumpReplacesIllFormedUtf8) {
+    json value{{"text", std::string("a\xff" "b")}, {std::string("k\xe2\x82"), "v"},
+               {"ok", "caf\xC3\xA9"}};
+    const auto dumped = value.dump();
+    ASSERT_FALSE(dumped.empty());
+    const auto parsed = json::parse(dumped);
+    EXPECT_EQ(parsed.value("text", ""), "a\xEF\xBF\xBD" "b");
+    EXPECT_EQ(parsed.value("ok", ""), "caf\xC3\xA9");
+    EXPECT_TRUE(parsed.contains("k\xEF\xBF\xBD"));
+    const json valid{{"ok", "caf\xC3\xA9"}, {"n", 1}};
+    EXPECT_EQ(valid.dump(), R"({"ok":"café","n":1})");
+}
+
+// The throwing facade keeps the whole typed result (it used to merge
+// TimedOut with Expired, and report every other status as runtime_error).
+TEST(ToolExecutionContract, TheThrowingFacadeKeepsTheTypedResult) {
+    ScriptedTool tool([]() -> std::string { throw std::runtime_error("remote refused"); });
+    auto controller = std::make_shared<ToolExecutionController>();
+    try {
+        (void)neograph::async::run_sync(controller->execute_async(tool, json::object(), {}));
+        FAIL() << "a failed call must throw";
+    } catch (const ToolExecutionError& error) {
+        EXPECT_EQ(error.status(), ToolTerminalStatus::ReconciliationRequired);
+        EXPECT_TRUE(error.result().effect_uncertain);
+        EXPECT_EQ(error.result().error, "remote refused");
+        // An uncertain effect is never retried by a node retry policy.
+        EXPECT_EQ(graph::classify_failure(std::current_exception()).code, "NG.EffectUncertain");
+    }
+    ToolExecutionContext expired;
+    expired.deadline = std::chrono::steady_clock::now() - 1ms;
+    try {
+        (void)neograph::async::run_sync(controller->execute_async(tool, json::object(), expired));
+        FAIL() << "an expired call must throw";
+    } catch (const ToolExecutionError& error) {
+        EXPECT_EQ(error.status(), ToolTerminalStatus::Expired);
+        EXPECT_EQ(graph::classify_failure(std::current_exception()).code, "NG.Timeout");
+    }
 }

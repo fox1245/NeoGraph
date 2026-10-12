@@ -530,6 +530,7 @@ ToolExecutionContext make_tool_execution_context(const RunContext& ctx) {
         execution.effect_broker = runtime->tool_effect_broker;
         execution.effect_task_id.assign(runtime.invocation_id().data(), runtime.invocation_id().size());
         execution.effect_grant = runtime->tool_effect_grant;
+        execution.hook_runtime = runtime->tool_hook_runtime;
     }
     return execution;
 }

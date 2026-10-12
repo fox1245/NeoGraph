@@ -143,41 +143,64 @@ public:
     std::string execute(const json&) override { return "unreachable"; }
 };
 
-// Hook target that fails, so a FailClosed BeforeToolExecution Hook blocks.
+// Hook target: fails (so a FailClosed Hook blocks) or records what it saw.
 class HookTarget final : public Tool {
 public:
     explicit HookTarget(bool fail) : fail_(fail) {}
     ChatTool get_definition() const override { return {"audit", "", json::object()}; }
     std::string get_name() const override { return "audit"; }
-    std::string execute(const json&) override {
+    std::string execute(const json& arguments) override {
         if (fail_) throw std::runtime_error("audit sink unavailable");
+        std::lock_guard lock(mutex_);
+        seen_.push_back(arguments);
         return "audited";
+    }
+    std::vector<json> seen() const {
+        std::lock_guard lock(mutex_);
+        return seen_;
     }
 
 private:
     bool fail_;
+    mutable std::mutex mutex_;
+    std::vector<json> seen_;
 };
 
-std::shared_ptr<HookRuntime> before_tool_hooks(std::shared_ptr<HookTarget> target) {
+// Mandatory FailClosed tool Hooks on the given phases. Each Hook's target sees
+// {"phase", "tool_name", "tool_call_id", "status"} of the event.
+std::shared_ptr<HookRuntime> tool_hooks(std::shared_ptr<HookTarget> target,
+                                        std::vector<HookPhase> phases) {
     HookTargetResolver resolver = [target](std::string_view id) -> std::optional<HookTargetContract> {
         if (id != "audit") return std::nullopt;
         return HookTargetContract{target.get(), {"audit"}, ToolEffectClass::ReadOnly};
     };
     auto registry = std::make_shared<HookRegistry>(resolver);
-    HookDefinitionData data;
-    data.priority = 1;
-    data.phase = HookPhase::BeforeToolExecution;
-    data.target_id = "audit";
-    data.required_capabilities = {"audit"};
-    data.effect = ToolEffectClass::ReadOnly;
-    data.input_mapper = {HookInputMapperKind::JsonPointer, "/arguments", json(), {}};
-    registry->admit(HookDefinition::create(std::move(data)));
+    for (const auto phase : phases) {
+        HookDefinitionData data;
+        data.priority = 1;
+        data.phase = phase;
+        data.target_id = "audit";
+        data.required_capabilities = {"audit"};
+        data.effect = ToolEffectClass::ReadOnly;
+        data.input_mapper = {HookInputMapperKind::Template, {},
+                             json{{"phase", std::string(to_string(phase))},
+                                  {"tool_name", json{{"$event", "/tool_name"}}},
+                                  {"tool_call_id", json{{"$event", "/tool_call_id"}}}},
+                             {}};
+        if (phase == HookPhase::AfterToolExecution)
+            data.input_mapper.value_template["status"] = json{{"$event", "/status"}};
+        registry->admit(HookDefinition::create(std::move(data)));
+    }
     auto adapter = std::make_shared<NativeHookExecutionAdapter>(
         resolver, std::make_shared<ToolExecutionController>());
     auto runner = std::make_shared<MandatoryHookRunner>(
         std::make_shared<InMemoryHookJournal>(), std::move(registry), std::move(adapter));
     // The hook target closure keeps the target alive with the runtime.
     return std::make_shared<HookRuntime>(std::move(runner));
+}
+
+std::shared_ptr<HookRuntime> before_tool_hooks(std::shared_ptr<HookTarget> target) {
+    return tool_hooks(std::move(target), {HookPhase::BeforeToolExecution});
 }
 
 // Mediated dispatch, as Program's Core tool_dispatch uses it: the broker owns
@@ -222,25 +245,23 @@ void collect_seen(const ChatMessage& message, std::vector<Seen>& out) {
 }
 
 struct Outcome {
-    std::exception_ptr error;               // escaped the path, unwrapped from NodeExecutionError
+    // What escaped the path, as its caller sees it. Nothing is unwrapped: a
+    // run control signal must leave a graph run as its own type, exactly as it
+    // leaves llm::Agent (a HookBoundaryBlocked used to leave a graph run
+    // wrapped in a NodeExecutionError).
+    std::exception_ptr error;
     std::optional<std::string> interrupt;   // reason of a NodeInterrupt or a paused run
     json interrupt_payload;
     std::vector<Seen> seen;                 // tool results that reached the model
 
     void capture(std::exception_ptr raised) {
-        for (;;) {
-            try {
-                std::rethrow_exception(raised);
-            } catch (const NodeExecutionError& wrapped) {
-                raised = wrapped.cause();
-                continue;
-            } catch (const NodeInterrupt& paused) {
-                interrupt = paused.reason();
-                interrupt_payload = paused.value();
-            } catch (...) {
-                error = raised;
-            }
-            return;
+        try {
+            std::rethrow_exception(raised);
+        } catch (const NodeInterrupt& paused) {
+            interrupt = paused.reason();
+            interrupt_payload = paused.value();
+        } catch (...) {
+            error = raised;
         }
     }
     const Seen* target() const {
@@ -334,11 +355,17 @@ const std::vector<Scenario>& scenarios() {
              .brokered = reconciliation()});
         row({.name = "tool_raises_hook_block", .act = Act::ThrowHookBlock,
              .expect = hook_blocked("nested-invocation", HookExecutionState::TimedOut)});
-        // The journal records a failed attempt with none left as timed_out.
+        // A failed Hook with no attempt left reports failed: only a deadline
+        // that elapsed is timed_out.
         row({.name = "hook_blocks_before_tool", .failing_hook = true,
-             .expect = hook_blocked("*", HookExecutionState::TimedOut)});
-        row({.name = "hook_deadline_elapsed", .expired_deadline = true,
-             .expect = hook_blocked({}, HookExecutionState::TimedOut)});
+             .expect = hook_blocked("*", HookExecutionState::Failed)});
+        // A call that would start after the run's deadline does not start,
+        // and none of its Hooks run, with or without Hooks configured.
+        row({.name = "run_deadline_elapsed", .expired_deadline = true,
+             .expect = tool_result("expired", "run deadline elapsed before the tool started")});
+        row({.name = "run_deadline_elapsed_with_hooks", .failing_hook = true,
+             .expired_deadline = true,
+             .expect = tool_result("expired", "run deadline elapsed before the tool started")});
         // A Hook that cannot even run fails closed too, instead of turning
         // into an error message for every call.
         row({.name = "hook_cannot_run", .anonymous = true,
@@ -357,8 +384,8 @@ const std::vector<Scenario>& scenarios() {
 
 enum class PathKind {
     DispatchSingle, DispatchBatch, BrokeredSingle, BrokeredBatch,
-    GraphNodeSingle, GraphNodeBatch, AgentRun, AgentRunStream,
-    PlanExecute, DeepResearch,
+    GraphNodeSingle, GraphNodeBatch, GraphRunResources, GraphSubgraph,
+    AgentRun, AgentRunStream, PlanExecute, DeepResearch,
 };
 
 struct Path {
@@ -366,25 +393,29 @@ struct Path {
     const char* name;
     bool batch;
     bool brokered = false;
-    // The ToolExecutionContext reaches lifecycle Hooks only where the caller
-    // supplies a HookRuntime for tools: direct dispatch and llm::Agent. Graph
-    // engines publish checkpoint Hooks only (see the reference).
-    bool tool_hooks = false;
     // The calls are dispatched before any provider request of this path, so an
     // already-expired run deadline reaches the tool boundary first.
     bool dispatch_first = false;
 };
 
+// Every path applies the same tool Hooks: direct dispatch through the
+// ToolExecutionContext, llm::Agent through set_hook_runtime, and graph runs
+// through the engine's HookRuntime (or RunResources::hook_runtime), including
+// a subgraph's calls under its parent's HookRuntime.
 const std::vector<Path>& paths() {
     static const std::vector<Path> all = {
-        {PathKind::DispatchSingle, "dispatch_single", false, false, true, true},
-        {PathKind::DispatchBatch, "dispatch_batch", true, false, true, true},
-        {PathKind::BrokeredSingle, "brokered_single", false, true, true, true},
-        {PathKind::BrokeredBatch, "brokered_batch", true, true, true, true},
-        {PathKind::GraphNodeSingle, "graph_tool_dispatch_single", false},
-        {PathKind::GraphNodeBatch, "graph_tool_dispatch_batch", true},
-        {PathKind::AgentRun, "agent_run", false, false, true, false},
-        {PathKind::AgentRunStream, "agent_run_stream_batch", true, false, true, true},
+        {PathKind::DispatchSingle, "dispatch_single", false, false, true},
+        {PathKind::DispatchBatch, "dispatch_batch", true, false, true},
+        {PathKind::BrokeredSingle, "brokered_single", false, true, true},
+        {PathKind::BrokeredBatch, "brokered_batch", true, true, true},
+        {PathKind::GraphNodeSingle, "graph_tool_dispatch_single", false, false, true},
+        {PathKind::GraphNodeBatch, "graph_tool_dispatch_batch", true, false, true},
+        {PathKind::GraphRunResources, "graph_run_resources_hooks_batch", true, false, true},
+        {PathKind::GraphSubgraph, "graph_subgraph_tool_dispatch_batch", true, false, true},
+        {PathKind::AgentRun, "agent_run", false, false, false},
+        // Dispatched first, but the run's next step is a provider call, which
+        // an expired deadline refuses before the model sees the results.
+        {PathKind::AgentRunStream, "agent_run_stream_batch", true, false, false},
         {PathKind::PlanExecute, "plan_execute_batch", true},
         {PathKind::DeepResearch, "deep_research_researcher", false},
     };
@@ -392,8 +423,7 @@ const std::vector<Path>& paths() {
 }
 
 bool applies(const Scenario& scenario, const Path& path) {
-    if ((scenario.failing_hook || scenario.anonymous) && !path.tool_hooks) return false;
-    if (scenario.expired_deadline && !(path.tool_hooks && path.dispatch_first)) return false;
+    if (scenario.expired_deadline && !path.dispatch_first) return false;
     return true;
 }
 
@@ -436,10 +466,7 @@ Setup make_setup(const Scenario& scenario, const Path& path) {
         setup.hooks = before_tool_hooks(std::make_shared<HookTarget>(false));
         setup.owner_scope.clear();
     }
-    if (scenario.expired_deadline) {
-        setup.hooks = before_tool_hooks(std::make_shared<HookTarget>(false));
-        setup.deadline = std::chrono::steady_clock::now() - 1ms;
-    }
+    if (scenario.expired_deadline) setup.deadline = std::chrono::steady_clock::now() - 1ms;
     if (scenario.policy_timeout || scenario.read_only) {
         auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
         ToolExecutionPolicy policy;
@@ -534,33 +561,75 @@ private:
     json calls_;
 };
 
-Outcome run_graph_node(Setup setup) {
-    NodeFactory::instance().register_type("tool_failure_contract_model",
-        [](const std::string&, const json& config, const NodeContext&) {
-            return std::make_unique<EmitCallsNode>(config.at("calls"));
-        });
+RunMetadata run_metadata(const Setup& setup) {
+    RunMetadata metadata;
+    metadata.owner_scope = setup.owner_scope;
+    metadata.run_id = "root-run";
+    metadata.deadline = setup.deadline;
+    return metadata;
+}
+
+json tool_graph(const std::vector<ToolCall>& tool_calls, const std::string& name) {
     json calls = json::array();
-    for (const auto& call : setup.calls)
+    for (const auto& call : tool_calls)
         calls.push_back(json{{"id", call.id}, {"name", call.name}, {"arguments", call.arguments}});
-    const json definition{
-        {"name", "tool_failure_contract"},
+    return json{
+        {"name", name},
         {"channels", {{"messages", {{"reducer", "append"}}}}},
         {"nodes", {{"model", {{"type", "tool_failure_contract_model"}, {"calls", calls}}},
                    {"tools", {{"type", "tool_dispatch"}}}}},
         {"edges", json::array({json{{"from", "__start__"}, {"to", "model"}},
                                json{{"from", "model"}, {"to", "tools"}},
                                json{{"from", "tools"}, {"to", "__end__"}}})}};
+}
+
+void register_emit_node() {
+    NodeFactory::instance().register_type("tool_failure_contract_model",
+        [](const std::string&, const json& config, const NodeContext&) {
+            return std::make_unique<EmitCallsNode>(config.at("calls"));
+        });
+}
+
+// kind: GraphNode*: hooks on the engine; GraphRunResources: hooks only in the
+// run's RunResources; GraphSubgraph: the tool_dispatch node runs in a
+// subgraph whose engine has no Hooks, under a parent engine that has them.
+Outcome run_graph_node(Setup setup, PathKind kind) {
+    register_emit_node();
     NodeContext context;
     context.tools = ToolSet(std::move(setup.tools));
-    auto engine = GraphEngine::compile(definition, context, std::make_shared<InMemoryCheckpointStore>());
+    std::unique_ptr<GraphEngine> engine;
+    std::shared_ptr<GraphEngine> child;
+    if (kind == PathKind::GraphSubgraph) {
+        child = GraphEngine::compile(tool_graph(setup.calls, "tool_failure_child"), context);
+        if (setup.controller) child->set_tool_execution_controller(setup.controller);
+        NodeFactory::instance().register_type("tool_failure_contract_subgraph",
+            [child](const std::string& name, const json&, const NodeContext&) {
+                return std::make_unique<SubgraphNode>(name, child);
+            });
+        const json parent{
+            {"name", "tool_failure_parent"},
+            {"channels", {{"messages", {{"reducer", "append"}}}}},
+            {"nodes", {{"child", {{"type", "tool_failure_contract_subgraph"}}}}},
+            {"edges", json::array({json{{"from", "__start__"}, {"to", "child"}},
+                                   json{{"from", "child"}, {"to", "__end__"}}})}};
+        engine = GraphEngine::compile(parent, NodeContext{},
+                                      std::make_shared<InMemoryCheckpointStore>());
+    } else {
+        engine = GraphEngine::compile(tool_graph(setup.calls, "tool_failure_contract"), context,
+                                      std::make_shared<InMemoryCheckpointStore>());
+    }
     if (setup.gate) engine->set_tool_gate(setup.gate);
     if (setup.controller) engine->set_tool_execution_controller(setup.controller);
+    RunResources resources;
+    if (kind == PathKind::GraphRunResources) resources.hook_runtime = setup.hooks;
+    else engine->set_hook_runtime(setup.hooks);
     RunConfig config;
     config.thread_id = "tool-failure-contract";
     config.cancel_token = setup.token;
     Outcome outcome;
     try {
-        const auto result = engine->run(config);
+        const auto result = neograph::async::run_sync(engine->run_async(
+            config, run_metadata(setup), std::move(resources)));
         if (result.interrupted) {
             outcome.interrupt = result.interrupt_value.value("reason", "");
             if (result.interrupt_value.contains("value"))
@@ -591,6 +660,7 @@ Outcome run_agent(Setup setup, bool stream) {
             co_return test::success("done");
         }, "contract-agent");
     llm::Agent agent(provider, std::move(setup.tools), "", "fixture-model");
+    // The Agent path keeps its own Hook binding: set_hook_runtime.
     if (setup.gate) agent.set_tool_gate(setup.gate);
     if (setup.hooks) agent.set_hook_runtime(setup.hooks);
     if (setup.controller) agent.set_tool_execution_controller(setup.controller);
@@ -634,6 +704,7 @@ Outcome run_plan_execute(Setup setup) {
     engine->set_checkpoint_store(std::make_shared<InMemoryCheckpointStore>());
     if (setup.gate) engine->set_tool_gate(setup.gate);
     if (setup.controller) engine->set_tool_execution_controller(setup.controller);
+    engine->set_hook_runtime(setup.hooks);
     RunConfig config;
     config.thread_id = "tool-failure-plan";
     config.input = json{{"messages", json::array({json{{"role", "user"}, {"content", "go"}}})}};
@@ -641,7 +712,7 @@ Outcome run_plan_execute(Setup setup) {
     config.cancel_token = setup.token;
     Outcome outcome;
     try {
-        const auto result = engine->run(config);
+        const auto result = engine->run(config, run_metadata(setup));
         if (result.interrupted) {
             outcome.interrupt = result.interrupt_value.value("reason", "");
             if (result.interrupt_value.contains("value"))
@@ -695,6 +766,7 @@ Outcome run_deep_research(Setup setup) {
     engine->set_checkpoint_store(std::make_shared<InMemoryCheckpointStore>());
     if (setup.gate) engine->set_tool_gate(setup.gate);
     if (setup.controller) engine->set_tool_execution_controller(setup.controller);
+    engine->set_hook_runtime(setup.hooks);
     RunConfig config;
     config.thread_id = "tool-failure-research";
     config.input = {{"user_query", "q"}};
@@ -702,7 +774,7 @@ Outcome run_deep_research(Setup setup) {
     config.cancel_token = setup.token;
     Outcome outcome;
     try {
-        const auto result = engine->run(config);
+        const auto result = engine->run(config, run_metadata(setup));
         if (result.interrupted) {
             outcome.interrupt = result.interrupt_value.value("reason", "");
             if (result.interrupt_value.contains("value"))
@@ -725,7 +797,9 @@ Outcome run_path(const Path& path, Setup setup) {
             return run_dispatch(std::move(setup), true);
         case PathKind::GraphNodeSingle:
         case PathKind::GraphNodeBatch:
-            return run_graph_node(std::move(setup));
+        case PathKind::GraphRunResources:
+        case PathKind::GraphSubgraph:
+            return run_graph_node(std::move(setup), path.kind);
         case PathKind::AgentRun:
             return run_agent(std::move(setup), false);
         case PathKind::AgentRunStream:
@@ -806,6 +880,43 @@ TEST(ToolFailureContract, EveryPathAppliesTheSameContract) {
                 EXPECT_EQ(probe->target_runs.load(), 0) << "the gate must decide before anything runs";
                 EXPECT_EQ(probe->sibling_runs.load(), 0);
             }
+        }
+    }
+}
+
+// Every path that runs a model's tool calls crosses the same tool Hooks: one
+// BeforeToolExecution and one AfterToolExecution event per call, with the same
+// payload, whether the calls come from direct dispatch, llm::Agent, a graph's
+// tool_dispatch node (engine Hooks, RunResources Hooks, or a parent's Hooks
+// reaching a subgraph), the plan-and-execute executor or the deep-research
+// researcher.
+TEST(ToolFailureContract, EveryPathEmitsTheSameToolHooks) {
+    for (const auto& path : paths()) {
+        if (path.brokered) continue;  // the broker path is dispatch with a broker
+        SCOPED_TRACE(path.name);
+        Scenario scenario{.name = "hooks_observe", .act = Act::Succeed};
+        auto setup = make_setup(scenario, path);
+        auto target = std::make_shared<HookTarget>(false);
+        setup.hooks = tool_hooks(target, {HookPhase::BeforeToolExecution,
+                                          HookPhase::AfterToolExecution});
+        const auto calls = setup.calls;
+        const auto outcome = run_path(path, std::move(setup));
+        ASSERT_FALSE(outcome.error) << describe(outcome);
+        const auto seen = target->seen();
+        for (const auto& call : calls) {
+            int before = 0;
+            int after = 0;
+            for (const auto& event : seen) {
+                if (event.value("tool_call_id", "") != call.id) continue;
+                EXPECT_EQ(event.value("tool_name", ""), call.name);
+                if (event.value("phase", "") == "before_tool_execution") ++before;
+                if (event.value("phase", "") == "after_tool_execution") {
+                    ++after;
+                    EXPECT_EQ(event.value("status", ""), "succeeded");
+                }
+            }
+            EXPECT_EQ(before, 1) << call.id;
+            EXPECT_EQ(after, 1) << call.id;
         }
     }
 }

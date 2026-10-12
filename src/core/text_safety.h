@@ -115,6 +115,11 @@ NEOGRAPH_API bool contains_unsafe_code_points(std::string_view text);
 /// Replace each maximal ill-formed subpart with U+FFFD; well-formed input is returned unchanged.
 NEOGRAPH_API std::string replace_invalid_utf8(std::string_view text);
 
+/// The one rule for text that crosses a boundary (tool results, MCP, gRPC,
+/// Python, json::dump): `text` itself when it is well-formed UTF-8, moved
+/// without a copy, otherwise replace_invalid_utf8(text).
+NEOGRAPH_API std::string valid_utf8(std::string text);
+
 /// Remove every unsafe code point. Ill-formed input follows `policy`.
 NEOGRAPH_API std::string strip_unsafe_code_points(std::string_view  text,
                                                   InvalidUtf8Policy policy);

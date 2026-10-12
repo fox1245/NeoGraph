@@ -84,6 +84,10 @@ struct RunContextRuntime {
     std::shared_ptr<ProviderCallBroker> provider_call_broker;
     std::shared_ptr<ToolEffectBroker> tool_effect_broker;
     ToolEffectGrantIdentity tool_effect_grant;
+    /// The lifecycle runtime whose tool Hooks every tool call of this run
+    /// emits (make_tool_execution_context): the invocation's, a parent run's
+    /// for a subgraph, or the engine's own. Null: no tool Hooks.
+    std::shared_ptr<::neograph::HookRuntime> tool_hook_runtime;
     bool is_resume = false;
     /// #364: the run-level retry ceiling, shared with subgraphs; may be null.
     std::shared_ptr<NodeRetryCeiling> node_retry_ceiling;

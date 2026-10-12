@@ -706,11 +706,15 @@ TEST(BlockingToolBridge, PreservesTypedExceptionsAndLongMessages) {
 
 TEST(BlockingToolBridge, PreservesSystemErrorsAndTerminalClassification) {
     using Mode = BridgeExceptionTool::Mode;
+    // A system error that tool code raises after it started is the tool's
+    // own failure, not an admission verdict: `rejected` is for calls that
+    // never started. Only the cancellation and timeout codes keep their
+    // statuses.
     const std::pair<asio::error_code, ToolTerminalStatus> cases[] = {
         {asio::error::operation_aborted, ToolTerminalStatus::Killed},
         {asio::error::timed_out, ToolTerminalStatus::TimedOut},
-        {asio::error::no_buffer_space, ToolTerminalStatus::Rejected},
-        {asio::error::access_denied, ToolTerminalStatus::Rejected},
+        {asio::error::no_buffer_space, ToolTerminalStatus::ReconciliationRequired},
+        {asio::error::access_denied, ToolTerminalStatus::ReconciliationRequired},
     };
     const auto arguments = json::object();
     ToolExecutionController controller;

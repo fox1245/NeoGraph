@@ -2,8 +2,13 @@
 
 #include <yyjson.h>
 
+#include "text_safety.h"
+
 #include <algorithm>
 #include <cstring>
+#include <deque>
+#include <memory>
+#include <string_view>
 #include <istream>
 #include <sstream>
 
@@ -552,6 +557,33 @@ void json::push_back(json&& v) {
 // Serialization
 // ===========================================================================
 
+namespace {
+
+// Points every string (values and object keys) of a copied tree that is not
+// well-formed UTF-8 at its repaired text, kept alive in `repaired`.
+void repair_strings(yyjson_mut_val* val, std::deque<std::string>& repaired) {
+    if (!val) return;
+    if (yyjson_mut_is_str(val)) {
+        const std::string_view text(yyjson_mut_get_str(val), yyjson_mut_get_len(val));
+        if (detail::is_valid_utf8(text)) return;
+        repaired.push_back(detail::replace_invalid_utf8(text));
+        yyjson_mut_set_strn(val, repaired.back().data(), repaired.back().size());
+    } else if (yyjson_mut_is_arr(val)) {
+        yyjson_mut_arr_iter it;
+        yyjson_mut_arr_iter_init(val, &it);
+        while (auto* item = yyjson_mut_arr_iter_next(&it)) repair_strings(item, repaired);
+    } else if (yyjson_mut_is_obj(val)) {
+        yyjson_mut_obj_iter it;
+        yyjson_mut_obj_iter_init(val, &it);
+        while (auto* key = yyjson_mut_obj_iter_next(&it)) {
+            repair_strings(key, repaired);
+            repair_strings(yyjson_mut_obj_iter_get_val(key), repaired);
+        }
+    }
+}
+
+}  // namespace
+
 std::string json::dump(int indent) const {
     if (!val_) return "null";
     // Create a temp doc pointing at val_ for writing (or serialize direct)
@@ -559,7 +591,22 @@ std::string json::dump(int indent) const {
     if (indent > 0) flag |= YYJSON_WRITE_PRETTY;
 
     size_t len = 0;
-    char* raw = yyjson_mut_val_write(val_, flag, &len);
+    yyjson_write_err err{};
+    char* raw = yyjson_mut_val_write_opts(val_, flag, nullptr, &len, &err);
+    if (!raw && err.code == YYJSON_WRITE_ERROR_INVALID_STRING) {
+        // A string that is not well-formed UTF-8 is written with each maximal
+        // ill-formed subpart replaced by U+FFFD, the rule every text boundary
+        // follows (text_safety.h), instead of losing the whole document.
+        // Well-formed documents never take this path, so their bytes do not
+        // change.
+        std::unique_ptr<yyjson_mut_doc, decltype(&yyjson_mut_doc_free)> copy(
+            yyjson_mut_doc_new(nullptr), &yyjson_mut_doc_free);
+        if (!copy) return "";
+        yyjson_mut_val* root = yyjson_mut_val_mut_copy(copy.get(), val_);
+        std::deque<std::string> repaired;
+        repair_strings(root, repaired);
+        raw = yyjson_mut_val_write_opts(root, flag, nullptr, &len, &err);
+    }
     if (!raw) return "";
     std::string result(raw, len);
     free(raw);

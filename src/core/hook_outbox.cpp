@@ -1,6 +1,9 @@
 #include <neograph/hook_outbox.h>
 
 #include "canonical_json.h"
+#include "text_safety.h"
+
+#include <neograph/graph/cancel.h>
 
 #include <algorithm>
 #include <mutex>
@@ -10,6 +13,9 @@ namespace neograph { namespace {
 using Clock = std::chrono::system_clock;
 bool valid(HookExecutionState s) { return static_cast<unsigned>(s) <= static_cast<unsigned>(HookExecutionState::Cancelled); }
 bool terminal(HookExecutionState s) { return s == HookExecutionState::Succeeded || s == HookExecutionState::TimedOut || s == HookExecutionState::ReconciliationRequired || s == HookExecutionState::Cancelled; }
+// A failed attempt with none left is final: it stays `failed`. Only a deadline
+// that elapsed makes an invocation `timed_out`.
+bool settled(const HookOutboxEntryData& d) { return terminal(d.state) || (d.state == HookExecutionState::Failed && d.attempt_count >= d.max_attempts); }
 std::int64_t ms(Clock::time_point t) { return std::chrono::duration_cast<std::chrono::milliseconds>(t.time_since_epoch()).count(); }
 Clock::time_point time(std::int64_t value) { return Clock::time_point(std::chrono::milliseconds(value)); }
 void identity(std::string_view v) { if (!detail::is_sha256_identity(v)) throw std::invalid_argument("invalid hook invocation identity"); }
@@ -21,10 +27,13 @@ json receipt_body(const HookExecutionReceiptData& d) { return {{"schema_version"
 json receipt_json(const HookExecutionReceipt& r) { auto v = receipt_body(r.data()); v["format"] = "neograph-hook-execution-receipt"; v["id"] = r.id(); return v; }
 HookExecutionReceipt receipt_from(const json& v) { detail::reject_unknown_fields(v, "Hook execution receipt", {"format", "schema_version", "id", "invocation_id", "attempt", "state", "external_effect", "error"}); if (v.at("format") != "neograph-hook-execution-receipt" || v.at("schema_version") != 1) throw std::invalid_argument("unsupported hook execution receipt"); auto r = HookExecutionReceipt::create({v.at("invocation_id").get<std::string>(), v.at("attempt").get<std::uint32_t>(), state_from(v.at("state").get<std::string>()), external_from(v.at("external_effect")), v.at("error").get<std::string>()}); if (v.at("id").get<std::string>() != r.id()) throw std::invalid_argument("hook receipt id mismatch"); return r; }
 json entry_body(const HookOutboxEntryData& d) { return {{"schema_version", 1}, {"invocation", d.invocation.serialize_canonical()}, {"event", d.event.serialize_canonical()}, {"state", std::string(to_string(d.state))}, {"attempt_count", d.attempt_count}, {"max_attempts", d.max_attempts}, {"deadline_ms", ms(d.deadline)}, {"fencing_token", d.fencing_token}, {"lease_expires_at_ms", ms(d.lease_expires_at)}, {"receipt", d.receipt ? receipt_json(*d.receipt) : json(nullptr)}}; }
-HookExecutionReceipt failed_receipt(const HookOutboxEntry& e, std::string error) { return HookExecutionReceipt::create({e.data().invocation.id(), e.data().attempt_count, HookExecutionState::Failed, {}, std::move(error)}); }
+// Receipt text is bounded and well-formed: a long or non-UTF-8 failure message
+// must not make the receipt itself unrecordable.
+std::string receipt_text(std::string_view text) { return detail::truncate_utf8(text, 4096, detail::InvalidUtf8Policy::Replace); }
+HookExecutionReceipt failed_receipt(const HookOutboxEntry& e, std::string_view error) { return HookExecutionReceipt::create({e.data().invocation.id(), e.data().attempt_count, HookExecutionState::Failed, {}, receipt_text(error)}); }
 HookExecutionReceipt result_receipt(const HookOutboxEntry& e, const ToolExecutionResult& r) {
     const auto& invocation = e.data().invocation;
-    const auto detail = r.output.substr(0, 4096);
+    const auto detail = receipt_text(r.output);
     if (r.succeeded()) {
         const auto receipt_id = digest("native-hook-effect/v1",
             json{{"invocation_id", invocation.id()}, {"attempt", e.data().attempt_count}});
@@ -32,13 +41,17 @@ HookExecutionReceipt result_receipt(const HookOutboxEntry& e, const ToolExecutio
             HookExecutionState::Succeeded, {receipt_id, true, true, detail}, {}});
     }
     const bool ambiguous = r.effect_uncertain || r.status == ToolTerminalStatus::ReconciliationRequired;
+    // A target that ran out of time timed out, as an RPC Hook whose deadline
+    // elapsed does (hook_rpc.cpp); every other failure is a failed attempt.
     const auto state = ambiguous && invocation.data().idempotency == HookIdempotency::NonIdempotent
         ? HookExecutionState::ReconciliationRequired
         : (r.status == ToolTerminalStatus::CancelledBeforeStart ||
            r.status == ToolTerminalStatus::CancellationRequested
-               ? HookExecutionState::Cancelled : HookExecutionState::Failed);
+               ? HookExecutionState::Cancelled
+               : (r.status == ToolTerminalStatus::TimedOut || r.status == ToolTerminalStatus::Expired
+                      ? HookExecutionState::TimedOut : HookExecutionState::Failed));
     return HookExecutionReceipt::create({invocation.id(), e.data().attempt_count, state, {},
-        r.error.empty() ? "adapter supplied no known external effect receipt" : r.error.substr(0, 4096)});
+        r.error.empty() ? "adapter supplied no known external effect receipt" : receipt_text(r.error)});
 }
 } // namespace
 
@@ -55,10 +68,10 @@ class InMemoryHookJournal::Impl { public: mutable std::mutex mu; std::unordered_
 InMemoryHookJournal::InMemoryHookJournal() : impl_(std::make_unique<Impl>()) {} InMemoryHookJournal::~InMemoryHookJournal() = default;
 HookOutboxEntry InMemoryHookJournal::enqueue(HookInvocation i, RuntimeEvent e, std::uint32_t max, Clock::time_point deadline) { auto candidate = HookOutboxEntry::create({std::move(i), std::move(e), HookExecutionState::Triggered, 0, max, deadline}); std::lock_guard<std::mutex> lock(impl_->mu); auto [it, inserted] = impl_->entries.emplace(candidate.data().invocation.id(), candidate); if (!inserted && (it->second.data().invocation.serialize_canonical() != candidate.data().invocation.serialize_canonical() || it->second.data().event.serialize_canonical() != candidate.data().event.serialize_canonical() || it->second.data().max_attempts != max || it->second.data().deadline != deadline)) throw std::invalid_argument("logical hook invocation enqueue conflict"); return it->second; }
 HookOutboxEntry InMemoryHookJournal::publish(std::string_view id) { std::lock_guard<std::mutex> lock(impl_->mu); auto it = impl_->entries.find(std::string(id)); if (it == impl_->entries.end()) throw std::out_of_range("hook invocation is not enqueued"); auto d = it->second.data(); if (d.state == HookExecutionState::Triggered) { d.state = HookExecutionState::Pending; it->second = HookOutboxEntry::create(std::move(d)); } return it->second; }
-std::optional<HookLease> InMemoryHookJournal::claim(std::string_view id, std::string_view worker, Clock::time_point now, std::chrono::milliseconds duration) { if (worker.empty() || duration <= std::chrono::milliseconds::zero()) throw std::invalid_argument("invalid hook claim"); std::lock_guard<std::mutex> lock(impl_->mu); auto it = impl_->entries.find(std::string(id)); if (it == impl_->entries.end()) return std::nullopt; auto d = it->second.data(); if (d.deadline <= now && !terminal(d.state)) { d.state = HookExecutionState::TimedOut; d.lease_expires_at = {}; it->second = HookOutboxEntry::create(std::move(d)); return std::nullopt; } if (d.state == HookExecutionState::Dispatched && d.lease_expires_at <= now) { if (d.invocation.data().idempotency == HookIdempotency::NonIdempotent) { d.state = HookExecutionState::ReconciliationRequired; d.lease_expires_at = {}; d.receipt = HookExecutionReceipt::create({d.invocation.id(), d.attempt_count, HookExecutionState::ReconciliationRequired, {}, "non-idempotent dispatched lease expired; external outcome is unknown"}); it->second = HookOutboxEntry::create(std::move(d)); return std::nullopt; } d.state = HookExecutionState::Failed; d.lease_expires_at = {}; d.receipt = HookExecutionReceipt::create({d.invocation.id(), d.attempt_count, HookExecutionState::Failed, {}, "idempotent dispatched lease expired"}); it->second = HookOutboxEntry::create(std::move(d)); d = it->second.data(); } if (d.state != HookExecutionState::Pending && !(d.state == HookExecutionState::Failed && d.attempt_count < d.max_attempts)) return std::nullopt; if (d.attempt_count >= d.max_attempts) { d.state = HookExecutionState::TimedOut; it->second = HookOutboxEntry::create(std::move(d)); return std::nullopt; } d.state = HookExecutionState::Dispatched; ++d.attempt_count; ++d.fencing_token; d.receipt.reset(); d.lease_expires_at = std::min(d.deadline, now + duration); it->second = HookOutboxEntry::create(std::move(d)); return HookLease{it->second, it->second.data().fencing_token}; }
-std::optional<HookOutboxEntry> InMemoryHookJournal::settle(std::string_view id, std::uint64_t fence, HookExecutionReceipt receipt, Clock::time_point now) { std::lock_guard<std::mutex> lock(impl_->mu); auto it = impl_->entries.find(std::string(id)); if (it == impl_->entries.end()) return std::nullopt; auto d = it->second.data(); if (d.state != HookExecutionState::Dispatched || d.fencing_token != fence || d.lease_expires_at < now || receipt.data().invocation_id != id || receipt.data().attempt != d.attempt_count) return std::nullopt; d.receipt = std::move(receipt); d.state = d.receipt->data().state; d.lease_expires_at = {}; if (d.state == HookExecutionState::Failed && d.attempt_count >= d.max_attempts) d.state = HookExecutionState::TimedOut; it->second = HookOutboxEntry::create(std::move(d)); return it->second; }
+std::optional<HookLease> InMemoryHookJournal::claim(std::string_view id, std::string_view worker, Clock::time_point now, std::chrono::milliseconds duration) { if (worker.empty() || duration <= std::chrono::milliseconds::zero()) throw std::invalid_argument("invalid hook claim"); std::lock_guard<std::mutex> lock(impl_->mu); auto it = impl_->entries.find(std::string(id)); if (it == impl_->entries.end()) return std::nullopt; auto d = it->second.data(); if (d.deadline <= now && !settled(d)) { d.state = HookExecutionState::TimedOut; d.lease_expires_at = {}; it->second = HookOutboxEntry::create(std::move(d)); return std::nullopt; } if (d.state == HookExecutionState::Dispatched && d.lease_expires_at <= now) { if (d.invocation.data().idempotency == HookIdempotency::NonIdempotent) { d.state = HookExecutionState::ReconciliationRequired; d.lease_expires_at = {}; d.receipt = HookExecutionReceipt::create({d.invocation.id(), d.attempt_count, HookExecutionState::ReconciliationRequired, {}, "non-idempotent dispatched lease expired; external outcome is unknown"}); it->second = HookOutboxEntry::create(std::move(d)); return std::nullopt; } d.state = HookExecutionState::Failed; d.lease_expires_at = {}; d.receipt = HookExecutionReceipt::create({d.invocation.id(), d.attempt_count, HookExecutionState::Failed, {}, "idempotent dispatched lease expired"}); it->second = HookOutboxEntry::create(std::move(d)); d = it->second.data(); } if (d.state != HookExecutionState::Pending && !(d.state == HookExecutionState::Failed && d.attempt_count < d.max_attempts)) return std::nullopt; if (d.attempt_count >= d.max_attempts) { d.state = HookExecutionState::TimedOut; it->second = HookOutboxEntry::create(std::move(d)); return std::nullopt; } d.state = HookExecutionState::Dispatched; ++d.attempt_count; ++d.fencing_token; d.receipt.reset(); d.lease_expires_at = std::min(d.deadline, now + duration); it->second = HookOutboxEntry::create(std::move(d)); return HookLease{it->second, it->second.data().fencing_token}; }
+std::optional<HookOutboxEntry> InMemoryHookJournal::settle(std::string_view id, std::uint64_t fence, HookExecutionReceipt receipt, Clock::time_point now) { std::lock_guard<std::mutex> lock(impl_->mu); auto it = impl_->entries.find(std::string(id)); if (it == impl_->entries.end()) return std::nullopt; auto d = it->second.data(); if (d.state != HookExecutionState::Dispatched || d.fencing_token != fence || d.lease_expires_at < now || receipt.data().invocation_id != id || receipt.data().attempt != d.attempt_count) return std::nullopt; d.receipt = std::move(receipt); d.state = d.receipt->data().state; d.lease_expires_at = {}; it->second = HookOutboxEntry::create(std::move(d)); return it->second; }
 std::optional<HookOutboxEntry> InMemoryHookJournal::reconcile(std::string_view id, HookExecutionState expected, std::string_view head, std::uint64_t fence, HookExecutionReceipt known) { std::lock_guard<std::mutex> lock(impl_->mu); auto it = impl_->entries.find(std::string(id)); if (it == impl_->entries.end() || it->second.data().state != expected || it->second.id() != head || it->second.data().fencing_token != fence || expected != HookExecutionState::ReconciliationRequired || !known.data().external_effect.outcome_known || known.data().invocation_id != id || known.data().attempt != it->second.data().attempt_count || (known.data().state != HookExecutionState::Succeeded && known.data().state != HookExecutionState::Failed)) return std::nullopt; auto d = it->second.data(); d.state = known.data().state; d.receipt = std::move(known); it->second = HookOutboxEntry::create(std::move(d)); return it->second; }
-std::vector<HookOutboxEntry> InMemoryHookJournal::pending() const { std::lock_guard<std::mutex> lock(impl_->mu); std::vector<HookOutboxEntry> r; for (const auto& [_, e] : impl_->entries) if (e.data().state == HookExecutionState::Triggered || e.data().state == HookExecutionState::Pending || e.data().state == HookExecutionState::Failed || e.data().state == HookExecutionState::Dispatched) r.push_back(e); return r; }
+std::vector<HookOutboxEntry> InMemoryHookJournal::pending() const { std::lock_guard<std::mutex> lock(impl_->mu); std::vector<HookOutboxEntry> r; for (const auto& [_, e] : impl_->entries) if (!settled(e.data())) r.push_back(e); return r; }
 std::vector<HookOutboxEntry> InMemoryHookJournal::reconciliation_required() const { std::lock_guard<std::mutex> lock(impl_->mu); std::vector<HookOutboxEntry> r; for (const auto& [_, e] : impl_->entries) if (e.data().state == HookExecutionState::ReconciliationRequired) r.push_back(e); return r; }
 std::optional<HookOutboxEntry> InMemoryHookJournal::get(std::string_view id) const { std::lock_guard<std::mutex> lock(impl_->mu); auto it = impl_->entries.find(std::string(id)); return it == impl_->entries.end() ? std::nullopt : std::optional<HookOutboxEntry>(it->second); }
 
@@ -123,6 +136,32 @@ MandatoryHookRunner::MandatoryHookRunner(
     }
 }
 
+bool MandatoryHookRunner::blocks(const RuntimeEvent& event) const {
+    for (const auto& invocation : registry_->plan(event))
+        if (invocation.data().delivery == HookDelivery::BlockingMandatory) return true;
+    return false;
+}
+
+void MandatoryHookRunner::lost_settlement(const HookInvocation& invocation,
+                                          Clock::time_point deadline, HookOutboxEntry& entry,
+                                          const HookOutboxEntry& leased) const {
+    // A settlement is refused when the lease ran past the invocation's
+    // deadline (a Hook that timed out) or another worker took the
+    // invocation over. The first is timed_out, in the journal and in the
+    // block; the second keeps the journal's state.
+    const auto now = Clock::now();
+    const bool timed_out = now >= deadline;
+    if (timed_out) (void)journal_->claim(invocation.id(), worker_id_, now, std::chrono::milliseconds(1));
+    entry = journal_->get(invocation.id()).value_or(leased);
+    if (invocation.data().delivery == HookDelivery::BlockingMandatory) {
+        if (timed_out)
+            throw HookBoundaryBlocked(invocation.id(), HookExecutionState::TimedOut,
+                                      "mandatory hook deadline elapsed");
+        throw HookBoundaryBlocked(invocation.id(), entry.data().state,
+                                  "hook settlement lost ownership");
+    }
+}
+
 asio::awaitable<void> MandatoryHookRunner::run_async(
     const RuntimeEvent& event, Clock::time_point deadline,
     std::uint32_t max_attempts) {
@@ -135,9 +174,13 @@ asio::awaitable<void> MandatoryHookRunner::run_async(
         for (;;) {
             const auto now = Clock::now();
             if (now >= deadline) {
+                // The journal records the elapsed deadline (a claim past it
+                // settles the invocation as timed_out), and the block says so.
+                (void)journal_->claim(invocation.id(), worker_id_, now,
+                                      std::chrono::milliseconds(1));
                 entry = journal_->get(invocation.id()).value_or(entry);
                 if (invocation.data().delivery == HookDelivery::BlockingMandatory) {
-                    throw HookBoundaryBlocked(invocation.id(), entry.data().state,
+                    throw HookBoundaryBlocked(invocation.id(), HookExecutionState::TimedOut,
                                               "mandatory hook deadline elapsed");
                 }
                 break;
@@ -150,6 +193,7 @@ asio::awaitable<void> MandatoryHookRunner::run_async(
             if (!lease) {
                 entry = journal_->get(invocation.id()).value_or(entry);
             } else {
+                std::exception_ptr cancelled;
                 ToolExecutionContext context;
                 context.identity.request_id = invocation.id();
                 context.identity.root_run_id = event.run_id();
@@ -190,10 +234,9 @@ asio::awaitable<void> MandatoryHookRunner::run_async(
                                 artifact_publisher_(invocation, event,
                                                     attempted.artifacts);
                             } catch (const std::exception& error) {
-                                auto message =
+                                auto message = receipt_text(
                                     std::string("Hook artifact publication requires reconciliation: ") +
-                                    error.what();
-                                if (message.size() > 4096) message.resize(4096);
+                                    error.what());
                                 attempt_receipt = HookExecutionReceipt::create(
                                     {invocation.id(),
                                      lease->entry.data().attempt_count,
@@ -211,34 +254,34 @@ asio::awaitable<void> MandatoryHookRunner::run_async(
                         invocation.id(), lease->fencing_token,
                         std::move(attempt_receipt), Clock::now());
                     if (!settled) {
-                        entry = journal_->get(invocation.id()).value_or(lease->entry);
-                        if (invocation.data().delivery ==
-                            HookDelivery::BlockingMandatory) {
-                            throw HookBoundaryBlocked(invocation.id(),
-                                                      entry.data().state,
-                                                      "hook settlement lost ownership");
-                        }
+                        lost_settlement(invocation, deadline, entry, lease->entry);
                         break;
                     }
                     entry = *settled;
                 } catch (const HookBoundaryBlocked&) {
                     throw;
+                } catch (const graph::CancelledException& error) {
+                    // Cancellation stays control flow (hook.cpp): the attempt
+                    // settles as cancelled and the run's cancellation goes on.
+                    cancelled = std::current_exception();
+                    (void)journal_->settle(
+                        invocation.id(), lease->fencing_token,
+                        HookExecutionReceipt::create({invocation.id(),
+                                                      lease->entry.data().attempt_count,
+                                                      HookExecutionState::Cancelled, {},
+                                                      receipt_text(error.what())}),
+                        Clock::now());
                 } catch (const std::exception& error) {
                     const auto settled = journal_->settle(
                         invocation.id(), lease->fencing_token,
                         failed_receipt(lease->entry, error.what()), Clock::now());
                     if (!settled) {
-                        entry = journal_->get(invocation.id()).value_or(lease->entry);
-                        if (invocation.data().delivery ==
-                            HookDelivery::BlockingMandatory) {
-                            throw HookBoundaryBlocked(invocation.id(),
-                                                      entry.data().state,
-                                                      "hook settlement lost ownership");
-                        }
+                        lost_settlement(invocation, deadline, entry, lease->entry);
                         break;
                     }
                     entry = *settled;
                 }
+                if (cancelled) std::rethrow_exception(cancelled);
             }
             if (entry.data().state == HookExecutionState::Succeeded) break;
             if (entry.data().state == HookExecutionState::Failed &&
