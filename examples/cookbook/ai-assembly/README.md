@@ -92,7 +92,7 @@ cmake --build build-cookbook --target \
 # Offline fixture: no .env loading, credentials or provider transport.
 NEOGRAPH_BUILD_DIR="$PWD/build-cookbook" \
   bash examples/cookbook/ai-assembly/scripts/run_session.sh --mock
-# Live: privately configure OPENROUTER_API_KEY in the environment or .env.
+# Live: export OPENROUTER_API_KEY in the environment first.
 NEOGRAPH_BUILD_DIR="$PWD/build-cookbook" \
   bash examples/cookbook/ai-assembly/scripts/run_session.sh
 ```
