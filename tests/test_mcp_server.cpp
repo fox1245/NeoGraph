@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <optional>
 
 #include <neograph/mcp/server.h>
 #include <neograph/graph/types.h>
@@ -15,6 +16,7 @@
 #include <future>
 #include <mutex>
 #include <sstream>
+#include <streambuf>
 #include <string>
 #include <thread>
 #include <atomic>
@@ -817,6 +819,271 @@ TEST(MCPServerTest, ContentBlocksARevisionLacksAreSentAsText) {
     EXPECT_EQ(json::parse(november[1]["text"].get<std::string>()), audio);
     EXPECT_EQ(november[2]["type"], "text");
     EXPECT_EQ(json::parse(november[2]["text"].get<std::string>()), link);
+}
+
+namespace {
+
+// The outcome handle_message(message, reply) delivers, at once or later.
+struct ReplyCapture {
+    std::promise<std::optional<json>> promise;
+    std::future<std::optional<json>> future = promise.get_future();
+    std::atomic<int> calls{0};
+
+    MCPServer::Reply reply() {
+        return [this](std::optional<json> outcome) {
+            if (calls.fetch_add(1) == 0) promise.set_value(std::move(outcome));
+        };
+    }
+    std::optional<json> get() {
+        if (future.wait_for(5s) != std::future_status::ready) {
+            ADD_FAILURE() << "no outcome";
+            return json("timed out");
+        }
+        return future.get();
+    }
+};
+
+void initialize_as(MCPServer& server, const std::string& revision) {
+    auto response = server.handle_message(request("init", "initialize", {
+        {"protocolVersion", revision},
+        {"capabilities", json::object()},
+        {"clientInfo", {{"name", "batch-client"}, {"version", "1"}}},
+    }));
+    ASSERT_EQ(response["result"]["protocolVersion"], revision);
+    server.handle_message(notification("notifications/initialized"));
+}
+
+// The response in @p batch with @p id, or null.
+json by_id(const json& batch, const json& id) {
+    for (std::size_t i = 0; i < batch.size(); ++i) {
+        const json item = batch[i];
+        if (item.contains("id") && item["id"] == id) return item;
+    }
+    return nullptr;
+}
+
+}  // namespace
+
+// MCP 2025-03-26 (basic, "Batching"): implementations MUST support receiving
+// JSON-RPC batches. 2024-11-05 defined none; its peers are answered the same
+// way. The answer is one array with a response for each request, in any
+// order; notifications get none.
+TEST(MCPServerTest, BatchesAreAnsweredForTheRevisionsThatHaveThem) {
+    for (const std::string revision : {"2025-03-26", "2024-11-05"}) {
+        MCPServer server(config());
+        server.register_tool(echo_definition(),
+            [](const json& arguments, const auto&) { return echo_result(arguments); });
+        initialize_as(server, revision);
+        const json batch = json::array({
+            request("p", "ping"),
+            notification("notifications/progress", {{"progressToken", 1}, {"progress", 1}}),
+            request("l", "tools/list"),
+            request("c", "tools/call", {{"name", "echo"}, {"arguments", {{"value", "x"}}}}),
+            json(7),
+        });
+        ReplyCapture captured;
+        server.handle_message(batch, captured.reply());
+        const auto outcome = captured.get();
+        ASSERT_TRUE(outcome && outcome->is_array()) << (outcome ? outcome->dump() : "none");
+        EXPECT_EQ(outcome->size(), 4u) << outcome->dump();
+        EXPECT_EQ(by_id(*outcome, "p")["result"], json::object());
+        EXPECT_EQ(by_id(*outcome, "l")["result"]["tools"][0]["name"], "echo");
+        EXPECT_EQ(by_id(*outcome, "c")["result"]["content"][0]["text"], "x");
+        bool invalid_answered = false;
+        for (std::size_t i = 0; i < outcome->size(); ++i) {
+            const json item = (*outcome)[i];
+            if (!item.contains("id")) invalid_answered = item["error"]["code"] == -32600;
+        }
+        EXPECT_TRUE(invalid_answered) << outcome->dump();
+        EXPECT_EQ(captured.calls.load(), 1);
+
+        // Only notifications: nothing to answer.
+        ReplyCapture quiet;
+        server.handle_message(json::array({notification("notifications/progress",
+                                                        {{"progressToken", 1}, {"progress", 2}})}),
+                              quiet.reply());
+        EXPECT_FALSE(quiet.get().has_value());
+
+        // An empty batch is one invalid request.
+        ReplyCapture empty;
+        server.handle_message(json::array(), empty.reply());
+        const auto refused = empty.get();
+        ASSERT_TRUE(refused && refused->is_object());
+        EXPECT_EQ((*refused)["error"]["code"], -32600);
+        EXPECT_FALSE(refused->contains("id"));
+
+        // The one-argument form answers a batch without tool calls at once,
+        // and one with tool calls through the response sink.
+        const auto immediate =
+            server.handle_message(json::array({request("q", "ping"), request("r", "tools/list")}));
+        ASSERT_TRUE(immediate.is_array()) << immediate.dump();
+        EXPECT_EQ(immediate.size(), 2u);
+        CapturingSink sink;
+        server.set_response_sink(sink.sink());
+        EXPECT_TRUE(server.handle_message(json::array({request("s", "ping"),
+            request("t", "tools/call", {{"name", "echo"}, {"arguments", {{"value", "y"}}}})}))
+                        .is_null());
+        std::unique_lock lock(sink.mutex);
+        ASSERT_TRUE(sink.cv.wait_for(lock, 5s, [&] { return !sink.responses.empty(); }));
+        ASSERT_TRUE(sink.responses[0].is_array()) << sink.responses[0].dump();
+        EXPECT_EQ(by_id(sink.responses[0], "t")["result"]["content"][0]["text"], "y");
+        EXPECT_EQ(by_id(sink.responses[0], "s")["result"], json::object());
+    }
+}
+
+// MCP 2025-06-18 removed JSON-RPC batching: a batch from such a client, or
+// from one that has not initialized (initialize is never part of a batch), is
+// one invalid request.
+TEST(MCPServerTest, BatchesAreRefusedWhereTheRevisionHasNone) {
+    for (const std::string revision : {"2025-06-18", "2025-11-25"}) {
+        MCPServer server(config());
+        initialize_as(server, revision);
+        ReplyCapture captured;
+        server.handle_message(json::array({request("p", "ping")}), captured.reply());
+        const auto refused = captured.get();
+        ASSERT_TRUE(refused && refused->is_object()) << (refused ? refused->dump() : "none");
+        EXPECT_EQ((*refused)["error"]["code"], -32600);
+        EXPECT_FALSE(refused->contains("id"));
+    }
+    MCPServer fresh(config());
+    const auto before = fresh.handle_message(json::array({request(1, "initialize", {
+        {"protocolVersion", "2025-03-26"},
+        {"capabilities", json::object()},
+        {"clientInfo", {{"name", "batch-client"}, {"version", "1"}}},
+    })}));
+    ASSERT_TRUE(before.is_object()) << before.dump();
+    EXPECT_EQ(before["error"]["code"], -32600);
+    EXPECT_FALSE(fresh.initialized());
+    EXPECT_TRUE(fresh.protocol_version().empty());
+}
+
+TEST(MCPServerTest, ACancelledCallInABatchIsLeftOut) {
+    MCPServer server(config(2, 2));
+    std::atomic<int> entered{0};
+    server.register_tool(echo_definition(), [&](const json&, const auto& cancel) {
+        entered.fetch_add(1);
+        while (!cancel->is_cancelled()) std::this_thread::sleep_for(1ms);
+        cancel->throw_if_cancelled("inside test tool");
+        return CallToolResult{};
+    });
+    initialize_as(server, "2025-03-26");
+    ReplyCapture mixed;
+    server.handle_message(json::array({
+        request("slow", "tools/call", {{"name", "echo"}, {"arguments", {{"value", "x"}}}}),
+        request("p", "ping")}), mixed.reply());
+    for (int i = 0; i < 400 && entered.load() < 1; ++i) std::this_thread::sleep_for(5ms);
+    server.handle_message(notification("notifications/cancelled", {{"requestId", "slow"}}));
+    const auto outcome = mixed.get();
+    ASSERT_TRUE(outcome && outcome->is_array());
+    ASSERT_EQ(outcome->size(), 1u) << outcome->dump();
+    EXPECT_EQ((*outcome)[0]["id"], "p");
+
+    // Every request cancelled: nothing at all, not an empty array.
+    ReplyCapture alone;
+    server.handle_message(json::array({request("gone", "tools/call",
+        {{"name", "echo"}, {"arguments", {{"value", "x"}}}})}), alone.reply());
+    for (int i = 0; i < 400 && entered.load() < 2; ++i) std::this_thread::sleep_for(5ms);
+    server.handle_message(notification("notifications/cancelled", {{"requestId", "gone"}}));
+    EXPECT_FALSE(alone.get().has_value());
+}
+
+namespace {
+
+// stdin that blocks until fed or closed, so the run loop does not reach EOF
+// (which stops the server) before the outcome is written.
+class FeedBuf final : public std::streambuf {
+  public:
+    void feed(const std::string& text) {
+        std::lock_guard lock(mu_);
+        data_ += text;
+        cv_.notify_all();
+    }
+    void close() {
+        std::lock_guard lock(mu_);
+        closed_ = true;
+        cv_.notify_all();
+    }
+
+  protected:
+    int_type underflow() override {
+        std::unique_lock lock(mu_);
+        cv_.wait(lock, [&] { return pos_ < data_.size() || closed_; });
+        if (pos_ >= data_.size()) return traits_type::eof();
+        current_ = data_[pos_++];
+        setg(&current_, &current_, &current_ + 1);
+        return traits_type::to_int_type(current_);
+    }
+
+  private:
+    std::mutex mu_;
+    std::condition_variable cv_;
+    std::string data_;
+    std::size_t pos_ = 0;
+    bool closed_ = false;
+    char current_ = 0;
+};
+
+// stdout whose lines the test can wait for while the run loop writes.
+class LineSink final : public std::streambuf {
+  public:
+    std::vector<json> wait_for_lines(std::size_t count) {
+        std::unique_lock lock(mu_);
+        cv_.wait_for(lock, 5s, [&] { return lines_.size() >= count; });
+        std::vector<json> out;
+        for (const auto& line : lines_) out.push_back(json::parse(line));
+        return out;
+    }
+
+  protected:
+    int_type overflow(int_type ch) override {
+        if (traits_type::eq_int_type(ch, traits_type::eof())) return traits_type::not_eof(ch);
+        std::lock_guard lock(mu_);
+        if (traits_type::to_char_type(ch) == '\n') {
+            if (!partial_.empty()) lines_.push_back(std::move(partial_));
+            partial_.clear();
+            cv_.notify_all();
+        } else {
+            partial_.push_back(traits_type::to_char_type(ch));
+        }
+        return ch;
+    }
+
+  private:
+    std::mutex mu_;
+    std::condition_variable cv_;
+    std::string partial_;
+    std::vector<std::string> lines_;
+};
+
+}  // namespace
+
+TEST(MCPServerTest, StdioAnswersABatchWithOneArray) {
+    MCPServer server(config());
+    server.register_tool(echo_definition(),
+        [](const json& arguments, const auto&) { return echo_result(arguments); });
+    FeedBuf input_buffer;
+    LineSink output_buffer;
+    std::istream in(&input_buffer);
+    std::ostream out(&output_buffer);
+    std::thread runner([&] { server.run(in, out); });
+    input_buffer.feed(request(1, "initialize", {{"protocolVersion", "2025-03-26"},
+                                                {"capabilities", json::object()},
+                                                {"clientInfo", {{"name", "c"}, {"version", "1"}}}})
+                          .dump() + "\n" +
+                      notification("notifications/initialized").dump() + "\n" +
+                      json::array({request(2, "ping"),
+                                   request(3, "tools/call", {{"name", "echo"},
+                                                             {"arguments", {{"value", "z"}}}})})
+                          .dump() + "\n");
+    const auto frames = output_buffer.wait_for_lines(2);
+    input_buffer.close();
+    runner.join();
+    ASSERT_EQ(frames.size(), 2u);
+    EXPECT_EQ(frames[0]["id"], 1);
+    ASSERT_TRUE(frames[1].is_array()) << frames[1].dump();
+    EXPECT_EQ(frames[1].size(), 2u);
+    EXPECT_EQ(by_id(frames[1], 2)["result"], json::object());
+    EXPECT_EQ(by_id(frames[1], 3)["result"]["content"][0]["text"], "z");
 }
 
 TEST(MCPServerTest, StdioWritesOnlyJsonRpcFramesAndLogsToStderr) {

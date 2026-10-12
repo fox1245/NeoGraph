@@ -1403,38 +1403,60 @@ asio::awaitable<void> StdioSession::run_reader() {
                         MCPFailure::protocol,
                         std::string("MCP stdio response JSON: ") + e.what());
                 }
-                if (!resp.is_object()) {
+                if (!resp.is_object() && !resp.is_array()) {
                     throw MCPTransportError(MCPFailure::protocol,
-                                            "MCP stdio frame must be a JSON object");
+                                            "MCP stdio frame must be a JSON object or a batch");
                 }
-                const auto kind = message_kind(resp);
-                if (kind == MessageKind::request) {
+                // A response completes its call, a notification reaches its
+                // handler; unknown and late ids are dropped.
+                const auto route = [this](json message) {
+                    const auto kind = message_kind(message);
+                    if (kind == MessageKind::response && message["id"].is_number_integer()) {
+                        const int rid = message["id"].get<int>();
+                        std::shared_ptr<RespChan> chan;
+                        {
+                            std::lock_guard<std::mutex> lk(demux_mu_);
+                            auto it = waiters_.find(rid);
+                            if (it != waiters_.end()) {
+                                chan = it->second;
+                                waiters_.erase(it);
+                            }
+                        }
+                        // Capacity-1 sink is empty, so this send always lands
+                        // for the matched id.
+                        if (chan) {
+                            auto p = std::make_shared<json>(std::move(message));
+                            chan->try_send(asio::error_code{}, p);
+                        }
+                    } else if (kind == MessageKind::notification) {
+                        deliver_notification(message);
+                    }
+                };
+                if (resp.is_array()) {
+                    // MCP 2025-03-26 lets a peer send a JSON-RPC batch. Each
+                    // message is handled as if it came alone, and the replies
+                    // to the requests in it go back as one array.
+                    json replies = json::array();
+                    for (std::size_t i = 0; i < resp.size(); ++i) {
+                        json element = resp[i];
+                        if (message_kind(element) == MessageKind::request)
+                            replies.push_back(server_request_reply(element));
+                        else
+                            route(std::move(element));
+                    }
+                    if (!replies.empty()) {
+                        asio::co_spawn(worker_.io, best_effort(do_notify(std::move(replies))),
+                                       asio::detached);
+                    }
+                } else if (message_kind(resp) == MessageKind::request) {
                     // A server request, such as ping: answered at once, also
                     // between calls, and never taken for the response of a
                     // pending request with the same id (MCP-C-02, MCP-C-06).
                     asio::co_spawn(worker_.io,
                                    best_effort(do_notify(server_request_reply(resp))),
                                    asio::detached);
-                } else if (kind == MessageKind::response && resp["id"].is_number_integer()) {
-                    const int rid = resp["id"].get<int>();
-                    std::shared_ptr<RespChan> chan;
-                    {
-                        std::lock_guard<std::mutex> lk(demux_mu_);
-                        auto it = waiters_.find(rid);
-                        if (it != waiters_.end()) {
-                            chan = it->second;
-                            waiters_.erase(it);
-                        }
-                    }
-                    // Unknown / late ids are dropped. Capacity-1 sink is
-                    // empty, so this send always lands for the matched id.
-                    if (chan) {
-                        auto p = std::make_shared<json>(std::move(resp));
-                        chan->try_send(asio::error_code{}, p);
-                    }
-                }
-                else if (kind == MessageKind::notification) {
-                    deliver_notification(resp);
+                } else {
+                    route(std::move(resp));
                 }
             }
             // The reader keeps reading between calls, on the session's own
@@ -2139,6 +2161,22 @@ HeaderList detail::HttpSession::request_headers(const char* accept,
 }
 
 void detail::HttpSession::on_stream_message(HttpExchange& exchange, json message) {
+    if (message.is_array()) {
+        // MCP 2025-03-26 lets a peer send a JSON-RPC batch. Each message is
+        // handled as if it came alone, and the replies to the requests in it
+        // go back as one array.
+        json replies = json::array();
+        for (std::size_t i = 0; i < message.size(); ++i) {
+            json element = message[i];
+            if (message_kind(element) == MessageKind::request)
+                replies.push_back(server_request_reply(element));
+            else
+                on_stream_message(exchange, std::move(element));
+        }
+        if (!replies.empty())
+            asio::co_spawn(worker.io, best_effort(reply(std::move(replies))), asio::detached);
+        return;
+    }
     switch (message_kind(message)) {
     case MessageKind::response:
         // This request's response; a late response to an abandoned request
@@ -2338,12 +2376,22 @@ asio::awaitable<json> detail::HttpSession::exchange_and_resume(
                                     "MCP server answered a request without a JSON-RPC response (HTTP " +
                                         std::to_string(exchange->status) + ")");
         }
+        json body;
         try {
-            co_return json::parse(exchange->body);
+            body = json::parse(exchange->body);
         } catch (const json::parse_error& e) {
             throw MCPTransportError(MCPFailure::protocol,
                                     std::string("MCP HTTP response JSON: ") + e.what());
         }
+        if (!body.is_array()) co_return body;
+        // A batch as the body: its messages are handled as on a stream, and
+        // this request's response is the one with its id.
+        on_stream_message(*exchange, std::move(body));
+        if (!exchange->response) {
+            throw MCPTransportError(MCPFailure::protocol,
+                                    "MCP HTTP batch response holds no response for the request");
+        }
+        co_return std::move(*exchange->response);
     }
 
     // MCP transports, "Resumability" (2025-11-25): a server may close the

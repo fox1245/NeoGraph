@@ -535,6 +535,88 @@ TEST(MCPHttpServerTest, ErrorBodiesCarryNoNullId) {
     EXPECT_FALSE(body.contains("id")) << unparsable->body;
 }
 
+// MCP 2025-03-26 Streamable HTTP: a POST body may be a batch, and a batch
+// with requests is answered with an array. Sessions that negotiated
+// 2025-03-26 or 2024-11-05 get that; later revisions removed batching, and a
+// batch can never initialize a session.
+TEST(MCPHttpServerTest, BatchesFollowTheSessionRevision) {
+    MCPHttpServer server(make_http_session);
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+    auto headers_for = [](const std::string& session, const std::string& revision) {
+        auto headers = base_headers();
+        headers.emplace("Mcp-Session-Id", session);
+        headers.emplace("MCP-Protocol-Version", revision);
+        return headers;
+    };
+    auto open_as = [&](const std::string& revision) {
+        auto init = client.Post(
+            "/mcp", base_headers(),
+            request(1, "initialize", {{"protocolVersion", revision},
+                                      {"capabilities", json::object()},
+                                      {"clientInfo", {{"name", "batch"}, {"version", "1"}}}})
+                .dump(),
+            "application/json");
+        EXPECT_TRUE(init && init->status == 200);
+        if (!init) return std::string();
+        EXPECT_EQ(json::parse(init->body)["result"]["protocolVersion"], revision);
+        const auto id = init->get_header_value("Mcp-Session-Id");
+        client.Post("/mcp", headers_for(id, revision),
+                    json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}}.dump(),
+                    "application/json");
+        return id;
+    };
+    const json progress = {{"jsonrpc", "2.0"},
+                           {"method", "notifications/progress"},
+                           {"params", {{"progressToken", 1}, {"progress", 1}}}};
+    for (const std::string revision : {"2025-03-26", "2024-11-05"}) {
+        const auto session = open_as(revision);
+        const auto batch = json::array(
+            {request(2, "ping"),
+             request(3, "tools/call", {{"name", "echo"}, {"arguments", {{"value", "b"}}}}),
+             progress});
+        auto answered =
+            client.Post("/mcp", headers_for(session, revision), batch.dump(), "application/json");
+        ASSERT_TRUE(answered);
+        EXPECT_EQ(answered->status, 200) << answered->body;
+        EXPECT_EQ(answered->get_header_value("Content-Type").rfind("application/json", 0), 0u);
+        const auto body = json::parse(answered->body);
+        ASSERT_TRUE(body.is_array()) << answered->body;
+        ASSERT_EQ(body.size(), 2u) << answered->body;
+        for (std::size_t i = 0; i < body.size(); ++i) {
+            const json item = body[i];
+            if (item["id"] == 2) EXPECT_EQ(item["result"], json::object());
+            else EXPECT_EQ(item["result"]["content"][0]["text"], "b") << item.dump();
+        }
+        auto notifications_only = client.Post("/mcp", headers_for(session, revision),
+                                              json::array({progress}).dump(), "application/json");
+        ASSERT_TRUE(notifications_only);
+        EXPECT_EQ(notifications_only->status, 202);
+    }
+
+    const auto modern = open_as("2025-11-25");
+    auto refused = client.Post("/mcp", headers_for(modern, "2025-11-25"),
+                               json::array({request(4, "ping")}).dump(), "application/json");
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(refused->status, 400);
+    const auto error = json::parse(refused->body);
+    EXPECT_EQ(error["error"]["code"], -32600);
+    EXPECT_FALSE(error.contains("id")) << refused->body;
+
+    auto batched_initialize = client.Post(
+        "/mcp", base_headers(),
+        json::array({request(5, "initialize",
+                              {{"protocolVersion", "2025-03-26"},
+                               {"capabilities", json::object()},
+                               {"clientInfo", {{"name", "batch"}, {"version", "1"}}}})})
+            .dump(),
+        "application/json");
+    ASSERT_TRUE(batched_initialize);
+    EXPECT_EQ(batched_initialize->status, 400);
+    EXPECT_TRUE(batched_initialize->get_header_value("Mcp-Session-Id").empty());
+}
+
 TEST(MCPHttpServerTest, RejectsUnlistedOrigin) {
     MCPHttpServer server(make_http_session);
     ASSERT_TRUE(server.start_async());

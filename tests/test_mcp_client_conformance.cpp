@@ -442,6 +442,58 @@ TEST(MCPClientConformance, AServerWithoutTheGetStreamIsNotAnError) {
     EXPECT_EQ(list_changes.load(), 0);
 }
 
+// MCP 2025-03-26 lets a server send a JSON-RPC batch: in an event of a
+// response stream, or as the JSON body. Each message in it is handled as if
+// it came alone, and the replies to its requests go back as one array.
+TEST(MCPClientConformance, BatchesFromTheServerAreHandledMessageByMessage) {
+    Recorder recorder;
+    httplib::Server svr;
+    svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+        recorder.add(req);
+        const auto request = json::parse(req.body);
+        if (request.is_array() || !request.contains("method") || !request.contains("id")) {
+            res.status = 202;
+            return;
+        }
+        const auto method = request.value("method", std::string{});
+        if (method == "initialize") {
+            res.set_header("Mcp-Session-Id", "b1");
+            auto result = initialize_result();
+            result["protocolVersion"] = "2025-03-26";
+            res.set_content(envelope(request["id"], result), "application/json");
+            return;
+        }
+        const json answer = json::parse(envelope(request["id"], text_result("ok")));
+        if (request["params"]["arguments"].value("mode", "") == "sse") {
+            const json ping = {{"jsonrpc", "2.0"}, {"id", "s1"}, {"method", "ping"}};
+            res.set_content("data: " + json::array({ping, answer}).dump() + "\n\n",
+                            "text/event-stream");
+        } else {
+            res.set_content(json::array({answer}).dump(), "application/json");
+        }
+    });
+    svr.Get("/mcp", [&](const httplib::Request&, httplib::Response& res) { res.status = 405; });
+    svr.Delete("/mcp", [&](const httplib::Request&, httplib::Response& res) { res.status = 204; });
+    Guard server(svr);
+    mcp::MCPClient client(server.url());
+    ASSERT_TRUE(client.initialize("batch"));
+    EXPECT_EQ(client.call_tool_result("echo", {{"mode", "sse"}}).content[0]["text"], "ok");
+    EXPECT_EQ(client.call_tool_result("echo", {{"mode", "json"}}).content[0]["text"], "ok");
+    // The ping in the batch was answered, in an array.
+    std::unique_lock lock(recorder.mu);
+    const bool answered = recorder.changed.wait_for(lock, 5s, [&] {
+        for (const auto& item : recorder.seen) {
+            if (!item.body.is_array()) continue;
+            for (std::size_t i = 0; i < item.body.size(); ++i) {
+                const json reply = item.body[i];
+                if (reply.value("id", json()) == json("s1") && reply.contains("result")) return true;
+            }
+        }
+        return false;
+    });
+    EXPECT_TRUE(answered);
+}
+
 // MCP-C-08: the URL tool constructor keeps one session for all its calls and
 // ends it with the tool.
 TEST(MCPClientConformance, TheUrlToolKeepsOneSession) {

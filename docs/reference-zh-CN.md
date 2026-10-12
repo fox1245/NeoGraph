@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=693aa578a329a83f89ba734e3210dce7b12fea7cf70c904a9c03ca23af247e9f -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=110a2516c9d60c99aff8e6bf20d7944bf34ffdda37017c93d9eabc53b6ae5959 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3007,7 +3007,8 @@ public:
 
 **遵循传输规则：** 两种传输都会应答服务器的请求：`ping` 得到空结果，其他所有请求得到
 `-32601`，因为客户端不声明任何客户端能力（roots、sampling、elicitation）。只有没有
-`method` 的消息才算应答，因此复用待处理调用 id 的服务器请求不会完成该调用。在 HTTP 上，
+`method` 的消息才算应答，因此复用待处理调用 id 的服务器请求不会完成该调用。服务器发来的
+JSON-RPC 批处理（MCP `2025-03-26`）逐条处理，其中请求的应答以一个数组发回。在 HTTP 上，
 客户端读取 JSON 和 Server-Sent Event 应答（按 WHATWG 规则：CRLF、LF 或 CR 行尾，多行
 `data`、`id`、`retry`），对在调用的事件流上到达的服务器请求，在保持该流打开的同时用单独的
 POST 应答，并在应答到达后停止读取该流。服务器在应答之前关闭的流，会在流的 `retry` 间隔之后
@@ -3066,7 +3067,11 @@ POST 应答，并在应答到达后停止读取该流。服务器在应答之前
 字段应答（`2025-06-18` 没有 `icons` 和 `execution`；`2025-03-26` 还没有 `title`、`outputSchema`、
 `_meta`、`structuredContent` 和 `resource_link` 内容，只有结构化数据的结果以文本携带这些数据；
 `2024-11-05` 还没有 `annotations` 和音频内容；该修订版没有的内容块以携带其 JSON 的文本块发送），
-对其他请求用 `2025-11-25` 应答；`protocol_version()` 报告协商结果。注册时会拒绝 `inputSchema` 或
+对其他请求用 `2025-11-25` 应答；`protocol_version()` 报告协商结果。协商了 `2025-03-26` 的客户端
+可以按该修订版对接收方的要求发送 JSON-RPC 批处理，`2024-11-05` 客户端也一样：批处理在 stdio 和
+HTTP 上以一个数组应答。之后的修订版去掉了批处理，initialize 也不能放进批处理，因此这样的批处理
+是一个 `-32600` 错误（HTTP 400）。`handle_message(message, reply)` 把每条消息的结果（应答、批处理
+的数组或无）交给调用方。注册时会拒绝 `inputSchema` 或
 `outputSchema` 未声明 `"type": "object"` 的工具（旧默认值空对象按 `{"type": "object"}` 读取）、
 不是验证器支持的 JSON Schema 2020-12 的模式，以及超出 SEP-986 的 1 到 128 个
 `A-Za-z0-9_.-` 字符的名称。参数用 JSON Schema 2020-12 验证器校验（`$ref`、`anyOf`、

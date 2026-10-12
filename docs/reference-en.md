@@ -3134,7 +3134,9 @@ client or tool reference is released.
 `ping` gets an empty result, and every other request gets `-32601`, because the
 client declares no client capability (no roots, sampling or elicitation). A
 message counts as a response only when it has no `method`, so a server request
-that reuses the id of a pending call never completes that call. Over HTTP the
+that reuses the id of a pending call never completes that call. A JSON-RPC
+batch from the server (MCP `2025-03-26`) is handled message by message, and the
+replies to the requests in it go back as one array. Over HTTP the
 client reads JSON and Server-Sent Event responses (by the WHATWG rules: CRLF,
 LF or CR line ends, multi-line `data`, `id`, `retry`), answers a server request
 that arrives on a call's event stream in its own POST while that stream stays
@@ -3213,7 +3215,12 @@ also no `title`, `outputSchema`, `_meta`, `structuredContent` or
 data carries it as text; also no `annotations` or audio content for
 `2024-11-05`; a content block the revision lacks is sent as a text block holding
 its JSON), and any other request with `2025-11-25`; `protocol_version()` reports
-the result. Registration refuses a
+the result. A client that negotiated `2025-03-26` may send a JSON-RPC batch, as
+that revision requires a receiver to accept, and so may a `2024-11-05` one: the
+batch is answered with one array, on stdio and over HTTP. Later revisions
+removed batches, and initialize is never part of one, so such a batch is one
+`-32600` error (HTTP 400). `handle_message(message, reply)` hands each message's
+outcome, a response, a batch's array or none, to its caller. Registration refuses a
 tool whose `inputSchema` or `outputSchema` does not say `"type": "object"` (an
 empty object, the old default, is read as `{"type": "object"}`), a schema that
 is not JSON Schema 2020-12 the validator supports, and a name outside SEP-986's

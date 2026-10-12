@@ -470,6 +470,51 @@ TEST(MCPStdioAsync, AServerThatAnswers20241105IsUsable) {
     EXPECT_EQ(tools[0]->execute(json{{"text", "hi"}}), "hi");
 }
 
+TEST(MCPStdioAsync, ABatchFromTheServerIsHandledMessageByMessage) {
+    // MCP 2025-03-26 lets a peer send a JSON-RPC batch. Each message in it is
+    // handled as if it came alone (a response completes its call, a
+    // notification reaches its handler), and the replies to the requests in
+    // it go back as one array.
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    const char* script =
+        "import json,sys\n"
+        "answered=False\n"
+        "def send(o): print(json.dumps(o),flush=True)\n"
+        "def note(m):\n"
+        "  global answered\n"
+        "  if isinstance(m,list):\n"
+        "    if any(x.get('id')=='s1' and x.get('result')=={} for x in m): answered='array'\n"
+        "  elif m.get('id')=='s1' and 'method' not in m: answered='single'\n"
+        "for line in sys.stdin:\n"
+        "  m=json.loads(line)\n"
+        "  if isinstance(m,list) or 'method' not in m: note(m); continue\n"
+        "  if 'id' not in m: continue\n"
+        "  if m['method']=='initialize':\n"
+        "    send({'jsonrpc':'2.0','id':m['id'],'result':{'protocolVersion':'2025-03-26',"
+        "'capabilities':{'tools':{'listChanged':True}},'serverInfo':{'name':'batch','version':'1'}}})\n"
+        "  elif m['method']=='tools/list':\n"
+        "    send([{'jsonrpc':'2.0','id':'s1','method':'ping'},"
+        "{'jsonrpc':'2.0','method':'notifications/tools/list_changed'},"
+        "{'jsonrpc':'2.0','id':m['id'],'result':{'tools':[{'name':'echo',"
+        "'inputSchema':{'type':'object'}}]}}])\n"
+        "  elif m['method']=='tools/call':\n"
+        "    while answered is False:\n"
+        "      note(json.loads(sys.stdin.readline()))\n"
+        "    send({'jsonrpc':'2.0','id':m['id'],'result':{'content':[{'type':'text','text':answered}]}})\n";
+    mcp::MCPClient client({python_cmd(), "-c", script});
+    std::atomic<int> changes{0};
+    client.set_tool_list_changed_handler([&] { ++changes; });
+    ASSERT_TRUE(client.initialize("batch"));
+    const auto definitions = client.get_tool_definitions();
+    ASSERT_EQ(definitions.size(), 1u);
+    EXPECT_EQ(definitions[0].name, "echo");
+    const auto result = client.call_tool_result("echo", json::object());
+    EXPECT_EQ(result.content[0]["text"], "array") << "the ping in the batch was answered alone";
+    for (int i = 0; i < 400 && changes.load() == 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    EXPECT_GE(changes.load(), 1);
+}
+
 TEST(MCPStdioAsync, HardenedStartupUsesStartupRatherThanRequestTimeout) {
     if (!python3_available()) GTEST_SKIP() << "python not available";
     auto config = boundary_config("startup");

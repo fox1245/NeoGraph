@@ -110,6 +110,25 @@ def test_initialize_older_revision_is_answered_with_that_revision(stdio, revisio
         assert json.loads(content[2]["text"])["type"] == "resource_link"
 
 
+@pytest.mark.parametrize("revision", ["2025-03-26", "2024-11-05"])
+def test_batch_is_answered_for_revisions_with_batching(stdio, revision):
+    """basic (2025-03-26), "Batching": a receiver MUST support JSON-RPC batches. One
+    array answers the requests; notifications get nothing. 2024-11-05 peers alike."""
+    stdio.send({**INIT, "params": {**INIT["params"], "protocolVersion": revision}})
+    assert stdio.recv()["result"]["protocolVersion"] == revision
+    stdio.send(INITIALIZED)
+    stdio.send([{"jsonrpc": "2.0", "id": 9, "method": "ping"},
+                {"jsonrpc": "2.0", "id": 10, "method": "tools/call",
+                 "params": {"name": "echo", "arguments": {"message": "b"}}},
+                {"jsonrpc": "2.0", "method": "notifications/progress",
+                 "params": {"progressToken": 1, "progress": 1}}])
+    r = stdio.recv()
+    assert isinstance(r, list) and sorted(x["id"] for x in r) == [9, 10], r
+    by_id = {x["id"]: x for x in r}
+    assert by_id[9]["result"] == {}
+    assert json.loads(by_id[10]["result"]["content"][0]["text"]) == {"message": "b"}
+
+
 def test_initialize_unknown_revision_counter_offers(stdio):
     stdio.send({**INIT, "params": {**INIT["params"], "protocolVersion": "1999-01-01"}})
     assert stdio.recv()["result"]["protocolVersion"] == "2025-11-25"
@@ -250,10 +269,11 @@ class Http:
         self._rec("s2c", status=r.status_code, headers=dict(r.headers), raw=r.text)
         return r
 
-    def session(self):
-        r = self.req("POST", INIT)
+    def session(self, revision="2025-11-25"):
+        r = self.req("POST", {**INIT, "params": {**INIT["params"], "protocolVersion": revision}})
+        assert r.json()["result"]["protocolVersion"] == revision
         sid = r.headers["mcp-session-id"]
-        h = {"Mcp-Session-Id": sid, "MCP-Protocol-Version": "2025-11-25"}
+        h = {"Mcp-Session-Id": sid, "MCP-Protocol-Version": revision}
         assert self.req("POST", INITIALIZED, h).status_code == 202
         return h
 
@@ -341,6 +361,23 @@ def test_http_batch_rejected(http):
     h = http.session()
     r = http.req("POST", [{"jsonrpc": "2.0", "id": 6, "method": "ping"}], h)
     assert r.status_code == 400
+
+
+@pytest.mark.parametrize("revision", ["2025-03-26", "2024-11-05"])
+def test_http_batch_answered_for_revisions_with_batching(http, revision):
+    """transports (2025-03-26): a POST body may be a batch; with requests in it the
+    answer is one JSON array, with only notifications it is 202."""
+    h = http.session(revision)
+    r = http.req("POST", [{"jsonrpc": "2.0", "id": 6, "method": "ping"},
+                          {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                           "params": {"name": "echo", "arguments": {"message": "h"}}}], h)
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("application/json")
+    body = r.json()
+    assert isinstance(body, list) and sorted(x["id"] for x in body) == [6, 7], body
+    note = http.req("POST", [{"jsonrpc": "2.0", "method": "notifications/progress",
+                              "params": {"progressToken": 1, "progress": 1}}], h)
+    assert note.status_code == 202 and not note.text
 
 
 def test_http_error_bodies_have_no_null_id(http):

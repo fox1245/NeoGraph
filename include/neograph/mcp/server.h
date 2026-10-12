@@ -15,6 +15,7 @@
 #include <functional>
 #include <istream>
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <string>
 
@@ -88,8 +89,25 @@ class NEOGRAPH_API MCPServer {
     /// Advertise an explicitly enabled MCP extension capability.
     void register_extension(std::string identifier, json settings = json::object());
 
+    /// The outcome of one message given to handle_message(message, reply):
+    /// its response (an object, or an array for a batch), or nullopt when it
+    /// has none (a notification, a response, a call the client cancelled, a
+    /// batch with nothing to answer).
+    using Reply = std::function<void(std::optional<json>)>;
+
     /// Process one parsed JSON-RPC message. Tool calls may complete via sink.
+    /// A batch (an array) is answered with one array, at once when it holds no
+    /// tool call and through the response sink otherwise; a batch whose calls
+    /// were all cancelled produces nothing.
     json handle_message(const json& envelope);
+
+    /// Process one parsed message and pass its outcome to @p reply exactly
+    /// once: before this returns, or later from a worker thread for a tool
+    /// call. The response sinks are not used for it. A message may be a
+    /// JSON-RPC batch when the negotiated revision has batches (2025-03-26,
+    /// and 2024-11-05 peers alike); later revisions, and a batch before
+    /// initialize, get one -32600 error object.
+    void handle_message(const json& message, Reply reply);
 
     /// Drive newline-delimited MCP stdio until EOF or a message-boundary stop.
     void run(std::istream& in, std::ostream& out);

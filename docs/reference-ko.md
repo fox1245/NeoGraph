@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=693aa578a329a83f89ba734e3210dce7b12fea7cf70c904a9c03ca23af247e9f -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=110a2516c9d60c99aff8e6bf20d7944bf34ffdda37017c93d9eabc53b6ae5959 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3068,7 +3068,9 @@ HTTP는 이후의 모든 요청의 `MCP-Protocol-Version` 헤더에 협상된 �
 **전송 규칙 준수:** 두 전송 모두 서버의 요청에 응답합니다. `ping`에는 빈 결과를, 그 밖의
 모든 요청에는 `-32601`을 보냅니다. 클라이언트는 어떤 client capability(roots, sampling,
 elicitation)도 선언하지 않기 때문입니다. 메시지는 `method`가 없을 때만 응답으로 간주되므로,
-대기 중인 호출의 id를 재사용한 서버 요청이 그 호출을 끝내는 일은 없습니다. HTTP에서
+대기 중인 호출의 id를 재사용한 서버 요청이 그 호출을 끝내는 일은 없습니다. 서버가 보낸
+JSON-RPC 배치(MCP `2025-03-26`)는 메시지마다 따로 처리하고, 그 안의 요청에 대한 응답은 하나의
+배열로 돌려보냅니다. HTTP에서
 클라이언트는 JSON 응답과 Server-Sent Event 응답을 읽고(WHATWG 규칙에 따라: CRLF, LF, CR
 줄 끝, 여러 줄 `data`, `id`, `retry`), 호출의 이벤트 스트림으로 도착한 서버 요청에는 그
 스트림을 열어 둔 채 별도의 POST로 응답하며, 응답이 도착하면 스트림 읽기를 멈춥니다.
@@ -3137,7 +3139,11 @@ HTTP 오류 상태가 그것을 실어 온 경우에도 그렇습니다(이때 `
 `title`, `outputSchema`, `_meta`, `structuredContent`, `resource_link` 콘텐츠도 없으며, 구조화된
 데이터만 있는 결과는 그것을 텍스트로 싣습니다. `2024-11-05`에는 `annotations`와 오디오 콘텐츠도
 없습니다. 그 개정판에 없는 콘텐츠 블록은 그 JSON을 담은 텍스트 블록으로 보냅니다), 그 밖의 요청에는 `2025-11-25`로 응답합니다. `protocol_version()`이 그
-결과를 알려 줍니다. 등록은 `inputSchema`나 `outputSchema`가 `"type": "object"`라고 말하지
+결과를 알려 줍니다. `2025-03-26`을 협상한 클라이언트는 그 개정판이 수신자에게 요구하는 대로
+JSON-RPC 배치를 보낼 수 있고 `2024-11-05` 클라이언트도 마찬가지이며, 배치는 stdio와 HTTP에서
+하나의 배열로 응답됩니다. 이후 개정판은 배치를 없앴고 initialize는 배치에 들어갈 수 없으므로,
+그런 배치는 `-32600` 오류 하나(HTTP 400)입니다. `handle_message(message, reply)`는 각 메시지의
+결과(응답, 배치의 배열 또는 없음)를 호출자에게 넘깁니다. 등록은 `inputSchema`나 `outputSchema`가 `"type": "object"`라고 말하지
 않는 도구(예전 기본값인 빈 객체는 `{"type": "object"}`로 읽음), 검증기가 지원하는 JSON
 Schema 2020-12가 아닌 스키마, SEP-986의 `A-Za-z0-9_.-` 1~128자를 벗어나는 이름을
 거부합니다. 인수는 JSON Schema 2020-12 검증기(`$ref`, `anyOf`, `minimum`, 정수로서의

@@ -945,7 +945,8 @@ remote-auth deployment manifest.
 
 NeoGraph publishes the dated MCP `2025-11-25` profile, and also answers a
 client that asks for `2025-06-18`, `2025-03-26` or `2024-11-05` with the fields
-that revision defines. The current MCP revision, `2026-07-28`, is stateless (no `initialize`,
+that revision defines, and accepts JSON-RPC batches from `2025-03-26` and
+`2024-11-05` clients. The current MCP revision, `2026-07-28`, is stateless (no `initialize`,
 no sessions, the version in every request's `_meta`) and is not served yet: the
 official dual-era clients fall back to `2025-11-25`, and a client pinned to
 `2026-07-28` cannot connect. Serving it as a second mode beside `2025-11-25` is

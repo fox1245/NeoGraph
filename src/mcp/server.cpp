@@ -13,7 +13,9 @@
 #include <initializer_list>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -231,6 +233,9 @@ struct MCPServer::Impl {
         RawToolHandler raw_handler;
     };
 
+    /// Where a deferred outcome goes: a response, or nullopt for none.
+    using Deliver = std::function<void(std::optional<json>)>;
+
     struct CallTask {
         json id;
         std::string key;
@@ -240,6 +245,36 @@ struct MCPServer::Impl {
         std::shared_ptr<graph::CancelToken> cancel;
         /// Set by notifications/cancelled before the token is cancelled.
         std::atomic<bool> client_cancelled{false};
+        Deliver deliver;
+    };
+
+    /// What process() knows when it returns: the response (null for none), or
+    /// that the outcome reaches its Deliver later.
+    struct Outcome {
+        bool deferred = false;
+        json response;
+    };
+
+    /// A JSON-RPC batch whose tool calls run: one array once every message
+    /// has its outcome. `outstanding` counts the messages still to settle and
+    /// the dispatch itself until every message was given to the server.
+    struct Batch {
+        std::mutex mu;
+        json responses = json::array();
+        std::size_t outstanding = 1;
+        Deliver deliver;
+
+        /// Adds one message's outcome; true for the last one.
+        bool add(std::optional<json> response) {
+            std::lock_guard lk(mu);
+            if (response && !response->is_null()) responses.push_back(std::move(*response));
+            return --outstanding == 0;
+        }
+        std::optional<json> answer() {
+            std::lock_guard lk(mu);
+            if (responses.empty()) return std::nullopt;
+            return responses;
+        }
     };
 
     explicit Impl(MCPServerConfig value) : config(std::move(value)) {}
@@ -296,6 +331,140 @@ struct MCPServer::Impl {
             if (current && current->no_response) current->no_response(id);
         } catch (...) {
         }
+    }
+
+    static void deliver(CallTask& task, std::optional<json> outcome) noexcept {
+        try {
+            if (task.deliver) task.deliver(std::move(outcome));
+        } catch (...) {
+            // A transport failure cannot safely be reported through itself.
+        }
+    }
+
+    /// The Deliver of the one-argument handle_message: a response goes to the
+    /// response sink, a call that ends without one to the no-response sink.
+    Deliver to_sinks(const json& message) {
+        const json id = message.is_object() && message.contains("id") ? message["id"] : json();
+        return [this, id](std::optional<json> outcome) {
+            if (outcome) emit(*outcome);
+            else if (!id.is_null()) end_without_response(id);
+        };
+    }
+
+    // MCP 2025-03-26 (basic, "Batching") makes receiving JSON-RPC batches a
+    // MUST, and 2025-06-18 removed them. 2024-11-05 defined none; its peers
+    // are answered as 2025-03-26 ones. Before initialize no revision is
+    // negotiated, and initialize itself is never part of a batch.
+    static bool has_batches(const std::string& version) {
+        return version == "2025-03-26" || version == "2024-11-05";
+    }
+
+    Outcome process(const json& message, Deliver deliver) {
+        if (!message.is_array()) return process_single(message, std::move(deliver));
+        const auto version = protocol_version();
+        if (!has_batches(version)) {
+            return {false, rpc_error(-32600,
+                                     version.empty()
+                                         ? "a JSON-RPC batch cannot initialize an MCP session"
+                                         : "MCP " + version + " has no JSON-RPC batches",
+                                     nullptr)};
+        }
+        if (message.empty()) return {false, rpc_error(-32600, "empty JSON-RPC batch", nullptr)};
+        auto batch = std::make_shared<Batch>();
+        batch->deliver = std::move(deliver);
+        for (std::size_t i = 0; i < message.size(); ++i) {
+            const json element = message[i];
+            {
+                std::lock_guard lk(batch->mu);
+                ++batch->outstanding;
+            }
+            Outcome outcome;
+            if (element.is_array()) {
+                outcome.response = rpc_error(-32600, "a JSON-RPC batch cannot hold a batch", nullptr);
+            } else {
+                outcome = process_single(element, [batch](std::optional<json> response) {
+                    if (batch->add(std::move(response))) batch->deliver(batch->answer());
+                });
+            }
+            if (!outcome.deferred) batch->add(std::move(outcome.response));
+        }
+        // Every message was given to the server: when nothing runs any more,
+        // the answer is ready now; otherwise the last tool call delivers it.
+        if (batch->add(std::nullopt)) {
+            auto answer = batch->answer();
+            return {false, answer ? std::move(*answer) : json()};
+        }
+        return {true, json()};
+    }
+
+    Outcome process_single(const json& envelope, Deliver deliver) {
+        if (!envelope.is_object() || !envelope.contains("jsonrpc") ||
+            envelope["jsonrpc"] != json("2.0")) {
+            return {false, rpc_error(-32600, "Invalid JSON-RPC 2.0 request", readable_id(envelope))};
+        }
+        if (!envelope.contains("method")) {
+            // The server currently sends no requests, so inbound responses
+            // have no waiter. Valid response envelopes are ignored rather than
+            // answered.
+            if (envelope.contains("id") &&
+                (envelope.contains("result") || envelope.contains("error"))) {
+                return {};
+            }
+            return {false, rpc_error(-32600, "JSON-RPC request is missing method",
+                                     readable_id(envelope))};
+        }
+        if (!envelope["method"].is_string()) {
+            return {false, rpc_error(-32600, "JSON-RPC method must be a string",
+                                     readable_id(envelope))};
+        }
+
+        const bool notification = !envelope.contains("id");
+        json id = notification ? json(nullptr) : envelope["id"];
+        if (!notification && !valid_request_id(id)) {
+            return {false, rpc_error(-32600, "JSON-RPC id must be a string or integer", nullptr)};
+        }
+        const auto method = envelope["method"].get<std::string>();
+        const json params = envelope.value("params", json(nullptr));
+
+        if (notification) {
+            if (method == "notifications/initialized") {
+                if (initialize_seen.load(std::memory_order_acquire)) {
+                    operational.store(true, std::memory_order_release);
+                }
+            } else if (method == "notifications/cancelled") {
+                handle_cancel(params);
+            }
+            return {};
+        }
+
+        if (method == "ping") return {false, rpc_result(json::object(), id)};
+        if (method == "initialize") return {false, handle_initialize(params, id)};
+        if (!operational.load(std::memory_order_acquire)) {
+            return {false, rpc_error(-32002, "MCP server is not initialized", id)};
+        }
+        if (method == "tools/list") return {false, handle_tools_list(params, id)};
+        if (method == "tools/call") {
+            auto response = handle_tools_call(params, id, std::move(deliver));
+            return {response.is_null(), std::move(response)};
+        }
+        MCPServer::MethodHandler extension_handler;
+        {
+            std::lock_guard lk(tools_mu);
+            auto            it = methods.find(method);
+            if (it != methods.end()) extension_handler = it->second;
+        }
+        if (extension_handler) {
+            try {
+                json context = {{"extensions", client_extensions}};
+                return {false, rpc_result(extension_handler(params, context), id)};
+            } catch (const std::invalid_argument& error) {
+                return {false, rpc_error(-32602, error.what(), id)};
+            } catch (...) {
+                // Exception text never crosses the wire (MCP-S-20).
+                return {false, rpc_error(-32603, "Internal error", id)};
+            }
+        }
+        return {false, rpc_error(-32601, "Method not found: " + method, id)};
     }
 
     void start_workers() {
@@ -376,13 +545,14 @@ struct MCPServer::Impl {
                 active.erase(task->key);
             }
             if (failure && task->client_cancelled.load(std::memory_order_acquire)) {
-                end_without_response(task->id);
+                deliver(*task, std::nullopt);
                 continue;
             }
-            emit(failure ? failure_response(failure, *task->cancel,
-                                            stopping.load(std::memory_order_acquire), task->id)
-                         : rpc_result(shaped_call_result(result_json, protocol_version()),
-                                      task->id));
+            deliver(*task,
+                    failure ? failure_response(failure, *task->cancel,
+                                               stopping.load(std::memory_order_acquire), task->id)
+                            : rpc_result(shaped_call_result(result_json, protocol_version()),
+                                         task->id));
         }
     }
 
@@ -445,7 +615,7 @@ struct MCPServer::Impl {
         return rpc_result({{"tools", std::move(listed)}}, id);
     }
 
-    json handle_tools_call(const json& params, const json& id) {
+    json handle_tools_call(const json& params, const json& id, Deliver deliver) {
         if (!params.is_object() || !params.contains("name") || !params["name"].is_string() ||
             params["name"].get<std::string>().empty()) {
             return rpc_error(-32602, "tools/call requires a non-empty name", id);
@@ -486,6 +656,7 @@ struct MCPServer::Impl {
         task->meta["io.neograph/negotiatedExtensions"] = client_extensions;
         task->tool = std::move(tool);
         task->cancel = std::make_shared<graph::CancelToken>();
+        task->deliver = std::move(deliver);
 
         {
             std::lock_guard lk(calls_mu);
@@ -600,67 +771,18 @@ void MCPServer::register_extension(std::string identifier, json settings) {
 }
 
 json MCPServer::handle_message(const json& envelope) {
-    if (!envelope.is_object() || !envelope.contains("jsonrpc") ||
-        envelope["jsonrpc"] != json("2.0")) {
-        return rpc_error(-32600, "Invalid JSON-RPC 2.0 request", readable_id(envelope));
-    }
-    if (!envelope.contains("method")) {
-        // The server currently sends no requests, so inbound responses have no
-        // waiter. Valid response envelopes are ignored rather than answered.
-        if (envelope.contains("id") &&
-            (envelope.contains("result") || envelope.contains("error"))) {
-            return nullptr;
-        }
-        return rpc_error(-32600, "JSON-RPC request is missing method", readable_id(envelope));
-    }
-    if (!envelope["method"].is_string()) {
-        return rpc_error(-32600, "JSON-RPC method must be a string", readable_id(envelope));
-    }
+    auto outcome = impl_->process(envelope, impl_->to_sinks(envelope));
+    return outcome.deferred ? json(nullptr) : std::move(outcome.response);
+}
 
-    const bool notification = !envelope.contains("id");
-    json id = notification ? json(nullptr) : envelope["id"];
-    if (!notification && !valid_request_id(id)) {
-        return rpc_error(-32600, "JSON-RPC id must be a string or integer", nullptr);
-    }
-    const auto method = envelope["method"].get<std::string>();
-    const json params = envelope.value("params", json(nullptr));
-
-    if (notification) {
-        if (method == "notifications/initialized") {
-            if (impl_->initialize_seen.load(std::memory_order_acquire)) {
-                impl_->operational.store(true, std::memory_order_release);
-            }
-        } else if (method == "notifications/cancelled") {
-            impl_->handle_cancel(params);
-        }
-        return nullptr;
-    }
-
-    if (method == "ping") return rpc_result(json::object(), id);
-    if (method == "initialize") return impl_->handle_initialize(params, id);
-    if (!impl_->operational.load(std::memory_order_acquire)) {
-        return rpc_error(-32002, "MCP server is not initialized", id);
-    }
-    if (method == "tools/list") return impl_->handle_tools_list(params, id);
-    if (method == "tools/call") return impl_->handle_tools_call(params, id);
-    MCPServer::MethodHandler extension_handler;
-    {
-        std::lock_guard lk(impl_->tools_mu);
-        auto            it = impl_->methods.find(method);
-        if (it != impl_->methods.end()) extension_handler = it->second;
-    }
-    if (extension_handler) {
-        try {
-            json context = {{"extensions", impl_->client_extensions}};
-            return rpc_result(extension_handler(params, context), id);
-        } catch (const std::invalid_argument& error) {
-            return rpc_error(-32602, error.what(), id);
-        } catch (...) {
-            // Exception text never crosses the wire (MCP-S-20).
-            return rpc_error(-32603, "Internal error", id);
-        }
-    }
-    return rpc_error(-32601, "Method not found: " + method, id);
+void MCPServer::handle_message(const json& message, Reply reply) {
+    auto shared = std::make_shared<Reply>(std::move(reply));
+    auto outcome = impl_->process(message, [shared](std::optional<json> response) {
+        (*shared)(std::move(response));
+    });
+    if (outcome.deferred) return;
+    if (outcome.response.is_null()) (*shared)(std::nullopt);
+    else (*shared)(std::move(outcome.response));
 }
 
 void MCPServer::run(std::istream& in, std::ostream& out) {
@@ -668,29 +790,33 @@ void MCPServer::run(std::istream& in, std::ostream& out) {
         throw std::logic_error("MCP server run loop is already active");
     }
     std::mutex output_mu;
-    set_response_sink([&out, &output_mu](const json& response) {
+    const auto write = [&out, &output_mu](const json& message) {
         std::lock_guard lk(output_mu);
-        out << response.dump() << '\n';
+        out << message.dump() << '\n';
         out.flush();
-    });
+    };
 
     std::string line;
     while (!impl_->stopping.load(std::memory_order_acquire) && std::getline(in, line)) {
         if (line.empty()) continue;
-        json response;
+        json message;
         try {
-            response = handle_message(json::parse(line));
+            message = json::parse(line);
         } catch (const json::parse_error& e) {
             std::cerr << "neograph MCP stdio parse error: " << e.what() << '\n';
-            response = rpc_error(-32700, "Parse error", nullptr);
+            write(rpc_error(-32700, "Parse error", nullptr));
+            continue;
+        }
+        // Every outcome is written as it comes: at once, or from a worker
+        // when a tool call (or a batch holding one) completes. stop() below
+        // waits for the workers, so none writes after this returns.
+        try {
+            handle_message(message, [&write](std::optional<json> outcome) {
+                if (outcome) write(*outcome);
+            });
         } catch (const std::exception& e) {
             std::cerr << "neograph MCP stdio internal error: " << e.what() << '\n';
-            response = rpc_error(-32603, "Internal error", nullptr);
-        }
-        if (!response.is_null()) {
-            std::lock_guard lk(output_mu);
-            out << response.dump() << '\n';
-            out.flush();
+            write(rpc_error(-32603, "Internal error", nullptr));
         }
     }
     stop();

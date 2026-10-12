@@ -4,8 +4,9 @@ name: MCP interop
 #   - TypeScript: @modelcontextprotocol/sdk 1.32.1, @modelcontextprotocol/client and
 #     @modelcontextprotocol/server 2.3.1, on Node 24 LTS.
 # Every message NeoGraph's server emits, and every message the official clients
-# send it, is also validated against the MCP 2025-11-25 schema.json at a pinned
-# commit. The suites live in bindings/python/tests/interop/mcp.
+# send it, is also validated against the schema.json of the MCP revision its
+# session negotiated (2025-11-25, 2025-06-18, 2025-03-26 or 2024-11-05) at a
+# pinned commit. The suites live in bindings/python/tests/interop/mcp.
 
 on:
   push:
@@ -54,7 +55,6 @@ jobs:
       # modelcontextprotocol/modelcontextprotocol main on 2026-10-12; the last
       # schema change is 271ecc9a (2026-07-28).
       MCP_SCHEMA_COMMIT: 1f520964b295d58494d944f2aea8a5ab51c79f77
-      MCP_SCHEMA_SHA256: 268a5f82ba70fd7e4b6dc4aa1e64f116f74b4d0edcb69dc046829c79dd4e97e7
       BUILD: build-mcp-interop
     steps:
       - uses: actions/checkout@v4
@@ -77,12 +77,19 @@ jobs:
           mkdir -p "$RUNNER_TEMP/mcp-node"
           cp "$SUITE/package.json" "$SUITE/package-lock.json" "$RUNNER_TEMP/mcp-node/"
           (cd "$RUNNER_TEMP/mcp-node" && npm ci --ignore-scripts --no-audit --no-fund)
-      - name: Fetch the MCP 2025-11-25 schema
+      - name: Fetch the MCP schemas of the revisions NeoGraph serves
         run: |
-          mkdir -p "$RUNNER_TEMP/mcp-schema/2025-11-25"
-          curl -fsSL -o "$RUNNER_TEMP/mcp-schema/2025-11-25/schema.json" \
-            "https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/$MCP_SCHEMA_COMMIT/schema/2025-11-25/schema.json"
-          echo "$MCP_SCHEMA_SHA256  $RUNNER_TEMP/mcp-schema/2025-11-25/schema.json" | sha256sum -c -
+          while read -r revision sha256; do
+            mkdir -p "$RUNNER_TEMP/mcp-schema/$revision"
+            curl -fsSL -o "$RUNNER_TEMP/mcp-schema/$revision/schema.json" \
+              "https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/$MCP_SCHEMA_COMMIT/schema/$revision/schema.json"
+            echo "$sha256  $RUNNER_TEMP/mcp-schema/$revision/schema.json" | sha256sum -c -
+          done <<'PINS'
+          2025-11-25 268a5f82ba70fd7e4b6dc4aa1e64f116f74b4d0edcb69dc046829c79dd4e97e7
+          2025-06-18 af845e7e5b9d27107d1690f0936022546177a1403e63ffb11470135b296a2e01
+          2025-03-26 e720669548c8100a4282c49e580efd6ddf7f28899ea786fc8db251dbdb356131
+          2024-11-05 61cea2392d4f284092d09bc84b9ac488c0d5618ac2b38a56942fc5b99fd960ce
+          PINS
       - name: Build NeoGraph's MCP server, client and Python binding
         run: |
           cmake -S . -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \

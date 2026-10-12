@@ -27,7 +27,6 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -73,11 +72,6 @@ bool media_type_contains(const std::string& header, const std::string& expected)
         start = end + 1;
     }
     return false;
-}
-
-std::string request_key(const json& id) {
-    if (id.is_string()) return "s:" + id.get<std::string>();
-    return "n:" + id.dump();
 }
 
 std::string fresh_session_id() {
@@ -179,11 +173,6 @@ struct MCPHttpServer::Impl {
         std::shared_ptr<void>                                                owner;
         std::unique_ptr<MCPServer>                                           server;
         std::mutex                                                           dispatch_mutex;
-        std::mutex                                                           pending_mutex;
-        /// Open POSTs by request id: a response, or nullopt when the call
-        /// ended without one (the client cancelled it).
-        std::unordered_map<std::string, std::shared_ptr<std::promise<std::optional<json>>>>
-            pending;
         /// When a request for this session last started or ended.
         std::atomic<Clock::rep> last_used{Clock::now().time_since_epoch().count()};
         /// Requests being handled now. A busy session never expires.
@@ -480,26 +469,6 @@ struct MCPHttpServer::Impl {
                 throw std::runtime_error("MCP HTTP server factory returned null");
             }
 
-            std::weak_ptr<Session> weak = session;
-            const auto settle = [weak](const json& id, std::optional<json> outcome) {
-                auto current = weak.lock();
-                if (!current) return;
-                std::shared_ptr<std::promise<std::optional<json>>> promise;
-                {
-                    std::lock_guard lock(current->pending_mutex);
-                    auto            it = current->pending.find(request_key(id));
-                    if (it == current->pending.end()) return;
-                    promise = std::move(it->second);
-                    current->pending.erase(it);
-                }
-                promise->set_value(std::move(outcome));
-            };
-            session->server->set_response_sink(
-                [settle](const json& envelope) {
-                    if (envelope.contains("id")) settle(envelope["id"], envelope);
-                },
-                [settle](const json& id) { settle(id, std::nullopt); });
-
             std::lock_guard lock(sessions_mutex);
             std::string     id;
             do {
@@ -571,12 +540,16 @@ struct MCPHttpServer::Impl {
             http_error(response, 400, -32700, "Parse error");
             return;
         }
-        if (!envelope.is_object()) {
-            http_error(response, 400, -32600, "JSON-RPC body must be an object");
+        // MCP 2025-03-26 also allows a JSON-RPC batch; MCPServer answers or
+        // refuses it by the session's revision.
+        const bool batch = envelope.is_array();
+        if (!envelope.is_object() && !batch) {
+            http_error(response, 400, -32600, "JSON-RPC body must be an object or a batch");
             return;
         }
 
-        const bool has_method = envelope.contains("method") && envelope["method"].is_string();
+        const bool has_method =
+            !batch && envelope.contains("method") && envelope["method"].is_string();
         const bool initialize = has_method && envelope["method"] == "initialize";
         const auto session_id = request.get_header_value("Mcp-Session-Id");
         std::shared_ptr<Session> session;
@@ -618,85 +591,80 @@ struct MCPHttpServer::Impl {
 
         const SessionUse use(session);
         if (!response_session_id.empty()) session->in_flight.fetch_sub(1);
-        if (!has_method) {
+        if (!batch && !has_method) {
             response.status = 202;
             return;
         }
 
-        const bool                          has_id = envelope.contains("id");
-        std::shared_ptr<std::promise<std::optional<json>>> promise;
-        std::future<std::optional<json>>                   future;
-        std::string                         key;
-        bool                                owns_waiter = false;
-        if (has_id) {
-            key     = request_key(envelope["id"]);
-            promise = std::make_shared<std::promise<std::optional<json>>>();
-            future  = promise->get_future();
-            std::lock_guard lock(session->pending_mutex);
-            owns_waiter = session->pending.emplace(key, promise).second;
-        }
-        if (has_id && !owns_waiter) {
-            response.status = 200;
-            response.set_content(
-                rpc_error(-32600, "MCP request ID is already in flight", envelope["id"]).dump(),
-                "application/json");
-            return;
+        // The request ids the POST answers: its own, or a batch's.
+        std::vector<json> request_ids;
+        if (batch) {
+            for (std::size_t i = 0; i < envelope.size(); ++i) {
+                const json element = envelope[i];
+                if (element.is_object() && element.contains("method") && element.contains("id"))
+                    request_ids.push_back(element["id"]);
+            }
+        } else if (envelope.contains("id")) {
+            request_ids.push_back(envelope["id"]);
         }
 
-        json immediate;
+        // The server passes the outcome to this POST alone: at once, or from
+        // a worker when a tool call ends (MCPServer::handle_message).
+        auto promise = std::make_shared<std::promise<std::optional<json>>>();
+        auto future  = promise->get_future();
         {
             std::lock_guard lock(session->dispatch_mutex);
-            immediate = session->server->handle_message(envelope);
+            session->server->handle_message(envelope, [promise](std::optional<json> outcome) {
+                promise->set_value(std::move(outcome));
+            });
         }
         if (!response_session_id.empty()) {
-            if (!immediate.contains("result")) {
+            const bool ready = future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+            const auto answer = ready ? future.get() : std::optional<json>();
+            if (!answer || !answer->contains("result")) {
                 erase_session(response_session_id);
             } else {
                 response.set_header("Mcp-Session-Id", response_session_id);
             }
-        }
-
-        if (!immediate.is_null()) {
-            if (owns_waiter) {
-                std::lock_guard lock(session->pending_mutex);
-                session->pending.erase(key);
-            }
-            response.status = 200;
-            response.set_content(immediate.dump(), "application/json");
-            return;
-        }
-        if (!has_id) {
-            response.status = 202;
+            respond(response, answer, !request_ids.empty(), batch);
             return;
         }
         if (future.wait_for(config.response_timeout) != std::future_status::ready) {
-            {
-                std::lock_guard lock(session->pending_mutex);
-                session->pending.erase(key);
-            }
-            // Nobody waits for the answer any more: stop the tool too, as
+            // Nobody waits for the answer any more: stop the tools too, as
             // the client would with notifications/cancelled (MCP-S-16).
             {
                 std::lock_guard lock(session->dispatch_mutex);
-                session->server->handle_message(
-                    {{"jsonrpc", "2.0"},
-                     {"method", "notifications/cancelled"},
-                     {"params", {{"requestId", envelope["id"]}, {"reason", "response timed out"}}}});
+                for (const auto& id : request_ids) {
+                    session->server->handle_message(
+                        {{"jsonrpc", "2.0"},
+                         {"method", "notifications/cancelled"},
+                         {"params", {{"requestId", id}, {"reason", "response timed out"}}}});
+                }
             }
-            http_error(response, 504, -32001, "MCP tool response timed out", envelope["id"]);
+            http_error(response, 504, -32001, "MCP tool response timed out",
+                       batch || request_ids.empty() ? json() : request_ids.front());
             return;
         }
-        const auto answer = future.get();
-        if (!answer) {
-            // The client cancelled this call, so it has no response (MCP
-            // cancellation). The POST still needs an answer: an event stream
-            // that ends without one.
+        respond(response, future.get(), !request_ids.empty(), batch);
+    }
+
+    // The HTTP answer to a POST's outcome. Nothing to answer: 202 for
+    // notifications and responses, and for requests the client cancelled an
+    // event stream that ends without a response (the POST still needs an
+    // answer). A batch the server refused as a whole is one error object.
+    static void respond(httplib::Response& response, const std::optional<json>& outcome,
+                        bool has_requests, bool batch) {
+        if (!outcome) {
+            if (!has_requests) {
+                response.status = 202;
+                return;
+            }
             response.status = 200;
             response.set_content(std::string(), "text/event-stream");
             return;
         }
-        response.status = 200;
-        response.set_content(answer->dump(), "application/json");
+        response.status = batch && outcome->is_object() ? 400 : 200;
+        response.set_content(outcome->dump(), "application/json");
     }
 
     void handle_get(const httplib::Request& request, httplib::Response& response) const {
