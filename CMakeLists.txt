@@ -1385,7 +1385,7 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         endif()
 
         if(NEOGRAPH_BUILD_GRPC)
-            add_executable(example_grpc_server examples/52_grpc_server.cpp)
+            add_executable(example_grpc_server examples/45_grpc_server.cpp)
             target_link_libraries(example_grpc_server PRIVATE
                 neograph::core neograph::grpc)
 
@@ -1771,10 +1771,10 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         add_executable(example_export_schema examples/52_export_schema.cpp)
         target_link_libraries(example_export_schema PRIVATE neograph::core)
 
-        # Harness evolution loop (issue #80). Example 54: reproduce the
+        # Harness evolution loop (issue #80). Example 32: reproduce the
         # README evolution benchmark from a strict Core seed + task fixture.
         #   ./example_evolution seed.json task.json > lineage.json
-        add_executable(example_evolution examples/54_evolution.cpp)
+        add_executable(example_evolution examples/32_evolution.cpp)
         target_link_libraries(example_evolution PRIVATE neograph::core)
 
         # Harness convergence benchmark (issue #81). Example 58:

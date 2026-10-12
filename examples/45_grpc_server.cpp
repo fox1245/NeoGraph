@@ -1,4 +1,4 @@
-// NeoGraph Example 52: expose a GraphEngine over gRPC.
+// NeoGraph Example 45: expose a GraphEngine over gRPC.
 //
 // Opt-in — build only with -DNEOGRAPH_BUILD_GRPC=ON (default OFF;
 // needs grpc++ + protoc on the host: apt install libgrpc++-dev

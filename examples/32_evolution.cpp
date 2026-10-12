@@ -1,4 +1,4 @@
-// NeoGraph Example 54: Harness evolution loop (issue #80).
+// NeoGraph Example 32: Harness evolution loop (issue #80).
 //
 //   ./example_evolution seed.json task.json > lineage.json
 //   ./example_evolution --smoke
@@ -8,8 +8,8 @@
 //
 // Node types: the seed may use any built-in node type plus the demo `pnoop`
 // no-op type, which this example registers in BOTH modes (so the tracked
-// examples/54_evolution_seed.json + 54_evolution_task.json run as-is):
-//   ./example_evolution examples/54_evolution_seed.json examples/54_evolution_task.json
+// examples/32_evolution_seed.json + 32_evolution_task.json run as-is):
+//   ./example_evolution examples/32_evolution_seed.json examples/32_evolution_task.json
 // Any other custom node type must be registered with NodeFactory by the host
 // program before evolve() runs; otherwise the compile gate rejects every
 // candidate with "Unknown node type" and the run exits 1 (compile_passed 0).

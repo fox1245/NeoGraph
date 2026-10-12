@@ -1,6 +1,6 @@
 // NeoGraph Example 53: call a NeoGraph gRPC GraphService from C++.
 //
-// Pairs with example_grpc_server (52). Opt-in — build only with
+// Pairs with example_grpc_server (45). Opt-in — build only with
 // -DNEOGRAPH_BUILD_GRPC=ON.
 //
 //   Terminal 1:  ./example_grpc_server                 # 0.0.0.0:50051
