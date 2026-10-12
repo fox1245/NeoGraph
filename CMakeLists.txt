@@ -894,7 +894,9 @@ if(NEOGRAPH_BUILD_MCP_CLIENT)
             $<INSTALL_INTERFACE:include>
     )
 
-    target_compile_definitions(neograph_mcp PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+    # The client names the library's version in clientInfo.
+    target_compile_definitions(neograph_mcp PRIVATE NEOGRAPH_BUILDING_LIBRARY
+        NEOGRAPH_VERSION_STR="${NEOGRAPH_VERSION}")
     target_link_libraries(neograph_mcp
         PUBLIC  neograph_core neograph_mcp_types
         PRIVATE neograph_async OpenSSL::SSL OpenSSL::Crypto

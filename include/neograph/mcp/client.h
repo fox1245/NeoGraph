@@ -21,6 +21,7 @@
 #include <asio/awaitable.hpp>
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -42,9 +43,12 @@ class ProtocolSession;
  */
 class NEOGRAPH_API MCPTool : public AsyncTool, public ContextualAsyncTool {
   public:
-    /// Direct HTTP constructor. Each execution opens an ephemeral
-    /// protocol session; tools returned by MCPClient::get_tools() instead
-    /// retain their originating protocol session and transport.
+    /// Direct HTTP constructor for one known tool. The tool opens one MCP
+    /// session on its first call, reuses it for every later call, and ends it
+    /// with DELETE when the tool is destroyed. `server_url` is the server's
+    /// MCP endpoint URL, used as given. Prefer MCPClient(url).get_tools(),
+    /// which shares one session among all of a server's tools and keeps
+    /// their complete definitions.
     MCPTool(const std::string& server_url,
             const std::string& name,
             const std::string& description,
@@ -87,6 +91,8 @@ class NEOGRAPH_API MCPTool : public AsyncTool, public ContextualAsyncTool {
     friend class MCPClient;
     MCPTool(std::shared_ptr<detail::ProtocolSession> session,
             ToolDefinition definition);
+    /// The session calls use; the URL constructor creates it on first use.
+    std::shared_ptr<detail::ProtocolSession> protocol_session();
 
     std::string server_url_; ///< Legacy direct-HTTP constructor only.
     std::shared_ptr<detail::ProtocolSession> session_;
@@ -101,8 +107,8 @@ class NEOGRAPH_API MCPTool : public AsyncTool, public ContextualAsyncTool {
  * the appropriate constructor.
  *
  * @code
- * // HTTP
- * MCPClient http_client("http://localhost:8000");
+ * // HTTP: the server's MCP endpoint URL, as given
+ * MCPClient http_client("http://localhost:8000/mcp");
  * http_client.initialize("my-agent");
  * auto tools = http_client.get_tools();
  *
@@ -115,8 +121,19 @@ class NEOGRAPH_API MCPTool : public AsyncTool, public ContextualAsyncTool {
 class NEOGRAPH_API MCPClient {
   public:
     /**
-     * @brief Construct an HTTP-mode MCP client.
-     * @param server_url URL of the MCP server (e.g., "http://localhost:8000").
+     * @brief Construct an HTTP-mode (Streamable HTTP) MCP client.
+     * @param server_url The server's MCP endpoint URL, used as given, path and
+     *        query included (e.g., "http://localhost:8000/mcp"). Nothing is
+     *        appended to it.
+     *
+     * The client answers a server's `ping` and refuses other server requests
+     * with -32601 (it declares no client capability), reads JSON and
+     * Server-Sent Event responses, resumes an event stream the server closed
+     * early (GET with Last-Event-ID), opens the optional GET event stream for
+     * server messages between calls once its session is initialized, starts
+     * a new session when the server answers 404 for its session and sends the
+     * request again once, and ends its session with DELETE on shutdown() or
+     * when the last reference goes.
      */
     explicit MCPClient(const std::string& server_url);
     MCPClient(const std::string& server_url, MCPClientConfig config);
@@ -158,6 +175,28 @@ class NEOGRAPH_API MCPClient {
 
     /// Async handshake + initialized notification for either transport.
     asio::awaitable<bool> initialize_async(const std::string& client_name = "neograph");
+
+    /// Bounded handshake: the deadline (absolute, steady clock) and cancel
+    /// token stop waiting for it (MCPTransportError timeout or cancelled), and
+    /// the client stays uninitialized. MCP never cancels initialize on the
+    /// wire, so the server is not told: a stdio server may then refuse a
+    /// second handshake, and a hardened stdio session ends.
+    bool initialize(const std::string& client_name,
+                    std::chrono::steady_clock::time_point deadline,
+                    std::shared_ptr<graph::CancelToken> cancel_token);
+    asio::awaitable<bool> initialize_async(const std::string& client_name,
+                                           std::chrono::steady_clock::time_point deadline,
+                                           std::shared_ptr<graph::CancelToken> cancel_token);
+
+    /// Called when the server sends notifications/tools/list_changed: read
+    /// get_tool_definitions() or get_tools() again for the new catalogue.
+    /// Until then outputSchema checks are skipped, as the cached schemas may
+    /// be stale. The notification may come on a call's response stream, on
+    /// stdio at any time, or over HTTP on the optional GET event stream the
+    /// client opens for its session after initialize. The handler runs on the
+    /// client's transport thread: return promptly and do not call this
+    /// client from it. An empty handler stops the callbacks.
+    void set_tool_list_changed_handler(std::function<void()> handler);
 
     bool is_initialized() const noexcept;
     InitializeResult get_initialize_result() const;

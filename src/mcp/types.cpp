@@ -2,10 +2,11 @@
 
 namespace neograph::mcp {
 
-MCPError::MCPError(int code, std::string message, json data)
+MCPError::MCPError(int code, std::string message, json data, int http_status)
   : std::runtime_error(std::move(message))
   , code_(code)
   , data_(std::move(data))
+  , http_status_(http_status)
 {
 }
 MCPTransportError::MCPTransportError(MCPFailure failure, std::string message,

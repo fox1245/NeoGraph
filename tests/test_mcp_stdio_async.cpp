@@ -23,6 +23,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <future>
 #include <string>
 #include <cerrno>
@@ -452,13 +454,15 @@ TEST(MCPStdioAsync, HardenedStartupUsesStartupRatherThanRequestTimeout) {
     EXPECT_FALSE(client.is_initialized());
 }
 
-TEST(MCPStdioAsync, HardenedStderrOverflowTerminatesSession) {
+TEST(MCPStdioAsync, HardenedStderrVolumeDoesNotEndTheSession) {
+    // MCP-C-05: stderr is drained and its tail kept; volume never ends the
+    // session (MCP: a client SHOULD NOT treat stderr as an error).
     if (!python3_available()) GTEST_SKIP() << "python not available";
     auto config = boundary_config("stderr");
     config.max_stderr_bytes = 128;
     mcp::MCPClient client(std::move(config));
-    EXPECT_THROW(client.initialize(), mcp::MCPTransportError);
-    EXPECT_FALSE(client.is_initialized());
+    EXPECT_TRUE(client.initialize());
+    EXPECT_NO_THROW(client.call_tool("probe", json::object()));
 }
 
 TEST(MCPStdioAsync, HardenedReplacementEnvironmentAndWorkingDirectory) {
@@ -616,6 +620,8 @@ TEST(MCPStdioAsync, HardenedCancellationDrainsDescendantsAndClosesAdmission) {
     const auto ready = std::filesystem::path(marker.string() + ".ready");
     auto config = boundary_config("tree-blocked");
     config.argv.push_back(marker.string());
+    // The server is told and gets this grace period before it is terminated.
+    config.cancel_grace = std::chrono::milliseconds(100);
     mcp::MCPClient client(std::move(config));
     ASSERT_TRUE(client.initialize());
     auto cancel = std::make_shared<graph::CancelToken>();
@@ -721,3 +727,125 @@ TEST(MCPStdioAsync, DispatchBoundsAnInFlightToolCall) {
     const auto ids = json::parse(cancellations.content.at(0).at("text").get<std::string>());
     EXPECT_EQ(ids.size(), 4u) << ids.dump();
 }
+
+namespace {
+std::filesystem::path conformance_fixture() {
+    return fixture_path().parent_path() / "mcp_stdio_conformance.py";
+}
+
+std::string read_record(const std::filesystem::path& path) {
+    std::ifstream in(path);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+bool wait_for_record(const std::filesystem::path& path, const std::string& text,
+                     std::chrono::milliseconds limit) {
+    const auto until = std::chrono::steady_clock::now() + limit;
+    while (std::chrono::steady_clock::now() < until) {
+        if (read_record(path).find(text) != std::string::npos) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return read_record(path).find(text) != std::string::npos;
+}
+}  // namespace
+
+// MCP-C-02, MCP-C-06: a server request is answered (ping with an empty result,
+// anything undeclared with -32601), even when it reuses the id of the call in
+// flight, which still gets its own response.
+TEST(MCPStdioAsync, ServerRequestsAreAnsweredAndKeptApartFromResponses) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    BoundaryDirectory directory;
+    mcp::MCPClient client(std::vector<std::string>{
+        python_cmd(), conformance_fixture().string(), (directory.path / "record").string()});
+    auto result = client.call_tool_result("ping_back", json::object());
+    ASSERT_FALSE(result.is_error);
+    const auto replies = json::parse(result.content[0]["text"].get<std::string>());
+    ASSERT_EQ(replies.size(), 2u);
+    bool ping = false, roots = false;
+    for (std::size_t i = 0; i < replies.size(); ++i) {
+        if (replies[i]["id"] == json("r-1")) {
+            roots = replies[i]["error"]["code"] == json(-32601);
+        } else {
+            ping = replies[i]["result"] == json::object();
+        }
+    }
+    EXPECT_TRUE(ping) << replies.dump();
+    EXPECT_TRUE(roots) << replies.dump();
+}
+
+// MCP-C-12: shutting a stdio server down closes its stdin first; a server
+// that exits on EOF never sees a signal.
+TEST(MCPStdioAsync, ShutdownClosesStdinBeforeAnySignal) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    BoundaryDirectory directory;
+    const auto record = directory.path / "record";
+    const auto started = std::chrono::steady_clock::now();
+    {
+        mcp::MCPClient client(std::vector<std::string>{
+            python_cmd(), conformance_fixture().string(), record.string()});
+        ASSERT_TRUE(client.initialize());
+    }
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(3));
+    EXPECT_TRUE(wait_for_record(record, "eof", std::chrono::milliseconds(500)));
+    EXPECT_EQ(read_record(record).find("sigterm"), std::string::npos) << read_record(record);
+}
+
+// Owner decision for hardened stdio: a cancelled call sends
+// notifications/cancelled first, waits a short grace period, then terminates
+// the server; the session takes no more requests.
+TEST(MCPStdioAsync, HardenedCancellationTellsTheServerBeforeTerminating) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    BoundaryDirectory directory;
+    const auto record = directory.path / "record";
+    mcp::StdioClientConfig config;
+    config.argv = {python_cmd(), conformance_fixture().string(), record.string()};
+    config.cancel_grace = std::chrono::milliseconds(300);
+    mcp::MCPClient client(std::move(config));
+    ASSERT_TRUE(client.initialize());
+    auto cancel = std::make_shared<graph::CancelToken>();
+    std::thread stop([cancel] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        cancel->cancel();
+    });
+    try {
+        async::run_sync(client.call_tool_result_async(
+            "slow", json::object(), std::chrono::steady_clock::time_point::max(), cancel));
+        FAIL() << "the call was not cancelled";
+    } catch (const mcp::MCPTransportError& error) {
+        EXPECT_EQ(error.failure(), mcp::MCPFailure::cancelled);
+    }
+    stop.join();
+    // The server heard of the cancellation before it was stopped.
+    EXPECT_TRUE(wait_for_record(record, "cancelled", std::chrono::milliseconds(2000)))
+        << read_record(record);
+    EXPECT_TRUE(wait_for_record(record, "eof", std::chrono::milliseconds(2000)) ||
+                read_record(record).find("sigterm") != std::string::npos)
+        << read_record(record);
+    try {
+        client.call_tool("echo", json::object());
+        FAIL() << "a cancelled hardened session took another request";
+    } catch (const mcp::MCPTransportError& error) {
+        EXPECT_EQ(error.failure(), mcp::MCPFailure::shutdown);
+    }
+}
+
+#ifndef _WIN32
+// Without replace_environment, configured entries add to or override the
+// inherited environment.
+TEST(MCPStdioAsync, ConfiguredEnvironmentEntriesOverrideTheInheritedOnes) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    ::setenv("NG_MCP_INHERITED", "parent", 1);
+    ::setenv("NG_MCP_OVERRIDDEN", "parent", 1);
+    auto config = boundary_config("echo");
+    config.environment = {{"NG_MCP_OVERRIDDEN", "child"}, {"NG_MCP_ADDED", "added"}};
+    mcp::MCPClient client(std::move(config));
+    auto result = client.call_tool("probe", json::object());
+    const auto environment = result.at("environment");
+    EXPECT_EQ(environment.value("NG_MCP_INHERITED", ""), "parent");
+    EXPECT_EQ(environment.value("NG_MCP_OVERRIDDEN", ""), "child");
+    EXPECT_EQ(environment.value("NG_MCP_ADDED", ""), "added");
+    EXPECT_TRUE(environment.contains("PATH"));
+    ::unsetenv("NG_MCP_INHERITED");
+    ::unsetenv("NG_MCP_OVERRIDDEN");
+}
+#endif

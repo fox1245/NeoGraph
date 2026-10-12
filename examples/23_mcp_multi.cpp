@@ -11,7 +11,7 @@
 //
 // Usage:
 //   echo 'OPENROUTER_API_KEY=sk-or-...' > .env
-//   ./example_mcp_multi http://localhost:8000 \
+//   ./example_mcp_multi http://localhost:8000/mcp \
 //       python3 examples/demo_mcp_stdio_server.py
 // (auto-loads .env from the cwd or any parent directory.)
 

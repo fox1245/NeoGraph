@@ -107,8 +107,9 @@ struct MockMcpServer {
         if (t.joinable()) t.join();
     }
 
+    // The endpoint URL, as given to the client (MCP-C-04).
     std::string url() const {
-        return "http://127.0.0.1:" + std::to_string(port);
+        return "http://127.0.0.1:" + std::to_string(port) + "/mcp";
     }
 };
 
@@ -133,6 +134,24 @@ struct ServerGuard {
     std::thread thread;
 };
 
+// Answer the MCP handshake for a mock that tests something else: the client
+// shakes hands before its first request (MCP-C-15). True when it answered.
+bool answer_handshake(const json& request, httplib::Response& res) {
+    const auto method = request.value("method", std::string{});
+    if (method == "notifications/initialized") {
+        res.status = 202;
+        return true;
+    }
+    if (method != "initialize") return false;
+    res.set_content(json{{"jsonrpc", "2.0"}, {"id", request.at("id")},
+                         {"result", {{"protocolVersion", "2025-11-25"},
+                                     {"capabilities", json::object()},
+                                     {"serverInfo", {{"name", "mock"}, {"version", "1"}}}}}}
+                        .dump(),
+                    "application/json");
+    return true;
+}
+
 } // namespace
 
 TEST(MCPClientAsync, RpcCallAsyncReturnsResultField) {
@@ -153,7 +172,8 @@ TEST(MCPClientAsync, RpcCallAsyncReturnsResultField) {
 
     EXPECT_TRUE(result.is_object());
     EXPECT_EQ(result.value("echo", ""), "ping");
-    EXPECT_EQ(mock.request_count.load(), 1);
+    // initialize and notifications/initialized come first (MCP-C-15).
+    EXPECT_EQ(mock.request_count.load(), 3);
 }
 
 TEST(MCPClientAsync, SyncRpcCallBridgesThroughAsync) {
@@ -247,7 +267,7 @@ TEST(MCPClientAsync, NotFoundDoesNotTerminateAndThrowsRuntimeError) {
     }
     ASSERT_TRUE(svr.is_running());
 
-    mcp::MCPClient client("http://127.0.0.1:" + std::to_string(port));
+    mcp::MCPClient client("http://127.0.0.1:" + std::to_string(port) + "/mcp");
 
     bool threw_runtime_error = false;
     try {
@@ -374,7 +394,7 @@ TEST(MCPClientAsync, SessionIdHeaderRoundTrips) {
     }
     ASSERT_TRUE(svr.is_running());
 
-    mcp::MCPClient client("http://127.0.0.1:" + std::to_string(port));
+    mcp::MCPClient client("http://127.0.0.1:" + std::to_string(port) + "/mcp");
     // First call: no session id yet — server assigns one.
     client.call_tool("first", json::object());
     // Subsequent calls: must carry the assigned id back.
@@ -700,7 +720,7 @@ TEST(MCPClientAsync, ConfiguredRequestTimeoutIsEnforced) {
     mcp::MCPClientConfig config;
     config.request_timeout = std::chrono::milliseconds(20);
     mcp::MCPClient client(
-        "http://127.0.0.1:" + std::to_string(server.port), config);
+        "http://127.0.0.1:" + std::to_string(server.port) + "/mcp", config);
     try {
         client.initialize();
         FAIL() << "expected HTTP timeout";
@@ -758,7 +778,7 @@ TEST(MCPClientAsync, FailedInitializationClearsNegotiatedHttpStateBeforeRetry) {
     ASSERT_TRUE(svr.is_running());
 
     mcp::MCPClient client(
-        "http://127.0.0.1:" + std::to_string(server.port));
+        "http://127.0.0.1:" + std::to_string(server.port) + "/mcp");
     EXPECT_THROW(client.initialize(), std::runtime_error);
     EXPECT_FALSE(client.is_initialized());
     EXPECT_TRUE(client.initialize());
@@ -772,6 +792,7 @@ TEST(MCPClientAsync, HttpCancellationAndConnectionAreClassified) {
     httplib::Server svr;
     svr.Post("/mcp", [](const httplib::Request& req, httplib::Response& res) {
         auto request = json::parse(req.body);
+        if (answer_handshake(request, res)) return;
         if (request.value("method", "") == "slow") {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
@@ -782,7 +803,7 @@ TEST(MCPClientAsync, HttpCancellationAndConnectionAreClassified) {
     {
         ServerGuard server(svr);
         port = server.port;
-        mcp::MCPClient client("http://127.0.0.1:" + std::to_string(port));
+        mcp::MCPClient client("http://127.0.0.1:" + std::to_string(port) + "/mcp");
         auto cancel = std::make_shared<graph::CancelToken>();
         std::thread stop([cancel] {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -798,7 +819,7 @@ TEST(MCPClientAsync, HttpCancellationAndConnectionAreClassified) {
         }
         stop.join();
     }
-    mcp::MCPClient offline("http://127.0.0.1:" + std::to_string(port));
+    mcp::MCPClient offline("http://127.0.0.1:" + std::to_string(port) + "/mcp");
     try {
         async::run_sync(offline.rpc_call_async("ping"));
         FAIL() << "expected closed endpoint failure";
@@ -811,6 +832,7 @@ TEST(MCPClientAsync, ConcurrentHttpRequestsReturnTheirOwnCorrelationIds) {
     httplib::Server svr;
     svr.Post("/mcp", [](const httplib::Request& req, httplib::Response& res) {
         auto request = json::parse(req.body);
+        if (answer_handshake(request, res)) return;
         int marker = request.at("params").at("marker").get<int>();
         std::this_thread::sleep_for(std::chrono::milliseconds((4 - marker) * 12));
         res.set_content(json{{"jsonrpc", "2.0"}, {"id", request.at("id")},
@@ -818,7 +840,7 @@ TEST(MCPClientAsync, ConcurrentHttpRequestsReturnTheirOwnCorrelationIds) {
                         "application/json");
     });
     ServerGuard server(svr);
-    mcp::MCPClient client("http://127.0.0.1:" + std::to_string(server.port));
+    mcp::MCPClient client("http://127.0.0.1:" + std::to_string(server.port) + "/mcp");
     asio::io_context io;
     std::array<json, 5> results;
     std::array<json, 5> params;
@@ -869,7 +891,7 @@ TEST(MCPClientAsync, DiscoveredToolRetainsHttpSessionAfterClientDestruction) {
     ServerGuard server(svr);
     std::unique_ptr<Tool> tool;
     {
-        mcp::MCPClient client("http://127.0.0.1:" + std::to_string(server.port));
+        mcp::MCPClient client("http://127.0.0.1:" + std::to_string(server.port) + "/mcp");
         auto discovered = client.get_tools();
         ASSERT_EQ(discovered.size(), 1u);
         tool = std::move(discovered.front());
@@ -905,7 +927,7 @@ TEST(MCPClientAsync, ShutdownDrainsHttpFromTheCallerExecutor) {
     });
     ServerGuard server(svr);
     ASSERT_TRUE(svr.is_running());
-    mcp::MCPClient client("http://127.0.0.1:" + std::to_string(server.port));
+    mcp::MCPClient client("http://127.0.0.1:" + std::to_string(server.port) + "/mcp");
     asio::io_context io;
     std::optional<mcp::MCPFailure> failure;
     asio::co_spawn(io, [&]() -> asio::awaitable<void> {
@@ -984,7 +1006,7 @@ TEST(MCPClientAsync, DispatchBoundsAnInFlightHttpToolCall) {
     });
     svr.new_task_queue = [] { return new httplib::ThreadPool(8); };
     ServerGuard server(svr);
-    mcp::MCPClient client("http://127.0.0.1:" + std::to_string(server.port));
+    mcp::MCPClient client("http://127.0.0.1:" + std::to_string(server.port) + "/mcp");
     auto tools = client.get_tools();
     ASSERT_EQ(tools.size(), 1u);
     Tool& echo = *tools[0];

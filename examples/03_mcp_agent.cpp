@@ -13,7 +13,7 @@
 //   ./example_mcp_agent <MCP_SERVER_URL> "<question>"
 //
 // Example:
-//   ./example_mcp_agent http://127.0.0.1:8000 "Use the calculate tool to compute 15 * 28 + 7."
+//   ./example_mcp_agent http://127.0.0.1:8000/mcp "Use the calculate tool to compute 15 * 28 + 7."
 
 #include <neograph/neograph.h>
 #include "provider_example_support.h"
@@ -33,7 +33,7 @@ int main(int argc, char* argv[]) {
     if (argc < 3) {
         std::cerr << "Usage: " << argv[0] << " <MCP_SERVER_URL> \"<question>\"\n"
                   << "Example: " << argv[0]
-                  << " http://127.0.0.1:8000 \"Use the calculate tool to compute 15 * 28 + 7.\"\n";
+                  << " http://127.0.0.1:8000/mcp \"Use the calculate tool to compute 15 * 28 + 7.\"\n";
         return 1;
     }
 

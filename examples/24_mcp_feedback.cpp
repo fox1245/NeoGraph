@@ -45,7 +45,7 @@ int main(int argc, char** argv) {
     cppdotenv::auto_load_dotenv();
 
     try {
-    const std::string mcp_url  = (argc >= 2) ? argv[1] : "http://localhost:8000";
+    const std::string mcp_url  = (argc >= 2) ? argv[1] : "http://localhost:8000/mcp";
     const std::string question = (argc >= 3) ? argv[2]
         : "What's the weather in Seoul right now?";
 

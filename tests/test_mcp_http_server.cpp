@@ -628,7 +628,7 @@ TEST(MCPHttpServerTest, ExistingMcpClientUsesNegotiatedHttpSession) {
     ASSERT_TRUE(server.start_async());
     HttpServerGuard guard(server);
 
-    MCPClient client("http://127.0.0.1:" + std::to_string(server.port()));
+    MCPClient client("http://127.0.0.1:" + std::to_string(server.port()) + "/mcp");
     ASSERT_TRUE(client.initialize("neograph-http-test"));
     auto definitions = client.get_tool_definitions();
     ASSERT_EQ(definitions.size(), 1u);

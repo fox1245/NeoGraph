@@ -4,16 +4,19 @@
 #include <neograph/async/endpoint.h>
 #include <neograph/async/http_client.h>
 #include <neograph/async/run_sync.h>
+#include <neograph/async/sse_parser.h>
 #include <neograph/graph/cancel.h>
 
 #include <asio/co_spawn.hpp>
 #include <asio/error.hpp>
+#include <asio/multiple_exceptions.hpp>
 #include <asio/system_error.hpp>
 #include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
 #include <asio/post.hpp>
 #include <asio/detached.hpp>
 #include <asio/experimental/channel.hpp>
+#include <asio/experimental/channel_error.hpp>
 #include <asio/experimental/awaitable_operators.hpp>
 #include <asio/read_until.hpp>
 #include <asio/steady_timer.hpp>
@@ -54,8 +57,12 @@
 #include <cerrno>
 #include <cstdlib>
 #include <chrono>
+#include <cctype>
 #include <condition_variable>
 #include <cstring>
+#include <cwchar>
+#include <functional>
+#include <future>
 #include <istream>
 #include <iterator>
 #include <map>
@@ -68,6 +75,7 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <unordered_map>
 
 namespace neograph::mcp {
@@ -161,8 +169,6 @@ void validate_stdio_config(const StdioClientConfig& config) {
     if (config.cwd.native().find(
             std::filesystem::path::value_type{}) != std::filesystem::path::string_type::npos)
         throw std::invalid_argument("MCP stdio cwd contains NUL");
-    if (!config.replace_environment && !config.environment.empty())
-        throw std::invalid_argument("MCP stdio environment requires replacement mode");
     for (std::size_t i = 0; i < config.environment.size(); ++i) {
         const auto& [key, value] = config.environment[i];
         if (key.empty() || key.find('=') != std::string::npos
@@ -173,13 +179,28 @@ void validate_stdio_config(const StdioClientConfig& config) {
                 throw std::invalid_argument("MCP stdio environment contains a duplicate key");
     }
     if (!config.max_frame_bytes || config.startup_timeout.count() <= 0
-        || config.request_timeout.count() <= 0)
+        || config.request_timeout.count() <= 0 || config.cancel_grace.count() < 0)
         throw std::invalid_argument("MCP stdio bounds must be positive");
 }
 
 [[noreturn]] void throw_shutdown() {
     throw MCPTransportError(MCPFailure::shutdown, "MCP client has been shut down");
 }
+
+// How an operation ends when its awaiting coroutine is cancelled through
+// Asio's cancellation slots (a graph run's cancel token does that): a socket
+// or timer reports operation_aborted, a channel channel_cancelled.
+bool aborted_by_caller(const std::error_code& code) {
+    return code == asio::error::operation_aborted ||
+           code == asio::experimental::error::channel_cancelled;
+}
+
+// How long a stdio server has to exit after its input closes, and after
+// SIGTERM, before the client escalates.
+constexpr std::chrono::milliseconds kStdioExitGrace{1000};
+constexpr std::chrono::milliseconds kStdioTermGrace{1000};
+// After a cancellation's grace period: SIGTERM at once, SIGKILL soon after.
+constexpr std::chrono::milliseconds kStdioPromptTermGrace{100};
 
 asio::awaitable<json> notification_result(asio::awaitable<void> operation) {
     co_await std::move(operation);
@@ -307,29 +328,130 @@ public:
     virtual void cancel_request(int /*id*/, std::string /*reason*/) noexcept {}
     virtual void negotiated_version(const std::string&) {}
     virtual void reset() {}
+    /// Forget the session @p stale the server no longer knows, when it is
+    /// still the current one. True when this call forgot it.
+    virtual bool forget_session(const std::string& /*stale*/) { return false; }
+    /// Where server notifications go; set once by the protocol session.
+    void set_notification_handler(std::function<void(const json&)> handler) {
+        std::lock_guard lk(notification_mu_);
+        notification_handler_ = std::move(handler);
+    }
+    /// Open the transport's channel for server messages between calls, when
+    /// it has one that is not always open (HTTP's optional GET stream).
+    virtual void listen() noexcept {}
     virtual void shutdown() noexcept = 0;
+
+protected:
+    void deliver_notification(const json& notification) noexcept {
+        std::function<void(const json&)> handler;
+        {
+            std::lock_guard lk(notification_mu_);
+            handler = notification_handler_;
+        }
+        try {
+            if (handler) handler(notification);
+        } catch (...) {
+            // A notification handler cannot fail the transport.
+        }
+    }
+
+private:
+    std::mutex notification_mu_;
+    std::function<void(const json&)> notification_handler_;
+};
+
+// The HTTP server answered 404 for a request that carried Mcp-Session-Id:
+// that session ended, and the server did not run the request. The protocol
+// session starts a new session and sends the request again (MCP-C-03).
+class SessionNotFound final : public MCPTransportError {
+public:
+    SessionNotFound(std::string stale, std::string message)
+        : MCPTransportError(MCPFailure::http_status, std::move(message), 404),
+          stale_(std::move(stale)) {}
+    const std::string& session_id() const noexcept { return stale_; }
+
+private:
+    std::string stale_;
+};
+
+namespace {
+
+// NeoGraph's client declares no client capability (roots, sampling,
+// elicitation), so it answers a server's `ping` and refuses every other
+// server request with -32601 (MCP-C-02, D8). Every request gets a response,
+// as JSON-RPC requires.
+json server_request_reply(const json& request) {
+    const json id = request["id"];
+    const auto method = request["method"].get<std::string>();
+    if (method == "ping")
+        return json{{"jsonrpc", "2.0"}, {"id", id}, {"result", json::object()}};
+    return json{{"jsonrpc", "2.0"},
+                {"id", id},
+                {"error", {{"code", -32601}, {"message", "Method not found: " + method}}}};
+}
+
+// What a JSON-RPC message is, by its members (MCP basic, "Messages"): a
+// request has a method and an id, a notification a method and no id, and a
+// response an id, no method and a result or an error. A server request that
+// reuses the id of a pending client request is still a request (MCP-C-06).
+enum class MessageKind { request, notification, response, invalid };
+
+MessageKind message_kind(const json& message) {
+    if (!message.is_object()) return MessageKind::invalid;
+    if (message.contains("method")) {
+        if (!message["method"].is_string()) return MessageKind::invalid;
+        return message.contains("id") ? MessageKind::request : MessageKind::notification;
+    }
+    if (message.contains("id") && (message.contains("result") || message.contains("error")))
+        return MessageKind::response;
+    return MessageKind::invalid;
+}
+
+}  // namespace
+
+// One HTTP exchange's response, as it streams in.
+struct HttpExchange {
+    explicit HttpExchange(int request_id) : id(request_id) {}
+
+    int id;
+    int status = 0;
+    bool event_stream = false;
+    bool saw_event = false;
+    std::string body;               ///< a body that is not an event stream
+    std::optional<json> response;   ///< this request's JSON-RPC response
+    async::SseEventParser events{sse_limits()};
+
+    static async::SseParserOptions sse_limits() {
+        async::SseParserOptions options;
+        // One event carries one JSON-RPC message, as large as a JSON body.
+        options.max_partial_line_bytes = 16u * 1024u * 1024u;
+        options.max_event_bytes = 16u * 1024u * 1024u;
+        options.max_pending_bytes = 32u * 1024u * 1024u;
+        return options;
+    }
 };
 
 class HttpSession final : public Transport {
 public:
     HttpSession(std::string url, MCPClientConfig client_config)
       : server_url(std::move(url))
-      , endpoint(async::split_async_endpoint(server_url))
       , config(std::move(client_config))
     {
+        // MCP transports, "Streamable HTTP": the server provides one MCP
+        // endpoint URL, and the client sends every message to it as given,
+        // path and query included. The client used to append "/mcp", so a
+        // server mounted anywhere else was unreachable (MCP-C-04).
+        if (server_url.find('#') != std::string::npos)
+            throw std::invalid_argument("MCP server URL must not contain a fragment");
+        const auto query = server_url.find('?');
+        endpoint = async::split_async_endpoint(server_url.substr(0, query));
         if (endpoint.host.empty()) {
             throw std::invalid_argument("MCP server URL has no host");
         }
-        const auto& prefix = endpoint.prefix;
-        if (prefix.empty() || prefix == "/") {
-            path = "/mcp";
-        } else if (prefix == "/mcp"
-                   || (prefix.size() > 4
-                       && prefix.compare(prefix.size() - 4, 4, "/mcp") == 0)) {
-            path = prefix;
-        } else {
-            path = prefix + "/mcp";
-        }
+        target = endpoint.prefix.empty() ? std::string("/") : endpoint.prefix;
+        if (query != std::string::npos) target += server_url.substr(query);
+        if (target.find_first_of(" \r\n") != std::string::npos)
+            throw std::invalid_argument("MCP server URL contains whitespace");
     }
 
     TransportCapabilities capabilities() const noexcept override {
@@ -341,12 +463,28 @@ public:
     asio::awaitable<json> do_exchange(
         json request, std::chrono::steady_clock::time_point deadline,
         std::shared_ptr<graph::CancelToken> cancel_token);
+    asio::awaitable<json> exchange_and_resume(json request, int id,
+                                              std::chrono::steady_clock::time_point until);
+    asio::awaitable<void> stream_once(std::string method, std::string body, HeaderList headers,
+                                      std::shared_ptr<HttpExchange> exchange,
+                                      std::chrono::milliseconds timeout);
+    asio::awaitable<std::pair<int, std::string>> send(std::string method, std::string body,
+                                                      HeaderList headers,
+                                                      std::chrono::milliseconds timeout);
     asio::awaitable<void> notify(json notification) override;
     asio::awaitable<void> do_notify(json notification);
+    asio::awaitable<void> reply(json message);
+    asio::awaitable<void> delete_session(std::string session);
+    asio::awaitable<void> listen_loop();
     ~HttpSession() override { shutdown(); }
     void shutdown() noexcept override {
-        worker.shutdown([this] { shutdown_token->cancel(); });
+        end_session();
+        worker.shutdown([this] {
+            shutdown_token->cancel();
+            if (listen_stop) listen_stop->cancel();
+        });
     }
+    void listen() noexcept override;
     void cancel_request(int id, std::string reason) noexcept override {
         try {
             worker.start([this, notification = cancelled_notification(id, std::move(reason))]()
@@ -370,10 +508,33 @@ public:
         session_id.clear();
         protocol_version.clear();
     }
+    bool forget_session(const std::string& stale) override {
+        std::lock_guard lk(mu);
+        if (stale.empty() || session_id != stale) return false;
+        session_id.clear();
+        protocol_version.clear();
+        return true;
+    }
+
+    /// The headers of a request to the endpoint; @p sent_session receives the
+    /// session id it carries.
+    HeaderList request_headers(const char* accept, const std::string* last_event_id,
+                               std::string* sent_session);
+    /// Route one JSON-RPC message that arrived on a response stream.
+    void on_stream_message(HttpExchange& exchange, json message);
+    /// End the server's session with DELETE, bounded and best effort.
+    void end_session() noexcept;
+    std::chrono::milliseconds remaining(std::chrono::steady_clock::time_point until) const;
+    [[noreturn]] void throw_http_failure(int status, const std::string& body) const;
+
+    /// The GET stream for server messages between calls; touched only on
+    /// the worker's thread.
+    bool listening = false;
+    std::unique_ptr<asio::steady_timer> listen_stop;
 
     std::string server_url;
     async::AsyncEndpoint endpoint;
-    std::string path;
+    std::string target;  ///< request target: the URL's path and query
     MCPClientConfig config;
     std::mutex mu;
     std::string session_id;
@@ -387,13 +548,39 @@ public:
     mutable std::mutex mu;
     std::condition_variable changed;
     Lifecycle lifecycle = Lifecycle::created;
+    /// The name the first initialize sent; a new session sends it again.
+    std::string client_name = "neograph";
+    /// Called for notifications/tools/list_changed.
+    std::function<void()> tool_list_changed;
     InitializeResult initialize_result;
     std::unordered_map<std::string, json> output_schemas;
 };
 class ProtocolSession {
 public:
     explicit ProtocolSession(std::shared_ptr<Transport> transport)
-      : transport_(std::move(transport)) {}
+      : transport_(std::move(transport)) {
+        // The transport outlives nothing it calls into: it holds only the
+        // metadata, which the session shares.
+        std::weak_ptr<ClientMetadata> metadata = metadata_;
+        transport_->set_notification_handler([metadata](const json& notification) {
+            if (notification.value("method", "") != "notifications/tools/list_changed") return;
+            auto current = metadata.lock();
+            if (!current) return;
+            std::function<void()> handler;
+            {
+                std::lock_guard lk(current->mu);
+                // Cached outputSchemas may be stale until the list is read again.
+                current->output_schemas.clear();
+                handler = current->tool_list_changed;
+            }
+            if (handler) handler();
+        });
+    }
+
+    void set_tool_list_changed_handler(std::function<void()> handler);
+    /// Listen for server messages between calls when a handler wants them
+    /// and the server declares tools.listChanged.
+    void listen_if_wanted();
 
     json rpc_call(const std::string& method, const json& params = json::object());
     asio::awaitable<json> rpc_call_async(
@@ -402,7 +589,13 @@ public:
             std::chrono::steady_clock::time_point::max(),
         std::shared_ptr<graph::CancelToken> cancel_token = {});
     bool initialize(const std::string& client_name = "neograph");
-    asio::awaitable<bool> initialize_async(const std::string& client_name = "neograph");
+    asio::awaitable<bool> initialize_async(
+        const std::string& client_name = "neograph",
+        std::chrono::steady_clock::time_point deadline =
+            std::chrono::steady_clock::time_point::max(),
+        std::shared_ptr<graph::CancelToken> cancel_token = {});
+    /// Start a new session after the server forgot @p stale (MCP-C-03).
+    asio::awaitable<void> restart_session(std::string stale);
     void shutdown() noexcept;
     bool is_initialized() const noexcept;
     InitializeResult get_initialize_result() const;
@@ -455,6 +648,11 @@ public:
     void reset() override { if (hardened_) shutdown(); }
 private:
     StdioSession() = default;
+    /// A hardened session ends at a cancellation or timeout: tell the server
+    /// (unless the request was initialize, id < 0), give it cancel_grace_ to
+    /// stop, then terminate the process tree.
+    void terminate_after_cancel(int id, std::string reason) noexcept;
+    asio::awaitable<void> cancel_then_terminate(int id, std::string reason);
     static std::shared_ptr<StdioSession> spawn_impl(StdioClientConfig config, bool hardened);
     void start_stderr();
     asio::awaitable<void> read_stderr();
@@ -491,6 +689,13 @@ private:
     std::mutex process_mu_;
     void terminate_process() noexcept;
     bool hardened_ = false;
+    /// Set when a hardened session started to end after a cancellation.
+    std::atomic<bool> closing_{false};
+    /// The server already had its grace period: terminate without waiting
+    /// for it to exit on its own.
+    std::atomic<bool> prompt_termination_{false};
+    std::chrono::milliseconds cancel_grace_{500};
+    /// The last max_stderr_bytes_ bytes the server wrote to stderr.
     std::size_t max_stderr_bytes_ = 64 * 1024;
     std::string stderr_buffer_;
     std::chrono::steady_clock::time_point startup_deadline_ =
@@ -598,13 +803,44 @@ std::vector<wchar_t> windows_environment(const StdioClientConfig& config) {
         return CompareStringOrdinal(a.c_str(), static_cast<int>(a.size()),
                                     b.c_str(), static_cast<int>(b.size()), TRUE);
     };
-    std::sort(entries.begin(), entries.end(), [&](const auto& a, const auto& b) {
-        return compare(a.first, b.first) == CSTR_LESS_THAN;
+    const std::size_t configured = entries.size();
+    if (!config.replace_environment) {
+        // Inherit the parent's environment; a configured entry overrides the
+        // inherited one of the same (case-insensitive) name.
+        if (LPWCH inherited = GetEnvironmentStringsW()) {
+            for (const wchar_t* entry = inherited; *entry; entry += std::wcslen(entry) + 1) {
+                const std::wstring_view text(entry);
+                // Names such as "=C:" start with '='.
+                const auto separator = text.find(L'=', 1);
+                if (separator == std::wstring_view::npos) continue;
+                std::wstring name(text.substr(0, separator));
+                bool overridden = false;
+                for (std::size_t i = 0; i < entries.size() && !overridden; ++i)
+                    overridden = compare(entries[i].first, name) == CSTR_EQUAL;
+                if (!overridden)
+                    entries.emplace_back(std::move(name), std::wstring(text.substr(separator + 1)));
+            }
+            FreeEnvironmentStringsW(inherited);
+        }
+    }
+    std::vector<std::size_t> order(entries.size());
+    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        return compare(entries[a].first, entries[b].first) == CSTR_LESS_THAN;
     });
+    std::vector<std::pair<std::wstring, std::wstring>> sorted;
+    sorted.reserve(order.size());
+    for (std::size_t index : order) {
+        if (!sorted.empty() && compare(sorted.back().first, entries[index].first) == CSTR_EQUAL) {
+            if (index < configured)
+                throw std::invalid_argument("MCP Windows environment contains a duplicate key");
+            continue;
+        }
+        sorted.push_back(std::move(entries[index]));
+    }
+    entries = std::move(sorted);
     std::vector<wchar_t> block;
     for (std::size_t i = 0; i < entries.size(); ++i) {
-        if (i && compare(entries[i - 1].first, entries[i].first) == CSTR_EQUAL)
-            throw std::invalid_argument("MCP Windows environment contains a duplicate key");
         const auto& [key, value] = entries[i];
         block.insert(block.end(), key.begin(), key.end());
         block.push_back(L'=');
@@ -706,6 +942,7 @@ std::shared_ptr<StdioSession> StdioSession::spawn_impl(
     sess->hardened_ = hardened;
     sess->max_frame_bytes_ = config.max_frame_bytes;
     sess->max_stderr_bytes_ = config.max_stderr_bytes;
+    sess->cancel_grace_ = config.cancel_grace;
     sess->request_timeout_ = config.request_timeout;
     if (hardened)
         sess->startup_deadline_ = std::chrono::steady_clock::now() + config.startup_timeout;
@@ -763,7 +1000,8 @@ std::shared_ptr<StdioSession> StdioSession::spawn_impl(
     PROCESS_INFORMATION process{};
     if (!CreateProcessW(executable.c_str(), cmdline.data(), nullptr, nullptr, TRUE,
                          CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
-                         config.replace_environment ? environment.data() : nullptr,
+                         config.replace_environment || !config.environment.empty()
+                             ? environment.data() : nullptr,
                          config.cwd.empty() ? nullptr : config.cwd.c_str(),
                          &startup.StartupInfo, &process))
         windows_error("CreateProcessW");
@@ -791,6 +1029,15 @@ StdioSession::~StdioSession() { shutdown(); }
 
 void StdioSession::terminate_process() noexcept {
     std::lock_guard lk(process_mu_);
+    // MCP lifecycle, "Shutdown" (stdio): close the server's input and wait
+    // for it to exit before terminating the process tree (MCP-C-12).
+    if (stdin_h_) CloseHandle(std::exchange(stdin_h_, nullptr));
+    if (process_) {
+        const auto grace = prompt_termination_.load()
+            ? static_cast<DWORD>(kStdioPromptTermGrace.count())
+            : static_cast<DWORD>((kStdioExitGrace + kStdioTermGrace).count());
+        WaitForSingleObject(process_, grace);
+    }
     if (job_) {
         TerminateJobObject(job_, 1);
         CloseHandle(std::exchange(job_, nullptr));
@@ -801,7 +1048,6 @@ void StdioSession::terminate_process() noexcept {
         WaitForSingleObject(process_, INFINITE);
         CloseHandle(std::exchange(process_, nullptr));
     }
-    if (stdin_h_) CloseHandle(std::exchange(stdin_h_, nullptr));
     if (stdout_h_) CloseHandle(std::exchange(stdout_h_, nullptr));
     if (stderr_h_) CloseHandle(std::exchange(stderr_h_, nullptr));
 }
@@ -832,9 +1078,8 @@ std::shared_ptr<StdioSession> StdioSession::spawn_impl(
         candidates.push_back(argv[0]);
     } else {
         const char* env_path = config.replace_environment ? nullptr : std::getenv("PATH");
-        if (config.replace_environment)
-            for (const auto& [key, value] : config.environment)
-                if (key == "PATH") env_path = value.c_str();
+        for (const auto& [key, value] : config.environment)
+            if (key == "PATH") env_path = value.c_str();
         const std::string path = env_path ? env_path : "/bin:/usr/bin";
         for (size_t start = 0; start <= path.size();) {
             const auto end = path.find(':', start);
@@ -847,10 +1092,28 @@ std::shared_ptr<StdioSession> StdioSession::spawn_impl(
         }
     }
 
+#if defined(__APPLE__)
+    char** const inherited_environment = *_NSGetEnviron();
+#else
+    char** const inherited_environment = ::environ;
+#endif
+    // The child gets its own environment when one is configured: the
+    // configured entries alone (replace_environment), or the inherited
+    // environment with the configured entries added or overriding it.
+    const bool own_environment = config.replace_environment || !config.environment.empty();
     std::vector<std::string> child_environment;
     std::vector<char*> child_envp;
-    if (config.replace_environment) {
-        child_environment.reserve(config.environment.size());
+    if (own_environment) {
+        if (!config.replace_environment && inherited_environment) {
+            for (char** entry = inherited_environment; *entry; ++entry) {
+                const std::string_view text(*entry);
+                const auto name = text.substr(0, text.find('='));
+                const bool overridden = std::any_of(
+                    config.environment.begin(), config.environment.end(),
+                    [&](const auto& item) { return item.first == name; });
+                if (!overridden) child_environment.emplace_back(text);
+            }
+        }
         for (const auto& [key, value] : config.environment)
             child_environment.push_back(key + "=" + value);
         child_envp.reserve(child_environment.size() + 1);
@@ -887,14 +1150,7 @@ std::shared_ptr<StdioSession> StdioSession::spawn_impl(
         throw std::system_error(error, std::generic_category(), "pipe()");
     }
 
-    char* const* environment = child_envp.data();
-    if (!config.replace_environment) {
-#if defined(__APPLE__)
-        environment = *_NSGetEnviron();
-#else
-        environment = ::environ;
-#endif
-    }
+    char* const* environment = own_environment ? child_envp.data() : inherited_environment;
 
     pid_t pid = ::fork();
     if (pid < 0) {
@@ -954,6 +1210,7 @@ std::shared_ptr<StdioSession> StdioSession::spawn_impl(
         sess->hardened_ = hardened;
         sess->max_frame_bytes_ = config.max_frame_bytes;
         sess->max_stderr_bytes_ = config.max_stderr_bytes;
+        sess->cancel_grace_ = config.cancel_grace;
         sess->request_timeout_ = config.request_timeout;
         if (hardened) sess->startup_deadline_ = startup_deadline;
         sess->pid_ = std::exchange(pid, -1);
@@ -976,29 +1233,53 @@ std::shared_ptr<StdioSession> StdioSession::spawn_impl(
 
 StdioSession::~StdioSession() { shutdown(); }
 
+namespace {
+// True once the child @p pid exited (and was reaped) within @p wait.
+bool exited_within(pid_t pid, std::chrono::milliseconds wait) {
+    const auto until = std::chrono::steady_clock::now() + wait;
+    for (;;) {
+        int status = 0;
+        const pid_t reaped = ::waitpid(pid, &status, WNOHANG);
+        if (reaped == pid || (reaped < 0 && errno == ECHILD)) return true;
+        if (std::chrono::steady_clock::now() >= until) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+}  // namespace
+
 void StdioSession::terminate_process() noexcept {
     std::lock_guard lk(process_mu_);
+    // MCP lifecycle, "Shutdown" (stdio): close the server's input, wait for
+    // it to exit, then SIGTERM, then SIGKILL. The client used to send SIGTERM
+    // and SIGKILL 20 ms apart without closing stdin first (MCP-C-12). The
+    // reader's duplicate of stdin is closed by close_io() before this runs.
+    if (stdin_fd_ >= 0) ::close(std::exchange(stdin_fd_, -1));
     if (pid_ > 0) {
         const pid_t group = pid_;
-        ::kill(-group, SIGTERM);
-        ::kill(pid_, SIGTERM);
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        const bool prompt = prompt_termination_.load();
+        bool reaped = exited_within(pid_, prompt ? std::chrono::milliseconds(0) : kStdioExitGrace);
+        if (!reaped) {
+            ::kill(-group, SIGTERM);
+            ::kill(pid_, SIGTERM);
+            reaped = exited_within(pid_, prompt ? kStdioPromptTermGrace : kStdioTermGrace);
+        }
         // The leader can already be dead while a TERM-ignoring descendant
         // still owns this group. Do not return early after reaping the leader.
         ::kill(-group, SIGKILL);
-        ::kill(pid_, SIGKILL);
-        int status = 0;
-        while (::waitpid(pid_, &status, 0) < 0 && errno == EINTR) {}
+        if (!reaped) {
+            ::kill(pid_, SIGKILL);
+            int status = 0;
+            while (::waitpid(pid_, &status, 0) < 0 && errno == EINTR) {}
+        }
         pid_ = -1;
     }
-    if (stdin_fd_ >= 0) ::close(std::exchange(stdin_fd_, -1));
     if (stdout_fd_ >= 0) ::close(std::exchange(stdout_fd_, -1));
     if (stderr_fd_ >= 0) ::close(std::exchange(stderr_fd_, -1));
 }
 #endif  // _WIN32
 
 void StdioSession::check_open() const {
-    if (worker_.stopped.load()) throw_shutdown();
+    if (worker_.stopped.load() || closing_.load()) throw_shutdown();
 }
 
 void StdioSession::close_io() noexcept {
@@ -1036,28 +1317,23 @@ void StdioSession::start_stderr() {
 }
 
 asio::awaitable<void> StdioSession::read_stderr() {
+    // MCP transports, stdio: the client MAY capture or ignore the server's
+    // stderr and SHOULD NOT treat it as an error. The session keeps draining
+    // it and keeps its last max_stderr_bytes_ bytes; it used to end the
+    // session once the total passed that limit, so a server that logs a line
+    // per request died after about 1,500 calls (MCP-C-05, D8).
     std::array<char, 4096> bytes;
     try {
         for (;;) {
-            const auto remaining = max_stderr_bytes_ - stderr_buffer_.size();
-            const auto capacity = remaining >= bytes.size() ? bytes.size() : remaining + 1;
             const auto count = co_await async_err_->async_read_some(
-                asio::buffer(bytes.data(), capacity), asio::use_awaitable);
-            if (count > remaining) {
-                {
-                    std::lock_guard lk(demux_mu_);
-                    reader_failure_ = std::make_exception_ptr(MCPTransportError(
-                        MCPFailure::protocol, "MCP stdio stderr limit exceeded"));
-                }
-                shutdown();
-                co_return;
-            }
+                asio::buffer(bytes.data(), bytes.size()), asio::use_awaitable);
             stderr_buffer_.append(bytes.data(), count);
+            if (stderr_buffer_.size() > max_stderr_bytes_)
+                stderr_buffer_.erase(0, stderr_buffer_.size() - max_stderr_bytes_);
         }
-    } catch (const std::system_error& error) {
-        if (error.code() != asio::error::eof
-            && error.code() != asio::error::operation_aborted)
-            shutdown();
+    } catch (const std::system_error&) {
+        // EOF, or the session closed the pipe: stderr says nothing about the
+        // session's health.
     }
 }
 
@@ -1130,7 +1406,15 @@ asio::awaitable<void> StdioSession::run_reader() {
                     throw MCPTransportError(MCPFailure::protocol,
                                             "MCP stdio frame must be a JSON object");
                 }
-                if (resp.contains("id") && resp["id"].is_number_integer()) {
+                const auto kind = message_kind(resp);
+                if (kind == MessageKind::request) {
+                    // A server request, such as ping: answered at once, also
+                    // between calls, and never taken for the response of a
+                    // pending request with the same id (MCP-C-02, MCP-C-06).
+                    asio::co_spawn(worker_.io,
+                                   best_effort(do_notify(server_request_reply(resp))),
+                                   asio::detached);
+                } else if (kind == MessageKind::response && resp["id"].is_number_integer()) {
                     const int rid = resp["id"].get<int>();
                     std::shared_ptr<RespChan> chan;
                     {
@@ -1148,19 +1432,12 @@ asio::awaitable<void> StdioSession::run_reader() {
                         chan->try_send(asio::error_code{}, p);
                     }
                 }
-            }
-            // Stop once nothing is outstanding so a private run_sync
-            // io_context can drain and return; a later call lazily
-            // restarts the reader.
-            bool stop = false;
-            {
-                std::lock_guard<std::mutex> lk(demux_mu_);
-                if (waiters_.empty()) {
-                    reader_running_ = false;
-                    stop = true;
+                else if (kind == MessageKind::notification) {
+                    deliver_notification(resp);
                 }
             }
-            if (stop) break;
+            // The reader keeps reading between calls, on the session's own
+            // io_context, so a server request is answered whenever it comes.
         }
     } catch (const std::system_error& error) {
         fail = std::make_exception_ptr(MCPTransportError(
@@ -1187,7 +1464,7 @@ asio::awaitable<void> StdioSession::run_reader() {
                 std::shared_ptr<json>{});
             kv.second->close();
         }
-        if (hardened_) shutdown();
+        if (hardened_ && !worker_.stopped.load() && !closing_.load()) shutdown();
     }
     co_return;
 }
@@ -1214,29 +1491,86 @@ asio::awaitable<json> StdioSession::exchange(
     deadline = std::min(deadline, std::chrono::steady_clock::now() + request_timeout_);
     if (hardened_ && !startup_complete_.load())
         deadline = std::min(deadline, startup_deadline_);
+    const int id = request.at("id").get<int>();
+    const bool initialize = request.value("method", "") == "initialize";
     using asio::experimental::awaitable_operators::operator||;
     try {
         if ((cancel_token && cancel_token->is_cancelled())
             || deadline <= std::chrono::steady_clock::now())
             throw_rpc_bound(deadline, cancel_token);
-        auto result = co_await (
-            capture_result(worker_.submit(do_exchange(std::move(request))))
-            || wait_for_rpc_bound(deadline, cancel_token));
+        std::variant<CapturedResult<json>, std::monostate> result;
+        try {
+            result = co_await (
+                capture_result(worker_.submit(do_exchange(std::move(request))))
+                || wait_for_rpc_bound(deadline, cancel_token));
+        } catch (const asio::multiple_exceptions& both) {
+            // The caller cancelled the coroutine awaiting this call, and both
+            // waits ended with it: the first failure names it.
+            std::rethrow_exception(both.first_exception());
+        }
         if (result.index() == 1) throw_rpc_bound(deadline, cancel_token);
         auto captured = std::get<0>(std::move(result));
         if (captured.error) std::rethrow_exception(captured.error);
         check_open();
         co_return std::move(*captured.value);
     } catch (const std::system_error& e) {
-        const bool stopped = worker_.stopped.load();
-        if (hardened_) shutdown();
-        throw MCPTransportError(stopped || e.code() == asio::error::operation_aborted
-                                    ? MCPFailure::shutdown : MCPFailure::connection,
-                                std::string("MCP stdio transport: ") + e.what());
+        const bool stopped = worker_.stopped.load() || closing_.load();
+        // An aborted operation of a session still running was cancelled by
+        // its caller (a cancelled run cancels the coroutine awaiting it).
+        const auto failure = stopped ? MCPFailure::shutdown
+            : aborted_by_caller(e.code()) ? MCPFailure::cancelled
+                                          : MCPFailure::connection;
+        if (hardened_ && failure == MCPFailure::cancelled)
+            terminate_after_cancel(initialize ? -1 : id, "cancelled by the caller");
+        else if (hardened_)
+            shutdown();
+        throw MCPTransportError(failure, std::string("MCP stdio transport: ") + e.what());
+    } catch (const MCPTransportError& e) {
+        if (hardened_ && (e.failure() == MCPFailure::cancelled ||
+                          e.failure() == MCPFailure::timeout)) {
+            // The owner's decision for hardened sessions: notifications/
+            // cancelled first, a short grace period, then termination (it
+            // used to kill the server at once and tell it nothing).
+            terminate_after_cancel(initialize ? -1 : id,
+                                   e.failure() == MCPFailure::cancelled ? "cancelled by the caller"
+                                                                        : "request timed out");
+        } else if (hardened_) {
+            shutdown();
+        }
+        throw;
     } catch (...) {
         if (hardened_) shutdown();
         throw;
     }
+}
+
+void StdioSession::terminate_after_cancel(int id, std::string reason) noexcept {
+    if (closing_.exchange(true)) return;
+    try {
+        worker_.start([this, id, reason = std::move(reason)]() mutable {
+            asio::co_spawn(worker_.io, cancel_then_terminate(id, std::move(reason)),
+                           asio::detached);
+        });
+    } catch (...) {
+        shutdown();
+    }
+}
+
+asio::awaitable<void> StdioSession::cancel_then_terminate(int id, std::string reason) {
+    using asio::experimental::awaitable_operators::operator||;
+    try {
+        asio::steady_timer grace(worker_.io);
+        grace.expires_after(cancel_grace_);
+        if (id >= 0 && async_lock_ && async_in_) {
+            co_await (best_effort(do_notify(cancelled_notification(id, std::move(reason))))
+                      || grace.async_wait(asio::use_awaitable));
+        }
+        co_await grace.async_wait(asio::use_awaitable);
+    } catch (...) {
+        // Shut down by its owner meanwhile.
+    }
+    prompt_termination_.store(true);
+    shutdown();
 }
 
 asio::awaitable<json> StdioSession::do_exchange(json request) {
@@ -1408,6 +1742,8 @@ asio::awaitable<void> StdioSession::notify(json notification) {
 }
 
 void StdioSession::cancel_request(int id, std::string reason) noexcept {
+    // A hardened session told the server already, on its way to terminate.
+    if (hardened_) return;
     try {
         worker_.start([this, notification = cancelled_notification(id, std::move(reason))]()
                           mutable {
@@ -1423,7 +1759,7 @@ void StdioSession::cancel_request(int id, std::string reason) noexcept {
 }
 
 asio::awaitable<void> StdioSession::do_notify(json notification) {
-    check_open();
+    if (worker_.stopped.load()) throw_shutdown();
     // initialize's request created the handles and write semaphore. Notifications
     // use that SAME write lock, so an adjacent tool call cannot interleave frames.
     co_await async_lock_->async_receive(asio::use_awaitable);
@@ -1522,6 +1858,20 @@ MCPTool::MCPTool(std::shared_ptr<detail::ProtocolSession> session,
 {
 }
 
+std::shared_ptr<detail::ProtocolSession> MCPTool::protocol_session() {
+    // The URL constructor creates its protocol session on first use and keeps
+    // it, so every call of this tool shares one MCP session, ended with DELETE
+    // when the tool goes away. It used to open a new session for every call
+    // and never end one, which exhausts a server's session limit (MCP-C-08).
+    static std::mutex lazy_session;
+    std::lock_guard lock(lazy_session);
+    if (!session_) {
+        session_ = std::make_shared<detail::ProtocolSession>(
+            std::make_shared<detail::HttpSession>(server_url_, MCPClientConfig{}));
+    }
+    return session_;
+}
+
 ChatTool MCPTool::get_definition() const {
     return { definition_.name, definition_.description,
              definition_.input_schema };
@@ -1545,16 +1895,8 @@ MCPTool::execute_result_async(const json& arguments, ToolExecutionContext contex
     const auto deadline = context.deadline.value_or(std::chrono::steady_clock::time_point::max());
     std::exception_ptr bounded;
     try {
-        if (auto session = session_) {
-            auto result = co_await session->call_tool_result_async(
-                definition_.name, arguments, deadline, context.cancel_token);
-            validate_tool_result(result, definition_.output_schema);
-            co_return result;
-        }
-        // The legacy direct-HTTP tool constructor has no originating client.
-        // Create a fresh protocol session for this invocation.
-        auto client = std::make_unique<MCPClient>(server_url_);
-        auto result = co_await client->call_tool_result_async(
+        auto session = protocol_session();
+        auto result = co_await session->call_tool_result_async(
             definition_.name, arguments, deadline, context.cancel_token);
         validate_tool_result(result, definition_.output_schema);
         co_return result;
@@ -1624,6 +1966,10 @@ asio::awaitable<json> MCPClient::rpc_call_async(
     std::chrono::steady_clock::time_point deadline,
     std::shared_ptr<graph::CancelToken> cancel_token) {
     auto session = session_;
+    // MCP lifecycle: initialize is the first interaction. A request sent here
+    // on a client that has not shaken hands yet does so first (MCP-C-15).
+    if (method != "initialize" && !session->is_initialized())
+        co_await session->initialize_async();
     co_return co_await session->rpc_call_async(
         method, params, deadline, std::move(cancel_token));
 }
@@ -1632,6 +1978,11 @@ json detail::ProtocolSession::rpc_call(
     const std::string& method, const json& params) {
     return async::run_sync(rpc_call_async(method, params));
 }
+
+namespace {
+void reset_initialization(const std::shared_ptr<detail::Transport>& transport,
+                          const std::shared_ptr<detail::ClientMetadata>& metadata);
+}  // namespace
 
 asio::awaitable<json> detail::ProtocolSession::rpc_call_async(
     const std::string& method, const json& params,
@@ -1642,32 +1993,67 @@ asio::awaitable<json> detail::ProtocolSession::rpc_call_async(
         || deadline <= std::chrono::steady_clock::now()) {
         throw_rpc_bound(deadline, cancel_token);
     }
-    const int id = ++next_id_;
-    json request{{"jsonrpc", "2.0"}, {"id", id},
-                 {"method", method}, {"params", params}};
     auto transport = transport_;
-    json response;
-    try {
-        response = co_await transport->exchange(
-            std::move(request), deadline, std::move(cancel_token));
-    } catch (const MCPTransportError& error) {
-        // A request this client stops waiting for is abandoned: MCP asks the
-        // client to tell the server (never for initialize), and its late
-        // response is dropped.
-        if (method != "initialize" && (error.failure() == MCPFailure::cancelled ||
-                                       error.failure() == MCPFailure::timeout))
-            transport->cancel_request(id, error.failure() == MCPFailure::cancelled
-                                              ? "cancelled by the caller"
-                                              : "request timed out");
-        throw;
+    for (int attempt = 0;; ++attempt) {
+        const int id = ++next_id_;
+        json request{{"jsonrpc", "2.0"}, {"id", id},
+                     {"method", method}, {"params", params}};
+        json response;
+        std::string expired_session;
+        try {
+            response = co_await transport->exchange(
+                std::move(request), deadline, cancel_token);
+        } catch (const SessionNotFound& error) {
+            if (method == "initialize" || attempt > 0) throw;
+            expired_session = error.session_id();
+        } catch (const MCPTransportError& error) {
+            // A request this client stops waiting for is abandoned: MCP asks the
+            // client to tell the server (never for initialize), and its late
+            // response is dropped.
+            if (method != "initialize" && (error.failure() == MCPFailure::cancelled ||
+                                           error.failure() == MCPFailure::timeout))
+                transport->cancel_request(id, error.failure() == MCPFailure::cancelled
+                                                  ? "cancelled by the caller"
+                                                  : "request timed out");
+            throw;
+        }
+        if (!expired_session.empty()) {
+            // MCP transports, "Session Management": HTTP 404 for a request
+            // that carried Mcp-Session-Id means the session ended, and the
+            // client MUST start a new one. The server did not run the
+            // request, so it goes again, once, in the new session (MCP-C-03).
+            co_await restart_session(std::move(expired_session));
+            continue;
+        }
+        if (stopped_.load()) throw_shutdown();
+        try {
+            co_return extract_rpc_result(response, id);
+        } catch (const MCPTransportError&) {
+            // A malformed response leaves the session unusable: the next
+            // request starts a new one.
+            reset_initialization(transport, metadata_);
+            throw;
+        }
     }
-    if (stopped_.load()) throw_shutdown();
-    try {
-        co_return extract_rpc_result(response, id);
-    } catch (const MCPTransportError&) {
-        transport->reset();
-        throw;
+}
+
+asio::awaitable<void> detail::ProtocolSession::restart_session(std::string stale) {
+    if (transport_->forget_session(stale)) {
+        {
+            std::lock_guard lk(metadata_->mu);
+            if (metadata_->lifecycle == ClientMetadata::Lifecycle::initialized) {
+                metadata_->lifecycle = ClientMetadata::Lifecycle::created;
+                metadata_->initialize_result = {};
+            }
+        }
+        metadata_->changed.notify_all();
     }
+    std::string client_name;
+    {
+        std::lock_guard lk(metadata_->mu);
+        client_name = metadata_->client_name;
+    }
+    co_await initialize_async(client_name);
 }
 
 asio::awaitable<json> detail::HttpSession::exchange(
@@ -1677,176 +2063,424 @@ asio::awaitable<json> detail::HttpSession::exchange(
         do_exchange(std::move(request), deadline, std::move(cancel_token)));
 }
 
-asio::awaitable<json> detail::HttpSession::do_exchange(
-    json request, std::chrono::steady_clock::time_point deadline,
-    std::shared_ptr<graph::CancelToken> cancel_token) {
-    if (worker.stopped.load()) throw_shutdown();
-    using asio::experimental::awaitable_operators::operator||;
-    const int this_id = request.at("id").get<int>();
-    std::vector<std::pair<std::string, std::string>> headers;
-    HeaderProvider header_provider;
+namespace {
+
+std::string lowercase(std::string_view text) {
+    std::string out(text);
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return out;
+}
+
+// The reconnection wait when a stream that ends early named none.
+constexpr std::chrono::milliseconds kDefaultSseRetry{1000};
+// Reconnections in a row that bring no event before the client gives up.
+constexpr int kMaxIdleResumes = 3;
+// A DELETE that ends a session never holds up a shutdown for longer.
+constexpr std::chrono::milliseconds kSessionDeleteTimeout{2000};
+// The largest JSON body read, as for an event.
+constexpr std::size_t kMaxJsonBody = 16u * 1024u * 1024u;
+
+}  // namespace
+
+std::chrono::milliseconds detail::HttpSession::remaining(
+    std::chrono::steady_clock::time_point until) const {
+    const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+        until - std::chrono::steady_clock::now());
+    if (left.count() <= 0)
+        throw MCPTransportError(MCPFailure::timeout, "MCP HTTP request timed out");
+    return left;
+}
+
+HeaderList detail::HttpSession::request_headers(const char* accept,
+                                                const std::string* last_event_id,
+                                                std::string* sent_session) {
+    HeaderList headers;
+    HeaderProvider provider;
     {
         std::lock_guard lk(mu);
-        headers = {
-            {"Content-Type", "application/json"},
-            {"Accept",       "application/json, text/event-stream"},
-        };
-        headers.insert(headers.end(), config.headers.begin(),
-                       config.headers.end());
-        header_provider = config.header_provider;
-        if (!session_id.empty()) {
-            headers.emplace_back("Mcp-Session-Id", session_id);
-        }
-        // Spec MUST (transports / Streamable HTTP § "Protocol Version
-        // Header"): include MCP-Protocol-Version on every HTTP request
-        // after initialize. Strict 2025-11-25 servers respond 400 Bad
-        // Request without it. Skip on the initialize call itself —
-        // negotiated_protocol_version_ is empty until initialize returns.
-        if (!protocol_version.empty()) {
-            headers.emplace_back("MCP-Protocol-Version", protocol_version);
-        }
+        headers.emplace_back("Content-Type", "application/json");
+        headers.emplace_back("Accept", accept);
+        headers.insert(headers.end(), config.headers.begin(), config.headers.end());
+        provider = config.header_provider;
+        if (sent_session) *sent_session = session_id;
+        if (!session_id.empty()) headers.emplace_back("Mcp-Session-Id", session_id);
+        // MCP transports, "Protocol Version Header": every request after
+        // initialize carries the negotiated revision.
+        if (!protocol_version.empty()) headers.emplace_back("MCP-Protocol-Version", protocol_version);
     }
+    if (last_event_id) headers.emplace_back("Last-Event-ID", *last_event_id);
     // User callbacks may refresh credentials or re-enter application code. Run
     // them after releasing the session mutex so they cannot deadlock the client.
-    if (header_provider) {
-        auto dynamic_headers = header_provider();
-        headers.insert(headers.end(), dynamic_headers.begin(),
-                       dynamic_headers.end());
+    if (provider) {
+        auto dynamic_headers = provider();
+        headers.insert(headers.end(), dynamic_headers.begin(), dynamic_headers.end());
     }
-    if (worker.stopped.load()) throw_shutdown();
     for (const auto& [name, value] : headers) {
         if (name.empty() || name.find_first_of("\r\n") != std::string::npos
             || value.find_first_of("\r\n") != std::string::npos) {
             throw std::invalid_argument("MCP header contains CR/LF or an empty name");
         }
     }
+    return headers;
+}
 
-    auto body_str = request.dump();
-
-    async::RequestOptions opts;
-    opts.timeout = config.request_timeout;
-    if (deadline != std::chrono::steady_clock::time_point::max()) {
-        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-            deadline - std::chrono::steady_clock::now());
-        if (remaining.count() <= 0) throw_rpc_bound(deadline, cancel_token);
-        if (opts.timeout.count() <= 0 || remaining < opts.timeout) opts.timeout = remaining;
+void detail::HttpSession::on_stream_message(HttpExchange& exchange, json message) {
+    switch (message_kind(message)) {
+    case MessageKind::response:
+        // This request's response; a late response to an abandoned request
+        // is dropped.
+        if (!exchange.response && message["id"].is_number_integer() &&
+            message["id"].get<long long>() == exchange.id)
+            exchange.response = std::move(message);
+        break;
+    case MessageKind::request:
+        // A server request on the response stream, such as a ping while a
+        // tool runs: it is answered in its own POST while this stream stays
+        // open (MCP-C-02).
+        asio::co_spawn(worker.io, best_effort(reply(server_request_reply(message))),
+                       asio::detached);
+        break;
+    case MessageKind::notification:
+        deliver_notification(message);
+        break;
+    case MessageKind::invalid:
+        break;
     }
+}
 
-    auto ex = co_await asio::this_coro::executor;
-    async::HttpResponse res;
+void detail::HttpSession::listen() noexcept {
     try {
-        auto result = co_await (
-            capture_result(async::async_post(ex, endpoint.host, endpoint.port,
-                                             path, body_str, std::move(headers),
-                                             endpoint.tls, opts))
-            || wait_for_rpc_bound(deadline, cancel_token, shutdown_token));
-        if (result.index() == 1) throw_rpc_bound(deadline, cancel_token, shutdown_token);
-        auto captured = std::get<0>(std::move(result));
-        if (captured.error) std::rethrow_exception(captured.error);
-        if (worker.stopped.load()) throw_shutdown();
-        res = std::move(*captured.value);
-    } catch (const std::system_error& e) {
-        const auto failure = e.code() == asio::error::timed_out
-            ? MCPFailure::timeout : (e.code() == asio::error::operation_aborted
-                ? MCPFailure::shutdown : MCPFailure::connection);
-        throw MCPTransportError(failure, std::string("MCP HTTP request failed: ") + e.what());
+        worker.start([this] {
+            if (listening || worker.stopped.load()) return;
+            listening = true;
+            listen_stop = std::make_unique<asio::steady_timer>(worker.io);
+            listen_stop->expires_at(std::chrono::steady_clock::time_point::max());
+            asio::co_spawn(worker.io, listen_loop(), asio::detached);
+        });
+    } catch (...) {
+        // A shut-down client listens to nothing.
     }
+}
 
-    // Absorb response state under the mutex — `Mcp-Session-Id` may
-    // change mid-conversation if the server rotates it. The MCP spec
-    // sends this header on the initialize response; subsequent rpc
-    // calls must echo it back so the server routes to the same session.
-    if (auto sid = res.get_header("Mcp-Session-Id"); !sid.empty()) {
-        std::lock_guard lk(mu);
-        session_id = std::string(sid);
-    }
-
-    if (res.status != 200) {
-        std::string scheme = endpoint.tls ? "https://" : "http://";
-        std::string full_url =
-            scheme + endpoint.host + ":" + endpoint.port + path;
-        std::string hint;
-        if (res.status == 404) {
-            hint = " — the server has no MCP endpoint at this path. Check the "
-                   "configured URL (a trailing '/mcp' is added automatically, "
-                   "so pass the server base like 'http://host:8000' or the "
-                   "full 'http://host:8000/mcp').";
-        }
-        throw MCPTransportError(
-            MCPFailure::http_status,
-            "MCP error (HTTP " + std::to_string(res.status) + ") for " +
-                full_url + ": " + res.body + hint, res.status);
-    }
-
-    // Parse response — may be plain JSON or SSE. Streamable HTTP can
-    // pack multiple SSE events into one response (e.g. an in-stream
-    // server→client request followed by the JSON-RPC response). Walk
-    // the events and pick the first one whose payload's `id` matches
-    // our request. Server requests and notifications remain unsupported,
-    // but cannot be mistaken for this call's response.
-    // This replaces a previous implementation that grabbed only the
-    // first `data:` line and dropped any subsequent events.
-    json resp;
-    const auto response_content_type = std::string(res.get_header("Content-Type"));
-    if (response_content_type.find("text/event-stream") != std::string::npos) {
-        // Parse SSE event stream: events separated by "\n\n", lines
-        // within an event starting with "data:" are concatenated with
-        // newlines per the W3C SSE spec.
-        json matched;
-        size_t pos = 0;
-        while (pos < res.body.size()) {
-            auto event_end = res.body.find("\n\n", pos);
-            std::string event = (event_end == std::string::npos)
-                                ? res.body.substr(pos)
-                                : res.body.substr(pos, event_end - pos);
-            pos = (event_end == std::string::npos)
-                  ? res.body.size()
-                  : event_end + 2;
-
-            std::string data;
-            size_t lp = 0;
-            while (lp < event.size()) {
-                auto nl = event.find('\n', lp);
-                std::string line = (nl == std::string::npos)
-                                   ? event.substr(lp)
-                                   : event.substr(lp, nl - lp);
-                lp = (nl == std::string::npos) ? event.size() : nl + 1;
-                if (line.rfind("data:", 0) == 0) {
-                    auto value = line.substr(5);
-                    if (!value.empty() && value.front() == ' ') value.erase(0, 1);
-                    if (!data.empty()) data.push_back('\n');
-                    data.append(value);
-                }
-            }
-            if (data.empty()) continue;
-            try {
-                json frame = json::parse(data);
-                if (frame.contains("id")
-                    && frame["id"].is_number_integer()
-                    && frame["id"].get<int>() == this_id) {
-                    matched = std::move(frame);
-                    break;
-                }
-            } catch (...) {
-                // Tolerate keep-alive / comment events; skip.
-            }
-        }
-        if (!matched.is_null()) {
-            resp = std::move(matched);
-        } else {
-            throw MCPTransportError(MCPFailure::protocol,
-                "MCP SSE response had no JSON-RPC response matching the request id");
-        }
-    } else {
+asio::awaitable<void> detail::HttpSession::listen_loop() {
+    // MCP transports, "Listening for Messages from the Server": the optional
+    // GET stream carries notifications (such as tools/list_changed) and
+    // requests between calls. A server that offers none answers 405; a
+    // stream that ends is reopened with Last-Event-ID after `retry`.
+    using asio::experimental::awaitable_operators::operator||;
+    std::string last_event_id;
+    std::optional<std::uint64_t> retry;
+    int idle = 0;
+    while (!worker.stopped.load()) {
+        std::string sent_session;
+        HeaderList headers;
         try {
-            resp = json::parse(res.body);
+            headers = request_headers("text/event-stream",
+                                      last_event_id.empty() ? nullptr : &last_event_id,
+                                      &sent_session);
+        } catch (...) {
+            break;
+        }
+        if (sent_session.empty()) break;  // no session to listen to
+        auto stream = std::make_shared<HttpExchange>(-1);
+        try {
+            co_await (stream_once("GET", std::string(), std::move(headers), stream,
+                                  std::chrono::milliseconds(0))
+                      || listen_stop->async_wait(asio::use_awaitable));
+        } catch (...) {
+            if (worker.stopped.load()) break;
+            stream->status = 0;
+        }
+        if (worker.stopped.load()) break;
+        // 405: the server has no such stream; 404: the session ended (the
+        // next request starts a new one, which listens again).
+        if (stream->status >= 400 || (stream->status != 0 && !stream->event_stream)) break;
+        if (!stream->events.last_event_id().empty()) last_event_id = stream->events.last_event_id();
+        if (stream->events.retry_ms()) retry = stream->events.retry_ms();
+        idle = stream->saw_event ? 0 : idle + 1;
+        if (idle > kMaxIdleResumes) break;
+        asio::steady_timer pause(worker.io);
+        pause.expires_after(retry ? std::chrono::milliseconds(static_cast<std::int64_t>(
+                                        std::min<std::uint64_t>(*retry, 3600000)))
+                                  : kDefaultSseRetry);
+        try {
+            co_await (pause.async_wait(asio::use_awaitable)
+                      || listen_stop->async_wait(asio::use_awaitable));
+        } catch (...) {
+            break;
+        }
+    }
+    listening = false;
+}
+
+asio::awaitable<void> detail::HttpSession::stream_once(std::string method, std::string body,
+                                                       HeaderList headers,
+                                                       std::shared_ptr<HttpExchange> exchange,
+                                                       std::chrono::milliseconds timeout) {
+    struct StreamAnswered {};
+    auto ex = co_await asio::this_coro::executor;
+    async::RequestOptions options;
+    options.timeout = timeout;
+    // An event stream lasts as long as the call; its events are bounded one
+    // by one, and a JSON body below.
+    options.max_response_body_bytes = 0;
+    async::HttpStreamResponse response;
+    try {
+    response = co_await async::async_request_stream(
+        ex, method, endpoint.host, endpoint.port, target, body, std::move(headers),
+        endpoint.tls,
+        [this, exchange](const async::HttpResponseHead& head) {
+            exchange->status = head.status;
+            const bool success = head.status >= 200 && head.status < 300;
+            exchange->event_stream =
+                success && lowercase(head.get_header("Content-Type")).rfind("text/event-stream", 0) == 0;
+            // The server may assign or rotate the session id on any response.
+            if (const auto sid = head.get_header("Mcp-Session-Id"); success && !sid.empty()) {
+                std::lock_guard lk(mu);
+                session_id = std::string(sid);
+            }
+        },
+        [this, exchange](std::string_view chunk) {
+            if (!exchange->event_stream) {
+                if (exchange->body.size() + chunk.size() > kMaxJsonBody)
+                    throw MCPTransportError(MCPFailure::protocol, "MCP HTTP response body is too large");
+                exchange->body.append(chunk);
+                return;
+            }
+            // Server-Sent Events by the WHATWG rules: CRLF, LF or CR line
+            // ends, multi-line data, id and retry. The client used to split
+            // events only on "\n\n", so the official Python servers' CRLF
+            // streams lost every response after a notification (MCP-C-01).
+            exchange->events.feed(chunk);
+            for (auto& event : exchange->events.drain()) {
+                exchange->saw_event = true;
+                if (event.data.empty()) continue;  // a priming event
+                json message;
+                try {
+                    message = json::parse(event.data);
+                } catch (const json::exception&) {
+                    continue;
+                }
+                on_stream_message(*exchange, std::move(message));
+            }
+            // The request is answered: stop reading, whether or not the
+            // server closes the stream (a resumed stream may stay open).
+            if (exchange->response) throw StreamAnswered{};
+        },
+        options);
+    } catch (const StreamAnswered&) {
+        co_return;
+    }
+    exchange->status = response.status;
+}
+
+void detail::HttpSession::throw_http_failure(int status, const std::string& body) const {
+    // A JSON-RPC error in the body keeps its code, message and data
+    // (MCP-C-13), such as -32022 from a server that refuses the revision.
+    std::optional<MCPError> rpc_error;
+    try {
+        const auto parsed = json::parse(body);
+        if (parsed.is_object() && parsed.contains("error") && parsed["error"].is_object()) {
+            const auto error = parsed["error"];
+            if (error.contains("code") && error["code"].is_number_integer() &&
+                error.contains("message") && error["message"].is_string()) {
+                rpc_error.emplace(error["code"].get<int>(),
+                                  "MCP JSON-RPC error (HTTP " + std::to_string(status) + "): " +
+                                      error["message"].get<std::string>(),
+                                  error.contains("data") ? error["data"] : json(nullptr), status);
+            }
+        }
+    } catch (const json::exception&) {
+    }
+    if (rpc_error) throw *rpc_error;
+    const std::string scheme = endpoint.tls ? "https://" : "http://";
+    std::string message = "MCP error (HTTP " + std::to_string(status) + ") for " + scheme +
+                          endpoint.host + ":" + endpoint.port + target + ": " +
+                          body.substr(0, 512);
+    if (status == 404) {
+        message += " - the server has no MCP endpoint at this URL. The client uses the "
+                   "configured endpoint URL as given, path and query included "
+                   "(for example http://host:8000/mcp).";
+    }
+    throw MCPTransportError(MCPFailure::http_status, std::move(message), status);
+}
+
+asio::awaitable<json> detail::HttpSession::exchange_and_resume(
+    json request, int id, std::chrono::steady_clock::time_point until) {
+    std::string sent_session;
+    auto headers = request_headers("application/json, text/event-stream", nullptr, &sent_session);
+    auto exchange = std::make_shared<HttpExchange>(id);
+    co_await stream_once("POST", request.dump(), std::move(headers), exchange, remaining(until));
+
+    if (exchange->status == 404 && !sent_session.empty()) {
+        throw SessionNotFound(sent_session, "MCP session " + sent_session +
+                                                " is no longer known to the server (HTTP 404)");
+    }
+    if (exchange->status < 200 || exchange->status >= 300)
+        throw_http_failure(exchange->status, exchange->body);
+    if (!exchange->event_stream) {
+        if (exchange->body.empty()) {
+            throw MCPTransportError(MCPFailure::protocol,
+                                    "MCP server answered a request without a JSON-RPC response (HTTP " +
+                                        std::to_string(exchange->status) + ")");
+        }
+        try {
+            co_return json::parse(exchange->body);
         } catch (const json::parse_error& e) {
             throw MCPTransportError(MCPFailure::protocol,
                                     std::string("MCP HTTP response JSON: ") + e.what());
         }
     }
 
-    co_return resp;
+    // MCP transports, "Resumability" (2025-11-25): a server may close the
+    // stream before the response, after it sent an event id. The client then
+    // waits the stream's `retry` and asks for the rest with GET and
+    // Last-Event-ID (MCP-C-07).
+    std::string last_event_id = exchange->events.last_event_id();
+    auto retry = exchange->events.retry_ms();
+    int idle_resumes = 0;
+    while (!exchange->response) {
+        if (last_event_id.empty()) {
+            throw MCPTransportError(
+                MCPFailure::protocol,
+                "MCP SSE response ended without a JSON-RPC response for the request");
+        }
+        if (++idle_resumes > kMaxIdleResumes) {
+            throw MCPTransportError(MCPFailure::protocol,
+                                    "MCP SSE stream ended repeatedly without the response");
+        }
+        const auto wait = std::min(
+            retry ? std::chrono::milliseconds(static_cast<std::int64_t>(
+                        std::min<std::uint64_t>(*retry, 3600000)))
+                  : kDefaultSseRetry,
+            remaining(until));
+        asio::steady_timer timer(co_await asio::this_coro::executor);
+        timer.expires_after(wait);
+        co_await timer.async_wait(asio::use_awaitable);
+
+        std::string resume_session;
+        auto resume_headers = request_headers("text/event-stream", &last_event_id, &resume_session);
+        auto resumed = std::make_shared<HttpExchange>(id);
+        co_await stream_once("GET", std::string(), std::move(resume_headers), resumed,
+                             remaining(until));
+        // The request already reached the server, so a lost session cannot
+        // be recovered by sending it again.
+        if (resumed->status < 200 || resumed->status >= 300)
+            throw_http_failure(resumed->status, resumed->body);
+        if (!resumed->event_stream) {
+            throw MCPTransportError(MCPFailure::protocol,
+                                    "MCP server did not resume the event stream");
+        }
+        if (resumed->saw_event) idle_resumes = 0;
+        if (!resumed->events.last_event_id().empty())
+            last_event_id = resumed->events.last_event_id();
+        if (resumed->events.retry_ms()) retry = resumed->events.retry_ms();
+        exchange = std::move(resumed);
+    }
+    co_return std::move(*exchange->response);
+}
+
+asio::awaitable<json> detail::HttpSession::do_exchange(
+    json request, std::chrono::steady_clock::time_point deadline,
+    std::shared_ptr<graph::CancelToken> cancel_token) {
+    if (worker.stopped.load()) throw_shutdown();
+    using asio::experimental::awaitable_operators::operator||;
+    const int id = request.at("id").get<int>();
+    auto until = deadline;
+    if (config.request_timeout.count() > 0)
+        until = std::min(until, std::chrono::steady_clock::now() + config.request_timeout);
+    if ((cancel_token && cancel_token->is_cancelled()) ||
+        deadline <= std::chrono::steady_clock::now())
+        throw_rpc_bound(deadline, cancel_token);
+    try {
+        std::variant<CapturedResult<json>, std::monostate> result;
+        try {
+            result = co_await (
+                capture_result(exchange_and_resume(std::move(request), id, until))
+                || wait_for_rpc_bound(deadline, cancel_token, shutdown_token));
+        } catch (const asio::multiple_exceptions& both) {
+            // The caller cancelled the coroutine awaiting this call, and both
+            // waits ended with it: the first failure names it.
+            std::rethrow_exception(both.first_exception());
+        }
+        if (result.index() == 1) throw_rpc_bound(deadline, cancel_token, shutdown_token);
+        auto captured = std::get<0>(std::move(result));
+        if (captured.error) std::rethrow_exception(captured.error);
+        if (worker.stopped.load()) throw_shutdown();
+        co_return std::move(*captured.value);
+    } catch (const std::system_error& e) {
+        // An aborted operation of a client still running was cancelled by
+        // its caller, for example a graph run whose cancel token cancels
+        // the coroutine that awaits the call: the server is told.
+        const auto failure = e.code() == asio::error::timed_out ? MCPFailure::timeout
+            : aborted_by_caller(e.code())
+                ? (worker.stopped.load() ? MCPFailure::shutdown : MCPFailure::cancelled)
+                : MCPFailure::connection;
+        throw MCPTransportError(failure, std::string("MCP HTTP request failed: ") + e.what());
+    } catch (const std::length_error& e) {
+        throw MCPTransportError(MCPFailure::protocol, std::string("MCP HTTP response: ") + e.what());
+    }
+}
+
+asio::awaitable<std::pair<int, std::string>> detail::HttpSession::send(
+    std::string method, std::string body, HeaderList headers, std::chrono::milliseconds timeout) {
+    using asio::experimental::awaitable_operators::operator||;
+    auto exchange = std::make_shared<HttpExchange>(0);
+    exchange->event_stream = false;
+    auto result = co_await (
+        capture_result(notification_result(
+            stream_once(std::move(method), std::move(body), std::move(headers), exchange, timeout)))
+        || wait_for_rpc_bound(std::chrono::steady_clock::time_point::max(), {}, shutdown_token));
+    if (result.index() == 1) throw_shutdown();
+    auto captured = std::get<0>(std::move(result));
+    if (captured.error) std::rethrow_exception(captured.error);
+    co_return std::make_pair(exchange->status, std::move(exchange->body));
+}
+
+asio::awaitable<void> detail::HttpSession::reply(json message) {
+    // The response to a server request goes to the endpoint like any other
+    // message; the server answers 202 with no body.
+    auto headers = request_headers("application/json, text/event-stream", nullptr, nullptr);
+    co_await send("POST", message.dump(), std::move(headers), config.request_timeout);
+}
+
+asio::awaitable<void> detail::HttpSession::delete_session(std::string session) {
+    std::string sent;
+    auto headers = request_headers("application/json, text/event-stream", nullptr, &sent);
+    if (sent != session) co_return;
+    const auto timeout = config.request_timeout.count() > 0
+        ? std::min(config.request_timeout, kSessionDeleteTimeout)
+        : kSessionDeleteTimeout;
+    // 405 means the server does not let clients end sessions: nothing to do.
+    co_await send("DELETE", std::string(), std::move(headers), timeout);
+}
+
+void detail::HttpSession::end_session() noexcept {
+    // MCP transports, "Session Management": a client that no longer needs
+    // its session SHOULD end it with DELETE. MCPClient::shutdown() and the
+    // release of the last reference both do, once and bounded (MCP-C-10).
+    std::string session;
+    {
+        std::lock_guard lk(mu);
+        session = session_id;
+    }
+    if (session.empty() || worker.stopped.load() ||
+        worker.io.get_executor().running_in_this_thread())
+        return;
+    try {
+        auto done = std::make_shared<std::promise<void>>();
+        auto finished = done->get_future();
+        worker.start([this, done, session]() mutable {
+            asio::co_spawn(worker.io, best_effort(delete_session(std::move(session))),
+                           [done](std::exception_ptr) { done->set_value(); });
+        });
+        finished.wait_for(kSessionDeleteTimeout + std::chrono::milliseconds(500));
+    } catch (...) {
+        // A client that cannot reach its server leaves the session to expire.
+    }
+    std::lock_guard lk(mu);
+    session_id.clear();
 }
 
 namespace {
@@ -1861,11 +2495,16 @@ T decode_protocol_result(const json& raw) {
     }
 }
 
+#ifndef NEOGRAPH_VERSION_STR
+#define NEOGRAPH_VERSION_STR "unknown"
+#endif
+
 json initialize_params(const std::string& client_name) {
     json params;
-    params["protocolVersion"] = "2025-11-25";
+    params["protocolVersion"] = MCP_SUPPORTED_PROTOCOL_VERSIONS.front();
     params["capabilities"]    = json::object();
-    params["clientInfo"]      = {{"name", client_name}, {"version", "0.1.0"}};
+    // The library's version, not a placeholder (MCP-C-20).
+    params["clientInfo"]      = {{"name", client_name}, {"version", NEOGRAPH_VERSION_STR}};
     return params;
 }
 
@@ -1896,37 +2535,6 @@ void reset_initialization(
     metadata->changed.notify_all();
 }
 
-HeaderList notification_headers(detail::HttpSession& session) {
-    HeaderList headers = {
-        {"Content-Type", "application/json"},
-        {"Accept", "application/json, text/event-stream"},
-    };
-    HeaderProvider provider;
-    {
-        std::lock_guard lk(session.mu);
-        headers.insert(headers.end(), session.config.headers.begin(),
-                       session.config.headers.end());
-        provider = session.config.header_provider;
-        if (!session.session_id.empty()) {
-            headers.emplace_back("Mcp-Session-Id", session.session_id);
-        }
-        if (!session.protocol_version.empty()) {
-            headers.emplace_back("MCP-Protocol-Version", session.protocol_version);
-        }
-    }
-    if (provider) {
-        auto dynamic_headers = provider();
-        headers.insert(headers.end(), dynamic_headers.begin(), dynamic_headers.end());
-    }
-    for (const auto& [name, value] : headers) {
-        if (name.empty() || name.find_first_of("\r\n") != std::string::npos
-            || value.find_first_of("\r\n") != std::string::npos) {
-            throw std::invalid_argument("MCP header contains CR/LF or an empty name");
-        }
-    }
-    return headers;
-}
-
 } // namespace
 
 asio::awaitable<void> detail::HttpSession::notify(json notification) {
@@ -1935,34 +2543,21 @@ asio::awaitable<void> detail::HttpSession::notify(json notification) {
 
 asio::awaitable<void> detail::HttpSession::do_notify(json notification) {
     if (worker.stopped.load()) throw_shutdown();
-    using asio::experimental::awaitable_operators::operator||;
-    async::RequestOptions opts;
-    opts.timeout = config.request_timeout;
-    auto ex = co_await asio::this_coro::executor;
-    async::HttpResponse res;
+    std::pair<int, std::string> answer;
     try {
-        auto headers = notification_headers(*this);
+        auto headers = request_headers("application/json, text/event-stream", nullptr, nullptr);
         if (worker.stopped.load()) throw_shutdown();
-        auto result = co_await (
-            capture_result(async::async_post(ex, endpoint.host, endpoint.port, path,
-                                             notification.dump(), std::move(headers),
-                                             endpoint.tls, opts))
-            || wait_for_rpc_bound(std::chrono::steady_clock::time_point::max(),
-                                  {}, shutdown_token));
-        if (result.index() == 1) throw_shutdown();
-        auto captured = std::get<0>(std::move(result));
-        if (captured.error) std::rethrow_exception(captured.error);
-        if (worker.stopped.load()) throw_shutdown();
-        res = std::move(*captured.value);
+        answer = co_await send("POST", notification.dump(), std::move(headers),
+                               config.request_timeout);
     } catch (const std::system_error& e) {
         throw MCPTransportError(e.code() == asio::error::timed_out
                                     ? MCPFailure::timeout : MCPFailure::connection,
                                 std::string("MCP HTTP notification: ") + e.what());
     }
-    if (res.status < 200 || res.status >= 300) {
+    if (answer.first < 200 || answer.first >= 300) {
         throw MCPTransportError(MCPFailure::http_status,
-            "MCP initialize notification returned HTTP "
-            + std::to_string(res.status) + ": " + res.body, res.status);
+            "MCP notification returned HTTP " + std::to_string(answer.first) + ": " +
+                answer.second.substr(0, 512), answer.first);
     }
 }
 
@@ -1976,16 +2571,37 @@ asio::awaitable<bool> MCPClient::initialize_async(const std::string& client_name
     co_return co_await session->initialize_async(client_name);
 }
 
+bool MCPClient::initialize(const std::string& client_name,
+                           std::chrono::steady_clock::time_point deadline,
+                           std::shared_ptr<graph::CancelToken> cancel_token) {
+    return async::run_sync(initialize_async(client_name, deadline, std::move(cancel_token)));
+}
+
+asio::awaitable<bool> MCPClient::initialize_async(
+    const std::string& client_name, std::chrono::steady_clock::time_point deadline,
+    std::shared_ptr<graph::CancelToken> cancel_token) {
+    auto session = session_;
+    co_return co_await session->initialize_async(client_name, deadline, std::move(cancel_token));
+}
+
+void MCPClient::set_tool_list_changed_handler(std::function<void()> handler) {
+    session_->set_tool_list_changed_handler(std::move(handler));
+}
+
 bool detail::ProtocolSession::initialize(const std::string& client_name) {
     return async::run_sync(initialize_async(client_name));
 }
 
 asio::awaitable<bool> detail::ProtocolSession::initialize_async(
-    const std::string& client_name) {
+    const std::string& client_name, std::chrono::steady_clock::time_point deadline,
+    std::shared_ptr<graph::CancelToken> cancel_token) {
     // Only one caller performs the handshake; concurrent callers wait for the
     // same negotiated session. A failure resets both protocol and transport.
     for (;;) {
         if (stopped_.load()) throw_shutdown();
+        if ((cancel_token && cancel_token->is_cancelled()) ||
+            deadline <= std::chrono::steady_clock::now())
+            throw_rpc_bound(deadline, cancel_token);
         {
             std::lock_guard lk(metadata_->mu);
             if (metadata_->lifecycle
@@ -1996,6 +2612,7 @@ asio::awaitable<bool> detail::ProtocolSession::initialize_async(
                 == detail::ClientMetadata::Lifecycle::created) {
                 metadata_->lifecycle =
                     detail::ClientMetadata::Lifecycle::initializing;
+                metadata_->client_name = client_name;
                 break;
             }
         }
@@ -2006,8 +2623,10 @@ asio::awaitable<bool> detail::ProtocolSession::initialize_async(
 
     bool unsupported_version = false;
     try {
+        // The bounds stop waiting only: MCP never cancels initialize on the
+        // wire, so no notifications/cancelled follows.
         auto raw = co_await rpc_call_async(
-            "initialize", initialize_params(client_name));
+            "initialize", initialize_params(client_name), deadline, cancel_token);
         auto result = decode_protocol_result<InitializeResult>(raw);
         if (!is_supported_protocol_version(result.protocol_version)) {
             // MCP lifecycle, "Version Negotiation": a client that does not
@@ -2030,12 +2649,34 @@ asio::awaitable<bool> detail::ProtocolSession::initialize_async(
         };
         co_await transport_->notify(std::move(notification));
         store_initialize_result(metadata_, std::move(result));
+        listen_if_wanted();
         co_return true;
     } catch (...) {
         reset_initialization(transport_, metadata_);
         if (unsupported_version) shutdown();
         throw;
     }
+}
+
+void detail::ProtocolSession::set_tool_list_changed_handler(std::function<void()> handler) {
+    {
+        std::lock_guard lk(metadata_->mu);
+        metadata_->tool_list_changed = std::move(handler);
+    }
+    listen_if_wanted();
+}
+
+void detail::ProtocolSession::listen_if_wanted() {
+    // As the official clients do, an HTTP session opens the optional GET
+    // stream once it is initialized: servers send requests and
+    // notifications that belong to no call there (FastMCP's ping, for
+    // instance, and tools/list_changed). A server without one answers 405.
+    bool initialized = false;
+    {
+        std::lock_guard lk(metadata_->mu);
+        initialized = metadata_->lifecycle == ClientMetadata::Lifecycle::initialized;
+    }
+    if (initialized) transport_->listen();
 }
 
 bool detail::ProtocolSession::is_initialized() const noexcept {

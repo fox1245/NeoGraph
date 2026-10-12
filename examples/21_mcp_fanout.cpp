@@ -127,7 +127,7 @@ public:
 };
 
 int main(int argc, char** argv) {
-    const std::string mcp_url = (argc >= 2) ? argv[1] : "http://localhost:8000";
+    const std::string mcp_url = (argc >= 2) ? argv[1] : "http://localhost:8000/mcp";
 
     try {
     // One shared MCPClient — all fan-out branches reuse it. HTTP client is
