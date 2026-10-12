@@ -138,7 +138,7 @@ These examples run offline. The MCP client examples start a standard-library ser
 | 59 | [`59_mcp_server.cpp`](59_mcp_server.cpp) | yes | MCP server over stdio with one `echo` tool, input and output schemas, and structured content. |
 | 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | yes | MCP over stdio: the server is a child process with no network stack, and a ReAct loop calls its tools. Scripted model, standard-library server. |
 | 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | yes | MCP over streamable HTTP: discover a server's tools and give them to a ReAct loop. The demo server is standard-library Python and the model is scripted. |
-| 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | key | MCP with human approval: `interrupt_before` any MCP tool call, show the pending call, resume. |
+| 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | yes | MCP with human approval: `interrupt_before` stops the graph ahead of an MCP tool call, the pending call is shown, and `resume()` continues without repeating the model call. |
 | 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | service | MCP with `Send`: one planner emits a call per MCP tool and the calls run in parallel. No model, but an MCP server must be running. |
 | 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | yes | One agent, two MCP servers (HTTP and stdio) merged into one tool list; its two calls go to different servers. |
 | 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | key | Operator feedback over MCP: a scripted second turn critiques the draft and the next run uses it. |
