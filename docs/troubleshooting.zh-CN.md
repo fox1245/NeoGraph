@@ -1,21 +1,21 @@
 <!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=cc7841c6b839b6ffd7e5f54c32ac76a95b214a2d621969c731a72de7b54379e7 -->
-# 故障排除
+# 故障排查
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
 
-## 确认安装的 artifact
+## 确认安装的是哪个构建产物
 
-记录 `neograph_engine.__version__`、Python version、OS/architecture、安装方式和第一个 error。检查该 release 的 wheel 文件，不假设 checkout 与旧 wheel 提供相同 API。typed 切换删除 legacy provider 名；旧 wheel import 不测试新 binding。
+先记录 `neograph_engine.__version__`、Python 版本、操作系统和架构、安装方式，以及最先出现的那个错误。请到该版本实际提供的 wheel 文件里确认，不要默认源码检出和旧 wheel 暴露的是同一套 API。类型化切换（typed cutover）移除了旧的 provider 名称；用旧 wheel 做 import，测不出新的绑定。
 
-NeoGraph 公开 platform metadata 包括 Linux/macOS/Windows。当前 SchemaProvider runtime/archive 验证范围为 Linux/POSIX；macOS/Windows port 须单独验证后才能声称新 wheel 可用。匹配 wheel tag/compiler 不证明 runtime 集成；WASM provider runtime 支持未确立。
+NeoGraph 发布的平台元数据包含 Linux、macOS 和 Windows。目前 SchemaProvider 的运行时和 archive 只在 Linux/POSIX 上通过了资格认证；macOS 和 Windows 的移植需要各自完成资格认证，之后才能说新的 wheel 在那里可用。仅有兼容的 wheel 标签或编译器，不能证明运行时已经集成好。WASM 上的 provider 运行时支持尚未确立。
 
-缺失 GLIBC symbol 时比较 wheel manylinux tag 与 host glibc。`manylinux_2_34` artifact 需要 glibc 2.34 以上。Windows DLL error 检查 x64 Python 与缺失 dependency DLL，architecture 不是唯一可能原因。不要单独替换 bundled library。
+遇到缺少 GLIBC 符号的错误时，把 wheel 的 manylinux 标签与宿主机的 glibc 版本对照。`manylinux_2_34` 的产物要求 glibc 2.34 或更新。Windows 上出现 DLL 错误时，确认用的是 x64 Python，并检查缺失的依赖 DLL；原因不一定只是架构不符。不要单独替换 wheel 中捆绑的某个库。
 
-## source 配置与缺失依赖
+## 源码配置与缺失的依赖
 
-Core 即使 `NEOGRAPH_BUILD_LLM=OFF` 也需要 `SchemaProvider::runtime`。NeoGraph 配置要求 CMake 3.20+。依次优先显式 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、installed package、默认 revision-pinned 公开 archive fallback。离线配置时安装匹配 SDK，在 `CMAKE_PREFIX_PATH` 提供 prefix 并设置 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`。SDK source build 需要 C++20、Python、standalone Asio、yyjson、libcurl 7.88+、OpenSSL Crypto；fetched/source 集成使用 NeoGraph 已提交的 Asio/yyjson。
+即使设置了 `NEOGRAPH_BUILD_LLM=OFF`，Core 仍然需要 `SchemaProvider::runtime`。配置 NeoGraph 需要 CMake 3.20 及以上。依赖的查找顺序是：优先使用显式指定的 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`，其次是已安装的包，最后是默认的、固定了修订版本的公开归档。离线配置时，先安装匹配的 SDK，通过 `CMAKE_PREFIX_PATH` 设置它的前缀，并设置 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`。从源码构建 SDK 需要 C++20、Python、独立版 Asio、yyjson、libcurl 7.88 及以上版本和 OpenSSL Crypto；NeoGraph 会把仓库中自带的 Asio/yyjson 提供给下载或源码形式的集成。
 
-SDK 单独不声明 OpenSSL Crypto 最小 version。NeoGraph 完整 HTTPS 配置与 wheel/sdist 路径通过 async/MCP HTTP 依赖要求 OpenSSL 3；这些 build 仅安装 Crypto header 不够。
+SDK 自身没有声明 OpenSSL Crypto 的最低版本。NeoGraph 完整的 HTTPS 配置以及 wheel/sdist 路径，会通过异步/MCP 的 HTTP 依赖要求 OpenSSL 3；只安装 Crypto 的头文件，不足以完成这些构建。
 
 ```bash
 cmake -S . -B build -DCMAKE_PREFIX_PATH="$SDK_PREFIX" \
@@ -23,25 +23,25 @@ cmake -S . -B build -DCMAKE_PREFIX_PATH="$SDK_PREFIX" \
 cmake --build build -j
 ```
 
-构建树不是已安装的包。在 `PYTHONPATH=build python -c "import neograph_engine"` 之前，先用 `pip install 'pydantic>=2' certifi` 安装 wheel 的 Python 依赖：缺少 pydantic 时 import 会失败，缺少 certifi 时 TLS 使用主机信任存储。
+构建目录不是已安装的包。在运行 `PYTHONPATH=build python -c "import neograph_engine"` 之前，先用 `pip install 'pydantic>=2' certifi` 安装 wheel 的 Python 依赖：没有 pydantic，import 会失败；没有 certifi，TLS 会使用宿主机的信任库。
 
-`Could NOT find CURL` 不能靠禁用 `NEOGRAPH_USE_LIBCURL` 修复；该 flag 控制 NeoGraph 可选 CurlH2Pool，不控制 SDK 必需 transport。安装 libcurl 开发文件（Debian/Ubuntu 的 `libcurl4-openssl-dev`、Fedora 的 `libcurl-devel`），使用一致 toolchain/prefix。
+出现 `Could NOT find CURL` 时，关闭 `NEOGRAPH_USE_LIBCURL` 解决不了问题：这个开关控制的是 NeoGraph 可选的 CurlH2Pool，不是 SDK 必需的传输层。请安装 libcurl 的开发文件（Debian/Ubuntu 上是 `libcurl4-openssl-dev`，Fedora 上是 `libcurl-devel`），并保持工具链和前缀一致。
 
-SQLite/PostgreSQL 是 NeoGraph 可选 component。提供开发 package 或显式禁用 `NEOGRAPH_BUILD_SQLITE`/`NEOGRAPH_BUILD_POSTGRES`；SDK runtime 仍保留。header/API 变化后 binding symbol 未解析时，在 fresh build directory 重新配置 CMake，用匹配 header/library rebuild 所有 consumer。
+SQLite 和 PostgreSQL 是 NeoGraph 的可选组件。要么提供它们的开发包，要么显式关闭 `NEOGRAPH_BUILD_SQLITE`/`NEOGRAPH_BUILD_POSTGRES`。这样做不会去掉 SDK 运行时。头文件或 API 变更之后如果出现绑定符号无法解析，请在全新的构建目录里重新配置，并针对匹配的头文件和库重新构建所有使用方。
 
-GCC 13 coroutine ICE 在 Stage 3 报告过。升级到适用 compiler 或重构对应表达式；旧 workaround 不验证整个 SDK/platform build。不要在 catch handler 中 `co_await`，C++ 本身禁止。保存 error，在 handler 外 await recovery。
+Stage 3 期间曾有人报告 GCC 13 在协程上出现编译器内部错误。请升级到合适的编译器，或者调整报错的那个表达式；当年的那些变通办法，并不能证明整个 SDK/平台的构建已通过资格认证。绝不要在 catch 处理器里 `co_await`：C++ 本身就禁止在那里使用 await 表达式。应该先把错误捕获下来，再到处理器外面 await 恢复逻辑。
 
-## 删除的 provider API 与 typed failure
+## 已移除的 provider API 与带类型的失败
 
-`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor-interpreter 配置、`prefer_libcurl`、Responses WebSocket 选择已删除。用 `SchemaProvider(load_provider_descriptor(descriptor_json), ProviderRuntimeOptions(...), SchemaProviderDefaults(...))` 和 `make_provider_request`。准确 constructor 见 [Python binding](python-binding.md)，C++ 见[迁移](migration-v0.4-to-v1.0.md)。
+`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器配置、`prefer_libcurl` 和 Responses WebSocket 的选择，都已不存在。请使用 `SchemaProvider(load_provider_descriptor(descriptor_json), ProviderRuntimeOptions(...), SchemaProviderDefaults(...))` 和 `make_provider_request`。具体的构造函数见 [Python 绑定](python-binding.md)，C++ 的迁移见[迁移指南](migration-v0.4-to-v1.0.md)。
 
-`prepare` 返回 single-use `PreparedProviderRequest`，`dispatch` 消费它；`invoke` 合并两步。保存 dispatch receipt 后不要重建 admitted request，不要重试 consumed handle。failure outcome 是带真实 error/partial 证据的 data；检查 `outcome.failure`，不要当作成功 completion 读取。
+`prepare` 返回只能使用一次的 `PreparedProviderRequest`，`dispatch` 会把它消耗掉，`invoke` 则把两步合在一起。已准入的请求一旦持久化了它的分发回执，就不要再重建，也不要重试已被消耗的句柄。失败的 outcome 本身就是数据，带有真实的错误和部分输出的证据；请检查 `outcome.failure`，不要把它当作形似成功的 completion 来读。
 
-observer exception 在 `ProviderObserverError` 保留 typed outcome/cause。budget settlement 和 terminal receipt persistence error 也保留真实 outcome，但该证据不授权再次 send。delivery unknown 需要 reconciliation，不是 blind retry。
+observer 抛出的异常，会把带类型的 outcome 和 cause 保留在 `ProviderObserverError` 里。预算结算和终态回执持久化的错误同样保留真实的 outcome；这些证据并不授权再发送一次。送达状态未知的请求需要对账，不能盲目重试。
 
-## streaming 与 Python async 边界
+## 流式输出与 Python 异步的边界
 
-显式设置 `ProviderMode.Stream`，observer 不选择 streaming。token display 只筛选非空 content-text delta；usage、reasoning、tool、raw-wire、envelope 不是 token。C++ event view 在 callback 期间借用；Python ProviderEvent 拥有复制的借用 data。避免慢 observer 消耗 host delivery capacity。
+请显式设置 `ProviderMode.Stream`。只挂 observer 不会选择流式。要显示 token，请过滤出非空的内容文本增量；用量、reasoning、工具、raw-wire 和 envelope 事件都不是 token。C++ 的事件视图只在回调期间有效（是借用的）；Python 的 ProviderEvent 持有从借用数据复制出来的副本。避免使用慢速的 observer，它们会占用宿主的交付能力。
 
 ```python
 import asyncio
@@ -61,19 +61,19 @@ else:
     handle_completion(outcome.completion)
 ```
 
-Provider invoke/dispatch 是释放 GIL 的同步 Python method；使用 `asyncio.to_thread`，它们不是 native asyncio awaitable。callback 调用、复制、销毁获取 GIL。cancel 经 graph CancelToken 向 SDK 传递 stop；timeout 或取消 waiter 不证明 remote effect 未发生。
+Provider 的 invoke/dispatch 是同步的 Python 方法，会释放 GIL。请配合 `asyncio.to_thread` 使用，它们不是原生的 asyncio awaitable。回调的调用、复制和销毁都会获取 GIL。取消使用图的 CancelToken，并把停止请求转发给 SDK；超时或等待方被取消，并不能证明远端的副作用没有发生。
 
-continuation 保留完整 `ProviderMessage`，含 tool/refusal/reasoning part。`ChatMessage`/`ToolCall` 是 graph 便利值，不是完整 provider history 的 alias。缺失 usage 为 `None`，不是 zero；known-zero counter 是有证据的 UsageCount。portable projection 不能导入 native replay/financial authority；native continuation 只用 admitted NativeArchive custody 保存。
+续接对话时，请保留完整的 `ProviderMessage`，包括工具、refusal 和 reasoning 这些 part。`ChatMessage` 和 `ToolCall` 只是方便图使用的值，不是完整 provider 历史的别名。缺失的用量是 `None`，不是 0；已知为零的计数器仍然是带证据的 UsageCount 值。可移植的 outcome 投影无法引入 native replay 或资金方面的权限。只有在已准入的 NativeArchive 托管下，才能持久化 native 的续接状态。
 
-## TLS 与 local endpoint
+## TLS 与本地 endpoint
 
-通过 `ProviderRuntimeOptions.ca_file` 指定 trust bundle。Python import 保留已有 `SSL_CERT_FILE`，否则在 certifi 可用时选择它；runtime option 将选定 CA file 传给 SDK libcurl。`NEOGRAPH_SKIP_CERT_AUTOFIX=1` 不改 host 设置。不要禁用 certificate verification 来隐藏 endpoint/trust-store error。
+要指定明确的信任包，设置 `ProviderRuntimeOptions.ca_file`。Python 导入时会保留已有的 `SSL_CERT_FILE`，没有的话，在 certifi 可用时选用 certifi；运行时选项把选定的 CA 文件交给 SDK 的 libcurl。设置 `NEOGRAPH_SKIP_CERT_AUTOFIX=1` 则不改动宿主自己的选择。不要为了掩盖 endpoint 或信任库的错误而关闭证书校验。
 
-v0.1.0–v0.1.6 wheel CA path 导致的 ConnPool timeout 是历史问题；v0.1.7 加入 CA 自动选择。当前 provider 用 SDK libcurl 而非旧路径。local HTTP 是 validated descriptor 的 admitted data，不是 raw URL override；遵循[例 31](../examples/31_local_transformer.cpp)。Responses WebSocket close=1000 配方仅属于删除的旧 transport。
+v0.1.0–v0.1.6 中由 wheel 里的 CA 路径引起的 ConnPool 超时，已是历史问题；v0.1.7 加入了 CA 自动选择。当前的 provider 使用 SDK 的 libcurl，不再走那条旧路径。本地 HTTP 的准入应该写在经过校验的描述符里，而不是直接覆盖 URL；请参照[示例 31](../examples/31_local_transformer.cpp)。Responses WebSocket 的 close=1000 处理办法，只适用于已移除的历史传输方式。
 
-## graph 定义与注册
+## 图定义与注册
 
-unknown reducer/condition/node-type 表示 compile 使用的 registry 没有该名称。内置 reducer 为 `overwrite`/`append`；compile 前注册 custom reducer/condition/node factory。`has_tool_calls`/`route_channel` 是内置 condition；Python callback 在 GIL 下运行。
+出现 unknown reducer、condition 或 node type 的诊断，说明这个名称不在编译所用的注册表里。内置的 reducer 是 `overwrite` 和 `append`；自定义的 reducer、条件和节点工厂必须在编译之前注册。`has_tool_calls` 和 `route_channel` 是内置条件。注册的 Python 回调在 GIL 下运行。
 
 ```python
 import neograph_engine as ng
@@ -84,69 +84,69 @@ ng.ConditionRegistry.register_condition("is_long",
     lambda state: "long" if len(state.get("messages") or []) > 10 else "short")
 ```
 
-write 的 channel 名必须准确存在。condition 返回 route label；open condition 可用显式 `default`，否则 unmatched label 抛错，closed condition 拒绝声明范围外 label。确认 `__start__` edge 和 loop escape。`RunConfig.max_steps` 默认 `50`；检查 step-limit status，不将截断当作正常完成。
+写入时必须准确写出一个已存在的通道名。条件返回的是路由标签：开放（open）的条件可以显式使用 `default`，没有它时，未匹配的标签会抛出异常；封闭（closed）的条件则会拒绝声明集合之外的标签。务必保证有一条从 `__start__` 出发的边，循环要有出口路由。`RunConfig.max_steps` 默认是 `50`；请检查步数上限的状态，不要把中途截断的运行当成正常完成。
 
-`schema_version: 1` 的 strict parsing 拒绝 unknown/unconsumed key 和 round-trip loss。metadata 用 `_`/`x-` annotation，barrier 用非空 `wait_for`，conditional edge 用 `routes`。custom 注册后用 `ng.export_schema()` 导出 live schema，不另行维护 editor palette。absent/zero version 在 `0.x` 保持 lenient；`ng.upgrade_topology()` 把忽略 data 保留为无碰撞 annotation。
+在 `schema_version: 1` 下，严格的拓扑解析会拒绝未知或未使用的键，也拒绝往返之后有信息丢失的定义。元数据用 `_`/`x-` 开头的注解，屏障上要写非空的 `wait_for`，条件边上要写 `routes`。自定义注册完成之后，用 `ng.export_schema()` 导出当前生效的 schema；不要另外维护一份编辑器的节点面板。缺省或为零的旧版本号，在 `0.x` 路径上仍按宽松方式处理；`ng.upgrade_topology()` 会把被忽略的数据保存在不会冲突的注解里。
 
-## fan-out 与管理
+## fan-out 与管理操作
 
-默认 worker_count `1` 不创建 engine pool。I/O branch 在 suspend 时仍可重叠；单 caller 线程的 CPU body 串行。需要 pool 时在并发执行前设置 `set_worker_count(N)`/`set_worker_count_auto()`。除非 native operation 释放 GIL，Python CPU callback 仍串行。
+worker_count 默认是 `1`，因此不会创建引擎自己的线程池。I/O 分支在挂起时仍然可以重叠；但在单个调用线程上，CPU 密集的函数体会串行执行。如果 CPU 计算能从线程池中受益，请在并发执行之前配置 `set_worker_count(N)` 或 `set_worker_count_auto()`。Python 里 CPU 密集的回调仍然受 GIL 限制而串行，除非某个原生操作释放了 GIL。
 
-同 engine 的 run/resume 期间 admin state/history/update/fork 以 `std::logic_error` 失败。先 cancel/drain 并等待完成，不隐藏异常。同 thread_id 并发执行的 checkpoint 交错未规定；共享 store 的不同 engine 需要 host 协调。参见[并发](concurrency.md)。
+同一个引擎上，只要有任何 run/resume 正在进行，此时调用管理类的 state/history/update/fork，就会以 `std::logic_error` 失败。请先取消或排空，并等待运行结束；不要把这个异常吞掉。thread id 相同的并发执行，其检查点的交错顺序没有规定；多个引擎共用一个存储时，需要由宿主来协调。参见[并发指南](concurrency.md)。
 
 ## Python Program 错误
 
-这些错误来自 `LocalProgramHost` 和 QuickJS Program compiler。背后的规则见 [Program 与 QuickJS](python-binding.md#program-and-quickjs)。
+这些错误来自 `LocalProgramHost` 和 QuickJS Program 编译器。背后的规则见 [Program 与 QuickJS](python-binding.md#program-and-quickjs)。
 
-| 错误 | 原因 | 解决 |
+| 错误 | 原因 | 解决办法 |
 |---|---|---|
-| node 抛出的 `TypeError: get(): incompatible function arguments` | `GraphState.get` 只接受 channel 名 | 使用 `state.get("value") or 0` |
-| `add_registered_node`、`add_registered_reducer` 或 `add_registered_condition` 抛出的 `ng.ProgramRegistryError` | 该 node type、reducer 或 condition 未在本 process 中注册 | 先用 `@ng.node`、`ng.NodeFactory.register_type`、`ng.ReducerRegistry.register_reducer` 或 `ng.ConditionRegistry.register_condition` 注册 |
-| `P_JS_DEFINE_MISSING` | module 未导出 `define()` | 导出 `define()` 并返回 Program 的唯一 graph |
-| `P_JS_GRAPH_ENTRY`，或针对名为 `__start__` 或 `__end__` 的 node 的 `P_JS_GRAPH_ARGUMENT` | graph 没有 `.entry()`，或 node 使用了保留名 | 调用 `.entry()` 并重命名该 node；`.entry()` 和 `.exit()` 会连接 sentinel |
-| `P_CORE_E13` 或 `P_CORE_E14` | node 在第一条 conditional edge 之外还有 static edge 或第二条 conditional edge；二者都永远不会触发 | 把每个 target 都放进第一条 conditional edge 的 route 中 |
-| `P_JS_CONTROL_COMMAND`: JavaScript command references a Core outside the admitted root | `ng.callCore` 指定了 `define()` 所返回 graph 之外的 graph | 使用传给 `ng.graph(...)` 的名称 |
-| `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | 列出的 ceiling field 为零 | 即使 Program 不调用 model，也设为正数 |
-| `ng.ProgramAdmissionError` 中的 `P_ADMIT_PROVIDER` | `llm_call` node 需要宿主未绑定的 provider，或 `llm_call` / `intent_classifier` node 注册时未带 `provider=` | 用 `add_provider(...)` 与 `add_registered_node("llm_call", ..., provider=...)` 注册，并向 `LocalProgramHost` 传入 `node_context=` 与 `binding_label=` |
-| `P_MONEY_BUDGET`（`BudgetExhausted`）或其他 `P_MONEY_*` 代码（`Failed`），且 provider 没有收到请求 | 已绑定调用的预留超出 `monetary_microunits`（0 不授予任何额度），或无法确定上限：未知 model 或 origin、没有 route ceiling 的 router alias、没有输出上限、未知输入限制，或价格目录不建模的功能 | 提高 `monetary_microunits`、设置 `provider_controls.max_output_tokens`，或使用有目录条目的 model；见[计价证据与价格目录](reference-en.md#pricing-evidence-and-the-price-catalog) |
-| `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | run budget 与传给 `compile_admit` 的 budget 不同 | 传入相同的 budget，或重新 compile 并准入(admission) |
-| `ng.spawn` 抛出的 `P_CHILD_BINDING` | `LocalProgramHost` 没有 child binding resolver | 在 C++ host 中运行 child Program |
-| `resume()` 抛出的 `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost` | run 属于另一个或已销毁的 `LocalProgramHost` | 通过启动该 run 的 host 恢复 |
-| `P_CORE_BARRIER_STALLED` | barrier member 走了一条不通往 join 的 route，因此 join 再也无法触发 | 把每个 member 都路由到 join 或 `__end__`；`P_CORE_E15` 会在 compile 时对这类 route 发出警告 |
-| `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | run 用尽了 `wall_time_ms`；被中断 operation 的文本在 `failure.witness["cause_message"]` 中 | 用更大的 `wall_time_ms` 重新 compile 并准入(admission) |
+| 节点中出现 `TypeError: get(): incompatible function arguments` | `GraphState.get` 只接受通道名 | 使用 `state.get("value") or 0` |
+| `add_registered_node`、`add_registered_reducer` 或 `add_registered_condition` 抛出 `ng.ProgramRegistryError` | 该节点类型、reducer 或条件没有在本进程中注册 | 先用 `@ng.node`、`ng.NodeFactory.register_type`、`ng.ReducerRegistry.register_reducer` 或 `ng.ConditionRegistry.register_condition` 注册 |
+| `P_JS_DEFINE_MISSING` | 模块没有导出 `define()` | 导出 `define()`，并返回 Program 的唯一那张图 |
+| `P_JS_GRAPH_ENTRY`，或者节点名为 `__start__`/`__end__` 时的 `P_JS_GRAPH_ARGUMENT` | 图没有 `.entry()`，或者有节点用了保留名称 | 调用 `.entry()`，并给节点改名；`.entry()` 和 `.exit()` 负责连接这两个哨兵节点 |
+| `P_CORE_E13` 或 `P_CORE_E14` | 节点在第一条条件边之外，还有一条静态边或第二条条件边；两者都永远不会触发 | 把所有目标都放进第一条条件边的 routes 里 |
+| `P_JS_CONTROL_COMMAND`：JavaScript command references a Core outside the admitted root | `ng.callCore` 指定的图不是 `define()` 返回的那张 | 使用传给 `ng.graph(...)` 的名称 |
+| `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | 列出的某个上限字段为零 | 改成正数，即使 Program 从不调用模型 |
+| `ng.ProgramAdmissionError` 中的 `P_ADMIT_PROVIDER` | 某个 `llm_call` 节点需要的 provider 宿主没有绑定，或者 `llm_call`、`intent_classifier` 节点注册时没带 `provider=` | 注册 `add_provider(...)` 和 `add_registered_node("llm_call", ..., provider=...)`，并给 `LocalProgramHost` 传入 `node_context=` 和 `binding_label=` |
+| `P_MONEY_BUDGET`（`BudgetExhausted`），或其他 `P_MONEY_*` 错误码（`Failed`），且 provider 没有收到任何请求 | 该次调用的预留额度超出了 `monetary_microunits`（0 表示什么都不授予），或者调用无法确定上限：模型或 origin 未知、路由别名没有路由上限、没有输出上限、不知道输入上限，或者用到了价格目录没有建模的功能 | 调高 `monetary_microunits`，设置 `provider_controls.max_output_tokens`，或者改用价格目录中有条目的模型；参见[定价证据与价格目录](reference-en.md#pricing-evidence-and-the-price-catalog) |
+| `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | 运行预算与传给 `compile_admit` 的预算不一致 | 传入相同的预算，或者重新编译并准入 |
+| `ng.spawn` 抛出 `P_CHILD_BINDING` | `LocalProgramHost` 没有子绑定解析器 | 在 C++ 宿主里运行子 Program |
+| `resume()` 抛出 `P_RUN_NOT_FOUND`：`run '<id>' was not found in this LocalProgramHost` | 这个运行属于另一个 `LocalProgramHost`，或者所属的宿主已销毁 | 通过启动该运行的宿主来恢复 |
+| `P_CORE_BARRIER_STALLED` | 屏障的某个成员走了不通向 join 的路由，join 再也无法触发 | 让每个成员都路由到 join 或 `__end__`；`P_CORE_E15` 会在编译时对这类路由发出警告 |
+| `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | 运行用完了 `wall_time_ms`；被打断的操作的文本在 `failure.witness["cause_message"]` 里 | 用更大的 `wall_time_ms` 重新编译并准入 |
 
-失败的 `callCore` 会以该失败结束 run，`main()` 无法用 `try`/`catch` 捕获。在 Python 中检查 `result.status` 和 `result.failure`。
+`callCore` 失败会让运行带着该失败结束；`main()` 无法用 `try`/`catch` 捕获它。请在 Python 中检查 `result.status` 和 `result.failure`。
 
-## checkpoint 与 PostgreSQL failure
+## 检查点与 PostgreSQL 故障
 
-缺失 PostgresCheckpointStore export 可能是 wheel/source build 禁用了 component。检查该 artifact 配置，不照搬旧 wheel 功能表。构建可选 target 时安装匹配 libpq。URI password 特殊字符须 percent-encode，或用 libpq key=value 形式；不公开真实 credential。
+找不到 PostgresCheckpointStore 的导出，可能是这个 wheel 或源码构建禁用了该组件；请检查这个产物自己的配置，而不是参考更旧的 wheel 的功能列表。构建这个可选目标时，要安装匹配的 libpq。连接 URI 中的特殊密码字符需要做百分号编码，或者改用 libpq 的 key=value 形式；千万不要公开真实的凭据。
 
-async connect/reconnect 在全部 host/IP 使用一个 deadline。显式正数 `connect_timeout=N` 以秒计，`1` 向上取两秒。absent/zero/negative 以及仅经 PGCONNECT_TIMEOUT/service file 提供的值使用 async 默认 30 秒。不同于 sync libpq 的 per-host timeout。
+异步的连接和重连，对所有主机/IP 共用同一个截止时间。显式给出的正数 `connect_timeout=N` 以秒为单位，其中 `1` 会被进位到 2。未设置、为零或为负的值，以及只通过 PGCONNECT_TIMEOUT 或 service 文件提供的超时，都使用异步默认的 30 秒。这与同步 libpq 按每台主机计时的超时不同。
 
-允许时 store 创建 table；缺少 CREATE 权限须应用 [PostgreSQL header](../include/neograph/graph/postgres_checkpoint.h) 的 schema。没有 pending-write capability 意味着整个 super-step replay，不保证外部效果 exactly-once。async-only backend 用 AsyncCheckpointStore 加 `adapt_async_checkpoint_store`，不使用旧相互 sync/async crossover。
+权限允许时，存储会自己建表；缺少 CREATE 权限时，需要手工执行 [PostgreSQL 头文件](../include/neograph/graph/postgres_checkpoint.h)中的 schema。没有 pending write 能力，意味着要整个超步重放，而不是外部副作用恰好执行一次。只支持异步的自定义后端，应当使用 AsyncCheckpointStore 加 `adapt_async_checkpoint_store`，而不是以前那种同步与异步互为默认实现的交叉写法。
 
-## tracing adapter 与历史修复
+## Tracing 适配器与历史修复
 
-Tracer adapter 须拥有记录 data，不保留 session close 销毁的 Span wrapper raw pointer。参见 [C++ tracing 例](../examples/49_openinference.cpp)。Python contextvars 不自动跨越 C++ callback 边界；显式传入/attach parent context，在 engine compile 前安装 wrapper。
+Tracer 适配器必须持有自己记录的数据，而不能保存指向 Span 包装器的裸指针，因为会话关闭时这些包装器会被销毁。参见 [C++ tracing 示例](../examples/49_openinference.cpp)。Python 的 contextvars 不会自动穿过 C++ 回调的边界；需要显式传递或挂接父 context，并且要在引擎编译之前安装这些包装器。
 
-历史修复包括 v0.1.8 接受 top-level conditional_edges、删除 node 双执行 fallback、切换前 httplib macro layout 不一致（issue #16）。这些不恢复删除的 provider signature。跨 translation unit 实例化 header-only httplib 的 consumer 仍需一致定义 CPPHTTPLIB_OPENSSL_SUPPORT；当前 typed-provider HTTP 为 SDK libcurl。
+历史上的修复包括：v0.1.8 开始接受顶层的 conditional_edges；去掉了节点被执行两次的回退逻辑；以及切换之前 httplib 宏布局不一致的问题（issue #16）。这些修复并不会恢复已移除的 provider 签名。如果使用方在多个编译单元里实例化仅有头文件的 httplib，仍然需要让 CPPHTTPLIB_OPENSSL_SUPPORT 的定义保持一致；当前带类型的 provider 通过 SDK 的 libcurl 发送 HTTP 请求。
 
-opaque convenience vector property 可能不是 Python list。用 iteration/`list(value)` 检查；ChatMessage.image_urls 等复制 sequence 须 build-then-assign。不要假设修改返回 copy 会改变 C++ request；新 typed request/outcome 与旧 CompletionParams 示例分离。
+不透明的便捷向量属性不一定是 Python 列表。检查时用迭代或 `list(value)`；对于 ChatMessage.image_urls 这类返回副本的序列字段，应当先构造好再整体赋值。不要以为修改返回的副本就能改变 C++ 的请求；新的带类型 request/outcome 契约，与旧的 CompletionParams 示例是两回事。
 
 ## 工具调用、Hook 与协议错误
 
-工具调用、节点或子图遇到强制 Hook 阻断的图运行，现在会像 `llm::Agent` 一直以来那样抛出 `HookBoundaryBlocked` 本身，而不是包装它的 `NodeExecutionError`，并且不会为此发出 `ERROR` 事件。请捕获 `HookBoundaryBlocked`（Python：`ng.HookBoundaryBlocked`）并读取 `invocation_id` 与 `state`。例如在嵌套引擎运行中抛出它的 Python 节点不再被重试。参见[工具失败契约](reference-en.md#tool-failure-contract)。
+图运行中的工具调用、节点或子图被强制 Hook 阻塞时，现在会直接抛出 `HookBoundaryBlocked`，与 `llm::Agent` 一贯的做法相同，而不再是包着它的 `NodeExecutionError`，也不会为此发出 `ERROR` 事件。请捕获 `HookBoundaryBlocked`（Python：`ng.HookBoundaryBlocked`），并读取 `invocation_id` 和 `state`。抛出它的 Python 节点（例如来自嵌套的引擎运行）不再被重试。参见[工具失败契约](reference-en.md#tool-failure-contract)。
 
-引擎的 `HookRuntime` 现在也会运行其工具调用的 `BeforeToolExecution` 与 `AfterToolExecution` Hook，Program 主机的 Hook 运行时会运行其 Core 工具调用的 Hook。如果图运行现在以 state 为 `failed`、消息为 `lifecycle hook could not run` 的 `HookBoundaryBlocked` 停止，请为运行提供 owner scope（`RunMetadata::owner_scope`）：没有 owner scope 的 Hook 边界无论是检查点 Hook 还是工具 Hook 都会关闭式失败。
+引擎的 `HookRuntime` 现在也会运行它的工具调用所对应的 `BeforeToolExecution` 和 `AfterToolExecution` Hook；Program 宿主的 Hook 运行时则运行其各个 Core 的工具调用对应的这两类 Hook。如果图运行现在以 `HookBoundaryBlocked`（state 为 `failed`，消息为 `lifecycle hook could not run`）停止，请给这次运行指定 owner 作用域（`RunMetadata::owner_scope`）：没有 owner 作用域的 Hook 边界会失败时关闭，检查点 Hook 和工具 Hook 都是如此。
 
-`state == "timed_out"` 现在表示 Hook 的截止时间已过或其目标超时。最后一次尝试失败的 Hook 报告 `failed`；以前它报告 `timed_out`。
+`state == "timed_out"` 现在表示 Hook 的截止时间已到，或者它的目标超时。最后一次尝试失败的 Hook 报告 `failed`；以前它报告的是 `timed_out`。
 
-状态为 `expired`、错误为 `run deadline elapsed before the tool started` 的工具结果表示运行截止时间在调用能够开始之前就已经过去：工具及其 Hook 都没有运行。请延长 `RunMetadata::deadline`（Python 的 `timeout_ms`、Program 的 `wall_time_ms`），而不是重试该调用。被运行截止时间或客户端请求超时停止的 MCP 调用为 `timed_out`，取消运行会立即停止进行中的 MCP 调用。
+工具结果的状态为 `expired`、错误为 `run deadline elapsed before the tool started` 时，表示在调用开始之前，运行的截止时间已经过了：工具和它的 Hook 都没有运行。请调高 `RunMetadata::deadline`（Python 中是 `timeout_ms`，Program 中是 `wall_time_ms`），而不是重试这次调用。被运行的截止时间或客户端的请求超时终止的 MCP 调用，状态是 `timed_out`；取消运行会立即终止正在进行的 MCP 调用。
 
-`MCPServer` 对客户端取消的 `tools/call` 在任何传输上都不应答，对 Hook 阻断以 `-32010`、对中断以 `-32011` 应答；其他所有失败都是 `isError` 结果，由 `_meta["io.neograph/failure"].code` 指明其类别，其文本是公开消息而不是异常文本（若要选择文本，请抛出带有 `public_message` 的 `NodeFailureError`）。过去从 `OK` 响应中读取 `RunGraphResponse.error` 的 gRPC 客户端现在必须读取状态：失败的运行是一个非 OK 状态，其 `google.rpc.ErrorInfo` 在 `metadata["code"]` 中携带代码。参见[协议失败映射](reference-en.md#protocol-failure-mapping)。
+对于客户端已取消的 `tools/call`，`MCPServer` 在任何传输方式下都不发送响应；Hook 阻塞用 `-32010` 回应，中断用 `-32011` 回应；其他所有失败都是 `isError` 结果，由 `_meta["io.neograph/failure"].code` 给出错误码，其文本是公开消息，绝不是异常文本（想自己选定文本，可以抛出带 `public_message` 的 `NodeFailureError`）。以前从 `OK` 响应里读取 `RunGraphResponse.error` 的 gRPC 客户端，现在必须改读状态：失败的运行对应的是非 OK 的状态，其 `google.rpc.ErrorInfo` 在 `metadata["code"]` 中带有错误码。参见[协议失败映射](reference-en.md#protocol-failure-mapping)。
 
-不是有效 UTF-8 的工具输出或异常消息，过去会变成空的工具消息、空的 MCP 或 gRPC payload，或在 Python 中引发 `UnicodeDecodeError`。现在每个格式错误的序列都会被替换为 U+FFFD 后到达。
+不是有效 UTF-8 的工具输出或异常消息，以前到达时会变成空的工具消息、空的 MCP 或 gRPC 负载，或者 Python 中的 `UnicodeDecodeError`。现在每个格式错误的序列都会换成 U+FFFD 后再送达。
 
-## 安全报告 bug
+## 安全地报告 bug
 
-提供 version/platform、最小 topology/call、execution_trace/status、去敏后的 typed failure/stop/usage 证据。说明 installed wheel 还是 rebuilt checkout。不包含 credential、private prompt、encoded native request body、未脱敏 packet capture。提交至 <https://github.com/fox1245/NeoGraph/issues>。
+请提供版本和平台、最小化的拓扑和调用代码、execution_trace 和 status，以及经过脱敏的、带类型的失败/停止/用量证据。并说明失败发生在已安装的 wheel 上，还是重新构建的源码检出上。切勿包含凭据、私密的提示词、编码后的 native 请求体，或未经清理的抓包数据。请到 <https://github.com/fox1245/NeoGraph/issues> 报告。
