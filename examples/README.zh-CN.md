@@ -137,6 +137,7 @@ Program 把 Core 图包进带有持久标识、预算和准入(admission)的生�
 | # | 示例 | Offline | 演示内容 |
 |---|---|---|---|
 | 59 | [`59_mcp_server.cpp`](59_mcp_server.cpp) | yes | 基于 stdio 的 MCP 服务器：一个 `echo` 工具、输入输出 schema 和结构化内容。 |
+| 76 | [`76_mcp_http_server.cpp`](76_mcp_http_server.cpp) | yes | 基于 streamable HTTP 的 MCP 服务器：在空闲端口上校验 bearer token，由 NeoGraph 自带的客户端调用；不带 token 的调用得到 HTTP 401（需要 `-DNEOGRAPH_BUILD_MCP_HTTP_SERVER=ON`）。 |
 | 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | yes | 基于 stdio 的 MCP：服务器是不经过网络栈的子进程，由 ReAct 循环调用它的工具。使用脚本化模型和只依赖标准库的服务器。 |
 | 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | yes | 基于 streamable HTTP 的 MCP：发现服务器的工具并交给 ReAct 循环。演示服务器只用 Python 标准库，模型由脚本代替。 |
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | yes | 带人工批准的 MCP：`interrupt_before` 在 MCP 工具调用前暂停图，展示待执行的调用，再用 `resume()` 继续，不会重复模型调用。 |

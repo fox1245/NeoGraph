@@ -136,6 +136,7 @@ These examples run offline. The MCP client examples start a standard-library ser
 | # | Example | Offline | Shows |
 |---|---|---|---|
 | 59 | [`59_mcp_server.cpp`](59_mcp_server.cpp) | yes | MCP server over stdio with one `echo` tool, input and output schemas, and structured content. |
+| 76 | [`76_mcp_http_server.cpp`](76_mcp_http_server.cpp) | yes | MCP server over streamable HTTP with a bearer token on a free port, called by NeoGraph's own client; a call without the token gets HTTP 401 (needs `-DNEOGRAPH_BUILD_MCP_HTTP_SERVER=ON`). |
 | 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | yes | MCP over stdio: the server is a child process with no network stack, and a ReAct loop calls its tools. Scripted model, standard-library server. |
 | 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | yes | MCP over streamable HTTP: discover a server's tools and give them to a ReAct loop. The demo server is standard-library Python and the model is scripted. |
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | yes | MCP with human approval: `interrupt_before` stops the graph ahead of an MCP tool call, the pending call is shown, and `resume()` continues without repeating the model call. |

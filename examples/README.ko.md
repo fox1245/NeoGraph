@@ -137,6 +137,7 @@ Program은 Core 그래프를 내구성 있는 식별자, 예산, 승인(admissio
 | # | 예제 | Offline | 보여 주는 것 |
 |---|---|---|---|
 | 59 | [`59_mcp_server.cpp`](59_mcp_server.cpp) | yes | stdio 기반 MCP 서버: `echo` 도구 하나, 입력·출력 스키마, 구조화된 콘텐츠. |
+| 76 | [`76_mcp_http_server.cpp`](76_mcp_http_server.cpp) | yes | streamable HTTP 기반 MCP 서버: 빈 포트에서 베어러 토큰을 검사하고 NeoGraph 자체 클라이언트가 호출합니다. 토큰 없는 호출은 HTTP 401을 받습니다(`-DNEOGRAPH_BUILD_MCP_HTTP_SERVER=ON` 필요). |
 | 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | yes | stdio 기반 MCP: 서버가 네트워크 스택 없는 자식 프로세스이고, ReAct 루프가 그 도구를 호출합니다. 스크립트 모델과 표준 라이브러리 서버를 씁니다. |
 | 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | yes | streamable HTTP 기반 MCP: 서버의 도구를 찾아 ReAct 루프에 넘깁니다. 데모 서버는 표준 라이브러리만 쓰는 Python이고 모델은 스크립트로 대신합니다. |
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | yes | 사람의 승인을 받는 MCP: `interrupt_before`가 MCP 도구 호출 앞에서 그래프를 멈추고, 대기 중인 호출을 보여 준 뒤 `resume()`으로 모델 호출을 되풀이하지 않고 이어 갑니다. |

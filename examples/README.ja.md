@@ -137,6 +137,7 @@ Program は Core グラフを、永続的な識別子、予算、admission を�
 | # | サンプル | Offline | 示すもの |
 |---|---|---|---|
 | 59 | [`59_mcp_server.cpp`](59_mcp_server.cpp) | yes | stdio 上の MCP サーバー。`echo` ツール 1 つ、入出力スキーマ、構造化コンテンツ。 |
+| 76 | [`76_mcp_http_server.cpp`](76_mcp_http_server.cpp) | yes | streamable HTTP 上の MCP サーバー。空きポートでベアラートークンを検査し、NeoGraph 自身のクライアントが呼び出します。トークンなしの呼び出しは HTTP 401 になります(`-DNEOGRAPH_BUILD_MCP_HTTP_SERVER=ON` が必要)。 |
 | 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | yes | stdio 上の MCP。サーバーはネットワークスタックを使わない子プロセスで、ReAct ループがそのツールを呼び出します。スクリプト化したモデルと標準ライブラリだけのサーバーを使います。 |
 | 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | yes | streamable HTTP 上の MCP。サーバーのツールを検出して ReAct ループに渡します。デモサーバーは標準ライブラリだけの Python で、モデルはスクリプトで代用します。 |
 | 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | yes | 人の承認付き MCP。`interrupt_before` が MCP ツール呼び出しの前でグラフを止め、保留中の呼び出しを表示して、`resume()` でモデル呼び出しを繰り返さずに再開します。 |

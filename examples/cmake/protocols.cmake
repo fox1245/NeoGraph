@@ -3,3 +3,5 @@
 # root CMakeLists.txt.
 
 neograph_add_example(mcp_tool_errors 75_mcp_tool_errors.cpp LINK neograph::core neograph::llm neograph::mcp)
+neograph_add_example(mcp_http_server 76_mcp_http_server.cpp
+    LINK neograph::core neograph::mcp neograph::mcp_http_server)
