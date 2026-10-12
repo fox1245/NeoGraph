@@ -87,6 +87,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | 101 | [`101_retry_policy.cpp`](101_retry_policy.cpp) | yes | `RetryPolicy`: 노드가 두 번 실패하면 엔진이 지수 백오프로 다시 시도합니다. 재시도 횟수를 줄이면 재시도가 바닥났을 때 호출한 쪽이 받는 결과를 볼 수 있습니다. |
 | 102 | [`102_node_interrupt.cpp`](102_node_interrupt.cpp) | yes | `NodeInterrupt`: 노드가 스스로 실행을 멈추고, 페이로드가 호출한 쪽에 물어볼 내용을 알려 주며, `resume`이 답(승인 또는 거절)을 노드에 돌려줍니다. |
 | 103 | [`103_max_steps.cpp`](103_max_steps.cpp) | yes | `max_steps`: 루프가 단계 한도에서 멈추고, 결과가 그 사실을 알려 줍니다(`max_steps_exhausted()`, `RunStatus::StepLimit`). 마지막 단계에서 스스로 끝난 실행은 표시되지 않습니다. |
+| 104 | [`104_channels_reducers.cpp`](104_channels_reducers.cpp) | yes | 채널과 reducer: `overwrite`와 `append`의 차이, `initial` 값, 그리고 모든 채널이 하나의 쓰기 카운터를 공유하는 채널 버전. |
 
 ### 에이전트 패턴
 

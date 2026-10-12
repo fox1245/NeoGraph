@@ -86,6 +86,7 @@ The remaining Core features. They link only `neograph::core`, except 02, 06, 07 
 | 101 | [`101_retry_policy.cpp`](101_retry_policy.cpp) | yes | `RetryPolicy`: a node fails twice and the engine retries it with exponential backoff; a smaller budget shows what the caller gets when the retries run out. |
 | 102 | [`102_node_interrupt.cpp`](102_node_interrupt.cpp) | yes | `NodeInterrupt`: a node pauses the run itself, the payload tells the caller what to ask, and `resume` hands the answer back to the node (approve or refuse). |
 | 103 | [`103_max_steps.cpp`](103_max_steps.cpp) | yes | `max_steps`: a loop is stopped by the step limit and the result says so (`max_steps_exhausted()`, `RunStatus::StepLimit`); a run that ends on the last step is not flagged. |
+| 104 | [`104_channels_reducers.cpp`](104_channels_reducers.cpp) | yes | Channels and reducers: `overwrite` against `append`, `initial` values, and channel versions as one shared write counter. |
 
 ### Agent patterns
 
