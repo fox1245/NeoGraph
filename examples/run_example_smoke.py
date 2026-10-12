@@ -11,7 +11,9 @@ optionally behind `//` or `#`:
     smoke-args:    command-line arguments (split like a shell); tokens @SRC@ (repository
                    root), @BIN@ (build directory), @PYTHON@ (interpreter), @TMP@ (scratch dir),
                    @PORT@ / @PORT2@ ... @PORT8@ (distinct free TCP ports on 127.0.0.1, chosen
-                   for this run; the same token has the same value everywhere in one run)
+                   for this run; the same token has the same value everywhere in one run;
+                   runs that use a token take a machine-wide lock from choosing the ports
+                   until the companions listen, so parallel runners never get the same one)
     smoke-stdin:   one line written to stdin, newline added (repeatable); stdin is then closed
     smoke-env:     NAME=VALUE added to the environment (repeatable)
     smoke-companion: a helper process started first (repeatable), for a client that needs a
@@ -158,10 +160,19 @@ def run_smoke(source: Path, command: list[str], *, build_dir: Path | None = None
         return SKIP_STATUS
 
     scratch = Path(tempfile.mkdtemp(prefix="ng-example-"))
+    port_lock = _PortLock()
     try:
         tokens = {"@SRC@": str(ROOT), "@BIN@": str(build_dir or ""),
                   "@PYTHON@": python or sys.executable, "@TMP@": str(scratch)}
-        tokens.update(_free_ports())
+        # Only a run that names a @PORT@ token picks ports. Choosing a port, starting the server
+        # that binds it and waiting for it happen under one lock shared by every runner on this
+        # machine, so two runners (ctest -j) cannot be handed the same number in between.
+        annotation_text = [notes.args, *notes.companion, *notes.wait_port, *notes.env, *notes.stdin]
+        wanted = [int(match.group(1) or 1) for text in annotation_text
+                  for match in re.finditer(r"@PORT([2-8]?)@", text)]
+        if wanted:
+            port_lock.acquire()
+            tokens.update(_free_ports(max(wanted)))
 
         def substitute(text: str) -> str:
             for token, value in tokens.items():
@@ -187,6 +198,7 @@ def run_smoke(source: Path, command: list[str], *, build_dir: Path | None = None
                 if not _wait_for_port(port, companions):
                     return _fail(source, f"nothing listened on 127.0.0.1:{port} within 20 s",
                                  _stop_companions(companions))
+            port_lock.release()
             done = subprocess.run(
                 argv, cwd=cwd or scratch, env=env, input=stdin, timeout=notes.timeout,
                 stdin=None if stdin is not None else subprocess.DEVNULL,
@@ -218,6 +230,7 @@ def run_smoke(source: Path, command: list[str], *, build_dir: Path | None = None
         print(f"PASS {source.name}: {len(notes.expect) + len(notes.expect_line)} expectation(s) held")
         return 0
     finally:
+        port_lock.release()
         shutil.rmtree(scratch, ignore_errors=True)
 
 
@@ -231,7 +244,33 @@ def _find_binary(build_dir: Path | None, name: str) -> Path:
     raise FileNotFoundError(f"built example {name} not found under {build_dir}")
 
 
-def _free_ports(count: int = 8) -> dict[str, str]:
+class _PortLock:
+    """An exclusive lock on a file in the temp directory, shared by all runners of this user."""
+
+    def __init__(self) -> None:
+        self._handle = None
+
+    def acquire(self) -> None:
+        self._handle = open(Path(tempfile.gettempdir()) / "neograph-example-ports.lock", "a+")
+        try:
+            import fcntl
+            fcntl.flock(self._handle, fcntl.LOCK_EX)
+        except ImportError:  # Windows
+            import msvcrt
+            while True:
+                try:
+                    msvcrt.locking(self._handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.05)
+
+    def release(self) -> None:
+        if self._handle is not None:
+            self._handle.close()  # closing the file drops the lock
+            self._handle = None
+
+
+def _free_ports(count: int) -> dict[str, str]:
     """Distinct free TCP ports, as the tokens @PORT@ (= @PORT1@), @PORT2@ ... @PORT<count>@."""
     held = []
     try:
