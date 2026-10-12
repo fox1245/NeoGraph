@@ -545,6 +545,24 @@ std::string public_text(const FailureVerdict& failure) {
     return ::neograph::detail::public_failure_message(failure);
 }
 
+/// @p object without @p key (the JSON wrapper has no erase).
+json without_key(const json& object, const char* key) {
+    json out = json::object();
+    if (!object.is_object()) return out;
+    for (auto [name, value] : object.items()) {
+        if (name != key) out[name] = value;
+    }
+    return out;
+}
+
+/// The checkpoint an INPUT_REQUIRED task paused at, or empty when the run
+/// saved none (an engine without a checkpoint store).
+std::string interrupt_checkpoint(const Task& task) {
+    if (!task.metadata.is_object() || !task.metadata.contains("neograph/interrupt")) return {};
+    const auto interrupt = task.metadata["neograph/interrupt"];
+    return interrupt.is_object() ? interrupt.value("checkpointId", std::string()) : std::string();
+}
+
 /// Failure fields a task may carry: `metadata["neograph/failure"]`.
 json failure_metadata(const FailureVerdict& failure) {
     return json{{"code", failure.code}, {"retryable", failure.retryable}};
@@ -805,7 +823,7 @@ struct A2AServer::Impl {
     // --- runs ----------------------------------------------------------------
 
     Task execute_graph(const Message& inbound, const std::string& task_id,
-                       const std::string& context_id, bool resume,
+                       const std::string& context_id, const std::string& resume_checkpoint,
                        std::shared_ptr<neograph::graph::CancelToken> cancel_token,
                        std::uint64_t generation);
 #ifdef NEOGRAPH_A2A_PROGRAM
@@ -1124,8 +1142,8 @@ void A2AServer::Impl::handle_jsonrpc(const httplib::Request& req,
 
 Task A2AServer::Impl::execute_graph(
     const Message& inbound, const std::string& task_id, const std::string& context_id,
-    bool resume, std::shared_ptr<neograph::graph::CancelToken> cancel_token,
-    std::uint64_t generation) {
+    const std::string& resume_checkpoint,
+    std::shared_ptr<neograph::graph::CancelToken> cancel_token, std::uint64_t generation) {
     auto& a = *adapter;
     publish_working(task_id, generation);
 
@@ -1140,16 +1158,11 @@ Task A2AServer::Impl::execute_graph(
         cfg.thread_id    = task_id;
         cfg.cancel_token = cancel_token;
         // Reserve the generation before adapter work so CancelTask can signal
-        // this run even while input preparation is still in progress.
-        bool resuming = false;
-        if (resume) {
-            try {
-                const auto phase = execution->latest_resume_phase(task_id);
-                resuming = phase.has_value();
-            } catch (const std::exception&) {
-                resuming = false;  // no checkpoint store: start the run again
-            }
-        }
+        // this run even while input preparation is still in progress. A
+        // follow-up to an INPUT_REQUIRED task resumes from the checkpoint the
+        // interrupt saved; without one (no checkpoint store) the run starts
+        // again with the follow-up as its input.
+        const bool resuming = !resume_checkpoint.empty();
         if (!resuming) cfg.input = a.build_initial_state(extract_user_text(inbound));
         neograph::graph::RunInvocationRequest request;
         request.config = std::move(cfg);
@@ -1158,8 +1171,9 @@ Task A2AServer::Impl::execute_graph(
                 work_done->store(true, std::memory_order_relaxed);
         };
         neograph::graph::RunInvocation invocation(*execution, std::move(request));
-        const auto outcome = resuming ? invocation.resume(a.build_resume_value(inbound))
-                                      : invocation.run();
+        const auto outcome = resuming
+            ? invocation.resume_from(resume_checkpoint, a.build_resume_value(inbound))
+            : invocation.run();
         json metadata = json::object();
         metadata["neograph/invocation_status"] =
             std::string(neograph::graph::to_string(outcome.status));
@@ -1551,7 +1565,7 @@ void A2AServer::Impl::handle_send(Call& call) {
     // always gets a server-generated id.
     std::string task_id;
     std::string context_id;
-    bool resume = false;
+    std::string resume_checkpoint;
     bool collaboration_new_task = false;
 #ifdef NEOGRAPH_A2A_PROGRAM
     if (program_adapter && mp.message.task_id) {
@@ -1609,7 +1623,9 @@ void A2AServer::Impl::handle_send(Call& call) {
                 refusal->domain = kNeoGraphDomain;
             } else {
                 context_id = known->second.context_id;
-                resume = is_interrupted(known->second.status.state);
+                if (is_interrupted(known->second.status.state)) {
+                    resume_checkpoint = interrupt_checkpoint(known->second);
+                }
             }
         }
         if (!refusal && !idempotent) {
@@ -1643,6 +1659,7 @@ void A2AServer::Impl::handle_send(Call& call) {
                 // A follow-up resumes the interrupted task; the stream it
                 // opens starts in the working state.
                 set_status(task, TaskState::Working);
+                task.metadata = without_key(task.metadata, "neograph/interrupt");
             }
             task.history.push_back(std::move(inbound));
             cancel_token = std::make_shared<neograph::graph::CancelToken>();
@@ -1674,7 +1691,8 @@ void A2AServer::Impl::handle_send(Call& call) {
     inbound.task_id    = task_id;
     inbound.context_id = context_id;
     try {
-        launch_worker([this, inbound, task_id, context_id, resume, cancel_token, generation] {
+        launch_worker([this, inbound, task_id, context_id, resume_checkpoint, cancel_token,
+                       generation] {
             Task outcome;
 #ifdef NEOGRAPH_A2A_PROGRAM
             if (program_adapter) {
@@ -1682,8 +1700,8 @@ void A2AServer::Impl::handle_send(Call& call) {
             } else
 #endif
             {
-                outcome = execute_graph(inbound, task_id, context_id, resume, cancel_token,
-                                        generation);
+                outcome = execute_graph(inbound, task_id, context_id, resume_checkpoint,
+                                        cancel_token, generation);
             }
             finish_run(task_id, generation, outcome);
         });
