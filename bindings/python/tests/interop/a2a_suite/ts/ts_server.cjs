@@ -2,12 +2,13 @@
 // executor, used as the reference peer for NeoGraph's A2A client.
 //
 // Usage: node ts_server.cjs <port> <sdk-dist-dir> <express-dir> [--compat03] [--record FILE]
+// <port> 0 lets the OS pick; the server prints `READY <port>` once it listens.
 // Behaviour by first word: echo | message | fail | interrupt | slow (see sdk_py_server.py).
 "use strict";
 
 const fs = require("node:fs");
 const path = require("node:path");
-const [, , PORT, DIST, EXPRESS, ...rest] = process.argv;
+const [, , REQUESTED_PORT, DIST, EXPRESS, ...rest] = process.argv;
 const compat = rest.includes("--compat03");
 const recIdx = rest.indexOf("--record");
 const RECORD = recIdx >= 0 ? rest[recIdx + 1] : "";
@@ -17,6 +18,9 @@ const srv = require(path.join(DIST, "server", "index.cjs"));
 const { jsonRpcHandler, agentCardHandler, UserBuilder } = require(path.join(DIST, "server", "express", "index.cjs"));
 const express = require(EXPRESS);
 
+// The port is known once the server listens, and the card names it: everything below
+// runs then, before READY is printed.
+function start(PORT) {
 const url = `http://127.0.0.1:${PORT}/`;
 const interfaces = [{ url, protocolBinding: "JSONRPC", protocolVersion: "1.0" }];
 if (compat) interfaces.push({ url, protocolBinding: "JSONRPC", protocolVersion: "0.3" });
@@ -95,4 +99,9 @@ app.use("/", jsonRpcHandler({
   requestHandler: handler, userBuilder: UserBuilder.noAuthentication,
   ...(compat ? { legacyCompat: { enabled: true } } : {}),
 }));
-app.listen(Number(PORT), "127.0.0.1", () => console.log(`READY ${PORT}`));
+server.on("request", app);
+console.log(`READY ${PORT}`);
+}
+
+const server = require("node:http").createServer();
+server.listen(Number(REQUESTED_PORT), "127.0.0.1", () => start(server.address().port));

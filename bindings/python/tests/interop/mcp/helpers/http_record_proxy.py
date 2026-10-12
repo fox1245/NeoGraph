@@ -114,6 +114,7 @@ class HttpRecordProxy:
 if __name__ == "__main__":
     p = HttpRecordProxy(int(sys.argv[2]), sys.argv[3], int(sys.argv[1])).start()
     print(f"proxy 127.0.0.1:{p.port} -> {sys.argv[2]}", flush=True)
+    print(f"READY {p.port}", flush=True)  # LISTEN_PORT 0: the port it got
     try:
         p.thread.join()
     except KeyboardInterrupt:

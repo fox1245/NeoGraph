@@ -28,7 +28,7 @@ const opt = (name, dflt) => { const i = argv.indexOf(name); return i >= 0 ? argv
 const flag = (name) => argv.includes(name);
 const ARGS = {
   transport: opt('--transport', 'stdio'),
-  port: Number(opt('--port', '18250')),
+  port: Number(opt('--port', '0')),
   path: opt('--path', '/mcp'),
   stateless: flag('--stateless'),
   json: flag('--json-response'),
@@ -222,7 +222,8 @@ async function runHttp() {
       if (!res.headersSent) { res.statusCode = 500; res.end(String(e)); }
     }
   });
-  httpServer.listen(ARGS.port, '127.0.0.1');
+  // --port 0: the OS picks; READY <port> says the server listens.
+  httpServer.listen(ARGS.port, '127.0.0.1', () => console.log(`READY ${httpServer.address().port}`));
   process.on('SIGTERM', () => { httpServer.close(); process.exit(0); });
 }
 

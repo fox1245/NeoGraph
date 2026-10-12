@@ -10,7 +10,8 @@ Pinned SDK: mcp==2.3.0 (see ../requirements.txt).  Two flavours:
                       inputSchema/outputSchema, ToolError -> isError.
 
 Transports: --transport stdio | http.  HTTP options: --stateless, --json-response,
---path, --port, --idle-timeout (seconds; small values reproduce session expiry).
+--path, --port (0: the OS picks; the server prints `READY <port>` once it listens),
+--idle-timeout (seconds; small values reproduce session expiry).
 
 --protocol-version V   answer every initialize with revision V (such as 2024-11-05),
                        as a server that supports only that revision does.
@@ -32,6 +33,7 @@ import os
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -274,6 +276,9 @@ def build_mcpserver():
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _recorder import Recorder  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+import server_ports  # noqa: E402
+
 
 def make_event_store():
     """Minimal in-memory EventStore (resumability) built on the SDK's abstract interface."""
@@ -308,8 +313,6 @@ def make_event_store():
 
 
 def run_http(server_obj, lowlevel: bool) -> None:
-    import uvicorn
-
     kwargs = dict(streamable_http_path=ARGS.path, json_response=ARGS.json_response,
                   stateless_http=ARGS.stateless)
     if ARGS.event_store:
@@ -320,8 +323,9 @@ def run_http(server_obj, lowlevel: bool) -> None:
         if ARGS.max_sessions:
             kwargs["max_sessions"] = ARGS.max_sessions
     app = server_obj.streamable_http_app(**kwargs)
-    uvicorn.run(Recorder(app, ARGS.record), host="127.0.0.1", port=ARGS.port, log_level="warning",
-                lifespan="on")
+    # The listener is bound first and kept, so --port 0 yields a port nobody else can take.
+    server_ports.serve_uvicorn(Recorder(app, ARGS.record), server_ports.bind_listener(ARGS.port),
+                               lifespan="on")
 
 
 def main() -> None:
@@ -329,7 +333,7 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--flavor", choices=["lowlevel", "mcpserver"], default="lowlevel")
     p.add_argument("--transport", choices=["stdio", "http"], default="stdio")
-    p.add_argument("--port", type=int, default=18200)
+    p.add_argument("--port", type=int, default=0)
     p.add_argument("--path", default="/mcp")
     p.add_argument("--stateless", action="store_true")
     p.add_argument("--json-response", action="store_true")

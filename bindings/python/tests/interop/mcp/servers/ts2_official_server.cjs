@@ -22,7 +22,7 @@ const stdio = req('@modelcontextprotocol/server/stdio');
 const argv = process.argv.slice(2);
 const opt = (name, dflt) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : dflt; };
 const ARGS = {
-  transport: opt('--transport', 'stdio'), port: Number(opt('--port', '18280')), path: opt('--path', '/mcp'),
+  transport: opt('--transport', 'stdio'), port: Number(opt('--port', '0')), path: opt('--path', '/mcp'),
   record: opt('--record', null), events: opt('--events', null),
   legacy: opt('--legacy', 'stateless'),   // 'reject' = modern-only (2026-07-28) deployment
 };
@@ -107,7 +107,8 @@ async function runHttp() {
       }) + '\n');
     }
   });
-  httpServer.listen(ARGS.port, '127.0.0.1');
+  // --port 0: the OS picks; READY <port> says the server listens.
+  httpServer.listen(ARGS.port, '127.0.0.1', () => console.log(`READY ${httpServer.address().port}`));
   process.on('SIGTERM', () => { httpServer.close(); process.exit(0); });
 }
 

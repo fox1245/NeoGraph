@@ -2,6 +2,7 @@
 
 Usage: python -I sdk_py_server.py <port> [--compat03] [--v03-first] [--rpc-path /a2a/v1]
                                         [--record FILE.jsonl]
+<port> 0 lets the OS pick; the server prints `READY <port>` once it listens.
 
 The executor picks its behaviour from the first word of the user text:
   echo      working -> text artifact -> completed (with a status message)
@@ -18,9 +19,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
+from pathlib import Path
 
-import uvicorn
 from starlette.applications import Starlette
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import server_ports  # noqa: E402
 
 from a2a.helpers import get_message_text, new_task_from_user_message, new_text_message, new_text_part
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -117,7 +122,9 @@ def main():
     ap.add_argument("--record", default="")
     ap.add_argument("--rpc-path", default="/")
     a = ap.parse_args()
-    url = f"http://127.0.0.1:{a.port}{a.rpc_path}"
+    # Bound first and kept: the card names the port, and nobody can take it meanwhile.
+    listener = server_ports.bind_listener(a.port)
+    url = f"http://127.0.0.1:{listener.getsockname()[1]}{a.rpc_path}"
     ifaces = [AgentInterface(protocol_binding="JSONRPC", protocol_version="1.0", url=url)]
     if a.compat03:
         legacy = AgentInterface(protocol_binding="JSONRPC", protocol_version="0.3", url=url)
@@ -133,7 +140,7 @@ def main():
                                     agent_card=card)
     app = Starlette(routes=[*create_agent_card_routes(card),
                             *create_jsonrpc_routes(handler, a.rpc_path, enable_v0_3_compat=a.compat03)])
-    uvicorn.run(Recorder(app, a.record), host="127.0.0.1", port=a.port, log_level="warning")
+    server_ports.serve_uvicorn(Recorder(app, a.record), listener)
 
 
 if __name__ == "__main__":

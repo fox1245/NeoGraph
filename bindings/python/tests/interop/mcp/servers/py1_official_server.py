@@ -2,7 +2,8 @@
 
 Run with the interpreter from NG_MCP1_PYTHON (a venv with requirements-mcp1.txt).
 
-  py1_official_server.py --transport stdio|http [--port N] [--path /mcp]
+  py1_official_server.py --transport stdio|http [--port N] [--path /mcp]   # --port 0: the OS picks,
+                                                                          # `READY <port>` says it listens
                          [--stateless] [--json-response] [--record FILE] [--events FILE]
 """
 
@@ -17,6 +18,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _recorder import Recorder  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+import server_ports  # noqa: E402
 
 import anyio  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
@@ -89,7 +93,7 @@ def main():
     global ARGS
     p = argparse.ArgumentParser()
     p.add_argument("--transport", choices=["stdio", "http"], default="stdio")
-    p.add_argument("--port", type=int, default=18270)
+    p.add_argument("--port", type=int, default=0)
     p.add_argument("--path", default="/mcp")
     p.add_argument("--stateless", action="store_true")
     p.add_argument("--json-response", action="store_true")
@@ -110,10 +114,8 @@ def main():
     if ARGS.transport == "stdio":
         mcp.run("stdio")
         return
-    import uvicorn
-
-    uvicorn.run(Recorder(mcp.streamable_http_app(), ARGS.record), host="127.0.0.1", port=ARGS.port,
-                log_level="warning", lifespan="on")
+    server_ports.serve_uvicorn(Recorder(mcp.streamable_http_app(), ARGS.record),
+                               server_ports.bind_listener(ARGS.port), lifespan="on")
 
 
 if __name__ == "__main__":

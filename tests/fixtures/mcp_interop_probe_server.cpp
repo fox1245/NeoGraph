@@ -4,12 +4,18 @@
 //
 //   neograph_mcp_interop_probe stdio [--untyped-tool]
 //   neograph_mcp_interop_probe http <port> [--untyped-tool]
+//     <port> 0 lets the server bind a port itself; it prints "READY <port>" on
+//     stdout once it listens, and exits with status 1 and "bind failed on <port>"
+//     on stderr when it cannot bind.
 //     env NG_PROBE_ALLOWED_ORIGINS=a,b   exact allowed Origin values
 //     env NG_PROBE_BEARER=<token>        require this bearer token, and publish
 //                                        RFC 9728 protected resource metadata
 #include <neograph/graph/types.h>
 #include <neograph/mcp/http_server.h>
 #include <neograph/mcp/server.h>
+
+#include <asio/io_context.hpp>
+#include <asio/ip/tcp.hpp>
 
 #include <chrono>
 #include <csignal>
@@ -171,6 +177,15 @@ std::vector<std::string> split_csv(const char* value) {
     return out;
 }
 
+// A port that was free a moment ago, for a server whose protected resource
+// metadata has to name its port before it binds.
+int pick_port() {
+    asio::io_context io;
+    asio::ip::tcp::acceptor acceptor(
+        io, asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
+    return acceptor.local_endpoint().port();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -192,32 +207,51 @@ int main(int argc, char** argv) {
         std::cerr << "usage: neograph_mcp_interop_probe stdio|http <port> [--untyped-tool]\n";
         return 2;
     }
-    mcp::MCPHttpServerConfig config;
-    config.host            = "127.0.0.1";
-    config.port            = std::atoi(argv[2]);
-    config.allowed_origins = split_csv(std::getenv("NG_PROBE_ALLOWED_ORIGINS"));
-    config.response_timeout = std::chrono::seconds(30);
+    mcp::MCPHttpServerConfig base;
+    base.host            = "127.0.0.1";
+    base.allowed_origins = split_csv(std::getenv("NG_PROBE_ALLOWED_ORIGINS"));
+    base.response_timeout = std::chrono::seconds(30);
+    bool bearer = false;
     if (const char* token = std::getenv("NG_PROBE_BEARER"); token && *token) {
+        bearer = true;
         const std::string expected = token;
-        config.bearer_authorizer =
+        base.bearer_authorizer =
             [expected](std::string_view candidate) -> std::optional<std::string> {
             if (candidate == expected) return std::string("probe-principal");
             return std::nullopt;
         };
-        config.protected_resource_metadata = {
-            {"resource", "http://127.0.0.1:" + std::to_string(config.port) + "/mcp"},
-            {"authorization_servers", json::array({"https://auth.example"})},
-            {"scopes_supported", json::array({"mcp:tools"})},
-            {"bearer_methods_supported", json::array({"header"})},
-        };
     }
-    mcp::MCPHttpServer http(
-        [untyped](std::string_view) {
-            mcp::MCPHttpServerSession session;
-            session.server = make_server(untyped);
-            return session;
-        },
-        config);
-    std::cerr << "neograph_mcp_interop_probe listening on 127.0.0.1:" << config.port << std::endl;
-    return http.start() ? 0 : 1;
+    const int requested = std::atoi(argv[2]);
+    // With port 0 the OS picks, which only the server can see; a server that
+    // publishes metadata naming its own URL picks and retries on a taken port.
+    const int attempts = (requested == 0 && bearer) ? 8 : 1;
+    std::unique_ptr<mcp::MCPHttpServer> http;
+    for (int attempt = 0; attempt < attempts && !http; ++attempt) {
+        auto config = base;
+        config.port = (requested == 0 && bearer) ? pick_port() : requested;
+        if (bearer) {
+            config.protected_resource_metadata = {
+                {"resource", "http://127.0.0.1:" + std::to_string(config.port) + "/mcp"},
+                {"authorization_servers", json::array({"https://auth.example"})},
+                {"scopes_supported", json::array({"mcp:tools"})},
+                {"bearer_methods_supported", json::array({"header"})},
+            };
+        }
+        auto candidate = std::make_unique<mcp::MCPHttpServer>(
+            [untyped](std::string_view) {
+                mcp::MCPHttpServerSession session;
+                session.server = make_server(untyped);
+                return session;
+            },
+            config);
+        if (candidate->start_async()) http = std::move(candidate);
+    }
+    if (!http) {
+        std::cerr << "bind failed on " << requested << std::endl;
+        return 1;
+    }
+    std::cerr << "neograph_mcp_interop_probe listening on 127.0.0.1:" << http->port() << std::endl;
+    std::cout << "READY " << http->port() << std::endl;
+    while (http->is_running()) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    return 0;
 }
