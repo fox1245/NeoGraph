@@ -13,6 +13,7 @@
 #include <chrono>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -285,4 +286,138 @@ TEST(TaskGraphExpansionSchemaTwo, AnOutputIsHeldToTheBytesOfOneAttemptNotAllOfTh
     ASSERT_TRUE(run.record->tasks[0].failure.has_value());
     EXPECT_EQ((*run.record->tasks[0].failure)["code"], "P_TASK_OUTPUT_BUDGET");
     EXPECT_EQ((*run.record->tasks[0].failure)["witness"]["reserved_output_bytes"], 8);
+}
+
+// ---- Retry of a task ----
+
+namespace {
+
+json retried_task(const std::string& id, const std::string& template_id, std::uint32_t attempts,
+                  std::vector<std::string> dependencies = {}) {
+    auto result            = task(id, template_id, std::move(dependencies));
+    result["max_attempts"] = attempts;
+    return result;
+}
+
+}  // namespace
+
+TEST(TaskGraphExpansionRetry, ARetryableFailureIsTriedAgainWithANewAttemptAndChild) {
+    ExpansionHarness h;
+    h.reset_observations();
+    flaky_failures_left.store(1);
+    const auto run = h.run(proposal_of({retried_task("a", "flaky/v1", 2)}, 2));
+
+    ASSERT_EQ(run.result.status(), ProgramTerminalStatus::Completed)
+        << run.result.serialize_canonical();
+    // Nothing is written as Failed for the first attempt: terminal states are absorbing.
+    EXPECT_EQ(run.events, (Events{"a:active:1", "a:active:2", "a:completed:2", "terminal"}));
+    EXPECT_EQ(flaky_calls.load(), 2);
+    ASSERT_TRUE(run.record.has_value());
+    const auto& record = run.record->tasks[0];
+    EXPECT_EQ(record.attempt, 2U);
+    EXPECT_EQ(record.attempt_identity, attempt_identity(run.fragment_id, "a", 2));
+    EXPECT_FALSE(record.failure.has_value());  // the outcome of attempt 2 replaced the old failure
+
+    // The record of the retried attempt kept the failure of the first one, and its child.
+    ASSERT_EQ(run.images.size(), 4U);
+    const auto& first_active  = run.images[0].tasks[0];
+    const auto& second_active = run.images[1].tasks[0];
+    EXPECT_EQ(second_active.attempt, 2U);
+    EXPECT_EQ(second_active.attempt_identity, attempt_identity(run.fragment_id, "a", 2));
+    ASSERT_TRUE(second_active.failure.has_value());
+    EXPECT_EQ((*second_active.failure)["code"], "NG.TaskFailed");
+    EXPECT_EQ((*second_active.failure)["witness"]["node_failure"]["retryable"], true);
+    EXPECT_FALSE(first_active.failure.has_value());
+    // Each attempt is its own child run, derived from its attempt identity.
+    ASSERT_TRUE(record.child_run_id.has_value());
+    EXPECT_EQ(run.child_budgets.size(), 2U);
+    EXPECT_TRUE(run.child_budgets.count(*record.child_run_id) != 0);
+    if (second_active.child_run_id) EXPECT_NE(*second_active.child_run_id, *record.child_run_id);
+    // Both children had the whole budget of one attempt; the aggregate reserved it twice.
+    for (const auto& [id, granted] : run.child_budgets) {
+        EXPECT_EQ(granted.wall_time_ms, 1000U);
+        EXPECT_EQ(granted.model_tokens, 1U);
+    }
+    EXPECT_EQ(run.record->fragment.aggregate_budget(), (TaskGraphBudget{2000, 2, 2, 1024}));
+}
+
+TEST(TaskGraphExpansionRetry, ATaskThatKeepsFailingEndsFailedAfterItsLastAttempt) {
+    ExpansionHarness h;
+    h.reset_observations();
+    flaky_failures_left.store(10);
+    const auto run = h.run(proposal_of({retried_task("a", "flaky/v1", 2)}, 2));
+
+    EXPECT_EQ(run.result.status(), ProgramTerminalStatus::Failed);
+    EXPECT_EQ(run.events, (Events{"a:active:1", "a:active:2", "a:failed:2", "terminal"}));
+    EXPECT_EQ(flaky_calls.load(), 2);
+    ASSERT_TRUE(run.result.failure().has_value());
+    EXPECT_EQ(run.result.failure()->code, "P_TASK_FAILED");
+    EXPECT_EQ(run.record->tasks[0].attempt, 2U);
+}
+
+TEST(TaskGraphExpansionRetry, AFailureTheClassifierDoesNotRetryIsNotRetried) {
+    ExpansionHarness h;
+    h.reset_observations();
+    const auto run = h.run(proposal_of({retried_task("a", "logic/v1", 3)}, 2));
+
+    EXPECT_EQ(run.result.status(), ProgramTerminalStatus::Failed);
+    EXPECT_EQ(run.events, (Events{"a:active:1", "a:failed:1", "terminal"}));
+    EXPECT_EQ(logic_calls.load(), 1);
+    EXPECT_EQ((*run.record->tasks[0].failure)["witness"]["node_failure"]["retryable"], false);
+}
+
+TEST(TaskGraphExpansionRetry, ATaskWithoutTheHintIsNotRetried) {
+    ExpansionHarness h;
+    h.reset_observations();
+    flaky_failures_left.store(1);
+    const auto run = h.run(proposal_of({task("a", "flaky/v1")}, 2));
+
+    EXPECT_EQ(run.result.status(), ProgramTerminalStatus::Failed);
+    EXPECT_EQ(run.events, (Events{"a:active:1", "a:failed:1", "terminal"}));
+    EXPECT_EQ(flaky_calls.load(), 1);
+}
+
+TEST(TaskGraphExpansionRetry, ADependentWaitsForTheRetryInsteadOfFailing) {
+    ExpansionHarness h;
+    h.reset_observations();
+    flaky_failures_left.store(1);
+    const auto run = h.run(proposal_of({retried_task("a", "flaky/v1", 2), task("b", "ok/v1", {"a"})}, 2));
+
+    ASSERT_EQ(run.result.status(), ProgramTerminalStatus::Completed)
+        << run.result.serialize_canonical();
+    EXPECT_EQ(run.events, (Events{"a:active:1", "a:active:2", "a:completed:2", "b:active:1",
+                                  "b:completed:1", "terminal"}));
+}
+
+TEST(TaskGraphExpansionRetry, ARetryableFailureDoesNotTriggerFailFast) {
+    ExpansionHarness h;
+    h.reset_observations();
+    flaky_failures_left.store(1);
+    const auto run = h.run(proposal_of({retried_task("a", "flaky/v1", 2), task("c", "ok/v1")}, 2),
+                           RunOptions{.concurrency = 2, .failure_policy = "fail_fast"});
+
+    ASSERT_EQ(run.result.status(), ProgramTerminalStatus::Completed)
+        << run.result.serialize_canonical();
+    // c ran in the first chunk beside the first attempt of a; a is dispatched again by the next scan.
+    EXPECT_EQ(run.events, (Events{"a:active:1", "c:active:1", "c:completed:1", "a:active:2",
+                                  "a:completed:2", "terminal"}));
+}
+
+TEST(TaskGraphExpansionRetry, EveryAttemptIdentityIsAPureFunctionOfTheFragmentTaskAndNumber) {
+    ExpansionHarness h;
+    h.reset_observations();
+    flaky_failures_left.store(2);
+    const auto run = h.run(proposal_of({retried_task("a", "flaky/v1", 3)}, 2));
+
+    ASSERT_EQ(run.result.status(), ProgramTerminalStatus::Completed);
+    ASSERT_EQ(run.images.size(), 5U);
+    std::set<std::string> identities;
+    for (std::size_t index = 0; index < 3; ++index) {
+        const auto& image = run.images[index].tasks[0];
+        EXPECT_EQ(image.attempt, index + 1);
+        EXPECT_EQ(image.attempt_identity, attempt_identity(run.fragment_id, "a", image.attempt));
+        identities.insert(image.attempt_identity);
+    }
+    EXPECT_EQ(identities.size(), 3U);
+    EXPECT_EQ(flaky_calls.load(), 3);
 }

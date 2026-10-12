@@ -457,6 +457,23 @@ std::optional<ProgramFailure> validate_task_output(const CompiledTaskGraphTask& 
     return std::nullopt;
 }
 
+// Whether the failure of a task's child may be tried again: the child failed with a Core node
+// failure the classifier calls retryable, and not one that stopped retrying because a committed
+// effect, the run's retry ceiling or the deadline forbids another attempt (the rule of the
+// plan-level Retry operation, program_retryable).
+bool retryable_task_failure(const std::optional<ProgramFailure>& failure) {
+    if (!failure || !failure->witness.is_object() || !failure->witness.contains("node_failure"))
+        return false;
+    const auto record = failure->witness["node_failure"];
+    if (!record.is_object() || !record.contains("retryable") || !record["retryable"].is_boolean() ||
+        !record["retryable"].get<bool>())
+        return false;
+    const auto kind = record.contains("kind") && record["kind"].is_string()
+                          ? record["kind"].get<std::string>()
+                          : std::string();
+    return kind != "effect_committed" && kind != "ceiling" && kind != "deadline";
+}
+
 std::optional<std::vector<std::string>> decode_json_pointer(std::string_view path) {
     if (path.empty()) return std::vector<std::string>{};
     if (path.front() != '/') return std::nullopt;
@@ -2604,6 +2621,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             {"attempts", failure->attempts},
                             {"witness", failure->witness}};
             };
+            auto find_task = [&](std::string_view task_id) -> const CompiledTaskGraphTask& {
+                for (const auto& task : fragment.tasks())
+                    if (task.task_id == task_id) return task;
+                throw_runtime_diagnostic("P_EXPAND_RECORD", "Published fragment task is missing",
+                                         json{{"task_id", std::string(task_id)}});
+            };
             auto update_task = [&](std::string_view task_id, TaskGraphTaskState task_state,
                                    std::uint32_t attempt, std::optional<json> output,
                                    std::optional<json>        failure,
@@ -2672,6 +2695,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             std::map<std::string, std::string, std::less<>>        child_run_ids;
             std::map<std::string, json, std::less<>>               outputs;
             std::map<std::string, json, std::less<>>               failures;
+            // Tasks whose last attempt failed in a way that may be retried: the failure to keep
+            // in the record while the next attempt runs. Not durable: a crash before the next
+            // attempt starts relaunches the same attempt, whose child already holds the failure.
+            std::map<std::string, json, std::less<>>               retry_failures;
             for (const auto& record : durable->record.tasks) {
                 states[record.task_id]   = record.state;
                 attempts[record.task_id] = record.attempt;
@@ -2991,17 +3018,27 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                                [batch_state] { batch_state->join.signal(); });
                                 continue;
                             }
-                            if (task_attempt == 0) ++task_attempt;
+                            const bool retrying = retry_failures.contains(task->task_id);
+                            if (task_attempt == 0 || retrying) ++task_attempt;
                             auto& identity = attempt_identities[task->task_id];
-                            if (identity.empty())
+                            if (identity.empty() || retrying)
                                 identity = task_attempt_identity(fragment.fragment_id(),
                                                                  task->task_id, task_attempt);
                             states[task->task_id] = TaskGraphTaskState::Active;
+                            // A retried attempt's record keeps the failure of the attempt before
+                            // it, until its own outcome replaces it.
                             update_task(task->task_id, TaskGraphTaskState::Active, task_attempt,
-                                        std::nullopt, std::nullopt, identity,
+                                        std::nullopt,
+                                        retrying ? std::optional<json>{retry_failures[task->task_id]}
+                                                 : std::nullopt,
+                                        identity,
                                         child_run_ids.contains(task->task_id)
                                             ? std::optional<std::string>{child_run_ids[task->task_id]}
                                             : std::nullopt);
+                            if (retrying) {
+                                failures[task->task_id] = retry_failures[task->task_id];
+                                retry_failures.erase(task->task_id);
+                            }
                             asio::co_spawn(
                                 executor, run_task(*task, batch_state),
                                 asio::bind_executor(
@@ -3073,9 +3110,22 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         if (completed) {
                             states[task_result.task_id]  = TaskGraphTaskState::Completed;
                             outputs[task_result.task_id] = task_result.output;
+                            failures.erase(task_result.task_id);  // a retried task's last failure
                             update_task(task_result.task_id, TaskGraphTaskState::Completed,
                                         task_result.attempt, task_result.output, std::nullopt,
                                         task_result.attempt_identity, child_id);
+                        } else if (task_result.status == ProgramTerminalStatus::Failed &&
+                                   retryable_task_failure(task_result.failure) &&
+                                   task_result.attempt <
+                                       find_task(task_result.task_id).max_attempts &&
+                                   !operation_token->is_cancelled() &&
+                                   control->cancellation_cause() == CancellationCause::None) {
+                            // Terminal states are absorbing, so nothing is written for an attempt
+                            // that will be retried. The task is dispatched again, with the next
+                            // attempt number, by the next scan; its Active record carries this
+                            // failure.
+                            states[task_result.task_id]         = TaskGraphTaskState::Pending;
+                            retry_failures[task_result.task_id] = failure_json(task_result.failure);
                         } else {
                             const auto cancelled =
                                 task_result.status == ProgramTerminalStatus::Cancelled ||

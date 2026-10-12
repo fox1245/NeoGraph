@@ -34,6 +34,9 @@ inline std::atomic<int>         gate_active{0};
 inline std::atomic<int>         gate_peak{0};
 inline std::atomic<int>         gate_arrived{0};
 inline std::atomic<int>         gate_target{1};
+inline std::atomic<int>         flaky_failures_left{0};
+inline std::atomic<int>         flaky_calls{0};
+inline std::atomic<int>         logic_calls{0};
 
 inline void log_node(std::string entry) {
     std::lock_guard lock(node_log_mutex);
@@ -142,6 +145,39 @@ private:
     std::string name_;
 };
 
+// Fails the first `flaky_failures_left` times it runs (an ordinary failure, which the node
+// failure classifier lets a caller retry), then echoes its input.
+class FlakyNode final : public GraphNode {
+public:
+    explicit FlakyNode(std::string name) : name_(std::move(name)) {}
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        ++flaky_calls;
+        if (flaky_failures_left.fetch_sub(1) > 0) throw std::runtime_error("scripted flake");
+        NodeOutput output;
+        output.writes.push_back(ChannelWrite{"value", input.state.get("item")});
+        co_return output;
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+// A logic error: the classifier does not let anyone retry it.
+class LogicFailNode final : public GraphNode {
+public:
+    explicit LogicFailNode(std::string name) : name_(std::move(name)) {}
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        ++logic_calls;
+        throw std::logic_error("scripted integrity failure");
+        co_return NodeOutput{};
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
 class CompletedNode final : public GraphNode {
 public:
     explicit CompletedNode(std::string name) : name_(std::move(name)) {}
@@ -180,6 +216,8 @@ inline RegistrySnapshot expansion_registry(ExecutionGuarantee = ExecutionGuarant
     add_node_type<FailNode>(builder, "exp-fail", 'c');
     add_node_type<GateNode>(builder, "exp-gate", 'd');
     add_node_type<JoinNode>(builder, "exp-join", 'e');
+    add_node_type<FlakyNode>(builder, "exp-flaky", 'f');
+    add_node_type<LogicFailNode>(builder, "exp-logic", '9');
     builder.add_reducer(manifest(ExecutableKind::Reducer, "runtime-overwrite", '3'),
                         [](const json&, const json& incoming) { return json(incoming); });
     return std::move(builder).build();
@@ -225,8 +263,12 @@ public:
                 if (now.state == before.state && now.attempt == before.attempt) continue;
                 events_.push_back(now.task_id + ":" + std::string(to_string(now.state)) + ":" +
                                   std::to_string(now.attempt));
+                images_.push_back(record);
             }
-            if (record.terminal && !previous->second.terminal) events_.push_back("terminal");
+            if (record.terminal && !previous->second.terminal) {
+                events_.push_back("terminal");
+                images_.push_back(record);
+            }
             previous->second = record;
         }
         return result;
@@ -236,12 +278,18 @@ public:
         std::lock_guard lock(mutex_);
         return events_;
     }
+    /// The record as it was after each event of events(), in the same order.
+    std::vector<TaskGraphFragmentRecord> images() const {
+        std::lock_guard lock(mutex_);
+        return images_;
+    }
 
 private:
     std::shared_ptr<TaskGraphFragmentStore>        inner_;
     mutable std::mutex                             mutex_;
     std::map<std::string, TaskGraphFragmentRecord> last_;
     std::vector<std::string>                       events_;
+    std::vector<TaskGraphFragmentRecord>           images_;
 };
 
 // ---- Fixture helpers. ----
@@ -310,6 +358,8 @@ struct ExpansionRun {
     std::string                            fragment_id;
     /// The budget each child run was launched with, by child run id.
     std::map<std::string, RunBudget>       child_budgets;
+    /// The record after each event, in the order of `events`.
+    std::vector<TaskGraphFragmentRecord>   images;
 };
 
 struct RunOptions {
@@ -333,7 +383,9 @@ public:
                                                  template_contract("fail/v1", 'c', "fail"),
                                                  template_contract("gate/v1", 'd', "gate"),
                                                  template_contract("join/v1", 'e', "join",
-                                                                   {"/item", "/extra"})};
+                                                                   {"/item", "/extra"}),
+                                                 template_contract("flaky/v1", 'f', "flaky"),
+                                                 template_contract("logic/v1", '9', "logic")};
         policy.limits.max_attempts            = 3;
         policy.limits.max_literal_bytes       = 256;
         policy.limits.max_total_literal_bytes = 1024;
@@ -353,7 +405,9 @@ public:
                        {"slow", fixture.admit_document(child_document("exp-slow"))},
                        {"fail", fixture.admit_document(child_document("exp-fail"))},
                        {"gate", fixture.admit_document(child_document("exp-gate"))},
-                       {"join", fixture.admit_document(child_document("exp-join", {"extra"}))}},
+                       {"join", fixture.admit_document(child_document("exp-join", {"extra"}))},
+                       {"flaky", fixture.admit_document(child_document("exp-flaky"))},
+                       {"logic", fixture.admit_document(child_document("exp-logic"))}},
                       BudgetLimits{3333, 333, 333, 1, 1, 6, 0, 0, 0});
         auto handle = fixture.runtime->start(
             "tenant:runtime", parent,
@@ -362,7 +416,7 @@ public:
                                         1, static_cast<std::uint32_t>(options.max_depth),
                                         options.max_tasks},
                               "trace-expansion", {}});
-        ExpansionRun run{handle.wait(), store->events(), std::nullopt, {}, {}};
+        ExpansionRun run{handle.wait(), store->events(), std::nullopt, {}, {}, store->images()};
         if (run.result.output().is_object() && run.result.output().contains("fragment_id")) {
             run.fragment_id = run.result.output()["fragment_id"].get<std::string>();
             run.record      = fixture.task_graph_fragments->load(run.fragment_id);
@@ -381,6 +435,9 @@ public:
         gate_arrived.store(0);
         gate_peak.store(0);
         gate_target.store(1);
+        flaky_failures_left.store(0);
+        flaky_calls.store(0);
+        logic_calls.store(0);
     }
 
     ExpansionRuntime                         fixture;
