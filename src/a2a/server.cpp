@@ -1539,9 +1539,15 @@ void A2AServer::Impl::handle_send(Call& call) {
                 return;
             }
         }
+        const auto host_task_id = mp.message.task_id.value_or(detail::random_uuid());
+        const auto host_context_id = mp.message.context_id.value_or(detail::random_uuid());
         if (auto handled = program_adapter->handle_host_message(
-                mp.message, mp.message.task_id.value_or(detail::random_uuid()),
-                mp.message.context_id.value_or(detail::random_uuid()), peer)) {
+                mp.message, host_task_id, host_context_id, peer)) {
+            if (handled->id != host_task_id || handled->context_id != host_context_id) {
+                // The host handler must answer for the task it was given.
+                reply_error(call, rpc_error(-32603, "The agent's host handler failed"));
+                return;
+            }
             if (!handled->status.timestamp) handled->status.timestamp = detail::utc_timestamp_now();
             {
                 std::lock_guard lk(tasks_mu);
