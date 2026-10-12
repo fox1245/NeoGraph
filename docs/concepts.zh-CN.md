@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=0d83e62e8cc14ec8bfa3d0d263eb93ba58b67f39b295e10c46ea4834c5d94ae5 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=6b4210742298df054f3561080a86ae38f8e11dc34a19717a7cec3dc07890e8be -->
 # NeoGraph 核心概念——叙事指南
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -316,6 +316,8 @@ class Planner(ng.GraphNode):
 
 引擎每个 `Send` 调用一次 compiled target，不保证新建 node object。因此 target 必须安全处理并发调用的 member state。Payload 在 target 读取 channel 前应用。单个 Send 使用共享状态；多个 Send 使用 ready batch 后状态的隔离副本，并在全部分支完成后按调用顺序合并返回写入。随后合并普通 node 和 Send target 的信号，规划下一 ready batch 的路由。
 
+抛出 `NodeInterrupt` 的 Send target 会像 ready batch 中的 node 一样暂停 run。它的 `NodeInterrupt` 检查点会重新进入整个 superstep：保存该 step 开始时的状态，并把该 step 的 ready node 记为 next node，暂停的结果也报告该状态。恢复会重新执行该 step。已完成的 ready node 和 Send 重放其记录的结果，不会再次执行或再次计费；暂停的 Send 以及其他未完成的 Send 会以相同的 task id 带着恢复值运行，因此其先前 attempt 记入日志的 provider 调用会被重放。若 step 之前没有检查点（例如位于入口的 map node），已完成的结果会记录在该中断检查点本身之下。
+
 ### 常见形态：fan-out 5，fan-in至汇总器
 
 ```
@@ -412,7 +414,7 @@ result = await engine.resume_async(thread_id="t1",
 
 ### 通过 `NodeInterrupt` 进行动态中断
 
-从节点主体内部抛出（Python：`raise ng.NodeInterrupt(reason)`，C++：`throw NodeInterrupt(...)`）。引擎捕获、持久化状态、返回一个在抛出节点处中断的 `RunResult` —— 使用相同的恢复 API。
+从节点主体内部抛出（Python：`raise ng.NodeInterrupt(reason)`，C++：`throw NodeInterrupt(...)`）。引擎捕获、持久化状态、返回一个在抛出节点处中断的 `RunResult` —— 使用相同的恢复 API。这对 ready batch 中的节点和 `Send` target 同样适用，在所有同步、异步和流式入口上都一致。暂停的步骤中已完成的兄弟节点在恢复时会被重放而不是再次运行，前面没有检查点的步骤也是如此。
 
 当暂停决策取决于中间节点输出时非常有用（例如“LLM 是否产生了值得展示给人类的东西？”）。
 

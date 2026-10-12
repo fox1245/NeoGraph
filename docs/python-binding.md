@@ -655,6 +655,8 @@ profile.attach(engine)
 
 Static `interrupt_before`/`interrupt_after`, dynamic `NodeInterrupt`, synchronous `resume`, asyncio `resume_async`, and exact `resume_from` require a checkpoint store.
 
+A Python node dispatched by `ng.Send` that raises `ng.NodeInterrupt` pauses the run like any other node: `run`, `run_stream`, `run_async` and `run_stream_async` return an interrupted `RunResult` with a checkpoint, and `resume`, `resume_async` and `resume_from` run that Send with the answer while the node that emitted the Sends and the Sends that finished replay without running again.
+
 Python `CheckpointStore` subclasses can implement `requires_managed_budget(thread_id) -> bool`. This synchronous virtual method reads persisted managed-bank denial obligations; the engine's native async facade calls it, and the binding acquires the GIL for the Python override. Report the truthful persisted obligation even when checkpoint state has been stripped or deleted. Omitting the override preserves the native explicit unsupported-backend error rather than returning `False`.
 
 This reader grants no spending, restoration or lease authority. Managed bounded execution still needs actual supported native managed-budget leases; implementing the reader alone cannot supply them.

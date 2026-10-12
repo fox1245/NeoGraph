@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=67ca829b6ef931fa0677424ca6fa666dd0593ba61bde293b8f3ad1290ca89ab2 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=9ba5883f1606544761d327968d6929dd5a799d30a3b2e6becd28ebe22f762769 -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -653,6 +653,8 @@ profile.attach(engine)
 ## HITLと状態
 
 静的`interrupt_before`/`interrupt_after`、動的`NodeInterrupt`、同期`resume`、asyncio`resume_async`、および厳密`resume_from`はチェックポイントストアを必要とします。
+
+`ng.Send`でディスパッチされたPythonノードが`ng.NodeInterrupt`を送出すると、他のノードと同じようにrunが一時停止します。`run`、`run_stream`、`run_async`、`run_stream_async`はチェックポイント付きの中断された`RunResult`を返し、`resume`、`resume_async`、`resume_from`はそのSendを回答とともに実行します。Sendを送出したノードと終了したSendは再実行されず再生されます。
 
 Python の `CheckpointStore` サブクラスは `requires_managed_budget(thread_id) -> bool` を実装できます。この同期仮想メソッドは、永続化された管理予算バンクの拒否義務を読み取ります。エンジンのネイティブ非同期ファサードがこのメソッドを呼び、バインディングは Python のオーバーライドを実行するときに GIL を取得します。チェックポイント状態からバンクを除去したり、チェックポイントを削除したりした後も、実際の永続義務を報告してください。オーバーライドを省略すると、`False` を返す代わりに、未対応バックエンドを示す明示的なネイティブエラーが維持されます。
 

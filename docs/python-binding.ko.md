@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=67ca829b6ef931fa0677424ca6fa666dd0593ba61bde293b8f3ad1290ca89ab2 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=9ba5883f1606544761d327968d6929dd5a799d30a3b2e6becd28ebe22f762769 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -653,6 +653,8 @@ profile.attach(engine)
 ## HITL 및 상태
 
 정적 `interrupt_before`/`interrupt_after`, 동적 `NodeInterrupt`, 동기식 `resume`, asyncio `resume_async`, 그리고 정확한 `resume_from`은 체크포인트 저장소를 필요로 합니다.
+
+`ng.Send`로 디스패치된 Python 노드가 `ng.NodeInterrupt`를 던지면 다른 노드와 마찬가지로 run이 일시 정지합니다. `run`, `run_stream`, `run_async`, `run_stream_async`는 체크포인트가 있는 중단된 `RunResult`를 반환하고, `resume`, `resume_async`, `resume_from`은 그 Send를 답과 함께 실행하며 Send를 내보낸 노드와 끝난 Send는 다시 실행되지 않고 재생됩니다.
 
 Python `CheckpointStore` 하위 클래스는 `requires_managed_budget(thread_id) -> bool`을 구현할 수 있습니다. 이 동기 가상 메서드는 영속화된 관리 예산 은행의 거부 의무를 읽습니다. 엔진의 네이티브 비동기 파사드가 이 메서드를 호출하며, 바인딩은 Python 재정의 메서드를 실행할 때 GIL을 획득합니다. 체크포인트 상태에서 은행 정보를 제거하거나 체크포인트를 삭제해도 실제 영속 의무를 보고해야 합니다. 재정의 메서드를 생략하면 `False`를 반환하는 대신 지원되지 않는 백엔드라는 명시적인 네이티브 오류가 유지됩니다.
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=6578e0172eac3a260f5e23c78aeee218bff1412d89f20e0a6dc79c302ea940a5 -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=006547cf898fc273af6a783b23b33ef4faae2d0a3da8861f2d2b0265d77183c4 -->
 # Program API 엔드투엔드 시나리오
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -20,6 +20,7 @@
 | `test_09_bound_llm.py` | `node_context`로 바인딩한 `llm_call`(#372): 보고 비용과 추정 비용, 보내기 전 거부(예산, 알 수 없는 모델, router alias), 0 예산, 공급자 없는 Program의 id, 한 예산에 대한 `all`과 `quorum`, 호출이 journal에 기록된 뒤의 크래시와 한 번만 청구하는 복구 |
 | `test_10_failure_routing.py` | 실패 라우팅(#364): 실패한 TEST가 레코드와 함께 `interruptBefore` 핸들러로 라우팅됨, retry와 abort 라우트로 재개, 작성자 코드, 가린 오류 텍스트, `max_visits`, `max_node_retries` 상한, 노드 안의 Program 진단, SQLite를 쓰는 새 프로세스에서의 재개 |
 | `test_11_attempt_timeout.py` | 시도 타임아웃(#364): 타임아웃된 뒤 재시도에서 회복하는 느린 Python 노드, 항상 타임아웃되어 `NG.Timeout`으로 핸들러에 라우팅되는 노드(핸들러가 없으면 실행 실패), 결과와 트레이스에 나타나지 않는 늦은 완료, 정지 마감 시각을 넘겨 취소를 무시하는 노드(`NG.EffectUncertain`), `wall_time_ms`를 넘게 될 백오프가 kind `deadline`으로 멈추는 경우 |
+| `test_11_send_interrupts.py` | `NodeInterrupt`를 던지는 `Send` target(#385): Program이 그 target에서 일시 정지함, 재개 시 map 노드와 끝난 Send가 재생됨, SQLite를 쓰는 재시작 뒤의 재개, 바인딩된 `llm_call`을 호출하고 끝난 Send는 다시 보내지도 다시 과금되지도 않음 |
 
 `support.py`에는 공유하는 Python 노드, 조건, 레지스트리, 예산, JavaScript 빌더가 있습니다.
 

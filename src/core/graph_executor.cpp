@@ -176,6 +176,18 @@ bool take_activation(const detail::FailureRouting* routing, const RunContext& ct
     return runtime->failure_state->activate(*routing, node);
 }
 
+// #385: before the writes of a step whose nodes emitted Sends are applied,
+// keep the state the step started from. A Send that interrupts saves it as
+// its checkpoint, so that resume re-enters the whole step.
+void capture_step_start(const RunContext& ctx, const GraphState& state, bool has_sends) {
+    if (!has_sends) return;
+    const auto runtime = detail::runtime_for(ctx);
+    if (!runtime || !runtime->step_start || !runtime->step_start->enabled ||
+        runtime->step_start->state)
+        return;
+    runtime->step_start->state = state.serialize_runtime();
+}
+
 }  // namespace
 
 namespace detail {
@@ -213,6 +225,46 @@ asio::awaitable<void> record_attempt_start(const CheckpointCoordinator& coord,
     NodeResult started;
     co_await coord.record_pending_write_async(checkpoint_id, effect_namespace, effect_namespace,
                                               node_name, started, step);
+}
+
+// #385: the NodeInterrupt checkpoint of a Send that interrupts. Like a ready
+// node that interrupts in a fan-out step, it re-enters the whole step: the
+// state the step started from, the step's ready nodes as next nodes, the
+// barrier state it started with. A Send runs after the step's ready nodes have
+// finished, so without a checkpoint before the step their results, and those
+// of the Sends that finished, are recorded under the interrupt checkpoint
+// itself; resume replays them instead of running them again. `finished[i]` is
+// the result of Send i when it finished.
+asio::awaitable<void> save_send_interrupt(const CheckpointCoordinator&          coord,
+                                          const GraphState&                     step_state,
+                                          const detail::SendStep&               send_step,
+                                          const std::vector<Send>&              sends,
+                                          const std::vector<const NodeResult*>& finished,
+                                          const std::vector<int>& interrupted_attempts,
+                                          std::size_t interrupted, int step,
+                                          const std::string& parent_cp_id,
+                                          const RunContext&  ctx) {
+    // GCC-13: build the vector outside the co_await argument list.
+    std::vector<std::string> next_nodes = send_step.ready;
+    const auto interrupt_cp_id = co_await coord.save_super_step_async(
+        step_state, sends[interrupted].target_node, next_nodes, CheckpointPhase::NodeInterrupt,
+        step, parent_cp_id, send_step.barrier_state,
+        detail::checkpoint_metadata_for(ctx, detail::CheckpointTiming::DuringStep));
+    if (!parent_cp_id.empty()) co_return;
+    for (std::size_t i = 0; i < send_step.ready.size() && i < send_step.results.size(); ++i) {
+        const auto task_id = make_static_task_id(step, send_step.ready[i]);
+        co_await coord.record_pending_write_async(interrupt_cp_id, task_id, task_id,
+                                                  send_step.ready[i], send_step.results[i], step);
+    }
+    for (std::size_t si = 0; si < sends.size(); ++si) {
+        const auto task_id = make_send_task_id(step, si, sends[si].target_node, sends[si].input);
+        if (finished[si])
+            co_await coord.record_pending_write_async(interrupt_cp_id, task_id, task_id,
+                                                      sends[si].target_node, *finished[si], step);
+        else
+            co_await record_attempt_start(coord, interrupt_cp_id, task_id, sends[si].target_node,
+                                          interrupted_attempts[si], step);
+    }
 }
 
 }  // namespace
@@ -1146,6 +1198,7 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
     }
 
     auto& nr = *ok_result;
+    capture_step_start(ctx, state, !nr.sends.empty());
     apply_node_result(state, nr, ctx, failure_routing_ && failure_routing_->routes());
 
     trace.push_back(node_name);
@@ -1225,6 +1278,7 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
                 co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, node_name, nr,
                                                           step);
         }
+        capture_step_start(ctx, state, !nr.sends.empty());
         apply_node_result(state, nr, ctx, failure_routes);
         trace.push_back(node_name);
         std::vector<NodeResult> result;
@@ -1369,10 +1423,18 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
                 parent_cp_id, barrier_state,
                 detail::checkpoint_metadata_for(ctx, detail::CheckpointTiming::DuringStep));
             if (parent_cp_id.empty()) {
+                // No checkpoint precedes the step: record under the interrupt
+                // checkpoint what a parent would hold, so that resume replays
+                // a sibling that finished instead of running it again (#385).
                 for (std::size_t i = 0; i < ready.size(); ++i) {
                     const auto branch_task_id = make_static_task_id(step, ready[i]);
-                    co_await record_attempt_start(coord, interrupt_cp_id, branch_task_id, ready[i],
-                                                  interrupted_attempts[i], step);
+                    if (!excs[i])
+                        co_await coord.record_pending_write_async(interrupt_cp_id, branch_task_id,
+                                                                  branch_task_id, ready[i],
+                                                                  values[i], step);
+                    else
+                        co_await record_attempt_start(coord, interrupt_cp_id, branch_task_id,
+                                                      ready[i], interrupted_attempts[i], step);
                 }
             }
             // Drop the worker eptr and throw a fresh NodeInterrupt —
@@ -1386,6 +1448,9 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
     }
 
     // Apply results in ready-order (scheduler pairs ready[i] ↔ results[i]).
+    capture_step_start(ctx, state,
+                       std::any_of(values.begin(), values.end(),
+                                   [](const NodeResult& value) { return !value.sends.empty(); }));
     std::vector<NodeResult> step_results;
     step_results.reserve(ready.size());
     for (std::size_t i = 0; i < ready.size(); ++i) {
@@ -1436,7 +1501,8 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
     const GraphStreamCallback&                         cb,
     StreamMode                                         stream_mode,
     const RunContext&                                  ctx,
-    std::vector<json>*                                 failure_records) {
+    std::vector<json>*                                 failure_records,
+    const detail::SendStep*                            send_step) {
     std::vector<StepRouting> routings;
     if (failure_records) failure_records->assign(sends.size(), json());
     if (sends.empty()) co_return routings;
@@ -1471,6 +1537,24 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
     for (std::size_t si = 0; si < sends.size(); ++si)
         visit_limited[si] = !take_activation(failure_routing_, ctx, sends[si].target_node);
 
+    // #385: a Send that interrupts pauses the run like a ready node: a
+    // NodeInterrupt checkpoint that re-enters the step, then the interrupt.
+    // The attempt each Send was in when it paused is written by that Send only.
+    std::vector<int> interrupted_attempts(sends.size(), 0);
+    auto pause = [&](std::size_t interrupted,
+                     const std::vector<const NodeResult*>& finished) -> asio::awaitable<void> {
+        if (!send_step || !coord.enabled()) co_return;
+        const auto runtime = detail::runtime_for(ctx);
+        if (!runtime || !runtime->step_start || !runtime->step_start->state)
+            throw std::logic_error("A Send interrupted without the state its step started from");
+        GraphState step_state;
+        init_state(step_state);
+        step_state.copy_provider_history_from(state);
+        step_state.restore_runtime(*runtime->step_start->state);
+        co_await save_send_interrupt(coord, step_state, *send_step, sends, finished,
+                                     interrupted_attempts, interrupted, step, parent_cp_id, ctx);
+    };
+
     // --- Single Send: sequential on shared state, with retry. ---
     if (sends.size() == 1) {
         const auto& s = sends[0];
@@ -1483,9 +1567,23 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
             nr = replay_it->second;
         } else {
             apply_input(state, s.input);
-            detail::InvocationSlot slot{task_id, step, &replay, &coord, &parent_cp_id, nullptr};
+            detail::InvocationSlot slot{task_id, step, &replay, &coord, &parent_cp_id,
+                                        &interrupted_attempts[0]};
             slot.visit_limited = visit_limited[0] != 0;
-            nr = co_await execute_attempts_async(s.target_node, state, cb, stream_mode, ctx, &slot);
+            // GCC-13: no co_await inside a catch handler; save outside it.
+            std::optional<NodeInterrupt> interrupt;
+            try {
+                nr = co_await execute_attempts_async(s.target_node, state, cb, stream_mode, ctx,
+                                                     &slot);
+            } catch (const NodeInterrupt& ni) {
+                interrupt = ni;
+            }
+            if (interrupt) {
+                const std::vector<const NodeResult*> finished(sends.size(), nullptr);
+                co_await pause(0, finished);
+                interrupt->set_node(s.target_node);
+                throw *interrupt;
+            }
             if (coord.records_pending_writes(parent_cp_id))
                 co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, s.target_node,
                                                           nr, step);
@@ -1546,7 +1644,8 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
         // is captured by value into this worker lambda — no
         // serialize/restore hop, no manual forward.
 
-        detail::InvocationSlot slot{task_id, step, &replay, &coord, &parent_cp_id, nullptr};
+        detail::InvocationSlot slot{task_id, step, &replay, &coord, &parent_cp_id,
+                                    &interrupted_attempts[si]};
         slot.visit_limited = visit_limited[si] != 0;
         auto nr = co_await execute_attempts_async(s.target_node, send_state, cb, stream_mode, ctx,
                                                   &slot);
@@ -1580,14 +1679,37 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
             .async_wait(asio::experimental::wait_for_all(), asio::use_awaitable);
     (void)order;
 
-    // First-exception pass — same shape as run_parallel_async, but
-    // a Send's NodeInterrupt does not emit a dedicated cp: Send
-    // targets are fan-out one-shots without an obvious resume
-    // scope, so interrupts propagate for the caller to surface.
+    // First-exception pass, the same as run_parallel_async's. A first
+    // exception that is a NodeInterrupt pauses the run (#385): the Sends that
+    // finished replay on resume and the ones that did not run again. As there,
+    // the interrupt is copied out of the worker's exception_ptr before the
+    // checkpoint I/O and thrown afresh from this thread.
+    std::exception_ptr           first_exception;
+    std::size_t                  first_index = 0;
+    std::optional<NodeInterrupt> interrupt;
     for (std::size_t i = 0; i < sends.size(); ++i) {
-        if (excs[i]) {
-            std::rethrow_exception(excs[i]);
+        if (excs[i] && !first_exception) {
+            first_exception = excs[i];
+            first_index     = i;
+            try {
+                std::rethrow_exception(first_exception);
+            } catch (const NodeInterrupt& ni) {
+                interrupt = ni;
+            } catch (...) {
+            }
         }
+    }
+    if (first_exception) {
+        if (interrupt) {
+            first_exception = nullptr;
+            std::vector<const NodeResult*> finished(sends.size(), nullptr);
+            for (std::size_t i = 0; i < sends.size(); ++i)
+                if (!excs[i]) finished[i] = &values[i];
+            co_await pause(first_index, finished);
+            interrupt->set_node(sends[first_index].target_node);
+            throw *interrupt;
+        }
+        std::rethrow_exception(first_exception);
     }
 
     // Fan back in send order. Each Send-spawned task contributes one

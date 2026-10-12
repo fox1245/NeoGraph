@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=67ca829b6ef931fa0677424ca6fa666dd0593ba61bde293b8f3ad1290ca89ab2 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=9ba5883f1606544761d327968d6929dd5a799d30a3b2e6becd28ebe22f762769 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -652,6 +652,8 @@ profile.attach(engine)
 ## HITL 与状态
 
 静态 `interrupt_before`/`interrupt_after`、动态 `NodeInterrupt`、同步 `resume`、asyncio `resume_async` 以及精确 `resume_from` 都需要检查点存储。
+
+由 `ng.Send` 分派的 Python 节点抛出 `ng.NodeInterrupt` 时，会像其他节点一样暂停 run：`run`、`run_stream`、`run_async` 和 `run_stream_async` 返回带检查点的中断 `RunResult`，`resume`、`resume_async` 和 `resume_from` 则带着答案运行该 Send，而发出 Send 的节点和已完成的 Send 会被重放，不会再次运行。
 
 Python `CheckpointStore` 子类可以实现 `requires_managed_budget(thread_id) -> bool`。此同步虚方法读取已持久化的受管理预算银行拒绝义务；引擎的原生异步门面调用该方法，绑定在执行 Python 重写方法时获取 GIL。即使检查点状态中的银行信息被剥离，或检查点被删除，也须报告真实的持久义务。省略重写方法会保留原生明确的后端不支持错误，而不是返回 `False`。
 

@@ -1926,6 +1926,10 @@ GraphEngine::execute_graph_async(
     // #383: how the run stopped, once known; every checkpoint carries it.
     const auto status_marks = std::make_shared<detail::RunStatusMarks>();
     runtime->status_marks   = status_marks;
+    // #385: the state each step started from, for a Send that interrupts.
+    const auto step_start = std::make_shared<detail::StepStartState>();
+    step_start->enabled   = coord.enabled();
+    runtime->step_start   = step_start;
     detail::ScopedRunContextRuntime runtime_scope(ctx, std::move(runtime));
 
     std::string last_checkpoint_id;
@@ -2174,6 +2178,8 @@ GraphEngine::execute_graph_async(
         std::vector<NodeResult> step_results;
         if (failure_state) failure_state->mark_step_start();
         failure_arrivals.clear();
+        step_start->state.reset();
+        const auto step_trace_size = trace.size();
 
         // Capture NodeInterrupt outside the catch (GCC-13-safe) so the
         // checkpoint lookup that follows can do its own work.
@@ -2182,6 +2188,8 @@ GraphEngine::execute_graph_async(
         // allocates a yyjson document. An empty optional allocates nothing,
         // and the NodeInterrupt inside it is only ever built on the cold path.
         std::optional<NodeInterrupt> interrupt;
+        std::vector<StepRouting>     send_routings;
+        std::vector<json>            send_failures;
 
         try {
             if (ready.size() == 1) {
@@ -2199,6 +2207,33 @@ GraphEngine::execute_graph_async(
                     coord, last_checkpoint_id, barrier_state,
                     trace, cb, stream_mode, ctx);
             }
+
+            // --- Collect Send requests ---
+            // Copied, not moved: the ready nodes' results keep their Sends, so
+            // that a Send that interrupts can record them for resume (#385).
+            for (std::size_t i = 0; i < step_results.size(); ++i) {
+                for (const auto& s : step_results[i].sends) {
+                    pending_sends.push_back(s);
+                    pending_sends.back().source_node = ready[i];
+                }
+            }
+
+            // --- Execute pending Sends BEFORE interrupt_after ---
+            // Sem 3.7.6: async fan-out, parallel_group-backed.
+            // 4.x: per-task StepRoutings flow back so each spawned task's
+            //      Command.goto / default outgoing edge contribute to the
+            //      next super-step routing decision (LangGraph parity).
+            // Most steps spawn no Send; calling the coroutine for an empty batch
+            // would still allocate and tear down its frame just to return nothing.
+            // #385: a Send target that interrupts pauses the run like a ready
+            // node, from a checkpoint that re-enters this whole step.
+            if (!pending_sends.empty()) {
+                const detail::SendStep send_step{ready, step_results, barrier_state};
+                send_routings = co_await executor_->run_sends_impl_async(
+                    pending_sends, step, state, replay_results,
+                    coord, last_checkpoint_id, trace, cb, stream_mode, ctx, &send_failures,
+                    &send_step);
+            }
         } catch (const NodeInterrupt& ni) {
             interrupt = ni;
         }
@@ -2206,7 +2241,10 @@ GraphEngine::execute_graph_async(
         if (interrupt) {
             RunResult result;
             result.usage = ctx.usage->snapshot();   // #88
-            result.output = state.serialize_runtime();
+            // The paused step is re-entered whole: the run reports the state it
+            // started from, like its checkpoint (#385).
+            result.output = step_start->state ? *step_start->state : state.serialize_runtime();
+            trace.resize(step_trace_size);
             result.native_messages = state.captured_provider_messages().value_or(std::vector<sp::Message>{});
             result.provider_outcomes = ctx.provider_outcomes->snapshot();
             result.interrupted     = true;
@@ -2231,30 +2269,6 @@ GraphEngine::execute_graph_async(
                 if (cp_opt) result.checkpoint_id = cp_opt->id;
             }
             co_return result;
-        }
-
-        // --- Collect Send requests ---
-        for (std::size_t i = 0; i < step_results.size(); ++i) {
-            auto& nr = step_results[i];
-            for (auto& s : nr.sends) {
-                s.source_node = ready[i];
-                pending_sends.push_back(std::move(s));
-            }
-        }
-
-        // --- Execute pending Sends BEFORE interrupt_after ---
-        // Sem 3.7.6: async fan-out, parallel_group-backed.
-        // 4.x: per-task StepRoutings flow back so each spawned task's
-        //      Command.goto / default outgoing edge contribute to the
-        //      next super-step routing decision (LangGraph parity).
-        // Most steps spawn no Send; calling the coroutine for an empty batch
-        // would still allocate and tear down its frame just to return nothing.
-        std::vector<StepRouting> send_routings;
-        std::vector<json>        send_failures;
-        if (!pending_sends.empty()) {
-            send_routings = co_await executor_->run_sends_impl_async(
-                pending_sends, step, state, replay_results,
-                coord, last_checkpoint_id, trace, cb, stream_mode, ctx, &send_failures);
         }
 
         if (cb && has_mode(stream_mode, StreamMode::VALUES)) {

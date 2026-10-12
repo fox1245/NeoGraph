@@ -82,6 +82,9 @@ struct FailureRouting;
 /// Node attempts dispatched off the orchestrator that are still running.
 /// Defined in run_context_runtime.h.
 class AttemptQuiescence;
+/// #385: the super-step a batch of Sends belongs to. Defined in
+/// run_context_runtime.h.
+struct SendStep;
 }  // namespace detail
 
 /**
@@ -239,7 +242,9 @@ private:
 
     /// run_sends_async, also reporting which Sends failed as handled (#364):
     /// `failure_records[i]` is the failure record when Send i routes along
-    /// its failure edge, and null otherwise.
+    /// its failure edge, and null otherwise. With `send_step`, a Send that
+    /// interrupts saves a NodeInterrupt checkpoint that re-enters that step
+    /// (#385); without it, the interrupt propagates without a checkpoint.
     asio::awaitable<std::vector<StepRouting>> run_sends_impl_async(
         const std::vector<Send>& sends,
         int step,
@@ -251,7 +256,8 @@ private:
         const GraphStreamCallback& cb,
         StreamMode stream_mode,
         const RunContext& ctx,
-        std::vector<json>* failure_records);
+        std::vector<json>* failure_records,
+        const detail::SendStep* send_step = nullptr);
 
     /// The retry loop. With a slot, every attempt runs under its own
     /// invocation scope and effect namespace and attempt k >= 1 first records

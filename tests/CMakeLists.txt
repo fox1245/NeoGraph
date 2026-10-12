@@ -937,6 +937,12 @@ if(NEOGRAPH_BUILD_SQLITE)
     target_link_libraries(neograph_attempt_timeout_tests PRIVATE
         neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
     neograph_discover_tests(neograph_attempt_timeout_tests PROPERTIES LABELS "core;failure-routing")
+    # #385: a Send target that interrupts pauses the run like any other node,
+    # on every entry point, in memory and on SQLite.
+    add_executable(neograph_send_interrupt_tests test_send_interrupt.cpp)
+    target_link_libraries(neograph_send_interrupt_tests PRIVATE
+        neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
+    neograph_discover_tests(neograph_send_interrupt_tests PROPERTIES LABELS "core;interrupt")
 endif()
 
 if(NEOGRAPH_BUILD_PROGRAM)

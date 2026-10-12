@@ -230,6 +230,22 @@ private:
     std::shared_ptr<Script>   script_;
 };
 
+// #385: a map step with two Sends to the brokered "work" node.
+class SendFan final : public graph::GraphNode {
+public:
+    explicit SendFan(std::string name) : name_(std::move(name)) {}
+    std::string get_name() const override { return name_; }
+    asio::awaitable<graph::NodeOutput> run(graph::NodeInput) override {
+        graph::NodeOutput output;
+        output.sends.push_back(graph::Send{"work", json{{"value", "left"}}});
+        output.sends.push_back(graph::Send{"work", json{{"value", "right"}}});
+        co_return output;
+    }
+
+private:
+    std::string name_;
+};
+
 class AfterNode final : public graph::GraphNode {
 public:
     AfterNode(std::string name, std::shared_ptr<Script> script)
@@ -251,7 +267,7 @@ private:
 // One host: registry, binder, catalog, runtime
 // ---------------------------------------------------------------------------
 
-enum class Shape { AfterOnly, Llm, LlmThenAfter, TwoLlms, Brokered, BrokeredThenAfter };
+enum class Shape { AfterOnly, Llm, LlmThenAfter, TwoLlms, Brokered, BrokeredThenAfter, SendsToBrokered };
 
 struct HostOptions {
     std::string   label        = "test-binding";
@@ -309,6 +325,11 @@ public:
                              return std::make_unique<AfterNode>(name, script);
                          },
                          json{{"type", "object"}}, json{{"writes", json::array({"done"})}});
+        builder.add_node(manifest({ExecutableKind::Node, "send_fan", "1.0.0", digest('7')}),
+                         [](const std::string& name, const json&, const graph::NodeContext&) {
+                             return std::make_unique<SendFan>(name);
+                         },
+                         json{{"type", "object"}}, json::object());
         builder.add_reducer(manifest({ExecutableKind::Reducer, "append", "1.0.0", digest('5')}),
                             [](const json& current, const json& incoming) {
                                 json merged = current.is_array() ? current : json::array();
@@ -415,6 +436,11 @@ public:
             case Shape::Brokered:
                 definition["nodes"] = {{"work", {{"type", "brokered_call"}}}};
                 definition["edges"] = json::array({edge("__start__", "work"), edge("work", "__end__")});
+                break;
+            case Shape::SendsToBrokered:
+                definition["nodes"] = {{"fan", {{"type", "send_fan"}}}, {"work", {{"type", "brokered_call"}}}};
+                definition["edges"] = json::array(
+                    {edge("__start__", "fan"), edge("fan", "__end__"), edge("work", "__end__")});
                 break;
         }
         return definition;
@@ -963,6 +989,37 @@ TEST(ProgramProviderBindingJournal, AnOutcomeReplayedByALaterAttemptIsNotCharged
     EXPECT_TRUE(second.monetary_records().empty()) << "attempt 1 already charged it";
     EXPECT_EQ(second.usage().monetary_microunits, 0U);
     EXPECT_EQ(second.remaining_budget().monetary_microunits, 100'000U - 1235U);
+}
+
+TEST(ProgramProviderBindingJournal, AResumedSendReplaysItsJournaledCall) {
+    // #385: two Send targets call the model and then ask. The run pauses on
+    // the first; resume runs both again under the same task ids, so their
+    // journaled calls replay instead of being sent and charged again.
+    TempDir     files("send-replay");
+    auto        peer = std::make_shared<Peer>();
+    HostOptions options;
+    options.monetary = 100'000;
+    options.workers  = 2;
+    Host h(peer, options, &files);
+    h.script().interrupt_after_call = true;
+    const auto first = h.run(Shape::SendsToBrokered, "send-run");
+    ASSERT_EQ(first.status(), ProgramTerminalStatus::Interrupted) << failure_text(first);
+    ASSERT_TRUE(first.interrupt().has_value());
+    EXPECT_EQ(first.interrupt()->core_node, "work");
+    EXPECT_EQ(peer->transport.load(), 2);
+    EXPECT_EQ(first.monetary_records().size(), 2U);
+    EXPECT_EQ(first.usage().monetary_microunits, 2U * 1235U);
+
+    const auto second =
+        h.runtime().resume(kOwner, "send-run", resume_after(first, "trace-send-resume")).wait();
+    ASSERT_EQ(second.status(), ProgramTerminalStatus::Completed) << failure_text(second);
+    EXPECT_EQ(peer->transport.load(), 2) << "each Send's journaled call replays; nothing is resent";
+    EXPECT_TRUE(second.monetary_records().empty()) << "attempt 1 already charged both calls";
+    EXPECT_EQ(second.usage().monetary_microunits, 0U);
+    EXPECT_EQ(second.remaining_budget().monetary_microunits, 100'000U - 2U * 1235U);
+    EXPECT_EQ(h.script().node_runs.load(), 4) << "both Sends ran once more, with the answer";
+    EXPECT_EQ(journal_states(files.provider_db()),
+              (std::vector<std::string>{"succeeded", "succeeded"}));
 }
 
 TEST(ProgramProviderBindingJournal, InMemoryAResumedNodeThatCallsAgainPaysAgain) {

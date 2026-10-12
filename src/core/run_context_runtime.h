@@ -3,12 +3,14 @@
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/run_context.h>
 #include <neograph/graph/provider_call_broker.h>
+#include <neograph/graph/scheduler.h>
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -28,6 +30,29 @@ class FailureRunState;
 struct RunStatusMarks {
     json barrier_stall;
     json failure_exit;
+};
+
+/// #385: the state the current super-step started from, which a Send that
+/// interrupts saves as its NodeInterrupt checkpoint so that resume re-enters
+/// the whole step. The executor captures it, before it applies their writes,
+/// only in a step whose nodes emitted Sends. Only the run's own coroutine
+/// reads and writes it.
+struct StepStartState {
+    /// Whether to capture it: the run saves checkpoints.
+    bool enabled = false;
+    /// GraphState::serialize_runtime() at the start of the step; reset by the
+    /// engine at every step.
+    std::optional<json> state;
+};
+
+/// #385: the super-step a batch of Sends belongs to. A Send that interrupts
+/// saves the step's ready nodes as the checkpoint's next nodes, with the
+/// barrier state the step started from, and records the ready nodes' results
+/// when no checkpoint precedes the step.
+struct SendStep {
+    const std::vector<std::string>& ready;
+    const std::vector<NodeResult>&  results;
+    const BarrierState&             barrier_state;
 };
 
 struct SubgraphWriteJournal {
@@ -52,6 +77,8 @@ struct RunContextRuntime {
     std::shared_ptr<FailureRunState> failure_state;
     /// #383: how this graph run stopped, once known; null outside a run.
     std::shared_ptr<RunStatusMarks> status_marks;
+    /// #385: the state the current step started from; null outside a run.
+    std::shared_ptr<StepStartState> step_start;
 };
 
 /// What a RunContext is bound to while a scope below is alive: the state the

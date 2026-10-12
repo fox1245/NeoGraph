@@ -350,6 +350,8 @@ class Planner(ng.GraphNode):
 
 The engine invokes the compiled target once per `Send`; it does not promise a fresh node object. Send targets therefore need safe member-state handling under concurrent invocations. Each payload is applied before its target reads channels. A single Send uses shared state; multiple Sends use isolated copies of the post-ready-batch state and fold returned writes in invocation order after all branches finish. Routing then combines ordinary-node and Send-target signals for the next ready batch.
 
+A Send target that raises `NodeInterrupt` pauses the run like a node of the ready batch. Its `NodeInterrupt` checkpoint re-enters the whole superstep: it holds the state the step started from and lists the step's ready nodes as next nodes, and the paused result reports that state. Resume runs the step again. Each ready node and each Send that finished replays its recorded result and is not run, or charged, again; the Send that paused, and any other Send that did not finish, runs with the resume value under the same task id, so a provider call its earlier attempt journaled replays. When no checkpoint precedes the step, for example for a map node at the entry, the finished results are recorded under the interrupt checkpoint itself.
+
 ### Common shape: fan-out 5, fan-in to summarizer
 
 ```
@@ -462,7 +464,10 @@ A resume skips only the gate of the interrupt it answers. Resuming an `interrupt
 Throw from inside a node body (Python: `raise ng.NodeInterrupt(reason)`,
 C++: `throw NodeInterrupt(...)`). The engine catches, persists state,
 returns a `RunResult` interrupted at the throwing node — same
-resume API.
+resume API. This holds for a node of the ready batch and for a `Send` target
+alike, on every sync, async and streaming entry point. The siblings that
+finished in the paused step replay on resume instead of running again, also
+in a step that no checkpoint precedes.
 
 Useful when the decision to pause depends on intermediate node output
 (e.g. "did the LLM produce something worth showing the human?").

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=0d83e62e8cc14ec8bfa3d0d263eb93ba58b67f39b295e10c46ea4834c5d94ae5 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=6b4210742298df054f3561080a86ae38f8e11dc34a19717a7cec3dc07890e8be -->
 # NeoGraph 핵심 개념 — 해설 가이드
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -316,6 +316,8 @@ class Planner(ng.GraphNode):
 
 엔진은 `Send`마다 compiled target을 호출하며 새 node 객체를 보장하지 않는다. 동시 호출에서 target의 member state를 안전하게 다뤄야 한다. Payload는 target의 채널 읽기 전에 적용한다. 단일 Send는 공유 상태, 다중 Send는 ready batch 이후 상태의 격리 복사본을 사용하며 모든 분기 완료 뒤 반환 쓰기를 호출 순서로 결합한다. 다음 ready batch 라우팅은 일반 node와 Send target의 신호를 함께 사용한다.
 
+`NodeInterrupt`를 던지는 Send target은 ready batch의 node처럼 run을 일시 정지한다. 그 `NodeInterrupt` 체크포인트는 superstep 전체로 다시 들어간다. step이 시작할 때의 상태를 담고 step의 ready node를 next node로 기록하며, 일시 정지한 결과도 그 상태를 보고한다. Resume은 step을 다시 실행한다. 끝난 ready node와 Send는 기록된 결과를 재생하며 다시 실행되거나 다시 과금되지 않는다. 일시 정지한 Send와 끝나지 않은 다른 Send는 같은 task id로 resume 값을 받아 실행되므로, 이전 attempt가 journal에 기록한 provider 호출은 재생된다. 진입점의 map node처럼 step 앞에 체크포인트가 없으면 끝난 결과는 interrupt 체크포인트 자체에 기록한다.
+
 ### 일반적인 형태: fan-out 5, 요약자 summarizer fan-in
 
 ```
@@ -412,7 +414,7 @@ result = await engine.resume_async(thread_id="t1",
 
 ### `NodeInterrupt`를 통한 동적 인터럽트
 
-노드 본문 내부에서 던지기(Python: `raise ng.NodeInterrupt(reason)`, C++: `throw NodeInterrupt(...)`). 엔진이 포착하고, 상태를 유지하며, 던지는 노드에서 중단된 `RunResult`를 반환합니다 — 동일한 재개 API입니다.
+노드 본문 내부에서 던지기(Python: `raise ng.NodeInterrupt(reason)`, C++: `throw NodeInterrupt(...)`). 엔진이 포착하고, 상태를 유지하며, 던지는 노드에서 중단된 `RunResult`를 반환합니다 — 동일한 재개 API입니다. 이는 ready batch의 노드와 `Send` target 모두에, 모든 동기·비동기·스트리밍 진입점에서 똑같이 적용됩니다. 일시 정지한 스텝에서 끝난 형제는 재개 시 다시 실행되지 않고 재생되며, 앞에 체크포인트가 없는 스텝에서도 마찬가지입니다.
 
 중간 노드 출력에 따라 일시 중지 여부를 결정해야 할 때 유용합니다(예: "LLM이 인간에게 보여줄 만한 것을 생성했는가?").
 

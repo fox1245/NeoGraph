@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=0d83e62e8cc14ec8bfa3d0d263eb93ba58b67f39b295e10c46ea4834c5d94ae5 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=6b4210742298df054f3561080a86ae38f8e11dc34a19717a7cec3dc07890e8be -->
 # NeoGraphのコアコンセプト— 解説ガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -316,6 +316,8 @@ class Planner(ng.GraphNode):
 
 エンジンは `Send` ごとに compiled target を呼び、新しい node object は保証しません。同時呼び出しでは target の member state を安全に扱う必要があります。Payload は target がチャネルを読む前に適用します。単一 Send は共有状態、複数 Send は ready batch 後状態の隔離コピーを使い、全分岐の終了後に返却書き込みを呼び出し順で結合します。次の ready batch の経路は通常 node と Send target の信号を組み合わせます。
 
+`NodeInterrupt` を送出する Send target は、ready batch の node と同じように run を一時停止します。その `NodeInterrupt` チェックポイントは superstep 全体に再突入します。step 開始時の状態を保持し、step の ready node を next node として記録し、一時停止した結果もその状態を報告します。再開は step を再実行します。終了した ready node と Send は記録済みの結果を再生し、再実行も再課金もされません。一時停止した Send と終了していない他の Send は同じ task id で再開値を受けて実行されるため、以前の attempt がジャーナルに記録した provider 呼び出しは再生されます。入口の map node のように step の前にチェックポイントがない場合、終了した結果は interrupt チェックポイント自体に記録します。
+
 ### 一般的な形: fan-out 5、fan-in to summarizer (要約)
 
 ```
@@ -412,7 +414,7 @@ result = await engine.resume_async(thread_id="t1",
 
 ### `NodeInterrupt`による動的割り込み
 
-ノード本体の内部からスローします（Python: `raise ng.NodeInterrupt(reason)`、C++: `throw NodeInterrupt(...)`）。エンジンはキャッチし、状態を永続化し、スローしたノードで中断された`RunResult`を返します — 同じ再開APIです。
+ノード本体の内部からスローします（Python: `raise ng.NodeInterrupt(reason)`、C++: `throw NodeInterrupt(...)`）。エンジンはキャッチし、状態を永続化し、スローしたノードで中断された`RunResult`を返します — 同じ再開APIです。これは ready batch のノードにも `Send` target にも、同期・非同期・ストリーミングのすべての入口で同じように当てはまります。一時停止したステップで終了した兄弟は、再開時に再実行されず再生されます。前にチェックポイントのないステップでも同じです。
 
 一時停止の決定が中間ノード出力に依存する場合に便利です（例:「LLM が人間に見せる価値のあるものを生成したか?」）。
 
