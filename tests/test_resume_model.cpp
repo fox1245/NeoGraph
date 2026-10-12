@@ -43,6 +43,7 @@
 #include <neograph/graph/state.h>
 #include <neograph/graph/validator.h>
 
+#include "fixtures/coarse_clock_store.h"
 #include "resume_model.h"
 
 #include <gtest/gtest.h>
@@ -249,13 +250,9 @@ void register_model() {
 /// throws until the host restarts.
 class CrashStore final : public CheckpointStore {
 public:
-    /// `coarse_clock` saves every checkpoint with one timestamp, as a clock
-    /// with a coarse tick (or a fast store) does: stores that order a thread's
-    /// checkpoints by time see them all tie.
-    void reset(std::shared_ptr<CheckpointStore> inner, bool coarse_clock) {
-        inner_        = std::move(inner);
-        coarse_clock_ = coarse_clock;
-        ops_          = 0;
+    void reset(std::shared_ptr<CheckpointStore> inner) {
+        inner_ = std::move(inner);
+        ops_   = 0;
         crashes_.clear();
     }
     /// Crash at durable operation `op` (counted from 0 over the whole
@@ -265,13 +262,7 @@ public:
     CheckpointStore& inner() { return *inner_; }
 
     void save(const Checkpoint& checkpoint) override {
-        durable(
-            [&] {
-                if (!coarse_clock_) return inner_->save(checkpoint);
-                Checkpoint tied = checkpoint;
-                tied.timestamp  = 1;
-                inner_->save(tied);
-            },
+        durable([&] { inner_->save(checkpoint); },
                 Event{Event::Save, checkpoint.thread_id, checkpoint.id, 0, checkpoint.current_node,
                       static_cast<int>(checkpoint.step), to_string(checkpoint.interrupt_phase), {}});
     }
@@ -367,7 +358,6 @@ private:
     }
 
     std::shared_ptr<CheckpointStore>  inner_;
-    bool                              coarse_clock_ = false;
     int                               ops_ = 0;
     std::vector<std::pair<int, bool>> crashes_;
 };
@@ -634,9 +624,9 @@ private:
 };
 
 Observed run_schedule(const Graph& graph, Engines& engines, bool addressed, const Schedule& schedule,
-                      std::shared_ptr<CheckpointStore> backing, bool coarse_clock, const std::string& thread) {
+                      std::shared_ptr<CheckpointStore> backing, const std::string& thread) {
     journal().reset();
-    engines.store->reset(std::move(backing), coarse_clock);
+    engines.store->reset(std::move(backing));
     for (const auto& [op, after] : schedule.crashes) engines.store->arm(op, after);
     Host     host(graph, engines, addressed, thread);
     Observed observed;
@@ -868,7 +858,7 @@ void run_variants(Context& context, const Outcome& reference, const std::vector<
 
     // Crash-free, on both stores.
     Schedule plain{answers, {}, -1};
-    const auto base = run_schedule(context.graph, context.engines, context.addressed, plain, fresh_memory(), false, thread());
+    const auto base = run_schedule(context.graph, context.engines, context.addressed, plain, fresh_memory(), thread());
     totals.max_ops = std::max<std::uint64_t>(totals.max_ops, static_cast<std::uint64_t>(base.ops));
     // An addressed ask that received a value addressed elsewhere: a gate's
     // approval reaches the node the gate held (#393).
@@ -879,7 +869,7 @@ void run_variants(Context& context, const Outcome& reference, const std::vector<
     if (context.sqlite) {
         ++totals.sqlite_runs;
         judge(context, reference, plain,
-              run_schedule(context.graph, context.engines, context.addressed, plain, context.sqlite, true, thread()), "sqlite");
+              run_schedule(context.graph, context.engines, context.addressed, plain, context.sqlite, thread()), "sqlite");
     }
 
     // A crash before and after every durable operation; with two crashes, a
@@ -896,7 +886,7 @@ void run_variants(Context& context, const Outcome& reference, const std::vector<
         {
             Schedule crash{answers, {{op, after}}, -1};
             const auto observed =
-                run_schedule(context.graph, context.engines, context.addressed, crash, fresh_memory(), false, thread());
+                run_schedule(context.graph, context.engines, context.addressed, crash, fresh_memory(), thread());
             ++totals.crash_runs;
             judge(context, reference, crash, observed, "memory");
             if (context.limits.max_crashes < 2) continue;
@@ -907,7 +897,7 @@ void run_variants(Context& context, const Outcome& reference, const std::vector<
                     ++totals.crash_runs;
                     judge(context, reference, twice,
                           run_schedule(context.graph, context.engines, context.addressed, twice, fresh_memory(),
-                                       false, thread()),
+                                       thread()),
                           "memory");
                 }
             }
@@ -921,7 +911,7 @@ void run_variants(Context& context, const Outcome& reference, const std::vector<
                 ++totals.crash_runs;
                 ++totals.sqlite_runs;
                 judge(context, reference, crash,
-                      run_schedule(context.graph, context.engines, context.addressed, crash, context.sqlite, true, thread()),
+                      run_schedule(context.graph, context.engines, context.addressed, crash, context.sqlite, thread()),
                       "sqlite");
             }
     }
@@ -931,7 +921,7 @@ void run_variants(Context& context, const Outcome& reference, const std::vector<
     for (std::size_t k = 0; k < answers.size() && k < reference.pauses.size(); ++k) {
         Schedule forked{answers, {}, static_cast<int>(k)};
         const auto observed =
-            run_schedule(context.graph, context.engines, context.addressed, forked, fresh_memory(), false, thread());
+            run_schedule(context.graph, context.engines, context.addressed, forked, fresh_memory(), thread());
         ++totals.fork_runs;
         judge(context, reference, forked, observed, "memory");
     }
@@ -1017,7 +1007,11 @@ void run_family(bool addressed, Totals& totals, const Bounds& limits) {
                         return;
                     }
                     std::shared_ptr<CheckpointStore> sqlite;
-                    if (limits.sqlite) sqlite = std::make_shared<SqliteCheckpointStore>(":memory:");
+                    // Every save carries one timestamp, as on a host whose saves return
+                    // inside the millisecond: the store must order saves by itself.
+                    if (limits.sqlite)
+                        sqlite = std::make_shared<test_support::CoarseClockStore<SqliteCheckpointStore>>(
+                            ":memory:");
                     Context context{graph, index - 1, limits, mine, addressed, *engines, sqlite};
                     explore(context);
                 });

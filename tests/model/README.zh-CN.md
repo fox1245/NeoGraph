@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/model/README.md locale=zh-CN source_sha256=da1d60a2c19590a22ffc97a53d9a3d8ed0817cae7f42d76bc9520ddd42b6831a -->
+<!-- neograph-i18n: source=tests/model/README.md locale=zh-CN source_sha256=9ae04f9a7dd7b94dfc86c07b96527f52f9292fe7bac7b78b878d0c2b6a30e293 -->
 # Join 模型 (#363)
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -79,7 +79,8 @@ step 的每个闸门单独回答，只有已回答的闸门放行（#382、#396�
   fork 后运行。崩溃会停止进程：存储拒绝之后的所有操作，宿主像真实宿主一样从最新检查点恢复。若该检查点
   正是它在回答的那个，就重做正在执行的恢复；对没见过的 `interrupt_before` 或 `interrupt_after` 暂停，
   把它作为问题呈现；其余情况不带值恢复；没有检查点的线程则重新运行。每个调度都在
-  `InMemoryCheckpointStore` 上运行，并在使用粗粒度时钟（所有检查点以同一时间戳保存）的
+  `InMemoryCheckpointStore` 上运行，并在使用粗粒度时钟（所有检查点以同一时间戳保存，
+  `tests/fixtures/coarse_clock_store.h`）的
   `SqliteCheckpointStore` 上无崩溃地运行（至多两个节点、扩展范围中至多三个节点的图也会崩溃）。
 - **Ask。** 每个调度运行两次：一次是只接受发给自己调用 id 的回答的 Ask，一次是像审批节点那样接受任何
   恢复值的 Ask。
@@ -93,7 +94,8 @@ step 的每个闸门单独回答，只有已回答的闸门放行（#382、#396�
 JavaScript `main()` 程序（`callCore`，同时或逐个运行两个成员的 `ng.all`、`ng.race`、`ng.quorum`，
 `ng.await`，以及其 Core step 运行两个都可能提问的节点的 `callCore`，#388 和 #394）和带类型的 plan（`parallel`、三取二的 `quorum`、`sequence`），运行在只有一个节点的
 Core 上，该节点可以调用已绑定的 provider，也可以提问。宿主按 `LocalProgramHost` 的方式装配：使用进程内
-计价代理的内存宿主，或把所有存储放在一个 SQLite 文件中并使用 SQLite provider 日志的宿主。provider 是
+计价代理的内存宿主，或把所有存储放在一个 SQLite 文件中、以同一粗粒度时钟保存检查点并使用 SQLite
+provider 日志的宿主。provider 是
 运行在本地传输上的真实 SDK 客户端，该传输会统计它发送的请求。P1 还覆盖"只发送一次、只计费一次"：
 请求数以及 run 被计费的 token 和金额与参考一致（使用进程内代理时，按文档所述，再次运行的节点会再次调用、
 再次付费）。崩溃在 SQLite 宿主上针对一次只运行一个调用的程序进行：在每次检查点保存、`put_writes`、
@@ -114,7 +116,7 @@ fork 会再次发送、再次计费被暂停的调用在提问前发出的 provi
 | 闸门 | 在 `Ok` 或 `Ask` 上一个 | 任意节点上一个，或两个 `interrupt_before` |
 
 在 CI 范围中，Core 测试框架覆盖 2,196 个图，每种 Ask 约 6,100 个回答调度，各约 83,000 次运行；Program
-测试框架运行 124 个 JavaScript 程序和 18 个 plan，约 920 个调度。每个测试用四个工作线程在一分钟内完成。
+测试框架运行 124 个 JavaScript 程序和 18 个 plan，约 950 个调度。每个测试用四个工作线程在一分钟内完成。
 
 变量：`NEOGRAPH_RESUME_MODEL_NODES`、`_SPECIAL`、`_SPECIAL_LARGEST`、`_ANSWERS` 和 `_CRASHES` 覆盖单项
 上限；`NEOGRAPH_RESUME_MODEL_SQLITE=0` 去掉 SQLite；`NEOGRAPH_RESUME_MODEL_THREADS` 设置工作线程数（默认

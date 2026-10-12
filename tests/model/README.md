@@ -103,7 +103,7 @@ ordinary interrupt of its step (#392).
   checkpoint. Every schedule runs on `InMemoryCheckpointStore`, and crash-free
   (crashes too on graphs of up to two nodes, three extended) on
   `SqliteCheckpointStore` with a coarse clock: every checkpoint saved with one
-  timestamp.
+  timestamp (`tests/fixtures/coarse_clock_store.h`).
 - **Asks.** Every schedule runs twice: with asks that take only an answer
   addressed to their own invocation id, and with asks that take any resume
   value, as an approval node does.
@@ -124,7 +124,8 @@ whose Core step runs two nodes that may both ask, #388 and #394) and typed plans
 (`parallel`, a two-of-three `quorum`, `sequence`) over a one-node Core whose
 node may call a bound provider and may ask. The host is wired as
 `LocalProgramHost` wires one: in memory with the in-process priced broker, or
-with every store in one SQLite file and the SQLite provider journal. The
+with every store in one SQLite file, checkpoints saved on the same coarse
+clock, and the SQLite provider journal. The
 provider is a real SDK client over a local transport that counts the requests
 it sends. P1 also covers "sent once, charged once": the requests, the tokens and
 the money a run is charged equal the reference's (with the in-process broker, a
@@ -153,7 +154,7 @@ which a resume of the source replays.
 
 At the CI bound the Core harness runs 2,196 graphs and about 6,100 answer
 schedules for each kind of ask, some 83,000 runs each; the Program harness runs
-124 JavaScript programs and 18 plans, about 920 schedules. Each test takes
+124 JavaScript programs and 18 plans, about 950 schedules. Each test takes
 under a minute on four workers.
 
 Variables: `NEOGRAPH_RESUME_MODEL_NODES`, `_SPECIAL`, `_SPECIAL_LARGEST`,

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/model/README.md locale=ko source_sha256=da1d60a2c19590a22ffc97a53d9a3d8ed0817cae7f42d76bc9520ddd42b6831a -->
+<!-- neograph-i18n: source=tests/model/README.md locale=ko source_sha256=9ae04f9a7dd7b94dfc86c07b96527f52f9292fe7bac7b78b878d0c2b6a30e293 -->
 # Join 모델 (#363)
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -89,7 +89,8 @@ spec에서 이름을 붙인 #357 그래프(legacy barrier, `any_of` slot, 서로
   실제 호스트처럼 최신 체크포인트에서 복구합니다. 그 체크포인트가 자신이 답하던 것이면 실행하던
   재개를 다시 하고, 보지 못한 `interrupt_before`나 `interrupt_after` 일시 정지는 질문으로 올리며,
   그 밖에는 값 없이 재개하고, 체크포인트가 없는 스레드는 다시 실행합니다. 모든 스케줄은
-  `InMemoryCheckpointStore`에서 실행되고, 거친 시계(모든 체크포인트를 같은 타임스탬프로 저장)를
+  `InMemoryCheckpointStore`에서 실행되고, 거친 시계(모든 체크포인트를 같은 타임스탬프로 저장,
+  `tests/fixtures/coarse_clock_store.h`)를
   쓰는 `SqliteCheckpointStore`에서는 크래시 없이 실행됩니다(노드 두 개, 확장 범위는 세 개까지의
   그래프는 크래시도 냅니다).
 - **Ask.** 모든 스케줄을 두 번 실행합니다. 자기 호출 id로 보낸 답만 받는 Ask와, 승인 노드처럼
@@ -107,7 +108,8 @@ JavaScript `main()` 프로그램(`callCore`, 멤버 둘을 함께 또는 하나�
 `callCore`, #388과 #394)과 타입 있는 plan(`parallel`, 셋 중 둘의 `quorum`,
 `sequence`)을, 바인딩된 provider를 호출하고 질문할 수 있는 노드 하나짜리 Core 위에서 실행합니다.
 호스트는 `LocalProgramHost`와 같은 방식으로 구성합니다. 프로세스 내 가격 브로커를 쓰는 메모리
-호스트, 또는 모든 저장소를 한 SQLite 파일에 두고 SQLite provider 저널을 쓰는 호스트입니다.
+호스트, 또는 모든 저장소를 한 SQLite 파일에 두고 체크포인트를 같은 거친 시계로 저장하며 SQLite
+provider 저널을 쓰는 호스트입니다.
 provider는 보낸 요청을 세는 로컬 전송 위의 실제 SDK 클라이언트입니다. P1은 "한 번 보내고 한 번
 청구한다"도 다룹니다. 요청 수와 run에 청구된 토큰과 금액이 참조와 같습니다(프로세스 내
 브로커에서는 문서대로 다시 실행되는 노드가 다시 호출하고 다시 지불합니다). 크래시는 한 번에 호출
@@ -132,7 +134,7 @@ provider는 보낸 요청을 세는 로컬 전송 위의 실제 SDK 클라이언
 | 게이트 | `Ok`나 `Ask`에 하나 | 어떤 노드에든 하나, 또는 `interrupt_before` 둘 |
 
 CI 범위에서 Core 하네스는 그래프 2,196개와 Ask 종류마다 답 스케줄 약 6,100개, 각각 약 83,000번의
-실행을 다룹니다. Program 하네스는 JavaScript 프로그램 124개와 plan 18개, 약 920개의 스케줄을
+실행을 다룹니다. Program 하네스는 JavaScript 프로그램 124개와 plan 18개, 약 950개의 스케줄을
 실행합니다. 각 테스트는 워커 네 개로 1분 안에 끝납니다.
 
 변수: `NEOGRAPH_RESUME_MODEL_NODES`, `_SPECIAL`, `_SPECIAL_LARGEST`, `_ANSWERS`, `_CRASHES`는 개별

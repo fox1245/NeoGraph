@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/model/README.md locale=ja source_sha256=da1d60a2c19590a22ffc97a53d9a3d8ed0817cae7f42d76bc9520ddd42b6831a -->
+<!-- neograph-i18n: source=tests/model/README.md locale=ja source_sha256=9ae04f9a7dd7b94dfc86c07b96527f52f9292fe7bac7b78b878d0c2b6a30e293 -->
 # Join モデル (#363)
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -90,7 +90,8 @@ java -XX:+UseParallelGC -cp /path/to/tla2tools.jar tlc2.TLC \
   ものなら実行中だった再開をやり直し、見ていない `interrupt_before` や `interrupt_after` の一時停止は
   質問として示し、それ以外は値なしで再開し、チェックポイントのないスレッドは再実行します。すべての
   スケジュールは `InMemoryCheckpointStore` で実行し、粗い時計（すべてのチェックポイントを同じ
-  タイムスタンプで保存）の `SqliteCheckpointStore` ではクラッシュなしで実行します（ノード 2 つ、拡張
+  タイムスタンプで保存、`tests/fixtures/coarse_clock_store.h`）の `SqliteCheckpointStore` では
+  クラッシュなしで実行します（ノード 2 つ、拡張
   範囲では 3 つまでのグラフはクラッシュも起こします）。
 - **Ask。** すべてのスケジュールを 2 回実行します。自分の呼び出し id 宛ての答えだけを受け取る Ask と、
   承認ノードのようにどんな再開値でも受け取る Ask です。
@@ -108,7 +109,8 @@ JavaScript の `main()` プログラム（`callCore`、メンバー 2 つを一�
 実行する `callCore`、#388 と #394）と型付き plan（`parallel`、3 つのうち 2 つの
 `quorum`、`sequence`）を、バインドされた provider を呼び出し質問できるノード 1 つの Core 上で実行
 します。ホストは `LocalProgramHost` と同じ構成です。プロセス内の価格付きブローカーを使うメモリの
-ホスト、またはすべてのストアを 1 つの SQLite ファイルに置き SQLite provider ジャーナルを使うホスト
+ホスト、またはすべてのストアを 1 つの SQLite ファイルに置き、チェックポイントを同じ粗い時計で保存し、
+SQLite provider ジャーナルを使うホスト
 です。provider は、送ったリクエストを数えるローカルトランスポート上の実際の SDK クライアントです。
 P1 は「1 回送り 1 回課金する」も扱います。リクエスト数と、run に課金されたトークンと金額が参照と
 等しくなります（プロセス内ブローカーでは、文書どおり再実行されたノードは再び呼び出して再び支払い
@@ -133,7 +135,7 @@ P1 は「1 回送り 1 回課金する」も扱います。リクエスト数と
 | ゲート | `Ok` か `Ask` に 1 つ | どのノードにも 1 つ、または `interrupt_before` 2 つ |
 
 CI 範囲では、Core ハーネスはグラフ 2,196 個と Ask の種類ごとに約 6,100 の回答スケジュール、それぞれ
-約 83,000 回の実行を扱います。Program ハーネスは JavaScript プログラム 124 個と plan 18 個、約 920 の
+約 83,000 回の実行を扱います。Program ハーネスは JavaScript プログラム 124 個と plan 18 個、約 950 の
 スケジュールを実行します。各テストはワーカー 4 つで 1 分以内に終わります。
 
 変数：`NEOGRAPH_RESUME_MODEL_NODES`、`_SPECIAL`、`_SPECIAL_LARGEST`、`_ANSWERS`、`_CRASHES` は個々の

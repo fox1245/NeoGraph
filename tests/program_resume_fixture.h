@@ -16,6 +16,7 @@
 #include <neograph/program/sqlite_store.h>
 #include <neograph/program/sqlite_transition_store.h>
 
+#include "fixtures/coarse_clock_store.h"
 #include "fixtures/typed_provider.h"
 #include "monetary.h"
 #include "pricing.h"
@@ -594,8 +595,11 @@ public:
             store           = std::make_shared<SQLiteProgramStore>(file);
             transitions = std::make_shared<CountingTransitionStore>(std::make_shared<SQLiteProgramTransitionStore>(file),
                                                                     world.crash);
-            checkpoints = std::make_shared<CountingCheckpointStore>(std::make_shared<graph::SqliteCheckpointStore>(file),
-                                                                    world.crash);
+            // Every checkpoint carries one timestamp, as on a host whose saves
+            // return inside the millisecond.
+            checkpoints = std::make_shared<CountingCheckpointStore>(
+                std::make_shared<graph::test_support::CoarseClockStore<graph::SqliteCheckpointStore>>(file),
+                world.crash);
             journal_        = std::make_shared<SQLiteProgramProviderCallJournal>(file);
         } else {
             store       = std::make_shared<InMemoryProgramStore>();
