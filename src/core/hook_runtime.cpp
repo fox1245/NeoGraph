@@ -14,6 +14,17 @@ HookRuntime::HookRuntime(std::shared_ptr<MandatoryHookRunner> runner,
     }
 }
 
+HookRuntime::HookRuntime(std::shared_ptr<HookRuntime> outer, std::shared_ptr<HookRuntime> inner)
+    : default_timeout_(std::chrono::seconds(30)), outer_(std::move(outer)),
+      inner_(std::move(inner)) {}
+
+std::shared_ptr<HookRuntime> HookRuntime::compose(std::shared_ptr<HookRuntime> outer,
+                                                  std::shared_ptr<HookRuntime> inner) {
+    if (!outer) return inner;
+    if (!inner || inner == outer) return outer;
+    return std::shared_ptr<HookRuntime>(new HookRuntime(std::move(outer), std::move(inner)));
+}
+
 bool HookRuntime::executing_hook_target() noexcept { return false; }
 
 asio::awaitable<void> HookRuntime::emit_async(
@@ -21,6 +32,19 @@ asio::awaitable<void> HookRuntime::emit_async(
     std::shared_ptr<graph::CancelToken> cancellation,
     std::optional<std::chrono::system_clock::time_point> parent_deadline,
     std::optional<std::uint64_t> event_sequence) {
+    if (!runner_) {
+        // A nested run's runtimes: the outer run's Hooks first, then the
+        // inner run's. The first block stops the event.
+        auto outer = outer_->emit_async(phase, type, owner_scope, run_id, data, cancellation,
+                                        parent_deadline, event_sequence);
+        co_await std::move(outer);
+        auto inner = inner_->emit_async(phase, std::move(type), std::move(owner_scope),
+                                        std::move(run_id), std::move(data),
+                                        std::move(cancellation), parent_deadline,
+                                        event_sequence);
+        co_await std::move(inner);
+        co_return;
+    }
     if (cancellation) cancellation->throw_if_cancelled("before lifecycle hook");
     const auto deadline = std::min(parent_deadline.value_or(std::chrono::system_clock::time_point::max()),
                                    std::chrono::system_clock::now() + default_timeout_);

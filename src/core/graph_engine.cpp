@@ -1727,8 +1727,9 @@ asio::awaitable<GraphEngine::SubgraphRunResult> GraphEngine::run_subgraph_async(
         resources.provider_call_broker = parent_runtime->provider_call_broker;
         resources.tool_effect_broker = parent_runtime->tool_effect_broker;
         resources.tool_effect_grant = parent_runtime->tool_effect_grant;
-        // The parent run's tool Hooks bound the subgraph's tool calls too.
-        resources.hook_runtime = parent_runtime->tool_hook_runtime;
+        // The parent run's tool Hooks bound the subgraph's tool calls too,
+        // before this engine's own.
+        resources.parent_hook_runtime = parent_runtime->tool_hook_runtime;
     }
     if (persistence == SubgraphPersistence::Stateless) {
         if (!interrupt_before_.empty() || !interrupt_after_.empty())
@@ -1956,8 +1957,12 @@ GraphEngine::execute_graph_async(
         runtime->tool_effect_broker = resources->tool_effect_broker;
         runtime->tool_effect_grant = resources->tool_effect_grant;
     }
-    runtime->tool_hook_runtime =
-        resources && resources->hook_runtime ? resources->hook_runtime : hook_runtime_;
+    // RunResources::hook_runtime replaces the engine's for one run. Under a
+    // parent run that has its own (a subgraph), both apply: the parent's
+    // first, then this run's.
+    runtime->tool_hook_runtime = ::neograph::HookRuntime::compose(
+        resources ? resources->parent_hook_runtime : nullptr,
+        resources && resources->hook_runtime ? resources->hook_runtime : hook_runtime_);
     if (resources) {
         runtime->subgraph_write_journal = resources->subgraph_write_journal;
     }

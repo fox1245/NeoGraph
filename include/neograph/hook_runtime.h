@@ -31,6 +31,16 @@ public:
     explicit HookRuntime(std::shared_ptr<MandatoryHookRunner> runner,
                          std::chrono::milliseconds default_timeout = std::chrono::seconds(30));
 
+    /**
+     * Both runtimes of a nested run, outer first: a subgraph whose engine has
+     * its own HookRuntime under a parent run that has one. Every event goes
+     * through `outer`'s Hooks and then `inner`'s, and a block from either
+     * blocks. A null side yields the other one, and the same runtime on both
+     * sides is that runtime, so its Hooks run once.
+     */
+    [[nodiscard]] static std::shared_ptr<HookRuntime> compose(std::shared_ptr<HookRuntime> outer,
+                                                              std::shared_ptr<HookRuntime> inner);
+
     asio::awaitable<void> emit_async(HookPhase phase, std::string type,
                                        std::string owner_scope, std::string run_id, json data,
                                        std::shared_ptr<graph::CancelToken> cancellation = {},
@@ -42,9 +52,15 @@ public:
     [[nodiscard]] static bool executing_hook_target() noexcept;
 
 private:
+    HookRuntime(std::shared_ptr<HookRuntime> outer, std::shared_ptr<HookRuntime> inner);
+
     std::shared_ptr<MandatoryHookRunner> runner_;
     std::chrono::milliseconds default_timeout_;
     std::atomic<std::uint64_t> next_sequence_{0};
+    /// A composed runtime (compose()) has no runner of its own: it emits
+    /// through `outer_` and then `inner_`.
+    std::shared_ptr<HookRuntime> outer_;
+    std::shared_ptr<HookRuntime> inner_;
 };
 
 } // namespace neograph

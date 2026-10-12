@@ -1234,6 +1234,9 @@ private:
         std::shared_ptr<ToolEffectBroker> tool_effect_broker;
         ToolEffectGrantIdentity tool_effect_grant;
         std::shared_ptr<::neograph::HookRuntime> hook_runtime;
+        /// A subgraph run's parent run's tool HookRuntime, applied before
+        /// this engine's own (HookRuntime::compose).
+        std::shared_ptr<::neograph::HookRuntime> parent_hook_runtime;
         std::shared_ptr<detail::SubgraphWriteJournal> subgraph_write_journal;
         std::shared_ptr<GraphSafePointRequest> safe_point_request;
     };

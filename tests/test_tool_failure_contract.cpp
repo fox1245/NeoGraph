@@ -1144,3 +1144,159 @@ TEST(ToolFailureContract, McpErrorsAreToolResults) {
     }
 }
 #endif
+
+// ── Nested Hook runtimes and durable tool Hook events ──────────────────────
+
+namespace {
+
+// A Hook target that appends "<label>:<phase>:<tool_call_id>" to a log shared
+// by several runtimes, so the order across them is visible.
+class LabelledHookTarget final : public Tool {
+public:
+    LabelledHookTarget(std::string label, std::shared_ptr<std::vector<std::string>> log,
+                       std::shared_ptr<std::mutex> mutex, bool fail)
+        : label_(std::move(label)), log_(std::move(log)), mutex_(std::move(mutex)), fail_(fail) {}
+    ChatTool get_definition() const override { return {"audit", "", json::object()}; }
+    std::string get_name() const override { return "audit"; }
+    std::string execute(const json& arguments) override {
+        {
+            std::lock_guard lock(*mutex_);
+            log_->push_back(label_ + ":" + arguments.value("phase", "") + ":" +
+                            arguments.value("tool_call_id", ""));
+        }
+        if (fail_) throw std::runtime_error(label_ + " audit sink unavailable");
+        return "audited";
+    }
+
+private:
+    std::string label_;
+    std::shared_ptr<std::vector<std::string>> log_;
+    std::shared_ptr<std::mutex> mutex_;
+    bool fail_;
+};
+
+struct HookLog {
+    std::shared_ptr<std::vector<std::string>> entries = std::make_shared<std::vector<std::string>>();
+    std::shared_ptr<std::mutex> mutex = std::make_shared<std::mutex>();
+    std::vector<std::string> snapshot() const {
+        std::lock_guard lock(*mutex);
+        return *entries;
+    }
+};
+
+std::shared_ptr<HookRuntime> labelled_hooks(const std::string& label, const HookLog& log,
+                                            bool fail = false) {
+    auto target = std::make_shared<LabelledHookTarget>(label, log.entries, log.mutex, fail);
+    HookTargetResolver resolver = [target](std::string_view id) -> std::optional<HookTargetContract> {
+        if (id != "audit") return std::nullopt;
+        return HookTargetContract{target.get(), {"audit"}, ToolEffectClass::ReadOnly};
+    };
+    auto registry = std::make_shared<HookRegistry>(resolver);
+    for (const auto phase : {HookPhase::BeforeToolExecution, HookPhase::AfterToolExecution}) {
+        HookDefinitionData data;
+        data.priority = 1;
+        data.phase = phase;
+        data.target_id = "audit";
+        data.required_capabilities = {"audit"};
+        data.effect = ToolEffectClass::ReadOnly;
+        data.input_mapper = {HookInputMapperKind::Template, {},
+                             json{{"phase", phase == HookPhase::BeforeToolExecution ? "before"
+                                                                                     : "after"},
+                                  {"tool_call_id", json{{"$event", "/tool_call_id"}}}},
+                             {}};
+        registry->admit(HookDefinition::create(std::move(data)));
+    }
+    auto adapter = std::make_shared<NativeHookExecutionAdapter>(
+        resolver, std::make_shared<ToolExecutionController>());
+    return std::make_shared<HookRuntime>(std::make_shared<MandatoryHookRunner>(
+        std::make_shared<InMemoryHookJournal>(), std::move(registry), std::move(adapter)));
+}
+
+// Runs one tool call in a subgraph whose engine has `child_hooks`, under a
+// parent engine that has `parent_hooks`.
+Outcome run_nested(std::shared_ptr<HookRuntime> parent_hooks,
+                   std::shared_ptr<HookRuntime> child_hooks, std::shared_ptr<Probe> probe) {
+    register_emit_node();
+    NodeContext context;
+    std::vector<std::unique_ptr<Tool>> tools;
+    tools.push_back(std::make_unique<TargetTool>(Act::Succeed, probe));
+    context.tools = ToolSet(std::move(tools));
+    std::shared_ptr<GraphEngine> child =
+        GraphEngine::compile(tool_graph({{kTargetCall, "target", "{}"}}, "nested_hooks_child"),
+                             context);
+    child->set_hook_runtime(std::move(child_hooks));
+    NodeFactory::instance().register_type("nested_hooks_subgraph",
+        [child](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<SubgraphNode>(name, child);
+        });
+    const json parent{
+        {"name", "nested_hooks_parent"},
+        {"channels", {{"messages", {{"reducer", "append"}}}}},
+        {"nodes", {{"child", {{"type", "nested_hooks_subgraph"}}}}},
+        {"edges", json::array({json{{"from", "__start__"}, {"to", "child"}},
+                               json{{"from", "child"}, {"to", "__end__"}}})}};
+    auto engine = GraphEngine::compile(parent, NodeContext{},
+                                       std::make_shared<InMemoryCheckpointStore>());
+    engine->set_hook_runtime(std::move(parent_hooks));
+    RunConfig config;
+    config.thread_id = "nested-hooks";
+    RunMetadata metadata;
+    metadata.owner_scope = "tenant";
+    metadata.run_id = "root-run";
+    Outcome outcome;
+    try {
+        (void)neograph::async::run_sync(engine->run_async(config, metadata, RunResources{}));
+    } catch (...) {
+        outcome.capture(std::current_exception());
+    }
+    return outcome;
+}
+
+}  // namespace
+
+// A subgraph whose engine has its own HookRuntime, under a parent run that has
+// one, applies both to its tool calls: the parent's Hooks first, then the
+// child's. A block from either blocks the call, and the tool does not run.
+TEST(ToolFailureContract, NestedHookRuntimesCompose) {
+    {
+        HookLog log;
+        auto probe = std::make_shared<Probe>();
+        const auto outcome = run_nested(labelled_hooks("parent", log),
+                                        labelled_hooks("child", log), probe);
+        ASSERT_FALSE(outcome.error) << describe(outcome);
+        EXPECT_EQ(log.snapshot(),
+                  (std::vector<std::string>{"parent:before:call-target", "child:before:call-target",
+                                            "parent:after:call-target", "child:after:call-target"}));
+        EXPECT_EQ(probe->target_runs.load(), 1);
+    }
+    for (const bool parent_fails : {true, false}) {
+        SCOPED_TRACE(parent_fails ? "the parent's Hook blocks" : "the child's Hook blocks");
+        HookLog log;
+        auto probe = std::make_shared<Probe>();
+        const auto outcome = run_nested(labelled_hooks("parent", log, parent_fails),
+                                        labelled_hooks("child", log, !parent_fails), probe);
+        bool hook_blocked = false;
+        try {
+            if (outcome.error) std::rethrow_exception(outcome.error);
+        } catch (const HookBoundaryBlocked&) {
+            hook_blocked = true;
+        } catch (...) {
+        }
+        EXPECT_TRUE(hook_blocked) << describe(outcome);
+        EXPECT_EQ(probe->target_runs.load(), 0);
+        const auto expected = parent_fails
+            ? std::vector<std::string>{"parent:before:call-target"}
+            : std::vector<std::string>{"parent:before:call-target", "child:before:call-target"};
+        EXPECT_EQ(log.snapshot(), expected);
+    }
+    {
+        // One runtime on both levels is one set of Hooks, not two.
+        HookLog log;
+        auto probe = std::make_shared<Probe>();
+        auto shared = labelled_hooks("shared", log);
+        const auto outcome = run_nested(shared, shared, probe);
+        ASSERT_FALSE(outcome.error) << describe(outcome);
+        EXPECT_EQ(log.snapshot(), (std::vector<std::string>{"shared:before:call-target",
+                                                            "shared:after:call-target"}));
+    }
+}
