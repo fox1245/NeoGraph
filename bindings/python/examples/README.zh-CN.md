@@ -92,7 +92,7 @@ python 01_minimal.py
 | 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | key | 带研究模式的 Gradio 聊天：并行 researcher 使用模型知识而非网络搜索，生成三个问题的报告。需要 `gradio`。 |
 | 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | key | 同一个研究图，加上通过 Crawl4AI 的真实网络搜索和可选的 PostgreSQL 检查点。需要 `gradio`、`requests` 和 Crawl4AI 服务器。 |
 | 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | yes | 图给自己的输出打分，失败后请模型给出修订后的定义。使用未注册节点类型的改写会连同原因一起被拒绝；获准的改写被编译，第二次迭代达成目标。`--live` 调用托管模型。 |
-| 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | key | 对话检查点在获准的图改写之后仍然保留；版本和哈希记录在 `__graph_meta__` 中（应用层元数据，不是重放证据）。 |
+| 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | yes | 聊了几轮之后，evolver 模型提出新的 agent 定义。`validate_agent` 批准后，新引擎共用检查点存储，因此之前的四条消息保留下来，`__graph_meta__` 记录版本和哈希（应用层元数据，不是重放证据）。 |
 
 ### Program API
 

@@ -92,7 +92,7 @@ python 01_minimal.py
 | 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | key | 調査モード付きの Gradio チャット。Web 検索ではなくモデルの知識を使う並列 researcher が、3 つの質問からなるレポートを作ります。`gradio` が必要です。 |
 | 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | key | 同じ調査グラフに、Crawl4AI による実際の Web 検索と、任意の PostgreSQL チェックポイントを加えたものです。`gradio`、`requests`、Crawl4AI サーバーが必要です。 |
 | 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | yes | グラフが自分の出力を採点し、失敗すると改訂版の定義をモデルに求めます。未登録のノードタイプを使った書き換えは理由付きで拒否され、承認された書き換えがコンパイルされて 2 回目の反復で目標を達成します。`--live` はホスト型モデルを呼びます。 |
-| 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | key | 許可されたグラフの書き換え後も会話のチェックポイントが残ります。バージョンとハッシュは `__graph_meta__` に記録されます(アプリケーションレベルのメタデータであり、リプレイの証拠ではありません)。 |
+| 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | yes | 数回のチャットターンのあと、evolver モデルが新しいエージェント定義を提案します。`validate_agent` が承認し、新しいエンジンがチェックポイントストアを共有するため前の 4 件のメッセージが残り、`__graph_meta__` にバージョンとハッシュが記録されます（アプリケーションレベルのメタデータで、リプレイの証拠ではありません）。 |
 
 ### Program API
 
