@@ -7,12 +7,15 @@
 // agent whose card lists only 0.3 follows it just as well.
 //
 // Two servers on free ports (port 0) run in this process: the first one with the default
-// card (1.0 and 0.3), the second one whose card is restricted to 0.3.
+// card (1.0 and 0.3), the second one whose card is restricted to 0.3. It also shows that a
+// 1.0 server accepts both method spellings, `SendMessage` and the 0.3 `message/send`.
 //
 // smoke-expect: card interfaces: JSONRPC 1.0, JSONRPC 0.3
 // smoke-expect: dialect: 1.0
 // smoke-expect: dialect: 0.3
 // smoke-expect: reply: echo: hello
+// smoke-expect: method SendMessage under A2A-Version 1.0: TASK_STATE_COMPLETED
+// smoke-expect: method message/send under A2A-Version 1.0: TASK_STATE_COMPLETED
 // smoke-forbid: [neograph] lint
 
 #include <neograph/a2a/client.h>
@@ -71,6 +74,20 @@ void call_agent(const std::string& label, int port) {
     std::cout << label << ": reply: " << task.status.message->parts[0].text << "\n";
 }
 
+// A 1.0 server also accepts the 0.3 method spelling. Both calls below carry the 1.0 body and
+// the `A2A-Version: 1.0` header; only the method name differs.
+void both_spellings(int port) {
+    a2a::A2AClient client("http://127.0.0.1:" + std::to_string(port));
+    const json params = {{"message", {{"messageId", "m-1"},
+                                      {"role", "ROLE_USER"},
+                                      {"parts", json::array({json{{"text", "hello"}}})}}}};
+    for (const char* method : {"SendMessage", "message/send"}) {
+        const auto result = client.rpc_call(method, params, a2a::WireDialect::V1_0);
+        std::cout << "method " << method << " under A2A-Version 1.0: "
+                  << result["task"]["status"]["state"].get<std::string>() << "\n";
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -96,6 +113,7 @@ int main() {
             return 1;
         }
         call_agent("both", server_both.port());
+        both_spellings(server_both.port());
         call_agent("legacy", server_legacy.port());
         server_legacy.stop();
         server_both.stop();
