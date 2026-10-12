@@ -99,10 +99,9 @@ Be decisive. Do not over-explore. The binary is small (under 10 user functions).
 /// MCPTool that still holds a session reference internally).
 ///
 /// `client` is held via unique_ptr because MCPClient owns a std::mutex
-/// (Round 3 audit, NeoGraph 7457a09) and is therefore neither copyable
-/// nor movable — but `GhidraBridge` itself needs to be returned by
-/// value from `spawn_ghidra_bridge`, so the heap indirection restores
-/// move semantics without touching the upstream class.
+/// and is therefore neither copyable nor movable. `GhidraBridge` itself is returned by value
+/// from `spawn_ghidra_bridge`, so the heap indirection restores move semantics without
+/// changing MCPClient.
 struct GhidraBridge {
     std::unique_ptr<neograph::mcp::MCPClient> client;
     std::vector<std::unique_ptr<neograph::Tool>> tools;
