@@ -1,6 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <neograph/mcp/server.h>
+#include <neograph/graph/types.h>
+#include <neograph/hook_outbox.h>
+#include <neograph/provider.h>
+
+#include <asio/error.hpp>
+#include <asio/system_error.hpp>
 
 #include <chrono>
 #include <condition_variable>
@@ -9,6 +15,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 using namespace std::chrono_literals;
@@ -292,12 +299,12 @@ TEST(MCPServerTest, CancellationReachesRequestScopedToken) {
         {"requestId", "cancel-me"}, {"reason", "test"},
     })).is_null());
 
+    // A cancelled call is a JSON-RPC error with the cancellation code, never
+    // a tool result (reference, "Protocol failure mapping").
     auto response = captured.wait_for("cancel-me");
-    ASSERT_TRUE(response.contains("result"));
-    EXPECT_TRUE(response["result"]["isError"].get<bool>());
-    EXPECT_NE(response["result"]["content"][0]["text"]
-                  .get<std::string>().find("cancelled"),
-              std::string::npos);
+    ASSERT_TRUE(response.contains("error")) << response.dump();
+    EXPECT_EQ(response["error"]["code"], -32800);
+    EXPECT_EQ(response["error"]["data"]["code"], "NG.Cancelled");
 }
 
 TEST(MCPServerTest, BoundedQueueRejectsExcessAndDuplicateRequestIds) {
@@ -362,10 +369,107 @@ TEST(MCPServerTest, StopCancelsRunningAndPendingCalls) {
     server.stop();
     auto running = captured.wait_for(60);
     auto pending = captured.wait_for(61);
-    ASSERT_TRUE(running.contains("result"));
-    ASSERT_TRUE(pending.contains("result"));
-    EXPECT_TRUE(running["result"]["isError"].get<bool>());
-    EXPECT_TRUE(pending["result"]["isError"].get<bool>());
+    ASSERT_TRUE(running.contains("error")) << running.dump();
+    ASSERT_TRUE(pending.contains("error")) << pending.dump();
+    EXPECT_EQ(running["error"]["code"], -32800);
+    EXPECT_EQ(pending["error"]["code"], -32800);
+}
+
+// Each typed failure class a handler raises maps to a distinct, documented
+// response (reference, "Protocol failure mapping"): run control signals are
+// JSON-RPC errors with their own codes; every other failure is an isError
+// tool result whose `_meta["io.neograph/failure"].code` names its class.
+TEST(MCPServerTest, TypedFailuresMapToDistinctResponses) {
+    CapturingSink captured;
+    MCPServer server(config(2, 16));
+    server.set_response_sink(captured.sink());
+    ToolDefinition definition;
+    definition.name = "fail";
+    definition.description = "raises the failure it is asked for";
+    definition.input_schema = {{"type", "object"},
+                               {"properties", {{"kind", {{"type", "string"}}}}}};
+    server.register_tool(definition, [](const json& arguments, const auto&) -> CallToolResult {
+        const auto kind = arguments.at("kind").get<std::string>();
+        auto provider = [](sp::ErrorKind error) {
+            sp::Failure failure;
+            failure.error.kind = error;
+            failure.error.safe_message = "provider failed";
+            return neograph::ProviderFailure(std::make_shared<const sp::Outcome>(std::move(failure)));
+        };
+        if (kind == "ordinary") throw std::runtime_error("plain failure");
+        if (kind == "author") throw neograph::graph::NodeFailureError("app.bad_input", "bad", false);
+        if (kind == "timeout") throw asio::system_error(asio::error::timed_out, "too slow");
+        if (kind == "provider") throw provider(sp::ErrorKind::Overloaded);
+        if (kind == "budget") throw provider(sp::ErrorKind::QuotaExhausted);
+        if (kind == "hook")
+            throw neograph::HookBoundaryBlocked("sha256:" + std::string(64, 'a'),
+                                                neograph::HookExecutionState::Failed,
+                                                "audit hook blocked");
+        if (kind == "interrupt")
+            throw neograph::graph::NodeInterrupt("needs approval", json{{"cmd", "deploy"}});
+        if (kind == "cancelled") throw neograph::graph::CancelledException("inner run cancelled");
+        return CallToolResult{};
+    });
+    initialize(server);
+    const std::vector<std::tuple<std::string, std::string, int>> table{
+        // kind, NG code, JSON-RPC error code (0: an isError tool result)
+        {"ordinary", "NG.TaskFailed", 0},
+        {"author", "app.bad_input", 0},
+        {"timeout", "NG.Timeout", 0},
+        {"provider", "NG.ProviderFailed", 0},
+        {"budget", "NG.BudgetExhausted", 0},
+        {"hook", "NG.HookBlocked", -32010},
+        {"interrupt", "NG.Interrupted", -32011},
+        {"cancelled", "NG.Cancelled", -32800},
+    };
+    int id = 100;
+    for (const auto& [kind, code, rpc] : table) {
+        SCOPED_TRACE(kind);
+        ++id;
+        EXPECT_TRUE(server.handle_message(request(id, "tools/call", {
+            {"name", "fail"}, {"arguments", {{"kind", kind}}},
+        })).is_null());
+        const auto response = captured.wait_for(id);
+        if (rpc == 0) {
+            ASSERT_TRUE(response.contains("result")) << response.dump();
+            EXPECT_TRUE(response["result"]["isError"].get<bool>());
+            EXPECT_EQ(response["result"]["_meta"]["io.neograph/failure"]["code"], code);
+        } else {
+            ASSERT_TRUE(response.contains("error")) << response.dump();
+            EXPECT_EQ(response["error"]["code"], rpc);
+            EXPECT_EQ(response["error"]["data"]["code"], code);
+        }
+        if (kind == "hook") {
+            EXPECT_EQ(response["error"]["data"]["invocation_id"], "sha256:" + std::string(64, 'a'));
+            EXPECT_EQ(response["error"]["data"]["state"], "failed");
+        }
+        if (kind == "interrupt") {
+            EXPECT_EQ(response["error"]["data"]["reason"], "needs approval");
+            EXPECT_EQ(response["error"]["data"]["value"]["cmd"], "deploy");
+        }
+    }
+}
+
+// Ill-formed UTF-8 in a handler's failure text still produces a response line
+// (it used to serialize to an empty line the client skipped until timeout).
+TEST(MCPServerTest, IllFormedUtf8NeverEmptiesAResponse) {
+    CapturingSink captured;
+    MCPServer server(config());
+    server.set_response_sink(captured.sink());
+    server.register_tool(echo_definition(), [](const json&, const auto&) -> CallToolResult {
+        throw std::runtime_error("bad \xff byte");
+    });
+    initialize(server);
+    EXPECT_TRUE(server.handle_message(request(7, "tools/call", {
+        {"name", "echo"}, {"arguments", {{"value", "x"}}},
+    })).is_null());
+    const auto response = captured.wait_for(7);
+    ASSERT_TRUE(response.contains("result"));
+    const auto line = response.dump();
+    ASSERT_FALSE(line.empty());
+    EXPECT_NE(json::parse(line)["result"]["content"][0]["text"].get<std::string>().find(
+                  "bad \xEF\xBF\xBD byte"),
+              std::string::npos);
 }
 
 TEST(MCPServerTest, RejectsInvalidDefinitionsAndLateRegistration) {

@@ -36,6 +36,12 @@ struct NEOGRAPH_API MCPServerConfig {
  * a fixed-size worker pool. The request-scoped CancelToken passed to a handler
  * is cancelled by `notifications/cancelled`; handlers cooperate by polling or
  * propagating that token into their own async work.
+ *
+ * A handler's failure keeps its class on the wire (reference, "Protocol
+ * failure mapping"): cancellation is JSON-RPC error -32800, a
+ * HookBoundaryBlocked -32010, a NodeInterrupt -32011, and every other failure
+ * an isError result whose `_meta["io.neograph/failure"]` holds its stable code
+ * (graph::classify_failure).
  */
 class NEOGRAPH_API MCPServer {
   public:

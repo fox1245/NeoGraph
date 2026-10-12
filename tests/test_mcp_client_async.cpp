@@ -948,3 +948,89 @@ TEST(MCPClientAsync, ShutdownFromTransportCallbackDoesNotSelfJoinOrSend) {
     client.shutdown();
     EXPECT_EQ(server.request_count.load(), 0);
 }
+
+// The HTTP twin of MCPStdioAsync.DispatchBoundsAnInFlightToolCall: the run's
+// cancel token stops an in-flight tools/call (classified as cancellation),
+// the run's deadline makes it a timed-out call, and a late response never
+// answers a later call.
+TEST(MCPClientAsync, DispatchBoundsAnInFlightHttpToolCall) {
+    httplib::Server svr;
+    svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+        auto request = json::parse(req.body);
+        auto method = request.value("method", "");
+        if (method == "notifications/initialized" || method == "notifications/cancelled") {
+            res.status = 202;
+            return;
+        }
+        json result = json::object();
+        if (method == "initialize") {
+            result = {{"protocolVersion", "2025-11-25"},
+                      {"capabilities", json::object()},
+                      {"serverInfo", {{"name", "slow"}, {"version", "1"}}}};
+        } else if (method == "tools/list") {
+            result = {{"tools", json::array({{{"name", "echo"},
+                                               {"inputSchema", {{"type", "object"}}}}})}};
+        } else if (method == "tools/call") {
+            const auto arguments = request.at("params").at("arguments");
+            const auto marker = arguments.value("marker", std::string());
+            if (marker == "late") std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+            result = {{"content", json::array({{{"type", "text"}, {"text", marker}}})}};
+        }
+        res.set_content(json{{"jsonrpc", "2.0"}, {"id", request.at("id")},
+                             {"result", result}}.dump(), "application/json");
+    });
+    svr.new_task_queue = [] { return new httplib::ThreadPool(8); };
+    ServerGuard server(svr);
+    mcp::MCPClient client("http://127.0.0.1:" + std::to_string(server.port));
+    auto tools = client.get_tools();
+    ASSERT_EQ(tools.size(), 1u);
+    Tool& echo = *tools[0];
+    auto controller = std::make_shared<ToolExecutionController>();
+    const std::string late = R"({"marker":"late"})";
+
+    {
+        auto cancel = std::make_shared<graph::CancelToken>();
+        ToolExecutionContext context;
+        context.cancel_token = cancel;
+        context.controller = controller;
+        std::jthread stop([cancel] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            cancel->cancel();
+        });
+        const auto started = std::chrono::steady_clock::now();
+        const auto result = async::run_sync(
+            controller->execute_result_async(echo, json::parse(late), context));
+        EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(1200));
+        EXPECT_EQ(result.status, ToolTerminalStatus::CancellationRequested) << result.error;
+    }
+    {
+        auto cancel = std::make_shared<graph::CancelToken>();
+        ToolExecutionContext context;
+        context.cancel_token = cancel;
+        context.controller = controller;
+        std::jthread stop([cancel] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            cancel->cancel();
+        });
+        const auto started = std::chrono::steady_clock::now();
+        EXPECT_THROW(async::run_sync(dispatch_tool_calls({{"c1", "echo", late}}, {&echo}, {}, {},
+                                                         context)),
+                     graph::CancelledException);
+        EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(1200));
+    }
+    {
+        ToolExecutionContext context;
+        context.controller = controller;
+        context.deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+        const auto messages = async::run_sync(
+            dispatch_tool_calls({{"c2", "echo", late}}, {&echo}, {}, {}, context));
+        ASSERT_EQ(messages.size(), 1u);
+        EXPECT_EQ(messages[0].tool_status, "timed_out") << messages[0].content;
+    }
+    ToolExecutionContext plain;
+    plain.controller = controller;
+    const auto later = async::run_sync(
+        dispatch_tool_calls({{"c3", "echo", R"({"marker":"next"})"}}, {&echo}, {}, {}, plain));
+    ASSERT_EQ(later.size(), 1u);
+    EXPECT_EQ(later[0].content, "next");
+}

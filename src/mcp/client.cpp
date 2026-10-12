@@ -6,6 +6,8 @@
 #include <neograph/graph/cancel.h>
 
 #include <asio/co_spawn.hpp>
+#include <asio/error.hpp>
+#include <asio/system_error.hpp>
 #include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
 #include <asio/post.hpp>
@@ -380,10 +382,16 @@ public:
     std::vector<ToolDefinition> get_tool_definitions();
     json call_tool(const std::string& name, const json& arguments);
     asio::awaitable<json> call_tool_async(
-        const std::string& name, const json& arguments);
+        const std::string& name, const json& arguments,
+        std::chrono::steady_clock::time_point deadline =
+            std::chrono::steady_clock::time_point::max(),
+        std::shared_ptr<graph::CancelToken> cancel_token = {});
     CallToolResult call_tool_result(const std::string& name, const json& arguments);
     asio::awaitable<CallToolResult> call_tool_result_async(
-        const std::string& name, const json& arguments);
+        const std::string& name, const json& arguments,
+        std::chrono::steady_clock::time_point deadline =
+            std::chrono::steady_clock::time_point::max(),
+        std::shared_ptr<graph::CancelToken> cancel_token = {});
 
     std::shared_ptr<Transport> transport_;
     std::shared_ptr<ClientMetadata> metadata_ = std::make_shared<ClientMetadata>();
@@ -1550,24 +1558,55 @@ CallToolResult MCPTool::execute_result(const json& arguments) {
 
 asio::awaitable<CallToolResult>
 MCPTool::execute_result_async(const json& arguments) {
-    if (auto session = session_) {
-        auto result = co_await session->call_tool_result_async(
-            definition_.name, arguments);
+    co_return co_await execute_result_async(arguments, ToolExecutionContext{});
+}
+
+asio::awaitable<CallToolResult>
+MCPTool::execute_result_async(const json& arguments, ToolExecutionContext context) {
+    // The call's own bounds: the run's deadline and cancel token (a node
+    // attempt's token, under an attempt timeout). Cancelling stops waiting for
+    // the response; a late one is dropped (stdio routes responses by id, HTTP
+    // abandons the request).
+    const auto deadline = context.deadline.value_or(std::chrono::steady_clock::time_point::max());
+    std::exception_ptr bounded;
+    try {
+        if (auto session = session_) {
+            auto result = co_await session->call_tool_result_async(
+                definition_.name, arguments, deadline, context.cancel_token);
+            validate_tool_result(result, definition_.output_schema);
+            co_return result;
+        }
+        // The legacy direct-HTTP tool constructor has no originating client.
+        // Create a fresh protocol session for this invocation.
+        auto client = std::make_unique<MCPClient>(server_url_);
+        auto result = co_await client->call_tool_result_async(
+            definition_.name, arguments, deadline, context.cancel_token);
         validate_tool_result(result, definition_.output_schema);
         co_return result;
+    } catch (const MCPTransportError& error) {
+        if (error.failure() != MCPFailure::cancelled && error.failure() != MCPFailure::timeout)
+            throw;
+        bounded = std::current_exception();
     }
-
-    // The legacy direct-HTTP tool constructor has no originating client.
-    // Create a fresh protocol session for this invocation.
-    auto client = std::make_unique<MCPClient>(server_url_);
-    auto result = co_await client->call_tool_result_async(
-        definition_.name, arguments);
-    validate_tool_result(result, definition_.output_schema);
-    co_return result;
+    // A bounded call ends as what bounded it, the same as for any other tool
+    // (reference, "Tool failure contract"): cancellation is
+    // graph::CancelledException, and a deadline or request timeout is a
+    // timed-out call, not an ordinary tool error.
+    try {
+        std::rethrow_exception(bounded);
+    } catch (const MCPTransportError& error) {
+        if (error.failure() == MCPFailure::cancelled) throw graph::CancelledException(error.what());
+        throw asio::system_error(asio::error::timed_out, error.what());
+    }
 }
 
 asio::awaitable<std::string> MCPTool::execute_async(const json& arguments) {
-    auto result = co_await execute_result_async(arguments);
+    co_return co_await execute_async(arguments, ToolExecutionContext{});
+}
+
+asio::awaitable<std::string> MCPTool::execute_async(const json& arguments,
+                                                    ToolExecutionContext context) {
+    auto result = co_await execute_result_async(arguments, std::move(context));
     std::string text = format_tool_result(result);
     if (result.is_error) {
         throw std::runtime_error("MCP tool execution error: " + text);
@@ -2095,17 +2134,22 @@ CallToolResult detail::ProtocolSession::call_tool_result(
 }
 
 asio::awaitable<json>
-detail::ProtocolSession::call_tool_async(const std::string& name, const json& arguments) {
+detail::ProtocolSession::call_tool_async(const std::string& name, const json& arguments,
+                                         std::chrono::steady_clock::time_point deadline,
+                                         std::shared_ptr<graph::CancelToken> cancel_token) {
+    // MCP never cancels initialization; the bounds apply to the call itself.
     co_await initialize_async();
     json params;
     params["name"]      = name;
     params["arguments"] = arguments;
-    co_return co_await rpc_call_async("tools/call", params);
+    co_return co_await rpc_call_async("tools/call", params, deadline, std::move(cancel_token));
 }
 
 asio::awaitable<CallToolResult> detail::ProtocolSession::call_tool_result_async(
-    const std::string& name, const json& arguments) {
-    auto raw = co_await call_tool_async(name, arguments);
+    const std::string& name, const json& arguments,
+    std::chrono::steady_clock::time_point deadline,
+    std::shared_ptr<graph::CancelToken> cancel_token) {
+    auto raw = co_await call_tool_async(name, arguments, deadline, std::move(cancel_token));
     auto result = decode_protocol_result<CallToolResult>(raw);
     json output_schema;
     bool has_output_schema = false;
@@ -2162,6 +2206,15 @@ asio::awaitable<CallToolResult> MCPClient::call_tool_result_async(
     const std::string& name, const json& arguments) {
     auto session = session_;
     co_return co_await session->call_tool_result_async(name, arguments);
+}
+
+asio::awaitable<CallToolResult> MCPClient::call_tool_result_async(
+    const std::string& name, const json& arguments,
+    std::chrono::steady_clock::time_point deadline,
+    std::shared_ptr<graph::CancelToken> cancel_token) {
+    auto session = session_;
+    co_return co_await session->call_tool_result_async(name, arguments, deadline,
+                                                       std::move(cancel_token));
 }
 
 } // namespace neograph::mcp

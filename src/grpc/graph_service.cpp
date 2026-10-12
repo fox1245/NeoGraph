@@ -10,6 +10,7 @@
 #include <neograph/neograph.h>
 
 #include "neograph.grpc.pb.h"   // generated into ${build}/grpc_gen
+#include "../core/text_safety.h"
 
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/server_builder.h>
@@ -67,13 +68,20 @@ public:
             watcher->stop();
             if (outcome.cancelled()) {
                 resp->set_error("cancelled");
+                resp->set_error_code("NG.Cancelled");
                 return ::grpc::Status(::grpc::StatusCode::CANCELLED,
                                       "graph invocation cancelled");
             }
             if (!outcome.succeeded() || !outcome.run_result) {
-                resp->set_error(outcome.error.empty()
-                                    ? "graph invocation failed"
-                                    : outcome.error);
+                // The failure stays in the payload (the graph failed, gRPC
+                // did not), with its stable code (reference, "Protocol
+                // failure mapping").
+                resp->set_error(::neograph::detail::valid_utf8(outcome.error.empty()
+                                                       ? "graph invocation failed"
+                                                       : outcome.error));
+                resp->set_error_code(outcome.error_code.empty() ? "NG.UnknownFailure"
+                                                                : outcome.error_code);
+                resp->set_error_detail_json(outcome.error_detail.dump());
                 return ::grpc::Status::OK;
             }
 
@@ -91,7 +99,10 @@ public:
             // Engine-side failure surfaces in the payload, not as a
             // transport error — caller distinguishes "graph threw"
             // from "gRPC broke".
-            resp->set_error(e.what());
+            const auto verdict = classify_failure(std::current_exception());
+            resp->set_error(::neograph::detail::valid_utf8(e.what()));
+            resp->set_error_code(verdict.code);
+            resp->set_error_detail_json("{}");
         }
         return ::grpc::Status::OK;
     }
@@ -150,7 +161,10 @@ public:
                 err.set_payload_json(neograph::json{
                     {"error", outcome.error.empty()
                                   ? "graph invocation failed"
-                                  : outcome.error}}.dump());
+                                  : outcome.error},
+                    {"code", outcome.error_code.empty() ? "NG.UnknownFailure"
+                                                        : outcome.error_code},
+                    {"detail", outcome.error_detail}}.dump());
                 writer->Write(err);
                 return ::grpc::Status::OK;
             }
@@ -172,10 +186,13 @@ public:
                                       "gRPC stream closed by client");
         } catch (const std::exception& e) {
             if (watcher) watcher->stop();
+            const auto verdict = classify_failure(std::current_exception());
             pb::GraphEvent err;
             err.set_kind(pb::GraphEvent::DEBUG);
             err.set_payload_json(
-                neograph::json{{"error", e.what()}}.dump());
+                neograph::json{{"error", e.what()},
+                               {"code", verdict.code},
+                               {"detail", neograph::json::object()}}.dump());
             writer->Write(err);
         }
         return ::grpc::Status::OK;

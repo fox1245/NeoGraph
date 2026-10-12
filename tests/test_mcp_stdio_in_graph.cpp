@@ -31,6 +31,7 @@
 
 #include <gtest/gtest.h>
 
+#include <neograph/graph/cancel.h>
 #include <neograph/graph/engine.h>
 #include <neograph/graph/node.h>
 #include <neograph/graph/types.h>
@@ -38,7 +39,9 @@
 
 #include <asio/awaitable.hpp>
 
+#include <chrono>
 #include <cstdlib>
+#include <thread>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -170,4 +173,87 @@ TEST(MCPStdioInGraph, TheSameClientSurvivesASecondRun) {
         }
         EXPECT_TRUE(saw_tool_result) << "run " << i << " produced no tool result";
     }
+}
+
+namespace {
+
+// Asks for one slow remote call.
+class SlowCallNode : public GraphNode {
+public:
+    asio::awaitable<NodeResult> run(NodeInput) override {
+        json assistant;
+        assistant["role"]       = "assistant";
+        assistant["content"]    = "";
+        assistant["tool_calls"] = json::array({
+            json{{"id", "slow-1"}, {"name", "echo"},
+                 {"arguments", R"({"marker":"late","delay_ms":4000})"}}
+        });
+        NodeResult out;
+        out.writes.push_back(ChannelWrite{"messages", json::array({assistant})});
+        co_return out;
+    }
+    std::string get_name() const override { return "llm"; }
+};
+
+std::filesystem::path slow_fixture() {
+    return fixture_path().parent_path() / "mcp_stdio_slow.py";
+}
+
+}  // namespace
+
+// A run's cancel token reaches an MCP call in flight inside a tool_dispatch
+// node: the run stops as cancelled at once instead of waiting for the server.
+TEST(MCPStdioInGraph, RunCancellationStopsAnInFlightCall) {
+    NodeFactory::instance().register_type("mcp_graph_slow_llm",
+        [](const std::string&, const json&, const NodeContext&) {
+            return std::make_unique<SlowCallNode>();
+        });
+    mcp::MCPClient client({python_cmd(), slow_fixture().string()});
+    NodeContext ctx;
+    ctx.tools = ToolSet(client.get_tools());
+    auto definition = graph_def();
+    definition["nodes"]["llm"]["type"] = "mcp_graph_slow_llm";
+    auto engine = GraphEngine::compile(definition, ctx);
+    RunConfig cfg;
+    cfg.thread_id = "mcp-stdio-cancel";
+    cfg.cancel_token = std::make_shared<CancelToken>();
+    auto token = cfg.cancel_token;
+    std::jthread stop([token] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        token->cancel();
+    });
+    const auto started = std::chrono::steady_clock::now();
+    EXPECT_THROW(engine->run(cfg), CancelledException);
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(2500))
+        << "the run waited for the MCP server instead of its cancel token";
+}
+
+// An attempt timeout cancels the attempt through its own token (the fencing
+// token, #364): the in-flight MCP call stops with it, so the attempt stops in
+// time and fails with NG.Timeout instead of outliving its stop deadline
+// (NG.EffectUncertain).
+TEST(MCPStdioInGraph, AttemptTimeoutStopsAnInFlightCall) {
+    NodeFactory::instance().register_type("mcp_graph_slow_llm",
+        [](const std::string&, const json&, const NodeContext&) {
+            return std::make_unique<SlowCallNode>();
+        });
+    mcp::MCPClient client({python_cmd(), slow_fixture().string()});
+    NodeContext ctx;
+    ctx.tools = ToolSet(client.get_tools());
+    auto definition = graph_def();
+    definition["nodes"]["llm"]["type"] = "mcp_graph_slow_llm";
+    auto engine = GraphEngine::compile(definition, ctx);
+    engine->set_node_attempt_timeout_ms("tools", 200);
+    RunConfig cfg;
+    cfg.thread_id = "mcp-stdio-attempt-timeout";
+    const auto started = std::chrono::steady_clock::now();
+    try {
+        (void)engine->run(cfg);
+        FAIL() << "the attempt should have timed out";
+    } catch (const NodeExecutionError& error) {
+        const auto* failure = node_failure_of(error);
+        ASSERT_NE(failure, nullptr);
+        EXPECT_EQ(failure->code, "NG.Timeout") << "the attempt did not stop with its MCP call";
+    }
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(2500));
 }

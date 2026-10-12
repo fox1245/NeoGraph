@@ -40,7 +40,7 @@ class ProtocolSession;
  * MCPTool implements the Tool interface through the originating protocol
  * session, independently of which transport owns the connection.
  */
-class NEOGRAPH_API MCPTool : public AsyncTool {
+class NEOGRAPH_API MCPTool : public AsyncTool, public ContextualAsyncTool {
   public:
     /// Direct HTTP constructor. Each execution opens an ephemeral
     /// protocol session; tools returned by MCPClient::get_tools() instead
@@ -56,6 +56,12 @@ class NEOGRAPH_API MCPTool : public AsyncTool {
     /// Typed execution preserving all content block kinds and MCP result fields.
     CallToolResult execute_result(const json& arguments);
     asio::awaitable<CallToolResult> execute_result_async(const json& arguments);
+    /// Typed execution bounded by the dispatcher's context: its cancel token
+    /// and deadline stop waiting for the response, which is then dropped.
+    /// Cancellation throws graph::CancelledException; a deadline or request
+    /// timeout throws asio::system_error(asio::error::timed_out).
+    asio::awaitable<CallToolResult> execute_result_async(const json& arguments,
+                                                         ToolExecutionContext context);
 
     ChatTool get_definition() const override;
 
@@ -68,6 +74,12 @@ class NEOGRAPH_API MCPTool : public AsyncTool {
     /// node dispatches several at once. stdio correlates in-flight calls by
     /// JSON-RPC id; discovered HTTP tools reuse their originating session.
     asio::awaitable<std::string> execute_async(const json& arguments) override;
+
+    /// What every dispatcher calls (ToolExecutionController): the call is
+    /// bounded by the run's cancel token and deadline, as above. An `isError`
+    /// result throws std::runtime_error, an ordinary tool failure.
+    asio::awaitable<std::string> execute_async(const json& arguments,
+                                               ToolExecutionContext context) override;
 
     std::string get_name() const override { return definition_.name; }
 
@@ -177,12 +189,19 @@ class NEOGRAPH_API MCPClient {
                                     const json& arguments);
 
     /// Async variant of call_tool() — awaits the tools/call RPC without
-    /// blocking. Used by MCPTool::execute_async for concurrent dispatch.
+    /// blocking and returns the raw result.
     asio::awaitable<json> call_tool_async(const std::string& name,
                                           const json& arguments);
     asio::awaitable<CallToolResult> call_tool_result_async(
         const std::string& name,
         const json& arguments);
+    /// Bounded variant: the deadline (absolute, steady clock) and cancel token
+    /// stop waiting for this call only, as for rpc_call_async().
+    asio::awaitable<CallToolResult> call_tool_result_async(
+        const std::string& name,
+        const json& arguments,
+        std::chrono::steady_clock::time_point deadline,
+        std::shared_ptr<graph::CancelToken> cancel_token);
 
     /**
      * @brief Send a transport-independent JSON-RPC request asynchronously.

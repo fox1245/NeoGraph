@@ -1,5 +1,7 @@
 #include <neograph/mcp/json_schema.h>
 #include <neograph/mcp/server.h>
+#include <neograph/graph/types.h>
+#include <neograph/hook_outbox.h>
 
 #include <atomic>
 #include <condition_variable>
@@ -32,6 +34,71 @@ CallToolResult tool_error(std::string message) {
     result.content = json::array({{{"type", "text"}, {"text", std::move(message)}}});
     result.is_error = true;
     return result;
+}
+
+// JSON-RPC error codes of the run control signals (reference, "Protocol
+// failure mapping"). They never become a tool result a model could read.
+constexpr int kRequestCancelled = -32800;  // the LSP RequestCancelled code
+constexpr int kHookBlocked      = -32010;
+constexpr int kInterrupted      = -32011;
+
+std::string what_of(const std::exception_ptr& error) {
+    try {
+        std::rethrow_exception(error);
+    } catch (const std::exception& failure) {
+        return failure.what();
+    } catch (...) {
+        return "unknown exception";
+    }
+}
+
+// The response to a tools/call whose handler failed: run control signals are
+// JSON-RPC errors with distinct codes, and every other failure is a tool
+// result with isError and its stable code in
+// `_meta["io.neograph/failure"]`.
+json failure_response(const std::exception_ptr& error, const graph::CancelToken& cancel,
+                      const json& id) {
+    auto verdict = graph::classify_failure(error, &cancel);
+    // A call cancelled by notifications/cancelled or stop() is cancelled,
+    // whatever its handler raised on the way out.
+    if (cancel.is_cancelled()) verdict.failure_class = graph::NodeFailureClass::Cancelled;
+    switch (verdict.failure_class) {
+    case graph::NodeFailureClass::Cancelled:
+        return rpc_error(kRequestCancelled, "Request cancelled", id,
+                         {{"code", "NG.Cancelled"}});
+    case graph::NodeFailureClass::HookBlocked: {
+        json data{{"code", "NG.HookBlocked"}};
+        std::string message = "lifecycle hook blocked the tool call";
+        try {
+            if (verdict.signal) std::rethrow_exception(verdict.signal);
+        } catch (const HookBoundaryBlocked& blocked) {
+            data["invocation_id"] = blocked.invocation_id();
+            data["state"] = std::string(to_string(blocked.state()));
+            message = blocked.what();
+        } catch (...) {
+        }
+        return rpc_error(kHookBlocked, std::move(message), id, std::move(data));
+    }
+    case graph::NodeFailureClass::Interrupted: {
+        json data{{"code", "NG.Interrupted"}};
+        std::string message = "the tool call needs a human";
+        try {
+            if (verdict.signal) std::rethrow_exception(verdict.signal);
+        } catch (const graph::NodeInterrupt& interrupt) {
+            data["reason"] = interrupt.reason();
+            data["value"] = interrupt.value();
+            message = interrupt.reason();
+        } catch (...) {
+        }
+        return rpc_error(kInterrupted, std::move(message), id, std::move(data));
+    }
+    default: {
+        auto result = tool_error("Tool execution failed: " + what_of(error));
+        result.meta = json{{"io.neograph/failure",
+                            {{"code", verdict.code}, {"retryable", verdict.retryable}}}};
+        return rpc_result(result.to_json(), id);
+    }
+    }
 }
 
 bool valid_request_id(const json& id) {
@@ -131,6 +198,7 @@ struct MCPServer::Impl {
             }
 
             json result_json;
+            std::exception_ptr failure;
             try {
                 task->cancel->throw_if_cancelled("before tool execution");
                 if (task->tool.raw_handler) {
@@ -153,20 +221,16 @@ struct MCPServer::Impl {
                     result_json = result.to_json();
                 }
                 task->cancel->throw_if_cancelled("after tool execution");
-            } catch (const graph::CancelledException& e) {
-                result_json = tool_error(e.what()).to_json();
-            } catch (const std::exception& e) {
-                result_json =
-                    tool_error(std::string("Tool execution failed: ") + e.what()).to_json();
             } catch (...) {
-                result_json = tool_error("Tool execution failed: unknown exception").to_json();
+                failure = std::current_exception();
             }
 
             {
                 std::lock_guard lk(calls_mu);
                 active.erase(task->key);
             }
-            emit(rpc_result(std::move(result_json), task->id));
+            emit(failure ? failure_response(failure, *task->cancel, task->id)
+                         : rpc_result(std::move(result_json), task->id));
         }
     }
 

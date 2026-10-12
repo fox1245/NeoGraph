@@ -24,11 +24,23 @@
 #include <neograph/api.h>   // NEOGRAPH_API
 #include <neograph/tool.h>  // neograph::Tool, ChatTool, json
 
+#include <asio/awaitable.hpp>
+
+namespace grpc { class Service; }
+
 namespace neograph::grpc {
 
 /// name → fn(arguments_json) → result_json. Throwing from the fn
-/// surfaces in ToolCallResponse.error (not as a gRPC transport error).
+/// surfaces in ToolCallResponse.error with its stable code in
+/// ToolCallResponse.error_code ("NG.TaskFailed", "NG.HookBlocked",
+/// "NG.Timeout", ...), not as a gRPC transport error; a cancellation is the
+/// CANCELLED status. See the reference, "Protocol failure mapping".
 using ToolFn = std::function<std::string(const std::string&)>;
+
+/// Build the ToolService as a generated service base, so embedders can
+/// register it with their own grpc::ServerBuilder (TLS, auth, ports).
+NEOGRAPH_API std::unique_ptr<::grpc::Service> make_tool_service(
+    std::unordered_map<std::string, ToolFn> tools);
 
 /// Build + run a blocking gRPC ToolService on `address`
 /// ("0.0.0.0:50091") serving `tools`, until the process is signalled.
@@ -46,11 +58,13 @@ NEOGRAPH_API void run_tool_server(
 /// definition (name / description / parameter schema the LLM sees) is
 /// supplied at construction. A non-empty ToolCallResponse.error from
 /// the server is rethrown as std::runtime_error (a tool error, not a
-/// transport error — same contract as run_tool_server's ToolFn).
+/// transport error — same contract as run_tool_server's ToolFn); its
+/// error_code is not mapped back to a local control signal.
 ///
 /// pimpl so this public header stays grpc++/protobuf-free for
 /// consumers (same posture as GrpcCheckpointStore).
-class NEOGRAPH_API GrpcRemoteTool : public neograph::Tool {
+class NEOGRAPH_API GrpcRemoteTool : public neograph::Tool,
+                                     public neograph::ContextualAsyncTool {
 public:
     /// target e.g. "tool-host:50091". Insecure channel.
     GrpcRemoteTool(const std::string& target,
@@ -61,6 +75,11 @@ public:
 
     ChatTool get_definition() const override;
     std::string execute(const neograph::json& arguments) override;
+    /// What every dispatcher calls: the run's cancel token cancels the RPC in
+    /// flight (graph::CancelledException) and its deadline becomes the RPC
+    /// deadline (asio::system_error(asio::error::timed_out)), as for MCPTool.
+    asio::awaitable<std::string> execute_async(
+        const neograph::json& arguments, neograph::ToolExecutionContext context) override;
     std::string get_name() const override;
 
 private:

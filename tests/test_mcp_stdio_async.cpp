@@ -8,6 +8,8 @@
 #include <neograph/mcp/client.h>
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/cancel.h>
+#include <neograph/tool_dispatch.h>
+#include <neograph/tool_execution.h>
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -638,4 +640,77 @@ TEST(MCPStdioAsync, HardenedCancellationDrainsDescendantsAndClosesAdmission) {
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1100));
     EXPECT_FALSE(std::filesystem::exists(marker));
+}
+
+// A run's cancel token and deadline bound an in-flight MCP tool call made
+// through any dispatcher (reference, "Tool failure contract"). Cancellation
+// is classified as cancellation, not a tool error; the deadline as a
+// timed-out call; the late response is dropped and never answers a later
+// call.
+TEST(MCPStdioAsync, DispatchBoundsAnInFlightToolCall) {
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    auto fixture = fixture_path().parent_path() / "mcp_stdio_slow.py";
+    ASSERT_TRUE(std::filesystem::exists(fixture));
+    mcp::MCPClient client({python_cmd(), fixture.string()});
+    auto tools = client.get_tools();
+    ASSERT_EQ(tools.size(), 1u);
+    Tool& echo = *tools[0];
+    const json slow{{"marker", "late"}, {"delay_ms", 3000}};
+    auto controller = std::make_shared<ToolExecutionController>();
+
+    // The controller's typed result: cancellation after the call started.
+    {
+        auto cancel = std::make_shared<graph::CancelToken>();
+        ToolExecutionContext context;
+        context.cancel_token = cancel;
+        context.controller = controller;
+        std::jthread stop([cancel] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            cancel->cancel();
+        });
+        const auto started = std::chrono::steady_clock::now();
+        const auto result = async::run_sync(controller->execute_result_async(echo, slow, context));
+        EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(2))
+            << "the call waited for the server instead of its cancel token";
+        EXPECT_EQ(result.status, ToolTerminalStatus::CancellationRequested) << result.error;
+    }
+
+    // dispatch_tool_calls: the run stops as cancelled, one call or a batch.
+    for (const bool batch : {false, true}) {
+        auto cancel = std::make_shared<graph::CancelToken>();
+        ToolExecutionContext context;
+        context.cancel_token = cancel;
+        context.controller = controller;
+        std::vector<ToolCall> calls{{"c1", "echo", slow.dump()}};
+        if (batch) calls.push_back({"c2", "echo", slow.dump()});
+        std::jthread stop([cancel] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            cancel->cancel();
+        });
+        const auto started = std::chrono::steady_clock::now();
+        EXPECT_THROW(async::run_sync(dispatch_tool_calls(calls, {&echo}, {}, {}, context)),
+                     graph::CancelledException) << (batch ? "batch" : "single");
+        EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(2));
+    }
+
+    // The run's deadline: a timed-out call, not an ordinary failure.
+    {
+        ToolExecutionContext context;
+        context.controller = controller;
+        context.deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+        const auto started = std::chrono::steady_clock::now();
+        const auto messages = async::run_sync(dispatch_tool_calls(
+            {{"c3", "echo", slow.dump()}}, {&echo}, {}, {}, context));
+        EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(2));
+        ASSERT_EQ(messages.size(), 1u);
+        EXPECT_EQ(messages[0].tool_status, "timed_out") << messages[0].content;
+    }
+
+    // The late responses are discarded: a later call gets its own.
+    const auto later = async::run_sync(dispatch_tool_calls(
+        {{"c4", "echo", R"({"marker":"next"})"}}, {&echo}, {}, {},
+        ToolExecutionContext{nullptr, controller}));
+    ASSERT_EQ(later.size(), 1u);
+    ASSERT_EQ(later[0].tool_status, "succeeded") << later[0].content;
+    EXPECT_EQ(json::parse(later[0].content).at("args").at("marker"), "next");
 }
