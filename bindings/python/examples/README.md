@@ -2,7 +2,7 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-These 28 scripts show graph state, routing, tools, provider requests and protocol hosting. Each one shows one thing. Most run offline: a scripted model stands in for the provider, so they need no API key and no network. Examples that can also call a real model take `--live`.
+These 47 scripts show graph state, routing, tools, provider requests, the Program API and protocol hosting. Each one shows one thing. Most run offline: a scripted model stands in for the provider, so they need no API key and no network. Examples that can also call a real model take `--live`.
 
 The **Offline** column says what a row needs. `yes`: runs with no key and no network, and is tested automatically by `bindings/python/tests/test_examples_offline.py`. `key`: needs a provider API key. `service`: needs another process, server or extra package. `paired`: runs offline together with the example named in its row.
 
@@ -17,20 +17,23 @@ Run commands from this directory. The offline examples need nothing else. To run
 
 ## Start here
 
-Read these in order; each one adds a single idea.
+Read these in order; each one adds a single idea. All of them run offline.
 
 | Step | Example | Offline | You learn |
 |---|---|---|---|
-| 1 | [`01_minimal.py`](01_minimal.py) | yes | A custom node reads a channel, doubles it and writes it back: 21 becomes 42. |
+| 1 | [`01_minimal.py`](01_minimal.py) | yes | Your first graph: a function registered with `@ng.node` reads one channel and writes another, and 21 becomes 42. |
 | 2 | [`02_tool_dispatch.py`](02_tool_dispatch.py) | yes | A Python `Tool` and the built-in `tool_dispatch` node: a scripted tool call comes back as `42`. |
-| 3 | [`05_openai_provider.py`](05_openai_provider.py) | yes | One model call through the built-in `llm_call` node. A scripted model answers `hello world`. |
-| 4 | [`06_react_agent.py`](06_react_agent.py) | yes | A ReAct loop: `llm_call`, `tool_dispatch` and a `has_tool_calls` conditional edge. `calc` returns `4053`, then the model answers. |
-| 5 | [`07_checkpoint_hitl.py`](07_checkpoint_hitl.py) | yes | A checkpoint pauses before payment dispatch; approval resumes exactly one simulated payment. No money moves. |
-| 6 | [`14_graph_to_json.py`](14_graph_to_json.py) | yes | A graph definition is plain JSON: it runs from a dict and is saved as `my_graph.json`. Example 15 loads it. |
+| 3 | [`03_send_fanout.py`](03_send_fanout.py) | yes | `Send` creates one branch per item at run time and the branches merge: eight squares, in any order. |
+| 4 | [`05_openai_provider.py`](05_openai_provider.py) | yes | One model call through the built-in `llm_call` node. A scripted model answers `hello world`; `--live` calls a hosted one. |
+| 5 | [`06_react_agent.py`](06_react_agent.py) | yes | A ReAct loop: `llm_call`, `tool_dispatch` and a `has_tool_calls` conditional edge. `calc` returns `4053`, then the model answers. |
+| 6 | [`77_dynamic_interrupt.py`](77_dynamic_interrupt.py) | yes | Human in the loop: a node raises `NodeInterrupt`, a checkpoint keeps the run, and `resume` hands the person's answer back to the node. |
+| 7 | [`29_program_hello.py`](29_program_hello.py) | yes | A Program: a short JavaScript Program defines one graph with a Python node and runs it on `LocalProgramHost`. |
+
+After step 7, pick by goal in the next table, or browse the index by tier.
 
 ## I want to ...
 
-Pick the goal, read the example.
+Pick the goal, read the example. The rows run from the basics to the protocols.
 
 | I want to ... | Read | Offline |
 |---|---|---|
@@ -42,6 +45,12 @@ Pick the goal, read the example.
 | build a tool-using agent loop | [`06_react_agent.py`](06_react_agent.py) | yes |
 | route by intent | [`08_intent_routing.py`](08_intent_routing.py) | yes |
 | choose the next node and write state in one step | [`10_command_routing.py`](10_command_routing.py) | yes |
+| choose how a channel combines writes (overwrite or append) | [`79_channels.py`](79_channels.py) | yes |
+| register my own reducer or edge condition | [`80_custom_registries.py`](80_custom_registries.py) | yes |
+| watch a run as it happens | [`75_stream_modes.py`](75_stream_modes.py) | yes |
+| retry a failing node with backoff | [`76_retry_policy.py`](76_retry_policy.py) | yes |
+| let a node ask a person before it goes on | [`77_dynamic_interrupt.py`](77_dynamic_interrupt.py) | yes |
+| stop a loop at a step limit | [`78_max_steps.py`](78_max_steps.py) | yes |
 | pause for approval and resume | [`07_checkpoint_hitl.py`](07_checkpoint_hitl.py) | yes |
 | allow, deny or interrupt tool calls | [`24_tool_approval_gate.py`](24_tool_approval_gate.py) | yes |
 | read and fork saved state | [`09_state_management.py`](09_state_management.py) | yes |
@@ -49,20 +58,35 @@ Pick the goal, read the example.
 | stream tokens as LangChain-style chunks | [`19_streaming_messages.py`](19_streaming_messages.py) | yes |
 | trace a run with OpenTelemetry | [`20_otel_tracing.py`](20_otel_tracing.py) | yes |
 | run I/O-bound tools concurrently | [`25_async_tools.py`](25_async_tools.py) | yes |
+| run a JavaScript Program | [`29_program_hello.py`](29_program_hello.py) | yes |
+| join parallel branches, and see why a join stalls | [`30_program_barrier_join.py`](30_program_barrier_join.py) | yes |
+| wait for the first of two redundant sources | [`31_program_any_of_join.py`](31_program_any_of_join.py) | yes |
+| send a failing Program node to an operator | [`32_program_failure_routing.py`](32_program_failure_routing.py) | yes |
+| bound what a Program may spend | [`33_program_budgets.py`](33_program_budgets.py) | yes |
+| pause and resume a Program run | [`34_program_pause_resume.py`](34_program_pause_resume.py) | yes |
+| fork a Program run without repeating a model call | [`35_program_fork.py`](35_program_fork.py) | yes |
+| recover a Program run after a crash | [`36_program_crash_recovery.py`](36_program_crash_recovery.py) | yes |
+| bind a model to a Program node and read its usage | [`37_program_model_node.py`](37_program_model_node.py) | yes |
+| repair a Program from the compiler's diagnostics | [`38_program_diagnostics.py`](38_program_diagnostics.py) | yes |
+| race two runs and cancel the slower one | [`39_program_main_race.py`](39_program_main_race.py) | yes |
+| time out a slow node attempt and retry it | [`40_program_attempt_timeout.py`](40_program_attempt_timeout.py) | yes |
 | use tools from an MCP server | [`26_mcp_tools.py`](26_mcp_tools.py) | yes |
 | host my agent over A2A | [`27_a2a_server.py`](27_a2a_server.py) | yes |
+| call an A2A agent from Python | [`45_a2a_client.py`](45_a2a_client.py) | yes |
 | host my agent over ACP | [`28_acp_agent.py`](28_acp_agent.py) | yes |
-| try Reflexion, Self-Ask or a debate | [`11_reflexion.py`](11_reflexion.py) | key |
 | let an agent rewrite its own graph | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | yes |
+| try Reflexion, Self-Ask or a debate | [`11_reflexion.py`](11_reflexion.py) | key |
 
 ## Index by tier
 
-### Start here and the Core engine
+### Core engine
 
-The remaining Core features, with no model involved. Example 14 writes `my_graph.json` beside the script and 15 reads it, so run them in that order.
+Nodes, channels, routing, streaming, retries and interrupts, with no model involved. Example 14 writes `my_graph.json` beside the script and 15 reads it, so run them in that order.
 
 | # | Example | Offline | Shows |
 |---|---|---|---|
+| 01 | [`01_minimal.py`](01_minimal.py) | yes | A function registered with `@ng.node` reads a channel, doubles it and writes it back: 21 becomes 42. |
+| 02 | [`02_tool_dispatch.py`](02_tool_dispatch.py) | yes | A Python `Tool` and the built-in `tool_dispatch` node: a scripted tool call comes back as `42`. |
 | 03 | [`03_send_fanout.py`](03_send_fanout.py) | yes | Eight `Send` branches merge squares `[0, 1, 4, 9, 16, 25, 36, 49]`; append order is not assumed. |
 | 04 | [`04_async_concurrent.py`](04_async_concurrent.py) | yes | Eight async runs with `asyncio.gather` give `[0, 2, 4, 6, 8, 10, 12, 14]`; a streamed run emits node events. |
 | 10 | [`10_command_routing.py`](10_command_routing.py) | yes | `Command` picks the next node and writes state: inputs 200, 50 and -10 go to accept, manual and reject. |
@@ -179,7 +203,7 @@ The distribution is `neograph-engine`; `neograph` on PyPI is an unrelated projec
 
 ## Add an example
 
-Numbers are never reused; the next free one is 29. A new example is one file and one table row.
+Numbers are never reused, so take one higher than every existing number. A new example is one file and one table row.
 
 1. Name the file `NN_short_name.py` and start it with a module docstring: what it shows in a few lines, the `Run:` commands, then the test annotations.
 2. Say how it is tested, in that docstring. An offline example names a line it must print; one that needs a key or a service says why it cannot run offline (the annotation grammar is at the top of `examples/run_example_smoke.py`).

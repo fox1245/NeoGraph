@@ -16,34 +16,47 @@ cmake --build build -j$(nproc)
 ctest --test-dir build -L examples-offline --output-on-failure   # run every offline example and check its output
 ```
 
-Binaries land in the build directory as `example_<name>`; most source files give the exact command in a `Usage:` line at the top. Program-backed examples (63, 64) need `-DNEOGRAPH_BUILD_PROGRAM=ON`. The gRPC examples (45, 53, 54, 55, 57) need `-DNEOGRAPH_BUILD_GRPC=ON` and `grpc++`/`protoc`. Example 11 needs `-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`. An example whose component is switched off is left out of the build; it does not fail it.
+Binaries land in the build directory as `example_<name>`; most source files give the exact command in a `Usage:` line at the top. Program-backed examples (63 to 69) need `-DNEOGRAPH_BUILD_PROGRAM=ON`; the JavaScript ones (65 to 69) also need `-DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON`, and 69 needs SQLite. Example 76 needs `-DNEOGRAPH_BUILD_MCP_HTTP_SERVER=ON`. The gRPC examples (45, 53, 54, 55, 57) need `-DNEOGRAPH_BUILD_GRPC=ON` and `grpc++`/`protoc`. Example 11 needs `-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`. An example whose component is switched off is left out of the build; it does not fail it.
 
 ## Start here
 
-Read these in order; each one adds a single idea.
+Read these in order; each one adds a single idea. All of them run offline.
 
 | Step | Example | Offline | You learn |
 |---|---|---|---|
-| 1 | [`62_core_quickstart.cpp`](62_core_quickstart.cpp) | yes | The installed `neograph::core` target: one node, one strict graph, one typed channel. |
-| 2 | [`01_react_agent.cpp`](01_react_agent.cpp) | yes | A model, a tool and a loop: `llm::Agent` runs a ReAct agent with a calculator tool and streams its text. |
-| 3 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | Parallel fan-out and fan-in on one `io_context` with `make_parallel_group`. |
-| 4 | [`10_send_command.cpp`](10_send_command.cpp) | yes | `Send` creates work at run time and `Command` overrides the route: planner, researchers, evaluator, loop. |
-| 5 | [`04_checkpoint_hitl.cpp`](04_checkpoint_hitl.cpp) | yes | Stop before a payment node with `interrupt_before`, save a checkpoint, resume after approval. |
-| 6 | [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | yes | Compile, admit and run one `call_core` Program through `neograph::program` (needs `-DNEOGRAPH_BUILD_PROGRAM=ON`). |
+| 1 | [`62_core_quickstart.cpp`](62_core_quickstart.cpp) | yes | The installed `neograph::core` target: one node, one strict graph, one typed channel. It prints `HELLO`. |
+| 2 | [`51_minimal.cpp`](51_minimal.cpp) | yes | Channels, the state a graph runs on: one node reads a channel and writes two, and the caller reads both back with typed `ChannelKey`s. |
+| 3 | [`105_conditional_edges.cpp`](105_conditional_edges.cpp) | yes | Conditional edges: `route_channel` picks the next node from a label, and a `default` route catches every label the map does not list. |
+| 4 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | Fan-out and fan-in: three nodes run in the same super-step and a `barrier` joins them for the node that follows. |
+| 5 | [`01_react_agent.cpp`](01_react_agent.cpp) | yes | A model, a tool and a loop: `llm::Agent` runs a ReAct agent on a scripted model with a real calculator tool. `--live` calls a real model. |
+| 6 | [`102_node_interrupt.cpp`](102_node_interrupt.cpp) | yes | Human in the loop: a node pauses the run, a checkpoint keeps it, and `resume` hands the person's answer back to the node. |
+| 7 | [`65_program_javascript.cpp`](65_program_javascript.cpp) | yes | A Program: JavaScript `define()` and `main()` drive a Core graph from a C++ host (needs `-DNEOGRAPH_BUILD_PROGRAM=ON` and `-DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON`). |
+
+After step 7, pick by goal in the next table, or browse the index by tier.
 
 ## I want to ...
 
-Pick the goal, read the example.
+Pick the goal, read the example. The rows run from the basics to the protocols.
 
 | I want to ... | Read | Offline |
 |---|---|---|
 | run my first graph | [`62_core_quickstart.cpp`](62_core_quickstart.cpp) | yes |
-| give a model a tool and loop until it answers | [`01_react_agent.cpp`](01_react_agent.cpp) | yes |
+| keep state in named channels and read it back with types | [`51_minimal.cpp`](51_minimal.cpp) | yes |
+| write a short node without coroutines | [`61_sync_node.cpp`](61_sync_node.cpp) | yes |
+| route a request by a label, with a fallback | [`105_conditional_edges.cpp`](105_conditional_edges.cpp) | yes |
+| route a request to the right expert | [`07_intent_routing.cpp`](07_intent_routing.cpp) | yes |
 | run steps in parallel and join the results | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes |
 | create work at run time and loop back | [`10_send_command.cpp`](10_send_command.cpp) | yes |
-| route a request to the right expert | [`07_intent_routing.cpp`](07_intent_routing.cpp) | yes |
+| register my own reducer or edge condition | [`42_custom_reducer_condition.cpp`](42_custom_reducer_condition.cpp) | yes |
+| choose how a channel combines writes (overwrite or append) | [`104_channels_reducers.cpp`](104_channels_reducers.cpp) | yes |
 | put one graph inside another | [`06_subgraph.cpp`](06_subgraph.cpp) | yes |
-| pause for a human and resume | [`04_checkpoint_hitl.cpp`](04_checkpoint_hitl.cpp) | yes |
+| give a model a tool and loop until it answers | [`01_react_agent.cpp`](01_react_agent.cpp) | yes |
+| build a ReAct graph in one call | [`02_custom_graph.cpp`](02_custom_graph.cpp) | yes |
+| watch a run as it happens | [`100_stream_modes.cpp`](100_stream_modes.cpp) | yes |
+| retry a failing node with backoff | [`101_retry_policy.cpp`](101_retry_policy.cpp) | yes |
+| let a node ask a person before it goes on | [`102_node_interrupt.cpp`](102_node_interrupt.cpp) | yes |
+| stop a graph in front of a node and resume it | [`04_checkpoint_hitl.cpp`](04_checkpoint_hitl.cpp) | yes |
+| stop a runaway loop | [`103_max_steps.cpp`](103_max_steps.cpp) | yes |
 | read, edit and fork saved state | [`08_state_management.cpp`](08_state_management.cpp) | yes |
 | recover from a crash without redoing finished work | [`14_plan_executor.cpp`](14_plan_executor.cpp) | yes |
 | continue a chat across calls | [`41_resume_if_exists_chat.cpp`](41_resume_if_exists_chat.cpp) | yes |
@@ -53,25 +66,37 @@ Pick the goal, read the example.
 | skip recomputing a node | [`47_node_cache.cpp`](47_node_cache.cpp) | yes |
 | send traces to an OpenInference backend | [`49_openinference.cpp`](49_openinference.cpp) | yes |
 | compile and run a Program | [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | yes |
+| write a Program in JavaScript | [`65_program_javascript.cpp`](65_program_javascript.cpp) | yes |
+| send a failing Program node to an operator | [`66_program_failure_routing.cpp`](66_program_failure_routing.cpp) | yes |
+| bound what a Program may spend | [`67_program_budgets.cpp`](67_program_budgets.cpp) | yes |
+| pause, resume or fork a Program run | [`68_program_pause_resume_fork.cpp`](68_program_pause_resume_fork.cpp) | yes |
+| recover a Program run after a crash | [`69_program_crash_recovery.cpp`](69_program_crash_recovery.cpp) | yes |
 | move a running Program to a better topology | [`64_topology_retrieval.cpp`](64_topology_retrieval.cpp) | yes |
 | evolve a harness from a seed | [`32_evolution.cpp`](32_evolution.cpp) | yes |
+| offer tools as an MCP server | [`59_mcp_server.cpp`](59_mcp_server.cpp) | yes |
+| serve MCP over HTTP with a bearer token | [`76_mcp_http_server.cpp`](76_mcp_http_server.cpp) | yes |
+| use MCP tools inside a ReAct loop | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | yes |
+| handle an MCP tool that fails | [`75_mcp_tool_errors.cpp`](75_mcp_tool_errors.cpp) | yes |
+| approve an MCP tool call before it runs | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | yes |
 | serve my graph to other agents over A2A | [`38_a2a_server.cpp`](38_a2a_server.cpp) | yes |
 | call a remote A2A agent | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes |
+| turn a paused graph into an A2A task that waits for input | [`78_a2a_input_required.cpp`](78_a2a_input_required.cpp) | yes |
 | serve my graph to an editor over ACP | [`39_acp_server.cpp`](39_acp_server.cpp) | yes |
-| offer tools as an MCP server | [`59_mcp_server.cpp`](59_mcp_server.cpp) | yes |
-| use MCP tools inside a ReAct loop | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | yes |
+| ask the editor for permission before a risky step | [`80_acp_permission.cpp`](80_acp_permission.cpp) | yes |
+| serve a graph over gRPC | [`45_grpc_server.cpp`](45_grpc_server.cpp) | yes |
 | call a tool in another process over gRPC | [`57_grpc_remote_tool.cpp`](57_grpc_remote_tool.cpp) | yes |
 | try a reasoning pattern such as Reflexion | [`15_reflexion.cpp`](15_reflexion.cpp) | key |
 | run against a local model server | [`31_local_transformer.cpp`](31_local_transformer.cpp) | service |
 
 ## Index by tier
 
-### Start here and the Core engine
+### Core engine
 
-The remaining Core features. They link only `neograph::core`, except 02, 06 and 07, which also link `neograph::llm` for their scripted provider.
+Nodes, channels, routing, fan-out, streaming, retries and interrupts. They link only `neograph::core`, except 02, 06 and 07, which also link `neograph::llm` for their scripted provider.
 
 | # | Example | Offline | Shows |
 |---|---|---|---|
+| 62 | [`62_core_quickstart.cpp`](62_core_quickstart.cpp) | yes | The installed `neograph::core` target: one node, one strict graph, one typed channel. |
 | 02 | [`02_custom_graph.cpp`](02_custom_graph.cpp) | yes | `create_react_graph()` builds the llm, tools, llm ReAct graph in one call; `run_stream` prints node events. |
 | 05 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | Fan-out and fan-in: three researcher nodes wait on timers at the same time (a counter proves it) and a barrier joins them for the summarizer. |
 | 06 | [`06_subgraph.cpp`](06_subgraph.cpp) | yes | A subgraph: an outer supervisor graph delegates to an inner ReAct graph. |
@@ -227,7 +252,7 @@ A script can also be a function of the request: `ScriptedProvider([](const examp
 
 ## Add an example
 
-Numbers are never reused; the next free ones are 33 and 65 onward. A new example is one source file, one line of CMake and one table row.
+Numbers are never reused, so take one higher than every existing number. A new example is one source file, one line of CMake and one table row.
 
 1. Name the file `NN_short_name.cpp` and start it with a header comment: what it shows in a few lines, a `Usage:` line, then the test annotations.
 2. Say how it is tested, in that comment block. An offline example names a line it must print; one that needs a key or a service says why it cannot run offline (the annotation grammar is at the top of `examples/run_example_smoke.py`).
@@ -266,7 +291,7 @@ then an installed runtime package, then the pinned public GitHub source archive.
 The download fallback is enabled by default; set `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`
 for offline builds with an installed package or explicit source checkout.
 Installed SDK include root is `include/SchemaProvider`. Interface/capability
-checks are enforced; the SDK package is alpha `0.1.1` (interface/shared ABI 4).
+checks are enforced; the SDK package is alpha `0.3.0` (interface revision/shared ABI 6).
 
 The preserved interface-3 model-free C++ E2E run verified 39 numbered targets: 29 finite offline
 targets plus actual MCP/ACP/A2A/Harness and gRPC graph/checkpoint/tool paths.
@@ -279,7 +304,7 @@ prompts and artifacts private; envelope/native inspection demos print sensitive
 payloads and must not feed public logs. A native archive provides authenticated,
 owner-private custody, not encryption or vendor-issuer authentication.
 
-Current interface-4 evidence is separate: Linux x86_64 runs exercised native
+Earlier interface-4 evidence is separate: Linux x86_64 runs exercised native
 research recovery, ToT/Forge/rewrite helpers and A2A 0.3/1.0 peers, plus 11 installed
 Python applications across 48 credential-free localhost requests in split cohorts.
 The tracked evolution file mode and Plan resume were also executed as described
@@ -290,8 +315,9 @@ claimed; remote CI and publication remain pending.
 
 ## Retained example contracts
 
-These source contracts use SDK interface 4. The recorded C++ runs above remain
-historical evidence; they are not interface-4 qualification or new live calls.
+These source contracts build against SDK `0.3.0` (interface 6). The recorded C++ runs above were
+made with older SDK interfaces and remain historical evidence; they are not a qualification of
+the current SDK or new live calls.
 Family-specific controls are closed typed fields on `ProviderControls`; unsupported
 family/origin/model combinations reject before I/O. See the
 [provider reference](../docs/reference-en.md) for reasoning/sampling/tool controls,
@@ -372,8 +398,8 @@ NG_EXAMPLE_MAX_TOKENS=8192 ./build/example_reasoning_effort
 
 These five commands bound 3 + 4 + 14 + 1 + 4 = 26 model calls and 212,992
 configured output tokens, with input tokens separate. They neither prove a dollar
-price nor authorize spending. Use the owner-approved model/route and keep logs
-private. Original-workload qualification omits only the shape overrides, leaving
+price nor authorize spending. Use a model and route you are allowed to spend on, and keep
+logs private. Original-workload qualification omits only the shape overrides, leaving
 explicit cap/re-ask choices recorded; full ToT + Baldwin + server is at most
 175 calls / 1,433,600 configured output tokens at these explicit settings.
 
