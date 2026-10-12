@@ -8,11 +8,13 @@ run Failed with the declared code, never Completed.
 
 import json
 
+import pytest
+
 import neograph_engine as ng
 
 from .support import (FAILURE_CONDITIONS, FAILURE_NODE_TYPES, JOURNAL, budget, build_registry,
                       channel, define_graph, describe, last_json_line, make_host, run_python,
-                      slow, source)
+                      slow, source, with_main)
 
 _FAILURE_CHANNELS = """
     g.channel("failures", {reducer: "append", initial: []});
@@ -227,6 +229,66 @@ def test_max_node_retries_is_a_run_level_ceiling():
     assert unbounded.usage.node_retries == 0
     assert unbounded.remaining_budget.max_node_retries is None
     assert "node_retries" not in unbounded.serialize_canonical()
+
+
+# ---------------------------------------------------------------------------
+# The ceiling's remainder is the ceiling less the retries taken, with or
+# without main() (#419)
+# ---------------------------------------------------------------------------
+
+FLAKY_ONCE = define_graph(f"""
+    g.node("work", {{type: "e2e.step", boom_first: true}});
+    g.entry("work");
+    g.exit("work");
+    g.retryPolicy("work", {{max_retries: 2, {_FAST}}});
+""")
+CALL_WORK = 'return yield ng.callCore("work", input, "run");'
+
+# A gate asks first; after the answer, one node fails once and succeeds on its retry.
+GATE_THEN_FLAKY = define_graph(f"""
+    g.node("gate", {{type: "e2e.step", record_resume: true}});
+    g.node("work", {{type: "e2e.step", boom_first: true}});
+    g.entry("gate");
+    g.edge("gate", "work");
+    g.exit("work");
+    g.retryPolicy("work", {{max_retries: 2, {_FAST}}});
+    g.interruptBefore("gate");
+""")
+
+SHAPES = {"define": lambda text: text,
+          "main": lambda text: with_main(text, CALL_WORK)}
+
+
+def ceiling_of(retries):
+    run_budget = budget()
+    run_budget.max_node_retries = retries
+    return run_budget
+
+
+@pytest.mark.parametrize("shape", sorted(SHAPES))
+def test_remaining_node_retries_is_the_ceiling_less_the_retries_taken(shape):
+    _host, result = start(SHAPES[shape](FLAKY_ONCE), ceiling_of(5))
+
+    assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
+    assert started("work") == 2
+    assert result.usage.node_retries == 1
+    assert result.remaining_budget.max_node_retries == 4
+
+
+@pytest.mark.parametrize("shape", sorted(SHAPES))
+def test_retries_after_a_resume_come_off_the_ceiling_the_pause_left(shape):
+    host, paused = start(SHAPES[shape](GATE_THEN_FLAKY), ceiling_of(5))
+
+    assert paused.status == ng.ProgramTerminalStatus.Interrupted, describe(paused)
+    assert paused.usage.node_retries == 0
+    assert paused.remaining_budget.max_node_retries == 5
+
+    done = host.resume(paused.run_id, {"approved": True}).wait()
+
+    assert done.status == ng.ProgramTerminalStatus.Completed, describe(done)
+    assert started("work") == 2
+    assert done.usage.node_retries == 1
+    assert done.remaining_budget.max_node_retries == 4
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=020d720d3a66c9a944cc3bd9546471325ac307c82f552d849a7f4e4ea78c6154 -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=82429959c9fe92f2469cb9bf853b8ee599faf5f51399e1ab608714e41751ab76 -->
 # Program APIのエンドツーエンドのシナリオ
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -18,7 +18,7 @@
 | `test_07_main_programs.py` | `callCore`、`all`、`race`、`quorum`、`await` のタイムアウト、`cancelScope`、外部からのキャンセル、`spawn` |
 | `test_08_live_llm.py` | ノードがモデルを呼び出すProgram。デフォルトではローカルのpeerを使い、有効にするとOpenRouterを使う。Pythonのノードと、バインド済みの `llm_call` |
 | `test_09_bound_llm.py` | `node_context` を通してバインドした `llm_call`（#372）：報告されたコストと推定のコスト、`provider.max_price` として固定したルートの上限、送信前の拒否（予算、未知のモデル、ルーターのエイリアス）、予算0、プロバイダーのないID、1つの予算に対する `all` と `quorum`、呼び出しがジャーナルに記録された後のクラッシュと、それを1回だけ課金する復旧 |
-| `test_10_failure_routing.py` | 失敗時のルーティング（#364）：失敗したTESTを、そのレコードとともに `interruptBefore` のハンドラーへルーティングする、リトライと中止のルートに沿った再開、作成者のコード、秘匿したエラーテキスト、`max_visits`、`max_node_retries` の上限、ノード内のProgramの診断、SQLiteを使った新しいプロセスでの再開 |
+| `test_10_failure_routing.py` | 失敗時のルーティング（#364）：失敗したTESTを、そのレコードとともに `interruptBefore` のハンドラーへルーティングする、リトライと中止のルートに沿った再開、作成者のコード、秘匿したエラーテキスト、`max_visits`、`max_node_retries` の上限と、`main()` がある場合とない場合の残り（#419）、ノード内のProgramの診断、SQLiteを使った新しいプロセスでの再開 |
 | `test_11_attempt_timeout.py` | 試行のタイムアウト（#364）：タイムアウトしてリトライで回復する遅いPythonのノード、常にタイムアウトして `NG.Timeout` としてハンドラーにルーティングされるノード（ハンドラーがなければ実行が失敗する）、結果にもトレースにも届かない遅れた完了、停止のデッドラインを過ぎてもキャンセルを無視するノード（`NG.EffectUncertain`）、`wall_time_ms` を超えることになるバックオフが、kind `deadline` で止まること |
 | `test_12_send_interrupts.py` | `NodeInterrupt` を投げる `Send` のターゲット（#385）：Programがそこで一時停止し、再開するとmapノードと完了済みのSendがリプレイされる。SQLiteでの再起動後の再開。バインド済みの `llm_call` を呼んだ完了済みのSendは、再送信も再課金もされない |
 | `test_13_fork_replays_the_paused_step.py` | 完了したバインド済みの `llm_call` の隣で一時停止した実行の `host.fork()`（#390）：フォークは質問に答え、完了した呼び出しを、そのステップの保留中の書き込みからリプレイする。そのため、リクエストは送信されず、トークンもお金も再課金されない。fan-outのステップとSendの両方で、インメモリとSQLiteのジャーナルの両方を確認する |

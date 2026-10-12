@@ -335,11 +335,17 @@ private:
 std::atomic<unsigned> classified_failure_calls{0};
 class ClassifiedFailureNode final : public GraphNode {
 public:
-    enum class Kind { Ordinary, Logic, Diagnostic };
+    // FirstCallOrdinary fails on the first call of the process-wide counter and
+    // succeeds on every later one.
+    enum class Kind { Ordinary, Logic, Diagnostic, FirstCallOrdinary };
     ClassifiedFailureNode(std::string name, Kind kind) : name_(std::move(name)), kind_(kind) {}
 
     asio::awaitable<NodeOutput> run(NodeInput) override {
-        ++classified_failure_calls;
+        const auto call = ++classified_failure_calls;
+        if (kind_ == Kind::FirstCallOrdinary) {
+            if (call == 1) throw std::runtime_error("ordinary failure");
+            co_return NodeOutput{};
+        }
         if (kind_ == Kind::Logic) throw std::logic_error("integrity check failed");
         if (kind_ == Kind::Diagnostic) {
             neograph::program::Diagnostic diagnostic;
@@ -1109,7 +1115,8 @@ RegistrySnapshot runtime_registry(
     for (const auto& [type, kind] :
          {std::pair{"runtime-classified-ordinary", ClassifiedFailureNode::Kind::Ordinary},
           std::pair{"runtime-classified-logic", ClassifiedFailureNode::Kind::Logic},
-          std::pair{"runtime-classified-diagnostic", ClassifiedFailureNode::Kind::Diagnostic}}) {
+          std::pair{"runtime-classified-diagnostic", ClassifiedFailureNode::Kind::Diagnostic},
+          std::pair{"runtime-classified-once", ClassifiedFailureNode::Kind::FirstCallOrdinary}}) {
         builder.add_node(
             manifest(ExecutableKind::Node, type, '9'),
             [kind = kind](const std::string& name, const json&, const NodeContext&) {
@@ -9409,6 +9416,54 @@ TEST(ProgramRuntimeTest, NodeRetryCeilingIsARunBudgetField) {
     const auto plain = unbounded.serialize_canonical();
     EXPECT_EQ(plain.find("node_retries"), std::string::npos);
 }
+
+// #419: the retry ceiling's remainder is the ceiling less the retries taken,
+// whether the Program is a typed plan or has a JavaScript main().
+TEST(ProgramRuntimeTest, RemainingNodeRetriesCountTheRetriesTakenOfATypedPlan) {
+    classified_failure_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto version = fixture.admit_document(retrying_program_document("runtime-classified-once", 2));
+    auto       budget  = grant();
+    budget.max_node_retries = 5;
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version, ProgramInvocation{json::object(), budget, "trace-retries-plan", {}});
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_detail(result);
+    EXPECT_EQ(classified_failure_calls.load(), 2U);
+    EXPECT_EQ(result.usage().node_retries, 1U);
+    EXPECT_EQ(result.remaining_budget().max_node_retries, std::optional<std::uint64_t>(4));
+}
+
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST(ProgramRuntimeTest, RemainingNodeRetriesCountTheRetriesTakenWithAJavaScriptMain) {
+    classified_failure_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+                graph.node("work", {type: "runtime-classified-once"});
+                graph.entry("work");
+                graph.exit("work");
+                graph.retryPolicy("work", {max_retries: 2, initial_delay_ms: 10,
+                                           backoff_multiplier: 1, max_delay_ms: 10});
+                return graph;
+            }
+
+            export function* main(input) {
+                return yield ng.callCore("main", input, "run");
+            }
+        )JS");
+    auto budget = grant();
+    budget.max_node_retries = 5;
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version, ProgramInvocation{json::object(), budget, "trace-retries-main", {}});
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_detail(result);
+    EXPECT_EQ(classified_failure_calls.load(), 2U);
+    EXPECT_EQ(result.usage().node_retries, 1U);
+    EXPECT_EQ(result.remaining_budget().max_node_retries, std::optional<std::uint64_t>(4));
+}
+#endif
 
 // #364 (WP12): a Core backoff that would cross the run's wall-time deadline
 // stops retrying with kind "deadline" instead of sleeping until the budget

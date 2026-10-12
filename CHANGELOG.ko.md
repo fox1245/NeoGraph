@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=659b55c00890129f841c62b31ddaba7012b0a1d9f3108f2306dccd0756a6173a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=8a1079e5cbb3655d72025f478cb861128df4f72f10aaea21cff99c4242d41ba5 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -112,6 +112,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 수정됨
 
+- **Program: `main()`이 있어도 `remaining_budget.max_node_retries`는 상한에서 이미 쓴 재시도를 뺀 값입니다 (#419).** JavaScript `main()`이 있는 Program은 재시도를 하나도 하지 않은 것처럼 시작할 때의 상한을 그대로 보고했습니다(`usage.node_retries`가 1인데 5). 명령의 남은 예산을 정산할 때 그 시도의 재시도를 빼지 않았기 때문입니다. `define()`만 있는 Program은 이미 4를 보고했습니다. 이제 둘 다 상한에서 그 시도의 재시도를 뺀 값을 보고하고, 재개한 시도는 그 남은 값에서 시작합니다.
 - **ACP가 Windows 작업 경로를 받아들입니다.** `session/new`와 `session/resume`은 `/`로 시작하지 않는 `cwd`와 `additionalDirectories` 항목을 모두 거부했기 때문에 Windows의 ACP 클라이언트는 세션을 열 수 없었습니다. 이제 POSIX 경로와 마찬가지로 드라이브 경로(`C:\work`, `C:/work`)와 UNC 공유(`\\host\share`)도 절대 경로로 인정합니다. 상대 경로와 드라이브 상대 경로(`C:work`)는 계속 `-32602`입니다.
 - **Program: 예산 차원을 비워 둔 task graph task도 실제로 받는 만큼으로 집계됩니다 (#412).** `TaskGraphProposal` task의 `budget`이 어떤 차원을 0으로 두면 proposal과 fragment의 상한은 그 차원을 0으로 셌지만, 자식은 그 차원에 대해 link 상한 전체를 받고 시작했고, 비워 둔 `output_bytes`는 어떤 출력이든 허용했습니다. 그래서 planner는 검사받은 집계 상한보다 더 많이 쓰는 expansion을 만들 수 있었습니다. proposal 스키마 2가 이 틈을 막습니다. task는 템플릿 상한이 0이 아닌 모든 차원에 0이 아닌 값을 명시해야 하고(`P_PROPOSAL_BUDGET_ZERO`), 스키마 2 fragment는 각 task를 예약한 값 그대로 시작합니다. `RunBudget`처럼 0인 차원은 아무것도 허용하지 않으며, 출력은 명시한 바이트로 제한됩니다. 스키마 1 proposal과 fragment는 canonical 바이트, identity, 시작 동작이 그대로이므로 저장된 데이터와 기존 호스트는 달라지지 않습니다. planner의 proposal을 받는 호스트는 `TaskGraphProposalLimits::min_schema_version`을 2로 두어 스키마 1을 거부합니다. 거부된 expansion proposal은 이제 처음 몇 개 diagnostic의 코드와 포인터를 `failure.witness.diagnostics`에 담아 보고합니다.
 - **Program: 포크가 이어 가는 호출의 provider 호출을 재생합니다 (#405).** 일시 정지한 run의 포크는 일시 정지한 호출을 포크의 run으로 다시 실행했습니다. 호출을 run 기준으로 저장하는 SQLite provider 저널은 그 호출이 질문하기 전에 한 provider 호출을 다시 보내고 다시 청구했습니다. 원본을 재개하면 이 호출은 재생됩니다. 이제 포크의 모든 시도는 브로커에 원본 run(`ProgramCoreProviderCallContext::replay_source`)을 알려 주고, 저널은 같은 호출에 대한 원본의 기록, 곧 포크 전에 원본의 Core 스레드 같은 슬롯에 기록된 같은 요청을 넘겨받습니다. 결과는 포크의 dispatch id로 다시 인코딩되고 행은 원본의 시도 번호를 유지하므로, 그 호출은 다시 보내지지도 청구되지도 않습니다. 결과를 알 수 없는 원본 호출은 포크에서도 불확실한 상태로 남습니다. 저널이 없는 프로세스 내 브로커는 노드 재시도와 마찬가지로 여전히 다시 보냅니다.

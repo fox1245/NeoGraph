@@ -1875,6 +1875,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         ProgramUsage unreserved;
         unreserved.wall_time_ms =
             subtract_saturated(elapsed_ms(started_at), settled_javascript_wall_time_ms);
+        // #419: a command reserves no retries, and the remainder it journaled
+        // carries the ceiling over as the attempt was granted it, so the
+        // attempt's retries come off the ceiling here, once.
+        unreserved.node_retries = node_retries_used();
         return settle_budget(remaining, unreserved);
     };
     const auto apply_durable_javascript_disposition = [&](RunOutcome& terminal) noexcept {
