@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=4cd00dbda5e6229f6dda6d68c4dc2aa340e18fb7af5c4d45605c5638997347a0 -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=020d720d3a66c9a944cc3bd9546471325ac307c82f552d849a7f4e4ea78c6154 -->
 # Program API 端到端场景
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -29,6 +29,7 @@
 | `test_18_step_failure_outranks_interrupt.py` | 无论提问节点的索引如何，失败都会结束其所在的步骤（#392）：一个 Core 步骤在绑定的 `llm_call` 旁以两种顺序运行一个提问节点和一个失败节点；Program 以失败节点的分类失败而失败，不留下等待中的问题，模型调用只发送并计费一次（内存与 SQLite 日志） |
 | `test_19_fork_interrupt_identity.py` | 在已完成的绑定 `llm_call` 旁 Core 步骤因两个中断而暂停的运行的 `host.fork()`（#394）：fork 回答等待调用的 `core_interrupt_id` 所指的中断，另一个节点在 fork 中再次提问，已完成的调用不会再次发送或计费（内存与 SQLite 日志） |
 | `test_20_javascript_fork.py` | 每个 `callCore` 中都有绑定 `llm_call` 的 JavaScript `main()` 在第二个 `callCore` 中暂停的运行的 `host.fork()`（#395）：fork 从命令日志重放第一个命令，以答案恢复暂停的调用并完成，任何模型调用都不会再次发送或计费（内存与 SQLite 日志） |
+| `test_21_fork_recorded_failure.py` | 收集式 `ng.all` 记录了一个绑定 `llm_call` 被拒绝的成员的 JavaScript `main()` 的 `host.fork()`（#398）：fork 把记录的 provider 证据重新绑定到自身，回答暂停的成员，并连同其证据报告记录的失败，不会再次发送任何调用（内存与 SQLite 日志） |
 
 `support.py` 包含共享的 Python 节点、条件、注册表、预算和 JavaScript 构建器。
 

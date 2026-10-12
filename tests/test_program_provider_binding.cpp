@@ -1663,6 +1663,63 @@ TEST(ProgramProviderBindingJournal, AForkOfAPausedFanOutNeverResendsOrRechargesT
     }
 }
 
+TEST(ProgramProviderBindingJournal, AForkReplaysAPlanBranchsProviderFailureUnderItsOwnCustody) {
+    // #398: a plan quorum of three branches, each calling the model and then a
+    // check. The first branch's call fails with the provider's outcome as
+    // evidence (#399: a failed branch); the second's check asks, which pauses
+    // the quorum. The paused run records the failed branch under the source
+    // run's custody. A fork of it replays that record: it used to restore the
+    // evidence under the fork's own custody, which the record does not match,
+    // so the fork failed. It now re-binds the evidence to the fork, answers
+    // the check, runs the third branch and completes, without sending the
+    // failed call again.
+    for (const bool durable : {false, true}) {
+        SCOPED_TRACE(durable ? "SQLite journal" : "in memory");
+        TempDir     files("fork-provider-failure");
+        auto        peer = std::make_shared<Peer>();
+        peer->reply      = [](int ordinal, const ProviderRequest&) -> sp::runtime::Result {
+            if (ordinal == 1) {
+                sp::Failure failure;
+                failure.error.kind         = sp::ErrorKind::InvalidRequest;
+                failure.error.safe_message = "refused by the test peer";
+                failure.error.http_status  = 400;
+                failure.error.retry_safety = sp::RetrySafety::RejectedBeforeOutput;
+                return std::make_shared<const sp::Outcome>(std::move(failure));
+            }
+            return neograph::test::success("answer", with_cost(final_usage(21, 3), 1'234'567));
+        };
+        HostOptions options;
+        options.monetary = 100'000;
+        Host h(peer, options, durable ? &files : nullptr);
+        h.script().ask_on_check_run = 1;
+        const auto call    = json{{"op", "call_core"}};
+        const auto version = h.admit_plan(
+            json{{"op", "quorum"}, {"branches", json::array({call, call, call})}, {"min_success", 2}},
+            Shape::LlmThenCheck);
+
+        const auto paused = h.run_plan(version, "fork-failure-source");
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_text(paused);
+        ASSERT_TRUE(paused.interrupt() && paused.checkpoint());
+        EXPECT_EQ(paused.interrupt()->pending_input->operation_id(), "root.1");
+        EXPECT_EQ(peer->transport.load(), 2);
+
+        auto invocation   = h.invocation("fork-failure-target");
+        invocation.budget = paused.remaining_budget();
+        const auto forked =
+            h.runtime()
+                .fork(kOwner,
+                      ExactProgramCheckpointReference{paused.run_id(),
+                                                      paused.checkpoint()->checkpoint_id},
+                      version, std::move(invocation), resume_after(paused, "trace-fork-failure"))
+                .wait();
+        ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed)
+            << "the fork could not replay the recorded failure: " << failure_text(forked);
+        EXPECT_EQ(peer->transport.load(), 3) << "the failed call is not sent again";
+        EXPECT_EQ(h.script().checks_answered.load(), 1);
+        EXPECT_EQ(h.script().checks_finished.load(), 1);
+    }
+}
+
 TEST(ProgramProviderBindingJournal, APlanQuorumResumeNeverResendsOrRechargesAFinishedBranch) {
     // #387: a plan quorum of two branches, each calling the model and then a
     // check. The first branch finishes; the second's check asks, which pauses

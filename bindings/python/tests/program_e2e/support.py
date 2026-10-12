@@ -574,7 +574,9 @@ class ChatPeer:
     cost in USD. A streaming request (the built-in llm_call node streams inside
     a Program) is answered with SSE chunks, the usage in the last one, as
     OpenRouter does. A request whose last user message contains "slow" is
-    answered after slow_seconds.
+    answered after slow_seconds. A request whose last user message contains
+    fail_marker is refused with HTTP 400, which the provider reports as a failed
+    call with its outcome as evidence.
     """
 
     def __init__(self):
@@ -583,6 +585,7 @@ class ChatPeer:
         self.usage = {"prompt_tokens": 21, "completion_tokens": 3, "total_tokens": 24,
                       "cost": 0.001234567}
         self.slow_seconds = 5.0
+        self.fail_marker = "fail-call"
         self._lock = threading.Lock()
         peer = self
 
@@ -596,6 +599,18 @@ class ChatPeer:
                 last = (body.get("messages") or [{}])[-1].get("content") or ""
                 if "slow" in str(last):
                     time.sleep(peer.slow_seconds)
+                if peer.fail_marker and peer.fail_marker in str(last):
+                    refusal = json.dumps({"error": {"message": "refused by the e2e peer",
+                                                    "code": 400}}).encode()
+                    try:
+                        self.send_response(400)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(refusal)))
+                        self.end_headers()
+                        self.wfile.write(refusal)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    return
                 base = {"id": "chatcmpl-e2e", "created": 1, "model": body.get("model")}
                 if body.get("stream"):
                     frames = [

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=4cd00dbda5e6229f6dda6d68c4dc2aa340e18fb7af5c4d45605c5638997347a0 -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=020d720d3a66c9a944cc3bd9546471325ac307c82f552d849a7f4e4ea78c6154 -->
 # Program API エンドツーエンドシナリオ
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -29,6 +29,7 @@
 | `test_18_step_failure_outranks_interrupt.py` | 尋ねるノードのインデックスにかかわらず失敗がステップを終わらせる（#392）：一つの Core ステップでバインド済み `llm_call` の横に尋ねるノードと失敗するノードを両方の順序で実行する。Program は失敗したノードの分類済み失敗で失敗し、保留中の質問は残らず、モデル呼び出しは一度だけ送信・課金される（メモリと SQLite ジャーナル） |
 | `test_19_fork_interrupt_identity.py` | 完了したバインド済み `llm_call` の横で Core ステップが二つの割り込みで一時停止した実行の `host.fork()`（#394）：フォークは保留中の呼び出しの `core_interrupt_id` が指す割り込みに答え、もう一方のノードはフォークでもう一度尋ね、完了した呼び出しは再送も再課金もされない（メモリと SQLite ジャーナル） |
 | `test_20_javascript_fork.py` | 各 `callCore` にバインド済み `llm_call` を持つ JavaScript の `main()` が二つ目の `callCore` で一時停止した実行の `host.fork()`（#395）：フォークは最初のコマンドをコマンドジャーナルから再生し、一時停止した呼び出しを答えとともに再開して完了し、どのモデル呼び出しも再送・再課金されない（メモリと SQLite ジャーナル） |
+| `test_21_fork_recorded_failure.py` | 収集型の `ng.all` が、バインド済み `llm_call` が拒否されたメンバーを記録した JavaScript の `main()` の `host.fork()`（#398）：フォークは記録されたプロバイダーの証拠を自身に結び直し、一時停止したメンバーに答え、記録された失敗をその証拠とともに報告し、どの呼び出しも再送しない（メモリと SQLite ジャーナル） |
 
 `support.py` には、共有の Python ノード、条件、レジストリ、予算、JavaScript ビルダーがあります。
 

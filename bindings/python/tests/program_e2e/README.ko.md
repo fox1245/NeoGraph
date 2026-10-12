@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=4cd00dbda5e6229f6dda6d68c4dc2aa340e18fb7af5c4d45605c5638997347a0 -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=020d720d3a66c9a944cc3bd9546471325ac307c82f552d849a7f4e4ea78c6154 -->
 # Program API 엔드투엔드 시나리오
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -29,6 +29,7 @@
 | `test_18_step_failure_outranks_interrupt.py` | 묻는 노드의 인덱스와 관계없이 실패가 스텝을 끝냄(#392): 한 Core 스텝에서 바인딩 `llm_call` 옆에 묻는 노드와 실패하는 노드가 두 순서로 실행됨. Program은 실패한 노드의 분류된 실패로 실패하고 대기 중인 질문은 남지 않으며, 모델 호출은 한 번 전송되고 한 번 과금됨(메모리와 SQLite 저널) |
 | `test_19_fork_interrupt_identity.py` | 끝난 바인딩 `llm_call` 옆에서 Core 스텝이 두 인터럽트로 일시 정지한 실행의 `host.fork()`(#394): 포크가 대기 호출의 `core_interrupt_id`가 지정한 인터럽트에 답하고 다른 노드는 포크에서 다시 물으며, 끝난 호출은 다시 전송되거나 과금되지 않음(메모리와 SQLite 저널) |
 | `test_20_javascript_fork.py` | 각 `callCore`에 바인딩 `llm_call`이 있는 JavaScript `main()`이 두 번째 `callCore`에서 일시 정지한 실행의 `host.fork()`(#395): 포크는 첫 명령을 명령 저널에서 재생하고 일시 정지한 호출을 답과 함께 재개해 완료하며, 어느 모델 호출도 다시 전송되거나 과금되지 않음(메모리와 SQLite 저널) |
+| `test_21_fork_recorded_failure.py` | 수집형 `ng.all`이 바인딩 `llm_call`이 거부된 멤버를 기록한 JavaScript `main()`의 `host.fork()`(#398): 포크는 기록된 provider 증거를 자신에게 다시 묶고, 일시 정지한 멤버에 답하며, 기록된 실패를 그 증거와 함께 보고하고, 어느 호출도 다시 전송하지 않음(메모리와 SQLite 저널) |
 
 `support.py`에는 공유하는 Python 노드, 조건, 레지스트리, 예산, JavaScript 빌더가 있습니다.
 

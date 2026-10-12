@@ -8,6 +8,7 @@
 #include "node_retry_budget.h"
 #include "catalog_access.h"
 #include "monetary.h"
+#include "provider_failure.h"
 #include "run_control.h"
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -393,20 +394,102 @@ std::string core_thread_identity(std::string_view run_id,
     return detail::sha256_identity("program-core-thread/v1", identity);
 }
 
+// #398: the run a recorded result was written by, which its provider
+// evidence is bound to (owner scope aside).
+struct RecordCustody {
+    std::string run_id;
+    std::string program_version_id;
+    std::string bundle_id;
+};
+
+// #398: a recorded terminal result (a JavaScript command's or join member's
+// result, or a plan branch's settled result) whose failure carries provider
+// evidence holds it under the custody of the run that wrote it. A run that
+// continues another (a fork, a graph migration) replays such records under
+// its own custody, so it re-binds each one: it restores the evidence under
+// the source run's custody, which must match exactly, and stores it again
+// under its own. A record without provider evidence is unchanged.
+void rebind_recorded_failure(json& result, std::string_view owner_scope,
+                             const RecordCustody& source, const RecordCustody& target,
+                             const std::shared_ptr<sp::NativeArchive>& archive) {
+    if (!result.is_object() || !result.contains("failure")) return;
+    auto failure_record = detail::owned_json_copy(result["failure"]);
+    if (!failure_record.is_object() || !failure_record.contains("witness")) return;
+    ProgramFailure failure;
+    failure.witness = detail::owned_json_copy(failure_record["witness"]);
+    if (!detail::has_provider_outcome(failure)) return;
+    if (!failure.witness.contains("provider_outcome_custody") ||
+        !failure.witness["provider_outcome_custody"].is_object())
+        throw_runtime_diagnostic("P_FORK_CUSTODY",
+                                 "A recorded provider failure has no custody to re-bind");
+    const auto stored = detail::owned_json_copy(failure.witness["provider_outcome_custody"]);
+    if (!stored.contains("operation_id") || !stored["operation_id"].is_string() ||
+        !stored.contains("attempt") || !stored["attempt"].is_number_unsigned())
+        throw_runtime_diagnostic("P_FORK_CUSTODY",
+                                 "A recorded provider failure's custody is malformed");
+    const auto operation_id = stored["operation_id"].get<std::string>();
+    const auto attempt      = stored["attempt"].get<std::uint64_t>();
+    try {
+        detail::restore_provider_failure(
+            failure,
+            detail::provider_failure_custody(owner_scope, source.run_id, source.program_version_id,
+                                             source.bundle_id, operation_id, attempt),
+            archive);
+    } catch (const std::invalid_argument& error) {
+        throw_runtime_diagnostic("P_FORK_CUSTODY",
+                                 std::string("A recorded provider failure is not the source "
+                                             "run's: ") + error.what());
+    }
+    detail::persist_provider_failure(
+        failure,
+        detail::provider_failure_custody(owner_scope, target.run_id, target.program_version_id,
+                                         target.bundle_id, operation_id, attempt),
+        archive);
+    failure_record["witness"] = std::move(failure.witness);
+    result["failure"]         = std::move(failure_record);
+}
+
+// #398: the recorded results of a paused join's settled members (#380), each
+// re-bound as above.
+json rebind_recorded_members(const json& members, std::string_view owner_scope,
+                             const RecordCustody& source, const RecordCustody& target,
+                             const std::shared_ptr<sp::NativeArchive>& archive) {
+    json rebound = json::object();
+    for (const auto& [member, stored] : members.items()) {
+        auto record = detail::owned_json_copy(stored);
+        rebind_recorded_failure(record, owner_scope, source, target, archive);
+        rebound[member] = std::move(record);
+    }
+    return rebound;
+}
+
 // #386: the replay records of a paused plan (settled_branches) that a run
 // continuing `source` in another run, `run_id` of `target`, carries. A
 // paused call's record names its checkpoint in the source run; the
 // continuation gets its own copy, on the call's Core thread in the new run,
 // so that answering the call there never writes into the source run.
+// A settled branch's provider evidence is re-bound to the new run (#398).
 std::optional<json> continued_replay_records(const ProgramRunRecord&         source,
                                              std::string_view                run_id,
                                              const detail::MaterializedProgram& target,
-                                             graph::CheckpointStore&         checkpoints) {
+                                             graph::CheckpointStore&         checkpoints,
+                                             const std::shared_ptr<sp::NativeArchive>& archive) {
     const auto records = source.settled_branches();
     if (!records) return std::nullopt;
+    const RecordCustody source_custody{source.run_id(), source.program_version_id(),
+                                       source.bundle_id()};
+    const RecordCustody target_custody{std::string(run_id), target.version.id(),
+                                       target.bundle.id()};
     json carried = json::object();
     for (const auto& [key, stored] : records->items()) {
         auto record = detail::owned_json_copy(stored);
+        if (record.is_object() && record.contains("kind") && record["kind"] == json("settled") &&
+            record.contains("result")) {
+            auto result = detail::owned_json_copy(record["result"]);
+            rebind_recorded_failure(result, source.owner_scope(), source_custody, target_custody,
+                                    archive);
+            record["result"] = std::move(result);
+        }
         if (record.is_object() && record.contains("kind") && record["kind"] == json("paused")) {
             const auto checkpoint_id = record["checkpoint"]["checkpoint_id"].get<std::string>();
             const auto loaded        = checkpoints.load_by_id(checkpoint_id);
@@ -6269,14 +6352,28 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
                 "P_FORK_STATE",
                 "JavaScript Program fork source checkpoint is not its paused callCore's");
         const auto& target_bundle_id = target_pinned->bundle.id();
+        // #398: a recorded failure's provider evidence is re-bound to the fork.
+        const RecordCustody source_custody{source_record->run_id(),
+                                           source_record->program_version_id(),
+                                           source_record->bundle_id()};
+        const RecordCustody target_custody{run_id, target.id(), target_bundle_id};
+        const auto&         archive = impl_->config.native_history_archive;
         for (const auto& entry : source_commands) {
+            auto terminal_result = entry.terminal_result();
+            if (terminal_result)
+                rebind_recorded_failure(*terminal_result, owner_scope, source_custody,
+                                        target_custody, archive);
+            auto settled_members = entry.settled_members();
+            if (settled_members)
+                settled_members = rebind_recorded_members(*settled_members, owner_scope,
+                                                           source_custody, target_custody, archive);
             ProgramJavaScriptCommandJournalEntryData data{
                 entry.sequence(), target_bundle_id, entry.command_ordinal(), entry.command(),
                 entry.effect_identity()
                     ? std::optional<std::string>(detail::javascript_command_effect_identity(
                           target_bundle_id, entry.command_ordinal(), entry.command()))
                     : std::nullopt,
-                entry.terminal_result(), entry.settled_members()};
+                std::move(terminal_result), std::move(settled_members)};
             data.await_started_at = entry.await_started_at();
             fork_commands.emplace_back(std::move(data));
         }
@@ -6331,7 +6428,8 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     // #386: the fork replays what the source's paused plan finished, as a
     // resume of the source would.
     auto fork_records = continued_replay_records(*source_record, run_id, *control->materialized,
-                                                 *impl_->config.checkpoints);
+                                                 *impl_->config.checkpoints,
+                                                 impl_->config.native_history_archive);
     auto publication =
         initial_publication(*control, started, target_checkpoint, receipt, std::nullopt,
                             std::move(fork_pending_input), std::move(fork_pending_effect),
@@ -7186,7 +7284,8 @@ ProgramHandle ProgramRuntime::migrate_graph(
     // #386: the same replay records as any continuation of the source.
     auto migrated_records = continued_replay_records(*source_record, target_run_id,
                                                      *control->materialized,
-                                                     *impl_->config.checkpoints);
+                                                     *impl_->config.checkpoints,
+                                                     impl_->config.native_history_archive);
     auto publication = initial_publication(
         *control, started, target_checkpoint, std::nullopt, std::nullopt,
         std::nullopt, std::nullopt, transition_time,

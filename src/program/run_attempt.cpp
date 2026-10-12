@@ -1537,6 +1537,26 @@ json settled_branch_record(const PlanExecution& branch) {
                                                               ProgramUsage{})}};
 }
 
+// #398: the settled record of a branch that finished, its provider evidence
+// stored under this run's custody, which a run continuing this one re-binds
+// to its own. Empty when the evidence cannot be stored: the branch then runs
+// again on resume.
+std::optional<json> settled_branch_record_of(PlanExecution& branch, const RunControl& control) {
+    if (branch.failure && branch.failure->provider_outcome) {
+        try {
+            detail::persist_provider_failure(
+                *branch.failure,
+                detail::provider_failure_custody(control.owner_scope, control.run_id,
+                                                 control.program_version_id, control.bundle_id,
+                                                 branch.failure->operation_id, control.attempt),
+                control.native_history_archive);
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+    return settled_branch_record(branch);
+}
+
 // Empty when the branch has no Core call that can ask again by itself.
 std::optional<json> paused_branch_record(const PlanExecution& branch) {
     if (!branch.interrupt || !branch.interrupt_checkpoint) return std::nullopt;
@@ -3433,8 +3453,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     if (branch.returned) result.returned = true;
                     if (!pause) continue;
                     if (branch.status != ProgramTerminalStatus::Interrupted) {
+                        // #398: with its provider evidence, as a quorum records it.
                         if (!rerun[index])
-                            result.settled_members[branches[index]] = settled_branch_record(branch);
+                            if (auto record = settled_branch_record_of(branch, *control))
+                                result.settled_members[branches[index]] = std::move(*record);
                         continue;
                     }
                     for (const auto& [key, record] : branch.settled_members.items())
@@ -3655,21 +3677,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         for (const auto& [key, record] : branch_result.settled_members.items())
                             paused.settled_members[key] = record;
                         for (auto& [branch_id, settled] : finished) {
-                            if (settled.failure && settled.failure->provider_outcome) {
-                                try {
-                                    detail::persist_provider_failure(
-                                        *settled.failure,
-                                        detail::provider_failure_custody(
-                                            control->owner_scope, control->run_id,
-                                            control->program_version_id, control->bundle_id,
-                                            settled.failure->operation_id, control->attempt),
-                                        control->native_history_archive);
-                                } catch (...) {
-                                    // Without its evidence the branch runs again on resume.
-                                    continue;
-                                }
-                            }
-                            paused.settled_members[branch_id] = settled_branch_record(settled);
+                            // Without its evidence the branch runs again on resume.
+                            if (auto record = settled_branch_record_of(settled, *control))
+                                paused.settled_members[branch_id] = std::move(*record);
                         }
                         co_return paused;
                     }
