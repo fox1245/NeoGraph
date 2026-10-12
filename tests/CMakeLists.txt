@@ -1046,6 +1046,17 @@ add_executable(neograph_join_model_tests test_join_exhaustive.cpp)
 target_link_libraries(neograph_join_model_tests PRIVATE neograph::core GTest::gtest_main)
 neograph_discover_tests(neograph_join_model_tests PROPERTIES LABELS "core;join-model" TIMEOUT 300)
 
+# Bounded-exhaustive resume/replay harness: the real GraphEngine against a
+# reference interpreter of the interrupt/resume contract, through every answer
+# order, a crash at every durable point and a fork of every pause.
+# NEOGRAPH_RESUME_MODEL_BOUND=extended runs the larger bound.
+if(NEOGRAPH_BUILD_SQLITE)
+    add_executable(neograph_resume_model_tests test_resume_model.cpp)
+    target_link_libraries(neograph_resume_model_tests PRIVATE
+        neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
+    neograph_discover_tests(neograph_resume_model_tests PROPERTIES LABELS "core;resume-model" TIMEOUT 300)
+endif()
+
 # Opt-in soundness check (X3): findings on hand-written graphs, the Program
 # compiler path, and agreement with the join harness's reference interpreter on
 # every graph of its family. NEOGRAPH_JOIN_MODEL_BOUND=extended runs the larger
