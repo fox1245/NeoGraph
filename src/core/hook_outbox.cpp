@@ -142,6 +142,42 @@ bool MandatoryHookRunner::blocks(const RuntimeEvent& event) const {
     return false;
 }
 
+MandatoryHookRunner::Delivery MandatoryHookRunner::delivery(const RuntimeEvent& event) const {
+    // The event passed when every Hook it plans settled: a mandatory one
+    // succeeded, an observational one ended either way. A mandatory Hook that
+    // ended without success blocked the event, which stopped its run: that
+    // emission was not a delivery.
+    bool any = false;
+    bool fresh = false;
+    bool in_progress = false;
+    bool unresolved = false;
+    bool not_delivered = false;
+    for (const auto& invocation : registry_->plan(event)) {
+        const auto entry = journal_->get(invocation.id());
+        if (!entry) {
+            fresh = true;
+            continue;
+        }
+        any = true;
+        const auto& data = entry->data();
+        if (data.state == HookExecutionState::Succeeded) continue;
+        if (!settled(data)) {
+            in_progress = true;
+        } else if (invocation.data().delivery != HookDelivery::BlockingMandatory) {
+            continue;
+        } else if (data.state == HookExecutionState::ReconciliationRequired) {
+            unresolved = true;
+        } else {
+            not_delivered = true;
+        }
+    }
+    if (!any) return Delivery::Fresh;
+    if (unresolved) return Delivery::Unresolved;
+    if (not_delivered) return Delivery::NotDelivered;
+    if (in_progress || fresh) return Delivery::InProgress;
+    return Delivery::Delivered;
+}
+
 void MandatoryHookRunner::lost_settlement(const HookInvocation& invocation,
                                           Clock::time_point deadline, HookOutboxEntry& entry,
                                           const HookOutboxEntry& leased) const {
@@ -169,7 +205,14 @@ asio::awaitable<void> MandatoryHookRunner::run_async(
         throw std::invalid_argument("invalid hook execution deadline");
     }
     for (const auto& invocation : registry_->plan(event)) {
-        auto entry = journal_->enqueue(invocation, event, max_attempts, deadline);
+        // The same invocation emitted again (a durable event a resume emits
+        // once more, a reconnect) continues its journal entry instead of
+        // enqueuing it with a new deadline: one that already succeeded runs
+        // nothing, one still in flight goes on under its own deadline.
+        const auto existing = journal_->get(invocation.id());
+        if (existing && existing->data().state == HookExecutionState::Succeeded) continue;
+        auto entry = existing ? *existing
+                              : journal_->enqueue(invocation, event, max_attempts, deadline);
         entry = journal_->publish(invocation.id());
         for (;;) {
             const auto now = Clock::now();

@@ -194,6 +194,10 @@ public:
     /// Whether the registry plans a BlockingMandatory Hook for @p event.
     [[nodiscard]] bool blocks(const RuntimeEvent& event) const;
 private:
+    friend class HookRuntime;
+    /// What the journal holds for the Hooks @p event plans (HookRuntime::emit_once_async).
+    enum class Delivery : std::uint8_t { Fresh, Delivered, InProgress, Unresolved, NotDelivered };
+    [[nodiscard]] Delivery delivery(const RuntimeEvent& event) const;
     void lost_settlement(const HookInvocation& invocation,
                          std::chrono::system_clock::time_point deadline, HookOutboxEntry& entry,
                          const HookOutboxEntry& leased) const;

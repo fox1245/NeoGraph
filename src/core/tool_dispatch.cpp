@@ -158,20 +158,47 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
                             ? *decision->args
                             : json::parse(tc.arguments);
             auto call_execution = execution;
+            // A call with a task slot (every graph run, Program Core and a
+            // mediated batch) has a durable identity, the effect identity:
+            // the run, the thread, the task with its node attempt
+            // ("s3:act#a1") and the call ordinal. Its Hook events carry it,
+            // so a resume or replay that runs the batch again does not
+            // deliver an event already delivered for it.
+            const bool durable = !call_execution.effect_task_id.empty();
             if (call_execution.identity.request_id.empty()) {
-                call_execution.identity.request_id = "tool-request-" + std::to_string(
-                    next_host_tool_request.fetch_add(1, std::memory_order_relaxed) + 1);
+                call_execution.identity.request_id = durable
+                    ? "tool:" + call_execution.identity.thread_id + "/" +
+                          call_execution.effect_task_id + "/" + std::to_string(call_index)
+                    : "tool-request-" + std::to_string(next_host_tool_request.fetch_add(
+                                            1, std::memory_order_relaxed) + 1);
             }
+            const auto hook_data = [&](json fields) {
+                fields["tool_call_id"] = tc.id;
+                fields["tool_name"] = tc.name;
+                fields["thread_id"] = call_execution.identity.thread_id;
+                fields["request_id"] = call_execution.identity.request_id;
+                if (durable) {
+                    fields["task_id"] = call_execution.effect_task_id;
+                    fields["call_ordinal"] = call_index;
+                }
+                return fields;
+            };
+            const auto emit = [&](HookPhase phase, json data) {
+                return durable
+                    ? execution.hook_runtime->emit_once_async(
+                          phase, "tool_execution", call_execution.identity.owner_scope,
+                          call_execution.identity.root_run_id, std::move(data),
+                          execution.cancel_token, hook_deadline())
+                    : execution.hook_runtime->emit_async(
+                          phase, "tool_execution", call_execution.identity.owner_scope,
+                          call_execution.identity.root_run_id, std::move(data),
+                          execution.cancel_token, hook_deadline());
+            };
             if (execution.hook_runtime) {
                 at_hook_boundary = true;
                 // GCC 13 ICEs when the returned awaitable is consumed as a temporary.
-                auto emission = execution.hook_runtime->emit_async(
-                    HookPhase::BeforeToolExecution, "tool_execution",
-                    call_execution.identity.owner_scope, call_execution.identity.root_run_id,
-                    json{{"tool_call_id", tc.id}, {"tool_name", tc.name}, {"arguments", args},
-                         {"thread_id", call_execution.identity.thread_id},
-                         {"request_id", call_execution.identity.request_id}},
-                    execution.cancel_token, hook_deadline());
+                auto emission =
+                    emit(HookPhase::BeforeToolExecution, hook_data(json{{"arguments", args}}));
                 co_await std::move(emission);
                 at_hook_boundary = false;
             }
@@ -221,13 +248,9 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
             }
             if (execution.hook_runtime) {
                 at_hook_boundary = true;
-                auto emission = execution.hook_runtime->emit_async(
-                    HookPhase::AfterToolExecution, "tool_execution",
-                    call_execution.identity.owner_scope, call_execution.identity.root_run_id,
-                    json{{"tool_call_id", tc.id}, {"tool_name", tc.name}, {"status", tool_msg.tool_status},
-                         {"result", tool_msg.content}, {"thread_id", call_execution.identity.thread_id},
-                         {"request_id", call_execution.identity.request_id}},
-                    execution.cancel_token, hook_deadline());
+                auto emission = emit(HookPhase::AfterToolExecution,
+                                     hook_data(json{{"status", tool_msg.tool_status},
+                                                    {"result", tool_msg.content}}));
                 co_await std::move(emission);
                 at_hook_boundary = false;
             }

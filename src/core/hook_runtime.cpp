@@ -85,4 +85,59 @@ asio::awaitable<void> HookRuntime::emit_async(
     if (blocked) std::rethrow_exception(blocked);
 }
 
+asio::awaitable<void> HookRuntime::emit_once_async(
+    HookPhase phase, std::string type, std::string owner_scope, std::string run_id, json data,
+    std::shared_ptr<graph::CancelToken> cancellation,
+    std::optional<std::chrono::system_clock::time_point> parent_deadline) {
+    if (!runner_) {
+        auto outer = outer_->emit_once_async(phase, type, owner_scope, run_id, data, cancellation,
+                                             parent_deadline);
+        co_await std::move(outer);
+        auto inner = inner_->emit_once_async(phase, std::move(type), std::move(owner_scope),
+                                             std::move(run_id), std::move(data),
+                                             std::move(cancellation), parent_deadline);
+        co_await std::move(inner);
+        co_return;
+    }
+    if (cancellation) cancellation->throw_if_cancelled("before lifecycle hook");
+    // The identity is the event's content; its sequence numbers the
+    // deliveries of that content. The first sequence whose event is not an
+    // earlier failed delivery is this one: delivered already (nothing to do),
+    // in progress after a crash or awaiting reconciliation (the runner
+    // continues it), or fresh.
+    constexpr std::uint64_t kMaxDeliveries = 64;
+    std::optional<std::uint64_t> sequence;
+    std::exception_ptr invalid;
+    try {
+        for (std::uint64_t candidate = 1; candidate <= kMaxDeliveries; ++candidate) {
+            const auto event = RuntimeEvent::create(
+                {{}, candidate, phase, type, owner_scope, run_id, data});
+            const auto state = runner_->delivery(event);
+            if (state == MandatoryHookRunner::Delivery::Delivered) {
+                if (cancellation) cancellation->throw_if_cancelled("after lifecycle hook");
+                co_return;
+            }
+            if (state != MandatoryHookRunner::Delivery::NotDelivered) {
+                sequence = candidate;
+                break;
+            }
+        }
+        if (!sequence)
+            throw std::runtime_error("lifecycle hook event was not delivered after 64 emissions");
+    } catch (const std::exception& error) {
+        // The same fail-closed rule as a Hook that cannot run (emit_async).
+        invalid = std::make_exception_ptr(HookBoundaryBlocked(
+            {}, HookExecutionState::Failed,
+            std::string("lifecycle hook could not run: ") + error.what()));
+    }
+    if (invalid) {
+        if (cancellation) cancellation->throw_if_cancelled("after lifecycle hook");
+        std::rethrow_exception(invalid);
+    }
+    auto emission = emit_async(phase, std::move(type), std::move(owner_scope), std::move(run_id),
+                               std::move(data), std::move(cancellation), parent_deadline,
+                               sequence);
+    co_await std::move(emission);
+}
+
 } // namespace neograph

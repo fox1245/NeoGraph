@@ -46,6 +46,7 @@
 #include <chrono>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -1299,4 +1300,63 @@ TEST(ToolFailureContract, NestedHookRuntimesCompose) {
         EXPECT_EQ(log.snapshot(), (std::vector<std::string>{"shared:before:call-target",
                                                             "shared:after:call-target"}));
     }
+}
+
+namespace {
+
+// Pauses the run the first time it is called (a tool that needs a human), and
+// succeeds once resumed.
+class PausingTool final : public Tool {
+public:
+    ChatTool get_definition() const override {
+        return {"pauser", "pauses once", json{{"type", "object"}, {"properties", json::object()}}};
+    }
+    std::string get_name() const override { return "pauser"; }
+    std::string execute(const json&) override {
+        if (calls.fetch_add(1) == 0) throw NodeInterrupt("approve the call", json{{"tool", "pauser"}});
+        return "approved";
+    }
+    std::atomic<int> calls{0};
+};
+
+}  // namespace
+
+// A tool call's Hook events have a durable identity, the effect identity: the
+// run, thread, task (with the node attempt) and call ordinal. A resume that
+// runs the batch again does not deliver an event already delivered for that
+// identity: here the sibling's two events and the paused call's Before event
+// are delivered once, and the paused call's After event, which the first run
+// never reached, once on resume.
+TEST(ToolFailureContract, ResumeDoesNotRefireDeliveredToolHookEvents) {
+    register_emit_node();
+    auto probe = std::make_shared<Probe>();
+    NodeContext context;
+    std::vector<std::unique_ptr<Tool>> tools;
+    tools.push_back(std::make_unique<SiblingTool>(probe));
+    auto pausing = std::make_unique<PausingTool>();
+    auto* pauser = pausing.get();
+    tools.push_back(std::move(pausing));
+    context.tools = ToolSet(std::move(tools));
+    auto engine = GraphEngine::compile(
+        tool_graph({{"call-sibling", "sibling", "{}"}, {"call-pauser", "pauser", "{}"}},
+                   "durable_tool_hooks"),
+        context, std::make_shared<InMemoryCheckpointStore>());
+    HookLog log;
+    engine->set_hook_runtime(labelled_hooks("hook", log));
+    RunConfig config;
+    config.thread_id = "durable-tool-hooks";
+    RunMetadata metadata;
+    metadata.owner_scope = "tenant";
+    metadata.run_id = "root-run";
+    const auto first = neograph::async::run_sync(engine->run_async(config, metadata, RunResources{}));
+    ASSERT_TRUE(first.interrupted);
+    const auto resumed = engine->resume(config, json(), nullptr, metadata);
+    ASSERT_FALSE(resumed.interrupted);
+    EXPECT_EQ(pauser->calls.load(), 2);
+    std::map<std::string, int> deliveries;
+    for (const auto& entry : log.snapshot()) ++deliveries[entry];
+    EXPECT_EQ(deliveries, (std::map<std::string, int>{{"hook:before:call-sibling", 1},
+                                                      {"hook:after:call-sibling", 1},
+                                                      {"hook:before:call-pauser", 1},
+                                                      {"hook:after:call-pauser", 1}}));
 }

@@ -47,6 +47,22 @@ public:
                                        std::optional<std::chrono::system_clock::time_point> parent_deadline = {},
                                        std::optional<std::uint64_t> event_sequence = {});
 
+    /**
+     * Emits an event whose `data` carries a durable identity, such as a tool
+     * call's (run, thread, task with its node attempt, call ordinal), at most
+     * once for that identity and content: a resume or a replay that emits it
+     * again finds it delivered in the journal and runs no Hook. An earlier
+     * emission that did not pass (its Hook failed, timed out or was
+     * cancelled, which stopped its run) is not a delivery, so the next one
+     * runs the Hooks again under a new event identity. One that still needs
+     * reconciliation blocks as before.
+     */
+    asio::awaitable<void> emit_once_async(HookPhase phase, std::string type,
+                                            std::string owner_scope, std::string run_id,
+                                            json data,
+                                            std::shared_ptr<graph::CancelToken> cancellation = {},
+                                            std::optional<std::chrono::system_clock::time_point> parent_deadline = {});
+
     /// Retained for source and binary compatibility. Hook-target origin is now
     /// explicit in NativeHookExecutionAdapter's direct execution path.
     [[nodiscard]] static bool executing_hook_target() noexcept;

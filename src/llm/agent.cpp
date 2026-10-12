@@ -57,11 +57,17 @@ sp::runtime::Result Agent::complete(const std::vector<sp::Message>& messages) {
 namespace {
 void append_tool_results(std::vector<sp::Message>& history, std::vector<ToolCall> calls,
                          std::vector<Tool*> tools, ToolGate gate, ToolExecutionContext execution) {
-    if (execution.effect_broker) {
+    if (execution.effect_broker || !execution.effect_task_id.empty()) {
         const auto turns = std::count_if(history.begin(), history.end(), [](const sp::Message& message) {
             return message.role == sp::Role::Assistant && !client_tool_calls(message).empty();
         });
-        execution.effect_task_id = "agent:turn:" + std::to_string(turns - 1);
+        // Every turn's batch has its own task slot: its calls' effects and
+        // their Hook events' durable identity (task, call ordinal) never
+        // collide with another turn's.
+        if (execution.effect_broker)
+            execution.effect_task_id = "agent:turn:" + std::to_string(turns - 1);
+        else
+            execution.effect_task_id += ":turn:" + std::to_string(turns - 1);
     }
     auto results = neograph::async::run_sync(dispatch_tool_calls(
         std::move(calls), std::move(tools), std::move(gate), {}, std::move(execution)));
