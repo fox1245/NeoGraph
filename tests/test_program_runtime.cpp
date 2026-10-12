@@ -7288,7 +7288,12 @@ TEST(ProgramRuntimeTest, JavaScriptAwaitTimeoutCancelsDirectCoreWork) {
     EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut);
     ASSERT_TRUE(result.failure().has_value());
     EXPECT_EQ(result.failure()->code, "P_AWAIT_TIMEOUT");
-    EXPECT_EQ(blocking_calls.load(), 1U);
+    // The node body runs on a worker (#367, #368). It is cancelled while it
+    // blocks, or, when the 10 ms timeout fires before a worker starts it, it
+    // never starts. Either way no Core work outlives the await, and the run
+    // does not wait out the body's 5 s.
+    EXPECT_LE(blocking_calls.load(), 1U);
+    EXPECT_EQ(blocking_active.load(), 0U);
     EXPECT_LT(elapsed.count(), 2);
 }
 
