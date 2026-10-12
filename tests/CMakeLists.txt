@@ -901,6 +901,20 @@ if(TARGET neograph_program_sqlite AND TARGET neograph_sqlite AND TARGET neograph
         neograph::program neograph::program_sqlite neograph::sqlite
         neograph::llm SQLite::SQLite3 GTest::gtest_main)
     neograph_discover_tests(neograph_program_provider_binding_tests)
+
+    # Program crash-recovery regressions found by the resume model harness,
+    # on the harness's fixtures (program_resume_fixture.h).
+    add_executable(neograph_program_resume_model_tests test_program_join_recovery.cpp)
+    target_include_directories(neograph_program_resume_model_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/program)
+    target_link_libraries(neograph_program_resume_model_tests PRIVATE
+        neograph::program neograph::program_sqlite neograph::sqlite
+        neograph::llm SQLite::SQLite3 GTest::gtest_main)
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        target_compile_definitions(neograph_program_resume_model_tests PRIVATE
+            NEOGRAPH_PROGRAM_RESUME_MODEL_HAVE_QUICKJS)
+    endif()
+    neograph_discover_tests(neograph_program_resume_model_tests PROPERTIES LABELS "program;resume-model" TIMEOUT 300)
 endif()
 
 if(NEOGRAPH_BUILD_SQLITE)

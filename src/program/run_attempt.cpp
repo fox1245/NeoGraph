@@ -5648,13 +5648,20 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                 "JavaScript callCore coordinate",
                                 operation_id);
                         }
-                        exact_core_resume = std::pair{*resume_operation, *checkpoint_id};
-                        supplied_core_resume_required = true;
-                        exact_resume_authorized       = true;
-                        if (const auto settled = prior->settled_members()) {
+                        // The member this attempt resumes may have finished, and the
+                        // join recorded it as settled, before the process stopped: its
+                        // answer is spent, and recovery replays it like every other
+                        // settled member instead of resuming its Core again.
+                        const auto settled = prior->settled_members();
+                        if (!settled || !settled->contains(*resume_operation)) {
+                            exact_core_resume = std::pair{*resume_operation, *checkpoint_id};
+                            supplied_core_resume_required = true;
+                        }
+                        exact_resume_authorized = true;
+                        if (settled) {
                             const auto member_prefix = operation_id + "/member/";
                             for (const auto& [member, record] : settled->items()) {
-                                if (!member.starts_with(member_prefix) || member == *resume_operation)
+                                if (!member.starts_with(member_prefix))
                                     throw_runtime_diagnostic(
                                         "P_JS_COMMAND_JOURNAL_MISMATCH",
                                         "Recorded join members do not match the paused join",
