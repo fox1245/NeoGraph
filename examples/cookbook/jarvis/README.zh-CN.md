@@ -97,7 +97,7 @@ JARVIS可以直接调用的函数型工具列表。每个条目对应一个MCP�
     {
       "name": "personal_memo",
       "transport": "stdio",
-      "command": ["python3", "examples/demo_mcp_stdio_server.py"],
+      "command": ["python3", "examples/mcp_demo_server.py", "--tools", "kb_lookup,save_note,list_notes"],
       "description": "Tony's personal memo storage/retrieval",
       "enabled": true
     }

@@ -97,7 +97,7 @@ JARVIS가 직접 호출할 수 있는 함수형 도구 목록입니다. 각 항�
     {
       "name": "personal_memo",
       "transport": "stdio",
-      "command": ["python3", "examples/demo_mcp_stdio_server.py"],
+      "command": ["python3", "examples/mcp_demo_server.py", "--tools", "kb_lookup,save_note,list_notes"],
       "description": "Tony's personal memo storage/retrieval",
       "enabled": true
     }
