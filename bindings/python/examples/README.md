@@ -105,6 +105,7 @@ The restricted JavaScript Program API runs on top of Core graphs: `ProgramRegist
 | 32 | [`32_program_failure_routing.py`](32_program_failure_routing.py) | yes | TEST fails, is retried twice, and its final failure is routed to a handler with `interruptBefore`. The operator resumes with `retry` and the Program completes, or with `abort` and a failure exit ends it `Failed` with `plan.user_abort`. |
 | 33 | [`33_program_budgets.py`](33_program_budgets.py) | yes | Two bound `llm_call` nodes report 600 tokens each under a 1,000-token budget, so the run ends `BudgetExhausted`. A run whose budget differs from the admitted one is refused with `P_START_BUDGET`. |
 | 34 | [`34_program_pause_resume.py`](34_program_pause_resume.py) | yes | `interruptBefore` pauses a run before node b and `host.resume(run_id, value)` continues it. The paused trace is `['a']`, the resumed one `['b', 'c']`, and `main()` finishes with the operator's answer. |
+| 35 | [`35_program_fork.py`](35_program_fork.py) | yes | A run paused next to a finished model call is forked with a different answer. The finished call is replayed from the checkpoint, so the scripted model sees one request in total and the fork is charged no tokens. |
 
 ### Protocols: MCP, A2A, ACP
 

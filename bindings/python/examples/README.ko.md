@@ -106,6 +106,7 @@ python 01_minimal.py
 | 32 | [`32_program_failure_routing.py`](32_program_failure_routing.py) | yes | TEST가 실패해 두 번 재시도된 뒤, 마지막 실패가 `interruptBefore`가 걸린 처리 노드로 라우팅됩니다. 운영자가 `retry`로 재개하면 Program이 완료되고, `abort`로 재개하면 실패 종료 노드가 `plan.user_abort` 코드와 함께 `Failed`로 끝냅니다. |
 | 33 | [`33_program_budgets.py`](33_program_budgets.py) | yes | 바인딩된 `llm_call` 노드 둘이 각각 600토큰을 보고하고 예산은 1,000토큰이라 실행은 `BudgetExhausted`로 끝납니다. 승인된 예산과 다른 예산으로 시작한 실행은 `P_START_BUDGET`으로 거부됩니다. |
 | 34 | [`34_program_pause_resume.py`](34_program_pause_resume.py) | yes | `interruptBefore`가 b 노드 앞에서 실행을 멈추고 `host.resume(run_id, value)`가 이어 갑니다. 멈춘 시점의 trace는 `['a']`, 재개한 결과는 `['b', 'c']`이며 `main()`은 운영자의 답으로 끝납니다. |
+| 35 | [`35_program_fork.py`](35_program_fork.py) | yes | 끝난 모델 호출 옆에서 멈춘 실행을 다른 답으로 fork합니다. 끝난 호출은 체크포인트에서 재생(replay)되므로 스크립트된 모델이 받는 요청은 모두 한 번이고, fork에는 토큰이 청구되지 않습니다. |
 
 ### 프로토콜: MCP, A2A, ACP
 

@@ -106,6 +106,7 @@ python 01_minimal.py
 | 32 | [`32_program_failure_routing.py`](32_program_failure_routing.py) | yes | TEST 失败并重试两次后，最终失败被路由到带有 `interruptBefore` 的处理节点。操作员以 `retry` 恢复，Program 完成；以 `abort` 恢复，失败出口节点让 Program 以 `Failed` 和 `plan.user_abort` 结束。 |
 | 33 | [`33_program_budgets.py`](33_program_budgets.py) | yes | 两个已绑定的 `llm_call` 节点各报告 600 个 token，预算只有 1,000，运行以 `BudgetExhausted` 结束。预算与准入时不一致的运行会被 `P_START_BUDGET` 拒绝。 |
 | 34 | [`34_program_pause_resume.py`](34_program_pause_resume.py) | yes | `interruptBefore` 让运行停在节点 b 之前，`host.resume(run_id, value)` 接着运行。暂停时的 trace 是 `['a']`，恢复后是 `['b', 'c']`，`main()` 带着操作员的回答结束。 |
+| 35 | [`35_program_fork.py`](35_program_fork.py) | yes | 在已完成的模型调用旁暂停的运行，用另一个回答做 fork。已完成的调用从检查点重放，因此脚本化模型总共只收到一次请求，fork 也不会再被计入 token。 |
 
 ### 协议：MCP、A2A、ACP
 
