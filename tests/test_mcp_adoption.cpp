@@ -151,7 +151,7 @@ for line in sys.stdin:
  if 'id' not in r: continue
  method=r['method']
  if method=='initialize':
-  result={'protocolVersion':'2024-11-05','capabilities':{'tools':{}},'serverInfo':{'name':'fixture','version':'1'}}
+  result={'protocolVersion':'2025-11-25','capabilities':{'tools':{}},'serverInfo':{'name':'fixture','version':'1'}}
  elif method=='tools/list':
   if (root/'hang').exists(): time.sleep(5)
   result={'tools':[{'name':'lookup','description':'Changed' if (root/'drift').exists() else 'Bounded lookup','inputSchema':{'type':'object'}}]}

@@ -33,6 +33,7 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <vector>
 #include <string>
 #include <thread>
 
@@ -1099,4 +1100,57 @@ TEST(MCPClientAsync, StructuredContentIsCheckedAsJsonSchema2020_12) {
             << error.what();
     }
     EXPECT_NO_THROW(client.call_tool_result("draft7", json::object()));
+}
+
+// D2 / MCP-C-11: the client accepts only the revisions it supports, and
+// disconnects from a server that answers another one.
+TEST(MCPClientAsync, AcceptsOnlyKnownProtocolRevisions) {
+    for (const std::string answer : {"2025-06-18", "2025-03-26", "1999-01-01"}) {
+        httplib::Server svr;
+        std::mutex mu;
+        std::vector<std::string> versions_sent;
+        svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+            {
+                std::lock_guard lock(mu);
+                versions_sent.push_back(req.get_header_value("MCP-Protocol-Version"));
+            }
+            const auto request = json::parse(req.body);
+            if (!request.contains("id")) {
+                res.status = 202;
+                return;
+            }
+            json result = request.value("method", std::string{}) == "initialize"
+                              ? json{{"protocolVersion", answer},
+                                     {"capabilities", json::object()},
+                                     {"serverInfo", {{"name", "old"}, {"version", "1"}}}}
+                              : json{{"tools", json::array()}};
+            res.set_content(
+                json{{"jsonrpc", "2.0"}, {"id", request["id"]}, {"result", result}}.dump(),
+                "application/json");
+        });
+        ServerGuard server(svr);
+        ASSERT_TRUE(svr.is_running());
+        mcp::MCPClient client("http://127.0.0.1:" + std::to_string(server.port) + "/mcp");
+        if (answer == "1999-01-01") {
+            try {
+                client.initialize("version-test");
+                FAIL() << "accepted protocolVersion " << answer;
+            } catch (const mcp::MCPTransportError& error) {
+                EXPECT_EQ(error.failure(), mcp::MCPFailure::protocol);
+                EXPECT_NE(std::string(error.what()).find("1999-01-01"), std::string::npos);
+            }
+            EXPECT_FALSE(client.is_initialized());
+            // Disconnected: nothing more is sent.
+            EXPECT_THROW(client.list_tools(), mcp::MCPTransportError);
+            std::lock_guard lock(mu);
+            EXPECT_EQ(versions_sent.size(), 1u);
+            continue;
+        }
+        ASSERT_TRUE(client.initialize("version-test"));
+        EXPECT_EQ(client.get_initialize_result().protocol_version, answer);
+        client.list_tools();
+        std::lock_guard lock(mu);
+        ASSERT_GE(versions_sent.size(), 3u);
+        EXPECT_EQ(versions_sent.back(), answer);
+    }
 }

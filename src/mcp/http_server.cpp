@@ -253,11 +253,19 @@ struct MCPHttpServer::Impl {
         return true;
     }
 
-    bool validate_protocol_header(const httplib::Request& request,
-                                  httplib::Response&      response) const {
-        if (request.get_header_value("MCP-Protocol-Version") != MCP_PROTOCOL_VERSION) {
+    // MCP transports, "Protocol Version Header": a request after initialize
+    // carries the negotiated revision. A missing header means the negotiated
+    // one (MCP-S-08; 2025-03-26 clients never send it); any other value is
+    // 400 Bad Request.
+    bool validate_protocol_header(const httplib::Request& request, httplib::Response& response,
+                                  const Session& session) const {
+        if (!request.has_header("MCP-Protocol-Version")) return true;
+        const auto negotiated = session.server->protocol_version();
+        const auto header     = request.get_header_value("MCP-Protocol-Version");
+        if (header != (negotiated.empty() ? std::string(MCP_PROTOCOL_VERSION) : negotiated)) {
             http_error(response, 400, -32600,
-                       "MCP-Protocol-Version must be " + std::string(MCP_PROTOCOL_VERSION));
+                       "MCP-Protocol-Version must be the negotiated revision " +
+                           (negotiated.empty() ? std::string(MCP_PROTOCOL_VERSION) : negotiated));
             return false;
         }
         return true;
@@ -315,7 +323,6 @@ struct MCPHttpServer::Impl {
                 return;
             }
         } else {
-            if (!validate_protocol_header(request, response)) return;
             session = find_session(session_id);
             if (!session) {
                 http_error(response, 404, -32004, "MCP session was not found");
@@ -326,6 +333,7 @@ struct MCPHttpServer::Impl {
                            "MCP session belongs to a different authorization scope");
                 return;
             }
+            if (!validate_protocol_header(request, response, *session)) return;
         }
 
         if (!has_method) {
@@ -400,7 +408,6 @@ struct MCPHttpServer::Impl {
     void handle_delete(const httplib::Request& request, httplib::Response& response) {
         auto scope = authorize(request, response);
         if (!scope) return;
-        if (!validate_protocol_header(request, response)) return;
         const auto session_id = request.get_header_value("Mcp-Session-Id");
         auto       session    = find_session(session_id);
         if (!session) {
@@ -412,6 +419,7 @@ struct MCPHttpServer::Impl {
                        "MCP session belongs to a different authorization scope");
             return;
         }
+        if (!validate_protocol_header(request, response, *session)) return;
         erase_session(session_id);
         response.status = 204;
     }

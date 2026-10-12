@@ -159,12 +159,20 @@ TEST(MCPHttpServerTest, JsonPostLifecycleAndDeleteRoundTrip) {
     ASSERT_FALSE(session_id.empty());
     EXPECT_EQ(json::parse(initialize->body)["result"]["protocolVersion"], "2025-11-25");
 
+    // Without MCP-Protocol-Version the negotiated revision applies (MCP-S-08);
+    // another revision than the negotiated one is 400.
     auto missing_version_headers = base_headers();
     missing_version_headers.emplace("Mcp-Session-Id", session_id);
     auto missing_version = client.Post("/mcp", missing_version_headers,
-                                       request(9, "tools/list").dump(), "application/json");
+                                       request(9, "ping").dump(), "application/json");
     ASSERT_TRUE(missing_version);
-    EXPECT_EQ(missing_version->status, 400);
+    EXPECT_EQ(missing_version->status, 200);
+    auto other_version_headers = missing_version_headers;
+    other_version_headers.emplace("MCP-Protocol-Version", "2025-06-18");
+    auto other_version = client.Post("/mcp", other_version_headers,
+                                     request(19, "ping").dump(), "application/json");
+    ASSERT_TRUE(other_version);
+    EXPECT_EQ(other_version->status, 400);
 
     auto repeated_initialize =
         client.Post("/mcp", session_headers(session_id),
@@ -209,6 +217,41 @@ TEST(MCPHttpServerTest, JsonPostLifecycleAndDeleteRoundTrip) {
                                     request(2, "tools/list").dump(), "application/json");
     ASSERT_TRUE(after_delete);
     EXPECT_EQ(after_delete->status, 404);
+}
+
+TEST(MCPHttpServerTest, SessionsKeepTheRevisionTheyNegotiated) {
+    // D2: a session that negotiated 2025-06-18 expects that revision in
+    // MCP-Protocol-Version, or no header at all.
+    MCPHttpServer server(make_http_session);
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+    auto initialize = client.Post(
+        "/mcp", base_headers(),
+        request(1, "initialize", {{"protocolVersion", "2025-06-18"},
+                                  {"capabilities", json::object()},
+                                  {"clientInfo", {{"name", "older"}, {"version", "1"}}}})
+            .dump(),
+        "application/json");
+    ASSERT_TRUE(initialize);
+    ASSERT_EQ(initialize->status, 200);
+    EXPECT_EQ(json::parse(initialize->body)["result"]["protocolVersion"], "2025-06-18");
+    const auto session_id = initialize->get_header_value("Mcp-Session-Id");
+    auto with_version = [&](const char* version) {
+        auto headers = base_headers();
+        headers.emplace("Mcp-Session-Id", session_id);
+        if (version) headers.emplace("MCP-Protocol-Version", version);
+        return client.Post("/mcp", headers, request(2, "ping").dump(), "application/json");
+    };
+    auto negotiated = with_version("2025-06-18");
+    ASSERT_TRUE(negotiated);
+    EXPECT_EQ(negotiated->status, 200);
+    auto absent = with_version(nullptr);
+    ASSERT_TRUE(absent);
+    EXPECT_EQ(absent->status, 200);
+    auto newest = with_version("2025-11-25");
+    ASSERT_TRUE(newest);
+    EXPECT_EQ(newest->status, 400);
 }
 
 TEST(MCPHttpServerTest, ErrorBodiesCarryNoNullId) {

@@ -10,11 +10,13 @@
 #include <cctype>
 #include <condition_variable>
 #include <deque>
+#include <initializer_list>
 #include <iostream>
 #include <map>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -103,6 +105,44 @@ json failure_response(const std::exception_ptr& error, const graph::CancelToken&
     }
 }
 
+// A copy of an object without the named members (json has no erase).
+json without(const json& object, std::initializer_list<std::string_view> names) {
+    json copy = json::object();
+    for (auto it = object.begin(); it != object.end(); ++it) {
+        const std::string key = it.key();
+        if (std::find(names.begin(), names.end(), key) == names.end()) copy[key] = it.value();
+    }
+    return copy;
+}
+
+// A client that negotiated an older revision gets the fields that revision
+// defines (D2): 2025-06-18 has no Tool.icons or Tool.execution, and 2025-03-26
+// also no Tool.title, Tool.outputSchema, Tool._meta or
+// CallToolResult.structuredContent.
+json shaped_tool(const json& tool, const std::string& version) {
+    if (version.empty() || version == MCP_PROTOCOL_VERSION) return tool;
+    if (version == "2025-06-18") return without(tool, {"icons", "execution"});
+    return without(tool, {"icons", "execution", "title", "outputSchema", "_meta"});
+}
+
+json shaped_call_result(const json& result, const std::string& version) {
+    if (version != "2025-03-26" || !result.is_object() || !result.contains("structuredContent"))
+        return result;
+    json shaped = without(result, {"structuredContent"});
+    // Keep the data: a result without a text block carries it as text, as
+    // MCP asks of structured results for clients that cannot read them.
+    json content = shaped.contains("content") && shaped["content"].is_array() ? shaped["content"]
+                                                                               : json::array();
+    bool has_text = false;
+    for (std::size_t i = 0; i < content.size() && !has_text; ++i)
+        has_text = content[i].is_object() && content[i].value("type", "") == "text";
+    if (!has_text) {
+        content.push_back({{"type", "text"}, {"text", result["structuredContent"].dump()}});
+        shaped["content"] = std::move(content);
+    }
+    return shaped;
+}
+
 bool valid_request_id(const json& id) {
     return id.is_string() || id.is_number_integer() || id.is_number_unsigned();
 }
@@ -181,6 +221,8 @@ struct MCPServer::Impl {
     explicit Impl(MCPServerConfig value) : config(std::move(value)) {}
 
     MCPServerConfig config;
+    mutable std::mutex version_mu;
+    std::string negotiated_version;
     std::atomic<bool> initialize_seen{false};
     std::atomic<bool> operational{false};
     std::atomic<bool> running{false};
@@ -203,6 +245,11 @@ struct MCPServer::Impl {
     std::deque<std::shared_ptr<CallTask>> queue;
     std::unordered_map<std::string, std::shared_ptr<CallTask>> active;
     std::vector<std::thread> workers;
+
+    std::string protocol_version() const {
+        std::lock_guard lk(version_mu);
+        return negotiated_version;
+    }
 
     void emit(const json& envelope) noexcept {
         try {
@@ -296,7 +343,8 @@ struct MCPServer::Impl {
                 continue;
             emit(failure ? failure_response(failure, *task->cancel, client_cancelled,
                                             stopping.load(std::memory_order_acquire), task->id)
-                         : rpc_result(std::move(result_json), task->id));
+                         : rpc_result(shaped_call_result(result_json, protocol_version()),
+                                      task->id));
         }
     }
 
@@ -313,8 +361,18 @@ struct MCPServer::Impl {
                 -32602, "initialize requires protocolVersion, capabilities, and clientInfo", id);
         }
 
+        // D2: answer the revision the client asks for when this server
+        // supports it, and the newest one otherwise (MCP lifecycle, "Version
+        // Negotiation").
+        const auto requested = params["protocolVersion"].get<std::string>();
+        const std::string version =
+            is_supported_protocol_version(requested) ? requested : MCP_PROTOCOL_VERSION;
+        {
+            std::lock_guard lk(version_mu);
+            negotiated_version = version;
+        }
         json result = {
-            {"protocolVersion", MCP_PROTOCOL_VERSION},
+            {"protocolVersion", version},
             {"capabilities", {{"tools", {{"listChanged", false}}}}},
             {"serverInfo", config.server_info},
         };
@@ -337,12 +395,13 @@ struct MCPServer::Impl {
             return rpc_error(-32602, "tools/list cursor is invalid: this catalogue is unpaged", id);
         }
 
+        const auto version = protocol_version();
         json listed = json::array();
         {
             std::lock_guard lk(tools_mu);
             for (const auto& [name, tool] : tools) {
                 (void)name;
-                listed.push_back(tool.definition.to_json());
+                listed.push_back(shaped_tool(tool.definition.to_json(), version));
             }
         }
         return rpc_result({{"tools", std::move(listed)}}, id);
@@ -632,6 +691,10 @@ bool MCPServer::initialized() const {
 
 bool MCPServer::is_running() const {
     return impl_->running.load(std::memory_order_acquire);
+}
+
+std::string MCPServer::protocol_version() const {
+    return impl_->protocol_version();
 }
 
 } // namespace neograph::mcp

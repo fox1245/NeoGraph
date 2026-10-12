@@ -12,16 +12,33 @@
 #include <neograph/api.h>
 #include <neograph/types.h>
 
+#include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace neograph::mcp {
+
+/// The MCP revisions NeoGraph's server answers and its client accepts, newest
+/// first. The server negotiates the revision a client asks for when it is one
+/// of these, and the newest otherwise; the client disconnects from a server
+/// that answers any other revision.
+inline constexpr std::array<std::string_view, 3> MCP_SUPPORTED_PROTOCOL_VERSIONS = {
+    "2025-11-25", "2025-06-18", "2025-03-26"};
+
+inline bool is_supported_protocol_version(std::string_view version) noexcept {
+    return std::find(MCP_SUPPORTED_PROTOCOL_VERSIONS.begin(),
+                     MCP_SUPPORTED_PROTOCOL_VERSIONS.end(),
+                     version) != MCP_SUPPORTED_PROTOCOL_VERSIONS.end();
+}
 
 using HeaderList = std::vector<std::pair<std::string, std::string>>;
 using HeaderProvider = std::function<HeaderList()>;

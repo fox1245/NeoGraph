@@ -2004,10 +2004,25 @@ asio::awaitable<bool> detail::ProtocolSession::initialize_async(
         co_await timer.async_wait(asio::use_awaitable);
     }
 
+    bool unsupported_version = false;
     try {
         auto raw = co_await rpc_call_async(
             "initialize", initialize_params(client_name));
         auto result = decode_protocol_result<InitializeResult>(raw);
+        if (!is_supported_protocol_version(result.protocol_version)) {
+            // MCP lifecycle, "Version Negotiation": a client that does not
+            // support the server's revision SHOULD disconnect (MCP-C-11, D2).
+            std::string supported;
+            for (const auto version : MCP_SUPPORTED_PROTOCOL_VERSIONS) {
+                if (!supported.empty()) supported += ", ";
+                supported += version;
+            }
+            unsupported_version = true;
+            throw MCPTransportError(
+                MCPFailure::protocol,
+                "MCP server answered protocolVersion " + json(result.protocol_version).dump() +
+                    ", which this client does not support (supported: " + supported + ")");
+        }
         transport_->negotiated_version(result.protocol_version);
         json notification = {
             {"jsonrpc", "2.0"}, {"method", "notifications/initialized"},
@@ -2018,6 +2033,7 @@ asio::awaitable<bool> detail::ProtocolSession::initialize_async(
         co_return true;
     } catch (...) {
         reset_initialization(transport_, metadata_);
+        if (unsupported_version) shutdown();
         throw;
     }
 }

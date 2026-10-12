@@ -20,6 +20,9 @@
 
 namespace neograph::mcp {
 
+/// The newest revision the server negotiates. It also answers the older
+/// revisions in MCP_SUPPORTED_PROTOCOL_VERSIONS (types.h) when a client asks
+/// for one of them.
 inline constexpr const char* MCP_PROTOCOL_VERSION = "2025-11-25";
 
 struct NEOGRAPH_API MCPServerConfig {
@@ -91,6 +94,11 @@ class NEOGRAPH_API MCPServer {
 
     bool initialized() const;
     bool is_running() const;
+
+    /// The revision initialize negotiated: the client's when it is one of
+    /// MCP_SUPPORTED_PROTOCOL_VERSIONS, MCP_PROTOCOL_VERSION otherwise. Empty
+    /// before initialize.
+    std::string protocol_version() const;
 
   private:
     struct Impl;

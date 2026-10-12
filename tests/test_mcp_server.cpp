@@ -638,6 +638,73 @@ TEST(MCPServerTest, RefusesSchemasAndNamesOfficialClientsReject) {
     EXPECT_NO_THROW(server.register_tool(with(std::string(128, 'y'), {{"type", "object"}}), handler));
 }
 
+TEST(MCPServerTest, NegotiatesTheOlderRevisionsItSupports) {
+    // D2: the server answers 2025-06-18 and 2025-03-26 when a client asks for
+    // them, with the fields those revisions define, and the newest revision
+    // for any other request.
+    auto serve = [](const std::string& requested, std::string& negotiated, json& tools,
+                    json& structured_call, json& plain_call) {
+        CapturingSink captured;
+        MCPServer server(config());
+        server.set_response_sink(captured.sink());
+        server.register_tool(echo_definition(),
+            [](const json& arguments, const auto&) { return echo_result(arguments); });
+        auto only_structured = echo_definition();
+        only_structured.name = "structured_only";
+        server.register_tool(only_structured, [](const json& arguments, const auto&) {
+            CallToolResult result;
+            result.structured_content = {{"echoed", arguments.at("value")}};
+            return result;
+        });
+        auto init = server.handle_message(request(1, "initialize", {
+            {"protocolVersion", requested},
+            {"capabilities", json::object()},
+            {"clientInfo", {{"name", "old-client"}, {"version", "1"}}},
+        }));
+        negotiated = init["result"]["protocolVersion"].get<std::string>();
+        EXPECT_EQ(server.protocol_version(), negotiated);
+        server.handle_message(notification("notifications/initialized"));
+        tools = server.handle_message(request(2, "tools/list"))["result"]["tools"];
+        server.handle_message(request(3, "tools/call", {{"name", "echo"},
+                                                        {"arguments", {{"value", "a"}}}}));
+        server.handle_message(request(4, "tools/call", {{"name", "structured_only"},
+                                                        {"arguments", {{"value", "b"}}}}));
+        structured_call = captured.wait_for(3)["result"];
+        plain_call = captured.wait_for(4)["result"];
+    };
+    std::string negotiated;
+    json tools, echo, only;
+
+    serve("2025-11-25", negotiated, tools, echo, only);
+    EXPECT_EQ(negotiated, "2025-11-25");
+    EXPECT_TRUE(tools[0].contains("icons"));
+    EXPECT_TRUE(tools[0].contains("execution"));
+
+    serve("2025-06-18", negotiated, tools, echo, only);
+    EXPECT_EQ(negotiated, "2025-06-18");
+    EXPECT_FALSE(tools[0].contains("icons"));
+    EXPECT_FALSE(tools[0].contains("execution"));
+    EXPECT_TRUE(tools[0].contains("title"));
+    EXPECT_TRUE(tools[0].contains("outputSchema"));
+    EXPECT_EQ(echo["structuredContent"]["echoed"], "a");
+
+    serve("2025-03-26", negotiated, tools, echo, only);
+    EXPECT_EQ(negotiated, "2025-03-26");
+    for (const char* field : {"icons", "execution", "title", "outputSchema", "_meta"})
+        EXPECT_FALSE(tools[0].contains(field)) << field;
+    EXPECT_TRUE(tools[0].contains("annotations"));
+    EXPECT_FALSE(echo.contains("structuredContent"));
+    EXPECT_EQ(echo["content"][0]["text"], "a");
+    // A result with only structured data keeps it as text.
+    EXPECT_FALSE(only.contains("structuredContent"));
+    EXPECT_EQ(json::parse(only["content"][0]["text"].get<std::string>()), json({{"echoed", "b"}}));
+
+    serve("2024-11-05", negotiated, tools, echo, only);
+    EXPECT_EQ(negotiated, "2025-11-25");
+    serve("1999-01-01", negotiated, tools, echo, only);
+    EXPECT_EQ(negotiated, "2025-11-25");
+}
+
 TEST(MCPServerTest, StdioWritesOnlyJsonRpcFramesAndLogsToStderr) {
     MCPServer server(config());
     server.register_tool(echo_definition(),
