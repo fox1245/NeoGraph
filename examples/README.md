@@ -121,6 +121,7 @@ Program wraps a Core graph in a lifecycle with durable identities, budgets and a
 | 63 | [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | yes | Compile a `ProgramSource` with one `call_core` operation, admit it, run it through `ProgramRuntime`. |
 | 64 | [`64_topology_retrieval.cpp`](64_topology_retrieval.cpp) | yes | A retrieved topology candidate becomes a verified migration of one running lineage at a durable safe point. |
 | 65 | [`65_program_javascript.cpp`](65_program_javascript.cpp) | yes | A C++ host compiles a JavaScript Program with `define()` and `main()` and runs it. `main()` calls the graph twice with `ng.callCore`: 21 becomes 42, then 84. |
+| 66 | [`66_program_failure_routing.cpp`](66_program_failure_routing.cpp) | yes | The C++ twin of Python 32. TEST throws a `NodeFailureError` with an author code, is retried twice and routed to a handler with `interruptBefore`. `resume` with `retry` completes the Program; `abort` ends it `failed` with `plan.user_abort`. |
 | 32 | [`32_evolution.cpp`](32_evolution.cpp) | yes | Harness evolution loop: mutate a strict Core seed against a task and print the lineage as JSON (`--smoke` uses a built-in fixture). |
 | 58 | [`58_harness_bench.cpp`](58_harness_bench.cpp) | yes | Harness convergence benchmark over three feedback modes; `--smoke` runs a built-in task. |
 | 60 | [`60_harness_mcp_server.cpp`](60_harness_mcp_server.cpp) | yes | The Harness MCP server: six tools compile and run a bounded multi-worker workflow. `NEOGRAPH_HARNESS_SMOKE=1` swaps in an offline fixture provider. |
