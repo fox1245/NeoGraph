@@ -697,7 +697,7 @@ The [pybind11 GIL documentation](https://pybind11.readthedocs.io/en/stable/advan
 
 ### Native A2A discovery and streaming
 
-`a2a.WireDialect` is `V0_3/V1_0`. `client.wire_dialect()` returns `None` after construction or forced card fetch until a card-selected RPC or successful probe. `AgentCard.supported_interfaces` contains detached `AgentInterface` records with `url`, `protocol_binding`, `protocol_version`, `tenant`; `card.raw` is observational JSON. The native client selects compatible JSONRPC interfaces, preferring its normalized base URL; card URLs never redirect the RPC endpoint. Without a card, only numeric RPC error `-32601` permits a dialect probe; card-selected calls do not fallback. `a2a.A2ARpcError` retains the actual integer `.code`.
+`a2a.WireDialect` is `V1_0` (primary) or `V0_3` (compatibility). `client.wire_dialect()` returns `None` after construction or forced card fetch until a card-selected RPC or successful probe. `AgentCard.supported_interfaces` contains detached `AgentInterface` records with `url`, `protocol_binding`, `protocol_version`, `tenant`; `card.raw` is observational JSON. Before its first call the native client fetches the card and selects a compatible JSONRPC interface, preferring its normalized base URL. RPCs go to that interface's URL when it has the base URL's origin; `client.set_allow_cross_origin_interfaces(True)` lets a card name another origin, and `client.endpoint_url()` reports the endpoint in use. Only when no card can be fetched does the client probe, 1.0 first, falling back to 0.3 on `-32601`, `-32009` or HTTP 400; card-selected calls do not fallback. Message ids are random UUIDs. `a2a.A2ARpcError` retains the actual integer `.code`.
 
 ```python
 from neograph_engine import a2a

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=317edfd57348541babbe80e0f232a1a47fc5ad73312f2ee72058b65c59341b4d -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=d51f941ee43cf4aa7a4d5561b6e23c63b2966d8693573cd32e28e5e4eea019d6 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3382,15 +3382,45 @@ pointer to that canonical source-level reference.
 ### `neograph::a2a` — Agent-to-Agent protocol
 
 **Header:** `<neograph/a2a/{client,server,types,a2a_caller_node}.h>`
-`A2AClient`와 `GraphAgentAdapter`는 `WireDialect::{V0_3,V1_0}`의 JSON-RPC 2.0 HTTP/SSE를 구현한다. `AgentCard.supported_interfaces`는 현대/legacy card에서 파싱한 순서 있는 `AgentInterface{url, protocol_binding, protocol_version, tenant}` 관측이며 raw card도 보존한다. 선택은 lazy: compatible JSONRPC 0.x/1.x 중 첫 interface, 설정 base URL과 trailing-slash 정규화 후 일치하는 것을 우선한다. card URL로 RPC endpoint를 redirect하지 않는다. 선택 tenant는 send/get/cancel/stream에 적용한다. `wire_dialect()`는 선택·성공 probe 전까지 비어 있고 force discovery가 초기화한다. fetched incompatible card는 다른 dialect probe 없이 거부한다.
+`A2AServer`는 graph(또는 admitted `ProgramVersion`)를 HTTP와 SSE 기반 A2A JSON-RPC binding으로 노출하고, `A2AClient`는 원격 agent를 호출한다. A2A 1.0(v1.0.1)이 기본 버전이고 0.3은 호환 dialect다(`WireDialect::{V1_0,V0_3}`). 공식 SDK(a2a-sdk 1.2.2, @a2a-js/sdk 1.3.0과 0.3.14)가 `bindings/python/tests/interop/a2a_suite`에서 양방향을 시험한다.
 
-card 없이는 0.3을 probe하고 숫자 JSON-RPC `-32601`에서만 전환하며 성공 dialect를 기억한다. method/body/header를 함께 바꾼다. V1은 PascalCase, `A2A-Version: 1.0`, `ROLE_*`/`TASK_STATE_*`, `kind` 없는 flat text/raw/url/data part와 `blocking`을 반전한 `returnImmediately`를 쓴다. task/message wrapper와 bare get/cancel task를 decode한다. server 응답 encoding은 method spelling이 아니라 version header로 결정한다. header 없음은 0.3, 미지원 major는 `-32009`; 기본 card는 둘 다 광고한다. bound discovery URL은 restart를 보존하며 explicit endpoint를 대체하지 않는다.
+#### A2A 버전 정책
 
-SSE는 LF/CRLF/CR, comment, multiline data, 마지막 unterminated data를 처리한다. opening task, status, artifact append/replace를 누적해 Task를 반환한다. V1은 opening submitted task와 artifact 뒤 terminal status를 보내며 legacy `kind`/`final`/trailing task가 필요 없다. event를 관측하면 external callback이 없어도 dialect redispatch를 금지한다. non-SSE RPC error는 `A2ARpcError::code()`를 보존하고 non-2xx HTTP를 성공 task로 바꾸지 않는다.
+- **요청.** server는 각 요청을 header 또는 `A2A-Version` query parameter의 `A2A-Version`이 지정한 dialect로 응답한다. 버전이 없으면 0.3이다(spec §3.6.2). Major.Minor `1.0`과 `0.3`만 지원하며 patch는 무시한다. `0.2`, `1.5`, `2.0` 같은 다른 값은 지원 버전을 명시한 VersionNotSupportedError(`-32009`)를 받는다. 두 method 표기(`SendMessage`, `message/send`)는 어느 버전에서도 받는다.
+- **Card.** card는 버전별로 제공한다. `A2A-Version: 1.0`은 순수 1.0 `AgentCard`를 받고, 버전 없는 요청은 0.3 card를 받는다. 0.3 card도 `supportedInterfaces` 첫 항목으로 1.0 interface를 나열한다. 응답에는 `ETag`, `Cache-Control: public, max-age=300`, `Vary: A2A-Version`이 붙고 `If-None-Match`에는 304로 답한다. `AgentCard::url`을 설정하지 않으면 card는 client가 사용한 주소를 광고한다. 모든 skill은 tag를 하나 이상 갖는다. card는 구현하지 않은 push notification, extended card, HTTP+JSON·gRPC binding을 주장하지 않는다.
+- **Client.** client는 첫 호출 전에 card를 가져와 `1.x` 또는 `0.x` 버전의 첫 JSONRPC interface를 선택하며, URL이 client의 `base_url`과 같은 interface를 우선한다. card를 가져올 수 없을 때만 probe한다. 1.0을 먼저 보내고 `-32601`, `-32009`, HTTP 400이면 0.3으로 바꾸며 결과를 기억한다. RPC는 선택한 interface URL이 `base_url`과 같은 origin이면 그 URL로 가므로 endpoint가 `/a2a/v1`인 agent도 동작한다. `set_allow_cross_origin_interfaces(true)`로 허용하지 않으면 card는 client를 다른 origin으로 보낼 수 없고, 이때 RPC는 `base_url`로 간다. `endpoint_url()`은 사용 중인 endpoint를 알려 주며 message id는 random UUID다.
+- **0.3.** 0.3은 같은 의미를 가진 호환 dialect로 남는다. 새 기능은 1.0을 대상으로 한다.
 
-caller node 답 우선순위는 final/interrupted agent status text, 첫 artifact text, 마지막 agent history text다. progress status나 user history는 답을 덮지 않는다. 일반 `async_post_stream`은 nonempty fixed-`Content-Length` body를 status와 함께 한 번 전달하고 zero length는 chunk를 내지 않는다. body limit/early EOF/이미 buffer된 surplus는 거부한다. redirect/chunked/close-delimited 규칙은 유지한다.
+#### Task와 method
 
-Python `neograph_engine.a2a`는 `WireDialect`, `AgentInterface`, `AgentCard.supported_interfaces`/`raw`, `Part.media_type`, `MessageSendConfiguration`, `MessageSendParams`, `StreamEvent`와 status/artifact record를 제공한다. `A2AClient.wire_dialect()`는 enum 또는 `None`; `set_authorization_header()`는 실제 native setter; `send_message(params)`는 multipart overload다. `send_message_stream(text, on_event, task_id="", context_id="")` 또는 `(params, on_event)`는 누적 `Task`를 반환하고 bool callback에 owned event snapshot을 준다. blocking call은 GIL을 해제하며 callback owner는 안전하게 재획득한다. `a2a.A2ARpcError.code`는 remote 정수 code다. vector/optional child는 detached snapshot, `Task.status`와 `MessageSendParams.message`는 live inline field다. JSON 관측은 provider native 권한을 주지 않는다.
+모든 run은 자체 worker thread에서 실행된다. stream이나 blocking send는 이를 관찰할 뿐이므로 task는 끊긴 연결보다 오래 산다. `SendMessage`는 task가 terminal 또는 interrupted 상태가 될 때까지 block하지만, `returnImmediately`(0.3 `blocking: false`)를 주면 SUBMITTED task를 즉시 반환한다. `SendStreamingMessage`와 `SubscribeToTask`(0.3 `tasks/resubscribe`)는 Task를 먼저 보내고 status·artifact update를 이어 보내며 terminal 또는 interrupted 상태에서 닫힌다. 0.3 stream은 `final: true`로 끝난다. `GetTask`와 `ListTasks`는 `historyLength`를 따른다(0이면 history 생략). `ListTasks`는 `contextId`, `status`, `statusTimestampAfter`로 거르고 `pageSize`(1~100, 기본 50)와 `pageToken`으로 최신순 paging하며, `includeArtifacts`가 없으면 artifact를 생략한다. 모든 status에는 timestamp가 붙는다.
+
+task id는 server가 생성한다. 모르는 `taskId`를 가진 message는 `-32001`, terminal task는 `-32004`, task와 다른 `contextId`는 `-32602`, 아직 실행 중인 task는 `-32603`으로 실패한다. INPUT_REQUIRED task에 보낸 message는 interrupt가 저장한 checkpoint에서 run을 재개한다. `GraphAgentAdapter::build_resume_value`가 message를 resume value로 바꾸며, checkpoint store가 없는 engine은 그 message를 input으로 graph를 다시 실행한다. NeoGraph collaboration envelope는 발신자가 정한 idempotent task id를 유지한다. 요청은 dialect별로 검증하며 위반은 `google.rpc.BadRequest` field violation과 함께 `-32602`를 받고, 모든 error는 `google.rpc.ErrorInfo` detail을 담는다. `CollaborationAuthenticator`가 있으면 card는 Bearer security scheme을 선언하고, 요청 인증이 필수면 전역 requirement도 선언한다. credential이 없으면 `WWW-Authenticate`와 함께 HTTP 401, 인증됐지만 collaboration link를 쓸 수 없는 peer는 HTTP 403을 받는다.
+
+#### A2A error 매핑
+
+peer에는 typed field만 전달된다. 실패의 public message(`NodeFailureError::public_message` 또는 class의 일반 문구)와 `metadata["neograph/failure"] = {code, retryable}`이다. exception text는 절대 전달되지 않는다.
+
+| NeoGraph 결과 | A2A 결과 |
+|---|---|
+| Completed | `COMPLETED`; agent 답을 status message로, adapter artifact |
+| Cancelled (`CancelTask`) | `CANCELED`; stream도 이 상태로 닫힘 |
+| Hook blocked (`NG.HookBlocked`) | 끝난 node가 없으면 `REJECTED`, 그 외 `FAILED` |
+| Interrupted (`NodeInterrupt`) | `INPUT_REQUIRED`; reason은 text, payload는 data part; `metadata["neograph/interrupt"] = {node, checkpointId}`; 후속 message가 run을 재개 |
+| run을 끝낸 node 또는 tool 실패 (`NG.TaskFailed`, author code) | `FAILED`, author의 public message가 있으면 그 문구 |
+| Timeout (`NG.Timeout`), provider 실패 (`NG.ProviderFailed`) | `FAILED`, `retryable: true` |
+| Budget (`NG.BudgetExhausted`), safety (`NG.SafetyBlocked`), configuration, logic, uncertain effect, unknown | class code와 함께 `FAILED` |
+| Step limit | `FAILED`, code `NG.StepLimit` |
+| Failure exit | exit가 선언한 code와 함께 `FAILED` |
+| in-flight 한도 도달 | JSON-RPC `-32603`, ErrorInfo reason `RESOURCE_EXHAUSTED` |
+| terminal task의 cancel | `-32002` TaskNotCancelableError; task는 변하지 않음 |
+| push notification 설정; extended card; streaming 비활성 | `-32003`; `-32004`; `-32004` |
+
+#### Client stream과 Python
+
+SSE는 LF/CRLF/CR, comment, multiline data, 마지막 unterminated data를 처리한다. opening task snapshot, status update(metadata 포함), artifact append/replace update를 누적해 반환 task를 만든다. event를 관측하면 external callback이 없어도 dialect redispatch를 금지한다. non-SSE RPC error는 `A2ARpcError::code()`로 code를 보존하고, non-2xx HTTP는 성공 task가 될 수 없다. caller node 답 우선순위는 final/interrupted agent status text, 첫 artifact text, 마지막 agent history text이며 progress status나 user history는 답을 덮지 않는다. 일반 `async_post_stream`은 nonempty fixed-`Content-Length` body를 status와 함께 한 번 전달하고 zero length는 chunk를 내지 않는다. body limit, early EOF, 이미 buffer된 surplus는 거부한다. redirect/chunked/close-delimited 규칙은 그대로다.
+
+Python `neograph_engine.a2a`는 `WireDialect`, `AgentInterface`, `AgentCard.supported_interfaces`/`raw`, `Part.media_type`, `MessageSendConfiguration`, `MessageSendParams`, `StreamEvent`와 status/artifact record를 제공한다. `A2AClient.wire_dialect()`는 enum 또는 `None`을 반환하고, `set_authorization_header()`, `set_allow_cross_origin_interfaces()`, `endpoint_url()`은 native client와 같다. `send_message(params)`는 multipart overload다. `send_message_stream(text, on_event, task_id="", context_id="")` 또는 `(params, on_event)`는 누적 `Task`를 반환하고 bool을 돌려주는 callback에 owned event snapshot을 전달한다. blocking call은 GIL을 해제한다. `a2a.A2ARpcError.code`는 원격 정수 code를 보존한다.
 
 **공개 헤더:** [`include/neograph/a2a/`](../include/neograph/a2a/).
 

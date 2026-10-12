@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=317edfd57348541babbe80e0f232a1a47fc5ad73312f2ee72058b65c59341b4d -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=d51f941ee43cf4aa7a4d5561b6e23c63b2966d8693573cd32e28e5e4eea019d6 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -3004,18 +3004,50 @@ sp::runtime::Result run_mcp_agent(
 `include/neograph/` 以下のヘッダーには、上で扱っていない公開 API も含まれています。
 以下の各節は、その正式なソースレベルリファレンスへの短い案内です。
 ### `neograph::a2a` — Agent-to-Agent プロトコル
+
 **ヘッダー:** `<neograph/a2a/{client,server,types,a2a_caller_node}.h>`
-`A2AClient` と `GraphAgentAdapter` は `WireDialect::{V0_3,V1_0}` の JSON-RPC 2.0 HTTP/SSE を実装します。`AgentCard.supported_interfaces` は新旧 card から解析した順序付き `AgentInterface{url, protocol_binding, protocol_version, tenant}` 観測で、raw card も保持します。遅延選択は compatible JSONRPC 0.x/1.x の最初の interface、設定 base URL と末尾 slash 正規化後に一致するものを優先します。card URL は RPC endpoint を redirect しません。tenant は send/get/cancel/stream に適用します。`wire_dialect()` は選択・成功 probe まで空、force discovery が初期化します。取得済み incompatible card は別 dialect を probe せず拒否します。
+`A2AServer` は graph(または admitted な `ProgramVersion`)を HTTP と SSE による A2A JSON-RPC binding で公開し、`A2AClient` はリモート agent を呼び出します。A2A 1.0(v1.0.1)が主要バージョンで、0.3 は互換 dialect です(`WireDialect::{V1_0,V0_3}`)。公式 SDK(a2a-sdk 1.2.2、@a2a-js/sdk 1.3.0 と 0.3.14)が `bindings/python/tests/interop/a2a_suite` で双方向を検証します。
 
-card なしでは 0.3 を probe し、数値 JSON-RPC `-32601` の場合だけ切替えて成功 dialect を記憶します。method/body/header は同時に変わります。V1 は PascalCase、`A2A-Version: 1.0`、`ROLE_*`/`TASK_STATE_*`、`kind` のない flat text/raw/url/data part、`blocking` を反転した `returnImmediately` です。task/message wrapper と bare get/cancel task を decode します。server の応答 encoding は method spelling でなく version header に従い、header なしは 0.3、非対応 major は `-32009`、既定 card は両方を広告します。bound discovery URL は restart を保持し explicit endpoint を置換しません。
+#### A2A バージョンポリシー
 
-SSE は LF/CRLF/CR、comment、multiline data、最後の unterminated data を処理します。opening task、status、artifact append/replace を蓄積して Task を返します。V1 は opening submitted task と artifact の後に terminal status を送り、legacy `kind`/`final`/trailing task は不要です。event 観測後は external callback がなくても dialect redispatch を禁止します。non-SSE RPC error は `A2ARpcError::code()` を保持し、non-2xx HTTP は成功 task になりません。
+- **リクエスト.** server は各リクエストに、header または `A2A-Version` query parameter の `A2A-Version` が示す dialect で応答します。バージョンがなければ 0.3 です(spec §3.6.2)。Major.Minor の `1.0` と `0.3` だけを扱い、patch は無視します。`0.2`、`1.5`、`2.0` などそれ以外は、対応バージョンを示す VersionNotSupportedError(`-32009`)になります。両方の method 表記(`SendMessage`、`message/send`)をどちらのバージョンでも受け付けます。
+- **Card.** card はバージョンごとに提供します。`A2A-Version: 1.0` には純粋な 1.0 `AgentCard` を返し、バージョンのないリクエストには 0.3 card を返します。0.3 card も `supportedInterfaces` の先頭に 1.0 interface を載せます。応答には `ETag`、`Cache-Control: public, max-age=300`、`Vary: A2A-Version` が付き、`If-None-Match` には 304 で応えます。`AgentCard::url` を設定しない場合、card は client が使ったアドレスを広告します。すべての skill は少なくとも 1 つの tag を持ちます。card は実装していない push notification、extended card、HTTP+JSON・gRPC binding を主張しません。
+- **Client.** client は最初の呼び出しの前に card を取得し、`1.x` または `0.x` バージョンの最初の JSONRPC interface を選びます。URL が client の `base_url` と一致する interface を優先します。card を取得できない場合だけ probe します。まず 1.0 を送り、`-32601`、`-32009`、HTTP 400 なら 0.3 に切り替えて結果を記憶します。選んだ interface URL が `base_url` と同じ origin なら RPC はその URL に送られるので、endpoint が `/a2a/v1` の agent も動作します。`set_allow_cross_origin_interfaces(true)` で許可しない限り card は client を別 origin に向けられず、その場合 RPC は `base_url` に送られます。`endpoint_url()` は使用中の endpoint を返し、message id はランダムな UUID です。
+- **0.3.** 0.3 は同じ意味を持つ互換 dialect として残ります。新機能は 1.0 を対象にします。
 
-caller node の回答優先順位は final/interrupted agent status text、最初の artifact text、最後の agent history text です。progress status や user history は回答を上書きしません。汎用 `async_post_stream` は nonempty fixed-`Content-Length` body を status とともに一度渡し、zero length は chunk を出しません。body limit/early EOF/既に buffer された surplus は拒否し、redirect/chunked/close-delimited 規則は維持します。
+#### Task と method
 
-Python `neograph_engine.a2a` は `WireDialect`, `AgentInterface`, `AgentCard.supported_interfaces`/`raw`, `Part.media_type`, `MessageSendConfiguration`, `MessageSendParams`, `StreamEvent` と status/artifact record を公開します。`A2AClient.wire_dialect()` は enum または `None`、`set_authorization_header()` は native setter、`send_message(params)` は multipart overload です。`send_message_stream(text, on_event, task_id="", context_id="")` または `(params, on_event)` は蓄積 `Task` を返し bool callback に owned event snapshot を渡します。blocking call は GIL を解放し callback owner は安全に再取得します。`a2a.A2ARpcError.code` は remote 整数 code です。vector/optional child は detached snapshot、`Task.status` と `MessageSendParams.message` は live inline field です。JSON 観測は provider native 権限を付与しません。
+すべての run は専用の worker thread で実行されます。stream や blocking send はそれを観測するだけなので、task は切断された接続より長く存続します。`SendMessage` は task が terminal または interrupted になるまで block しますが、`returnImmediately`(0.3 では `blocking: false`)を指定すると SUBMITTED の task を即座に返します。`SendStreamingMessage` と `SubscribeToTask`(0.3 では `tasks/resubscribe`)は Task を最初に送り、続けて status・artifact update を送り、terminal または interrupted の状態で閉じます。0.3 の stream は `final: true` で終わります。`GetTask` と `ListTasks` は `historyLength` に従います(0 なら history を省略)。`ListTasks` は `contextId`、`status`、`statusTimestampAfter` で絞り込み、`pageSize`(1〜100、既定 50)と `pageToken` で新しい順にページングし、`includeArtifacts` がなければ artifact を省略します。すべての status に timestamp が付きます。
+
+task id は server が生成します。未知の `taskId` を持つ message は `-32001`、terminal な task は `-32004`、task と異なる `contextId` は `-32602`、まだ実行中の task は `-32603` で失敗します。INPUT_REQUIRED の task に送った message は、interrupt が保存した checkpoint から run を再開します。`GraphAgentAdapter::build_resume_value` が message を resume value に変換し、checkpoint store を持たない engine はその message を input として graph を再実行します。NeoGraph の collaboration envelope は送信者が決めた冪等な task id を保ちます。リクエストは dialect ごとに検証し、違反は `google.rpc.BadRequest` の field violation 付きで `-32602` になり、すべての error は `google.rpc.ErrorInfo` detail を持ちます。`CollaborationAuthenticator` がある場合、card は Bearer security scheme を宣言し、リクエストの認証が必須なら全体の requirement も宣言します。credential がなければ `WWW-Authenticate` 付きの HTTP 401、認証済みでも collaboration link を使えない peer は HTTP 403 になります。
+
+#### A2A エラーマッピング
+
+peer に届くのは型付きの項目だけです。失敗の public message(`NodeFailureError::public_message` または class の汎用文言)と `metadata["neograph/failure"] = {code, retryable}` です。例外テキストは決して届きません。
+
+| NeoGraph の結果 | A2A の結果 |
+|---|---|
+| Completed | `COMPLETED`; agent の回答を status message に、adapter の artifact |
+| Cancelled (`CancelTask`) | `CANCELED`; stream もこの状態で閉じる |
+| Hook blocked (`NG.HookBlocked`) | 完了した node がなければ `REJECTED`、それ以外は `FAILED` |
+| Interrupted (`NodeInterrupt`) | `INPUT_REQUIRED`; reason を text、payload を data part に; `metadata["neograph/interrupt"] = {node, checkpointId}`; 後続の message が run を再開 |
+| run を終わらせた node または tool の失敗 (`NG.TaskFailed`、author code) | `FAILED`、author の public message があればその文言 |
+| Timeout (`NG.Timeout`)、provider の失敗 (`NG.ProviderFailed`) | `FAILED`、`retryable: true` |
+| Budget (`NG.BudgetExhausted`)、safety (`NG.SafetyBlocked`)、configuration、logic、uncertain effect、unknown | class code 付きの `FAILED` |
+| Step limit | `FAILED`、code `NG.StepLimit` |
+| Failure exit | exit が宣言した code 付きの `FAILED` |
+| in-flight 上限に到達 | JSON-RPC `-32603`、ErrorInfo reason `RESOURCE_EXHAUSTED` |
+| terminal な task の cancel | `-32002` TaskNotCancelableError; task は変わらない |
+| push notification 設定; extended card; streaming 無効 | `-32003`; `-32004`; `-32004` |
+
+#### Client の stream と Python
+
+SSE は LF/CRLF/CR、comment、multiline data、最後の unterminated data を処理します。opening task snapshot、status update(metadata を含む)、artifact の append/replace update を蓄積して返す task を作ります。event を観測すると external callback がなくても dialect の再送を禁止します。non-SSE の RPC error は `A2ARpcError::code()` で code を保持し、non-2xx の HTTP が成功 task になることはありません。caller node の回答優先順位は final/interrupted agent status text、最初の artifact text、最後の agent history text で、progress status や user history は回答を上書きしません。汎用の `async_post_stream` は空でない固定 `Content-Length` の body を status とともに一度渡し、長さ 0 では chunk を出しません。body limit、early EOF、既に buffer された余剰は拒否します。redirect/chunked/close-delimited の規則は変わりません。
+
+Python の `neograph_engine.a2a` は `WireDialect`、`AgentInterface`、`AgentCard.supported_interfaces`/`raw`、`Part.media_type`、`MessageSendConfiguration`、`MessageSendParams`、`StreamEvent` と status/artifact record を提供します。`A2AClient.wire_dialect()` は enum または `None` を返し、`set_authorization_header()`、`set_allow_cross_origin_interfaces()`、`endpoint_url()` は native client と同じです。`send_message(params)` は multipart overload です。`send_message_stream(text, on_event, task_id="", context_id="")` または `(params, on_event)` は蓄積した `Task` を返し、bool を返す callback に owned event snapshot を渡します。blocking call は GIL を解放します。`a2a.A2ARpcError.code` はリモートの整数 code を保持します。
 
 **公開ヘッダー:** [`include/neograph/a2a/`](../include/neograph/a2a/)。
+
 ### `neograph::acp` — Agent Client Protocol
 **ヘッダー:** `<neograph/acp/{server,types}.h>`
 stdio 上の改行区切り JSON によるエディター↔エージェント JSON-RPC です (Zed、

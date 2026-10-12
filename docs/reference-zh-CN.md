@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=317edfd57348541babbe80e0f232a1a47fc5ad73312f2ee72058b65c59341b4d -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=d51f941ee43cf4aa7a4d5561b6e23c63b2966d8693573cd32e28e5e4eea019d6 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3336,17 +3336,47 @@ sp::runtime::Result run_mcp_agent(
 ### `neograph::a2a` — Agent 到 Agent 协议
 
 **头文件：** `<neograph/a2a/{client,server,types,a2a_caller_node}.h>`
-`A2AClient` 与 `GraphAgentAdapter` 实现 `WireDialect::{V0_3,V1_0}` JSON-RPC 2.0 HTTP/SSE。`AgentCard.supported_interfaces` 为从新旧 card 解析的有序 `AgentInterface{url, protocol_binding, protocol_version, tenant}` 观测，raw card 保留。延迟选择首个 compatible JSONRPC 0.x/1.x interface，优先尾 slash 规范化后匹配配置 base URL 的项。card URL 不重定向 RPC endpoint。tenant 传至 send/get/cancel/stream。`wire_dialect()` 在选择或成功 probe 前为空，force discovery 重置。已取得 incompatible card 时直接拒绝，不 probe 其他 dialect。
+`A2AServer` 通过基于 HTTP 和 SSE 的 A2A JSON-RPC binding 公开一个 graph（或已准入的 `ProgramVersion`），`A2AClient` 调用远程 agent。A2A 1.0（v1.0.1）是主版本，0.3 是兼容 dialect（`WireDialect::{V1_0,V0_3}`）。官方 SDK（a2a-sdk 1.2.2、@a2a-js/sdk 1.3.0 和 0.3.14）在 `bindings/python/tests/interop/a2a_suite` 中测试两个方向。
 
-无 card 时 probe 0.3，仅数字 JSON-RPC `-32601` 才切换，并记住成功 dialect。切换同时修改 method/body/header。V1 用 PascalCase、`A2A-Version: 1.0`、`ROLE_*`/`TASK_STATE_*`、不带 `kind` 的 flat text/raw/url/data part，以及反转 `blocking` 的 `returnImmediately`。解析 task/message wrapper 与 bare get/cancel task。server 响应编码按 version header，而非 method spelling：无 header 为 0.3，不支持 major 返回 `-32009`；默认 card 广告两者。bound discovery URL 保留 restart 行为，不覆盖 explicit endpoint。
+#### A2A 版本策略
 
-SSE 接受 LF/CRLF/CR、comment、multiline data、最后未终止 data。opening task、status、artifact append/replace 累积为返回 Task。V1 在 opening submitted task 与 artifact 后发送 terminal status，无需 legacy `kind`/`final`/trailing task。观察到 event 后，即使无 external callback 也禁止 dialect redispatch。non-SSE RPC error 保留 `A2ARpcError::code()`；non-2xx HTTP 不成为成功 task。
+- **请求。** server 按 header 或 `A2A-Version` query parameter 中的 `A2A-Version` 所指定的 dialect 应答每个请求。没有版本即为 0.3（spec §3.6.2）。只支持 Major.Minor `1.0` 和 `0.3`，忽略 patch；`0.2`、`1.5`、`2.0` 等其他值得到列出所支持版本的 VersionNotSupportedError（`-32009`）。两种 method 写法（`SendMessage`、`message/send`）在任一版本下都接受。
+- **Card。** card 按版本提供。`A2A-Version: 1.0` 得到纯 1.0 `AgentCard`；不带版本的请求得到 0.3 card，0.3 card 仍在 `supportedInterfaces` 中首先列出 1.0 interface。响应带有 `ETag`、`Cache-Control: public, max-age=300` 和 `Vary: A2A-Version`，`If-None-Match` 得到 304。未配置 `AgentCard::url` 时，card 公布 client 所用的地址。每个 skill 至少有一个 tag。card 从不声明未实现的 push notification、extended card 以及 HTTP+JSON 和 gRPC binding。
+- **Client。** client 在第一次调用前获取 card，选择第一个版本为 `1.x` 或 `0.x` 的 JSONRPC interface，并优先选择 URL 与 client 的 `base_url` 相同的 interface。只有无法获取 card 时才探测：先发 1.0，遇到 `-32601`、`-32009` 或 HTTP 400 后改用 0.3，并记住结果。所选 interface URL 与 `base_url` 同源时，RPC 发往该 URL，因此 endpoint 为 `/a2a/v1` 的 agent 也能工作。除非通过 `set_allow_cross_origin_interfaces(true)` 允许，card 无法把 client 引向其他源，此时 RPC 发往 `base_url`。`endpoint_url()` 返回正在使用的 endpoint，message id 是随机 UUID。
+- **0.3。** 0.3 作为语义相同的兼容 dialect 保留。新功能以 1.0 为目标。
 
-caller node 回答优先级为 final/interrupted agent status text、首个 artifact text、最后 agent history text。progress status 或 user history 不覆盖答案。通用 `async_post_stream` 对 nonempty fixed-`Content-Length` body 保留 status 并传递一次；zero length 不发 chunk。body limit/early EOF/已缓冲 surplus 拒绝，redirect/chunked/close-delimited 规则不变。
+#### Task 与 method
 
-Python `neograph_engine.a2a` 公开 `WireDialect`, `AgentInterface`, `AgentCard.supported_interfaces`/`raw`, `Part.media_type`, `MessageSendConfiguration`, `MessageSendParams`, `StreamEvent` 和 status/artifact record。`A2AClient.wire_dialect()` 返回 enum 或 `None`；`set_authorization_header()` 为 native setter；`send_message(params)` 为 multipart overload。`send_message_stream(text, on_event, task_id="", context_id="")` 或 `(params, on_event)` 返回累积 `Task`，向 bool callback 传递 owned event snapshot。blocking call 释放 GIL，callback owner 安全重获 GIL。`a2a.A2ARpcError.code` 保留 remote 整数 code。vector/optional child 是 detached snapshot，`Task.status` 和 `MessageSendParams.message` 是 live inline field。JSON 观测不授予 provider native 权限。
+每个 run 都在自己的 worker thread 上执行；stream 或 blocking send 只是观察它，因此 task 的生命周期长于断开的连接。`SendMessage` 会阻塞到 task 进入 terminal 或 interrupted 状态，除非 `returnImmediately`（0.3 为 `blocking: false`）要求立即返回 SUBMITTED 的 task。`SendStreamingMessage` 和 `SubscribeToTask`（0.3 为 `tasks/resubscribe`）先发送 Task，再发送 status 和 artifact update，并在 terminal 或 interrupted 状态时关闭；0.3 stream 以 `final: true` 结束。`GetTask` 和 `ListTasks` 遵循 `historyLength`（0 表示省略 history）。`ListTasks` 按 `contextId`、`status` 和 `statusTimestampAfter` 过滤，用 `pageSize`（1 到 100，默认 50）和 `pageToken` 按最新优先分页，未设置 `includeArtifacts` 时省略 artifact。每个 status 都带有 timestamp。
 
-**公共头文件：** [`include/neograph/a2a/`](../include/neograph/a2a/)。
+task id 由 server 生成。`taskId` 未知的 message 以 `-32001` 失败，terminal task 以 `-32004` 失败，与 task 不同的 `contextId` 以 `-32602` 失败，仍在运行的 task 以 `-32603` 失败。发给 INPUT_REQUIRED task 的 message 会从 interrupt 保存的 checkpoint 恢复其 run；`GraphAgentAdapter::build_resume_value` 将 message 转为 resume value，没有 checkpoint store 的 engine 则以该 message 为 input 重新运行 graph。NeoGraph collaboration envelope 保留发送方指定的幂等 task id。请求按 dialect 校验，违规得到带 `google.rpc.BadRequest` field violation 的 `-32602`，每个 error 都带有 `google.rpc.ErrorInfo` detail。配置 `CollaborationAuthenticator` 时，card 声明 Bearer security scheme，若请求必须认证还会声明全局 requirement；缺少 credential 得到带 `WWW-Authenticate` 的 HTTP 401，已认证但无权使用 collaboration link 的 peer 得到 HTTP 403。
+
+#### A2A 错误映射
+
+只有类型化字段会到达 peer：失败的 public message（`NodeFailureError::public_message` 或该 class 的通用文字）和 `metadata["neograph/failure"] = {code, retryable}`。异常文本永远不会到达。
+
+| NeoGraph 结果 | A2A 结果 |
+|---|---|
+| Completed | `COMPLETED`；agent 回复作为 status message，adapter artifact |
+| Cancelled（`CancelTask`） | `CANCELED`；stream 也以此状态关闭 |
+| Hook blocked（`NG.HookBlocked`） | 没有 node 完成时为 `REJECTED`，否则为 `FAILED` |
+| Interrupted（`NodeInterrupt`） | `INPUT_REQUIRED`；reason 作为 text，payload 作为 data part；`metadata["neograph/interrupt"] = {node, checkpointId}`；后续 message 恢复 run |
+| 结束 run 的 node 或 tool 失败（`NG.TaskFailed`、author code） | `FAILED`，有 author 的 public message 时使用它 |
+| Timeout（`NG.Timeout`）、provider 失败（`NG.ProviderFailed`） | `FAILED`，`retryable: true` |
+| Budget（`NG.BudgetExhausted`）、safety（`NG.SafetyBlocked`）、configuration、logic、uncertain effect、unknown | 带 class code 的 `FAILED` |
+| Step limit | `FAILED`，code `NG.StepLimit` |
+| Failure exit | 带 exit 声明的 code 的 `FAILED` |
+| 达到 in-flight 上限 | JSON-RPC `-32603`，ErrorInfo reason `RESOURCE_EXHAUSTED` |
+| 取消 terminal task | `-32002` TaskNotCancelableError；task 不变 |
+| push notification 配置；extended card；streaming 关闭 | `-32003`；`-32004`；`-32004` |
+
+#### Client stream 与 Python
+
+SSE 接受 LF/CRLF/CR、comment、多行 data 以及最后未终止的 data。opening task snapshot、status update（包括其 metadata）以及 artifact append/replace update 会累积成返回的 task。观察到 event 后，即使没有外部 callback 也禁止 dialect 重发。非 SSE 的 RPC error 通过 `A2ARpcError::code()` 保留 code；非 2xx 的 HTTP 不会变成成功的 task。caller node 依次选择 final/interrupted agent status text、第一个 artifact text、最后一个 agent history text；progress status 或 user history 不能覆盖答案。通用 `async_post_stream` 对非空的固定 `Content-Length` body 也连同 status 交付一次；长度为 0 时不产生 chunk。body limit、提前 EOF 和已缓冲的多余数据会被拒绝。redirect/chunked/close-delimited 规则不变。
+
+Python 的 `neograph_engine.a2a` 导出 `WireDialect`、`AgentInterface`、`AgentCard.supported_interfaces`/`raw`、`Part.media_type`、`MessageSendConfiguration`、`MessageSendParams`、`StreamEvent` 以及 status/artifact record。`A2AClient.wire_dialect()` 返回 enum 或 `None`；`set_authorization_header()`、`set_allow_cross_origin_interfaces()` 和 `endpoint_url()` 与 native client 一致；`send_message(params)` 是 multipart overload。`send_message_stream(text, on_event, task_id="", context_id="")` 或 `(params, on_event)` 返回累积的 `Task`，并把 owned event snapshot 传给返回 bool 的 callback。blocking call 会释放 GIL。`a2a.A2ARpcError.code` 保留远程整数 code。
+
+**公开头文件：** [`include/neograph/a2a/`](../include/neograph/a2a/)。
 
 ### `neograph::acp` — Agent 客户端协议
 

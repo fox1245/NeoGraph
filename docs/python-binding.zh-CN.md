@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=d76ac3cb28c29f272c496b3ea03ef57ff5591ed0a1c50bf6b3f9888633c3a5bd -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=e376356dbf8e9ae47791d3beacd6167ce86569148053f4255acd8ad0f73b17ea -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -695,7 +695,7 @@ if result.interrupted:
 
 ### 原生 A2A 发现与流式调用
 
-`a2a.WireDialect` 为 `V0_3/V1_0`。`client.wire_dialect()` 在构造/强制 card fetch 后到首次 card-selected RPC 或成功 probe 前为 `None`。`AgentCard.supported_interfaces` 为含 `url/protocol_binding/protocol_version/tenant` 的独立 `AgentInterface` 列表；`card.raw` 为观察 JSON。客户端在兼容 JSONRPC 中优先匹配规范化 base URL；card URL 不改变 RPC endpoint。无 card 时仅数字 RPC error `-32601` 允许 probe，card-selected 调用不 fallback。`a2a.A2ARpcError.code` 是实际整数代码。
+`a2a.WireDialect` 为 `V1_0`（主版本）或 `V0_3`（兼容）。`client.wire_dialect()` 在构造/强制 card fetch 后到首次 card-selected RPC 或成功 probe 前为 `None`。`AgentCard.supported_interfaces` 为含 `url/protocol_binding/protocol_version/tenant` 的独立 `AgentInterface` 列表；`card.raw` 为观察 JSON。native client 在首次调用前获取 card 并选择兼容的 JSONRPC interface，优先匹配规范化 base URL。该 interface URL 与 base URL 同源时，RPC 发往该 URL；`client.set_allow_cross_origin_interfaces(True)` 允许 card 指定其他源，`client.endpoint_url()` 返回正在使用的 endpoint。只有无法获取 card 时才从 1.0 开始 probe，遇到 `-32601`、`-32009` 或 HTTP 400 时改用 0.3；card-selected 调用不 fallback。message id 为随机 UUID。`a2a.A2ARpcError.code` 是实际整数代码。
 
 ```python
 from neograph_engine import a2a

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=d76ac3cb28c29f272c496b3ea03ef57ff5591ed0a1c50bf6b3f9888633c3a5bd -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=e376356dbf8e9ae47791d3beacd6167ce86569148053f4255acd8ad0f73b17ea -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -696,7 +696,7 @@ if result.interrupted:
 
 ### ネイティブ A2A discovery と streaming
 
-`a2a.WireDialect` は `V0_3/V1_0`。`client.wire_dialect()` は構築/強制 card fetch 後、最初の card-selected RPC または成功 probe まで `None` です。`AgentCard.supported_interfaces` は `url/protocol_binding/protocol_version/tenant` を持つ独立した `AgentInterface` リスト、`card.raw` は観察 JSON です。互換 JSONRPC のうち正規化 base URL を優先し、card URL は RPC endpoint を変更しません。card なしでは数値 RPC error `-32601` だけが probe を許可し、card-selected 呼び出しは fallback しません。`a2a.A2ARpcError.code` は実際の整数コードです。
+`a2a.WireDialect` は `V1_0`(主要)または `V0_3`(互換)。`client.wire_dialect()` は構築/強制 card fetch 後、最初の card-selected RPC または成功 probe まで `None` です。`AgentCard.supported_interfaces` は `url/protocol_binding/protocol_version/tenant` を持つ独立した `AgentInterface` リスト、`card.raw` は観察 JSON です。native client は最初の呼び出しの前に card を取得して互換 JSONRPC interface を選び、正規化 base URL を優先します。その interface URL が base URL と同じ origin なら RPC はその URL に送られます。`client.set_allow_cross_origin_interfaces(True)` は card が別 origin を指定することを許可し、`client.endpoint_url()` は使用中の endpoint を返します。card を取得できない場合だけ 1.0 から probe し、`-32601`、`-32009`、HTTP 400 なら 0.3 に切り替えます。card-selected 呼び出しは fallback しません。message id はランダムな UUID です。`a2a.A2ARpcError.code` は実際の整数コードです。
 
 ```python
 from neograph_engine import a2a

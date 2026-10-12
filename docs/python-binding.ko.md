@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=d76ac3cb28c29f272c496b3ea03ef57ff5591ed0a1c50bf6b3f9888633c3a5bd -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=e376356dbf8e9ae47791d3beacd6167ce86569148053f4255acd8ad0f73b17ea -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -696,7 +696,7 @@ if result.interrupted:
 
 ### 네이티브 A2A 탐색과 스트리밍
 
-`a2a.WireDialect`는 `V0_3/V1_0`입니다. `client.wire_dialect()`는 생성/강제 card fetch 후 첫 card-selected RPC 또는 성공 probe까지 `None`입니다. `AgentCard.supported_interfaces`는 `url/protocol_binding/protocol_version/tenant`를 가진 분리된 `AgentInterface` 목록이며 `card.raw`는 관찰 JSON입니다. 호환 JSONRPC 중 정규화 base URL을 우선하며 card URL은 RPC endpoint를 바꾸지 않습니다. card가 없을 때 숫자 RPC 오류 `-32601`만 probe를 허용하고 card-selected 호출은 fallback하지 않습니다. `a2a.A2ARpcError.code`는 실제 정수 코드입니다.
+`a2a.WireDialect`는 `V1_0`(기본) 또는 `V0_3`(호환)입니다. `client.wire_dialect()`는 생성/강제 card fetch 후 첫 card-selected RPC 또는 성공 probe까지 `None`입니다. `AgentCard.supported_interfaces`는 `url/protocol_binding/protocol_version/tenant`를 가진 분리된 `AgentInterface` 목록이며 `card.raw`는 관찰 JSON입니다. native client는 첫 호출 전에 card를 가져와 호환 JSONRPC interface를 고르며 정규화 base URL을 우선합니다. 그 interface URL이 base URL과 같은 origin이면 RPC는 그 URL로 갑니다. `client.set_allow_cross_origin_interfaces(True)`는 card가 다른 origin을 지정하도록 허용하고, `client.endpoint_url()`은 사용 중인 endpoint를 알려 줍니다. card를 가져올 수 없을 때만 1.0부터 probe하고 `-32601`, `-32009`, HTTP 400이면 0.3으로 바꾸며, card-selected 호출은 fallback하지 않습니다. message id는 random UUID입니다. `a2a.A2ARpcError.code`는 실제 정수 코드입니다.
 
 ```python
 from neograph_engine import a2a
