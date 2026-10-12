@@ -1046,8 +1046,8 @@ void GraphEngine::update_state_writes(
     const int64_t now = static_cast<int64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
-    // update_state preserves the parent's step, so millisecond timestamp ties
-    // would leave durable stores unable to identify the newer checkpoint.
+    // Stores order a thread's checkpoints by save order. The timestamp still
+    // increases strictly from the parent's for callers that compare times.
     new_cp.timestamp       = std::max(now, cp.timestamp + 1);
 
     if (lease) checkpoint_store_->publish_managed_budget_checkpoint(lease, new_cp);

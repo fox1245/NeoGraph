@@ -539,6 +539,23 @@ function(neograph_discover_tests target)
     gtest_discover_tests(${target} DISCOVERY_TIMEOUT 120 ${ARGN})
 endfunction()
 
+# A suite instantiated over tests/fixtures/checkpoint_backends.h also runs on
+# PostgreSQL when it is built. Those cases drop the shared checkpoint tables,
+# so they hold the postgres_test_db lock; the other cases stay parallel. The
+# lock comes first: gtest_discover_tests flattens a list-valued property.
+function(neograph_discover_backend_tests target labels)
+    if(TARGET neograph_postgres)
+        target_link_libraries(${target} PRIVATE neograph::postgres)
+        target_compile_definitions(${target} PRIVATE NEOGRAPH_TESTS_HAVE_POSTGRES)
+        neograph_discover_tests(${target} TEST_FILTER "*/Postgres*"
+            PROPERTIES RESOURCE_LOCK postgres_test_db LABELS ${labels})
+        neograph_discover_tests(${target} TEST_FILTER "-*/Postgres*"
+            PROPERTIES LABELS ${labels})
+    else()
+        neograph_discover_tests(${target} PROPERTIES LABELS ${labels})
+    endif()
+endfunction()
+
 if(TARGET neograph_mcp_hook_rpc_tests)
     neograph_discover_tests(neograph_mcp_hook_rpc_tests)
 endif()
@@ -962,11 +979,11 @@ if(NEOGRAPH_BUILD_SQLITE)
         neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
     neograph_discover_tests(neograph_interrupt_identity_tests PROPERTIES LABELS "core;interrupt")
     # #393: a resume value reaches only the invocation the resume answers, in
-    # the step it re-enters; later steps ask again, in memory and on SQLite.
+    # the step it re-enters; later steps ask again, on every checkpoint store.
     add_executable(neograph_resume_value_scope_tests test_resume_value_scope.cpp)
     target_link_libraries(neograph_resume_value_scope_tests PRIVATE
         neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
-    neograph_discover_tests(neograph_resume_value_scope_tests PROPERTIES LABELS "core;interrupt")
+    neograph_discover_backend_tests(neograph_resume_value_scope_tests "core;interrupt")
     # #392: a fan-out step and the Sends of a step end by one rule, whatever
     # the index of the sibling that failed or paused, with one worker or many.
     add_executable(neograph_step_outcome_tests test_step_outcome.cpp)
@@ -978,7 +995,7 @@ if(NEOGRAPH_BUILD_SQLITE)
     add_executable(neograph_gate_identity_tests test_gate_identity.cpp)
     target_link_libraries(neograph_gate_identity_tests PRIVATE
         neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
-    neograph_discover_tests(neograph_gate_identity_tests PROPERTIES LABELS "core;interrupt")
+    neograph_discover_backend_tests(neograph_gate_identity_tests "core;interrupt")
 endif()
 
 if(NEOGRAPH_BUILD_PROGRAM)

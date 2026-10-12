@@ -13,10 +13,11 @@
 // checkpoint. Once every gate of the step is answered, the step runs, and each
 // gated node receives the value of the resume that answered its own gate.
 
+#include "fixtures/checkpoint_backends.h"
+
 #include <neograph/graph/engine.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
-#include <neograph/graph/sqlite_checkpoint.h>
 #include <neograph/graph/state.h>
 
 #include <gtest/gtest.h>
@@ -154,24 +155,33 @@ private:
     std::filesystem::path path_;
 };
 
-class GateIdentity : public ::testing::TestWithParam<bool> {
+using test_support::Backend;
+
+class GateIdentity : public ::testing::TestWithParam<Backend> {
 protected:
+    void SetUp() override {
+        if (!test_support::backend_available(GetParam()))
+            GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+        test_support::reset_backend(GetParam());
+    }
+    void TearDown() override {
+        store_.reset();
+        if (test_support::backend_available(GetParam())) test_support::reset_backend(GetParam());
+    }
     std::shared_ptr<CheckpointStore> store() {
         if (!store_) store_ = make_store();
         return store_;
     }
     // A second store over the same file, as a restarted process opens it.
     std::shared_ptr<CheckpointStore> reopen() {
-        if (!GetParam()) return store();
+        if (GetParam() == Backend::InMemory) return store();
         store_ = make_store();
         return store_;
     }
 
 private:
     std::shared_ptr<CheckpointStore> make_store() {
-        return GetParam() ? std::shared_ptr<CheckpointStore>(
-                                std::make_shared<SqliteCheckpointStore>(dir_.file("gates.sqlite")))
-                          : std::make_shared<InMemoryCheckpointStore>();
+        return test_support::open_backend(GetParam(), dir_.file("gates.sqlite"));
     }
     TempDir                          dir_;
     std::shared_ptr<CheckpointStore> store_;
@@ -274,5 +284,5 @@ TEST_P(GateIdentity, AGateOfALaterStepIsAskedAgain) {
     EXPECT_EQ(results_of(done), (std::multiset<std::string>{"anchor=-", "a=A", "after=Z"}));
 }
 
-INSTANTIATE_TEST_SUITE_P(Stores, GateIdentity, ::testing::Values(false, true),
-                         [](const auto& info) { return info.param ? "Sqlite" : "InMemory"; });
+INSTANTIATE_TEST_SUITE_P(Stores, GateIdentity, ::testing::ValuesIn(test_support::backends()),
+                         [](const auto& info) { return test_support::backend_name(info.param); });

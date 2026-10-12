@@ -63,7 +63,8 @@ namespace neograph::graph {
  *
  * Construct with a filesystem path. ":memory:" works too for tests.
  * The DB file is created if missing; the schema is materialised on
- * first connect via `CREATE TABLE IF NOT EXISTS`.
+ * first connect via `CREATE TABLE IF NOT EXISTS`. A thread's checkpoints
+ * are ordered by save (`save_seq`), as in the PostgreSQL store.
  */
 class NEOGRAPH_API SqliteCheckpointStore : public CheckpointStore {
 public:

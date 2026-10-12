@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=121965481f67e36855bf3b60e985cee1ae42a74e02c2b207334d6f9f34e6312c -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=317edfd57348541babbe80e0f232a1a47fc5ad73312f2ee72058b65c59341b4d -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -1837,7 +1837,7 @@ std::vector<Checkpoint> get_state_history(const std::string& thread_id,
                                           int limit = 100) const;
 ```
 
-Returns the checkpoint history for a thread, ordered by timestamp (newest first).
+스레드의 체크포인트 이력을 가장 최근에 저장된 것부터 반환합니다. 첫 항목은 `get_state`가 읽는 체크포인트입니다.
 
 #### `update_state`
 

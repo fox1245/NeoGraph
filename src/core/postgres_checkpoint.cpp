@@ -326,6 +326,7 @@ CREATE TABLE IF NOT EXISTS neograph_checkpoints (
     checkpoint_shape   JSONB,
     metadata_text      TEXT,
     checkpoint_shape_text TEXT,
+    save_seq           BIGINT,
     PRIMARY KEY (thread_id, checkpoint_id)
 );
 
@@ -333,8 +334,24 @@ ALTER TABLE neograph_checkpoints ADD COLUMN IF NOT EXISTS checkpoint_shape JSONB
 ALTER TABLE neograph_checkpoints ADD COLUMN IF NOT EXISTS metadata_text TEXT;
 ALTER TABLE neograph_checkpoints ADD COLUMN IF NOT EXISTS checkpoint_shape_text TEXT;
 
-CREATE INDEX IF NOT EXISTS neograph_checkpoints_recent
-    ON neograph_checkpoints (thread_id, timestamp_ms DESC, step DESC);
+-- A thread's latest checkpoint is the one saved last, as in the in-memory
+-- store: save_seq is the save order, and a re-save of an ID takes the next
+-- value. A timestamp or step cannot order saves: a later run on a thread
+-- restarts at step 0, two gates of one step save the same step, and saves
+-- inside one millisecond share the timestamp. Adding the nullable column
+-- and its default rewrites no row: rows saved before it keep save_seq NULL
+-- and their (timestamp_ms, step) order, behind every numbered row. The
+-- default numbers a row whose writer does not set save_seq. The ALTER TABLE
+-- statements above serialize concurrent initializers before the sequence.
+ALTER TABLE neograph_checkpoints ADD COLUMN IF NOT EXISTS save_seq BIGINT;
+CREATE SEQUENCE IF NOT EXISTS neograph_checkpoints_save_seq
+    OWNED BY neograph_checkpoints.save_seq;
+ALTER TABLE neograph_checkpoints
+    ALTER COLUMN save_seq SET DEFAULT nextval('neograph_checkpoints_save_seq');
+
+DROP INDEX IF EXISTS neograph_checkpoints_recent;
+CREATE INDEX IF NOT EXISTS neograph_checkpoints_save_order
+    ON neograph_checkpoints (thread_id, save_seq DESC NULLS LAST, timestamp_ms DESC, step DESC);
 
 CREATE TABLE IF NOT EXISTS neograph_checkpoint_blobs (
     thread_id  TEXT   NOT NULL,
@@ -427,9 +444,10 @@ INSERT INTO neograph_checkpoints
     (thread_id, checkpoint_id, parent_id, current_node, next_nodes,
      interrupt_phase, barrier_state, channel_versions, global_version,
      metadata, step, timestamp_ms, schema_version, checkpoint_shape,
-     metadata_text, checkpoint_shape_text)
+     metadata_text, checkpoint_shape_text, save_seq)
 VALUES ($2, $3, $4, $5, $6::jsonb, $7, $8::jsonb, $9::jsonb, $10,
-        $11::text::jsonb, $12, $13, $14, $16::text::jsonb, $11::text, $16::text)
+        $11::text::jsonb, $12, $13, $14, $16::text::jsonb, $11::text, $16::text,
+        nextval('neograph_checkpoints_save_seq'))
 ON CONFLICT (thread_id, checkpoint_id) DO UPDATE SET
     parent_id        = EXCLUDED.parent_id,
     current_node     = EXCLUDED.current_node,
@@ -444,8 +462,13 @@ ON CONFLICT (thread_id, checkpoint_id) DO UPDATE SET
     schema_version   = EXCLUDED.schema_version,
     checkpoint_shape = EXCLUDED.checkpoint_shape,
     metadata_text    = EXCLUDED.metadata_text,
-    checkpoint_shape_text = EXCLUDED.checkpoint_shape_text
+    checkpoint_shape_text = EXCLUDED.checkpoint_shape_text,
+    save_seq         = EXCLUDED.save_seq
 )SQL";
+
+// Newest first: a re-saved ID took the newest save_seq. Legacy rows follow.
+constexpr const char* kSaveOrder =
+    " ORDER BY save_seq DESC NULLS LAST, timestamp_ms DESC, step DESC";
 
 constexpr const char* kSqlRequiresManagedBudget =
     "SELECT 1 FROM neograph_checkpoint_managed_budget_obligations WHERE thread_id = $1";
@@ -958,8 +981,8 @@ void PostgresCheckpointStore::save(const Checkpoint& cp) {
 std::optional<Checkpoint> PostgresCheckpointStore::load_latest(const std::string& thread_id) {
     return with_conn([&](pg_conn* c) -> std::optional<Checkpoint> {
         std::string sql = std::string("SELECT ") + kSelectCols +
-                          " FROM neograph_checkpoints WHERE thread_id = $1 "
-                          "ORDER BY timestamp_ms DESC, step DESC LIMIT 1";
+                          " FROM neograph_checkpoints WHERE thread_id = $1" + kSaveOrder +
+                          " LIMIT 1";
         auto res = exec_params(c, sql.c_str(), {thread_id});
         if (PQntuples(res) == 0) return std::nullopt;
         return finish_load(c, row_to_loaded(res, 0));
@@ -979,8 +1002,8 @@ std::optional<Checkpoint> PostgresCheckpointStore::load_by_id(const std::string&
 std::vector<Checkpoint> PostgresCheckpointStore::list(const std::string& thread_id, int limit) {
     return with_conn([&](pg_conn* c) {
         std::string sql = std::string("SELECT ") + kSelectCols +
-                          " FROM neograph_checkpoints WHERE thread_id = $1 "
-                          "ORDER BY timestamp_ms DESC, step DESC LIMIT $2";
+                          " FROM neograph_checkpoints WHERE thread_id = $1" + kSaveOrder +
+                          " LIMIT $2";
         std::vector<std::string> params{thread_id, std::to_string(limit)};
         auto                     res = exec_params(c, sql.c_str(), params);
         std::vector<Checkpoint>  out;
@@ -1919,8 +1942,7 @@ asio::awaitable<void> PostgresCheckpointStore::save_async(const Checkpoint& cp) 
 asio::awaitable<std::optional<Checkpoint>> PostgresCheckpointStore::load_latest_async(
     const std::string& thread_id) {
     std::string sql = std::string("SELECT ") + kSelectCols +
-                      " FROM neograph_checkpoints WHERE thread_id = $1 "
-                      "ORDER BY timestamp_ms DESC, step DESC LIMIT 1";
+                      " FROM neograph_checkpoints WHERE thread_id = $1" + kSaveOrder + " LIMIT 1";
     // GCC 13 ICE workaround: build the param vector outside the
     // coroutine lambda; brace-init inside a coroutine body hits
     // build_special_member_call.
@@ -1951,8 +1973,7 @@ asio::awaitable<std::optional<Checkpoint>> PostgresCheckpointStore::load_by_id_a
 asio::awaitable<std::vector<Checkpoint>> PostgresCheckpointStore::list_async(
     const std::string& thread_id, int limit) {
     std::string sql = std::string("SELECT ") + kSelectCols +
-                      " FROM neograph_checkpoints WHERE thread_id = $1 "
-                      "ORDER BY timestamp_ms DESC, step DESC LIMIT $2";
+                      " FROM neograph_checkpoints WHERE thread_id = $1" + kSaveOrder + " LIMIT $2";
     std::vector<std::string> params{thread_id, std::to_string(limit)};
 
     auto operation = [&, sql](pg_conn* c) -> asio::awaitable<std::vector<Checkpoint>> {

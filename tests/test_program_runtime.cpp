@@ -28,6 +28,7 @@
 #include <sqlite3.h>
 #endif
 
+#include "fixtures/coarse_clock_store.h"
 #include "javascript.h"
 #include "registry_access.h"
 #include "run_control.h"
@@ -11331,30 +11332,17 @@ TEST(ProgramRuntimeTest, PlanResumeContinuesAMapAtItsPausedItem) {
 
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE) && \
     defined(NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE_CHECKPOINT)
-namespace {
-// Saves every checkpoint in the same millisecond, as SQLite does on a host
-// whose fsync returns at once. SQLite orders a thread's checkpoints by
-// (timestamp_ms, step).
-class OneMillisecondCheckpointStore final : public SqliteCheckpointStore {
-public:
-    using SqliteCheckpointStore::SqliteCheckpointStore;
-    void save(const Checkpoint& checkpoint) override {
-        Checkpoint pinned = checkpoint;
-        pinned.timestamp  = 1;
-        SqliteCheckpointStore::save(pinned);
-    }
-};
-}  // namespace
-
 TEST(ProgramRuntimeTest, PlanResumeAnswersThePausedCallWhoseCheckpointTiesAnEarlierCall) {
     // #386: A and then B run on the plan's root Core thread, and B asks. A's
-    // last checkpoint and B's question are saved in the same millisecond, and
-    // A's has the higher step, so it is the thread's latest. The run still
-    // pauses on B's checkpoint, and resume runs B with the answer instead of
-    // replaying A's completed state.
+    // last checkpoint and B's question are saved in the same millisecond, as
+    // SQLite does on a host whose fsync returns at once, and A's has the
+    // higher step. B's question, saved last, is the thread's latest; the run
+    // pauses on it, and resume runs B with the answer instead of replaying
+    // A's completed state.
     JoinTestStores stores(true);
-    stores.checkpoints = std::make_shared<OneMillisecondCheckpointStore>(
-        (stores.directory / "coarse-checkpoints.db").string());
+    stores.checkpoints =
+        std::make_shared<neograph::graph::test_support::CoarseClockStore<SqliteCheckpointStore>>(
+            (stores.directory / "coarse-checkpoints.db").string());
     AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
                             ExecutionGuarantee::Unmanaged, true);
     reset_plan_steps([](std::size_t ordinal, const NodeInput&) -> json {
@@ -11371,8 +11359,10 @@ TEST(ProgramRuntimeTest, PlanResumeAnswersThePausedCallWhoseCheckpointTiesAnEarl
     const auto latest =
         stores.checkpoints->load_latest(plan_root_thread(version, "plan-coarse-clock"));
     ASSERT_TRUE(latest.has_value());
-    ASSERT_NE(latest->interrupt_phase, CheckpointPhase::NodeInterrupt)
-        << "this test needs A's last checkpoint to be the thread's latest";
+    EXPECT_EQ(latest->id, paused.checkpoint()->checkpoint_id)
+        << "the checkpoint saved last, B's question, is the thread's latest";
+    EXPECT_EQ(latest->interrupt_phase, CheckpointPhase::NodeInterrupt);
+    EXPECT_EQ(latest->timestamp, 1);
     EXPECT_EQ(paused_phase(fixture, paused), CheckpointPhase::NodeInterrupt);
 
     const auto done = decide(fixture, paused, "approved");

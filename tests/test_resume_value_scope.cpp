@@ -15,10 +15,11 @@
 // a node that asks pauses the run again. A subgraph resumed through its parent
 // receives its answer through the parent's answered invocation.
 
+#include "fixtures/checkpoint_backends.h"
+
 #include <neograph/graph/engine.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
-#include <neograph/graph/sqlite_checkpoint.h>
 #include <neograph/graph/state.h>
 #include <neograph/tool_dispatch.h>
 
@@ -301,14 +302,21 @@ private:
     std::filesystem::path path_;
 };
 
-class ResumeValueScope : public ::testing::TestWithParam<bool> {
+using test_support::Backend;
+
+class ResumeValueScope : public ::testing::TestWithParam<Backend> {
 protected:
+    void SetUp() override {
+        if (!test_support::backend_available(GetParam()))
+            GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+        test_support::reset_backend(GetParam());
+    }
+    void TearDown() override {
+        store_.reset();
+        if (test_support::backend_available(GetParam())) test_support::reset_backend(GetParam());
+    }
     std::shared_ptr<CheckpointStore> store() {
-        if (!store_)
-            store_ = GetParam()
-                         ? std::shared_ptr<CheckpointStore>(std::make_shared<SqliteCheckpointStore>(
-                               dir_.file("checkpoints.sqlite")))
-                         : std::make_shared<InMemoryCheckpointStore>();
+        if (!store_) store_ = test_support::open_backend(GetParam(), dir_.file("checkpoints.sqlite"));
         return store_;
     }
 
@@ -600,5 +608,5 @@ TEST_P(ResumeValueScope, EveryAttemptOfTheAnsweredInvocationSeesTheAnswer) {
     EXPECT_EQ(results_of(done), (std::multiset<std::string>{"flaky=r", "next=n"}));
 }
 
-INSTANTIATE_TEST_SUITE_P(Stores, ResumeValueScope, ::testing::Values(false, true),
-                         [](const auto& info) { return info.param ? "Sqlite" : "InMemory"; });
+INSTANTIATE_TEST_SUITE_P(Stores, ResumeValueScope, ::testing::ValuesIn(test_support::backends()),
+                         [](const auto& info) { return test_support::backend_name(info.param); });

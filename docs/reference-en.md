@@ -1881,7 +1881,7 @@ std::vector<Checkpoint> get_state_history(const std::string& thread_id,
                                           int limit = 100) const;
 ```
 
-Returns the checkpoint history for a thread, ordered by timestamp (newest first).
+Returns the checkpoint history for a thread, most recently saved first; the first entry is the checkpoint `get_state` reads.
 
 #### `update_state`
 

@@ -8,6 +8,7 @@
 #include <neograph/graph/state.h>
 #include <neograph/graph/engine.h>
 #include <neograph/provider_outcome_codec.h>
+#include "fixtures/coarse_clock_store.h"
 #include "fixtures/typed_provider.h"
 #include <codecs/messages.h>
 #include <codecs/responses.h>
@@ -17,8 +18,10 @@
 #include <gtest/gtest.h>
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <barrier>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <future>
@@ -26,6 +29,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <vector>
 #ifdef _WIN32
 #include <process.h>
 #else
@@ -1011,23 +1015,17 @@ TEST(SqliteCheckpointNativeHistory, FreshManagedBankAuthenticatesHeldClaimsScope
 }
 #endif
 
-// #386: SQLite orders a thread's checkpoints by (timestamp_ms, step). Two runs
-// on one thread inside one millisecond (a Program plan's Core calls on its root
+// #386, #396: a thread's latest checkpoint is the one saved last. Two runs on
+// one thread inside one millisecond (a Program plan's Core calls on its root
 // thread, where fsync returns at once) tie on the timestamp, and the earlier
-// run's last checkpoint has the higher step: it is the thread's "latest". A run
-// that pauses on a NodeInterrupt reports the checkpoint it saved, so resuming it
-// runs the paused node instead of replaying the earlier run's completed state.
+// run's last checkpoint has the higher step; two gates of one step save the
+// same step. SQLite ordered a thread's checkpoints by (timestamp_ms, step), so
+// either one could be the "latest", and a resume of it replayed the earlier
+// run or answered the wrong gate. Every save below carries one timestamp.
 namespace {
 
-class OneMillisecondSqliteStore final : public SqliteCheckpointStore {
-public:
-    using SqliteCheckpointStore::SqliteCheckpointStore;
-    void save(const Checkpoint& cp) override {
-        Checkpoint pinned = cp;
-        pinned.timestamp  = 1;
-        SqliteCheckpointStore::save(pinned);
-    }
-};
+using test_support::CoarseClockStore;
+using CoarseSqliteStore = CoarseClockStore<SqliteCheckpointStore>;
 
 std::atomic<int> coarse_gate_resumed{0};
 
@@ -1059,7 +1057,9 @@ public:
 
 }  // namespace
 
-TEST(SqliteCheckpointCoarseClock, NodeInterruptReportsTheCheckpointItSaved) {
+namespace {
+
+json coarse_clock_graph() {
     NodeFactory::instance().register_type(
         "coarse_gate", [](const std::string&, const json&, const NodeContext&) {
             return std::make_unique<CoarseGateNode>();
@@ -1068,31 +1068,82 @@ TEST(SqliteCheckpointCoarseClock, NodeInterruptReportsTheCheckpointItSaved) {
         "coarse_tail", [](const std::string&, const json&, const NodeContext&) {
             return std::make_unique<CoarseTailNode>();
         });
-    const json definition{
+    return json{
         {"name", "coarse_clock"},
         {"channels", {{"value", {{"reducer", "overwrite"}}}, {"tail", {{"reducer", "overwrite"}}}}},
         {"nodes", {{"gate", {{"type", "coarse_gate"}}}, {"tail", {{"type", "coarse_tail"}}}}},
         {"edges", json::array({json{{"from", "__start__"}, {"to", "gate"}},
                                json{{"from", "gate"}, {"to", "tail"}},
                                json{{"from", "tail"}, {"to", "__end__"}}})}};
+}
+
+Checkpoint coarse_cp(const std::string& thread_id, int step, int value) {
+    auto cp      = make_state_cp(thread_id, step, {{"x", {value, static_cast<uint64_t>(value)}}});
+    cp.timestamp = CoarseSqliteStore::kTimestamp;
+    return cp;
+}
+
+std::vector<std::string> ids_of(const std::vector<Checkpoint>& checkpoints) {
+    std::vector<std::string> ids;
+    for (const auto& checkpoint : checkpoints) ids.push_back(checkpoint.id);
+    return ids;
+}
+
+}  // namespace
+
+TEST(SqliteCheckpointCoarseClock, ALaterRunAtStepZeroIsTheLatestAndResumes) {
     coarse_gate_resumed.store(0);
-    auto store  = std::make_shared<OneMillisecondSqliteStore>(":memory:");
-    auto engine = GraphEngine::compile(definition, NodeContext{}, store);
+    auto store  = std::make_shared<CoarseSqliteStore>(":memory:");
+    auto engine = GraphEngine::compile(coarse_clock_graph(), NodeContext{}, store);
 
     RunConfig first;
     first.thread_id = "coarse-clock";
     first.input     = json{{"value", "go"}};
     const auto finished = engine->run(first);
     ASSERT_FALSE(finished.interrupted);
+    const auto finished_cp = store->load_by_id(finished.checkpoint_id);
+    ASSERT_TRUE(finished_cp);
+    ASSERT_GT(finished_cp->step, 0);
 
+    // The second run restarts at step 0 in the same millisecond, below the
+    // first run's last step. Its pause is still the thread's latest.
     RunConfig second = first;
     second.input     = json{{"value", "ask"}};
     const auto paused = engine->run(second);
     ASSERT_TRUE(paused.interrupted);
     const auto latest = store->load_latest("coarse-clock");
     ASSERT_TRUE(latest);
-    ASSERT_EQ(latest->id, finished.checkpoint_id)
-        << "the timestamps tie, so the first run's last checkpoint is the latest";
+    EXPECT_EQ(latest->id, paused.checkpoint_id) << "the checkpoint saved last is the latest";
+    EXPECT_EQ(latest->interrupt_phase, CheckpointPhase::NodeInterrupt);
+    EXPECT_EQ(latest->next_nodes, std::vector<std::string>{"gate"});
+    EXPECT_EQ(latest->timestamp, finished_cp->timestamp);
+    EXPECT_LT(latest->step, finished_cp->step);
+    const auto history = store->list("coarse-clock");
+    ASSERT_FALSE(history.empty());
+    EXPECT_EQ(history.front().id, paused.checkpoint_id);
+
+    // resume() takes the thread's latest checkpoint: the paused node runs.
+    const auto resumed = engine->resume("coarse-clock", json("answered"));
+    EXPECT_FALSE(resumed.interrupted);
+    EXPECT_EQ(coarse_gate_resumed.load(), 1) << "the paused node runs with the answer";
+    EXPECT_EQ(resumed.output["channels"]["value"]["value"], json("answered"));
+    EXPECT_EQ(resumed.output["channels"]["tail"]["value"], json(true));
+}
+
+TEST(SqliteCheckpointCoarseClock, NodeInterruptReportsTheCheckpointItSaved) {
+    coarse_gate_resumed.store(0);
+    auto store  = std::make_shared<CoarseSqliteStore>(":memory:");
+    auto engine = GraphEngine::compile(coarse_clock_graph(), NodeContext{}, store);
+
+    RunConfig first;
+    first.thread_id = "coarse-clock";
+    first.input     = json{{"value", "go"}};
+    ASSERT_FALSE(engine->run(first).interrupted);
+
+    RunConfig second = first;
+    second.input     = json{{"value", "ask"}};
+    const auto paused = engine->run(second);
+    ASSERT_TRUE(paused.interrupted);
     const auto saved = store->load_by_id(paused.checkpoint_id);
     ASSERT_TRUE(saved);
     EXPECT_EQ(saved->interrupt_phase, CheckpointPhase::NodeInterrupt);
@@ -1103,4 +1154,210 @@ TEST(SqliteCheckpointCoarseClock, NodeInterruptReportsTheCheckpointItSaved) {
     EXPECT_EQ(coarse_gate_resumed.load(), 1) << "the paused node runs with the answer";
     EXPECT_EQ(resumed.output["channels"]["value"]["value"], json("answered"));
     EXPECT_EQ(resumed.output["channels"]["tail"]["value"], json(true));
+}
+
+TEST(SqliteCheckpointCoarseClock, AStepZeroSaveAfterAHigherStepIsTheLatest) {
+    CoarseSqliteStore store(":memory:");
+    const auto high = coarse_cp("t", 5, 1);
+    const auto low  = coarse_cp("t", 0, 2);
+    store.save(high);
+    store.save(low);
+    ASSERT_TRUE(store.load_latest("t"));
+    EXPECT_EQ(store.load_latest("t")->id, low.id);
+    EXPECT_EQ(ids_of(store.list("t")), (std::vector<std::string>{low.id, high.id}));
+}
+
+TEST(SqliteCheckpointCoarseClock, EqualStepSavesKeepTheirSaveOrder) {
+    // Two interrupt_before gates of one step each save a Before checkpoint of
+    // that step (#396), here in one millisecond.
+    CoarseSqliteStore store(":memory:");
+    std::vector<std::string> saved;
+    for (int gate = 0; gate < 4; ++gate) {
+        auto cp            = coarse_cp("t", 3, gate + 1);
+        cp.interrupt_phase = CheckpointPhase::Before;
+        store.save(cp);
+        saved.insert(saved.begin(), cp.id);
+        ASSERT_TRUE(store.load_latest("t"));
+        EXPECT_EQ(store.load_latest("t")->id, cp.id) << "after gate " << gate;
+    }
+    EXPECT_EQ(ids_of(store.list("t")), saved);
+    EXPECT_EQ(ids_of(store.list("t", 2)), (std::vector<std::string>{saved[0], saved[1]}));
+}
+
+TEST(SqliteCheckpointCoarseClock, AResavedIdBecomesTheLatestOnce) {
+    // As in the in-memory store: a save of an ID the thread holds replaces it
+    // and makes it the latest; the history lists it once, in its new place.
+    CoarseSqliteStore store(":memory:");
+    auto       first  = coarse_cp("t", 0, 1);
+    const auto second = coarse_cp("t", 1, 2);
+    store.save(first);
+    store.save(second);
+    first.next_nodes = {"edited"};
+    store.save(first);
+    const auto latest = store.load_latest("t");
+    ASSERT_TRUE(latest);
+    EXPECT_EQ(latest->id, first.id);
+    EXPECT_EQ(latest->next_nodes, std::vector<std::string>{"edited"});
+    EXPECT_EQ(ids_of(store.list("t")), (std::vector<std::string>{first.id, second.id}));
+
+    InMemoryCheckpointStore reference;
+    auto reference_first = first;
+    reference_first.next_nodes = {"__end__"};
+    reference.save(reference_first);
+    reference.save(second);
+    reference.save(first);
+    EXPECT_EQ(ids_of(reference.list("t")), ids_of(store.list("t")));
+    ASSERT_TRUE(reference.load_latest("t"));
+    EXPECT_EQ(reference.load_latest("t")->next_nodes, latest->next_nodes);
+}
+
+TEST(SqliteCheckpointCoarseClock, ThreadsKeepSeparateSaveOrders) {
+    CoarseSqliteStore store(":memory:");
+    const auto a0 = coarse_cp("a", 4, 1);
+    const auto b0 = coarse_cp("b", 0, 2);
+    const auto a1 = coarse_cp("a", 0, 3);
+    store.save(a0);
+    store.save(b0);
+    store.save(a1);
+    EXPECT_EQ(ids_of(store.list("a")), (std::vector<std::string>{a1.id, a0.id}));
+    EXPECT_EQ(ids_of(store.list("b")), (std::vector<std::string>{b0.id}));
+    store.delete_thread("a");
+    EXPECT_FALSE(store.load_latest("a"));
+    const auto a2 = coarse_cp("a", 7, 4);
+    const auto a3 = coarse_cp("a", 0, 5);
+    store.save(a2);
+    store.save(a3);
+    EXPECT_EQ(ids_of(store.list("a")), (std::vector<std::string>{a3.id, a2.id}));
+}
+
+// A database written before save_seq existed: its rows keep their
+// (timestamp_ms, step) order, behind every row saved since. The migration adds
+// a nullable column, rewrites no row, and runs again without effect.
+TEST(SqliteCheckpointSaveOrderMigration, LegacyRowsKeepTheirOrderBehindNewSaves) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("neograph-save-order-" + Checkpoint::generate_id() + ".sqlite");
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() {
+            std::error_code ignored;
+            for (const auto& suffix : {"", "-wal", "-shm"})
+                std::filesystem::remove(path.string() + suffix, ignored);
+        }
+    } cleanup{path};
+
+    // A separate connection, as another process or an older release has it.
+    const auto exec = [&](const std::string& sql) {
+        sqlite3* raw = nullptr;
+        const int opened = sqlite3_open(path.string().c_str(), &raw);
+        std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, &sqlite3_close);
+        if (opened != SQLITE_OK) return std::string("open failed");
+        char* error = nullptr;
+        const int status = sqlite3_exec(db.get(), sql.c_str(), nullptr, nullptr, &error);
+        const std::string message = error ? error : "";
+        sqlite3_free(error);
+        return status == SQLITE_OK ? std::string() : message.empty() ? "error" : message;
+    };
+    const auto query_int = [&](const std::string& sql) {
+        sqlite3* raw = nullptr;
+        const int opened = sqlite3_open(path.string().c_str(), &raw);
+        std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, &sqlite3_close);
+        EXPECT_EQ(opened, SQLITE_OK);
+        sqlite3_stmt* statement = nullptr;
+        EXPECT_EQ(sqlite3_prepare_v2(db.get(), sql.c_str(), -1, &statement, nullptr), SQLITE_OK);
+        std::int64_t value = -1;
+        if (sqlite3_step(statement) == SQLITE_ROW) value = sqlite3_column_int64(statement, 0);
+        sqlite3_finalize(statement);
+        return value;
+    };
+    // The previous schema, with its index, and rows written by that release.
+    ASSERT_EQ(exec(R"SQL(
+        CREATE TABLE neograph_checkpoints (
+            thread_id TEXT NOT NULL, checkpoint_id TEXT NOT NULL,
+            parent_id TEXT NOT NULL DEFAULT '', current_node TEXT NOT NULL DEFAULT '',
+            next_nodes TEXT NOT NULL DEFAULT '[]',
+            interrupt_phase TEXT NOT NULL DEFAULT 'completed',
+            barrier_state TEXT NOT NULL DEFAULT '{}', channel_versions TEXT NOT NULL DEFAULT '{}',
+            global_version INTEGER NOT NULL DEFAULT 0, metadata TEXT NOT NULL DEFAULT '{}',
+            step INTEGER NOT NULL DEFAULT 0, timestamp_ms INTEGER NOT NULL DEFAULT 0,
+            schema_version INTEGER NOT NULL DEFAULT 2, checkpoint_shape TEXT,
+            PRIMARY KEY (thread_id, checkpoint_id));
+        CREATE INDEX neograph_checkpoints_recent
+            ON neograph_checkpoints (thread_id, timestamp_ms DESC, step DESC);
+        INSERT INTO neograph_checkpoints (thread_id, checkpoint_id, step, timestamp_ms) VALUES
+            ('t', 'old-1', 0, 1000), ('t', 'old-3', 0, 2000), ('t', 'old-2', 1, 1000),
+            ('other', 'other-1', 9, 5);
+    )SQL"), "");
+
+    std::vector<std::string> legacy_order{"old-3", "old-2", "old-1"};
+    {
+        SqliteCheckpointStore store(path.string());
+        EXPECT_EQ(ids_of(store.list("t")), legacy_order) << "legacy rows keep (timestamp_ms, step)";
+        ASSERT_TRUE(store.load_latest("t"));
+        EXPECT_EQ(store.load_latest("t")->id, "old-3");
+
+        // A new save is the latest, though its timestamp and step are lower.
+        auto fresh      = make_state_cp("t", 0, {{"x", {1, 1}}});
+        fresh.timestamp = 1;
+        store.save(fresh);
+        legacy_order.insert(legacy_order.begin(), fresh.id);
+        EXPECT_EQ(ids_of(store.list("t")), legacy_order);
+        EXPECT_EQ(ids_of(store.list("other")), (std::vector<std::string>{"other-1"}));
+    }
+    EXPECT_EQ(query_int("SELECT COUNT(*) FROM neograph_checkpoints"), 5);
+    EXPECT_EQ(query_int("SELECT COUNT(*) FROM neograph_checkpoints WHERE save_seq IS NULL"), 4)
+        << "the migration rewrites no legacy row";
+    EXPECT_EQ(query_int("SELECT COUNT(*) FROM sqlite_master WHERE name = 'neograph_checkpoints_recent'"), 0);
+    EXPECT_EQ(query_int("SELECT COUNT(*) FROM sqlite_master WHERE name = 'neograph_checkpoints_save_order'"), 1);
+
+    // A writer that does not set save_seq, as an older release does, is
+    // numbered by the trigger and is the latest.
+    ASSERT_EQ(exec("INSERT INTO neograph_checkpoints (thread_id, checkpoint_id, step, timestamp_ms) "
+                   "VALUES ('t', 'older-writer', 0, 0)"), "");
+    legacy_order.insert(legacy_order.begin(), "older-writer");
+    {
+        // Opening again migrates nothing and keeps the order.
+        SqliteCheckpointStore store(path.string());
+        EXPECT_EQ(ids_of(store.list("t")), legacy_order);
+        EXPECT_EQ(query_int("SELECT COUNT(*) FROM pragma_table_info('neograph_checkpoints') "
+                            "WHERE name = 'save_seq'"), 1);
+
+        // Re-saving a legacy row numbers it: it moves to the newest place.
+        auto old_two = store.load_by_id("old-2");
+        ASSERT_TRUE(old_two);
+        store.save(*old_two);
+        legacy_order.erase(std::find(legacy_order.begin(), legacy_order.end(), "old-2"));
+        legacy_order.insert(legacy_order.begin(), "old-2");
+        EXPECT_EQ(ids_of(store.list("t")), legacy_order);
+        ASSERT_TRUE(store.load_latest("t"));
+        EXPECT_EQ(store.load_latest("t")->id, "old-2");
+    }
+    EXPECT_EQ(query_int("SELECT COUNT(*) FROM neograph_checkpoints WHERE save_seq IS NULL"), 3);
+}
+
+TEST(SqliteCheckpointSaveOrderMigration, TheSaveOrderNeedsNoSort) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("neograph-save-order-plan-" + Checkpoint::generate_id() + ".sqlite");
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() {
+            std::error_code ignored;
+            for (const auto& suffix : {"", "-wal", "-shm"})
+                std::filesystem::remove(path.string() + suffix, ignored);
+        }
+    } cleanup{path};
+    { SqliteCheckpointStore store(path.string()); }
+    sqlite3* raw = nullptr;
+    ASSERT_EQ(sqlite3_open(path.string().c_str(), &raw), SQLITE_OK);
+    std::unique_ptr<sqlite3, decltype(&sqlite3_close)> db(raw, &sqlite3_close);
+    sqlite3_stmt* statement = nullptr;
+    ASSERT_EQ(sqlite3_prepare_v2(db.get(),
+        "EXPLAIN QUERY PLAN SELECT checkpoint_id FROM neograph_checkpoints WHERE thread_id = ?1 "
+        "ORDER BY save_seq DESC, timestamp_ms DESC, step DESC LIMIT 1", -1, &statement, nullptr),
+        SQLITE_OK);
+    std::string plan;
+    while (sqlite3_step(statement) == SQLITE_ROW)
+        plan += reinterpret_cast<const char*>(sqlite3_column_text(statement, 3)) + std::string("\n");
+    sqlite3_finalize(statement);
+    EXPECT_NE(plan.find("neograph_checkpoints_save_order"), std::string::npos) << plan;
+    EXPECT_EQ(plan.find("TEMP B-TREE"), std::string::npos) << plan;
 }

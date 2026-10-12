@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=121965481f67e36855bf3b60e985cee1ae42a74e02c2b207334d6f9f34e6312c -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=317edfd57348541babbe80e0f232a1a47fc5ad73312f2ee72058b65c59341b4d -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -1639,7 +1639,7 @@ std::vector<Checkpoint> get_state_history(const std::string& thread_id,
                                           int limit = 100) const;
 ```
 
-スレッドのチェックポイント履歴をタイムスタンプ順 (新しいものから) で返します。
+スレッドのチェックポイント履歴を、最後に保存されたものから順に返します。最初の要素は `get_state` が読むチェックポイントです。
 #### `update_state`
 ```cpp
 void update_state(const std::string& thread_id,

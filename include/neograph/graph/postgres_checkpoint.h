@@ -20,7 +20,10 @@
  * Checkpoint tables, all auto-created on first use via `ensure_schema()`:
  *
  *   - `neograph_checkpoints` — cp metadata + per-channel version map.
- *     Channel VALUES are NOT stored here (just versions).
+ *     Channel VALUES are NOT stored here (just versions). `save_seq`
+ *     (sequence `neograph_checkpoints_save_seq`) orders a thread's
+ *     checkpoints by save; rows saved before the column existed keep it
+ *     NULL and their (timestamp, step) order, behind every numbered row.
  *   - `neograph_checkpoint_blobs` — `(thread_id, channel, version) →
  *     value`. Identical (channel, version) writes collapse via
  *     `ON CONFLICT DO NOTHING`, so a long-running thread that touches

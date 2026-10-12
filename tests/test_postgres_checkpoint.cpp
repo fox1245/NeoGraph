@@ -11,7 +11,11 @@
 // between tests is irrelevant — a failure in one test never poisons
 // the others.
 
+#include "fixtures/coarse_clock_store.h"
+
 #include <gtest/gtest.h>
+#include <neograph/graph/engine.h>
+#include <neograph/graph/loader.h>
 #include <neograph/graph/postgres_checkpoint.h>
 #include <neograph/graph/state.h>
 #include <libpq-fe.h>
@@ -26,6 +30,7 @@
 #include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -1490,4 +1495,345 @@ TEST_F(PostgresCheckpointTest, CancelledAsyncPutWritesDiscardsTransactionWithout
     EXPECT_TRUE(recovered.empty())
         << "cancelled put_writes_async retried on the replacement connection";
     EXPECT_EQ(store->reconnect_count(), 1u);
+}
+
+// ── Save order (#386, #396) ───────────────────────────────────────────
+//
+// A thread's latest checkpoint is the one saved last, as in the in-memory
+// store, whatever its timestamp or step: every save below carries one
+// timestamp, as when saves return inside the millisecond.
+
+namespace {
+
+using CoarsePostgresStore = test_support::CoarseClockStore<PostgresCheckpointStore>;
+
+Checkpoint coarse_cp(const std::string& thread_id, int step, int value) {
+    auto cp      = make_state_cp(thread_id, step, {{"x", {value, static_cast<uint64_t>(value)}}});
+    cp.timestamp = CoarsePostgresStore::kTimestamp;
+    return cp;
+}
+
+std::vector<std::string> ids_of(const std::vector<Checkpoint>& checkpoints) {
+    std::vector<std::string> ids;
+    for (const auto& checkpoint : checkpoints) ids.push_back(checkpoint.id);
+    return ids;
+}
+
+std::vector<Checkpoint> list_async_now(PostgresCheckpointStore& store, const std::string& thread_id,
+                                       int limit = 100) {
+    asio::io_context        io;
+    std::vector<Checkpoint> out;
+    std::exception_ptr      error;
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> { out = co_await store.list_async(thread_id, limit); },
+        [&](std::exception_ptr e) { error = e; });
+    io.run();
+    if (error) std::rethrow_exception(error);
+    return out;
+}
+
+std::optional<Checkpoint> latest_async_now(PostgresCheckpointStore& store,
+                                           const std::string& thread_id) {
+    asio::io_context          io;
+    std::optional<Checkpoint> out;
+    std::exception_ptr        error;
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> { out = co_await store.load_latest_async(thread_id); },
+        [&](std::exception_ptr e) { error = e; });
+    io.run();
+    if (error) std::rethrow_exception(error);
+    return out;
+}
+
+void save_async_now(PostgresCheckpointStore& store, const Checkpoint& cp) {
+    asio::io_context   io;
+    std::exception_ptr error;
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> { co_await store.save_async(cp); },
+                   [&](std::exception_ptr e) { error = e; });
+    io.run();
+    if (error) std::rethrow_exception(error);
+}
+
+std::string exec_ok(PGconn* connection, const std::string& sql) {
+    TestPgResult result{PQexec(connection, sql.c_str())};
+    if (!result.raw) return "no result";
+    const auto status = PQresultStatus(result.raw);
+    if (status == PGRES_COMMAND_OK || status == PGRES_TUPLES_OK) return {};
+    return PQresultErrorMessage(result.raw);
+}
+
+std::string query_text(PGconn* connection, const std::string& sql) {
+    TestPgResult result{PQexec(connection, sql.c_str())};
+    if (!result.raw || PQresultStatus(result.raw) != PGRES_TUPLES_OK || PQntuples(result.raw) != 1)
+        return "<no row>";
+    return PQgetisnull(result.raw, 0, 0) ? "<null>" : PQgetvalue(result.raw, 0, 0);
+}
+
+}  // namespace
+
+TEST_F(PostgresCheckpointTest, CoarseClockStepZeroSaveAfterAHigherStepIsTheLatest) {
+    CoarsePostgresStore coarse(pg_url());
+    const auto high = coarse_cp("t", 5, 1);
+    const auto low  = coarse_cp("t", 0, 2);
+    coarse.save(high);
+    coarse.save(low);
+    ASSERT_TRUE(coarse.load_latest("t"));
+    EXPECT_EQ(coarse.load_latest("t")->id, low.id);
+    EXPECT_EQ(ids_of(coarse.list("t")), (std::vector<std::string>{low.id, high.id}));
+    const auto latest = latest_async_now(coarse, "t");
+    ASSERT_TRUE(latest);
+    EXPECT_EQ(latest->id, low.id);
+    EXPECT_EQ(ids_of(list_async_now(coarse, "t")), (std::vector<std::string>{low.id, high.id}));
+}
+
+TEST_F(PostgresCheckpointTest, CoarseClockEqualStepSavesKeepTheirSaveOrder) {
+    // Two interrupt_before gates of one step each save a Before checkpoint of
+    // that step (#396), here in one millisecond, through both save paths.
+    CoarsePostgresStore      coarse(pg_url());
+    std::vector<std::string> saved;
+    for (int gate = 0; gate < 4; ++gate) {
+        auto cp            = coarse_cp("t", 3, gate + 1);
+        cp.interrupt_phase = CheckpointPhase::Before;
+        if (gate % 2) save_async_now(coarse, cp);
+        else coarse.save(cp);
+        saved.insert(saved.begin(), cp.id);
+        ASSERT_TRUE(coarse.load_latest("t"));
+        EXPECT_EQ(coarse.load_latest("t")->id, cp.id) << "after gate " << gate;
+    }
+    EXPECT_EQ(ids_of(coarse.list("t")), saved);
+    EXPECT_EQ(ids_of(coarse.list("t", 2)), (std::vector<std::string>{saved[0], saved[1]}));
+    EXPECT_EQ(ids_of(list_async_now(coarse, "t", 2)),
+              (std::vector<std::string>{saved[0], saved[1]}));
+}
+
+TEST_F(PostgresCheckpointTest, CoarseClockResavedIdBecomesTheLatestOnce) {
+    // As in the in-memory store: a save of an ID the thread holds replaces it
+    // and makes it the latest; the history lists it once, in its new place.
+    CoarsePostgresStore coarse(pg_url());
+    auto       first  = coarse_cp("t", 0, 1);
+    const auto second = coarse_cp("t", 1, 2);
+    coarse.save(first);
+    coarse.save(second);
+    first.next_nodes = {"edited"};
+    save_async_now(coarse, first);
+    const auto latest = coarse.load_latest("t");
+    ASSERT_TRUE(latest);
+    EXPECT_EQ(latest->id, first.id);
+    EXPECT_EQ(latest->next_nodes, std::vector<std::string>{"edited"});
+    EXPECT_EQ(ids_of(coarse.list("t")), (std::vector<std::string>{first.id, second.id}));
+
+    InMemoryCheckpointStore reference;
+    auto reference_first       = first;
+    reference_first.next_nodes = {"__end__"};
+    reference.save(reference_first);
+    reference.save(second);
+    reference.save(first);
+    EXPECT_EQ(ids_of(reference.list("t")), ids_of(coarse.list("t")));
+}
+
+namespace {
+
+std::atomic<int> pg_coarse_gate_resumed{0};
+
+class PgCoarseGateNode final : public GraphNode {
+public:
+    asio::awaitable<NodeResult> run(NodeInput in) override {
+        NodeResult out;
+        if (in.ctx.resume_value) {
+            ++pg_coarse_gate_resumed;
+            out.writes.push_back(ChannelWrite{"value", *in.ctx.resume_value});
+            co_return out;
+        }
+        if (in.state.get("value") == json("ask")) throw NodeInterrupt("approval");
+        out.writes.push_back(ChannelWrite{"value", json("passed")});
+        co_return out;
+    }
+    std::string get_name() const override { return "gate"; }
+};
+
+class PgCoarseTailNode final : public GraphNode {
+public:
+    asio::awaitable<NodeResult> run(NodeInput) override {
+        NodeResult out;
+        out.writes.push_back(ChannelWrite{"tail", json(true)});
+        co_return out;
+    }
+    std::string get_name() const override { return "tail"; }
+};
+
+}  // namespace
+
+TEST_F(PostgresCheckpointTest, CoarseClockALaterRunAtStepZeroIsTheLatestAndResumes) {
+    NodeFactory::instance().register_type(
+        "pg_coarse_gate", [](const std::string&, const json&, const NodeContext&) {
+            return std::make_unique<PgCoarseGateNode>();
+        });
+    NodeFactory::instance().register_type(
+        "pg_coarse_tail", [](const std::string&, const json&, const NodeContext&) {
+            return std::make_unique<PgCoarseTailNode>();
+        });
+    const json definition{
+        {"name", "pg_coarse_clock"},
+        {"channels", {{"value", {{"reducer", "overwrite"}}}, {"tail", {{"reducer", "overwrite"}}}}},
+        {"nodes", {{"gate", {{"type", "pg_coarse_gate"}}}, {"tail", {{"type", "pg_coarse_tail"}}}}},
+        {"edges", json::array({json{{"from", "__start__"}, {"to", "gate"}},
+                               json{{"from", "gate"}, {"to", "tail"}},
+                               json{{"from", "tail"}, {"to", "__end__"}}})}};
+    pg_coarse_gate_resumed.store(0);
+    auto coarse = std::make_shared<CoarsePostgresStore>(pg_url());
+    auto engine = GraphEngine::compile(definition, NodeContext{}, coarse);
+
+    RunConfig first;
+    first.thread_id = "coarse-clock";
+    first.input     = json{{"value", "go"}};
+    const auto finished = engine->run(first);
+    ASSERT_FALSE(finished.interrupted);
+    const auto finished_cp = coarse->load_by_id(finished.checkpoint_id);
+    ASSERT_TRUE(finished_cp);
+    ASSERT_GT(finished_cp->step, 0);
+
+    RunConfig second = first;
+    second.input     = json{{"value", "ask"}};
+    const auto paused = engine->run(second);
+    ASSERT_TRUE(paused.interrupted);
+    const auto latest = coarse->load_latest("coarse-clock");
+    ASSERT_TRUE(latest);
+    EXPECT_EQ(latest->id, paused.checkpoint_id) << "the checkpoint saved last is the latest";
+    EXPECT_EQ(latest->timestamp, finished_cp->timestamp);
+    EXPECT_LT(latest->step, finished_cp->step);
+    EXPECT_EQ(coarse->list("coarse-clock").front().id, paused.checkpoint_id);
+
+    const auto resumed = engine->resume("coarse-clock", json("answered"));
+    EXPECT_FALSE(resumed.interrupted);
+    EXPECT_EQ(pg_coarse_gate_resumed.load(), 1) << "the paused node runs with the answer";
+    EXPECT_EQ(resumed.output["channels"]["value"]["value"], json("answered"));
+    EXPECT_EQ(resumed.output["channels"]["tail"]["value"], json(true));
+}
+
+namespace {
+
+// neograph_checkpoints as the release before save_seq created it, with rows
+// it wrote: within thread "t" its order was old-3, old-2, old-1.
+constexpr const char* kPreviousCheckpointSchema = R"SQL(
+DROP TABLE IF EXISTS neograph_checkpoints;
+CREATE TABLE neograph_checkpoints (
+    thread_id          TEXT    NOT NULL,
+    checkpoint_id      TEXT    NOT NULL,
+    parent_id          TEXT    NOT NULL DEFAULT '',
+    current_node       TEXT    NOT NULL DEFAULT '',
+    next_nodes         JSONB   NOT NULL DEFAULT '[]'::jsonb,
+    interrupt_phase    TEXT    NOT NULL DEFAULT 'completed',
+    barrier_state      JSONB   NOT NULL DEFAULT '{}'::jsonb,
+    channel_versions   JSONB   NOT NULL DEFAULT '{}'::jsonb,
+    global_version     BIGINT  NOT NULL DEFAULT 0,
+    metadata           JSONB   NOT NULL DEFAULT '{}'::jsonb,
+    step               BIGINT  NOT NULL DEFAULT 0,
+    timestamp_ms       BIGINT  NOT NULL DEFAULT 0,
+    schema_version     INT     NOT NULL DEFAULT 2,
+    checkpoint_shape   JSONB,
+    metadata_text      TEXT,
+    checkpoint_shape_text TEXT,
+    PRIMARY KEY (thread_id, checkpoint_id)
+);
+CREATE INDEX neograph_checkpoints_recent
+    ON neograph_checkpoints (thread_id, timestamp_ms DESC, step DESC);
+INSERT INTO neograph_checkpoints (thread_id, checkpoint_id, step, timestamp_ms) VALUES
+    ('t', 'old-1', 0, 1000), ('t', 'old-3', 0, 2000), ('t', 'old-2', 1, 1000),
+    ('other', 'other-1', 9, 5);
+)SQL";
+
+void expect_migrated_schema(PGconn* observer) {
+    EXPECT_EQ(query_text(observer, "SELECT COUNT(*) FROM neograph_checkpoints WHERE save_seq IS NULL"),
+              "4")
+        << "the migration rewrites no legacy row";
+    EXPECT_EQ(query_text(observer,
+                  "SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef d JOIN pg_attribute a "
+                  "ON a.attrelid = d.adrelid AND a.attnum = d.adnum "
+                  "WHERE d.adrelid = 'neograph_checkpoints'::regclass AND a.attname = 'save_seq'"),
+              "nextval('neograph_checkpoints_save_seq'::regclass)");
+    EXPECT_EQ(query_text(observer, "SELECT to_regclass('neograph_checkpoints_recent')"), "<null>");
+    EXPECT_EQ(query_text(observer, "SELECT to_regclass('neograph_checkpoints_save_order')"),
+              "neograph_checkpoints_save_order");
+}
+
+}  // namespace
+
+TEST_F(PostgresCheckpointTest, SaveOrderMigratesThePreviousSchemaInPlace) {
+    TestPgConn observer{PQconnectdb(pg_url())};
+    ASSERT_EQ(PQstatus(observer.raw), CONNECTION_OK) << PQerrorMessage(observer.raw);
+    ASSERT_EQ(exec_ok(observer.raw, kPreviousCheckpointSchema), "");
+
+    std::vector<std::string> order{"old-3", "old-2", "old-1"};
+    {
+        PostgresCheckpointStore migrated(pg_url(), 2);
+        expect_migrated_schema(observer.raw);
+        EXPECT_EQ(ids_of(migrated.list("t")), order) << "legacy rows keep (timestamp_ms, step)";
+        ASSERT_TRUE(migrated.load_latest("t"));
+        EXPECT_EQ(migrated.load_latest("t")->id, "old-3");
+
+        // A new save is the latest, though its timestamp and step are lower.
+        auto fresh      = make_state_cp("t", 0, {{"x", {1, 1}}});
+        fresh.timestamp = 1;
+        migrated.save(fresh);
+        order.insert(order.begin(), fresh.id);
+        EXPECT_EQ(ids_of(migrated.list("t")), order);
+        EXPECT_EQ(ids_of(migrated.list("other")), (std::vector<std::string>{"other-1"}));
+    }
+    EXPECT_EQ(query_text(observer.raw, "SELECT COUNT(*) FROM neograph_checkpoints"), "5");
+
+    // A writer that does not set save_seq, as the previous release does, takes
+    // the column default and is the latest.
+    ASSERT_EQ(exec_ok(observer.raw,
+                  "INSERT INTO neograph_checkpoints (thread_id, checkpoint_id, step, timestamp_ms) "
+                  "VALUES ('t', 'older-writer', 0, 0)"),
+              "");
+    order.insert(order.begin(), "older-writer");
+    {
+        // Initializing again, as every store and reconnect does, changes nothing.
+        PostgresCheckpointStore again(pg_url(), 1);
+        expect_migrated_schema(observer.raw);
+        EXPECT_EQ(ids_of(again.list("t")), order);
+        EXPECT_EQ(query_text(observer.raw,
+                      "SELECT COUNT(*) FROM pg_attribute WHERE attrelid = "
+                      "'neograph_checkpoints'::regclass AND attname = 'save_seq' AND NOT attisdropped"),
+                  "1");
+
+        // Re-saving a legacy row numbers it: it moves to the newest place.
+        auto old_two = again.load_by_id("old-2");
+        ASSERT_TRUE(old_two);
+        again.save(*old_two);
+        order.erase(std::find(order.begin(), order.end(), "old-2"));
+        order.insert(order.begin(), "old-2");
+        EXPECT_EQ(ids_of(again.list("t")), order);
+        EXPECT_EQ(ids_of(list_async_now(again, "t")), order);
+    }
+    EXPECT_EQ(query_text(observer.raw,
+                  "SELECT COUNT(*) FROM neograph_checkpoints WHERE save_seq IS NULL"),
+              "3");
+}
+
+TEST_F(PostgresCheckpointTest, SaveOrderMigratesThePreviousSchemaOnAnAsyncReconnect) {
+    TestPgConn observer{PQconnectdb(pg_url())};
+    ASSERT_EQ(PQstatus(observer.raw), CONNECTION_OK) << PQerrorMessage(observer.raw);
+    ASSERT_EQ(exec_ok(observer.raw, kPreviousCheckpointSchema), "");
+
+    // A slot rebuilt on an executor initializes the schema asynchronously.
+    auto pool = PoolTestAccess::make_pool(/*pool_size=*/1);
+    PoolTestAccess::set_conn_str(*pool, pg_url());
+    asio::io_context   io;
+    std::exception_ptr rebuild_error;
+    asio::co_spawn(io,
+        [&]() -> asio::awaitable<void> { co_await PoolTestAccess::rebuild_async(*pool, 0); },
+        [&](std::exception_ptr error) { rebuild_error = error; });
+    io.run();
+    ASSERT_EQ(rebuild_error, nullptr);
+    expect_migrated_schema(observer.raw);
+
+    EXPECT_EQ(ids_of(list_async_now(*pool, "t")), (std::vector<std::string>{"old-3", "old-2", "old-1"}));
+    auto fresh      = make_state_cp("t", 0, {{"x", {1, 1}}});
+    fresh.timestamp = 1;
+    save_async_now(*pool, fresh);
+    const auto latest = latest_async_now(*pool, "t");
+    ASSERT_TRUE(latest);
+    EXPECT_EQ(latest->id, fresh.id);
 }

@@ -764,7 +764,9 @@ void InMemoryCheckpointStore::save(const Checkpoint& cp) {
     std::lock_guard lock(mutex_);
     // Ordinary new rows never advance the trusted current branch. Replacing
     // that exact ID with edited content or custody permanently invalidates it.
-    if (const auto previous = by_id_.find(cp.id); previous != by_id_.end()) {
+    const auto previous = by_id_.find(cp.id);
+    const bool resaved  = previous != by_id_.end();
+    if (resaved) {
         if (const auto branch = managed_budget_branch_heads_.find(previous->second.thread_id);
             branch != managed_budget_branch_heads_.end() && branch->second.checkpoint_id == cp.id &&
             (branch->second.commitment != managed_budget_checkpoint_commitment(cp) ||
@@ -775,7 +777,20 @@ void InMemoryCheckpointStore::save(const Checkpoint& cp) {
         managed_budget_obligations_.insert(cp.thread_id);
     Checkpoint shell = split_blobs_locked(cp);
     by_id_[shell.id] = shell;
-    by_thread_[shell.thread_id].push_back(std::move(shell));
+    // A thread's history is its save order, newest last, one entry per ID:
+    // load_latest returns the checkpoint saved last, and a re-saved ID moves
+    // to the newest position, as in the SQLite and PostgreSQL stores.
+    auto& history = by_thread_[shell.thread_id];
+    if (resaved) {
+        const auto stale = std::find_if(history.begin(), history.end(),
+            [&](const Checkpoint& saved) { return saved.id == shell.id; });
+        if (stale != history.end()) {
+            *stale = std::move(shell);
+            std::rotate(stale, stale + 1, history.end());
+            return;
+        }
+    }
+    history.push_back(std::move(shell));
 }
 
 std::optional<Checkpoint> InMemoryCheckpointStore::load_latest(

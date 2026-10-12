@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=121965481f67e36855bf3b60e985cee1ae42a74e02c2b207334d6f9f34e6312c -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=317edfd57348541babbe80e0f232a1a47fc5ad73312f2ee72058b65c59341b4d -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -1809,7 +1809,7 @@ std::vector<Checkpoint> get_state_history(const std::string& thread_id,
                                           int limit = 100) const;
 ```
 
-返回线程的检查点历史，按时间戳排序（最新优先）。
+返回线程的检查点历史，最后保存的排在最前；第一项就是 `get_state` 读取的检查点。
 
 #### `update_state`
 

@@ -374,12 +374,18 @@ public:
 
     /**
      * @brief Save a checkpoint.
+     *
+     * Saving an ID the thread already holds replaces that checkpoint and
+     * makes it the thread's latest, as if it were saved for the first time.
      * @param cp The checkpoint to persist.
      */
     virtual void save(const Checkpoint& cp);
 
     /**
-     * @brief Load the most recent checkpoint for a thread.
+     * @brief Load the most recently saved checkpoint for a thread.
+     *
+     * "Latest" is save order, not `timestamp` or `step`: a later run on a
+     * thread restarts at step 0, and saves can share a millisecond.
      * @param thread_id Thread identifier.
      * @return The latest checkpoint, or std::nullopt if none exists.
      */
@@ -393,7 +399,8 @@ public:
     virtual std::optional<Checkpoint> load_by_id(const std::string& id);
 
     /**
-     * @brief List checkpoints for a thread, ordered by timestamp (newest first).
+     * @brief List checkpoints for a thread, most recently saved first, one
+     *        entry per ID; the first entry is load_latest().
      * @param thread_id Thread identifier.
      * @param limit Maximum number of checkpoints to return (default: 100).
      * @return Vector of checkpoints.

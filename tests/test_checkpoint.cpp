@@ -103,6 +103,35 @@ TEST_F(CheckpointTest, DeleteThread) {
     EXPECT_TRUE(store.load_latest("thread-2").has_value());
 }
 
+// The latest checkpoint is the one saved last, whatever its step or timestamp,
+// and a re-saved ID moves to the newest place, listed once: the contract the
+// SQLite and PostgreSQL stores share.
+TEST_F(CheckpointTest, LatestIsTheLastSaveAndAResavedIdMovesThere) {
+    auto first        = make_cp("t", 4);
+    auto second       = make_cp("t", 0);
+    second.timestamp  = first.timestamp;
+    const auto third  = make_cp("t", 0);
+    store.save(first);
+    store.save(second);
+    ASSERT_TRUE(store.load_latest("t"));
+    EXPECT_EQ(store.load_latest("t")->id, second.id);
+    store.save(third);
+
+    first.next_nodes = {"edited"};
+    store.save(first);
+    const auto latest = store.load_latest("t");
+    ASSERT_TRUE(latest);
+    EXPECT_EQ(latest->id, first.id);
+    EXPECT_EQ(latest->next_nodes, std::vector<std::string>{"edited"});
+    const auto history = store.list("t");
+    ASSERT_EQ(history.size(), 3u);
+    EXPECT_EQ(history[0].id, first.id);
+    EXPECT_EQ(history[0].next_nodes, std::vector<std::string>{"edited"});
+    EXPECT_EQ(history[1].id, third.id);
+    EXPECT_EQ(history[2].id, second.id);
+    EXPECT_EQ(store.size(), 3u);
+}
+
 TEST_F(CheckpointTest, SizeCount) {
     EXPECT_EQ(store.size(), 0);
     store.save(make_cp("t1", 0));

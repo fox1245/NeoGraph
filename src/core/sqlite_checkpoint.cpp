@@ -300,11 +300,9 @@ CREATE TABLE IF NOT EXISTS neograph_checkpoints (
     timestamp_ms       INTEGER NOT NULL DEFAULT 0,
     schema_version     INTEGER NOT NULL DEFAULT 2,
     checkpoint_shape   TEXT,
+    save_seq           INTEGER,
     PRIMARY KEY (thread_id, checkpoint_id)
 );
-
-CREATE INDEX IF NOT EXISTS neograph_checkpoints_recent
-    ON neograph_checkpoints (thread_id, timestamp_ms DESC, step DESC);
 
 CREATE TABLE IF NOT EXISTS neograph_checkpoint_blobs (
     thread_id  TEXT    NOT NULL,
@@ -350,6 +348,34 @@ CREATE TABLE IF NOT EXISTS neograph_checkpoint_schema_migrations (
     migration_id TEXT PRIMARY KEY
 );
 )SQL";
+
+// A thread's latest checkpoint is the one saved last, as in the in-memory
+// store: save_seq numbers a thread's saves, and a re-save of an ID takes the
+// next number. A timestamp or step cannot order saves: a later run on a
+// thread restarts at step 0, two gates of one step save the same step, and
+// saves inside one millisecond share the timestamp. Rows saved before the
+// column existed keep save_seq NULL and their (timestamp_ms, step) order,
+// behind every numbered row. The trigger numbers a row whose writer did not
+// set save_seq. Runs once the column exists.
+constexpr const char* kSaveOrderDDL = R"SQL(
+DROP INDEX IF EXISTS neograph_checkpoints_recent;
+
+CREATE INDEX IF NOT EXISTS neograph_checkpoints_save_order
+    ON neograph_checkpoints (thread_id, save_seq DESC, timestamp_ms DESC, step DESC);
+
+CREATE TRIGGER IF NOT EXISTS neograph_checkpoints_save_seq
+AFTER INSERT ON neograph_checkpoints
+FOR EACH ROW WHEN NEW.save_seq IS NULL
+BEGIN
+    UPDATE neograph_checkpoints
+       SET save_seq = (SELECT COALESCE(MAX(save_seq), 0) + 1
+                         FROM neograph_checkpoints WHERE thread_id = NEW.thread_id)
+     WHERE thread_id = NEW.thread_id AND checkpoint_id = NEW.checkpoint_id;
+END;
+)SQL";
+
+// Newest first. SQLite sorts NULL lowest, so legacy rows follow numbered ones.
+constexpr const char* kSaveOrder = " ORDER BY save_seq DESC, timestamp_ms DESC, step DESC";
 
 constexpr const char* kDropDDL = R"SQL(
 DROP TABLE IF EXISTS neograph_checkpoint_writes;
@@ -431,16 +457,23 @@ void SqliteCheckpointStore::ensure_schema() {
     // Older databases lack the lossless structural residue. This inspects only
     // table metadata, never checkpoint history, and preserves legacy payloads.
     bool has_checkpoint_shape = false;
+    bool has_save_seq = false;
     {
         Stmt columns(db_, "PRAGMA table_info(neograph_checkpoints)");
         int column_status;
         while ((column_status = columns.step()) == SQLITE_ROW) {
-            if (columns.column_text(1) == "checkpoint_shape") has_checkpoint_shape = true;
+            const auto column = columns.column_text(1);
+            if (column == "checkpoint_shape") has_checkpoint_shape = true;
+            if (column == "save_seq") has_save_seq = true;
         }
         if (column_status != SQLITE_DONE) throw_sqlite_error(db_, "checkpoint schema lookup failed");
     }
     if (!has_checkpoint_shape)
         exec_ddl("ALTER TABLE neograph_checkpoints ADD COLUMN checkpoint_shape TEXT;");
+    // Adding a nullable column rewrites no row: existing rows stay legacy.
+    if (!has_save_seq)
+        exec_ddl("ALTER TABLE neograph_checkpoints ADD COLUMN save_seq INTEGER;");
+    exec_ddl(kSaveOrderDDL);
     Stmt migration(db_,
         "SELECT 1 FROM neograph_checkpoint_schema_migrations "
         "WHERE migration_id = 'managed_budget_finite_scope_v2'");
@@ -479,6 +512,7 @@ void SqliteCheckpointStore::drop_schema() {
         throw std::logic_error("SqliteCheckpointStore: guarded schema cannot be dropped");
     exec_ddl(kDropDDL);
     exec_ddl(kSchemaDDL);
+    exec_ddl(kSaveOrderDDL);
 }
 
 // ── save() ────────────────────────────────────────────────────────────
@@ -533,12 +567,16 @@ void SqliteCheckpointStore::save_locked(const Checkpoint& cp) {
     // shape retains its exact presence/type/value, including null or overflow.
     constexpr int64_t global_version = 0;
 
+    // The writer transaction serializes saves, so the thread's next save_seq
+    // is exact. A re-saved ID takes it too: it becomes the latest checkpoint.
     Stmt cp_ins(db_,
         "INSERT INTO neograph_checkpoints "
         "(thread_id, checkpoint_id, parent_id, current_node, next_nodes, "
         " interrupt_phase, barrier_state, channel_versions, global_version, "
-        " metadata, step, timestamp_ms, schema_version, checkpoint_shape) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        " metadata, step, timestamp_ms, schema_version, checkpoint_shape, save_seq) "
+        "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, "
+        "        (SELECT COALESCE(MAX(save_seq), 0) + 1 FROM neograph_checkpoints "
+        "          WHERE thread_id = ?1)) "
         "ON CONFLICT (thread_id, checkpoint_id) DO UPDATE SET "
         "  parent_id        = excluded.parent_id, "
         "  current_node     = excluded.current_node, "
@@ -551,7 +589,8 @@ void SqliteCheckpointStore::save_locked(const Checkpoint& cp) {
         "  step             = excluded.step, "
         "  timestamp_ms     = excluded.timestamp_ms, "
         "  schema_version   = excluded.schema_version, "
-        "  checkpoint_shape = excluded.checkpoint_shape");
+        "  checkpoint_shape = excluded.checkpoint_shape, "
+        "  save_seq         = excluded.save_seq");
     cp_ins.bind_text (1,  cp.thread_id);
     cp_ins.bind_text (2,  cp.id);
     cp_ins.bind_text (3,  cp.parent_id);
@@ -644,8 +683,7 @@ std::optional<Checkpoint> SqliteCheckpointStore::load_latest(
     const std::string& thread_id) {
     std::lock_guard lock(db_mutex_);
     std::string sql = std::string("SELECT ") + kSelectCols +
-        " FROM neograph_checkpoints WHERE thread_id = ? "
-        "ORDER BY timestamp_ms DESC, step DESC LIMIT 1";
+        " FROM neograph_checkpoints WHERE thread_id = ?" + kSaveOrder + " LIMIT 1";
     Stmt q(db_, sql.c_str());
     q.bind_text(1, thread_id);
     if (q.step() != SQLITE_ROW) return std::nullopt;
@@ -667,8 +705,7 @@ std::vector<Checkpoint> SqliteCheckpointStore::list(
     const std::string& thread_id, int limit) {
     std::lock_guard lock(db_mutex_);
     std::string sql = std::string("SELECT ") + kSelectCols +
-        " FROM neograph_checkpoints WHERE thread_id = ? "
-        "ORDER BY timestamp_ms DESC, step DESC LIMIT ?";
+        " FROM neograph_checkpoints WHERE thread_id = ?" + kSaveOrder + " LIMIT ?";
     Stmt q(db_, sql.c_str());
     q.bind_text(1, thread_id);
     q.bind_int(2, limit);
