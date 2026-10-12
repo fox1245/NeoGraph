@@ -1,0 +1,102 @@
+{
+  "join": {
+    "kind": "all"
+  },
+  "schema_version": 2,
+  "tasks": [
+    {
+      "budget": {
+        "model_tokens": 0,
+        "monetary_microunits": 1000,
+        "output_bytes": 65536,
+        "wall_time_ms": 20000
+      },
+      "depends_on": [],
+      "id": "s1",
+      "input_bindings": [],
+      "literals": [
+        {
+          "to": {
+            "field": "/limit"
+          },
+          "value": 3
+        },
+        {
+          "to": {
+            "field": "/query"
+          },
+          "value": "weather in Seoul tomorrow"
+        }
+      ],
+      "max_attempts": 2,
+      "template": "web.search/v2"
+    },
+    {
+      "budget": {
+        "model_tokens": 4000,
+        "monetary_microunits": 20000,
+        "output_bytes": 8192,
+        "wall_time_ms": 30000
+      },
+      "depends_on": [
+        "s1"
+      ],
+      "id": "s2",
+      "input_bindings": [
+        {
+          "from": {
+            "artifact": "hits",
+            "field": "/items/0/snippet",
+            "task": "s1"
+          },
+          "to": {
+            "field": "/text"
+          }
+        }
+      ],
+      "literals": [
+        {
+          "to": {
+            "field": "/style"
+          },
+          "value": "one sentence"
+        }
+      ],
+      "template": "text.summarize/v1"
+    },
+    {
+      "budget": {
+        "model_tokens": 0,
+        "monetary_microunits": 100,
+        "output_bytes": 1024,
+        "wall_time_ms": 5000
+      },
+      "depends_on": [
+        "s1",
+        "s2"
+      ],
+      "id": "s3",
+      "input_bindings": [
+        {
+          "from": {
+            "artifact": "summary",
+            "field": "/text",
+            "task": "s2"
+          },
+          "to": {
+            "field": "/body"
+          }
+        }
+      ],
+      "literals": [
+        {
+          "to": {
+            "field": "/title"
+          },
+          "value": "Seoul weather"
+        }
+      ],
+      "template": "notes.save/v1"
+    }
+  ]
+}

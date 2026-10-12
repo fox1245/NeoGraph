@@ -41,6 +41,7 @@
 #include <neograph/program/synthesis.h>
 #include <neograph/program/task_graph_proposal.h>
 #include <neograph/program/task_graph_fragment.h>
+#include <neograph/program/step_plan.h>
 #include <neograph/program/transition_store.h>
 #include <neograph/program/postgres_transition_store.h>
 #include <neograph/program/sqlite_transition_store.h>

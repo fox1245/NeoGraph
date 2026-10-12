@@ -1,0 +1,24 @@
+{
+  "schema": "step-plan/v1",
+  "steps": [
+    {
+      "id": "s1",
+      "use": "calc.add/v1",
+      "params": {
+        "a": 1,
+        "b": 2
+      },
+      "after": [
+        "s2"
+      ]
+    },
+    {
+      "id": "s2",
+      "use": "calc.add/v1",
+      "params": {
+        "a": 1,
+        "b": 2
+      }
+    }
+  ]
+}

@@ -600,6 +600,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/javascript_capabilities.cpp
         src/program/task_graph_proposal.cpp
         src/program/task_graph_fragment.cpp
+        src/program/step_plan.cpp
         src/program/javascript.cpp
         src/program/native.cpp
         src/program/bundle.cpp

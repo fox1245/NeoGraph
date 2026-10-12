@@ -1,0 +1,33 @@
+{
+  "schema": "step-plan/v1",
+  "steps": [
+    {
+      "id": "s1",
+      "use": "calc.add/v1",
+      "params": {
+        "a": 1,
+        "b": 2
+      }
+    },
+    {
+      "id": "s2",
+      "use": "calc.add/v1",
+      "params": {
+        "a": 1,
+        "b": 2
+      }
+    },
+    {
+      "id": "s3",
+      "use": "calc.add/v1",
+      "params": {
+        "a": {
+          "from_step": "s1"
+        },
+        "b": {
+          "from_step": "s2"
+        }
+      }
+    }
+  ]
+}

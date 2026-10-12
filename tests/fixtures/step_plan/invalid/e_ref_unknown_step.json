@@ -1,0 +1,15 @@
+{
+  "schema": "step-plan/v1",
+  "steps": [
+    {
+      "id": "s1",
+      "use": "calc.add/v1",
+      "params": {
+        "a": {
+          "from_step": "zz"
+        },
+        "b": 2
+      }
+    }
+  ]
+}

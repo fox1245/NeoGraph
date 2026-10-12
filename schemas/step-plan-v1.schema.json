@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.ai/schemas/step-plan-v1.schema.json",
+  "title": "NeoGraph step-plan/v1",
+  "description": "A flat, ordered list of steps written by a planner. Data only: intake_step_plan checks it against the host's template allow-list and lowers it into a TaskGraphProposal. A reference may only name an earlier step. step_plan_json_schema() generates a schema specialised to one catalog; this one is the catalog-independent shape.",
+  "type": "object",
+  "required": ["schema", "steps"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "step-plan/v1"},
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/step"}
+    }
+  },
+  "$defs": {
+    "step_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}$"
+    },
+    "reference": {
+      "type": "object",
+      "required": ["from_step"],
+      "additionalProperties": false,
+      "properties": {
+        "from_step": {"$ref": "#/$defs/step_id"},
+        "output": {"type": "string", "description": "Artifact name. Default: the producer's 'out', else its only artifact."},
+        "field": {"type": "string", "description": "Output field without the leading '/'. Default: the artifact's only field."}
+      }
+    },
+    "literal": {
+      "description": "Any JSON value except an object that has the key 'from_step'.",
+      "not": {"type": "object", "required": ["from_step"]}
+    },
+    "step": {
+      "type": "object",
+      "required": ["id", "use"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/step_id"},
+        "use": {"type": "string", "minLength": 1, "description": "A template id from the host allow-list."},
+        "params": {
+          "type": "object",
+          "description": "Input name (the template's input field without the leading '/') to a literal or a reference.",
+          "additionalProperties": {"anyOf": [{"$ref": "#/$defs/reference"}, {"$ref": "#/$defs/literal"}]}
+        },
+        "out": {"type": "string", "description": "A declared output artifact of the template."},
+        "after": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/step_id"},
+          "uniqueItems": true
+        },
+        "retry": {
+          "type": "object",
+          "required": ["max_attempts"],
+          "additionalProperties": false,
+          "properties": {
+            "max_attempts": {"type": "integer", "minimum": 1}
+          }
+        }
+      }
+    }
+  }
+}

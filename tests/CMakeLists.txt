@@ -120,6 +120,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_program_task_graph_proposal.cpp
         test_program_task_graph_scheduler.cpp
         test_program_task_graph_expansion.cpp
+        test_program_step_plan.cpp
     )
     target_include_directories(neograph_program_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/src/program

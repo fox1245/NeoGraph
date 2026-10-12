@@ -1,0 +1,26 @@
+{
+  "schema": "step-plan/v1",
+  "steps": [
+    {
+      "id": "lookup",
+      "use": "table.lookup/v1",
+      "params": {
+        "table": "t",
+        "filter/key": "k",
+        "filter/value": "v"
+      },
+      "out": "rows"
+    },
+    {
+      "id": "count",
+      "use": "calc.add/v1",
+      "params": {
+        "a": {
+          "from_step": "lookup",
+          "output": "rows"
+        },
+        "b": 1
+      }
+    }
+  ]
+}

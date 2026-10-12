@@ -1,0 +1,42 @@
+{
+  "schema": "step-plan/v1",
+  "steps": [
+    {
+      "id": "s1",
+      "use": "web.search/v2",
+      "params": {
+        "query": "weather in Seoul tomorrow",
+        "limit": 3
+      },
+      "retry": {
+        "max_attempts": 2
+      }
+    },
+    {
+      "id": "s2",
+      "use": "text.summarize/v1",
+      "params": {
+        "text": {
+          "from_step": "s1",
+          "field": "items/0/snippet"
+        },
+        "style": "one sentence"
+      }
+    },
+    {
+      "id": "s3",
+      "use": "notes.save/v1",
+      "params": {
+        "title": "Seoul weather",
+        "body": {
+          "from_step": "s2",
+          "output": "summary",
+          "field": "text"
+        }
+      },
+      "after": [
+        "s1"
+      ]
+    }
+  ]
+}

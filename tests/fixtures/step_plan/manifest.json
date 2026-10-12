@@ -1,0 +1,528 @@
+{
+  "_comment": "step-plan/v1 intake corpus. Valid files are accepted. For each invalid file, 'violations' is the exact ordered list of [path, code] intake_step_plan returns; 'options' names a variant of the test catalog. Files ending in .txt go through the text entry point.",
+  "valid": [
+    "valid/after_only.json",
+    "valid/design_example.json",
+    "valid/diamond.json",
+    "valid/explicit_output.json",
+    "valid/nested_param.json",
+    "valid/single_step.json"
+  ],
+  "invalid": {
+    "invalid/e_not_json.txt": {
+      "options": "default",
+      "violations": [
+        [
+          "",
+          "STEP_NOT_JSON"
+        ]
+      ]
+    },
+    "invalid/e_unterminated.txt": {
+      "options": "default",
+      "violations": [
+        [
+          "",
+          "STEP_NOT_JSON"
+        ]
+      ]
+    },
+    "invalid/e_bad_syntax.txt": {
+      "options": "default",
+      "violations": [
+        [
+          "",
+          "STEP_NOT_JSON"
+        ]
+      ]
+    },
+    "invalid/e_duplicate_key.txt": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/params/a",
+          "STEP_DUPLICATE_KEY"
+        ]
+      ]
+    },
+    "invalid/e_type_steps.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps",
+          "STEP_TYPE"
+        ]
+      ]
+    },
+    "invalid/e_type_step.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0",
+          "STEP_TYPE"
+        ]
+      ]
+    },
+    "invalid/e_type_document.json": {
+      "options": "default",
+      "violations": [
+        [
+          "",
+          "STEP_TYPE"
+        ]
+      ]
+    },
+    "invalid/e_schema.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/schema",
+          "STEP_SCHEMA"
+        ]
+      ]
+    },
+    "invalid/e_schema_missing.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/schema",
+          "STEP_SCHEMA"
+        ]
+      ]
+    },
+    "invalid/e_unknown_field.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/note",
+          "STEP_UNKNOWN_FIELD"
+        ]
+      ]
+    },
+    "invalid/e_unknown_step_field.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/color",
+          "STEP_UNKNOWN_FIELD"
+        ]
+      ]
+    },
+    "invalid/e_forbidden_field.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/model",
+          "STEP_FORBIDDEN_FIELD"
+        ]
+      ]
+    },
+    "invalid/e_forbidden_param.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/params/url",
+          "STEP_FORBIDDEN_FIELD"
+        ]
+      ]
+    },
+    "invalid/e_empty.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps",
+          "STEP_EMPTY"
+        ]
+      ]
+    },
+    "invalid/e_empty_missing.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps",
+          "STEP_EMPTY"
+        ]
+      ]
+    },
+    "invalid/e_limit_steps.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps",
+          "STEP_LIMIT_STEPS"
+        ]
+      ]
+    },
+    "invalid/e_id_required.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/id",
+          "STEP_ID_REQUIRED"
+        ]
+      ]
+    },
+    "invalid/e_id_format.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/id",
+          "STEP_ID_FORMAT"
+        ]
+      ]
+    },
+    "invalid/e_id_duplicate.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/1/id",
+          "STEP_ID_DUPLICATE"
+        ]
+      ]
+    },
+    "invalid/e_use_required.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/use",
+          "STEP_USE_REQUIRED"
+        ]
+      ]
+    },
+    "invalid/e_use_unknown.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/use",
+          "STEP_USE_UNKNOWN"
+        ]
+      ]
+    },
+    "invalid/e_param_unknown.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/params/c",
+          "STEP_PARAM_UNKNOWN"
+        ]
+      ]
+    },
+    "invalid/e_param_missing.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/params/query",
+          "STEP_PARAM_MISSING"
+        ]
+      ]
+    },
+    "invalid/e_param_missing_no_params.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/params/query",
+          "STEP_PARAM_MISSING"
+        ]
+      ]
+    },
+    "invalid/e_literal_too_large.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/params/query",
+          "STEP_LITERAL_TOO_LARGE"
+        ]
+      ]
+    },
+    "invalid/e_literal_depth.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/params/a",
+          "STEP_LITERAL_DEPTH"
+        ]
+      ]
+    },
+    "invalid/e_literal_reserved_key.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/params/a",
+          "STEP_LITERAL_RESERVED_KEY"
+        ]
+      ]
+    },
+    "invalid/e_literals_refused.json": {
+      "options": "no_literals",
+      "violations": [
+        [
+          "/steps/0/params/a",
+          "STEP_LITERAL_TOO_LARGE"
+        ],
+        [
+          "/steps/0/params/b",
+          "STEP_LITERAL_TOO_LARGE"
+        ]
+      ]
+    },
+    "invalid/e_ref_syntax.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/1/params/a/bogus",
+          "STEP_REF_SYNTAX"
+        ]
+      ]
+    },
+    "invalid/e_ref_syntax_type.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/1/params/a/from_step",
+          "STEP_REF_SYNTAX"
+        ]
+      ]
+    },
+    "invalid/e_ref_unknown_step.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/params/a/from_step",
+          "STEP_REF_UNKNOWN_STEP"
+        ]
+      ]
+    },
+    "invalid/e_ref_forward.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/params/a/from_step",
+          "STEP_REF_FORWARD"
+        ]
+      ]
+    },
+    "invalid/e_ref_self.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/params/a/from_step",
+          "STEP_REF_FORWARD"
+        ]
+      ]
+    },
+    "invalid/e_ref_output_unknown.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/1/params/a",
+          "STEP_REF_OUTPUT_UNKNOWN"
+        ]
+      ]
+    },
+    "invalid/e_ref_output_wrong.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/1/params/a/output",
+          "STEP_REF_OUTPUT_UNKNOWN"
+        ]
+      ]
+    },
+    "invalid/e_ref_field_unknown.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/1/params/a/field",
+          "STEP_REF_FIELD_UNKNOWN"
+        ]
+      ]
+    },
+    "invalid/e_ref_field_ambiguous.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/1/params/text",
+          "STEP_REF_FIELD_AMBIGUOUS"
+        ]
+      ]
+    },
+    "invalid/e_ref_out_mismatch.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/1/params/a/output",
+          "STEP_REF_OUT_MISMATCH"
+        ]
+      ]
+    },
+    "invalid/e_out_unknown.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/out",
+          "STEP_OUT_UNKNOWN"
+        ]
+      ]
+    },
+    "invalid/e_after_unknown.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/after/0",
+          "STEP_AFTER_UNKNOWN"
+        ]
+      ]
+    },
+    "invalid/e_after_forward.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/after/0",
+          "STEP_AFTER_FORWARD"
+        ]
+      ]
+    },
+    "invalid/e_after_duplicate.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/1/after/1",
+          "STEP_AFTER_DUPLICATE"
+        ]
+      ]
+    },
+    "invalid/e_retry_field.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/retry/max",
+          "STEP_RETRY_FIELD"
+        ]
+      ]
+    },
+    "invalid/e_retry_missing.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/retry",
+          "STEP_RETRY_FIELD"
+        ]
+      ]
+    },
+    "invalid/e_retry_range.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/retry/max_attempts",
+          "STEP_RETRY_RANGE"
+        ]
+      ]
+    },
+    "invalid/e_retry_type.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/0/retry/max_attempts",
+          "STEP_TYPE"
+        ]
+      ]
+    },
+    "invalid/e_limit_edges.json": {
+      "options": "max_edges_1",
+      "violations": [
+        [
+          "/steps",
+          "STEP_LIMIT_EDGES"
+        ]
+      ]
+    },
+    "invalid/e_limit_depth.json": {
+      "options": "max_depth_2",
+      "violations": [
+        [
+          "/steps",
+          "STEP_LIMIT_DEPTH"
+        ]
+      ]
+    },
+    "invalid/e_limit_budget.json": {
+      "options": "total_wall_30000",
+      "violations": [
+        [
+          "/steps",
+          "STEP_LIMIT_BUDGET"
+        ]
+      ]
+    },
+    "invalid/e_limit_budget_retry.json": {
+      "options": "total_wall_30000",
+      "violations": [
+        [
+          "/steps",
+          "STEP_LIMIT_BUDGET"
+        ]
+      ]
+    },
+    "invalid/e_limit_params.json": {
+      "options": "max_params_1",
+      "violations": [
+        [
+          "/steps/0/params",
+          "STEP_LIMIT_PARAMS"
+        ]
+      ]
+    },
+    "invalid/e_limit_after.json": {
+      "options": "max_after_1",
+      "violations": [
+        [
+          "/steps/2/after",
+          "STEP_LIMIT_AFTER"
+        ]
+      ]
+    },
+    "invalid/e_limit_document.json": {
+      "options": "max_document_64",
+      "violations": [
+        [
+          "",
+          "STEP_LIMIT_DOCUMENT"
+        ]
+      ]
+    },
+    "invalid/e_lowering_rejected.json": {
+      "options": "zero_money_per_task",
+      "violations": [
+        [
+          "/steps/0/use",
+          "STEP_LOWERING_REJECTED"
+        ]
+      ]
+    },
+    "invalid/e_many.json": {
+      "options": "default",
+      "violations": [
+        [
+          "/steps/1/params/text/from_step",
+          "STEP_REF_FORWARD"
+        ],
+        [
+          "/steps/1/use",
+          "STEP_USE_UNKNOWN"
+        ],
+        [
+          "/steps/2/extra",
+          "STEP_UNKNOWN_FIELD"
+        ],
+        [
+          "/steps/2/params/a/from_step",
+          "STEP_REF_FORWARD"
+        ],
+        [
+          "/steps/2/params/c",
+          "STEP_PARAM_UNKNOWN"
+        ]
+      ]
+    }
+  }
+}

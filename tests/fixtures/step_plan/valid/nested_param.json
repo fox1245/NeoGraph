@@ -1,0 +1,26 @@
+{
+  "schema": "step-plan/v1",
+  "steps": [
+    {
+      "id": "find",
+      "use": "table.lookup/v1",
+      "params": {
+        "table": "prices",
+        "filter/key": "sku",
+        "filter/value": "A-17"
+      },
+      "out": "row"
+    },
+    {
+      "id": "total",
+      "use": "calc.add/v1",
+      "params": {
+        "a": {
+          "from_step": "find",
+          "field": "value"
+        },
+        "b": 5
+      }
+    }
+  ]
+}

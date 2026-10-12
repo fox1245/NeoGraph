@@ -1,0 +1,21 @@
+{
+  "schema": "step-plan/v1",
+  "steps": [
+    {
+      "id": "s1",
+      "use": "web.search/v2",
+      "params": {
+        "query": "q"
+      }
+    },
+    {
+      "id": "s2",
+      "use": "text.summarize/v1",
+      "params": {
+        "text": {
+          "from_step": "s1"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "schema": "step-plan/v1",
+  "steps": [
+    {
+      "id": "s1",
+      "use": "web.search/v2",
+      "params": {
+        "query": "q"
+      }
+    },
+    {
+      "id": "s2",
+      "use": "web.serach/v2",
+      "params": {
+        "text": {
+          "from_step": "s4"
+        }
+      }
+    },
+    {
+      "id": "s3",
+      "use": "calc.add/v1",
+      "params": {
+        "a": {
+          "from_step": "s4"
+        },
+        "c": 1
+      },
+      "extra": true
+    },
+    {
+      "id": "s4",
+      "use": "calc.add/v1",
+      "params": {
+        "a": 1,
+        "b": 2
+      }
+    }
+  ]
+}
