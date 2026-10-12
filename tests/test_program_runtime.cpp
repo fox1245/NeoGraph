@@ -4904,6 +4904,20 @@ TEST(ProgramRuntimeTest, RemoteReconnectCannotStealLiveRootExecutionLease) {
         FAIL() << "remote reconnect unexpectedly stole a live root execution lease";
     } catch (const ProgramDiagnosticError& error) {
         EXPECT_EQ(error.diagnostic().code, "P_RUN_LEASE_HELD");
+        // #421: the error names the lease, what happens when it expires, and
+        // the child budgets that take no lease.
+        const auto& message = error.diagnostic().message;
+        EXPECT_NE(message.find("execution lease"), std::string::npos) << message;
+        EXPECT_NE(message.find("TimedOut"), std::string::npos) << message;
+        EXPECT_NE(message.find("max_child_depth"), std::string::npos) << message;
+        EXPECT_NE(message.find("max_total_children"), std::string::npos) << message;
+        const auto& witness = error.diagnostic().witness;
+        EXPECT_EQ(witness.value("run_id", std::string()), source.run_id());
+        EXPECT_EQ(witness.value("lease_id", std::string()), lease->id());
+        EXPECT_EQ(witness.value("expires_at_ms", std::int64_t{0}), lease->expires_at_ms());
+        const auto retry_after = witness.value("retry_after_ms", std::int64_t{0});
+        EXPECT_GT(retry_after, 0);
+        EXPECT_LE(retry_after, lease->expires_at_ms() - lease->acquired_at_ms());
     }
     EXPECT_EQ(blocking_calls.load(), 1U);
 

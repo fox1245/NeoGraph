@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=d3ad21d0934c02a44597ebb1b2697a6d28725a9c1b396386c5beae702f724db3 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=69afc6fcb257ee278de8e8e0470fbfa008100e77d3a3af2e20a9435e8cef2a34 -->
 # Program 가이드: 그래프를 조율하는 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -291,6 +291,8 @@ python restart.py state resume run-...
 ```
 
 첫 번째 명령은 상태 `Interrupted`와 실행 ID를 출력합니다. 그 ID를 두 번째 명령에 넘기면 `Completed`와 리포트를 출력합니다. `state` 디렉터리에는 `program.db`, `checkpoints.db`, `provider_calls.db`가 들어 있습니다.
+
+프로세스가 일시 정지가 아니라 실행 중인 채로 남긴 실행은 `host.reconnect(run_id)`로 이어 갑니다. 어떻게 이어지는지는 Program에 따라 다릅니다. 자식 예산 없이 시작한 `define()`만 있는 Program(`max_child_depth`와 `max_total_children`이 모두 0인 기본값)은 `wall_time_ms` 동안 실행 lease를 잡습니다. 소유자가 아직 살아 있을 수 있는 실행을 다른 프로세스가 이어 가지 못하게 하기 위해서입니다. lease가 만료될 때까지 `reconnect`는 `P_RUN_LEASE_HELD`를 발생시키고, 만료된 뒤에는 실행을 이어 가지 않고 `TimedOut`으로 끝냅니다. `main()`이 있는 Program이나 자식 예산(둘 다 0보다 큼)으로 시작한 Program은 lease를 잡지 않으며, `reconnect`는 마지막 체크포인트에서 바로 이어 가면서 저널에 기록된 모델 호출을 재생하고 한 번만 과금합니다([`36_program_crash_recovery.py`](../bindings/python/examples/36_program_crash_recovery.py)).
 
 ## `define()`이 표현할 수 있는 것
 

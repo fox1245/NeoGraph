@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=e6f1c22542e9ee7aa71cdd0f174b90ea75b2ce24998ab18d034df6cba761d8a9 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=bf3a0fc91c038eb15990431ba05111781017b3a926b38e3f45cd235f633546e0 -->
 # 故障排查
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -112,6 +112,7 @@ worker_count 默认是 `1`，因此不会创建引擎自己的线程池。I/O �
 | `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | 运行预算与传给 `compile_admit` 的预算不一致 | 传入相同的预算，或者重新编译并准入 |
 | `ng.spawn` 抛出 `P_CHILD_BINDING` | `LocalProgramHost` 没有子绑定解析器 | 在 C++ 宿主里运行子 Program |
 | `resume()` 抛出 `P_RUN_NOT_FOUND`：`run '<id>' was not found in this LocalProgramHost` | 这个运行属于另一个 `LocalProgramHost`，或者所属的宿主已销毁 | 通过启动该运行的宿主来恢复 |
+| `reconnect()` 抛出 `P_RUN_LEASE_HELD` | 没有子预算的、只有 `define()` 的 Program 会在其 `wall_time_ms` 内持有执行租约，以免别的运行时接着运行一个所有者可能仍然存活的运行 | 等过了诊断 witness 里的 `retry_after_ms` 后重试，运行随后以 `TimedOut` 结束。要让崩溃的运行从最近的检查点继续，请使用 `main()`，或为 Program 设置子预算（`max_child_depth` 和 `max_total_children` 大于 0）后再启动 |
 | `fork()` 抛出 `P_FORK_SOURCE_BUDGET` | 分叉的预算拿走了已暂停运行剩下的全部 `wall_time_ms` 或全部 `max_core_steps`，该运行将无法恢复 | 只给分叉 `paused.remaining_budget` 的一部分，例如一半；`max_concurrency` 可以原样给 |
 | `P_CORE_BARRIER_STALLED` | 屏障的某个成员走了不通向 join 的路由，join 再也无法触发 | 让每个成员都路由到 join 或 `__end__`；`P_CORE_E15` 会在编译时对这类路由发出警告 |
 | `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | 运行用完了 `wall_time_ms`；被打断的操作的文本在 `failure.witness["cause_message"]` 里 | 用更大的 `wall_time_ms` 重新编译并准入 |

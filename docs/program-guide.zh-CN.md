@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=d3ad21d0934c02a44597ebb1b2697a6d28725a9c1b396386c5beae702f724db3 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=69afc6fcb257ee278de8e8e0470fbfa008100e77d3a3af2e20a9435e8cef2a34 -->
 # Program 指南：协调图的 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -291,6 +291,8 @@ python restart.py state resume run-...
 ```
 
 第一条命令打印状态 `Interrupted` 和运行 ID；把该 ID 传给第二条命令，它会打印 `Completed` 和报告。目录 `state` 中有 `program.db`、`checkpoints.db` 和 `provider_calls.db`。
+
+进程停止时仍处于运行状态（而不是暂停）的运行，用 `host.reconnect(run_id)` 继续，具体怎么继续取决于 Program。没有子预算（`max_child_depth` 和 `max_total_children` 都是 0，这是默认值）的、只有 `define()` 的 Program，会在其 `wall_time_ms` 内持有执行租约，以免别的进程接着运行一个所有者可能仍然存活的运行。租约到期前，`reconnect` 会抛出 `P_RUN_LEASE_HELD`；到期后，它让运行以 `TimedOut` 结束，而不会继续运行。带有 `main()` 的 Program，或带子预算（两者都大于 0）启动的 Program，不持有租约，`reconnect` 会立即从最近一个检查点继续，重放已记入 journal 的模型调用，并只计一次费（[`36_program_crash_recovery.py`](../bindings/python/examples/36_program_crash_recovery.py)）。
 
 ## `define()` 能表达什么
 

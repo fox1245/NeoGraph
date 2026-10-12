@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=d3ad21d0934c02a44597ebb1b2697a6d28725a9c1b396386c5beae702f724db3 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=69afc6fcb257ee278de8e8e0470fbfa008100e77d3a3af2e20a9435e8cef2a34 -->
 # Program ガイド: グラフを取りまとめる JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -291,6 +291,8 @@ python restart.py state resume run-...
 ```
 
 最初のコマンドはステータス `Interrupted` と実行 ID を出力します。その ID を2番目のコマンドに渡すと、`Completed` とレポートが出力されます。ディレクトリ `state` には `program.db`、`checkpoints.db`、`provider_calls.db` が入ります。
+
+プロセスが一時停止ではなく実行中のまま残した実行は、`host.reconnect(run_id)` で続行します。どう続行されるかは Program によって違います。子の予算なしで始めた `define()` だけの Program（`max_child_depth` と `max_total_children` がどちらも 0 の、デフォルトの状態）は、`wall_time_ms` の間、実行リースを保持します。所有者がまだ生きているかもしれない実行を、別のプロセスが続行しないようにするためです。リースが切れるまで `reconnect` は `P_RUN_LEASE_HELD` を送出し、切れた後は実行を続行せず `TimedOut` で終わらせます。`main()` を持つ Program や、子の予算（どちらも 0 より大きい）付きで始めた Program はリースを持たず、`reconnect` は最後のチェックポイントからすぐに続行します。そのとき、ジャーナルに記録済みのモデル呼び出しはリプレイされ、課金は1回だけです（[`36_program_crash_recovery.py`](../bindings/python/examples/36_program_crash_recovery.py)）。
 
 ## `define()` で表現できること
 

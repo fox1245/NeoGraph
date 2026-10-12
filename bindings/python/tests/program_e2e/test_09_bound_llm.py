@@ -745,3 +745,50 @@ def test_the_overshoot_record_says_how_far_the_last_reply_went_over(peer):
     assert result.failure.witness["model_tokens"] == {
         "granted": TOKEN_BUDGET, "used": 1_200, "over_by": 200}
     assert "1200" in result.failure.message and str(TOKEN_BUDGET) in result.failure.message
+
+
+# ---------------------------------------------------------------------------
+# reconnect() of a run that holds an execution lease says why it is held (#421)
+#
+# A define()-only Program started without child budgets holds a root execution
+# lease for its wall time, so that no other runtime continues a run whose owner
+# may still be alive. The error names the lease and the two ways out: wait for
+# it to expire (the run then ends TimedOut), or start the Program with child
+# budgets, which holds no lease and recovers from the last checkpoint
+# (test_a_call_journaled_before_a_crash_is_charged_once_after_recovery).
+# ---------------------------------------------------------------------------
+
+_LEASE_HELD_SETUP = _LEASE_SETUP.replace("wall_time_ms=3_000", "wall_time_ms=60_000")
+_LEASE_HELD_CRASHING_PROCESS = _LEASE_HELD_SETUP + _LEASE_CRASHING_PROCESS[len(_LEASE_SETUP):]
+_LEASE_HELD_RECONNECT = _LEASE_HELD_SETUP + r'''
+try:
+    host.reconnect(sys.argv[4])
+except RuntimeError as error:
+    print(json.dumps({"diagnostic": error.diagnostics[0]}, default=str), flush=True)
+else:
+    print(json.dumps({"reconnected": True}), flush=True)
+'''
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="NativeArchive custody needs an owner-only protected directory")
+def test_reconnect_of_a_leased_run_names_the_lease_and_the_child_budget_exit(peer, tmp_path):
+    store = str(tmp_path / "runs")
+    crashed = run_python(_LEASE_HELD_CRASHING_PROCESS, peer.base_url, store, "first", timeout=120)
+    assert crashed.returncode == 9, (crashed.returncode, crashed.stdout, crashed.stderr[-2000:])
+    lines = [json.loads(line) for line in crashed.stdout.splitlines() if line.startswith("{")]
+
+    held = run_python(_LEASE_HELD_RECONNECT, peer.base_url, store, "again", lines[0]["run_id"],
+                      timeout=120)
+    assert held.returncode == 0, held.stderr[-2000:]
+    diagnostic = last_json_line(held.stdout)["diagnostic"]
+    assert diagnostic["code"] == "P_RUN_LEASE_HELD", diagnostic
+    message = diagnostic["message"]
+    assert "execution lease" in message, message
+    assert "TimedOut" in message, message
+    assert "max_child_depth" in message and "max_total_children" in message, message
+    witness = diagnostic["witness"]
+    assert witness["run_id"] == lines[0]["run_id"]
+    assert 0 < witness["retry_after_ms"] <= 60_000, witness
+    assert witness["expires_at_ms"] > 0
+    assert peer.request_count() == 1, "the held run was not dispatched again"

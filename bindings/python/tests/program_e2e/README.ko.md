@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=5244fb2b21fedea0ecc885bd7f9d932335e0ebbf3a5965744fd2e020d1d4e4c5 -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=577a50f6d808128cac2df1fd5fae47da01c5856b1c57c6596bc8c2faa5933321 -->
 # Program API 엔드투엔드 시나리오
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -17,7 +17,7 @@
 | `test_06_graph_shapes.py` | barrier join, 조건부 라우팅, `Send` map-reduce, 서브그래프, 잘못된 그래프 형태 |
 | `test_07_main_programs.py` | `callCore`, `all`, `race`, `quorum`, `await` 타임아웃, `cancelScope`, 외부 취소, `spawn` |
 | `test_08_live_llm.py` | 노드가 모델을 호출하는 Program(기본은 로컬 peer, 활성화하면 OpenRouter), Python 노드와 바인딩된 `llm_call` |
-| `test_09_bound_llm.py` | `node_context`로 바인딩한 `llm_call`(#372): 보고된 비용과 추정 비용, `provider.max_price`로 고정한 route 상한, 전송 전 거부(예산, 알 수 없는 모델, 라우터 별칭), 예산 0, provider 없이 쓴 id, 하나의 예산에 대한 `all`과 `quorum`, 호출이 저널에 기록된 뒤 발생한 크래시와 그 비용을 한 번만 청구하는 복구 |
+| `test_09_bound_llm.py` | `node_context`로 바인딩한 `llm_call`(#372): 보고된 비용과 추정 비용, `provider.max_price`로 고정한 route 상한, 전송 전 거부(예산, 알 수 없는 모델, 라우터 별칭), 예산 0, provider 없이 쓴 id, 하나의 예산에 대한 `all`과 `quorum`, 호출이 저널에 기록된 뒤 발생한 크래시와 그 비용을 한 번만 청구하는 복구, 모델 토큰 예산이 소진될 때의 하나의 종료 모양(#420), 실행 lease에 묶인 실행의 오류(#421) |
 | `test_10_failure_routing.py` | 실패 라우팅(#364): 실패한 TEST를 기록과 함께 `interruptBefore` 핸들러로 라우팅, 재시도 라우트와 중단 라우트를 따른 재개, 작성자 정의 코드, 가려진(redacted) 오류 텍스트, `max_visits`, `max_node_retries` 상한과 `main()`이 있을 때와 없을 때의 남은 값(#419), 노드 안의 Program 진단, SQLite를 쓴 새 프로세스에서의 재개 |
 | `test_11_attempt_timeout.py` | 시도 타임아웃(#364): 타임아웃이 나고 재시도에서 복구되는 느린 Python 노드, 항상 타임아웃이 나서 `NG.Timeout`으로 핸들러에 라우팅되는 노드(핸들러가 없으면 실행이 실패), 결과나 트레이스에 전혀 반영되지 않는 늦은 완료, 중지 기한이 지나도록 취소를 무시하는 노드(`NG.EffectUncertain`), `wall_time_ms`를 넘길 백오프가 `deadline` 종류로 실행을 멈추는 경우 |
 | `test_12_send_interrupts.py` | `NodeInterrupt`를 발생시키는 `Send` 대상(#385): Program이 그 지점에서 일시 중지되고, 재개하면 map 노드와 끝난 Send를 재생(replay)하며, SQLite로 재시작한 뒤에도 재개할 수 있고, 바인딩된 `llm_call`을 호출한 뒤 끝난 Send는 다시 보내지도 다시 청구하지도 않는다 |

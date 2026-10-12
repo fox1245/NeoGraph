@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=e6f1c22542e9ee7aa71cdd0f174b90ea75b2ce24998ab18d034df6cba761d8a9 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=bf3a0fc91c038eb15990431ba05111781017b3a926b38e3f45cd235f633546e0 -->
 # 문제 해결
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -112,6 +112,7 @@ worker_count의 기본값은 `1`이므로 엔진이 소유하는 풀이 만들�
 | `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | 실행 예산이 `compile_admit`에 넘긴 예산과 다르다 | 같은 예산을 넘기거나, 다시 컴파일하고 승인(admission)한다 |
 | `ng.spawn`에서 발생하는 `P_CHILD_BINDING` | `LocalProgramHost`에 자식 바인딩 resolver가 없다 | 자식 Program은 C++ 호스트에서 실행한다 |
 | `resume()`에서 발생하는 `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost` | 그 실행이 다른 `LocalProgramHost`나 이미 소멸한 호스트의 것이다 | 그 실행을 시작한 호스트로 재개한다 |
+| `reconnect()`에서 발생하는 `P_RUN_LEASE_HELD` | 자식 예산 없이 시작한 `define()`만 있는 Program은 `wall_time_ms` 동안 실행 lease를 잡으므로, 소유자가 아직 살아 있을 수 있는 실행을 다른 런타임이 이어 가지 못한다 | 진단의 witness에 있는 `retry_after_ms`가 지난 뒤에 다시 시도한다. 그러면 실행은 `TimedOut`으로 끝난다. 멈춘 실행을 마지막 체크포인트에서 이어 가려면 `main()`을 쓰거나 자식 예산(`max_child_depth`와 `max_total_children`을 0보다 크게)으로 Program을 시작한다 |
 | `fork()`에서 발생하는 `P_FORK_SOURCE_BUDGET` | 포크의 예산이 일시 정지한 실행에 남은 `wall_time_ms`나 `max_core_steps`를 전부 가져가서, 그 실행이 재개할 수 없게 된다 | 포크에는 `paused.remaining_budget`의 일부(예: 절반)를 준다. `max_concurrency`는 그대로 줘도 된다 |
 | `P_CORE_BARRIER_STALLED` | barrier 멤버가 join으로 이어지지 않는 경로를 택해서 join이 더는 발동할 수 없다 | 모든 멤버를 join이나 `__end__`로 라우팅한다. `P_CORE_E15`가 컴파일 시점에 이런 경로를 경고한다 |
 | `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | 실행이 `wall_time_ms`를 모두 썼다. 중단된 연산의 텍스트는 `failure.witness["cause_message"]`에 있다 | 더 큰 `wall_time_ms`로 다시 컴파일하고 승인(admission)한다 |

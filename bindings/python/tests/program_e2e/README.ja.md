@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=5244fb2b21fedea0ecc885bd7f9d932335e0ebbf3a5965744fd2e020d1d4e4c5 -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=577a50f6d808128cac2df1fd5fae47da01c5856b1c57c6596bc8c2faa5933321 -->
 # Program APIのエンドツーエンドのシナリオ
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -17,7 +17,7 @@
 | `test_06_graph_shapes.py` | バリアのjoin、条件付きルーティング、`Send` によるmap-reduce、サブグラフ、不正なグラフの形状 |
 | `test_07_main_programs.py` | `callCore`、`all`、`race`、`quorum`、`await` のタイムアウト、`cancelScope`、外部からのキャンセル、`spawn` |
 | `test_08_live_llm.py` | ノードがモデルを呼び出すProgram。デフォルトではローカルのpeerを使い、有効にするとOpenRouterを使う。Pythonのノードと、バインド済みの `llm_call` |
-| `test_09_bound_llm.py` | `node_context` を通してバインドした `llm_call`（#372）：報告されたコストと推定のコスト、`provider.max_price` として固定したルートの上限、送信前の拒否（予算、未知のモデル、ルーターのエイリアス）、予算0、プロバイダーのないID、1つの予算に対する `all` と `quorum`、呼び出しがジャーナルに記録された後のクラッシュと、それを1回だけ課金する復旧 |
+| `test_09_bound_llm.py` | `node_context` を通してバインドした `llm_call`（#372）：報告されたコストと推定のコスト、`provider.max_price` として固定したルートの上限、送信前の拒否（予算、未知のモデル、ルーターのエイリアス）、予算0、プロバイダーのないID、1つの予算に対する `all` と `quorum`、呼び出しがジャーナルに記録された後のクラッシュと、それを1回だけ課金する復旧、モデルトークン予算が尽きたときの1つの終了の形（#420）、実行リースに保持された実行のエラー（#421） |
 | `test_10_failure_routing.py` | 失敗時のルーティング（#364）：失敗したTESTを、そのレコードとともに `interruptBefore` のハンドラーへルーティングする、リトライと中止のルートに沿った再開、作成者のコード、秘匿したエラーテキスト、`max_visits`、`max_node_retries` の上限と、`main()` がある場合とない場合の残り（#419）、ノード内のProgramの診断、SQLiteを使った新しいプロセスでの再開 |
 | `test_11_attempt_timeout.py` | 試行のタイムアウト（#364）：タイムアウトしてリトライで回復する遅いPythonのノード、常にタイムアウトして `NG.Timeout` としてハンドラーにルーティングされるノード（ハンドラーがなければ実行が失敗する）、結果にもトレースにも届かない遅れた完了、停止のデッドラインを過ぎてもキャンセルを無視するノード（`NG.EffectUncertain`）、`wall_time_ms` を超えることになるバックオフが、kind `deadline` で止まること |
 | `test_12_send_interrupts.py` | `NodeInterrupt` を投げる `Send` のターゲット（#385）：Programがそこで一時停止し、再開するとmapノードと完了済みのSendがリプレイされる。SQLiteでの再起動後の再開。バインド済みの `llm_call` を呼んだ完了済みのSendは、再送信も再課金もされない |

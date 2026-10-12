@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=5244fb2b21fedea0ecc885bd7f9d932335e0ebbf3a5965744fd2e020d1d4e4c5 -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=577a50f6d808128cac2df1fd5fae47da01c5856b1c57c6596bc8c2faa5933321 -->
 # Program API 端到端场景
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -17,7 +17,7 @@
 | `test_06_graph_shapes.py` | 屏障 join，条件路由，`Send` 的 map-reduce，子图，无效的图形态 |
 | `test_07_main_programs.py` | `callCore`、`all`、`race`、`quorum`，`await` 超时，`cancelScope`，外部取消，`spawn` |
 | `test_08_live_llm.py` | 节点会调用模型的 Program：默认用本地对端，启用时用 OpenRouter；Python 节点和绑定的 `llm_call` |
-| `test_09_bound_llm.py` | 通过 `node_context` 绑定的 `llm_call`（#372）：上报的成本和估算的成本，固定为 `provider.max_price` 的路由上限，发送之前的拒绝（预算、未知模型、路由别名），零预算，没有 provider 的 id，针对同一份预算的 `all` 和 `quorum`，调用写入 journal 之后发生崩溃、以及只计费一次的恢复 |
+| `test_09_bound_llm.py` | 通过 `node_context` 绑定的 `llm_call`（#372）：上报的成本和估算的成本，固定为 `provider.max_price` 的路由上限，发送之前的拒绝（预算、未知模型、路由别名），零预算，没有 provider 的 id，针对同一份预算的 `all` 和 `quorum`，调用写入 journal 之后发生崩溃、以及只计费一次的恢复，模型 token 预算耗尽时的同一种终态（#420），以及被执行租约占住的运行的错误（#421） |
 | `test_10_failure_routing.py` | 失败路由（#364）：失败的 TEST 被路由到带 `interruptBefore` 的处理器并附带它的记录，沿 retry 和 abort 路由恢复，作者自定义的错误码，脱敏后的错误文本，`max_visits`，`max_node_retries` 上限，以及有无 `main()` 时的剩余值（#419），节点内部的 Program 诊断，以及用 SQLite 在新进程里恢复 |
 | `test_11_attempt_timeout.py` | 尝试超时（#364）：一个很慢的 Python 节点超时后在重试时恢复正常，一个总是超时的节点以 `NG.Timeout` 路由到它的处理器（没有处理器时让运行失败），迟到的完成永远不会进入结果或 trace，一个在停止期限之后仍然无视取消的节点（`NG.EffectUncertain`），以及会越过 `wall_time_ms` 的退避以 `deadline` 类别停止 |
 | `test_12_send_interrupts.py` | 抛出 `NodeInterrupt` 的 `Send` 目标（#385）：Program 在它上面暂停，恢复时重放 map 节点和已完成的 Send，用 SQLite 在重启后恢复，以及调用过绑定 `llm_call` 的已完成 Send 既不会重发，也不会再次计费 |

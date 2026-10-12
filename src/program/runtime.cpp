@@ -8238,12 +8238,19 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
 
             const auto timestamp = std::max(now_ms(), record->updated_at_ms());
             if (timestamp < execution_lease->expires_at_ms()) {
+                // #421: say why the run is held and what ends it. Only a
+                // define()-only Program without child budgets holds this lease.
                 throw_runtime_diagnostic(
                     "P_RUN_LEASE_HELD",
-                    "Program execution is owned by another live runtime",
+                    "Program execution is held by an execution lease for the run's wall time: "
+                    "reconnect() cannot continue the run until the lease expires, and then ends "
+                    "it TimedOut. A Program with main(), or one started with child budgets "
+                    "(max_child_depth and max_total_children above zero), holds no lease and "
+                    "continues from its last checkpoint",
                     json{{"run_id", record->run_id()},
                          {"lease_id", execution_lease->id()},
-                         {"expires_at_ms", execution_lease->expires_at_ms()}});
+                         {"expires_at_ms", execution_lease->expires_at_ms()},
+                         {"retry_after_ms", execution_lease->expires_at_ms() - timestamp}});
             }
 
             ProgramPersistedInvocation expired_invocation{

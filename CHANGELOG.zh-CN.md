@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=f04ab220babdb47d54d0fab5f7a5ba3ac3804ce3ed42e81627af1f3f20dd8ee0 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=ea42fa4edfc84c3adac1752f2f14f1d4afa153c9b22c63e6ccab0d30a7547f05 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -111,6 +111,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 
+- **Program：持有执行租约的运行在 `reconnect()` 时会说明原因（#421）。** 没有子预算的、只有 `define()` 的 Program 运行，会在其挂钟时间内持有执行租约。因此在租约到期前，`reconnect()` 会抛出 `P_RUN_LEASE_HELD`，文字是“owned by another live runtime”，看起来像是需要子预算。现在错误会点明租约，说明租约到期后 `reconnect()` 会让运行以 `TimedOut` 结束，并指出 `main()` 和子预算（`max_child_depth`、`max_total_children`）不持有租约，会从最近一个检查点继续；witness 里带有 `expires_at_ms` 和 `retry_after_ms`。哪些运行持有租约没有变化。Program 指南在“重启”一节列出了这条规则。
 - **Program：分叉只从源运行的“量”中取自己的份额，不占用它的并发，也不会让源运行无法恢复（#414）。** 分叉的预算整个从已暂停运行的剩余预算中扣除，`max_concurrency` 也不例外。因此，把运行的全部 `remaining_budget` 给了分叉，源运行就没有并发可用（`P_CONCURRENCY_BUDGET`、`P_TRANSITION_CONFLICT`），或者没有挂钟时间可用（`P_RUN_LEASE`；有 `main()` 时在 0 ms 处 `TimedOut`）。挂钟时间、模型 token、金额、Program 操作数、Core 步数、动态编译数和子预算都是“量”：分叉取走自己的份额，其余留给源运行。`max_concurrency` 是“上限”：分叉带着自己的上限（不超过源运行的），源运行保留自己的；转换存储会检查分叉没有改动它。**行为变更：** 分叉要拿走源运行剩下的全部挂钟时间或全部 Core 步数时，`fork()` 会抛出 `P_FORK_SOURCE_BUDGET`，并且不改变任何东西。把已暂停运行的全部 `remaining_budget` 给分叉，以前是被接受的，现在请只给一份。规则写在 Program 指南和 Python 绑定指南里。
 - **Program：模型 token 预算耗尽时，运行以同一种形态结束（#420）。** 模型的一次响应使运行超出 `model_tokens` 时，运行以没有 `failure` 的 `BudgetExhausted` 结束；而预留放不下、在发送前被拒绝的调用，则以带有 `NG.BudgetExhausted` 的 `Failed` 结束，调用方只能一种情况看 `status`，另一种情况看 `failure.code`。现在两者都以 `BudgetExhausted` 结束，`failure.code` 为 `NG.BudgetExhausted`。这个代码是 `graph::classify_failure` 给预算耗尽的代码，MCP、gRPC、A2A 和 ACP 主机也以它报告。`failure.witness["model_tokens"]` 含有 `granted`、`used` 和 `over_by`，`over_by` 是最后一次响应超出的量（被拒绝的调用为 0，其 failure 仍保留 provider 证据）。没有获得 `model_tokens` 却调用了模型的运行也会得到这条记录。**行为变更：** 因模型响应而超出预算的运行现在有 `failure`；下一次调用在发送前被拒绝的运行以 `BudgetExhausted` 结束，而不再是 `Failed`。
 - **Program：有 `main()` 时，`remaining_budget.max_node_retries` 也是上限减去已用的重试次数（#419）。** 带有 JavaScript `main()` 的 Program 报告的仍是开始时的上限，就像没有发生过重试（`usage.node_retries` 为 1 时报告 5）。原因是结算命令的剩余预算时没有扣除该次尝试的重试；只有 `define()` 的 Program 本来就报告 4。现在两者都报告上限减去该次尝试的重试次数，恢复后的尝试从这个剩余值开始。

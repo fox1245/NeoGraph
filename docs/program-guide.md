@@ -291,6 +291,8 @@ python restart.py state resume run-...
 
 The first command prints the status `Interrupted` and the run id; pass that id to the second, which prints `Completed` and the reports. The directory `state` holds `program.db`, `checkpoints.db` and `provider_calls.db`.
 
+A run that a process left running, not paused, is continued with `host.reconnect(run_id)`, and what it does depends on the Program. A `define()`-only Program started without child budgets (`max_child_depth` and `max_total_children` both 0, the default) holds an execution lease for its `wall_time_ms`, so that no other process continues a run whose owner may still be alive. `reconnect` raises `P_RUN_LEASE_HELD` until the lease expires, then ends the run `TimedOut` and does not continue it. A Program with `main()`, or one started with child budgets (both above zero), holds no lease, and `reconnect` continues it from its last checkpoint at once, replaying the model calls it had journaled and charging them once ([`36_program_crash_recovery.py`](../bindings/python/examples/36_program_crash_recovery.py)).
+
 ## What `define()` can say
 
 `ng.graph(name)` returns a builder. All methods return the builder.
