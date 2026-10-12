@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/python_clients/README.md locale=ko source_sha256=af81d002bccc99ca3b2c0878d155a8cb0155616d26402cf1d3076b8167b8e53b -->
+<!-- neograph-i18n: source=benchmarks/python_clients/README.md locale=ko source_sha256=8739f401dab3be1da626487b784c9b20021da2862c69a752cd8b521d608d2ce7 -->
 # Python 클라이언트 오버헤드: 현재 러너와 과거 결과
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -41,7 +41,7 @@ K=16/64에서 처리량이 떨어진 데에는 `ThreadingHTTPServer`와 클라�
 두 클라이언트는 같은 비공개 HTTP 루프백 서버와 Chat 경로를 쓰며, 응답은 텍스트가 `ok`인 canned 응답입니다. 서버는 경로, 모델, 프롬프트를 확인합니다. 호스팅 서비스의 자격 증명, 사용자 지정 CA, 유료 호출은 필요하지 않습니다. 이 벤치마크는 HTTP/1.0으로 로컬에서 프로토콜 작업을 돌리는 것일 뿐, TLS/HTTP2 전송의 검증이나 네이티브 재생(replay) 벤치마크가 아닙니다. canned 응답에 들어 있는 토큰 사용량은 provider가 보고한 것처럼 만든 픽스처 데이터이며, 측정한 토큰 수도 예산 청구액도 아닙니다.
 
 [Python 바인딩 가이드](../../docs/python-binding.md)에 따라 현재 소스와 맞는 wheel을 설치한 뒤, 아래의 비교용 SDK를 설치합니다. 소스에서 빌드할 때는 Core만 빌드하더라도 외부 `SchemaProvider::runtime`이 필요하므로 [빌드 가이드](../../README.md)를 따릅니다. Python 래퍼만으로는 오래된 wheel에 타입이 있는 네이티브 API를 추가할 수 없습니다.
-NeoGraph `0.13.1`의 wheel과 네이티브 소비자는 알파 SDK `0.1.1`, 인터페이스 리비전/공유 라이브러리 세대 4와 일치해야 합니다.
+NeoGraph `0.13.1`의 wheel과 네이티브 소비자는 알파 SDK `0.3.0`, 인터페이스 리비전/공유 라이브러리 세대 6과 일치해야 합니다.
 
 ## 새 측정 실행하기
 

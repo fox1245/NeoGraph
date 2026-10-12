@@ -1,16 +1,14 @@
-<!-- neograph-i18n: source=docs/promo/README.md locale=zh-CN source_sha256=eda23a0fd62ee1ba5a3eb5f26292eac3aa3ac273903f5fd8c5714eaa49627b54 -->
+<!-- neograph-i18n: source=docs/promo/README.md locale=zh-CN source_sha256=30c867676721c71ac71439cd89b4b5ce8a34f8a0db32675233aa37d1cd21d390 -->
 # NeoGraph 宣传片：Remotion 源码
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-仓库 README 顶部展示的 15 秒宣传片的源码
+15 秒宣传片的源码
 （`docs/videos/neograph-promo-v3.mp4` 和 `docs/images/neograph-promo-v3.gif`）。
 
 源码已提交到仓库，这样可以修改场景并重新渲染。
-生成的视频只是用来说明 Program 的流水线，不是 API 参考、基准测试或资格认证记录。
+生成的视频只是用来说明 Program 的流水线，不是 API 参考或基准测试。
 媒体文件名里的 `v3` 只是素材的标签，不是 SDK 的接口修订版。
-NeoGraph `0.13.1` 使用 alpha 版 SDK `0.1.1`，接口/共享库代数为 4；
-现有的渲染结果既没有演示该运行时，也不代表其待完成的验证。
 
 ## 场景（`src/scenes/`）
 

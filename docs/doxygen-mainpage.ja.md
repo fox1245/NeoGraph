@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=ja source_sha256=d3f40032eb64bd20115a5e0189753523ae701025f3b2a0139baca7973c0aba1b -->
+<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=ja source_sha256=3cb46aa97802cc0ade7e8a0f348f998d522fc61a6f052cc394c62ea6a705f2cb -->
 # NeoGraph C++ APIリファレンス {#mainpage}
 
 **Languages:** [English](doxygen-mainpage.md) | [한국어](doxygen-mainpage.ko.md) | [日本語](doxygen-mainpage.ja.md) | [简体中文](doxygen-mainpage.zh-CN.md)
@@ -64,7 +64,7 @@ sp::runtime::Result first_call(
 
 ワイヤーのエビデンスは、ファミリーが提供する省略可能なものです。`sp::Completion::wire_envelope` はnullになることがあります（Pythonでは `ProviderCompletion.wire_envelope` が `None`）。バッファ型のChatは、現在、レスポンス全体のJSONを `raw_events` に `RawWire` として保持します。`type == "chat.completion"` で、文書は `payload` にあります。`wire_envelope` はnullのままです。エビデンスは、ファミリーが保持している場所から読んでください。代わりのエンベロープが捏造されることはありません。ネイティブな継続とrawバッファは、保護されたエビデンスのままで、トレースのペイロードには含まれません。
 
-これは、ソースとバイナリの両方の互換性を壊す変更です。すべてのC++コンシューマーとカスタムプロバイダーを、新しい対応するヘッダーとライブラリで再コンパイルしてください。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、ディスクリプターのインタープリター、ResponsesのWebSocket経路は削除されました。エイリアスも互換用のブリッジもありません。リリースの対象は、SDK `0.1.1` alpha、インターフェースリビジョン4／共有ABI 4で、capabilityのチェックはアウトオブラインです。alphaは、安定したAPIの約束ではありません。
+これは、ソースとバイナリの両方の互換性を壊す変更です。すべてのC++コンシューマーとカスタムプロバイダーを、新しい対応するヘッダーとライブラリで再コンパイルしてください。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、ディスクリプターのインタープリター、ResponsesのWebSocket経路は削除されました。エイリアスも互換用のブリッジもありません。リリースの対象は、SDK `0.3.0` alpha、インターフェースリビジョン6／共有ABI 6で、capabilityのチェックはアウトオブラインです。alphaは、安定したAPIの約束ではありません。
 
 Pythonでは、`SchemaProvider(ValidatedDescriptor, ProviderRuntimeOptions,
 SchemaProviderDefaults)` と `make_provider_request` を、型付きの `ProviderMessage` パートとともに使います。`prepare` は `PreparedProviderRequest` を返し、`dispatch` はそれを1回だけ消費します。`invoke` は、リクエストの準備とディスパッチをまとめて行います。`ProviderOutcome` は、変更できないcompletion／failure／partialのビューを保持し、不明な使用量は `None` になります。グラフの `ChatMessage` は別の便宜的な型で、プロバイダーのメッセージの別名ではありません。ブロックするプロバイダー呼び出しはGILを解放するので、Pythonの非同期の呼び出し側は `asyncio.to_thread` を使えます。コンストラクター、エラー、制約については、[Pythonバインディングガイド](python-binding.md)を参照してください。

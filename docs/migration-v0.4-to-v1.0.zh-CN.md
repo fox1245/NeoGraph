@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=zh-CN source_sha256=4e05a942ffe129170fbb3e2c41f12fae8021ba41d6a2fd792f8c9c13d793202a -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=zh-CN source_sha256=0a1f90cdd5b2c7cf3e672239c5237d10e7d011fbeb5bf6b002227a29889a0220 -->
 # 迁移指南：旧的 8 个虚函数 → `run(NodeInput)`（v0.4.x → v0.9+）
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -275,7 +275,7 @@ grep -lE 'execute\(const GraphState' src/**/*.cpp
 
 # 迁移 2：带类型的无损 Provider 切换（必须重新编译）
 
-这是一次源码和二进制层面的不兼容变更：每个 C++ 使用方和自定义 provider，都要用匹配的新头文件和库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器和 Responses WebSocket 路径都已移除，没有别名，也没有兼容桥。SDK 是 alpha `0.1.1`，接口修订版 4 / 共享库 ABI 4，并带有非内联的 capability 检查；这不表示它已是稳定版本。
+这是一次源码和二进制层面的不兼容变更：每个 C++ 使用方和自定义 provider，都要用匹配的新头文件和库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器和 Responses WebSocket 路径都已移除，没有别名，也没有兼容桥。SDK 是 alpha `0.3.0`，接口修订版 6 / 共享库 ABI 6，并带有非内联的 capability 检查；这不表示它已是稳定版本。
 
 请把对已移除的 `Provider::complete`、`complete_async`、`complete_stream` 和 `complete_stream_async` 的调用，替换成显式指定模式的请求，加上 `invoke` / `dispatch`（或它们对应的 C++ 异步版本）。`Agent::complete` 仍是一个独立的单轮 API，返回持有所有权的 outcome。
 
@@ -328,7 +328,7 @@ sp::runtime::Result call_provider(
 }
 ```
 
-接口 4 通过带类型的字段，而不是 `extra_fields` 字典，保留了每次调用所需的控制项：
+每次调用所需的控制项是带类型的字段，而不是 `extra_fields` 字典：
 
 | 请求族 | 额外的 `ProviderControls` |
 |---|---|

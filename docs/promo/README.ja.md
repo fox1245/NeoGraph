@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/promo/README.md locale=ja source_sha256=eda23a0fd62ee1ba5a3eb5f26292eac3aa3ac273903f5fd8c5714eaa49627b54 -->
+<!-- neograph-i18n: source=docs/promo/README.md locale=ja source_sha256=30c867676721c71ac71439cd89b4b5ce8a34f8a0db32675233aa37d1cd21d390 -->
 # NeoGraphのプロモーション動画 — Remotionのソース
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-リポジトリのREADMEの先頭に載せている、15秒のプロモーション動画のソースです（`docs/videos/neograph-promo-v3.mp4` と `docs/images/neograph-promo-v3.gif`）。
+15秒のプロモーション動画のソースです（`docs/videos/neograph-promo-v3.mp4` と `docs/images/neograph-promo-v3.gif`）。
 
-ソースをコミットしてあるので、シーンを編集して、もう一度レンダリングできます。生成される動画は、Programのパイプラインを図解したものです。APIリファレンスでも、ベンチマークでも、適格性確認の記録でもありません。メディアのファイル名にある `v3` は、アセットのラベルであり、SDKのインターフェースのリビジョンではありません。NeoGraph `0.13.1` はalpha SDK `0.1.1`（インターフェースと共有世代は4）を使います。既存のレンダリング結果は、そのランタイムも、保留中の検証も示すものではありません。
+ソースをコミットしてあるので、シーンを編集して、もう一度レンダリングできます。生成される動画は、Programのパイプラインを図解したものです。APIリファレンスでも、ベンチマークでもありません。メディアのファイル名にある `v3` は、アセットのラベルであり、SDKのインターフェースのリビジョンではありません。
 
 ## シーン（`src/scenes/`）
 

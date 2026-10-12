@@ -1,17 +1,14 @@
-<!-- neograph-i18n: source=docs/promo/README.md locale=ko source_sha256=eda23a0fd62ee1ba5a3eb5f26292eac3aa3ac273903f5fd8c5714eaa49627b54 -->
+<!-- neograph-i18n: source=docs/promo/README.md locale=ko source_sha256=30c867676721c71ac71439cd89b4b5ce8a34f8a0db32675233aa37d1cd21d390 -->
 # NeoGraph 프로모 — Remotion 소스
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-저장소 README 맨 위에 보이는 15초짜리 프로모 영상의 소스입니다
+15초짜리 프로모 영상의 소스입니다
 (`docs/videos/neograph-promo-v3.mp4` + `docs/images/neograph-promo-v3.gif`).
 
 장면을 수정하고 다시 렌더링할 수 있도록 소스를 커밋해 두었습니다.
-생성된 영상은 Program 파이프라인을 보여 주는 그림일 뿐이며 API 레퍼런스, 벤치마크,
-검증(qualification) 기록이 아닙니다.
+생성된 영상은 Program 파이프라인을 보여 주는 그림일 뿐이며 API 레퍼런스나 벤치마크가 아닙니다.
 미디어 파일명의 `v3`는 에셋 이름표이지 SDK 인터페이스 리비전이 아닙니다.
-NeoGraph `0.13.1`은 알파 SDK `0.1.1`, 인터페이스/공유 라이브러리 세대 4를 씁니다.
-기존에 렌더링한 영상은 이 런타임이나 아직 끝나지 않은 검증을 보여 주지 않습니다.
 
 ## 장면 (`src/scenes/`)
 

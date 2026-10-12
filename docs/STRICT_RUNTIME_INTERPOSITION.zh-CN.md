@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=e3291ec69efbff7f588c57393be530d7d20277c9a5cbfecd0e9883a6827a6626 -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=54f44441580a2f6483e0493d762a502e2887203f24c7a623f0acf01ccac9ffaa -->
 # 严格的运行时拦截
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -83,7 +83,7 @@ journal 以 owner、不可变的 Program 版本、运行、操作、Core 的线�
 只有在拿到经独立验证的 provider 一侧证据和完整的 Completion outcome 时，
 才能使用 `reconcile_success`。重放流式调用时，返回的是已捕获的 outcome，不会合成流事件。
 
-更大的输出上限，是一次新的语义调用，不是传输层的重试，也不是对同一个 journal 槽位的重放。接口 4 只把这个上限从 native replay 的配置中排除；已准备请求的摘要和保守的资源预留额度仍然包含它。给每个已准入的调用一个不同的、确定性的序号，保留每次尝试的 outcome 和核算以及原来的截止时间，并从同一个资源 bank 获得准入。已有槽位里的摘要发生变化，会被拒绝；送达状态不确定、observer 失败或结算失败之后，native 历史和游标都既不能续期额度，也不能授权再次发送。
+更大的输出上限，是一次新的语义调用，不是传输层的重试，也不是对同一个 journal 槽位的重放。native replay 的配置中不包含这个上限；已准备请求的摘要和保守的资源预留额度仍然包含它。给每个已准入的调用一个不同的、确定性的序号，保留每次尝试的 outcome 和核算以及原来的截止时间，并从同一个资源 bank 获得准入。已有槽位里的摘要发生变化，会被拒绝；送达状态不确定、observer 失败或结算失败之后，native 历史和游标都既不能续期额度，也不能授权再次发送。
 
 有序的消息 parts、原始观测、可为空的用量、尝试元数据和 native 续接状态，
 仍然是已存储结果的一部分。native outcome 需要把宿主的 `sp::NativeArchive`

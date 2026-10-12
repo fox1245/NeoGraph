@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ko source_sha256=e3291ec69efbff7f588c57393be530d7d20277c9a5cbfecd0e9883a6827a6626 -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ko source_sha256=54f44441580a2f6483e0493d762a502e2887203f24c7a623f0acf01ccac9ffaa -->
 # 엄격한 런타임 인터포지션
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -54,7 +54,7 @@ Program이 내장 Core LLM 노드를 쓰면, 호스트는 `RuntimeConfig::core_p
 
 저널은 호출마다 소유자, 불변 Program 버전, run, operation, Core의 thread/task/node, 내장 호출 순번(ordinal)을 키로 사용하며, 요청 내용이나 Program attempt는 키에 **포함하지 않습니다**. 마커는 전송 전에 SQLite FULL 동기화로 커밋합니다. 이 마커는 전송이 *일어났을 수도 있다*는 뜻일 뿐, provider가 요청을 받았다거나 효과가 정확히 한 번 일어났다는 뜻이 아닙니다. SDK의 Completion/Failure 결과는 불변 값 전체를 인코딩 버전 2로 저장하며, 정확히 바인딩된 재생(replay)에 쓰입니다. 전송되지 않았음이 증명된 Failure는 `Failed`로 기록합니다. 전달 여부가 불확실하거나, 예외가 났거나, 정산(settlement) 전에 크래시가 나면 조정(reconciliation)이 필요하며, 조용히 다시 디스패치하는 일은 없습니다. 상태는 `inspect(owner, logical_call_id(context, core_identity))`로 확인합니다. 그다음 `reconcile_success`는 provider 쪽 증거를 독립적으로 검증했고 Completion 결과 전체가 있을 때에만 호출합니다. 스트리밍 호출을 재생(replay)하면 캡처해 둔 결과를 그대로 반환하며 스트림 이벤트를 새로 만들어 내지 않습니다.
 
-출력 상한을 더 크게 잡으면 전송 재시도나 같은 저널 슬롯의 재생(replay)이 아니라 새로운 의미의 호출이 됩니다. Interface 4는 이 상한을 네이티브 재생(replay) 설정에서만 제외하며, 준비된 요청의 다이제스트와 보수적으로 잡은 리소스 청구량(resource claim)에는 여전히 포함합니다. 승인(admission)된 호출마다 서로 다른 결정적 순번을 부여하고, 모든 시도의 결과와 회계 기록, 그리고 원래의 데드라인을 보존해야 합니다. 승인(admission)은 같은 리소스 bank에서 받아야 합니다. 이미 있는 슬롯에서 다이제스트가 바뀌면 거부됩니다. 네이티브 기록이나 커서(cursor)가 크레딧을 갱신하는 일은 없으며, 전달이 불확실했거나 observer·정산(settlement)이 실패한 뒤에 다시 보내도록 허가하는 일도 없습니다.
+출력 상한을 더 크게 잡으면 전송 재시도나 같은 저널 슬롯의 재생(replay)이 아니라 새로운 의미의 호출이 됩니다. 네이티브 재생(replay) 설정은 이 상한을 제외하지만, 준비된 요청의 다이제스트와 보수적으로 잡은 리소스 청구량(resource claim)에는 여전히 포함합니다. 승인(admission)된 호출마다 서로 다른 결정적 순번을 부여하고, 모든 시도의 결과와 회계 기록, 그리고 원래의 데드라인을 보존해야 합니다. 승인(admission)은 같은 리소스 bank에서 받아야 합니다. 이미 있는 슬롯에서 다이제스트가 바뀌면 거부됩니다. 네이티브 기록이나 커서(cursor)가 크레딧을 갱신하는 일은 없으며, 전달이 불확실했거나 observer·정산(settlement)이 실패한 뒤에 다시 보내도록 허가하는 일도 없습니다.
 
 순서가 있는 메시지 파트, 원시 관찰값, null일 수 있는 사용량, attempt 메타데이터, 네이티브 continuation은 모두 저장된 결과에 포함됩니다. 네이티브 결과를 다루려면 호스트의 `sp::NativeArchive`를 `SQLiteProgramProviderCallJournal(database_path, native_archive)`에 넘겨야 합니다. 이식 가능한 JSON 투영(portable projection)으로는 이 권한을 다시 만들 수 없습니다. 정보가 손실된 예전 영수증은 업그레이드하거나 조용히 다시 디스패치하지 않고 거부합니다. 저널은 보수적으로 잡은 청구량과 확정된(committed) 토큰 양을 provider 보고서와 따로 보관합니다. 데이터베이스 경로는 파일 시스템의 영속 경로를 써야 합니다. 빈 경로, `:memory:`, `file:` URI 경로는 거부됩니다. 이 broker는 조립된 `ContextEpoch`가 아니라 Core에 이미 있는 ReAct 메시지 상태를 대상으로 동작하며, 같은 내장 호출에 엔진의 Strict Runtime 인터포지션과 함께 쓸 수 없습니다. 호스트가 작성한 네이티브 Provider 호출은 이 broker의 대상이 아닙니다.
 

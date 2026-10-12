@@ -95,7 +95,7 @@ silently re-dispatches. Use
 a full Completion outcome. Replayed streaming calls return the captured outcome
 without synthesizing stream events.
 
-A larger output cap is a new semantic call, not a transport retry or replay of the same journal slot. Interface 4 excludes that cap only from native replay configuration; the prepared-request digest and conservative resource claim still include it. Give each admitted call a distinct deterministic ordinal, retain every attempt's outcome/accounting and the original deadline, and obtain admission from the same resource bank. A changed digest in an existing slot rejects; neither native history nor a cursor renews credit or authorizes another send after uncertain delivery, observer or settlement failure.
+A larger output cap is a new semantic call, not a transport retry or replay of the same journal slot. Native replay configuration excludes that cap; the prepared-request digest and conservative resource claim still include it. Give each admitted call a distinct deterministic ordinal, retain every attempt's outcome/accounting and the original deadline, and obtain admission from the same resource bank. A changed digest in an existing slot rejects; neither native history nor a cursor renews credit or authorizes another send after uncertain delivery, observer or settlement failure.
 
 Ordered message parts, raw observations, nullable usage, attempt metadata, and
 native continuation remain part of the stored result. Native outcomes require

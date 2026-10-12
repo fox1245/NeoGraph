@@ -2,15 +2,13 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-Source for the 15-second promo shown at the top of the repository README
+Source for the 15-second promo
 (`docs/videos/neograph-promo-v3.mp4` + `docs/images/neograph-promo-v3.gif`).
 
 The source is committed so the scenes can be edited and rendered again.
 The generated video illustrates the Program pipeline; it is not an API
-reference, benchmark, or qualification record.
+reference or a benchmark.
 The `v3` media filenames are asset labels, not SDK interface revisions.
-NeoGraph `0.13.1` uses alpha SDK `0.1.1`, interface/shared generation 4;
-the existing render does not demonstrate that runtime or its pending validation.
 
 ## Scenes (`src/scenes/`)
 
