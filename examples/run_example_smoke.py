@@ -182,6 +182,11 @@ def run_smoke(source: Path, command: list[str], *, build_dir: Path | None = None
 
         argv = [*command, *[substitute(item) for item in shlex.split(notes.args)]]
         env = {key: value for key, value in os.environ.items() if key not in CREDENTIAL_VARIABLES}
+        # The example runs in a scratch directory, so a relative PYTHONPATH entry
+        # of the caller (for example "build:bindings/python") would stop resolving.
+        if env.get("PYTHONPATH"):
+            env["PYTHONPATH"] = os.pathsep.join(
+                os.path.abspath(entry) for entry in env["PYTHONPATH"].split(os.pathsep) if entry)
         env.update(NEOGRAPH_SUPPRESS_FANOUT_WARNING="1", PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
         for item in notes.env:
             name, _, value = substitute(item).partition("=")
