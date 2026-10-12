@@ -277,27 +277,51 @@ def test_undeclared_server_request_gets_error_response(peer: Peer, request):
 
 # --------------------------------------------------------------------------- cancellation / timeouts
 
+def _wait_for(predicate, limit: float = 30.0, step: float = 0.1):
+    """Poll until `predicate()` is truthy or `limit` seconds passed; return its last value.
+
+    What a test waits for on a peer (a server's own record, a late message) gets a
+    generous bound, so a loaded machine slows the test down instead of failing it."""
+    deadline = time.time() + limit
+    value = predicate()
+    while not value and time.time() < deadline:
+        time.sleep(step)
+        value = predicate()
+    return value
+
+
 @pytest.mark.parametrize("peer", HTTP)
 def test_request_timeout_sends_cancelled_and_session_survives(peer: Peer, request):
     """basic/utilities/cancellation: on timeout the sender SHOULD send notifications/cancelled."""
     with server(peer, _name(request)) as run:
-        client = run.client(request_timeout=1.0)
-        client.initialize("ng-interop")
+        # Only the slow call runs under the short budget, passed as that call's own
+        # `timeout`. The handshake is not what this test bounds: it gets the client's
+        # default budget, so a loaded machine cannot time it out.
+        client = _initialized(run)
         started = time.time()
         with pytest.raises(Exception) as info:
-            client.call_tool("slow", {"seconds": 3})
+            client.call_tool_result("slow", {"seconds": 3}, timeout=1.0)
         elapsed = time.time() - started
-        time.sleep(2.5)
-        after = None
+        assert getattr(info.value, "failure", None) == "timeout", repr(info.value)
+
+        # The server's own record names the slow call (an HTTP recorder cannot log the
+        # abandoned POST, which never completes) and says how its handler ended.
+        def slow_events():
+            return [e for e in run.server_events() if e["event"].startswith("slow_")]
+
+        _wait_for(lambda: any(e["event"] in ("slow_cancelled", "slow_finished") for e in slow_events()))
+        started_events = [e for e in slow_events() if e["event"] == "slow_started"]
+        slow_id = started_events[0].get("request_id") if started_events else None
+
+        def cancels_for_slow():
+            found = [m["message"] for m in _messages(run, "notifications/cancelled")]
+            return found if any(c["params"].get("requestId") == slow_id for c in found) else None
+
+        cancels = _wait_for(cancels_for_slow) or [m["message"] for m in _messages(run, "notifications/cancelled")]
         try:
             after = client.call_tool("echo", {"text": "after-timeout"})["content"][0]["text"]
         except Exception as exc:  # noqa: BLE001
             after = f"{type(exc).__name__}: {exc}"
-        # The server's own record names the slow call: an HTTP recorder
-        # cannot log the abandoned POST, which never completes.
-        started = [e for e in run.server_events() if e["event"] == "slow_started"]
-        slow_id = started[0].get("request_id") if started else None
-        cancels = [m["message"] for m in _messages(run, "notifications/cancelled")]
         record_result(request.node.name, {"timeout_exc": str(info.value)[:200], "elapsed": round(elapsed, 2),
                                           "cancels": cancels, "after": after,
                                           "server_events": run.server_events()})

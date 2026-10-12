@@ -70,7 +70,7 @@ def free_port() -> int:
     raise RuntimeError("no free port in the configured range")
 
 
-def wait_port(port: int, proc: subprocess.Popen, timeout: float = 20.0) -> None:
+def wait_port(port: int, proc: subprocess.Popen, timeout: float = 60.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if proc.poll() is not None:
