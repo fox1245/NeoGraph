@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=47af23142c7e907bf65978078a8f3c471d1f9fc343818cc828403d52ee0a17d9 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=e87174d256f1d79aa9a4b5abd7a0661ce0fdbf3aa7f108fb42dba62434a3dc8b -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -436,7 +436,7 @@ print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 
 
 네이티브 Program의 기록된 실행 API는 `ProgramRuntime::replay_recorded`입니다. `LocalProgramHost`는 `run`, `start`, `resume`, `fork`를 제공하고, 기록된 바인딩의 원시 컨트롤 플레인은 노출하지 않습니다. Program 결과에는 기존의 핸들, 예산, 권한 필드와 함께 네이티브 런타임이 제공한 타입이 있는 provider 결과와 실패 증거가 담깁니다.
 
-`ProgramResult.failure`는 딕셔너리가 아니라 읽기 전용 `ProgramFailure` 값이거나 `None`입니다. `provider_outcome`과 `provider_cause`에는 provider 실패 증거가 남고, `code`, `message`, `operation_id`, `core_node`, `attempts`, `witness`는 실패한 연산을 설명합니다. 결과 필드에는 `bundle_id`, `operation_id`, `attempt`, `checkpoint`, `interrupt`, `provider_budget_authority`도 있습니다.
+`ProgramResult.failure`는 딕셔너리가 아니라 읽기 전용 `ProgramFailure` 값이거나 `None`입니다. `provider_outcome`과 `provider_cause`에는 provider 실패 증거가 남고, `code`, `message`, `operation_id`, `core_node`, `attempts`, `witness`는 실패한 연산을 설명합니다. 결과 필드에는 `bundle_id`, `operation_id`, `attempt`, `checkpoint`, `interrupt`, `provider_budget_authority`도 있습니다. `native_history_archive`가 없는 호스트(기본 메모리 호스트가 그렇습니다)에서는 `provider_outcome`이 native 상태를 뺀 메시지를 담고, `witness["provider_outcome_native_retained"]`는 `False`이며, 원래 outcome은 `provider_cause`에 남습니다.
 
 설치된 JavaScript 어휘 전체를 dict로 얻을 수 있습니다.
 

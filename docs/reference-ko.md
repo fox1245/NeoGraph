@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=0ce1c2edd1c432684b315a629a0cfe1256e46e8fcdbb3f69a7531f0f1c65fc55 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=85567510a32b3c6ca53c9620f034dad40362731f4e275e92cfc86aa5b689fb58 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -255,7 +255,7 @@ Python은 `ContextStore.hydrate_records(range)`와 `history_record_by_message_id
 
 `ProviderOutcomeError`는 결과를 보존하는 공통 host-error base이다. `ProviderObserverError`와 `ProviderDispatchOutcomePersistenceError`는 완전히 drain된 SDK 결과와 원래 `cause()`를 보존하며 후자는 보조 observer 실패도 `delivery_error()`에 보존한다. `ProviderFailure::outcome()`은 SDK 실패 자체를 보존한다. 이 증거는 Node/Program 재dispatch 권한이 아니다. Provider retry의 유일한 소유자는 SDK이며 caller가 선택한 `max_output_tokens`를 조용히 clamp하지 않는다.
 
-`ProgramFailure`는 live `provider_outcome`·`provider_cause`를 보존한다. Canonical factual SDK witness는 실제 archive custody를 owner/run/version/bundle/operation/attempt에 결합하며 Runtime은 복구 실패를 노출하기 전에 설정된 custody를 즉시 복원한다. 공개 data-only `ProgramResult::create()`는 미리 채운 witness로 우회할 수 없고 unresolved parsed seal은 실행 결과가 아니다. 프로세스 재시작 후 원래 exception pointer는 없으므로 `provider_cause == nullptr`이며 text에서 재생성하지 않는다. 영속화할 수 없는 실패는 serialize/publish/replay할 수 없다.
+`ProgramFailure`는 live `provider_outcome`·`provider_cause`를 보존한다. Canonical factual SDK witness는 실제 archive custody를 owner/run/version/bundle/operation/attempt에 결합하며 Runtime은 복구 실패를 노출하기 전에 설정된 custody를 즉시 복원한다. 공개 data-only `ProgramResult::create()`는 미리 채운 witness로 우회할 수 없고 unresolved parsed seal은 실행 결과가 아니다. 프로세스 재시작 후 원래 exception pointer는 없으므로 `provider_cause == nullptr`이며 text에서 재생성하지 않는다. `native_history_archive`가 없는 호스트는 provider의 native replay 상태를 보관할 수 없으므로, native 메시지가 든 실패를 그 상태 없이 발행한다. 메시지, usage, stop reason, error, raw event는 그대로 두고 메시지마다 native seal만 뺀 사본이며, witness에 `provider_outcome_native_retained: false`가 들어간다. 결과의 `provider_outcome`은 이 사본이고, 호출을 실행한 프로세스에서는 원래 outcome이 `provider_cause`에 남는다. 그 밖의 이유로, 곧 archive 쓰기가 실패해 영속화할 수 없는 실패는 serialize/publish/replay할 수 없다.
 
 Python `LocalProgramHost`는 소멸 시 `ProgramRuntime`이 스케줄러 작업을 취소하고 비운 뒤 join하는 동안 호출자의 GIL을 해제하여 실행 중인 Python 노드가 끝날 수 있게 한다. 나머지 host 멤버와 이들이 소유한 Python 콜백/객체를 소멸하기 전에 GIL을 다시 획득한다. 이 변경은 종료 처리에만 적용되며 추가 capability binder나 실행 권한을 공개하지 않는다.
 

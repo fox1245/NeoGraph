@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=0ce1c2edd1c432684b315a629a0cfe1256e46e8fcdbb3f69a7531f0f1c65fc55 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=85567510a32b3c6ca53c9620f034dad40362731f4e275e92cfc86aa5b689fb58 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -254,7 +254,7 @@ Python 通过 `ContextStore.hydrate_records(range)` 与 `history_record_by_messa
 
 `ProviderOutcomeError` 是保留结果的共同 host-error base；`ProviderObserverError` 和 `ProviderDispatchOutcomePersistenceError` 保留完整 drain 后的 SDK 结果及原始 `cause()`，后者还通过 `delivery_error()` 保留次要 observer 失败。`ProviderFailure::outcome()` 保留 SDK 失败本身。这些证据不授权 Node/Program 重新 dispatch。SDK 是 provider retry 的唯一所有者，调用方选择的 `max_output_tokens` 不会被暗中 clamp。
 
-`ProgramFailure` 保留 live `provider_outcome`、`provider_cause`。Canonical factual SDK witness 将真实 archive custody 绑定到 owner/run/version/bundle/operation/attempt；Runtime 在暴露恢复后的失败前立即恢复配置的 custody。公开 data-only `ProgramResult::create()` 不能用预填 witness 绕过；未解析完的 parsed seal 不是可执行结果。进程重启后原始 exception pointer 不可用（`provider_cause == nullptr`），不会从 text 重建。无法持久化的失败不能 serialize/publish/replay。
+`ProgramFailure` 保留 live `provider_outcome`、`provider_cause`。Canonical factual SDK witness 将真实 archive custody 绑定到 owner/run/version/bundle/operation/attempt；Runtime 在暴露恢复后的失败前立即恢复配置的 custody。公开 data-only `ProgramResult::create()` 不能用预填 witness 绕过；未解析完的 parsed seal 不是可执行结果。进程重启后原始 exception pointer 不可用（`provider_cause == nullptr`），不会从 text 重建。没有 `native_history_archive` 的宿主无法保存 provider 的 native replay 状态，因此会发布去掉该状态的失败：消息、usage、stop reason、error 和 raw event 保持不变，只去掉每条消息的 native seal，并在 witness 中写入 `provider_outcome_native_retained: false`。结果的 `provider_outcome` 就是这份副本，发起调用的进程里原始 outcome 仍留在 `provider_cause`。其他原因造成的无法持久化（例如 archive 写入失败）的失败，不能 serialize/publish/replay。
 
 Python `LocalProgramHost` 析构时，会在 `ProgramRuntime` 取消、排空并 join 调度器工作期间释放调用者的 GIL，使正在执行的 Python 节点能够完成。销毁其他 host 成员及其持有的 Python 回调/对象之前，会重新获取 GIL。此变更仅涉及结束处理，不暴露额外的 capability binder 或执行权限。
 

@@ -464,6 +464,88 @@ def test_interrupt_and_resume_charge_each_call_once(peer, tmp_path, durable):
 
 
 # ---------------------------------------------------------------------------
+# A stream cut in the middle is a provider failure that publishes (#426)
+# ---------------------------------------------------------------------------
+
+CUT_QUESTION = {"messages": [{"role": "user", "content": "cut-stream: capital of France?"}]}
+
+
+def assert_cut_stream_failure(result):
+    """A cut stream ends the run Failed with the provider's own error."""
+    assert result.status == ng.ProgramTerminalStatus.Failed, describe(result)
+    witness = result.failure.witness
+    assert witness["provider_error"]["message"] == "response ended abnormally", witness
+    return witness["provider_outcome"]
+
+
+def test_a_cut_stream_on_the_in_memory_host_publishes_its_terminal_state(peer, capfd):
+    host = make_bound_host(peer.base_url)
+    run_budget = priced_budget()
+    version = admit(host, CHAT, run_budget, "chat.js")
+
+    result = host.run(version, CUT_QUESTION, run_budget)
+
+    outcome = assert_cut_stream_failure(result)
+    assert result.failure.code == "NG.ProviderFailed"
+    assert peer.request_count() == 1
+    # The failure keeps what the stream delivered, as portable evidence. The
+    # host holds no native archive, so the provider's native replay state is
+    # not kept, and the failure says so.
+    assert outcome["kind"] == "failure"
+    assert outcome["native_archive_reference"] is None
+    assert "Par" in json.dumps(outcome["messages"])
+    assert result.failure.witness["provider_outcome_native_retained"] is False
+    assert result.failure.provider_outcome is not None
+    # No exception was swallowed on the way to publishing it.
+    assert "terminal publication exception" not in capfd.readouterr().err
+
+    # The terminal state is published: the run can be reconnected and read.
+    again = host.reconnect(result.run_id).wait()
+    assert again.status == ng.ProgramTerminalStatus.Failed, describe(again)
+    assert again.id == result.id
+    assert again.failure.code == result.failure.code
+    assert again.usage.model_tokens == result.usage.model_tokens
+    assert again.usage.monetary_microunits == result.usage.monetary_microunits
+    assert ng.ProgramResult.parse(result.serialize_canonical()).id == result.id
+    # Reconnecting never sends the call again.
+    assert peer.request_count() == 1
+
+
+def test_a_cut_stream_on_the_in_memory_host_inside_main_publishes_its_terminal_state(peer, capfd):
+    text = with_main(CHAT, """
+        return yield ng.callCore("chat", input, "chat");
+    """)
+    host = make_bound_host(peer.base_url)
+    run_budget = priced_budget()
+    version = admit(host, text, run_budget, "chat.js")
+
+    result = host.run(version, CUT_QUESTION, run_budget)
+
+    assert_cut_stream_failure(result)
+    assert "terminal publication exception" not in capfd.readouterr().err
+    again = host.reconnect(result.run_id).wait()
+    assert again.id == result.id
+
+
+def test_a_cut_stream_on_a_host_with_an_archive_keeps_its_native_evidence(peer, tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("NativeArchive custody needs an owner-only protected directory")
+    host = durable_bound_host(peer, tmp_path)
+    run_budget = priced_budget()
+    version = admit(host, CHAT, run_budget, "chat.js")
+
+    result = host.run(version, CUT_QUESTION, run_budget)
+
+    outcome = assert_cut_stream_failure(result)
+    # With custody the native replay state is archived, not dropped.
+    assert outcome["native_archive_reference"], outcome
+    assert "provider_outcome_native_retained" not in result.failure.witness
+    again = host.reconnect(result.run_id).wait()
+    assert again.id == result.id
+    assert again.failure.provider_outcome is not None
+
+
+# ---------------------------------------------------------------------------
 # A join member refused for money is the join's failure (#379)
 # ---------------------------------------------------------------------------
 

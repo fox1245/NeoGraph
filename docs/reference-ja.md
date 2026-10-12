@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=0ce1c2edd1c432684b315a629a0cfe1256e46e8fcdbb3f69a7531f0f1c65fc55 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=85567510a32b3c6ca53c9620f034dad40362731f4e275e92cfc86aa5b689fb58 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -230,7 +230,7 @@ Python は `ContextStore.hydrate_records(range)` と `history_record_by_message_
 
 `ProviderOutcomeError` は結果を保持する共通 host-error base です。`ProviderObserverError` と `ProviderDispatchOutcomePersistenceError` は完全に drain した SDK 結果と元の `cause()` を保持し、後者は二次 observer 失敗も `delivery_error()` に保持します。`ProviderFailure::outcome()` は SDK 失敗自体を保持します。これは Node/Program の再 dispatch 権限ではありません。Provider retry の唯一の所有者は SDK で、caller が選んだ `max_output_tokens` を黙って clamp しません。
 
-`ProgramFailure` は live `provider_outcome`・`provider_cause` を保持します。Canonical factual SDK witness は真正な archive custody を owner/run/version/bundle/operation/attempt に結び付け、Runtime は復旧失敗を公開する前に設定済み custody を eager に復元します。公開 data-only `ProgramResult::create()` は事前入力 witness で迂回できず、未解決の parsed seal は実行結果ではありません。プロセス再起動後は元の exception pointer がなく `provider_cause == nullptr` であり、text から再作成しません。永続化できない失敗は serialize/publish/replay できません。
+`ProgramFailure` は live `provider_outcome`・`provider_cause` を保持します。Canonical factual SDK witness は真正な archive custody を owner/run/version/bundle/operation/attempt に結び付け、Runtime は復旧失敗を公開する前に設定済み custody を eager に復元します。公開 data-only `ProgramResult::create()` は事前入力 witness で迂回できず、未解決の parsed seal は実行結果ではありません。プロセス再起動後は元の exception pointer がなく `provider_cause == nullptr` であり、text から再作成しません。`native_history_archive` のないホストは provider の native replay 状態を保管できないため、native メッセージを含む失敗を、その状態を除いて公開します。メッセージ、usage、stop reason、error、raw event はそのままで、各メッセージの native seal だけを除いた複製であり、witness に `provider_outcome_native_retained: false` が入ります。結果の `provider_outcome` はこの複製で、呼び出しを実行したプロセスでは元の outcome が `provider_cause` に残ります。それ以外の理由、つまり archive への書き込みが失敗して永続化できない失敗は、serialize/publish/replay できません。
 
 Python の `LocalProgramHost` は破棄時に、`ProgramRuntime` がスケジューラーの処理をキャンセルし、残りの処理を完了させて join する間、呼び出し側の GIL を解放します。これにより実行中の Python ノードが終了できます。残りの host メンバーと、それらが所有する Python コールバック/オブジェクトを破棄する前に GIL を再取得します。変更は終了処理のみで、追加の capability binder や実行権限は公開しません。
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=47af23142c7e907bf65978078a8f3c471d1f9fc343818cc828403d52ee0a17d9 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=e87174d256f1d79aa9a4b5abd7a0661ce0fdbf3aa7f108fb42dba62434a3dc8b -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -437,7 +437,7 @@ print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 
 
 ネイティブのProgramには、記録済みの実行を扱うAPIとして `ProgramRuntime::replay_recorded` があります。`LocalProgramHost` が公開するのは `run`、`start`、`resume`、`fork` で、生のrecorded-bindingのコントロールプレーンは公開しません。Programの結果には、従来のハンドル、予算、権限のフィールドに加えて、ネイティブランタイムが提供する、型付きのプロバイダーの結果と失敗のエビデンスが残ります。
 
-`ProgramResult.failure` は、辞書ではなく、読み取り専用の `ProgramFailure` の値か `None` です。`provider_outcome` と `provider_cause` はプロバイダーの失敗のエビデンスを保持し、`code`、`message`、`operation_id`、`core_node`、`attempts`、`witness` は失敗した操作を説明します。結果には、`bundle_id`、`operation_id`、`attempt`、`checkpoint`、`interrupt`、`provider_budget_authority` のフィールドもあります。
+`ProgramResult.failure` は、辞書ではなく、読み取り専用の `ProgramFailure` の値か `None` です。`provider_outcome` と `provider_cause` はプロバイダーの失敗のエビデンスを保持し、`code`、`message`、`operation_id`、`core_node`、`attempts`、`witness` は失敗した操作を説明します。結果には、`bundle_id`、`operation_id`、`attempt`、`checkpoint`、`interrupt`、`provider_budget_authority` のフィールドもあります。`native_history_archive` のないホスト（既定のメモリ上のホストがそうです）では、`provider_outcome` は native 状態を除いたメッセージを持ち、`witness["provider_outcome_native_retained"]` は `False` になり、元の outcome は `provider_cause` に残ります。
 
 インストールされているJavaScriptの語彙（vocabulary）は、辞書として正確に取得できます。
 

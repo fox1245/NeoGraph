@@ -1139,22 +1139,47 @@ void prove_native_program_failure_custody(bool ordinary_failure) {
     runtime.reset();
     runtime = make_runtime({});
     EXPECT_THROW(runtime->reconnect(owner, result.run_id()), std::invalid_argument);
-    const auto nonpersistable = runtime->run(owner, version,
+    // A host without an archive keeps no native replay state (#426). It still
+    // publishes the failure, with the portable part of the evidence and a
+    // witness that the native part was not kept; the native state is never
+    // written without custody, and it stays on the failure's cause.
+    const auto portable = runtime->run(owner, version,
         ProgramInvocation{json::object(), RunBudget{10000, *claim + 64, 0, 1, 4, 20, 0, 0, 0},
                           "native-program-without-result-custody", {}});
-    ASSERT_EQ(nonpersistable.status(), ProgramTerminalStatus::Failed);
-    ASSERT_TRUE(nonpersistable.failure() && nonpersistable.failure()->provider_cause);
-    EXPECT_EQ(nonpersistable.failure()->provider_outcome, actual);
-    EXPECT_THROW(nonpersistable.serialize_canonical(), std::runtime_error);
-    const auto uncommitted = transitions->load(owner, nonpersistable.run_id());
-    ASSERT_TRUE(uncommitted);
-    EXPECT_FALSE(uncommitted->terminal_result());
-    auto rejected_replay = uncommitted->invocation();
-    rejected_replay.run_id = "cannot-replay-unpersisted-native-failure";
-    EXPECT_THROW(runtime->replay_recorded(
-        nonpersistable.run_id(), rejected_replay,
-        RecordedBindingSet(version.core_materialization_receipt().capability_bindings, {}, {})),
-        ProgramDiagnosticError);
+    ASSERT_EQ(portable.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(portable.failure() && portable.failure()->provider_outcome &&
+                portable.failure()->provider_cause);
+    EXPECT_NE(portable.failure()->provider_outcome, actual);
+    const auto& portable_messages = outcome_messages(*portable.failure()->provider_outcome);
+    ASSERT_EQ(portable_messages.size(), outcome_messages(*actual).size());
+    for (std::size_t i = 0; i < portable_messages.size(); ++i) {
+        EXPECT_FALSE(portable_messages[i].native);
+        EXPECT_EQ(portable_messages[i].parts.size(), outcome_messages(*actual)[i].parts.size());
+    }
+    EXPECT_EQ(portable.failure()->witness.at("provider_outcome_native_retained"), false);
+    EXPECT_TRUE(portable.failure()->witness.at("provider_outcome").at("native_archive_reference")
+                    .is_null());
+    try {
+        std::rethrow_exception(portable.failure()->provider_cause);
+    } catch (const ProviderFailure& error) {
+        EXPECT_TRUE(ordinary_failure);
+        EXPECT_EQ(error.outcome(), actual);
+    } catch (const ProgramProviderOutcomePersistenceError& error) {
+        EXPECT_FALSE(ordinary_failure);
+        EXPECT_EQ(error.outcome(), actual);
+    }
+    const auto portable_bytes = portable.serialize_canonical();
+    EXPECT_EQ(ProgramResult::parse(portable_bytes).id(), portable.id());
+    const auto published = transitions->load(owner, portable.run_id());
+    ASSERT_TRUE(published);
+    ASSERT_TRUE(published->terminal_result());
+    EXPECT_EQ(published->terminal_result()->id(), portable.id());
+    const auto reconnected = runtime->reconnect(owner, portable.run_id()).wait();
+    EXPECT_EQ(reconnected.id(), portable.id());
+    ASSERT_TRUE(reconnected.failure() && reconnected.failure()->provider_outcome);
+    EXPECT_EQ(provider_codec::observe_outcome(*reconnected.failure()->provider_outcome),
+              provider_codec::observe_outcome(*portable.failure()->provider_outcome));
+    EXPECT_FALSE(reconnected.failure()->provider_cause);
     auto changed_descriptor = neograph::test::descriptor(
         "anthropic.messages", "https://other.fixture.invalid");
     const auto changed = sp::NativeArchive::open(

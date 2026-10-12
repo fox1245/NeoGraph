@@ -443,7 +443,7 @@ Destroying `LocalProgramHost` releases the caller's GIL while its actual `Progra
 
 The native Program recorded-execution API is `ProgramRuntime::replay_recorded`. `LocalProgramHost` exposes `run`, `start`, `resume` and `fork`; it does not expose the raw recorded-binding control plane. Program results retain the typed provider outcome and failure evidence supplied by the native runtime, alongside the existing handle, budget and authority fields.
 
-`ProgramResult.failure` is a read-only `ProgramFailure` value or `None`, not a dictionary. Its `provider_outcome` and `provider_cause` retain provider failure evidence; `code`, `message`, `operation_id`, `core_node`, `attempts` and `witness` describe the failed operation. Result fields also include `bundle_id`, `operation_id`, `attempt`, `checkpoint`, `interrupt` and `provider_budget_authority`.
+`ProgramResult.failure` is a read-only `ProgramFailure` value or `None`, not a dictionary. Its `provider_outcome` and `provider_cause` retain provider failure evidence; `code`, `message`, `operation_id`, `core_node`, `attempts` and `witness` describe the failed operation. Result fields also include `bundle_id`, `operation_id`, `attempt`, `checkpoint`, `interrupt` and `provider_budget_authority`. On a host without a `native_history_archive`, such as the default in-memory host, `provider_outcome` holds the failure's messages without their native state, `witness["provider_outcome_native_retained"]` is `False`, and `provider_cause` keeps the original outcome.
 
 The exact installed JavaScript vocabulary is available as a dict:
 

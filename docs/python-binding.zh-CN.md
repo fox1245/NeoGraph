@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=47af23142c7e907bf65978078a8f3c471d1f9fc343818cc828403d52ee0a17d9 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=e87174d256f1d79aa9a4b5abd7a0661ce0fdbf3aa7f108fb42dba62434a3dc8b -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -437,7 +437,7 @@ print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 
 
 原生的 Program 录制执行 API 是 `ProgramRuntime::replay_recorded`。`LocalProgramHost` 提供 `run`、`start`、`resume` 和 `fork`，不暴露原始的 recorded-binding 控制面。Program 的结果除了原有的句柄、预算和权限字段，还保留原生运行时给出的带类型的 provider outcome 和失败证据。
 
-`ProgramResult.failure` 是只读的 `ProgramFailure` 值或 `None`，不是字典。它的 `provider_outcome` 和 `provider_cause` 保留 provider 的失败证据；`code`、`message`、`operation_id`、`core_node`、`attempts` 和 `witness` 描述失败的那个操作。结果字段还包括 `bundle_id`、`operation_id`、`attempt`、`checkpoint`、`interrupt` 和 `provider_budget_authority`。
+`ProgramResult.failure` 是只读的 `ProgramFailure` 值或 `None`，不是字典。它的 `provider_outcome` 和 `provider_cause` 保留 provider 的失败证据；`code`、`message`、`operation_id`、`core_node`、`attempts` 和 `witness` 描述失败的那个操作。结果字段还包括 `bundle_id`、`operation_id`、`attempt`、`checkpoint`、`interrupt` 和 `provider_budget_authority`。在没有 `native_history_archive` 的宿主（默认的内存宿主就是如此）上，`provider_outcome` 持有去掉 native 状态的消息，`witness["provider_outcome_native_retained"]` 为 `False`，原始 outcome 仍留在 `provider_cause`。
 
 已安装的 JavaScript 词汇表的确切内容，可以作为字典取得：
 

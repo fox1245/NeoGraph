@@ -609,7 +609,10 @@ class ChatPeer:
     OpenRouter does. A request whose last user message contains "slow" is
     answered after slow_seconds. A request whose last user message contains
     fail_marker is refused with HTTP 400, which the provider reports as a failed
-    call with its outcome as evidence.
+    call with its outcome as evidence. A streaming request whose last user
+    message contains cut_marker is answered with one chunk of the reply and then
+    the connection ends: no finish reason, no usage and no [DONE], a stream cut
+    in the middle.
     """
 
     def __init__(self):
@@ -619,6 +622,7 @@ class ChatPeer:
                       "cost": 0.001234567}
         self.slow_seconds = 5.0
         self.fail_marker = "fail-call"
+        self.cut_marker = "cut-stream"
         self._lock = threading.Lock()
         peer = self
 
@@ -645,6 +649,20 @@ class ChatPeer:
                         pass
                     return
                 base = {"id": "chatcmpl-e2e", "created": 1, "model": body.get("model")}
+                if body.get("stream") and peer.cut_marker and peer.cut_marker in str(last):
+                    first = {**base, "object": "chat.completion.chunk",
+                             "choices": [{"index": 0, "finish_reason": None,
+                                          "delta": {"role": "assistant",
+                                                    "content": peer.reply[:3]}}]}
+                    try:
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream")
+                        self.end_headers()  # no Content-Length: the body ends with the connection
+                        self.wfile.write(("data: " + json.dumps(first) + "\n\n").encode())
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    return
                 if body.get("stream"):
                     frames = [
                         {**base, "object": "chat.completion.chunk",
