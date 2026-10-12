@@ -71,6 +71,7 @@ python 01_minimal.py
 | 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | yes | 예제 14의 `my_graph.json`을 불러와 5를 10으로, 100을 200으로 두 배로 만듭니다. 14를 먼저 실행하세요. 사용자 정의 노드 타입은 코드에서 등록합니다. |
 | 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | yes | `message_stream`이 토큰 이벤트를 LangChain 형태의 청크로 바꿉니다. 스크립트로 정한 토큰 다섯 개가 `Octopuses have three hearts.`가 됩니다. |
 | 75 | [`75_stream_modes.py`](75_stream_modes.py) | yes | 스트림 모드: 같은 실행을 VALUES, UPDATES, EVENTS, DEBUG 모드로 관찰하고, 모드마다 전달되는 이벤트를 셉니다. |
+| 76 | [`76_retry_policy.py`](76_retry_policy.py) | yes | `RetryPolicy`: 노드가 두 번 실패하면 엔진이 지수 백오프로 다시 시도합니다. 재시도 횟수를 줄이면 재시도가 바닥났을 때 호출한 쪽이 받는 결과를 볼 수 있습니다. |
 
 ### 에이전트 패턴
 
