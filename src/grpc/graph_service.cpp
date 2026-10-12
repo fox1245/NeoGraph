@@ -113,7 +113,8 @@ public:
             pb::GraphEvent err;
             err.set_kind(pb::GraphEvent::DEBUG);
             err.set_payload_json(neograph::json{{"error", failure.message},
-                                                {"code", failure.info.reason}}.dump());
+                                                {"code", detail::error_code_of(failure.info)}}
+                                     .dump());
             writer->Write(err);
             return failure.status();
         };

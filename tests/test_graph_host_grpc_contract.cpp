@@ -13,6 +13,7 @@
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/server_builder.h>
 
+#include <algorithm>
 #include <thread>
 #include <tuple>
 #include <unordered_map>
@@ -149,6 +150,9 @@ std::shared_ptr<const sp::Outcome> failed_provider(sp::ErrorKind kind) {
     if (kind == "hook")
         throw HookBoundaryBlocked("sha256:" + std::string(64, 'b'), HookExecutionState::Failed,
                                   "audit hook blocked");
+    if (kind == "hook-timeout")
+        throw HookBoundaryBlocked("sha256:" + std::string(64, 'c'), HookExecutionState::TimedOut,
+                                  "audit hook timed out");
     if (kind == "timeout") throw asio::system_error(asio::error::timed_out, "too slow");
     if (kind == "provider") throw ProviderFailure(failed_provider(sp::ErrorKind::Overloaded));
     if (kind == "budget") throw ProviderFailure(failed_provider(sp::ErrorKind::QuotaExhausted));
@@ -197,24 +201,40 @@ struct ServedGraph {
     }
 };
 
-// The ErrorInfo of a failed call (google.rpc.Status details).
+// The ErrorInfo of a failed call (google.rpc.Status details). Its reason
+// follows AIP-193 (UPPER_SNAKE, at most 63 characters); the stable NeoGraph
+// code is metadata["code"].
 detail::ErrorInfo error_info(const ::grpc::Status& status) {
     const auto info = detail::error_info_of(status.error_details());
     EXPECT_TRUE(info) << "no google.rpc.ErrorInfo in the status details";
-    return info.value_or(detail::ErrorInfo{});
+    const auto result = info.value_or(detail::ErrorInfo{});
+    const auto& reason = result.reason;
+    const bool upper_snake =
+        reason.size() >= 2 && reason.size() <= 63 && reason.front() >= 'A' &&
+        reason.front() <= 'Z' && reason.back() != '_' &&
+        std::all_of(reason.begin(), reason.end(), [](char c) {
+            return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+        });
+    EXPECT_TRUE(upper_snake) << "ErrorInfo.reason is not AIP-193 UPPER_SNAKE: " << reason;
+    EXPECT_EQ(result.domain, "neograph");
+    EXPECT_TRUE(result.metadata.contains("code")) << "no metadata[\"code\"] for " << reason;
+    return result;
 }
 
 TEST(GraphHostGRPCContract, TypedGraphFailuresAreCanonicalStatuses) {
     ServedGraph served;
-    const std::vector<std::tuple<std::string, ::grpc::StatusCode, std::string>> table{
-        {"ordinary", ::grpc::StatusCode::UNKNOWN, "NG.TaskFailed"},
-        {"timeout", ::grpc::StatusCode::DEADLINE_EXCEEDED, "NG.Timeout"},
-        {"provider", ::grpc::StatusCode::UNAVAILABLE, "NG.ProviderFailed"},
-        {"budget", ::grpc::StatusCode::RESOURCE_EXHAUSTED, "NG.BudgetExhausted"},
-        {"hook", ::grpc::StatusCode::FAILED_PRECONDITION, "NG.HookBlocked"},
-        {"cancelled", ::grpc::StatusCode::CANCELLED, "NG.Cancelled"},
+    const std::vector<std::tuple<std::string, ::grpc::StatusCode, std::string, std::string>> table{
+        {"ordinary", ::grpc::StatusCode::UNKNOWN, "TASK_FAILED", "NG.TaskFailed"},
+        {"timeout", ::grpc::StatusCode::DEADLINE_EXCEEDED, "TIMEOUT", "NG.Timeout"},
+        {"provider", ::grpc::StatusCode::UNAVAILABLE, "PROVIDER_FAILED", "NG.ProviderFailed"},
+        {"budget", ::grpc::StatusCode::RESOURCE_EXHAUSTED, "BUDGET_EXHAUSTED",
+         "NG.BudgetExhausted"},
+        {"hook", ::grpc::StatusCode::FAILED_PRECONDITION, "HOOK_BLOCKED", "NG.HookBlocked"},
+        {"hook-timeout", ::grpc::StatusCode::DEADLINE_EXCEEDED, "HOOK_BLOCKED",
+         "NG.HookBlocked"},
+        {"cancelled", ::grpc::StatusCode::CANCELLED, "CANCELLED", "NG.Cancelled"},
     };
-    for (const auto& [kind, code, reason] : table) {
+    for (const auto& [kind, code, reason, ng_code] : table) {
         SCOPED_TRACE(kind);
         ::grpc::ClientContext context;
         context.set_deadline(std::chrono::system_clock::now() + 5s);
@@ -226,7 +246,7 @@ TEST(GraphHostGRPCContract, TypedGraphFailuresAreCanonicalStatuses) {
         EXPECT_EQ(status.error_code(), code) << status.error_message();
         const auto info = error_info(status);
         EXPECT_EQ(info.reason, reason);
-        EXPECT_EQ(info.domain, "neograph");
+        EXPECT_EQ(info.metadata.at("code"), ng_code);
         // The public message only: never the exception text.
         EXPECT_EQ(status.error_message().find("plain failure"), std::string::npos);
         EXPECT_EQ(status.error_message().find("too slow"), std::string::npos);
@@ -253,7 +273,8 @@ TEST(GraphHostGRPCContract, TypedGraphFailuresAreCanonicalStatuses) {
         }
         const auto status = stream->Finish();
         EXPECT_EQ(status.error_code(), ::grpc::StatusCode::FAILED_PRECONDITION);
-        EXPECT_EQ(error_info(status).reason, "NG.HookBlocked");
+        EXPECT_EQ(error_info(status).reason, "HOOK_BLOCKED");
+        // The stream's event names the stable code, as the ErrorInfo metadata does.
         EXPECT_EQ(code, "NG.HookBlocked");
     }
 }
@@ -277,7 +298,9 @@ TEST(GraphHostGRPCContract, InvalidGraphRequestsAreRefusedBeforeTheyRun) {
         pb::RunGraphResponse response;
         const auto status = served.stub->RunGraph(&context, request, &response);
         EXPECT_EQ(status.error_code(), ::grpc::StatusCode::INVALID_ARGUMENT);
-        EXPECT_EQ(error_info(status).reason, "NG.InvalidRequest");
+        const auto info = error_info(status);
+        EXPECT_EQ(info.reason, "INVALID_REQUEST");
+        EXPECT_EQ(info.metadata.at("code"), "NG.InvalidRequest");
     }
 }
 
@@ -318,25 +341,28 @@ TEST(GraphHostGRPCContract, ToolServiceKeepsTypedFailuresDistinct) {
         EXPECT_EQ(response.error_code(), code);
     }
     // A run control signal is a status with ErrorInfo.
-    const std::vector<std::tuple<std::string, ::grpc::StatusCode, std::string>> control{
-        {"hook", ::grpc::StatusCode::FAILED_PRECONDITION, "NG.HookBlocked"},
-        {"interrupt", ::grpc::StatusCode::FAILED_PRECONDITION, "NG.Interrupted"},
-        {"cancelled", ::grpc::StatusCode::CANCELLED, "NG.Cancelled"},
+    const std::vector<std::tuple<std::string, ::grpc::StatusCode, std::string, std::string>> control{
+        {"hook", ::grpc::StatusCode::FAILED_PRECONDITION, "HOOK_BLOCKED", "NG.HookBlocked"},
+        {"interrupt", ::grpc::StatusCode::FAILED_PRECONDITION, "INTERRUPTED", "NG.Interrupted"},
+        {"cancelled", ::grpc::StatusCode::CANCELLED, "CANCELLED", "NG.Cancelled"},
     };
-    for (const auto& [kind, code, reason] : control) {
+    for (const auto& [kind, code, reason, ng_code] : control) {
         SCOPED_TRACE(kind);
         pb::ToolCallResponse response;
         const auto status = call("fail", json{{"kind", kind}}.dump(), response);
         EXPECT_EQ(status.error_code(), code);
         const auto info = error_info(status);
         EXPECT_EQ(info.reason, reason);
+        EXPECT_EQ(info.metadata.at("code"), ng_code);
         if (kind == "interrupt") EXPECT_EQ(info.metadata.at("reason"), "needs approval");
     }
     {
         pb::ToolCallResponse response;
         const auto status = call("missing", "{}", response);
         EXPECT_EQ(status.error_code(), ::grpc::StatusCode::NOT_FOUND);
-        EXPECT_EQ(error_info(status).reason, "NG.ToolNotFound");
+        const auto info = error_info(status);
+        EXPECT_EQ(info.reason, "TOOL_NOT_FOUND");
+        EXPECT_EQ(info.metadata.at("code"), "NG.ToolNotFound");
     }
     {
         pb::ToolCallResponse response;

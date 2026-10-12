@@ -3,11 +3,13 @@
 //
 // A failure leaves as a canonical status code with a google.rpc.Status in the
 // `grpc-status-details-bin` trailer carrying one google.rpc.ErrorInfo
-// (AIP-193): `reason` is the stable NeoGraph code ("NG.HookBlocked",
-// "NG.Timeout", an author code, ...), `domain` is "neograph", and `metadata`
-// holds `retryable` plus the class's fields (a Hook block's invocation_id and
-// state, an interrupt's reason). The message is the public message, never
-// what(). See the reference, "Protocol failure mapping".
+// (AIP-193): `reason` is an UPPER_SNAKE constant derived from the stable
+// NeoGraph code ("HOOK_BLOCKED" for "NG.HookBlocked", "TIMEOUT" for
+// "NG.Timeout"; an author code gives its class's reason), `domain` is
+// "neograph", and `metadata` holds `code` (the stable NeoGraph code itself),
+// `retryable` and the class's fields (a Hook block's invocation_id and state,
+// an interrupt's reason). The message is the public message, never what().
+// See the reference, "Protocol failure mapping".
 //
 // Both messages are encoded and decoded here directly on the protobuf wire
 // format, so NeoGraph needs no googleapis dependency; any client decodes them
@@ -161,17 +163,30 @@ struct WireFailure {
     }
 };
 
+/// The AIP-193 ErrorInfo reason of a stable NeoGraph code: the code after
+/// "NG." in UPPER_SNAKE ("NG.ToolNotFound" -> "TOOL_NOT_FOUND"). Author codes
+/// are open-ended, so an author code gives the reason of its class
+/// (`failure_class`), and its exact code travels in metadata["code"]. At most
+/// 63 characters of [A-Z0-9_], starting with a letter.
+std::string error_reason(std::string_view code, graph::NodeFailureClass failure_class);
+
+/// The stable NeoGraph code an ErrorInfo carries: metadata["code"], or, from a
+/// server that predates it, a reason that is itself an "NG." code. Empty when
+/// it carries none.
+std::string error_code_of(const ErrorInfo& info);
+
 /// The canonical status of a failure class (reference, "Protocol failure
 /// mapping"). A Hook block whose Hook timed out is DEADLINE_EXCEEDED.
 ::grpc::StatusCode status_code_of(const graph::FailureVerdict& verdict);
 
 /// The gRPC form of a classified failure: its status code, public message and
-/// ErrorInfo (reason: the code; metadata: retryable and the run control
-/// signal's fields).
+/// ErrorInfo (reason: error_reason(); metadata: code, retryable and the run
+/// control signal's fields).
 WireFailure wire_failure(const graph::FailureVerdict& verdict);
 
-/// A request the service refuses before running anything.
-WireFailure request_failure(::grpc::StatusCode code, std::string reason, std::string message);
+/// A request the service refuses before running anything; `ng_code` is its
+/// stable code ("NG.InvalidRequest", "NG.ToolNotFound", ...).
+WireFailure request_failure(::grpc::StatusCode code, std::string ng_code, std::string message);
 
 }  // namespace neograph::grpc::detail
 
