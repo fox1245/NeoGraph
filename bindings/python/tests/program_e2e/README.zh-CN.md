@@ -28,7 +28,7 @@
 | `test_17_resume_value_scope.py` | 回应只送达它所回应的问题（#393）：绑定的 `llm_call` 之后，`first` 提问，接着 `second` 在下一个 Core 步骤中提问；回应 `first` 的那次恢复，让 `second` 提出它自己的问题，下一次恢复回应它，已完成的调用永远不会重发或再次计费；分别在内存中和使用 SQLite journal |
 | `test_18_step_failure_outranks_interrupt.py` | 不论提问节点的序号如何，失败都会结束它所在的步骤（#392）：一个 Core 步骤里，一个绑定的 `llm_call` 旁边有一个提问的节点和一个失败的节点，两种顺序都测；Program 以失败节点的分类后的失败而失败，没有问题残留在待处理状态，模型调用只发送并计费一次；分别在内存中和使用 SQLite journal |
 | `test_19_fork_interrupt_identity.py` | 对一个 Core 步骤在两个中断上暂停、且旁边有一个已完成的绑定 `llm_call` 的运行执行 `host.fork()`（#394）：fork 回答待处理调用的 `core_interrupt_id` 所指明的那个中断，另一个节点在 fork 中重新提问，已完成的调用永远不会重发或再次计费；分别在内存中和使用 SQLite journal |
-| `test_20_javascript_fork.py` | 对一个 JavaScript `main()` 执行 `host.fork()`，它在第二个 `callCore` 中暂停，两个 `callCore` 里各有一个绑定的 `llm_call`（#395）：fork 从命令 journal 重放第一条命令，带着回应恢复暂停的调用并完成，两次模型调用都不会再发送或再次计费；分别在内存中和使用 SQLite journal |
+| `test_20_javascript_fork.py` | 对一个 JavaScript `main()` 执行 `host.fork()`，它在第二个 `callCore` 中暂停，其中各有一个绑定的 `llm_call`（#395）：fork 从命令 journal 重放第一条命令，带着回应恢复暂停的调用并完成，两次模型调用都不会再发送或再次计费；分别在内存中和使用 SQLite journal |
 | `test_21_fork_recorded_failure.py` | 对一个 JavaScript `main()` 执行 `host.fork()`，它的收集式 `ng.all` 记录了一个绑定 `llm_call` 被拒绝的成员（#398）：fork 把已记录的 provider 证据重新绑定到自己，回应暂停的成员，并连同证据一起报告已记录的失败，两次调用都不会再发送；分别在内存中和使用 SQLite journal |
 
 `support.py` 放着共用的 Python 节点、条件、注册表、预算和 JavaScript 构建器。
