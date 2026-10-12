@@ -3,24 +3,24 @@
 
 **Languages:** [English](doxygen-mainpage.md) | [한국어](doxygen-mainpage.ko.md) | [日本語](doxygen-mainpage.ja.md) | [简体中文](doxygen-mainpage.zh-CN.md)
 
-C++20グラフエージェントエンジンライブラリ — C++向けのLangGraphで、オプションのPythonバインディング付きです。このサイトは`include/neograph/`内の公開C++ヘッダーに対する**生成されたリファレンス**です。
+C++20のグラフエージェントエンジンライブラリです。C++向けのLangGraphにあたり、オプションでPythonバインディングも使えます。このサイトは、`include/neograph/` にある公開C++ヘッダーの、**自動生成されたリファレンス**です。
 
-## 開始する場所
+## 最初に読むもの
 
-NeoGraphを初めてお使いの場合は、**まずナラティブドキュメントをお読みください** — この生成されたリファレンスは、探しているものが分かった時点でクラスシグネチャを調べるためのものです。
+NeoGraphを初めて使う方は、**先に解説のドキュメントを読んでください**。この自動生成のリファレンスは、探したいものが分かっているときに、クラスのシグネチャを調べるためのものです。
 
-| 対象 | 移動先 |
+| 知りたいこと | 参照先 |
 |---|---|
-| NeoGraphとは何か、その理由、ベンチマーク | [README](https://github.com/fox1245/NeoGraph#readme) |
-| メンタルモデル — チャネル、ノード、エッジ、Send、Command | [Core Concepts](https://github.com/fox1245/NeoGraph/blob/master/docs/concepts.md) |
-| 一般的な問題の症状起点での修正 | [Troubleshooting](https://github.com/fox1245/NeoGraph/blob/master/docs/troubleshooting.md) |
-| C++ 例 (検証は別途報告) | [examples/](https://github.com/fox1245/NeoGraph/tree/master/examples) |
-| Python typed provider とグラフの例 | [bindings/python/examples/](https://github.com/fox1245/NeoGraph/tree/master/bindings/python/examples) |
-| Async / コルーチン内部構造 | [ASYNC_GUIDE](https://github.com/fox1245/NeoGraph/blob/master/docs/ASYNC_GUIDE.md) |
+| NeoGraphとは何か、なぜ作ったか、ベンチマーク | [README](https://github.com/fox1245/NeoGraph#readme) |
+| 考え方：チャネル、ノード、エッジ、Send、Command | [コアコンセプト](https://github.com/fox1245/NeoGraph/blob/master/docs/concepts.md) |
+| よくある問題の、症状から引ける対処法 | [トラブルシューティング](https://github.com/fox1245/NeoGraph/blob/master/docs/troubleshooting.md) |
+| C++のサンプル（検証結果は別に報告） | [examples/](https://github.com/fox1245/NeoGraph/tree/master/examples) |
+| Pythonの型付きプロバイダーとグラフのサンプル | [bindings/python/examples/](https://github.com/fox1245/NeoGraph/tree/master/bindings/python/examples) |
+| 非同期／コルーチンの内部 | [ASYNC_GUIDE](https://github.com/fox1245/NeoGraph/blob/master/docs/ASYNC_GUIDE.md) |
 
-## トップレベルヘッダ
+## トップレベルのヘッダー
 
-便利ヘッダは、完全なCore + GraphEngine APIを取り込みます:
+便利なヘッダーを1つインクルードすると、コアとグラフエンジンのAPI全体が読み込まれます。
 
 ```cpp
 #include <neograph/neograph.h>
@@ -29,14 +29,14 @@ using namespace neograph;
 using namespace neograph::graph;
 ```
 
-サブ名前空間:
+サブ名前空間は次のとおりです。
 
-- `neograph`           — 基盤型 (`Provider`、`Tool`、`ChatMessage`)
-- `neograph::graph`    — エンジン、ノード、状態、チェックポイント
-- `neograph::llm` — `SchemaProvider`, `Agent`; typed SDK runtime
-- `neograph::mcp`      — Model Context Protocol クライアント
-- `neograph::async`    — コルーチン + io_context インフラストラクチャ
-- `neograph::util`     — 並行性プリミティブ
+- `neograph`：基盤となる型（`Provider`、`Tool`、`ChatMessage`）
+- `neograph::graph`：エンジン、ノード、状態、チェックポイント
+- `neograph::llm`：`SchemaProvider`、`Agent`、型付きのSDKランタイム
+- `neograph::mcp`：Model Context Protocolのクライアント
+- `neograph::async`：コルーチンとio_contextの基盤
+- `neograph::util`：並行処理のプリミティブ
 
 ## 最初のプログラム
 
@@ -58,32 +58,26 @@ sp::runtime::Result first_call(
 }
 ```
 
-`SchemaProvider` は承認済み `sp::descriptor::ValidatedDescriptor`、`sp::runtime::Options`、任意の `SchemaProvider::Defaults` を受け取ります。descriptor は closed/versioned データ admission であり、要求/応答 interpreter や任意 primitive registry ではありません。credential は公開 descriptor でなく runtime options に置きます。Defaults は typed OpenRouter routing と Responses 保持 (`responses_store`) のみで、後者は Responses 専用です。Hosted OpenRouter routing・retention・JSON 形式は宣言済み typed 制御です。Images、Veo、Decisions は別の NeoGraph typed client と別の承認を使い SDK chat grant を継承しません。
+`SchemaProvider` は、admission済みの `sp::descriptor::ValidatedDescriptor`、`sp::runtime::Options`、省略可能な `SchemaProvider::Defaults` を受け取ります。ディスクリプターの読み込みは、closedでバージョン付きのデータのadmissionです。リクエストとレスポンスのインタープリターでも、任意のプリミティブのレジストリでもありません。認証情報は、公開されるディスクリプターのファイルではなく、ランタイムオプションに置きます。Defaultsに含まれるのは、型付きのOpenRouterルーティングと、Responsesの保持（`responses_store`）だけです。後者が有効なのは、Responsesに対してだけです。ホスト型のOpenRouterのルーティング、保持、JSONフォーマットは、引き続き、宣言する型付きのコントロールです。Images、Veo、Decisionsは、NeoGraphの別の型付きクライアントと、別の認可を使います。SDKのchatのグラントを引き継ぐことはありません。
 
-プロバイダー呼び出しは `sp::runtime::Result`、すなわち `sp::Completion` または `sp::Failure` を保持する不変の所有 `std::shared_ptr<const sp::Outcome>` を返します。表示テキストだけでなく結果全体を保持してください。順序付きメッセージ/パート、保持された native continuation と family が提供する wire 証拠、順序付き raw 観測、停止の根拠と実際の試行メタデータは呼び出しとクライアント破棄後も残ります。使用量は根拠・段階・品質付きの nullable `uint64_t` であり、欠落はゼロではなく不明です。失敗も元の部分結果を保持します。`ProviderFailure::outcome()` と `ProviderObserverError::outcome()` は実際の結果を保持し、後者の `cause()` は観測者の例外を保持します。
+プロバイダー呼び出しが返すのは `sp::runtime::Result` です。これは、変更できない、所有権付きの `std::shared_ptr<const sp::Outcome>` で、`sp::Completion` または `sp::Failure` を含みます。表示用のテキストだけでなく、結果の全体を保持してください。順序付きのメッセージとパート、保持されているネイティブな継続とファミリーが提供するワイヤーのエビデンス、順序付きのrawの観測、停止のエビデンス、本物の試行メタデータは、呼び出しが終わった後も、クライアントが破棄された後も残ります。使用量カウンターは、エビデンス、ステージ、品質を伴う、null許容の `uint64_t` の値です。値がないのは「不明」を意味し、ゼロではありません。失敗は、元の部分的な結果を保持します。`ProviderFailure::outcome()` と `ProviderObserverError::outcome()` は、その結果を保持します。後者は、オブザーバーの例外も `cause()` に保持します。
 
-Wire 証拠は family が提供する任意の情報です。`sp::Completion::wire_envelope` は null の場合があります（Python の `ProviderCompletion.wire_envelope` は `None`）。現在の buffered Chat は応答 JSON 全体を `raw_events` 内の `RawWire` に保持します。`type == "chat.completion"` で、文書は `payload` にあり、`wire_envelope` は null のままです。Family が実際に保持する場所から証拠を読み、fallback envelope は捏造しません。Native continuation と raw buffer は保護された証拠として保持され、trace payload から除外されます。
+ワイヤーのエビデンスは、ファミリーが提供する省略可能なものです。`sp::Completion::wire_envelope` はnullになることがあります（Pythonでは `ProviderCompletion.wire_envelope` が `None`）。バッファ型のChatは、現在、レスポンス全体のJSONを `raw_events` に `RawWire` として保持します。`type == "chat.completion"` で、文書は `payload` にあります。`wire_envelope` はnullのままです。エビデンスは、ファミリーが保持している場所から読んでください。代わりのエンベロープが捏造されることはありません。ネイティブな継続とrawバッファは、保護されたエビデンスのままで、トレースのペイロードには含まれません。
 
-ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを新しい一致したヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。リリース対象は SDK `0.1.1` alpha、interface revision 4 / shared ABI 4 で、out-of-line capability check を使用します。Alpha は安定 API の保証ではありません。記録された interface-3 runtime/archive 資格検証は Linux/POSIX の範囲であり、interface 4 や Windows・macOS・WASM runtime の資格検証を意味しません。
+これは、ソースとバイナリの両方の互換性を壊す変更です。すべてのC++コンシューマーとカスタムプロバイダーを、新しい対応するヘッダーとライブラリで再コンパイルしてください。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、ディスクリプターのインタープリター、ResponsesのWebSocket経路は削除されました。エイリアスも互換用のブリッジもありません。リリースの対象は、SDK `0.1.1` alpha、インターフェースリビジョン4／共有ABI 4で、capabilityのチェックはアウトオブラインです。alphaは、安定したAPIの約束ではありません。記録されている、インターフェース3でのランタイムとarchiveの適格性確認は、Linux/POSIXを対象としています。インターフェース4や、Windows、macOS、WASMでのランタイムの適格性確認は、含まれていません。
 
-Python は `SchemaProvider(ValidatedDescriptor, ProviderRuntimeOptions,
-SchemaProviderDefaults)` と、typed `ProviderMessage` の part を受け取る
-`make_provider_request` を使います。`prepare` は `PreparedProviderRequest` を
-返し、`dispatch` はそれを一度消費します。`invoke` はリクエストを準備して
-dispatch します。`ProviderOutcome` は不変の completion/failure/partial view を
-保持し、不明な使用量は `None` です。グラフの `ChatMessage` は別の便宜型であり、
-provider message の alias ではありません。Blocking provider 呼び出しは GIL を
-解放し、Python async 呼び出し側は `asyncio.to_thread` を使えます。
-コンストラクタ、エラー、制限は [`Python binding guide`](python-binding.md) を参照してください。
+Pythonでは、`SchemaProvider(ValidatedDescriptor, ProviderRuntimeOptions,
+SchemaProviderDefaults)` と `make_provider_request` を、型付きの `ProviderMessage` パートとともに使います。`prepare` は `PreparedProviderRequest` を返し、`dispatch` はそれを1回だけ消費します。`invoke` は、リクエストの準備とディスパッチをまとめて行います。`ProviderOutcome` は、変更できないcompletion／failure／partialのビューを保持し、不明な使用量は `None` になります。グラフの `ChatMessage` は別の便宜的な型で、プロバイダーのメッセージの別名ではありません。ブロックするプロバイダー呼び出しはGILを解放するので、Pythonの非同期の呼び出し側は `asyncio.to_thread` を使えます。コンストラクター、エラー、制約については、[Pythonバインディングガイド](python-binding.md)を参照してください。
 
 
-実結果の後に post-effect 精算や terminal receipt 永続化が失敗すると、`ProviderDispatchOutcomePersistenceError::outcome()` は元の不変結果、`cause()` は元の永続例外を保持します。delivery も失敗した場合は `delivery_error()` が元の観測者例外を保持します。永続化成功後の観測者失敗は元の例外を変更せず再送出し、不明/結果なし transport 失敗では outcome を捏造しません。
-## リファレンス索引
+本物の結果が存在するのに、効果の後の会計処理や、最終レシートの永続化が失敗した場合、`ProviderDispatchOutcomePersistenceError` は、元の変更できない結果を `outcome()` に、元の永続化の例外を `cause()` に保持します。配送にも失敗していた場合は、`delivery_error()` が元のオブザーバーの例外を保持します。永続化に成功した後でオブザーバーが失敗した場合は、その元のオブザーバーの例外が、そのまま再送出されます。不明な、または結果のないトランスポートの失敗では、結果が捏造されることはありません。
 
-サイドバーのクラスリスト、ファイルリスト、名前空間リストは `include/neograph/` 配下のヘッダから生成されています。[クラスリスト](annotated.html) が最も有用なエントリポイントです。
+## リファレンスの索引
+
+サイドバーのクラス一覧、ファイル一覧、名前空間一覧は、`include/neograph/` にあるヘッダーから自動生成されています。最も使いやすい入口は、[クラス一覧](annotated.html)です。
 
 ## ソース
 
-プロジェクトホーム: <https://github.com/fox1245/NeoGraph>
+プロジェクトのホーム：<https://github.com/fox1245/NeoGraph>
 
-ライセンス: MIT.
+ライセンス：MIT
