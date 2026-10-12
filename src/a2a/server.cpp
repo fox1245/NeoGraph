@@ -1599,6 +1599,18 @@ void A2AServer::Impl::handle_send(Call& call) {
     std::string context_id;
     std::string resume_checkpoint;
     bool collaboration_new_task = false;
+    // A Program run waiting for input cannot take its answer from an A2A
+    // message yet. TODO(D3 phase 2): resume it with the message as the
+    // input (ProgramRuntime::resume). Until then the message is refused and
+    // the task keeps waiting, instead of reading as a busy task.
+    const auto program_input_pending = [&](const Task& task) {
+#ifdef NEOGRAPH_A2A_PROGRAM
+        return program_adapter && !collaboration && task.status.state == TaskState::InputRequired;
+#else
+        (void)task;
+        return false;
+#endif
+    };
 #ifdef NEOGRAPH_A2A_PROGRAM
     if (program_adapter && mp.message.task_id) {
         Task refreshed;
@@ -1649,6 +1661,9 @@ void A2AServer::Impl::handle_send(Call& call) {
                     refusal = rpc_error(-32004,
                         "Task " + task_id + " is in a terminal state and accepts no more messages");
                 }
+            } else if (program_input_pending(known->second)) {
+                refusal = rpc_error(-32004, "Task " + task_id + " waits for Program input, "
+                                            "which this agent does not accept over A2A yet");
             } else if (has_run_unlocked(task_id)) {
                 refusal = rpc_error(-32603, "Task " + task_id + " is still running");
                 refusal->reason = "TASK_BUSY";

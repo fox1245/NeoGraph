@@ -109,6 +109,8 @@ neograph::program::ProgramVersion make_program_version() {
 }
 /// Makes the adapter test node throw an exception carrying a fake secret.
 std::atomic<bool> g_adapter_node_fails{false};
+/// Makes the adapter test node pause its Program run for input.
+std::atomic<bool> g_adapter_node_interrupts{false};
 
 class AdapterCompletedNode final : public neograph::graph::GraphNode {
 public:
@@ -120,6 +122,9 @@ public:
         starts_->fetch_add(1, std::memory_order_relaxed);
         if (g_adapter_node_fails.load(std::memory_order_acquire)) {
             throw std::runtime_error("adapter node failed: db password=hunter2 at /srv/secret");
+        }
+        if (g_adapter_node_interrupts.load(std::memory_order_acquire)) {
+            throw neograph::graph::NodeInterrupt("needs a reviewer");
         }
         neograph::graph::NodeOutput output;
         output.writes.push_back(neograph::graph::ChannelWrite{"value", "completed"});
@@ -839,6 +844,51 @@ TEST(A2ACollaboration, FailedProgramRunNeverSendsExceptionText) {
     const auto task = json::parse(response->body)["result"]["task"];
     EXPECT_EQ(task["status"]["state"], "TASK_STATE_FAILED") << response->body;
     EXPECT_TRUE(task["metadata"]["neograph/failure"]["code"].is_string()) << response->body;
+}
+
+TEST(A2ACollaboration, AProgramInputRequestIsNotAnsweredByAnA2AMessageYet) {
+    // A Program run that pauses for input is INPUT_REQUIRED. Answering it over
+    // A2A is D3 phase 2; until then a follow-up is UnsupportedOperation and
+    // the task keeps waiting (it used to read as a busy task).
+    ProgramAdapterFixture fixture;
+    auto adapter = std::make_shared<ProgramAgentAdapter>(
+        fixture.runtime, fixture.admitted_version(), "owner-b");
+    AgentCard card;
+    card.name = "waiting-program";
+    card.description = "Program input request test";
+    card.version = "1.0.0";
+    card.default_input_modes = {"text/plain"};
+    card.default_output_modes = {"text/plain"};
+    A2AServer server(adapter, card);
+    ASSERT_TRUE(server.start_async("127.0.0.1", 0));
+    httplib::Client peer("127.0.0.1", server.port());
+    const auto call = [&](const json& request) {
+        auto response = peer.Post("/", httplib::Headers{{"A2A-Version", "1.0"}},
+                                  request.dump(), "application/json");
+        EXPECT_TRUE(response);
+        return response ? json::parse(response->body) : json::object();
+    };
+    g_adapter_node_interrupts.store(true, std::memory_order_release);
+    const auto first = call({{"jsonrpc", "2.0"}, {"id", 1}, {"method", "SendMessage"},
+        {"params", {{"message", {{"messageId", "m-wait"}, {"role", "ROLE_USER"},
+                                 {"parts", json::array({json{{"text", "start"}}})}}}}}});
+    g_adapter_node_interrupts.store(false, std::memory_order_release);
+    const auto task = first["result"]["task"];
+    ASSERT_EQ(task["status"]["state"], "TASK_STATE_INPUT_REQUIRED") << first.dump();
+    const auto task_id = task["id"].get<std::string>();
+
+    const auto answer = call({{"jsonrpc", "2.0"}, {"id", 2}, {"method", "SendMessage"},
+        {"params", {{"message", {{"messageId", "m-answer"}, {"role", "ROLE_USER"},
+                                 {"taskId", task_id},
+                                 {"parts", json::array({json{{"text", "approved"}}})}}}}}});
+    ASSERT_TRUE(answer.contains("error")) << answer.dump();
+    EXPECT_EQ(answer["error"]["code"], -32004) << answer.dump();
+
+    const auto fetched = call({{"jsonrpc", "2.0"}, {"id", 3}, {"method", "GetTask"},
+                               {"params", {{"id", task_id}}}});
+    EXPECT_EQ(fetched["result"]["status"]["state"], "TASK_STATE_INPUT_REQUIRED") << fetched.dump();
+    EXPECT_EQ(fixture.starts->load(std::memory_order_relaxed), 1U);
+    server.stop();
 }
 
 TEST(A2ACollaboration, StrictAuthenticationAlsoGatesOrdinaryProgramTasks) {
