@@ -5,8 +5,12 @@
 
 #include <gtest/gtest.h>
 
+#include <neograph/a2a/a2a_caller_node.h>
 #include <neograph/a2a/client.h>
 #include <neograph/a2a/server.h>
+#include <neograph/async/run_sync.h>
+#include <neograph/graph/run_context.h>
+#include <neograph/graph/state.h>
 #include <neograph/a2a/types.h>
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/engine.h>
@@ -515,4 +519,35 @@ TEST(A2AConformance, NativeClientResumesAnInputRequiredTask) {
     EXPECT_EQ(resumed.status.state, TaskState::Completed);
     ASSERT_TRUE(resumed.status.message);
     EXPECT_EQ(resumed.status.message->parts[0].text, "resumed:approved");
+}
+
+TEST(A2AConformance, CallerNodeContinuesByContextAndResumesOnlyOpenTasks) {
+    // A terminal task accepts no follow-up (spec 3.1.1), so the caller node
+    // keeps a task id only while the task waits for input.
+    Server srv;
+    auto client = std::make_shared<A2AClient>(srv.url());
+    A2ACallerNode node("caller", client);
+    graph::GraphState state;
+    for (const char* channel : {"prompt", "response", "response_task_id", "response_context_id"}) {
+        state.init_channel(channel, graph::ReducerType::OVERWRITE,
+                           [](const json&, const json& incoming) { return incoming; });
+    }
+    graph::RunContext ctx;
+    auto call = [&](const std::string& prompt) {
+        state.write("prompt", prompt);
+        auto out = neograph::async::run_sync(node.run({state, ctx}));
+        for (const auto& write : out.writes) state.write(write.channel, write.value);
+        return state.get("response").get<std::string>();
+    };
+    EXPECT_EQ(call("echo one"), "[conformance] echo one");
+    EXPECT_EQ(state.get("response_task_id"), json(""));
+    const auto context = state.get("response_context_id").get<std::string>();
+    EXPECT_EQ(call("echo two"), "[conformance] echo two");  // new task, same context
+    EXPECT_EQ(state.get("response_context_id").get<std::string>(), context);
+
+    EXPECT_EQ(call("interrupt now"), "approve the probe?");
+    const auto open_task = state.get("response_task_id").get<std::string>();
+    EXPECT_FALSE(open_task.empty());
+    EXPECT_EQ(call("granted"), "resumed:granted");
+    EXPECT_EQ(state.get("response_task_id"), json(""));
 }

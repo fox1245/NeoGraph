@@ -28,10 +28,12 @@ namespace neograph::a2a {
  * @brief Node that forwards an input string to a remote A2A agent.
  *
  * Reads from `input_key` (default "prompt"), writes the agent's first
- * text response into `output_key` (default "response"). Task / context
- * ids are appended to the state under "<output_key>_task_id" and
- * "<output_key>_context_id" so a follow-up node can continue the
- * conversation.
+ * text response into `output_key` (default "response"). The context id is
+ * written to "<output_key>_context_id" so the next call continues the
+ * conversation; "<output_key>_task_id" holds the task id only while the
+ * task waits for input (INPUT_REQUIRED / AUTH_REQUIRED), so the next call
+ * resumes that task, and is empty once the task is terminal (A2A 3.4.3: a
+ * terminal task accepts no further messages).
  */
 class NEOGRAPH_API A2ACallerNode : public neograph::graph::GraphNode {
   public:

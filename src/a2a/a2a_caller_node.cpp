@@ -64,8 +64,13 @@ asio::awaitable<NodeOutput> A2ACallerNode::run(NodeInput in) {
     }
     params.message.role = Role::User;
     params.message.parts.push_back(Part::text_part(std::move(prompt)));
-    if (task_id_val.is_string())    params.message.task_id    = task_id_val.get<std::string>();
-    if (context_id_val.is_string()) params.message.context_id = context_id_val.get<std::string>();
+    // A2A continues a conversation through its contextId; a taskId continues
+    // only a task that waits for input (spec 3.4.3). A terminal task accepts
+    // no further messages, so its id is never sent (see the writes below).
+    if (task_id_val.is_string() && !task_id_val.get<std::string>().empty())
+        params.message.task_id = task_id_val.get<std::string>();
+    if (context_id_val.is_string() && !context_id_val.get<std::string>().empty())
+        params.message.context_id = context_id_val.get<std::string>();
 
     auto task = co_await client_->send_message_async(params);
 
@@ -101,8 +106,13 @@ asio::awaitable<NodeOutput> A2ACallerNode::run(NodeInput in) {
 
     NodeOutput out;
     out.writes.push_back({output_key_, response_text});
+    // Keep the task id only while the task waits for input, so the next call
+    // resumes it; once the task is terminal the next call starts a new task
+    // in the same context.
+    const bool awaiting_input =
+        state == TaskState::InputRequired || state == TaskState::AuthRequired;
     if (!task.id.empty())
-        out.writes.push_back({output_key_ + "_task_id", task.id});
+        out.writes.push_back({output_key_ + "_task_id", awaiting_input ? task.id : std::string()});
     if (!task.context_id.empty())
         out.writes.push_back({output_key_ + "_context_id", task.context_id});
     co_return out;
