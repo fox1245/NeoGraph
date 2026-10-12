@@ -465,7 +465,9 @@ The Program compiler lowers authoring sugar to a small orchestration plan:
   children that finished already decide the quorum, it pauses there, starts no
   further child, and the run record keeps the result of each child that
   finished (#387). Resume continues the paused child and replays the finished
-  ones without running or charging them again. As in a Core step (#392), a
+  ones without running or charging them again. A child whose Core node fails
+  is a failed child, like one that ends `Failed`: the quorum goes on and ends
+  by its own rule (#399). As in a Core step (#392), a
   child paused on an effect whose outcome is unknown pauses `parallel` and
   `quorum` even beside a failed child, which is recorded and ends them on
   resume (#397);

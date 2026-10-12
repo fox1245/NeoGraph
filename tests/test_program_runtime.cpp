@@ -10748,6 +10748,76 @@ TEST(ProgramRuntimeTest, RecoveryOfAForkedJavaScriptAttemptResumesItsCallCoreWit
 }
 #endif  // NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS
 
+TEST(ProgramRuntimeTest, PlanQuorumCountsABranchNodeFailureAsAFailedBranch) {
+    // #399: a branch whose Core node fails is a failed branch of the quorum,
+    // which then ends by its own rule. It used to fail the whole run at once.
+    // In memory and on SQLite.
+    for (const bool durable : join_test_store_kinds()) {
+        const std::string suffix = durable ? "-sqlite" : "-memory";
+        {
+            SCOPED_TRACE(std::string(durable ? "SQLite stores" : "in-memory stores") +
+                         ", still reachable");
+            JoinTestStores  stores(durable);
+            AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                                    ExecutionGuarantee::Unmanaged, true);
+            reset_plan_steps([](std::size_t ordinal, const NodeInput&) -> json {
+                if (ordinal == 1) return json{{"fail", "quorum branch node failure"}};
+                return json{{"write", ordinal == 2 ? "B" : "C"}};
+            });
+            const auto version = admit_plan(
+                fixture, plan_quorum(json::array({plan_call(), plan_call(), plan_call()}), 2));
+            const auto done = run_plan(fixture, version, "plan-quorum-node-failure" + suffix);
+            ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed)
+                << "a branch's node failure failed the run: " << failure_detail(done);
+            ASSERT_EQ(done.output().size(), 2U);
+            EXPECT_EQ(channel_value(done.output()[0]), json("B"));
+            EXPECT_EQ(channel_value(done.output()[1]), json("C"));
+        }
+        {
+            SCOPED_TRACE(std::string(durable ? "SQLite stores" : "in-memory stores") +
+                         ", out of reach");
+            JoinTestStores  stores(durable);
+            AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                                    ExecutionGuarantee::Unmanaged, true);
+            reset_plan_steps([](std::size_t ordinal, const NodeInput&) -> json {
+                if (ordinal <= 2) return json{{"fail", "quorum branch node failure"}};
+                return json{{"write", "C"}};
+            });
+            const auto version = admit_plan(
+                fixture, plan_quorum(json::array({plan_call(), plan_call(), plan_call()}), 2));
+            const auto failed = run_plan(fixture, version, "plan-quorum-node-unreachable" + suffix);
+            ASSERT_EQ(failed.status(), ProgramTerminalStatus::Failed) << failure_detail(failed);
+            EXPECT_EQ(failed.failure()->code, "P_QUORUM_UNREACHABLE") << failure_detail(failed);
+            EXPECT_EQ(plan_steps_counted(false), 2U) << "the third branch never starts";
+        }
+        {
+            SCOPED_TRACE(std::string(durable ? "SQLite stores" : "in-memory stores") +
+                         ", paused after the failure");
+            JoinTestStores  stores(durable);
+            AdmittedRuntime fixture(2, stores.checkpoints, stores.transitions, {},
+                                    ExecutionGuarantee::Unmanaged, true);
+            reset_plan_steps([](std::size_t ordinal, const NodeInput&) -> json {
+                if (ordinal == 1) return json{{"fail", "quorum branch node failure"}};
+                if (ordinal == 2) return json{{"ask", true}};
+                return json{{"write", "C"}};
+            });
+            const auto version = admit_plan(
+                fixture, plan_quorum(json::array({plan_call(), plan_call(), plan_call()}), 2));
+            const auto paused = run_plan(fixture, version, "plan-quorum-node-paused" + suffix);
+            ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_detail(paused);
+            EXPECT_EQ(paused_operation(paused), "root.1");
+            const auto record = fixture.journal->load("tenant:runtime", paused.run_id());
+            ASSERT_TRUE(record && record->settled_branches());
+            EXPECT_EQ((*record->settled_branches())["root.0"]["kind"], json("settled"))
+                << "the failed branch finished, and is recorded";
+
+            const auto done = decide(fixture, paused, "B");
+            ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_detail(done);
+            EXPECT_EQ(plan_steps_counted(false), 3U) << "the failed branch replays";
+        }
+    }
+}
+
 TEST(ProgramRuntimeTest, PlanQuorumPausedByABranchAsksAndResumeAnswersIt) {
     // #387: A finishes and B asks. The quorum needs two successes and B may
     // still be one, so the quorum pauses on B instead of counting it as a

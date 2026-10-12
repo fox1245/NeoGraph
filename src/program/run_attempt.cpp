@@ -1159,6 +1159,28 @@ void retain_provider_failure(ProgramFailure& failure, const std::exception_ptr& 
     }
 }
 
+// #399: the result of a plan branch whose Core node failed, which the branch
+// threw as a NestedOperationFailure: the failure the run would have reported
+// had it ended there, now the branch's own Failed result. Empty for anything
+// else the branch threw (cancellation, a checkpoint that is gone, ...), which
+// still ends the run.
+std::optional<PlanExecution> failed_branch_of(const std::exception_ptr& error) {
+    try {
+        std::rethrow_exception(error);
+    } catch (const NestedOperationFailure& failure) {
+        if (failure.checkpoint_incompatible) return std::nullopt;
+        auto branch = plan_failure(ProgramTerminalStatus::Failed, "P_RUNTIME_CORE_FAILURE",
+                                   failure.what(), failure.operation_id);
+        branch.failure->core_node = failure.core_node;
+        branch.failure->attempts  = failure.attempts;
+        retain_provider_failure(*branch.failure, failure.cause);
+        apply_node_failure(*branch.failure, error);
+        return branch;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 [[noreturn]] void throw_runtime_diagnostic(std::string code, std::string message, json witness) {
     Diagnostic diagnostic;
     diagnostic.phase    = CompilePhase::Seal;
@@ -3354,22 +3376,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         });
                     std::optional<PlanExecution> failed_branch;
                     if (reconciling_branch != parallel_results.end() && error_index &&
-                        !operation_token->is_cancelled()) {
-                        try {
-                            std::rethrow_exception(parallel_error);
-                        } catch (const NestedOperationFailure& error) {
-                            if (!error.checkpoint_incompatible) {
-                                failed_branch = plan_failure(ProgramTerminalStatus::Failed,
-                                                             "P_RUNTIME_CORE_FAILURE", error.what(),
-                                                             error.operation_id);
-                                failed_branch->failure->core_node = error.core_node;
-                                failed_branch->failure->attempts  = error.attempts;
-                                retain_provider_failure(*failed_branch->failure, error.cause);
-                                apply_node_failure(*failed_branch->failure, parallel_error);
-                            }
-                        } catch (...) {
-                        }
-                    }
+                        !operation_token->is_cancelled())
+                        failed_branch = failed_branch_of(parallel_error);
                     if (!failed_branch) std::rethrow_exception(parallel_error);
                     parallel_results[*error_index] = std::move(*failed_branch);
                     for (std::size_t index = 0; index < parallel_results.size(); ++index) {
@@ -3609,9 +3617,23 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 // branch's call with the resume value, and goes on from there.
                 std::vector<std::pair<std::string, PlanExecution>> finished;
                 for (std::size_t index = 0; index < branches.size(); ++index) {
-                    auto branch_result = co_await execute(
-                        branches[index], state, operation_thread_id(*control, branches[index]),
-                        child_depth, operation_token);
+                    // #399: a branch whose Core node fails is a failed branch,
+                    // not the run's failure; the quorum decides by its rule.
+                    PlanExecution      branch_result;
+                    std::exception_ptr branch_error;
+                    try {
+                        branch_result = co_await execute(
+                            branches[index], state, operation_thread_id(*control, branches[index]),
+                            child_depth, operation_token);
+                    } catch (const NestedOperationFailure&) {
+                        branch_error = std::current_exception();
+                    }
+                    if (branch_error) {
+                        auto failed = failed_branch_of(branch_error);
+                        if (!failed || operation_token->is_cancelled())
+                            std::rethrow_exception(branch_error);
+                        branch_result = std::move(*failed);
+                    }
                     const auto remaining = branches.size() - index - 1;
                     result.execution_trace.insert(result.execution_trace.end(),
                                                   branch_result.execution_trace.begin(),
