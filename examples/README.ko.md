@@ -69,7 +69,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 
 ### 시작하기와 Core 엔진
 
-나머지 Core 기능입니다. `neograph::core`만 링크하며, 스크립트 공급자를 쓰는 02, 06, 07, 09만 `neograph::llm`도 링크합니다.
+나머지 Core 기능입니다. `neograph::core`만 링크하며, 스크립트 공급자를 쓰는 02, 06, 07만 `neograph::llm`도 링크합니다.
 
 | # | 예제 | Offline | 보여 주는 것 |
 |---|---|---|---|
@@ -77,7 +77,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | 05 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | fan-out과 fan-in: researcher 노드 세 개가 타이머를 동시에 기다리고(카운터로 확인합니다), barrier가 이들을 합쳐 summarizer로 넘깁니다. |
 | 06 | [`06_subgraph.cpp`](06_subgraph.cpp) | yes | 서브그래프: 바깥 supervisor 그래프가 안쪽 ReAct 그래프에 일을 맡깁니다. |
 | 07 | [`07_intent_routing.cpp`](07_intent_routing.cpp) | yes | 분류 노드와 조건부 엣지(`route_channel`)가 각 요청을 math, translate, general 전문가에게 보냅니다. |
-| 09 | [`09_all_features.cpp`](09_all_features.cpp) | yes | 파일 하나에 기능 여섯 가지: `NodeInterrupt`, `RetryPolicy`, `StreamMode`, `Send`, `Command`, `Store`. |
+| 09 | [`09_all_features.cpp`](09_all_features.cpp) | yes | 엔진 기능 여섯 가지를 각각 몇 줄로 훑어봅니다: `NodeInterrupt`, `RetryPolicy`, `StreamMode`, `Send`, `Command`, `Store`. 기능마다 따로 다루는 예제를 안내합니다. |
 | 10 | [`10_send_command.cpp`](10_send_command.cpp) | yes | `Send` fan-out과 `Command` 경로 재정의: 결과가 충분해질 때까지 planner, researcher, evaluator가 반복합니다. |
 | 42 | [`42_custom_reducer_condition.cpp`](42_custom_reducer_condition.cpp) | yes | C++에서 채널 reducer와 엣지 조건을 직접 등록합니다. |
 | 51 | [`51_minimal.cpp`](51_minimal.cpp) | yes | 채널: 노드 하나가 채널 하나를 읽고 둘을 쓰며, 호출한 쪽이 타입이 있는 `ChannelKey`로 둘을 다시 읽습니다(`result.channel(key)`, `try_channel`). |

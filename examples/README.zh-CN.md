@@ -69,7 +69,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 
 ### 入门与 Core 引擎
 
-其余的 Core 功能。它们只链接 `neograph::core`，只有使用脚本化 provider 的 02、06、07、09 还会链接 `neograph::llm`。
+其余的 Core 功能。它们只链接 `neograph::core`，只有使用脚本化 provider 的 02、06、07 还会链接 `neograph::llm`。
 
 | # | 示例 | Offline | 演示内容 |
 |---|---|---|---|
@@ -77,7 +77,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | 05 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | fan-out 与 fan-in：三个 researcher 节点同时等待定时器（用计数器验证），由 barrier 汇合后交给 summarizer。 |
 | 06 | [`06_subgraph.cpp`](06_subgraph.cpp) | yes | 子图：外层 supervisor 图把工作委托给内层 ReAct 图。 |
 | 07 | [`07_intent_routing.cpp`](07_intent_routing.cpp) | yes | 分类节点加条件边（`route_channel`）把每个请求送给 math、translate 或 general 专家。 |
-| 09 | [`09_all_features.cpp`](09_all_features.cpp) | yes | 一个文件里的六项功能：`NodeInterrupt`、`RetryPolicy`、`StreamMode`、`Send`、`Command`、`Store`。 |
+| 09 | [`09_all_features.cpp`](09_all_features.cpp) | yes | 用几行代码依次过一遍六项引擎功能：`NodeInterrupt`、`RetryPolicy`、`StreamMode`、`Send`、`Command`、`Store`，并指向分别讲解它们的示例。 |
 | 10 | [`10_send_command.cpp`](10_send_command.cpp) | yes | `Send` fan-out 与 `Command` 路由覆盖：planner、researcher、evaluator 循环到结果足够为止。 |
 | 42 | [`42_custom_reducer_condition.cpp`](42_custom_reducer_condition.cpp) | yes | 在 C++ 中注册自己的通道 reducer 和边条件。 |
 | 51 | [`51_minimal.cpp`](51_minimal.cpp) | yes | 通道：一个节点读取一个通道、写入两个通道，调用方用带类型的 `ChannelKey` 读回两者（`result.channel(key)`、`try_channel`）。 |

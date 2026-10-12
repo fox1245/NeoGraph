@@ -68,7 +68,7 @@ Pick the goal, read the example.
 
 ### Start here and the Core engine
 
-The remaining Core features. They link only `neograph::core`, except 02, 06, 07 and 09, which also link `neograph::llm` for their scripted provider.
+The remaining Core features. They link only `neograph::core`, except 02, 06 and 07, which also link `neograph::llm` for their scripted provider.
 
 | # | Example | Offline | Shows |
 |---|---|---|---|
@@ -76,7 +76,7 @@ The remaining Core features. They link only `neograph::core`, except 02, 06, 07 
 | 05 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | Fan-out and fan-in: three researcher nodes wait on timers at the same time (a counter proves it) and a barrier joins them for the summarizer. |
 | 06 | [`06_subgraph.cpp`](06_subgraph.cpp) | yes | A subgraph: an outer supervisor graph delegates to an inner ReAct graph. |
 | 07 | [`07_intent_routing.cpp`](07_intent_routing.cpp) | yes | A classifier node and conditional edges (`route_channel`) send each request to a math, translate or general expert. |
-| 09 | [`09_all_features.cpp`](09_all_features.cpp) | yes | Six features in one file: `NodeInterrupt`, `RetryPolicy`, `StreamMode`, `Send`, `Command` and `Store`. |
+| 09 | [`09_all_features.cpp`](09_all_features.cpp) | yes | A tour of six engine features in a few lines each (`NodeInterrupt`, `RetryPolicy`, `StreamMode`, `Send`, `Command`, `Store`), each pointing to the example that teaches it. |
 | 10 | [`10_send_command.cpp`](10_send_command.cpp) | yes | `Send` fan-out and a `Command` route override: planner, researchers and evaluator loop until enough findings exist. |
 | 42 | [`42_custom_reducer_condition.cpp`](42_custom_reducer_condition.cpp) | yes | Register your own channel reducer and edge condition from C++. |
 | 51 | [`51_minimal.cpp`](51_minimal.cpp) | yes | Channels: one node reads one channel, writes two, and the caller reads both back with typed `ChannelKey`s (`result.channel(key)`, `try_channel`). |

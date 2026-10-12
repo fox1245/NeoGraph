@@ -1,15 +1,16 @@
-// NeoGraph Example 09: All New Features Demo
+// NeoGraph Example 09: a tour of six engine features
 //
-// Demonstrates all 6 new features in a single example:
+// Each section is a few lines and names the example that teaches the feature on its own:
 //
-//   1. NodeInterrupt  — dynamic breakpoint (throw from inside a node)
-//   2. RetryPolicy    — exponential backoff retry on failure
-//   3. StreamMode     — observe internal behavior via EVENTS | DEBUG mode
-//   4. Send           — dynamic fan-out (map-reduce pattern)
-//   5. Command        — return routing + state modification simultaneously
-//   6. Store          — cross-thread shared memory
+//   1. NodeInterrupt  a node pauses the run and a person answers  -> 102_node_interrupt.cpp
+//   2. RetryPolicy    a flaky node is retried with backoff        -> 101_retry_policy.cpp
+//   3. StreamMode     choose which events a streaming run emits   -> 100_stream_modes.cpp
+//   4. Send           run a node once per item, in parallel       -> 10_send_command.cpp
+//   5. Command        choose the next node and write state at once -> 10_send_command.cpp
+//   6. Store          memory shared across threads                -> 43_store_personalization.cpp
 //
-// No API key required (uses custom nodes)
+// Nodes here are lambdas wrapped in one small class, which keeps the tour short.
+// No API key required.
 //
 // Usage: ./example_all_features
 //
@@ -19,473 +20,166 @@
 // smoke-forbid: [neograph] lint
 
 #include <neograph/neograph.h>
-#include <neograph/graph/react_graph.h>
 
-#include <iostream>
-#include <iomanip>
-#include <thread>
 #include <atomic>
+#include <functional>
+#include <iostream>
 
 using namespace neograph;
 using namespace neograph::graph;
 
-// =========================================================================
-// 1. NodeInterrupt — dynamic interrupt on high-risk amount
-// =========================================================================
-class PaymentNode : public GraphNode {
+using Body = std::function<NodeOutput(NodeInput&)>;
+
+// A node whose body is a lambda.
+class LambdaNode : public SyncGraphNode {
 public:
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto amount_json = in.state.get("amount");
-        int amount = amount_json.is_number() ? amount_json.get<int>() : 0;
-
-        // The admin's verdict, handed to engine->resume(). Null on the first
-        // visit — which is how the node knows nobody has answered yet, rather
-        // than that the answer was "no".
-        const auto& verdict = in.ctx.resume_value;
-
-        // Dynamic breakpoint if amount >= 1,000,000. The payload rides along
-        // so the caller can render the prompt without parsing the sentence.
-        if (amount >= 1000000 && !verdict) {
-            json needs_approval;
-            needs_approval["amount"]   = amount;
-            needs_approval["currency"] = "KRW";
-            throw NodeInterrupt(
-                "High-value payment detected: " + std::to_string(amount)
-                + " KRW. Admin approval required.",
-                needs_approval);
-        }
-
-        if (verdict && !verdict->value("approved", false)) {
-            NodeOutput denied;
-            denied.writes.push_back(ChannelWrite{"result",
-                json("Payment declined by admin")});
-            co_return denied;
-        }
-
-        NodeOutput out;
-        out.writes.push_back(ChannelWrite{"result",
-            json("Payment complete: " + std::to_string(amount) + " KRW")});
-        co_return out;
-    }
-    std::string get_name() const override { return "payment"; }
+    LambdaNode(std::string name, Body body) : SyncGraphNode(std::move(name)), body_(std::move(body)) {}
+protected:
+    NodeOutput run_sync(NodeInput in) override { return body_(in); }
+private:
+    Body body_;
 };
 
-// =========================================================================
-// 2. RetryPolicy — intermittently failing node (succeeds on 3rd attempt)
-// =========================================================================
-class UnstableAPINode : public GraphNode {
-    static std::atomic<int> call_count_;
-public:
-    asio::awaitable<NodeOutput> run(NodeInput) override {
-        int count = ++call_count_;
-        if (count < 3) {
-            throw std::runtime_error(
-                "API temporary failure (attempt " + std::to_string(count) + ")");
-        }
-        NodeOutput out;
-        out.writes.push_back(ChannelWrite{"api_result",
-            json("External API response success (attempt "
-                + std::to_string(count) + ")")});
-        co_return out;
-    }
-    std::string get_name() const override { return "unstable_api"; }
-};
-std::atomic<int> UnstableAPINode::call_count_{0};
-
-// =========================================================================
-// 5. Command — route + modify state simultaneously based on score
-// =========================================================================
-// (Demo showing the Command struct itself. Since the engine is ChannelWrite-based,
-//  Command's updates are applied directly, and goto is expressed via the __route__ channel.)
-class ScoreRouterNode : public GraphNode {
-public:
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto score = in.state.get("score");
-        int s = score.is_number() ? score.get<int>() : 0;
-
-        Command cmd;
-        if (s >= 90) {
-            cmd.goto_node = "premium";
-            cmd.updates = {ChannelWrite{"tier", json("PREMIUM")}};
-        } else if (s >= 60) {
-            cmd.goto_node = "standard";
-            cmd.updates = {ChannelWrite{"tier", json("STANDARD")}};
-        } else {
-            cmd.goto_node = "basic";
-            cmd.updates = {ChannelWrite{"tier", json("BASIC")}};
-        }
-
-        NodeOutput out;
-        out.writes.push_back(ChannelWrite{"__route__", json(cmd.goto_node)});
-        for (auto& u : cmd.updates) out.writes.push_back(std::move(u));
-        co_return out;
-    }
-    std::string get_name() const override { return "score_router"; }
-};
-
-// Tier-specific processing node
-class TierNode : public GraphNode {
-    std::string name_;
-    std::string message_;
-public:
-    TierNode(const std::string& n, const std::string& msg) : name_(n), message_(msg) {}
-    asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto tier = in.state.get("tier");
-        NodeOutput out;
-        out.writes.push_back(ChannelWrite{"result",
-            json(message_ + " (tier: " + tier.get<std::string>() + ")")});
-        co_return out;
-    }
-    std::string get_name() const override { return name_; }
-};
-
-// =========================================================================
-// Helper: print section separator
-// =========================================================================
-static void section(const std::string& title) {
-    std::cout << "\n" << std::string(60, '=') << "\n"
-              << " " << title << "\n"
-              << std::string(60, '=') << "\n\n";
+void register_node(const std::string& type, Body body) {
+    NodeFactory::instance().register_type(type,
+        [body](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<LambdaNode>(name, body);
+        });
 }
 
-// =========================================================================
-// Stream callback — selective output based on StreamMode
-// =========================================================================
-static void stream_handler(const GraphEvent& event) {
-    switch (event.type) {
-        case GraphEvent::Type::NODE_START:
-            if (event.node_name == "__routing__") {
-                // DEBUG mode routing info
-                std::cout << "  [debug] routing → " << event.data.dump() << "\n";
-            } else {
-                std::string extra;
-                if (event.data.contains("retry_attempt"))
-                    extra = " (retry #" + std::to_string(event.data["retry_attempt"].get<int>()) + ")";
-                std::cout << "  [start] " << event.node_name << extra << "\n";
-            }
-            break;
-        case GraphEvent::Type::NODE_END:
-            std::cout << "  [done]  " << event.node_name << "\n";
-            break;
-        case GraphEvent::Type::CHANNEL_WRITE:
-            if (event.node_name == "__state__") {
-                std::cout << "  [values] full state snapshot emitted\n";
-            } else if (event.data.contains("value")) {
-                std::cout << "  [update] " << event.node_name << "."
-                          << event.data.value("channel", "?") << " = "
-                          << event.data["value"].dump().substr(0, 60) << "\n";
-            }
-            break;
-        case GraphEvent::Type::INTERRUPT:
-            std::cout << "  [INTERRUPT] " << event.node_name
-                      << " — " << event.data.dump() << "\n";
-            break;
-        case GraphEvent::Type::ERROR:
-            std::cout << "  [error] " << event.node_name
-                      << " — " << event.data.dump() << "\n";
-            break;
-        default:
-            break;
-    }
+// __start__ -> <type> -> __end__, with every channel set to overwrite.
+std::unique_ptr<GraphEngine> chain(const std::string& type, Body body,
+                                   const std::vector<std::string>& channels, EngineConfig config = {}) {
+    register_node(type, std::move(body));
+    json channel_defs = json::object();
+    for (const auto& name : channels) channel_defs[name] = json{{"reducer", "overwrite"}};
+    return GraphEngine::build(json{
+        {"schema_version", TOPOLOGY_SCHEMA_VERSION}, {"name", type}, {"channels", channel_defs},
+        {"nodes", {{type, {{"type", type}}}}},
+        {"edges", json::array({{{"from", "__start__"}, {"to", type}}, {{"from", type}, {"to", "__end__"}}})}
+    }, std::move(config));
 }
 
 int main() {
-    // ================================================================
-    // Demo 1: NodeInterrupt (dynamic breakpoint)
-    // ================================================================
-    section("1. NodeInterrupt — dynamic breakpoint");
+    // 1. NodeInterrupt: a large payment pauses; the admin's answer arrives as resume_value.
     {
-        NodeFactory::instance().register_type("payment",
-            [](const std::string& name, const json&, const NodeContext&) {
-                return std::make_unique<PaymentNode>();
-            });
-
-        json def = {
-            {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
-            {"name", "payment_graph"},
-            {"channels", {
-                {"amount", {{"reducer", "overwrite"}}},
-                {"result", {{"reducer", "overwrite"}}}
-            }},
-            {"nodes", {{"payment", {{"type", "payment"}}}}},
-            {"edges", json::array({
-                {{"from", "__start__"}, {"to", "payment"}},
-                {{"from", "payment"}, {"to", "__end__"}}
-            })}
-        };
-
-        NodeContext ctx;
-        auto store = std::make_shared<InMemoryCheckpointStore>();
-        auto        engine =
-            GraphEngine::build(def, EngineConfig{.node_context = ctx, .checkpoint_store = store});
-
-        // Small payment: passes normally
-        RunConfig cfg;
-        cfg.thread_id = "pay-001";
-        cfg.input = {{"amount", 50000}};
-        auto r1 = engine->run_stream(cfg, stream_handler);
-        std::cout << "  Result: " << r1.output["channels"]["result"]["value"] << "\n\n";
-
-        // Large payment: NodeInterrupt triggered
-        cfg.thread_id = "pay-002";
-        cfg.input = {{"amount", 2500000}};
-        cfg.stream_mode = StreamMode::EVENTS | StreamMode::DEBUG;
-        auto r2 = engine->run_stream(cfg, stream_handler);
-        std::cout << "  interrupted: " << std::boolalpha << r2.interrupted << "\n";
-        std::cout << "  Node:   " << r2.interrupt_node << "\n";
-        std::cout << "  Reason: " << r2.interrupt_value.value("reason", "") << "\n";
-        std::cout << "  Payload: " << r2.interrupt_value["value"].dump() << "\n";
-
-        // Resume with the admin's verdict. It reaches the node as
-        // in.ctx.resume_value — pass nothing and the node has no way to know
-        // it was approved, so it would simply pause again.
-        std::cout << "\n  >>> Admin approved -> resume <<<\n";
-        json approval;
-        approval["approved"] = true;
-        auto r3 = engine->resume("pay-002", approval, stream_handler);
-        std::cout << "  Result: " << r3.output["channels"]["result"]["value"] << "\n";
+        EngineConfig config;
+        config.checkpoint_store = std::make_shared<InMemoryCheckpointStore>();
+        auto engine = chain("payment", [](NodeInput& in) {
+            const int amount = in.state.get("amount").get<int>();
+            if (amount >= 1000000 && !in.ctx.resume_value)
+                throw NodeInterrupt("High-value payment detected: " + std::to_string(amount) +
+                                    " KRW. Admin approval required.", json{{"amount", amount}});
+            return NodeOutput{{ChannelWrite{"result", json("Payment complete: " + std::to_string(amount) + " KRW")}}};
+        }, {"amount", "result"}, std::move(config));
+        RunConfig run;
+        run.thread_id = "pay-1";
+        run.input     = {{"amount", 2500000}};
+        auto paused   = engine->run(run);
+        std::cout << "1. paused at " << paused.interrupt_node << "\n   Reason: "
+                  << paused.interrupt_value.value("reason", "") << "\n";
+        std::cout << "   resumed: " << engine->resume("pay-1", json{{"approved", true}}).channel_raw("result").dump() << "\n";
     }
 
-    // ================================================================
-    // Demo 2: RetryPolicy (automatic retry)
-    // ================================================================
-    section("2. RetryPolicy — exponential backoff retry");
+    // 2. RetryPolicy: fails twice, the third attempt works.
     {
-        NodeFactory::instance().register_type("unstable_api",
-            [](const std::string& name, const json&, const NodeContext&) {
-                return std::make_unique<UnstableAPINode>();
-            });
-
-        json def = {
-            {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
-            {"name", "retry_graph"},
-            {"channels", {{"api_result", {{"reducer", "overwrite"}}}}},
-            {"nodes", {{"unstable_api", {{"type", "unstable_api"}}}}},
-            {"edges", json::array({
-                {{"from", "__start__"}, {"to", "unstable_api"}},
-                {{"from", "unstable_api"}, {"to", "__end__"}}
-            })}
-        };
-
-        NodeContext ctx;
+        auto calls = std::make_shared<std::atomic<int>>(0);
         RetryPolicy retry;
-        retry.max_retries = 5;
-        retry.initial_delay_ms = 10;   // Short for demo purposes
-        retry.backoff_multiplier = 2.0f;
-        retry.max_delay_ms = 100;
-        EngineConfig engine_config;
-        engine_config.node_context                        = ctx;
-        engine_config.node_retry_policies["unstable_api"] = retry;
-        auto engine = GraphEngine::build(def, std::move(engine_config));
-
-        RunConfig cfg;
-        cfg.stream_mode = StreamMode::EVENTS | StreamMode::DEBUG;
-        auto result = engine->run_stream(cfg, stream_handler);
-        std::cout << "  Result: " << result.output["channels"]["api_result"]["value"] << "\n";
+        retry.max_retries      = 5;
+        retry.initial_delay_ms = 10;
+        EngineConfig config;
+        config.node_retry_policies["unstable_api"] = retry;
+        auto engine = chain("unstable_api", [calls](NodeInput&) {
+            const int attempt = ++*calls;
+            if (attempt < 3) throw std::runtime_error("API temporary failure");
+            return NodeOutput{{ChannelWrite{"api_result",
+                json("External API response success (attempt " + std::to_string(attempt) + ")")}}};
+        }, {"api_result"}, std::move(config));
+        std::cout << "2. Result: " << engine->run(RunConfig{}).channel_raw("api_result").dump() << "\n";
     }
 
-    // ================================================================
-    // Demo 3: StreamMode (selective streaming)
-    // ================================================================
-    section("3. StreamMode — VALUES + UPDATES mode");
+    // 3. StreamMode: VALUES | UPDATES delivers state snapshots and writes, but no node events.
     {
-        json def = {
-            {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
-            {"name", "stream_demo"},
-            {"channels", {
-                {"amount", {{"reducer", "overwrite"}}},
-                {"result", {{"reducer", "overwrite"}}}
-            }},
-            {"nodes", {{"payment", {{"type", "payment"}}}}},
-            {"edges", json::array({
-                {{"from", "__start__"}, {"to", "payment"}},
-                {{"from", "payment"}, {"to", "__end__"}}
-            })}
-        };
-
-        NodeContext ctx;
-        auto        engine = GraphEngine::build(def, EngineConfig{.node_context = ctx});
-
-        RunConfig cfg;
-        cfg.input = {{"amount", 30000}};
-        // VALUES + UPDATES only (without EVENTS)
-        cfg.stream_mode = StreamMode::VALUES | StreamMode::UPDATES;
-
-        std::cout << "  (Streaming VALUES + UPDATES only, without EVENTS)\n";
-        auto result = engine->run_stream(cfg,
-            [](const GraphEvent& ev) {
-                if (ev.type == GraphEvent::Type::NODE_START ||
-                    ev.type == GraphEvent::Type::NODE_END) {
-                    // EVENTS mode is off, so this should never appear
-                    std::cout << "  [!] This should not be visible\n";
-                }
-                if (ev.type == GraphEvent::Type::CHANNEL_WRITE) {
-                    if (ev.node_name == "__state__")
-                        std::cout << "  [values] state snapshot received\n";
-                    else
-                        std::cout << "  [update] " << ev.data.dump().substr(0, 80) << "\n";
-                }
-            });
-        std::cout << "  Result: " << result.output["channels"]["result"]["value"] << "\n";
+        auto engine = chain("greet", [](NodeInput&) {
+            return NodeOutput{{ChannelWrite{"greeting", json("hello")}}};
+        }, {"greeting"});
+        RunConfig run;
+        run.stream_mode = StreamMode::VALUES | StreamMode::UPDATES;
+        int events = 0;
+        engine->run_stream(run, [&](const GraphEvent&) { ++events; });
+        std::cout << "3. VALUES|UPDATES delivered " << events << " events\n";
     }
 
-    // ================================================================
-    // Demo 4: Send (dynamic fan-out struct)
-    // ================================================================
-    section("4. Send — dynamic fan-out struct");
+    // 4. Send: one `square` run per item. Only Send starts `square`, so the static
+    //    reachability lint (E7) would flag it; that notice is expected, so it is switched off.
     {
-        // Demo of Send struct usage (the struct itself is the data)
-        std::vector<Send> sends = {
-            {"researcher", {{"topic", "AI"}}},
-            {"researcher", {{"topic", "Quantum"}}},
-            {"researcher", {{"topic", "Biotech"}}},
-        };
-
-        std::cout << "  Created " << sends.size() << " Send requests:\n";
-        for (const auto& s : sends) {
-            std::cout << "    → " << s.target_node
-                      << " (input: " << s.input.dump() << ")\n";
-        }
-        std::cout << "\n  These Sends are processed by the engine's dynamic fan-out scheduler,\n"
-                  << "  which runs the same node in parallel with different inputs.\n";
+        register_node("fan", [](NodeInput&) {
+            NodeOutput out;
+            for (int item : {1, 2, 3}) out.sends.push_back(Send{"square", json({{"item", item}})});
+            return out;
+        });
+        register_node("square", [](NodeInput& in) {
+            const int item = in.state.get("item").get<int>();
+            return NodeOutput{{ChannelWrite{"squares", json::array({item * item})}}};
+        });
+        EngineConfig config;
+        config.worker_count   = 3;
+        config.stderr_notices = false;
+        auto engine = GraphEngine::build(json{
+            {"schema_version", TOPOLOGY_SCHEMA_VERSION}, {"name", "send"},
+            {"channels", {{"item", {{"reducer", "overwrite"}}}, {"squares", {{"reducer", "append"}}}}},
+            {"nodes", {{"fan", {{"type", "fan"}}}, {"square", {{"type", "square"}}}}},
+            {"edges", json::array({{{"from", "__start__"}, {"to", "fan"}}})}
+        }, std::move(config));
+        std::cout << "4. squares: " << engine->run(RunConfig{}).channel_raw("squares").dump() << "\n";
     }
 
-    // ================================================================
-    // Demo 5: Command (routing + state modification)
-    // ================================================================
-    section("5. Command — routing + simultaneous state modification");
+    // 5. Command: the router picks the next node and writes `tier` in one return value. The
+    //    three edges list where it may go; the Command it returns chooses one.
     {
-        NodeFactory::instance().register_type("score_router",
-            [](const std::string& name, const json&, const NodeContext&) {
-                return std::make_unique<ScoreRouterNode>();
+        register_node("score_router", [](NodeInput& in) {
+            const int  score = in.state.get("score").get<int>();
+            const char* tier = score >= 90 ? "PREMIUM" : score >= 60 ? "STANDARD" : "BASIC";
+            NodeOutput out;
+            out.command = Command{score >= 90 ? "premium" : score >= 60 ? "standard" : "basic",
+                                  {ChannelWrite{"tier", json(tier)}}};
+            return out;
+        });
+        for (const char* name : {"premium", "standard", "basic"})
+            register_node(name, [](NodeInput& in) {
+                return NodeOutput{{ChannelWrite{"result", json("service provided (tier: " + in.state.get("tier").get<std::string>() + ")")}}};
             });
-        NodeFactory::instance().register_type("tier_node",
-            [](const std::string& name, const json& config, const NodeContext&) {
-                return std::make_unique<TierNode>(name, config.value("message", "Processing complete"));
-            });
-
-        json def = {
-            {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
-            {"name", "command_graph"},
-            {"channels", {
-                {"score",     {{"reducer", "overwrite"}}},
-                {"tier",      {{"reducer", "overwrite"}}},
-                {"result",    {{"reducer", "overwrite"}}},
-                {"__route__", {{"reducer", "overwrite"}}}
-            }},
-            {"nodes", {
-                {"score_router", {{"type", "score_router"}}},
-                {"premium",  {{"type", "tier_node"}, {"message", "VIP exclusive service provided"}}},
-                {"standard", {{"type", "tier_node"}, {"message", "Standard service provided"}}},
-                {"basic",    {{"type", "tier_node"}, {"message", "Basic service provided"}}}
-            }},
+        auto engine = GraphEngine::build(json{
+            {"schema_version", TOPOLOGY_SCHEMA_VERSION}, {"name", "command"},
+            {"channels", {{"score", {{"reducer", "overwrite"}}}, {"tier", {{"reducer", "overwrite"}}},
+                          {"result", {{"reducer", "overwrite"}}}}},
+            {"nodes", {{"score_router", {{"type", "score_router"}}}, {"premium", {{"type", "premium"}}},
+                       {"standard", {{"type", "standard"}}}, {"basic", {{"type", "basic"}}}}},
             {"edges", json::array({
                 {{"from", "__start__"}, {"to", "score_router"}},
-                {{"from", "score_router"}, {"condition", "route_channel"},
-                 {"routes", {{"premium", "premium"}, {"standard", "standard"}, {"basic", "basic"},
-                             {"default", "basic"}}}},
+                {{"from", "score_router"}, {"to", "premium"}},
+                {{"from", "score_router"}, {"to", "standard"}},
+                {{"from", "score_router"}, {"to", "basic"}},
                 {{"from", "premium"}, {"to", "__end__"}},
                 {{"from", "standard"}, {"to", "__end__"}},
-                {{"from", "basic"}, {"to", "__end__"}}
-            })}
-        };
-
-        NodeContext ctx;
-
-        struct TestCase { int score; std::string expected; };
-        std::vector<TestCase> cases = {{95, "premium"}, {72, "standard"}, {40, "basic"}};
-
-        for (const auto& tc : cases) {
-            auto      engine = GraphEngine::build(def, EngineConfig{.node_context = ctx});
-            RunConfig cfg;
-            cfg.input = {{"score", tc.score}};
-            cfg.stream_mode = StreamMode::EVENTS | StreamMode::UPDATES;
-
-            std::cout << "  Score " << tc.score << ":\n";
-            auto result = engine->run_stream(cfg, stream_handler);
-            std::cout << "  → " << result.output["channels"]["result"]["value"]
-                      << "  (tier: " << result.output["channels"]["tier"]["value"] << ")\n\n";
+                {{"from", "basic"}, {"to", "__end__"}}})}
+        }, EngineConfig{});
+        for (int score : {95, 72, 40}) {
+            RunConfig run;
+            run.input = {{"score", score}};
+            std::cout << "5. score " << score << ": " << engine->run(run).channel<std::string>("result") << "\n";
         }
     }
 
-    // ================================================================
-    // Demo 6: Store (cross-thread shared memory)
-    //
-    // NOTE: this block exercises the Store API in isolation in `main()`
-    // (put / get / search) and connects an InMemoryStore to a graph via
-    // `EngineConfig::store`, but does NOT show a node reading from
-    // Store *during a run*. For the live-node pattern — capturing
-    // `shared_ptr<Store>` in a factory closure and reading inside
-    // `run()` — see `examples/43_store_personalization.cpp`.
-    // ================================================================
-    section("6. Store — cross-thread shared memory");
+    // 6. Store: memory that outlives one thread's checkpoints. Example 43 reads it inside nodes.
     {
         auto store = std::make_shared<InMemoryStore>();
-
-        // Thread A: save user preferences
         store->put({"users", "user123"}, "language", json("ko"));
         store->put({"users", "user123"}, "theme", json("dark"));
         store->put({"users", "user456"}, "language", json("en"));
-
-        // Thread B: retrieve preferences
-        auto lang = store->get({"users", "user123"}, "language");
-        if (lang) {
-            std::cout << "  user123 language: " << lang->value << "\n";
-        }
-
-        // Namespace search
-        auto user123_prefs = store->search({"users", "user123"});
-        std::cout << "  user123 preferences (" << user123_prefs.size() << " items):\n";
-        for (const auto& item : user123_prefs) {
-            std::cout << "    " << item.key << " = " << item.value << "\n";
-        }
-
-        // List all namespaces
-        auto namespaces = store->list_namespaces({"users"});
-        std::cout << "\n  Namespaces under 'users' (" << namespaces.size() << " items):\n";
-        for (const auto& ns : namespaces) {
-            std::string path;
-            for (size_t i = 0; i < ns.size(); ++i) {
-                if (i > 0) path += "/";
-                path += ns[i];
-            }
-            std::cout << "    " << path << "\n";
-        }
-
-        // Connect Store to GraphEngine
-        json def = {
-            {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
-            {"name", "store_demo"},
-            {"channels", {
-                {"amount", {{"reducer", "overwrite"}}},
-                {"result", {{"reducer", "overwrite"}}}
-            }},
-            {"nodes", {{"payment", {{"type", "payment"}}}}},
-            {"edges", json::array({
-                {{"from", "__start__"}, {"to", "payment"}},
-                {{"from", "payment"}, {"to", "__end__"}}
-            })}
-        };
-        NodeContext ctx;
-        auto engine = GraphEngine::build(def, EngineConfig{.node_context = ctx, .store = store});
-
-        std::cout << "\n  Engine store connection: "
-                  << (engine->get_store() ? "OK" : "FAIL")
-                  << " (size=" << store->size() << ")\n";
+        std::cout << "6. user123 language: " << store->get({"users", "user123"}, "language")->value
+                  << ", " << store->search({"users", "user123"}).size() << " items, "
+                  << store->list_namespaces({"users"}).size() << " users\n";
     }
-
-    // ================================================================
-    // Summary
-    // ================================================================
-    section("Summary");
-    std::cout << "  All 6 features demonstrated successfully:\n\n"
-              << "  1. NodeInterrupt  — dynamic interrupt on high-value payment + resume\n"
-              << "  2. RetryPolicy    — 2 failures then 3rd success (backoff)\n"
-              << "  3. StreamMode     — selective streaming: VALUES/UPDATES/EVENTS/DEBUG\n"
-              << "  4. Send           — dynamic fan-out request struct\n"
-              << "  5. Command        — score-based routing + tier set simultaneously\n"
-              << "  6. Store          — user preferences cross-thread shared memory\n"
-              << "\n";
-
     return 0;
 }

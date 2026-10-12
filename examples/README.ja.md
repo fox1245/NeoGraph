@@ -69,7 +69,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 
 ### はじめにと Core エンジン
 
-残りの Core 機能です。`neograph::core` だけをリンクしますが、スクリプト化したプロバイダーを使う 02、06、07、09 は `neograph::llm` もリンクします。
+残りの Core 機能です。`neograph::core` だけをリンクしますが、スクリプト化したプロバイダーを使う 02、06、07 は `neograph::llm` もリンクします。
 
 | # | サンプル | Offline | 示すもの |
 |---|---|---|---|
@@ -77,7 +77,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | 05 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | fan-out と fan-in。3 つの researcher ノードが同時にタイマーを待ち（カウンターで確認します）、barrier が合流させて summarizer に渡します。 |
 | 06 | [`06_subgraph.cpp`](06_subgraph.cpp) | yes | サブグラフ。外側の supervisor グラフが内側の ReAct グラフに処理を任せます。 |
 | 07 | [`07_intent_routing.cpp`](07_intent_routing.cpp) | yes | 分類ノードと条件付きエッジ(`route_channel`)が、各リクエストを math、translate、general の専門家へ振り分けます。 |
-| 09 | [`09_all_features.cpp`](09_all_features.cpp) | yes | 1 ファイルに 6 つの機能: `NodeInterrupt`、`RetryPolicy`、`StreamMode`、`Send`、`Command`、`Store`。 |
+| 09 | [`09_all_features.cpp`](09_all_features.cpp) | yes | エンジンの 6 つの機能を数行ずつ見て回ります: `NodeInterrupt`、`RetryPolicy`、`StreamMode`、`Send`、`Command`、`Store`。各機能を単独で扱うサンプルへ案内します。 |
 | 10 | [`10_send_command.cpp`](10_send_command.cpp) | yes | `Send` による fan-out と `Command` による経路の上書き。十分な結果が揃うまで planner、researcher、evaluator が繰り返します。 |
 | 42 | [`42_custom_reducer_condition.cpp`](42_custom_reducer_condition.cpp) | yes | C++ から独自のチャンネル reducer とエッジ条件を登録します。 |
 | 51 | [`51_minimal.cpp`](51_minimal.cpp) | yes | チャンネル。ノード 1 つが 1 つのチャンネルを読んで 2 つに書き込み、呼び出し側は型付きの `ChannelKey` で両方を読み戻します（`result.channel(key)`、`try_channel`）。 |
