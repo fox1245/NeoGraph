@@ -1,29 +1,29 @@
 <!-- neograph-i18n: source=docs/PROGRAM_RECURSIVE_HARNESSES.md locale=ko source_sha256=66abaa1eb78c67c16cf2ef0e6f42ad71632806116dc0b71dd952e8433d4b4970 -->
-# 독립적인 Harness generation을 가진 재귀 agent
+# 독립된 Harness 세대를 가진 재귀 에이전트
 
 **Languages:** [English](PROGRAM_RECURSIVE_HARNESSES.md) | [한국어](PROGRAM_RECURSIVE_HARNESSES.ko.md) | [日本語](PROGRAM_RECURSIVE_HARNESSES.ja.md) | [简体中文](PROGRAM_RECURSIVE_HARNESSES.zh-CN.md)
 
-검증된 시나리오는 하나의 owner 아래에서 하나의 논리적 session을 부모/자식/손자 tree로 실행한다. 각 agent는 자체 ProgramVersion, Core topology, state, budget, lineage를 가진다. 자식은 main orchestrator가 사용하는 것과 동일한 호스트 소유 synthesis 경계를 통해 자신의 자식을 위한 JavaScript를 제안할 수 있다.
+검증된 시나리오는 논리 세션 하나를 한 소유자(owner) 아래에서 부모/자식/손자 트리로 실행합니다. 에이전트마다 고유한 ProgramVersion, Core 토폴로지, 상태, 예산, 계보(lineage)를 가집니다. 자식은 메인 오케스트레이터가 쓰는 것과 같은, 호스트가 소유한 합성(synthesis) 경계를 거쳐 자기 자식을 위한 JavaScript를 제안할 수 있습니다.
 
-reference test는 서로 다른 Core plan 네 개를 실행한다. main Harness에 노드 하나, 원래 자식에 둘, replacement 자식에 셋, 손자에 넷이 있다. 손자가 살아 있는 동안 자식을 교체한다. main orchestrator는 기존 await를 통해 replacement 자식의 result를 받는다. SQLite와 PostgreSQL process-exit test는 중첩 replacement commit 이후 전체 tree를 다시 열고 완료된 작업을 다시 실행하지 않은 채 마친다.
+레퍼런스 테스트는 서로 다른 Core 플랜 네 개를 실행합니다. 메인 Harness의 플랜은 노드가 하나, 원래 자식은 둘, 교체된 자식은 셋, 손자는 넷입니다. 자식은 손자가 아직 살아 있는 동안 교체됩니다. 메인 오케스트레이터는 이미 걸어 둔 await로 교체된 자식의 결과를 받습니다. SQLite와 PostgreSQL 프로세스 종료 테스트는 중첩 교체가 커밋된 뒤 트리 전체를 다시 열고, 이미 끝난 작업을 다시 실행하지 않은 채 마무리합니다.
 
-## 신원과 저장
+## 식별자와 저장
 
-`ProgramRunRecord::logical_run_id()`와 `ProgramHandle::logical_run_id()`는 안정적인 agent 신원을 노출한다. 각 replacement는 여전히 별도의 physical run과 불변 ProgramVersion을 만든다. lineage가 활성 generation을 선택한다. `reconnect(owner, logical_run_id)`로 해당 generation의 handle을 얻는다.
+`ProgramRunRecord::logical_run_id()`와 `ProgramHandle::logical_run_id()`는 변하지 않는 에이전트 식별자를 반환합니다. 교체할 때마다 별도의 물리 run과 변경할 수 없는 ProgramVersion이 새로 만들어지고, 어느 세대가 활성인지는 계보가 정합니다. 그 세대의 핸들은 `reconnect(owner, logical_run_id)`로 얻습니다.
 
-새 run-record schema 4는 physical run과 다를 때 `logical_run_id`를 담는다. child relation은 계속 원래 child 신원을 가리키며 최초로 승인된 link와 invocation을 유지한다. replacement가 terminal result를 제공하면 relation은 그 result의 실제 run/version 신원과 함께 `terminal_generation`을 기록한다. transition backend는 이를 commit된 child lineage, generation, terminal run record와 대조한다.
+새 run 레코드 스키마 4는 물리 run과 다를 때 `logical_run_id`를 담습니다. 자식 관계는 계속 원래 자식의 식별자를 가리키며, 처음 승인(admission)된 link와 invocation을 유지합니다. 교체된 자식이 최종 결과를 제공하면, 관계에는 그 결과를 낸 실제 run/version 식별자와 함께 `terminal_generation`이 기록됩니다. 전이(transition) 백엔드는 이 값을 커밋된 자식 계보, 세대, 최종 run 레코드와 대조해 확인합니다.
 
-기존 schema 2/3 record는 계속 읽을 수 있으며, 새 field가 없는 일반 record는 schema 3 표현을 유지한다. 오래된 Program binary와 새 C++ record layout을 혼용하지 않는다. Program consumer를 함께 다시 빌드한다.
+기존 스키마 2/3 레코드는 계속 읽을 수 있고, 새 필드가 없는 일반 레코드는 스키마 3 표현을 그대로 유지합니다. 예전 Program 바이너리를 새 C++ 레코드 레이아웃과 섞어 쓰면 안 됩니다. Program을 사용하는 쪽은 모두 함께 다시 빌드해야 합니다.
 
-## Descendant를 가진 replacement
+## 자손이 있는 에이전트의 교체
 
-살아 있는 family의 replacement는 소유 runtime과 해당 agent generator의 유지 중이며 완료된 top-level checkpoint를 사용한다. 이 checkpoint는 중첩 agent에 속할 수 있다. target은 이미 승인되어 있어야 한다.
+실행 중인 에이전트 계열(family)을 교체하려면 소유 런타임과, 그 에이전트의 제너레이터에서 보류 중인(held) 완료된 최상위 체크포인트가 필요합니다. 이 체크포인트는 중첩된 에이전트의 것이어도 됩니다. 교체 대상은 이미 승인(admission)되어 있어야 합니다.
 
-같은 transaction이 새 generation을 게시하고 기존 child relation과 commit된 descendant budget을 복사한다. parent 신원과 절대 child depth는 바뀔 수 없다. target은 자식의 capability/effect grant와 guarantee 하한을 유지해야 한다. 중첩 replacement는 부모의 result contract를 보존해야 한다. 유지되는 자식에는 고유한 binding 이름이 필요하다. 중단된 자식은 부모를 교체하기 전에 명시적으로 처리 방침을 정해야 한다.
+같은 트랜잭션이 새 세대를 게시하면서 기존 자식 관계와 커밋된 자손 예산을 복사합니다. 부모 식별자와 자식의 절대 깊이는 바꿀 수 없습니다. 교체 대상은 자식에게 부여된 capability/effect grant와 보장 하한(guarantee floor)을 그대로 유지해야 합니다. 중첩된 교체는 부모의 결과 계약(result contract)을 지켜야 합니다. 유지되는 자식은 binding 이름이 서로 달라야 하며, 중단된 자식이 있으면 부모를 교체하기 전에 처리 방침(disposition)을 명시해야 합니다.
 
-오래된 execution은 logical-agent terminal hook을 호출하거나 이전된 자식을 취소하지 않고 종료된다. logical child-concurrency와 quota 정리는 successor로 옮기며 attempt별 정리는 계속 실행한다. 이미 자식을 기다리는 부모는 그 successor result를 따라가고, 그 child handle을 통한 cancellation도 같은 chain을 따라간다. root-generation handle은 기존 generation 의미를 유지한다. 활성 root에는 반환된 replacement handle을 사용하거나 logical 신원으로 reconnect한다.
+이전 실행은 논리 에이전트의 종료 Hook을 호출하지 않고, 이전된 자식도 취소하지 않은 채 종료합니다. 자식 동시 실행 수와 quota의 정리는 후임 세대로 넘어가고, 시도(attempt)별 정리는 그대로 실행됩니다. 이미 그 자식을 기다리던 부모는 후임의 결과를 따라가며, 그 자식 핸들로 하는 취소도 같은 체인을 따라갑니다. 루트 세대의 핸들은 기존의 세대 의미를 유지합니다. 활성 루트를 다루려면 반환된 교체 핸들을 쓰거나 논리 식별자로 다시 연결(reconnect)해야 합니다.
 
-불변 generation-creation publication에 존재하는 자식만 inherited binding이 된다. 기존 자식은 정확히 일치하는 binding과 input으로 다시 join할 수 있다.
+세대를 만들 때 게시된 불변 데이터(publication)에 들어 있던 자식만 상속 binding이 됩니다. 기존 자식은 binding과 input이 정확히 일치할 때 다시 join할 수 있습니다.
 
 ```javascript
 // Original child Harness:
@@ -44,48 +44,49 @@ const result = yield ng.await(
 return {generation: 2, result};
 ```
 
-replacement는 해당 child를 다시 만들거나 invocation을 다시 쓰거나 또 다른 child grant를 얻지 않는다. 오래된 generation의 연결되지 않은 synthesis binding은 새 권한이 되지 않는다. 새 binding은 여전히 일반 synthesis 및 admission 경로를 사용한다. source proposal은 독립적으로 검토한 호스트 template 인스턴스와 일치해야 한다. reference host는 agent가 checkpoint에 source를 포함했다는 이유만으로 승인하지 않는다.
+교체된 세대는 그 자식을 다시 만들지 않고, 자식의 invocation을 고쳐 쓰지 않으며, 자식 grant를 새로 받지도 않습니다. 이전 세대에서 연결되지 않은 채 남은 합성 binding은 새 권한이 되지 않습니다. 새 binding은 여전히 일반적인 합성 및 승인(admission) 경로를 거칩니다. 소스 제안은 독립적으로 검토한 호스트 템플릿 인스턴스와 일치해야 합니다. 레퍼런스 호스트는 에이전트가 체크포인트에 소스를 넣었다는 이유만으로 그 소스를 승인하지 않습니다.
 
-## Process 상실 후 사전 승인된 자식 복구
+## 프로세스 유실 후 미리 승인된 자식 복구
 
-승인된 child binding을 복원하는 호스트는 미완료 JavaScript `spawn`/`await` command가 이미 게시된 자식에 reconnect하도록 명시적으로 허용할 수 있다.
+승인(admission)된 자식 binding을 복원하는 호스트는, 끝나지 않은 JavaScript `spawn`/`await` 명령이 이미 게시된 자식에 다시 연결되도록 명시적으로 허용할 수 있습니다.
 
 ```cpp
 config.recover_existing_child_commands = true; // default: false
 ```
 
-synthesis gateway 없이도 일반 static binding과 replacement를 통해 상속된 자식에 적용된다. parent relation, link receipt, owner, 정확한 invocation, child depth, 저장된 child run이 일치해야 한다. static command는 기록된 command 좌표에서 같은 child ID를 도출해야 한다. inherited child는 generation-creation publication에서 승인된 ID를 유지한다. 과거 Program version과 호스트 grant도 여전히 사용 가능해야 한다. 호스트 admission resolver가 구성되어 있으면 계속 일반 절차로 child attempt를 승인한다.
+이 방식은 합성 게이트웨이 없이도 일반 정적 binding과 교체를 통해 상속된 자식에 모두 동작합니다. 부모 관계, link receipt, 소유자, 정확한 invocation, 자식 깊이, 저장된 자식 run이 모두 일치해야 합니다. 정적 명령은 기록된 명령 좌표에서 같은 자식 ID를 계산해 내야 하고, 상속된 자식은 세대를 만들 때 게시된 데이터에서 승인(admission)된 ID를 그대로 유지합니다. 과거의 Program 버전과 호스트 grant도 계속 사용할 수 있어야 합니다. 호스트에 승인(admission) resolver가 설정되어 있으면, 그 resolver가 평소처럼 자식 시도를 승인(admission)합니다.
 
-복구는 전용 reconnect 경로를 사용한다. 검사 이후 자식이 사라져도 새 child 생성으로 넘어갈 수 없다. run이 없거나 input이 바뀌었거나 binding을 사용할 수 없으면 기존 command를 reconciliation 대기 상태로 남긴다. command reservation과 descendant accounting은 복구 이후에도 유지된다. 이 flag는 알 수 없는 provider, tool, native 또는 다른 외부 effect의 replay를 허가하지 않는다. 별도 grant를 받는 synthesis 복구 protocol은 바뀌지 않는다.
+복구는 전용 reconnect 경로를 사용합니다. 확인 직후 자식이 사라져도 새 자식을 만드는 경로로 빠지지 않습니다. run이 없거나 input이 바뀌었거나 binding을 쓸 수 없으면, 기존 명령은 조정(reconciliation)을 기다리는 pending 상태로 남습니다. 명령 예약과 자손 회계는 복구 후에도 유지됩니다. 이 플래그가 provider, 도구, 네이티브 등 결과를 알 수 없는 외부 효과의 재생(replay)까지 허용하는 것은 아닙니다. 별도로 부여하는 합성 복구 프로토콜은 달라지지 않습니다.
 
-이 flag와 무관하게 running attempt의 replay는 정확히 journal에 기록된 값과 원래 command reservation으로 미완료 봉인 `ng.checkpoint`를 완료한다. 외부 dispatch는 수행하지 않는다. 다른 알 수 없는 effect는 여전히 family를 reconciliation을 위해 일시 중지한다. 중단된 자식은 dispatch되었으며 재개 가능한 relation으로 남고, 부모는 relation을 취소하거나 reservation을 두 번 환급하는 대신 진행 중 command reservation을 유지한다.
+이 플래그와 별개로, 실행 중이던 시도를 재생(replay)할 때는 끝나지 않은 봉인된(sealed) `ng.checkpoint`를 저널에 기록된 정확한 값과 원래의 명령 예약으로 마무리합니다. 이때 외부 dispatch는 하지 않습니다.
+결과를 알 수 없는 다른 효과는 여전히 조정(reconciliation)을 위해 에이전트 계열을 일시 중지합니다. 중단된 자식은 dispatch된 채 재개할 수 있는 관계로 남고, 부모는 관계를 취소하거나 그 예약을 두 번 돌려주지 않고 진행 중인 명령 예약을 그대로 유지합니다.
 
-storage가 계속 사용 가능한 상태에서 result publication이 실패하면 dispatch된 command의 outcome과 pending effect를 모두 `Ambiguous`로 게시한다. cancellation은 그 불확실성을 지울 수 없다. 낙관적 command-head 읽기 충돌은 retry하지만, 변경되지 않은 parent head에 대한 영구적인 거부가 child completion notification을 무한히 차단할 수는 없다.
+저장소는 정상인데 결과 게시에 실패하면, dispatch된 명령의 결과와 pending effect를 모두 `Ambiguous`로 게시합니다. 취소해도 이 불확실성은 지워지지 않습니다. 낙관적(optimistic) 명령 head 읽기에서 충돌이 나면 재시도하며, 부모 head가 바뀌지 않았는데도 영구적으로 거부되는 경우가 자식 완료 알림을 무기한 막지는 못합니다.
 
-`*StaticChild*` test는 SQLite와 PostgreSQL process exit, static 및 inherited recursive child, 바뀌지 않은 child 신원과 receipt, 손자의 checkpoint 32개가 정확히 journal entry 64개를 만드는 경우를 다룬다. 또한 opt-in 없음, run/binding 없음, 변경된 input/receipt, recovery admission과 dispatch 사이에 run이 사라지는 경우를 확인한다.
+`*StaticChild*` 테스트는 SQLite와 PostgreSQL의 프로세스 종료, 정적 자식과 상속된 재귀 자식, 바뀌지 않은 자식 식별자와 receipt, 그리고 손자의 체크포인트 32개가 저널 항목 정확히 64개를 만드는 경우를 다룹니다. 옵트인을 하지 않은 경우, run이나 binding이 없는 경우, input이나 receipt가 바뀐 경우, 복구 승인(admission)과 dispatch 사이에 run이 사라지는 경우도 검사합니다.
 
-## JSON artifact와 accounting
+## JSON 산출물과 회계
 
-JSON은 직렬화되고 검증된 Program bundle이다. 다른 JSON을 읽으면 후보 불변 version을 선택한다. 파일을 바꾼다고 live engine이 변경되지는 않는다. 호스트는 version을 승인하고 유지 중인 checkpoint에서 agent의 generation을 전환한다. generator heap/stack state는 이식하지 않는다. application state는 명시적인 `handoff` JSON을 통해 전달되고 child relationship은 영속 tree에 남는다.
+JSON은 직렬화하고 검증을 마친 Program 번들입니다. 다른 JSON을 불러오면 변경할 수 없는 새 후보 버전이 선택될 뿐이며, 파일을 고쳐도 실행 중인 엔진은 바뀌지 않습니다. 호스트가 그 버전을 승인(admission)하고, 보류 중인 체크포인트에서 에이전트의 세대를 전환합니다. 제너레이터의 힙/스택 상태는 옮기지 않습니다. 애플리케이션 상태는 명시적인 `handoff` JSON으로 넘기고, 자식 관계는 영속 트리에 그대로 남습니다.
 
-예제의 replacement bundle은 session 시작 전에 컴파일되고 승인된다. main과 child agent는 실행 중 descendant JavaScript를 제안하며 그 컴파일은 각자의 grant를 소비한다. 새로 생성한 self-replacement를 준비하는 일은 별도의 compilation/admission 연산이다. `replace` API 자체는 이미 승인된 target을 선택한다.
+예제의 교체용 번들은 세션이 시작되기 전에 컴파일하고 승인(admission)합니다. 메인 에이전트와 자식 에이전트는 실행 중에 자기 자손이 쓸 JavaScript를 제안하며, 이 컴파일은 각자의 grant를 소비합니다. 새로 생성한 자기 교체본을 준비하는 일은 컴파일/승인(admission)이라는 별도 작업이며, `replace` API 자체는 이미 승인된 대상을 고르기만 합니다.
 
-위임한 compile budget은 다른 부모 synthesis 요청에 쓸 수 없다. replacement는 정확한 잔여 budget과 commit된 descendant를 이전한다. child recovery는 최초 attempt의 deadline도 유지한다. SQLite Catalog는 이제 제한된 busy timeout을 사용한다. 이는 동시 agent publication과 database를 공유할 수 있는 transition store의 동작에 맞춘 것이다.
+자손에게 위임한 컴파일 예산은 부모의 다른 합성 요청에 쓸 수 없습니다. 교체하면 남은 예산과 커밋된 자손이 정확히 그대로 넘어갑니다. 자식 복구도 첫 시도의 데드라인을 유지합니다. SQLite Catalog는 이제 busy timeout에 상한을 두며, 이는 전이(transition) 저장소가 동시에 일어나는 에이전트 게시와 데이터베이스를 공유할 수 있는 것과 같은 조건을 맞춘 것입니다.
 
-## Reference 실행
+## 레퍼런스 실행하기
 
-Program과 QuickJS를 빌드하고 각 case에 대해 두 persistence backend를 모두 활성화한다. `neograph_program_tests --gtest_filter="*Recursive*"`를 실행한다. PostgreSQL case는 기존 일회용 `NEOGRAPH_TEST_POSTGRES_URL` fixture와 CTest database resource lock을 사용한다. native WSL Docker는 이 구성에 적합하다.
+Program과 QuickJS를 빌드하고, 해당 케이스에 필요한 영속 백엔드를 둘 다 켭니다. `neograph_program_tests --gtest_filter="*Recursive*"`를 실행합니다. PostgreSQL 케이스는 기존의 일회용 `NEOGRAPH_TEST_POSTGRES_URL` 픽스처와 CTest 데이터베이스 리소스 락을 사용합니다. 이 구성에는 WSL의 네이티브 Docker를 쓸 수 있습니다.
 
-성공적인 topology test 실행 시 `NEOGRAPH_RECURSIVE_ARTIFACT_DIR`를 설정하면 `main.json`, `child-v1.json`, `child-v2.json`, `grandchild.json`, `session.json`을 export한다. 이 파일은 test registry/compiler 신원을 사용하며 검토 fixture이지 독립적인 production configuration이 아니다.
+토폴로지 성공 테스트를 실행할 때 `NEOGRAPH_RECURSIVE_ARTIFACT_DIR`을 지정하면 `main.json`, `child-v1.json`, `child-v2.json`, `grandchild.json`, `session.json`을 내보냅니다. 이 파일은 테스트용 레지스트리/컴파일러 식별자를 쓰므로 검토용 픽스처일 뿐, 단독으로 쓰는 프로덕션 설정이 아닙니다.
 
-이 검증은 3단계 tree, 중첩 checkpoint replacement, live descendant 유지 및 cancellation, generation-result 무결성, budget 제한, SQLite/PostgreSQL의 전체 session process recovery를 다룬다. LLM source-generation service, Python/transport facade, cross-owner session 공유 policy, 임의의 in-place Core 변경을 도입하지 않는다. native Core migration은 기존 경계를 유지한다. 독립적인 multi-host live ownership 이전과 모든 context/hook failure 조합은 별도 검증이 필요하다.
+이 검증이 다루는 범위는 3단계 트리, 중첩된 체크포인트 교체, 실행 중인 자손의 유지와 취소, 세대 결과의 무결성, 예산 감쇠(attenuation), 그리고 SQLite/PostgreSQL에서의 세션 전체 프로세스 복구입니다. LLM 소스 생성 서비스, Python/전송 파사드, 소유자 간 세션 공유 정책, Core를 제자리에서 임의로 수정하는 기능은 새로 도입하지 않습니다. 네이티브 Core 마이그레이션은 기존의 경계를 그대로 유지합니다. 서로 독립된 여러 호스트 간의 실시간 소유권 이전과 모든 컨텍스트/Hook 실패 조합은 별도로 검증해야 합니다.
 
-## 대화형 chatbot 예제
+## 대화형 챗봇 예제
 
-[진화하는 Harness chatbot](../examples/cookbook/self_evolving_chatbot/README.md)은 reference에 격리된 tenant 둘, OpenRouter adapter, browser inspector, turn별 검토 template proposal, runtime successor compilation, SQLite 또는 PostgreSQL의 chat/provider ledger를 추가한다. assistant는 replacement 이후 reviewer를 합성할 수 있으며 원래 orchestrator는 계속 같은 logical assistant를 await한다.
+[진화하는 Harness 챗봇](../examples/cookbook/self_evolving_chatbot/README.md)은 이 레퍼런스에 다음을 더합니다. 격리된 테넌트 둘, OpenRouter 어댑터, 브라우저 인스펙터, 턴마다 검토된 템플릿 제안, 실행 중 후임 컴파일, SQLite 또는 PostgreSQL 위의 채팅/provider 원장입니다. 이 챗봇의 어시스턴트는 교체 후에 리뷰어를 합성할 수 있으며, 원래 오케스트레이터는 같은 논리 어시스턴트를 계속 기다립니다.
 
-`RuntimeConfig::checkpoint_handler`를 사용하면 호스트가 영속 publication 이후 handle과 이동 전용 checkpoint lease를 queue에 넣을 수 있다. lease를 유지하면 scheduler thread를 차단하지 않고 generator를 일시 중지한다. callback은 신속히 반환해야 한다. compilation과 replacement는 호스트 worker에서 수행한다. reconnect 시 최신 완료 checkpoint의 replay도 관찰한다. 명시적인 `next_handoff` 요청이 우선한다.
+`RuntimeConfig::checkpoint_handler`를 쓰면 호스트가 영속 게시 이후에 핸들과 이동만 가능한(move-only) 체크포인트 lease를 큐에 넣을 수 있습니다. lease를 쥐고 있는 동안 제너레이터는 스케줄러 스레드를 막지 않은 채 일시 중지됩니다. 콜백은 곧바로 반환해야 하므로, 컴파일과 교체는 호스트의 워커에서 수행합니다. 다시 연결할 때는 가장 최근에 완료된 체크포인트의 재생(replay)도 이 콜백으로 전달됩니다. 명시적인 `next_handoff` 요청이 있으면 그것이 우선합니다.
 
-`ProgramRuntime::reserve_synthesis`는 예상 lineage head에 대해 미할당 dynamic compile 하나를 차감하고 유지 중인 lease의 journal 참조를 갱신한다. checkpoint 신원과 직렬화된 handoff 값은 바뀌지 않는다. 오래된 head, 다른 owner/runtime, 만료된 wall budget, descendant에 할당된 compile budget은 거부한다. 호스트는 reservation 전에 intent를 저장하고 outcome을 기록해야 한다. 모호한 acknowledgement는 무료 retry를 허가할 수 없다. chatbot은 일반 `ProgramSynthesisGateway`에서 이 reservation을 사용한 뒤 승인된 target을 `replace`에 전달한다.
+`ProgramRuntime::reserve_synthesis`는 아직 배정되지 않은 동적 컴파일 한 건을 예상한 계보 head 기준으로 차감하고, 보류 중인 lease의 저널 참조를 갱신합니다. 체크포인트 식별자와 직렬화된 handoff 값은 바뀌지 않습니다. head가 오래되었거나, 소유자/런타임이 다르거나, 벽시계(wall) 예산이 만료되었거나, 컴파일 예산이 자손에게 배정되어 있으면 거부됩니다. 호스트는 예약하기 전에 의도를 영속화하고 결과를 기록해야 합니다. 확인 응답이 모호하다고 해서 예산 차감 없이 재시도할 수는 없습니다. 챗봇은 일반 `ProgramSynthesisGateway`에서 이 예약을 사용한 다음, 승인(admission)된 대상을 `replace`에 넘깁니다.
 
-chatbot의 template gate는 답변 품질의 증명이 아니며 model call과 generator control은 `Unmanaged` guarantee를 유지한다. process 상실 이후 pending provider effect에는 자동 재dispatch 대신 reconciliation이 필요하다.
+챗봇의 템플릿 게이트는 답변 품질을 보증하지 않으며, 모델 호출과 제너레이터 제어의 보장 수준은 `Unmanaged`로 유지됩니다. 프로세스 유실 뒤에 남은 pending provider 효과는 자동으로 다시 dispatch하지 않고 조정(reconciliation)을 거쳐야 합니다.
