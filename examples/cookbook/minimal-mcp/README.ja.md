@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/minimal-mcp/README.md locale=ja source_sha256=a7376fb45ce9458c71f7360172bb26947a1694fa341962f3490ecc028390d1a4 -->
+<!-- neograph-i18n: source=examples/cookbook/minimal-mcp/README.md locale=ja source_sha256=ad305d0ff700addd7966a8ce6dc03cdceaa6dd0790dd0cdcdb650b98944a5004 -->
 # Minimal MCP — fastmcp と API key なし
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)

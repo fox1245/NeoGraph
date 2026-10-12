@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/26_postgres_react_hitl/README.md locale=ja source_sha256=fb347c51a8ebcb9bd157da6854903e0e2a348f5f3672207040849b70a60e57cb -->
+<!-- neograph-i18n: source=examples/26_postgres_react_hitl/README.md locale=ja source_sha256=d730666d7dc2da92103ec602b763743c21ff797faf2ab3fd2a8dcbe217299b46 -->
 # 例26 — PostgreSQLバックエンドのDeep Research with HITL
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -210,7 +210,7 @@ Failure、observer/settlement エラー、配信済み streaming part は再試�
 human review 前にエラーとなります。内容のある `MaxTokens` 報告は public 投影に `Incomplete` を
 表示し、不変 outcome を変更せず、部分テキストも再試行しません。空の compression が ladder を
 使い切ると diagnostic を生成し、成功した provider result は捏造しません。
-これらは保持された interface-4 ソース契約で、新しい live 実行や durability 証明ではありません。
+これらは保持されたソース契約で、新しい live 実行や durability 証明ではありません。
 
 ## なぜフロントエンドがないのか
 

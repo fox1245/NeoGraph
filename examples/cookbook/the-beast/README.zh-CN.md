@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=zh-CN source_sha256=a9b2426138faa8e51665146bcdb5ff4b4bad70882618a41b3420db5f8b51cb47 -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=zh-CN source_sha256=43028e6dab64c32b2e6c1eea1365f85263c323804e556019af037af655632cde -->
 # The Beast — 生成 · 演化 · 回滚
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -11,7 +11,7 @@ Forge 使用 low reasoning effort 和300秒 provider timeout，每次 ask 固定
 仅已完成的空 `MaxTokens` outcome 没有 text 和有效/无效 client tool call 时，才以当前
 3,000/4,000-token cap 的两倍额外调用最多一次。保留所有 outcome 和 usage。
 Failure、observer/settlement 错误、有内容的部分响应不触发额外调用。此 budget recovery
-与 compiler/初始化 repair 分开，是 interface-4 源码契约，不是新的 live 通过。
+与 compiler/初始化 repair 分开，是源码契约，不是新的 live 通过。
 
 保留私有 OpenRouter 路由 `~deepseek/deepseek-v4-flash-latest` 与 `zdr: true`（共享示例 provider factory）：无合格的零数据保留（ZDR）端点则失败，不向保留数据的提供方披露。ZDR 端点列表不是驻留或当前可用性保证。实时执行需要获授权的密钥、网络/提供方及付费容量；提示、导出模式、诊断和原生历史会发送至该路由。生成的 Python server 执行有独立 local code-execution trust boundary，与 NeoGraph Python provider binding 分开。不要公开密钥或私有提示。可空 token 计数不是美元费用，需定价和实际计费用量。
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ko source_sha256=a9b2426138faa8e51665146bcdb5ff4b4bad70882618a41b3420db5f8b51cb47 -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ko source_sha256=43028e6dab64c32b2e6c1eea1365f85263c323804e556019af037af655632cde -->
 # The Beast — 생성 · 진화 · 롤백
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -11,7 +11,7 @@ Forge는 low reasoning effort와 provider timeout 300초를 쓰며 ask마다 dea
 완료된 빈 `MaxTokens` outcome에 text와 유효/무효 client tool call이 없을 때만 현재
 3,000/4,000-token cap의 두 배로 최대 한 번 더 호출합니다. 모든 outcome과 usage를 보존합니다.
 Failure, observer/settlement 오류, 내용이 있는 부분 응답은 추가 호출을 유발하지 않습니다.
-이 budget recovery는 compiler/초기화 repair와 별개이며 interface-4 소스 계약이지 새 live 통과가 아닙니다.
+이 budget recovery는 compiler/초기화 repair와 별개이며 소스 계약이지 새 live 통과가 아닙니다.
 
 비공개 OpenRouter 경로 `~deepseek/deepseek-v4-flash-latest`와 `zdr: true`(공유 예제 provider factory)를 유지한다. 적격 무보존(ZDR) 엔드포인트가 없으면 데이터를 보존하는 제공자에게 공개하지 않고 실패한다. ZDR 엔드포인트 목록은 지역 상주·현재 가용성 보장이 아니다. 라이브 실행은 승인된 키, 네트워크/제공자 및 유료 용량이 필요하고 프롬프트·스키마·진단·네이티브 이력을 해당 경로로 전송한다. 생성된 Python 서버 실행은 별도의 로컬 코드 실행 신뢰 경계이며 NeoGraph Python 제공자 binding과 별개다. 키·비공개 프롬프트를 공개하지 않는다. nullable 토큰 수는 달러 비용이 아니며 가격과 실제 청구 사용량이 필요하다.
 

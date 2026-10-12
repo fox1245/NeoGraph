@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=zh-CN source_sha256=f54a315d6278705e37ff35dfc675090e85b00c7efc53c88fe7c93d31a420be61 -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=zh-CN source_sha256=a02202d9106c06303699bf2e4f4def793c54adf84521a08926964317cabffa6c -->
 # JARVIS — 语音驱动的元编排器
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -24,7 +24,7 @@ JSON router 在解析前仅接受 text-only `EndTurn` / `StopSequence` 完成；
 `[jarvis:ttft]` 仅在首个非空 `sp::PartDelta` 且为 `PartKind::Text`、`DeltaChannel::Content` 时发出，不由用量、推理、响应头等事件触发。它表示首次合成文本，不是首次可听见的 TTS 播放。Python REPL driver 仍为 protocol client；pybind benchmark 使用已迁移类型化 binding，需要单独运行证据。当前运行证据仅涵盖实际 CLI 问候、已持久化的合成记忆 turn 和正常 EOF 退出，不验证麦克风捕获、ASR、TTS、pybind 基准或 vendor 推理。下文耗时及语音/live 执行主张仍为历史记录，不是当前迁移的 qualification。
 
 上述 CLI 证据在 interface 3 下记录，未重跑。
-[当前 interface-4 local 证据](../../README.md#typed-c-cutover-status)单独覆盖 SDK 控制与
+[后续的 interface-4 local 证据](../../README.md#typed-c-cutover-status)单独覆盖 SDK 控制与
 A2A 0.3/1.0 peer，不验证 Jarvis 语音、benchmark 或新的完整 CLI session。
 
 > 本地/mock 无需云端提供方；可选语音需要本地资源和设备。

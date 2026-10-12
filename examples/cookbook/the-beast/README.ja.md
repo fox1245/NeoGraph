@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ja source_sha256=a9b2426138faa8e51665146bcdb5ff4b4bad70882618a41b3420db5f8b51cb47 -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/README.md locale=ja source_sha256=43028e6dab64c32b2e6c1eea1365f85263c323804e556019af037af655632cde -->
 # The Beast — 生成・進化・ロールバック
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -11,7 +11,7 @@ Forge は low reasoning effort と300秒 provider timeout を使い、ask ごと
 完了した空の `MaxTokens` outcome に text と有効/無効 client tool call がない場合だけ、現在の
 3,000/4,000-token cap の二倍で最大一回追加呼出しします。全 outcome と usage を保持します。
 Failure、observer/settlement エラー、内容のある部分応答は追加呼出しを起こしません。
-この budget recovery は compiler/初期化 repair と別で、interface-4 ソース契約であり新しい live pass ではありません。
+この budget recovery は compiler/初期化 repair と別で、ソース契約であり新しい live pass ではありません。
 
 非公開OpenRouter経路 `~deepseek/deepseek-v4-flash-latest` と `zdr: true`（共有のサンプル provider factory）を維持する。適格なデータ非保持（ZDR）エンドポイントがなければ、データを保持する提供者へ開示せず失敗する。ZDRエンドポイントの記載は常駐・現在の可用性保証ではない。ライブには承認されたキー、ネットワーク/提供者と有料容量が必要で、プロンプト・スキーマ・診断・ネイティブ履歴をこの経路へ送信する。生成した Python server の実行は独立した local code-execution trust boundary で、NeoGraph の Python provider binding とは別です。キー・非公開プロンプトを公開しない。nullableトークン数は金額ではなく、価格と実際の請求対象使用量が必要。
 

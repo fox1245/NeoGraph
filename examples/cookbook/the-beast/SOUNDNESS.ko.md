@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=ko source_sha256=e7b1391ddc95470be622551937b4ac833623fd97280f71e2d09cc07865360b8b -->
+<!-- neograph-i18n: source=examples/cookbook/the-beast/SOUNDNESS.md locale=ko source_sha256=18f1e186e8a90c276c3c13b2b8bc42aae5336f5a2c3e6b040838d071bf3a685d -->
 # Coherence Gate의 건전성 — 형식 증명 문서
 
 **Languages:** [English](SOUNDNESS.md) | [한국어](SOUNDNESS.ko.md) | [日本語](SOUNDNESS.ja.md) | [简体中文](SOUNDNESS.zh-CN.md)
@@ -7,7 +7,7 @@
 
 typed API로 옮긴 C++ 작성/수정 경로는 타입이 있는 `ProviderRequest`와 `sp::Message` 기록을 만들고, 반환된 모든 네이티브 메시지/파트를 포함한 불변 `sp::Outcome` 전체를 소비합니다. 텍스트 추출은 후보 JSON/Python을 파싱할 때만 쓰며, 네이티브 대화 기록을 대체하는 데는 쓰지 않습니다. 컴파일러/파싱/초기화 피드백은 이 메시지들 뒤에 덧붙입니다. 의미 수정(semantic repair)은 프로그램마다 정해진 시도 횟수로 제한됩니다(실제 작성: 3회, Forge 서버 생성: 2회). 전송 재시도도 아니고 무제한 진화도 아닙니다.
 
-interface 4의 [Forge 소스 계약](README.md)은 `MaxTokens`로 끊겨 출력이 비었을 때의 복구를 별도로 제한합니다.
+[Forge 소스 계약](README.md)은 `MaxTokens`로 끊겨 출력이 비었을 때의 복구를 별도로 제한합니다.
 상한을 두 배로 올린 호출 한 번만 허용하고, 데드라인은 300초로 고정하며, 결과와 사용량을 보존합니다.
 실패나 observer/정산(settlement) 오류는 재시도하지 않습니다.
 

@@ -28,7 +28,7 @@ explicit `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<sdk-source>`, or the immutable
 public SDK archive fallback. `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` disables
 fetching when using an offline installed/source SDK.
 Installed SDK include root is `include/SchemaProvider`. Interface/capability
-checks are enforced; SDK `0.1.1` alpha uses interface/shared ABI 4.
+checks are enforced; SDK `0.3.0` alpha uses interface revision/shared ABI 6.
 
 The preserved interface-3 model-free execution covered the four local Assembly A2A member servers
 and C++ speaker, JARVIS CLI synthetic turns with persisted memory, Beast strict
@@ -36,7 +36,7 @@ Core compilation/evolution/checkpoint rollback, dedicated mock topology load,
 retrieval index reuse/admission, and ProgramChat browser tenant isolation/
 generation replacement plus six SQLite and six PostgreSQL black-box scenarios.
 The inventory below keeps these historical runs separate from
-[current interface-4 local evidence](../README.md#typed-c-cutover-status), including
+[earlier interface-4 local evidence](../README.md#typed-c-cutover-status), including
 installed Python applications, A2A peers and the Forge helper.
 Vendor inference, voice, every Beast live variant and the dedicated live
 multitenant 1,000/32 workload remain unqualified.
@@ -57,7 +57,7 @@ not provide a standalone build.
 | [`ai-assembly/`](ai-assembly/) | Multi-persona A2A: 4 members of the National Assembly (each its own A2A endpoint) + a Speaker that broadcasts a bill in parallel and tallies votes. Cross-language: C++ member servers + Python or C++ Speaker. |
 | [`byo-openai/`](byo-openai/) | Python provider preparation through the authentic typed SDK path; see the recipe for compatibility and execution evidence. |
 | [`jarvis/`](jarvis/) | Voice-driven meta-orchestrator. Optional local ASR/TTS surrounds a four-way router (chat/direct/delegate/parallel), MCP tools, A2A specialists and stored conversation memory. Local/mock operation is cloud-free; live inference uses OpenRouter. |
-| [`minimal-mcp/`](minimal-mcp/) | MCP client round-trip with **no LLM, no API key, no fastmcp**: a ~60-line stdlib stdio server + a C++ harness that does `initialize` → `tools/list` → `tools/call`. Shows NeoGraph's MCP client only needs a process that speaks the wire protocol — the peer can be anything. |
+| [`minimal-mcp/`](minimal-mcp/) | MCP client round-trip with **no model and no API key**: a ~60-line standard-library stdio server + a C++ harness that does `initialize` → `tools/list` → `tools/call`. Shows NeoGraph's MCP client only needs a process that speaks the wire protocol — the peer can be anything. |
 | [`openrouter-provider/`](openrouter-provider/) | Typed Python OpenRouter provider requests and immutable outcomes; see the recipe for compatibility and execution evidence. |
 
 Each cookbook also documents the friction it surfaced — useful for
@@ -79,7 +79,7 @@ finding the rough edges of the public API.
 
 Python MCP servers, Jarvis CLI/REPL drivers and retrieval HTTP clients remain protocol clients; they do not implement provider bindings. The Assembly Python speaker uses the A2A binding; Jarvis pybind benchmarks use the migrated native bindings. Their execution evidence is separate from the preserved C++ runs above. Live multitenant 1,000/32 is not a smoke run. Current SDK runtime qualification is Linux/POSIX; these recipes do not establish macOS or Windows transport qualification.
 
-## Interface-4 controls and retained call limits
+## Provider controls and retained call limits
 
 `ProviderControls` preserves family-specific reasoning, sampling and tool selection:
 Chat has the admitted OpenRouter reasoning object, usage/include controls and
@@ -103,4 +103,4 @@ The [numbered-example contracts](../README.md#retained-example-contracts) detail
 Deep Research's bounded cap ladder and deadline discovery, examples 16/28,
 fork/new-turn behavior, computed replay savings, evolution file mode and A2A
 0.x/1.0 snapshots. These source updates do not relabel the preserved runs above
-as interface-4 or live-provider passes.
+as a qualification of the current SDK or as live-provider passes.

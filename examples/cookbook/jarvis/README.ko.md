@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=ko source_sha256=f54a315d6278705e37ff35dfc675090e85b00c7efc53c88fe7c93d31a420be61 -->
+<!-- neograph-i18n: source=examples/cookbook/jarvis/README.md locale=ko source_sha256=a02202d9106c06303699bf2e4f4def793c54adf84521a08926964317cabffa6c -->
 # JARVIS — 음성 기반 메타 오케스트레이터
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -24,7 +24,7 @@ JSON router는 파싱 전에 text-only `EndTurn` / `StopSequence` 완료만 허�
 `[jarvis:ttft]`는 비어 있지 않은 첫 `sp::PartDelta` 중 `PartKind::Text`와 `DeltaChannel::Content`에만 발생하며 사용량·추론·헤더 이벤트는 제외한다. 첫 합성 텍스트 시점이지 실제 TTS 청취 시작이 아니다. Python REPL driver는 protocol client이며 pybind benchmark는 전환된 타입 binding을 사용하므로 별도 실행 증거가 필요하다. 현재 실행 증거는 실제 CLI 인사, 영속화된 합성 메모리 turn과 정상 EOF 종료에 한정된다. 마이크 입력·ASR·TTS·pybind 벤치나 vendor 추론을 검증하지 않는다. 아래 시간·음성/live 실행 주장은 과거 기록이며 현재 전환 qualification이 아니다.
 
 위 CLI 증거는 interface 3에서 기록했으며 재실행하지 않았습니다.
-[현재 interface-4 local 증거](../../README.md#typed-c-cutover-status)는 SDK 제어와
+[이후의 interface-4 local 증거](../../README.md#typed-c-cutover-status)는 SDK 제어와
 A2A 0.3/1.0 peer를 별도로 다루며 Jarvis 음성, benchmark나 새 전체 CLI 세션을 검증하지 않습니다.
 
 > 로컬/mock은 클라우드 제공자가 필요 없으며 선택적 음성은 로컬 자산·장치가 필요하다.

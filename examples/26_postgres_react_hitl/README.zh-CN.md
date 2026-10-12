@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/26_postgres_react_hitl/README.md locale=zh-CN source_sha256=fb347c51a8ebcb9bd157da6854903e0e2a348f5f3672207040849b70a60e57cb -->
+<!-- neograph-i18n: source=examples/26_postgres_react_hitl/README.md locale=zh-CN source_sha256=d730666d7dc2da92103ec602b763743c21ff797faf2ab3fd2a8dcbe217299b46 -->
 # 示例 26 — 基于 Postgres 的深度研究（带 HITL）
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -209,7 +209,7 @@ preparation 取得已配置 deadline，在 mediated invoke 前释放 handle 并�
 Failure、observer/settlement 错误、已交付 streaming part 不重试。空最终文本在 human review 前
 报错；有内容的 `MaxTokens` 报告只在 public 投影标为 `Incomplete`，不修改不可变 outcome，
 也不重试部分文本。空 compression 耗尽 ladder 后生成 diagnostic，不伪造成功 provider result。
-这些是保留的 interface-4 源码契约，不是新的 live 运行或 durability 证明。
+这些是保留的源码契约，不是新的 live 运行或 durability 证明。
 
 ## 为什么没有前端？
 

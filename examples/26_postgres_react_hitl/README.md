@@ -272,7 +272,7 @@ Empty final text raises an error before human review; a nonempty `MaxTokens`
 report remains visibly `Incomplete` in the public projection without mutating
 the immutable outcome or retrying its partial text. Exhausted empty compression
 produces a diagnostic, not a fabricated successful provider result. These are
-retained interface-4 source contracts, not a new live run or durability proof.
+retained source contracts, not a new live run or durability proof.
 
 ## Why no frontend?
 

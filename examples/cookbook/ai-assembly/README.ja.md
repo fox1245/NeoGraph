@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ja source_sha256=0bc9a674677c52e4a62ad11530f1770b7024e4395ff8d74cc0dafc2aa84ac720 -->
+<!-- neograph-i18n: source=examples/cookbook/ai-assembly/README.md locale=ja source_sha256=007a2adec84766f6cb74dcb01efbf6ad1396be759e81052ef3d3695c1d6badde -->
 # AI国民議会
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
