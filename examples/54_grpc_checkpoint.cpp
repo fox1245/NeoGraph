@@ -10,12 +10,10 @@
 //   2. gRPC round-trip (save + load_latest) — the network overhead
 //   3. payload size: JSON-in-proto vs a notional JSON-RPC envelope
 //
-// This is the measurement ROADMAP Candidate 7 demanded: turn the
-// inherited-from-NexaGraph "PLAUSIBLE BUT UNPROVEN" overhead claim
-// into numbers — *including the honest part*: our JSON-string-in-proto
-// design (chosen for schema robustness) does NOT get protobuf's
-// field-level wire compression. The gRPC win here is transport
-// (HTTP/2 framing + connection reuse), not payload shrink.
+// These are measurements, not claims: they include the unflattering part.
+// The JSON-string-in-proto design (chosen for schema robustness) does NOT
+// get protobuf's field-level wire compression. The gRPC win here is
+// transport (HTTP/2 framing + connection reuse), not payload shrink.
 //
 // smoke-expect: Round-trip correctness (rich fields preserved): PASS
 // smoke-expect: RESULT: PASS
@@ -40,9 +38,8 @@
 using namespace neograph::graph;
 using clk = std::chrono::steady_clock;
 
-// Build a realistically large checkpoint: a 1536-dim embedding (the
-// NexaGraph rationale's worked example) plus a chunk of conversation
-// history in channel_values.
+// Build a realistically large checkpoint: a 1536-dim embedding plus a
+// chunk of conversation history in channel_values.
 static Checkpoint make_big_checkpoint(const std::string& thread_id) {
     Checkpoint cp;
     cp.id        = Checkpoint::generate_id();
@@ -135,8 +132,9 @@ int main() {
     double g_load = time_us(ITERS, [&]{
         (void)store.load_latest("t-bench"); });
 
-    // Correctness: round-trip must preserve the rich fields NexaGraph's
-    // flat mapping didn't carry (next_nodes vector, enum, barrier_state).
+    // Correctness: round-trip must preserve the rich fields a flat
+    // field-per-column mapping cannot carry (next_nodes vector, enum,
+    // barrier_state).
     auto rt = store.load_latest("t-bench");
     bool ok = rt
         && rt->next_nodes.size() == 2

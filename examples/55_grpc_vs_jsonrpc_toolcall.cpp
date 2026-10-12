@@ -13,8 +13,8 @@
 //   - JSON-RPC client keep-alive ON (persistent HTTP/1.1) so it's not
 //     unfairly paying per-call TCP connect; gRPC reuses its channel
 //     (HTTP/2) by default — both get connection reuse
-//   - two payload regimes: tiny args, and a 1536-float arg (the size
-//     where NexaGraph claimed binary wins)
+//   - two payload regimes: tiny args, and a 1536-float arg (an
+//     embedding-sized payload, where a binary encoding is expected to win)
 //   - warmup before timing; p50 over N iters (loopback noise is not
 //     gaussian, mean alone lies)
 //

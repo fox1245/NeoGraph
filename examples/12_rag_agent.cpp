@@ -26,8 +26,6 @@
 //   ./example_rag_agent
 // (auto-loads .env from the cwd or any parent directory.)
 //
-// For production RAG with PGVector + gRPC, see NexaGraph.
-//
 // smoke-skip: needs OPENROUTER_API_KEY (live embeddings and model call)
 
 #include <neograph/neograph.h>
