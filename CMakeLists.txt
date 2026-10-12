@@ -1070,7 +1070,8 @@ if(NEOGRAPH_BUILD_ACP)
             $<INSTALL_INTERFACE:include>
     )
 
-    target_compile_definitions(neograph_acp PRIVATE NEOGRAPH_BUILDING_LIBRARY)
+    target_compile_definitions(neograph_acp PRIVATE NEOGRAPH_BUILDING_LIBRARY
+        NEOGRAPH_VERSION_STR="${NEOGRAPH_VERSION}")
     target_link_libraries(neograph_acp
         PUBLIC neograph_core
     )

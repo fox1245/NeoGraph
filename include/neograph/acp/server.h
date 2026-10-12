@@ -6,8 +6,9 @@
  * **newline-delimited JSON over stdio** (one message per line on stdin,
  * one per line on stdout) — the form used by Zed's agent-client-protocol
  * Rust crate and by every editor that launches an agent as a sub-process.
- * The implementation is audited against ACP protocol version 1 and the
- * official schema fetched 2026-08-05.
+ * The implementation targets ACP protocol version 1 and is checked against
+ * the official schema v1.25.0 (agent-client-protocol commit 4cf3dd85,
+ * 2026-10-09) and the official Python and TypeScript SDKs.
  *
  * Methods served (client → agent):
  *   - initialize (exactly once, before all session methods)
@@ -18,9 +19,16 @@
  *
  * Methods emitted (agent → client):
  *   - session/update  (streaming notification while a prompt is in flight)
- *   - fs/read_text_file, fs/write_text_file and session/request_permission
- *     only when requested by graph nodes; filesystem calls require the
- *     corresponding client capability from initialize.
+ *   - session/request_permission, when a node asks for it or when the graph
+ *     raises a NodeInterrupt (see ACPGraphAdapter::interrupt_permission)
+ *   - fs/read_text_file, fs/write_text_file and terminal/&#42; only when the
+ *     client advertised the matching capability in initialize.
+ *
+ * A failed turn is a JSON-RPC error on session/prompt (-32603) whose message
+ * is a public message and whose `data` carries the NeoGraph failure code and
+ * the retry hint; exception text never reaches the client. A provider
+ * refusal ends the turn with stopReason `refusal`, a step limit with
+ * `max_turn_requests`.
  *
  * Adapter pattern mirrors neograph::a2a — by default the inbound prompt
  * text is dropped into the `prompt` channel and the `response` channel
@@ -39,6 +47,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace neograph::acp {
 
@@ -46,16 +55,53 @@ class ACPServer;
 struct ACPServerTestAccess;
 
 /**
+ * @brief What a prompt turn knows about its session.
+ *
+ * Passed to ACPGraphAdapter::build_session_state. `cwd` and
+ * `additional_directories` are the absolute paths the client sent in
+ * session/new (or session/resume); relative paths a node receives from the
+ * client resolve against `cwd`. `mcp_tools` names the tools of the session's
+ * MCP servers.
+ */
+struct NEOGRAPH_API ACPSessionContext {
+    std::string              session_id;
+    std::string              cwd;
+    std::vector<std::string> additional_directories;
+    /// One object per tool: {"server": <mcpServers[].name>, "name": <tool>}.
+    neograph::json           mcp_tools = neograph::json::array();
+};
+
+/**
+ * @brief A NodeInterrupt raised during a prompt turn.
+ *
+ * `reason` and `payload` come from the interrupt; `checkpoint_id` is the
+ * checkpoint the run paused at.
+ */
+struct NEOGRAPH_API ACPInterrupt {
+    std::string    session_id;
+    std::string    node;
+    std::string    reason;
+    neograph::json payload;
+    std::string    checkpoint_id;
+};
+
+/// The session/request_permission request that asks the user about an
+/// interrupt (see ACPGraphAdapter::interrupt_permission).
+struct NEOGRAPH_API ACPInterruptPermission {
+    ToolCallUpdate                tool_call;
+    std::vector<PermissionOption> options;
+};
+
+/**
  * @brief Map between ACP `ContentBlock[]` and the engine's channels.
  *
- * The default does the simplest possible thing: concatenate all text
- * blocks into the input channel; read a string out of the output
- * channel; emit that string as a single `agent_message_chunk` followed
- * by StopReason::Completed.
+ * The default concatenates the text of every block into the input channel —
+ * text blocks verbatim, `resource_link` blocks as `[name](uri)`, embedded
+ * text resources as their text — reads a string out of the output channel
+ * and sends it as one `agent_message_chunk` before StopReason::EndTurn.
  *
  * Override to handle images/audio/embedded resources, to wire up a
- * conversation-history channel, or to emit per-super-step thought
- * chunks during the run (see @ref emit_chunks_from_state below).
+ * conversation-history channel, or to change how interrupts are presented.
  */
 class NEOGRAPH_API ACPGraphAdapter {
   public:
@@ -67,8 +113,10 @@ class NEOGRAPH_API ACPGraphAdapter {
     /// Channel name to read the agent's text reply from (default "response").
     virtual std::string output_channel() const { return "response"; }
 
-    /// Concatenate every text-typed ContentBlock with single-space joins;
-    /// non-text blocks are ignored unless the adapter overrides this.
+    /// Join the text of every block with single spaces: text blocks
+    /// verbatim, `resource_link` as `[name](uri)`, embedded resources as their
+    /// text (or as a link when they carry a blob). Image and audio blocks
+    /// contribute nothing unless the adapter overrides this.
     virtual std::string extract_user_text(
         const std::vector<ContentBlock>& blocks) const;
 
@@ -82,11 +130,42 @@ class NEOGRAPH_API ACPGraphAdapter {
         const std::vector<ContentBlock>& blocks,
         const std::string& session_id) const;
 
+    /// What the server calls to build a turn's initial state. The default
+    /// calls @ref build_initial_state (so existing overrides keep working) and
+    /// then seeds, when the state is an object that does not set them already,
+    /// `_acp_cwd`, `_acp_additional_directories` and `_acp_mcp_tools`. A graph
+    /// that does not declare those channels ignores them.
+    virtual neograph::json build_session_state(
+        const std::vector<ContentBlock>& blocks,
+        const ACPSessionContext& session) const;
+
     /// Pull the agent's text reply out of the graph's final state.
     /// Default looks at `channels[<output_channel()>].value`, then falls
-    /// back to `channels.messages[-1].content` (matches ReAct examples).
+    /// back to the content of the last assistant message in
+    /// `channels.messages` (matches ReAct examples).
     virtual std::string extract_agent_text(
         const neograph::json& output) const;
+
+    /**
+     * Present a NodeInterrupt to the user. The server sends the returned
+     * request as session/request_permission in the same prompt turn and
+     * resumes the run with interrupt_resume_value() of the option the user
+     * selects. The default is a tool call titled with the interrupt reason
+     * (kind "other", status "pending", rawInput = the payload, and the
+     * interrupt under `_meta["neograph/interrupt"]`) with the options
+     * "approve" (allow_once) and "reject" (reject_once).
+     *
+     * Return std::nullopt when the interrupt cannot be answered by a choice;
+     * the turn then fails with a JSON-RPC error whose data.code is
+     * NG.Interrupted.
+     */
+    virtual std::optional<ACPInterruptPermission> interrupt_permission(
+        const ACPInterrupt& interrupt) const;
+
+    /// The resume value for the option the user selected. Default: the
+    /// option id as a JSON string ("approve" or "reject").
+    virtual neograph::json interrupt_resume_value(
+        const ACPInterrupt& interrupt, const std::string& option_id) const;
 };
 
 /**
@@ -136,9 +215,14 @@ class NEOGRAPH_API ACPClient {
     /// True once @ref bind has been called with a non-null server.
     bool bound() const noexcept;
 
-    /// Default per-call timeout. Editors usually respond fast, but
-    /// fs/* may be slow for large files; tune via @ref set_timeout.
+    /// Per-call timeout for fs/* requests (default 30 s). Editors usually
+    /// respond fast, but fs/* may be slow for large files.
     void set_timeout(std::chrono::milliseconds t);
+
+    /// Timeout for session/request_permission. Default: none — a permission
+    /// prompt waits for the user until the prompt turn is cancelled. Pass a
+    /// duration to bound it; on expiry the call throws.
+    void set_permission_timeout(std::optional<std::chrono::milliseconds> t);
 
     /// Read a workspace file via the editor. `line` is 1-based;
     /// omitted = from start. `limit` is the max line count;
@@ -158,16 +242,20 @@ class NEOGRAPH_API ACPClient {
     /// tool call. Blocks until the user picks an option or the prompt
     /// is cancelled. The returned outcome tells the caller whether to
     /// proceed (kind == Selected, inspect optionId/kind) or abort
-    /// (kind == Cancelled — the prompt turn itself was cancelled).
+    /// (kind == Cancelled — the prompt turn itself was cancelled, either
+    /// because the client answered "cancelled" or because session/cancel
+    /// arrived while the request was pending).
     /// Throws if not yet bound to a server.
     RequestPermissionOutcome request_permission(
         std::string_view session_id,
         const ToolCallUpdate&  tool_call,
         const std::vector<PermissionOption>& options);
 
+
   private:
     ACPServer*               server_ = nullptr;
     std::chrono::milliseconds timeout_{std::chrono::seconds(30)};
+    std::optional<std::chrono::milliseconds> permission_timeout_;
 };
 
 /**
@@ -193,8 +281,12 @@ class NEOGRAPH_API ACPServer {
     using NotificationSink = std::function<void(const neograph::json&)>;
 
     /// @param engine   The graph engine that handles incoming prompts.
-    /// @param info     Free-form agent_info bag returned in initialize.
-    ///                 Typically `{"name":"my-agent","version":"0.1.0"}`.
+    /// @param info     agentInfo returned in initialize: an ACP Implementation
+    ///                 `{"name":"my-agent","version":"0.1.0"}` with an
+    ///                 optional string `title` and object `_meta`. A missing
+    ///                 or non-string name/version is filled with
+    ///                 "neograph-agent" / the NeoGraph version, and any other
+    ///                 key is dropped, so the reply always validates.
     /// @param adapter  Optional input/output mapping override.
     ACPServer(std::shared_ptr<neograph::graph::GraphEngine> engine,
               neograph::json info,
@@ -258,10 +350,16 @@ class NEOGRAPH_API ACPServer {
     /// checkpoint. The terminal session/prompt response then carries
     /// `StopReason::Cancelled`.
     ///
-    /// A cancel received after `session/new` but before the first prompt is
-    /// consumed by that prompt. Once a terminal response has committed, a
-    /// cancel with no active prompt is ignored as stale: ACP does not include
-    /// a prompt/request id that could safely associate it with a future turn.
+    /// session/cancel cancels the session's ongoing prompt turn; a cancel
+    /// with no prompt running is ignored. An embedder whose transport can
+    /// reorder messages may opt into @ref set_pre_armed_cancel, under which a
+    /// cancel that arrives before a session's first prompt cancels it.
+    ///
+    /// While a turn waits for an agent→client request (fs/*, terminal/*,
+    /// session/request_permission), session/cancel gives the client a short
+    /// grace to answer on its own (ACP requires a client to answer pending
+    /// permission requests with `cancelled`); after it the server sends
+    /// `$/cancel_request` for the request and stops waiting.
     ///
     /// **Destructor semantics**: ~ACPServer joins all in-flight
     /// session/prompt worker threads before returning. Each worker
@@ -271,9 +369,22 @@ class NEOGRAPH_API ACPServer {
     /// destruction if you need a bounded-latency teardown.
     void stop();
     /// Bound concurrently executing sessions; reject excess prompts before
-    /// any graph node runs. Defaults to 32.
+    /// any graph node runs (JSON-RPC -32603 with data.reason "overloaded").
+    /// Defaults to 32.
     void set_max_inflight_prompts(std::size_t limit);
     bool initialized() const;
+
+    /// Opt in to the pre-armed cancel: a session/cancel received after
+    /// session/new but before the session's first prompt cancels that prompt.
+    /// Off by default — on an ordered transport such as stdio a cancel with no
+    /// prompt running is stale and must not cancel a later turn.
+    void set_pre_armed_cancel(bool enabled);
+
+    /// How long run() lets in-flight prompts finish after its input reaches
+    /// EOF (the client closed the connection) before it cancels them.
+    /// Defaults to one second.
+    void set_eof_grace(std::chrono::milliseconds grace);
+
 
     /// Handle for issuing agent→client requests (fs/*, etc.). On first
     /// call lazily creates a client bound to this server and caches it.
@@ -289,10 +400,14 @@ class NEOGRAPH_API ACPServer {
 
     /// Issue a JSON-RPC request to the connected client and block
     /// until a response arrives. Used internally by @ref ACPClient;
-    /// exposed publicly so user code can issue protocol extensions
-    /// (e.g. session/request_permission once that surface is added).
-    /// Throws on transport not yet connected, on `error` envelope, and
-    /// on timeout.
+    /// exposed publicly so user code can issue protocol extensions.
+    /// fs/*, terminal/* and elicitation/* require the matching client
+    /// capability. When `params.sessionId` names a session with a prompt
+    /// turn in flight, cancelling that turn ends the wait (after the grace
+    /// described at @ref stop) with neograph::graph::CancelledException.
+    /// `timeout` of std::chrono::milliseconds::max() waits without a
+    /// deadline. Throws std::runtime_error on transport not yet connected,
+    /// on a missing capability, on an `error` envelope, and on timeout.
     neograph::json call_client(std::string method,
                                 neograph::json params,
                                 std::chrono::milliseconds timeout

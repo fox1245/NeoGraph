@@ -8,8 +8,9 @@
  * **agent** side — exposing a compiled graph as an ACP server that an
  * Spec: https://agentclientprotocol.com/protocol/v1/schema
  *
- * The wire contract audited here is ACP protocol version 1 against the
- * official schema fetched 2026-08-05. ProtocolVersion remains an integer;
+ * The wire contract is ACP protocol version 1, checked against the official
+ * schema v1.25.0 (github.com/agentclientprotocol/agent-client-protocol,
+ * schema/v1 at commit 4cf3dd85, 2026-10-09). ProtocolVersion remains an integer;
  * optional fields are omitted when unsupported and unknown fields are kept
  * in raw JSON where this API exposes a pass-through object.
  * Coverage in this header:
@@ -88,6 +89,9 @@ struct NEOGRAPH_API FsCapabilities {
 struct NEOGRAPH_API ClientCapabilities {
     FsCapabilities fs;
     bool           terminal = false;  ///< terminal/&#42; methods supported.
+    /// The client sent an `elicitation` capability object; elicitation/&#42;
+    /// requests are allowed only then.
+    bool           elicitation = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -193,12 +197,12 @@ struct NEOGRAPH_API PromptRequest {
 };
 
 /// Why the agent stopped responding for this turn. Values mirror the
-/// official ACP schema (zed-industries/agent-client-protocol,
-/// schema/schema.json: StopReason). Stop reasons that don't apply to
-/// NeoGraph today (max_tokens, max_turn_requests, refusal) are
-/// modelled so consumers can still round-trip them through to_json /
-/// from_json without loss; the runtime only ever emits EndTurn or
-/// Cancelled in the baseline server.
+/// official ACP schema (schema/v1/schema.json: StopReason). ACPServer emits
+/// EndTurn for a turn that succeeded, Cancelled after session/cancel,
+/// Refusal for a provider safety block (NG.SafetyBlocked), MaxTurnRequests
+/// when the run hit its step limit and MaxTokens when a node reported the
+/// run's model-token budget exhausted. Every other failure is a JSON-RPC
+/// error on session/prompt, never a stop reason.
 enum class StopReason {
     EndTurn,         ///< "end_turn" — turn finished normally.
     MaxTokens,       ///< "max_tokens" — model hit the token cap.

@@ -1,17 +1,28 @@
 #include <neograph/acp/server.h>
 
+#include <neograph/graph/cancel.h>
+#include <neograph/graph/engine.h>
 #include <neograph/graph/types.h>
 #include <neograph/graph/invocation.h>
+#include <neograph/tool.h>
 
+#include "../core/tool_failure.h"
+
+
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <set>
 #include <future>
 #include <iostream>
 #include <limits>
 #include <map>
 #include <mutex>
+#include <random>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -19,6 +30,10 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#ifndef NEOGRAPH_VERSION_STR
+#define NEOGRAPH_VERSION_STR "unknown"
+#endif
 
 namespace neograph::acp {
 
@@ -28,10 +43,26 @@ namespace neograph::acp {
 std::string
 ACPGraphAdapter::extract_user_text(const std::vector<ContentBlock>& blocks) const {
     std::string out;
-    for (auto& b : blocks) {
+    auto append = [&out](const std::string& piece) {
+        if (piece.empty()) return;
+        if (!out.empty()) out.push_back(' ');
+        out.append(piece);
+    };
+    for (const auto& b : blocks) {
         if (b.type == "text") {
-            if (!out.empty()) out.push_back(' ');
-            out.append(b.text);
+            append(b.text);
+        } else if (b.type == "resource_link") {
+            // ResourceLink is baseline prompt content (ACP initialization):
+            // keep it visible to the graph as a Markdown link.
+            append("[" + (b.name.empty() ? b.uri : b.name) + "](" + b.uri + ")");
+        } else if (b.type == "resource" && b.resource.is_object()) {
+            const auto resource = b.resource;
+            if (resource.contains("text") && resource["text"].is_string()) {
+                append(resource["text"].get<std::string>());
+            } else if (resource.contains("uri") && resource["uri"].is_string()) {
+                const auto uri = resource["uri"].get<std::string>();
+                append("[" + uri + "](" + uri + ")");
+            }
         }
     }
     return out;
@@ -47,6 +78,26 @@ ACPGraphAdapter::build_initial_state(
     return state;
 }
 
+neograph::json
+ACPGraphAdapter::build_session_state(
+    const std::vector<ContentBlock>& blocks,
+    const ACPSessionContext& session) const {
+    auto state = build_initial_state(blocks, session.session_id);
+    if (state.is_object()) {
+        if (!state.contains("_acp_cwd")) state["_acp_cwd"] = session.cwd;
+        if (!state.contains("_acp_additional_directories")) {
+            auto dirs = neograph::json::array();
+            for (const auto& dir : session.additional_directories) dirs.push_back(dir);
+            state["_acp_additional_directories"] = std::move(dirs);
+        }
+        if (!state.contains("_acp_mcp_tools")) {
+            state["_acp_mcp_tools"] = session.mcp_tools.is_array()
+                ? session.mcp_tools : neograph::json::array();
+        }
+    }
+    return state;
+}
+
 std::string
 ACPGraphAdapter::extract_agent_text(const neograph::json& output) const {
     if (output.contains("channels")) {
@@ -59,10 +110,17 @@ ACPGraphAdapter::extract_agent_text(const neograph::json& output) const {
         }
         if (ch.contains("messages") && ch["messages"].contains("value")) {
             auto msgs = ch["messages"]["value"];
-            if (msgs.is_array() && !msgs.empty()) {
-                auto last = msgs[msgs.size() - 1];
-                if (last.is_object() && last.contains("content")) {
-                    auto c = last["content"];
+            // The agent's reply is the last assistant message. A trailing tool
+            // result is not a reply, and a failed one holds the tool's error
+            // text, which must not reach the client.
+            if (msgs.is_array()) {
+                for (std::size_t i = msgs.size(); i-- > 0;) {
+                    auto message = msgs[i];
+                    if (!message.is_object()) continue;
+                    const auto role = message.value("role", std::string("assistant"));
+                    if (role != "assistant") continue;
+                    if (!message.contains("content")) return "";
+                    auto c = message["content"];
                     if (c.is_string()) return c.get<std::string>();
                     return c.dump();
                 }
@@ -72,18 +130,79 @@ ACPGraphAdapter::extract_agent_text(const neograph::json& output) const {
     return "";
 }
 
+std::optional<ACPInterruptPermission>
+ACPGraphAdapter::interrupt_permission(const ACPInterrupt& interrupt) const {
+    ACPInterruptPermission permission;
+    auto& call = permission.tool_call;
+    call.tool_call_id = "neograph-interrupt-"
+        + (interrupt.checkpoint_id.empty() ? interrupt.session_id : interrupt.checkpoint_id);
+    call.title = interrupt.reason.empty()
+        ? std::string("The agent needs your approval to continue")
+        : interrupt.reason;
+    call.kind = "other";
+    call.status = "pending";
+    neograph::json raw = neograph::json::object();
+    if (!interrupt.payload.is_null()) raw["rawInput"] = interrupt.payload;
+    // ACP reserves `_meta` for implementation metadata.
+    raw["_meta"] = neograph::json{
+        {"neograph/interrupt", {
+            {"node", interrupt.node},
+            {"reason", interrupt.reason},
+            {"payload", interrupt.payload},
+            {"checkpointId", interrupt.checkpoint_id},
+        }},
+    };
+    call.raw = std::move(raw);
+    permission.options = {
+        {"approve", "Approve", "allow_once"},
+        {"reject", "Reject", "reject_once"},
+    };
+    return permission;
+}
+
+neograph::json
+ACPGraphAdapter::interrupt_resume_value(const ACPInterrupt&,
+                                        const std::string& option_id) const {
+    return neograph::json(option_id);
+}
+
+namespace server_internal {
+/// One client-supplied stdio MCP server, validated.
+struct McpServerSpec {
+    std::string name;
+    std::string command;
+    std::vector<std::string> args;
+    std::vector<std::pair<std::string, std::string>> env;
+};
+}  // namespace server_internal
+using server_internal::McpServerSpec;
+
 // ---------------------------------------------------------------------------
 // JSON-RPC envelope helpers
 // ---------------------------------------------------------------------------
 namespace {
 
-neograph::json jsonrpc_error(int code, std::string msg, const neograph::json& id) {
+/// ACP ErrorCode values (schema/v1 ErrorCode) used by this server.
+constexpr int kInvalidRequest   = -32600;
+constexpr int kMethodNotFound   = -32601;
+constexpr int kInvalidParams    = -32602;
+constexpr int kInternalError    = -32603;
+constexpr int kRequestCancelled = -32800;
+constexpr int kResourceNotFound = -32002;
+
+/// How long a cancelled turn waits for the client to answer a pending
+/// agent->client request on its own before the server abandons it.
+constexpr auto kClientRequestCancelGrace = std::chrono::milliseconds(500);
+
+neograph::json jsonrpc_error(int code, std::string msg, const neograph::json& id,
+                             neograph::json data = neograph::json()) {
     neograph::json env;
     env["jsonrpc"] = "2.0";
     env["id"]      = id;
     neograph::json e;
     e["code"]    = code;
     e["message"] = std::move(msg);
+    if (!data.is_null()) e["data"] = std::move(data);
     env["error"] = std::move(e);
     return env;
 }
@@ -104,15 +223,29 @@ neograph::json jsonrpc_notify(std::string method, neograph::json params) {
     return env;
 }
 
+/// A refusal of a request the server cannot serve right now. ACP reserves
+/// -32000 for "Authentication required", so capacity and single-flight
+/// refusals are internal errors with a machine-readable reason.
+neograph::json busy_error(std::string message, const char* reason,
+                          const neograph::json& id) {
+    return jsonrpc_error(kInternalError, std::move(message), id,
+                         neograph::json{{"reason", reason}});
+}
+
+/// Session ids are unique across processes: a resumed session must never
+/// collide with an id another agent process persisted.
 std::string fresh_session_id() {
-    static std::atomic<std::uint64_t> counter{0};
-    auto n = counter.fetch_add(1, std::memory_order_relaxed);
-    auto seed = static_cast<std::uint64_t>(
-        std::chrono::steady_clock::now().time_since_epoch().count());
-    char buf[40];
-    std::snprintf(buf, sizeof(buf), "sess-%08llx-%012llx",
-                  static_cast<unsigned long long>(seed & 0xFFFFFFFF),
-                  static_cast<unsigned long long>(n));
+    static std::mutex mutex;
+    static std::random_device device;
+    std::array<std::uint32_t, 4> words{};
+    {
+        std::lock_guard lock(mutex);
+        for (auto& word : words) word = device();
+    }
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "sess-%08x%08x%08x%08x",
+                  static_cast<unsigned>(words[0]), static_cast<unsigned>(words[1]),
+                  static_cast<unsigned>(words[2]), static_cast<unsigned>(words[3]));
     return buf;
 }
 
@@ -141,6 +274,122 @@ bool has_array(const neograph::json& object, const char* key) {
     return object.contains(key) && object[key].is_array();
 }
 
+bool is_absolute_path(const std::string& path) {
+    return !path.empty() && path.front() == '/';
+}
+
+/// agentInfo must be an ACP Implementation: string name and version, optional
+/// string title and object _meta. Fill what is missing, drop the rest.
+neograph::json normalize_agent_info(const neograph::json& info) {
+    std::string name = "neograph-agent";
+    std::string version = NEOGRAPH_VERSION_STR;
+    neograph::json out = neograph::json::object();
+    if (info.is_object()) {
+        if (has_string(info, "name")) name = info["name"].get<std::string>();
+        if (has_string(info, "version")) version = info["version"].get<std::string>();
+    }
+    out["name"] = name;
+    out["version"] = version;
+    if (info.is_object()) {
+        if (info.contains("title") && info["title"].is_string()) out["title"] = info["title"];
+        if (info.contains("_meta") && info["_meta"].is_object()) out["_meta"] = info["_meta"];
+    }
+    return out;
+}
+
+/// Validate a session/prompt ContentBlock array against the schema and the
+/// advertised promptCapabilities. Returns the error message, or empty.
+std::string validate_prompt_blocks(const neograph::json& prompt,
+                                   const PromptCapabilities& caps) {
+    for (const auto& block : prompt) {
+        if (!block.is_object() || !has_string(block, "type")) {
+            return "Invalid params: malformed content block";
+        }
+        const auto type = block["type"].get<std::string>();
+        if (type == "text") {
+            if (!has_string(block, "text", true))
+                return "Invalid params: text content requires text";
+        } else if (type == "image" || type == "audio") {
+            if (!has_string(block, "data", true) || !has_string(block, "mimeType"))
+                return "Invalid params: " + type + " content requires data and mimeType";
+            if ((type == "image" && !caps.image) || (type == "audio" && !caps.audio))
+                return "Invalid params: " + type + " content is not supported by this agent "
+                       "(promptCapabilities." + type + " is false)";
+        } else if (type == "resource_link") {
+            if (!has_string(block, "uri") || !has_string(block, "name", true))
+                return "Invalid params: resource_link content requires uri and name";
+        } else if (type == "resource") {
+            if (!block.contains("resource") || !block["resource"].is_object()
+                || !has_string(block["resource"], "uri")
+                || !(has_string(block["resource"], "text", true)
+                     || has_string(block["resource"], "blob", true)))
+                return "Invalid params: resource content requires a resource with uri and text or blob";
+            if (!caps.embedded_context)
+                return "Invalid params: embedded resource content is not supported by this agent "
+                       "(promptCapabilities.embeddedContext is false)";
+        } else {
+            return "Invalid params: unknown content block type";
+        }
+    }
+    return {};
+}
+
+/// Parse `mcpServers` (already known to be an array of objects). Returns the
+/// error message, or empty.
+std::string parse_mcp_servers(const neograph::json& servers,
+                              std::vector<McpServerSpec>& out) {
+    std::size_t index = 0;
+    for (const auto& server : servers) {
+        const auto where = "mcpServers[" + std::to_string(index++) + "]";
+        if (!server.is_object()) return "Invalid params: " + where + " must be an object";
+        if (server.contains("type") && !server["type"].is_null()) {
+            if (!server["type"].is_string())
+                return "Invalid params: " + where + ".type must be a string";
+            const auto type = server["type"].get<std::string>();
+            if (type == "http" || type == "sse") {
+                return "Invalid params: " + where + " uses the " + type
+                     + " transport, which this agent does not advertise "
+                       "(agentCapabilities.mcpCapabilities." + type + " is false)";
+            }
+            if (type != "stdio")
+                return "Invalid params: " + where + " has an unknown transport type";
+        }
+        McpServerSpec spec;
+        if (!has_string(server, "name", true) || !has_string(server, "command"))
+            return "Invalid params: " + where + " requires name and command";
+        spec.name = server["name"].get<std::string>();
+        spec.command = server["command"].get<std::string>();
+        if (server.contains("args")) {
+            if (!server["args"].is_array())
+                return "Invalid params: " + where + ".args must be an array of strings";
+            for (const auto& arg : server["args"]) {
+                if (!arg.is_string())
+                    return "Invalid params: " + where + ".args must be an array of strings";
+                spec.args.push_back(arg.get<std::string>());
+            }
+        }
+        if (server.contains("env")) {
+            if (!server["env"].is_array())
+                return "Invalid params: " + where + ".env must be an array";
+            for (const auto& variable : server["env"]) {
+                if (!variable.is_object() || !has_string(variable, "name")
+                    || !has_string(variable, "value", true))
+                    return "Invalid params: " + where + ".env entries require name and value";
+                const auto name = variable["name"].get<std::string>();
+                const auto value = variable["value"].get<std::string>();
+                if (name.find('=') != std::string::npos || name.find('\0') != std::string::npos
+                    || value.find('\0') != std::string::npos)
+                    return "Invalid params: " + where + ".env contains an invalid entry";
+                spec.env.emplace_back(variable["name"].get<std::string>(),
+                                      variable["value"].get<std::string>());
+            }
+        }
+        out.push_back(std::move(spec));
+    }
+    return {};
+}
+
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -157,6 +406,11 @@ struct ACPServer::Impl {
     std::atomic<bool>                             initialized{false};
     std::atomic<bool>                             initialize_seen{false};
     std::atomic<bool>                             stop_flag{false};
+    /// Set by run() when its input reaches EOF: the client is gone, so a
+    /// pending agent->client request can no longer be answered.
+    std::atomic<bool>                             transport_closed{false};
+    std::atomic<bool>                             pre_armed_cancel{false};
+    std::atomic<std::int64_t>                     eof_grace_ms{1000};
     /// Toggled on by run() entry, off on exit. Mirrors
     /// A2AServer::is_running so a generic protocol-server supervisor
     /// can poll either uniformly.
@@ -170,20 +424,32 @@ struct ACPServer::Impl {
     /// `std::function` assignment would have during SBO reseating.
     std::shared_ptr<NotificationSink>             sink_;
 
-    std::mutex                                    sessions_mu;
-    std::map<std::string, std::string>            sessions;
-    /// Sessions whose latest engine result is paused. The next prompt is
-    /// consumed as the resume value exactly once instead of starting at entry.
+    /// One client-supplied MCP server attached to a session.
+    struct McpAttachment {
+        std::string                                  server_name;
+        std::vector<std::shared_ptr<neograph::Tool>> tools;
+    };
+
+    struct SessionState {
+        std::string                cwd;
+        std::vector<std::string>   additional_directories;
+        std::vector<McpAttachment> mcp;
+    };
+
+    mutable std::mutex                            sessions_mu;
+    std::map<std::string, SessionState>           sessions;
+    /// Sessions restored by session/resume whose latest checkpoint is paused.
+    /// The next prompt is consumed as the resume value exactly once instead of
+    /// starting at entry.
     std::set<std::string>                         interrupted_sessions;
     /// An active prompt owns its token until its terminal response leaves the
-    /// notification sink. A cancel before a session's first prompt is consumed
-    /// by that prompt.
+    /// notification sink.
     std::map<std::string, std::shared_ptr<neograph::graph::CancelToken>>
                                                     active_cancel_tokens;
+    /// Pre-armed cancels (opt-in, see set_pre_armed_cancel).
     std::set<std::string>                         pending_cancels;
-    /// A terminal prompt response has been committed for these sessions. ACP
-    /// cancel carries only a session id, so a cancel without an active prompt
-    /// after this point is stale rather than a pre-cancel for a later turn.
+    /// A terminal prompt response has been committed for these sessions. A
+    /// cancel without an active prompt after this point is stale.
     std::set<std::string>                         terminal_prompt_sessions;
 
     /// Outbound JSON-RPC: id → promise that the run-loop reader fulfils
@@ -254,6 +520,15 @@ struct ACPServer::Impl {
         for (auto& worker : finished) worker.first.join();
     }
 
+    void cancel_active_prompts() {
+        std::vector<std::shared_ptr<neograph::graph::CancelToken>> tokens;
+        {
+            std::lock_guard lk(sessions_mu);
+            for (const auto& [_, token] : active_cancel_tokens) tokens.push_back(token);
+        }
+        for (const auto& token : tokens) token->cancel();
+    }
+
     struct WorkerReservation {
         Impl*       owner;
         std::string session_id;
@@ -299,7 +574,17 @@ struct ACPServer::Impl {
     /// Cached client handle returned by ACPServer::client().
     std::shared_ptr<ACPClient>                    client_handle;
 
-    std::shared_ptr<ACPGraphAdapter> adapter_ptr() { return adapter; }
+    /// How one prompt turn ended.
+    struct TurnResult {
+        StopReason stop = StopReason::EndTurn;
+        std::optional<neograph::graph::FailureVerdict> failure;
+        /// The run stopped on a cancellation the client did not ask for
+        /// (shutdown, a node that aborted): JSON-RPC -32800.
+        bool        internal_cancel = false;
+        std::string agent_text;
+        std::string boundary_status = "completed";
+    };
+
 
     neograph::json handle_initialize(const neograph::json& params,
                                      const neograph::json& id);
@@ -307,11 +592,29 @@ struct ACPServer::Impl {
                                        const neograph::json& id);
     neograph::json handle_session_resume(const neograph::json& params,
                                           const neograph::json& id);
-    void           handle_session_prompt(ACPServer& owner,
-                                         const neograph::json& params,
+    void           handle_session_prompt(const neograph::json& params,
                                          const neograph::json& id,
                                          bool reply_expected);
     void           handle_session_cancel(const neograph::json& params);
+
+    TurnResult run_turn(const PromptRequest& req,
+                        const ACPSessionContext& session,
+                        const std::shared_ptr<neograph::graph::CancelToken>& token,
+                        bool resume_pending);
+
+    /// Start the session's MCP servers. Returns an error envelope on failure
+    /// (after shutting down any server it already started), else null.
+    neograph::json attach_mcp_servers(const std::vector<McpServerSpec>& specs,
+                                      const std::string& cwd,
+                                      const neograph::json& id,
+                                      std::vector<McpAttachment>& out);
+
+    static void shutdown_mcp(std::vector<McpAttachment>& attachments) noexcept {
+        attachments.clear();
+    }
+
+    neograph::json request_client(std::string method, neograph::json params,
+                                  std::chrono::milliseconds timeout);
 
     void emit(const neograph::json& env) {
         // Take a stable snapshot of the current sink shared_ptr — even
@@ -321,13 +624,13 @@ struct ACPServer::Impl {
         if (s && *s) (*s)(env);
     }
 
-    void emit_internal_error(const neograph::json& id,
-                             const char* prefix,
-                             const char* detail = nullptr) noexcept {
+    /// Report a host failure. The message is fixed: exception text from the
+    /// host, the adapter or the transport never reaches the client.
+    void emit_internal_error(const neograph::json& id) noexcept {
         try {
-            std::string message(prefix);
-            if (detail) message += detail;
-            emit(jsonrpc_error(-32603, message, id));
+            emit(jsonrpc_error(kInternalError, "Internal error", id,
+                               neograph::json{{"code", "NG.UnknownFailure"},
+                                              {"retryable", false}}));
         } catch (...) {
             // A failing transport/sink cannot be used to report its own
             // failure, but it must never escape a prompt worker.
@@ -339,7 +642,7 @@ neograph::json
 ACPServer::Impl::handle_initialize(const neograph::json& params,
                                    const neograph::json& id) {
     if (initialize_seen.load(std::memory_order_acquire)) {
-        return jsonrpc_error(-32600, "initialize may only be called once", id);
+        return jsonrpc_error(kInvalidRequest, "initialize may only be called once", id);
     }
     if (!require_object(params)
         || !params.contains("protocolVersion")
@@ -351,18 +654,18 @@ ACPServer::Impl::handle_initialize(const neograph::json& params,
         || (params.contains("clientInfo")
             && !params["clientInfo"].is_object()
             && !params["clientInfo"].is_null())) {
-        return jsonrpc_error(-32602, "Invalid params: malformed initialize request", id);
+        return jsonrpc_error(kInvalidParams, "Invalid params: malformed initialize request", id);
     }
 
     InitializeRequest req;
     try { from_json(params, req); }
-    catch (const std::exception& e) {
-        return jsonrpc_error(-32602, std::string("Invalid params: ") + e.what(), id);
+    catch (const std::exception&) {
+        return jsonrpc_error(kInvalidParams, "Invalid params: malformed initialize request", id);
     }
     bool expected = false;
     if (!initialize_seen.compare_exchange_strong(
             expected, true, std::memory_order_acq_rel)) {
-        return jsonrpc_error(-32600, "initialize may only be called once", id);
+        return jsonrpc_error(kInvalidRequest, "initialize may only be called once", id);
     }
     client_caps = req.client_capabilities;
 
@@ -381,45 +684,63 @@ ACPServer::Impl::handle_initialize(const neograph::json& params,
 }
 
 neograph::json
+ACPServer::Impl::attach_mcp_servers(const std::vector<McpServerSpec>& specs,
+                                    const std::string& cwd,
+                                    const neograph::json& id,
+                                    std::vector<McpAttachment>& out) {
+    if (specs.empty()) return {};
+    (void)cwd;
+    (void)out;
+    return jsonrpc_error(kInternalError,
+                         "This agent was built without MCP client support", id,
+                         neograph::json{{"reason", "mcp_unsupported"}});
+}
+
+neograph::json
 ACPServer::Impl::handle_session_new(const neograph::json& params,
                                     const neograph::json& id) {
     if (!initialized.load(std::memory_order_acquire)) {
-        return jsonrpc_error(-32000, "initialize must be called first", id);
+        return jsonrpc_error(kInvalidRequest, "initialize must be called first", id);
     }
     if (!require_object(params)
         || !has_string(params, "cwd")
         || !has_array(params, "mcpServers")) {
-        return jsonrpc_error(-32602, "Invalid params: session/new requires cwd and mcpServers", id);
+        return jsonrpc_error(kInvalidParams, "Invalid params: session/new requires cwd and mcpServers", id);
     }
     if (params.contains("additionalDirectories")
         && !params["additionalDirectories"].is_array()) {
-        return jsonrpc_error(-32602, "Invalid params: additionalDirectories must be an array", id);
+        return jsonrpc_error(kInvalidParams, "Invalid params: additionalDirectories must be an array", id);
     }
     for (const auto& path : params.value("additionalDirectories", neograph::json::array())) {
-        if (!path.is_string() || path.get<std::string>().empty()
-            || path.get<std::string>().front() != '/') {
-            return jsonrpc_error(-32602, "Invalid params: workspace paths must be absolute", id);
-        }
-    }
-    for (const auto& server : params["mcpServers"]) {
-        if (!server.is_object()) {
-            return jsonrpc_error(-32602, "Invalid params: MCP servers must be objects", id);
+        if (!path.is_string() || !is_absolute_path(path.get<std::string>())) {
+            return jsonrpc_error(kInvalidParams, "Invalid params: workspace paths must be absolute", id);
         }
     }
     const auto cwd = params["cwd"].get<std::string>();
-    if (cwd.empty() || cwd.front() != '/') {
-        return jsonrpc_error(-32602, "Invalid params: cwd must be absolute", id);
+    if (!is_absolute_path(cwd)) {
+        return jsonrpc_error(kInvalidParams, "Invalid params: cwd must be absolute", id);
+    }
+    std::vector<McpServerSpec> specs;
+    if (auto problem = parse_mcp_servers(params["mcpServers"], specs); !problem.empty()) {
+        return jsonrpc_error(kInvalidParams, std::move(problem), id);
     }
     NewSessionRequest req;
     try { from_json(params, req); }
-    catch (const std::exception& e) {
-        return jsonrpc_error(-32602, std::string("Invalid params: ") + e.what(), id);
+    catch (const std::exception&) {
+        return jsonrpc_error(kInvalidParams, "Invalid params: malformed session/new request", id);
+    }
+
+    SessionState state;
+    state.cwd = req.cwd;
+    state.additional_directories = req.additional_directories;
+    if (auto error = attach_mcp_servers(specs, state.cwd, id, state.mcp); !error.is_null()) {
+        return error;
     }
 
     auto sid = fresh_session_id();
     {
         std::lock_guard lk(sessions_mu);
-        sessions[sid] = req.cwd;
+        sessions[sid] = std::move(state);
     }
     NewSessionResponse resp;
     resp.session_id = sid;
@@ -432,25 +753,38 @@ neograph::json
 ACPServer::Impl::handle_session_resume(const neograph::json& params,
                                        const neograph::json& id) {
     if (!initialized.load(std::memory_order_acquire)) {
-        return jsonrpc_error(-32000, "initialize must be called first", id);
+        return jsonrpc_error(kInvalidRequest, "initialize must be called first", id);
     }
     if (!caps.session.resume) {
-        return jsonrpc_error(-32601, "session/resume is not supported", id);
+        return jsonrpc_error(kMethodNotFound, "session/resume is not supported", id);
     }
     if (!require_object(params)
         || !has_string(params, "sessionId")
         || !has_string(params, "cwd")
-        || (params.contains("mcpServers") && !params["mcpServers"].is_array())) {
-        return jsonrpc_error(-32602, "Invalid params: malformed session/resume request", id);
+        || (params.contains("mcpServers") && !params["mcpServers"].is_array())
+        || (params.contains("additionalDirectories")
+            && !params["additionalDirectories"].is_array())) {
+        return jsonrpc_error(kInvalidParams, "Invalid params: malformed session/resume request", id);
     }
     const auto cwd = params["cwd"].get<std::string>();
-    if (cwd.front() != '/') {
-        return jsonrpc_error(-32602, "Invalid params: cwd must be absolute", id);
+    if (!is_absolute_path(cwd)) {
+        return jsonrpc_error(kInvalidParams, "Invalid params: cwd must be absolute", id);
+    }
+    for (const auto& path : params.value("additionalDirectories", neograph::json::array())) {
+        if (!path.is_string() || !is_absolute_path(path.get<std::string>())) {
+            return jsonrpc_error(kInvalidParams, "Invalid params: workspace paths must be absolute", id);
+        }
+    }
+    std::vector<McpServerSpec> specs;
+    if (params.contains("mcpServers")) {
+        if (auto problem = parse_mcp_servers(params["mcpServers"], specs); !problem.empty()) {
+            return jsonrpc_error(kInvalidParams, std::move(problem), id);
+        }
     }
     ResumeSessionRequest req;
     try { from_json(params, req); }
-    catch (const std::exception& e) {
-        return jsonrpc_error(-32602, std::string("Invalid params: ") + e.what(), id);
+    catch (const std::exception&) {
+        return jsonrpc_error(kInvalidParams, "Invalid params: malformed session/resume request", id);
     }
 
     ResumeReservation reservation(this, req.session_id);
@@ -458,76 +792,268 @@ ACPServer::Impl::handle_session_resume(const neograph::json& params,
         std::lock_guard lk(workers_mu);
         if (inflight_sessions.count(req.session_id) ||
             resuming_sessions.count(req.session_id)) {
-            return jsonrpc_error(
-                -32000,
-                "session_id " + req.session_id + " is already in use",
-                id);
+            return busy_error("session " + req.session_id + " is busy with a prompt turn",
+                              "session_busy", id);
         }
         resuming_sessions.insert(req.session_id);
         reservation.active = true;
     }
 
-    std::optional<neograph::graph::CheckpointPhase> phase;
-    try {
-        phase = execution.latest_resume_phase(req.session_id);
-    } catch (const std::exception& e) {
-        return jsonrpc_error(
-            -32603, std::string("Failed to restore session: ") + e.what(), id);
-    }
-    if (!phase) {
-        return jsonrpc_error(-32001, "Unknown session: " + req.session_id, id);
-    }
-
+    bool known = false;
     {
         std::lock_guard lk(sessions_mu);
         auto existing = sessions.find(req.session_id);
-        if (existing != sessions.end() && !existing->second.empty() &&
-            existing->second != req.cwd) {
+        known = existing != sessions.end();
+        if (known && existing->second.cwd != req.cwd) {
             return jsonrpc_error(
-                -32602, "session/resume cwd does not match the existing session", id);
+                kInvalidParams, "session/resume cwd does not match the existing session", id);
         }
-        sessions[req.session_id] = req.cwd;
-        if (is_interrupt_phase(*phase)) {
+    }
+    // A session this process created never stays paused between turns (an
+    // interrupt is answered inside its turn), so only a session from an
+    // earlier process needs its persisted state. Reading it administers the
+    // shared engine, which refuses while any other run is active.
+    std::optional<neograph::graph::CheckpointPhase> phase;
+    if (!known) {
+        const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        for (;;) {
+            try {
+                phase = execution.latest_resume_phase(req.session_id);
+                break;
+            } catch (const std::logic_error&) {
+                if (std::chrono::steady_clock::now() >= give_up) {
+                    return busy_error("The agent is busy; retry session/resume shortly",
+                                      "engine_busy", id);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            } catch (...) {
+                const auto failure = graph::classify_failure(std::current_exception());
+                return jsonrpc_error(kInternalError, "Failed to restore the session", id,
+                                     neograph::json{{"code", failure.code},
+                                                    {"retryable", failure.retryable}});
+            }
+        }
+    }
+    if (!phase && !known) {
+        // ACP ErrorCode -32002 "Resource not found", as for session/prompt.
+        return jsonrpc_error(kResourceNotFound, "Unknown session: " + req.session_id, id);
+    }
+
+    // session/resume carries the complete MCP server list for the session.
+    SessionState state;
+    state.cwd = req.cwd;
+    state.additional_directories = req.additional_directories;
+    if (auto error = attach_mcp_servers(specs, state.cwd, id, state.mcp); !error.is_null()) {
+        return error;
+    }
+
+    std::vector<McpAttachment> replaced;
+    {
+        std::lock_guard lk(sessions_mu);
+        auto& slot = sessions[req.session_id];
+        replaced = std::move(slot.mcp);
+        slot = std::move(state);
+        if (phase && is_interrupt_phase(*phase)) {
             interrupted_sessions.insert(req.session_id);
-        } else {
+        } else if (!known) {
             interrupted_sessions.erase(req.session_id);
         }
     }
+    shutdown_mcp(replaced);
 
     // ACP v1 session/resume restores context without replaying session/update.
     return jsonrpc_result(neograph::json::object(), id);
 }
 
+ACPServer::Impl::TurnResult
+ACPServer::Impl::run_turn(const PromptRequest& req,
+                          const ACPSessionContext& session,
+                          const std::shared_ptr<neograph::graph::CancelToken>& token,
+                          bool resume_pending) {
+    namespace graph = neograph::graph;
+    TurnResult turn;
+    auto& a = *adapter;
+    auto budget_exhausted = std::make_shared<std::atomic_bool>(false);
+
+    auto request_for = [&](neograph::json input, bool with_input) {
+        graph::RunInvocationRequest request;
+        request.config.thread_id = req.session_id;
+        request.config.cancel_token = token;
+        request.config.budget_exhausted = budget_exhausted;
+        if (with_input) request.config.input = std::move(input);
+        request.metadata.run_id = req.session_id;
+        return request;
+    };
+    auto fail = [&](graph::FailureVerdict failure) {
+        turn.failure = std::move(failure);
+        turn.boundary_status = "error";
+    };
+    auto interrupted_failure = [] {
+        graph::FailureVerdict failure;
+        failure.failure_class = graph::NodeFailureClass::Interrupted;
+        failure.code = graph::node_failure_code(failure.failure_class);
+        return failure;
+    };
+
+    graph::InvocationResult outcome;
+    try {
+        if (resume_pending) {
+            // A pause restored by session/resume: the prompt answers it.
+            graph::RunInvocation invocation(execution, request_for({}, false));
+            outcome = invocation.resume(neograph::json(a.extract_user_text(req.prompt)));
+        } else {
+            auto input = a.build_session_state(req.prompt, session);
+            graph::RunInvocation invocation(execution, request_for(std::move(input), true));
+            outcome = invocation.run();
+        }
+    } catch (...) {
+        fail(graph::classify_failure(std::current_exception(), token.get()));
+        return turn;
+    }
+
+    for (;;) {
+        turn.boundary_status = std::string(graph::to_string(outcome.status));
+        if (outcome.cancelled() && token->is_cancelled()) {
+            turn.stop = StopReason::Cancelled;
+            break;
+        }
+        if (!outcome.succeeded() || !outcome.run_result) {
+            // An Error outcome, or a cancellation the client did not ask for
+            // (a node that aborted), carries its classified failure.
+            fail(outcome.failure.value_or(graph::classify_failure(nullptr)));
+            break;
+        }
+        if (outcome.status == graph::InvocationStatus::MaxSteps) {
+            // A node that crosses the run's model-token budget stops the run
+            // at the next super-step boundary, like a step limit.
+            turn.stop = budget_exhausted->load(std::memory_order_acquire)
+                ? StopReason::MaxTokens : StopReason::MaxTurnRequests;
+            break;
+        }
+        const auto& result = *outcome.run_result;
+        if (!result.interrupted) {
+            try {
+                turn.agent_text = a.extract_agent_text(result.output);
+            } catch (...) {
+                fail(graph::classify_failure(std::current_exception(), token.get()));
+            }
+            break;
+        }
+
+        // A NodeInterrupt: ask the user through session/request_permission in
+        // this same turn and resume the run with the answer.
+        ACPInterrupt interrupt;
+        interrupt.session_id = req.session_id;
+        interrupt.node = result.interrupt_node;
+        interrupt.checkpoint_id = result.checkpoint_id;
+        const auto& value = result.interrupt_value;
+        interrupt.reason = value.is_object()
+            ? value.value("reason", value.value("message", std::string()))
+            : std::string();
+        if (value.is_object() && value.contains("value")) interrupt.payload = value["value"];
+
+        std::optional<ACPInterruptPermission> permission;
+        try {
+            permission = a.interrupt_permission(interrupt);
+        } catch (...) {
+            fail(graph::classify_failure(std::current_exception(), token.get()));
+            break;
+        }
+        if (!permission) {
+            fail(interrupted_failure());
+            break;
+        }
+        RequestPermissionRequest ask;
+        ask.session_id = req.session_id;
+        ask.tool_call = permission->tool_call;
+        ask.options = permission->options;
+        neograph::json ask_json;
+        to_json(ask_json, ask);
+        RequestPermissionResponse answer;
+        bool answered = false;
+        bool cancelled = false;
+        try {
+            auto reply = request_client("session/request_permission", std::move(ask_json),
+                                        std::chrono::milliseconds::max());
+            from_json(reply, answer);
+            answered = true;
+        } catch (const graph::CancelledException&) {
+            cancelled = true;
+        } catch (...) {
+            cancelled = token->is_cancelled();
+        }
+        if (cancelled || (answered && answer.outcome.kind == PermissionOutcomeKind::Cancelled)) {
+            turn.stop = StopReason::Cancelled;
+            break;
+        }
+        if (!answered) {
+            // The client could not answer (error reply, transport gone).
+            fail(interrupted_failure());
+            break;
+        }
+        try {
+            auto resume_value = a.interrupt_resume_value(interrupt, answer.outcome.option_id);
+            graph::RunInvocation invocation(execution, request_for({}, false));
+            // Resume the exact checkpoint the run paused at.
+            outcome = interrupt.checkpoint_id.empty()
+                ? invocation.resume(std::move(resume_value))
+                : invocation.resume_from(interrupt.checkpoint_id, std::move(resume_value));
+        } catch (...) {
+            fail(graph::classify_failure(std::current_exception(), token.get()));
+            break;
+        }
+    }
+
+    if (turn.failure) {
+        using graph::NodeFailureClass;
+        switch (turn.failure->failure_class) {
+        case NodeFailureClass::SafetyBlocked:
+            // A provider safety block is ACP's `refusal` stop reason.
+            turn.stop = StopReason::Refusal;
+            turn.failure.reset();
+            break;
+        case NodeFailureClass::BudgetExhausted:
+            if (budget_exhausted->load(std::memory_order_acquire)) {
+                // The run's model-token budget: ACP's `max_tokens`.
+                turn.stop = StopReason::MaxTokens;
+                turn.failure.reset();
+            }
+            break;
+        case NodeFailureClass::Cancelled:
+            if (!token->is_cancelled()) turn.internal_cancel = true;
+            break;
+        default:
+            break;
+        }
+    }
+    return turn;
+}
+
 void
-ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
-                                       const neograph::json& params,
+ACPServer::Impl::handle_session_prompt(const neograph::json& params,
                                        const neograph::json& id,
                                        bool reply_expected) {
     if (!initialized.load(std::memory_order_acquire)) {
-        if (reply_expected) emit(jsonrpc_error(-32000, "initialize must be called first", id));
+        if (reply_expected) emit(jsonrpc_error(kInvalidRequest, "initialize must be called first", id));
         return;
     }
     if (!require_object(params)
         || !has_string(params, "sessionId")
         || !has_array(params, "prompt")) {
         if (reply_expected) {
-            emit(jsonrpc_error(-32602, "Invalid params: session/prompt requires sessionId and prompt", id));
+            emit(jsonrpc_error(kInvalidParams, "Invalid params: session/prompt requires sessionId and prompt", id));
         }
         return;
     }
-    for (const auto& block : params["prompt"]) {
-        if (!block.is_object() || !has_string(block, "type")) {
-            if (reply_expected) {
-                emit(jsonrpc_error(-32602, "Invalid params: malformed content block", id));
-            }
-            return;
-        }
+    if (auto problem = validate_prompt_blocks(params["prompt"], caps.prompt); !problem.empty()) {
+        if (reply_expected) emit(jsonrpc_error(kInvalidParams, std::move(problem), id));
+        return;
     }
     PromptRequest req;
     try { from_json(params, req); }
-    catch (const std::exception& e) {
+    catch (const std::exception&) {
         if (reply_expected) {
-            emit(jsonrpc_error(-32602, std::string("Invalid params: ") + e.what(), id));
+            emit(jsonrpc_error(kInvalidParams, "Invalid params: malformed session/prompt request", id));
         }
         return;
     }
@@ -535,21 +1061,30 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
         std::lock_guard lk(workers_mu);
         if (resuming_sessions.contains(req.session_id)) {
             if (reply_expected) {
-                emit(jsonrpc_error(-32000,
-                                   "session_id " + req.session_id
-                                       + " is already in use",
-                                   id));
+                emit(busy_error("session " + req.session_id + " is being resumed",
+                                "session_busy", id));
             }
             return;
         }
     }
+    ACPSessionContext session;
+    session.session_id = req.session_id;
     {
         std::lock_guard lk(sessions_mu);
-        if (!sessions.contains(req.session_id)) {
+        auto it = sessions.find(req.session_id);
+        if (it == sessions.end()) {
             if (reply_expected) {
-                emit(jsonrpc_error(-32002, "Unknown session: " + req.session_id, id));
+                emit(jsonrpc_error(kResourceNotFound, "Unknown session: " + req.session_id, id));
             }
             return;
+        }
+        session.cwd = it->second.cwd;
+        session.additional_directories = it->second.additional_directories;
+        for (const auto& attachment : it->second.mcp) {
+            for (const auto& tool : attachment.tools) {
+                session.mcp_tools.push_back(neograph::json{
+                    {"server", attachment.server_name}, {"name", tool->get_name()}});
+            }
         }
     }
 
@@ -568,17 +1103,16 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
     {
         std::lock_guard lk(workers_mu);
         if (inflight_count >= max_inflight_prompts) {
-            // -32000 Server error per JSON-RPC §5.1 (server-defined range).
-            rejection = jsonrpc_error(-32000,
-                std::string("ACP server overloaded: ")
-                + std::to_string(max_inflight_prompts)
-                + " concurrent prompts in flight; retry shortly", id);
+            rejection = busy_error(
+                "ACP agent is at its limit of " + std::to_string(max_inflight_prompts)
+                    + " concurrent prompt turns; retry shortly",
+                "overloaded", id);
         } else if (inflight_sessions.count(req.session_id) ||
                    resuming_sessions.count(req.session_id)) {
-            rejection = jsonrpc_error(-32000,
-                std::string("session_id ") + req.session_id
-                + " is already in use; ACP requires single-flight "
-                  "per session", id);
+            rejection = busy_error(
+                "session " + req.session_id
+                    + " already has a prompt turn in progress",
+                "session_busy", id);
         } else {
             inflight_sessions.insert(req.session_id);
             ++inflight_count;
@@ -619,8 +1153,9 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
         std::promise<void> exited;
         auto exit_future = exited.get_future();
         std::thread worker(
-            [this, req = std::move(req), id, task_cancel, worker_reservation = reservation,
-              exited = std::move(exited), resume_pending, reply_expected]() mutable {
+            [this, req = std::move(req), session = std::move(session), id, task_cancel,
+              worker_reservation = reservation, exited = std::move(exited), resume_pending,
+              reply_expected]() mutable {
                 exited.set_value_at_thread_exit();
                 // Release accounting at body exit, before thread-local cleanup.
                 auto reservation = std::move(worker_reservation);
@@ -638,10 +1173,10 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                         // Error paths still complete this prompt turn. Mark it
                         // terminal so a late cancel cannot cancel the next one.
                         terminal_prompt_sessions.insert(req.session_id);
+                        interrupted_sessions.erase(req.session_id);
                     }
                 };
-                auto commit_terminal = [&](StopReason& stop,
-                                           bool interrupted) {
+                auto commit_terminal = [&](StopReason& stop) {
                     std::lock_guard lk(sessions_mu);
                     // This lock is the cancel-vs-terminal-response
                     // linearization point. A cancel that wins here changes the
@@ -649,11 +1184,10 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                     if (task_cancel->is_cancelled()) {
                         stop = StopReason::Cancelled;
                     }
-                    if (stop != StopReason::Cancelled && interrupted) {
-                        interrupted_sessions.insert(req.session_id);
-                    } else {
-                        interrupted_sessions.erase(req.session_id);
-                    }
+                    // A turn never leaves its session paused: an interrupt is
+                    // answered inside the turn, and a turn that ends otherwise
+                    // starts the next prompt afresh.
+                    interrupted_sessions.erase(req.session_id);
                     auto it = active_cancel_tokens.find(req.session_id);
                     if (it != active_cancel_tokens.end()
                         && it->second == task_cancel) {
@@ -664,133 +1198,35 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                 };
 
                 try {
-                    auto& a = *adapter;
-
-                    neograph::graph::RunConfig cfg;
-                    cfg.thread_id = req.session_id;
-                    cfg.cancel_token = task_cancel;
-
-                    StopReason  stop         = StopReason::EndTurn;
-                    bool        graph_failed = false;
-                    std::string agent_text;
-                    std::string graph_error;
-                    std::string boundary_status = "completed";
-                    neograph::graph::RunResult run_result;
-
-                    try {
-                        if (!resume_pending) {
-                            cfg.input =
-                                a.build_initial_state(req.prompt, req.session_id);
-                        }
-                        neograph::graph::RunInvocationRequest invocation_request;
-                        invocation_request.config = std::move(cfg);
-                        invocation_request.metadata.run_id = req.session_id;
-                        neograph::graph::RunInvocation invocation(
-                            execution, std::move(invocation_request));
-
-                        auto outcome = resume_pending
-                            ? invocation.resume(neograph::json(
-                                  a.extract_user_text(req.prompt)))
-                            : invocation.run();
-                        boundary_status = std::string(
-                            neograph::graph::to_string(outcome.status));
-                        if (outcome.cancelled()) {
-                            stop = StopReason::Cancelled;
-                        } else if (!outcome.succeeded() || !outcome.run_result) {
-                            graph_failed = true;
-                            graph_error = outcome.error.empty()
-                                ? "graph invocation failed"
-                                : outcome.error;
-                        } else if (outcome.status ==
-                                   neograph::graph::InvocationStatus::MaxSteps) {
-                            stop = StopReason::MaxTurnRequests;
-                        } else {
-                            run_result = std::move(*outcome.run_result);
-                            if (!run_result.interrupted) {
-                                agent_text =
-                                    a.extract_agent_text(run_result.output);
-                            }
-                        }
-                    } catch (const std::exception& e) {
-                        boundary_status = "error";
-                        graph_failed = true;
-                        graph_error = e.what();
-                    } catch (...) {
-                        graph_failed = true;
-                        boundary_status = "error";
-                        graph_error = "unknown exception";
-                    }
-
+                    auto turn = run_turn(req, session, task_cancel, resume_pending);
                     if (task_cancel->is_cancelled()) {
-                        stop = StopReason::Cancelled;
+                        // Cancellation wins a concurrent failure so the client
+                        // observes one terminal cancelled response.
+                        turn.stop = StopReason::Cancelled;
+                        turn.failure.reset();
+                        turn.internal_cancel = false;
                     }
 
-                    // Cancellation wins a concurrent graph failure so the client
-                    // observes one terminal cancelled response, not an error update.
-                    if (graph_failed && stop != StopReason::Cancelled) {
-                        // ACP's StopReason vocabulary has no generic error
-                        // value. Preserve the existing protocol shape:
-                        // diagnostic update, then a normal end_turn response.
+                    if (!turn.failure && turn.stop == StopReason::EndTurn
+                        && !turn.agent_text.empty()) {
                         SessionNotification n;
                         n.session_id = req.session_id;
                         n.update.session_update = "agent_message_chunk";
-                        n.update.content = ContentBlock::text_block(
-                            std::string("(graph error: ") + graph_error + ")");
+                        n.update.content = ContentBlock::text_block(turn.agent_text);
                         neograph::json nj;
                         to_json(nj, n);
                         emit(jsonrpc_notify("session/update", std::move(nj)));
-                    } else {
-                        if (stop == StopReason::Cancelled) {
-                            // Cancellation has no final agent content. Emit only
-                            // the terminal prompt response below, never an empty
-                            // session/update followed by a second terminal signal.
-                        } else if (run_result.interrupted) {
-                            const auto reason = run_result.interrupt_value.value(
-                                "reason", run_result.interrupt_value.value(
-                                    "message", std::string("Graph execution interrupted")));
-                            const auto payload = run_result.interrupt_value.contains("value")
-                                ? run_result.interrupt_value["value"]
-                                : neograph::json();
-
-                            SessionNotification n;
-                            n.session_id = req.session_id;
-                            n.update.session_update = "agent_message_chunk";
-                            n.update.content = ContentBlock::text_block(reason);
-                            // ACP v1 reserves `_meta` for implementation metadata.
-                            // Source: agent-client-protocol-schema/src/v1/ext.rs
-                            // (fetched 2026-07-21 for NeoGraph #153).
-                            n.update.raw = {
-                                {"_meta", {
-                                    {"neograph/interrupt", {
-                                        {"node", run_result.interrupt_node},
-                                        {"reason", reason},
-                                        {"payload", payload},
-                                        {"checkpointId", run_result.checkpoint_id},
-                                    }},
-                                }},
-                            };
-                            neograph::json nj;
-                            to_json(nj, n);
-                            emit(jsonrpc_notify("session/update", std::move(nj)));
-                        } else {
-                            SessionNotification n;
-                            n.session_id = req.session_id;
-                            n.update.session_update = "agent_message_chunk";
-                            n.update.content =
-                                ContentBlock::text_block(agent_text);
-                            neograph::json nj;
-                            to_json(nj, n);
-                            emit(jsonrpc_notify(
-                                "session/update", std::move(nj)));
-                        }
                     }
 
                     // Notifications may synchronously block in an embedder's
                     // sink. Recheck cancellation only after all pending updates
                     // have been emitted, then commit the one terminal response.
-                    commit_terminal(
-                        stop, !graph_failed && run_result.interrupted);
-                    if (stop == StopReason::Cancelled) boundary_status = "cancelled";
+                    commit_terminal(turn.stop);
+                    if (turn.stop == StopReason::Cancelled) {
+                        turn.failure.reset();
+                        turn.internal_cancel = false;
+                        turn.boundary_status = "cancelled";
+                    }
 
                     // The terminal state is now committed and the old cancel
                     // token is no longer reachable. Admit the next turn before
@@ -799,26 +1235,35 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
                     reservation->release_session();
 
                     if (reply_expected) {
-                        PromptResponse resp;
-                        resp.stop_reason = stop;
-                        neograph::json rj;
-                        to_json(rj, resp);
-                        rj["_meta"]["neograph/invocation_status"] =
-                            boundary_status;
                         response_attempted = true;
-                        emit(jsonrpc_result(std::move(rj), id));
+                        if (turn.failure) {
+                            // A failed turn is a JSON-RPC error: ACP's stop
+                            // reasons all describe a turn that ended normally.
+                            // Only typed public fields go on the wire
+                            // (reference, "Protocol failure mapping").
+                            const auto& failure = *turn.failure;
+                            neograph::json data{{"code", failure.code},
+                                                {"retryable", failure.retryable}};
+                            if (turn.internal_cancel) {
+                                emit(jsonrpc_error(kRequestCancelled, "Request cancelled", id,
+                                                   std::move(data)));
+                            } else {
+                                emit(jsonrpc_error(kInternalError, ::neograph::detail::public_failure_message(failure), id,
+                                                   std::move(data)));
+                            }
+                        } else {
+                            PromptResponse resp;
+                            resp.stop_reason = turn.stop;
+                            neograph::json rj;
+                            to_json(rj, resp);
+                            rj["_meta"]["neograph/invocation_status"] = turn.boundary_status;
+                            emit(jsonrpc_result(std::move(rj), id));
+                        }
                     }
                     cleanup();
-                } catch (const std::exception& e) {
-                    cleanup();
-                    if (reply_expected && !response_attempted) {
-                        emit_internal_error(id, "ACP prompt worker failed: ", e.what());
-                    }
                 } catch (...) {
                     cleanup();
-                    if (reply_expected && !response_attempted) {
-                        emit_internal_error(id, "ACP prompt worker failed: unknown exception");
-                    }
+                    if (reply_expected && !response_attempted) emit_internal_error(id);
                 }
                 // returns. Its destructor cleans every worker exit path.
             });
@@ -830,17 +1275,17 @@ ACPServer::Impl::handle_session_prompt(ACPServer& /*owner*/,
             throw;
         }
         reservation.reset();
-    } catch (const std::exception& e) {
+    } catch (...) {
         // If worker launch fails, no worker owns the reservation.
         reservation.reset();
-        if (reply_expected) {
-            emit_internal_error(id, "ACP prompt worker launch failed: ", e.what());
+        {
+            std::lock_guard lk(sessions_mu);
+            auto it = active_cancel_tokens.find(req.session_id);
+            if (it != active_cancel_tokens.end() && it->second == task_cancel) {
+                active_cancel_tokens.erase(it);
+            }
         }
-    } catch (...) {
-        reservation.reset();
-        if (reply_expected) {
-            emit_internal_error(id, "ACP prompt worker launch failed: unknown exception");
-        }
+        if (reply_expected) emit_internal_error(id);
     }
 }
 
@@ -856,11 +1301,138 @@ ACPServer::Impl::handle_session_cancel(const neograph::json& params) {
         auto it = active_cancel_tokens.find(n.session_id);
         if (it != active_cancel_tokens.end() && it->second) {
             token = it->second;
-        } else if (!terminal_prompt_sessions.contains(n.session_id)) {
+        } else if (pre_armed_cancel.load(std::memory_order_acquire)
+                   && sessions.contains(n.session_id)
+                   && !terminal_prompt_sessions.contains(n.session_id)) {
+            // Opt-in only: a transport that may deliver a cancel ahead of the
+            // prompt it targets.
             pending_cancels.insert(n.session_id);
         }
+        // Otherwise there is no ongoing turn to cancel; the cancel is stale.
     }
     if (token) token->cancel();
+}
+
+neograph::json
+ACPServer::Impl::request_client(std::string method, neograph::json params,
+                                std::chrono::milliseconds timeout) {
+    if (!initialized.load(std::memory_order_acquire)) {
+        throw std::runtime_error(
+            "ACPServer::call_client: initialize must complete before client requests");
+    }
+    if (method == "fs/read_text_file" && !client_caps.fs.read_text_file) {
+        throw std::runtime_error(
+            "ACPServer::call_client: client did not advertise fs.readTextFile");
+    }
+    if (method == "fs/write_text_file" && !client_caps.fs.write_text_file) {
+        throw std::runtime_error(
+            "ACPServer::call_client: client did not advertise fs.writeTextFile");
+    }
+    if (method.rfind("terminal/", 0) == 0 && !client_caps.terminal) {
+        throw std::runtime_error(
+            "ACPServer::call_client: client did not advertise terminal");
+    }
+    if (method.rfind("elicitation/", 0) == 0 && !client_caps.elicitation) {
+        throw std::runtime_error(
+            "ACPServer::call_client: client did not advertise elicitation");
+    }
+    auto s_snap = std::atomic_load_explicit(&sink_, std::memory_order_acquire);
+    if (!s_snap || !*s_snap) {
+        throw std::runtime_error(
+            "ACPServer::call_client: no transport connected — call run() first "
+            "or set_notification_sink() before issuing client requests");
+    }
+
+    // The prompt turn this request belongs to, when params name a session
+    // with a turn in flight: cancelling the turn ends the wait.
+    std::shared_ptr<neograph::graph::CancelToken> token;
+    if (params.is_object() && params.contains("sessionId")
+        && params["sessionId"].is_string()) {
+        const auto session_id = params["sessionId"].get<std::string>();
+        std::lock_guard lk(sessions_mu);
+        if (auto it = active_cancel_tokens.find(session_id);
+            it != active_cancel_tokens.end()) {
+            token = it->second;
+        }
+    }
+
+    auto id = next_outbound_id.fetch_add(1, std::memory_order_relaxed);
+    neograph::json env;
+    env["jsonrpc"] = "2.0";
+    env["id"]      = id;
+    env["method"]  = method;
+    env["params"]  = std::move(params);
+
+    auto promise = std::make_shared<std::promise<neograph::json>>();
+    auto fut     = promise->get_future();
+    {
+        std::lock_guard lk(pending_mu);
+        pending[id] = promise;
+    }
+    auto forget = [&] {
+        std::lock_guard lk(pending_mu);
+        pending.erase(id);
+    };
+
+    try {
+        emit(env);
+    } catch (...) {
+        forget();
+        throw;
+    }
+
+    using clock = std::chrono::steady_clock;
+    const bool unbounded = timeout == std::chrono::milliseconds::max();
+    const auto start = clock::now();
+    std::optional<clock::time_point> abandon_at;
+    for (;;) {
+        auto slice = std::chrono::milliseconds(10);
+        if (!unbounded) {
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                start + timeout - clock::now());
+            slice = std::clamp(left, std::chrono::milliseconds(0), slice);
+        }
+        if (fut.wait_for(slice) == std::future_status::ready) break;
+        const auto now = clock::now();
+        const bool closing = stop_flag.load(std::memory_order_acquire)
+                          || transport_closed.load(std::memory_order_acquire);
+        if (closing || (token && token->is_cancelled())) {
+            // ACP requires a client to answer pending permission requests with
+            // `cancelled` once it cancels the turn; give it a moment to do so
+            // before abandoning the request.
+            if (!abandon_at) {
+                abandon_at = now + (closing ? std::chrono::milliseconds(0)
+                                            : kClientRequestCancelGrace);
+            }
+            if (now >= *abandon_at) {
+                forget();
+                if (!closing) {
+                    try {
+                        emit(jsonrpc_notify("$/cancel_request",
+                                            neograph::json{{"requestId", id}}));
+                    } catch (...) {
+                    }
+                }
+                throw neograph::graph::CancelledException(
+                    "ACP client request abandoned: the prompt turn was cancelled");
+            }
+            continue;
+        }
+        if (!unbounded && now - start >= timeout) {
+            forget();
+            throw std::runtime_error("ACPServer::call_client: timeout waiting for " + method);
+        }
+    }
+    auto resp = fut.get();
+    if (resp.contains("error")) {
+        throw std::runtime_error(
+            "ACPServer::call_client: error response: "
+            + resp["error"].dump());
+    }
+    // A JSON null result (seen from some clients for fs/write_text_file) is
+    // tolerated as an empty object.
+    if (!resp.contains("result") || resp["result"].is_null()) return neograph::json::object();
+    return resp["result"];
 }
 
 // ---------------------------------------------------------------------------
@@ -876,7 +1448,7 @@ ACPServer::ACPServer(neograph::graph::GraphExecution execution,
                      neograph::json info,
                      std::shared_ptr<ACPGraphAdapter> adapter)
     : impl_(std::make_unique<Impl>(std::move(execution))) {
-    impl_->info    = std::move(info);
+    impl_->info    = normalize_agent_info(info);
     impl_->adapter = adapter ? adapter : std::make_shared<ACPGraphAdapter>();
     impl_->caps.session.resume = true;
 }
@@ -892,29 +1464,35 @@ ACPServer::~ACPServer() {
     std::atomic_store_explicit(
         &impl_->sink_, std::shared_ptr<NotificationSink>{}, std::memory_order_release);
     impl_->stop_flag.store(true, std::memory_order_release);
-    std::vector<std::shared_ptr<neograph::graph::CancelToken>> active_tokens;
-    {
-        std::lock_guard lk(impl_->sessions_mu);
-        for (const auto& [_, token] : impl_->active_cancel_tokens) {
-            active_tokens.push_back(token);
-        }
-    }
-    for (const auto& token : active_tokens) token->cancel();
+    impl_->cancel_active_prompts();
     impl_->drain_workers();
 
     // Wake any pending outbound RPC waiters with an error so they don't
     // hang the caller forever.
-    std::lock_guard lk(impl_->pending_mu);
-    for (auto& kv : impl_->pending) {
-        try {
-            neograph::json err;
-            err["error"] = neograph::json{
-                {"code",    -32603},
-                {"message", "ACPServer torn down before response"}};
-            kv.second->set_value(std::move(err));
-        } catch (...) {}
+    {
+        std::lock_guard lk(impl_->pending_mu);
+        for (auto& kv : impl_->pending) {
+            try {
+                neograph::json err;
+                err["error"] = neograph::json{
+                    {"code",    kInternalError},
+                    {"message", "ACPServer torn down before response"}};
+                kv.second->set_value(std::move(err));
+            } catch (...) {}
+        }
+        impl_->pending.clear();
     }
-    impl_->pending.clear();
+
+    // Stop the client-supplied MCP servers.
+    std::vector<Impl::McpAttachment> attachments;
+    {
+        std::lock_guard lk(impl_->sessions_mu);
+        for (auto& [_, state] : impl_->sessions) {
+            for (auto& attachment : state.mcp) attachments.push_back(std::move(attachment));
+            state.mcp.clear();
+        }
+    }
+    Impl::shutdown_mcp(attachments);
 }
 
 AgentCapabilities&       ACPServer::capabilities()       { return impl_->caps; }
@@ -946,6 +1524,14 @@ void ACPServer::set_max_inflight_prompts(std::size_t limit) {
     impl_->max_inflight_prompts = static_cast<int>(limit);
 }
 
+void ACPServer::set_pre_armed_cancel(bool enabled) {
+    impl_->pre_armed_cancel.store(enabled, std::memory_order_release);
+}
+
+void ACPServer::set_eof_grace(std::chrono::milliseconds grace) {
+    if (grace.count() < 0) throw std::invalid_argument("ACP EOF grace must not be negative");
+    impl_->eof_grace_ms.store(grace.count(), std::memory_order_release);
+}
 
 bool ACPServer::is_running() const {
     return impl_->running.load(std::memory_order_acquire);
@@ -973,56 +1559,7 @@ neograph::json
 ACPServer::call_client(std::string method,
                        neograph::json params,
                        std::chrono::milliseconds timeout) {
-    if (!impl_->initialized.load(std::memory_order_acquire)) {
-        throw std::runtime_error(
-            "ACPServer::call_client: initialize must complete before client requests");
-    }
-    if (method == "fs/read_text_file" && !impl_->client_caps.fs.read_text_file) {
-        throw std::runtime_error(
-            "ACPServer::call_client: client did not advertise fs.readTextFile");
-    }
-    if (method == "fs/write_text_file" && !impl_->client_caps.fs.write_text_file) {
-        throw std::runtime_error(
-            "ACPServer::call_client: client did not advertise fs.writeTextFile");
-    }
-    auto s_snap = std::atomic_load_explicit(&impl_->sink_,
-                                            std::memory_order_acquire);
-    if (!s_snap || !*s_snap) {
-        throw std::runtime_error(
-            "ACPServer::call_client: no transport connected — call run() first "
-            "or set_notification_sink() before issuing fs/* requests");
-    }
-
-    auto id = impl_->next_outbound_id.fetch_add(1, std::memory_order_relaxed);
-    neograph::json env;
-    env["jsonrpc"] = "2.0";
-    env["id"]      = id;
-    env["method"]  = std::move(method);
-    env["params"]  = std::move(params);
-
-    auto promise = std::make_shared<std::promise<neograph::json>>();
-    auto fut     = promise->get_future();
-    {
-        std::lock_guard lk(impl_->pending_mu);
-        impl_->pending[id] = promise;
-    }
-
-    impl_->emit(env);
-
-    auto status = fut.wait_for(timeout);
-    if (status != std::future_status::ready) {
-        std::lock_guard lk(impl_->pending_mu);
-        impl_->pending.erase(id);
-        throw std::runtime_error("ACPServer::call_client: timeout waiting for "
-                                 + env.value("method", std::string()));
-    }
-    auto resp = fut.get();
-    if (resp.contains("error")) {
-        throw std::runtime_error(
-            "ACPServer::call_client: error response: "
-            + resp["error"].dump());
-    }
-    return resp.contains("result") ? resp["result"] : neograph::json::object();
+    return impl_->request_client(std::move(method), std::move(params), timeout);
 }
 
 neograph::json
@@ -1039,7 +1576,7 @@ ACPServer::handle_message(const neograph::json& env) {
     if (!env.is_object()
         || !env.contains("jsonrpc")
         || env["jsonrpc"] != "2.0") {
-        return jsonrpc_error(-32600, "Invalid Request", invalid_request_id);
+        return jsonrpc_error(kInvalidRequest, "Invalid Request", invalid_request_id);
     }
     const bool has_method = env.contains("method");
 
@@ -1050,7 +1587,7 @@ ACPServer::handle_message(const neograph::json& env) {
         if (!env.contains("id") || !valid_request_id(env["id"])
             || (env.contains("result") == env.contains("error"))
             || (env.contains("error") && !env["error"].is_object())) {
-            return jsonrpc_error(-32600, "Invalid Request", invalid_request_id);
+            return jsonrpc_error(kInvalidRequest, "Invalid Request", invalid_request_id);
         }
         if (env["id"].is_number_integer()) {
             const auto numeric_id = env["id"].get<std::int64_t>();
@@ -1070,7 +1607,7 @@ ACPServer::handle_message(const neograph::json& env) {
 
     if (!env["method"].is_string()
         || (env.contains("id") && !valid_request_id(env["id"]))) {
-        return jsonrpc_error(-32600, "Invalid Request", invalid_request_id);
+        return jsonrpc_error(kInvalidRequest, "Invalid Request", invalid_request_id);
     }
     const auto method = env["method"].get<std::string>();
     const auto params = env.contains("params") ? env["params"] : neograph::json::object();
@@ -1079,7 +1616,7 @@ ACPServer::handle_message(const neograph::json& env) {
 
     // session/cancel is defined as a notification, never a request.
     if (method == "session/cancel" && !is_notification) {
-        return jsonrpc_error(-32600, "session/cancel must be a notification", id);
+        return jsonrpc_error(kInvalidRequest, "session/cancel must be a notification", id);
     }
     if (method == "initialize") {
         auto response = impl_->handle_initialize(params, id);
@@ -1095,7 +1632,7 @@ ACPServer::handle_message(const neograph::json& env) {
     }
     if (method == "session/prompt") {
         // Async dispatch — the worker emits a response only for a request.
-        impl_->handle_session_prompt(*this, params, id, !is_notification);
+        impl_->handle_session_prompt(params, id, !is_notification);
         return {};
     }
     if (method == "session/cancel") {
@@ -1104,11 +1641,12 @@ ACPServer::handle_message(const neograph::json& env) {
     }
 
     if (is_notification) return {};
-    return jsonrpc_error(-32601, "Method not found: " + method, id);
+    return jsonrpc_error(kMethodNotFound, "Method not found: " + method, id);
 }
 
 void ACPServer::run(std::istream& in, std::ostream& out) {
     impl_->running.store(true, std::memory_order_release);
+    impl_->transport_closed.store(false, std::memory_order_release);
     // Always clear `running` on exit (including via exception), so
     // is_running() never reports a stale `true`.
     struct RunningGuard {
@@ -1167,17 +1705,12 @@ void ACPServer::run(std::istream& in, std::ostream& out) {
         neograph::json resp;
         try {
             resp = handle_message(env);
-        } catch (const std::exception& e) {
-            auto request_id = env.is_object() && env.contains("id")
-                                ? env["id"] : neograph::json();
-            resp = jsonrpc_error(
-                -32603, std::string("Internal error: ") + e.what(),
-                request_id);
         } catch (...) {
+            // Host failures are reported without their exception text.
             auto request_id = env.is_object() && env.contains("id")
+                                && valid_request_id(env["id"])
                                 ? env["id"] : neograph::json();
-            resp = jsonrpc_error(
-                -32603, "Internal error: unknown exception", request_id);
+            resp = jsonrpc_error(kInternalError, "Internal error", request_id);
         }
         if (!resp.is_null()) {
             std::lock_guard lk(*out_mu);
@@ -1186,6 +1719,19 @@ void ACPServer::run(std::istream& in, std::ostream& out) {
         }
     }
 
+    if (!impl_->stop_flag.load(std::memory_order_acquire)) {
+        // EOF: the client closed the connection, so nobody can answer an
+        // agent->client request or read a response. Give in-flight turns a
+        // short grace to finish, then cancel them so run() returns promptly.
+        impl_->transport_closed.store(true, std::memory_order_release);
+        {
+            std::unique_lock lock(impl_->workers_mu);
+            impl_->workers_cv.wait_for(
+                lock, std::chrono::milliseconds(impl_->eof_grace_ms.load(std::memory_order_acquire)),
+                [this] { return impl_->inflight_count == 0; });
+        }
+        impl_->cancel_active_prompts();
+    }
 }
 
 void ACPServer::run() {
@@ -1201,6 +1747,9 @@ ACPClient::ACPClient(ACPServer* server) : server_(server) {}
 void ACPClient::bind(ACPServer* server)             { server_ = server; }
 bool ACPClient::bound() const noexcept              { return server_ != nullptr; }
 void ACPClient::set_timeout(std::chrono::milliseconds t) { timeout_ = t; }
+void ACPClient::set_permission_timeout(std::optional<std::chrono::milliseconds> t) {
+    permission_timeout_ = t;
+}
 
 std::string
 ACPClient::read_text_file(std::string_view session_id,
@@ -1254,12 +1803,20 @@ ACPClient::request_permission(std::string_view session_id,
     req.options    = options;
 
     neograph::json params; to_json(params, req);
-    auto result = server_->call_client("session/request_permission",
-                                       std::move(params), timeout_);
+    neograph::json result;
+    try {
+        result = server_->call_client(
+            "session/request_permission", std::move(params),
+            permission_timeout_.value_or(std::chrono::milliseconds::max()));
+    } catch (const neograph::graph::CancelledException&) {
+        // The prompt turn was cancelled while the user was being asked.
+        return RequestPermissionOutcome{};
+    }
 
     RequestPermissionResponse resp;
     from_json(result, resp);
     return std::move(resp.outcome);
 }
+
 
 }  // namespace neograph::acp

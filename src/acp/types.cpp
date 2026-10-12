@@ -95,10 +95,12 @@ void to_json(json& j, const ClientCapabilities& c) {
     json fs; to_json(fs, c.fs);
     if (!fs.empty()) j["fs"] = std::move(fs);
     if (c.terminal) j["terminal"] = true;
+    if (c.elicitation) j["elicitation"] = json::object();
 }
 void from_json(const json& j, ClientCapabilities& c) {
-    if (j.contains("fs")) from_json(j["fs"], c.fs);
+    if (j.contains("fs") && j["fs"].is_object()) from_json(j["fs"], c.fs);
     c.terminal = j.value("terminal", false);
+    c.elicitation = j.contains("elicitation") && j["elicitation"].is_object();
 }
 
 // ---------------------------------------------------------------------------
