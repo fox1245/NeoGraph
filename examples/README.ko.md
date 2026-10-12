@@ -143,6 +143,7 @@ Program은 Core 그래프를 내구성 있는 식별자, 예산, 승인(admissio
 | 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | yes | `Send`를 쓰는 MCP: planner가 도구마다 호출 하나를 만들고, 세 호출이 한 super-step 안에서 겹쳐 실행됩니다. 모델은 쓰지 않습니다. |
 | 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | yes | 에이전트 하나가 MCP 서버 두 개(HTTP와 stdio)의 도구를 하나의 목록으로 합쳐 쓰고, 두 호출이 서로 다른 서버로 갑니다. |
 | 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | yes | MCP 위의 운영자 피드백: 첫 답은 추측이고, 운영자의 답장이 대화 기록에 들어가며, 두 번째 라운드에서 도구를 호출합니다. |
+| 75 | [`75_mcp_tool_errors.cpp`](75_mcp_tool_errors.cpp) | yes | MCP 실패: `isError` 결과와 JSON-RPC 오류는 프로토콜에서 서로 다른 응답입니다. 에이전트가 두 메시지를 읽고 스스로 바로잡습니다. |
 | 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | service | 리버스 엔지니어링 에이전트: stdio의 GhidraMCP로 스트립된 바이너리의 함수 이름을 복원합니다. Ghidra와 키가 필요합니다. |
 | 38 | [`38_a2a_server.cpp`](38_a2a_server.cpp) | yes | A2A 서버: 그래프를 SSE 스트리밍과 함께 A2A 0.3, 1.0으로 제공하고 자체 클라이언트로 호출합니다. `serve`를 주면 계속 대기합니다. |
 | 37 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes | A2A 클라이언트: 에이전트 카드를 가져오고 메시지를 보내며, `A2ACallerNode`로 그래프에서 원격 에이전트를 호출합니다. |

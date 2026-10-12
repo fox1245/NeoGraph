@@ -143,6 +143,7 @@ Program 把 Core 图包进带有持久标识、预算和准入(admission)的生�
 | 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | yes | 结合 `Send` 的 MCP：planner 为每个工具发出一次调用，三次调用在同一个 super-step 内重叠执行。不使用模型。 |
 | 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | yes | 一个智能体把两个 MCP 服务器（HTTP 与 stdio）的工具合并为一个列表，它的两次调用分别发往不同的服务器。 |
 | 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | yes | MCP 上的操作员反馈：第一个回答只是猜测，操作员的回复进入历史记录，第二轮调用工具。 |
+| 75 | [`75_mcp_tool_errors.cpp`](75_mcp_tool_errors.cpp) | yes | MCP 的失败：`isError` 结果和 JSON-RPC 错误是两种不同的响应。智能体读取两条消息后自行纠正。 |
 | 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | service | 逆向工程智能体：通过 stdio 上的 GhidraMCP 为被剥离符号的二进制恢复函数名。需要 Ghidra 和 key。 |
 | 38 | [`38_a2a_server.cpp`](38_a2a_server.cpp) | yes | A2A 服务器：以 SSE 流式方式通过 A2A 0.3 与 1.0 提供图，并用自带客户端调用。传入 `serve` 可持续监听。 |
 | 37 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes | A2A 客户端：获取 agent card、发送消息，并用 `A2ACallerNode` 在图中调用远程智能体。 |

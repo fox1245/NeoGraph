@@ -143,6 +143,7 @@ Program は Core グラフを、永続的な識別子、予算、admission を�
 | 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | yes | `Send` を使う MCP。planner がツールごとに呼び出しを 1 つ作り、3 つの呼び出しが 1 つの super-step の中で重なって実行されます。モデルは使いません。 |
 | 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | yes | 1 つのエージェントが 2 つの MCP サーバー(HTTP と stdio)のツールを 1 つの一覧にまとめて使い、2 回の呼び出しは別々のサーバーに届きます。 |
 | 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | yes | MCP 上のオペレーターフィードバック。最初の答えは推測で、オペレーターの返信が履歴に加わり、2 回目のラウンドでツールを呼び出します。 |
+| 75 | [`75_mcp_tool_errors.cpp`](75_mcp_tool_errors.cpp) | yes | MCP の失敗。`isError` の結果と JSON-RPC エラーはプロトコル上で別の応答です。エージェントが両方のメッセージを読んで自分で直します。 |
 | 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | service | リバースエンジニアリングエージェント。stdio 上の GhidraMCP でストリップされたバイナリの関数名を復元します。Ghidra とキーが必要です。 |
 | 38 | [`38_a2a_server.cpp`](38_a2a_server.cpp) | yes | A2A サーバー。グラフを SSE ストリーミング付きで A2A 0.3 と 1.0 で公開し、自前のクライアントで呼び出します。`serve` を渡すと待ち受けを続けます。 |
 | 37 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes | A2A クライアント。エージェントカードを取得してメッセージを送り、`A2ACallerNode` でグラフからリモートエージェントを呼び出します。 |
