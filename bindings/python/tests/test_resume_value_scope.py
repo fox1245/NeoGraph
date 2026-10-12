@@ -38,7 +38,30 @@ class Plain(ng.GraphNode):
         return [ng.ChannelWrite("results", [self._name])]
 
 
+class Question(ng.GraphNode):
+    """Asks until a resume answers its own question (#406): a gate's approval
+    carries no interrupt id, an answer to the question names it."""
+
+    approvals = []
+
+    def __init__(self, name):
+        super().__init__()
+        self._name = name
+
+    def get_name(self):
+        return self._name
+
+    def run(self, input):
+        answer = input.ctx.resume_value
+        if answer is not None and input.ctx.resume_interrupt_id is None:
+            Question.approvals.append((self._name, answer))
+        if answer is None or input.ctx.resume_interrupt_id is None:
+            raise ng.NodeInterrupt({"asks": self._name}, reason=f"question of {self._name}")
+        return [ng.ChannelWrite("results", [f"{self._name}={answer}@{input.ctx.resume_interrupt_id}"])]
+
+
 ng.NodeFactory.register_type("scope.ask", lambda name, _config, _ctx: Ask(name))
+ng.NodeFactory.register_type("scope.question", lambda name, _config, _ctx: Question(name))
 ng.NodeFactory.register_type("scope.plain", lambda name, _config, _ctx: Plain(name))
 
 
@@ -157,3 +180,38 @@ def test_a_tool_gate_of_a_later_step_asks_again():
     done = engine.resume("tool-gate", {"approved": True})
     assert done.status == ng.RunStatus.Completed
     assert len(ran) == 1
+
+
+def test_a_gated_node_tells_the_gate_approval_from_the_answer_to_its_question():
+    Question.approvals.clear()
+    engine = _engine(_definition({"review": {"type": "scope.question"}},
+                                 [("__start__", "review"), ("review", "__end__")],
+                                 interrupt_before=["review"]))
+    gate = engine.run(ng.RunConfig(thread_id="gated-question"))
+    assert gate.interrupted and gate.interrupt_node == "review"
+    assert gate.interrupt_id == ""
+
+    question = engine.resume("gated-question", "run it")
+    assert question.interrupted, "the gate's approval is not the answer"
+    assert question.interrupt_id == "s0:review"
+    assert Question.approvals == [("review", "run it")]
+
+    done = engine.resume("gated-question", "yes")
+    assert done.status == ng.RunStatus.Completed
+    assert _results(done) == ["review=yes@s0:review"]
+
+
+def test_an_answer_names_the_interrupt_it_answers():
+    Question.approvals.clear()
+    engine = _engine(_definition({"a": {"type": "scope.question"}, "b": {"type": "scope.question"}},
+                                 [("__start__", "a"), ("__start__", "b"),
+                                  ("a", "__end__"), ("b", "__end__")]))
+    paused = engine.run(ng.RunConfig(thread_id="answer-id"))
+    assert len(paused.interrupts) == 2
+
+    one = engine.resume("answer-id", "B", interrupt_id="s0:b")
+    assert one.interrupt_id == "s0:a"
+    done = engine.resume("answer-id", "A")
+    assert done.status == ng.RunStatus.Completed
+    assert _results(done) == ["a=A@s0:a", "b=B@s0:b"]
+    assert Question.approvals == []

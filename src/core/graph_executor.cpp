@@ -382,11 +382,16 @@ void bind_resume_value(const RunContext& parent, RunContext& context,
     // An executor driven without a run binding keeps what its caller set.
     if (!runtime) return;
     context.resume_value.reset();
+    context.resume_interrupt_id.clear();
     if (slot.step != runtime->answered_step) return;
     // #396: each gated node whose gate the step had answered receives its own
     // answer.
     if (const auto answer = runtime->answers.find(slot.task_id); answer != runtime->answers.end())
         context.resume_value = answer->second;
+    // #406: an answer to the invocation's own NodeInterrupt names it; a gate's
+    // approval does not.
+    if (context.resume_value && slot.task_id == runtime->answered_interrupt)
+        context.resume_interrupt_id = slot.task_id;
 }
 
 }  // namespace

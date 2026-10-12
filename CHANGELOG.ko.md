@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=6e06ce3442fe26741419620daf3ddca6dff54972a45513b02028956408358dc6 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=93ce83e49b4277a01aaa5591748c2831f77556ba403e34be659fed7f56891e3b -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -77,6 +77,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 추가됨
 
+- **Core: 노드가 재개가 어느 인터럽트에 답하는지 알 수 있습니다 (#406).** `RunContext::resume_interrupt_id`(Python `input.ctx.resume_interrupt_id`)는 `resume_value`가 노드 자신의 `NodeInterrupt`에 대한 답일 때 그 인터럽트의 id로, 재개가 지정했든 첫 인터럽트에 답했든 `RunResult::interrupt_id`와 `RunResult::interrupts`가 보고하는 id입니다. 값이 노드를 붙잡은 `interrupt_before` 게이트의 승인이면 비어 있습니다(Python `None`). 게이트 뒤에 있으면서 자기 질문도 하는 노드는 더 이상 실행 승인을 답으로 받아들일 필요가 없습니다. id가 비어 있는 동안 질문합니다. 재개 값을 받는 호출은 바뀌지 않습니다(#393). `RunContext`에 멤버가 추가되었으므로 네이티브 사용자는 맞는 헤더로 다시 빌드해야 합니다.
 - **A2A: native server의 `ListTasks`, `SubscribeToTask`, non-blocking send.** `ListTasks`는 `contextId`, `status`, `statusTimestampAfter`로 거르고 최신순으로 paging합니다. `SubscribeToTask`(0.3 `tasks/resubscribe`)는 현재 task와 실시간 event를 stream합니다. `returnImmediately`(0.3 `blocking: false`)는 제출된 task를 즉시 반환합니다. 모든 run은 자체 worker에서 실행되어 끊긴 연결보다 오래 살고, 모든 status에 timestamp가 붙습니다. push notification, extended card, HTTP+JSON/gRPC binding은 주장하지 않으며 해당 method는 `-32003` / `-32004`로 답합니다.
 - **ACP: client가 제공한 stdio MCP server**를 NeoGraph의 MCP client로 시작하며, node는 `ACPClient::session_tools()`로 그 tool에 접근합니다. server는 최소 환경, 즉 agent의 `PATH`(Windows에서는 `SystemRoot`도)와 client의 `env`만 받으며, provider API 키가 있을 수 있는 나머지 agent 환경은 받지 않습니다.
 - **A2A: card가 collaboration envelope를 extension으로 선언합니다.** `CollaborationMailbox`를 가진 Program agent는 `capabilities.extensions`(`AgentCard::extensions`)에 `a2a::COLLABORATION_EXTENSION_URI`를 나열하므로, collaboration message의 발신자가 정한 idempotent task id는 선언된 extension이 됩니다(A2A spec 4.6).

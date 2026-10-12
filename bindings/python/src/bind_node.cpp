@@ -775,7 +775,20 @@ void init_node(py::module_& m) {
             "node can tell \"nobody has answered yet\" from \"the answer was "
             "no\" (issue #94). Only the node or Send the resume answers sees "
             "it, in the step the resume re-enters; every other node, and every "
-            "node of a later step, sees ``None`` (#393).");
+            "node of a later step, sees ``None`` (#393).")
+        .def_property_readonly("resume_interrupt_id",
+            [](const RunContext& c) -> py::object {
+                if (c.resume_interrupt_id.empty()) return py::none();
+                return py::str(c.resume_interrupt_id);
+            },
+            "The id of the interrupt ``resume_value`` answers, when it answers "
+            "this node's own ``NodeInterrupt``: the id ``result.interrupt_id`` "
+            "and ``result.interrupts`` report (``\"s3:review\"``), whether the "
+            "resume named it with ``interrupt_id=`` or answered the first one. "
+            "``None`` when ``resume_value`` is the approval of the "
+            "``interrupt_before`` gate that held this node, and whenever "
+            "``resume_value`` is ``None`` (#406). A gated node that also asks its "
+            "own question tells the two apart by it.");
 
     // ── Per-call input bundle ──────────────────────────────────────────
     py::class_<NodeInput>(m, "NodeInput",

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=e376356dbf8e9ae47791d3beacd6167ce86569148053f4255acd8ad0f73b17ea -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=7166152d46492e76c24091a85ba33c8e3be570c0031ef3234c48464dba58bde9 -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -661,6 +661,8 @@ profile.attach(engine)
 静的`interrupt_before`/`interrupt_after`、動的`NodeInterrupt`、同期`resume`、asyncio`resume_async`、および厳密`resume_from`はチェックポイントストアを必要とします。
 
 `ng.Send`でディスパッチされたPythonノードが`ng.NodeInterrupt`を送出すると、他のノードと同じようにrunが一時停止します。`run`、`run_stream`、`run_async`、`run_stream_async`はチェックポイント付きの中断された`RunResult`を返し、`resume`、`resume_async`、`resume_from`はそのSendを回答とともに実行します。Sendを送出したノードと終了したSendは再実行されず再生されます。 一つのステップの複数のノードや Send が `ng.NodeInterrupt` を送出すると、`result.interrupts` はそれぞれを `{"id", "node", "value"}` として列挙し、`result.interrupt_id` は最初のものを指します。`resume`、`resume_async`、`resume_from` は `interrupt_id=` を受け取ってその割り込みに答え、指定がなければ最初のものに答えます。一時停止した他のノードや Send はその再開で自身の質問をもう一度行い、次の再開がそれに答えます (#388)。保留中でない `interrupt_id` は `ValueError` になります。`RunMetadata.resume_interrupt_id` も同じ id を運びます。答えは、再開が再び入るステップで、それが答えるノードや Send にだけ届きます。再開した run の後続ステップでは `input.ctx.resume_value` と tool gate の `ToolGateContext.resume_value` が `None` になるため、そこで尋ねるノードや gate は run をもう一度一時停止します (#393)。`interrupt_before` の一時停止後の再開は gate が止めていたノードに値を渡し、`interrupt_after` の一時停止後の再開はどのノードにも渡しません。一つのステップで複数のゲート付きノードが ready になると、各ゲートに個別に答えます。ステップのすべてのゲートが答えられるまで run は次のゲート付きノードの前でもう一度止まり、その後、各ゲート付きノードは自身のゲートへの答えを受け取ります (#396)。一つのステップでは、失敗したノードや Send は順序にかかわらず尋ねるノードより優先されます。run は失敗を送出し、割り込みを報告しません。不確かな効果 (payload の `kind` が `tool_effect_reconciliation` である `NodeInterrupt`) だけは、照合できるよう失敗の横でも一時停止します (#392)。
+
+`input.ctx.resume_interrupt_id`は、`input.ctx.resume_value`がどの割り込みへの答えかをノードに伝えます (#406)。再開が`interrupt_id=`で指定したか最初の割り込みに答えたかにかかわらずノード自身の`NodeInterrupt`のid（`result.interrupt_id`が報告する`"s3:review"`）で、値がノードを止めた`interrupt_before`ゲートの承認であれば`None`です。ゲートの後ろにあり自分の質問もするノードは、`resume_interrupt_id`が`None`の間は`ng.NodeInterrupt`を送出し、実行の承認を答えとして受け取りません。[概念ガイド](concepts.md)にこのパターンがあります。
 
 Python の `CheckpointStore` サブクラスは `requires_managed_budget(thread_id) -> bool` を実装できます。この同期仮想メソッドは、永続化された管理予算バンクの拒否義務を読み取ります。エンジンのネイティブ非同期ファサードがこのメソッドを呼び、バインディングは Python のオーバーライドを実行するときに GIL を取得します。チェックポイント状態からバンクを除去したり、チェックポイントを削除したりした後も、実際の永続義務を報告してください。オーバーライドを省略すると、`False` を返す代わりに、未対応バックエンドを示す明示的なネイティブエラーが維持されます。
 

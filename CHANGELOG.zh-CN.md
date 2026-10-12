@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=6e06ce3442fe26741419620daf3ddca6dff54972a45513b02028956408358dc6 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=93ce83e49b4277a01aaa5591748c2831f77556ba403e34be659fed7f56891e3b -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -79,6 +79,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 新增
 
+- **Core：节点可以知道一次恢复回答的是哪个中断（#406）。** 当 `resume_value` 回答的是节点自身的 `NodeInterrupt` 时，`RunContext::resume_interrupt_id`（Python 中为 `input.ctx.resume_interrupt_id`）就是该中断的 id，无论恢复是指名回答还是回答了第一个中断，它都与 `RunResult::interrupt_id` 和 `RunResult::interrupts` 报告的 id 相同。当该值是拦住此节点的 `interrupt_before` 门的批准时，它为空（Python 中为 `None`）。位于门之后、同时也提出自己问题的节点不必再把运行的批准当作回答：id 为空时它就提问。哪个调用收到恢复值保持不变（#393）。`RunContext` 新增了成员：原生使用方需用匹配的头文件重新构建。
 - **A2A：native server 支持 `ListTasks`、`SubscribeToTask` 和非阻塞发送。** `ListTasks` 按 `contextId`、`status` 和 `statusTimestampAfter` 过滤，并按最新优先分页；`SubscribeToTask`（0.3 为 `tasks/resubscribe`）流式发送当前 task 及其实时 event；`returnImmediately`（0.3 为 `blocking: false`）立即返回已提交的 task。每个 run 都在自己的 worker 上执行，因此 task 的生命周期长于断开的连接，每个 status 都带有 timestamp。不声明 push notification、extended card 以及 HTTP+JSON/gRPC binding，其 method 以 `-32003` / `-32004` 应答。
 - **ACP：client 提供的 stdio MCP server** 通过 NeoGraph 的 MCP client 启动，node 通过 `ACPClient::session_tools()` 访问其 tool。server 只得到最小的环境，即 agent 的 `PATH`（Windows 上还有 `SystemRoot`）加上 client 的 `env`，不会得到可能含有 provider API 密钥的其余 agent 环境。
 - **A2A：card 将 collaboration envelope 声明为 extension。** 带有 `CollaborationMailbox` 的 Program agent 在 `capabilities.extensions`（`AgentCard::extensions`）中列出 `a2a::COLLABORATION_EXTENSION_URI`，因此 collaboration message 中由发送方指定的幂等 task id 成为已声明的 extension（A2A spec 4.6）。

@@ -471,6 +471,28 @@ in a step that no checkpoint precedes.
 
 Several interrupts of one step are answered one at a time (#388). When several nodes or Sends of one super-step raise `NodeInterrupt`, the run pauses on all of them: `RunResult.interrupts` lists each as `{id, node, value}`, where the id is the paused invocation's task id (`s3:review`, or `s3:send[1]:worker:<hash>` for a Send), and `interrupt_node`, `interrupt_value` and `interrupt_id` report the first. A resume answers the interrupt that `interrupt_id=` names (C++ `RunMetadata::resume_interrupt_id`), or the first one; every other paused node or Send of that step runs again without the value and asks its own question again, and the next resume answers it. Naming an interrupt that is not pending raises `ValueError` (C++ `std::invalid_argument`) before anything runs. A checkpoint that paused on several interrupts lists them in its metadata (`_neograph.interrupts`); one that paused on one is unchanged. The value reaches only the answered invocation of the paused step (#393): every node of a later step of the resumed run sees no `ctx.resume_value`, so a node or a tool gate that asks there pauses the run again instead of taking an answer to another question. A subgraph resumed through its parent receives its answer through the parent's answered node. A graph with a `messages` channel still receives the value there as a user message. JavaScript joins and plan-level `parallel` and `quorum` follow the same rule: one paused member is answered per resume, and the others ask again.
 
+A node can tell which interrupt a resume answers (#406). `ctx.resume_interrupt_id` (Python `input.ctx.resume_interrupt_id`) is the id of the interrupt that `ctx.resume_value` answers when it answers the node's own `NodeInterrupt`: the id that `RunResult::interrupt_id` and `RunResult::interrupts` report, whether the resume named it or answered the first one. It is empty (Python `None`) when the value is the approval of the `interrupt_before` gate that held the node, and whenever there is no value. The delivery rule is unchanged: the gate's approval still reaches the gated node (#393). A node behind a gate that also asks its own question checks the id, so that the approval to run is not taken as the answer to its question:
+
+```cpp
+asio::awaitable<NodeOutput> run(NodeInput in) override {
+    const auto& answer = in.ctx.resume_value;
+    // Nothing yet, or the approval of the gate that held this node.
+    if (!answer || in.ctx.resume_interrupt_id.empty())
+        throw NodeInterrupt("deploy needs a target", json{{"ask", "target"}});
+    NodeOutput out;
+    out.writes.push_back(ChannelWrite{"target", *answer});
+    co_return out;
+}
+```
+
+```python
+def run(self, input):
+    answer = input.ctx.resume_value
+    if answer is None or input.ctx.resume_interrupt_id is None:
+        raise ng.NodeInterrupt({"ask": "target"}, reason="deploy needs a target")
+    return [ng.ChannelWrite("target", answer)]
+```
+
 A step whose siblings end differently ends by one rule, whatever their index or completion order (#392). It holds for the branches of a fan-out and for the Sends of a step, with one worker or many. Cancellation of the run stops it. Otherwise an uncertain effect, a `NodeInterrupt` whose payload `kind` is `tool_effect_reconciliation`, pauses the step for reconciliation even when a sibling failed, because ending the run would abandon an effect whose outcome nobody knows; the pause reports only those interrupts, and the failed sibling, which recorded no result, runs again when the step is resumed. Otherwise a failure fails the run with the first failure in dispatch order (ready order, then Send order): the step's ordinary interrupts are not reported, and no checkpoint is saved for them. Otherwise the step pauses on every interrupt, as above. A failure routed along a failure edge is the node's result, like a completion: a sibling's interrupt still pauses the step, and the route is taken when the step completes. JavaScript joins and plan-level `parallel` and `quorum` rank their members the same way (#397): a member paused on an uncertain effect pauses the join beside a member that failed, on the first such member, unless a success already decides it (a race winner, a quorum met); the failed member is recorded and ends the join when it is resumed, once the member the resume answers has run to its end and settled its effect (#400). Whenever a join pauses, a member paused on an uncertain effect is asked before one paused on an ordinary question, whatever the declaration order (#401). A collecting `ng.all` (`collect: true`) is the deliberate exception to the rule above: it waits for every member, paused ones included, before it reports, so a member's failure does not end it while another member is paused on an ordinary question. It pauses there instead, and reports the failure once every member has settled (#401).
 
 Useful when the decision to pause depends on intermediate node output

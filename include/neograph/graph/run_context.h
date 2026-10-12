@@ -119,6 +119,17 @@ struct RunContext {
     /// again instead of taking an answer to another question.
     std::optional<json> resume_value;
 
+    /// #406: the interrupt resume_value answers, when it answers this
+    /// invocation's own NodeInterrupt: its PendingInterrupt::id, the task id
+    /// that RunResult::interrupt_id and RunResult::interrupts report, whether
+    /// the resume named it (RunMetadata::resume_interrupt_id) or answered the
+    /// first one. Empty when resume_value is the approval of the
+    /// interrupt_before gate that held this node (#393, #396), and whenever
+    /// resume_value is empty. A node behind a gate that also asks its own
+    /// question tells the gate's approval from the answer to its question by
+    /// this field.
+    std::string resume_interrupt_id;
+
     /// Optional cross-thread shared memory.
     std::shared_ptr<Store> store;
 

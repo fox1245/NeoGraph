@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=e376356dbf8e9ae47791d3beacd6167ce86569148053f4255acd8ad0f73b17ea -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=7166152d46492e76c24091a85ba33c8e3be570c0031ef3234c48464dba58bde9 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -661,6 +661,8 @@ profile.attach(engine)
 정적 `interrupt_before`/`interrupt_after`, 동적 `NodeInterrupt`, 동기식 `resume`, asyncio `resume_async`, 그리고 정확한 `resume_from`은 체크포인트 저장소를 필요로 합니다.
 
 `ng.Send`로 디스패치된 Python 노드가 `ng.NodeInterrupt`를 던지면 다른 노드와 마찬가지로 run이 일시 정지합니다. `run`, `run_stream`, `run_async`, `run_stream_async`는 체크포인트가 있는 중단된 `RunResult`를 반환하고, `resume`, `resume_async`, `resume_from`은 그 Send를 답과 함께 실행하며 Send를 내보낸 노드와 끝난 Send는 다시 실행되지 않고 재생됩니다. 한 스텝의 노드나 Send 여럿이 `ng.NodeInterrupt`를 일으키면 `result.interrupts`는 각각을 `{"id", "node", "value"}`로 나열하고 `result.interrupt_id`는 첫 번째를 지정합니다. `resume`, `resume_async`, `resume_from`은 `interrupt_id=`를 받아 그 인터럽트에 답하며, 없으면 첫 번째에 답합니다. 일시 정지한 다른 노드나 Send는 그 재개에서 자신의 질문을 다시 하고 다음 재개가 그것에 답합니다(#388). 대기 중이 아닌 `interrupt_id`는 `ValueError`를 일으킵니다. `RunMetadata.resume_interrupt_id`도 같은 id를 전달합니다. 답은 재개가 다시 들어가는 스텝에서 그 답이 향하는 노드나 Send에만 전달됩니다. 재개된 run의 이후 스텝에서는 `input.ctx.resume_value`와 tool gate의 `ToolGateContext.resume_value`가 `None`이므로, 거기서 묻는 노드나 gate는 run을 다시 일시 정지합니다(#393). `interrupt_before` 일시 정지 뒤의 재개는 gate가 붙잡아 둔 노드에 값을 주고, `interrupt_after` 일시 정지 뒤의 재개는 어떤 노드에도 주지 않습니다. 한 스텝에 게이트 노드 여럿이 준비되면 각 게이트에 따로 답합니다. 스텝의 모든 게이트가 답을 받을 때까지 run은 다음 게이트 노드 앞에서 다시 멈추고, 그다음 각 게이트 노드는 자신의 게이트에 대한 답을 받습니다(#396). 한 스텝에서 실패한 노드나 Send는 순서와 관계없이 묻는 노드보다 우선합니다. run은 실패를 일으키고 인터럽트를 보고하지 않습니다. 불확실한 효과(payload `kind`가 `tool_effect_reconciliation`인 `NodeInterrupt`)만은 조정될 수 있도록 실패 옆에서도 일시 정지합니다(#392).
+
+`input.ctx.resume_interrupt_id`는 `input.ctx.resume_value`가 어느 인터럽트에 대한 답인지 노드에 알려 줍니다(#406). 재개가 `interrupt_id=`로 지정했든 첫 인터럽트에 답했든 노드 자신의 `NodeInterrupt` id(`result.interrupt_id`가 보고하는 `"s3:review"`)이고, 값이 노드를 붙잡은 `interrupt_before` 게이트의 승인이면 `None`입니다. 게이트 뒤에 있으면서 자기 질문도 하는 노드는 `resume_interrupt_id`가 `None`인 동안 `ng.NodeInterrupt`를 던져, 실행 승인을 답으로 받아들이지 않습니다. [개념 가이드](concepts.md)에 이 패턴이 있습니다.
 
 Python `CheckpointStore` 하위 클래스는 `requires_managed_budget(thread_id) -> bool`을 구현할 수 있습니다. 이 동기 가상 메서드는 영속화된 관리 예산 은행의 거부 의무를 읽습니다. 엔진의 네이티브 비동기 파사드가 이 메서드를 호출하며, 바인딩은 Python 재정의 메서드를 실행할 때 GIL을 획득합니다. 체크포인트 상태에서 은행 정보를 제거하거나 체크포인트를 삭제해도 실제 영속 의무를 보고해야 합니다. 재정의 메서드를 생략하면 `False`를 반환하는 대신 지원되지 않는 백엔드라는 명시적인 네이티브 오류가 유지됩니다.
 

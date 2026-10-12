@@ -2008,6 +2008,8 @@ GraphEngine::execute_graph_async(
         }
         if (!answered.empty()) {
             // #393: only the answered invocations, in that step, receive a value.
+            // #406: a NodeInterrupt's answer names the interrupt it answers.
+            if (gate_answers.empty()) runtime->answered_interrupt = answered;
             runtime->answers[answered] = std::move(answer);
             runtime->answered_step     = resume_context->start_step;
         }

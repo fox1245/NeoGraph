@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=3ddbf9b3903df0b61f2694ecfbb12af0682b96f25f81d50b4efc4865c4c576a1 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=9041d1fa585108e4b82b60fc3526dbb3b4885f7a5febdefac7e9ea2778d72aee -->
 # NeoGraph 핵심 개념 — 해설 가이드
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -417,6 +417,28 @@ result = await engine.resume_async(thread_id="t1",
 노드 본문 내부에서 던지기(Python: `raise ng.NodeInterrupt(reason)`, C++: `throw NodeInterrupt(...)`). 엔진이 포착하고, 상태를 유지하며, 던지는 노드에서 중단된 `RunResult`를 반환합니다 — 동일한 재개 API입니다. 이는 ready batch의 노드와 `Send` target 모두에, 모든 동기·비동기·스트리밍 진입점에서 똑같이 적용됩니다. 일시 정지한 스텝에서 끝난 형제는 재개 시 다시 실행되지 않고 재생되며, 앞에 체크포인트가 없는 스텝에서도 마찬가지입니다.
 
 한 스텝의 여러 인터럽트는 하나씩 답한다(#388). 한 슈퍼스텝의 노드나 Send 여럿이 `NodeInterrupt`를 던지면 run은 그 모두에서 일시 정지한다. `RunResult.interrupts`는 각각을 `{id, node, value}`로 나열하며, id는 일시 정지한 호출의 task id(`s3:review`, Send는 `s3:send[1]:worker:<hash>`)이고, `interrupt_node`, `interrupt_value`, `interrupt_id`는 첫 번째를 보고한다. 재개는 `interrupt_id=`(C++ `RunMetadata::resume_interrupt_id`)가 지정한 인터럽트, 또는 첫 번째 인터럽트에 답한다. 그 스텝에서 일시 정지한 다른 노드나 Send는 값 없이 다시 실행되어 자신의 질문을 다시 하고, 다음 재개가 그것에 답한다. 대기 중이 아닌 인터럽트를 지정하면 아무것도 실행되기 전에 `ValueError`(C++ `std::invalid_argument`)가 발생한다. 여러 인터럽트에서 일시 정지한 체크포인트는 metadata(`_neograph.interrupts`)에 그것들을 나열하며, 하나에서 일시 정지한 체크포인트는 바뀌지 않는다. 값은 일시 정지한 스텝의 답을 받은 호출에만 전달된다(#393). 재개된 run의 이후 스텝 노드는 `ctx.resume_value`를 보지 못하므로, 거기서 묻는 노드나 tool gate는 다른 질문의 답을 가져가지 않고 run을 다시 일시 정지한다. 부모를 통해 재개된 서브그래프는 부모의 답을 받은 노드를 통해 자신의 답을 받는다. `messages` 채널이 있는 그래프는 여전히 그 값을 사용자 메시지로 받는다. JavaScript join과 플랜 수준 `parallel`, `quorum`도 같은 규칙을 따른다. 재개마다 일시 정지한 멤버 하나에 답하고 나머지는 다시 묻는다.
+
+노드는 재개가 어느 인터럽트에 답하는지 알 수 있다(#406). `ctx.resume_interrupt_id`(Python `input.ctx.resume_interrupt_id`)는 `ctx.resume_value`가 노드 자신의 `NodeInterrupt`에 대한 답일 때 그 인터럽트의 id다. 재개가 그 id를 지정했든 첫 인터럽트에 답했든 `RunResult::interrupt_id`와 `RunResult::interrupts`가 보고하는 id와 같다. 값이 노드를 붙잡은 `interrupt_before` 게이트의 승인이면, 그리고 값이 없으면 비어 있다(Python `None`). 전달 규칙은 바뀌지 않는다. 게이트의 승인은 여전히 게이트가 붙잡은 노드에 전달된다(#393). 게이트 뒤에 있으면서 자기 질문도 하는 노드는 이 id를 확인해, 실행 승인을 자기 질문의 답으로 받아들이지 않는다.
+
+```cpp
+asio::awaitable<NodeOutput> run(NodeInput in) override {
+    const auto& answer = in.ctx.resume_value;
+    // Nothing yet, or the approval of the gate that held this node.
+    if (!answer || in.ctx.resume_interrupt_id.empty())
+        throw NodeInterrupt("deploy needs a target", json{{"ask", "target"}});
+    NodeOutput out;
+    out.writes.push_back(ChannelWrite{"target", *answer});
+    co_return out;
+}
+```
+
+```python
+def run(self, input):
+    answer = input.ctx.resume_value
+    if answer is None or input.ctx.resume_interrupt_id is None:
+        raise ng.NodeInterrupt({"ask": "target"}, reason="deploy needs a target")
+    return [ng.ChannelWrite("target", answer)]
+```
 
 형제들이 서로 다르게 끝난 스텝은 그 인덱스나 완료 순서와 관계없이 하나의 규칙으로 끝난다(#392). 이 규칙은 fan-out의 분기와 한 스텝의 Send에, 워커가 하나든 여럿이든 똑같이 적용된다. run이 취소되면 run이 멈춘다. 그렇지 않고 불확실한 효과, 즉 payload `kind`가 `tool_effect_reconciliation`인 `NodeInterrupt`가 있으면 형제가 실패했더라도 스텝은 조정(reconciliation)을 위해 일시 정지한다. run을 끝내면 결과를 아무도 모르는 효과를 버리게 되기 때문이다. 이 일시 정지는 그런 인터럽트만 보고하며, 결과를 기록하지 않은 실패한 형제는 스텝이 재개될 때 다시 실행된다. 그렇지 않고 실패가 있으면 디스패치 순서(ready 순서, 그다음 Send 순서)에서 첫 실패로 run이 실패한다. 그 스텝의 일반 인터럽트는 보고되지 않으며 그것을 위한 체크포인트도 저장되지 않는다. 그 밖의 경우 스텝은 위와 같이 모든 인터럽트에서 일시 정지한다. failure edge를 따라 라우팅되는 실패는 완료와 같은 노드의 결과다. 형제의 인터럽트는 여전히 스텝을 일시 정지시키며, 라우트는 스텝이 완료될 때 적용된다. JavaScript join과 플랜 수준 `parallel`, `quorum`도 멤버를 같은 방식으로 순위 매긴다(#397). 불확실한 효과에서 일시 정지한 멤버는, 성공이 이미 결과를 정하지 않았다면(race 승자, 충족된 quorum) 실패한 멤버 옆에서도 그런 첫 멤버에서 join을 일시 정지시킨다. 실패한 멤버는 기록되며, join이 재개되면 재개가 응답한 멤버가 끝까지 실행되어 그 효과를 확정한 뒤에 join을 끝낸다(#400). join이 일시 정지할 때는 선언 순서와 관계없이 불확실한 효과에서 일시 정지한 멤버가 일반 질문에서 일시 정지한 멤버보다 먼저 질문된다(#401). 수집형 `ng.all`(`collect: true`)은 위 규칙의 의도된 예외다. 수집형 join은 일시 정지한 멤버를 포함해 모든 멤버를 기다린 뒤에 보고하므로, 다른 멤버가 일반 질문에서 일시 정지해 있는 동안에는 멤버의 실패가 join을 끝내지 않는다. 대신 그 멤버에서 일시 정지하고, 모든 멤버가 끝난 뒤에 실패를 보고한다(#401).
 

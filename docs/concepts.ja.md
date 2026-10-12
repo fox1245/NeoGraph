@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=3ddbf9b3903df0b61f2694ecfbb12af0682b96f25f81d50b4efc4865c4c576a1 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=9041d1fa585108e4b82b60fc3526dbb3b4885f7a5febdefac7e9ea2778d72aee -->
 # NeoGraphのコアコンセプト— 解説ガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -417,6 +417,28 @@ result = await engine.resume_async(thread_id="t1",
 ノード本体の内部からスローします（Python: `raise ng.NodeInterrupt(reason)`、C++: `throw NodeInterrupt(...)`）。エンジンはキャッチし、状態を永続化し、スローしたノードで中断された`RunResult`を返します — 同じ再開APIです。これは ready batch のノードにも `Send` target にも、同期・非同期・ストリーミングのすべての入口で同じように当てはまります。一時停止したステップで終了した兄弟は、再開時に再実行されず再生されます。前にチェックポイントのないステップでも同じです。
 
 一つのステップの複数の割り込みには一つずつ答えます (#388)。一つのスーパーステップの複数のノードや Send が `NodeInterrupt` を送出すると、run はそのすべてで一時停止します。`RunResult.interrupts` はそれぞれを `{id, node, value}` として列挙し、id は一時停止した呼び出しの task id (`s3:review`、Send なら `s3:send[1]:worker:<hash>`) です。`interrupt_node`、`interrupt_value`、`interrupt_id` は最初のものを報告します。再開は `interrupt_id=` (C++ `RunMetadata::resume_interrupt_id`) が指定した割り込み、または最初の割り込みに答えます。そのステップで一時停止した他のノードや Send は値なしで再実行されて自身の質問をもう一度行い、次の再開がそれに答えます。保留中でない割り込みを指定すると、何も実行される前に `ValueError` (C++ `std::invalid_argument`) が発生します。複数の割り込みで一時停止したチェックポイントはメタデータ (`_neograph.interrupts`) にそれらを列挙し、一つで一時停止したチェックポイントは変わりません。値は一時停止したステップの答えを受けた呼び出しにだけ届きます (#393)。再開した run の後続ステップのノードには `ctx.resume_value` が見えないため、そこで尋ねるノードや tool gate は別の質問への答えを受け取らず、run をもう一度一時停止します。親を通じて再開したサブグラフは、親の答えを受けたノードを通じて自身の答えを受け取ります。`messages` チャネルを持つグラフは、引き続きその値をユーザーメッセージとして受け取ります。JavaScript の join とプランレベルの `parallel`、`quorum` も同じ規則に従い、再開ごとに一時停止したメンバー一つに答え、残りはもう一度尋ねます。
+
+ノードは、再開がどの割り込みに答えるのかを知ることができます (#406)。`ctx.resume_interrupt_id`（Python では `input.ctx.resume_interrupt_id`）は、`ctx.resume_value` がノード自身の `NodeInterrupt` への答えであるとき、その割り込みの id です。再開がその id を指定したか最初の割り込みに答えたかにかかわらず、`RunResult::interrupt_id` と `RunResult::interrupts` が報告する id と同じです。値がノードを止めた `interrupt_before` ゲートの承認であるとき、および値がないときは空です（Python では `None`）。配信の規則は変わりません。ゲートの承認は引き続きゲートが止めたノードに届きます (#393)。ゲートの後ろにあり自分の質問もするノードはこの id を確かめ、実行の承認を自分の質問への答えとして受け取らないようにします。
+
+```cpp
+asio::awaitable<NodeOutput> run(NodeInput in) override {
+    const auto& answer = in.ctx.resume_value;
+    // Nothing yet, or the approval of the gate that held this node.
+    if (!answer || in.ctx.resume_interrupt_id.empty())
+        throw NodeInterrupt("deploy needs a target", json{{"ask", "target"}});
+    NodeOutput out;
+    out.writes.push_back(ChannelWrite{"target", *answer});
+    co_return out;
+}
+```
+
+```python
+def run(self, input):
+    answer = input.ctx.resume_value
+    if answer is None or input.ctx.resume_interrupt_id is None:
+        raise ng.NodeInterrupt({"ask": "target"}, reason="deploy needs a target")
+    return [ng.ChannelWrite("target", answer)]
+```
 
 兄弟が異なる形で終わったステップは、そのインデックスや完了順にかかわらず一つの規則で終わります (#392)。この規則は fan-out の分岐にも一つのステップの Send にも、ワーカーが一つでも複数でも同じく適用されます。run のキャンセルは run を止めます。そうでなければ、不確かな効果、つまり payload の `kind` が `tool_effect_reconciliation` である `NodeInterrupt` は、兄弟が失敗していても照合 (reconciliation) のためにステップを一時停止します。run を終えると、結果を誰も知らない効果を放棄することになるからです。この一時停止はそうした割り込みだけを報告し、結果を記録していない失敗した兄弟はステップの再開時にもう一度実行されます。そうでなければ、失敗はディスパッチ順 (ready の順、次に Send の順) で最初の失敗によって run を失敗させます。そのステップの通常の割り込みは報告されず、そのためのチェックポイントも保存されません。それ以外の場合、ステップは上記のとおりすべての割り込みで一時停止します。failure edge に沿ってルーティングされる失敗は、完了と同じくノードの結果です。兄弟の割り込みは引き続きステップを一時停止させ、ルートはステップの完了時にたどられます。JavaScript の join とプランレベルの `parallel`、`quorum` もメンバーを同じように順位付けします (#397)。不確かな効果で一時停止したメンバーは、成功がすでに結果を決めていない限り (race の勝者、満たされた quorum)、失敗したメンバーの横でも、そうした最初のメンバーで join を一時停止させます。失敗したメンバーは記録され、join が再開されると、再開が応答したメンバーが最後まで実行されてその効果を確定させた後に join を終わらせます (#400)。join が一時停止するときは、宣言順にかかわらず、不確かな効果で一時停止したメンバーが通常の質問で一時停止したメンバーより先に問われます (#401)。収集型の `ng.all` (`collect: true`) は上記の規則の意図的な例外です。一時停止したメンバーも含めてすべてのメンバーを待ってから報告するため、別のメンバーが通常の質問で一時停止している間は、メンバーの失敗で join は終わりません。代わりにそこで一時停止し、すべてのメンバーが確定した後に失敗を報告します (#401)。
 

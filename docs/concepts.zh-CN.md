@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=3ddbf9b3903df0b61f2694ecfbb12af0682b96f25f81d50b4efc4865c4c576a1 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=9041d1fa585108e4b82b60fc3526dbb3b4885f7a5febdefac7e9ea2778d72aee -->
 # NeoGraph 核心概念——叙事指南
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -417,6 +417,28 @@ result = await engine.resume_async(thread_id="t1",
 从节点主体内部抛出（Python：`raise ng.NodeInterrupt(reason)`，C++：`throw NodeInterrupt(...)`）。引擎捕获、持久化状态、返回一个在抛出节点处中断的 `RunResult` —— 使用相同的恢复 API。这对 ready batch 中的节点和 `Send` target 同样适用，在所有同步、异步和流式入口上都一致。暂停的步骤中已完成的兄弟节点在恢复时会被重放而不是再次运行，前面没有检查点的步骤也是如此。
 
 同一步中的多个中断会逐个回答（#388）。当一个超步中的多个节点或 Send 抛出 `NodeInterrupt` 时，run 会在所有这些中断上暂停：`RunResult.interrupts` 以 `{id, node, value}` 列出每一个，其中 id 是暂停调用的 task id（`s3:review`，Send 为 `s3:send[1]:worker:<hash>`），`interrupt_node`、`interrupt_value` 和 `interrupt_id` 报告第一个。恢复回答 `interrupt_id=`（C++ `RunMetadata::resume_interrupt_id`）指定的中断，或第一个中断；该步中其他暂停的节点或 Send 会在没有该值的情况下再次运行并再次提出自己的问题，下一次恢复回答它。指定一个不在等待中的中断会在任何内容运行之前抛出 `ValueError`（C++ `std::invalid_argument`）。在多个中断上暂停的检查点会在其元数据（`_neograph.interrupts`）中列出它们；在一个中断上暂停的检查点保持不变。该值只送达暂停步骤中被回答的调用（#393）：恢复后的 run 中后续步骤的节点看不到 `ctx.resume_value`，因此在那里提问的节点或 tool gate 会再次暂停 run，而不会拿走另一个问题的答案。通过父图恢复的子图经由父图中被回答的节点收到自己的答案。带有 `messages` 通道的图仍会在其中以用户消息的形式收到该值。JavaScript join 以及计划级 `parallel` 和 `quorum` 遵循相同规则：每次恢复回答一个暂停的成员，其余成员再次提问。
+
+节点可以知道一次恢复回答的是哪个中断（#406）。当 `ctx.resume_value` 回答的是节点自身的 `NodeInterrupt` 时，`ctx.resume_interrupt_id`（Python 中为 `input.ctx.resume_interrupt_id`）就是该中断的 id：无论恢复是指名回答它还是回答了第一个中断，它都与 `RunResult::interrupt_id` 和 `RunResult::interrupts` 报告的 id 相同。当该值是拦住此节点的 `interrupt_before` 门的批准时，以及没有值时，它为空（Python 中为 `None`）。传递规则不变：门的批准仍然送达被门拦住的节点（#393）。位于门之后、同时也提出自己问题的节点会检查这个 id，从而不会把运行的批准当作对自己问题的回答：
+
+```cpp
+asio::awaitable<NodeOutput> run(NodeInput in) override {
+    const auto& answer = in.ctx.resume_value;
+    // Nothing yet, or the approval of the gate that held this node.
+    if (!answer || in.ctx.resume_interrupt_id.empty())
+        throw NodeInterrupt("deploy needs a target", json{{"ask", "target"}});
+    NodeOutput out;
+    out.writes.push_back(ChannelWrite{"target", *answer});
+    co_return out;
+}
+```
+
+```python
+def run(self, input):
+    answer = input.ctx.resume_value
+    if answer is None or input.ctx.resume_interrupt_id is None:
+        raise ng.NodeInterrupt({"ask": "target"}, reason="deploy needs a target")
+    return [ng.ChannelWrite("target", answer)]
+```
 
 兄弟节点以不同方式结束的步骤，无论它们的索引或完成顺序如何，都按同一条规则结束（#392）。该规则适用于 fan-out 的分支和同一步的 Send，无论一个 worker 还是多个。run 被取消时 run 停止。否则，不确定的效果，即 payload `kind` 为 `tool_effect_reconciliation` 的 `NodeInterrupt`，即使有兄弟节点失败也会让该步为对账（reconciliation）而暂停，因为结束 run 会丢弃一个无人知道结果的效果；此暂停只报告这些中断，而没有记录结果的失败兄弟节点会在该步恢复时再次运行。否则，失败会以派发顺序（ready 顺序，然后是 Send 顺序）中的第一个失败使 run 失败：该步的普通中断不会被报告，也不会为它们保存检查点。否则，该步如上所述在所有中断上暂停。沿 failure edge 路由的失败是节点的结果，与完成相同：兄弟节点的中断仍会使该步暂停，路由在该步完成时进行。JavaScript join 以及计划级 `parallel` 和 `quorum` 以同样的方式对成员排序（#397）：因不确定效果而暂停的成员，除非成功已决定结果（race 胜者、已满足的 quorum），即使在失败成员旁也会让 join 在第一个这样的成员上暂停；失败的成员会被记录，并在 join 恢复时、待恢复所答复的成员运行到结束并落定其效果之后结束 join（#400）。join 暂停时，无论声明顺序如何，因不确定效果而暂停的成员都先于因普通问题而暂停的成员被询问（#401）。收集式 `ng.all`（`collect: true`）是上述规则的有意例外：它会等待所有成员（包括暂停的成员）结束后才报告，因此当另一个成员因普通问题而暂停时，成员的失败不会结束它。它会在该成员处暂停，并在所有成员都落定后报告该失败（#401）。
 
