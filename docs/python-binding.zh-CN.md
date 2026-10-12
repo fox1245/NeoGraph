@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=0a1d1d88fe0a97c7153a148b087c1a58f79c30d0794b13dcc68ea7e48a39eb79 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=6430f7803a016e70f6a2e2cf8d0a4eb7ea7c95fa45ad0f53e5790e5a540ee435 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -659,7 +659,7 @@ profile.attach(engine)
 
 静态 `interrupt_before`/`interrupt_after`、动态 `NodeInterrupt`、同步 `resume`、asyncio `resume_async` 以及精确 `resume_from` 都需要检查点存储。
 
-由 `ng.Send` 分派的 Python 节点抛出 `ng.NodeInterrupt` 时，会像其他节点一样暂停 run：`run`、`run_stream`、`run_async` 和 `run_stream_async` 返回带检查点的中断 `RunResult`，`resume`、`resume_async` 和 `resume_from` 则带着答案运行该 Send，而发出 Send 的节点和已完成的 Send 会被重放，不会再次运行。 当同一步中的多个节点或 Send 抛出 `ng.NodeInterrupt` 时，`result.interrupts` 以 `{"id", "node", "value"}` 列出每一个，`result.interrupt_id` 指明第一个。`resume`、`resume_async` 和 `resume_from` 接受 `interrupt_id=` 并回答该中断，未指定时回答第一个；其他暂停的节点或 Send 会在该次恢复中再次提出自己的问题，下一次恢复回答它（#388）。不在等待中的 `interrupt_id` 会抛出 `ValueError`。`RunMetadata.resume_interrupt_id` 携带同一个 id。答案只送达它所回答的节点或 Send，并且只在恢复重新进入的那一步：在恢复后的 run 的后续步骤中，`input.ctx.resume_value` 以及 tool gate 的 `ToolGateContext.resume_value` 都是 `None`，因此在那里提问的节点或 gate 会再次暂停 run（#393）。`interrupt_before` 暂停之后的恢复把值交给闸门拦下的节点；`interrupt_after` 暂停之后的恢复不把它交给任何节点。
+由 `ng.Send` 分派的 Python 节点抛出 `ng.NodeInterrupt` 时，会像其他节点一样暂停 run：`run`、`run_stream`、`run_async` 和 `run_stream_async` 返回带检查点的中断 `RunResult`，`resume`、`resume_async` 和 `resume_from` 则带着答案运行该 Send，而发出 Send 的节点和已完成的 Send 会被重放，不会再次运行。 当同一步中的多个节点或 Send 抛出 `ng.NodeInterrupt` 时，`result.interrupts` 以 `{"id", "node", "value"}` 列出每一个，`result.interrupt_id` 指明第一个。`resume`、`resume_async` 和 `resume_from` 接受 `interrupt_id=` 并回答该中断，未指定时回答第一个；其他暂停的节点或 Send 会在该次恢复中再次提出自己的问题，下一次恢复回答它（#388）。不在等待中的 `interrupt_id` 会抛出 `ValueError`。`RunMetadata.resume_interrupt_id` 携带同一个 id。答案只送达它所回答的节点或 Send，并且只在恢复重新进入的那一步：在恢复后的 run 的后续步骤中，`input.ctx.resume_value` 以及 tool gate 的 `ToolGateContext.resume_value` 都是 `None`，因此在那里提问的节点或 gate 会再次暂停 run（#393）。`interrupt_before` 暂停之后的恢复把值交给闸门拦下的节点；`interrupt_after` 暂停之后的恢复不把它交给任何节点。在同一步中，失败的节点或 Send 无论顺序如何都优先于提问的节点：run 抛出该失败，不报告任何中断；只有不确定的效果（payload `kind` 为 `tool_effect_reconciliation` 的 `NodeInterrupt`）仍会在失败旁暂停，以便对账（#392）。
 
 Python `CheckpointStore` 子类可以实现 `requires_managed_budget(thread_id) -> bool`。此同步虚方法读取已持久化的受管理预算银行拒绝义务；引擎的原生异步门面调用该方法，绑定在执行 Python 重写方法时获取 GIL。即使检查点状态中的银行信息被剥离，或检查点被删除，也须报告真实的持久义务。省略重写方法会保留原生明确的后端不支持错误，而不是返回 `False`。
 

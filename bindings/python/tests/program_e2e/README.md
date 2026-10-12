@@ -25,6 +25,7 @@ These tests drive the sealed-v1 JavaScript Program API through the Python bindin
 | `test_15_send_isolation.py` | a `Send` payload is visible only to its own `Send` (#389): one Send and three Sends, with one and four workers, live and after a resume on SQLite, leave no payload for the next step or the final state |
 | `test_16_interrupt_identity.py` | two Core interrupts of one step, next to a bound `llm_call` that finished (#388): the pending input names the first Core interrupt, a resume answers it and the second asks its own question again, the next resume answers that one, and the finished call is never resent or charged again, in memory and with the SQLite journal |
 | `test_17_resume_value_scope.py` | an answer reaches only the question it answers (#393): after a bound `llm_call`, `first` asks and then `second` asks in the next Core step; the resume that answers `first` leaves `second` to ask its own question, the next resume answers it, and the finished call is never resent or charged again, in memory and with the SQLite journal |
+| `test_18_step_failure_outranks_interrupt.py` | a failure ends its step whatever the index of a node that asks (#392): one Core step runs a bound `llm_call` next to a node that asks and a node that fails, in both orders; the Program fails with the failing node's classified failure, no question is left pending, and the model call is sent and charged once, in memory and with the SQLite journal |
 
 `support.py` holds the shared Python nodes, conditions, registry, budgets and JavaScript builders.
 

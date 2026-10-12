@@ -211,15 +211,100 @@ PendingInterrupt pending_interrupt(std::string task_id, const std::string& node,
 }
 
 // #388: the step's NodeInterrupts, for the engine to report; and the metadata
-// of its NodeInterrupt checkpoint, which lists them when there are several.
-json record_step_interrupts(const RunContext& ctx, std::vector<PendingInterrupt> interrupts) {
+// of its NodeInterrupt checkpoint, which lists them when there are several,
+// or always when `listed` (#392: a pause beside a failure).
+json record_step_interrupts(const RunContext& ctx, std::vector<PendingInterrupt> interrupts,
+                            bool listed = false) {
     const auto runtime = detail::runtime_for(ctx);
     if (runtime && runtime->step_interrupts) {
         runtime->step_interrupts->list = interrupts;
         runtime->step_interrupts->checkpoint_id.clear();
     }
     return detail::with_pending_interrupts(
-        detail::checkpoint_metadata_for(ctx, detail::CheckpointTiming::DuringStep), interrupts);
+        detail::checkpoint_metadata_for(ctx, detail::CheckpointTiming::DuringStep), interrupts,
+        listed);
+}
+
+// #392: how one invocation of a step ended, by precedence, lowest first.
+enum class InvocationExit { Interrupt, Failure, Reconciliation, Stop };
+
+InvocationExit exit_of(const std::exception_ptr& error) {
+    try {
+        std::rethrow_exception(error);
+    } catch (const NodeInterrupt& interrupt) {
+        // The interrupt the executor and mediated dispatch raise for an effect
+        // whose outcome is unknown.
+        const auto& value = interrupt.value();
+        return value.is_object() &&
+                       value.value("kind", std::string()) == "tool_effect_reconciliation"
+                   ? InvocationExit::Reconciliation
+                   : InvocationExit::Interrupt;
+    } catch (const CancelledException&) {
+        return InvocationExit::Stop;
+    } catch (const std::bad_alloc&) {
+        return InvocationExit::Stop;
+    } catch (...) {
+        return InvocationExit::Failure;
+    }
+}
+
+// #392: how a step ends when its invocations (fan-out branches, or the Sends
+// of a step) ended with `errors`, null for one that finished. The same rule
+// holds whatever their index or completion order:
+//   1. run control (cancellation, out of memory) stops the run; `end` is the
+//      first one, as inside one invocation, where it outranks an uncertain
+//      effect;
+//   2. otherwise an uncertain effect pauses the step for reconciliation, even
+//      beside a failure, which would end the run and abandon an effect whose
+//      outcome nobody knows; beside a failure the pause reports only the
+//      reconciliation interrupts, and the failed invocation, which recorded
+//      no result, runs again on resume;
+//   3. otherwise a failure fails the run; `end` is the first in dispatch
+//      order, and the step's ordinary interrupts are not reported;
+//   4. otherwise the step pauses on every interrupt (#388).
+// A failure routed along a failure edge (#364) is not an error here: it is the
+// invocation's result, like a completion.
+struct StepOutcome {
+    std::optional<std::size_t> end;
+    /// The interrupts the pause reports, in dispatch order.
+    std::vector<std::size_t> pause;
+    /// The pause holds back a failure; its checkpoint lists what it answers.
+    bool beside_failure = false;
+};
+
+StepOutcome step_outcome(const std::vector<std::exception_ptr>& errors) {
+    std::optional<std::size_t> stop;
+    std::optional<std::size_t> failure;
+    std::vector<std::size_t>   reconciliations;
+    std::vector<std::size_t>   interrupts;
+    for (std::size_t index = 0; index < errors.size(); ++index) {
+        if (!errors[index]) continue;
+        switch (exit_of(errors[index])) {
+            case InvocationExit::Stop:
+                if (!stop) stop = index;
+                break;
+            case InvocationExit::Failure:
+                if (!failure) failure = index;
+                break;
+            case InvocationExit::Reconciliation:
+                reconciliations.push_back(index);
+                interrupts.push_back(index);
+                break;
+            case InvocationExit::Interrupt:
+                interrupts.push_back(index);
+                break;
+        }
+    }
+    StepOutcome outcome;
+    if (stop) {
+        outcome.end = stop;
+    } else if (failure && reconciliations.empty()) {
+        outcome.end = failure;
+    } else {
+        outcome.beside_failure = failure.has_value();
+        outcome.pause          = failure ? std::move(reconciliations) : std::move(interrupts);
+    }
+    return outcome;
 }
 
 // #386: the NodeInterrupt checkpoint saved for the step's interrupts, which the
@@ -1472,9 +1557,12 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
             .async_wait(asio::experimental::wait_for_all(), asio::use_awaitable);
     (void)order;  // we apply in ready-order regardless of completion-order
 
-    // Find first exception + classify. NodeInterrupt gets a dedicated
-    // cp-save with the full ready set. Successful siblings have pending
-    // writes; resume replays those and retries only the interrupted node.
+    // #392: the step's outcome does not depend on which branch has the lower
+    // index (step_outcome). A failure fails the run; an interrupt pauses it,
+    // with a dedicated cp-save with the full ready set, only when no branch
+    // failed or when it asks to reconcile an uncertain effect. Successful
+    // siblings have pending writes; resume replays those and runs again only
+    // the branches that did not finish.
     //
     // TSan-safe NodeInterrupt path: extract the reason as a plain
     // ``std::string`` while we still hold the exception_ptr, then
@@ -1486,66 +1574,59 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
     // worker thread's eptr destructor. Non-interrupt
     // exceptions still rethrow the original eptr on the same thread
     // they were classified, no co_await between, so no race window.
-    std::exception_ptr first_exception;
-    std::string        first_exception_node;
-    // A whole copy of the interrupt (reason + payload), not just its reason.
-    // Copying it here is what keeps the TSan property described above: the
-    // strings and json are deep-copied out while we still hold the eptr, so
-    // what we throw later is wholly owned by this thread.
-    std::optional<NodeInterrupt> interrupt;
-    // #388: every branch that paused, not just the first; copied out of its
-    // exception_ptr here, for the same reason as the first one.
-    std::vector<PendingInterrupt> pending;
-    for (std::size_t i = 0; i < ready.size(); ++i) {
-        if (!excs[i]) continue;
-        try {
-            std::rethrow_exception(excs[i]);
-        } catch (const NodeInterrupt& ni) {
-            if (!first_exception) interrupt = ni;
-            pending.push_back(pending_interrupt(make_static_task_id(step, ready[i]), ready[i], ni));
-        } catch (...) {
-            // non-interrupt
-        }
-        if (!first_exception) {
-            first_exception      = excs[i];
-            first_exception_node = ready[i];
-        }
-    }
-
-    if (first_exception) {
-        if (interrupt) {
-            // GCC-13 workaround: build the next_nodes vector outside
-            // the co_await arg list (nested brace-init trips the ICE).
-            std::vector<std::string> next_nodes;
-            next_nodes = ready;
-            const auto metadata        = record_step_interrupts(ctx, std::move(pending));
-            const auto interrupt_cp_id = co_await coord.save_super_step_async(
-                state, first_exception_node, next_nodes, CheckpointPhase::NodeInterrupt, step,
-                parent_cp_id, barrier_state, metadata);
-            if (parent_cp_id.empty()) {
-                // No checkpoint precedes the step: record under the interrupt
-                // checkpoint what a parent would hold, so that resume replays
-                // a sibling that finished instead of running it again (#385).
-                for (std::size_t i = 0; i < ready.size(); ++i) {
-                    const auto branch_task_id = make_static_task_id(step, ready[i]);
-                    if (!excs[i])
-                        co_await coord.record_pending_write_async(interrupt_cp_id, branch_task_id,
-                                                                  branch_task_id, ready[i],
-                                                                  values[i], step);
-                    else
-                        co_await record_attempt_start(coord, interrupt_cp_id, branch_task_id,
-                                                      ready[i], interrupted_attempts[i], step);
+    const auto outcome = step_outcome(excs);
+    if (outcome.end) std::rethrow_exception(excs[*outcome.end]);
+    if (!outcome.pause.empty()) {
+        // A whole copy of the interrupt (reason + payload), not just its
+        // reason. Copying it here is what keeps the TSan property described
+        // above: the strings and json are deep-copied out while we still hold
+        // the eptr, so what we throw later is wholly owned by this thread.
+        std::optional<NodeInterrupt> interrupt;
+        std::string                  interrupt_node;
+        // #388: every branch the pause reports, not just the first; copied
+        // out of its exception_ptr here, for the same reason as the first one.
+        std::vector<PendingInterrupt> pending;
+        for (const auto i : outcome.pause) {
+            try {
+                std::rethrow_exception(excs[i]);
+            } catch (const NodeInterrupt& ni) {
+                if (!interrupt) {
+                    interrupt      = ni;
+                    interrupt_node = ready[i];
                 }
+                pending.push_back(
+                    pending_interrupt(make_static_task_id(step, ready[i]), ready[i], ni));
             }
-            // Drop the worker eptr and throw a fresh NodeInterrupt —
-            // see comment above the loop. The fresh exception is
-            // wholly owned by the current (main) thread.
-            first_exception = nullptr;
-            interrupt->set_node(first_exception_node);
-            record_interrupt_checkpoint(ctx, interrupt_cp_id);
-            throw *interrupt;
         }
-        std::rethrow_exception(first_exception);
+        // GCC-13 workaround: build the next_nodes vector outside
+        // the co_await arg list (nested brace-init trips the ICE).
+        std::vector<std::string> next_nodes;
+        next_nodes = ready;
+        const auto metadata =
+            record_step_interrupts(ctx, std::move(pending), outcome.beside_failure);
+        const auto interrupt_cp_id = co_await coord.save_super_step_async(
+            state, interrupt_node, next_nodes, CheckpointPhase::NodeInterrupt, step, parent_cp_id,
+            barrier_state, metadata);
+        if (parent_cp_id.empty()) {
+            // No checkpoint precedes the step: record under the interrupt
+            // checkpoint what a parent would hold, so that resume replays
+            // a sibling that finished instead of running it again (#385).
+            for (std::size_t i = 0; i < ready.size(); ++i) {
+                const auto branch_task_id = make_static_task_id(step, ready[i]);
+                if (!excs[i])
+                    co_await coord.record_pending_write_async(interrupt_cp_id, branch_task_id,
+                                                              branch_task_id, ready[i], values[i],
+                                                              step);
+                else
+                    co_await record_attempt_start(coord, interrupt_cp_id, branch_task_id,
+                                                  ready[i], interrupted_attempts[i], step);
+            }
+        }
+        // Throw a fresh NodeInterrupt — see the comment above. The fresh
+        // exception is wholly owned by the current (main) thread.
+        interrupt->set_node(interrupt_node);
+        record_interrupt_checkpoint(ctx, interrupt_cp_id);
+        throw *interrupt;
     }
 
     // Apply results in ready-order (scheduler pairs ready[i] ↔ results[i]).
@@ -1642,9 +1723,12 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
     // The attempt each Send was in when it paused is written by that Send only.
     std::vector<int> interrupted_attempts(sends.size(), 0);
     // `pending` (#388) lists every Send that paused, the first one first.
+    // `listed` (#392): the pause holds back a failure, and its checkpoint lists
+    // what it answers.
     auto pause = [&](std::size_t interrupted, const std::vector<const NodeResult*>& finished,
-                     std::vector<PendingInterrupt> pending) -> asio::awaitable<void> {
-        const auto metadata = record_step_interrupts(ctx, std::move(pending));
+                     std::vector<PendingInterrupt> pending,
+                     bool listed) -> asio::awaitable<void> {
+        const auto metadata = record_step_interrupts(ctx, std::move(pending), listed);
         if (!send_step || !coord.enabled()) co_return;
         const auto runtime = detail::runtime_for(ctx);
         if (!runtime || !runtime->step_start || !runtime->step_start->state)
@@ -1722,7 +1806,7 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
             std::vector<PendingInterrupt>        pending;
             pending.push_back(
                 pending_interrupt(send_task_ids[0], sends[0].target_node, *interrupt));
-            co_await pause(0, finished, std::move(pending));
+            co_await pause(0, finished, std::move(pending), false);
             interrupt->set_node(sends[0].target_node);
             throw *interrupt;
         }
@@ -1758,41 +1842,34 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
                 .async_wait(asio::experimental::wait_for_all(), asio::use_awaitable);
         (void)order;
 
-        // First-exception pass, the same as run_parallel_async's. A first
-        // exception that is a NodeInterrupt pauses the run (#385): the Sends
-        // that finished replay on resume and the ones that did not run again.
-        // As there, the interrupt is copied out of the worker's exception_ptr
-        // before the checkpoint I/O and thrown afresh from this thread.
-        std::exception_ptr           first_exception;
-        std::size_t                  first_index = 0;
-        std::optional<NodeInterrupt> interrupt;
-        // #388: every Send that paused, not just the first.
-        std::vector<PendingInterrupt> pending;
-        for (std::size_t i = 0; i < sends.size(); ++i) {
-            if (!excs[i]) continue;
-            try {
-                std::rethrow_exception(excs[i]);
-            } catch (const NodeInterrupt& ni) {
-                if (!first_exception) interrupt = ni;
-                pending.push_back(pending_interrupt(send_task_ids[i], sends[i].target_node, ni));
-            } catch (...) {
+        // The step's outcome, by the same rule as run_parallel_async's
+        // (#392): a failure fails the run whatever its Send index, and an
+        // interrupt pauses it (#385) only when no Send failed or when it asks
+        // to reconcile an uncertain effect. The Sends that finished replay on
+        // resume and the ones that did not run again. As there, the interrupt
+        // is copied out of the worker's exception_ptr before the checkpoint
+        // I/O and thrown afresh from this thread.
+        const auto outcome = step_outcome(excs);
+        if (outcome.end) std::rethrow_exception(excs[*outcome.end]);
+        if (!outcome.pause.empty()) {
+            std::size_t                  first_index = outcome.pause.front();
+            std::optional<NodeInterrupt> interrupt;
+            // #388: every Send the pause reports, not just the first.
+            std::vector<PendingInterrupt> pending;
+            for (const auto i : outcome.pause) {
+                try {
+                    std::rethrow_exception(excs[i]);
+                } catch (const NodeInterrupt& ni) {
+                    if (!interrupt) interrupt = ni;
+                    pending.push_back(pending_interrupt(send_task_ids[i], sends[i].target_node, ni));
+                }
             }
-            if (!first_exception) {
-                first_exception = excs[i];
-                first_index     = i;
-            }
-        }
-        if (first_exception) {
-            if (interrupt) {
-                first_exception = nullptr;
-                std::vector<const NodeResult*> finished(sends.size(), nullptr);
-                for (std::size_t i = 0; i < sends.size(); ++i)
-                    if (!excs[i]) finished[i] = &results[i];
-                co_await pause(first_index, finished, std::move(pending));
-                interrupt->set_node(sends[first_index].target_node);
-                throw *interrupt;
-            }
-            std::rethrow_exception(first_exception);
+            std::vector<const NodeResult*> finished(sends.size(), nullptr);
+            for (std::size_t i = 0; i < sends.size(); ++i)
+                if (!excs[i]) finished[i] = &results[i];
+            co_await pause(first_index, finished, std::move(pending), outcome.beside_failure);
+            interrupt->set_node(sends[first_index].target_node);
+            throw *interrupt;
         }
         values = std::move(results);
     }

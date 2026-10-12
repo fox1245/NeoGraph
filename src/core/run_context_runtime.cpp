@@ -298,8 +298,9 @@ json interrupt_value_of(const NodeInterrupt& interrupt) {
     return value;
 }
 
-json with_pending_interrupts(json metadata, const std::vector<PendingInterrupt>& interrupts) {
-    if (interrupts.size() < 2) return metadata;
+json with_pending_interrupts(json metadata, const std::vector<PendingInterrupt>& interrupts,
+                             bool listed) {
+    if (interrupts.empty() || (interrupts.size() < 2 && !listed)) return metadata;
     if (metadata.is_null()) metadata = json::object();
     json list = json::array();
     for (const auto& interrupt : interrupts)

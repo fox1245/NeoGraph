@@ -10222,6 +10222,48 @@ export function* main(input) {
 }
 #endif  // NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS
 
+TEST(ProgramRuntimeTest, ACoreStepWithAFailureAndAnInterruptFailsWhateverTheOrder) {
+    // #392: one Core super-step runs a node that asks next to one that fails.
+    // The Program used to pause when the asking node came first and fail when
+    // the failing one did. It now fails either way, with the failing node's
+    // classified failure, and leaves no question pending. In memory and on
+    // SQLite.
+    for (const bool durable : join_test_store_kinds()) {
+        for (const bool ask_first : {true, false}) {
+            SCOPED_TRACE(std::string(durable ? "SQLite stores" : "in-memory stores") +
+                         (ask_first ? ", asking node first" : ", failing node first"));
+            JoinTestStores  stores(durable);
+            AdmittedRuntime fixture(1, stores.checkpoints, stores.transitions, {},
+                                    ExecutionGuarantee::Unmanaged, true);
+            auto document   = program_document("runtime-completed");
+            auto definition = document["root"]["definition"];
+            definition["channels"]["a_first_answer"]  = json{{"reducer", "runtime-overwrite"}, {"initial", ""}};
+            definition["channels"]["b_second_answer"] = json{{"reducer", "runtime-overwrite"}, {"initial", ""}};
+            definition["nodes"]["a_first"] =
+                json{{"type", ask_first ? "runtime-named-ask" : "runtime-failing"}};
+            definition["nodes"]["b_second"] =
+                json{{"type", ask_first ? "runtime-failing" : "runtime-named-ask"}};
+            definition["edges"] = json::array({json{{"from", "__start__"}, {"to", "work"}},
+                                               json{{"from", "work"}, {"to", "a_first"}},
+                                               json{{"from", "work"}, {"to", "b_second"}},
+                                               json{{"from", "a_first"}, {"to", "__end__"}},
+                                               json{{"from", "b_second"}, {"to", "__end__"}}});
+            document["root"]["definition"] = std::move(definition);
+            const auto version = fixture.admit_document(std::move(document));
+
+            const auto result = fixture.runtime->run(
+                "tenant:runtime", version,
+                ProgramInvocation{json::object(), grant(), "trace-step-failure-and-interrupt", {}});
+            ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed)
+                << "the step paused on the interrupt and dropped the failure: "
+                << failure_detail(result);
+            ASSERT_TRUE(result.failure());
+            EXPECT_EQ(result.failure()->core_node, ask_first ? "b_second" : "a_first");
+            EXPECT_FALSE(result.interrupt().has_value());
+        }
+    }
+}
+
 TEST(ProgramRuntimeTest, PlanQuorumPausedByABranchAsksAndResumeAnswersIt) {
     // #387: A finishes and B asks. The quorum needs two successes and B may
     // still be one, so the quorum pauses on B instead of counting it as a

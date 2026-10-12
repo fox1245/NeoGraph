@@ -967,6 +967,12 @@ if(NEOGRAPH_BUILD_SQLITE)
     target_link_libraries(neograph_resume_value_scope_tests PRIVATE
         neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
     neograph_discover_tests(neograph_resume_value_scope_tests PROPERTIES LABELS "core;interrupt")
+    # #392: a fan-out step and the Sends of a step end by one rule, whatever
+    # the index of the sibling that failed or paused, with one worker or many.
+    add_executable(neograph_step_outcome_tests test_step_outcome.cpp)
+    target_link_libraries(neograph_step_outcome_tests PRIVATE
+        neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
+    neograph_discover_tests(neograph_step_outcome_tests PROPERTIES LABELS "core;interrupt")
 endif()
 
 if(NEOGRAPH_BUILD_PROGRAM)

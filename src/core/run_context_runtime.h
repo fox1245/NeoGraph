@@ -157,7 +157,11 @@ json interrupt_value_of(const NodeInterrupt& interrupt);
 /// #388: `metadata` with the pending interrupts of a NodeInterrupt checkpoint
 /// under "_neograph"/"interrupts", when there are several. A checkpoint with
 /// one keeps its bytes: its single interrupt is the one paused invocation.
-json with_pending_interrupts(json metadata, const std::vector<PendingInterrupt>& interrupts);
+/// With `listed` (#392: a pause that holds back a failure of its step), one is
+/// listed too, because the paused invocations then include the failed one,
+/// which is not an interrupt.
+json with_pending_interrupts(json metadata, const std::vector<PendingInterrupt>& interrupts,
+                             bool listed = false);
 
 /// #388: the ids of the pending interrupts a NodeInterrupt checkpoint
 /// recorded (with_pending_interrupts), or nothing when it recorded none.
