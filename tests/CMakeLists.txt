@@ -411,6 +411,12 @@ if(NEOGRAPH_BUILD_ACP)
         neograph::acp SchemaProvider::transport GTest::gtest_main)
     add_test(NAME neograph.acp_graph_contract
              COMMAND neograph_acp_graph_contract_tests)
+
+    if(NEOGRAPH_BUILD_MCP_CLIENT)
+        # ACPServer starts client-supplied stdio MCP servers in this build.
+        target_compile_definitions(neograph_acp_tests PRIVATE NEOGRAPH_ACP_MCP_TESTS)
+        target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_ACP_MCP_TESTS)
+    endif()
 endif()
 
 if(NEOGRAPH_BUILD_GRPC)

@@ -8,6 +8,10 @@
 
 #include "../core/tool_failure.h"
 
+#ifdef NEOGRAPH_ACP_MCP
+#include <neograph/mcp/client.h>
+#include <neograph/mcp/types.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -30,6 +34,12 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <crt_externs.h>
+#elif !defined(_WIN32)
+extern char** environ;
+#endif
 
 #ifndef NEOGRAPH_VERSION_STR
 #define NEOGRAPH_VERSION_STR "unknown"
@@ -389,6 +399,61 @@ std::string parse_mcp_servers(const neograph::json& servers,
     return {};
 }
 
+#ifdef NEOGRAPH_ACP_MCP
+bool same_env_name(const std::string& a, const std::string& b) {
+#if defined(_WIN32)
+    return a.size() == b.size()
+        && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+               return std::tolower(static_cast<unsigned char>(x))
+                   == std::tolower(static_cast<unsigned char>(y));
+           });
+#else
+    return a == b;
+#endif
+}
+
+/// The agent's own environment with the client's `env` entries applied on top.
+std::vector<std::pair<std::string, std::string>>
+mcp_server_environment(const std::vector<std::pair<std::string, std::string>>& overrides) {
+    std::vector<std::pair<std::string, std::string>> result;
+#if defined(__APPLE__)
+    char** entries = *_NSGetEnviron();
+#elif defined(_WIN32)
+    char** entries = _environ;
+#else
+    char** entries = environ;
+#endif
+    for (char** entry = entries; entry && *entry; ++entry) {
+        std::string_view text(*entry);
+        const auto eq = text.find('=');
+        // Skip malformed entries and Windows' hidden "=C:" drive entries.
+        if (eq == std::string_view::npos || eq == 0) continue;
+        std::string key(text.substr(0, eq));
+        bool overridden = false;
+        for (const auto& [name, _] : overrides) {
+            if (same_env_name(name, key)) { overridden = true; break; }
+        }
+        if (overridden) continue;
+        bool duplicate = false;
+        for (const auto& [name, _] : result) {
+            if (same_env_name(name, key)) { duplicate = true; break; }
+        }
+        if (!duplicate) result.emplace_back(std::move(key), std::string(text.substr(eq + 1)));
+    }
+    for (const auto& item : overrides) {
+        bool duplicate = false;
+        for (auto& [name, value] : result) {
+            if (same_env_name(name, item.first)) {
+                value = item.second;  // a later client entry wins
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) result.push_back(item);
+    }
+    return result;
+}
+#endif
 
 }  // namespace
 
@@ -427,6 +492,9 @@ struct ACPServer::Impl {
     /// One client-supplied MCP server attached to a session.
     struct McpAttachment {
         std::string                                  server_name;
+#ifdef NEOGRAPH_ACP_MCP
+        std::shared_ptr<neograph::mcp::MCPClient>    client;
+#endif
         std::vector<std::shared_ptr<neograph::Tool>> tools;
     };
 
@@ -627,6 +695,11 @@ struct ACPServer::Impl {
                                       std::vector<McpAttachment>& out);
 
     static void shutdown_mcp(std::vector<McpAttachment>& attachments) noexcept {
+#ifdef NEOGRAPH_ACP_MCP
+        for (auto& attachment : attachments) {
+            if (attachment.client) attachment.client->shutdown();
+        }
+#endif
         attachments.clear();
     }
 
@@ -706,11 +779,56 @@ ACPServer::Impl::attach_mcp_servers(const std::vector<McpServerSpec>& specs,
                                     const neograph::json& id,
                                     std::vector<McpAttachment>& out) {
     if (specs.empty()) return {};
+#ifndef NEOGRAPH_ACP_MCP
     (void)cwd;
     (void)out;
     return jsonrpc_error(kInternalError,
                          "This agent was built without MCP client support", id,
                          neograph::json{{"reason", "mcp_unsupported"}});
+#else
+    for (std::size_t index = 0; index < specs.size(); ++index) {
+        const auto& spec = specs[index];
+        McpAttachment attachment;
+        attachment.server_name = spec.name;
+        bool connected = false;
+        try {
+            neograph::mcp::StdioClientConfig config;
+            config.argv.push_back(spec.command);
+            config.argv.insert(config.argv.end(), spec.args.begin(), spec.args.end());
+            config.cwd = cwd;
+            config.environment = mcp_server_environment(spec.env);
+            config.replace_environment = true;
+            // Do not treat server logging as an error (MCP stdio transport):
+            // allow a generous stderr budget.
+            config.max_stderr_bytes = 8u * 1024u * 1024u;
+            config.startup_timeout = std::chrono::seconds(15);
+            config.request_timeout = std::chrono::minutes(5);
+            attachment.client = std::make_shared<neograph::mcp::MCPClient>(std::move(config));
+            if (attachment.client->initialize("neograph-acp")) {
+                for (auto& tool : attachment.client->get_tools()) {
+                    attachment.tools.emplace_back(std::move(tool));
+                }
+                connected = true;
+            }
+        } catch (...) {
+            connected = false;
+        }
+        if (!connected) {
+            if (attachment.client) attachment.client->shutdown();
+            shutdown_mcp(out);
+            // The detail of the failure (the server's stderr, paths, the
+            // transport error) stays local.
+            return jsonrpc_error(kInternalError,
+                                 "Could not start the MCP server mcpServers["
+                                     + std::to_string(index) + "]",
+                                 id,
+                                 neograph::json{{"reason", "mcp_server_unavailable"},
+                                                {"index", static_cast<int>(index)}});
+        }
+        out.push_back(std::move(attachment));
+    }
+    return {};
+#endif
 }
 
 neograph::json
@@ -1647,6 +1765,18 @@ void ACPServer::set_eof_grace(std::chrono::milliseconds grace) {
     impl_->eof_grace_ms.store(grace.count(), std::memory_order_release);
 }
 
+std::vector<std::shared_ptr<neograph::Tool>>
+ACPServer::session_tools(std::string_view session_id) const {
+    std::vector<std::shared_ptr<neograph::Tool>> tools;
+    std::lock_guard lk(impl_->sessions_mu);
+    auto it = impl_->sessions.find(std::string(session_id));
+    if (it == impl_->sessions.end()) return tools;
+    for (const auto& attachment : it->second.mcp) {
+        tools.insert(tools.end(), attachment.tools.begin(), attachment.tools.end());
+    }
+    return tools;
+}
+
 bool ACPServer::is_running() const {
     return impl_->running.load(std::memory_order_acquire);
 }
@@ -1932,5 +2062,10 @@ ACPClient::request_permission(std::string_view session_id,
     return std::move(resp.outcome);
 }
 
+std::vector<std::shared_ptr<neograph::Tool>>
+ACPClient::session_tools(std::string_view session_id) const {
+    if (!server_) return {};
+    return server_->session_tools(session_id);
+}
 
 }  // namespace neograph::acp

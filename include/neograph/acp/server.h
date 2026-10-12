@@ -30,6 +30,11 @@
  * refusal ends the turn with stopReason `refusal`, a step limit with
  * `max_turn_requests`.
  *
+ * Client-supplied stdio MCP servers (session/new `mcpServers`) are started
+ * with NeoGraph's MCP client when the library is built with
+ * NEOGRAPH_BUILD_MCP_CLIENT; their tools are available to nodes through
+ * ACPClient::session_tools().
+ *
  * Adapter pattern mirrors neograph::a2a — by default the inbound prompt
  * text is dropped into the `prompt` channel and the `response` channel
  * is sent back. Subclass @ref ACPGraphAdapter to plug in a richer
@@ -49,6 +54,10 @@
 #include <string_view>
 #include <vector>
 
+namespace neograph {
+class Tool;
+}
+
 namespace neograph::acp {
 
 class ACPServer;
@@ -61,7 +70,7 @@ struct ACPServerTestAccess;
  * `additional_directories` are the absolute paths the client sent in
  * session/new (or session/resume); relative paths a node receives from the
  * client resolve against `cwd`. `mcp_tools` names the tools of the session's
- * MCP servers.
+ * MCP servers (see ACPClient::session_tools).
  */
 struct NEOGRAPH_API ACPSessionContext {
     std::string              session_id;
@@ -251,6 +260,14 @@ class NEOGRAPH_API ACPClient {
         const ToolCallUpdate&  tool_call,
         const std::vector<PermissionOption>& options);
 
+    /// The tools of the session's client-supplied MCP servers (session/new
+    /// `mcpServers`), in server order. Empty when the session has none, is
+    /// unknown, or the library was built without the MCP client. A tool
+    /// call goes to the MCP server process the client configured; the
+    /// session owns those processes until it is replaced by session/resume
+    /// or the server is destroyed.
+    std::vector<std::shared_ptr<neograph::Tool>> session_tools(
+        std::string_view session_id) const;
 
   private:
     ACPServer*               server_ = nullptr;
@@ -385,6 +402,10 @@ class NEOGRAPH_API ACPServer {
     /// Defaults to one second.
     void set_eof_grace(std::chrono::milliseconds grace);
 
+    /// The tools of a session's client-supplied MCP servers; see
+    /// ACPClient::session_tools.
+    std::vector<std::shared_ptr<neograph::Tool>> session_tools(
+        std::string_view session_id) const;
 
     /// Handle for issuing agent→client requests (fs/*, etc.). On first
     /// call lazily creates a client bound to this server and caches it.

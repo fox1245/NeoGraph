@@ -2592,6 +2592,79 @@ TEST(ACPServer, InputEofCancelsInflightPromptsAfterTheGrace) {
 }
 
 // ---------------------------------------------------------------------------
+// Client-supplied MCP servers (session/new mcpServers)
+// ---------------------------------------------------------------------------
+
+TEST(ACPServer, McpServersOverUnadvertisedTransportsAreInvalidParams) {
+    auto server = make_server();
+    initialize_server(server);
+    for (const char* type : {"http", "sse"}) {
+        auto resp = server.handle_message(make_request(1, "session/new",
+            {{"cwd", "/work"},
+             {"mcpServers", neograph::json::array({neograph::json{
+                 {"type", type}, {"name", "remote"}, {"url", "http://127.0.0.1:1/mcp"},
+                 {"headers", neograph::json::array()}}})}}));
+        ASSERT_TRUE(resp.contains("error")) << resp.dump();
+        EXPECT_EQ(resp["error"].value("code", 0), -32602);
+        EXPECT_NE(resp["error"].value("message", std::string()).find(type), std::string::npos);
+    }
+}
+
+TEST(ACPServer, AnMcpServerThatCannotStartFailsSessionNewWithoutDetail) {
+    auto server = make_server();
+    initialize_server(server);
+    auto resp = server.handle_message(make_request(1, "session/new",
+        {{"cwd", "/tmp"},
+         {"mcpServers", neograph::json::array({neograph::json{
+             {"name", "missing"}, {"command", "/nonexistent/neograph-acp-mcp"},
+             {"args", neograph::json::array()}, {"env", neograph::json::array()}}})}}));
+    ASSERT_TRUE(resp.contains("error")) << resp.dump();
+#ifdef NEOGRAPH_ACP_MCP_TESTS
+    EXPECT_EQ(resp["error"].value("code", 0), -32603);
+    EXPECT_EQ(resp["error"]["data"].value("reason", std::string()), "mcp_server_unavailable");
+#endif
+    EXPECT_EQ(resp.dump().find("/nonexistent"), std::string::npos) << resp.dump();
+}
+
+#ifdef NEOGRAPH_ACP_MCP_TESTS
+const char* acp_test_python() {
+#ifdef _WIN32
+    if (std::system("where python >nul 2>&1") == 0) return "python";
+    return nullptr;
+#else
+    if (std::system("command -v python3 >/dev/null 2>&1") == 0) return "python3";
+    return nullptr;
+#endif
+}
+
+TEST(ACPServer, StdioMcpServerToolsAreAvailableToTheSession) {
+    const char* python = acp_test_python();
+    if (!python) GTEST_SKIP() << "python3 not available";
+    const auto fixture = std::filesystem::path(__FILE__).parent_path() / "fixtures"
+                         / "mcp_stdio_echo.py";
+    CapturingSink cap;
+    auto server = make_server();
+    initialize_server(server);
+    server.set_notification_sink(cap.as_sink());
+    auto created = server.handle_message(make_request(1, "session/new",
+        {{"cwd", std::filesystem::temp_directory_path().string()},
+         {"mcpServers", neograph::json::array({neograph::json{
+             {"name", "echo-server"}, {"command", python},
+             {"args", neograph::json::array({fixture.string()})},
+             {"env", neograph::json::array({neograph::json{
+                 {"name", "NEOGRAPH_ACP_TEST"}, {"value", "1"}}})}}})}}));
+    ASSERT_TRUE(created.contains("result")) << created.dump();
+    const auto sid = created["result"].value("sessionId", std::string());
+    auto tools = server.client()->session_tools(sid);
+    ASSERT_EQ(tools.size(), 1u);
+    EXPECT_EQ(tools[0]->get_name(), "echo");
+    const auto result = tools[0]->execute({{"msg", "hi"}});
+    EXPECT_NE(result.find("\"msg\": \"hi\""), std::string::npos) << result;
+    EXPECT_TRUE(server.session_tools("unknown").empty());
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // Incremental updates (ACP-12): model tokens and tool calls
 // ---------------------------------------------------------------------------
 

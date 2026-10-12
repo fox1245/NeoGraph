@@ -1075,6 +1075,12 @@ if(NEOGRAPH_BUILD_ACP)
     target_link_libraries(neograph_acp
         PUBLIC neograph_core
     )
+    # Client-supplied stdio MCP servers (session/new mcpServers) are started
+    # with NeoGraph's own MCP client when it is built.
+    if(NEOGRAPH_BUILD_MCP_CLIENT)
+        target_link_libraries(neograph_acp PRIVATE neograph_mcp)
+        target_compile_definitions(neograph_acp PRIVATE NEOGRAPH_ACP_MCP)
+    endif()
 
     add_library(neograph::acp ALIAS neograph_acp)
 endif()
