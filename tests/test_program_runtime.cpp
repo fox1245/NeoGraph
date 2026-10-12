@@ -10614,6 +10614,140 @@ TEST(ProgramRuntimeTest, JavaScriptJoinsPauseForReconciliationBesideAFailedMembe
 }
 #endif  // NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS
 
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST(ProgramRuntimeTest, AForkOfAJavaScriptMainContinuesItsPausedCallCore) {
+    // #395: a fork of a JavaScript main() paused in a callCore used to start
+    // main() over: the commands that finished ran again, the paused call
+    // asked its question again, and the fork's answer was lost. The fork now
+    // continues like a resume of the source: it carries the source's command
+    // journal, so the finished commands replay without running, and resumes
+    // the paused call from its checkpoint with the fork's answer. For a
+    // command and for a join member, in memory and on SQLite.
+    struct Case {
+        const char* label;
+        const char* body;
+        json        expected;
+    };
+    const Case cases[] = {
+        {"a later command", R"JS(
+    const first = yield ng.callCore("main", {value: "first"}, "fork:first");
+    const second = yield ng.callCore("main", {value: "ask"}, "fork:second");
+    return {first: first.value, second: second.value};
+)JS",
+         json{{"first", "done:first"}, {"second", "forked"}}},
+        {"a join member", R"JS(
+    const results = yield ng.all([
+        ng.callCore("main", {value: "first"}, "fork:a"),
+        ng.callCore("main", {value: "ask"}, "fork:b")
+    ], {max_in_flight: 2}, "fork:all");
+    return {first: results[0].value, second: results[1].value};
+)JS",
+         json{{"first", "done:first"}, {"second", "forked"}}},
+    };
+    for (const bool durable : join_test_store_kinds()) {
+        for (const auto& item : cases) {
+            SCOPED_TRACE(std::string(durable ? "SQLite stores, " : "in-memory stores, ") +
+                         item.label);
+            reset_join_member_runs();
+            JoinTestStores  stores(durable);
+            AdmittedRuntime fixture(3, stores.checkpoints, stores.transitions, {},
+                                    ExecutionGuarantee::Unmanaged, true);
+            const auto version =
+                fixture.admit_javascript(javascript_runtime_source("runtime-join-member", item.body));
+            const auto source = fixture.runtime->run(
+                "tenant:runtime", version,
+                ProgramInvocation{json{{"tag", "source input"}}, javascript_budget(3),
+                                  "trace-js-fork-source", {}});
+            ASSERT_EQ(source.status(), ProgramTerminalStatus::Interrupted) << failure_detail(source);
+            ASSERT_TRUE(source.checkpoint());
+            EXPECT_EQ(join_member_runs_of("first"), 1U);
+            EXPECT_EQ(join_member_runs_of("ask"), 1U);
+
+            RunInvocation invocation;
+            invocation.owner_scope        = "tenant:runtime";
+            invocation.agent_id           = "test-js-fork";
+            invocation.program_version_id = version.id();
+            invocation.run_id             = std::string("js-fork-") + (durable ? "sqlite-" : "memory-") +
+                                std::to_string(&item - cases);
+            invocation.budget             = source.remaining_budget();
+            invocation.input              = json::object();
+            invocation.message_sequence   = 1;
+            invocation.idempotency_key    = "test-js-fork:" + invocation.run_id;
+            invocation.correlation_id     = "trace-js-fork-target";
+            invocation.validate();
+
+            const auto forked =
+                fixture.runtime
+                    ->fork(ExactProgramCheckpointReference{source.run_id(),
+                                                           source.checkpoint()->checkpoint_id},
+                           invocation,
+                           ProgramResume{json{{"decision", "forked"}}, "trace-js-fork-resume", {},
+                                         pending_call_id(source)})
+                    .wait();
+            ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed)
+                << "the fork started main() over: " << failure_detail(forked);
+            EXPECT_EQ(forked.output(), item.expected);
+            EXPECT_EQ(join_member_runs_of("first"), 1U) << "the finished call replays";
+            EXPECT_EQ(join_member_runs_of("ask"), 2U) << "the paused call resumes once, answered";
+            const auto record = fixture.journal->load("tenant:runtime", forked.run_id());
+            ASSERT_TRUE(record);
+            EXPECT_EQ(record->invocation().input, (json{{"tag", "source input"}}))
+                << "main() runs again with the source's input";
+        }
+    }
+}
+#endif  // NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS
+
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST(ProgramRuntimeTest, RecoveryOfAForkedJavaScriptAttemptResumesItsCallCoreWithTheForkValue) {
+    // #395: the first attempt of a JavaScript fork stops inside the answered
+    // node; a fresh runtime recovers it from the fork's run record, and the
+    // recovered attempt resumes the paused callCore with the fork's value,
+    // with main() run on the source's input.
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-resume-hook", R"JS(
+    const reply = yield ng.callCore("main", {decision: input.decision}, "approval");
+    return {value: reply.value, input: input.decision};
+)JS"));
+    const auto source = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json{{"decision", "source input"}}, javascript_budget(1),
+                          "trace-js-forked-crash-source", {}});
+    ASSERT_EQ(source.status(), ProgramTerminalStatus::Interrupted) << failure_detail(source);
+    ASSERT_TRUE(source.checkpoint());
+
+    RunInvocation invocation;
+    invocation.owner_scope        = "tenant:runtime";
+    invocation.agent_id           = "test-js-forked-crash";
+    invocation.program_version_id = version.id();
+    invocation.run_id             = "js-forked-crash-target";
+    invocation.budget             = source.remaining_budget();
+    invocation.input              = json::object();
+    invocation.message_sequence   = 1;
+    invocation.idempotency_key    = "test-js-forked-crash:1";
+    invocation.correlation_id     = "trace-js-forked-crash-target";
+    invocation.validate();
+
+    HeldResumedAttempt held;
+    auto               original = fixture.runtime->fork(
+        ExactProgramCheckpointReference{source.run_id(), source.checkpoint()->checkpoint_id},
+        invocation,
+        ProgramResume{json{{"decision", "forked"}}, "trace-js-forked-crash-resume", {},
+                      pending_call_id(source)});
+    ASSERT_TRUE(held.entered());
+
+    auto       fresh     = fixture.make_runtime();
+    const auto recovered = fresh->reconnect("tenant:runtime", "js-forked-crash-target").wait();
+    ASSERT_EQ(recovered.status(), ProgramTerminalStatus::Completed) << failure_detail(recovered);
+    EXPECT_EQ(recovered.output(), (json{{"value", json{{"decision", "forked"}}.dump()},
+                                        {"input", "source input"}}));
+    held.release();
+    (void)original.wait();
+}
+#endif  // NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS
+
 TEST(ProgramRuntimeTest, PlanQuorumPausedByABranchAsksAndResumeAnswersIt) {
     // #387: A finishes and B asks. The quorum needs two successes and B may
     // still be one, so the quorum pauses on B instead of counting it as a

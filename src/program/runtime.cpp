@@ -3885,6 +3885,63 @@ bool RunControl::consume_dynamic_compile() {
     return false;
 }
 
+ProgramTransitionPublishResult RunControl::publish_command_reservation(
+    RunBudget remaining_budget, RunBudget inflight_reservation) {
+    remaining_budget.max_dynamic_compiles = std::min<std::uint64_t>(
+        remaining_budget.max_dynamic_compiles, dynamic_compile_ceiling.load());
+    const auto head = transitions->load_run_publication_head(owner_scope, run_id);
+    if (!head) return ProgramTransitionPublishResult::Conflict;
+    const auto& previous         = head->run_record;
+    const auto& previous_journal = head->journal_record;
+    if (previous.journal_head() != previous_journal.id ||
+        previous.continuation().state != ContinuationState::Running ||
+        previous.continuation().attempt != attempt ||
+        previous_journal.inflight_reservation != RunBudget{})
+        return ProgramTransitionPublishResult::Conflict;
+    auto journal = ProgramJournalRecord::create(ProgramJournalRecordData{
+        previous.journal_head(), run_id, program_version_id, bundle_id,
+        previous_journal.sequence + 1, previous.continuation(), std::move(remaining_budget),
+        std::move(inflight_reservation), previous_journal.core_checkpoint, now_ms()});
+
+    ProgramRunRecordData data;
+    data.owner_scope                      = owner_scope;
+    data.run_id                           = run_id;
+    data.logical_run_id                   = logical_run_id;
+    data.program_version_id               = program_version_id;
+    data.bundle_id                        = bundle_id;
+    data.binding_fingerprint              = previous.binding_fingerprint();
+    data.invocation                       = previous.invocation();
+    data.child_depth                      = previous.child_depth();
+    data.children                         = previous.children();
+    data.continuation                     = journal.continuation;
+    data.remaining_budget                 = journal.remaining_budget;
+    data.exact_checkpoint                 = previous.exact_checkpoint();
+    data.exact_checkpoint_content_id      = previous.exact_checkpoint_content_id();
+    data.attempt_resume                   = previous.attempt_resume();
+    data.settled_branches                 = previous.settled_branches();
+    data.pending_input                    = previous.pending_input();
+    data.pending_effect                   = previous.pending_effect();
+    data.fork_receipt                     = previous.fork_receipt();
+    data.fork_source_run_id               = previous.fork_source_run_id();
+    data.fork_source_program_version_id   = previous.fork_source_program_version_id();
+    data.fork_source_checkpoint_id        = previous.fork_source_checkpoint_id();
+    data.recorded_binding_set_fingerprint = previous.recorded_binding_set_fingerprint();
+    data.journal_head                     = journal.id;
+    data.event_sequence                   = previous.event_sequence();
+    data.effect_sequence                  = previous.effect_sequence();
+    data.created_at_ms                    = previous.created_at_ms();
+    data.updated_at_ms                    = journal.timestamp_ms;
+    auto publication = attach_run_lineage(
+        *transitions, ProgramTransitionPublication{ProgramRunRecord::create(std::move(data)),
+                                                   std::move(journal), {}, {}, std::nullopt, {}});
+    const auto owned_lease = execution_lease();
+    return owned_lease ? transitions->compare_publish_execution(
+                             owner_scope, previous.journal_head(), std::move(publication),
+                             owned_lease, owned_lease)
+                       : transitions->compare_publish(owner_scope, previous.journal_head(),
+                                                      std::move(publication));
+}
+
 ProgramTransitionPublishResult RunControl::publish_javascript_command(
     std::uint64_t              command_ordinal,
     JavaScriptCommand          command,
@@ -5996,6 +6053,17 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     }
     auto target_pinned =
         detail::CatalogRuntimeAccess::pin(*impl_->config.catalog, *resolved_target);
+    // #395: a fork of a JavaScript main() runs main() again with the source
+    // run's input, as a resume of the source does, so that it yields the
+    // commands the source's journal recorded.
+    if (target_pinned->bundle.control_source()) {
+        if (const auto source_run =
+                impl_->config.transitions->load(owner_scope, source.source_run_id)) {
+            invocation.input = source_run->invocation().input;
+            if (invocation.canonical_request)
+                invocation.canonical_request->input = source_run->invocation().input;
+        }
+    }
     const auto canonical = bind_runtime_invocation(invocation, owner_scope, target.id(), run_id);
     const auto reconnect_existing = [&]() -> std::optional<ProgramHandle> {
         const auto existing = impl_->config.transitions->load(owner_scope, run_id);
@@ -6176,11 +6244,53 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     receipt =
         receipt.with_initial_resume_binding(std::move(fork_initial_pending_id), resume_value.value);
 
+    // #395: a fork of a JavaScript main() continues the command its source
+    // paused in, as a resume of the source does. It carries the source's
+    // command journal, rebound to the target bundle, so that the commands
+    // that finished replay without running or charging again, and its copy
+    // of the paused call's checkpoint lives on that call's Core thread in the
+    // fork, where the attempt's exact resume looks for it.
+    std::vector<ProgramJavaScriptCommandJournalEntry> fork_commands;
+    std::optional<std::string>                        fork_core_operation;
+    if (target_pinned->bundle.control_source()) {
+        const auto source_commands =
+            impl_->config.transitions->load_javascript_commands(owner_scope, source.source_run_id);
+        if (source_commands.empty() || !source_commands.back().pending())
+            throw_runtime_diagnostic("P_FORK_STATE",
+                                     "JavaScript Program fork source is not paused in a command");
+        const auto& paused_command = source_commands.back();
+        fork_core_operation        = javascript_call_core_operation_for_thread(
+            paused_command.command(),
+            "root.javascript." + std::to_string(paused_command.command_ordinal()),
+            source.source_run_id, checkpoint_identity.core_generation_id,
+            checkpoint_identity.core_thread_id);
+        if (!fork_core_operation)
+            throw_runtime_diagnostic(
+                "P_FORK_STATE",
+                "JavaScript Program fork source checkpoint is not its paused callCore's");
+        const auto& target_bundle_id = target_pinned->bundle.id();
+        for (const auto& entry : source_commands) {
+            ProgramJavaScriptCommandJournalEntryData data{
+                entry.sequence(), target_bundle_id, entry.command_ordinal(), entry.command(),
+                entry.effect_identity()
+                    ? std::optional<std::string>(detail::javascript_command_effect_identity(
+                          target_bundle_id, entry.command_ordinal(), entry.command()))
+                    : std::nullopt,
+                entry.terminal_result(), entry.settled_members()};
+            data.await_started_at = entry.await_started_at();
+            fork_commands.emplace_back(std::move(data));
+        }
+    }
     const auto target_thread_id =
         core_thread_identity(run_id, target_pinned->root->compiled_plan_identity);
+    const auto cloned_thread_id =
+        fork_core_operation ? core_thread_identity(run_id,
+                                                   target_pinned->root->compiled_plan_identity,
+                                                   *fork_core_operation)
+                            : target_thread_id;
     auto cloned_checkpoint      = *loaded_checkpoint;
     cloned_checkpoint.id        = graph::Checkpoint::generate_id();
-    cloned_checkpoint.thread_id = target_thread_id;
+    cloned_checkpoint.thread_id = cloned_thread_id;
     cloned_checkpoint.parent_id = checkpoint_identity.checkpoint_id;
     cloned_checkpoint.metadata["forked_from"] =
         json{{"thread_id", checkpoint_identity.core_thread_id},
@@ -6195,7 +6305,7 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     const auto                   cloned_checkpoint_id = cloned_checkpoint.id;
     const CoreCheckpointIdentity target_checkpoint{
         target_pinned->root->core_name, target_pinned->root->compiled_plan_identity,
-        target_thread_id, cloned_checkpoint_id, cloned_checkpoint.schema_version};
+        cloned_thread_id, cloned_checkpoint_id, cloned_checkpoint.schema_version};
     const auto binding_fingerprint = capability_binding_receipt_root(
         resolved_target->core_materialization_receipt().capability_bindings);
     ProgramPersistedInvocation persisted{canonical.input, canonical.budget,
@@ -6214,11 +6324,10 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     const auto started =
         control->stage_event(ProgramEventKind::Started, ProgramStartedEvent{invocation.budget});
     // The fork's first attempt resumes the cloned checkpoint with the resume
-    // value; its recovery must too (#377).
-    auto fork_resume = control->materialized->bundle.control_source()
-        ? std::optional<ProgramAttemptResume>{}
-        : std::optional<ProgramAttemptResume>{
-              ProgramAttemptResume{target_checkpoint.checkpoint_id, resume_value.value}};
+    // value; its recovery must too (#377), for a JavaScript main() as well
+    // (#395).
+    auto fork_resume = std::optional<ProgramAttemptResume>{
+        ProgramAttemptResume{target_checkpoint.checkpoint_id, resume_value.value}};
     // #386: the fork replays what the source's paused plan finished, as a
     // resume of the source would.
     auto fork_records = continued_replay_records(*source_record, run_id, *control->materialized,
@@ -6228,6 +6337,7 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
                             std::move(fork_pending_input), std::move(fork_pending_effect),
                             std::nullopt, std::nullopt, {}, std::move(fork_resume),
                             std::move(fork_records));
+    publication.commands = std::move(fork_commands);
     if (!source_contexts.empty()) {
         publication.context_publication = transfer_context_to_run(source_contexts.back(), run_id);
     }
@@ -6294,9 +6404,17 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
         control->complete(std::move(failed));
         return ProgramHandle(std::move(control));
     }
-    spawn_run_attempt(impl_->pool, control, std::move(resume_value.value),
-                      target_checkpoint.checkpoint_id, impl_->config.host_admission,
-                      impl_->config.host_admission_resolver);
+    // #395: a JavaScript main() runs again with the source's input and
+    // resumes its paused callCore with the resume value, as resume does.
+    if (fork_core_operation) {
+        spawn_run_attempt(impl_->pool, control, control->persisted_invocation.input,
+                          target_checkpoint.checkpoint_id, impl_->config.host_admission,
+                          impl_->config.host_admission_resolver, std::move(resume_value.value));
+    } else {
+        spawn_run_attempt(impl_->pool, control, std::move(resume_value.value),
+                          target_checkpoint.checkpoint_id, impl_->config.host_admission,
+                          impl_->config.host_admission_resolver);
+    }
     return ProgramHandle(std::move(control));
 }
 

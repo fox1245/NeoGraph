@@ -761,13 +761,7 @@ std::string javascript_command_operation_id(std::uint64_t command_ordinal) {
 std::string javascript_command_effect_identity(const RunControl&        control,
                                                std::uint64_t            command_ordinal,
                                                const JavaScriptCommand& command) {
-    json payload = json::object();
-    payload["bundle_id"]      = control.bundle_id;
-    payload["command_ordinal"] = command_ordinal;
-    payload["command"]         = command.to_json();
-    return detail::sha256_identity(
-        "program-javascript-command-effect/v1",
-        detail::canonical_json_bytes(payload));
+    return detail::javascript_command_effect_identity(control.bundle_id, command_ordinal, command);
 }
 
 std::optional<std::string> javascript_call_core_operation_for_thread(
@@ -1621,6 +1615,18 @@ PlanExecution replay_branch_record(const json& record, const RunControl& control
 }
 
 }  // namespace
+std::string javascript_command_effect_identity(std::string_view         bundle_id,
+                                               std::uint64_t            command_ordinal,
+                                               const JavaScriptCommand& command) {
+    json payload = json::object();
+    payload["bundle_id"]       = std::string(bundle_id);
+    payload["command_ordinal"] = command_ordinal;
+    payload["command"]         = command.to_json();
+    return detail::sha256_identity(
+        "program-javascript-command-effect/v1",
+        detail::canonical_json_bytes(payload));
+}
+
 CommandBudgetReservation reserve_command_resources(RunBudget available) noexcept {
     RunBudget reservation;
     reservation.wall_time_ms        = available.wall_time_ms;
@@ -5578,8 +5584,27 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
                 if (exact_resume_authorized || child_resume_authorized ||
                     checkpoint_resume_authorized) {
-                    const auto durable_resumed =
+                    auto durable_resumed =
                         control->transitions->latest(control->owner_scope, control->run_id);
+                    // #395: the first attempt of a fork resumes the command its
+                    // source paused in, and reserves that command's resources
+                    // itself: a fork's first publication holds none. A
+                    // recovered attempt finds the reservation already made.
+                    if (exact_resume_authorized && durable_resumed &&
+                        !has_resource_reservation(durable_resumed->inflight_reservation) &&
+                        durable_resumed->sequence == 1) {
+                        const auto record =
+                            control->transitions->load(control->owner_scope, control->run_id);
+                        if (record && record->fork_receipt()) {
+                            auto reservation =
+                                reserve_command_resources(durable_resumed->remaining_budget);
+                            (void)control->publish_command_reservation(
+                                std::move(reservation.remaining),
+                                std::move(reservation.reservation));
+                            durable_resumed =
+                                control->transitions->latest(control->owner_scope, control->run_id);
+                        }
+                    }
                     if (!durable_resumed ||
                         !has_resource_reservation(durable_resumed->inflight_reservation)) {
                         throw_runtime_diagnostic(

@@ -239,6 +239,10 @@ public:
      * coordinate are cumulative: each carries the settled members and await
      * starts of the entries before it.
      */
+    /** #395: reserves the resources of the command the attempt resumes, on a
+     *  run whose first publication could hold no reservation (a fork). */
+    ProgramTransitionPublishResult publish_command_reservation(RunBudget remaining_budget,
+                                                               RunBudget inflight_reservation);
     ProgramTransitionPublishResult publish_javascript_command(
         std::uint64_t              command_ordinal,
         JavaScriptCommand          command,
@@ -368,6 +372,12 @@ struct CommandBudgetReservation {
 };
 
 CommandBudgetReservation reserve_command_resources(RunBudget available) noexcept;
+
+/// The effect identity of JavaScript command `command_ordinal` of a bundle, as
+/// the command journal records it.
+std::string javascript_command_effect_identity(std::string_view         bundle_id,
+                                               std::uint64_t            command_ordinal,
+                                               const JavaScriptCommand& command);
 
 asio::awaitable<void> execute_run_attempt(
     std::shared_ptr<RunControl> control,

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=6862c42a74975353d1c69570ad0be209a42dd7ff95e483fefb99b5f5a8296ea3 -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=4cd00dbda5e6229f6dda6d68c4dc2aa340e18fb7af5c4d45605c5638997347a0 -->
 # Program API 端到端场景
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -28,6 +28,7 @@
 | `test_17_resume_value_scope.py` | 答案只送达它所回答的问题（#393）：在绑定的 `llm_call` 之后，`first` 提问，下一个 Core 步骤中 `second` 提问；回答 `first` 的恢复之后 `second` 仍提出自己的问题，下一次恢复回答它；已完成的调用不会再次发送或计费（内存与 SQLite 日志） |
 | `test_18_step_failure_outranks_interrupt.py` | 无论提问节点的索引如何，失败都会结束其所在的步骤（#392）：一个 Core 步骤在绑定的 `llm_call` 旁以两种顺序运行一个提问节点和一个失败节点；Program 以失败节点的分类失败而失败，不留下等待中的问题，模型调用只发送并计费一次（内存与 SQLite 日志） |
 | `test_19_fork_interrupt_identity.py` | 在已完成的绑定 `llm_call` 旁 Core 步骤因两个中断而暂停的运行的 `host.fork()`（#394）：fork 回答等待调用的 `core_interrupt_id` 所指的中断，另一个节点在 fork 中再次提问，已完成的调用不会再次发送或计费（内存与 SQLite 日志） |
+| `test_20_javascript_fork.py` | 每个 `callCore` 中都有绑定 `llm_call` 的 JavaScript `main()` 在第二个 `callCore` 中暂停的运行的 `host.fork()`（#395）：fork 从命令日志重放第一个命令，以答案恢复暂停的调用并完成，任何模型调用都不会再次发送或计费（内存与 SQLite 日志） |
 
 `support.py` 包含共享的 Python 节点、条件、注册表、预算和 JavaScript 构建器。
 
