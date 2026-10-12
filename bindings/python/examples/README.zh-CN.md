@@ -104,6 +104,7 @@ python 01_minimal.py
 | 30 | [`30_program_barrier_join.py`](30_program_barrier_join.py) | yes | 三个审阅者并行运行，`barrier` 等待全部到齐。有一个审阅者改道后，Program 以 `Failed` 结束，给出 `P_CORE_BARRIER_STALLED` 和指明缺失节点的 witness。 |
 | 31 | [`31_program_any_of_join.py`](31_program_any_of_join.py) | yes | 按普通成员等待两个来源的 join，在修正节点接替其中一个时会卡住。把编译器给出的建议，即 `{any_of: [...]}` 槽位，应用到源码后，修复后的 Program 顺利完成。 |
 | 32 | [`32_program_failure_routing.py`](32_program_failure_routing.py) | yes | TEST 失败并重试两次后，最终失败被路由到带有 `interruptBefore` 的处理节点。操作员以 `retry` 恢复，Program 完成；以 `abort` 恢复，失败出口节点让 Program 以 `Failed` 和 `plan.user_abort` 结束。 |
+| 33 | [`33_program_budgets.py`](33_program_budgets.py) | yes | 两个已绑定的 `llm_call` 节点各报告 600 个 token，预算只有 1,000，运行以 `BudgetExhausted` 结束。预算与准入时不一致的运行会被 `P_START_BUDGET` 拒绝。 |
 
 ### 协议：MCP、A2A、ACP
 

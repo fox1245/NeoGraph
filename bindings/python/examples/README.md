@@ -103,6 +103,7 @@ The restricted JavaScript Program API runs on top of Core graphs: `ProgramRegist
 | 30 | [`30_program_barrier_join.py`](30_program_barrier_join.py) | yes | Three reviewers run in parallel and a `barrier` waits for all of them. When one reviewer routes elsewhere, the Program ends `Failed` with `P_CORE_BARRIER_STALLED` and a witness naming the missing node. |
 | 31 | [`31_program_any_of_join.py`](31_program_any_of_join.py) | yes | A join over two plain members stalls when a fix-up node takes over for one of them. The compiler's own suggestion, an `{any_of: [...]}` slot, is applied to the source and the repaired Program completes. |
 | 32 | [`32_program_failure_routing.py`](32_program_failure_routing.py) | yes | TEST fails, is retried twice, and its final failure is routed to a handler with `interruptBefore`. The operator resumes with `retry` and the Program completes, or with `abort` and a failure exit ends it `Failed` with `plan.user_abort`. |
+| 33 | [`33_program_budgets.py`](33_program_budgets.py) | yes | Two bound `llm_call` nodes report 600 tokens each under a 1,000-token budget, so the run ends `BudgetExhausted`. A run whose budget differs from the admitted one is refused with `P_START_BUDGET`. |
 
 ### Protocols: MCP, A2A, ACP
 
