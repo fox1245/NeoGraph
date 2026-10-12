@@ -72,6 +72,7 @@ The remaining Core features, with no model involved. Example 14 writes `my_graph
 | 75 | [`75_stream_modes.py`](75_stream_modes.py) | yes | Stream modes: the same run observed in VALUES, UPDATES, EVENTS and DEBUG mode, with the events each mode delivers counted. |
 | 76 | [`76_retry_policy.py`](76_retry_policy.py) | yes | `RetryPolicy`: a node fails twice and the engine retries it with exponential backoff; a smaller budget shows what the caller gets when the retries run out. |
 | 77 | [`77_dynamic_interrupt.py`](77_dynamic_interrupt.py) | yes | `NodeInterrupt`: a node raises it, the payload tells the caller what to ask, and `resume` hands the answer back to the node (approve or refuse). |
+| 78 | [`78_max_steps.py`](78_max_steps.py) | yes | `max_steps`: a loop is stopped by the step limit and the result says so (`max_steps_exhausted`, `RunStatus.StepLimit`); a run that ends on the last step is not flagged. |
 
 ### Agent patterns
 

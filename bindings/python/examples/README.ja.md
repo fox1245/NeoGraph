@@ -73,6 +73,7 @@ python 01_minimal.py
 | 75 | [`75_stream_modes.py`](75_stream_modes.py) | yes | ストリームモード。同じ実行を VALUES、UPDATES、EVENTS、DEBUG の各モードで観察し、モードごとに届くイベントを数えます。 |
 | 76 | [`76_retry_policy.py`](76_retry_policy.py) | yes | `RetryPolicy`。ノードが 2 回失敗すると、エンジンが指数バックオフで再試行します。回数を減らすと、再試行を使い切ったときに呼び出し側が受け取るものが分かります。 |
 | 77 | [`77_dynamic_interrupt.py`](77_dynamic_interrupt.py) | yes | `NodeInterrupt`。ノードがこれを送出すると、ペイロードが呼び出し側に尋ねる内容を伝え、`resume` が答え（承認または拒否）をノードに返します。 |
+| 78 | [`78_max_steps.py`](78_max_steps.py) | yes | `max_steps`。ループがステップ上限で止まり、結果がそれを知らせます（`max_steps_exhausted`、`RunStatus.StepLimit`）。最後のステップで自然に終わった実行には印が付きません。 |
 
 ### エージェントパターン
 

@@ -73,6 +73,7 @@ python 01_minimal.py
 | 75 | [`75_stream_modes.py`](75_stream_modes.py) | yes | 스트림 모드: 같은 실행을 VALUES, UPDATES, EVENTS, DEBUG 모드로 관찰하고, 모드마다 전달되는 이벤트를 셉니다. |
 | 76 | [`76_retry_policy.py`](76_retry_policy.py) | yes | `RetryPolicy`: 노드가 두 번 실패하면 엔진이 지수 백오프로 다시 시도합니다. 재시도 횟수를 줄이면 재시도가 바닥났을 때 호출한 쪽이 받는 결과를 볼 수 있습니다. |
 | 77 | [`77_dynamic_interrupt.py`](77_dynamic_interrupt.py) | yes | `NodeInterrupt`: 노드가 이를 발생시키면, 페이로드가 호출한 쪽에 물어볼 내용을 알려 주고, `resume`이 답(승인 또는 거절)을 노드에 돌려줍니다. |
+| 78 | [`78_max_steps.py`](78_max_steps.py) | yes | `max_steps`: 루프가 단계 한도에서 멈추고, 결과가 그 사실을 알려 줍니다(`max_steps_exhausted`, `RunStatus.StepLimit`). 마지막 단계에서 스스로 끝난 실행은 표시되지 않습니다. |
 
 ### 에이전트 패턴
 
