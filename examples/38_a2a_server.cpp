@@ -21,6 +21,7 @@
 //   ./build/example_a2a_server [port]          (default 8087, 0=auto)
 //   ./build/example_a2a_server [port] serve    (stay up until Ctrl-C)
 //
+// smoke-args: 0
 // smoke-expect: state:    completed
 // smoke-expect: response: [neo-agent] HELLO FROM MAIN()
 // smoke-expect: streamed task state: completed

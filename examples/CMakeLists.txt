@@ -59,7 +59,9 @@ endif()
 # instead is deliberately not run (live model, service or display needed).
 get_property(_root_targets DIRECTORY "${PROJECT_SOURCE_DIR}" PROPERTY BUILDSYSTEM_TARGETS)
 get_property(_here_targets DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY BUILDSYSTEM_TARGETS)
-foreach(_target IN LISTS _root_targets _here_targets)
+# The Jarvis cookbook is its own CMake project, added only with NEOGRAPH_BUILD_COOKBOOK_JARVIS.
+get_property(_jarvis_targets DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/cookbook/jarvis" PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_target IN LISTS _root_targets _here_targets _jarvis_targets)
     get_target_property(_type ${_target} TYPE)
     if(NOT _type STREQUAL "EXECUTABLE")
         continue()

@@ -12,6 +12,10 @@ optionally behind `//` or `#`:
                    root), @BIN@ (build directory), @PYTHON@ (interpreter), @TMP@ (scratch dir)
     smoke-stdin:   one line written to stdin, newline added (repeatable); stdin is then closed
     smoke-env:     NAME=VALUE added to the environment (repeatable)
+    smoke-companion: a helper process started first (repeatable), for a client that needs a
+                   server. Tokens as in smoke-args, plus @TARGET:<cmake target>@ for a built
+                   example binary. It is stopped when the run ends.
+    smoke-wait-port: TCP port on 127.0.0.1 to wait for (up to 20 s) after starting companions
     smoke-exit:    expected exit status (default 0)
     smoke-timeout: seconds before the run is killed (default 60)
     smoke-requires: Python only. Comma-separated modules; the test is skipped when one is missing
@@ -36,16 +40,19 @@ import platform
 import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]   # the source tree: examples/ lives directly under it
 HEADER_LINES = 80
 SKIP_STATUS = 77
-KEYS = ("expect", "expect-line", "forbid", "args", "stdin", "env", "exit", "timeout", "requires", "os", "skip")
+KEYS = ("expect", "expect-line", "forbid", "args", "stdin", "env", "companion", "wait-port", "exit",
+        "timeout", "requires", "os", "skip")
 ANNOTATION = re.compile(r"^smoke-([a-z-]+):(.*)$")
 CREDENTIAL_VARIABLES = (
     "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
@@ -61,6 +68,8 @@ class Annotations:
     args: str = ""
     stdin: list[str] = field(default_factory=list)
     env: list[str] = field(default_factory=list)
+    companion: list[str] = field(default_factory=list)
+    wait_port: int = 0
     exit: int = 0
     timeout: int = 60
     requires: list[str] = field(default_factory=list)
@@ -97,9 +106,11 @@ def parse_annotations(path: Path) -> Annotations:
             getattr(result, key.replace("-", "_")).append(value)
         elif key in ("requires", "os"):
             getattr(result, key).extend(item.strip() for item in value.split(",") if item.strip())
-        elif key in ("exit", "timeout"):
+        elif key == "companion":
+            result.companion.append(value)
+        elif key in ("exit", "timeout", "wait-port"):
             try:
-                setattr(result, key, int(value))
+                setattr(result, key.replace("-", "_"), int(value))
             except ValueError:
                 result.errors.append(f"{path.name}:{number}: smoke-{key} needs an integer")
         else:
@@ -139,7 +150,8 @@ def run_smoke(source: Path, command: list[str], *, build_dir: Path | None = None
         def substitute(text: str) -> str:
             for token, value in tokens.items():
                 text = text.replace(token, value)
-            return text
+            return re.sub(r"@TARGET:([A-Za-z0-9_]+)@",
+                          lambda match: str(_find_binary(build_dir, match.group(1))), text)
 
         argv = [*command, *[substitute(item) for item in shlex.split(notes.args)]]
         env = {key: value for key, value in os.environ.items() if key not in CREDENTIAL_VARIABLES}
@@ -148,21 +160,33 @@ def run_smoke(source: Path, command: list[str], *, build_dir: Path | None = None
             name, _, value = substitute(item).partition("=")
             env[name] = value
         stdin = "".join(substitute(line) + "\n" for line in notes.stdin) if notes.stdin else None
+        companions: list[subprocess.Popen] = []
         try:
+            for line in notes.companion:
+                companions.append(subprocess.Popen(
+                    shlex.split(substitute(line), posix=os.name != "nt"), cwd=scratch, env=env,
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT))
+            if notes.wait_port and not _wait_for_port(notes.wait_port, companions):
+                return _fail(source, f"nothing listened on 127.0.0.1:{notes.wait_port} within 20 s",
+                             _stop_companions(companions))
             done = subprocess.run(
                 argv, cwd=cwd or scratch, env=env, input=stdin, timeout=notes.timeout,
                 stdin=None if stdin is not None else subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                 encoding="utf-8", errors="replace")
         except OSError as error:
-            return _fail(source, f"could not start {argv[0]}: {error}", "")
+            _stop_companions(companions)
+            return _fail(source, f"could not start a process: {error}", "")
         except subprocess.TimeoutExpired as expired:
             output = expired.stdout.decode("utf-8", "replace") if isinstance(expired.stdout, bytes) \
                 else (expired.stdout or "")
+            _stop_companions(companions)
             return _fail(source, f"timed out after {notes.timeout} s", output)
+        companion_output = _stop_companions(companions)
         output = done.stdout
         if done.returncode != notes.exit:
-            return _fail(source, f"exit status {done.returncode}, expected {notes.exit}", output)
+            return _fail(source, f"exit status {done.returncode}, expected {notes.exit}",
+                         output + ("\n--- companion output ---\n" + companion_output if companion_output else ""))
         for needle in notes.expect:
             if needle not in output:
                 return _fail(source, f"expected text not found: {needle!r}", output)
@@ -177,6 +201,44 @@ def run_smoke(source: Path, command: list[str], *, build_dir: Path | None = None
         return 0
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _find_binary(build_dir: Path | None, name: str) -> Path:
+    """A built example by CMake target name: <build>/<name>, <build>/Release/<name>, with .exe on Windows."""
+    suffix = ".exe" if os.name == "nt" else ""
+    for base in (build_dir or Path("."), (build_dir or Path(".")) / "Release", (build_dir or Path(".")) / "Debug"):
+        candidate = base / (name + suffix)
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(f"built example {name} not found under {build_dir}")
+
+
+def _wait_for_port(port: int, processes: list, seconds: float = 20.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if any(process.poll() is not None for process in processes):
+            return False  # a companion exited instead of listening
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                return True
+        except OSError:
+            time.sleep(0.1)
+    return False
+
+
+def _stop_companions(processes: list) -> str:
+    """Stop helper processes and return what they printed (for failure messages)."""
+    collected = []
+    for process in processes:
+        if process.poll() is None:
+            process.terminate()
+        try:
+            out, _ = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            out, _ = process.communicate()
+        collected.append((out or b"").decode("utf-8", "replace"))
+    return "\n".join(collected)
 
 
 def _importable(module: str, python: str | None) -> bool:
@@ -203,7 +265,11 @@ def main() -> int:
     source = args.source.resolve()
     command = [str(args.exe.resolve())] if args.exe else [args.python, str(source)]
     build_dir = args.build_dir.resolve() if args.build_dir else None
-    return run_smoke(source, command, build_dir=build_dir, python=args.python, cwd=args.cwd)
+    try:
+        return run_smoke(source, command, build_dir=build_dir, python=args.python, cwd=args.cwd)
+    except FileNotFoundError as error:
+        print(f"FAIL {source.name}: {error}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

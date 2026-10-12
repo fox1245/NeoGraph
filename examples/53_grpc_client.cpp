@@ -10,7 +10,11 @@
 // any Go/Rust/TS/Java client would — the C++ engine runs the graph,
 // the caller never links NeoGraph itself.
 //
-// smoke-skip: needs the gRPC server of example 45 running (needs -DNEOGRAPH_BUILD_GRPC=ON)
+// smoke-companion: @TARGET:example_grpc_server@
+// smoke-wait-port: 50051
+// smoke-args: localhost:50051
+// smoke-expect: [RunGraph] output_json={"channels":{"text":{"value":"HELLO FROM GRPC"
+// smoke-expect: RESULT: PASS (failures=0)
 
 #include <cstdio>
 #include <cstdlib>

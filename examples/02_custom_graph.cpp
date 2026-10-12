@@ -1,7 +1,9 @@
-// NeoGraph Example 02: Custom Graph Definition
+// NeoGraph Example 02: a ReAct graph from create_react_graph()
 //
-// Demonstrates compiling and running a graph from JSON definition.
-// Uses a mock provider for offline testing — no API key needed.
+// One call builds the llm -> tools -> llm graph around a provider and a tool;
+// run_stream() prints node events and streamed text. The provider is a local
+// fixture that asks the calculator once and then answers, so no API key is
+// needed. Examples 04, 06 and 07 write the graph definition as JSON instead.
 //
 // Usage:
 //   ./example_custom_graph

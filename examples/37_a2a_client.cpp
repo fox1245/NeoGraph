@@ -15,7 +15,11 @@
 // on that default URL — so AgentCard discovery succeeds; otherwise the
 // example reports the connect failure and exits 1.
 //
-// smoke-skip: needs the A2A server of example 38 running; 38 already round-trips through its own client
+// smoke-companion: @TARGET:example_a2a_server@ 18087 serve
+// smoke-wait-port: 18087
+// smoke-args: http://127.0.0.1:18087
+// smoke-expect: agent text: [neo-agent] SAY HI FROM NEOGRAPH.
+// smoke-expect: graph reply:            "[neo-agent] SAY HI FROM NEOGRAPH. (VIA NEOGRAPH NODE)"
 
 #include <neograph/neograph.h>
 #include <neograph/a2a/client.h>

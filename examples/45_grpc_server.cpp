@@ -11,7 +11,7 @@
 // Then call RunGraph with a JSON graph_def + input from any gRPC
 // client in any language — the C++ engine runs it, no Python anywhere.
 //
-// smoke-skip: serves until stopped; pair it with example 53 (needs -DNEOGRAPH_BUILD_GRPC=ON)
+// smoke-skip: serves until stopped; example 53 starts it as its companion and checks the exchange
 
 #include <neograph/grpc/graph_service.h>
 

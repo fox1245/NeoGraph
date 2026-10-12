@@ -11,6 +11,13 @@
 //   7. 자비스 자신을 A2A 서버로 노출 (agent_registry.json self.enabled=true 일 때)
 //   8. 메인 루프: 한 턴 = engine->run() — voice_in 노드가 stdin 을 읽음
 //      __shutdown__ 채널 true 또는 SIGINT/SIGTERM 이면 루프 종료
+//
+// smoke-args: @SRC@/examples/cookbook/jarvis/config-demo/mock
+// smoke-env: JARVIS_MEMORY_FILE=@TMP@/jarvis_memory.json
+// smoke-stdin: hello there
+// smoke-stdin: what time is it
+// smoke-expect: [jarvis:tts][en] [mock] hello there
+// smoke-expect: [jarvis:tts][en] [mock] what time is it
 
 #include <neograph/neograph.h>
 #include "provider_support.h"
