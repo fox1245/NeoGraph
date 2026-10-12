@@ -74,7 +74,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | # | サンプル | Offline | 示すもの |
 |---|---|---|---|
 | 02 | [`02_custom_graph.cpp`](02_custom_graph.cpp) | yes | `create_react_graph()` の 1 回の呼び出しで llm、tools、llm の ReAct グラフを作り、`run_stream` がノードイベントを出力します。 |
-| 05 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | 非同期 fan-out。3 つの researcher ノードが 1 つの `io_context` 上で重なって動き、summarizer が合流させます。 |
+| 05 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | fan-out と fan-in。3 つの researcher ノードが同時にタイマーを待ち（カウンターで確認します）、barrier が合流させて summarizer に渡します。 |
 | 06 | [`06_subgraph.cpp`](06_subgraph.cpp) | yes | サブグラフ。外側の supervisor グラフが内側の ReAct グラフに処理を任せます。 |
 | 07 | [`07_intent_routing.cpp`](07_intent_routing.cpp) | yes | 分類ノードと条件付きエッジ(`route_channel`)が、各リクエストを math、translate、general の専門家へ振り分けます。 |
 | 09 | [`09_all_features.cpp`](09_all_features.cpp) | yes | 1 ファイルに 6 つの機能: `NodeInterrupt`、`RetryPolicy`、`StreamMode`、`Send`、`Command`、`Store`。 |

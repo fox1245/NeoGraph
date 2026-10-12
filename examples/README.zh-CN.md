@@ -74,7 +74,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | # | 示例 | Offline | 演示内容 |
 |---|---|---|---|
 | 02 | [`02_custom_graph.cpp`](02_custom_graph.cpp) | yes | 一次 `create_react_graph()` 调用即可构建 llm、tools、llm 的 ReAct 图，`run_stream` 打印节点事件。 |
-| 05 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | 异步 fan-out：三个 researcher 节点在一个 `io_context` 上重叠运行，由 summarizer 汇合。 |
+| 05 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | fan-out 与 fan-in：三个 researcher 节点同时等待定时器（用计数器验证），由 barrier 汇合后交给 summarizer。 |
 | 06 | [`06_subgraph.cpp`](06_subgraph.cpp) | yes | 子图：外层 supervisor 图把工作委托给内层 ReAct 图。 |
 | 07 | [`07_intent_routing.cpp`](07_intent_routing.cpp) | yes | 分类节点加条件边（`route_channel`）把每个请求送给 math、translate 或 general 专家。 |
 | 09 | [`09_all_features.cpp`](09_all_features.cpp) | yes | 一个文件里的六项功能：`NodeInterrupt`、`RetryPolicy`、`StreamMode`、`Send`、`Command`、`Store`。 |

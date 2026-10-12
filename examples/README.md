@@ -73,7 +73,7 @@ The remaining Core features. They link only `neograph::core`, except 02, 06, 07 
 | # | Example | Offline | Shows |
 |---|---|---|---|
 | 02 | [`02_custom_graph.cpp`](02_custom_graph.cpp) | yes | `create_react_graph()` builds the llm, tools, llm ReAct graph in one call; `run_stream` prints node events. |
-| 05 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | Async fan-out: three researcher nodes overlap on one `io_context` and a summarizer joins them. |
+| 05 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | Fan-out and fan-in: three researcher nodes wait on timers at the same time (a counter proves it) and a barrier joins them for the summarizer. |
 | 06 | [`06_subgraph.cpp`](06_subgraph.cpp) | yes | A subgraph: an outer supervisor graph delegates to an inner ReAct graph. |
 | 07 | [`07_intent_routing.cpp`](07_intent_routing.cpp) | yes | A classifier node and conditional edges (`route_channel`) send each request to a math, translate or general expert. |
 | 09 | [`09_all_features.cpp`](09_all_features.cpp) | yes | Six features in one file: `NodeInterrupt`, `RetryPolicy`, `StreamMode`, `Send`, `Command` and `Store`. |

@@ -74,7 +74,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | # | 예제 | Offline | 보여 주는 것 |
 |---|---|---|---|
 | 02 | [`02_custom_graph.cpp`](02_custom_graph.cpp) | yes | `create_react_graph()` 한 번으로 llm, tools, llm ReAct 그래프를 만들고, `run_stream`이 노드 이벤트를 출력합니다. |
-| 05 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | 비동기 fan-out: researcher 노드 세 개가 하나의 `io_context`에서 겹쳐 실행되고 summarizer가 합칩니다. |
+| 05 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | fan-out과 fan-in: researcher 노드 세 개가 타이머를 동시에 기다리고(카운터로 확인합니다), barrier가 이들을 합쳐 summarizer로 넘깁니다. |
 | 06 | [`06_subgraph.cpp`](06_subgraph.cpp) | yes | 서브그래프: 바깥 supervisor 그래프가 안쪽 ReAct 그래프에 일을 맡깁니다. |
 | 07 | [`07_intent_routing.cpp`](07_intent_routing.cpp) | yes | 분류 노드와 조건부 엣지(`route_channel`)가 각 요청을 math, translate, general 전문가에게 보냅니다. |
 | 09 | [`09_all_features.cpp`](09_all_features.cpp) | yes | 파일 하나에 기능 여섯 가지: `NodeInterrupt`, `RetryPolicy`, `StreamMode`, `Send`, `Command`, `Store`. |
