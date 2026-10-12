@@ -108,6 +108,7 @@ The restricted JavaScript Program API runs on top of Core graphs: `ProgramRegist
 | 35 | [`35_program_fork.py`](35_program_fork.py) | yes | A run paused next to a finished model call is forked with a different answer. The finished call is replayed from the checkpoint, so the scripted model sees one request in total and the fork is charged no tokens. |
 | 36 | [`36_program_crash_recovery.py`](36_program_crash_recovery.py) | yes | Process A runs a Program to a question, is answered, makes its model call and dies. Process B opens the same `sqlite_directory` and calls `reconnect`: the run finishes, the journaled reply is replayed, and the call is charged once. Linux and macOS. |
 | 37 | [`37_program_model_node.py`](37_program_model_node.py) | yes | A Program's `llm_call` node is bound to a provider by the host through `node_context`. The scripted model reports 30 + 12 tokens, which land in `usage.model_tokens: 42`, in `remaining_budget` and in a priced monetary record. A host without the binding refuses the Program with `P_ADMIT_PROVIDER`. |
+| 38 | [`38_program_diagnostics.py`](38_program_diagnostics.py) | yes | A scripted model misspells a node in an edge. Compilation fails with `P_CORE_E3`, a suggestion and candidates. A repair loop applies the suggestion, recompiles with `soundness_check=True` and admits the Program; the model is called once. |
 
 ### Protocols: MCP, A2A, ACP
 

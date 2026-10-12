@@ -109,6 +109,7 @@ python 01_minimal.py
 | 35 | [`35_program_fork.py`](35_program_fork.py) | yes | 끝난 모델 호출 옆에서 멈춘 실행을 다른 답으로 fork합니다. 끝난 호출은 체크포인트에서 재생(replay)되므로 스크립트된 모델이 받는 요청은 모두 한 번이고, fork에는 토큰이 청구되지 않습니다. |
 | 36 | [`36_program_crash_recovery.py`](36_program_crash_recovery.py) | yes | 프로세스 A가 질문까지 Program을 실행하고, 답을 받아 모델을 호출한 뒤 종료됩니다. 프로세스 B가 같은 `sqlite_directory`를 열어 `reconnect`를 호출하면 실행이 끝나고, 기록된 응답은 재생(replay)되며 호출 비용은 한 번만 청구됩니다. Linux와 macOS 전용입니다. |
 | 37 | [`37_program_model_node.py`](37_program_model_node.py) | yes | Program의 `llm_call` 노드는 호스트가 `node_context`로 공급자에 바인딩합니다. 스크립트된 모델이 보고한 30 + 12토큰이 `usage.model_tokens: 42`, `remaining_budget`, 가격이 매겨진 비용 기록에 반영됩니다. 바인딩이 없는 호스트는 `P_ADMIT_PROVIDER`로 Program을 거부합니다. |
+| 38 | [`38_program_diagnostics.py`](38_program_diagnostics.py) | yes | 스크립트된 모델이 엣지에서 노드 이름을 잘못 적습니다. 컴파일은 `P_CORE_E3`, 수정 제안, 후보 목록과 함께 실패합니다. 수정 루프가 제안을 적용하고 `soundness_check=True`로 다시 컴파일한 뒤 Program을 승인하며, 모델 호출은 한 번뿐입니다. |
 
 ### 프로토콜: MCP, A2A, ACP
 

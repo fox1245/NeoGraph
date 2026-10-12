@@ -109,6 +109,7 @@ python 01_minimal.py
 | 35 | [`35_program_fork.py`](35_program_fork.py) | yes | 終わったモデル呼び出しの隣で止まった実行を、別の答えで fork します。終わった呼び出しはチェックポイントからリプレイされるので、スクリプト化したモデルが受け取るリクエストは合計 1 回で、fork にトークンは課金されません。 |
 | 36 | [`36_program_crash_recovery.py`](36_program_crash_recovery.py) | yes | プロセス A は Program を質問まで実行し、答えを受けてモデルを呼んだあと終了します。プロセス B が同じ `sqlite_directory` を開いて `reconnect` を呼ぶと実行が完了し、ジャーナルの応答はリプレイされ、呼び出しの課金は 1 回だけです。Linux と macOS のみ。 |
 | 37 | [`37_program_model_node.py`](37_program_model_node.py) | yes | Program の `llm_call` ノードは、ホストが `node_context` でプロバイダーにバインドします。スクリプト化したモデルが報告した 30 + 12 トークンは `usage.model_tokens: 42`、`remaining_budget`、価格付きの課金記録に反映されます。バインドのないホストは `P_ADMIT_PROVIDER` で Program を拒否します。 |
+| 38 | [`38_program_diagnostics.py`](38_program_diagnostics.py) | yes | スクリプト化したモデルがエッジのノード名を書き間違えます。コンパイルは `P_CORE_E3`、修正案、候補とともに失敗します。修復ループが修正案を適用し、`soundness_check=True` で再コンパイルして Program を承認します。モデルの呼び出しは 1 回だけです。 |
 
 ### プロトコル: MCP、A2A、ACP
 
