@@ -515,6 +515,54 @@ TEST(MCPStdioAsync, ABatchFromTheServerIsHandledMessageByMessage) {
     EXPECT_GE(changes.load(), 1);
 }
 
+TEST(MCPStdioAsync, ATimeoutWhileTheResponseArrivesIsATimeout) {
+    // A call that runs out of time while its response line is still being
+    // written fails as a timeout and tells the server; the line that ends
+    // later is a late response and is dropped, and the session goes on.
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    const char* script =
+        "import json,sys\n"
+        "cancelled=[]\n"
+        "def send(o): print(json.dumps(o),flush=True)\n"
+        "for line in sys.stdin:\n"
+        "  m=json.loads(line)\n"
+        "  if 'id' not in m or 'method' not in m: continue\n"
+        "  if m['method']=='initialize':\n"
+        "    send({'jsonrpc':'2.0','id':m['id'],'result':{'protocolVersion':'2025-11-25',"
+        "'capabilities':{'tools':{}},'serverInfo':{'name':'stall','version':'1'}}})\n"
+        "  elif m['params']['name']=='slow':\n"
+        "    full=json.dumps({'jsonrpc':'2.0','id':m['id'],'result':{'content':[{'type':'text','text':'late'}]}})\n"
+        "    sys.stdout.write(full[:len(full)//2]); sys.stdout.flush()\n"
+        // The rest of the line follows the client's next message, which a
+        // client that gave up sends first: notifications/cancelled.
+        "    note=json.loads(sys.stdin.readline())\n"
+        "    if note.get('method')=='notifications/cancelled': cancelled.append(note['params']['requestId'])\n"
+        "    sys.stdout.write(full[len(full)//2:]+'\\n'); sys.stdout.flush()\n"
+        "  else:\n"
+        "    send({'jsonrpc':'2.0','id':m['id'],'result':{'content':[{'type':'text','text':json.dumps(cancelled)}]}})\n";
+    mcp::MCPClient client({python_cmd(), "-c", script});
+    ASSERT_TRUE(client.initialize("stall"));
+    const auto started = std::chrono::steady_clock::now();
+    try {
+        async::run_sync(client.call_tool_result_async(
+            "slow", json::object(), std::chrono::steady_clock::now() + std::chrono::milliseconds(300),
+            nullptr));
+        ADD_FAILURE() << "the stalled call returned";
+    } catch (const mcp::MCPTransportError& error) {
+        EXPECT_EQ(error.failure(), mcp::MCPFailure::timeout) << error.what();
+    } catch (const std::exception& error) {
+        ADD_FAILURE() << "not a transport timeout: " << error.what();
+    }
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(2500));
+    // The late rest of the line did not disturb the session, and the server
+    // heard of the abandoned request.
+    const auto after = async::run_sync(client.call_tool_result_async(
+        "echo", json::object(), std::chrono::steady_clock::now() + std::chrono::seconds(10),
+        nullptr));
+    const auto cancelled = json::parse(after.content[0]["text"].get<std::string>());
+    ASSERT_EQ(cancelled.size(), 1u) << cancelled.dump();
+}
+
 TEST(MCPStdioAsync, HardenedStartupUsesStartupRatherThanRequestTimeout) {
     if (!python3_available()) GTEST_SKIP() << "python not available";
     auto config = boundary_config("startup");
@@ -863,6 +911,47 @@ TEST(MCPStdioAsync, ShutdownClosesStdinBeforeAnySignal) {
     EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(3));
     EXPECT_TRUE(wait_for_record(record, "eof", std::chrono::milliseconds(500)));
     EXPECT_EQ(read_record(record).find("sigterm"), std::string::npos) << read_record(record);
+}
+
+// The same for a hardened session, whose bound is its configured
+// request_timeout: the server is told, then stopped.
+TEST(MCPStdioAsync, HardenedTimeoutWhileTheResponseArrivesIsATimeout) {
+    if (!python3_available()) GTEST_SKIP() << "python not available";
+    BoundaryDirectory directory;
+    const auto record = directory.path / "record";
+    const char* script =
+        "import json,sys\n"
+        "def send(o): print(json.dumps(o),flush=True)\n"
+        "for line in sys.stdin:\n"
+        "  m=json.loads(line)\n"
+        "  if 'id' not in m or 'method' not in m: continue\n"
+        "  if m['method']=='initialize':\n"
+        "    send({'jsonrpc':'2.0','id':m['id'],'result':{'protocolVersion':'2025-11-25',"
+        "'capabilities':{'tools':{}},'serverInfo':{'name':'stall','version':'1'}}})\n"
+        "  else:\n"
+        "    full=json.dumps({'jsonrpc':'2.0','id':m['id'],'result':{'content':[{'type':'text','text':'late'}]}})\n"
+        "    sys.stdout.write(full[:len(full)//2]); sys.stdout.flush()\n"
+        "    note=sys.stdin.readline()\n"
+        "    open(sys.argv[1],'a').write('cancelled\\n' if 'notifications/cancelled' in note else 'eof\\n')\n"
+        "    sys.stdout.write(full[len(full)//2:]+'\\n'); sys.stdout.flush()\n";
+    mcp::StdioClientConfig config;
+    config.argv = {python_cmd(), "-c", script, record.string()};
+    config.request_timeout = std::chrono::milliseconds(300);
+    config.cancel_grace = std::chrono::milliseconds(300);
+    mcp::MCPClient client(std::move(config));
+    ASSERT_TRUE(client.initialize("stall"));
+    const auto started = std::chrono::steady_clock::now();
+    try {
+        client.call_tool_result("slow", json::object());
+        ADD_FAILURE() << "the stalled call returned";
+    } catch (const mcp::MCPTransportError& error) {
+        EXPECT_EQ(error.failure(), mcp::MCPFailure::timeout) << error.what();
+    } catch (const std::exception& error) {
+        ADD_FAILURE() << "not a transport timeout: " << error.what();
+    }
+    EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(2500));
+    EXPECT_TRUE(wait_for_record(record, "cancelled", std::chrono::milliseconds(5000)))
+        << read_record(record);
 }
 
 // Owner decision for hardened stdio: a cancelled call sends
