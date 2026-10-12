@@ -17,7 +17,7 @@
 | `test_06_graph_shapes.py` | 屏障 join，条件路由，`Send` 的 map-reduce，子图，无效的图形态 |
 | `test_07_main_programs.py` | `callCore`、`all`、`race`、`quorum`，`await` 超时，`cancelScope`，外部取消，`spawn` |
 | `test_08_live_llm.py` | 节点会调用模型的 Program：默认用本地对端，启用时用 OpenRouter；Python 节点和绑定的 `llm_call` |
-| `test_09_bound_llm.py` | 通过 `node_context` 绑定的 `llm_call`（#372）：上报的成本和估算的成本，固定为 `provider.max_price` 的路由上限，发送之前的拒绝（预算、未知模型、路由别名），零预算，没有 provider 的 id，针对同一份预算的 `all` 和 `quorum`，调用写入 journal 之后发生崩溃、以及只计费一次的恢复，模型 token 预算耗尽时的同一种终态（#420），以及被执行租约占住的运行的错误（#421），以及还有中途被切断的流（#426）：失败的 run 会发布 terminal 状态并可重新连接，没有 native archive 的宿主保留可移植的证据，有 archive 的宿主保留 native 证据 |
+| `test_09_bound_llm.py` | 通过 `node_context` 绑定的 `llm_call`（#372）：上报的成本和估算的成本，固定为 `provider.max_price` 的路由上限，发送之前的拒绝（预算、未知模型、路由别名），零预算，没有 provider 的 id，针对同一份预算的 `all` 和 `quorum`，调用写入 journal 之后发生崩溃、以及只计费一次的恢复，模型 token 预算耗尽时的同一种终态（#420），以及被执行租约占住的运行的错误（#421），以及中途被切断的流（#426）：失败的 run 会发布 terminal 状态并可重新连接，没有 native archive 的宿主保留可移植的证据，有 archive 的宿主保留 native 证据 |
 | `test_10_failure_routing.py` | 失败路由（#364）：失败的 TEST 被路由到带 `interruptBefore` 的处理器并附带它的记录，沿 retry 和 abort 路由恢复，作者自定义的错误码，脱敏后的错误文本，`max_visits`，`max_node_retries` 上限，以及有无 `main()` 时的剩余值（#419），上限与 `main()` 同时存在时重试用尽的失败仍在处理器处暂停（#418），节点内部的 Program 诊断，以及用 SQLite 在新进程里恢复 |
 | `test_11_attempt_timeout.py` | 尝试超时（#364）：一个很慢的 Python 节点超时后在重试时恢复正常，一个总是超时的节点以 `NG.Timeout` 路由到它的处理器（没有处理器时让运行失败），迟到的完成永远不会进入结果或 trace，一个在停止期限之后仍然无视取消的节点（`NG.EffectUncertain`），以及会越过 `wall_time_ms` 的退避以 `deadline` 类别停止 |
 | `test_12_send_interrupts.py` | 抛出 `NodeInterrupt` 的 `Send` 目标（#385）：Program 在它上面暂停，恢复时重放 map 节点和已完成的 Send，用 SQLite 在重启后恢复，以及调用过绑定 `llm_call` 的已完成 Send 既不会重发，也不会再次计费 |

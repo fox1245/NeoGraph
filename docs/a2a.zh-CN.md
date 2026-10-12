@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=zh-CN source_sha256=e66a91176c76ffd278b84027d339011bc77f1f321caaa761da98e2db92c9457c -->
+<!-- neograph-i18n: source=docs/a2a.md locale=zh-CN source_sha256=9873d79cea98d815e023d14384da32f3f021dc0c30122d6a004b7bb181f149db -->
 # A2A：智能体调用智能体
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
@@ -261,7 +261,7 @@ int main(int argc, char** argv) {
 - **取消。** `CancelTask` 取消这次运行的令牌，任务以 `canceled` 结束。取消已终止的任务会得到 `-32002`。
 - **失败。** 失败的运行是一个 `failed` 任务，状态消息是失败的公开消息，`metadata["neograph/failure"]` 为 `{code, retryable}`。异常文本不会出现在网络上。如果在任何节点完成之前 Hook 就拦下了运行，结果是 `rejected`。达到 `max_steps` 的图会以错误码 `NG.StepLimit` 失败。
 - **请求错误**（未知任务 `-32001`，向已终止的任务发消息 `-32004`，与任务不一致的 `contextId` `-32602`，任务仍在运行 `-32603` 且原因为 `TASK_BUSY`）列在参考文档的 [A2A 错误映射](reference-en.md#a2a-error-mapping)中，所有协议的失败类别则在[协议失败映射](reference-en.md#protocol-failure-mapping)中。这里不再重复。
-- **Program。** 基于 Program 的智能体（`A2AServer` 背后的已准入 `ProgramVersion`）还接受 NeoGraph 协作信封，见 [A2A 协作扩展](reference-en.md#a2a-collaboration-extension)。等待输入的 Program 任务目前还不能通过 A2A 回答：消息会收到 `-32004`，任务继续等待。
+- **Program。** 基于 Program 的智能体（`A2AServer` 背后的已准入 `ProgramVersion`）还接受 NeoGraph 协作信封，见 [A2A 协作扩展](reference-en.md#a2a-collaboration-extension)。等待输入的 Program 任务目前还不能通过 A2A 回答：消息会收到 `-32004`，任务继续等待。服务器重启后，会从 `CollaborationMailbox` 恢复 Program 任务。对仍在运行的已恢复任务调用 `SubscribeToTask`，会先发送 Task，再跟随持久 run 直到它结束，并以最终状态收尾；无法跟随 run 时，不会空着关闭，而是以错误事件结束。
 
 ## 测试与互操作
 

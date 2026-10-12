@@ -8,6 +8,12 @@
 #include <neograph/a2a/a2a_caller_node.h>
 #include <neograph/a2a/client.h>
 #include <neograph/a2a/server.h>
+#ifdef NEOGRAPH_A2A_PROGRAM
+#include <neograph/a2a/collaboration.h>
+#include <neograph/a2a/program_adapter.h>
+#include <neograph/program/program.h>
+#include <neograph/program/store.h>
+#endif
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/run_context.h>
 #include <neograph/graph/state.h>
@@ -22,11 +28,13 @@
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <regex>
 #include <string>
 #include <thread>
@@ -189,6 +197,8 @@ struct Server {
                                              conformance_card(streaming));
         if (!server->start_async("127.0.0.1", 0)) throw std::runtime_error("bind failed");
     }
+    /// Wraps a server the test built itself (a Program-backed one) and started.
+    explicit Server(std::unique_ptr<A2AServer> started) : server(std::move(started)) {}
     ~Server() { server->stop(); }
     int port() const { return server->port(); }
     std::string url() const { return "http://127.0.0.1:" + std::to_string(port()); }
@@ -202,10 +212,10 @@ struct Reply {
 };
 
 Reply post(const Server& srv, const std::string& body, const std::string& version = "1.0",
-           const std::string& path = "/") {
+           const std::string& path = "/", const httplib::Headers& extra = {}) {
     httplib::Client c("127.0.0.1", srv.port());
     c.set_read_timeout(10, 0);
-    httplib::Headers headers;
+    httplib::Headers headers = extra;
     if (!version.empty()) headers.emplace("A2A-Version", version);
     auto res = c.Post(path, headers, body, "application/json");
     if (!res) throw std::runtime_error("no response");
@@ -218,9 +228,9 @@ Reply post(const Server& srv, const std::string& body, const std::string& versio
 }
 
 Reply rpc(const Server& srv, const std::string& method, const json& params,
-          const std::string& version = "1.0") {
+          const std::string& version = "1.0", const httplib::Headers& extra = {}) {
     json body = {{"jsonrpc", "2.0"}, {"id", 7}, {"method", method}, {"params", params}};
-    return post(srv, body.dump(), version);
+    return post(srv, body.dump(), version, "/", extra);
 }
 
 /// POST a streaming method and hand each piece of the body to @p on_chunk as
@@ -228,12 +238,14 @@ Reply rpc(const Server& srv, const std::string& method, const json& params,
 /// stream is still open. Returns the whole body.
 Reply stream_rpc(const Server& srv, const std::string& method, const json& params,
                  const std::function<void(const std::string&)>& on_chunk,
-                 int read_timeout_s = 10) {
+                 int read_timeout_s = 10, const httplib::Headers& extra = {}) {
     httplib::Client c("127.0.0.1", srv.port());
     c.set_read_timeout(read_timeout_s, 0);
     const json body = {{"jsonrpc", "2.0"}, {"id", 7}, {"method", method}, {"params", params}};
     std::string received;
-    auto res = c.Post("/", httplib::Headers{{"A2A-Version", "1.0"}}, body.dump(),
+    httplib::Headers headers = extra;
+    headers.emplace("A2A-Version", "1.0");
+    auto res = c.Post("/", headers, body.dump(),
                       "application/json", [&](const char* data, size_t size) {
                           received.append(data, size);
                           on_chunk(received);
@@ -281,6 +293,230 @@ json send_v1(const Server& srv, const std::string& text) {
     auto r = rpc(srv, "SendMessage", {{"message", v1_message(text)}});
     return r.envelope["result"]["task"];
 }
+
+#ifdef NEOGRAPH_A2A_PROGRAM
+// --- a Program task recovered after a restart (#413) --------------------------
+
+std::string digest(char value) {
+    return "sha256:" + std::string(64, value);
+}
+
+std::atomic<bool> g_program_node_interrupts{false};
+
+/// A Program node that waits at the run gate, so a run the server recovers is
+/// still working when a test subscribes to it.
+class GatedProgramNode final : public GraphNode {
+  public:
+    explicit GatedProgramNode(std::string name) : name_(std::move(name)) {}
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        for (int i = 0; i < 3000 && !run_gate().wait_for(10ms); ++i) {
+            if (in.ctx.cancel_token && in.ctx.cancel_token->is_cancelled()) break;
+        }
+        if (g_program_node_interrupts.load(std::memory_order_acquire))
+            throw graph::NodeInterrupt("needs a reviewer");
+        NodeOutput out;
+        out.writes.push_back({"value", "completed"});
+        co_return out;
+    }
+    std::string get_name() const override { return name_; }
+
+  private:
+    std::string name_;
+};
+
+CollaborationLink recovery_link() {
+    CollaborationLinkSpec spec;
+    spec.link_id = "link-1";
+    spec.sender_owner_scope = "owner-a";
+    spec.receiver_owner_scope = "owner-b";
+    spec.sender_agent_id = "coordinator-a";
+    spec.receiver_agent_id = "executor-b";
+    spec.task_scope = "bounded-coding-task";
+    spec.capability_allowlist = {"code-read"};
+    spec.effect_allowlist = {"artifact-publish"};
+    spec.artifact_allowlist = {"program-result:run-b"};
+    spec.cancellation_rights = {"sender", "receiver"};
+    spec.message_kind_allowlist = {"request", "completed", "failed", "canceled", "terminal"};
+    spec.expires_at_unix_ms = 4102444800000ULL;
+    spec.max_retries = 2;
+    spec.acknowledgement_timeout_ms = 1000;
+    return CollaborationLink::create(std::move(spec));
+}
+
+/// One Program version over in-memory stores that outlive a runtime.
+struct RecoveryFixture {
+    program::RegistrySnapshot registry;
+    program::AdmissionProfile profile;
+    program::PolicySnapshot policy;
+    std::shared_ptr<program::InMemoryProgramStore> store;
+    std::shared_ptr<program::EngineGenerationCache> engines;
+    std::shared_ptr<program::ProgramCatalog> catalog;
+    std::shared_ptr<graph::InMemoryCheckpointStore> checkpoints;
+    std::shared_ptr<program::InMemoryProgramTransitionStore> transitions;
+    std::shared_ptr<program::ProgramRuntime> runtime;
+    std::optional<program::ProgramVersion> version;
+
+    RecoveryFixture()
+        : registry(make_registry()),
+          profile(make_profile(registry)),
+          policy(make_policy(profile)),
+          store(std::make_shared<program::InMemoryProgramStore>()),
+          checkpoints(std::make_shared<graph::InMemoryCheckpointStore>()),
+          transitions(std::make_shared<program::InMemoryProgramTransitionStore>()) {
+        restart();
+        program::ProgramCompiler compiler(registry, {"a2a-recovery/v1"});
+        version.emplace(catalog->admit(
+            compiler.compile(program::ProgramSource::from_cpp_builder(
+                "test:a2a-recovery", 1, source_document())),
+            program::ProgramAdmission{"owner-b", profile, policy, {}}));
+    }
+
+    void restart() {
+        runtime.reset();
+        engines = std::make_shared<program::EngineGenerationCache>();
+        catalog = std::make_shared<program::ProgramCatalog>(
+            program::CatalogConfig{store, registry, engines, "a2a-recovery/v1"});
+        runtime = std::make_shared<program::ProgramRuntime>(
+            program::RuntimeConfig{catalog, checkpoints, {}, transitions, 1});
+    }
+
+    /// The mailbox of a receiver that accepted the request for run "run-b" and
+    /// stopped before it started the run, as a new process reads it back.
+    std::shared_ptr<CollaborationMailbox> mailbox_with_pending_request() const {
+        const auto accepted = recovery_link().accept("executor-b", "consent-secret");
+        const auto envelope = CollaborationEnvelope::bind_program(
+            CollaborationEnvelope::create(accepted, "run-a", "run-b", "run-b", "context-1",
+                                          "message-1", "correlation-1", 1, "request",
+                                          "idem-recovery", json{{"prompt", "persisted"}}),
+            *version);
+        program::RunInvocation invocation;
+        invocation.owner_scope = envelope.receiver_owner_scope;
+        invocation.agent_id = envelope.receiver_agent_id;
+        invocation.program_version_id = version->id();
+        invocation.run_id = envelope.receiver_program_run_id;
+        invocation.budget = program::RunBudget{20000, 1000, 1000, 1, 1, 20, 0, 0, 0};
+        invocation.input = envelope.payload;
+        invocation.message_sequence = envelope.sequence;
+        invocation.idempotency_key = envelope.idempotency_key;
+        invocation.correlation_id = envelope.correlation_id;
+        CollaborationMailbox original("owner-b", "executor-b");
+        original.accept_link(accepted, "consent-secret");
+        if (original.submit_program(envelope, *version, invocation)
+            != CollaborationSubmitResult::Accepted)
+            throw std::runtime_error("the mailbox refused the request");
+        return std::make_shared<CollaborationMailbox>(
+            CollaborationMailbox::parse(original.serialize_canonical()));
+    }
+
+    /// A server over the restarted runtime. Starting it recovers the request:
+    /// the run starts at once and waits at the gate.
+    std::unique_ptr<A2AServer> server_over(
+        std::shared_ptr<CollaborationMailbox> mailbox,
+        ProgramAgentAdapter::ArtifactBuilder artifacts = {}) const {
+        auto adapter = std::make_shared<ProgramAgentAdapter>(
+            runtime, *version, "owner-b", std::move(mailbox),
+            ProgramAgentAdapter::InvocationBuilder{}, std::move(artifacts));
+        AgentCard card;
+        card.name = "recovered-program";
+        card.description = "A2A recovery conformance";
+        card.version = "1.0.0";
+        card.default_input_modes = {"text/plain"};
+        card.default_output_modes = {"text/plain"};
+        auto server = std::make_unique<A2AServer>(
+            adapter, card,
+            [](std::string_view authorization) -> std::optional<CollaborationPeerIdentity> {
+                if (authorization == "Bearer coordinator-a")
+                    return CollaborationPeerIdentity{"owner-a", "coordinator-a"};
+                return std::nullopt;
+            });
+        if (!server->start_async("127.0.0.1", 0)) throw std::runtime_error("bind failed");
+        return server;
+    }
+
+  private:
+    static program::RegistrySnapshot make_registry() {
+        using namespace program;
+        RegistrySnapshotBuilder builder;
+        builder.add_node(
+            ExecutableManifest{{ExecutableKind::Node, "a2a-gated-node", "1.0.0", digest('4')},
+                               EffectMode::Brokered, "attestation:a2a", {}, {}, {}},
+            [](const std::string& name, const json&, const NodeContext&) {
+                return std::make_unique<GatedProgramNode>(name);
+            },
+            json{{"type", "object"}}, json::object());
+        builder.add_reducer(
+            ExecutableManifest{{ExecutableKind::Reducer, "a2a-overwrite", "1.0.0", digest('5')},
+                               EffectMode::Brokered, "attestation:a2a", {}, {}, {}},
+            [](const json&, const json& incoming) { return json(incoming); });
+        return std::move(builder).build();
+    }
+
+    static program::AdmissionProfile make_profile(const program::RegistrySnapshot& registry) {
+        using namespace program;
+        AdmissionProfileBuilder builder;
+        builder.id("a2a-recovery-profile")
+            .semantic_version("1.0.0")
+            .registry(registry)
+            .mode(AdmissionMode::MultiTenant)
+            .max_program_schema_version(1)
+            .allow_source_kind(SourceKind::CppBuilder)
+            .allow_effect_mode(EffectMode::Brokered);
+        for (const auto& identity : registry.identities()) builder.allow_executable(identity);
+        return std::move(builder).build();
+    }
+
+    static program::PolicySnapshot make_policy(const program::AdmissionProfile& profile) {
+        using namespace program;
+        PolicySnapshotBuilder builder;
+        builder.id("a2a-recovery-policy")
+            .semantic_version("1.0.0")
+            .owner_scope("owner-b")
+            .admission_profile(profile)
+            .budget_ceiling(BudgetLimits{20000, 1000, 1000, 1, 1, 20, 1, 1, 1});
+        return std::move(builder).build();
+    }
+
+    static json source_document() {
+        return json{
+            {"program_schema_version", 1},
+            {"input_contract", json{{"schema_version", 1}, {"schema", json::object()}}},
+            {"output_contract", json{{"schema_version", 1}, {"schema", json::object()}}},
+            {"root",
+             json{{"op", "call_core"},
+                  {"name", "main"},
+                  {"definition",
+                   json{{"schema_version", 1},
+                        {"name", "main"},
+                        {"channels",
+                         json{{"value", json{{"reducer", "a2a-overwrite"}, {"initial", ""}}}}},
+                        {"nodes", json{{"work", json{{"type", "a2a-gated-node"}}}}},
+                        {"edges",
+                         json::array({json{{"from", "__start__"}, {"to", "work"}},
+                                      json{{"from", "work"}, {"to", "__end__"}}})},
+                        {"conditional_edges", json::array()}}}}},
+            {"declared_budget_requirements",
+             json::array(
+                 {json{{"resource", "wall_time_ms"}, {"minimum", 1}, {"maximum", 20000}},
+                  json{{"resource", "model_tokens"}, {"minimum", 0}, {"maximum", 1000}},
+                  json{{"resource", "monetary_microunits"}, {"minimum", 0}, {"maximum", 1000}},
+                  json{{"resource", "max_concurrency"}, {"minimum", 1}, {"maximum", 1}},
+                  json{{"resource", "max_program_operations"}, {"minimum", 1}, {"maximum", 1}},
+                  json{{"resource", "max_core_steps"}, {"minimum", 1}, {"maximum", 20}},
+                  json{{"resource", "max_dynamic_compiles"}, {"minimum", 0}, {"maximum", 0}},
+                  json{{"resource", "max_child_depth"}, {"minimum", 0}, {"maximum", 0}},
+                  json{{"resource", "max_total_children"}, {"minimum", 0}, {"maximum", 0}}})}};
+    }
+};
+
+/// The recovering peer of the link: the coordinator that sent the request.
+const httplib::Headers kCoordinator{{"Authorization", "Bearer coordinator-a"}};
+
+/// Opens the gate on the way out, before the server and the fixture are torn
+/// down, so a test that fails early never leaves a recovered run blocked.
+struct ReleaseGate {
+    ~ReleaseGate() { run_gate().open(); }
+};
+#endif
 
 }  // namespace
 
@@ -504,6 +740,116 @@ TEST(A2AConformance, AQuietStreamIsKeptAliveWhileTheRunWorks) {
     EXPECT_EQ(events.front()["result"]["task"]["id"], id);
     EXPECT_EQ(events.back()["result"]["statusUpdate"]["status"]["state"], "TASK_STATE_COMPLETED");
 }
+
+#ifdef NEOGRAPH_A2A_PROGRAM
+TEST(A2AConformance, ASubscriberToARecoveredProgramTaskFollowsItsRunToTheFinalStatus) {
+    // The server restarted while the request was accepted and its run had not
+    // finished: the run is not this server's own, so no channel carries its
+    // events. The stream still ends with the final status (#413).
+    GateScope gate;
+    RecoveryFixture fixture;
+    Server srv(fixture.server_over(fixture.mailbox_with_pending_request()));
+    ReleaseGate release;
+
+    const auto running = rpc(srv, "GetTask", {{"id", "run-b"}}, "1.0", kCoordinator);
+    ASSERT_EQ(running.envelope["result"]["status"]["state"], "TASK_STATE_WORKING") << running.body;
+
+    // The run waits at the gate, so it is working when the subscription is
+    // made; the gate opens once the subscriber holds the current Task.
+    const auto r = stream_rpc(srv, "SubscribeToTask", {{"id", "run-b"}},
+                              [&](const std::string& so_far) {
+                                  if (so_far.find("\n\n") != std::string::npos) run_gate().open();
+                              }, 10, kCoordinator);
+    const auto events = sse_events(r.body);
+    ASSERT_GE(events.size(), 2u) << r.body;
+    EXPECT_EQ(events.front()["result"]["task"]["id"], "run-b");
+    EXPECT_EQ(events.front()["result"]["task"]["status"]["state"], "TASK_STATE_WORKING");
+    const auto& last = events.back()["result"]["statusUpdate"];
+    EXPECT_EQ(last["status"]["state"], "TASK_STATE_COMPLETED") << r.body;
+    EXPECT_EQ(last["taskId"], "run-b");
+    EXPECT_TRUE(last["metadata"].contains("program_result_id")) << r.body;
+    // The result artifact arrives before the final status, as for a run this
+    // server started.
+    bool saw_artifact = false;
+    for (const auto& event : events) {
+        if (event["result"].contains("artifactUpdate")) {
+            saw_artifact = true;
+            EXPECT_EQ(event["result"]["artifactUpdate"]["artifact"]["artifactId"],
+                      "program-result:run-b");
+        }
+    }
+    EXPECT_TRUE(saw_artifact) << r.body;
+
+    // The task is terminal now, so there is nothing left to join.
+    const auto again = rpc(srv, "SubscribeToTask", {{"id", "run-b"}}, "1.0", kCoordinator);
+    EXPECT_EQ(error_code(again.envelope), -32004) << again.body;
+    const auto fetched = rpc(srv, "GetTask", {{"id", "run-b"}}, "1.0", kCoordinator);
+    EXPECT_EQ(fetched.envelope["result"]["status"]["state"], "TASK_STATE_COMPLETED");
+}
+
+TEST(A2AConformance, ASubscriberToARecoveredProgramTaskThatPausesEndsWithInputRequired) {
+    GateScope gate;
+    g_program_node_interrupts.store(true, std::memory_order_release);
+    struct Reset { ~Reset() { g_program_node_interrupts.store(false, std::memory_order_release); } } reset;
+    RecoveryFixture fixture;
+    Server srv(fixture.server_over(fixture.mailbox_with_pending_request()));
+    ReleaseGate release;
+
+    const auto r = stream_rpc(srv, "SubscribeToTask", {{"id", "run-b"}},
+                              [&](const std::string& so_far) {
+                                  if (so_far.find("\n\n") != std::string::npos) run_gate().open();
+                              }, 10, kCoordinator);
+    const auto events = sse_events(r.body);
+    ASSERT_GE(events.size(), 2u) << r.body;
+    EXPECT_EQ(events.front()["result"]["task"]["status"]["state"], "TASK_STATE_WORKING");
+    EXPECT_EQ(events.back()["result"]["statusUpdate"]["status"]["state"],
+              "TASK_STATE_INPUT_REQUIRED") << r.body;
+}
+
+TEST(A2AConformance, ACancelEndsTheStreamOfARecoveredProgramTask) {
+    GateScope gate;
+    RecoveryFixture fixture;
+    Server srv(fixture.server_over(fixture.mailbox_with_pending_request()));
+    ReleaseGate release;
+
+    bool cancelled = false;
+    const auto r = stream_rpc(srv, "SubscribeToTask", {{"id", "run-b"}},
+                              [&](const std::string& so_far) {
+                                  if (cancelled || so_far.find("\n\n") == std::string::npos) return;
+                                  cancelled = true;
+                                  const auto reply = rpc(srv, "CancelTask", {{"id", "run-b"}}, "1.0",
+                                                         kCoordinator);
+                                  EXPECT_EQ(error_code(reply.envelope), 0) << reply.body;
+                              }, 10, kCoordinator);
+    const auto events = sse_events(r.body);
+    ASSERT_GE(events.size(), 2u) << r.body;
+    EXPECT_EQ(events.back()["result"]["statusUpdate"]["status"]["state"], "TASK_STATE_CANCELED")
+        << r.body;
+}
+
+TEST(A2AConformance, AStreamThatCannotFollowARecoveredRunEndsWithAnErrorNotSilence) {
+    // The run settles, but its result cannot be projected into a Task (here the
+    // artifact builder throws): the stream says so.
+    GateScope gate;
+    RecoveryFixture fixture;
+    Server srv(fixture.server_over(
+        fixture.mailbox_with_pending_request(),
+        [](const program::ProgramResult&, std::string_view) -> std::optional<Artifact> {
+            throw std::runtime_error("the artifact store is down");
+        }));
+    ReleaseGate release;
+
+    const auto r = stream_rpc(srv, "SubscribeToTask", {{"id", "run-b"}},
+                              [&](const std::string& so_far) {
+                                  if (so_far.find("\n\n") != std::string::npos) run_gate().open();
+                              }, 10, kCoordinator);
+    const auto events = sse_events(r.body);
+    ASSERT_GE(events.size(), 2u) << r.body;
+    EXPECT_EQ(events.front()["result"]["task"]["id"], "run-b");
+    EXPECT_EQ(error_code(events.back()), -32603) << r.body;
+    EXPECT_EQ(r.body.find("artifact store"), std::string::npos) << "no internal text: " << r.body;
+}
+#endif
 
 // --- task rules (A2A-05, A2A-06, A2A-07, A2A-09, A2A-20) -----------------------------
 

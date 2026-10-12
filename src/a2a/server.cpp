@@ -119,6 +119,8 @@ constexpr int kMaxPageSize     = 100;
 /// (httplib and httpx default to 5 s), and the stream otherwise says nothing
 /// between the Task and the next status.
 constexpr auto kStreamKeepAlive = 5s;
+/// How often a stream looks at a durable run that has no channel to wake it.
+constexpr auto kFollowPollInterval = 25ms;
 
 /// A JSON-RPC error with its A2A typed details (spec 9.5: `error.data` is a
 /// list of google.rpc details, the first one an ErrorInfo).
@@ -608,6 +610,14 @@ struct A2AServer::Impl {
         generated_card_url = true;
     }
 
+    /// One look at a run that has no channel (`follow` of stream_task).
+    enum class FollowStep {
+        Working,      ///< not settled yet
+        Settled,      ///< terminal or interrupted: the Task is the final status
+        Unavailable,  ///< the run can no longer be followed
+    };
+    using FollowPoll = std::function<FollowStep(Task& settled)>;
+
     /// One event of a task lifecycle stream.
     struct StreamItem {
         bool                    is_artifact = false;
@@ -856,6 +866,12 @@ struct A2AServer::Impl {
     /// live handle when one is held, else a reconnect. False when the run is
     /// not visible to this adapter.
     bool refresh_program_task(const std::string& task_id, Task& out);
+
+    /// One look at the durable run behind a task that has no channel: settled
+    /// once the run has a result or a cancel committed, and unavailable when
+    /// the task or its run cannot be read any more.
+    FollowStep poll_program_task(const std::string& task_id,
+                                 const program::ProgramHandle& handle, Task& out);
 #endif
 
     /// The security scheme name and HTTP auth scheme the card declares.
@@ -906,9 +922,11 @@ struct A2AServer::Impl {
     }
 
     /// Serve a task lifecycle stream: the @p snapshot Task first, then the
-    /// run's events from @p cursor until its final status.
+    /// run's events from @p cursor until its final status. A task whose run
+    /// has no channel (a Program task recovered after a restart) is followed
+    /// through @p follow until it settles.
     void stream_task(Call& call, Task snapshot, std::shared_ptr<TaskChannel> channel,
-                     std::size_t cursor);
+                     std::size_t cursor, FollowPoll follow = {});
 
     void handle_jsonrpc(const httplib::Request& req, httplib::Response& res);
     void handle_send(Call& call);
@@ -1434,6 +1452,28 @@ bool A2AServer::Impl::refresh_program_task(const std::string& task_id, Task& out
     }
 }
 
+A2AServer::Impl::FollowStep A2AServer::Impl::poll_program_task(
+    const std::string& task_id, const program::ProgramHandle& handle, Task& out) {
+    {
+        std::lock_guard lk(tasks_mu);
+        const auto task = tasks.find(task_id);
+        if (task == tasks.end()) return FollowStep::Unavailable;
+        // A cancel commits to the stored task before the run reports it.
+        if (closes_stream(task->second.status.state)) {
+            out = task->second;
+            return FollowStep::Settled;
+        }
+    }
+    // The handle answers from memory; the stores are read only once the run
+    // has a result to project.
+    if (!handle.try_result()) return FollowStep::Working;
+    Task refreshed;
+    if (!refresh_program_task(task_id, refreshed)) return FollowStep::Unavailable;
+    if (!closes_stream(refreshed.status.state)) return FollowStep::Unavailable;
+    out = std::move(refreshed);
+    return FollowStep::Settled;
+}
+
 Task A2AServer::Impl::execute_program(const Message& inbound, const std::string& task_id,
                                       const std::string& context_id,
                                       std::uint64_t generation) {
@@ -1796,14 +1836,15 @@ void A2AServer::Impl::handle_send(Call& call) {
 }
 
 void A2AServer::Impl::stream_task(Call& call, Task snapshot,
-                                  std::shared_ptr<TaskChannel> channel, std::size_t cursor) {
+                                  std::shared_ptr<TaskChannel> channel, std::size_t cursor,
+                                  FollowPoll follow) {
     const auto rpc_id  = call.id;
     const auto dialect = call.dialect;
     auto* self = this;
     call.res->set_chunked_content_provider(
         "text/event-stream",
-        [self, rpc_id, dialect, snapshot = std::move(snapshot), channel, cursor](
-            size_t /*offset*/, httplib::DataSink& sink) mutable {
+        [self, rpc_id, dialect, snapshot = std::move(snapshot), channel, cursor,
+         follow = std::move(follow)](size_t /*offset*/, httplib::DataSink& sink) mutable {
             using Clock = std::chrono::steady_clock;
             auto last_sent = Clock::now();
             auto write = [&](json result) {
@@ -1864,6 +1905,79 @@ void A2AServer::Impl::stream_task(Call& call, Task snapshot,
                         lk.lock();
                         if (!alive) return false;  // the client went away
                     }
+                }
+            } else if (follow) {
+                // No channel carries this run's events: this server did not
+                // start it (a Program task recovered after a restart). Follow
+                // the durable run until it settles, then end with its final
+                // status, or with an error when the run cannot be followed.
+                std::vector<std::string> sent_artifacts;
+                for (const auto& artifact : snapshot.artifacts)
+                    sent_artifacts.push_back(artifact.artifact_id);
+                for (;;) {
+                    Task settled;
+                    const auto step = follow(settled);
+                    if (step == FollowStep::Settled) {
+                        for (const auto& artifact : settled.artifacts) {
+                            if (std::find(sent_artifacts.begin(), sent_artifacts.end(),
+                                          artifact.artifact_id) != sent_artifacts.end())
+                                continue;
+                            TaskArtifactUpdateEvent update;
+                            update.task_id    = settled.id;
+                            update.context_id = settled.context_id;
+                            update.artifact   = artifact;
+                            update.last_chunk = true;
+                            json ej;
+                            to_json(ej, update, dialect);
+                            if (dialect == WireDialect::V1_0)
+                                ej = json{{"artifactUpdate", std::move(ej)}};
+                            if (!write(std::move(ej))) return false;
+                        }
+                        TaskStatusUpdateEvent update;
+                        update.task_id    = settled.id;
+                        update.context_id = settled.context_id;
+                        update.status     = settled.status;
+                        update.final      = true;
+                        if (settled.metadata.is_object() && !settled.metadata.empty())
+                            update.metadata = settled.metadata;
+                        json ej;
+                        to_json(ej, update, dialect);
+                        if (dialect == WireDialect::V1_0)
+                            ej = json{{"statusUpdate", std::move(ej)}};
+                        if (!write(std::move(ej))) return false;
+                        break;
+                    }
+                    if (step == FollowStep::Unavailable) {
+                        auto e = rpc_error(-32603, "The task's run can no longer be followed; "
+                                                   "fetch the task with GetTask");
+                        e.reason = "RUN_UNAVAILABLE";
+                        e.domain = kNeoGraphDomain;
+                        const auto frame = sse_frame(jsonrpc_error(e, rpc_id));
+                        if (!sink.write(frame.data(), frame.size())) return false;
+                        break;
+                    }
+                    if (self->stopping.load(std::memory_order_acquire)) break;
+                    std::chrono::milliseconds keepalive;
+                    {
+                        std::lock_guard lk(self->tasks_mu);
+                        keepalive = self->stream_keepalive;
+                    }
+                    const auto until_due = std::max(
+                        0ms, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 last_sent + keepalive - Clock::now()));
+                    std::this_thread::sleep_for(std::min<std::chrono::milliseconds>(
+                        kFollowPollInterval, until_due));
+                    // As for a channel: a quiet stream says so with an SSE
+                    // comment, and the write finds a client that went away.
+                    bool alive = true;
+                    if (Clock::now() - last_sent >= keepalive) {
+                        static constexpr std::string_view kComment = ": keep-alive\n\n";
+                        alive = sink.write(kComment.data(), kComment.size());
+                        last_sent = Clock::now();
+                    } else {
+                        alive = !sink.is_writable || sink.is_writable();
+                    }
+                    if (!alive) return false;
                 }
             }
             sink.done();
@@ -2167,17 +2281,24 @@ void A2AServer::Impl::handle_subscribe(Call& call) {
             return;
         }
         bool in_memory = false;
+        bool driven = false;
         {
             std::lock_guard lk(tasks_mu);
             in_memory = tasks.contains(task_id);
+            driven = active_runs.contains(task_id);
         }
+        // A run this server drives publishes its own state. Any other Program
+        // task is read from its durable run first, so a recovered run that
+        // settled since the restart is answered as the terminal task it is
+        // and not followed.
         Task refreshed;
-        if (!in_memory) (void)refresh_program_task(task_id, refreshed);
+        if (!in_memory || !driven) (void)refresh_program_task(task_id, refreshed);
     }
 #endif
     Task snapshot;
     std::shared_ptr<TaskChannel> channel;
     std::size_t cursor = 0;
+    FollowPoll follow;
     {
         std::lock_guard lk(tasks_mu);
         auto it = tasks.find(task_id);
@@ -2196,8 +2317,24 @@ void A2AServer::Impl::handle_subscribe(Call& call) {
             channel = run->second.channel;
             cursor  = channel->items.size();
         }
+#ifdef NEOGRAPH_A2A_PROGRAM
+        if (!channel && program_adapter && !closes_stream(snapshot.status.state)) {
+            // A running task with no channel is a Program task this server did
+            // not start (recovered after a restart): follow its durable run.
+            if (const auto run = program_runs.find(task_id); run != program_runs.end()) {
+                follow = [this, task_id, handle = run->second.handle](Task& settled) {
+                    return poll_program_task(task_id, handle, settled);
+                };
+            } else {
+                reply_error(call, rpc_error(-32603,
+                    "Task " + task_id + " is not running here and cannot be followed; "
+                    "fetch it with GetTask"));
+                return;
+            }
+        }
+#endif
     }
-    stream_task(call, std::move(snapshot), channel, cursor);
+    stream_task(call, std::move(snapshot), channel, cursor, std::move(follow));
 }
 
 // ---------------------------------------------------------------------------
