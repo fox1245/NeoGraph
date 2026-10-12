@@ -486,6 +486,38 @@ private:
 };
 
 /**
+ * @brief A run control signal a remote peer reported for one call.
+ *
+ * NeoGraph's protocol clients raise it when the server's Hook blocked the call
+ * (MCP JSON-RPC error -32010, a gRPC status whose ErrorInfo code is
+ * `NG.HookBlocked`) or the server's run paused for input (-32011,
+ * `NG.Interrupted`). The signal belongs to the remote run, not to this one:
+ * it is an ordinary failure that carries the remote code, so it does not stop
+ * or pause the local run, and it is not retried. The public message is the
+ * remote's public message. Carrying a remote interrupt into the local run as a
+ * native pause is a later phase.
+ */
+class NEOGRAPH_API RemoteControlFailure : public NodeFailureError {
+public:
+    /// @p code is "NG.HookBlocked" or "NG.Interrupted"; anything else throws
+    /// std::invalid_argument.
+    RemoteControlFailure(const std::string& code, const std::string& public_message)
+        : NodeFailureError(what_of(code, public_message), checked(code), public_message,
+                           false) {}
+
+private:
+    static std::string checked(const std::string& code) {
+        if (code != "NG.HookBlocked" && code != "NG.Interrupted")
+            throw std::invalid_argument(
+                "RemoteControlFailure code must be NG.HookBlocked or NG.Interrupted");
+        return code;
+    }
+    static std::string what_of(const std::string& code, const std::string& public_message) {
+        return public_message.empty() ? code : code + ": " + public_message;
+    }
+};
+
+/**
  * @brief A node attempt ran past its `attempt_timeout_ms` (#364).
  *
  * The executor raises it as the cause of an attempt that timed out; node code

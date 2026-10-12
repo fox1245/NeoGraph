@@ -134,19 +134,32 @@ namespace {
 // deadline is a timed-out call; any other status, a remote cancellation
 // included, and an in-band tool error are ordinary failures that name the
 // status and the remote's stable code. Only the run's own cancellation (in
-// execute_async) is CancelledException.
+// execute_async) is CancelledException. A remote run control signal (the
+// server's Hook blocked the call, or its run needs input) is the remote run's,
+// not this one's: an ordinary graph::RemoteControlFailure with the remote code,
+// whatever status carried it (a Hook that timed out is DEADLINE_EXCEEDED).
 std::string response_or_throw(const ::grpc::Status& status, const pb::ToolCallResponse& resp) {
+    std::optional<detail::ErrorInfo> info;
+    if (!status.ok()) info = detail::error_info_of(status.error_details());
+    std::string remote_code;
+    if (info && info->domain == detail::kErrorDomain) remote_code = detail::error_code_of(*info);
+    if (remote_code == "NG.HookBlocked" || remote_code == "NG.Interrupted")
+        throw neograph::graph::RemoteControlFailure(
+            remote_code, ::neograph::detail::valid_utf8(status.error_message()));
     if (status.error_code() == ::grpc::StatusCode::DEADLINE_EXCEEDED)
         throw asio::system_error(asio::error::timed_out, "gRPC CallTool deadline exceeded");
     if (!status.ok()) {
         std::string message = "gRPC CallTool failed with status " +
                               std::to_string(static_cast<int>(status.error_code()));
-        if (const auto info = detail::error_info_of(status.error_details()))
-            message += " (" + info->reason + ")";
+        if (!remote_code.empty()) message += " (" + remote_code + ")";
+        else if (info) message += " (" + info->reason + ")";
         throw std::runtime_error(message + ": " + status.error_message());
     }
     if (!resp.error().empty()) {
-        // The tool failed remotely.
+        // The tool failed remotely. A run control signal the remote tool
+        // itself reported from yet another server stays what it was.
+        if (resp.error_code() == "NG.HookBlocked" || resp.error_code() == "NG.Interrupted")
+            throw neograph::graph::RemoteControlFailure(resp.error_code(), resp.error());
         throw std::runtime_error(resp.error_code().empty()
                                      ? resp.error()
                                      : resp.error() + " (" + resp.error_code() + ")");

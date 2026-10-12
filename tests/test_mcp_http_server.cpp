@@ -2,6 +2,11 @@
 
 #include <gtest/gtest.h>
 #ifdef NEOGRAPH_TESTS_HAVE_MCP_CLIENT
+#include <neograph/async/run_sync.h>
+#include <neograph/graph/engine.h>
+#include <neograph/graph/node.h>
+#include <neograph/graph/types.h>
+#include <neograph/hook_outbox.h>
 #include <neograph/mcp/client.h>
 #endif
 
@@ -11,6 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <future>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -636,6 +642,119 @@ TEST(MCPHttpServerTest, ExistingMcpClientUsesNegotiatedHttpSession) {
     auto result = client.call_tool_result("echo", {{"value", "client-roundtrip"}});
     EXPECT_FALSE(result.is_error);
     EXPECT_EQ(result.structured_content["echoed"], "client-roundtrip");
+}
+#endif
+
+#ifdef NEOGRAPH_TESTS_HAVE_MCP_CLIENT
+// A remote run control signal (the server's Hook blocked the call: -32010;
+// the server's run needs input: -32011) is the remote's, not this run's:
+// MCPTool reports it as an ordinary failure carrying the remote code
+// (NG.HookBlocked, NG.Interrupted), and the local graph run goes on with a
+// failed tool result. Native human-in-the-loop propagation across protocols is
+// a later phase.
+namespace {
+
+std::unique_ptr<MCPServer> make_control_server() {
+    MCPServerConfig config;
+    config.server_info = {{"name", "control-test"}, {"version", "1"}};
+    auto server = std::make_unique<MCPServer>(std::move(config));
+    ToolDefinition blocked;
+    blocked.name = "blocked";
+    blocked.description = "A tool whose Hook blocks it";
+    blocked.input_schema = {{"type", "object"}};
+    server->register_tool(blocked, [](const json&, const auto&) -> CallToolResult {
+        throw neograph::HookBoundaryBlocked("sha256:" + std::string(64, 'd'),
+                                            neograph::HookExecutionState::Failed,
+                                            "remote audit hook blocked the call");
+    });
+    ToolDefinition paused;
+    paused.name = "paused";
+    paused.description = "A tool that needs a human";
+    paused.input_schema = {{"type", "object"}};
+    server->register_tool(paused, [](const json&, const auto&) -> CallToolResult {
+        throw neograph::graph::NodeInterrupt("remote approval needed", json{{"cmd", "deploy"}});
+    });
+    return server;
+}
+
+class RemoteControlCallingNode final : public neograph::graph::GraphNode {
+public:
+    asio::awaitable<neograph::graph::NodeResult> run(neograph::graph::NodeInput) override {
+        json assistant;
+        assistant["role"] = "assistant";
+        assistant["content"] = "";
+        assistant["tool_calls"] = json::array({
+            json{{"id", "call-blocked"}, {"name", "blocked"}, {"arguments", "{}"}},
+            json{{"id", "call-paused"}, {"name", "paused"}, {"arguments", "{}"}},
+        });
+        neograph::graph::NodeResult out;
+        out.writes.push_back(neograph::graph::ChannelWrite{"messages", json::array({assistant})});
+        co_return out;
+    }
+    std::string get_name() const override { return "llm"; }
+};
+
+}  // namespace
+
+TEST(MCPHttpServerTest, RemoteRunControlSignalsAreOrdinaryTypedToolFailures) {
+    MCPHttpServer server([](std::string_view) {
+        return MCPHttpServerSession{make_control_server(), {}};
+    });
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    neograph::graph::NodeFactory::instance().register_type(
+        "mcp_remote_control_llm",
+        [](const std::string&, const json&, const neograph::graph::NodeContext&) {
+            return std::make_unique<RemoteControlCallingNode>();
+        });
+    MCPClient client("http://127.0.0.1:" + std::to_string(server.port()) + "/mcp");
+    ASSERT_TRUE(client.initialize("neograph-remote-control"));
+    neograph::graph::NodeContext context;
+    context.tools = neograph::ToolSet(client.get_tools());
+    auto engine = neograph::graph::GraphEngine::compile(
+        json{{"name", "mcp_remote_control"},
+             {"channels", {{"messages", {{"reducer", "append"}}}}},
+             {"nodes", {{"llm", {{"type", "mcp_remote_control_llm"}}},
+                        {"tools", {{"type", "tool_dispatch"}}}}},
+             {"edges", json::array({json{{"from", "__start__"}, {"to", "llm"}},
+                                    json{{"from", "llm"}, {"to", "tools"}},
+                                    json{{"from", "tools"}, {"to", "__end__"}}})}},
+        context);
+    neograph::graph::RunConfig config;
+    config.thread_id = "mcp-remote-control";
+    neograph::graph::RunResult result;
+    ASSERT_NO_THROW(result = engine->run(config));
+    EXPECT_FALSE(result.interrupted);
+    std::map<std::string, std::pair<std::string, std::string>> tool_results;
+    for (const auto& message : result.output["channels"]["messages"]["value"]) {
+        if (message.value("role", "") != "tool") continue;
+        tool_results[message.value("tool_call_id", "")] = {message.value("tool_status", ""),
+                                                           message.value("content", "")};
+    }
+    ASSERT_EQ(tool_results.size(), 2u);
+    for (const auto& [id, code] : std::vector<std::pair<std::string, std::string>>{
+             {"call-blocked", "NG.HookBlocked"}, {"call-paused", "NG.Interrupted"}}) {
+        SCOPED_TRACE(id);
+        const auto& [status, content] = tool_results[id];
+        EXPECT_NE(status, "succeeded");
+        EXPECT_NE(content.find(code), std::string::npos) << content;
+        EXPECT_EQ(content.find("remote audit hook"), std::string::npos)
+            << "never the remote exception text: " << content;
+    }
+    // Called directly, the classified failure is ordinary, carries the code
+    // and is not retried.
+    for (auto& tool : client.get_tools()) {
+        try {
+            (void)neograph::async::run_sync(tool->execute_async(json::object()));
+            ADD_FAILURE() << tool->get_name() << " must fail";
+        } catch (...) {
+            const auto verdict = neograph::graph::classify_failure(std::current_exception());
+            EXPECT_EQ(verdict.failure_class, neograph::graph::NodeFailureClass::Ordinary);
+            EXPECT_EQ(verdict.code, tool->get_name() == "blocked" ? "NG.HookBlocked"
+                                                                    : "NG.Interrupted");
+            EXPECT_FALSE(verdict.retryable);
+        }
+    }
 }
 #endif
 

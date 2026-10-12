@@ -6,6 +6,7 @@
 #include <neograph/async/run_sync.h>
 #include <neograph/async/sse_parser.h>
 #include <neograph/graph/cancel.h>
+#include <neograph/graph/types.h>
 
 #include <asio/co_spawn.hpp>
 #include <asio/error.hpp>
@@ -1904,6 +1905,18 @@ MCPTool::execute_result_async(const json& arguments, ToolExecutionContext contex
         if (error.failure() != MCPFailure::cancelled && error.failure() != MCPFailure::timeout)
             throw;
         bounded = std::current_exception();
+    } catch (const MCPError& error) {
+        // A remote run control signal (reference, "Protocol failure mapping"):
+        // the server's Hook blocked the call (-32010), or its run needs input
+        // (-32011). It belongs to the remote run: an ordinary failure with the
+        // remote code, which neither stops nor pauses this run.
+        if (error.code() != -32010 && error.code() != -32011) throw;
+        constexpr std::string_view prefix = "MCP JSON-RPC error: ";
+        std::string_view message = error.what();
+        if (message.substr(0, prefix.size()) == prefix) message.remove_prefix(prefix.size());
+        throw graph::RemoteControlFailure(error.code() == -32010 ? "NG.HookBlocked"
+                                                                 : "NG.Interrupted",
+                                          std::string(message));
     }
     // A bounded call ends as what bounded it, the same as for any other tool
     // (reference, "Tool failure contract"): cancellation is

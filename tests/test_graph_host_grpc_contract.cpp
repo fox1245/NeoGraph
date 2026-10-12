@@ -486,3 +486,66 @@ TEST(GraphHostGRPCContract, RemoteToolCallsAreBoundedByTheRun) {
     server->Wait();
 }
 } // namespace
+
+// A remote Hook block or interrupt is the remote's run control, not this
+// run's: GrpcRemoteTool reports it as an ordinary failure carrying the remote
+// code (NG.HookBlocked, NG.Interrupted), never retried, and the local run goes
+// on with a failed tool result. Native human-in-the-loop propagation across
+// protocols is a later phase.
+TEST(GraphHostGRPCContract, RemoteRunControlSignalsAreOrdinaryTypedFailures) {
+    std::unordered_map<std::string, neograph::grpc::ToolFn> tools{
+        {"fail", [](const std::string& arguments) -> std::string {
+             raise_failure(json::parse(arguments).value("kind", ""));
+         }},
+    };
+    auto service = neograph::grpc::make_tool_service(std::move(tools));
+    ::grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(service.get());
+    auto server = builder.BuildAndStart();
+    neograph::grpc::GrpcRemoteTool remote("127.0.0.1:" + std::to_string(port), "fail", "fail",
+                                          json::object());
+    auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
+    ToolExecutionPolicy read_only;
+    read_only.effect = ToolEffectClass::ReadOnly;
+    policies->upsert("fail", read_only);
+    auto controller = std::make_shared<ToolExecutionController>(
+        ToolExecutionControllerConfig{policies, std::make_shared<ResourceArbiter>()});
+    const std::vector<std::tuple<std::string, std::string>> cases{
+        {"hook", "NG.HookBlocked"},
+        {"hook-timeout", "NG.HookBlocked"},
+        {"interrupt", "NG.Interrupted"},
+    };
+    for (const auto& [kind, code] : cases) {
+        SCOPED_TRACE(kind);
+        ToolExecutionContext context;
+        context.controller = controller;
+        // The classified failure: ordinary, the remote code, not retried, and
+        // the remote's public message.
+        try {
+            (void)neograph::async::run_sync(
+                remote.execute_async(json{{"kind", kind}}, context));
+            ADD_FAILURE() << "a remote control signal must fail the call";
+        } catch (...) {
+            const auto verdict = classify_failure(std::current_exception());
+            EXPECT_EQ(verdict.failure_class, NodeFailureClass::Ordinary);
+            EXPECT_EQ(verdict.code, code);
+            EXPECT_FALSE(verdict.retryable);
+            EXPECT_FALSE(verdict.public_message.empty());
+            EXPECT_EQ(verdict.public_message.find("audit hook"), std::string::npos)
+                << "the remote public message, never the remote exception text";
+        }
+        // In a tool batch the local run does not stop: the call is a failed
+        // tool result that names the code.
+        std::vector<ChatMessage> messages;
+        EXPECT_NO_THROW(messages = neograph::async::run_sync(dispatch_tool_calls(
+                            {{"c-" + kind, "fail", json{{"kind", kind}}.dump()}}, {&remote}, {},
+                            {}, context)));
+        ASSERT_EQ(messages.size(), 1u);
+        EXPECT_EQ(messages[0].tool_status, "failed") << messages[0].content;
+        EXPECT_NE(messages[0].content.find(code), std::string::npos) << messages[0].content;
+    }
+    server->Shutdown(std::chrono::system_clock::now() + 2s);
+    server->Wait();
+}
