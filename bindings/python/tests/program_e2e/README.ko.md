@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=82429959c9fe92f2469cb9bf853b8ee599faf5f51399e1ab608714e41751ab76 -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=5244fb2b21fedea0ecc885bd7f9d932335e0ebbf3a5965744fd2e020d1d4e4c5 -->
 # Program API 엔드투엔드 시나리오
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -12,7 +12,7 @@
 | `test_01_quickstart.py` | 문서에 있는 예제, Python 노드와 조건이 있는 `define()` 그래프, 프로세스를 넘나드는 identity, 활성화(activation)와 롤백 |
 | `test_02_hitl.py` | `interruptBefore`, `NodeInterrupt`, 기본 pending id와 명시적 pending id, `main()` 안의 인터럽트, 프로세스를 재시작한 뒤의 재개 |
 | `test_03_failures.py` | 노드가 예외를 던지는 경우, fan-out 분기가 실패하는 경우, `main()`이 예외를 던지는 경우, 실패한 `callCore`, provider 없는 `llm_call` |
-| `test_04_budgets.py` | 컴파일 시점과 실행 시점의 JavaScript 타임아웃, 스텝 및 연산 예산, wall-time 취소, 승인(admission)된 예산 |
+| `test_04_budgets.py` | 컴파일 시점과 실행 시점의 JavaScript 타임아웃, 스텝 및 연산 예산, wall-time 취소, 승인(admission)된 예산, 원본 실행의 예산에서 떼어 낸 포크의 몫(#414) |
 | `test_05_diagnostics.py` | 문법 오류와 builder 오류의 소스 위치, registry miss, lint span, 제어 문자, 승인(admission) 오류 |
 | `test_06_graph_shapes.py` | barrier join, 조건부 라우팅, `Send` map-reduce, 서브그래프, 잘못된 그래프 형태 |
 | `test_07_main_programs.py` | `callCore`, `all`, `race`, `quorum`, `await` 타임아웃, `cancelScope`, 외부 취소, `spawn` |

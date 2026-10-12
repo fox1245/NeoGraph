@@ -513,11 +513,21 @@ bool fork_binds_predecessor(const ProgramRunRecord&     target,
            source.journal_head() == lineage.active_journal_head();
 }
 
+// `concurrency_is_a_limit` is a fork's allocation (#414): its max_concurrency
+// is its own limit, up to the source's, and the source keeps its own. A
+// recorded replay hands the whole remainder over, concurrency included.
 bool fork_allocation_fits(const ProgramRunLineage& previous,
                           const ProgramRunLineage& debited,
-                          const RunBudget&         target) noexcept {
+                          const RunBudget&         target,
+                          bool                     concurrency_is_a_limit = false) noexcept {
     const auto fits = [](auto before, auto after, auto allocated) {
         return after <= before && allocated == before - after;
+    };
+    const auto concurrency_fits = [&] {
+        const auto before = previous.remaining_budget().max_concurrency;
+        const auto after  = debited.remaining_budget().max_concurrency;
+        return concurrency_is_a_limit ? after == before && target.max_concurrency <= before
+                                      : fits(before, after, target.max_concurrency);
     };
     return debited.active_generation() == previous.active_generation() &&
            debited.active_generation_id() == previous.active_generation_id() &&
@@ -531,8 +541,7 @@ bool fork_allocation_fits(const ProgramRunLineage& previous,
                 debited.remaining_budget().model_tokens, target.model_tokens) &&
            fits(previous.remaining_budget().monetary_microunits,
                 debited.remaining_budget().monetary_microunits, target.monetary_microunits) &&
-           fits(previous.remaining_budget().max_concurrency,
-                debited.remaining_budget().max_concurrency, target.max_concurrency) &&
+           concurrency_fits() &&
            fits(previous.remaining_budget().max_program_operations,
                 debited.remaining_budget().max_program_operations,
                 target.max_program_operations) &&
@@ -2056,7 +2065,7 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
             !is_valid_program_run_lineage_transition(
                 found->second->head, *publication.fork_source_lineage) ||
             !fork_allocation_fits(found->second->head, *publication.fork_source_lineage,
-                                  publication.journal_record.remaining_budget)) {
+                                  publication.journal_record.remaining_budget, true)) {
             return ProgramTransitionPublishResult::Conflict;
         }
         const auto active =

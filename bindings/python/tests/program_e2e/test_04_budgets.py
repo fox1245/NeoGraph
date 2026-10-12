@@ -6,9 +6,9 @@ import pytest
 
 import neograph_engine as ng
 
-from .support import (JOURNAL, admit, budget, build_registry, ceiling, channel, define_graph,
-                      describe, make_host, run_program, slow, source, trace_channel,
-                      with_main)
+from .support import (APPROVAL_GATE, JOURNAL, admit, budget, build_registry, ceiling, channel,
+                      define_graph, describe, fork_share, make_host, run_program, slow, source,
+                      trace_channel, with_main)
 
 SPIN_DEFINE = "export function define() {\n  let i = 0;\n  while (true) { i++; }\n}\n"
 
@@ -193,3 +193,93 @@ def test_zero_model_token_ceiling_is_accepted_or_names_the_field():
         make_host(budget_ceiling=ceiling(model_tokens=0, monetary_microunits=0))
     except ValueError as error:
         assert "model_tokens" in str(error), str(error)
+
+
+# ---------------------------------------------------------------------------
+# A fork's budget and the paused run it forks (#414)
+#
+# Amounts are split: the fork's share is taken out of the paused run's
+# remainder. max_concurrency is a limit: the fork carries its own and the
+# source keeps its own. A fork that would leave the source without the wall
+# time or the core steps every resume needs is refused at fork(), with
+# P_FORK_SOURCE_BUDGET, and changes nothing.
+# ---------------------------------------------------------------------------
+
+GATE_SHAPES = {
+    "define": APPROVAL_GATE,
+    "main": with_main(APPROVAL_GATE, 'return yield ng.callCore("release", input, "run");'),
+}
+
+
+def paused_gate(shape):
+    host = make_host()
+    run_budget = budget(max_concurrency=4)
+    version = admit(host, GATE_SHAPES[shape], run_budget)
+    paused = host.run(version, {}, run_budget)
+    assert paused.status == ng.ProgramTerminalStatus.Interrupted, describe(paused)
+    return host, version, paused
+
+
+@pytest.mark.parametrize("shape", sorted(GATE_SHAPES))
+def test_a_fork_takes_its_share_and_the_source_keeps_the_rest(shape):
+    host, version, paused = paused_gate(shape)
+    left = paused.remaining_budget
+    share = fork_share(left)
+
+    forked = host.fork(paused.run_id, {"approved": False}, version, share).wait()
+    assert forked.status == ng.ProgramTerminalStatus.Completed, describe(forked)
+
+    resumed = host.resume(paused.run_id, {"approved": True}).wait()
+    assert resumed.status == ng.ProgramTerminalStatus.Completed, describe(resumed)
+    # What the source had left, less the fork's share, is all it could use.
+    assert resumed.usage.core_steps + resumed.remaining_budget.max_core_steps == (
+        left.max_core_steps - share.max_core_steps)
+    assert resumed.usage.program_operations + resumed.remaining_budget.max_program_operations == (
+        left.max_program_operations - share.max_program_operations)
+    assert resumed.remaining_budget.wall_time_ms <= left.wall_time_ms - share.wall_time_ms
+
+
+@pytest.mark.parametrize("shape", sorted(GATE_SHAPES))
+def test_a_fork_does_not_consume_the_sources_concurrency(shape):
+    host, version, paused = paused_gate(shape)
+    left = paused.remaining_budget
+    assert left.max_concurrency == 4
+    share = fork_share(left)
+    assert share.max_concurrency == left.max_concurrency
+
+    forked = host.fork(paused.run_id, {"approved": False}, version, share).wait()
+    assert forked.status == ng.ProgramTerminalStatus.Completed, describe(forked)
+
+    resumed = host.resume(paused.run_id, {"approved": True}).wait()
+    assert resumed.status == ng.ProgramTerminalStatus.Completed, describe(resumed)
+    assert resumed.remaining_budget.max_concurrency == left.max_concurrency
+
+
+@pytest.mark.parametrize("field", ["wall_time_ms", "max_core_steps"])
+@pytest.mark.parametrize("shape", sorted(GATE_SHAPES))
+def test_a_fork_that_would_leave_the_source_without_a_resume_resource_is_refused(shape, field):
+    host, version, paused = paused_gate(shape)
+    left = paused.remaining_budget
+    whole = fork_share(left, **{field: getattr(left, field)})
+
+    with pytest.raises(ng.ProgramDiagnosticError) as raised:
+        host.fork(paused.run_id, {"approved": False}, version, whole)
+    [diagnostic] = raised.value.diagnostics
+    assert diagnostic["code"] == "P_FORK_SOURCE_BUDGET", diagnostic
+    assert field in diagnostic["message"], diagnostic
+
+    # The refusal changed nothing: the source resumes with all it had.
+    resumed = host.resume(paused.run_id, {"approved": True}).wait()
+    assert resumed.status == ng.ProgramTerminalStatus.Completed, describe(resumed)
+    assert resumed.usage.core_steps + resumed.remaining_budget.max_core_steps == left.max_core_steps
+
+
+@pytest.mark.parametrize("shape", sorted(GATE_SHAPES))
+def test_a_fork_larger_than_the_source_remainder_is_still_refused(shape):
+    host, version, paused = paused_gate(shape)
+    left = paused.remaining_budget
+    too_much = fork_share(left, wall_time_ms=left.wall_time_ms + 1)
+
+    with pytest.raises(ng.ProgramDiagnosticError) as raised:
+        host.fork(paused.run_id, {"approved": False}, version, too_much)
+    assert [d["code"] for d in raised.value.diagnostics] == ["P_FORK_BUDGET"]

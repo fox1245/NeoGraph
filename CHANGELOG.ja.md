@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=8cafae30bf3a608fdbe9b5ba02694471353592b757f4b7171d266333d7ba364a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=f04ab220babdb47d54d0fab5f7a5ba3ac3804ce3ed42e81627af1f3f20dd8ee0 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -112,6 +112,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ### 修正
 
+- **Program: フォークは元の量から自分の取り分だけを取り、並行度は取らず、元の実行を再開できなくすることもありません (#414)。** フォークの予算はそっくり、一時停止した実行の残りの予算から差し引かれ、`max_concurrency` も例外ではありませんでした。そのため、実行の `remaining_budget` をまるごと渡したフォークは、元の実行に並行度を残さないか（`P_CONCURRENCY_BUDGET`、`P_TRANSITION_CONFLICT`）、実時間を残しませんでした（`P_RUN_LEASE`。`main()` があると 0 ms で `TimedOut`）。実時間、モデルトークン、金額、Program の操作数、Core のステップ数、動的コンパイル数、子の予算は「量」です。フォークが自分の取り分を取り、残りは元の実行に残ります。`max_concurrency` は「上限」です。フォークは元の上限以下の自分の上限を持ち、元の実行は自分の上限をそのまま保ちます。遷移ストアは、フォークがこの値を変えていないことを確認します。**動作の変更:** フォークが元の実行に残っている実時間または Core のステップ数をすべて取ろうとすると、`fork()` は何も変えずに `P_FORK_SOURCE_BUDGET` を送出します。一時停止した実行の `remaining_budget` をまるごと渡したフォークは、以前は受け付けられていました。今後は取り分だけを渡してください。この規則は Program ガイドと Python バインディングガイドに記載しています。
 - **Program: モデルトークン予算が尽きた実行は、1つの形で終わります (#420)。** 応答が実行を `model_tokens` の上限より先へ進めた場合、実行は `failure` のない `BudgetExhausted` で終わりました。一方、予約が収まらず送信前に拒否された呼び出しは、`NG.BudgetExhausted` を持つ `Failed` で終わったため、呼び出し側は一方では `status` を、もう一方では `failure.code` を読む必要がありました。今は両方とも、`failure.code` が `NG.BudgetExhausted` の `BudgetExhausted` で終わります。このコードは `graph::classify_failure` が予算の枯渇に与えるコードで、MCP、gRPC、A2A、ACP のホストもこのコードで報告します。`failure.witness["model_tokens"]` には `granted`、`used`、`over_by` が入り、`over_by` は最後の応答が超えた量です（拒否された呼び出しでは 0 で、その failure は provider の証拠を保ちます）。`model_tokens` を与えられていないのにモデルを呼んだ実行にも、この記録が付きます。**動作の変更:** 応答が予算を超えさせた実行には `failure` が付くようになり、次の呼び出しが送信前に拒否された実行は `Failed` ではなく `BudgetExhausted` で終わります。
 - **Program: `main()` があっても `remaining_budget.max_node_retries` は上限から実施済みのリトライを引いた値です (#419)。** JavaScript の `main()` を持つ Program は、リトライをまだしていないかのように、開始時の上限をそのまま報告していました（`usage.node_retries` が 1 のとき 5）。コマンドの残りを精算するときに、その試行のリトライを引いていなかったためです。`define()` だけの Program はすでに 4 を報告していました。今は両方とも、上限からその試行のリトライを引いた値を報告し、再開した試行はその残りから始まります。
 - **Program: フォークは、続ける呼び出しの provider 呼び出しを再生します (#405)。** 一時停止した run のフォークは、一時停止した呼び出しをフォークの run で再実行していました。呼び出しを run ごとに記録する SQLite provider ジャーナルは、その呼び出しが質問する前に行った provider 呼び出しを再送し、再課金していました。元の run を再開すれば、この呼び出しは再生されます。フォークのすべての試行がブローカーに元の run（`ProgramCoreProviderCallContext::replay_source`）を渡すようになり、ジャーナルは同じ呼び出しについての元の記録、つまりフォークより前に元の Core スレッドの同じスロットに記録された同じリクエストを引き継ぎます。結果はフォークの dispatch id で再エンコードされ、行は元の試行番号を保つため、その呼び出しは再送も再課金もされません。結果が分からない元の呼び出しは、フォークでも不確かなままです。ジャーナルを持たないプロセス内ブローカーは、ノードの再試行と同じく引き続き再送します。

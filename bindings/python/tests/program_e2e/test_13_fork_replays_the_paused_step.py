@@ -124,7 +124,8 @@ def test_a_fork_never_resends_or_recharges_the_call_its_step_finished(peer, tmp_
     assert paused.usage.model_tokens == 24
     assert paused.usage.monetary_microunits == 1235
 
-    forked = host.fork(paused.run_id, "approved", version, paused.remaining_budget).wait()
+    share = support.fork_share(paused.remaining_budget)
+    forked = host.fork(paused.run_id, "approved", version, share).wait()
 
     assert forked.status == ng.ProgramTerminalStatus.Completed, describe(forked)
     assert forked.run_id != paused.run_id

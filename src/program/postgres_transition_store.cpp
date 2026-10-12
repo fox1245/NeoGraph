@@ -847,6 +847,8 @@ bool fork_binds_predecessor(const ProgramRunRecord& target,
            source.journal_head() == lineage.active_journal_head();
 }
 
+// A fork's allocation: its max_concurrency is its own limit, up to the
+// source's, and the source keeps its own (#414). The other fields are amounts.
 bool fork_allocation_fits(const ProgramRunLineage& previous,
                           const ProgramRunLineage& debited,
                           const RunBudget& target) noexcept {
@@ -865,8 +867,9 @@ bool fork_allocation_fits(const ProgramRunLineage& previous,
                 debited.remaining_budget().model_tokens, target.model_tokens) &&
            fits(previous.remaining_budget().monetary_microunits,
                 debited.remaining_budget().monetary_microunits, target.monetary_microunits) &&
-           fits(previous.remaining_budget().max_concurrency,
-                debited.remaining_budget().max_concurrency, target.max_concurrency) &&
+           debited.remaining_budget().max_concurrency ==
+               previous.remaining_budget().max_concurrency &&
+           target.max_concurrency <= previous.remaining_budget().max_concurrency &&
            fits(previous.remaining_budget().max_program_operations,
                 debited.remaining_budget().max_program_operations, target.max_program_operations) &&
            fits(previous.remaining_budget().max_core_steps,

@@ -432,14 +432,18 @@ void attach_replacement_successor(
     publication.run_generation = std::move(generation);
 }
 
+// A fork takes its share of the source's amounts. max_concurrency is a limit:
+// the fork carries its own and the source keeps its own (#414), unless the
+// test asks for the debit that used to be made.
 void attach_fork_split(ProgramTransitionPublication& publication,
-                       const ProgramRunLineage&      source) {
+                       const ProgramRunLineage&      source,
+                       bool                          debit_concurrency = false) {
     attach_initial_lineage(publication);
-    const auto debit = [](RunBudget remaining, const RunBudget& allocated) {
+    const auto debit = [debit_concurrency](RunBudget remaining, const RunBudget& allocated) {
         remaining.wall_time_ms -= allocated.wall_time_ms;
         remaining.model_tokens -= allocated.model_tokens;
         remaining.monetary_microunits -= allocated.monetary_microunits;
-        remaining.max_concurrency -= allocated.max_concurrency;
+        if (debit_concurrency) remaining.max_concurrency -= allocated.max_concurrency;
         remaining.max_program_operations -= allocated.max_program_operations;
         remaining.max_core_steps -= allocated.max_core_steps;
         remaining.max_dynamic_compiles -= allocated.max_dynamic_compiles;
@@ -1886,6 +1890,62 @@ TEST(ProgramTransitionStoreTest, FreshForkPublicationRejectsLegacyReceiptDowngra
               ProgramTransitionPublishResult::Conflict);
     EXPECT_FALSE(store.load("owner-a", "run-2"));
 }
+
+// #414: a fork's max_concurrency is its own limit. A store accepts a fork that
+// leaves the source's concurrency as it was, and refuses the debit that took it.
+template <typename Store>
+void exercise_fork_leaves_concurrency_alone(Store& store) {
+    auto source_start = start_publication();
+    attach_initial_lineage(source_start);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, source_start),
+              ProgramTransitionPublishResult::Published);
+    auto source = interrupted_effect_publication(source_start);
+    attach_same_generation_lineage(source, *source_start.run_lineage);
+    ASSERT_EQ(store.compare_publish("owner-a", source_start.journal_record.id, source),
+              ProgramTransitionPublishResult::Published);
+    ASSERT_GT(source.run_lineage->remaining_budget().max_concurrency, 0U);
+
+    auto debited = start_publication_for("run-2", digest('1'), digest('2'), budget(), 30);
+    attach_fork_receipt(debited);
+    debited.migration_plan = MigrationPlan::create(MigrationPlanData{
+        digest('1'), digest('1'), "owner-a", MigrationCompatibility::ForkCompatible, {}, {}, {}});
+    attach_fork_split(debited, *source.run_lineage, /*debit_concurrency=*/true);
+    EXPECT_EQ(store.compare_publish("owner-a", {}, debited),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(store.load("owner-a", "run-2"));
+
+    auto limit = start_publication_for("run-3", digest('1'), digest('2'), budget(), 30);
+    attach_fork_receipt(limit);
+    limit.migration_plan = MigrationPlan::create(MigrationPlanData{
+        digest('1'), digest('1'), "owner-a", MigrationCompatibility::ForkCompatible, {}, {}, {}});
+    attach_fork_split(limit, *source.run_lineage);
+    ASSERT_EQ(limit.fork_source_lineage->remaining_budget().max_concurrency,
+              source.run_lineage->remaining_budget().max_concurrency);
+    EXPECT_EQ(store.compare_publish("owner-a", {}, limit),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_EQ(store.load_run_lineage("owner-a", "run-1")->remaining_budget().max_concurrency,
+              source.run_lineage->remaining_budget().max_concurrency);
+}
+
+TEST(ProgramTransitionStoreTest, ForkPublicationLeavesTheSourcesConcurrencyAlone) {
+    InMemoryProgramTransitionStore store;
+    exercise_fork_leaves_concurrency_alone(store);
+}
+
+TEST(ProgramTransitionStoreTest, SQLiteForkPublicationLeavesTheSourcesConcurrencyAlone) {
+    SQLiteProgramTransitionStore store(":memory:");
+    exercise_fork_leaves_concurrency_alone(store);
+}
+
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+TEST(ProgramTransitionStoreTest, PostgreSQLForkPublicationLeavesTheSourcesConcurrencyAlone) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    reset_postgres_transition_schema(url);
+    PostgreSQLProgramTransitionStore store(url);
+    exercise_fork_leaves_concurrency_alone(store);
+}
+#endif
 
 TEST(ProgramTransitionStoreTest, ForkPublicationRequiresAtomicSourceDebit) {
     InMemoryProgramTransitionStore store;

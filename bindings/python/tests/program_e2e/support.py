@@ -123,6 +123,26 @@ def budget_dict(value: "ng.ProgramRunBudget") -> dict:
     return {key: getattr(value, key) for key in BUDGET_FIELDS}
 
 
+def fork_share(remaining: "ng.ProgramRunBudget", **overrides) -> "ng.ProgramRunBudget":
+    """A fork's budget out of a paused run's remaining_budget (#414).
+
+    Amounts (wall time, tokens, money, operations, core steps, dynamic compiles)
+    are split: the fork takes half and the source keeps the rest. max_concurrency
+    is a limit, not an amount: the fork carries the source's own, and the source
+    keeps it. The fork takes no child budget.
+    """
+    values = {}
+    for field in BUDGET_FIELDS:
+        have = getattr(remaining, field)
+        if field == "max_concurrency":
+            values[field] = have
+        elif field in ("max_child_depth", "max_total_children"):
+            values[field] = 0
+        else:
+            values[field] = have // 2 if have > 1 else have
+    return _make_budget({**values, **overrides})
+
+
 # --------------------------------------------------------------------------
 # Observable side effects of Python nodes
 # --------------------------------------------------------------------------

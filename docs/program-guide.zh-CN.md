@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=508b1fb2ee262e224e6c3e820847b62384042e2f7857f5855b64f021ce7f7fe7 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=d3ad21d0934c02a44597ebb1b2697a6d28725a9c1b396386c5beae702f724db3 -->
 # Program 指南：协调图的 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -211,7 +211,7 @@ review release.checks_failed
 
 ```python
 # Fork the paused run to see what "hold" would do. The original stays paused.
-# The fork's budget is taken out of the paused run's remaining budget.
+# The fork takes a share of the paused run's remaining budget.
 
 fork_budget = budget(wall_time_ms=2_000, max_concurrency=3, max_program_operations=8,
                      max_core_steps=20)
@@ -225,7 +225,7 @@ ProgramTerminalStatus.Failed release.held
 
 `fork` 从暂停运行的检查点开始一次新的运行，并用 `"hold"` 回答那个问题。分叉以失败退出的错误码 `Failed` 结束。原来的运行仍处于暂停状态。已经完成的工作会被重放，不会重新运行。
 
-分叉的预算从原运行的剩余预算中逐字段扣除，`max_concurrency` 也不例外。汇合需要 3，运行有 6，所以给原运行留下 3。如果分叉拿走了某项资源的全部，原运行就无法继续；这种情况下我们见到过 `P_CONCURRENCY_BUDGET` 和 `P_TRANSITION_CONFLICT`。
+分叉的预算是原运行剩余预算中切出的一份。`wall_time_ms`、`model_tokens`、`monetary_microunits`、`max_program_operations`、`max_core_steps` 和 `max_dynamic_compiles` 是量：分叉从原运行剩下的量里取走自己的份额，其余仍归原运行。这个例子中，原运行保留剩余的 `wall_time_ms` 减去 2,000，以及剩余的 `max_core_steps` 减去 20。`max_concurrency` 是上限，不是量：分叉有自己的上限，不超过原运行的，原运行保留自己的，所以分叉的 3 不会占用原运行的并发。如果分叉会让原运行的 `wall_time_ms` 或 `max_core_steps` 变成 0，`fork` 调用会以 `P_FORK_SOURCE_BUDGET` 拒绝它；比原运行剩余量更大的分叉则以 `P_FORK_BUDGET` 拒绝。两种情况都不会改变原运行。
 
 ### 7. 用回答恢复运行
 

@@ -219,6 +219,17 @@ RunBudget debit_budget(RunBudget available, const RunBudget& debit) noexcept {
     return available;
 }
 
+// #414: what a fork takes out of its source's remainder. Wall time, tokens,
+// money, operations, Core steps, dynamic compiles and child budgets are
+// amounts: the fork's share leaves the source. max_concurrency is a limit,
+// not an amount: the fork carries its own and the source keeps its own.
+RunBudget debit_fork_share(RunBudget available, const RunBudget& share) noexcept {
+    const auto concurrency    = available.max_concurrency;
+    available                 = debit_budget(std::move(available), share);
+    available.max_concurrency = concurrency;
+    return available;
+}
+
 ProgramTransitionPublication attach_run_lineage(ProgramTransitionStore&       transitions,
                                                 ProgramTransitionPublication publication) {
     if (publication.run_lineage) return publication;
@@ -6369,6 +6380,23 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
                                           {"granted", granted}});
         }
     }
+    // #414: every resume of the source needs wall time and Core steps. A fork
+    // that takes all it has left would leave the source unable to run again,
+    // so it is refused here, before anything is cloned or debited.
+    const auto leaves_the_source_nothing = [](const char* resource, std::uint64_t left,
+                                              std::uint64_t taken) {
+        if (taken != left) return;
+        throw_runtime_diagnostic(
+            "P_FORK_SOURCE_BUDGET",
+            std::string("Program fork would leave its source run without ") + resource +
+                ", so the source could not resume; give the fork a share of the source remainder",
+            json{{"resource", resource},
+                 {"source_remaining", left},
+                 {"fork_budget", taken},
+                 {"fork_budget_at_most", left - 1}});
+    };
+    leaves_the_source_nothing("wall_time_ms", remaining.wall_time_ms, requested.wall_time_ms);
+    leaves_the_source_nothing("max_core_steps", remaining.max_core_steps, requested.max_core_steps);
     auto       fork_pending_input  = source_record->pending_input();
     auto       fork_pending_effect = source_record->pending_effect();
     std::optional<std::string> fork_initial_pending_id;
@@ -6524,7 +6552,7 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
         source_lineage->lineage.active_generation_id(),
         source_lineage->lineage.active_run_record_id(),
         source_lineage->lineage.active_journal_head(),
-        debit_budget(source_lineage->lineage.remaining_budget(), requested),
+        debit_fork_share(source_lineage->lineage.remaining_budget(), requested),
         source_lineage->lineage.inflight_reservation(), source_lineage->lineage.id(),
         source_lineage->lineage.created_at_ms(),
         std::max(source_lineage->lineage.updated_at_ms(), publication.run_record.updated_at_ms()),

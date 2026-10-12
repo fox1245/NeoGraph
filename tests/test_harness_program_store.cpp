@@ -974,6 +974,7 @@ TEST(HarnessProgramStoreTest, SqliteForkAtomicallyDebitsSourceAndCreatesTargetLi
     std::string source_lineage_id;
     std::string debited_source_head_id;
     std::string target_lineage_id;
+    RunBudget   expected_source_budget;
 
     {
         auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
@@ -986,6 +987,12 @@ TEST(HarnessProgramStoreTest, SqliteForkAtomicallyDebitsSourceAndCreatesTargetLi
         ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(),
                                                source_start.journal_record.id, source),
                   ProgramTransitionPublishResult::Published);
+
+        // The fork takes the whole of every amount the source had; its
+        // max_concurrency is a limit the source keeps (#414).
+        RunBudget debited_source;
+        debited_source.max_concurrency = source.run_lineage->remaining_budget().max_concurrency;
+        expected_source_budget         = debited_source;
 
         auto dropped = initial_publication(fixture, "fork-dropped-pending");
         attach_fork_receipt(dropped, source.run_record, false);
@@ -1002,7 +1009,7 @@ TEST(HarnessProgramStoreTest, SqliteForkAtomicallyDebitsSourceAndCreatesTargetLi
             source.run_lineage->owner_scope(), source.run_lineage->lineage_id(),
             source.run_lineage->root_run_id(), source.run_lineage->active_generation(),
             source.run_lineage->active_generation_id(), source.run_lineage->active_run_record_id(),
-            source.run_lineage->active_journal_head(), RunBudget{},
+            source.run_lineage->active_journal_head(), debited_source,
             source.run_lineage->inflight_reservation(), source.run_lineage->id(),
             source.run_lineage->created_at_ms(), dropped.run_record.updated_at_ms(),
             source.run_lineage->committed_descendant_budget()});
@@ -1022,7 +1029,7 @@ TEST(HarnessProgramStoreTest, SqliteForkAtomicallyDebitsSourceAndCreatesTargetLi
             source.run_lineage->root_run_id(), source.run_lineage->active_generation(),
             source.run_lineage->active_generation_id(),
             source.run_lineage->active_run_record_id(), source.run_lineage->active_journal_head(),
-            RunBudget{}, source.run_lineage->inflight_reservation(), source.run_lineage->id(),
+            debited_source, source.run_lineage->inflight_reservation(), source.run_lineage->id(),
             source.run_lineage->created_at_ms(), target.run_record.updated_at_ms(),
             source.run_lineage->committed_descendant_budget()});
 
@@ -1056,7 +1063,7 @@ TEST(HarnessProgramStoreTest, SqliteForkAtomicallyDebitsSourceAndCreatesTargetLi
     ASSERT_TRUE(target);
     EXPECT_EQ(source->lineage_id(), source_lineage_id);
     EXPECT_EQ(source->id(), debited_source_head_id);
-    EXPECT_EQ(source->remaining_budget(), RunBudget{});
+    EXPECT_EQ(source->remaining_budget(), expected_source_budget);
     EXPECT_EQ(target->lineage_id(), target_lineage_id);
     EXPECT_NE(source->lineage_id(), target->lineage_id());
     EXPECT_EQ(source->active_generation(), 1U);

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=82429959c9fe92f2469cb9bf853b8ee599faf5f51399e1ab608714e41751ab76 -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=5244fb2b21fedea0ecc885bd7f9d932335e0ebbf3a5965744fd2e020d1d4e4c5 -->
 # Program API 端到端场景
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -12,7 +12,7 @@
 | `test_01_quickstart.py` | 文档中的示例，一张带有 Python 节点和一个条件的 `define()` 图，跨进程的标识，激活与回滚 |
 | `test_02_hitl.py` | `interruptBefore`、`NodeInterrupt`，默认的和显式指定的 pending id，`main()` 内部的中断，进程重启后的恢复 |
 | `test_03_failures.py` | 节点抛出异常，fan-out 分支失败，`main()` 抛出异常，`callCore` 失败，没有 provider 的 `llm_call` |
-| `test_04_budgets.py` | 编译期和运行期的 JavaScript 超时，步数和操作数预算，挂钟时间的取消，已准入的预算 |
+| `test_04_budgets.py` | 编译期和运行期的 JavaScript 超时，步数和操作数预算，挂钟时间的取消，已准入的预算，分叉从源运行的预算中分得的一份（#414） |
 | `test_05_diagnostics.py` | 语法错误和构建器错误的源码位置，注册表缺失，lint 的 span，控制字符，准入错误 |
 | `test_06_graph_shapes.py` | 屏障 join，条件路由，`Send` 的 map-reduce，子图，无效的图形态 |
 | `test_07_main_programs.py` | `callCore`、`all`、`race`、`quorum`，`await` 超时，`cancelScope`，外部取消，`spawn` |

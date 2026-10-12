@@ -210,7 +210,7 @@ review release.checks_failed
 
 ```python
 # Fork the paused run to see what "hold" would do. The original stays paused.
-# The fork's budget is taken out of the paused run's remaining budget.
+# The fork takes a share of the paused run's remaining budget.
 
 fork_budget = budget(wall_time_ms=2_000, max_concurrency=3, max_program_operations=8,
                      max_core_steps=20)
@@ -224,7 +224,7 @@ ProgramTerminalStatus.Failed release.held
 
 `fork` starts a new run from the paused run's checkpoint and answers the question with `"hold"`. The fork ends `Failed` with the code of the failure exit. The original run is still paused. Finished work is replayed, not run again.
 
-The fork's budget is taken out of the original run's remaining budget, field by field, including `max_concurrency`. The join needs three, the run has six, so three are left for the original. When a fork takes all of a resource, the original cannot continue; we saw `P_CONCURRENCY_BUDGET` and `P_TRANSITION_CONFLICT` in that case.
+The fork's budget is a share of the original run's remaining budget. `wall_time_ms`, `model_tokens`, `monetary_microunits`, `max_program_operations`, `max_core_steps` and `max_dynamic_compiles` are amounts: the fork takes its share out of what the original has left, and the original keeps the rest. Here the original keeps its remaining `wall_time_ms` less 2,000 and its remaining `max_core_steps` less 20. `max_concurrency` is a limit, not an amount: the fork gets a limit of its own, at most the original's, and the original keeps its own, so the fork's 3 cost the original nothing. A fork that would leave the original with no `wall_time_ms` or no `max_core_steps` is refused at the `fork` call with `P_FORK_SOURCE_BUDGET`, and a fork larger than what the original has left with `P_FORK_BUDGET`. Neither changes the original run.
 
 ### 7. Resume with the answer
 

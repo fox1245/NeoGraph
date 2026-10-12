@@ -7,6 +7,7 @@
 // provider journal for durable ones. The provider is a local double speaking
 // through a real SDK client, so origin, model, output cap and input limits come
 // from an admitted descriptor exactly as they do for a hosted model.
+#include "fixtures/fork_share.h"
 #include "fixtures/unique_temp_dir.h"
 
 #include <neograph/graph/node.h>
@@ -1707,7 +1708,7 @@ TEST(ProgramProviderBindingJournal, AForkOfAPausedFanOutNeverResendsOrRechargesT
         EXPECT_EQ(paused.usage().monetary_microunits, 1235U);
 
         auto invocation   = h.invocation("fork-target");
-        invocation.budget = paused.remaining_budget();
+        invocation.budget = neograph::test::fork_share(paused.remaining_budget());
         const auto forked =
             h.runtime()
                 .fork(kOwner,
@@ -1768,7 +1769,13 @@ TEST(ProgramProviderBindingJournal, AForkReplaysAPlanBranchsProviderFailureUnder
         EXPECT_EQ(peer->transport.load(), 2);
 
         auto invocation   = h.invocation("fork-failure-target");
-        invocation.budget = paused.remaining_budget();
+        invocation.budget = neograph::test::fork_share(paused.remaining_budget());
+        // The fork runs the whole plan again, replaying what the source finished: each
+        // operation costs one Program operation, and a branch that calls the model again
+        // reserves tokens and money. This test is about custody, so it keeps them whole.
+        invocation.budget.max_program_operations = paused.remaining_budget().max_program_operations;
+        invocation.budget.model_tokens           = paused.remaining_budget().model_tokens;
+        invocation.budget.monetary_microunits    = paused.remaining_budget().monetary_microunits;
         const auto forked =
             h.runtime()
                 .fork(kOwner,

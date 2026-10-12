@@ -94,6 +94,8 @@ bool effect_ids_are_unique(
     return true;
 }
 
+// A fork's allocation: its max_concurrency is its own limit, up to the
+// source's, and the source keeps its own (#414). The other fields are amounts.
 bool fork_allocation_fits(const program::ProgramRunLineage& previous,
                           const program::ProgramRunLineage& debited,
                           const program::RunBudget&         target) noexcept {
@@ -112,8 +114,9 @@ bool fork_allocation_fits(const program::ProgramRunLineage& previous,
                 debited.remaining_budget().model_tokens, target.model_tokens) &&
            fits(previous.remaining_budget().monetary_microunits,
                 debited.remaining_budget().monetary_microunits, target.monetary_microunits) &&
-           fits(previous.remaining_budget().max_concurrency,
-                debited.remaining_budget().max_concurrency, target.max_concurrency) &&
+           debited.remaining_budget().max_concurrency ==
+               previous.remaining_budget().max_concurrency &&
+           target.max_concurrency <= previous.remaining_budget().max_concurrency &&
            fits(previous.remaining_budget().max_program_operations,
                 debited.remaining_budget().max_program_operations,
                 target.max_program_operations) &&

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=619cc967ee0702270da38d4f92f783baacddd5dee11306e5545600ae7c24fb51 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=e6f1c22542e9ee7aa71cdd0f174b90ea75b2ce24998ab18d034df6cba761d8a9 -->
 # 故障排查
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -112,6 +112,7 @@ worker_count 默认是 `1`，因此不会创建引擎自己的线程池。I/O �
 | `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | 运行预算与传给 `compile_admit` 的预算不一致 | 传入相同的预算，或者重新编译并准入 |
 | `ng.spawn` 抛出 `P_CHILD_BINDING` | `LocalProgramHost` 没有子绑定解析器 | 在 C++ 宿主里运行子 Program |
 | `resume()` 抛出 `P_RUN_NOT_FOUND`：`run '<id>' was not found in this LocalProgramHost` | 这个运行属于另一个 `LocalProgramHost`，或者所属的宿主已销毁 | 通过启动该运行的宿主来恢复 |
+| `fork()` 抛出 `P_FORK_SOURCE_BUDGET` | 分叉的预算拿走了已暂停运行剩下的全部 `wall_time_ms` 或全部 `max_core_steps`，该运行将无法恢复 | 只给分叉 `paused.remaining_budget` 的一部分，例如一半；`max_concurrency` 可以原样给 |
 | `P_CORE_BARRIER_STALLED` | 屏障的某个成员走了不通向 join 的路由，join 再也无法触发 | 让每个成员都路由到 join 或 `__end__`；`P_CORE_E15` 会在编译时对这类路由发出警告 |
 | `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | 运行用完了 `wall_time_ms`；被打断的操作的文本在 `failure.witness["cause_message"]` 里 | 用更大的 `wall_time_ms` 重新编译并准入 |
 

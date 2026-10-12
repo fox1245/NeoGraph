@@ -94,7 +94,8 @@ def test_a_fork_replays_a_recorded_provider_failure(peer, tmp_path, durable):
     assert paused.interrupt.core_node == "gate"
     assert peer.request_count() == 2
 
-    forked = host.fork(paused.run_id, "approved", version, paused.remaining_budget).wait()
+    share = support.fork_share(paused.remaining_budget)
+    forked = host.fork(paused.run_id, "approved", version, share).wait()
     assert forked.status == ng.ProgramTerminalStatus.Failed, describe(forked)
     assert "custody" not in forked.failure.message, \
         "the fork could not replay the recorded failure: " + describe(forked)

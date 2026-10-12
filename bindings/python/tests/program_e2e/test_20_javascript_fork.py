@@ -91,7 +91,8 @@ def test_a_fork_continues_the_paused_call_core(peer, tmp_path, durable):
     assert peer.request_count() == 2
     assert JOURNAL.names("asked") == ["gate"]
 
-    forked = host.fork(paused.run_id, "approved", version, paused.remaining_budget).wait()
+    share = support.fork_share(paused.remaining_budget)
+    forked = host.fork(paused.run_id, "approved", version, share).wait()
     assert forked.status == ng.ProgramTerminalStatus.Completed, \
         "the fork started main() over: " + describe(forked)
     assert forked.run_id != paused.run_id

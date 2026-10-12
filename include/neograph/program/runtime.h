@@ -270,6 +270,15 @@ public:
     /**
      * Fork an exact checkpoint into the ProgramVersion selected by the
      * canonical top-level invocation. The optional sink is runtime-only.
+     *
+     * The invocation's budget is the fork's share of the source's remaining
+     * budget. Wall time, tokens, money, operations, Core steps, dynamic
+     * compiles and child budgets are amounts: the share is taken out of what
+     * the source has left. max_concurrency is a limit: the fork carries its
+     * own, at most the source's, and the source keeps its own. A share larger
+     * than the remainder is refused with P_FORK_BUDGET, and one that would
+     * leave the source without wall_time_ms or max_core_steps, which every
+     * resume needs, with P_FORK_SOURCE_BUDGET. Neither changes the source.
      */
     ProgramHandle fork(ExactProgramCheckpointReference source,
                        RunInvocation                 invocation,

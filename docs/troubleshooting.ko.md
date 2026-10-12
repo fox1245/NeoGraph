@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=619cc967ee0702270da38d4f92f783baacddd5dee11306e5545600ae7c24fb51 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=e6f1c22542e9ee7aa71cdd0f174b90ea75b2ce24998ab18d034df6cba761d8a9 -->
 # 문제 해결
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -112,6 +112,7 @@ worker_count의 기본값은 `1`이므로 엔진이 소유하는 풀이 만들�
 | `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | 실행 예산이 `compile_admit`에 넘긴 예산과 다르다 | 같은 예산을 넘기거나, 다시 컴파일하고 승인(admission)한다 |
 | `ng.spawn`에서 발생하는 `P_CHILD_BINDING` | `LocalProgramHost`에 자식 바인딩 resolver가 없다 | 자식 Program은 C++ 호스트에서 실행한다 |
 | `resume()`에서 발생하는 `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost` | 그 실행이 다른 `LocalProgramHost`나 이미 소멸한 호스트의 것이다 | 그 실행을 시작한 호스트로 재개한다 |
+| `fork()`에서 발생하는 `P_FORK_SOURCE_BUDGET` | 포크의 예산이 일시 정지한 실행에 남은 `wall_time_ms`나 `max_core_steps`를 전부 가져가서, 그 실행이 재개할 수 없게 된다 | 포크에는 `paused.remaining_budget`의 일부(예: 절반)를 준다. `max_concurrency`는 그대로 줘도 된다 |
 | `P_CORE_BARRIER_STALLED` | barrier 멤버가 join으로 이어지지 않는 경로를 택해서 join이 더는 발동할 수 없다 | 모든 멤버를 join이나 `__end__`로 라우팅한다. `P_CORE_E15`가 컴파일 시점에 이런 경로를 경고한다 |
 | `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | 실행이 `wall_time_ms`를 모두 썼다. 중단된 연산의 텍스트는 `failure.witness["cause_message"]`에 있다 | 더 큰 `wall_time_ms`로 다시 컴파일하고 승인(admission)한다 |
 

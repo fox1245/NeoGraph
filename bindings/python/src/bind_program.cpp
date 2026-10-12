@@ -1063,9 +1063,14 @@ void init_program(py::module_& m) {
              py::arg("pending_id") = py::none(), py::arg("fork_run_id") = py::none(),
              py::arg("trace_id") = "python-program-fork",
              "Fork an interrupted run into a new run of `version` that answers its pending "
-             "call with `value`, and return the new run's handle. budget is the fork's own "
-             "budget and must lie within the source run's remaining_budget. checkpoint_id defaults to "
-             "the run's exact checkpoint and pending_id to its single awaiting call. The fork "
+             "call with `value`, and return the new run's handle. budget is the fork's share of "
+             "the source run's remaining_budget: wall time, tokens, money, operations, core steps "
+             "and dynamic compiles are taken out of what the source has left, and max_concurrency "
+             "is the fork's own limit, up to the source's, which the source keeps. A fork larger "
+             "than the remainder raises P_FORK_BUDGET, and one that would leave the source "
+             "without wall_time_ms or max_core_steps raises P_FORK_SOURCE_BUDGET. checkpoint_id "
+             "defaults to the run's exact checkpoint and pending_id to its single awaiting call. "
+             "The fork "
              "replays what the paused run finished, as resume does: a finished node or Send "
              "is neither run nor charged again (#390).");
 }

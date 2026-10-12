@@ -17,6 +17,7 @@
 #include <neograph/program/sqlite_transition_store.h>
 
 #include "fixtures/coarse_clock_store.h"
+#include "fixtures/fork_share.h"
 #include "fixtures/typed_provider.h"
 #include "monetary.h"
 #include "pricing.h"
@@ -708,7 +709,12 @@ public:
     }
     ProgramResult fork(const ProgramVersion& version, const ProgramResult& paused, const std::string& target,
                        json value, std::string pending_id) {
-        ProgramInvocation invocation{json::object(), paused.remaining_budget(), "trace-fork", {}};
+        // The scenarios compare what the fork is charged with what the source was, so
+        // the fork keeps all the model budget; it takes a share of the rest (#414).
+        auto share                 = neograph::test::fork_share(paused.remaining_budget());
+        share.model_tokens         = paused.remaining_budget().model_tokens;
+        share.monetary_microunits  = paused.remaining_budget().monetary_microunits;
+        ProgramInvocation invocation{json::object(), share, "trace-fork", {}};
         invocation.requested_run_id = target;
         return runtime_
             ->fork(kOwner, ExactProgramCheckpointReference{paused.run_id(), paused.checkpoint()->checkpoint_id}, version,

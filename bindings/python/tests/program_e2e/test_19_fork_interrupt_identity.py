@@ -89,7 +89,8 @@ def test_a_fork_answers_the_core_interrupt_its_pending_call_names(peer, tmp_path
     assert paused.interrupt.pending_input.core_interrupt_id == "s1:left"
     assert peer.request_count() == 1
 
-    forked = host.fork(paused.run_id, "L", version, paused.remaining_budget).wait()
+    share = support.fork_share(paused.remaining_budget)
+    forked = host.fork(paused.run_id, "L", version, share).wait()
     assert forked.status == ng.ProgramTerminalStatus.Interrupted, describe(forked)
     assert forked.run_id != paused.run_id
     assert forked.interrupt.core_node == "right", "left got the fork's answer; right asks again"

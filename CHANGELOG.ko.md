@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=8cafae30bf3a608fdbe9b5ba02694471353592b757f4b7171d266333d7ba364a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=f04ab220babdb47d54d0fab5f7a5ba3ac3804ce3ed42e81627af1f3f20dd8ee0 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -112,6 +112,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 수정됨
 
+- **Program: 포크는 원본의 양에서 자기 몫만 가져가고 동시성은 가져가지 않으며, 원본을 재개할 수 없게 만들지 않습니다 (#414).** 포크의 예산 전체가 일시 정지한 실행의 남은 예산에서 `max_concurrency`까지 포함해 차감되었습니다. 그래서 실행의 `remaining_budget` 전체를 받은 포크는 원본에 동시성을 남기지 않거나(`P_CONCURRENCY_BUDGET`, `P_TRANSITION_CONFLICT`) wall time을 남기지 않았습니다(`P_RUN_LEASE`, `main()`이 있으면 0 ms에서 `TimedOut`). wall time, 모델 토큰, 금액, Program 연산, Core 스텝, 동적 컴파일, 자식 예산은 양입니다. 포크가 자기 몫을 가져가고 나머지는 원본에 남습니다. `max_concurrency`는 한도입니다. 포크는 원본 한도 이하의 자기 한도를 갖고, 원본은 자기 한도를 그대로 유지합니다. 전이 저장소는 포크가 이 값을 바꾸지 않았는지 확인합니다. **동작 변경:** 포크가 원본에 남은 wall time이나 Core 스텝을 전부 가져가려 하면 `fork()`는 아무것도 바꾸지 않고 `P_FORK_SOURCE_BUDGET`을 발생시킵니다. 일시 정지한 실행의 `remaining_budget` 전체를 받은 포크는 전에는 받아들여졌으니, 이제는 몫만 주십시오. 이 규칙은 Program 가이드와 Python 바인딩 가이드에 있습니다.
 - **Program: 모델 토큰 예산이 소진되면 실행은 하나의 모양으로 끝납니다 (#420).** 응답 하나가 실행을 `model_tokens` 너머로 끌고 가면 실행은 `failure`가 없는 `BudgetExhausted`로 끝났습니다. 반면 예약이 들어가지 않아 전송 전에 거부된 호출은 `NG.BudgetExhausted`가 담긴 `Failed`로 끝났기 때문에, 호출자는 한쪽에서는 `status`를, 다른 쪽에서는 `failure.code`를 읽어야 했습니다. 이제 둘 다 `failure.code`가 `NG.BudgetExhausted`인 `BudgetExhausted`로 끝납니다. 이 코드는 `graph::classify_failure`가 예산 소진에 주는 코드이고, MCP·gRPC·A2A·ACP 호스트도 이 코드로 보고합니다. `failure.witness["model_tokens"]`에는 `granted`, `used`, `over_by`가 들어 있으며 `over_by`는 마지막 응답이 넘긴 양입니다(거부된 호출은 0이고, 그 failure는 provider 증거를 그대로 유지합니다). `model_tokens`를 받지 못했는데 모델을 호출한 실행에도 이 기록이 붙습니다. **동작 변경:** 응답이 예산을 넘긴 실행에는 이제 `failure`가 있고, 다음 호출이 전송 전에 거부된 실행은 `Failed`가 아니라 `BudgetExhausted`로 끝납니다.
 - **Program: `main()`이 있어도 `remaining_budget.max_node_retries`는 상한에서 이미 쓴 재시도를 뺀 값입니다 (#419).** JavaScript `main()`이 있는 Program은 재시도를 하나도 하지 않은 것처럼 시작할 때의 상한을 그대로 보고했습니다(`usage.node_retries`가 1인데 5). 명령의 남은 예산을 정산할 때 그 시도의 재시도를 빼지 않았기 때문입니다. `define()`만 있는 Program은 이미 4를 보고했습니다. 이제 둘 다 상한에서 그 시도의 재시도를 뺀 값을 보고하고, 재개한 시도는 그 남은 값에서 시작합니다.
 - **ACP가 Windows 작업 경로를 받아들입니다.** `session/new`와 `session/resume`은 `/`로 시작하지 않는 `cwd`와 `additionalDirectories` 항목을 모두 거부했기 때문에 Windows의 ACP 클라이언트는 세션을 열 수 없었습니다. 이제 POSIX 경로와 마찬가지로 드라이브 경로(`C:\work`, `C:/work`)와 UNC 공유(`\\host\share`)도 절대 경로로 인정합니다. 상대 경로와 드라이브 상대 경로(`C:work`)는 계속 `-32602`입니다.

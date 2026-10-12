@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=508b1fb2ee262e224e6c3e820847b62384042e2f7857f5855b64f021ce7f7fe7 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=d3ad21d0934c02a44597ebb1b2697a6d28725a9c1b396386c5beae702f724db3 -->
 # Program 가이드: 그래프를 조율하는 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -211,7 +211,7 @@ review release.checks_failed
 
 ```python
 # Fork the paused run to see what "hold" would do. The original stays paused.
-# The fork's budget is taken out of the paused run's remaining budget.
+# The fork takes a share of the paused run's remaining budget.
 
 fork_budget = budget(wall_time_ms=2_000, max_concurrency=3, max_program_operations=8,
                      max_core_steps=20)
@@ -225,7 +225,7 @@ ProgramTerminalStatus.Failed release.held
 
 `fork`는 멈춘 실행의 체크포인트에서 새 실행을 시작하고 질문에 `"hold"`로 답합니다. 포크는 실패 종료의 코드와 함께 `Failed`로 끝납니다. 원래 실행은 여전히 멈춰 있습니다. 끝난 작업은 다시 실행하지 않고 재생(replay)합니다.
 
-포크의 예산은 원래 실행의 남은 예산에서 필드별로 떼어 갑니다. `max_concurrency`도 마찬가지입니다. 조인에는 3이 필요하고 실행에는 6이 있으므로, 원래 실행에는 3이 남습니다. 포크가 어떤 자원을 전부 가져가면 원래 실행은 계속할 수 없습니다. 그런 경우 `P_CONCURRENCY_BUDGET`과 `P_TRANSITION_CONFLICT`를 확인했습니다.
+포크의 예산은 원래 실행의 남은 예산에서 떼어 낸 몫입니다. `wall_time_ms`, `model_tokens`, `monetary_microunits`, `max_program_operations`, `max_core_steps`, `max_dynamic_compiles`는 양입니다. 포크는 원래 실행에 남은 양에서 자기 몫을 가져가고, 나머지는 원래 실행이 그대로 가집니다. 이 예에서 원래 실행에는 남은 `wall_time_ms`에서 2,000을 뺀 값과 남은 `max_core_steps`에서 20을 뺀 값이 남습니다. `max_concurrency`는 양이 아니라 한도입니다. 포크는 원래 실행의 한도 이하로 자기 한도를 받고, 원래 실행은 자기 한도를 그대로 유지하므로, 포크의 3은 원래 실행에서 아무것도 가져가지 않습니다. 포크 때문에 원래 실행의 `wall_time_ms`나 `max_core_steps`가 0이 되면 `fork` 호출이 `P_FORK_SOURCE_BUDGET`으로 거부하고, 원래 실행에 남은 양보다 큰 포크는 `P_FORK_BUDGET`으로 거부합니다. 어느 쪽도 원래 실행을 바꾸지 않습니다.
 
 ### 7. 답으로 재개하기
 

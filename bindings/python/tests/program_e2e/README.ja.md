@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=82429959c9fe92f2469cb9bf853b8ee599faf5f51399e1ab608714e41751ab76 -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=5244fb2b21fedea0ecc885bd7f9d932335e0ebbf3a5965744fd2e020d1d4e4c5 -->
 # Program APIのエンドツーエンドのシナリオ
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -12,7 +12,7 @@
 | `test_01_quickstart.py` | ドキュメントのサンプル、Pythonのノードと条件を持つ `define()` のグラフ、プロセスをまたいだID、アクティベーションとロールバック |
 | `test_02_hitl.py` | `interruptBefore`、`NodeInterrupt`、デフォルトと明示指定の保留ID、`main()` の中での割り込み、プロセスの再起動後の再開 |
 | `test_03_failures.py` | ノードの例外、fan-outの分岐の失敗、`main()` の例外、失敗した `callCore`、プロバイダーのない `llm_call` |
-| `test_04_budgets.py` | コンパイル時と実行時のJavaScriptのタイムアウト、ステップ数と操作数の予算、実時間によるキャンセル、admission済みの予算 |
+| `test_04_budgets.py` | コンパイル時と実行時のJavaScriptのタイムアウト、ステップ数と操作数の予算、実時間によるキャンセル、admission済みの予算、元の実行の予算から切り分けたフォークの取り分（#414） |
 | `test_05_diagnostics.py` | 構文エラーとビルダーのエラーのソース位置、レジストリのミス、lintのスパン、制御文字、admissionのエラー |
 | `test_06_graph_shapes.py` | バリアのjoin、条件付きルーティング、`Send` によるmap-reduce、サブグラフ、不正なグラフの形状 |
 | `test_07_main_programs.py` | `callCore`、`all`、`race`、`quorum`、`await` のタイムアウト、`cancelScope`、外部からのキャンセル、`spawn` |

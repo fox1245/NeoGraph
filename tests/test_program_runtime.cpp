@@ -31,6 +31,7 @@
 #include "program_expansion_fixture.h"
 #include "fixtures/unique_temp_dir.h"
 #include "fixtures/coarse_clock_store.h"
+#include "fixtures/fork_share.h"
 #include "javascript.h"
 #include "registry_access.h"
 #include "run_control.h"
@@ -3624,7 +3625,11 @@ TEST(ProgramRuntimeTest, RecoveryOfAForkedAttemptResumesWithTheForkResumeValue) 
     invocation.agent_id           = "test-forked-crash";
     invocation.program_version_id = version.id();
     invocation.run_id             = "forked-crash-target";
-    invocation.budget             = source.remaining_budget();
+    invocation.budget             = neograph::test::fork_share(source.remaining_budget());
+    // The fork is recovered from its checkpoint by a fresh runtime, which a run
+    // with child budgets allows at once (#421): it takes the source's.
+    invocation.budget.max_child_depth    = source.remaining_budget().max_child_depth;
+    invocation.budget.max_total_children = source.remaining_budget().max_total_children;
     invocation.input              = json{{"decision", "fork input"}};
     invocation.message_sequence   = 1;
     invocation.idempotency_key    = "test-forked-crash:1";
@@ -8687,8 +8692,7 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
     fork_invocation.agent_id           = "test-fork";
     fork_invocation.program_version_id = version.id();
     fork_invocation.run_id             = "fork-target-run";
-    fork_invocation.budget             = source.remaining_budget();
-    --fork_invocation.budget.wall_time_ms;
+    fork_invocation.budget             = neograph::test::fork_share(source.remaining_budget());
     fork_invocation.input              = json::object();
     fork_invocation.message_sequence   = 19;
     fork_invocation.idempotency_key    = "test-fork:19";
@@ -8763,19 +8767,11 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
     ASSERT_TRUE(target_generation);
     EXPECT_EQ(source_generation->run_id(), source.run_id());
     EXPECT_EQ(target_generation->run_id(), forked.run_id());
-    auto expected_source_budget = source.remaining_budget();
-    expected_source_budget.wall_time_ms -= fork_invocation.budget.wall_time_ms;
-    expected_source_budget.model_tokens -= fork_invocation.budget.model_tokens;
-    expected_source_budget.monetary_microunits -= fork_invocation.budget.monetary_microunits;
-    expected_source_budget.max_concurrency -= fork_invocation.budget.max_concurrency;
-    expected_source_budget.max_program_operations -=
-        fork_invocation.budget.max_program_operations;
-    expected_source_budget.max_core_steps -= fork_invocation.budget.max_core_steps;
-    expected_source_budget.max_dynamic_compiles -= fork_invocation.budget.max_dynamic_compiles;
-    expected_source_budget.max_child_depth -= fork_invocation.budget.max_child_depth;
-    expected_source_budget.max_total_children -= fork_invocation.budget.max_total_children;
+    const auto expected_source_budget =
+        neograph::test::fork_remainder(source.remaining_budget(), fork_invocation.budget);
     EXPECT_EQ(source_lineage_after->remaining_budget(), expected_source_budget);
-    EXPECT_EQ(source_lineage_after->remaining_budget().wall_time_ms, 1U);
+    EXPECT_EQ(source_lineage_after->remaining_budget().max_concurrency,
+              source.remaining_budget().max_concurrency);
     EXPECT_EQ(target_lineage->remaining_budget(), target_record->remaining_budget());
 
     const auto source_after = fixture.runtime->reconnect("tenant:runtime", source.run_id()).wait();
@@ -8787,8 +8783,9 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
                      ProgramResume{json{{"decision", "source"}}, "trace-source-after-fork", {},
                                    source_pending_id})
             .wait();
-    EXPECT_NE(resumed_source.status(), ProgramTerminalStatus::Completed);
-    EXPECT_EQ(interrupt_calls.load(), 2U);
+    EXPECT_EQ(resumed_source.status(), ProgramTerminalStatus::Completed)
+        << failure_detail(resumed_source);
+    EXPECT_EQ(interrupt_calls.load(), 3U);
     const auto retried_after_source_progress =
         fixture.runtime
             ->fork(ExactProgramCheckpointReference{source.run_id(),
@@ -8798,7 +8795,7 @@ TEST(ProgramRuntimeTest, ExactForkAfterRestartResumesPublishedCheckpointAndPersi
                        json{{"decision", "forked"}}, "trace-fork-resume", {}, source_pending_id})
             .wait();
     EXPECT_EQ(retried_after_source_progress.id(), forked.id());
-    EXPECT_EQ(interrupt_calls.load(), 2U);
+    EXPECT_EQ(interrupt_calls.load(), 3U);
 }
 
 TEST(ProgramRuntimeTest, ForkRetryAfterLaterInterruptUsesImmutableInitialResumeBinding) {
@@ -8819,7 +8816,7 @@ TEST(ProgramRuntimeTest, ForkRetryAfterLaterInterruptUsesImmutableInitialResumeB
     invocation.agent_id           = "test-fork-later-interrupt";
     invocation.program_version_id = version.id();
     invocation.run_id             = "fork-later-interrupt-target";
-    invocation.budget             = source.remaining_budget();
+    invocation.budget             = neograph::test::fork_share(source.remaining_budget());
     invocation.input              = json::object();
     invocation.message_sequence   = 23;
     invocation.idempotency_key    = "test-fork-later-interrupt:23";
@@ -8874,13 +8871,18 @@ TEST(ProgramRuntimeTest, ConcurrentExactForksAtomicallyDebitSourceOnce) {
     const auto pending_id = source_record->pending_input()->call_id();
 
     fixture.recreate_catalog_and_runtime();
+    // Each fork asks for three fifths of the wall time and the Core steps, so
+    // the source's remainder fits one of them and not both.
+    auto racing_share            = neograph::test::fork_share(source.remaining_budget());
+    racing_share.wall_time_ms    = source.remaining_budget().wall_time_ms * 3 / 5;
+    racing_share.max_core_steps  = source.remaining_budget().max_core_steps * 3 / 5;
     const auto make_invocation = [&](std::string run_id) {
         RunInvocation invocation;
         invocation.owner_scope        = "tenant:runtime";
         invocation.agent_id           = "test-fork-race";
         invocation.program_version_id = version.id();
         invocation.run_id             = std::move(run_id);
-        invocation.budget             = source.remaining_budget();
+        invocation.budget             = racing_share;
         invocation.input              = json::object();
         invocation.message_sequence   = 20;
         invocation.idempotency_key    = "test-fork-race:" + invocation.run_id;
@@ -8922,7 +8924,8 @@ TEST(ProgramRuntimeTest, ConcurrentExactForksAtomicallyDebitSourceOnce) {
     ASSERT_TRUE(source_lineage);
     ASSERT_TRUE(target_lineage);
     EXPECT_EQ(source_lineage->active_generation(), 1U);
-    EXPECT_EQ(source_lineage->remaining_budget(), RunBudget{});
+    EXPECT_EQ(source_lineage->remaining_budget(),
+              neograph::test::fork_remainder(source.remaining_budget(), racing_share));
     EXPECT_EQ(target_lineage->active_generation(), 1U);
     EXPECT_NE(target_lineage->lineage_id(), source_lineage->lineage_id());
     EXPECT_EQ(fixture.journal
@@ -8950,7 +8953,7 @@ TEST(ProgramRuntimeTest, ConcurrentIdenticalForksReconnectOneTargetDispatch) {
     invocation.agent_id           = "test-identical-fork";
     invocation.program_version_id = version.id();
     invocation.run_id             = "identical-fork-target";
-    invocation.budget             = source.remaining_budget();
+    invocation.budget             = neograph::test::fork_share(source.remaining_budget());
     invocation.input              = json::object();
     invocation.message_sequence   = 22;
     invocation.idempotency_key    = "test-identical-fork:22";
@@ -8984,6 +8987,148 @@ TEST(ProgramRuntimeTest, ConcurrentIdenticalForksReconnectOneTargetDispatch) {
               1);
 }
 
+// #414: a fork's budget. Amounts are split: the fork's share leaves the source
+// the rest. max_concurrency is a limit: the fork carries its own and the
+// source keeps its own. A fork that would leave the source without the wall
+// time or the core steps every resume needs is refused at fork().
+namespace {
+
+struct ForkBudgetSource {
+    ProgramResult source;
+    std::string   pending_id;
+    ProgramVersion version;
+};
+
+ForkBudgetSource pause_for_fork_budget(AdmittedRuntime& fixture, const std::string& trace) {
+    interrupt_calls.store(0);
+    auto version = fixture.admit("runtime-interrupt");
+    auto source  = fixture.runtime
+                       ->start("tenant:runtime", version,
+                               ProgramInvocation{json::object(), grant(), trace, {}})
+                       .wait();
+    EXPECT_EQ(source.status(), ProgramTerminalStatus::Interrupted);
+    auto pending_id = pending_call_id(source);
+    return ForkBudgetSource{std::move(source), std::move(pending_id), std::move(version)};
+}
+
+RunInvocation fork_invocation_with(const ForkBudgetSource& paused, std::string run_id,
+                                   const RunBudget& budget) {
+    RunInvocation invocation;
+    invocation.owner_scope        = "tenant:runtime";
+    invocation.agent_id           = "test-fork-budget";
+    invocation.program_version_id = paused.version.id();
+    invocation.run_id             = std::move(run_id);
+    invocation.budget             = budget;
+    invocation.input              = json::object();
+    invocation.message_sequence   = 24;
+    invocation.idempotency_key    = "test-fork-budget:" + invocation.run_id;
+    invocation.correlation_id     = "trace-" + invocation.run_id;
+    invocation.validate();
+    return invocation;
+}
+
+}  // namespace
+
+TEST(ProgramRuntimeTest, ForkTakesItsShareOfTheAmountsAndLeavesTheSourceItsConcurrency) {
+    AdmittedRuntime fixture;
+    const auto      paused = pause_for_fork_budget(fixture, "trace-fork-share-source");
+    const auto      before = fixture.journal->load_run_lineage("tenant:runtime", paused.source.run_id());
+    ASSERT_TRUE(before);
+    const auto left  = before->remaining_budget();
+    const auto share = neograph::test::fork_share(left);
+    ASSERT_EQ(share.max_concurrency, left.max_concurrency);
+    ASSERT_GE(left.max_concurrency, 1U);
+
+    const auto forked =
+        fixture.runtime
+            ->fork(ExactProgramCheckpointReference{paused.source.run_id(),
+                                                   paused.source.checkpoint()->checkpoint_id},
+                   fork_invocation_with(paused, "fork-budget-share", share),
+                   ProgramResume{json{{"decision", "forked"}}, "trace-fork-share-resume", {},
+                                 paused.pending_id})
+            .wait();
+    ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed) << failure_detail(forked);
+
+    const auto expected = neograph::test::fork_remainder(left, share);
+    const auto after = fixture.journal->load_run_lineage("tenant:runtime", paused.source.run_id());
+    ASSERT_TRUE(after);
+    EXPECT_EQ(after->remaining_budget(), expected);
+    EXPECT_EQ(after->remaining_budget().max_concurrency, left.max_concurrency);
+
+    const auto resumed =
+        fixture.runtime
+            ->resume("tenant:runtime", paused.source.run_id(),
+                     ProgramResume{json{{"decision", "source"}}, "trace-fork-share-source-resume", {},
+                                   paused.pending_id})
+            .wait();
+    EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Completed) << failure_detail(resumed);
+    EXPECT_EQ(resumed.remaining_budget().max_concurrency, left.max_concurrency);
+}
+
+TEST(ProgramRuntimeTest, ForkThatWouldLeaveTheSourceWithoutAResumeResourceIsRefused) {
+    for (const std::string field : {"wall_time_ms", "max_core_steps"}) {
+        SCOPED_TRACE(field);
+        AdmittedRuntime fixture;
+        const auto      paused = pause_for_fork_budget(fixture, "trace-fork-refused-source-" + field);
+        const auto before =
+            fixture.journal->load_run_lineage("tenant:runtime", paused.source.run_id());
+        ASSERT_TRUE(before);
+        auto whole = neograph::test::fork_share(before->remaining_budget());
+        if (field == "wall_time_ms") whole.wall_time_ms = before->remaining_budget().wall_time_ms;
+        if (field == "max_core_steps") whole.max_core_steps = before->remaining_budget().max_core_steps;
+
+        const std::string target_id = "fork-budget-refused-" + field;
+        try {
+            (void)fixture.runtime->fork(
+                ExactProgramCheckpointReference{paused.source.run_id(),
+                                                paused.source.checkpoint()->checkpoint_id},
+                fork_invocation_with(paused, target_id, whole),
+                ProgramResume{json{{"decision", "forked"}}, "trace-fork-refused-resume", {},
+                              paused.pending_id});
+            FAIL() << "a fork that takes all of " << field << " was accepted";
+        } catch (const ProgramDiagnosticError& error) {
+            EXPECT_EQ(error.diagnostic().code, "P_FORK_SOURCE_BUDGET");
+            EXPECT_NE(error.diagnostic().message.find(field), std::string::npos)
+                << error.diagnostic().message;
+            EXPECT_EQ(error.diagnostic().witness.value("resource", std::string()), field);
+        }
+
+        // Nothing changed: no target run, the source's lineage as it was, and the
+        // source resumes with everything it had.
+        EXPECT_FALSE(fixture.journal->load("tenant:runtime", target_id));
+        const auto after =
+            fixture.journal->load_run_lineage("tenant:runtime", paused.source.run_id());
+        ASSERT_TRUE(after);
+        EXPECT_EQ(after->id(), before->id());
+        EXPECT_EQ(interrupt_calls.load(), 1U);
+        const auto resumed =
+            fixture.runtime
+                ->resume("tenant:runtime", paused.source.run_id(),
+                         ProgramResume{json{{"decision", "source"}}, "trace-fork-refused-source-resume",
+                                       {}, paused.pending_id})
+                .wait();
+        EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Completed) << failure_detail(resumed);
+    }
+}
+
+TEST(ProgramRuntimeTest, ForkLargerThanTheSourceRemainderIsStillRefusedAsBefore) {
+    AdmittedRuntime fixture;
+    const auto      paused = pause_for_fork_budget(fixture, "trace-fork-too-much-source");
+    auto            too_much = neograph::test::fork_share(paused.source.remaining_budget());
+    too_much.wall_time_ms    = paused.source.remaining_budget().wall_time_ms + 1;
+    try {
+        (void)fixture.runtime->fork(
+            ExactProgramCheckpointReference{paused.source.run_id(),
+                                            paused.source.checkpoint()->checkpoint_id},
+            fork_invocation_with(paused, "fork-budget-too-much", too_much),
+            ProgramResume{json{{"decision", "forked"}}, "trace-fork-too-much-resume", {},
+                          paused.pending_id});
+        FAIL() << "a fork larger than the source's remainder was accepted";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_FORK_BUDGET");
+    }
+}
+
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 TEST(ProgramRuntimeTest, ExactForkLineageSurvivesSqliteRuntimeReconnect) {
     static std::atomic<unsigned> sequence{0};
@@ -9011,7 +9156,7 @@ TEST(ProgramRuntimeTest, ExactForkLineageSurvivesSqliteRuntimeReconnect) {
         invocation.agent_id           = "test-sqlite-fork";
         invocation.program_version_id = version.id();
         invocation.run_id             = "sqlite-fork-target";
-        invocation.budget             = source.remaining_budget();
+        invocation.budget             = neograph::test::fork_share(source.remaining_budget());
         invocation.input              = json::object();
         invocation.message_sequence   = 21;
         invocation.idempotency_key    = "test-sqlite-fork:21";
@@ -9040,7 +9185,8 @@ TEST(ProgramRuntimeTest, ExactForkLineageSurvivesSqliteRuntimeReconnect) {
         EXPECT_EQ(lineage->active_generation(), 1U);
         EXPECT_EQ(source_lineage->active_generation(), 1U);
         EXPECT_NE(source_lineage->lineage_id(), lineage->lineage_id());
-        EXPECT_EQ(source_lineage->remaining_budget(), RunBudget{});
+        EXPECT_EQ(source_lineage->remaining_budget(),
+                  neograph::test::fork_remainder(source.remaining_budget(), invocation.budget));
         EXPECT_EQ(fixture.journal
                       ->load_generation("tenant:runtime", lineage->lineage_id(), 1)
                       ->run_id(),
@@ -10077,7 +10223,7 @@ TEST(ProgramRuntimeTest, AForkOfTwoCoreInterruptsAnswersTheOneItsPendingInputNam
         invocation.agent_id           = "test-fork-two-interrupts";
         invocation.program_version_id = version.id();
         invocation.run_id             = durable ? "fork-two-interrupts-sqlite" : "fork-two-interrupts";
-        invocation.budget             = source.remaining_budget();
+        invocation.budget             = neograph::test::fork_share(source.remaining_budget());
         invocation.input              = json::object();
         invocation.message_sequence   = 1;
         invocation.idempotency_key    = "test-fork-two-interrupts:1";
@@ -10520,7 +10666,7 @@ TEST(ProgramRuntimeTest, AForkOfAJavaScriptMainContinuesItsPausedCallCore) {
             invocation.program_version_id = version.id();
             invocation.run_id             = std::string("js-fork-") + (durable ? "sqlite-" : "memory-") +
                                 std::to_string(&item - cases);
-            invocation.budget             = source.remaining_budget();
+            invocation.budget             = neograph::test::fork_share(source.remaining_budget());
             invocation.input              = json::object();
             invocation.message_sequence   = 1;
             invocation.idempotency_key    = "test-js-fork:" + invocation.run_id;
@@ -10574,7 +10720,7 @@ TEST(ProgramRuntimeTest, RecoveryOfAForkedJavaScriptAttemptResumesItsCallCoreWit
     invocation.agent_id           = "test-js-forked-crash";
     invocation.program_version_id = version.id();
     invocation.run_id             = "js-forked-crash-target";
-    invocation.budget             = source.remaining_budget();
+    invocation.budget             = neograph::test::fork_share(source.remaining_budget());
     invocation.input              = json::object();
     invocation.message_sequence   = 1;
     invocation.idempotency_key    = "test-js-forked-crash:1";
@@ -11272,8 +11418,8 @@ TEST(ProgramRuntimeTest, ForkOfAPausedPlanReplaysWhatTheSourceFinished) {
                                        source.run_id(), source.checkpoint()->checkpoint_id},
                                    version,
                                    ProgramInvocation{json{{"value", "start"}},
-                                                     source.remaining_budget(), "trace-plan-fork",
-                                                     {}, "plan-fork-target"},
+                                                     neograph::test::fork_share(source.remaining_budget()),
+                                                     "trace-plan-fork", {}, "plan-fork-target"},
                                    resume_for(source, json{{"decision", "first"}},
                                               "trace-plan-fork-resume"))
                             .wait();
@@ -11320,7 +11466,7 @@ TEST(ProgramRuntimeTest, ForkOfAPlanPausedInALaterBranchContinuesThatBranch) {
                                        source.run_id(), source.checkpoint()->checkpoint_id},
                                    version,
                                    ProgramInvocation{json{{"value", "start"}},
-                                                     source.remaining_budget(),
+                                                     neograph::test::fork_share(source.remaining_budget()),
                                                      "trace-plan-fork-later", {},
                                                      "plan-fork-later-target"},
                                    resume_for(source, json{{"decision", "B"}},

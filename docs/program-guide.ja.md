@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=508b1fb2ee262e224e6c3e820847b62384042e2f7857f5855b64f021ce7f7fe7 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=d3ad21d0934c02a44597ebb1b2697a6d28725a9c1b396386c5beae702f724db3 -->
 # Program ガイド: グラフを取りまとめる JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -211,7 +211,7 @@ review release.checks_failed
 
 ```python
 # Fork the paused run to see what "hold" would do. The original stays paused.
-# The fork's budget is taken out of the paused run's remaining budget.
+# The fork takes a share of the paused run's remaining budget.
 
 fork_budget = budget(wall_time_ms=2_000, max_concurrency=3, max_program_operations=8,
                      max_core_steps=20)
@@ -225,7 +225,7 @@ ProgramTerminalStatus.Failed release.held
 
 `fork` は、止まっている実行のチェックポイントから新しい実行を始め、質問に `"hold"` で答えます。フォークは、失敗終了のコードつきで `Failed` になります。元の実行はまだ止まったままです。終わった作業は、再実行されずにリプレイされます。
 
-フォークの予算は、元の実行の残りの予算から、フィールドごとに差し引かれます。`max_concurrency` も同様です。ジョインには3が必要で、実行には6あるので、元の実行には3が残ります。フォークがある資源をすべて持っていくと、元の実行は続けられません。その場合に `P_CONCURRENCY_BUDGET` と `P_TRANSITION_CONFLICT` を確認しています。
+フォークの予算は、元の実行の残りの予算から切り分けた取り分です。`wall_time_ms`、`model_tokens`、`monetary_microunits`、`max_program_operations`、`max_core_steps`、`max_dynamic_compiles` は量です。フォークは元の実行に残っている量から自分の取り分を取り、残りは元の実行がそのまま持ちます。この例では、元の実行には、残りの `wall_time_ms` から 2,000 を引いた値と、残りの `max_core_steps` から 20 を引いた値が残ります。`max_concurrency` は量ではなく上限です。フォークは元の実行の上限以下で自分の上限を持ち、元の実行は自分の上限をそのまま保つので、フォークの 3 は元の実行から何も奪いません。フォークのせいで元の実行の `wall_time_ms` または `max_core_steps` が 0 になる場合、`fork` の呼び出しは `P_FORK_SOURCE_BUDGET` で拒否されます。元の実行に残っている量より大きいフォークは `P_FORK_BUDGET` で拒否されます。どちらの場合も、元の実行は変わりません。
 
 ### 7. 答えで再開する
 

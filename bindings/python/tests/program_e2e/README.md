@@ -11,7 +11,7 @@ These tests drive the sealed-v1 JavaScript Program API through the Python bindin
 | `test_01_quickstart.py` | the documented example, a `define()` graph with Python nodes and a condition, identities across processes, activation and rollback |
 | `test_02_hitl.py` | `interruptBefore`, `NodeInterrupt`, default and explicit pending ids, interrupts inside `main()`, resume after a process restart |
 | `test_03_failures.py` | a node raises, a fan-out branch fails, `main()` throws, a failed `callCore`, `llm_call` without a provider |
-| `test_04_budgets.py` | compile-time and run-time JavaScript timeouts, step and operation budgets, wall-time cancellation, admitted budgets |
+| `test_04_budgets.py` | compile-time and run-time JavaScript timeouts, step and operation budgets, wall-time cancellation, admitted budgets, a fork's share of the source run's budget (#414) |
 | `test_05_diagnostics.py` | source locations for syntax and builder errors, registry misses, lint spans, control characters, admission errors |
 | `test_06_graph_shapes.py` | barrier joins, conditional routing, `Send` map-reduce, subgraphs, invalid graph shapes |
 | `test_07_main_programs.py` | `callCore`, `all`, `race`, `quorum`, `await` timeouts, `cancelScope`, external cancel, `spawn` |

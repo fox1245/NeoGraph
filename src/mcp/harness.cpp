@@ -1040,8 +1040,18 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
                 resources.owner_scope, fork_source->source_run_id);
             if (!source_lineage)
                 return {{"started", false}, {"status", "lineage_unavailable"}};
-            invocation_template.budget =
-                bounded_budget(invocation_template.budget, source_lineage->remaining_budget());
+            const auto left            = source_lineage->remaining_budget();
+            invocation_template.budget = bounded_budget(invocation_template.budget, left);
+            // #414: a fork is bounded by what its source has left, and the Program
+            // runtime refuses a fork that takes the last wall-time millisecond or
+            // Core step, which every resume of the source needs. The fork takes
+            // all but one of each, as it took all of them before.
+            if (invocation_template.budget.wall_time_ms == left.wall_time_ms &&
+                left.wall_time_ms > 1)
+                --invocation_template.budget.wall_time_ms;
+            if (invocation_template.budget.max_core_steps == left.max_core_steps &&
+                left.max_core_steps > 1)
+                --invocation_template.budget.max_core_steps;
         }
         if (replay_source) {
             const auto source_handle = retained_handle(replay_source);
