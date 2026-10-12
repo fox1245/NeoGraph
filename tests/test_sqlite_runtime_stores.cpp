@@ -8,6 +8,11 @@
 #include <neograph/llm/agent.h>
 #endif
 #include <neograph/tool_dispatch.h>
+#include <asio/use_awaitable.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/steady_timer.hpp>
+#include <neograph/hook_outbox.h>
+#include <neograph/hook.h>
 #include "fixtures/typed_provider.h"
 #include <neograph/provider_outcome_codec.h>
 #include <codecs/messages.h>
@@ -97,6 +102,66 @@ TEST(SQLiteRuntimeStores, HookLeaseSurvivesReopenAndFencesStaleWorker) {
     EXPECT_GT(second.fencing_token, first.fencing_token);
     const auto stale = HookExecutionReceipt::create({call.id(), first.entry.data().attempt_count, HookExecutionState::Succeeded, {"effect", true, true, {}}, {}});
     EXPECT_FALSE(reopened.settle(call.id(), first.fencing_token, stale, now + std::chrono::seconds(1)));
+}
+
+// A native Hook target that timed out is final on the durable journal too:
+// no further attempt starts even with attempts left, because the timed-out
+// target may still be running (reference, "Tool failure contract").
+TEST(SQLiteRuntimeStores, HookTargetTimeoutIsTerminalOnTheDurableJournal) {
+    class Waiting final : public Tool, public ContextualAsyncTool {
+    public:
+        ChatTool get_definition() const override { return {"audit", "", json::object()}; }
+        std::string get_name() const override { return "audit"; }
+        std::string execute(const json&) override { return "unused"; }
+        asio::awaitable<std::string> execute_async(const json&, ToolExecutionContext) override {
+            ++runs;
+            asio::steady_timer timer(co_await asio::this_coro::executor);
+            timer.expires_after(std::chrono::seconds(2));
+            co_await timer.async_wait(asio::use_awaitable);
+            co_return "late";
+        }
+        std::atomic<int> runs{0};
+    } tool;
+    HookTargetResolver resolver = [&tool](std::string_view id) -> std::optional<HookTargetContract> {
+        if (id != "audit") return std::nullopt;
+        return HookTargetContract{&tool, {"audit"}, ToolEffectClass::ReadOnly};
+    };
+    auto registry = std::make_shared<HookRegistry>(resolver);
+    HookDefinitionData definition;
+    definition.priority = 1;
+    definition.phase = HookPhase::BeforeToolExecution;
+    definition.target_id = "audit";
+    definition.required_capabilities = {"audit"};
+    definition.effect = ToolEffectClass::ReadOnly;
+    definition.input_mapper = {HookInputMapperKind::JsonPointer, "", json(), {}};
+    registry->admit(HookDefinition::create(std::move(definition)));
+    auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
+    ToolExecutionPolicy policy;
+    policy.execution_timeout = std::chrono::milliseconds(50);
+    policy.effect = ToolEffectClass::ReadOnly;
+    policies->upsert("audit", policy);
+    auto adapter = std::make_shared<NativeHookExecutionAdapter>(
+        resolver, std::make_shared<ToolExecutionController>(
+                      ToolExecutionControllerConfig{policies, nullptr}));
+    auto journal = std::make_shared<SQLiteHookJournal>(database("hook_target_timeout"));
+    MandatoryHookRunner runner(journal, registry, adapter);
+    const auto event = RuntimeEvent::create({{}, 1, HookPhase::BeforeToolExecution, "tool_execution",
+                                             "owner", "run", json{{"tool_name", "write"}}});
+    try {
+        async::run_sync(runner.run_async(event, std::chrono::system_clock::now() +
+                                                    std::chrono::minutes(1), 3));
+        FAIL() << "the mandatory Hook must block";
+    } catch (const HookBoundaryBlocked& blocked) {
+        EXPECT_EQ(blocked.state(), HookExecutionState::TimedOut);
+    }
+    const auto planned = registry->plan(event);
+    ASSERT_EQ(planned.size(), 1u);
+    const auto entry = journal->get(planned.front().id());
+    ASSERT_TRUE(entry);
+    EXPECT_EQ(entry->data().state, HookExecutionState::TimedOut);
+    EXPECT_EQ(entry->data().attempt_count, 1u) << "a timed-out target is final";
+    EXPECT_EQ(tool.runs.load(), 1);
+    EXPECT_TRUE(journal->pending().empty());
 }
 
 TEST(SQLiteRuntimeStores, ProviderReceiptReopensAndFailsClosedOnCorruption) {
