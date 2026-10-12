@@ -13,6 +13,7 @@
 // smoke-expect: Trace: classifier → math_expert → END
 // smoke-expect: Trace: classifier → translate_expert → END
 // smoke-expect: Trace: classifier → general_expert → END
+// smoke-forbid: [neograph] lint
 
 #include <neograph/neograph.h>
 #include "provider_example_support.h"
@@ -134,7 +135,8 @@ int main() {
              {"routes", {
                  {"math", "math_expert"},
                  {"translate", "translate_expert"},
-                 {"general", "general_expert"}
+                 {"general", "general_expert"},
+                 {"default", "general_expert"}   // any label the classifier invents
              }}},
             {{"from", "math_expert"}, {"to", "__end__"}},
             {{"from", "translate_expert"}, {"to", "__end__"}},
