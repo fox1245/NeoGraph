@@ -1,38 +1,28 @@
 <!-- neograph-i18n: source=tests/fixtures/identity_corpus/README.md locale=ja source_sha256=83accd0c1a18f7f267e987bd5317425e2b0b24cc05a9249464d08243fe4f72e9 -->
-# ゴールデン identity コーパス
+# ゴールデンIdentityコーパス
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-`manifest.json` は Program のソースと、各ソースのコンパイル時に基準となる registry を列挙します。
-`golden.json` は各ソースのコンパイル結果を pin（固定値）として記録します。対象は封印済み（sealed）の
-Core definition、その `definition_hash`、コンパイル済み plan の identity、封印済みの diagnostics、
-bundle id です。`tests/test_identity_golden.cpp` と `bindings/python/tests/test_identity_golden.py`
-がすべての pin を検査します。
+`manifest.json` には、Programのソースと、それをコンパイルするときに使うレジストリが並んでいます。`golden.json` は、各ソースのコンパイル結果を固定値（pin）として記録しています。記録するのは、封印されたCore定義、その `definition_hash`、コンパイル済みプランのidentity、封印された診断、バンドルIDです。`tests/test_identity_golden.cpp` と `bindings/python/tests/test_identity_golden.py` が、すべての固定値を検査します。
 
-新しい Core キーを使わない program は、すべての pin を維持しなければなりません。そのような program の
-pin が変わった場合は、互換性の破壊です。
+新しいCoreのキーを使わないプログラムは、すべての固定値を維持しなければなりません。そのようなプログラムの固定値が変わった場合は、互換性が壊れています。
 
-## プラットフォーム規則
+## プラットフォームごとの規則
 
-JavaScript のソース envelope は `ProgramSource::JAVASCRIPT_QUICKJS_BUILD_OPTIONS` を封印しますが、
-この値は MSVC 移植版では異なります。そのため、次の pin は `posix_quickjs` の下に置き、
-POSIX QuickJS ビルドの identity に対してのみ検査します。
+JavaScriptのソースエンベロープは `ProgramSource::JAVASCRIPT_QUICKJS_BUILD_OPTIONS` を封印しますが、この値はMSVC向けの移植版では異なります。そのため、次の固定値は `posix_quickjs` の下に置き、POSIXのQuickJSビルドのidentityに対してだけ検査します。
 
-- JavaScript の `source_hash` と `bundle_id`
-- program に `main()` がある場合の `canonical_program_hash`（ソースを control source として
-  封印するため）
+- JavaScriptの `source_hash` と `bundle_id`
+- `main()` を持つプログラムの `canonical_program_hash`（ソースを制御用のソースとして封印するため）
 
-`all_platforms` の下にあるものは、C++ builder program のすべての pin を含め、すべてのプラットフォームで検査します。
+`all_platforms` の下にあるものは、C++ビルダーのプログラムの固定値をすべて含め、すべてのプラットフォームで検査します。
 
 ## 再生成
 
-意図した identity の変更後にのみ実行し、CI では決して実行しません。
+意図してidentityを変更したあとにだけ実行します。CIでは実行しないでください。
 
 ```sh
 NEOGRAPH_REGENERATE_IDENTITY_CORPUS=1 \
     <build>/tests/neograph_identity_golden_tests --gtest_filter='IdentityGolden.*'
 ```
 
-`NEOGRAPH_BUILD_QUICKJS_CONTROL=ON` を指定した POSIX ビルドが必要です。`CI` または `GITHUB_ACTIONS`
-が設定されている場合は実行を拒否します。出力は決定的（deterministic）なので、ファイルを手で編集すると
-`IdentityGolden.GoldenFileIsTheDeterministicRegeneration` が失敗します。コミットする前に diff を確認してください。
+`NEOGRAPH_BUILD_QUICKJS_CONTROL=ON` を指定したPOSIXのビルドが必要です。`CI` または `GITHUB_ACTIONS` が設定されていると、実行を拒否します。出力は決定的なので、ファイルを手で編集すると、`IdentityGolden.GoldenFileIsTheDeterministicRegeneration` が失敗します。コミットする前に、差分を確認してください。
