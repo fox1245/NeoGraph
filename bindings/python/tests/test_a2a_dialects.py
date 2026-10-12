@@ -38,6 +38,7 @@ class _A2APeer:
         self.result = None
         self.error = None
         self.stream = None
+        self.serve_card = True
         peer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -58,7 +59,7 @@ class _A2APeer:
 
             def do_GET(self):
                 peer.requests.append({"method": "GET", "path": self.path})
-                if self.path != "/.well-known/agent-card.json":
+                if self.path != "/.well-known/agent-card.json" or not peer.serve_card:
                     self.reply(404, {"error": "unknown discovery path"})
                     return
                 self.reply(200, peer.card)
@@ -462,6 +463,7 @@ def test_callback_abort_returns_observed_partial_task_without_later_events(a2a_p
 
 def test_observed_stream_error_preserves_code_and_never_redispatches(a2a_peer):
     a2a_peer.configure("0.3")
+    a2a_peer.serve_card = False  # no card: the client probes, 1.0 first
     a2a_peer.stream = (
         _frame({"kind": "status-update", "taskId": "observed-task",
                 "status": {"state": "working"}, "final": False})
@@ -480,12 +482,26 @@ def test_observed_stream_error_preserves_code_and_never_redispatches(a2a_peer):
     event, = events
     assert event.status_update.task_id == "observed-task"
     assert event.status_update.status.state == a2a.TaskState.Working
-    request, = a2a_peer.rpc_requests
-    assert request["body"]["method"] == "message/stream"
+    # The 1.0 probe got -32601 before any event; the 0.3 attempt observed an
+    # event, so its error ends the call without a third dispatch.
+    modern, legacy = a2a_peer.rpc_requests
+    assert modern["body"]["method"] == "SendStreamingMessage"
+    assert legacy["body"]["method"] == "message/stream"
     assert client.wire_dialect() is None
 
 
-def test_unbound_stream_probes_v1_only_before_any_event_is_observed(a2a_peer):
+def test_first_stream_fetches_the_card_and_uses_its_interface(a2a_peer):
+    client = _client(a2a_peer)
+    task = client.send_message_stream("card first", lambda _event: True)
+    assert task.state == a2a.TaskState.Completed
+    assert [request["method"] for request in a2a_peer.requests] == ["GET", "POST"]
+    request, = a2a_peer.rpc_requests
+    assert request["body"]["method"] == "SendStreamingMessage"
+    assert client.wire_dialect() == a2a.WireDialect.V1_0
+
+
+def test_unbound_stream_probes_v1_first_without_a_card(a2a_peer):
+    a2a_peer.serve_card = False
     events = []
 
     def retain(event):
@@ -493,15 +509,13 @@ def test_unbound_stream_probes_v1_only_before_any_event_is_observed(a2a_peer):
         return True
 
     client = _client(a2a_peer)
-    task = client.send_message_stream("unobserved method rejection", retain)
+    task = client.send_message_stream("no card", retain)
     assert task.id == "remote-task"
     assert task.state == a2a.TaskState.Completed
     event, = events
     assert event.type == a2a.StreamEvent.Type.Task
     assert event.task.history[0].parts[0].text == "remote answer"
-    legacy, modern = a2a_peer.rpc_requests
-    assert legacy["body"]["method"] == "message/stream"
-    assert "a2a-version" not in legacy["headers"]
+    modern, = a2a_peer.rpc_requests
     assert modern["body"]["method"] == "SendStreamingMessage"
     assert modern["headers"]["a2a-version"] == "1.0"
     assert not _contains_kind(modern["body"]["params"])

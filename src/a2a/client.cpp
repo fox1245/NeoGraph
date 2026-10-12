@@ -1,5 +1,7 @@
 #include <neograph/a2a/client.h>
 
+#include "ids.h"
+
 #include <neograph/async/endpoint.h>
 #include <neograph/async/http_client.h>
 #include <neograph/async/run_sync.h>
@@ -48,7 +50,47 @@ json parse_response_body(const std::string& body) {
 }
 
 constexpr int kMethodNotFound = -32601;
+constexpr int kVersionNotSupported = -32009;
 constexpr std::size_t kMaxStreamErrorBody = 1u << 20;
+
+/// A non-2xx HTTP reply. what() keeps the historical "A2A error (HTTP n)"
+/// text; the status lets the probe treat a 400 as "try the other dialect".
+class HttpStatusError : public std::runtime_error {
+  public:
+    HttpStatusError(int status, const std::string& body)
+        : std::runtime_error("A2A error (HTTP " + std::to_string(status) + "): " + body),
+          status_(status) {}
+    int status() const noexcept { return status_; }
+
+  private:
+    int status_;
+};
+
+/// Without a card the client probes 1.0 first. These replies mean "this
+/// agent does not speak that dialect" (spec 3.6.2 / 9.5), so the other one
+/// is tried: method not found, version not supported, or an HTTP 400.
+bool probe_falls_back(int rpc_code, int http_status) {
+    return rpc_code == kMethodNotFound || rpc_code == kVersionNotSupported
+        || http_status == 400;
+}
+
+struct Origin {
+    bool        tls = false;
+    std::string host;
+    std::string port;
+    bool operator==(const Origin&) const = default;
+};
+
+std::optional<Origin> origin_of(const std::string& url) {
+    try {
+        auto endpoint = async::split_async_endpoint(url);
+        std::transform(endpoint.host.begin(), endpoint.host.end(), endpoint.host.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return Origin{endpoint.tls, endpoint.host, endpoint.port};
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
 
 bool iequals(std::string_view a, std::string_view b) {
     return a.size() == b.size()
@@ -82,12 +124,41 @@ std::string strip_trailing_slashes(std::string url) {
 struct Chosen {
     WireDialect dialect;
     std::string tenant;
+    std::string url;
 };
 
-/// AgentCard -> wire dialect (A2A spec §8.3.2): first supported JSONRPC
-/// interface in card order, preferring one whose URL is the client's
+/// The endpoint for an interface URL under the client's origin policy: the
+/// interface URL itself when it is usable and on `base_url`'s origin (or the
+/// caller opted into cross-origin interfaces), else `base_url`.
+std::string interface_endpoint(const std::string& interface_url, const std::string& base_url,
+                               bool allow_cross_origin) {
+    if (interface_url.empty()) return base_url;
+    std::string candidate = interface_url;
+    if (candidate.front() == '/') {
+        // A path-only URL is relative to the card's origin.
+        try {
+            const auto base = async::split_async_endpoint(base_url);
+            candidate = std::string(base.tls ? "https://" : "http://")
+                      + (base.host.find(':') != std::string::npos ? "[" + base.host + "]"
+                                                                  : base.host)
+                      + ":" + base.port + candidate;
+        } catch (const std::exception&) {
+            return base_url;
+        }
+    } else if (!async::has_explicit_http_scheme(candidate)) {
+        return base_url;
+    }
+    const auto target = origin_of(candidate);
+    if (!target) return base_url;
+    if (!allow_cross_origin && origin_of(base_url) != target) return base_url;
+    return candidate;
+}
+
+/// AgentCard -> wire dialect and endpoint (A2A spec §8.3.2): first supported
+/// JSONRPC interface in card order, preferring one whose URL is the client's
 /// `base_url` when the card lists several.
-Chosen select_from_card(const AgentCard& card, const std::string& base_url) {
+Chosen select_from_card(const AgentCard& card, const std::string& base_url,
+                        bool allow_cross_origin) {
     const AgentInterface* first = nullptr;
     WireDialect first_dialect = WireDialect::V0_3;
     const AgentInterface* same_url = nullptr;
@@ -107,9 +178,15 @@ Chosen select_from_card(const AgentCard& card, const std::string& base_url) {
             same_url_dialect = *dialect;
         }
     }
-    if (same_url) return {same_url_dialect, same_url->tenant};
-    if (first)    return {first_dialect, first->tenant};
-    if (card.supported_interfaces.empty()) return {WireDialect::V0_3, {}};
+    if (same_url) {
+        return {same_url_dialect, same_url->tenant,
+                interface_endpoint(same_url->url, base_url, allow_cross_origin)};
+    }
+    if (first) {
+        return {first_dialect, first->tenant,
+                interface_endpoint(first->url, base_url, allow_cross_origin)};
+    }
+    if (card.supported_interfaces.empty()) return {WireDialect::V0_3, {}, base_url};
     throw std::runtime_error(
         "A2A agent at " + base_url + " declares no compatible interface: this "
         "client speaks the JSONRPC binding at protocol version 1.x or 0.x, but "
@@ -128,6 +205,17 @@ A2AClient::A2AClient(std::string base_url)
 void A2AClient::set_timeout(std::chrono::seconds t) {
     std::lock_guard<std::mutex> lock(*state_mutex_);
     timeout_ = t;
+}
+
+void A2AClient::set_allow_cross_origin_interfaces(bool allow) {
+    std::lock_guard<std::mutex> lock(*state_mutex_);
+    allow_cross_origin_ = allow;
+    if (card_loaded_) selection_.reset();  // re-select under the new policy
+}
+
+std::string A2AClient::endpoint_url() const {
+    std::lock_guard<std::mutex> lock(*state_mutex_);
+    return selection_ ? selection_->url : base_url_;
 }
 
 void A2AClient::set_authorization_header(std::string authorization_header) {
@@ -157,14 +245,38 @@ std::optional<A2AClient::Selection> A2AClient::resolve_selection() {
     if (!card_loaded_) return std::nullopt;
     // Selection and card refresh share the lock; an old card cannot install
     // its selection after a newer fetch invalidates it. No network I/O here.
-    auto chosen = select_from_card(cached_card_, base_url_);
-    selection_ = Selection{chosen.dialect, std::move(chosen.tenant)};
+    auto chosen = select_from_card(cached_card_, base_url_, allow_cross_origin_);
+    selection_ = Selection{chosen.dialect, std::move(chosen.tenant), std::move(chosen.url)};
     return selection_;
+}
+
+asio::awaitable<std::optional<A2AClient::Selection>> A2AClient::select_async() {
+    if (auto sel = resolve_selection()) co_return sel;
+    bool need_card = false;
+    {
+        std::lock_guard<std::mutex> lock(*state_mutex_);
+        need_card = !card_loaded_ && !card_unavailable_;
+    }
+    if (need_card) {
+        // Fetch the card before the first call (owner decision D5): the
+        // interface it selects names both the dialect and the endpoint.
+        bool failed = false;
+        try {
+            (void)co_await fetch_agent_card_async(false);
+        } catch (const std::exception&) {
+            failed = true;
+        }
+        if (failed) {
+            std::lock_guard<std::mutex> lock(*state_mutex_);
+            card_unavailable_ = true;
+        }
+    }
+    co_return resolve_selection();
 }
 
 void A2AClient::remember_probe(WireDialect dialect) {
     std::lock_guard<std::mutex> lock(*state_mutex_);
-    if (!card_loaded_ && !selection_) selection_ = Selection{dialect, {}};
+    if (!card_loaded_ && !selection_) selection_ = Selection{dialect, {}, base_url_};
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +286,12 @@ void A2AClient::remember_probe(WireDialect dialect) {
 asio::awaitable<json>
 A2AClient::rpc_call_async(const std::string& method, const json& params,
                           std::optional<WireDialect> dialect) {
+    co_return co_await post_rpc(endpoint_url(), method, params, dialect);
+}
+
+asio::awaitable<json>
+A2AClient::post_rpc(const std::string& url, const std::string& method, const json& params,
+                    std::optional<WireDialect> dialect) {
     json body = {
         {"jsonrpc", "2.0"},
         {"id",      request_id_.fetch_add(1, std::memory_order_relaxed) + 1},
@@ -181,7 +299,7 @@ A2AClient::rpc_call_async(const std::string& method, const json& params,
         {"params",  params},
     };
     auto body_str = body.dump();
-    auto endpoint = async::split_async_endpoint(base_url_);
+    auto endpoint = async::split_async_endpoint(url);
 
     std::vector<std::pair<std::string, std::string>> headers = {
         {"Content-Type", "application/json"},
@@ -214,8 +332,7 @@ A2AClient::rpc_call_async(const std::string& method, const json& params,
     }
 
     if (res.status < 200 || res.status >= 300) {
-        throw std::runtime_error(
-            "A2A error (HTTP " + std::to_string(res.status) + "): " + res.body);
+        throw HttpStatusError(res.status, res.body);
     }
 
     json resp;
@@ -250,36 +367,6 @@ json A2AClient::rpc_call(const std::string& method, const json& params,
     return async::run_sync(rpc_call_async(method, params, dialect));
 }
 
-namespace {
-
-struct TryResult {
-    bool        ok = false;
-    json        value;          ///< result when ok
-    int         code = 0;       ///< JSON-RPC error code, 0 when not an RPC error
-    std::string message;        ///< failure text when !ok
-};
-
-asio::awaitable<TryResult>
-try_rpc(A2AClient& self, const std::string& method, const json& params,
-        WireDialect dialect) {
-    // co_await is forbidden inside catch blocks (g++14, clang
-    // matches), so the try wraps a delegated awaitable and returns a
-    // TryResult. Caller dispatches outside.
-    TryResult r;
-    try {
-        r.value = co_await self.rpc_call_async(method, params, dialect);
-        r.ok = true;
-    } catch (const A2ARpcError& e) {
-        r.code    = e.code();
-        r.message = e.what();
-    } catch (const std::exception& e) {
-        r.message = e.what();
-    }
-    co_return r;
-}
-
-}  // namespace
-
 asio::awaitable<json> A2AClient::call_method(
     const char* v1_method, const char* v03_method,
     const std::function<json(WireDialect, const std::string& tenant)>& build) {
@@ -288,31 +375,41 @@ asio::awaitable<json> A2AClient::call_method(
         return std::string(d == WireDialect::V1_0 ? v1_method : v03_method);
     };
 
-    if (auto sel = resolve_selection()) {
-        co_return co_await rpc_call_async(
-            method_for(sel->dialect), build(sel->dialect, sel->tenant), sel->dialect);
+    if (auto sel = co_await select_async()) {
+        co_return co_await post_rpc(
+            sel->url, method_for(sel->dialect), build(sel->dialect, sel->tenant), sel->dialect);
     }
 
-    // No card-derived dialect yet: probe. 0.3 first (a 0.3 server answers,
-    // and an a2a-sdk server with `enable_v0_3_compat` does too); on
-    // "method not found" the agent speaks 1.0 only, so retry with the 1.0
-    // method *and* a 1.0-shaped body — the two generations differ in body
-    // shape, not just the method name.
-    auto first = co_await try_rpc(
-        *this, method_for(WireDialect::V0_3),
-        build(WireDialect::V0_3, std::string()), WireDialect::V0_3);
-    if (first.ok) {
-        remember_probe(WireDialect::V0_3);
-        co_return std::move(first.value);
+    // No card could be fetched: probe. 1.0 (the primary version) first; the
+    // two generations differ in body shape, not just the method name, so each
+    // attempt builds its own body.
+    json value;
+    bool ok = false;
+    int code = 0;
+    int http_status = 0;
+    std::string message;
+    try {
+        value = co_await post_rpc(base_url_, method_for(WireDialect::V1_0),
+                                  build(WireDialect::V1_0, std::string()), WireDialect::V1_0);
+        ok = true;
+    } catch (const A2ARpcError& e) {
+        code = e.code();
+        message = e.what();
+    } catch (const HttpStatusError& e) {
+        http_status = e.status();
+        message = e.what();
     }
-    if (first.code != kMethodNotFound) {
-        if (first.code != 0) throw A2ARpcError(first.code, first.message);
-        throw std::runtime_error(first.message);
+    if (ok) {
+        remember_probe(WireDialect::V1_0);
+        co_return value;
     }
-    auto result = co_await rpc_call_async(
-        method_for(WireDialect::V1_0),
-        build(WireDialect::V1_0, std::string()), WireDialect::V1_0);
-    remember_probe(WireDialect::V1_0);
+    if (!probe_falls_back(code, http_status)) {
+        if (code != 0) throw A2ARpcError(code, message);
+        throw std::runtime_error(message);
+    }
+    auto result = co_await post_rpc(base_url_, method_for(WireDialect::V0_3),
+                                    build(WireDialect::V0_3, std::string()), WireDialect::V0_3);
+    remember_probe(WireDialect::V0_3);
     co_return result;
 }
 
@@ -392,6 +489,7 @@ A2AClient::fetch_agent_card_async(bool force) {
         std::lock_guard<std::mutex> lock(*state_mutex_);
         cached_card_ = card;
         card_loaded_ = true;
+        card_unavailable_ = false;
         card_loading_ = false;
         selection_.reset();  // re-select from the fresh card on the next RPC
     }
@@ -408,16 +506,9 @@ AgentCard A2AClient::fetch_agent_card(bool force) {
 // ---------------------------------------------------------------------------
 
 namespace {
-std::string fresh_uuid_like() {
-    // Not cryptographic — just a unique ID per call. Spec only
-    // requires uniqueness within the session.
-    static std::atomic<std::uint64_t> counter{0};
-    auto n = counter.fetch_add(1, std::memory_order_relaxed);
-    char buf[40];
-    std::snprintf(buf, sizeof(buf), "ng-a2a-msg-%016llx",
-                  static_cast<unsigned long long>(n));
-    return buf;
-}
+/// messageId is the sender's unique id (spec 4.1.4); agents may de-duplicate
+/// on it, so it must not repeat across processes: a random UUID.
+std::string fresh_message_id() { return detail::random_uuid(); }
 }  // namespace
 
 asio::awaitable<Task>
@@ -441,7 +532,7 @@ Task A2AClient::send_message_sync(const std::string& text,
                                   const std::string& task_id,
                                   const std::string& context_id) {
     MessageSendParams params;
-    params.message.message_id = fresh_uuid_like();
+    params.message.message_id = fresh_message_id();
     params.message.role       = Role::User;
     params.message.parts.push_back(Part::text_part(text));
     if (!task_id.empty())    params.message.task_id    = task_id;
@@ -568,6 +659,12 @@ void accumulate(Task& acc, const StreamEvent& ev) {
             if (acc.id.empty())         acc.id = u.task_id;
             if (acc.context_id.empty()) acc.context_id = u.context_id;
             acc.status = u.status;
+            // As the SDK task managers do: an update's metadata (a failure
+            // code, the invocation status) becomes the task's.
+            if (u.metadata.is_object() && !u.metadata.empty()) {
+                if (!acc.metadata.is_object()) acc.metadata = json::object();
+                for (auto [key, value] : u.metadata.items()) acc.metadata[key] = value;
+            }
             if (u.status.message) {
                 const auto& m = *u.status.message;
                 if (acc.history.empty() || m.message_id.empty()
@@ -599,7 +696,7 @@ void accumulate(Task& acc, const StreamEvent& ev) {
 }  // namespace
 
 Task A2AClient::stream_once(WireDialect dialect, const std::string& tenant,
-                            const MessageSendParams& params,
+                            const std::string& url, const MessageSendParams& params,
                             const EventCallback& on_event, bool& saw_events) {
     json p;
     to_json(p, params, dialect);
@@ -613,7 +710,7 @@ Task A2AClient::stream_once(WireDialect dialect, const std::string& tenant,
         {"params",  p},
     };
     auto body_str = body.dump();
-    auto endpoint = async::split_async_endpoint(base_url_);
+    auto endpoint = async::split_async_endpoint(url);
     std::vector<std::pair<std::string, std::string>> headers = {
         {"Content-Type", "application/json"},
         {"Accept",       "text/event-stream"},
@@ -692,8 +789,7 @@ Task A2AClient::stream_once(WireDialect dialect, const std::string& tenant,
     splitter.finish(frame_handler);
 
     if (http_status < 200 || http_status >= 300) {
-        throw std::runtime_error(
-            "A2A error (HTTP " + std::to_string(http_status) + "): " + raw_body);
+        throw HttpStatusError(http_status, raw_body);
     }
     if (!saw_events && !rpc_error) {
         // A server that answers a streaming request with a plain JSON-RPC
@@ -708,21 +804,25 @@ Task A2AClient::stream_once(WireDialect dialect, const std::string& tenant,
 Task A2AClient::send_message_stream(const MessageSendParams& params,
                                     EventCallback on_event) {
     bool saw_events = false;
-    if (auto sel = resolve_selection()) {
-        return stream_once(sel->dialect, sel->tenant, params, on_event, saw_events);
+    if (auto sel = async::run_sync(select_async())) {
+        return stream_once(sel->dialect, sel->tenant, sel->url, params, on_event, saw_events);
     }
-    // Dialect unknown (no card fetched): same probe as unary calls.
+    // No card could be fetched: the same probe as unary calls, 1.0 first.
+    // Once an event was observed the dialect is settled and nothing is
+    // re-sent.
     try {
-        auto task = stream_once(WireDialect::V0_3, std::string(), params,
+        auto task = stream_once(WireDialect::V1_0, std::string(), base_url_, params,
                                 on_event, saw_events);
-        remember_probe(WireDialect::V0_3);
+        remember_probe(WireDialect::V1_0);
         return task;
     } catch (const A2ARpcError& e) {
-        if (saw_events || e.code() != kMethodNotFound) throw;
+        if (saw_events || !probe_falls_back(e.code(), 0)) throw;
+    } catch (const HttpStatusError& e) {
+        if (saw_events || !probe_falls_back(0, e.status())) throw;
     }
-    auto task = stream_once(WireDialect::V1_0, std::string(), params,
+    auto task = stream_once(WireDialect::V0_3, std::string(), base_url_, params,
                             on_event, saw_events);
-    remember_probe(WireDialect::V1_0);
+    remember_probe(WireDialect::V0_3);
     return task;
 }
 
@@ -731,7 +831,7 @@ Task A2AClient::send_message_stream(const std::string& text,
                                     const std::string& task_id,
                                     const std::string& context_id) {
     MessageSendParams params;
-    params.message.message_id = fresh_uuid_like();
+    params.message.message_id = fresh_message_id();
     params.message.role       = Role::User;
     params.message.parts.push_back(Part::text_part(text));
     if (!task_id.empty())    params.message.task_id    = task_id;

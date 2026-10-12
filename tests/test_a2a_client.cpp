@@ -68,6 +68,9 @@ struct MockA2AServer {
     /// `result`. Object shape: {"code": -32600, "message": "..."}.
     json forced_error = json();
 
+    /// When false the well-known card path answers 404 (no card).
+    bool serve_card = true;
+
     /// Card returned from /.well-known/agent-card.json.
     json card = json::parse(R"({
         "name": "mock-agent",
@@ -89,6 +92,10 @@ struct MockA2AServer {
                     {
                         std::lock_guard<std::mutex> lock(observed_mutex);
                         last_card_request_path = req.path;
+                    }
+                    if (!serve_card) {
+                        res.status = 404;
+                        return;
                     }
                     res.status = 200;
                     res.set_content(card.dump(), "application/json");
@@ -557,6 +564,8 @@ struct MockV1Server {
     std::atomic<int>         rpc_count{0};
 
     json card = json::object();
+    /// When false the well-known card path answers 404 (no card).
+    bool serve_card = true;
     /// Returned as `result` for unary methods.
     json unary_result = json::parse(R"({
         "task": {
@@ -586,6 +595,10 @@ struct MockV1Server {
         })");
         svr.Get("/.well-known/agent-card.json",
                 [this](const httplib::Request&, httplib::Response& res) {
+                    if (!serve_card) {
+                        res.status = 404;
+                        return;
+                    }
                     res.set_content(card.dump(), "application/json");
                 });
         svr.Post("/", [this](const httplib::Request& req, httplib::Response& res) {
@@ -700,27 +713,75 @@ TEST(A2AClientV1, MessageOnlyResultBecomesCompletedTask) {
     EXPECT_EQ(task.history[0].parts[0].text, "just a message");
 }
 
-TEST(A2AClientV1, WithoutCardProbeFallsBackToV1BodyAndIsRemembered) {
-    // The regression: the fallback used to retry PascalCase `SendMessage`
-    // with the 0.3 body (`kind` fields), which a v1 server rejects with
-    // -32602 "Invalid params".
+TEST(A2AClientV1, FirstCallFetchesTheCardBeforeAnyRpc) {
+    // A2A-03: the client selects the dialect from the card, so a 1.0-only
+    // agent never sees a 0.3 probe.
     MockV1Server srv;
     A2AClient client(srv.url());
     EXPECT_FALSE(client.wire_dialect().has_value());
+    auto task = client.send_message_sync("first");
+
+    ASSERT_EQ(srv.rpc_count.load(), 1);
+    EXPECT_EQ(srv.methods[0], "SendMessage");
+    EXPECT_EQ(srv.versions[0], "1.0");
+    EXPECT_FALSE(has_key_deep(srv.bodies[0], "kind"));
+    EXPECT_EQ(task.status.state, TaskState::Completed);
+    EXPECT_EQ(client.wire_dialect(), WireDialect::V1_0);
+}
+
+TEST(A2AClientV1, WithoutCardProbeTriesV1FirstAndIsRemembered) {
+    MockV1Server srv;
+    srv.serve_card = false;
+    A2AClient client(srv.url());
     auto task = client.send_message_sync("probe");
 
-    ASSERT_EQ(srv.rpc_count.load(), 2);
-    EXPECT_EQ(srv.methods[0], "message/send");
-    EXPECT_EQ(srv.methods[1], "SendMessage");
-    EXPECT_EQ(srv.versions[1], "1.0");
-    EXPECT_FALSE(has_key_deep(srv.bodies[1], "kind"));
-    EXPECT_EQ(srv.bodies[1]["message"].value("role", std::string()), "ROLE_USER");
+    ASSERT_EQ(srv.rpc_count.load(), 1);
+    EXPECT_EQ(srv.methods[0], "SendMessage");
+    EXPECT_EQ(srv.versions[0], "1.0");
+    EXPECT_FALSE(has_key_deep(srv.bodies[0], "kind"));
+    EXPECT_EQ(srv.bodies[0]["message"].value("role", std::string()), "ROLE_USER");
     EXPECT_EQ(task.status.state, TaskState::Completed);
     EXPECT_EQ(client.wire_dialect(), WireDialect::V1_0);
 
     (void)client.send_message_sync("again");
-    ASSERT_EQ(srv.rpc_count.load(), 3) << "probe outcome is remembered";
-    EXPECT_EQ(srv.methods[2], "SendMessage");
+    ASSERT_EQ(srv.rpc_count.load(), 2) << "probe outcome is remembered";
+    EXPECT_EQ(srv.methods[1], "SendMessage");
+}
+
+TEST(A2AClientV1, WithoutCardProbeFallsBackToV03OnVersionNotSupported) {
+    // A 0.3-only agent answers A2A-Version 1.0 with -32009 (spec 3.6.2).
+    httplib::Server svr;
+    std::vector<std::string> methods;
+    std::mutex mu;
+    svr.Post("/", [&](const httplib::Request& req, httplib::Response& res) {
+        auto parsed = json::parse(req.body);
+        const auto method = parsed.value("method", std::string());
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            methods.push_back(method);
+        }
+        json env = {{"jsonrpc", "2.0"}, {"id", parsed["id"]}};
+        if (!req.get_header_value("A2A-Version").empty()) {
+            env["error"] = {{"code", -32009}, {"message", "version not supported"}};
+        } else {
+            env["result"] = json::parse(R"({"kind": "task", "id": "t-03", "contextId": "c",
+                "status": {"state": "completed"}})");
+        }
+        res.set_content(env.dump(), "application/json");
+    });
+    const int port = svr.bind_to_any_port("127.0.0.1");
+    std::thread t([&] { svr.listen_after_bind(); });
+    for (int i = 0; i < 200 && !svr.is_running(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    A2AClient client("http://127.0.0.1:" + std::to_string(port));
+    auto task = client.send_message_sync("probe legacy");
+    svr.stop();
+    t.join();
+    ASSERT_EQ(methods.size(), 2u);
+    EXPECT_EQ(methods[0], "SendMessage");
+    EXPECT_EQ(methods[1], "message/send");
+    EXPECT_EQ(task.id, "t-03");
+    EXPECT_EQ(client.wire_dialect(), WireDialect::V0_3);
 }
 
 TEST(A2AClientV1, LegacyCardKeepsSlashMethodsAndKindBody) {
@@ -829,14 +890,13 @@ TEST(A2AClientV1, StreamingUsesSendStreamingMessageAndAssemblesTask) {
 TEST(A2AClientV1, StreamingProbeSurfacesJsonRpcErrorBodyInsteadOfEmptyTask) {
     // Non-SSE JSON-RPC error replies used to be swallowed (empty Task).
     MockV1Server srv;
+    srv.serve_card = false;
     srv.sse_body = "data: " + json({{"result", srv.unary_result}}).dump() + "\n\n";
     A2AClient client(srv.url());
-    // No card: the 0.3 probe (`message/stream`) gets -32601, the client
-    // retries as SendStreamingMessage with an actual completed task.
+    // No card: the 1.0 probe (`SendStreamingMessage`) is the first attempt.
     auto task = client.send_message_stream("hi", nullptr);
-    ASSERT_EQ(srv.methods.size(), 2u);
-    EXPECT_EQ(srv.methods[0], "message/stream");
-    EXPECT_EQ(srv.methods[1], "SendStreamingMessage");
+    ASSERT_EQ(srv.methods.size(), 1u);
+    EXPECT_EQ(srv.methods[0], "SendStreamingMessage");
     EXPECT_EQ(client.wire_dialect(), WireDialect::V1_0);
     EXPECT_EQ(task.status.state, TaskState::Completed);
     ASSERT_TRUE(task.status.message);
@@ -882,22 +942,27 @@ TEST(A2AClientV1, CallerNodeReturnsAnswerNotInterimHistoryNote) {
     EXPECT_EQ(out.writes[0].value, json("final answer"));
 }
 
-TEST(A2AClientV1, OnlyNumericMethodNotFoundAllowsProbeFallback) {
-    for (const auto& error : {
-            json{{"code", -32602}, {"message", "Method not found (-32601)"}},
-            json{{"code", "-32601"}, {"message", "Method not found"}},
-            json{{"code", -32009}, {"message", "version not supported"}}}) {
+TEST(A2AClientV1, OnlyNumericDialectErrorsAllowProbeFallback) {
+    // Without a card, -32601 and -32009 mean "not this dialect" and the
+    // probe tries 0.3; any other error is the agent's answer.
+    struct Case { json error; int attempts; };
+    for (const auto& c : {
+            Case{json{{"code", -32602}, {"message", "Method not found (-32601)"}}, 1},
+            Case{json{{"code", "-32601"}, {"message", "Method not found"}}, 1},
+            Case{json{{"code", -32601}, {"message", "Method not found"}}, 2},
+            Case{json{{"code", -32009}, {"message", "version not supported"}}, 2}}) {
         MockA2AServer server;
-        server.forced_error = error;
+        server.serve_card = false;
+        server.forced_error = c.error;
         A2AClient client(server.url());
-        if (error["code"].is_number_integer()) {
-            EXPECT_THROW(client.send_message_sync("no retry"), A2ARpcError);
+        if (c.error["code"].is_number_integer()) {
+            EXPECT_THROW(client.send_message_sync("probe"), A2ARpcError);
         } else {
-            EXPECT_THROW(client.send_message_sync("no retry"), std::runtime_error);
+            EXPECT_THROW(client.send_message_sync("probe"), std::runtime_error);
         }
-        EXPECT_EQ(server.rpc_count.load(), 1);
-        EXPECT_THROW(client.send_message_stream("no retry", nullptr), A2ARpcError);
-        EXPECT_EQ(server.rpc_count.load(), 2);
+        EXPECT_EQ(server.rpc_count.load(), c.attempts);
+        EXPECT_THROW(client.send_message_stream("probe", nullptr), A2ARpcError);
+        EXPECT_EQ(server.rpc_count.load(), 2 * c.attempts);
         EXPECT_FALSE(client.wire_dialect());
     }
 }
@@ -905,9 +970,10 @@ TEST(A2AClientV1, OnlyNumericMethodNotFoundAllowsProbeFallback) {
 TEST(A2AClientV1, ObservedStreamEventProhibitsDialectRedispatch) {
     for (bool install_callback : {false, true}) {
         MockV1Server server;
-        server.probe_sse_body =
-            "data: " + json({{"result", {{"kind", "status-update"},
-                {"taskId", "observed"}, {"status", {{"state", "working"}}}}}}).dump()
+        server.serve_card = false;
+        server.sse_body =
+            "data: " + json({{"result", {{"statusUpdate", {
+                {"taskId", "observed"}, {"status", {{"state", "TASK_STATE_WORKING"}}}}}}}}).dump()
             + "\n\ndata: " + json({{"error", {{"code", -32601},
                 {"message", "Method not found"}}}}).dump() + "\n\n";
         A2AClient client(server.url());
@@ -923,11 +989,13 @@ TEST(A2AClientV1, ObservedStreamEventProhibitsDialectRedispatch) {
 
 TEST(A2AClientV1, CallerAbortDoesNotReceiveLaterFramesOrRedispatch) {
     MockV1Server server;
-    server.probe_sse_body =
-        "data: " + json({{"result", {{"kind", "status-update"},
-            {"taskId", "aborted"}, {"status", {{"state", "working"}}}}}}).dump()
-        + "\n\ndata: " + json({{"result", {{"kind", "task"},
-            {"id", "aborted"}, {"status", {{"state", "completed"}}}}}}).dump() + "\n\n";
+    server.serve_card = false;
+    server.sse_body =
+        "data: " + json({{"result", {{"statusUpdate", {
+            {"taskId", "aborted"}, {"status", {{"state", "TASK_STATE_WORKING"}}}}}}}}).dump()
+        + "\n\ndata: " + json({{"result", {{"task", {
+            {"id", "aborted"}, {"status", {{"state", "TASK_STATE_COMPLETED"}}}}}}}}).dump()
+        + "\n\n";
     A2AClient client(server.url());
     int delivered = 0;
     auto task = client.send_message_stream("abort", [&](const StreamEvent&) {
@@ -1043,5 +1111,103 @@ TEST(A2AClientV1, SendConfigurationReachesSelectedDialectWire) {
     EXPECT_EQ(legacy.last_params["configuration"],
         (json{{"blocking", true}, {"historyLength", 7},
               {"acceptedOutputModes", {"text/plain"}}}));
+}
+
+// ---------------------------------------------------------------------------
+// Endpoint policy (spec 8.3.2) and message ids (spec 4.1.4).
+// ---------------------------------------------------------------------------
+struct SubPathAgent {
+    httplib::Server svr;
+    std::thread     t;
+    int             port = 0;
+    std::mutex      mu;
+    std::vector<std::string> paths;
+    std::string     interface_url;   ///< empty: this server's /a2a/v1
+
+    SubPathAgent() {
+        svr.Get("/.well-known/agent-card.json",
+                [this](const httplib::Request&, httplib::Response& res) {
+                    const auto url = interface_url.empty()
+                        ? "http://127.0.0.1:" + std::to_string(port) + "/a2a/v1"
+                        : interface_url;
+                    json card = {{"name", "sub-path"}, {"description", "d"}, {"version", "1"},
+                                 {"supportedInterfaces", json::array({json{
+                                     {"url", url}, {"protocolBinding", "JSONRPC"},
+                                     {"protocolVersion", "1.0"}}})},
+                                 {"capabilities", json::object()},
+                                 {"defaultInputModes", json::array({"text/plain"})},
+                                 {"defaultOutputModes", json::array({"text/plain"})},
+                                 {"skills", json::array()}};
+                    res.set_content(card.dump(), "application/json");
+                });
+        auto handler = [this](const httplib::Request& req, httplib::Response& res) {
+            {
+                std::lock_guard<std::mutex> lock(mu);
+                paths.push_back(req.path);
+            }
+            auto parsed = json::parse(req.body);
+            json env = {{"jsonrpc", "2.0"}, {"id", parsed["id"]},
+                        {"result", json::parse(R"({"task": {"id": "t", "contextId": "c",
+                            "status": {"state": "TASK_STATE_COMPLETED"}}})")}};
+            res.set_content(env.dump(), "application/json");
+        };
+        svr.Post("/a2a/v1", handler);
+        svr.Post("/", handler);
+        port = svr.bind_to_any_port("127.0.0.1");
+        t = std::thread([this] { svr.listen_after_bind(); });
+        for (int i = 0; i < 200 && !svr.is_running(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ~SubPathAgent() { svr.stop(); if (t.joinable()) t.join(); }
+    std::string url() const { return "http://127.0.0.1:" + std::to_string(port); }
+};
+
+TEST(A2AClientEndpoint, FollowsSameOriginInterfaceUrlOnASubPath) {
+    SubPathAgent agent;
+    A2AClient client(agent.url());
+    EXPECT_EQ(client.send_message_sync("sub path").status.state, TaskState::Completed);
+    EXPECT_EQ(client.endpoint_url(), agent.url() + "/a2a/v1");
+    std::lock_guard<std::mutex> lock(agent.mu);
+    ASSERT_EQ(agent.paths.size(), 1u);
+    EXPECT_EQ(agent.paths[0], "/a2a/v1");
+}
+
+TEST(A2AClientEndpoint, CrossOriginInterfaceRequiresOptIn) {
+    SubPathAgent other;
+    SubPathAgent agent;
+    agent.interface_url = other.url() + "/a2a/v1";
+
+    A2AClient client(agent.url());
+    EXPECT_EQ(client.send_message_sync("same origin only").status.state,
+              TaskState::Completed);
+    EXPECT_EQ(client.endpoint_url(), agent.url());
+    {
+        std::lock_guard<std::mutex> lock(agent.mu);
+        ASSERT_EQ(agent.paths.size(), 1u) << "a card cannot redirect to another origin";
+    }
+
+    A2AClient opted(agent.url());
+    opted.set_allow_cross_origin_interfaces(true);
+    EXPECT_EQ(opted.send_message_sync("cross origin").status.state, TaskState::Completed);
+    EXPECT_EQ(opted.endpoint_url(), other.url() + "/a2a/v1");
+    std::lock_guard<std::mutex> lock(other.mu);
+    ASSERT_EQ(other.paths.size(), 1u);
+    EXPECT_EQ(other.paths[0], "/a2a/v1");
+}
+
+TEST(A2AClientEndpoint, MessageIdsAreRandomVersion4Uuids) {
+    MockA2AServer srv;
+    A2AClient first(srv.url());
+    A2AClient second(srv.url());
+    (void)first.send_message_sync("one");
+    (void)second.send_message_sync("two");
+    std::lock_guard<std::mutex> lock(srv.observed_mutex);
+    ASSERT_EQ(srv.message_ids.size(), 2u);
+    EXPECT_NE(srv.message_ids[0], srv.message_ids[1]);
+    for (const auto& id : srv.message_ids) {
+        ASSERT_EQ(id.size(), 36u) << id;
+        EXPECT_EQ(id[14], '4') << id;  // version 4
+        EXPECT_NE(std::string("89ab").find(id[19]), std::string::npos) << id;
+    }
 }
 }  // namespace

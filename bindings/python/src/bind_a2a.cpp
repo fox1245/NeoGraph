@@ -177,7 +177,7 @@ void init_a2a(py::module_& m) {
             return "<a2a.AgentCard name=" + v.name + " url=" + v.url + " skills=[" + std::to_string(v.skill_names.size()) + "]>";
         });
     py::class_<A2AClient, std::shared_ptr<A2AClient>>(a2a, "A2AClient",
-        "Thread-safe native A2A client; discovery and successful probes select the actual wire dialect.")
+        "Thread-safe native A2A client; the first call fetches the AgentCard and selects its interface; without a card it probes 1.0 first.")
         .def(py::init<std::string>(), py::arg("base_url"))
         .def("set_timeout", [](A2AClient& self, double seconds) {
             if (!std::isfinite(seconds) || seconds < std::numeric_limits<int>::min() || seconds > std::numeric_limits<int>::max())
@@ -187,6 +187,11 @@ void init_a2a(py::module_& m) {
         .def("wire_dialect", &A2AClient::wire_dialect,
             "None until the first card-selected RPC or successful probe; forced discovery resets selection.")
         .def("set_authorization_header", &A2AClient::set_authorization_header, py::arg("authorization_header"))
+        .def("set_allow_cross_origin_interfaces", &A2AClient::set_allow_cross_origin_interfaces,
+            py::arg("allow"),
+            "Let the AgentCard direct RPCs to an interface URL on another origin (default False).")
+        .def("endpoint_url", &A2AClient::endpoint_url,
+            "The JSON-RPC endpoint in use: the selected interface URL, or base_url.")
         .def("fetch_agent_card", [](A2AClient& self, bool force) {
             py::gil_scoped_release release;
             return self.fetch_agent_card(force);

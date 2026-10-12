@@ -12,11 +12,11 @@
  *
  * Two wire generations are spoken (see WireDialect in types.h): the A2A
  * 1.0 protobuf-JSON form (PascalCase methods, `A2A-Version: 1.0` header,
- * `ROLE_*` / `TASK_STATE_*` enums, flat Parts, no `kind`) and the 0.3
- * JSON-Schema form (slash-form methods, `kind` discriminators). The
- * dialect is selected from the AgentCard's `supportedInterfaces` /
- * `protocolVersion` once the card has been fetched; before that it is
- * learned by probing (0.3 first, 1.0 on "method not found").
+ * `ROLE_*` / `TASK_STATE_*` enums, flat Parts, no `kind`) — the primary
+ * version — and the 0.3 JSON-Schema form (slash-form methods, `kind`
+ * discriminators), kept for compatibility. The first call fetches the
+ * AgentCard and selects an interface from it; only when no card can be
+ * fetched does the client probe, 1.0 first.
  */
 #pragma once
 
@@ -61,17 +61,26 @@ class NEOGRAPH_API A2ARpcError : public std::runtime_error {
  * their own synchronization for shared application state. Reuses
  * neograph::async::async_post for transport.
  *
- * Dialect selection: after @ref fetch_agent_card the first RPC picks the
+ * Interface selection (spec 8.3.2): before its first RPC the client fetches
+ * the AgentCard (unless @ref fetch_agent_card already did) and picks the
  * first `supportedInterfaces` entry with a `JSONRPC` binding and a `1.x`
  * (-> WireDialect::V1_0) or `0.x` (-> V0_3) protocol version, preferring an
  * entry whose URL equals the client's `base_url`; a 0.3 card without
  * `supportedInterfaces` selects V0_3 from its `protocolVersion` /
  * `preferredTransport` / `additionalInterfaces`. When the card offers no
  * compatible interface the call throws `std::runtime_error` naming what the
- * card offers. The RPC endpoint is always `base_url` (card URLs only take
- * part in the choice); a selected interface `tenant` is copied into every
- * request. Without a fetched card the client sends 0.3 first and switches
- * to 1.0 on a -32601 reply, remembering the outcome.
+ * card offers. A selected interface `tenant` is copied into every request.
+ *
+ * Endpoint policy: RPCs go to the selected interface's URL when it has the
+ * same origin (scheme, host, port) as `base_url`, for example an agent whose
+ * JSON-RPC endpoint is at `/a2a/v1`. A card cannot redirect the client to
+ * another origin unless @ref set_allow_cross_origin_interfaces opts in; a
+ * cross-origin (or unusable) interface URL is otherwise ignored and the RPC
+ * goes to `base_url`.
+ *
+ * When no card can be fetched, the client probes: 1.0 first, then 0.3 when
+ * the agent answers -32601 (method not found), -32009 (version not
+ * supported) or HTTP 400, and remembers the outcome.
  *
  * @code
  * a2a::A2AClient client("https://agent.example.com");
@@ -88,6 +97,11 @@ class NEOGRAPH_API A2AClient {
 
     /// Override the default 30 s request timeout.
     void set_timeout(std::chrono::seconds t);
+
+    /// Allow the AgentCard to direct RPCs to an interface URL on another
+    /// origin than `base_url` (default false: such URLs are ignored and RPCs
+    /// go to `base_url`). Takes effect at the next interface selection.
+    void set_allow_cross_origin_interfaces(bool allow);
 
     /// Wire dialect in use: selected from the fetched AgentCard or learned by
     /// probing. `nullopt` until the first card-selected RPC / successful probe.
@@ -168,6 +182,10 @@ class NEOGRAPH_API A2AClient {
 
     const std::string& base_url() const { return base_url_; }
 
+    /// The JSON-RPC endpoint in use: the selected interface URL, or
+    /// `base_url` before a selection or when the policy ignores the card URL.
+    std::string endpoint_url() const;
+
   private:
     std::string base_url_;
     std::chrono::seconds timeout_ = std::chrono::seconds(30);
@@ -179,12 +197,16 @@ class NEOGRAPH_API A2AClient {
     /// Cached agent card (populated by fetch_agent_card).
     AgentCard cached_card_;
     bool      card_loaded_ = false;
+    /// The card could not be fetched; calls probe instead of refetching.
+    bool      card_unavailable_ = false;
+    bool      allow_cross_origin_ = false;
     std::string authorization_header_;
 
-    /// Dialect/tenant chosen from the card or learned by probing.
+    /// Dialect/tenant/endpoint chosen from the card or learned by probing.
     struct Selection {
         WireDialect dialect = WireDialect::V0_3;
         std::string tenant;
+        std::string url;   ///< JSON-RPC endpoint
     };
     std::optional<Selection> selection_;
 
@@ -192,7 +214,12 @@ class NEOGRAPH_API A2AClient {
     /// dialect is still unknown. Throws when the card has no compatible
     /// interface.
     std::optional<Selection> resolve_selection();
+    /// resolve_selection(), fetching the card first when none was fetched.
+    asio::awaitable<std::optional<Selection>> select_async();
     void remember_probe(WireDialect dialect);
+
+    asio::awaitable<json> post_rpc(const std::string& url, const std::string& method,
+                                   const json& params, std::optional<WireDialect> dialect);
 
     /// One unary A2A call: picks the method name and request body for the
     /// resolved (or probed) dialect. @p build receives the dialect and the
@@ -201,7 +228,7 @@ class NEOGRAPH_API A2AClient {
         const char* v1_method, const char* v03_method,
         const std::function<json(WireDialect, const std::string& tenant)>& build);
 
-    Task stream_once(WireDialect dialect, const std::string& tenant,
+    Task stream_once(WireDialect dialect, const std::string& tenant, const std::string& url,
                      const MessageSendParams& params, const EventCallback& on_event,
                      bool& saw_events);
 

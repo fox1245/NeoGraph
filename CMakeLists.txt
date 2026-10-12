@@ -1010,6 +1010,7 @@ endif()
 if(NEOGRAPH_BUILD_A2A)
     add_library(neograph_a2a
         src/a2a/types.cpp
+        src/a2a/ids.cpp
         src/a2a/collaboration.cpp
         src/a2a/client.cpp
         src/a2a/server.cpp
