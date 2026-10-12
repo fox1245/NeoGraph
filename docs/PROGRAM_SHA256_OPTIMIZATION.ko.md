@@ -3,36 +3,36 @@
 
 **Languages:** [English](PROGRAM_SHA256_OPTIMIZATION.md) | [한국어](PROGRAM_SHA256_OPTIMIZATION.ko.md) | [日本語](PROGRAM_SHA256_OPTIMIZATION.ja.md) | [简体中文](PROGRAM_SHA256_OPTIMIZATION.zh-CN.md)
 
-런타임 조건으로 선택하는 x86 SHA 명령어로 측정된 64 KiB identity-hash 비용이 약 **6.2배** 줄었다. 앞선 canonical JSON 최적화(`779be451`)와 짝지어 비교한 큰 input case에서 Program latency는 **memory store 약 28%, SQLite 20%, PostgreSQL 8%** 개선되었다. 작은 database case에서는 유의미한 개선을 확립하지 못했다.
+런타임에 사용 여부를 판단하는 x86 SHA 명령으로, 측정한 64 KiB 식별자 해시 비용이 약 **6.2배** 줄었습니다. 앞선 정규 JSON 최적화(`779be451`)와 비교하면, 입력이 큰 경우 쌍별 Program 지연 시간이 memory 저장소에서 약 **28%**, SQLite에서 **20%**, PostgreSQL에서 **8%** 개선되었습니다. 작은 데이터베이스 케이스에서는 의미 있는 개선을 확인하지 못했습니다.
 
 ## 구현과 호환성
 
-원래 scalar SHA-256 compression과 padding을 `canonical_json.cpp`에서 내부 `sha256.cpp` module로 옮겼다. 별도의 inline되지 않는 x86-64 함수가 SHA 명령어로 round와 message schedule을 수행한다. register layout은 출처를 명시한 public-domain [SHA-Intrinsics reference](https://github.com/noloader/SHA-Intrinsics/blob/d03795497f3e4576083fc2cd8fe0b924f24d0bb2/sha256-x86.c)를 따른다. 구현은 회전하는 4-vector schedule을 사용한다. 원래 scalar 구현도 계속 사용할 수 있다.
+기존의 스칼라 SHA-256 압축과 패딩은 `canonical_json.cpp`에서 내부 모듈 `sha256.cpp`로 옮겼습니다. 인라인하지 않은 별도의 x86-64 함수가 SHA 명령으로 라운드와 메시지 스케줄을 수행합니다. 이 함수의 레지스터 배치는 출처를 밝힌 퍼블릭 도메인 [SHA-Intrinsics 레퍼런스](https://github.com/noloader/SHA-Intrinsics/blob/d03795497f3e4576083fc2cd8fe0b924f24d0bb2/sha256-x86.c)를 따르고, 구현은 벡터 4개를 돌려 가며 쓰는 스케줄을 사용합니다. 기존 스칼라 구현도 그대로 남아 있습니다.
 
-automatic dispatch는 가속 함수를 선택하기 전에 CPUID basic leaf 사용 가능 여부, SSSE3, SSE4.1, SHA 지원을 확인한다. GCC/Clang의 명령어 활성화는 그 함수에만 적용하며 전역 architecture flag를 사용하지 않는다. MSVC는 같은 runtime 검사 아래 같은 intrinsic을 컴파일한다. 다른 architecture와 `NEOGRAPH_ENABLE_SHA256_ACCELERATION=OFF` build는 portable 경로를 선택한다. 추가 library dependency는 도입하지 않았다.
+자동 디스패치는 가속 함수를 고르기 전에 CPUID 기본 leaf의 사용 가능 여부와 SSSE3, SSE4.1, SHA 지원을 확인합니다. GCC/Clang에서는 명령어 활성화를 그 함수 안으로 한정하며 전역 아키텍처 플래그는 쓰지 않습니다. MSVC도 같은 런타임 검사 뒤에서 같은 intrinsic을 컴파일합니다. 다른 아키텍처와 `NEOGRAPH_ENABLE_SHA256_ACCELERATION=OFF`로 빌드한 경우에는 이식 가능한 경로를 선택합니다. 라이브러리 의존성은 추가하지 않았습니다.
 
-private backend selector를 통해 process-wide 동작을 바꾸지 않고 portable/hardware correctness test를 강제로 선택할 수 있다. 설치되는 SDK의 일부는 아니다. hardware를 명시적으로 선택했는데 사용할 수 없으면 예외를 던진다. digest state는 호출별로 local이며 CPU 사용 가능 여부와 선택된 함수 포인터만 cache한다.
+비공개 백엔드 선택기를 쓰면 프로세스 전체의 동작을 바꾸지 않고 이식 가능 경로나 하드웨어 경로를 강제로 골라 정확성 테스트를 할 수 있습니다. 이 선택기는 설치되는 SDK에 포함되지 않습니다. 하드웨어를 명시적으로 선택했는데 쓸 수 없으면 예외를 던집니다. 다이제스트 상태는 호출마다 로컬이며, 캐시되는 것은 CPU 지원 여부와 선택된 함수 포인터뿐입니다.
 
-identity framing은 그대로다. `preamble || NUL || domain || NUL || decimal(payload byte length) || NUL || payload`. padding, digest의 256 bit 전체, 소문자 hexadecimal, `sha256:` prefix를 보존한다. 기존 input-buffer 생성도 그대로 유지한다. 이 변경은 streaming, hash caching, 더 약한 checksum, 새 storage format, 다른 authority/budget 규칙을 도입하지 않는다.
+식별자 프레이밍은 달라지지 않았습니다: `preamble || NUL || domain || NUL || decimal(payload byte length) || NUL || payload`. 패딩, 256비트 다이제스트 전체, 소문자 16진수, `sha256:` 접두사도 그대로입니다. 기존의 입력 버퍼 구성 방식도 유지하며, 이 변경은 스트리밍, 해시 캐싱, 더 약한 체크섬, 새 저장 형식, 다른 권한/예산 규칙을 도입하지 않습니다.
 
-명령어 의미는 [Intel SHA extensions](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sha-extensions.html)를 참조한다. 실행한 Ryzen은 필요한 x86 instruction bit를 노출한다. 이 dispatch는 Intel vendor 전용이 아니다.
+명령어 동작은 [Intel SHA extensions](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sha-extensions.html)를 참고하세요. 측정에 사용한 Ryzen도 필요한 x86 명령어 비트를 제공하며, 이 디스패치는 Intel 벤더에만 한정되지 않습니다.
 
 ## 검증
 
-- 빈 input, `abc`, 56-byte vector, `a` 100만 byte를 포함한 표준 SHA-256 known answer.
-- binary payload, padding 경계, 정렬되지 않은 input view, identity framing, 내장 NUL을 다루는 독립 Python-hashlib vector 35개.
-- portable, automatic, hardware output을 비교하는 결정적인 512-input corpus와 동시 독립 hashing.
-- CPU-feature predicate test가 없는 leaf 또는 필요한 instruction bit의 누락을 거부한다.
-- Linux ASan/UBSan: 일반 build와 가속 비활성 build 모두 SHA test 6개가 전부 통과했다. leak detection을 켰고 suppression은 없었다.
-- Windows MSVC x64: hardware를 사용할 수 있는 경우와 가속을 compile에서 제외한 경우 모두 독립 vector 35개가 통과했다. 이는 native backend correctness 검증이며 전체 Windows Program suite나 performance 주장에는 해당하지 않는다.
-- 집중 Core suite: PostgreSQL checkpoint와 identity consumer를 포함해 217개가 통과했다.
-- 전체 Program suite: 680개 통과, 적용되지 않는 memory-store process-restart case 2개 skip. golden stored identity, SQLite/PostgreSQL recovery, replacement, lineage, budget 검증을 유지한다.
+- 표준 SHA-256 known-answer 테스트를 실행했습니다. 빈 입력, `abc`, 56바이트 벡터, `a` 100만 바이트를 포함합니다.
+- Python hashlib으로 독립적으로 만든 벡터 35개를 확인했습니다. 바이너리 payload, 패딩 경계, 정렬되지 않은 입력 뷰, 식별자 프레이밍, 중간에 NUL이 들어 있는 경우를 다룹니다.
+- 결정적인 512개 입력 코퍼스로 이식 가능 경로, 자동 선택, 하드웨어 경로의 출력을 비교했고, 독립된 해시를 동시에 계산하는 테스트도 했습니다.
+- CPU 기능 판정 테스트는 leaf가 없거나 필요한 명령어 비트가 하나라도 없으면 거부합니다.
+- Linux ASan/UBSan에서 SHA 테스트 6개가 일반 빌드와 가속을 끈 빌드 모두에서 누수 탐지를 켠 채, 억제 설정 없이 통과했습니다.
+- Windows MSVC x64에서 독립 벡터 35개가 하드웨어를 쓸 수 있는 빌드와 가속을 컴파일에서 뺀 빌드 모두에서 통과했습니다. 이는 네이티브 백엔드의 정확성만 확인한 것이며, Windows에서 Program 전체 테스트를 통과했다거나 성능이 좋아졌다는 주장은 아닙니다.
+- 집중 Core 테스트는 217개가 통과했고, PostgreSQL 체크포인트와 식별자를 사용하는 쪽을 포함합니다.
+- Program 전체 테스트는 680개가 통과했고, 해당하지 않는 memory 저장소의 프로세스 재시작 케이스 2개는 건너뛰었습니다. golden으로 저장된 식별자, SQLite/PostgreSQL 복구, 교체, 계보, 예산은 계속 검증됩니다.
 
-## 독립 identity-hash 비교
+## 식별자 해시 단독 비교
 
-input 크기마다 새 process pair 7개, warmup 20회, process마다 hash 측정 500회를 사용했고 1 MiB에서는 100회로 줄였다. AB/BA와 case 순서를 번갈아 사용했다. benchmark는 바뀌지 않은 identity framing과 hex encoding을 포함한다. 반환된 모든 digest를 Python hashlib로 독립 검증했다. 아래 timing은 process별 median들의 median이며 감소율은 paired ratio의 median으로 계산했다.
+입력 크기마다 새 프로세스 쌍 7개를 쓰고, 워밍업은 20번, 프로세스당 측정 해시는 500번이며 1 MiB는 100번으로 줄였습니다. AB/BA 순서와 케이스 순서는 번갈아 바꿨습니다. 벤치마크에는 달라지지 않은 식별자 프레이밍과 16진수 인코딩이 포함됩니다. 반환된 다이제스트는 모두 Python hashlib으로 독립적으로 검증했습니다. 아래의 시간은 프로세스 중앙값의 중앙값이고, 감소율은 쌍별 비율의 중앙값으로 계산했습니다.
 
-| Payload byte | 변경 전 (µs) | 변경 후 (µs) | Paired 감소율 |
+| payload 바이트 | 변경 전 (µs) | 변경 후 (µs) | 쌍별 감소율 |
 | --- | --- | --- | --- |
 | 0 | 0.391 | 0.240 | +38.62% |
 | 32 | 0.591 | 0.291 | +50.76% |
@@ -47,9 +47,9 @@ input 크기마다 새 process pair 7개, warmup 20회, process마다 hash 측�
 
 ## Program 비교
 
-동일한 Ryzen 7 5800X, WSL2 Ubuntu 24.04, repository hardening을 적용한 GCC 13.3 Release `-O3 -DNDEBUG`, Runtime scheduler thread 하나, native-WSL PostgreSQL 16.15 구성을 사용했다. 두 binary는 고정했다. case마다 process pair 5개, process마다 warmup 3회와 invocation 측정 12회, process마다 새 SQLite/PostgreSQL database를 사용했다. 이 timing pair를 측정하는 동안 build, profiler, 다른 test는 실행하지 않았다.
+같은 Ryzen 7 5800X, WSL2 Ubuntu 24.04, 저장소 하드닝을 켠 GCC 13.3 Release `-O3 -DNDEBUG`, Runtime 스케줄러 스레드 하나, 네이티브 WSL의 PostgreSQL 16.15 구성을 썼습니다. 두 바이너리 모두 고정했습니다. 케이스마다 프로세스 쌍 5개를 쓰고 프로세스당 워밍업 3번과 측정 12번을 호출했으며, SQLite/PostgreSQL 데이터베이스는 프로세스마다 새로 만들었습니다. 이 시간 측정 쌍을 실행하는 동안에는 빌드, 프로파일러, 다른 테스트가 돌지 않았습니다.
 
-| Case | 변경 전 (ms) | 변경 후 (ms) | Paired 감소율 | Paired 변경 후/전 범위 |
+| 케이스 | 변경 전 (ms) | 변경 후 (ms) | 쌍별 감소율 | 쌍별 변경 후/변경 전 범위 |
 | --- | --- | --- | --- | --- |
 | direct-0 | 0.0081 | 0.0129 | -3.22% | 0.5786–1.6575 |
 | memory-cpp-0 | 2.0560 | 1.9606 | +4.64% | 0.8751–0.9940 |
@@ -64,26 +64,26 @@ input 크기마다 새 process pair 7개, warmup 20회, process마다 hash 측�
 | postgres-javascript-0-commands-16 | 992.9859 | 991.9219 | +0.21% | 0.9310–1.0355 |
 | postgres-cpp-0 | 53.1536 | 53.1421 | +0.81% | 0.9605–1.0069 |
 
-paired percentage는 독립적으로 요약한 median 열의 비율과 같을 필요가 없다. 큰 input의 개선은 pair 5개 모두에서 일관되었다. ratio가 1의 양쪽에 분포한 작은 case는 결론을 내릴 수 없다. 보편적인 속도 향상이나 LLM 응답 시간 비교가 아니다.
+쌍별 백분율은 독립적으로 요약한 두 중앙값 열의 비율과 같지 않을 수 있습니다. 입력이 큰 케이스의 개선은 다섯 쌍 모두에서 일관되었습니다. 비율이 1의 양쪽에 걸쳐 있는 작은 케이스는 결론을 낼 수 없습니다. 이 결과는 모든 워크로드에 통하는 속도 향상도, LLM 응답 시간의 비교도 아닙니다.
 
-매우 작은 direct-Core 행의 noise가 커서 더 넓은 control을 한 번 수행했다. pair 7개, warmup 100회, direct invocation 측정 10,000회를 사용했다. 변경 후/전 ratio의 median은 1.0014, 범위는 0.9838–1.0331이었다. 유의미한 direct-Core 변화를 확립하지 못했다.
+아주 작은 direct-Core 행은 잡음이 컸기 때문에, 쌍 7개, 워밍업 100번, 측정 direct 호출 10,000번으로 범위를 넓힌 대조 측정을 하나 더 했습니다. 변경 후/변경 전 비율의 중앙값은 1.0014, 범위는 0.9838–1.0331이었습니다. direct-Core에 의미 있는 변화가 있었다고 볼 수는 없습니다.
 
-## Machine code와 후속 증거
+## 기계어 분석과 후속 증거
 
-owner-local AgentX radare2 read-only peer가 content-addressed 변경 후 ELF를 검사했다. symbol 경계 내 disassembly는 `compress_x86_sha` 안의 `SHA256RNDS2`, `SHA256MSG1`, `SHA256MSG2`, 검사한 portable compressor 안에 SHA 명령어가 없음, availability check의 CPUID 명령어를 확인했다. 특수 함수는 baseline 경로와 분리되어 있다.
+소유자 로컬 AgentX radare2 읽기 전용 피어가 내용 주소 방식으로 지정한 변경 후 ELF를 분석했습니다. 심볼 범위로 한정한 디스어셈블리에서 `compress_x86_sha` 안에 `SHA256RNDS2`, `SHA256MSG1`, `SHA256MSG2`가 있고, 확인한 이식 가능 압축 함수에는 SHA 명령이 없으며, 사용 가능 여부를 검사하는 코드에 CPUID 명령이 있음을 확인했습니다. 전용 함수는 기존 경로와 분리되어 있습니다.
 
-변경 후 64 KiB memory workload의 software CPU-clock profile은 sample 1,418개를 수집했으며 loss는 0이었다. hardware compressor는 sample 약 9.31%, unescaped-string scanning은 17.91%를 차지했다. 약 39%는 해석하지 못한 shared-library symbol로 남아 있으므로 추가 attribution 없이 전부 allocation으로 돌려서는 안 된다. 이는 전체 process의 leaf-IP profile이지 wall-time 분할이 아니며 대표 timing에는 사용하지 않았다.
+변경 후 64 KiB memory 워크로드의 소프트웨어 CPU 클럭 프로파일에서 샘플 1,418개를 유실 없이 수집했습니다. 하드웨어 압축 함수가 샘플의 약 9.31%였고 이스케이프가 필요 없는 문자열 스캔은 17.91%였습니다. 약 39%는 해석하지 못한 공유 라이브러리 심볼에 남아 있는데, 더 정확한 귀속 없이 전부 할당의 몫으로 돌려서는 안 됩니다. 이 결과는 프로세스 전체의 leaf IP 프로파일이며 벽시계 시간의 분할이 아니고, 대표 시간 측정에는 사용하지 않았습니다.
 
-AgentX는 owner가 직접 허가한 analysis peer로 사용했다. AgentX model WorkOrder 또는 Analysis Graph provenance import를 주장하지 않는다. service configuration은 변경하지 않았다.
+AgentX는 소유자가 허가한 분석 피어로 직접 사용했습니다. AgentX 모델 WorkOrder나 Analysis Graph 출처(provenance) 가져오기는 주장하지 않습니다. AgentX 서비스 설정은 바꾸지 않았습니다.
 
-## 재현과 보존된 증거
+## 재현 방법과 보관한 증거
 
-변경 전 revision(`779be451`)과 변경 revision에서 같은 Release option으로 `bench_sha256`와 `bench_program_cost`를 빌드한다. 새 identity benchmark source는 오래된 Core library에 연결해 컴파일할 수 있다. 예:
+변경 전 리비전(`779be451`)과 변경된 리비전에서 `bench_sha256`과 `bench_program_cost`를 같은 Release 옵션으로 빌드합니다. 새 식별자 벤치마크 소스는 예전 Core 라이브러리에 대해서도 컴파일할 수 있습니다. 예시는 다음과 같습니다.
 
 ```sh
 bench_sha256 65536 500
 ```
 
-end-to-end 비교에는 [paired Program runner](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md)를 사용한다. build 시 가속을 끄려면 `-DNEOGRAPH_ENABLE_SHA256_ACCELERATION=OFF`를 설정한다.
+엔드 투 엔드 비교에는 [쌍별 Program 실행기](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md)를 사용합니다. 빌드할 때 가속을 끄려면 `-DNEOGRAPH_ENABLE_SHA256_ACCELERATION=OFF`를 지정합니다.
 
-raw result, 독립 vector, source/binary hash, upstream source 신원, AgentX RPC record, 경계가 제한된 assembly, CPU sample/map, Windows smoke log, test log는 `artifacts/program-sha256-20260907/`에 local 보존한다. database file은 WSL에 남아 있다. credential은 포함하지 않는다.
+원시 결과, 독립 벡터, 소스/바이너리 해시, 업스트림 소스 식별 정보, AgentX RPC 기록, 범위를 한정한 어셈블리, CPU 샘플/맵, Windows 스모크 로그, 테스트 로그는 로컬의 `artifacts/program-sha256-20260907/`에 보관합니다. 데이터베이스 파일은 WSL에 남아 있습니다. 자격 증명은 포함하지 않았습니다.

@@ -1,44 +1,44 @@
 <!-- neograph-i18n: source=docs/PROGRAM_CANONICAL_JSON_OPTIMIZATION.md locale=ko source_sha256=21e00a791dfa14a8b9748d723c10121eb2c8acdbd477978e058c932110f2d41d -->
-# AgentX 분석을 활용한 canonical JSON 최적화 — 2026-09-07
+# AgentX 분석을 이용한 정규 JSON 최적화 — 2026-09-07
 
 **Languages:** [English](PROGRAM_CANONICAL_JSON_OPTIMIZATION.md) | [한국어](PROGRAM_CANONICAL_JSON_OPTIMIZATION.ko.md) | [日本語](PROGRAM_CANONICAL_JSON_OPTIMIZATION.ja.md) | [简体中文](PROGRAM_CANONICAL_JSON_OPTIMIZATION.zh-CN.md)
 
-측정한 64 KiB Program workload에서 string scan/copy를 묶어 처리하자 이미 최적화된 command-head 구현(`ef56ff89`)에 비해 latency가 **memory store 약 54%, SQLite 50%, PostgreSQL 26%** 줄었다. 개선은 native canonical JSON 처리에서 나온다. 이 실험은 JIT backend를 평가하지 않는다.
+측정한 64 KiB Program 워크로드에서, 문자열 스캔과 복사를 묶어서 처리하자 이미 최적화된 command-head 구현(`ef56ff89`)보다 지연 시간이 memory 저장소에서는 약 **54%**, SQLite에서는 **50%**, PostgreSQL에서는 **26%** 줄었습니다. 이 개선은 네이티브 정규 JSON 처리에서 나온 것이며, 이 실험은 JIT 백엔드를 평가하지 않습니다.
 
-## 변경 선택의 근거
+## 변경을 선택한 근거
 
-owner-local AgentX radare2 MCP peer(connector version 1.8.6)가 content 신원으로 정확히 고정한 Release ELF를 검사했다. artifact 열기, symbol lookup, read-only disassembly만 사용했다. function disassembly는 처음에 analysis metadata가 없다고 보고했다. read-only service는 `analyze`를 제공하지 않는다. 주소 기반 `disassemble`은 성공했으며 `nm`의 ELF symbol 주소/크기로 발견 사항의 범위를 제한했다.
+소유자 로컬 AgentX radare2 MCP 피어(커넥터 버전 1.8.6)가 고정된 Release ELF를 내용 식별자로 정확히 지정해 분석했습니다. 사용한 기능은 아티팩트 열기, 심볼 조회, 읽기 전용 디스어셈블리뿐입니다. 함수 디스어셈블리는 처음에 분석 메타데이터가 없다고 보고했는데, 읽기 전용 서비스가 `analyze`를 제공하지 않기 때문입니다. 주소 기반 `disassemble`은 성공했고, 결과는 `nm`으로 얻은 ELF 심볼의 주소와 크기 범위 안으로 한정했습니다.
 
-그 후 Linux software CPU-clock sampler는 새로 생성한 benchmark process와 그 thread만 실행하며 kernel/hypervisor sample을 제외했다. 주기는 1 ms, buffer는 per-CPU inherited buffer를 사용했다. 이는 setup, 호출자 측 verification, teardown을 포함한 전체 process의 leaf-IP profile이다. wall-time 분할이나 inclusive call graph가 아니다. 해석하지 못한 shared-library symbol은 명시적으로 미해결 상태로 남긴다.
+이어서 Linux 소프트웨어 CPU 클럭 샘플러를 새로 만든 벤치마크 프로세스와 그 스레드에만 적용해 실행했고, 커널/하이퍼바이저 샘플은 제외했습니다. 샘플링 주기는 1 ms이며 CPU별 상속 버퍼를 썼습니다. 이 결과는 준비, 호출자 쪽 검증, 정리를 포함한 프로세스 전체의 leaf IP 프로파일이며, 벽시계 시간의 분할이나 포함형(inclusive) 호출 그래프가 아닙니다. 공유 라이브러리 심볼 중 해석하지 못한 것은 해석하지 못한 상태 그대로 표시했습니다.
 
-- 작은 memory input: sample 4,196개, loss 0.
-- 64 KiB memory input: sample 5,155개, loss 0. `append_escaped`가 sample 25.68%, UTF-8 sequence validation이 17.58%, escaped-size 계산이 11.68%로 합계 약 55%를 차지했다.
-- AgentX disassembly는 오래된 loop가 `0x66a349`에서 UTF-8 validation을 호출하고 반환된 sequence 길이만큼 진행하는 모습을 보였다. 이 길이는 모든 ASCII byte에 대해 1이었다. source 검사에서도 byte별 escape-size loop와 output loop가 별도로 있음을 확인했다.
+- 작은 memory 입력: 샘플 4,196개, 유실 0.
+- 64 KiB memory 입력: 샘플 5,155개, 유실 0. `append_escaped`가 샘플의 25.68%, UTF-8 시퀀스 검증이 17.58%, 이스케이프 후 크기 계산이 11.68%를 차지했고, 합치면 약 55%입니다.
+- AgentX 디스어셈블리에서 예전 루프는 `0x66a349`에서 UTF-8 검증을 호출하고 반환된 시퀀스 길이만큼 전진했는데, 이 길이는 ASCII 바이트마다 1이었습니다. 소스를 살펴보니 이스케이프 크기 계산과 출력도 각각 바이트 단위 루프였습니다.
 
-이 증거를 바탕으로 추측에 기반한 VM 변경보다 string 처리를 먼저 선택했다. 아래의 별도 unprofiled 비교가 측정된 개선을 결정한다. sampling API는 [Linux perf_event_open](https://man7.org/linux/man-pages/man2/perf_event_open.2.html)을 참조한다.
+이 근거를 바탕으로, 추측에 기댄 VM 변경보다 문자열 처리를 먼저 손보기로 했습니다. 실제로 얼마나 개선되었는지는 프로파일링하지 않고 따로 비교한 아래 측정이 보여 줍니다. 샘플링 API 참고: [Linux perf_event_open](https://man7.org/linux/man-pages/man2/perf_event_open.2.html).
 
-## 변경과 불변 조건
+## 변경 내용과 불변 조건
 
-`src/core/canonical_json.cpp`는 이제 8-byte word 전체에서 ASCII 또는 JSON escape byte를 검사한 다음 나머지를 scalar 방식으로 처리한다. 정렬되지 않은 word는 `memcpy`로 읽고 repeated-byte mask는 byte order에 의존하지 않는다. UTF-8 validation은 ASCII 구간을 한 번에 소비하며 기존 non-ASCII 유효성 규칙을 유지한다. string 출력은 검증 후 escape가 필요 없는 span을 한 연산으로 append한다.
+`src/core/canonical_json.cpp`는 이제 8바이트 단위로 완전한 워드를 읽어 ASCII 바이트인지, JSON 이스케이프 대상 바이트가 있는지 검사하고, 나머지는 스칼라 방식으로 처리합니다. 정렬되지 않은 워드는 `memcpy`로 읽으며, 바이트를 반복해 만든 마스크는 바이트 순서에 의존하지 않습니다. UTF-8 검증은 ASCII 구간을 한 번에 소비하고, ASCII가 아닌 바이트의 유효성 규칙은 기존 그대로입니다. 문자열을 내보낼 때는 검증을 마친 뒤 이스케이프가 필요 없는 구간을 한 번에 이어 붙입니다.
 
-size 계산은 raw-size 하한에서 시작해 escape 확장량을 더한다. newline 같은 짧은 escape를 포함해 모든 control byte에 적용하던 보수적인 6-byte 계산을 유지한다. 16 MiB 한도, 유효하지 않은 UTF-8 거부, escape byte, 정렬된 key, number encoding, owned-value 동작, content 신원은 바뀌지 않는다. 새 dependency, architecture별 compiler option, public API, SQL query, persistence setting을 도입하지 않았다.
+크기 계산은 원본 크기를 하한으로 삼고 거기에 이스케이프로 늘어나는 양을 더합니다. 줄바꿈처럼 짧게 이스케이프되는 경우를 포함해, 제어 바이트마다 6바이트를 잡는 기존의 보수적 계산은 그대로입니다. 16 MiB 한도, 잘못된 UTF-8 거부, 이스케이프되는 바이트, 정렬된 키, 숫자 인코딩, 소유 값(owned-value)의 동작, 콘텐츠 식별자는 달라지지 않았습니다. 새 의존성, 특정 아키텍처 전용 컴파일러 옵션, 공개 API, SQL 쿼리, 영속화 설정은 추가하지 않았습니다.
 
-변경 후 ELF도 같은 AgentX peer로 검사했다. `0x668710`의 `unescaped_prefix`에는 `mov rax, qword [r8 + rcx]`가 있으며 `rcx`를 8씩 증가시킨다. 컴파일된 code에 의도한 wide-load loop가 있음을 확인한다.
+변경 후 ELF도 같은 AgentX 피어로 살펴보았습니다. `0x668710`의 `unescaped_prefix`에는 `mov rax, qword [r8 + rcx]`가 있고 `rcx`를 8씩 전진시키므로, 의도한 와이드 로드 루프가 컴파일된 코드에 들어갔음을 확인할 수 있습니다.
 
 ## 정확성 검증
 
-- 새 canonical JSON test 6개는 word 경계 주변의 모든 ASCII byte, Unicode/escaping 혼합, 결정적인 Unicode corpus 4,096개, ASCII prefix 뒤의 유효하지 않은 UTF-8, 짧거나 정렬되지 않은 view, 보수적인 materialized-size 경계를 다룬다.
-- 같은 test 6개가 AddressSanitizer와 UndefinedBehaviorSanitizer에서 통과했다. leak detection을 포함했고 suppression은 없었다.
-- 집중 Core test 211개가 두 번의 실행에 걸쳐 통과했다. 처음 180개, 이후 전용 backend를 활성화한 PostgreSQL checkpoint case 31개 전부다.
-- 전체 Program suite: 680개 통과, 적용되지 않는 memory-store process-restart case 2개 skip. golden canonical identity와 SQLite/PostgreSQL recovery, lineage, replacement, budget 검사를 포함한다.
-- 모든 microbenchmark output이 독립 scalar escape oracle과 일치했고 모든 Program invocation이 예상 counter와 전체 payload를 유지했다.
-- 검증 환경은 WSL GCC 13.3이었다. Windows, ARM, sanitizer로 전체 engine을 검증했다는 주장은 하지 않는다.
+- 새 정규 JSON 테스트 6개가 워드 경계 부근의 모든 ASCII 바이트, 유니코드와 이스케이프가 섞인 경우, 결정적인 4,096건짜리 유니코드 코퍼스, ASCII 접두사 뒤의 잘못된 UTF-8, 짧거나 정렬되지 않은 뷰, 보수적인 구체화 크기의 경계를 다룹니다.
+- 같은 테스트 6개는 AddressSanitizer와 UndefinedBehaviorSanitizer로(누수 탐지 포함) 억제 설정 없이 통과했습니다.
+- 집중 Core 테스트 211개가 두 번의 실행에서 통과했습니다. 처음에 180개가, 그다음 전용 백엔드를 켠 PostgreSQL 체크포인트 케이스 31개가 모두 통과했습니다.
+- Program 전체 테스트는 680개가 통과했고, 해당하지 않는 memory 저장소의 프로세스 재시작 케이스 2개는 건너뛰었습니다. golden 정규 식별자와 SQLite/PostgreSQL의 복구, 계보, 교체, 예산 검사를 포함합니다.
+- 마이크로벤치마크 출력은 모두 독립적인 스칼라 이스케이프 오라클과 일치했고, Program 호출은 모두 기대한 카운터와 전체 payload를 유지했습니다.
+- 검증은 WSL의 GCC 13.3에서 했습니다. Windows, ARM, 엔진 전체에 대한 sanitizer 검증은 주장하지 않습니다.
 
-## String 전용 benchmark
+## 문자열 전용 벤치마크
 
-case마다 새 process pair 7개, warmup 20회, process마다 serialization 측정 500회를 사용하고 AB/BA와 case 순서를 번갈아 바꿨다. input에는 ASCII, 한국어/emoji, escape가 있는 mixed text, control/quote/backslash가 많은 case가 있다. 준비와 전체 output verification은 timed call 밖에서 수행한다. 1 µs 미만의 작은 case는 timer 해상도에 가까우므로 정밀한 regression gate로 사용해서는 안 된다.
+케이스마다 새 프로세스 쌍 7개를 쓰고, 프로세스마다 워밍업 20번과 측정 직렬화 500번을 실행했으며, AB/BA 순서와 케이스 순서는 번갈아 바꿨습니다. 입력에는 ASCII, 한글/이모지, 이스케이프가 섞인 텍스트, 제어 문자/따옴표/백슬래시가 많은 경우가 있습니다. 준비 작업과 출력 전체 검증은 시간 측정 구간 밖입니다. 1마이크로초 미만의 아주 작은 케이스는 타이머 해상도에 가까우므로 정밀한 퇴행 게이트로 쓰면 안 됩니다.
 
-| Input | 변경 전 median (µs) | 변경 후 median (µs) | Paired 감소율 median |
+| 입력 | 변경 전 중앙값 (µs) | 변경 후 중앙값 (µs) | 쌍별 감소율 중앙값 |
 | --- | --- | --- | --- |
 | ascii-8 | 0.060 | 0.050 | +16.67% |
 | ascii-32 | 0.190 | 0.090 | +50.28% |
@@ -54,11 +54,11 @@ case마다 새 process pair 7개, warmup 20회, process마다 serialization 측�
 | mixed-65536 | 295.183 | 169.748 | +42.37% |
 | escaped-65536 | 492.026 | 416.920 | +14.27% |
 
-## Program runtime 비교
+## Program 런타임 비교
 
-`compare_program_costs.py`를 사용해 case마다 새 process pair 5개, warmup 3회, process마다 invocation 측정 12회를 수행했다. 두 binary를 고정했으며 변경 전 binary는 앞선 command-head 최적화다. 같은 Ryzen 7 5800X, WSL ext4, repository hardening을 적용한 Release `-O3 -DNDEBUG`, Runtime scheduler thread 하나, native-WSL PostgreSQL 16.15 구성을 사용했다. 각 database case는 새 database로 시작한다. 이 timing pair를 측정하는 동안 build, profiler, 다른 test job은 실행하지 않았다.
+`compare_program_costs.py`를 써서 케이스마다 새 프로세스 쌍 5개를 실행했고, 프로세스마다 워밍업 3번과 측정 12번을 호출했습니다. 두 바이너리 모두 고정했으며, 변경 전 바이너리는 앞선 command-head 최적화 상태입니다. 같은 Ryzen 7 5800X, WSL ext4, 저장소 하드닝을 켠 Release `-O3 -DNDEBUG`, Runtime 스케줄러 스레드 하나, 네이티브 WSL의 PostgreSQL 16.15 구성을 썼습니다. 데이터베이스 케이스는 매번 새 데이터베이스에서 시작합니다. 이 시간 측정 쌍을 실행하는 동안에는 빌드, 프로파일러, 다른 테스트 작업이 돌지 않았습니다.
 
-| Case | 변경 전 median (ms) | 변경 후 median (ms) | Paired 감소율 median | Paired ratio 범위 |
+| 케이스 | 변경 전 중앙값 (ms) | 변경 후 중앙값 (ms) | 쌍별 감소율 중앙값 | 쌍별 비율 범위 |
 | --- | --- | --- | --- | --- |
 | direct-0 | 0.0078 | 0.0078 | +0.83% | 0.7911–1.2164 |
 | memory-cpp-0 | 2.1190 | 1.9813 | +9.03% | 0.9054–0.9640 |
@@ -73,20 +73,20 @@ case마다 새 process pair 7개, warmup 20회, process마다 serialization 측�
 | postgres-javascript-0-commands-16 | 973.4043 | 945.9677 | +2.14% | 0.9462–1.0037 |
 | postgres-cpp-0 | 51.8192 | 50.9214 | +1.73% | 0.8937–0.9983 |
 
-percentage는 paired ratio를 요약하므로 독립적인 두 median 열의 비율과 같을 필요가 없다. 아주 작은 direct-Core timing과 작은 database case는 상대적 분산이 크다. 큰 input의 개선은 pair 5개 모두에서 일관되었다. 이는 synthetic engine overhead이며 chatbot/model 응답 시간이나 모든 workload의 속도 향상이 아니다.
+백분율은 쌍별 비율을 요약한 값이므로, 독립된 두 중앙값 열의 비율과 같지 않을 수 있습니다. 아주 작은 direct-Core 시간과 작은 데이터베이스 케이스는 상대적 편차가 큽니다. 입력이 큰 케이스의 개선은 다섯 쌍 모두에서 일관되었습니다. 이 결과는 합성 엔진 오버헤드이며, 챗봇/모델 응답 시간이나 모든 워크로드에 통하는 속도 향상이 아닙니다.
 
-## 남은 부분
+## 남은 과제
 
-후속 64 KiB CPU profile은 sample 2,317개를 수집했고 loss는 0이었다. SHA-256 identity 계산이 sample 약 35.17%, unescaped-span scanning이 10.96%, UTF-8 validation이 1.90%를 차지했다. hash 비율이 커진 것은 전체 작업이 줄어든 결과이지 hashing이 느려졌다는 증거가 아니다. 미해결 비용을 전부 allocation이나 copying에 배정하기 전에 shared-library symbol의 attribution을 개선해야 한다.
+이후 64 KiB CPU 프로파일에서 샘플 2,317개를 유실 없이 수집했습니다. SHA-256 식별자 계산이 샘플의 약 35.17%, 이스케이프가 필요 없는 구간 스캔이 10.96%, UTF-8 검증이 1.90%를 차지했습니다. 해시의 비중이 커진 것은 전체 작업량이 줄어든 결과이며, 해시가 느려졌다는 증거가 아닙니다. 해석하지 못한 비용을 모두 할당이나 복사의 몫으로 돌리려면, 먼저 공유 라이브러리 심볼의 귀속을 더 정확히 해야 합니다.
 
-## 재현과 범위
+## 재현 방법과 범위
 
-`ef56ff89`와 변경 revision에서 같은 Release option으로 `bench_canonical_json`과 `bench_program_cost`를 빌드한다. 새 microbenchmark source는 변경 전 library를 바꾸지 않고 그 library에 연결해 빌드할 수 있다. micro command 예:
+`ef56ff89`와 변경된 리비전에서 `bench_canonical_json`과 `bench_program_cost`를 같은 Release 옵션으로 빌드합니다. 새 마이크로벤치마크 소스는 변경 전 라이브러리를 수정하지 않고 그 라이브러리에 대해 빌드할 수 있습니다. 마이크로벤치마크 실행 예시는 다음과 같습니다.
 
 ```sh
 bench_canonical_json unicode 65536 500
 ```
 
-end-to-end case에는 [paired Program 비교](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md)를 사용한다. raw RPC request/response, tool schema, ELF/source hash, CPU sample/map, helper source, micro/runtime result, test log는 `artifacts/program-canonical-agentx-20260907/` 아래 local 보존한다. 완전한 read-only input ELF는 할당된 AgentX artifact root의 digest 기반 directory에 남아 있으며 evidence에 credential은 포함하지 않는다.
+엔드 투 엔드 케이스는 [쌍별 Program 비교](PROGRAM_COMMAND_HEAD_OPTIMIZATION.md)를 사용합니다. 원시 RPC 요청/응답, 도구 스키마, ELF/소스 해시, CPU 샘플/맵, 보조 소스, 마이크로/런타임 결과, 테스트 로그는 로컬의 `artifacts/program-canonical-agentx-20260907/`에 보관합니다. 읽기 전용 입력 ELF 전체는 할당된 AgentX 아티팩트 루트의, 다이제스트로 이름 붙인 디렉터리에 남아 있습니다. 증거에는 자격 증명이 포함되어 있지 않습니다.
 
-owner가 허가한 host에서 AgentX analysis peer를 직접 사용했다. AgentX model WorkOrder를 시작하거나 새 ToolBindingSet을 게시하거나 AgentX Analysis Graph에 record를 import하지 않았다. 그 workflow/provenance guarantee는 주장하지 않는다. AgentX service configuration과 다른 application data는 바꾸지 않았다.
+이 작업은 소유자가 허가한 호스트에서 AgentX의 분석 피어를 직접 사용했습니다. AgentX 모델 WorkOrder를 시작하거나, 새 ToolBindingSet을 게시하거나, AgentX Analysis Graph로 레코드를 가져오지는 않았습니다. 이러한 워크플로/출처(provenance) 보장은 주장하지 않습니다. AgentX 서비스 설정과 그 밖의 애플리케이션 데이터는 바꾸지 않았습니다.
