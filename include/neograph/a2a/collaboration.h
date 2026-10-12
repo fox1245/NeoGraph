@@ -153,6 +153,16 @@ struct NEOGRAPH_API CollaborationEnvelope {
     bool is_terminal() const noexcept;
 };
 
+/// The A2A extension (spec 4.6) a server that accepts collaboration envelopes
+/// declares in its card's `capabilities.extensions`. Such a message carries a
+/// data part `{"format": "neograph-a2a-collaboration-v1", "envelope": ...}`
+/// and `metadata.neograph_collaboration`, and names its receiver task id up
+/// front, so delivering it again is idempotent. Only authenticated peers of a
+/// linked collaboration may send one.
+inline constexpr std::string_view COLLABORATION_EXTENSION_URI =
+    "https://github.com/fox1245/NeoGraph/blob/master/docs/reference-en.md"
+    "#a2a-collaboration-extension";
+
 /// Convert a logical collaboration envelope into an ordinary A2A Message.
 NEOGRAPH_API Message collaboration_to_message(const CollaborationEnvelope& envelope);
 

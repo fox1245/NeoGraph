@@ -973,6 +973,32 @@ AgentCard A2AServer::Impl::served_card(const httplib::Request& req) const {
             {"description", "The Authorization header the agent's authenticator accepts"},
         }}}}};
     }
+    if (program_adapter && program_adapter->mailbox()) {
+        // A2A-26: the collaboration envelope, whose sender names the receiver
+        // task up front, is a declared extension rather than a silent one.
+        bool declared = false;
+        if (c.extensions.is_array()) {
+            for (const auto& extension : c.extensions) {
+                if (extension.is_object()
+                    && extension.value("uri", std::string()) == COLLABORATION_EXTENSION_URI) {
+                    declared = true;
+                }
+            }
+        } else {
+            c.extensions = json::array();
+        }
+        if (!declared) {
+            c.extensions.push_back(json{
+                {"uri", std::string(COLLABORATION_EXTENSION_URI)},
+                {"description", "NeoGraph collaboration envelopes between linked, "
+                                "authenticated peers: the sender names the receiver task "
+                                "id, so a redelivery is idempotent."},
+                {"required", false},
+                {"params", {{"format", "neograph-a2a-collaboration-v1"},
+                            {"metadataKey", "neograph_collaboration"}}},
+            });
+        }
+    }
     if (collaboration_authenticator && require_authenticated_requests
         && !c.security_requirements.is_array()) {
         const auto [name, _] = declared_http_auth();

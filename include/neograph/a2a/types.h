@@ -266,6 +266,11 @@ struct NEOGRAPH_API AgentCard {
     /// 1.0 `securityRequirements`: an array of
     /// `{"schemes": {"<name>": {"list": [<scope>...]}}}`. Null when none.
     json security_requirements;
+    /// `capabilities.extensions` (both versions): an array of AgentExtension
+    /// objects `{uri, description, required, params}`. Null when none. A
+    /// server that accepts NeoGraph collaboration envelopes adds
+    /// COLLABORATION_EXTENSION_URI (collaboration.h).
+    json extensions;
 
     /// Full original document as received. Preserves fields we don't yet model.
     json raw;

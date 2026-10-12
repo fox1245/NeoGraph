@@ -556,6 +556,7 @@ void to_json(json& j, const AgentCard& c) {
     json caps = json::object();
     caps["streaming"]         = c.streaming;
     caps["pushNotifications"] = c.push_notifications;
+    if (c.extensions.is_array() && !c.extensions.empty()) caps["extensions"] = c.extensions;
     j["capabilities"] = std::move(caps);
 
     if (!c.supported_interfaces.empty()) {
@@ -594,6 +595,7 @@ void to_json(json& j, const AgentCard& c, WireDialect dialect) {
     caps["streaming"]         = c.streaming;
     caps["pushNotifications"] = c.push_notifications;
     caps["extendedAgentCard"] = c.extended_card || c.supports_authenticated_extended;
+    if (c.extensions.is_array() && !c.extensions.empty()) caps["extensions"] = c.extensions;
     j["capabilities"] = std::move(caps);
 
     if (c.security_schemes.is_object() && !c.security_schemes.empty()) {
@@ -641,6 +643,8 @@ void from_json(const json& j, AgentCard& c) {
             // 1.0 `capabilities.extendedAgentCard`; a 0.3 card uses the
             // top-level `supportsAuthenticatedExtendedCard` instead.
             c.extended_card      = cap.value("extendedAgentCard", false);
+            if (cap.contains("extensions") && cap["extensions"].is_array())
+                c.extensions = cap["extensions"];
         }
     }
     c.supports_authenticated_extended = j.value("supportsAuthenticatedExtendedCard", false);

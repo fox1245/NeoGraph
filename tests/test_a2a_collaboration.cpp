@@ -752,6 +752,12 @@ TEST(A2ACollaboration, AuthenticatedPeerGatesProgramRequestAndTaskAccess) {
     // The card declares the scheme the authenticator accepts (A2A-12).
     const auto card_json = client.fetch_agent_card().raw;
     EXPECT_EQ(card_json["securitySchemes"]["bearer"]["type"], "http");
+    // The collaboration envelope is a declared extension (A2A-26).
+    const auto extensions = card_json["capabilities"]["extensions"];
+    ASSERT_TRUE(extensions.is_array()) << card_json.dump();
+    ASSERT_EQ(extensions.size(), 1u) << card_json.dump();
+    EXPECT_EQ(extensions[0]["uri"], std::string(COLLABORATION_EXTENSION_URI));
+    EXPECT_EQ(extensions[0]["required"], false);
 
     // Spec 7.4: missing credentials are the binding's auth error (HTTP 401
     // with a challenge), not an AUTH_REQUIRED task.
@@ -885,6 +891,8 @@ TEST(A2ACollaboration, StrictAuthenticationAlsoGatesOrdinaryProgramTasks) {
     // Strict authentication is a global security requirement in the card.
     const auto card_json = client.fetch_agent_card().raw;
     EXPECT_EQ(card_json["security"][0]["bearer"], json::array());
+    // No mailbox, no collaboration envelopes: no extension is claimed.
+    EXPECT_FALSE(card_json["capabilities"].contains("extensions")) << card_json.dump();
 
     auto expect_unauthenticated = [&](const std::function<void()>& call) {
         try {
