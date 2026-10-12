@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=98ae3ff902524bde879db22f4a564d4fc7a9af9ee26d42aaff5b57986f174e16 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=8fe4f054f24c4c06bec5128afc3875d098dacc2ec4a1940bfef47ed1b57458e6 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3075,7 +3075,8 @@ elicitation)도 선언하지 않기 때문입니다. 메시지는 `method`가 �
 서버가 응답 전에 닫은 스트림은 스트림의 `retry` 간격이 지난 뒤 `GET`과 `Last-Event-ID`로
 이어 받습니다. `initialize` 후 클라이언트는 공식 클라이언트들처럼, 어떤 호출에도 속하지
 않는 메시지를 위해 세션의 선택적 `GET` 이벤트 스트림을 엽니다. 그런 스트림이 없는 서버는
-405로 응답합니다. 세션 id를 실은 요청에 서버가 404로 응답하면 세션이 끝난 것입니다.
+405로 응답하며, 클라이언트는 이를 실패가 아니라 스트림이 없다는 뜻으로 받아들여 다시 요청하지
+않고 세션과 호출을 그대로 이어 갑니다. 세션 id를 실은 요청에 서버가 404로 응답하면 세션이 끝난 것입니다.
 클라이언트는 새 세션을 초기화하고 요청을 한 번 다시 보냅니다. `shutdown()`과 마지막
 참조의 해제는 최대 2초로 제한된 `DELETE`로 세션을 끝냅니다.
 

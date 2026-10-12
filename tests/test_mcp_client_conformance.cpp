@@ -383,6 +383,65 @@ TEST(MCPClientConformance, TheSessionEndsWithDelete) {
     EXPECT_EQ(deletes[0].version, "2025-11-25");
 }
 
+// After initialize the client opens the optional GET event stream, as the
+// official TypeScript client does. A server without one answers 405 (MCP
+// transports, "Listening for Messages"): that means no stream, not a
+// failure. The client asks once, keeps its session and its calls work.
+TEST(MCPClientConformance, AServerWithoutTheGetStreamIsNotAnError) {
+    Recorder recorder;
+    std::atomic<int> sessions{0};
+    httplib::Server svr;
+    svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+        recorder.add(req);
+        const auto request = json::parse(req.body);
+        if (common(request, res, "g" + std::to_string(++sessions))) return;
+        if (request.value("method", "") == "tools/list") {
+            res.set_content(envelope(request["id"],
+                                     {{"tools", json::array({{{"name", "echo"},
+                                                              {"inputSchema", {{"type", "object"}}}}})}}),
+                            "application/json");
+            return;
+        }
+        res.set_content(envelope(request["id"], text_result("ok")), "application/json");
+    });
+    svr.Get("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+        recorder.add(req);
+        res.status = 405;
+        res.set_header("Allow", "POST, DELETE");
+    });
+    svr.Delete("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+        recorder.add(req);
+        res.status = 204;
+    });
+    Guard server(svr);
+    mcp::MCPClient client(server.url());
+    std::atomic<int> list_changes{0};
+    client.set_tool_list_changed_handler([&] { ++list_changes; });
+    ASSERT_TRUE(client.initialize("no-stream"));
+    {
+        std::unique_lock lock(recorder.mu);
+        ASSERT_TRUE(recorder.changed.wait_for(lock, 5s, [&] {
+            for (const auto& item : recorder.seen)
+                if (item.method == "GET") return true;
+            return false;
+        }));
+    }
+    std::this_thread::sleep_for(300ms);  // a retry would come within this
+    EXPECT_EQ(client.get_tool_definitions().size(), 1u);
+    for (int i = 0; i < 2; ++i) {
+        const auto result = client.call_tool_result("echo", json::object());
+        EXPECT_FALSE(result.is_error);
+        EXPECT_EQ(result.content[0]["text"], "ok");
+    }
+    EXPECT_TRUE(client.is_initialized());
+    const auto gets = recorder.http("GET");
+    ASSERT_EQ(gets.size(), 1u) << "the client asked again after 405";
+    EXPECT_EQ(gets[0].session, "g1");
+    EXPECT_EQ(recorder.with_method("initialize").size(), 1u);
+    for (const auto& call : recorder.with_method("tools/call")) EXPECT_EQ(call.session, "g1");
+    EXPECT_EQ(list_changes.load(), 0);
+}
+
 // MCP-C-08: the URL tool constructor keeps one session for all its calls and
 // ends it with the tool.
 TEST(MCPClientConformance, TheUrlToolKeepsOneSession) {

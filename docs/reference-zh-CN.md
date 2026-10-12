@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=98ae3ff902524bde879db22f4a564d4fc7a9af9ee26d42aaff5b57986f174e16 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=8fe4f054f24c4c06bec5128afc3875d098dacc2ec4a1940bfef47ed1b57458e6 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3012,7 +3012,8 @@ public:
 `data`、`id`、`retry`），对在调用的事件流上到达的服务器请求，在保持该流打开的同时用单独的
 POST 应答，并在应答到达后停止读取该流。服务器在应答之前关闭的流，会在流的 `retry` 间隔之后
 用 `GET` 和 `Last-Event-ID` 续接。`initialize` 之后，客户端像官方客户端一样，为不属于任何
-调用的消息打开会话的可选 `GET` 事件流；没有该流的服务器返回 405。如果服务器对携带会话 id
+调用的消息打开会话的可选 `GET` 事件流；没有该流的服务器返回 405，客户端将其视为没有该流
+而不是失败：不再请求，会话及其调用照常继续。如果服务器对携带会话 id
 的请求返回 404，说明会话已结束：客户端初始化一个新会话，并重新发送该请求一次。
 `shutdown()` 和最后一个引用的释放会用最多两秒的 `DELETE` 结束会话。
 

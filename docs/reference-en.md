@@ -3142,7 +3142,9 @@ open, and stops reading a stream once its response arrived. A stream the server
 closes before the response is resumed with `GET` and `Last-Event-ID` after the
 stream's `retry` interval. After `initialize` the client opens the optional
 `GET` event stream of its session for messages that belong to no call, as the
-official clients do; a server without one answers 405. When the server answers
+official clients do; a server without one answers 405, which the client takes
+as no stream, not as a failure: it does not ask again, and the session and its
+calls go on. When the server answers
 404 for a request that carried the session id, the session has ended: the
 client initializes a new one and sends the request again, once. `shutdown()`
 and the release of the last reference end the session with `DELETE`, bounded
