@@ -1178,9 +1178,15 @@ TEST(A2AClientEndpoint, CrossOriginInterfaceRequiresOptIn) {
     agent.interface_url = other.url() + "/a2a/v1";
 
     A2AClient client(agent.url());
-    EXPECT_EQ(client.send_message_sync("same origin only").status.state,
-              TaskState::Completed);
+    testing::internal::CaptureStderr();
+    const auto state = client.send_message_sync("same origin only").status.state;
+    const auto warning = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(state, TaskState::Completed);
     EXPECT_EQ(client.endpoint_url(), agent.url());
+    // The fallback is not silent: it names the origin it did not follow.
+    EXPECT_NE(warning.find("[neograph] warning: the A2A AgentCard"), std::string::npos) << warning;
+    EXPECT_NE(warning.find(other.url()), std::string::npos) << warning;
+    EXPECT_NE(warning.find("set_allow_cross_origin_interfaces"), std::string::npos) << warning;
     {
         std::lock_guard<std::mutex> lock(agent.mu);
         ASSERT_EQ(agent.paths.size(), 1u) << "a card cannot redirect to another origin";

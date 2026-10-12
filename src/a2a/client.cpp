@@ -92,6 +92,18 @@ std::optional<Origin> origin_of(const std::string& url) {
     }
 }
 
+/// An origin for a log line. The host comes from a remote card, so anything
+/// but printable ASCII is replaced.
+std::string printable_origin(const Origin& origin) {
+    std::string out = origin.tls ? "https://" : "http://";
+    out += origin.host.find(':') != std::string::npos ? "[" + origin.host + "]" : origin.host;
+    out += ":" + origin.port;
+    for (auto& c : out) {
+        if (c < 0x20 || c > 0x7e) c = '?';
+    }
+    return out;
+}
+
 bool iequals(std::string_view a, std::string_view b) {
     return a.size() == b.size()
         && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
@@ -150,7 +162,19 @@ std::string interface_endpoint(const std::string& interface_url, const std::stri
     }
     const auto target = origin_of(candidate);
     if (!target) return base_url;
-    if (!allow_cross_origin && origin_of(base_url) != target) return base_url;
+    const auto base = origin_of(base_url);
+    if (!allow_cross_origin && base != target) {
+        // Keep the address the caller chose, but say why the card's
+        // interface is not used. FILE* stderr: see graph_executor.cpp.
+        const auto here = base ? printable_origin(*base) : std::string("the client's base_url");
+        std::fprintf(stderr,
+                     "[neograph] warning: the A2A AgentCard served at %s names an interface "
+                     "on another origin (%s); sending to %s instead. Call "
+                     "A2AClient::set_allow_cross_origin_interfaces(true) to follow it.\n",
+                     here.c_str(), printable_origin(*target).c_str(), here.c_str());
+        std::fflush(stderr);
+        return base_url;
+    }
     return candidate;
 }
 
