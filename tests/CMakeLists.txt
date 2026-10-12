@@ -451,6 +451,18 @@ if(NEOGRAPH_BUILD_GRPC)
         neograph::grpc SchemaProvider::transport GTest::gtest_main)
     add_test(NAME neograph.grpc_graph_contract
              COMMAND neograph_grpc_graph_contract_tests)
+
+    # Each public header on its own, in a translation unit that includes
+    # nothing else of gRPC: the service factories return a pointer to
+    # ::grpc::Service, which has to be complete wherever it is destroyed.
+    foreach(_header tool_service checkpoint)
+        add_executable(neograph_grpc_${_header}_header_tests
+            test_grpc_${_header}_header.cpp)
+        target_link_libraries(neograph_grpc_${_header}_header_tests PRIVATE
+            neograph::grpc SchemaProvider::transport GTest::gtest_main)
+        add_test(NAME neograph.grpc_${_header}_header
+                 COMMAND neograph_grpc_${_header}_header_tests)
+    endforeach()
 endif()
 
 # Smoke tests for the async::async_get helper added with the A2A client

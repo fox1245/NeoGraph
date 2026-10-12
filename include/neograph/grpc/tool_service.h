@@ -11,6 +11,11 @@
 //
 // Opt-in (NEOGRAPH_BUILD_GRPC). Whole header behind NEOGRAPH_HAVE_GRPC
 // so the umbrella include never pulls grpc++.
+//
+// make_tool_service() returns a std::unique_ptr<::grpc::Service>, which the
+// caller destroys: the header therefore includes the gRPC service base
+// (<grpcpp/impl/service_type.h>), and including it alone is enough to build
+// and destroy the service. The generated neograph.grpc.pb.h is not needed.
 
 #pragma once
 
@@ -22,12 +27,17 @@
 #include <string>
 #include <unordered_map>
 
+// ::grpc::Service, complete for the destructor of the returned unique_ptr.
+#if __has_include(<grpcpp/impl/service_type.h>)
+#include <grpcpp/impl/service_type.h>
+#else
+#include <grpcpp/impl/codegen/service_type.h>
+#endif
+
 #include <neograph/api.h>   // NEOGRAPH_API
 #include <neograph/tool.h>  // neograph::Tool, ChatTool, json
 
 #include <asio/awaitable.hpp>
-
-namespace grpc { class Service; }
 
 namespace neograph::grpc {
 
@@ -66,8 +76,8 @@ NEOGRAPH_API void run_tool_server(
 /// not mapped back to a local control signal), and DEADLINE_EXCEEDED as a
 /// timed-out call.
 ///
-/// pimpl so this public header stays grpc++/protobuf-free for
-/// consumers (same posture as GrpcCheckpointStore).
+/// pimpl so the class itself exposes no generated or protobuf type (same
+/// posture as GrpcCheckpointStore).
 class NEOGRAPH_API GrpcRemoteTool : public neograph::Tool,
                                      public neograph::ContextualAsyncTool {
 public:
