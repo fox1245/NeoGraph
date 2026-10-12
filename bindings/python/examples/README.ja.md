@@ -122,6 +122,7 @@ python 01_minimal.py
 | 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | yes | ローカルの MCP サーバーを起動して `fetch` を検出し、明示的な再入ポリシーで 3 回呼び出します。MCP を有効にしたビルドが必要で、スモークテストは Linux で行います。 |
 | 27 | [`27_a2a_server.py`](27_a2a_server.py) | yes | 公式の A2A SDK でエージェントをホストします。`127.0.0.1:9999` のエージェントカードと JSON-RPC、ストリーミングされるアーティファクト。`--self-check` は空きポートでサーバーを起動し、SDK のクライアントで 2 ターン実行します。`neograph-engine[a2a]` が必要です。 |
 | 28 | [`28_acp_agent.py`](28_acp_agent.py) | yes | 公式の ACP SDK で stdio 上にエージェントをホストします。initialize、セッション作成、prompt、トークン更新、`end_turn`。`--self-check` はエージェントを子プロセスとして実行し、SDK のクライアントで 2 ターン実行します。`neograph-engine[acp]` が必要です。 |
+| 45 | [`45_a2a_client.py`](45_a2a_client.py) | yes | A2A クライアント。`ng.a2a.A2AClient` がエージェントカードを取得してメッセージを送り、サンプル 27 の SDK エージェントが出すストリームを読みます。サーバーはこのスクリプトが空きポートでスレッドとして起動します。`neograph-engine[a2a]` が必要です。 |
 
 ### 永続化と運用
 

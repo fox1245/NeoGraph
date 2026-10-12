@@ -121,6 +121,7 @@ MCP and A2A are clients here (`ng.mcp`, `ng.a2a`). A2A and ACP agents are hosted
 | 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | yes | Starts a local MCP server, discovers `fetch` and runs three calls with an explicit re-entrant policy; needs an MCP-enabled build and is smoke-tested on Linux. |
 | 27 | [`27_a2a_server.py`](27_a2a_server.py) | yes | Hosts an agent through the official A2A SDK: an agent card and JSON-RPC on `127.0.0.1:9999`, streamed artifacts. `--self-check` serves on a free port and has two turns with the SDK's own client. Needs `neograph-engine[a2a]`. |
 | 28 | [`28_acp_agent.py`](28_acp_agent.py) | yes | Hosts an agent through the official ACP SDK over stdio: initialize, create a session, prompt, token updates, `end_turn`. `--self-check` runs the agent as a child process and has two turns with the SDK's client. Needs `neograph-engine[acp]`. |
+| 45 | [`45_a2a_client.py`](45_a2a_client.py) | yes | A2A client: `ng.a2a.A2AClient` fetches the agent card, sends a message and reads the stream from the SDK-hosted agent of example 27, which the script starts in a thread on a free port. Needs `neograph-engine[a2a]`. |
 
 ### Persistence and operations
 
