@@ -13,7 +13,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
+#include <functional>
 #include <future>
 #include <iomanip>
 #include <map>
@@ -24,6 +28,7 @@
 #include <thread>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace neograph::mcp {
 namespace {
@@ -91,9 +96,83 @@ void http_error(
                          "application/json");
 }
 
+// cpp-httplib's ThreadPool decides whether to start a thread from a count of
+// idle threads that lags behind the jobs already handed to them: connections
+// that arrive together can wait for one thread while it serves a tool call for
+// minutes, so a notifications/cancelled sat behind the calls it should stop
+// (MCP-S-10). This queue starts a thread whenever the jobs waiting and running
+// outnumber the threads, up to `max` threads, which then stay.
+class ElasticTaskQueue final : public httplib::TaskQueue {
+public:
+    ElasticTaskQueue(std::size_t base, std::size_t max, std::size_t max_queued)
+        : max_(std::max(base, max)), max_queued_(max_queued) {
+        std::lock_guard lock(mutex_);
+        for (std::size_t i = 0; i < base; ++i) spawn_locked();
+    }
+    ~ElasticTaskQueue() override { shutdown(); }
+
+    bool enqueue(std::function<void()> job) override {
+        {
+            std::lock_guard lock(mutex_);
+            if (stopping_) return false;
+            if (max_queued_ != 0 && jobs_.size() >= max_queued_) return false;
+            jobs_.push_back(std::move(job));
+            if (jobs_.size() + busy_ > threads_.size() && threads_.size() < max_) spawn_locked();
+        }
+        ready_.notify_one();
+        return true;
+    }
+
+    void shutdown() override {
+        std::vector<std::thread> threads;
+        {
+            std::lock_guard lock(mutex_);
+            stopping_ = true;
+            threads.swap(threads_);
+        }
+        ready_.notify_all();
+        for (auto& thread : threads) {
+            if (thread.joinable()) thread.join();
+        }
+    }
+
+private:
+    void spawn_locked() {
+        threads_.emplace_back([this] { work(); });
+    }
+
+    void work() {
+        for (;;) {
+            std::function<void()> job;
+            {
+                std::unique_lock lock(mutex_);
+                ready_.wait(lock, [this] { return stopping_ || !jobs_.empty(); });
+                if (jobs_.empty()) return;  // stopping, and every job ran
+                job = std::move(jobs_.front());
+                jobs_.pop_front();
+                ++busy_;
+            }
+            job();
+            std::lock_guard lock(mutex_);
+            --busy_;
+        }
+    }
+
+    const std::size_t                 max_;
+    const std::size_t                 max_queued_;
+    std::mutex                        mutex_;
+    std::condition_variable           ready_;
+    std::deque<std::function<void()>> jobs_;
+    std::vector<std::thread>          threads_;
+    std::size_t                       busy_     = 0;
+    bool                              stopping_ = false;
+};
+
 }  // namespace
 
 struct MCPHttpServer::Impl {
+    using Clock = std::chrono::steady_clock;
+
     struct Session {
         std::string                                                          scope;
         std::shared_ptr<void>                                                owner;
@@ -101,10 +180,38 @@ struct MCPHttpServer::Impl {
         std::mutex                                                           dispatch_mutex;
         std::mutex                                                           pending_mutex;
         std::unordered_map<std::string, std::shared_ptr<std::promise<json>>> pending;
+        /// When a request for this session last started or ended.
+        std::atomic<Clock::rep> last_used{Clock::now().time_since_epoch().count()};
+        /// Requests being handled now. A busy session never expires.
+        std::atomic<int> in_flight{0};
+
+        void touch() noexcept { last_used.store(Clock::now().time_since_epoch().count()); }
+        Clock::time_point used_at() const noexcept {
+            return Clock::time_point(Clock::duration(last_used.load()));
+        }
 
         ~Session() {
             if (server) server->stop();
         }
+    };
+
+    // Marks a session busy for the duration of one request.
+    struct SessionUse {
+        explicit SessionUse(std::shared_ptr<Session> value) : session(std::move(value)) {
+            if (session) {
+                session->in_flight.fetch_add(1);
+                session->touch();
+            }
+        }
+        ~SessionUse() {
+            if (session) {
+                session->touch();
+                session->in_flight.fetch_sub(1);
+            }
+        }
+        SessionUse(const SessionUse&)            = delete;
+        SessionUse& operator=(const SessionUse&) = delete;
+        std::shared_ptr<Session> session;
     };
 
     Impl(ServerFactory value_factory, MCPHttpServerConfig value_config)
@@ -116,7 +223,9 @@ struct MCPHttpServer::Impl {
         }
         if (config.port < 0 || config.port > 65535 || config.max_sessions == 0 ||
             config.max_payload_bytes == 0 || config.http_threads == 0 ||
-            config.max_queued_requests == 0 || config.response_timeout.count() <= 0) {
+            config.max_http_threads < config.http_threads ||
+            config.max_queued_requests == 0 || config.response_timeout.count() <= 0 ||
+            config.session_idle_timeout.count() < 0) {
             throw std::invalid_argument("MCP HTTP limits and port must be valid");
         }
         if (!is_loopback_bind(config.host) && !config.bearer_authorizer) {
@@ -124,8 +233,12 @@ struct MCPHttpServer::Impl {
         }
 
         http.set_payload_max_length(config.max_payload_bytes);
-        http.new_task_queue = [threads = config.http_threads, queued = config.max_queued_requests] {
-            return new httplib::ThreadPool(threads, threads, queued);
+        // A request holds an HTTP thread until it is answered, and a tools/call
+        // until its tool returns: http_threads start at once, and more start
+        // on demand up to max_http_threads (MCP-S-10).
+        http.new_task_queue = [threads = config.http_threads, max = config.max_http_threads,
+                               queued = config.max_queued_requests] {
+            return new ElasticTaskQueue(threads, max, queued);
         };
         register_routes();
     }
@@ -140,6 +253,12 @@ struct MCPHttpServer::Impl {
     std::mutex                                      sessions_mutex;
     std::map<std::string, std::shared_ptr<Session>> sessions;
     std::size_t                                     creating_sessions = 0;
+
+    // Closes idle sessions in the background (MCP-S-02).
+    std::mutex              reaper_mutex;
+    std::condition_variable reaper_cv;
+    bool                    reaper_stop = false;
+    std::thread             reaper;
 
     std::optional<std::string> authorize(const httplib::Request& request,
                                          httplib::Response&      response) const {
@@ -181,25 +300,114 @@ struct MCPHttpServer::Impl {
         return true;
     }
 
+    bool expired(const Session& session, Clock::time_point now) const {
+        return config.session_idle_timeout.count() > 0 && session.in_flight.load() == 0 &&
+               now - session.used_at() >= config.session_idle_timeout;
+    }
+
+    // A session the server closed answers 404, which tells the client to
+    // initialize a new one (MCP transports, "Session Management").
     std::shared_ptr<Session> find_session(const std::string& id) {
-        std::lock_guard lock(sessions_mutex);
-        auto            it = sessions.find(id);
-        return it == sessions.end() ? nullptr : it->second;
+        std::shared_ptr<Session> stale;
+        {
+            std::lock_guard lock(sessions_mutex);
+            auto            it = sessions.find(id);
+            if (it == sessions.end()) return nullptr;
+            if (!expired(*it->second, Clock::now())) return it->second;
+            stale = std::move(it->second);
+            sessions.erase(it);
+        }
+        stale->server->stop();
+        return nullptr;
+    }
+
+    // Remove the sessions idle past session_idle_timeout and, when `room` is
+    // needed and none is left, the least recently used session with no
+    // request in flight. Callers stop the returned sessions outside the lock.
+    std::vector<std::shared_ptr<Session>> reclaim_locked(bool room) {
+        std::vector<std::shared_ptr<Session>> removed;
+        const auto now = Clock::now();
+        for (auto it = sessions.begin(); it != sessions.end();) {
+            if (expired(*it->second, now)) {
+                removed.push_back(std::move(it->second));
+                it = sessions.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (room && sessions.size() + creating_sessions >= config.max_sessions) {
+            auto oldest = sessions.end();
+            for (auto it = sessions.begin(); it != sessions.end(); ++it) {
+                if (it->second->in_flight.load() != 0) continue;
+                if (oldest == sessions.end() ||
+                    it->second->used_at() < oldest->second->used_at())
+                    oldest = it;
+            }
+            if (oldest != sessions.end()) {
+                removed.push_back(std::move(oldest->second));
+                sessions.erase(oldest);
+            }
+        }
+        return removed;
+    }
+
+    void reap_idle_sessions() {
+        std::vector<std::shared_ptr<Session>> removed;
+        {
+            std::lock_guard lock(sessions_mutex);
+            removed = reclaim_locked(false);
+        }
+        for (const auto& session : removed) session->server->stop();
+    }
+
+    void start_reaper() {
+        if (config.session_idle_timeout.count() <= 0 || reaper.joinable()) return;
+        {
+            std::lock_guard lock(reaper_mutex);
+            reaper_stop = false;
+        }
+        const auto period = std::clamp<std::chrono::milliseconds>(
+            config.session_idle_timeout / 4, std::chrono::milliseconds(250),
+            std::chrono::milliseconds(60000));
+        reaper = std::thread([this, period] {
+            std::unique_lock lock(reaper_mutex);
+            while (!reaper_cv.wait_for(lock, period, [this] { return reaper_stop; })) {
+                lock.unlock();
+                reap_idle_sessions();
+                lock.lock();
+            }
+        });
+    }
+
+    void stop_reaper() {
+        {
+            std::lock_guard lock(reaper_mutex);
+            reaper_stop = true;
+        }
+        reaper_cv.notify_all();
+        if (reaper.joinable()) reaper.join();
     }
 
     std::pair<std::string, std::shared_ptr<Session>> create_session(std::string scope) {
+        std::vector<std::shared_ptr<Session>> reclaimed;
         {
             std::lock_guard lock(sessions_mutex);
+            if (sessions.size() + creating_sessions >= config.max_sessions)
+                reclaimed = reclaim_locked(true);
             if (sessions.size() + creating_sessions >= config.max_sessions) {
                 throw std::runtime_error("MCP HTTP session capacity is exhausted");
             }
             ++creating_sessions;
         }
+        for (const auto& session : reclaimed) session->server->stop();
 
         bool reserved = true;
         try {
             auto built      = factory(scope);
             auto session    = std::make_shared<Session>();
+            // Busy until its initialize is answered, so it cannot be evicted
+            // for another client before it was used.
+            session->in_flight.store(1);
             session->scope  = std::move(scope);
             session->server = std::move(built.server);
             session->owner  = std::move(built.owner);
@@ -319,6 +527,8 @@ struct MCPHttpServer::Impl {
                 response_session_id = std::move(created.first);
                 session             = std::move(created.second);
             } catch (const std::exception& error) {
+                // Every session is busy with a request.
+                response.set_header("Retry-After", "1");
                 http_error(response, 503, -32000, error.what());
                 return;
             }
@@ -336,6 +546,8 @@ struct MCPHttpServer::Impl {
             if (!validate_protocol_header(request, response, *session)) return;
         }
 
+        const SessionUse use(session);
+        if (!response_session_id.empty()) session->in_flight.fetch_sub(1);
         if (!has_method) {
             response.status = 202;
             return;
@@ -392,11 +604,31 @@ struct MCPHttpServer::Impl {
                 std::lock_guard lock(session->pending_mutex);
                 session->pending.erase(key);
             }
+            // Nobody waits for the answer any more: stop the tool too, as
+            // the client would with notifications/cancelled (MCP-S-16).
+            {
+                std::lock_guard lock(session->dispatch_mutex);
+                session->server->handle_message(
+                    {{"jsonrpc", "2.0"},
+                     {"method", "notifications/cancelled"},
+                     {"params", {{"requestId", envelope["id"]}, {"reason", "response timed out"}}}});
+            }
             http_error(response, 504, -32001, "MCP tool response timed out", envelope["id"]);
             return;
         }
+        const json answer = future.get();
+        if (answer.contains("error") && answer["error"].is_object() &&
+            answer["error"].value("code", 0) == -32800) {
+            // The client cancelled this call: MCP asks for no response to it,
+            // and the official clients report one for an id they gave up as
+            // an error. The POST still needs an answer, so it gets an event
+            // stream that ends without one.
+            response.status = 200;
+            response.set_content(std::string(), "text/event-stream");
+            return;
+        }
         response.status = 200;
-        response.set_content(future.get().dump(), "application/json");
+        response.set_content(answer.dump(), "application/json");
     }
 
     void handle_get(const httplib::Request& request, httplib::Response& response) const {
@@ -422,6 +654,10 @@ struct MCPHttpServer::Impl {
         if (!validate_protocol_header(request, response, *session)) return;
         erase_session(session_id);
         response.status = 204;
+        // A DELETE may arrive with Content-Type but no body (the official
+        // Python client sends one); closing keeps the next request from being
+        // read as its body (MCP-S-17).
+        response.set_header("Connection", "close");
     }
 
     void register_routes() {
@@ -469,8 +705,10 @@ MCPHttpServer::~MCPHttpServer() {
 bool MCPHttpServer::start() {
     if (!impl_->bind()) return false;
     impl_->running.store(true, std::memory_order_release);
+    impl_->start_reaper();
     const bool ok = impl_->http.listen_after_bind();
     impl_->running.store(false, std::memory_order_release);
+    impl_->stop_reaper();
     impl_->stop_sessions();
     return ok;
 }
@@ -478,6 +716,7 @@ bool MCPHttpServer::start() {
 bool MCPHttpServer::start_async() {
     if (!impl_->bind()) return false;
     impl_->running.store(true, std::memory_order_release);
+    impl_->start_reaper();
     impl_->listener = std::thread([this] {
         impl_->http.listen_after_bind();
         impl_->running.store(false, std::memory_order_release);
@@ -490,6 +729,7 @@ void MCPHttpServer::stop() {
     if (impl_->http.is_running()) impl_->http.stop();
     if (impl_->listener.joinable()) impl_->listener.join();
     impl_->running.store(false, std::memory_order_release);
+    impl_->stop_reaper();
     impl_->stop_sessions();
 }
 

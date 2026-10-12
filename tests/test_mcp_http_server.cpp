@@ -15,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 using neograph::json;
 using neograph::mcp::CallToolResult;
@@ -96,13 +97,65 @@ private:
     MCPHttpServer& server_;
 };
 
+// A tool that runs until its call is cancelled, then counts the cancellation.
+struct BlockingTool {
+    std::atomic<int> started{0};
+    std::atomic<int> cancelled{0};
+
+    MCPHttpServer::ServerFactory factory() {
+        return [this](std::string_view) {
+            MCPServerConfig config;
+            config.server_info = {{"name", "blocking"}, {"version", "1"}};
+            config.max_concurrent_calls = 8;
+            auto server = std::make_unique<MCPServer>(std::move(config));
+            ToolDefinition wait;
+            wait.name = "wait";
+            server->register_tool(std::move(wait), [this](const json&, const auto& cancel) {
+                started.fetch_add(1);
+                const auto until = std::chrono::steady_clock::now() + 10s;
+                while (std::chrono::steady_clock::now() < until) {
+                    if (cancel->is_cancelled()) {
+                        cancelled.fetch_add(1);
+                        cancel->throw_if_cancelled("wait cancelled");
+                    }
+                    std::this_thread::sleep_for(5ms);
+                }
+                return CallToolResult{};
+            });
+            return MCPHttpServerSession{std::move(server), {}};
+        };
+    }
+};
+
+std::string open_session(httplib::Client& client) {
+    auto initialize = client.Post(
+        "/mcp", base_headers(),
+        request(1, "initialize", {{"protocolVersion", "2025-11-25"},
+                                  {"capabilities", json::object()},
+                                  {"clientInfo", {{"name", "lifecycle"}, {"version", "1"}}}})
+            .dump(),
+        "application/json");
+    if (!initialize || initialize->status != 200) return {};
+    const auto id = initialize->get_header_value("Mcp-Session-Id");
+    client.Post("/mcp", session_headers(id),
+                json{{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}}.dump(),
+                "application/json");
+    return id;
+}
+
+int ping_status(httplib::Client& client, const std::string& session_id) {
+    auto response =
+        client.Post("/mcp", session_headers(session_id), request(7, "ping").dump(), "application/json");
+    return response ? response->status : -1;
+}
+
 TEST(MCPHttpServerTest, DefaultsRejectUnauthenticatedRemoteBind) {
     MCPHttpServerConfig config;
     config.host = "0.0.0.0";
     EXPECT_THROW(MCPHttpServer(make_http_session, std::move(config)), std::invalid_argument);
 }
 
-TEST(MCPHttpServerTest, RejectsInitializeWhenSessionCapacityIsExhausted) {
+TEST(MCPHttpServerTest, AnIdleSessionMakesRoomAtCapacity) {
     MCPHttpServerConfig config;
     config.max_sessions = 1;
     MCPHttpServer server(make_http_session, std::move(config));
@@ -118,11 +171,14 @@ TEST(MCPHttpServerTest, RejectsInitializeWhenSessionCapacityIsExhausted) {
     auto first = client.Post("/mcp", base_headers(), initialize_body.dump(), "application/json");
     ASSERT_TRUE(first);
     ASSERT_EQ(first->status, 200);
+    const auto first_id = first->get_header_value("Mcp-Session-Id");
 
     initialize_body["id"] = 2;
     auto second = client.Post("/mcp", base_headers(), initialize_body.dump(), "application/json");
     ASSERT_TRUE(second);
-    EXPECT_EQ(second->status, 503);
+    EXPECT_EQ(second->status, 200);
+    EXPECT_EQ(ping_status(client, first_id), 404);
+    EXPECT_EQ(ping_status(client, second->get_header_value("Mcp-Session-Id")), 200);
 }
 
 TEST(MCPHttpServerTest, JsonPostLifecycleAndDeleteRoundTrip) {
@@ -252,6 +308,197 @@ TEST(MCPHttpServerTest, SessionsKeepTheRevisionTheyNegotiated) {
     auto newest = with_version("2025-11-25");
     ASSERT_TRUE(newest);
     EXPECT_EQ(newest->status, 400);
+}
+
+TEST(MCPHttpServerTest, IdleSessionsExpireAndAnswer404) {
+    // MCP-S-02: a session without requests for session_idle_timeout is closed,
+    // and its id answers 404, which tells the client to initialize again.
+    MCPHttpServerConfig config;
+    config.session_idle_timeout = 300ms;
+    MCPHttpServer server(make_http_session, std::move(config));
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+
+    const auto active = open_session(client);
+    const auto idle = open_session(client);
+    ASSERT_FALSE(active.empty());
+    ASSERT_FALSE(idle.empty());
+    for (int i = 0; i < 8; ++i) {
+        EXPECT_EQ(ping_status(client, active), 200);
+        std::this_thread::sleep_for(100ms);
+    }
+    EXPECT_EQ(ping_status(client, active), 200);
+    EXPECT_EQ(ping_status(client, idle), 404);
+}
+
+TEST(MCPHttpServerTest, AbandonedSessionsDoNotExhaustTheServer) {
+    // MCP-S-02: the official TypeScript clients never DELETE on close(). At
+    // capacity the least recently used idle session makes room; only when
+    // every session is busy is initialize refused, with Retry-After.
+    BlockingTool tool;
+    MCPHttpServerConfig config;
+    config.max_sessions = 2;
+    MCPHttpServer server(tool.factory(), std::move(config));
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+
+    std::vector<std::string> ids;
+    for (int i = 0; i < 5; ++i) {
+        ids.push_back(open_session(client));
+        ASSERT_FALSE(ids.back().empty()) << "initialize #" << i;
+    }
+    EXPECT_EQ(ping_status(client, ids[0]), 404);
+    EXPECT_EQ(ping_status(client, ids[3]), 200);
+    EXPECT_EQ(ping_status(client, ids[4]), 200);
+
+    // Both sessions busy: nothing may be evicted.
+    std::vector<std::future<httplib::Result>> calls;
+    for (int i = 3; i < 5; ++i) {
+        calls.push_back(std::async(std::launch::async, [port = server.port(), id = ids[i]] {
+            httplib::Client caller("127.0.0.1", port);
+            caller.set_read_timeout(15s);
+            return caller.Post("/mcp", session_headers(id),
+                               request("w", "tools/call", {{"name", "wait"},
+                                                           {"arguments", json::object()}})
+                                   .dump(),
+                               "application/json");
+        }));
+    }
+    for (int i = 0; i < 2000 && tool.started.load() < 2; ++i) std::this_thread::sleep_for(5ms);
+    ASSERT_EQ(tool.started.load(), 2);
+    auto refused = client.Post(
+        "/mcp", base_headers(),
+        request(1, "initialize", {{"protocolVersion", "2025-11-25"},
+                                  {"capabilities", json::object()},
+                                  {"clientInfo", {{"name", "late"}, {"version", "1"}}}})
+            .dump(),
+        "application/json");
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(refused->status, 503);
+    EXPECT_EQ(refused->get_header_value("Retry-After"), "1");
+    EXPECT_FALSE(json::parse(refused->body).contains("id"));
+    for (int i = 3; i < 5; ++i) {
+        httplib::Client canceller("127.0.0.1", server.port());
+        canceller.Post("/mcp", session_headers(ids[i]),
+                       json{{"jsonrpc", "2.0"}, {"method", "notifications/cancelled"},
+                            {"params", {{"requestId", "w"}}}}.dump(),
+                       "application/json");
+    }
+    for (auto& call : calls) call.get();
+}
+
+TEST(MCPHttpServerTest, ACancelledCallEndsWithAnEmptyEventStream) {
+    // MCP: the receiver of notifications/cancelled SHOULD NOT answer the
+    // request; the official clients report a response to an id they cancelled
+    // as an error. The POST ends with an event stream that carries nothing.
+    BlockingTool tool;
+    MCPHttpServer server(tool.factory());
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+    const auto id = open_session(client);
+    ASSERT_FALSE(id.empty());
+
+    auto call = std::async(std::launch::async, [port = server.port(), id] {
+        httplib::Client caller("127.0.0.1", port);
+        return caller.Post("/mcp", session_headers(id),
+                           request(41, "tools/call", {{"name", "wait"}, {"arguments", json::object()}})
+                               .dump(),
+                           "application/json");
+    });
+    for (int i = 0; i < 400 && tool.started.load() < 1; ++i) std::this_thread::sleep_for(5ms);
+    auto cancel = client.Post("/mcp", session_headers(id),
+                              json{{"jsonrpc", "2.0"}, {"method", "notifications/cancelled"},
+                                   {"params", {{"requestId", 41}, {"reason", "user"}}}}.dump(),
+                              "application/json");
+    ASSERT_TRUE(cancel);
+    EXPECT_EQ(cancel->status, 202);
+    auto answered = call.get();
+    ASSERT_TRUE(answered);
+    EXPECT_EQ(answered->status, 200);
+    EXPECT_EQ(answered->get_header_value("Content-Type").rfind("text/event-stream", 0), 0u);
+    EXPECT_TRUE(answered->body.empty()) << answered->body;
+    EXPECT_EQ(tool.cancelled.load(), 1);
+}
+
+TEST(MCPHttpServerTest, AResponseTimeoutCancelsTheTool) {
+    // MCP-S-16: when nobody waits for the answer any more, the tool stops.
+    BlockingTool tool;
+    MCPHttpServerConfig config;
+    config.response_timeout = 200ms;
+    MCPHttpServer server(tool.factory(), std::move(config));
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+    const auto id = open_session(client);
+    auto timed_out = client.Post(
+        "/mcp", session_headers(id),
+        request(5, "tools/call", {{"name", "wait"}, {"arguments", json::object()}}).dump(),
+        "application/json");
+    ASSERT_TRUE(timed_out);
+    EXPECT_EQ(timed_out->status, 504);
+    EXPECT_EQ(json::parse(timed_out->body)["id"], 5);
+    for (int i = 0; i < 400 && tool.cancelled.load() < 1; ++i) std::this_thread::sleep_for(5ms);
+    EXPECT_EQ(tool.cancelled.load(), 1);
+}
+
+TEST(MCPHttpServerTest, CancellationIsNotStarvedByCallsInFlight) {
+    // MCP-S-10: with every kept HTTP thread held by a tool call, a
+    // notifications/cancelled on a new connection is still handled at once.
+    BlockingTool tool;
+    MCPHttpServerConfig config;
+    config.http_threads = 2;
+    MCPHttpServer server(tool.factory(), std::move(config));
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+    const auto id = open_session(client);
+    std::vector<std::future<httplib::Result>> calls;
+    for (int i = 0; i < 4; ++i) {
+        calls.push_back(std::async(std::launch::async, [port = server.port(), id, i] {
+            httplib::Client caller("127.0.0.1", port);
+            caller.set_read_timeout(15s);
+            return caller.Post("/mcp", session_headers(id),
+                               request(100 + i, "tools/call",
+                                       {{"name", "wait"}, {"arguments", json::object()}})
+                                   .dump(),
+                               "application/json");
+        }));
+    }
+    for (int i = 0; i < 2000 && tool.started.load() < 4; ++i) std::this_thread::sleep_for(5ms);
+    ASSERT_EQ(tool.started.load(), 4);
+    for (int i = 0; i < 4; ++i) {
+        httplib::Client canceller("127.0.0.1", server.port());
+        const auto started = std::chrono::steady_clock::now();
+        auto cancel = canceller.Post("/mcp", session_headers(id),
+                                     json{{"jsonrpc", "2.0"}, {"method", "notifications/cancelled"},
+                                          {"params", {{"requestId", 100 + i}}}}.dump(),
+                                     "application/json");
+        ASSERT_TRUE(cancel);
+        EXPECT_EQ(cancel->status, 202);
+        EXPECT_LT(std::chrono::steady_clock::now() - started, 2s);
+    }
+    for (auto& call : calls) call.get();
+    EXPECT_EQ(tool.cancelled.load(), 4);
+}
+
+TEST(MCPHttpServerTest, DeleteClosesTheConnection) {
+    // MCP-S-17: the official Python client's DELETE carries Content-Type and
+    // no body; the server closes that connection after its 204.
+    MCPHttpServer server(make_http_session);
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+    const auto id = open_session(client);
+    auto headers = session_headers(id);
+    headers.emplace("Content-Type", "application/json");
+    auto removed = client.Delete("/mcp", headers);
+    ASSERT_TRUE(removed);
+    EXPECT_EQ(removed->status, 204);
+    EXPECT_EQ(removed->get_header_value("Connection"), "close");
+    EXPECT_EQ(ping_status(client, id), 404);
 }
 
 TEST(MCPHttpServerTest, ErrorBodiesCarryNoNullId) {

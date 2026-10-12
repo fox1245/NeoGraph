@@ -32,11 +32,27 @@ struct NEOGRAPH_API MCPHttpServerConfig {
     int         port     = 0;
     std::string endpoint = "/mcp";
 
+    /// Open sessions at most. When a new client initializes at capacity, the
+    /// least recently used session with no request in flight is closed for
+    /// it; only when every session is busy does initialize get 503.
     std::size_t               max_sessions        = 64;
     std::size_t               max_payload_bytes   = 1024 * 1024;
+    /// HTTP worker threads started with the server. A connection holds one
+    /// while it is open and a tools/call until its tool returns, so another
+    /// starts whenever every thread is taken, up to max_http_threads (they
+    /// then stay). Size max_http_threads above the tool calls expected in
+    /// flight plus the client connections.
     std::size_t               http_threads        = 8;
+    std::size_t               max_http_threads    = 64;
     std::size_t               max_queued_requests = 64;
+    /// A request still waiting after this long gets 504, and its tool call is
+    /// cancelled.
     std::chrono::milliseconds response_timeout    = std::chrono::minutes(10);
+    /// A session with no request for this long is closed, and its id then
+    /// answers 404 so the client initializes again. Clients that never send
+    /// DELETE (the official TypeScript clients' close()) cannot exhaust the
+    /// server. Zero keeps idle sessions until DELETE or eviction.
+    std::chrono::milliseconds session_idle_timeout = std::chrono::minutes(30);
 
     /// Exact allowed Origin values. An Origin header is rejected unless listed.
     std::vector<std::string> allowed_origins;
@@ -55,8 +71,11 @@ struct NEOGRAPH_API MCPHttpServerConfig {
 /**
  * @brief Session-aware MCP Streamable HTTP server.
  *
- * This baseline returns one `application/json` response per POST and declines
- * optional GET/SSE streams with HTTP 405. `factory` must return a fresh,
+ * This baseline returns one `application/json` response per POST (a call the
+ * client cancelled ends with an empty `text/event-stream` instead, so no
+ * response reaches it) and declines optional GET/SSE streams with HTTP 405.
+ * Sessions end with DELETE, after session_idle_timeout without a request, or
+ * by eviction at max_sessions; an ended session's id answers 404. `factory` must return a fresh,
  * registered, uninitialized MCPServer for every new HTTP session. It receives
  * the validated authorization scope so embeddings can isolate durable stores
  * without exposing authentication concepts to GraphEngine.
