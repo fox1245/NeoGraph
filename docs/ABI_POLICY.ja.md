@@ -1,52 +1,52 @@
 <!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=5ecfa5a3968c2ebfb4344b913e7b9be42f04485f90940d647b0d693b1f9d129a -->
-# binary 互換方針
+# バイナリ互換性ポリシー
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
 
-## version と loader 契約
+## バージョンとローダーの契約
 
-CMake は `pyproject.toml` から NeoGraph version を読み、公開 compiled library の `VERSION` に全 version、`SOVERSION` に major 成分を設定する。
+CMakeは、NeoGraphのバージョンを `pyproject.toml` から読み取り、コンパイルされる公開ライブラリの `VERSION` にそのバージョンを、`SOVERSION` にそのメジャー番号を設定します。
 
-| release 系列 | loader 世代 | 契約 |
+| リリースライン | ローダーのジェネレーション | 契約 |
 |---|---:|---|
-| `0.x` | `0` | pre-v1。公表した rebuild 境界で binary 互換が破れる場合がある。 |
-| `1.x` | `1` | 将来の stable v1 方針であり、v1 発売の主張ではない。 |
-| `N.x`, `N >= 2` | `N` | major ABI 境界。consumer を rebuild する。 |
+| `0.x` | `0` | v1より前です。告知された再ビルドの境界で、バイナリ互換性が壊れることがあります。 |
+| `1.x` | `1` | 安定版v1に予定しているポリシーです。v1がリリース済みだという主張ではありません。 |
+| `N.x`（`N >= 2`） | `N` | メジャーなABIの境界です。コンシューマーは再ビルドしてください。 |
 
-`SOVERSION 0` は pre-v1 package の loader 名であり、layout の交換可能性ではない。loader はすべての非互換 `0.x` 置換を拒否できない。対象 release note を読み、header/library を一括交換し、公表した境界ごとに rebuild する。稼働 process に個別 pre-v1 library を hot-swap しない。
+`SOVERSION 0` がv1より前のパッケージに与えるのは、ローダー用の名前であり、互換性のあるレイアウトではありません。ローダーは、互換性のない `0.x` への置き換えをすべて拒否できるわけではありません。更新先のリリースノートを読み、ヘッダーとライブラリはまとめて置き換え、告知されたすべての境界で再ビルドしてください。v1より前のライブラリを、動作中のプロセスの中で1つだけ差し替える（ホットスワップする）ことはしないでください。
 
-## 必須 rebuild 境界
+## 再ビルドが必須になる境界
 
-- pre-`0.9.0` から `0.9.0+`: GraphNode は旧実行 virtual 八つを削除した。custom node は `run(NodeInput)` を実装し、SyncGraphNode は追加 adapter である。
-- 以後の pre-v1 bounded-resource、UsageAccumulator 予約、issue #216 変更: 公開 layout に accounting、admission、cache、runtime-interposition 状態が加わった。対応 header で rebuild する。
-- typed-provider 移行: 対応する NeoGraph/SchemaProvider SDK header/library で全 C++ consumer と custom provider を rebuild する。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、旧 descriptor interpreter、Responses WebSocket は alias なしで削除された。
-- event-driven provider dispatch: CancelToken は `std::stop_source` を使い `stop_token()` を公開する。`cancel`、`fork`、Asio-slot signature が同じでも旧 inline cancel code は互換ではない。
-- 完了した cancel context の detach: CancelToken の公開 layout に generation で保護する emit 状態が加わった。NeoGraph と全 native consumer を一緒に rebuild する。Detach は context 破棄前に完了済み slot handler を解放するが、operation の先行完了を要求し、cancel 状態を reset しない。
-- `ChatTool::strict`: portable なツール定義に member が加わった。`ChatTool` は `Tool::get_definition()` と `make_provider_request` で値として library 境界を越えるため、NeoGraph、全 native consumer と custom `Tool`、Python 拡張を一緒に rebuild する。
-- 将来の `1.0.0` 境界は loader 世代を `1` にし rebuild を要求する。generation-1 freeze はその release の方針で、現在の検証結果ではない。
+- `0.9.0` より前から `0.9.0+` へ：GraphNodeから、従来の実行用の仮想関数8個が削除されました。カスタムノードは `run(NodeInput)` を実装します。SyncGraphNodeは、追加のアダプターです。
+- その後のv1より前の、リソース上限、UsageAccumulatorの予約、issue #216に関する変更：公開レイアウトに、会計、admission、キャッシュ、ランタイムのインターポジションの状態が加わりました。対応するヘッダーで再ビルドしてください。
+- 型付きプロバイダーへの切り替え（typed cutover）：すべてのC++コンシューマーとカスタムプロバイダーを、対応するNeoGraphとSchemaProvider SDKのヘッダーおよびライブラリで再ビルドしてください。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、古いディスクリプターのインタープリター、ResponsesのWebSocket経路は、エイリアスなしで削除されました。
+- イベント駆動のプロバイダーディスパッチ：CancelTokenは `std::stop_source` を使い、`stop_token()` を公開します。`cancel`、`fork`、Asioスロットのシグネチャが残っているからといって、古いインラインのキャンセルのコードに互換性があるわけではありません。
+- drain済みのキャンセルコンテキストのdetach：CancelTokenの公開レイアウトに、ジェネレーションで区切られた発行状態が加わりました。NeoGraphと、すべてのネイティブコンシューマーをまとめて再ビルドしてください。detachは、コンテキストを破棄する前に、完了したスロットのハンドラーを解放します。ただし、操作がdrainされていることが引き続き必要で、キャンセルの状態はリセットされません。
+- `ChatTool::strict`：ポータブルなツール定義にメンバーが追加されました。`ChatTool` は、`Tool::get_definition()` と `make_provider_request` で、値渡しでライブラリの境界を越えます。そのため、NeoGraph、すべてのネイティブコンシューマー、カスタムの `Tool`、Pythonの拡張を、まとめて再ビルドしてください。
+- 将来の `1.0.0` の境界では、ローダーのジェネレーションが `1` になり、再ビルドが必要になります。ジェネレーション1での固定は、そのリリースに向けたポリシーであり、現時点の適格性確認の結果ではありません。
 
-## 公開 interface
+## エクスポートされるインターフェース
 
-Provider の subclass hook は `get_name`、`family`、`prepare(ProviderRequest)` の三つ。共通 `invoke(_async)`、`dispatch(_async)` は owned typed request を消費し、不変 `sp::runtime::Result` を返す。virtual completion override の対ではない。
+Providerのサブクラス用のフックは、`get_name`、`family`、`prepare(ProviderRequest)` の3つです。共通の `invoke(_async)` と `dispatch(_async)` は、所有権を持つ型付きのリクエストを消費し、変更できない `sp::runtime::Result` を返します。対になった、completion用の仮想関数のオーバーライドではありません。
 
-CheckpointStore は明示的 adapter 移行に legacy layout を保つ。sync 既定実装は async override に渡さず失敗し、async 既定実装は sync override を offload する。新しい async-only backend は AsyncCheckpointStore と `adapt_async_checkpoint_store` を、sync capability backend は CheckpointStoreCore と `adapt_checkpoint_store` を使う。公表した pre-v1 境界で rebuild する。adapter 設計は library だけの置換を許可しない。
+CheckpointStoreは、アダプターへの明示的な移行のために、従来のレイアウトを保っています。同期のデフォルト実装は、非同期のオーバーライドを呼び出さずに失敗します。非同期のデフォルト実装は、同期のオーバーライドをワーカーに移します。非同期だけの新しいバックエンドは、AsyncCheckpointStoreを実装して `adapt_async_checkpoint_store` を使います。同期のcapabilityを持つバックエンドは、CheckpointStoreCoreを実装して `adapt_checkpoint_store` を使います。v1より前の告知された境界では、再ビルドしてください。このアダプターの設計は、共有ライブラリだけを置き換えてよいという許可ではありません。
 
-## SDK と Python 境界
+## SDKとPythonの境界
 
-LLM node を無効にしても Core は外部 `SchemaProvider::runtime` を要求する。選択した SDK release は `0.3.0` alpha、`maint/interface6` の公開コミット `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`、interface revision `6`、shared-library ABI revision `6` で、out-of-line capability check を持つ。stable interface の主張ではない。対応 component を一緒に install する。`libsp_*.so.6` 世代は NeoGraph loader 世代と Python `abi3` wheel tag の双方と別である。
+Coreは、LLMノードを無効にしても、外部の `SchemaProvider::runtime` を必要とします。採用しているSDKのリリースは `0.3.0` alphaで、公開されている `maint/interface6` のコミット `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`、インターフェースリビジョン `6`、共有ライブラリのABIリビジョン `6` です。capabilityのチェックはアウトオブラインです。これは、安定したインターフェースだという主張ではありません。対応するSDKのコンポーネントは、まとめてインストールしてください。`libsp_*.so.6` のジェネレーションは、NeoGraphのローダーのジェネレーションとも、Pythonの `abi3` wheelタグとも別のものです。
 
-Interface 6 は固定サイズのprovider報告金額メタデータを公開usage layoutに追加し、blocking/async SDK呼び出しを単一async pipelineで処理する。選択したコミットは revision 6 のまま、`max_price` が加わった `sp::OpenRouterRouting` と Chat、Messages、Responses のリクエスト layout も大きくする。`RequiredProvider` に含まれ NeoGraph の handshake が要求する capability bit `OpenRouterRoutingMaxPrice` が、以前の interface-6 library を拒否する。SDK consumer、NeoGraph、Python extension を一緒に rebuild する。以前のheader/libraryとinterface 6は混在できない。blocking wrapperはSDK event-loop/callback workerからの再入を引き続き拒否する。Native archive v3 / `spna3` と portable JSON v2 は独立した形式で、変更されない。canonical outcome v2のusageは金額メタデータがある場合のみ任意の`provider_cost`を追加し、過去の欠落のみの記録のbytesを保持して費用を捏造しない。過去のinterface-3/4/5測定は元の範囲を保ち、interface 6の資格検証ではない。
+インターフェース6では、公開されている使用量のレイアウトに、プロバイダーが報告する金額のメタデータ（固定サイズ）が加わりました。また、ブロッキングのSDK呼び出しと非同期のSDK呼び出しは、1つの非同期パイプラインを使います。採用しているコミットでは、リビジョン6の中で、`sp::OpenRouterRouting` も拡張されました（`max_price` が追加されています）。Chat、Messages、Responsesのリクエストのレイアウトも拡張されています。capabilityビット `OpenRouterRoutingMaxPrice` は、`RequiredProvider` の一部で、NeoGraphのハンドシェイクが要求するものです。このビットによって、これより前のインターフェース6のライブラリは拒否されます。SDKのコンシューマー、NeoGraph、Pythonの拡張は、まとめて再ビルドしてください。これより前のヘッダーやライブラリは、インターフェース6とは互換性がありません。ブロッキングのラッパーは、SDKのイベントループとコールバックのワーカーへの再入を、引き続き拒否します。ネイティブarchive v3（`spna3`）とポータブルJSON v2は、それぞれ独立した、変更のない形式のままです。正規の結果v2の使用量に、省略可能な `provider_cost` が加わるのは、金額のメタデータがある場合だけです。メタデータがないだけの過去のレコードは、元のバイト列を保ち、コストを捏造することはありません。以前のインターフェース3/4/5での測定は、元の範囲のままで、インターフェース6の適格性確認にはなりません。
 
-Python は prepared handle と不変 outcome を含む typed provider 契約を公開し、legacy completion shim はない。extension と対応 library を一つの wheel として install する。bundled NeoGraph/SDK library を個別交換しない。graph の ChatMessage 便宜値は native ProviderMessage custody の代替ではない。[Python binding](python-binding.md)を参照。
+Pythonは、準備済みのハンドルや変更できない結果を含む、型付きのプロバイダー契約を公開します。従来のcompletionの互換シムはありません。拡張と、それに対応するライブラリは、1つのwheelとしてインストールしてください。同梱されているNeoGraphやSDKのライブラリを、1つだけ置き換えてはいけません。グラフ向けの便宜的な値であるChatMessageは、ネイティブなProviderMessageの保管の代わりにはなりません。詳しくは[Pythonバインディング](python-binding.md)を参照してください。
 
-wheel は curl を含まない wire 層を含む対応する SDK runtime shared library 七つを含み、SDK C++ header/CMake package は含まない。C++ consumer は SDK を別途 install する。source resolution は明示的 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、installed package、公開 revision-pinned archive fallback の順。installed SDK を使う offline build は `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` とし、`CMAKE_PREFIX_PATH` で prefix を渡す。
+wheelに同梱されるのは、対応するSDKのランタイムの共有ライブラリ7個（curlを使わないワイヤー層を含む）です。SDKのC++ヘッダーとCMakeパッケージは含まれません。C++のコンシューマーは、SDKを別にインストールします。ソースの解決順は、明示した `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、インストール済みのパッケージ、リビジョンを固定した公開archiveのフォールバックの順です。インストール済みのSDKを使ってオフラインでビルドするには、`NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` を設定し、`CMAKE_PREFIX_PATH` でそのプレフィックスを指定します。
 
-## installed 名と platform 制限
+## インストールされる名前とプラットフォームの制約
 
-Linux shared library は versioned file、major-generation SONAME link、unversioned linker 名を持つ。NeoGraph shared library は sibling 依存に `$ORIGIN` を使う。macOS `.dylib`/`@loader_path` と Windows の unsuffixed `.dll` は packaging 規則で、新 SDK runtime の検証ではない。static archive は SONAME を持たず、transitive link 要件も除かない。
+Linuxの共有ライブラリには、バージョン付きのファイル、メジャーのジェネレーションを表すSONAMEのリンク、バージョンなしのリンカー用の名前があります。NeoGraphの共有ライブラリは、同じディレクトリにある依存先を `$ORIGIN` で参照します。macOSの `.dylib` / `@loader_path` と、Windowsの接尾辞なしの `.dll` という命名は、パッケージングの慣習のままです。これらは新しいSDKランタイムの適格性確認にはなりません。静的archiveにはSONAMEがなく、推移的なリンク要件もなくなりません。
 
-記録された interface-3 SDK runtime/archive 検証は Linux/POSIX の範囲で、interface 6 の資格検証ではない。既存 macOS/Windows metadata と依存検証は別で、WASM runtime 検証は確立していない。wheel tag は Python/ABI/platform 互換を記すが、全 runtime 経路を実行した証明ではない。[PyPA tag 仕様](https://packaging.python.org/en/latest/specifications/platform-compatibility-tags/)を参照。
+記録されている、インターフェース3でのSDKランタイムとarchiveの適格性確認は、Linux/POSIXを対象としていて、インターフェース6ではありません。既存のmacOS/Windows向けパッケージメタデータは、依存関係の適格性確認とは別のものです。WASMのランタイムは、適格性確認されていません。wheelタグが表すのは、Python/ABI/プラットフォームの互換性であり、すべてのランタイム経路を実際に試したことの証明ではありません。詳しくは[PyPAのタグ仕様](https://packaging.python.org/en/latest/specifications/platform-compatibility-tags/)を参照してください。
 
-## 検証の根拠
+## 検証のエビデンス
 
-`python scripts/verify_ci.py install --work-dir <fresh-output> --jobs 2` は installed-consumer 検査の定義で、pass 結果ではない。Platform が対応する consumer 行には `--shared`、`--core-only`、または `--program --quickjs` を使う。Driver は checkout または展開済み sdist から Git/Bash なしで動作する。日付付きの移行前測定は[歴史的根拠](VALGRIND.md)として残す。現在の NeoGraph/SDK/Python 結果は統合 release report で build、platform、実行経路を明示する。この方針は新しい pass 主張を作らない。
+`python scripts/verify_ci.py install --work-dir <fresh-output> --jobs 2` が定義するのは、インストール済みコンシューマーのチェックであり、合格した結果ではありません。プラットフォームが対応しているコンシューマーの行に合わせて、`--shared`、`--core-only`、または `--program --quickjs` を使ってください。このドライバーは、チェックアウトした状態でも、展開したsdistからでも、GitやBashなしで動作します。日付のある、切り替え前の測定結果は、引き続き[過去のエビデンス](VALGRIND.md)です。現在のNeoGraph、SDK、Pythonの結果は、統合したリリースレポートの中で、ビルド、プラットフォーム、実行した経路を明示する必要があります。このポリシーが、新たな合格の主張を作ることはありません。

@@ -1,49 +1,49 @@
 <!-- neograph-i18n: source=docs/performance-deep-dive.md locale=ja source_sha256=31ea664b884c612f5b01c1132fe748da0cb0115e2afe5bf203f33e958516c63b -->
-# 性能詳細
+# 性能の詳細解説
 
 **Languages:** [English](performance-deep-dive.md) | [한국어](performance-deep-dive.ko.md) | [日本語](performance-deep-dive.ja.md) | [简体中文](performance-deep-dive.zh-CN.md)
 
-## 歴史的測定の読み方
+## 過去の測定結果の読み方
 
-以下の表は移行前測定を保存する。現在の typed provider、外部 runtime、再構築した Python wheel の検証ではない。新比較には revision、compiler、configuration、topology、concurrency、endpoint、計時境界を記録する。現在の再現手順は [benchmark](../benchmarks/README.md) にある。
+以下の表は、切り替え前の測定結果をそのまま残したものです。現在の型付きプロバイダー、その外部ランタイム、再ビルドしたPythonのwheelの適格性確認にはなりません。新しく比較するときは、リビジョン、コンパイラー、設定、トポロジー、並行度、エンドポイント、計測する範囲を記録してください。現在の再現手順は、[ベンチマーク](../benchmarks/README.md)にあります。
 
-旧文の cloud 費用、数百万 worker、恒久 ABI freeze は測定からの予測で、実測した deployment ではない。現在の容量・費用保証ではない。package version に加え wheel hash と native dependency を固定する。version 文字列だけでは再現性を得られない。
+以前の文章では、これらの測定結果から、クラウドの請求額、数百万のワーカー、ABIの恒久的な固定を外挿していました。それらは推定であり、実際にデプロイして測ったものではありません。現在の処理能力やコストの保証でもありません。パッケージのバージョンだけでなく、wheelのハッシュとネイティブの依存もピン留めしてください。バージョン文字列だけでは、デプロイを再現できるようにはなりません。
 
-## engine-only workload、2026 年 4 月
+## エンジン単体のワークロード（2026年4月）
 
-同じ topology を一度 compile し、model/network/sleep なしで実行した。seq は三 node chain、par は五分岐と join。2026-04-22 の x86_64 Linux で、NeoGraph は GCC 13 Release `-O3 -DNDEBUG` の十回 median、Python は CPython 3.12.3 の三回 median。pydantic-graph の par は native fan-out でなく六 node の直列模倣である。
+トポロジーを揃え、1回だけコンパイルし、モデル、ネットワーク、スリープは使っていません。seqは3ノードの直列のチェーン、parは5並列のfan-outとjoinです。これらの行は、2026-04-22にx86_64 Linuxで測定しました。NeoGraphはGCC 13のRelease（`-O3 -DNDEBUG`）で10回の中央値、PythonはCPython 3.12.3で3回の中央値です。pydantic-graphのparの行は、6ノードを直列にエミュレートしたもので、ネイティブのfan-outではありません。
 
-| Framework (2026-04-22) | seq µs | par µs |
+| フレームワーク（2026-04-22） | seq µs | par µs |
 |---|---:|---:|
-| NeoGraph, then-current master | 5.0 | 11.8 |
+| NeoGraph（当時のmaster） | 5.0 | 11.8 |
 | Haystack 2.28.0 | 144.1 | 290.0 |
 | pydantic-graph 1.85.1 | 235.9 | 286.1 |
 | LangGraph 1.1.9 | 656.7 | 2348.7 |
 | LlamaIndex Workflow 0.14.21 | 1780.3 | 4683.5 |
 | AutoGen GraphFlow 0.7.5 | 3209.2 | 7292.7 |
 
-当時の warm-up と seq 10000/par 5000 回では NeoGraph ~0.16 s・4.8 MB、Haystack 2.91 s・80.3 MB、AutoGen 68.29 s・52.4 MB を記録した。zero-I/O engine 比較は model-service latency を予測しない。
+過去の、ウォームアップに加えてseq 10000回／par 5000回を実行した測定では、NeoGraphが約0.16秒・4.8 MB、Haystackが2.91秒・80.3 MB、AutoGenが68.29秒・52.4 MBでした。I/Oなしのエンジン単体の比較から、モデルサービスのレイテンシーは予測できません。
 
-## 歴史的 burst 並行実行
+## 過去のバースト時の並行性
 
-一 CPU、512 MB RAM の Docker cgroup に 10000 request を同時投入した。Python は asyncio。結果はその workload/environment に属し、普遍的 Python/GIL scaling 法則を示さない。
+10000件のリクエストを同時に投入しました。環境は、CPU 1個、RAM 512 MBのDocker cgroupの中です。Pythonの行はasyncioを使っています。これらの結果は、そのワークロードと環境に固有のものであり、PythonとGILに共通のスケーリング則を示すものではありません。
 
-| Framework | Wall | P99 | Peak RSS | Result |
+| フレームワーク | 実時間 | P99 | ピークRSS | 結果 |
 |---|---:|---:|---:|---|
-| NeoGraph, then-current master | 52 ms | 7 µs | 5.5 MB | 10000 completed |
-| pydantic-graph | 886 ms | 158 µs | 42.6 MB | 10000 completed |
-| Haystack | 3.1 s | 2.9 s | 130.7 MB | 10000 completed |
-| LangGraph | 23.4 s | 23.0 s | 416.2 MB | 10000 completed |
-| LlamaIndex | — | — | — | OOM killed |
-| AutoGen | — | — | — | OOM killed |
+| NeoGraph（当時のmaster） | 52 ms | 7 µs | 5.5 MB | 10000件完了 |
+| pydantic-graph | 886 ms | 158 µs | 42.6 MB | 10000件完了 |
+| Haystack | 3.1 s | 2.9 s | 130.7 MB | 10000件完了 |
+| LangGraph | 23.4 s | 23.0 s | 416.2 MB | 10000件完了 |
+| LlamaIndex | — | — | — | OOMで強制終了 |
+| AutoGen | — | — | — | OOMで強制終了 |
 
-手法と process-pool 比較は [concurrent benchmark](../benchmarks/concurrent/CONCURRENT.md) にある。
+測定方法とプロセスプールとの比較は、[並行実行のベンチマーク](../benchmarks/concurrent/CONCURRENT.md)を参照してください。
 
-## 歴史的 cache simulation
+## 過去のキャッシュシミュレーション
 
-Cachegrind は Ryzen 7 5800X の cache 階層を模擬した。L1 instruction/data は各 32 KB・eight-way、last-level は 32 MB・sixteen-way、line は 64 byte。当時の concurrent benchmark は以下を記録した。
+Cachegrindで、Ryzen 7 5800Xのキャッシュ階層をシミュレートしました。L1の命令キャッシュとデータキャッシュは32 KBで8ウェイ、ラストレベルキャッシュは32 MBで16ウェイ、ラインは64バイトです。過去の並行実行ベンチマークの報告は、次のとおりです。
 
-| N | Instruction references | Last-level instruction misses | Native p50 |
+| N | 命令参照数 | ラストレベルの命令ミス数 | ネイティブ p50 |
 |---|---:|---:|---:|
 | 1 | 5.3 M | 4313 | 17 µs |
 | 10 | 5.9 M | 4304 | 16 µs |
@@ -51,13 +51,13 @@ Cachegrind は Ryzen 7 5800X の cache 階層を模擬した。L1 instruction/da
 | 1000 | 69.7 M | 4327 | 6 µs |
 | 10000 | 648 M | 4329 | 5 µs |
 
-約 4330 miss に 64 byte を掛けると 277 KB の line-count 推定になる。simulated miss だけで実際の resident working set、DRAM stall 時間、native latency 変化の原因を証明できない。[Cachegrind manual](https://valgrind.org/docs/manual/cg-manual.html)を参照。
+約4330回のミスに64バイトを掛けると、ライン数から見積もった277 KBになります。ただし、Cachegrindのシミュレーション上のミスだけでは、実機での常駐ワーキングセット、DRAMのストール時間、ネイティブのレイテンシーが変化した原因は証明できません。詳しくは[Cachegrindのマニュアル](https://valgrind.org/docs/manual/cg-manual.html)を参照してください。
 
-## 歴史的 local model workload
+## 過去のローカルモデルのワークロード
 
-別の neoclaw 実験は RTX 4070 Ti 一つ、Gemma 4 E2B Q4 GGUF 一つ（~1.5 GB weight）、inference を直列化する shared LocalProvider、単一 `llm_call` node を使った。wall time は全 worker の drain を含む。request percentile は queueing が消える証拠ではない。
+別のneoclawの実験では、RTX 4070 Ti 1枚と、Gemma 4 E2B Q4のGGUF 1つ（重みは約1.5 GB）を使いました。共有のLocalProviderが推論を直列化し、グラフは `llm_call` ノード1つです。記録されている実時間は、すべてのワーカーのdrainまでを含みます。掲載しているリクエストのパーセンタイルは、キューイングがなくなったことを示すものではありません。
 
-| N | Wall s | Throughput rps | p50 ms | p99 ms | Peak RSS MB |
+| N | 実時間（秒） | スループット（rps） | p50（ms） | p99（ms） | ピークRSS（MB） |
 |---|---:|---:|---:|---:|---:|
 | 1 | 0.64 | 1.6 | 642 | 642 | 2464 |
 | 10 | 0.94 | 10.6 | 184 | 686 | 2529 |
@@ -66,40 +66,40 @@ Cachegrind は Ryzen 7 5800X の cache 階層を模擬した。L1 instruction/da
 | 5000 | 213.7 | 23.4 | 338 | 657 | 2570 |
 | 10000 | 424 | 23.6 | 337 | 648 | 2572 |
 
-source は [neoclaw benchmark](https://github.com/fox1245/neoclaw/blob/main/benchmarks/bench_concurrent_workers_local_llm.cpp)。CUDA benchmark 設定はその repository のもので、現在の NeoGraph provider build ではない。観測した marginal memory から未測定 session 上限を外挿しない。
+出典：[neoclawのベンチマーク](https://github.com/fox1245/neoclaw/blob/main/benchmarks/bench_concurrent_workers_local_llm.cpp)。このCUDAのベンチマーク構成は、そのリポジトリのもので、NeoGraphの現在のプロバイダーのビルドのものではありません。観測した追加メモリの増分から、測っていないセッション数の上限を外挿しないでください。
 
-別の歴史的実験では local Gemma-4 E2B Q4_K_M（4.65 B parameter、2.9 GB GGUF）を HTTP endpoint の背後で使った。
+別の過去の実験では、HTTPエンドポイントの背後で、ローカルのGemma-4 E2B Q4_K_Mモデル（パラメーター数4.65 B、GGUFは2.9 GB）を使いました。
 
-| Metric | Engine-only | Historical local Gemma HTTP |
+| 指標 | エンジン単体 | 過去のローカルGemma HTTP |
 |---|---:|---:|
-| Last-level instruction misses | 4320 | 7262 |
-| 64 × simulated LL instruction miss（歴史的算出値） | 277 KB | 465 KB |
-| Agent RSS | 5.2 MB | 7.6 MB |
+| ラストレベルの命令ミス数 | 4320 | 7262 |
+| 64 ×（シミュレーション上のラストレベルの命令ミス数）（過去の導出値） | 277 KB | 465 KB |
+| エージェントのRSS | 5.2 MB | 7.6 MB |
 | TTFT | — | 25–27 ms |
-| Total request time | — | 146–213 ms |
-| Separate model-server RSS | — | 2.45 GB |
-| RTX 4070 Ti VRAM | — | 3.06 GB |
+| リクエスト全体の時間 | — | 146–213 ms |
+| 別プロセスのモデルサーバーのRSS | — | 2.45 GB |
+| RTX 4070 TiのVRAM | — | 3.06 GB |
 
-五 request で 1.58 s、overlap speedup 2.65×を記録した。旧 OpenAIProvider 設定と httplib transport accounting はその実験のものである。現在の local endpoint は validated descriptor と SDK runtime option を使う。[例 31](../examples/31_local_transformer.cpp)を参照。別 inference process は model allocation を agent process の外に置くが、cache residency を保証しない。
+この実験では、5件のリクエストが1.58秒で完了し、重なりによる高速化は2.65倍でした。古いOpenAIProviderの構成とhttplibトランスポートの会計は、この実験のものです。現在のローカルエンドポイントの設定は、検証済みのディスクリプターとSDKのランタイムオプションを使います。[サンプル31](../examples/31_local_transformer.cpp)を参照してください。推論を別のプロセスにすると、モデルのメモリ割り当てはエージェントのプロセスの外に出ますが、キャッシュに常駐することまでは保証されません。
 
-## 歴史的 size と cold start
+## 過去のサイズとコールドスタート
 
-x86_64 Linux GCC 13 の Plan & Executor demo は `-Os`、static libstdc++/libgcc、dead-section removal、stripping を使った。120 ms sleep で model 処理を模擬し、任意の fan-out pool を使い、一 branch を失敗させて resume した。
+x86_64 LinuxとGCC 13でビルドしたPlan & Executorのデモは、`-Os`、静的なlibstdc++/libgcc、不要セクションの削除、stripを使っています。モデルの処理は120 msのスリープで模擬し、明示的に有効にしたfan-outのプールを使い、1つの分岐を失敗させてから再開しました。
 
-| Metric | Historical Plan & Executor demo |
+| 指標 | 過去のPlan & Executorデモ |
 |---|---:|
-| Stripped MinSizeRel binary | 1203 KB |
-| Peak RSS, crash and resume included | 2.9 MB |
-| Cold start through both phases | ~720 ms |
-| Recorded dynamic dependencies | libc.so.6 only |
+| stripしたMinSizeRelのバイナリ | 1203 KB |
+| ピークRSS（クラッシュと再開を含む） | 2.9 MB |
+| 両方のフェーズを通したコールドスタート | ~720 ms |
+| 記録されている動的依存 | libc.so.6のみ |
 
-当時の artifact 測定であり、現在の libc-only deployment、250 ms 未満 cold start、musl cross-compile、特定 embedded board の容量を証明しない。
+これらは、過去の成果物に対する測定結果です。現在でもlibcだけでデプロイできること、250 ms未満のコールドスタート、musl向けのクロスコンパイル、特定の組み込みボードでの処理能力は、これらからは証明できません。
 
-## 現在の測定を再現する
+## 現在の測定の再現
 
-外部 `SchemaProvider::runtime` は `NEOGRAPH_BUILD_LLM=OFF` でも必要。`SDK_PREFIX` を installed prefix に設定するか、SDK 開発依存と `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` を使う。transitive link は CMake target で扱う。旧 core/yyjson archive 直接 link は runtime を欠く。以下は現在の engine benchmark で、歴史的 concurrent sweep の厳密な再現ではない。
+`NEOGRAPH_BUILD_LLM=OFF` でも、外部の `SchemaProvider::runtime` が必要です。`SDK_PREFIX` にそのインストール先のプレフィックスを設定するか、SDKの開発用の依存とともに `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` を使います。推移的なリンクにはCMakeのターゲットを使ってください。古い、coreとyyjsonのarchiveを直接指定するコマンドでは、ランタイムが抜けてしまいます。以下は、現在のエンジンのベンチマークを測るものです。過去の並行実行の掃引を、そのまま再現するものではありません。
 
-NeoGraph は CMake 3.20+ を要する。明示 SDK source/installed package がなければ、既定設定は revision-pinned 公開 SDK archive を取得する。installed SDK の offline 測定は prefix に加え `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` を設定する。fetch は libcurl/OpenSSL 開発依存を除かない。
+NeoGraphにはCMake 3.20以降が必要です。SDKのソースを明示せず、インストール済みのパッケージもない場合、構成時には、リビジョンを固定した公開SDKのarchiveがデフォルトで取得されます。インストール済みのSDKでオフラインの測定を行うには、プレフィックスに加えて `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` も設定します。取得したとしても、libcurlとOpenSSLの開発用の前提条件はなくなりません。
 
 ```bash
 cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release \
@@ -111,4 +111,4 @@ valgrind --tool=cachegrind --cache-sim=yes \
   ./build-release/bench_neograph
 ```
 
-結果 artifact の `ldd`/`otool` または platform loader inventory を確認し、旧依存一覧を仮定しない。記録された interface-3 SDK runtime/archive 検証は Linux/POSIX の範囲で、interface 4 の資格検証ではない。既存 macOS/Windows metadata と WASM target は新依存の検証ではない。typed Python binding は移行に含まれ、延期ではない。性能は再構築 wheel で測定する必要がある。
+古い依存関係の一覧を前提にせず、できあがった成果物に対して、`ldd` / `otool` か、そのプラットフォームのローダーの一覧で確認してください。記録されている、インターフェース3でのSDKランタイムとarchiveの適格性確認は、Linux/POSIXを対象としていて、インターフェース4ではありません。既存のmacOS/Windows向けメタデータとWASMのターゲットは、この依存の適格性確認にはなりません。現在の型付きPythonバインディングは、切り替えに含まれていて、先送りされたものではありません。その性能は、再ビルドしたwheelで測定する必要があります。
