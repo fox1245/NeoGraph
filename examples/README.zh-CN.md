@@ -125,6 +125,7 @@ Program 把 Core 图包进带有持久标识、预算和准入(admission)的生�
 | 66 | [`66_program_failure_routing.cpp`](66_program_failure_routing.cpp) | yes | Python 示例 32 的 C++ 对应版本。TEST 抛出带作者代码的 `NodeFailureError`，重试两次后被路由到带有 `interruptBefore` 的处理节点。以 `retry` 调用 `resume` 时 Program 完成；`abort` 则以 `plan.user_abort` 和 `failed` 结束。 |
 | 67 | [`67_program_budgets.cpp`](67_program_budgets.cpp) | yes | C++ 中的三道预算限制。要求超过主机 `BudgetLimits` 上限的 Program 在准入时被 `P_ADMIT_POLICY` 拒绝；使用另一个 `RunBudget` 的运行在启动时被 `P_START_BUDGET` 拒绝；用完 `max_core_steps` 的循环以 `budget_exhausted` 结束。 |
 | 68 | [`68_program_pause_resume_fork.cpp`](68_program_pause_resume_fork.cpp) | yes | Python 示例 34 和 35 的 C++ 对应版本。`interruptBefore` 让运行暂停，`resume` 带着操作员的回答继续，`fork` 则从暂停运行的检查点出发，用另一个回答作答。已完成节点的函数体总共只执行一次。 |
+| 69 | [`69_program_crash_recovery.cpp`](69_program_crash_recovery.cpp) | yes | 使用 SQLite 文件的 Python 示例 36 的 C++ 对应版本。进程 A 回答问题、执行 `charge` 后退出，进程 B 打开同一目录并调用 `reconnect`。运行在第二次尝试时完成；`charge` 执行了两次，因此它的副作用由账本保护。仅限 Linux 和 macOS。 |
 | 32 | [`32_evolution.cpp`](32_evolution.cpp) | yes | Harness 演化循环：针对任务变异严格 Core 种子，并以 JSON 输出谱系（`--smoke` 使用内置夹具）。 |
 | 58 | [`58_harness_bench.cpp`](58_harness_bench.cpp) | yes | 针对三种反馈模式的 harness 收敛基准；`--smoke` 运行内置任务。 |
 | 60 | [`60_harness_mcp_server.cpp`](60_harness_mcp_server.cpp) | yes | Harness MCP 服务器：六个工具编译并运行范围受限的多 worker 工作流。`NEOGRAPH_HARNESS_SMOKE=1` 会换成离线夹具 provider。 |

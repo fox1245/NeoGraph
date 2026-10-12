@@ -9,3 +9,8 @@ if(NEOGRAPH_BUILD_PROGRAM AND NEOGRAPH_BUILD_QUICKJS_CONTROL)
     neograph_add_example(program_budgets 67_program_budgets.cpp LINK neograph::program)
     neograph_add_example(program_pause_resume_fork 68_program_pause_resume_fork.cpp LINK neograph::program)
 endif()
+
+if(NEOGRAPH_BUILD_PROGRAM AND NEOGRAPH_BUILD_QUICKJS_CONTROL AND NEOGRAPH_BUILD_SQLITE)
+    neograph_add_example(program_crash_recovery 69_program_crash_recovery.cpp
+        LINK neograph::program neograph::program_sqlite neograph::sqlite)
+endif()
