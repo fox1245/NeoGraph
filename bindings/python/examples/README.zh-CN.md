@@ -102,6 +102,7 @@ python 01_minimal.py
 |---|---|---|---|
 | 29 | [`29_program_hello.py`](29_program_hello.py) | yes | 一段 JavaScript Program 定义带有 Python 节点的图并在 `LocalProgramHost` 上运行，输出 `status: Completed`、`value: 1`、`trace: ['work']`。 |
 | 30 | [`30_program_barrier_join.py`](30_program_barrier_join.py) | yes | 三个审阅者并行运行，`barrier` 等待全部到齐。有一个审阅者改道后，Program 以 `Failed` 结束，给出 `P_CORE_BARRIER_STALLED` 和指明缺失节点的 witness。 |
+| 31 | [`31_program_any_of_join.py`](31_program_any_of_join.py) | yes | 按普通成员等待两个来源的 join，在修正节点接替其中一个时会卡住。把编译器给出的建议，即 `{any_of: [...]}` 槽位，应用到源码后，修复后的 Program 顺利完成。 |
 
 ### 协议：MCP、A2A、ACP
 
