@@ -221,6 +221,8 @@ def native_archive(directory: str, scripted_url: str, *, first: bool, owner: str
 
 def model_context(scripted_url: str) -> "ng.NodeContext":
     """The provider, model and request controls a host binds to its ``llm_call`` nodes."""
+    if not getattr(ng, "_HAVE_LLM", False):
+        raise SystemExit("This neograph_engine build has no provider support (NEOGRAPH_BUILD_LLM=ON).")
     from neograph_engine.llm import SchemaProvider
 
     routing = ng.OpenRouterRouting()
