@@ -16,7 +16,7 @@ Windows uses process working-set counters; Linux uses `/proc/self/status`. Other
 
 Install the external SchemaProvider SDK and set its prefix. Core requires `SchemaProvider::runtime` even when LLM and the optional NeoGraph libcurl backend are disabled. An explicit SDK source checkout can replace the prefix using `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`; its build needs C++20, Python, libcurl ≥7.88, and OpenSSL Crypto. See the [build guide](../../README.md) for dependency and platform limits. This recipe disables network fetching and unused NeoGraph integrations.
 For NeoGraph `0.13.1`, use alpha SDK `0.1.1`, interface revision/shared
-generation 4, and rebuild with matching headers/libraries. Current integrated validation is pending.
+generation 4, and rebuild with matching headers/libraries.
 
 ```bash
 # Set SCHEMAPROVIDER_PREFIX to the installed SDK prefix.
@@ -40,7 +40,7 @@ cmake --build build-stress --parallel --target bench_sustained_concurrent
 
 ## Preserved legacy observation
 
-The previous README reported an undated Ryzen 7 5800X run with concurrency=100 and duration=15 s: 15.3 M runs (about 1.0 M runs/s), mean latency about 55 µs, warm RSS 9.3 MB and final RSS 7.4 MB (about −20%, exit 0). Its date and SDK revision were not recorded here. It is retained as legacy evidence, not a new cutover qualification or a throughput guarantee. The output excerpt below belongs to that observation; the ellipsis is not JSON.
+An earlier undated run on a Ryzen 7 5800X, with concurrency=100 and duration=15 s, recorded 15.3 M runs (about 1.0 M runs/s), mean latency about 55 µs, warm RSS 9.3 MB and final RSS 7.4 MB (about −20%, exit 0). Its date and SDK revision were not recorded. It is kept as a legacy observation, not a throughput guarantee. The output excerpt below belongs to that observation; the ellipsis is not JSON.
 
 ```json
 {"sample":1,"elapsed_s":5,"window_ok":5012514,"err_total":0,"inflight":100,

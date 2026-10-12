@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ko source_sha256=7b098f4c6cf07b09aa0fd20aec0dc8196fd6dcb389dc25c305c9cc3352cfb1dd -->
+<!-- neograph-i18n: source=README.md locale=ko source_sha256=0d7ef3e43002968c0fde7cbc0ba61917a919d82e8ae7e1a7d573f0da86540c6e -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -231,7 +231,7 @@ Output channel:  text = "HELLO"
 
 `NEOGRAPH_BUILD_LLM=OFF`일 때도 SchemaProvider는 꼭 필요한 외부 SDK입니다. Core가 타입이 지정된 provider 계약을 내보내기 때문입니다. 아래 명령은 설치된 [SchemaProvider 런타임 패키지](https://github.com/fox1245/SchemaProvider)를 사용하며, `SCHEMAPROVIDER_PREFIX`를 그 설치 경로로 지정합니다. `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=../SchemaProvider`로 지정한 체크아웃이 가장 우선합니다. 그렇지 않으면 CMake는 설치된 패키지를 먼저 찾고, 없으면 고정된 공개 SDK 아카이브를 내려받습니다. 설치된 패키지나 지정한 체크아웃으로 오프라인 빌드를 하려면 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`로 지정하세요. CMake는 이웃 디렉터리의 체크아웃을 추측하지 않으며, 제거된 번들 인터프리터도 쓰지 않습니다.
 
-필요한 것은 C++20 컴파일러, CMake 3.20 이상, 그리고 SDK의 런타임 의존성인 libcurl 7.88 이상입니다. SDK의 TLS는 libcurl 백엔드를 쓰므로 SDK 자체에는 OpenSSL이 필요 없습니다. NeoGraph의 HTTPS 구성 요소를 포함한 전체 빌드에는 OpenSSL 3이 필요합니다. 기본 빌드는 SQLite와 PostgreSQL 연동도 켜므로, 아래 명령은 필요 없는 NeoGraph 구성 요소를 끕니다. SDK의 의존성은 그대로 남습니다. SDK에 대해 기록된 점검은 interface 4에 대한 것이며, 이 리비전이 고정한 interface 6보다 오래된 것입니다([타입이 지정된 provider 호출](#typed-provider-calls) 참고). 점검은 Linux x86_64와 로컬 프로토콜·상태 피어를 대상으로 했으며, 정확한 범위는 [SDK 적합성 기록](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record)에 있습니다. 이 점검이 새로운 Windows, macOS, ARM64, HTTP/3, 호스팅 업체, WASM 환경에서의 검증을 의미하지는 않습니다. 플랫폼과 빌드 제약은 [문제 해결](docs/troubleshooting.md)을 보세요.
+필요한 것은 C++20 컴파일러, CMake 3.20 이상, 그리고 SDK의 런타임 의존성인 libcurl 7.88 이상입니다. SDK의 TLS는 libcurl 백엔드를 쓰므로 SDK 자체에는 OpenSSL이 필요 없습니다. NeoGraph의 HTTPS 구성 요소를 포함한 전체 빌드에는 OpenSSL 3이 필요합니다. 기본 빌드는 SQLite와 PostgreSQL 연동도 켜므로, 아래 명령은 필요 없는 NeoGraph 구성 요소를 끕니다. SDK의 의존성은 그대로 남습니다. 플랫폼과 빌드 제약은 [문제 해결](docs/troubleshooting.md)을 보세요.
 
 ```bash
 git clone https://github.com/fox1245/NeoGraph.git
@@ -401,7 +401,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `wheel` | 복구를 거친 설치형 휠. cibuildwheel==2.23.0과 네이티브/컨테이너 provider 필요. `--arch x86_64\|aarch64\|arm64\|AMD64` 필수. 선택 옵션 `--python cp312`는 모든 CPython 대신 하나만 빌드합니다. |
 | `runtime-archive` | 공유 SDK 네이티브 아카이브 이식성 타깃/CTest. Ninja와 플랫폼 런타임 의존성 필요. |
 
-로컬 Windows/WSL 결과가 네이티브 ARM/macOS나 VS2026 새니타이저 행을 대신하지는 않습니다. push와 pull request마다 `ci.yml`이 실행됩니다. Linux, macOS, Windows의 전체 네이티브 테스트에 설치형 소비자 행 두 개가 더해지며, 문서만 바꾼 변경은 건너뜁니다. `ci-extended.yml`은 매일 밤과 요청 시에 실행됩니다. 새니타이저, 퍼즈 카나리, 성능 게이트, 네이티브 ARM64, gRPC, Visual Studio 제너레이터, 나머지 설치형 소비자 행 여덟 개를 다룹니다. 릴리스 후보에서는 태그를 붙이기 전에 실행하세요. `wheels.yml`은 패키징 변경 때 플랫폼별 CPython 3.12를, 릴리스 태그와 주간 카나리, 수동 실행에서는 CPython 3.9–3.13을 빌드합니다. glibc 2.34/macOS 14 하한, 설치된 휠 전체 테스트, 콜드 로더·LGPL 교체 게이트, 네이티브 휠/아카이브 플랫폼 4곳, 보호된 태그·OIDC 게시 의존성이 포함됩니다. 소스를 검토하거나 CLI 도움말을 읽었다고 해서 실행하거나 릴리스한 것을 증명하지는 않습니다.
+로컬 Windows/WSL 결과가 네이티브 ARM/macOS나 VS2026 새니타이저 행을 대신하지는 않습니다. push와 pull request마다 `ci.yml`이 실행됩니다. Linux, macOS, Windows의 전체 네이티브 테스트에 설치형 소비자 행 두 개가 더해지며, 문서만 바꾼 변경은 건너뜁니다. `ci-extended.yml`은 매일 밤과 요청 시에 실행됩니다. 새니타이저, 퍼즈 카나리, 성능 게이트, 네이티브 ARM64, gRPC, Visual Studio 제너레이터, 나머지 설치형 소비자 행 여덟 개를 다룹니다. 릴리스 후보에서는 태그를 붙이기 전에 실행하세요. `wheels.yml`은 패키징 변경 때 플랫폼마다 CPython 3.12 휠 하나를 빌드합니다. 릴리스 태그에서는 Linux(x86_64, aarch64), macOS(arm64), Windows(AMD64)용으로 CPython 3.9–3.13 휠을 빌드하며, 최소 플랫폼 버전은 glibc 2.34와 macOS 14입니다.
 
 - [문서 목차](docs/README.md)
 - [핵심 개념과 그래프 의미](docs/concepts.md)

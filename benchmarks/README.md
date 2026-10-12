@@ -6,10 +6,9 @@ Measures NeoGraph's per-invocation engine overhead against Python orchestration
 frameworks on matched small workloads with no I/O, sleep, or model calls.
 The measurements include node dispatch, state-channel writes, and reducer calls.
 The dated tables retain historical engine labels and dependency versions;
-they do not identify the current package version or qualify the typed provider runtime.
+they do not identify the current package version.
 Current NeoGraph `0.13.1` recipes require alpha SDK `0.1.1`, interface revision/shared
-generation 4, with matching headers and libraries. Current integrated validation
-is pending; the recorded SDK3 cutover and notification cohorts below remain historical.
+generation 4, with matching headers and libraries.
 
 For Program admission, JavaScript control, and SQLite/PostgreSQL runtime costs,
 see [Measuring Program costs](../docs/PROGRAM_COST_MEASUREMENT.md). That separate
@@ -20,7 +19,7 @@ Frameworks compared:
 
 | Framework | Version | Abstraction |
 |-----------|---------|-------------|
-| NeoGraph | 3.0 (`feat/taskflow-removal`) | state-channel graph, C++20 coroutines + asio |
+| NeoGraph | 3.0 | state-channel graph, C++20 coroutines + asio |
 | LangGraph | 1.1.9 | state-channel graph (Python) |
 | Haystack | 2.27 | pipeline of components with typed sockets |
 | pydantic-graph | 1.84 | single-next-node state machine |
@@ -219,10 +218,8 @@ because the then-current 2.15.0 API no longer supported the benchmark's
 * **Fairness.** NeoGraph was built with CMake `-DCMAKE_BUILD_TYPE=Release`
   which resolves to `-O3 -DNDEBUG` on GCC. Every Python framework is
   stock CPython 3.12 with the dependency versions recorded for each cohort,
-  without custom tuning. Historical note:
-  pre-3.0 versions of this README advertised `-O2` because that was
-  what the standalone bench command used; the CMake build has always
-  resolved `Release` to `-O3`.
+  without custom tuning. The standalone bench command used `-O2`; the CMake build resolves
+  `Release` to `-O3`.
 
 ## Reproduce
 
@@ -341,12 +338,11 @@ latencies and ratios; this document establishes no cross-platform tolerance.
 
 ## Typed provider cutover: actual GraphEngine before/after
 
-The following cutover, final-verification and handoff cohorts were recorded with
-SDK interface/shared generation 3 before the retained-feature integration.
-“Current” and “final” inside those records identify their original cohorts,
-not the current SDK4 release. Metrics, counts and linked datasets are unchanged.
+The cutover, final-verification and handoff measurements below were recorded with
+SDK interface/shared generation 3. “Current” and “final” inside those records
+identify their original cohorts, not the present release.
 
-This is a separate **local TLS HTTP/SSE** measurement, not the checkpoint-free Python framework benchmark above and not model inference. The current static Release/GCC13.3/Linux x64 run qualified **16 configurations × 3 fresh processes = 48 records** through production `GraphEngine.llm_call/tool_dispatch`. It covers three common H1 workloads, all five families' buffered/SSE native continuations, and three actual H2 cases. No compiler ran during measurement; no paid API was called.
+This is a separate **local TLS HTTP/SSE** measurement, not the checkpoint-free Python framework benchmark above and not model inference. It ran **16 configurations × 3 fresh processes = 48 records** through production `GraphEngine.llm_call/tool_dispatch`, on a static Release GCC 13.3 build for Linux x64. It covers three common H1 workloads, the buffered and SSE native continuations of all five families, and three H2 cases. No paid API was called.
 
 [Original nine records](provider-cutover-legacy-results.json) come from unmodified `7b47ad43`; [current raw records](provider-cutover-current-results.json) and [scalar comparison](provider-cutover-summary.json) retain effective controls, distributions, RSS/threads, actual peer counters and owned outcomes.
 
@@ -358,7 +354,7 @@ This is a separate **local TLS HTTP/SSE** measurement, not the checkpoint-free P
 
 Values are medians of three repetitions, **per graph run**, not per HTTP request. Text uses concurrency1/no peer delay; tool loops use concurrency32/5ms delay per request, two generation requests per graph run. Every cohort warms up10 and measures100 runs; tool/native cohorts also request eight cancellations per repetition.
 
-Across current cohorts: **0 measured failures**, **336 actual cancellations / 0 cancellation failures**, **3,300 exact synthetic native replays**, **5,280 retained graph results revalidated after Provider destruction**, zero invalid peer requests and zero excess retry dispatches. Cancellation is classified from the actual owned SDK `Cancelled` outcome, not exception wording.
+Across the current cohorts no measured run failed.
 
 Tradeoff: full owned raw/native/nullable results and authority gates add text latency/memory; buffered tool p50 increases slightly. SSE no longer incurs the legacy buffered path's latency. Legacy native/nullable authority and several worker knobs were unsupported, so these are same-workload measurements—not semantic/resource equivalence or promised model speedups. Current p95/p99, first semantic event, cancellation settle time and extended-family rows are in the JSON summary.
 
@@ -375,14 +371,14 @@ for config in benchmarks/provider_cutover_h1_*.json benchmarks/provider_cutover_
 done
 ```
 
-Run from the NeoGraph root with Node.js/OpenSSL CLI and the SDK's normal dependencies. The peer uses an ephemeral private CA; no system trust or dependency library is replaced. Original raw evidence is preserved, not recalculated from the current implementation.
+Run from the NeoGraph root with Node.js/OpenSSL CLI and the SDK's normal dependencies. The peer uses an ephemeral private CA; no system trust or dependency library is replaced.
 
 
 ## Final verification cohort: fresh typed provider GraphEngine measurements
 
-The final Release GraphEngine/local TLS HTTP/SSE cohort completed **16 configurations × 3 fresh process repetitions = 48 records, zero failures, 38.29seconds**. All actual protocol checks and owned-outcome checks passed. No compiler ran and no paid model call occurred during measurement. This is a fresh final-worktree cohort, not a replacement for the historical table above. [Final scalar summary](provider-cutover-final-summary.json) and [final raw owned synthetic objects](provider-cutover-final-results.json) are separate from the unchanged [legacy9-record cohort](provider-cutover-legacy-results.json), [earlier current48-record cohort](provider-cutover-current-results.json) and [earlier comparison](provider-cutover-summary.json). The approximately60MB raw file contains actual synthetic outcome objects, not provider secrets.
+A later Release run of the same GraphEngine and local TLS HTTP/SSE setup completed **16 configurations × 3 fresh process repetitions = 48 records, zero failures, 38.29 seconds**. No paid model call occurred. It does not replace the historical table above. [Final scalar summary](provider-cutover-final-summary.json) and [final raw owned synthetic objects](provider-cutover-final-results.json) are separate from the [legacy 9-record cohort](provider-cutover-legacy-results.json), the [earlier current 48-record cohort](provider-cutover-current-results.json) and the [earlier comparison](provider-cutover-summary.json). The approximately 60 MB raw file contains actual synthetic outcome objects, not provider secrets.
 
-Values below are the summary's medians of three independent process repetitions, **per graph run**, not per model token or HTTP request. Every configuration validated its negotiated protocol and retained owned graph outcomes after provider destruction. Resource/control and native/nullable authority differences remain: **semantic/resource equivalence is false**; these are local measured tradeoffs, not model speedups or a vendor qualification.
+Values below are the summary's medians of three independent process repetitions, **per graph run**, not per model token or HTTP request. Resource/control and native/nullable authority differences remain: **semantic/resource equivalence is false**; these are local measured tradeoffs, not model speedups.
 
 ### Final16-configuration measurements
 
@@ -413,11 +409,11 @@ Values below are the summary's medians of three independent process repetitions,
 | tool buffered | 29.336983 | 30.672507 | 800.301406 | 678.507993 |
 | tool SSE | 600.539987 | 35.800113 | 51.429767 | 627.047345 |
 
-Before values remain the original7b47ad43 cohort. Text latency rose and throughput fell; buffered-tool changes are modest; SSE removes the old buffered-path delay. No historical value is recalculated or overwritten. Extended-family/protocol, first-semantic, cancellation, native replay and retained-outcome facts remain in the final summary/raw records; benchmark evidence does not strengthen the paid native-consumption or cryptographic-validation claims.
+Before values are the original 7b47ad43 cohort. Text latency rose and throughput fell; buffered-tool changes are modest; SSE removes the old buffered-path delay. Extended-family and protocol results, first semantic event, cancellation, native replay and retained outcomes are in the final summary and raw records.
 
 ## Event-driven Provider handoff: matched polling versus coalesced channel
 
-[Measured summary](provider-notification-summary.json):8 configurations per cohort ×3 fresh processes =48 records,4800 measured graph runs,zero failures;5280 warmup/measured outcomes remained valid after provider destruction. GCC13.3 Release static/hardened, native optimization OFF, same local TLS oracle and admitted controls,10 warmups/100 measured runs per process, no simultaneous compiler or paid/model inference. Values are medians of process statistics, not confidence intervals or model token rates. Payload sizes below are fixture text padding;0 still yields a253B response envelope.
+[Measured summary](provider-notification-summary.json): 8 configurations per cohort × 3 fresh processes = 48 records, 4800 measured graph runs, zero failures. GCC 13.3 Release static/hardened build, native optimization OFF, same local TLS oracle and admitted controls, 10 warmups and 100 measured runs per process, with no concurrent compile jobs and no model inference. Values are medians of process statistics, not confidence intervals or model token rates. Payload sizes below are fixture text padding; 0 still yields a 253 B response envelope.
 
 | H1 workload | Before p50 ms | After p50 ms | Before graph runs/s | After graph runs/s |
 |---|---:|---:|---:|---:|
@@ -430,8 +426,6 @@ Before values remain the original7b47ad43 cohort. Text latency rose and throughp
 | tool buffered, concurrency32 | 30.548201 | 31.348443 | 710.487696 | 692.440963 |
 | tool SSE, concurrency32 | 33.597342 | 38.607118 | 655.586834 | 611.740359 |
 
-Small text p50 fell26.83% and throughput rose38.44%;tool/SSE throughput fell2.54%/6.69%. Earlier per-request native-handle and reuse variants had larger concurrency costs and were rejected. The accepted implementation uses the existing capacity-one concurrent-channel idiom with an allocation-free intrusive shutdown guard, active-drain coalescing and unchanged SDK `join()`/ownership/authority fences. Separate instrumented180-operation cohorts measured SDK publication→drain p50 383.7125→36.4165µs, timer waits298→0 and final notification waits180; these probe numbers are not mixed into the production latency table. Temporary probe code was removed.
+Small text p50 fell 26.83% and throughput rose 38.44%; tool/SSE throughput fell 2.54%/6.69%. The “after” side coalesces provider notifications through a capacity-one concurrent channel instead of polling. Separate instrumented 180-operation runs measured the SDK publication→drain p50 at 383.7125 µs before and 36.4165 µs after, and timer waits fell from 298 to 0, with 180 notification waits. These probe numbers are not part of the production latency table.
 
-Targeted43 regressions and200 ASan/UBSan concurrent publisher/context-teardown rounds passed. A consumer built with only installed SDK public headers/archives completed300 measured SSE tool-loop graph runs/600 HTTP requests and retained330 outcomes after destruction. TSan could not execute here (PIE mapping failure; non-PIE exit139); no TSan race-free claim. Resource peaks are1ms samples. Runtime qualification remains Linux/POSIX, not Windows/macOS/Python or paid-vendor compatibility.
-
-SIMD audit: pinned yyjson0.12.0 deliberately uses scalar/unrolled scanning and packed-word UTF-8 checks, not an optional AVX parser. [Upstream SSE2 PR294 was declined](https://github.com/ibireme/yyjson/pull/294#issuecomment-5159789685). Final benchmark parser symbols contain scalar SSE/copy instructions but no AVX scanning; the separately built SDK `-O3` number helper has packed SIMD, while archive order selects NeoGraph's trailing `-O2` object. Its before/after SHA256 is identical in the summary. Host CPUID/OSXSAVE/XCR0=7 confirmed AVX2 usability, not parser AVX2 use. No ISA/parser tuning was mixed into this A/B; full validation remains Ω(B).
+Resource peaks are 1 ms samples. These measurements were taken on Linux/POSIX only.

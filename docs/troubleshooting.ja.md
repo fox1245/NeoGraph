@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=cc7841c6b839b6ffd7e5f54c32ac76a95b214a2d621969c731a72de7b54379e7 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=619cc967ee0702270da38d4f92f783baacddd5dee11306e5545600ae7c24fb51 -->
 # トラブルシューティング
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -7,7 +7,7 @@
 
 `neograph_engine.__version__`、Pythonのバージョン、OSとアーキテクチャ、インストール方法、最初に出たエラーを控えておきます。ソースのチェックアウトと古いwheelが同じAPIを公開しているとは思い込まず、そのリリースで入手できるwheelのファイルを確認してください。型付きインターフェースへの切り替え（typed cutover）で、旧来のプロバイダー名は削除されました。古いwheelでimportできても、新しいバインディングを試したことにはなりません。
 
-NeoGraphが公開しているプラットフォームのメタデータには、Linux、macOS、Windowsが含まれます。現時点でSchemaProviderのランタイムとarchiveの適格性確認が済んでいるのは、Linux/POSIXです。macOSとWindowsへの移植は、新しいwheelをそこで使えると主張する前に、それぞれ適格性確認が必要です。互換性のあるwheelタグやコンパイラーがあるだけでは、ランタイムの統合が動くことの証明にはなりません。WASMでのプロバイダーランタイムのサポートは、確立されていません。
+NeoGraphが公開しているプラットフォームのメタデータには、Linux、macOS、Windowsが含まれます。互換性のあるwheelタグやコンパイラーがあるだけでは、ランタイムの統合が動くことの証明にはなりません。WASMでのプロバイダーランタイムのサポートは、確立されていません。
 
 GLIBCのシンボルが見つからないというエラーが出た場合は、wheelのmanylinuxタグとホストのglibcを比べます。`manylinux_2_34` のwheelには、glibc 2.34以降が必要です。WindowsでDLLのエラーが出た場合は、Pythonがx64であることを確認し、見つからない依存DLLを調べます。原因がアーキテクチャだけとは限りません。同梱されているライブラリを、1つだけ差し替えてはいけません。
 
@@ -29,7 +29,7 @@ cmake --build build -j
 
 SQLiteとPostgreSQLは、NeoGraphのオプションのコンポーネントです。それぞれの開発用パッケージを用意するか、`NEOGRAPH_BUILD_SQLITE` / `NEOGRAPH_BUILD_POSTGRES` を明示的に無効にしてください。無効にしても、SDKのランタイムはなくなりません。ヘッダーやAPIを変更した後にバインディングのシンボルが解決できない場合は、新しいビルドディレクトリで、対応するヘッダーとライブラリを使って、すべてのコンシューマーを再構成して再ビルドします。
 
-Stage 3の間に、GCC 13でコルーチンに関するコンパイラー内部エラーが報告されました。適切なコンパイラーにアップグレードするか、報告された式の書き方を変えてください。過去の回避策があるからといって、SDKやプラットフォーム全体のビルドが適格性確認済みだということにはなりません。catchハンドラーの中で `co_await` してはいけません。C++自体が、そこでのawait式を禁止しています。エラーを捕捉しておき、ハンドラーの外で復旧処理をawaitしてください。
+GCC 13では、コルーチンに関するコンパイラー内部エラーが報告されたことがあります。適切なコンパイラーにアップグレードするか、報告された式の書き方を変えてください。catchハンドラーの中で `co_await` してはいけません。C++自体が、そこでのawait式を禁止しています。エラーを捕捉しておき、ハンドラーの外で復旧処理をawaitしてください。
 
 ## 削除されたプロバイダーAPIと、型付きの失敗
 
@@ -69,7 +69,7 @@ else:
 
 信頼するバンドルを明示するには、`ProviderRuntimeOptions.ca_file` を設定します。Pythonのimport時には、既存の `SSL_CERT_FILE` があればそれを保持し、なければ、使える場合にcertifiを選びます。選ばれたCAファイルは、ランタイムオプションを通じてSDKのlibcurlに渡されます。`NEOGRAPH_SKIP_CERT_AUTOFIX=1` を設定すると、ホスト側の選択には手を加えません。エンドポイントや信頼ストアのエラーを隠すために、証明書の検証を無効にしてはいけません。
 
-v0.1.0〜v0.1.6で、wheelのCAパスが原因でConnPoolがタイムアウトした問題は、過去のものです。v0.1.7でCAの自動選択が追加されました。現在のプロバイダーは、その古い経路ではなく、SDKのlibcurlを使います。ローカルのHTTPエンドポイントのadmissionは、生のURLの上書きではなく、検証済みのディスクリプターで行います。[サンプル31](../examples/31_local_transformer.cpp)に従ってください。ResponsesのWebSocketのclose=1000に関する手順は、削除された過去のトランスポートにだけ当てはまります。
+ローカルのHTTPエンドポイントのadmissionは、生のURLの上書きではなく、検証済みのディスクリプターで行います。[サンプル31](../examples/31_local_transformer.cpp)に従ってください。
 
 ## グラフ定義と登録
 
@@ -125,27 +125,27 @@ PostgresCheckpointStoreがエクスポートされていない場合は、その
 
 ストアは、権限があればテーブルを自分で作成します。CREATE権限がない場合は、[PostgreSQLのヘッダー](../include/neograph/graph/postgres_checkpoint.h)にあるスキーマを、自分で適用する必要があります。保留中の書き込みの機能がない場合は、スーパーステップ全体がリプレイされます。外部への効果が1回だけ実行される（exactly-once）ことにはなりません。非同期専用のカスタムバックエンドでは、AsyncCheckpointStoreと `adapt_async_checkpoint_store` を使います。以前のような、同期と非同期の既定実装が互いに呼び合う仕組みは使いません。
 
-## トレーシングのアダプターと過去の修正
+## トレーシングのアダプターとその他の落とし穴
 
 トレーサーのアダプターは、記録したデータを自分で所有する必要があります。セッションを閉じたときに破棄されるSpanラッパーへの生のポインターを持ってはいけません。[C++のトレーシングのサンプル](../examples/49_openinference.cpp)を参照してください。Pythonのcontextvarsは、C++のコールバックの境界を自動では越えません。親のコンテキストを明示的に渡すかアタッチし、ラッパーはエンジンのコンパイル前に組み込んでください。
 
-過去の修正には、v0.1.8でトップレベルのconditional_edgesを受け付けるようになったこと、ノードを二重に実行するフォールバックを削除したこと、型付きインターフェースへの切り替え前にあったhttplibのマクロのレイアウトの不一致（issue #16）があります。これらの修正で、削除されたプロバイダーのシグネチャが復活するわけではありません。ヘッダーオンリーのhttplibを複数の翻訳単位でインスタンス化するコンシューマーは、これまでどおり、CPPHTTPLIB_OPENSSL_SUPPORTの定義をそろえる必要があります。現在の型付きプロバイダーのHTTPディスパッチは、SDKのlibcurlです。
+ヘッダーオンリーのhttplibを複数の翻訳単位でインスタンス化するコンシューマーは、CPPHTTPLIB_OPENSSL_SUPPORTの定義をそろえる必要があります。型付きプロバイダーのHTTPディスパッチは、SDKのlibcurlを使います。
 
-便宜的なvectorを返すプロパティは、Pythonのlistではないことがあります。中身を確認するには、イテレーションか `list(value)` を使ってください。ChatMessage.image_urlsのような、コピーとして返されるシーケンスのフィールドは、組み立ててから代入します。返されたコピーを変更すれば、C++のリクエストも変わると思わないでください。新しい型付きのリクエストと結果の契約は、古いCompletionParamsのサンプルとは別のものです。
+便宜的なvectorを返すプロパティは、Pythonのlistではないことがあります。中身を確認するには、イテレーションか `list(value)` を使ってください。ChatMessage.image_urlsのような、コピーとして返されるシーケンスのフィールドは、組み立ててから代入します。返されたコピーを変更すれば、C++のリクエストも変わると思わないでください。
 
 ## ツール呼び出し、Hook、プロトコルエラー
 
-グラフの実行中に、ツール呼び出し、ノード、サブグラフが必須のHookによるブロックに遭遇した場合、`NodeExecutionError` で包むのではなく、`HookBoundaryBlocked` そのものが送出されるようになりました。`llm::Agent` は以前からそうしています。このブロックに対する `ERROR` イベントは発行されません。`HookBoundaryBlocked`（Pythonでは `ng.HookBoundaryBlocked`）を捕捉し、`invocation_id` と `state` を読んでください。たとえば入れ子のエンジン実行から、これを送出したPythonノードは、リトライされなくなりました。[ツールの失敗に関する契約](reference-en.md#tool-failure-contract)を参照してください。
+グラフの実行中に、ツール呼び出し、ノード、サブグラフが必須のHookによるブロックに遭遇した場合、`NodeExecutionError` で包むのではなく、`llm::Agent` と同じく `HookBoundaryBlocked` そのものが送出されます。このブロックに対する `ERROR` イベントは発行されません。`HookBoundaryBlocked`（Pythonでは `ng.HookBoundaryBlocked`）を捕捉し、`invocation_id` と `state` を読んでください。たとえば入れ子のエンジン実行から、これを送出したPythonノードは、リトライされません。[ツールの失敗に関する契約](reference-en.md#tool-failure-contract)を参照してください。
 
-エンジンの `HookRuntime` は、そのエンジンのツール呼び出しについて、`BeforeToolExecution` と `AfterToolExecution` のHookも実行するようになりました。ProgramホストのHookランタイムも、そのCoreのツール呼び出しについて同様です。グラフの実行が、状態 `failed`、メッセージ `lifecycle hook could not run` の `HookBoundaryBlocked` で止まるようになった場合は、実行にオーナースコープ（`RunMetadata::owner_scope`）を与えてください。オーナースコープがないHook境界は、チェックポイントのHookでもツールのHookでも、フェイルクローズになります。
+エンジンの `HookRuntime` は、そのエンジンのツール呼び出しについて、`BeforeToolExecution` と `AfterToolExecution` のHookも実行します。ProgramホストのHookランタイムも、そのCoreのツール呼び出しについて同様です。グラフの実行が、状態 `failed`、メッセージ `lifecycle hook could not run` の `HookBoundaryBlocked` で止まった場合は、実行にオーナースコープ（`RunMetadata::owner_scope`）を与えてください。オーナースコープがないHook境界は、チェックポイントのHookでもツールのHookでも、フェイルクローズになります。
 
-`state == "timed_out"` は、Hookのデッドラインが過ぎたか、その対象がタイムアウトしたことを意味するようになりました。最後の試行が失敗したHookは `failed` を報告します。以前は `timed_out` を報告していました。
+`state == "timed_out"` は、Hookのデッドラインが過ぎたか、その対象がタイムアウトしたことを意味します。最後の試行が失敗したHookは `failed` を報告します。
 
 ステータスが `expired` で、エラーが `run deadline elapsed before the tool started` のツール結果は、呼び出しを始められる前に、実行のデッドラインが過ぎていたことを意味します。ツールもそのHookも実行されていません。呼び出しをリトライするのではなく、`RunMetadata::deadline`（Pythonでは `timeout_ms`、Programでは `wall_time_ms`）を延ばしてください。実行のデッドライン、またはクライアントのリクエストタイムアウトによって止められたMCP呼び出しは、`timed_out` になります。実行をキャンセルすると、実行中のMCP呼び出しはただちに止まります。
 
-`MCPServer` は、クライアントがキャンセルした `tools/call` に対しては、どのトランスポートでも応答を返しません。Hookによるブロックには `-32010`、割り込みには `-32011` で応答します。それ以外の失敗は、すべて `isError` の結果になり、その `_meta["io.neograph/failure"].code` が失敗の種類を示します。テキストは公開用のメッセージで、例外のテキストが使われることはありません（テキストを指定するには、`public_message` を付けて `NodeFailureError` を送出します）。`OK` のレスポンスから `RunGraphResponse.error` を読んでいたgRPCクライアントは、今後はステータスを読む必要があります。失敗した実行は、OKではないステータスになり、`google.rpc.ErrorInfo` の `metadata["code"]` にコードが入ります。詳しくは[プロトコルの失敗のマッピング](reference-en.md#protocol-failure-mapping)を参照してください。
+`MCPServer` は、クライアントがキャンセルした `tools/call` に対しては、どのトランスポートでも応答を返しません。Hookによるブロックには `-32010`、割り込みには `-32011` で応答します。それ以外の失敗は、すべて `isError` の結果になり、その `_meta["io.neograph/failure"].code` が失敗の種類を示します。テキストは公開用のメッセージで、例外のテキストが使われることはありません（テキストを指定するには、`public_message` を付けて `NodeFailureError` を送出します）。gRPCクライアントは、`OK` のレスポンスの `RunGraphResponse.error` ではなく、ステータスを読む必要があります。失敗した実行は、OKではないステータスになり、`google.rpc.ErrorInfo` の `metadata["code"]` にコードが入ります。詳しくは[プロトコルの失敗のマッピング](reference-en.md#protocol-failure-mapping)を参照してください。
 
-有効なUTF-8でないツール出力や例外メッセージは、以前は、空のツールメッセージ、空のMCPやgRPCのペイロード、またはPythonの `UnicodeDecodeError` になっていました。現在は、不正なバイト列の部分がU+FFFDに置き換えられて届きます。
+有効なUTF-8でないツール出力や例外メッセージは、不正なバイト列の部分がU+FFFDに置き換えられて届きます。空のツールメッセージ、空のMCPやgRPCのペイロード、Pythonの `UnicodeDecodeError` にはなりません。
 
 ## バグを安全に報告するには
 

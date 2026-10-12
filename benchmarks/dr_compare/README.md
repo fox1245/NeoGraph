@@ -2,14 +2,14 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-The runners implement router → plan → researcher Send branches → synthesis with matching prompts and model selection. Their engines, bindings, clients, and checkpoint implementations differ, so end-to-end timing does not isolate engine cost or transport alone. The April 2026 findings below are preserved historical evidence, not a rerun of the current cutover.
+The runners implement router → plan → researcher Send branches → synthesis with matching prompts and model selection. Their engines, bindings, clients, and checkpoint implementations differ, so end-to-end timing does not isolate engine cost or transport alone. The April 2026 findings below are historical and were not rerun with the current SDK.
 
 ## Files and dependencies
 
 `dr_neograph.py`, `dr_langgraph.py`, `bench.py`, `bench_mock.py`, `mem_probe.py`, `mem_prod_stack.py`, `sweep.sh`, `_run_single.py` cover real calls, plain-text mock workloads, memory probes, sweeps, and one-shot diagnosis. Install a wheel matching the current source via the [Python binding guide](../../docs/python-binding.md); an old wheel with `CompletionParams`/`OpenAIProvider` is not the current API. Source builds require the external SchemaProvider SDK even for Core.
 Current builds require a wheel/native build matching SDK `0.3.0`, interface
 revision/shared generation 6, at SchemaProvider `maint/interface6` commit
-`f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`. Current integrated validation is pending.
+`f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`.
 This comparison runner is separate from the built-in Deep Research recovery path.
 
 The workflow imports requests, LangGraph, and langchain-openai; memory probes use psutil. PostgreSQL mode also needs the appropriate checkpoint packages and a running database. `mem_prod_stack.py` imports additional web/database/observability packages for its named stacks; it is not a bare-engine-only RSS probe.
@@ -41,7 +41,7 @@ The workflow imports requests, LangGraph, and langchain-openai; memory probes us
 4. Historical pooling changes identified as commits `6da4810` / `bc2ab4f` were associated with NG p90 35.34 s → 25.28 s and sd 5.90 s → 1.28 s. Those changes concerned removed provider implementations; current typed SchemaProvider uses the external SDK/libcurl runtime.
 5. A worker-count experiment reported NG 307 ms vs LG asyncio 711 ms at FANOUT=50 and LLM_MOCK_MS=100 with NG_WORKER_COUNT=50. This is a separate workload, not a general server-capacity result.
 
-The old claim that NeoGraph still needs HTTP/2 support is obsolete. These recorded timings do not qualify the new SDK, current Python wheel, other platforms, or remote inference speedups. Mock mode measures orchestration and configured sleep only; it creates no provider evidence. Real mode extracts visible text from typed owned outcomes but does not benchmark native replay, portable history export, or provider-report/budget-charge settlement.
+The old claim that NeoGraph still needs HTTP/2 support is obsolete. These timings were recorded before the new SDK and the current Python wheel; they do not apply to other platforms or predict remote inference speedups. Mock mode measures orchestration and configured sleep only; it creates no provider evidence. Real mode extracts visible text from typed owned outcomes but does not benchmark native replay, portable history export, or provider-report/budget-charge settlement.
 
 ## Running a new cohort
 
@@ -91,17 +91,17 @@ This command is not a spending limit: for `FANOUT=5`, a research query performs
 at most seven logical model calls per side (plan, five researchers, synthesis).
 Two warmups plus five measured runs on both sides can therefore dispatch
 98 logical calls. The current NG SDK default disables transport retries; LG
-explicitly sets `max_retries=0`. Authorized bounded validation must reserve calls
-and the sum of configured output caps outside the benchmark. Both sides use
+explicitly sets `max_retries=0`. Set a limit on calls
+and on the sum of configured output caps outside the benchmark. Both sides use
 `NG_EXAMPLE_MAX_TOKENS=1600` by default; an explicit value is honored unchanged.
-Use only the host's explicitly authorized model, endpoint, credentials, and
-search service. A reduced representative cohort is not the historical
+Use only a model, endpoint, credentials, and
+search service that you are allowed to use. A reduced representative cohort is not the historical
 multi-iteration measurement and must be labeled separately.
 
 A finite paid-provider diagnostic (not a latency comparison) is:
 
 ```sh
-# From benchmarks/dr_compare, only after a separate spending reservation.
+# From benchmarks/dr_compare; this makes paid provider calls.
 : "${OPENAI_API_KEY:?Requires an intentionally authorized hosted credential}"
 env -u NG_WORKER_COUNT LLM_MOCK_MS=-1 MOCK_SEARCH=1 USE_INMEMORY_CP=1 \
   FANOUT=5 NG_TRANSPORT=http-chat NG_EXAMPLE_MAX_TOKENS=8192 \
@@ -110,7 +110,7 @@ env -u NG_WORKER_COUNT LLM_MOCK_MS=-1 MOCK_SEARCH=1 USE_INMEMORY_CP=1 \
 
 This is at most seven model calls and 57,344 configured output tokens, plus input
 tokens. It has no real web search and must be labelled paid-provider/mock-search,
-not real-search qualification. A pass needs exit 0, one successful sample, a
+not a real-search run. A pass needs exit 0, one successful sample, a
 nonempty report and `Failed runs: 0`; any failed/empty plan, answer or report fails.
 The 8,192-token allowance is an explicit diagnostic choice, not a raised default,
 price estimate or spending authorization. With an approved running Crawl4AI

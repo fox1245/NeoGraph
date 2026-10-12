@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=110a2516c9d60c99aff8e6bf20d7944bf34ffdda37017c93d9eabc53b6ae5959 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=06849fc847850619dee71a61ed970037593e55f98c2c3bb8354018f3cd9ee74b -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -32,11 +32,11 @@
 | **ACP** | `neograph::acp` | Agent 客户端协议 — 编辑器↔agent 通过 stdio 的双向 RPC | [公开头文件](../include/neograph/) | [ACPServer](../include/neograph/acp/server.h) |
 | **Async** | `neograph::async` | Asio HTTP/SSE/WS 辅助类、ConnPool、run_sync | [公开头文件](../include/neograph/) | [WsClient](../include/neograph/async/ws_client.h) |
 
-附加模块在 `include/neograph/{a2a,acp,async}/` 提供公开头文件。单独叙述指南已延期，请查阅头文件中的精确契约。文件存在不表示当前集成已获验证。
+附加模块在 `include/neograph/{a2a,acp,async}/` 提供公开头文件。本导览不涵盖这些模块，请查阅头文件中的精确契约。
 
 **便利头文件：** `#include <neograph/neograph.h>` 包含完整的 core + graph engine API。
 
-需要 CMake 3.20 或更高版本。Core 公开拥有所有权的 typed provider 契约，所以 `NEOGRAPH_BUILD_LLM=OFF` 时 SchemaProvider runtime 仍必需。显式 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` 优先；否则先查找已安装的 `SchemaProvider` runtime package。若没有且 `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON`（默认），就下载 `cmake/NeoGraphSchemaProvider.cmake` 固定的不可变 GitHub archive。Offline build 需安装 SDK、将 `CMAKE_PREFIX_PATH` 指向其 prefix，并传入 `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`。CMake 不猜测 sibling checkout，也不选择已删除的 bundled interpreter。禁用 NeoGraph 可选 HTTP module 时，SDK runtime 的 transport 依赖仍必需。已记录的 SDK runtime/archive 验证覆盖 Linux/POSIX。Windows NTFS 与 macOS 实现已存在，但新 platform 验证需要 runtime 证据；尚未确立 WASM provider runtime 验证。
+需要 CMake 3.20 或更高版本。Core 公开拥有所有权的 typed provider 契约，所以 `NEOGRAPH_BUILD_LLM=OFF` 时 SchemaProvider runtime 仍必需。显式 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` 优先；否则先查找已安装的 `SchemaProvider` runtime package。若没有且 `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON`（默认），就下载 `cmake/NeoGraphSchemaProvider.cmake` 固定的不可变 GitHub archive。Offline build 需安装 SDK、将 `CMAKE_PREFIX_PATH` 指向其 prefix，并传入 `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`。CMake 不猜测 sibling checkout，也不选择已删除的 bundled interpreter。禁用 NeoGraph 可选 HTTP module 时，SDK runtime 的 transport 依赖仍必需。已验证的平台是 Linux/POSIX。Windows NTFS 与 macOS 实现已存在，但尚未在该 SDK 上验证；WASM provider runtime 支持尚未确立。
 
 SDK imported target 提供 `include/SchemaProvider` include root；公开示例直接使用 `<descriptor/descriptor.h>`、`<runtime/client.h>`、`<neograph/llm/schema_provider.h>`，不依赖 recipe 专用 helper。
 
@@ -224,10 +224,10 @@ struct ChatTool {
 
 `UsageAccumulator::snapshot()` 返回累计报告。`total_tokens_wide()` 返回已计费 token 与未解决预留之和，不能把它显示为报告用量。结算要求具有 input/output count 的 final、consistent 报告，并计入有依据的最大 total，不截断超额用量。任何累计报告缺少 counter，汇总该 counter 也为未知。预留、本地计费和 vendor 发票是不同的记录。
 
+实际结果存在后，若 post-effect 结算或 terminal receipt 持久化失败，`ProviderDispatchOutcomePersistenceError::outcome()` 保留原始不可变结果，`cause()` 保留原始持久化异常。若 delivery 也失败，`delivery_error()` 保留原始观察者异常。持久化成功后的观察者失败原样重新抛出原异常；未知/无结果 transport 失败不会伪造 outcome。
+
 ### Portable projections
 
-
-实际结果存在后，若 post-effect 结算或 terminal receipt 持久化失败，`ProviderDispatchOutcomePersistenceError::outcome()` 保留原始不可变结果，`cause()` 保留原始持久化异常。若 delivery 也失败，`delivery_error()` 保留原始观察者异常。持久化成功后的观察者失败原样重新抛出原异常；未知/无结果 transport 失败不会伪造 outcome。
 `ChatMessage` / `ChatTool` 和 JSON 只是 portable projection，不是 native 权限。Portable 格式仍为 [`provider-message-v2`](../schemas/provider-message-v2.schema.json)、[`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)。真实 C++ checkpoint sidecar 保留内存 native seal。持久 native 历史需要 host-owned `sp::NativeArchive`：closed v3 / `spna3` 使用独立密钥提供经认证的 owner-private custody；archive v2 被拒绝，不升级或解释。认证绑定全部 semantic descriptor 选择（origin/path/header、policy、请求 field mapping、usage path、stop mapping）、owner 和精确 custody binding。这不是加密或 vendor-issuer 认证；不得公开 archive 正文、密钥、native blob 或 raw wire 观测。Archive 是证据存储，不是资金 grant 或 spending lease。Program/external bank 仍由独立 journal 拥有，复制 snapshot 不能创建 credit。
 
 `RuntimeHistoryRecord` 的无参数 `serialize_canonical()` 支持可移植记录。持久原生历史须使用 `serialize_canonical(archive, owner_id)`，并提供所有者范围与该 ID 一致的存档。Python 暴露同一重载以及 `RuntimeHistoryRecord.parse(stored_bytes, archive=None, owner_id="")`；面向可移植记录的默认参数不会在缺少匹配存档时授权原生恢复。Python 的解析和存档感知序列化会在原生工作期间释放 GIL。JSON 观测数据仍与存档认证的保管权限不同。
@@ -236,17 +236,17 @@ Python 通过 `ContextStore.hydrate_records(range)` 与 `history_record_by_messa
 
 包含 `Assistant` 消息的 RAW `RuntimeHistoryRecord` 必须使用 `RuntimeTrustClass.ModelOutput`；`RuntimeTrustClass.UntrustedInput` 仅接受 `User` 消息。这些是实际的 Python enum 名称。trust class 标明记录的角色与来源边界；选择它不会授予原生重放保管权限或支出、执行权限。
 
-**Standalone bank journal 修正——当前契约已修订；实际 runtime 证据如下。** Owner-approved protocol 要求单调 trusted-store namespace obligation，以及真实不可变 original owner/thread/graph scope、ceiling、deadline/clock identity、generation。只有对全部 checkpoint commitment/revision 的精确 durable head CAS 才可发放 host-owned opaque lease。精确 pending effect window 必须在 provider I/O 前持久化；结算必须采用真实 SDK outcome 及实际 charge、nullable report、hold、dedup identity。Checkpoint 与 next head 必须在同一 owned actor/revision 下原子 publish。删除 bank metadata、prune checkpoint、replay old authenticated snapshot、覆盖同一 ID 或失去 actor 都不能授予 credit。已有 65 hold 时将 ceiling 130 降至 129，不能再批准另一个 65；已证明 no-effect 的失败可 release unchanged head，使 authentic 130 恢复仍可进行。Crash/unknown/lost-lease window 保持 hold，不 refund/retry/fallback。Plain/pristine archive 配置不授予 money/native spending lease；当前 `config.usage` 不能替换既有 standalone obligation，Program/external-bank journal 所有权不变。这是要求契约。实际 currency/custody 证据与 instrumentation 限制见下文，不是稳定 released API 保证。
+**独立预算 bank。** 独立 bank 要求单调 trusted-store namespace obligation，以及真实不可变 original owner/thread/graph scope、ceiling、deadline/clock identity、generation。只有对全部 checkpoint commitment/revision 的精确 durable head CAS 才可发放 host-owned opaque lease。精确 pending effect window 必须在 provider I/O 前持久化；结算必须采用真实 SDK outcome 及实际 charge、nullable report、hold、dedup identity。Checkpoint 与 next head 在同一 owned actor/revision 下原子 publish。删除 bank metadata、prune checkpoint、replay old authenticated snapshot、覆盖同一 ID 或失去 actor 都不会授予 credit。已有 65 hold 时将 ceiling 130 降至 129，不能再批准另一个 65；已证明 no-effect 的失败可 release unchanged head，使 authentic 130 恢复仍可进行。Crash/unknown/lost-lease window 保持 hold，不 refund/retry/fallback。Plain archive 配置不授予 money 或 native spending lease，当前 `config.usage` 不能替换既有独立 obligation。Program/external bank 仍由各自的 journal 所有。
 
-**当前声明；集成 runtime 证据如下:** `<neograph/graph/checkpoint.h>` 声明 `ManagedBudgetLeaseScope`，包含 `owner_scope`、logical `thread_id`、private backend `storage_thread_id`、`graph_identity`、`original_ceiling`、`original_deadline_ticks`、`deadline_clock_identity`。`OwnedManagedBudgetLease` 暴露 read-only `scope()`、`actor_id()`、不可变 `bank_generation()`、`revision()`、`head_checkpoint_id()`、`head_commitment()`，没有公开 authority-import constructor。`ManagedBudgetEffectReceipt` 暴露 `active()`、`effect_id()`、`claim_amount()`、`request_digest()`；default receipt 不授予权限。`CheckpointStore` 声明 `acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment)`、`begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest)`、`settle_managed_budget_effect(lease, effect, genuine_outcome, authority)`、`publish_managed_budget_checkpoint(lease, checkpoint)`、`release_managed_budget_lease(lease)` 及 `_async` counterpart。Sync `CheckpointStoreCore` 与 `AsyncCheckpointStore` 暴露各自 variant。`managed_budget_checkpoint_commitment(checkpoint)` 绑定完整持久 checkpoint，而非仅 bank JSON。这些声明不证明 backend CAS、currency 安全性、installed ABI 兼容性或实际成功的 runtime 路径。
+**Managed budget lease 声明。** `<neograph/graph/checkpoint.h>` 声明 `ManagedBudgetLeaseScope`，包含 `owner_scope`、logical `thread_id`、private backend `storage_thread_id`、`graph_identity`、`original_ceiling`、`original_deadline_ticks`、`deadline_clock_identity`。`OwnedManagedBudgetLease` 暴露 read-only `scope()`、`actor_id()`、不可变 `bank_generation()`、`revision()`、`head_checkpoint_id()`、`head_commitment()`，没有公开 authority-import constructor。`ManagedBudgetEffectReceipt` 暴露 `active()`、`effect_id()`、`claim_amount()`、`request_digest()`；default receipt 不授予权限。`CheckpointStore` 声明 `acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment)`、`begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest)`、`settle_managed_budget_effect(lease, effect, genuine_outcome, authority)`、`publish_managed_budget_checkpoint(lease, checkpoint)`、`release_managed_budget_lease(lease)` 及 `_async` counterpart。Sync `CheckpointStoreCore` 与 `AsyncCheckpointStore` 暴露各自 variant。`managed_budget_checkpoint_commitment(checkpoint)` 绑定完整持久 checkpoint，而非仅 bank JSON。
 
-**真实 InMemory shared-bank fork 已保留并实证。** 原始真实 C++ fork 使用 ONE original financial journal 和 trusted current branch head，不复制 grant。`publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)` 及 `_async` 要求 authentic current source/full commitment 与实际 same-bank native C++ pointer；durable standalone fork 仍明确 unsupported。`OwnedManagedBudgetLease::scope()` 及 original owner/thread/graph、ceiling、deadline/clock、generation 保持不可变。Read-only store-issued `execution_thread_id()` / `execution_storage_thread_id()` 单独选择 execution branch；`GraphState::budget_original_thread_id()` 标识原始 financial bank。精确 selected-branch head CAS 和 global actor/revision 将所有 branch 对 canonical current counter、pending effect、burned identity 串行化。Original/fork branch 保持可用但不补充额度。Stale snapshot、checkpoint copy、imported JSON 不能发放 alias 或回退 head。原始 root30 → charge3 → original continuation6 → fork lower20 → continuation9 same-bank 证明在未修改 test_graph_engine.cpp:810–913 中 PASSED；saved original ceiling30 不同于 effective fork ceiling20；widening31 和 JSON-only restore 必须拒绝。Unbounded reported observation 是事实 data，不是 finite grant。只有已证明 zero-effect 的 lease 能 release unchanged head；unknown/pending effect 保留 obligation。
+**Shared-bank fork（InMemory）。** 原始真实 C++ fork 使用 ONE original financial journal 和 trusted current branch head，不复制 grant。`publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)` 及 `_async` 要求 authentic current source/full commitment 与实际 same-bank native C++ pointer；durable standalone fork 仍明确 unsupported。`OwnedManagedBudgetLease::scope()` 及 original owner/thread/graph、ceiling、deadline/clock、generation 保持不可变。Read-only store-issued `execution_thread_id()` / `execution_storage_thread_id()` 单独选择 execution branch；`GraphState::budget_original_thread_id()` 标识原始 financial bank。精确 selected-branch head CAS 和 global actor/revision 将所有 branch 对 canonical current counter、pending effect、burned identity 串行化。Original/fork branch 保持可用但不补充额度。Stale snapshot、checkpoint copy、imported JSON 不能发放 alias 或回退 head。保存的 original ceiling 与 effective fork ceiling 相互独立；放宽它或仅用 JSON 恢复都会被拒绝。Unbounded reported observation 是事实 data，不是 finite grant。只有已证明 zero-effect 的 lease 能 release unchanged head；unknown/pending effect 保留 obligation。
 
-**当前 release-error 契约；实际 suite/probe 如下。** `<neograph/graph/engine.h>` 中 `graph::ManagedBudgetLeaseReleaseError` 继承 `ProviderOutcomeError`。`cause()` 保留原始 execution exception，`release_error()` 暴露次要 durable lease-disposition 失败。`outcome()` 在存在真实 SDK 证据时保留它，若没有 SDK outcome 则为 null；release 失败不能伪造结果或授权重新 dispatch。Closed `_neograph_managed_budget_scope` metadata 描述原始 logical scope/cap/deadline clock/generation，但只是 data，不是 backend CAS 权限。
+**Lease release 错误。** `<neograph/graph/engine.h>` 中 `graph::ManagedBudgetLeaseReleaseError` 继承 `ProviderOutcomeError`。`cause()` 保留原始 execution exception，`release_error()` 暴露次要 durable lease-disposition 失败。`outcome()` 在存在真实 SDK 证据时保留它，若没有 SDK outcome 则为 null；release 失败不能伪造结果或授权重新 dispatch。Closed `_neograph_managed_budget_scope` metadata 描述原始 logical scope/cap/deadline clock/generation，但只是 data，不是 backend CAS 权限。
 
-**Archive-owner/retention 契约；实际 suite/probe 如下。** 只有 finite standalone root 或 authenticated finite source 才从真实配置的 `sp::NativeArchive::owner_scope()` 继承省略的 original owner；unbounded/plain owner metadata 语义不变。显式冲突的 archive owner 在 lease acquire 前拒绝。`CheckpointStore::retains_native_checkpoint() const noexcept` 及对应 Core/Async storage capability 默认 false；真实 InMemory backend override 为 true，wrapper 必须委托真实 retention。此 read-only 描述允许合法 unleased/plain/unbounded C++ native checkpoint custody，但不授予 spending credit 或 native replay authority。Leased custody 使用真实 store-issued receipt，而非 JSON flag 或猜测的 store type。
+**Archive owner 与 retention。** 只有 finite standalone root 或 authenticated finite source 才从真实配置的 `sp::NativeArchive::owner_scope()` 继承省略的 original owner；unbounded/plain owner metadata 语义不变。显式冲突的 archive owner 在 lease acquire 前拒绝。`CheckpointStore::retains_native_checkpoint() const noexcept` 及对应 Core/Async storage capability 默认 false；真实 InMemory backend override 为 true，wrapper 必须委托真实 retention。此 read-only 描述允许合法 unleased/plain/unbounded C++ native checkpoint custody，但不授予 spending credit 或 native replay authority。Leased custody 使用真实 store-issued receipt，而非 JSON flag 或猜测的 store type。
 
-**Native-custody pre-I/O gate；实际 suite/probe 如下。** Managed effect begin 在任何 pending-effect/slot/held-window 修改前要求真实绑定的 NativeArchive 或实际 local store-issued private C++ retention capability。Private capability 不从 JSON import，也不经 wire 传输。C++ sidecar 无法跨越边界，因此即使 remote backend 是 InMemory，gRPC 仍要求真实 client/server archive。Archive 未提供 finite source owner 时，原始 anonymous owner scope 保持空值；真实 archive binding 必须匹配 original scope。Financial head/lease 证据本身不证明 native-custody readiness。
+**Native-custody gate。** Managed effect begin 在任何 pending-effect/slot/held-window 修改前要求真实绑定的 NativeArchive 或实际 local store-issued private C++ retention capability。Private capability 不从 JSON import，也不经 wire 传输。C++ sidecar 无法跨越边界，因此即使 remote backend 是 InMemory，gRPC 仍要求真实 client/server archive。Archive 未提供 finite source owner 时，原始 anonymous owner scope 保持空值；真实 archive binding 必须匹配 original scope。Financial head/lease 证据本身不证明 native-custody readiness。
 
 诊断 JSON 保留原始 raw byte，包括语法有效的 duplicate-key 文档；可执行请求/config admission 仍拒绝重复键。原始 non-2xx 响应 JSON 保留在 `http.error` 证据中，不进行第二次有损 parse。named SSE error 优先于之后的正常 stream close。诊断/provider metadata 按获准 source extent 限制，而非无关的小 error-text cap。
 
@@ -260,19 +260,7 @@ Python `LocalProgramHost` 析构时，会在 `ProgramRuntime` 取消、排空并
 
 `RecordedBindingSet` 是 source-bound move-only data，不是调用方提供的 dispatcher。可信 Catalog `recorded_capability_binder` 独立读取真实持久 source event，materialize captured-only capability。`ProgramRuntime::replay_recorded()` 检查原始 selected-source permission，再通过 durable CAS 转移真实剩余 bank；inherited spend 不是新的 model grant。旧 `start_recorded` 续期 API 已删除。InMemory/File/SQLite/PostgreSQL Program store 在整个执行期间保留精确不可变 owned lease，不因 expiry 续期。Controlled JavaScript 仍验证 underlying capability manifest，消费精确 completed command 结果，不重新 dispatch external effect。
 
-**Recorded-control causal fix 已在 full suite 实证。** Captured command replay 在执行前仅为新的 CPU wall-time/Core work 建立 durable reservation，再通过 result CAS publish 测量 work 与新产生的 Core checkpoint。不消耗新的 model、money、Program-operation allowance，也不重新 dispatch captured external effect。未结算 reservation 保持 debit。Reservation 选择认证 settlement transition，而非曾拒绝首个新 Core checkpoint 的普通 Running→Running transition。Await channel receive、timer wait/cancel、handoff wait 的开始/release 在所属 executor/strand 上串行化；既有 Recorded CPU/Memory await/handoff scenario 在 full suite pass；remote TSan coverage 限制如下明确保留。
-
-以下观察记录于本次文档整理之前。它们是历史证据，不是新测试运行，也不保证所有 platform、transport 或 security 属性。
-
-**付费观测已完成；不是普遍 qualification。** 原始 `SPQUAL1` base630/1000000 microUSD 不变；同一原始 ledger 中 ONE hash-chained `A` 接纳批准的 extension480/3000000，aggregate1110/4000000。Calls/spent/hold/settlement 累积，不产生新 grant ID/header/reset。精确 declaration byte/file identity 和 original authorization/baseline/catalog/activation/ledger-prefix hash/totals 仍固定；删除、替换、变更均 fail closed。最终 canonical ledger 为 calls1110/spent437958/held1287828 microUSD、eventA1、limits1110/4000000；spent+held US$1.725786 是 LOCAL catalogue meter，不是 invoice。记录的 five-family60-pair baseline 完成600 request：Chat60/60、Responses60/60、Messages60/60、Generate56/60（incorrect-vision SSE4次）、Interactions57/60（incorrect-vision buffered1次/SSE2次）；合计293/300 pair，不是300/300。其他 old600 financial record 保留，但不是完整 behavioral proof。此前 M5/media one-shot cohort 不变。此前 Google3-round prerequisite 保留 invalid-tool2次/unreadable-positive1次失败状态。不批准更多付费调用。最终 SDK 证据与 native-axis 限制不同于 baseline 成功。 此前 activation/reopen smoke 保留为两次 reopen 后 calls610/spent219159/held751233、SDK meter/canary/vision4-test19.38秒 pass；这是限定的历史 checkpoint，不是最终 ledger totals。此前验证的 Chat60-pair cohort 保留实际 attempt120、UpperBound charge120、无 UnknownHold。
-
-**Native-axis 观测不是 cryptographic 验证或 native consumption/equivalence。** Generate 接纳 mutation/omission/duplication。Interactions 接纳 isolated genuine source/positive control、one-owner signature mutation、thought-carrier omission、call-carrier omission、duplication。删除全部 thought/signature 返回 generic400；保留 THOUGHT item 而删除全部 signature field 也返回 generic400。最后一次 capture 只有 local encoded-original retention control，没有 same-capture server positive；此前 positive cohort 仍是真实证据。这仅建立 aggregate-carrier-absence boundary，不证明 issuer/signature 验证或 vendor consumption。实际 report：SDK `config/qualification-extension-results.json`、`qualification-final-summary.json`、`qualification-native-axis-results.json`、`qualification-combined-omission-results.json`、`qualification-signature-presence-results.json`；prerequisite-failed/not-run/negative-inconclusive 状态保持为事实。 Thought-only/carrier-only omission 在仍有其他 carrier 时被接纳；这不加强 issuer-validation/native-consumption 声明。
-
-**实际集成证明及剩余限制。** 最新 Core full run：2242 test、失败0、skip16（RAM process-loss 不适用14项/live-credential gate2项）、130.17秒。`PgNestedJsonRoundTrips` 精确保留 duplicate key/order/null metadata、blob、residual，0.18秒 pass。未修改的原始 shared-bank fork 和既有 Recorded CPU/Memory await/handoff scenario 均 pass。真实 wrappedMemory/SQLite/PostgreSQL/gRPC finite130/hold65/lower129/strip/old-head/pruning/no-archive/import probe 在 plain 和 ASan+UBSan pass。LOCAL Memory/SQLite/PostgreSQL TSan scope7项 pass、warning0。包含 system Abseil/Protobuf 的 full mixed gRPC TSan 为 exit66，dependency/generated-RPC stack 有 race warning402项。这是 instrumentation/coverage 限制，不是已证明的 false positive；不声称 remote TSan/race-free，不 suppress warning。Installed find_package Program C++/C ABI/dualQuickJS3个 consumer pass。Fresh installed NeoGraph/SchemaProvider typed consumer 实际2个 HTTP request、coroutine 开始前 provider 销毁、native/tool replay、refusal、known-zero/raw 保留、实际 LinkedMismatch 拒绝均 pass。Browser Alice/Bob isolation、generation2 replacement 已实际目视验证；PostgreSQL Program Chat black-box6项18.989秒 pass。最新 SDK26/26、失败0、74.07秒 pass。最终 ReleaseGraph16配置 ×fresh process3次/48记录以38.29秒、失败0、全部 actual protocol/owned-outcome check pass 完成。NeoGraph `benchmarks/provider-cutover-final-results.json` 和 `benchmarks/provider-cutover-final-summary.json` 保留独立最终 cohort。测量期间未执行 compiler/付费 model；历史 cohort 不变，不声明 semantic/resource equivalence。Unstable SDK/ABI3 不是稳定 release 或更广 platform qualification。
-
-**最小付费证据（2026-10-03）不是广泛 qualification。** 分别批准的三次 one-shot 调用结果：Images—1 个 JPEG，1024×1024，360685 byte，input/output/total token 19/1408/1427，已实际目视检查；Veo—1 个 MP4，1280×720，4 秒，437737 byte，1 次 generation 加 3 次 status GET，usage nullable，在 Chromium 中 decode 并目视检查；Decisions—`typesafe/jev-1.13`，probability 0.93，input/output token 283/21，total 未知，API 报告费用 USD 0.000011886。Image USD 0.0336 base 加 text/thinking、Veo USD 0.20 是 catalog 预期，不是 invoice；最小 image smoke 未取得价格档位分解。结果不续期 one-shot 权限，也不授权重跑。
-
-已完成的 chat pair 不证明 downstream vendor 对 native-continuation 的消费。
+**Recorded replay 记账。** Captured command replay 在执行前仅为新的 CPU wall-time/Core work 建立 durable reservation，再通过 result CAS publish 测量 work 与新产生的 Core checkpoint。不消耗新的 model、money、Program-operation allowance，也不重新 dispatch captured external effect。未结算 reservation 保持 debit。Await channel receive、timer wait/cancel、handoff wait 的开始/release 在所属 executor/strand 上串行化。
 
 ```cpp
 #include <neograph/types.h>
@@ -437,7 +425,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-这是源码和二进制破坏性变更；所有 C++ 使用者和自定义提供方都须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为 alpha `0.1.1`、interface revision 4 / shared-library generation 4，采用 out-of-line capability check，不表示稳定发布。已记录 interface-3 SDK runtime/archive 验证是 Linux/POSIX 的历史证据，不是 interface-4 pass。Windows NTFS/macOS 实现已存在，但新 platform 验证需要 runtime 证据；WASM provider runtime 尚未验证。
+这是源码和二进制破坏性变更；所有 C++ 使用者和自定义提供方都须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为 alpha `0.1.1`、interface revision 4 / shared-library generation 4，采用 out-of-line capability check，不表示稳定发布。已验证的平台是 Linux/POSIX。Windows NTFS 与 macOS 实现已存在，但尚未在该 SDK 上验证；WASM provider runtime 支持尚未确立。
 
 Python 公开与 C++ 相同的所有权 request/outcome 边界：`make_provider_request`、`Provider.prepare`、`dispatch` 和 `invoke`。Provider 历史使用带 typed part 的 `ProviderMessage`；`ChatMessage` 仍是图的便利 projection。SDK 失败可通过 `ProviderOutcome.failure` 读取，host observer/settlement 异常保留 `outcome` 和 `cause`。构造器及 GIL/回调行为参见 [Python binding 指南](python-binding.md)。
 
@@ -445,14 +433,10 @@ Python SDK 的 vector/map getter 返回独立值：`ProviderMessage.parts`、`Pr
 
 原生代码调用 Python provider 的 `prepare` 重写时，返回 `None` 会在消费 handle 前引发 `TypeError`。`ProviderDescriptorPolicy.identity` 是包含 raw SHA-256 digest 的 `bytes`；`.hex()` 仅用于显示转换。反复检查已保存的 Python provider/graph cause 会保留原始异常值与 traceback，不消费已保存异常的 restore 状态；此规则也适用于嵌套原生异常转换。
 
-此前记录的 installed find_package Program C++/C ABI/dualQuickJS consumer 和 NeoGraph/SchemaProvider typed2-request lifetime/native/raw/mismatch consumer 在当时 snapshot 上 pass。这不证明 interface-4 package 验证；仅声明匹配不证明新 runtime 结果或更广 platform 支持。
-
-当前 SDK4 Linux x86_64 证据覆盖全部 27 个注册 case：首次 full run 中 25 个 pass；修正两个 obsolete assertion 后，`native_archive` 与 `stop_reasoning_preservation` 在 focused 2/2 run 中 pass。这不是第二次 full-suite 27/27 run。未改 buffered/SSE Stop probe 和已安装 SDK 的 exact README consumer 也 pass。后者每个 zero-usage、unknown-usage、HTTP-400-failure variant 执行一个无 credential 请求。这些 SDK 结果不证明新 NeoGraph native build/wheel pass 或 Windows/macOS/ARM64/HTTP3 验证。
-
 <a id="pricing-evidence-and-the-price-catalog"></a>
 ### 计价证据与价格目录
 
-Program 运行的 `monetary_microunits` 预算按 micro-USD 计数（1 microunit = 1e-6 USD）。当主机把内置 `llm_call` 节点的 provider 调用交给计价 broker 时，调用才会被计价：进程内使用 `bind_priced_provider_call(context)`，需要崩溃安全的重放时使用 `SQLiteProgramProviderCallJournal::bind_priced(context, deployment)`。运行时通过 `ProgramCoreProviderCallContext::monetary_account` 把 attempt 的金额账户交给每个 broker。Python 的 `LocalProgramHost(node_context=..., binding_label=...)` 总是为其调用计价（[Python 指南](python-binding.md#model-calling-nodes)）。与所有 `RunBudget` 字段一样，`monetary_microunits` 是授予运行的数量，`0` 表示什么也不授予：子运行与 fork 的预算从父运行的数量中划出，使用了模型 token 却以 `model_tokens = 0` 完成的运行会报告为 `BudgetExhausted`。#372 之前没有任何东西收取金额；现在 `monetary_microunits = 0` 的运行会在发送前拒绝每一个被计价的调用。计价代码是内部的（`src/program/pricing.h`、`monetary.h`），不承诺 ABI。
+Program 运行的 `monetary_microunits` 预算按 micro-USD 计数（1 microunit = 1e-6 USD）。当主机把内置 `llm_call` 节点的 provider 调用交给计价 broker 时，调用才会被计价：进程内使用 `bind_priced_provider_call(context)`，需要崩溃安全的重放时使用 `SQLiteProgramProviderCallJournal::bind_priced(context, deployment)`。运行时通过 `ProgramCoreProviderCallContext::monetary_account` 把 attempt 的金额账户交给每个 broker。Python 的 `LocalProgramHost(node_context=..., binding_label=...)` 总是为其调用计价（[Python 指南](python-binding.md#model-calling-nodes)）。与所有 `RunBudget` 字段一样，`monetary_microunits` 是授予运行的数量，`0` 表示什么也不授予：子运行与 fork 的预算从父运行的数量中划出，使用了模型 token 却以 `model_tokens = 0` 完成的运行会报告为 `BudgetExhausted`。`monetary_microunits = 0` 的运行会在发送前拒绝每一个被计价的调用。计价代码是内部的（`src/program/pricing.h`、`monetary.h`），不承诺 ABI。
 
 分发之前，broker 为已准备的请求计价。origin 是 URL 与 descriptor base URL 匹配的目录 origin；若 SDK 策略把该 base URL 声明为 OpenRouter origin，则为 `openrouter`。hold 是请求的输入上限与输出上限对应的目录预留，乘以一次分发可能计费的模型调用次数（`Provider::invocation_upper_bound`）。输入上限是该模型已知的最小输入限制：SDK 策略的限制、目录的 `max_input_tokens` 或其上下文窗口。每个输入 token 按最贵的输入档计价，每个输出 token 按最贵的输出费率计价，aggregator 上使用 route ceiling。无法确定上限的调用，或 hold 超出剩余预算的调用，会在产生任何请求或 journal marker 之前被拒绝。节点以表示未发送的合成 provider 失败而失败，运行的 `ProgramFailure` 写明原因；`failure.witness["monetary"]` 包含 origin、model、上限与目录：
 
@@ -1371,7 +1355,7 @@ struct RunConfig {
 | `usage` | `std::shared_ptr<UsageAccumulator>` | `nullptr` | 可选的 token 累加器。当省略时引擎创建一个，并将活跃累加器暴露为 `in.ctx.usage` |
 | `resume_if_exists` | `bool` | `false` | 如果为 `true` 且 `thread_id` 存在检查点，在应用 `input` 之前从该检查点播种（多轮聊天形态） |
 
-### RunContext（v0.4 PR 1，通过 `NodeInput.ctx` 暴露给节点）
+### RunContext（v0.4，通过 `NodeInput.ctx` 暴露给节点）
 
 引擎传递的每次运行分发元数据。最初由 `RunConfig`（未提供 usage 累加器时
 创建一个）、`RunMetadata`、有效 Store 和可选 resume value 构造。节点在
@@ -1492,7 +1476,7 @@ asio::awaitable<NodeOutput> run(NodeInput in) override {
 |--------|-------------|
 | `cancel()` | 幂等、线程安全。设置轮询标志，并在绑定执行器上发出 asio cancellation_signal；通过 `fork()` 级联到所有活动子令牌 |
 | `is_cancelled()` | 无锁轮询读取 |
-| `fork()` | **v0.4 PR 3。** 返回子 shared_ptr。Parent.cancel() 级联；如果父令牌在 fork() 时已取消，子令牌被构造为预取消状态（无 emit-vs-bind 竞态） |
+| `fork()` | **v0.4。** 返回子 shared_ptr。Parent.cancel() 级联；如果父令牌在 fork() 时已取消，子令牌被构造为预取消状态（无 emit-vs-bind 竞态） |
 | `bind_executor(ex)` | 引擎内部；绑定处理信号发出的执行器 |
 | `slot()` | asio `cancellation_slot`，用于在 `co_spawn` 时 `bind_cancellation_slot` |
 
@@ -1645,7 +1629,7 @@ public:
     // owned `asio::thread_pool` of size n. build() defaults to
     // n==1 — prefer EngineConfig::worker_count to opt into
     // real parallel fan-out. Throws `std::logic_error` if called
-    // while a run is in flight (Round 3 guard — `active_runs_`
+    // while a run is in flight (an `active_runs_`
     // counter prevents tasks queued on the old pool from being
     // silently dropped on swap).
     void set_worker_count(std::size_t n);
@@ -2234,7 +2218,7 @@ constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
 | `metadata` | `json` | 任意的用户定义数据 |
 | `step` | `int64_t` | 超级步骤计数 |
 | `timestamp` | `int64_t` | 创建时间，Unix 纪元毫秒 |
-| `schema_version` | `std::uint32_t` | 线路布局版本（见 `CHECKPOINT_SCHEMA_VERSION`，当前为 `3`）。第五轮将其从 `int` 扩大到定宽无符号 — schema version 是非负的，平台可变的 `int` 宽度对于持久化到磁盘并通过 JSON 往返的值来说是不正确的。持久的 `CheckpointStore` 实现应序列化它，并将反序列化 blob 上的 `0` 视为"pre-versioned"（例如字段缺失 — 迁移是调用者的责任） |
+| `schema_version` | `std::uint32_t` | 线路布局版本（见 `CHECKPOINT_SCHEMA_VERSION`，当前为 `3`）。它是定宽无符号类型，因为 schema version 非负，并且要持久化到磁盘、通过 JSON 往返。持久的 `CheckpointStore` 实现应序列化它，并将反序列化 blob 上的 `0` 视为"pre-versioned"（例如字段缺失 — 迁移是调用者的责任） |
 
 ### CheckpointStore
 
@@ -3046,7 +3030,7 @@ POST 应答，并在应答到达后停止读取该流。服务器在应答之前
 | 方法 | 说明 |
 |--------|-------------|
 | `MCPClient(url)` | 构造按原样使用 MCP 端点 `url` 的 HTTP 模式客户端 |
-| `MCPClient(argv)` | 启动子进程并构造 stdio 模式客户端。`argv[0]` 在 fork 前通过 `PATH` 解析；exec 失败会在第一次 RPC 时表现为连接错误。出于安全考虑拒绝 Windows `.bat`/`.cmd`（Round 3 hardening） |
+| `MCPClient(argv)` | 启动子进程并构造 stdio 模式客户端。`argv[0]` 在 fork 前通过 `PATH` 解析；exec 失败会在第一次 RPC 时表现为连接错误。出于安全考虑拒绝 Windows `.bat`/`.cmd` |
 | `MCPClient(StdioClientConfig)` | 带显式环境、有界 stderr 捕获、截止时间和取消宽限期的加固 stdio 启动 |
 | `initialize(client_name)` | 执行一次 MCP 初始化握手。重复调用是幂等的；协议/传输失败会抛出 |
 | `initialize(client_name, deadline, cancel_token)` | 由截止时间和取消令牌约束的握手 |
@@ -3535,14 +3519,13 @@ Python 的 `neograph_engine.a2a` 导出 `WireDialect`、`AgentInterface`、`Agen
 
 ### 本导览未涵盖的其他公共接口
 
-- 可选 `ProviderControls` 是调用方选择，不是强制默认值或暗中 clamp 的 cap。不支持的 family 控制在 dispatch 前拒绝。有界调用需要获准的真实模型 input/output 上限；缺失时为 `LimitUnknown`。预留是保守的支出权限，而非报告使用量、预测或账单。未知/部分/delivery-unknown 结果保留 hold，真实最终报告用于结算，超额报告也全额计入。retry 是显式单层，默认 off，具有有界 window 与 unknown-prior hold；没有隐藏重发。
 - **`neograph::AsyncTool`** — `Tool` 的对应类型，为天然适合协程的工具（HTTP 获取、MCP 调用）
   提供 `execute_async(json)`。同步 `execute()` 通过 `run_sync` 以 `final` 方式路由。
 - **`neograph::graph::NodeCache`** — 每节点记忆化缓存，通过构造时的 `EngineConfig::cached_nodes`
   选择性启用（setter 仍作为兼容接口保留）。
 - **`neograph::graph::create_deep_research_graph`** —
   open_deep_research 风格的 supervisor + 子研究者扇出，由
-  `examples/25_deep_research.cpp` 使用。Round 2 审计新增了
+  `examples/25_deep_research.cpp` 使用。它包含
   `BriefNode` LLM 重写、`FinalReportNode` token 限制重试以及
   `ClarifyNode` HITL 闸门。
 

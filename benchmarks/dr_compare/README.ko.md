@@ -1,14 +1,14 @@
-<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=ko source_sha256=9085c7d12b789cfef4a2314e135b20f3fd1dc1c17f40e8b7ed0011f880bd792b -->
+<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=ko source_sha256=505672efc95e54e5c55c2204f9bff828e13151f825659a9473eceab788c37149 -->
 # dr_compare: 심층 조사 오케스트레이션 비교
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-러너는 라우터 → 계획 → 연구자 Send 분기 → 종합 흐름을 같은 프롬프트와 모델 선택으로 구현합니다. 하지만 엔진, 바인딩, 클라이언트, 체크포인트 구현이 서로 달라서 종단 간 시간만으로는 엔진 비용이나 전송만을 따로 가려낼 수 없습니다. 아래의 2026년 4월 결과는 과거 증거를 그대로 보존한 것이며, 현재 cutover를 다시 실행한 결과가 아닙니다.
+러너는 라우터 → 계획 → 연구자 Send 분기 → 종합 흐름을 같은 프롬프트와 모델 선택으로 구현합니다. 하지만 엔진, 바인딩, 클라이언트, 체크포인트 구현이 서로 달라서 종단 간 시간만으로는 엔진 비용이나 전송만을 따로 가려낼 수 없습니다. 아래의 2026년 4월 결과는 과거 기록이며, 현재 SDK로 다시 실행한 결과가 아닙니다.
 
 ## 파일과 의존성
 
 `dr_neograph.py`, `dr_langgraph.py`, `bench.py`, `bench_mock.py`, `mem_probe.py`, `mem_prod_stack.py`, `sweep.sh`, `_run_single.py`는 실제 호출, 일반 텍스트 mock 작업, 메모리 측정, 스윕(sweep), 단발성 진단을 맡습니다. [Python 바인딩 가이드](../../docs/python-binding.md)에 따라 현재 소스와 맞는 wheel을 설치합니다. `CompletionParams`/`OpenAIProvider`가 있는 예전 wheel은 현재 API가 아닙니다. 소스에서 빌드할 때는 Core만 빌드하더라도 외부 SchemaProvider SDK가 필요합니다.
-현재 빌드에는 SDK `0.3.0`, 인터페이스 리비전/공유 라이브러리 세대 6과 SchemaProvider `maint/interface6` 커밋 `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`에 맞는 wheel/네이티브 빌드가 필요합니다. 현재 통합 검증은 아직 끝나지 않았습니다. 이 비교 러너는 내장 Deep Research 복구 경로와는 별개입니다.
+현재 빌드에는 SDK `0.3.0`, 인터페이스 리비전/공유 라이브러리 세대 6과 SchemaProvider `maint/interface6` 커밋 `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`에 맞는 wheel/네이티브 빌드가 필요합니다. 이 비교 러너는 내장 Deep Research 복구 경로와는 별개입니다.
 
 워크플로는 requests, LangGraph, langchain-openai를 import하고, 메모리 측정에는 psutil을 씁니다. PostgreSQL 모드에는 이에 맞는 체크포인트 패키지와 실행 중인 데이터베이스도 필요합니다. `mem_prod_stack.py`는 이름이 붙은 스택마다 웹/데이터베이스/관측성 패키지를 추가로 import하므로, 엔진만 놓고 RSS를 재는 측정기가 아닙니다.
 
@@ -39,7 +39,7 @@
 4. 커밋 `6da4810` / `bc2ab4f`로 확인된 과거의 풀링 변경은 NG p90 35.34 s → 25.28 s, sd 5.90 s → 1.28 s와 연관되었습니다. 이 변경은 이미 제거된 provider 구현에 관한 것이며, 현재의 typed SchemaProvider는 외부 SDK/libcurl 런타임을 씁니다.
 5. 워커 수 실험에서는 FANOUT=50, LLM_MOCK_MS=100, NG_WORKER_COUNT=50일 때 NG 307 ms, LG asyncio 711 ms로 보고되었습니다. 이는 별도의 워크로드이며 서버 용량으로 일반화할 수 있는 결과가 아닙니다.
 
-NeoGraph에 아직 HTTP/2 지원이 필요하다는 예전 주장은 더 이상 유효하지 않습니다. 기록된 시간은 새 SDK, 현재의 Python wheel, 다른 플랫폼, 원격 추론의 속도 향상을 검증해 주지 않습니다. mock 모드가 측정하는 것은 오케스트레이션과 설정한 sleep뿐이며 provider 증거는 만들지 않습니다. 실제 모드는 typed 소유 outcome에서 화면에 보이는 텍스트를 추출하지만, 네이티브 재생(replay), 이식 가능한 기록(history) 내보내기, provider 보고/예산 청구 정산(settlement)은 벤치마크하지 않습니다.
+NeoGraph에 아직 HTTP/2 지원이 필요하다는 예전 주장은 더 이상 유효하지 않습니다. 기록된 시간은 새 SDK와 현재의 Python wheel 이전에 측정한 값이므로, 다른 플랫폼에는 적용되지 않으며 원격 추론의 속도 향상을 예측하지도 않습니다. mock 모드가 측정하는 것은 오케스트레이션과 설정한 sleep뿐이며 provider 증거는 만들지 않습니다. 실제 모드는 typed 소유 outcome에서 화면에 보이는 텍스트를 추출하지만, 네이티브 재생(replay), 이식 가능한 기록(history) 내보내기, provider 보고/예산 청구 정산(settlement)은 벤치마크하지 않습니다.
 
 ## 새 측정 실행하기
 
@@ -68,16 +68,16 @@ LLM_MOCK_MS=-1 MOCK_SEARCH=0 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
   python bench.py --warmup 2 --iters 5
 ```
 
-이 명령은 지출 한도가 아닙니다. `FANOUT=5`이면 조사 질의 하나가 한쪽당 논리적 모델 호출을 최대 7번(계획 1번, 연구자 5번, 종합 1번) 수행합니다. 워밍업 2번과 측정 5번을 양쪽에서 실행하면 논리적 호출이 최대 98번 나갈 수 있습니다. 현재 NG SDK의 기본값은 전송 재시도를 끄는 것이고, LG는 `max_retries=0`을 명시적으로 설정합니다. 승인된 범위 안에서 검증하려면 호출 수와 설정된 출력 상한의 합계를 벤치마크 바깥에서 미리 예약해 두어야 합니다. 양쪽 모두 기본값으로 `NG_EXAMPLE_MAX_TOKENS=1600`을 쓰며, 명시적으로 준 값은 그대로 적용됩니다. 호스트가 명시적으로 승인한 모델, 엔드포인트, 자격 증명, 검색 서비스만 사용합니다. 규모를 줄인 대표 측정 그룹은 과거의 여러 번 반복한 측정과 다르므로 따로 표시해야 합니다.
+이 명령은 지출 한도가 아닙니다. `FANOUT=5`이면 조사 질의 하나가 한쪽당 논리적 모델 호출을 최대 7번(계획 1번, 연구자 5번, 종합 1번) 수행합니다. 워밍업 2번과 측정 5번을 양쪽에서 실행하면 논리적 호출이 최대 98번 나갈 수 있습니다. 현재 NG SDK의 기본값은 전송 재시도를 끄는 것이고, LG는 `max_retries=0`을 명시적으로 설정합니다. 호출 수와 설정된 출력 상한의 합계에 대한 한도는 벤치마크 바깥에서 정해 두어야 합니다. 양쪽 모두 기본값으로 `NG_EXAMPLE_MAX_TOKENS=1600`을 쓰며, 명시적으로 준 값은 그대로 적용됩니다. 사용해도 되는 모델, 엔드포인트, 자격 증명, 검색 서비스만 사용합니다. 규모를 줄인 대표 측정 그룹은 과거의 여러 번 반복한 측정과 다르므로 따로 표시해야 합니다.
 
 유한한 비용이 드는 provider 진단(지연 시간 비교가 아님)은 다음과 같습니다.
 
 ```sh
-# From benchmarks/dr_compare, only after a separate spending reservation.
+# From benchmarks/dr_compare; this makes paid provider calls.
 : "${OPENAI_API_KEY:?Requires an intentionally authorized hosted credential}"
 env -u NG_WORKER_COUNT LLM_MOCK_MS=-1 MOCK_SEARCH=1 USE_INMEMORY_CP=1 \
   FANOUT=5 NG_TRANSPORT=http-chat NG_EXAMPLE_MAX_TOKENS=8192 \
   python bench.py --only neograph --warmup 0 --iters 1
 ```
 
-이 명령은 모델 호출이 최대 7번이고 설정된 출력 토큰은 57,344개이며, 입력 토큰은 별도입니다. 실제 웹 검색은 없으므로 실제 검색을 검증한 것이 아니라 유료 provider/mock 검색으로 표시해야 합니다. 통과하려면 종료 코드 0, 성공한 샘플 1개, 비어 있지 않은 보고서, `Failed runs: 0`이 필요하며, 계획, 답변, 보고서 중 하나라도 실패하거나 비어 있으면 실패입니다. 8,192토큰 허용량은 진단을 위해 명시적으로 고른 값이지, 기본값을 올린 것도, 비용 추정도, 지출 승인도 아닙니다. 승인받은 Crawl4AI 서비스가 실행 중이면 `MOCK_SEARCH=0`으로 같은 모델 호출 상한에서 실제 검색을 확인할 수 있습니다.
+이 명령은 모델 호출이 최대 7번이고 설정된 출력 토큰은 57,344개이며, 입력 토큰은 별도입니다. 실제 웹 검색은 없으므로 실제 검색을 실행한 것이 아니라 유료 provider/mock 검색으로 표시해야 합니다. 통과하려면 종료 코드 0, 성공한 샘플 1개, 비어 있지 않은 보고서, `Failed runs: 0`이 필요하며, 계획, 답변, 보고서 중 하나라도 실패하거나 비어 있으면 실패입니다. 8,192토큰 허용량은 진단을 위해 명시적으로 고른 값이지, 기본값을 올린 것도, 비용 추정도, 지출 승인도 아닙니다. 승인받은 Crawl4AI 서비스가 실행 중이면 `MOCK_SEARCH=0`으로 같은 모델 호출 상한에서 실제 검색을 확인할 수 있습니다.

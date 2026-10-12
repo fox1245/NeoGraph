@@ -1,16 +1,16 @@
-<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=zh-CN source_sha256=9085c7d12b789cfef4a2314e135b20f3fd1dc1c17f40e8b7ed0011f880bd792b -->
+<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=zh-CN source_sha256=505672efc95e54e5c55c2204f9bff828e13151f825659a9473eceab788c37149 -->
 # dr_compare：深度研究编排对比
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-这些 runner 实现的是同一条链路：router → plan → 通过 Send 分出的 researcher 分支 → synthesis，使用相同的提示词和模型选择。它们的引擎、绑定、客户端和检查点实现各不相同，所以端到端的耗时，无法单独分离出引擎开销或传输层开销。下面 2026 年 4 月的结论作为历史证据保留，不是针对当前切换的重新运行。
+这些 runner 实现的是同一条链路：router → plan → 通过 Send 分出的 researcher 分支 → synthesis，使用相同的提示词和模型选择。它们的引擎、绑定、客户端和检查点实现各不相同，所以端到端的耗时，无法单独分离出引擎开销或传输层开销。下面 2026 年 4 月的结论是历史记录，没有用当前的 SDK 重新运行过。
 
 ## 文件与依赖
 
 `dr_neograph.py`、`dr_langgraph.py`、`bench.py`、`bench_mock.py`、`mem_probe.py`、`mem_prod_stack.py`、`sweep.sh`、`_run_single.py` 覆盖了真实调用、纯文本的 mock 工作负载、内存探测、参数扫描和一次性的问题诊断。请按 [Python 绑定指南](../../docs/python-binding.md)安装与当前源码匹配的 wheel；带有 `CompletionParams`/`OpenAIProvider` 的旧 wheel，不是当前的 API。从源码构建时，即使只用 Core，也需要外部的 SchemaProvider SDK。
 当前的构建需要与 SDK `0.3.0`、接口修订版/共享库代数 6 相匹配的 wheel 或原生构建，
 对应 SchemaProvider `maint/interface6` 提交
-`f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`。当前的集成验证尚未完成。
+`f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`。
 这个对比用的 runner，与内置的 Deep Research 恢复路径是分开的。
 
 这个工作流会 import requests、LangGraph 和 langchain-openai；内存探测使用 psutil。PostgreSQL 模式还需要相应的检查点包，以及一个正在运行的数据库。`mem_prod_stack.py` 会为它命名的各个技术栈 import 额外的 web、数据库和可观测性包；它不是只针对裸引擎的 RSS 探测。
@@ -42,7 +42,7 @@
 4. 历史上的连接池改动，即提交 `6da4810` / `bc2ab4f`，与 NG 的 p90 从 35.34 s 降到 25.28 s、标准差从 5.90 s 降到 1.28 s 相关联。这些改动针对的是已经移除的 provider 实现；当前带类型的 SchemaProvider 使用外部的 SDK/libcurl 运行时。
 5. 一次 worker 数量的实验，在 FANOUT=50、LLM_MOCK_MS=100、NG_WORKER_COUNT=50 的条件下，报告 NG 为 307 ms，LG asyncio 为 711 ms。这是另一种工作负载，不是通用的服务器容量结论。
 
-以前说 NeoGraph 仍然需要 HTTP/2 支持，这个说法已经过时。这些记录下来的耗时，不能证明新的 SDK、当前的 Python wheel、其他平台，或远程推理的加速合格。mock 模式只测量编排和配置的 sleep；它不产生任何 provider 证据。真实模式会从带类型、持有所有权的 outcome 中提取可见文本，但不对 native 重放、可移植历史的导出，或 provider 上报与预算计费的结算做基准测试。
+以前说 NeoGraph 仍然需要 HTTP/2 支持，这个说法已经过时。这些记录下来的耗时是在新的 SDK 和当前的 Python wheel 之前测得的，不适用于其他平台，也不能用来预测远程推理的加速。mock 模式只测量编排和配置的 sleep；它不产生任何 provider 证据。真实模式会从带类型、持有所有权的 outcome 中提取可见文本，但不对 native 重放、可移植历史的导出，或 provider 上报与预算计费的结算做基准测试。
 
 ## 运行新的 cohort
 
@@ -89,15 +89,15 @@ LLM_MOCK_MS=-1 MOCK_SEARCH=0 USE_INMEMORY_CP=1 NG_TRANSPORT=http-chat \
 这条命令不是花费上限：`FANOUT=5` 时，一次研究查询每一侧最多执行七次逻辑上的模型调用
 （plan、五个 researcher、synthesis）。因此，两侧各做两次预热加五次正式测量，最多可以分发 98 次逻辑调用。
 当前 NG 的 SDK 默认关闭传输层的重试；LG 显式设置了 `max_retries=0`。
-经授权的有界验证，必须在基准测试之外预留调用次数，以及已配置的各输出上限之和。
+请在基准测试之外，为调用次数以及已配置的各输出上限之和设定限额。
 两侧默认都使用 `NG_EXAMPLE_MAX_TOKENS=1600`；显式给出的值会原样采用。
-只使用宿主明确授权的模型、endpoint、凭据和搜索服务。缩小规模的代表性 cohort，
+只使用你有权使用的模型、endpoint、凭据和搜索服务。缩小规模的代表性 cohort，
 不是历史上多次迭代的测量，必须另行标注。
 
 一个有限的付费 provider 诊断（不是延迟对比）如下：
 
 ```sh
-# From benchmarks/dr_compare, only after a separate spending reservation.
+# From benchmarks/dr_compare; this makes paid provider calls.
 : "${OPENAI_API_KEY:?Requires an intentionally authorized hosted credential}"
 env -u NG_WORKER_COUNT LLM_MOCK_MS=-1 MOCK_SEARCH=1 USE_INMEMORY_CP=1 \
   FANOUT=5 NG_TRANSPORT=http-chat NG_EXAMPLE_MAX_TOKENS=8192 \
@@ -105,7 +105,7 @@ env -u NG_WORKER_COUNT LLM_MOCK_MS=-1 MOCK_SEARCH=1 USE_INMEMORY_CP=1 \
 ```
 
 这最多是七次模型调用，以及 57,344 个已配置的输出 token，另加输入 token。
-它没有真实的网络搜索，必须标注为“付费 provider / mock 搜索”，而不是真实搜索的资格认证。
+它没有真实的网络搜索，必须标注为“付费 provider / mock 搜索”，而不是真实搜索的运行。
 通过的条件是：退出码为 0、有一个成功的样本、报告非空，并且 `Failed runs: 0`；
 任何失败的或为空的计划、回答或报告，都算失败。
 8,192 个 token 的额度，是明确选定的诊断参数，不是调高后的默认值，不是价格估算，也不是消费授权。

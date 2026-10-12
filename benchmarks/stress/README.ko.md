@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/stress/README.md locale=ko source_sha256=d1fd42d6f1bc331198538223f1500e0230e84d2ed174a70b798a73ad75817cc7 -->
+<!-- neograph-i18n: source=benchmarks/stress/README.md locale=ko source_sha256=dc3aa60d06ab4b26c3b084af5651245fcbc52e56a724212845d2e0351f68a69a -->
 # NeoGraph 지속 동시 실행 스트레스 벤치마크
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -16,7 +16,7 @@ Windows에서는 프로세스의 working-set 카운터를, Linux에서는 `/proc
 ## 빌드와 실행
 
 외부 SchemaProvider SDK를 설치하고 prefix를 지정합니다. LLM과 NeoGraph의 선택적 libcurl 백엔드를 꺼도 Core에는 `SchemaProvider::runtime`이 필요합니다. prefix 대신 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`로 SDK 소스 체크아웃을 직접 지정할 수도 있습니다. 이 경우 SDK 빌드에는 C++20, Python, libcurl 7.88 이상, OpenSSL Crypto가 필요합니다. 의존성과 플랫폼 제약은 [빌드 가이드](../../README.md)를 참고하세요. 아래 명령은 네트워크 다운로드와 쓰지 않는 NeoGraph 통합 기능을 끕니다.
-NeoGraph `0.13.1`에는 알파 SDK `0.1.1`, 인터페이스 리비전/공유 라이브러리 세대 4를 쓰고, 맞는 헤더와 라이브러리로 다시 빌드해야 합니다. 현재 통합 검증은 아직 끝나지 않았습니다.
+NeoGraph `0.13.1`에는 알파 SDK `0.1.1`, 인터페이스 리비전/공유 라이브러리 세대 4를 쓰고, 맞는 헤더와 라이브러리로 다시 빌드해야 합니다.
 
 ```bash
 # Set SCHEMAPROVIDER_PREFIX to the installed SDK prefix.
@@ -40,7 +40,7 @@ cmake --build build-stress --parallel --target bench_sustained_concurrent
 
 ## 보존한 과거 관측
 
-이전 README에는 날짜가 없는 Ryzen 7 5800X 실행 기록이 있었습니다. 동시성 100, 실행 시간 15초 조건에서 15.3 M회 실행(초당 약 1.0 M회), 평균 지연 약 55 µs, 워밍업 후 RSS 9.3 MB, 최종 RSS 7.4 MB(약 −20%, 종료 코드 0)였습니다. 날짜와 SDK 리비전은 여기에 기록되어 있지 않습니다. 이 값은 과거 기록으로만 남겨 두며, 새 cutover 검증도 처리량 보장도 아닙니다. 아래 출력 발췌는 이 관측에 속하며, 줄임표(…)는 JSON이 아닙니다.
+날짜가 기록되지 않은 이전 Ryzen 7 5800X 실행은 동시성 100, 실행 시간 15초 조건에서 15.3 M회 실행(초당 약 1.0 M회), 평균 지연 약 55 µs, 워밍업 후 RSS 9.3 MB, 최종 RSS 7.4 MB(약 −20%, 종료 코드 0)였습니다. 날짜와 SDK 리비전은 기록되어 있지 않습니다. 이 값은 과거 관측으로만 남겨 두며, 처리량 보장이 아닙니다. 아래 출력 발췌는 이 관측에 속하며, 줄임표(…)는 JSON이 아닙니다.
 
 ```json
 {"sample":1,"elapsed_s":5,"window_ok":5012514,"err_total":0,"inflight":100,

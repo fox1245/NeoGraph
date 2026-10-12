@@ -46,12 +46,11 @@ Docker CPU quota need not change the cores visible to `hardware_concurrency()`. 
 
 ## Current dependencies and reproduction status
 
-Core links external `SchemaProvider::runtime` even with `NEOGRAPH_BUILD_LLM=OFF` and `NEOGRAPH_USE_LIBCURL=OFF`. Supply an installed SDK using `CMAKE_PREFIX_PATH` or an explicit checkout using `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`; see the [build guide](../../README.md). SDK source builds require C++20, Python for configuration generation, libcurl ≥7.88, and OpenSSL Crypto. Current SDK qualification is Linux/POSIX; the old Docker results do not qualify other platforms.
+Core links external `SchemaProvider::runtime` even with `NEOGRAPH_BUILD_LLM=OFF` and `NEOGRAPH_USE_LIBCURL=OFF`. Supply an installed SDK using `CMAKE_PREFIX_PATH` or an explicit checkout using `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`; see the [build guide](../../README.md). SDK source builds require C++20, Python for configuration generation, libcurl ≥7.88, and OpenSSL Crypto. The SDK has been tested on Linux/POSIX only; the old Docker results do not apply to other platforms.
 NeoGraph `0.13.1` recipes require alpha SDK `0.1.1`, interface revision/shared
-generation 4, with matching headers/libraries. Current integrated validation is pending;
-the earlier Linux/POSIX qualification is not an SDK4 or new Docker pass.
+generation 4, with matching headers/libraries.
 
-The maintained NeoGraph Docker image installs curl/OpenSSL development dependencies and builds a private CMake consumer linked to `neograph::core`, inheriting its SDK dependency closure. SDK acquisition follows root CMake policy; it may need network access when no package or source checkout is supplied. Optional NeoGraph network modules are off, but SDK dependencies remain. No new Docker measurements are asserted here. The matrix truncates its output before building, so choose a new path. `status=ok` only means JSON was extracted; inspect `ok`, `err`, and exit status too.
+The maintained NeoGraph Docker image installs curl/OpenSSL development dependencies and builds a private CMake consumer linked to `neograph::core`, inheriting its SDK dependency closure. SDK acquisition follows root CMake policy; it may need network access when no package or source checkout is supplied. Optional NeoGraph network modules are off, but SDK dependencies remain. The matrix truncates its output before building, so choose a new path. `status=ok` only means JSON was extracted; inspect `ok`, `err`, and exit status too.
 
 ```bash
 # From the repository root. Docker builds use the root SDK acquisition policy.

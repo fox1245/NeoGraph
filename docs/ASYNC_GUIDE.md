@@ -95,8 +95,8 @@ Python exports `prepare`, `dispatch` and `invoke` with typed `ProviderRequest`, 
 
 `run_sync` creates a private single-thread context per call; `run_sync_pool` creates a per-call pool. Handles bound to those executors must not escape the call. A coroutine may return another awaitable directly as a regular function, or use `co_return co_await` in a coroutine body; do not mix ordinary `return` into that body.
 
-## Build and historical evidence
+## Build
 
-External `SchemaProvider::runtime` is required by `neograph::core`, even with `NEOGRAPH_BUILD_LLM=OFF`. Use an installed SDK prefix or `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`. The SDK build requires CMake 3.20+, C++20, Python, standalone Asio, yyjson, libcurl 7.88+ and OpenSSL Crypto. Recorded pre-interface-4 runtime/archive qualification covers Linux/POSIX; it does not qualify interface 4. Existing macOS/Windows metadata does not qualify this dependency, and WASM runtime integration is not established.
+External `SchemaProvider::runtime` is required by `neograph::core`, even with `NEOGRAPH_BUILD_LLM=OFF`. Use an installed SDK prefix or `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`. The SDK build requires CMake 3.20+, C++20, Python, standalone Asio, yyjson, libcurl 7.88+ and OpenSSL Crypto. WASM runtime integration is not established.
 
 NeoGraph configuration requires CMake 3.20+. Resolution uses an explicit SDK source directory first, otherwise an installed package, then the default revision-pinned public archive fallback. Set `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` with an installed SDK for offline configuration; set `CMAKE_PREFIX_PATH` to that SDK prefix. A fetched/source SDK uses NeoGraph's checked-in Asio and yyjson, but still needs its system development dependencies.

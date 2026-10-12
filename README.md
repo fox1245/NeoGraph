@@ -229,7 +229,7 @@ The source declares which channels the node reads and writes, so `GraphEngine::b
 
 SchemaProvider is a required external SDK even when `NEOGRAPH_BUILD_LLM=OFF`, because Core exports its typed provider contracts. The commands below use an installed [SchemaProvider runtime package](https://github.com/fox1245/SchemaProvider): set `SCHEMAPROVIDER_PREFIX` to its install prefix. An explicit checkout supplied with `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=../SchemaProvider` takes precedence; otherwise CMake prefers an installed package and, if none is found, fetches the pinned public SDK archive. Set `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` for an offline build with an installed package or explicit checkout. CMake does not guess a sibling checkout or use the removed bundled interpreter.
 
-Prerequisites include a C++20 compiler, CMake 3.20 or newer, and the SDK's runtime dependency libcurl 7.88 or newer; the SDK itself needs no OpenSSL, because its TLS comes from libcurl's backend. Full builds with NeoGraph's HTTPS components require OpenSSL 3. The default build also enables SQLite and PostgreSQL integrations; the command below disables unnecessary NeoGraph components without removing SDK dependencies. The recorded SDK checks are for interface 4, older than the interface 6 this revision pins (see [Typed provider calls](#typed-provider-calls)). They cover Linux x86_64 and local protocol/state peers; the [SDK conformance record](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record) gives their exact scope. They do not establish new Windows, macOS, ARM64, HTTP/3, hosted-vendor or WASM qualification. See [troubleshooting](docs/troubleshooting.md) for platform and build constraints.
+Prerequisites include a C++20 compiler, CMake 3.20 or newer, and the SDK's runtime dependency libcurl 7.88 or newer; the SDK itself needs no OpenSSL, because its TLS comes from libcurl's backend. Full builds with NeoGraph's HTTPS components require OpenSSL 3. The default build also enables SQLite and PostgreSQL integrations; the command below disables unnecessary NeoGraph components without removing SDK dependencies. See [troubleshooting](docs/troubleshooting.md) for platform and build constraints.
 
 ```bash
 git clone https://github.com/fox1245/NeoGraph.git
@@ -416,11 +416,9 @@ macOS and Windows plus two installed-consumer rows; documentation-only changes
 skip it. `ci-extended.yml` runs nightly and on demand: sanitizers, the fuzz
 canary, performance gates, native ARM64, gRPC, the Visual Studio generator and
 the other eight installed-consumer rows. Run it on a release candidate before
-tagging. `wheels.yml` builds CPython 3.12 per platform for packaging changes and
-CPython 3.9–3.13 on release tags, a weekly canary and manual runs, with glibc
-2.34/macOS 14 floors, full installed-wheel tests, cold-loader/LGPL replacement
-gates, four native wheel/archive platforms, and protected tag/OIDC publication
-dependencies. Source review or CLI help is not execution or release proof.
+tagging. `wheels.yml` builds one CPython 3.12 wheel per platform for packaging changes. On
+release tags it builds wheels for CPython 3.9–3.13 on Linux (x86_64 and aarch64), macOS (arm64)
+and Windows (AMD64), with glibc 2.34 and macOS 14 as the minimum platform versions.
 
 - [Documentation index](docs/README.md)
 - [Concepts and graph semantics](docs/concepts.md)

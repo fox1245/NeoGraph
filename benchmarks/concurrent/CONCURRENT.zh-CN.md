@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/concurrent/CONCURRENT.md locale=zh-CN source_sha256=dbe7cdde4e740c018239a2ca99a8ee319dd9ff01974ea002629f03d5595e2199 -->
+<!-- neograph-i18n: source=benchmarks/concurrent/CONCURRENT.md locale=zh-CN source_sha256=acac6c40df2f3cdd8b1d1d39bd54572c68b5e97122c7b4c5ffc208dbf36a3c5b -->
 # 并发负载基准测试：NeoGraph 与 Python 的历史结果
 
 **Languages:** [English](CONCURRENT.md) | [한국어](CONCURRENT.ko.md) | [日本語](CONCURRENT.ja.md) | [简体中文](CONCURRENT.zh-CN.md)
@@ -47,12 +47,11 @@ Docker 的 CPU 配额不一定会改变 `hardware_concurrency()` 看到的核数
 
 ## 当前的依赖与复现状态
 
-即使设置了 `NEOGRAPH_BUILD_LLM=OFF` 和 `NEOGRAPH_USE_LIBCURL=OFF`，Core 仍然链接外部的 `SchemaProvider::runtime`。可以通过 `CMAKE_PREFIX_PATH` 提供已安装的 SDK，或者通过 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` 指定一份显式的检出；参见[构建指南](../../README.md)。从源码构建 SDK 需要 C++20、用于生成配置的 Python、libcurl ≥7.88 和 OpenSSL Crypto。目前 SDK 的资格认证只覆盖 Linux/POSIX；旧的 Docker 结果不能证明其他平台合格。
+即使设置了 `NEOGRAPH_BUILD_LLM=OFF` 和 `NEOGRAPH_USE_LIBCURL=OFF`，Core 仍然链接外部的 `SchemaProvider::runtime`。可以通过 `CMAKE_PREFIX_PATH` 提供已安装的 SDK，或者通过 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` 指定一份显式的检出；参见[构建指南](../../README.md)。从源码构建 SDK 需要 C++20、用于生成配置的 Python、libcurl ≥7.88 和 OpenSSL Crypto。SDK 只在 Linux/POSIX 上测试过；旧的 Docker 结果不适用于其他平台。
 NeoGraph `0.13.1` 当前的构建方法，需要 alpha 版 SDK `0.1.1`、接口修订版/共享库
-代数 4，以及匹配的头文件和库。当前的集成验证尚未完成；
-此前针对 Linux/POSIX 的资格认证，不等于 SDK4 或新的 Docker 测试已通过。
+代数 4，以及匹配的头文件和库。
 
-仍在维护的 NeoGraph Docker 镜像，会安装 curl/OpenSSL 的开发依赖，并构建一个链接 `neograph::core` 的私有 CMake 使用方，它会继承 SDK 的整个依赖闭包。获取 SDK 的方式遵循根目录 CMake 的策略；既没有提供包、也没有提供源码检出时，可能需要联网。NeoGraph 可选的网络模块是关闭的，但 SDK 的依赖依然存在。这里没有给出任何新的 Docker 测量。测试矩阵会在构建之前清空它的输出文件，所以请选一个新的路径。`status=ok` 只表示 JSON 提取成功；还要检查 `ok`、`err` 和退出状态。
+仍在维护的 NeoGraph Docker 镜像，会安装 curl/OpenSSL 的开发依赖，并构建一个链接 `neograph::core` 的私有 CMake 使用方，它会继承 SDK 的整个依赖闭包。获取 SDK 的方式遵循根目录 CMake 的策略；既没有提供包、也没有提供源码检出时，可能需要联网。NeoGraph 可选的网络模块是关闭的，但 SDK 的依赖依然存在。测试矩阵会在构建之前清空它的输出文件，所以请选一个新的路径。`status=ok` 只表示 JSON 提取成功；还要检查 `ok`、`err` 和退出状态。
 
 ```bash
 # From the repository root. Docker builds use the root SDK acquisition policy.

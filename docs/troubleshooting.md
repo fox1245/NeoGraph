@@ -6,7 +6,7 @@
 
 Record `neograph_engine.__version__`, Python version, OS/architecture, installation method and the first error. Check available wheel files for that release rather than assuming a source checkout and an older wheel expose the same APIs. The typed cutover removes legacy provider names; an old-wheel import does not test the new binding.
 
-NeoGraph's published platform metadata includes Linux, macOS and Windows. Current SchemaProvider runtime/archive qualification is Linux/POSIX; macOS/Windows ports need their own qualification before a new wheel is claimed usable there. A compatible wheel tag or compiler alone does not prove runtime integration. WASM provider-runtime support is not established.
+NeoGraph's published platform metadata includes Linux, macOS and Windows. A compatible wheel tag or compiler alone does not prove runtime integration. WASM provider-runtime support is not established.
 
 For a missing GLIBC symbol, compare the wheel's manylinux tag with the host glibc. A `manylinux_2_34` artifact requires glibc 2.34 or newer. For Windows DLL failures, check x64 Python and inspect missing dependency DLLs; architecture alone is not the only possible cause. Do not swap individual bundled libraries.
 
@@ -28,7 +28,7 @@ The build tree is not an installed package. Before `PYTHONPATH=build python -c "
 
 SQLite and PostgreSQL are optional NeoGraph components. Supply their development packages or explicitly disable `NEOGRAPH_BUILD_SQLITE`/`NEOGRAPH_BUILD_POSTGRES`. This does not remove the SDK runtime. For unresolved binding symbols after a header/API change, reconfigure and rebuild all consumers against matching headers/libraries in a fresh build directory.
 
-GCC 13 coroutine internal compiler errors were reported during Stage 3. Upgrade to a suitable compiler or restructure the reported expression; the old workarounds are not evidence that a whole SDK/platform build is qualified. Never `co_await` inside a catch handler: C++ itself prohibits await expressions there. Capture the error and await recovery outside the handler.
+GCC 13 coroutine internal compiler errors have been reported. Upgrade to a suitable compiler or restructure the reported expression. Never `co_await` inside a catch handler: C++ itself prohibits await expressions there. Capture the error and await recovery outside the handler.
 
 ## Removed provider APIs and typed failures
 
@@ -68,7 +68,7 @@ Keep full `ProviderMessage` values for continuation, including tool/refusal/reas
 
 Set `ProviderRuntimeOptions.ca_file` for an explicit trust bundle. Python import preserves an existing `SSL_CERT_FILE`, otherwise selects certifi when available; runtime options pass the selected CA file to SDK libcurl. `NEOGRAPH_SKIP_CERT_AUTOFIX=1` leaves host selection untouched. Do not disable certificate verification to hide an endpoint or trust-store error.
 
-The v0.1.0–v0.1.6 ConnPool timeout caused by wheel CA paths is historical; v0.1.7 added CA auto-selection. The current provider uses SDK libcurl rather than that old path. Local HTTP admission belongs in a validated descriptor, not a raw URL override; follow [example 31](../examples/31_local_transformer.cpp). Responses WebSocket close=1000 recipes apply only to removed historical transports.
+Local HTTP admission belongs in a validated descriptor, not a raw URL override; follow [example 31](../examples/31_local_transformer.cpp).
 
 ## Graph definitions and registration
 
@@ -124,27 +124,27 @@ Async connection/reconnection uses one deadline across all hosts/IPs. A positive
 
 The store creates its tables when permitted; missing CREATE privileges require applying the schema in [the PostgreSQL header](../include/neograph/graph/postgres_checkpoint.h). No pending-write capability means full super-step replay, not exactly-once external effects. An async-only custom backend uses AsyncCheckpointStore plus `adapt_async_checkpoint_store`, not the old mutual sync/async default crossover.
 
-## Tracing adapters and historical fixes
+## Tracing adapters and other pitfalls
 
 Tracer adapters must own recorded data, not raw pointers into Span wrappers destroyed by session close. See [the C++ tracing example](../examples/49_openinference.cpp). Python contextvars do not automatically cross C++ callback boundaries; pass/attach the parent context explicitly and install wrappers before engine compilation.
 
-Historical fixes include v0.1.8 acceptance of top-level conditional_edges, removal of the double node-execution fallback, and the pre-cutover httplib macro-layout mismatch (issue #16). They do not restore removed provider signatures. Consumers that instantiate header-only httplib across translation units still need consistent CPPHTTPLIB_OPENSSL_SUPPORT definitions; current typed-provider HTTP dispatch is SDK libcurl.
+Consumers that instantiate header-only httplib across translation units need consistent CPPHTTPLIB_OPENSSL_SUPPORT definitions; typed-provider HTTP dispatch uses SDK libcurl.
 
-Opaque convenience-vector properties may not be Python lists. Use iteration or `list(value)` for inspection, and build-then-assign for copied sequence fields such as ChatMessage.image_urls. Do not assume mutating a returned copy changes a C++ request; the new typed request/outcome contract is separate from old CompletionParams examples.
+Opaque convenience-vector properties may not be Python lists. Use iteration or `list(value)` for inspection, and build-then-assign for copied sequence fields such as ChatMessage.image_urls. Do not assume mutating a returned copy changes a C++ request.
 
 ## Tool calls, Hooks and protocol errors
 
-A graph run whose tool call, node or subgraph hits a mandatory Hook block now throws `HookBoundaryBlocked` itself, as `llm::Agent` always did, instead of a `NodeExecutionError` wrapping it, and emits no `ERROR` event for it. Catch `HookBoundaryBlocked` (Python: `ng.HookBoundaryBlocked`) and read `invocation_id` and `state`. A Python node that raises one, for example from a nested engine run, is no longer retried. See the [tool failure contract](reference-en.md#tool-failure-contract).
+A graph run whose tool call, node or subgraph hits a mandatory Hook block throws `HookBoundaryBlocked` itself, as `llm::Agent` does, rather than a `NodeExecutionError` wrapping it, and emits no `ERROR` event for it. Catch `HookBoundaryBlocked` (Python: `ng.HookBoundaryBlocked`) and read `invocation_id` and `state`. A Python node that raises one, for example from a nested engine run, is not retried. See the [tool failure contract](reference-en.md#tool-failure-contract).
 
-An engine's `HookRuntime` now also runs the `BeforeToolExecution` and `AfterToolExecution` Hooks of its tool calls, and a Program host's Hook runtime those of its Cores' tool calls. If a graph run now stops with `HookBoundaryBlocked` state `failed` and the message `lifecycle hook could not run`, give the run an owner scope (`RunMetadata::owner_scope`): a Hook boundary without one fails closed, for checkpoint Hooks as for tool Hooks.
+An engine's `HookRuntime` also runs the `BeforeToolExecution` and `AfterToolExecution` Hooks of its tool calls, and a Program host's Hook runtime those of its Cores' tool calls. If a graph run stops with `HookBoundaryBlocked` state `failed` and the message `lifecycle hook could not run`, give the run an owner scope (`RunMetadata::owner_scope`): a Hook boundary without one fails closed, for checkpoint Hooks as for tool Hooks.
 
-`state == "timed_out"` now means that a Hook's deadline elapsed or its target timed out. A Hook whose last attempt failed reports `failed`; before, it reported `timed_out`.
+`state == "timed_out"` means that a Hook's deadline elapsed or its target timed out. A Hook whose last attempt failed reports `failed`.
 
 A tool result with status `expired` and error `run deadline elapsed before the tool started` means the run's deadline had passed before the call could start: the tool and its Hooks did not run. Raise `RunMetadata::deadline` (Python `timeout_ms`, Program `wall_time_ms`) rather than retrying the call. An MCP call that the run's deadline or the client's request timeout stops is `timed_out`, and cancelling the run stops an MCP call in flight at once.
 
-`MCPServer` sends no response for a `tools/call` the client cancelled, on any transport, answers a Hook block with `-32010` and an interrupt with `-32011`; every other failure is an `isError` result whose `_meta["io.neograph/failure"].code` names it, and its text is a public message, never the exception text (raise `NodeFailureError` with a `public_message` to choose the text). A gRPC client that read `RunGraphResponse.error` from an `OK` response must now read the status: a failed run is a non-OK status whose `google.rpc.ErrorInfo` carries the code in `metadata["code"]`. See [Protocol failure mapping](reference-en.md#protocol-failure-mapping).
+`MCPServer` sends no response for a `tools/call` the client cancelled, on any transport, answers a Hook block with `-32010` and an interrupt with `-32011`; every other failure is an `isError` result whose `_meta["io.neograph/failure"].code` names it, and its text is a public message, never the exception text (raise `NodeFailureError` with a `public_message` to choose the text). A gRPC client must read the status, not `RunGraphResponse.error` of an `OK` response: a failed run is a non-OK status whose `google.rpc.ErrorInfo` carries the code in `metadata["code"]`. See [Protocol failure mapping](reference-en.md#protocol-failure-mapping).
 
-Tool output or an exception message that is not valid UTF-8 used to arrive as an empty tool message, an empty MCP or gRPC payload, or a `UnicodeDecodeError` in Python. It now arrives with U+FFFD in place of each ill-formed sequence.
+Tool output or an exception message that is not valid UTF-8 arrives with U+FFFD in place of each ill-formed sequence, not as an empty tool message, an empty MCP or gRPC payload, or a `UnicodeDecodeError` in Python.
 
 ## Reporting a bug safely
 

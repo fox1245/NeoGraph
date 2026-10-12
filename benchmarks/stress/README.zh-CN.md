@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/stress/README.md locale=zh-CN source_sha256=d1fd42d6f1bc331198538223f1500e0230e84d2ed174a70b798a73ad75817cc7 -->
+<!-- neograph-i18n: source=benchmarks/stress/README.md locale=zh-CN source_sha256=dc3aa60d06ab4b26c3b084af5651245fcbc52e56a724212845d2e0351f68a69a -->
 # NeoGraph 持续并发压力基准测试
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -17,7 +17,7 @@ Windows 使用进程工作集的计数器；Linux 使用 `/proc/self/status`。�
 
 先安装外部的 SchemaProvider SDK，并设置它的前缀。即使禁用了 LLM 和 NeoGraph 可选的 libcurl 后端，Core 仍然需要 `SchemaProvider::runtime`。也可以用 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` 指定显式的 SDK 源码检出来代替前缀；构建它需要 C++20、Python、libcurl ≥7.88 和 OpenSSL Crypto。依赖和平台方面的限制，见[构建指南](../../README.md)。这套做法关闭了联网下载，也关闭了用不到的 NeoGraph 集成。
 对于 NeoGraph `0.13.1`，请使用 alpha 版 SDK `0.1.1`、接口修订版/共享库
-代数 4，并用匹配的头文件和库重新构建。当前的集成验证尚未完成。
+代数 4，并用匹配的头文件和库重新构建。
 
 ```bash
 # Set SCHEMAPROVIDER_PREFIX to the installed SDK prefix.
@@ -41,7 +41,7 @@ cmake --build build-stress --parallel --target bench_sustained_concurrent
 
 ## 保留的旧观测结果
 
-之前的 README 报告了一次没有标明日期的 Ryzen 7 5800X 运行：并发 100、持续 15 s，共运行 15.3 M 次（约 1.0 M 次/秒），平均延迟约 55 µs，预热后 RSS 为 9.3 MB，最终 RSS 为 7.4 MB（约 −20%，退出码 0）。这里没有记录它的日期和 SDK 修订版本。保留它只是作为旧的证据，不是新的切换资格认证，也不是吞吐量保证。下面的输出节选属于那次观测；其中的省略号不是 JSON 的一部分。
+早先有一次没有标明日期的 Ryzen 7 5800X 运行：并发 100、持续 15 s，共运行 15.3 M 次（约 1.0 M 次/秒），平均延迟约 55 µs，预热后 RSS 为 9.3 MB，最终 RSS 为 7.4 MB（约 −20%，退出码 0）。它的日期和 SDK 修订版本没有记录。保留它只是作为一次旧的观测，不是吞吐量保证。下面的输出节选属于那次观测；其中的省略号不是 JSON 的一部分。
 
 ```json
 {"sample":1,"elapsed_s":5,"window_ok":5012514,"err_total":0,"inflight":100,

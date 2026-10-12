@@ -326,7 +326,7 @@ Python exposes the C++ execution abilities rather than a separate Python schedul
 | Runtime context and strict dispatch | context stores, receipts and interposition | matching immutable values, stores and `StrictRuntimeProfile` | Same native controller |
 | Durable wheel defaults | SQLite Core/context/dispatch stores | `_HAVE_SQLITE` exports | Enabled in the PyPI wheel |
 
-Raw `ProgramCatalog`, transition stores, replacement/migration controllers, synthesis gateways, Hook journals and RPC executors remain host-composition APIs. Exposing only fragments of those authority-bearing paths would bypass the required `proposal -> compile -> admit -> publish -> migrate/spawn` protocol. A future Python host controller must bind that protocol and its nonrenewable lineage budget as one owner-scoped unit; `_HAVE_PROGRAM` does not claim raw control-plane administration parity.
+Raw `ProgramCatalog`, transition stores, replacement/migration controllers, synthesis gateways, Hook journals and RPC executors remain host-composition APIs. Exposing only fragments of those authority-bearing paths would bypass the required `proposal -> compile -> admit -> publish -> migrate/spawn` protocol. `_HAVE_PROGRAM` does not claim raw control-plane administration parity.
 
 ### Runtime retry overrides
 
@@ -441,7 +441,7 @@ Each diagnostic dict has a `help` entry: a dict with `doc` (its entry in the [di
 
 Destroying `LocalProgramHost` releases the caller's GIL while its actual `ProgramRuntime` cancels, drains and joins scheduler work, so active Python nodes can finish. It reacquires the GIL before destroying the remaining host members; their Python callback/object owners keep GIL-safe destruction.
 
-The native Program recorded-execution API is `ProgramRuntime::replay_recorded`, replacing `start_recorded`. `LocalProgramHost` exposes `run`, `start`, `resume` and `fork`; it does not expose the raw recorded-binding control plane. Program results retain the typed provider outcome and failure evidence supplied by the native runtime, alongside the existing handle, budget and authority fields.
+The native Program recorded-execution API is `ProgramRuntime::replay_recorded`. `LocalProgramHost` exposes `run`, `start`, `resume` and `fork`; it does not expose the raw recorded-binding control plane. Program results retain the typed provider outcome and failure evidence supplied by the native runtime, alongside the existing handle, budget and authority fields.
 
 `ProgramResult.failure` is a read-only `ProgramFailure` value or `None`, not a dictionary. Its `provider_outcome` and `provider_cause` retain provider failure evidence; `code`, `message`, `operation_id`, `core_node`, `attempts` and `witness` describe the failed operation. Result fields also include `bundle_id`, `operation_id`, `attempt`, `checkpoint`, `interrupt` and `provider_budget_authority`.
 

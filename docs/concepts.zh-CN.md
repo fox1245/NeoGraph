@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=3ddbf9b3903df0b61f2694ecfbb12af0682b96f25f81d50b4efc4865c4c576a1 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=39e6eb468894ddbf6852ef7d57b9b1d0a4c87e432e2fb0ef577113a9376bd72f -->
 # NeoGraph 核心概念导读
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -100,8 +100,6 @@ ephemeral 值在各个超步之间一直有效，不会每步重置。每个检�
 
 进入检查点的通道保存的是完整的物化快照。Memory、SQLite 和 PostgreSQL 都会对没有变化的 `(thread, channel, version)` 值去重，但 append 的历史每次写入都会改变版本，快照仍然会增大。待定写入记录的是未完成超步中已成功的任务，不是通用的通道增量。目前没有“每步重置”的策略：要安全地设计它，必须规定写入和路由之后的重置时机，以及中断、重放和 Send 下的行为。它也不能与 ephemeral 持久化混为一谈。
 
-基于增量（delta）的检查点目前只是设计，不是通道设置。这种格式会在完整快照的基础上，按顺序重放最多 *K* 个 `{channel, version, write mode, value}` 增量（也可以再加字节数阈值）。它必须保留 overwrite、保留策略、版本和 reducer 的标识；在清除待定写入之前，要以原子方式发布快照、增量和检查点指针；遇到缺失的链接、版本跳号、未知的 reducer 或重放失败时，必须拒绝。要采用它，需要新的 schema 版本，并且有实测的收益。迁移时，把现有快照作为基线，不凭空编造增量；在可回退的上线期间，要为旧版本的读取方保留完整快照；如果记录里只有增量，除非原来的 reducer 注册表能把它们物化，否则拒绝降级。当前的存储仍然是完整快照方式。
-
 基线用 `bench_checkpoint_store --threads 1 --iters 1 --history-steps 256 --payload 512 --backends memory,sqlite` 测量；只有在隔离的本地数据库上，才加上 `postgres` 和 `--pg-url`。每一行报告逻辑序列化字节数、保存和加载的 p50/p95，以及重建深度；legacy 行报告 blob 数量。要统计内存分配请求，运行 `heaptrack bench_checkpoint_store --threads 1 --iters 1 --history-steps 256 --payload 512 --backends memory`。原生的 JSON 和 SQL 分配器，并不都在 C++ `operator new` 的截获范围内。对比时要使用相同的 payload、历史长度和后端配置，依据实测而不是估算的收益。逻辑字节数不等于持久化后实际占用的物理字节数。SQLite 使用退出时删除的唯一临时数据库；`--sqlite-path` 会保留新建的文件，并拒绝已存在的路径。
 
 下面记录的一次 Linux x86-64 Debug 基线，使用 1 个线程、256 个历史步、512 字节的消息，只迭代 1 次。这些是历史测量值，不是性能目标：
@@ -111,7 +109,7 @@ ephemeral 值在各个超步之间一直有效，不会每步重置。每个检�
 | Memory | 17,814,952 | 54 / 138 | 141 / 382 | 1 |
 | SQLite | 17,814,952 | 289 / 1,589 | 176 / 474 | 1 |
 
-在数据库删除之前另测了一次，SQLite 数据库和 WAL 的大小分别为 14,811,136 / 4,210,672 字节（共 19,021,808 字节）。另外用 Linux 的 `LD_PRELOAD` shim 统计了整个进程的 `malloc`、`calloc` 和非零 `realloc` 请求，包含对象构造和 JSON 解析。与 `--history-steps 0` 相比，Memory 多出 88,277 次请求、共 605,289,027 请求字节，SQLite 多出 114,295 次、867,319,964 字节。这些是累计的请求量，不是存活内存，也不只是存储层的分配。对齐分配和内部分配没有截获。这个 shim 不是项目依赖；下结论之前，请使用受支持的 profiler，并在预热后多跑几次。
+另测了一次，SQLite 数据库和 WAL 的大小分别为 14,811,136 / 4,210,672 字节（共 19,021,808 字节）。另外用 Linux 的 `LD_PRELOAD` shim 统计了整个进程的 `malloc`、`calloc` 和非零 `realloc` 请求，包含对象构造和 JSON 解析。与 `--history-steps 0` 相比，Memory 多出 88,277 次请求、共 605,289,027 请求字节，SQLite 多出 114,295 次、867,319,964 字节。这些是累计的请求量，不是存活内存，也不只是存储层的分配。对齐分配和内部分配没有截获。下结论之前，请使用受支持的 profiler，并在预热后多跑几次。
 
 ### 写入通道
 
@@ -432,47 +430,7 @@ result = await engine.resume_async(thread_id="t1",
 
 [示例 08](../examples/08_state_management.cpp)沿用新一轮对话（new-turn）的流程：fork 一个已完成的检查点，修改用户消息，再用 `resume_if_exists=true` 调用 `run()`；只有这次新运行发生中断时才恢复。它并没有演示如何恢复一个已暂停的 fork。
 
-`ChatMessage` / `ChatTool` 和 JSON 只是可移植的投影（portable projection），并不具备 native 权限。可移植格式仍然是 [`provider-message-v2`](../schemas/provider-message-v2.schema.json) 和 [`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)。真正的 C++ 检查点 sidecar 把 native seal 保存在内存里。要持久保存 native 历史，需要由宿主持有的 `sp::NativeArchive`：封闭的 v3 / `spna3` 格式，带经过认证的、归 owner 私有的托管（custody），并使用独立的密钥。archive v2 会被拒绝，既不会升级，也不会解释。认证绑定的内容包括：描述符里每一项语义选择（origin、路径、header、policy、请求字段映射、usage 路径和 stop 映射）、owner，以及确切的托管绑定。它既不是加密，也不是对 vendor 签发方的认证；不要公开 archive 的正文、密钥、native blob 或原始的 wire 观测数据。archive 只是证据存储，不是资金 grant，也不是消费租约（spending lease）。Program 和外部的 bank 仍由各自独立的 journal 持有；复制快照不能凭空产生额度（credit）。
-
-provider 的历史有几种不同的模式。走同一条路由时，native continuation 会在原来的绑定下，保留真实的 reasoning、签名和有序的工具调用组。Gemini 默认使用 `NativeOnly`；显式指定 `PortableForeign` 时，接受调用方自己构造的 assistant 文本和工具调用，这些内容没有 native seal、wire 输出和签名。只有第一个外来的 function call 会带上 Google 文档规定的绕过标记；纯文本的轮次不带签名。这种投影不授予 native 权限，也不会修复或降级一个校验失败的 native seal。它也不意味着任意多 vendor 混合的历史都能原样在 native 层面移植。
-
-Responses 的 `previous_response_id` 用来选定由 provider 保存的会话状态，此时请求只携带新的输入。当客户端工具的归属需要本地证据时，由 `previous_response_history` 提供真实的先前归属证据，它不会作为重复输入发出去。游标（cursor）既不是完整的 native replay seal，也不具备 archive 权限；它仍然要通过 origin、路由、模型、配置和完成状态的检查。
-
-当前的 SDK 接口修订版和共享库代数（generation）都是 4；使用方必须针对匹配的头文件和库重新构建。输出生成上限在每次调用时都要经过准入(admission)并计入用量，与 native replay 的配置分开。为一次新的语义调用调高它，不会续期原来的 bank、grant 或截止时间。除了文档里明确列出的逐轮可选项，content、prefix、origin、路由、policy、工具和 reasoning 控制都保持绑定。可移植 JSON v2 和 native archive v3 / `spna3` 保持不变；下文的历史 ABI3 测量值不是 interface4 的结果。
-
-Python 暴露的所有权式 request/outcome 边界与 C++ 相同：`make_provider_request`、`Provider.prepare`、`dispatch` 和 `invoke`。provider 的历史请使用带类型化部分（typed parts）的 `ProviderMessage`；`ChatMessage` 仍只是方便图使用的投影。SDK 返回的失败可以通过 `ProviderOutcome.failure` 读取，而宿主的 observer 或结算（settlement）抛出的异常会保留 `outcome` 和 `cause`。构造函数以及 GIL 和回调的行为，请看 [Python 绑定指南](python-binding.md)。
-
-`input_total`、`output_total`、`total` 等用量计数器的类型是 `std::optional<sp::Count>`；有值的计数带有 `uint64_t value` 和 `Evidence`。`Usage` 还会记录 stage、quality 和 conflicts。缺失表示未知，绝不会当成 0。
-
-`UsageAccumulator::snapshot()` 返回累计的报告。`total_tokens_wide()` 返回已计费的 token 数加上尚未结清的预留量，不能把它当作上报的用量显示出来。结算要求报告是最终的、前后一致的，且带有 input 和 output 计数；结算按有依据的最大总量计费，超出的用量也不做截断。只要累计的某份报告里缺少某个计数器，汇总后该计数器仍然是未知。预留、本地计费和 vendor 的发票是不同的记录。
-
-**独立 bank journal 的修正：当前契约已修订，实际运行的证据见下文。** 经 owner 批准的协议要求：有一个单调的、受信存储命名空间义务（obligation），以及真实且不可变的原始 owner/thread/graph 作用域、上限（ceiling）、截止时间/时钟标识和 generation。只有对完整检查点承诺（commitment）和 revision 做精确的持久 head CAS，才能签发由宿主持有的不透明租约（lease）。精确的 pending effect 窗口必须在 provider I/O 之前持久化；结算必须使用真实的 SDK outcome 和实际计费，以及可空的 report、hold 和去重标识。检查点和下一个 head 必须在同一个 owned actor/revision 下原子发布。删除 bank 元数据、裁剪（prune）检查点、重放旧的已认证快照、覆盖同一个 ID 或丢失 actor，都不能产生额度（credit）。已有 65 的 hold 时，把上限 130 收紧到 129，不能再准入另一个 65；已证明没有副作用的失败，可以释放保持不变的 head，使真实的 130 恢复仍能进行。崩溃、未知、租约丢失的窗口一直处于 hold 状态，不退款、不重试、不降级（fallback）。普通/原始（plain/pristine）的 archive 配置不授予资金或 native 消费租约，当前的 `config.usage` 也不能替换已有的独立义务；Program 和外部 bank 的 journal 所有权不变。这是必须满足的契约；实际的币种/托管证据和测量手段的局限见下文，它不是稳定发布的 API 保证。
-
-**当前声明；集成运行的证据见下文：** `<neograph/graph/checkpoint.h>` 声明了 `ManagedBudgetLeaseScope`，包含 `owner_scope`、逻辑 `thread_id`、私有的后端 `storage_thread_id`、`graph_identity`、`original_ceiling`、`original_deadline_ticks` 和 `deadline_clock_identity`。`OwnedManagedBudgetLease` 提供只读的 `scope()`、`actor_id()`、不可变的 `bank_generation()`、`revision()`、`head_checkpoint_id()` 和 `head_commitment()`；它没有可导入权限的公开构造函数。`ManagedBudgetEffectReceipt` 提供 `active()`、`effect_id()`、`claim_amount()` 和 `request_digest()`；默认构造的 receipt 不授予任何东西。`CheckpointStore` 声明了 `acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment)`、`begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest)`、`settle_managed_budget_effect(lease, effect, genuine_outcome, authority)`、`publish_managed_budget_checkpoint(lease, checkpoint)` 和 `release_managed_budget_lease(lease)`，以及对应的 `_async` 版本。同步的 `CheckpointStoreCore` 和 `AsyncCheckpointStore` 各自提供相应的变体。`managed_budget_checkpoint_commitment(checkpoint)` 覆盖完整的持久检查点，而不只是 bank 的 JSON。这些声明本身并不能证明后端的 CAS、币种安全、已安装 ABI 的兼容性，或某条运行路径已被成功演练。
-
-**真实的 InMemory shared-bank fork 已保留并经过验证。** 最初那个真实的 C++ fork 使用唯一一份原始的 financial journal 和受信的当前分支 head，而不是复制出来的 grant。`publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)`（及 `_async`）要求提供真实的当前源及其完整 commitment，以及指向同一个 bank 的实际 native C++ 指针；持久化的独立 fork 仍明确不支持。`OwnedManagedBudgetLease::scope()` 以及原始 owner/thread/graph、上限、截止时间/时钟和 generation 保持不可变。只读的、由存储签发的 `execution_thread_id()` / `execution_storage_thread_id()` 单独指定执行分支；`GraphState::budget_original_thread_id()` 标识原始的 financial bank。对所选分支 head 做精确 CAS，再加全局的 actor/revision，使所有分支针对规范的当前计数器、pending effect 和已作废（burned）的标识串行化。原分支和 fork 分支都保持可用，无需补充额度；过期的快照、复制的检查点和导入的 JSON 都不能产生别名（alias）或回退 head。原有的 root30 → charge3 → original continuation6 → fork lower20 → continuation9 同一 bank 的验证，在未改动的 test_graph_engine.cpp:810–913 中通过（PASSED）；保存的原始上限 30 与 fork 的有效上限 20 是两回事；放宽到 31 以及仅用 JSON 恢复，都必须被拒绝。上报的无上限观测值是事实数据，不是有限的 grant。只有已证明零副作用的租约才能释放保持不变的 head；未知或 pending 的副作用会保留其义务。
-
-**当前的释放错误（release-error）契约；实际演练的测试集/探针见下文。** `<neograph/graph/engine.h>` 中的 `graph::ManagedBudgetLeaseReleaseError` 派生自 `ProviderOutcomeError`。`cause()` 保留原始的执行异常，`release_error()` 暴露次要的、持久化租约处置阶段的失败。`outcome()` 在有真实 SDK 证据时保留该证据，没有 SDK outcome 时为 null；释放失败既不能凭空构造 outcome，也不允许重新分发。封闭的 `_neograph_managed_budget_scope` 元数据描述原始的逻辑作用域、上限、截止时间时钟和 generation，但它只是数据，不具备后端 CAS 的权威。
-
-**Archive owner 与留存（retention）契约；实际演练的测试集/探针见下文。** 只有有限的独立根（finite standalone root）或经认证的有限来源，才会从真实配置的 `sp::NativeArchive::owner_scope()` 继承被省略的原始 owner；无限（unbounded）或普通（plain）的 owner 元数据语义不变。显式冲突的 archive owner 会在获取租约之前被拒绝。`CheckpointStore::retains_native_checkpoint() const noexcept` 以及 Core/Async 对应的存储能力，默认返回 false；真实的 InMemory 后端重写为 true，包装器必须把真实的留存能力转发下去。这个只读的描述，允许合法的、未加租约/普通/无限的 C++ native 检查点托管，但它既不授予消费额度（credit），也不授予 native replay 权限。加了租约的托管使用存储实际签发的 receipt，而不是 JSON 标志或猜测出来的存储类型。
-
-**native 托管的 I/O 前闸门（pre-I/O gate）；实际演练的测试集/探针见下文。** 开始一个受管的副作用（managed effect）之前，在修改任何 pending effect、slot 或 held 窗口之前，必须有真正绑定的 NativeArchive，或者存储实际签发的本地私有 C++ 留存能力。这个私有能力不会从 JSON 导入，也不会通过 wire 传输。即使远端后端是 InMemory，gRPC 也要求客户端和服务端各有真实的 archive，因为 C++ sidecar 无法跨越这条边界。没有 archive 提供有限的来源 owner 时，原始的匿名 owner 作用域保持为空；真实的 archive 绑定必须与原始作用域一致。只有 financial head/租约的证据，并不能证明 native 托管已经就绪。
-
-`ProgramFailure` 保留存活的 `provider_outcome` 和 `provider_cause`。它规范的、事实性的 SDK witness，把真实的 archive 托管绑定到 owner/run/version/bundle/operation/attempt；Runtime 在暴露恢复出来的失败之前，会先主动恢复配置好的托管。公开的、纯数据的 `ProgramResult::create()` 不能用预先填好的 witness 绕过这一步，未解析完成的 parsed seal 也不是可执行的结果。进程重启之后，原来的异常指针不再可用（`provider_cause == nullptr`），也不会根据文本重建。无法持久化的失败，也就无法序列化、发布或重放。
-
-`RecordedBindingSet` 是绑定到来源（source-bound）、只能移动的数据，不是调用方提供的 dispatcher。受信的 Catalog `recorded_capability_binder` 根据真实持久化的来源事件，独立地物化出只含已捕获内容的能力（captured-only capabilities）。`ProgramRuntime::replay_recorded()` 先检查原来所选来源的权限，再通过持久的 CAS 转移实际剩余的 bank；继承下来的花费不是新的模型 grant。旧的 `start_recorded` 续期 API 已经移除。InMemory、File、SQLite 和 PostgreSQL 的 Program 存储，在整个执行期间保留那份确切的、不可变的、归自己所有的租约；过期不会使它续期。受控的 JavaScript 仍会校验底层的 capability manifest，并消费确切的已完成命令结果，不会重新分发外部副作用。
-
-**Recorded-control 因果修复已在完整测试集中验证。** 重放已捕获的命令时，执行之前只为新增的 CPU 挂钟时间和 Core 工作做持久的预留，然后通过结果 CAS 发布测得的工作量，以及新产生的 Core 检查点。它不消耗新的模型、资金或 Program 操作额度，也不会重新分发已捕获的外部副作用。未对账的预留仍然记为已扣减。这笔预留会选择经认证的结算转换，而不是曾经拒绝首个新 Core 检查点的普通 Running→Running 转换。await 通道的接收、定时器的等待/取消、以及 handoff 等待的发起/释放，都在各自所属的 executor/strand 上串行化；现有的 Recorded CPU/Memory await/handoff 场景在完整测试集中通过；远端 TSan 覆盖的局限仍在下文明确列出。
-
-下面这些观测记录于本次文档校对之前。它们是历史证据，不是新的测试运行结果，也不保证适用于所有平台、传输方式或安全属性。
-
-**已完成的付费观测；并非通用的资格认证（qualification）。** 最初的 `SPQUAL1` 基线为 630/1000000 microUSD，保持不变；同一份原始账本（ledger）里，由一个哈希链接的 `A` 接纳了获批的扩展额度 480/3000000，合计 1110/4000000，调用数、已花费额度、hold 和结算都是累计的，没有新的 grant ID、header，也没有重置。确切的声明字节/文件标识，以及原始的授权/基线/catalog/激活/账本前缀的哈希和总额都保持固定；删除、替换或改动都按“失败时关闭”处理。最终的规范账本为：调用 1110 次、已花费 437958、hold 1287828 microUSD，eventA1，上限 1110/4000000；已花费加 hold 共计 1.725786 美元，这是本地 catalogue 的计量，不是发票。文档记录的五个 family、每个 60 对的基线共完成 600 次请求：Chat 60/60、Responses 60/60、Messages 60/60、Generate 56/60（4 次 vision 判断错误，均为 SSE）、Interactions 57/60（1 次 buffered、2 次 SSE 的 vision 判断错误）；合计 293/300 对，不是 300/300。其他旧的 600 次相关财务记录被保留，但并不构成完整的行为证明。更早的 M5/media 一次性 cohort 保持不变。更早的三轮 Google 前置条件检查，仍保留 2 次 invalid-tool 和 1 次 unreadable-positive 失败。不再授权任何付费调用。最终的 SDK 证据和 native-axis 的局限，与基线的成功是两回事。更早的激活/重新打开（reopen）冒烟测试，仍记录为两次 reopen 后调用 610、已花费 219159、hold 751233，SDK 的 meter/canary/vision 4 个测试在 19.38 秒内通过；这些都是特定范围内的历史检查点，不是最终的账本总数。更早验证过的 Chat 60 对 cohort 仍保留 120 次实际尝试、120 次 UpperBound 计费，没有 UnknownHold。
-
-**native-axis 观测：不是密码学验证，也不代表 native 消费或等价。** Generate 接受了篡改（mutation）、省略（omission）和重复（duplication）。Interactions 接受了孤立的真实来源/正向对照、单个 owner 的签名篡改、省略 thought-carrier、省略 call-carrier，以及重复。删除全部 thought 和签名，返回 generic 400；删除全部签名字段、但保留 THOUGHT 项，同样返回 generic 400。最后一次采集（capture）只有本地的、编码后原件的留存对照，没有同一次采集中的服务端正向结果；更早的正向 cohort 仍然是真实的。这些观测只确立了“整体 carrier 缺失”的边界，不能证明 issuer/签名校验或 vendor 的消费。实际报告：SDK 的 `config/qualification-extension-results.json`、`qualification-final-summary.json`、`qualification-native-axis-results.json`、`qualification-combined-omission-results.json` 和 `qualification-signature-presence-results.json`；前置条件失败、未运行、负向结果不确定这几种状态，如实保留。只要还剩另一个 carrier，仅省略 thought 或仅省略 carrier 的请求就被接受；这并不能加强 issuer 校验或 native 消费方面的任何说法。
-
-**实际的集成验证与遗留局限。** 最近一次 Core 完整运行：2242 个测试，0 失败，16 个跳过（14 个 RAM 进程丢失用例不适用，2 个需要真实凭据的闸门），耗时 130.17 秒。`PgNestedJsonRoundTrips` 精确保留了重复的键、顺序、null 元数据、blob 和 residual，用时 0.18 秒。未改动的原始 shared-bank fork 和现有的 Recorded CPU/Memory await/handoff 场景均通过。针对真实包装的 Memory/SQLite/PostgreSQL/gRPC，执行了 finite130/hold65/lower129/strip/old-head/pruning/no-archive/import 这组探针，普通构建和 ASan+UBSan 构建下均通过。本地 Memory/SQLite/PostgreSQL 的 TSan 范围：7 项通过，0 个警告。含系统 Abseil/Protobuf 的完整混合 gRPC TSan 以退出码 66 结束，在依赖库和生成的 RPC 栈里有 402 条 race 警告：这是插桩/覆盖范围的局限，不是已证实的误报；我们不声称远端 TSan 无 race，也没有屏蔽任何警告。已安装的 find_package Program C++/C ABI/双 QuickJS 这 3 个使用方均通过。全新安装的 NeoGraph/SchemaProvider 类型化使用方通过了：2 次真实的 HTTP 请求、协程启动前销毁 provider、native/工具重放、refusal、已知为零/原始值的保留，以及真实的 LinkedMismatch 拒绝。浏览器中 Alice/Bob 的隔离和 generation 2 的替换，已经目视验证；PostgreSQL Program Chat 的 6 个黑盒测试在 18.989 秒内通过。最近一次 SDK：26/26 通过，0 失败，74.07 秒。最终的 ReleaseGraph：16 种配置 ×3 次全新进程重复，共 48 条记录，用时 38.29 秒完成，0 失败，所有实际的协议/owned-outcome 检查均通过。NeoGraph 的 `benchmarks/provider-cutover-final-results.json` 和 `benchmarks/provider-cutover-final-summary.json` 保存了这个独立的最终 cohort。测量期间没有运行编译器，也没有调用付费模型；历史 cohort 保持不变，也不声称语义或资源上等价。不稳定的 SDK/ABI3 既不是稳定发布，也不是对更多平台的资格认证。
-
-宿主的交付限制、有范围上限的诊断/原始证据、常见的 provider 错误，以及最小化的媒体证据，见 [typed provider reference](reference-en.md#owned-outcome)。
+检查点只会在生成它的进程内，以 C++ sidecar 的形式保存 provider 的 native 历史（推理内容、签名、有序的工具调用）。`ChatMessage`、`ChatTool` 和 JSON 是可移植的副本，不具备 native 权限。需要在重启后保留 native 历史的宿主，要配置一个 `sp::NativeArchive`。这些契约见 [typed provider reference](reference-en.md#portable-projections)。
 
 ---
 
@@ -538,7 +496,7 @@ std::thread t([&]() {
 t.join();
 ```
 
-> 历史问题 #16 曾在某些 glibc/OpenSSL 组合上观察到：在每个请求里嵌套 `io.run()`，并配合旧的子线程 provider 流式桥接，会在 `getaddrinfo` 中出现 SEGV。类型化切换（typed cutover）已移除这个桥接；当时那次结构性测试的结果，并未穷尽复现下游的 HTTPS/sanitizer/负载条件，也不是当前的资格认证。当前的调用方应通过 `invoke_async` / `dispatch_async` 显式指定 `ProviderMode`，并在已有的长生命周期 executor 上驱动工作，而不要嵌套每个请求各自的事件循环。不要把合成单个假 token，或重新发送一次 completion 当作变通办法。
+> 请通过 `invoke_async` / `dispatch_async` 显式指定 `ProviderMode`，并在已有的长生命周期 executor 上驱动工作，而不要嵌套每个请求各自的 `io.run()`。不要把合成单个假 token，或重新发送一次 completion 当作变通办法。
 
 ---
 

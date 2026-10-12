@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/concurrent/CONCURRENT.md locale=ja source_sha256=dbe7cdde4e740c018239a2ca99a8ee319dd9ff01974ea002629f03d5595e2199 -->
+<!-- neograph-i18n: source=benchmarks/concurrent/CONCURRENT.md locale=ja source_sha256=acac6c40df2f3cdd8b1d1d39bd54572c68b5e97122c7b4c5ffc208dbf36a3c5b -->
 # 同時負荷ベンチマーク：NeoGraphとPythonの過去の結果
 
 **Languages:** [English](CONCURRENT.md) | [한국어](CONCURRENT.ko.md) | [日本語](CONCURRENT.ja.md) | [简体中文](CONCURRENT.zh-CN.md)
@@ -47,10 +47,10 @@ DockerのCPUクォータを設定しても、`hardware_concurrency()` から見�
 
 ## 現在の依存関係と再現の状況
 
-Coreは、`NEOGRAPH_BUILD_LLM=OFF` と `NEOGRAPH_USE_LIBCURL=OFF` にしても、外部の `SchemaProvider::runtime` をリンクします。インストール済みのSDKは `CMAKE_PREFIX_PATH` で、明示的なチェックアウトは `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` で指定してください。詳しくは[ビルドガイド](../../README.md)を参照してください。SDKをソースからビルドするには、C++20、設定を生成するためのPython、libcurl 7.88以上、OpenSSL Cryptoが必要です。現在のSDKの適格性確認はLinux/POSIXが対象で、過去のDockerの結果は他のプラットフォームの適格性確認にはなりません。
-NeoGraph `0.13.1` のレシピには、alpha SDK `0.1.1`（インターフェースのリビジョンと共有世代は4）と、それに合ったヘッダーおよびライブラリーが必要です。現在の構成での統合検証は未完了です。以前のLinux/POSIXでの適格性確認は、SDK4での確認でも、新しいDockerでの合格でもありません。
+Coreは、`NEOGRAPH_BUILD_LLM=OFF` と `NEOGRAPH_USE_LIBCURL=OFF` にしても、外部の `SchemaProvider::runtime` をリンクします。インストール済みのSDKは `CMAKE_PREFIX_PATH` で、明示的なチェックアウトは `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` で指定してください。詳しくは[ビルドガイド](../../README.md)を参照してください。SDKをソースからビルドするには、C++20、設定を生成するためのPython、libcurl 7.88以上、OpenSSL Cryptoが必要です。SDKはLinux/POSIXでのみテストしており、過去のDockerの結果は他のプラットフォームには当てはまりません。
+NeoGraph `0.13.1` のレシピには、alpha SDK `0.1.1`（インターフェースのリビジョンと共有世代は4）と、それに合ったヘッダーおよびライブラリーが必要です。
 
-メンテナンスしているNeoGraphのDockerイメージは、curlとOpenSSLの開発用パッケージをインストールし、`neograph::core` にリンクする専用のCMakeコンシューマーをビルドします。SDKへの依存関係は、そこから引き継がれます。SDKの取得はルートのCMakeのポリシーに従います。パッケージもソースのチェックアウトも指定しない場合は、ネットワークへのアクセスが必要になることがあります。NeoGraphのオプションのネットワークモジュールはOFFですが、SDKの依存は残ります。ここでは、新たにDockerで測定した結果は示していません。マトリクスは、ビルドする前に出力先を空にします。そのため、新しいパスを指定してください。`status=ok` が示すのは、JSONを取り出せたことだけです。`ok`、`err`、終了ステータスも確認してください。
+メンテナンスしているNeoGraphのDockerイメージは、curlとOpenSSLの開発用パッケージをインストールし、`neograph::core` にリンクする専用のCMakeコンシューマーをビルドします。SDKへの依存関係は、そこから引き継がれます。SDKの取得はルートのCMakeのポリシーに従います。パッケージもソースのチェックアウトも指定しない場合は、ネットワークへのアクセスが必要になることがあります。NeoGraphのオプションのネットワークモジュールはOFFですが、SDKの依存は残ります。マトリクスは、ビルドする前に出力先を空にします。そのため、新しいパスを指定してください。`status=ok` が示すのは、JSONを取り出せたことだけです。`ok`、`err`、終了ステータスも確認してください。
 
 ```bash
 # From the repository root. Docker builds use the root SDK acquisition policy.

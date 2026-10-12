@@ -6,7 +6,7 @@
 
 The tables below preserve pre-cutover measurements. They do not qualify the current typed provider, its external runtime, or the rebuilt Python wheel. Record the revision, compiler, configuration, topology, concurrency, endpoint and timing boundary for any new comparison. Current reproduction guidance is in [benchmarks](../benchmarks/README.md).
 
-Earlier prose extrapolated cloud bills, millions of workers and a permanent ABI freeze from these measurements. Those were projections, not measured deployments. They are not current capacity or cost guarantees. Pin wheel hashes and native dependencies as well as package versions; a version string alone does not make a deployment reproducible.
+These measurements give no cloud costs, worker counts or capacity guarantees. Pin wheel hashes and native dependencies as well as package versions; a version string alone does not make a deployment reproducible.
 
 ## Engine-only workloads, April 2026
 
@@ -110,4 +110,4 @@ valgrind --tool=cachegrind --cache-sim=yes \
   ./build-release/bench_neograph
 ```
 
-Inspect `ldd`/`otool` or the platform loader inventory on the resulting artifact rather than assuming the old dependency list. Recorded interface-3 SDK runtime/archive qualification covers Linux/POSIX, not interface 4; existing macOS/Windows metadata and WASM targets do not qualify that dependency. Current typed Python bindings are part of the cutover, not deferred; their performance needs measurement against the rebuilt wheel.
+Inspect `ldd`/`otool` or the platform loader inventory on the resulting artifact rather than assuming the old dependency list. The performance of the typed Python bindings needs its own measurement against the rebuilt wheel.

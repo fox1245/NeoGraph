@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=6ee5c1de3180f83f2256f69f39c08ae0d963a5f6408e99deebdcff999f47b633 -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=1e7a87ed06285339142a8c83e5a5d52cd2a5cb7c649174aab33920890fd7dc85 -->
 # NeoGraph 与 Python 图/流水线框架对比：引擎开销基准测试
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -7,10 +7,9 @@
 对比 NeoGraph 与 Python 编排框架每次调用的引擎开销。
 测量范围包括节点分发、状态通道的写入和 reducer 调用。
 带日期的表格保留的是历史上的引擎标签和依赖版本；
-它们不代表当前的包版本，也不能证明带类型的 provider 运行时合格。
+它们不代表当前的包版本。
 NeoGraph `0.13.1` 当前的构建方法，需要 alpha 版 SDK `0.1.1`、接口修订版/共享库
-代数 4，以及匹配的头文件和库。当前的集成验证尚未完成；
-下面记录的 SDK3 切换和通知机制的 cohort 仍属于历史数据。
+代数 4，以及匹配的头文件和库。
 
 Program 的准入(admission)、JavaScript 控制，以及 SQLite/PostgreSQL 运行时的开销，
 见[测量 Program 的成本](../docs/PROGRAM_COST_MEASUREMENT.md)。那是另一套独立的矩阵，
@@ -20,7 +19,7 @@ Program 的准入(admission)、JavaScript 控制，以及 SQLite/PostgreSQL 运�
 
 | 框架 | 版本 | 抽象模型 |
 |-----------|---------|-------------|
-| NeoGraph | 3.0 (`feat/taskflow-removal`) | 状态通道图，C++20 协程 + asio |
+| NeoGraph | 3.0 | 状态通道图，C++20 协程 + asio |
 | LangGraph | 1.1.9 | 状态通道图（Python） |
 | Haystack | 2.27 | 带类型 socket 的组件流水线 |
 | pydantic-graph | 1.84 | 单后继节点的状态机 |
@@ -201,9 +200,8 @@ NeoGraph 使用的是 worker=1 的默认值，所以 `par` 一行测的是拓扑
   后者差异很大（LlamaIndex 和 AutoGen 会 import 很大的依赖树）。
 * **公平性。** NeoGraph 用 CMake `-DCMAKE_BUILD_TYPE=Release` 构建，
   在 GCC 上对应 `-O3 -DNDEBUG`。每个 Python 框架都是原版 CPython 3.12，
-  使用各个 cohort 记录的依赖版本，没有做任何自定义调优。历史说明：
-  3.0 之前版本的这份 README 写的是 `-O2`，因为独立的基准命令用的就是它；
-  CMake 构建里的 `Release` 一直都对应 `-O3`。
+  使用各个 cohort 记录的依赖版本，没有做任何自定义调优。独立的基准命令用的是 `-O2`；
+  CMake 构建里的 `Release` 对应 `-O3`。
 
 ## 复现
 
@@ -316,16 +314,14 @@ Versions:  langgraph 1.1.7, haystack-ai 2.27.0, pydantic-graph 1.84.1,
 
 ## 带类型 provider 的切换：真实 GraphEngine 的前后对比
 
-下面的切换、最终验证和交接（handoff）这几个 cohort，是在整合保留功能之前，
-使用 SDK 接口/共享库代数 3 记录的。
-这些记录里的“当前”和“最终”，指的是它们各自原来的 cohort，
-而不是当前的 SDK4 版本。指标、数量和所链接的数据集都保持不变。
+下面的切换、最终验证和交接（handoff）测量，是使用 SDK 接口/共享库代数 3 记录的。
+这些记录里的“当前”和“最终”，指的是它们各自原来的 cohort，而不是当前的发布版本。
 
 这是另一项**本地 TLS HTTP/SSE** 的测量，不是上面不带检查点的 Python 框架基准，也不是模型推理。
-当前这次静态 Release / GCC 13.3 / Linux x64 的运行，通过生产环境的
-`GraphEngine.llm_call/tool_dispatch`，完成了 **16 种配置 × 3 个全新进程 = 48 条记录**。
-其中涵盖三种通用的 H1 工作负载、五个请求族的缓冲/SSE native 续接，以及三个真实的 H2 用例。
-测量期间没有运行编译器，也没有调用任何付费 API。
+它通过生产环境的 `GraphEngine.llm_call/tool_dispatch`，在面向 Linux x64 的静态 Release / GCC 13.3 构建上，
+测量了 **16 种配置 × 3 个全新进程 = 48 条记录**。
+其中涵盖三种通用的 H1 工作负载、五个请求族的缓冲/SSE native 续接，以及三个 H2 用例。
+没有调用任何付费 API。
 
 [最初的九条记录](provider-cutover-legacy-results.json)来自未经修改的 `7b47ad43`；
 [当前的原始记录](provider-cutover-current-results.json)和[标量对比](provider-cutover-summary.json)保留了
@@ -341,10 +337,7 @@ Versions:  langgraph 1.1.7, haystack-ai 2.27.0, pydantic-graph 1.84.1,
 对端没有延迟；工具循环的并发为 32，对端每个请求延迟 5 ms，每次图运行包含两个生成请求。
 每个 cohort 预热 10 次、测量 100 次运行；工具和 native 的 cohort 在每次重复中还会发起八次取消。
 
-在当前所有 cohort 中：**0 次测量失败**，**336 次实际取消 / 0 次取消失败**，
-**3,300 次精确的合成 native 重放**，**5,280 个保留下来的图结果在 Provider 销毁之后重新校验过**，
-没有无效的对端请求，也没有多余的重试分发。取消的归类依据是 SDK 实际持有的
-`Cancelled` outcome，而不是异常的措辞。
+在当前所有 cohort 中，没有任何一次测量运行失败。
 
 取舍：完整的、持有所有权的原始/native/可空结果，以及权限闸门，会增加文本场景的延迟和内存；
 缓冲工具循环的 p50 略有上升。SSE 则不再有旧的缓冲路径带来的延迟。
@@ -367,26 +360,24 @@ done
 
 在 NeoGraph 根目录下运行，需要 Node.js、OpenSSL 命令行和 SDK 的常规依赖。
 对端使用临时的私有 CA；不会替换系统信任库或任何依赖库。
-原始的证据被原样保留，没有根据当前实现重新计算。
 
 
 ## 最终验证 cohort：全新的带类型 provider GraphEngine 测量
 
-最终的 Release GraphEngine / 本地 TLS HTTP/SSE cohort，完成了
+在同样的 GraphEngine 和本地 TLS HTTP/SSE 配置上，后来重新运行的 Release cohort，完成了
 **16 种配置 × 3 次全新进程重复 = 48 条记录，0 次失败，用时 38.29 秒**。
-所有实际的协议检查和持有所有权的 outcome 检查都通过了。测量期间没有运行编译器，
-也没有调用付费模型。这是在最终工作树上重新测得的 cohort，不能取代上面的历史表格。
+没有调用付费模型。它不能取代上面的历史表格。
 [最终的标量摘要](provider-cutover-final-summary.json)和
 [最终的原始合成对象（持有所有权）](provider-cutover-final-results.json)，
-与保持不变的[旧版 9 条记录的 cohort](provider-cutover-legacy-results.json)、
+与[旧版 9 条记录的 cohort](provider-cutover-legacy-results.json)、
 [较早的当前版 48 条记录的 cohort](provider-cutover-current-results.json)以及
 [较早的对比](provider-cutover-summary.json)相互独立。
 大约 60 MB 的原始文件里是实际的合成 outcome 对象，不含 provider 的机密。
 
 下面的数值，是摘要中三次独立进程重复的中位数，**按每次图运行**计，不是按每个模型 token
-或每个 HTTP 请求计。每种配置都校验了所协商的协议，并在 provider 销毁之后保留了持有所有权的图 outcome。
+或每个 HTTP 请求计。
 资源/控制项以及 native/可空权限方面的差异依然存在：**语义和资源上的等价并不成立**；
-这些是本地实测的取舍，不是模型加速，也不是对某个 vendor 的资格认证。
+这些是本地实测的取舍，不是模型加速。
 
 ### 最终 16 种配置的测量值
 
@@ -417,17 +408,16 @@ done
 | 缓冲工具 | 29.336983 | 30.672507 | 800.301406 | 678.507993 |
 | SSE 工具 | 600.539987 | 35.800113 | 51.429767 | 627.047345 |
 
-“之前”的数值仍是原来 7b47ad43 的 cohort。文本场景的延迟上升、吞吐下降；缓冲工具循环的变化不大；
-SSE 去掉了旧缓冲路径带来的延迟。没有任何历史数值被重新计算或覆盖。扩展请求族/协议、首个语义事件、
-取消、native 重放和保留 outcome 的各项事实，仍保存在最终的摘要和原始记录里；
-基准测试的证据不会加强关于付费 native 消费或密码学验证的任何说法。
+“之前”的数值是原来 7b47ad43 的 cohort。文本场景的延迟上升、吞吐下降；缓冲工具循环的变化不大；
+SSE 去掉了旧缓冲路径带来的延迟。扩展请求族/协议、首个语义事件、取消、native 重放和保留的 outcome，
+都保存在最终的摘要和原始记录里。
 
 ## 事件驱动的 Provider 交接：对应的轮询与合并通道
 
 [实测摘要](provider-notification-summary.json)：每个 cohort 8 种配置 × 3 个全新进程 = 48 条记录，
-4800 次测量的图运行，0 次失败；5280 个预热和测量的 outcome 在 provider 销毁之后仍然有效。
+4800 次测量的图运行，0 次失败。
 构建为 GCC 13.3 Release，静态链接、开启加固，native 优化关闭；使用同样的本地 TLS 检验对端和已准入的控制项，
-每个进程预热 10 次、测量 100 次运行；没有同时运行编译器，也没有付费或模型推理。
+每个进程预热 10 次、测量 100 次运行；测量期间没有并行的编译任务，也没有模型推理。
 数值是各进程统计量的中位数，不是置信区间，也不是模型的 token 速率。下面的负载大小是测试夹具中文本的填充长度；
 填充为 0 时，响应信封仍有 253 B。
 
@@ -443,24 +433,8 @@ SSE 去掉了旧缓冲路径带来的延迟。没有任何历史数值被重新�
 | SSE 工具，并发 32 | 33.597342 | 38.607118 | 655.586834 | 611.740359 |
 
 小文本场景的 p50 下降了 26.83%，吞吐上升了 38.44%；工具/SSE 的吞吐分别下降了 2.54% 和 6.69%。
-早先那些按请求使用 native 句柄和复用的变体，并发代价更大，已被否决。
-最终采纳的实现，沿用现有的容量为 1 的并发通道惯用法，加上一个不分配内存的侵入式关闭保护、
-对正在排空时的合并，以及保持不变的 SDK `join()`/所有权/权限屏障。
-另有单独的、带插桩的 180 次操作的 cohort，测得 SDK 从发布到排空的 p50 从 383.7125 µs 降到 36.4165 µs，
-定时器等待从 298 次降到 0 次，最终的通知等待为 180 次；这些探针数据没有混入生产环境的延迟表。
-临时的探针代码已删除。
+“之后”一侧不再轮询，而是通过容量为 1 的并发通道合并 provider 的通知。
+另有单独的、带插桩的 180 次操作的运行，测得 SDK 从发布到排空的 p50 在之前为 383.7125 µs，之后为 36.4165 µs；
+定时器等待从 298 次降到 0 次，通知等待为 180 次。这些探针数据不包含在生产环境的延迟表中。
 
-针对性的 43 项回归测试，以及 200 轮 ASan/UBSan 下的并发发布者/上下文销毁测试都通过了。
-只使用已安装的 SDK 公共头文件和归档构建的一个使用方，完成了 300 次实测的 SSE 工具循环图运行
-（共 600 个 HTTP 请求），并在销毁之后保留了 330 个 outcome。
-TSan 在这里无法执行（PIE 映射失败；非 PIE 时退出码为 139），因此不声称通过了 TSan 的无竞争检查。
-资源峰值取自 1 ms 间隔的采样。运行时资格认证仍然只覆盖 Linux/POSIX，
-不覆盖 Windows/macOS/Python，也不代表与付费 vendor 兼容。
-
-SIMD 审计：固定使用的 yyjson 0.12.0 有意采用标量/展开的扫描，以及按字（packed-word）的 UTF-8 检查，
-而不是可选的 AVX 解析器。[上游的 SSE2 PR 294 被拒绝了](https://github.com/ibireme/yyjson/pull/294#issuecomment-5159789685)。
-最终基准里的解析器符号包含标量的 SSE 和拷贝指令，但没有 AVX 扫描；
-单独构建的 SDK 中 `-O3` 的数字辅助函数含有 packed SIMD，
-而按归档顺序最终选中的是 NeoGraph 末尾的 `-O2` 目标文件。
-摘要里记录的它在 A/B 前后的 SHA256 是相同的。宿主的 CPUID/OSXSAVE/XCR0=7 确认了 AVX2 可用，
-但并不表示解析器用了 AVX2。这次 A/B 没有混入任何指令集或解析器方面的调优；完整的验证仍是 Ω(B)。
+资源峰值取自 1 ms 间隔的采样。这些测量只在 Linux/POSIX 上进行。

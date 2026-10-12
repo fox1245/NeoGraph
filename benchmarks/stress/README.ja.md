@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/stress/README.md locale=ja source_sha256=d1fd42d6f1bc331198538223f1500e0230e84d2ed174a70b798a73ad75817cc7 -->
+<!-- neograph-i18n: source=benchmarks/stress/README.md locale=ja source_sha256=dc3aa60d06ab4b26c3b084af5651245fcbc52e56a724212845d2e0351f68a69a -->
 # NeoGraphの持続的な並行実行のストレスベンチマーク
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -16,7 +16,7 @@ Windowsではプロセスのワーキングセットのカウンターを、Linu
 ## ビルドと実行
 
 外部のSchemaProvider SDKをインストールし、そのプレフィックスを設定します。LLMとオプションのNeoGraphのlibcurlバックエンドを無効にしても、Coreには `SchemaProvider::runtime` が必要です。プレフィックスの代わりに、`NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` で、SDKのソースのチェックアウトを明示的に指定することもできます。そのビルドには、C++20、Python、libcurl 7.88以上、OpenSSL Cryptoが必要です。依存関係とプラットフォームの制約については、[ビルドガイド](../../README.md)を参照してください。このレシピは、ネットワークからの取得と、使わないNeoGraphの統合を無効にします。
-NeoGraph `0.13.1` では、alpha SDK `0.1.1`（インターフェースのリビジョンと共有世代は4）を使い、それに合ったヘッダーとライブラリーで再ビルドしてください。現在の構成での統合検証は未完了です。
+NeoGraph `0.13.1` では、alpha SDK `0.1.1`（インターフェースのリビジョンと共有世代は4）を使い、それに合ったヘッダーとライブラリーで再ビルドしてください。
 
 ```bash
 # Set SCHEMAPROVIDER_PREFIX to the installed SDK prefix.
@@ -40,7 +40,7 @@ cmake --build build-stress --parallel --target bench_sustained_concurrent
 
 ## 保存してある過去の観測結果
 
-以前のREADMEには、日付不明のRyzen 7 5800Xでの実行が載っていました。条件はconcurrency=100、duration=15 sで、実行数は15.3 M回（約1.0 M回/s）、レイテンシーの平均は約55 µs、ウォーム時のRSSは9.3 MB、最後のRSSは7.4 MB（約−20%、終了コード0）です。ここでは、日付もSDKのリビジョンも記録されていません。過去のエビデンスとして残しているもので、切り替え後の新たな適格性確認でも、スループットの保証でもありません。下の出力の抜粋は、この観測のものです。省略記号はJSONではありません。
+日付不明の、以前のRyzen 7 5800Xでの実行です。条件はconcurrency=100、duration=15 sで、実行数は15.3 M回（約1.0 M回/s）、レイテンシーの平均は約55 µs、ウォーム時のRSSは9.3 MB、最後のRSSは7.4 MB（約−20%、終了コード0）です。日付もSDKのリビジョンも記録されていません。過去の観測として残しているもので、スループットの保証ではありません。下の出力の抜粋は、この観測のものです。省略記号はJSONではありません。
 
 ```json
 {"sample":1,"elapsed_s":5,"window_ok":5012514,"err_total":0,"inflight":100,

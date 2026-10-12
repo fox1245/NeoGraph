@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=cc7841c6b839b6ffd7e5f54c32ac76a95b214a2d621969c731a72de7b54379e7 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=619cc967ee0702270da38d4f92f783baacddd5dee11306e5545600ae7c24fb51 -->
 # 故障排查
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -7,7 +7,7 @@
 
 先记录 `neograph_engine.__version__`、Python 版本、操作系统和架构、安装方式，以及最先出现的那个错误。请到该版本实际提供的 wheel 文件里确认，不要默认源码检出和旧 wheel 暴露的是同一套 API。类型化切换（typed cutover）移除了旧的 provider 名称；用旧 wheel 做 import，测不出新的绑定。
 
-NeoGraph 发布的平台元数据包含 Linux、macOS 和 Windows。目前 SchemaProvider 的运行时和 archive 只在 Linux/POSIX 上通过了资格认证；macOS 和 Windows 的移植需要各自完成资格认证，之后才能说新的 wheel 在那里可用。仅有兼容的 wheel 标签或编译器，不能证明运行时已经集成好。WASM 上的 provider 运行时支持尚未确立。
+NeoGraph 发布的平台元数据包含 Linux、macOS 和 Windows。仅有兼容的 wheel 标签或编译器，不能证明运行时已经集成好。WASM 上的 provider 运行时支持尚未确立。
 
 遇到缺少 GLIBC 符号的错误时，把 wheel 的 manylinux 标签与宿主机的 glibc 版本对照。`manylinux_2_34` 的产物要求 glibc 2.34 或更新。Windows 上出现 DLL 错误时，确认用的是 x64 Python，并检查缺失的依赖 DLL；原因不一定只是架构不符。不要单独替换 wheel 中捆绑的某个库。
 
@@ -29,7 +29,7 @@ cmake --build build -j
 
 SQLite 和 PostgreSQL 是 NeoGraph 的可选组件。要么提供它们的开发包，要么显式关闭 `NEOGRAPH_BUILD_SQLITE`/`NEOGRAPH_BUILD_POSTGRES`。这样做不会去掉 SDK 运行时。头文件或 API 变更之后如果出现绑定符号无法解析，请在全新的构建目录里重新配置，并针对匹配的头文件和库重新构建所有使用方。
 
-Stage 3 期间曾有人报告 GCC 13 在协程上出现编译器内部错误。请升级到合适的编译器，或者调整报错的那个表达式；当年的那些变通办法，并不能证明整个 SDK/平台的构建已通过资格认证。绝不要在 catch 处理器里 `co_await`：C++ 本身就禁止在那里使用 await 表达式。应该先把错误捕获下来，再到处理器外面 await 恢复逻辑。
+曾有人报告 GCC 13 在协程上出现编译器内部错误。请升级到合适的编译器，或者调整报错的那个表达式。绝不要在 catch 处理器里 `co_await`：C++ 本身就禁止在那里使用 await 表达式。应该先把错误捕获下来，再到处理器外面 await 恢复逻辑。
 
 ## 已移除的 provider API 与带类型的失败
 
@@ -69,7 +69,7 @@ Provider 的 invoke/dispatch 是同步的 Python 方法，会释放 GIL。请配
 
 要指定明确的信任包，设置 `ProviderRuntimeOptions.ca_file`。Python 导入时会保留已有的 `SSL_CERT_FILE`，没有的话，在 certifi 可用时选用 certifi；运行时选项把选定的 CA 文件交给 SDK 的 libcurl。设置 `NEOGRAPH_SKIP_CERT_AUTOFIX=1` 则不改动宿主自己的选择。不要为了掩盖 endpoint 或信任库的错误而关闭证书校验。
 
-v0.1.0–v0.1.6 中由 wheel 里的 CA 路径引起的 ConnPool 超时，已是历史问题；v0.1.7 加入了 CA 自动选择。当前的 provider 使用 SDK 的 libcurl，不再走那条旧路径。本地 HTTP 的准入应该写在经过校验的描述符里，而不是直接覆盖 URL；请参照[示例 31](../examples/31_local_transformer.cpp)。Responses WebSocket 的 close=1000 处理办法，只适用于已移除的历史传输方式。
+本地 HTTP 的准入应该写在经过校验的描述符里，而不是直接覆盖 URL；请参照[示例 31](../examples/31_local_transformer.cpp)。
 
 ## 图定义与注册
 
@@ -125,27 +125,27 @@ worker_count 默认是 `1`，因此不会创建引擎自己的线程池。I/O �
 
 权限允许时，存储会自己建表；缺少 CREATE 权限时，需要手工执行 [PostgreSQL 头文件](../include/neograph/graph/postgres_checkpoint.h)中的 schema。没有 pending write 能力，意味着要整个超步重放，而不是外部副作用恰好执行一次。只支持异步的自定义后端，应当使用 AsyncCheckpointStore 加 `adapt_async_checkpoint_store`，而不是以前那种同步与异步互为默认实现的交叉写法。
 
-## Tracing 适配器与历史修复
+## Tracing 适配器与其他常见陷阱
 
 Tracer 适配器必须持有自己记录的数据，而不能保存指向 Span 包装器的裸指针，因为会话关闭时这些包装器会被销毁。参见 [C++ tracing 示例](../examples/49_openinference.cpp)。Python 的 contextvars 不会自动穿过 C++ 回调的边界；需要显式传递或挂接父 context，并且要在引擎编译之前安装这些包装器。
 
-历史上的修复包括：v0.1.8 开始接受顶层的 conditional_edges；去掉了节点被执行两次的回退逻辑；以及切换之前 httplib 宏布局不一致的问题（issue #16）。这些修复并不会恢复已移除的 provider 签名。如果使用方在多个编译单元里实例化仅有头文件的 httplib，仍然需要让 CPPHTTPLIB_OPENSSL_SUPPORT 的定义保持一致；当前带类型的 provider 通过 SDK 的 libcurl 发送 HTTP 请求。
+如果使用方在多个编译单元里实例化仅有头文件的 httplib，需要让 CPPHTTPLIB_OPENSSL_SUPPORT 的定义保持一致；带类型的 provider 通过 SDK 的 libcurl 发送 HTTP 请求。
 
-不透明的便捷向量属性不一定是 Python 列表。检查时用迭代或 `list(value)`；对于 ChatMessage.image_urls 这类返回副本的序列字段，应当先构造好再整体赋值。不要以为修改返回的副本就能改变 C++ 的请求；新的带类型 request/outcome 契约，与旧的 CompletionParams 示例是两回事。
+不透明的便捷向量属性不一定是 Python 列表。检查时用迭代或 `list(value)`；对于 ChatMessage.image_urls 这类返回副本的序列字段，应当先构造好再整体赋值。不要以为修改返回的副本就能改变 C++ 的请求。
 
 ## 工具调用、Hook 与协议错误
 
-图运行中的工具调用、节点或子图被强制 Hook 阻塞时，现在会直接抛出 `HookBoundaryBlocked`，与 `llm::Agent` 一贯的做法相同，而不再是包着它的 `NodeExecutionError`，也不会为此发出 `ERROR` 事件。请捕获 `HookBoundaryBlocked`（Python：`ng.HookBoundaryBlocked`），并读取 `invocation_id` 和 `state`。抛出它的 Python 节点（例如来自嵌套的引擎运行）不再被重试。参见[工具失败契约](reference-en.md#tool-failure-contract)。
+图运行中的工具调用、节点或子图被强制 Hook 阻塞时，会直接抛出 `HookBoundaryBlocked`，与 `llm::Agent` 的做法相同，而不是包着它的 `NodeExecutionError`，也不会为此发出 `ERROR` 事件。请捕获 `HookBoundaryBlocked`（Python：`ng.HookBoundaryBlocked`），并读取 `invocation_id` 和 `state`。抛出它的 Python 节点（例如来自嵌套的引擎运行）不会被重试。参见[工具失败契约](reference-en.md#tool-failure-contract)。
 
-引擎的 `HookRuntime` 现在也会运行它的工具调用所对应的 `BeforeToolExecution` 和 `AfterToolExecution` Hook；Program 宿主的 Hook 运行时则运行其各个 Core 的工具调用对应的这两类 Hook。如果图运行现在以 `HookBoundaryBlocked`（state 为 `failed`，消息为 `lifecycle hook could not run`）停止，请给这次运行指定 owner 作用域（`RunMetadata::owner_scope`）：没有 owner 作用域的 Hook 边界会失败时关闭，检查点 Hook 和工具 Hook 都是如此。
+引擎的 `HookRuntime` 也会运行它的工具调用所对应的 `BeforeToolExecution` 和 `AfterToolExecution` Hook；Program 宿主的 Hook 运行时则运行其各个 Core 的工具调用对应的这两类 Hook。如果图运行以 `HookBoundaryBlocked`（state 为 `failed`，消息为 `lifecycle hook could not run`）停止，请给这次运行指定 owner 作用域（`RunMetadata::owner_scope`）：没有 owner 作用域的 Hook 边界会失败时关闭，检查点 Hook 和工具 Hook 都是如此。
 
-`state == "timed_out"` 现在表示 Hook 的截止时间已到，或者它的目标超时。最后一次尝试失败的 Hook 报告 `failed`；以前它报告的是 `timed_out`。
+`state == "timed_out"` 表示 Hook 的截止时间已到，或者它的目标超时。最后一次尝试失败的 Hook 报告 `failed`。
 
 工具结果的状态为 `expired`、错误为 `run deadline elapsed before the tool started` 时，表示在调用开始之前，运行的截止时间已经过了：工具和它的 Hook 都没有运行。请调高 `RunMetadata::deadline`（Python 中是 `timeout_ms`，Program 中是 `wall_time_ms`），而不是重试这次调用。被运行的截止时间或客户端的请求超时终止的 MCP 调用，状态是 `timed_out`；取消运行会立即终止正在进行的 MCP 调用。
 
-对于客户端已取消的 `tools/call`，`MCPServer` 在任何传输方式下都不发送响应；Hook 阻塞用 `-32010` 回应，中断用 `-32011` 回应；其他所有失败都是 `isError` 结果，由 `_meta["io.neograph/failure"].code` 给出错误码，其文本是公开消息，绝不是异常文本（想自己选定文本，可以抛出带 `public_message` 的 `NodeFailureError`）。以前从 `OK` 响应里读取 `RunGraphResponse.error` 的 gRPC 客户端，现在必须改读状态：失败的运行对应的是非 OK 的状态，其 `google.rpc.ErrorInfo` 在 `metadata["code"]` 中带有错误码。参见[协议失败映射](reference-en.md#protocol-failure-mapping)。
+对于客户端已取消的 `tools/call`，`MCPServer` 在任何传输方式下都不发送响应；Hook 阻塞用 `-32010` 回应，中断用 `-32011` 回应；其他所有失败都是 `isError` 结果，由 `_meta["io.neograph/failure"].code` 给出错误码，其文本是公开消息，绝不是异常文本（想自己选定文本，可以抛出带 `public_message` 的 `NodeFailureError`）。gRPC 客户端必须读取状态，而不是 `OK` 响应里的 `RunGraphResponse.error`：失败的运行对应的是非 OK 的状态，其 `google.rpc.ErrorInfo` 在 `metadata["code"]` 中带有错误码。参见[协议失败映射](reference-en.md#protocol-failure-mapping)。
 
-不是有效 UTF-8 的工具输出或异常消息，以前到达时会变成空的工具消息、空的 MCP 或 gRPC 负载，或者 Python 中的 `UnicodeDecodeError`。现在每个格式错误的序列都会换成 U+FFFD 后再送达。
+不是有效 UTF-8 的工具输出或异常消息，每个格式错误的序列都会换成 U+FFFD 后再送达，不会变成空的工具消息、空的 MCP 或 gRPC 负载，也不会变成 Python 中的 `UnicodeDecodeError`。
 
 ## 安全地报告 bug
 

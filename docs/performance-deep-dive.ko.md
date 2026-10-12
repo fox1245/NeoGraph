@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=ko source_sha256=31ea664b884c612f5b01c1132fe748da0cb0115e2afe5bf203f33e958516c63b -->
+<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=ko source_sha256=2d15a0b62d2881a1880f92dc7b5d24e9e499ffc57b27fd02b0bb365c20ce9225 -->
 # 성능 심층 분석
 
 **Languages:** [English](performance-deep-dive.md) | [한국어](performance-deep-dive.ko.md) | [日本語](performance-deep-dive.ja.md) | [简体中文](performance-deep-dive.zh-CN.md)
@@ -7,7 +7,7 @@
 
 아래 표는 cutover 이전에 측정한 값을 그대로 보존한 것입니다. 현재의 타입 기반 provider, 그 외부 런타임, 다시 빌드한 Python wheel을 검증한 결과가 아닙니다. 새로 비교할 때는 리비전, 컴파일러, 구성(configuration), 토폴로지, 동시성, 엔드포인트, 시간 측정 경계를 기록해 두어야 합니다. 현재의 재현 방법은 [benchmarks](../benchmarks/README.md)에 있습니다.
 
-이전 문서에서는 이 측정값으로 클라우드 비용, 수백만 개의 워커, ABI를 영구히 동결하는 방안까지 추정했습니다. 이는 추정일 뿐 실제로 측정한 배포가 아니며, 현재의 용량이나 비용을 보장하지 않습니다. 패키지 버전뿐 아니라 wheel 해시와 네이티브 의존성도 고정해야 합니다. 버전 문자열만으로는 배포를 재현할 수 없습니다.
+이 측정값으로는 클라우드 비용, 워커 수, 용량을 보장할 수 없습니다. 패키지 버전뿐 아니라 wheel 해시와 네이티브 의존성도 고정해야 합니다. 버전 문자열만으로는 배포를 재현할 수 없습니다.
 
 ## 엔진 단독 워크로드, 2026년 4월
 
@@ -111,4 +111,4 @@ valgrind --tool=cachegrind --cache-sim=yes \
   ./build-release/bench_neograph
 ```
 
-예전 의존성 목록을 그대로 믿지 말고, 만들어진 산출물에서 `ldd`/`otool`이나 플랫폼 로더의 목록을 직접 확인합니다. 기록된 인터페이스 3 SDK 런타임/아카이브 검증은 Linux/POSIX만 다루며 인터페이스 4는 검증하지 않습니다. 기존 macOS/Windows 메타데이터와 WASM 타깃도 그 의존성을 검증하지 않습니다. 현재의 타입 기반 Python 바인딩은 cutover에 포함되어 있고 미뤄진 것이 아니지만, 성능은 다시 빌드한 wheel로 측정해야 합니다.
+예전 의존성 목록을 그대로 믿지 말고, 만들어진 산출물에서 `ldd`/`otool`이나 플랫폼 로더의 목록을 직접 확인합니다. 타입 기반 Python 바인딩의 성능은 다시 빌드한 wheel로 따로 측정해야 합니다.

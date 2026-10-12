@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=zh-CN source_sha256=e7253d2aacfe88e0cb5c6ef9f02834b805e0ddcfb739e7c9882235f90eba9b52 -->
+<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=zh-CN source_sha256=d3f40032eb64bd20115a5e0189753523ae701025f3b2a0139baca7973c0aba1b -->
 # NeoGraph C++ API 参考 {#mainpage}
 
 **Languages:** [English](doxygen-mainpage.md) | [한국어](doxygen-mainpage.ko.md) | [日本語](doxygen-mainpage.ja.md) | [简体中文](doxygen-mainpage.zh-CN.md)
@@ -64,7 +64,7 @@ provider 调用返回 `sp::runtime::Result`：它是不可变的、持有所有�
 
 wire 证据由请求族提供，而且是可选的：`sp::Completion::wire_envelope` 可能为空（在 Python 中，`ProviderCompletion.wire_envelope` 为 `None`）。带缓冲的 Chat 目前把完整的响应 JSON 作为 `RawWire` 保存在 `raw_events` 里，其 `type == "chat.completion"`，文档内容在 `payload` 中；`wire_envelope` 则保持为空。请到请求族保留证据的地方去读取；不会伪造一个兜底的 envelope。native 续接状态和原始缓冲区仍然是受保护的证据，不会出现在 trace 的 payload 里。
 
-这是一次源码和二进制层面的不兼容变更：每个 C++ 使用方和自定义 provider，都要用匹配的新头文件和库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器和 Responses WebSocket 路径都已移除，没有别名，也没有兼容桥。发布所针对的是 SDK `0.1.1` alpha，接口修订版 4 / 共享库 ABI 4，并带有非内联的 capability 检查；alpha 不是对稳定 API 的承诺。记录在案的接口 3 的运行时和 archive 资格认证覆盖 Linux/POSIX，不覆盖接口 4，也不覆盖 Windows、macOS 和 WASM 上的运行时资格认证。
+这是一次源码和二进制层面的不兼容变更：每个 C++ 使用方和自定义 provider，都要用匹配的新头文件和库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器和 Responses WebSocket 路径都已移除，没有别名，也没有兼容桥。发布所针对的是 SDK `0.1.1` alpha，接口修订版 4 / 共享库 ABI 4，并带有非内联的 capability 检查；alpha 不是对稳定 API 的承诺。
 
 Python 使用 `SchemaProvider(ValidatedDescriptor, ProviderRuntimeOptions,
 SchemaProviderDefaults)` 和 `make_provider_request`，消息是带类型的
@@ -78,6 +78,7 @@ SchemaProviderDefaults)` 和 `make_provider_request`，消息是带类型的
 
 
 如果在已有真实结果之后，副作用后的核算或终态回执的持久化失败了，`ProviderDispatchOutcomePersistenceError` 会在 `outcome()` 中保留原来的不可变结果，在 `cause()` 中保留原来的持久化异常。如果交付也失败了，`delivery_error()` 会保留原来的 observer 异常。持久化成功、随后 observer 失败时，会原样重新抛出那个原始的 observer 异常；状态未知、没有结果的传输失败，不会伪造 outcome。
+
 ## 参考索引
 
 侧边栏中的类列表、文件列表和命名空间列表，都是根据 `include/neograph/`

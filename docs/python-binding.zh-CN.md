@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=69972a28821d3a677802735fa400a1b7a3b91bac64275756ae64f07620db9cc3 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=dffe463f8f3a5a6ebfe8bafc5a1d27d20c4b5f3b1bbfb791e2f8608c77bb05ad -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -320,7 +320,7 @@ Python 暴露的是 C++ 的执行能力，而不是另外一套 Python 调度器
 | 运行时上下文与严格分发 | 上下文存储、回执（receipt）和拦截 | 对应的不可变值、存储和 `StrictRuntimeProfile` | 同一个原生控制器 |
 | wheel 默认的持久化 | SQLite 的 Core/上下文/分发存储 | `_HAVE_SQLITE` 导出项 | PyPI wheel 中已启用 |
 
-原始的 `ProgramCatalog`、转换存储（transition store）、替换/迁移控制器、synthesis 网关、Hook journal 和 RPC 执行器，仍然是供宿主自行组合的 API。只暴露这些带权限路径的片段，会绕过必需的 `proposal -> compile -> admit -> publish -> migrate/spawn` 协议。将来的 Python 宿主控制器必须把这套协议和不可续期的谱系预算（lineage budget）绑成一个按 owner 划分作用域的整体；`_HAVE_PROGRAM` 并不声称与原始控制面的管理能力对等。
+原始的 `ProgramCatalog`、转换存储（transition store）、替换/迁移控制器、synthesis 网关、Hook journal 和 RPC 执行器，仍然是供宿主自行组合的 API。只暴露这些带权限路径的片段，会绕过必需的 `proposal -> compile -> admit -> publish -> migrate/spawn` 协议。`_HAVE_PROGRAM` 并不声称与原始控制面的管理能力对等。
 
 ### 运行时覆盖重试策略
 
@@ -435,7 +435,7 @@ print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 
 
 销毁 `LocalProgramHost` 时，调用方持有的 GIL 会被释放，同时它内部真正的 `ProgramRuntime` 会取消、排空并 join 调度器的工作，这样正在运行的 Python 节点可以执行完。之后它重新获取 GIL，再销毁宿主的其余成员；这些成员中的 Python 回调和对象所有者，仍能保证在持有 GIL 的情况下安全销毁。
 
-原生的 Program 录制执行 API 是 `ProgramRuntime::replay_recorded`，它取代了 `start_recorded`。`LocalProgramHost` 提供 `run`、`start`、`resume` 和 `fork`，不暴露原始的 recorded-binding 控制面。Program 的结果除了原有的句柄、预算和权限字段，还保留原生运行时给出的带类型的 provider outcome 和失败证据。
+原生的 Program 录制执行 API 是 `ProgramRuntime::replay_recorded`。`LocalProgramHost` 提供 `run`、`start`、`resume` 和 `fork`，不暴露原始的 recorded-binding 控制面。Program 的结果除了原有的句柄、预算和权限字段，还保留原生运行时给出的带类型的 provider outcome 和失败证据。
 
 `ProgramResult.failure` 是只读的 `ProgramFailure` 值或 `None`，不是字典。它的 `provider_outcome` 和 `provider_cause` 保留 provider 的失败证据；`code`、`message`、`operation_id`、`core_node`、`attempts` 和 `witness` 描述失败的那个操作。结果字段还包括 `bundle_id`、`operation_id`、`attempt`、`checkpoint`、`interrupt` 和 `provider_budget_authority`。
 

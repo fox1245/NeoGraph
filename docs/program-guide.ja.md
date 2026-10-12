@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=51c4b4ad6cac765e2629982d260600386568149c97b34cad0d1f779d395f4c6b -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=6f69f4c493387ec533fd315d4e5a294d10e695e59765446ee310d4add2d1b624 -->
 # Program ガイド: グラフを取りまとめる JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -22,8 +22,6 @@ Program 層には、Program と QuickJS 制御を含むビルドが必要です�
 リリースのジョブが、3つのサービスを並列にチェックします。`payments` のチェックは失敗します。ジョブ全体を失敗させる代わりに、失敗はレビューのステップに回り、ジョブは人を待ちます。人がリリースを承認すると、ほかのサービスは再チェックされずにジョブが終わります。同じジョブが予算の範囲内で動きます。
 
 例は Python のファイル3つです。`release_program.py` には実行ごとに変わらないものをすべて入れ、`run_release.py` と `restart.py` がそれを使います。
-
-<!-- TODO(link): replace the listings below with a link to the Program example under examples/ once the examples overhaul adds it. -->
 
 ### 1. ノードのコード
 

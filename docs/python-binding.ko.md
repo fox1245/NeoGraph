@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=69972a28821d3a677802735fa400a1b7a3b91bac64275756ae64f07620db9cc3 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=dffe463f8f3a5a6ebfe8bafc5a1d27d20c4b5f3b1bbfb791e2f8608c77bb05ad -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -319,7 +319,7 @@ Python은 별도의 Python 스케줄러를 두지 않고 C++의 실행 기능을
 | 런타임 컨텍스트와 strict dispatch | 컨텍스트 저장소, receipt, 인터포지션 | 대응하는 불변 값, 저장소, `StrictRuntimeProfile` | 같은 네이티브 컨트롤러 |
 | wheel의 영속 기본값 | SQLite Core/컨텍스트/디스패치 저장소 | `_HAVE_SQLITE` export | PyPI wheel에서 활성화 |
 
-원시 `ProgramCatalog`, 전환 저장소, 교체/마이그레이션 컨트롤러, 합성 게이트웨이, Hook 저널, RPC executor는 호스트를 구성할 때 쓰는 API로 남아 있습니다. 권한을 가진 이 경로들의 일부만 노출하면 `proposal -> compile -> admit -> publish -> migrate/spawn`이라는 필수 프로토콜을 우회하게 됩니다. 앞으로 Python 호스트 컨트롤러가 생긴다면 이 프로토콜과 갱신할 수 없는 lineage 예산을 소유자 범위의 단위 하나로 묶어야 합니다. `_HAVE_PROGRAM`은 원시 컨트롤 플레인 관리 기능의 동등성까지 보장하지 않습니다.
+원시 `ProgramCatalog`, 전환 저장소, 교체/마이그레이션 컨트롤러, 합성 게이트웨이, Hook 저널, RPC executor는 호스트를 구성할 때 쓰는 API로 남아 있습니다. 권한을 가진 이 경로들의 일부만 노출하면 `proposal -> compile -> admit -> publish -> migrate/spawn`이라는 필수 프로토콜을 우회하게 됩니다. `_HAVE_PROGRAM`은 원시 컨트롤 플레인 관리 기능의 동등성까지 보장하지 않습니다.
 
 ### 런타임에서 재시도 정책 덮어쓰기
 
@@ -434,7 +434,7 @@ print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 
 
 `LocalProgramHost`를 소멸시키면, 실제 `ProgramRuntime`이 스케줄러 작업을 취소하고 비우고 join하는 동안 호출자의 GIL을 놓습니다. 그래서 실행 중인 Python 노드가 끝날 수 있습니다. 호스트의 나머지 멤버를 소멸시키기 전에는 GIL을 다시 잡으며, 이 멤버들의 Python 콜백/객체 소유자는 GIL에 안전한 소멸을 보장합니다.
 
-네이티브 Program의 기록된 실행 API는 `ProgramRuntime::replay_recorded`이며 `start_recorded`를 대체합니다. `LocalProgramHost`는 `run`, `start`, `resume`, `fork`를 제공하고, 기록된 바인딩의 원시 컨트롤 플레인은 노출하지 않습니다. Program 결과에는 기존의 핸들, 예산, 권한 필드와 함께 네이티브 런타임이 제공한 타입이 있는 provider 결과와 실패 증거가 담깁니다.
+네이티브 Program의 기록된 실행 API는 `ProgramRuntime::replay_recorded`입니다. `LocalProgramHost`는 `run`, `start`, `resume`, `fork`를 제공하고, 기록된 바인딩의 원시 컨트롤 플레인은 노출하지 않습니다. Program 결과에는 기존의 핸들, 예산, 권한 필드와 함께 네이티브 런타임이 제공한 타입이 있는 provider 결과와 실패 증거가 담깁니다.
 
 `ProgramResult.failure`는 딕셔너리가 아니라 읽기 전용 `ProgramFailure` 값이거나 `None`입니다. `provider_outcome`과 `provider_cause`에는 provider 실패 증거가 남고, `code`, `message`, `operation_id`, `core_node`, `attempts`, `witness`는 실패한 연산을 설명합니다. 결과 필드에는 `bundle_id`, `operation_id`, `attempt`, `checkpoint`, `interrupt`, `provider_budget_authority`도 있습니다.
 

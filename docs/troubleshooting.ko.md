@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=cc7841c6b839b6ffd7e5f54c32ac76a95b214a2d621969c731a72de7b54379e7 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=619cc967ee0702270da38d4f92f783baacddd5dee11306e5545600ae7c24fb51 -->
 # 문제 해결
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -7,7 +7,7 @@
 
 `neograph_engine.__version__`, Python 버전, OS/아키텍처, 설치 방법, 처음 발생한 오류를 기록합니다. 소스 체크아웃과 이전 wheel이 같은 API를 제공한다고 가정하지 말고, 해당 릴리스에서 받을 수 있는 wheel 파일을 확인합니다. 타입 기반 전환(typed cutover)으로 예전 provider 이름이 제거되었으므로, 이전 wheel을 import해 보는 것은 새 바인딩을 테스트하는 것이 아닙니다.
 
-NeoGraph가 공개한 플랫폼 메타데이터에는 Linux, macOS, Windows가 들어 있습니다. 현재 SchemaProvider 런타임/archive의 자격 검증은 Linux/POSIX에서만 이루어졌습니다. macOS와 Windows 포트는 새 wheel을 그곳에서 쓸 수 있다고 하려면 별도의 자격 검증이 필요합니다. wheel 태그나 컴파일러가 호환된다는 사실만으로는 런타임 통합이 입증되지 않습니다. WASM에서 provider 런타임을 지원하는지는 확인되지 않았습니다.
+NeoGraph가 공개한 플랫폼 메타데이터에는 Linux, macOS, Windows가 들어 있습니다. wheel 태그나 컴파일러가 호환된다는 사실만으로는 런타임 통합이 입증되지 않습니다. WASM에서 provider 런타임을 지원하는지는 확인되지 않았습니다.
 
 GLIBC 심볼이 없다는 오류가 나면 wheel의 manylinux 태그와 호스트의 glibc를 비교합니다. `manylinux_2_34` 산출물에는 glibc 2.34 이상이 필요합니다. Windows에서 DLL 오류가 나면 x64 Python인지 확인하고 빠진 의존성 DLL을 점검합니다. 아키텍처만이 원인인 것은 아닙니다. 번들된 라이브러리를 하나씩 바꿔 끼우면 안 됩니다.
 
@@ -29,7 +29,7 @@ cmake --build build -j
 
 SQLite와 PostgreSQL은 NeoGraph의 선택 컴포넌트입니다. 개발 패키지를 설치하거나 `NEOGRAPH_BUILD_SQLITE`/`NEOGRAPH_BUILD_POSTGRES`를 명시적으로 끄면 됩니다. 이렇게 해도 SDK 런타임은 사라지지 않습니다. 헤더나 API를 바꾼 뒤 바인딩 심볼을 찾을 수 없다는 오류가 나면, 새 빌드 디렉터리에서 다시 구성하고 맞는 헤더/라이브러리로 모든 사용처를 다시 빌드합니다.
 
-Stage 3 작업 중 GCC 13에서 코루틴 관련 내부 컴파일러 오류가 보고되었습니다. 적합한 컴파일러로 업그레이드하거나 오류가 보고된 식의 구조를 바꿔야 합니다. 예전의 우회책은 SDK/플랫폼 전체 빌드가 자격 검증을 통과했다는 증거가 아닙니다. catch 핸들러 안에서는 `co_await`를 쓰면 안 됩니다. C++ 자체가 그 위치의 await 식을 금지합니다. 오류를 변수에 저장해 두고, 핸들러 밖에서 복구 작업을 await합니다.
+GCC 13에서 코루틴 관련 내부 컴파일러 오류가 보고된 적이 있습니다. 적합한 컴파일러로 업그레이드하거나 오류가 보고된 식의 구조를 바꿔야 합니다. catch 핸들러 안에서는 `co_await`를 쓰면 안 됩니다. C++ 자체가 그 위치의 await 식을 금지합니다. 오류를 변수에 저장해 두고, 핸들러 밖에서 복구 작업을 await합니다.
 
 ## 제거된 provider API와 타입이 있는 실패
 
@@ -69,7 +69,7 @@ Provider의 invoke/dispatch는 GIL을 놓는 동기 Python 메서드입니다. �
 
 신뢰 번들을 직접 지정하려면 `ProviderRuntimeOptions.ca_file`을 설정합니다. Python은 import할 때 이미 설정된 `SSL_CERT_FILE`을 그대로 두고, 없으면 certifi를 쓸 수 있을 때 certifi를 선택합니다. 선택된 CA 파일은 런타임 옵션을 통해 SDK의 libcurl로 전달됩니다. `NEOGRAPH_SKIP_CERT_AUTOFIX=1`을 설정하면 호스트의 선택을 건드리지 않습니다. 엔드포인트나 신뢰 저장소 오류를 감추려고 인증서 검증을 끄면 안 됩니다.
 
-wheel의 CA 경로 때문에 v0.1.0–v0.1.6에서 생기던 ConnPool 타임아웃은 지난 문제입니다. v0.1.7에서 CA 자동 선택이 추가되었습니다. 현재 provider는 그 예전 경로가 아니라 SDK의 libcurl을 사용합니다. 로컬 HTTP의 승인(admission)은 URL을 직접 덮어쓰는 방식이 아니라 검증된 descriptor에 넣어야 합니다. [예제 31](../examples/31_local_transformer.cpp)을 따라 하면 됩니다. Responses WebSocket의 close=1000 대응법은 제거된 예전 전송 방식에만 해당합니다.
+로컬 HTTP의 승인(admission)은 URL을 직접 덮어쓰는 방식이 아니라 검증된 descriptor에 넣어야 합니다. [예제 31](../examples/31_local_transformer.cpp)을 따라 하면 됩니다.
 
 ## 그래프 정의와 등록
 
@@ -125,27 +125,27 @@ PostgresCheckpointStore export가 없다면 wheel이나 소스 빌드에서 이 
 
 저장소는 권한이 있으면 테이블을 만듭니다. CREATE 권한이 없으면 [PostgreSQL 헤더](../include/neograph/graph/postgres_checkpoint.h)에 있는 스키마를 직접 적용해야 합니다. 대기 중인 쓰기(pending write)를 지원하지 않으면 슈퍼스텝 전체를 재생(replay)하게 되며, 외부 효과가 정확히 한 번만 일어난다는 뜻이 아닙니다. 비동기만 지원하는 사용자 정의 백엔드는 AsyncCheckpointStore와 `adapt_async_checkpoint_store`를 사용하며, 예전처럼 동기/비동기 기본 구현이 서로를 호출하는 방식은 쓰지 않습니다.
 
-## 트레이싱 어댑터와 과거 수정 사항
+## 트레이싱 어댑터와 그 밖의 함정
 
 트레이서 어댑터는 세션을 닫을 때 소멸하는 Span 래퍼를 가리키는 원시 포인터가 아니라, 기록한 데이터를 직접 소유해야 합니다. [C++ 트레이싱 예제](../examples/49_openinference.cpp)를 참고하세요. Python contextvars는 C++ 콜백 경계를 자동으로 넘지 않습니다. 부모 컨텍스트를 명시적으로 전달하거나 연결하고, 엔진을 컴파일하기 전에 래퍼를 설치해야 합니다.
 
-과거 수정 사항에는 v0.1.8에서 최상위 conditional_edges를 허용한 것, 노드를 두 번 실행하던 대체 경로를 제거한 것, 전환 이전의 httplib 매크로 레이아웃 불일치(이슈 #16)가 있습니다. 이 수정은 제거된 provider 시그니처를 되살리지 않습니다. 헤더 전용 httplib를 여러 번역 단위에서 인스턴스화하는 사용처는 여전히 CPPHTTPLIB_OPENSSL_SUPPORT 정의를 일관되게 맞춰야 합니다. 타입이 있는 현재 provider의 HTTP 디스패치는 SDK의 libcurl입니다.
+헤더 전용 httplib를 여러 번역 단위에서 인스턴스화하는 사용처는 CPPHTTPLIB_OPENSSL_SUPPORT 정의를 일관되게 맞춰야 합니다. 타입이 있는 provider의 HTTP 디스패치는 SDK의 libcurl을 씁니다.
 
-불투명한 편의용 벡터 속성은 Python 리스트가 아닐 수 있습니다. 내용을 확인할 때는 순회하거나 `list(value)`를 쓰고, ChatMessage.image_urls 같은 복사된 시퀀스 필드를 바꿀 때는 새 값을 만들어서 대입합니다. 반환된 복사본을 수정하면 C++ 요청이 바뀐다고 가정하면 안 됩니다. 새로운 타입이 있는 요청/결과 계약은 예전 CompletionParams 예제와는 별개입니다.
+불투명한 편의용 벡터 속성은 Python 리스트가 아닐 수 있습니다. 내용을 확인할 때는 순회하거나 `list(value)`를 쓰고, ChatMessage.image_urls 같은 복사된 시퀀스 필드를 바꿀 때는 새 값을 만들어서 대입합니다. 반환된 복사본을 수정하면 C++ 요청이 바뀐다고 가정하면 안 됩니다.
 
 ## 도구 호출, Hook, 프로토콜 오류
 
-그래프 실행에서 도구 호출, 노드, 서브그래프가 필수 Hook의 차단에 걸리면 이제 `llm::Agent`가 늘 그랬듯 `HookBoundaryBlocked`를 그대로 던집니다. 이전처럼 이를 감싼 `NodeExecutionError`를 던지지 않으며, 이에 대한 `ERROR` 이벤트도 내지 않습니다. `HookBoundaryBlocked`(Python에서는 `ng.HookBoundaryBlocked`)를 잡아 `invocation_id`와 `state`를 읽습니다. 중첩된 엔진 실행 등에서 이 예외를 발생시킨 Python 노드는 더 이상 재시도되지 않습니다. [도구 실패 계약](reference-en.md#tool-failure-contract)을 참고하세요.
+그래프 실행에서 도구 호출, 노드, 서브그래프가 필수 Hook의 차단에 걸리면 `llm::Agent`와 마찬가지로 `HookBoundaryBlocked`를 그대로 던지며, 이를 감싼 `NodeExecutionError`를 던지지 않고 이에 대한 `ERROR` 이벤트도 내지 않습니다. `HookBoundaryBlocked`(Python에서는 `ng.HookBoundaryBlocked`)를 잡아 `invocation_id`와 `state`를 읽습니다. 중첩된 엔진 실행 등에서 이 예외를 발생시킨 Python 노드는 재시도되지 않습니다. [도구 실패 계약](reference-en.md#tool-failure-contract)을 참고하세요.
 
-이제 엔진의 `HookRuntime`은 그 엔진의 도구 호출에 대한 `BeforeToolExecution`, `AfterToolExecution` Hook도 실행하고, Program 호스트의 Hook 런타임은 그 Core의 도구 호출에 대한 Hook을 실행합니다. 그래프 실행이 `HookBoundaryBlocked` 상태 `failed`와 `lifecycle hook could not run` 메시지로 멈춘다면 실행에 소유자 범위(`RunMetadata::owner_scope`)를 지정해야 합니다. 소유자 범위가 없는 Hook 경계는 체크포인트 Hook이든 도구 Hook이든 실패 시 차단으로 처리됩니다.
+엔진의 `HookRuntime`은 그 엔진의 도구 호출에 대한 `BeforeToolExecution`, `AfterToolExecution` Hook도 실행하고, Program 호스트의 Hook 런타임은 그 Core의 도구 호출에 대한 Hook을 실행합니다. 그래프 실행이 `HookBoundaryBlocked` 상태 `failed`와 `lifecycle hook could not run` 메시지로 멈춘다면 실행에 소유자 범위(`RunMetadata::owner_scope`)를 지정해야 합니다. 소유자 범위가 없는 Hook 경계는 체크포인트 Hook이든 도구 Hook이든 실패 시 차단으로 처리됩니다.
 
-`state == "timed_out"`은 이제 Hook의 데드라인이 지났거나 대상이 타임아웃되었다는 뜻입니다. 마지막 시도가 실패한 Hook은 `failed`로 보고합니다. 이전에는 `timed_out`으로 보고했습니다.
+`state == "timed_out"`은 Hook의 데드라인이 지났거나 대상이 타임아웃되었다는 뜻입니다. 마지막 시도가 실패한 Hook은 `failed`로 보고합니다.
 
 도구 결과의 상태가 `expired`이고 오류가 `run deadline elapsed before the tool started`이면, 호출을 시작하기 전에 실행의 데드라인이 지났다는 뜻입니다. 이때 도구와 그 Hook은 실행되지 않았습니다. 호출을 재시도하지 말고 `RunMetadata::deadline`(Python에서는 `timeout_ms`, Program에서는 `wall_time_ms`)을 늘립니다. 실행의 데드라인이나 클라이언트의 요청 타임아웃이 중단시킨 MCP 호출은 `timed_out`이 되고, 실행을 취소하면 진행 중인 MCP 호출도 즉시 중단됩니다.
 
-`MCPServer`는 전송 방식과 상관없이 클라이언트가 취소한 `tools/call`에는 응답을 보내지 않습니다. Hook 차단에는 `-32010`으로, 인터럽트에는 `-32011`로 응답합니다. 그 밖의 모든 실패는 `isError` 결과로 응답하며, 이 결과의 `_meta["io.neograph/failure"].code`가 실패 코드를 알려 줍니다. 결과의 텍스트는 공개 메시지이고 예외 텍스트는 절대 쓰지 않습니다(텍스트를 직접 정하려면 `public_message`를 담은 `NodeFailureError`를 발생시킵니다). `OK` 응답에서 `RunGraphResponse.error`를 읽던 gRPC 클라이언트는 이제 status를 읽어야 합니다. 실패한 실행은 OK가 아닌 status로 오며, `google.rpc.ErrorInfo`가 코드를 `metadata["code"]`에 담습니다. [프로토콜 실패 매핑](reference-en.md#protocol-failure-mapping)을 참고하세요.
+`MCPServer`는 전송 방식과 상관없이 클라이언트가 취소한 `tools/call`에는 응답을 보내지 않습니다. Hook 차단에는 `-32010`으로, 인터럽트에는 `-32011`로 응답합니다. 그 밖의 모든 실패는 `isError` 결과로 응답하며, 이 결과의 `_meta["io.neograph/failure"].code`가 실패 코드를 알려 줍니다. 결과의 텍스트는 공개 메시지이고 예외 텍스트는 절대 쓰지 않습니다(텍스트를 직접 정하려면 `public_message`를 담은 `NodeFailureError`를 발생시킵니다). gRPC 클라이언트는 `OK` 응답의 `RunGraphResponse.error`가 아니라 status를 읽어야 합니다. 실패한 실행은 OK가 아닌 status로 오며, `google.rpc.ErrorInfo`가 코드를 `metadata["code"]`에 담습니다. [프로토콜 실패 매핑](reference-en.md#protocol-failure-mapping)을 참고하세요.
 
-유효한 UTF-8이 아닌 도구 출력이나 예외 메시지는 예전에는 빈 도구 메시지, 빈 MCP/gRPC 페이로드, Python의 `UnicodeDecodeError`로 전달되었습니다. 이제는 잘못된 시퀀스마다 U+FFFD로 대체되어 전달됩니다.
+유효한 UTF-8이 아닌 도구 출력이나 예외 메시지는 잘못된 시퀀스마다 U+FFFD로 대체되어 전달됩니다. 빈 도구 메시지, 빈 MCP/gRPC 페이로드, Python의 `UnicodeDecodeError`로 바뀌지 않습니다.
 
 ## 버그를 안전하게 보고하기
 

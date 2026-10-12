@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=ko source_sha256=d93d769dd5c563a2078f1723e8a7ac9d4a2e0e972df81e3fa66d4055899cc942 -->
+<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=ko source_sha256=383083208b75306ce5f39426d8796c619a72487c065e6c1abf0478dc354efff5 -->
 # NeoGraph 비동기 가이드
 
 **Languages:** [English](ASYNC_GUIDE.md) | [한국어](ASYNC_GUIDE.ko.md) | [日本語](ASYNC_GUIDE.ja.md) | [简体中文](ASYNC_GUIDE.zh-CN.md)
@@ -96,8 +96,8 @@ Python은 타입이 있는 `ProviderRequest`, `PreparedProviderRequest`, 변경�
 
 `run_sync`는 호출마다 전용 단일 스레드 컨텍스트를, `run_sync_pool`은 호출마다 풀을 만듭니다. 이 executor에 바인딩된 핸들은 그 호출 밖으로 나가면 안 됩니다. 코루틴이 다른 awaitable을 반환할 때는 일반 함수로서 직접 반환하거나, 코루틴 본문에서 `co_return co_await`를 쓸 수 있습니다. 그 본문에 일반 `return`을 섞어서는 안 됩니다.
 
-## 빌드와 과거 증거
+## 빌드
 
-`neograph::core`는 `NEOGRAPH_BUILD_LLM=OFF`일 때도 외부 `SchemaProvider::runtime`을 필요로 합니다. 설치된 SDK의 prefix를 쓰거나 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`을 지정합니다. SDK를 빌드하려면 CMake 3.20 이상, C++20, Python, 독립형 Asio, yyjson, libcurl 7.88 이상, OpenSSL Crypto가 필요합니다. 기록으로 남은 interface 4 이전의 런타임/archive 자격 검증은 Linux/POSIX를 다루며, interface 4를 검증한 것은 아닙니다. 기존 macOS/Windows 메타데이터는 이 의존성의 자격 검증이 되지 못하고, WASM 런타임 통합은 확인되지 않았습니다.
+`neograph::core`는 `NEOGRAPH_BUILD_LLM=OFF`일 때도 외부 `SchemaProvider::runtime`을 필요로 합니다. 설치된 SDK의 prefix를 쓰거나 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`을 지정합니다. SDK를 빌드하려면 CMake 3.20 이상, C++20, Python, 독립형 Asio, yyjson, libcurl 7.88 이상, OpenSSL Crypto가 필요합니다. WASM 런타임 통합은 확인되지 않았습니다.
 
 NeoGraph를 구성하려면 CMake 3.20 이상이 필요합니다. 명시적으로 지정한 SDK 소스 디렉터리를 먼저 쓰고, 없으면 설치된 패키지를, 그것도 없으면 리비전이 고정된 공개 archive를 기본 대체 경로로 씁니다. 설치된 SDK로 오프라인 구성을 하려면 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`로 설정하고 `CMAKE_PREFIX_PATH`를 그 SDK의 prefix로 지정합니다. 내려받은 SDK나 소스 SDK는 NeoGraph에 포함된 Asio와 yyjson을 쓰지만, 시스템 개발 의존성은 여전히 필요합니다.

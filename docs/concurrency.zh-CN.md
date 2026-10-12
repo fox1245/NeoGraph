@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concurrency.md locale=zh-CN source_sha256=889743688862b981a4a8e8d8de0c0f3bc287693712453d430183d4dcdd7a030a -->
+<!-- neograph-i18n: source=docs/concurrency.md locale=zh-CN source_sha256=7b28f6ab7b0b2e770dc3e78b5fb91e5c0b4a0e984f0f7f5e92da337753756d7a -->
 # 并发与异步
 
 **Languages:** [English](concurrency.md) | [한국어](concurrency.ko.md) | [日本語](concurrency.ja.md) | [简体中文](concurrency.zh-CN.md)
@@ -61,10 +61,10 @@ if (!accepted) reject_request();
 
 Python 回调在 GIL 下执行。CPU 密集的 Python 节点和 reducer，光靠调大 worker_count 得不到并行；原生调用只有在自身实现释放了 GIL 时才能重叠。带类型的 provider invoke/dispatch 会释放 GIL，可以通过 `asyncio.to_thread` 调用。这并没有提供原生的 provider asyncio awaitable。
 
-## 运行时依赖与平台资格认证
+## 运行时依赖
 
 Core 始终会链接外部的 `SchemaProvider::runtime`，`NEOGRAPH_BUILD_LLM=OFF` 时也是如此。关闭 PostgreSQL、LLM 节点或 NeoGraph 可选的 CurlH2Pool，都不会去掉该运行时对 libcurl 的需求。请提供匹配的已安装 SDK，或设置 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`。
 
 查找 SDK 源码的顺序是：优先使用显式指定的 SDK 源码目录，其次是已安装的包，最后是固定了修订版本的公开归档（默认 `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON`）。离线构建时，使用已安装的 SDK，把该开关设为 `OFF`，并在 `CMAKE_PREFIX_PATH` 中给出它的前缀。配置 NeoGraph 和 SDK 源码都需要 CMake 3.20 及以上。
 
-当前 SDK 的运行时和 archive 在 Linux/POSIX 上通过了资格认证。NeoGraph 现有的 Linux/macOS/Windows 包元数据，并不能证明这个新依赖在所有这些平台上都能工作。macOS、Windows 和 WASM 需要各自的运行时和构建资格认证；仅有可移植的 executor API，不足以确立这一点。
+与 SDK 的 WASM 运行时集成尚未确立，仅有可移植的 executor API 也无法提供它。

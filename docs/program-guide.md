@@ -22,8 +22,6 @@ A release job checks three services in parallel. The checks of `payments` fail. 
 
 The example is three Python files. `release_program.py` holds everything that does not change between runs; `run_release.py` and `restart.py` use it.
 
-<!-- TODO(link): replace the listings below with a link to the Program example under examples/ once the examples overhaul adds it. -->
-
 ### 1. The node code
 
 The nodes are ordinary Python. `check` fails for `payments`. A failure names itself with the attributes `code`, `public_message` and `retryable` of the exception; the text of the exception never leaves the node. `Review` runs after a person has answered, and the answer is its resume value.

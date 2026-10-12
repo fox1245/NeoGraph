@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=b75490c4ee1f8c84e484fcbd9515de47eb62bef484adfebc5b1e4259daa0d911 -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=bb496c51253637e7a274ba36af0c8d26e97f8c3d6fa013c796beeb25b1ecac34 -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -113,7 +113,7 @@ const request = {
 
 `harness.mode`는 반드시 명시해야 합니다. `dsl`은 `H_MIGRATION_CORE_DSL`, `core`는 `H_MIGRATION_CORE_JSON`, `program`과 `program_json`은 `H_MIGRATION_PROGRAM_JSON`을 반환합니다. 모두 `/harness/mode`를 가리키며, 요청 JSON의 모양이나 빠진 필드를 보고 모드를 추측하는 일은 없습니다. strict Core JSON은 검증된 Core·Program 아티팩트를 위한 내부/교환용 표현으로 남고, 신뢰할 수 있는 C++의 프로세스 내 구성도 계속 지원합니다. 하지만 둘 다 공개 Harness 작성 언어는 아닙니다.
 
-스키마 내보내기, 컴파일, 시작은 이제 모두 같은 불변 `HarnessAdmissionProfile`을 사용합니다. 이 프로파일의 범위가 지정된 `GraphRegistry`와 manifest에는 사용할 수 있는 모든 노드, 리듀서, 조건이 구현, 로워링(lowering), 호환성 메타데이터와 함께 나열됩니다. 프로세스 전역 레지스트리의 항목은 이 팔레트에 포함되지 않으며 Harness 승인(admission)에서 확인할 수 없습니다. 컴파일은 검증된 선언형 `TopologySpec`까지만 진행하므로, 거부된 입력은 `GraphNode`를 만들지 않고 워커나 효과를 디스패치하지도 않습니다. 보관된 아티팩트는 프로파일 ID와 지문(fingerprint)에 묶여 있습니다. 프로파일이 다르거나 프로파일이 도입되기 전에 만든 아티팩트는 다시 해석되지 않고 start/resume 단계에서 실패 시 차단으로 거부됩니다.
+스키마 내보내기, 컴파일, 시작은 모두 같은 불변 `HarnessAdmissionProfile`을 사용합니다. 이 프로파일의 범위가 지정된 `GraphRegistry`와 manifest에는 사용할 수 있는 모든 노드, 리듀서, 조건이 구현, 로워링(lowering), 호환성 메타데이터와 함께 나열됩니다. 프로세스 전역 레지스트리의 항목은 이 팔레트에 포함되지 않으며 Harness 승인(admission)에서 확인할 수 없습니다. 컴파일은 검증된 선언형 `TopologySpec`까지만 진행하므로, 거부된 입력은 `GraphNode`를 만들지 않고 워커나 효과를 디스패치하지도 않습니다. 보관된 아티팩트는 프로파일 ID와 지문(fingerprint)에 묶여 있습니다. 프로파일이 다르거나 프로파일이 도입되기 전에 만든 아티팩트는 다시 해석되지 않고 start/resume 단계에서 실패 시 차단으로 거부됩니다.
 
 C++ 임베더는 기본값이 아닌 프로파일을 생성할 때 `HarnessServiceResources`로 넘깁니다. 이 리소스 경계는 기존 구조에 덧붙이는 방식이어서 `HarnessServiceConfig`의 레이아웃은 그대로입니다. 프로파일 지문은 manifest와, 범위가 지정된 레지스트리가 내보내는 의미 투영(semantic projection)을 포함합니다. 각 `implementation_identity`는 신뢰하는 선언이므로, 그 callable의 동작이 바뀔 때마다 함께 바꿔야 합니다.
 
@@ -216,7 +216,7 @@ SQLite 저장소는 선택 사항인 형제 인터페이스 `HarnessRetentionSto
 
 `runs.db` 안에서는 하나의 트랜잭션이 run의 저널 행을 먼저 삭제한 뒤 run 행을 삭제하며, 아티팩트는 참조하는 run이 없을 때에만 삭제합니다. 이 커밋이 끝나면 Harness는 삭제된 run의 체크포인트 스레드를 따로 설정된 체크포인트 저장소에서 제거합니다. 이 두 번째 단계에서 크래시가 나거나 체크포인트 백엔드가 실패하면 어디서도 도달할 수 없는 체크포인트 저장 공간이 남을 수 있습니다. 그래도 보존된 재생(replay)/fork가 이미 삭제된 원본 기록을 가리키는 일은 생기지 않습니다. 체크포인트만 남은 이런 잔여물은 나중에 관리 작업이나 백엔드별 고아 정리(orphan sweep)로 회수할 수 있습니다.
 
-`FileHarnessRecordStore`는 영속 정리를 구현하지 않습니다. 기존의 메모리 아티팩트 캐시 제거 방식과 run 용량 하드 한도 동작은 그대로입니다.
+`FileHarnessRecordStore`는 영속 정리를 구현하지 않습니다. 메모리 아티팩트 캐시 제거와 run 용량의 하드 한도는 그대로 유지합니다.
 
 ## 디버거 뷰
 
@@ -252,36 +252,6 @@ neograph://runs/run_123/attempts?after_sequence=17&limit=50
 recorded 재생(replay)은 원본이 처음 가졌던 불변의 호출 권한을, 남아 있는 지출 권한과 따로 인증합니다. 원본 계보(lineage)에 대한 CAS 한 번으로 남은 금액이 재생(replay) run으로 넘어가며, 두 번째 재생(replay)이 같은 원본의 잔액을 다시 쓸 수는 없습니다. 캡처된 호출은 과거의 연산 좌표를 그대로 쓰며 연산 슬롯을 다시 채우지 않습니다. 재생(replay) 중에 실제로 새로 발생하는 Core와 wall-time 작업은 넘겨받은 잔액을 소비합니다.
 
 provider 보고서, 확정된 청구액, 불확실한 예약, 효과 식별자는 관찰 전용의 별도 bank로 정확히 한 번 복원(hydrate)됩니다. 재생(replay) 중에는 예약, 환불, 정산, 보고서 추가, 새 효과의 디스패치를 할 수 없습니다. 유실된 재생(replay) 실행은 영속 lease로 차단(fence)되고, 넘겨받은 크레딧과 불확실한 크레딧은 그대로 유지됩니다. 실제 디스패치로 복구하지 않습니다. run 스냅샷에는 크레딧이 재생(replay)으로 넘어간 원본을 포함해, 계보의 현재 잔액이 표시됩니다.
-
-`ChatMessage` / `ChatTool`과 JSON은 이식 가능한 투영(portable projection)일 뿐 네이티브 권한(native authority)이 아닙니다. 이식 가능한 형식은 계속 [`provider-message-v2`](../schemas/provider-message-v2.schema.json)와 [`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)입니다. 실제 C++ 체크포인트 사이드카는 네이티브 봉인(native seal)을 메모리에 보관합니다. 네이티브 기록을 영구 저장하려면 호스트가 소유하는 `sp::NativeArchive`가 필요합니다. 닫힌 형식인 v3 / `spna3`이며, 인증된 소유자 전용 보관(custody)과 독립된 키를 갖춰야 합니다. archive v2는 업그레이드하거나 해석하지 않고 거부합니다. 인증은 의미를 정하는 descriptor의 모든 선택(origin/경로/헤더, 정책, 요청 필드 매핑, 사용량 경로와 stop 매핑), 소유자, 정확한 보관 바인딩을 묶어서 검증합니다. 이는 암호화도 아니고 벤더 발급자 인증도 아닙니다. archive 본문, 키, 네이티브 blob, 원시 wire 관찰값은 절대 공개해서는 안 됩니다. archive는 증거를 저장하는 곳이지 비용 승인(money grant)이나 지출 임대(spending lease)가 아닙니다. Program과 외부 예산(bank)은 각자 저널이 따로 소유하며, 스냅샷을 복사해도 크레딧이 생기지 않습니다.
-
-**독립형 bank 저널 정정 — 현재 계약을 수정했으며, 실제로 실행한 런타임 증거는 아래에 있습니다.** 소유자가 승인한 프로토콜은 다음을 요구합니다. 신뢰할 수 있는 저장소의 네임스페이스에 대해 단조 증가하는 의무(obligation)가 있어야 하고, 실제로 변경할 수 없는 원본 소유자/스레드/그래프 범위, 상한(ceiling), 데드라인/시계 식별자, 세대(generation)가 있어야 합니다. 체크포인트 전체 커밋먼트와 리비전에 대한 정확한 영속 head CAS만이 호스트 소유의 불투명한 lease를 발급할 수 있습니다. 대기 중인 효과의 정확한 구간(pending effect window)은 provider I/O 이전에 영속화되어야 합니다. 정산(settlement)에는 실제 SDK 결과와 실제 청구액, null 가능한 보고서, hold, 중복 제거 식별자를 써야 합니다. 체크포인트와 다음 head는 같은 소유 actor/리비전 아래서 원자적으로 게시되어야 합니다. bank 메타데이터를 지우거나, 체크포인트를 정리(prune)하거나, 인증된 예전 스냅샷을 재생(replay)하거나, 같은 ID를 덮어쓰거나, actor를 잃어도 크레딧이 생겨서는 안 됩니다. 이미 hold 65가 있는 상태에서 상한을 130에서 129로 줄이면 65를 추가로 승인(admission)할 수 없습니다. 효과가 없었다고 증명된 실패는 바뀌지 않은 head를 해제할 수 있으며, 그러면 실제 130 기준의 복구는 계속 진행할 수 있습니다. 크래시, 상태 불명, lease 유실로 생긴 구간은 환불, 재시도, 대체(fallback) 없이 hold 상태로 남습니다. 일반적이거나 처음 상태 그대로인 archive 설정은 금액이나 네이티브 지출 lease를 부여하지 않으며, 현재의 `config.usage`는 이미 있는 독립형 의무를 대체할 수 없습니다. Program/외부 bank 저널의 소유권은 바뀌지 않습니다. 여기에 적은 내용은 요구되는 계약이며, 실제 통화/보관(custody) 증거와 계측의 한계는 아래에 보고합니다. 안정 릴리스된 API를 보장한다는 뜻이 아닙니다.
-
-**현재 선언 내용. 통합 런타임 증거는 아래에 있습니다.** `<neograph/graph/checkpoint.h>`는 `ManagedBudgetLeaseScope`를 선언하며, 이 타입은 `owner_scope`, 논리적 `thread_id`, 비공개 백엔드용 `storage_thread_id`, `graph_identity`, `original_ceiling`, `original_deadline_ticks`, `deadline_clock_identity`를 가집니다. `OwnedManagedBudgetLease`는 읽기 전용인 `scope()`, `actor_id()`, 변경할 수 없는 `bank_generation()`, `revision()`, `head_checkpoint_id()`, `head_commitment()`를 제공하며, 권한을 외부에서 가져오는 공개 생성자는 없습니다. `ManagedBudgetEffectReceipt`는 `active()`, `effect_id()`, `claim_amount()`, `request_digest()`를 제공하고, 기본 생성된 receipt는 아무 권한도 부여하지 않습니다. `CheckpointStore`는 `acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment)`, `begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest)`, `settle_managed_budget_effect(lease, effect, genuine_outcome, authority)`, `publish_managed_budget_checkpoint(lease, checkpoint)`, `release_managed_budget_lease(lease)`를 선언하며 각각 `_async` 짝이 있습니다. 동기 `CheckpointStoreCore`와 `AsyncCheckpointStore`는 각자에 맞는 변형을 제공합니다. `managed_budget_checkpoint_commitment(checkpoint)`는 bank JSON만이 아니라 영속 체크포인트 전체를 대상으로 합니다. 이 선언만으로는 백엔드 CAS, 통화 안전성, 설치된 ABI 호환성, 실제로 실행해 본 런타임 경로가 보장되지 않습니다.
-
-**실제 InMemory 공유 bank fork를 유지하고 실행해 확인했습니다.** 실제 C++ fork는 복제된 grant가 아니라 원본 금융 저널 하나와 신뢰할 수 있는 현재 브랜치 head를 사용합니다. `publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)`(와 `_async`)는 인증된 현재 원본/전체 커밋먼트와, 같은 bank를 가리키는 실제 네이티브 C++ 포인터를 요구합니다. 영속 독립형 fork는 명시적으로 지원하지 않습니다. `OwnedManagedBudgetLease::scope()`와 원본 소유자/스레드/그래프, 상한, 데드라인/시계, 세대는 변경할 수 없습니다. 저장소가 발급하는 읽기 전용 `execution_thread_id()` / `execution_storage_thread_id()`는 실행 브랜치를 따로 선택하고, `GraphState::budget_original_thread_id()`는 원본 금융 bank를 식별합니다. 선택된 브랜치 head에 대한 정확한 CAS와 전역 actor/리비전이 모든 브랜치를 정규 현재 카운터, 대기 중인 효과, 소진된(burned) 식별자에 맞춰 직렬화합니다. 원본 브랜치와 fork 브랜치는 보충 없이도 계속 쓸 수 있습니다. 오래된 스냅샷, 복사한 체크포인트, 가져온 JSON으로는 별칭을 만들거나 head를 되돌릴 수 없습니다. 원본 root30 → charge3 → 원본 continuation6 → fork lower20 → continuation9로 이어지는 같은 bank 증명은 바뀌지 않은 test_graph_engine.cpp:810–913에서 통과했습니다. 저장된 원본 상한 30은 fork의 유효 상한 20과 별개이며, 31로 넓히는 시도와 JSON만으로 하는 복원은 거부되어야 합니다. 상한이 없는 보고 관찰값은 사실 데이터일 뿐 유한한 grant가 아닙니다. 효과가 없었다고 증명된 lease만 바뀌지 않은 head를 해제할 수 있고, 알 수 없거나 대기 중인 효과는 의무를 그대로 유지합니다.
-
-**현재 release 오류 계약. 실행한 테스트와 프로브는 아래에 있습니다.** `<neograph/graph/engine.h>`의 `graph::ManagedBudgetLeaseReleaseError`는 `ProviderOutcomeError`에서 파생됩니다. `cause()`는 원래의 실행 예외를 보존하고, `release_error()`는 이차적으로 발생한 영속 lease 처리 실패를 노출합니다. `outcome()`은 실제 SDK 증거가 있으면 그 증거를 유지하고, SDK 결과가 없으면 null입니다. release에 실패해도 결과를 지어내거나 재디스패치를 허용하지 않습니다. 닫힌 형식의 `_neograph_managed_budget_scope` 메타데이터는 원본 논리 범위/상한/데드라인 시계/세대를 기술하지만 데이터일 뿐 백엔드 CAS 권한이 아닙니다.
-
-**Archive 소유자/보존 계약. 실행한 테스트와 프로브는 아래에 있습니다.** 유한한 독립형 루트와 인증된 유한 원본만이 생략된 원본 소유자를 실제로 설정된 `sp::NativeArchive::owner_scope()`에서 물려받습니다. 상한이 없거나 일반적인 소유자 메타데이터의 의미는 바뀌지 않았습니다. archive 소유자가 명시적으로 충돌하면 lease를 얻기 전에 거부합니다. `CheckpointStore::retains_native_checkpoint() const noexcept`와 이에 대응하는 Core/Async 저장소 기능은 기본값이 false이고, 실제 InMemory 백엔드는 true로 재정의합니다. 래퍼는 실제 보존 여부를 위임해야 합니다. 이 읽기 전용 설명은 lease가 없거나 일반적이거나 상한이 없는 C++ 네이티브 체크포인트를 정당하게 보관할 수 있게 합니다. 다만 지출 크레딧이나 네이티브 재생(replay) 권한은 부여하지 않습니다. lease가 있는 보관은 JSON 플래그나 추측한 저장소 타입이 아니라 저장소가 실제로 발급한 receipt를 사용합니다.
-
-**네이티브 보관 사전 I/O 게이트. 실행한 테스트와 프로브는 아래에 있습니다.** 관리되는 효과(managed effect)를 시작하려면, 대기 효과·슬롯·보류 구간(held window)을 변경하기 전에 실제로 바인딩된 NativeArchive 또는 로컬 저장소가 실제로 발급한 비공개 C++ 보존 기능(retention capability)이 필요합니다. 이 비공개 기능은 JSON에서 가져오거나 wire로 전달하지 않습니다. 원격 백엔드가 InMemory여도 gRPC에서는 클라이언트와 서버 모두에 실제 archive가 필요합니다. C++ 사이드카는 그 경계를 넘을 수 없기 때문입니다. archive가 유한한 원본 소유자를 제공하지 않으면 원본의 익명 소유자 범위는 비어 있는 채로 남고, 실제 archive를 바인딩할 때는 원본 범위와 일치해야 합니다. 금융 head/lease 증거만으로는 네이티브 보관 준비가 되었다는 것을 증명하지 못합니다.
-
-`ProviderOutcomeError`는 결과를 보존하는 호스트 오류의 공통 기반 클래스입니다. `ProviderObserverError`와 `ProviderDispatchOutcomePersistenceError`는 모두 비워진(drained) 전체 SDK 결과와 원래의 `cause()`를 보관합니다. 영속화 오류는 이차적으로 발생한 observer 실패도 `delivery_error()`에 보관합니다. `ProviderFailure::outcome()`은 SDK 실패 자체를 보관합니다. 이는 증거일 뿐이며, Node나 Program이 다시 디스패치해도 된다는 허가가 아닙니다. 전송 재시도는 SDK만이 책임지고, 호출자가 정한 `max_output_tokens`는 조용히 줄어드는 일이 없습니다. 상한을 더 크게 잡은 의미상 새 호출에는 새 준비 다이제스트, 별개의 결정적 호출 순번, 원래 리소스 bank와 원래 데드라인에 대한 승인(admission)이 필요합니다. 네이티브 재생(replay) 자격이 있다고 해서 크레딧이 새로 생기지는 않습니다.
-
-`ProgramFailure`는 살아 있는 `provider_outcome`과 `provider_cause`를 보관합니다. 사실을 기록한 정규 SDK 증인(witness)은 실제 archive 보관을 소유자/run/버전/번들/연산/시도에 묶습니다. Runtime은 복구한 실패를 노출하기 전에 설정된 보관을 먼저 복원합니다. 데이터만 담는 공개 `ProgramResult::create()`는 미리 채운 증인으로 이 과정을 우회할 수 없으며, 해석되지 않은 봉인은 실행 가능한 결과가 아닙니다. 프로세스를 재시작하면 원래의 예외 포인터는 사용할 수 없고(`provider_cause == nullptr`), 텍스트로 다시 만들지도 않습니다. 영속화할 수 없는 실패는 직렬화하거나 게시하거나 재생(replay)할 수 없습니다.
-
-`RecordedBindingSet`은 원본에 묶여 있고 이동만 가능한 데이터이며, 호출자가 제공하는 dispatcher가 아닙니다. 신뢰할 수 있는 Catalog의 `recorded_capability_binder`가 실제로 저장된 원본 이벤트로부터 캡처된 기능(captured-only capabilities)만을 독립적으로 구성합니다. `ProgramRuntime::replay_recorded()`는 원래 선택된 원본의 권한을 확인한 다음, 실제로 남은 bank를 영속 CAS로 넘겨줍니다. 물려받은 지출은 새로운 모델 grant가 아닙니다. 예전의 `start_recorded` 갱신 API는 제거되었습니다. InMemory, File, SQLite, PostgreSQL Program 저장소는 실행하는 동안 변경할 수 없는 소유 lease를 그대로 보존하며, 만료되어도 갱신되지 않습니다. 제어되는 JavaScript도 기반이 되는 capability manifest를 계속 검증하고, 이미 완료된 command 결과를 그대로 사용하며 외부 효과를 다시 디스패치하지 않습니다.
-
-**전체 테스트 스위트에서 실행해 확인한 Recorded-control 인과 수정.** 캡처된 command의 재생(replay)은 실행 전에 새로 필요한 CPU wall-time과 Core 작업분만 영속적으로 예약하고, 실행 뒤 측정된 작업량과 새로 만들어진 Core 체크포인트를 결과 CAS로 게시합니다. 새로운 모델, 금액, Program 연산 허용량은 소비하지 않으며 캡처된 외부 효과를 다시 디스패치하지도 않습니다. 조정(reconcile)되지 않은 예약은 차감된 채로 남습니다. 예약은 일반적인 Running→Running 전이가 아니라 인증된 정산(settlement) 전이를 선택합니다. 일반 전이는 처음 만들어지는 새 Core 체크포인트를 거부했습니다. await 채널 수신, 타이머 대기/취소, handoff 대기 시작/해제는 각각을 소유한 executor/strand에서 직렬화됩니다. 기존 Recorded CPU/Memory의 await/handoff 시나리오는 전체 스위트에서 통과했고, 원격 TSan 커버리지의 한계는 아래에 따로 적었습니다.
-
-아래의 유료 호출, 네이티브 축, 통합 런타임 관찰 기록은 과거 provider cutover 코호트의 것입니다. 건수, 실패, 건너뜀, 한계는 바뀌지 않았습니다. 이 기록에서 "최근(Latest)"은 해당 코호트에서 마지막으로 실행했다는 뜻이며, 현재의 Python 바인딩이나 이번 문서 변경을 검증했다는 뜻이 아닙니다.
-
-**비용이 든 관찰 완료. 보편적인 자격 검증은 아님.** 원래의 `SPQUAL1`의 기본 한도 630/1000000 microUSD는 바뀌지 않았습니다. 해시로 연결된 `A` 하나가 같은 원본 원장 안에서 승인된 확장분 480/3000000을 승인(admission)해 합계가 1110/4000000이 되었고, 호출/지출/hold/정산(settlement)은 누적되며 새 grant ID, 헤더, 리셋은 없습니다. 선언 바이트와 파일 식별자 자체, 원래의 authorization/baseline/catalog/activation/원장 prefix의 해시와 합계는 그대로 고정되어 있으며, 제거·교체·변경은 실패 시 차단으로 처리합니다. 최종 정규 원장은 calls1110/spent437958/held1287828 microUSD, eventA1, limits1110/4000000입니다. spent+held는 US$1.725786이며 이는 로컬 카탈로그 미터 값이지 청구서가 아닙니다. 문서화된 5개 계열 × 60쌍의 기준 측정은 600건의 요청을 완료했습니다. Chat 60/60, Responses 60/60, Messages 60/60, Generate 56/60(비전 오답 SSE 4건), Interactions 57/60(비전 오답: 버퍼 1건, SSE 2건)이며 합계는 300쌍 중 293쌍이지 300/300이 아닙니다. 그 밖의 예전 600건의 금융 기록은 그대로 보존되어 있지만 동작 전체를 증명하지는 않습니다. 이전의 M5/미디어 1회성 코호트는 바뀌지 않았습니다. 이전 3라운드 Google 사전 조건에서는 잘못된 도구 2건과 읽을 수 없는 양성(positive) 1건의 실패가 그대로 남아 있습니다. 추가 유료 호출은 승인되지 않았습니다. 최종 SDK 증거와 네이티브 축의 한계는 기준 측정의 성공과 별개입니다. 이전의 활성화/재오픈 스모크 테스트는 두 번 재오픈한 뒤 calls610/spent219159/held751233으로 기록되어 있고, SDK meter/canary/vision 테스트 4건이 19.38초 만에 통과했습니다. 이는 범위가 한정된 이전 체크포인트이며 최종 원장 합계가 아닙니다. 이전에 검증한 Chat 60쌍 코호트에는 실제 시도 120건, UpperBound 청구 120건이 있고 UnknownHold는 없습니다.
-
-**네이티브 축 관찰. 암호학적 검증이나 네이티브 소비/동등성을 뜻하지 않습니다.** Generate는 변조, 누락, 중복을 받아들였습니다. Interactions는 격리된 실제 원본(양성 대조군), 한 소유자의 서명 변조, thought 운반체 누락, call 운반체 누락과 중복을 받아들였습니다. 모든 thought와 서명을 제거하면 일반적인 400이 반환되었고, THOUGHT 항목은 남기고 모든 서명 필드만 제거해도 일반적인 400이 반환되었습니다. 마지막 캡처에는 로컬에서 인코딩한 원본을 유지하는 대조군이 있었으나 같은 캡처에서 얻은 서버 측 양성 결과는 아니었습니다. 이전의 양성 코호트는 여전히 실제 데이터입니다. 이 관찰들이 보여 주는 것은 운반체(carrier)가 전부 없는 경우의 경계뿐이며, 발급자나 서명 검증, 벤더의 실제 소비 여부를 입증하지는 않습니다. 실제 보고서는 SDK의 `config/qualification-extension-results.json`, `qualification-final-summary.json`, `qualification-native-axis-results.json`, `qualification-combined-omission-results.json`, `qualification-signature-presence-results.json`입니다. 사전 조건 실패, 미실행, 음성(negative) 불확정 상태도 있는 그대로 기록해 두었습니다. thought만 또는 운반체만 누락한 경우에도 다른 운반체가 남아 있으면 받아들여졌지만, 이 결과는 발급자 검증이나 네이티브 소비에 관한 주장을 강화하지 않습니다.
-
-**실제로 실행해 확인한 통합 증명과 남은 한계.** 가장 최근의 Core 전체 실행은 테스트 2242개, 실패 0, 건너뜀 16(RAM 프로세스 유실 케이스 14개는 해당 없음, 실제 자격 증명이 필요한 게이트 2개), 130.17초였습니다. `PgNestedJsonRoundTrips`는 중복 키, 순서, null 메타데이터, blob, residual을 정확히 보존했고 0.18초가 걸렸습니다. 바뀌지 않은 원본 공유 bank fork와 기존 Recorded CPU/Memory await/handoff 시나리오는 통과했습니다. 실제 wrapped Memory/SQLite/PostgreSQL/gRPC에 대한 finite130/hold65/lower129/strip/old-head/pruning/no-archive/import 프로브는 일반 빌드와 ASan+UBSan 빌드 모두 통과했습니다. 로컬 Memory/SQLite/PostgreSQL TSan 범위에서는 7건이 통과했고 경고는 0건입니다. gRPC까지 섞은 전체 구성에 시스템 Abseil/Protobuf를 더한 TSan 실행은 종료 코드 66으로 끝났고, 의존성과 생성된 RPC 스택에서 race 경고가 402건 나왔습니다. 이는 계측/커버리지의 한계이지 오탐으로 증명된 것은 아닙니다. 원격 TSan이나 race-freedom은 주장하지 않으며 경고도 억제하지 않았습니다. 설치된 find_package로 Program C++/C ABI/dualQuickJS 소비자 세 개를 빌드해 통과했습니다. 새로 설치한 NeoGraph/SchemaProvider 타입 소비자는 실제 HTTP 요청 2건, 코루틴 시작 전 provider 소멸, 네이티브/도구 재생(replay), 거부(refusal), known-zero/raw 보존, 실제 LinkedMismatch 거부를 통과했습니다. 브라우저에서 Alice/Bob 격리와 generation 2 교체는 눈으로 확인했고, PostgreSQL Program Chat 블랙박스 테스트 6건은 18.989초에 통과했습니다. 가장 최근의 SDK 테스트는 26/26 통과, 실패 0, 74.07초였습니다. 최종 Release Graph는 16개 구성 × 새 프로세스 3회 반복(기록 48건)을 38.29초에 완료했고 실패 0건이며 실제 프로토콜과 소유 결과(owned-outcome) 검사를 모두 통과했습니다. NeoGraph의 `benchmarks/provider-cutover-final-results.json`과 `benchmarks/provider-cutover-final-summary.json`에 이 최종 코호트가 따로 보관되어 있습니다. 측정 중에는 컴파일러도 유료 모델도 실행하지 않았습니다. 과거 코호트는 바뀌지 않았으며 의미나 자원 사용의 동등성은 주장하지 않습니다. 불안정한 SDK/ABI3은 안정 릴리스도, 더 넓은 플랫폼에 대한 자격 검증도 아닙니다.
 
 ## 호환되는 Fork
 
@@ -384,7 +354,7 @@ OpenCode(프로젝트의 `opencode.json` 또는 사용자 설정):
 }
 ```
 
-`opencode mcp list`로 확인합니다. 이 형식들은 2026-07-21에 확인한 각 호스트의 공식 MCP 설정 계약을 따릅니다.
+`opencode mcp list`로 확인합니다. 이 형식들은 각 호스트의 공식 MCP 설정 계약을 따릅니다.
 
 ## PR 리뷰 워크플로
 
@@ -556,7 +526,7 @@ run 스냅샷에는 `created_at`, `updated_at`, `expires_at`, `poll_after_ms`가
 
 ## 실험적 Tasks 프로파일
 
-구현되어 있지 않습니다. 이 가이드의 이전 버전에는 선택적으로 켜는 MCP Tasks 프로파일이 설명되어 있었지만, 그런 프로파일은 존재하지 않습니다. Harness 서버는 tasks capability를 알리지 않으며, `HarnessServiceConfig::enable_experimental_tasks`와 `NEOGRAPH_HARNESS_EXPERIMENTAL_TASKS`는 아무 효과가 없고, `tasks/get`, `tasks/update`, `tasks/cancel`은 `-32601`로 응답합니다. 오래 걸리는 run은 안정적인 `run_id`와 `neograph_get` 폴링 계약을 사용합니다.
+구현되어 있지 않습니다. 선택적으로 켜는 MCP Tasks 프로파일은 존재하지 않습니다. Harness 서버는 tasks capability를 알리지 않으며, `HarnessServiceConfig::enable_experimental_tasks`와 `NEOGRAPH_HARNESS_EXPERIMENTAL_TASKS`는 아무 효과가 없고, `tasks/get`, `tasks/update`, `tasks/cancel`은 `-32601`로 응답합니다. 오래 걸리는 run은 안정적인 `run_id`와 `neograph_get` 폴링 계약을 사용합니다.
 
 ## Capability 백엔드
 
@@ -572,4 +542,4 @@ provider executor는 타입이 있는 `ProviderRequest`를 만듭니다. `prepar
 
 지원하는 로컬 배포 경로는 위에서 설명한 설치 가능한 `neograph-harness-mcp` 바이너리입니다. 소스 빌드에서는 계속 예제 타깃을 쓸 수 있고, Python wheel은 원격 데몬을 암묵적으로 설치하지 않는 라이브러리/런타임 패키지로 유지됩니다. MCPB와 공식 레지스트리 게시는 릴리스·검색용 패키징 선택지로 남아 있습니다. 와이어 프로토콜에는 필요하지 않으며, 서명된 릴리스 아티팩트와 명시적인 원격 인증 배포 manifest가 있을 때에만 추가해야 합니다.
 
-NeoGraph는 날짜가 붙은 MCP `2025-11-25` 프로파일을 공개합니다. 클라이언트가 `2025-06-18`, `2025-03-26`, `2024-11-05`를 요청하면 그 리비전이 정의한 필드로 응답하고, `2025-03-26`과 `2024-11-05` 클라이언트가 보내는 JSON-RPC 배치도 받아들입니다. 현재 MCP 리비전인 `2026-07-28`은 상태를 저장하지 않으며(`initialize`와 세션이 없고, 모든 요청의 `_meta`에 버전이 들어 있습니다) 아직 제공하지 않습니다. 두 시대를 모두 지원하는 공식 클라이언트는 `2025-11-25`로 폴백하고, `2026-07-28`로 고정한 클라이언트는 연결할 수 없습니다. `2025-11-25`와 나란히 두 번째 모드로 제공할 계획입니다.
+NeoGraph는 날짜가 붙은 MCP `2025-11-25` 프로파일을 공개합니다. 클라이언트가 `2025-06-18`, `2025-03-26`, `2024-11-05`를 요청하면 그 리비전이 정의한 필드로 응답하고, `2025-03-26`과 `2024-11-05` 클라이언트가 보내는 JSON-RPC 배치도 받아들입니다. 현재 MCP 리비전인 `2026-07-28`은 상태를 저장하지 않으며(`initialize`와 세션이 없고, 모든 요청의 `_meta`에 버전이 들어 있습니다) 제공하지 않습니다. 두 시대를 모두 지원하는 공식 클라이언트는 `2025-11-25`로 폴백하고, `2026-07-28`로 고정한 클라이언트는 연결할 수 없습니다.

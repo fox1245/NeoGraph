@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=7b098f4c6cf07b09aa0fd20aec0dc8196fd6dcb389dc25c305c9cc3352cfb1dd -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=0d7ef3e43002968c0fde7cbc0ba61917a919d82e8ae7e1a7d573f0da86540c6e -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -231,7 +231,7 @@ Output channel:  text = "HELLO"
 
 即使 `NEOGRAPH_BUILD_LLM=OFF`，SchemaProvider 也是必需的外部 SDK，因为 Core 会导出它的带类型 provider 契约。下面的命令使用已安装的 [SchemaProvider 运行时包](https://github.com/fox1245/SchemaProvider)：把 `SCHEMAPROVIDER_PREFIX` 设为它的安装前缀。用 `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=../SchemaProvider` 指定的检出优先级最高；否则 CMake 优先使用已安装的包，找不到时才下载固定版本的公开 SDK 压缩包。要用已安装的包或指定的检出做离线构建，请设置 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`。CMake 不会去猜测相邻目录里的检出，也不会使用已移除的内置解释器。
 
-前提条件包括 C++20 编译器、CMake 3.20 或更高版本，以及 SDK 的运行时依赖 libcurl 7.88 或更高版本。SDK 的 TLS 来自 libcurl 的后端，所以 SDK 本身不需要 OpenSSL。包含 NeoGraph 各 HTTPS 组件的完整构建需要 OpenSSL 3。默认构建还会启用 SQLite 和 PostgreSQL 集成，所以下面的命令会关闭不需要的 NeoGraph 组件，SDK 的依赖仍然保留。SDK 已记录的检查针对的是 interface 4，比本版本固定的 interface 6 更旧（见[带类型的 provider 调用](#typed-provider-calls)）。这些检查覆盖 Linux x86_64 以及本地的协议/状态对端，确切范围见 [SDK 一致性记录](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record)。它们并不表示已在新的 Windows、macOS、ARM64、HTTP/3、托管厂商或 WASM 环境中验证。平台和构建方面的限制见[故障排除](docs/troubleshooting.md)。
+前提条件包括 C++20 编译器、CMake 3.20 或更高版本，以及 SDK 的运行时依赖 libcurl 7.88 或更高版本。SDK 的 TLS 来自 libcurl 的后端，所以 SDK 本身不需要 OpenSSL。包含 NeoGraph 各 HTTPS 组件的完整构建需要 OpenSSL 3。默认构建还会启用 SQLite 和 PostgreSQL 集成，所以下面的命令会关闭不需要的 NeoGraph 组件，SDK 的依赖仍然保留。平台和构建方面的限制见[故障排除](docs/troubleshooting.md)。
 
 ```bash
 git clone https://github.com/fox1245/NeoGraph.git
@@ -401,7 +401,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `wheel` | 修复后的已安装 wheel。需要 cibuildwheel==2.23.0 和原生/容器 provider；`--arch x86_64\|aarch64\|arm64\|AMD64` 为必填；可选 `--python cp312`，只构建一个 CPython 而不是全部。 |
 | `runtime-archive` | 共享 SDK 原生归档的可移植性目标/CTest。需要 Ninja 和平台运行时依赖。 |
 
-本地 Windows/WSL 的结果不能替代原生 ARM/macOS 或 VS2026 sanitizer 行。每次 push 和 pull request 都会运行 `ci.yml`：在 Linux、macOS 和 Windows 上运行完整的原生测试，再加两行已安装使用方的检查；仅修改文档时会跳过。`ci-extended.yml` 每晚运行，也可以按需运行：sanitizer、模糊测试金丝雀、性能关卡、原生 ARM64、gRPC、Visual Studio 生成器，以及其余八行已安装使用方的检查。发布候选版本在打标签之前请运行它。`wheels.yml` 在打包相关变更时为每个平台构建 CPython 3.12，在发布标签、每周金丝雀和手动运行时构建 CPython 3.9–3.13，包含 glibc 2.34/macOS 14 的下限、已安装 wheel 的完整测试、冷加载器/LGPL 替换关卡、4 个原生 wheel/归档平台，以及受保护的标签和 OIDC 发布依赖。只审阅源码或查看 CLI 帮助，并不等于已经运行，也不是发布的证明。
+本地 Windows/WSL 的结果不能替代原生 ARM/macOS 或 VS2026 sanitizer 行。每次 push 和 pull request 都会运行 `ci.yml`：在 Linux、macOS 和 Windows 上运行完整的原生测试，再加两行已安装使用方的检查；仅修改文档时会跳过。`ci-extended.yml` 每晚运行，也可以按需运行：sanitizer、模糊测试金丝雀、性能关卡、原生 ARM64、gRPC、Visual Studio 生成器，以及其余八行已安装使用方的检查。发布候选版本在打标签之前请运行它。`wheels.yml` 在打包相关变更时为每个平台构建一个 CPython 3.12 的 wheel。在发布标签上，它为 Linux（x86_64 和 aarch64）、macOS（arm64）和 Windows（AMD64）构建 CPython 3.9–3.13 的 wheel，最低平台版本为 glibc 2.34 和 macOS 14。
 
 - [文档索引](docs/README.md)
 - [核心概念与图语义](docs/concepts.md)

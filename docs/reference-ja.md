@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=110a2516c9d60c99aff8e6bf20d7944bf34ffdda37017c93d9eabc53b6ae5959 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=06849fc847850619dee71a61ed970037593e55f98c2c3bb8354018f3cd9ee74b -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -27,9 +27,9 @@
 | **A2A** | `neograph::a2a` | Agent-to-Agent JSON-RPC ブリッジ (クライアント + サーバー + ストリーミング) | [公開ヘッダー](../include/neograph/) | [A2AClient](../include/neograph/a2a/client.h) |
 | **ACP** | `neograph::acp` | Agent Client Protocol — stdio 上のエディター↔エージェント双方向 RPC | [公開ヘッダー](../include/neograph/) | [ACPServer](../include/neograph/acp/server.h) |
 | **Async** | `neograph::async` | Asio の HTTP/SSE/WS ヘルパー、ConnPool、run_sync | [公開ヘッダー](../include/neograph/) | [WsClient](../include/neograph/async/ws_client.h) |
-追加モジュールは `include/neograph/{a2a,acp,async}/` に公開ヘッダーを持ちます。個別ナラティブは延期されているため、正確な契約はヘッダーを参照してください。存在するだけで現統合資格検証を主張しません。
+追加モジュールは `include/neograph/{a2a,acp,async}/` に公開ヘッダーを持ちます。このツアーではこれらのモジュールを扱わないため、正確な契約はヘッダーを参照してください。
 
-CMake 3.20 以上が必要です。Core は所有 typed provider 契約を公開するため `NEOGRAPH_BUILD_LLM=OFF` でも SchemaProvider runtime は必須です。明示的な `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` が優先され、それがなければ設置済み `SchemaProvider` runtime package を探します。なければ `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON`（既定）の時に `cmake/NeoGraphSchemaProvider.cmake` が固定した不変 GitHub archive を取得します。Offline build は SDK を設置し、`CMAKE_PREFIX_PATH` に prefix を設定して `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` を渡します。Sibling checkout は推測せず、削除済み bundled interpreter も選択しません。NeoGraph の任意 HTTP module を無効にしても SDK runtime の transport 依存は必要です。記録された SDK runtime/archive 検証は Linux/POSIX の範囲です。Windows NTFS と macOS の実装はありますが、新 platform の検証には runtime 証拠が必要です。WASM provider runtime の検証は確立していません。
+CMake 3.20 以上が必要です。Core は所有 typed provider 契約を公開するため `NEOGRAPH_BUILD_LLM=OFF` でも SchemaProvider runtime は必須です。明示的な `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` が優先され、それがなければ設置済み `SchemaProvider` runtime package を探します。なければ `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON`（既定）の時に `cmake/NeoGraphSchemaProvider.cmake` が固定した不変 GitHub archive を取得します。Offline build は SDK を設置し、`CMAKE_PREFIX_PATH` に prefix を設定して `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` を渡します。Sibling checkout は推測せず、削除済み bundled interpreter も選択しません。NeoGraph の任意 HTTP module を無効にしても SDK runtime の transport 依存は必要です。検証済みのプラットフォームは Linux/POSIX です。Windows NTFS と macOS の実装はありますが、この SDK では検証していません。WASM provider runtime のサポートは確立していません。
 
 SDK imported target は `include/SchemaProvider` include root を提供します。公開例は recipe 専用 helper なしで `<descriptor/descriptor.h>`、`<runtime/client.h>`、`<neograph/llm/schema_provider.h>` を直接使います。
 
@@ -200,10 +200,10 @@ struct ChatTool {
 
 `UsageAccumulator::snapshot()` は累積報告を返します。`total_tokens_wide()` は計上済みトークンと未解決予約の合計で、報告使用量として表示してはいけません。精算には input/output count のある final・consistent 報告が必要で、根拠のある最大 total を計上し、超過使用量も clamp しません。累積対象の一つでも counter が欠落すれば集計も不明です。予約、ローカル計上、vendor 請求書は別の記録です。
 
+実結果の後に post-effect 精算や terminal receipt 永続化が失敗すると、`ProviderDispatchOutcomePersistenceError::outcome()` は元の不変結果、`cause()` は元の永続例外を保持します。delivery も失敗した場合は `delivery_error()` が元の観測者例外を保持します。永続化成功後の観測者失敗は元の例外を変更せず再送出し、不明/結果なし transport 失敗では outcome を捏造しません。
+
 ### Portable projections
 
-
-実結果の後に post-effect 精算や terminal receipt 永続化が失敗すると、`ProviderDispatchOutcomePersistenceError::outcome()` は元の不変結果、`cause()` は元の永続例外を保持します。delivery も失敗した場合は `delivery_error()` が元の観測者例外を保持します。永続化成功後の観測者失敗は元の例外を変更せず再送出し、不明/結果なし transport 失敗では outcome を捏造しません。
 `ChatMessage` / `ChatTool` と JSON は portable projection であり native 権限ではありません。Portable 形式は [`provider-message-v2`](../schemas/provider-message-v2.schema.json)、[`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json) のままです。真正な C++ checkpoint sidecar はメモリ内の native seal を保持します。永続 native 履歴には host-owned `sp::NativeArchive` が必要です。closed v3 / `spna3` は独立キーによる認証済み owner-private custody で、archive v2 は更新・解釈せず拒否します。認証は全 semantic descriptor 選択（origin/path/header、policy、要求 field mapping、usage path、stop mapping）、owner と正確な custody binding を結び付けます。暗号化や vendor-issuer 認証ではありません。archive 本文・キー・native blob・raw wire 観測は公開しません。Archive は証拠保存であり、金銭 grant や spending lease ではありません。Program/external bank は独立 journal が所有し、snapshot コピーで credit は作れません。
 
 `RuntimeHistoryRecord` の引数なしの `serialize_canonical()` はポータブルなレコードを扱います。永続ネイティブ履歴には `serialize_canonical(archive, owner_id)` と、その ID に所有者範囲が一致するアーカイブを使います。Python も同じオーバーロードと `RuntimeHistoryRecord.parse(stored_bytes, archive=None, owner_id="")` を公開します。ポータブルなレコード用の既定引数は、一致するアーカイブなしでのネイティブ復元を許可しません。Python のパースとアーカイブ対応の直列化はネイティブ処理中に GIL を解放します。JSON の観測データと、アーカイブで認証された保管権限は区別されます。
@@ -212,17 +212,17 @@ Python は `ContextStore.hydrate_records(range)` と `history_record_by_message_
 
 `Assistant` メッセージを含む RAW `RuntimeHistoryRecord` には `RuntimeTrustClass.ModelOutput` が必要です。`RuntimeTrustClass.UntrustedInput` は `User` メッセージだけを受け入れます。これらは実際の Python enum 名です。trust class はレコードのロールと由来の境界を示し、選択してもネイティブ再生の保管権限や支出・実行権限を付与しません。
 
-**Standalone bank journal 修正 — 現在の契約を改訂；実際の runtime 証拠は下記。** Owner-approved protocol は単調 trusted-store namespace obligation と、実際の不変 original owner/thread/graph scope、ceiling、deadline/clock identity、generation を要求します。全 checkpoint commitment/revision に対する正確な durable head CAS だけが host-owned opaque lease を発行できます。正確な pending effect window を provider I/O 前に永続化し、真正な SDK outcome と実際の charge、nullable report、hold、dedup identity で精算しなければなりません。Checkpoint/next head は同じ owned actor/revision 下で原子的に publish します。Bank metadata 削除、checkpoint pruning、old authenticated snapshot replay、同一 ID overwrite、actor 喪失で credit を与えてはなりません。既存 65 hold がある ceiling 130 を 129 に下げると別の 65 は許可できません。証明済み no-effect 失敗は unchanged head を release し authentic 130 復旧を可能にできます。Crash/unknown/lost-lease window は refund/retry/fallback なしで hold を保持します。Plain/pristine archive 設定は money/native spending lease を与えず、現在の `config.usage` は既存 standalone obligation を置換できません。Program/external-bank journal 所有は不変です。これは要求契約です。実際の currency/custody 証拠と instrumentation 制約は下記であり、安定 released API 保証ではありません。
+**Standalone 予算 bank。** Standalone bank は、単調な trusted-store namespace obligation と、実際の不変 original owner/thread/graph scope、ceiling、deadline/clock identity、generation を要求します。全 checkpoint commitment/revision に対する正確な durable head CAS だけが host-owned opaque lease を発行できます。正確な pending effect window を provider I/O 前に永続化し、真正な SDK outcome と実際の charge、nullable report、hold、dedup identity で精算しなければなりません。Checkpoint と next head は、同じ owned actor/revision 下で原子的に publish します。Bank metadata の削除、checkpoint pruning、old authenticated snapshot replay、同一 ID の overwrite、actor の喪失では credit を与えません。既存 65 hold がある ceiling 130 を 129 に下げると、別の 65 は許可できません。証明済み no-effect 失敗は unchanged head を release でき、authentic 130 の復旧を継続できます。Crash/unknown/lost-lease window は refund/retry/fallback なしで hold を保持します。Plain archive 設定は money も native spending lease も与えず、現在の `config.usage` は既存の standalone obligation を置換できません。Program/external bank は、それぞれの journal が所有します。
 
-**現在の宣言；統合 runtime 証拠は下記:** `<neograph/graph/checkpoint.h>` は `owner_scope`、logical `thread_id`、private backend `storage_thread_id`、`graph_identity`、`original_ceiling`、`original_deadline_ticks`、`deadline_clock_identity` を持つ `ManagedBudgetLeaseScope` を宣言します。`OwnedManagedBudgetLease` は read-only `scope()`、`actor_id()`、不変 `bank_generation()`、`revision()`、`head_checkpoint_id()`、`head_commitment()` を公開し、公開 authority-import constructor はありません。`ManagedBudgetEffectReceipt` は `active()`、`effect_id()`、`claim_amount()`、`request_digest()` を公開し、default receipt は権限を与えません。`CheckpointStore` は `acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment)`、`begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest)`、`settle_managed_budget_effect(lease, effect, genuine_outcome, authority)`、`publish_managed_budget_checkpoint(lease, checkpoint)`、`release_managed_budget_lease(lease)` と `_async` counterpart を宣言します。Sync `CheckpointStoreCore` と `AsyncCheckpointStore` はそれぞれの variant を公開します。`managed_budget_checkpoint_commitment(checkpoint)` は bank JSON だけでなく全永続 checkpoint を結び付けます。これらの宣言は backend CAS、currency 安全性、installed ABI 互換性、実際に成功した runtime 経路を証明しません。
+**Managed budget lease の宣言。** `<neograph/graph/checkpoint.h>` は `owner_scope`、logical `thread_id`、private backend `storage_thread_id`、`graph_identity`、`original_ceiling`、`original_deadline_ticks`、`deadline_clock_identity` を持つ `ManagedBudgetLeaseScope` を宣言します。`OwnedManagedBudgetLease` は read-only `scope()`、`actor_id()`、不変 `bank_generation()`、`revision()`、`head_checkpoint_id()`、`head_commitment()` を公開し、公開 authority-import constructor はありません。`ManagedBudgetEffectReceipt` は `active()`、`effect_id()`、`claim_amount()`、`request_digest()` を公開し、default receipt は権限を与えません。`CheckpointStore` は `acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment)`、`begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest)`、`settle_managed_budget_effect(lease, effect, genuine_outcome, authority)`、`publish_managed_budget_checkpoint(lease, checkpoint)`、`release_managed_budget_lease(lease)` と `_async` counterpart を宣言します。Sync `CheckpointStoreCore` と `AsyncCheckpointStore` はそれぞれの variant を公開します。`managed_budget_checkpoint_commitment(checkpoint)` は bank JSON だけでなく全永続 checkpoint を結び付けます。
 
-**真正な InMemory shared-bank fork は保持・実証済み。** 元の真正な C++ fork は ONE original financial journal と trusted current branch head を使い、grant を複製しません。`publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)`（および `_async`）は authentic current source/full commitment と実際の same-bank native C++ pointer を要求し、durable standalone fork は明示的に unsupported のままです。`OwnedManagedBudgetLease::scope()` と original owner/thread/graph、ceiling、deadline/clock、generation は不変です。Read-only store-issued `execution_thread_id()` / `execution_storage_thread_id()` は execution branch を別に選び、`GraphState::budget_original_thread_id()` は元の financial bank を示します。正確な selected-branch head CAS と global actor/revision は canonical current counter、pending effect、burned identity に対して全 branch を直列化します。Original/fork branch は補充なしで使用可能なままです。Stale snapshot、checkpoint copy、imported JSON は alias を発行したり head を巻き戻したりできません。元の root30 → charge3 → original continuation6 → fork lower20 → continuation9 の same-bank 証明は未変更 test_graph_engine.cpp:810–913 で PASSED です。Saved original ceiling30 は effective fork ceiling20 と別です。Widening31 と JSON-only restore は拒否必須です。Unbounded reported observation は factual data で finite grant ではありません。証明済み zero-effect lease だけが unchanged head を release でき、unknown/pending effect は obligation を保持します。
+**Shared-bank fork（InMemory）。** 元の真正な C++ fork は ONE original financial journal と trusted current branch head を使い、grant を複製しません。`publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)`（および `_async`）は authentic current source/full commitment と実際の same-bank native C++ pointer を要求し、durable standalone fork は明示的に unsupported のままです。`OwnedManagedBudgetLease::scope()` と original owner/thread/graph、ceiling、deadline/clock、generation は不変です。Read-only store-issued `execution_thread_id()` / `execution_storage_thread_id()` は execution branch を別に選び、`GraphState::budget_original_thread_id()` は元の financial bank を示します。正確な selected-branch head CAS と global actor/revision は canonical current counter、pending effect、burned identity に対して全 branch を直列化します。Original/fork branch は補充なしで使用可能なままです。Stale snapshot、checkpoint copy、imported JSON は alias を発行したり head を巻き戻したりできません。保存された original ceiling は effective fork ceiling とは別で、これを広げることや JSON だけでの復元は拒否されます。Unbounded reported observation は factual data で finite grant ではありません。証明済み zero-effect lease だけが unchanged head を release でき、unknown/pending effect は obligation を保持します。
 
-**現在の release-error 契約；実際の suite/probe は下記。** `<neograph/graph/engine.h>` の `graph::ManagedBudgetLeaseReleaseError` は `ProviderOutcomeError` を継承します。`cause()` は元の execution exception を保持し、`release_error()` は二次 durable lease-disposition 失敗を公開します。`outcome()` は真正な SDK 証拠があれば保持し、SDK outcome がなければ null です。Release 失敗は結果を捏造せず再 dispatch も許可しません。Closed `_neograph_managed_budget_scope` metadata は元の logical scope/cap/deadline clock/generation を記述しますが、backend CAS 権限ではなく data です。
+**Lease release エラー。** `<neograph/graph/engine.h>` の `graph::ManagedBudgetLeaseReleaseError` は `ProviderOutcomeError` を継承します。`cause()` は元の execution exception を保持し、`release_error()` は二次 durable lease-disposition 失敗を公開します。`outcome()` は真正な SDK 証拠があれば保持し、SDK outcome がなければ null です。Release 失敗は結果を捏造せず再 dispatch も許可しません。Closed `_neograph_managed_budget_scope` metadata は元の logical scope/cap/deadline clock/generation を記述しますが、backend CAS 権限ではなく data です。
 
-**Archive-owner/retention 契約；実際の suite/probe は下記。** Finite standalone root または authenticated finite source だけが、実際に設定された `sp::NativeArchive::owner_scope()` から省略された original owner を継承します。Unbounded/plain owner metadata の意味は不変です。明示的に矛盾する archive owner は lease acquire 前に拒否します。`CheckpointStore::retains_native_checkpoint() const noexcept` と対応する Core/Async storage capability は既定 false で、実際の InMemory backend は true に override し、wrapper は実際の retention を委譲します。この read-only 記述は正当な unleased/plain/unbounded C++ native checkpoint custody を許しますが、spending credit や native replay authority は与えません。Leased custody は JSON flag や推測した store type ではなく実際の store-issued receipt を使います。
+**Archive owner と retention。** Finite standalone root または authenticated finite source だけが、実際に設定された `sp::NativeArchive::owner_scope()` から省略された original owner を継承します。Unbounded/plain owner metadata の意味は不変です。明示的に矛盾する archive owner は lease acquire 前に拒否します。`CheckpointStore::retains_native_checkpoint() const noexcept` と対応する Core/Async storage capability は既定 false で、実際の InMemory backend は true に override し、wrapper は実際の retention を委譲します。この read-only 記述は正当な unleased/plain/unbounded C++ native checkpoint custody を許しますが、spending credit や native replay authority は与えません。Leased custody は JSON flag や推測した store type ではなく実際の store-issued receipt を使います。
 
-**Native-custody pre-I/O gate；実際の suite/probe は下記。** Managed effect begin は pending-effect/slot/held-window 変更前に、真正に結び付けた NativeArchive または実際の local store-issued private C++ retention capability を要求します。Private capability は JSON から import せず wire にも転送しません。C++ sidecar は境界を越えられないため、remote backend が InMemory でも gRPC は実際の client/server archive を要求します。Archive が finite source owner を提供しなければ元の anonymous owner scope は空のままで、実際の archive binding は original scope に一致しなければなりません。Financial head/lease 証拠だけでは native-custody readiness を証明しません。
+**Native-custody gate。** Managed effect begin は pending-effect/slot/held-window 変更前に、真正に結び付けた NativeArchive または実際の local store-issued private C++ retention capability を要求します。Private capability は JSON から import せず wire にも転送しません。C++ sidecar は境界を越えられないため、remote backend が InMemory でも gRPC は実際の client/server archive を要求します。Archive が finite source owner を提供しなければ元の anonymous owner scope は空のままで、実際の archive binding は original scope に一致しなければなりません。Financial head/lease 証拠だけでは native-custody readiness を証明しません。
 
 診断 JSON は構文上有効な duplicate-key 文書も含め元の raw byte を保持しますが、実行可能な要求/config admission は重複を拒否します。元の non-2xx 応答 JSON は二度目の損失 parse なしで `http.error` 証拠に残ります。named SSE error は後続の正常 stream close より優先します。診断/provider metadata の上限は承認済み source extent であり、無関係な小さい error-text cap ではありません。
 
@@ -236,19 +236,7 @@ Python の `LocalProgramHost` は破棄時に、`ProgramRuntime` がスケジュ
 
 `RecordedBindingSet` は source-bound の move-only data で、caller 提供 dispatcher ではありません。信頼された Catalog の `recorded_capability_binder` は実際の永続 source event を独立に読み、captured-only capability を materialize します。`ProgramRuntime::replay_recorded()` は元の selected-source permission を検証し、実際の残存 bank を durable CAS で移します。inherited spend は新しい model grant ではありません。旧 `start_recorded` 更新 API は削除されました。InMemory/File/SQLite/PostgreSQL Program store は実行全体で正確で不変の owned lease を保持し、expiry による更新をしません。Controlled JavaScript も underlying capability manifest を検証し、正確な completed command 結果を消費して external effect を再 dispatch しません。
 
-**Recorded-control causal fix は full suite で実証済み。** Captured command replay は実行前に新しい CPU wall-time/Core work だけを durable に reserve し、測定済み work と新しく生成した Core checkpoint を result CAS で publish します。新しい model、money、Program-operation allowance を消費せず、captured external effect を再 dispatch しません。未精算 reservation は debit を保持します。Reservation により、最初の新しい Core checkpoint を拒否した通常の Running→Running transition ではなく認証済み settlement transition を選びます。Await channel receive、timer wait/cancel、handoff wait の開始/release は owning executor/strand 上で直列化します。既存 Recorded CPU/Memory await/handoff scenario は full suite で pass しました。Remote TSan coverage 制約は下記に明記します。
-
-以下の観測はこの文書整備より前に記録されたものです。歴史的証拠であり、新 test 実行や全 platform・transport・security 性質の保証ではありません。
-
-**有料観測は完了；普遍的な qualification ではありません。** 元の `SPQUAL1` base630/1000000 microUSD は不変です。同じ元 ledger の ONE hash-chained `A` が承認済み extension480/3000000 を受け入れ、aggregate1110/4000000 になります。Calls/spent/hold/settlement は累積で新 grant ID/header/reset はありません。正確な declaration byte/file identity と original authorization/baseline/catalog/activation/ledger-prefix の hash/totals は固定され、削除・置換・変更は fail closed です。最終 canonical ledger は calls1110/spent437958/held1287828 microUSD、eventA1、limits1110/4000000；spent+held US$1.725786 は LOCAL catalogue meter で invoice ではありません。記録済み five-family60-pair baseline は600 request 完了：Chat60/60、Responses60/60、Messages60/60、Generate56/60（incorrect-vision SSE4件）、Interactions57/60（incorrect-vision buffered1件/SSE2件）；合計293/300 pair で300/300ではありません。他の old600 financial record は保持しますが完全な behavioral proof ではありません。以前の M5/media one-shot cohort は不変です。以前の Google3-round prerequisite は invalid-tool2件/unreadable-positive1件の失敗状態を保持します。追加有料呼出しは承認されません。最終 SDK 証拠と native-axis 制約は baseline 成功とは別です。 以前の activation/reopen smoke は2回 reopen 後 calls610/spent219159/held751233、SDK meter/canary/vision4-test19.38秒 pass として保持します。これは限定された以前の checkpoint で最終 ledger totals ではありません。以前の検証済み Chat60-pair cohort は実際の attempt120、UpperBound charge120、UnknownHold なしを保持します。
-
-**Native-axis 観測は cryptographic 検証・native consumption/equivalence ではありません。** Generate は mutation/omission/duplication を受け入れました。Interactions は isolated genuine source/positive control、one-owner signature mutation、thought-carrier omission、call-carrier omission、duplication を受け入れました。全 thought/signature 削除は generic400、THOUGHT item を保持して全 signature field を削除した場合も generic400 でした。最後の capture は local encoded-original retention control で、same-capture server positive ではありません。以前の positive cohort は真正です。観測は aggregate-carrier-absence boundary のみを示し、issuer/signature 検証や vendor consumption を証明しません。実際の report：SDK `config/qualification-extension-results.json`、`qualification-final-summary.json`、`qualification-native-axis-results.json`、`qualification-combined-omission-results.json`、`qualification-signature-presence-results.json`。Prerequisite-failed/not-run/negative-inconclusive の状態は事実のままです。 Thought-only/carrier-only omission は別 carrier が残る状態で受け入れられました。Issuer-validation/native-consumption の主張を強めません。
-
-**実際の統合証明と残る制約。** 最新 Core full run は2242 test、失敗0、skip16（RAM process-loss 非適用14件/live-credential gate2件）、130.17秒です。`PgNestedJsonRoundTrips` は duplicate key/order/null metadata、blob、residual を正確に保持し0.18秒で pass。未変更の元 shared-bank fork と既存 Recorded CPU/Memory await/handoff scenario も pass。実際の wrappedMemory/SQLite/PostgreSQL/gRPC finite130/hold65/lower129/strip/old-head/pruning/no-archive/import probe は plain と ASan+UBSan で pass。LOCAL Memory/SQLite/PostgreSQL TSan scope は7件 pass、warning0。System Abseil/Protobuf を含む full mixed gRPC TSan は exit66、dependency/generated-RPC stack に race warning402件。これは instrumentation/coverage 制約で proven false positive ではありません。Remote TSan/race-free は主張せず warning を suppress しません。Installed find_package Program C++/C ABI/dualQuickJS の3 consumer は pass。Fresh installed NeoGraph/SchemaProvider typed consumer は実際の HTTP request2件、coroutine 開始前の provider 破棄、native/tool replay、refusal、known-zero/raw 保持、実際の LinkedMismatch 拒否で pass。Browser Alice/Bob isolation と generation2 replacement を目視検証し、PostgreSQL Program Chat black-box6件は18.989秒で pass。最新 SDK26/26 は失敗0、74.07秒で pass。最終 ReleaseGraph16設定 ×fresh process3回/48記録は38.29秒、失敗0、全 actual protocol/owned-outcome check pass で完了しました。NeoGraph `benchmarks/provider-cutover-final-results.json` と `benchmarks/provider-cutover-final-summary.json` は独立した最終 cohort を保持します。測定中 compiler/有料 model は実行せず、歴史 cohort は不変で semantic/resource equivalence は主張しません。Unstable SDK/ABI3 は安定 release や広い platform qualification ではありません。
-
-**最小有料証拠（2026-10-03）は広範な qualification ではありません。** 個別承認の one-shot 3 呼出しの結果：Images—JPEG 1 個、1024×1024、360685 byte、input/output/total token 19/1408/1427、実際に目視確認；Veo—MP4 1 個、1280×720、4 秒、437737 byte、generation 1 回と status GET 3 回、usage nullable、Chromium で decode・目視確認；Decisions—`typesafe/jev-1.13`、probability 0.93、input/output token 283/21、total 不明、API 報告費用 USD 0.000011886。Image USD 0.0336 base + text/thinking、Veo USD 0.20 は catalog 予測で invoice ではなく、最小 image smoke は価格帯内訳を取得していません。結果は one-shot 権限を更新せず再実行も許可しません。
-
-完了した chat pair は downstream vendor の native-continuation 消費を証明しません。
+**Recorded replay の精算。** Captured command replay は実行前に新しい CPU wall-time/Core work だけを durable に reserve し、測定済み work と新しく生成した Core checkpoint を result CAS で publish します。新しい model、money、Program-operation allowance を消費せず、captured external effect を再 dispatch しません。未精算 reservation は debit を保持します。Await channel receive、timer wait/cancel、handoff wait の開始/release は owning executor/strand 上で直列化します。
 
 ```cpp
 #include <neograph/types.h>
@@ -407,7 +395,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを一致した新ヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。SDK は alpha `0.1.1`、interface revision 4 / shared-library generation 4、out-of-line capability check を使い、安定リリースの宣言ではありません。記録済み interface-3 SDK runtime/archive 検証は Linux/POSIX の過去の根拠で、interface-4 pass ではありません。Windows NTFS/macOS 実装は存在しますが新 platform 検証には runtime 根拠が必要です。WASM provider runtime は未検証です。
+ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを一致した新ヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。SDK は alpha `0.1.1`、interface revision 4 / shared-library generation 4、out-of-line capability check を使い、安定リリースの宣言ではありません。検証済みのプラットフォームは Linux/POSIX です。Windows NTFS と macOS の実装はありますが、この SDK では検証していません。WASM provider runtime のサポートは確立していません。
 
 Python も C++ と同じ所有 request/outcome 境界を公開します: `make_provider_request`、`Provider.prepare`、`dispatch`、`invoke`。Provider 履歴には typed part を持つ `ProviderMessage` を使い、`ChatMessage` はグラフ用の便宜的 projection として残ります。SDK 失敗は `ProviderOutcome.failure` で読み、host observer/settlement 例外は `outcome` と `cause` を保持します。コンストラクターと GIL/コールバック動作は [Python binding ガイド](python-binding.md)を参照してください。
 
@@ -415,14 +403,10 @@ Python SDK の vector/map getter は独立した値を返します: `ProviderMes
 
 ネイティブコードが Python provider の `prepare` オーバーライドを呼ぶ際に `None` を返すと、handle を消費する前に `TypeError` が発生します。`ProviderDescriptorPolicy.identity` は raw SHA-256 digest を格納する `bytes` で、`.hex()` は表示用の変換です。保存された Python provider/graph の cause を繰り返し調べても、元の例外値と traceback を保持し、保存された例外の restore 状態を消費しません。ネイティブの入れ子になった例外変換にも適用されます。
 
-以前記録した installed find_package Program C++/C ABI/dualQuickJS consumer と NeoGraph/SchemaProvider typed2-request lifetime/native/raw/mismatch consumer は当時の snapshot で pass しました。これらは interface-4 package 検証を証明しません。宣言一致だけでは新 runtime 結果や広い platform 対応を証明できません。
-
-現 SDK4 Linux x86_64 根拠は登録済み 27 case をすべて対象とします。最初の full run で 25 が pass、obsolete assertion 二つを修正後、`native_archive` と `stop_reasoning_preservation` は focused 2/2 で pass しました。二度目の full-suite 27/27 run ではありません。未変更の buffered/SSE Stop probe と設置 SDK の exact README consumer も pass しました。後者は zero-usage、unknown-usage、HTTP-400-failure variant ごとに credential なしで一要求を実行しました。この SDK 結果は新 NeoGraph native build/wheel pass や Windows/macOS/ARM64/HTTP3 検証を証明しません。
-
 <a id="pricing-evidence-and-the-price-catalog"></a>
 ### 価格の証拠と価格カタログ
 
-Program 実行の `monetary_microunits` 予算は micro-USD（1 microunit = 1e-6 USD）を数えます。ホストが組み込み `llm_call` ノードの provider 呼び出しを価格付け broker に通すと、その呼び出しに価格が付きます。プロセス内では `bind_priced_provider_call(context)`、クラッシュに安全な再生が必要なら `SQLiteProgramProviderCallJournal::bind_priced(context, deployment)` を使います。ランタイムは各 broker に attempt の金額アカウントを `ProgramCoreProviderCallContext::monetary_account` で渡します。Python の `LocalProgramHost(node_context=..., binding_label=...)` は常に呼び出しに価格を付けます（[Python ガイド](python-binding.md#model-calling-nodes)）。すべての `RunBudget` フィールドと同じく `monetary_microunits` は実行に与えられる量で、`0` は何も与えません。子と fork の予算は親の量から切り出され、`model_tokens = 0` でモデルトークンを使った完了実行は `BudgetExhausted` と報告されます。#372 より前は何も金額を請求しませんでした。現在は `monetary_microunits = 0` の実行は、価格の付くすべての呼び出しを送信前に拒否します。価格付けのコードは内部用（`src/program/pricing.h`、`monetary.h`）で、ABI を約束しません。
+Program 実行の `monetary_microunits` 予算は micro-USD（1 microunit = 1e-6 USD）を数えます。ホストが組み込み `llm_call` ノードの provider 呼び出しを価格付け broker に通すと、その呼び出しに価格が付きます。プロセス内では `bind_priced_provider_call(context)`、クラッシュに安全な再生が必要なら `SQLiteProgramProviderCallJournal::bind_priced(context, deployment)` を使います。ランタイムは各 broker に attempt の金額アカウントを `ProgramCoreProviderCallContext::monetary_account` で渡します。Python の `LocalProgramHost(node_context=..., binding_label=...)` は常に呼び出しに価格を付けます（[Python ガイド](python-binding.md#model-calling-nodes)）。すべての `RunBudget` フィールドと同じく `monetary_microunits` は実行に与えられる量で、`0` は何も与えません。子と fork の予算は親の量から切り出され、`model_tokens = 0` でモデルトークンを使った完了実行は `BudgetExhausted` と報告されます。`monetary_microunits = 0` の実行は、価格の付くすべての呼び出しを送信前に拒否します。価格付けのコードは内部用（`src/program/pricing.h`、`monetary.h`）で、ABI を約束しません。
 
 dispatch の前に broker は準備済みリクエストに価格を付けます。origin は descriptor の base URL と URL が一致するカタログ origin で、SDK ポリシーがその base URL を OpenRouter origin と宣言していれば `openrouter` です。hold は、リクエストの入力上限と出力 cap に対するカタログ予約に、1 回の dispatch が請求しうるモデル呼び出し数（`Provider::invocation_upper_bound`）を掛けた値です。入力上限は、そのモデルについて分かっている最小の入力上限、つまり SDK ポリシーの上限、カタログの `max_input_tokens` またはコンテキストウィンドウです。すべての入力トークンは最も高い入力帯の料金、すべての出力トークンは最も高い出力料金で計算し、aggregator では route ceiling を使います。上限を決められない呼び出しや、hold が残り予算に収まらない呼び出しは、リクエストや journal marker ができる前に拒否されます。ノードは未送信を示す合成 provider 失敗で失敗し、実行の `ProgramFailure` が理由を示します。`failure.witness["monetary"]` には origin、model、上限、カタログが入ります。
 
@@ -1235,7 +1219,7 @@ struct RunConfig {
 | `cancel_token` | `std::shared_ptr<CancelToken>` | `nullptr` | 協調キャンセル用ハンドル。エンジンはこれを `RunContext` に包み、各ノードの `run(NodeInput)` 呼び出しへ `in.ctx.cancel_token` として渡します |
 | `usage` | `std::shared_ptr<UsageAccumulator>` | `nullptr` | 任意のトークン集計器。省略時はエンジンが作成し、実行中の集計器を `in.ctx.usage` として公開します |
 | `resume_if_exists` | `bool` | `false` | `true` かつ `thread_id` のチェックポイントが存在する場合、`input` を適用する前にそこから初期化します (複数ターンのチャット形状) |
-### RunContext (v0.4 PR 1、`NodeInput.ctx` 経由でノードに公開)
+### RunContext (v0.4、`NodeInput.ctx` 経由でノードに公開)
 エンジンが実行ごとに運ぶディスパッチメタデータです。最初は `RunConfig`
 （usage accumulator が未指定なら作成）、`RunMetadata`、有効な Store、
 任意の resume value から構築されます。ノードは `run(NodeInput) -> NodeOutput`
@@ -1352,7 +1336,7 @@ asio::awaitable<NodeOutput> run(NodeInput in) override {
 |--------|-------------|
 | `cancel()` | 冪等でスレッドセーフ。ポーリングフラグを設定し、バインドされたエグゼキューターで asio の cancellation_signal を発行し、`fork()` 経由ですべての生存中の子へ連鎖 |
 | `is_cancelled()` | ロックフリーのポーリング読み取り |
-| `fork()` | **v0.4 PR 3。** 子の shared_ptr を返します。親の cancel() は連鎖し、fork() 時点ですでに親がキャンセル済みなら競合なしで子もキャンセル済みになります |
+| `fork()` | **v0.4。** 子の shared_ptr を返します。親の cancel() は連鎖し、fork() 時点ですでに親がキャンセル済みなら競合なしで子もキャンセル済みになります |
 | `bind_executor(ex)` | シグナル発行を処理するエグゼキューターをエンジン内部でバインド |
 | `slot()` | `co_spawn` 時に `bind_cancellation_slot` へ渡す asio `cancellation_slot` |
 ### RunResult
@@ -1498,7 +1482,7 @@ public:
     // owned `asio::thread_pool` of size n. build() defaults to
     // n==1 — prefer EngineConfig::worker_count to opt into
     // real parallel fan-out. Throws `std::logic_error` if called
-    // while a run is in flight (Round 3 guard — `active_runs_`
+    // while a run is in flight (an `active_runs_`
     // counter prevents tasks queued on the old pool from being
     // silently dropped on swap).
     void set_worker_count(std::size_t n);
@@ -2006,7 +1990,7 @@ constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
 | `metadata` | `json` | 任意のユーザー定義データ |
 | `step` | `int64_t` | スーパーステップカウンター |
 | `timestamp` | `int64_t` | Unix epoch ミリ秒での作成時刻 |
-| `schema_version` | `std::uint32_t` | wire 上のレイアウトバージョン (`CHECKPOINT_SCHEMA_VERSION`、現在は `3` を参照)。Round 5 で `int` から固定幅の unsigned へ広げました。schema version は非負であり、ディスクへ永続化して JSON 経由で往復する値に、プラットフォームで幅が変わる `int` を使うのは不適切だったためです。永続化する `CheckpointStore` 実装はこれをシリアライズし、デシリアライズした blob の `0` は「バージョン付け前」(例: フィールドが存在しなかった。移行は呼び出し側の責任) と扱うべきです |
+| `schema_version` | `std::uint32_t` | wire 上のレイアウトバージョン (`CHECKPOINT_SCHEMA_VERSION`、現在は `3` を参照)。固定幅の unsigned 型です。schema version は非負で、ディスクへ永続化して JSON 経由で往復する値だからです。永続化する `CheckpointStore` 実装はこれをシリアライズし、デシリアライズした blob の `0` は「バージョン付け前」(例: フィールドが存在しなかった。移行は呼び出し側の責任) と扱うべきです |
 ### CheckpointStore
 チェックポイント永続化の抽象インターフェースです。データベース、ファイルシステム、その他のバックエンドに保存するには実装します。
 データベース、ファイルシステム、その他のバックエンドにチェックポイントを保存するためのインターフェースです。
@@ -2703,7 +2687,7 @@ public:
 | メソッド | 説明 |
 |--------|-------------|
 | `MCPClient(url)` | MCP エンドポイント `url` を与えられたとおりに使う HTTP モードのクライアントを構築します |
-| `MCPClient(argv)` | サブプロセスを起動し、stdio モードのクライアントを構築します。`argv[0]` は fork の前に `PATH` で解決され、exec の失敗は最初の RPC で接続エラーとして現れます。安全のため Windows の `.bat`/`.cmd` を拒否します (Round 3 hardening) |
+| `MCPClient(argv)` | サブプロセスを起動し、stdio モードのクライアントを構築します。`argv[0]` は fork の前に `PATH` で解決され、exec の失敗は最初の RPC で接続エラーとして現れます。安全のため Windows の `.bat`/`.cmd` を拒否します |
 | `MCPClient(StdioClientConfig)` | 明示的な環境、上限付きの stderr 取得、期限、キャンセルの猶予を持つ強化された stdio 起動 |
 | `initialize(client_name)` | MCP の初期化ハンドシェイクを 1 回行います。繰り返しの呼び出しは冪等で、プロトコル/トランスポートの失敗は例外を送出します |
 | `initialize(client_name, deadline, cancel_token)` | 期限とキャンセルトークンで制限されたハンドシェイク |
@@ -3138,15 +3122,14 @@ stdio 上の改行区切り JSON によるエディター↔エージェント J
 [`PostgresCheckpointStore`](../include/neograph/graph/postgres_checkpoint.h) ·
 [`SqliteCheckpointStore`](../include/neograph/graph/sqlite_checkpoint.h)。
 ### このツアーにないその他の公開 API
-- 任意の `ProviderControls` は呼び出し元の選択であり、強制デフォルトや黙った cap clamp ではありません。非対応 family 制御は dispatch 前に拒否します。有界呼び出しには承認された実際のモデル input/output 上限が必要で、欠落は `LimitUnknown` です。予約は保守的な支出権限であり、報告使用量・予測・請求書ではありません。不明/部分/delivery-unknown の結果は hold を維持し、実際の最終報告で精算し、超過報告も全量を計上します。retry は明示的な単一層で、既定 off、有界 window と unknown-prior hold を使います。隠れた再送はありません。
 - **`neograph::AsyncTool`** — コルーチン向き (HTTP fetch、MCP 呼び出し) の仕事に対して
   `execute_async(json)` を公開する `Tool` の対となる実装です。同期 `execute()` は
   `run_sync` を経由して `final` ルーティングされます。
 - **`neograph::graph::NodeCache`** — ノード単位のメモ化です。
   構築時に `EngineConfig::cached_nodes` でオプトインします (setter は互換性のため残ります)。
 - **`neograph::graph::create_deep_research_graph`** —
-  `examples/25_deep_research.cpp` で使われます。Round 2 の監査で
-  `BriefNode` の LLM 書き換え、`FinalReportNode` のトークン上限再試行、
-  `ClarifyNode` HITL gate で触れています。
+  `examples/25_deep_research.cpp` で使われます。
+  `BriefNode` による LLM の書き換え、`FinalReportNode` のトークン上限再試行、
+  `ClarifyNode` の HITL gate を含みます。
 このツアーに必要な型がない場合は `include/neograph/` を直接確認してください。
 すべての公開ヘッダーにリファレンス文書があります。

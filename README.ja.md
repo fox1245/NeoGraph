@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ja source_sha256=7b098f4c6cf07b09aa0fd20aec0dc8196fd6dcb389dc25c305c9cc3352cfb1dd -->
+<!-- neograph-i18n: source=README.md locale=ja source_sha256=0d7ef3e43002968c0fde7cbc0ba61917a919d82e8ae7e1a7d573f0da86540c6e -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -231,7 +231,7 @@ Output channel:  text = "HELLO"
 
 `NEOGRAPH_BUILD_LLM=OFF` の場合でも、SchemaProvider は必須の外部 SDK です。Core が型付き provider の契約をエクスポートしているためです。以下のコマンドは、インストール済みの [SchemaProvider ランタイムパッケージ](https://github.com/fox1245/SchemaProvider)を使うもので、`SCHEMAPROVIDER_PREFIX` にそのインストール先を指定します。`-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=../SchemaProvider` で指定したチェックアウトが最優先されます。それ以外の場合、CMake はまずインストール済みのパッケージを探し、見つからなければ固定された公開 SDK のアーカイブをダウンロードします。インストール済みのパッケージや指定したチェックアウトでオフラインビルドをするには、`NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` を指定します。CMake は隣のディレクトリのチェックアウトを推測せず、削除されたバンドル版インタープリターも使いません。
 
-必要なのは、C++20 コンパイラ、CMake 3.20 以降、そして SDK のランタイム依存である libcurl 7.88 以降です。SDK の TLS は libcurl のバックエンドを使うため、SDK 自体に OpenSSL は不要です。NeoGraph の HTTPS コンポーネントを含む完全なビルドには、OpenSSL 3 が必要です。既定のビルドでは SQLite と PostgreSQL の連携も有効になるため、下のコマンドは不要な NeoGraph のコンポーネントを無効にします。SDK の依存は残ります。SDK について記録されている検査は interface 4 に対するもので、このリビジョンが固定している interface 6 より古いものです([型付き provider 呼び出し](#typed-provider-calls)を参照)。検査の対象は Linux x86_64 とローカルのプロトコル/状態ピアで、正確な範囲は [SDK 適合性記録](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record)にあります。新しい Windows、macOS、ARM64、HTTP/3、ホスティングベンダー、WASM での検証を意味するものではありません。プラットフォームとビルドの制約は[トラブルシューティング](docs/troubleshooting.md)を参照してください。
+必要なのは、C++20 コンパイラ、CMake 3.20 以降、そして SDK のランタイム依存である libcurl 7.88 以降です。SDK の TLS は libcurl のバックエンドを使うため、SDK 自体に OpenSSL は不要です。NeoGraph の HTTPS コンポーネントを含む完全なビルドには、OpenSSL 3 が必要です。既定のビルドでは SQLite と PostgreSQL の連携も有効になるため、下のコマンドは不要な NeoGraph のコンポーネントを無効にします。SDK の依存は残ります。プラットフォームとビルドの制約は[トラブルシューティング](docs/troubleshooting.md)を参照してください。
 
 ```bash
 git clone https://github.com/fox1245/NeoGraph.git
@@ -401,7 +401,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `wheel` | 修復を経たインストール済みホイール。cibuildwheel==2.23.0 とネイティブ/コンテナの provider が必要。`--arch x86_64\|aarch64\|arm64\|AMD64` は必須。任意の `--python cp312` を付けると、すべての CPython ではなく1つだけビルドします。 |
 | `runtime-archive` | 共有 SDK のネイティブアーカイブの移植性を見るターゲット/CTest。Ninja とプラットフォームのランタイム依存が必要。 |
 
-ローカルの Windows/WSL の結果は、ネイティブの ARM/macOS や VS2026 のサニタイザー行の代わりにはなりません。push と pull request のたびに `ci.yml` が実行されます。Linux、macOS、Windows の完全なネイティブテストに、インストール済みコンシューマーの行が2つ加わります。ドキュメントだけの変更では実行されません。`ci-extended.yml` は夜間と要求時に実行されます。サニタイザー、ファズのカナリア、性能ゲート、ネイティブ ARM64、gRPC、Visual Studio ジェネレーター、残り8つのインストール済みコンシューマーの行を扱います。リリース候補では、タグを付ける前に実行してください。`wheels.yml` は、パッケージングの変更ではプラットフォームごとに CPython 3.12 を、リリースタグ、週次のカナリア、手動実行では CPython 3.9–3.13 をビルドします。glibc 2.34/macOS 14 の下限、インストール済みホイールの全テスト、コールドローダー/LGPL 置き換えのゲート、ネイティブのホイール/アーカイブのプラットフォーム4つ、保護されたタグと OIDC による公開の依存関係が含まれます。ソースを確認したり CLI のヘルプを読んだりしただけでは、実行したことにも、リリースの証明にもなりません。
+ローカルの Windows/WSL の結果は、ネイティブの ARM/macOS や VS2026 のサニタイザー行の代わりにはなりません。push と pull request のたびに `ci.yml` が実行されます。Linux、macOS、Windows の完全なネイティブテストに、インストール済みコンシューマーの行が2つ加わります。ドキュメントだけの変更では実行されません。`ci-extended.yml` は夜間と要求時に実行されます。サニタイザー、ファズのカナリア、性能ゲート、ネイティブ ARM64、gRPC、Visual Studio ジェネレーター、残り8つのインストール済みコンシューマーの行を扱います。リリース候補では、タグを付ける前に実行してください。`wheels.yml` は、パッケージングの変更ではプラットフォームごとに CPython 3.12 のホイールを1つビルドします。リリースタグでは、Linux（x86_64 と aarch64）、macOS（arm64）、Windows（AMD64）向けに CPython 3.9–3.13 のホイールをビルドし、最低のプラットフォームバージョンは glibc 2.34 と macOS 14 です。
 
 - [ドキュメント目次](docs/README.md)
 - [コンセプトとグラフの意味論](docs/concepts.md)

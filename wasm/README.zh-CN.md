@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=1f49ed436cfb27bb00b666cedc90e9c3cc246bcbd3243db1f137c7142f5c9380 -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=08ae98c9b9640fa53657b63ba4a2691bf503e965a04f5442b3bde19d974e6ca7 -->
 # NeoGraph WASM 冒烟程序
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -11,22 +11,20 @@
 
 ## 当前的构建边界
 
-带类型的 provider 切换，使 `SchemaProvider::runtime` 成为 Core 的依赖，
-即使设置了 `NEOGRAPH_BUILD_LLM=OFF` 也一样。CMake 3.20 及以上会按以下顺序选择：
+即使设置了 `NEOGRAPH_BUILD_LLM=OFF`，Core 也依赖 `SchemaProvider::runtime`。CMake 3.20 及以上会按以下顺序选择：
 先是显式指定的 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`，其次是已安装的运行时，
 最后是固定版本的公开 GitHub 源码归档。下载这一兜底方式通过
 `NEOGRAPH_FETCH_SCHEMAPROVIDER` 控制，默认为 ON；离线的包构建或源码构建要把它设为 OFF。
 Core 链接的是 SDK 运行时，而不是它的 libcurl 传输层。在所检查的 SDK 固定版本上，
 SDK 顶层的 CMake 在配置阶段仍然要求 CURL，尽管运行时目标并不链接它；
 OpenSSL 不是运行时的直接依赖。
-SDK 的原生库无法链接进 WebAssembly。Emscripten 目标需要确认运行时、archive 和
-C++ 标准库的支持；下面那次历史上的冒烟测试，不能证明当前能构建成功。
+SDK 的原生库无法链接进 WebAssembly。Emscripten 目标上，SDK 运行时、archive 支持和
+C++ 标准库都必须能正常工作；下面那次历史上的冒烟测试，不能说明当前的代码能构建成功。
 
 当前的构建需要 SDK `0.3.0`，接口修订版/共享库代数为 6，
 对应 SchemaProvider `maint/interface6` 提交 `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`，
-并且要针对同一个目标构建。必须先确认真正可用的 Emscripten 版 SDK
-运行时；本页既没有放弃对 WASM 的支持，也不保证当前能构建成功。
-archive v3 / `spna3` 和可移植 JSON v2 保持不变。
+并且要针对同一个目标构建。必须先有真正可用的 Emscripten 版 SDK
+运行时构建；本页不保证当前能构建成功。
 
 ### 对受支持目标的要求
 
@@ -35,8 +33,8 @@ Emscripten 工具链和 C++ 标准库必须支持 SDK 的 C++20 约定，
 原子且不覆盖已有文件（no-replace）的文件系统后端；不能为了能构建成功而关闭托管。
 
 请使用全新的构建目录，以及真正针对同一目标的依赖，包括 SDK 配置阶段需要的
-CURL 依赖。原生库或伪造的依赖可用性，都不能让 WebAssembly 构建通过资格认证。
-目前在 Node.js 和浏览器中的执行仍未通过资格认证。
+CURL 依赖。原生库或伪造的依赖可用性，都不能得到有效的 WebAssembly 构建。
+目前在 Node.js 和浏览器中的执行尚未验证。
 
 ## 历史结果
 
@@ -122,4 +120,4 @@ python3 wasm/serve_smoke.py build-wasm/wasm --port 8765
 
 这个测试环境不提供 npm 包、Embind API、JS 的图回调或 provider 传输层。
 托管模型的访问、本地推理，以及与 NeoProtocol Executor 的集成，
-都没有通过这个不涉及模型的冒烟测试的资格认证。
+都不在这个不涉及模型的冒烟测试的覆盖范围内。

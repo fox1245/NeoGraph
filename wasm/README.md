@@ -10,7 +10,7 @@ this is not a browser SDK.
 
 ## Current build boundary
 
-The typed provider cutover makes `SchemaProvider::runtime` a dependency of Core,
+Core depends on `SchemaProvider::runtime`,
 even with `NEOGRAPH_BUILD_LLM=OFF`. CMake 3.20+ selects an explicit
 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`, then an installed runtime, then a pinned
 public GitHub source archive. The download fallback defaults to ON through
@@ -18,15 +18,15 @@ public GitHub source archive. The download fallback defaults to ON through
 Core links the SDK runtime, not its libcurl transport. At the examined SDK pin,
 the top-level SDK CMake still requires CURL during configuration even though
 the runtime target does not link it; OpenSSL is not a direct runtime dependency.
-Native SDK libraries cannot be linked into WebAssembly. Runtime/archive and
-C++ standard-library support must be qualified for the Emscripten target;
-the historical smoke below does not establish a current successful build.
+Native SDK libraries cannot be linked into WebAssembly. The SDK runtime, its
+archive support and the C++ standard library must work on the Emscripten target;
+the historical smoke below does not show that the current code builds.
 
 Current builds require SDK `0.3.0`, interface revision/shared generation 6,
 at SchemaProvider `maint/interface6` commit `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`,
-built for the same target. Qualifying a genuine Emscripten SDK
-runtime remains a prerequisite; this page neither drops WASM support nor
-guarantees a current build. Archive v3 / `spna3` and portable JSON v2 are unchanged.
+built for the same target. A genuine Emscripten build of the SDK
+runtime is a prerequisite, and this page does not guarantee that a current
+build succeeds.
 
 ### Supported-target requirements
 
@@ -37,8 +37,8 @@ for the target; custody must not be disabled to obtain a build.
 
 Use a fresh build directory and genuine same-target dependencies, including
 any CURL dependency required during SDK configuration. Native libraries or
-fabricated dependency availability cannot qualify a WebAssembly build.
-Current Node.js and browser execution remain unqualified.
+fabricated dependency availability cannot make a WebAssembly build valid.
+Current Node.js and browser execution have not been verified.
 
 ## Historical result
 
@@ -127,4 +127,4 @@ Node.js run alone is not browser evidence.
 
 This harness supplies no npm package, Embind API, JS graph callbacks, or
 provider transport. Hosted-model access, local inference, and NeoProtocol
-Executor integration are not qualified by this model-free smoke.
+Executor integration are not covered by this model-free smoke.

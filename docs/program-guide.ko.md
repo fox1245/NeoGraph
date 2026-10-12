@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=51c4b4ad6cac765e2629982d260600386568149c97b34cad0d1f779d395f4c6b -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=6f69f4c493387ec533fd315d4e5a294d10e695e59765446ee310d4add2d1b624 -->
 # Program 가이드: 그래프를 조율하는 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -22,8 +22,6 @@ Program 계층에는 Program과 QuickJS 제어가 포함된 빌드가 필요합�
 릴리스 작업이 서비스 세 개를 병렬로 점검합니다. `payments`의 점검이 실패합니다. 작업 전체를 실패시키는 대신, 실패는 검토 단계로 가고 작업은 사람을 기다립니다. 사람이 릴리스를 승인하면 나머지 서비스는 다시 점검하지 않고 작업이 끝납니다. 같은 작업이 예산 안에서 실행됩니다.
 
 예제는 Python 파일 세 개입니다. `release_program.py`는 실행마다 바뀌지 않는 모든 것을 담고, `run_release.py`와 `restart.py`가 이를 가져다 씁니다.
-
-<!-- TODO(link): replace the listings below with a link to the Program example under examples/ once the examples overhaul adds it. -->
 
 ### 1. 노드 코드
 

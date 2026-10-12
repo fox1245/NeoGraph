@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=110a2516c9d60c99aff8e6bf20d7944bf34ffdda37017c93d9eabc53b6ae5959 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=06849fc847850619dee71a61ed970037593e55f98c2c3bb8354018f3cd9ee74b -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -34,11 +34,11 @@ provider/tool interfaces → graph types → engine → checkpoint store →
 | **ACP** | `neograph::acp` | Agent Client Protocol — stdio 기반 편집기↔에이전트 양방향 RPC | [공개 헤더](../include/neograph/) | [ACPServer](../include/neograph/acp/server.h) |
 | **Async** | `neograph::async` | Asio HTTP/SSE/WS 도우미, ConnPool, run_sync | [공개 헤더](../include/neograph/) | [WsClient](../include/neograph/async/ws_client.h) |
 
-추가 모듈은 `include/neograph/{a2a,acp,async}/` 공개 헤더를 제공한다. 개별 서술 안내는 유예되었으므로 정확한 계약은 헤더를 참조한다. 파일 존재는 현재 통합 검증을 뜻하지 않는다.
+추가 모듈은 `include/neograph/{a2a,acp,async}/` 공개 헤더를 제공한다. 이 투어는 이 모듈을 다루지 않으므로 정확한 계약은 헤더를 참조한다.
 
 **편의 헤더:** `#include <neograph/neograph.h>`에는 전체 핵심 API와 그래프 엔진 API가 포함된다.
 
-CMake 3.20 이상이 필요하다. Core가 소유 typed provider 계약을 공개하므로 `NEOGRAPH_BUILD_LLM=OFF`여도 SchemaProvider runtime은 필수다. 명시적 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`를 우선하고 없으면 설치된 `SchemaProvider` runtime package를 찾는다. 없고 `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON`(기본)이면 `cmake/NeoGraphSchemaProvider.cmake`에 고정된 불변 GitHub archive를 다운로드한다. Offline build에서는 SDK를 설치하고 `CMAKE_PREFIX_PATH`에 prefix를 지정한 뒤 `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`를 준다. Sibling checkout을 추측하거나 제거된 bundled interpreter를 선택하지 않는다. NeoGraph 선택적 HTTP module을 꺼도 SDK runtime의 transport 의존성은 필요하다. 기록된 SDK runtime/archive 검증은 Linux/POSIX 범위다. Windows NTFS와 macOS 구현이 있으나 새 platform 검증에는 runtime 증거가 필요하며 WASM provider runtime 검증은 입증되지 않았다.
+CMake 3.20 이상이 필요하다. Core가 소유 typed provider 계약을 공개하므로 `NEOGRAPH_BUILD_LLM=OFF`여도 SchemaProvider runtime은 필수다. 명시적 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`를 우선하고 없으면 설치된 `SchemaProvider` runtime package를 찾는다. 없고 `NEOGRAPH_FETCH_SCHEMAPROVIDER=ON`(기본)이면 `cmake/NeoGraphSchemaProvider.cmake`에 고정된 불변 GitHub archive를 다운로드한다. Offline build에서는 SDK를 설치하고 `CMAKE_PREFIX_PATH`에 prefix를 지정한 뒤 `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`를 준다. Sibling checkout을 추측하거나 제거된 bundled interpreter를 선택하지 않는다. NeoGraph 선택적 HTTP module을 꺼도 SDK runtime의 transport 의존성은 필요하다. Linux/POSIX가 검증된 플랫폼이다. Windows NTFS와 macOS 구현이 있으나 이 SDK로 검증하지 않았으며, WASM provider runtime 지원은 확립되지 않았다.
 
 SDK imported target이 `include/SchemaProvider` include root를 제공한다. 공개 예시는 recipe 전용 helper 없이 `<descriptor/descriptor.h>`, `<runtime/client.h>`, `<neograph/llm/schema_provider.h>`를 직접 사용한다.
 
@@ -225,10 +225,10 @@ struct ChatTool {
 
 `UsageAccumulator::snapshot()`은 누적 보고를 반환한다. `total_tokens_wide()`는 청구 토큰과 미해결 예약의 합이며 보고 사용량으로 표시하면 안 된다. 정산에는 input/output count가 있는 final·consistent 보고가 필요하며 근거가 있는 가장 큰 total을 차감하고 초과 사용량도 clamp하지 않는다. 누적 보고 중 하나라도 counter가 없으면 합계도 미상이다. 예약, 로컬 차감, vendor 청구서는 서로 다른 기록이다.
 
+실제 결과 이후 post-effect 정산이나 terminal receipt 영속화가 실패하면 `ProviderDispatchOutcomePersistenceError`의 `outcome()`은 원래 불변 결과를, `cause()`는 원래 영속 예외를 보존한다. 전달도 실패했으면 `delivery_error()`가 원래 관측자 예외를 보존한다. 영속화 성공 뒤 관측자 실패는 원래 예외를 그대로 다시 던진다. 미상/결과 없는 transport 실패는 결과를 조작하지 않는다.
+
 ### Portable projections
 
-
-실제 결과 이후 post-effect 정산이나 terminal receipt 영속화가 실패하면 `ProviderDispatchOutcomePersistenceError`의 `outcome()`은 원래 불변 결과를, `cause()`는 원래 영속 예외를 보존한다. 전달도 실패했으면 `delivery_error()`가 원래 관측자 예외를 보존한다. 영속화 성공 뒤 관측자 실패는 원래 예외를 그대로 다시 던진다. 미상/결과 없는 transport 실패는 결과를 조작하지 않는다.
 `ChatMessage` / `ChatTool`과 JSON은 portable projection이지 native 권한이 아니다. Portable 포맷은 [`provider-message-v2`](../schemas/provider-message-v2.schema.json), [`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)를 유지한다. 실제 C++ checkpoint sidecar는 메모리에서 native seal을 보존한다. 영속 native 기록에는 host-owned `sp::NativeArchive`가 필요하다. closed v3 / `spna3`는 독립 키를 쓰는 인증된 owner-private custody이며 archive v2는 업그레이드하거나 해석하지 않고 거부한다. 인증은 모든 semantic descriptor 선택(origin/path/header, policy, 요청 field mapping, usage path, stop mapping), owner와 정확한 custody binding을 결합한다. 암호화나 vendor-issuer 인증은 아니다. archive 본문·키·native blob·raw wire 관측을 공개하지 않는다. Archive는 증거 저장소이지 돈의 grant나 spending lease가 아니다. Program/external bank는 독립 journal 소유이며 snapshot 복사로 credit을 만들 수 없다.
 
 `RuntimeHistoryRecord`의 인자 없는 `serialize_canonical()`은 이식 가능한 기록을 지원한다. 영속 네이티브 이력에는 `serialize_canonical(archive, owner_id)`와 해당 ID에 소유자 범위가 일치하는 아카이브를 사용한다. Python도 같은 오버로드와 `RuntimeHistoryRecord.parse(stored_bytes, archive=None, owner_id="")`를 제공한다. 이식 가능한 기록용 기본 인자는 일치하는 아카이브 없이 네이티브 복원을 허가하지 않는다. Python의 파싱과 아카이브를 사용하는 직렬화는 네이티브 작업 중 GIL을 해제한다. JSON 관찰 데이터와 아카이브로 인증된 보관 권한은 구별된다.
@@ -237,17 +237,17 @@ Python은 `ContextStore.hydrate_records(range)`와 `history_record_by_message_id
 
 `Assistant` 메시지를 담은 RAW `RuntimeHistoryRecord`에는 `RuntimeTrustClass.ModelOutput`이 필요하다. `RuntimeTrustClass.UntrustedInput`은 `User` 메시지만 허용한다. 이 이름들은 실제 Python enum 이름이다. trust class는 기록의 역할과 출처 경계를 나타내며, 이를 선택해도 네이티브 재생 보관 권한이나 지출·실행 권한은 생기지 않는다.
 
-**Standalone bank journal 수정 — 현재 계약 개정; 실제 runtime 증거는 아래.** Owner-approved protocol은 단조 trusted-store namespace obligation과 실제 불변 original owner/thread/graph scope, ceiling, deadline/clock identity, generation을 요구한다. 전체 checkpoint commitment·revision에 대한 정확한 durable head CAS만 host-owned opaque lease를 발급할 수 있다. 정확한 pending effect window를 provider I/O 전에 영속화해야 하며 실제 SDK outcome, charge, nullable report, hold, dedup identity로 정산해야 한다. Checkpoint와 next head는 같은 owned actor/revision 아래 원자적으로 publish해야 한다. Bank metadata 제거·checkpoint pruning·old authenticated snapshot replay·같은 ID overwrite·actor 상실은 credit을 주면 안 된다. 기존 65 hold에서 ceiling 130을 129로 낮추면 추가 65를 허용할 수 없다. 입증된 no-effect 실패는 unchanged head를 release해 authentic 130 복구가 가능해야 한다. Crash/unknown/lost-lease window는 refund/retry/fallback 없이 hold를 유지한다. Plain/pristine archive 설정은 money/native spending lease를 주지 않고 현재 `config.usage`는 기존 standalone obligation을 대체할 수 없다. Program/external-bank journal 소유는 유지된다. 이는 요구 계약이다. 실제 currency/custody 증거와 instrumentation 한계는 아래에 있으며 stable released API 보장은 아니다.
+**독립 실행형 예산 bank.** 독립 실행형 bank는 단조 trusted-store namespace obligation과 실제 불변 original owner/thread/graph scope, ceiling, deadline/clock identity, generation을 요구한다. 전체 checkpoint commitment·revision에 대한 정확한 durable head CAS만 host-owned opaque lease를 발급할 수 있다. 정확한 pending effect window를 provider I/O 전에 영속화해야 하며 실제 SDK outcome, charge, nullable report, hold, dedup identity로 정산해야 한다. Checkpoint와 next head는 같은 owned actor/revision 아래 원자적으로 publish한다. Bank metadata 제거·checkpoint pruning·old authenticated snapshot replay·같은 ID overwrite·actor 상실은 credit을 주지 않는다. 기존 65 hold에서 ceiling 130을 129로 낮추면 추가 65를 허용할 수 없다. 입증된 no-effect 실패는 unchanged head를 release해 authentic 130 복구가 가능하다. Crash/unknown/lost-lease window는 refund/retry/fallback 없이 hold를 유지한다. Plain archive 설정은 money/native spending lease를 주지 않고 현재 `config.usage`는 기존 독립 실행형 obligation을 대체할 수 없다. Program/external bank는 각자의 journal이 소유한다.
 
-**현재 선언; 통합 runtime 증거는 아래:** `<neograph/graph/checkpoint.h>`는 `owner_scope`, logical `thread_id`, private backend `storage_thread_id`, `graph_identity`, `original_ceiling`, `original_deadline_ticks`, `deadline_clock_identity`를 가진 `ManagedBudgetLeaseScope`를 선언한다. `OwnedManagedBudgetLease`는 read-only `scope()`, `actor_id()`, 불변 `bank_generation()`, `revision()`, `head_checkpoint_id()`, `head_commitment()`를 노출하며 공개 authority-import constructor가 없다. `ManagedBudgetEffectReceipt`는 `active()`, `effect_id()`, `claim_amount()`, `request_digest()`를 노출하고 default receipt는 권한을 주지 않는다. `CheckpointStore`는 `acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment)`, `begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest)`, `settle_managed_budget_effect(lease, effect, genuine_outcome, authority)`, `publish_managed_budget_checkpoint(lease, checkpoint)`, `release_managed_budget_lease(lease)`와 `_async` counterpart를 선언한다. Sync `CheckpointStoreCore`와 `AsyncCheckpointStore`는 각각 해당 variant를 제공한다. `managed_budget_checkpoint_commitment(checkpoint)`는 bank JSON뿐 아니라 전체 영속 checkpoint를 결합한다. 이 선언은 backend CAS·currency 안전성·installed ABI 호환성·실제 성공 runtime 경로를 입증하지 않는다.
+**관리형 예산 lease 선언.** `<neograph/graph/checkpoint.h>`는 `owner_scope`, logical `thread_id`, private backend `storage_thread_id`, `graph_identity`, `original_ceiling`, `original_deadline_ticks`, `deadline_clock_identity`를 가진 `ManagedBudgetLeaseScope`를 선언한다. `OwnedManagedBudgetLease`는 read-only `scope()`, `actor_id()`, 불변 `bank_generation()`, `revision()`, `head_checkpoint_id()`, `head_commitment()`를 노출하며 공개 authority-import constructor가 없다. `ManagedBudgetEffectReceipt`는 `active()`, `effect_id()`, `claim_amount()`, `request_digest()`를 노출하고 default receipt는 권한을 주지 않는다. `CheckpointStore`는 `acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment)`, `begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest)`, `settle_managed_budget_effect(lease, effect, genuine_outcome, authority)`, `publish_managed_budget_checkpoint(lease, checkpoint)`, `release_managed_budget_lease(lease)`와 `_async` counterpart를 선언한다. Sync `CheckpointStoreCore`와 `AsyncCheckpointStore`는 각각 해당 variant를 제공한다. `managed_budget_checkpoint_commitment(checkpoint)`는 bank JSON뿐 아니라 전체 영속 checkpoint를 결합한다.
 
-**실제 InMemory shared-bank fork는 유지되었으며 실제 증명 완료.** 원래 실제 C++ fork는 ONE original financial journal과 trusted current branch head를 쓰며 grant를 복제하지 않는다. `publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)` 및 `_async`는 authentic current source/full commitment와 실제 same-bank native C++ pointer를 요구하고 durable standalone fork는 명시적 unsupported로 남는다. `OwnedManagedBudgetLease::scope()`와 original owner/thread/graph, ceiling, deadline/clock, generation은 불변이다. Read-only store-issued `execution_thread_id()` / `execution_storage_thread_id()`는 execution branch를 별도로 선택하며 `GraphState::budget_original_thread_id()`는 원래 financial bank를 가리킨다. 정확한 selected-branch head CAS와 global actor/revision은 canonical current counter, pending effect, burned identity에 대해 모든 branch를 직렬화한다. Original/fork branch는 보충 없이 계속 사용할 수 있다. Stale snapshot·checkpoint copy·imported JSON은 alias를 발급하거나 head를 되돌릴 수 없다. 원래 root30 → charge3 → original continuation6 → fork lower20 → continuation9 same-bank 증명은 변경하지 않은 test_graph_engine.cpp:810–913에서 PASSED했다. Saved original ceiling30은 effective fork ceiling20과 별개이며 widening31과 JSON-only restore는 거부해야 한다. Unbounded reported observation은 사실 data이지 finite grant가 아니다. 입증된 zero-effect lease만 unchanged head를 release할 수 있고 unknown/pending effect는 obligation을 유지한다.
+**공유 bank fork(InMemory).** 원래 실제 C++ fork는 ONE original financial journal과 trusted current branch head를 쓰며 grant를 복제하지 않는다. `publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork)` 및 `_async`는 authentic current source/full commitment와 실제 same-bank native C++ pointer를 요구하고 durable standalone fork는 명시적 unsupported로 남는다. `OwnedManagedBudgetLease::scope()`와 original owner/thread/graph, ceiling, deadline/clock, generation은 불변이다. Read-only store-issued `execution_thread_id()` / `execution_storage_thread_id()`는 execution branch를 별도로 선택하며 `GraphState::budget_original_thread_id()`는 원래 financial bank를 가리킨다. 정확한 selected-branch head CAS와 global actor/revision은 canonical current counter, pending effect, burned identity에 대해 모든 branch를 직렬화한다. Original/fork branch는 보충 없이 계속 사용할 수 있다. Stale snapshot·checkpoint copy·imported JSON은 alias를 발급하거나 head를 되돌릴 수 없다. 저장된 original ceiling은 effective fork ceiling과 별개이며, 이를 넓히거나 JSON만으로 복원하는 것은 거부된다. Unbounded reported observation은 사실 data이지 finite grant가 아니다. 입증된 zero-effect lease만 unchanged head를 release할 수 있고 unknown/pending effect는 obligation을 유지한다.
 
-**현재 release-error 계약; 실제 suite/probe는 아래.** `<neograph/graph/engine.h>`의 `graph::ManagedBudgetLeaseReleaseError`는 `ProviderOutcomeError`를 상속한다. `cause()`는 원래 execution exception을 보존하고 `release_error()`는 보조 durable lease-disposition 실패를 노출한다. `outcome()`은 실제 SDK 증거가 있으면 보존하고 SDK outcome이 없으면 null이다. Release 실패는 결과를 만들거나 재dispatch를 허용할 수 없다. Closed `_neograph_managed_budget_scope` metadata는 원래 logical scope/cap/deadline clock/generation을 설명하지만 backend CAS 권한이 아닌 data이다.
+**Lease release 오류.** `<neograph/graph/engine.h>`의 `graph::ManagedBudgetLeaseReleaseError`는 `ProviderOutcomeError`를 상속한다. `cause()`는 원래 execution exception을 보존하고 `release_error()`는 보조 durable lease-disposition 실패를 노출한다. `outcome()`은 실제 SDK 증거가 있으면 보존하고 SDK outcome이 없으면 null이다. Release 실패는 결과를 만들거나 재dispatch를 허용할 수 없다. Closed `_neograph_managed_budget_scope` metadata는 원래 logical scope/cap/deadline clock/generation을 설명하지만 backend CAS 권한이 아닌 data이다.
 
-**Archive-owner/retention 계약; 실제 suite/probe는 아래.** Finite standalone root 또는 authenticated finite source만 실제 설정된 `sp::NativeArchive::owner_scope()`에서 생략된 original owner를 상속한다. Unbounded/plain owner metadata 의미는 바뀌지 않는다. 명시적으로 충돌하는 archive owner는 lease acquire 전에 거부한다. `CheckpointStore::retains_native_checkpoint() const noexcept`와 대응 Core/Async storage capability는 기본 false이며 실제 InMemory backend만 true로 override하고 wrapper는 실제 retention을 위임해야 한다. 이 read-only 설명은 정당한 unleased/plain/unbounded C++ native checkpoint custody를 허용하되 spending credit이나 native replay authority를 주지 않는다. Leased custody는 JSON flag나 추측한 store type 대신 실제 store-issued receipt를 사용한다.
+**Archive owner와 retention.** Finite standalone root 또는 authenticated finite source만 실제 설정된 `sp::NativeArchive::owner_scope()`에서 생략된 original owner를 상속한다. Unbounded/plain owner metadata 의미는 바뀌지 않는다. 명시적으로 충돌하는 archive owner는 lease acquire 전에 거부한다. `CheckpointStore::retains_native_checkpoint() const noexcept`와 대응 Core/Async storage capability는 기본 false이며 실제 InMemory backend만 true로 override하고 wrapper는 실제 retention을 위임해야 한다. 이 read-only 설명은 정당한 unleased/plain/unbounded C++ native checkpoint custody를 허용하되 spending credit이나 native replay authority를 주지 않는다. Leased custody는 JSON flag나 추측한 store type 대신 실제 store-issued receipt를 사용한다.
 
-**Native-custody pre-I/O gate; 실제 suite/probe는 아래.** Managed effect begin은 pending-effect/slot/held-window 변경 전에 실제 결합된 NativeArchive 또는 실제 local store-issued private C++ retention capability를 요구한다. Private capability는 JSON에서 import하거나 wire로 전달하지 않는다. C++ sidecar는 경계를 넘을 수 없으므로 remote backend가 InMemory여도 gRPC는 실제 client·server archive를 요구한다. Archive가 finite source owner를 제공하지 않으면 원래 anonymous owner scope는 빈 값으로 유지하고 실제 archive binding은 original scope와 일치해야 한다. Financial head/lease 증거만으로 native-custody readiness를 증명하지 않는다.
+**Native-custody gate.** Managed effect begin은 pending-effect/slot/held-window 변경 전에 실제 결합된 NativeArchive 또는 실제 local store-issued private C++ retention capability를 요구한다. Private capability는 JSON에서 import하거나 wire로 전달하지 않는다. C++ sidecar는 경계를 넘을 수 없으므로 remote backend가 InMemory여도 gRPC는 실제 client·server archive를 요구한다. Archive가 finite source owner를 제공하지 않으면 원래 anonymous owner scope는 빈 값으로 유지하고 실제 archive binding은 original scope와 일치해야 한다. Financial head/lease 증거만으로 native-custody readiness를 증명하지 않는다.
 
 진단 JSON은 문법상 유효한 duplicate-key 문서를 포함해 원래 raw byte를 보존하지만 실행 가능한 요청/config admission은 중복을 계속 거부한다. 원래 non-2xx 응답 JSON은 두 번째 손실 parse 없이 `http.error` 증거에 남는다. named SSE error는 뒤의 정상 stream close보다 우선한다. 진단/provider metadata는 무관한 작은 error-text cap이 아니라 승인된 source extent로 제한된다.
 
@@ -261,19 +261,7 @@ Python `LocalProgramHost`는 소멸 시 `ProgramRuntime`이 스케줄러 작업�
 
 `RecordedBindingSet`는 source-bound move-only data이지 caller가 제공하는 dispatcher가 아니다. 신뢰된 Catalog `recorded_capability_binder`는 실제 영속 source event를 독립적으로 읽어 captured-only capability를 materialize한다. `ProgramRuntime::replay_recorded()`는 원래 selected-source permission을 검사한 뒤 실제 남은 bank를 durable CAS로 이전한다. inherited spend는 새 model grant가 아니다. 구 `start_recorded` 갱신 API는 제거되었다. InMemory/File/SQLite/PostgreSQL Program store는 실행 내내 정확하고 불변인 owned lease를 보존하며 expiry로 갱신하지 않는다. Controlled JavaScript도 underlying capability manifest를 검사하고 정확한 completed command 결과를 소비하며 external effect를 재dispatch하지 않는다.
 
-**Recorded-control causal fix는 full suite에서 실제 증명 완료.** Captured command replay는 실행 전에 새 CPU wall-time/Core work만 durable reserve하고 측정 work와 새 Core checkpoint를 result CAS로 publish한다. 새 model·money·Program-operation allowance를 소비하지 않고 captured external effect를 재dispatch하지 않는다. 미정산 reservation은 debit을 유지한다. Reservation은 첫 새 Core checkpoint를 거부했던 일반 Running→Running transition 대신 인증된 settlement transition을 선택한다. Await channel receive·timer wait/cancel·handoff wait 시작/release는 소유 executor/strand에서 직렬화한다. 기존 Recorded CPU/Memory await/handoff scenario는 full suite에서 pass했다. Remote TSan coverage 한계는 아래에 명시한다.
-
-아래 관측은 이 문서 정리 이전에 기록되었다. 과거 증거이며 새 테스트 실행이나 모든 platform·transport·security 속성의 보장이 아니다.
-
-**유료 관측 완료; 보편적 qualification은 아님.** 원래 `SPQUAL1` base630/1000000 microUSD는 불변이다. 같은 원래 ledger의 ONE hash-chained `A`가 승인 extension480/3000000을 받아 aggregate1110/4000000이 된다. Calls/spent/hold/settlement는 누적이며 새 grant ID/header/reset은 없다. 정확한 declaration byte/file identity와 original authorization/baseline/catalog/activation/ledger-prefix hash/totals는 고정되고 삭제·교체·변경은 fail closed한다. 최종 canonical ledger는 calls1110/spent437958/held1287828 microUSD, eventA1, limits1110/4000000이다. Spent+held US$1.725786은 LOCAL catalogue meter이지 invoice가 아니다. 기록된 five-family60-pair baseline은600 request를 완료했다: Chat60/60, Responses60/60, Messages60/60, Generate56/60(incorrect-vision SSE4개), Interactions57/60(incorrect-vision buffered1개/SSE2개). 합계293/300 pair이며300/300은 아니다. 다른 old600 financial record는 보존하되 완전한 behavioral proof는 아니다. 이전 M5/media one-shot cohort는 그대로다. 이전 Google3-round prerequisite의 invalid-tool2개/unreadable-positive1개 실패 상태를 유지한다. 추가 유료 호출은 승인되지 않는다. 최종 SDK 증거와 native-axis 한계는 baseline 성공과 별개다. 이전 activation/reopen smoke는 두 번 reopen한 calls610/spent219159/held751233 및 SDK meter/canary/vision4-test19.38초 pass로 보존한다. 이는 범위가 정해진 이전 checkpoint이지 최종 ledger totals가 아니다. 이전 검증된 Chat60-pair cohort의 실제 attempt120,UpperBound charge120,UnknownHold 없음도 보존한다.
-
-**Native-axis 관측은 cryptographic 검증·native consumption/equivalence가 아니다.** Generate는 mutation/omission/duplication을 받아들였다. Interactions는 isolated genuine source/positive control, one-owner signature mutation, thought-carrier omission, call-carrier omission, duplication을 받아들였다. 모든 thought/signature 제거는 generic400을 반환했고 THOUGHT item을 유지한 채 모든 signature field를 제거해도 generic400이었다. 마지막 capture에는 local encoded-original retention control만 있고 same-capture server positive는 없었다. 이전 positive cohort는 실제 증거다. 이는 aggregate-carrier-absence boundary만 입증하며 issuer/signature 검증이나 vendor consumption을 입증하지 않는다. 실제 report: SDK `config/qualification-extension-results.json`, `qualification-final-summary.json`, `qualification-native-axis-results.json`, `qualification-combined-omission-results.json`, `qualification-signature-presence-results.json`. Prerequisite-failed/not-run/negative-inconclusive 상태는 사실 그대로 유지한다. Thought-only/carrier-only omission은 다른 carrier가 남아 있는 상태에서 받아들여졌다. Issuer-validation/native-consumption 주장을 강화하지 않는다.
-
-**실제 통합 증명과 남은 한계.** 최신 Core full run:2242 test, 실패0,skip16(RAM process-loss 비적용14개/live-credential gate2개),130.17초. `PgNestedJsonRoundTrips`는 duplicate key/order/null metadata,blob,residual을 정확히 보존하며0.18초 pass했다. 변경하지 않은 원래 shared-bank fork와 기존 Recorded CPU/Memory await/handoff scenario가 pass했다. 실제 wrappedMemory/SQLite/PostgreSQL/gRPC finite130/hold65/lower129/strip/old-head/pruning/no-archive/import probe는 plain과 ASan+UBSan에서 pass했다. LOCAL Memory/SQLite/PostgreSQL TSan scope는7개 pass,warning0이다. System Abseil/Protobuf를 포함한 full mixed gRPC TSan은 exit66,dependency/generated-RPC stack에 race warning402개였다. 이는 instrumentation/coverage 한계이지 proven false positive가 아니다. Remote TSan/race-free를 주장하지 않으며 warning을 suppress하지 않는다. Installed find_package Program C++/C ABI/dualQuickJS3 consumer는 pass했다. Fresh installed NeoGraph/SchemaProvider typed consumer는 실제 HTTP request2개,coroutine 시작 전 provider 소멸,native/tool replay,refusal,known-zero/raw 보존,실제 LinkedMismatch 거부를 pass했다. Browser Alice/Bob isolation·generation2 replacement를 실제 시각 검증했고 PostgreSQL Program Chat black-box6개는18.989초 pass했다. 최신 SDK26/26은 실패0,74.07초 pass했다. 최종 ReleaseGraph16설정 ×fresh process3회/48기록은38.29초,실패0,모든 actual protocol/owned-outcome check pass로 완료했다. NeoGraph `benchmarks/provider-cutover-final-results.json`과 `benchmarks/provider-cutover-final-summary.json`은 별도의 최종 cohort를 보존한다. 측정 중 compiler/유료 model은 실행하지 않았고 historical cohort는 그대로이며 semantic/resource equivalence를 주장하지 않는다. Unstable SDK/ABI3는 stable release나 더 넓은 platform qualification이 아니다.
-
-**최소 유료 증거(2026-10-03)는 광범위 qualification이 아니다.** 별도로 승인한 one-shot 세 호출 결과: Images—JPEG 1개, 1024×1024, 360685 byte, input/output/total token 19/1408/1427, 실제 시각 검사; Veo—MP4 1개, 1280×720, 4초, 437737 byte, generation 1회와 status GET 3회, usage nullable, Chromium decode·시각 검사; Decisions—`typesafe/jev-1.13`, probability 0.93, input/output token 283/21, total 미상, API 보고 비용 USD 0.000011886. Image USD 0.0336 base + text/thinking, Veo USD 0.20은 catalog 예상이지 invoice가 아니다. 최소 image smoke에서는 가격대별 내역을 수집하지 않았다. 결과는 one-shot 권한을 갱신하거나 재실행을 승인하지 않는다.
-
-완료된 chat pair는 downstream vendor의 native-continuation 소비를 입증하지 않는다.
+**Recorded replay 정산.** Captured command replay는 실행 전에 새 CPU wall-time/Core work만 durable reserve하고 측정 work와 새 Core checkpoint를 result CAS로 publish한다. 새 model·money·Program-operation allowance를 소비하지 않고 captured external effect를 재dispatch하지 않는다. 미정산 reservation은 debit을 유지한다. Await channel receive·timer wait/cancel·handoff wait 시작/release는 소유 executor/strand에서 직렬화한다.
 
 ```cpp
 #include <neograph/types.h>
@@ -436,7 +424,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 alpha `0.1.1`, interface revision 4 / shared-library generation 4이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. 기록된 interface-3 SDK runtime/archive 검증은 Linux/POSIX의 과거 증거이지 interface-4 pass가 아니다. Windows NTFS와 macOS 구현이 있으나 새 platform 검증에는 runtime 증거가 필요하며 WASM provider runtime 검증은 입증되지 않았다.
+소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 alpha `0.1.1`, interface revision 4 / shared-library generation 4이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. Linux/POSIX가 검증된 플랫폼이다. Windows NTFS와 macOS 구현이 있으나 이 SDK로 검증하지 않았으며, WASM provider runtime 지원은 확립되지 않았다.
 
 Python도 C++과 같은 소유 request/outcome 경계를 제공한다: `make_provider_request`, `Provider.prepare`, `dispatch`, `invoke`. Provider 기록에는 typed part를 가진 `ProviderMessage`를 사용하며 `ChatMessage`는 그래프 편의 projection으로 남는다. SDK 실패는 `ProviderOutcome.failure`로 읽고 host observer/settlement 예외는 `outcome`과 `cause`를 보존한다. 생성자와 GIL/콜백 동작은 [Python binding 안내](python-binding.md)를 참조한다.
 
@@ -444,14 +432,10 @@ Python SDK의 vector/map getter는 분리된 값을 반환한다: `ProviderMessa
 
 네이티브 코드가 Python provider의 `prepare` override를 호출할 때 `None`을 반환하면 handle을 소비하기 전에 `TypeError`가 발생한다. `ProviderDescriptorPolicy.identity`는 raw SHA-256 digest를 담은 `bytes`이며 `.hex()`는 표시용 변환이다. 저장된 Python provider/graph cause를 반복해서 읽어도 원래 예외 값과 traceback을 유지하고 저장된 예외의 restore 상태를 소비하지 않는다. 중첩된 네이티브 예외 변환에도 같은 규칙이 적용된다.
 
-이전에 기록한 installed find_package Program C++/C ABI/dualQuickJS consumer와 NeoGraph/SchemaProvider typed2-request lifetime/native/raw/mismatch consumer는 당시 snapshot에서 pass했다. 이 결과가 interface-4 package 검증을 입증하지는 않는다. 선언 일치만으로 새 runtime 결과나 더 넓은 platform 지원을 증명하지 않는다.
-
-현재 SDK4 Linux x86_64 증거는 등록된 27 case를 모두 다룬다. 최초 full run에서 25개가 pass했고 obsolete assertion 두 개를 고친 뒤 `native_archive`와 `stop_reasoning_preservation`이 focused 2/2로 pass했다. 두 번째 full-suite 27/27 실행은 아니다. 변경 없는 buffered/SSE Stop probe와 설치 SDK의 exact README consumer도 pass했다. 후자는 zero-usage, unknown-usage, HTTP-400-failure variant마다 credential 없는 요청 하나를 실행했다. 이 SDK 결과는 새 NeoGraph native build/wheel pass나 Windows/macOS/ARM64/HTTP3 검증을 입증하지 않는다.
-
 <a id="pricing-evidence-and-the-price-catalog"></a>
 ### 가격 증거와 가격 카탈로그
 
-Program 실행의 `monetary_microunits` 예산은 micro-USD(1 microunit = 1e-6 USD)를 센다. 호스트가 내장 `llm_call` 노드의 provider 호출을 가격 broker로 보낼 때 호출에 가격이 매겨진다. 프로세스 안에서는 `bind_priced_provider_call(context)`, 크래시에 안전한 재생이 필요하면 `SQLiteProgramProviderCallJournal::bind_priced(context, deployment)`를 쓴다. 런타임은 각 broker에 attempt의 금액 계정을 `ProgramCoreProviderCallContext::monetary_account`로 넘긴다. Python `LocalProgramHost(node_context=..., binding_label=...)`는 항상 호출에 가격을 매긴다([Python 가이드](python-binding.md#model-calling-nodes)). 모든 `RunBudget` 필드와 마찬가지로 `monetary_microunits`는 실행에 부여된 양이며 `0`은 아무것도 부여하지 않는다. 자식과 fork 예산은 부모의 양에서 떼어 내고, `model_tokens = 0`으로 모델 토큰을 쓴 완료 실행은 `BudgetExhausted`로 보고된다. #372 전에는 아무것도 금액을 청구하지 않았다. 이제 `monetary_microunits = 0`인 실행은 가격이 매겨지는 모든 호출을 보내기 전에 거부한다. 가격 코드는 내부용(`src/program/pricing.h`, `monetary.h`)이며 ABI를 약속하지 않는다.
+Program 실행의 `monetary_microunits` 예산은 micro-USD(1 microunit = 1e-6 USD)를 센다. 호스트가 내장 `llm_call` 노드의 provider 호출을 가격 broker로 보낼 때 호출에 가격이 매겨진다. 프로세스 안에서는 `bind_priced_provider_call(context)`, 크래시에 안전한 재생이 필요하면 `SQLiteProgramProviderCallJournal::bind_priced(context, deployment)`를 쓴다. 런타임은 각 broker에 attempt의 금액 계정을 `ProgramCoreProviderCallContext::monetary_account`로 넘긴다. Python `LocalProgramHost(node_context=..., binding_label=...)`는 항상 호출에 가격을 매긴다([Python 가이드](python-binding.md#model-calling-nodes)). 모든 `RunBudget` 필드와 마찬가지로 `monetary_microunits`는 실행에 부여된 양이며 `0`은 아무것도 부여하지 않는다. 자식과 fork 예산은 부모의 양에서 떼어 내고, `model_tokens = 0`으로 모델 토큰을 쓴 완료 실행은 `BudgetExhausted`로 보고된다. `monetary_microunits = 0`인 실행은 가격이 매겨지는 모든 호출을 보내기 전에 거부한다. 가격 코드는 내부용(`src/program/pricing.h`, `monetary.h`)이며 ABI를 약속하지 않는다.
 
 dispatch 전에 broker는 준비된 요청에 가격을 매긴다. origin은 descriptor base URL과 URL이 일치하는 카탈로그 origin이며, SDK 정책이 그 base URL을 OpenRouter origin으로 선언하면 `openrouter`다. hold는 요청의 입력 상한과 출력 cap에 대한 카탈로그 예약에, dispatch 한 번이 청구할 수 있는 모델 호출 수(`Provider::invocation_upper_bound`)를 곱한 값이다. 입력 상한은 그 모델에 대해 알려진 가장 작은 입력 한도, 즉 SDK 정책의 한도, 카탈로그의 `max_input_tokens` 또는 context window다. 모든 입력 토큰은 가장 비싼 입력 구간 요율로, 모든 출력 토큰은 가장 비싼 출력 요율로 계산하며 aggregator에서는 route ceiling을 쓴다. 상한을 정할 수 없거나 hold가 남은 예산에 들어가지 않는 호출은 요청이나 journal marker가 생기기 전에 거부된다. 노드는 보내지 않았음을 나타내는 합성 provider 실패로 실패하고, 실행의 `ProgramFailure`가 이유를 밝힌다. `failure.witness["monetary"]`에는 origin, model, 상한과 카탈로그가 들어 있다.
 
@@ -1386,7 +1370,7 @@ struct RunConfig {
 | `usage` | `std::shared_ptr<UsageAccumulator>` | `nullptr` | Optional token accumulator. The engine creates one when omitted and exposes the active accumulator as `in.ctx.usage` |
 | `resume_if_exists` | `bool` | `false` | If `true` and a checkpoint exists for `thread_id`, seed from it before applying `input` (multi-turn chat shape) |
 
-### RunContext (v0.4 PR 1, exposed to nodes via `NodeInput.ctx`)
+### RunContext (v0.4, exposed to nodes via `NodeInput.ctx`)
 
 엔진이 전달하는 실행별 dispatch metadata입니다. 처음에는 `RunConfig`(usage
 accumulator가 없으면 생성), `RunMetadata`, 유효 Store, 선택적 resume value로
@@ -1512,7 +1496,7 @@ asio::awaitable<NodeOutput> run(NodeInput in) override {
 |--------|-------------|
 | `cancel()` | Idempotent, thread-safe. Sets the polling flag and emits the asio cancellation_signal on the bound executor; cascades to all live children via `fork()` |
 | `is_cancelled()` | Lock-free polling read |
-| `fork()` | **v0.4 PR 3.** Returns a child shared_ptr. Parent.cancel() cascades; if the parent is already cancelled at fork() time the child is constructed pre-cancelled (no emit-vs-bind race) |
+| `fork()` | **v0.4.** Returns a child shared_ptr. Parent.cancel() cascades; if the parent is already cancelled at fork() time the child is constructed pre-cancelled (no emit-vs-bind race) |
 | `bind_executor(ex)` | Engine-internal; binds the executor that handles signal emits |
 | `slot()` | asio `cancellation_slot` for `bind_cancellation_slot` at `co_spawn` time |
 
@@ -1667,7 +1651,7 @@ public:
     // owned `asio::thread_pool` of size n. build() defaults to
     // n==1 — prefer EngineConfig::worker_count to opt into
     // real parallel fan-out. Throws `std::logic_error` if called
-    // while a run is in flight (Round 3 guard — `active_runs_`
+    // while a run is in flight (an `active_runs_`
     // counter prevents tasks queued on the old pool from being
     // silently dropped on swap).
     void set_worker_count(std::size_t n);
@@ -2275,7 +2259,7 @@ constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
 | `metadata` | `json` | Arbitrary user-defined data |
 | `step` | `int64_t` | Super-step counter |
 | `timestamp` | `int64_t` | Creation time in Unix epoch milliseconds |
-| `schema_version` | `std::uint32_t` | On-wire layout version (see `CHECKPOINT_SCHEMA_VERSION`, currently `3`). Round 5 widened this from `int` to fixed-width unsigned — schema versions are non-negative and a platform-variable `int` width was wrong for a value persisted to disk and round-tripped through JSON. Persistent `CheckpointStore` implementations should serialize it and treat `0` on a deserialized blob as "pre-versioned" (e.g. the field was absent — migration is the caller's responsibility) |
+| `schema_version` | `std::uint32_t` | On-wire layout version (see `CHECKPOINT_SCHEMA_VERSION`, currently `3`). It is a fixed-width unsigned type because a schema version is non-negative and is persisted to disk and round-tripped through JSON. Persistent `CheckpointStore` implementations should serialize it and treat `0` on a deserialized blob as "pre-versioned" (e.g. the field was absent — migration is the caller's responsibility) |
 
 ### CheckpointStore
 
@@ -3116,7 +3100,7 @@ HTTP 오류 상태가 그것을 실어 온 경우에도 그렇습니다(이때 `
 | 메서드 | 설명 |
 |--------|-------------|
 | `MCPClient(url)` | MCP 엔드포인트 `url`을 주어진 그대로 쓰는 HTTP 모드 클라이언트를 만듭니다 |
-| `MCPClient(argv)` | 하위 프로세스를 실행하고 stdio 모드 클라이언트를 만듭니다. `argv[0]`은 fork 전에 `PATH`로 해석되며, exec 실패는 첫 RPC에서 연결 오류로 나타납니다. 안전을 위해 Windows `.bat`/`.cmd`를 거부합니다(Round 3 hardening) |
+| `MCPClient(argv)` | 하위 프로세스를 실행하고 stdio 모드 클라이언트를 만듭니다. `argv[0]`은 fork 전에 `PATH`로 해석되며, exec 실패는 첫 RPC에서 연결 오류로 나타납니다. 안전을 위해 Windows `.bat`/`.cmd`를 거부합니다 |
 | `MCPClient(StdioClientConfig)` | 명시적 환경, 제한된 stderr 캡처, deadline, 취소 유예 시간을 갖춘 강화된 stdio 실행 |
 | `initialize(client_name)` | MCP 초기화 핸드셰이크를 한 번 수행합니다. 반복 호출은 멱등적이며, 프로토콜/전송 실패는 예외를 던집니다 |
 | `initialize(client_name, deadline, cancel_token)` | deadline과 cancel token으로 제한된 핸드셰이크 |
@@ -3604,7 +3588,6 @@ edge / single-host deployments.
 
 ### Other public surface not in this tour
 
-- 선택적 `ProviderControls`는 호출자 선택이며 강제 기본값이나 몰래 clamp한 cap이 아니다. family가 지원하지 않는 제어는 dispatch 전에 거부한다. 유한 예산 호출에는 승인된 실제 모델 input/output 한계가 필요하며 없으면 `LimitUnknown`으로 실패한다. 예약은 보수적인 지출 권한이지 보고 사용량·예측·청구서가 아니다. 미상/부분/delivery-unknown 결과는 hold를 유지하고 실제 최종 보고로 정산하며 초과 보고도 전부 청구한다. 재시도는 단일 명시적 계층이며 기본 off, 유한 window와 unknown-prior hold를 사용한다. 숨은 재전송은 없다.
 - **`neograph::AsyncTool`** — `Tool` peer that exposes
   `execute_async(json)` for tools whose work is naturally
   coroutine-shaped (HTTP fetch, MCP call). Sync `execute()` is
@@ -3614,9 +3597,9 @@ edge / single-host deployments.
   compatibility surface).
 - **`neograph::graph::create_deep_research_graph`** —
   open_deep_research-style supervisor + sub-researcher fan-out,
-  used by `examples/25_deep_research.cpp`. Round 2 audit added
-  `BriefNode` LLM rewrite, `FinalReportNode` token-limit retry,
-  `ClarifyNode` HITL gate.
+  used by `examples/25_deep_research.cpp`. It includes a
+  `BriefNode` LLM rewrite, a `FinalReportNode` token-limit retry and
+  a `ClarifyNode` HITL gate.
 
 If the type you need isn't in this tour, check `include/neograph/`
 directly. Every public header carries its reference documentation.

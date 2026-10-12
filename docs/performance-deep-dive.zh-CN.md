@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=zh-CN source_sha256=31ea664b884c612f5b01c1132fe748da0cb0115e2afe5bf203f33e958516c63b -->
+<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=zh-CN source_sha256=2d15a0b62d2881a1880f92dc7b5d24e9e499ffc57b27fd02b0bb365c20ce9225 -->
 # 性能深度剖析
 
 **Languages:** [English](performance-deep-dive.md) | [한국어](performance-deep-dive.ko.md) | [日本語](performance-deep-dive.ja.md) | [简体中文](performance-deep-dive.zh-CN.md)
@@ -7,7 +7,7 @@
 
 下面的表格保留的是切换（cutover）之前的测量值。它们不能证明当前带类型的 provider、它所依赖的外部运行时，或者重新构建的 Python wheel 合格。做任何新的对比时，都要记录修订版本、编译器、配置、拓扑、并发数、endpoint 和计时边界。当前如何复现，见[基准测试](../benchmarks/README.md)。
 
-以前的行文曾根据这些测量值，推算云账单、数百万个 worker 和永久冻结的 ABI。那些只是推算，不是实测的部署，也不是当前容量或成本的保证。除了包的版本，还要固定 wheel 的哈希和原生依赖；仅凭一个版本号，不能让部署可复现。
+这些测量值不能用来保证云成本、worker 数量或容量。除了包的版本，还要固定 wheel 的哈希和原生依赖；仅凭一个版本号，不能让部署可复现。
 
 ## 仅引擎的工作负载，2026 年 4 月
 
@@ -111,4 +111,4 @@ valgrind --tool=cachegrind --cache-sim=yes \
   ./build-release/bench_neograph
 ```
 
-请对生成的产物用 `ldd`/`otool` 或平台自带的加载器清单检查实际的依赖，而不要默认沿用旧的依赖列表。记录在案的接口 3 的 SDK 运行时和 archive 资格认证覆盖 Linux/POSIX，不覆盖接口 4；现有的 macOS/Windows 元数据和 WASM 目标，也不能证明这个依赖合格。当前带类型的 Python 绑定是这次切换的一部分，不是延后的事项；它们的性能需要针对重新构建的 wheel 去测量。
+请对生成的产物用 `ldd`/`otool` 或平台自带的加载器清单检查实际的依赖，而不要默认沿用旧的依赖列表。带类型的 Python 绑定的性能需要针对重新构建的 wheel 单独测量。

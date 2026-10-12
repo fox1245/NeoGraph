@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=51c4b4ad6cac765e2629982d260600386568149c97b34cad0d1f779d395f4c6b -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=6f69f4c493387ec533fd315d4e5a294d10e695e59765446ee310d4add2d1b624 -->
 # Program 指南：协调图的 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -22,8 +22,6 @@ Program 层需要包含 Program 和 QuickJS 控制的构建：`pip install neogr
 一个发布作业并行检查三个服务。`payments` 的检查失败了。作业没有整体失败，而是把失败送到评审步骤，作业在那里等待人工处理。人批准发布后，其他服务不用重新检查，作业随即完成。同一个作业在预算之内运行。
 
 示例由三个 Python 文件组成。`release_program.py` 放每次运行都不变的全部内容，`run_release.py` 和 `restart.py` 使用它。
-
-<!-- TODO(link): replace the listings below with a link to the Program example under examples/ once the examples overhaul adds it. -->
 
 ### 1. 节点代码
 

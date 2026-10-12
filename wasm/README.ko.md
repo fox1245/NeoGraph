@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=1f49ed436cfb27bb00b666cedc90e9c3cc246bcbd3243db1f137c7142f5c9380 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=08ae98c9b9640fa53657b63ba4a2691bf503e965a04f5442b3bde19d974e6ca7 -->
 # NeoGraph WASM 스모크 프로그램
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -10,22 +10,21 @@
 
 ## 현재 빌드 범위
 
-typed provider 전환(cutover) 이후로는 `NEOGRAPH_BUILD_LLM=OFF`여도 `SchemaProvider::runtime`이
-Core의 의존성입니다. CMake 3.20 이상은 먼저 명시적으로 지정한 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`을
+Core는 `NEOGRAPH_BUILD_LLM=OFF`여도 `SchemaProvider::runtime`에
+의존합니다. CMake 3.20 이상은 먼저 명시적으로 지정한 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`을
 고르고, 없으면 설치된 런타임을, 그것도 없으면 버전이 고정된 공개 GitHub 소스 아카이브를
 선택합니다. 다운로드 대체 경로는 `NEOGRAPH_FETCH_SCHEMAPROVIDER`로 제어하며 기본값은 ON입니다.
 오프라인 패키지/소스 빌드에서는 OFF로 바꿉니다. Core는 SDK 런타임에 링크하며, SDK의 libcurl 전송
 계층에는 링크하지 않습니다. 확인한 SDK 고정 버전(pin)에서는 런타임 타깃이 CURL에 링크하지 않는데도,
 최상위 SDK CMake가 구성 단계에서 여전히 CURL을 요구합니다. OpenSSL은 런타임의 직접 의존성이
 아닙니다. 네이티브 SDK 라이브러리는 WebAssembly에 링크할 수 없습니다. Emscripten 타깃에서
-런타임/아카이브와 C++ 표준 라이브러리 지원이 검증되어야 하며, 아래의 과거 스모크 결과가 현재
-빌드의 성공을 보증하지는 않습니다.
+SDK 런타임, 아카이브 지원, C++ 표준 라이브러리가 동작해야 하며, 아래의 과거 스모크 결과가 현재
+코드의 빌드 성공을 보여 주지는 않습니다.
 
 현재 빌드에는 SDK `0.3.0`, 인터페이스 리비전/공유 라이브러리 세대 6이 필요하며, SchemaProvider
 `maint/interface6`의 커밋 `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`를 같은 타깃용으로 빌드해야
-합니다. 실제 Emscripten용 SDK 런타임을 검증하는 일이 여전히 선행 조건입니다. 이 문서는 WASM
-지원을 포기하는 것도 아니고 현재 빌드를 보장하는 것도 아닙니다. 아카이브 v3 / `spna3`와 이식
-가능한 JSON v2는 바뀌지 않았습니다.
+합니다. 실제 Emscripten용 SDK 런타임 빌드가 선행 조건이며,
+이 문서는 현재 빌드의 성공을 보장하지 않습니다.
 
 ### 지원 대상의 요구 사항
 
@@ -35,8 +34,8 @@ C++20 계약을 지원해야 합니다. 네이티브 아카이브 보관(custody
 기능을 꺼서는 안 됩니다.
 
 새 빌드 디렉터리를 쓰고, SDK 구성 단계에 필요한 CURL 의존성을 포함해 같은 타깃용으로 만든 실제
-의존성을 사용합니다. 네이티브 라이브러리를 쓰거나 의존성이 있는 것처럼 꾸며서는 WebAssembly
-빌드를 검증할 수 없습니다. 현재 Node.js와 브라우저에서의 실행은 아직 검증되지 않았습니다.
+의존성을 사용합니다. 네이티브 라이브러리를 쓰거나 의존성이 있는 것처럼 꾸며서는 유효한 WebAssembly
+빌드가 되지 않습니다. 현재 Node.js와 브라우저에서의 실행은 아직 확인되지 않았습니다.
 
 ## 과거 결과
 
@@ -121,5 +120,5 @@ python3 wasm/serve_smoke.py build-wasm/wasm --port 8765
 동작한다는 증거가 되지 않습니다.
 
 이 하네스는 npm 패키지, Embind API, JS 그래프 콜백, provider 전송 계층을 제공하지 않습니다.
-호스팅 모델 접근, 로컬 추론, NeoProtocol Executor 통합은 모델을 쓰지 않는 이 스모크로 검증되지
-않습니다.
+호스팅 모델 접근, 로컬 추론, NeoProtocol Executor 통합은 모델을 쓰지 않는 이 스모크의
+범위 밖입니다.

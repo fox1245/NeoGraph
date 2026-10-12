@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=1f49ed436cfb27bb00b666cedc90e9c3cc246bcbd3243db1f137c7142f5c9380 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=08ae98c9b9640fa53657b63ba4a2691bf503e965a04f5442b3bde19d974e6ca7 -->
 # NeoGraphのWASMスモークプログラム
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -7,17 +7,17 @@
 
 ## 現在のビルドの前提と限界
 
-型付きプロバイダーへの切り替え後は、`NEOGRAPH_BUILD_LLM=OFF` にしても、Coreは `SchemaProvider::runtime` に依存します。CMake 3.20以降は、明示した `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、インストール済みのランタイム、リビジョンを固定した公開GitHubのソースアーカイブの順に選びます。ダウンロードへのフォールバックは、`NEOGRAPH_FETCH_SCHEMAPROVIDER` によってデフォルトでONです。パッケージやソースを使ってオフラインでビルドするときは、OFFにしてください。
+`NEOGRAPH_BUILD_LLM=OFF` にしても、Coreは `SchemaProvider::runtime` に依存します。CMake 3.20以降は、明示した `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、インストール済みのランタイム、リビジョンを固定した公開GitHubのソースアーカイブの順に選びます。ダウンロードへのフォールバックは、`NEOGRAPH_FETCH_SCHEMAPROVIDER` によってデフォルトでONです。パッケージやソースを使ってオフラインでビルドするときは、OFFにしてください。
 CoreがリンクするのはSDKのランタイムで、そのlibcurlトランスポートはリンクしません。確認したSDKの固定リビジョンでは、ランタイムのターゲットがCURLをリンクしないにもかかわらず、SDKのトップレベルのCMakeが、構成時にCURLを要求します。OpenSSLは、ランタイムが直接依存するものではありません。
-ネイティブのSDKライブラリーを、WebAssemblyにリンクすることはできません。Emscriptenのターゲットでは、ランタイムとアーカイブ、およびC++標準ライブラリーのサポートについて、適格性確認が必要です。下の過去のスモークテストは、現在のビルドが成功することを示すものではありません。
+ネイティブのSDKライブラリーを、WebAssemblyにリンクすることはできません。Emscriptenのターゲットでは、SDKのランタイム、アーカイブのサポート、C++標準ライブラリーが動作する必要があります。下の過去のスモークテストは、現在のコードがビルドできることを示すものではありません。
 
-現在のビルドには、同じターゲット向けにビルドした、SDK `0.3.0`（インターフェースのリビジョンと共有世代は6、SchemaProviderの `maint/interface6` のコミット `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`）が必要です。本物のEmscripten向けのSDKランタイムの適格性確認は、引き続き前提条件です。このページは、WASMのサポートを打ち切るものではなく、現在のビルドが成功することを保証するものでもありません。アーカイブv3／`spna3` とポータブルJSON v2は、変わりません。
+現在のビルドには、同じターゲット向けにビルドした、SDK `0.3.0`（インターフェースのリビジョンと共有世代は6、SchemaProviderの `maint/interface6` のコミット `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`）が必要です。本物のEmscripten向けのSDKランタイムのビルドが前提条件であり、このページは、現在のビルドが成功することを保証するものではありません。
 
 ### サポート対象のターゲットの要件
 
 Emscriptenのツールチェーンと、C++標準ライブラリーが、SDKのC++20の契約（`std::bit_cast` と `std::stop_token` を含む）をサポートしている必要があります。ネイティブアーカイブの保管（custody）には、ターゲットでサポートされている、上書きしないアトミックなファイルシステムのバックエンドが必要です。ビルドを通すために、保管を無効にしてはいけません。
 
-ビルドディレクトリーは新しく作り、同じターゲット向けの本物の依存を使ってください。SDKの構成時に必要になるCURLの依存も同様です。ネイティブのライブラリーや、依存があるかのように見せかけたものでは、WebAssemblyのビルドの適格性確認はできません。Node.jsとブラウザーでの現在の実行も、適格性確認が済んでいません。
+ビルドディレクトリーは新しく作り、同じターゲット向けの本物の依存を使ってください。SDKの構成時に必要になるCURLの依存も同様です。ネイティブのライブラリーや、依存があるかのように見せかけたものでは、有効なWebAssemblyのビルドにはなりません。Node.jsとブラウザーでの現在の実行は、まだ確認していません。
 
 ## 過去の結果
 
@@ -85,4 +85,4 @@ python3 wasm/serve_smoke.py build-wasm/wasm --port 8765
 
 サーバーは `Cross-Origin-Opener-Policy: same-origin` と `Cross-Origin-Embedder-Policy: require-corp` を送ります。ハーネスは、クロスオリジン分離と `SharedArrayBuffer` が使えないと、実行を拒否します。読み込むのは、実際に生成された `smoke.js` で、代わりのランタイムではありません。合格の条件は、出力が `doubled = 42` と `trace = d` で、終了コードが0であることです。これは、`document.body.dataset.result === "pass"` と `dataset.exitCode === "0"` として公開されます。ブラウザーの種類とバージョン、コンソールのエラー、実際の出力を記録してください。Node.jsでの実行が成功しただけでは、ブラウザーでの動作のエビデンスにはなりません。
 
-このハーネスは、npmパッケージ、Embind API、JSによるグラフのコールバック、プロバイダーのトランスポートを提供しません。ホスト型モデルへのアクセス、ローカル推論、NeoProtocol Executorとの統合については、モデルを使わないこのスモークテストでは、適格性確認ができません。
+このハーネスは、npmパッケージ、Embind API、JSによるグラフのコールバック、プロバイダーのトランスポートを提供しません。ホスト型モデルへのアクセス、ローカル推論、NeoProtocol Executorとの統合については、モデルを使わないこのスモークテストの対象外です。

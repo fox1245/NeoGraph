@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=5ecfa5a3968c2ebfb4344b913e7b9be42f04485f90940d647b0d693b1f9d129a -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=c256cd8dbcff6a9d694757b520df28f400ba2037d5521599da2e474fb625a0d4 -->
 # バイナリ互換性ポリシー
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -23,7 +23,7 @@ CMakeは、NeoGraphのバージョンを `pyproject.toml` から読み取り、�
 - イベント駆動のプロバイダーディスパッチ：CancelTokenは `std::stop_source` を使い、`stop_token()` を公開します。`cancel`、`fork`、Asioスロットのシグネチャが残っているからといって、古いインラインのキャンセルのコードに互換性があるわけではありません。
 - drain済みのキャンセルコンテキストのdetach：CancelTokenの公開レイアウトに、世代で区切られた発行状態が加わりました。NeoGraphと、すべてのネイティブコンシューマーをまとめて再ビルドしてください。detachは、コンテキストを破棄する前に、完了したスロットのハンドラーを解放します。ただし、操作がdrainされていることが引き続き必要で、キャンセルの状態はリセットされません。
 - `ChatTool::strict`：ポータブルなツール定義にメンバーが追加されました。`ChatTool` は、`Tool::get_definition()` と `make_provider_request` で、値渡しでライブラリの境界を越えます。そのため、NeoGraph、すべてのネイティブコンシューマー、カスタムの `Tool`、Pythonの拡張を、まとめて再ビルドしてください。
-- 将来の `1.0.0` の境界では、ローダーの世代が `1` になり、再ビルドが必要になります。世代1での固定は、そのリリースに向けたポリシーであり、現時点の適格性確認の結果ではありません。
+- 将来の `1.0.0` の境界では、ローダーの世代が `1` になり、再ビルドが必要になります。世代1での固定は、そのリリースに向けたポリシーです。
 
 ## エクスポートされるインターフェース
 
@@ -35,7 +35,7 @@ CheckpointStoreは、アダプターへの明示的な移行のために、従�
 
 Coreは、LLMノードを無効にしても、外部の `SchemaProvider::runtime` を必要とします。採用しているSDKのリリースは `0.3.0` alphaで、公開されている `maint/interface6` のコミット `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`、インターフェースリビジョン `6`、共有ライブラリのABIリビジョン `6` です。capabilityのチェックはアウトオブラインです。これは、安定したインターフェースだという主張ではありません。対応するSDKのコンポーネントは、まとめてインストールしてください。`libsp_*.so.6` の世代は、NeoGraphのローダーの世代とも、Pythonの `abi3` wheelタグとも別のものです。
 
-インターフェース6では、公開されている使用量のレイアウトに、プロバイダーが報告する金額のメタデータ（固定サイズ）が加わりました。また、ブロッキングのSDK呼び出しと非同期のSDK呼び出しは、1つの非同期パイプラインを使います。採用しているコミットでは、リビジョン6の中で、`sp::OpenRouterRouting` も拡張されました（`max_price` が追加されています）。Chat、Messages、Responsesのリクエストのレイアウトも拡張されています。capabilityビット `OpenRouterRoutingMaxPrice` は、`RequiredProvider` の一部で、NeoGraphのハンドシェイクが要求するものです。このビットによって、これより前のインターフェース6のライブラリは拒否されます。SDKのコンシューマー、NeoGraph、Pythonの拡張は、まとめて再ビルドしてください。これより前のヘッダーやライブラリは、インターフェース6とは互換性がありません。ブロッキングのラッパーは、SDKのイベントループとコールバックのワーカーへの再入を、引き続き拒否します。ネイティブarchive v3（`spna3`）とポータブルJSON v2は、それぞれ独立した、変更のない形式のままです。正規の結果v2の使用量に、省略可能な `provider_cost` が加わるのは、金額のメタデータがある場合だけです。メタデータがないだけの過去のレコードは、元のバイト列を保ち、コストを捏造することはありません。以前のインターフェース3/4/5での測定は、元の範囲のままで、インターフェース6の適格性確認にはなりません。
+インターフェース6では、公開されている使用量のレイアウトに、プロバイダーが報告する金額のメタデータ（固定サイズ）が加わりました。また、ブロッキングのSDK呼び出しと非同期のSDK呼び出しは、1つの非同期パイプラインを使います。採用しているコミットでは、リビジョン6の中で、`sp::OpenRouterRouting` も拡張されました（`max_price` が追加されています）。Chat、Messages、Responsesのリクエストのレイアウトも拡張されています。capabilityビット `OpenRouterRoutingMaxPrice` は、`RequiredProvider` の一部で、NeoGraphのハンドシェイクが要求するものです。このビットによって、これより前のインターフェース6のライブラリは拒否されます。SDKのコンシューマー、NeoGraph、Pythonの拡張は、まとめて再ビルドしてください。これより前のヘッダーやライブラリは、インターフェース6とは互換性がありません。ブロッキングのラッパーは、SDKのイベントループとコールバックのワーカーへの再入を、引き続き拒否します。ネイティブarchive v3（`spna3`）とポータブルJSON v2は、それぞれ独立した、変更のない形式のままです。正規の結果v2の使用量に、省略可能な `provider_cost` が加わるのは、金額のメタデータがある場合だけです。メタデータがないだけの過去のレコードは、元のバイト列を保ち、コストを捏造することはありません。
 
 Pythonは、準備済みのハンドルや変更できない結果を含む、型付きのプロバイダー契約を公開します。従来のcompletionの互換シムはありません。拡張と、それに対応するライブラリは、1つのwheelとしてインストールしてください。同梱されているNeoGraphやSDKのライブラリを、1つだけ置き換えてはいけません。グラフ向けの便宜的な値であるChatMessageは、ネイティブなProviderMessageの保管の代わりにはなりません。詳しくは[Pythonバインディング](python-binding.md)を参照してください。
 
@@ -43,10 +43,10 @@ wheelに同梱されるのは、対応するSDKのランタイムの共有ライ
 
 ## インストールされる名前とプラットフォームの制約
 
-Linuxの共有ライブラリには、バージョン付きのファイル、メジャーの世代を表すSONAMEのリンク、バージョンなしのリンカー用の名前があります。NeoGraphの共有ライブラリは、同じディレクトリにある依存先を `$ORIGIN` で参照します。macOSの `.dylib` / `@loader_path` と、Windowsの接尾辞なしの `.dll` という命名は、パッケージングの慣習のままです。これらは新しいSDKランタイムの適格性確認にはなりません。静的archiveにはSONAMEがなく、推移的なリンク要件もなくなりません。
+Linuxの共有ライブラリには、バージョン付きのファイル、メジャーの世代を表すSONAMEのリンク、バージョンなしのリンカー用の名前があります。NeoGraphの共有ライブラリは、同じディレクトリにある依存先を `$ORIGIN` で参照します。macOSの `.dylib` / `@loader_path` と、Windowsの接尾辞なしの `.dll` という命名は、パッケージングの慣習のままです。静的archiveにはSONAMEがなく、推移的なリンク要件もなくなりません。
 
-記録されている、インターフェース3でのSDKランタイムとarchiveの適格性確認は、Linux/POSIXを対象としていて、インターフェース6ではありません。既存のmacOS/Windows向けパッケージメタデータは、依存関係の適格性確認とは別のものです。WASMのランタイムは、適格性確認されていません。wheelタグが表すのは、Python/ABI/プラットフォームの互換性であり、すべてのランタイム経路を実際に試したことの証明ではありません。詳しくは[PyPAのタグ仕様](https://packaging.python.org/en/latest/specifications/platform-compatibility-tags/)を参照してください。
+WASMでのランタイム統合は確立されていません。wheelタグが表すのは、Python/ABI/プラットフォームの互換性だけです。詳しくは[PyPAのタグ仕様](https://packaging.python.org/en/latest/specifications/platform-compatibility-tags/)を参照してください。
 
-## 検証のエビデンス
+## インストールの検証
 
-`python scripts/verify_ci.py install --work-dir <fresh-output> --jobs 2` が定義するのは、インストール済みコンシューマーのチェックであり、合格した結果ではありません。プラットフォームが対応しているコンシューマーの行に合わせて、`--shared`、`--core-only`、または `--program --quickjs` を使ってください。このドライバーは、チェックアウトした状態でも、展開したsdistからでも、GitやBashなしで動作します。日付のある、切り替え前の測定結果は、引き続き[過去のエビデンス](VALGRIND.md)です。現在のNeoGraph、SDK、Pythonの結果は、統合したリリースレポートの中で、ビルド、プラットフォーム、実行した経路を明示する必要があります。このポリシーが、新たな合格の主張を作ることはありません。
+`python scripts/verify_ci.py install --work-dir <fresh-output> --jobs 2` は、インストール済みコンシューマーのチェックを実行します。プラットフォームが対応しているコンシューマーの行に合わせて、`--shared`、`--core-only`、または `--program --quickjs` を使ってください。このドライバーは、チェックアウトした状態でも、展開したsdistからでも、GitやBashなしで動作します。

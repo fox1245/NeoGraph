@@ -60,10 +60,10 @@ In-memory checkpoint operations run on the caller under mutexes; SQLite and sync
 
 Python callbacks execute under the GIL. CPU-bound Python nodes/reducers cannot gain parallelism merely by increasing worker_count; native calls can overlap only when their own implementation releases the GIL. Typed provider invoke/dispatch release the GIL and can be called through `asyncio.to_thread`. This does not expose a native provider asyncio awaitable.
 
-## Runtime dependency and platform qualification
+## Runtime dependency
 
 Core always links external `SchemaProvider::runtime`, including `NEOGRAPH_BUILD_LLM=OFF`. Disabling PostgreSQL, LLM nodes or NeoGraph's optional CurlH2Pool does not remove that runtime's libcurl requirement. Supply the matching installed SDK or `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`.
 
 Source resolution prefers an explicit SDK source directory, then an installed package, then the revision-pinned public archive fallback (`NEOGRAPH_FETCH_SCHEMAPROVIDER=ON` by default). Configure an offline installed-SDK build with that flag `OFF` and its prefix in `CMAKE_PREFIX_PATH`. NeoGraph and SDK source configuration require CMake 3.20+.
 
-The current SDK runtime/archive is qualified on Linux/POSIX. NeoGraph's existing Linux/macOS/Windows package metadata is not evidence that the new dependency works on all those platforms. macOS, Windows and WASM require their own runtime/build qualification; a portable executor API alone does not establish it.
+WASM runtime integration with the SDK is not established; a portable executor API alone does not provide it.

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=69972a28821d3a677802735fa400a1b7a3b91bac64275756ae64f07620db9cc3 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=dffe463f8f3a5a6ebfe8bafc5a1d27d20c4b5f3b1bbfb791e2f8608c77bb05ad -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -320,7 +320,7 @@ Pythonでは、Python専用のスケジューラーを別に用意するので�
 | ランタイムコンテキストとstrictディスパッチ | コンテキストストア、レシート、インターポジション | 対応する不変の値、ストア、`StrictRuntimeProfile` | 同じネイティブのコントローラー |
 | wheelのデフォルトの永続化 | SQLiteのCore／コンテキスト／ディスパッチのストア | `_HAVE_SQLITE` のエクスポート | PyPIのwheelで有効 |
 
-生の `ProgramCatalog`、遷移ストア、置き換え／マイグレーションのコントローラー、合成ゲートウェイ、Hookのジャーナル、RPCエグゼキューターは、これまでどおり、ホストが組み立てるためのAPIです。権限を持つこれらの経路の一部だけを公開すると、必須の `proposal -> compile -> admit -> publish -> migrate/spawn` のプロトコルを迂回できてしまいます。将来、Pythonのホストコントローラーを用意する場合は、このプロトコルと、更新できない系統の予算（lineage budget）を、オーナー単位の1つのまとまりとして結び付ける必要があります。`_HAVE_PROGRAM` は、生のコントロールプレーンの管理までC++と同等であることを示すものではありません。
+生の `ProgramCatalog`、遷移ストア、置き換え／マイグレーションのコントローラー、合成ゲートウェイ、Hookのジャーナル、RPCエグゼキューターは、これまでどおり、ホストが組み立てるためのAPIです。権限を持つこれらの経路の一部だけを公開すると、必須の `proposal -> compile -> admit -> publish -> migrate/spawn` のプロトコルを迂回できてしまいます。`_HAVE_PROGRAM` は、生のコントロールプレーンの管理までC++と同等であることを示すものではありません。
 
 ### 実行時のリトライの上書き
 
@@ -435,7 +435,7 @@ print(result.status, result.output["value"])  # ProgramTerminalStatus.Completed 
 
 `LocalProgramHost` を破棄すると、実際の `ProgramRuntime` がスケジューラーの処理をキャンセルし、drainし、joinする間、呼び出し側のGILが解放されます。そのため、実行中のPythonノードは終了できます。残りのホストのメンバーを破棄する前には、GILを再取得します。メンバーが持つPythonのコールバックとオブジェクトのオーナーは、GILに対して安全な破棄を保ちます。
 
-ネイティブのProgramには、記録済みの実行を扱うAPIとして `ProgramRuntime::replay_recorded` があり、`start_recorded` はこれに置き換えられました。`LocalProgramHost` が公開するのは `run`、`start`、`resume`、`fork` で、生のrecorded-bindingのコントロールプレーンは公開しません。Programの結果には、従来のハンドル、予算、権限のフィールドに加えて、ネイティブランタイムが提供する、型付きのプロバイダーの結果と失敗のエビデンスが残ります。
+ネイティブのProgramには、記録済みの実行を扱うAPIとして `ProgramRuntime::replay_recorded` があります。`LocalProgramHost` が公開するのは `run`、`start`、`resume`、`fork` で、生のrecorded-bindingのコントロールプレーンは公開しません。Programの結果には、従来のハンドル、予算、権限のフィールドに加えて、ネイティブランタイムが提供する、型付きのプロバイダーの結果と失敗のエビデンスが残ります。
 
 `ProgramResult.failure` は、辞書ではなく、読み取り専用の `ProgramFailure` の値か `None` です。`provider_outcome` と `provider_cause` はプロバイダーの失敗のエビデンスを保持し、`code`、`message`、`operation_id`、`core_node`、`attempts`、`witness` は失敗した操作を説明します。結果には、`bundle_id`、`operation_id`、`attempt`、`checkpoint`、`interrupt`、`provider_budget_authority` のフィールドもあります。
 

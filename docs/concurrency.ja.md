@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concurrency.md locale=ja source_sha256=889743688862b981a4a8e8d8de0c0f3bc287693712453d430183d4dcdd7a030a -->
+<!-- neograph-i18n: source=docs/concurrency.md locale=ja source_sha256=7b28f6ab7b0b2e770dc3e78b5fb91e5c0b4a0e984f0f7f5e92da337753756d7a -->
 # 並行実行と非同期
 
 **Languages:** [English](concurrency.md) | [한국어](concurrency.ko.md) | [日本語](concurrency.ja.md) | [简体中文](concurrency.zh-CN.md)
@@ -61,10 +61,10 @@ if (!accepted) reject_request();
 
 Pythonのコールバックは、GILの下で実行されます。CPUを使うPythonのノードやリデューサーは、worker_countを増やしただけでは並列になりません。ネイティブの呼び出しが重なって動くのは、その実装自身がGILを解放する場合だけです。型付きプロバイダーのinvokeとdispatchはGILを解放するので、`asyncio.to_thread` 経由で呼び出せます。これは、ネイティブのプロバイダーのasyncio awaitableを公開するものではありません。
 
-## ランタイム依存とプラットフォームの適格性確認
+## ランタイム依存
 
 Coreは、`NEOGRAPH_BUILD_LLM=OFF` の場合も含め、常に外部の `SchemaProvider::runtime` をリンクします。PostgreSQL、LLMノード、NeoGraphのオプションのCurlH2Poolを無効にしても、このランタイムが必要とするlibcurlはなくなりません。対応するインストール済みのSDKか、`NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` を用意してください。
 
 ソースの解決順は、明示したSDKのソースディレクトリ、インストール済みのパッケージ、リビジョンを固定した公開archiveのフォールバックの順です（`NEOGRAPH_FETCH_SCHEMAPROVIDER=ON` がデフォルト）。インストール済みのSDKを使ってオフラインでビルドするには、このフラグを `OFF` にし、`CMAKE_PREFIX_PATH` にSDKのプレフィックスを指定します。NeoGraphとSDKのソースの構成には、CMake 3.20以降が必要です。
 
-現在のSDKのランタイムとarchiveは、Linux/POSIXで適格性確認が済んでいます。NeoGraphの既存のLinux/macOS/Windows向けパッケージメタデータは、この新しい依存がそれらすべてのプラットフォームで動く証拠にはなりません。macOS、Windows、WASMには、それぞれランタイムとビルドの適格性確認が必要です。ポータブルなexecutor APIがあるだけでは、確認したことにはなりません。
+SDKとのWASMでのランタイム統合は確立されておらず、ポータブルなexecutor APIがあるだけでは実現できません。

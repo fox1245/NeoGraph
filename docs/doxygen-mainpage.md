@@ -67,7 +67,7 @@ A provider call returns `sp::runtime::Result`: an immutable, owned `std::shared_
 
 Wire evidence is family-supplied and optional: `sp::Completion::wire_envelope` may be null (`ProviderCompletion.wire_envelope` is `None` in Python). Buffered Chat currently retains the full response JSON in `raw_events` as a `RawWire` with `type == "chat.completion"` and the document in `payload`; it leaves `wire_envelope` null. Read the evidence where the family retains it; no fallback envelope is fabricated. Native continuation and raw buffers remain protected evidence, excluded from trace payloads.
 
-This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The release target is SDK `0.1.1` alpha, interface revision 4 / shared ABI 4, with out-of-line capability checks; alpha is not a stable API promise. Recorded interface-3 runtime/archive qualification covers Linux/POSIX, not interface 4 or Windows, macOS and WASM runtime qualification.
+This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The release target is SDK `0.1.1` alpha, interface revision 4 / shared ABI 4, with out-of-line capability checks; alpha is not a stable API promise.
 
 Python uses `SchemaProvider(ValidatedDescriptor, ProviderRuntimeOptions,
 SchemaProviderDefaults)` and `make_provider_request` with typed
@@ -81,6 +81,7 @@ callers can use `asyncio.to_thread`. See the
 
 
 If post-effect accounting or terminal-receipt persistence fails after a real result exists, `ProviderDispatchOutcomePersistenceError` retains the original immutable result in `outcome()` and the original persistence exception in `cause()`. If delivery also failed, `delivery_error()` retains the original observer exception. Successful persistence followed by observer failure rethrows that original observer exception unchanged; an unknown/no-result transport failure does not fabricate an outcome.
+
 ## Reference index
 
 The class list, file list, and namespace list in the sidebar are

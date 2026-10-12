@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/python_clients/README.md locale=zh-CN source_sha256=649e0973ac9e600a33d13f10df707c76d463ff1d0d7c8ccb7315b07471bb6f51 -->
+<!-- neograph-i18n: source=benchmarks/python_clients/README.md locale=zh-CN source_sha256=af81d002bccc99ca3b2c0878d155a8cb0155616d26402cf1d3076b8167b8e53b -->
 # Python 客户端开销：当前的 runner 与历史结果
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -40,9 +40,9 @@ K=16/64 时吞吐量的下降，包含了与 `ThreadingHTTPServer` 和各客户�
 
 两个客户端使用同一个私有的 HTTP 回环对端和同一条 Chat 路由，预置的响应文本是 `ok`。对端会检查路由、模型和提示词。不需要托管服务的凭据、自定义 CA 或付费调用。这是一个 HTTP/1.0 的本地协议工作负载，不是对 TLS/HTTP2 传输的资格认证，也不是 native 重放的基准测试。预置的 token 用量，是模拟 provider 上报的测试夹具数据，不是实测的 token，也不是预算的计费。
 
-请按 [Python 绑定指南](../../docs/python-binding.md)安装与当前源码匹配的 wheel，再安装下面用于对比的各 SDK。从源码构建时，即使只用 Core，也需要外部的 `SchemaProvider::runtime`；请按[构建指南](../../README.md)操作。只靠 Python 封装层，无法给旧的 wheel 补上带类型的原生 API。这些页面不声称有新验证过的 wheel，也不声称新的基准测试已通过。
+请按 [Python 绑定指南](../../docs/python-binding.md)安装与当前源码匹配的 wheel，再安装下面用于对比的各 SDK。从源码构建时，即使只用 Core，也需要外部的 `SchemaProvider::runtime`；请按[构建指南](../../README.md)操作。只靠 Python 封装层，无法给旧的 wheel 补上带类型的原生 API。
 对于 NeoGraph `0.13.1`，wheel 和原生使用方必须匹配 alpha 版 SDK
-`0.1.1`、接口修订版/共享库代数 4。当前的集成验证尚未完成。
+`0.1.1`、接口修订版/共享库代数 4。
 
 ## 运行新的 cohort
 

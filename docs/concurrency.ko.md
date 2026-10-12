@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concurrency.md locale=ko source_sha256=889743688862b981a4a8e8d8de0c0f3bc287693712453d430183d4dcdd7a030a -->
+<!-- neograph-i18n: source=docs/concurrency.md locale=ko source_sha256=7b28f6ab7b0b2e770dc3e78b5fb91e5c0b4a0e984f0f7f5e92da337753756d7a -->
 # 동시성과 비동기
 
 **Languages:** [English](concurrency.md) | [한국어](concurrency.ko.md) | [日本語](concurrency.ja.md) | [简体中文](concurrency.zh-CN.md)
@@ -61,10 +61,10 @@ if (!accepted) reject_request();
 
 Python 콜백은 GIL을 잡고 실행됩니다. CPU 위주의 Python 노드/리듀서는 worker_count를 늘리는 것만으로는 병렬성을 얻을 수 없습니다. 네이티브 호출은 그 구현이 직접 GIL을 놓을 때만 겹쳐 실행될 수 있습니다. 타입이 있는 provider의 invoke/dispatch는 GIL을 놓으므로 `asyncio.to_thread`로 호출할 수 있습니다. 그렇다고 네이티브 provider의 asyncio awaitable이 제공되는 것은 아닙니다.
 
-## 런타임 의존성과 플랫폼 자격 검증
+## 런타임 의존성
 
 Core는 `NEOGRAPH_BUILD_LLM=OFF`일 때도 외부 `SchemaProvider::runtime`을 항상 링크합니다. PostgreSQL, LLM 노드, NeoGraph의 선택 기능인 CurlH2Pool을 꺼도 이 런타임의 libcurl 요구 사항은 사라지지 않습니다. 맞는 버전의 설치된 SDK를 제공하거나 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`을 지정해야 합니다.
 
 소스는 명시적으로 지정한 SDK 소스 디렉터리를 먼저 쓰고, 없으면 설치된 패키지를, 그것도 없으면 리비전이 고정된 공개 archive를 대체 경로로 사용합니다(`NEOGRAPH_FETCH_SCHEMAPROVIDER=ON`이 기본값). 설치된 SDK로 오프라인 빌드를 구성하려면 이 플래그를 `OFF`로 하고 SDK의 prefix를 `CMAKE_PREFIX_PATH`에 지정합니다. NeoGraph와 SDK 소스를 구성하려면 CMake 3.20 이상이 필요합니다.
 
-현재 SDK 런타임/archive는 Linux/POSIX에서 자격 검증을 마쳤습니다. NeoGraph의 기존 Linux/macOS/Windows 패키지 메타데이터는 새 의존성이 그 모든 플랫폼에서 동작한다는 증거가 아닙니다. macOS, Windows, WASM은 각각 런타임/빌드 자격 검증이 따로 필요하며, 이식 가능한 executor API만으로는 이를 입증할 수 없습니다.
+SDK와의 WASM 런타임 통합은 확인되지 않았으며, 이식 가능한 executor API만으로는 이를 제공하지 못합니다.

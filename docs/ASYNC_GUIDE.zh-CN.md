@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=zh-CN source_sha256=d93d769dd5c563a2078f1723e8a7ac9d4a2e0e972df81e3fa66d4055899cc942 -->
+<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=zh-CN source_sha256=383083208b75306ce5f39426d8796c619a72487c065e6c1abf0478dc354efff5 -->
 # NeoGraph 异步指南
 
 **Languages:** [English](ASYNC_GUIDE.md) | [한국어](ASYNC_GUIDE.ko.md) | [日本語](ASYNC_GUIDE.ja.md) | [简体中文](ASYNC_GUIDE.zh-CN.md)
@@ -96,8 +96,8 @@ Python 导出了 `prepare`、`dispatch` 和 `invoke`，并配有带类型的 `Pr
 
 `run_sync` 每次调用都会创建一个私有的单线程上下文；`run_sync_pool` 每次调用创建一个线程池。绑定到这些 executor 的句柄，不能逃出这次调用。要返回另一个 awaitable，可以把它写成普通函数直接返回，也可以在协程体里使用 `co_return co_await`；不要在协程体里混用普通的 `return`。
 
-## 构建与历史证据
+## 构建
 
-`neograph::core` 需要外部的 `SchemaProvider::runtime`，`NEOGRAPH_BUILD_LLM=OFF` 时也一样。请使用已安装的 SDK 前缀，或设置 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`。构建 SDK 需要 CMake 3.20 及以上、C++20、Python、独立版 Asio、yyjson、libcurl 7.88 及以上版本和 OpenSSL Crypto。记录在案的、interface 4 之前的运行时和 archive 资格认证只覆盖 Linux/POSIX，并不能为 interface 4 提供资格认证。现有的 macOS/Windows 元数据也不能证明这个依赖在那些平台上合格，WASM 上的运行时集成同样尚未确立。
+`neograph::core` 需要外部的 `SchemaProvider::runtime`，`NEOGRAPH_BUILD_LLM=OFF` 时也一样。请使用已安装的 SDK 前缀，或设置 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`。构建 SDK 需要 CMake 3.20 及以上、C++20、Python、独立版 Asio、yyjson、libcurl 7.88 及以上版本和 OpenSSL Crypto。WASM 上的运行时集成尚未确立。
 
 配置 NeoGraph 需要 CMake 3.20 及以上。依赖的查找顺序是：先用显式指定的 SDK 源码目录，没有的话用已安装的包，最后才用默认的、固定了修订版本的公开归档。离线配置时，使用已安装的 SDK，设置 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`，并把 `CMAKE_PREFIX_PATH` 设为该 SDK 的前缀。下载或从源码构建的 SDK 使用 NeoGraph 仓库中自带的 Asio 和 yyjson，但仍然需要系统的开发依赖。
