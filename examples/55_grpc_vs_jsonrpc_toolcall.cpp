@@ -84,17 +84,22 @@ static double time_loop(int iters, F&& f) {
 }
 
 int main() {
-    const std::string grpc_addr = "127.0.0.1:50091";
-    const int    JR_PORT = 50092;
     const int    N = 300;
 
-    // ── gRPC ToolService (background) ───────────────────────────────
-    std::thread gsrv([&]{
-        std::unordered_map<std::string, neograph::grpc::ToolFn> tools;
-        tools["compute"] = compute;
-        neograph::grpc::run_tool_server(grpc_addr, std::move(tools));
-    });
-    gsrv.detach();
+    // ── gRPC ToolService, on a port the OS picks ────────────────────
+    std::unordered_map<std::string, neograph::grpc::ToolFn> tools;
+    tools["compute"] = compute;
+    auto grpc_service = neograph::grpc::make_tool_service(std::move(tools));
+    ::grpc::ServerBuilder builder;
+    int grpc_port = 0;
+    builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &grpc_port);
+    builder.RegisterService(grpc_service.get());
+    auto grpc_server = builder.BuildAndStart();
+    if (!grpc_server || grpc_port == 0) {
+        std::printf("could not start the gRPC ToolService\n");
+        return 1;
+    }
+    const std::string grpc_addr = "127.0.0.1:" + std::to_string(grpc_port);
 
     // ── JSON-RPC 2.0 tool server (httplib, MCP `tools/call` shape) ──
     httplib::Server jr;
@@ -122,9 +127,13 @@ int main() {
         }
         res.set_content(out.dump(), "application/json");
     });
-    std::thread jsrv([&]{ jr.listen("127.0.0.1", JR_PORT); });
-    jsrv.detach();
-    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+    const int JR_PORT = jr.bind_to_any_port("127.0.0.1");  // the OS picks the port
+    if (JR_PORT <= 0) {
+        std::printf("could not start the JSON-RPC server\n");
+        return 1;
+    }
+    std::thread jsrv([&]{ jr.listen_after_bind(); });
+    jr.wait_until_ready();
 
     // ── Clients (both reuse one connection) ─────────────────────────
     auto chan = ::grpc::CreateChannel(
@@ -235,6 +244,9 @@ int main() {
                     "  the transport delta dominates — a typical Python/\n"
                     "  nlohmann JSON-RPC stack would NOT be this close.\n");
     }
+    jr.stop();
+    jsrv.join();
+    grpc_server->Shutdown();
     return 0;
 }
 

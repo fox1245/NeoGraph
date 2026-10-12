@@ -29,6 +29,8 @@
 
 #include "neograph.grpc.pb.h"
 
+#include <grpcpp/grpcpp.h>
+
 #include <chrono>
 #include <memory>
 #include <string>
@@ -88,16 +90,22 @@ static double time_us(int iters, F&& f) {
 }
 
 int main() {
-    const std::string addr = "127.0.0.1:50081";
     const int ITERS = 200;
 
-    // ── Server: InMemory backend behind a gRPC CheckpointService ────
+    // ── Server: InMemory backend behind a gRPC CheckpointService, on a
+    //    port the OS picks (the server is listening when BuildAndStart returns) ──
     auto backend = std::make_shared<InMemoryCheckpointStore>();
-    std::thread srv([&] {
-        neograph::grpc::run_checkpoint_server(addr, backend);
-    });
-    srv.detach();
-    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    auto service = neograph::grpc::make_checkpoint_service(backend);
+    ::grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(service.get());
+    auto server = builder.BuildAndStart();
+    if (!server || port == 0) {
+        std::printf("could not start the CheckpointService\n");
+        return 1;
+    }
+    const std::string addr = "127.0.0.1:" + std::to_string(port);
 
     auto cp = make_big_checkpoint("t-bench");
 
@@ -163,6 +171,7 @@ int main() {
     std::printf("Round-trip correctness (rich fields preserved): %s\n",
                 ok ? "PASS" : "FAIL");
     std::printf("\n%s\n", ok ? "RESULT: PASS" : "RESULT: FAIL");
+    server->Shutdown();
     return ok ? 0 : 1;
 }
 
