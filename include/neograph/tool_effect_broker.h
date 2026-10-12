@@ -44,7 +44,11 @@ struct ToolEffectIdentity {
  * An ordinary thrown exception is conservatively exposed as an uncertain
  * effect; cancellation, a HookBoundaryBlocked and a NodeInterrupt remain run
  * control flow and propagate. A confirmed pre-dispatch refusal should return
- * an explicit failed result.
+ * an explicit failed result. A result whose status says the call never
+ * started (tool_call_not_started(): `cancelled_before_start`, `expired`,
+ * `rejected`) performed no effect: the broker returns it as it is, terminal
+ * and not effect-uncertain, and releases the slot, so the same call may run
+ * later.
  * Core does not claim that a particular host broker is durable or exactly once.
  */
 class NEOGRAPH_API ToolEffectBroker {

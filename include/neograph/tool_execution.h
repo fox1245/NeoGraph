@@ -65,6 +65,15 @@ enum class ToolTerminalStatus : std::uint8_t {
 NEOGRAPH_API std::string_view to_string(ToolTerminalStatus status) noexcept;
 NEOGRAPH_API ToolTerminalStatus tool_terminal_status_from_string(std::string_view value);
 
+/// The statuses of a call that never started: the run was cancelled first,
+/// its deadline or queue wait ran out, or admission refused it. Such a call
+/// performed no effect; a ToolEffectBroker records it as terminal with no
+/// effect and frees its slot.
+inline bool tool_call_not_started(ToolTerminalStatus status) noexcept {
+    return status == ToolTerminalStatus::CancelledBeforeStart ||
+           status == ToolTerminalStatus::Expired || status == ToolTerminalStatus::Rejected;
+}
+
 /** One stable result contract for native async and blocking Tool bridges. */
 struct NEOGRAPH_API ToolExecutionResult {
     ToolTerminalStatus status = ToolTerminalStatus::Failed;

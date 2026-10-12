@@ -475,6 +475,9 @@ target_link_libraries(neograph_tests PRIVATE
 # does not export, so it is built only against the static core.
 if(NOT BUILD_SHARED_LIBS)
     target_sources(neograph_tests PRIVATE test_run_context_runtime_registry.cpp)
+    if(NEOGRAPH_BUILD_SQLITE)
+        target_sources(neograph_tests PRIVATE test_tool_effect_not_started.cpp)
+    endif()
 endif()
 
 # A program that links neograph::core alone must not load libcurl (only neograph::llm links the

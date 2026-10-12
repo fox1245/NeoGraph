@@ -244,6 +244,27 @@ asio::awaitable<ToolExecutionResult> SQLiteToolEffectBroker::execute(
         // Including cancellation: the marker remains pending on disk.
         throw;
     }
+    if (tool_call_not_started(result.status) && !result.effect_uncertain) {
+        // The call never started: its deadline had passed, admission refused
+        // it, or its run was cancelled first. Nothing happened, so the marker
+        // is withdrawn and the slot is free for the same call later, as for
+        // every broker (tool_effect_broker.h). Should the withdrawal fail, the
+        // marker stays and a later attempt asks for reconciliation: safe,
+        // only conservative.
+        try {
+            std::lock_guard lock(impl_->mutex);
+            Transaction tx(impl_->db);
+            Statement release(impl_->db, R"(
+                DELETE FROM neograph_tool_effects
+                WHERE owner=? AND run=? AND thread=? AND task=? AND ordinal=? AND receipt IS NULL
+            )");
+            slot(release, identity);
+            (void)release.step();
+            tx.commit();
+        } catch (const std::exception&) {
+        }
+        co_return result;
+    }
     if (!result.succeeded() || result.effect_uncertain)
         co_return refusal(ToolTerminalStatus::ReconciliationRequired,
                          "Tool effect outcome after dispatch is unconfirmed");
