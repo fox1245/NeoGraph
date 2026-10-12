@@ -145,7 +145,7 @@ Program 把 Core 图包进带有持久标识、预算和准入(admission)的生�
 | 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | yes | 一个智能体把两个 MCP 服务器（HTTP 与 stdio）的工具合并为一个列表，它的两次调用分别发往不同的服务器。 |
 | 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | yes | MCP 上的操作员反馈：第一个回答只是猜测，操作员的回复进入历史记录，第二轮调用工具。 |
 | 75 | [`75_mcp_tool_errors.cpp`](75_mcp_tool_errors.cpp) | yes | MCP 的失败：`isError` 结果和 JSON-RPC 错误是两种不同的响应。智能体读取两条消息后自行纠正。 |
-| 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | service | 逆向工程智能体：通过 stdio 上的 GhidraMCP 为被剥离符号的二进制恢复函数名。需要 Ghidra 和 key。 |
+| 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | yes | 逆向工程智能体：通过 stdio 上的 GhidraMCP 为被剥离符号的二进制恢复函数名。用替身桥接和脚本化模型即可离线运行，`--live` 使用 Ghidra 和真实模型。 |
 | 38 | [`38_a2a_server.cpp`](38_a2a_server.cpp) | yes | A2A 服务器：以 SSE 流式方式通过 A2A 0.3 与 1.0 提供图，并用自带客户端调用。传入 `serve` 可持续监听。 |
 | 77 | [`77_a2a_dialects.cpp`](77_a2a_dialects.cpp) | yes | A2A 方言：agent card 列出 JSON-RPC 1.0 和 0.3；一个客户端从中选 1.0，另一个客户端拿到只列 0.3 的 card，就选 0.3。 |
 | 78 | [`78_a2a_input_required.cpp`](78_a2a_input_required.cpp) | yes | A2A 的 `input-required`：在 `interrupt_before` 处停下的图成为等待输入的任务，客户端在同一任务上作答后，以 artifact 的形式收到结果。 |
@@ -206,7 +206,7 @@ Program 把 Core 图包进带有持久标识、预算和准入(admission)的生�
 
 示例 11 从源码构建 Raylib，在 Linux 上需要 X11 和 OpenGL 开发头文件（例如 `libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev`）。文本使用通过 fontconfig 或常见安装路径找到的系统 TrueType/OpenType 字体。可用 `NEOGRAPH_CHAT_FONT`，以及可选的 `NEOGRAPH_CHAT_BOLD_FONT` 和 `NEOGRAPH_CHAT_MONO_FONT` 指定文件；`font.ttc#N` 选择字体集合中的第 N 个 face。按键：Enter 发送，Esc 清空输入，Ctrl+V 粘贴，Ctrl+Q 退出；回复流式输出期间，Send 按钮变为 Stop。
 
-示例 35 要求通过 `GHIDRA_MCP_BRIDGE` 指定 `bridge_mcp_ghidra.py` 脚本路径。`GHIDRA_MCP_PYTHON` 选择解释器，默认值为 `python3`；`GHIDRA_SERVER_URL` 选择 GhidraMCP 后端端点，默认值为 `http://127.0.0.1:18080/`。运行前须启动已启用 GhidraMCP 后端并打开程序的 Ghidra。示例在调用模型之前会发现工具并调用一次 `list_methods`，后端无响应时以状态 2 退出，因为某些 GhidraMCP 版本即使后端未运行也会列出全部工具。此示例还需要非空的 `OPENROUTER_API_KEY`（在此之后检查），并调用付费模型。
+示例 35 传入 `--bridge examples/ghidra_stand_in.py` 指定 GhidraMCP 桥接的替身后，即可与脚本化模型一起离线运行。用 `--live` 运行时，须通过 `GHIDRA_MCP_BRIDGE`（或 `--bridge`）指定 `bridge_mcp_ghidra.py` 脚本路径。`GHIDRA_MCP_PYTHON` 选择解释器，默认值为 `python3`；`GHIDRA_SERVER_URL` 选择 GhidraMCP 后端端点，默认值为 `http://127.0.0.1:18080/`。实机运行前须启动已启用 GhidraMCP 后端并打开程序的 Ghidra。示例在调用模型之前会发现工具并调用一次 `list_methods`，后端无响应时以状态 2 退出，因为某些 GhidraMCP 版本即使后端未运行也会列出全部工具。实机运行还需要非空的 `OPENROUTER_API_KEY`（在此之后检查），并调用付费模型。
 
 ## 离线、脚本化与实时
 

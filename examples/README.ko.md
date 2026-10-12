@@ -145,7 +145,7 @@ Program은 Core 그래프를 내구성 있는 식별자, 예산, 승인(admissio
 | 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | yes | 에이전트 하나가 MCP 서버 두 개(HTTP와 stdio)의 도구를 하나의 목록으로 합쳐 쓰고, 두 호출이 서로 다른 서버로 갑니다. |
 | 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | yes | MCP 위의 운영자 피드백: 첫 답은 추측이고, 운영자의 답장이 대화 기록에 들어가며, 두 번째 라운드에서 도구를 호출합니다. |
 | 75 | [`75_mcp_tool_errors.cpp`](75_mcp_tool_errors.cpp) | yes | MCP 실패: `isError` 결과와 JSON-RPC 오류는 프로토콜에서 서로 다른 응답입니다. 에이전트가 두 메시지를 읽고 스스로 바로잡습니다. |
-| 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | service | 리버스 엔지니어링 에이전트: stdio의 GhidraMCP로 스트립된 바이너리의 함수 이름을 복원합니다. Ghidra와 키가 필요합니다. |
+| 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | yes | 리버스 엔지니어링 에이전트: stdio의 GhidraMCP로 스트립된 바이너리의 함수 이름을 복원합니다. 대역 브리지와 스크립트 모델로 오프라인 실행하고, `--live`는 Ghidra와 실제 모델을 씁니다. |
 | 38 | [`38_a2a_server.cpp`](38_a2a_server.cpp) | yes | A2A 서버: 그래프를 SSE 스트리밍과 함께 A2A 0.3, 1.0으로 제공하고 자체 클라이언트로 호출합니다. `serve`를 주면 계속 대기합니다. |
 | 77 | [`77_a2a_dialects.cpp`](77_a2a_dialects.cpp) | yes | A2A 방언: 에이전트 카드가 JSON-RPC 1.0과 0.3을 나열합니다. 한 클라이언트는 카드에서 1.0을 고르고, 0.3만 적힌 카드를 받은 다른 클라이언트는 0.3을 고릅니다. |
 | 78 | [`78_a2a_input_required.cpp`](78_a2a_input_required.cpp) | yes | A2A `input-required`: `interrupt_before`에서 멈춘 그래프가 대기하는 task가 되고, 클라이언트가 같은 task에 답하면 결과를 아티팩트로 받습니다. |
@@ -206,7 +206,7 @@ Program은 Core 그래프를 내구성 있는 식별자, 예산, 승인(admissio
 
 예제 11은 Raylib를 소스에서 빌드하므로 Linux에서는 X11과 OpenGL 개발 헤더가 필요합니다(예: `libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev`). 텍스트는 fontconfig나 일반적인 설치 경로에서 찾은 시스템 TrueType/OpenType 글꼴을 사용합니다. `NEOGRAPH_CHAT_FONT`와, 필요하면 `NEOGRAPH_CHAT_BOLD_FONT`, `NEOGRAPH_CHAT_MONO_FONT`로 파일을 지정할 수 있으며, `font.ttc#N`은 글꼴 모음의 N번째 face를 고릅니다. 키: Enter 전송, Esc 입력 지우기, Ctrl+V 붙여넣기, Ctrl+Q 종료이며, 답변이 스트리밍되는 동안 Send 버튼은 Stop이 됩니다.
 
-예제 35에는 `bridge_mcp_ghidra.py` 스크립트 경로를 지정하는 `GHIDRA_MCP_BRIDGE`가 필요하다. `GHIDRA_MCP_PYTHON`은 인터프리터를 선택하며 기본값은 `python3`이다. `GHIDRA_SERVER_URL`은 GhidraMCP 백엔드 엔드포인트를 선택하며 기본값은 `http://127.0.0.1:18080/`이다. 실행 전에 GhidraMCP 백엔드를 켜고 프로그램을 연 Ghidra를 시작해야 한다. 예제는 모델을 호출하기 전에 도구를 찾고 `list_methods`를 한 번 호출하며, 백엔드가 응답하지 않으면 상태 2로 종료한다. 일부 GhidraMCP 릴리스는 백엔드가 내려가 있어도 모든 도구를 나열하기 때문이다. 이 예제는 그다음에 확인하는 비어 있지 않은 `OPENROUTER_API_KEY`도 필요하며 유료 모델을 호출한다.
+예제 35는 `--bridge examples/ghidra_stand_in.py`로 GhidraMCP 브리지의 대역을 지정하면 스크립트 모델과 함께 오프라인에서 실행된다. `--live`로 실행하려면 `GHIDRA_MCP_BRIDGE`(또는 `--bridge`)로 `bridge_mcp_ghidra.py` 스크립트 경로를 지정해야 한다. `GHIDRA_MCP_PYTHON`은 인터프리터를 선택하며 기본값은 `python3`이다. `GHIDRA_SERVER_URL`은 GhidraMCP 백엔드 엔드포인트를 선택하며 기본값은 `http://127.0.0.1:18080/`이다. 실제 실행 전에 GhidraMCP 백엔드를 켜고 프로그램을 연 Ghidra를 시작해야 한다. 예제는 모델을 호출하기 전에 도구를 찾고 `list_methods`를 한 번 호출하며, 백엔드가 응답하지 않으면 상태 2로 종료한다. 일부 GhidraMCP 릴리스는 백엔드가 내려가 있어도 모든 도구를 나열하기 때문이다. 실제 실행에는 그다음에 확인하는 비어 있지 않은 `OPENROUTER_API_KEY`도 필요하며 유료 모델을 호출한다.
 
 ## 오프라인, 스크립트, 라이브
 
