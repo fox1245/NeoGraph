@@ -5,6 +5,8 @@
 
 #include "program_expansion_fixture.h"
 
+#include <neograph/program/step_plan_repair.h>
+
 #include "canonical_json.h"
 
 #include <asio/bind_cancellation_slot.hpp>
@@ -34,6 +36,11 @@ inline std::atomic<int>         gate_active{0};
 inline std::atomic<int>         gate_peak{0};
 inline std::atomic<int>         gate_arrived{0};
 inline std::atomic<int>         gate_target{1};
+inline std::atomic<int>         planner_calls{0};
+inline std::mutex               planner_mutex;
+inline std::vector<std::string> planner_replies;       // by attempt number
+inline std::vector<std::uint64_t> planner_tokens;      // tokens to charge for each reply
+inline std::vector<json>        planner_seen;          // the messages each call saw
 inline std::atomic<int>         flaky_failures_left{0};
 inline std::atomic<int>         flaky_calls{0};
 inline std::atomic<int>         logic_calls{0};
@@ -178,6 +185,88 @@ private:
     std::string name_;
 };
 
+// Numbers in, a number out.
+class AddNode final : public GraphNode {
+public:
+    explicit AddNode(std::string name) : name_(std::move(name)) {}
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        const auto a = input.state.get("a");
+        const auto b = input.state.get("b");
+        if (!a.is_number() || !b.is_number()) throw std::invalid_argument("exp-add needs numbers");
+        NodeOutput output;
+        output.writes.push_back(ChannelWrite{"value", a.get<double>() + b.get<double>()});
+        co_return output;
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+class UpperNode final : public GraphNode {
+public:
+    explicit UpperNode(std::string name) : name_(std::move(name)) {}
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        auto text = input.state.get("text").get<std::string>();
+        for (auto& c : text) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        NodeOutput output;
+        output.writes.push_back(ChannelWrite{"value", text});
+        co_return output;
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+// A planner whose answers are scripted by attempt number. It reads how many answers the intake
+// node has already judged (`repair.attempts`), so its choice is a function of the checkpointed
+// state, not of how often the process called it.
+class ScriptedPlannerNode final : public GraphNode {
+public:
+    explicit ScriptedPlannerNode(std::string name) : name_(std::move(name)) {}
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        const auto repair   = input.state.get("repair");
+        const auto messages = input.state.get("messages");
+        std::size_t attempt = 0;
+        if (repair.is_object() && repair.contains("attempts") && repair["attempts"].is_number_unsigned())
+            attempt = repair["attempts"].get<std::size_t>();
+        std::string   reply;
+        std::uint64_t tokens = 0;
+        {
+            std::lock_guard lock(planner_mutex);
+            ++planner_calls;
+            planner_seen.push_back(messages);
+            if (attempt < planner_replies.size()) reply = planner_replies[attempt];
+            if (attempt < planner_tokens.size()) tokens = planner_tokens[attempt];
+        }
+        if (tokens != 0 && input.ctx.usage) {
+            // A complete report: a quarter of the tokens were output.
+            sp::Usage usage;
+            usage.stage        = sp::UsageStage::Final;
+            usage.output_total = sp::Count{tokens / 4};
+            usage.input_total  = sp::Count{tokens - tokens / 4};
+            usage.total        = sp::Count{tokens};
+            input.ctx.usage->add(usage);
+        }
+        json next = json::array();
+        if (messages.is_array())
+            for (std::size_t i = 0; i < messages.size(); ++i) next.push_back(messages[i]);
+        next.push_back(json{{"role", "assistant"}, {"content", reply}});
+        NodeOutput output;
+        ChannelWrite write;
+        write.channel = "messages";
+        write.mode    = ChannelWrite::Mode::Overwrite;
+        write.value   = std::move(next);
+        output.writes.push_back(std::move(write));
+        co_return output;
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
 class CompletedNode final : public GraphNode {
 public:
     explicit CompletedNode(std::string name) : name_(std::move(name)) {}
@@ -202,8 +291,54 @@ inline void add_node_type(RegistrySnapshotBuilder& builder, const char* type, ch
         json{{"type", "object"}}, json::object());
 }
 
+// Limits of the expansions the suites run, shared by the policy and the step plan intake.
+inline TaskGraphProposalLimits expansion_limits() {
+    TaskGraphProposalLimits limits;
+    limits.max_tasks               = 6;
+    limits.max_edges               = 12;
+    limits.max_depth               = 6;
+    limits.per_task_budget_ceiling = TaskGraphBudget{1000, 100, 100, 4096};
+    limits.total_budget_ceiling    = TaskGraphBudget{6000, 600, 600, 24576};
+    limits.max_attempts            = 3;
+    limits.max_literal_bytes       = 256;
+    limits.max_total_literal_bytes = 1024;
+    return limits;
+}
+
+inline std::vector<TaskGraphTemplateContract> expansion_allowlist();
+
+// What the planner is allowed to ask for: the trusted facts the intake node and the expansion
+// policy both use.
+inline StepPlanRepairNodeOptions plan_repair_options() {
+    StepPlanRepairNodeOptions options;
+    options.intake.source_id                      = "planner:plan-1";
+    options.intake.limits.max_steps               = 8;
+    options.intake.proposal_limits                = expansion_limits();
+    // The planner is offered two of the templates the policy allows.
+    for (const auto& contract : expansion_allowlist())
+        if (contract.template_id == "calc.add/v1" || contract.template_id == "text.upper/v1")
+            options.intake.template_allowlist.push_back(contract);
+    options.intake.template_info = {{"calc.add/v1", {"a", "b"}, "Add two numbers."},
+                                    {"text.upper/v1", {"text"}, "Upper-case a text."}};
+    return options;
+}
+
+inline void add_expansion_nodes(RegistrySnapshotBuilder& builder);
+
 inline RegistrySnapshot expansion_registry(ExecutionGuarantee = ExecutionGuarantee::Strict) {
     RegistrySnapshotBuilder builder;
+    add_expansion_nodes(builder);
+    add_step_plan_repair(builder, plan_repair_options());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "test.scripted_planner", '6'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<ScriptedPlannerNode>(name);
+        },
+        json{{"type", "object"}}, json{{"writes", json::array({"messages"})}});
+    return std::move(builder).build();
+}
+
+inline void add_expansion_nodes(RegistrySnapshotBuilder& builder) {
     builder.add_node(
         manifest(ExecutableKind::Node, "runtime-completed", '1'),
         [](const std::string& name, const json&, const NodeContext&) {
@@ -218,9 +353,10 @@ inline RegistrySnapshot expansion_registry(ExecutionGuarantee = ExecutionGuarant
     add_node_type<JoinNode>(builder, "exp-join", 'e');
     add_node_type<FlakyNode>(builder, "exp-flaky", 'f');
     add_node_type<LogicFailNode>(builder, "exp-logic", '9');
+    add_node_type<AddNode>(builder, "exp-add", '8');
+    add_node_type<UpperNode>(builder, "exp-upper", '7');
     builder.add_reducer(manifest(ExecutableKind::Reducer, "runtime-overwrite", '3'),
                         [](const json&, const json& incoming) { return json(incoming); });
-    return std::move(builder).build();
 }
 
 using ExpansionRuntime = BasicAdmittedRuntime<expansion_registry>;
@@ -295,16 +431,31 @@ private:
 // ---- Fixture helpers. ----
 
 inline TaskGraphTemplateContract template_contract(std::string id, char identity, std::string binding,
-                                                   std::vector<std::string> inputs = {"/item"}) {
+                                                   std::vector<std::string> inputs = {"/item"},
+                                                   std::string artifact = "result") {
     TaskGraphTemplateContract contract;
     contract.template_id      = std::move(id);
     contract.content_identity = digest(identity);
     contract.input_fields     = std::move(inputs);
-    contract.output_artifacts = {TaskGraphArtifactContract{"result", {"/channels/value/value"}}};
+    contract.output_artifacts = {TaskGraphArtifactContract{std::move(artifact), {"/channels/value/value"}}};
     contract.budget_ceiling   = TaskGraphBudget{1000, 100, 100, 4096};
     contract.child_binding    = std::move(binding);
     contract.kind             = "program";
     return contract;
+}
+
+inline std::vector<TaskGraphTemplateContract> expansion_allowlist() {
+    return {template_contract("ok/v1", 'a', "ok"),
+            template_contract("slow/v1", 'b', "slow"),
+            template_contract("fail/v1", 'c', "fail"),
+            template_contract("gate/v1", 'd', "gate"),
+            template_contract("join/v1", 'e', "join", {"/item", "/extra"}),
+            template_contract("flaky/v1", 'f', "flaky"),
+            template_contract("logic/v1", '9', "logic"),
+            // The templates a step plan may ask for: a plan names them, so they take inputs
+            // by name and answer on one artifact.
+            template_contract("calc.add/v1", '8', "add", {"/a", "/b"}, "sum"),
+            template_contract("text.upper/v1", '7', "upper", {"/text"}, "upper")};
 }
 
 inline json child_document(const char* node_type, std::vector<std::string> extra_channels = {}) {
@@ -315,7 +466,7 @@ inline json child_document(const char* node_type, std::vector<std::string> extra
     document["declared_budget_requirements"][0]["maximum"] = 3333;
     document["declared_budget_requirements"][1]["maximum"] = 333;
     document["declared_budget_requirements"][2]["maximum"] = 333;
-    document["declared_budget_requirements"][5]["maximum"] = 6;
+    document["declared_budget_requirements"][5]["maximum"] = 3;
     document["root"]["definition"]["channels"]["item"] =
         json{{"reducer", "runtime-overwrite"}, {"initial", json::object()}};
     return document;
@@ -367,28 +518,18 @@ struct RunOptions {
     std::uint64_t max_depth       = 4;
     std::uint32_t concurrency     = 1;
     const char*   failure_policy  = "collect";
+    /// Program operations the run may start; 0 means `max_tasks`.
+    std::uint64_t max_operations  = 0;
+    /// False for a Program that does not expand a task graph: it gets no compile or child budget.
+    bool          expands         = true;
 };
 
 class ExpansionHarness {
 public:
     ExpansionHarness() : fixture(4) {
         auto& policy = *fixture.expansion;
-        policy.limits.max_tasks               = 6;
-        policy.limits.max_edges               = 12;
-        policy.limits.max_depth               = 6;
-        policy.limits.per_task_budget_ceiling = TaskGraphBudget{1000, 100, 100, 4096};
-        policy.limits.total_budget_ceiling    = TaskGraphBudget{6000, 600, 600, 24576};
-        policy.template_allowlist             = {template_contract("ok/v1", 'a', "ok"),
-                                                 template_contract("slow/v1", 'b', "slow"),
-                                                 template_contract("fail/v1", 'c', "fail"),
-                                                 template_contract("gate/v1", 'd', "gate"),
-                                                 template_contract("join/v1", 'e', "join",
-                                                                   {"/item", "/extra"}),
-                                                 template_contract("flaky/v1", 'f', "flaky"),
-                                                 template_contract("logic/v1", '9', "logic")};
-        policy.limits.max_attempts            = 3;
-        policy.limits.max_literal_bytes       = 256;
-        policy.limits.max_total_literal_bytes = 1024;
+        policy.limits             = expansion_limits();
+        policy.template_allowlist = expansion_allowlist();
         store = std::make_shared<RecordingFragmentStore>(fixture.task_graph_fragments);
         fixture.fragment_store_override = store;
         fixture.runtime                 = fixture.make_runtime();
@@ -399,6 +540,11 @@ public:
                                                    options.max_tasks * 2, options.max_depth,
                                                    options.concurrency);
         document["root"]["failure_policy"] = options.failure_policy;
+        return run_program(std::move(document), json{{"item", "seed"}}, options);
+    }
+
+    /// Admits `document`, links the template children and runs it to its end.
+    ExpansionRun run_program(json document, json input, RunOptions options = {}) {
         const auto parent = fixture.admit_document(std::move(document));
         link_children(fixture, parent,
                       {{"ok", fixture.admit_document(child_document("exp-echo"))},
@@ -407,14 +553,18 @@ public:
                        {"gate", fixture.admit_document(child_document("exp-gate"))},
                        {"join", fixture.admit_document(child_document("exp-join", {"extra"}))},
                        {"flaky", fixture.admit_document(child_document("exp-flaky"))},
-                       {"logic", fixture.admit_document(child_document("exp-logic"))}},
-                      BudgetLimits{3333, 333, 333, 1, 1, 6, 0, 0, 0});
+                       {"logic", fixture.admit_document(child_document("exp-logic"))},
+                       {"add", fixture.admit_document(child_document("exp-add", {"a", "b"}))},
+                       {"upper", fixture.admit_document(child_document("exp-upper", {"text"}))}},
+                      BudgetLimits{3333, 333, 333, 1, 1, 3, 0, 0, 0});
         auto handle = fixture.runtime->start(
             "tenant:runtime", parent,
-            ProgramInvocation{json{{"item", "seed"}},
-                              RunBudget{10000, 1000, 1000, options.concurrency, options.max_tasks, 20,
-                                        1, static_cast<std::uint32_t>(options.max_depth),
-                                        options.max_tasks},
+            ProgramInvocation{std::move(input),
+                              RunBudget{10000, 1000, 1000, options.concurrency,
+                                        options.max_operations ? options.max_operations : options.max_tasks, 20,
+                                        options.expands ? 1U : 0U,
+                                        options.expands ? static_cast<std::uint32_t>(options.max_depth) : 0U,
+                                        options.expands ? options.max_tasks : 0U},
                               "trace-expansion", {}});
         ExpansionRun run{handle.wait(), store->events(), std::nullopt, {}, {}, store->images()};
         if (run.result.output().is_object() && run.result.output().contains("fragment_id")) {
@@ -438,6 +588,11 @@ public:
         flaky_failures_left.store(0);
         flaky_calls.store(0);
         logic_calls.store(0);
+        planner_calls.store(0);
+        std::lock_guard lock(planner_mutex);
+        planner_replies.clear();
+        planner_tokens.clear();
+        planner_seen.clear();
     }
 
     ExpansionRuntime                         fixture;

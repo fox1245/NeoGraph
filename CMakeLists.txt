@@ -601,6 +601,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/task_graph_proposal.cpp
         src/program/task_graph_fragment.cpp
         src/program/step_plan.cpp
+        src/program/step_plan_repair.cpp
         src/program/javascript.cpp
         src/program/native.cpp
         src/program/bundle.cpp
@@ -1254,6 +1255,10 @@ if(NEOGRAPH_BUILD_EXAMPLES)
         # example shows NeoGraph's Catalog/adapter/runtime verification boundary.
         add_executable(example_topology_retrieval examples/64_topology_retrieval.cpp)
         target_link_libraries(example_topology_retrieval PRIVATE neograph::program)
+
+        # Plan intake and plan repair with a scripted planner: offline, no provider.
+        add_executable(example_program_plan_intake examples/65_program_plan_intake.cpp)
+        target_link_libraries(example_program_plan_intake PRIVATE neograph::program)
     endif()
 
     if(NEOGRAPH_BUILD_LLM)

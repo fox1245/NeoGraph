@@ -121,6 +121,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_program_task_graph_scheduler.cpp
         test_program_task_graph_expansion.cpp
         test_program_step_plan.cpp
+        test_program_plan_intake.cpp
     )
     target_include_directories(neograph_program_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/src/program
@@ -202,6 +203,13 @@ if(NEOGRAPH_BUILD_PROGRAM)
         )
         set_tests_properties(Program.ModelSemanticMigrationProbe PROPERTIES
             LABELS "program;quickjs;synthesis;migration"
+        )
+    endif()
+    if(TARGET example_program_plan_intake)
+        add_test(NAME Program.PlanIntakeExample COMMAND example_program_plan_intake)
+        set_tests_properties(Program.PlanIntakeExample PROPERTIES
+            PASS_REGULAR_EXPRESSION "s3 completed -> 35"
+            LABELS "program;example"
         )
     endif()
     if(TARGET neograph_program_sqlite)

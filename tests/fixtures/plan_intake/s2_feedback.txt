@@ -1,0 +1,4 @@
+The plan was not accepted. Fix every problem below and answer with the complete corrected plan as one JSON object.
+1. /steps/0/use [STEP_USE_UNKNOWN] Template 'calc.ad/v1' is not available. Use one of: calc.add/v1, text.upper/v1. Closest: calc.add/v1.
+2. /steps/1/note [STEP_UNKNOWN_FIELD] The key 'note' is not part of the plan format. Use only these keys here: id, use, params, out, after, retry.
+3. /steps/1/params/a/from_step [STEP_REF_FORWARD] Step 's3' does not come before this step. Reference only steps listed earlier in 'steps'; reorder the steps or drop the reference.
