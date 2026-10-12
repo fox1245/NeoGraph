@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=d5712d45d63de13a7bbb77204b995f0b83f02ac0a536a4009de888dec5c59764 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=121965481f67e36855bf3b60e985cee1ae42a74e02c2b207334d6f9f34e6312c -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -575,19 +575,29 @@ public:
 <a id="protocol-failure-mapping"></a>
 ### 协议失败映射
 
-当 NeoGraph 通过 MCP 或 gRPC 提供工具或图时，每个失败类别在传输上都保持各自不同且有文档说明的形式，并以节点失败分类器给出的稳定代码（`graph::classify_failure`）命名。运行控制信号永远不会成为模型可读的工具结果。
+当 NeoGraph 通过 MCP 或 gRPC 提供工具或图时，每个失败类别在传输上都保持各自不同且有文档说明的形式，并以节点失败分类器给出的稳定代码（`graph::classify_failure`）命名。运行控制信号永远不会成为模型可读的工具结果。只有公开消息会跨越传输：失败的 `public_message`（来自 `NodeFailureError`），或该类别的固定描述，绝不是可能携带路径、payload 或机密的异常文本。
 
 | 类别（代码） | MCP `tools/call`（`MCPServer`） | gRPC `GraphService` | gRPC `ToolService.CallTool` |
 |------|------|------|------|
-| 取消（`NG.Cancelled`）：`notifications/cancelled`、`stop()`、客户端取消，或抛出 `CancelledException` 的处理器 | JSON-RPC 错误 `-32800`，`data.code` | 状态 `CANCELLED`，`error_code` | 状态 `CANCELLED` |
-| Hook 阻断（`NG.HookBlocked`） | JSON-RPC 错误 `-32010`，`data` `{code, invocation_id, state}` | 状态 `OK`，`error`、`error_code`、`error_detail_json` `{invocation_id, state}` | 状态 `OK`，`error`、`error_code`、`error_detail_json` `{invocation_id, state}` |
-| 中断（`NG.Interrupted`） | JSON-RPC 错误 `-32011`，`data` `{code, reason, value}` | 已暂停的运行：`interrupted`、`interrupt_node`、`interrupt_value_json` | 状态 `OK`，`error`、`error_code`、`error_detail_json` `{reason, value}` |
-| 普通工具错误（`NG.TaskFailed`、作者代码） | 带有 `isError: true` 与 `_meta["io.neograph/failure"]` `{code, retryable}` 的 `result` | 状态 `OK`，`error`、`error_code` | 状态 `OK`，`error`、`error_code` |
-| 超时（`NG.Timeout`）、Provider 失败（`NG.ProviderFailed`）、预算（`NG.BudgetExhausted`）以及其他所有类别（`NG.ConfigError`、`NG.LogicError`、`NG.SafetyBlocked`、`NG.EffectCommitted`、`NG.EffectUncertain`、`NG.UnknownFailure`） | 与普通工具错误相同，带有各自的代码 | 与普通失败相同，带有各自的代码 | 与普通失败相同，带有各自的代码 |
-| 未到达 `__end__` 就结束的运行 | 无 | `error_code`：失败出口的代码，或 `NG.BarrierStalled` | 无 |
-| 未知工具 | 不带失败代码、`isError: true` 的 `result` | 无 | `error_code` `NG.ToolNotFound` |
+| 客户端取消（`NG.Cancelled`）：`notifications/cancelled`、gRPC 取消 | stdio（`run`）：不应答；读取应答 sink 的传输（如 HTTP）：JSON-RPC 错误 `-32800`，`data.code` | `CANCELLED` | `CANCELLED` |
+| 服务器取消（`NG.Cancelled`）：`stop()`，或处理器自身的工作 | JSON-RPC 错误 `-32000`（`stop()`）或 `-32603`，`data.code` | `CANCELLED` | `CANCELLED` |
+| Hook 阻断（`NG.HookBlocked`） | JSON-RPC 错误 `-32010`，`data` `{code, invocation_id, state}` | `FAILED_PRECONDITION`，Hook 超时则为 `DEADLINE_EXCEEDED`；ErrorInfo metadata `invocation_id`、`state` | 与 `GraphService` 相同 |
+| 中断（`NG.Interrupted`） | JSON-RPC 错误 `-32011`，`data` `{code, reason, value}` | 已暂停的运行：`OK`、`interrupted`、`interrupt_node`、`interrupt_value_json`（流的 FINAL payload：`interrupt_value`） | `FAILED_PRECONDITION`，ErrorInfo metadata `reason`、`value` |
+| 普通（`NG.TaskFailed`、作者代码） | 带有 `isError: true` 与 `_meta["io.neograph/failure"]` `{code, retryable}` 的 `result` | `UNKNOWN` | 带有 `error` 与 `error_code` 的 `OK` |
+| 超时（`NG.Timeout`） | 与普通相同，带有各自的代码 | `DEADLINE_EXCEEDED` | 与普通相同，带有各自的代码 |
+| Provider 失败（`NG.ProviderFailed`） | 与普通相同，带有各自的代码 | `UNAVAILABLE` | 与普通相同，带有各自的代码 |
+| 预算（`NG.BudgetExhausted`） | 与普通相同，带有各自的代码 | `RESOURCE_EXHAUSTED` | 与普通相同，带有各自的代码 |
+| 安全或配置（`NG.SafetyBlocked`、`NG.ConfigError`） | 与普通相同，带有各自的代码 | `FAILED_PRECONDITION` | 与普通相同，带有各自的代码 |
+| 逻辑（`NG.LogicError`、`NG.BarrierStalled`） | 与普通相同，带有各自的代码 | `INTERNAL` | 与普通相同，带有各自的代码 |
+| 已提交的效果（`NG.EffectCommitted`） | 与普通相同，带有各自的代码 | `ABORTED` | 与普通相同，带有各自的代码 |
+| 不确定的效果、未知、失败出口（`NG.EffectUncertain`、`NG.UnknownFailure`、出口的代码） | 与普通相同，带有各自的代码 | `UNKNOWN` | 与普通相同，带有各自的代码 |
+| 无效请求（`NG.InvalidRequest`） | JSON-RPC 错误 `-32602` | `INVALID_ARGUMENT`；没有可运行的图时为 `FAILED_PRECONDITION`（`NG.NoGraph`） | `INVALID_ARGUMENT` |
+| 未知工具（`NG.ToolNotFound`） | 不带失败代码、`isError: true` 的 `result` | 无 | `NOT_FOUND` |
+| 容量已满（`NG.Capacity`） | JSON-RPC 错误 `-32000`，`data.capacity` | `RESOURCE_EXHAUSTED` | 无 |
 
-`RunGraphStream` 以 payload 为 `{error, code, detail}` 的事件报告失败。被取消的请求同样会得到响应，因此 HTTP 传输不会一直等待；发送了 `notifications/cancelled` 的客户端会丢弃该响应。NeoGraph 自己的客户端不会把这些代码还原为本地控制信号：来自远程服务器的 MCP JSON-RPC 错误或 gRPC `error` 对调用方而言是普通工具失败。
+每个非 OK 的 gRPC 状态都在 `grpc-status-details-bin` trailer 中携带一个 `google.rpc.Status`，其中包含一个 `google.rpc.ErrorInfo`：`reason` 为代码，`domain` 为 `neograph`，`metadata` 包含 `retryable` 以及上表中的字段。`RunGraphResponse.error` 已弃用，仅携带公开消息并保留一个版本；非 OK 的一元状态不携带响应体。`RunGraphStream` 以 payload 为 `{error, code}` 的 `DEBUG` 事件报告失败，然后以与一元调用相同的状态结束。`CheckpointService` 对后端失败返回 `UNAVAILABLE`（`NG.BackendUnavailable`），而不是“没有检查点”、空列表或成功的删除；对格式错误的 `SaveCheckpoint` 返回 `INVALID_ARGUMENT`。
+
+NeoGraph 自己的客户端会约束其调用：MCP 客户端对因取消或超时而不再等待的请求发送 `notifications/cancelled`（`initialize` 除外），并丢弃迟到的响应；`GrpcRemoteTool`（`set_call_timeout`，默认 60 秒）与 `GrpcCheckpointStore`（`set_rpc_timeout`，默认 30 秒）为每次调用设置截止时间，运行的 cancel token 会取消远程工具的 RPC。这些客户端不会把远程代码还原为本地控制信号：来自远程服务器的 MCP JSON-RPC 错误、gRPC 工具错误或状态对调用方而言是普通工具失败。
 
 <a id="node-failure-contract"></a>
 ### 节点失败契约

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=d5712d45d63de13a7bbb77204b995f0b83f02ac0a536a4009de888dec5c59764 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=121965481f67e36855bf3b60e985cee1ae42a74e02c2b207334d6f9f34e6312c -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -575,19 +575,29 @@ public:
 <a id="protocol-failure-mapping"></a>
 ### 프로토콜 실패 매핑
 
-NeoGraph가 MCP나 gRPC로 도구나 그래프를 제공할 때, 모든 실패 분류는 노드 실패 분류기가 주는 안정된 코드(`graph::classify_failure`)로 이름 붙은, 서로 구별되고 문서화된 형태를 와이어에서도 유지합니다. 실행 제어 신호는 결코 모델이 읽을 수 있는 도구 결과가 되지 않습니다.
+NeoGraph가 MCP나 gRPC로 도구나 그래프를 제공할 때, 모든 실패 분류는 노드 실패 분류기가 주는 안정된 코드(`graph::classify_failure`)로 이름 붙은, 서로 구별되고 문서화된 형태를 와이어에서도 유지합니다. 실행 제어 신호는 결코 모델이 읽을 수 있는 도구 결과가 되지 않습니다. 와이어를 넘는 것은 공개 메시지뿐입니다. 실패의 `public_message`(`NodeFailureError`에서 온 것) 또는 분류에 대한 고정된 설명이며, 경로나 페이로드나 비밀을 담을 수 있는 예외 텍스트는 결코 넘지 않습니다.
 
 | 분류(코드) | MCP `tools/call` (`MCPServer`) | gRPC `GraphService` | gRPC `ToolService.CallTool` |
 |------|------|------|------|
-| 취소(`NG.Cancelled`): `notifications/cancelled`, `stop()`, 클라이언트의 취소, 또는 `CancelledException`을 발생시킨 핸들러 | JSON-RPC 오류 `-32800`, `data.code` | 상태 `CANCELLED`, `error_code` | 상태 `CANCELLED` |
-| Hook 차단(`NG.HookBlocked`) | JSON-RPC 오류 `-32010`, `data` `{code, invocation_id, state}` | 상태 `OK`, `error`, `error_code`, `error_detail_json` `{invocation_id, state}` | 상태 `OK`, `error`, `error_code`, `error_detail_json` `{invocation_id, state}` |
-| 인터럽트(`NG.Interrupted`) | JSON-RPC 오류 `-32011`, `data` `{code, reason, value}` | 일시 정지한 실행: `interrupted`, `interrupt_node`, `interrupt_value_json` | 상태 `OK`, `error`, `error_code`, `error_detail_json` `{reason, value}` |
-| 일반 도구 오류(`NG.TaskFailed`, 작성자 코드) | `isError: true`와 `_meta["io.neograph/failure"]` `{code, retryable}`를 가진 `result` | 상태 `OK`, `error`, `error_code` | 상태 `OK`, `error`, `error_code` |
-| 타임아웃(`NG.Timeout`), 제공자 실패(`NG.ProviderFailed`), 예산(`NG.BudgetExhausted`), 그 밖의 모든 분류(`NG.ConfigError`, `NG.LogicError`, `NG.SafetyBlocked`, `NG.EffectCommitted`, `NG.EffectUncertain`, `NG.UnknownFailure`) | 일반 도구 오류와 같되 자기 코드를 가짐 | 일반 실패와 같되 자기 코드를 가짐 | 일반 실패와 같되 자기 코드를 가짐 |
-| `__end__`에 이르지 못하고 끝난 실행 | 없음 | `error_code`: 실패 출구의 코드, 또는 `NG.BarrierStalled` | 없음 |
-| 알 수 없는 도구 | 실패 코드 없이 `isError: true`인 `result` | 없음 | `error_code` `NG.ToolNotFound` |
+| 클라이언트의 취소(`NG.Cancelled`): `notifications/cancelled`, gRPC 취소 | stdio(`run`): 응답 없음. HTTP처럼 응답 sink를 읽는 전송: JSON-RPC 오류 `-32800`, `data.code` | `CANCELLED` | `CANCELLED` |
+| 서버의 취소(`NG.Cancelled`): `stop()`, 또는 핸들러 자신의 작업 | JSON-RPC 오류 `-32000`(`stop()`) 또는 `-32603`, `data.code` | `CANCELLED` | `CANCELLED` |
+| Hook 차단(`NG.HookBlocked`) | JSON-RPC 오류 `-32010`, `data` `{code, invocation_id, state}` | `FAILED_PRECONDITION`, Hook이 시간을 초과했으면 `DEADLINE_EXCEEDED`. ErrorInfo metadata `invocation_id`, `state` | `GraphService`와 같음 |
+| 인터럽트(`NG.Interrupted`) | JSON-RPC 오류 `-32011`, `data` `{code, reason, value}` | 일시 정지한 실행: `OK`, `interrupted`, `interrupt_node`, `interrupt_value_json`(스트림의 FINAL 페이로드: `interrupt_value`) | `FAILED_PRECONDITION`, ErrorInfo metadata `reason`, `value` |
+| 일반(`NG.TaskFailed`, 작성자 코드) | `isError: true`와 `_meta["io.neograph/failure"]` `{code, retryable}`를 가진 `result` | `UNKNOWN` | `error`와 `error_code`를 가진 `OK` |
+| 타임아웃(`NG.Timeout`) | 일반과 같되 자기 코드를 가짐 | `DEADLINE_EXCEEDED` | 일반과 같되 자기 코드를 가짐 |
+| 제공자 실패(`NG.ProviderFailed`) | 일반과 같되 자기 코드를 가짐 | `UNAVAILABLE` | 일반과 같되 자기 코드를 가짐 |
+| 예산(`NG.BudgetExhausted`) | 일반과 같되 자기 코드를 가짐 | `RESOURCE_EXHAUSTED` | 일반과 같되 자기 코드를 가짐 |
+| 안전 또는 구성(`NG.SafetyBlocked`, `NG.ConfigError`) | 일반과 같되 자기 코드를 가짐 | `FAILED_PRECONDITION` | 일반과 같되 자기 코드를 가짐 |
+| 논리(`NG.LogicError`, `NG.BarrierStalled`) | 일반과 같되 자기 코드를 가짐 | `INTERNAL` | 일반과 같되 자기 코드를 가짐 |
+| 커밋된 효과(`NG.EffectCommitted`) | 일반과 같되 자기 코드를 가짐 | `ABORTED` | 일반과 같되 자기 코드를 가짐 |
+| 불확실한 효과, 알 수 없음, 실패 출구(`NG.EffectUncertain`, `NG.UnknownFailure`, 출구의 코드) | 일반과 같되 자기 코드를 가짐 | `UNKNOWN` | 일반과 같되 자기 코드를 가짐 |
+| 잘못된 요청(`NG.InvalidRequest`) | JSON-RPC 오류 `-32602` | `INVALID_ARGUMENT`. 실행할 그래프가 없으면 `FAILED_PRECONDITION`(`NG.NoGraph`) | `INVALID_ARGUMENT` |
+| 알 수 없는 도구(`NG.ToolNotFound`) | 실패 코드 없이 `isError: true`인 `result` | 없음 | `NOT_FOUND` |
+| 용량 초과(`NG.Capacity`) | JSON-RPC 오류 `-32000`, `data.capacity` | `RESOURCE_EXHAUSTED` | 없음 |
 
-`RunGraphStream`은 실패를 페이로드가 `{error, code, detail}`인 이벤트로 알립니다. 취소된 요청도 응답을 받으므로 HTTP 전송이 응답을 기다리며 멈추지 않으며, `notifications/cancelled`를 보낸 클라이언트는 그 응답을 버립니다. NeoGraph 자체 클라이언트는 이 코드를 로컬 제어 신호로 되돌리지 않습니다. 원격 서버가 보낸 MCP JSON-RPC 오류나 gRPC `error`는 호출자에게 일반 도구 실패입니다.
+OK가 아닌 모든 gRPC 상태는 `grpc-status-details-bin` trailer에 `google.rpc.ErrorInfo` 하나를 담은 `google.rpc.Status`를 실어 보냅니다. `reason`은 코드, `domain`은 `neograph`이며, `metadata`에는 `retryable`과 위의 필드가 들어 있습니다. `RunGraphResponse.error`는 폐기 예정이며 공개 메시지만 담은 채 한 릴리스 동안 유지됩니다. OK가 아닌 단항 상태에는 응답 본문이 실리지 않습니다. `RunGraphStream`은 실패를 페이로드가 `{error, code}`인 `DEBUG` 이벤트로 알린 뒤 단항 호출과 같은 상태로 끝납니다. `CheckpointService`는 백엔드 실패에 "체크포인트 없음", 빈 목록, 성공한 삭제 대신 `UNAVAILABLE`(`NG.BackendUnavailable`)로, 형식이 잘못된 `SaveCheckpoint`에는 `INVALID_ARGUMENT`로 응답합니다.
+
+NeoGraph 자체 클라이언트는 호출을 제한합니다. MCP 클라이언트는 취소되었거나 시간을 초과해 더 이상 기다리지 않는 요청에 대해(`initialize`는 제외) `notifications/cancelled`를 보내고 늦은 응답을 버립니다. `GrpcRemoteTool`(`set_call_timeout`, 기본 60초)과 `GrpcCheckpointStore`(`set_rpc_timeout`, 기본 30초)는 모든 호출에 마감 시각을 두며, 실행의 cancel token은 원격 도구의 RPC를 취소합니다. 이 클라이언트들은 원격 코드를 로컬 제어 신호로 되돌리지 않습니다. 원격 서버의 MCP JSON-RPC 오류, gRPC 도구 오류나 상태는 호출자에게 일반 도구 실패입니다.
 
 <a id="node-failure-contract"></a>
 ### 노드 실패 계약

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=9bd2aaf3ddfc71fd73dc9aae89227290ea5f3799f64165758a0924a233e45fe0 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=44721ce0c61105b48ef97804504e90f95838e8412f062dd1296149ec1c803099 -->
 # 故障排除
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -143,7 +143,7 @@ opaque convenience vector property 可能不是 Python list。用 iteration/`lis
 
 状态为 `expired`、错误为 `run deadline elapsed before the tool started` 的工具结果表示运行截止时间在调用能够开始之前就已经过去：工具及其 Hook 都没有运行。请延长 `RunMetadata::deadline`（Python 的 `timeout_ms`、Program 的 `wall_time_ms`），而不是重试该调用。被运行截止时间或客户端请求超时停止的 MCP 调用为 `timed_out`，取消运行会立即停止进行中的 MCP 调用。
 
-`MCPServer` 对被取消的 `tools/call` 以 JSON-RPC 错误 `-32800` 应答，对 Hook 阻断以 `-32010`、对中断以 `-32011` 应答；其他所有失败都是 `isError` 结果，由 `_meta["io.neograph/failure"].code` 指明其类别。gRPC 响应在 `error_code` 中携带相同的代码。参见[协议失败映射](reference-en.md#protocol-failure-mapping)。
+`MCPServer` 对客户端取消的 `tools/call` 在 stdio 上不应答、在 HTTP 上以 `-32800` 应答，对 Hook 阻断以 `-32010`、对中断以 `-32011` 应答；其他所有失败都是 `isError` 结果，由 `_meta["io.neograph/failure"].code` 指明其类别，其文本是公开消息而不是异常文本（若要选择文本，请抛出带有 `public_message` 的 `NodeFailureError`）。过去从 `OK` 响应中读取 `RunGraphResponse.error` 的 gRPC 客户端现在必须读取状态：失败的运行是一个非 OK 状态，其 `google.rpc.ErrorInfo.reason` 即为代码。参见[协议失败映射](reference-en.md#protocol-failure-mapping)。
 
 不是有效 UTF-8 的工具输出或异常消息，过去会变成空的工具消息、空的 MCP 或 gRPC payload，或在 Python 中引发 `UnicodeDecodeError`。现在每个格式错误的序列都会被替换为 U+FFFD 后到达。
 

@@ -573,19 +573,29 @@ The first three rows never reach the model. A tool result sets `tool_status`, an
 
 ### Protocol failure mapping
 
-When NeoGraph serves tools or graphs over MCP or gRPC, every failure class keeps a distinct, documented form on the wire, named by the stable code the node failure classifier gives (`graph::classify_failure`). Run control signals never become a tool result a model could read.
+When NeoGraph serves tools or graphs over MCP or gRPC, every failure class keeps a distinct, documented form on the wire, named by the stable code the node failure classifier gives (`graph::classify_failure`). Run control signals never become a tool result a model could read. Only the public message crosses the wire: the failure's `public_message` (from `NodeFailureError`), or a fixed description of its class, never the exception text, which can carry paths, payloads or secrets.
 
 | Class (code) | MCP `tools/call` (`MCPServer`) | gRPC `GraphService` | gRPC `ToolService.CallTool` |
 |------|------|------|------|
-| Cancelled (`NG.Cancelled`): `notifications/cancelled`, `stop()`, a client cancel, or a handler that raised `CancelledException` | JSON-RPC error `-32800`, `data.code` | status `CANCELLED`, `error_code` | status `CANCELLED` |
-| Hook blocked (`NG.HookBlocked`) | JSON-RPC error `-32010`, `data` `{code, invocation_id, state}` | status `OK`, `error`, `error_code`, `error_detail_json` `{invocation_id, state}` | status `OK`, `error`, `error_code`, `error_detail_json` `{invocation_id, state}` |
-| Interrupted (`NG.Interrupted`) | JSON-RPC error `-32011`, `data` `{code, reason, value}` | a paused run: `interrupted`, `interrupt_node`, `interrupt_value_json` | status `OK`, `error`, `error_code`, `error_detail_json` `{reason, value}` |
-| Ordinary tool error (`NG.TaskFailed`, an author code) | `result` with `isError: true` and `_meta["io.neograph/failure"]` `{code, retryable}` | status `OK`, `error`, `error_code` | status `OK`, `error`, `error_code` |
-| Timeout (`NG.Timeout`), provider failure (`NG.ProviderFailed`), budget (`NG.BudgetExhausted`) and every other class (`NG.ConfigError`, `NG.LogicError`, `NG.SafetyBlocked`, `NG.EffectCommitted`, `NG.EffectUncertain`, `NG.UnknownFailure`) | as an ordinary tool error, with its own code | as an ordinary failure, with its own code | as an ordinary failure, with its own code |
-| A run that ended without reaching `__end__` | none | `error_code`: the failure exit's code, or `NG.BarrierStalled` | none |
-| Unknown tool | `result` with `isError: true`, no failure code | none | `error_code` `NG.ToolNotFound` |
+| Cancelled by the client (`NG.Cancelled`): `notifications/cancelled`, a gRPC cancel | stdio (`run`): no response; a transport that reads the response sink, such as HTTP: JSON-RPC error `-32800`, `data.code` | `CANCELLED` | `CANCELLED` |
+| Cancelled by the server (`NG.Cancelled`): `stop()`, or the handler's own work | JSON-RPC error `-32000` (`stop()`) or `-32603`, `data.code` | `CANCELLED` | `CANCELLED` |
+| Hook blocked (`NG.HookBlocked`) | JSON-RPC error `-32010`, `data` `{code, invocation_id, state}` | `FAILED_PRECONDITION`, or `DEADLINE_EXCEEDED` when the Hook timed out; ErrorInfo metadata `invocation_id`, `state` | as `GraphService` |
+| Interrupted (`NG.Interrupted`) | JSON-RPC error `-32011`, `data` `{code, reason, value}` | a paused run: `OK`, `interrupted`, `interrupt_node`, `interrupt_value_json` (the stream's FINAL payload: `interrupt_value`) | `FAILED_PRECONDITION`, ErrorInfo metadata `reason`, `value` |
+| Ordinary (`NG.TaskFailed`, an author code) | `result` with `isError: true` and `_meta["io.neograph/failure"]` `{code, retryable}` | `UNKNOWN` | `OK` with `error` and `error_code` |
+| Timeout (`NG.Timeout`) | as ordinary, with its code | `DEADLINE_EXCEEDED` | as ordinary, with its code |
+| Provider failure (`NG.ProviderFailed`) | as ordinary, with its code | `UNAVAILABLE` | as ordinary, with its code |
+| Budget (`NG.BudgetExhausted`) | as ordinary, with its code | `RESOURCE_EXHAUSTED` | as ordinary, with its code |
+| Safety or configuration (`NG.SafetyBlocked`, `NG.ConfigError`) | as ordinary, with its code | `FAILED_PRECONDITION` | as ordinary, with its code |
+| Logic (`NG.LogicError`, `NG.BarrierStalled`) | as ordinary, with its code | `INTERNAL` | as ordinary, with its code |
+| Effect committed (`NG.EffectCommitted`) | as ordinary, with its code | `ABORTED` | as ordinary, with its code |
+| Effect uncertain, unknown, a failure exit (`NG.EffectUncertain`, `NG.UnknownFailure`, the exit's code) | as ordinary, with its code | `UNKNOWN` | as ordinary, with its code |
+| Invalid request (`NG.InvalidRequest`) | JSON-RPC error `-32602` | `INVALID_ARGUMENT`; `FAILED_PRECONDITION` (`NG.NoGraph`) when there is no graph to run | `INVALID_ARGUMENT` |
+| Unknown tool (`NG.ToolNotFound`) | `result` with `isError: true`, no failure code | none | `NOT_FOUND` |
+| At capacity (`NG.Capacity`) | JSON-RPC error `-32000`, `data.capacity` | `RESOURCE_EXHAUSTED` | none |
 
-`RunGraphStream` reports a failure as an event whose payload is `{error, code, detail}`. A cancelled request gets a response too, so an HTTP transport never waits for one; a client that sent `notifications/cancelled` drops it. NeoGraph's own clients do not turn these codes back into local control signals: an MCP JSON-RPC error or a gRPC `error` from a remote server is an ordinary tool failure for the caller.
+Every non-OK gRPC status carries a `google.rpc.Status` in the `grpc-status-details-bin` trailer with one `google.rpc.ErrorInfo`: `reason` is the code, `domain` is `neograph`, and `metadata` holds `retryable` and the fields above. `RunGraphResponse.error` is deprecated and kept for one release with the public message only; a non-OK unary status carries no response body. `RunGraphStream` reports a failure as a `DEBUG` event whose payload is `{error, code}` and then ends with the same status as a unary call. The `CheckpointService` answers a backend failure with `UNAVAILABLE` (`NG.BackendUnavailable`) instead of "no checkpoint", an empty list or a successful delete, and a malformed `SaveCheckpoint` with `INVALID_ARGUMENT`.
+
+NeoGraph's own clients bound their calls: the MCP client sends `notifications/cancelled` for a request it stops waiting for, cancelled or timed out (never for `initialize`), and drops the late response; `GrpcRemoteTool` (`set_call_timeout`, 60 s by default) and `GrpcCheckpointStore` (`set_rpc_timeout`, 30 s by default) set a deadline on every call, and the run's cancel token cancels the remote tool's RPC. They do not turn a remote code back into a local control signal: an MCP JSON-RPC error, a gRPC tool error or status from a remote server is an ordinary tool failure for the caller.
 
 ### Node failure contract
 

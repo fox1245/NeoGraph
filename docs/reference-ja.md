@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=d5712d45d63de13a7bbb77204b995f0b83f02ac0a536a4009de888dec5c59764 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=121965481f67e36855bf3b60e985cee1ae42a74e02c2b207334d6f9f34e6312c -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -539,19 +539,29 @@ public:
 <a id="protocol-failure-mapping"></a>
 ### プロトコル失敗のマッピング
 
-NeoGraph が MCP や gRPC でツールやグラフを提供するとき、すべての失敗分類は、ノード失敗の分類器が与える安定したコード(`graph::classify_failure`)で名付けられた、互いに区別され文書化された形をワイヤー上でも保ちます。実行制御シグナルが、モデルの読めるツール結果になることはありません。
+NeoGraph が MCP や gRPC でツールやグラフを提供するとき、すべての失敗分類は、ノード失敗の分類器が与える安定したコード(`graph::classify_failure`)で名付けられた、互いに区別され文書化された形をワイヤー上でも保ちます。実行制御シグナルが、モデルの読めるツール結果になることはありません。ワイヤーを越えるのは公開メッセージだけです。失敗の `public_message`(`NodeFailureError` 由来)、または分類の固定の説明であり、パスやペイロードや秘密を含みうる例外テキストは決して越えません。
 
 | 分類(コード) | MCP `tools/call` (`MCPServer`) | gRPC `GraphService` | gRPC `ToolService.CallTool` |
 |------|------|------|------|
-| キャンセル(`NG.Cancelled`): `notifications/cancelled`、`stop()`、クライアントのキャンセル、または `CancelledException` を送出したハンドラー | JSON-RPC エラー `-32800`、`data.code` | ステータス `CANCELLED`、`error_code` | ステータス `CANCELLED` |
-| Hook のブロック(`NG.HookBlocked`) | JSON-RPC エラー `-32010`、`data` `{code, invocation_id, state}` | ステータス `OK`、`error`、`error_code`、`error_detail_json` `{invocation_id, state}` | ステータス `OK`、`error`、`error_code`、`error_detail_json` `{invocation_id, state}` |
-| 割り込み(`NG.Interrupted`) | JSON-RPC エラー `-32011`、`data` `{code, reason, value}` | 一時停止した実行: `interrupted`、`interrupt_node`、`interrupt_value_json` | ステータス `OK`、`error`、`error_code`、`error_detail_json` `{reason, value}` |
-| 通常のツールエラー(`NG.TaskFailed`、作成者コード) | `isError: true` と `_meta["io.neograph/failure"]` `{code, retryable}` を持つ `result` | ステータス `OK`、`error`、`error_code` | ステータス `OK`、`error`、`error_code` |
-| タイムアウト(`NG.Timeout`)、プロバイダー失敗(`NG.ProviderFailed`)、予算(`NG.BudgetExhausted`)、その他すべての分類(`NG.ConfigError`、`NG.LogicError`、`NG.SafetyBlocked`、`NG.EffectCommitted`、`NG.EffectUncertain`、`NG.UnknownFailure`) | 通常のツールエラーと同じで、それぞれのコードを持つ | 通常の失敗と同じで、それぞれのコードを持つ | 通常の失敗と同じで、それぞれのコードを持つ |
-| `__end__` に到達せずに終わった実行 | なし | `error_code`: 失敗出口のコード、または `NG.BarrierStalled` | なし |
-| 未知のツール | 失敗コードなしの `isError: true` の `result` | なし | `error_code` `NG.ToolNotFound` |
+| クライアントによるキャンセル(`NG.Cancelled`): `notifications/cancelled`、gRPC のキャンセル | stdio(`run`): 応答なし。HTTP のように応答 sink を読むトランスポート: JSON-RPC エラー `-32800`、`data.code` | `CANCELLED` | `CANCELLED` |
+| サーバーによるキャンセル(`NG.Cancelled`): `stop()`、またはハンドラー自身の処理 | JSON-RPC エラー `-32000`(`stop()`)または `-32603`、`data.code` | `CANCELLED` | `CANCELLED` |
+| Hook のブロック(`NG.HookBlocked`) | JSON-RPC エラー `-32010`、`data` `{code, invocation_id, state}` | `FAILED_PRECONDITION`、Hook がタイムアウトしたときは `DEADLINE_EXCEEDED`。ErrorInfo metadata `invocation_id`、`state` | `GraphService` と同じ |
+| 割り込み(`NG.Interrupted`) | JSON-RPC エラー `-32011`、`data` `{code, reason, value}` | 一時停止した実行: `OK`、`interrupted`、`interrupt_node`、`interrupt_value_json`(ストリームの FINAL ペイロード: `interrupt_value`) | `FAILED_PRECONDITION`、ErrorInfo metadata `reason`、`value` |
+| 通常(`NG.TaskFailed`、作成者コード) | `isError: true` と `_meta["io.neograph/failure"]` `{code, retryable}` を持つ `result` | `UNKNOWN` | `error` と `error_code` を持つ `OK` |
+| タイムアウト(`NG.Timeout`) | 通常と同じで、それぞれのコードを持つ | `DEADLINE_EXCEEDED` | 通常と同じで、それぞれのコードを持つ |
+| プロバイダー失敗(`NG.ProviderFailed`) | 通常と同じで、それぞれのコードを持つ | `UNAVAILABLE` | 通常と同じで、それぞれのコードを持つ |
+| 予算(`NG.BudgetExhausted`) | 通常と同じで、それぞれのコードを持つ | `RESOURCE_EXHAUSTED` | 通常と同じで、それぞれのコードを持つ |
+| 安全または構成(`NG.SafetyBlocked`、`NG.ConfigError`) | 通常と同じで、それぞれのコードを持つ | `FAILED_PRECONDITION` | 通常と同じで、それぞれのコードを持つ |
+| 論理(`NG.LogicError`、`NG.BarrierStalled`) | 通常と同じで、それぞれのコードを持つ | `INTERNAL` | 通常と同じで、それぞれのコードを持つ |
+| コミット済みの効果(`NG.EffectCommitted`) | 通常と同じで、それぞれのコードを持つ | `ABORTED` | 通常と同じで、それぞれのコードを持つ |
+| 不確定な効果、不明、失敗出口(`NG.EffectUncertain`、`NG.UnknownFailure`、出口のコード) | 通常と同じで、それぞれのコードを持つ | `UNKNOWN` | 通常と同じで、それぞれのコードを持つ |
+| 不正なリクエスト(`NG.InvalidRequest`) | JSON-RPC エラー `-32602` | `INVALID_ARGUMENT`。実行するグラフがないときは `FAILED_PRECONDITION`(`NG.NoGraph`) | `INVALID_ARGUMENT` |
+| 未知のツール(`NG.ToolNotFound`) | 失敗コードなしの `isError: true` の `result` | なし | `NOT_FOUND` |
+| 容量超過(`NG.Capacity`) | JSON-RPC エラー `-32000`、`data.capacity` | `RESOURCE_EXHAUSTED` | なし |
 
-`RunGraphStream` は失敗を、ペイロードが `{error, code, detail}` のイベントで報告します。キャンセルされたリクエストにも応答が返るので HTTP トランスポートが応答を待って止まることはなく、`notifications/cancelled` を送ったクライアントはその応答を破棄します。NeoGraph 自身のクライアントは、これらのコードをローカルの制御シグナルに戻しません。リモートサーバーからの MCP JSON-RPC エラーや gRPC の `error` は、呼び出し元にとって通常のツール失敗です。
+OK でないすべての gRPC ステータスは、`grpc-status-details-bin` trailer に `google.rpc.ErrorInfo` を 1 つ持つ `google.rpc.Status` を載せます。`reason` はコード、`domain` は `neograph` で、`metadata` には `retryable` と上のフィールドが入ります。`RunGraphResponse.error` は非推奨で、公開メッセージだけを持って 1 リリースの間残ります。OK でない単項ステータスには応答本体が載りません。`RunGraphStream` は失敗をペイロードが `{error, code}` の `DEBUG` イベントで報告し、その後、単項呼び出しと同じステータスで終わります。`CheckpointService` はバックエンドの失敗に「チェックポイントなし」、空のリスト、成功した削除ではなく `UNAVAILABLE`(`NG.BackendUnavailable`)で、形式の不正な `SaveCheckpoint` には `INVALID_ARGUMENT` で応答します。
+
+NeoGraph 自身のクライアントは呼び出しを制限します。MCP クライアントは、キャンセルまたはタイムアウトで待つのをやめたリクエストについて(`initialize` を除き)`notifications/cancelled` を送り、遅れた応答を破棄します。`GrpcRemoteTool`(`set_call_timeout`、既定 60 秒)と `GrpcCheckpointStore`(`set_rpc_timeout`、既定 30 秒)はすべての呼び出しに期限を設け、実行の cancel token はリモートツールの RPC をキャンセルします。これらのクライアントはリモートのコードをローカルの制御シグナルに戻しません。リモートサーバーからの MCP JSON-RPC エラー、gRPC のツールエラーやステータスは、呼び出し元にとって通常のツール失敗です。
 
 <a id="node-failure-contract"></a>
 ### ノード失敗の契約
