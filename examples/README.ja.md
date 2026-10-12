@@ -1,7 +1,229 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=c11de6b910a8425c3b03fae8b1bb9fd2f95ed32b17c591cee0007b93464bd9ff -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=8d5870bdce1ab6c9f3b5e508b7487efc8c8478ee8cb58e24807b494414025413 -->
 # C++ API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
+各サンプルは 1 ファイルで 1 つの事柄を示し、上から下まで数分で読めます。多くはオフラインで動きます。プロバイダーの代わりにスクリプト化したモデルが応答するため、API キーもネットワークも不要です。実際のモデルも呼べるサンプルは `--live` を受け付けます。1 つを自分のプロジェクトにコピーし、`neograph::core`(モデルを使うものは `neograph::llm` も)をリンクすれば、動くコードから始められます。
+
+**Offline** 列は、各行が必要とするものを示します。`yes`: キーもネットワークも不要で、自動のスモークテスト(`ctest -L examples-offline`)があります。`key`: プロバイダーの API キーが必要です。`service`: 別のプロセス、サーバー、データベース、ディスプレイ、またはモデルが必要です。`paired`: その行に書かれたサンプルと一緒に、オフラインで動きます。
+
+## ビルドと実行
+
+```bash
+cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_TESTS=ON
+cmake --build build -j$(nproc)
+./build/example_react_agent            # scripted model: no key, no network
+./build/example_react_agent --live     # real model: OPENROUTER_API_KEY must be set in the environment
+ctest --test-dir build -L examples-offline --output-on-failure   # run every offline example and check its output
+```
+
+バイナリはビルドディレクトリに `example_<名前>` として作られます。多くのソースファイルは、先頭の `Usage:` 行に正確なコマンドを書いています。Program を使うサンプル(63、64)には `-DNEOGRAPH_BUILD_PROGRAM=ON` が必要です。gRPC のサンプル(45、53、54、55、57)には `-DNEOGRAPH_BUILD_GRPC=ON` と `grpc++`/`protoc` が必要です。サンプル 11 には `-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON` が必要です。コンポーネントを無効にしたサンプルはビルドから外れるだけで、ビルドを失敗させません。
+
+## ここから始める
+
+順番に読んでください。1 つ進むごとに考え方が 1 つ増えます。
+
+| 手順 | サンプル | Offline | 学ぶこと |
+|---|---|---|---|
+| 1 | [`62_core_quickstart.cpp`](62_core_quickstart.cpp) | yes | インストール済みの `neograph::core` ターゲット。ノード 1 つ、厳密なグラフ 1 つ、型付きチャンネル 1 つ。 |
+| 2 | [`01_react_agent.cpp`](01_react_agent.cpp) | yes | モデル、ツール、ループ。`llm::Agent` が電卓ツール付きの ReAct エージェントを実行し、テキストをストリーミングします。 |
+| 3 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | `make_parallel_group` で 1 つの `io_context` 上に並列の fan-out と fan-in を行います。 |
+| 4 | [`10_send_command.cpp`](10_send_command.cpp) | yes | `Send` で実行時に作業を作り、`Command` で経路を上書きします。planner、researcher、evaluator がループします。 |
+| 5 | [`04_checkpoint_hitl.cpp`](04_checkpoint_hitl.cpp) | yes | `interrupt_before` で支払いノードの手前で止め、チェックポイントを保存し、承認後に再開します。 |
+| 6 | [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | yes | `neograph::program` で `call_core` Program を 1 つコンパイルし、admission を通して実行します(`-DNEOGRAPH_BUILD_PROGRAM=ON` が必要)。 |
+
+## やりたいことから探す
+
+目的を選んで、そのサンプルを読んでください。
+
+| やりたいこと | 読むサンプル | Offline |
+|---|---|---|
+| 最初のグラフを動かす | [`62_core_quickstart.cpp`](62_core_quickstart.cpp) | yes |
+| モデルにツールを渡し、答えが出るまでループさせる | [`01_react_agent.cpp`](01_react_agent.cpp) | yes |
+| ステップを並列に実行して結果を合流させる | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes |
+| 実行時に作業を作り、元へ戻る | [`10_send_command.cpp`](10_send_command.cpp) | yes |
+| リクエストを適切な専門家へ振り分ける | [`07_intent_routing.cpp`](07_intent_routing.cpp) | yes |
+| グラフの中に別のグラフを入れる | [`06_subgraph.cpp`](06_subgraph.cpp) | yes |
+| 人の判断を待って止め、再開する | [`04_checkpoint_hitl.cpp`](04_checkpoint_hitl.cpp) | yes |
+| 保存した状態を読み、編集し、フォークする | [`08_state_management.cpp`](08_state_management.cpp) | yes |
+| クラッシュ後に完了済みの作業をやり直さず復旧する | [`14_plan_executor.cpp`](14_plan_executor.cpp) | yes |
+| 呼び出しをまたいでチャットを続ける | [`41_resume_if_exists_chat.cpp`](41_resume_if_exists_chat.cpp) | yes |
+| スレッド間でメモリを共有する | [`43_store_personalization.cpp`](43_store_personalization.cpp) | yes |
+| 長い履歴を予算内に収める | [`56_history_compaction.cpp`](56_history_compaction.cpp) | yes |
+| 別スレッドから実行をキャンセルする | [`46_cancel_token.cpp`](46_cancel_token.cpp) | yes |
+| ノードの再計算を省く | [`47_node_cache.cpp`](47_node_cache.cpp) | yes |
+| OpenInference バックエンドへトレースを送る | [`49_openinference.cpp`](49_openinference.cpp) | yes |
+| Program をコンパイルして実行する | [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | yes |
+| 実行中の Program をより良いトポロジーへ移す | [`64_topology_retrieval.cpp`](64_topology_retrieval.cpp) | yes |
+| シードから harness を進化させる | [`32_evolution.cpp`](32_evolution.cpp) | yes |
+| A2A でグラフを他のエージェントへ公開する | [`38_a2a_server.cpp`](38_a2a_server.cpp) | yes |
+| リモートの A2A エージェントを呼び出す | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes |
+| ACP でグラフをエディターへ公開する | [`39_acp_server.cpp`](39_acp_server.cpp) | yes |
+| MCP サーバーとしてツールを提供する | [`59_mcp_server.cpp`](59_mcp_server.cpp) | yes |
+| ReAct ループの中で MCP ツールを使う | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | key |
+| gRPC で別プロセスのツールを呼び出す | [`57_grpc_remote_tool.cpp`](57_grpc_remote_tool.cpp) | yes |
+| Reflexion などの推論パターンを試す | [`15_reflexion.cpp`](15_reflexion.cpp) | key |
+| ローカルのモデルサーバーに対して実行する | [`31_local_transformer.cpp`](31_local_transformer.cpp) | service |
+
+## 段階別の索引
+
+### はじめにと Core エンジン
+
+残りの Core 機能です。`neograph::core` だけをリンクしますが、スクリプト化したプロバイダーを使う 02、06、07、09 は `neograph::llm` もリンクします。
+
+| # | サンプル | Offline | 示すもの |
+|---|---|---|---|
+| 02 | [`02_custom_graph.cpp`](02_custom_graph.cpp) | yes | `create_react_graph()` の 1 回の呼び出しで llm、tools、llm の ReAct グラフを作り、`run_stream` がノードイベントを出力します。 |
+| 05 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | 非同期 fan-out。3 つの researcher ノードが 1 つの `io_context` 上で重なって動き、summarizer が合流させます。 |
+| 06 | [`06_subgraph.cpp`](06_subgraph.cpp) | yes | サブグラフ。外側の supervisor グラフが内側の ReAct グラフに処理を任せます。 |
+| 07 | [`07_intent_routing.cpp`](07_intent_routing.cpp) | yes | 分類ノードと条件付きエッジ(`route_channel`)が、各リクエストを math、translate、general の専門家へ振り分けます。 |
+| 09 | [`09_all_features.cpp`](09_all_features.cpp) | yes | 1 ファイルに 6 つの機能: `NodeInterrupt`、`RetryPolicy`、`StreamMode`、`Send`、`Command`、`Store`。 |
+| 10 | [`10_send_command.cpp`](10_send_command.cpp) | yes | `Send` による fan-out と `Command` による経路の上書き。十分な結果が揃うまで planner、researcher、evaluator が繰り返します。 |
+| 42 | [`42_custom_reducer_condition.cpp`](42_custom_reducer_condition.cpp) | yes | C++ から独自のチャンネル reducer とエッジ条件を登録します。 |
+| 51 | [`51_minimal.cpp`](51_minimal.cpp) | yes | 最小のプログラム。ノード 1 つ、チャンネル 1 つ、`result.channel<T>("name")`。 |
+| 52 | [`52_export_schema.cpp`](52_export_schema.cpp) | yes | `NodeFactory::export_schema()` が、ビジュアルエディターがパレットを作るためのトポロジー JSON Schema を出力します。 |
+| 61 | [`61_sync_node.cpp`](61_sync_node.cpp) | yes | `SyncGraphNode`。コルーチンの定型コードが要らない短いノード。 |
+
+### エージェントパターン
+
+モデルとツールをループで組み合わせた構成と、その上に作った公開済みの推論パターンです。`key` の行は実際のモデルを呼び出します。
+
+| # | サンプル | Offline | 示すもの |
+|---|---|---|---|
+| 01 | [`01_react_agent.cpp`](01_react_agent.cpp) | yes | ReAct。Thought の 1 行、ツール呼び出し、Observation、最終回答。`--live` で実際のモデルを呼びます。 |
+| 36 | [`36_classifier_fanout.cpp`](36_classifier_fanout.cpp) | yes | 5 つの小さな分類器を `Send` で fan-out します。所要時間は合計ではなく最も遅い 1 つ分です。判定結果は固定値です。 |
+| 15 | [`15_reflexion.cpp`](15_reflexion.cpp) | key | Reflexion。critic が受け入れるまで actor と critic が繰り返します(Shinn et al. 2023)。 |
+| 16 | [`16_tree_of_thoughts.cpp`](16_tree_of_thoughts.cpp) | key | Tree of Thoughts。候補となる思考を生成し、採点し、残し、展開します。 |
+| 17 | [`17_self_ask.cpp`](17_self_ask.cpp) | key | Self-Ask。マルチホップ推論のための明示的な追加質問(Press et al. 2022)。 |
+| 18 | [`18_multi_agent_debate.cpp`](18_multi_agent_debate.cpp) | key | researcher、skeptic、judge。1 つの共有トランスクリプトに対して 3 つのシステムプロンプトが働きます。 |
+| 19 | [`19_rewoo.cpp`](19_rewoo.cpp) | key | REWOO。planner がプレースホルダーを書き、worker がツールを並列実行し、solver が証拠をまとめます。 |
+| 12 | [`12_rag_agent.cpp`](12_rag_agent.cpp) | key | 実際の埋め込みとメモリ内コサイン検索を使う検索拡張生成。 |
+| 28 | [`28_corrective_rag.cpp`](28_corrective_rag.cpp) | key | Corrective RAG。検索結果を評価し、洗練する、Web 検索を足す、Web 検索のみにする、のいずれかを選びます(Yan et al. 2024)。 |
+| 25 | [`25_deep_research.cpp`](25_deep_research.cpp) | key | Deep research。supervisor が、それぞれ ReAct ループを回す下位 researcher を fan-out し、レポートを書きます。`OPENROUTER_API_KEY` と Crawl4AI サーバーが必要です。 |
+| 40 | [`40_react_async_streaming.cpp`](40_react_async_streaming.cpp) | key | 非同期 ReAct。外側のコルーチンが `run_stream_async` を待ち、型付きのテキスト差分を出力します。 |
+| 13 | [`13_openrouter_responses_sse.cpp`](13_openrouter_responses_sse.cpp) | key | 順序付きの `sp::Event` 観測と所有された `sp::Outcome` を伴う、型付き Responses SSE リクエスト。 |
+| 29 | [`29_responses_envelope.cpp`](29_responses_envelope.cpp) | key | デバッグ補助。1 つのツール呼び出しリクエストについて、Responses エンベロープ全体と順序付きの出力項目をすべてダンプします。 |
+| 30 | [`30_reasoning_effort.cpp`](30_reasoning_effort.cpp) | key | 1 つのプロンプトで推論強度 `none`、`low`、`medium`、`high` を順に試し、レイテンシと推論トークンを比べます。 |
+| 34 | [`34_openrouter_responses_tools_sse.cpp`](34_openrouter_responses_tools_sse.cpp) | key | 型付きのホスト型ツール 7 セクションをすべて SSE で実行し、完全な outcome と順序付きの wire 観測を残します。 |
+| 31 | [`31_local_transformer.cpp`](31_local_transformer.cpp) | service | `127.0.0.1:8090` のローカル OpenAI 互換サーバー(llama.cpp、vLLM)を指す、型付き Chat クライアント。 |
+
+### Program API
+
+Program は Core グラフを、永続的な識別子、予算、admission を備えたライフサイクルで包みます。JavaScript Program API(join、失敗ルーティング、予算、一時停止と再開、fork、クラッシュ復旧)は、[`bindings/python/tests/program_e2e/`](../bindings/python/tests/program_e2e/README.md) の Python エンドツーエンドシナリオが扱っています。
+
+| # | サンプル | Offline | 示すもの |
+|---|---|---|---|
+| 63 | [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | yes | `call_core` 操作を 1 つ持つ `ProgramSource` をコンパイルし、admission を通して `ProgramRuntime` で実行します。 |
+| 64 | [`64_topology_retrieval.cpp`](64_topology_retrieval.cpp) | yes | 検索で得たトポロジー候補を、永続的なセーフポイントで 1 つの実行中 lineage の検証済みマイグレーションにします。 |
+| 32 | [`32_evolution.cpp`](32_evolution.cpp) | yes | Harness 進化ループ。厳密な Core のシードをタスクに合わせて変異させ、系譜を JSON で出力します(`--smoke` は組み込みフィクスチャを使用)。 |
+| 58 | [`58_harness_bench.cpp`](58_harness_bench.cpp) | yes | 3 つのフィードバックモードに対する harness 収束ベンチマーク。`--smoke` は組み込みタスクを実行します。 |
+| 60 | [`60_harness_mcp_server.cpp`](60_harness_mcp_server.cpp) | yes | Harness MCP サーバー。6 つのツールで、範囲を限定したマルチ worker ワークフローをコンパイルして実行します。`NEOGRAPH_HARNESS_SMOKE=1` でオフラインのフィクスチャプロバイダーに切り替わります。 |
+
+### プロトコル: MCP、A2A、ACP、gRPC
+
+モデルやサーバーを使う MCP サンプルには、それぞれが必要です。59 は手で操作できるサーバーです。A2A と ACP のサンプルはオフラインで動きます。gRPC のサンプルは `-DNEOGRAPH_BUILD_GRPC=ON` のときだけビルドされます。
+
+| # | サンプル | Offline | 示すもの |
+|---|---|---|---|
+| 59 | [`59_mcp_server.cpp`](59_mcp_server.cpp) | yes | stdio 上の MCP サーバー。`echo` ツール 1 つ、入出力スキーマ、構造化コンテンツ。 |
+| 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | key | stdio 上の MCP。サーバーは子プロセスで、ネットワークスタックなしに ReAct ループが駆動します。 |
+| 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | key | streamable HTTP 上の MCP。サーバーのツールを検出して ReAct ループを駆動します。実行中の MCP サーバーが必要です。 |
+| 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | key | 人の承認付き MCP。すべての MCP ツール呼び出しの前で `interrupt_before` により止め、保留中の呼び出しを表示して再開します。 |
+| 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | service | `Send` を使う MCP。1 つの planner が MCP ツールごとに呼び出しを作り、並列に実行します。モデルは不要ですが、MCP サーバーが動いている必要があります。 |
+| 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | key | 1 つのエージェントが 2 つの MCP サーバー(HTTP と stdio)を 1 つのツール一覧にまとめて使います。 |
+| 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | key | MCP 上のオペレーターフィードバック。スクリプト化した 2 回目のターンが下書きを批評し、次の実行がそれを取り込みます。 |
+| 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | service | リバースエンジニアリングエージェント。stdio 上の GhidraMCP でストリップされたバイナリの関数名を復元します。Ghidra とキーが必要です。 |
+| 38 | [`38_a2a_server.cpp`](38_a2a_server.cpp) | yes | A2A サーバー。グラフを SSE ストリーミング付きで A2A 0.3 と 1.0 で公開し、自前のクライアントで呼び出します。`serve` を渡すと待ち受けを続けます。 |
+| 37 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes | A2A クライアント。エージェントカードを取得してメッセージを送り、`A2ACallerNode` でグラフからリモートエージェントを呼び出します。 |
+| 39 | [`39_acp_server.cpp`](39_acp_server.cpp) | yes | stdio 上の ACP エージェント。エディターが駆動する形です。`--self-test` は initialize、session/new、session/prompt をプロセス内で実行します。 |
+| 45 | [`45_grpc_server.cpp`](45_grpc_server.cpp) | paired | gRPC。`GraphEngine` を `GraphService` で公開します。サンプル 53 がこれを補助プロセスとして起動します(`-DNEOGRAPH_BUILD_GRPC=ON` が必要)。 |
+| 53 | [`53_grpc_client.cpp`](53_grpc_client.cpp) | yes | gRPC。通常のクライアントから `GraphService`(`Health`、`RunGraph`、ストリーミング)を呼び出します(`-DNEOGRAPH_BUILD_GRPC=ON` が必要)。 |
+| 54 | [`54_grpc_checkpoint.cpp`](54_grpc_checkpoint.cpp) | yes | gRPC。リモートの `CheckpointStore` である `GrpcCheckpointStore` と、測定したレイテンシ(`-DNEOGRAPH_BUILD_GRPC=ON` が必要)。 |
+| 55 | [`55_grpc_vs_jsonrpc_toolcall.cpp`](55_grpc_vs_jsonrpc_toolcall.cpp) | yes | ツール呼び出しにおける gRPC と JSON-RPC をループバックで測定して比べます。合否の検査ではなく測定です(`-DNEOGRAPH_BUILD_GRPC=ON` が必要)。 |
+| 57 | [`57_grpc_remote_tool.cpp`](57_grpc_remote_tool.cpp) | yes | gRPC。別プロセスのツールをローカルの `neograph::Tool` として使います(`-DNEOGRAPH_BUILD_GRPC=ON` が必要)。 |
+
+### 永続化と運用
+
+チェックポイント、状態、メモリ、並行性、可観測性。
+
+| # | サンプル | Offline | 示すもの |
+|---|---|---|---|
+| 04 | [`04_checkpoint_hitl.cpp`](04_checkpoint_hitl.cpp) | yes | Human-in-the-Loop。支払いノードの手前で `interrupt_before` により止め、チェックポイントを保存し、承認後に再開します。 |
+| 08 | [`08_state_management.cpp`](08_state_management.cpp) | yes | 保存したチェックポイントに対する `get_state`、`update_state`、`fork` と、チェックポイント履歴。 |
+| 14 | [`14_plan_executor.cpp`](14_plan_executor.cpp) | yes | fan-out の途中で失敗を模擬した Plan and execute。再開すると失敗した兄弟ノードだけが再実行されます(pending writes)。 |
+| 26 | [`26_postgres_react_hitl/`](26_postgres_react_hitl/) | key | PostgreSQL を使う deep-research HITL。レポートと再開の間にプロセスが終了しても保持されます。キー、PostgreSQL、Crawl4AI が必要です(Docker Compose)。 |
+| 41 | [`41_resume_if_exists_chat.cpp`](41_resume_if_exists_chat.cpp) | yes | `resume_if_exists` を使うマルチターンのチャット。次のターンが保存済みのチェックポイントを読み込み、続きを追記します。 |
+| 43 | [`43_store_personalization.cpp`](43_store_personalization.cpp) | yes | ノード内から読み書きするスレッド横断の `Store` で、ユーザーごとに応答を個別化します。 |
+| 48 | [`48_sqlite_checkpoint.cpp`](48_sqlite_checkpoint.cpp) | yes | `:memory:` 上の `SqliteCheckpointStore`。チェックポイント、再開、スレッドの分離(ファイルへの永続化は示しません)。 |
+| 56 | [`56_history_compaction.cpp`](56_history_compaction.cpp) | yes | 会話履歴の圧縮。要約が正常な場合に限り古いテキストターンが要約に置き換わり、ネイティブのグループは丸ごと保持されます。 |
+| 27 | [`27_async_concurrent_runs.cpp`](27_async_concurrent_runs.cpp) | yes | 3 つのエージェント実行が `engine->run_async()` で 1 つの `io_context` スレッド上に交互に載ります。 |
+| 44 | [`44_request_queue_backpressure.cpp`](44_request_queue_backpressure.cpp) | yes | バックプレッシャー付きの固定ワーカープール(`RequestQueue`)。処理中の作業を制限し、溢れた分は拒否します。 |
+| 46 | [`46_cancel_token.cpp`](46_cancel_token.cpp) | yes | 協調的キャンセル。子ごとに `CancelToken::fork()` を使い、親の `cancel()` がすべてを止めます。 |
+| 47 | [`47_node_cache.cpp`](47_node_cache.cpp) | yes | ノード単位の結果キャッシュ。同じ入力での 2 回目の実行はキャッシュに当たり、新しい入力は外れます。 |
+| 50 | [`50_async_tool.cpp`](50_async_tool.cpp) | yes | `AsyncTool`。同期の `Tool::execute` 契約でもそのまま受け付けられる、コルーチン形式のツール。 |
+| 49 | [`49_openinference.cpp`](49_openinference.cpp) | yes | OpenInference トレーシング。`graph.run > node.* > llm.complete` が、モックプロバイダーとともに 1 つの span ツリーになります。 |
+
+### ショーケースとクックブック
+
+複数の機能を組み合わせた、より大きなプログラムです。クックブックの各プロジェクトには専用の README があります。[クックブックの索引](cookbook/README.md)を参照してください。
+
+| # | サンプル | Offline | 示すもの |
+|---|---|---|---|
+| 11 | [`11_clay_chatbot.cpp`](11_clay_chatbot.cpp) | service | C++ で作ったデスクトップチャット。Clay がウィンドウを配置し、Raylib が描画し、エージェントの応答がストリーミングされます。既定はモック、`--live` で OpenRouter。`-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON` とディスプレイが必要です。 |
+
+| プロジェクト | Offline | 示すもの |
+|---|---|---|
+| [`cookbook/the-beast/`](cookbook/the-beast/) | yes | 厳密な Core JSON を書き、コンパイラで検証し、進化させ、チェックポイントでロールバックする自己進化エージェント。オフラインのバイナリはスタブの作成者を使い、ライブ版にはキーが必要です。 |
+| [`cookbook/ai-assembly/`](cookbook/ai-assembly/) | yes | A2A のメンバーサーバー 4 つと、議案を配信して投票を集計する Speaker。`scripts/run_session.sh --mock` でオフライン実行でき、`NEOGRAPH_BUILD_DIR` にビルドディレクトリを指定します。 |
+| [`cookbook/jarvis/`](cookbook/jarvis/) | yes | 4 方向ルーター、MCP ツール、A2A の専門家、保存されるメモリを備えたメタオーケストレーター。モックビルド: `-DNEOGRAPH_BUILD_COOKBOOK_JARVIS=ON -DNEOGRAPH_JARVIS_FORCE_MOCK=ON`。 |
+| [`cookbook/minimal-mcp/`](cookbook/minimal-mcp/) | yes | 標準ライブラリだけの 60 行の Python サーバーを相手にした MCP クライアントの往復。モデルは使いません。 |
+| [`cookbook/multi_tenant_chatbot/`](cookbook/multi_tenant_chatbot/) | yes | コンパイルキャッシュを通じて、1 つのプロセスが多数の顧客のトポロジーを処理します。モックのバイナリは何も要らず、ライブ版にはキーが必要です。 |
+| [`cookbook/self_evolving_chatbot/`](cookbook/self_evolving_chatbot/) | key | 顧客ごとにトポロジーを選び、進化させるチャットサーバー。ProgramChat には `--mock` モードがあり、Core のサーバーにはキーが必要です。 |
+| [`cookbook/topology-retrieval/`](cookbook/topology-retrieval/) | yes | サンプル 64 へつながる候補選択(dense、BM25、順位融合、再ランキング)。`--mock` には `pip install faiss-cpu numpy` が必要です。 |
+| [`cookbook/byo-openai/`](cookbook/byo-openai/) and [`cookbook/openrouter-provider/`](cookbook/openrouter-provider/) | service | Python のプロバイダーレシピ。ノード内で自前の OpenAI クライアントを使う方法と、型付きの OpenRouter リクエスト。Chat エンドポイント(キー、または `bindings/python/examples/_scripted.py` のスクリプト化モデルのようなローカルピア)が必要です。 |
+
+この表の `yes` は、プロジェクトの既定の実行にキーが要らないという意味です。スモークテストされるバイナリは `ctest -L examples-offline` に `cookbook.*` として現れます。
+
+### サンプル 11 と 35 についての補足
+
+例 11 は Raylib をソースからビルドするため、Linux では X11 と OpenGL の開発ヘッダーが必要です(例: `libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev`)。テキストには fontconfig または一般的なインストール パスで見つかったシステムの TrueType/OpenType フォントを使います。`NEOGRAPH_CHAT_FONT` と、必要に応じて `NEOGRAPH_CHAT_BOLD_FONT`、`NEOGRAPH_CHAT_MONO_FONT` でファイルを指定でき、`font.ttc#N` はフォント コレクションの N 番目の face を選びます。キー: Enter で送信、Esc で入力を消去、Ctrl+V で貼り付け、Ctrl+Q で終了。応答のストリーミング中は Send ボタンが Stop になります。
+
+例 35 には、`bridge_mcp_ghidra.py` スクリプトのパスを指定する `GHIDRA_MCP_BRIDGE` が必要です。`GHIDRA_MCP_PYTHON` はインタープリターを選択し、既定値は `python3` です。`GHIDRA_SERVER_URL` は GhidraMCP バックエンドのエンドポイントを選択し、既定値は `http://127.0.0.1:18080/` です。実行前に、GhidraMCP バックエンドを有効にしてプログラムを開いた Ghidra を起動してください。この例はモデルを呼び出す前にツールを検出して `list_methods` を一度呼び出し、バックエンドが応答しなければ終了ステータス 2 で終了します。一部の GhidraMCP リリースはバックエンドが停止していてもすべてのツールを列挙するためです。この例にはその後に確認される空でない `OPENROUTER_API_KEY` も必要で、有料モデルを呼び出します。
+
+## オフライン、スクリプト、ライブ
+
+モデルで動くサンプルにはモデルが必要です。オフラインのサンプルは `scripted_provider.h` を使います。これは返答をサンプル自身に書く `neograph::Provider` で、テキスト、ツール呼び出し、ストリーミングの差分、使用量、型付きの失敗を表現できます。実際のプロバイダーと同じ prepare と dispatch の経路を通るので、グラフ、ツール、チェックポイントのコードは、そのまま本番に出せるコードです。モデルではないため、何を返すかはスクリプトが決めます。
+
+```cpp
+#include "scripted_provider.h"
+
+auto scripted = std::make_shared<examples::ScriptedProvider>(std::vector<examples::Reply>{
+    examples::call_tool("calculator", {{"expression", "2 + 3"}}),   // call 1: ask for a tool
+    examples::say("The answer is 5."),                              // call 2: the final answer
+});
+auto provider = examples::choose_provider(argc, argv, scripted);    // --live switches to OpenRouter
+```
+
+スクリプトはリクエストの関数にもできます。`ScriptedProvider([](const examples::ScriptedTurn& turn) { ... })` は履歴、最後のユーザーテキスト、ツール結果を参照でき、ループや並列 fan-out にはこちらが必要です。規則は `scripted_provider.h` 先頭のコメントにあります。
+
+`--live`(または `NG_EXAMPLE_LIVE=1`)は `OPENROUTER_API_KEY` から実際のプロバイダーを作ります。キーはプロセスの環境からのみ読み、ヘルパーはファイルを読みません。ライブ呼び出しはプロバイダーが課金します。古いライブ専用のサンプルはまだ `cppdotenv` で `.env` ファイルを読み込んでおり、書き直す際にこのヘルパーへ移します。サンプル 25 と 26 はローカルの Crawl4AI サーバーも使います。現在のセキュアな Crawl4AI イメージには空でない `CRAWL4AI_API_TOKEN` が必要です。サンプル 26 の `.env.example` を参照してください。
+
+## サンプルを追加する
+
+番号は再利用しません。次に空いているのは 33 と 65 以降です。新しいサンプルは、ソースファイル 1 つ、CMake の 1 行、表の 1 行で構成されます。
+
+1. ファイル名を `NN_short_name.cpp` とし、ヘッダーコメントで始めます。数行の説明、`Usage:` 行、続いてテスト用の注釈を書きます。
+2. そのコメントブロックにテスト方法を書きます。オフラインのサンプルは必ず出力する行を書き、キーやサービスが必要なサンプルはオフラインで動かせない理由を書きます(注釈の文法は `examples/run_example_smoke.py` の先頭にあります)。
+3. `examples/cmake/` 配下のファイルで `neograph_add_example(short_name NN_short_name.cpp LINK neograph::core neograph::llm)` を使ってターゲットを登録します。ctest の項目は注釈から作られます。
+4. 該当する段階の表に、Offline の値付きで行を追加します。
+5. `ctest -L examples-offline` と `python scripts/check_examples.py` を実行します。後者は、注釈のないサンプル、重複した番号、注釈と食い違う表があると失敗します。
+
+```cpp
+// smoke-expect: Final answer: 427
+// smoke-skip: needs OPENROUTER_API_KEY (live model call)
+```
+
+上の 2 つの注釈はどちらか一方です。サンプルには `smoke-expect` の行か `smoke-skip` の 1 行のどちらかを書き、両方は書きません。
 
 ## 型付き C++ 移行状況
 
@@ -41,193 +263,6 @@ ToT/Forge/rewrite helper と A2A 0.3/1.0 peer を実行し、インストール�
 [SDK interface-4 実行記録](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record)を参照してください。
 新しい hosted vendor、Windows/macOS/ARM64、HTTP/3、sanitizer 検証は主張せず、
 remote CI と公開は未完了です。
-
-
-
-番号付き例は NeoGraph のエンジン API を扱い、Core と Program の quickstart も含みます。
-ほとんどはこのディレクトリの単一ファイルです。Docker Compose を使う
-[`26_postgres_react_hitl/`](26_postgres_react_hitl/) もあります。
-例をプロジェクトにコピーし、`neograph::core` と必要なコンポーネントにリンクしてください。
-
-## 建てる
-
-デフォルトの CMake 構成では、有効なコンポーネントがサポートする
-例をビルドします。Program quickstart と Program ベースの例には
-`-DNEOGRAPH_BUILD_PROGRAM=ON` が必要です。gRPC と Python バインディングは
-オプションで、対応するオプションを有効にしない限り該当例は省略されます。
-
-```bash
-cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON
-cmake --build build -j$(nproc)
-```
-
-Program ベースと A2A の例を含めるには、次のコンポーネントも有効にします。
-
-```bash
-cmake -S . -B build \
-  -DNEOGRAPH_BUILD_EXAMPLES=ON \
-  -DNEOGRAPH_BUILD_PROGRAM=ON \
-  -DNEOGRAPH_BUILD_A2A=ON
-cmake --build build -j$(nproc)
-```
-
-例をスキップするには `-DNEOGRAPH_BUILD_EXAMPLES=OFF` を渡します。追加の
-依存関係 (Crawl4AI Docker、Postgres、MCP サーバー、Clay+Raylib) が必要な例は、
-明示的な CMake オプションまたはランタイムプローブで制御されます。
-以下の「セットアップ」列を参照してください。
-
-## 設定
-
-実際の LLM にアクセスする例は cppdotenv 経由で cwd (または任意の親ディレクトリ) から
-`.env` を自動ロードします。ライブ例は 1 つのキーを使います。
-
-```
-OPENROUTER_API_KEY=sk-or-...
-```
-
-以下の「Setup」エントリのない例では API キーは必要ありません。
-インプロセス `MockProvider` または純粋なモック ノード。
-
-## ここから始めましょう
-
-初めての場合:
-
-|最初 |学ぶこと |
-|---|---|
-| [`62_core_quickstart.cpp`](62_core_quickstart.cpp) | **Core クイックスタート** — インストール済み `neograph::core` ターゲットで厳密なグラフと型付きチャンネルを実行します。オプション コンポーネント/API キー不要。 |
-| [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | **Program クイックスタート** — インストール済み `neograph::program` ターゲットで `call_core` Program をコンパイル、admission、実行します。`-DNEOGRAPH_BUILD_PROGRAM=ON` が必要です。 |
-| [`51_minimal.cpp`](51_minimal.cpp) |最小の動作プログラム — `result.channel<T>("name")` をビルド、実行、読み取ります。 APIキーがありません。 |
-| [`02_custom_graph.cpp`](02_custom_graph.cpp) | JSON グラフ定義を構築し、実行します。 APIキーがありません。 |
-| [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | `make_parallel_group` による非同期ファンアウト。 APIキーがありません。 |
-| [`10_send_command.cpp`](10_send_command.cpp) | `Send` (動的ファンアウト) + `Command` (ルーティング オーバーライド)。 APIキーがありません。 |
-| [`01_react_agent.cpp`](01_react_agent.cpp) |実際の LLM + 計算ツールを使用した ReAct ループ。 **`OPENROUTER_API_KEY` が必要です。** |
-| [`14_plan_executor.cpp`](14_plan_executor.cpp) |計画→並列サブタスク→ソルバー、チェックポイント ストアによるクラッシュ回復。 APIキーがありません。 |
-
-これらが意味をなすと、以下の残りは内容ごとにグループ化されます。
-ファイル番号ではなく、実演してください。
-
-## 索引
-
-### コア エンジン — グラフ、状態、ルーティング
-
-| # |ファイル |セットアップ |それが示すもの |
-|---|------|-------|---------------|
-| 02 | [`02_custom_graph.cpp`](02_custom_graph.cpp) |オフライン | JSON グラフを構築して実行します。このリポジトリで最も短い便利なプログラム。 |
-| 05 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) |オフライン |非同期ファンアウト — 3 つの「researcher」ノードが 1 つの io_context 上で同時実行され、サマライザがそれらをファンインします。 |
-| 06 | [`06_subgraph.cpp`](06_subgraph.cpp) |オフライン |階層構成 — 外側のスーパーバイザー グラフは内側の ReAct サブグラフに委譲します。 |
-| 07 | [`07_intent_routing.cpp`](07_intent_routing.cpp) |オフライン |分類器→条件付きエッジ→数学/翻訳/一般的な専門家。 |
-| 08 | [`08_state_management.cpp`](08_state_management.cpp) |オフライン | `get_state` / `update_state` / `fork` — C++ にマップされた LangGraph のチェックポインター API。 |
-| 09 | [`09_all_features.cpp`](09_all_features.cpp) |オフライン | 1 つのデモに 6 つの機能 — `NodeInterrupt`、`RetryPolicy`、`StreamMode`、`Send`、`Command`、`Store`。 |
-| 10 | [`10_send_command.cpp`](10_send_command.cpp) |オフライン | Planner→Send→researcher→Command(loop|finish) — 標準的な Send+Command パターン。 |
-| 42 | [`42_custom_reducer_condition.cpp`](42_custom_reducer_condition.cpp) |オフライン | C++ からカスタム チャネル リデューサーとエッジ条件を登録します。エンジンに触れることなく、JSON ボキャブラリーを拡張します。 |
-| 43 | [`43_store_personalization.cpp`](43_store_personalization.cpp) |オフライン |クロススレッド `Store` は、`in.ctx.store` を介してノード内から到達しました。共有名前空間メモリからのユーザーごとのノードの動作です。 |
-| 51 | [`51_minimal.cpp`](51_minimal.cpp) |オフライン |最も短い動作プログラム — ビルド、実行、`result.channel<T>("name")`。新しいユーザーのテンプレート。 |
-| 52 | [`52_export_schema.cpp`](52_export_schema.cpp) |オフライン | `NodeFactory::export_schema()` → トポロジ JSON スキーマ ダンプ。コードレスビジュアルエディターがパレットを構築する、バージョンがロックされた信頼できる情報源。 |
-| 56 | [`56_history_compaction.cpp`](56_history_compaction.cpp) |オフライン |境界付きメッセージ ウィンドウ - 履歴が予算を超えると、削除されたプレフィックスが LLM によって作成された概要に置き換えられます。常にモックの要約器を使い、API key は読みません。 |
-
-### 本物の LLM — プロバイダー、ツール、ReAct
-
-| # |ファイル |セットアップ |それが示すもの |
-|---|------|-------|---------------|
-| 01 | [`01_react_agent.cpp`](01_react_agent.cpp) | OpenRouter | ReAct ループ: `llm_call` ↔ `tool_dispatch` (`has_tool_calls` 条件付き)。計算ツール。 |
-| 12 | [`12_rag_agent.cpp`](12_rag_agent.cpp) | OpenRouter | OpenRouter 互換 embedding + メモリ内コサイン検索を備えた RAG。 |
-| 13 | [`13_openrouter_responses_sse.cpp`](13_openrouter_responses_sse.cpp) | OpenRouter | 型付き Responses SSE リクエスト、順序付き `sp::Event` 観測と所有された `sp::Outcome`。 |
-| 34 | [`34_openrouter_responses_tools_sse.cpp`](34_openrouter_responses_tools_sse.cpp) | OpenRouter | 全七 hosted-tool セクションを型付き SSE で実行し、完全な Outcome と順序付き wire 観測を保持します。 |
-| 29 | [`29_responses_envelope.cpp`](29_responses_envelope.cpp) | OpenRouter | デバッグ支援: 1 つのツール呼び出しリクエストの生の `/api/v1/responses` JSON envelope をダンプします。 |
-| 30 | [`30_reasoning_effort.cpp`](30_reasoning_effort.cpp) | OpenRouter | 固定 DeepSeek モデルで reasoning effort のレイテンシー / reasoning token のトレードオフを確認します。 |
-
-### 推論パターン
-
-| # |ファイル |セットアップ |パターン |
-|---|------|-------|---------|
-| 15 | [`15_reflexion.cpp`](15_reflexion.cpp) |人類 |反射 — 批評家が「受け入れます」と言うまで生成者 ↔ 批評家がループします (Shinn et al. 2023)。俳句制約タスク。 |
-| 16 | [`16_tree_of_thoughts.cpp`](16_tree_of_thoughts.cpp) |人類 |思考のツリー — 各深さで、N 個の候補の思考を生成し、それらをスコア化し、上位 K を維持し、展開します。 24 のゲーム。 |
-| 17 | [`17_self_ask.cpp`](17_self_ask.cpp) |人類 |自問 - 明確な「フォローアップの質問は必要ですか?」マルチホップ推論のための分解 (Press et al. 2022)。 |
-| 18 | [`18_multi_agent_debate.cpp`](18_multi_agent_debate.cpp) |人類 |研究者 / 懐疑論者 / 裁判官 — 3 つのシステム プロンプト、共有記録証明書、裁判官の判決。 |
-| 19 | [`19_rewoo.cpp`](19_rewoo.cpp) |人類 | REWOO — プランナーは `#E1 / #E2` プレースホルダーを使用して完全なプランをコミットし、ワーカーはツールを並行してファンアウトし、ソルバーが合成します。 |
-
-### 永続性と HITL
-
-| # |ファイル |セットアップ |それが示すもの |
-|---|------|-------|---------------|
-| 04 | [`04_checkpoint_hitl.cpp`](04_checkpoint_hitl.cpp) |オフライン | `interrupt_before` 支払いノード、チェックポイントを保持し、オペレーターの承認後に再開します。モックプロバイダー。 |
-| 14 | [`14_plan_executor.cpp`](14_plan_executor.cpp) |オフライン |ファンアウト中障害をシミュレートした Plan-and-Executor - チェックポイントの再実行は、障害が発生した兄弟のみを再実行します。保留中 - 書き込み機構が動作中。 |
-| 26 | [`26_postgres_react_hitl/`](26_postgres_react_hitl/) | OpenRouter + Postgres + Crawl4AI | プロセス不連続ディープリサーチ HITL — PG でバックアップされたチェックポイントは、レポートと再開の間の `exit` まで存続します。 Docker-Compose 駆動。 |
-| 41 | [`41_resume_if_exists_chat.cpp`](41_resume_if_exists_chat.cpp) |オフライン | LangGraph スタイルのマルチターン チャット — `resume_if_exists` は前のチェックポイントをリロードし、新しいターンを追加します。モックプロバイダー。 |
-| 48 | [`48_sqlite_checkpoint.cpp`](48_sqlite_checkpoint.cpp) |オフライン | SQLite `:memory:` checkpoint/resume と thread 分離; file/process-restart 永続性の証拠ではありません。 |
-
-### MCP (モデル コンテキスト プロトコル)
-
-| # |ファイル |セットアップ |それが示すもの |
-|---|------|-------|---------------|
-| 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | OpenRouter + MCP HTTP サーバー | ストリーミング可能な HTTP MCP サーバーからツールを検出し、ReAct ループを駆動します。 |
-| 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | OpenRouter + Python stdio スクリプト | 03 と同じですが、MCP サーバーは stdin/stdout 上の子サブプロセスで、ネットワークスタックはありません。 |
-| 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | OpenRouter + 2 サーバー | 1 つのエージェント、2 つの MCP サーバー (HTTP + stdio)、ツールを 1 つのリストへ統合し、LLM が両方から透過的に選択します。 |
-| 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | MCP HTTP サーバー (LLM なし) | 固定 planner が MCP 呼び出しごとに Send を作り、`make_parallel_group` で同時実行します。モデル呼び出しはありませんが、MCP サーバーへの接続は必要です。 |
-| 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | OpenRouter + MCP HTTP サーバー | `interrupt_before` で任意の MCP ツール呼び出しを止め、オペレーターが確認・承認して再開します。 |
-| 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | OpenRouter + MCP HTTP サーバー | コードに固定された（入力は受け付けない）オペレーターのフィードバックが回答草案を指摘します。2 回目の実行はそれを会話コンテキストへ取り込みます。 |
-
-### 非同期、同時実行、パフォーマンス
-
-| # |ファイル |セットアップ |それが示すもの |
-|---|------|-------|---------------|
-| 27 | [`27_async_concurrent_runs.cpp`](27_async_concurrent_runs.cpp) |オフライン | 3 つのエージェントは、`engine->run_async()` を介して 1 つの `io_context` スレッドでインターリーブ実行されます (3×50 ミリ秒ではなく、ほぼ 50 ミリ秒)。ステージ 4 非同期エンドツーエンド。 |
-| 40 | [`40_react_async_streaming.cpp`](40_react_async_streaming.cpp) | OpenRouter | 型付き provider イベントによる非同期 ReAct。text delta は表示用投影であり native history ではありません。 |
-| 44 | [`44_request_queue_backpressure.cpp`](44_request_queue_backpressure.cpp) |オフライン |バックプレッシャー付きの固定ワーカー プール (`neograph::util::RequestQueue`) — 実行中の作業は制限されており、負荷がかかっても無制限に増加することはありません。 |
-| 46 | [`46_cancel_token.cpp`](46_cancel_token.cpp) |オフライン |協調キャンセル — 子ごとに `CancelToken::fork()`、親 `cancel()` が飛行中のすべての子にカスケードされます。 |
-| 47 | [`47_node_cache.cpp`](47_node_cache.cpp) |オフライン |ノード + 入力をキーとしたノードごとの結果キャッシュ — 実行全体で同一の入力に対する再計算をスキップします。 |
-| 50 | [`50_async_tool.cpp`](50_async_tool.cpp) |オフライン | `AsyncTool` — コルーチン形状のツール実行アダプター。ツールは io_context をブロックせずに `co_await` できます。 |
-
-### エージェントの相互運用性 — A2A および ACP
-
-| # |ファイル |セットアップ |それが示すもの |
-|---|------|-------|---------------|
-| 38 | [`38_a2a_server.cpp`](38_a2a_server.cpp) |オフライン |コンパイルされた NeoGraph をエージェント間エンドポイント (HTTP、ストリーミング SSE) として公開します。まずこれを実行してください。 |
-| 37 | [`37_a2a_client.cpp`](37_a2a_client.cpp) |オフライン (サンプル 38 を実行する必要があります) | *リモート* A2A エージェントを駆動する — `A2ACallerNode` は、リモート エージェントをローカル ノードのように見せます。 |
-| 39 | [`39_acp_server.cpp`](39_acp_server.cpp) |オフライン | Agent Client Protocol を介して NeoGraph を公開します。標準入出力を介した双方向 JSON-RPC、エディター (Zed スタイル) が駆動する形状です。 |
-
-### 分散 — gRPC サービスとリモート チェックポイント/ツール
-
-`-DNEOGRAPH_BUILD_GRPC=ON` のみでビルドされます (`grpc++` / `protoc` が必要)。
-
-| # |ファイル |セットアップ |それが示すもの |
-|---|------|-------|---------------|
-| 52 | [`52_grpc_server.cpp`](52_grpc_server.cpp) |オフライン (grpc++) | gRPC 経由で `GraphEngine` を公開します。遅延コンパイルされキャッシュされた個別グラフ エンジンごとに実行されます。 |
-| 53 | [`53_grpc_client.cpp`](53_grpc_client.cpp) |オフライン (grpc++) | C++ クライアントから NeoGraph gRPC `GraphService` を呼び出します。 |
-| 54 | [`54_grpc_checkpoint.cpp`](54_grpc_checkpoint.cpp) |オフライン (grpc++) | `GrpcCheckpointStore` — ネットワーク境界を越えたリモート `CheckpointStore`、正確な遅延測定。 |
-| 55 | [`55_grpc_vs_jsonrpc_toolcall.cpp`](55_grpc_vs_jsonrpc_toolcall.cpp) |オフライン (grpc++) |直接対決: JSON-RPC と gRPC を介したツール呼び出し — 「70× は Nagle アーティファクト」の背後にあるマイクロベンチ。 |
-| 57 | [`57_grpc_remote_tool.cpp`](57_grpc_remote_tool.cpp) |オフライン (grpc++) |ローカル `neograph::Tool` として公開される別のプロセスに存在するツール。 |
-
-### 可観測性
-
-| # |ファイル |セットアップ |それが示すもの |
-|---|------|-------|---------------|
-| 49 | [`49_openinference.cpp`](49_openinference.cpp) |オフライン | OpenInference トレーサー アダプター — `graph.run > node.* > llm.complete` は 1 つのトレース ツリー (12 属性) として配置されます。フェニックス認証済み。モックプロバイダー。 |
-
-### 綿密な研究 / RAG バリアント
-
-| # |ファイル |セットアップ |それが示すもの |
-|---|------|-------|---------------|
-| 25 | [`25_deep_research.cpp`](25_deep_research.cpp) | OpenRouter DeepSeek + Crawl4AI Docker | `langchain-ai/open_deep_research` の C++ ポート。スーパーバイザーは計画を立て、並行するサブ研究者を展開し、Markdown レポートを統合します。 |
-| 28 | [`28_corrective_rag.cpp`](28_corrective_rag.cpp) | OpenRouter | CRAG (Yan et al. 2024)。取得→グレード→関連性に応じて refine(KB) / refine+Web / Web のみにルーティングします。`/api/v1/responses` の組み込みツールで Web 検索します。 |
-
-### ローカル/ハイブリッド LLM バックエンド
-
-| # |ファイル |セットアップ |それが示すもの |
-|---|------|-------|---------------|
-| 31 | [`31_local_transformer.cpp`](31_local_transformer.cpp) | llama.cpp / vLLM | `http://localhost:8090` の型付き Chat クライアント。モデル重みはエージェントプロセスの外部に置きます。 |
-
-### ショーケース
-
-| # |ファイル |セットアップ |それが示すもの |
-|---|------|-------|---------------|
-| 11 | [`11_clay_chatbot.cpp`](11_clay_chatbot.cpp) | Clay + Raylib (`-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`) | 純粋な C++ のデスクトップ マルチターン チャットです。Clay がウィンドウをレイアウトし、Raylib が描画し、応答は NeoGraph エージェントからストリーミングされます。既定は mock、`--live` で OpenRouter を使います。コード ブロック、リスト、非ラテン文字を描画し、Stop で応答を取り消せます。 |
-| 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | OpenRouter + Ghidra + ghidra-mcp | リバースエンジニアリングエージェント。Ghidra でシンボルを除去したバイナリの関数名と概要を復元します。過去のエンドツーエンド結果は、6 関数の crackme で matched_score 0.92 でした。完全なパイプラインは別の非公開リポジトリ `fox1245/re-agent` で管理されています。 |
-| 36 | [`36_classifier_fanout.cpp`](36_classifier_fanout.cpp) |オフライン | 5 つの小さな「分類子」 (感情 / 毒性 / 言語 / トピック / 意図) が Send を介して展開され、並行して実行されます。経過時間 ≈ 合計ではなく最大 (分類子ごと) — 小規模モデルのエッジ ストーリー。 DistilBERT/MiniLM パスの 5 ms レイテンシの代用を模擬します。インライン `[ONNX SWAP-IN]` ブロックは、`Ort::Session` を使用した 30 行の置換を示します。推論ランタイムの依存関係はありません。 |
-
-例 11 は Raylib をソースからビルドするため、Linux では X11 と OpenGL の開発ヘッダーが必要です(例: `libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev`)。テキストには fontconfig または一般的なインストール パスで見つかったシステムの TrueType/OpenType フォントを使います。`NEOGRAPH_CHAT_FONT` と、必要に応じて `NEOGRAPH_CHAT_BOLD_FONT`、`NEOGRAPH_CHAT_MONO_FONT` でファイルを指定でき、`font.ttc#N` はフォント コレクションの N 番目の face を選びます。キー: Enter で送信、Esc で入力を消去、Ctrl+V で貼り付け、Ctrl+Q で終了。応答のストリーミング中は Send ボタンが Stop になります。
-
-例 35 には、`bridge_mcp_ghidra.py` スクリプトのパスを指定する `GHIDRA_MCP_BRIDGE` が必要です。`GHIDRA_MCP_PYTHON` はインタープリターを選択し、既定値は `python3` です。`GHIDRA_SERVER_URL` は GhidraMCP バックエンドのエンドポイントを選択し、既定値は `http://127.0.0.1:18080/` です。実行前に、GhidraMCP バックエンドを有効にしてプログラムを開いた Ghidra を起動してください。この例はモデルを呼び出す前にツールを検出して `list_methods` を一度呼び出し、バックエンドが応答しなければ終了ステータス 2 で終了します。一部の GhidraMCP リリースはバックエンドが停止していてもすべてのツールを列挙するためです。この例にはその後に確認される空でない `OPENROUTER_API_KEY` も必要で、有料モデルを呼び出します。上のスコアは過去の観測値であり、新しい実行結果や一般的な精度保証ではありません。
 
 ## 保持された例の契約
 
@@ -305,12 +340,12 @@ ToT は空でない最終 `EXPR`/`CHECK` を出力しなければなりません
 一時停止した reviewer の resume 例ではありません。例14は実際の executor 回数から節約数を
 計算します。最初の五回の後、失敗 sibling 一つだけを再実行すると四回を節約します。
 
-例54は smoke/file モードを選ぶ前に `pnoop` を登録します。repository root から
+例32は smoke/file モードを選ぶ前に `pnoop` を登録します。repository root から
 追跡済み seed/task ファイルを使ってください:
 
 ```bash
 ./build/example_evolution --smoke
-./build/example_evolution examples/54_evolution_seed.json examples/54_evolution_task.json
+./build/example_evolution examples/32_evolution_seed.json examples/32_evolution_task.json
 ```
 
 実際の JSON の `best.compiled`、`best.validated`、`best.executed`、`best.correct` を確認してください。
@@ -346,29 +381,6 @@ SSE 配信後は再送しません。例38は両 dialect を広告し、初期/�
 グラフ定義は JSON 形式 (`std::map<std::string, json>`) です。
 [Python examples](../bindings/python/examples/) も同じ topology 形式を使います。
 provider リクエストと Outcome は topology JSON とは別の型付きオブジェクトです。
-
-## APIキーエコノミー
-
-|プロバイダー |例 |
-|---|---|
-| `OPENROUTER_API_KEY` | 01、03、12、13、15、16、17、18、19、20、22、23、24、25、28、29、30、34、35、40 |
-| ローカルサーバー (キーなし) | 31 |
-| **なし** | 02、04、05、06、07、08、09、10、14、21、27、36、37、38、39、41、42、43、44、46、47、48、49、50、51、52、53、54、55、 56、57 |
-
-例 25 と 26 は local Crawl4AI も使用します。現在の secure Docker image は
-空でない `CRAWL4AI_API_TOKEN` を必要とします。例 26 の `.env.example` を参照してください。
-
-31 例は API key なしで実行できます。例 21 は固定 MCP planner、
-27 は `steady_timer` で model latency を代用し、token を使わず engine 動作を示します。
-gRPC 例 (52–55, 57) も key 不要ですが、`-DNEOGRAPH_BUILD_GRPC=ON` と `grpc++`/`protoc` が必要です。
-56 (`history_compaction`) は常に mock の要約器を使い、API key を読みません。
-
-## CMake 構成後の再実行
-
-ビルドされたバイナリは、ビルド ディレクトリのルートに配置されます。
-`example_<short_name>` (例: `example_react_agent`、
-`example_custom_graph`）。正確な名前は各 `.cpp` の上部にあります
-`Usage:` の下にコメントします。
 
 ## Responses inspection 契約 (13 / 29 / 30 / 34)
 

@@ -1,79 +1,181 @@
-<!-- neograph-i18n: source=bindings/python/examples/README.md locale=zh-CN source_sha256=5ec25b467bef853ac9df52be725f8c16b6c63aef9ab5f6f5b64c974749579bee -->
+<!-- neograph-i18n: source=bindings/python/examples/README.md locale=zh-CN source_sha256=a56e3bfe852d264dcadce3f7ea680e0c8b6f8dca978c16eb8d21270ed2254900 -->
 # Python API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-这 28 个脚本演示了图状态、路由、工具、provider 请求和协议托管。建议从离线的示例开始；调用托管模型需要明确提供凭据，并且会产生 provider 费用。
+这 28 个脚本演示图状态、路由、工具、provider 请求和协议托管，每个只演示一件事。大多数能离线运行：由脚本化模型代替 provider，因此既不需要 API key，也不需要网络。也能调用真实模型的示例接受 `--live`。
 
-## 准备
+**Offline** 列说明每一行需要什么。`yes`：无需 key 和网络即可运行，并由 `bindings/python/tests/test_examples_offline.py` 自动测试。`key`：需要 provider API key。`service`：需要其他进程、服务器或额外的包。`paired`：与该行所写的示例一起离线运行。
+
+## 设置
 
 ```bash
 pip install neograph-engine
 python 01_minimal.py
 ```
 
-在这个目录下运行命令。`python-dotenv` 是可选的：如果希望 `_common.py` 加载离得最近的示例或仓库的 `.env`，就安装它。已导出的环境变量优先。缺少托管服务的凭据会报错，不算验证成功。
+请在此目录下运行命令。离线示例不需要其他东西。若要用源码构建而不是 wheel 来运行，请使用 `-DNEOGRAPH_BUILD_PYBIND=ON` 配置，并把 `PYTHONPATH` 设为构建目录和 `bindings/python`。构建目录不会安装该包的 Python 依赖，请先运行 `pip install 'pydantic>=2' certifi`。`import neograph_engine` 需要 pydantic；没有 certifi 时，TLS 使用主机的信任库。
 
-如果要改为针对源码构建来运行，用 `-DNEOGRAPH_BUILD_PYBIND=ON` 配置，并把 `PYTHONPATH` 设为构建目录。构建目录不会安装包的 Python 依赖：请先运行 `pip install 'pydantic>=2' certifi`。`import neograph_engine` 需要 pydantic；没有 certifi 时，TLS 使用宿主机的信任库。
+## 从这里开始
 
-运行托管服务的示例时，设置 `OPENAI_API_KEY`，还可以选择性地设置 `OPENAI_MODEL`（默认 `gpt-4.1-mini`）。`_common.py` 会准入(admission)一份封闭的 OpenAI Chat 或 Responses 描述符，然后构造 `SchemaProvider`。带类型的 SDK 使用 libcurl 的 HTTP；已移除的 provider 类、completion 参数、WebSocket 路径和传输后端选择器都不再可用。
+请按顺序阅读，每个示例只增加一个概念。
 
-要在没有密钥的情况下做协议验证，把 `OPENAI_API_BASE` 设为一个忠实的回环 Chat/Responses 对端。它必须实现示例所用的路由和响应形态，而不是返回一个 Python mock。本地 TLS 的 CA 用 `NG_EXAMPLE_CA_FILE` 指定。也可以用 `NG_PROVIDER_DESCRIPTOR` 指向一份完整的、已准入的描述符 JSON 文件，其中包括网关前缀、路由和允许的 header。基础 URL 不是完整的 `/v1/chat/completions` 路由。带类型的 request/outcome 契约，见 [Python 绑定指南](../../../docs/python-binding.md)。
+| 步骤 | 示例 | Offline | 你会学到 |
+|---|---|---|---|
+| 1 | [`01_minimal.py`](01_minimal.py) | yes | 自定义节点读取通道、翻倍后写回：21 变成 42。 |
+| 2 | [`02_tool_dispatch.py`](02_tool_dispatch.py) | yes | Python `Tool` 与内置 `tool_dispatch` 节点：脚本化的工具调用返回 `42`。 |
+| 3 | [`05_openai_provider.py`](05_openai_provider.py) | yes | 通过内置 `llm_call` 节点调用一次模型。脚本化模型回答 `hello world`。 |
+| 4 | [`06_react_agent.py`](06_react_agent.py) | yes | ReAct 循环：`llm_call`、`tool_dispatch` 与 `has_tool_calls` 条件边。`calc` 返回 `4053`，然后模型作答。 |
+| 5 | [`07_checkpoint_hitl.py`](07_checkpoint_hitl.py) | yes | 检查点在支付分发前暂停；批准后恰好恢复一次模拟支付。不会真的转账。 |
+| 6 | [`14_graph_to_json.py`](14_graph_to_json.py) | yes | 图定义就是普通 JSON：先从 dict 运行，再保存为 `my_graph.json`。示例 15 会加载它。 |
 
-## 索引与预期行为
+## 按目标查找
 
-每一项都用 `python <file>` 运行。Linux x86_64 上的冒烟测试，针对不需要凭据的本地对端，运行了选定的几个带类型 provider 的应用，包括两个研究类应用。这并不能证明每个脚本、每个托管 vendor 或每个发布平台都合格；远程 CI 和发布仍待完成。范围见[当前的发布证据](../../../CHANGELOG.md#unreleased)。表中给出的是预期行为，而不是模型确切的措辞。
+选一个目标，阅读对应的示例。
 
-| # | 文件 | 前置条件 | 预期行为 |
-|---|------|---------------|-------------------|
-| 01 | [`01_minimal.py`](01_minimal.py) | 无 | 自定义节点把 21 翻倍成 42。 |
-| 02 | [`02_tool_dispatch.py`](02_tool_dispatch.py) | 无 | 脚本化的工具调用经过 `tool_dispatch`；计算器返回 `42`。 |
-| 03 | [`03_send_fanout.py`](03_send_fanout.py) | 无 | 八个 `Send` 分支合并出平方数 `[0, 1, 4, 9, 16, 25, 36, 49]`；不假定 append 的顺序。 |
-| 04 | [`04_async_concurrent.py`](04_async_concurrent.py) | 无 | 八次异步运行产生 `[0, 2, 4, 6, 8, 10, 12, 14]`；流式运行会发出节点事件。 |
-| 05 | [`05_openai_provider.py`](05_openai_provider.py) | Chat 对端或托管服务的密钥 | `llm_call` 写入一条内容为 `hello world` 的 assistant 消息。 |
-| 06 | [`06_react_agent.py`](06_react_agent.py) | Responses 对端或托管服务的密钥 | 模型发出的 `calc` 调用返回 `4053`，然后模型给出最终回答。 |
-| 07 | [`07_checkpoint_hitl.py`](07_checkpoint_hitl.py) | 无 | 检查点在支付分发之前暂停；批准后恰好恢复一次模拟支付。不会扣任何钱。 |
-| 08 | [`08_intent_routing.py`](08_intent_routing.py) | Chat 对端或托管服务的密钥 | 三个问题分别路由到数学、翻译和通用专家；每个专家写出自己的回答。 |
-| 09 | [`09_state_management.py`](09_state_management.py) | 无 | Alpha 计数到 11；beta fork 了这个值；未知的线程没有检查点。 |
-| 10 | [`10_command_routing.py`](10_command_routing.py) | 无 | 输入 200、50 和 -10 分别通过 `Command` 选择 accept、manual 和 reject 节点。 |
-| 11 | [`11_reflexion.py`](11_reflexion.py) | Chat 对端或托管服务的密钥 | Actor/critic 调用把反思带入下一次尝试，在出现 `ok` 或达到超步上限时停止。这是一个有界的教学性改编。 |
-| 12 | [`12_self_ask.py`](12_self_ask.py) | Chat 对端或托管服务的密钥 | 中间的问题和回答累积在 scratchpad 里，最后才给出答案。没有接入搜索服务。 |
-| 13 | [`13_multi_agent_debate.py`](13_multi_agent_debate.py) | Chat 对端或托管服务的密钥 | 两个 `Send` 分支产生相反的论点；一个 judge 读取合并后的论点。 |
-| 14 | [`14_graph_to_json.py`](14_graph_to_json.py) | 无 | 翻倍的结果 42，以及保存下来的 `my_graph.json` 定义。 |
-| 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | 先运行 14 | 保存的定义把 5 翻倍成 10，把 100 翻倍成 200；自定义节点类型需要另外注册。 |
-| 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | Responses 对端/密钥；`gradio` | 普通聊天，或者三个问题组成的研究报告。researcher 用的是模型自身的知识，不做网络搜索。 |
-| 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | Responses 对端/密钥；`gradio`、`requests`；可选的 Crawl4AI/Postgres | `CRAWL4AI_URL` 启用真实的 `/md` 搜索；`NEOGRAPH_PG_DSN` 启用持久的引擎检查点。已配置的服务出错时，不会悄悄替换。两者都不设置时，脚本会明确报告当前是仅用模型的研究/内存状态。Gradio 的历史不会自动恢复。 |
-| 18 | [`18_node_cache.py`](18_node_cache.py) | Chat 对端或托管服务的密钥 | 跨两个主题的五次运行，只会执行两次由 provider 支撑的节点；重复的输入重放缓存的写入。不承诺固定的延迟。 |
-| 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | 无 | 五个脚本化的 token 事件组成 `Octopuses have three hearts.` 以及消息流的各个块。 |
-| 20 | [`20_otel_tracing.py`](20_otel_tracing.py) | `opentelemetry-api`、`opentelemetry-sdk` | 控制台中的 span 覆盖这次运行和三个节点；最终的轨迹是 `['A', 'B', 'C']`。 |
-| 21 | [`21_http2_transport.py`](21_http2_transport.py) | TLS Chat 对端/密钥；libcurl 的 HTTP/2 支持 | 通过同一个 SDK 对比 HTTP/1.1 和 HTTP/2 请求。协商出的协议要另行确认；耗时取决于 endpoint。 |
-| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | Chat 对端或托管服务的密钥 | 给 profile JSON 打分，失败后请求一张修订过的图，重新编译，再重试。只有已注册的节点类型才会被准入。模型可能用完迭代次数上限也没有成功。 |
-| 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | Chat 对端或托管服务的密钥 | 在一次已准入的图重写前后保留对话检查点；在 `__graph_meta__` 中记录版本/哈希。这个元数据属于应用层，不是权威的重放证据。 |
-| 24 | [`24_tool_approval_gate.py`](24_tool_approval_gate.py) | 无 | 在两个同级工具运行之前暂停；拒绝时只执行 `list_files`，批准时两者各执行一次。shell 操作是模拟的。 |
-| 25 | [`25_async_tools.py`](25_async_tools.py) | 无 | 对比串行的 `Tool` 和 I/O 密集、会重叠的 `AsyncTool`，然后展示 CPython 的 GIL 边界。耗时比值只是观察结果，不是通过的标准。 |
-| 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | 启用了 MCP 的构建 | 启动一个真正的本地 JSON-RPC MCP 对端，发现 `fetch`，在显式的可重入策略下执行三次调用。不需要外部网络，也不需要密钥。 |
-| 27 | [`27_a2a_server.py`](27_a2a_server.py) | Python 3.10+；`neograph-engine[a2a]` | 在 `127.0.0.1:9999` 上提供 agent card 和 A2A JSON-RPC；流式制品组成 `NeoGraph received: hello (turn 1)`。 |
-| 28 | [`28_acp_agent.py`](28_acp_agent.py) | Python 3.10+；`neograph-engine[acp]` | 通过 stdio 提供 ACP；初始化、创建会话、发送 prompt，接收 token 更新和 `end_turn`。持久的 `session/load` 需要配置 Postgres 或 SQLite 后端。 |
+| 我想要…… | 阅读 | Offline |
+|---|---|---|
+| 运行我的第一个图 | [`01_minimal.py`](01_minimal.py) | yes |
+| 给图添加 Python 工具 | [`02_tool_dispatch.py`](02_tool_dispatch.py) | yes |
+| 用 Send 做分支 fan-out | [`03_send_fanout.py`](03_send_fanout.py) | yes |
+| 用 asyncio 同时运行多个图 | [`04_async_concurrent.py`](04_async_concurrent.py) | yes |
+| 从图中调用模型 | [`05_openai_provider.py`](05_openai_provider.py) | yes |
+| 构建会用工具的智能体循环 | [`06_react_agent.py`](06_react_agent.py) | yes |
+| 按意图路由 | [`08_intent_routing.py`](08_intent_routing.py) | yes |
+| 一步内选择下一个节点并写入状态 | [`10_command_routing.py`](10_command_routing.py) | yes |
+| 暂停等待批准后恢复 | [`07_checkpoint_hitl.py`](07_checkpoint_hitl.py) | yes |
+| 允许、拒绝或中断工具调用 | [`24_tool_approval_gate.py`](24_tool_approval_gate.py) | yes |
+| 读取并分叉已保存的状态 | [`09_state_management.py`](09_state_management.py) | yes |
+| 把图保存为 JSON 并重新加载 | [`14_graph_to_json.py`](14_graph_to_json.py) | yes |
+| 把 token 流式输出为 LangChain 风格的块 | [`19_streaming_messages.py`](19_streaming_messages.py) | yes |
+| 用 OpenTelemetry 追踪运行 | [`20_otel_tracing.py`](20_otel_tracing.py) | yes |
+| 并发运行 I/O 密集型工具 | [`25_async_tools.py`](25_async_tools.py) | yes |
+| 使用 MCP 服务器的工具 | [`26_mcp_tools.py`](26_mcp_tools.py) | yes |
+| 通过 A2A 托管我的智能体 | [`27_a2a_server.py`](27_a2a_server.py) | service |
+| 通过 ACP 托管我的智能体 | [`28_acp_agent.py`](28_acp_agent.py) | service |
+| 尝试 Reflexion、Self-Ask 或辩论 | [`11_reflexion.py`](11_reflexion.py) | key |
+| 让智能体改写自己的图 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | key |
+
+## 按层级索引
+
+### 入门与 Core 引擎
+
+其余不涉及模型的 Core 功能。示例 14 会在脚本旁写出 `my_graph.json`，15 再读取它，请按此顺序运行。
+
+| # | 示例 | Offline | 演示内容 |
+|---|---|---|---|
+| 03 | [`03_send_fanout.py`](03_send_fanout.py) | yes | 八个 `Send` 分支合并出平方值 `[0, 1, 4, 9, 16, 25, 36, 49]`；不假定 append 的顺序。 |
+| 04 | [`04_async_concurrent.py`](04_async_concurrent.py) | yes | 用 `asyncio.gather` 并发八次异步运行得到 `[0, 2, 4, 6, 8, 10, 12, 14]`；流式运行会发出节点事件。 |
+| 10 | [`10_command_routing.py`](10_command_routing.py) | yes | `Command` 选择下一个节点并写入状态：输入 200、50、-10 分别进入 accept、manual、reject。 |
+| 14 | [`14_graph_to_json.py`](14_graph_to_json.py) | yes | 图定义就是普通 JSON：先从 dict 运行，再保存为 `my_graph.json`。 |
+| 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | yes | 加载示例 14 生成的 `my_graph.json`，把 5 翻倍为 10、100 翻倍为 200。请先运行 14；自定义节点类型在代码中注册。 |
+| 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | yes | `message_stream` 把 token 事件转成 LangChain 风格的块；五个脚本化 token 组成 `Octopuses have three hearts.` |
+
+### 智能体模式
+
+图中的模型（有无工具均可）。`key` 行会调用托管模型。
+
+| # | 示例 | Offline | 演示内容 |
+|---|---|---|---|
+| 05 | [`05_openai_provider.py`](05_openai_provider.py) | yes | 通过 `llm_call` 调用一次模型；脚本化模型回答 `hello world`，`--live` 调用托管模型。 |
+| 06 | [`06_react_agent.py`](06_react_agent.py) | yes | 基于 Responses 协议的 ReAct：模型发出的 `calc` 调用返回 `4053`，随后模型作答。 |
+| 08 | [`08_intent_routing.py`](08_intent_routing.py) | yes | 三个问题通过 `route_channel` 分别路由到 math、translate、general 专家，每位专家写出答案。 |
+| 11 | [`11_reflexion.py`](11_reflexion.py) | key | Reflexion：actor 与 critic 调用把反思带入下一次尝试；这是范围受限的教学版本。 |
+| 12 | [`12_self_ask.py`](12_self_ask.py) | key | Self-Ask：中间问题和答案先累积在草稿区，再给出最终答案；没有接入搜索服务。 |
+| 13 | [`13_multi_agent_debate.py`](13_multi_agent_debate.py) | key | 两个 `Send` 分支各执一方，一个裁判读取合并后的论据。 |
+| 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | key | 带研究模式的 Gradio 聊天：并行 researcher 使用模型知识而非网络搜索，生成三个问题的报告。需要 `gradio`。 |
+| 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | key | 同一个研究图，加上通过 Crawl4AI 的真实网络搜索和可选的 PostgreSQL 检查点。需要 `gradio`、`requests` 和 Crawl4AI 服务器。 |
+| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | key | 图给自己的输出打分，失败后向模型请求修订后的定义，重新编译并重试。只允许已注册的节点类型。 |
+| 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | key | 对话检查点在获准的图改写之后仍然保留；版本和哈希记录在 `__graph_meta__` 中（应用层元数据，不是重放证据）。 |
+
+### Program API
+
+受限的 JavaScript Program API 运行在 Core 图之上：`ProgramRegistryBuilder`、`ProgramCompiler`、`LocalProgramHost`。它在 [Program and QuickJS](../../../docs/python-binding.md#program-and-quickjs) 中有说明，[`bindings/python/tests/program_e2e/`](../tests/program_e2e/README.md) 里的端到端场景覆盖了 join、失败路由、预算、暂停与恢复、fork 和崩溃恢复。
+
+### 协议：MCP、A2A、ACP
+
+这里的 MCP 是客户端（`ng.mcp`）。A2A 和 ACP 用官方 Python SDK 与 `ProtocolHostAdapter` 托管，会一直运行到被停止，因此它们的冒烟覆盖由 `bindings/python/tests/test_protocol_sdk_e2e.py` 负责。
+
+| # | 示例 | Offline | 演示内容 |
+|---|---|---|---|
+| 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | yes | 启动本地 MCP 服务器，发现 `fetch`，并用显式可重入策略执行三次调用。需要启用 MCP 的构建，冒烟测试在 Linux 上进行。 |
+| 27 | [`27_a2a_server.py`](27_a2a_server.py) | service | 通过官方 A2A SDK 托管智能体：`127.0.0.1:9999` 上的 agent card 与 JSON-RPC，以及流式 artifact。需要 `neograph-engine[a2a]`。 |
+| 28 | [`28_acp_agent.py`](28_acp_agent.py) | service | 通过官方 ACP SDK 在 stdio 上托管智能体：initialize、创建会话、prompt、token 更新、`end_turn`。需要 `neograph-engine[acp]`。 |
+
+### 持久化与运维
+
+检查点、状态、缓存、追踪、传输与工具并发。
+
+| # | 示例 | Offline | 演示内容 |
+|---|---|---|---|
+| 07 | [`07_checkpoint_hitl.py`](07_checkpoint_hitl.py) | yes | 检查点在支付分发前暂停；批准后恰好恢复一次模拟支付。 |
+| 09 | [`09_state_management.py`](09_state_management.py) | yes | `get_state` 与 `fork`：alpha 的 count 达到 11，beta 分叉该值，未知线程没有检查点。 |
+| 18 | [`18_node_cache.py`](18_node_cache.py) | key | 跨两个主题的五次运行中，依赖 provider 的节点只执行两次；重复输入会重放缓存的写入。 |
+| 20 | [`20_otel_tracing.py`](20_otel_tracing.py) | yes | 控制台输出该次运行和三个节点的 OpenTelemetry span，最终轨迹为 `['A', 'B', 'C']`。需要 `opentelemetry-api` 与 `opentelemetry-sdk`。 |
+| 21 | [`21_http2_transport.py`](21_http2_transport.py) | key | 通过同一个 SDK 对比 HTTP/1.1 与 HTTP/2；需要 TLS Chat 端点和支持 HTTP/2 的 libcurl。结果只描述该端点，不构成排名。 |
+| 24 | [`24_tool_approval_gate.py`](24_tool_approval_gate.py) | yes | 工具门在任一同级工具运行之前暂停；拒绝时只运行 `list_files`，批准时两者各运行一次。Shell 操作是模拟的。 |
+| 25 | [`25_async_tools.py`](25_async_tools.py) | yes | 在 I/O 密集型任务上对比同步 `Tool` 与可重叠的 `AsyncTool`，再在 CPU 密集型任务上展示 GIL 的边界；时间比例只是观察值，冒烟测试在 Linux 上运行。 |
+
+## 离线、脚本化与实时
+
+由模型驱动的示例通过 `_common.py` 的 `example_provider(script)` 构建 provider。没有 `--live` 时由 `_scripted.ScriptedModel` 应答：它是 `127.0.0.1` 上的小型服务器，按脚本以 OpenAI Chat 或 Responses 协议作答（文本、工具调用、流式、用量、HTTP 失败）。真实 `SchemaProvider` 的请求构建、SSE 解析和 outcome 处理都在它之上运行。它不是模型：说什么由脚本决定。
+
+```python
+from _common import example_provider
+from _scripted import call_tool, say
+
+script = [call_tool("calc", expression="2 + 3"), say("5")]   # call 1 asks for a tool, call 2 answers
+with example_provider(script) as chosen:
+    provider = chosen.provider        # a SchemaProvider; chosen.scripted is None with --live
+```
+
+脚本也可以是读取 `turn.last_user_text`、`turn.system_text` 和 `turn.last_tool_result` 的函数 `(turn) -> Reply`。`chosen.scripted.call_count` 可用来断言发生了多少次模型调用。规则写在 `_scripted.py` 的 docstring 里。
+
+`--live`、`NG_EXAMPLE_LIVE=1`、`OPENAI_API_BASE` 或 `NG_PROVIDER_DESCRIPTOR` 会改为选择已配置的端点。托管端点需要 `OPENAI_API_KEY`，并可选 `OPENAI_MODEL`（默认 `gpt-4.1-mini`），两者都只从进程环境读取；`_common.py` 不加载 `.env` 文件，缺少 key 是错误，而不是一次成功的运行。`_common.py` 先准入封闭的 OpenAI Chat 或 Responses 描述符，再构造 `SchemaProvider`。类型化 SDK 使用 libcurl HTTP；已移除的 provider 类、completion 参数、WebSocket 路径和传输后端选择器不再可用。`OPENAI_API_BASE` 是 origin 或网关前缀，不是完整的 `/v1/chat/completions` 路由；若 HTTPS 对端的 CA 不在系统信任库中，还需要 `NG_EXAMPLE_CA_FILE`。也可以改用 `NG_PROVIDER_DESCRIPTOR` 指定一个完整的已准入描述符 JSON 文件。类型化请求与 outcome 契约见 [Python 绑定指南](../../../docs/python-binding.md)。
 
 ## 状态与调度
 
-节点读取当前超步的状态，并返回对通道的写入。引擎在下一个超步之前，通过声明的 reducer 合并这些写入。`Send` 提供各分支专属的输入；`Command` 更新状态并选择下一个节点。在 CPython 的 GIL 之下，worker 线程池不会让 CPU 密集的 Python 回调并行执行。
+节点读取当前超步的状态并返回通道写入。引擎在下一个超步之前，通过声明的归约器合并这些写入。`Send` 提供分支专用输入；`Command` 更新状态并选择下一个节点。在 CPython GIL 下，工作线程池不会使 CPU 密集型 Python 回调并行执行。
 
-`GraphEngine.compile()` 既接受从 JSON 加载的字典，也接受直接用 Python 写出的字典。定义里保存的是连线关系，而不是可执行的 Python 类：编译已保存的定义之前，要先注册自定义节点工厂。示例 14 和 15 会在脚本旁边写入/读取 `my_graph.json`；验证这一对示例时，请使用一次性的检出，或这个目录的副本。
+`GraphEngine.compile()` 既接受从 JSON 加载的字典，也接受用 Python 编写的字典。定义存储的是连接关系，而不是可执行的 Python 类：编译保存的定义前，请注册自定义节点工厂。示例14和15在脚本所在目录写入/读取 `my_graph.json`；验证这一对示例时，请使用可丢弃的检出副本或此目录的副本。
 
 ## 交互与协议场景
 
-运行 16/17 需要安装 `gradio`，启动脚本，然后访问打印出来的本地 URL。先提交 `hello`，再提交 `research apples`。对于 17，真实的 Crawl4AI `/md` 服务，或忠实的本地对端，必须返回 `{"success": true, "markdown": "..."}`。只有当正在运行的构建支持 Postgres、且数据库可以连接时，才配置 Postgres。引擎的状态要与界面上的历史分开检查。
+为16/17安装 `gradio`，启动脚本并访问打印出的本地 URL。先提交 `hello`，再提交 `research apples`。在17中，真实的 Crawl4AI `/md` 服务或忠实实现协议的本地端点必须返回 `{"success": true, "markdown": "..."}`。只有运行中的构建支持 Postgres 且数据库可达时，才配置 Postgres。请分别检查引擎状态和 UI 历史。
 
-示例 27/28 使用官方的 Python SDK 处理线路上的协议，并使用 `ProtocolHostAdapter` 来运行支持检查点的引擎。验证 A2A 需要用 SDK 客户端获取 agent card、发送消息并消费流。验证 ACP 需要通过一个客户端子进程连接，执行 `initialize`、`session/new` 和 `session/prompt`；stdout 专门留给协议消息。在同一个上下文/会话里再发送第二个 prompt，预期会看到 `(turn 2)`。取消应当终止正在进行的请求，而不是造出一个形似成功的兜底结果。
+示例27/28使用官方 Python SDK 处理线上协议，使用 `ProtocolHostAdapter` 执行支持检查点的引擎调用。A2A 验证需要 SDK 客户端来获取智能体卡片、发送消息并消费流。ACP 验证需要客户端连接子进程，以执行 `initialize`、`session/new` 和 `session/prompt`；stdout 专用于协议消息。在同一上下文/会话中发送第二条提示，预期得到 `(turn 2)`。取消应停止活动请求，而不是生成看似成功的替代结果。
 
-要使用持久的 ACP 会话，`NEOGRAPH_ACP_POSTGRES_URL` 和 `NEOGRAPH_ACP_SQLITE_PATH` 两者中恰好设置一个。第一个 prompt 完成之后，就会创建 `session/load` 所需的检查点。每个会话只保留一个活动的 agent 进程；检查点存储不会对跨进程的并发写入方做串行化。示例会原样回显富内容块，但不会解释图像或音频内容，也不提供编辑器的文件系统/终端回调。
+对于持久化 ACP 会话，请仅设置 `NEOGRAPH_ACP_POSTGRES_URL` 或 `NEOGRAPH_ACP_SQLITE_PATH` 中的一项。第一条提示完成后会创建 `session/load` 所需的检查点。每个会话只保留一个活动智能体进程；检查点存储不会将跨进程的并发写入串行化。此示例回显富内容块，但不解释图像/音频内容，也不提供编辑器文件系统/终端回调。
 
-## 分发包名与 import 名
+## 发行名称与导入名称
 
 ```python
 import neograph_engine as ng
 from neograph_engine.llm import SchemaProvider
 ```
 
-分发包名是 `neograph-engine`；PyPI 上的 `neograph` 是一个无关的项目。
+发行包名为 `neograph-engine`；PyPI 上的 `neograph` 是无关项目。
+
+## 添加示例
+
+编号绝不复用；下一个空闲编号是 29。新增一个示例只需要一个文件和表格中的一行。
+
+1. 文件命名为 `NN_short_name.py`，开头写模块 docstring：几行说明、`Run:` 命令，然后是测试注解。
+2. 在该 docstring 里写明如何测试。离线示例写出必须打印的一行；需要 key 或服务的示例写明为何不能离线运行（注解语法见 `examples/run_example_smoke.py` 开头）。
+3. 由模型驱动的 provider 用 `example_provider(script)` 构建，使示例默认离线并接受 `--live`。
+4. 在所属层级的表格里添加一行，并填上 Offline 值。
+5. 运行 `python -m pytest bindings/python/tests/test_examples_offline.py` 和 `python scripts/check_examples.py`。如果示例缺少注解、编号重复，或表格与注解不一致，后者会失败。
+
+```python
+"""NN — one line saying what this shows.
+
+Run:
+    python NN_short_name.py           # scripted model, no key
+    python NN_short_name.py --live    # hosted model; OPENAI_API_KEY in the environment
+
+smoke-expect: provider: scripted
+smoke-expect: final answer: 5
+"""
+```
+
+示例无法离线运行时，用 `smoke-skip: <原因>` 代替 `smoke-expect` 行；`smoke-requires: module1, module2` 会在缺少模块时跳过测试。

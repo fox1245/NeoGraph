@@ -1,7 +1,229 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=c11de6b910a8425c3b03fae8b1bb9fd2f95ed32b17c591cee0007b93464bd9ff -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=8d5870bdce1ab6c9f3b5e508b7487efc8c8478ee8cb58e24807b494414025413 -->
 # C++ API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
+每个示例是一个文件，只演示一件事，从头到尾几分钟即可读完。大多数示例都能离线运行：由脚本化模型代替 provider，因此既不需要 API key，也不需要网络。也能调用真实模型的示例接受 `--live`。把其中一个复制到自己的项目并链接 `neograph::core`（由模型驱动的再加上 `neograph::llm`），就能从可运行的代码起步。
+
+**Offline** 列说明每一行需要什么。`yes`：无需 key 和网络即可运行，并有自动冒烟测试（`ctest -L examples-offline`）。`key`：需要 provider API key。`service`：需要其他进程、服务器、数据库、显示器或模型。`paired`：与该行所写的示例一起离线运行。
+
+## 构建与运行
+
+```bash
+cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_TESTS=ON
+cmake --build build -j$(nproc)
+./build/example_react_agent            # scripted model: no key, no network
+./build/example_react_agent --live     # real model: OPENROUTER_API_KEY must be set in the environment
+ctest --test-dir build -L examples-offline --output-on-failure   # run every offline example and check its output
+```
+
+二进制文件会以 `example_<名称>` 的形式生成在构建目录中，多数源文件在开头的 `Usage:` 行给出确切命令。基于 Program 的示例（63、64）需要 `-DNEOGRAPH_BUILD_PROGRAM=ON`。gRPC 示例（45、53、54、55、57）需要 `-DNEOGRAPH_BUILD_GRPC=ON` 以及 `grpc++`/`protoc`。示例 11 需要 `-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`。组件被关闭的示例只会被排除在构建之外，不会导致构建失败。
+
+## 从这里开始
+
+请按顺序阅读，每个示例只增加一个概念。
+
+| 步骤 | 示例 | Offline | 你会学到 |
+|---|---|---|---|
+| 1 | [`62_core_quickstart.cpp`](62_core_quickstart.cpp) | yes | 已安装的 `neograph::core` 目标：一个节点、一个严格图、一个带类型的通道。 |
+| 2 | [`01_react_agent.cpp`](01_react_agent.cpp) | yes | 一个模型、一个工具、一个循环：`llm::Agent` 用计算器工具运行 ReAct 智能体，并流式输出文本。 |
+| 3 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | 用 `make_parallel_group` 在一个 `io_context` 上并行 fan-out 和 fan-in。 |
+| 4 | [`10_send_command.cpp`](10_send_command.cpp) | yes | `Send` 在运行时生成任务，`Command` 覆盖路由：planner、researcher、evaluator 循环执行。 |
+| 5 | [`04_checkpoint_hitl.cpp`](04_checkpoint_hitl.cpp) | yes | 用 `interrupt_before` 在支付节点前暂停，保存检查点，批准后恢复。 |
+| 6 | [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | yes | 通过 `neograph::program` 编译、准入(admission)并运行一个 `call_core` Program（需要 `-DNEOGRAPH_BUILD_PROGRAM=ON`）。 |
+
+## 按目标查找
+
+选一个目标，阅读对应的示例。
+
+| 我想要…… | 阅读 | Offline |
+|---|---|---|
+| 运行我的第一个图 | [`62_core_quickstart.cpp`](62_core_quickstart.cpp) | yes |
+| 给模型一个工具并循环到它给出答案 | [`01_react_agent.cpp`](01_react_agent.cpp) | yes |
+| 并行运行多个步骤并合并结果 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes |
+| 在运行时生成任务并回到前面的节点 | [`10_send_command.cpp`](10_send_command.cpp) | yes |
+| 把请求路由给合适的专家 | [`07_intent_routing.cpp`](07_intent_routing.cpp) | yes |
+| 把一个图嵌入另一个图 | [`06_subgraph.cpp`](06_subgraph.cpp) | yes |
+| 暂停等待人工确认，然后恢复 | [`04_checkpoint_hitl.cpp`](04_checkpoint_hitl.cpp) | yes |
+| 读取、修改并分叉已保存的状态 | [`08_state_management.cpp`](08_state_management.cpp) | yes |
+| 崩溃后无需重做已完成的工作即可恢复 | [`14_plan_executor.cpp`](14_plan_executor.cpp) | yes |
+| 跨多次调用延续对话 | [`41_resume_if_exists_chat.cpp`](41_resume_if_exists_chat.cpp) | yes |
+| 在多个线程间共享记忆 | [`43_store_personalization.cpp`](43_store_personalization.cpp) | yes |
+| 让长历史保持在预算之内 | [`56_history_compaction.cpp`](56_history_compaction.cpp) | yes |
+| 从另一个线程取消运行 | [`46_cancel_token.cpp`](46_cancel_token.cpp) | yes |
+| 跳过节点的重复计算 | [`47_node_cache.cpp`](47_node_cache.cpp) | yes |
+| 把追踪发送到 OpenInference 后端 | [`49_openinference.cpp`](49_openinference.cpp) | yes |
+| 编译并运行 Program | [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | yes |
+| 把运行中的 Program 迁移到更好的拓扑 | [`64_topology_retrieval.cpp`](64_topology_retrieval.cpp) | yes |
+| 从种子出发演化 harness | [`32_evolution.cpp`](32_evolution.cpp) | yes |
+| 通过 A2A 向其他智能体提供我的图 | [`38_a2a_server.cpp`](38_a2a_server.cpp) | yes |
+| 调用远程 A2A 智能体 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes |
+| 通过 ACP 向编辑器提供我的图 | [`39_acp_server.cpp`](39_acp_server.cpp) | yes |
+| 以 MCP 服务器的形式提供工具 | [`59_mcp_server.cpp`](59_mcp_server.cpp) | yes |
+| 在 ReAct 循环中使用 MCP 工具 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | key |
+| 通过 gRPC 调用另一个进程中的工具 | [`57_grpc_remote_tool.cpp`](57_grpc_remote_tool.cpp) | yes |
+| 尝试 Reflexion 之类的推理模式 | [`15_reflexion.cpp`](15_reflexion.cpp) | key |
+| 对接本地模型服务器运行 | [`31_local_transformer.cpp`](31_local_transformer.cpp) | service |
+
+## 按层级索引
+
+### 入门与 Core 引擎
+
+其余的 Core 功能。它们只链接 `neograph::core`，只有使用脚本化 provider 的 02、06、07、09 还会链接 `neograph::llm`。
+
+| # | 示例 | Offline | 演示内容 |
+|---|---|---|---|
+| 02 | [`02_custom_graph.cpp`](02_custom_graph.cpp) | yes | 一次 `create_react_graph()` 调用即可构建 llm、tools、llm 的 ReAct 图，`run_stream` 打印节点事件。 |
+| 05 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | yes | 异步 fan-out：三个 researcher 节点在一个 `io_context` 上重叠运行，由 summarizer 汇合。 |
+| 06 | [`06_subgraph.cpp`](06_subgraph.cpp) | yes | 子图：外层 supervisor 图把工作委托给内层 ReAct 图。 |
+| 07 | [`07_intent_routing.cpp`](07_intent_routing.cpp) | yes | 分类节点加条件边（`route_channel`）把每个请求送给 math、translate 或 general 专家。 |
+| 09 | [`09_all_features.cpp`](09_all_features.cpp) | yes | 一个文件里的六项功能：`NodeInterrupt`、`RetryPolicy`、`StreamMode`、`Send`、`Command`、`Store`。 |
+| 10 | [`10_send_command.cpp`](10_send_command.cpp) | yes | `Send` fan-out 与 `Command` 路由覆盖：planner、researcher、evaluator 循环到结果足够为止。 |
+| 42 | [`42_custom_reducer_condition.cpp`](42_custom_reducer_condition.cpp) | yes | 在 C++ 中注册自己的通道 reducer 和边条件。 |
+| 51 | [`51_minimal.cpp`](51_minimal.cpp) | yes | 最小的程序：一个节点、一个通道、`result.channel<T>("name")`。 |
+| 52 | [`52_export_schema.cpp`](52_export_schema.cpp) | yes | `NodeFactory::export_schema()` 输出可视化编辑器据以生成调色板的拓扑 JSON Schema。 |
+| 61 | [`61_sync_node.cpp`](61_sync_node.cpp) | yes | `SyncGraphNode`：无需协程样板代码的简短节点。 |
+
+### 智能体模式
+
+把模型与工具放进循环，以及基于它实现的公开推理模式。`key` 行会调用真实模型。
+
+| # | 示例 | Offline | 演示内容 |
+|---|---|---|---|
+| 01 | [`01_react_agent.cpp`](01_react_agent.cpp) | yes | ReAct：一行 Thought、一次工具调用、Observation，然后给出最终答案。`--live` 调用真实模型。 |
+| 36 | [`36_classifier_fanout.cpp`](36_classifier_fanout.cpp) | yes | 五个小型分类器通过 `Send` fan-out，耗时取决于最慢的一个而不是总和。判定结果是预先写好的。 |
+| 15 | [`15_reflexion.cpp`](15_reflexion.cpp) | key | Reflexion：actor 与 critic 循环，直到 critic 接受（Shinn et al. 2023）。 |
+| 16 | [`16_tree_of_thoughts.cpp`](16_tree_of_thoughts.cpp) | key | Tree of Thoughts：生成、评分、保留并扩展候选思路。 |
+| 17 | [`17_self_ask.cpp`](17_self_ask.cpp) | key | Self-Ask：为多跳推理显式提出后续问题（Press et al. 2022）。 |
+| 18 | [`18_multi_agent_debate.cpp`](18_multi_agent_debate.cpp) | key | researcher、skeptic、judge：三个系统提示词共享同一份对话记录。 |
+| 19 | [`19_rewoo.cpp`](19_rewoo.cpp) | key | REWOO：planner 写出占位符，worker 并行执行工具，solver 汇总证据。 |
+| 12 | [`12_rag_agent.cpp`](12_rag_agent.cpp) | key | 使用真实嵌入向量和内存余弦检索的检索增强生成。 |
+| 28 | [`28_corrective_rag.cpp`](28_corrective_rag.cpp) | key | Corrective RAG：评估检索结果，然后精炼、追加网络搜索或只用网络搜索（Yan et al. 2024）。 |
+| 25 | [`25_deep_research.cpp`](25_deep_research.cpp) | key | 深度研究：supervisor 把工作 fan-out 给各自运行 ReAct 循环的子 researcher，再撰写报告。需要 `OPENROUTER_API_KEY` 和 Crawl4AI 服务器。 |
+| 40 | [`40_react_async_streaming.cpp`](40_react_async_streaming.cpp) | key | 异步 ReAct：外层协程等待 `run_stream_async` 并打印带类型的文本增量。 |
+| 13 | [`13_openrouter_responses_sse.cpp`](13_openrouter_responses_sse.cpp) | key | 带有有序 `sp::Event` 观察值和自有 `sp::Outcome` 的类型化 Responses SSE 请求。 |
+| 29 | [`29_responses_envelope.cpp`](29_responses_envelope.cpp) | key | 调试辅助：为一次工具调用请求转储完整的 Responses 信封和每个有序输出项。 |
+| 30 | [`30_reasoning_effort.cpp`](30_reasoning_effort.cpp) | key | 对同一提示词依次尝试 `none`、`low`、`medium`、`high` 推理强度，比较延迟与推理 token。 |
+| 34 | [`34_openrouter_responses_tools_sse.cpp`](34_openrouter_responses_tools_sse.cpp) | key | 通过 SSE 运行全部七个类型化托管工具部分，保留完整 outcome 与有序 wire 观察值。 |
+| 31 | [`31_local_transformer.cpp`](31_local_transformer.cpp) | service | 指向 `127.0.0.1:8090` 上本地 OpenAI 兼容服务器（llama.cpp、vLLM）的类型化 Chat 客户端。 |
+
+### Program API
+
+Program 把 Core 图包进带有持久标识、预算和准入(admission)的生命周期。JavaScript Program API（join、失败路由、预算、暂停与恢复、fork、崩溃恢复）由 [`bindings/python/tests/program_e2e/`](../bindings/python/tests/program_e2e/README.md) 中的 Python 端到端场景覆盖。
+
+| # | 示例 | Offline | 演示内容 |
+|---|---|---|---|
+| 63 | [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | yes | 编译带有一个 `call_core` 操作的 `ProgramSource`，准入(admission)后通过 `ProgramRuntime` 运行。 |
+| 64 | [`64_topology_retrieval.cpp`](64_topology_retrieval.cpp) | yes | 检索得到的拓扑候选，在持久化安全点上成为对一条运行中 lineage 的已验证迁移。 |
+| 32 | [`32_evolution.cpp`](32_evolution.cpp) | yes | Harness 演化循环：针对任务变异严格 Core 种子，并以 JSON 输出谱系（`--smoke` 使用内置夹具）。 |
+| 58 | [`58_harness_bench.cpp`](58_harness_bench.cpp) | yes | 针对三种反馈模式的 harness 收敛基准；`--smoke` 运行内置任务。 |
+| 60 | [`60_harness_mcp_server.cpp`](60_harness_mcp_server.cpp) | yes | Harness MCP 服务器：六个工具编译并运行范围受限的多 worker 工作流。`NEOGRAPH_HARNESS_SMOKE=1` 会换成离线夹具 provider。 |
+
+### 协议：MCP、A2A、ACP、gRPC
+
+使用模型或服务器的 MCP 示例需要对应的模型或服务器；59 是可以手动驱动的服务器。A2A 与 ACP 示例可离线运行。gRPC 示例仅在 `-DNEOGRAPH_BUILD_GRPC=ON` 时构建。
+
+| # | 示例 | Offline | 演示内容 |
+|---|---|---|---|
+| 59 | [`59_mcp_server.cpp`](59_mcp_server.cpp) | yes | 基于 stdio 的 MCP 服务器：一个 `echo` 工具、输入输出 schema 和结构化内容。 |
+| 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | key | 基于 stdio 的 MCP：服务器是子进程，不经过网络栈，由 ReAct 循环驱动。 |
+| 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | key | 基于 streamable HTTP 的 MCP：发现服务器工具并驱动 ReAct 循环。需要正在运行的 MCP 服务器。 |
+| 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | key | 带人工批准的 MCP：在任何 MCP 工具调用前 `interrupt_before` 暂停，展示待执行调用，然后恢复。 |
+| 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | service | 结合 `Send` 的 MCP：一个 planner 为每个 MCP 工具发出一次调用，调用并行执行。不需要模型，但需要 MCP 服务器在运行。 |
+| 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | key | 一个智能体使用两个 MCP 服务器（HTTP 与 stdio），工具合并成一个列表。 |
+| 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | key | MCP 上的操作员反馈：脚本化的第二轮评论草稿，下一次运行采纳该反馈。 |
+| 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | service | 逆向工程智能体：通过 stdio 上的 GhidraMCP 为被剥离符号的二进制恢复函数名。需要 Ghidra 和 key。 |
+| 38 | [`38_a2a_server.cpp`](38_a2a_server.cpp) | yes | A2A 服务器：以 SSE 流式方式通过 A2A 0.3 与 1.0 提供图，并用自带客户端调用。传入 `serve` 可持续监听。 |
+| 37 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes | A2A 客户端：获取 agent card、发送消息，并用 `A2ACallerNode` 在图中调用远程智能体。 |
+| 39 | [`39_acp_server.cpp`](39_acp_server.cpp) | yes | 基于 stdio 的 ACP 智能体，即编辑器驱动的形态；`--self-test` 在进程内运行 initialize、session/new 和 session/prompt。 |
+| 45 | [`45_grpc_server.cpp`](45_grpc_server.cpp) | paired | gRPC：通过 `GraphService` 提供 `GraphEngine`。示例 53 会把它作为伴随进程启动（需要 `-DNEOGRAPH_BUILD_GRPC=ON`）。 |
+| 53 | [`53_grpc_client.cpp`](53_grpc_client.cpp) | yes | gRPC：从普通客户端调用 `GraphService`（`Health`、`RunGraph`、流式）（需要 `-DNEOGRAPH_BUILD_GRPC=ON`）。 |
+| 54 | [`54_grpc_checkpoint.cpp`](54_grpc_checkpoint.cpp) | yes | gRPC：远程 `CheckpointStore` 即 `GrpcCheckpointStore`，并给出实测延迟（需要 `-DNEOGRAPH_BUILD_GRPC=ON`）。 |
+| 55 | [`55_grpc_vs_jsonrpc_toolcall.cpp`](55_grpc_vs_jsonrpc_toolcall.cpp) | yes | 在回环上测量并对比工具调用的 gRPC 与 JSON-RPC；这是测量而非通过/失败检查（需要 `-DNEOGRAPH_BUILD_GRPC=ON`）。 |
+| 57 | [`57_grpc_remote_tool.cpp`](57_grpc_remote_tool.cpp) | yes | gRPC：把另一个进程中的工具当作本地 `neograph::Tool` 使用（需要 `-DNEOGRAPH_BUILD_GRPC=ON`）。 |
+
+### 持久化与运维
+
+检查点、状态、记忆、并发与可观测性。
+
+| # | 示例 | Offline | 演示内容 |
+|---|---|---|---|
+| 04 | [`04_checkpoint_hitl.cpp`](04_checkpoint_hitl.cpp) | yes | Human-in-the-Loop：在支付节点前 `interrupt_before` 暂停、持久化检查点，批准后恢复。 |
+| 08 | [`08_state_management.cpp`](08_state_management.cpp) | yes | 对已保存检查点使用 `get_state`、`update_state`、`fork`，并查看检查点历史。 |
+| 14 | [`14_plan_executor.cpp`](14_plan_executor.cpp) | yes | 在 fan-out 中途模拟失败的 Plan and execute：恢复时只重跑失败的那个兄弟节点（pending writes）。 |
+| 26 | [`26_postgres_react_hitl/`](26_postgres_react_hitl/) | key | 基于 PostgreSQL 的 deep-research HITL，在报告与恢复之间进程退出也不会丢失。需要 key、PostgreSQL 和 Crawl4AI（Docker Compose）。 |
+| 41 | [`41_resume_if_exists_chat.cpp`](41_resume_if_exists_chat.cpp) | yes | 使用 `resume_if_exists` 的多轮对话：下一轮会重新加载已保存的检查点并在其后追加。 |
+| 43 | [`43_store_personalization.cpp`](43_store_personalization.cpp) | yes | 在节点内读写跨线程的 `Store`，为每个用户个性化回复。 |
+| 48 | [`48_sqlite_checkpoint.cpp`](48_sqlite_checkpoint.cpp) | yes | `:memory:` 上的 `SqliteCheckpointStore`：检查点、恢复与线程隔离（不演示文件持久化）。 |
+| 56 | [`56_history_compaction.cpp`](56_history_compaction.cpp) | yes | 对话历史压缩：只有摘要干净时，旧的文本轮次才会被摘要替换；原生分组会整体保留。 |
+| 27 | [`27_async_concurrent_runs.cpp`](27_async_concurrent_runs.cpp) | yes | 三次智能体运行通过 `engine->run_async()` 在一个 `io_context` 线程上交错执行。 |
+| 44 | [`44_request_queue_backpressure.cpp`](44_request_queue_backpressure.cpp) | yes | 带背压的固定 worker 池（`RequestQueue`）：限制在途工作，拒绝溢出的请求。 |
+| 46 | [`46_cancel_token.cpp`](46_cancel_token.cpp) | yes | 协作式取消：每个子任务一个 `CancelToken::fork()`，父级 `cancel()` 会停止所有子任务。 |
+| 47 | [`47_node_cache.cpp`](47_node_cache.cpp) | yes | 按节点缓存结果：相同输入的第二次运行命中缓存，新输入则未命中。 |
+| 50 | [`50_async_tool.cpp`](50_async_tool.cpp) | yes | `AsyncTool`：协程形态的工具，同步的 `Tool::execute` 约定同样可以接受。 |
+| 49 | [`49_openinference.cpp`](49_openinference.cpp) | yes | OpenInference 追踪：`graph.run > node.* > llm.complete` 与模拟 provider 一起组成一棵 span 树。 |
+
+### 展示与 Cookbook
+
+组合多项功能的较大程序。每个 Cookbook 项目都有自己的 README，参见 [Cookbook 索引](cookbook/README.md)。
+
+| # | 示例 | Offline | 演示内容 |
+|---|---|---|---|
+| 11 | [`11_clay_chatbot.cpp`](11_clay_chatbot.cpp) | service | 用 C++ 写的桌面聊天：Clay 负责窗口布局，Raylib 负责绘制，回复由智能体流式输出。默认使用模拟，`--live` 使用 OpenRouter。需要 `-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON` 和显示器。 |
+
+| 项目 | Offline | 演示内容 |
+|---|---|---|
+| [`cookbook/the-beast/`](cookbook/the-beast/) | yes | 能够编写严格 Core JSON、经编译器把关、演化并通过检查点回滚的自演化智能体。离线二进制使用桩作者，实时变体需要 key。 |
+| [`cookbook/ai-assembly/`](cookbook/ai-assembly/) | yes | 四个 A2A 议员服务器，以及广播议案并统计投票的 Speaker。`scripts/run_session.sh --mock` 可离线运行，需把 `NEOGRAPH_BUILD_DIR` 设为构建目录。 |
+| [`cookbook/jarvis/`](cookbook/jarvis/) | yes | 带有四路路由、MCP 工具、A2A 专家和持久记忆的元编排器。模拟构建：`-DNEOGRAPH_BUILD_COOKBOOK_JARVIS=ON -DNEOGRAPH_JARVIS_FORCE_MOCK=ON`。 |
+| [`cookbook/minimal-mcp/`](cookbook/minimal-mcp/) | yes | 与仅用标准库的 60 行 Python 服务器进行 MCP 客户端往返；不使用模型。 |
+| [`cookbook/multi_tenant_chatbot/`](cookbook/multi_tenant_chatbot/) | yes | 一个进程通过编译缓存为许多客户的拓扑提供服务。模拟二进制无需任何依赖，实时版本需要 key。 |
+| [`cookbook/self_evolving_chatbot/`](cookbook/self_evolving_chatbot/) | key | 按客户选择并演化拓扑的聊天服务器。ProgramChat 有 `--mock` 模式，Core 服务器需要 key。 |
+| [`cookbook/topology-retrieval/`](cookbook/topology-retrieval/) | yes | 为示例 64 提供输入的候选选择（稠密、BM25、排名融合、重排）。`--mock` 需要 `pip install faiss-cpu numpy`。 |
+| [`cookbook/byo-openai/`](cookbook/byo-openai/) and [`cookbook/openrouter-provider/`](cookbook/openrouter-provider/) | service | Python provider 配方：在节点内使用自己的 OpenAI 客户端，以及类型化的 OpenRouter 请求。需要 Chat 端点（key，或类似 `bindings/python/examples/_scripted.py` 脚本化模型的本地对端）。 |
+
+此表中的 `yes` 表示项目的默认运行不需要 key；做过冒烟测试的二进制会以 `cookbook.*` 的名字出现在 `ctest -L examples-offline` 中。
+
+### 关于示例 11 与 35 的说明
+
+示例 11 从源码构建 Raylib，在 Linux 上需要 X11 和 OpenGL 开发头文件（例如 `libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev`）。文本使用通过 fontconfig 或常见安装路径找到的系统 TrueType/OpenType 字体。可用 `NEOGRAPH_CHAT_FONT`，以及可选的 `NEOGRAPH_CHAT_BOLD_FONT` 和 `NEOGRAPH_CHAT_MONO_FONT` 指定文件；`font.ttc#N` 选择字体集合中的第 N 个 face。按键：Enter 发送，Esc 清空输入，Ctrl+V 粘贴，Ctrl+Q 退出；回复流式输出期间，Send 按钮变为 Stop。
+
+示例 35 要求通过 `GHIDRA_MCP_BRIDGE` 指定 `bridge_mcp_ghidra.py` 脚本路径。`GHIDRA_MCP_PYTHON` 选择解释器，默认值为 `python3`；`GHIDRA_SERVER_URL` 选择 GhidraMCP 后端端点，默认值为 `http://127.0.0.1:18080/`。运行前须启动已启用 GhidraMCP 后端并打开程序的 Ghidra。示例在调用模型之前会发现工具并调用一次 `list_methods`，后端无响应时以状态 2 退出，因为某些 GhidraMCP 版本即使后端未运行也会列出全部工具。此示例还需要非空的 `OPENROUTER_API_KEY`（在此之后检查），并调用付费模型。
+
+## 离线、脚本化与实时
+
+由模型驱动的示例需要模型。离线示例使用 `scripted_provider.h`，它是一个 `neograph::Provider`，回复直接写在示例里：文本、工具调用、流式增量、用量和类型化失败。它与真实 provider 走同样的 prepare 和 dispatch 路径，所以图、工具和检查点代码就是你要发布的代码。它不是模型：说什么由脚本决定。
+
+```cpp
+#include "scripted_provider.h"
+
+auto scripted = std::make_shared<examples::ScriptedProvider>(std::vector<examples::Reply>{
+    examples::call_tool("calculator", {{"expression", "2 + 3"}}),   // call 1: ask for a tool
+    examples::say("The answer is 5."),                              // call 2: the final answer
+});
+auto provider = examples::choose_provider(argc, argv, scripted);    // --live switches to OpenRouter
+```
+
+脚本也可以是请求的函数：`ScriptedProvider([](const examples::ScriptedTurn& turn) { ... })` 能看到历史记录、最后一条用户文本和工具结果，循环与并行 fan-out 需要这种写法。规则列在 `scripted_provider.h` 开头的注释里。
+
+`--live`（或 `NG_EXAMPLE_LIVE=1`）会用 `OPENROUTER_API_KEY` 构建真实 provider。key 只从进程环境读取，该辅助头不读取任何文件。实时调用由 provider 计费。较早的仅实时示例仍通过 `cppdotenv` 加载 `.env` 文件，改写时会迁移到这个辅助头。示例 25 和 26 还会使用本地 Crawl4AI 服务器；当前的安全 Crawl4AI 镜像需要非空的 `CRAWL4AI_API_TOKEN`，见示例 26 的 `.env.example`。
+
+## 添加示例
+
+编号绝不复用；下一个空闲编号是 33 以及 65 之后。新增一个示例只需要一个源文件、一行 CMake 和表格中的一行。
+
+1. 文件命名为 `NN_short_name.cpp`，开头写头部注释：几行说明、一行 `Usage:`，然后是测试注解。
+2. 在该注释块里写明如何测试。离线示例写出必须打印的一行；需要 key 或服务的示例写明为何不能离线运行（注解语法见 `examples/run_example_smoke.py` 开头）。
+3. 在 `examples/cmake/` 下的文件里用 `neograph_add_example(short_name NN_short_name.cpp LINK neograph::core neograph::llm)` 注册目标。ctest 条目由注解生成。
+4. 在所属层级的表格里添加一行，并填上 Offline 值。
+5. 运行 `ctest -L examples-offline` 和 `python scripts/check_examples.py`。如果示例缺少注解、编号重复，或表格与注解不一致，后者会失败。
+
+```cpp
+// smoke-expect: Final answer: 427
+// smoke-skip: needs OPENROUTER_API_KEY (live model call)
+```
+
+上面两种注解二选一：示例要么有 `smoke-expect` 行，要么有一行 `smoke-skip`，不能同时存在。
 
 ## 类型化 C++ 迁移状态
 
@@ -39,188 +261,6 @@ ToT/Forge/rewrite helper 和 A2A 0.3/1.0 peer；11个已安装 Python applicatio
 参见 [SDK interface-4 执行记录](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/CONFORMANCE.md#interface-4-execution-record)。
 不声称新的 hosted vendor、Windows/macOS/ARM64、HTTP/3 或 sanitizer 验证；
 remote CI 与公开发布仍待完成。
-
-
-
-编号示例涵盖 NeoGraph 引擎 API，包括 Core 和 Program quickstart。
-大多是此目录中的单个文件；[`26_postgres_react_hitl/`](26_postgres_react_hitl/) 使用 Docker Compose。
-将示例复制到项目中，并链接 `neograph::core` 与所需的其他组件。
-
-## 构建
-
-默认 CMake 配置会构建已启用组件所支持的示例。Program quickstart
-和基于 Program 的示例需要 `-DNEOGRAPH_BUILD_PROGRAM=ON`；gRPC 和
-Python binding 是可选的，未启用对应选项时相关示例会被省略。
-
-```bash
-cmake -S . -B build -DNEOGRAPH_BUILD_EXAMPLES=ON
-cmake --build build -j$(nproc)
-```
-
-要包含基于 Program 的示例和 A2A 示例，还需启用以下组件：
-
-```bash
-cmake -S . -B build \
-  -DNEOGRAPH_BUILD_EXAMPLES=ON \
-  -DNEOGRAPH_BUILD_PROGRAM=ON \
-  -DNEOGRAPH_BUILD_A2A=ON
-cmake --build build -j$(nproc)
-```
-
-传入 `-DNEOGRAPH_BUILD_EXAMPLES=OFF` 可以跳过示例。需要额外依赖的示例
-（Crawl4AI Docker、Postgres、MCP servers、Clay+Raylib）会由显式 CMake option
-或运行时探测门控控制 — 见下方“设置”列。
-
-## 设置
-
-会调用真实 LLM 的示例会通过 cppdotenv 从 cwd（或任何父目录）自动加载 `.env`。
-所有 live 示例使用同一个 key：
-
-```
-OPENROUTER_API_KEY=sk-or-...
-```
-
-下方没有“设置”条目的示例不需要 API key — 它们使用进程内 `MockProvider`
-或纯 mock node。
-
-## 从这里开始
-
-如果这是你第一次使用：
-
-| 首选 | 你会学到什么 |
-|---|---|
-| [`62_core_quickstart.cpp`](62_core_quickstart.cpp) | **Core 快速入门** — 使用已安装的 `neograph::core` 目标、一个严格图和一个类型化通道。不需要可选组件或 API key。 |
-| [`63_program_quickstart.cpp`](63_program_quickstart.cpp) | **Program 快速入门** — 使用已安装的 `neograph::program` 目标编译、接纳并运行一个 `call_core` Program。需要 `-DNEOGRAPH_BUILD_PROGRAM=ON`。 |
-| [`51_minimal.cpp`](51_minimal.cpp) | 最小可工作程序 — 构建、运行、读取 `result.channel<T>("name")`。不需要 API key。 |
-| [`02_custom_graph.cpp`](02_custom_graph.cpp) | 构建 JSON 图定义并运行它。不需要 API key。 |
-| [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | 使用 `make_parallel_group` 的异步扇出。不需要 API key。 |
-| [`10_send_command.cpp`](10_send_command.cpp) | `Send`（动态扇出）+ `Command`（路由覆盖）。不需要 API key。 |
-| [`01_react_agent.cpp`](01_react_agent.cpp) | 使用真实 LLM + calculator tool 的 ReAct 循环。**需要 `OPENROUTER_API_KEY`。** |
-| [`14_plan_executor.cpp`](14_plan_executor.cpp) | 计划 → 并行子任务 → 求解器，并通过 checkpoint store 实现崩溃恢复。不需要 API key。 |
-
-理解这些之后，下面其余示例按它们展示的内容分组，而不是按文件编号分组。
-
-## 索引
-
-### 核心引擎 — 图、状态、路由
-
-| # | 文件 | 设置 | 展示内容 |
-|---|------|-------|---------------|
-| 02 | [`02_custom_graph.cpp`](02_custom_graph.cpp) | 离线 | 构建 JSON 图 + 运行它。本 repo 中最短的实用程序。 |
-| 05 | [`05_parallel_fanout.cpp`](05_parallel_fanout.cpp) | 离线 | 异步扇出 — 三个“researcher” node 在一个 io_context 上共同运行，summarizer 将它们扇入。 |
-| 06 | [`06_subgraph.cpp`](06_subgraph.cpp) | 离线 | 分层组合 — 外层 supervisor 图委托给内层 ReAct 子图。 |
-| 07 | [`07_intent_routing.cpp`](07_intent_routing.cpp) | 离线 | 分类器 → 条件边 → 数学 / 翻译 / 通用专家。 |
-| 08 | [`08_state_management.cpp`](08_state_management.cpp) | 离线 | `get_state` / `update_state` / `fork` — 把 LangGraph 的 Checkpointer API 映射到 C++。 |
-| 09 | [`09_all_features.cpp`](09_all_features.cpp) | 离线 | 一个 demo 展示六个功能 — `NodeInterrupt`、`RetryPolicy`、`StreamMode`、`Send`、`Command`、`Store`。 |
-| 10 | [`10_send_command.cpp`](10_send_command.cpp) | 离线 | Planner→Send→researcher→Command(loop|finish) — 标准 Send+Command 模式。 |
-| 42 | [`42_custom_reducer_condition.cpp`](42_custom_reducer_condition.cpp) | 离线 | 从 C++ 注册自定义 channel 归约器和边条件 — 不改引擎也能扩展 JSON vocabulary。 |
-| 43 | [`43_store_personalization.cpp`](43_store_personalization.cpp) | 离线 | 在 node 内通过 `in.ctx.store` 访问跨 thread 的 `Store` — 从共享命名空间记忆得到每用户 node 行为。 |
-| 51 | [`51_minimal.cpp`](51_minimal.cpp) | 离线 | 最短可工作程序 — 构建、运行、`result.channel<T>("name")`。新用户模板。 |
-| 52 | [`52_export_schema.cpp`](52_export_schema.cpp) | 离线 | `NodeFactory::export_schema()` → topology JSON Schema dump。无代码可视化编辑器构建 palette 时使用的版本锁定真实来源。 |
-| 56 | [`56_history_compaction.cpp`](56_history_compaction.cpp) | 离线 | 有界 message window — history 超出预算时，被丢弃的 prefix 会替换为 LLM 写出的 summary。始终使用 mock summarizer，不读取 API key。 |
-### 真实 LLM — provider、工具、ReAct
-
-| # | 文件 | 设置 | 展示内容 |
-|---|------|-------|---------------|
-| 01 | [`01_react_agent.cpp`](01_react_agent.cpp) | OpenRouter | ReAct 循环：`llm_call` ↔ `tool_dispatch`，带 `has_tool_calls` 条件判断。Calculator 工具。 |
-| 12 | [`12_rag_agent.cpp`](12_rag_agent.cpp) | OpenRouter | 使用 OpenRouter 兼容 embedding + 内存余弦搜索的 RAG。 |
-| 13 | [`13_openrouter_responses_sse.cpp`](13_openrouter_responses_sse.cpp) | OpenRouter | 类型化 Responses SSE 请求、有序 `sp::Event` 观察与拥有所有权的 `sp::Outcome`。 |
-| 34 | [`34_openrouter_responses_tools_sse.cpp`](34_openrouter_responses_tools_sse.cpp) | OpenRouter | 保留全部七个类型化 hosted-tool SSE 部分，以及完整 Outcome 和有序 wire 观察。 |
-| 29 | [`29_responses_envelope.cpp`](29_responses_envelope.cpp) | OpenRouter | 调试辅助：为一次工具调用请求转储原始 `/api/v1/responses` JSON envelope。 |
-| 30 | [`30_reasoning_effort.cpp`](30_reasoning_effort.cpp) | OpenRouter | 扫描固定 DeepSeek 模型的 reasoning effort，观察延迟 / reasoning token 取舍。 |
-
-### 推理模式
-
-| # | 文件 | 设置 | 模式 |
-|---|------|-------|---------|
-| 15 | [`15_reflexion.cpp`](15_reflexion.cpp) | OpenRouter | Reflexion — generator ↔ critic 循环，直到 critic 说 ACCEPT（Shinn et al. 2023）。俳句约束任务。 |
-| 16 | [`16_tree_of_thoughts.cpp`](16_tree_of_thoughts.cpp) | OpenRouter | Tree of Thoughts — 每个深度生成 N 个候选 thought，给它们打分，保留 top-K，再展开。24 点游戏。 |
-| 17 | [`17_self_ask.cpp`](17_self_ask.cpp) | OpenRouter | Self-Ask — 对多跳推理做显式“是否需要后续问题？”分解（Press et al. 2022）。 |
-| 18 | [`18_multi_agent_debate.cpp`](18_multi_agent_debate.cpp) | OpenRouter | Researcher / Skeptic / Judge — 三个 system prompt，共享转录，由 judge 裁决。 |
-| 19 | [`19_rewoo.cpp`](19_rewoo.cpp) | OpenRouter | REWOO — planner 提交带 `#E1 / #E2` 占位符的完整 plan，worker 并行扇出工具，solver 综合结果。 |
-
-### 持久化与 HITL
-
-| # | 文件 | 设置 | 展示内容 |
-|---|------|-------|---------------|
-| 04 | [`04_checkpoint_hitl.cpp`](04_checkpoint_hitl.cpp) | 离线 | 在 payment node 前 `interrupt_before`，持久化检查点，在 operator approval 后 resume。Mock provider。 |
-| 14 | [`14_plan_executor.cpp`](14_plan_executor.cpp) | 离线 | Plan-and-Executor，模拟扇出中途失败 — checkpoint replay 只会重跑失败的同级任务。Pending-writes 机制实战。 |
-| 26 | [`26_postgres_react_hitl/`](26_postgres_react_hitl/) | OpenRouter + Postgres + Crawl4AI | 进程不连续的深度研究 HITL — PG-backed 检查点能在报告和 resume 之间的 `exit` 后存活。Docker Compose 驱动。 |
-| 41 | [`41_resume_if_exists_chat.cpp`](41_resume_if_exists_chat.cpp) | 离线 | LangGraph 风格多轮聊天 — `resume_if_exists` 重新加载先前检查点并追加新轮次。Mock provider。 |
-| 48 | [`48_sqlite_checkpoint.cpp`](48_sqlite_checkpoint.cpp) | 离线 | SQLite `:memory:` checkpoint/resume 与 thread 隔离；不声称文件或 process restart 持久性。 |
-
-### MCP（模型上下文协议）
-
-| # | 文件 | 设置 | 展示内容 |
-|---|------|-------|---------------|
-| 03 | [`03_mcp_agent.cpp`](03_mcp_agent.cpp) | OpenRouter + MCP HTTP server | 从 streamable-http MCP server 发现工具，并驱动 ReAct 循环。 |
-| 22 | [`22_mcp_stdio.cpp`](22_mcp_stdio.cpp) | OpenRouter + Python stdio script | 与 03 相同，但 MCP server 是通过 stdin/stdout 通信的子进程 — 没有网络栈。 |
-| 23 | [`23_mcp_multi.cpp`](23_mcp_multi.cpp) | OpenRouter + 2 servers | 一个 agent、两个 MCP server（HTTP + stdio），工具合并到同一个列表 — LLM 能透明地跨两者选择。 |
-| 21 | [`21_mcp_fanout.cpp`](21_mcp_fanout.cpp) | MCP HTTP server（无 LLM） | Planner 为每次 MCP 调用发出一个 Send；`make_parallel_group` 并发运行它们。确定性 — LLM 轴上保持离线，因为 demo 中工具由手写逻辑选择。 |
-| 20 | [`20_mcp_hitl.cpp`](20_mcp_hitl.cpp) | OpenRouter + MCP HTTP server | 在任何 MCP 工具调用前 `interrupt_before` — operator 看到待处理工具名 + 参数，批准后 resume。 |
-| 24 | [`24_mcp_feedback.cpp`](24_mcp_feedback.cpp) | OpenRouter + MCP HTTP server | 代码中写定（不读取输入）的 operator 反馈指出 agent 草稿答案的不足；第二次运行会把反馈作为新的对话上下文纳入。 |
-
-### 异步、并发、性能
-
-| # | 文件 | 设置 | 展示内容 |
-|---|------|-------|---------------|
-| 27 | [`27_async_concurrent_runs.cpp`](27_async_concurrent_runs.cpp) | 离线 | 三个 agent 运行通过 `engine->run_async()` 在一个 `io_context` 线程上交错运行 — 墙钟时间 ≈ 50 ms，而不是 3×50 ms。Stage-4 端到端异步。 |
-| 40 | [`40_react_async_streaming.cpp`](40_react_async_streaming.cpp) | OpenRouter | 使用类型化 provider 事件的异步 ReAct。text delta 是显示投影，不是 native history。 |
-| 44 | [`44_request_queue_backpressure.cpp`](44_request_queue_backpressure.cpp) | 离线 | 带背压的固定 worker 池（`neograph::util::RequestQueue`）— 有界在途工作，负载下不会无界增长。 |
-| 46 | [`46_cancel_token.cpp`](46_cancel_token.cpp) | 离线 | 协作式取消 — 每个 child 使用 `CancelToken::fork()`，parent `cancel()` 会级联到所有在途 child。 |
-| 47 | [`47_node_cache.cpp`](47_node_cache.cpp) | 离线 | 每 node 结果缓存，key 为 node + input — 跨运行遇到相同输入时跳过重新计算。 |
-| 50 | [`50_async_tool.cpp`](50_async_tool.cpp) | 离线 | `AsyncTool` — coroutine-shaped 工具执行适配器，让工具可以 `co_await` 而不阻塞 io_context。 |
-
-### 代理互操作 — A2A 与 ACP
-
-| # | 文件 | 设置 | 展示内容 |
-|---|------|-------|---------------|
-| 38 | [`38_a2a_server.cpp`](38_a2a_server.cpp) | 离线 | 把编译好的 NeoGraph 暴露为 Agent-to-Agent endpoint（HTTP、streaming SSE）。先运行这个。 |
-| 37 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | 离线（需要示例 38 正在运行） | 驱动一个*远程* A2A agent — `A2ACallerNode` 让远程 agent 看起来像本地 node。 |
-| 39 | [`39_acp_server.cpp`](39_acp_server.cpp) | 离线 | 通过 Agent Client Protocol 暴露 NeoGraph — stdio 上的双向 JSON-RPC，这是编辑器（Zed 风格）驱动的形状。 |
-
-### 分布式 — gRPC 服务与远程检查点/工具
-
-只有传入 `-DNEOGRAPH_BUILD_GRPC=ON` 才会构建（需要 `grpc++` / `protoc`）。
-
-| # | 文件 | 设置 | 展示内容 |
-|---|------|-------|---------------|
-| 52 | [`52_grpc_server.cpp`](52_grpc_server.cpp) | 离线（grpc++） | 通过 gRPC 暴露 `GraphEngine` — 每个不同图的 engine 懒编译并缓存。 |
-| 53 | [`53_grpc_client.cpp`](53_grpc_client.cpp) | 离线（grpc++） | 从 C++ 客户端调用 NeoGraph gRPC `GraphService`。 |
-| 54 | [`54_grpc_checkpoint.cpp`](54_grpc_checkpoint.cpp) | 离线（grpc++） | `GrpcCheckpointStore` — 跨网络边界的远程 `CheckpointStore`，带诚实的延迟测量。 |
-| 55 | [`55_grpc_vs_jsonrpc_toolcall.cpp`](55_grpc_vs_jsonrpc_toolcall.cpp) | 离线（grpc++） | 正面对比：JSON-RPC vs gRPC 上的工具调用 — “70× 是 Nagle artifact”背后的微基准。 |
-| 57 | [`57_grpc_remote_tool.cpp`](57_grpc_remote_tool.cpp) | 离线（grpc++） | 位于另一个进程中的工具，作为本地 `neograph::Tool` 暴露。 |
-
-### 可观测性
-
-| # | 文件 | 设置 | 展示内容 |
-|---|------|-------|---------------|
-| 49 | [`49_openinference.cpp`](49_openinference.cpp) | 离线 | OpenInference tracer adapter — `graph.run > node.* > llm.complete` 落成一个 trace tree（12 个 attribute）。Phoenix 已验证。Mock provider。 |
-
-### 深度研究 / RAG 变体
-
-| # | 文件 | 设置 | 展示内容 |
-|---|------|-------|---------------|
-| 25 | [`25_deep_research.cpp`](25_deep_research.cpp) | OpenRouter DeepSeek + Crawl4AI Docker | `langchain-ai/open_deep_research` 的 C++ port。Supervisor 规划，扇出并行 sub-researcher（每个都有自己的 ReAct 循环），综合成 markdown 报告。 |
-| 28 | [`28_corrective_rag.cpp`](28_corrective_rag.cpp) | OpenRouter | CRAG（Yan et al. 2024）。Retrieve → grade → 根据相关性路由到 refine(KB) / refine+web / web-only。Web search 通过 `/api/v1/responses` 内置工具。 |
-
-### 本地 / 混合 LLM 后端
-
-| # | 文件 | 设置 | 展示内容 |
-|---|------|-------|---------------|
-| 31 | [`31_local_transformer.cpp`](31_local_transformer.cpp) | llama.cpp / vLLM | 位于 `http://localhost:8090` 的类型化 Chat 客户端；模型权重位于代理进程之外。 |
-
-### 展示
-
-| # | 文件 | 设置 | 展示内容 |
-|---|------|-------|---------------|
-| 11 | [`11_clay_chatbot.cpp`](11_clay_chatbot.cpp) | Clay + Raylib (`-DNEOGRAPH_BUILD_CLAY_EXAMPLE=ON`) | 纯 C++ 桌面多轮聊天：Clay 负责窗口布局，Raylib 负责绘制，回复从 NeoGraph 智能体流式到达。默认使用 mock，`--live` 使用 OpenRouter。可渲染代码块、列表和非拉丁文字，Stop 可取消回复。 |
-| 35 | [`35_re_agent.cpp`](35_re_agent.cpp) | OpenRouter + Ghidra + ghidra-mcp | 逆向工程 agent，通过 Ghidra 从去除符号的二进制恢复函数名和摘要。历史端到端结果为：6 个函数的 crackme，matched_score 0.92。完整流水线在独立的私有仓库 `fox1245/re-agent` 中维护。 |
-| 36 | [`36_classifier_fanout.cpp`](36_classifier_fanout.cpp) | 离线 | 五个小“classifier”（情感 / 毒性 / 语言 / 主题 / 意图）通过 Send 扇出并并行运行。墙钟时间 ≈ max(per-classifier)，不是求和 — 小模型边缘故事。Mock 5 ms 延迟作为 DistilBERT/MiniLM pass 的替身；inline `[ONNX SWAP-IN]` block 展示使用 `Ort::Session` 的 30 行替换。没有推理运行时依赖。 |
-
-示例 11 从源码构建 Raylib，在 Linux 上需要 X11 和 OpenGL 开发头文件（例如 `libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev`）。文本使用通过 fontconfig 或常见安装路径找到的系统 TrueType/OpenType 字体。可用 `NEOGRAPH_CHAT_FONT`，以及可选的 `NEOGRAPH_CHAT_BOLD_FONT` 和 `NEOGRAPH_CHAT_MONO_FONT` 指定文件；`font.ttc#N` 选择字体集合中的第 N 个 face。按键：Enter 发送，Esc 清空输入，Ctrl+V 粘贴，Ctrl+Q 退出；回复流式输出期间，Send 按钮变为 Stop。
-
-示例 35 要求通过 `GHIDRA_MCP_BRIDGE` 指定 `bridge_mcp_ghidra.py` 脚本路径。`GHIDRA_MCP_PYTHON` 选择解释器，默认值为 `python3`；`GHIDRA_SERVER_URL` 选择 GhidraMCP 后端端点，默认值为 `http://127.0.0.1:18080/`。运行前须启动已启用 GhidraMCP 后端并打开程序的 Ghidra。示例在调用模型之前会发现工具并调用一次 `list_methods`，后端无响应时以状态 2 退出，因为某些 GhidraMCP 版本即使后端未运行也会列出全部工具。此示例还需要非空的 `OPENROUTER_API_KEY`（在此之后检查），并调用付费模型。上面的分数是历史观测值，不是新的运行结果，也不是普遍的准确率保证。
 
 ## 保留的示例契约
 
@@ -294,11 +334,11 @@ ToT 必须输出非空的最终 `EXPR`/`CHECK`；请独立计算实际表达式�
 示例08保留 terminal checkpoint fork 后启动新 user turn 的流程，不演示暂停 reviewer 的 resume。
 示例14根据实际 executor 次数计算节省数：首次五次调用后只重跑一个失败 sibling，节省四次。
 
-示例54在选择 smoke/file 模式前注册 `pnoop`。从 repository root 使用已跟踪 seed/task 文件：
+示例32在选择 smoke/file 模式前注册 `pnoop`。从 repository root 使用已跟踪 seed/task 文件：
 
 ```bash
 ./build/example_evolution --smoke
-./build/example_evolution examples/54_evolution_seed.json examples/54_evolution_task.json
+./build/example_evolution examples/32_evolution_seed.json examples/32_evolution_task.json
 ```
 
 检查实际 JSON 字段 `best.compiled`、`best.validated`、`best.executed`、`best.correct`；
@@ -329,29 +369,6 @@ stream 累积 status/artifact update。caller 按完成/中断的 agent status t
 图定义采用 JSON 形式（`std::map<std::string, json>`）。
 [Python examples](../bindings/python/examples/) 使用相同的 topology 格式；
 provider 请求与 Outcome 是独立类型化对象，不是 topology JSON。
-
-## API key 节省策略
-
-| Provider | 示例 |
-|---|---|
-| `OPENROUTER_API_KEY` | 01, 03, 12, 13, 15, 16, 17, 18, 19, 20, 22, 23, 24, 25, 28, 29, 30, 34, 35, 40 |
-| local server (no key) | 31 |
-| **none** | 02, 04, 05, 06, 07, 08, 09, 10, 14, 21, 27, 36, 37, 38, 39, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57 |
-
-示例25与26也使用 local Crawl4AI。当前 secure Docker image 要求非空的
-`CRAWL4AI_API_TOKEN`，见示例26的 `.env.example`。
-
-三十一个示例不需要 API key 就能运行 — 这是“试跑一下”的最低门槛。
-尤其是示例 21（MCP 扇出，确定性 planner）和 27（异步并发，
-用 `steady_timer` 代替 LLM 延迟）展示了不花 token 的引擎管线。
-gRPC 套件（52–55, 57）也不需要 key，但需要 `-DNEOGRAPH_BUILD_GRPC=ON`
-（`grpc++` / `protoc`）；56（`history_compaction`）始终使用 mock summarizer，
-不读取 API key。
-## CMake 配置后重新运行
-
-构建出的二进制文件位于构建目录根部，命名为 `example_<short_name>`
-（例如 `example_react_agent`、`example_custom_graph`）。准确名称在每个 `.cpp`
-顶部注释的 `Usage:` 下。
 
 ## Responses inspection 契约 (13 / 29 / 30 / 34)
 

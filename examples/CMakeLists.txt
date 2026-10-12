@@ -3,10 +3,14 @@
 # Added from the top-level CMakeLists.txt after every older example target and after
 # enable_testing(). It builds nothing by itself except what examples/cmake/*.cmake define.
 #
-# 1. example.<name> / cookbook.<name> (ctest, label examples-offline, 60 s): one test per built
+# 1. examples.index (ctest, label examples-offline): scripts/check_examples.py. Runs in every
+#    configuration that builds the tests, even with NEOGRAPH_BUILD_EXAMPLES=OFF. It fails when an
+#    example has no smoke-expect/smoke-skip annotation, when numbers collide, or when the READMEs'
+#    "Offline" column disagrees with the annotations.
+# 2. example.<name> / cookbook.<name> (ctest, label examples-offline, 60 s): one test per built
 #    example whose source declares `smoke-expect` lines in its leading comment block.
 #    examples/run_example_smoke.py runs the binary with no API keys and checks the output.
-# 2. examples/cmake/*.cmake: one file per area; define new example targets with
+# 3. examples/cmake/*.cmake: one file per area; define new example targets with
 #    neograph_add_example() there. Files are included in name order. No other file needs editing.
 #
 # Run only these tests:  ctest -L examples-offline --output-on-failure
@@ -49,6 +53,10 @@ endif()
 if(NOT NEOGRAPH_BUILD_TESTS OR NOT Python3_Interpreter_FOUND)
     return()
 endif()
+
+add_test(NAME examples.index
+    COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/check_examples.py")
+set_tests_properties(examples.index PROPERTIES LABELS "examples-offline" TIMEOUT 60)
 
 if(NOT NEOGRAPH_BUILD_EXAMPLES)
     return()

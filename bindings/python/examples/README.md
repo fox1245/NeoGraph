@@ -2,7 +2,9 @@
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-These 28 scripts show graph state, routing, tools, provider requests, and protocol hosting. Start with the offline examples; hosted model calls require explicit credentials and incur provider charges.
+These 28 scripts show graph state, routing, tools, provider requests and protocol hosting. Each one shows one thing. Most run offline: a scripted model stands in for the provider, so they need no API key and no network. Examples that can also call a real model take `--live`.
+
+The **Offline** column says what a row needs. `yes`: runs with no key and no network, and is tested automatically by `bindings/python/tests/test_examples_offline.py`. `key`: needs a provider API key. `service`: needs another process, server or extra package. `paired`: runs offline together with the example named in its row.
 
 ## Setup
 
@@ -11,48 +13,124 @@ pip install neograph-engine
 python 01_minimal.py
 ```
 
-Run commands from this directory. `python-dotenv` is optional: install it if you want `_common.py` to load the nearest example/repository `.env`. Exported environment variables take precedence. Missing hosted credentials are an error, not a successful verification run.
+Run commands from this directory. The offline examples need nothing else. To run against a source build instead of the wheel, configure with `-DNEOGRAPH_BUILD_PYBIND=ON` and set `PYTHONPATH` to the build directory and `bindings/python`. A build tree does not install the package's Python dependencies: run `pip install 'pydantic>=2' certifi` first. `import neograph_engine` requires pydantic; without certifi, TLS uses the host's trust store.
 
-To run them against a source build instead, configure with `-DNEOGRAPH_BUILD_PYBIND=ON` and set `PYTHONPATH` to the build directory. A build tree does not install the package's Python dependencies: run `pip install 'pydantic>=2' certifi` first. `import neograph_engine` requires pydantic; without certifi, TLS uses the host's trust store.
+## Start here
 
-For hosted examples, set `OPENAI_API_KEY` and optionally `OPENAI_MODEL` (default `gpt-4.1-mini`). `_common.py` admits a closed OpenAI Chat or Responses descriptor, then constructs `SchemaProvider`. The typed SDK uses libcurl HTTP; the removed provider classes, completion parameters, WebSocket path, and transport-backend selector are not available.
+Read these in order; each one adds a single idea.
 
-For no-key protocol qualification, set `OPENAI_API_BASE` to a faithful loopback Chat/Responses peer. It must implement the route and response shape used by the example, not return a Python mock. Use `NG_EXAMPLE_CA_FILE` for a local TLS CA. `NG_PROVIDER_DESCRIPTOR` can instead name a complete admitted descriptor JSON file, including a gateway prefix, routes, and allowed headers. A base URL is not a full `/v1/chat/completions` route. See [the Python binding guide](../../../docs/python-binding.md) for the typed request/outcome contract.
+| Step | Example | Offline | You learn |
+|---|---|---|---|
+| 1 | [`01_minimal.py`](01_minimal.py) | yes | A custom node reads a channel, doubles it and writes it back: 21 becomes 42. |
+| 2 | [`02_tool_dispatch.py`](02_tool_dispatch.py) | yes | A Python `Tool` and the built-in `tool_dispatch` node: a scripted tool call comes back as `42`. |
+| 3 | [`05_openai_provider.py`](05_openai_provider.py) | yes | One model call through the built-in `llm_call` node. A scripted model answers `hello world`. |
+| 4 | [`06_react_agent.py`](06_react_agent.py) | yes | A ReAct loop: `llm_call`, `tool_dispatch` and a `has_tool_calls` conditional edge. `calc` returns `4053`, then the model answers. |
+| 5 | [`07_checkpoint_hitl.py`](07_checkpoint_hitl.py) | yes | A checkpoint pauses before payment dispatch; approval resumes exactly one simulated payment. No money moves. |
+| 6 | [`14_graph_to_json.py`](14_graph_to_json.py) | yes | A graph definition is plain JSON: it runs from a dict and is saved as `my_graph.json`. Example 15 loads it. |
 
-## Index and expected behavior
+## I want to ...
 
-Run each entry with `python <file>`. Linux x86_64 smoke runs exercised selected typed-provider applications, including both research apps, against credential-free localhost peers. This does not qualify every script, hosted vendor or release platform; remote CI and publication remain pending. See the [current release evidence](../../../CHANGELOG.md#unreleased) for scope. The table gives expected behavior, not deterministic model wording.
+Pick the goal, read the example.
 
-| # | File | Prerequisites | Expected behavior |
-|---|------|---------------|-------------------|
-| 01 | [`01_minimal.py`](01_minimal.py) | None | A custom node doubles 21 to 42. |
-| 02 | [`02_tool_dispatch.py`](02_tool_dispatch.py) | None | A scripted tool call goes through `tool_dispatch`; the calculator returns `42`. |
-| 03 | [`03_send_fanout.py`](03_send_fanout.py) | None | Eight `Send` branches merge squares `[0, 1, 4, 9, 16, 25, 36, 49]`; append order is not assumed. |
-| 04 | [`04_async_concurrent.py`](04_async_concurrent.py) | None | Eight async runs produce `[0, 2, 4, 6, 8, 10, 12, 14]`; a streamed run emits node events. |
-| 05 | [`05_openai_provider.py`](05_openai_provider.py) | Chat peer or hosted key | `llm_call` writes an assistant message saying `hello world`. |
-| 06 | [`06_react_agent.py`](06_react_agent.py) | Responses peer or hosted key | A model-issued `calc` call returns `4053`, then the model gives its final answer. |
-| 07 | [`07_checkpoint_hitl.py`](07_checkpoint_hitl.py) | None | A checkpoint pauses before payment dispatch; approval resumes exactly one simulated payment. No money is charged. |
-| 08 | [`08_intent_routing.py`](08_intent_routing.py) | Chat peer or hosted key | Three questions route to math, translate, and general experts; each expert writes its answer. |
-| 09 | [`09_state_management.py`](09_state_management.py) | None | Alpha reaches count 11; beta forks that value; an unknown thread has no checkpoint. |
-| 10 | [`10_command_routing.py`](10_command_routing.py) | None | Inputs 200, 50, and -10 choose accept, manual, and reject nodes via `Command`. |
-| 11 | [`11_reflexion.py`](11_reflexion.py) | Chat peer or hosted key | Actor/critic calls carry reflection into the next attempt, stopping on `ok` or the superstep cap. This is a bounded teaching adaptation. |
-| 12 | [`12_self_ask.py`](12_self_ask.py) | Chat peer or hosted key | Intermediate questions/answers accumulate in a scratchpad before a final answer. No search service is attached. |
-| 13 | [`13_multi_agent_debate.py`](13_multi_agent_debate.py) | Chat peer or hosted key | Two `Send` branches produce opposing arguments; one judge reads the merged arguments. |
-| 14 | [`14_graph_to_json.py`](14_graph_to_json.py) | None | A doubled result of 42 and a saved `my_graph.json` definition. |
-| 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | Run 14 first | The saved definition doubles 5 to 10 and 100 to 200; custom node types are registered separately. |
-| 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | Responses peer/key; `gradio` | Normal chat or a three-question research report. Researchers use model knowledge, not web search. |
-| 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | Responses peer/key; `gradio`, `requests`; optional Crawl4AI/Postgres | `CRAWL4AI_URL` enables real `/md` search; `NEOGRAPH_PG_DSN` enables durable engine checkpoints. Configured service failures are not silently replaced. Without either setting, the script explicitly reports model-only research/in-memory state. Gradio history is not restored automatically. |
-| 18 | [`18_node_cache.py`](18_node_cache.py) | Chat peer or hosted key | Five runs across two topics execute the provider-backed node twice; repeated inputs replay cached writes. No fixed latency is promised. |
-| 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | None | Five scripted token events form `Octopuses have three hearts.` and message-stream chunks. |
-| 20 | [`20_otel_tracing.py`](20_otel_tracing.py) | `opentelemetry-api`, `opentelemetry-sdk` | Console spans cover the run and three nodes; final trail is `['A', 'B', 'C']`. |
-| 21 | [`21_http2_transport.py`](21_http2_transport.py) | TLS Chat peer/key; libcurl HTTP/2 support | Compare HTTP/1.1 and HTTP/2 requests through the same SDK. Confirm negotiated protocol separately; timings depend on the endpoint. |
-| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | Chat peer or hosted key | Score profile JSON, request a revised graph after failure, recompile, retry. Only registered node types are admitted. A model may exhaust the iteration cap without success. |
-| 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | Chat peer or hosted key | Preserve conversation checkpoints across an admitted graph rewrite; record version/hash in `__graph_meta__`. This metadata is application-level, not authoritative replay evidence. |
-| 24 | [`24_tool_approval_gate.py`](24_tool_approval_gate.py) | None | Pause before either sibling tool runs; refusal executes only `list_files`, approval executes both once. Shell actions are simulated. |
-| 25 | [`25_async_tools.py`](25_async_tools.py) | None | Compare serial `Tool` with overlapping I/O-bound `AsyncTool`, then show the CPython GIL boundary. Timing ratios are observations, not pass criteria. |
-| 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | MCP-enabled build | Start a real local JSON-RPC MCP peer, discover `fetch`, execute three calls with an explicit re-entrant policy. No external network or key. |
-| 27 | [`27_a2a_server.py`](27_a2a_server.py) | Python 3.10+; `neograph-engine[a2a]` | Serve an agent card and A2A JSON-RPC on `127.0.0.1:9999`; streamed artifacts form `NeoGraph received: hello (turn 1)`. |
-| 28 | [`28_acp_agent.py`](28_acp_agent.py) | Python 3.10+; `neograph-engine[acp]` | Serve ACP over stdio; initialize, create a session, prompt, receive token updates and `end_turn`. Durable `session/load` requires a configured Postgres or SQLite backend. |
+| I want to ... | Read | Offline |
+|---|---|---|
+| run my first graph | [`01_minimal.py`](01_minimal.py) | yes |
+| add a Python tool to a graph | [`02_tool_dispatch.py`](02_tool_dispatch.py) | yes |
+| fan out branches with Send | [`03_send_fanout.py`](03_send_fanout.py) | yes |
+| run many graphs at once with asyncio | [`04_async_concurrent.py`](04_async_concurrent.py) | yes |
+| call a model from a graph | [`05_openai_provider.py`](05_openai_provider.py) | yes |
+| build a tool-using agent loop | [`06_react_agent.py`](06_react_agent.py) | yes |
+| route by intent | [`08_intent_routing.py`](08_intent_routing.py) | yes |
+| choose the next node and write state in one step | [`10_command_routing.py`](10_command_routing.py) | yes |
+| pause for approval and resume | [`07_checkpoint_hitl.py`](07_checkpoint_hitl.py) | yes |
+| allow, deny or interrupt tool calls | [`24_tool_approval_gate.py`](24_tool_approval_gate.py) | yes |
+| read and fork saved state | [`09_state_management.py`](09_state_management.py) | yes |
+| save and load a graph as JSON | [`14_graph_to_json.py`](14_graph_to_json.py) | yes |
+| stream tokens as LangChain-style chunks | [`19_streaming_messages.py`](19_streaming_messages.py) | yes |
+| trace a run with OpenTelemetry | [`20_otel_tracing.py`](20_otel_tracing.py) | yes |
+| run I/O-bound tools concurrently | [`25_async_tools.py`](25_async_tools.py) | yes |
+| use tools from an MCP server | [`26_mcp_tools.py`](26_mcp_tools.py) | yes |
+| host my agent over A2A | [`27_a2a_server.py`](27_a2a_server.py) | service |
+| host my agent over ACP | [`28_acp_agent.py`](28_acp_agent.py) | service |
+| try Reflexion, Self-Ask or a debate | [`11_reflexion.py`](11_reflexion.py) | key |
+| let an agent rewrite its own graph | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | key |
+
+## Index by tier
+
+### Start here and the Core engine
+
+The remaining Core features, with no model involved. Example 14 writes `my_graph.json` beside the script and 15 reads it, so run them in that order.
+
+| # | Example | Offline | Shows |
+|---|---|---|---|
+| 03 | [`03_send_fanout.py`](03_send_fanout.py) | yes | Eight `Send` branches merge squares `[0, 1, 4, 9, 16, 25, 36, 49]`; append order is not assumed. |
+| 04 | [`04_async_concurrent.py`](04_async_concurrent.py) | yes | Eight async runs with `asyncio.gather` give `[0, 2, 4, 6, 8, 10, 12, 14]`; a streamed run emits node events. |
+| 10 | [`10_command_routing.py`](10_command_routing.py) | yes | `Command` picks the next node and writes state: inputs 200, 50 and -10 go to accept, manual and reject. |
+| 14 | [`14_graph_to_json.py`](14_graph_to_json.py) | yes | A graph definition is plain JSON: it runs from a dict and is saved as `my_graph.json`. |
+| 15 | [`15_graph_from_json.py`](15_graph_from_json.py) | yes | Loads `my_graph.json` from example 14 and doubles 5 to 10 and 100 to 200. Run 14 first; custom node types are registered in code. |
+| 19 | [`19_streaming_messages.py`](19_streaming_messages.py) | yes | `message_stream` turns token events into LangChain-style chunks; five scripted tokens form `Octopuses have three hearts.` |
+
+### Agent patterns
+
+A model, with or without tools, inside a graph. The `key` rows call a hosted model.
+
+| # | Example | Offline | Shows |
+|---|---|---|---|
+| 05 | [`05_openai_provider.py`](05_openai_provider.py) | yes | One model call through `llm_call`; a scripted model answers `hello world`, `--live` calls a hosted one. |
+| 06 | [`06_react_agent.py`](06_react_agent.py) | yes | ReAct over the Responses protocol: a model-issued `calc` call returns `4053`, then the model answers. |
+| 08 | [`08_intent_routing.py`](08_intent_routing.py) | yes | Three questions route to math, translate and general experts through `route_channel`; each expert writes its answer. |
+| 11 | [`11_reflexion.py`](11_reflexion.py) | key | Reflexion: actor and critic calls carry a reflection into the next attempt; a bounded teaching version. |
+| 12 | [`12_self_ask.py`](12_self_ask.py) | key | Self-Ask: intermediate questions and answers accumulate in a scratchpad before the final answer; no search service is attached. |
+| 13 | [`13_multi_agent_debate.py`](13_multi_agent_debate.py) | key | Two `Send` branches argue opposite sides; one judge reads the merged arguments. |
+| 16 | [`16_deep_research_chat.py`](16_deep_research_chat.py) | key | A Gradio chat with a research mode: a three-question report from parallel researchers that use model knowledge, not web search. Needs `gradio`. |
+| 17 | [`17_deep_research_crawl4ai.py`](17_deep_research_crawl4ai.py) | key | The same research graph with real web search through Crawl4AI and optional PostgreSQL checkpoints. Needs `gradio`, `requests` and a Crawl4AI server. |
+| 22 | [`22_self_evolving_graph.py`](22_self_evolving_graph.py) | key | A graph scores its own output, asks a model for a revised definition after a failure, recompiles and retries. Only registered node types are admitted. |
+| 23 | [`23_evolving_chat_agent.py`](23_evolving_chat_agent.py) | key | Conversation checkpoints survive an admitted rewrite of the graph; version and hash go into `__graph_meta__` (application-level metadata, not replay evidence). |
+
+### Program API
+
+The restricted JavaScript Program API runs on top of Core graphs: `ProgramRegistryBuilder`, `ProgramCompiler`, `LocalProgramHost`. It is described in [Program and QuickJS](../../../docs/python-binding.md#program-and-quickjs) and exercised by the end-to-end scenarios in [`bindings/python/tests/program_e2e/`](../tests/program_e2e/README.md): joins, failure routing, budgets, pause and resume, fork and crash recovery.
+
+### Protocols: MCP, A2A, ACP
+
+MCP is a client here (`ng.mcp`). A2A and ACP are hosted with the official Python SDKs and `ProtocolHostAdapter`; they run until stopped, so their smoke coverage is `bindings/python/tests/test_protocol_sdk_e2e.py`.
+
+| # | Example | Offline | Shows |
+|---|---|---|---|
+| 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | yes | Starts a local MCP server, discovers `fetch` and runs three calls with an explicit re-entrant policy; needs an MCP-enabled build and is smoke-tested on Linux. |
+| 27 | [`27_a2a_server.py`](27_a2a_server.py) | service | Hosts an agent through the official A2A SDK: an agent card and JSON-RPC on `127.0.0.1:9999`, streamed artifacts. Needs `neograph-engine[a2a]`. |
+| 28 | [`28_acp_agent.py`](28_acp_agent.py) | service | Hosts an agent through the official ACP SDK over stdio: initialize, create a session, prompt, token updates, `end_turn`. Needs `neograph-engine[acp]`. |
+
+### Persistence and operations
+
+Checkpoints, state, caching, tracing, transport and tool concurrency.
+
+| # | Example | Offline | Shows |
+|---|---|---|---|
+| 07 | [`07_checkpoint_hitl.py`](07_checkpoint_hitl.py) | yes | A checkpoint pauses before payment dispatch; approval resumes exactly one simulated payment. |
+| 09 | [`09_state_management.py`](09_state_management.py) | yes | `get_state` and `fork`: alpha reaches count 11, beta forks that value, an unknown thread has no checkpoint. |
+| 18 | [`18_node_cache.py`](18_node_cache.py) | key | Five runs across two topics execute the provider-backed node twice; repeated inputs replay cached writes. |
+| 20 | [`20_otel_tracing.py`](20_otel_tracing.py) | yes | OpenTelemetry spans for the run and three nodes on the console; the final trail is `['A', 'B', 'C']`. Needs `opentelemetry-api` and `opentelemetry-sdk`. |
+| 21 | [`21_http2_transport.py`](21_http2_transport.py) | key | HTTP/1.1 against HTTP/2 through the same SDK; needs a TLS Chat endpoint and libcurl with HTTP/2. The result describes this endpoint, not a ranking. |
+| 24 | [`24_tool_approval_gate.py`](24_tool_approval_gate.py) | yes | A tool gate pauses before either sibling tool runs; refusal runs only `list_files`, approval runs both once. Shell actions are simulated. |
+| 25 | [`25_async_tools.py`](25_async_tools.py) | yes | A sync `Tool` against an overlapping `AsyncTool` on I/O-bound work, then the GIL boundary on CPU-bound work; timing ratios are observations, and the smoke test runs on Linux. |
+
+## Offline, scripted and live
+
+Model-driven examples build their provider with `example_provider(script)` from `_common.py`. Unless `--live` is given, `_scripted.ScriptedModel` answers: a small server on `127.0.0.1` that speaks the OpenAI Chat or Responses protocol from a script (text, tool calls, streaming, usage, HTTP failures). The real `SchemaProvider` request building, SSE parsing and outcome handling run against it. It is not a model: the script decides what is said.
+
+```python
+from _common import example_provider
+from _scripted import call_tool, say
+
+script = [call_tool("calc", expression="2 + 3"), say("5")]   # call 1 asks for a tool, call 2 answers
+with example_provider(script) as chosen:
+    provider = chosen.provider        # a SchemaProvider; chosen.scripted is None with --live
+```
+
+A script can also be a function `(turn) -> Reply` that reads `turn.last_user_text`, `turn.system_text` and `turn.last_tool_result`. `chosen.scripted.call_count` lets an example assert how many model calls happened. The rules are in the docstring of `_scripted.py`.
+
+`--live`, `NG_EXAMPLE_LIVE=1`, `OPENAI_API_BASE` or `NG_PROVIDER_DESCRIPTOR` select a configured endpoint instead. Hosted endpoints need `OPENAI_API_KEY` and optionally `OPENAI_MODEL` (default `gpt-4.1-mini`), read from the process environment only; `_common.py` loads no `.env` file, and a missing key is an error, not a successful run. `_common.py` admits a closed OpenAI Chat or Responses descriptor, then constructs `SchemaProvider`. The typed SDK uses libcurl HTTP; the removed provider classes, completion parameters, WebSocket path and transport-backend selector are not available. `OPENAI_API_BASE` is an origin or gateway prefix, not a full `/v1/chat/completions` route; an HTTPS peer also needs `NG_EXAMPLE_CA_FILE` when its CA is not in the system trust store. `NG_PROVIDER_DESCRIPTOR` can name a complete admitted descriptor JSON file instead. See [the Python binding guide](../../../docs/python-binding.md) for the typed request and outcome contract.
 
 ## State and scheduling
 
@@ -76,3 +154,27 @@ from neograph_engine.llm import SchemaProvider
 ```
 
 The distribution is `neograph-engine`; `neograph` on PyPI is an unrelated project.
+
+## Add an example
+
+Numbers are never reused; the next free one is 29. A new example is one file and one table row.
+
+1. Name the file `NN_short_name.py` and start it with a module docstring: what it shows in a few lines, the `Run:` commands, then the test annotations.
+2. Say how it is tested, in that docstring. An offline example names a line it must print; one that needs a key or a service says why it cannot run offline (the annotation grammar is at the top of `examples/run_example_smoke.py`).
+3. Build any model-driven provider with `example_provider(script)` so the example is offline by default and takes `--live`.
+4. Add a row, with its Offline value, to the table of its tier.
+5. Run `python -m pytest bindings/python/tests/test_examples_offline.py` and `python scripts/check_examples.py`. The second fails when an example has no annotation, a number is used twice, or a table disagrees with the annotations.
+
+```python
+"""NN — one line saying what this shows.
+
+Run:
+    python NN_short_name.py           # scripted model, no key
+    python NN_short_name.py --live    # hosted model; OPENAI_API_KEY in the environment
+
+smoke-expect: provider: scripted
+smoke-expect: final answer: 5
+"""
+```
+
+Use `smoke-skip: <reason>` instead of the `smoke-expect` lines when the example cannot run offline; `smoke-requires: module1, module2` skips the test when a module is missing.
