@@ -1,17 +1,23 @@
-// NeoGraph Example 51: 가장 작은 동작하는 프로그램
+// NeoGraph Example 51: channels, the state a graph runs on
 //
-// LLM 없음, mock provider 없음, tool 없음, API key 없음 — 노드 하나가
-// 채널 하나의 값을 변환하고 끝나는 그래프. NeoGraph 가 어떤 모양으로
-// 돌아가는지 5분 안에 이해하고 싶은 사람에게.
+// No model, no tool, no key: one node and two channels. A channel is a named slot of state;
+// the node reads one, writes both, and the caller reads both back with typed keys.
 //
-// 흐름:
-//   1) 그래프를 JSON 으로 기술 — 채널 1개 + 노드 1개 + 엣지
-//   2) 노드 타입을 등록
-//   3) build → run → 결과를 result.channel<T>(name) 으로 꺼냄
+// Steps:
+//   1) describe the graph as JSON: two channels, one node, two edges
+//   2) register the node type under the name the JSON uses
+//   3) build, run, and read the result with `result.channel(key)`
 //
-// 실행: ./example_minimal     출력: "HELLO"
+// A ChannelKey<T> ties a channel name to its C++ type, so a read is checked where it is
+// written. `channel<T>(name)` is the untyped form; `try_channel` returns nullopt for a channel
+// the graph does not have, where `channel` would throw.
+//
+// Usage: ./example_minimal     prints: HELLO, length: 5, missing: not in the graph
 //
 // smoke-expect-line: HELLO
+// smoke-expect-line: length: 5
+// smoke-expect-line: missing: not in the graph
+// smoke-forbid: [neograph] lint
 
 #include <neograph/neograph.h>
 
@@ -21,48 +27,51 @@
 using namespace neograph;
 using namespace neograph::graph;
 
-const ChannelKey<std::string> text_channel{"text"};
+const ChannelKey<std::string> text_key{"text"};
+const ChannelKey<int>         length_key{"length"};
+const ChannelKey<int>         missing_key{"nothing_here"};
 
-// 노드 한 개. 채널 "text" 를 읽어서 대문자로 바꿔 다시 같은 채널에 씀.
+// Reads `text`, writes it back in capitals and writes its length to `length`.
 class UpperNode : public GraphNode {
 public:
     asio::awaitable<NodeOutput> run(NodeInput in) override {
-        std::string s = in.state.get(text_channel);
-        for (auto& c : s) c = static_cast<char>(std::toupper(c));
+        std::string text = in.state.get(text_key);
+        for (auto& c : text) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         NodeOutput out;
-        out.writes.push_back(ChannelWrite{"text", json(s)});
+        out.writes.push_back(ChannelWrite{"length", json(static_cast<int>(text.size()))});
+        out.writes.push_back(ChannelWrite{"text", json(std::move(text))});
         co_return out;
     }
     std::string get_name() const override { return "upper"; }
 };
 
 int main() {
-    // (2) JSON 노드 type → 실제 GraphNode 만드는 함수 등록.
+    // (2) A node type is a name plus a function that makes the node.
     NodeFactory::instance().register_type("upper",
         [](const std::string&, const json&, const NodeContext&) {
             return std::make_unique<UpperNode>();
         });
 
-    // (1) 그래프 정의 — 채널 1, 노드 1, 엣지 2 (start→upper→end).
-    json def = {
+    // (1) Two channels (overwrite: a write replaces the value), one node, two edges.
+    const json definition = {
         {"schema_version", TOPOLOGY_SCHEMA_VERSION},
         {"name", "minimal"},
-        {"channels", {{"text", {{"reducer", "overwrite"}}}}},
-        {"nodes",    {{"upper", {{"type", "upper"}}}}},
-        {"edges", {
+        {"channels", {{"text", {{"reducer", "overwrite"}}}, {"length", {{"reducer", "overwrite"}}}}},
+        {"nodes", {{"upper", {{"type", "upper"}}}}},
+        {"edges", json::array({
             {{"from", "__start__"}, {"to", "upper"}},
-            {{"from", "upper"},     {"to", "__end__"}},
-        }},
+            {{"from", "upper"}, {"to", "__end__"}}
+        })}
     };
 
-    // (3) 컴파일 → 실행 → 결과 꺼냄.
-    NodeContext ctx;
-    auto        engine = GraphEngine::build_strict(def, EngineConfig{.node_context = ctx});
+    // (3) Build, run with an input for `text`, read the channels back.
+    auto engine = GraphEngine::build_strict(definition, EngineConfig{});
+    RunConfig config;
+    config.input = {{"text", "hello"}};
+    const auto result = engine->run(config);
 
-    RunConfig cfg;
-    cfg.input = {{"text", "hello"}};
-    auto result = engine->run(cfg);
-
-    std::cout << result.channel(text_channel) << "\n";   // → HELLO
+    std::cout << result.channel(text_key) << "\n";
+    std::cout << "length: " << result.channel(length_key) << "\n";
+    std::cout << "missing: " << (result.try_channel(missing_key) ? "found" : "not in the graph") << "\n";
     return 0;
 }

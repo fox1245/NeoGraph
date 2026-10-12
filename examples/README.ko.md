@@ -80,7 +80,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | 09 | [`09_all_features.cpp`](09_all_features.cpp) | yes | 파일 하나에 기능 여섯 가지: `NodeInterrupt`, `RetryPolicy`, `StreamMode`, `Send`, `Command`, `Store`. |
 | 10 | [`10_send_command.cpp`](10_send_command.cpp) | yes | `Send` fan-out과 `Command` 경로 재정의: 결과가 충분해질 때까지 planner, researcher, evaluator가 반복합니다. |
 | 42 | [`42_custom_reducer_condition.cpp`](42_custom_reducer_condition.cpp) | yes | C++에서 채널 reducer와 엣지 조건을 직접 등록합니다. |
-| 51 | [`51_minimal.cpp`](51_minimal.cpp) | yes | 가장 작은 프로그램: 노드 하나, 채널 하나, `result.channel<T>("name")`. |
+| 51 | [`51_minimal.cpp`](51_minimal.cpp) | yes | 채널: 노드 하나가 채널 하나를 읽고 둘을 쓰며, 호출한 쪽이 타입이 있는 `ChannelKey`로 둘을 다시 읽습니다(`result.channel(key)`, `try_channel`). |
 | 52 | [`52_export_schema.cpp`](52_export_schema.cpp) | yes | `NodeFactory::export_schema()`가 시각적 편집기가 팔레트를 만드는 데 쓰는 토폴로지 JSON Schema를 출력합니다. |
 | 61 | [`61_sync_node.cpp`](61_sync_node.cpp) | yes | `SyncGraphNode`: 코루틴 보일러플레이트 없는 짧은 노드. |
 

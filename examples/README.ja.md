@@ -80,7 +80,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | 09 | [`09_all_features.cpp`](09_all_features.cpp) | yes | 1 ファイルに 6 つの機能: `NodeInterrupt`、`RetryPolicy`、`StreamMode`、`Send`、`Command`、`Store`。 |
 | 10 | [`10_send_command.cpp`](10_send_command.cpp) | yes | `Send` による fan-out と `Command` による経路の上書き。十分な結果が揃うまで planner、researcher、evaluator が繰り返します。 |
 | 42 | [`42_custom_reducer_condition.cpp`](42_custom_reducer_condition.cpp) | yes | C++ から独自のチャンネル reducer とエッジ条件を登録します。 |
-| 51 | [`51_minimal.cpp`](51_minimal.cpp) | yes | 最小のプログラム。ノード 1 つ、チャンネル 1 つ、`result.channel<T>("name")`。 |
+| 51 | [`51_minimal.cpp`](51_minimal.cpp) | yes | チャンネル。ノード 1 つが 1 つのチャンネルを読んで 2 つに書き込み、呼び出し側は型付きの `ChannelKey` で両方を読み戻します（`result.channel(key)`、`try_channel`）。 |
 | 52 | [`52_export_schema.cpp`](52_export_schema.cpp) | yes | `NodeFactory::export_schema()` が、ビジュアルエディターがパレットを作るためのトポロジー JSON Schema を出力します。 |
 | 61 | [`61_sync_node.cpp`](61_sync_node.cpp) | yes | `SyncGraphNode`。コルーチンの定型コードが要らない短いノード。 |
 
