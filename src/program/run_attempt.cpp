@@ -442,15 +442,17 @@ std::optional<ProgramFailure> validate_task_output(const CompiledTaskGraphTask& 
             }
         }
     }
-    if ((exact_budget || task.reserved_budget.output_bytes != 0) &&
-        output->dump().size() > task.reserved_budget.output_bytes) {
+    // A schema-2 task reserves its budget once per attempt, but each attempt holds the whole.
+    const auto output_limit =
+        exact_budget ? task.requested_budget.output_bytes : task.reserved_budget.output_bytes;
+    if ((exact_budget || output_limit != 0) && output->dump().size() > output_limit) {
         return ProgramFailure{"P_TASK_OUTPUT_BUDGET",
                               "Task output exceeds its reserved output byte budget",
                               task.operation_id,
                               "",
                               0,
                               json{{"output_bytes", output->dump().size()},
-                                   {"reserved_output_bytes", task.reserved_budget.output_bytes}}};
+                                   {"reserved_output_bytes", output_limit}}};
     }
     return std::nullopt;
 }
@@ -2774,6 +2776,19 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         co_return result;
                     }
                 }
+                // Literals are assigned after the bindings; a target never has both.
+                for (const auto& literal : task.input_literals) {
+                    if (!assign_json_path(child_input, literal.to.field, literal.value)) {
+                        result.failure =
+                            ProgramFailure{"P_TASK_INPUT",
+                                           "Task input literal could not be materialized",
+                                           task.operation_id,
+                                           "",
+                                           0,
+                                           json{{"target_field", literal.to.field}}};
+                        co_return result;
+                    }
+                }
                 if (operation_token->is_cancelled() ||
                     control->cancellation_cause() != CancellationCause::None) {
                     result.status  = ProgramTerminalStatus::Cancelled;
@@ -2788,7 +2803,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 try {
                     auto child = control->launch_child(task.child_binding, std::move(child_input),
                                                        operation.id(), result.attempt_identity,
-                                                       task.reserved_budget, exact_budget);
+                                                       exact_budget ? task.requested_budget
+                                                                    : task.reserved_budget,
+                                                       exact_budget);
                     result.child_run_id = child->run_id;
                     bool cancel_child = false;
                     {

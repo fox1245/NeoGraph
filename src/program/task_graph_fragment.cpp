@@ -33,6 +33,19 @@ std::uint64_t checked_add(std::uint64_t lhs, std::uint64_t rhs, std::string_view
     return lhs + rhs;
 }
 
+std::uint64_t checked_multiply(std::uint64_t lhs, std::uint64_t rhs, std::string_view field) {
+    if (rhs != 0 && lhs > std::numeric_limits<std::uint64_t>::max() / rhs)
+        throw std::invalid_argument(std::string(field) + " exceeds uint64 range");
+    return lhs * rhs;
+}
+
+TaskGraphBudget multiply_budget(const TaskGraphBudget& budget, std::uint64_t attempts) {
+    return {checked_multiply(budget.wall_time_ms, attempts, "Task graph wall_time_ms"),
+            checked_multiply(budget.model_tokens, attempts, "Task graph model_tokens"),
+            checked_multiply(budget.monetary_microunits, attempts, "Task graph monetary_microunits"),
+            checked_multiply(budget.output_bytes, attempts, "Task graph output_bytes")};
+}
+
 TaskGraphBudget add_budget(const TaskGraphBudget& lhs, const TaskGraphBudget& rhs) {
     return {checked_add(lhs.wall_time_ms, rhs.wall_time_ms, "Task graph wall_time_ms"),
             checked_add(lhs.model_tokens, rhs.model_tokens, "Task graph model_tokens"),
@@ -88,19 +101,28 @@ json artifact_contracts_to_json(const std::vector<TaskGraphArtifactContract>& co
 json task_to_json(const CompiledTaskGraphTask& task) {
     json bindings = json::array();
     for (const auto& binding : task.input_bindings) bindings.push_back(binding_to_json(binding));
-    return json{{"id", task.task_id},
-                {"operation_id", task.operation_id},
-                {"template_id", task.template_id},
-                {"template_identity", task.template_identity},
-                {"child_binding", task.child_binding},
-                {"input_bindings", std::move(bindings)},
-                {"depends_on", task.depends_on},
-                {"budget", budget_to_json(task.requested_budget)},
-                {"reserved_budget", budget_to_json(task.reserved_budget)},
-                {"capabilities", task.capabilities},
-                {"effects", task.effects},
-                {"input_fields", task.input_fields},
-                {"output_artifacts", artifact_contracts_to_json(task.output_artifacts)}};
+    json encoded{{"id", task.task_id},
+                 {"operation_id", task.operation_id},
+                 {"template_id", task.template_id},
+                 {"template_identity", task.template_identity},
+                 {"child_binding", task.child_binding},
+                 {"input_bindings", std::move(bindings)},
+                 {"depends_on", task.depends_on},
+                 {"budget", budget_to_json(task.requested_budget)},
+                 {"reserved_budget", budget_to_json(task.reserved_budget)},
+                 {"capabilities", task.capabilities},
+                 {"effects", task.effects},
+                 {"input_fields", task.input_fields},
+                 {"output_artifacts", artifact_contracts_to_json(task.output_artifacts)}};
+    // Schema-2 members appear only when used, so a schema-1 task keeps its bytes and identity.
+    if (!task.input_literals.empty()) {
+        json literals = json::array();
+        for (const auto& literal : task.input_literals)
+            literals.push_back(json{{"to", json{{"field", literal.to.field}}}, {"value", literal.value}});
+        encoded["input_literals"] = std::move(literals);
+    }
+    if (task.max_attempts > 1) encoded["max_attempts"] = task.max_attempts;
+    return encoded;
 }
 
 json receipt_to_json(const TaskGraphTemplateReceipt& receipt) {
@@ -289,7 +311,7 @@ CompiledTaskGraphTask task_from_json(const json& value) {
         value, "Task graph compiled task",
         {"id", "operation_id", "template_id", "template_identity", "child_binding",
          "input_bindings", "depends_on", "budget", "reserved_budget", "capabilities", "effects",
-         "input_fields", "output_artifacts"});
+         "input_fields", "output_artifacts", "input_literals", "max_attempts"});
     for (const auto field : {"input_bindings", "depends_on", "capabilities", "effects"}) {
         if (!value.contains(field) || !value.at(field).is_array())
             throw std::invalid_argument("Task graph compiled task field '" + std::string(field) +
@@ -324,6 +346,45 @@ CompiledTaskGraphTask task_from_json(const json& value) {
     }
     if (value.contains("output_artifacts"))
         result.output_artifacts = artifact_contracts_from_json(value.at("output_artifacts"));
+    if (value.contains("input_literals")) {
+        if (!value.at("input_literals").is_array() || value.at("input_literals").empty())
+            throw std::invalid_argument(
+                "Task graph compiled task input_literals must be a non-empty array");
+        std::set<std::string, std::less<>> targets;
+        for (const auto& encoded : value.at("input_literals")) {
+            if (!encoded.is_object())
+                throw std::invalid_argument("Task graph input literal must be an object");
+            detail::reject_unknown_fields(encoded, "Task graph input literal", {"to", "value"});
+            if (!encoded.contains("to") || !encoded.contains("value") || !encoded.at("to").is_object())
+                throw std::invalid_argument("Task graph input literal requires to and value");
+            detail::reject_unknown_fields(encoded.at("to"), "Task graph input literal target",
+                                          {"field"});
+            TaskGraphInputLiteral literal;
+            literal.to.field = required_string(encoded.at("to"), "field");
+            literal.value    = owned_json_copy(encoded.at("value"));
+            detail::validate_json_pointer(literal.to.field);
+            if (literal.to.field.empty())
+                throw std::invalid_argument("Task graph input literal target must not be empty");
+            if (!targets.insert(literal.to.field).second)
+                throw std::invalid_argument("Task graph input literal targets must be unique");
+            if (std::find(result.input_fields.begin(), result.input_fields.end(), literal.to.field) ==
+                result.input_fields.end())
+                throw std::invalid_argument("Task graph input literal target is not an input field");
+            for (const auto& binding : result.input_bindings)
+                if (binding.to.field == literal.to.field)
+                    throw std::invalid_argument(
+                        "Task graph input literal target is also a binding target");
+            if (!result.input_literals.empty() &&
+                !(result.input_literals.back().to.field < literal.to.field))
+                throw std::invalid_argument("Task graph input literals must be sorted by target");
+            result.input_literals.push_back(std::move(literal));
+        }
+    }
+    if (value.contains("max_attempts")) {
+        result.max_attempts = required_uint32(value, "max_attempts");
+        if (result.max_attempts < 2)
+            throw std::invalid_argument("Task graph max_attempts is stored only when above 1");
+    }
     return result;
 }
 
@@ -488,6 +549,13 @@ CompiledTaskGraphFragment CompiledTaskGraphFragment::parse(std::string_view stor
     for (const auto& encoded : document.at("tasks")) tasks.push_back(task_from_json(encoded));
     std::set<std::string, std::less<>> task_ids;
     for (const auto& task : tasks) {
+        if (schema_version < SCHEMA_VERSION_2 && (!task.input_literals.empty() || task.max_attempts != 1))
+            throw std::invalid_argument(
+                "Stored task graph fragment uses schema-2 task members under schema_version 1");
+        if (schema_version >= SCHEMA_VERSION_2 &&
+            !(task.reserved_budget == multiply_budget(task.requested_budget, task.max_attempts)))
+            throw std::invalid_argument(
+                "Stored task graph task reservation is not its budget once per attempt");
         if (!task_ids.insert(task.task_id).second)
             throw std::invalid_argument("Stored task graph fragment has duplicate task id");
         if (task.operation_id != task_operation_id(fragment_id, task.task_id))
@@ -786,7 +854,26 @@ CompiledTaskGraphFragment TaskGraphFragmentCompiler::compile(
             !budget_explicit(task.budget, contract.budget_ceiling))
             throw std::invalid_argument(
                 "Task graph schema 2 task budget leaves a spendable dimension at zero");
-        aggregate = add_budget(aggregate, task.budget);
+        if (task.max_attempts == 0 || task.max_attempts > std::max<std::uint32_t>(options.limits.max_attempts, 1))
+            throw std::invalid_argument("Task graph task max_attempts exceeds the compiler ceiling");
+        std::uint64_t literal_bytes = 0;
+        for (const auto& literal : task.literals) {
+            if (std::find(contract.input_fields.begin(), contract.input_fields.end(),
+                          literal.to.field) == contract.input_fields.end())
+                throw std::invalid_argument(
+                    "Task graph input literal targets a field its template does not accept");
+            literal_bytes += canonical_json_bytes(literal.value).size();
+        }
+        if (literal_bytes != 0 &&
+            (literal_bytes > options.limits.max_total_literal_bytes ||
+             std::any_of(task.literals.begin(), task.literals.end(), [&](const auto& literal) {
+                 return canonical_json_bytes(literal.value).size() > options.limits.max_literal_bytes;
+             })))
+            throw std::invalid_argument("Task graph input literals exceed the compiler ceiling");
+        // Every attempt starts a child with the whole budget, so the aggregate counts it once
+        // per attempt.
+        const auto reserved = multiply_budget(task.budget, task.max_attempts);
+        aggregate = add_budget(aggregate, reserved);
         edge_count += task.depends_on.size();
 
         CompiledTaskGraphTask compiled;
@@ -797,7 +884,9 @@ CompiledTaskGraphFragment TaskGraphFragmentCompiler::compile(
         compiled.input_bindings = task.input_bindings;
         compiled.depends_on = task.depends_on;
         compiled.requested_budget = task.budget;
-        compiled.reserved_budget = task.budget;
+        compiled.reserved_budget = reserved;
+        compiled.input_literals = task.literals;
+        compiled.max_attempts = task.max_attempts;
         compiled.capabilities = sorted_unique(contract.capabilities);
         compiled.effects = sorted_unique(contract.effects);
         compiled.input_fields = contract.input_fields;

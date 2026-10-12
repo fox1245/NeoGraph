@@ -192,3 +192,97 @@ TEST(TaskGraphExpansionCharacterization, ARunWithNoDependenciesBetweenTasksSettl
     EXPECT_EQ(run.events, (Events{"a:active:1", "b:active:1", "c:active:1", "a:completed:1",
                                   "b:completed:1", "c:completed:1", "terminal"}));
 }
+
+
+// ---- Schema 2: literal inputs and attempts reach the running graph ----
+
+namespace {
+
+json with_literal(json task, const std::string& field, json value) {
+    json literals = task.contains("literals") ? task["literals"] : json::array();
+    literals.push_back(json{{"to", json{{"field", field}}}, {"value", std::move(value)}});
+    task["literals"] = literals;
+    return task;
+}
+
+}  // namespace
+
+TEST(TaskGraphExpansionSchemaTwo, ALiteralReachesTheChildInputAndBeatsTheExpansionState) {
+    ExpansionHarness h;
+    h.reset_observations();
+    const auto run = h.run(proposal_of({with_literal(task("a", "ok/v1"), "/item", "hello")}, 2));
+
+    ASSERT_EQ(run.result.status(), ProgramTerminalStatus::Completed)
+        << run.result.serialize_canonical();
+    ASSERT_TRUE(run.record.has_value());
+    EXPECT_EQ(run.record->fragment.schema_version(), 2U);
+    ASSERT_EQ(run.record->fragment.tasks()[0].input_literals.size(), 1U);
+    // The expansion state says "seed"; the literal is what the child read.
+    EXPECT_EQ((*run.record->tasks[0].output)["channels"]["value"]["value"], "hello");
+}
+
+TEST(TaskGraphExpansionSchemaTwo, ABindingAndALiteralFillDifferentFieldsOfOneChild) {
+    ExpansionHarness h;
+    h.reset_observations();
+    auto joined = with_literal(task("b", "join/v1", {"a"}), "/extra", json{{"note", "E"}});
+    const auto run = h.run(proposal_of({with_literal(task("a", "ok/v1"), "/item", "A"), joined}, 2));
+
+    ASSERT_EQ(run.result.status(), ProgramTerminalStatus::Completed)
+        << run.result.serialize_canonical();
+    ASSERT_TRUE(run.record.has_value());
+    EXPECT_EQ((*run.record->tasks[1].output)["channels"]["value"]["value"],
+              (json{{"item", "A"}, {"extra", json{{"note", "E"}}}}));
+}
+
+TEST(TaskGraphExpansionSchemaTwo, AHostThatSetsNoLiteralLimitRefusesLiteralsBeforeAnythingRuns) {
+    ExpansionHarness h;
+    h.reset_observations();
+    h.fixture.expansion->limits.max_literal_bytes       = 0;
+    h.fixture.expansion->limits.max_total_literal_bytes = 0;
+    const auto run = h.run(proposal_of({with_literal(task("a", "ok/v1"), "/item", "hello")}, 2));
+
+    EXPECT_EQ(run.result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(run.result.failure().has_value());
+    EXPECT_EQ(run.result.failure()->code, "P_EXPAND_REJECTED");
+    EXPECT_EQ(run.result.failure()->witness["diagnostics"][0]["code"], "P_PROPOSAL_LITERAL_SIZE");
+    EXPECT_FALSE(run.record.has_value());
+    EXPECT_TRUE(run.events.empty());
+}
+
+TEST(TaskGraphExpansionSchemaTwo, EachAttemptGetsTheWholeBudgetWhileTheAggregateReservesAllOfThem) {
+    ExpansionHarness h;
+    h.reset_observations();
+    json retried = task("a", "ok/v1");
+    retried["max_attempts"] = 2;
+    const auto run = h.run(proposal_of({retried, task("b", "ok/v1")}, 2));
+
+    ASSERT_EQ(run.result.status(), ProgramTerminalStatus::Completed)
+        << run.result.serialize_canonical();
+    ASSERT_TRUE(run.record.has_value());
+    const auto& tasks = run.record->fragment.tasks();
+    EXPECT_EQ(tasks[0].max_attempts, 2U);
+    EXPECT_EQ(tasks[0].requested_budget, (TaskGraphBudget{1000, 1, 1, 512}));
+    EXPECT_EQ(tasks[0].reserved_budget, (TaskGraphBudget{2000, 2, 2, 1024}));
+    EXPECT_EQ(run.record->fragment.aggregate_budget(), (TaskGraphBudget{3000, 3, 3, 1536}));
+    // The child of the one attempt that ran was launched with the requested, not the reserved, budget.
+    const auto& child_id = *run.record->tasks[0].child_run_id;
+    ASSERT_TRUE(run.child_budgets.count(child_id) != 0);
+    EXPECT_EQ(run.child_budgets.at(child_id).wall_time_ms, 1000U);
+    EXPECT_EQ(run.child_budgets.at(child_id).model_tokens, 1U);
+    EXPECT_EQ(run.child_budgets.at(child_id).monetary_microunits, 1U);
+}
+
+TEST(TaskGraphExpansionSchemaTwo, AnOutputIsHeldToTheBytesOfOneAttemptNotAllOfThem) {
+    ExpansionHarness h;
+    h.reset_observations();
+    json retried = task("a", "ok/v1");
+    retried["max_attempts"] = 3;
+    retried["budget"]["output_bytes"] = 8;  // far less than the child's output
+    const auto run = h.run(proposal_of({retried}, 2));
+
+    EXPECT_EQ(run.result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(run.record.has_value());
+    ASSERT_TRUE(run.record->tasks[0].failure.has_value());
+    EXPECT_EQ((*run.record->tasks[0].failure)["code"], "P_TASK_OUTPUT_BUDGET");
+    EXPECT_EQ((*run.record->tasks[0].failure)["witness"]["reserved_output_bytes"], 8);
+}

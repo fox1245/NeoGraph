@@ -37,7 +37,7 @@
     },
     "json_pointer": {
       "type": "string",
-      "pattern": "^(|(/([^~/]|~[01])*))+$/"
+      "pattern": "^(/([^~/]|~[01])*)*$"
     },
     "source_coordinate": {
       "type": "object",
@@ -126,7 +126,43 @@
         "budget": { "$ref": "#/$defs/budget" },
         "reserved_budget": { "$ref": "#/$defs/budget" },
         "capabilities": { "type": "array", "items": { "$ref": "#/$defs/token" } },
-        "effects": { "type": "array", "items": { "$ref": "#/$defs/token" } }
+        "effects": { "type": "array", "items": { "$ref": "#/$defs/token" } },
+        "input_fields": { "type": "array", "items": { "$ref": "#/$defs/json_pointer" } },
+        "output_artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact_contract" } },
+        "input_literals": {
+          "description": "Schema-2 fragments only. JSON values assigned to input fields after the bindings; sorted by target field, each target a declared input field that no binding fills.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/input_literal" }
+        },
+        "max_attempts": {
+          "description": "Schema-2 fragments only, stored only above 1. reserved_budget is budget once per attempt; every attempt's child starts with the whole budget.",
+          "type": "integer",
+          "minimum": 2
+        }
+      }
+    },
+    "artifact_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact", "fields"],
+      "properties": {
+        "artifact": { "$ref": "#/$defs/token" },
+        "fields": { "type": "array", "items": { "$ref": "#/$defs/json_pointer" } }
+      }
+    },
+    "input_literal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["to", "value"],
+      "properties": {
+        "to": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["field"],
+          "properties": { "field": { "$ref": "#/$defs/json_pointer" } }
+        },
+        "value": {}
       }
     },
     "template_receipt": {
@@ -148,7 +184,9 @@
         "executable_identity": { "type": "string" },
         "kind": { "type": "string" },
         "capabilities": { "type": "array", "items": { "$ref": "#/$defs/token" } },
-        "effects": { "type": "array", "items": { "$ref": "#/$defs/token" } }
+        "effects": { "type": "array", "items": { "$ref": "#/$defs/token" } },
+        "input_fields": { "type": "array", "items": { "$ref": "#/$defs/json_pointer" } },
+        "output_artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact_contract" } }
       }
     },
     "compiled_fragment": {
@@ -171,7 +209,10 @@
         "source_map"
       ],
       "properties": {
-        "schema_version": { "const": 1 },
+        "schema_version": {
+          "description": "1 for a fragment of a schema-1 proposal, whose bytes and identity are unchanged; 2 for a fragment of a schema-2 proposal, whose launch budgets are exact (an unstated dimension grants nothing).",
+          "enum": [1, 2]
+        },
         "owner_scope": { "$ref": "#/$defs/token" },
         "parent_run_id": { "$ref": "#/$defs/token" },
         "expansion_operation_id": { "$ref": "#/$defs/token" },

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <initializer_list>
+#include <limits>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -283,12 +284,47 @@ struct ParsedTask {
     TaskGraphTask                    task;
     std::vector<std::size_t>         binding_source_indices;
     std::vector<std::size_t>         dependency_source_indices;
+    std::vector<std::size_t>         literal_source_indices;
     bool                             id_valid = false;
     bool                             template_valid = false;
     const TaskGraphTemplateContract* template_contract = nullptr;
 };
 
-inline ParsedTask parse_task(DiagnosticAccumulator& diagnostics, const json& value, std::size_t index) {
+inline std::optional<TaskGraphInputLiteral> parse_literal(DiagnosticAccumulator& diagnostics,
+                                                           const json&             value,
+                                                           std::string_view        pointer) {
+    if (!value.is_object()) {
+        diagnostics.add(std::string(pointer), "P_PROPOSAL_TYPE", "Input literal must be an object",
+                        json{{"expected", "object"}});
+        return std::nullopt;
+    }
+    add_unknown_fields(diagnostics, value, pointer, {"to", "value"});
+    const auto to_pointer = child_pointer(pointer, "to");
+    bool       valid      = true;
+    if (!value.contains("to")) {
+        diagnostics.add(to_pointer, "P_PROPOSAL_REQUIRED_FIELD", "Input literal field is required",
+                        json{{"field", "to"}});
+        valid = false;
+    } else if (!value["to"].is_object()) {
+        diagnostics.add(to_pointer, "P_PROPOSAL_TYPE", "Input literal target must be an object",
+                        json{{"expected", "object"}});
+        valid = false;
+    }
+    if (!value.contains("value")) {
+        diagnostics.add(child_pointer(pointer, "value"), "P_PROPOSAL_REQUIRED_FIELD",
+                        "Input literal field is required", json{{"field", "value"}});
+        valid = false;
+    }
+    if (!valid) return std::nullopt;
+    add_unknown_fields(diagnostics, value["to"], to_pointer, {"field"});
+    const auto field = required_nonempty_pointer(diagnostics, value["to"], to_pointer, "field");
+    if (!field) return std::nullopt;
+    return TaskGraphInputLiteral{{*field}, owned_json_copy(value["value"])};
+}
+
+// `schema_version` is the version the document declares (1 when it declares none that is valid).
+inline ParsedTask parse_task(DiagnosticAccumulator& diagnostics, const json& value, std::size_t index,
+                             std::uint32_t schema_version = 1) {
     const auto pointer = index_pointer("/tasks", index);
     ParsedTask parsed;
     parsed.index = index;
@@ -298,7 +334,16 @@ inline ParsedTask parse_task(DiagnosticAccumulator& diagnostics, const json& val
         return parsed;
     }
     add_unknown_fields(diagnostics, value, pointer,
-                       {"id", "template", "input_bindings", "depends_on", "budget"});
+                       {"id", "template", "input_bindings", "depends_on", "budget", "literals",
+                        "max_attempts"});
+    if (schema_version < TaskGraphProposal::SCHEMA_VERSION_2) {
+        for (const auto field : {"literals", "max_attempts"}) {
+            if (!value.contains(field)) continue;
+            diagnostics.add(child_pointer(pointer, field), "P_PROPOSAL_SCHEMA_VERSION",
+                            "Task field requires TaskGraphProposal schema_version 2",
+                            json{{"field", field}, {"required", TaskGraphProposal::SCHEMA_VERSION_2}});
+        }
+    }
 
     if (const auto id = required_token(diagnostics, value, pointer, "id")) {
         parsed.task.id = *id;
@@ -370,6 +415,40 @@ inline ParsedTask parse_task(DiagnosticAccumulator& diagnostics, const json& val
                         json{{"field", "budget"}});
     } else if (const auto budget = parse_budget(diagnostics, value["budget"], budget_pointer)) {
         parsed.task.budget = *budget;
+    }
+
+    if (schema_version >= TaskGraphProposal::SCHEMA_VERSION_2) {
+        if (value.contains("literals")) {
+            const auto literals_pointer = child_pointer(pointer, "literals");
+            if (!value["literals"].is_array()) {
+                diagnostics.add(literals_pointer, "P_PROPOSAL_TYPE", "Task literals must be an array",
+                                json{{"expected", "array"}});
+            } else {
+                std::size_t literal_index = 0;
+                for (const auto& literal : value["literals"]) {
+                    if (const auto parsed_literal = parse_literal(
+                            diagnostics, literal, index_pointer(literals_pointer, literal_index))) {
+                        parsed.task.literals.push_back(*parsed_literal);
+                        parsed.literal_source_indices.push_back(literal_index);
+                    }
+                    ++literal_index;
+                }
+            }
+        }
+        if (value.contains("max_attempts")) {
+            const auto attempts_pointer = child_pointer(pointer, "max_attempts");
+            const auto attempts         = unsigned_integer(value["max_attempts"]);
+            if (!attempts) {
+                diagnostics.add(attempts_pointer, "P_PROPOSAL_TYPE",
+                                "Task max_attempts must be an unsigned integer",
+                                json{{"expected", "unsigned integer"}});
+            } else if (*attempts > std::numeric_limits<std::uint32_t>::max()) {
+                diagnostics.add(attempts_pointer, "P_PROPOSAL_ATTEMPTS",
+                                "Task max_attempts is out of range", json{{"requested", *attempts}});
+            } else {
+                parsed.task.max_attempts = static_cast<std::uint32_t>(*attempts);
+            }
+        }
     }
     return parsed;
 }

@@ -76,6 +76,12 @@ struct TaskGraphProposalLimits {
      * requires every budget dimension to be explicit.
      */
     std::uint32_t    min_schema_version = 1;
+    /// Schema 2: the most attempts one task may declare. 1 means no retries.
+    std::uint32_t    max_attempts = 1;
+    /// Schema 2: bytes of canonical JSON one literal input may take. 0 refuses literals.
+    std::uint32_t    max_literal_bytes = 0;
+    /// Schema 2: bytes of canonical JSON all the literals of a proposal may take together.
+    std::uint32_t    max_total_literal_bytes = 0;
 
     bool operator==(const TaskGraphProposalLimits&) const = default;
 };
@@ -117,6 +123,17 @@ struct TaskGraphInputBinding {
     bool operator==(const TaskGraphInputBinding&) const = default;
 };
 
+/**
+ * A JSON value assigned to one input field of a template (schema 2). It is data, like a
+ * binding: the field must be a declared input of the template and receives no other value.
+ */
+struct TaskGraphInputLiteral {
+    TaskGraphInputTarget to;
+    json                 value;
+
+    bool operator==(const TaskGraphInputLiteral&) const = default;
+};
+
 /** One task vertex in a finite TaskGraphProposal DAG. */
 struct TaskGraphTask {
     std::string                        id;
@@ -124,6 +141,11 @@ struct TaskGraphTask {
     std::vector<TaskGraphInputBinding> input_bindings;
     std::vector<std::string>           depends_on;
     TaskGraphBudget                    budget;
+    /// Schema 2; sorted by target field.
+    std::vector<TaskGraphInputLiteral> literals;
+    /// Schema 2: attempts the task may take, 1 to TaskGraphProposalLimits::max_attempts. Each
+    /// attempt has the whole `budget`, so the aggregate counts it once per attempt.
+    std::uint32_t                      max_attempts = 1;
 
     bool operator==(const TaskGraphTask&) const = default;
 };
@@ -161,8 +183,10 @@ private:
  * Schema 1 is the original document. Schema 2 requires every task to state a
  * non-zero amount for each budget dimension in which its template has a
  * non-zero ceiling (`P_PROPOSAL_BUDGET_ZERO`), so that the aggregate counts
- * what each launched task receives. A schema-1 document keeps its canonical
- * bytes and identity.
+ * what each launched task receives, and adds two optional task members:
+ * `literals` (JSON values for declared input fields) and `max_attempts`. A
+ * schema-1 document keeps its canonical bytes and identity; a document that
+ * uses a schema-2 member while declaring schema 1 is `P_PROPOSAL_SCHEMA_VERSION`.
  */
 class NEOGRAPH_PROGRAM_API TaskGraphProposal final {
 public:

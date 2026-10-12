@@ -108,17 +108,25 @@ bool add_without_overflow(std::uint64_t& total, std::uint64_t amount) noexcept {
     return true;
 }
 
+bool multiply_without_overflow(std::uint64_t& amount, std::uint64_t factor) noexcept {
+    if (factor != 0 && amount > std::numeric_limits<std::uint64_t>::max() / factor) return false;
+    amount *= factor;
+    return true;
+}
+
+// Each attempt has the task's whole budget, so a task counts once per attempt it may take.
 BudgetSum sum_budgets(const std::vector<ParsedTask>& tasks) {
     BudgetSum result;
     for (const auto& parsed : tasks) {
-        result.overflow[0] |=
-            !add_without_overflow(result.total.wall_time_ms, parsed.task.budget.wall_time_ms);
-        result.overflow[1] |=
-            !add_without_overflow(result.total.model_tokens, parsed.task.budget.model_tokens);
-        result.overflow[2] |= !add_without_overflow(result.total.monetary_microunits,
-                                                     parsed.task.budget.monetary_microunits);
-        result.overflow[3] |=
-            !add_without_overflow(result.total.output_bytes, parsed.task.budget.output_bytes);
+        const auto attempts = static_cast<std::uint64_t>(std::max<std::uint32_t>(parsed.task.max_attempts, 1));
+        auto reserve = [&](std::size_t dimension, std::uint64_t amount, std::uint64_t& total) {
+            if (!multiply_without_overflow(amount, attempts) || !add_without_overflow(total, amount))
+                result.overflow[dimension] = true;
+        };
+        reserve(0, parsed.task.budget.wall_time_ms, result.total.wall_time_ms);
+        reserve(1, parsed.task.budget.model_tokens, result.total.model_tokens);
+        reserve(2, parsed.task.budget.monetary_microunits, result.total.monetary_microunits);
+        reserve(3, parsed.task.budget.output_bytes, result.total.output_bytes);
     }
     return result;
 }
@@ -158,15 +166,29 @@ json task_to_json(const TaskGraphTask& task) {
                                 {"field", binding.from.field}}},
                  {"to", json{{"field", binding.to.field}}}});
     }
-    return json{{"id", task.id},
-                {"template", task.template_id},
-                {"input_bindings", std::move(encoded_bindings)},
-                {"depends_on", std::move(dependencies)},
-                {"budget",
-                 json{{"wall_time_ms", task.budget.wall_time_ms},
-                      {"model_tokens", task.budget.model_tokens},
-                      {"monetary_microunits", task.budget.monetary_microunits},
-                      {"output_bytes", task.budget.output_bytes}}}};
+    json encoded{{"id", task.id},
+                 {"template", task.template_id},
+                 {"input_bindings", std::move(encoded_bindings)},
+                 {"depends_on", std::move(dependencies)},
+                 {"budget",
+                  json{{"wall_time_ms", task.budget.wall_time_ms},
+                       {"model_tokens", task.budget.model_tokens},
+                       {"monetary_microunits", task.budget.monetary_microunits},
+                       {"output_bytes", task.budget.output_bytes}}}};
+    // Schema-2 members appear only when used, so a schema-1 task keeps its bytes.
+    if (!task.literals.empty()) {
+        auto literals = task.literals;
+        std::sort(literals.begin(), literals.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.to.field < rhs.to.field;
+        });
+        json encoded_literals = json::array();
+        for (const auto& literal : literals)
+            encoded_literals.push_back(
+                json{{"to", json{{"field", literal.to.field}}}, {"value", literal.value}});
+        encoded["literals"] = std::move(encoded_literals);
+    }
+    if (task.max_attempts > 1) encoded["max_attempts"] = task.max_attempts;
+    return encoded;
 }
 
 json proposal_to_json(const std::vector<TaskGraphTask>& tasks, const TaskGraphJoinPolicy& join,
@@ -184,6 +206,7 @@ struct CanonicalTask {
     std::size_t              source_task_index = 0;
     std::vector<std::size_t> binding_source_indices;
     std::vector<std::size_t> dependency_source_indices;
+    std::vector<std::size_t> literal_source_indices;
 };
 
 CanonicalTask canonicalize_task(const ParsedTask& parsed) {
@@ -191,7 +214,19 @@ CanonicalTask canonicalize_task(const ParsedTask& parsed) {
     result.task.id = parsed.task.id;
     result.task.template_id = parsed.task.template_id;
     result.task.budget = parsed.task.budget;
+    result.task.max_attempts = parsed.task.max_attempts;
     result.source_task_index = parsed.index;
+
+    std::vector<std::pair<TaskGraphInputLiteral, std::size_t>> literals;
+    for (std::size_t index = 0; index < parsed.task.literals.size(); ++index)
+        literals.emplace_back(parsed.task.literals[index], parsed.literal_source_indices.at(index));
+    std::sort(literals.begin(), literals.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.first.to.field < rhs.first.to.field;
+    });
+    for (auto& [literal, source_index] : literals) {
+        result.task.literals.push_back(std::move(literal));
+        result.literal_source_indices.push_back(source_index);
+    }
 
     std::vector<std::pair<std::string, std::size_t>> dependencies;
     dependencies.reserve(parsed.task.depends_on.size());
@@ -238,8 +273,8 @@ std::vector<SourceMapEntry> canonical_source_map(
     const std::vector<CanonicalTask>&  tasks) {
     std::size_t entry_count = 5;
     for (const auto& task : tasks) {
-        entry_count += 10 + task.dependency_source_indices.size() +
-                       7 * task.binding_source_indices.size();
+        entry_count += 12 + task.dependency_source_indices.size() +
+                       7 * task.binding_source_indices.size() + 4 * task.literal_source_indices.size();
     }
     std::vector<SourceMapEntry> result;
     result.reserve(entry_count);
@@ -260,6 +295,36 @@ std::vector<SourceMapEntry> canonical_source_map(
         for (const auto field : {"id", "template", "input_bindings", "depends_on", "budget"}) {
             append_source_map_entry(result, child_pointer(canonical_task_pointer, field),
                                     child_pointer(source_task_pointer, field), source_id, source_map);
+        }
+        if (!tasks[canonical_index].literal_source_indices.empty()) {
+            append_source_map_entry(result, child_pointer(canonical_task_pointer, "literals"),
+                                    child_pointer(source_task_pointer, "literals"), source_id,
+                                    source_map);
+            for (std::size_t literal_index = 0;
+                 literal_index < tasks[canonical_index].literal_source_indices.size();
+                 ++literal_index) {
+                const auto canonical_literal = index_pointer(
+                    child_pointer(canonical_task_pointer, "literals"), literal_index);
+                const auto source_literal = index_pointer(
+                    child_pointer(source_task_pointer, "literals"),
+                    tasks[canonical_index].literal_source_indices[literal_index]);
+                append_source_map_entry(result, canonical_literal, source_literal, source_id,
+                                        source_map);
+                append_source_map_entry(result, child_pointer(canonical_literal, "to"),
+                                        child_pointer(source_literal, "to"), source_id, source_map);
+                append_source_map_entry(result,
+                                        child_pointer(child_pointer(canonical_literal, "to"), "field"),
+                                        child_pointer(child_pointer(source_literal, "to"), "field"),
+                                        source_id, source_map);
+                append_source_map_entry(result, child_pointer(canonical_literal, "value"),
+                                        child_pointer(source_literal, "value"), source_id,
+                                        source_map);
+            }
+        }
+        if (source_task.contains("max_attempts") && tasks[canonical_index].task.max_attempts > 1) {
+            append_source_map_entry(result, child_pointer(canonical_task_pointer, "max_attempts"),
+                                    child_pointer(source_task_pointer, "max_attempts"), source_id,
+                                    source_map);
         }
         for (const auto field : kBudgetFields) {
             const auto source_budget_pointer = child_pointer(source_task_pointer, "budget");
@@ -491,7 +556,7 @@ TaskGraphProposal TaskGraphProposal::parse(const json& proposal, TaskGraphPropos
         }
         std::size_t index = 0;
         for (const auto& task : document["tasks"]) {
-            parsed_tasks.push_back(parse_task(diagnostics, task, index));
+            parsed_tasks.push_back(parse_task(diagnostics, task, index, schema_version));
             ++index;
         }
     }
@@ -565,6 +630,7 @@ TaskGraphProposal TaskGraphProposal::parse(const json& proposal, TaskGraphPropos
                         json{{"requested", edge_count}, {"ceiling", options.limits.max_edges}});
     }
 
+    std::uint64_t literal_bytes_total = 0;
     for (const auto& parsed : parsed_tasks) {
         if (!parsed.id_valid) continue;
         const auto owner = task_index.find(parsed.task.id);
@@ -619,6 +685,44 @@ TaskGraphProposal TaskGraphProposal::parse(const json& proposal, TaskGraphPropos
             }
             ++binding_index;
         }
+        {
+            const auto task_pointer = index_pointer("/tasks", parsed.index);
+            std::size_t literal_index = 0;
+            for (const auto& literal : parsed.task.literals) {
+                const auto literal_pointer = index_pointer(
+                    child_pointer(task_pointer, "literals"),
+                    parsed.literal_source_indices.at(literal_index));
+                const auto field_pointer = child_pointer(child_pointer(literal_pointer, "to"), "field");
+                if (!target_fields.insert(literal.to.field).second) {
+                    diagnostics.add(field_pointer, "P_PROPOSAL_LITERAL_DUPLICATE_TARGET",
+                                    "Each target input field may receive at most one binding or literal",
+                                    json{{"field", literal.to.field}});
+                }
+                if (parsed.template_contract &&
+                    !is_allowed_field(parsed.template_contract->input_fields, literal.to.field)) {
+                    diagnostics.add(field_pointer, "P_PROPOSAL_LITERAL_TARGET",
+                                    "Input literal target is not accepted by its template",
+                                    json{{"template", parsed.task.template_id},
+                                         {"field", literal.to.field}});
+                }
+                const auto bytes = detail::canonical_json_bytes(literal.value).size();
+                if (bytes > options.limits.max_literal_bytes) {
+                    diagnostics.add(child_pointer(literal_pointer, "value"),
+                                    "P_PROPOSAL_LITERAL_SIZE", "Input literal exceeds its size ceiling",
+                                    json{{"requested", bytes},
+                                         {"ceiling", options.limits.max_literal_bytes}});
+                }
+                literal_bytes_total += bytes;
+                ++literal_index;
+            }
+            if (parsed.task.max_attempts == 0 ||
+                parsed.task.max_attempts > std::max<std::uint32_t>(options.limits.max_attempts, 1)) {
+                diagnostics.add(child_pointer(task_pointer, "max_attempts"), "P_PROPOSAL_ATTEMPTS",
+                                "Task max_attempts is outside 1 to the proposal ceiling",
+                                json{{"requested", parsed.task.max_attempts},
+                                     {"ceiling", std::max<std::uint32_t>(options.limits.max_attempts, 1)}});
+            }
+        }
         validate_budget_ceiling(diagnostics, parsed.task.budget,
                                 options.limits.per_task_budget_ceiling,
                                 child_pointer(index_pointer("/tasks", parsed.index), "budget"),
@@ -635,6 +739,12 @@ TaskGraphProposal TaskGraphProposal::parse(const json& proposal, TaskGraphPropos
                                                        "budget"));
             }
         }
+    }
+    if (literal_bytes_total > options.limits.max_total_literal_bytes) {
+        diagnostics.add("/tasks", "P_PROPOSAL_LITERAL_SIZE",
+                        "Input literals exceed their combined size ceiling",
+                        json{{"requested", literal_bytes_total},
+                             {"ceiling", options.limits.max_total_literal_bytes}});
     }
     validate_total_budget(diagnostics, sum_budgets(parsed_tasks), options.limits.total_budget_ceiling);
 

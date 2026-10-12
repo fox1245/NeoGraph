@@ -54,6 +54,12 @@ struct NEOGRAPH_PROGRAM_API CompiledTaskGraphTask {
     std::vector<std::string>              effects;
     std::vector<std::string>              input_fields;
     std::vector<TaskGraphArtifactContract> output_artifacts;
+    /// Schema-2 fragments: JSON values assigned to input fields of each attempt's child input,
+    /// after the bindings; sorted by target field.
+    std::vector<TaskGraphInputLiteral>    input_literals;
+    /// Schema-2 fragments: attempts the task may take. `reserved_budget` is `requested_budget`
+    /// once per attempt; every attempt's child starts with the requested budget.
+    std::uint32_t                         max_attempts = 1;
 
     bool operator==(const CompiledTaskGraphTask&) const = default;
 };

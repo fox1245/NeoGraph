@@ -126,6 +126,22 @@ private:
     std::string name_;
 };
 
+// Writes both inputs, so a test can see a binding and a literal arrive at different fields.
+class JoinNode final : public GraphNode {
+public:
+    explicit JoinNode(std::string name) : name_(std::move(name)) {}
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        NodeOutput output;
+        output.writes.push_back(ChannelWrite{
+            "value", json{{"item", input.state.get("item")}, {"extra", input.state.get("extra")}}});
+        co_return output;
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
 class CompletedNode final : public GraphNode {
 public:
     explicit CompletedNode(std::string name) : name_(std::move(name)) {}
@@ -163,6 +179,7 @@ inline RegistrySnapshot expansion_registry(ExecutionGuarantee = ExecutionGuarant
     add_node_type<SlowNode>(builder, "exp-slow", 'b');
     add_node_type<FailNode>(builder, "exp-fail", 'c');
     add_node_type<GateNode>(builder, "exp-gate", 'd');
+    add_node_type<JoinNode>(builder, "exp-join", 'e');
     builder.add_reducer(manifest(ExecutableKind::Reducer, "runtime-overwrite", '3'),
                         [](const json&, const json& incoming) { return json(incoming); });
     return std::move(builder).build();
@@ -229,11 +246,12 @@ private:
 
 // ---- Fixture helpers. ----
 
-inline TaskGraphTemplateContract template_contract(std::string id, char identity, std::string binding) {
+inline TaskGraphTemplateContract template_contract(std::string id, char identity, std::string binding,
+                                                   std::vector<std::string> inputs = {"/item"}) {
     TaskGraphTemplateContract contract;
     contract.template_id      = std::move(id);
     contract.content_identity = digest(identity);
-    contract.input_fields     = {"/item"};
+    contract.input_fields     = std::move(inputs);
     contract.output_artifacts = {TaskGraphArtifactContract{"result", {"/channels/value/value"}}};
     contract.budget_ceiling   = TaskGraphBudget{1000, 100, 100, 4096};
     contract.child_binding    = std::move(binding);
@@ -241,8 +259,11 @@ inline TaskGraphTemplateContract template_contract(std::string id, char identity
     return contract;
 }
 
-inline json child_document(const char* node_type) {
+inline json child_document(const char* node_type, std::vector<std::string> extra_channels = {}) {
     auto document = program_document(node_type);
+    for (const auto& channel : extra_channels)
+        document["root"]["definition"]["channels"][channel] =
+            json{{"reducer", "runtime-overwrite"}, {"initial", json::object()}};
     document["declared_budget_requirements"][0]["maximum"] = 3333;
     document["declared_budget_requirements"][1]["maximum"] = 333;
     document["declared_budget_requirements"][2]["maximum"] = 333;
@@ -287,6 +308,8 @@ struct ExpansionRun {
     std::vector<std::string>               events;
     std::optional<TaskGraphFragmentRecord> record;
     std::string                            fragment_id;
+    /// The budget each child run was launched with, by child run id.
+    std::map<std::string, RunBudget>       child_budgets;
 };
 
 struct RunOptions {
@@ -308,7 +331,12 @@ public:
         policy.template_allowlist             = {template_contract("ok/v1", 'a', "ok"),
                                                  template_contract("slow/v1", 'b', "slow"),
                                                  template_contract("fail/v1", 'c', "fail"),
-                                                 template_contract("gate/v1", 'd', "gate")};
+                                                 template_contract("gate/v1", 'd', "gate"),
+                                                 template_contract("join/v1", 'e', "join",
+                                                                   {"/item", "/extra"})};
+        policy.limits.max_attempts            = 3;
+        policy.limits.max_literal_bytes       = 256;
+        policy.limits.max_total_literal_bytes = 1024;
         store = std::make_shared<RecordingFragmentStore>(fixture.task_graph_fragments);
         fixture.fragment_store_override = store;
         fixture.runtime                 = fixture.make_runtime();
@@ -324,7 +352,8 @@ public:
                       {{"ok", fixture.admit_document(child_document("exp-echo"))},
                        {"slow", fixture.admit_document(child_document("exp-slow"))},
                        {"fail", fixture.admit_document(child_document("exp-fail"))},
-                       {"gate", fixture.admit_document(child_document("exp-gate"))}},
+                       {"gate", fixture.admit_document(child_document("exp-gate"))},
+                       {"join", fixture.admit_document(child_document("exp-join", {"extra"}))}},
                       BudgetLimits{3333, 333, 333, 1, 1, 6, 0, 0, 0});
         auto handle = fixture.runtime->start(
             "tenant:runtime", parent,
@@ -333,11 +362,13 @@ public:
                                         1, static_cast<std::uint32_t>(options.max_depth),
                                         options.max_tasks},
                               "trace-expansion", {}});
-        ExpansionRun run{handle.wait(), store->events(), std::nullopt, {}};
+        ExpansionRun run{handle.wait(), store->events(), std::nullopt, {}, {}};
         if (run.result.output().is_object() && run.result.output().contains("fragment_id")) {
             run.fragment_id = run.result.output()["fragment_id"].get<std::string>();
             run.record      = fixture.task_graph_fragments->load(run.fragment_id);
         }
+        for (const auto& child : handle.snapshot().children())
+            run.child_budgets[child.child_run_id] = child.invocation.granted_budget;
         return run;
     }
 

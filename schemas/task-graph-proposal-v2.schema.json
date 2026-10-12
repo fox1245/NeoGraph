@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.ai/schemas/task-graph-proposal-v2.schema.json",
+  "title": "NeoGraph TaskGraphProposal v2",
+  "description": "Non-executable planner data. Schema 2 adds literal inputs and a retry bound, and requires every task to state a non-zero amount for each budget dimension its template can spend (P_PROPOSAL_BUDGET_ZERO), so the aggregate counts what each launched task receives. Structural validation is supplemented by the trusted template allow-list, DAG, binding, literal, attempt and budget checks in TaskGraphProposal::parse.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "tasks",
+    "join"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "tasks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/task"
+      }
+    },
+    "join": {
+      "$ref": "#/$defs/join"
+    }
+  },
+  "$defs": {
+    "token": {
+      "type": "string",
+      "minLength": 1
+    },
+    "json_pointer": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^/(?:[^~/]|~[01])*(?:/(?:[^~/]|~[01])*)*$"
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "wall_time_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "model_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "monetary_microunits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "description": "Schema 2: a dimension in which the template has a non-zero ceiling must be stated and non-zero. A dimension may be left out, or 0, only where the template ceiling is 0."
+    },
+    "binding": {
+      "type": "object",
+      "required": [
+        "from",
+        "to"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "type": "object",
+          "required": [
+            "task",
+            "artifact",
+            "field"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "task": {
+              "$ref": "#/$defs/token"
+            },
+            "artifact": {
+              "$ref": "#/$defs/token"
+            },
+            "field": {
+              "$ref": "#/$defs/json_pointer"
+            }
+          }
+        },
+        "to": {
+          "type": "object",
+          "required": [
+            "field"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "$ref": "#/$defs/json_pointer"
+            }
+          }
+        }
+      }
+    },
+    "task": {
+      "type": "object",
+      "required": [
+        "id",
+        "template",
+        "input_bindings",
+        "depends_on",
+        "budget"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/token"
+        },
+        "template": {
+          "$ref": "#/$defs/token"
+        },
+        "input_bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/binding"
+          }
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/token"
+          }
+        },
+        "budget": {
+          "$ref": "#/$defs/budget"
+        },
+        "literals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/literal"
+          }
+        },
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Attempts allowed for the task, bounded by the host limit. The aggregate reserves the task budget once per attempt."
+        }
+      }
+    },
+    "join": {
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "all"
+        }
+      }
+    },
+    "literal": {
+      "type": "object",
+      "required": [
+        "to",
+        "value"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "to": {
+          "type": "object",
+          "required": [
+            "field"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "$ref": "#/$defs/json_pointer"
+            }
+          }
+        },
+        "value": {}
+      },
+      "description": "A JSON value assigned to one input field of the template. The field must be a declared input of the template and must not also receive a binding or another literal."
+    }
+  }
+}

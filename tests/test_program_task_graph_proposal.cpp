@@ -438,6 +438,211 @@ TEST(TaskGraphProposalTest, UnknownSchemaVersionIsRefused) {
     EXPECT_EQ(diagnostics[0].witness["supported"], json::array({1, 2}));
 }
 
+// ---- Schema 2: literal inputs and attempts ----
+
+namespace {
+
+TaskGraphProposalOptions literal_options() {
+    auto options = proposal_options();
+    options.limits.max_attempts            = 3;
+    options.limits.max_literal_bytes       = 64;
+    options.limits.max_total_literal_bytes = 100;
+    return options;
+}
+
+json literal_proposal() {
+    return json{
+        {"schema_version", 2},
+        {"tasks",
+         json::array({
+             json{{"id", "review-security"},
+                  {"template", "security-reviewer/v2"},
+                  {"input_bindings",
+                   json::array({json{{"from",
+                                      json{{"task", "research-api"},
+                                           {"artifact", "findings"},
+                                           {"field", "/summary"}}},
+                                     {"to", json{{"field", "/candidate_summary"}}}}})},
+                  {"depends_on", json::array({"research-api"})},
+                  {"budget", json{{"wall_time_ms", 20000}, {"model_tokens", 3000},
+                                  {"monetary_microunits", 300000}, {"output_bytes", 1024}}}},
+             json{{"id", "research-api"},
+                  {"template", "researcher/v3"},
+                  {"input_bindings", json::array()},
+                  {"depends_on", json::array()},
+                  {"budget", json{{"wall_time_ms", 30000}, {"model_tokens", 4000},
+                                  {"monetary_microunits", 400000}, {"output_bytes", 2048}}},
+                  {"literals", json::array({json{{"to", json{{"field", "/question"}}},
+                                                 {"value", "What changed?"}}})},
+                  {"max_attempts", 2}},
+         })},
+        {"join", json{{"kind", "all"}}},
+    };
+}
+
+}  // namespace
+
+TEST(TaskGraphProposalTest, LiteralsAndAttemptsHaveACanonicalFormAndIdentity) {
+    const auto proposal = TaskGraphProposal::parse(literal_proposal(), literal_options());
+
+    EXPECT_EQ(proposal.schema_version(), 2U);
+    ASSERT_EQ(proposal.tasks().size(), 2U);
+    EXPECT_EQ(proposal.tasks()[0].id, "research-api");
+    EXPECT_EQ(proposal.tasks()[0].max_attempts, 2U);
+    ASSERT_EQ(proposal.tasks()[0].literals.size(), 1U);
+    EXPECT_EQ(proposal.tasks()[0].literals[0].to.field, "/question");
+    EXPECT_EQ(proposal.tasks()[0].literals[0].value, json("What changed?"));
+    EXPECT_EQ(proposal.tasks()[1].max_attempts, 1U);
+    // Derived independently of the library (sorted-key compact JSON, then the identity digest).
+    EXPECT_EQ(
+        proposal.serialize_canonical(),
+        R"({"join":{"kind":"all"},"schema_version":2,"tasks":[{"budget":{"model_tokens":4000,"monetary_microunits":400000,"output_bytes":2048,"wall_time_ms":30000},"depends_on":[],"id":"research-api","input_bindings":[],"literals":[{"to":{"field":"/question"},"value":"What changed?"}],"max_attempts":2,"template":"researcher/v3"},{"budget":{"model_tokens":3000,"monetary_microunits":300000,"output_bytes":1024,"wall_time_ms":20000},"depends_on":["research-api"],"id":"review-security","input_bindings":[{"from":{"artifact":"findings","field":"/summary","task":"research-api"},"to":{"field":"/candidate_summary"}}],"template":"security-reviewer/v2"}]})");
+    EXPECT_EQ(proposal.id(), "sha256:366f001849e308ae5663257fb238b34bd5f72f6cbadc50d6af7a8df04932dd38");
+    // The canonical form parses back to itself.
+    EXPECT_EQ(TaskGraphProposal::parse(proposal.to_json(), literal_options()).id(), proposal.id());
+}
+
+TEST(TaskGraphProposalTest, LiteralsAreOrderedByTargetAndMayHoldAnyJsonValue) {
+    auto options = literal_options();
+    options.template_allowlist[0].input_fields = {"/question", "/limit", "/filters", "/flag"};
+    auto document = literal_proposal();
+    json literals = json::array();
+    for (const auto& pair : std::vector<std::pair<std::string, json>>{
+             {"/question", "q"}, {"/limit", 3}, {"/filters", json::array({1, json{{"a", nullptr}}})},
+             {"/flag", nullptr}}) {
+        literals.push_back(json{{"to", json{{"field", pair.first}}}, {"value", pair.second}});
+    }
+    document["tasks"][1]["literals"] = literals;
+    json reversed = json::array();
+    for (std::size_t index = literals.size(); index-- > 0;) reversed.push_back(literals[index]);
+    auto other = document;
+    other["tasks"][1]["literals"] = reversed;
+
+    const auto first = TaskGraphProposal::parse(document, options);
+    EXPECT_EQ(first.id(), TaskGraphProposal::parse(other, options).id());
+    const auto& stored = first.tasks()[0].literals;
+    ASSERT_EQ(stored.size(), 4U);
+    EXPECT_EQ(stored[0].to.field, "/filters");
+    EXPECT_EQ(stored[1].to.field, "/flag");
+    EXPECT_TRUE(stored[1].value.is_null());
+    EXPECT_EQ(stored[2].to.field, "/limit");
+    EXPECT_EQ(stored[3].to.field, "/question");
+}
+
+TEST(TaskGraphProposalTest, SchemaTwoMembersUnderSchemaOneAreASchemaVersionError) {
+    auto document              = literal_proposal();
+    document["schema_version"] = 1;
+    for (std::size_t index = 0; index < document["tasks"].size(); ++index) {
+        document["tasks"][index]["budget"] = json{{"wall_time_ms", 1000}, {"model_tokens", 1}};
+    }
+    const auto diagnostics = proposal_errors(document, literal_options());
+
+    std::vector<std::string> pointers;
+    for (const auto& diagnostic : diagnostics) {
+        EXPECT_EQ(diagnostic.code, "P_PROPOSAL_SCHEMA_VERSION");
+        pointers.push_back(diagnostic.primary.json_pointer);
+    }
+    std::sort(pointers.begin(), pointers.end());
+    EXPECT_EQ(pointers, (std::vector<std::string>{"/tasks/1/literals", "/tasks/1/max_attempts"}));
+}
+
+TEST(TaskGraphProposalTest, ALiteralTargetMustBeADeclaredInputThatHasNoOtherValue) {
+    auto document = literal_proposal();
+    // Not an input of the template.
+    document["tasks"][1]["literals"][0]["to"]["field"] = "/unapproved";
+    EXPECT_TRUE(contains_code(proposal_errors(document, literal_options()),
+                              "P_PROPOSAL_LITERAL_TARGET"));
+
+    // Also the target of a binding.
+    document = literal_proposal();
+    document["tasks"][0]["literals"] =
+        json::array({json{{"to", json{{"field", "/candidate_summary"}}}, {"value", "x"}}});
+    const auto bound = proposal_errors(document, literal_options());
+    EXPECT_TRUE(contains_code(bound, "P_PROPOSAL_LITERAL_DUPLICATE_TARGET"));
+    EXPECT_EQ(diagnostic_with_code(bound, "P_PROPOSAL_LITERAL_DUPLICATE_TARGET").primary.json_pointer,
+              "/tasks/0/literals/0/to/field");
+
+    // Two literals for one field.
+    document = literal_proposal();
+    document["tasks"][1]["literals"].push_back(
+        json{{"to", json{{"field", "/question"}}}, {"value", "again"}});
+    EXPECT_TRUE(contains_code(proposal_errors(document, literal_options()),
+                              "P_PROPOSAL_LITERAL_DUPLICATE_TARGET"));
+}
+
+TEST(TaskGraphProposalTest, LiteralSizesAreBoundedPerLiteralAndInTotal) {
+    auto document = literal_proposal();
+    document["tasks"][1]["literals"][0]["value"] = std::string(80, 'x');
+    const auto single = proposal_errors(document, literal_options());
+    ASSERT_TRUE(contains_code(single, "P_PROPOSAL_LITERAL_SIZE"));
+    EXPECT_EQ(diagnostic_with_code(single, "P_PROPOSAL_LITERAL_SIZE").primary.json_pointer,
+              "/tasks/1/literals/0/value");
+
+    auto options = literal_options();
+    options.limits.max_total_literal_bytes = 10;
+    const auto total = proposal_errors(literal_proposal(), options);
+    ASSERT_TRUE(contains_code(total, "P_PROPOSAL_LITERAL_SIZE"));
+    EXPECT_EQ(diagnostic_with_code(total, "P_PROPOSAL_LITERAL_SIZE").primary.json_pointer, "/tasks");
+
+    // A host that sets no literal limit accepts no literal.
+    auto none = proposal_options();
+    none.limits.max_attempts = 3;
+    EXPECT_TRUE(contains_code(proposal_errors(literal_proposal(), none), "P_PROPOSAL_LITERAL_SIZE"));
+}
+
+TEST(TaskGraphProposalTest, AttemptsAreBoundedByTheHostCeiling) {
+    for (const auto& attempts : {json(0), json(4), json(5000000000ULL)}) {
+        auto document = literal_proposal();
+        document["tasks"][1]["max_attempts"] = attempts;
+        const auto diagnostics = proposal_errors(document, literal_options());
+        ASSERT_TRUE(contains_code(diagnostics, "P_PROPOSAL_ATTEMPTS")) << attempts.dump();
+        EXPECT_EQ(diagnostic_with_code(diagnostics, "P_PROPOSAL_ATTEMPTS").primary.json_pointer,
+                  "/tasks/1/max_attempts");
+    }
+    auto text = literal_proposal();
+    text["tasks"][1]["max_attempts"] = "2";
+    EXPECT_TRUE(contains_code(proposal_errors(text, literal_options()), "P_PROPOSAL_TYPE"));
+
+    // The default ceiling is one attempt: no retries unless the host allows them.
+    auto limits = literal_options();
+    limits.limits.max_attempts = 1;
+    EXPECT_TRUE(contains_code(proposal_errors(literal_proposal(), limits), "P_PROPOSAL_ATTEMPTS"));
+}
+
+TEST(TaskGraphProposalTest, TheAggregateReservesTheBudgetOncePerAttempt) {
+    // Both tasks fit the total once; the task with two attempts does not fit twice.
+    auto options = literal_options();
+    options.limits.total_budget_ceiling = budget(60000, 16000, 1500000, 8192);
+    const auto diagnostics = proposal_errors(literal_proposal(), options);
+    ASSERT_TRUE(contains_code(diagnostics, "P_PROPOSAL_LIMIT_TOTAL_BUDGET"));
+    const auto& wall = diagnostic_with_code(diagnostics, "P_PROPOSAL_LIMIT_TOTAL_BUDGET");
+    EXPECT_EQ(wall.witness["resource"], "wall_time_ms");
+    EXPECT_EQ(wall.witness["requested"], 80000);  // 2 x 30000 + 20000
+
+    auto single = literal_proposal();
+    single["tasks"][1]["max_attempts"] = 1;
+    EXPECT_NO_THROW((void)TaskGraphProposal::parse(single, options));
+}
+
+TEST(TaskGraphProposalTest, LiteralsAndAttemptsKeepTheirAuthoredCoordinates) {
+    auto options = literal_options();
+    options.source_map.push_back({"/tasks/1/literals/0/value",
+                                  {"planner:turn-9", "/steps/0/params/question", std::nullopt}});
+    options.source_map.push_back({"/tasks/1/max_attempts",
+                                  {"planner:turn-9", "/steps/0/retry/max_attempts", std::nullopt}});
+    const auto proposal = TaskGraphProposal::parse(literal_proposal(), options);
+
+    const auto authored = [&](std::string_view generated) -> std::string {
+        for (const auto& entry : proposal.source_map())
+            if (entry.generated_pointer == generated) return entry.authored.json_pointer;
+        return "<none>";
+    };
+    // research-api is the first canonical task although it is declared second.
+    EXPECT_EQ(authored("/tasks/0/literals/0/value"), "/steps/0/params/question");
+    EXPECT_EQ(authored("/tasks/0/max_attempts"), "/steps/0/retry/max_attempts");
+    EXPECT_EQ(authored("/tasks/0/literals/0/to/field"), "/tasks/1/literals/0/to/field");
+}
+
 
 namespace {
 
@@ -611,4 +816,99 @@ TEST(TaskGraphFragmentTest, CompileRefusesASchemaTwoTaskThatLeavesASpendableDime
 
     EXPECT_THROW((void)TaskGraphFragmentCompiler::compile(proposal, fragment_compile_options()),
                  std::invalid_argument);
+}
+
+TEST(TaskGraphFragmentTest, CompilingLiteralsAndAttemptsReservesTheBudgetOncePerAttempt) {
+    auto proposal_opts = literal_options();
+    const auto proposal = TaskGraphProposal::parse(literal_proposal(), proposal_opts);
+    auto compile = fragment_compile_options();
+    compile.limits = proposal_opts.limits;
+    compile.remaining_budget.wall_time_ms = 200000;
+    compile.remaining_budget.monetary_microunits = 3000000;
+    const auto fragment = TaskGraphFragmentCompiler::compile(proposal, compile);
+
+    EXPECT_EQ(fragment.schema_version(), 2U);
+    ASSERT_EQ(fragment.tasks().size(), 2U);
+    const auto& research = fragment.tasks()[0];
+    EXPECT_EQ(research.task_id, "research-api");
+    EXPECT_EQ(research.max_attempts, 2U);
+    EXPECT_EQ(research.requested_budget, budget(30000, 4000, 400000, 2048));
+    EXPECT_EQ(research.reserved_budget, budget(60000, 8000, 800000, 4096));
+    ASSERT_EQ(research.input_literals.size(), 1U);
+    EXPECT_EQ(research.input_literals[0].to.field, "/question");
+    const auto& review = fragment.tasks()[1];
+    EXPECT_EQ(review.max_attempts, 1U);
+    EXPECT_EQ(review.reserved_budget, review.requested_budget);
+    EXPECT_EQ(fragment.aggregate_budget(), budget(80000, 11000, 1100000, 5120));
+
+    const auto parsed = CompiledTaskGraphFragment::parse(fragment.serialize_canonical());
+    EXPECT_EQ(parsed, fragment);
+    EXPECT_EQ(parsed.tasks()[0].input_literals, research.input_literals);
+    EXPECT_EQ(parsed.tasks()[0].max_attempts, 2U);
+}
+
+TEST(TaskGraphFragmentTest, CompileChecksLiteralsAndAttemptsAgainstItsOwnLimits) {
+    auto proposal_opts = literal_options();
+    const auto proposal = TaskGraphProposal::parse(literal_proposal(), proposal_opts);
+    auto compile = fragment_compile_options();
+    compile.limits = proposal_opts.limits;
+    compile.remaining_budget.wall_time_ms = 200000;
+    compile.remaining_budget.monetary_microunits = 3000000;
+    EXPECT_NO_THROW((void)TaskGraphFragmentCompiler::compile(proposal, compile));
+
+    auto fewer_attempts = compile;
+    fewer_attempts.limits.max_attempts = 1;
+    EXPECT_THROW((void)TaskGraphFragmentCompiler::compile(proposal, fewer_attempts), std::invalid_argument);
+
+    auto smaller_literals = compile;
+    smaller_literals.limits.max_literal_bytes = 4;
+    EXPECT_THROW((void)TaskGraphFragmentCompiler::compile(proposal, smaller_literals),
+                 std::invalid_argument);
+
+    auto other_template = compile;
+    other_template.template_allowlist[0].input_fields = {"/other"};
+    EXPECT_THROW((void)TaskGraphFragmentCompiler::compile(proposal, other_template),
+                 std::invalid_argument);
+}
+
+TEST(TaskGraphFragmentTest, StoredFragmentsRefuseSchemaTwoMembersTheyCannotHold) {
+    auto proposal_opts = literal_options();
+    const auto proposal = TaskGraphProposal::parse(literal_proposal(), proposal_opts);
+    auto compile = fragment_compile_options();
+    compile.limits = proposal_opts.limits;
+    compile.remaining_budget.wall_time_ms = 200000;
+    compile.remaining_budget.monetary_microunits = 3000000;
+    const auto document = TaskGraphFragmentCompiler::compile(proposal, compile).to_json();
+
+    const auto refusal = [](const json& tampered) {
+        try {
+            (void)CompiledTaskGraphFragment::parse(tampered.dump());
+        } catch (const std::invalid_argument& error) {
+            return std::string(error.what());
+        }
+        return std::string("<accepted>");
+    };
+
+    // A reservation that is not the budget once per attempt.
+    auto wrong_reservation = document;
+    wrong_reservation["tasks"][0]["reserved_budget"]["wall_time_ms"] = 30000;
+    EXPECT_NE(refusal(wrong_reservation).find("once per attempt"), std::string::npos);
+
+    // A schema-1 fragment cannot carry them.
+    auto downgraded = document;
+    downgraded["schema_version"] = 1;
+    EXPECT_NE(refusal(downgraded).find("schema-2 task members"), std::string::npos);
+
+    // A literal for a field that is also bound.
+    auto doubled = document;
+    doubled["tasks"][1]["input_literals"] = json::array(
+        {json{{"to", json{{"field", "/candidate_summary"}}}, {"value", "x"}}});
+    EXPECT_NE(refusal(doubled).find("also a binding target"), std::string::npos);
+
+    // A literal for a field the template does not accept.
+    auto stray = document;
+    stray["tasks"][0]["input_literals"][0]["to"]["field"] = "/stray";
+    EXPECT_NE(refusal(stray).find("not an input field"), std::string::npos);
+
+    EXPECT_EQ(refusal(document), "<accepted>");
 }
