@@ -85,6 +85,7 @@ The remaining Core features. They link only `neograph::core`, except 02, 06, 07 
 | 100 | [`100_stream_modes.cpp`](100_stream_modes.cpp) | yes | `StreamMode`: the same run observed in VALUES, UPDATES, EVENTS and DEBUG mode, with the events each mode delivers counted. |
 | 101 | [`101_retry_policy.cpp`](101_retry_policy.cpp) | yes | `RetryPolicy`: a node fails twice and the engine retries it with exponential backoff; a smaller budget shows what the caller gets when the retries run out. |
 | 102 | [`102_node_interrupt.cpp`](102_node_interrupt.cpp) | yes | `NodeInterrupt`: a node pauses the run itself, the payload tells the caller what to ask, and `resume` hands the answer back to the node (approve or refuse). |
+| 103 | [`103_max_steps.cpp`](103_max_steps.cpp) | yes | `max_steps`: a loop is stopped by the step limit and the result says so (`max_steps_exhausted()`, `RunStatus::StepLimit`); a run that ends on the last step is not flagged. |
 
 ### Agent patterns
 

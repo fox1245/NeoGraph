@@ -86,6 +86,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | 100 | [`100_stream_modes.cpp`](100_stream_modes.cpp) | yes | `StreamMode`：用 VALUES、UPDATES、EVENTS、DEBUG 四种模式观察同一次运行，并统计每种模式送达的事件。 |
 | 101 | [`101_retry_policy.cpp`](101_retry_policy.cpp) | yes | `RetryPolicy`：节点失败两次后，引擎按指数退避重试；把重试次数调小，可以看到重试用尽时调用方得到什么。 |
 | 102 | [`102_node_interrupt.cpp`](102_node_interrupt.cpp) | yes | `NodeInterrupt`：节点自己暂停运行，载荷告诉调用方要问什么，`resume` 把答复（批准或拒绝）交还给节点。 |
+| 103 | [`103_max_steps.cpp`](103_max_steps.cpp) | yes | `max_steps`：循环被步数上限截停，结果会明确告知（`max_steps_exhausted()`、`RunStatus::StepLimit`）；恰好在最后一步自行结束的运行不会被标记。 |
 
 ### 智能体模式
 

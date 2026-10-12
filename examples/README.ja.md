@@ -86,6 +86,7 @@ ctest --test-dir build -L examples-offline --output-on-failure   # run every off
 | 100 | [`100_stream_modes.cpp`](100_stream_modes.cpp) | yes | `StreamMode`。同じ実行を VALUES、UPDATES、EVENTS、DEBUG の各モードで観察し、モードごとに届くイベントを数えます。 |
 | 101 | [`101_retry_policy.cpp`](101_retry_policy.cpp) | yes | `RetryPolicy`。ノードが 2 回失敗すると、エンジンが指数バックオフで再試行します。回数を減らすと、再試行を使い切ったときに呼び出し側が受け取るものが分かります。 |
 | 102 | [`102_node_interrupt.cpp`](102_node_interrupt.cpp) | yes | `NodeInterrupt`。ノード自身が実行を止め、ペイロードが呼び出し側に尋ねる内容を伝え、`resume` が答え（承認または拒否）をノードに返します。 |
+| 103 | [`103_max_steps.cpp`](103_max_steps.cpp) | yes | `max_steps`。ループがステップ上限で止まり、結果がそれを知らせます（`max_steps_exhausted()`、`RunStatus::StepLimit`）。最後のステップで自然に終わった実行には印が付きません。 |
 
 ### エージェントパターン
 
