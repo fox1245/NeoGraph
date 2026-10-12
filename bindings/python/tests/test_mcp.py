@@ -76,6 +76,18 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass   # keep pytest's output readable
 
+    def do_GET(self):
+        # No event stream for messages between calls.
+        self.send_response(405)
+        self.send_header("Allow", "POST, DELETE")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_DELETE(self):
+        # The client ends its session.
+        self.send_response(204)
+        self.end_headers()
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         request = json.loads(self.rfile.read(length) or b"{}")
@@ -484,3 +496,71 @@ def test_mcp_error_keeps_its_code_and_data(stdio_client):
     assert raised.value.code == -32099
     assert raised.value.data == {"why": "test"}
     assert "refused by policy" in str(raised.value)
+
+
+# ── The client's typed failures, bounds and lifecycle (MCP-C-14) ────────────
+
+BOUNDARY = os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, os.pardir,
+                        "tests", "fixtures", "mcp_stdio_boundary.py")
+
+
+def test_a_bounded_call_raises_a_typed_transport_error(stdio_client):
+    with pytest.raises(mcp.MCPTransportError) as timed_out:
+        stdio_client.call_tool_result("slow_echo", {"text": "x", "delay": 2},
+                                      timeout=0.2)
+    assert timed_out.value.failure == "timeout"
+    assert timed_out.value.http_status == 0
+
+    token = ng.CancelToken()
+    threading.Timer(0.2, token.cancel).start()
+    with pytest.raises(mcp.MCPTransportError) as cancelled:
+        stdio_client.call_tool_result("slow_echo", {"text": "x", "delay": 2},
+                                      cancel_token=token)
+    assert cancelled.value.failure == "cancelled"
+    # The session survives both: the late responses are dropped.
+    assert stdio_client.call_tool_result("echo", {"text": "after"}).content[0]["text"] == "after"
+
+
+def test_shutdown_closes_the_client_for_good():
+    client = mcp.MCPClient([sys.executable, SERVER])
+    assert client.initialize("neograph-test")
+    client.shutdown()
+    with pytest.raises(mcp.MCPTransportError) as closed:
+        client.call_tool("echo", {"text": "x"})
+    assert closed.value.failure == "shutdown"
+
+
+def test_mcp_error_reports_the_http_status_that_carried_it(stdio_client):
+    with pytest.raises(mcp.MCPError) as info:
+        stdio_client.call_tool("rpc_error", {})
+    assert info.value.http_status == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the boundary fixture reports POSIX environments")
+def test_stdio_config_inherits_the_environment_with_overrides(monkeypatch):
+    monkeypatch.setenv("NG_MCP_PY_INHERITED", "parent")
+    monkeypatch.setenv("NG_MCP_PY_OVERRIDDEN", "parent")
+    config = mcp.StdioClientConfig()
+    config.argv = [sys.executable, BOUNDARY, "report"]
+    config.environment = [("NG_MCP_PY_OVERRIDDEN", "child")]
+    client = mcp.MCPClient(config)
+    environment = client.call_tool("probe", {})["environment"]
+    assert environment["NG_MCP_PY_INHERITED"] == "parent"
+    assert environment["NG_MCP_PY_OVERRIDDEN"] == "child"
+
+    config = mcp.StdioClientConfig()
+    config.argv = [sys.executable, BOUNDARY, "report"]
+    config.replace_environment = True
+    config.environment = [("ONLY", "this")]
+    replaced = mcp.MCPClient(config).call_tool("probe", {})["environment"]
+    assert replaced.get("ONLY") == "this"
+    assert "NG_MCP_PY_INHERITED" not in replaced
+
+
+def test_tool_list_changed_reaches_the_handler(stdio_client):
+    changed = threading.Event()
+    stdio_client.set_tool_list_changed_handler(changed.set)
+    assert stdio_client.call_tool_result("announce_change", {}).content[0]["text"] == "changed"
+    assert changed.wait(5), "notifications/tools/list_changed did not reach the handler"
+    stdio_client.set_tool_list_changed_handler(None)
+

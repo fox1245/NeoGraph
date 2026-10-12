@@ -84,6 +84,11 @@ def handle(request):
             text = args.get("text", "")
         elif name == "echo":
             text = args.get("text", "")
+        elif name == "announce_change":
+            # A tool that changes the catalogue tells the client first.
+            write_response({"jsonrpc": "2.0",
+                            "method": "notifications/tools/list_changed"})
+            text = "changed"
         else:
             return {"isError": True,
                     "content": [{"type": "text", "text": f"no such tool: {name}"}]}

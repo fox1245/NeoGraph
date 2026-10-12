@@ -27,6 +27,8 @@
 
 #include "json_bridge.h"
 
+#include <neograph/async/run_sync.h>
+#include <neograph/graph/cancel.h>
 #include <neograph/mcp/client.h>
 #include <neograph/tool.h>
 
@@ -34,7 +36,10 @@
 #include <pybind11/chrono.h>
 #include <pybind11/stl.h>
 
+#include <chrono>
+#include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -49,9 +54,14 @@ void init_mcp(py::module_& m) {
 
     auto mcp_error = py::register_exception<neograph::mcp::MCPError>(mcp, "MCPError",
                                                                       PyExc_RuntimeError);
-    // Registered after the plain translator, so pybind11 tries it first: the
-    // Python exception keeps the JSON-RPC error's `code` and `data`, as
-    // A2ARpcError and HookBoundaryBlocked keep their typed fields.
+    auto transport_error = py::register_exception<neograph::mcp::MCPTransportError>(
+        mcp, "MCPTransportError", PyExc_RuntimeError);
+    // Registered after the plain translators, so pybind11 tries it first: the
+    // Python exceptions keep their typed fields, as A2ARpcError and
+    // HookBoundaryBlocked do. MCPError: the JSON-RPC error's `code`, `data`
+    // and the `http_status` that carried it (0 when none). MCPTransportError:
+    // `failure` ("connection", "timeout", "cancelled", "shutdown",
+    // "http_status", "protocol") and `http_status`.
     py::register_exception_translator([](std::exception_ptr pointer) {
         if (!pointer) return;
         try {
@@ -63,6 +73,27 @@ void init_mcp(py::module_& m) {
                 py::object instance = type(utf8_to_py(error.what()));
                 instance.attr("code") = py::int_(error.code());
                 instance.attr("data") = json_to_py(error.data());
+                instance.attr("http_status") = py::int_(error.http_status());
+                PyErr_SetObject(type.ptr(), instance.ptr());
+            } catch (py::error_already_set& failure) {
+                failure.restore();
+            }
+        } catch (const neograph::mcp::MCPTransportError& error) {
+            try {
+                py::object type = py::module_::import("neograph_engine._neograph")
+                                      .attr("mcp").attr("MCPTransportError");
+                py::object instance = type(utf8_to_py(error.what()));
+                const char* failure = "protocol";
+                switch (error.failure()) {
+                case neograph::mcp::MCPFailure::connection: failure = "connection"; break;
+                case neograph::mcp::MCPFailure::timeout: failure = "timeout"; break;
+                case neograph::mcp::MCPFailure::cancelled: failure = "cancelled"; break;
+                case neograph::mcp::MCPFailure::shutdown: failure = "shutdown"; break;
+                case neograph::mcp::MCPFailure::http_status: failure = "http_status"; break;
+                case neograph::mcp::MCPFailure::protocol: failure = "protocol"; break;
+                }
+                instance.attr("failure") = py::str(failure);
+                instance.attr("http_status") = py::int_(error.http_status());
                 PyErr_SetObject(type.ptr(), instance.ptr());
             } catch (py::error_already_set& failure) {
                 failure.restore();
@@ -70,6 +101,29 @@ void init_mcp(py::module_& m) {
         }
     });
     (void)mcp_error;
+    (void)transport_error;
+
+    py::class_<neograph::mcp::StdioClientConfig>(mcp, "StdioClientConfig",
+        "Hardened stdio launch: an explicit argv, working directory and "
+        "environment, bounded frames and stderr capture, startup and request "
+        "deadlines, and process-tree ownership. Without replace_environment the "
+        "server inherits this process's environment and `environment` entries "
+        "add to or override it; with it, they are the whole environment.")
+        .def(py::init<>())
+        .def_readwrite("argv", &neograph::mcp::StdioClientConfig::argv)
+        .def_property("cwd",
+            [](const neograph::mcp::StdioClientConfig& self) { return self.cwd.string(); },
+            [](neograph::mcp::StdioClientConfig& self, const std::string& value) {
+                self.cwd = std::filesystem::path(value);
+            })
+        .def_readwrite("environment", &neograph::mcp::StdioClientConfig::environment)
+        .def_readwrite("replace_environment",
+                       &neograph::mcp::StdioClientConfig::replace_environment)
+        .def_readwrite("max_frame_bytes", &neograph::mcp::StdioClientConfig::max_frame_bytes)
+        .def_readwrite("max_stderr_bytes", &neograph::mcp::StdioClientConfig::max_stderr_bytes)
+        .def_readwrite("startup_timeout", &neograph::mcp::StdioClientConfig::startup_timeout)
+        .def_readwrite("request_timeout", &neograph::mcp::StdioClientConfig::request_timeout)
+        .def_readwrite("cancel_grace", &neograph::mcp::StdioClientConfig::cancel_grace);
 
     py::class_<neograph::mcp::MCPClientConfig>(mcp, "MCPClientConfig")
         .def(py::init<>())
@@ -181,12 +235,13 @@ void init_mcp(py::module_& m) {
     py::class_<neograph::mcp::MCPClient>(mcp, "MCPClient",
         "Client for an MCP server.\n\n"
         "Two transports:\n\n"
-        "  MCPClient(\"http://localhost:8000\")        # HTTP\n"
+        "  MCPClient(\"http://localhost:8000/mcp\")    # HTTP: the endpoint URL, as given\n"
         "  MCPClient([\"python\", \"server.py\"])        # stdio, spawns a subprocess\n\n"
         "The subprocess is terminated when the last reference to the session is "
         "dropped — which is the client, or any tool it produced.")
         .def(py::init<const std::string&>(), py::arg("server_url"),
-            "HTTP transport. Tool calls made through this server overlap.")
+            "HTTP transport. `server_url` is the server's MCP endpoint URL, used as "
+            "given (nothing is appended). Tool calls made through this server overlap.")
         .def(py::init<const std::string&, neograph::mcp::MCPClientConfig>(),
              py::arg("server_url"), py::arg("config"))
         .def(py::init<std::vector<std::string>>(), py::arg("argv"),
@@ -194,11 +249,60 @@ void init_mcp(py::module_& m) {
             "pipes. argv[0] is resolved via PATH.\n\n"
             "Requests are correlated by JSON-RPC id, so calls overlap when the "
             "subprocess handles requests concurrently.")
-        .def("initialize", &neograph::mcp::MCPClient::initialize,
-            py::arg("client_name") = "neograph",
-            py::call_guard<py::gil_scoped_release>(),
+        .def(py::init<neograph::mcp::StdioClientConfig>(), py::arg("config"),
+            "Hardened stdio transport (see StdioClientConfig).")
+        .def("initialize",
+            [](neograph::mcp::MCPClient& self, const std::string& client_name,
+               std::optional<double> timeout,
+               std::shared_ptr<neograph::graph::CancelToken> cancel_token) {
+                py::gil_scoped_release release;
+                if (!timeout && !cancel_token) return self.initialize(client_name);
+                const auto deadline = timeout
+                    ? std::chrono::steady_clock::now() +
+                          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                              std::chrono::duration<double>(*timeout))
+                    : std::chrono::steady_clock::time_point::max();
+                return self.initialize(client_name, deadline, std::move(cancel_token));
+            },
+            py::arg("client_name") = "neograph", py::arg("timeout") = py::none(),
+            py::arg("cancel_token") = py::none(),
             "Perform the MCP handshake once. Repeated calls are idempotent; "
-            "protocol and transport failures raise.")
+            "protocol and transport failures raise. `timeout` (seconds) and "
+            "`cancel_token` stop waiting for it (MCPTransportError); MCP never "
+            "cancels initialize on the wire.")
+        .def("shutdown", &neograph::mcp::MCPClient::shutdown,
+            py::call_guard<py::gil_scoped_release>(),
+            "Permanently close the client and every tool it produced: an HTTP "
+            "session is ended with DELETE, a stdio server is shut down (stdin "
+            "closed first).")
+        .def("set_tool_list_changed_handler",
+            [](neograph::mcp::MCPClient& self, py::object handler) {
+                if (handler.is_none()) {
+                    self.set_tool_list_changed_handler({});
+                    return;
+                }
+                // The callable lives in C++ and may be released on any thread.
+                auto owned = std::shared_ptr<py::object>(
+                    new py::object(std::move(handler)), [](py::object* object) {
+                        if (Py_IsInitialized()) {
+                            py::gil_scoped_acquire gil;
+                            delete object;
+                        }
+                    });
+                self.set_tool_list_changed_handler([owned] {
+                    if (!Py_IsInitialized()) return;
+                    py::gil_scoped_acquire gil;
+                    try {
+                        (*owned)();
+                    } catch (py::error_already_set& error) {
+                        error.discard_as_unraisable("MCP tool list changed handler");
+                    }
+                });
+            },
+            py::arg("handler"),
+            "Call `handler()` when the server sends notifications/tools/list_changed; "
+            "read get_tools() again then. It runs on the client's transport thread: "
+            "return promptly and do not call this client from it. None removes it.")
         .def("is_initialized", &neograph::mcp::MCPClient::is_initialized)
         .def("get_initialize_result",
              &neograph::mcp::MCPClient::get_initialize_result,
@@ -256,19 +360,34 @@ void init_mcp(py::module_& m) {
             "{\"content\": [{\"type\": \"text\", \"text\": ...}]}.")
         .def("call_tool_result",
             [](neograph::mcp::MCPClient& self, const std::string& name,
-               py::object arguments) {
+               py::object arguments, std::optional<double> timeout,
+               std::shared_ptr<neograph::graph::CancelToken> cancel_token) {
                 json args = arguments.is_none() ? json::object()
                                                 : py_to_json(arguments);
                 neograph::mcp::CallToolResult result;
                 {
                     py::gil_scoped_release release;
-                    result = self.call_tool_result(name, args);
+                    if (!timeout && !cancel_token) {
+                        result = self.call_tool_result(name, args);
+                    } else {
+                        const auto deadline = timeout
+                            ? std::chrono::steady_clock::now() +
+                                  std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                      std::chrono::duration<double>(*timeout))
+                            : std::chrono::steady_clock::time_point::max();
+                        result = neograph::async::run_sync(self.call_tool_result_async(
+                            name, args, deadline, std::move(cancel_token)));
+                    }
                 }
                 return result;
             },
             py::arg("name"), py::arg("arguments") = py::none(),
+            py::arg("timeout") = py::none(), py::arg("cancel_token") = py::none(),
             "Call a tool and preserve all MCP result fields. Tool-level "
-            "isError remains data; JSON-RPC failures raise MCPError.");
+            "isError remains data; JSON-RPC failures raise MCPError. `timeout` "
+            "(seconds) and `cancel_token` bound the call: the client stops "
+            "waiting, tells the server with notifications/cancelled and raises "
+            "MCPTransportError with failure \"timeout\" or \"cancelled\".");
 }
 
 }  // namespace neograph::pybind
