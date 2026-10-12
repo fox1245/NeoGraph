@@ -51,15 +51,11 @@ const SDKS = {
     call: (c, p, o) => c.callTool(p, o) },
 };
 
-let nextPort = 18150;
+// The OS picks the port: a fixed range collides when two test processes run
+// these suites on one machine at once.
 async function freePort() {
-  for (; nextPort < 18200; nextPort++) {
-    const p = nextPort;
-    const ok = await new Promise((res) => { const s = net.createServer(); s.once('error', () => res(false));
-      s.listen(p, '127.0.0.1', () => s.close(() => res(true))); });
-    if (ok) { nextPort++; return p; }
-  }
-  throw new Error('no free port');
+  return new Promise((res, rej) => { const s = net.createServer(); s.once('error', rej);
+    s.listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => res(port)); }); });
 }
 async function waitPort(port) {
   for (let i = 0; i < 200; i++) {

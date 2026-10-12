@@ -10,7 +10,7 @@ Environment:
   NEOGRAPH_BUILD_DIR    the build that holds those binaries (required)
   NG_MCP_PROBE_SERVER   the probe binary, if not <build>/tests/neograph_mcp_interop_probe
   NG_MCP_TRANSCRIPTS    where wire transcripts are written (default: a temporary directory)
-  MCP_PORT_RANGE        "lo-hi" loopback ports for these tests (default 18110-18199)
+  MCP_PORT_RANGE        "lo-hi" loopback ports for these tests (default: the OS picks)
 """
 
 import contextlib
@@ -37,7 +37,10 @@ EXAMPLE59 = BUILD / "example_mcp_server" if BUILD else Path("example_mcp_server"
 TRANSCRIPTS = Path(os.environ.get("NG_MCP_TRANSCRIPTS") or
                    tempfile.mkdtemp(prefix="neograph-mcp-interop-"))
 TEE = HELPERS / "stdio_tee.py"
-_lo, _hi = (int(x) for x in os.environ.get("MCP_PORT_RANGE", "18110-18199").split("-"))
+# Ports come from the OS unless MCP_PORT_RANGE pins a range: a fixed range
+# collides when two test processes run this suite on one machine at once.
+_PORT_RANGE = os.environ.get("MCP_PORT_RANGE")
+_lo, _hi = (int(x) for x in (_PORT_RANGE or "0-0").split("-"))
 _next_port = [_lo]
 
 
@@ -46,6 +49,10 @@ def missing_binaries() -> list[str]:
 
 
 def free_port() -> int:
+    if not _PORT_RANGE:
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
     while _next_port[0] <= _hi:
         port = _next_port[0]
         _next_port[0] += 1

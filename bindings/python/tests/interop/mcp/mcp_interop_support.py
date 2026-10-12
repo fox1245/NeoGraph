@@ -8,7 +8,7 @@ Environment:
                          (mcp 1.30.0, FastMCP); FastMCP v1 peers are skipped when unset
   * NG_MCP_SCHEMA_DIR    directory with <revision>/schema.json (pinned commit);
                          schema checks are skipped when unset
-  * NG_MCP_PORT_BASE     first loopback port to use (default 18200; 100 ports)
+  * NG_MCP_PORT_BASE     first of 100 loopback ports to use (default: the OS picks)
   * NG_MCP_TRANSCRIPTS   where wire transcripts are written (default: a temporary
                          directory); this side writes into its "client" subdirectory
 
@@ -48,11 +48,17 @@ SCHEMA_PATH = (str(Path(os.environ["NG_MCP_SCHEMA_DIR"]) / "2025-11-25" / "schem
 TRANSCRIPTS = Path(os.environ.get("NG_MCP_TRANSCRIPTS") or
                    tempfile.mkdtemp(prefix="neograph-mcp-client-interop-")) / "client"
 TRANSCRIPTS.mkdir(parents=True, exist_ok=True)
-_PORT_BASE = int(os.environ.get("NG_MCP_PORT_BASE", "18200"))
-_ports = itertools.cycle(range(_PORT_BASE, _PORT_BASE + 100))
+# Ports come from the OS unless NG_MCP_PORT_BASE pins a range: a fixed range
+# collides when two test processes run this suite on one machine at once.
+_PORT_BASE = os.environ.get("NG_MCP_PORT_BASE")
+_ports = itertools.cycle(range(int(_PORT_BASE), int(_PORT_BASE) + 100)) if _PORT_BASE else None
 
 
 def free_port() -> int:
+    if _ports is None:
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
     for _ in range(100):
         port = next(_ports)
         with socket.socket() as s:
