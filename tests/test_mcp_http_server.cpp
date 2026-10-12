@@ -211,6 +211,34 @@ TEST(MCPHttpServerTest, JsonPostLifecycleAndDeleteRoundTrip) {
     EXPECT_EQ(after_delete->status, 404);
 }
 
+TEST(MCPHttpServerTest, ErrorBodiesCarryNoNullId) {
+    // MCP-S-07: an HTTP error body is a JSON-RPC error response without an id,
+    // never "id": null, which the 2025-11-25 schema does not allow.
+    MCPHttpServer server(make_http_session);
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+
+    auto no_session = client.Post("/mcp", base_headers(), request(2, "tools/list").dump(),
+                                  "application/json");
+    ASSERT_TRUE(no_session);
+    EXPECT_EQ(no_session->status, 400);
+    EXPECT_FALSE(json::parse(no_session->body).contains("id")) << no_session->body;
+
+    auto unknown = client.Post("/mcp", session_headers("ng_missing"),
+                               request(3, "tools/list").dump(), "application/json");
+    ASSERT_TRUE(unknown);
+    EXPECT_EQ(unknown->status, 404);
+    EXPECT_FALSE(json::parse(unknown->body).contains("id")) << unknown->body;
+
+    auto unparsable = client.Post("/mcp", base_headers(), "{not json", "application/json");
+    ASSERT_TRUE(unparsable);
+    EXPECT_EQ(unparsable->status, 400);
+    const auto body = json::parse(unparsable->body);
+    EXPECT_EQ(body["error"]["code"], -32700);
+    EXPECT_FALSE(body.contains("id")) << unparsable->body;
+}
+
 TEST(MCPHttpServerTest, RejectsUnlistedOrigin) {
     MCPHttpServer server(make_http_session);
     ASSERT_TRUE(server.start_async());

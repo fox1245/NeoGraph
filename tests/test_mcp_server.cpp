@@ -280,11 +280,15 @@ TEST(MCPServerTest, ProtocolAndToolExecutionErrorsRemainDistinct) {
     ASSERT_TRUE(malformed.contains("error"));
     EXPECT_EQ(malformed["error"]["code"], -32602);
 
+    // An unknown tool is a protocol error (MCP-S-06).
     auto missing = server.handle_message(request(31, "tools/call", {
         {"name", "missing"}, {"arguments", json::object()},
     }));
-    ASSERT_TRUE(missing.contains("result"));
-    EXPECT_TRUE(missing["result"]["isError"].get<bool>());
+    ASSERT_TRUE(missing.contains("error")) << missing.dump();
+    EXPECT_EQ(missing["id"], 31);
+    EXPECT_EQ(missing["error"]["code"], -32602);
+    EXPECT_EQ(missing["error"]["message"], "Unknown tool: missing");
+    EXPECT_EQ(missing["error"]["data"]["code"], "NG.ToolNotFound");
 
     EXPECT_TRUE(server.handle_message(request(32, "tools/call", {
         {"name", "echo"}, {"arguments", {{"value", "x"}}},
@@ -664,7 +668,36 @@ TEST(MCPServerTest, StdioWritesOnlyJsonRpcFramesAndLogsToStderr) {
     EXPECT_EQ(frames[0]["id"], 1);
     EXPECT_EQ(frames[1]["id"], 2);
     EXPECT_EQ(frames[2]["error"]["code"], -32700);
+    // No id could be read: the response has none, never "id": null (MCP-S-07).
+    EXPECT_FALSE(frames[2].contains("id")) << frames[2].dump();
     EXPECT_NE(errors.str().find("parse error"), std::string::npos);
+}
+
+TEST(MCPServerTest, InvalidEnvelopesEchoAReadableIdAndNeverANullOne) {
+    // MCP-S-05: the error of an invalid envelope carries its id when the id
+    // could be read; MCP-S-07: otherwise it has no id at all.
+    MCPServer server(config());
+    initialize(server);
+
+    auto wrong_version = server.handle_message(json::parse(R"({"jsonrpc":"1.0","id":42,"method":"ping"})"));
+    EXPECT_EQ(wrong_version["error"]["code"], -32600);
+    EXPECT_EQ(wrong_version["id"], 42);
+
+    auto no_method = server.handle_message(json::parse(R"({"jsonrpc":"2.0","id":"s-7"})"));
+    EXPECT_EQ(no_method["error"]["code"], -32600);
+    EXPECT_EQ(no_method["id"], "s-7");
+
+    auto numeric_method = server.handle_message(json::parse(R"({"jsonrpc":"2.0","id":8,"method":3})"));
+    EXPECT_EQ(numeric_method["id"], 8);
+
+    for (const char* unreadable : {R"({"jsonrpc":"2.0","id":null,"method":"ping"})",
+                                   R"({"jsonrpc":"2.0","id":1.5,"method":"ping"})",
+                                   R"([{"jsonrpc":"2.0","id":9,"method":"ping"}])",
+                                   R"({"jsonrpc":"1.0","id":{"x":1},"method":"ping"})"}) {
+        auto response = server.handle_message(json::parse(unreadable));
+        EXPECT_EQ(response["error"]["code"], -32600) << unreadable;
+        EXPECT_FALSE(response.contains("id")) << response.dump();
+    }
 }
 
 } // namespace

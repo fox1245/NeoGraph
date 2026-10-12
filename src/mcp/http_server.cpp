@@ -28,12 +28,15 @@
 namespace neograph::mcp {
 namespace {
 
+// An HTTP error body is a JSON-RPC error response with the request's id when
+// it was read and no id otherwise, never a null id (MCP-S-07).
 json rpc_error(int code, std::string message, json id = nullptr) {
-    return {
+    json response = {
         {"jsonrpc", "2.0"},
-        {"id", std::move(id)},
         {"error", {{"code", code}, {"message", std::move(message)}}},
     };
+    if (!id.is_null()) response["id"] = std::move(id);
+    return response;
 }
 
 bool is_loopback_bind(const std::string& host) {
@@ -294,8 +297,7 @@ struct MCPHttpServer::Impl {
         std::string              response_session_id;
 
         if (initialize && !session_id.empty()) {
-            http_error(response, 400, -32600, "initialize must not include Mcp-Session-Id",
-                       envelope.contains("id") ? envelope["id"] : json(nullptr));
+            http_error(response, 400, -32600, "initialize must not include Mcp-Session-Id");
             return;
         }
         if (session_id.empty()) {

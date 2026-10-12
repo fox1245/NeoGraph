@@ -27,10 +27,15 @@ json rpc_result(json result, const json& id) {
     return {{"jsonrpc", "2.0"}, {"id", id}, {"result", std::move(result)}};
 }
 
+// An error response carries the request's id when it could be read, and no id
+// otherwise: the 2025-11-25 schema allows a string, an integer or no id, never
+// null (MCP-S-05, MCP-S-07).
 json rpc_error(int code, std::string message, const json& id, json data = nullptr) {
     json error = {{"code", code}, {"message", std::move(message)}};
     if (!data.is_null()) error["data"] = std::move(data);
-    return {{"jsonrpc", "2.0"}, {"id", id}, {"error", std::move(error)}};
+    json response = {{"jsonrpc", "2.0"}, {"error", std::move(error)}};
+    if (!id.is_null()) response["id"] = id;
+    return response;
 }
 
 CallToolResult tool_error(std::string message) {
@@ -100,6 +105,13 @@ json failure_response(const std::exception_ptr& error, const graph::CancelToken&
 
 bool valid_request_id(const json& id) {
     return id.is_string() || id.is_number_integer() || id.is_number_unsigned();
+}
+
+// The id of an envelope that is otherwise invalid, when it is a valid id.
+json readable_id(const json& envelope) {
+    if (envelope.is_object() && envelope.contains("id") && valid_request_id(envelope["id"]))
+        return envelope["id"];
+    return nullptr;
 }
 
 std::string request_key(const json& id) {
@@ -356,7 +368,10 @@ struct MCPServer::Impl {
             std::lock_guard lk(tools_mu);
             auto it = tools.find(name);
             if (it == tools.end()) {
-                return rpc_result(tool_error("Unknown tool: " + name).to_json(), id);
+                // MCP 2025-11-25 server/tools, "Error Handling": an unknown tool
+                // is a protocol error (MCP-S-06).
+                return rpc_error(-32602, "Unknown tool: " + name, id,
+                                 {{"code", "NG.ToolNotFound"}});
             }
             tool = it->second;
         }
@@ -488,8 +503,9 @@ void MCPServer::register_extension(std::string identifier, json settings) {
 }
 
 json MCPServer::handle_message(const json& envelope) {
-    if (!envelope.is_object() || envelope.value("jsonrpc", "") != "2.0") {
-        return rpc_error(-32600, "Invalid JSON-RPC 2.0 request", nullptr);
+    if (!envelope.is_object() || !envelope.contains("jsonrpc") ||
+        envelope["jsonrpc"] != json("2.0")) {
+        return rpc_error(-32600, "Invalid JSON-RPC 2.0 request", readable_id(envelope));
     }
     if (!envelope.contains("method")) {
         // The server currently sends no requests, so inbound responses have no
@@ -498,10 +514,10 @@ json MCPServer::handle_message(const json& envelope) {
             (envelope.contains("result") || envelope.contains("error"))) {
             return nullptr;
         }
-        return rpc_error(-32600, "JSON-RPC request is missing method", nullptr);
+        return rpc_error(-32600, "JSON-RPC request is missing method", readable_id(envelope));
     }
     if (!envelope["method"].is_string()) {
-        return rpc_error(-32600, "JSON-RPC method must be a string", nullptr);
+        return rpc_error(-32600, "JSON-RPC method must be a string", readable_id(envelope));
     }
 
     const bool notification = !envelope.contains("id");
