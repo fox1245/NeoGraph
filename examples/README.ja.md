@@ -149,6 +149,7 @@ Program は Core グラフを、永続的な識別子、予算、admission を�
 | 38 | [`38_a2a_server.cpp`](38_a2a_server.cpp) | yes | A2A サーバー。グラフを SSE ストリーミング付きで A2A 0.3 と 1.0 で公開し、自前のクライアントで呼び出します。`serve` を渡すと待ち受けを続けます。 |
 | 77 | [`77_a2a_dialects.cpp`](77_a2a_dialects.cpp) | yes | A2A のダイアレクト。エージェントカードが JSON-RPC 1.0 と 0.3 を列挙し、1 つ目のクライアントはそこから 1.0 を選び、0.3 だけを載せたカードを受け取った 2 つ目のクライアントは 0.3 を選びます。 |
 | 78 | [`78_a2a_input_required.cpp`](78_a2a_input_required.cpp) | yes | A2A の `input-required`。`interrupt_before` で止まったグラフが待機するタスクになり、クライアントが同じタスクに答えると、結果をアーティファクトとして受け取ります。 |
+| 79 | [`79_a2a_collaboration.cpp`](79_a2a_collaboration.cpp) | yes | A2A のコラボレーション。2 つのエージェントがリンクを結び(提案、次に承認)、メールボックスを通して連番付きのエンベロープをやり取りします。再配送されたものは 1 回だけ適用されます。 |
 | 37 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes | A2A クライアント。エージェントカードを取得してメッセージを送り、`A2ACallerNode` でグラフからリモートエージェントを呼び出します。 |
 | 39 | [`39_acp_server.cpp`](39_acp_server.cpp) | yes | stdio 上の ACP エージェント。エディターが駆動する形です。`--self-test` は initialize、session/new、session/prompt をプロセス内で実行します。 |
 | 45 | [`45_grpc_server.cpp`](45_grpc_server.cpp) | paired | gRPC。`GraphEngine` を `GraphService` で公開します。サンプル 53 がこれを補助プロセスとして起動します(`-DNEOGRAPH_BUILD_GRPC=ON` が必要)。 |

@@ -148,6 +148,7 @@ These examples run offline. The MCP client examples start a standard-library ser
 | 38 | [`38_a2a_server.cpp`](38_a2a_server.cpp) | yes | A2A server: serve a graph over A2A 0.3 and 1.0 with SSE streaming, then call it with its own client. Pass `serve` to keep listening. |
 | 77 | [`77_a2a_dialects.cpp`](77_a2a_dialects.cpp) | yes | A2A dialects: the agent card lists JSON-RPC 1.0 and 0.3; one client takes 1.0 from it, and a second client, given a card with only 0.3, takes that. |
 | 78 | [`78_a2a_input_required.cpp`](78_a2a_input_required.cpp) | yes | A2A `input-required`: a graph that stops at `interrupt_before` becomes a task that waits; the client answers on the same task and receives the result as an artifact. |
+| 79 | [`79_a2a_collaboration.cpp`](79_a2a_collaboration.cpp) | yes | A2A collaboration: two agents link (proposed, then accepted) and exchange sequenced envelopes through a mailbox; a redelivery is applied once. |
 | 37 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes | A2A client: fetch the agent card, send a message, and call a remote agent from a graph with `A2ACallerNode`. |
 | 39 | [`39_acp_server.cpp`](39_acp_server.cpp) | yes | ACP agent over stdio, the shape an editor drives; `--self-test` runs initialize, session/new and session/prompt in process. |
 | 45 | [`45_grpc_server.cpp`](45_grpc_server.cpp) | paired | gRPC: serve a `GraphEngine` over `GraphService`. Example 53 starts it as its companion (needs `-DNEOGRAPH_BUILD_GRPC=ON`). |

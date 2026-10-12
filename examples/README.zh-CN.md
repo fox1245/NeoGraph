@@ -149,6 +149,7 @@ Program 把 Core 图包进带有持久标识、预算和准入(admission)的生�
 | 38 | [`38_a2a_server.cpp`](38_a2a_server.cpp) | yes | A2A 服务器：以 SSE 流式方式通过 A2A 0.3 与 1.0 提供图，并用自带客户端调用。传入 `serve` 可持续监听。 |
 | 77 | [`77_a2a_dialects.cpp`](77_a2a_dialects.cpp) | yes | A2A 方言：agent card 列出 JSON-RPC 1.0 和 0.3；一个客户端从中选 1.0，另一个客户端拿到只列 0.3 的 card，就选 0.3。 |
 | 78 | [`78_a2a_input_required.cpp`](78_a2a_input_required.cpp) | yes | A2A 的 `input-required`：在 `interrupt_before` 处停下的图成为等待输入的任务，客户端在同一任务上作答后，以 artifact 的形式收到结果。 |
+| 79 | [`79_a2a_collaboration.cpp`](79_a2a_collaboration.cpp) | yes | A2A 协作：两个智能体建立链接（先提议，再接受），通过邮箱交换带序号的信封；重复投递只生效一次。 |
 | 37 | [`37_a2a_client.cpp`](37_a2a_client.cpp) | yes | A2A 客户端：获取 agent card、发送消息，并用 `A2ACallerNode` 在图中调用远程智能体。 |
 | 39 | [`39_acp_server.cpp`](39_acp_server.cpp) | yes | 基于 stdio 的 ACP 智能体，即编辑器驱动的形态；`--self-test` 在进程内运行 initialize、session/new 和 session/prompt。 |
 | 45 | [`45_grpc_server.cpp`](45_grpc_server.cpp) | paired | gRPC：通过 `GraphService` 提供 `GraphEngine`。示例 53 会把它作为伴随进程启动（需要 `-DNEOGRAPH_BUILD_GRPC=ON`）。 |
