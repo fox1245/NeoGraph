@@ -306,7 +306,10 @@ def sanitizer(args):
     configure(build, options)
     build_targets(build, args.jobs, prefix=prefix)
     # pybind_smoke is run separately below with the interpreter preload boundary.
-    ctest(build, 1 if asan else min(args.jobs, 2), "-E",
+    # The tests share no state (each takes its own temporary directories, ports and
+    # PostgreSQL schemas), so the ASan run uses every job; one at a time it took
+    # 79 minutes, more than half of the job.
+    ctest(build, args.jobs if asan else min(args.jobs, 2), "-E",
           "BIG_|valgrind|^pybind_smoke$" if asan else "BIG_|valgrind", env=env, prefix=prefix,
           timeout=SANITIZER_TEST_TIMEOUT if asan else TEST_TIMEOUT)
     for example in ASAN_EXAMPLES if asan else TSAN_EXAMPLES:
