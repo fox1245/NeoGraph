@@ -435,7 +435,7 @@ asio::awaitable<sp::runtime::Result> ControlledProvider::dispatch_impl(
             terminal.dispatch_id = receipt.dispatch_id();
             terminal.dispatch_receipt_id = receipt.id();
             if (const auto* failed = std::get_if<sp::Failure>(result.get())) {
-                terminal.state = provider_failure_proves_not_sent(*failed)
+                terminal.state = provider_failure_proves_not_accepted(*failed)
                     ? ProviderDispatchState::Failed : ProviderDispatchState::ReconciliationRequired;
                 terminal.error = bounded_error(failed->error.safe_message);
                 if (terminal.error.empty()) terminal.error = "Provider returned a typed failure";

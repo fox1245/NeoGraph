@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=08ae98c9b9640fa53657b63ba4a2691bf503e965a04f5442b3bde19d974e6ca7 -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=2b20dfa53dbea78468ab09a909c58b6d7a00ebddf1b671d5a79ccc142e8ce854 -->
 # NeoGraph WASM 冒烟程序
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -21,8 +21,8 @@ OpenSSL 不是运行时的直接依赖。
 SDK 的原生库无法链接进 WebAssembly。Emscripten 目标上，SDK 运行时、archive 支持和
 C++ 标准库都必须能正常工作；下面那次历史上的冒烟测试，不能说明当前的代码能构建成功。
 
-当前的构建需要 SDK `0.3.0`，接口修订版/共享库代数为 6，
-对应 SchemaProvider `maint/interface6` 提交 `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`，
+当前的构建需要 SDK `0.3.1`，接口修订版/共享库代数为 6，
+对应 SchemaProvider `maint/interface6` 提交 `69f8aba5c75decd21d786853de134ac713634966`，
 并且要针对同一个目标构建。必须先有真正可用的 Emscripten 版 SDK
 运行时构建；本页不保证当前能构建成功。
 

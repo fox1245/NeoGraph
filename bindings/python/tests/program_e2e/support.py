@@ -609,10 +609,11 @@ class ChatPeer:
     OpenRouter does. A request whose last user message contains "slow" is
     answered after slow_seconds. A request whose last user message contains
     fail_marker is refused with HTTP 400, which the provider reports as a failed
-    call with its outcome as evidence. A streaming request whose last user
-    message contains cut_marker is answered with one chunk of the reply and then
-    the connection ends: no finish reason, no usage and no [DONE], a stream cut
-    in the middle.
+    call with its outcome as evidence. A request whose last user message contains
+    a key of `refusals` is answered with that HTTP status instead. A streaming
+    request whose last user message contains cut_marker is answered with one
+    chunk of the reply and then the connection ends: no finish reason, no usage
+    and no [DONE], a stream cut in the middle.
     """
 
     def __init__(self):
@@ -623,6 +624,7 @@ class ChatPeer:
         self.slow_seconds = 5.0
         self.fail_marker = "fail-call"
         self.cut_marker = "cut-stream"
+        self.refusals = {}
         self._lock = threading.Lock()
         peer = self
 
@@ -636,11 +638,15 @@ class ChatPeer:
                 last = (body.get("messages") or [{}])[-1].get("content") or ""
                 if "slow" in str(last):
                     time.sleep(peer.slow_seconds)
-                if peer.fail_marker and peer.fail_marker in str(last):
+                status = 400 if peer.fail_marker and peer.fail_marker in str(last) else None
+                for marker, answer in peer.refusals.items():
+                    if marker in str(last):
+                        status = answer
+                if status is not None:
                     refusal = json.dumps({"error": {"message": "refused by the e2e peer",
-                                                    "code": 400}}).encode()
+                                                    "code": status}}).encode()
                     try:
-                        self.send_response(400)
+                        self.send_response(status)
                         self.send_header("Content-Type", "application/json")
                         self.send_header("Content-Length", str(len(refusal)))
                         self.end_headers()

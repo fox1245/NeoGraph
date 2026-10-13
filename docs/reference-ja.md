@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=1ca9f4ddd1a059b77adaa7d44ecb6000374b0406f3d7cf2387fb3673dcd1cd19 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=02aa0420d6411279c4b6c9bc6dca39056c66c53c94ff7fa922a4342831a6b03b -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -33,10 +33,10 @@ CMake 3.20 以上が必要です。Core は所有 typed provider 契約を公開
 
 SDK imported target は `include/SchemaProvider` include root を提供します。公開例は recipe 専用 helper なしで `<descriptor/descriptor.h>`、`<runtime/client.h>`、`<neograph/llm/schema_provider.h>` を直接使います。
 
-設置 SDK package は正確に `0.3.0` で、interface revision 6 header と shared-library generation 6 の一致が必要です。バージョン一致だけでは旧 interface/ABI binary を承認しません。
+設置 SDK package は正確に `0.3.1` で、interface revision 6 header と shared-library generation 6 の一致が必要です。バージョン一致だけでは旧 interface/ABI binary を承認しません。
 
 ```cmake
-find_package(SchemaProvider 0.3.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.3.1 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -375,9 +375,14 @@ semantic `Stop` 境界で valid/invalid client-call intent は `EndTurn` を `To
 ### PreparedProviderRequest / ProviderBudgetClaim
 `prepare()` は検証とエンコードを正確に一度行い、元の deadline とキャンセル状態を持つ移動専用 `PreparedProviderRequest` を生成します。永続呼び出し元は `Provider::request_digest()` を assembly に結び付け、承認された budget claim を予約し、dispatch receipt を記録してから、同じハンドルを `ControlledProvider::dispatch_prepared(_async)` で消費します。gate 後の再生成はありません。重複 receipt は再送しません。カスタム実装は `get_name()`、`family()`、`prepare()` を実装し `prepare_runtime()` または `prepare_local()` を使います。local callback は `this` ではなく所有 shared 状態をキャプチャします。
 
-任意の `ProviderControls` は呼び出し元の選択であり、強制デフォルトや黙った cap clamp ではありません。非対応 family 制御は dispatch 前に拒否します。有界呼び出しには承認された実際のモデル input/output 上限が必要で、欠落は `LimitUnknown` です。予約は保守的な支出権限であり、報告使用量・予測・請求書ではありません。不明/部分/delivery-unknown の結果は hold を維持し、実際の最終報告で精算し、超過報告も全量を計上します。retry は明示的な単一層で、既定 off、有界 window と unknown-prior hold を使います。隠れた再送はありません。
+任意の `ProviderControls` は呼び出し元の選択であり、強制デフォルトや黙った cap clamp ではありません。非対応 family 制御は dispatch 前に拒否します。有界呼び出しには承認された実際のモデル input/output 上限が必要で、欠落は `LimitUnknown` です。予約は保守的な支出権限であり、報告使用量・予測・請求書ではありません。不明/部分/delivery-unknown の結果は hold を維持し、実際の最終報告で精算し、超過報告も全量を計上します。使用量の stage が `Missing` なら証拠がない状態で（0 ではありません）、`Partial` はそこまでに見えた値です。どちらも呼び出しを精算せず、hold が残ります。SDK が導出した件数（`Evidence::Derived`）は、報告された件数と同じように精算されます。出力予算を思考で使い切り `candidatesTokenCount` が省かれた Gemini の呼び出しは、導出された `output_total` と `total` だけで実際の使用量を請求できます。retry は明示的な単一層で、既定 off、有界 window と unknown-prior hold を使います。隠れた再送はありません。
 
-`provider_failure_proves_not_sent(Failure)` は完全で矛盾のない NotSent 根拠を要求します。status code・使用量欠落・観測者/永続例外だけでは費用ゼロや予算更新を証明しません。
+`provider_failure_proves_not_accepted(Failure)` は、失敗した呼び出しが hold を解放するか維持するかを、すべての精算経路が共通で判断する唯一の規則です。対象は、bank、managed journal、MCP harness provider のトークン reservation、Program の金額 hold、SQLite provider journal、controlled provider の dispatch receipt（`Failed` または `ReconciliationRequired`）です。次のどちらかの根拠が、完全で矛盾なく揃っている必要があります。
+
+- `NotSent`: リクエストのバイトが 1 つも出ていないことを SDK が証明している（`provider_failure_proves_not_sent(Failure)` はこの半分だけを判定します）。
+- 完了した HTTP 4xx 応答（408、425、429 を除く）での `RejectedBeforeOutput`。たとえば不正なキー（401）、不正なリクエスト（400）、誰も満たせない `max_price` の固定（404）です。サーバーがリクエストを拒否したので、何も実行されず、請求もされません。失敗には出力、stop reason、使用量がなく、請求された可能性のある以前の試行もないことが必要です。
+
+HTTP 408、425、429、5xx の応答、途中で切れたりタイムアウトしたりした呼び出し、リクエストが出た後の transport 失敗、部分的な出力や使用量を伴う失敗は、すべて hold を維持します。使用量の欠落、観測者や永続化の例外、SDK の `RejectedBeforeOutput` ラベルのない status code だけでは、費用ゼロも予算の更新も証明されません。
 
 ```cpp
 #include <neograph/controlled_provider.h>
@@ -395,7 +400,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを一致した新ヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。SDK は alpha `0.3.0`、interface revision 6 / shared-library generation 6、out-of-line capability check を使い、安定リリースの宣言ではありません。検証済みのプラットフォームは Linux/POSIX です。Windows NTFS と macOS の実装はありますが、この SDK では検証していません。WASM provider runtime のサポートは確立していません。
+ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを一致した新ヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。SDK は alpha `0.3.1`、interface revision 6 / shared-library generation 6、out-of-line capability check を使い、安定リリースの宣言ではありません。検証済みのプラットフォームは Linux/POSIX です。Windows NTFS と macOS の実装はありますが、この SDK では検証していません。WASM provider runtime のサポートは確立していません。
 
 Python も C++ と同じ所有 request/outcome 境界を公開します: `make_provider_request`、`Provider.prepare`、`dispatch`、`invoke`。Provider 履歴には typed part を持つ `ProviderMessage` を使い、`ChatMessage` はグラフ用の便宜的 projection として残ります。SDK 失敗は `ProviderOutcome.failure` で読み、host observer/settlement 例外は `outcome` と `cause` を保持します。コンストラクターと GIL/コールバック動作は [Python binding ガイド](python-binding.md)を参照してください。
 
@@ -426,9 +431,9 @@ dispatch の前に broker は準備済みリクエストに価格を付けます
 |---|---|---|
 | `reported` | 応答に provider 自身の費用がある：OpenRouter の `usage.cost` で、SDK が nano-USD 単位の `Usage::provider_cost` にパースします。BYOK なら報告された upstream の請求額を加えます。 | 報告額を整数 microunit に切り上げた値。 |
 | `estimated` | 報告費用のない最終で一貫した usage。 | カタログ料金 × 報告されたトークン帯、呼び出しごとに 1 回切り上げ。記録にカタログの version と digest が残ります。 |
-| `held` | 結果が分からない（transport 例外、キャンセル、タイムアウト）、失敗前にリクエストが送られた可能性がある、SDK が transport 試行を再送した、または usage が部分的か一貫しない。 | hold。 |
+| `held` | 結果が分からない（transport 例外、キャンセル、タイムアウト）、すでに始まった処理の後に失敗した可能性がある（HTTP 408、425、429、5xx の応答、途中で切れたストリーム、リクエストが出た後の transport 失敗）、SDK が transport 試行を再送した、または usage が部分的か一貫しない。 | hold。 |
 
-何も送らなかったことを証明する失敗は hold を解放し、記録を残しません。hold を超える請求額（BYOK の upstream 費用のように、固定した上限が抑えない費用が報告費用に含まれるときに起こりえます）は報告どおりに請求され、請求額が予算を超えた実行は `BudgetExhausted` で終わります。並行呼び出し（`ng.all`、`ng.race`、`ng.quorum`、並列ノード）は 1 つのアカウントに予約するので、収まらない member は拒否されます。ノードの再試行は自分の effect namespace（`task#a<k>`）で呼び出すため、attempt ごとの呼び出しは新しい呼び出しで、再び請求されます。
+プロバイダーが何も受け付けなかったことを証明する失敗は hold を解放し、記録を残しません。リクエストが送られなかった場合と、プロバイダーが完了した HTTP 4xx 応答（408、425、429 を除く）でリクエストを拒否した場合です。金額の hold もモデルトークンの reservation も請求されません。hold を超える請求額（BYOK の upstream 費用のように、固定した上限が抑えない費用が報告費用に含まれるときに起こりえます）は報告どおりに請求され、請求額が予算を超えた実行は `BudgetExhausted` で終わります。並行呼び出し（`ng.all`、`ng.race`、`ng.quorum`、並列ノード）は 1 つのアカウントに予約するので、収まらない member は拒否されます。ノードの再試行は自分の effect namespace（`task#a<k>`）で呼び出すため、attempt ごとの呼び出しは新しい呼び出しで、再び請求されます。
 
 `bind_priced` は呼び出しの記録を journal 行に書きます。dispatched marker と一緒に held 記録を、結果と一緒に精算済み記録を書きます。同じ Program attempt がプロセス停止前に記録した呼び出しは、復旧した attempt がその operation をバインドしたときに、Core が再び呼び出すかどうかにかかわらず 1 回だけ請求され、`replayed` と記されます。execution lease の期限切れで復旧する define() のみの実行も含みます。以前の attempt が記録した呼び出しは、その attempt の結果が残り予算にすでに精算しているので、後の attempt が結果を再生しても再び請求されません。recorded replay は金額を使いません。
 

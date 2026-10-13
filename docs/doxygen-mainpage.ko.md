@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=ko source_sha256=3cb46aa97802cc0ade7e8a0f348f998d522fc61a6f052cc394c62ea6a705f2cb -->
+<!-- neograph-i18n: source=docs/doxygen-mainpage.md locale=ko source_sha256=e76f02f95e2c48a4209505045ee0773301a7dbc6100f48105d1299237fd5d6fa -->
 # NeoGraph C++ API 레퍼런스 {#mainpage}
 
 **Languages:** [English](doxygen-mainpage.md) | [한국어](doxygen-mainpage.ko.md) | [日本語](doxygen-mainpage.ja.md) | [简体中文](doxygen-mainpage.zh-CN.md)
@@ -64,7 +64,7 @@ provider 호출은 `sp::runtime::Result`를 반환합니다. 이는 `sp::Complet
 
 wire 증거는 계열이 제공하는 선택 사항입니다. `sp::Completion::wire_envelope`는 null일 수 있습니다(Python에서는 `ProviderCompletion.wire_envelope`가 `None`입니다). 버퍼링 방식 Chat은 현재 전체 응답 JSON을 `raw_events`에 `type == "chat.completion"`인 `RawWire`로 보관하며, 문서는 `payload`에 들어 있고 `wire_envelope`는 null로 둡니다. 증거는 계열이 보관하는 위치에서 읽어야 하며, 대체 envelope를 만들어 내지 않습니다. 네이티브 continuation과 raw 버퍼는 보호되는 증거로 남으며 트레이스 payload에서는 제외됩니다.
 
-이 변경은 소스 호환과 바이너리 호환을 모두 깨뜨립니다. 모든 C++ 소비자와 사용자 정의 provider를 새 헤더·라이브러리에 맞춰 다시 컴파일해야 합니다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor 인터프리터, Responses WebSocket 경로는 제거되었고 별칭이나 호환용 브리지도 없습니다. 릴리스 대상은 SDK `0.3.0` 알파, 인터페이스 리비전 6 / 공유 ABI 6이며 기능 검사는 out-of-line으로 합니다. 알파는 안정 API를 약속하지 않습니다.
+이 변경은 소스 호환과 바이너리 호환을 모두 깨뜨립니다. 모든 C++ 소비자와 사용자 정의 provider를 새 헤더·라이브러리에 맞춰 다시 컴파일해야 합니다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor 인터프리터, Responses WebSocket 경로는 제거되었고 별칭이나 호환용 브리지도 없습니다. 릴리스 대상은 SDK `0.3.1` 알파, 인터페이스 리비전 6 / 공유 ABI 6이며 기능 검사는 out-of-line으로 합니다. 알파는 안정 API를 약속하지 않습니다.
 
 Python에서는 `SchemaProvider(ValidatedDescriptor, ProviderRuntimeOptions, SchemaProviderDefaults)`와 `make_provider_request`를 쓰고, 메시지는 타입이 있는 `ProviderMessage` 파트로 만듭니다. `prepare`는 `PreparedProviderRequest`를 반환하고, `dispatch`는 이를 한 번만 소비합니다. `invoke`는 요청을 준비하고 dispatch까지 합니다. `ProviderOutcome`은 변경할 수 없는 completion/failure/partial 뷰를 보존하며, 알 수 없는 사용량은 `None`입니다. 그래프의 `ChatMessage`는 별도의 편의 타입이며 provider 메시지의 별칭이 아닙니다. 블로킹 provider 호출은 GIL을 놓습니다. Python 비동기 호출자는 `asyncio.to_thread`를 쓸 수 있습니다. 생성자, 오류, 제한 사항은 [`Python binding guide`](python-binding.md)를 참고하세요.
 

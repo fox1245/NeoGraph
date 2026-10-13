@@ -946,7 +946,13 @@ if(TARGET neograph_program_sqlite AND TARGET neograph_sqlite AND TARGET neograph
         ${PROJECT_SOURCE_DIR}/src/program)
     target_link_libraries(neograph_program_provider_binding_tests PRIVATE
         neograph::program neograph::program_sqlite neograph::sqlite
-        neograph::llm SQLite::SQLite3 GTest::gtest_main)
+        neograph::llm SchemaProvider::transport httplib OpenSSL::SSL OpenSSL::Crypto
+        SQLite::SQLite3 GTest::gtest_main)
+    if(WIN32)
+        target_link_libraries(neograph_program_provider_binding_tests PRIVATE advapi32)
+    endif()
+    target_include_directories(neograph_program_provider_binding_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/deps)
     neograph_discover_tests(neograph_program_provider_binding_tests)
 
     # Bounded-exhaustive resume/replay harness at the Program level: the
@@ -1000,6 +1006,22 @@ if(TARGET neograph::llm)
         ${PROJECT_SOURCE_DIR}/deps)
     neograph_discover_tests(neograph_schema_provider_interface6_tests
         PROPERTIES TIMEOUT 60 LABELS "provider;interface6;model-free")
+
+    # What a provider failure costs the token bank: a completed HTTP 4xx answer
+    # releases the reservation, every other failure keeps it, and the usage
+    # labels (missing, partial, derived) decide what a call is settled on.
+    add_executable(neograph_provider_rejection_accounting_tests
+        test_provider_rejection_accounting.cpp)
+    target_link_libraries(neograph_provider_rejection_accounting_tests PRIVATE
+        neograph::core neograph::llm SchemaProvider::transport
+        httplib OpenSSL::SSL OpenSSL::Crypto GTest::gtest_main)
+    if(WIN32)
+        target_link_libraries(neograph_provider_rejection_accounting_tests PRIVATE advapi32)
+    endif()
+    target_include_directories(neograph_provider_rejection_accounting_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/deps)
+    neograph_discover_tests(neograph_provider_rejection_accounting_tests
+        PROPERTIES TIMEOUT 60 LABELS "provider;accounting;model-free")
 endif()
 
 # Program API v2 guards (#363-#365). Each suite is its own executable so the

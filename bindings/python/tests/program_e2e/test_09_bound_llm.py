@@ -124,6 +124,46 @@ def test_zero_monetary_budget_grants_nothing(peer):
     assert peer.request_count() == 0
 
 
+def run_refused(peer, status):
+    """One call whose reply is an HTTP error `status`, and the budget it ran under."""
+    peer.refusals = {f"answer-{status}": status}
+    host = make_bound_host(peer.base_url)
+    run_budget = priced_budget()
+    version = admit(host, CHAT, run_budget, "chat.js")
+    question = {"messages": [{"role": "user", "content": f"answer-{status}: please"}]}
+    return host.run(version, question, run_budget), run_budget
+
+
+@pytest.mark.parametrize("status", [400, 401, 404])
+def test_a_completed_4xx_answer_releases_the_hold_and_charges_nothing(peer, status):
+    result, run_budget = run_refused(peer, status)
+
+    assert result.status == ng.ProgramTerminalStatus.Failed, describe(result)
+    assert peer.request_count() == 1
+    # The provider declined the request, so nothing ran and nothing is billed:
+    # neither the money hold nor the model-token hold stays, and no call is
+    # recorded as charged.
+    assert result.monetary_records == []
+    assert result.usage.monetary_microunits == 0
+    assert result.usage.model_tokens == 0
+    assert result.remaining_budget.monetary_microunits == run_budget.monetary_microunits
+    assert result.remaining_budget.model_tokens == run_budget.model_tokens
+
+
+@pytest.mark.parametrize("status", [429, 503])
+def test_an_answer_that_can_follow_started_work_keeps_the_hold(peer, status):
+    result, run_budget = run_refused(peer, status)
+
+    assert result.status == ng.ProgramTerminalStatus.Failed, describe(result)
+    assert peer.request_count() == 1
+    [record] = result.monetary_records
+    assert record.evidence == "held"
+    assert record.microunits == HOLD
+    assert result.usage.monetary_microunits == HOLD
+    assert result.usage.model_tokens == support.PRICED_INPUT_LIMIT + support.OUTPUT_CAP
+    assert result.remaining_budget.monetary_microunits == run_budget.monetary_microunits - HOLD
+
+
 def test_an_unknown_model_fails_closed(peer):
     model = "vendor/unlisted-model"
     _host, _version, result = run_bound(peer, model=model,

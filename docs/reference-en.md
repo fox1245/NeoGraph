@@ -43,10 +43,10 @@ CMake 3.20 or newer is required. SchemaProvider runtime remains mandatory when `
 
 The SDK imported target supplies its `include/SchemaProvider` include root; public examples use `<descriptor/descriptor.h>`, `<runtime/client.h>` and `<neograph/llm/schema_provider.h>` directly, without recipe-only helpers.
 
-The installed SDK package must be exactly `0.3.0`, with matching interface revision 6 headers and shared-library generation 6. A version match alone does not admit older interface/ABI binaries.
+The installed SDK package must be exactly `0.3.1`, with matching interface revision 6 headers and shared-library generation 6. A version match alone does not admit older interface/ABI binaries.
 
 ```cmake
-find_package(SchemaProvider 0.3.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.3.1 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -405,9 +405,14 @@ At the semantic `Stop` boundary, valid or invalid client-call intent changes `En
 ### PreparedProviderRequest / ProviderBudgetClaim
 `prepare()` validates and encodes exactly once, producing a move-only `PreparedProviderRequest` with the original deadline and cancellation state. Durable callers bind its `Provider::request_digest()` to their assembly, reserve an admitted budget claim, write the dispatch receipt, then consume that same handle through `ControlledProvider::dispatch_prepared(_async)`. They never rebuild a request after the gate. Duplicate receipts never redispatch. Custom providers implement `get_name()`, `family()` and `prepare()` using `prepare_runtime()` or `prepare_local()`; local callbacks capture owned shared state, not `this`.
 
-Optional `ProviderControls` are caller choices, not mandatory defaults or silently clamped caps. Unsupported family controls fail before dispatch. Bounded calls require genuine admitted model input/output facts; missing facts fail with `LimitUnknown`. A reservation is conservative spending authority, not reported usage, a forecast or an invoice. Unknown/partial/delivery-unknown outcomes retain their hold; genuine final reports settle it, including oversized usage. Retry is one explicit layer, off by default, with a bounded window and unknown-prior hold; no hidden resend.
+Optional `ProviderControls` are caller choices, not mandatory defaults or silently clamped caps. Unsupported family controls fail before dispatch. Bounded calls require genuine admitted model input/output facts; missing facts fail with `LimitUnknown`. A reservation is conservative spending authority, not reported usage, a forecast or an invoice. Unknown/partial/delivery-unknown outcomes retain their hold; genuine final reports settle it, including oversized usage. A usage record with stage `Missing` is no evidence (not zero), and `Partial` is what was seen so far; neither settles a call, and the hold stays. A count the SDK derives (`Evidence::Derived`) settles like a reported one: Gemini's `output_total` and `total`, derived when the output budget is spent while thinking and `candidatesTokenCount` is omitted, are enough to charge the call what it used. Retry is one explicit layer, off by default, with a bounded window and unknown-prior hold; no hidden resend.
 
-`provider_failure_proves_not_sent(Failure)` requires complete, contradiction-free NotSent evidence. A status code, missing usage or observer/persistence exception alone never proves zero cost or renews a budget.
+`provider_failure_proves_not_accepted(Failure)` is the one rule every settlement path uses to decide whether a failed call releases its hold or keeps it: the token reservation of the bank, of the managed journal and of the MCP harness provider, the Program's monetary hold, the SQLite provider journal and the controlled provider's dispatch receipt (`Failed` or `ReconciliationRequired`). It requires complete, contradiction-free evidence of one of two kinds:
+
+- `NotSent`: the SDK proves that no request byte left (`provider_failure_proves_not_sent(Failure)` is this half alone).
+- `RejectedBeforeOutput` on a completed HTTP 4xx answer other than 408, 425 and 429, such as a bad key (401), a malformed request (400) or a pinned `max_price` nobody meets (404). The server declined the request, so nothing ran and nothing is billed. The failure must also carry no output, no stop reason and no usage, and no earlier attempt that could have been billed.
+
+An HTTP 408, 425, 429 or 5xx answer, a cut or timed-out call, a transport failure after the request left, and any failure with partial output or usage keep the hold. Missing usage, an observer or persistence exception, or a status code without the SDK's `RejectedBeforeOutput` label never proves zero cost or renews a budget.
 
 ```cpp
 #include <neograph/controlled_provider.h>
@@ -425,7 +430,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is alpha `0.3.0`, interface revision 6 / shared-library generation 6, with out-of-line capability checks; that is not a stable release claim. Linux/POSIX is the tested platform. Windows NTFS and macOS implementations are present but not tested with this SDK, and WASM provider runtime support is not established.
+This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is alpha `0.3.1`, interface revision 6 / shared-library generation 6, with out-of-line capability checks; that is not a stable release claim. Linux/POSIX is the tested platform. Windows NTFS and macOS implementations are present but not tested with this SDK, and WASM provider runtime support is not established.
 
 Python exposes the same owned request/outcome boundary as C++: `make_provider_request`, `Provider.prepare`, `dispatch` and `invoke`. Use `ProviderMessage` with typed parts for provider history; `ChatMessage` remains a graph convenience projection. A returned SDK failure is available through `ProviderOutcome.failure`, while host observer/settlement exceptions retain `outcome` and `cause`. See the [Python binding guide](python-binding.md) for constructors and GIL/callback behavior.
 
@@ -455,9 +460,9 @@ After the outcome, the hold is settled exactly once, and the attempt's `ProgramR
 |---|---|---|
 | `reported` | The response carries the provider's own cost: OpenRouter `usage.cost`, which the SDK parses into `Usage::provider_cost` in nano-USD. With BYOK the reported upstream charge is added. | The reported amount, rounded up to whole microunits. |
 | `estimated` | Final, consistent usage without a reported cost. | Catalog rates times the reported token bands, rounded up once per call. The record names the catalog version and digest. |
-| `held` | The outcome is unknown (a transport exception, cancellation, a timeout), the request may have been sent before failing, the SDK resent transport attempts, or the usage is partial or inconsistent. | The hold. |
+| `held` | The outcome is unknown (a transport exception, cancellation, a timeout), the call failed in a way that can follow started work (an HTTP 408, 425, 429 or 5xx answer, a cut stream, a transport failure after the request left), the SDK resent transport attempts, or the usage is partial or inconsistent. | The hold. |
 
-A failure that proves nothing was sent releases the hold and leaves no record. A charge above the hold, possible when the reported cost includes what the pin does not cap, such as a BYOK upstream charge, is charged as reported, and a run whose charges exceed its budget ends `BudgetExhausted`. Concurrent calls (`ng.all`, `ng.race`, `ng.quorum`, parallel nodes) reserve against one account, so a member that does not fit is refused. A node retry calls under its own effect namespace (`task#a<k>`), so each attempt's call is a new call and is charged again.
+A failure that proves the provider accepted nothing releases the hold and leaves no record: no request was sent, or the provider answered with a completed HTTP 4xx other than 408, 425 and 429, which declines the request. Neither the money hold nor the model-token reservation is charged. A charge above the hold, possible when the reported cost includes what the pin does not cap, such as a BYOK upstream charge, is charged as reported, and a run whose charges exceed its budget ends `BudgetExhausted`. Concurrent calls (`ng.all`, `ng.race`, `ng.quorum`, parallel nodes) reserve against one account, so a member that does not fit is refused. A node retry calls under its own effect namespace (`task#a<k>`), so each attempt's call is a new call and is charged again.
 
 `bind_priced` writes the call's record into its journal row: the held record with the dispatched marker, then the settled record with the outcome. A call the same Program attempt journaled before its process stopped is charged once, marked `replayed`, when the recovered attempt binds the operation, whether or not the Core calls it again; this includes a define()-only run that recovers by letting its execution lease expire. A call an earlier attempt journaled was settled into the remaining budget by that attempt's result and is never charged again when a later attempt replays its outcome. Recorded replay never spends money.
 

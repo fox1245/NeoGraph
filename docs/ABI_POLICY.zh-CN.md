@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=c256cd8dbcff6a9d694757b520df28f400ba2037d5521599da2e474fb625a0d4 -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=9eb3b827690755fbe7fe7af9513b4faee74fc4cc8350f688f91d2852a7c58b20 -->
 # 二进制兼容性策略
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -33,7 +33,7 @@ CheckpointStore 为了显式的适配器迁移而保留旧的布局。同步的�
 
 ## SDK 与 Python 的边界
 
-即使禁用了 LLM 节点，Core 仍然需要外部的 `SchemaProvider::runtime`。选定的 SDK 版本是 `0.3.0` alpha，公开的 `maint/interface6` 提交 `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`，接口修订版 `6`，共享库 ABI 修订版 `6`，并带有非内联的 capability 检查；这不表示接口已稳定。请把匹配的 SDK 组件一起安装。它的 `libsp_*.so.6` 代数，与 NeoGraph 的加载器代数、Python 的 `abi3` wheel 标签，都是各自独立的。
+即使禁用了 LLM 节点，Core 仍然需要外部的 `SchemaProvider::runtime`。选定的 SDK 版本是 `0.3.1` alpha，公开的 `maint/interface6` 提交 `69f8aba5c75decd21d786853de134ac713634966`，接口修订版 `6`，共享库 ABI 修订版 `6`，并带有非内联的 capability 检查；这不表示接口已稳定。请把匹配的 SDK 组件一起安装。它的 `libsp_*.so.6` 代数，与 NeoGraph 的加载器代数、Python 的 `abi3` wheel 标签，都是各自独立的。
 
 接口 6 在公共的 usage 布局里，增加了定长的、由 provider 上报的金额元数据，并让阻塞和异步的 SDK 调用共用同一条异步流水线。选定的提交还在修订版 6 之内，扩大了 `sp::OpenRouterRouting`（新增了 `max_price`）以及 Chat、Messages 和 Responses 的请求布局；它的 capability 位 `OpenRouterRoutingMaxPrice` 属于 `RequiredProvider`，NeoGraph 的握手要求具备它，因此更早的接口 6 库会被拒绝。SDK 的使用方、NeoGraph 和 Python 扩展要一起重新构建；更早的头文件或库与接口 6 不能互换。阻塞式包装器仍然拒绝从 SDK 的事件循环和回调 worker 中重入。native archive v3 / `spna3` 和可移植 JSON v2 是各自独立、保持不变的格式。规范的 outcome v2 usage，只有在存在金额元数据时才增加可选的 `provider_cost`；只是缺失该字段的历史记录保留原有字节，不会伪造成本。
 

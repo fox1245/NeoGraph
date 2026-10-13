@@ -561,7 +561,7 @@ std::optional<ProgramMonetaryRecord> settle_monetary_call(const pricing::PriceCa
                                                           const sp::runtime::Result&   outcome) {
     if (!outcome) return unknown_outcome_record(quote, site, "no outcome");
     if (const auto* failure = std::get_if<sp::Failure>(outcome.get())) {
-        if (provider_failure_proves_not_sent(*failure)) return std::nullopt;
+        if (provider_failure_proves_not_accepted(*failure)) return std::nullopt;
         return held_record(quote, site, "failed after the request may have been sent");
     }
     const auto& completion = std::get<sp::Completion>(*outcome);

@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=6054da8515ffab9b9f21d9d29f0cd3ecc2d9c708c06bc1242748ee7a001ecf5e -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=d8e99cf88b8a8203b09c7390c1474d631c9f24671d2be045446c79de071e497a -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
 
 `neograph-engine` 是同一套 C++ 运行时的 pybind11 接口。wheel 启用了 Core、LLM、Program/QuickJS、MCP 和 SQLite 运行时持久化；从源码构建时，可选组件只有编译进去的才会暴露。
 
-本指南要求使用针对 SchemaProvider SDK `0.3.0`、接口修订版 `6` 和共享库 ABI 修订版 `6` 构建的 wheel，并且要连同其捆绑的组件一起安装。仍然暴露 `complete` 的旧版 wheel 使用的是另一套 provider 接口，无法运行下面带类型的示例。
+本指南要求使用针对 SchemaProvider SDK `0.3.1`、接口修订版 `6` 和共享库 ABI 修订版 `6` 构建的 wheel，并且要连同其捆绑的组件一起安装。仍然暴露 `complete` 的旧版 wheel 使用的是另一套 provider 接口，无法运行下面带类型的示例。
 
 ```bash
 pip install neograph-engine
@@ -539,7 +539,7 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 
 在这个绑定里，只有 label 会进入任何身份标识。需要该 provider 的 Program 版本，带有一份 capability receipt，其身份是 label 与 provider 的注册表身份合起来的摘要；provider 的密钥、endpoint 和模型都不在其中，所以换模型不会改变版本 id，换 label 才会。不需要 provider 的 Program 没有 receipt，bundle id 和版本 id 都不变。label 必须由 1 到 64 个字符组成，字符取自 `a-z`、`0-9`、`.`、`_`、`-` 和 `:`，以字母或数字开头，并且看起来不能像 API key。没有 `node_context` 时，需要该 provider 的 Program 会在准入时以 `P_ADMIT_PROVIDER` 被拒绝；含有未带 `provider=` 注册的 `llm_call` 或 `intent_classifier` 节点的 Program 也一样。
 
-每次调用都按编译进 NeoGraph 的价格目录计价，并计入运行的 `monetary_microunits`。请求发出之前，会先预留这次调用的上限。在 OpenRouter 上，请求还会把这个上限作为 `provider.max_price` 带上：取路由上限（route ceiling）的输入和输出费率，或者控制项或 `SchemaProviderDefaults` 中已设置的、更低的 `max_price`，这样 OpenRouter 就不能把调用路由到更贵的 endpoint。计价时会准备（但绝不发送）一个探测请求，其对话只有一条用户消息，所以 Python provider 的 `prepare` 能看到它。无法确定上限的调用（目录里没有该模型、路由别名没有路由上限、请求没有输出上限），或者预留额度超出剩余预算的调用，会在发出任何东西之前被拒绝，运行以 `P_MONEY_*` 错误码失败。与 `ProgramRunBudget` 的每个字段一样，`monetary_microunits = 0` 表示什么都不授予，所以这样的运行会拒绝每一次调用。收到回复后，`result.monetary_records` 为每次调用保存一条 `ng.ProgramMonetaryRecord`，带有它的 `evidence`：`reported`（OpenRouter 的 `usage.cost`）、`estimated`（按目录费率估算；`catalog_version` 和 `catalog_digest` 指明是哪个目录）或 `held`（outcome 或用量未知，因此按预留额度计费）。`result.usage.monetary_microunits` 是它们的总和。错误码、上限和结算规则见[定价证据与价格目录](reference-en.md#pricing-evidence-and-the-price-catalog)。
+每次调用都按编译进 NeoGraph 的价格目录计价，并计入运行的 `monetary_microunits`。请求发出之前，会先预留这次调用的上限。在 OpenRouter 上，请求还会把这个上限作为 `provider.max_price` 带上：取路由上限（route ceiling）的输入和输出费率，或者控制项或 `SchemaProviderDefaults` 中已设置的、更低的 `max_price`，这样 OpenRouter 就不能把调用路由到更贵的 endpoint。计价时会准备（但绝不发送）一个探测请求，其对话只有一条用户消息，所以 Python provider 的 `prepare` 能看到它。无法确定上限的调用（目录里没有该模型、路由别名没有路由上限、请求没有输出上限），或者预留额度超出剩余预算的调用，会在发出任何东西之前被拒绝，运行以 `P_MONEY_*` 错误码失败。与 `ProgramRunBudget` 的每个字段一样，`monetary_microunits = 0` 表示什么都不授予，所以这样的运行会拒绝每一次调用。收到回复后，`result.monetary_records` 为每次调用保存一条 `ng.ProgramMonetaryRecord`，带有它的 `evidence`：`reported`（OpenRouter 的 `usage.cost`）、`estimated`（按目录费率估算；`catalog_version` 和 `catalog_digest` 指明是哪个目录）或 `held`（outcome 或用量未知，因此按预留额度计费）。provider 以已完成的 HTTP 4xx 响应（408、425、429 除外，例如密钥无效或请求格式错误）拒绝的调用，以及从未发出的调用，会释放预留、不留记录，也不收取金额和模型 token。429、5xx 响应和被切断的调用仍为 `held`。`result.usage.monetary_microunits` 是它们的总和。错误码、上限和结算规则见[定价证据与价格目录](reference-en.md#pricing-evidence-and-the-price-catalog)。
 
 调用模型的 Python 节点自己持有 provider；Program 的预算看不到这样的调用。
 

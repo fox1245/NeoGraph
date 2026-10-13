@@ -54,7 +54,8 @@ The provider boundary records two separate immutable values:
    `ReconciliationRequired` after the attempt.
 
 A successful result binds a digest of the full SDK outcome observation.
-A typed Failure proven not sent records `Failed`; uncertain delivery records
+A typed Failure proven not accepted (no request was sent, or a completed HTTP 4xx
+answer declined it) records `Failed`; uncertain delivery records
 `ReconciliationRequired`. An exception after dispatch does not establish whether
 the remote provider acted, so the controller does not silently retry.
 SQLite schema v3 stores terminal receipts separately and checks their exact
@@ -87,7 +88,8 @@ Program attempt. It commits the marker with SQLite FULL synchronization before
 transport. The marker means transport *may* have occurred, not that the provider
 received it or that the effect happened exactly once. Full immutable SDK
 Completion/Failure outcomes are stored with encoding version 2 for exact-bound
-replay. A Failure proven not sent records `Failed`; uncertain delivery, an
+replay. A Failure proven not accepted (not sent, or declined by a completed HTTP
+4xx answer) records `Failed`; uncertain delivery, an
 exception, or a crash before settlement requires reconciliation and never
 silently re-dispatches. Use
 `inspect(owner, logical_call_id(context, core_identity))` to check status, then

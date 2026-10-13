@@ -157,6 +157,29 @@ public:
     std::atomic<unsigned>& calls;
 };
 
+// Answers every call with a typed failure of the given HTTP status and safety.
+class FailureProvider final : public neograph::test::LocalProvider {
+public:
+    FailureProvider(int http_status, sp::RetrySafety safety,
+                    std::shared_ptr<std::atomic<unsigned>> count =
+                        std::make_shared<std::atomic<unsigned>>(0))
+        : LocalProvider([count, http_status, safety](auto, const auto&, const auto&)
+                            -> asio::awaitable<sp::runtime::Result> {
+              count->fetch_add(1, std::memory_order_relaxed);
+              sp::Failure failure;
+              failure.error.kind         = sp::ErrorKind::RemoteFailure;
+              failure.error.safe_message = "provider answered with an HTTP error";
+              failure.error.http_status  = http_status;
+              failure.error.retry_safety = safety;
+              failure.error.attempt.request_may_have_left = true;
+              failure.error.attempt.request_body_bytes    = 128;
+              failure.error.attempt.response_head_seen    = true;
+              failure.error.attempt.attempts              = 1;
+              co_return std::make_shared<const sp::Outcome>(std::move(failure));
+          }, "failure-provider", neograph::test::bounded_client()), calls(*count) {}
+    std::atomic<unsigned>& calls;
+};
+
 class TimeoutProvider final : public neograph::test::LocalProvider {
 public:
     explicit TimeoutProvider(std::shared_ptr<std::atomic<unsigned>> count =
@@ -741,6 +764,52 @@ TEST(HarnessProgramCutover, ProviderExceptionRetainsUncertainTokenReservation) {
     EXPECT_EQ(executor(call, cancel).kind, neograph::mcp::HarnessWorkerResponseKind::VALUE);
     EXPECT_EQ(provider->calls.load(std::memory_order_relaxed), 3U);
     EXPECT_EQ(call.usage->total_tokens_wide(), 0);
+}
+
+TEST(HarnessProgramCutover, ADeclinedRequestReleasesTheTokenReservationAndAnUncertainOneKeepsIt) {
+    struct Case {
+        int                http_status;
+        sp::RetrySafety    safety;
+        std::uint64_t      held;
+        bool               uncertain;
+    };
+    // A completed HTTP 4xx that the SDK labels RejectedBeforeOutput proves the
+    // provider accepted nothing. A 503, a 429 or an unlabelled answer can
+    // follow started work.
+    const std::vector<Case> cases{
+        {401, sp::RetrySafety::RejectedBeforeOutput, 0, false},
+        {400, sp::RetrySafety::RejectedBeforeOutput, 0, false},
+        {429, sp::RetrySafety::PossiblyAccepted, 2, true},
+        {503, sp::RetrySafety::PossiblyAccepted, 2, true},
+        {401, sp::RetrySafety::PossiblyAccepted, 2, true},
+    };
+    for (const auto& item : cases) {
+        SCOPED_TRACE(std::to_string(item.http_status));
+        auto                                         provider = std::make_shared<FailureProvider>(
+            item.http_status, item.safety);
+        neograph::mcp::HarnessProviderExecutorConfig provider_config{.model = "test-model"};
+        provider_config.provider        = provider;
+        provider_config.max_tool_rounds = 1;
+        auto executor = neograph::mcp::make_provider_harness_executor(std::move(provider_config));
+
+        neograph::mcp::HarnessWorkerCall call;
+        call.task               = {{"objective", "declined"}, {"acceptance", json::array()}};
+        call.worker             = {{"worker_id", "declined-worker"},
+                                   {"instructions", "return JSON"},
+                                   {"output_schema", {{"type", "object"}}},
+                                   {"_harness_provider_budget",
+                                    {{"max_output_tokens", 1}, {"input_token_ceiling", 1}}}};
+        call.usage              = std::make_shared<neograph::UsageAccumulator>();
+        call.model_token_budget = 2;
+        call.budget_exhausted   = std::make_shared<std::atomic_bool>(false);
+        auto cancel             = std::make_shared<neograph::graph::CancelToken>();
+
+        const auto failed = executor(call, cancel);
+        EXPECT_EQ(failed.kind, neograph::mcp::HarnessWorkerResponseKind::TOOL_ERROR);
+        EXPECT_EQ(provider->calls.load(std::memory_order_relaxed), 1U);
+        EXPECT_EQ(call.usage->total_tokens_wide(), item.held);
+        EXPECT_EQ(failed.provider_effect_uncertain, item.uncertain);
+    }
 }
 
 TEST(HarnessProgramCutover, ProviderTimeoutRetainsUncertainTokenReservation) {

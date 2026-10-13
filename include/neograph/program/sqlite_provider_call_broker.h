@@ -98,7 +98,7 @@ public:
         std::uint64_t committed_amount;
         /// The priced call's record: the held provisional record while the
         /// outcome is unknown, the settled record after it. Empty when the call
-        /// was not priced or nothing was sent.
+        /// was not priced or the provider accepted nothing.
         std::optional<ProgramMonetaryRecord> monetary_record;
     };
     std::optional<Record> inspect(std::string_view owner_scope,

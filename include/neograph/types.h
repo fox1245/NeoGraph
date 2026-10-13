@@ -411,19 +411,67 @@ inline const sp::Usage& outcome_usage(const sp::Outcome& outcome) noexcept {
     if (const auto* completion = std::get_if<sp::Completion>(&outcome)) return completion->usage;
     return std::get<sp::Failure>(outcome).partial.usage;
 }
-inline bool provider_failure_proves_not_sent(const sp::Failure& failure) noexcept {
-    const auto& attempt = failure.error.attempt;
-    const auto& usage = failure.partial.usage;
-    return failure.error.retry_safety == sp::RetrySafety::NotSent &&
-        !attempt.request_may_have_left && attempt.request_body_bytes == 0 &&
-        !attempt.response_head_seen && attempt.transport_internal_resends == 0 && !attempt.prior_usage_unknown &&
-        failure.partial.messages.empty() && !failure.partial.stop && !failure.partial.wire_envelope &&
-        failure.partial.raw_events.empty() && usage.stage == sp::UsageStage::Missing &&
+namespace detail {
+// A usage record that holds nothing at all: no stage, no counter, no cost. The
+// provider reported nothing, which is not the same as reporting zero.
+inline bool usage_holds_nothing(const sp::Usage& usage) noexcept {
+    return usage.stage == sp::UsageStage::Missing &&
         usage.quality == sp::UsageQuality::Consistent &&
         !usage.input_total && !usage.output_total && !usage.total && !usage.provider_reported_total &&
         !usage.input_uncached && !usage.cache_read && !usage.cache_write && !usage.reasoning &&
         usage.extra.empty() && usage.conflicts.empty() &&
         provider_codec::provider_cost_absent(usage.provider_cost);
+}
+// The statuses SchemaProvider 0.3.1 labels `RejectedBeforeOutput`: the server
+// completed an answer that declines the request. 408 and 425 ask the client to
+// try again and 429 can follow started work, so they stay possibly accepted.
+inline bool http_status_declines_request(int status) noexcept {
+    return status >= 400 && status < 500 && status != 408 && status != 425 && status != 429;
+}
+}  // namespace detail
+
+/// The SDK proves that no request byte left the process. Complete,
+/// contradiction-free `NotSent` evidence: no attempt evidence of any kind, no
+/// partial output and no usage.
+inline bool provider_failure_proves_not_sent(const sp::Failure& failure) noexcept {
+    const auto& attempt = failure.error.attempt;
+    const auto& partial = failure.partial;
+    return failure.error.retry_safety == sp::RetrySafety::NotSent &&
+        !attempt.request_may_have_left && attempt.request_body_bytes == 0 &&
+        !attempt.response_head_seen && attempt.transport_internal_resends == 0 && !attempt.prior_usage_unknown &&
+        partial.messages.empty() && !partial.stop && !partial.wire_envelope &&
+        partial.raw_events.empty() && detail::usage_holds_nothing(partial.usage);
+}
+
+/// The provider answered with a completed HTTP 4xx other than 408, 425 and 429
+/// and the SDK labelled it `RejectedBeforeOutput`: the server declined the
+/// request, so nothing ran and nothing is billed. The failure must carry no
+/// output, no stop reason and no usage (only the diagnostic `http.error` body
+/// the SDK keeps), and no earlier attempt that could have been billed.
+inline bool provider_failure_proves_rejected_before_output(const sp::Failure& failure) noexcept {
+    const auto& attempt = failure.error.attempt;
+    const auto& partial = failure.partial;
+    return failure.error.retry_safety == sp::RetrySafety::RejectedBeforeOutput &&
+        detail::http_status_declines_request(failure.error.http_status) &&
+        attempt.request_may_have_left && attempt.response_head_seen &&
+        attempt.transport_internal_resends == 0 && !attempt.prior_usage_unknown &&
+        partial.messages.empty() && !partial.stop && !partial.wire_envelope &&
+        std::all_of(partial.raw_events.begin(), partial.raw_events.end(),
+                    [](const sp::RawWire& event) { return event.type == "http.error"; }) &&
+        detail::usage_holds_nothing(partial.usage);
+}
+
+/// The one rule that decides whether a failed provider call releases the hold
+/// taken for it (token reservation, monetary hold, dispatch receipt) or keeps
+/// it: true only when the failure proves the provider accepted nothing, because
+/// no request was sent or because it declined the request with a completed HTTP
+/// 4xx answer. Everything else keeps the hold: 408, 425, 429 and 5xx answers,
+/// a cut or timed-out call, a transport failure after the request left, and any
+/// failure with partial output or usage. Missing usage, a status code on its
+/// own, or an observer or persistence exception never prove it.
+inline bool provider_failure_proves_not_accepted(const sp::Failure& failure) noexcept {
+    return provider_failure_proves_not_sent(failure) ||
+           provider_failure_proves_rejected_before_output(failure);
 }
 inline std::string outcome_text(const sp::Outcome& outcome) {
     std::string text;

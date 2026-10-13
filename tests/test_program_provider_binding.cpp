@@ -19,6 +19,7 @@
 #include <neograph/program/sqlite_transition_store.h>
 
 #include "fixtures/typed_provider.h"
+#include "fixtures/typed_wire_peer.h"
 #include "monetary.h"
 #include "pricing.h"
 #include "provider_binding.h"
@@ -337,6 +338,10 @@ struct HostOptions {
     std::size_t   workers       = 1;
     bool          bind_provider = true;
     int           node_retries  = 0;
+    // Replaces the provider double: a real SDK client at a loopback peer.
+    std::function<std::shared_ptr<Provider>()> provider;
+    // The trusted native custody a durable journal needs for a real SDK client.
+    std::shared_ptr<sp::NativeArchive> archive;
 };
 
 const ExecutableIdentity kProviderIdentity{ExecutableKind::Provider, "priced-provider", "1.0.0",
@@ -421,7 +426,8 @@ public:
             store        = std::make_shared<SQLiteProgramStore>(files_->program_db());
             transitions_ = std::make_shared<SQLiteProgramTransitionStore>(files_->program_db());
             checkpoints  = std::make_shared<graph::SqliteCheckpointStore>(files_->checkpoint_db());
-            journal_     = std::make_shared<SQLiteProgramProviderCallJournal>(files_->provider_db());
+            journal_     = std::make_shared<SQLiteProgramProviderCallJournal>(files_->provider_db(),
+                                                                              options_.archive);
         } else {
             store        = std::make_shared<InMemoryProgramStore>();
             transitions_ = std::make_shared<InMemoryProgramTransitionStore>();
@@ -431,8 +437,9 @@ public:
         std::optional<graph::NodeContext> context;
         if (options_.bind_provider) {
             context.emplace();
-            context->provider = make_provider(
-                peer_, client_for(options_.origin, options_.model, options_.input_limit));
+            context->provider = options_.provider
+                ? options_.provider()
+                : make_provider(peer_, client_for(options_.origin, options_.model, options_.input_limit));
             context->model = options_.model;
             context->provider_controls.max_output_tokens = options_.output_cap;
             context->provider_controls.service_tier      = options_.service_tier;
@@ -837,6 +844,139 @@ TEST_P(Priced, AFailureAfterTheRequestMayHaveLeftKeepsTheHold) {
     ASSERT_EQ(result.monetary_records().size(), 1U);
     EXPECT_EQ(result.monetary_records().front().evidence, ProgramMonetaryEvidence::Held);
     EXPECT_EQ(result.usage().monetary_microunits, expected_hold());
+}
+
+// ---------------------------------------------------------------------------
+// HTTP answers from a real SDK client at a loopback peer
+// ---------------------------------------------------------------------------
+
+namespace wire = neograph::test::wire;
+
+// The loopback origin is declared an OpenRouter origin in the SDK policy, as
+// the Python host does for a local peer: the SDK then admits OpenRouter
+// routing for it and the catalog prices it as OpenRouter.
+sp::descriptor::ValidatedDescriptor loopback_openrouter_descriptor(const std::string& origin) {
+    auto policy = json::parse(sp::config_defaults::descriptor_policy_json);
+    json defaults;
+    for (auto family : policy.at("families")) {
+        if (family.at("family") != "openai.chat") continue;
+        family.at("openrouter_origins").push_back(origin);
+        defaults = family.at("defaults");
+    }
+    policy.at("models").push_back(json{{"family", "openai.chat"}, {"model", std::string(kModel)},
+                                       {"defaults", defaults}, {"output_limit", nullptr},
+                                       {"input_limit", kInputLimit}});
+    auto admitted = sp::descriptor::load_policy(policy.dump(), sp::config_defaults::codec_defaults_json);
+    if (auto* error = std::get_if<sp::descriptor::ConfigError>(&admitted))
+        throw std::invalid_argument(error->pointer + ": " + error->message);
+    return neograph::test::descriptor("openai.chat", origin,
+                                      std::get<sp::descriptor::PolicySnapshot>(std::move(admitted)));
+}
+
+// A real SDK client at the loopback peer. A durable journal needs the trusted
+// native custody such a client asks for: an archive provisioned for the same
+// descriptor, in an owner-only directory next to the journal.
+HostOptions loopback_options(const std::string& origin, const TempDir* durable_files) {
+    auto descriptor = loopback_openrouter_descriptor(origin);
+    HostOptions options;
+    if (durable_files) {
+        const auto custody = durable_files->path / "custody";
+        std::filesystem::create_directory(custody);
+        std::filesystem::permissions(custody, std::filesystem::perms::owner_all,
+                                     std::filesystem::perm_options::replace);
+        auto provisioned = sp::NativeArchive::provision((custody / "records").string(),
+                                                        (custody / "key").string(), kOwner, descriptor);
+        if (!std::holds_alternative<std::shared_ptr<sp::NativeArchive>>(provisioned))
+            throw std::runtime_error("native archive provisioning failed");
+        options.archive = std::get<std::shared_ptr<sp::NativeArchive>>(std::move(provisioned));
+    }
+    options.provider = [descriptor] {
+        sp::runtime::Options runtime;
+        runtime.workers                 = 1;
+        runtime.default_timeout         = std::chrono::seconds(5);
+        runtime.retry_tokens            = 0;
+        runtime.retry_tokens_per_second = 0;
+        return std::shared_ptr<Provider>(llm::SchemaProvider::create(descriptor, std::move(runtime)));
+    };
+    return options;
+}
+
+std::string error_body(int status) {
+    return json{{"error", {{"message", "marker-not-for-logs"}, {"type", "fixture_error"},
+                           {"code", status}}}}.dump();
+}
+
+std::size_t requests_seen(wire::Peer& peer) {
+    std::lock_guard lock(peer.state->mutex);
+    return peer.state->entered;
+}
+
+// The reservation one call makes against the model-token budget: the admitted
+// input limit plus the output cap.
+constexpr std::uint64_t kTokenHold = kInputLimit + kOutputCap;
+
+TEST_P(Priced, ACompletedHttp4xxAnswerReleasesTheHoldAndChargesNothing) {
+#ifdef _WIN32
+    if (durable()) GTEST_SKIP() << "NativeArchive custody needs an owner-only protected directory";
+#endif
+    for (const int status : {400, 401, 404}) {
+        SCOPED_TRACE(status);
+        TempDir      files("rejection");
+        wire::Peer   remote(error_body(status));
+        remote.state->status = status;
+        auto options = loopback_options(remote.origin(), durable() ? &files : nullptr);
+        Host       h(std::make_shared<Peer>(), options, durable() ? &files : nullptr);
+        const auto result = h.run(Shape::Llm);
+        EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed) << failure_text(result);
+        ASSERT_TRUE(result.failure());
+        // The durable run keeps the outcome in the journal row, not in the failure.
+        if (!durable()) {
+            ASSERT_TRUE(result.failure()->provider_outcome);
+            const auto& failed = std::get<sp::Failure>(*result.failure()->provider_outcome);
+            EXPECT_EQ(failed.error.http_status, status);
+            EXPECT_EQ(failed.error.retry_safety, sp::RetrySafety::RejectedBeforeOutput);
+        }
+        // The provider declined the request: the money hold and the token
+        // hold are released, and nothing is charged.
+        EXPECT_TRUE(result.monetary_records().empty());
+        EXPECT_EQ(result.usage().monetary_microunits, 0U);
+        EXPECT_EQ(result.usage().model_tokens, 0U);
+        EXPECT_EQ(result.remaining_budget().monetary_microunits, 1'000'000U);
+        EXPECT_EQ(result.remaining_budget().model_tokens, options.model_tokens);
+        EXPECT_EQ(requests_seen(remote), 1U);
+        if (durable()) EXPECT_EQ(journal_states(files.provider_db()), std::vector<std::string>{"failed"});
+    }
+}
+
+TEST_P(Priced, AnAnswerThatCanFollowStartedWorkKeepsTheHold) {
+#ifdef _WIN32
+    if (durable()) GTEST_SKIP() << "NativeArchive custody needs an owner-only protected directory";
+#endif
+    for (const int status : {429, 503}) {
+        SCOPED_TRACE(status);
+        TempDir      files("started");
+        wire::Peer   remote(error_body(status));
+        remote.state->status = status;
+        auto options = loopback_options(remote.origin(), durable() ? &files : nullptr);
+        Host       h(std::make_shared<Peer>(), options, durable() ? &files : nullptr);
+        const auto result = h.run(Shape::Llm);
+        EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed) << failure_text(result);
+        ASSERT_TRUE(result.failure());
+        if (!durable()) {
+            ASSERT_TRUE(result.failure()->provider_outcome);
+            const auto& failed = std::get<sp::Failure>(*result.failure()->provider_outcome);
+            EXPECT_EQ(failed.error.http_status, status);
+            EXPECT_EQ(failed.error.retry_safety, sp::RetrySafety::PossiblyAccepted);
+        }
+        ASSERT_EQ(result.monetary_records().size(), 1U);
+        EXPECT_EQ(result.monetary_records().front().evidence, ProgramMonetaryEvidence::Held);
+        EXPECT_EQ(result.usage().monetary_microunits, expected_hold());
+        EXPECT_EQ(result.usage().model_tokens, kTokenHold);
+        EXPECT_EQ(requests_seen(remote), 1U);
+        if (durable())
+            EXPECT_EQ(journal_states(files.provider_db()),
+                      std::vector<std::string>{"reconciliation_required"});
+    }
 }
 
 // ---------------------------------------------------------------------------

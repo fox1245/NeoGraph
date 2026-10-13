@@ -742,7 +742,7 @@ void ManagedBudgetJournalAccess::settle(
                 state = "charged";
             }
         }
-    } else if (provider_failure_proves_not_sent(std::get<sp::Failure>(*outcome))) {
+    } else if (provider_failure_proves_not_accepted(std::get<sp::Failure>(*outcome))) {
         held = 0;
         state = "released";
     }

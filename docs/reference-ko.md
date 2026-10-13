@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=1ca9f4ddd1a059b77adaa7d44ecb6000374b0406f3d7cf2387fb3673dcd1cd19 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=02aa0420d6411279c4b6c9bc6dca39056c66c53c94ff7fa922a4342831a6b03b -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -42,10 +42,10 @@ CMake 3.20 이상이 필요하다. Core가 소유 typed provider 계약을 공�
 
 SDK imported target이 `include/SchemaProvider` include root를 제공한다. 공개 예시는 recipe 전용 helper 없이 `<descriptor/descriptor.h>`, `<runtime/client.h>`, `<neograph/llm/schema_provider.h>`를 직접 사용한다.
 
-설치 SDK package는 정확히 `0.3.0`이어야 하며 interface revision 6 header와 shared-library generation 6이 일치해야 한다. 버전 일치만으로 이전 interface/ABI binary를 승인하지 않는다.
+설치 SDK package는 정확히 `0.3.1`이어야 하며 interface revision 6 header와 shared-library generation 6이 일치해야 한다. 버전 일치만으로 이전 interface/ABI binary를 승인하지 않는다.
 
 ```cmake
-find_package(SchemaProvider 0.3.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.3.1 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -404,9 +404,14 @@ semantic `Stop` 경계에서 valid/invalid client-call intent 모두 `EndTurn`�
 ### PreparedProviderRequest / ProviderBudgetClaim
 `prepare()`는 검증·인코딩을 정확히 한 번 수행하고 원래 deadline과 취소 상태를 가진 이동 전용 `PreparedProviderRequest`를 만든다. 영속 호출자는 `Provider::request_digest()`를 assembly에 바인딩하고 승인된 예산 claim을 예약하며 dispatch receipt를 기록한 다음 같은 핸들을 `ControlledProvider::dispatch_prepared(_async)`로 소비한다. gate 이후 요청을 재생성하지 않는다. 중복 receipt는 재전송하지 않는다. 사용자 공급자는 `get_name()`, `family()`, `prepare()`를 구현하고 `prepare_runtime()` 또는 `prepare_local()`을 사용한다. local callback은 `this` 대신 소유 shared 상태를 캡처한다.
 
-선택적 `ProviderControls`는 호출자 선택이며 강제 기본값이나 몰래 clamp한 cap이 아니다. family가 지원하지 않는 제어는 dispatch 전에 거부한다. 유한 예산 호출에는 승인된 실제 모델 input/output 한계가 필요하며 없으면 `LimitUnknown`으로 실패한다. 예약은 보수적인 지출 권한이지 보고 사용량·예측·청구서가 아니다. 미상/부분/delivery-unknown 결과는 hold를 유지하고 실제 최종 보고로 정산하며 초과 보고도 전부 청구한다. 재시도는 단일 명시적 계층이며 기본 off, 유한 window와 unknown-prior hold를 사용한다. 숨은 재전송은 없다.
+선택적 `ProviderControls`는 호출자 선택이며 강제 기본값이나 몰래 clamp한 cap이 아니다. family가 지원하지 않는 제어는 dispatch 전에 거부한다. 유한 예산 호출에는 승인된 실제 모델 input/output 한계가 필요하며 없으면 `LimitUnknown`으로 실패한다. 예약은 보수적인 지출 권한이지 보고 사용량·예측·청구서가 아니다. 미상/부분/delivery-unknown 결과는 hold를 유지하고 실제 최종 보고로 정산하며 초과 보고도 전부 청구한다. 사용량 stage가 `Missing`이면 근거가 없는 것이지 0이 아니고, `Partial`은 지금까지 본 값이다. 둘 다 호출을 정산하지 못하므로 hold가 남는다. SDK가 도출한 개수(`Evidence::Derived`)는 보고된 개수처럼 정산한다. thinking에 출력 예산을 다 써서 `candidatesTokenCount`가 빠진 Gemini 호출은, 도출된 `output_total`과 `total`만으로 실제 사용량을 청구한다. 재시도는 단일 명시적 계층이며 기본 off, 유한 window와 unknown-prior hold를 사용한다. 숨은 재전송은 없다.
 
-`provider_failure_proves_not_sent(Failure)`는 완전하고 모순 없는 NotSent 근거를 요구한다. 상태 코드·누락 사용량·관측자/영속 예외만으로 비용 0이나 예산 갱신을 증명하지 않는다.
+`provider_failure_proves_not_accepted(Failure)`는 실패한 호출이 hold를 풀지 유지할지를 모든 정산 경로가 함께 쓰는 단일 규칙이다. 적용 대상은 bank, managed journal, MCP harness provider의 토큰 reservation, Program의 금액 hold, SQLite provider journal, controlled provider의 dispatch receipt(`Failed` 또는 `ReconciliationRequired`)다. 아래 두 근거 중 하나가 완전하고 모순 없이 갖춰져야 한다.
+
+- `NotSent`: 요청 바이트가 하나도 나가지 않았음을 SDK가 증명한다(`provider_failure_proves_not_sent(Failure)`는 이 절반만 판정한다).
+- 완료된 HTTP 4xx 응답(408, 425, 429 제외)의 `RejectedBeforeOutput`. 예를 들면 잘못된 키(401), 잘못된 요청(400), 아무도 맞출 수 없는 `max_price` 고정값(404)이다. 서버가 요청을 거절했으므로 아무것도 실행되지 않았고 청구되지도 않는다. 실패에는 출력·stop reason·사용량이 없어야 하고, 청구되었을 수 있는 이전 시도도 없어야 한다.
+
+HTTP 408, 425, 429, 5xx 응답, 끊기거나 timeout된 호출, 요청이 나간 뒤의 transport 실패, 부분 출력이나 사용량이 있는 모든 실패는 hold를 유지한다. 누락된 사용량, 관측자·영속 예외, SDK의 `RejectedBeforeOutput` 라벨이 없는 상태 코드만으로는 비용 0이나 예산 갱신을 증명하지 않는다.
 
 ```cpp
 #include <neograph/controlled_provider.h>
@@ -424,7 +429,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 alpha `0.3.0`, interface revision 6 / shared-library generation 6이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. Linux/POSIX가 검증된 플랫폼이다. Windows NTFS와 macOS 구현이 있으나 이 SDK로 검증하지 않았으며, WASM provider runtime 지원은 확립되지 않았다.
+소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 alpha `0.3.1`, interface revision 6 / shared-library generation 6이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. Linux/POSIX가 검증된 플랫폼이다. Windows NTFS와 macOS 구현이 있으나 이 SDK로 검증하지 않았으며, WASM provider runtime 지원은 확립되지 않았다.
 
 Python도 C++과 같은 소유 request/outcome 경계를 제공한다: `make_provider_request`, `Provider.prepare`, `dispatch`, `invoke`. Provider 기록에는 typed part를 가진 `ProviderMessage`를 사용하며 `ChatMessage`는 그래프 편의 projection으로 남는다. SDK 실패는 `ProviderOutcome.failure`로 읽고 host observer/settlement 예외는 `outcome`과 `cause`를 보존한다. 생성자와 GIL/콜백 동작은 [Python binding 안내](python-binding.md)를 참조한다.
 
@@ -455,9 +460,9 @@ dispatch 전에 broker는 준비된 요청에 가격을 매긴다. origin은 des
 |---|---|---|
 | `reported` | 응답에 provider 자체 비용이 있다: OpenRouter `usage.cost`이며 SDK가 nano-USD 단위의 `Usage::provider_cost`로 파싱한다. BYOK이면 보고된 upstream 청구액을 더한다. | 보고 금액을 정수 microunit으로 올림한 값. |
 | `estimated` | 보고 비용이 없는 최종·일관 usage. | 카탈로그 요율 × 보고된 토큰 구간, 호출당 한 번 올림. 기록에 카탈로그 version과 digest가 남는다. |
-| `held` | 결과를 모른다(transport 예외, 취소, timeout), 요청이 실패 전에 보내졌을 수 있다, SDK가 transport 시도를 다시 보냈다, 또는 usage가 부분적이거나 일관되지 않다. | hold. |
+| `held` | 결과를 모른다(transport 예외, 취소, timeout), 호출이 이미 시작된 작업 뒤에 실패했을 수 있다(HTTP 408·425·429·5xx 응답, 끊긴 스트림, 요청이 나간 뒤의 transport 실패), SDK가 transport 시도를 다시 보냈다, 또는 usage가 부분적이거나 일관되지 않다. | hold. |
 
-아무것도 보내지 않았음을 증명하는 실패는 hold를 풀고 기록을 남기지 않는다. hold보다 큰 청구액(BYOK upstream 비용처럼 고정값이 제한하지 않는 비용이 보고 비용에 포함될 때 가능)은 보고된 대로 청구되며, 청구액이 예산을 넘은 실행은 `BudgetExhausted`로 끝난다. 동시 호출(`ng.all`, `ng.race`, `ng.quorum`, 병렬 노드)은 한 계정에 예약하므로 들어가지 않는 member는 거부된다. 노드 재시도는 자기 effect namespace(`task#a<k>`)로 호출하므로 attempt마다의 호출은 새 호출이며 다시 청구된다.
+provider가 아무것도 받아들이지 않았음을 증명하는 실패는 hold를 풀고 기록을 남기지 않는다. 요청을 보내지 않았거나, provider가 완료된 HTTP 4xx 응답(408, 425, 429 제외)으로 요청을 거절한 경우다. 금액 hold도 모델 토큰 reservation도 청구되지 않는다. hold보다 큰 청구액(BYOK upstream 비용처럼 고정값이 제한하지 않는 비용이 보고 비용에 포함될 때 가능)은 보고된 대로 청구되며, 청구액이 예산을 넘은 실행은 `BudgetExhausted`로 끝난다. 동시 호출(`ng.all`, `ng.race`, `ng.quorum`, 병렬 노드)은 한 계정에 예약하므로 들어가지 않는 member는 거부된다. 노드 재시도는 자기 effect namespace(`task#a<k>`)로 호출하므로 attempt마다의 호출은 새 호출이며 다시 청구된다.
 
 `bind_priced`는 호출의 기록을 journal 행에 쓴다. dispatched marker와 함께 held 기록을, 결과와 함께 정산된 기록을 쓴다. 같은 Program attempt가 프로세스가 멈추기 전에 기록한 호출은, 복구된 attempt가 그 operation을 바인딩할 때 Core가 다시 호출하든 아니든 한 번 청구되고 `replayed`로 표시된다. execution lease 만료로 복구되는 define() 전용 실행도 포함된다. 이전 attempt가 기록한 호출은 그 attempt의 결과가 남은 예산에 이미 정산했으므로, 이후 attempt가 결과를 재생해도 다시 청구되지 않는다. recorded replay는 금액을 쓰지 않는다.
 

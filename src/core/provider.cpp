@@ -910,7 +910,7 @@ std::uint64_t ProviderBudgetClaim::settle_accounting(sp::runtime::Result result)
     } else {
         const auto& failed = std::get<sp::Failure>(*result);
         budget_.usage->observe(failed.partial.usage);
-        if (provider_failure_proves_not_sent(failed)) {
+        if (provider_failure_proves_not_accepted(failed)) {
             budget_.usage->release_reservation(amount_);
             committed = 0;
         }

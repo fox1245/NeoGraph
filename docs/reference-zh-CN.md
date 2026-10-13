@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=1ca9f4ddd1a059b77adaa7d44ecb6000374b0406f3d7cf2387fb3673dcd1cd19 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=02aa0420d6411279c4b6c9bc6dca39056c66c53c94ff7fa922a4342831a6b03b -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -40,10 +40,10 @@
 
 SDK imported target 提供 `include/SchemaProvider` include root；公开示例直接使用 `<descriptor/descriptor.h>`、`<runtime/client.h>`、`<neograph/llm/schema_provider.h>`，不依赖 recipe 专用 helper。
 
-已安装 SDK package 须恰为 `0.3.0`，并匹配 interface revision 6 header 和 shared-library generation 6。版本匹配本身不批准旧 interface/ABI binary。
+已安装 SDK package 须恰为 `0.3.1`，并匹配 interface revision 6 header 和 shared-library generation 6。版本匹配本身不批准旧 interface/ABI binary。
 
 ```cmake
-find_package(SchemaProvider 0.3.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.3.1 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -405,9 +405,14 @@ semantic `Stop` 边界上 valid/invalid client-call intent 均把 `EndTurn` 改�
 ### PreparedProviderRequest / ProviderBudgetClaim
 `prepare()` 恰好验证、编码一次，生成保持原始 deadline 与取消状态的仅可移动 `PreparedProviderRequest`。持久调用方将 `Provider::request_digest()` 绑定到 assembly，预留获准的 budget claim，写入 dispatch receipt，然后通过 `ControlledProvider::dispatch_prepared(_async)` 消费同一个 handle。gate 之后不重建请求。重复 receipt 绝不重新 dispatch。自定义实现提供 `get_name()`、`family()`、`prepare()` 并使用 `prepare_runtime()` 或 `prepare_local()`；local callback 捕获拥有所有权的 shared 状态，而非 `this`。
 
-可选 `ProviderControls` 是调用方选择，不是强制默认值或暗中 clamp 的 cap。不支持的 family 控制在 dispatch 前拒绝。有界调用需要获准的真实模型 input/output 上限；缺失时为 `LimitUnknown`。预留是保守的支出权限，而非报告使用量、预测或账单。未知/部分/delivery-unknown 结果保留 hold，真实最终报告用于结算，超额报告也全额计入。retry 是显式单层，默认 off，具有有界 window 与 unknown-prior hold；没有隐藏重发。
+可选 `ProviderControls` 是调用方选择，不是强制默认值或暗中 clamp 的 cap。不支持的 family 控制在 dispatch 前拒绝。有界调用需要获准的真实模型 input/output 上限；缺失时为 `LimitUnknown`。预留是保守的支出权限，而非报告使用量、预测或账单。未知/部分/delivery-unknown 结果保留 hold，真实最终报告用于结算，超额报告也全额计入。使用量的 stage 为 `Missing` 表示没有证据（不是零），`Partial` 表示目前所见；两者都不能结算调用，hold 保持。SDK 推导出的数值（`Evidence::Derived`）与报告的数值一样用于结算：输出预算在思考中耗尽、省略了 `candidatesTokenCount` 的 Gemini 调用，凭推导出的 `output_total` 和 `total` 就能按实际用量收费。retry 是显式单层，默认 off，具有有界 window 与 unknown-prior hold；没有隐藏重发。
 
-`provider_failure_proves_not_sent(Failure)` 要求完整、无矛盾的 NotSent 依据。仅状态码、使用量缺失或观察者/持久化异常不能证明零成本或更新预算。
+`provider_failure_proves_not_accepted(Failure)` 是所有结算路径共用的唯一规则，用来决定失败的调用释放还是保留 hold。适用对象有 bank、managed journal 和 MCP harness provider 的 token 预留、Program 的金额 hold、SQLite provider journal，以及 controlled provider 的 dispatch receipt（`Failed` 或 `ReconciliationRequired`）。下面两种依据之一必须完整且无矛盾：
+
+- `NotSent`：SDK 证明没有任何请求字节发出（`provider_failure_proves_not_sent(Failure)` 只判断这一半）。
+- 已完成的 HTTP 4xx 响应（408、425、429 除外）上的 `RejectedBeforeOutput`，例如密钥无效（401）、请求格式错误（400）、没有任何端点能满足的 `max_price` 固定值（404）。服务器拒绝了请求，所以什么都没有运行，也不会收费。该失败还必须没有输出、stop reason 和用量，也没有可能已被计费的先前尝试。
+
+HTTP 408、425、429、5xx 响应、被切断或超时的调用、请求发出后的 transport 失败，以及任何带有部分输出或用量的失败，都保留 hold。用量缺失、观察者或持久化异常，或没有 SDK `RejectedBeforeOutput` 标签的状态码，都不能证明零成本或更新预算。
 
 ```cpp
 #include <neograph/controlled_provider.h>
@@ -425,7 +430,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-这是源码和二进制破坏性变更；所有 C++ 使用者和自定义提供方都须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为 alpha `0.3.0`、interface revision 6 / shared-library generation 6，采用 out-of-line capability check，不表示稳定发布。已验证的平台是 Linux/POSIX。Windows NTFS 与 macOS 实现已存在，但尚未在该 SDK 上验证；WASM provider runtime 支持尚未确立。
+这是源码和二进制破坏性变更；所有 C++ 使用者和自定义提供方都须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为 alpha `0.3.1`、interface revision 6 / shared-library generation 6，采用 out-of-line capability check，不表示稳定发布。已验证的平台是 Linux/POSIX。Windows NTFS 与 macOS 实现已存在，但尚未在该 SDK 上验证；WASM provider runtime 支持尚未确立。
 
 Python 公开与 C++ 相同的所有权 request/outcome 边界：`make_provider_request`、`Provider.prepare`、`dispatch` 和 `invoke`。Provider 历史使用带 typed part 的 `ProviderMessage`；`ChatMessage` 仍是图的便利 projection。SDK 失败可通过 `ProviderOutcome.failure` 读取，host observer/settlement 异常保留 `outcome` 和 `cause`。构造器及 GIL/回调行为参见 [Python binding 指南](python-binding.md)。
 
@@ -456,9 +461,9 @@ Program 运行的 `monetary_microunits` 预算按 micro-USD 计数（1 microunit
 |---|---|---|
 | `reported` | 响应带有 provider 自己的费用：OpenRouter 的 `usage.cost`，由 SDK 解析为以 nano-USD 计的 `Usage::provider_cost`。BYOK 时加上报告的 upstream 费用。 | 报告金额向上取整到整数 microunit。 |
 | `estimated` | 没有报告费用的最终且一致的 usage。 | 目录费率乘以报告的 token 档，每次调用向上取整一次。记录写明目录的 version 与 digest。 |
-| `held` | 结果未知（transport 异常、取消、超时）、请求在失败前可能已发出、SDK 重发了 transport 尝试，或 usage 不完整或不一致。 | hold。 |
+| `held` | 结果未知（transport 异常、取消、超时）、调用失败时可能已有工作开始（HTTP 408、425、429 或 5xx 响应、被切断的流、请求发出后的 transport 失败）、SDK 重发了 transport 尝试，或 usage 不完整或不一致。 | hold。 |
 
-证明什么也没有发送的失败会释放 hold 且不留记录。超过 hold 的费用（当报告的费用包含固定上限不限制的部分时可能出现，例如 BYOK 的 upstream 费用）按报告收费，费用超出预算的运行以 `BudgetExhausted` 结束。并发调用（`ng.all`、`ng.race`、`ng.quorum`、并行节点）在同一个账户上预留，放不下的成员会被拒绝。节点重试在自己的 effect namespace（`task#a<k>`）下调用，因此每次尝试的调用都是新调用，会再次收费。
+证明 provider 什么也没有接受的失败会释放 hold 且不留记录：请求没有发出，或者 provider 以已完成的 HTTP 4xx 响应（408、425、429 除外）拒绝了请求。金额 hold 和模型 token 预留都不会收费。超过 hold 的费用（当报告的费用包含固定上限不限制的部分时可能出现，例如 BYOK 的 upstream 费用）按报告收费，费用超出预算的运行以 `BudgetExhausted` 结束。并发调用（`ng.all`、`ng.race`、`ng.quorum`、并行节点）在同一个账户上预留，放不下的成员会被拒绝。节点重试在自己的 effect namespace（`task#a<k>`）下调用，因此每次尝试的调用都是新调用，会再次收费。
 
 `bind_priced` 把调用的记录写入其 journal 行：随 dispatched marker 写入 held 记录，随结果写入结算后的记录。同一 Program attempt 在进程停止前记录的调用，会在恢复后的 attempt 绑定该 operation 时收费一次并标记为 `replayed`，无论 Core 是否再次调用它；这也包括通过 execution lease 过期而恢复的仅 define() 运行。较早 attempt 记录的调用已由该 attempt 的结果结算进剩余预算，后续 attempt 重放其结果时不会再次收费。recorded replay 从不花钱。
 

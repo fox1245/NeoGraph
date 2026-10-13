@@ -503,13 +503,19 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
                     !usage.input_total || !usage.output_total;
             } else {
                 provider_effect_uncertain = provider_effect_uncertain ||
-                    !provider_failure_proves_not_sent(std::get<sp::Failure>(*result));
+                    !provider_failure_proves_not_accepted(std::get<sp::Failure>(*result));
             }
             if (completion && !completion->attempt.prior_usage_unknown &&
                 completion->attempt.transport_internal_resends == 0 && !timed_out && !cancelled)
                 reservation.settle(completion->usage);
-            else if (call.usage)
+            else if (call.usage) {
                 call.usage->observe(outcome_usage(*result));
+                // The same rule as every other settlement path: a failure that
+                // proves the provider accepted nothing returns the reservation.
+                if (!completion && !timed_out && !cancelled &&
+                    provider_failure_proves_not_accepted(std::get<sp::Failure>(*result)))
+                    reservation.release();
+            }
             const auto archive_binding = call.run_id + ":" + provider_correlation + ":" + request_digest;
             std::size_t client_tool_call_count = 0;
             if (completion) {

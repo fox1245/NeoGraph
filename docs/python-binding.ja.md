@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=6054da8515ffab9b9f21d9d29f0cd3ecc2d9c708c06bc1242748ee7a001ecf5e -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=d8e99cf88b8a8203b09c7390c1474d631c9f24671d2be045446c79de071e497a -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
 
 `neograph-engine` は、同じC++ランタイムをpybind11で公開したパッケージです。wheelでは、Core、LLM、Program/QuickJS、MCP、SQLiteによるランタイムの永続化が有効になっています。wheelを使わずソースからビルドした場合は、コンパイルしたコンポーネントだけが公開されます。
 
-このガイドの内容は、SchemaProvider SDK `0.3.0`（インターフェースリビジョン `6`、共有ライブラリのABIリビジョン `6`）でビルドしたwheelが前提です。同梱されているコンポーネントは、まとめてインストールしてください。`complete` を公開している古いwheelはプロバイダーのインターフェースが異なるため、以下の型付きのサンプルは動きません。
+このガイドの内容は、SchemaProvider SDK `0.3.1`（インターフェースリビジョン `6`、共有ライブラリのABIリビジョン `6`）でビルドしたwheelが前提です。同梱されているコンポーネントは、まとめてインストールしてください。`complete` を公開している古いwheelはプロバイダーのインターフェースが異なるため、以下の型付きのサンプルは動きません。
 
 ```bash
 pip install neograph-engine
@@ -545,7 +545,7 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 
 結び付けのうち、どのIDにも含まれるのはラベルだけです。プロバイダーを必要とするProgramのバージョンには、機能のレシートが付きます。このレシートのIDは、ラベルとプロバイダーのレジストリ上のIDのダイジェストです。プロバイダーのキー、エンドポイント、モデルは含まれません。したがって、モデルを変えてもバージョンIDは変わらず、ラベルを変えると変わります。プロバイダーを必要としないProgramにはレシートが付かず、バンドルIDとバージョンIDも変わりません。ラベルは、英小文字（`a-z`）、数字（`0-9`）、`.`、`_`、`-`、`:` からなる1〜64文字で、先頭は英字か数字にします。APIキーに見える文字列にしてはいけません。`node_context` がないと、プロバイダーを必要とするProgramは、admissionで `P_ADMIT_PROVIDER` により拒否されます。`provider=` なしで登録した `llm_call` ノードや `intent_classifier` ノードを持つProgramも同様です。
 
-各呼び出しの料金は、NeoGraphに組み込まれた価格カタログを使って、実行の `monetary_microunits` に対して計算されます。リクエストを送る前に、その呼び出しの上限額が予約されます。OpenRouterの場合は、リクエストにもこの上限が `provider.max_price` として付きます。値は、ルートの上限の入力・出力の単価です。コントロールや `SchemaProviderDefaults` で、すでにこれより低い `max_price` を設定している場合は、そちらが使われます。これにより、OpenRouterが呼び出しを、より高価なエンドポイントに回すことはなくなります。料金の計算では、会話がユーザーメッセージ1件だけのプローブ用リクエストを準備しますが、送信はしません。そのため、Pythonのプロバイダーの `prepare` から、そのプローブが見えます。上限を決められない呼び出しや、予約額が残りの予算に収まらない呼び出しは、何も送信されないまま拒否され、実行は `P_MONEY_*` のコードで失敗します。上限を決められない呼び出しとは、カタログにないモデル、ルートの上限がないルーターのエイリアス、出力の上限がないリクエストのことです。`ProgramRunBudget` の他のフィールドと同じく、`monetary_microunits = 0` は何も許可しません。この場合、すべての呼び出しが拒否されます。応答の後、`result.monetary_records` には、呼び出しごとに1件の `ng.ProgramMonetaryRecord` が入り、`evidence` が付きます。その種類は次の3つです。`reported`（OpenRouterの `usage.cost`）、`estimated`（カタログの単価。`catalog_version` と `catalog_digest` でカタログを特定します）、`held`（結果または使用量が不明なため、予約額が課金されます）。`result.usage.monetary_microunits` は、これらの合計です。コード、上限、精算の規則は、[料金のエビデンスと価格カタログ](reference-en.md#pricing-evidence-and-the-price-catalog)にあります。
+各呼び出しの料金は、NeoGraphに組み込まれた価格カタログを使って、実行の `monetary_microunits` に対して計算されます。リクエストを送る前に、その呼び出しの上限額が予約されます。OpenRouterの場合は、リクエストにもこの上限が `provider.max_price` として付きます。値は、ルートの上限の入力・出力の単価です。コントロールや `SchemaProviderDefaults` で、すでにこれより低い `max_price` を設定している場合は、そちらが使われます。これにより、OpenRouterが呼び出しを、より高価なエンドポイントに回すことはなくなります。料金の計算では、会話がユーザーメッセージ1件だけのプローブ用リクエストを準備しますが、送信はしません。そのため、Pythonのプロバイダーの `prepare` から、そのプローブが見えます。上限を決められない呼び出しや、予約額が残りの予算に収まらない呼び出しは、何も送信されないまま拒否され、実行は `P_MONEY_*` のコードで失敗します。上限を決められない呼び出しとは、カタログにないモデル、ルートの上限がないルーターのエイリアス、出力の上限がないリクエストのことです。`ProgramRunBudget` の他のフィールドと同じく、`monetary_microunits = 0` は何も許可しません。この場合、すべての呼び出しが拒否されます。応答の後、`result.monetary_records` には、呼び出しごとに1件の `ng.ProgramMonetaryRecord` が入り、`evidence` が付きます。その種類は次の3つです。`reported`（OpenRouterの `usage.cost`）、`estimated`（カタログの単価。`catalog_version` と `catalog_digest` でカタログを特定します）、`held`（結果または使用量が不明なため、予約額が課金されます）。プロバイダーが完了した HTTP 4xx 応答（408、425、429 を除く。たとえば不正なキーや不正なリクエスト）で拒否した呼び出しと、送信されなかった呼び出しは、予約を解放し、記録を残さず、金額もモデルトークンも課金しません。429、5xx の応答、途中で切れた呼び出しは `held` のままです。`result.usage.monetary_microunits` は、これらの合計です。コード、上限、精算の規則は、[料金のエビデンスと価格カタログ](reference-en.md#pricing-evidence-and-the-price-catalog)にあります。
 
 モデルを呼び出すPythonノードは、プロバイダーを自分で持ちます。そのような呼び出しは、Programの予算には反映されません。
 

@@ -194,7 +194,7 @@ std::uint64_t committed_amount(const sp::Outcome& outcome, std::uint64_t claim) 
         return completion->attempt.prior_usage_unknown || completion->attempt.transport_internal_resends != 0 ? claim
             : UsageAccumulator::conservative_final_charge(completion->usage).value_or(claim);
     const auto& failure = std::get<sp::Failure>(outcome);
-    return provider_failure_proves_not_sent(failure) ? 0 : claim;
+    return provider_failure_proves_not_accepted(failure) ? 0 : claim;
 }
 std::string archive_binding(std::string_view owner, std::string_view id, const Stored& row) {
     return neograph::detail::canonical_json_bytes(json{
@@ -259,7 +259,8 @@ std::optional<Stored> load(sqlite3* db, std::string_view owner, std::string_view
         throw std::runtime_error("Corrupt pending Program provider journal outcome");
     }
     if (!row.monetary.empty()) {
-        // A call proven not sent charges nothing and keeps no record.
+        // A call proven not accepted (never sent, or declined by a completed
+        // HTTP 4xx answer) charges nothing and keeps no record.
         if (row.state == "failed")
             throw std::runtime_error("Corrupt Program provider journal monetary record");
         const auto value = neograph::detail::parse_json_strict(row.monetary);
@@ -690,7 +691,7 @@ private:
             const auto outcome = neograph::detail::sha256_identity(outcome_domain, "outcome", canonical);
             const auto* failure = std::get_if<sp::Failure>(result.get());
             const auto state = !failure ? "succeeded"
-                : provider_failure_proves_not_sent(*failure) ? "failed" : "reconciliation_required";
+                : provider_failure_proves_not_accepted(*failure) ? "failed" : "reconciliation_required";
             std::lock_guard lock(impl->mutex);
             Transaction tx(impl->db);
             save_outcome(impl->db, owner, id, state, canonical, outcome, "", admitted.committed,

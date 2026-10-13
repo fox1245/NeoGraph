@@ -31,7 +31,8 @@
  *  3. Settle exactly once from the outcome: the provider's reported cost when
  *     the response carries one, else the catalog estimate. An unknown outcome,
  *     resent transport attempts, or partial or inconsistent usage keep the
- *     hold as the charge. A failure that proves nothing was sent releases it.
+ *     hold as the charge. A failure that proves the provider accepted nothing (no
+ *     request was sent, or a completed HTTP 4xx answer declined it) releases it.
  *
  * Exported for the SQLite journal library and the Python binding only; no
  * compatibility promise.
@@ -84,7 +85,7 @@ public:
     /// Hold `amount` for a call about to be dispatched; fails when charged +
     /// held + amount would exceed the ceiling.
     bool try_reserve(std::uint64_t amount);
-    /// Return the hold of a call that was not sent.
+    /// Return the hold of a call the provider did not accept.
     void release(std::uint64_t amount) noexcept;
     /// Settle one dispatched call: drop its hold and charge the record's amount.
     void settle(std::uint64_t held, ProgramMonetaryRecord record);
@@ -212,7 +213,8 @@ NEOGRAPH_PROGRAM_API sp::runtime::Result monetary_refusal_outcome(const Monetary
 
 /**
  * The record for one dispatched call's outcome; empty when the outcome proves
- * nothing was sent, so the hold is released and nothing is charged.
+ * the provider accepted nothing (provider_failure_proves_not_accepted), so the
+ * hold is released and nothing is charged.
  */
 NEOGRAPH_PROGRAM_API std::optional<ProgramMonetaryRecord> settle_monetary_call(
     const pricing::PriceCatalog& catalog,
@@ -264,7 +266,7 @@ public:
     void mark_dispatched() noexcept { dispatched_ = true; }
     /// The record settle() will charge for this outcome.
     std::optional<ProgramMonetaryRecord> record_for(const sp::runtime::Result& outcome) const;
-    /// Settle from a known outcome (or release when it proves nothing was sent).
+    /// Settle from a known outcome (or release when it proves nothing was accepted).
     void settle(const sp::runtime::Result& outcome);
     /// Settle with a precomputed record (empty: release).
     void settle_record(std::optional<ProgramMonetaryRecord> record);

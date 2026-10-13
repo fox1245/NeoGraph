@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=54f44441580a2f6483e0493d762a502e2887203f24c7a623f0acf01ccac9ffaa -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=66add7e0d22c128f1999d5920e393a0a858ba181578a45c282fa158dcfd377b2 -->
 # 严格的运行时拦截
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -51,7 +51,7 @@ provider 边界会记录两个相互独立的不可变值：
    `ReconciliationRequired`。
 
 成功的结果，会绑定完整的 SDK outcome 观测数据的摘要。
-已证明未发送的带类型 Failure，记录为 `Failed`；送达状态不确定的，记录为 `ReconciliationRequired`。
+已证明未被接受的带类型 Failure（请求未发送，或被已完成的 HTTP 4xx 响应拒绝），记录为 `Failed`；送达状态不确定的，记录为 `ReconciliationRequired`。
 分发之后发生异常，并不能说明远端 provider 是否已经执行，所以控制器不会悄悄重试。
 SQLite schema v3 把终态回执单独存储，并在重启后检查它们与已准入分发之间的确切绑定。
 回执摘要是证据，不是 native 续接的托管，也不是可以执行的、已存储的 outcome。
@@ -77,7 +77,7 @@ journal 以 owner、不可变的 Program 版本、运行、操作、Core 的线�
 作为每次调用的键，**而不是**请求内容或 Program 的尝试。它在传输之前，用 SQLite FULL 同步提交标记。
 这个标记表示传输*可能*已经发生，并不表示 provider 收到了它，也不表示副作用恰好发生了一次。
 完整的、不可变的 SDK Completion/Failure outcome，以编码版本 2 存储，用于精确绑定的重放。
-已证明未发送的 Failure 记录为 `Failed`；送达状态不确定、发生异常，或在结算之前崩溃，
+已证明未被接受的 Failure（未发送，或被已完成的 HTTP 4xx 响应拒绝）记录为 `Failed`；送达状态不确定、发生异常，或在结算之前崩溃，
 都需要对账，并且绝不会悄悄重新分发。用
 `inspect(owner, logical_call_id(context, core_identity))` 检查状态；
 只有在拿到经独立验证的 provider 一侧证据和完整的 Completion outcome 时，

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ja source_sha256=54f44441580a2f6483e0493d762a502e2887203f24c7a623f0acf01ccac9ffaa -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ja source_sha256=66add7e0d22c128f1999d5920e393a0a858ba181578a45c282fa158dcfd377b2 -->
 # Strictランタイムインターポジション
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -44,7 +44,7 @@ durable RAW history + admitted artifacts + required Skills/constraints
 1. `ProviderDispatchReceipt` は、ディスパッチの前に書き込まれます。
 2. `ProviderDispatchOutcomeReceipt` は、試行の後に、`Succeeded`、`Failed`、`ReconciliationRequired` のいずれかを記録します。
 
-成功した結果には、SDKの結果の観測全体のダイジェストが結び付けられます。送信されていないことが証明された型付きのFailureは `Failed` を記録します。配送が不確かな場合は `ReconciliationRequired` を記録します。ディスパッチの後に例外が起きても、リモートのプロバイダーが動作したかどうかは分からないため、コントローラーは黙ってリトライすることはありません。SQLiteのスキーマv3は、最終レシートを別に保存し、再起動後に、admission済みのディスパッチとの正確な結び付きを検査します。レシートのダイジェストはエビデンスです。ネイティブな継続の保管でも、実行可能な保存済みの結果でもありません。
+成功した結果には、SDKの結果の観測全体のダイジェストが結び付けられます。受け付けられていないことが証明された型付きのFailure（リクエストが送信されなかった場合と、完了したHTTP 4xx応答が拒否した場合）は `Failed` を記録します。配送が不確かな場合は `ReconciliationRequired` を記録します。ディスパッチの後に例外が起きても、リモートのプロバイダーが動作したかどうかは分からないため、コントローラーは黙ってリトライすることはありません。SQLiteのスキーマv3は、最終レシートを別に保存し、再起動後に、admission済みのディスパッチとの正確な結び付きを検査します。レシートのダイジェストはエビデンスです。ネイティブな継続の保管でも、実行可能な保存済みの結果でもありません。
 
 コントローラーは `ProviderRequest` を受け取り、変更できない、所有権付きの `sp::runtime::Result` を返します。順序付きのメッセージとパート、部分的な失敗のエビデンスも保持されます。本物の結果が得られた後で、精算やレシートの永続化が失敗した場合、`ProviderDispatchOutcomePersistenceError` は、その結果と元の原因を保持します。二次的なオブザーバーの失敗は `delivery_error()` に残ります。トークンの課金や予約は、null許容のプロバイダーの使用量レポートとは別のものです。
 
@@ -52,7 +52,7 @@ durable RAW history + admitted artifacts + required Skills/constraints
 
 Programが組み込みのCoreのLLMノードを使う場合、ホストは `RuntimeConfig::core_provider_call_resolver` と `require_core_provider_call_broker = true` を設定できます。`ProgramCoreProviderCallContext` ごとに、`<neograph/program/sqlite_provider_call_broker.h>` の `SQLiteProgramProviderCallJournal::bind(context, deployment_identity)` を返します。リンクするのは `neograph::program_sqlite` です。デプロイメントIDは、実際のプロバイダーのルート、モデルのデプロイメント、権限（認証情報のバージョンを含む）を表す、ホストが所有するSHA-256のIDでなければなりません。ブローカーは、これらを `Provider` オブジェクトから見つけ出すことはしません。再起動や再接続のときは、同じ永続データベースを再度バインドしてください。
 
-ジャーナルは、各呼び出しを、オーナー、変更できないProgramバージョン、実行、オペレーション、Coreのスレッド／タスク／ノード、組み込みの呼び出し序数で識別します。リクエストの内容やProgramの試行では識別**しません**。マーカーは、トランスポートの前に、SQLiteのFULL同期でコミットされます。このマーカーが意味するのは、トランスポートが行われた*可能性がある*ことです。プロバイダーが受け取ったことや、効果がちょうど1回起きたことを意味しません。変更できないSDKのCompletionまたはFailureの結果は、そのままエンコードバージョン2で保存され、正確に結び付いたリプレイに使われます。送信されていないことが証明されたFailureは `Failed` を記録します。配送が不確かな場合、例外が起きた場合、精算の前にクラッシュした場合は、照合が必要で、黙って再ディスパッチされることはありません。状態を確認するには `inspect(owner, logical_call_id(context, core_identity))` を使います。`reconcile_success` を使うのは、プロバイダー側の独立して検証したエビデンスと、完全なCompletionの結果がある場合だけです。リプレイされたストリーミングの呼び出しは、取得済みの結果を返し、ストリームのイベントを合成することはありません。
+ジャーナルは、各呼び出しを、オーナー、変更できないProgramバージョン、実行、オペレーション、Coreのスレッド／タスク／ノード、組み込みの呼び出し序数で識別します。リクエストの内容やProgramの試行では識別**しません**。マーカーは、トランスポートの前に、SQLiteのFULL同期でコミットされます。このマーカーが意味するのは、トランスポートが行われた*可能性がある*ことです。プロバイダーが受け取ったことや、効果がちょうど1回起きたことを意味しません。変更できないSDKのCompletionまたはFailureの結果は、そのままエンコードバージョン2で保存され、正確に結び付いたリプレイに使われます。受け付けられていないことが証明されたFailure（送信されなかった場合と、完了したHTTP 4xx応答が拒否した場合）は `Failed` を記録します。配送が不確かな場合、例外が起きた場合、精算の前にクラッシュした場合は、照合が必要で、黙って再ディスパッチされることはありません。状態を確認するには `inspect(owner, logical_call_id(context, core_identity))` を使います。`reconcile_success` を使うのは、プロバイダー側の独立して検証したエビデンスと、完全なCompletionの結果がある場合だけです。リプレイされたストリーミングの呼び出しは、取得済みの結果を返し、ストリームのイベントを合成することはありません。
 
 出力の上限を引き上げた呼び出しは、新しいセマンティックな呼び出しです。トランスポートのリトライでも、同じジャーナルのスロットのリプレイでもありません。ネイティブリプレイの設定からは、この上限が除かれます。準備済みリクエストのダイジェストと、保守的に見積もったリソースの請求枠には、引き続きこの上限が含まれます。admission済みの呼び出しごとに、別々の決定的な序数を与え、すべての試行の結果と会計、そして元のデッドラインを保持し、同じリソースバンクからadmissionを受けてください。既存のスロットでダイジェストが変わると、拒否されます。ネイティブ履歴もカーソルも、クレジットを更新しません。配送が不確かな場合や、オブザーバーまたは精算が失敗した場合に、もう一度送信してよいという許可にもなりません。
 

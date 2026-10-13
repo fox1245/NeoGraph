@@ -22,8 +22,8 @@ Native SDK libraries cannot be linked into WebAssembly. The SDK runtime, its
 archive support and the C++ standard library must work on the Emscripten target;
 the historical smoke below does not show that the current code builds.
 
-Current builds require SDK `0.3.0`, interface revision/shared generation 6,
-at SchemaProvider `maint/interface6` commit `f7ed8161fbcf39a6bf9358f78cfdcfda133537a2`,
+Current builds require SDK `0.3.1`, interface revision/shared generation 6,
+at SchemaProvider `maint/interface6` commit `69f8aba5c75decd21d786853de134ac713634966`,
 built for the same target. A genuine Emscripten build of the SDK
 runtime is a prerequisite, and this page does not guarantee that a current
 build succeeds.
