@@ -57,6 +57,8 @@ _register("trace.goto_planner", lambda _input: ng.NodeResult(
 _register("trace.worker", _record_item)
 _register("trace.asker", _ask)
 _register("trace.noop", lambda _input: [])
+_register("trace.nested_worker", lambda input: ng.NodeResult(
+    writes=_record_item(input), sends=[ng.Send("leaf", {"item": input.state.get("item")})]))
 
 PLANNER_AND_THREE_WORKERS = ["planner"] + ["worker[send]"] * 3
 
@@ -175,3 +177,14 @@ def test_a_paused_step_lists_nothing_and_the_resume_lists_the_whole_step():
     done = engine.resume("trace-pause", "yes")
     assert not done.interrupted
     assert done.execution_trace == ["planner", "asker[send]", "worker[send]"]
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_a_send_execution_that_returns_sends_fails_the_run(workers):
+    # #432: the Sends of a Send execution used to be dropped without a word.
+    engine = _compile(_definition({"planner": "planner", "worker": "nested_worker", "leaf": "worker"}),
+                      workers)
+    with pytest.raises(Exception) as raised:
+        engine.run(ng.RunConfig(thread_id="nested"))
+    assert "'worker' was started by a Send and returned Sends to 'leaf'" in str(raised.value)
+

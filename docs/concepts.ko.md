@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=825eb1e938efc450ca761d9555bc4ecea1579b8d25dbe2c936bae1e5ebbb4943 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=aaa8bb30e4dc189578326fdb886d6afca91d0530a19b900b7efb69cf322a0799 -->
 # NeoGraph 핵심 개념 — 처음부터 읽는 안내서
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -323,6 +323,8 @@ class Planner(ng.GraphNode):
 ### 동작 원리
 
 엔진은 `Send` 하나마다 컴파일된 대상 노드를 한 번씩 호출하지만, 매번 새 노드 객체를 만든다고 보장하지는 않습니다. 그러므로 Send 대상 노드는 동시에 호출되어도 안전하게 멤버 상태를 다뤄야 합니다. payload는 대상 노드가 채널을 읽기 전에 적용됩니다. 그 스텝에서 Send를 하나만 보냈든 여러 개를 보냈든, 모든 Send는 ready batch가 끝난 시점의 상태를 격리해 복사한 뒤 자기 payload를 적용해서 실행합니다. 그래서 payload는 그 Send 자신의 실행(재시도 포함)에서만 보이고, 다음 스텝이나 최종 상태에는 나타나지 않습니다(#389). Send가 모두 끝나면 반환된 쓰기를 호출 순서대로 합칩니다. 그다음 일반 노드와 Send 대상 노드의 신호를 합쳐 다음 ready batch의 라우팅을 정합니다.
+
+Send로 실행된 노드는 다시 Send를 낼 수 없습니다. 그런 실행이 Send를 돌려주면, 슈퍼스텝의 결과를 하나도 반영하기 전에 노드와 대상을 밝힌 오류로 실행이 실패합니다. 한 번 더 펼치려면 항목을 채널에 쓰고, 그 슈퍼스텝이 이어지는 일반 노드가 Send를 보내게 하세요.
 
 Send 대상 노드가 `NodeInterrupt`를 발생시키면 ready batch의 노드와 마찬가지로 실행이 일시 중지됩니다. 이때 만들어지는 `NodeInterrupt` 체크포인트는 슈퍼스텝 전체로 다시 들어가는 지점입니다. 체크포인트에는 그 스텝이 시작될 때의 상태가 담기고, 그 스텝의 ready 노드가 다음 노드로 기록되며, 일시 중지된 결과도 이 상태를 보고합니다. 재개하면 그 스텝을 다시 실행합니다. 이미 끝난 ready 노드와 Send는 기록해 둔 결과를 재생(replay)할 뿐 다시 실행하거나 과금하지 않습니다. 일시 중지된 Send와 끝나지 않은 다른 Send는 같은 task id로 재개 값을 받아 다시 실행되며, 앞선 시도에서 저널에 기록된 provider 호출은 재생(replay)됩니다. 그 스텝 앞에 체크포인트가 없는 경우(예를 들어 진입점의 map 노드)에는 끝난 결과를 인터럽트 체크포인트 자체에 기록합니다.
 

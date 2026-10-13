@@ -1968,6 +1968,20 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
         values = std::move(results);
     }
 
+    // #432: a Send execution cannot emit Send. Its Sends used to be dropped
+    // without a word; the run fails instead, naming the node and the targets,
+    // before any result of the step is applied.
+    for (std::size_t si = 0; si < sends.size(); ++si) {
+        if (values[si].sends.empty()) continue;
+        std::string targets;
+        for (const auto& nested : values[si].sends)
+            targets += (targets.empty() ? "'" : ", '") + nested.target_node + "'";
+        throw std::runtime_error("node '" + sends[si].target_node +
+                                 "' was started by a Send and returned Sends to " + targets +
+                                 "; a Send execution cannot emit Send. Return the items as a "
+                                 "channel write and let an ordinary node send them.");
+    }
+
     // Fan back in send order. Each Send-spawned task contributes one
     // StepRouting so its `Command.goto` and / or default outgoing edges
     // flow into the next super-step's routing decision.

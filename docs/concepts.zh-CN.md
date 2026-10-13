@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=825eb1e938efc450ca761d9555bc4ecea1579b8d25dbe2c936bae1e5ebbb4943 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=aaa8bb30e4dc189578326fdb886d6afca91d0530a19b900b7efb69cf322a0799 -->
 # NeoGraph 核心概念导读
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -317,6 +317,8 @@ class Planner(ng.GraphNode):
 ### 心智模型
 
 每个 `Send` 会让引擎调用一次编译好的目标节点，但不保证每次都是新的节点对象。因此 Send 的目标节点必须能安全处理并发调用下的成员状态。payload 会在目标节点读取通道之前应用。每个 Send（这一步派发的是一个还是多个都一样）都在就绪批次之后的状态副本上运行，这份副本是隔离的，已应用该 Send 自己的 payload。所以 payload 只对该 Send 自己的执行可见（包括它的每一次重试），不会泄漏到下一步，也不会出现在最终状态里（#389）。所有 Send 都结束后，它们返回的写入按调用顺序合并。随后，路由把普通节点和 Send 目标节点发出的信号合在一起，得出下一个就绪批次。
+
+由 Send 启动的执行不能再发出 Send：这样的执行返回 Send 时，运行会在应用该超步的任何结果之前失败，错误信息会指出节点和目标。要再次扇出，请把条目写入通道，由该超步之后路由到的普通节点发出 Send。
 
 Send 的目标节点抛出 `NodeInterrupt` 时，会像就绪批次中的节点一样暂停运行。它的 `NodeInterrupt` 检查点会重新进入整个超步：检查点里保存的是这一步开始时的状态，并把这一步的就绪节点列为下一批节点，暂停结果报告的也是这份状态。恢复时会把这一步重新跑一遍。已完成的每个就绪节点和每个 Send 直接重放已记录的结果，不会再次运行，也不会再次计费；暂停的那个 Send 以及其他没有完成的 Send，则在相同的 task id 下带着恢复值运行，所以它们之前的尝试已写入日志的 provider 调用会被重放。如果这一步之前没有检查点（例如入口处的 map 节点），已完成的结果就记录在中断检查点本身之下。
 

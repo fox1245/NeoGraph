@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=c8643fdd4a24cf7c0c6a4a94752679d308925fe5079995eff2f9cd48e03a7b02 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=27dd005b8bd4b2b779458ec8ee2ad6ddc3d05f9524af0ed55ce52d03d4aabc70 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -20,6 +20,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 
+- **由 Send 启动的执行返回 Send 时，运行会失败，而不是丢掉它们（#432）。** 由 Send 启动的节点返回的 Send 过去会被丢弃，其目标从未运行，也没有任何提示。现在运行会在应用该超步的任何结果之前失败，错误信息会指出节点和目标。**行为变更：** Send 目标返回 Send 的图过去会在不运行这些目标的情况下结束，现在会失败；请把条目写入通道，由普通节点发出 Send。
 - **失败的 Program 尝试用与引擎追踪相同的名称记录 Send 执行（#433）。** 失败的 Core 会在没有引擎追踪的情况下重新抛出异常，因此失败的尝试根据 `NODE_END` 事件构建追踪，过去只用节点名记录 Send 执行。现在 Send 执行的 `NODE_END` 事件带有 `"send": true`，尝试的追踪按完成顺序把它记为 `<目标>[send]`。**行为变更：** 失败的 Program 尝试的追踪把 Send 执行记为 `<目标>[send]`，Send 执行的 `NODE_END` 事件多了 `send` 字段。
 - **Python 也能关闭构建时的 lint（#415）。** `GraphEngine.compile` 新增关键字 `stderr_notices`，默认值为 `True`，与 C++ 的 `EngineConfig::stderr_notices` 相同。设为 `stderr_notices=False` 后，不再输出 strict 图的 lint（例如针对只由 `Send` 或 `Command.goto` 启动的节点的 E7），也不再输出 fan-out 串行执行的一次性提示；校验错误仍然会抛出。E7 本身没有变化：图定义里没有声明动态目标的地方，校验器无法区分由 Send 启动的节点和没有任何入口的节点，文档现已写明这一点。文档还说明，指向 Send 目标的静态边不能用来消除 lint：目标会在所有 Send 结束后，在共享状态上再多运行一次。不传这个关键字的代码行为不变，图的运行方式也不变。
 - **明确了 `RunResult::execution_trace` 的契约（#424）。** 只改了文档和测试，行为没有变化。关于由 `Send` 启动的节点缺失于轨迹的报告，未能复现：`run`、`run_stream`、`run_async`、`run_stream_async` 和 `resume`，无论有没有 worker 线程池，都会把每次 Send 执行记为 `<目标>[send]`。`types.h`、`engine.h` 和文档现在写明了顺序：超步按先后排列，一个超步内先列就绪节点，再按发出顺序列 Send，与各次执行结束的先后无关。暂停的超步不记录任何内容，恢复后的运行会记录重新进入的整个超步，子图只算一项。

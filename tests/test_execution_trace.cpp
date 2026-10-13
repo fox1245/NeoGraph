@@ -91,6 +91,11 @@ void register_types() {
             return NodeOutput{};
         });
         register_body("trace.noop", [](NodeInput&) { return NodeOutput{}; });
+        register_body("trace.nested_worker", [](NodeInput& in) {
+            auto out = record_item(in);
+            out.sends.push_back(Send{"leaf", json{{"item", in.state.get("item")}}});
+            return out;
+        });
     });
 }
 
@@ -184,6 +189,30 @@ TEST(ExecutionTrace, TheNodeEndEventOfASendExecutionSaysSo) {
         }
     }
     EXPECT_EQ(sends, 3);
+}
+
+// #432: a Send execution that returns Sends used to have them dropped without a
+// word, so their target never ran. The run now fails and names the node and the
+// targets, whether one Send ran or several.
+TEST(ExecutionTrace, ASendExecutionThatReturnsSendsFailsTheRun) {
+    for (const std::size_t workers : {std::size_t{1}, std::size_t{3}}) {
+        const json definition{
+            {"channels", channels()},
+            {"nodes", {{"planner", {{"type", "trace.planner"}}},
+                       {"worker", {{"type", "trace.nested_worker"}}},
+                       {"leaf", {{"type", "trace.worker"}}}}},
+            {"edges", json::array({{{"from", "__start__"}, {"to", "planner"}}})}};
+        auto engine = build(definition, workers);
+        try {
+            (void)engine->run(RunConfig{});
+            FAIL() << "a Send execution's Sends were dropped";
+        } catch (const std::exception& error) {
+            const std::string message = error.what();
+            EXPECT_NE(message.find("'worker' was started by a Send and returned Sends to 'leaf'"),
+                      std::string::npos)
+                << message;
+        }
+    }
 }
 
 TEST(ExecutionTrace, SendsAreListedInTheOrderTheyWereEmittedWhateverFinishesFirst) {
