@@ -27,6 +27,11 @@ using namespace neograph::program;
 
 std::atomic<unsigned> work_calls{0};
 std::atomic<unsigned> followup_calls{0};
+// Set just before the probe asks for the migration. The work node holds its
+// super-step until then, so the request is armed while the source still runs
+// however long the run took to start (on a loaded, sanitized host the run took
+// longer than the node's 100 ms to reach it and ended before the request came).
+std::atomic<bool> migration_requested{false};
 
 std::string digest(char value) { return "sha256:" + std::string(64, value); }
 
@@ -45,7 +50,11 @@ public:
     asio::awaitable<NodeOutput> run(NodeInput) override {
         ++work_calls;
         auto timer = asio::steady_timer(co_await asio::this_coro::executor);
-        timer.expires_after(std::chrono::milliseconds(100));
+        for (int waited = 0; !migration_requested.load() && waited < 2000; ++waited) {
+            timer.expires_after(std::chrono::milliseconds(5));
+            co_await timer.async_wait(asio::use_awaitable);
+        }
+        timer.expires_after(std::chrono::milliseconds(300));
         co_await timer.async_wait(asio::use_awaitable);
         co_return NodeOutput{{ChannelWrite{"value", "source-work-completed"}}};
     }
@@ -174,6 +183,7 @@ int main(int argc, char** argv) {
     try {
         work_calls = 0;
         followup_calls = 0;
+        migration_requested = false;
         const auto registry = registry_snapshot();
         const auto profile = admission_profile(registry);
         const auto policy = policy_snapshot(profile);
@@ -243,6 +253,7 @@ int main(int argc, char** argv) {
         auto source = runtime.start(
             "model-semantic-migration-probe", source_version,
             ProgramInvocation{json::object(), runtime_budget(), "model-semantic-migration-source", {}});
+        migration_requested = true;
         auto target = runtime.migrate_graph(
             source, ProgramGraphMigrationTarget{synthesized.version.id(),
                                                 "model-semantic-migration-target", {}, adapter});
